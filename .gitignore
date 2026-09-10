@@ -2,6 +2,9 @@
 node_modules/
 .npm-cache/
 
+# Bundled local binaries (ffmpeg, portable git, etc.)
+tools/
+
 # Runtime state and local config (never publish)
 state/
 config.json
