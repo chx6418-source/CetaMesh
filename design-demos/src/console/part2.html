@@ -522,15 +522,40 @@
       <p class="page-sub">活动日志、会话映射、挂起审批、工具调用与会话状态，一站处理</p>
     </div>
     <div class="grid">
-      <article class="card c-12">
+      <article class="card c-8">
         <header class="card-head">
           <h2><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>活动日志（最近 100 条）</h2>
-          <span class="pill pill-ok"><span class="dot pulse"></span>3 秒自动刷新</span>
+          <span class="pill pill-ok" id="activityLivePill"><span class="dot pulse"></span>实时</span>
         </header>
-        <div class="card-body"><pre class="console-pre" id="activity">（空）</pre></div>
+        <div class="card-body">
+          <div class="log-toolbar">
+            <div class="seg" id="activityFilter">
+              <button data-v="all" class="active">全部</button>
+              <button data-v="in">收</button>
+              <button data-v="out">发</button>
+              <button data-v="sys">系统</button>
+              <button data-v="err">错误</button>
+            </div>
+            <input type="text" id="activitySearch" placeholder="搜索内容...">
+            <button class="btn sm" id="activityPause">暂停</button>
+            <button class="btn sm ghost" id="activityClear">清空</button>
+          </div>
+          <div class="log-list" id="activityList"><div class="empty-tip">（空）</div></div>
+        </div>
       </article>
 
-      <article class="card c-7">
+      <article class="card c-4" id="cardStates">
+        <header class="card-head">
+          <h2><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a8 8 0 1 1-4-6.9L21 4l-1 4.4"/><circle cx="12" cy="12" r="3.2"/></svg>会话状态</h2>
+          <span class="pill pill-ok" id="ssLivePill"><span class="dot pulse"></span>实时</span>
+        </header>
+        <div class="card-body"><div id="ssRows"><div class="empty-tip">加载中…</div></div></div>
+      </article>
+
+
+
+
+<article class="card c-7">
         <header class="card-head">
           <h2><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 7H5a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h4m6-10h4a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2h-4M8 12h8"/></svg>会话映射</h2>
           <span class="hint">QQ 会话 ↔ DSH 会话</span>

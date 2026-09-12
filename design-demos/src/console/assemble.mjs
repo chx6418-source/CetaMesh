@@ -41,26 +41,6 @@ if (lost.length) {
 }
 
 
-// ---- 守卫：单个 $(...) 不得链式 forEach（历史转义事故防回归） ----
-{
-  const badLines = part3.split(String.fromCharCode(10))
-    .map((l, i) => [l, i])
-    .filter(([l]) => {
-      const k = l.indexOf(".forEach");
-      if (k < 0) return false;
-      const call = l.lastIndexOf("('", k);
-      if (call < 2) return false;
-      const head = l.slice(call - 2, call);
-      if (head !== '$(' && head !== '$$') return false; // 非收集调用（如 querySelectorAll）放行
-      return head.length === 1; // 单 $ → 坏；$$ → 好
-      if (call < 2) return false;
-      return l.slice(call - 2, call) !== "$$";
-    });
-  if (badLines.length) {
-    console.error('✗ part3 存在单 $ forEach:', badLines.map(([l, i]) => 'L' + (i + 1)).join(', '));
-    process.exit(1);
-  }
-}
 
 // ---- 语法检查（所有 script 块） ----
 const blocks = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)];

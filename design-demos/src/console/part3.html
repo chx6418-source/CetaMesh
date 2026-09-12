@@ -407,7 +407,8 @@
       $('#roleText').textContent = '当前：' + (s.role || '无');
       $('#roleModeText').textContent = s.roleMode === 'silent' ? '静默' : '正常';
       $('#silentSwitch').checked = s.roleMode === 'silent';
-      $('#activity').textContent = s.activity || '（空）';
+      actRaw = s.activity || '';
+      if (!actPaused) renderActivity();
       const presetSel = $('#closedPreset');
       if (presetSel && document.activeElement !== presetSel) {
         const want = s.closedAgentPreset || '';
@@ -427,6 +428,77 @@
       $('#statusText').textContent = '连接失败';
     }
   }
+
+  /* ================= 实时活动日志（结构化 + 筛选/搜索/暂停） ================= */
+  let actDir = 'all', actQuery = '', actPaused = false, actCleared = false, actRaw = '';
+  function classifyAct(msg) {
+    if (/断线|重连|失败|错误|未授权|异常/.test(msg)) return 'err';
+    if (/入未读|收到/.test(msg)) return 'in';
+    if (/发送|回复/.test(msg)) return 'out';
+    return 'sys';
+  }
+  function parseActivity(raw) {
+    return raw.split('\n').filter(Boolean).map(function (line) {
+      const m = line.match(/^\[(\d{1,2}:\d{2}:\d{2})\]\s+(\S+)\s+\[([^\]]+)\]\s?(.*)$/);
+      if (!m) return { time: '', key: '', msg: line, dir: 'sys' };
+      const msg = m[4];
+      return { time: m[1], key: m[2], msg: msg, dir: classifyAct(msg) };
+    });
+  }
+  function renderActivity() {
+    const list = $('#activityList');
+    if (!list) return;
+    const rows = actCleared ? [] : parseActivity(actRaw);
+    const q = actQuery.trim().toLowerCase();
+    const LABEL = { in: '收', out: '发', sys: '系', err: '错' };
+    const shown = rows.filter(function (r) {
+      if (actDir !== 'all' && r.dir !== actDir) return false;
+      if (q && (r.msg + ' ' + r.key).toLowerCase().indexOf(q) < 0) return false;
+      return true;
+    });
+    list.innerHTML = '';
+    if (!shown.length) {
+      list.innerHTML = '<div class="empty-tip">' + (actCleared ? '已清空显示（不影响桥接日志文件）' : '（空）') + '</div>';
+      return;
+    }
+    shown.forEach(function (r) {
+      const line = document.createElement('div');
+      line.className = 'log-line' + (r.dir === 'err' ? ' is-err' : '');
+      line.innerHTML = '<span class="log-time">' + r.time + '</span>' +
+        '<span class="log-dir ' + r.dir + '">' + LABEL[r.dir] + '</span>' +
+        '<span class="log-msg">' + (r.key ? '<span class="who">' + esc(r.key) + '</span> ' : '') + esc(r.msg) + '</span>';
+      list.appendChild(line);
+    });
+  }
+  $$('#activityFilter button').forEach(function (b) {
+    b.addEventListener('click', function () {
+      $$('#activityFilter button').forEach(function (x) { x.classList.remove('active'); });
+      b.classList.add('active');
+      actDir = b.dataset.v;
+      renderActivity();
+    });
+  });
+  $('#activitySearch').addEventListener('input', function () { actQuery = this.value; renderActivity(); });
+  $('#activityPause').addEventListener('click', function () {
+    actPaused = !actPaused;
+    this.textContent = actPaused ? '继续' : '暂停';
+    const pill = $('#activityLivePill');
+    if (pill) {
+      pill.className = actPaused ? 'pill pill-warn' : 'pill pill-ok';
+      pill.innerHTML = actPaused ? '<span class="dot"></span>已暂停' : '<span class="dot pulse"></span>实时';
+    }
+    toast(actPaused ? '活动日志已暂停刷新' : '活动日志已恢复实时', { type: actPaused ? 'warn' : 'ok' });
+  });
+  $('#activityClear').addEventListener('click', function () {
+    actCleared = true;
+    renderActivity();
+    toast('已清空日志显示（不影响桥接日志文件）', {
+      type: 'warn',
+      undoLabel: '撤销',
+      undo: function () { actCleared = false; renderActivity(); }
+    });
+  });
+  renderActivity();
 
   async function refreshPresets() {
     try {
@@ -479,6 +551,70 @@
         '<span class="pill">' + p.model + '</span><span class="pill">' + p.tools + ' 个工具</span>' +
         (used ? '<span class="pill pill-accent">使用中</span>' : '<span class="pill">未挂载</span>');
       box.appendChild(row);
+    });
+  }
+
+  /* ================= 会话状态卡（实时） ================= */
+  async function renderSessionStates() {
+    const box = $('#ssRows');
+    if (!box) return;
+    const sessions = window.__sess || [];
+    if (!sessions.length) { box.innerHTML = '<div class="empty-tip">暂无活跃会话</div>'; return; }
+    let v2map = {};
+    try {
+      const r = await api('/api/socialV2/states');
+      (r.conversations || []).forEach(function (c) { v2map[c.key] = c; });
+    } catch (e) {}
+    const owner = String(window.__ownerQQ || '');
+    const palette = ['#6366f1', '#10b981', '#f59e0b', '#ec4899', '#06b6d4', '#8b5cf6'];
+    box.innerHTML = '';
+    sessions.forEach(function (x) {
+      const isP = x.key.indexOf('private:') === 0;
+      const idPart = x.key.split(':')[1] || '';
+      const isOwner = owner && idPart === owner;
+      const name = isOwner ? 'Owner' : idPart;
+      let hash = 0;
+      for (let i = 0; i < x.key.length; i++) hash = (hash * 31 + x.key.charCodeAt(i)) >>> 0;
+      const color = palette[hash % palette.length];
+      const st = v2map[x.key] || {};
+      const unread = Number(st.unreadCount) || 0;
+      const wc = st.wakeConfig || {};
+      let cls = 'ok', label = '空闲';
+      if (wc.mode === 'active') { cls = 'busy'; label = '回合中…'; }
+      else if (wc.sleepUntil) {
+        const t = new Date(wc.sleepUntil);
+        if (t.getTime() > Date.now()) {
+          cls = 'sleep';
+          label = '沉睡至 ' + ('0' + t.getHours()).slice(-2) + ':' + ('0' + t.getMinutes()).slice(-2);
+        } else { cls = 'wait'; label = '待唤醒'; }
+      } else if (wc.infinite) { cls = 'sleep'; label = '潜水中'; }
+      if (unread > 0 && cls !== 'sleep') { cls = 'wait'; label = '待回答'; }
+      const row = document.createElement('div');
+      row.className = 'ss-row';
+      row.innerHTML = '<span class="ss-avatar" style="background:' + color + '">' + name.slice(0, 1) +
+        (unread ? '<span class="unread">' + unread + '</span>' : '') + '</span>' +
+        '<div class="ss-info"><b>' + name + '</b><small>' + (isP ? '私聊' : '群聊') + ' · ' + x.key + '</small></div>' +
+        '<div class="ss-side"><span class="ss-state ' + cls + '">' + label + '</span>' +
+        '<div class="ss-btns">' +
+        (v2map[x.key] ? '<button class="btn sm" data-ss-wake="' + x.key + '">唤醒</button>' : '') +
+        '<button class="btn sm ghost" data-ss-reset="' + x.key + '">重置</button>' +
+        '</div></div>';
+      box.appendChild(row);
+    });
+    box.querySelectorAll('[data-ss-wake]').forEach(function (btn) {
+      btn.addEventListener('click', async function () {
+        const key = btn.getAttribute('data-ss-wake');
+        const r = await api('/api/socialV2/wake', 'POST', { key: key, reason: 'admin' });
+        toast(r.ok ? '已唤醒 ' + key : ('❌ ' + (r.error || '失败')), { type: r.ok ? 'ok' : 'err' });
+      });
+    });
+    box.querySelectorAll('[data-ss-reset]').forEach(function (btn) {
+      btn.addEventListener('click', async function () {
+        const key = btn.getAttribute('data-ss-reset');
+        if (!await confirmBox('确定清除「' + key + '」的会话上下文？下次消息将开新会话。')) return;
+        const r = await api('/api/session/reset', 'POST', { key: key });
+        toast(r.ok ? '✅ 已清除上下文' : ('❌ ' + (r.error || '失败')), { type: r.ok ? 'ok' : 'err' });
+      });
     });
   }
 
@@ -558,6 +694,8 @@
         toast(r.ok ? '✅ 已清除上下文' : ('❌ ' + esc(r.error || '失败')), { type: r.ok ? 'ok' : 'err' });
         refreshSessions();
       }));
+      window.__sess = s.sessions;
+      renderSessionStates();
     } catch (e) {}
   }
 

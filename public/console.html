@@ -199,6 +199,7 @@ html.theme-anim, html.theme-anim *, html.theme-anim *::before, html.theme-anim *
 .page-sub { margin: 0; color: var(--text-3); font-size: 12.5px; }
 .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 18px; }
 .c-6 { grid-column: span 6; } .c-7 { grid-column: span 7; } .c-5 { grid-column: span 5; } .c-12 { grid-column: span 12; }
+.c-8 { grid-column: span 8; } .c-4 { grid-column: span 4; }
 @media (max-width: 1020px) { .grid > .card { grid-column: 1 / -1 !important; } }
 
 /* ---------- 玻璃软糖卡片 ---------- */
@@ -439,6 +440,51 @@ pre.console-pre {
   max-height: 420px; overflow: auto; white-space: pre-wrap; word-break: break-all; margin: 0;
   box-shadow: inset 3px 4px 10px var(--shadow-c1), inset -3px -4px 9px var(--shadow-c2);
 }
+/* ---------- 会话状态卡（实时） ---------- */
+.ss-row { display: flex; gap: 12px; padding: 12px 4px; border-bottom: 1px solid var(--border-soft); }
+.ss-row:last-child { border-bottom: 0; }
+.ss-avatar {
+  position: relative; width: 38px; height: 38px; border-radius: 13px; flex: none;
+  display: flex; align-items: center; justify-content: center;
+  color: #fff; font-weight: 700; font-size: 14px;
+  box-shadow: 2px 3px 8px var(--shadow-c1);
+}
+.ss-avatar .unread { position: absolute; top: -5px; right: -7px; margin: 0; }
+.ss-info { flex: 1; min-width: 0; padding-top: 1px; }
+.ss-info b { display: block; font-size: 13px; line-height: 1.4; }
+.ss-info small { color: var(--text-3); font-size: 11.5px; word-break: break-all; }
+.ss-side { flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 7px; }
+.ss-state { font-size: 12px; font-weight: 600; white-space: nowrap; }
+.ss-state.ok { color: var(--ok); }
+.ss-state.busy { color: var(--warn); }
+.ss-state.sleep { color: var(--text-3); }
+.ss-state.wait { color: var(--err); }
+.ss-btns { display: flex; gap: 6px; }
+
+/* ---------- 实时活动日志（结构化行 + 筛选工具栏） ---------- */
+.log-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.log-toolbar input { flex: 1; min-width: 150px; }
+.log-list {
+  display: flex; flex-direction: column;
+  background: var(--input-bg);
+  border-radius: 18px; padding: 4px 10px;
+  box-shadow: inset 3px 4px 10px var(--shadow-c1), inset -3px -4px 9px var(--shadow-c2);
+  max-height: 460px; overflow-y: auto;
+}
+.log-line { display: flex; gap: 12px; align-items: flex-start; padding: 9px 6px; border-bottom: 1px solid var(--border-soft); font-size: 12.5px; }
+.log-line:last-child { border-bottom: 0; }
+.log-line:hover { background: var(--hover); border-radius: 10px; }
+.log-time { flex: none; color: var(--text-3); font-family: var(--font-mono); font-size: 11.5px; padding-top: 2px; }
+.log-dir { flex: none; width: 38px; text-align: center; font-size: 11.5px; font-weight: 700; border-radius: 999px; padding: 2px 0; margin-top: 1px; }
+.log-dir.in { background: var(--ok-bg); color: var(--ok); }
+.log-dir.out { background: var(--accent-soft); color: var(--accent); }
+.log-dir.sys { background: var(--chip); color: var(--text-3); }
+.log-dir.err { background: var(--err-bg); color: var(--err); }
+.log-msg { flex: 1; min-width: 0; word-break: break-word; color: var(--text-2); line-height: 1.55; padding-top: 1px; }
+.log-msg .who { color: var(--text); font-weight: 700; }
+.log-line.is-err .log-msg, .log-line.is-err .log-time { color: var(--err); }
+.log-line.is-err .log-dir { background: var(--err-bg); color: var(--err); }
+
 .tool-log-cell { display: inline-block; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: top; cursor: pointer; }
 .tool-log-cell.expanded { white-space: pre-wrap; overflow-wrap: anywhere; }
 
@@ -1070,15 +1116,40 @@ pre.console-pre {
       <p class="page-sub">活动日志、会话映射、挂起审批、工具调用与会话状态，一站处理</p>
     </div>
     <div class="grid">
-      <article class="card c-12">
+      <article class="card c-8">
         <header class="card-head">
           <h2><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>活动日志（最近 100 条）</h2>
-          <span class="pill pill-ok"><span class="dot pulse"></span>3 秒自动刷新</span>
+          <span class="pill pill-ok" id="activityLivePill"><span class="dot pulse"></span>实时</span>
         </header>
-        <div class="card-body"><pre class="console-pre" id="activity">（空）</pre></div>
+        <div class="card-body">
+          <div class="log-toolbar">
+            <div class="seg" id="activityFilter">
+              <button data-v="all" class="active">全部</button>
+              <button data-v="in">收</button>
+              <button data-v="out">发</button>
+              <button data-v="sys">系统</button>
+              <button data-v="err">错误</button>
+            </div>
+            <input type="text" id="activitySearch" placeholder="搜索内容...">
+            <button class="btn sm" id="activityPause">暂停</button>
+            <button class="btn sm ghost" id="activityClear">清空</button>
+          </div>
+          <div class="log-list" id="activityList"><div class="empty-tip">（空）</div></div>
+        </div>
       </article>
 
-      <article class="card c-7">
+      <article class="card c-4" id="cardStates">
+        <header class="card-head">
+          <h2><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a8 8 0 1 1-4-6.9L21 4l-1 4.4"/><circle cx="12" cy="12" r="3.2"/></svg>会话状态</h2>
+          <span class="pill pill-ok" id="ssLivePill"><span class="dot pulse"></span>实时</span>
+        </header>
+        <div class="card-body"><div id="ssRows"><div class="empty-tip">加载中…</div></div></div>
+      </article>
+
+
+
+
+<article class="card c-7">
         <header class="card-head">
           <h2><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 7H5a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h4m6-10h4a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2h-4M8 12h8"/></svg>会话映射</h2>
           <span class="hint">QQ 会话 ↔ DSH 会话</span>
@@ -1894,7 +1965,8 @@ window.LOG_POOL = [
       $('#roleText').textContent = '当前：' + (s.role || '无');
       $('#roleModeText').textContent = s.roleMode === 'silent' ? '静默' : '正常';
       $('#silentSwitch').checked = s.roleMode === 'silent';
-      $('#activity').textContent = s.activity || '（空）';
+      actRaw = s.activity || '';
+      if (!actPaused) renderActivity();
       const presetSel = $('#closedPreset');
       if (presetSel && document.activeElement !== presetSel) {
         const want = s.closedAgentPreset || '';
@@ -1914,6 +1986,77 @@ window.LOG_POOL = [
       $('#statusText').textContent = '连接失败';
     }
   }
+
+  /* ================= 实时活动日志（结构化 + 筛选/搜索/暂停） ================= */
+  let actDir = 'all', actQuery = '', actPaused = false, actCleared = false, actRaw = '';
+  function classifyAct(msg) {
+    if (/断线|重连|失败|错误|未授权|异常/.test(msg)) return 'err';
+    if (/入未读|收到/.test(msg)) return 'in';
+    if (/发送|回复/.test(msg)) return 'out';
+    return 'sys';
+  }
+  function parseActivity(raw) {
+    return raw.split('\n').filter(Boolean).map(function (line) {
+      const m = line.match(/^\[(\d{1,2}:\d{2}:\d{2})\]\s+(\S+)\s+\[([^\]]+)\]\s?(.*)$/);
+      if (!m) return { time: '', key: '', msg: line, dir: 'sys' };
+      const msg = m[4];
+      return { time: m[1], key: m[2], msg: msg, dir: classifyAct(msg) };
+    });
+  }
+  function renderActivity() {
+    const list = $('#activityList');
+    if (!list) return;
+    const rows = actCleared ? [] : parseActivity(actRaw);
+    const q = actQuery.trim().toLowerCase();
+    const LABEL = { in: '收', out: '发', sys: '系', err: '错' };
+    const shown = rows.filter(function (r) {
+      if (actDir !== 'all' && r.dir !== actDir) return false;
+      if (q && (r.msg + ' ' + r.key).toLowerCase().indexOf(q) < 0) return false;
+      return true;
+    });
+    list.innerHTML = '';
+    if (!shown.length) {
+      list.innerHTML = '<div class="empty-tip">' + (actCleared ? '已清空显示（不影响桥接日志文件）' : '（空）') + '</div>';
+      return;
+    }
+    shown.forEach(function (r) {
+      const line = document.createElement('div');
+      line.className = 'log-line' + (r.dir === 'err' ? ' is-err' : '');
+      line.innerHTML = '<span class="log-time">' + r.time + '</span>' +
+        '<span class="log-dir ' + r.dir + '">' + LABEL[r.dir] + '</span>' +
+        '<span class="log-msg">' + (r.key ? '<span class="who">' + esc(r.key) + '</span> ' : '') + esc(r.msg) + '</span>';
+      list.appendChild(line);
+    });
+  }
+  $$('#activityFilter button').forEach(function (b) {
+    b.addEventListener('click', function () {
+      $$('#activityFilter button').forEach(function (x) { x.classList.remove('active'); });
+      b.classList.add('active');
+      actDir = b.dataset.v;
+      renderActivity();
+    });
+  });
+  $('#activitySearch').addEventListener('input', function () { actQuery = this.value; renderActivity(); });
+  $('#activityPause').addEventListener('click', function () {
+    actPaused = !actPaused;
+    this.textContent = actPaused ? '继续' : '暂停';
+    const pill = $('#activityLivePill');
+    if (pill) {
+      pill.className = actPaused ? 'pill pill-warn' : 'pill pill-ok';
+      pill.innerHTML = actPaused ? '<span class="dot"></span>已暂停' : '<span class="dot pulse"></span>实时';
+    }
+    toast(actPaused ? '活动日志已暂停刷新' : '活动日志已恢复实时', { type: actPaused ? 'warn' : 'ok' });
+  });
+  $('#activityClear').addEventListener('click', function () {
+    actCleared = true;
+    renderActivity();
+    toast('已清空日志显示（不影响桥接日志文件）', {
+      type: 'warn',
+      undoLabel: '撤销',
+      undo: function () { actCleared = false; renderActivity(); }
+    });
+  });
+  renderActivity();
 
   async function refreshPresets() {
     try {
@@ -1966,6 +2109,70 @@ window.LOG_POOL = [
         '<span class="pill">' + p.model + '</span><span class="pill">' + p.tools + ' 个工具</span>' +
         (used ? '<span class="pill pill-accent">使用中</span>' : '<span class="pill">未挂载</span>');
       box.appendChild(row);
+    });
+  }
+
+  /* ================= 会话状态卡（实时） ================= */
+  async function renderSessionStates() {
+    const box = $('#ssRows');
+    if (!box) return;
+    const sessions = window.__sess || [];
+    if (!sessions.length) { box.innerHTML = '<div class="empty-tip">暂无活跃会话</div>'; return; }
+    let v2map = {};
+    try {
+      const r = await api('/api/socialV2/states');
+      (r.conversations || []).forEach(function (c) { v2map[c.key] = c; });
+    } catch (e) {}
+    const owner = String(window.__ownerQQ || '');
+    const palette = ['#6366f1', '#10b981', '#f59e0b', '#ec4899', '#06b6d4', '#8b5cf6'];
+    box.innerHTML = '';
+    sessions.forEach(function (x) {
+      const isP = x.key.indexOf('private:') === 0;
+      const idPart = x.key.split(':')[1] || '';
+      const isOwner = owner && idPart === owner;
+      const name = isOwner ? 'Owner' : idPart;
+      let hash = 0;
+      for (let i = 0; i < x.key.length; i++) hash = (hash * 31 + x.key.charCodeAt(i)) >>> 0;
+      const color = palette[hash % palette.length];
+      const st = v2map[x.key] || {};
+      const unread = Number(st.unreadCount) || 0;
+      const wc = st.wakeConfig || {};
+      let cls = 'ok', label = '空闲';
+      if (wc.mode === 'active') { cls = 'busy'; label = '回合中…'; }
+      else if (wc.sleepUntil) {
+        const t = new Date(wc.sleepUntil);
+        if (t.getTime() > Date.now()) {
+          cls = 'sleep';
+          label = '沉睡至 ' + ('0' + t.getHours()).slice(-2) + ':' + ('0' + t.getMinutes()).slice(-2);
+        } else { cls = 'wait'; label = '待唤醒'; }
+      } else if (wc.infinite) { cls = 'sleep'; label = '潜水中'; }
+      if (unread > 0 && cls !== 'sleep') { cls = 'wait'; label = '待回答'; }
+      const row = document.createElement('div');
+      row.className = 'ss-row';
+      row.innerHTML = '<span class="ss-avatar" style="background:' + color + '">' + name.slice(0, 1) +
+        (unread ? '<span class="unread">' + unread + '</span>' : '') + '</span>' +
+        '<div class="ss-info"><b>' + name + '</b><small>' + (isP ? '私聊' : '群聊') + ' · ' + x.key + '</small></div>' +
+        '<div class="ss-side"><span class="ss-state ' + cls + '">' + label + '</span>' +
+        '<div class="ss-btns">' +
+        (v2map[x.key] ? '<button class="btn sm" data-ss-wake="' + x.key + '">唤醒</button>' : '') +
+        '<button class="btn sm ghost" data-ss-reset="' + x.key + '">重置</button>' +
+        '</div></div>';
+      box.appendChild(row);
+    });
+    box.querySelectorAll('[data-ss-wake]').forEach(function (btn) {
+      btn.addEventListener('click', async function () {
+        const key = btn.getAttribute('data-ss-wake');
+        const r = await api('/api/socialV2/wake', 'POST', { key: key, reason: 'admin' });
+        toast(r.ok ? '已唤醒 ' + key : ('❌ ' + (r.error || '失败')), { type: r.ok ? 'ok' : 'err' });
+      });
+    });
+    box.querySelectorAll('[data-ss-reset]').forEach(function (btn) {
+      btn.addEventListener('click', async function () {
+        const key = btn.getAttribute('data-ss-reset');
+        if (!await confirmBox('确定清除「' + key + '」的会话上下文？下次消息将开新会话。')) return;
+        const r = await api('/api/session/reset', 'POST', { key: key });
+        toast(r.ok ? '✅ 已清除上下文' : ('❌ ' + (r.error || '失败')), { type: r.ok ? 'ok' : 'err' });
+      });
     });
   }
 
@@ -2045,6 +2252,8 @@ window.LOG_POOL = [
         toast(r.ok ? '✅ 已清除上下文' : ('❌ ' + esc(r.error || '失败')), { type: r.ok ? 'ok' : 'err' });
         refreshSessions();
       }));
+      window.__sess = s.sessions;
+      renderSessionStates();
     } catch (e) {}
   }
 
