@@ -101,24 +101,25 @@ h1, h2, h3 { line-height: 1.35; }
 body { grid-template: "brand actions" auto "nav main" 1fr / var(--nav-w) 1fr; }
 body > .top { display: contents; }
 body > .top .brand {
-  grid-area: brand; position: sticky; top: 0; z-index: 41;
-  display: flex; align-items: center; gap: 10px; padding: 0 16px 0 20px; min-height: 58px;
+  position: fixed; top: 0; left: 0; width: var(--nav-w); min-height: 58px; z-index: 42;
+  display: flex; align-items: center; gap: 10px; padding: 0 16px 0 20px;
   background: var(--glass-weak); backdrop-filter: blur(var(--glass-blur)) saturate(1.5);
   border-bottom: 1px solid var(--edge-hi);
 }
 body > .top .top-right {
-  grid-area: actions; position: sticky; top: 0; z-index: 41;
-  display: flex; align-items: center; justify-content: flex-end; gap: 12px; flex-wrap: wrap; padding: 8px 20px; min-height: 58px;
+  position: fixed; top: 0; left: var(--nav-w); right: 0; min-height: 58px; z-index: 42;
+  display: flex; align-items: center; justify-content: flex-end; gap: 12px; flex-wrap: wrap; padding: 8px 20px;
   background: var(--glass-weak); backdrop-filter: blur(var(--glass-blur)) saturate(1.5);
   border-bottom: 1px solid var(--edge-hi);
 }
-body > .nav {
-  grid-area: nav; display: flex; flex-direction: column; gap: 6px; padding: 18px 12px;
-  position: sticky; top: 58px; align-self: start; height: calc(100vh - 58px); overflow-y: auto;
+body.layout-sidebar .nav {
+  position: fixed; top: 58px; left: 0; bottom: 0; width: var(--nav-w); z-index: 40;
+  display: flex; flex-direction: column; gap: 6px; padding: 18px 12px;
+  overflow-y: auto; overflow-x: hidden;
   background: var(--glass-weak); backdrop-filter: blur(var(--glass-blur)) saturate(1.5);
   border-right: 1px solid var(--edge-hi);
 }
-body > main { grid-area: main; padding: 24px 28px 70px; max-width: 1160px; width: 100%; }
+body > main { grid-area: main; padding: 82px 28px 70px; max-width: 1240px; width: 100%; margin: 0 auto; }
 .brand .logo {
   display: inline-flex; width: 36px; height: 36px; align-items: center; justify-content: center;
   border-radius: 13px; font-weight: 700; font-size: 15px; flex: none;
@@ -144,11 +145,40 @@ body > main { grid-area: main; padding: 24px 28px 70px; max-width: 1160px; width
   color: var(--on-accent); font-weight: 600;
   box-shadow: 5px 7px 16px var(--accent-shadow), -3px -4px 10px var(--shadow-c2), inset 0 1.5px 0 rgba(255, 255, 255, .4);
 }
+/* 模型选择单选卡 */
+.model-list { display: flex; flex-direction: column; gap: 8px; }
+.model-item {
+  position: relative; display: flex; align-items: center; gap: 10px; cursor: pointer;
+  border: 1px solid var(--border); border-radius: var(--radius-s, 14px);
+  padding: 9px 12px; background: var(--input-bg);
+  transition: border-color .15s, background .15s, transform .16s var(--spring);
+}
+.model-item:hover { border-color: var(--accent); }
+.model-item:active { transform: scale(.985); }
+.model-item input { position: absolute; opacity: 0; }
+.model-item.checked { border-color: var(--accent); background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
+.model-item .radio { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--text-3); flex: none; }
+.model-item.checked .radio { border-color: var(--accent); background: radial-gradient(circle, var(--accent) 45%, transparent 52%); }
+.model-item b { font-family: var(--font-mono); font-size: 12.5px; }
+.model-item small { color: var(--text-3); font-size: 11.5px; display: block; margin-top: 1px; }
+.model-item > div { flex: 1; min-width: 0; }
+.model-item .pill { margin-left: auto; flex: none; }
+
+body.layout-sidebar .nav-btn, body.layout-rail .nav-btn { position: relative; z-index: 1; }
+
+/* 模块切换入场 */
+.module { animation: moduleIn .34s cubic-bezier(.22, .9, .36, 1) both; }
+@keyframes moduleIn { from { opacity: 0; transform: translateY(12px); } }
+
+/* 主题切换时全局色彩平滑过渡（短暂开启，避免常驻开销） */
+html.theme-anim, html.theme-anim *, html.theme-anim *::before, html.theme-anim *::after {
+  transition: background-color .34s ease, color .34s ease, border-color .34s ease, box-shadow .34s ease, opacity .34s ease !important;
+}
 .nav-btn .nav-no { margin-left: auto; font-size: 10.5px; opacity: .6; font-family: var(--font-mono); }
 @media (max-width: 860px) {
   body { grid-template: "brand" auto "actions" auto "nav" auto "main" 1fr / 1fr; }
   body > .top .brand, body > .top .top-right { position: static; }
-  body > .nav { flex-direction: row; height: auto; position: static; border-right: 0; border-bottom: 1px solid var(--edge-hi); overflow-x: auto; padding: 8px 12px; }
+  body.layout-sidebar .nav { flex-direction: row; position: static; width: auto; height: auto; border-right: 0; border-bottom: 1px solid var(--edge-hi); overflow-x: auto; overflow-y: hidden; padding: 8px 12px; }
   body > .nav .nav-btn { width: auto; }
   body > .nav .nav-no { display: none; }
   body > main { padding: 18px 14px 60px; }
@@ -162,7 +192,7 @@ body > main { grid-area: main; padding: 24px 28px 70px; max-width: 1160px; width
   -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
 }
 .page-sub { margin: 0; color: var(--text-3); font-size: 12.5px; }
-.grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 18px; align-items: start; }
+.grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 18px; }
 .c-6 { grid-column: span 6; } .c-7 { grid-column: span 7; } .c-5 { grid-column: span 5; } .c-12 { grid-column: span 12; }
 @media (max-width: 1020px) { .grid > .card { grid-column: 1 / -1 !important; } }
 
@@ -220,12 +250,74 @@ input[type=text], input[type=number], input[type=password], textarea, select {
 input:focus, textarea:focus, select:focus {
   box-shadow: inset 3px 4px 10px var(--shadow-c1), inset -3px -4px 9px var(--shadow-c2), 0 0 0 2.5px var(--accent-soft), 0 0 0 1px var(--accent) inset;
 }
-textarea { resize: vertical; min-height: 74px; font-family: var(--font-mono); line-height: 1.55; }
+textarea { resize: vertical; min-height: 74px; line-height: 1.6; }
+
+/* 下拉框：统一外观（自绘箭头 + 选项列表配色随主题） */
+select {
+  appearance: none; -webkit-appearance: none; cursor: pointer;
+  font-weight: 500; min-height: 37px; padding-right: 34px;
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5l5 5 5-5' fill='none' stroke='%235b7cfa' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 13px center;
+}
+:root[data-theme="dark"] select {
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5l5 5 5-5' fill='none' stroke='%238ba4ff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+:root[data-theme="warm"] select {
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5l5 5 5-5' fill='none' stroke='%236a7fae' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+select option { font-family: inherit; font-size: 13px; color: #333d5c; background: #fff; padding: 8px 10px; }
+:root[data-theme="dark"] select option { color: #e8edfb; background: #1c2642; }
+:root[data-theme="warm"] select option { color: #37423c; background: #f7f9ee; }
+
+/* 自定义下拉：触发按钮 + 与主题统一的弹出选项列表 */
+.sel-wrap { position: relative; display: inline-flex; min-width: 0; }
+.sel-wrap .sel-native { display: none !important; }
+.sel-trigger {
+  display: inline-flex; align-items: center; width: 100%; min-height: 37px;
+  padding: 7px 32px 7px 12px; position: relative;
+  font: inherit; font-size: 13px; font-weight: 500; color: var(--text); text-align: left;
+  background: var(--input-bg); border: 0; border-radius: 14px; cursor: pointer;
+  box-shadow: inset 3px 4px 10px var(--shadow-c1), inset -3px -4px 9px var(--shadow-c2);
+  transition: box-shadow .18s ease;
+}
+.sel-trigger > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sel-trigger::after {
+  content: ""; position: absolute; right: 13px; top: 50%; width: 11px; height: 7px;
+  transform: translateY(-50%);
+  background: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5l5 5 5-5' fill='none' stroke='%235b7cfa' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center/contain no-repeat;
+  transition: transform .18s var(--spring);
+}
+:root[data-theme="dark"] .sel-trigger::after {
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5l5 5 5-5' fill='none' stroke='%238ba4ff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+:root[data-theme="warm"] .sel-trigger::after {
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5l5 5 5-5' fill='none' stroke='%236a7fae' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+.sel-trigger:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.sel-wrap.open .sel-trigger {
+  box-shadow: inset 3px 4px 10px var(--shadow-c1), inset -3px -4px 9px var(--shadow-c2), 0 0 0 2.5px var(--accent-soft), 0 0 0 1px var(--accent) inset;
+}
+.sel-wrap.open .sel-trigger::after { transform: translateY(-50%) rotate(180deg); }
+.sel-menu {
+  position: fixed; z-index: 1100; display: none; flex-direction: column; gap: 2px;
+  min-width: 150px; max-height: 320px; overflow-y: auto; padding: 6px;
+  background: var(--panel-solid); border: 1px solid var(--edge-hi); border-radius: 16px;
+  box-shadow: 12px 14px 36px var(--shadow-c1), -6px -8px 24px var(--shadow-c2), inset 0 1.5px 0 var(--edge-hi);
+  backdrop-filter: blur(var(--glass-blur)) saturate(1.5);
+}
+.sel-menu.open { display: flex; animation: selPop .16s var(--spring); }
+@keyframes selPop { from { opacity: 0; transform: translateY(-6px) scale(.98); } }
+.sel-item {
+  display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 10px;
+  font-size: 13px; color: var(--text-2); cursor: pointer; white-space: normal; word-break: break-word; line-height: 1.5;
+}
+.sel-item:hover, .sel-item.hl { background: var(--accent-soft); color: var(--accent); }
+.sel-item.checked { color: var(--accent); font-weight: 600; }
+.sel-item.checked::after { content: "✓"; margin-left: auto; font-size: 12px; }
 input[type=checkbox], input[type=radio] { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; flex: none; }
 input[type=range] { accent-color: var(--accent); width: 100%; border: 0; box-shadow: none; background: transparent; }
 input[type=range]:focus { box-shadow: none; }
-select option { color: #333; background: #fff; }
-:root[data-theme="dark"] select option { color: #e8edfb; background: #1c2642; }
 .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .row > label[style*="flex"] { color: var(--text-2); font-size: 12.5px; }
 .kv-row { display: flex; align-items: center; gap: 10px; font-size: 12.5px; color: var(--text-3); flex-wrap: wrap; }
@@ -516,9 +608,51 @@ pre.console-pre {
         </div>
       </article>
 
+      <article class="card c-6" id="cardModel">
+        <header class="card-head">
+          <h2><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 3 7v10l9 5 9-5V7z"/><path d="M12 12 3 7m9 5 9-5m-9 5v10"/></svg>模型选择</h2>
+          <span class="hint">对新回合立即生效</span>
+        </header>
+        <div class="card-body">
+          <div class="model-list" id="modelList"></div>
+          <div class="kv-row"><span>推理强度</span>
+            <div class="seg" id="effortSeg">
+              <button data-v="low">低</button><button data-v="medium" class="active">中</button><button data-v="high">高</button>
+            </div>
+            <small>reasoningEffort</small>
+          </div>
+        </div>
+      </article>
+
+      <article class="card c-12" id="cardBind">
+        <header class="card-head">
+          <h2><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 7H5a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h4m6-10h4a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2h-4M8 12h8"/></svg>运行模式 × Agent 预设绑定</h2>
+          <span class="hint">每个模式使用独立预设，下拉即改，无需保存</span>
+        </header>
+        <div class="card-body"><div class="rows" id="modeBind"></div></div>
+      </article>
+
+      <article class="card c-12" id="cardParams">
+        <header class="card-head">
+          <h2><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="2.6"/><circle cx="15" cy="17" r="2.6"/></svg>发送参数</h2>
+          <span class="hint">防风控与投递体验</span>
+        </header>
+        <div class="card-body">
+          <div class="c-6" style="grid-column: span 6; min-width: 260px;">
+            <div class="range-row"><span style="min-width:96px">发送间隔</span><input type="range" id="sendDelay" min="200" max="3000" step="100" value="800"><output id="sendDelayOut">800ms</output></div>
+            <div class="range-row"><span style="min-width:96px">音量增益</span><input type="range" id="volGainSlider2" min="0.5" max="8" step="0.1" value="1" hidden><output id="volGainOut2" hidden></output></div>
+          </div>
+          <div style="display:flex; flex-direction:column; gap:10px; flex:1; min-width:240px;">
+            <label class="field"><span>投递回执 ackMessage（留空关闭）</span><input type="text" id="ackMessage" value="" placeholder="例如：✅ 已收到"></label>
+            <div class="switch-row"><label class="switch"><input type="checkbox" id="splitSend" checked><span class="track"></span></label>按空格分句发送<small>一代仿真 reserved 生效</small></div>
+          </div>
+        </div>
+      </article>
+
       <article class="card c-6">
         <header class="card-head">
           <h2><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M5 12.5a10 10 0 0 1 14 0M8.5 16a5 5 0 0 1 7 0M12 19.5h.01"/><circle cx="12" cy="5" r="1.6"/></svg>连接与状态</h2>
+          <span class="pill pill-ok" id="dshState"><span class="dot pulse"></span>在线 · 42ms</span>
           <span class="pill" id="statusText">加载中…</span>
         </header>
         <div class="card-body">
@@ -526,7 +660,10 @@ pre.console-pre {
           <div class="kv-row"><span>管理员 QQ</span><span id="ownerStatusText">-</span></div>
           <div class="kv-row"><span>群白名单</span><span id="groupsStatusText">-</span></div>
           <div class="kv-row"><span>私聊白名单</span><span id="privateStatusText">-</span></div>
-          <div class="meta">config.json 中 dsh.provider / model / reasoningEffort 决定会话使用的模型；修改请编辑配置文件或 DSH 设置页（本控制台不改后端）。</div>
+          <div class="row">
+            <button class="btn sm" id="dshCheck">检测连通</button>
+            <span class="meta">config.json 中 dsh.provider / model / reasoningEffort 决定会话使用的模型；修改请编辑配置文件或 DSH 设置页（本控制台不改后端）。</span>
+          </div>
         </div>
       </article>
 
@@ -600,6 +737,14 @@ pre.console-pre {
       <p class="page-sub">角色人格、黑话用语库与一代 / 二代仿真行为参数</p>
     </div>
     <div class="grid">
+      <article class="card c-12" id="cardPresets">
+        <header class="card-head">
+          <h2><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="12" rx="3"/><path d="M12 8V4m-3 0h6"/></svg>Agent 预设库</h2>
+          <span class="hint">点击「编辑」右侧抽屉直接修改，保存即生效</span>
+        </header>
+        <div class="card-body"><div class="rows" id="presetRows"></div></div>
+      </article>
+
       <article class="card c-12">
         <header class="card-head">
           <h2><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6"/></svg>人格（角色扮演）</h2>
@@ -645,7 +790,7 @@ pre.console-pre {
               <button id="slangBatchResearch" class="btn sm">批量送 DSH 深度研究</button>
               <button id="slangBatchConfirm" class="btn sm">批量确认（有含义）</button>
               <button id="slangBatchReject" class="btn sm">批量拒绝</button>
-              <button id="slangBatchDeleteCand" class="btn sm danger" data-confirm="确定删除选中的候选词？此操作不可恢复！">批量删除候选</button>
+              <button id="slangBatchDeleteCand" class="btn sm danger">批量删除候选</button>
               <button id="slangExtract" class="btn sm ghost">立即提取候选</button>
               <button id="slangResearch" class="btn sm ghost">研究全部候选</button>
             </div>
@@ -661,7 +806,7 @@ pre.console-pre {
           <div class="slang-panel" id="slangPanelConfirmed">
             <div class="row">
               <label class="inline-label"><input type="checkbox" id="slangConfirmedSelectAll"> 全选</label>
-              <button id="slangBatchDeleteConfirmed" class="btn sm danger" data-confirm="确定删除选中的已确认黑话？此操作不可恢复！">批量删除已确认</button>
+              <button id="slangBatchDeleteConfirmed" class="btn sm danger">批量删除已确认</button>
             </div>
             <div class="row">
               <input type="text" id="slangSearchConfirmed" placeholder="搜索词条 / 含义 / 用法 / 示例 / 来源" style="flex:1">
@@ -676,7 +821,7 @@ pre.console-pre {
             <div class="row">
               <label class="inline-label"><input type="checkbox" id="slangRejectedSelectAll"> 全选</label>
               <button id="slangBatchRestore" class="btn sm">恢复为候选</button>
-              <button id="slangBatchDeleteRejected" class="btn sm danger" data-confirm="确定删除选中的已拒绝词条？此操作不可恢复！">批量删除已拒绝</button>
+              <button id="slangBatchDeleteRejected" class="btn sm danger">批量删除已拒绝</button>
             </div>
             <div class="row">
               <input type="text" id="slangSearchRejected" placeholder="搜索词条 / 拒绝原因" style="flex:1">
@@ -775,7 +920,7 @@ pre.console-pre {
                 <label class="inline-label"><input type="checkbox" id="v2RecQuestion"> 推荐提问唤醒</label>
                 <label class="inline-label"><input type="checkbox" id="v2RecPoke"> 推荐拍一拍唤醒</label>
               </div>
-              <label class="field"><span>唤醒推荐提示（给 AI 看的文字）</span><textarea id="v2WakeHint" rows="2" placeholder="例如：如果你在潜水，推荐 5~120 分钟、普通消息概率 0.05…"></textarea></div>
+              <label class="field"><span>唤醒推荐提示（给 AI 看的文字）</span><textarea id="v2WakeHint" rows="2" placeholder="例如：如果你在潜水，推荐 5~120 分钟、普通消息概率 0.05…"></textarea></label>
             </div>
           </details>
 
@@ -957,7 +1102,7 @@ pre.console-pre {
             <button id="v2ToolLogClear" class="btn sm danger" data-arm="确认清空？">清空工具日志</button>
             <span class="meta" id="v2ToolLogMsg"></span>
           </div>
-          <div id="v2ToolLogOutput" class="tbl-wrap">（空）</div>
+          <div id="v2ToolLogOutput" class="tbl-wrap auto-show" hidden>（空）</div>
         </div>
       </article>
 
@@ -976,8 +1121,8 @@ pre.console-pre {
             <button id="v2ForceWake" class="btn sm primary">立即唤醒</button>
             <button id="v2StatesList" class="btn sm ghost">列出全部会话状态</button>
           </div>
-          <pre class="console-pre" id="v2StateOutput">（空）</pre>
-          <pre class="console-pre" id="v2AllStatesOutput" style="max-height:260px">（全部会话状态：空）</pre>
+          <pre class="console-pre auto-show" id="v2StateOutput" hidden>（空）</pre>
+          <pre class="console-pre auto-show" id="v2AllStatesOutput" style="max-height:260px" hidden>（全部会话状态：空）</pre>
           <div class="divider"></div>
           <div class="sub-label">唤醒状态详情（AI 当前设置的下一次唤醒条件/倒计时）</div>
           <div class="row">
@@ -985,7 +1130,7 @@ pre.console-pre {
             <button id="v2WakeStatusLoad" class="btn sm">查看唤醒状态</button>
             <span class="meta" id="v2WakeStatusMsg"></span>
           </div>
-          <div class="tbl-wrap" id="v2WakeStatusOutput">（空）</div>
+          <div class="tbl-wrap auto-show" id="v2WakeStatusOutput" hidden>（空）</div>
         </div>
       </article>
 
@@ -1000,7 +1145,7 @@ pre.console-pre {
             <button id="v2MemoryClearAll" class="btn sm danger" data-arm="确认清空？">清空全部</button>
           </div>
           <span class="meta" id="v2MemoryMsg"></span>
-          <div class="tbl-wrap" id="v2MemoryOutput">（空）</div>
+          <div class="tbl-wrap auto-show" id="v2MemoryOutput" hidden>（空）</div>
         </div>
       </article>
 
@@ -1015,7 +1160,7 @@ pre.console-pre {
             <button id="v2FeedbackClear" class="btn sm danger" data-arm="确认清空？">清空 AI 反馈</button>
             <span class="meta" id="v2FeedbackMsg"></span>
           </div>
-          <pre class="console-pre" id="v2FeedbackOutput">（空）</pre>
+          <pre class="console-pre auto-show" id="v2FeedbackOutput" hidden>（空）</pre>
         </div>
       </article>
     </div>
@@ -1228,6 +1373,113 @@ pre.console-pre {
 </div>
 
 <div class="toasts" id="toasts" aria-live="polite"></div>
+
+<script>
+/* QQ 桥接控制台 · Mock 数据（贴合 config.example.json / 现有 console.html 功能） */
+window.MOCK = {
+  dsh: {
+    url: 'http://127.0.0.1:3080',
+    online: true, latency: 42,
+    cookie: 'sk-bridge••••••••3f2a',
+    workspace: 'QQ 聊天',
+    callsToday: 342, successRate: '98.2%', p95: '2.1s'
+  },
+  models: [
+    { id: 'deepseek-v3.2-exp', desc: '均衡 · 128K 上下文', tag: '当前', rec: true },
+    { id: 'deepseek-r1', desc: '深度推理 · 慢但聪明', tag: '推理' },
+    { id: 'glm-4.6', desc: '长文写作 · 中文强化', tag: '长文' },
+    { id: 'qwen3-max', desc: '通用备选', tag: '' },
+    { id: 'kimi-k2', desc: '联网问答备选', tag: '' }
+  ],
+  effort: 'medium',
+  modes: [
+    { id: 'chat', name: 'chat', desc: '白名单群 + 私聊安全聊天', preset: 'qq-chat', scene: '日常挂机' },
+    { id: 'closed-agent', name: 'closed-agent', desc: '仅 Owner 私聊，完整工具可操控 DSH', preset: 'router-standard', scene: '远程运维' },
+    { id: 'reserved', name: 'reserved', desc: '一代仿真群友 · 状态机主动参聊', preset: 'qq-chat', scene: '仿真一代' },
+    { id: 'reserved2', name: 'reserved2', desc: '二代仿真 · AI 自主收发 / 唤醒 / 潜水', preset: 'qq-chat-v2', scene: '仿真二代' }
+  ],
+  currentMode: 'chat',
+  presets: [
+    { id: 'qq-chat', name: 'qq-chat', desc: 'QQ 安全聊天人格，仅附加 QQ 场景规则', model: 'deepseek-v3.2-exp', tools: 6,
+      prompt: '你是 QQ 群聊 / 私聊中的 AI 桥接代理。规则：\n1. 只使用安全子集工具（收发消息 / 查历史 / 表情包）。\n2. 语气自然，像真人群友，短句为主，可用空格分条。\n3. 涉及敏感内容一律拒绝并提醒 Owner。\n4. 引用消息注意判断说话对象，不要误接话。' },
+    { id: 'qq-chat-v2', name: 'qq-chat-v2', desc: '二代仿真 · AI 自主看消息、发言、等待、设置唤醒', model: 'deepseek-v3.2-exp', tools: 9,
+      prompt: '你是二代仿真群友。通过 qq_get_unread_messages 主动看消息，用 qq_send_message 发言；\n可以使用 set_wake_config 设置沉睡/唤醒，潜水时无需逐条回复。\n保持人设一致，控制发言频率（maxSendPerMinute）。' },
+    { id: 'router-standard', name: 'router-standard', desc: 'closed-agent 完整工具，可在 QQ 上操控 DSH', model: 'deepseek-r1', tools: 14,
+      prompt: '你是 Owner 的远程运维代理，运行在 closed-agent 模式。\n拥有完整 DSH 工具与 snowluma-host 进程控制（需显式开启）。\n执行前简要确认影响面，执行后回报结果。' }
+  ],
+  roles: [
+    { name: '默认（关闭角色扮演）', content: '' },
+    { name: '赛博侦探', content: 'El Psy Kongroo。说话冷静克制，喜欢用「机关」称呼神秘事物，偶尔中二。' },
+    { name: '傲娇猫娘', content: '哼、才、才不是特别想你呢喵！句子结尾偶尔带「喵」，嘴硬心软。' },
+    { name: '毒舌军师', content: '言简意赅，一针见血，擅长吐槽但关键时刻给真建议。' },
+    { name: '老学究', content: '引经据典，爱用「昔日」「盖因」，偶尔科普冷知识。' }
+  ],
+  currentRole: '赛博侦探',
+  slang: [
+    { term: 'yyds', meaning: '永远的神' },
+    { term: 'xswl', meaning: '笑死我了' },
+    { term: '蚌埠住了', meaning: '绷不住了' },
+    { term: '尊嘟假嘟', meaning: '真的假的' },
+    { term: '6', meaning: '溜 / 厉害' },
+    { term: '破防了', meaning: '心理防线被击穿' },
+    { term: '自习室', meaning: '摸鱼时假装学习' }
+  ],
+  sessions: [
+    { key: 'group:952719003', name: 'AI 仿真群', type: '群聊', state: 'busy', stateText: '回合中…', unread: 0, color: '#6366f1' },
+    { key: 'private:10001', name: 'Owner', type: '私聊', state: 'ok', stateText: '空闲', unread: 0, color: '#10b981' },
+    { key: 'group:31415926', name: '测试群', type: '群聊', state: 'sleep', stateText: '沉睡至 08:30', unread: 3, color: '#f59e0b' },
+    { key: 'private:20002', name: '小雪', type: '私聊', state: 'wait', stateText: '待回答', unread: 1, color: '#ec4899' }
+  ],
+  pending: [
+    { id: 'p1', kind: 'tool', title: '工具审批 · web_search', detail: '「明天上海天气怎么样」→ 联网查询', timeout: '27s 后自动拒绝' },
+    { id: 'p2', kind: 'ask', title: 'AI 提问 · ask_user_question', detail: '要把凌晨 4 点的自动重启打开吗？', timeout: '' }
+  ],
+  tools: [
+    { name: 'qq_send_message', args: '群 952719003 · "El Psy Kongroo~"', dur: '0.8s', ok: true },
+    { name: 'web_search', args: 'DSH 0.1.5 Web API 变更', dur: '2.4s', ok: true },
+    { name: 'qq_get_unread_messages', args: 'group:31415926', dur: '0.2s', ok: true },
+    { name: 'set_wake_config', args: 'sleepUntil 08:30', dur: '0.3s', ok: true },
+    { name: 'kugou_parse', args: '「晴天」VIP 无损', dur: '6.1s', ok: false }
+  ],
+  memories: [
+    { key: 'group:952719003', name: 'AI 仿真群', text: '群主爱聊技术；周五晚有固定云聚会；阿雪在做毕设', n: 12 },
+    { key: 'group:31415926', name: '测试群', text: '主要用于联调，少踩雷话题：前任、加班', n: 5 },
+    { key: 'private:10001', name: 'Owner', text: '喜欢简洁汇报；讨厌被重复问已确认的事', n: 8 }
+  ],
+  whitelist: {
+    private: [{ v: '10001', note: 'Owner' }, { v: '20002', note: '小雪' }],
+    groups: [{ v: '952719003', note: 'AI 仿真群' }, { v: '31415926', note: '测试群' }],
+    deny: []
+  },
+  settings: { silent: false, intercept: true, notifyOwner: true, bilibili: true, fileSend: true, search: true, sendDelayMs: 800, volumeGain: 1.0, ackMessage: '', splitSend: true },
+  kugou: { loggedIn: true, user: '芝士雪豹' },
+  token: 'qkb-9f3e••••••••d21c',
+  consoleUrl: 'http://127.0.0.1:3100'
+};
+
+/* 模拟日志池 */
+window.LOG_POOL = [
+  { dir: 'in',  msg: '<span class="who">群 · AI仿真群</span> 谁懂啊，这桥接也太好玩了吧' },
+  { dir: 'out', msg: '→ 群 · AI仿真群：El Psy Kongroo~（0.9s）' },
+  { dir: 'in',  msg: '<span class="who">私聊 · Owner</span> /model deepseek-r1' },
+  { dir: 'sys', msg: '模式切换：chat → closed-agent，预设 router-standard 已加载' },
+  { dir: 'out', msg: '→ 私聊 · Owner：已切换模型 deepseek-r1，推理强度=高' },
+  { dir: 'in',  msg: '<span class="who">群 · 测试群</span> [引用 芝士雪豹：今晚八点集合] 收到喵' },
+  { dir: 'sys', msg: 'DSH 会话已创建（workspace: QQ 聊天 · 4 个活跃会话）' },
+  { dir: 'err', msg: 'SnowLuma WS 断线，3s 后重连（第 2 次）' },
+  { dir: 'out', msg: '→ 群 · 测试群：八点见，我带资料（分句 ×2）' },
+  { dir: 'in',  msg: '<span class="who">群 · AI仿真群</span> 尊嘟假嘟？AI 真的会自己潜水？' },
+  { dir: 'sys', msg: '安全拦截：出站消息命中敏感规则，已通知 Owner' },
+  { dir: 'out', msg: '→ 私聊 · Owner：⚠️ 拦截提醒：测试群出站消息被过滤' },
+  { dir: 'in',  msg: '<span class="who">私聊 · 小雪</span> 在吗，帮我查个东西' },
+  { dir: 'sys', msg: '工具审批已转发 QQ：web_search（等待 Owner 回复）' },
+  { dir: 'out', msg: '→ 群 · AI仿真群：真的假的，自己试试就知道了 [表情:滑稽]' },
+  { dir: 'sys', msg: '酷狗 Cookie 已刷新（VIP 有效期 23 天）' },
+  { dir: 'in',  msg: '<span class="who">群 · AI仿真群</span> 6' },
+  { dir: 'out', msg: '→ 群 · AI仿真群：[[SILENT]] 潜水，不接话' }
+];
+
+</script>
 <script>
 (function () {
   'use strict';
@@ -1257,6 +1509,14 @@ pre.console-pre {
     box.appendChild(t);
     setTimeout(() => { t.classList.add('out'); setTimeout(() => t.remove(), 260); }, opts.ms || 3400);
     while (box.children.length > 4) box.firstChild.remove();
+  }
+
+  /* ================= 空输出框自动隐藏（不占版面） ================= */
+  function syncAutoShow() {
+    $$('.auto-show').forEach(el => {
+      const t = el.textContent.trim();
+      el.hidden = (t === '' || t === '（空）' || t === '（全部会话状态：空）');
+    });
   }
 
   /* ================= 防误触：连点两次确认（代替 confirm 弹窗，用于静态按钮） ================= */
@@ -1375,7 +1635,7 @@ pre.console-pre {
     return res.json();
   }
 
-  /* ================= 模块导航 ================= */
+  /* ================= 模块导航 ================= */  /* ================= 模块导航 ================= */
   function go(module, silent) {
     $$('.module').forEach(m => { m.hidden = m.dataset.module !== module; });
     $$('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.module === module));
@@ -1397,10 +1657,12 @@ pre.console-pre {
     b.textContent = t.label;
     b.dataset.theme = t.id;
     b.addEventListener('click', () => {
+      document.documentElement.classList.add('theme-anim');
       document.documentElement.dataset.theme = t.id;
       try { localStorage.setItem('consoleTheme', t.id); } catch (e) {}
       syncTheme();
       toast('主题已切换：' + t.label);
+      setTimeout(() => document.documentElement.classList.remove('theme-anim'), 400);
     });
     themeBox.appendChild(b);
   });
@@ -1413,6 +1675,183 @@ pre.console-pre {
     if (saved && ['light', 'dark', 'warm'].indexOf(saved) >= 0) document.documentElement.dataset.theme = saved;
   } catch (e) {}
   syncTheme();
+
+  /* ================= 自定义下拉框（选项列表与主题统一） =================
+     保留原生 select（隐藏），所有读取 .value / change 监听的逻辑零改动；
+     触发按钮 + 玻璃糖果风弹出菜单，选择时回写 value 并派发 change。 */
+  const selMenu = document.createElement('div');
+  selMenu.className = 'sel-menu';
+  document.body.appendChild(selMenu);
+  let selMenuOwner = null, selMenuHl = -1;
+  function closeSelMenu() {
+    selMenu.classList.remove('open');
+    if (selMenuOwner) {
+      const w = selMenuOwner.closest('.sel-wrap');
+      if (w) w.classList.remove('open');
+    }
+    selMenuOwner = null; selMenuHl = -1;
+  }
+  function syncSelLabel(sel) {
+    const btn = sel._selBtn;
+    if (!btn) return;
+    const o = sel.options[sel.selectedIndex];
+    const t = o ? o.textContent : '';
+    if (btn._lastLabel !== t) { btn._lastLabel = t; btn.querySelector('span').textContent = t; }
+  }
+  function applySelValue(sel, v) {
+    if (sel.value !== v) {
+      sel.value = v;
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    syncSelLabel(sel);
+  }
+  function renderSelHl() {
+    [...selMenu.children].forEach((el, i) => el.classList.toggle('hl', i === selMenuHl));
+    const el = selMenu.children[selMenuHl];
+    if (el) el.scrollIntoView({ block: 'nearest' });
+  }
+  function openSelMenu(sel) {
+    closeSelMenu();
+    selMenuOwner = sel;
+    selMenu.innerHTML = '';
+    const cur = sel.value;
+    [...sel.options].forEach((o) => {
+      const item = document.createElement('div');
+      item.className = 'sel-item' + (o.value === cur ? ' checked' : '');
+      item.dataset.value = o.value;
+      item.textContent = o.textContent || ' ';
+      item.addEventListener('click', () => { closeSelMenu(); applySelValue(sel, o.value); });
+      selMenu.appendChild(item);
+    });
+    selMenu.classList.add('open');
+    selMenu.style.visibility = 'hidden';
+    // 宽度自适应最长选项：先按 max-content 量宽，再夹在触发框宽度与视口之间
+    selMenu.style.width = 'max-content';
+    selMenu.style.maxWidth = (window.innerWidth - 16) + 'px';
+    const wrap = sel.closest('.sel-wrap');
+    if (wrap) wrap.classList.add('open');
+    const r = sel._selBtn.getBoundingClientRect();
+    const natural = selMenu.offsetWidth;
+    const mw = Math.max(r.width, Math.min(natural, window.innerWidth - 16));
+    selMenu.style.width = mw + 'px';
+    selMenu.style.maxWidth = '';
+    const mh = selMenu.offsetHeight;
+    selMenu.style.left = Math.max(8, Math.min(r.left, window.innerWidth - mw - 8)) + 'px';
+    selMenu.style.top = (r.bottom + 6 + mh > window.innerHeight - 8 ? Math.max(8, r.top - mh - 6) : r.bottom + 6) + 'px';
+    selMenu.style.visibility = '';
+    const idx = [...sel.options].findIndex(o => o.value === cur);
+    selMenuHl = idx >= 0 ? idx : 0;
+    renderSelHl();
+  }
+  function chooseSelHl() {
+    const sel = selMenuOwner;
+    if (!sel || !selMenu.children[selMenuHl]) return;
+    const v = selMenu.children[selMenuHl].dataset.value;
+    closeSelMenu();
+    applySelValue(sel, v);
+  }
+  function beautifySelect(sel) {
+    if (sel.dataset.beautyBound) return;
+    sel.dataset.beautyBound = '1';
+    const wrap = document.createElement('div');
+    wrap.className = 'sel-wrap';
+    wrap.setAttribute('style', sel.getAttribute('style') || '');
+    sel.removeAttribute('style');
+    sel.classList.add('sel-native');
+    sel.parentNode.insertBefore(wrap, sel);
+    wrap.appendChild(sel);
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'sel-trigger';
+    btn.innerHTML = '<span></span>';
+    wrap.appendChild(btn);
+    sel._selBtn = btn;
+    syncSelLabel(sel);
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (selMenuOwner === sel) closeSelMenu(); else openSelMenu(sel);
+    });
+    btn.addEventListener('keydown', (e) => {
+      if (selMenuOwner === sel) {
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+          e.preventDefault();
+          const n = sel.options.length;
+          selMenuHl = (selMenuHl + (e.key === 'ArrowDown' ? 1 : -1) + n) % n;
+          renderSelHl();
+        } else if (e.key === 'Enter') { e.preventDefault(); chooseSelHl(); }
+        else if (e.key === 'Escape') closeSelMenu();
+      } else if (e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault(); openSelMenu(sel);
+      }
+    });
+  }
+  document.addEventListener('click', (e) => {
+    if (!selMenuOwner) return;
+    if (selMenu.contains(e.target) || (selMenuOwner._selBtn && selMenuOwner._selBtn.contains(e.target))) return;
+    closeSelMenu();
+  });
+  window.addEventListener('scroll', (e) => { if (e.target !== selMenu) closeSelMenu(); }, true);
+  window.addEventListener('resize', closeSelMenu);
+  $$('select').forEach(beautifySelect);
+  // 值被轮询等程序修改时，同步触发按钮上的显示
+  setInterval(() => { $$('select[data-beauty-bound]').forEach(syncSelLabel); }, 400);
+
+  /* ================= 模型配置 ================= */
+  const M = window.MOCK;
+  var modelList = $('#modelList');
+  M.models.forEach(function (m) {
+    var item = document.createElement('label');
+    item.className = 'model-item' + (m.tag === '当前' ? ' checked' : '');
+    item.innerHTML = '<input type="radio" name="model" value="' + m.id + '"' + (m.tag === '当前' ? ' checked' : '') + '>' +
+      '<span class="radio"></span><div><b>' + m.id + '</b><small>' + m.desc + '</small></div>' +
+      (m.tag ? '<span class="pill' + (m.tag === '当前' ? ' pill-accent' : '') + '">' + m.tag + '</span>' : '');
+    item.querySelector('input').addEventListener('change', function () {
+      $$('.model-item', modelList).forEach(function (x) { x.classList.remove('checked'); });
+      item.classList.add('checked');
+      toast('模型已切换为 <b>' + m.id + '</b>，对新回合生效');
+    });
+    modelList.appendChild(item);
+  });
+  $$('#effortSeg button').forEach(function (b) {
+    b.addEventListener('click', function () {
+      $$('#effortSeg button').forEach(function (x) { x.classList.remove('active'); });
+      b.classList.add('active');
+      toast('推理强度 → ' + b.textContent);
+    });
+  });
+  $('#dshCheck').addEventListener('click', function () {
+    var pill = $('#dshState');
+    pill.className = 'pill pill-warn'; pill.innerHTML = '<span class="dot pulse"></span>检测中…';
+    setTimeout(function () {
+      pill.className = 'pill pill-ok'; pill.innerHTML = '<span class="dot pulse"></span>在线 · 42ms';
+      toast('DSH 连通正常 · 42ms');
+    }, 700);
+  });
+  var bindBox = $('#modeBind');
+  function renderBind() {
+    bindBox.innerHTML = '';
+    M.modes.forEach(function (md) {
+      var opts = M.presets.map(function (p) {
+        return '<option value="' + p.id + '"' + (p.id === md.preset ? ' selected' : '') + '>' + p.id + '</option>';
+      }).join('');
+      var row = document.createElement('div');
+      row.className = 'row';
+      row.innerHTML = '<b class="mono" style="min-width:96px">' + md.id + '</b>' +
+        '<small style="flex:1;min-width:150px">' + md.desc + '</small>' +
+        '<select data-mode="' + md.id + '">' + opts + '</select>' +
+        '<span class="pill">' + md.scene + '</span>';
+      row.querySelector('select').addEventListener('change', function (e) {
+        md.preset = e.target.value;
+        toast('<b>' + md.id + '</b> 的预设已改为 <b>' + e.target.value + '</b>，即时生效');
+      });
+      bindBox.appendChild(row);
+    });
+  }
+  renderBind(); renderPresets();
+  $('#sendDelay').addEventListener('input', function () { $('#sendDelayOut').textContent = this.value + 'ms'; });
+  $('#sendDelay').addEventListener('change', function () { toast('发送间隔 → ' + this.value + 'ms'); });
+  $('#ackMessage').addEventListener('change', function () { toast(this.value ? '投递回执已开启' : '投递回执已关闭'); });
+  $('#splitSend').addEventListener('change', function () { toast('分句发送：' + (this.checked ? '开' : '关')); });
 
   /* ================= 状态轮询（核心刷新） ================= */
   const MODE_LABEL = { chat: '聊天模式', 'closed-agent': '封闭 Agent', reserved: '一代仿真', reserved2: '二代仿真' };
@@ -1439,7 +1878,17 @@ pre.console-pre {
       $('#silentSwitch').checked = s.roleMode === 'silent';
       $('#activity').textContent = s.activity || '（空）';
       const presetSel = $('#closedPreset');
-      if (presetSel && document.activeElement !== presetSel) presetSel.value = s.closedAgentPreset || '';
+      if (presetSel && document.activeElement !== presetSel) {
+        const want = s.closedAgentPreset || '';
+        // 当前配置的预设不在 DSH 列表里时，动态补一项，避免下拉框显示空白
+        if (want && ![...presetSel.options].some(o => o.value === want)) {
+          const opt = document.createElement('option');
+          opt.value = want;
+          opt.textContent = want + '（当前配置）';
+          presetSel.insertBefore(opt, presetSel.options[1] || null);
+        }
+        presetSel.value = [...presetSel.options].some(o => o.value === want) ? want : '';
+      }
     } catch (e) {
       const dshPill = $('#pillDsh');
       dshPill.className = 'pill pill-err';
@@ -1454,6 +1903,10 @@ pre.console-pre {
       const sel = $('#closedPreset');
       const prev = sel.value;
       sel.innerHTML = '';
+      const ph = document.createElement('option');
+      ph.value = '';
+      ph.textContent = '未设置（closed-agent 默认 router-standard）';
+      sel.appendChild(ph);
       for (const p of (r.presets || [])) {
         const opt = document.createElement('option');
         opt.value = p.id;
@@ -1481,6 +1934,22 @@ pre.console-pre {
     const mode = active ? active.dataset.mode : 'chat';
     await saveMode(mode);
   });
+
+  /* ================= Agent 预设库（只读展示） ================= */
+  function renderPresets() {
+    const box = $('#presetRows');
+    if (!box) return;
+    box.innerHTML = '';
+    M.presets.forEach(function (p) {
+      const used = M.modes.some(function (md) { return md.preset === p.id; });
+      const row = document.createElement('div');
+      row.className = 'row';
+      row.innerHTML = '<div class="grow"><b class="mono">' + p.name + '</b><small>' + p.desc + '</small></div>' +
+        '<span class="pill">' + p.model + '</span><span class="pill">' + p.tools + ' 个工具</span>' +
+        (used ? '<span class="pill pill-accent">使用中</span>' : '<span class="pill">未挂载</span>');
+      box.appendChild(row);
+    });
+  }
 
   /* ================= 角色 / 静默 ================= */
   async function refreshRoles() {
@@ -1884,6 +2353,7 @@ pre.console-pre {
     refreshV2Activity();
     $('#v2AllStatesOutput').textContent = '（全部会话状态：空）';
     $('#v2StateOutput').textContent = '（空）';
+    syncAutoShow();
   });
 
   /* ================= 二代：状态 / 唤醒 ================= */
@@ -1892,6 +2362,7 @@ pre.console-pre {
     if (!key) { toast('请输入会话 key，或用上方白名单快速选择', { type: 'warn' }); return; }
     const r = await api('/api/socialV2/state?key=' + encodeURIComponent(key));
     $('#v2StateOutput').textContent = JSON.stringify(r, null, 2);
+    syncAutoShow();
   }
   $('#v2StateView').addEventListener('click', viewV2State);
   $('#v2ForceWake').addEventListener('click', async () => {
@@ -1906,6 +2377,7 @@ pre.console-pre {
   $('#v2StatesList').addEventListener('click', async () => {
     const r = await api('/api/socialV2/states');
     $('#v2AllStatesOutput').textContent = JSON.stringify(r.conversations || [], null, 2);
+    syncAutoShow();
   });
 
   async function loadV2SessionOptions() {
@@ -2013,13 +2485,14 @@ pre.console-pre {
   function renderV2ToolLog(entries) {
     const box = $('#v2ToolLogOutput');
     const list = entries || [];
-    if (!list.length) { box.innerHTML = '<div class="empty-tip">（空）</div>'; return; }
+    if (!list.length) { box.innerHTML = '<div class="empty-tip">（空）</div>'; syncAutoShow(); return; }
     let html = '<table class="tbl tbl-wide"><tr><th>时间</th><th>会话 key</th><th>工具名</th><th>状态</th><th>参数</th><th>错误信息</th></tr>';
     for (const e of list) {
       const time = e.time ? new Date(e.time).toLocaleString() : '-';
       html += '<tr><td>' + esc(time) + '</td><td>' + esc(e.key || '') + '</td><td>' + esc(e.tool || '-') + '</td><td>' + v2ToolLogStatus(e) + '</td><td>' + (e.type === 'call' ? v2ToolLogCell(e.args, e.tool) : '<span class="meta">-</span>') + '</td><td>' + (e.type === 'result' ? v2ToolLogCell(e.error) : '<span class="meta">-</span>') + '</td></tr>';
     }
     box.innerHTML = html + '</table>';
+    syncAutoShow();
   }
   function loadV2ToolLog() {
     return api('/api/socialV2/tool-log?limit=200')
@@ -2084,6 +2557,7 @@ pre.console-pre {
     }
     html += '</div></div>';
     box.innerHTML = html;
+    syncAutoShow();
   }
   function loadV2Memory() {
     const key = $('#v2MemoryKey').value.trim();
@@ -2201,6 +2675,7 @@ pre.console-pre {
     api('/api/socialV2/state?key=' + encodeURIComponent(key))
       .then(r => {
         $('#v2WakeStatusOutput').innerHTML = formatWakeStatus(r);
+        syncAutoShow();
         msg.textContent = r.ok ? '✅ 已加载' : ('❌ ' + (r.error || '失败'));
         msg.className = r.ok ? 'meta ok' : 'meta err';
       })
@@ -2215,6 +2690,7 @@ pre.console-pre {
   $('#v2FeedbackLoad').addEventListener('click', async () => {
     const r = await api('/api/socialV2/feedback');
     $('#v2FeedbackOutput').textContent = JSON.stringify(r.entries || [], null, 2);
+    syncAutoShow();
     toast('AI 反馈已加载');
   });
   $('#v2FeedbackClear').addEventListener('confirmed', async () => {
@@ -2222,7 +2698,7 @@ pre.console-pre {
     const msg = $('#v2FeedbackMsg');
     msg.textContent = r.ok ? '✅ 已清空' : ('❌ ' + (r.error || '失败'));
     msg.className = r.ok ? 'meta ok' : 'meta err';
-    if (r.ok) { $('#v2FeedbackOutput').textContent = '（空）'; toast('AI 反馈已清空', { type: 'warn' }); }
+    if (r.ok) { $('#v2FeedbackOutput').textContent = '（空）'; syncAutoShow(); toast('AI 反馈已清空', { type: 'warn' }); }
   });
 
   /* ================= 一代仿真参数 ================= */

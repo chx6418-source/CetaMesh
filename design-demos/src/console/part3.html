@@ -29,6 +29,14 @@
     while (box.children.length > 4) box.firstChild.remove();
   }
 
+  /* ================= 空输出框自动隐藏（不占版面） ================= */
+  function syncAutoShow() {
+    $$('.auto-show').forEach(el => {
+      const t = el.textContent.trim();
+      el.hidden = (t === '' || t === '（空）' || t === '（全部会话状态：空）');
+    });
+  }
+
   /* ================= 防误触：连点两次确认（代替 confirm 弹窗，用于静态按钮） ================= */
   function bindArm(btn) {
     if (!btn || btn.dataset.armBound) return;
@@ -145,7 +153,7 @@
     return res.json();
   }
 
-  /* ================= 模块导航 ================= */
+  /* ================= 模块导航 ================= */  /* ================= 模块导航 ================= */
   function go(module, silent) {
     $$('.module').forEach(m => { m.hidden = m.dataset.module !== module; });
     $$('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.module === module));
@@ -167,10 +175,12 @@
     b.textContent = t.label;
     b.dataset.theme = t.id;
     b.addEventListener('click', () => {
+      document.documentElement.classList.add('theme-anim');
       document.documentElement.dataset.theme = t.id;
       try { localStorage.setItem('consoleTheme', t.id); } catch (e) {}
       syncTheme();
       toast('主题已切换：' + t.label);
+      setTimeout(() => document.documentElement.classList.remove('theme-anim'), 400);
     });
     themeBox.appendChild(b);
   });
@@ -183,6 +193,183 @@
     if (saved && ['light', 'dark', 'warm'].indexOf(saved) >= 0) document.documentElement.dataset.theme = saved;
   } catch (e) {}
   syncTheme();
+
+  /* ================= 自定义下拉框（选项列表与主题统一） =================
+     保留原生 select（隐藏），所有读取 .value / change 监听的逻辑零改动；
+     触发按钮 + 玻璃糖果风弹出菜单，选择时回写 value 并派发 change。 */
+  const selMenu = document.createElement('div');
+  selMenu.className = 'sel-menu';
+  document.body.appendChild(selMenu);
+  let selMenuOwner = null, selMenuHl = -1;
+  function closeSelMenu() {
+    selMenu.classList.remove('open');
+    if (selMenuOwner) {
+      const w = selMenuOwner.closest('.sel-wrap');
+      if (w) w.classList.remove('open');
+    }
+    selMenuOwner = null; selMenuHl = -1;
+  }
+  function syncSelLabel(sel) {
+    const btn = sel._selBtn;
+    if (!btn) return;
+    const o = sel.options[sel.selectedIndex];
+    const t = o ? o.textContent : '';
+    if (btn._lastLabel !== t) { btn._lastLabel = t; btn.querySelector('span').textContent = t; }
+  }
+  function applySelValue(sel, v) {
+    if (sel.value !== v) {
+      sel.value = v;
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    syncSelLabel(sel);
+  }
+  function renderSelHl() {
+    [...selMenu.children].forEach((el, i) => el.classList.toggle('hl', i === selMenuHl));
+    const el = selMenu.children[selMenuHl];
+    if (el) el.scrollIntoView({ block: 'nearest' });
+  }
+  function openSelMenu(sel) {
+    closeSelMenu();
+    selMenuOwner = sel;
+    selMenu.innerHTML = '';
+    const cur = sel.value;
+    [...sel.options].forEach((o) => {
+      const item = document.createElement('div');
+      item.className = 'sel-item' + (o.value === cur ? ' checked' : '');
+      item.dataset.value = o.value;
+      item.textContent = o.textContent || ' ';
+      item.addEventListener('click', () => { closeSelMenu(); applySelValue(sel, o.value); });
+      selMenu.appendChild(item);
+    });
+    selMenu.classList.add('open');
+    selMenu.style.visibility = 'hidden';
+    // 宽度自适应最长选项：先按 max-content 量宽，再夹在触发框宽度与视口之间
+    selMenu.style.width = 'max-content';
+    selMenu.style.maxWidth = (window.innerWidth - 16) + 'px';
+    const wrap = sel.closest('.sel-wrap');
+    if (wrap) wrap.classList.add('open');
+    const r = sel._selBtn.getBoundingClientRect();
+    const natural = selMenu.offsetWidth;
+    const mw = Math.max(r.width, Math.min(natural, window.innerWidth - 16));
+    selMenu.style.width = mw + 'px';
+    selMenu.style.maxWidth = '';
+    const mh = selMenu.offsetHeight;
+    selMenu.style.left = Math.max(8, Math.min(r.left, window.innerWidth - mw - 8)) + 'px';
+    selMenu.style.top = (r.bottom + 6 + mh > window.innerHeight - 8 ? Math.max(8, r.top - mh - 6) : r.bottom + 6) + 'px';
+    selMenu.style.visibility = '';
+    const idx = [...sel.options].findIndex(o => o.value === cur);
+    selMenuHl = idx >= 0 ? idx : 0;
+    renderSelHl();
+  }
+  function chooseSelHl() {
+    const sel = selMenuOwner;
+    if (!sel || !selMenu.children[selMenuHl]) return;
+    const v = selMenu.children[selMenuHl].dataset.value;
+    closeSelMenu();
+    applySelValue(sel, v);
+  }
+  function beautifySelect(sel) {
+    if (sel.dataset.beautyBound) return;
+    sel.dataset.beautyBound = '1';
+    const wrap = document.createElement('div');
+    wrap.className = 'sel-wrap';
+    wrap.setAttribute('style', sel.getAttribute('style') || '');
+    sel.removeAttribute('style');
+    sel.classList.add('sel-native');
+    sel.parentNode.insertBefore(wrap, sel);
+    wrap.appendChild(sel);
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'sel-trigger';
+    btn.innerHTML = '<span></span>';
+    wrap.appendChild(btn);
+    sel._selBtn = btn;
+    syncSelLabel(sel);
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (selMenuOwner === sel) closeSelMenu(); else openSelMenu(sel);
+    });
+    btn.addEventListener('keydown', (e) => {
+      if (selMenuOwner === sel) {
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+          e.preventDefault();
+          const n = sel.options.length;
+          selMenuHl = (selMenuHl + (e.key === 'ArrowDown' ? 1 : -1) + n) % n;
+          renderSelHl();
+        } else if (e.key === 'Enter') { e.preventDefault(); chooseSelHl(); }
+        else if (e.key === 'Escape') closeSelMenu();
+      } else if (e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault(); openSelMenu(sel);
+      }
+    });
+  }
+  document.addEventListener('click', (e) => {
+    if (!selMenuOwner) return;
+    if (selMenu.contains(e.target) || (selMenuOwner._selBtn && selMenuOwner._selBtn.contains(e.target))) return;
+    closeSelMenu();
+  });
+  window.addEventListener('scroll', (e) => { if (e.target !== selMenu) closeSelMenu(); }, true);
+  window.addEventListener('resize', closeSelMenu);
+  $$('select').forEach(beautifySelect);
+  // 值被轮询等程序修改时，同步触发按钮上的显示
+  setInterval(() => { $$('select[data-beauty-bound]').forEach(syncSelLabel); }, 400);
+
+  /* ================= 模型配置 ================= */
+  const M = window.MOCK;
+  var modelList = $('#modelList');
+  M.models.forEach(function (m) {
+    var item = document.createElement('label');
+    item.className = 'model-item' + (m.tag === '当前' ? ' checked' : '');
+    item.innerHTML = '<input type="radio" name="model" value="' + m.id + '"' + (m.tag === '当前' ? ' checked' : '') + '>' +
+      '<span class="radio"></span><div><b>' + m.id + '</b><small>' + m.desc + '</small></div>' +
+      (m.tag ? '<span class="pill' + (m.tag === '当前' ? ' pill-accent' : '') + '">' + m.tag + '</span>' : '');
+    item.querySelector('input').addEventListener('change', function () {
+      $$('.model-item', modelList).forEach(function (x) { x.classList.remove('checked'); });
+      item.classList.add('checked');
+      toast('模型已切换为 <b>' + m.id + '</b>，对新回合生效');
+    });
+    modelList.appendChild(item);
+  });
+  $$('#effortSeg button').forEach(function (b) {
+    b.addEventListener('click', function () {
+      $$('#effortSeg button').forEach(function (x) { x.classList.remove('active'); });
+      b.classList.add('active');
+      toast('推理强度 → ' + b.textContent);
+    });
+  });
+  $('#dshCheck').addEventListener('click', function () {
+    var pill = $('#dshState');
+    pill.className = 'pill pill-warn'; pill.innerHTML = '<span class="dot pulse"></span>检测中…';
+    setTimeout(function () {
+      pill.className = 'pill pill-ok'; pill.innerHTML = '<span class="dot pulse"></span>在线 · 42ms';
+      toast('DSH 连通正常 · 42ms');
+    }, 700);
+  });
+  var bindBox = $('#modeBind');
+  function renderBind() {
+    bindBox.innerHTML = '';
+    M.modes.forEach(function (md) {
+      var opts = M.presets.map(function (p) {
+        return '<option value="' + p.id + '"' + (p.id === md.preset ? ' selected' : '') + '>' + p.id + '</option>';
+      }).join('');
+      var row = document.createElement('div');
+      row.className = 'row';
+      row.innerHTML = '<b class="mono" style="min-width:96px">' + md.id + '</b>' +
+        '<small style="flex:1;min-width:150px">' + md.desc + '</small>' +
+        '<select data-mode="' + md.id + '">' + opts + '</select>' +
+        '<span class="pill">' + md.scene + '</span>';
+      row.querySelector('select').addEventListener('change', function (e) {
+        md.preset = e.target.value;
+        toast('<b>' + md.id + '</b> 的预设已改为 <b>' + e.target.value + '</b>，即时生效');
+      });
+      bindBox.appendChild(row);
+    });
+  }
+  renderBind(); renderPresets();
+  $('#sendDelay').addEventListener('input', function () { $('#sendDelayOut').textContent = this.value + 'ms'; });
+  $('#sendDelay').addEventListener('change', function () { toast('发送间隔 → ' + this.value + 'ms'); });
+  $('#ackMessage').addEventListener('change', function () { toast(this.value ? '投递回执已开启' : '投递回执已关闭'); });
+  $('#splitSend').addEventListener('change', function () { toast('分句发送：' + (this.checked ? '开' : '关')); });
 
   /* ================= 状态轮询（核心刷新） ================= */
   const MODE_LABEL = { chat: '聊天模式', 'closed-agent': '封闭 Agent', reserved: '一代仿真', reserved2: '二代仿真' };
@@ -209,7 +396,17 @@
       $('#silentSwitch').checked = s.roleMode === 'silent';
       $('#activity').textContent = s.activity || '（空）';
       const presetSel = $('#closedPreset');
-      if (presetSel && document.activeElement !== presetSel) presetSel.value = s.closedAgentPreset || '';
+      if (presetSel && document.activeElement !== presetSel) {
+        const want = s.closedAgentPreset || '';
+        // 当前配置的预设不在 DSH 列表里时，动态补一项，避免下拉框显示空白
+        if (want && ![...presetSel.options].some(o => o.value === want)) {
+          const opt = document.createElement('option');
+          opt.value = want;
+          opt.textContent = want + '（当前配置）';
+          presetSel.insertBefore(opt, presetSel.options[1] || null);
+        }
+        presetSel.value = [...presetSel.options].some(o => o.value === want) ? want : '';
+      }
     } catch (e) {
       const dshPill = $('#pillDsh');
       dshPill.className = 'pill pill-err';
@@ -224,6 +421,10 @@
       const sel = $('#closedPreset');
       const prev = sel.value;
       sel.innerHTML = '';
+      const ph = document.createElement('option');
+      ph.value = '';
+      ph.textContent = '未设置（closed-agent 默认 router-standard）';
+      sel.appendChild(ph);
       for (const p of (r.presets || [])) {
         const opt = document.createElement('option');
         opt.value = p.id;
@@ -251,6 +452,22 @@
     const mode = active ? active.dataset.mode : 'chat';
     await saveMode(mode);
   });
+
+  /* ================= Agent 预设库（只读展示） ================= */
+  function renderPresets() {
+    const box = $('#presetRows');
+    if (!box) return;
+    box.innerHTML = '';
+    M.presets.forEach(function (p) {
+      const used = M.modes.some(function (md) { return md.preset === p.id; });
+      const row = document.createElement('div');
+      row.className = 'row';
+      row.innerHTML = '<div class="grow"><b class="mono">' + p.name + '</b><small>' + p.desc + '</small></div>' +
+        '<span class="pill">' + p.model + '</span><span class="pill">' + p.tools + ' 个工具</span>' +
+        (used ? '<span class="pill pill-accent">使用中</span>' : '<span class="pill">未挂载</span>');
+      box.appendChild(row);
+    });
+  }
 
   /* ================= 角色 / 静默 ================= */
   async function refreshRoles() {
@@ -654,6 +871,7 @@
     refreshV2Activity();
     $('#v2AllStatesOutput').textContent = '（全部会话状态：空）';
     $('#v2StateOutput').textContent = '（空）';
+    syncAutoShow();
   });
 
   /* ================= 二代：状态 / 唤醒 ================= */
@@ -662,6 +880,7 @@
     if (!key) { toast('请输入会话 key，或用上方白名单快速选择', { type: 'warn' }); return; }
     const r = await api('/api/socialV2/state?key=' + encodeURIComponent(key));
     $('#v2StateOutput').textContent = JSON.stringify(r, null, 2);
+    syncAutoShow();
   }
   $('#v2StateView').addEventListener('click', viewV2State);
   $('#v2ForceWake').addEventListener('click', async () => {
@@ -676,6 +895,7 @@
   $('#v2StatesList').addEventListener('click', async () => {
     const r = await api('/api/socialV2/states');
     $('#v2AllStatesOutput').textContent = JSON.stringify(r.conversations || [], null, 2);
+    syncAutoShow();
   });
 
   async function loadV2SessionOptions() {
@@ -783,13 +1003,14 @@
   function renderV2ToolLog(entries) {
     const box = $('#v2ToolLogOutput');
     const list = entries || [];
-    if (!list.length) { box.innerHTML = '<div class="empty-tip">（空）</div>'; return; }
+    if (!list.length) { box.innerHTML = '<div class="empty-tip">（空）</div>'; syncAutoShow(); return; }
     let html = '<table class="tbl tbl-wide"><tr><th>时间</th><th>会话 key</th><th>工具名</th><th>状态</th><th>参数</th><th>错误信息</th></tr>';
     for (const e of list) {
       const time = e.time ? new Date(e.time).toLocaleString() : '-';
       html += '<tr><td>' + esc(time) + '</td><td>' + esc(e.key || '') + '</td><td>' + esc(e.tool || '-') + '</td><td>' + v2ToolLogStatus(e) + '</td><td>' + (e.type === 'call' ? v2ToolLogCell(e.args, e.tool) : '<span class="meta">-</span>') + '</td><td>' + (e.type === 'result' ? v2ToolLogCell(e.error) : '<span class="meta">-</span>') + '</td></tr>';
     }
     box.innerHTML = html + '</table>';
+    syncAutoShow();
   }
   function loadV2ToolLog() {
     return api('/api/socialV2/tool-log?limit=200')
@@ -854,6 +1075,7 @@
     }
     html += '</div></div>';
     box.innerHTML = html;
+    syncAutoShow();
   }
   function loadV2Memory() {
     const key = $('#v2MemoryKey').value.trim();
@@ -971,6 +1193,7 @@
     api('/api/socialV2/state?key=' + encodeURIComponent(key))
       .then(r => {
         $('#v2WakeStatusOutput').innerHTML = formatWakeStatus(r);
+        syncAutoShow();
         msg.textContent = r.ok ? '✅ 已加载' : ('❌ ' + (r.error || '失败'));
         msg.className = r.ok ? 'meta ok' : 'meta err';
       })
@@ -985,6 +1208,7 @@
   $('#v2FeedbackLoad').addEventListener('click', async () => {
     const r = await api('/api/socialV2/feedback');
     $('#v2FeedbackOutput').textContent = JSON.stringify(r.entries || [], null, 2);
+    syncAutoShow();
     toast('AI 反馈已加载');
   });
   $('#v2FeedbackClear').addEventListener('confirmed', async () => {
@@ -992,7 +1216,7 @@
     const msg = $('#v2FeedbackMsg');
     msg.textContent = r.ok ? '✅ 已清空' : ('❌ ' + (r.error || '失败'));
     msg.className = r.ok ? 'meta ok' : 'meta err';
-    if (r.ok) { $('#v2FeedbackOutput').textContent = '（空）'; toast('AI 反馈已清空', { type: 'warn' }); }
+    if (r.ok) { $('#v2FeedbackOutput').textContent = '（空）'; syncAutoShow(); toast('AI 反馈已清空', { type: 'warn' }); }
   });
 
   /* ================= 一代仿真参数 ================= */

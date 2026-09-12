@@ -65,9 +65,51 @@
         </div>
       </article>
 
+      <article class="card c-6" id="cardModel">
+        <header class="card-head">
+          <h2><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 3 7v10l9 5 9-5V7z"/><path d="M12 12 3 7m9 5 9-5m-9 5v10"/></svg>模型选择</h2>
+          <span class="hint">对新回合立即生效</span>
+        </header>
+        <div class="card-body">
+          <div class="model-list" id="modelList"></div>
+          <div class="kv-row"><span>推理强度</span>
+            <div class="seg" id="effortSeg">
+              <button data-v="low">低</button><button data-v="medium" class="active">中</button><button data-v="high">高</button>
+            </div>
+            <small>reasoningEffort</small>
+          </div>
+        </div>
+      </article>
+
+      <article class="card c-12" id="cardBind">
+        <header class="card-head">
+          <h2><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 7H5a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h4m6-10h4a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2h-4M8 12h8"/></svg>运行模式 × Agent 预设绑定</h2>
+          <span class="hint">每个模式使用独立预设，下拉即改，无需保存</span>
+        </header>
+        <div class="card-body"><div class="rows" id="modeBind"></div></div>
+      </article>
+
+      <article class="card c-12" id="cardParams">
+        <header class="card-head">
+          <h2><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="2.6"/><circle cx="15" cy="17" r="2.6"/></svg>发送参数</h2>
+          <span class="hint">防风控与投递体验</span>
+        </header>
+        <div class="card-body">
+          <div class="c-6" style="grid-column: span 6; min-width: 260px;">
+            <div class="range-row"><span style="min-width:96px">发送间隔</span><input type="range" id="sendDelay" min="200" max="3000" step="100" value="800"><output id="sendDelayOut">800ms</output></div>
+            <div class="range-row"><span style="min-width:96px">音量增益</span><input type="range" id="volGainSlider2" min="0.5" max="8" step="0.1" value="1" hidden><output id="volGainOut2" hidden></output></div>
+          </div>
+          <div style="display:flex; flex-direction:column; gap:10px; flex:1; min-width:240px;">
+            <label class="field"><span>投递回执 ackMessage（留空关闭）</span><input type="text" id="ackMessage" value="" placeholder="例如：✅ 已收到"></label>
+            <div class="switch-row"><label class="switch"><input type="checkbox" id="splitSend" checked><span class="track"></span></label>按空格分句发送<small>一代仿真 reserved 生效</small></div>
+          </div>
+        </div>
+      </article>
+
       <article class="card c-6">
         <header class="card-head">
           <h2><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M5 12.5a10 10 0 0 1 14 0M8.5 16a5 5 0 0 1 7 0M12 19.5h.01"/><circle cx="12" cy="5" r="1.6"/></svg>连接与状态</h2>
+          <span class="pill pill-ok" id="dshState"><span class="dot pulse"></span>在线 · 42ms</span>
           <span class="pill" id="statusText">加载中…</span>
         </header>
         <div class="card-body">
@@ -75,7 +117,10 @@
           <div class="kv-row"><span>管理员 QQ</span><span id="ownerStatusText">-</span></div>
           <div class="kv-row"><span>群白名单</span><span id="groupsStatusText">-</span></div>
           <div class="kv-row"><span>私聊白名单</span><span id="privateStatusText">-</span></div>
-          <div class="meta">config.json 中 dsh.provider / model / reasoningEffort 决定会话使用的模型；修改请编辑配置文件或 DSH 设置页（本控制台不改后端）。</div>
+          <div class="row">
+            <button class="btn sm" id="dshCheck">检测连通</button>
+            <span class="meta">config.json 中 dsh.provider / model / reasoningEffort 决定会话使用的模型；修改请编辑配置文件或 DSH 设置页（本控制台不改后端）。</span>
+          </div>
         </div>
       </article>
 
@@ -149,6 +194,14 @@
       <p class="page-sub">角色人格、黑话用语库与一代 / 二代仿真行为参数</p>
     </div>
     <div class="grid">
+      <article class="card c-12" id="cardPresets">
+        <header class="card-head">
+          <h2><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="12" rx="3"/><path d="M12 8V4m-3 0h6"/></svg>Agent 预设库</h2>
+          <span class="hint">点击「编辑」右侧抽屉直接修改，保存即生效</span>
+        </header>
+        <div class="card-body"><div class="rows" id="presetRows"></div></div>
+      </article>
+
       <article class="card c-12">
         <header class="card-head">
           <h2><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6"/></svg>人格（角色扮演）</h2>
@@ -194,7 +247,7 @@
               <button id="slangBatchResearch" class="btn sm">批量送 DSH 深度研究</button>
               <button id="slangBatchConfirm" class="btn sm">批量确认（有含义）</button>
               <button id="slangBatchReject" class="btn sm">批量拒绝</button>
-              <button id="slangBatchDeleteCand" class="btn sm danger" data-confirm="确定删除选中的候选词？此操作不可恢复！">批量删除候选</button>
+              <button id="slangBatchDeleteCand" class="btn sm danger">批量删除候选</button>
               <button id="slangExtract" class="btn sm ghost">立即提取候选</button>
               <button id="slangResearch" class="btn sm ghost">研究全部候选</button>
             </div>
@@ -210,7 +263,7 @@
           <div class="slang-panel" id="slangPanelConfirmed">
             <div class="row">
               <label class="inline-label"><input type="checkbox" id="slangConfirmedSelectAll"> 全选</label>
-              <button id="slangBatchDeleteConfirmed" class="btn sm danger" data-confirm="确定删除选中的已确认黑话？此操作不可恢复！">批量删除已确认</button>
+              <button id="slangBatchDeleteConfirmed" class="btn sm danger">批量删除已确认</button>
             </div>
             <div class="row">
               <input type="text" id="slangSearchConfirmed" placeholder="搜索词条 / 含义 / 用法 / 示例 / 来源" style="flex:1">
@@ -225,7 +278,7 @@
             <div class="row">
               <label class="inline-label"><input type="checkbox" id="slangRejectedSelectAll"> 全选</label>
               <button id="slangBatchRestore" class="btn sm">恢复为候选</button>
-              <button id="slangBatchDeleteRejected" class="btn sm danger" data-confirm="确定删除选中的已拒绝词条？此操作不可恢复！">批量删除已拒绝</button>
+              <button id="slangBatchDeleteRejected" class="btn sm danger">批量删除已拒绝</button>
             </div>
             <div class="row">
               <input type="text" id="slangSearchRejected" placeholder="搜索词条 / 拒绝原因" style="flex:1">
@@ -324,7 +377,7 @@
                 <label class="inline-label"><input type="checkbox" id="v2RecQuestion"> 推荐提问唤醒</label>
                 <label class="inline-label"><input type="checkbox" id="v2RecPoke"> 推荐拍一拍唤醒</label>
               </div>
-              <label class="field"><span>唤醒推荐提示（给 AI 看的文字）</span><textarea id="v2WakeHint" rows="2" placeholder="例如：如果你在潜水，推荐 5~120 分钟、普通消息概率 0.05…"></textarea></div>
+              <label class="field"><span>唤醒推荐提示（给 AI 看的文字）</span><textarea id="v2WakeHint" rows="2" placeholder="例如：如果你在潜水，推荐 5~120 分钟、普通消息概率 0.05…"></textarea></label>
             </div>
           </details>
 
@@ -506,7 +559,7 @@
             <button id="v2ToolLogClear" class="btn sm danger" data-arm="确认清空？">清空工具日志</button>
             <span class="meta" id="v2ToolLogMsg"></span>
           </div>
-          <div id="v2ToolLogOutput" class="tbl-wrap">（空）</div>
+          <div id="v2ToolLogOutput" class="tbl-wrap auto-show" hidden>（空）</div>
         </div>
       </article>
 
@@ -525,8 +578,8 @@
             <button id="v2ForceWake" class="btn sm primary">立即唤醒</button>
             <button id="v2StatesList" class="btn sm ghost">列出全部会话状态</button>
           </div>
-          <pre class="console-pre" id="v2StateOutput">（空）</pre>
-          <pre class="console-pre" id="v2AllStatesOutput" style="max-height:260px">（全部会话状态：空）</pre>
+          <pre class="console-pre auto-show" id="v2StateOutput" hidden>（空）</pre>
+          <pre class="console-pre auto-show" id="v2AllStatesOutput" style="max-height:260px" hidden>（全部会话状态：空）</pre>
           <div class="divider"></div>
           <div class="sub-label">唤醒状态详情（AI 当前设置的下一次唤醒条件/倒计时）</div>
           <div class="row">
@@ -534,7 +587,7 @@
             <button id="v2WakeStatusLoad" class="btn sm">查看唤醒状态</button>
             <span class="meta" id="v2WakeStatusMsg"></span>
           </div>
-          <div class="tbl-wrap" id="v2WakeStatusOutput">（空）</div>
+          <div class="tbl-wrap auto-show" id="v2WakeStatusOutput" hidden>（空）</div>
         </div>
       </article>
 
@@ -549,7 +602,7 @@
             <button id="v2MemoryClearAll" class="btn sm danger" data-arm="确认清空？">清空全部</button>
           </div>
           <span class="meta" id="v2MemoryMsg"></span>
-          <div class="tbl-wrap" id="v2MemoryOutput">（空）</div>
+          <div class="tbl-wrap auto-show" id="v2MemoryOutput" hidden>（空）</div>
         </div>
       </article>
 
@@ -564,7 +617,7 @@
             <button id="v2FeedbackClear" class="btn sm danger" data-arm="确认清空？">清空 AI 反馈</button>
             <span class="meta" id="v2FeedbackMsg"></span>
           </div>
-          <pre class="console-pre" id="v2FeedbackOutput">（空）</pre>
+          <pre class="console-pre auto-show" id="v2FeedbackOutput" hidden>（空）</pre>
         </div>
       </article>
     </div>
