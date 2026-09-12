@@ -175,10 +175,6 @@ body.layout-sidebar .nav-btn, body.layout-rail .nav-btn { position: relative; z-
 .module { animation: moduleIn .34s cubic-bezier(.22, .9, .36, 1) both; }
 @keyframes moduleIn { from { opacity: 0; transform: translateY(12px); } }
 
-/* 主题切换时全局色彩平滑过渡（短暂开启，避免常驻开销） */
-html.theme-anim, html.theme-anim *, html.theme-anim *::before, html.theme-anim *::after {
-  transition: background-color .34s ease, color .34s ease, border-color .34s ease, box-shadow .34s ease, opacity .34s ease !important;
-}
 .nav-btn .nav-no { margin-left: auto; font-size: 10.5px; opacity: .6; font-family: var(--font-mono); }
 @media (max-width: 860px) {
   body { grid-template: "brand" auto "actions" auto "nav" auto "main" 1fr / 1fr; }
@@ -1733,12 +1729,10 @@ window.LOG_POOL = [
     b.textContent = t.label;
     b.dataset.theme = t.id;
     b.addEventListener('click', () => {
-      document.documentElement.classList.add('theme-anim');
       document.documentElement.dataset.theme = t.id;
       try { localStorage.setItem('consoleTheme', t.id); } catch (e) {}
       syncTheme();
       toast('主题已切换：' + t.label);
-      setTimeout(() => document.documentElement.classList.remove('theme-anim'), 400);
     });
     themeBox.appendChild(b);
   });

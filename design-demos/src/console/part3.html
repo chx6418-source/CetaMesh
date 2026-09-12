@@ -175,12 +175,10 @@
     b.textContent = t.label;
     b.dataset.theme = t.id;
     b.addEventListener('click', () => {
-      document.documentElement.classList.add('theme-anim');
       document.documentElement.dataset.theme = t.id;
       try { localStorage.setItem('consoleTheme', t.id); } catch (e) {}
       syncTheme();
       toast('主题已切换：' + t.label);
-      setTimeout(() => document.documentElement.classList.remove('theme-anim'), 400);
     });
     themeBox.appendChild(b);
   });

@@ -31,7 +31,7 @@ const mustHave = [
   'window.MOCK', 'LOG_POOL', 'id="modelList"', 'id="modeBind"', 'id="presetRows"', 'id="roleList"',
   'id="sessionList"', 'id="pendingList"', 'id="v2Tools"', 'id="modeRow"', 'id="closedPreset"',
   'id="v2ConfigSave"', 'id="roleSet"', 'id="restartBtn"', 'id="kugouQrLogin"', 'id="authOverlay"', 'id="themeSwitch"', 'id="toasts"', 'id="authOverlay"',
-  'data-arm=', 'moduleIn', 'theme-anim'
+  'data-arm=', 'moduleIn'
 ];
 const html = part1 + part2 + '\n<script>\n' + dataJs + '\n</script>\n' + part3;
 const lost = mustHave.filter((k) => !html.includes(k));
