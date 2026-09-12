@@ -17,6 +17,7 @@
   --radius: 26px; --radius-s: 16px; --nav-w: 240px;
   --spring: cubic-bezier(.3, 1.6, .5, 1);
   --candy-angle: 130deg;
+  interpolate-size: allow-keywords; /* 让 height:auto 可参与过渡（details 平滑展开） */
 }
 :root[data-theme="light"] {
   --candy-a: #d5e3ff; --candy-b: #ded7ff; --candy-c: #ccf1ef;
@@ -131,20 +132,25 @@ body > main { grid-area: main; padding: 82px 28px 70px; max-width: 1240px; width
 .status-strip { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
 
 .nav-btn {
+  position: relative; isolation: isolate;
   display: flex; align-items: center; gap: 9px; width: 100%;
   padding: 11px 16px; border: 0; background: transparent; color: var(--text-2);
   font: inherit; font-size: 13.5px; font-weight: 500; border-radius: 18px; cursor: pointer;
   transition: transform .16s var(--spring), box-shadow .18s ease, background .18s ease, color .18s ease;
   white-space: nowrap;
 }
+/* 高亮渐变画在伪元素上用 opacity 过渡（background-image 本身无法参与 transition） */
+.nav-btn::before {
+  content: ""; position: absolute; inset: 0; border-radius: inherit; z-index: -1;
+  background: linear-gradient(140deg, var(--accent), var(--accent-2));
+  box-shadow: 5px 7px 16px var(--accent-shadow), -3px -4px 10px var(--shadow-c2), inset 0 1.5px 0 rgba(255, 255, 255, .4);
+  opacity: 0; transition: opacity .18s ease;
+}
 .nav-btn svg { flex: none; }
 .nav-btn:hover { background: var(--hover); box-shadow: 4px 5px 12px var(--shadow-c1), -3px -4px 10px var(--shadow-c2), inset 0 1px 0 var(--edge-hi); }
 .nav-btn:active { transform: scale(.955); }
-.nav-btn.active {
-  background: linear-gradient(140deg, var(--accent), var(--accent-2));
-  color: var(--on-accent); font-weight: 600;
-  box-shadow: 5px 7px 16px var(--accent-shadow), -3px -4px 10px var(--shadow-c2), inset 0 1.5px 0 rgba(255, 255, 255, .4);
-}
+.nav-btn.active { color: var(--on-accent); font-weight: 600; }
+.nav-btn.active::before { opacity: 1; }
 /* 模型选择单选卡 */
 .model-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 8px; }
 @media (max-width: 900px) { .model-list { grid-template-columns: 1fr; } }
@@ -171,8 +177,11 @@ body > main { grid-area: main; padding: 82px 28px 70px; max-width: 1240px; width
 
 body.layout-sidebar .nav-btn, body.layout-rail .nav-btn { position: relative; z-index: 1; }
 
-/* 模块切换入场 */
-.module { animation: moduleIn .34s cubic-bezier(.22, .9, .36, 1) both; }
+/* 模块切换入场：页头与卡片依次浮入，避免整块一起硬切 */
+.module > * { animation: moduleIn .34s cubic-bezier(.22, .9, .36, 1) both; }
+.module > :nth-child(2) { animation-delay: .05s; }
+.module > :nth-child(3) { animation-delay: .1s; }
+.module > :nth-child(n+4) { animation-delay: .15s; }
 @keyframes moduleIn { from { opacity: 0; transform: translateY(12px); } }
 
 .nav-btn .nav-no { margin-left: auto; font-size: 10.5px; opacity: .6; font-family: var(--font-mono); }
@@ -363,18 +372,22 @@ input[type=range]:focus { box-shadow: none; }
 @keyframes pulse { 50% { opacity: .35; } }
 .chips { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .chip {
+  position: relative; isolation: isolate;
   display: inline-flex; align-items: center; gap: 7px; background: var(--chip); border: 0;
   border-radius: 999px; padding: 5px 14px; font: inherit; font-size: 12.5px; color: var(--text-2); cursor: pointer;
   box-shadow: 3px 4px 9px var(--shadow-c1), -2px -3px 7px var(--shadow-c2), inset 0 1px 0 var(--edge-hi);
   transition: transform .16s var(--spring), box-shadow .16s, background .16s, color .16s;
 }
+.chip::before {
+  content: ""; position: absolute; inset: 0; border-radius: inherit; z-index: -1;
+  background: linear-gradient(140deg, var(--accent), var(--accent-2));
+  box-shadow: 3px 5px 11px var(--accent-shadow), -2px -3px 7px var(--shadow-c2), inset 0 1px 0 rgba(255, 255, 255, .35);
+  opacity: 0; transition: opacity .16s ease;
+}
 .chip:hover { background: var(--hover); }
 .chip:active { transform: scale(.93); }
-.chip.active {
-  background: linear-gradient(140deg, var(--accent), var(--accent-2));
-  color: var(--on-accent); font-weight: 600;
-  box-shadow: 3px 5px 11px var(--accent-shadow), -2px -3px 7px var(--shadow-c2), inset 0 1px 0 rgba(255, 255, 255, .35);
-}
+.chip.active { color: var(--on-accent); font-weight: 600; }
+.chip.active::before { opacity: 1; }
 .chip .x { opacity: .55; font-style: normal; padding: 0 1px; }
 .chip .x:hover { opacity: 1; color: var(--err); }
 
@@ -385,16 +398,20 @@ input[type=range]:focus { box-shadow: none; }
   box-shadow: inset 2.5px 3px 8px var(--shadow-c1), inset -2px -3px 8px var(--shadow-c2);
 }
 .seg button {
+  position: relative; isolation: isolate;
   font: inherit; font-size: 12.5px; border: 0; background: transparent; color: var(--text-3);
   padding: 5px 14px; border-radius: 999px; cursor: pointer;
   transition: transform .16s var(--spring), background .18s, color .18s, box-shadow .18s;
 }
-.seg button:active { transform: scale(.93); }
-.seg button.active {
+.seg button::before {
+  content: ""; position: absolute; inset: 0; border-radius: inherit; z-index: -1;
   background: linear-gradient(140deg, var(--accent), var(--accent-2));
-  color: var(--on-accent); font-weight: 600;
   box-shadow: 3px 4px 9px var(--accent-shadow), -2px -3px 6px var(--shadow-c2), inset 0 1px 0 rgba(255, 255, 255, .35);
+  opacity: 0; transition: opacity .18s ease;
 }
+.seg button:active { transform: scale(.93); }
+.seg button.active { color: var(--on-accent); font-weight: 600; }
+.seg button.active::before { opacity: 1; }
 .mode-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
 .mode-tile {
   border: 0; border-radius: 18px; padding: 13px 15px; cursor: pointer; text-align: left;
@@ -422,6 +439,12 @@ details.group > summary::-webkit-details-marker { display: none; }
 details.group > summary::before { content: "▸"; color: var(--accent); transition: transform .18s; display: inline-block; }
 details.group[open] > summary::before { transform: rotate(90deg); }
 details.group > .group-body { padding: 2px 2px 12px; display: flex; flex-direction: column; gap: 10px; }
+/* 平滑展开/收起：高度从 0 过渡到 auto；不支持 ::details-content 的浏览器回退为直接展开 */
+details.group::details-content {
+  block-size: 0; overflow-y: clip; opacity: 0;
+  transition: block-size .32s cubic-bezier(.22, .9, .36, 1), opacity .22s ease, content-visibility .32s allow-discrete;
+}
+details.group[open]::details-content { block-size: auto; opacity: 1; }
 
 /* ---------- 表格 / 控制台输出 ---------- */
 .tbl-wrap { border-radius: 16px; background: var(--input-bg); overflow: auto; max-height: 460px; box-shadow: inset 3px 4px 10px var(--shadow-c1), inset -3px -4px 9px var(--shadow-c2); }
@@ -465,8 +488,11 @@ pre.console-pre {
   background: var(--input-bg);
   border-radius: 18px; padding: 4px 10px;
   box-shadow: inset 3px 4px 10px var(--shadow-c1), inset -3px -4px 9px var(--shadow-c2);
-  max-height: 460px; overflow-y: auto;
+  height: 460px; overflow-y: auto; /* 固定视口高度：筛选切换时下方卡片不再上下跳动 */
 }
+.log-list:has(> .empty-tip) { align-items: center; justify-content: center; }
+.log-list.swap > * { animation: logIn .26s cubic-bezier(.22, .9, .36, 1) both; animation-delay: calc(var(--i, 0) * 24ms); }
+@keyframes logIn { from { opacity: 0; transform: translateY(5px); } }
 .log-line { display: flex; gap: 12px; align-items: flex-start; padding: 9px 6px; border-bottom: 1px solid var(--border-soft); font-size: 12.5px; }
 .log-line:last-child { border-bottom: 0; }
 .log-line:hover { background: var(--hover); border-radius: 10px; }
@@ -530,15 +556,24 @@ pre.console-pre {
 /* ---------- 黑话面板 ---------- */
 .slang-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
 .slang-tab {
+  position: relative; isolation: isolate;
   font: inherit; font-size: 12.5px; border: 0; cursor: pointer; color: var(--text-3);
   background: var(--chip); border-radius: 999px; padding: 6px 15px;
   box-shadow: 3px 4px 9px var(--shadow-c1), -2px -3px 7px var(--shadow-c2), inset 0 1px 0 var(--edge-hi);
   transition: transform .16s var(--spring), background .18s, color .18s;
 }
+.slang-tab::before {
+  content: ""; position: absolute; inset: 0; border-radius: inherit; z-index: -1;
+  background: linear-gradient(140deg, var(--accent), var(--accent-2));
+  box-shadow: 3px 4px 9px var(--accent-shadow), -2px -3px 6px var(--shadow-c2);
+  opacity: 0; transition: opacity .18s ease;
+}
 .slang-tab:active { transform: scale(.93); }
-.slang-tab.active { background: linear-gradient(140deg, var(--accent), var(--accent-2)); color: var(--on-accent); font-weight: 600; box-shadow: 3px 4px 9px var(--accent-shadow), -2px -3px 6px var(--shadow-c2); }
+.slang-tab.active { color: var(--on-accent); font-weight: 600; }
+.slang-tab.active::before { opacity: 1; }
 .slang-panel { display: none; }
-.slang-panel.active { display: block; }
+.slang-panel.active { display: block; animation: panelIn .24s cubic-bezier(.22, .9, .36, 1); }
+@keyframes panelIn { from { opacity: 0; transform: translateY(6px); } }
 
 /* ---------- 弹窗（玻璃软糖） ---------- */
 .modal-overlay {
@@ -575,6 +610,11 @@ pre.console-pre {
 .toast.out { animation: toastOut .25s ease forwards; }
 @keyframes toastIn { from { opacity: 0; transform: translateY(12px) scale(.96); } }
 @keyframes toastOut { to { opacity: 0; transform: translateY(8px); } }
+
+/* 系统开启"减少动态效果"时，取消入场/过渡动画 */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+}
 .toast .undo { border: 0; background: transparent; color: var(--accent); font: inherit; font-size: 12.5px; cursor: pointer; font-weight: 600; padding: 2px 4px; }
 
 /* ---------- 主题切换 ---------- */
@@ -1468,7 +1508,7 @@ pre.console-pre {
     <h3>QQ 桥接控制台</h3>
     <div class="meta">输入控制台访问令牌后进入（config.json 的 consoleToken）</div>
     <div class="auth-field">
-      <span class="auth-key"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="14" r="4.5"/><path d="M11.5 10.5 20 2m-4 2 3 3m-6 0 3 3"/></svg></span>
+      <span class="auth-key"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg></span>
       <input type="password" id="authTokenInput" placeholder="输入控制台访问令牌" autocomplete="current-password">
       <button class="eye" id="authEye" type="button" title="显示/隐藏令牌">
         <svg id="authEyeOpen" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-6.5 10-6.5S22 12 22 12s-3.5 6.5-10 6.5S2 12 2 12z"/><circle cx="12" cy="12" r="2.8"/></svg>
@@ -1605,7 +1645,7 @@ window.LOG_POOL = [
     const token = qs.get('token');
     if (token) {
       localStorage.setItem('consoleToken', token);
-      history.replaceState({}, '', location.pathname);
+      history.replaceState({}, '', location.pathname + location.hash);
     }
   })();
 
@@ -1992,8 +2032,12 @@ window.LOG_POOL = [
       $$('#modeRow .mode-tile').forEach(b => b.classList.toggle('active', b.dataset.mode === s.mode));
       const modeLabel = MODE_LABEL[s.mode] || s.mode;
       const dshPill = $('#pillDsh');
-      dshPill.className = 'pill ' + (s.dshReady ? 'pill-ok' : 'pill-err');
-      dshPill.innerHTML = '<span class="dot' + (s.dshReady ? ' pulse' : '') + '"></span>DSH ' + (s.dshReady ? '在线' : '离线');
+      // 仅在状态真正变化时重写，避免每轮轮询重启呼吸灯动画造成闪烁
+      const dshHtml = '<span class="dot' + (s.dshReady ? ' pulse' : '') + '"></span>DSH ' + (s.dshReady ? '在线' : '离线');
+      if (dshPill.innerHTML !== dshHtml) {
+        dshPill.className = 'pill ' + (s.dshReady ? 'pill-ok' : 'pill-err');
+        dshPill.innerHTML = dshHtml;
+      }
       $('#pillMode').textContent = modeLabel;
       const silentPill = $('#pillSilent');
       silentPill.className = 'pill ' + (s.roleMode === 'silent' ? 'pill-warn' : '');
@@ -2007,8 +2051,11 @@ window.LOG_POOL = [
       $('#roleText').textContent = '当前：' + (s.role || '无');
       $('#roleModeText').textContent = s.roleMode === 'silent' ? '静默' : '正常';
       $('#silentSwitch').checked = s.roleMode === 'silent';
-      actRaw = s.activity || '';
-      if (!actPaused) renderActivity();
+      const newRaw = s.activity || '';
+      if (newRaw !== actRaw) {
+        actRaw = newRaw;
+        if (!actPaused) renderActivity(); // 内容没变化时跳过重建，避免轮询期无谓的重排抖动
+      }
       const presetSel = $('#closedPreset');
       if (presetSel && document.activeElement !== presetSel) {
         const want = s.closedAgentPreset || '';
@@ -2045,7 +2092,7 @@ window.LOG_POOL = [
       return { time: m[1], key: m[2], msg: msg, dir: classifyAct(msg) };
     });
   }
-  function renderActivity() {
+  function renderActivity(fx) {
     const list = $('#activityList');
     if (!list) return;
     const rows = actCleared ? [] : parseActivity(actRaw);
@@ -2059,23 +2106,26 @@ window.LOG_POOL = [
     list.innerHTML = '';
     if (!shown.length) {
       list.innerHTML = '<div class="empty-tip">' + (actCleared ? '已清空显示（不影响桥接日志文件）' : '（空）') + '</div>';
-      return;
+    } else {
+      shown.forEach(function (r, i) {
+        const line = document.createElement('div');
+        line.className = 'log-line' + (r.dir === 'err' ? ' is-err' : '');
+        line.innerHTML = '<span class="log-time">' + r.time + '</span>' +
+          '<span class="log-dir ' + r.dir + '">' + LABEL[r.dir] + '</span>' +
+          '<span class="log-msg">' + (r.key ? '<span class="who">' + esc(r.key) + '</span> ' : '') + esc(r.msg) + '</span>';
+        if (fx) line.style.setProperty('--i', Math.min(i, 10));
+        list.appendChild(line);
+      });
     }
-    shown.forEach(function (r) {
-      const line = document.createElement('div');
-      line.className = 'log-line' + (r.dir === 'err' ? ' is-err' : '');
-      line.innerHTML = '<span class="log-time">' + r.time + '</span>' +
-        '<span class="log-dir ' + r.dir + '">' + LABEL[r.dir] + '</span>' +
-        '<span class="log-msg">' + (r.key ? '<span class="who">' + esc(r.key) + '</span> ' : '') + esc(r.msg) + '</span>';
-      list.appendChild(line);
-    });
+    // 仅筛选/清空等主动操作带过渡；实时轮询刷新不重播动画
+    if (fx) { list.classList.remove('swap'); void list.offsetWidth; list.classList.add('swap'); }
   }
   $$('#activityFilter button').forEach(function (b) {
     b.addEventListener('click', function () {
       $$('#activityFilter button').forEach(function (x) { x.classList.remove('active'); });
       b.classList.add('active');
       actDir = b.dataset.v;
-      renderActivity();
+      renderActivity(true);
     });
   });
   $('#activitySearch').addEventListener('input', function () { actQuery = this.value; renderActivity(); });
@@ -2091,11 +2141,11 @@ window.LOG_POOL = [
   });
   $('#activityClear').addEventListener('click', function () {
     actCleared = true;
-    renderActivity();
+    renderActivity(true);
     toast('已清空日志显示（不影响桥接日志文件）', {
       type: 'warn',
       undoLabel: '撤销',
-      undo: function () { actCleared = false; renderActivity(); }
+      undo: function () { actCleared = false; renderActivity(true); }
     });
   });
   renderActivity();
@@ -2155,11 +2205,15 @@ window.LOG_POOL = [
   }
 
   /* ================= 会话状态卡（实时） ================= */
+  let ssCache = '';
   async function renderSessionStates() {
     const box = $('#ssRows');
     if (!box) return;
     const sessions = window.__sess || [];
-    if (!sessions.length) { box.innerHTML = '<div class="empty-tip">暂无活跃会话</div>'; return; }
+    if (!sessions.length) {
+      if (ssCache !== 'empty') { ssCache = 'empty'; box.innerHTML = '<div class="empty-tip">暂无活跃会话</div>'; }
+      return;
+    }
     let v2map = {};
     try {
       const r = await api('/api/socialV2/states');
@@ -2167,8 +2221,7 @@ window.LOG_POOL = [
     } catch (e) {}
     const owner = String(window.__ownerQQ || '');
     const palette = ['#6366f1', '#10b981', '#f59e0b', '#ec4899', '#06b6d4', '#8b5cf6'];
-    box.innerHTML = '';
-    sessions.forEach(function (x) {
+    const rows = sessions.map(function (x) {
       const isP = x.key.indexOf('private:') === 0;
       const idPart = x.key.split(':')[1] || '';
       const isOwner = owner && idPart === owner;
@@ -2189,16 +2242,24 @@ window.LOG_POOL = [
         } else { cls = 'wait'; label = '待唤醒'; }
       } else if (wc.infinite) { cls = 'sleep'; label = '潜水中'; }
       if (unread > 0 && cls !== 'sleep') { cls = 'wait'; label = '待回答'; }
-      const row = document.createElement('div');
-      row.className = 'ss-row';
-      row.innerHTML = '<span class="ss-avatar" style="background:' + color + '">' + name.slice(0, 1) +
+      return { key: x.key, html: '<span class="ss-avatar" style="background:' + color + '">' + name.slice(0, 1) +
         (unread ? '<span class="unread">' + unread + '</span>' : '') + '</span>' +
         '<div class="ss-info"><b>' + name + '</b><small>' + (isP ? '私聊' : '群聊') + ' · ' + x.key + '</small></div>' +
         '<div class="ss-side"><span class="ss-state ' + cls + '">' + label + '</span>' +
         '<div class="ss-btns">' +
         (v2map[x.key] ? '<button class="btn sm" data-ss-wake="' + x.key + '">唤醒</button>' : '') +
         '<button class="btn sm ghost" data-ss-reset="' + x.key + '">重置</button>' +
-        '</div></div>';
+        '</div></div>' };
+    });
+    // 内容没变化时跳过重建，避免每轮轮询整卡重绘
+    const sig = rows.map(function (r) { return r.key + '|' + r.html; }).join('\n');
+    if (sig === ssCache) return;
+    ssCache = sig;
+    box.innerHTML = '';
+    rows.forEach(function (r) {
+      const row = document.createElement('div');
+      row.className = 'ss-row';
+      row.innerHTML = r.html;
       box.appendChild(row);
     });
     box.querySelectorAll('[data-ss-wake]').forEach(function (btn) {
