@@ -354,15 +354,17 @@
       }).join('');
       var row = document.createElement('div');
       row.className = 'row';
-      row.innerHTML = '<b class="mono" style="min-width:96px">' + md.id + '</b>' +
-        '<small style="flex:1;min-width:150px">' + md.desc + '</small>' +
-        '<select data-mode="' + md.id + '">' + opts + '</select>' +
-        '<span class="pill">' + md.scene + '</span>';
+      row.className = 'row bind-row';
+      row.innerHTML = '<b class="mono" style="width:112px;flex:none">' + md.id + '</b>' +
+        '<small style="flex:1;min-width:140px">' + md.desc + '</small>' +
+        '<select data-mode="' + md.id + '" style="width:230px;flex:none">' + opts + '</select>' +
+        '<span class="pill" style="min-width:78px;justify-content:center">' + md.scene + '</span>';
       row.querySelector('select').addEventListener('change', function (e) {
         md.preset = e.target.value;
         toast('<b>' + md.id + '</b> 的预设已改为 <b>' + e.target.value + '</b>，即时生效');
       });
       bindBox.appendChild(row);
+      if (typeof beautifySelect === 'function') beautifySelect(row.querySelector('select'));
     });
   }
   renderBind(); renderPresets();

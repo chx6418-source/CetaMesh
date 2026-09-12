@@ -146,7 +146,8 @@ body > main { grid-area: main; padding: 82px 28px 70px; max-width: 1240px; width
   box-shadow: 5px 7px 16px var(--accent-shadow), -3px -4px 10px var(--shadow-c2), inset 0 1.5px 0 rgba(255, 255, 255, .4);
 }
 /* 模型选择单选卡 */
-.model-list { display: flex; flex-direction: column; gap: 8px; }
+.model-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 8px; }
+@media (max-width: 900px) { .model-list { grid-template-columns: 1fr; } }
 .model-item {
   position: relative; display: flex; align-items: center; gap: 10px; cursor: pointer;
   border: 1px solid var(--border); border-radius: var(--radius-s, 14px);
@@ -163,6 +164,10 @@ body > main { grid-area: main; padding: 82px 28px 70px; max-width: 1240px; width
 .model-item small { color: var(--text-3); font-size: 11.5px; display: block; margin-top: 1px; }
 .model-item > div { flex: 1; min-width: 0; }
 .model-item .pill { margin-left: auto; flex: none; }
+
+/* 绑定行：显示框之间留出呼吸间距 */
+#modeBind .row { padding: 14px 4px; }
+#modeBind .sel-trigger { min-height: 40px; }
 
 body.layout-sidebar .nav-btn, body.layout-rail .nav-btn { position: relative; z-index: 1; }
 
@@ -608,7 +613,7 @@ pre.console-pre {
         </div>
       </article>
 
-      <article class="card c-6" id="cardModel">
+      <article class="card c-12" id="cardModel">
         <header class="card-head">
           <h2><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 3 7v10l9 5 9-5V7z"/><path d="M12 12 3 7m9 5 9-5m-9 5v10"/></svg>模型选择</h2>
           <span class="hint">对新回合立即生效</span>
@@ -1836,15 +1841,17 @@ window.LOG_POOL = [
       }).join('');
       var row = document.createElement('div');
       row.className = 'row';
-      row.innerHTML = '<b class="mono" style="min-width:96px">' + md.id + '</b>' +
-        '<small style="flex:1;min-width:150px">' + md.desc + '</small>' +
-        '<select data-mode="' + md.id + '">' + opts + '</select>' +
-        '<span class="pill">' + md.scene + '</span>';
+      row.className = 'row bind-row';
+      row.innerHTML = '<b class="mono" style="width:112px;flex:none">' + md.id + '</b>' +
+        '<small style="flex:1;min-width:140px">' + md.desc + '</small>' +
+        '<select data-mode="' + md.id + '" style="width:230px;flex:none">' + opts + '</select>' +
+        '<span class="pill" style="min-width:78px;justify-content:center">' + md.scene + '</span>';
       row.querySelector('select').addEventListener('change', function (e) {
         md.preset = e.target.value;
         toast('<b>' + md.id + '</b> 的预设已改为 <b>' + e.target.value + '</b>，即时生效');
       });
       bindBox.appendChild(row);
+      if (typeof beautifySelect === 'function') beautifySelect(row.querySelector('select'));
     });
   }
   renderBind(); renderPresets();
