@@ -370,6 +370,17 @@
   renderBind(); renderPresets();
   $('#sendDelay').addEventListener('input', function () { $('#sendDelayOut').textContent = this.value + 'ms'; });
   $('#sendDelay').addEventListener('change', function () { toast('发送间隔 → ' + this.value + 'ms'); });
+  $('#volumeGain').addEventListener('input', function () {
+    $('#volumeGainOut').textContent = Number(this.value).toFixed(1) + 'x';
+  });
+  $('#volumeGain').addEventListener('change', function () {
+    const g = Number(this.value);
+    api('/api/fileSend', 'POST', { volumeGain: g }).then(function (r) {
+      toast(r.ok ? '音量增益已保存（' + g.toFixed(1) + 'x，与文件/音频发送同步）' : '❌ ' + (r.error || '保存失败'));
+      const fs2 = $('#fsGainSlider'); if (fs2) fs2.value = g;
+      const fo = $('#fsGainVal'); if (fo) fo.textContent = g.toFixed(1) + 'x';
+    }).catch(function () { toast('保存失败', { type: 'err' }); });
+  });
   $('#ackMessage').addEventListener('change', function () { toast(this.value ? '投递回执已开启' : '投递回执已关闭'); });
   $('#splitSend').addEventListener('change', function () { toast('分句发送：' + (this.checked ? '开' : '关')); });
 
@@ -1690,6 +1701,8 @@
       const g = Number(fs.volumeGain) || 1;
       $('#fsGainSlider').value = g;
       $('#fsGainVal').textContent = g.toFixed(1) + 'x';
+      const vg = $('#volumeGain');
+      if (vg) { vg.value = g; $('#volumeGainOut').textContent = g.toFixed(1) + 'x'; }
     } catch (e) {}
   }
   $('#fsGainSlider')?.addEventListener('input', (e) => {
