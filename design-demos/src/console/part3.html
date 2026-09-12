@@ -1,0 +1,1631 @@
+<script>
+(function () {
+  'use strict';
+
+  /* ================= 基础工具 ================= */
+  const $ = (s, r) => (r || document).querySelector(s);
+  const $$ = (s, r) => Array.prototype.slice.call((r || document).querySelectorAll(s));
+  function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+
+  // 通过 ?token= 进入（控制台启用鉴权时根路径会重定向带 token），存到 localStorage
+  (() => {
+    const qs = new URLSearchParams(location.search);
+    const token = qs.get('token');
+    if (token) {
+      localStorage.setItem('consoleToken', token);
+      history.replaceState({}, '', location.pathname);
+    }
+  })();
+
+  /* ================= Toast（代替 alert） ================= */
+  function toast(msg, opts) {
+    opts = opts || {};
+    const box = $('#toasts');
+    const t = document.createElement('div');
+    t.className = 'toast ' + (opts.type || '');
+    t.innerHTML = '<span>' + msg + '</span>';
+    box.appendChild(t);
+    setTimeout(() => { t.classList.add('out'); setTimeout(() => t.remove(), 260); }, opts.ms || 3400);
+    while (box.children.length > 4) box.firstChild.remove();
+  }
+
+  /* ================= 防误触：连点两次确认（代替 confirm 弹窗，用于静态按钮） ================= */
+  function bindArm(btn) {
+    if (!btn || btn.dataset.armBound) return;
+    btn.dataset.armBound = '1';
+    let timer = null;
+    btn.addEventListener('click', () => {
+      if (btn.classList.contains('armed')) {
+        clearTimeout(timer);
+        btn.classList.remove('armed');
+        btn.textContent = btn.dataset.orig;
+        btn.dispatchEvent(new CustomEvent('confirmed'));
+      } else {
+        btn.dataset.orig = btn.textContent;
+        btn.classList.add('armed');
+        btn.textContent = btn.dataset.arm || '再点一次确认';
+        timer = setTimeout(() => { btn.classList.remove('armed'); btn.textContent = btn.dataset.orig; }, 2800);
+      }
+    });
+  }
+  $$('[data-arm]').forEach(bindArm);
+
+  /* ================= 通用确认弹窗（动态列表操作用） ================= */
+  function confirmBox(text, okLabel) {
+    return new Promise((resolve) => {
+      const overlay = $('#confirmOverlay'), ok = $('#confirmOk'), cancel = $('#confirmCancel');
+      $('#confirmText').textContent = text || '确定执行该操作？';
+      ok.textContent = okLabel || '确认';
+      overlay.classList.add('open');
+      const done = (v) => {
+        overlay.classList.remove('open');
+        ok.removeEventListener('click', onOk);
+        cancel.removeEventListener('click', onCancel);
+        overlay.removeEventListener('click', onOutside);
+        resolve(v);
+      };
+      function onOk() { done(true); }
+      function onCancel() { done(false); }
+      function onOutside(e) { if (e.target === overlay) done(false); }
+      ok.addEventListener('click', onOk);
+      cancel.addEventListener('click', onCancel);
+      overlay.addEventListener('click', onOutside);
+    });
+  }
+
+  /* ================= 输入弹窗（代替 prompt，用于记忆编辑） ================= */
+  function promptModal(title, value) {
+    return new Promise((resolve) => {
+      const overlay = $('#memEditOverlay'), input = $('#memEditInput'), ok = $('#memEditSave'), cancel = $('#memEditCancel');
+      $('#memEditTitle').textContent = title || '编辑';
+      input.value = value || '';
+      overlay.classList.add('open');
+      setTimeout(() => { input.focus(); input.select(); }, 60);
+      const done = (v) => {
+        overlay.classList.remove('open');
+        ok.removeEventListener('click', onOk);
+        cancel.removeEventListener('click', onCancel);
+        overlay.removeEventListener('click', onOutside);
+        input.removeEventListener('keydown', onKey);
+        resolve(v);
+      };
+      function onOk() { done(input.value); }
+      function onCancel() { done(null); }
+      function onOutside(e) { if (e.target === overlay) done(null); }
+      function onKey(e) { if (e.key === 'Enter') onOk(); }
+      ok.addEventListener('click', onOk);
+      cancel.addEventListener('click', onCancel);
+      overlay.addEventListener('click', onOutside);
+      input.addEventListener('keydown', onKey);
+    });
+  }
+
+  /* ================= 鉴权（401 时弹出，代替 prompt 循环） ================= */
+  let authPromise = null;
+  function requestToken() {
+    if (authPromise) return authPromise;
+    authPromise = new Promise((resolve) => {
+      const overlay = $('#authOverlay'), input = $('#authTokenInput'), ok = $('#authOk'), msg = $('#authMsg');
+      msg.textContent = '';
+      input.value = '';
+      overlay.classList.add('open');
+      setTimeout(() => input.focus(), 60);
+      const done = (v) => {
+        overlay.classList.remove('open');
+        authPromise = null;
+        ok.removeEventListener('click', onOk);
+        input.removeEventListener('keydown', onKey);
+        resolve(v);
+      };
+      function onOk() {
+        const v = input.value.trim();
+        if (!v) { msg.textContent = '请输入令牌'; return; }
+        done(v);
+      }
+      function onKey(e) { if (e.key === 'Enter') onOk(); }
+      ok.addEventListener('click', onOk);
+      input.addEventListener('keydown', onKey);
+    });
+    return authPromise;
+  }
+
+  /* ================= API（沿用原鉴权协议：x-console-token） ================= */
+  async function api(path, method, body, _retried = 0) {
+    const headers = body ? { 'content-type': 'application/json' } : {};
+    const token = localStorage.getItem('consoleToken');
+    if (token) headers['x-console-token'] = token;
+    const res = await fetch(path, { method: method || 'GET', headers, body: body ? JSON.stringify(body) : undefined });
+    if (res.status === 401) {
+      if (_retried >= 2) throw new Error('未授权');
+      const t = await requestToken();
+      if (!t) throw new Error('未授权');
+      localStorage.setItem('consoleToken', t);
+      return api(path, method, body, _retried + 1);
+    }
+    return res.json();
+  }
+
+  /* ================= 模块导航 ================= */
+  function go(module, silent) {
+    $$('.module').forEach(m => { m.hidden = m.dataset.module !== module; });
+    $$('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.module === module));
+    if (!silent) { try { history.replaceState(null, '', '#' + module); } catch (e) {} }
+    window.scrollTo({ top: 0, behavior: silent ? 'auto' : 'smooth' });
+  }
+  $$('.nav-btn').forEach(b => b.addEventListener('click', () => go(b.dataset.module)));
+  const hash = (location.hash || '').replace('#', '');
+  go(['models', 'agents', 'logs', 'settings'].indexOf(hash) >= 0 ? hash : 'models', true);
+
+  /* ================= 主题切换（苏打 / 深海 / 护眼） ================= */
+  const themeBox = $('#themeSwitch');
+  [
+    { id: 'light', label: '苏打' },
+    { id: 'dark', label: '深海' },
+    { id: 'warm', label: '护眼' }
+  ].forEach(t => {
+    const b = document.createElement('button');
+    b.textContent = t.label;
+    b.dataset.theme = t.id;
+    b.addEventListener('click', () => {
+      document.documentElement.dataset.theme = t.id;
+      try { localStorage.setItem('consoleTheme', t.id); } catch (e) {}
+      syncTheme();
+      toast('主题已切换：' + t.label);
+    });
+    themeBox.appendChild(b);
+  });
+  function syncTheme() {
+    const cur = document.documentElement.dataset.theme;
+    $$('button', themeBox).forEach(b => b.classList.toggle('active', b.dataset.theme === cur));
+  }
+  try {
+    const saved = localStorage.getItem('consoleTheme');
+    if (saved && ['light', 'dark', 'warm'].indexOf(saved) >= 0) document.documentElement.dataset.theme = saved;
+  } catch (e) {}
+  syncTheme();
+
+  /* ================= 状态轮询（核心刷新） ================= */
+  const MODE_LABEL = { chat: '聊天模式', 'closed-agent': '封闭 Agent', reserved: '一代仿真', reserved2: '二代仿真' };
+  async function refresh() {
+    try {
+      const s = await api('/api/status');
+      $$('#modeRow .mode-tile').forEach(b => b.classList.toggle('active', b.dataset.mode === s.mode));
+      const modeLabel = MODE_LABEL[s.mode] || s.mode;
+      const dshPill = $('#pillDsh');
+      dshPill.className = 'pill ' + (s.dshReady ? 'pill-ok' : 'pill-err');
+      dshPill.innerHTML = '<span class="dot' + (s.dshReady ? ' pulse' : '') + '"></span>DSH ' + (s.dshReady ? '在线' : '离线');
+      $('#pillMode').textContent = modeLabel;
+      const silentPill = $('#pillSilent');
+      silentPill.className = 'pill ' + (s.roleMode === 'silent' ? 'pill-warn' : '');
+      silentPill.textContent = s.roleMode === 'silent' ? '静默中' : '正常';
+      $('#pillOwner').textContent = 'Owner ' + (s.ownerQQ || '未设置');
+      $('#statusText').textContent = modeLabel + ' · 角色: ' + (s.role || '无');
+      $('#dshReadyText').innerHTML = (s.dshReady ? '<span class="ok-text">在线</span>' : '<span class="err-text">离线</span>') + ' · 模式 ' + esc(modeLabel);
+      $('#ownerStatusText').textContent = s.ownerQQ || '未设置（fail-closed）';
+      $('#groupsStatusText').textContent = (s.allowGroups || []).join(', ') || '无';
+      $('#privateStatusText').textContent = (s.allowPrivate || []).join(', ') || '无';
+      $('#roleText').textContent = '当前：' + (s.role || '无');
+      $('#roleModeText').textContent = s.roleMode === 'silent' ? '静默' : '正常';
+      $('#silentSwitch').checked = s.roleMode === 'silent';
+      $('#activity').textContent = s.activity || '（空）';
+      const presetSel = $('#closedPreset');
+      if (presetSel && document.activeElement !== presetSel) presetSel.value = s.closedAgentPreset || '';
+    } catch (e) {
+      const dshPill = $('#pillDsh');
+      dshPill.className = 'pill pill-err';
+      dshPill.textContent = '桥接连接失败';
+      $('#statusText').textContent = '连接失败';
+    }
+  }
+
+  async function refreshPresets() {
+    try {
+      const r = await api('/api/presets');
+      const sel = $('#closedPreset');
+      const prev = sel.value;
+      sel.innerHTML = '';
+      for (const p of (r.presets || [])) {
+        const opt = document.createElement('option');
+        opt.value = p.id;
+        opt.textContent = p.id + (p.trust === 'user' ? '（用户）' : '');
+        sel.appendChild(opt);
+      }
+      if (prev && [...sel.options].some(o => o.value === prev)) sel.value = prev;
+      refresh();
+    } catch (e) {}
+  }
+
+  async function saveMode(mode) {
+    const preset = $('#closedPreset').value || 'router-standard';
+    const r = await api('/api/mode', 'POST', { mode, closedAgentPreset: preset });
+    if (r.ok) { refresh(); toast('运行模式 → <b>' + esc(MODE_LABEL[mode] || mode) + '</b>，桥接 5 秒内感知'); }
+    else toast('❌ ' + esc(r.error || '切换失败'), { type: 'err' });
+    return r;
+  }
+  $$('#modeRow .mode-tile').forEach(b => b.addEventListener('click', async () => {
+    if (b.classList.contains('active')) return;
+    await saveMode(b.dataset.mode);
+  }));
+  $('#closedPreset').addEventListener('change', async () => {
+    const active = $('#modeRow .mode-tile.active');
+    const mode = active ? active.dataset.mode : 'chat';
+    await saveMode(mode);
+  });
+
+  /* ================= 角色 / 静默 ================= */
+  async function refreshRoles() {
+    try {
+      const r = await api('/api/roles');
+      const box = $('#roleList');
+      box.innerHTML = '';
+      if (!(r.roles || []).length) { box.innerHTML = '<span class="meta">暂无角色，可在下方新建</span>'; return; }
+      for (const name of r.roles) {
+        const tag = document.createElement('button');
+        tag.type = 'button';
+        tag.className = 'chip' + (name === r.current ? ' active' : '');
+        tag.textContent = name;
+        tag.addEventListener('click', async () => {
+          const res = await api('/api/role', 'POST', { role: name });
+          if (!res.ok) toast('❌ ' + esc(res.error || '切换失败'), { type: 'err' });
+          else toast('角色已切换为 <b>' + esc(name) + '</b>');
+          refreshRoles(); refresh();
+        });
+        box.appendChild(tag);
+      }
+    } catch (e) { $('#roleList').innerHTML = '<span class="meta">加载失败</span>'; }
+  }
+  $('#roleSet').addEventListener('click', async () => {
+    const name = $('#roleInput').value.trim();
+    if (!name) { toast('请输入角色名，或直接点击上方角色', { type: 'warn' }); return; }
+    const r = await api('/api/role', 'POST', { role: name });
+    if (r.ok) { toast('角色已设置为 <b>' + esc(name) + '</b>'); $('#roleInput').value = ''; }
+    else toast('❌ ' + esc(r.error || '设置失败'), { type: 'err' });
+    refreshRoles(); refresh();
+  });
+  $('#roleClear').addEventListener('click', async () => {
+    await api('/api/role', 'POST', { role: null });
+    toast('已清除角色扮演');
+    refreshRoles(); refresh();
+  });
+  $('#roleCreate').addEventListener('click', async () => {
+    const name = $('#newRoleName').value.trim();
+    const content = $('#newRoleContent').value.trim();
+    if (!name) { toast('请填写角色名', { type: 'warn' }); return; }
+    const r = await api('/api/roles/create', 'POST', { name, content });
+    const msg = $('#roleCreateMsg');
+    msg.textContent = r.ok ? '✅ 已创建' : ('❌ ' + (r.error || '失败'));
+    msg.className = r.ok ? 'meta ok' : 'meta err';
+    if (r.ok) {
+      toast('人格 <b>' + esc(name) + '</b> 已创建');
+      $('#newRoleName').value = ''; $('#newRoleContent').value = '';
+      refreshRoles();
+    }
+  });
+  $('#silentSwitch').addEventListener('change', async (e) => {
+    const r = await api('/api/role-mode', 'POST', { mode: e.target.checked ? 'silent' : 'active' });
+    if (r && r.ok === false) toast('❌ ' + esc(r.error || '操作失败'), { type: 'err' });
+    else toast(e.target.checked ? '已开启静默：群友消息不投递 agent' : '已恢复正常', { type: e.target.checked ? 'warn' : 'ok' });
+    refresh();
+  });
+
+  /* ================= 会话映射 / 挂起 ================= */
+  async function refreshSessions() {
+    try {
+      const s = await api('/api/sessions');
+      const box = $('#sessionList');
+      if (!s.sessions.length) { box.innerHTML = '<div class="empty-tip">暂无会话</div>'; return; }
+      let html = '<table class="tbl"><tr><th>QQ 会话</th><th>DSH 会话 ID</th><th>类型</th><th></th></tr>';
+      for (const x of s.sessions) {
+        const isP = x.key.startsWith('private:');
+        const type = isP ? '<span class="pill pill-accent">私聊</span>' : '<span class="pill pill-ok">群</span>';
+        const ownerTag = x.owner ? ' <span class="pill pill-warn">管理员</span>' : '';
+        html += '<tr><td>' + esc(x.key) + ownerTag + '</td><td><code>' + esc(x.sessionId) + '</code></td><td>' + type + '</td><td><button class="btn sm" data-reset-key="' + esc(x.key) + '">清除上下文</button></td></tr>';
+      }
+      box.innerHTML = html + '</table>';
+      box.querySelectorAll('[data-reset-key]').forEach(btn => btn.addEventListener('click', async () => {
+        if (!await confirmBox('确定清除该会话的上下文？下次消息将开新会话。')) return;
+        const r = await api('/api/session/reset', 'POST', { key: btn.dataset.resetKey });
+        toast(r.ok ? '✅ 已清除上下文' : ('❌ ' + esc(r.error || '失败')), { type: r.ok ? 'ok' : 'err' });
+        refreshSessions();
+      }));
+    } catch (e) {}
+  }
+
+  async function refreshPending() {
+    try {
+      const p = await api('/api/pending');
+      const box = $('#pendingList');
+      if (!p.pending.length) { box.innerHTML = '<div class="empty-tip">无挂起请求 ✨</div>'; return; }
+      let html = '<div class="list-rows">';
+      for (const x of p.pending) {
+        const kind = x.kind === 'approval' ? '<span class="pill pill-err">审批</span>' : '<span class="pill pill-accent">提问</span>';
+        let detail = '';
+        if (x.kind === 'approval') detail = esc(x.toolName) + (x.reason ? '：' + esc(x.reason) : '');
+        else if (x.questions) detail = x.questions.map(q => esc(q.question)).join(' / ');
+        html += '<div class="list-row"><code>' + esc(x.key) + '</code>' + kind + '<div class="grow"><small>' + detail + '</small></div></div>';
+      }
+      box.innerHTML = html + '</div>';
+    } catch (e) {}
+  }
+
+  /* ================= 白名单 / 安全 ================= */
+  async function refreshWhitelist() {
+    try {
+      const w = await api('/api/whitelist');
+      $('#wlGroups').value = (w.allow.groups || []).join(', ');
+      $('#wlPrivate').value = (w.allow.private || []).join(', ');
+      $('#ownerQQ').value = w.ownerQQ != null ? String(w.ownerQQ) : '';
+      $('#dnGroups').value = (w.deny.groups || []).join(', ');
+      $('#dnPrivate').value = (w.deny.private || []).join(', ');
+    } catch (e) {}
+  }
+  $('#wlSave').addEventListener('click', async () => {
+    const parse = (s) => s.split(/[,，\s]+/).map(x => x.trim()).filter(Boolean).map(Number).filter(Number.isFinite);
+    const r = await api('/api/whitelist', 'POST', {
+      allow: { private: parse($('#wlPrivate').value), groups: parse($('#wlGroups').value) },
+      deny: { private: parse($('#dnPrivate').value), groups: parse($('#dnGroups').value) },
+      ownerQQ: $('#ownerQQ').value.trim()
+    });
+    if (r.ok) { refreshWhitelist(); refresh(); toast('白名单已保存并生效'); }
+    else toast('❌ ' + esc(r.error || '保存失败'), { type: 'err' });
+  });
+
+  function loadSecurity() {
+    api('/api/security').then(r => {
+      $('#secInterceptNotify').checked = r.security?.interceptNotify !== false;
+    }).catch(() => {});
+  }
+  $('#secSave').addEventListener('click', async () => {
+    const r = await api('/api/security', 'POST', { interceptNotify: $('#secInterceptNotify').checked });
+    const msg = $('#secMsg');
+    msg.textContent = r.ok ? '✅ 已保存' : ('❌ ' + (r.error || '失败'));
+    msg.className = r.ok ? 'meta ok' : 'meta err';
+    if (r.ok) { toast('安全设置已保存'); loadSecurity(); }
+  });
+
+  /* ================= 测试发送 / 引导投递 ================= */
+  $('#tsSend').addEventListener('click', async () => {
+    const r = await api('/api/test-send', 'POST', {
+      kind: $('#tsKind').value,
+      id: $('#tsId').value.trim(),
+      message: $('#tsMsg').value
+    });
+    const el = $('#tsMsg2');
+    el.textContent = r.ok ? ('✅ 已发送 message_id=' + r.message_id) : ('❌ ' + (r.error || '失败'));
+    el.className = r.ok ? 'meta ok' : 'meta err';
+    toast(r.ok ? '测试消息已投递' : ('❌ ' + esc(r.error || '发送失败')), { type: r.ok ? 'ok' : 'err' });
+  });
+  $('#aiNotifySend').addEventListener('click', async () => {
+    const kind = $('#aiNotifyKind').value;
+    const id = $('#aiNotifyId').value.trim();
+    const message = $('#aiNotifyMessage').value.trim();
+    if (!id || !message) { toast('请填写群号/QQ 号和提醒内容', { type: 'warn' }); return; }
+    const r = await api('/api/console/notify-ai', 'POST', { key: kind + ':' + id, message });
+    const msg = $('#aiNotifyMsg');
+    msg.textContent = r.ok ? ('✅ 已投递到 DSH：' + r.sessionId) : ('❌ ' + (r.error || '失败'));
+    msg.className = r.ok ? 'meta ok' : 'meta err';
+    toast(r.ok ? '引导已投递到 DSH 会话' : ('❌ ' + esc(r.error || '失败')), { type: r.ok ? 'ok' : 'err' });
+  });
+
+  /* ================= 桥接维护（连点确认） ================= */
+  $('#restartBtn').addEventListener('confirmed', async () => {
+    const r = await api('/api/restart', 'POST', {});
+    $('#restartMsg').textContent = r.message || '正在重启…';
+    toast('重启指令已发送，守护窗口将在 5 秒内拉起', { type: 'warn' });
+  });
+  $('#clearWsBtn').addEventListener('confirmed', async () => {
+    const r = await api('/api/workspace/reset', 'POST', {});
+    const msg = $('#clearWsMsg');
+    msg.textContent = r.ok ? ('✅ 已归档 ' + r.archivedCount + ' 个会话，工作区已清空') : ('❌ ' + (r.error || '失败'));
+    msg.className = r.ok ? 'meta ok' : 'meta err';
+    toast(r.ok ? 'QQ 聊天工作区已清空' : ('❌ ' + esc(r.error || '失败')), { type: r.ok ? 'warn' : 'err' });
+    refreshSessions(); refresh();
+  });
+
+  /* ================= 二代仿真配置 ================= */
+  async function loadV2Config() {
+    try {
+      const r = await api('/api/socialV2/config');
+      const c = r.config || {};
+      $('#v2Enabled').checked = c.enabled !== false;
+      $('#v2AgentPreset').value = c.agentPreset || '';
+      $('#v2ProvideRecommendations').checked = c.provideRecommendations !== false;
+      $$('[data-v2-tool]').forEach(el => {
+        el.checked = (c.tools && c.tools[el.dataset.v2Tool] !== false);
+      });
+      const w = c.wake || {};
+      $('#v2WakeDefaultMode').value = w.defaultMode === 'active' ? 'active' : 'diving';
+      $('#v2RecDefaultInfinite').checked = w.recommendedDefaultInfinite !== false;
+      $('#v2RecSleepMin').value = Math.round((w.recommendedSleepMinMs || 300000) / 60000);
+      $('#v2RecSleepMax').value = Math.round((w.recommendedSleepMaxMs || 7200000) / 60000);
+      $('#v2RecProb').value = w.recommendedProbability ?? 0.05;
+      $('#v2RecKeywords').value = (w.recommendedKeywords || []).join(', ');
+      $('#v2RecAt').checked = w.recommendedAtMention !== false;
+      $('#v2RecName').checked = w.recommendedNameMention !== false;
+      $('#v2RecQuestion').checked = w.recommendedQuestion !== false;
+      $('#v2RecPoke').checked = w.recommendedPoke !== false;
+      $('#v2WakeHint').value = w.recommendedHint || '';
+      $('#v2SleepMinMs').value = Math.round((w.sleepMinMs || 60000) / 1000);
+      $('#v2SleepMaxMs').value = Math.round((w.sleepMaxMs || 0) / 1000);
+      $('#v2MaxWakeMin').value = w.maxWakePerMinute ?? 1;
+      $('#v2MaxWakeHour').value = w.maxWakePerHour ?? 12;
+      $('#v2BatchWindowMs').value = w.batchWindowMs ?? 8000;
+      $('#v2NoActionLimit').value = w.noActionLimit ?? 3;
+      $('#v2MaxWakeConfigReminders').value = w.maxWakeConfigReminders ?? 2;
+      $('#v2PreSleepWaitEnabled').checked = w.preSleepWaitEnabled !== false;
+      $('#v2PreSleepWaitMin').value = Number.isFinite(Number(w.preSleepWaitMs)) ? Math.round(Number(w.preSleepWaitMs) / 60000) : 5;
+      const s = c.send || {};
+      $('#v2BurstEnabled').checked = s.burstEnabled !== false;
+      $('#v2BurstMax').value = s.burstMaxMessages ?? 8;
+      $('#v2BurstMin').value = s.burstIntervalMinMs ?? 1000;
+      $('#v2BurstMaxMs').value = s.burstIntervalMaxMs ?? 3000;
+      $('#v2LongGapProb').value = s.longGapProbability ?? 0.2;
+      $('#v2LongGapMin').value = s.longGapMinMs ?? 5000;
+      $('#v2LongGapMax').value = s.longGapMaxMs ?? 10000;
+      $('#v2MaxSendMin').value = s.maxSendPerMinute ?? 8;
+      $('#v2MaxSendHour').value = s.maxSendPerHour ?? 60;
+      $('#v2MaxMsgChars').value = s.maxMessageChars ?? 500;
+      $('#v2MaxGapMs').value = s.maxGapMs ?? 10000;
+      $('#v2GapBaseMs').value = s.gapBaseMs ?? 800;
+      $('#v2GapPerCharMs').value = s.gapPerCharMs ?? 20;
+      $('#v2SendHint').value = s.recommendedHint || '';
+      const wt = c.wait || {};
+      $('#v2WaitDefaultMs').value = wt.defaultMs ?? 30000;
+      $('#v2WaitMinMs').value = wt.minMs ?? 5000;
+      $('#v2WaitMaxMs').value = wt.maxMs ?? 600000;
+      $('#v2WaitDefaultQuietMs').value = wt.defaultQuietMs ?? 8000;
+      $('#v2MinQuietAfterNewMs').value = wt.minQuietAfterNewMs ?? 10000;
+      $('#v2AutoReplyCheckSec').value = Math.round((c.autoReplyCheckMs || 30000) / 1000);
+      const pa = c.proactive || {};
+      $('#v2ProactiveEnabled').checked = pa.enabled !== false;
+      $('#v2ProactiveIntervalMin').value = Math.round((pa.checkIntervalMinMs || 1800000) / 60000);
+      $('#v2ProactiveIntervalMax').value = Math.round((pa.checkIntervalMaxMs || 5400000) / 60000);
+      $('#v2ProactiveIdleThreshold').value = Math.round((pa.idleThresholdMs || 900000) / 60000);
+      $('#v2ProactiveProbability').value = pa.probability ?? 0.3;
+      const stk = c.sticker || {};
+      $('#v2StickerEnabled').checked = stk.enabled !== false;
+      $('#v2StickerSyncTtlSec').value = Math.round((stk.syncTtlMs || 60000) / 1000);
+      $('#v2StickerMaxList').value = stk.maxListCount ?? 100;
+      $('#v2StickerPromptMax').value = stk.promptMaxStickers ?? 8;
+      $('#v2StickerIncludePrompt').checked = stk.includeInPrompt !== false;
+      const stkCollect = stk.collect || {};
+      $('#v2StickerCollectEnabled').checked = stkCollect.enabled !== false;
+      $('#v2StickerCollectPerMin').value = stkCollect.maxPerMinute ?? 2;
+      $('#v2StickerCollectPerHour').value = stkCollect.maxPerHour ?? 10;
+      $('#v2StickerCollectRemarkMax').value = stkCollect.maxRemarkChars ?? 20;
+      const ctx = c.context || {};
+      $('#v2ContextRecentLimit').value = ctx.recentLimit ?? 100;
+      $('#v2ContextUnreadLimit').value = ctx.unreadLimit ?? 30;
+      $('#v2ContextWindow').value = ctx.contextWindow ?? 20;
+      const fb = c.feedback || {};
+      $('#v2FeedbackMaxLength').value = fb.maxLength ?? 500;
+      $('#v2FeedbackNotifyOwner').checked = fb.notifyOwnerOnError === true;
+      const fsList = $('[data-v2-tool="fileSend"]'), fsPanel = $('#fileSendPanelToggle');
+      if (fsList && fsPanel) fsPanel.checked = fsList.checked;
+      const asList = $('[data-v2-tool="audioSearch"]'), asPanel = $('#audioSearchPanelToggle');
+      if (asList && asPanel) asPanel.checked = asList.checked;
+      const biList = $('[data-v2-tool="bilibili"]'), biPanel = $('#bilibiliPanelToggle');
+      if (biList && biPanel) biPanel.checked = biList.checked;
+    } catch (e) {}
+  }
+
+  $('#fileSendPanelToggle')?.addEventListener('change', (e) => {
+    const fsList = $('[data-v2-tool="fileSend"]');
+    if (fsList) fsList.checked = e.target.checked;
+  });
+  $('#audioSearchPanelToggle')?.addEventListener('change', (e) => {
+    const asList = $('[data-v2-tool="audioSearch"]');
+    if (asList) asList.checked = e.target.checked;
+  });
+  $('#bilibiliPanelToggle')?.addEventListener('change', async (e) => {
+    const biList = $('[data-v2-tool="bilibili"]');
+    if (biList) biList.checked = e.target.checked;
+    const msg = $('#bilibiliMsg');
+    try {
+      const r = await api('/api/socialV2/config', 'POST', { tools: { bilibili: e.target.checked } });
+      msg.textContent = r.ok ? (e.target.checked ? '✅ 已开启' : '✅ 已关闭') : ('❌ ' + (r.error || '保存失败'));
+      msg.className = r.ok ? 'meta ok' : 'meta err';
+      if (r.ok) toast('B站工具已' + (e.target.checked ? '开启' : '关闭'));
+    } catch (err) {
+      msg.textContent = '❌ 保存失败：' + err.message;
+      msg.className = 'meta err';
+    }
+  });
+
+  async function saveV2Config() {
+    const tools = {};
+    $$('[data-v2-tool]').forEach(el => { tools[el.dataset.v2Tool] = el.checked; });
+    const num = (id, d) => Math.round(Number($(id).value)) || d;
+    const body = {
+      enabled: $('#v2Enabled').checked,
+      agentPreset: $('#v2AgentPreset').value.trim(),
+      provideRecommendations: $('#v2ProvideRecommendations').checked,
+      autoReplyCheckMs: Math.round(Number($('#v2AutoReplyCheckSec').value) || 30) * 1000,
+      tools,
+      wake: {
+        defaultMode: $('#v2WakeDefaultMode').value,
+        recommendedDefaultInfinite: $('#v2RecDefaultInfinite').checked,
+        preSleepWaitEnabled: $('#v2PreSleepWaitEnabled').checked,
+        preSleepWaitMs: (Number.isFinite(Number($('#v2PreSleepWaitMin').value)) && Number($('#v2PreSleepWaitMin').value) >= 0 ? Math.round(Number($('#v2PreSleepWaitMin').value)) : 5) * 60000,
+        recommendedSleepMinMs: (Math.round(Number($('#v2RecSleepMin').value) || 5)) * 60000,
+        recommendedSleepMaxMs: (Math.round(Number($('#v2RecSleepMax').value) || 120)) * 60000,
+        recommendedProbability: Number($('#v2RecProb').value) || 0,
+        recommendedKeywords: $('#v2RecKeywords').value.split(/[,，]/).map(s => s.trim()).filter(Boolean),
+        recommendedAtMention: $('#v2RecAt').checked,
+        recommendedNameMention: $('#v2RecName').checked,
+        recommendedQuestion: $('#v2RecQuestion').checked,
+        recommendedPoke: $('#v2RecPoke').checked,
+        recommendedHint: $('#v2WakeHint').value,
+        sleepMinMs: (Math.round(Number($('#v2SleepMinMs').value) || 0)) * 1000,
+        sleepMaxMs: (Math.round(Number($('#v2SleepMaxMs').value) || 0)) * 1000,
+        maxWakePerMinute: num('#v2MaxWakeMin', 0),
+        maxWakePerHour: num('#v2MaxWakeHour', 0),
+        batchWindowMs: num('#v2BatchWindowMs', 8000),
+        noActionLimit: num('#v2NoActionLimit', 3),
+        maxWakeConfigReminders: num('#v2MaxWakeConfigReminders', 2)
+      },
+      send: {
+        burstEnabled: $('#v2BurstEnabled').checked,
+        burstMaxMessages: num('#v2BurstMax', 8),
+        burstIntervalMinMs: num('#v2BurstMin', 1000),
+        burstIntervalMaxMs: num('#v2BurstMaxMs', 3000),
+        longGapProbability: Number($('#v2LongGapProb').value) || 0,
+        longGapMinMs: num('#v2LongGapMin', 5000),
+        longGapMaxMs: num('#v2LongGapMax', 10000),
+        maxSendPerMinute: num('#v2MaxSendMin', 0),
+        maxSendPerHour: num('#v2MaxSendHour', 0),
+        maxMessageChars: num('#v2MaxMsgChars', 500),
+        maxGapMs: num('#v2MaxGapMs', 10000),
+        gapBaseMs: num('#v2GapBaseMs', 800),
+        gapPerCharMs: num('#v2GapPerCharMs', 20),
+        recommendedHint: $('#v2SendHint').value
+      },
+      wait: {
+        defaultMs: num('#v2WaitDefaultMs', 5000),
+        minMs: num('#v2WaitMinMs', 1000),
+        maxMs: num('#v2WaitMaxMs', 10000),
+        defaultQuietMs: Number.isFinite(Number($('#v2WaitDefaultQuietMs').value)) ? Math.max(0, Math.round(Number($('#v2WaitDefaultQuietMs').value))) : 8000,
+        minQuietAfterNewMs: Number.isFinite(Number($('#v2MinQuietAfterNewMs').value)) ? Math.max(0, Math.round(Number($('#v2MinQuietAfterNewMs').value))) : 10000
+      },
+      proactive: {
+        enabled: $('#v2ProactiveEnabled').checked,
+        checkIntervalMinMs: Math.round(Number($('#v2ProactiveIntervalMin').value) || 30) * 60000,
+        checkIntervalMaxMs: Math.round(Number($('#v2ProactiveIntervalMax').value) || 90) * 60000,
+        idleThresholdMs: Math.round(Number($('#v2ProactiveIdleThreshold').value) || 15) * 60000,
+        probability: Number($('#v2ProactiveProbability').value) || 0
+      },
+      sticker: {
+        enabled: $('#v2StickerEnabled').checked,
+        syncTtlMs: Math.max(1000, Math.round(Number($('#v2StickerSyncTtlSec').value) || 60) * 1000),
+        maxListCount: Math.min(500, Math.max(1, Math.round(Number($('#v2StickerMaxList').value) || 100))),
+        includeInPrompt: $('#v2StickerIncludePrompt').checked,
+        promptMaxStickers: Math.min(30, Math.max(1, Math.round(Number($('#v2StickerPromptMax').value) || 8))),
+        collect: {
+          enabled: $('#v2StickerCollectEnabled').checked,
+          maxPerMinute: Math.max(0, Math.round(Number($('#v2StickerCollectPerMin').value) || 0)),
+          maxPerHour: Math.max(0, Math.round(Number($('#v2StickerCollectPerHour').value) || 0)),
+          maxRemarkChars: Math.min(50, Math.max(1, Math.round(Number($('#v2StickerCollectRemarkMax').value) || 20)))
+        }
+      },
+      context: {
+        recentLimit: Math.round(Number($('#v2ContextRecentLimit').value) || 100),
+        unreadLimit: Math.round(Number($('#v2ContextUnreadLimit').value) || 30),
+        contextWindow: Math.round(Number($('#v2ContextWindow').value) || 20)
+      },
+      feedback: {
+        maxLength: Math.round(Number($('#v2FeedbackMaxLength').value) || 500),
+        notifyOwnerOnError: $('#v2FeedbackNotifyOwner').checked
+      }
+    };
+    const r = await api('/api/socialV2/config', 'POST', body);
+    const msg = $('#v2ConfigMsg');
+    msg.textContent = r.ok ? '✅ 已保存' : ('❌ ' + (r.error || '失败'));
+    msg.className = r.ok ? 'meta ok' : 'meta err';
+    toast(r.ok ? '二代参数已保存并热更新' : ('❌ ' + esc(r.error || '保存失败')), { type: r.ok ? 'ok' : 'err' });
+    if (r.ok) loadV2Config();
+  }
+  $('#v2ConfigSave').addEventListener('click', saveV2Config);
+  $('#v2ConfigSaveTop').addEventListener('click', saveV2Config);
+
+  async function refreshV2Activity() {
+    try {
+      const r = await api('/api/socialV2/activity');
+      const el = $('#v2ActivityStatus');
+      el.textContent = r.paused ? '已暂停' : '运行中';
+      el.className = 'pill ' + (r.paused ? 'pill-warn' : 'pill-ok');
+    } catch (e) {}
+  }
+  $('#v2PauseBtn').addEventListener('click', async () => {
+    await api('/api/socialV2/activity', 'POST', { paused: true });
+    toast('二代 AI 已暂停', { type: 'warn' });
+    refreshV2Activity();
+  });
+  $('#v2ResumeBtn').addEventListener('click', async () => {
+    await api('/api/socialV2/activity', 'POST', { paused: false });
+    toast('二代 AI 已恢复运行');
+    refreshV2Activity();
+  });
+  $('#v2ResetBtn').addEventListener('confirmed', async () => {
+    const r = await api('/api/socialV2/reset', 'POST', {});
+    const msg = $('#v2ConfigMsg');
+    msg.textContent = r.ok ? '✅ 已重置二代状态' : ('❌ ' + (r.error || '失败'));
+    msg.className = r.ok ? 'meta ok' : 'meta err';
+    toast(r.ok ? '二代状态已重置' : ('❌ ' + esc(r.error || '失败')), { type: r.ok ? 'warn' : 'err' });
+    refreshV2Activity();
+    $('#v2AllStatesOutput').textContent = '（全部会话状态：空）';
+    $('#v2StateOutput').textContent = '（空）';
+  });
+
+  /* ================= 二代：状态 / 唤醒 ================= */
+  async function viewV2State() {
+    const key = $('#v2StateKey').value.trim();
+    if (!key) { toast('请输入会话 key，或用上方白名单快速选择', { type: 'warn' }); return; }
+    const r = await api('/api/socialV2/state?key=' + encodeURIComponent(key));
+    $('#v2StateOutput').textContent = JSON.stringify(r, null, 2);
+  }
+  $('#v2StateView').addEventListener('click', viewV2State);
+  $('#v2ForceWake').addEventListener('click', async () => {
+    const key = $('#v2StateKey').value.trim();
+    if (!key) { toast('请输入会话 key', { type: 'warn' }); return; }
+    const r = await api('/api/socialV2/wake', 'POST', { key, reason: 'admin' });
+    const msg = $('#v2ConfigMsg');
+    msg.textContent = r.ok ? '✅ 已发送唤醒' : ('❌ ' + (r.error || '失败'));
+    msg.className = r.ok ? 'meta ok' : 'meta err';
+    toast(r.ok ? '已向 ' + esc(key) + ' 发送唤醒' : ('❌ ' + esc(r.error || '失败')), { type: r.ok ? 'ok' : 'err' });
+  });
+  $('#v2StatesList').addEventListener('click', async () => {
+    const r = await api('/api/socialV2/states');
+    $('#v2AllStatesOutput').textContent = JSON.stringify(r.conversations || [], null, 2);
+  });
+
+  async function loadV2SessionOptions() {
+    const sel = $('#v2SessionSelect');
+    const prev = sel.value;
+    try {
+      const r = await api('/api/status');
+      const groups = Array.isArray(r.allowGroups) ? r.allowGroups : [];
+      const privates = Array.isArray(r.allowPrivate) ? r.allowPrivate : [];
+      const options = [{ value: '', label: '选择白名单群/私聊…' }];
+      for (const g of groups) options.push({ value: 'group:' + g, label: '群 ' + g });
+      for (const p of privates) options.push({ value: 'private:' + p, label: '私聊 ' + p });
+      sel.innerHTML = options.map(o => '<option value="' + esc(o.value) + '">' + esc(o.label) + '</option>').join('');
+      if (prev && options.some(o => o.value === prev)) sel.value = prev;
+    } catch (e) {
+      sel.innerHTML = '<option value="">无法加载白名单</option>';
+    }
+  }
+  $('#v2SessionRefresh').addEventListener('click', loadV2SessionOptions);
+  $('#v2SessionSelect').addEventListener('change', (ev) => {
+    const key = ev.target.value;
+    if (!key) return;
+    $('#v2StateKey').value = key;
+    $('#v2MemoryKey').value = key;
+    $('#v2WakeKey').value = key;
+  });
+
+  /* ================= 二代：工具调用日志 ================= */
+  function v2ToolLogStatus(entry) {
+    if (entry.type === 'result') {
+      const ok = entry.ok !== false;
+      return '<span class="pill ' + (ok ? 'pill-ok' : 'pill-err') + '">' + (ok ? '成功' : '失败') + '</span>';
+    }
+    return '<span class="pill pill-accent">调用</span>';
+  }
+  function summarizeToolArgs(tool, args) {
+    let obj = args;
+    if (typeof args === 'string') {
+      try { obj = JSON.parse(args); } catch (e) { return args || ''; }
+    }
+    if (!obj || typeof obj !== 'object') return String(obj ?? '');
+    const parts = [];
+    const push = (k, v) => { if (v === undefined || v === null || v === '') return; parts.push(k + '=' + v); };
+    const t = String(tool || '');
+    if (t.includes('qq_set_wake_config')) {
+      const cfg = (obj.config && typeof obj.config === 'object') ? obj.config : obj;
+      push('mode', cfg.mode);
+      push('infinite', cfg.infinite);
+      const sleepUntil = cfg.sleepUntil || obj.sleepUntil;
+      const sleepMs = cfg.sleepMs !== undefined ? cfg.sleepMs : obj.sleepMs;
+      if (sleepUntil) push('sleepUntil', sleepUntil);
+      else if (sleepMs !== undefined) push('sleepMs', sleepMs + 'ms');
+      else push('sleep', '未设置时间');
+      const tr = (cfg.triggers && typeof cfg.triggers === 'object') ? cfg.triggers : {};
+      const trigs = [];
+      if (tr.atMention) trigs.push('@');
+      if (tr.nameMention) trigs.push('名字');
+      if (tr.question) trigs.push('提问');
+      if (tr.poke) trigs.push('拍一拍');
+      if (Array.isArray(tr.keywords) && tr.keywords.length) trigs.push('关键词:' + tr.keywords.join(','));
+      if (Array.isArray(tr.speakerIds) && tr.speakerIds.length) trigs.push('指定成员:' + tr.speakerIds.join(','));
+      if (tr.anyMessage) trigs.push('anyMessage');
+      if (Number(tr.probability) > 0) trigs.push('概率:' + tr.probability);
+      if (trigs.length) push('triggers', trigs.join('|'));
+    } else if (t.includes('qq_wait_for_messages')) {
+      push('timeoutMs', obj.timeoutMs != null ? obj.timeoutMs : '默认30000');
+      push('minNewMessages', obj.minNewMessages != null ? obj.minNewMessages : 1);
+      push('quietMs', obj.quietMs != null ? obj.quietMs : '默认8000');
+    } else if (t.includes('qq_send_message')) {
+      const msgs = Array.isArray(obj.messages) ? obj.messages : (obj.messages != null ? [obj.messages] : []);
+      push('条数', msgs.length);
+      if (msgs.length) push('首条', String(msgs[0]).slice(0, 30));
+      push('gapMode', obj.gapMode || 'auto');
+      if (obj.gapMs != null) push('gapMs', obj.gapMs);
+      if (Array.isArray(obj.gaps) && obj.gaps.length) push('gaps', obj.gaps.join(','));
+      if (obj.replyToMessageId != null && obj.replyToMessageId !== '') push('引用id', obj.replyToMessageId);
+    } else if (t.includes('qq_send_burst')) {
+      const msgs = Array.isArray(obj.messages) ? obj.messages : [];
+      push('条数', msgs.length);
+      if (msgs.length) push('首条', String(msgs[0]).slice(0, 30));
+    } else if (t.includes('qq_send_poke')) {
+      push('key', obj.key);
+      if (obj.targetUserId != null && obj.targetUserId !== '') push('target', obj.targetUserId);
+    } else if (t.includes('qq_get_forward_msg')) {
+      push('key', obj.key);
+      if (obj.id != null && obj.id !== '') push('id', String(obj.id).slice(0, 40));
+    } else if (t.includes('qq_mark_read')) {
+      push('key', obj.key);
+    } else if (t.includes('qq_get_prompt') || t.includes('qq_get_unread_messages') || t.includes('qq_get_recent_messages') || t.includes('qq_social_state') || t.includes('qq_get_my_recent_messages') || t.includes('qq_get_message_detail') || t.includes('qq_get_active_members')) {
+      push('key', obj.key);
+      if (obj.messageId != null) push('messageId', obj.messageId);
+      if (obj.limit != null) push('limit', obj.limit);
+    } else {
+      push('key', obj.key);
+    }
+    return parts.join(' | ') || JSON.stringify(obj);
+  }
+  function v2ToolLogCell(value, tool) {
+    const text = value == null ? '' : String(value);
+    if (!text) return '<span class="meta">-</span>';
+    const summary = tool ? summarizeToolArgs(tool, text) : text;
+    const short = summary.length > 100 ? summary.slice(0, 100) + '…' : summary;
+    return '<span class="tool-log-cell" data-full="' + esc(text) + '" data-short="' + esc(short) + '" title="点击查看完整 JSON">' + esc(short) + '</span>';
+  }
+  function renderV2ToolLog(entries) {
+    const box = $('#v2ToolLogOutput');
+    const list = entries || [];
+    if (!list.length) { box.innerHTML = '<div class="empty-tip">（空）</div>'; return; }
+    let html = '<table class="tbl tbl-wide"><tr><th>时间</th><th>会话 key</th><th>工具名</th><th>状态</th><th>参数</th><th>错误信息</th></tr>';
+    for (const e of list) {
+      const time = e.time ? new Date(e.time).toLocaleString() : '-';
+      html += '<tr><td>' + esc(time) + '</td><td>' + esc(e.key || '') + '</td><td>' + esc(e.tool || '-') + '</td><td>' + v2ToolLogStatus(e) + '</td><td>' + (e.type === 'call' ? v2ToolLogCell(e.args, e.tool) : '<span class="meta">-</span>') + '</td><td>' + (e.type === 'result' ? v2ToolLogCell(e.error) : '<span class="meta">-</span>') + '</td></tr>';
+    }
+    box.innerHTML = html + '</table>';
+  }
+  function loadV2ToolLog() {
+    return api('/api/socialV2/tool-log?limit=200')
+      .then(r => { renderV2ToolLog(r.entries || []); })
+      .catch(() => { renderV2ToolLog([]); });
+  }
+  $('#v2ToolLogOutput').addEventListener('click', (ev) => {
+    const cell = ev.target.closest('.tool-log-cell');
+    if (!cell) return;
+    if (cell.classList.contains('expanded')) {
+      cell.classList.remove('expanded');
+      cell.textContent = cell.dataset.short;
+    } else {
+      cell.classList.add('expanded');
+      cell.textContent = cell.dataset.full;
+    }
+  });
+  $('#v2ToolLogLoad').addEventListener('click', async () => {
+    $('#v2ToolLogMsg').textContent = '';
+    await loadV2ToolLog();
+    toast('工具日志已加载');
+  });
+  $('#v2ToolLogClear').addEventListener('confirmed', async () => {
+    const r = await api('/api/socialV2/tool-log/clear', 'POST', {});
+    const msg = $('#v2ToolLogMsg');
+    msg.textContent = r.ok ? '✅ 已清空' : ('❌ ' + (r.error || '失败'));
+    msg.className = r.ok ? 'meta ok' : 'meta err';
+    renderV2ToolLog([]);
+    toast(r.ok ? '工具日志已清空' : ('❌ ' + esc(r.error || '失败')), { type: r.ok ? 'warn' : 'err' });
+  });
+
+  /* ================= 二代：轻量记忆 ================= */
+  function renderV2Memory(data) {
+    const box = $('#v2MemoryOutput');
+    if (!data || !data.ok) { box.innerHTML = '<div class="empty-tip">加载失败</div>'; return; }
+    const raw = data.raw || {};
+    const topics = Array.isArray(raw.activeTopics) ? raw.activeTopics : [];
+    const thoughts = Array.isArray(raw.pendingThoughts) ? raw.pendingThoughts : [];
+    const impressions = raw.memberImpressions && typeof raw.memberImpressions === 'object' ? raw.memberImpressions : {};
+    let html = '<div style="padding:10px 12px">';
+    html += '<div class="memory-section"><b>进行中的话题</b> <button class="btn sm" data-action="clear" data-cat="activeTopic">清空</button>';
+    if (!topics.length) html += '<div class="meta">（空）</div>';
+    for (const t of topics) {
+      const text = esc(String(t?.text || ''));
+      const extra = t?.pendingQuestion ? '；待追问：' + esc(String(t.pendingQuestion)) : '';
+      html += '<div class="memory-line">📌 ' + text + extra + ' <button class="btn sm" data-action="edit" data-cat="activeTopic" data-content="' + esc(String(t?.text || '')) + '">编辑</button> <button class="btn sm ghost" data-action="remove" data-cat="activeTopic" data-content="' + esc(String(t?.text || '')) + '">删除</button></div>';
+    }
+    html += '</div>';
+    html += '<div class="memory-section"><b>想说但还没说的</b> <button class="btn sm" data-action="clear" data-cat="pendingThought">清空</button>';
+    if (!thoughts.length) html += '<div class="meta">（空）</div>';
+    for (const t of thoughts) {
+      html += '<div class="memory-line">💭 ' + esc(String(t?.text || '')) + (t?.motivation ? '（' + esc(String(t.motivation)) + '）' : '') + ' <button class="btn sm" data-action="edit" data-cat="pendingThought" data-content="' + esc(String(t?.text || '')) + '">编辑</button> <button class="btn sm ghost" data-action="remove" data-cat="pendingThought" data-content="' + esc(String(t?.text || '')) + '">删除</button></div>';
+    }
+    html += '</div>';
+    html += '<div class="memory-section"><b>对群友的印象</b> <button class="btn sm" data-action="clear" data-cat="memberImpression">清空</button>';
+    const names = Object.keys(impressions);
+    if (!names.length) html += '<div class="meta">（空）</div>';
+    for (const name of names) {
+      const im = impressions[name] || {};
+      const traits = Array.isArray(im.traits) ? im.traits : [];
+      html += '<div class="memory-line">👤 ' + esc(name) + '：' + (traits.length ? esc(traits.join('、')) : '暂无记录') + '（互动 ' + (Number(im.interactionCount) || 0) + ' 次） <button class="btn sm" data-action="edit" data-cat="memberImpression" data-target="' + esc(name) + '" data-traits="' + esc(traits.join(', ')) + '">编辑</button> <button class="btn sm ghost" data-action="remove" data-cat="memberImpression" data-target="' + esc(name) + '">删除</button></div>';
+    }
+    html += '</div></div>';
+    box.innerHTML = html;
+  }
+  function loadV2Memory() {
+    const key = $('#v2MemoryKey').value.trim();
+    const msg = $('#v2MemoryMsg');
+    if (!key) { toast('请输入会话 key', { type: 'warn' }); return Promise.resolve(); }
+    msg.textContent = '加载中…';
+    msg.className = 'meta';
+    return api('/api/socialV2/memory?key=' + encodeURIComponent(key))
+      .then(r => {
+        renderV2Memory(r);
+        msg.textContent = r.ok ? '✅ 已加载' : ('❌ ' + (r.error || '失败'));
+        msg.className = r.ok ? 'meta ok' : 'meta err';
+      })
+      .catch(e => {
+        msg.textContent = '❌ ' + (e.message || e);
+        msg.className = 'meta err';
+      });
+  }
+  $('#v2MemoryLoad').addEventListener('click', loadV2Memory);
+  $('#v2MemoryClearAll').addEventListener('confirmed', async () => {
+    const key = $('#v2MemoryKey').value.trim();
+    const msg = $('#v2MemoryMsg');
+    if (!key) { toast('请输入会话 key', { type: 'warn' }); return; }
+    const r = await api('/api/socialV2/memory-clear', 'POST', { key, category: '' });
+    msg.textContent = r.ok ? '✅ 已清空全部记忆' : ('❌ ' + (r.error || '失败'));
+    msg.className = r.ok ? 'meta ok' : 'meta err';
+    toast(r.ok ? '该会话轻量记忆已清空' : ('❌ ' + esc(r.error || '失败')), { type: r.ok ? 'warn' : 'err' });
+    if (r.ok) loadV2Memory();
+  });
+  $('#v2MemoryOutput').addEventListener('click', async (ev) => {
+    const btn = ev.target.closest('button[data-action]');
+    if (!btn) return;
+    const key = $('#v2MemoryKey').value.trim();
+    const msg = $('#v2MemoryMsg');
+    if (!key) { toast('请输入会话 key', { type: 'warn' }); return; }
+    const cat = btn.dataset.cat;
+    const action = btn.dataset.action;
+    let r;
+    if (action === 'clear') {
+      if (!await confirmBox('确定清空该分类的全部记忆？')) return;
+      r = await api('/api/socialV2/memory-clear', 'POST', { key, category: cat });
+    } else if (action === 'edit') {
+      let newContent;
+      if (cat === 'memberImpression') {
+        newContent = await promptModal('编辑对 ' + btn.dataset.target + ' 的印象特质（逗号分隔）', btn.dataset.traits || '');
+      } else {
+        newContent = await promptModal('编辑' + (cat === 'activeTopic' ? '话题' : '想法') + '内容', btn.dataset.content || '');
+      }
+      if (newContent === null) return;
+      r = await api('/api/socialV2/memory-update', 'POST', { key, category: cat, oldContent: btn.dataset.content || '', target: btn.dataset.target || '', newContent, newExtra: {} });
+    } else {
+      if (!await confirmBox('确定删除该条记忆？')) return;
+      r = await api('/api/socialV2/memory-remove', 'POST', { key, category: cat, content: btn.dataset.content || '', target: btn.dataset.target || '' });
+    }
+    msg.textContent = r.ok ? '✅ 已更新' : ('❌ ' + (r.error || '失败'));
+    msg.className = r.ok ? 'meta ok' : 'meta err';
+    if (r.ok) { toast('记忆已更新'); loadV2Memory(); }
+  });
+
+  /* ================= 二代：唤醒状态详情 ================= */
+  function formatWakeStatus(r) {
+    if (!r || !r.ok) return '<div class="empty-tip">加载失败</div>';
+    const wc = r.wakeConfig || {};
+    const lines = [];
+    const mode = wc.mode === 'active' ? '活跃（任何消息都会唤醒）' : (wc.mode === 'diving' ? '潜水' : (wc.mode || '未知'));
+    lines.push('<div class="memory-line"><b>模式：</b>' + esc(mode) + '</div>');
+    lines.push('<div class="memory-line"><b>无限期：</b>' + (wc.infinite ? '是' : '否') + '</div>');
+    const safety = r.wakeSafety || {};
+    lines.push('<div class="memory-line"><b>唤醒保证：</b>' + (safety.guaranteed ? '<span class="pill pill-ok">已保证</span>' : '<span class="pill pill-err">无保证</span>') + (safety.stale ? '（配置较旧，未确认）' : '') + '</div>');
+    let next = '';
+    if (wc.mode === 'active' || wc.triggers?.anyMessage) {
+      next = '任何新消息都会唤醒';
+    } else if (wc.sleepUntil) {
+      const until = new Date(wc.sleepUntil).getTime();
+      const remain = until - Date.now();
+      if (!Number.isFinite(remain)) next = '时间格式无效';
+      else if (remain > 0) next = '约 ' + Math.max(1, Math.round(remain / 1000)) + ' 秒后（' + new Date(wc.sleepUntil).toLocaleString() + '）';
+      else next = '已到期，等待下一次唤醒';
+    } else if (wc.infinite) {
+      next = '无限期潜水，等待指定条件';
+    } else {
+      next = '未设置时间';
+    }
+    lines.push('<div class="memory-line"><b>下次唤醒：</b>' + esc(next) + '</div>');
+    const tr = wc.triggers || {};
+    const conds = [];
+    if (tr.atMention) conds.push('@');
+    if (tr.nameMention) conds.push('名字');
+    if (Array.isArray(tr.keywords) && tr.keywords.length) conds.push('关键词：' + tr.keywords.join('、'));
+    if (Array.isArray(tr.speakerIds) && tr.speakerIds.length) conds.push('指定成员：' + tr.speakerIds.join('、'));
+    if (tr.question) conds.push('提问');
+    if (tr.poke) conds.push('拍一拍');
+    if (tr.anyMessage) conds.push('任何消息');
+    if (Number(tr.probability) > 0) conds.push('普通消息概率 ' + Number(tr.probability));
+    lines.push('<div class="memory-line"><b>提前唤醒条件：</b>' + (conds.length ? esc(conds.join('；')) : '（无）') + '</div>');
+    lines.push('<div class="memory-line"><b>最近唤醒原因：</b>' + esc(r.lastWakeReason || '-') + '</div>');
+    lines.push('<div class="memory-line"><b>唤醒次数：</b>' + (Number(wc.wakeCount) || 0) + '</div>');
+    if (wc.confirmedAt) {
+      const ago = Math.max(0, Math.round((Date.now() - wc.confirmedAt) / 60000));
+      lines.push('<div class="memory-line"><b>配置确认：</b>' + ago + ' 分钟前（' + esc(wc.confirmedBy || 'unknown') + '）</div>');
+    }
+    if (r.lastAiReplyAt) {
+      const ago = Math.max(0, Math.round((Date.now() - r.lastAiReplyAt) / 60000));
+      lines.push('<div class="memory-line"><b>上次发言：</b>' + ago + ' 分钟前</div>');
+    }
+    lines.push('<div class="memory-line"><b>未读：</b>' + (Number(r.unreadCount) || 0) + ' 条</div>');
+    return '<div style="padding:10px 12px">' + lines.join('') + '</div>';
+  }
+  function loadV2WakeStatus() {
+    const key = $('#v2WakeKey').value.trim();
+    const msg = $('#v2WakeStatusMsg');
+    if (!key) { toast('请输入会话 key', { type: 'warn' }); return; }
+    msg.textContent = '加载中…';
+    msg.className = 'meta';
+    api('/api/socialV2/state?key=' + encodeURIComponent(key))
+      .then(r => {
+        $('#v2WakeStatusOutput').innerHTML = formatWakeStatus(r);
+        msg.textContent = r.ok ? '✅ 已加载' : ('❌ ' + (r.error || '失败'));
+        msg.className = r.ok ? 'meta ok' : 'meta err';
+      })
+      .catch(e => {
+        msg.textContent = '❌ ' + (e.message || e);
+        msg.className = 'meta err';
+      });
+  }
+  $('#v2WakeStatusLoad').addEventListener('click', loadV2WakeStatus);
+
+  /* ================= 二代：AI 反馈 ================= */
+  $('#v2FeedbackLoad').addEventListener('click', async () => {
+    const r = await api('/api/socialV2/feedback');
+    $('#v2FeedbackOutput').textContent = JSON.stringify(r.entries || [], null, 2);
+    toast('AI 反馈已加载');
+  });
+  $('#v2FeedbackClear').addEventListener('confirmed', async () => {
+    const r = await api('/api/socialV2/feedback-clear', 'POST', {});
+    const msg = $('#v2FeedbackMsg');
+    msg.textContent = r.ok ? '✅ 已清空' : ('❌ ' + (r.error || '失败'));
+    msg.className = r.ok ? 'meta ok' : 'meta err';
+    if (r.ok) { $('#v2FeedbackOutput').textContent = '（空）'; toast('AI 反馈已清空', { type: 'warn' }); }
+  });
+
+  /* ================= 一代仿真参数 ================= */
+  async function loadSocialForm() {
+    try {
+      const s = await api('/api/social');
+      const c = s.config;
+      $('#sTrigger').value = c.triggerProbability;
+      $('#sCheckMin').value = Math.round((c.activeCheckMinMs || 0) / 1000);
+      $('#sCheckMax').value = Math.round((c.activeCheckMaxMs || 0) / 1000);
+      $('#sActiveDelayMin').value = Math.round((c.activeReplyDelayMinMs || 0) / 1000);
+      $('#sActiveDelayMax').value = Math.round((c.activeReplyDelayMaxMs || 0) / 1000);
+      $('#sActiveDurationEnabled').checked = c.activeDurationEnabled !== false;
+      $('#sActiveDurationMin').value = Math.round((c.activeDurationMinMs || 0) / 60000);
+      $('#sActiveDurationMax').value = Math.round((c.activeDurationMaxMs || 0) / 60000);
+      $('#sIdleWindow').value = Math.round((c.idleWindowMs || 0) / 60000);
+      $('#sIdleRetry').value = c.idleRetryProbability;
+      $('#sIdleWait').value = Math.round((c.idleRetryWaitMs || 0) / 60000);
+      $('#sSkipProb').value = c.skipProbability ?? 0.15;
+      $('#sSurrenderProb').value = c.surrenderProbability ?? 0.08;
+      $('#sContextWindow').value = c.contextWindow;
+      $('#sMaxChars').value = c.maxReplyChars ?? 500;
+      $('#sBurstEnabled').checked = c.burstEnabled !== false;
+      $('#sBurstIntervalMin').value = c.burstIntervalMinMs ?? 1000;
+      $('#sBurstIntervalMax').value = c.burstIntervalMaxMs ?? 3000;
+      $('#sLongGapProb').value = c.longGapProbability ?? 0.1;
+      $('#sLongGapMin').value = c.longGapMinMs ?? 2500;
+      $('#sLongGapMax').value = c.longGapMaxMs ?? 5000;
+      $('#sKeywords').value = (c.mustReplyKeywords || []).join(', ');
+      $('#sProactiveEnabled').checked = c.proactiveEnabled !== false;
+      $('#sProactiveIdle').value = Math.round((c.proactiveIdleThresholdMs || 0) / 60000);
+      $('#sProactiveCheckMin').value = Math.round((c.proactiveCheckMinMs || 0) / 60000);
+      $('#sProactiveCheckMax').value = Math.round((c.proactiveCheckMaxMs || 0) / 60000);
+      $('#sProactiveProb').value = c.proactiveProbability;
+    } catch (e) {}
+  }
+
+  async function refreshSocialStatus() {
+    try {
+      const s = await api('/api/social');
+      const buff = Object.entries(s.pendingSummaries || {}).map(([k, n]) => k + ':' + n).join('  ') || '无';
+      const phaseLabel = { idle: '观望', active: '活跃', probing: '试探', exiting: '退场中' };
+      const phaseClass = { idle: 'pill pill-ok', active: 'pill pill-accent', probing: 'pill pill-err', exiting: 'pill' };
+      const stateEntries = Object.entries(s.states || {});
+      const sel = $('#sStateKey');
+      const prevSel = sel.value;
+      sel.innerHTML = '<option value="">选择会话</option>';
+      for (const [k] of stateEntries) {
+        const opt = document.createElement('option');
+        opt.value = k;
+        opt.textContent = k;
+        sel.appendChild(opt);
+      }
+      if (prevSel && [...sel.options].some(o => o.value === prevSel)) sel.value = prevSel;
+      let html = '摘要缓冲: ' + esc(buff) + '<br>状态:';
+      if (!stateEntries.length) html += ' 暂无（发过消息的群会显示状态）';
+      for (const [k, v] of stateEntries) {
+        html += ' <span class="' + (phaseClass[v.phase] || 'pill') + '">' + esc(k) + ' · ' + (phaseLabel[v.phase] || esc(v.phase)) + '</span>';
+      }
+      $('#socialStatus').innerHTML = html;
+    } catch (e) {}
+  }
+
+  $('#socialSave').addEventListener('click', async () => {
+    const n = (id) => Number($(id).value);
+    const r = await api('/api/social', 'POST', {
+      triggerProbability: Math.min(1, Math.max(0, n('sTrigger'))),
+      activeCheckMinMs: Math.max(5, n('sCheckMin')) * 1000,
+      activeCheckMaxMs: Math.max(5, n('sCheckMax')) * 1000,
+      activeReplyDelayMinMs: Math.max(0, n('sActiveDelayMin')) * 1000,
+      activeReplyDelayMaxMs: Math.max(0, n('sActiveDelayMax')) * 1000,
+      activeDurationEnabled: $('#sActiveDurationEnabled').checked,
+      activeDurationMinMs: Math.max(1, n('sActiveDurationMin')) * 60000,
+      activeDurationMaxMs: Math.max(1, n('sActiveDurationMax')) * 60000,
+      idleWindowMs: Math.max(1, n('sIdleWindow')) * 60000,
+      idleRetryProbability: Math.min(1, Math.max(0, n('sIdleRetry'))),
+      idleRetryWaitMs: Math.max(1, n('sIdleWait')) * 60000,
+      skipProbability: Math.min(1, Math.max(0, n('sSkipProb'))),
+      surrenderProbability: Math.min(1, Math.max(0, n('sSurrenderProb'))),
+      contextWindow: Math.min(100, Math.max(1, n('sContextWindow'))),
+      maxReplyChars: Math.max(1, n('sMaxChars')),
+      burstEnabled: $('#sBurstEnabled').checked,
+      burstIntervalMinMs: Math.max(0, n('sBurstIntervalMin')),
+      burstIntervalMaxMs: Math.max(0, n('sBurstIntervalMax')),
+      longGapProbability: Math.min(1, Math.max(0, n('sLongGapProb'))),
+      longGapMinMs: Math.max(0, n('sLongGapMin')),
+      longGapMaxMs: Math.max(0, n('sLongGapMax')),
+      mustReplyKeywords: $('#sKeywords').value.split(/[,，]/).map(x => x.trim()).filter(Boolean),
+      proactiveEnabled: $('#sProactiveEnabled').checked,
+      proactiveIdleThresholdMs: Math.max(1, n('sProactiveIdle')) * 60000,
+      proactiveCheckMinMs: Math.max(1, n('sProactiveCheckMin')) * 60000,
+      proactiveCheckMaxMs: Math.max(1, n('sProactiveCheckMax')) * 60000,
+      proactiveProbability: Math.min(1, Math.max(0, n('sProactiveProb')))
+    });
+    const msg = $('#socialMsg');
+    msg.textContent = r.ok ? '✅ 已保存' : ('❌ ' + (r.error || '失败'));
+    msg.className = r.ok ? 'meta ok' : 'meta err';
+    toast(r.ok ? '一代社交配置已保存' : ('❌ ' + esc(r.error || '保存失败')), { type: r.ok ? 'ok' : 'err' });
+    if (r.ok) { loadSocialForm(); refreshSocialStatus(); }
+  });
+  $('#socialFlush').addEventListener('click', async () => {
+    const r = await api('/api/social/flush', 'POST', {});
+    const msg = $('#socialMsg');
+    msg.textContent = r.ok ? '✅ 已触发摘要投喂' : ('❌ ' + (r.error || '失败'));
+    msg.className = r.ok ? 'meta ok' : 'meta err';
+    toast(r.ok ? '已触发摘要投喂' : ('❌ ' + esc(r.error || '失败')), { type: r.ok ? 'ok' : 'err' });
+  });
+  async function setSocialPhase(phase) {
+    const key = $('#sStateKey').value;
+    if (!key) { toast('请先选择会话', { type: 'warn' }); return; }
+    const r = await api('/api/social/state', 'POST', { key, phase });
+    const msg = $('#socialMsg');
+    msg.textContent = r.ok ? ('✅ 已设为' + (phase === 'active' ? '活跃' : '观望')) : ('❌ ' + (r.error || '失败'));
+    msg.className = r.ok ? 'meta ok' : 'meta err';
+    toast(r.ok ? (esc(key) + ' → ' + (phase === 'active' ? '活跃' : '观望')) : ('❌ ' + esc(r.error || '失败')), { type: r.ok ? 'ok' : 'err' });
+    refreshSocialStatus();
+  }
+  $('#sStateActive').addEventListener('click', () => setSocialPhase('active'));
+  $('#sStateIdle').addEventListener('click', () => setSocialPhase('idle'));
+
+  /* ================= 黑话库 ================= */
+  let slangEntriesCache = [];
+  let slangSelected = new Set();
+  let slangActiveTab = 'candidate';
+  let slangModalId = null;
+  let slangModalMode = 'confirm';
+
+  function slangStatusLabel(status) {
+    return { candidate: '候选', confirmed: '已确认', rejected: '已拒绝' }[status] || esc(status);
+  }
+  function slangStatusClass(status) {
+    return { candidate: 'pill pill-accent', confirmed: 'pill pill-ok', rejected: 'pill pill-err' }[status] || 'pill';
+  }
+  function slangSourceLabel(e) {
+    if (e.source === 'manual') return '手动';
+    if (Array.isArray(e.evidence) && e.evidence.some(ev => ev.sender === 'AI提交')) return 'AI提交';
+    return '自动提取';
+  }
+  function slangEvidenceHtml(e) {
+    return Array.isArray(e.evidence) && e.evidence.length
+      ? e.evidence.slice(-2).map(ev => '<span class="meta">' + esc(String(ev.sender || '未知')) + '：' + esc(String(ev.text || '').slice(0, 30)) + '</span>').join('<br>')
+      : '<span class="meta">—</span>';
+  }
+  function slangSourcesHtml(e) {
+    return Array.isArray(e.sources) && e.sources.length
+      ? e.sources.slice(0, 5).map(s => '<span class="meta">🔗 ' + esc(s) + '</span>').join('<br>')
+      : '';
+  }
+  function slangSearchFields(e) {
+    return [e.content, e.meaning, e.usage, e.example, e.risk, Array.isArray(e.sources) ? e.sources.join(' ') : '', Array.isArray(e.evidence) ? e.evidence.map(x => x.text || '').join(' ') : ''].join(' ').toLowerCase();
+  }
+  function getSlangLimit() {
+    const id = slangActiveTab === 'candidate' ? 'slangLimitCand' : slangActiveTab === 'confirmed' ? 'slangLimitConfirmed' : 'slangLimitRejected';
+    return Math.max(10, Number($(id)?.value) || 100);
+  }
+  function getSlangSearch() {
+    const id = slangActiveTab === 'candidate' ? 'slangSearchCand' : slangActiveTab === 'confirmed' ? 'slangSearchConfirmed' : 'slangSearchRejected';
+    return String($(id)?.value || '').trim().toLowerCase();
+  }
+  function selectedIdsForStatus(status) {
+    return [...slangSelected].filter(id => slangEntriesCache.some(e => e.id === id && e.status === status));
+  }
+  function setSlangMsg(text, ok) {
+    const msg = $('#slangMsg');
+    if (!msg) return;
+    msg.textContent = text;
+    msg.className = ok ? 'meta ok' : 'meta err';
+  }
+  function setSlangTab(tab) {
+    slangActiveTab = tab;
+    $$('.slang-tab').forEach(btn => btn.classList.toggle('active', btn.dataset.slangTab === tab));
+    $$('.slang-panel').forEach(panel => panel.classList.toggle('active', panel.id === 'slangPanel' + tab[0].toUpperCase() + tab.slice(1)));
+    renderSlangPanel();
+  }
+  function updateSlangSelectAll(status) {
+    const id = status === 'candidate' ? 'slangCandidateSelectAll' : status === 'confirmed' ? 'slangConfirmedSelectAll' : 'slangRejectedSelectAll';
+    const el = document.getElementById(id);
+    if (!el) return;
+    const list = slangEntriesCache.filter(e => e.status === status);
+    const q = getSlangSearch();
+    const filtered = q ? list.filter(e => slangSearchFields(e).includes(q)) : list;
+    el.checked = filtered.length > 0 && filtered.every(e => slangSelected.has(e.id));
+    el.indeterminate = filtered.some(e => slangSelected.has(e.id)) && !el.checked;
+  }
+
+  function renderSlangPanel() {
+    const status = slangActiveTab;
+    const containerId = status === 'candidate' ? 'slangCandidateList' : status === 'confirmed' ? 'slangConfirmedList' : 'slangRejectedList';
+    const box = document.getElementById(containerId);
+    if (!box) return;
+    const list = slangEntriesCache.filter(e => e.status === status);
+    const q = getSlangSearch();
+    const filtered = q ? list.filter(e => slangSearchFields(e).includes(q)) : list;
+    if (!filtered.length) {
+      box.innerHTML = '<div class="empty-tip" style="padding:10px 12px">' + (list.length ? '没有符合条件的词条' : (status === 'candidate' ? '暂无候选黑话，等 DSH 自动提取、AI 提交或手动添加' : status === 'confirmed' ? '暂无已确认黑话' : '暂无已拒绝词条')) + '</div>';
+      updateSlangSelectAll(status);
+      return;
+    }
+    const limit = getSlangLimit();
+    const shown = filtered.slice(0, limit);
+    let html = '<div class="meta" style="padding:8px 12px">共 ' + filtered.length + ' 条，显示 ' + shown.length + ' 条（可滚动查找）</div>';
+    html += '<table class="tbl tbl-wide"><tr><th>选择</th><th>词条</th><th>次数</th><th>来源</th><th>含义 / 用法 / 示例</th><th>参考来源</th><th>语境证据</th><th>操作</th></tr>';
+    for (const e of shown) {
+      const meaning = e.meaning ? esc(e.meaning) : (status === 'candidate' ? '<span class="meta">待研究</span>' : '<span class="meta">无</span>');
+      const checked = slangSelected.has(e.id) ? ' checked' : '';
+      const actions = [];
+      if (status === 'candidate') {
+        actions.push('<button class="btn sm" data-slang-confirm="' + esc(e.id) + '">确认</button>');
+        actions.push('<button class="btn sm" data-slang-edit="' + esc(e.id) + '">编辑</button>');
+        actions.push('<button class="btn sm" data-slang-reject="' + esc(e.id) + '">拒绝</button>');
+      } else if (status === 'confirmed') {
+        actions.push('<button class="btn sm" data-slang-edit="' + esc(e.id) + '">编辑</button>');
+      } else {
+        actions.push('<button class="btn sm" data-slang-restore="' + esc(e.id) + '">恢复候选</button>');
+      }
+      actions.push('<button class="btn sm danger" data-slang-del="' + esc(e.id) + '">删</button>');
+      html += '<tr><td><input type="checkbox" data-slang-select="' + esc(e.id) + '"' + checked + '></td>' +
+        '<td><b>' + esc(e.content) + '</b><br><span class="' + slangStatusClass(status) + '">' + slangStatusLabel(status) + '</span></td>' +
+        '<td>' + esc(e.count) + '</td><td>' + esc(slangSourceLabel(e)) + '</td>' +
+        '<td>' + meaning + (e.usage ? '<br><span class="meta">用法：' + esc(e.usage) + '</span>' : '') + (e.example ? '<br><span class="meta">例：' + esc(e.example) + '</span>' : '') + (e.risk ? '<br><span class="meta">风险：' + esc(e.risk) + '</span>' : '') + '</td>' +
+        '<td>' + (slangSourcesHtml(e) || '<span class="meta">—</span>') + '</td>' +
+        '<td>' + slangEvidenceHtml(e) + '</td>' +
+        '<td style="white-space:nowrap">' + actions.join('') + '</td></tr>';
+    }
+    box.innerHTML = html + '</table>';
+    box.querySelectorAll('[data-slang-select]').forEach(cb => cb.addEventListener('change', () => {
+      const id = cb.dataset.slangSelect;
+      if (cb.checked) slangSelected.add(id); else slangSelected.delete(id);
+      updateSlangSelectAll(status);
+    }));
+    box.querySelectorAll('[data-slang-confirm]').forEach(btn => btn.addEventListener('click', () => openSlangModal(btn.dataset.slangConfirm, 'confirm')));
+    box.querySelectorAll('[data-slang-edit]').forEach(btn => btn.addEventListener('click', () => openSlangModal(btn.dataset.slangEdit, 'edit')));
+    box.querySelectorAll('[data-slang-reject]').forEach(btn => btn.addEventListener('click', async () => {
+      const r2 = await api('/api/slang/' + btn.dataset.slangReject + '/reject', 'POST', {});
+      setSlangMsg(r2.ok ? '✅ 已拒绝' : ('❌ ' + (r2.error || '失败')), r2.ok);
+      toast(r2.ok ? '已拒绝该词条' : ('❌ ' + esc(r2.error || '失败')), { type: r2.ok ? 'warn' : 'err' });
+      refreshSlang();
+    }));
+    box.querySelectorAll('[data-slang-restore]').forEach(btn => btn.addEventListener('click', async () => {
+      const e = slangEntriesCache.find(x => x.id === btn.dataset.slangRestore);
+      if (!e) return;
+      const r2 = await api('/api/slang/' + e.id, 'PATCH', { status: 'candidate' });
+      setSlangMsg(r2.ok ? '✅ 已恢复为候选' : ('❌ ' + (r2.error || '失败')), r2.ok);
+      toast(r2.ok ? '已恢复为候选' : ('❌ ' + esc(r2.error || '失败')), { type: r2.ok ? 'ok' : 'err' });
+      refreshSlang();
+    }));
+    box.querySelectorAll('[data-slang-del]').forEach(btn => btn.addEventListener('click', async () => {
+      if (!await confirmBox('确定删除该黑话？此操作不可恢复。')) return;
+      const r2 = await api('/api/slang/' + btn.dataset.slangDel, 'DELETE', {});
+      setSlangMsg(r2.ok ? '✅ 已删除' : ('❌ ' + (r2.error || '失败')), r2.ok);
+      toast(r2.ok ? '已删除' : ('❌ ' + esc(r2.error || '失败')), { type: r2.ok ? 'warn' : 'err' });
+      slangSelected.delete(btn.dataset.slangDel);
+      refreshSlang();
+    }));
+    updateSlangSelectAll(status);
+  }
+
+  async function refreshSlang() {
+    try {
+      const r = await api('/api/slang');
+      slangEntriesCache = r.entries || [];
+      renderSlangPanel();
+    } catch (e) {
+      const box = $('#slangCandidateList');
+      if (box) box.innerHTML = '<div class="empty-tip">加载失败</div>';
+    }
+  }
+
+  function openSlangModal(id, mode) {
+    const e = slangEntriesCache.find(x => x.id === id);
+    if (!e) return;
+    slangModalId = id;
+    slangModalMode = mode;
+    $('#slangModalTitle').textContent = mode === 'confirm' ? '确认黑话：' + e.content : '编辑黑话：' + e.content;
+    $('#slangModalContent').textContent = mode === 'confirm'
+      ? '可以直接填写含义/用法并转正，也可以先送 DSH 深度联网研究，研究结果回来后在此处删改再确认。'
+      : '修改后保存；候选不会转正，已确认仍保持已确认。';
+    $('#slangModalMeaning').value = e.meaning || '';
+    $('#slangModalUsage').value = e.usage || '';
+    $('#slangModalExample').value = e.example || '';
+    $('#slangModalRisk').value = e.risk || '';
+    $('#slangModalSources').value = Array.isArray(e.sources) ? e.sources.join('\n') : '';
+    $('#slangModalDirectConfirm').textContent = mode === 'confirm' ? '直接确认（转正）' : '保存修改';
+    $('#slangModalSendResearch').style.display = mode === 'confirm' && e.status === 'candidate' ? '' : 'none';
+    $('#slangModalOverlay').classList.add('open');
+  }
+  function closeSlangModal() {
+    $('#slangModalOverlay').classList.remove('open');
+    slangModalId = null;
+  }
+  function readSlangModalPayload() {
+    return {
+      meaning: $('#slangModalMeaning').value.trim(),
+      usage: $('#slangModalUsage').value.trim(),
+      example: $('#slangModalExample').value.trim(),
+      risk: $('#slangModalRisk').value.trim(),
+      sources: $('#slangModalSources').value.split(/\n/).map(s => s.trim()).filter(Boolean)
+    };
+  }
+
+  $$('.slang-tab').forEach(btn => btn.addEventListener('click', () => setSlangTab(btn.dataset.slangTab)));
+  $('#slangSearchCand').addEventListener('input', renderSlangPanel);
+  $('#slangSearchConfirmed').addEventListener('input', renderSlangPanel);
+  $('#slangSearchRejected').addEventListener('input', renderSlangPanel);
+  $('#slangLimitCand').addEventListener('change', renderSlangPanel);
+  $('#slangLimitConfirmed').addEventListener('change', renderSlangPanel);
+  $('#slangLimitRejected').addEventListener('change', renderSlangPanel);
+  [['slangCandidateSelectAll', 'candidate'], ['slangConfirmedSelectAll', 'confirmed'], ['slangRejectedSelectAll', 'rejected']].forEach(([id, st]) => {
+    document.getElementById(id).addEventListener('change', (e) => {
+      const list = slangEntriesCache.filter(x => x.status === st);
+      const q = getSlangSearch();
+      const filtered = q ? list.filter(x => slangSearchFields(x).includes(q)) : list;
+      for (const x of filtered) { if (e.target.checked) slangSelected.add(x.id); else slangSelected.delete(x.id); }
+      renderSlangPanel();
+    });
+  });
+
+  $('#slangBatchResearch').addEventListener('click', async () => {
+    const ids = selectedIdsForStatus('candidate');
+    if (!ids.length) { toast('请先勾选要研究的候选词', { type: 'warn' }); return; }
+    const r = await api('/api/slang/research', 'POST', { ids });
+    setSlangMsg(r.ok ? '✅ 已送 ' + r.count + ' 条候选到 DSH 深度联网研究，完成后刷新查看结果' : ('❌ ' + (r.error || '失败')), r.ok);
+    toast(r.ok ? '已送 ' + r.count + ' 条到 DSH 深度研究' : ('❌ ' + esc(r.error || '失败')), { type: r.ok ? 'ok' : 'err' });
+    if (r.ok) refreshSlang();
+  });
+  $('#slangBatchConfirm').addEventListener('click', async () => {
+    const ids = selectedIdsForStatus('candidate');
+    if (!ids.length) { toast('请先勾选要确认的候选词', { type: 'warn' }); return; }
+    if (!await confirmBox('确定批量确认 ' + ids.length + ' 条候选？缺少含义的会被跳过。')) return;
+    const r = await api('/api/slang/batch-confirm', 'POST', { ids });
+    setSlangMsg(r.ok ? '✅ 已确认 ' + r.confirmedCount + ' 条，跳过 ' + r.skippedCount + ' 条' : ('❌ ' + (r.error || '失败')), r.ok);
+    toast(r.ok ? '已确认 ' + r.confirmedCount + ' 条' : ('❌ ' + esc(r.error || '失败')), { type: r.ok ? 'ok' : 'err' });
+    if (r.ok) { slangSelected.clear(); refreshSlang(); }
+  });
+  $('#slangBatchReject').addEventListener('click', async () => {
+    const ids = selectedIdsForStatus('candidate');
+    if (!ids.length) { toast('请先勾选要拒绝的候选词', { type: 'warn' }); return; }
+    if (!await confirmBox('确定拒绝 ' + ids.length + ' 条候选？')) return;
+    const r = await api('/api/slang/batch-reject', 'POST', { ids });
+    setSlangMsg(r.ok ? '✅ 已拒绝 ' + r.rejectedCount + ' 条' : ('❌ ' + (r.error || '失败')), r.ok);
+    toast(r.ok ? '已拒绝 ' + r.rejectedCount + ' 条' : ('❌ ' + esc(r.error || '失败')), { type: r.ok ? 'warn' : 'err' });
+    if (r.ok) { slangSelected.clear(); refreshSlang(); }
+  });
+  $('#slangBatchDeleteCand').addEventListener('click', async () => {
+    const ids = selectedIdsForStatus('candidate');
+    if (!ids.length) { toast('请先勾选要删除的候选词', { type: 'warn' }); return; }
+    if (!await confirmBox('确定删除 ' + ids.length + ' 条候选？此操作不可恢复！')) return;
+    const r = await api('/api/slang/batch-delete', 'POST', { ids });
+    setSlangMsg(r.ok ? '✅ 已删除 ' + r.removedCount + ' 条候选' : ('❌ ' + (r.error || '失败')), r.ok);
+    toast(r.ok ? '已删除 ' + r.removedCount + ' 条' : ('❌ ' + esc(r.error || '失败')), { type: r.ok ? 'warn' : 'err' });
+    if (r.ok) { slangSelected.clear(); refreshSlang(); }
+  });
+  $('#slangBatchDeleteConfirmed').addEventListener('click', async () => {
+    const ids = selectedIdsForStatus('confirmed');
+    if (!ids.length) { toast('请先勾选要删除的已确认词条', { type: 'warn' }); return; }
+    if (!await confirmBox('确定删除 ' + ids.length + ' 条已确认黑话？此操作不可恢复！')) return;
+    const r = await api('/api/slang/batch-delete', 'POST', { ids });
+    setSlangMsg(r.ok ? '✅ 已删除 ' + r.removedCount + ' 条已确认' : ('❌ ' + (r.error || '失败')), r.ok);
+    toast(r.ok ? '已删除 ' + r.removedCount + ' 条' : ('❌ ' + esc(r.error || '失败')), { type: r.ok ? 'warn' : 'err' });
+    if (r.ok) { slangSelected.clear(); refreshSlang(); }
+  });
+  $('#slangBatchDeleteRejected').addEventListener('click', async () => {
+    const ids = selectedIdsForStatus('rejected');
+    if (!ids.length) { toast('请先勾选要删除的已拒绝词条', { type: 'warn' }); return; }
+    if (!await confirmBox('确定删除 ' + ids.length + ' 条已拒绝词条？此操作不可恢复！')) return;
+    const r = await api('/api/slang/batch-delete', 'POST', { ids });
+    setSlangMsg(r.ok ? '✅ 已删除 ' + r.removedCount + ' 条已拒绝' : ('❌ ' + (r.error || '失败')), r.ok);
+    toast(r.ok ? '已删除 ' + r.removedCount + ' 条' : ('❌ ' + esc(r.error || '失败')), { type: r.ok ? 'warn' : 'err' });
+    if (r.ok) { slangSelected.clear(); refreshSlang(); }
+  });
+  $('#slangBatchRestore').addEventListener('click', async () => {
+    const ids = selectedIdsForStatus('rejected');
+    if (!ids.length) { toast('请先勾选要恢复的已拒绝词条', { type: 'warn' }); return; }
+    let okCount = 0;
+    for (const id of ids) {
+      const r = await api('/api/slang/' + id, 'PATCH', { status: 'candidate' });
+      if (r.ok) okCount++;
+    }
+    setSlangMsg('✅ 已恢复 ' + okCount + '/' + ids.length + ' 条为候选', true);
+    toast('已恢复 ' + okCount + '/' + ids.length + ' 条为候选');
+    if (okCount) { slangSelected.clear(); refreshSlang(); }
+  });
+  $('#slangModalDirectConfirm').addEventListener('click', async () => {
+    if (!slangModalId) return;
+    const payload = readSlangModalPayload();
+    if (!payload.meaning) { toast('请先填写含义，确认后才会注入 AI 上下文', { type: 'warn' }); return; }
+    const e = slangEntriesCache.find(x => x.id === slangModalId);
+    if (!e) return;
+    const path = slangModalMode === 'confirm' ? '/api/slang/' + e.id + '/confirm' : '/api/slang/' + e.id;
+    const r2 = await api(path, slangModalMode === 'confirm' ? 'POST' : 'PATCH', payload);
+    if (!r2.ok) toast('❌ ' + esc(r2.error || '保存失败'), { type: 'err' });
+    setSlangMsg(r2.ok ? (slangModalMode === 'confirm' ? '✅ 已确认转正' : '✅ 已保存') : ('❌ ' + (r2.error || '失败')), r2.ok);
+    toast(r2.ok ? (slangModalMode === 'confirm' ? '已确认转正' : '已保存') : ('❌ ' + esc(r2.error || '失败')), { type: r2.ok ? 'ok' : 'err' });
+    closeSlangModal();
+    refreshSlang();
+  });
+  $('#slangModalSendResearch').addEventListener('click', async () => {
+    if (!slangModalId) return;
+    const r = await api('/api/slang/research', 'POST', { ids: [slangModalId] });
+    setSlangMsg(r.ok ? '✅ 已送「' + (slangEntriesCache.find(x => x.id === slangModalId)?.content || '') + '」到 DSH 深度联网研究，稍后刷新查看结果' : ('❌ ' + (r.error || '失败')), r.ok);
+    toast(r.ok ? '已送 DSH 深度研究' : ('❌ ' + esc(r.error || '失败')), { type: r.ok ? 'ok' : 'err' });
+    closeSlangModal();
+    refreshSlang();
+  });
+  $('#slangModalCancel').addEventListener('click', closeSlangModal);
+  $('#slangModalOverlay').addEventListener('click', (e) => { if (e.target.id === 'slangModalOverlay') closeSlangModal(); });
+
+  $('#slangAdd').addEventListener('click', async () => {
+    const content = $('#slangContent').value.trim();
+    const meaning = $('#slangMeaning').value.trim();
+    const usage = $('#slangUsage').value.trim();
+    const example = $('#slangExample').value.trim();
+    if (!content) { toast('词条不能为空', { type: 'warn' }); return; }
+    const r = await api('/api/slang', 'POST', { content, meaning, usage, example });
+    setSlangMsg(r.ok ? '✅ 已添加' : ('❌ ' + (r.error || '失败')), r.ok);
+    toast(r.ok ? '黑话 <b>' + esc(content) + '</b> 已入库' : ('❌ ' + esc(r.error || '失败')), { type: r.ok ? 'ok' : 'err' });
+    if (r.ok) {
+      $('#slangContent').value = ''; $('#slangMeaning').value = '';
+      $('#slangUsage').value = ''; $('#slangExample').value = '';
+      refreshSlang();
+    }
+  });
+  $('#slangExtract').addEventListener('click', async () => {
+    const r = await api('/api/slang/extract', 'POST', {});
+    setSlangMsg(r.ok ? '✅ 已触发提取' : ('❌ ' + (r.error || '失败')), r.ok);
+    toast(r.ok ? '已触发提取' : ('❌ ' + esc(r.error || '失败')), { type: r.ok ? 'ok' : 'err' });
+  });
+  $('#slangResearch').addEventListener('click', async () => {
+    const r = await api('/api/slang/research', 'POST', {});
+    setSlangMsg(r.ok ? ('✅ 已触发研究 ' + r.count + ' 条') : ('❌ ' + (r.error || '失败')), r.ok);
+    toast(r.ok ? ('已触发研究 ' + r.count + ' 条') : ('❌ ' + esc(r.error || '失败')), { type: r.ok ? 'ok' : 'err' });
+  });
+  function loadSlangConfig() {
+    api('/api/slang').then(r => {
+      const c = r.config || {};
+      $('#slangEnabled').checked = c.enabled !== false;
+      $('#slangExtractMin').value = c.extractMinMessages ?? 10;
+      $('#slangCooldown').value = c.extractCooldownMs ?? 300000;
+      $('#slangThresholds').value = (c.inferenceThresholds || [2, 4, 8]).join(', ');
+      $('#slangInjectMax').value = c.injectMax ?? 8;
+      $('#slangLearnerPreset').value = c.learnerPreset || 'qq-chat';
+      $('#slangWorkspaceTitle').value = c.workspaceTitle || 'QQ 黑话学习';
+      $('#slangAutoResearch').checked = c.autoResearch !== false;
+    }).catch(() => {});
+  }
+  $('#slangConfigSave').addEventListener('click', async () => {
+    const r = await api('/api/slang/config', 'POST', {
+      enabled: $('#slangEnabled').checked,
+      extractMinMessages: Number($('#slangExtractMin').value) || 10,
+      extractCooldownMs: Number($('#slangCooldown').value) || 300000,
+      inferenceThresholds: $('#slangThresholds').value.split(/[,，\s]+/).map(Number).filter(Boolean),
+      injectMax: Number($('#slangInjectMax').value) || 8,
+      learnerPreset: $('#slangLearnerPreset').value.trim(),
+      workspaceTitle: $('#slangWorkspaceTitle').value.trim(),
+      autoResearch: $('#slangAutoResearch').checked
+    });
+    const msg = $('#slangConfigMsg');
+    msg.textContent = r.ok ? '✅ 已保存' : ('❌ ' + (r.error || '失败'));
+    msg.className = r.ok ? 'meta ok' : 'meta err';
+    toast(r.ok ? '黑话参数已保存' : ('❌ ' + esc(r.error || '失败')), { type: r.ok ? 'ok' : 'err' });
+    if (r.ok) loadSlangConfig();
+  });
+
+  /* ================= 文件/音频发送 ================= */
+  async function loadFileSendConfig() {
+    try {
+      const r = await api('/api/fileSend');
+      const fs = r.fileSend || {};
+      const g = Number(fs.volumeGain) || 1;
+      $('#fsGainSlider').value = g;
+      $('#fsGainVal').textContent = g.toFixed(1) + 'x';
+    } catch (e) {}
+  }
+  $('#fsGainSlider')?.addEventListener('input', (e) => {
+    $('#fsGainVal').textContent = Number(e.target.value).toFixed(1) + 'x';
+  });
+  $('#fsGainSave')?.addEventListener('click', async () => {
+    const g = Number($('#fsGainSlider').value);
+    const msg = $('#fsGainMsg');
+    try {
+      const r = await api('/api/fileSend', 'POST', { volumeGain: g });
+      msg.textContent = r.ok ? ('✅ 已保存 ' + g.toFixed(1) + 'x，语音发送即时生效') : ('❌ ' + (r.error || '保存失败'));
+      msg.className = r.ok ? 'meta ok' : 'meta err';
+      toast(r.ok ? '音量增益已保存（' + g.toFixed(1) + 'x）' : ('❌ ' + esc(r.error || '失败')), { type: r.ok ? 'ok' : 'err' });
+    } catch (e) {
+      msg.textContent = '❌ 保存失败：' + e.message;
+      msg.className = 'meta err';
+    }
+  });
+
+  /* ================= 酷狗登录 ================= */
+  let kugouQrTimer = null;
+  async function loadKugouLogin() {
+    try {
+      const r = await api('/api/kugou');
+      const status = $('#kugouStatus');
+      if (!status) return;
+      if (r.ok && r.info && r.info.loggedIn) {
+        const vip = r.info.isSvip ? 'SVIP 豪华会员' : r.info.isVip ? 'VIP 会员' : '非会员';
+        const fallbackNick = '酷狗 ' + (r.info.userId || '');
+        const nick = (r.info.nickname && r.info.nickname !== fallbackNick) ? r.info.nickname : ('酷狗用户 ' + (r.info.userId || ''));
+        status.innerHTML = '当前已登录：<b>' + esc(nick) + '</b>（' + vip + '）';
+        status.className = 'meta ok';
+      } else {
+        status.textContent = r.configured ? '已配置 Cookie 但未检测到有效登录态（缺少 userid/token）' : '未登录';
+        status.className = 'meta';
+      }
+    } catch (e) {}
+  }
+  function kugouStopQrPoll() {
+    if (kugouQrTimer) { clearInterval(kugouQrTimer); kugouQrTimer = null; }
+  }
+  $('#kugouQrLogin')?.addEventListener('click', async () => {
+    const msg = $('#kugouMsg');
+    const wrap = $('#kugouQrWrap');
+    const img = $('#kugouQrImg');
+    const st = $('#kugouQrStatus');
+    msg.textContent = '正在生成二维码…';
+    msg.className = 'meta';
+    try {
+      const r = await api('/api/kugou/qr', 'POST', {});
+      if (!r.ok || !r.qrcodeImg) { msg.textContent = '❌ ' + (r.error || '二维码生成失败'); msg.className = 'meta err'; return; }
+      img.src = r.qrcodeImg;
+      wrap.style.display = 'block';
+      st.textContent = '请用酷狗音乐 App 扫码';
+      msg.textContent = '';
+      kugouStopQrPoll();
+      kugouQrTimer = setInterval(() => kugouPollQr(), 2000);
+    } catch (e) {
+      msg.textContent = '❌ 生成失败：' + e.message;
+      msg.className = 'meta err';
+    }
+  });
+  async function kugouPollQr() {
+    const st = $('#kugouQrStatus');
+    const msg = $('#kugouMsg');
+    try {
+      const r = await api('/api/kugou/qr/status');
+      const s = r.status;
+      if (s === 4) {
+        kugouStopQrPoll();
+        $('#kugouQrWrap').style.display = 'none';
+        st.textContent = '登录成功';
+        msg.textContent = '✅ 登录成功：' + ((r.info && r.info.nickname) || (r.info && r.info.userId) || '');
+        msg.className = 'meta ok';
+        toast('酷狗登录成功 🎉');
+        loadKugouLogin();
+      } else if (s === 2) {
+        st.textContent = '已扫码，请在手机上确认登录';
+      } else if (s === 0) {
+        kugouStopQrPoll();
+        st.textContent = '二维码已过期，请重新生成';
+        msg.textContent = '二维码已过期，请重新点击「一键扫码登录」';
+        msg.className = 'meta err';
+      } else {
+        st.textContent = '等待扫码…';
+      }
+    } catch (e) {}
+  }
+  $('#kugouSave')?.addEventListener('click', async () => {
+    const input = $('#kugouCookieInput');
+    const msg = $('#kugouMsg');
+    const cookie = (input?.value || '').trim();
+    if (!cookie) { msg.textContent = '❌ 请先粘贴 Cookie'; msg.className = 'meta err'; return; }
+    msg.textContent = '验证中…';
+    msg.className = 'meta';
+    try {
+      const r = await api('/api/kugou', 'POST', { cookie });
+      if (r.ok) {
+        msg.textContent = '✅ 登录成功：' + ((r.info && r.info.nickname) || (r.info && r.info.userId) || '');
+        msg.className = 'meta ok';
+        toast('酷狗 Cookie 已保存并验证通过');
+        loadKugouLogin();
+      } else {
+        msg.textContent = '❌ ' + (r.error || '登录失败');
+        msg.className = 'meta err';
+      }
+    } catch (e) {
+      msg.textContent = '❌ 保存失败：' + e.message;
+      msg.className = 'meta err';
+    }
+  });
+  $('#kugouClear').addEventListener('confirmed', async () => {
+    const msg = $('#kugouMsg');
+    try {
+      kugouStopQrPoll();
+      const r = await api('/api/kugou', 'DELETE', {});
+      $('#kugouCookieInput').value = '';
+      $('#kugouQrWrap').style.display = 'none';
+      if (r.ok) { msg.textContent = '✅ 已退出登录'; msg.className = 'meta ok'; toast('酷狗已退出登录', { type: 'warn' }); loadKugouLogin(); }
+      else { msg.textContent = '❌ ' + (r.error || '清除失败'); msg.className = 'meta err'; }
+    } catch (e) {
+      msg.textContent = '❌ 清除失败：' + e.message;
+      msg.className = 'meta err';
+    }
+  });
+
+  /* ================= 控制台令牌 ================= */
+  async function changeConsoleToken(generate) {
+    const input = $('#consoleTokenInput');
+    const msg = $('#consoleTokenMsg');
+    const token = generate ? '' : input.value.trim();
+    if (!generate && token && token.length < 16) {
+      msg.textContent = '❌ 令牌至少需要 16 位';
+      msg.className = 'meta err';
+      toast('令牌至少需要 16 位', { type: 'err' });
+      return;
+    }
+    const r = await api('/api/console/token', 'POST', { token });
+    if (!r.ok) {
+      msg.textContent = '❌ ' + (r.error || '修改失败');
+      msg.className = 'meta err';
+      toast('❌ ' + esc(r.error || '修改失败'), { type: 'err' });
+      return;
+    }
+    localStorage.setItem('consoleToken', r.token);
+    input.value = r.token;
+    msg.textContent = r.generated ? ('✅ 已生成随机令牌：' + r.token) : '✅ 已保存新令牌';
+    msg.className = 'meta ok';
+    toast(r.generated ? '已生成随机令牌，本页面已自动切换' : '令牌已更新，本页面已自动切换', { type: 'warn' });
+  }
+  $('#consoleTokenSave').addEventListener('click', () => changeConsoleToken(false));
+  $('#consoleTokenRandom').addEventListener('confirmed', () => changeConsoleToken(true));
+
+  /* ================= 启动 ================= */
+  refresh(); refreshRoles(); refreshWhitelist(); refreshSessions(); refreshPending(); refreshPresets();
+  loadSocialForm(); loadV2Config(); refreshV2Activity(); loadV2ToolLog(); loadV2SessionOptions();
+  refreshSocialStatus(); refreshSlang(); loadSlangConfig(); loadSecurity(); loadFileSendConfig(); loadKugouLogin();
+  setInterval(() => {
+    if (document.hidden) return; // 后台标签页暂停轮询
+    refresh(); refreshSessions(); refreshPending(); refreshSocialStatus(); refreshSlang();
+  }, 3000);
+})();
+</script>
+</body>
+</html>

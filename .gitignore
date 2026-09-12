@@ -30,3 +30,6 @@ config.json
 /scripts/patch-qq-chat-v2-presleep.mjs
 /scripts/patch-qq-chat-v2-stickers.mjs
 /scripts/patch-web-mcp-timeout.mjs
+
+# UI design demos archive (unselected proposals, local reference only)
+/design-demos/archive/
