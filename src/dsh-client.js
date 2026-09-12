@@ -1,101 +1,138 @@
-// Node 环境的 DSH Web API 客户端。
-// 协议：unary RPC 走 POST /api/<method>（fetch），事件流走 WebSocket 下行（/api/events.mux、/api/events.host）。
-// 复用官方 @deepseek-ai/dsh-host-apiproxy 的 AbstractApiClient 与 zod schema，只替换传输层。
-import { AbstractApiClient } from '@deepseek-ai/dsh-host-apiproxy/client';
-import { serverRequestSchema } from '@deepseek-ai/dsh-host-apiproxy/api/rpc.schema';
-import { muxFrameSchema, hostFrameSchema } from '@deepseek-ai/dsh-host-apiproxy/api/events.schema';
+// Node 环境的 DSH Web API 客户端（适配 DSH 0.1.5+ "Typert 网关"协议）。
+// unary RPC：POST /api/<ns/method>，body = {type:'client-request', rpcId, method, payload:{args}}，
+//           响应 {type:'server-response', rpcId, result:{ok,value|error}}。
+// 事件/会话流：WebSocket /api/remote.mux，客户端发 {type:'open', streamId, endpoint, payload:{args}}，
+//             服务端下发 {type:'item'|'end'|'error', streamId, ...}（ping/pong 由 ws 自动处理）。
+// 鉴权：DSH 0.1.5 起 /api/* 强制浏览器会话 Cookie（回环地址也不例外），由 ./dsh-auth.js 离线锻造。
+// 端点速查（0.1.5-rc.1/rc.2 实测）：session/create|prompt|selectModel|list|cancel|follow，
+//   workspace/create|rename|delete|archiveSession|follow，settings/describe，agentPresets/list，
+//   $events（全局事件流）、$events/result（瀑布事件应答）。旧协议 /api/events.mux 已移除。
+import WebSocket from 'ws';
+import { resolveDshAuthCookie } from './dsh-auth.js';
 
-export class NodeApiClient extends AbstractApiClient {
-  constructor(baseUrl, timeoutMs) {
-    super(timeoutMs);
+export class NodeApiClient {
+  constructor(baseUrl, { authCookie } = {}) {
     this.baseUrl = String(baseUrl ?? 'http://127.0.0.1:3080').replace(/\/+$/, '');
+    this.authCookieOption = authCookie;
+    this.rpcSeq = 0;
+    this.streamSeq = 0;
   }
 
-  /** Node 没有 location；把 base 固定为配置的 DSH 地址（回环地址天然通过 /api 信任栅栏）。 */
-  resolveBase() {
-    return this.baseUrl;
+  authCookie() {
+    return resolveDshAuthCookie(this.baseUrl, this.authCookieOption);
   }
 
-  doFetch(input, init) {
-    return fetch(input, init);
+  /** 新版 unary RPC：payload 固定包一层 {args}；业务错误与传输错误都抛 Error（含端点名）。 */
+  async callEndpoint(endpoint, args = {}, signal) {
+    const rpcId = `qq-bridge-${Date.now().toString(36)}-${(++this.rpcSeq).toString(36)}`;
+    let res;
+    try {
+      res = await fetch(`${this.baseUrl}/api/${endpoint}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', cookie: this.authCookie() },
+        body: JSON.stringify({ type: 'client-request', rpcId, method: endpoint, payload: { args } }),
+        signal
+      });
+    } catch (error) {
+      throw new Error(`${endpoint}: 传输失败（${error?.cause?.code ?? error?.message ?? error}）`);
+    }
+    const text = await res.text();
+    let full = null;
+    try { full = JSON.parse(text); } catch { /* 非 JSON（如纯文本 4xx） */ }
+    if (!res.ok || !full || full.type !== 'server-response' || full.rpcId !== rpcId) {
+      const hint = res.status === 401 ? '（鉴权被拒：检查 DSH 是否为 0.1.5+ 且 .dsh/.credentials.yaml 可读）'
+        : res.status === 403 ? '（Host/Origin 栅栏拒绝）' : '';
+      throw new Error(`${endpoint}: HTTP ${res.status}${hint}${full ? '' : ` ${text.slice(0, 120)}`}`);
+    }
+    if (!full.result.ok) {
+      const { code, message } = full.result.error ?? {};
+      throw new Error(`${endpoint} failed: ${code}: ${message}`);
+    }
+    return full.result.value;
   }
 
-  openMux(_payload, signal, onOpen) {
-    return this.readWebSocket('/api/events.mux', signal, muxFrameSchema, onOpen);
+  /** 应答一条瀑布事件（user-questions/request 或 approval/request）。 */
+  answerRemoteEvent(clientId, eventId, outcome) {
+    return this.callEndpoint('$events/result', { clientId, eventId, outcome });
   }
 
-  openHost(_payload, signal, onOpen) {
-    return this.readWebSocket('/api/events.host', signal, hostFrameSchema, onOpen);
-  }
-
-  /** 与浏览器 WebApiClient 相同的下行协议：只读 WebSocket，文本帧即 server-request 信封。 */
-  async *readWebSocket(path, signal, frameSchema, onOpen) {
-    // 调用方不传 signal 时自建一个（Node 端 pump 常省略该参数）
-    const own = signal === undefined ? new AbortController() : undefined;
-    const sig = signal ?? own.signal;
-    const url = new URL(path, this.baseUrl);
-    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
-    const socket = new WebSocket(url);
+  /**
+   * 打开一条 /api/remote.mux 逻辑流，异步迭代服务端下发的每个 item.value。
+   * - $events 流首帧为 {type:'ready', clientId, host}；
+   * - session/follow 流首帧为 {type:'snapshot', ...}，随后为 {type:'event', event}；
+   * - error 帧抛 Error；end 帧与 socket 断开正常 return（调用方据此决定重连）。
+   * options.signal 中止时立即关闭 socket；options.onSocket 用于外部监听底层连接事件。
+   */
+  async *openRemoteStream(endpoint, args = {}, options = {}) {
+    const streamId = `qq-bridge-s${(++this.streamSeq).toString(36)}`;
+    const url = this.baseUrl.replace(/^http/, 'ws') + '/api/remote.mux';
+    const socket = new WebSocket(url, { headers: { cookie: this.authCookie() } });
     const inbox = [];
     let wake;
+    let settled = false;
     const enqueue = (item) => {
       inbox.push(item);
       wake?.();
       wake = undefined;
     };
-    const handleOpen = () => {
-      // DSH 的 events.mux / events.host 是“仅下行”WebSocket：
-      // 服务端收到任何客户端消息都会以 1008 downlink only 关闭，
-      // 因此不能做应用层 ping/pong，也不应因“一段时间没有下行消息”就主动断开。
-      // 之前 90s 空闲 watchdog 是日志里频繁“连接 DSH 事件流…”的根源。
-      // 现在改为长连接保活：不因空闲主动 close；
-      // 断线/重启由 WebSocket close/error 事件驱动，桥接另有 5s 一次的 HTTP checkDsh 兜底。
-      onOpen?.();
-    };
-    const handleMessage = (event) => {
-      let full;
-      let frame;
+    socket.on('open', () => {
       try {
-        if (typeof event.data !== 'string') throw new Error('binary WebSocket frame');
-        full = serverRequestSchema.parse(JSON.parse(event.data));
-        frame = frameSchema.parse(full.payload);
+        socket.send(JSON.stringify({ type: 'open', streamId, endpoint, payload: { args } }));
       } catch (error) {
-        console.error(`[dsh-client] dropping malformed WebSocket frame on ${path}:`, error);
+        enqueue({ kind: 'socket-error', message: `打开流失败：${error?.message ?? error}` });
+      }
+    });
+    socket.on('message', (data) => {
+      let msg;
+      try {
+        msg = JSON.parse(data.toString());
+      } catch {
+        console.error(`[dsh-client] 丢弃 ${endpoint} 流上的非 JSON 帧`);
         return;
       }
-      this.onEnvelope(full);
-      enqueue({ kind: 'frame', envelope: { rpcId: full.rpcId, payload: frame } });
+      if (msg.streamId !== streamId) return;
+      if (msg.type === 'item') enqueue({ kind: 'item', value: msg.value });
+      else if (msg.type === 'end') enqueue({ kind: 'end' });
+      else if (msg.type === 'error') enqueue({ kind: 'error', error: msg.error });
+    });
+    socket.on('close', (code, reason) => {
+      if (!settled) enqueue({ kind: 'socket-close', code, reason: String(reason ?? '') });
+    });
+    socket.on('error', (error) => {
+      enqueue({ kind: 'socket-error', message: error?.message ?? String(error) });
+    });
+    const abort = () => {
+      try { socket.close(); } catch { /* 已关闭 */ }
     };
-    const handleClose = () => enqueue({ kind: 'end' });
-    const handleError = () => enqueue({ kind: 'end' });
-    const handleAbort = () => {
-      if (socket.readyState === WebSocket.CONNECTING || socket.readyState === WebSocket.OPEN) socket.close();
-    };
-    socket.addEventListener('open', handleOpen);
-    socket.addEventListener('message', handleMessage);
-    socket.addEventListener('close', handleClose, { once: true });
-    socket.addEventListener('error', handleError, { once: true });
-    sig.addEventListener('abort', handleAbort, { once: true });
-    if (sig.aborted) handleAbort();
+    options.signal?.addEventListener('abort', abort, { once: true });
+    if (options.signal?.aborted) abort();
+    options.onSocket?.(socket);
     try {
-      while (true) {
+      for (;;) {
         while (inbox.length > 0) {
           const item = inbox.shift();
-          if (item.kind === 'end') return;
-          yield item.envelope;
+          if (item.kind === 'item') {
+            yield item.value;
+          } else if (item.kind === 'end') {
+            settled = true;
+            return;
+          } else if (item.kind === 'error') {
+            settled = true;
+            throw new Error(`${endpoint} 流错误: ${item.error?.code}: ${item.error?.message}`);
+          } else if (item.kind === 'socket-error') {
+            settled = true;
+            throw new Error(`${endpoint} WebSocket 错误: ${item.message}`);
+          } else if (item.kind === 'socket-close') {
+            settled = true;
+            return;
+          }
         }
-        await new Promise((resolve) => {
-          wake = resolve;
-        });
+        await new Promise((resolve) => { wake = resolve; });
       }
     } finally {
-      sig.removeEventListener('abort', handleAbort);
-      socket.removeEventListener('open', handleOpen);
-      socket.removeEventListener('message', handleMessage);
-      socket.removeEventListener('close', handleClose);
-      socket.removeEventListener('error', handleError);
-      own?.abort();
-      handleAbort();
+      settled = true;
+      options.signal?.removeEventListener('abort', abort);
+      try { socket.close(); } catch { /* 已关闭 */ }
     }
   }
 }

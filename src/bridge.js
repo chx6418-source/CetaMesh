@@ -939,27 +939,30 @@ async function main() {
   async function ensureSlangLearnerSession() {
     if (slangLearnerSessionId) {
       learnerSessions.add(slangLearnerSessionId);
+      ensureFollowStream(slangLearnerSessionId);
       return slangLearnerSessionId;
     }
     const saved = readJsonSafe(SLANG_SESSION_FILE, null);
     if (saved?.sessionId) {
       slangLearnerSessionId = String(saved.sessionId);
       learnerSessions.add(slangLearnerSessionId);
+      ensureFollowStream(slangLearnerSessionId);
       return slangLearnerSessionId;
     }
     const dir = path.join(STATE_DIR, 'slang-agent');
     fs.mkdirSync(dir, { recursive: true });
-    const wsValue = unwrap(await api.workspace.create({ path: dir }), 'slang workspace.create');
+    const wsValue = await api.callEndpoint('workspace/create', { request: { path: dir } });
     const workspaceTitle = cfg.slang?.workspaceTitle || 'QQ 黑话学习';
     if (wsValue.created && workspaceTitle) {
-      try { await api.workspace.rename({ workspaceId: wsValue.workspace.workspaceId, title: workspaceTitle }); } catch {}
+      try { await api.callEndpoint('workspace/rename', { request: { workspaceId: wsValue.workspace.workspaceId, title: workspaceTitle } }); } catch {}
     }
     const params = { workspaceId: wsValue.workspace.workspaceId };
     const preset = cfg.slang?.learnerPreset || cfg.agentPreset || undefined;
     if (preset) params.agentPreset = preset;
-    const value = unwrap(await api.sessions.create(params), 'slang session.create');
+    const value = await api.callEndpoint('session/create', { request: params });
     slangLearnerSessionId = value.sessionId;
     learnerSessions.add(slangLearnerSessionId);
+    ensureFollowStream(slangLearnerSessionId);
     fs.mkdirSync(STATE_DIR, { recursive: true });
     atomicWriteJson(SLANG_SESSION_FILE, { sessionId: slangLearnerSessionId });
     log(`黑话学习会话已创建：${slangLearnerSessionId}`);
@@ -1010,11 +1013,7 @@ async function main() {
 
     const promptText = buildExtractionPrompt(messages);
     try {
-      const accepted = await api.sessions.prompt({ sessionId, mode: 'queue', content: [{ type: 'text', text: promptText }] });
-      if (!accepted.result.ok) {
-        log(`黑话提取被拒 (${key}): ${accepted.result.error.code}: ${accepted.result.error.message}`);
-        return;
-      }
+      await promptSession(sessionId, [{ type: 'text', text: promptText }]);
       const output = await waitLearnerTurn(sessionId);
       const items = parseExtractionJson(output);
       if (!items.length) {
@@ -1073,11 +1072,7 @@ async function main() {
     }
     const promptText = buildResearchPrompt(targets);
     try {
-      const accepted = await api.sessions.prompt({ sessionId, mode: 'queue', content: [{ type: 'text', text: promptText }] });
-      if (!accepted.result.ok) {
-        log(`黑话研究被拒: ${accepted.result.error.code}: ${accepted.result.error.message}`);
-        return;
-      }
+      await promptSession(sessionId, [{ type: 'text', text: promptText }]);
       const output = await waitLearnerTurn(sessionId);
       const results = parseResearchJson(output);
       for (const r of results) {
@@ -1193,7 +1188,14 @@ async function main() {
   }
 
   // DSH 侧
-  const api = new NodeApiClient(cfg.dsh.baseUrl);
+  const api = new NodeApiClient(cfg.dsh.baseUrl, { authCookie: cfg.dsh.authCookie });
+  let promptSeq = 0;
+  // session/prompt 需要必填 requestId 与 mode；统一在这里补齐，失败时抛错（含端点信息）。
+  async function promptSession(sessionId, content, mode = 'queue') {
+    return api.callEndpoint('session/prompt', {
+      request: { requestId: `qq-bridge-p${Date.now().toString(36)}-${(++promptSeq).toString(36)}`, sessionId, mode, content }
+    });
+  }
   const collectors = new Map(); // sessionId -> turn collector
   const sendToolSucceededSessions = new Set(); // sessionId：当前 turn 内 MCP 发送类工具至少成功一次
   const v2TurnStartAt = new Map(); // sessionId -> timestamp：reserved2 turn 开始时间，用于判断是否“无行动”
@@ -1237,6 +1239,7 @@ async function main() {
   // DSH 重启期间收到的 QQ 消息先入队（不丢），DSH 恢复后按序补投。
   let dshReady = false;
   let dshCheckStarted = false;
+  let dshFailureLogged = false; // 首次探测失败打一条原因，之后转为静默（切换状态时再报）
   let currentMode = 'chat'; // chat | closed-agent | reserved（仿真模式，由 DSH settings / state/mode.json 驱动）
   let lastMode = currentMode;
   let closedAgentPreset = 'router-standard'; // closed-agent 模式使用的 DSH agent preset
@@ -1266,7 +1269,7 @@ async function main() {
   const VALID_MODES = ['chat', 'closed-agent', 'reserved', 'reserved2'];
   async function refreshMode() {
     try {
-      const s = unwrap(await api.settings.describe({}), 'settings.describe');
+      const s = await api.callEndpoint('settings/describe', {});
       const ns = s.namespaces.find((n) => n.ns === 'qq-mode');
       if (ns?.value && typeof ns.value.mode === 'string' && VALID_MODES.includes(ns.value.mode)) {
         currentMode = ns.value.mode;
@@ -1375,16 +1378,21 @@ async function main() {
   };
   const checkDsh = async () => {
     let ok = false;
+    let lastError = null;
     try {
-      await api.host.describe({});
+      await api.callEndpoint('settings/describe', {});
       ok = true;
-    } catch {}
+    } catch (error) {
+      lastError = error;
+    }
     if (ok) {
       await refreshMode();
       if (!dshReady) {
         dshReady = true;
         lastMode = currentMode;
         log(`DSH 已就绪（模式: ${currentMode}）`);
+        // 恢复既有会话的 follow 流（ensureFollowStream 幂等；黑话学习会话按需建立）
+        for (const sid of new Set(Object.values(state.sessions))) ensureFollowStream(sid);
         if (currentMode === 'reserved2') {
           // 首次确定模式为 reserved2 后再恢复持久化的有限睡眠定时器，
           // 避免在 initial chat 模式下设置定时器导致 timeout 唤醒被模式守卫吞掉。
@@ -1417,10 +1425,17 @@ async function main() {
         log(`桥接模式已切换为: ${currentMode}`);
         lastMode = currentMode;
       }
-    } else if (dshReady) {
-      dshReady = false;
-      log('⚠️ DSH 不可用（重启中？），QQ 消息将入队等待');
+    } else {
+      // 不再静默吞错：打印失败原因（401/403/连接拒绝各不相同），但只在状态切换时打一条，避免刷屏。
+      if (dshReady) {
+        dshReady = false;
+        log(`⚠️ DSH 不可用（重启中？），QQ 消息将入队等待。原因: ${lastError?.message ?? '未知'}`);
+      } else if (!dshFailureLogged) {
+        dshFailureLogged = true;
+        log(`⚠️ DSH 尚未就绪: ${lastError?.message ?? '未知'}`);
+      }
     }
+    if (ok) dshFailureLogged = false;
   };
   function startDshWatch() {
     if (dshCheckStarted) return;
@@ -1607,7 +1622,7 @@ async function main() {
         if (req.method === 'GET' && url.pathname === '/api/presets') {
           let presets = [];
           try {
-            const { presets: list } = unwrap(await api.agentPresets.list({}), 'agentPreset.list');
+            const { presets: list } = await api.callEndpoint('agentPresets/list', {});
             presets = list.map((p) => ({ id: p.id, trust: p.trust ?? 'system' }));
           } catch {}
           sendJson({ presets });
@@ -1969,7 +1984,7 @@ async function main() {
               key,
               kind: p.kind,
               sessionId: p.sessionId,
-              ...(p.kind === 'approval' ? { toolName: p.toolName, reason: p.reason, approvalId: p.approvalId } : {}),
+              ...(p.kind === 'approval' ? { toolName: p.toolName, reason: p.reason, eventId: p.eventId } : {}),
               ...(p.kind === 'question' ? { questions: p.questions } : {})
             });
           }
@@ -4470,7 +4485,8 @@ async function main() {
           seenForwardIds.delete(key);
           saveSocialV2State();
           saveState();
-          try { await api.workspace.archiveSession({ sessionId: oldSessionId }); } catch {}
+          try { await api.callEndpoint('workspace/archiveSession', { request: { sessionId: oldSessionId } }); } catch {}
+          stopFollowStream(oldSessionId);
           log(`控制台：已清除会话上下文 ${key}（旧会话 ${oldSessionId} 已归档）`);
           sendJson({ ok: true, key, archived: oldSessionId });
           return;
@@ -4479,13 +4495,14 @@ async function main() {
           sessionEpoch++;
           let archivedCount = 0;
           try {
-            const ws = unwrap(await api.workspace.list({}), 'workspace.list');
-            const qq = ws.items.find((w) => w.title === cfg.workspaceTitle);
-            if (qq) {
-              for (const sid of qq.sessionIds) {
-                try { await api.workspace.archiveSession({ sessionId: sid }); archivedCount += 1; } catch {}
-              }
-              try { await api.workspace.delete({ workspaceId: qq.workspaceId }); } catch {}
+            // 0.1.5 没有 workspace/list：改用 session/list 枚举，按本桥使用的 agentPreset 圈定自己的会话。
+            const bridgePresets = new Set([cfg.agentPreset, cfg.slang?.learnerPreset, cfg.socialV2?.agentPreset, closedAgentPreset].filter(Boolean));
+            const listed = await api.callEndpoint('session/list', { _request: {} });
+            for (const item of listed.items ?? []) {
+              const preset = item.projections?.values?.agentPreset;
+              if (!preset || !bridgePresets.has(preset)) continue;
+              try { await api.callEndpoint('workspace/archiveSession', { request: { sessionId: item.sessionId } }); archivedCount += 1; } catch {}
+              stopFollowStream(item.sessionId);
             }
           } catch {}
           for (const entry of pending.values()) {
@@ -4515,6 +4532,7 @@ async function main() {
           }
           socialV2.conversations.clear();
           saveSocialV2State();
+          stopAllFollowStreams();
           state.sessions = {};
           reverse.clear();
           collectors.clear();
@@ -5229,7 +5247,7 @@ async function main() {
     const effort = String(cfg.dsh?.reasoningEffort || 'max');
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       try {
-        const result = unwrap(await api.sessions.selectModel({ sessionId, provider, model, reasoningEffort: effort }), 'session.selectModel');
+        const result = await api.callEndpoint('session/selectModel', { request: { sessionId, provider, model, reasoningEffort: effort } });
         visionModelAppliedSessions.add(sessionId);
         log(`已设置会话视觉模型 ${sessionId} -> ${result.selected.provider}/${result.selected.model} (${result.selected.reasoningEffort ?? '默认'})`);
         return;
@@ -5248,8 +5266,10 @@ async function main() {
       if (epoch !== sessionEpoch) {
         delete state.sessions[key];
         if (reverse.get(existing) === key) reverse.delete(existing);
-        try { await api.workspace.archiveSession({ sessionId: existing }); } catch {}
+        stopFollowStream(existing);
+        try { await api.callEndpoint('workspace/archiveSession', { request: { sessionId: existing } }); } catch {}
       } else {
+        ensureFollowStream(existing);
         await ensureVisionModel(existing);
         return existing;
       }
@@ -5263,14 +5283,14 @@ async function main() {
       // 归组：所有 QQ 会话挂到同一个 workspace（幂等创建），GUI 里不再散落「未分组」
       for (const withPreset of [true, false]) {
         try {
-          const wsValue = unwrap(await api.workspace.create({ path: dir }), 'workspace.create');
+          const wsValue = await api.callEndpoint('workspace/create', { request: { path: dir } });
           if (wsValue.created && cfg.workspaceTitle) {
-            await api.workspace.rename({ workspaceId: wsValue.workspace.workspaceId, title: cfg.workspaceTitle });
+            await api.callEndpoint('workspace/rename', { request: { workspaceId: wsValue.workspace.workspaceId, title: cfg.workspaceTitle } });
           }
           const params = { workspaceId: wsValue.workspace.workspaceId };
           const preset = modePreset(key, currentMode, cfg);
           if (withPreset && preset) params.agentPreset = preset;
-          const value = unwrap(await api.sessions.create(params), 'session.create');
+          const value = await api.callEndpoint('session/create', { request: params });
           sessionId = value.sessionId;
           break;
         } catch (error) {
@@ -5279,18 +5299,20 @@ async function main() {
       }
       if (!sessionId) {
         log(`归组创建失败（${lastError?.message}），回退无参创建`);
-        const value = unwrap(await api.sessions.create({}), 'session.create');
+        const value = await api.callEndpoint('session/create', { request: {} });
         sessionId = value.sessionId;
       }
       // reset/清空工作区期间创建完成：丢弃，防止旧会话复活
       if (epoch !== sessionEpoch) {
         log(`会话创建期间发生 reset，丢弃 ${key} 的新会话（${sessionId}）`);
-        try { await api.workspace.archiveSession({ sessionId }); } catch {}
+        stopFollowStream(sessionId);
+        try { await api.callEndpoint('workspace/archiveSession', { request: { sessionId } }); } catch {}
         throw new Error('会话创建期间已重置，丢弃新会话');
       }
       state.sessions[key] = sessionId;
       reverse.set(sessionId, key);
       saveState();
+      ensureFollowStream(sessionId);
       await ensureVisionModel(sessionId);
       log(`新会话 ${key} -> ${sessionId}（模式 ${currentMode}，preset: ${modePreset(key, currentMode, cfg) ?? '默认'}）`);
       return sessionId;
@@ -6043,26 +6065,14 @@ async function main() {
     }
     // 媒体解析成功后再标记退场，避免解析异常时残留退场标记。
     if (opts.farewell) social.exitingSessions.add(sessionId);
-    let accepted;
     try {
-      accepted = await api.sessions.prompt({ sessionId, mode: 'queue', content });
+      await promptSession(sessionId, content);
     } catch (error) {
       if (opts.farewell) social.exitingSessions.delete(sessionId);
       throw error;
     }
-    if (!accepted.result.ok) {
-      if (opts.farewell) social.exitingSessions.delete(sessionId);
-      const errText = `${accepted.result.error.code}: ${accepted.result.error.message}`;
-      const safeErrText = shouldAuditKey(key) && SENSITIVE_RE.test(errText) ? '（含敏感信息，已隐藏）' : errText;
-      if (!opts.silent) await sendToQQ(key, `⚠️ 消息未被接受：${safeErrText}`);
-      return { ok: false, error: safeErrText };
-    }
-    if (accepted.result.value.command?.text && !opts.silent && currentMode !== 'reserved2') {
-      if (opts.farewell) social.exitingSessions.delete(sessionId);
-      await auditAndSend(key, mdToPlain(accepted.result.value.command.text));
-    } else if (accepted.result.value.command?.text && opts.silent && opts.farewell) {
-      social.exitingSessions.delete(sessionId);
-    }
+    // 0.1.5 的 session/prompt 只返回 {accepted:true}（旧版 result.value.command 回显已移除），
+    // 退场标记交由 turn/end 时的 isFarewell 消费。
     return { ok: true };
   }
 
@@ -6884,7 +6894,8 @@ async function main() {
   async function rotateV2SessionForKey(key) {
     const sid = state.sessions[key];
     if (!sid) return;
-    try { await api.workspace.archiveSession({ sessionId: sid }); } catch {}
+    try { await api.callEndpoint('workspace/archiveSession', { request: { sessionId: sid } }); } catch {}
+    stopFollowStream(sid);
     if (state.sessions[key] === sid) {
       delete state.sessions[key];
       if (reverse.get(sid) === key) reverse.delete(sid);
@@ -7609,20 +7620,12 @@ async function main() {
       const imageParts = await resolveMediaList(mediaList);
       content = [{ type: 'text', text: withSlangContext(promptText) }, ...imageParts];
     }
-    const accepted = await api.sessions.prompt({
-      sessionId,
-      mode: 'queue',
-      content
-    });
-    if (!accepted.result.ok) {
-      const errText = `${accepted.result.error.code}: ${accepted.result.error.message}`;
+    try {
+      await promptSession(sessionId, content);
+    } catch (error) {
+      const errText = String(error?.message ?? error);
       const safeErrText = shouldAuditKey(key) && SENSITIVE_RE.test(errText) ? '（含敏感信息，已隐藏）' : errText;
       await sendToQQ(key, `⚠️ 消息未被接受：${safeErrText}`);
-      return;
-    }
-    if (accepted.result.value.command) {
-      // 斜杠命令直接有结果，不走模型
-      if (accepted.result.value.command.text) await auditAndSend(key, mdToPlain(accepted.result.value.command.text));
       return;
     }
     if (cfg.ackMessage && currentMode !== 'reserved2') await sendToQQ(key, cfg.ackMessage);
@@ -7633,20 +7636,13 @@ async function main() {
   async function cancelPendingEntry(entry) {
     if (!entry) return;
     try {
+      if (!entry.clientId || !entry.eventId) return; // 旧格式挂起（无瀑布标识），无法回执
       if (entry.kind === 'approval') {
-        await withTimeout(api.respond({
-          type: 'client-response',
-          rpcId: entry.rpcId,
-          result: { ok: true, value: { sessionId: entry.sessionId, approvalId: entry.approvalId, outcome: 'rejected' } }
-        }), 5000, '取消挂起回执');
-        log(`已取消挂起审批（拒绝回执）: ${entry.rpcId}`);
+        await withTimeout(api.answerRemoteEvent(entry.clientId, entry.eventId, { kind: 'result', value: 'rejected' }), 5000, '取消挂起回执');
+        log(`已取消挂起审批（拒绝回执）: ${entry.eventId}`);
       } else if (entry.kind === 'question') {
-        await withTimeout(api.respond({
-          type: 'client-response',
-          rpcId: entry.rpcId,
-          result: { ok: true, value: { sessionId: entry.sessionId, answer: { answers: [] } } }
-        }), 5000, '取消挂起回执');
-        log(`已取消挂起提问（空答案回执）: ${entry.rpcId}`);
+        await withTimeout(api.answerRemoteEvent(entry.clientId, entry.eventId, { kind: 'result', value: { answers: [] } }), 5000, '取消挂起回执');
+        log(`已取消挂起提问（空答案回执）: ${entry.eventId}`);
       }
     } catch (error) {
       log('取消挂起请求回执失败:', error?.message ?? error);
@@ -7664,12 +7660,8 @@ async function main() {
         else answers.push({ id: q.id, selected: [], custom: answerText });
       }
       try {
-        const receipt = await api.respond({
-          type: 'client-response',
-          rpcId: p.rpcId,
-          result: { ok: true, value: { sessionId: p.sessionId, answer: { answers } } }
-        });
-        log(`已回答提问 (${key}):`, receipt);
+        await api.answerRemoteEvent(p.clientId, p.eventId, { kind: 'result', value: { answers } });
+        log(`已回答提问 (${key})`);
         // 只有回执成功才移除挂起，且必须仍是同一个挂起（防止期间被新请求覆盖）
         if (pending.get(key) === p) pending.delete(key);
       } catch (error) {
@@ -7692,12 +7684,8 @@ async function main() {
         return;
       }
       try {
-        const receipt = await api.respond({
-          type: 'client-response',
-          rpcId: p.rpcId,
-          result: { ok: true, value: { sessionId: p.sessionId, approvalId: p.approvalId, outcome } }
-        });
-        log(`已处理审批 (${key}): ${outcome}`, receipt);
+        await api.answerRemoteEvent(p.clientId, p.eventId, { kind: 'result', value: outcome });
+        log(`已处理审批 (${key}): ${outcome}`);
         await sendToQQ(key, outcome === 'allowed-once' ? '✅ 已通过审批' : '❌ 已拒绝审批');
         // 只有回执成功才移除挂起，且必须仍是同一个挂起（防止期间被新请求覆盖）
         if (pending.get(key) === p) pending.delete(key);
@@ -7790,432 +7778,513 @@ async function main() {
     pending.set(key, entry);
   }
 
-  // DSH 事件流 → QQ
+  // DSH 事件流 → QQ（DSH 0.1.5+：全局 $events 流承接提问/审批瀑布事件；turn 事件走每会话 session/follow 流）
+  let eventsClientId = null;     // $events ready 帧分配的 clientId，应答瀑布事件必须携带
+  let lastPumpConnectLogAt = 0;  // 重连日志节流：DSH 停机期间不再每 3 秒刷屏
+  let lastFollowErrorLogAt = 0;  // 会话流错误日志节流
+
+  // 每个已知 DSH 会话一条 follow 流：断线自动重连；实时 turn 事件交给 handleSessionEvent。
+  // snapshot 帧（历史回放）一律丢弃，避免重启/重连后把旧 turn 当新回复发给 QQ。
+  const followStreams = new Map(); // sessionId -> { active, signal: AbortController }
+  function ensureFollowStream(sessionId) {
+    if (!sessionId || followStreams.has(sessionId)) return;
+    const entry = { active: true, signal: new AbortController() };
+    followStreams.set(sessionId, entry);
+    runFollowLoop(sessionId, entry).catch((error) => log('会话流任务异常:', error?.message ?? error));
+  }
+  function stopFollowStream(sessionId) {
+    const entry = followStreams.get(sessionId);
+    if (!entry) return;
+    entry.active = false;
+    entry.signal.abort();
+    followStreams.delete(sessionId);
+  }
+  function stopAllFollowStreams() {
+    for (const sid of [...followStreams.keys()]) stopFollowStream(sid);
+  }
+  // follow 流断开后的会话级状态清理（相当于旧全局流中断清理的单会话版）
+  function cleanupSessionStreamState(sessionId) {
+    collectors.delete(sessionId);
+    social.silentTurns.delete(sessionId);
+    sendToolSucceededSessions.delete(sessionId);
+    pendingSendToolCalls.delete(sessionId);
+    v2TurnStartAt.delete(sessionId);
+    toolCallNames.delete(sessionId);
+    social.exitingSessions.delete(sessionId);
+  }
+  async function runFollowLoop(sessionId, entry) {
+    const name = () => reverse.get(sessionId) ?? sessionId;
+    for (;;) {
+      try {
+        for await (const item of api.openRemoteStream('session/follow', { request: { address: { kind: 'session', sessionId } } }, { signal: entry.signal.signal })) {
+          if (item.type !== 'event' || !item.event) continue;
+          await handleSessionEvent(sessionId, item.event);
+        }
+        log(`会话流结束（${name()}），3 秒后重连`);
+      } catch (error) {
+        if (entry.signal.signal.aborted) break;
+        // DSH 停机时多条会话流会同时报错，按全局节流只打一条，避免刷屏。
+        const now = Date.now();
+        if (now - lastFollowErrorLogAt > 60000) {
+          lastFollowErrorLogAt = now;
+          log(`会话流中断（${name()}）: ${error?.message ?? error}（后续相同错误 60 秒内不再重复打印）`);
+        }
+        cleanupSessionStreamState(sessionId);
+      }
+      if (!entry.active || entry.signal.signal.aborted) break;
+      await sleep(3000);
+      if (!entry.active || entry.signal.signal.aborted) break;
+    }
+  }
+
+  // 单条会话事件处理：从旧全局事件流的 session/event 分支原样迁移，逻辑保持不变。
+  async function handleSessionEvent(sessionId, event) {
+    const key = reverse.get(sessionId);
+    if (!key) {
+      // 黑话学习会话：只收集 turn，不发送 QQ，并唤醒等待中的学习任务。
+      if (learnerSessions.has(sessionId)) {
+        const learnerCollector = learnerCollectors.get(sessionId) ?? createTurnCollector();
+        learnerCollectors.set(sessionId, learnerCollector);
+        const learnerEnded = learnerCollector.push(event);
+        if (learnerEnded) {
+          learnerCollectors.delete(sessionId);
+          const waiters = learnerWaiters.get(sessionId) ?? [];
+          const waiter = waiters.shift();
+          if (waiters.length === 0) learnerWaiters.delete(sessionId);
+          if (waiter) {
+            clearTimeout(waiter.timer);
+            if (learnerEnded.reason.kind === 'completed' && learnerEnded.text.trim()) {
+              waiter.resolve(learnerEnded.text);
+            } else {
+              waiter.reject(new Error(`学习会话 turn 未正常完成：${learnerEnded.reason.kind}`));
+            }
+          }
+          // 旧学习会话 turn 结束后从集合移除，避免残留
+          if (sessionId !== slangLearnerSessionId) learnerSessions.delete(sessionId);
+        }
+      }
+      return;
+    }
+    // 追踪当前 turn 是否成功调用过 MCP 发送类工具：
+    // 只有“发送成功”才跳过自动转发；如果工具调用失败，仍允许 AI 的文本正常发出。
+    if (event.type === 'turn/start') {
+      sendToolSucceededSessions.delete(sessionId);
+      pendingSendToolCalls.delete(sessionId);
+      v2TurnStartAt.set(sessionId, Date.now());
+    }
+    if (event.type === 'tool/call') {
+      const toolName = String(event.data?.name ?? '');
+      const callId = event.data?.callId;
+      const args = sanitizeToolArgs(event.data?.arguments ?? event.data?.input ?? event.data);
+      appendToolLog({ type: 'call', time: new Date().toISOString(), key, sessionId: sessionId, tool: toolName, args });
+      if (callId != null) {
+        if (isSendToolName(toolName)) {
+          let pending = pendingSendToolCalls.get(sessionId);
+          if (!pending) {
+            pending = new Set();
+            pendingSendToolCalls.set(sessionId, pending);
+          }
+          pending.add(callId);
+        }
+        let nameMap = toolCallNames.get(sessionId);
+        if (!nameMap) {
+          nameMap = new Map();
+          toolCallNames.set(sessionId, nameMap);
+        }
+        nameMap.set(String(callId), toolName);
+      }
+    }
+    if (event.type === 'tool/result') {
+      const callId = event.data?.message?.source?.callId;
+      const toolName = callId != null ? (toolCallNames.get(sessionId)?.get(String(callId)) ?? '') : '';
+      const resultBlock = event.data?.message?.content?.[0];
+      const resultError = event.data?.message?.isError === true || resultBlock?.isError === true;
+      const errorText = resultError ? String(resultBlock?.text ?? resultBlock?.error ?? event.data?.message?.error ?? '') : '';
+      appendToolLog({
+        type: 'result',
+        time: new Date().toISOString(),
+        key,
+        sessionId: sessionId,
+        tool: toolName,
+        ok: !resultError,
+        error: errorText ? sanitizeToolArgs(errorText) : null
+      });
+      if (callId != null) {
+        toolCallNames.get(sessionId)?.delete(String(callId));
+        const pending = pendingSendToolCalls.get(sessionId);
+        if (pending?.has(callId)) {
+          pending.delete(callId);
+          if (pending.size === 0) pendingSendToolCalls.delete(sessionId);
+          if (!resultError) {
+            sendToolSucceededSessions.add(sessionId);
+          }
+        }
+      }
+    }
+    const collector = collectors.get(sessionId) ?? createTurnCollector();
+    collectors.set(sessionId, collector);
+    const ended = collector.push(event);
+    if (ended) {
+      // reserved2 无行动兜底：普通唤醒回合若既没发消息、也没 mark_read / set_wake_config，
+      // 则累计 noActionCount；达到阈值后自动重置 WakeConfig，避免 AI 卡死。
+      const silentQueueNow = social.silentTurns.get(sessionId) ?? [];
+      const isSilentTurn = silentQueueNow.length > 0;
+      if (currentMode === 'reserved2' && key && !isSilentTurn) {
+        const st = getSocialV2State(key);
+        const turnStart = v2TurnStartAt.get(sessionId) ?? 0;
+        const actionTaken = sendToolSucceededSessions.has(sessionId) || (turnStart > 0 && st.lastActionAt >= turnStart);
+        if (actionTaken) {
+          st.wakeConfig.noActionCount = 0;
+        } else {
+          st.wakeConfig.noActionCount = (st.wakeConfig.noActionCount || 0) + 1;
+          const limit = Number(cfg.socialV2?.wake?.noActionLimit) || 3;
+          if (st.wakeConfig.noActionCount >= limit) {
+            log(`[reserved2] ${key} 连续 ${st.wakeConfig.noActionCount} 次唤醒无行动，重置唤醒配置`);
+            st.wakeConfig = defaultWakeConfigV2();
+            st.bootstrapSent = true;
+            st.wakeConfig.noActionCount = 0;
+          }
+        }
+        saveSocialV2State();
+      }
+      v2TurnStartAt.delete(sessionId);
+      collectors.delete(sessionId);
+      const sendToolSucceeded = sendToolSucceededSessions.has(sessionId);
+      sendToolSucceededSessions.delete(sessionId);
+      pendingSendToolCalls.delete(sessionId);
+      toolCallNames.delete(sessionId);
+      // 标记本次 turn 是否为“活跃超时退场”发言（用于准确回到观望，避免把旧回复误判为退场）
+      const isFarewell = social.exitingSessions.has(sessionId);
+      if (isFarewell) social.exitingSessions.delete(sessionId);
+      // 摘要投喂触发的 turn：回复静默（不发送到 QQ）。
+      // 用 FIFO 时间戳队列 + 超时回收，避免计数残留吞掉后续正常回复。
+      const silentQueue = social.silentTurns.get(sessionId) ?? [];
+      const silentNow = Date.now();
+      while (silentQueue.length && silentNow - silentQueue[0].ts > SILENT_TURN_TIMEOUT_MS) silentQueue.shift();
+      if (silentQueue.length > 0) {
+        silentQueue.shift();
+        if (silentQueue.length > 0) social.silentTurns.set(sessionId, silentQueue);
+        else social.silentTurns.delete(sessionId);
+        log(`摘要投喂 turn 结束，静默 (${key})`);
+        return;
+      }
+      // reserved2 防遗忘：每次唤醒回合结束时，若 AI 没有调用 qq_set_wake_config 设置下一次唤醒条件，
+      // 则发送提醒；连续未设置达到上限后重置为默认唤醒配置。静默/后台提醒回合已在上方 continue，不触发。
+      if (pendingWakeKeys.has(key)) {
+        pendingWakeKeys.delete(key);
+        disarmPendingWakeLease(key);
+        if (wakeConfigUpdatedKeys.has(key) || markReadCalledKeys.has(key)) {
+          ensureWakeableV2(getSocialV2State(key), { key });
+          wakeConfigUpdatedKeys.delete(key);
+          markReadCalledKeys.delete(key);
+          wakeConfigMissCount.delete(key);
+        } else {
+          const currentMiss = (wakeConfigMissCount.get(key) ?? 0) + 1;
+          const maxReminders = Number(cfg.socialV2?.wake?.maxWakeConfigReminders) || 2;
+          if (currentMiss < maxReminders) {
+            wakeConfigMissCount.set(key, currentMiss);
+            pendingWakeKeys.add(key);
+            armPendingWakeLease(key);
+            deliverPrompt(key, buildWakeReminderPromptV2(key)).then((result) => {
+              if (result && result.ok === false) {
+                pendingWakeKeys.delete(key);
+                disarmPendingWakeLease(key);
+              }
+            }).catch((error) => {
+              pendingWakeKeys.delete(key);
+              disarmPendingWakeLease(key);
+              log(`[reserved2] ${key} 唤醒提醒投递失败: ${error?.message ?? error}`);
+            });
+            log(`[reserved2] ${key} 未设置唤醒条件，发送提醒 (${currentMiss}/${maxReminders})`);
+          } else {
+            const st = getSocialV2State(key);
+            st.wakeConfig = defaultWakeConfigV2();
+            saveSocialV2State();
+            log(`[reserved2] ${key} 连续未设置唤醒条件，已重置为默认唤醒配置`);
+          }
+        }
+      }
+      // 繁忙期间被暂存的唤醒原因：当前 turn 结束后补一次，避免关键 @/提问被漏掉。
+      // 但如果触发它的消息已经被 AI 在当前回合处理（unread 中已不存在该 seq），则不再补发。
+      {
+        const stEnd = getSocialV2State(key);
+        if (Array.isArray(stEnd.pendingWakeReasons) && stEnd.pendingWakeReasons.length) {
+          const item = stEnd.pendingWakeReasons.shift();
+          if (!item || typeof item !== 'object') {
+            // 兼容旧字符串残留
+          } else {
+            const stillRelevant = Array.isArray(stEnd.unread) && stEnd.unread.some((m) => m && Number(m.seq) >= Number(item.seq));
+            if (stillRelevant) {
+              log(`[reserved2] ${key} 补发繁忙期间积压的唤醒：${item.reason}@seq${item.seq}`);
+              scheduleWakeV2(key, item.reason);
+            } else {
+              log(`[reserved2] ${key} 繁忙期间唤醒 ${item.reason}@seq${item.seq} 已被当前回合处理，跳过补发`);
+            }
+          }
+        }
+      }
+      if (ended.reason.kind === 'completed' && ended.text.trim()) {
+        const plain = mdToPlain(ended.text);
+        // 纯 Markdown/空白输出按“无文本”处理，避免后续 planSocialTimeline 拿空串崩溃。
+        if (!plain.trim()) {
+          log(`agent 回复为空（仅格式/空白）(${key})`);
+          if (isFarewell) {
+            const st = socialState(key);
+            if (st.phase === 'exiting') {
+              st.phase = 'idle';
+              st.activeDeadlineAt = 0;
+              st.activeExitAt = 0;
+              log(`社交模式：${key} 空退场回合，回到观望`);
+            }
+          }
+          return;
+        }
+        // 社交模式静默标记：AI 主动选择“潜水/不接话”，不发送到 QQ
+        if (isSilentMarker(plain)) {
+          log(`社交模式：AI 选择静默（${SILENT_MARKER}）(${key})`);
+          if (isFarewell) {
+            const st = socialState(key);
+            if (st.phase === 'exiting') {
+              st.phase = 'idle';
+              st.activeDeadlineAt = 0;
+              st.activeExitAt = 0;
+              log(`社交模式：${key} 退场选择静默，回到观望`);
+            }
+          }
+          return;
+        }
+        // 本回合已经通过 MCP 发送工具成功发出消息：跳过自动转发，避免重复发送。
+        if (sendToolSucceeded) {
+          log(`工具已发送消息，跳过自动转发 (${key})`);
+          if (isFarewell) {
+            const st = socialState(key);
+            if (st.phase === 'exiting') {
+              st.phase = 'idle';
+              st.activeDeadlineAt = 0;
+              st.activeExitAt = 0;
+              log(`社交模式：${key} 工具发送后退场完成，回到观望`);
+            }
+          }
+          return;
+        }
+        // 审计（对完整文本执行，避免截断漏判；这里只判断，不发送，避免双重发送）
+        const hasKnownToken = [...KNOWN_AGENT_TOKENS].some((t) => t && plain.includes(t));
+        if (shouldAuditKey(key) && (SENSITIVE_RE.test(plain) || hasKnownToken)) {
+          log(`⚠️ 回复被安全策略拦截 (${key})，疑似包含敏感信息${hasKnownToken ? '（含会话令牌）' : ''}`);
+          appendActivity(`${key} agent 回复被拦截（疑似敏感信息${hasKnownToken ? '/会话令牌' : ''}）`);
+          if (cfg.security?.interceptNotify !== false) {
+            await sendToQQ(key, '⚠️ 本条回复因疑似包含敏感信息（路径/凭据/会话令牌）被安全策略拦截，已记录并通知管理员。');
+          }
+          if (isFarewell) {
+            const st = socialState(key);
+            if (st.phase === 'exiting') {
+              st.phase = 'idle';
+              st.activeDeadlineAt = 0;
+              st.activeExitAt = 0;
+              log(`社交模式：${key} 退场发言被拦截，回到观望`);
+            }
+          }
+          return;
+        }
+        // 仿真群友模式：时间线多段发送（主回复 + 可选二次补刀）
+        if (isSocialEnabled()) {
+          if (shouldBlockSilentReply(key)) {
+            log(`静默模式，拦截在途回复 (${key})`);
+            appendActivity(`${key} 静默模式，拦截在途回复`);
+            if (isFarewell) {
+              const st = socialState(key);
+              if (st.phase === 'exiting') {
+                st.phase = 'idle';
+                st.activeDeadlineAt = 0;
+                st.activeExitAt = 0;
+                log(`社交模式：${key} 静默模式下退场回合被拦截，回到观望`);
+              }
+            }
+            return;
+          }
+          const timeline = planSocialTimeline(plain, cfg.social);
+          const messages = timeline.main;
+          log(`agent 回复 (${key}) ${plain.length} 字 → ${messages.length} 条`);
+          appendActivity(`${key} agent 回复：${messages[0].slice(0, 80)}${messages.length > 1 ? '（分' + messages.length + '条）' : ''}${messages[0].length > 80 ? '…' : ''}`);
+          if (messages.length > 1) {
+            await sendBurstToQQ(key, messages, cfg.social);
+          } else {
+            await sendToQQ(key, messages[0]);
+          }
+          // 发言后刷新活跃时间，并调度可能的二次补刀
+          const st = socialState(key);
+          if (isFarewell) {
+            // 确认为退场发言：不再刷新活跃时间、不调度补刀，直接进入观望
+            st.phase = 'idle';
+            st.activeDeadlineAt = 0;
+            st.activeExitAt = 0;
+            log(`社交模式：${key} 退场发言完成，进入观望`);
+          } else if (st.phase === 'exiting') {
+            // 退场期间有旧回复恰好完成：照常发出，但不把它当作退场，也不调度补刀
+            log(`社交模式：${key} 退场期间旧回复完成，保持退场状态`);
+          } else {
+            st.lastActiveMessageAt = Date.now();
+            st.lastAiReplyAt = Date.now();
+            log(`社交模式：发言完成，刷新活跃时间 (${key})`);
+          }
+        } else if (currentMode === 'reserved2') {
+          log(`[reserved2] AI 内部输出（不自动转发）(${key}): ${plain.slice(0, 80)}`);
+          appendActivity(`${key} [reserved2] AI 内部输出：${plain.slice(0, 80)}${plain.length > 80 ? '…' : ''}`);
+        } else {
+          if (shouldBlockSilentReply(key)) {
+            log(`静默模式，拦截在途回复 (${key})`);
+            appendActivity(`${key} 静默模式，拦截在途回复`);
+            return;
+          }
+          log(`agent 回复 (${key}) ${plain.length} 字`);
+          appendActivity(`${key} agent 回复：${plain.slice(0, 80)}${plain.length > 80 ? '…' : ''}`);
+          await sendToQQ(key, plain);
+        }
+      } else if (ended.reason.kind === 'error') {
+        const msg = ended.reason.error?.message ?? '未知错误';
+        const safeMsg = shouldAuditKey(key) && SENSITIVE_RE.test(msg) ? '（含敏感信息，已隐藏）' : msg.slice(0, 500);
+        await sendToQQ(key, `⚠️ agent 处理出错：${safeMsg}`);
+        if (isFarewell) {
+          const st = socialState(key);
+          if (st.phase === 'exiting') {
+            st.phase = 'idle';
+            st.activeDeadlineAt = 0;
+            st.activeExitAt = 0;
+            log(`社交模式：${key} 退场发言出错，回到观望`);
+          }
+        }
+      } else if (ended.reason.kind === 'aborted') {
+        await sendToQQ(key, '⏹️ 已停止');
+        if (isFarewell) {
+          const st = socialState(key);
+          if (st.phase === 'exiting') {
+            st.phase = 'idle';
+            st.activeDeadlineAt = 0;
+            st.activeExitAt = 0;
+            log(`社交模式：${key} 退场发言中止，回到观望`);
+          }
+        }
+      } else if (!ended.text.trim()) {
+        // completed 但没文本（纯工具调用回合）
+        log(`回合完成但无文本 (${key})`);
+        if (isFarewell) {
+          const st = socialState(key);
+          if (st.phase === 'exiting') {
+            st.phase = 'idle';
+            st.activeDeadlineAt = 0;
+            st.activeExitAt = 0;
+            log(`社交模式：${key} 退场回合无文本，回到观望`);
+          }
+        }
+      }
+    }
+  }
+
+  // 瀑布事件（提问/审批）：转发对应 QQ 会话并登记挂起；答复经 $events/result 回传。
+  async function handleWaterfall(item) {
+    const sessionId = item.agentId;
+    const kind = item.event === 'user-questions/request' ? 'question'
+      : item.event === 'approval/request' ? 'approval' : null;
+    if (!kind || !sessionId) return;
+    const key = reverse.get(sessionId);
+    if (!key) {
+      if (learnerSessions.has(sessionId)) {
+        // 黑话学习会话不应向用户提问/请求审批；自动跳过，避免阻塞学习任务。
+        try {
+          if (kind === 'question') {
+            await api.answerRemoteEvent(eventsClientId, item.eventId, { kind: 'result', value: { answers: (item.request?.questions ?? []).map((q) => ({ id: q.id, selected: [], custom: '' })) } });
+          } else {
+            await api.answerRemoteEvent(eventsClientId, item.eventId, { kind: 'result', value: 'rejected' });
+          }
+          log('黑话学习会话自动跳过提问/审批');
+        } catch (error) {
+          log('自动响应学习会话提问/审批失败:', error?.message ?? error);
+        }
+      }
+      return;
+    }
+    // DSH 断线重连后同一瀑布会重新投递（eventId 不变）：只刷新 clientId，不重复打扰 QQ。
+    const existing = pending.get(key);
+    if (existing?.eventId === item.eventId) {
+      existing.clientId = eventsClientId;
+      return;
+    }
+    if (kind === 'question') {
+      const questions = Array.isArray(item.request?.questions) ? item.request.questions : [];
+      const lines = questions.map((q, i) => {
+        const qText = String(q.question ?? '');
+        const sensitive = shouldAuditKey(key) && SENSITIVE_RE.test(qText);
+        if (sensitive) log(`⚠️ 提问文本含敏感信息，已隐藏 (${key})`);
+        const safeQuestion = sensitive ? '（含敏感信息，已隐藏）' : qText;
+        let s = `${i + 1}. ${safeQuestion}`;
+        if (q.options?.length) {
+          const opts = q.options.map((o) => {
+            const label = String(o.label ?? '');
+            const optSensitive = shouldAuditKey(key) && SENSITIVE_RE.test(label);
+            if (optSensitive) log(`⚠️ 提问选项含敏感信息，已隐藏 (${key})`);
+            return `「${optSensitive ? '（含敏感信息，已隐藏）' : label}」`;
+          });
+          s += '\n   ' + opts.join(' ');
+        }
+        return s;
+      });
+      await sendToQQ(key, '❓ agent 需要你回答：\n' + lines.join('\n') + '\n（直接回复选项文字或输入你的回答）');
+      await registerPending(key, { kind: 'question', clientId: eventsClientId, eventId: item.eventId, sessionId, questions });
+    } else {
+      const rawReason = item.request?.reason ?? '';
+      const sensitiveReason = shouldAuditKey(key) && SENSITIVE_RE.test(rawReason);
+      if (sensitiveReason) log(`⚠️ 审批理由含敏感信息，已隐藏 (${key})`);
+      const safeReason = sensitiveReason ? '（含敏感信息，已隐藏）' : rawReason;
+      const reason = safeReason ? `\n理由：${safeReason}` : '';
+      const rawToolName = item.request?.toolName ?? '';
+      const sensitiveTool = shouldAuditKey(key) && SENSITIVE_RE.test(rawToolName);
+      if (sensitiveTool) log(`⚠️ 审批工具名含敏感信息，已隐藏 (${key})`);
+      const safeToolName = sensitiveTool ? '（含敏感信息，已隐藏）' : rawToolName;
+      await sendToQQ(key, `🔐 agent 请求审批：${safeToolName}${reason}\n回复「通过」或「拒绝」`);
+      await registerPending(key, { kind: 'approval', clientId: eventsClientId, eventId: item.eventId, sessionId, toolName: rawToolName });
+    }
+  }
+
+  // DSH 侧取消了瀑布（回合结束/超时未答）：清掉对应挂起，避免 QQ 答复打在已关闭的请求上。
+  function handleWaterfallCancel(eventId) {
+    if (!eventId) return;
+    for (const [key, entry] of pending.entries()) {
+      if (entry.eventId !== eventId) continue;
+      if (entry.timer) clearTimeout(entry.timer);
+      pending.delete(key);
+      log(`挂起请求已被 DSH 取消 (${key})`);
+    }
+  }
+
   async function pumpMux() {
     for (;;) {
       try {
-        log('连接 DSH 事件流…');
-        for await (const envelope of api.events.mux({})) {
-          const frame = envelope.payload;
-          if (frame.type === 'session/event') {
-            const key = reverse.get(frame.sessionId);
-            if (!key) {
-              // 黑话学习会话：只收集 turn，不发送 QQ，并唤醒等待中的学习任务。
-              if (learnerSessions.has(frame.sessionId)) {
-                const learnerCollector = learnerCollectors.get(frame.sessionId) ?? createTurnCollector();
-                learnerCollectors.set(frame.sessionId, learnerCollector);
-                const learnerEnded = learnerCollector.push(frame.event);
-                if (learnerEnded) {
-                  learnerCollectors.delete(frame.sessionId);
-                  const waiters = learnerWaiters.get(frame.sessionId) ?? [];
-                  const waiter = waiters.shift();
-                  if (waiters.length === 0) learnerWaiters.delete(frame.sessionId);
-                  if (waiter) {
-                    clearTimeout(waiter.timer);
-                    if (learnerEnded.reason.kind === 'completed' && learnerEnded.text.trim()) {
-                      waiter.resolve(learnerEnded.text);
-                    } else {
-                      waiter.reject(new Error(`学习会话 turn 未正常完成：${learnerEnded.reason.kind}`));
-                    }
-                  }
-                  // 旧学习会话 turn 结束后从集合移除，避免残留
-                  if (frame.sessionId !== slangLearnerSessionId) learnerSessions.delete(frame.sessionId);
-                }
-              }
-              continue;
-            }
-            // 追踪当前 turn 是否成功调用过 MCP 发送类工具：
-            // 只有“发送成功”才跳过自动转发；如果工具调用失败，仍允许 AI 的文本正常发出。
-            if (frame.event.type === 'turn/start') {
-              sendToolSucceededSessions.delete(frame.sessionId);
-              pendingSendToolCalls.delete(frame.sessionId);
-              v2TurnStartAt.set(frame.sessionId, Date.now());
-            }
-            if (frame.event.type === 'tool/call') {
-              const toolName = String(frame.event.data?.name ?? '');
-              const callId = frame.event.data?.callId;
-              const args = sanitizeToolArgs(frame.event.data?.arguments ?? frame.event.data?.input ?? frame.event.data);
-              appendToolLog({ type: 'call', time: new Date().toISOString(), key, sessionId: frame.sessionId, tool: toolName, args });
-              if (callId != null) {
-                if (isSendToolName(toolName)) {
-                  let pending = pendingSendToolCalls.get(frame.sessionId);
-                  if (!pending) {
-                    pending = new Set();
-                    pendingSendToolCalls.set(frame.sessionId, pending);
-                  }
-                  pending.add(callId);
-                }
-                let nameMap = toolCallNames.get(frame.sessionId);
-                if (!nameMap) {
-                  nameMap = new Map();
-                  toolCallNames.set(frame.sessionId, nameMap);
-                }
-                nameMap.set(String(callId), toolName);
-              }
-            }
-            if (frame.event.type === 'tool/result') {
-              const callId = frame.event.data?.message?.source?.callId;
-              const toolName = callId != null ? (toolCallNames.get(frame.sessionId)?.get(String(callId)) ?? '') : '';
-              const resultBlock = frame.event.data?.message?.content?.[0];
-              const resultError = frame.event.data?.message?.isError === true || resultBlock?.isError === true;
-              const errorText = resultError ? String(resultBlock?.text ?? resultBlock?.error ?? frame.event.data?.message?.error ?? '') : '';
-              appendToolLog({
-                type: 'result',
-                time: new Date().toISOString(),
-                key,
-                sessionId: frame.sessionId,
-                tool: toolName,
-                ok: !resultError,
-                error: errorText ? sanitizeToolArgs(errorText) : null
-              });
-              if (callId != null) {
-                toolCallNames.get(frame.sessionId)?.delete(String(callId));
-                const pending = pendingSendToolCalls.get(frame.sessionId);
-                if (pending?.has(callId)) {
-                  pending.delete(callId);
-                  if (pending.size === 0) pendingSendToolCalls.delete(frame.sessionId);
-                  if (!resultError) {
-                    sendToolSucceededSessions.add(frame.sessionId);
-                  }
-                }
-              }
-            }
-            const collector = collectors.get(frame.sessionId) ?? createTurnCollector();
-            collectors.set(frame.sessionId, collector);
-            const ended = collector.push(frame.event);
-            if (ended) {
-              // reserved2 无行动兜底：普通唤醒回合若既没发消息、也没 mark_read / set_wake_config，
-              // 则累计 noActionCount；达到阈值后自动重置 WakeConfig，避免 AI 卡死。
-              const silentQueueNow = social.silentTurns.get(frame.sessionId) ?? [];
-              const isSilentTurn = silentQueueNow.length > 0;
-              if (currentMode === 'reserved2' && key && !isSilentTurn) {
-                const st = getSocialV2State(key);
-                const turnStart = v2TurnStartAt.get(frame.sessionId) ?? 0;
-                const actionTaken = sendToolSucceededSessions.has(frame.sessionId) || (turnStart > 0 && st.lastActionAt >= turnStart);
-                if (actionTaken) {
-                  st.wakeConfig.noActionCount = 0;
-                } else {
-                  st.wakeConfig.noActionCount = (st.wakeConfig.noActionCount || 0) + 1;
-                  const limit = Number(cfg.socialV2?.wake?.noActionLimit) || 3;
-                  if (st.wakeConfig.noActionCount >= limit) {
-                    log(`[reserved2] ${key} 连续 ${st.wakeConfig.noActionCount} 次唤醒无行动，重置唤醒配置`);
-                    st.wakeConfig = defaultWakeConfigV2();
-                    st.bootstrapSent = true;
-                    st.wakeConfig.noActionCount = 0;
-                  }
-                }
-                saveSocialV2State();
-              }
-              v2TurnStartAt.delete(frame.sessionId);
-              collectors.delete(frame.sessionId);
-              const sendToolSucceeded = sendToolSucceededSessions.has(frame.sessionId);
-              sendToolSucceededSessions.delete(frame.sessionId);
-              pendingSendToolCalls.delete(frame.sessionId);
-              toolCallNames.delete(frame.sessionId);
-              // 标记本次 turn 是否为“活跃超时退场”发言（用于准确回到观望，避免把旧回复误判为退场）
-              const isFarewell = social.exitingSessions.has(frame.sessionId);
-              if (isFarewell) social.exitingSessions.delete(frame.sessionId);
-              // 摘要投喂触发的 turn：回复静默（不发送到 QQ）。
-              // 用 FIFO 时间戳队列 + 超时回收，避免计数残留吞掉后续正常回复。
-              const silentQueue = social.silentTurns.get(frame.sessionId) ?? [];
-              const silentNow = Date.now();
-              while (silentQueue.length && silentNow - silentQueue[0].ts > SILENT_TURN_TIMEOUT_MS) silentQueue.shift();
-              if (silentQueue.length > 0) {
-                silentQueue.shift();
-                if (silentQueue.length > 0) social.silentTurns.set(frame.sessionId, silentQueue);
-                else social.silentTurns.delete(frame.sessionId);
-                log(`摘要投喂 turn 结束，静默 (${key})`);
-                continue;
-              }
-              // reserved2 防遗忘：每次唤醒回合结束时，若 AI 没有调用 qq_set_wake_config 设置下一次唤醒条件，
-              // 则发送提醒；连续未设置达到上限后重置为默认唤醒配置。静默/后台提醒回合已在上方 continue，不触发。
-              if (pendingWakeKeys.has(key)) {
-                pendingWakeKeys.delete(key);
-                disarmPendingWakeLease(key);
-                if (wakeConfigUpdatedKeys.has(key) || markReadCalledKeys.has(key)) {
-                  ensureWakeableV2(getSocialV2State(key), { key });
-                  wakeConfigUpdatedKeys.delete(key);
-                  markReadCalledKeys.delete(key);
-                  wakeConfigMissCount.delete(key);
-                } else {
-                  const currentMiss = (wakeConfigMissCount.get(key) ?? 0) + 1;
-                  const maxReminders = Number(cfg.socialV2?.wake?.maxWakeConfigReminders) || 2;
-                  if (currentMiss < maxReminders) {
-                    wakeConfigMissCount.set(key, currentMiss);
-                    pendingWakeKeys.add(key);
-                    armPendingWakeLease(key);
-                    deliverPrompt(key, buildWakeReminderPromptV2(key)).then((result) => {
-                      if (result && result.ok === false) {
-                        pendingWakeKeys.delete(key);
-                        disarmPendingWakeLease(key);
-                      }
-                    }).catch((error) => {
-                      pendingWakeKeys.delete(key);
-                      disarmPendingWakeLease(key);
-                      log(`[reserved2] ${key} 唤醒提醒投递失败: ${error?.message ?? error}`);
-                    });
-                    log(`[reserved2] ${key} 未设置唤醒条件，发送提醒 (${currentMiss}/${maxReminders})`);
-                  } else {
-                    const st = getSocialV2State(key);
-                    st.wakeConfig = defaultWakeConfigV2();
-                    saveSocialV2State();
-                    log(`[reserved2] ${key} 连续未设置唤醒条件，已重置为默认唤醒配置`);
-                  }
-                }
-              }
-              // 繁忙期间被暂存的唤醒原因：当前 turn 结束后补一次，避免关键 @/提问被漏掉。
-              // 但如果触发它的消息已经被 AI 在当前回合处理（unread 中已不存在该 seq），则不再补发。
-              {
-                const stEnd = getSocialV2State(key);
-                if (Array.isArray(stEnd.pendingWakeReasons) && stEnd.pendingWakeReasons.length) {
-                  const item = stEnd.pendingWakeReasons.shift();
-                  if (!item || typeof item !== 'object') {
-                    // 兼容旧字符串残留
-                  } else {
-                    const stillRelevant = Array.isArray(stEnd.unread) && stEnd.unread.some((m) => m && Number(m.seq) >= Number(item.seq));
-                    if (stillRelevant) {
-                      log(`[reserved2] ${key} 补发繁忙期间积压的唤醒：${item.reason}@seq${item.seq}`);
-                      scheduleWakeV2(key, item.reason);
-                    } else {
-                      log(`[reserved2] ${key} 繁忙期间唤醒 ${item.reason}@seq${item.seq} 已被当前回合处理，跳过补发`);
-                    }
-                  }
-                }
-              }
-              if (ended.reason.kind === 'completed' && ended.text.trim()) {
-                const plain = mdToPlain(ended.text);
-                // 纯 Markdown/空白输出按“无文本”处理，避免后续 planSocialTimeline 拿空串崩溃。
-                if (!plain.trim()) {
-                  log(`agent 回复为空（仅格式/空白）(${key})`);
-                  if (isFarewell) {
-                    const st = socialState(key);
-                    if (st.phase === 'exiting') {
-                      st.phase = 'idle';
-                      st.activeDeadlineAt = 0;
-                      st.activeExitAt = 0;
-                      log(`社交模式：${key} 空退场回合，回到观望`);
-                    }
-                  }
-                  continue;
-                }
-                // 社交模式静默标记：AI 主动选择“潜水/不接话”，不发送到 QQ
-                if (isSilentMarker(plain)) {
-                  log(`社交模式：AI 选择静默（${SILENT_MARKER}）(${key})`);
-                  if (isFarewell) {
-                    const st = socialState(key);
-                    if (st.phase === 'exiting') {
-                      st.phase = 'idle';
-                      st.activeDeadlineAt = 0;
-                      st.activeExitAt = 0;
-                      log(`社交模式：${key} 退场选择静默，回到观望`);
-                    }
-                  }
-                  continue;
-                }
-                // 本回合已经通过 MCP 发送工具成功发出消息：跳过自动转发，避免重复发送。
-                if (sendToolSucceeded) {
-                  log(`工具已发送消息，跳过自动转发 (${key})`);
-                  if (isFarewell) {
-                    const st = socialState(key);
-                    if (st.phase === 'exiting') {
-                      st.phase = 'idle';
-                      st.activeDeadlineAt = 0;
-                      st.activeExitAt = 0;
-                      log(`社交模式：${key} 工具发送后退场完成，回到观望`);
-                    }
-                  }
-                  continue;
-                }
-                // 审计（对完整文本执行，避免截断漏判；这里只判断，不发送，避免双重发送）
-                const hasKnownToken = [...KNOWN_AGENT_TOKENS].some((t) => t && plain.includes(t));
-                if (shouldAuditKey(key) && (SENSITIVE_RE.test(plain) || hasKnownToken)) {
-                  log(`⚠️ 回复被安全策略拦截 (${key})，疑似包含敏感信息${hasKnownToken ? '（含会话令牌）' : ''}`);
-                  appendActivity(`${key} agent 回复被拦截（疑似敏感信息${hasKnownToken ? '/会话令牌' : ''}）`);
-                  if (cfg.security?.interceptNotify !== false) {
-                    await sendToQQ(key, '⚠️ 本条回复因疑似包含敏感信息（路径/凭据/会话令牌）被安全策略拦截，已记录并通知管理员。');
-                  }
-                  if (isFarewell) {
-                    const st = socialState(key);
-                    if (st.phase === 'exiting') {
-                      st.phase = 'idle';
-                      st.activeDeadlineAt = 0;
-                      st.activeExitAt = 0;
-                      log(`社交模式：${key} 退场发言被拦截，回到观望`);
-                    }
-                  }
-                  continue;
-                }
-                // 仿真群友模式：时间线多段发送（主回复 + 可选二次补刀）
-                if (isSocialEnabled()) {
-                  if (shouldBlockSilentReply(key)) {
-                    log(`静默模式，拦截在途回复 (${key})`);
-                    appendActivity(`${key} 静默模式，拦截在途回复`);
-                    if (isFarewell) {
-                      const st = socialState(key);
-                      if (st.phase === 'exiting') {
-                        st.phase = 'idle';
-                        st.activeDeadlineAt = 0;
-                        st.activeExitAt = 0;
-                        log(`社交模式：${key} 静默模式下退场回合被拦截，回到观望`);
-                      }
-                    }
-                    continue;
-                  }
-                  const timeline = planSocialTimeline(plain, cfg.social);
-                  const messages = timeline.main;
-                  log(`agent 回复 (${key}) ${plain.length} 字 → ${messages.length} 条`);
-                  appendActivity(`${key} agent 回复：${messages[0].slice(0, 80)}${messages.length > 1 ? '（分' + messages.length + '条）' : ''}${messages[0].length > 80 ? '…' : ''}`);
-                  if (messages.length > 1) {
-                    await sendBurstToQQ(key, messages, cfg.social);
-                  } else {
-                    await sendToQQ(key, messages[0]);
-                  }
-                  // 发言后刷新活跃时间，并调度可能的二次补刀
-                  const st = socialState(key);
-                  if (isFarewell) {
-                    // 确认为退场发言：不再刷新活跃时间、不调度补刀，直接进入观望
-                    st.phase = 'idle';
-                    st.activeDeadlineAt = 0;
-                    st.activeExitAt = 0;
-                    log(`社交模式：${key} 退场发言完成，进入观望`);
-                  } else if (st.phase === 'exiting') {
-                    // 退场期间有旧回复恰好完成：照常发出，但不把它当作退场，也不调度补刀
-                    log(`社交模式：${key} 退场期间旧回复完成，保持退场状态`);
-                  } else {
-                    st.lastActiveMessageAt = Date.now();
-                    st.lastAiReplyAt = Date.now();
-                    log(`社交模式：发言完成，刷新活跃时间 (${key})`);
-                  }
-                } else if (currentMode === 'reserved2') {
-                  log(`[reserved2] AI 内部输出（不自动转发）(${key}): ${plain.slice(0, 80)}`);
-                  appendActivity(`${key} [reserved2] AI 内部输出：${plain.slice(0, 80)}${plain.length > 80 ? '…' : ''}`);
-                } else {
-                  if (shouldBlockSilentReply(key)) {
-                    log(`静默模式，拦截在途回复 (${key})`);
-                    appendActivity(`${key} 静默模式，拦截在途回复`);
-                    continue;
-                  }
-                  log(`agent 回复 (${key}) ${plain.length} 字`);
-                  appendActivity(`${key} agent 回复：${plain.slice(0, 80)}${plain.length > 80 ? '…' : ''}`);
-                  await sendToQQ(key, plain);
-                }
-              } else if (ended.reason.kind === 'error') {
-                const msg = ended.reason.error?.message ?? '未知错误';
-                const safeMsg = shouldAuditKey(key) && SENSITIVE_RE.test(msg) ? '（含敏感信息，已隐藏）' : msg.slice(0, 500);
-                await sendToQQ(key, `⚠️ agent 处理出错：${safeMsg}`);
-                if (isFarewell) {
-                  const st = socialState(key);
-                  if (st.phase === 'exiting') {
-                    st.phase = 'idle';
-                    st.activeDeadlineAt = 0;
-                    st.activeExitAt = 0;
-                    log(`社交模式：${key} 退场发言出错，回到观望`);
-                  }
-                }
-              } else if (ended.reason.kind === 'aborted') {
-                await sendToQQ(key, '⏹️ 已停止');
-                if (isFarewell) {
-                  const st = socialState(key);
-                  if (st.phase === 'exiting') {
-                    st.phase = 'idle';
-                    st.activeDeadlineAt = 0;
-                    st.activeExitAt = 0;
-                    log(`社交模式：${key} 退场发言中止，回到观望`);
-                  }
-                }
-              } else if (!ended.text.trim()) {
-                // completed 但没文本（纯工具调用回合）
-                log(`回合完成但无文本 (${key})`);
-                if (isFarewell) {
-                  const st = socialState(key);
-                  if (st.phase === 'exiting') {
-                    st.phase = 'idle';
-                    st.activeDeadlineAt = 0;
-                    st.activeExitAt = 0;
-                    log(`社交模式：${key} 退场回合无文本，回到观望`);
-                  }
-                }
-              }
-            }
-          } else if ((frame.type === 'question/requested' || frame.type === 'approval/requested') && learnerSessions.has(frame.sessionId)) {
-            // 黑话学习会话不应向用户提问/请求审批；自动跳过，避免阻塞学习任务。
-            try {
-              if (frame.type === 'question/requested') {
-                await api.respond({
-                  type: 'client-response',
-                  rpcId: envelope.rpcId,
-                  result: { ok: true, value: { sessionId: frame.sessionId, answer: { answers: frame.questions.map((q) => ({ id: q.id, selected: [], custom: '' })) } } }
-                });
-              } else {
-                await api.respond({
-                  type: 'client-response',
-                  rpcId: envelope.rpcId,
-                  result: { ok: true, value: { sessionId: frame.sessionId, approvalId: frame.approvalId, outcome: 'rejected' } }
-                });
-              }
-              log('黑话学习会话自动跳过提问/审批');
-            } catch (error) {
-              log('自动响应学习会话提问/审批失败:', error?.message ?? error);
-            }
-          } else if (frame.type === 'question/requested') {
-            const key = reverse.get(frame.sessionId);
-            if (!key) continue;
-            const lines = frame.questions.map((q, i) => {
-              const qText = String(q.question ?? '');
-              const sensitive = shouldAuditKey(key) && SENSITIVE_RE.test(qText);
-              if (sensitive) log(`⚠️ 提问文本含敏感信息，已隐藏 (${key})`);
-              const safeQuestion = sensitive ? '（含敏感信息，已隐藏）' : qText;
-              let s = `${i + 1}. ${safeQuestion}`;
-              if (q.options?.length) {
-                const opts = q.options.map((o) => {
-                  const label = String(o.label ?? '');
-                  const optSensitive = shouldAuditKey(key) && SENSITIVE_RE.test(label);
-                  if (optSensitive) log(`⚠️ 提问选项含敏感信息，已隐藏 (${key})`);
-                  return `「${optSensitive ? '（含敏感信息，已隐藏）' : label}」`;
-                });
-                s += '\n   ' + opts.join(' ');
-              }
-              return s;
-            });
-            await sendToQQ(key, '❓ agent 需要你回答：\n' + lines.join('\n') + '\n（直接回复选项文字或输入你的回答）');
-            await registerPending(key, { kind: 'question', rpcId: envelope.rpcId, sessionId: frame.sessionId, questions: frame.questions });
-          } else if (frame.type === 'approval/requested') {
-            const key = reverse.get(frame.sessionId);
-            if (!key) continue;
-            const rawReason = frame.reason ?? '';
-            const sensitiveReason = shouldAuditKey(key) && SENSITIVE_RE.test(rawReason);
-            if (sensitiveReason) log(`⚠️ 审批理由含敏感信息，已隐藏 (${key})`);
-            const safeReason = sensitiveReason ? '（含敏感信息，已隐藏）' : rawReason;
-            const reason = safeReason ? `\n理由：${safeReason}` : '';
-            const rawToolName = frame.toolName ?? '';
-            const sensitiveTool = shouldAuditKey(key) && SENSITIVE_RE.test(rawToolName);
-            if (sensitiveTool) log(`⚠️ 审批工具名含敏感信息，已隐藏 (${key})`);
-            const safeToolName = sensitiveTool ? '（含敏感信息，已隐藏）' : rawToolName;
-            await sendToQQ(key, `🔐 agent 请求审批：${safeToolName}${reason}\n回复「通过」或「拒绝」`);
-            await registerPending(key, { kind: 'approval', rpcId: envelope.rpcId, sessionId: frame.sessionId, approvalId: frame.approvalId, toolName: frame.toolName });
-          } else if (frame.type === 'stream/error') {
-            log('事件流错误:', frame.error);
-          }
+        const now = Date.now();
+        if (now - lastPumpConnectLogAt > 60000) {
+          log('连接 DSH 事件流…');
+          lastPumpConnectLogAt = now;
         }
+        for await (const item of api.openRemoteStream('$events', {})) {
+          if (item.type === 'ready') {
+            // 重连后 DSH 会把仍在等待的瀑布事件用新 clientId 重新投递，挂起条目同步刷新。
+            if (item.clientId && item.clientId !== eventsClientId) {
+              eventsClientId = item.clientId;
+              for (const p of pending.values()) if (p.clientId) p.clientId = item.clientId;
+            }
+          } else if (item.type === 'waterfall') {
+            await handleWaterfall(item);
+          } else if (item.type === 'cancel') {
+            handleWaterfallCancel(item.eventId);
+          }
+          // 其余 emit 帧（api-session/* 状态、settings/commands 变更）对桥接无行为，忽略。
+        }
+        log('DSH 事件流已结束，3 秒后重连');
       } catch (error) {
         log('事件流中断:', error?.message ?? error);
-        collectors.clear(); // 清除旧 turn collector，避免重连后残留导致重复累加
-        social.silentTurns.clear(); // 清除未消费的摘要静默名额，避免重连后吞掉正常回复
-        sendToolSucceededSessions.clear();
-        pendingSendToolCalls.clear();
-        v2TurnStartAt.clear();
-        toolCallNames.clear();
-        pendingWakeKeys.clear();
-        clearAllPendingWakeLeases();
-        social.exitingSessions.clear();
-        wakeConfigUpdatedKeys.clear();
-        markReadCalledKeys.clear();
-        wakeConfigMissCount.clear();
       }
       await sleep(3000);
     }
   }
-
   // QQ 侧（SnowLuma OneBot WebSocket 客户端）
   const bot = new SnowLumaWebSocketClient({
     url: cfg.snowluma.wsUrl,

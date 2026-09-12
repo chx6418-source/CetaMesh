@@ -2,6 +2,23 @@
 
 `qq-bridge` 仓库本身包含桥接、控制台和插件，但 **DSH 端的两个聊天模式（`qq-chat` / `qq-chat-v2`）以及 MCP 挂载** 不在仓库根目录，需要通过本说明安装到目标设备的 DSH 环境中。
 
+## DSH 版本要求（≥ 0.1.5-rc.1，2026-09 起强制）
+
+DSH 0.1.5 对 Web API 做了两次不兼容变更，桥接已适配：
+
+1. **强制鉴权**：所有 `/api/*` 请求（含 WebSocket）必须携带 `dsh web` 签发的浏览器会话 Cookie，回环地址也不例外。
+   桥接会自动用本机 `%USERPROFILE%\.dsh\.credentials.yaml`（受 `DSH_HOME` 环境变量影响）里 `client-connection/browser-session` 记录的 secret 离线锻造 Cookie，无需人工干预。
+   仅当自动锻造不可用时才需要在 `config.json` 的 `dsh.authCookie` 手动填入完整 Cookie（形如 `dsh-auth-xxx=v1.…`，浏览器 DevTools 里可复制）。
+2. **协议更换**：旧的 `POST /api/sessions.create`（点号式）与 `/api/events.mux` 全局事件流已移除，替换为
+   `POST /api/<ns/method>`（斜杠式，payload 包一层 `{args}`）+ WebSocket `/api/remote.mux` 多路复用流
+   （全局 `$events` 流承接提问/审批瀑布事件；每个会话经 `session/follow` 流收取 turn 事件）。
+
+诊断工具：`node scripts/probe-dsh-api.mjs [baseUrl]` 可一键校验鉴权、unary RPC、事件流与提问瀑布应答闭环；
+`node src/self-test.js` 可验证"建会话 → prompt → 收回复"的最小链路。
+
+常见症状：日志每 3 秒刷一条「连接 DSH 事件流…」且无报错 —— 旧版桥接对 401 静默重试的表现（已修复，
+现在 `checkDsh` 与事件流中断都会打印具体原因，例如 401/403/连接拒绝）。
+
 ## 安装步骤
 
 在目标设备上：
