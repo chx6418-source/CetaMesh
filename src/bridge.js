@@ -12,6 +12,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { SnowLumaWebSocketClient, text } from '@snowluma/sdk';
 import { NodeApiClient, unwrap, createTurnCollector } from './dsh-client.js';
+import { createStatusPanel } from './status-panel.js';
 import { mdToPlain, splitForQQ } from './md-to-plain.js';
 import { SENSITIVE_RE } from './sensitive.js';
 import { looksLikeUnfinished } from './v2-wait.js';
@@ -564,10 +565,14 @@ function releaseLock() {
 }
 
 // ── 工具 ────────────────────────────────────────────────────────────────────
-// 日志同时输出到 stdout 与 state/bridge.log（守护窗口不可见时也能排查）
+// 命令行底部实时状态面板（TTY 下启用；日志从面板上方滚动，详见 status-panel.js）
+const statusPanel = createStatusPanel();
+// 日志同时输出到 stdout 与 state/bridge.log（守护窗口不可见时也能排查）。时间用本地时区，与状态面板/activity 日志一致。
 function log(...args) {
-  const line = `${new Date().toISOString().slice(11, 19)} [bridge] ${args.map((a) => redactSensitiveText(typeof a === 'string' ? a : JSON.stringify(a))).join(' ')}`.replace(/[\r\n]+/g, ' ');
-  console.log(line);
+  const now = new Date();
+  const clock = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
+  const line = `${clock} [bridge] ${args.map((a) => redactSensitiveText(typeof a === 'string' ? a : JSON.stringify(a))).join(' ')}`.replace(/[\r\n]+/g, ' ');
+  statusPanel.logAbove(line);
   try {
     fs.mkdirSync(STATE_DIR, { recursive: true });
     fs.appendFileSync(BRIDGE_LOG, line + '\n');
@@ -8324,6 +8329,51 @@ async function main() {
   }
   startDshWatch();
   startConsoleServer();
+
+  // ── 命令行实时会话状态面板（TTY 下日志下方常驻，1 秒刷新；重定向输出时自动关闭） ──
+  function fmtPanelClock(ts) {
+    const d = new Date(ts);
+    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  }
+  function gatherStatusLines() {
+    const now = new Date();
+    const clock = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
+    const head = `${clock} 模式 ${currentMode} · DSH ${dshReady ? '已就绪' : '不可用（消息排队中）'}${socialV2.paused ? ' · 二代已暂停' : ''} · 会话 ${Object.keys(state.sessions).length}${followStreams.size ? ` · 事件流 ${followStreams.size}` : ''}`;
+    const lines = [{ rule: true, text: '─'.repeat(64) }, head];
+    const keys = new Set([...Object.keys(state.sessions), ...socialV2.conversations.keys()]);
+    const sorted = [...keys].sort((a, b) => (socialV2.conversations.get(b)?.lastIncomingAt ?? 0) - (socialV2.conversations.get(a)?.lastIncomingAt ?? 0));
+    for (const key of sorted.slice(0, 8)) {
+      const st = socialV2.conversations.get(key);
+      const sessionId = state.sessions[key];
+      const bits = [];
+      let status = '观望';
+      if (sessionId && collectors.has(sessionId)) status = '回合中';
+      else if (pending.has(key)) status = pending.get(key).kind === 'approval' ? '待审批' : '待回答';
+      else if (promptQueues.get(key)?.queue?.length) status = `排队${promptQueues.get(key).queue.length}条`;
+      else if (activeWaits.has(key)) status = '观察中';
+      else if (pendingWakeKeys.has(key)) status = '唤醒处理中';
+      else if (currentMode === 'reserved2') {
+        if (st?.wakeConfig?.mode === 'active') status = '活跃';
+        else if (st?.wakeConfig?.sleepUntil) {
+          const until = Date.parse(st.wakeConfig.sleepUntil);
+          status = Number.isFinite(until) && until > Date.now() ? `沉睡至 ${fmtPanelClock(until)}` : '待唤醒';
+        } else if (st?.wakeConfig?.infinite) status = '长潜（条件唤醒）';
+      } else {
+        const s1 = social.states.get(key);
+        if (s1?.phase === 'exiting') status = '退场中';
+        else if (Number(s1?.activeDeadlineAt) > Date.now()) status = `活跃至 ${fmtPanelClock(s1.activeDeadlineAt)}`;
+      }
+      bits.push(status);
+      const unread = Array.isArray(st?.unread) ? st.unread.length : 0;
+      if (unread) bits.push(`未读${unread}`);
+      if (st?.lastIncomingAt) bits.push(`来讯 ${fmtPanelClock(st.lastIncomingAt)}`);
+      lines.push(`  ${key.padEnd(22)}${bits.join(' · ')}`);
+    }
+    if (!sorted.length) lines.push('  （暂无会话，QQ 消息到来后自动创建）');
+    lines.push({ rule: true, text: '─'.repeat(64) });
+    return lines;
+  }
+  statusPanel.start(gatherStatusLines);
 
   await pumpMux();
 }
