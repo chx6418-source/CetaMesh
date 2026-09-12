@@ -137,6 +137,16 @@
     return authPromise;
   }
 
+  // 授权弹窗：令牌显示/隐藏
+  $('#authEye').addEventListener('click', function () {
+    const inp = $('#authTokenInput');
+    const show = inp.type === 'password';
+    inp.type = show ? 'text' : 'password';
+    $('#authEyeOpen').style.display = show ? 'none' : '';
+    $('#authEyeShut').style.display = show ? '' : 'none';
+    inp.focus();
+  });
+
   /* ================= API（沿用原鉴权协议：x-console-token） ================= */
   async function api(path, method, body, _retried = 0) {
     const headers = body ? { 'content-type': 'application/json' } : {};

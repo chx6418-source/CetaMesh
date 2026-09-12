@@ -197,7 +197,7 @@
       <article class="card c-12" id="cardPresets">
         <header class="card-head">
           <h2><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="12" rx="3"/><path d="M12 8V4m-3 0h6"/></svg>Agent 预设库</h2>
-          <span class="hint">点击「编辑」右侧抽屉直接修改，保存即生效</span>
+          <span class="hint">预设来自 DSH，此处展示各运行模式的挂载情况</span>
         </header>
         <div class="card-body"><div class="rows" id="presetRows"></div></div>
       </article>
@@ -843,14 +843,22 @@
 
 <!-- 鉴权弹窗（401 时） -->
 <div class="modal-overlay" id="authOverlay">
-  <div class="modal" style="width:min(420px,94vw)">
-    <h3>🔒 需要控制台令牌</h3>
-    <div class="meta">请输入控制台访问令牌（config.json 的 consoleToken）</div>
-    <input type="password" id="authTokenInput" placeholder="控制台访问令牌" autocomplete="current-password">
-    <div class="meta err" id="authMsg"></div>
-    <div class="modal-foot">
-      <button id="authOk" class="btn primary sm">解锁</button>
+  <div class="modal auth-modal">
+    <div class="auth-logo">Q</div>
+    <h3>QQ 桥接控制台</h3>
+    <div class="meta">输入控制台访问令牌后进入（config.json 的 consoleToken）</div>
+    <div class="auth-field">
+      <span class="auth-key"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="14" r="4.5"/><path d="M11.5 10.5 20 2m-4 2 3 3m-6 0 3 3"/></svg></span>
+      <input type="password" id="authTokenInput" placeholder="输入控制台访问令牌" autocomplete="current-password">
+      <button class="eye" id="authEye" type="button" title="显示/隐藏令牌">
+        <svg id="authEyeOpen" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-6.5 10-6.5S22 12 22 12s-3.5 6.5-10 6.5S2 12 2 12z"/><circle cx="12" cy="12" r="2.8"/></svg>
+        <svg id="authEyeShut" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="display:none"><path d="M2 12s3.5-6.5 10-6.5c1.3 0 2.5.2 3.6.6M22 12s-3.5 6.5-10 6.5c-1.3 0-2.5-.2-3.6-.6M4 20 20 4"/></svg>
+      </button>
     </div>
+    <div class="meta err" id="authMsg"></div>
+    <button id="authOk" class="btn primary auth-go">进入控制台
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h13m-5-6 6 6-6 6"/></svg>
+    </button>
   </div>
 </div>
 
