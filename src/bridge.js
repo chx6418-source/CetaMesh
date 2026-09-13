@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import iconv from 'iconv-lite';
 import { fileURLToPath } from 'node:url';
 import { SnowLumaWebSocketClient, text } from '@snowluma/sdk';
@@ -1817,8 +1817,25 @@ async function main() {
           res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-store', connection: 'keep-alive', ...SECURITY_HEADERS });
           res.write(`data: ${JSON.stringify({ backlog: runtimeLogHub.buffer, status: gatherStatusLines() })}\n\n`);
           runtimeLogHub.clients.add(res);
-          const beat = setInterval(() => { try { res.write(`data: ${JSON.stringify({ status: gatherStatusLines() })}\n\n`); } catch {} }, 4000);
+          // 状态面板 1s 刷新，与 TTY 状态面板同频；运行日志行保持即时推送
+          const beat = setInterval(() => { try { res.write(`data: ${JSON.stringify({ status: gatherStatusLines() })}\n\n`); } catch {} }, 1000);
           req.on('close', () => { clearInterval(beat); runtimeLogHub.clients.delete(res); });
+          return;
+        }
+        // 关闭主程序：终止守护循环与全量桥接进程（含内嵌终端会话），完整退出应用
+        if (req.method === 'POST' && url.pathname === '/api/shutdown') {
+          log('控制台：收到关闭主程序请求，正在终止全量进程…');
+          sendJson({ ok: true, message: '正在关闭主程序…' });
+          setTimeout(() => {
+            try { for (const session of terminalSessions.values()) { try { session.child.kill(); } catch {} } } catch {}
+            try {
+              // 先杀守护循环（start.bat cmd），避免进程退出后被守护重拉
+              execFileSync('powershell.exe', ['-NoProfile', '-Command', "Get-CimInstance Win32_Process -Filter \"Name='cmd.exe'\" | Where-Object { $_.CommandLine -like '*start.bat*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"], { timeout: 8000, windowsHide: true, stdio: 'ignore' });
+            } catch {}
+            try { releaseLock(); } catch {}
+            log('桥接已完全关闭。');
+            process.exit(0);
+          }, 200);
           return;
         }
         if (req.method === 'GET' && url.pathname === '/api/status') {

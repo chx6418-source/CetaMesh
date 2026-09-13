@@ -81,6 +81,12 @@ body {
 }
 [hidden] { display: none !important; }
 ::selection { background: var(--accent); color: var(--on-accent); }
+/* 交互式控制台默认禁止选中页面文字：主题 ::selection 是高饱和强调色，
+   任何误选（双击标题/正文、拖拽划过）都会留下一个醒目的实心蓝块。
+   日志、终端、表格数据与输入框在下一行显式放开，保证可复制。 */
+body { user-select: none; -webkit-user-select: none; }
+input, textarea, select, [contenteditable="true"],
+pre, code, table, .log-list, .log-msg, .ss-info, .tbl-wrap, #sessionList { user-select: text; -webkit-user-select: text; }
 code { font-family: var(--font-mono); font-size: 12px; background: var(--chip); padding: 2px 7px; border-radius: 9px; color: var(--text-2); box-shadow: inset 1.5px 2px 5px var(--shadow-c1), inset -1.5px -2px 5px var(--shadow-c2); }
 a { color: var(--accent); }
 h1, h2, h3 { line-height: 1.35; }
@@ -167,6 +173,9 @@ body > main { grid-area: main; padding: 82px 28px 70px; max-width: 1240px; width
 }
 .nav-logout:active { transform: scale(.955); }
 .nav-logout:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* 底部操作组：退出登录 + 关闭主程序 共同钉在侧栏最底部（关闭主程序在最下） */
+#logoutBtn { margin-top: auto; }
+#shutdownBtn { margin-top: 6px; }
 /* ---------- 内嵌命令提示符 ---------- */
 .term-screen {
   margin: 0; padding: 14px 16px; border-radius: 16px;
@@ -258,6 +267,8 @@ article.card {
 .card-body { padding: 16px 18px 18px; display: flex; flex-direction: column; gap: 12px; }
 
 /* ---------- 软糖按钮 ---------- */
+/* 按钮文字不参与选中：避免连点/双击时弹出系统蓝色选区残留（关闭主程序等确认按钮易触发） */
+button, .btn, .nav-btn, .nav-logout, .chip { user-select: none; -webkit-user-select: none; }
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 6px;
   font: inherit; font-size: 13px; font-weight: 600;
@@ -616,16 +627,23 @@ pre.console-pre {
 .modal-overlay {
   position: fixed; inset: 0; background: rgba(50, 40, 90, .3); backdrop-filter: blur(4px);
   display: none; align-items: center; justify-content: center; z-index: 1000; padding: 20px;
+  opacity: 0; transition: opacity .2s ease;
 }
-.modal-overlay.open { display: flex; }
+/* 打开：遮罩淡入（@starting-style 让从 display:none 出现的首帧也从 0 过渡） */
+.modal-overlay.open { display: flex; opacity: 1; }
+@starting-style { .modal-overlay.open { opacity: 0; } }
+/* 关闭：先播退出过渡再由 JS 摘除 .open，避免瞬间 display:none 的硬切 */
+.modal-overlay.open.closing { opacity: 0; }
 .modal {
   background: var(--panel-solid); border: 1px solid var(--edge-hi); border-radius: 24px;
   width: min(640px, 94vw); max-height: 88vh; overflow: auto; padding: 22px 24px;
   box-shadow: 18px 22px 60px var(--shadow-c1), -10px -12px 40px var(--shadow-c2), inset 0 1.5px 0 var(--edge-hi);
   backdrop-filter: blur(var(--glass-blur)) saturate(1.5);
-  animation: modalIn .2s var(--spring);
+  animation: modalIn .26s var(--spring);
+  transition: transform .2s cubic-bezier(.4, 0, .55, 1), opacity .2s ease;
   display: flex; flex-direction: column; gap: 10px;
 }
+.modal-overlay.closing .modal { animation: none; transform: translateY(10px) scale(.975); opacity: 0; }
 @keyframes modalIn { from { transform: translateY(14px) scale(.97); opacity: 0; } }
 .modal h3 { margin: 0; font-size: 15.5px; display: flex; align-items: center; gap: 8px; }
 .modal .modal-foot { display: flex; gap: 10px; justify-content: flex-end; flex-wrap: wrap; margin-top: 6px; }
@@ -732,6 +750,10 @@ pre.console-pre {
     <button class="nav-logout" id="logoutBtn" type="button" title="清空本机登录态并返回登录页">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/></svg>
       <span>退出登录</span>
+    </button>
+    <button class="nav-logout" id="shutdownBtn" type="button" title="终止全部桥接进程并完整退出应用">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><path d="M12 2v10"/></svg>
+      <span>关闭主程序</span>
     </button>
   </nav>
   <div class="top-right">
@@ -1792,15 +1814,38 @@ window.LOG_POOL = [
   }
   $$('[data-arm]').forEach(bindArm);
 
+  /* ================= 弹窗开合（统一进出场过渡） ================= */
+  // 关闭先播 .closing 退出过渡，约 200ms 后再摘除 .open；
+  // 用元素级计时器防止快速连开时旧的关闭计时误摘新弹窗。
+  function openOverlay(overlay) {
+    if (!overlay) return;
+    clearTimeout(overlay.__closeTimer);
+    // 清掉打开前页面上残留的选区，避免它透过/叠在弹窗上形成蓝块
+    try { window.getSelection()?.removeAllRanges(); } catch (e) {}
+    overlay.classList.remove('closing');
+    overlay.classList.add('open');
+  }
+  function closeOverlay(overlay) {
+    if (!overlay) return;
+    clearTimeout(overlay.__closeTimer);
+    // 清掉弹窗内可能残留的文本选区（连点按钮易误选文字）
+    try {
+      const sel = window.getSelection();
+      if (sel && sel.rangeCount && overlay.contains(sel.anchorNode)) sel.removeAllRanges();
+    } catch (e) {}
+    overlay.classList.add('closing');
+    overlay.__closeTimer = setTimeout(() => overlay.classList.remove('open', 'closing'), 200);
+  }
+
   /* ================= 通用确认弹窗（动态列表操作用） ================= */
   function confirmBox(text, okLabel) {
     return new Promise((resolve) => {
       const overlay = $('#confirmOverlay'), ok = $('#confirmOk'), cancel = $('#confirmCancel');
       $('#confirmText').textContent = text || '确定执行该操作？';
       ok.textContent = okLabel || '确认';
-      overlay.classList.add('open');
+      openOverlay(overlay);
       const done = (v) => {
-        overlay.classList.remove('open');
+        closeOverlay(overlay);
         ok.removeEventListener('click', onOk);
         cancel.removeEventListener('click', onCancel);
         overlay.removeEventListener('click', onOutside);
@@ -1821,10 +1866,10 @@ window.LOG_POOL = [
       const overlay = $('#memEditOverlay'), input = $('#memEditInput'), ok = $('#memEditSave'), cancel = $('#memEditCancel');
       $('#memEditTitle').textContent = title || '编辑';
       input.value = value || '';
-      overlay.classList.add('open');
+      openOverlay(overlay);
       setTimeout(() => { input.focus(); input.select(); }, 60);
       const done = (v) => {
-        overlay.classList.remove('open');
+        closeOverlay(overlay);
         ok.removeEventListener('click', onOk);
         cancel.removeEventListener('click', onCancel);
         overlay.removeEventListener('click', onOutside);
@@ -1850,10 +1895,10 @@ window.LOG_POOL = [
       const overlay = $('#authOverlay'), input = $('#authTokenInput'), ok = $('#authOk'), msg = $('#authMsg');
       msg.textContent = '';
       input.value = '';
-      overlay.classList.add('open');
+      openOverlay(overlay);
       setTimeout(() => input.focus(), 60);
       const done = (v) => {
-        overlay.classList.remove('open');
+        closeOverlay(overlay);
         authPromise = null;
         ok.removeEventListener('click', onOk);
         input.removeEventListener('keydown', onKey);
@@ -1885,12 +1930,15 @@ window.LOG_POOL = [
      桥接重启窗口期（连接拒绝）不再需要手动刷新：横幅提示 + 轮询，
      后端恢复的瞬间整页自动刷新，登录态由会话 Cookie 静默续持 */
   let backendWaitPromise = null;
+  let appClosed = false;
   function waitBackendReady() {
     if (backendWaitPromise) return backendWaitPromise;
     backendWaitPromise = (async () => {
       const banner = document.createElement('div');
       banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;background:linear-gradient(140deg,#5b7cfa,#7cc7f2);color:#fff;font:600 13px/1.4 var(--font-body);padding:10px 16px;text-align:center;box-shadow:0 6px 18px rgba(60,80,180,.4)';
-      banner.textContent = '与桥接后端的连接已中断，正在等待恢复后自动刷新…';
+      banner.textContent = appClosed
+        ? '主程序已关闭。双击项目目录中的 启动桥接.vbs 重新启动，本页将自动恢复。'
+        : '与桥接后端的连接已中断，正在等待恢复后自动刷新…';
       document.body.appendChild(banner);
       let savedToken = '';
       try { savedToken = localStorage.getItem('consoleToken') || ''; } catch (e) {}
@@ -1936,6 +1984,15 @@ window.LOG_POOL = [
   $$('.nav-btn').forEach(b => b.addEventListener('click', () => go(b.dataset.module)));
   const hash = (location.hash || '').replace('#', '');
   go(['models', 'agents', 'logs', 'settings', 'sessions', 'terminal'].indexOf(hash) >= 0 ? hash : 'models', true);
+
+  /* ================= 关闭主程序 ================= */
+  $('#shutdownBtn').addEventListener('click', async () => {
+    const ok = await confirmBox('确认关闭主程序？QQ 机器人将立即下线，全部桥接进程完整退出。', '关闭主程序');
+    if (!ok) return;
+    appClosed = true;
+    try { await api('/api/shutdown', 'POST', {}); } catch (e) {}
+    await waitBackendReady(); // 停轮询横幅：显示"已关闭 + 重启指引"，用户重启桥接后本页自动恢复
+  });
 
   /* ================= 退出登录 ================= */
   $('#logoutBtn').addEventListener('click', async () => {
@@ -3592,10 +3649,10 @@ window.LOG_POOL = [
     $('#slangModalSources').value = Array.isArray(e.sources) ? e.sources.join('\n') : '';
     $('#slangModalDirectConfirm').textContent = mode === 'confirm' ? '直接确认（转正）' : '保存修改';
     $('#slangModalSendResearch').style.display = mode === 'confirm' && e.status === 'candidate' ? '' : 'none';
-    $('#slangModalOverlay').classList.add('open');
+    openOverlay($('#slangModalOverlay'));
   }
   function closeSlangModal() {
-    $('#slangModalOverlay').classList.remove('open');
+    closeOverlay($('#slangModalOverlay'));
     slangModalId = null;
   }
   function readSlangModalPayload() {
