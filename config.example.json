@@ -121,6 +121,7 @@
       "slangSubmit": true,
       "getImages": true,
       "getForwardMsg": true,
+      "getCardMsg": true,
       "sendPoke": true,
       "listStickers": true,
       "getStickerImage": true,

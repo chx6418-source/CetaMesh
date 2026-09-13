@@ -46,7 +46,15 @@ function segmentText(seg) {
     case 'file': return `[文件${d.name ?? ''}]`;
     case 'reply': return '[引用]';
     case 'forward': return '[转发]';
-    case 'json': return '[卡片消息]';
+    // QQ 官方机器人卡片段（Markdown 卡片 / 普通消息卡片 / 活动类卡片 / 小程序卡片）
+    case 'markdown': return '[卡片消息]';
+    case 'inline_keyboard':
+    case 'keyboard': return '[按钮]';
+    case 'json':
+    case 'xml':
+    case 'lightapp':
+    case 'miniapp': return '[卡片消息]';
+    case 'ark': return '[活动卡片]';
     default: return `[${seg.type ?? '未知'}]`;
   }
 }

@@ -221,6 +221,7 @@ DSH 事件流（api.events.mux）→ pumpMux()
 - 发送/互动：`qq_send_message`、`qq_send_burst`、`qq_send_poke`、`qq_send_sticker`
 - 等待/收尾：`qq_wait_for_messages`、`qq_mark_read`、`qq_set_wake_config`
 - 记忆/黑话/表情：`qq_memory_*`、`qq_slang_query`、`qq_slang_submit`、`qq_list_stickers`、`qq_get_sticker_image`、`qq_sticker_note`、`qq_collect_sticker`
+- 查看类：`qq_get_message_images`（含 QQ 官方卡片插图）、`qq_get_forward_msg`、`qq_get_card_msg`（QQ 官方机器人卡片：Markdown 卡片 / 普通消息卡片 / 活动类卡片，返回完整原始内容与解析字段；缓存未命中时按需回源 `get_msg`）
 - 形象：`qq_get_self_image`
 
 `mcp-host-server.js`：

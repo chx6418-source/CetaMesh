@@ -41,6 +41,7 @@ QQ 消息 ──► SnowLuma（OneBot v11 WS）──► 本桥接进程 ──�
   - 支持 DSH 斜杠命令（如 `/model`）与 `/reset`（重置会话上下文）
   - 群聊引用/回复会解析成「被引用人 + 原文」注入 DSH（如 `[引用 Derp：El Psy Kongroo是啥]机关的走狗`），让 AI 判断这句话是对谁说的，不会把群友之间引用第三方的对话误当成指向自己；引用机器人自己时会被视为必回
   - MCP 发送工具支持可选 `replyToMessageId`，并新增专用 `qq_reply` 工具：AI 可以先用 `qq_get_group_history` 拿到真实消息 id，再引用/回复某条消息（是否允许 AI 主动使用由人格/策略决定；桥接会检测发送类工具调用并自动跳过该回合的重复自动转发）
+  - **QQ 官方机器人卡片查看**（二代/reserved2）：QQ 官方机器人卡片主要有两类——**Markdown 卡片**（`markdown` + `inline_keyboard` 段：随机图／今日梦境／今日运势这类互动卡，正文会渲染成可读文本、按钮显示为 `[按钮:💖喜欢/💔不喜欢/🔄再来一张]`，卡片插图进入图片管线，用 `qq_get_message_images` 就能看图）与**图文/活动类卡片**（`json` / `ark`，正文折叠为 `[卡片消息]` / `[活动卡片]`）。AI 可用 `qq_get_card_msg`（参数 `key` / `messageId` / `token`，可选 `index`）读取卡片的**完整原始内容**（markdown 原文 + 按钮 JSON，或 json/ark payload）与解析字段（`kind` / `app` / `title` / `desc` / `jumpUrl` / `coverUrl` / `buttons` / `mentions`），方便开发调试时提取查看卡片数据。卡片缓存按会话隔离并单独落盘（`state/social-v2-cards.json`，有界）；缓存未命中时用 OneBot `get_msg` **按需回源**（校验消息归属），因此本功能上线前收到的旧卡片同样可读，桥接启动后还会自动回填最近的历史卡片元数据。控制台「Agent 预设 → 工具开关 → qq_get_card_msg」可独立开关（`socialV2.tools.getCardMsg`），**开/关即时生效、无需重启**
   - 一代仿真模式（`reserved`）下，AI 可以只输出 `[SILENT]` 表示“潜水/不接话”，桥接会静默不发送
   - 一代仿真模式（`reserved`）按空格分句：AI 用空格表示拆成多条消息；中英文/数字之间的空格也会被当成分条信号，不想分条就不要加空格（`reserved2` 不适用，分条请用 `qq_send_message` 数组）
 

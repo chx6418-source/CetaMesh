@@ -21,6 +21,20 @@ import { looksLikeUnfinished } from './v2-wait.js';
 import { safeFetchBuffer, validateFetchUrl, looksLikeImageBuffer } from './safe-fetch.js';
 import { extractForwardIds, forwardIdFromData, sanitizeForwardId, formatForwardResponse } from './forward.js';
 import {
+  CARD_SEGMENT_TYPES,
+  extractCardsFromSegments,
+  extractCardMediaFromSegments,
+  botMarkdownToText,
+  inlineKeyboardButtonLabels,
+  cardSummaryForMessage,
+  summarizeCard,
+  cardSegmentPlaceholder,
+  sanitizeCardRef,
+  formatCardResponse,
+  buildCardHint,
+  MAX_CARD_RAW_CHARS
+} from './qq-card.js';
+import {
   loadSlang,
   saveSlang,
   upsertSlangEntry,
@@ -64,6 +78,9 @@ const ROLE_STATE_FILE = path.join(STATE_DIR, 'current-role.json');
 const SLANG_FILE = path.join(STATE_DIR, 'slang.json');
 const SLANG_SESSION_FILE = path.join(STATE_DIR, 'slang-session.json');
 const SOCIAL_V2_FILE = path.join(STATE_DIR, 'social-v2.json');
+// QQ 官方卡片（普通消息卡片/活动类卡片）完整原始内容缓存：卡片无法从 OneBot 回源，
+// 必须在收到消息时留存，因此单独落盘，避免撑爆 social-v2.json。
+const SOCIAL_V2_CARD_FILE = path.join(STATE_DIR, 'social-v2-cards.json');
 const STICKER_FILE = path.join(STATE_DIR, 'stickers.json');
 const FEEDBACK_FILE = path.join(STATE_DIR, 'feedback.json');
 const TOOL_LOG_FILE = path.join(STATE_DIR, 'tool-calls.jsonl');
@@ -380,6 +397,7 @@ function loadConfig() {
         memory: true,
         getImages: true,
         getForwardMsg: true,
+        getCardMsg: true,
         sendPoke: true,
         listStickers: true,
         getStickerImage: true,
@@ -491,6 +509,7 @@ function loadConfig() {
     slangSubmit: true,
     getImages: true,
     getForwardMsg: true,
+    getCardMsg: true,
     sendPoke: true,
     listStickers: true,
     getStickerImage: true,
@@ -684,7 +703,26 @@ async function segmentsToText(segments, options = {}) {
         out.push(replyText || '[引用消息]');
         break;
       }
-      case 'json': out.push('[卡片消息]'); break;
+      // QQ 官方机器人 Markdown 卡片：正文就是卡片内容（随机图/今日梦境/运势…），
+      // 渲染成可读文本直接给 AI；插图由媒体管线单独处理，完整原文/按钮数据仍由 qq_get_card_msg 按需读取。
+      case 'markdown': {
+        const mdText = botMarkdownToText(d.content, { maxChars: 800 });
+        out.push(mdText || '[卡片消息]');
+        break;
+      }
+      case 'inline_keyboard':
+      case 'keyboard': {
+        const labels = inlineKeyboardButtonLabels(d, { max: 6 });
+        out.push(labels.length ? `[按钮:${labels.join('/')}]` : '[按钮]');
+        break;
+      }
+      // 其余卡片段（普通消息卡片 json / 活动类卡片 ark / 小程序卡片 xml·lightapp）
+      // 统一折叠成占位符；完整原始内容由 qq_get_card_msg 按需读取。
+      case 'json':
+      case 'ark':
+      case 'xml':
+      case 'lightapp':
+      case 'miniapp': out.push(cardSegmentPlaceholder(seg?.type)); break;
       case 'forward': {
         const fid = forwardIdFromData(d);
         out.push(fid ? `[转发消息 id=${fid}]` : '[转发消息]');
@@ -717,6 +755,11 @@ function extractMediaFromSegments(segments) {
         faceId: String(d.id ?? '')
       });
     }
+  }
+  // QQ 官方机器人 markdown 卡片的插图（![#宽 #高](https://qqbot.ugcimg.cn/…)）与 json/ark 卡片封面：
+  // 只有进入媒体管线，qq_get_message_images 才能把卡片插图喂给视觉模型（否则 AI 只看到 [图片] 占位）。
+  for (const cardMedia of extractCardMediaFromSegments(segments)) {
+    if (cardMedia.url && !media.some((m) => m.url && m.url === cardMedia.url)) media.push(cardMedia);
   }
   return media;
 }
@@ -1948,6 +1991,10 @@ async function main() {
             allowGroups: cfg.allow?.groups ?? [],
             allowPrivate: cfg.allow?.private ?? [],
             socialV2Paused: socialV2.paused,
+            // QQ 官方卡片能力自描述：自检/运维可据此判断运行中的桥接是否已加载卡片支持
+            // （含 QQ 官方机器人 markdown 卡片），避免“代码已改但进程没重启”的误判。
+            cardSegments: [...CARD_SEGMENT_TYPES],
+            cardToolEnabled: cfg.socialV2?.tools?.getCardMsg !== false,
             activity: readActivityTail(100)
           });
           return;
@@ -2764,7 +2811,7 @@ async function main() {
             merged.autoReplyCheckMs = Number.isFinite(n) ? Math.max(1000, Math.round(n)) : (current.autoReplyCheckMs ?? 30000);
           }
           // tools：只接受布尔开关
-          const toolFlags = ['getPrompt', 'getUnread', 'getRecent', 'socialState', 'sendGroup', 'sendPrivate', 'reply', 'sendBurst', 'sendMessage', 'waitMessages', 'feedback', 'getMyRecent', 'getMessageDetail', 'getActiveMembers', 'setWakeConfig', 'markRead', 'memory', 'slangQuery', 'slangSubmit', 'getImages', 'getForwardMsg', 'sendPoke', 'listStickers', 'getStickerImage', 'sendSticker', 'setStickerRemark', 'stickerNote', 'collectSticker', 'getSelfImage', 'fileSend', 'audioSearch', 'bilibili'];
+          const toolFlags = ['getPrompt', 'getUnread', 'getRecent', 'socialState', 'sendGroup', 'sendPrivate', 'reply', 'sendBurst', 'sendMessage', 'waitMessages', 'feedback', 'getMyRecent', 'getMessageDetail', 'getActiveMembers', 'setWakeConfig', 'markRead', 'memory', 'slangQuery', 'slangSubmit', 'getImages', 'getForwardMsg', 'getCardMsg', 'sendPoke', 'listStickers', 'getStickerImage', 'sendSticker', 'setStickerRemark', 'stickerNote', 'collectSticker', 'getSelfImage', 'fileSend', 'audioSearch', 'bilibili'];
           if (body.tools && typeof body.tools === 'object') {
             merged.tools = { ...(current.tools ?? {}), ...body.tools };
             for (const k of toolFlags) {
@@ -2938,7 +2985,9 @@ async function main() {
             if (removedV2?.agentToken) KNOWN_AGENT_TOKENS.delete(removedV2.agentToken);
             socialV2.conversations.delete(key);
             seenForwardIds.delete(key);
+            messageCardStore.delete(key);
           }
+          saveMessageCardStore();
           pendingWakeKeys.clear();
           clearAllPendingWakeLeases();
           wakeConfigUpdatedKeys.clear();
@@ -3003,6 +3052,7 @@ async function main() {
             slangSubmit: 'qq_slang_submit',
             getImages: 'qq_get_message_images',
             getForwardMsg: 'qq_get_forward_msg',
+            getCardMsg: 'qq_get_card_msg',
             sendPoke: 'qq_send_poke',
             listStickers: 'qq_list_stickers',
             getStickerImage: 'qq_get_sticker_image',
@@ -4213,6 +4263,14 @@ async function main() {
               forwardIds: Array.isArray(found.forwardIds) ? found.forwardIds : [],
               hasForward: !!found.hasForward
             } : {};
+            // QQ 官方卡片摘要：告诉 AI 这条消息带卡片，以及用哪个 messageId 调 qq_get_card_msg 取完整原始内容。
+            const cardFields = found && found.hasCard ? {
+              hasCard: true,
+              cardCount: Number(found.cardCount) || 0,
+              cardKinds: Array.isArray(found.cardKinds) ? found.cardKinds : [],
+              cardLabels: Array.isArray(found.cardLabels) ? found.cardLabels : [],
+              cardHint: String(found.cardHint || '')
+            } : {};
             let info = null;
             // 如果入参命中本地 seq 且本地存有真实 messageId，优先按 seq 展示，避免与真实 id 冲突。
             if (found && found.messageId && String(found.messageId) !== messageId) {
@@ -4235,8 +4293,8 @@ async function main() {
                 };
               }
             }
-            // 无论 info 来自本地还是 OneBot，只要本地有 found 就补充转发字段，避免提示词与实现不一致。
-            if (info && found) Object.assign(info, forwardFields);
+            // 无论 info 来自本地还是 OneBot，只要本地有 found 就补充转发/卡片字段，避免提示词与实现不一致。
+            if (info && found) Object.assign(info, forwardFields, cardFields);
             sendJson({ ok: true, key, messageId, info });
           } catch (error) {
             sendJson({ ok: false, error: `获取消息详情失败：${error?.message ?? error}` }, 500);
@@ -4353,6 +4411,54 @@ async function main() {
             log(`转发媒体读取失败 ${key}:`, error?.message ?? error);
             sendJson({ ok: false, error: `转发媒体读取失败：${error?.message ?? error}` }, 500);
           }
+          return;
+        }
+        // ── QQ 官方卡片查看端点（MCP qq_get_card_msg 走这里） ──────────────────
+        // 只返回“当前会话确实收到过”的卡片完整原始内容：
+        // 卡片缓存按会话隔离，ref 只能命中本会话入库过的消息，无法跨会话探测。
+        if (req.method === 'GET' && url.pathname === '/api/socialV2/card-message') {
+          const key = String(url.searchParams.get('key') ?? '').trim();
+          const messageId = String(url.searchParams.get('messageId') ?? '').trim();
+          const indexRaw = url.searchParams.get('index');
+          const agentToken = String(req.headers['x-agent-token'] ?? '').trim();
+          const keyMatch = /^(group|private):(\d+)$/.exec(key);
+          if (!keyMatch) { sendJson({ ok: false, error: 'key 格式应为 group:群号 或 private:QQ号' }, 400); return; }
+          const ref = sanitizeCardRef(messageId);
+          if (!ref) { sendJson({ ok: false, error: 'messageId 不能为空或格式非法' }, 400); return; }
+          if (currentMode !== 'reserved2') { sendJson({ ok: false, error: 'QQ 官方卡片查看仅 reserved2 模式可用' }, 403); return; }
+          if (!agentToken) { sendJson({ ok: false, error: 'reserved2 模式读取卡片必须携带 agent token' }, 403); return; }
+          if (!agentTokenOk(key, agentToken)) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          const kind = keyMatch[1];
+          const num = Number(keyMatch[2]);
+          if (!Number.isFinite(num) || num <= 0 || !modeAllowed(key, kind, num, cfg, currentMode)) {
+            sendJson({ ok: false, error: '当前模式不允许读取该会话' }, 403);
+            return;
+          }
+          if (!v2ToolEnabled('getCardMsg')) {
+            sendJson({ ok: false, error: '工具未启用：qq_get_card_msg' }, 403);
+            return;
+          }
+          let index = null;
+          if (indexRaw !== null && String(indexRaw).trim() !== '') {
+            const n = Number(indexRaw);
+            if (!Number.isInteger(n) || n < 0) { sendJson({ ok: false, error: 'index 必须是非负整数' }, 400); return; }
+            index = n;
+          }
+          loadMessageCardStore();
+          let cards = findMessageCards(key, ref);
+          if (!cards.length) {
+            // 缓存未命中：对历史消息（本功能上线前收到 / 缓存淘汰 / 桥接重启前）回源 get_msg
+            // 重新解析并回填缓存，这样旧卡片也能被读取。
+            const filled = await backfillMessageCache(key, ref);
+            cards = filled.cards;
+          }
+          if (!cards.length) {
+            sendJson({ ok: false, error: '该消息没有卡片内容，或不在当前会话可见范围内' }, 404);
+            return;
+          }
+          const shaped = index === null ? formatCardResponse(cards) : formatCardResponse(cards, { index });
+          if (index !== null && !shaped.card) { sendJson({ ok: false, error: '卡片序号越界' }, 404); return; }
+          sendJson({ ok: true, key, messageId: ref, ...shaped });
           return;
         }
         if (req.method === 'GET' && url.pathname === '/api/socialV2/active-members') {
@@ -4653,7 +4759,13 @@ async function main() {
             sendJson({ ok: false, error: '工具未启用：qq_get_message_images' }, 403);
             return;
           }
-          const media = findMessageMedia(key, messageId);
+          let media = findMessageMedia(key, messageId);
+          if (!media.length) {
+            // 缓存未命中：回源 get_msg 解析媒体（含 QQ 官方卡片插图）并回填，
+            // 让历史消息、卡片大图也能被 qq_get_message_images 读取。
+            const filled = await backfillMessageCache(key, messageId);
+            media = filled.media;
+          }
           if (!media.length) {
             sendJson({ ok: true, messageId, media: [], images: [], note: '该消息没有可读取的图片/表情元数据' });
             return;
@@ -4817,6 +4929,8 @@ async function main() {
           if (removedV2?.agentToken) KNOWN_AGENT_TOKENS.delete(removedV2.agentToken);
           socialV2.conversations.delete(key);
           seenForwardIds.delete(key);
+          messageCardStore.delete(key);
+          saveMessageCardStore();
           saveSocialV2State();
           saveState();
           try { await api.callEndpoint('workspace/archiveSession', { request: { sessionId: oldSessionId } }); } catch {}
@@ -4852,6 +4966,8 @@ async function main() {
           social.recentMessages.clear();
           messageMediaStore.clear();
           seenForwardIds.clear();
+          messageCardStore.clear();
+          saveMessageCardStore();
           social.pendingSummaries.clear();
           social.silentContext.clear();
           social.silentTurns.clear();
@@ -5461,7 +5577,9 @@ async function main() {
         const st = getSocialV2State(key);
         if (st && Array.isArray(st.recentMessages)) {
           const found = st.recentMessages.find((m) => m && (String(m.messageId || '') === refStr || String(m.seq || '') === refStr));
-          if (found && Array.isArray(found.media)) return found.media;
+          // 注意：只有非空才直接返回；空数组要继续查 messageMediaStore —— 历史消息（卡片图片回填）
+          // 的媒体只存在 store 里，若这里直接 return [] 会永远读不到。
+          if (found && Array.isArray(found.media) && found.media.length > 0) return found.media;
         }
       } catch {}
     }
@@ -5672,6 +5790,204 @@ async function main() {
   const messageMediaStore = new Map();
   // 二代会话见过的 forward id（有界，避免 recentMessages 滚动淘汰后无法读取刚见过的转发）
   const seenForwardIds = new Map(); // key -> Set<string>
+
+  // QQ 官方卡片缓存：key -> Map<messageId/seq, cardRecord[]>
+  // 卡片与转发不同：OneBot 没有“按消息 id 取卡片”的 API，只能在收到消息时把完整原始内容留下来，
+  // 供 MCP 工具 qq_get_card_msg 按需读取（开发调试时提取查看卡片数据）。
+  // 有界：每会话限制条数与原始内容总字节数，防止异常/刷屏 payload 撑爆内存与状态文件。
+  const messageCardStore = new Map();
+  const MAX_CARD_REFS_PER_KEY = 100;      // 每个会话最多保留多少条消息的卡片
+  const MAX_CARD_BYTES_PER_KEY = 1500000; // 每个会话卡片原始内容总量上限（约 1.5MB）
+  let cardStoreLoaded = false;
+
+  function cardStoreBytes(byRef) {
+    let total = 0;
+    for (const cards of byRef.values()) {
+      for (const c of cards) total += String(c?.raw ?? '').length;
+    }
+    return total;
+  }
+
+  function loadMessageCardStore() {
+    if (cardStoreLoaded) return;
+    cardStoreLoaded = true;
+    const data = readJsonSafe(SOCIAL_V2_CARD_FILE, null);
+    const convs = data && typeof data.conversations === 'object' && data.conversations ? data.conversations : null;
+    if (!convs) return;
+    for (const [key, refs] of Object.entries(convs)) {
+      if (!canonicalV2Key(key) || !refs || typeof refs !== 'object' || Array.isArray(refs)) continue;
+      const byRef = new Map();
+      for (const [ref, cards] of Object.entries(refs)) {
+        const safeRef = sanitizeCardRef(ref);
+        if (!safeRef || !Array.isArray(cards)) continue;
+        const clean = cards.filter((c) => c && typeof c === 'object' && c.raw).slice(0, 4);
+        if (clean.length) byRef.set(safeRef, clean);
+      }
+      if (byRef.size) messageCardStore.set(key, byRef);
+    }
+  }
+
+  function saveMessageCardStore() {
+    try {
+      const conversations = Object.create(null);
+      for (const [key, byRef] of messageCardStore) {
+        if (!byRef || !byRef.size) continue;
+        const obj = Object.create(null);
+        for (const [ref, cards] of byRef) {
+          const clean = cards.filter((c) => c && typeof c === 'object' && c.raw).slice(0, 4);
+          if (clean.length) obj[ref] = clean;
+        }
+        if (Object.keys(obj).length) conversations[key] = obj;
+      }
+      atomicWriteJson(SOCIAL_V2_CARD_FILE, { conversations });
+    } catch (error) {
+      log('保存卡片缓存失败:', error?.message ?? error);
+    }
+  }
+
+  // 记录一条消息里的卡片：同时按 messageId 与 seq 建索引，工具用任意一个 ref 都能查到。
+  function rememberMessageCards(key, refs, cards) {
+    const list = (Array.isArray(cards) ? cards : []).filter(Boolean).slice(0, 4);
+    if (!list.length) return;
+    const safeRefs = [...new Set((Array.isArray(refs) ? refs : []).map((r) => sanitizeCardRef(r)).filter(Boolean))];
+    if (!safeRefs.length) return;
+    let byRef = messageCardStore.get(key);
+    if (!byRef) {
+      byRef = new Map();
+      messageCardStore.set(key, byRef);
+    }
+    for (const ref of safeRefs) byRef.set(ref, list);
+    // 有界淘汰：先按条数，再按原始内容总字节（Map 保持插入序，最旧在头部）。
+    while (byRef.size > MAX_CARD_REFS_PER_KEY) {
+      const oldest = byRef.keys().next().value;
+      if (oldest === undefined) break;
+      byRef.delete(oldest);
+    }
+    while (byRef.size > 1 && cardStoreBytes(byRef) > MAX_CARD_BYTES_PER_KEY) {
+      const oldest = byRef.keys().next().value;
+      if (oldest === undefined) break;
+      byRef.delete(oldest);
+    }
+    saveMessageCardStore();
+  }
+
+  function findMessageCards(key, ref) {
+    const refStr = sanitizeCardRef(ref);
+    if (!refStr) return [];
+    const byRef = messageCardStore.get(key);
+    if (!byRef) return [];
+    const hit = byRef.get(refStr);
+    return Array.isArray(hit) ? hit : [];
+  }
+
+  // 按 ref（真实 messageId 或本地 seq）向 OneBot 回源拉取原始消息。
+  // 用途：卡片/媒体缓存只覆盖“本进程收到过的消息”，对更早的消息（或缓存淘汰、桥接重启前）
+  // 用 get_msg 重新拿原始消息段；归属校验与 resolveReplyInfo 完全一致
+  // （群消息必须同群；私聊必须无群归属且发送者匹配），防止用任意 id 跨会话探测。
+  async function fetchRawMessageByRef(key, ref) {
+    const keyMatch = /^(group|private):(\d+)$/.exec(String(key ?? ''));
+    if (!keyMatch) return null;
+    const kind = keyMatch[1];
+    const convId = keyMatch[2];
+    let realId = String(ref ?? '').trim();
+    let seq = null;
+    try {
+      // 只读已有状态，避免为未知会话创建影子状态。
+      const st = socialV2.conversations.get(key);
+      const found = st && Array.isArray(st.recentMessages)
+        ? st.recentMessages.find((m) => m && (String(m.seq) === realId || (m.messageId && String(m.messageId) === realId)))
+        : null;
+      if (found?.messageId) realId = String(found.messageId);
+      if (found?.seq != null) seq = String(found.seq);
+    } catch {}
+    const numericId = Number(realId);
+    if (!Number.isSafeInteger(numericId)) return null;
+    const raw = await bot.getMessage(numericId);
+    if (!raw || typeof raw !== 'object') return null;
+    if (kind === 'group') {
+      const rawGroup = raw.group_id ?? raw.groupId;
+      if (rawGroup == null || String(rawGroup) !== String(convId)) return null;
+    } else {
+      const rawUser = raw.user_id ?? raw.userId ?? raw.sender?.user_id;
+      const rawGroup = raw.group_id ?? raw.groupId;
+      if (rawGroup != null || rawUser == null || String(rawUser) !== String(convId)) return null;
+    }
+    return { raw, messageId: realId, seq };
+  }
+
+  // 回源解析卡片与媒体并回填缓存，返回 { cards, media }。
+  async function backfillMessageCache(key, ref) {
+    const empty = { cards: [], media: [] };
+    try {
+      const got = await fetchRawMessageByRef(key, ref);
+      if (!got) return empty;
+      const segments = Array.isArray(got.raw.message) ? got.raw.message : [];
+      const refs = [...new Set([got.messageId, got.seq, String(ref ?? '')].filter(Boolean).map(String))];
+      const cards = extractCardsFromSegments(segments, { maxRawChars: MAX_CARD_RAW_CHARS });
+      const media = extractMediaFromSegments(segments);
+      if (cards.length) rememberMessageCards(key, refs, cards);
+      if (media.length) {
+        let byRef = messageMediaStore.get(key);
+        if (!byRef) {
+          byRef = new Map();
+          messageMediaStore.set(key, byRef);
+        }
+        for (const r of refs) byRef.set(r, media);
+        while (byRef.size > MAX_MEDIA_STORE_PER_KEY) {
+          const oldest = byRef.keys().next().value;
+          if (oldest === undefined) break;
+          byRef.delete(oldest);
+        }
+      }
+      return { cards, media };
+    } catch (error) {
+      log(`回源消息失败 ${key} ${ref}:`, error?.message ?? error);
+      return empty;
+    }
+  }
+
+  // 启动后回填：卡片支持上线前收到的卡片消息没有卡片/媒体元数据，AI 既看不到卡片也读不到插图。
+  // 对最近消息里“看起来是卡片”的做一次按需回源补全（有界：每会话最多 10 条、全局最多 30 条）。
+  async function backfillRecentCardsV2() {
+    const LOOKS_LIKE_CARD = /\[(markdown|inline_keyboard|keyboard|卡片消息|活动卡片|json|ark|xml)\]/i;
+    const MAX_TOTAL = 30;
+    const MAX_PER_CONV = 10;
+    let total = 0;
+    for (const [key, st] of [...socialV2.conversations]) {
+      if (total >= MAX_TOTAL) break;
+      if (!canonicalV2Key(key)) continue;
+      const recent = Array.isArray(st?.recentMessages) ? st.recentMessages : [];
+      const targets = recent
+        .filter((m) => m && !m.isSelf && !m.hasCard && !m.hasMedia && LOOKS_LIKE_CARD.test(String(m.text || m.plain || '')))
+        .slice(-MAX_PER_CONV);
+      for (const m of targets) {
+        if (total >= MAX_TOTAL) break;
+        const ref = m.messageId != null ? String(m.messageId) : (m.seq != null ? String(m.seq) : '');
+        if (!ref) continue;
+        const filled = await backfillMessageCache(key, ref);
+        if (!filled.cards.length && !filled.media.length) continue;
+        total += 1;
+        if (filled.cards.length) {
+          const summary = cardSummaryForMessage(filled.cards);
+          if (summary) {
+            m.hasCard = true;
+            m.cardCount = summary.cardCount;
+            m.cardKinds = summary.cardKinds;
+            m.cardLabels = summary.cardLabels;
+            m.cardHint = buildCardHint(key, ref, summary).replace(/^\n+/, '');
+          }
+        }
+        if (filled.media.length) {
+          m.media = filled.media;
+          m.hasMedia = true;
+        }
+      }
+    }
+    if (total > 0) {
+      saveSocialV2State();
+      log(`卡片回填：已补齐 ${total} 条历史消息的卡片/插图元数据`);
+    }
+  }
 
   // 归一化“指定群友发言唤醒”名单：
   // - 只保留正整数 QQ 号（字符串形式），拒绝 null/对象/“null”/非法字符等脏数据；
@@ -6149,6 +6465,7 @@ async function main() {
   }
 
   loadSocialV2State();
+  loadMessageCardStore();
 
   function isSocialEnabled() {
     return currentMode === 'reserved' && cfg.social?.enabled !== false;
@@ -6930,7 +7247,7 @@ async function main() {
   }
 
   // ── 二代仿真模式（reserved2）唤醒调度 ──────────────────────────────────
-  function appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, messageId, media = [], userId = null, forwardIds = []) {
+  function appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, messageId, media = [], userId = null, forwardIds = [], cards = []) {
     const st = getSocialV2State(key);
     const recentLimit = Number(cfg.socialV2?.context?.recentLimit) || 100;
     const unreadLimit = Number(cfg.socialV2?.context?.unreadLimit) || 30;
@@ -6956,8 +7273,13 @@ async function main() {
         }
       }
     }
+    // QQ 官方卡片：只把摘要信息写进消息记录（随状态落盘），完整原始内容进卡片缓存（有界+单独落盘）。
+    const safeCards = (Array.isArray(cards) ? cards : []).filter(Boolean).slice(0, 4);
+    const cardSummary = cardSummaryForMessage(safeCards);
+    const seq = (st.lastUnreadSeq || 0) + 1;
+    const refForHint = messageId != null ? String(messageId) : String(seq);
     const msg = {
-      seq: (st.lastUnreadSeq || 0) + 1,
+      seq,
       messageId: messageId != null ? String(messageId) : null,
       sender,
       userId: userId != null ? String(userId) : null,
@@ -6972,8 +7294,14 @@ async function main() {
       hasMedia: safeMedia.length > 0,
       forwardIds: safeForwardIds,
       hasForward: safeForwardIds.length > 0,
+      hasCard: !!cardSummary,
+      cardCount: cardSummary ? cardSummary.cardCount : 0,
+      cardKinds: cardSummary ? cardSummary.cardKinds : [],
+      cardLabels: cardSummary ? cardSummary.cardLabels : [],
+      cardHint: cardSummary ? buildCardHint(key, refForHint, cardSummary).replace(/^\n+/, '') : '',
       time: Date.now()
     };
+    if (safeCards.length) rememberMessageCards(key, [messageId != null ? String(messageId) : '', String(seq)], safeCards);
     st.lastUnreadSeq = msg.seq;
     st.lastIncomingAt = Date.now();
     st.preSleepWaitSatisfiedAt = 0; // 有新消息进来，之前的“沉睡前已等待/已观察”作废
@@ -7650,6 +7978,8 @@ async function main() {
     const textContent = await segmentsToText(event.message ?? [], { resolveAtName, resolveReply });
     const plainContent = await segmentsToText(event.message ?? [], { resolveAtName, includeReply: false });
     const mediaList = extractMediaFromSegments(event.message ?? []);
+    // QQ 官方机器人卡片（普通消息卡片/活动类卡片）：提取完整原始内容，仅 reserved2 会落库并可被工具读取。
+    const cardList = extractCardsFromSegments(event.message ?? [], { maxRawChars: MAX_CARD_RAW_CHARS });
     const messageRef = String(event.message_id ?? event.msg_id ?? event.message_seq ?? '');
     const seqRef = event.message_seq != null ? String(event.message_seq) : '';
     const refsToStore = [...new Set([messageRef, seqRef].filter(Boolean))];
@@ -7742,6 +8072,8 @@ async function main() {
           if (removedV2?.agentToken) KNOWN_AGENT_TOKENS.delete(removedV2.agentToken);
           socialV2.conversations.delete(key);
           seenForwardIds.delete(key);
+          messageCardStore.delete(key);
+          saveMessageCardStore();
           saveSocialV2State();
           saveState();
           await sendToQQ(key, '已重置会话，下次消息将开新上下文');
@@ -7785,7 +8117,11 @@ async function main() {
     // 二代仿真模式（reserved2）：唤醒调度
     if (currentMode === 'reserved2') {
       const sender = kind === 'group' ? (event.sender?.card || event.sender?.nickname || String(event.user_id)) : '私聊';
-      appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, event.message_id ?? event.msg_id ?? null, mediaList, event.user_id ?? null, extractForwardIds(event.message ?? []));
+      appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, event.message_id ?? event.msg_id ?? null, mediaList, event.user_id ?? null, extractForwardIds(event.message ?? []), cardList);
+      // 卡片到达时在活动日志留痕，方便开发调试时定位是哪条消息带了卡片。
+      if (cardList.length) {
+        appendActivity(`${key} 收到 ${cardList.length} 张 QQ 官方卡片：${cardList.map((c) => summarizeCard(c)).join(' | ').slice(0, 160)}`);
+      }
       // 二代同样收集群聊黑话学习素材（AI 自主提交之外，桥接仍自动提取高频陌生词）
       if (kind === 'group') feedSlangWindow(key, sender, plainContent);
       if (socialV2.paused) {
@@ -8641,6 +8977,10 @@ async function main() {
   }
   startDshWatch();
   startConsoleServer();
+  // 启动后延迟回填历史卡片元数据（本功能上线前收到的卡片消息），失败不影响启动。
+  setTimeout(() => {
+    backfillRecentCardsV2().catch((error) => log('卡片回填失败:', error?.message ?? error));
+  }, 8000);
 
   // ── 命令行实时会话状态面板（TTY 下日志下方常驻，1 秒刷新；重定向输出时自动关闭） ──
   function fmtPanelClock(ts) {

@@ -34,6 +34,8 @@
 3. **只读联网搜索**：`qq-chat` / `qq-chat-v2` 预设已关闭 DSH 内置 `tool-web` 的 `search` / `fetch`，联网统一走 `src/mcp-web-search-safe.js` 提供的 `mcp__web-search-safe__web_search/web_fetch`。不暴露本地文件、命令执行、写操作。
    - ✅ `mcp__web-search-safe__web_fetch` 已做 SSRF 加固：仅 http/https、禁止 localhost/私有 IP/链路本地/CGNAT/带凭据 URL、DNS 解析结果全量校验、每跳重定向重新校验、响应体限量读取。
 4. **发送强制白名单**：所有发送类工具（`qq_send_group_message` / `qq_send_private_message` / `qq_send_message` / `qq_send_burst` / `qq_reply` / `qq_send_poke` / `qq_send_sticker` 等）的目标必须命中 `config.json` 的 `allow.groups` / `allow.private`，否则拒绝执行。
+4.1 **卡片查看为只读且有会话边界**：`qq_get_card_msg` 只能读取**当前会话的** QQ 官方机器人卡片（`markdown`+`inline_keyboard` Markdown 卡片、`json` 普通消息卡片、`ark` 活动类卡片），返回完整原始内容与解析字段。卡片按会话隔离缓存（`state/social-v2-cards.json`，有界）；缓存未命中时用 OneBot `get_msg` 按需回源，并做与引用解析一致的**消息归属校验**（群消息必须同群、私聊必须无群归属且发送者匹配），无法跨会话探测；在控制台「Agent 预设 → 工具开关 → qq_get_card_msg」关闭后（`socialV2.tools.getCardMsg=false`），桥接端点与 MCP 工具都会直接返回 403，开/关即时生效、无需重启。
+
 5. **发送禁令（模型层）**：persona 明确规定只有「管理端明确指示」或「【管理员】标记的明确要求」才可使用发送工具；禁止写"我已回复/消息已发送（message_id）"类汇报。
 6. **回复审计（桥接层硬拦截）**：agent 回复文本若包含本机路径（`C:\`、`/home/` 等）或凭据特征（token/password/secret/api key 等）→ **整条拦截不发送**，并告知"被安全策略拦截"。
 7. **人格由桥接注入**：角色设定来自 `state/current-role.json` + `roles/<角色>.md`，桥接注入到消息；群友口头要求改角色无效（桥接直接拦截），agent 也无文件工具自行更改。

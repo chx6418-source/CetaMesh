@@ -1093,4 +1093,37 @@ if (cfg.socialV2?.tools?.getForwardMsg !== false) {
   );
 }
 
+// ── QQ 官方卡片查看工具（普通消息卡片 / 活动类卡片，二代仿真模式） ──────────
+// 说明：本工具**不做启动期开关判断**（不同于上面按 cfg 条件注册的工具），
+// 而是永远注册、在执行期重新读取 config.json 判断 socialV2.tools.getCardMsg。
+// 这样在控制台「Agent 预设 → 工具开关」里开/关「QQ 官方卡片查看」时，无需重启
+// 桥接或 DSH 即可即时生效：关闭后调用直接返回 statusCode=403。
+server.tool(
+  'qq_get_card_msg',
+  '查看当前会话某条消息里 QQ 官方机器人推送的卡片完整原始内容（只读，开发调试用）。支持普通消息卡片（json 图文/按钮卡）与活动类卡片（ark 活动/抽奖/报名卡），返回每张卡片的完整原始 payload（raw）以及解析后的结构化字段（kind/kindLabel/app/view/title/desc/tag/source/jumpUrl/coverUrl/buttons/json）。当 qq_get_unread_messages / qq_get_recent_messages / qq_get_message_detail 返回的消息带 hasCard: true / cardCount > 0（或文本里出现 [卡片消息] / [活动卡片]）时调用；messageId 用消息对象里的 messageId 或 seq。只能读取当前会话确实收到过的卡片，不能任意读取。',
+  {
+    key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
+    token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
+    messageId: z.string().describe('携带卡片的消息 id：用消息对象里的 messageId 或 seq'),
+    index: z.number().int().min(0).optional().describe('可选：只返回第 index 张卡片（从 0 开始），不传则返回该消息的全部卡片')
+  },
+  async ({ key, token, messageId, index }) => {
+    // 执行期读配置 → 开关即时生效，无需重启。
+    if (getConfig().socialV2?.tools?.getCardMsg === false) {
+      return { content: [{ type: 'text', text: JSON.stringify({ statusCode: 403, message: '工具已禁用：请先在桥接控制台「Agent 预设 → 工具开关」中开启「QQ 官方卡片查看」' }) }], isError: true };
+    }
+    try {
+      const q = new URLSearchParams({ key, messageId: String(messageId) });
+      if (index !== undefined && index !== null) q.set('index', String(index));
+      const data = await agentApi('/api/socialV2/card-message?' + q.toString(), {
+        headers: { 'x-agent-token': token },
+        timeoutMs: 30000
+      });
+      return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: '查看 QQ 官方卡片失败：' + (error?.message ?? error) }], isError: true };
+    }
+  }
+);
+
 await server.connect(new StdioServerTransport());

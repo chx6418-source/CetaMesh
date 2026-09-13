@@ -15,6 +15,7 @@
     "test-vision": "node scripts/test-vision-media.mjs",
     "probe-model": "node scripts/probe-model-bind.mjs",
     "test-forward": "node scripts/test-forward.mjs",
+    "test-card": "node scripts/test-card.mjs",
     "test-slang": "node scripts/test-slang-learn.mjs",
     "test-stickers": "node scripts/test-stickers.mjs",
     "postinstall": "node scripts/patch-snowluma-sdk.mjs"

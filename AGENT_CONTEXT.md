@@ -76,6 +76,18 @@ history:
     action: "[后端·非 UI] 修复「工具图片识别失效」：会话被绑定成文本模型 deepseek-v4-flash，DSH 把图片替换为 [image unavailable: … does not declare image input]（AI 只能回「看不到/一片黑」）→ 桥接默认模型改为 deepseek-flash（DeepSeek-V41-Flash，官方目录声明 text+image）；新建会话仍强制 selectModel 绑定；绑定到不声明图像输入的模型时打告警，并在 /api/images/message 回带说明，避免再次静默失效"
     result: "src/bridge.js（DEFAULT_MODEL / ensureSessionModel / resolveModelImageSupport / imageCapabilityNote）、src/mcp-snowluma-safe.js（透传 note）、config.json、config.example.json、scripts/test-vision-media.mjs、scripts/probe-model-bind.mjs（新增自检）"
     scope_note: "本条为后端模型配置修复（用户直接下达），非前端 UI 迭代；red_line.backend_zero_change 对 UI 任务继续生效"
+  - step: T12
+    date: "2026-09-13"
+    action: "[后端+控制台] 新增「QQ 官方卡片查看」能力：新增 src/qq-card.js（json/ark/xml/lightapp/miniapp 卡片段提取 + 完整原始内容 + 结构化字段解析纯函数）；bridge.js 接入卡片缓存（按会话有界、单独落盘 state/social-v2-cards.json）、消息记录卡片摘要（hasCard/cardCount/cardKinds/cardHint）、GET /api/socialV2/card-message 端点、socialV2.tools.getCardMsg 开关与 toolMap 提示词；mcp-snowluma-safe.js 新增 qq_get_card_msg（**常驻注册 + 执行期读 config.json**，实现开关即时生效无需重启）；控制台「Agent 预设 → 工具开关」新增 qq_get_card_msg 独立开关；qq-chat-v2 preset 增加卡片工具协议条目与用途速查"
+    result: "src/qq-card.js（新增）、src/bridge.js、src/mcp-snowluma-safe.js、public/console.html、design-demos/src/console/part2.html、dsh/agent-presets/qq-chat-v2/agent.cordis.yml、config.json、config.example.json、scripts/test-card.mjs（新增，65 项断言全通过）、README.md、RULES.md、docs/PROJECT_GUIDE.md"
+    scope_note: "本条为后端工具能力 + 控制台单点开关新增（用户直接下达），未触碰 red_line.backend_zero_change 所保护的 API/令牌/会话行为；控制台仅按既有 v2-tool-item 模式新增一个复选框"
+    discovered_issue: "public/console.html 与 design-demos/src/console/part1-3 **已漂移**：重跑 assemble.mjs 会丢失生产控制台的 500+ 行较新功能——见 §6.anchors.assembler_warning"
+  - step: T13
+    date: "2026-09-13"
+    action: "[后端·根因修正] 用户反馈「工具无法查看 QQ 官方卡片内容」。抓取真实群消息（OneBot get_group_msg_history）后确认：QQ 官方机器人卡片**根本不是 json/ark 段**，而是 `markdown` + `inline_keyboard` 两个消息段（raw_message 形如 [CQ:markdown][CQ:inline_keyboard]）。T12 的实现只覆盖 json/ark/xml，因此这类卡片完全没被识别：AI 只看到 [markdown][inline_keyboard] 占位、卡片插图（markdown 里的 ![#宽 #高](https://qqbot.ugcimg.cn/…)）也没进图片管线。修正：src/qq-card.js 增加 `parseBotMarkdown`（去模板头 [](/%7B%22version%22…)/图片转占位并抽 URL/链接与 @提及还原）与 `parseInlineKeyboard`（按钮 label/type/data/style 结构化）、`buildBotMarkdownCard`（markdown+按钮合并为一张卡）、`extractCardMediaFromSegments`（插图进入媒体管线、过滤 ≤64px 装饰图标）；bridge.js 的 segmentsToText 渲染 markdown 正文与 [按钮:…]、extractMediaFromSegments 接入卡片插图；新增 `fetchRawMessageByRef`/`backfillMessageCache`（缓存未命中时用 get_msg 按需回源，归属校验与 resolveReplyInfo 一致）+ 启动后 `backfillRecentCardsV2`（回填历史卡片元数据）；/api/status 增加 cardSegments/cardToolEnabled 能力自描述"
+    result: "src/qq-card.js、src/bridge.js、src/forward.js、dsh/agent-presets/qq-chat-v2/agent.cordis.yml、scripts/test-card.mjs（99 项断言，含真实抓包 payload 夹具 + 桥接正向端到端检查）、README.md、RULES.md、docs/PROJECT_GUIDE.md"
+    scope_note: "T12 的结论「工具无法查看卡片」由本条修正；T12 的控制台开关、端点、MCP 工具、即时生效机制均保留不变"
+    verification: "解析层用真实抓包 payload 验证通过；图片 URL 已验证可直接抓取（safeFetchBuffer 取回 PNG/JPEG）；桥接进程需重启后由 `npm run test-card` 自动完成正向端到端确认（/api/status.cardSegments 含 markdown 时才会执行，避免把「没重启」误判为回归）"
 
   deprecated_experiments:
     - id: "DEP-01"
@@ -182,7 +194,8 @@ anchors:
     console_css: "design-demos/src/console/part1.html（全部样式 + 设计 token）"
     console_html: "design-demos/src/console/part2.html（四模块 DOM + 弹窗）"
     console_js: "design-demos/src/console/part3.html（全部交互/API 逻辑）"
-    assembler: "design-demos/src/console/assemble.mjs（组装 + 三重断言，改源文件后必须执行）"
+    assembler: "design-demos/src/console/assemble.mjs（组装 + 三重断言）"
+    assembler_warning: "[重要·2026-09-13 实测] public/console.html **当前不是** part1-3 的可复现产物：生产控制台含大量未回移植到 part1-3 的较新功能（退出登录 nav-logout、内嵌终端、会话管理模块、user-select 规则、interpolate-size 等，约 500+ 行）。直接运行 assemble.mjs **会覆盖并丢失**这些功能（实测产物 226KB vs 生产 248KB）。修改控制台时：以 public/console.html 为生产事实源直接编辑，并把对应改动**同步**回 part1/2/3 作为参考源，**不要贸然重跑 assemble**；若要恢复组装链，需先做一次 part1-3 ← public/console.html 的全量回移植。"
     mock_data: "design-demos/src/data.js（Demo 用 Mock）"
     preview_server: "design-demos/src/console/serve.mjs"
     login_page: "public/token-login.html（无令牌入口页，桥接重启后生效）"
@@ -218,5 +231,6 @@ anchors:
 # §7 当前待办状态 [MODULE=OPEN_ITEMS]
 # ================================================================
 open_items:
-  uncommitted: "本文件（AGENT_CONTEXT.md）为新增，待用户确认后提交"
-  known_stable: "main HEAD=043f1d4 已含：登录页美化 + 会话状态卡 + 全部布局/动效修复"
+  uncommitted: "无"
+  known_stable: "本次提交已含：QQ 官方机器人卡片查看工具（markdown+inline_keyboard 卡片 / json 图文卡 / ark 活动卡）、控制台「Agent 预设 → 工具开关」独立开关（socialV2.tools.getCardMsg，开/关即时生效）、卡片插图进图片管线（qq_get_message_images 可看图）、按需回源 get_msg 与启动历史回填"
+  pending_ops: "[部署] 后端卡片支持需重启一次桥接生效；重启后执行 npm run test-card 完成正向端到端确认（脚本会先检查 /api/status.cardSegments 是否含 markdown，未重启则跳过而非误报失败）"
