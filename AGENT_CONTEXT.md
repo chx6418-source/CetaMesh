@@ -94,6 +94,35 @@ history:
     result: "public/console.html（html overflow-anchor、滚动位置自持、终端 screenEl/rtScreen 的 showScreen/rtAppend/nearBottom、focus.preventScroll、listen() 首帧与 onerror）、src/bridge.js（/api/terminal/open 支持复用、/api/terminal/stream 首帧 snapshot+cwd）"
     verification: "浏览器实测（真实桥接 3100 + 沙箱实例 3199 双端）：4 个模块 × 200/400/700 三档滚动位置刷新后逐一对上（含终端页 400 不再变 782）；带内容会话刷新后 termSession 不变、内容长度与标记数完全保留、无重复；终端面板上翻后执行新命令 scrollTop 保持 60 不动、回到底部后继续跟随。沙箱内单点验证服务端协议：同 id 复用得 `reused:true`+回滚内容、无效 id 才新建、流首帧为 `{snapshot,cwd}`"
     scope_note: "服务端复用需重启桥接生效（前端已向后兼容：旧后端首帧仍走 `t`，靠 firstFrame 去重避免重复）；沙箱验证用的临时实例与 stub OneBot 已删除，未触碰运行中的用户桥接与 QQ"
+  - step: T15
+    date: "2026-09-13"
+    action: "[样品阶段·未落地] 令牌登录页视觉优化 + 两套过渡动画：按用户要求「先出 10 份样品演示视频、选定后再落地」，新建 design-demos/login-proposals/（不动 public/token-login.html）。10 套方案共用一套骨架（assets/base.css 结构+主页面示意 / assets/chrome.js 注入登录卡片与主页面 DOM / assets/stage.js 驱动 enter·to-app·app-live 三个状态类 + ?take=1 隐藏操作提示 + ?enter=<ms> 录屏起帧延迟），每套 pNN.html 只写自己的 token、光源层与两段动画：p01 柔雾浮起、p02 软糖按压（涟漪遮罩）、p03 糖果玻璃（三层错位推进）、p04 分层绽放（光环+径向擦除）、p05 霓虹苏打（深色，主页面同步深海配色）、p06 纸感折页（3D 翻页）、p07 极光漂流（mask 波纹）、p08 气泡上浮（气泡膨胀覆盖）、p09 柔光浮雕（光源旋转）、p10 终端脉冲（扫描线+窗口最大化展开）。功能框架原样保留（#t / #eye / #go / #err 与空值校验、Enter 提交），样品不真跳转，演示落点是同页主页面示意"
+    result: "design-demos/login-proposals/{index.html（画廊：10 段视频 + 光影/入场/转场说明 + 单页打开/下载）、p01–p10.html、assets/{base.css,chrome.js,stage.js,bubbles.js}、videos/pNN-*.webm（10 段，1280×800@30fps≈5.6s，ffmpeg 重封装补 Duration 以便拖动进度）、serve.mjs（端口 4174，含 webm/mp4 MIME 与 Range）}；design-demos/index.html 增加入口链接"
+    verification: "逐页渲染自检（10 页卡片可见、主页面隐藏、功能元素在位、p08 气泡 13 个）；10 段视频用浏览器录制 API 生成后逐段抽帧核对（入场中段/落定/转场中/主页面落点），并对 10 套登录画面做了横向对照；ffmpeg 重封装后 duration=5.6s 且 seekable 全部可拖动"
+    scope_note: "本阶段刻意不落地：生产文件 public/token-login.html、public/console.html 均未改动（red_line.backend_zero_change 未触碰）。录屏格式为 WebM（本机 ffmpeg 无 libx264，未另出 MP4；画廊用 <video> 内联播放）。视频约 12MB 二进制，未提交（如需入库或加 .gitignore 待用户定）"
+  - step: T16
+    date: "2026-09-13"
+    action: "[样品阶段·未落地] 用户选定方案 09，要求：①入场只做细节小优化；②转场按「不同卡片如同湖面涟漪般依次上浮」基于方案 9 再出 10 套变体（其余样品不动）。做法：把方案 9 的材质与入场抽成共享 assets/emboss.css（含 4 处细节优化：内容错开 0.78/0.86/0.94/1.02 → 0.60/0.68/0.76/0.84 收到 1.4s 内、光源旋转 1.5s→1.15s、卡片补一道极淡斜向柔光扫过、输入框加「压入回弹」微动作、底纹落定后极缓呼吸），p09.html 改为引用该文件且保留原转场；新增 assets/ripple.js 作为涟漪编排器——转场开始时按「卡片中心到点击处的距离 ÷ --wave-speed」写 --rise-delay（波前度量支持 --wave-axis: radial/y/diag/order），并注入 .ripple-lake 三个涟漪环 span；涟漪动画默认 animation-play-state: paused，body.to-app 时才 running，保证 delay 从转场那一刻起算而不是页面加载时就走完（这个坑实测会让涟漪完全消失）。10 个变体 p09-t01…t10 只写各自的波前参数、涟漪环外观与 riseTxx 关键帧：01 涟漪原波（圆形波前，建议默认）、02 同心双波（第二道波追上时略沉再落定）、03 横向波前（自上而下逐排）、04 对角风纹（45° 推进 + 落定前轻微倾斜回摆）、05 浮标缓起（波速六成、起得高、阴影先散后收）、06 水滴弹起（压扁→弹起→顶边白边闪）、07 镜光水波（主页面水下焦散 + 卡片表面反光扫过）、08 层叠上浮（固定顺序、每张 120ms，侧栏→顶栏→页头→三卡）、09 压入回弹（先凹陷内阴影压住 150ms 再翻外阴影弹起）、10 静水浮升（不画涟漪环，只有水位缓升 + 最慢最无过冲）"
+    result: "design-demos/login-proposals/{assets/emboss.css（新增，方案9材质+入场+转场骨架）、assets/ripple.js（新增，涟漪编排器）、p09.html（改为共享材质 + 入场优化）、p09-t01…p09-t10.html（10 变体）、videos/p09-soft-emboss.webm（按优化后入场重录）、videos/p09-t01…t10-*.webm（10 段新视频，≈6.4s）、index.html（画廊改为 §1 首轮 10 案 + §2 涟漪 10 变体两区）}"
+    verification: "浏览器实测编排：t01 的 --rise-delay 按距离算出 0→353ms 共 13 档，转场 420ms 时近处卡片 opacity 0.97-0.99、远处 0.43-0.53（依次上浮成立）；t08 延迟为 0/120/240…1440ms，420ms 时只有前 3-4 项可见、其余为 0（层叠节奏成立）；两者结束时卡片全部可见、主页面可见、登录舞台隐藏。11 段视频逐段抽帧核对（p09 优化后入场、4 个变体的涟漪中段 4 帧横向对照），ffmpeg 重封装后 duration≈6.34-6.37s 且可拖动；画廊 20 段视频全部 readyState≥2、无 Infinity duration"
+    scope_note: "仍属样品阶段，未落地生产文件；服务端/桥接零改动。变体中 05/10 时长更长（1.25s/张），录屏尾帧留了约 1.6s 观察落定"
+  - step: T17
+    date: "2026-09-13"
+    action: "[正式落地] 用户定版：方案 09「柔光浮雕 Soft Emboss」+ 涟漪变体 10「静水浮升」。① public/token-login.html 全量重写为该设计：低对比 neumorph 材质（同色系、无描边无玻璃、双光源明暗差、卡片前后两圈浮雕底纹、内凹输入框、凸起按钮），入场动画（光源旋转落定 → 卡片浮起 + 一道极淡柔光扫过 → 内容依次上浮 → 输入框压入回弹 → 底纹极缓呼吸），提交转场（卡片压入水面 + 水位/环境光下沉 600ms，写入 sessionStorage.loginArrive 后跳转）；功能框架与原先一致（#t / #eye / 空值校验 / Enter 提交 / location.href='/?token='）。② public/console.html 新增落场段：head 里极早读一次 loginArrive 标记并给 <html> 打类（卡片从第一帧就是未浮起态，避免闪一下），启动时按「离屏幕中心的距离」给当前模块 .card 与 .nav-btn 写 --arrive-delay（上限 760ms），叠加一层 .arrive-tint 水色薄雾，2.4s 后移除类/薄雾/内联变量，全部清理干净。③ 方案管理：未选中的样品（design-demos/login-proposals/，含 24MB 视频）加进 .gitignore，仅作本机参考资料保留、不入库"
+    result: "public/token-login.html（重写）、public/console.html（CSS arriveRise/.arrive-tint + head 标记脚本 + 启动编排）、.gitignore（忽略 design-demos/login-proposals/）、design-demos/index.html（入口链接标注「本机参考资料，不入库」）、AGENT_CONTEXT §6 login_page 锚点更新"
+    verification: "真实浏览器走完整流程（localhost:3100 未授权 → 登录页）：入场截图确认（浮雕卡片 + 两圈底纹 + 内凹输入 + 凸起按钮）；点登录后 260ms 截图确认卡片已压入水面（leaving 类在位、内容淡出）、环境光滤镜实测由 brightness(1) 平滑降到 0.955（伪元素上的 transition 不生效，改用 keyframes 后才动）；跳转后控制台 html.login-arrive 在位、.arrive-tint 在位、14 个元素（当前模块卡片 + 导航）拿到 0→429ms 的距离延迟、动画中段可见前几项 opacity≈1.00 而末几项 0.95（依次浮升成立）；2.4s 后类/薄雾/内联变量全部清空、控制台数据正常（DSH 在线、模块 models）"
+    scope_note: "桥接后端零改动（红线未触碰）；两个前端文件随请求即时生效、无需重启桥接。样品仍可用 node design-demos/login-proposals/serve.mjs（4174）预览，但已不进版本库"
+  - step: T18
+    date: "2026-09-13"
+    action: "[落地优化·主题联动] 针对已落地的「卡片如湖面涟漪依次上浮」做主题深度联动与衔接优化：① 配色同源——登录页新增 :root[data-theme=light|dark|warm] 三套 token，直接照搬 console.html 同名字段（--accent/--accent-2/--accent-soft/--accent-shadow/--text*/--shadow-c1/c2/--err），浮雕材质与双光源阴影全部改用这些 token（只新增 --emboss-base/--emboss-surface 两个底色），于是登录页与控制台在三个主题下是同一套配色；② 主题抢在首帧——登录页在 <style> 前读 localStorage.consoleTheme 定 data-theme，控制台在 <style> 后立刻设 data-theme（原先要等主脚本，深色/护眼用户会先看到一瞬浅色底）；③ 波前改为匹配功能模块排布——落场不再按「离屏幕中心距离」，改为先把当前模块 .card 与 .nav-btn 按视觉行分桶（26px 容差）再按行内左→右排序，行距自适应（ROW_BUDGET 880ms ÷ 行数，夹在 58~110ms），行内再 55ms 微错开，于是按「侧栏水岸 → 顶栏 → 页头 → 卡片逐行」推进且每行都有独立时刻（实测 14 项 14 个不同延迟）；④ 粒子元素——两页各加一套「水汽」粒子（≤20px、低透明度、blur .6px，用 var(--accent) + var(--shadow-c2)/var(--edge-hi) 取主题色），登录页从卡片下沿浮起 10 颗、控制台每张卡片浮起时下沿放 3 颗（最多 8 张卡 24 颗），共用同一套微光径向渐变与上浮淡出关键帧；⑤ 消断点——跨页时控制台在 head 里给根元素垫一层主题底色（仅落场时设、2.6s 后连同薄雾/粒子/内联变量一起清掉），消除跳转瞬间闪白；落场薄雾也改用 var(--accent-soft)（深色下不再是一层突兀浅蓝）"
+    result: "public/token-login.html（三套主题 token + 材质/阴影/按钮全部 token 化 + leaving 水汽粒子 + 主题早读）、public/console.html（head 早读主题与标记 + 落场按模块排布排波前 + .arrive-mote 粒子 + 与主题同源的薄雾/底色）"
+    verification: "三主题实测：切主题后登录页与主页面 token 完全一致（dark bg rgb(19,26,46)/card #171f36/accent #8ba4ff；warm #e8ecdf/#eef1e6/#6a7fae；light #e9eefb/#eef2fc/#5b7cfa）并截图核对；深色下登录页收尾截图可见卡片压入 + 水汽升起；落场实测浅色 14 项延迟 0/73/146/219/292/365/438/511/584/657/730/785/803/876ms 全部不同、中段透明度由 0.98 递减到 0.00 的水波；薄雾取 var(--accent-soft)、粒子取 var(--edge-hi)+var(--accent)（深色下即 #8ba4ff）；2.6s 后类/薄雾/粒子/内联变量/内联底色全部清空；回归：主题三按钮切换正常、普通刷新不播落场且 T14 滚动自持仍准（250/620 精确保持）"
+    scope_note: "仅前端两文件。主题 token 在登录页是手动同步（登录页没有共享样式文件的通道），改主题色时需两处一起改，文件注释已标注。桥接后端零改动"
+  - step: T19
+    date: "2026-09-13"
+    action: "[回退] 用户要求「回退到上次改动」→ 撤销 T18（转场主题联动那版），public/token-login.html 与 public/console.html 都还原到 T17 落地的状态：登录页回到固定浅色浮雕配色（不再跟随 consoleTheme，head 里没有主题早读）、退场不再放水汽粒子；控制台的落场恢复为「按离屏幕中心距离排序 + 固定蓝色薄雾（rgba(120,150,235,.13)）」，去掉 T18 的行分桶排布、自适应行距与水汽粒子、去掉 head 里的主题早读与防闪白底色。T18 的实现留档在 public/token-login.html.bak-t18 与 public/console.html.bak-t18（已被 .gitignore 的 *.bak-* 覆盖，不入库），若要恢复本轮优化，把这两个文件覆盖回去即可。"
+    result: "public/token-login.html（还原）、public/console.html（还原：head 脚本 / 落场 CSS / 落场 JS 三段）、public/*.bak-t18（新增，T18 留档，未入库）"
+    verification: "回退后实测：把 localStorage.consoleTheme 设成 dark 再进登录页，html 无 data-theme、底色仍是 rgb(233,238,251)/卡片 rgb(238,242,252)（不再跟随主题）；退场 leaving 无水汽粒子；落场延迟恢复为中心距离排序（429/405/384/367/355/346/0/2/303/608/760…，远端封顶 760ms）、薄雾为固定 rgba(120,150,235,.13)、无粒子、无内联底色；2.6s 后类/薄雾/内联变量清理干净，控制台数据正常；主题切换按钮与 T14 滚动自持不受影响"
 
   deprecated_experiments:
     - id: "DEP-01"
@@ -204,10 +233,11 @@ anchors:
     assembler_warning: "[重要·2026-09-13 实测] public/console.html **当前不是** part1-3 的可复现产物：生产控制台含大量未回移植到 part1-3 的较新功能（退出登录 nav-logout、内嵌终端、会话管理模块、user-select 规则、interpolate-size 等，约 500+ 行）。直接运行 assemble.mjs **会覆盖并丢失**这些功能（实测产物 226KB vs 生产 248KB）。修改控制台时：以 public/console.html 为生产事实源直接编辑，并把对应改动**同步**回 part1/2/3 作为参考源，**不要贸然重跑 assemble**；若要恢复组装链，需先做一次 part1-3 ← public/console.html 的全量回移植。"
     mock_data: "design-demos/src/data.js（Demo 用 Mock）"
     preview_server: "design-demos/src/console/serve.mjs"
-    login_page: "public/token-login.html（无令牌入口页，桥接重启后生效）"
+    login_page: "public/token-login.html（无令牌入口页，随改动即时生效，无需重启桥接）——已落地「柔光浮雕 Soft Emboss + 静水浮升转场」：入场动画 + 提交后卡片压入水面/水位下沉（600ms）再跳转，控制台侧读 sessionStorage.loginArrive 做卡片依次浮升（见 public/console.html 的 login-arrive 段）"
   commands:
     assemble: "node design-demos/src/console/assemble.mjs（改 part1/2/3 后必须执行并确认 ✓）"
     preview_static: "node design-demos/src/console/serve.mjs → http://127.0.0.1:4173"
+    login_samples: "node design-demos/login-proposals/serve.mjs → http://127.0.0.1:4174/（登录页 10 方案样品 + 演示视频；单页可加 ?take=1 隐藏提示、?enter=300 延迟入场便于录屏）"
     production: "http://127.0.0.1:3100/?token=<consoleToken>（token 见 state/console-token）"
   interaction_rules:
     - { id: "R-INT-001", rule: "危险操作=连点两次确认", src: "part3 bindArm()/data-arm 属性", note: "静态按钮用 data-arm；动态行内删除用 confirmBox()" }

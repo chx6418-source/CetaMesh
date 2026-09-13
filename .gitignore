@@ -17,6 +17,11 @@ config.json
 # ZCode 客户端本地会话/计划目录
 .zcode/
 
+# 登录页视觉方案样品（10 套整体方案 + 方案 09 的涟漪转场变体 + 演示视频）：
+# 已选定「柔光浮雕 + 静水浮升」落地到 public/token-login.html，其余仅作本机参考资料保留，
+# 不入库（含约 24MB 视频，避免占用仓库空间）。目录仍在磁盘上，用 serve.mjs 预览。
+design-demos/login-proposals/
+
 # Local development / planning / research docs (not part of public project)
 /PROJECT_GUIDE.md
 /ARCH_REVIEW.md

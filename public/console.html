@@ -720,7 +720,35 @@ pre.console-pre {
 ::-webkit-scrollbar-thumb { background: var(--border-soft); border-radius: 99px; border: 2px solid transparent; background-clip: content-box; }
 ::-webkit-scrollbar-track { background: transparent; }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; } }
+/* ---------- 从登录页进来的落场：静水浮升（登录页转场方案 09·涟漪变体 10） ----------
+   登录页跳转前会留下 sessionStorage.loginArrive；这里给当前模块的卡片与侧栏导航
+   做一次「像水位托起一样」的依次浮升：无过冲、时长最长、阴影缓慢散开。
+   每张卡片的延迟由启动脚本按「离屏幕中心的距离」写进 --arrive-delay。 */
+html.login-arrive .module:not([hidden]) .card,
+html.login-arrive .nav-btn {
+  animation: arriveRise 1.25s cubic-bezier(.16, .84, .28, 1) var(--arrive-delay, 0ms) both;
+}
+@keyframes arriveRise {
+  from { opacity: 0; transform: translateY(30px) scale(.992); }
+  to   { opacity: 1; transform: none; }
+}
+/* 水位：一层很淡的冷色纱，随浮升淡出（浅色/深色主题下都是一层薄雾，不刺眼） */
+.arrive-tint {
+  position: fixed; inset: 0; z-index: 9998; pointer-events: none;
+  background: linear-gradient(180deg, rgba(120, 150, 235, .13), rgba(120, 150, 235, .02));
+  animation: arriveTint 1.8s cubic-bezier(.22, .9, .36, 1) both;
+}
+@keyframes arriveTint { from { opacity: 1; } to { opacity: 0; } }
 </style>
+<script>
+  /* 登录页跳转进来时留下标记：先给根元素打类，卡片从第一帧就是「未浮起」态，避免闪一下 */
+  try {
+    if (sessionStorage.getItem('loginArrive') === '1') {
+      sessionStorage.removeItem('loginArrive');
+      document.documentElement.classList.add('login-arrive');
+    }
+  } catch (e) {}
+</script>
 </head>
 <body class="layout-sidebar">
 
@@ -4071,6 +4099,31 @@ window.LOG_POOL = [
   $('#consoleTokenRandom').addEventListener('confirmed', () => changeConsoleToken(true));
 
   /* ================= 启动 ================= */
+  // 从登录页进来的落场动画（方案 09·静水浮升）：按「离屏幕中心的距离」给当前模块卡片与
+  // 侧栏导航排上浮时刻，越靠近中心的越先浮起，最多错开 760ms（与登录页的压入水面衔接）。
+  (function () {
+    const el = document.documentElement;
+    if (!el.classList.contains('login-arrive')) return;
+    const items = [...document.querySelectorAll('.module:not([hidden]) .card, .nav-btn')];
+    if (!items.length) { el.classList.remove('login-arrive'); return; }
+    const cx = window.innerWidth / 2;
+    const cy = window.innerHeight * 0.55;              // 登录卡片刚才所在的位置
+    const metric = items.map((n) => {
+      const r = n.getBoundingClientRect();
+      return Math.hypot(r.left + r.width / 2 - cx, r.top + r.height / 2 - cy);
+    });
+    const min = Math.min(...metric);
+    items.forEach((n, i) => n.style.setProperty('--arrive-delay', `${Math.round(Math.min(760, metric[i] - min))}ms`));
+    const tint = document.createElement('div');
+    tint.className = 'arrive-tint';
+    document.body.appendChild(tint);
+    setTimeout(() => {                                 // 动画结束即清理，不留痕
+      el.classList.remove('login-arrive');
+      tint.remove();
+      items.forEach((n) => n.style.removeProperty('--arrive-delay'));
+    }, 2400);
+  })();
+
   refresh(); refreshRoles(); refreshWhitelist(); refreshSessions(); refreshPending(); refreshPresets();
   loadSocialForm(); loadV2Config(); refreshV2Activity(); loadV2ToolLog(); loadV2SessionOptions();
   refreshSocialStatus(); refreshSlang(); loadSlangConfig(); loadSecurity(); loadFileSendConfig(); loadKugouLogin();
