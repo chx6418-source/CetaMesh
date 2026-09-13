@@ -1460,6 +1460,9 @@ async function main() {
     let consoleToken = tokenValid ? configuredToken : loadOrCreateConsoleToken();
     if (!tokenValid && configuredToken) log(`控制台 config.consoleToken 长度/字符不合法，已忽略并回退到自动生成令牌`);
     if (!configuredToken) log(`控制台未配置 consoleToken，已自动生成：${String(consoleToken).slice(0, 6)}…（完整值保存在 state/console-token）`);
+    // 控制台会话（仅存进程内存）：进程存活期间 F5 刷新/路由切换/休眠唤醒均凭 Cookie 免登续持；
+    // 进程终止即全部失效，冷重启后必须重新令牌鉴权。
+    const consoleSessions = new Set();
     // 二代会话级隔离：MCP 工具调用时若带 x-agent-token，则必须匹配该会话的 agentToken。
     // 控制台/管理端请求不带此头，仍走 consoleToken 管理通道。
     const agentTokenOk = (key, token) => {
@@ -1537,9 +1540,15 @@ async function main() {
         req.on('error', () => fail(400, '请求体读取失败'));
         req.on('aborted', () => fail(400, '请求体读取中断'));
       });
-      // 控制台鉴权：所有请求需带 x-console-token 或 ?token=
+      // 控制台鉴权：?token= / x-console-token / 进程内会话 Cookie 三者其一即可。
+      const cookieMap = {};
+      String(req.headers.cookie ?? '').split(';').forEach(function (pair) {
+        const idx = pair.indexOf('=');
+        if (idx > 0) cookieMap[pair.slice(0, idx).trim()] = decodeURIComponent(pair.slice(idx + 1).trim());
+      });
+      const sessionValid = typeof cookieMap.consoleSession === 'string' && consoleSessions.has(cookieMap.consoleSession);
       const suppliedToken = url.searchParams.get('token') ?? req.headers['x-console-token'];
-      if (consoleToken && suppliedToken !== consoleToken) {
+      if (consoleToken && !sessionValid && suppliedToken !== consoleToken) {
         if (req.method === 'GET' && url.pathname === '/') {
           res.writeHead(401, { 'content-type': 'text/html; charset=utf-8', ...SECURITY_HEADERS });
           try {
@@ -1551,6 +1560,14 @@ async function main() {
           sendJson({ ok: false, error: '未授权：请提供控制台访问令牌' }, 401);
         }
         return;
+      }
+      // 令牌鉴权通过且尚无有效会话：签发进程内存会话并种 HttpOnly Cookie，
+      // 之后同浏览器的请求凭 Cookie 静默续持登录态（Set-Cookie 随本次响应带回）
+      if (consoleToken && !sessionValid) {
+        const sid = crypto.randomBytes(32).toString('hex');
+        consoleSessions.add(sid);
+        while (consoleSessions.size > 200) consoleSessions.delete(consoleSessions.values().next().value);
+        res.setHeader('Set-Cookie', `consoleSession=${sid}; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000`);
       }
       // CSRF 防护：所有写操作必须是 application/json，且（若带 Origin）必须来自本机页面。
       // 默认未配 consoleToken 时，这可阻止任意网页用表单/跨站请求触发
@@ -1610,6 +1627,13 @@ async function main() {
           } catch {
             res.end('控制台页面缺失：qq-bridge/public/console.html');
           }
+          return;
+        }
+        // 登出：删除进程内会话并过期 Cookie；本地令牌由前端自行清空
+        if (req.method === 'POST' && url.pathname === '/api/logout') {
+          if (cookieMap.consoleSession) consoleSessions.delete(cookieMap.consoleSession);
+          res.setHeader('Set-Cookie', 'consoleSession=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0');
+          sendJson({ ok: true, message: '已退出登录' });
           return;
         }
         if (req.method === 'GET' && url.pathname === '/api/status') {

@@ -151,6 +151,22 @@ body > main { grid-area: main; padding: 82px 28px 70px; max-width: 1240px; width
 .nav-btn:active { transform: scale(.955); }
 .nav-btn.active { color: var(--on-accent); font-weight: 600; }
 .nav-btn.active::before { opacity: 1; }
+/* 退出登录：钉在侧栏最底部，悬停转危险色，风格与导航按钮同源 */
+.nav-logout {
+  margin-top: auto;
+  display: flex; align-items: center; gap: 9px; width: 100%;
+  padding: 10px 16px; border: 0; background: transparent; color: var(--text-3);
+  font: inherit; font-size: 13px; border-radius: 18px; cursor: pointer;
+  transition: transform .16s var(--spring), background .18s, color .18s, box-shadow .18s;
+  white-space: nowrap;
+}
+.nav-logout svg { flex: none; }
+.nav-logout:hover {
+  background: var(--err-bg); color: var(--err);
+  box-shadow: 4px 5px 12px var(--shadow-c1), -3px -4px 10px var(--shadow-c2), inset 0 1px 0 var(--edge-hi);
+}
+.nav-logout:active { transform: scale(.955); }
+.nav-logout:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 /* 模型选择单选卡 */
 .model-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 8px; }
 @media (max-width: 900px) { .model-list { grid-template-columns: 1fr; } }
@@ -190,6 +206,7 @@ body.layout-sidebar .nav-btn, body.layout-rail .nav-btn { position: relative; z-
   body > .top .brand, body > .top .top-right { position: static; }
   body.layout-sidebar .nav { flex-direction: row; position: static; width: auto; height: auto; border-right: 0; border-bottom: 1px solid var(--edge-hi); overflow-x: auto; overflow-y: hidden; padding: 8px 12px; }
   body > .nav .nav-btn { width: auto; }
+  body > .nav .nav-logout { width: auto; margin: 0 0 0 auto; }
   body > .nav .nav-no { display: none; }
   body > main { padding: 18px 14px 60px; }
 }
@@ -683,6 +700,10 @@ pre.console-pre {
     <button class="nav-btn" data-module="settings">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="2.6"/><circle cx="15" cy="17" r="2.6"/></svg>
       <span>系统设置</span><span class="nav-no">04</span>
+    </button>
+    <button class="nav-logout" id="logoutBtn" type="button" title="清空本机登录态并返回登录页">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/></svg>
+      <span>退出登录</span>
     </button>
   </nav>
   <div class="top-right">
@@ -1805,6 +1826,15 @@ window.LOG_POOL = [
   $$('.nav-btn').forEach(b => b.addEventListener('click', () => go(b.dataset.module)));
   const hash = (location.hash || '').replace('#', '');
   go(['models', 'agents', 'logs', 'settings'].indexOf(hash) >= 0 ? hash : 'models', true);
+
+  /* ================= 退出登录 ================= */
+  $('#logoutBtn').addEventListener('click', async () => {
+    try {
+      await fetch('/api/logout', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+    } catch (e) {}
+    try { localStorage.removeItem('consoleToken'); } catch (e) {}
+    location.replace('/');
+  });
 
   /* ================= 主题切换（苏打 / 深海 / 护眼） ================= */
   const themeBox = $('#themeSwitch');

@@ -97,11 +97,6 @@
     <div class="foot">© 2026 QQ Bridge · DeepSeek Harness × SnowLuma</div>
   </div>
 <script>
-  // 本机已保存过令牌时自动进入；带 ?token= 的失败尝试不再重定向，避免死循环
-  try {
-    var savedToken = localStorage.getItem('consoleToken');
-    if (savedToken && !location.search) location.replace('/?token=' + encodeURIComponent(savedToken));
-  } catch (e) {}
   var inp = document.getElementById('t');
   document.getElementById('eye').addEventListener('click', function () {
     var show = inp.type === 'password';
