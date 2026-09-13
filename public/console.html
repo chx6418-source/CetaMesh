@@ -500,6 +500,11 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 12px; }
 table.tbl th { position: sticky; top: 0; background: var(--panel-solid); z-index: 1; text-align: left; font-weight: 600; color: var(--text-2); }
 table.tbl th, table.tbl td { padding: 7px 10px; border-bottom: 1px solid var(--border-soft); vertical-align: top; overflow-wrap: anywhere; }
 table.tbl tr:last-child td { border-bottom: 0; }
+/* 表格内胶囊统一宽度并居中标签：否则「私聊 / 群」宽窄不一，同列看起来参差未对齐 */
+table.tbl .pill { min-width: 54px; justify-content: center; }
+/* 会话映射「类型」列：胶囊自带 10px 横向内边距，表头补同样缩进，
+   让「类型」与胶囊标签（群 / 私聊）落在同一竖线上 */
+#sessionList table.tbl th:nth-child(3) { padding-left: 20px; }
 table.tbl.tbl-wide { min-width: 1000px; }
 pre.console-pre {
   background: var(--input-bg); border-radius: 16px; padding: 12px 14px;
@@ -2684,7 +2689,7 @@ window.LOG_POOL = [
         const ownerTag = x.owner ? ' <span class="pill pill-warn">管理员</span>' : '';
         html += '<tr><td>' + esc(x.key) + ownerTag + '</td><td><code>' + esc(x.sessionId) + '</code></td><td>' + type + '</td><td><button class="btn sm" data-reset-key="' + esc(x.key) + '">清除上下文</button></td></tr>';
       }
-      box.innerHTML = html + '</table>';
+      box.innerHTML = '<div class="tbl-wrap">' + html + '</table></div>';
       box.querySelectorAll('[data-reset-key]').forEach(btn => btn.addEventListener('click', async () => {
         if (!await confirmBox('确定清除该会话的上下文？下次消息将开新会话。')) return;
         const r = await api('/api/session/reset', 'POST', { key: btn.dataset.resetKey });
