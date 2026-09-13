@@ -167,6 +167,26 @@ body > main { grid-area: main; padding: 82px 28px 70px; max-width: 1240px; width
 }
 .nav-logout:active { transform: scale(.955); }
 .nav-logout:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* ---------- 内嵌命令提示符 ---------- */
+.term-screen {
+  margin: 0; padding: 14px 16px; border-radius: 16px;
+  background: #0f1428; color: #d9e3ff;
+  font-family: var(--font-mono); font-size: 12.5px; line-height: 1.6;
+  height: 480px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; text-align: left;
+  box-shadow: inset 3px 4px 12px rgba(0, 0, 0, .5), inset 0 1px 0 rgba(255, 255, 255, .06);
+}
+.term-screen .term-run { color: #8fd3a7; }
+.term-prompt {
+  flex: none; max-width: 42%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--font-mono); font-size: 12px; color: var(--text-3);
+}
+.term-status {
+  margin: 0; padding: 10px 16px; border-radius: 14px;
+  background: #0f1428; color: #97a5cc;
+  font-family: var(--font-mono); font-size: 12px; line-height: 1.65;
+  overflow-x: auto; white-space: pre; text-align: left;
+  box-shadow: inset 3px 4px 12px rgba(0, 0, 0, .5), inset 0 1px 0 rgba(255, 255, 255, .06);
+}
 /* 模型选择单选卡 */
 .model-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 8px; }
 @media (max-width: 900px) { .model-list { grid-template-columns: 1fr; } }
@@ -704,6 +724,10 @@ pre.console-pre {
     <button class="nav-btn" data-module="sessions">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
       <span>会话管理</span><span class="nav-no">05</span>
+    </button>
+    <button class="nav-btn" data-module="terminal">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m5 8 4 4-4 4"/><path d="M12 17h7"/><rect x="2" y="3" width="20" height="18" rx="3"/></svg>
+      <span>终端</span><span class="nav-no">06</span>
     </button>
     <button class="nav-logout" id="logoutBtn" type="button" title="清空本机登录态并返回登录页">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/></svg>
@@ -1491,6 +1515,50 @@ pre.console-pre {
       </article>
     </div>
   </section>
+
+  <!-- ===================== 06 终端 ===================== -->
+  <section class="module" data-module="terminal" id="module-terminal" hidden>
+    <div class="page-head">
+      <h1>终端</h1>
+      <p class="page-sub">运行控制台 · 内嵌命令提示符——桥接运行日志与实时状态面板同步呈现，命令进程内执行，不再弹出独立窗口</p>
+    </div>
+    <div class="grid">
+      <article class="card c-12">
+        <header class="card-head">
+          <h2><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>运行控制台</h2>
+          <span class="hint">等效外部 cmd 窗口：桥接运行日志 + 实时状态面板</span>
+          <div style="display:flex;gap:6px;flex-wrap:wrap">
+            <button id="rtPause" class="btn sm ghost" type="button">暂停滚动</button>
+          </div>
+        </header>
+        <div class="card-body">
+          <pre class="term-screen" id="rtScreen" style="height:380px">正在连接运行日志…</pre>
+          <pre class="term-status" id="rtStatus" hidden>状态面板加载中…</pre>
+        </div>
+      </article>
+
+      <article class="card c-12">
+        <header class="card-head">
+          <h2><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m5 8 4 4-4 4"/><path d="M12 17h7"/></svg>命令提示符</h2>
+          <span class="hint" id="termCwdHint">cmd.exe · 桥接进程内会话</span>
+          <div style="display:flex;gap:6px;flex-wrap:wrap">
+            <button id="termInterrupt" class="btn sm danger" type="button">中断运行</button>
+            <button id="termClear" class="btn sm ghost" type="button">清屏</button>
+            <button id="termReset" class="btn sm ghost" type="button">新建会话</button>
+          </div>
+        </header>
+        <div class="card-body">
+          <pre class="term-screen" id="termScreen">正在启动命令提示符…</pre>
+          <div class="row">
+            <span class="term-prompt" id="termPromptLabel">…</span>
+            <input type="text" id="termInput" style="flex:1;min-width:200px;font-family:var(--font-mono)" placeholder="输入命令，Enter 执行 · ↑/↓ 翻历史" autocomplete="off" spellcheck="false">
+            <button id="termSend" class="btn sm primary" type="button">执行</button>
+          </div>
+          <div class="meta">命令在桥接进程内的真实 cmd.exe 中执行：工作目录、环境变量与内置状态跨命令延续，输出与系统命令行完全一致。长时命令（如 ping -t）可点「中断运行」强制结束并重开会话。</div>
+        </div>
+      </article>
+    </div>
+  </section>
 </main>
 
 <!-- 黑话确认/编辑弹窗 -->
@@ -1813,12 +1881,41 @@ window.LOG_POOL = [
     inp.focus();
   });
 
+  /* ================= 后端断线自动恢复 =================
+     桥接重启窗口期（连接拒绝）不再需要手动刷新：横幅提示 + 轮询，
+     后端恢复的瞬间整页自动刷新，登录态由会话 Cookie 静默续持 */
+  let backendWaitPromise = null;
+  function waitBackendReady() {
+    if (backendWaitPromise) return backendWaitPromise;
+    backendWaitPromise = (async () => {
+      const banner = document.createElement('div');
+      banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;background:linear-gradient(140deg,#5b7cfa,#7cc7f2);color:#fff;font:600 13px/1.4 var(--font-body);padding:10px 16px;text-align:center;box-shadow:0 6px 18px rgba(60,80,180,.4)';
+      banner.textContent = '与桥接后端的连接已中断，正在等待恢复后自动刷新…';
+      document.body.appendChild(banner);
+      let savedToken = '';
+      try { savedToken = localStorage.getItem('consoleToken') || ''; } catch (e) {}
+      for (;;) {
+        await new Promise((r) => setTimeout(r, 1500));
+        try {
+          const r = await fetch('/api/status', { headers: savedToken ? { 'x-console-token': savedToken } : {} });
+          if (r.status === 200 || r.status === 401) { location.reload(); await new Promise(() => {}); }
+        } catch (e) {}
+      }
+    })();
+    return backendWaitPromise;
+  }
+
   /* ================= API（沿用原鉴权协议：x-console-token） ================= */
   async function api(path, method, body, _retried = 0) {
     const headers = body ? { 'content-type': 'application/json' } : {};
     const token = localStorage.getItem('consoleToken');
     if (token) headers['x-console-token'] = token;
-    const res = await fetch(path, { method: method || 'GET', headers, body: body ? JSON.stringify(body) : undefined });
+    let res;
+    try {
+      res = await fetch(path, { method: method || 'GET', headers, body: body ? JSON.stringify(body) : undefined });
+    } catch (e) {
+      await waitBackendReady(); // 网络层失败（后端重启/未就绪）：等恢复后自动刷新
+    }
     if (res.status === 401) {
       if (_retried >= 2) throw new Error('未授权');
       const t = await requestToken();
@@ -1838,16 +1935,155 @@ window.LOG_POOL = [
   }
   $$('.nav-btn').forEach(b => b.addEventListener('click', () => go(b.dataset.module)));
   const hash = (location.hash || '').replace('#', '');
-  go(['models', 'agents', 'logs', 'settings', 'sessions'].indexOf(hash) >= 0 ? hash : 'models', true);
+  go(['models', 'agents', 'logs', 'settings', 'sessions', 'terminal'].indexOf(hash) >= 0 ? hash : 'models', true);
 
   /* ================= 退出登录 ================= */
   $('#logoutBtn').addEventListener('click', async () => {
     try {
       await fetch('/api/logout', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
     } catch (e) {}
-    try { localStorage.removeItem('consoleToken'); } catch (e) {}
+    try { localStorage.removeItem('consoleToken'); localStorage.removeItem('termSession'); } catch (e) {}
     location.replace('/');
   });
+
+  /* ================= 内嵌命令提示符 ================= */
+  (() => {
+    const screenEl = $('#termScreen'), inputEl = $('#termInput'), cwdEl = $('#termPromptLabel');
+    let sessionId = '';
+    try { sessionId = localStorage.getItem('termSession') || ''; } catch (e) {}
+    let source = null, opened = false, termOpenRetries = 0;
+    const history = [];
+    let histIdx = 0;
+
+    function append(text) {
+      if (!text) return;
+      screenEl.textContent += text;
+      if (screenEl.textContent.length > 200000) screenEl.textContent = screenEl.textContent.slice(-160000);
+      screenEl.scrollTop = screenEl.scrollHeight;
+    }
+    function setCwd(cwd) { cwdEl.textContent = cwd ? cwd + '>' : ''; }
+    function forget() {
+      sessionId = ''; opened = false;
+      try { localStorage.removeItem('termSession'); } catch (e) {}
+    }
+    function listen() {
+      if (source) source.close();
+      source = new EventSource('/api/terminal/stream?id=' + encodeURIComponent(sessionId));
+      source.onmessage = (ev) => {
+        let m; try { m = JSON.parse(ev.data); } catch { return; }
+        if (m.reset) screenEl.textContent = '';
+        if (m.t) append(m.t);
+        if (m.cwd) setCwd(m.cwd);
+        if (m.exited) {
+          append('\n[会话已结束：' + (m.exited === 'idle' ? '空闲超时回收' : m.exited === 'replaced' ? '会话数超限' : '进程退出') + '，点「新建会话」重新开启]\n');
+          forget(); if (source) { source.close(); source = null; }
+        }
+      };
+      source.onerror = () => {
+        if (source) { source.close(); source = null; }
+        if (!sessionId) return;
+        append('\n[连接断开，正在重建会话…]\n');
+        forget(); open();
+      };
+    }
+    async function open() {
+      if (opened) return; opened = true;
+      screenEl.textContent = '正在启动命令提示符…\n';
+      try {
+        const r = await api('/api/terminal/open', 'POST', {});
+        if (!r.ok) throw new Error(r.error || '启动失败');
+        sessionId = r.id;
+        termOpenRetries = 0;
+        try { localStorage.setItem('termSession', sessionId); } catch (e) {}
+        screenEl.textContent = r.buffer || '';
+        setCwd(r.cwd);
+        listen();
+        inputEl.focus();
+      } catch (e) {
+        screenEl.textContent = '启动失败：' + (e.message || e) + '\n';
+        opened = false;
+        // 后端暂不可用时静默重试（最多 10 次，间隔 3s），恢复后自动就绪
+        if (termOpenRetries < 10) { termOpenRetries++; setTimeout(() => { if (!sessionId && !opened) open(); }, 3000); }
+      }
+    }
+    async function send() {
+      const v = inputEl.value;
+      if (!v.trim()) return;
+      if (!sessionId) { open(); return; }
+      // cmd 会在输出里回显命令本身（管道 stdin + ECHO ON），前端不重复回显
+      history.push(v); if (history.length > 100) history.shift();
+      histIdx = history.length;
+      inputEl.value = '';
+      try {
+        const r = await api('/api/terminal/write', 'POST', { id: sessionId, input: v });
+        if (!r.ok) append('[写入失败：' + (r.error || '') + ']\n');
+      } catch (e) { append('[写入失败：' + (e.message || e) + ']\n'); }
+    }
+    $('#termSend').addEventListener('click', send);
+    inputEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); send(); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); if (history.length && histIdx > 0) { histIdx--; inputEl.value = history[histIdx]; } }
+      else if (e.key === 'ArrowDown') { e.preventDefault(); if (histIdx < history.length - 1) { histIdx++; inputEl.value = history[histIdx]; } else { histIdx = history.length; inputEl.value = ''; } }
+    });
+    $('#termInterrupt').addEventListener('click', async () => {
+      if (!sessionId) return;
+      try {
+        const r = await api('/api/terminal/write', 'POST', { id: sessionId, interrupt: true });
+        if (r.ok && r.id && r.id !== sessionId) {
+          sessionId = r.id;
+          try { localStorage.setItem('termSession', sessionId); } catch (e) {}
+          if (source) { source.close(); source = null; }
+          screenEl.textContent = r.buffer || '';
+          setCwd(r.cwd);
+          append('[已中断运行中的命令，会话已重置]\n');
+          listen();
+        }
+      } catch (e) {}
+    });
+    $('#termClear').addEventListener('click', () => { if (sessionId) api('/api/terminal/write', 'POST', { id: sessionId, clear: true }); });
+    $('#termReset').addEventListener('click', async () => {
+      if (sessionId) { try { await api('/api/terminal/close', 'POST', { id: sessionId }); } catch (e) {} }
+      if (source) { source.close(); source = null; }
+      forget(); screenEl.textContent = ''; open();
+    });
+    $('.nav-btn[data-module="terminal"]').addEventListener('click', open);
+    if ((location.hash || '').replace('#', '') === 'terminal') open();
+  })();
+
+  /* ================= 运行控制台（桥接日志 + 状态面板内嵌） ================= */
+  (() => {
+    const rtScreen = $('#rtScreen'), rtStatus = $('#rtStatus');
+    let rtSource = null, rtPaused = false, rtPending = '';
+    function rtRenderStatus(lines) {
+      if (!Array.isArray(lines)) return;
+      rtStatus.textContent = lines.map((l) => (typeof l === 'object' && l && l.rule) ? l.text : String(l)).join('\n');
+      rtStatus.hidden = false;
+    }
+    function rtAppend(line) {
+      if (rtPaused) { rtPending += line + '\n'; return; }
+      rtScreen.textContent += line + '\n';
+      if (rtScreen.textContent.length > 300000) rtScreen.textContent = rtScreen.textContent.slice(-240000);
+      rtScreen.scrollTop = rtScreen.scrollHeight;
+    }
+    function rtConnect() {
+      if (rtSource) return;
+      rtSource = new EventSource('/api/runtime/stream');
+      rtSource.onmessage = (ev) => {
+        let m; try { m = JSON.parse(ev.data); } catch { return; }
+        if (Array.isArray(m.backlog)) { rtScreen.textContent = m.backlog.join('\n') + '\n'; rtScreen.scrollTop = rtScreen.scrollHeight; }
+        if (m.line) rtAppend(m.line);
+        if (m.status) rtRenderStatus(m.status);
+      };
+      rtSource.onerror = () => { /* EventSource 断线自动重连，重连后重放缓冲 */ };
+    }
+    $('#rtPause').addEventListener('click', function () {
+      rtPaused = !rtPaused;
+      this.textContent = rtPaused ? '继续滚动' : '暂停滚动';
+      if (!rtPaused && rtPending) { rtScreen.textContent += rtPending; rtPending = ''; rtScreen.scrollTop = rtScreen.scrollHeight; }
+    });
+    $('.nav-btn[data-module="terminal"]').addEventListener('click', () => { if (!rtSource) rtConnect(); });
+    if ((location.hash || '').replace('#', '') === 'terminal') rtConnect();
+  })();
 
   /* ================= 主题切换（苏打 / 深海 / 护眼） ================= */
   const themeBox = $('#themeSwitch');

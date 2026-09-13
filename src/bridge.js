@@ -9,6 +9,8 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { spawn } from 'node:child_process';
+import iconv from 'iconv-lite';
 import { fileURLToPath } from 'node:url';
 import { SnowLumaWebSocketClient, text } from '@snowluma/sdk';
 import { NodeApiClient, unwrap, createTurnCollector } from './dsh-client.js';
@@ -229,6 +231,35 @@ function normalizeIdList(value) {
 }
 
 // ── 配置 ────────────────────────────────────────────────────────────────────
+// 启动致命错误兜底：在约定端口挂一个仅展示错误信息的极简页面（不弹黑框、不崩溃），
+// 自动唤起的浏览器会直接看到友好的错误说明；修复后经 重启桥接.vbs 重启即恢复。
+function startFatalErrorServer(port, title, detail) {
+  const safe = String(detail).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+  const page = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>QQ 桥接控制台 · 启动失败</title><style>
+  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:linear-gradient(140deg,#d5e3ff,#ded7ff 55%,#ccf1ef);font-family:"Segoe UI",system-ui,"Microsoft YaHei",sans-serif;color:#333d5c}
+  .card{width:min(560px,90vw);background:rgba(255,255,255,.92);border-radius:22px;padding:30px 34px;box-shadow:0 24px 70px rgba(110,130,230,.28)}
+  h1{font-size:19px;margin:0 0 10px}code{background:#eef2fc;border-radius:8px;padding:2px 6px;font-size:12.5px}
+  pre{background:#0f1428;color:#d9e3ff;border-radius:14px;padding:14px 16px;font-size:12.5px;white-space:pre-wrap;word-break:break-all;max-height:40vh;overflow:auto}
+  p{font-size:13px;color:#5a6482;line-height:1.7}
+  </style></head><body><div class="card"><h1>⚠️ ${title}</h1>
+  <p>桥接后端启动失败，进程已在后台保持运行并展示本错误页，不会弹出命令行窗口。请根据下方信息修复后，双击 <code>重启桥接.vbs</code> 重新启动。</p>
+  <pre>${safe}</pre>
+  <p>修复并重启后，本页地址即可访问控制台登录页。</p>
+  </div></body></html>`;
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+    res.end(page);
+  });
+  server.on('error', () => process.exit(1));
+  server.listen(port, '127.0.0.1', () => {
+    const url = `http://127.0.0.1:${port}/`;
+    if (process.argv.includes('--open') || process.env.QQ_OPEN_BROWSER === '1') {
+      try { spawn('cmd.exe', ['/d', '/s', '/c', 'start', '""', url], { detached: true, windowsHide: true, stdio: 'ignore' }).unref(); } catch {}
+    }
+    console.error(`[bridge] ${title}：${detail}（错误页已挂载：${url}）`);
+  });
+}
+
 function loadConfig() {
   const p = path.join(ROOT, 'config.json');
   const file = readJsonSafe(p, null, true);
@@ -567,11 +598,20 @@ function releaseLock() {
 // ── 工具 ────────────────────────────────────────────────────────────────────
 // 命令行底部实时状态面板（TTY 下启用；日志从面板上方滚动，详见 status-panel.js）
 const statusPanel = createStatusPanel();
+// 运行日志中心：内存环形缓冲 + SSE 广播，供控制台「运行控制台」内嵌面板使用
+// （等效外部命令行窗口：log() 运行日志 + 状态面板快照，无需弹出 cmd）
+const runtimeLogHub = { buffer: [], clients: new Set() };
+function runtimeLogPush(line) {
+  runtimeLogHub.buffer.push(line);
+  if (runtimeLogHub.buffer.length > 500) runtimeLogHub.buffer.splice(0, runtimeLogHub.buffer.length - 500);
+  for (const res of runtimeLogHub.clients) { try { res.write(`data: ${JSON.stringify({ line })}\n\n`); } catch {} }
+}
 // 日志同时输出到 stdout 与 state/bridge.log（守护窗口不可见时也能排查）。时间用本地时区，与状态面板/activity 日志一致。
 function log(...args) {
   const now = new Date();
   const clock = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
   const line = `${clock} [bridge] ${args.map((a) => redactSensitiveText(typeof a === 'string' ? a : JSON.stringify(a))).join(' ')}`.replace(/[\r\n]+/g, ' ');
+  runtimeLogPush(line);
   statusPanel.logAbove(line);
   try {
     fs.mkdirSync(STATE_DIR, { recursive: true });
@@ -698,7 +738,17 @@ const REJECT_WORDS = new Set(['拒绝', '不同意', '不允许', '驳回', 'no'
 
 // ── 主流程 ──────────────────────────────────────────────────────────────────
 async function main() {
-  const cfg = loadConfig();
+  let cfg;
+  try {
+    cfg = loadConfig();
+  } catch (error) {
+    // 配置缺失/格式错误：不崩溃、不弹黑框，端口上挂友好错误页供自动唤起的浏览器展示
+    const title = '配置加载失败';
+    const detail = `${error?.message ?? error}\n（文件：config.json）`;
+    try { fs.appendFileSync(path.join(ROOT, 'bridge.err.log'), `${new Date().toISOString()} ${title}: ${detail}\n`); } catch {}
+    startFatalErrorServer(cfg?.consolePort ?? 3100, title, detail);
+    return;
+  }
   fs.mkdirSync(STATE_DIR, { recursive: true });
   acquireLock();
   loadState();
@@ -1463,6 +1513,81 @@ async function main() {
     // 控制台会话（仅存进程内存）：进程存活期间 F5 刷新/路由切换/休眠唤醒均凭 Cookie 免登续持；
     // 进程终止即全部失效，冷重启后必须重新令牌鉴权。
     const consoleSessions = new Set();
+
+    // 主程序启动联动：--open（或环境变量 QQ_OPEN_BROWSER=1）时，后端就绪即自动唤起系统浏览器；
+    // 仅首次启动生效，守护循环内的重启由前端断线自动恢复承接，不重复开标签。
+    const autoOpenBrowser = process.argv.includes('--open') || process.env.QQ_OPEN_BROWSER === '1';
+    function openConsoleInBrowser() {
+      const url = `http://127.0.0.1:${port}/`;
+      try {
+        spawn('cmd.exe', ['/d', '/s', '/c', 'start', '""', url], { detached: true, windowsHide: true, stdio: 'ignore' }).unref();
+        log(`控制台已就绪，已唤起系统浏览器：${url}`);
+      } catch (e) {
+        log(`唤起系统浏览器失败：${e?.message ?? e}`);
+      }
+    }
+
+    // ============ 内嵌命令提示符：进程内 cmd.exe 持久会话（windowsHide，不弹系统窗口） ============
+    // 每个会话是一条真实 cmd.exe 管道进程：工作目录/环境变量/内置状态跨命令自然延续；
+    // 输出经 SSE 实时推送；完成检测用“追加 echo __TERM_END_<seq>__ %CD%”标记行。
+    // 代码页保持系统默认（中文 Windows 为 936/GBK，与真实命令提示符一致）：
+    // 输入经 iconv 转 GBK 写入 stdin，输出按 GBK 解码，规避 cp65001 管道多字节输入致 cmd 退出的系统怪癖。
+    const terminalSessions = new Map(); // id -> session
+    const TERM_SCROLLBACK_MAX = 120_000;   // 会话回滚缓冲上限（字符）
+    const TERM_IDLE_KILL_MS = 15 * 60_000; // 空闲自动回收
+    const TERM_MAX_SESSIONS = 5;
+
+    function termDecode(session, stream, buf) {
+      if (!session.dec[stream]) session.dec[stream] = new TextDecoder('gbk');
+      return session.dec[stream].decode(buf, { stream: true });
+    }
+    function termEmit(session, text) {
+      if (!text) return;
+      session.buffer += text;
+      if (session.buffer.length > TERM_SCROLLBACK_MAX) session.buffer = session.buffer.slice(-TERM_SCROLLBACK_MAX);
+      for (const res of session.clients) { try { res.write(`data: ${JSON.stringify({ t: text })}\n\n`); } catch {} }
+    }
+    function termScanMarker(session, text) {
+      // 输出里可能出现完成标记行：不进入前端显示，仅用于判定命令结束并捕获 %CD%
+      const re = /__TERM_END_(\d+)__[ \t]*(\S[^\r\n]*)?/g;
+      let m;
+      while ((m = re.exec(text))) {
+        session.cwd = (m[2] ?? '').trim() || session.cwd;
+        for (const res of session.clients) { try { res.write(`data: ${JSON.stringify({ end: Number(m[1]), cwd: session.cwd })}\n\n`); } catch {} }
+      }
+      return text.replace(/^[^\r\n]*__TERM_END_\d+__[^\r\n]*(\r?\n)?/gm, '');
+    }
+    function termClose(session, reason) {
+      if (!terminalSessions.has(session.id)) return;
+      terminalSessions.delete(session.id);
+      try { session.child.kill(); } catch {}
+      for (const res of session.clients) { try { res.write(`data: ${JSON.stringify({ exited: reason || 'closed' })}\n\n`); res.end(); } catch {} }
+      session.clients.clear();
+    }
+    function termOpen() {
+      while (terminalSessions.size >= TERM_MAX_SESSIONS) {
+        termClose(terminalSessions.values().next().value, 'replaced');
+      }
+      const id = crypto.randomBytes(12).toString('hex');
+      const child = spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/k'], { cwd: ROOT, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+      const session = { id, child, buffer: '', clients: new Set(), seq: 0, cwd: ROOT, dec: {}, lastActive: Date.now() };
+      terminalSessions.set(id, session);
+      child.stdout.on('data', (buf) => { let t = termDecode(session, 'out', buf); t = termScanMarker(session, t); termEmit(session, t); });
+      child.stderr.on('data', (buf) => { let t = termDecode(session, 'err', buf); t = termScanMarker(session, t); termEmit(session, t); });
+      child.on('error', (err) => { log(`控制台：内嵌终端进程异常：${err?.message ?? err}`); termClose(session, 'error'); });
+      child.on('exit', () => termClose(session, 'exit'));
+      // 会话启动即绪：翻回 UTF-8 已由 /k chcp 完成，这里只补发结束标记拿 %CD%
+      session.child.stdin.write('echo on\r\necho __TERM_END_0__ %CD%\r\n');
+      log(`控制台：内嵌终端会话已开启（${id.slice(0, 8)}…）`);
+      return session;
+    }
+    setInterval(() => {
+      const now = Date.now();
+      for (const session of [...terminalSessions.values()]) {
+        if (now - session.lastActive > TERM_IDLE_KILL_MS) termClose(session, 'idle');
+      }
+    }, 60_000);
+    process.once('exit', () => { for (const session of terminalSessions.values()) { try { session.child.kill(); } catch {} } });
     // 二代会话级隔离：MCP 工具调用时若带 x-agent-token，则必须匹配该会话的 agentToken。
     // 控制台/管理端请求不带此头，仍走 consoleToken 管理通道。
     const agentTokenOk = (key, token) => {
@@ -1634,6 +1759,66 @@ async function main() {
           if (cookieMap.consoleSession) consoleSessions.delete(cookieMap.consoleSession);
           res.setHeader('Set-Cookie', 'consoleSession=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0');
           sendJson({ ok: true, message: '已退出登录' });
+          return;
+        }
+        // ============ 内嵌命令提示符 ============
+        if (req.method === 'POST' && url.pathname === '/api/terminal/open') {
+          const session = termOpen();
+          sendJson({ ok: true, id: session.id, cwd: session.cwd, buffer: session.buffer });
+          return;
+        }
+        if (req.method === 'GET' && url.pathname === '/api/terminal/stream') {
+          const session = terminalSessions.get(String(url.searchParams.get('id') ?? ''));
+          if (!session) { sendJson({ ok: false, error: '终端会话不存在或已关闭' }, 404); return; }
+          res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-store', connection: 'keep-alive', ...SECURITY_HEADERS });
+          res.write(`data: ${JSON.stringify({ t: session.buffer })}\n\n`);
+          session.clients.add(res);
+          const beat = setInterval(() => { try { res.write(': ping\n\n'); } catch {} }, 15_000);
+          req.on('close', () => { clearInterval(beat); session.clients.delete(res); });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/terminal/write') {
+          const body = await readBody();
+          const session = terminalSessions.get(String(body?.id ?? url.searchParams.get('id') ?? ''));
+          if (!session) { sendJson({ ok: false, error: '终端会话不存在或已关闭' }, 404); return; }
+          session.lastActive = Date.now();
+          if (body.interrupt) {
+            // 管道 stdin 无法投递控制台 Ctrl+C 事件（那是控制台机制而非输入字节）；
+            // 中断 = 终止当前 cmd 会话（连带结束运行中的命令）并重开一个干净会话
+            termClose(session, 'interrupt');
+            const fresh = termOpen();
+            sendJson({ ok: true, id: fresh.id, cwd: fresh.cwd });
+            return;
+          }
+          if (body.clear) {
+            session.buffer = '';
+            for (const res of session.clients) { try { res.write(`data: ${JSON.stringify({ reset: true })}\n\n`); } catch {} }
+            sendJson({ ok: true });
+            return;
+          }
+          const input = String(body.input ?? '');
+          if (input.length > 8000) { sendJson({ ok: false, error: '单条命令过长' }, 400); return; }
+          session.seq += 1;
+          // GBK 编码写入，与真实命令提示符的输入行为一致；
+          // 完成标记与 echo on 合并为单行命令，避免多出一行空提示符
+          session.child.stdin.write(iconv.encode(input + '\r\n' + `echo on & echo __TERM_END_${session.seq}__ %CD%\r\n`, 'gbk'));
+          sendJson({ ok: true });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/terminal/close') {
+          const body = await readBody().catch(() => ({}));
+          const session = terminalSessions.get(String(body?.id ?? url.searchParams.get('id') ?? ''));
+          if (session) termClose(session, 'closed');
+          sendJson({ ok: true });
+          return;
+        }
+        // 运行控制台：桥接运行日志（log()）实时流 + 状态面板快照，内嵌等效外部 cmd 窗口
+        if (req.method === 'GET' && url.pathname === '/api/runtime/stream') {
+          res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-store', connection: 'keep-alive', ...SECURITY_HEADERS });
+          res.write(`data: ${JSON.stringify({ backlog: runtimeLogHub.buffer, status: gatherStatusLines() })}\n\n`);
+          runtimeLogHub.clients.add(res);
+          const beat = setInterval(() => { try { res.write(`data: ${JSON.stringify({ status: gatherStatusLines() })}\n\n`); } catch {} }, 4000);
+          req.on('close', () => { clearInterval(beat); runtimeLogHub.clients.delete(res); });
           return;
         }
         if (req.method === 'GET' && url.pathname === '/api/status') {
@@ -4597,14 +4782,18 @@ async function main() {
     });
     server.listen(port, '127.0.0.1', () => {
       log(`本地控制台已启动：http://127.0.0.1:${port}`);
+      if (autoOpenBrowser) openConsoleInBrowser();
     });
     // 端口被占用说明已有实例在跑：以 exit 2 退出，守护脚本会识别为"已有实例"而不是无限重启
     server.on('error', (error) => {
-      log(`控制台服务错误: ${error?.message ?? error}`);
       if (error?.code === 'EADDRINUSE') {
-        console.error(`[bridge] 控制台端口 ${port} 已被占用（可能已有实例在运行），退出。`);
+        // 端口被占用：大概率已有桥接实例在运行——直接唤起浏览器打开现有控制台，
+        // 本实例静默退出（exit 2，守护脚本识别为"已有实例"不再重拉），全程无黑框。
+        log(`控制台端口 ${port} 已被占用（可能已有桥接实例在运行），本实例静默退出。`);
+        if (autoOpenBrowser) openConsoleInBrowser();
         process.exit(2);
       }
+      log(`控制台服务错误: ${error?.message ?? error}`);
       process.exit(1);
     });
     return server;
