@@ -1,14 +1,17 @@
 // 自测脚本：不依赖 SnowLuma / QQ，只验证 DSH 侧链路——
 //   1. 连接 DSH Web API（settings/describe 探活）
 //   2. 创建一个独立测试会话（不会碰现有会话）
-//   3. 订阅该会话的 session/follow 事件流
-//   4. session/prompt 注入一条消息
-//   5. 等 agent 回复（turn/end）并打印
+//   3. session/prompt 注入一条消息
+//   4. 轮询会话快照，等 agent 回复并打印
 // 用法：node src/self-test.js [baseUrl] [prompt文本]
+//
+// 说明：不靠 session/follow 的实时事件——该流在会话空闲时会「推完快照就结束」，
+// 订阅时机稍晚就会整轮漏掉（曾表现为「等待回复超时」）。快照本身带完整历史，
+// 这里改为轮询快照里最后一条 assistant 文本，稳定且不依赖订阅时序。
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import fs from 'node:fs';
-import { NodeApiClient, createTurnCollector } from './dsh-client.js';
+import { NodeApiClient } from './dsh-client.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -28,51 +31,51 @@ async function main() {
   const sessionId = created.sessionId;
   console.log('✅ 测试会话已创建:', sessionId);
 
-  // 先订阅会话流（在 prompt 之前），再注入消息。
-  // follow 流首帧是历史快照（丢弃），之后才是实时事件。
-  const collector = createTurnCollector();
-  let resolveOpened;
-  let openTimer;
-  const opened = new Promise((resolve, reject) => {
-    openTimer = setTimeout(() => reject(new Error('等待 follow 流建立超时（10s）')), 10_000);
-    resolveOpened = () => { clearTimeout(openTimer); resolve(); };
-  });
-  const stream = api.openRemoteStream('session/follow', { request: { address: { kind: 'session', sessionId } } });
-  const done = new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('等待回复超时（60s）')), 60_000);
-    (async () => {
-      let sawFirst = false;
-      for await (const item of stream) {
-        if (!sawFirst) {
-          sawFirst = true;
-          resolveOpened();
+  /** 读一次会话快照，返回最后一条 assistant 文本与最后一条 turn 结束原因。 */
+  async function readSessionState() {
+    const controller = new AbortController();
+    const guard = setTimeout(() => controller.abort(), 8000);
+    try {
+      for await (const item of api.openRemoteStream('session/follow', { request: { address: { kind: 'session', sessionId } } }, { signal: controller.signal })) {
+        if (item?.type !== 'snapshot') continue;
+        let text = '';
+        let reason = null;
+        for (const record of item.records ?? []) {
+          const event = record?.event;
+          if (event?.type === 'assistant/message') {
+            text = '';
+            for (const block of event.data?.message?.content ?? []) {
+              if (block?.type === 'text' && typeof block.text === 'string') text += block.text;
+            }
+          } else if (event?.type === 'turn/end') {
+            reason = event.data?.reason ?? null;
+          }
         }
-        if (item.type !== 'event') continue; // snapshot 等非实时帧
-        const ended = collector.push(item.event);
-        if (ended && ended.reason?.kind === 'completed') {
-          clearTimeout(timer);
-          resolve(ended);
-          return;
-        }
-        if (ended) {
-          clearTimeout(timer);
-          reject(new Error(`回合异常结束: ${ended.reason?.kind}`));
-          return;
-        }
+        return { text: text.trim(), reason };
       }
-    })().catch((error) => { clearTimeout(timer); reject(error); });
-  });
-  await opened;
+    } catch { /* 流断开：交给调用方重试 */ } finally {
+      clearTimeout(guard);
+    }
+    return { text: '', reason: null };
+  }
 
   const accepted = await api.callEndpoint('session/prompt', {
     request: { requestId: `self-test-${Date.now()}`, sessionId, mode: 'queue', content: [{ type: 'text', text: promptText }] }
   });
   console.log('✅ prompt 已接受:', JSON.stringify(accepted));
 
-  const ended = await done;
-  console.log('✅ 回合结束 reason =', ended.reason.kind);
+  const deadline = Date.now() + 60_000;
+  let state = { text: '', reason: null };
+  while (Date.now() < deadline) {
+    state = await readSessionState();
+    if (state.text) break;
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+  if (!state.text) throw new Error('等待回复超时（60s）');
+  if (state.reason && state.reason.kind !== 'completed') throw new Error(`回合异常结束: ${state.reason.kind}`);
+  console.log('✅ 回合结束 reason =', state.reason?.kind ?? '未知');
   console.log('🤖 agent 回复:');
-  console.log(ended.text || '（无文本）');
+  console.log(state.text);
   console.log('🎉 自测通过 —— DSH 侧链路可用');
   process.exit(0);
 }

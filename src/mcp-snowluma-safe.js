@@ -801,8 +801,9 @@ if (cfg.socialV2?.tools?.getImages !== false) {
           timeoutMs: 180000
         });
         const images = Array.isArray(data?.images) ? data.images : [];
+        const note = String(data?.note ?? '').trim();
         if (!images.length) {
-          return { content: [{ type: 'text', text: `消息 ${messageId} 没有可返回的图片/表情：${data?.note || '未找到'}` }] };
+          return { content: [{ type: 'text', text: `消息 ${messageId} 没有可返回的图片/表情：${note || '未找到'}` }] };
         }
         const content = [];
         const textParts = [];
@@ -814,8 +815,11 @@ if (cfg.socialV2?.tools?.getImages !== false) {
             textParts.push(`[${img.kind === 'face' ? '表情' : '图片'}${img.index ?? ''}${img.text ? ' ' + img.text : '（获取失败）'}]`);
           }
         }
+        // note 是桥接在会话模型读不了图时补的能力说明（图片不会进视觉上下文），必须让模型看到。
         if (textParts.length) {
-          content.unshift({ type: 'text', text: `消息 ${messageId} 的媒体内容（${images.length} 项）：\n${textParts.join('\n')}` });
+          content.unshift({ type: 'text', text: `消息 ${messageId} 的媒体内容（${images.length} 项）：\n${textParts.join('\n')}${note ? '\n⚠️ ' + note : ''}` });
+        } else if (note) {
+          content.unshift({ type: 'text', text: `⚠️ ${note}` });
         }
         return { content };
       } catch (error) {

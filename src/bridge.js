@@ -260,6 +260,14 @@ function startFatalErrorServer(port, title, detail) {
   });
 }
 
+// 桥接默认模型：新建会话显式绑定它；config.json 显式写了 dsh.model 时以配置为准。
+// 必须是官方目录里声明了 image 输入的模型——QQ 图片工具（qq_get_message_images /
+// qq_get_sticker_image / qq_get_self_image）返回的图片，只有在会话当前模型声明
+// image 输入时才会真正投递给模型；文本模型下 DSH 会把每张图替换成
+// "[image unavailable: … does not declare image input]"，表现为「图片识别失效」。
+// DeepSeek-V41-Flash（deepseek-flash）声明 inputModalities = text + image。
+const DEFAULT_MODEL = 'deepseek-flash';
+
 function loadConfig() {
   const p = path.join(ROOT, 'config.json');
   const file = readJsonSafe(p, null, true);
@@ -268,7 +276,7 @@ function loadConfig() {
     dsh: {
       baseUrl: 'http://127.0.0.1:3080',
       provider: 'deepseek-official',
-      model: 'deepseek-v4-flash-vision-exp',
+      model: DEFAULT_MODEL,
       reasoningEffort: 'max',
       ...(file.dsh ?? {})
     },
@@ -1251,6 +1259,96 @@ async function main() {
       request: { requestId: `qq-bridge-p${Date.now().toString(36)}-${(++promptSeq).toString(36)}`, sessionId, mode, content }
     });
   }
+
+  // ── 会话默认模型绑定 ──────────────────────────────────────────────────────
+  // 每个新建（或复用）的 DSH 会话都显式 selectModel 绑定桥接默认模型：
+  //  - 新建会话无需人工切换，直接就是 DEFAULT_MODEL（DeepSeek-V41-Flash）；
+  //  - selectModel 同时会写进 DSH 的 agent-default-model 设置，网页端/其他入口
+  //    新建的会话也默认选中同一模型；
+  //  - config.json 显式写了 dsh.model 时以配置为准（cfg.dsh.model）。
+  const modelBoundSessions = new Set();   // sessionId：本进程内已绑定过模型（只 selectModel 一次）
+  const sessionModelInfo = new Map();     // sessionId -> { provider, model, image }：图片端点据此给出提示
+  let modelImageWarned = false;           // 不支持图像输入的完整告警只打一次，避免每个会话刷屏
+
+  // 模型能否读图：查 DSH 侧的模型目录（settings/describe 里各命名空间的 models[]），
+  // 与 DSH 判定图片准入用的是同一份 inputModalities。查不到（目录缺失/查询失败/未知模型）
+  // 返回 image:true 不误报——宁可漏报也不要在能读图时谎报。
+  let modelCatalogCache = { at: 0, images: new Map(), ok: false };
+  async function resolveModelImageSupport(modelId) {
+    const now = Date.now();
+    // 取到目录后缓存 5 分钟；取不到（DSH 未就绪等）60 秒后重试。
+    const ttl = modelCatalogCache.ok ? 5 * 60 * 1000 : 60 * 1000;
+    if (now - modelCatalogCache.at > ttl) {
+      const images = new Map();
+      let ok = false;
+      try {
+        const described = await api.callEndpoint('settings/describe', {});
+        for (const section of described?.namespaces ?? []) {
+          const list = section?.value?.models;
+          if (!Array.isArray(list)) continue;
+          for (const m of list) {
+            if (!m?.id) continue;
+            const id = String(m.id);
+            // 同一 id 出现在多个目录时，只要有一个目录声明 image 就视为可读图。
+            const readable = Array.isArray(m.inputModalities) && m.inputModalities.includes('image');
+            images.set(id, (images.get(id) ?? false) || readable);
+          }
+        }
+        ok = images.size > 0;
+      } catch (error) {
+        log(`读取 DSH 模型目录失败（图片能力自检跳过）：${error?.message ?? error}`);
+      }
+      modelCatalogCache = { at: now, images, ok };
+    }
+    const id = String(modelId);
+    if (!modelCatalogCache.images.has(id)) return { known: false, image: true };
+    return { known: true, image: modelCatalogCache.images.get(id) };
+  }
+
+  async function ensureSessionModel(sessionId) {
+    if (modelBoundSessions.has(sessionId)) return;
+    const provider = String(cfg.dsh?.provider || 'deepseek-official');
+    const model = String(cfg.dsh?.model || DEFAULT_MODEL);
+    const effort = String(cfg.dsh?.reasoningEffort || 'max');
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      try {
+        const result = await api.callEndpoint('session/selectModel', { request: { sessionId, provider, model, reasoningEffort: effort } });
+        modelBoundSessions.add(sessionId);
+        const bound = result.selected;
+        // 图片能力自检只是「附加告警」：查不到就当作可读图，绝不影响模型绑定本身。
+        let support = { known: false, image: true };
+        try {
+          support = await resolveModelImageSupport(bound.model);
+        } catch (error) {
+          log(`图片能力自检失败（忽略）：${error?.message ?? error}`);
+        }
+        sessionModelInfo.set(sessionId, { provider: bound.provider, model: bound.model, image: support.image });
+        log(`已绑定会话模型 ${sessionId} -> ${bound.provider}/${bound.model} (${bound.reasoningEffort ?? '默认'})${support.known && !support.image ? ' ⚠️ 该模型不声明图像输入' : ''}`);
+        if (support.known && !support.image) {
+          const advice = `当前会话模型 ${bound.model} 不声明图像输入，QQ 图片/表情无法被识别（DSH 会把图片替换成 [image unavailable]）。请把 config.json 的 dsh.model 改成 ${DEFAULT_MODEL}（DeepSeek-V41-Flash）等支持图像的模型。`;
+          if (!modelImageWarned) {
+            modelImageWarned = true;
+            log(`⚠️ ${advice}`);
+          }
+          appendActivity(`⚠️ 会话模型不支持图像输入：${bound.model}，图片识别将失效（建议改用 ${DEFAULT_MODEL}）`);
+        }
+        return;
+      } catch (error) {
+        log(`绑定会话模型失败 ${sessionId}（第 ${attempt}/2 次）: ${error?.message ?? error}`);
+        if (attempt < 2) await sleep(1000);
+      }
+    }
+  }
+
+  // 图片端点附带的能力说明：会话模型读不了图时，明确告诉 agent「图片没进你的视觉
+  // 上下文、别猜」，避免历史上那种拿到 [image unavailable] 占位后硬描述画面的情况。
+  function imageCapabilityNote(key) {
+    const sid = state.sessions?.[key];
+    const info = sid ? sessionModelInfo.get(sid) : undefined;
+    if (!info || info.image !== false) return '';
+    return `当前会话模型 ${info.model} 不支持图像输入，图片不会进入你的视觉上下文；请如实说明看不到这张图，不要猜测画面内容。`;
+  }
+
   const collectors = new Map(); // sessionId -> turn collector
   const sendToolSucceededSessions = new Set(); // sessionId：当前 turn 内 MCP 发送类工具至少成功一次
   const v2TurnStartAt = new Map(); // sessionId -> timestamp：reserved2 turn 开始时间，用于判断是否“无行动”
@@ -4562,7 +4660,8 @@ async function main() {
           }
           try {
             const images = await fetchMediaData(media);
-            sendJson({ ok: true, messageId, media, images });
+            const note = imageCapabilityNote(key);
+            sendJson({ ok: true, messageId, media, images, ...(note ? { note } : {}) });
           } catch (error) {
             log(`图片查询失败 ${key} ${messageId}: ${error?.message ?? error}`);
             sendJson({ ok: false, error: `图片查询失败：${error?.message ?? error}` }, 500);
@@ -5476,27 +5575,6 @@ async function main() {
     return true;
   }
 
-  // 视觉模型应用去重：每个 DSH 会话在本进程内只 selectModel 一次。
-  // 四种 QQ 模式共用 DSH 会话，统一强制使用 DeepSeek-V4-Flash-Vision-Exp + max 思考强度。
-  const visionModelAppliedSessions = new Set();
-  async function ensureVisionModel(sessionId) {
-    if (visionModelAppliedSessions.has(sessionId)) return;
-    const provider = String(cfg.dsh?.provider || 'deepseek-official');
-    const model = String(cfg.dsh?.model || 'deepseek-v4-flash-vision-exp');
-    const effort = String(cfg.dsh?.reasoningEffort || 'max');
-    for (let attempt = 1; attempt <= 2; attempt += 1) {
-      try {
-        const result = await api.callEndpoint('session/selectModel', { request: { sessionId, provider, model, reasoningEffort: effort } });
-        visionModelAppliedSessions.add(sessionId);
-        log(`已设置会话视觉模型 ${sessionId} -> ${result.selected.provider}/${result.selected.model} (${result.selected.reasoningEffort ?? '默认'})`);
-        return;
-      } catch (error) {
-        log(`设置会话视觉模型失败 ${sessionId}（第 ${attempt}/2 次）: ${error?.message ?? error}`);
-        if (attempt < 2) await sleep(1000);
-      }
-    }
-  }
-
   async function ensureSession(key) {
     const epoch = sessionEpoch;
     const existing = state.sessions[key];
@@ -5509,7 +5587,7 @@ async function main() {
         try { await api.callEndpoint('workspace/archiveSession', { request: { sessionId: existing } }); } catch {}
       } else {
         ensureFollowStream(existing);
-        await ensureVisionModel(existing);
+        await ensureSessionModel(existing);
         return existing;
       }
     }
@@ -5552,7 +5630,7 @@ async function main() {
       reverse.set(sessionId, key);
       saveState();
       ensureFollowStream(sessionId);
-      await ensureVisionModel(sessionId);
+      await ensureSessionModel(sessionId);
       log(`新会话 ${key} -> ${sessionId}（模式 ${currentMode}，preset: ${modePreset(key, currentMode, cfg) ?? '默认'}）`);
       return sessionId;
     })();

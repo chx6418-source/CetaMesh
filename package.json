@@ -13,6 +13,7 @@
     "test-md": "node scripts/test-md-to-plain.mjs",
     "test-wait": "node scripts/test-v2-wait.mjs",
     "test-vision": "node scripts/test-vision-media.mjs",
+    "probe-model": "node scripts/probe-model-bind.mjs",
     "test-forward": "node scripts/test-forward.mjs",
     "test-slang": "node scripts/test-slang-learn.mjs",
     "test-stickers": "node scripts/test-stickers.mjs",

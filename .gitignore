@@ -12,6 +12,11 @@ config.json
 *.bak
 *.bak-*
 
+# dsh-vision-router 插件在工作目录下写的运行产物（agent cwd = 仓库根时会出现）
+.dsh-vision-router/
+# ZCode 客户端本地会话/计划目录
+.zcode/
+
 # Local development / planning / research docs (not part of public project)
 /PROJECT_GUIDE.md
 /ARCH_REVIEW.md

@@ -1,5 +1,5 @@
 // 视觉/图片链路自检脚本：
-// 1. 校验配置默认模型为 DeepSeek-V4-Flash-Vision-Exp
+// 1. 校验配置的会话模型支持图像输入（文本模型会让 QQ 图片静默失效）
 // 2. 校验 safe-fetch 的 SSRF 防护（本机地址应被拒绝）
 // 3. 若桥接运行中，校验 /api/images/message 端点可用（用二代 agent token）
 // 运行：node scripts/test-vision-media.mjs
@@ -32,8 +32,16 @@ function check(name, cond, extra = '') {
 }
 
 // 1. 配置
-check('config.dsh.model 为视觉模型', config.dsh?.model === 'deepseek-v4-flash-vision-exp', `当前 ${config.dsh?.model}`);
-check('config.dsh.reasoningEffort 为 max', config.dsh?.reasoningEffort === 'max', `当前 ${config.dsh?.reasoningEffort}`);
+// 官方目录（deepseek-official，见 dsh-llm-deepseek 的 DEFAULT_MODELS）里声明了 image 输入的模型：
+// 只有这些模型能让 QQ 图片工具返回的图片真正进入模型视觉上下文。
+const IMAGE_CAPABLE_MODELS = new Set(['deepseek-flash', 'deepseek-v4-flash-vision-exp']);
+const TEXT_ONLY_MODELS = new Set(['deepseek-v4-flash', 'deepseek-v4-pro']);
+const configuredModel = config.dsh?.model;
+check('config.dsh.model 支持图像输入（否则 QQ 图片识别静默失效）', IMAGE_CAPABLE_MODELS.has(configuredModel),
+  `当前 ${configuredModel}${TEXT_ONLY_MODELS.has(configuredModel) ? '（文本模型，请改用 deepseek-flash / DeepSeek-V41-Flash）' : ''}`);
+check('会话模型可被 DSH 接受（provider/model 齐全）', Boolean(config.dsh?.provider && configuredModel), `provider ${config.dsh?.provider}`);
+check('config.dsh.reasoningEffort 取值合法', ['off', 'low', 'high', 'max'].includes(config.dsh?.reasoningEffort ?? ''),
+  `当前 ${config.dsh?.reasoningEffort}`);
 check('config.socialV2.tools.getImages 默认开启', config.socialV2?.tools?.getImages !== false);
 
 // 2. safe-fetch SSRF
@@ -61,6 +69,8 @@ if (fs.existsSync(consoleTokenFile) && fs.existsSync(socialV2File)) {
         const res = await fetch(url, { headers: { 'x-agent-token': agentToken, 'x-console-token': consoleToken }, signal: AbortSignal.timeout(10000) });
         const body = await res.json().catch(() => ({}));
         check('桥接 /api/images/message 端点可访问', res.ok === true && body.ok === true, `HTTP ${res.status}`);
+        // 桥接在会话模型读不了图时会带 note 说明；note 里出现这句说明绑定的模型不对。
+        check('桥接未报告「会话模型不支持图像输入」', !String(body?.note ?? '').includes('不支持图像输入'), String(body?.note ?? ''));
       } else {
         console.log('⚠️ 跳过桥接端点检查：没有可用 agentToken/messageId');
       }

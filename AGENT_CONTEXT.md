@@ -71,6 +71,11 @@ history:
     date: "2026-09-12"
     action: "指令：侧边栏动画回退到「优化动效」完成态 → 滑动胶囊机制整体移除"
     result: "已在 95d4607 之后的源文件中执行，随下次提交固化"
+  - step: T11
+    date: "2026-09-13"
+    action: "[后端·非 UI] 修复「工具图片识别失效」：会话被绑定成文本模型 deepseek-v4-flash，DSH 把图片替换为 [image unavailable: … does not declare image input]（AI 只能回「看不到/一片黑」）→ 桥接默认模型改为 deepseek-flash（DeepSeek-V41-Flash，官方目录声明 text+image）；新建会话仍强制 selectModel 绑定；绑定到不声明图像输入的模型时打告警，并在 /api/images/message 回带说明，避免再次静默失效"
+    result: "src/bridge.js（DEFAULT_MODEL / ensureSessionModel / resolveModelImageSupport / imageCapabilityNote）、src/mcp-snowluma-safe.js（透传 note）、config.json、config.example.json、scripts/test-vision-media.mjs、scripts/probe-model-bind.mjs（新增自检）"
+    scope_note: "本条为后端模型配置修复（用户直接下达），非前端 UI 迭代；red_line.backend_zero_change 对 UI 任务继续生效"
 
   deprecated_experiments:
     - id: "DEP-01"

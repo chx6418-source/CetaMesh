@@ -108,3 +108,8 @@ DSH 0.1.5 对 Web API 做了两次不兼容变更，桥接已适配：
    ```bash
    node scripts/check-onebot-status.mjs
    ```
+- **AI 看不到图片（回「一片黑 / 读不出来」或乱猜画面）**：会话模型不支持图像输入。桥接会把 `config.json` 的 `dsh.model` 绑定给每个 QQ 会话；文本模型（`deepseek-v4-flash` / `deepseek-v4-pro`）下 DSH 会把图片换成 `[image unavailable: … does not declare image input]`，图片根本没进入模型视觉上下文（视觉路由插件也救不了：它的工具只认本地路径/附件 id，不认 QQ 的图片 URL）。把 `dsh.model` 改成 `deepseek-flash`（DeepSeek-V41-Flash）或 `deepseek-v4-flash-vision-exp` 后重启桥接即可。桥接日志里出现「⚠️ 会话模型不支持图像输入」就是这个故障；两个自检脚本：
+   ```bash
+   node scripts/test-vision-media.mjs            # 校验配置模型能读图
+   node scripts/probe-model-bind.mjs --image     # 端到端：带图问颜色，应回答「红」
+   ```
