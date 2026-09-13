@@ -1904,6 +1904,15 @@ async function main() {
         }
         // ============ 内嵌命令提示符 ============
         if (req.method === 'POST' && url.pathname === '/api/terminal/open') {
+          // 带上 id 且会话仍活着 => 复用（保留回滚内容与工作目录），否则新建。
+          // 页面刷新/重开终端页都走这里：不复用会让每次打开都换一个新 cmd，内容凭空消失。
+          const body = await readBody().catch(() => ({}));
+          const existing = terminalSessions.get(String(body?.id ?? ''));
+          if (existing) {
+            existing.lastActive = Date.now();
+            sendJson({ ok: true, id: existing.id, cwd: existing.cwd, buffer: existing.buffer, reused: true });
+            return;
+          }
           const session = termOpen();
           sendJson({ ok: true, id: session.id, cwd: session.cwd, buffer: session.buffer });
           return;
@@ -1912,7 +1921,8 @@ async function main() {
           const session = terminalSessions.get(String(url.searchParams.get('id') ?? ''));
           if (!session) { sendJson({ ok: false, error: '终端会话不存在或已关闭' }, 404); return; }
           res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-store', connection: 'keep-alive', ...SECURITY_HEADERS });
-          res.write(`data: ${JSON.stringify({ t: session.buffer })}\n\n`);
+          // 首帧单独标记为 snapshot：前端据此「替换」而不是「追加」，否则与 open() 预填的回滚内容重复一份
+          res.write(`data: ${JSON.stringify({ snapshot: session.buffer, cwd: session.cwd })}\n\n`);
           session.clients.add(res);
           const beat = setInterval(() => { try { res.write(': ping\n\n'); } catch {} }, 15_000);
           req.on('close', () => { clearInterval(beat); session.clients.delete(res); });

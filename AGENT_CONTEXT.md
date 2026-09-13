@@ -88,6 +88,12 @@ history:
     result: "src/qq-card.js、src/bridge.js、src/forward.js、dsh/agent-presets/qq-chat-v2/agent.cordis.yml、scripts/test-card.mjs（99 项断言，含真实抓包 payload 夹具 + 桥接正向端到端检查）、README.md、RULES.md、docs/PROJECT_GUIDE.md"
     scope_note: "T12 的结论「工具无法查看卡片」由本条修正；T12 的控制台开关、端点、MCP 工具、即时生效机制均保留不变"
     verification: "解析层用真实抓包 payload 验证通过；图片 URL 已验证可直接抓取（safeFetchBuffer 取回 PNG/JPEG）；桥接进程需重启后由 `npm run test-card` 自动完成正向端到端确认（/api/status.cardSegments 含 markdown 时才会执行，避免把「没重启」误判为回归）"
+  - step: T14
+    date: "2026-09-13"
+    action: "[控制台·滚动稳定性] 修复两个刷新/开关页面时的滚动偏移：①「页面持续刷新视口向下漂移」——根因有三：终端 open() 里 `inputEl.focus()` 会把命令输入框滚进视野（实测每次刷新把视口从 400 拽到 782=底部）、浏览器自带滚动恢复按「锚点元素」找位置（模块内容一变就落到 367 这类锚点偏移，实测 400/700 都被拉成 367）、轮询重渲染期间的滚动锚定会改写 window.scrollY。修法：focus({preventScroll:true})、`html{overflow-anchor:none}`、`history.scrollRestoration='manual'` + 自持位置（滚动写 sessionStorage consoleScrollY，加载后 rAF/350ms 两次还原，切换模块仍回顶部）。②「终端页面反复开关内容上下跳变」——根因：每次 /api/terminal/open 都新建 cmd（前端从不回传已记住的会话 id），页面一刷新内容就整段消失；SSE 首帧以 `t` 推送整段回滚缓冲，与 open() 预填内容重复追加；append()/backlog 无条件滚到底把用户翻看的回滚区顶走；SSE onerror 里 `forget()` 丢掉会话 id，网络抖一下就换新会话。修法：前端回传 id + 服务端 `/api/terminal/open` 复用存活会话（返回 reused/buffer/cwd）、流首帧改为 `{snapshot,cwd}` 由前端「替换」而非追加、`#termScreen`/`#rtScreen` 统一「跟随底部」规则（nearBottom 40px 内才自动滚底，内容相同不重写 DOM）、断线只重连不丢 id（1.5s 后带 id 重开，服务端真没了才新建）"
+    result: "public/console.html（html overflow-anchor、滚动位置自持、终端 screenEl/rtScreen 的 showScreen/rtAppend/nearBottom、focus.preventScroll、listen() 首帧与 onerror）、src/bridge.js（/api/terminal/open 支持复用、/api/terminal/stream 首帧 snapshot+cwd）"
+    verification: "浏览器实测（真实桥接 3100 + 沙箱实例 3199 双端）：4 个模块 × 200/400/700 三档滚动位置刷新后逐一对上（含终端页 400 不再变 782）；带内容会话刷新后 termSession 不变、内容长度与标记数完全保留、无重复；终端面板上翻后执行新命令 scrollTop 保持 60 不动、回到底部后继续跟随。沙箱内单点验证服务端协议：同 id 复用得 `reused:true`+回滚内容、无效 id 才新建、流首帧为 `{snapshot,cwd}`"
+    scope_note: "服务端复用需重启桥接生效（前端已向后兼容：旧后端首帧仍走 `t`，靠 firstFrame 去重避免重复）；沙箱验证用的临时实例与 stub OneBot 已删除，未触碰运行中的用户桥接与 QQ"
 
   deprecated_experiments:
     - id: "DEP-01"
