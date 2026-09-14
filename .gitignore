@@ -2,8 +2,10 @@
 node_modules/
 .npm-cache/
 
-# Bundled local binaries (ffmpeg, portable git, etc.)
-tools/
+# Bundled local binaries (ffmpeg, portable git, etc.) —— 锚定仓库根目录，
+# 不要写成 `tools/`：那会连带忽略任意层级下的 tools 目录（例如
+# design-demos/bg-ripple/tools/ 的融合工具链与校验夹具，那些是要入库的）
+/tools/
 
 # Runtime state and local config (never publish)
 state/

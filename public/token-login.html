@@ -11,8 +11,9 @@
            卡片前后各有一圈浮雕底纹，输入框内凹、按钮凸起。
      入场：光源角度旋转落定左上 → 卡片浮起并有一道极淡柔光扫过 → 内容依次上浮
            → 输入框「压入回弹」；底纹落定后极缓呼吸。
-     转场：点「进入控制台」后卡片压入水面、底色微沉（水位），随后跳转；
-           控制台侧读标记后让各卡片像水位托起般依次浮升（见 public/console.html）。
+     转场（点「进入控制台」）：卡片压入水面 → 主页主题的背景色从「右下角」径向铺满整页
+           （.morph 层，目标色按 localStorage.consoleTheme 注入）→ 跳转。
+           登录页自身的配色不受主题影响；只有这一段渐变会把主题色带进来。
      ========================================================================== */
   * { box-sizing: border-box; margin: 0; }
   html, body { height: 100%; }
@@ -21,7 +22,6 @@
     display: flex; align-items: center; justify-content: center;
     color: #333d5c; background: #e9eefb;
     -webkit-font-smoothing: antialiased; overflow: hidden;
-    transition: background-color .6s ease;
   }
   body::before {                       /* 环境光：左上主光 + 右下冷补光 */
     content: ""; position: fixed; inset: 0; pointer-events: none;
@@ -44,7 +44,6 @@
     from { opacity: 0; transform: translate(-50%, -50%) scale(.88); }
     to   { opacity: 1; transform: translate(-50%, -50%) scale(1); }
   }
-  /* 落定后极缓呼吸，避免整屏彻底静止 */
   body.enter .rings { animation: ringBreath 9s cubic-bezier(.22,.9,.36,1) 1.5s infinite alternate; }
   @keyframes ringBreath { from { opacity: 1; } to { opacity: .955; } }
 
@@ -55,7 +54,6 @@
     box-shadow: 18px 20px 46px rgba(172, 187, 228, .78), -18px -20px 46px rgba(255, 255, 255, .98);
     opacity: 0;
   }
-  /* 光源角度旋转一周后落定左上，同时把影子收成常态 */
   body.enter .card { animation: cardIn 1.15s cubic-bezier(.22,.9,.36,1) .18s both; }
   @keyframes cardIn {
     0%   { opacity: 0; transform: translateY(24px) scale(.965);
@@ -65,8 +63,7 @@
     100% { opacity: 1; transform: none;
            box-shadow: 18px 20px 46px rgba(172,187,228,.78), -18px -20px 46px rgba(255, 255, 255, .98); }
   }
-  /* 卡片表面一道极淡的斜向柔光 */
-  .card::after {
+  .card::after {                       /* 掠过卡片表面的极淡柔光 */
     content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
     background: linear-gradient(118deg, transparent 34%, rgba(255,255,255,.5) 50%, transparent 66%);
     opacity: 0;
@@ -136,12 +133,21 @@
     100% { transform: none; box-shadow: inset 7px 8px 18px rgba(176, 190, 230, .8), inset -7px -8px 18px rgba(255,255,255,1); }
   }
 
-  /* ── 转场（涟漪变体 10 · 静水浮升）：卡片压入水面 + 水位微沉，随后跳转 ── */
-  body.leaving { background-color: #dde5f8; }
-  /* 环境光随水位一起下沉（用动画而不是 transition：伪元素上的过渡在这里不生效） */
-  body.leaving::before { animation: waterSink .8s cubic-bezier(.22,.9,.36,1) both; }
-  @keyframes waterSink { from { filter: none; } to { filter: brightness(.955) saturate(1.05); } }
-  body.leaving .card { animation: sink .82s cubic-bezier(.22,.9,.36,1) both; }
+  /* ── 转场（涟漪变体 10 · 静水浮升）：卡片压入水面 + 主题背景色自右下角渐变铺满 ──
+     做法：以右下角为圆心的一颗软边圆（border-radius + 径向渐变），从 scale(0) 放大到铺满。
+     半径随缩放线性增长，所以看到的是一道从右下角稳稳推过来的渐变，不会「一下糊满」；
+     圆直径取 240vmax，缩放到 1 时半径 120vmax，足够盖住任意视口的对角（含顶角）。
+     目标色 --morph-bg 由脚本按 localStorage.consoleTheme 注入，登录页自身配色不变。 */
+  .morph {
+    position: fixed; right: 0; bottom: 0; width: 240vmax; height: 240vmax;
+    z-index: 3; pointer-events: none; border-radius: 50%;
+    background: radial-gradient(closest-side, var(--morph-bg, #eef2fc) 56%, transparent 100%);
+    transform: scale(0); transform-origin: 100% 100%;
+    will-change: transform;
+  }
+  body.leaving .morph { animation: morphSpread .64s cubic-bezier(.34, .06, .3, 1) both; }
+  @keyframes morphSpread { from { transform: scale(0); } to { transform: scale(1); } }
+  body.leaving .card { animation: sink .8s cubic-bezier(.35, 0, .5, 1) both; }
   @keyframes sink {
     0%   { opacity: 1; transform: none;
            box-shadow: 18px 20px 46px rgba(172,187,228,.78), -18px -20px 46px rgba(255,255,255,.98); }
@@ -150,8 +156,10 @@
     100% { opacity: 0; transform: scale(.94) translateY(12px);
            box-shadow: 6px 8px 20px rgba(172,187,228,.3), -6px -6px 20px rgba(255,255,255,.6); }
   }
-  body.leaving .rings { animation: ringsOut .9s cubic-bezier(.22,.9,.36,1) .1s both; }
+  body.leaving .rings { animation: ringsOut .8s cubic-bezier(.22,.9,.36,1) .06s both; }
   @keyframes ringsOut { to { opacity: 0; } }
+  body.leaving::before { animation: ambientOut .62s cubic-bezier(.42, 0, .32, 1) both; }
+  @keyframes ambientOut { to { opacity: .25; } }
 </style>
 </head>
 <body>
@@ -174,9 +182,17 @@
     <div class="err" id="err"></div>
     <div class="foot">© 2026 QQ Bridge · DeepSeek Harness × SnowLuma</div>
   </div>
+  <div class="morph" aria-hidden="true"></div>
 <script>
   var inp = document.getElementById('t');
   var body = document.body;
+
+  /* 目标色：主页主题的背景色（控制台 :root[data-theme=*] 的 --bg）。
+     登录页自身配色保持不变，只有这段转场渐变会把主题色带进来。 */
+  var THEME_BG = { light: '#eef2fc', dark: '#131a2e', warm: '#eaede0' };
+  var morphBg = THEME_BG.light;
+  try { morphBg = THEME_BG[localStorage.getItem('consoleTheme')] || morphBg; } catch (e) {}
+  document.documentElement.style.setProperty('--morph-bg', morphBg);
 
   // 入场动画：先渲染初始态，下一帧加 enter 触发（避免首帧闪一下落定态）
   requestAnimationFrame(function () { body.classList.add('enter'); });
@@ -201,7 +217,7 @@
     body.classList.add('leaving');
     setTimeout(function () {
       location.href = '/?token=' + encodeURIComponent(v);
-    }, 600);                              // 与卡片「压入水面」的时间对齐
+    }, 640);                              // 与「渐变铺满整页」的时间对齐
   }
   document.getElementById('go').addEventListener('click', go);
   inp.addEventListener('keydown', function (e) { if (e.key === 'Enter') go(); });

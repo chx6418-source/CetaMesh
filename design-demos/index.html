@@ -24,7 +24,11 @@
     <p>已选型落地方案预览（苏打蓝 4 · 薰衣草 3 · 冰薄荷 3）<br>正式控制台：<code>http://127.0.0.1:3100</code> · 未选中方案见 <code>archive/</code>（不入库）</p>
     <a href="fusion-4-soda.html">打开交互预览（Mock 数据）</a>
     <div><a class="ghost" href="login-proposals/index.html">令牌登录页视觉方案样品（10 案 + 涟漪变体）</a></div>
-    <small>登录页已落地「柔光浮雕 + 静水浮升」到 <code>public/token-login.html</code>；<br>下面这些样品仅作本机参考资料保留，不入库（见 .gitignore）。</small>
+    <div><a class="ghost" href="bg-ripple/index.html">主题背景渐变 · 湖面涟漪（进入主页面时落场）</a></div>
+    <small>登录页已落地「柔光浮雕 + 静水浮升」到 <code>public/token-login.html</code>（登录页本身<b>不含</b>渐变动画）；<br>
+      湖面涟漪渐变在<b>进入主页面时播一次</b>，并与当前主题联动（苏打/深海/护眼各扩散到自己的画布）：<br>
+      <code>node design-demos/bg-ripple/serve.mjs</code> → http://127.0.0.1:4175/（同端口可直接看两个生产页面）<br>
+      上面 login-proposals 的样品仅作本机参考资料保留，不入库（见 .gitignore）。</small>
   </div>
 </body>
 </html>
