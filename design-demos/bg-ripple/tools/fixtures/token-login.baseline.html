@@ -134,19 +134,22 @@
   }
 
   /* ── 转场（涟漪变体 10 · 静水浮升）：卡片压入水面 + 主题背景色自右下角渐变铺满 ──
-     做法：以右下角为圆心的一颗软边圆（border-radius + 径向渐变），从 scale(0) 放大到铺满。
-     半径随缩放线性增长，所以看到的是一道从右下角稳稳推过来的渐变，不会「一下糊满」；
-     圆直径取 240vmax，缩放到 1 时半径 120vmax，足够盖住任意视口的对角（含顶角）。
-     目标色 --morph-bg 由脚本按 localStorage.consoleTheme 注入，登录页自身配色不变。 */
+     软边圆的「圆心」落在视口右下角，再从 scale(0) 向外扩散；旧实现把圆的包围盒右下角
+     放在这里，圆心会一边向左上移动一边放大，最终反而在右下留下透明区，深色主题跳页时
+     就会从浅色斜面硬切到深色页面。
+     圆本体仍为 240vmax（不增加合成层尺寸），终态放大到 1.35 倍；此时 90% 的纯色半径
+     为 145.8vmax，大于任意视口的最长对角线（不超过 141.5vmax），因此跳页前整屏一定
+     已经落到目标色。目标色 --morph-bg 仍按 localStorage.consoleTheme 注入，登录页自身
+     配色不受影响。 */
   .morph {
-    position: fixed; right: 0; bottom: 0; width: 240vmax; height: 240vmax;
+    position: fixed; right: -120vmax; bottom: -120vmax; width: 240vmax; height: 240vmax;
     z-index: 3; pointer-events: none; border-radius: 50%;
-    background: radial-gradient(closest-side, var(--morph-bg, #eef2fc) 56%, transparent 100%);
-    transform: scale(0); transform-origin: 100% 100%;
+    background: radial-gradient(closest-side, var(--morph-bg, #eef2fc) 0 90%, transparent 100%);
+    transform: scale(0); transform-origin: 50% 50%;
     will-change: transform;
   }
-  body.leaving .morph { animation: morphSpread .64s cubic-bezier(.34, .06, .3, 1) both; }
-  @keyframes morphSpread { from { transform: scale(0); } to { transform: scale(1); } }
+  body.leaving .morph { animation: morphSpread .84s cubic-bezier(.45, 0, .55, 1) both; }
+  @keyframes morphSpread { from { transform: scale(0); } to { transform: scale(1.35); } }
   body.leaving .card { animation: sink .8s cubic-bezier(.35, 0, .5, 1) both; }
   @keyframes sink {
     0%   { opacity: 1; transform: none;
@@ -214,10 +217,25 @@
     // 让控制台知道「这是从登录页进来的」：它会给各卡片做一次依次浮升的落场动画
     try { sessionStorage.setItem('loginArrive', '1'); } catch (e) {}
     body.classList.remove('enter');       // 先停掉入场动画的 fill，避免与退场动画抢同一属性
-    body.classList.add('leaving');
-    setTimeout(function () {
+    var morph = document.querySelector('.morph');
+    var navigated = false;
+    var fallbackTimer = null;
+    function navigate() {
+      if (navigated) return;
+      navigated = true;
+      if (fallbackTimer) clearTimeout(fallbackTimer);
       location.href = '/?token=' + encodeURIComponent(v);
-    }, 640);                              // 与「渐变铺满整页」的时间对齐
+    }
+    // 不再用一个与 CSS 恰好相等的定时器抢最后一帧：等扩散真正结束，再保留 120ms
+    // 完整目标色静帧后跳页。后台标签页收不到 animationend 时仍有兜底，不会卡在登录页。
+    if (morph) {
+      morph.addEventListener('animationend', function (e) {
+        if (e.animationName !== 'morphSpread') return;
+        setTimeout(navigate, 120);
+      }, { once: true });
+    }
+    body.classList.add('leaving');
+    fallbackTimer = setTimeout(navigate, 1100);
   }
   document.getElementById('go').addEventListener('click', go);
   inp.addEventListener('keydown', function (e) { if (e.key === 'Enter') go(); });

@@ -100,7 +100,7 @@ node design-demos/bg-ripple/tools/check-fusion.mjs       # 必须三条 PASS
 - **三主题联动的落场**：峰值 p 均为 1.0、画布撤除 1504/1508/1506ms、`data-theme` 写入 0 次、控制台自身 2s 清理照常。
 - **融合合规**：`check-fusion.mjs` 三条 PASS。
 
-## 修复记录（T26/T27：断层 / 末端不符 / 整页横移）
+## 修复记录（T26–T30：断层 / 末端不符 / 整页横移 / 跨页硬切）
 
 用「录屏逐帧差值曲线」定位到四处问题，均已修复：
 
@@ -125,6 +125,11 @@ node design-demos/bg-ripple/tools/check-fusion.mjs       # 必须三条 PASS
    「验证通过」全是假阳性。修法（规范且视觉一致）：**底色从 `body` 挪到 `html`、`body` 透明**
    （`html{background:var(--bg)}` + `body{background:transparent}`），负 z 层即可正常合成；
    另把 `preserveDrawingBuffer` 默认改为 true。实测 `translateZ(0)`/`will-change` 无效、`overflow-y` 与兜底色无关。
+7. **登录页主题铺色的圆心漂移、末帧未覆盖**（T30）：旧 `.morph` 把圆形包围盒的右下角放在视口右下角，
+   再围绕这个角缩放；圆心会随缩放向左上移动，软边最终从右下重新退出画面。深海主题最明显：跳页前仍留有
+   大块浅色斜面，下一帧却直接进入纯深色控制台。现在把圆心固定在视口右下角，保持 240vmax 合成层尺寸并
+   放大到 1.35 倍；终态 90% 纯色半径为 **145.8vmax**，严格大于任意视口对角线的 **141.5vmax** 上限。
+   扩散改为 840ms 对称缓入缓出，并在 `animationend` 后保留 120ms 完整主题色静帧再跳页（另有 1100ms 兜底）。
 
 **验收口径（重要）**：这一层必须**看屏幕**——把宿主内容 `visibility:hidden` 做隔离观测，对截图取点与
 官方主题底图逐点比对（ACC-2 / ACC-7）。只读画布内部像素或只看动画差值会漏掉"内容正确但没被合成"。
