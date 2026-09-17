@@ -1461,30 +1461,60 @@ async function main() {
     setTimeout(() => { flushQueue(); }, 3000);
   };
 
-  // 从 DSH settings 读取桥接模式；命名空间未注册时回退本地 state/mode.json
+  // 从 DSH settings 读取桥接模式；命名空间未注册时回退本地 state/mode.json。
+  // 控制台切换优先同步回 DSH settings；若当前 DSH 版本不提供写入端点，
+  // 则在本地文件标记 source=console，避免下一轮 5 秒探活又被 DSH 的旧值覆盖。
   const VALID_MODES = ['chat', 'closed-agent', 'reserved', 'reserved2'];
-  async function refreshMode() {
+  let modeSyncSeq = 0;
+  async function readDshMode() {
+    const s = await api.callEndpoint('settings/describe', {});
+    const ns = (Array.isArray(s.namespaces) ? s.namespaces : []).find((n) => n.ns === 'qq-mode');
+    if (!ns?.value || typeof ns.value !== 'object') return null;
+    return { value: ns.value, revision: ns.revision, writable: s.writable !== false };
+  }
+
+  async function syncModeToDsh(mode) {
     try {
-      const s = await api.callEndpoint('settings/describe', {});
-      const ns = s.namespaces.find((n) => n.ns === 'qq-mode');
-      if (ns?.value && typeof ns.value.mode === 'string' && VALID_MODES.includes(ns.value.mode)) {
-        currentMode = ns.value.mode;
+      const ns = await readDshMode();
+      if (!ns || !ns.writable) return false;
+      const args = {
+        ns: 'qq-mode',
+        ops: [{ op: 'set', path: ['mode'], value: mode }]
+      };
+      if (ns.revision !== undefined) args.expectedRevision = ns.revision;
+      await api.callEndpoint('settings/mutate', args);
+      return true;
+    } catch (error) {
+      log(`控制台：DSH 模式同步不可用，使用本地覆盖（${error?.message ?? error}）`);
+      return false;
+    }
+  }
+
+  async function refreshMode() {
+    const local = readJsonSafe(path.join(STATE_DIR, 'mode.json'), null);
+    const localMode = local?.mode && VALID_MODES.includes(local.mode) ? local.mode : null;
+    if (typeof local?.closedAgentPreset === 'string' && local.closedAgentPreset) {
+      closedAgentPreset = local.closedAgentPreset;
+    }
+    let dsh = null;
+    try {
+      dsh = await readDshMode();
+      if (dsh?.value?.mode && VALID_MODES.includes(dsh.value.mode)) {
         // DSH 设置页也可配置管理员 QQ；未设置该字段时不覆盖 config.json。
-        if (ns.value.ownerQQ !== undefined) {
+        if (dsh.value.ownerQQ !== undefined) {
           try {
-            cfg.ownerQQ = normalizeOwnerQQ(ns.value.ownerQQ);
+            cfg.ownerQQ = normalizeOwnerQQ(dsh.value.ownerQQ);
           } catch (error) {
             log(`DSH settings ownerQQ 无效，已忽略: ${error?.message ?? error}`);
           }
         }
-        return;
       }
     } catch {}
-    const local = readJsonSafe(path.join(STATE_DIR, 'mode.json'), null);
-    if (local?.mode && VALID_MODES.includes(local.mode)) currentMode = local.mode;
-    if (typeof local?.closedAgentPreset === 'string' && local.closedAgentPreset) {
-      closedAgentPreset = local.closedAgentPreset;
-    }
+    // source=console 表示本地控制台切换未能写入 DSH，必须保留本地选择；
+    // 没有该标记时仍让 DSH 设置页优先，兼容既有安装和外部切换。
+    if (localMode && local.source === 'console') currentMode = localMode;
+    else if (dsh?.value?.mode && VALID_MODES.includes(dsh.value.mode)) currentMode = dsh.value.mode;
+    else if (localMode) currentMode = localMode;
   }
 
   /** 当前模式是否允许该会话进入 */
@@ -2025,9 +2055,12 @@ async function main() {
             return;
           }
           const existing = readJsonSafe(path.join(STATE_DIR, 'mode.json'), {});
+          // 先落本地并立即更新内存状态，保证 DSH 暂不可用时切换也不被阻塞；
+          // 后台再尝试同步 DSH，成功后移除本地覆盖标记。
           const next = {
             mode: body.mode,
-            ...(body.closedAgentPreset ? { closedAgentPreset: String(body.closedAgentPreset) } : { closedAgentPreset: existing.closedAgentPreset ?? 'router-standard' })
+            ...(body.closedAgentPreset ? { closedAgentPreset: String(body.closedAgentPreset) } : { closedAgentPreset: existing.closedAgentPreset ?? 'router-standard' }),
+            source: 'console'
           };
           atomicWriteJson(path.join(STATE_DIR, 'mode.json'), next);
           if (next.closedAgentPreset) closedAgentPreset = next.closedAgentPreset;
@@ -2050,6 +2083,15 @@ async function main() {
             log('控制台：模式进入二代仿真模式，重建有限睡眠定时器');
           }
           log(`控制台：模式已设置为 ${body.mode}${next.closedAgentPreset ? `（closed-agent preset: ${next.closedAgentPreset}）` : ''}`);
+          const syncSeq = ++modeSyncSeq;
+          void syncModeToDsh(body.mode).then((synced) => {
+            if (!synced || syncSeq !== modeSyncSeq) return;
+            const persisted = readJsonSafe(path.join(STATE_DIR, 'mode.json'), null);
+            if (persisted?.mode !== body.mode || persisted.source !== 'console') return;
+            const shared = { ...persisted };
+            delete shared.source;
+            atomicWriteJson(path.join(STATE_DIR, 'mode.json'), shared);
+          });
           sendJson({ ok: true, mode: body.mode, closedAgentPreset: next.closedAgentPreset });
           return;
         }
