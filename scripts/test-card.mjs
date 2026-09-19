@@ -313,9 +313,10 @@ check('mcp-snowluma-safe.js 注册审批状态查询工具', mcpSrc.includes("'q
 check('控制台开关面板含 getCardMsg（public/console.html）', consoleHtml.includes('data-v2-tool="getCardMsg"'));
 check('控制台开关面板含 getCardMsg（part2.html 源）', part2.includes('data-v2-tool="getCardMsg"'));
 check('控制台卡片点击开关默认关闭并标注风险', consoleHtml.includes('data-v2-tool="clickCardButton"') && consoleHtml.includes('data-v2-tool-default="off"') && consoleHtml.includes('高风险 · 默认关闭'));
-check('控制台卡片点击开关同步到 part2 源', part2.includes('data-v2-tool="clickCardButton"') && part2.includes('data-risk-tool="card-button"'));
+check('控制台卡片点击开关同步到 part2 源', part2.includes('data-v2-tool="clickCardButton"') && part2.includes('data-risk-tool="card-button"') && part2.includes('首次确认后立即保存并持续开启'));
 check('控制台开启卡片点击前弹出风险确认', consoleHtml.includes('知晓风险并开启') && consoleHtml.includes('每次工具调用仍需显式确认'));
 check('控制台风险开关确认后保持开启、再次开启需复核', consoleHtml.includes('确认后工具会持续开启') && consoleHtml.includes('下次从关闭状态重新开启时仍需再次确认'));
+check('控制台风险开关开启/关闭即时持久化', consoleHtml.includes('persistCardButtonTool') && /clickCardButton:\s*enabled/.test(consoleHtml) && consoleHtml.includes('待审批请求已撤销'));
 check('控制台可批准或拒绝风险卡片按钮', consoleHtml.includes('data-card-approval-approve') && consoleHtml.includes('data-card-approval-reject') && consoleHtml.includes('批准并执行'));
 
 // 6. 配置默认开关

@@ -921,17 +921,47 @@
   }
 
   // 高风险工具不能被一次误点悄悄开启：先恢复关闭态，再展示明确的副作用警示。
+  // 该开关是独立的权限开关：确认开启或主动关闭时立即持久化，不依赖整页“保存二代配置”。
+  async function persistCardButtonTool(el, enabled) {
+    try {
+      const r = await api('/api/socialV2/config', 'POST', { tools: { clickCardButton: enabled } });
+      if (!r.ok) {
+        await loadV2Config();
+        toast('❌ 卡片点击工具状态保存失败：' + esc(r.error || '未知错误'), { type: 'err' });
+        return false;
+      }
+      return true;
+    } catch (error) {
+      await loadV2Config();
+      toast('❌ 卡片点击工具状态保存失败：' + esc(error?.message || '网络错误'), { type: 'err' });
+      return false;
+    }
+  }
   $$('[data-risk-tool="card-button"]').forEach((el) => {
     el.addEventListener('change', async () => {
-      if (!el.checked) return;
-      el.checked = false;
-      const accepted = await confirmBox(
-        '开启 qq_click_card_button 后，Agent 可以申请代表当前 QQ 账号点击机器人卡片按钮。按钮可能触发签到、抽奖、订阅、授权或其他外部状态变化；确认后工具会持续开启，直到你手动关闭并保存；每次工具调用仍需显式确认，风险或用途未知的按钮仍必须由管理员逐次批准。确定要允许吗？',
-        '知晓风险并开启'
-      );
-      if (accepted) {
-        el.checked = true;
-        toast('已确认风险并在表单中保持开启；请点击“保存二代配置”使其生效。下次从关闭状态重新开启时仍需再次确认', { type: 'warn', ms: 6200 });
+      if (el.disabled) return;
+      el.disabled = true;
+      try {
+        if (!el.checked) {
+          const saved = await persistCardButtonTool(el, false);
+          if (saved) toast('qq_click_card_button 已关闭；待审批请求已撤销', { type: 'warn' });
+          return;
+        }
+        el.checked = false;
+        const accepted = await confirmBox(
+          '开启 qq_click_card_button 后，Agent 可以申请代表当前 QQ 账号点击机器人卡片按钮。按钮可能触发签到、抽奖、订阅、授权或其他外部状态变化；确认后工具会持续开启，直到你手动关闭；每次工具调用仍需显式确认，风险或用途未知的按钮仍必须由管理员逐次批准。确定要允许吗？',
+          '知晓风险并开启'
+        );
+        if (!accepted) return;
+        const saved = await persistCardButtonTool(el, true);
+        if (saved) {
+          el.checked = true;
+          toast('已确认风险，qq_click_card_button 已立即持久化开启；下次从关闭状态重新开启时仍需再次确认', { type: 'warn', ms: 6200 });
+        } else {
+          el.checked = false;
+        }
+      } finally {
+        el.disabled = false;
       }
     });
   });
