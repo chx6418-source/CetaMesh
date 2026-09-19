@@ -26,7 +26,9 @@ import {
   summarizeCard,
   cardSummaryForMessage,
   buildCardHint,
-  formatCardResponse
+  formatCardResponse,
+  assessCardButtonRisk,
+  selectCardButton
 } from '../src/qq-card.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -194,6 +196,36 @@ check('Markdown 卡片 插图提取（含尺寸）', botCard.markdownImages.leng
 check('Markdown 卡片 @提及还原为文案', botCard.mentions.length === 1 && botCard.mentions[0].userId === '3273753820' && botCard.text.includes('@宇宙Ω银河'));
 check('Markdown 卡片 外链还原', botCard.markdownLinks.some((l) => l.kind === 'web' && l.url === 'https://xbdqwq.com/about/rule/image'));
 check('Markdown 卡片 按钮结构化', botCard.buttons.length === 3 && botCard.buttons[0].text === '💖喜欢' && botCard.buttons[0].action === 'callback' && botCard.buttons[2].action === 'command' && botCard.buttons[2].data === '随机图');
+const pickedCallback = selectCardButton(botCards, { cardIndex: 0, buttonIndex: 0 });
+check('卡片按钮点击：按索引派生网关参数', pickedCallback.selection?.botAppId === '102084850' && pickedCallback.selection?.buttonId === '1' && pickedCallback.selection?.callbackData === 'BOT1.0_xxx');
+check('卡片风险分级：明确偏好按钮为低风险', pickedCallback.selection?.riskLevel === 'low' && pickedCallback.selection?.requiresApproval === false);
+const pickedCommand = selectCardButton(botCards, { cardIndex: 0, buttonIndex: 2 });
+check('卡片按钮点击：支持指令按钮', pickedCommand.selection?.action === 'command' && pickedCommand.selection?.callbackData === '随机图');
+check('卡片风险分级：明确刷新类指令为低风险', pickedCommand.selection?.riskLevel === 'low' && pickedCommand.selection?.requiresApproval === false);
+const riskyCard = {
+  ...botCard,
+  title: '充值抽奖活动',
+  desc: '绑定账号后支付并领取奖励',
+  text: '绑定账号后支付并领取奖励',
+  prompt: '立即领取',
+  buttons: [{ id: 'risk-1', text: '立即领取', action: 'callback', data: 'claim_reward' }]
+};
+const riskySelection = selectCardButton([riskyCard], { buttonIndex: 0 });
+check('卡片风险分级：资金/授权/领奖内容必须审批', riskySelection.selection?.riskLevel === 'high' && riskySelection.selection?.requiresApproval === true && riskySelection.selection?.riskReasons.length >= 2);
+const unknownCard = {
+  ...botCard,
+  title: '机器人操作',
+  desc: '请选择操作',
+  text: '请选择操作',
+  prompt: '立即执行',
+  buttons: [{ id: 'unknown-1', text: '立即执行', action: 'callback', data: 'do_something' }]
+};
+const unknownRisk = assessCardButtonRisk(unknownCard, unknownCard.buttons[0]);
+check('卡片风险分级：未知用途默认交管理员审批', unknownRisk.riskLevel === 'high' && unknownRisk.requiresApproval === true && unknownRisk.riskReasons.some((x) => x.includes('低风险白名单')));
+const linkOnlyCard = { ...botCard, buttons: [{ id: '9', text: '打开网页', action: 'link', data: 'https://example.com' }] };
+const blockedLink = selectCardButton([linkOnlyCard], { buttonIndex: 0 });
+check('卡片按钮点击：拒绝链接按钮', !blockedLink.selection && /链接按钮/.test(blockedLink.error));
+check('卡片按钮点击：拒绝越界索引', !selectCardButton(botCards, { cardIndex: 0, buttonIndex: 99 }).selection);
 check('Markdown 卡片 标题取自正文', botCard.title.includes('随机图'));
 check('Markdown 卡片 保留完整原始 markdown + 按钮 JSON', botCard.markdown.includes('的随机图') && botCard.keyboard.includes('BOT1.0_xxx') && botCard.raw.includes('[inline_keyboard]'));
 check('Markdown 卡片 正文可读（图片转占位）', botCard.text.includes('[图片]') && botCard.text.includes('图片作者'));
@@ -220,11 +252,13 @@ check('cardSummaryForMessage 统计卡片数', summary.cardCount === 3 && summar
 check('cardSummaryForMessage 汇总卡片种类', summary.cardKinds.includes('message_card') && summary.cardKinds.includes('activity_card') && summary.cardKinds.includes('lightapp_card'));
 check('cardSummaryForMessage 无卡片返回 null', cardSummaryForMessage([]) === null && cardSummaryForMessage(null) === null);
 const hint = buildCardHint('group:123', '987654', summary);
-check('buildCardHint 指向 qq_get_card_msg', hint.includes('qq_get_card_msg') && hint.includes('group:123') && hint.includes('987654') && hint.includes('3 张卡片'));
+check('buildCardHint 关联查看与点击工具', hint.includes('qq_get_card_msg') && hint.includes('qq_click_card_button') && hint.includes('group:123') && hint.includes('987654') && hint.includes('3 张卡片'));
 check('buildCardHint 无卡片返回空', buildCardHint('group:123', '1', null) === '');
 
 const full = formatCardResponse(cards);
 check('formatCardResponse 默认返回全部', full.total === 3 && full.cards.length === 3);
+const interactive = formatCardResponse(botCards);
+check('formatCardResponse 返回稳定按钮索引/可点击性/风险级别', interactive.cards[0].cardIndex === 0 && interactive.cards[0].buttons[2].buttonIndex === 2 && interactive.cards[0].buttons[2].clickable === true && interactive.cards[0].buttons[2].riskLevel === 'low' && interactive.cards[0].buttons[2].requiresApproval === false);
 const one = formatCardResponse(cards, { index: 1 });
 check('formatCardResponse index 选中单张', one.card?.kind === 'activity_card' && one.total === 3);
 const oob = formatCardResponse(cards, { index: 9 });
@@ -245,8 +279,18 @@ check('bridge.js 导入 extractCardsFromSegments', /extractCardsFromSegments/.te
 check('bridge.js 提供 /api/socialV2/card-message 端点', bridgeSrc.includes("url.pathname === '/api/socialV2/card-message'"));
 check('bridge.js 端点受 getCardMsg 开关控制', /v2ToolEnabled\('getCardMsg'\)/.test(bridgeSrc));
 check('bridge.js 工具开关默认含 getCardMsg', /getCardMsg:\s*true/.test(bridgeSrc));
+check('bridge.js 卡片点击工具严格默认关闭', /clickCardButton:\s*false/.test(bridgeSrc) && /clickCardButton\s*===\s*true/.test(bridgeSrc));
 check('bridge.js toolFlags 含 getCardMsg', /'getCardMsg'/.test(bridgeSrc));
 check('bridge.js toolMap 映射 qq_get_card_msg', bridgeSrc.includes("getCardMsg: 'qq_get_card_msg'"));
+check('bridge.js 提供卡片按钮点击端点与 OneBot 动作', bridgeSrc.includes("url.pathname === '/api/socialV2/card-button-click'") && bridgeSrc.includes("bot.raw('click_inline_keyboard_button'"));
+check('bridge.js toolMap 映射 qq_click_card_button', bridgeSrc.includes("clickCardButton: 'qq_click_card_button"));
+check('bridge.js 卡片点击逐次确认与防连点', /body\.confirm\s*!==\s*true/.test(bridgeSrc) && /CARD_BUTTON_CLICK_COOLDOWN_MS/.test(bridgeSrc));
+check('bridge.js 风险按钮进入隔离审批队列', /pending_approval/.test(bridgeSrc) && /cardButtonApprovals/.test(bridgeSrc) && /CARD_BUTTON_APPROVAL_TTL_MS/.test(bridgeSrc));
+check('bridge.js 管理员审批前后重新回源并校验指纹', /decideCardButtonApproval/.test(bridgeSrc) && /target\.fingerprint !== record\.fingerprint/.test(bridgeSrc) && /resolveCardButtonClickTarget/.test(bridgeSrc));
+check('bridge.js 管理员审批支持控制台与 ownerQQ 命令', /card-button-approvals/.test(bridgeSrc) && /card-\(approve\|reject\)/.test(bridgeSrc));
+check('bridge.js Agent 只能查询本会话审批状态', bridgeSrc.includes("url.pathname === '/api/socialV2/card-button-approval'") && /approval\.key !== key/.test(bridgeSrc));
+check('bridge.js 工具关闭或二代暂停会撤销待审批请求', /cancelPendingCardButtonApprovals/.test(bridgeSrc) && /socialV2\.paused/.test(bridgeSrc));
+check('bridge.js 审批错误状态对 Agent 脱敏且限长', /safeCardApprovalError/.test(bridgeSrc) && /redactKnownTokensOnly/.test(bridgeSrc));
 check('bridge.js 消息段落使用卡片占位符', /cardSegmentPlaceholder/.test(bridgeSrc));
 check('bridge.js 渲染 markdown 卡片正文', /botMarkdownToText/.test(bridgeSrc));
 check('bridge.js 列出按钮文案', /inlineKeyboardButtonLabels/.test(bridgeSrc));
@@ -261,21 +305,32 @@ check('forward.js 识别 markdown/按钮段', /case 'markdown'/.test(forwardSrc)
 check('mcp-snowluma-safe.js 注册 qq_get_card_msg', mcpSrc.includes("'qq_get_card_msg'"));
 check('mcp-snowluma-safe.js 运行期读配置实现即时开关', /getCardMsg === false/.test(mcpSrc));
 check('mcp-snowluma-safe.js 调用桥接 card-message 端点', mcpSrc.includes('/api/socialV2/card-message'));
+check('mcp-snowluma-safe.js 注册 qq_click_card_button', mcpSrc.includes("'qq_click_card_button'"));
+check('mcp-snowluma-safe.js 卡片点击严格检查显式开启', /clickCardButton !== true/.test(mcpSrc));
+check('mcp-snowluma-safe.js 卡片点击要求 confirm=true', /confirm:\s*z\.literal\(true\)/.test(mcpSrc));
+check('mcp-snowluma-safe.js 注册审批状态查询工具', mcpSrc.includes("'qq_get_card_button_approval'") && mcpSrc.includes('/api/socialV2/card-button-approval'));
 
 check('控制台开关面板含 getCardMsg（public/console.html）', consoleHtml.includes('data-v2-tool="getCardMsg"'));
 check('控制台开关面板含 getCardMsg（part2.html 源）', part2.includes('data-v2-tool="getCardMsg"'));
+check('控制台卡片点击开关默认关闭并标注风险', consoleHtml.includes('data-v2-tool="clickCardButton"') && consoleHtml.includes('data-v2-tool-default="off"') && consoleHtml.includes('高风险 · 默认关闭'));
+check('控制台卡片点击开关同步到 part2 源', part2.includes('data-v2-tool="clickCardButton"') && part2.includes('data-risk-tool="card-button"'));
+check('控制台开启卡片点击前弹出风险确认', consoleHtml.includes('知晓风险并开启') && consoleHtml.includes('每次工具调用仍需显式确认'));
+check('控制台风险开关确认后保持开启、再次开启需复核', consoleHtml.includes('确认后工具会持续开启') && consoleHtml.includes('下次从关闭状态重新开启时仍需再次确认'));
+check('控制台可批准或拒绝风险卡片按钮', consoleHtml.includes('data-card-approval-approve') && consoleHtml.includes('data-card-approval-reject') && consoleHtml.includes('批准并执行'));
 
 // 6. 配置默认开关
 let config = null;
 try {
   config = JSON.parse(fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8'));
   check('config.socialV2.tools.getCardMsg 默认开启', config.socialV2?.tools?.getCardMsg !== false);
+  check('config.socialV2.tools.clickCardButton 默认关闭', config.socialV2?.tools?.clickCardButton === false);
 } catch (error) {
   check('config.json 可读', false, error?.message);
 }
 try {
   const example = JSON.parse(fs.readFileSync(path.join(ROOT, 'config.example.json'), 'utf8'));
   check('config.example.json 含 getCardMsg', example.socialV2?.tools?.getCardMsg !== undefined);
+  check('config.example.json 卡片点击默认关闭', example.socialV2?.tools?.clickCardButton === false);
 } catch (error) {
   check('config.example.json 可读', false, error?.message);
 }
@@ -308,12 +363,16 @@ if (fs.existsSync(consoleTokenFile) && fs.existsSync(socialV2File) && config) {
             signal: AbortSignal.timeout(5000)
           });
           const bodyUnknown = await resUnknown.json().catch(() => ({}));
-          check('桥接端点：未知 messageId 被拒绝', resUnknown.status === 404 && /没有卡片内容|不在当前会话可见范围/.test(String(bodyUnknown.error || '')), 'HTTP ' + resUnknown.status + ' ' + (bodyUnknown.error || ''));
+          const v2Inactive = resUnknown.status === 403 && /二代模式已关闭|仅 reserved2 模式可用|当前模式不允许/.test(String(bodyUnknown.error || ''));
+          if (v2Inactive) {
+            console.log('⚠️ 跳过桥接端点正向检查：运行中的桥接当前未处于 reserved2 模式');
+          } else {
+            check('桥接端点：未知 messageId 被拒绝', resUnknown.status === 404 && /没有卡片内容|不在当前会话可见范围/.test(String(bodyUnknown.error || '')), 'HTTP ' + resUnknown.status + ' ' + (bodyUnknown.error || ''));
 
-          // ── 正向端到端验证（需要运行中的桥接已加载 markdown 卡片支持，否则跳过） ──
-          // 用 /api/status.cardSegments 判断能力，避免把“没重启”误判成回归。
-          let liveChecked = false;
-          try {
+            // ── 正向端到端验证（需要运行中的桥接已加载 markdown 卡片支持，否则跳过） ──
+            // 用 /api/status.cardSegments 判断能力，避免把“没重启”误判成回归。
+            let liveChecked = false;
+            try {
             const statusRes = await fetch('http://127.0.0.1:' + (config.consolePort || 3100) + '/api/status', { headers: authHeaders, signal: AbortSignal.timeout(5000) });
             const statusBody = await statusRes.json().catch(() => ({}));
             const segments = Array.isArray(statusBody.cardSegments) ? statusBody.cardSegments : [];
@@ -353,10 +412,11 @@ if (fs.existsSync(consoleTokenFile) && fs.existsSync(socialV2File) && config) {
                 check('桥接正向：卡片插图进入图片管线（AI 可看图）', imgRes.status === 200 && imgCount >= 1, 'HTTP ' + imgRes.status + ' images=' + imgCount + ' ' + String(imgBody.note || ''));
               }
             }
-          } catch (error) {
-            console.log('⚠️ 卡片正向验证跳过：' + (error?.message ?? error));
+            } catch (error) {
+              console.log('⚠️ 卡片正向验证跳过：' + (error?.message ?? error));
+            }
+            if (!liveChecked) console.log('ℹ️ 正向验证未执行；重启桥接后重跑本脚本即可完成端到端确认');
           }
-          if (!liveChecked) console.log('ℹ️ 正向验证未执行；重启桥接后重跑本脚本即可完成端到端确认');
         }
       } else {
         console.log('⚠️ 跳过桥接端点检查：没有可用 agentToken');
@@ -394,10 +454,19 @@ try {
     const listed = await client.listTools();
     const names = listed.tools.map((t) => t.name);
     check('MCP 常驻注册 qq_get_card_msg（不随启动期开关消失）', names.includes('qq_get_card_msg'));
+    check('MCP 常驻注册 qq_click_card_button（默认关闭仍可发现）', names.includes('qq_click_card_button'));
+    check('MCP 常驻注册 qq_get_card_button_approval', names.includes('qq_get_card_button_approval'));
     const tool = listed.tools.find((t) => t.name === 'qq_get_card_msg');
     const props = Object.keys(tool?.inputSchema?.properties ?? {});
     check('MCP 工具入参含 key/token/messageId（可选 index）', props.includes('key') && props.includes('token') && props.includes('messageId') && props.includes('index'));
-    check('MCP 工具描述说明只读/开发调试', /开发调试/.test(String(tool?.description || '')));
+    check('MCP 卡片查看工具描述说明只读', /只读/.test(String(tool?.description || '')));
+    const clickTool = listed.tools.find((t) => t.name === 'qq_click_card_button');
+    const clickProps = Object.keys(clickTool?.inputSchema?.properties ?? {});
+    check('MCP 点击工具参数仅索引选择且含逐次确认', clickProps.includes('key') && clickProps.includes('token') && clickProps.includes('messageId') && clickProps.includes('cardIndex') && clickProps.includes('buttonIndex') && clickProps.includes('confirm') && !clickProps.includes('callback_data') && !clickProps.includes('bot_appid'));
+    check('MCP 点击工具明确标注高风险/默认关闭', /高风险/.test(String(clickTool?.description || '')) && /默认关闭/.test(String(clickTool?.description || '')));
+    const approvalTool = listed.tools.find((t) => t.name === 'qq_get_card_button_approval');
+    const approvalProps = Object.keys(approvalTool?.inputSchema?.properties ?? {});
+    check('MCP 审批查询仅需会话令牌和审批编号', approvalProps.includes('key') && approvalProps.includes('token') && approvalProps.includes('approvalId'));
     await client.close();
     try { await globalThis.__cardTestServer?.close(); } catch {}
   }

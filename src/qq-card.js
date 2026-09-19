@@ -51,6 +51,48 @@ export const MAX_CARDS_PER_MESSAGE = 4;
 // 卡片的「小图标」尺寸阈值：markdown 卡片里常夹带 18~20px 的装饰图标，
 // 不把它们塞进媒体管线（真正的插图远大于此）。
 export const CARD_ICON_MAX_PX = 64;
+// NapCat 的 click_inline_keyboard_button 只适用于会向机器人回传数据的按钮。
+// 链接按钮可能拉起外部页面，不允许由 Agent 代替用户打开。
+export const CARD_CLICKABLE_ACTIONS = new Set(['callback', 'command']);
+
+// 卡片按钮风险判定采用“低风险白名单 + 高风险信号”模型：
+// - 只有用途明确的轻量浏览/偏好按钮可直接执行；
+// - 命中资金、账号授权、订阅报名、抽奖领奖、数据外发、管理操作等信号时必须审批；
+// - 无法可靠判断用途的按钮也进入审批，避免陌生机器人用含糊文案绕过规则。
+const CARD_LOW_RISK_BUTTON_LABELS = new Set([
+  '再来', '再来一张', '再来一次', '换一张', '换一个', '刷新',
+  '下一张', '下一个', '下一页', '上一张', '上一个', '上一页',
+  '喜欢', '不喜欢', '点赞', '点踩', '好看', '不好看',
+  '返回', '关闭', '收起', '展开',
+  'refresh', 'next', 'previous', 'prev', 'like', 'dislike', 'back', 'close'
+]);
+
+const CARD_RISK_RULES = [
+  {
+    reason: '涉及支付、交易、充值或资产操作',
+    pattern: /支付|付款|收款|充值|购买|买入|卖出|下单|订单|退款|提现|转账|红包|打赏|捐赠|余额|金额|钱包|payment|purchase|order|trade|withdraw|deposit|wallet|pay\b/i
+  },
+  {
+    reason: '涉及账号、身份验证、绑定或授权',
+    pattern: /授权|登录|登陆|绑定|解绑|验证|验证码|实名|身份|账号|账户|密码|令牌|权限|oauth|authorize|permission|grant|bind|login|verify|token/i
+  },
+  {
+    reason: '涉及订阅、报名、签到、协议或外部状态提交',
+    pattern: /订阅|取消订阅|关注|取关|加入|退出|报名|签到|签约|协议|同意|接受|提交|发布|注销|subscribe|follow|join|leave|register|sign[ _-]?in|submit|confirm|accept/i
+  },
+  {
+    reason: '涉及抽奖、领奖、兑换或概率性权益',
+    pattern: /抽奖|开奖|领奖|领取|兑换|兑奖|盲盒|扭蛋|奖励|福利|lottery|raffle|claim|redeem|reward/i
+  },
+  {
+    reason: '涉及数据外发、隐私信息或外部资源',
+    pattern: /上传|下载|分享|发送|公开|隐私|手机号|邮箱|地址|定位|相册|摄像头|麦克风|upload|download|share|privacy|phone|email|location|camera|microphone/i
+  },
+  {
+    reason: '涉及删除、封禁、举报或管理权限操作',
+    pattern: /删除|撤回|禁言|踢出|封禁|举报|管理员|审核|批准|delete|remove|revoke|block|ban|kick|admin|report/i
+  }
+];
 
 export function isCardSegment(type) {
   return CARD_SEGMENT_TYPES.has(String(type ?? ''));
@@ -224,7 +266,9 @@ export function parseInlineKeyboard(data) {
         style: Number(b.style) || 0,
         type,
         action: keyboardActionOf(type),
-        data: stripCardControlChars(String(b.data ?? '')).slice(0, 500),
+        // 点击按钮时 callback_data 必须与卡片原值一致；保留到 2000 字符，
+        // 同时继续做控制字符清洗和长度上限，避免异常 payload 撑大状态文件。
+        data: stripCardControlChars(String(b.data ?? '')).slice(0, 2000),
         clickLimit: Number(b.click_limit) || 0,
         permissionType: Number(b.permission_type) || 0,
         unsupportedTips: stripCardControlChars(String(b.unsupport_tips ?? '')).slice(0, 200)
@@ -293,7 +337,10 @@ export function buildBotMarkdownCard(markdownContents, keyboards, options = {}) 
     action: b.action,
     type: b.type,
     style: b.style,
-    id: b.id
+    id: b.id,
+    clickLimit: b.clickLimit,
+    permissionType: b.permissionType,
+    unsupportedTips: b.unsupportedTips
   }));
   const text = parts.map((p) => p.text).filter(Boolean).join('\n\n');
   const webLink = links.find((l) => l.kind === 'web');
@@ -616,7 +663,148 @@ export function buildCardHint(key, messageRef, summary) {
   const labels = Array.isArray(summary?.cardLabels) && summary.cardLabels.length
     ? summary.cardLabels.join('/')
     : 'QQ 官方卡片';
-  return '\n【' + labels + '】本条消息包含 ' + count + " 张卡片（消息ID=" + messageRef + '）。如需查看卡片完整原始内容（markdown 原文 / 按钮数据），请调用 mcp__snowluma__qq_get_card_msg，参数 key="' + key + '", messageId="' + messageRef + '"。';
+  return '\n【' + labels + '】本条消息包含 ' + count + " 张卡片（消息ID=" + messageRef + '）。如需查看卡片完整原始内容（markdown 原文 / 按钮数据），请调用 mcp__snowluma__qq_get_card_msg，参数 key="' + key + '", messageId="' + messageRef + '"。若管理员已开启高风险交互工具，可再按返回的 cardIndex/buttonIndex 调用 mcp__snowluma__qq_click_card_button；该工具默认关闭，且 requiresApproval=true 的按钮必须等待管理员批准。';
+}
+
+function cardButtonClickState(card, button) {
+  if (!card || card.kind !== CARD_KIND_BOT_MARKDOWN) {
+    return { clickable: false, blockedReason: '仅 QQ 官方机器人 Markdown 卡片支持模拟点击' };
+  }
+  if (!CARD_CLICKABLE_ACTIONS.has(String(button?.action ?? ''))) {
+    return {
+      clickable: false,
+      blockedReason: String(button?.action ?? '') === 'link'
+        ? '链接按钮不会由 Agent 代替用户打开'
+        : '未知按钮类型不允许执行'
+    };
+  }
+  if (!/^\d{1,20}$/.test(String(card.botAppId ?? '').trim())) {
+    return { clickable: false, blockedReason: '卡片缺少有效 bot_appid' };
+  }
+  if (!String(button?.id ?? '').trim()) {
+    return { clickable: false, blockedReason: '按钮缺少 id' };
+  }
+  if (!String(button?.data ?? '')) {
+    return { clickable: false, blockedReason: '按钮缺少回调数据' };
+  }
+  return { clickable: true, blockedReason: '' };
+}
+
+function normalizeRiskLabel(value) {
+  return stripCardControlChars(value)
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, '')
+    .slice(0, 100);
+}
+
+// 对“整张卡片的可读内容 + 当前按钮文案/回调载荷”做保守风险分级。
+// 返回值不会泄露命中的原始 callback_data，只给出管理员可读的风险类别。
+export function assessCardButtonRisk(card, button) {
+  const state = cardButtonClickState(card, button);
+  if (!state.clickable) {
+    return {
+      riskLevel: 'blocked',
+      requiresApproval: false,
+      riskReasons: [state.blockedReason]
+    };
+  }
+
+  const content = [
+    card?.title,
+    card?.desc,
+    card?.text,
+    card?.tag,
+    card?.source,
+    card?.prompt,
+    card?.markdown,
+    button?.text,
+    button?.label,
+    button?.data
+  ]
+    .filter((v) => v !== undefined && v !== null && String(v).trim())
+    .map((v) => stripCardControlChars(String(v)).slice(0, 4000))
+    .join('\n');
+
+  const reasons = [];
+  for (const rule of CARD_RISK_RULES) {
+    if (rule.pattern.test(content)) reasons.push(rule.reason);
+  }
+  if (/https?:\/\/|mqqapi:\/\//i.test(String(button?.data ?? ''))) {
+    reasons.push('按钮回调包含外部地址或跳转指令');
+  }
+  if (card?.rawTruncated) reasons.push('卡片原始内容被截断，无法完整判断用途');
+
+  const label = normalizeRiskLabel(button?.text || button?.label || '');
+  if (!CARD_LOW_RISK_BUTTON_LABELS.has(label)) {
+    reasons.push('按钮用途不在已知低风险白名单中');
+  }
+
+  const uniqueReasons = [...new Set(reasons)].slice(0, 6);
+  return {
+    riskLevel: uniqueReasons.length ? 'high' : 'low',
+    requiresApproval: uniqueReasons.length > 0,
+    riskReasons: uniqueReasons
+  };
+}
+
+// 给 qq_get_card_msg 的结果补充稳定索引和可点击性，形成“先看卡片，再按索引点击”的闭环。
+// 不修改缓存中的原对象，避免一次格式化污染后续读取。
+function formatCardForTool(card, cardIndex) {
+  const buttons = Array.isArray(card?.buttons) ? card.buttons : [];
+  return {
+    ...card,
+    cardIndex,
+    buttons: buttons.map((button, buttonIndex) => {
+      const clickState = cardButtonClickState(card, button);
+      return {
+        ...button,
+        buttonIndex,
+        ...clickState,
+        ...assessCardButtonRisk(card, button)
+      };
+    })
+  };
+}
+
+// 从已验证属于当前会话的卡片记录中，按稳定索引挑出一个可执行按钮。
+// bot_appid/button_id/callback_data 均由卡片本身派生，调用方不能自由注入。
+export function selectCardButton(records, options = {}) {
+  const list = Array.isArray(records) ? records.filter(Boolean) : [];
+  const cardIndex = options.cardIndex === undefined ? 0 : Number(options.cardIndex);
+  const buttonIndex = Number(options.buttonIndex);
+  if (!Number.isInteger(cardIndex) || cardIndex < 0) return { selection: null, error: 'cardIndex 必须是非负整数' };
+  if (!Number.isInteger(buttonIndex) || buttonIndex < 0) return { selection: null, error: 'buttonIndex 必须是非负整数' };
+  if (cardIndex >= list.length) return { selection: null, error: '卡片序号越界' };
+  const card = list[cardIndex];
+  const buttons = Array.isArray(card?.buttons) ? card.buttons : [];
+  if (buttonIndex >= buttons.length) return { selection: null, error: '按钮序号越界' };
+  const button = buttons[buttonIndex];
+  const state = cardButtonClickState(card, button);
+  if (!state.clickable) return { selection: null, error: state.blockedReason };
+  const risk = assessCardButtonRisk(card, button);
+
+  const botAppId = String(card.botAppId ?? '').trim();
+  const buttonId = stripCardControlChars(String(button.id ?? '')).trim().slice(0, 100);
+  const callbackData = stripCardControlChars(String(button.data ?? '')).slice(0, 2000);
+  if (!buttonId) return { selection: null, error: '按钮缺少有效 id' };
+  if (!callbackData) return { selection: null, error: '按钮缺少有效回调数据' };
+  return {
+    error: '',
+    selection: {
+      cardIndex,
+      buttonIndex,
+      cardTitle: String(card.title || card.desc || '').slice(0, 200),
+      buttonLabel: String(button.text || button.label || '').slice(0, 100),
+      action: String(button.action || ''),
+      botAppId,
+      buttonId,
+      callbackData,
+      riskLevel: risk.riskLevel,
+      requiresApproval: risk.requiresApproval,
+      riskReasons: risk.riskReasons
+    }
+  };
 }
 
 // 对外返回给工具的结果整形（保留完整 raw；index 用于挑选单张）
@@ -625,7 +813,7 @@ export function formatCardResponse(records, options = {}) {
   const index = Number(options.index);
   if (Number.isInteger(index) && index >= 0) {
     if (index >= list.length) return { total: list.length, index, card: null, error: '卡片序号越界' };
-    return { total: list.length, index, card: list[index] };
+    return { total: list.length, index, card: formatCardForTool(list[index], index) };
   }
-  return { total: list.length, cards: list };
+  return { total: list.length, cards: list.map((card, cardIndex) => formatCardForTool(card, cardIndex)) };
 }

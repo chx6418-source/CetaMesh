@@ -1100,7 +1100,7 @@ if (cfg.socialV2?.tools?.getForwardMsg !== false) {
 // 桥接或 DSH 即可即时生效：关闭后调用直接返回 statusCode=403。
 server.tool(
   'qq_get_card_msg',
-  '查看当前会话某条消息里 QQ 官方机器人推送的卡片完整原始内容（只读，开发调试用）。支持普通消息卡片（json 图文/按钮卡）与活动类卡片（ark 活动/抽奖/报名卡），返回每张卡片的完整原始 payload（raw）以及解析后的结构化字段（kind/kindLabel/app/view/title/desc/tag/source/jumpUrl/coverUrl/buttons/json）。当 qq_get_unread_messages / qq_get_recent_messages / qq_get_message_detail 返回的消息带 hasCard: true / cardCount > 0（或文本里出现 [卡片消息] / [活动卡片]）时调用；messageId 用消息对象里的 messageId 或 seq。只能读取当前会话确实收到过的卡片，不能任意读取。',
+  '查看当前会话某条消息里 QQ 官方机器人推送的卡片完整原始内容（只读）。支持 markdown+inline_keyboard 互动卡、json 图文卡与 ark 活动卡，返回原始 payload、结构化字段及带 cardIndex/buttonIndex/clickable/riskLevel/requiresApproval/riskReasons 的按钮列表。需要交互时必须先调用本工具确认按钮，再使用 qq_click_card_button；风险或用途未知的按钮不会立即执行，而会进入管理员审批。messageId 用消息对象里的 messageId 或 seq。只能读取当前会话确实收到过的卡片，不能任意读取。',
   {
     key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
     token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
@@ -1122,6 +1122,62 @@ server.tool(
       return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
     } catch (error) {
       return { content: [{ type: 'text', text: '查看 QQ 官方卡片失败：' + (error?.message ?? error) }], isError: true };
+    }
+  }
+);
+
+// ── QQ 官方机器人卡片按钮点击（高风险写操作，严格默认关闭） ────────────────
+// 与 qq_get_card_msg 组成两阶段协议：先读到由桥接生成的稳定索引，再按索引点击。
+// Agent 无法直接传 bot_appid/button_id/callback_data，避免伪造任意回调或跨会话操作。
+server.tool(
+  'qq_click_card_button',
+  '【高风险写操作，默认关闭】代表当前 QQ 账号点击群聊中 QQ 官方机器人卡片的回调/指令按钮，可能触发签到、抽奖、订阅、状态变更或其他外部副作用。必须先调用 qq_get_card_msg，确认目标按钮的 label/action/clickable/riskLevel，再原样使用其 cardIndex 和 buttonIndex；链接按钮与私聊卡片不支持。每次调用都必须显式传 confirm=true。若服务器判断 requiresApproval=true，本次调用只会返回 pending_approval 和 approvalId，不会点击；管理员在控制台或 QQ 明确批准后才执行，可用 qq_get_card_button_approval 查询结果。',
+  {
+    key: z.string().describe('当前群聊会话 key，格式 group:群号'),
+    token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
+    messageId: z.string().describe('携带卡片的消息 id：与 qq_get_card_msg 使用同一个 messageId'),
+    cardIndex: z.number().int().min(0).optional().describe('卡片索引，使用 qq_get_card_msg 返回的 cardIndex；默认 0'),
+    buttonIndex: z.number().int().min(0).describe('按钮索引，使用 qq_get_card_msg 返回的 buttonIndex'),
+    confirm: z.literal(true).describe('逐次风险确认；必须明确传 true，表示知晓点击会向外部机器人提交回调并可能产生副作用')
+  },
+  async ({ key, token, messageId, cardIndex, buttonIndex, confirm }) => {
+    // 原始 config.json 缺字段也必须视为关闭，避免升级后旧配置意外获得写权限。
+    if (getConfig().socialV2?.tools?.clickCardButton !== true) {
+      return {
+        content: [{ type: 'text', text: JSON.stringify({ statusCode: 403, message: '高风险工具已禁用：请先由管理员在桥接控制台阅读警示并开启 qq_click_card_button' }) }],
+        isError: true
+      };
+    }
+    try {
+      const data = await agentApi('/api/socialV2/card-button-click', {
+        method: 'POST',
+        headers: { 'x-agent-token': token },
+        body: JSON.stringify({ key, messageId: String(messageId), cardIndex: cardIndex ?? 0, buttonIndex, confirm }),
+        timeoutMs: 30000
+      });
+      return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: '点击 QQ 官方机器人卡片按钮失败：' + (error?.message ?? error) }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  'qq_get_card_button_approval',
+  '查询风险卡片按钮的管理员审批状态（只读）。approvalId 来自 qq_click_card_button 返回的 pending_approval；状态可能是 pending、processing、completed、rejected、expired 或 failed。不要把 pending 当作已点击，只有 completed 才表示管理员批准且按钮执行成功。',
+  {
+    key: z.string().describe('发起卡片按钮请求的群聊会话 key，格式 group:群号'),
+    token: z.string().describe('该会话的令牌'),
+    approvalId: z.string().regex(/^card_[a-f0-9]{24}$/).describe('qq_click_card_button 返回的审批编号')
+  },
+  async ({ key, token, approvalId }) => {
+    try {
+      const data = await agentApi(`/api/socialV2/card-button-approval?key=${encodeURIComponent(key)}&approvalId=${encodeURIComponent(approvalId)}`, {
+        headers: { 'x-agent-token': token }
+      });
+      return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: '查询卡片按钮审批状态失败：' + (error?.message ?? error) }], isError: true };
     }
   }
 );

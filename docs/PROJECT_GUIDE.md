@@ -218,10 +218,10 @@ DSH 事件流（api.events.mux）→ pumpMux()
 二代仿真模式（`reserved2`）还有：
 
 - 状态/消息：`qq_get_prompt`、`qq_get_unread_messages`、`qq_get_recent_messages`、`qq_get_message_detail`、`qq_get_active_members`、`qq_social_state`
-- 发送/互动：`qq_send_message`、`qq_send_burst`、`qq_send_poke`、`qq_send_sticker`
+- 发送/互动：`qq_send_message`、`qq_send_burst`、`qq_send_poke`、`qq_send_sticker`；`qq_click_card_button` 可按 `qq_get_card_msg` 返回的索引点击群聊官方机器人回调/指令按钮（高风险、严格默认关闭、逐次 `confirm=true`；风险或用途未知时进入管理员审批，批准前不执行）
 - 等待/收尾：`qq_wait_for_messages`、`qq_mark_read`、`qq_set_wake_config`
 - 记忆/黑话/表情：`qq_memory_*`、`qq_slang_query`、`qq_slang_submit`、`qq_list_stickers`、`qq_get_sticker_image`、`qq_sticker_note`、`qq_collect_sticker`
-- 查看类：`qq_get_message_images`（含 QQ 官方卡片插图）、`qq_get_forward_msg`、`qq_get_card_msg`（QQ 官方机器人卡片：Markdown 卡片 / 普通消息卡片 / 活动类卡片，返回完整原始内容与解析字段；缓存未命中时按需回源 `get_msg`）
+- 查看类：`qq_get_message_images`（含 QQ 官方卡片插图）、`qq_get_forward_msg`、`qq_get_card_msg`（QQ 官方机器人卡片：Markdown 卡片 / 普通消息卡片 / 活动类卡片，返回完整原始内容、解析字段与 `cardIndex/buttonIndex/clickable/riskLevel/requiresApproval/riskReasons`；缓存未命中时按需回源 `get_msg`）、`qq_get_card_button_approval`（查询与当前会话绑定的风险按钮审批状态）
 - 形象：`qq_get_self_image`
 
 `mcp-host-server.js`：

@@ -577,6 +577,17 @@ pre.console-pre {
 .v2-tool-item:active { transform: scale(.97); }
 .v2-tool-item b { font-family: var(--font-mono); font-size: 12px; }
 .v2-tool-item .meta { display: block; margin: 2px 0 0; }
+.v2-tool-item.tool-risk {
+  background: linear-gradient(145deg, var(--warn-bg), var(--chip) 72%);
+  box-shadow: 3px 4px 9px var(--shadow-c1), -2px -3px 7px var(--shadow-c2), inset 0 0 0 1px var(--warn-bg), inset 0 1px 0 var(--edge-hi);
+}
+.v2-tool-item.tool-risk:hover { background: linear-gradient(145deg, var(--warn-bg), var(--hover) 72%); }
+.tool-risk-badge {
+  display: inline-flex; margin-left: 6px; padding: 1px 7px; border-radius: 999px;
+  color: var(--warn); background: var(--warn-bg); font: 700 10px/1.55 var(--font-sans);
+  letter-spacing: .2px; vertical-align: 1px;
+}
+.v2-tool-item.tool-risk input:checked + span .tool-risk-badge { color: var(--warn-ink); background: linear-gradient(140deg, var(--warn), var(--warn-2)); }
 
 /* ---------- 黑话面板 ---------- */
 .slang-tabs { display: flex; gap: 6px; flex-wrap: wrap; }

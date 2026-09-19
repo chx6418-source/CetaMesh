@@ -36,6 +36,10 @@
 4. **发送强制白名单**：所有发送类工具（`qq_send_group_message` / `qq_send_private_message` / `qq_send_message` / `qq_send_burst` / `qq_reply` / `qq_send_poke` / `qq_send_sticker` 等）的目标必须命中 `config.json` 的 `allow.groups` / `allow.private`，否则拒绝执行。
 4.1 **卡片查看为只读且有会话边界**：`qq_get_card_msg` 只能读取**当前会话的** QQ 官方机器人卡片（`markdown`+`inline_keyboard` Markdown 卡片、`json` 普通消息卡片、`ark` 活动类卡片），返回完整原始内容与解析字段。卡片按会话隔离缓存（`state/social-v2-cards.json`，有界）；缓存未命中时用 OneBot `get_msg` 按需回源，并做与引用解析一致的**消息归属校验**（群消息必须同群、私聊必须无群归属且发送者匹配），无法跨会话探测；在控制台「Agent 预设 → 工具开关 → qq_get_card_msg」关闭后（`socialV2.tools.getCardMsg=false`），桥接端点与 MCP 工具都会直接返回 403，开/关即时生效、无需重启。
 
+4.2 **卡片按钮点击严格默认拒绝**：`qq_click_card_button` 是高风险写操作，只支持当前白名单群聊里、经 `qq_get_card_msg` 返回且标记为 `clickable=true` 的官方机器人 Markdown 卡片回调/指令按钮。Agent 只能传 `cardIndex/buttonIndex`，桥接必须重新回源并校验消息归属，再从原卡片派生 `bot_appid/button_id/callback_data/msg_seq`；禁止自由传入回调载荷，禁止链接按钮、私聊卡片和跨会话操作。`socialV2.tools.clickCardButton` 缺失或不为 `true` 一律视为关闭；控制台开启时必须展示副作用警示并二次确认，每次调用还必须显式传 `confirm=true`，同一按钮 5 秒内禁止重复点击。
+
+4.3 **风险卡片必须管理员逐次审批**：桥接必须对卡片可读正文、按钮文案和回调载荷执行确定性风险分级。只有命中明确低风险白名单的浏览/偏好按钮可在其他安全检查通过后直接执行；涉及资金交易、账号授权、订阅报名、签到、抽奖领奖、隐私或数据外发、删除/管理操作，以及用途无法可靠判断的按钮，一律返回 `pending_approval`，批准前不得调用 OneBot 点击动作。审批与 DSH 普通挂起请求隔离，10 分钟超时自动失效且桥接重启即清空；同一待审批请求去重，管理员拒绝后 10 分钟内不得重复施压，关闭工具、关闭二代模式或暂停二代 AI 时必须撤销所有待审批请求。批准时必须重新读取原消息、重新校验会话/白名单/工具开关/暂停状态并核对不可逆按钮指纹，内容变化则拒绝执行。管理员只能通过受控制台令牌保护的审批接口，或 `ownerQQ` 身份发送 `/card-approve <审批编号>` / `/card-reject <审批编号>` 作出一次性决定。审批记录不得包含可重放的原始回调载荷，Agent 只能用 `qq_get_card_button_approval` 查询与自身会话绑定的脱敏状态，且只有 `completed` 表示实际点击成功。
+
 5. **发送禁令（模型层）**：persona 明确规定只有「管理端明确指示」或「【管理员】标记的明确要求」才可使用发送工具；禁止写"我已回复/消息已发送（message_id）"类汇报。
 6. **回复审计（桥接层硬拦截）**：agent 回复文本若包含本机路径（`C:\`、`/home/` 等）或凭据特征（token/password/secret/api key 等）→ **整条拦截不发送**，并告知"被安全策略拦截"。
 7. **人格由桥接注入**：角色设定来自 `state/current-role.json` + `roles/<角色>.md`，桥接注入到消息；群友口头要求改角色无效（桥接直接拦截），agent 也无文件工具自行更改。

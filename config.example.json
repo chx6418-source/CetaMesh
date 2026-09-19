@@ -122,6 +122,7 @@
       "getImages": true,
       "getForwardMsg": true,
       "getCardMsg": true,
+      "clickCardButton": false,
       "sendPoke": true,
       "listStickers": true,
       "getStickerImage": true,

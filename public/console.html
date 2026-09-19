@@ -652,6 +652,17 @@ pre.console-pre {
 .v2-tool-item:active { transform: scale(.97); }
 .v2-tool-item b { font-family: var(--font-mono); font-size: 12px; }
 .v2-tool-item .meta { display: block; margin: 2px 0 0; }
+.v2-tool-item.tool-risk {
+  background: linear-gradient(145deg, var(--warn-bg), var(--chip) 72%);
+  box-shadow: 3px 4px 9px var(--shadow-c1), -2px -3px 7px var(--shadow-c2), inset 0 0 0 1px var(--warn-bg), inset 0 1px 0 var(--edge-hi);
+}
+.v2-tool-item.tool-risk:hover { background: linear-gradient(145deg, var(--warn-bg), var(--hover) 72%); }
+.tool-risk-badge {
+  display: inline-flex; margin-left: 6px; padding: 1px 7px; border-radius: 999px;
+  color: var(--warn); background: var(--warn-bg); font: 700 10px/1.55 var(--font-sans);
+  letter-spacing: .2px; vertical-align: 1px;
+}
+.v2-tool-item.tool-risk input:checked + span .tool-risk-badge { color: var(--warn-ink); background: linear-gradient(140deg, var(--warn), var(--warn-2)); }
 
 /* ---------- 黑话面板 ---------- */
 .slang-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
@@ -1209,6 +1220,7 @@ html.login-arrive .nav-btn {
             <label class="v2-tool-item"><input type="checkbox" data-v2-tool="getImages"> <span><b>qq_get_message_images</b><span class="meta">查看消息中的图片/表情内容</span></span></label>
             <label class="v2-tool-item"><input type="checkbox" data-v2-tool="getForwardMsg"> <span><b>qq_get_forward_msg</b><span class="meta">查看当前会话收到的合并转发消息内容</span></span></label>
             <label class="v2-tool-item"><input type="checkbox" data-v2-tool="getCardMsg"> <span><b>qq_get_card_msg</b><span class="meta">查看 QQ 官方机器人卡片（普通消息/活动类）完整原始内容（开发调试）</span></span></label>
+            <label class="v2-tool-item tool-risk"><input type="checkbox" data-v2-tool="clickCardButton" data-v2-tool-default="off" data-risk-tool="card-button"> <span><b>qq_click_card_button</b><span class="tool-risk-badge">高风险 · 默认关闭</span><span class="meta">首次确认后持续开启，直到你手动关闭并保存；风险或用途未知的内容仍会转管理员审批，批准前绝不执行</span></span></label>
             <label class="v2-tool-item"><input type="checkbox" data-v2-tool="getActiveMembers"> <span><b>qq_get_active_members</b><span class="meta">查看最近活跃成员列表</span></span></label>
             <label class="v2-tool-item"><input type="checkbox" data-v2-tool="setWakeConfig"> <span><b>qq_set_wake_config</b><span class="meta">设置唤醒/潜水条件：无限期、有限时间、@/名字/关键词/概率等</span></span></label>
             <label class="v2-tool-item"><input type="checkbox" data-v2-tool="markRead"> <span><b>qq_mark_read</b><span class="meta">标记当前未读为已读（看过但决定不回复）</span></span></label>
@@ -1429,7 +1441,7 @@ html.login-arrive .nav-btn {
         </header>
         <div class="card-body">
           <div id="pendingList">加载中…</div>
-          <div class="meta">审批 / 提问会同步转发到 QQ，直接回复「通过 / 拒绝」或回答内容即可决策（本页仅展示）。</div>
+          <div class="meta">DSH 审批 / 提问会同步转发到 QQ；风险卡片按钮会在这里等待管理员处理，也可在管理员 QQ 中使用通知里的 /card-approve 或 /card-reject 命令。</div>
         </div>
       </article>
 
@@ -2909,13 +2921,45 @@ window.LOG_POOL = [
       if (!p.pending.length) { box.innerHTML = '<div class="empty-tip">无挂起请求 ✨</div>'; return; }
       let html = '<div class="list-rows">';
       for (const x of p.pending) {
-        const kind = x.kind === 'approval' ? '<span class="pill pill-err">审批</span>' : '<span class="pill pill-accent">提问</span>';
+        const isCardApproval = x.kind === 'card-approval';
+        const kind = isCardApproval
+          ? '<span class="pill pill-warn">风险卡片</span>'
+          : (x.kind === 'approval' ? '<span class="pill pill-err">审批</span>' : '<span class="pill pill-accent">提问</span>');
         let detail = '';
-        if (x.kind === 'approval') detail = esc(x.toolName) + (x.reason ? '：' + esc(x.reason) : '');
+        let actions = '';
+        if (isCardApproval) {
+          const reasons = Array.isArray(x.riskReasons) && x.riskReasons.length ? x.riskReasons.join('；') : '用途无法可靠判断';
+          const expiresSec = Math.max(0, Math.ceil((Number(x.expiresAt) - Date.now()) / 1000));
+          detail = '<b>' + esc(x.buttonLabel || '无文案按钮') + '</b>'
+            + (x.cardTitle ? ' · ' + esc(x.cardTitle) : '')
+            + '<br>风险：' + esc(reasons)
+            + '<br><code>' + esc(x.id) + '</code> · ' + esc(x.key) + ' · ' + (x.status === 'processing' ? '正在执行安全复核' : expiresSec + ' 秒后过期');
+          if (x.status === 'pending') {
+            actions = '<div class="row">'
+              + '<button class="btn sm primary" data-card-approval-approve="' + esc(x.id) + '">批准并执行</button>'
+              + '<button class="btn sm danger" data-card-approval-reject="' + esc(x.id) + '">拒绝</button>'
+              + '</div>';
+          }
+        } else if (x.kind === 'approval') detail = esc(x.toolName) + (x.reason ? '：' + esc(x.reason) : '');
         else if (x.questions) detail = x.questions.map(q => esc(q.question)).join(' / ');
-        html += '<div class="list-row"><code>' + esc(x.key) + '</code>' + kind + '<div class="grow"><small>' + detail + '</small></div></div>';
+        html += '<div class="list-row">' + (isCardApproval ? '' : '<code>' + esc(x.key) + '</code>') + kind + '<div class="grow"><small>' + detail + '</small></div>' + actions + '</div>';
       }
       box.innerHTML = html + '</div>';
+      box.querySelectorAll('[data-card-approval-approve]').forEach(btn => btn.addEventListener('click', async () => {
+        const id = btn.dataset.cardApprovalApprove;
+        if (!await confirmBox('批准后桥接会再次读取并核对原卡片，然后立即代表当前 QQ 账号点击该按钮。确定批准这一次操作吗？', '批准并执行')) return;
+        btn.disabled = true;
+        const r = await api('/api/card-button-approvals/' + encodeURIComponent(id) + '/decision', 'POST', { decision: 'approve' });
+        toast(r.ok ? '已批准并执行卡片按钮' : ('❌ ' + esc(r.error || '审批失败')), { type: r.ok ? 'ok' : 'err', ms: 5200 });
+        refreshPending();
+      }));
+      box.querySelectorAll('[data-card-approval-reject]').forEach(btn => btn.addEventListener('click', async () => {
+        const id = btn.dataset.cardApprovalReject;
+        btn.disabled = true;
+        const r = await api('/api/card-button-approvals/' + encodeURIComponent(id) + '/decision', 'POST', { decision: 'reject' });
+        toast(r.ok ? '已拒绝卡片按钮，未执行点击' : ('❌ ' + esc(r.error || '拒绝失败')), { type: r.ok ? 'warn' : 'err' });
+        refreshPending();
+      }));
     } catch (e) {}
   }
 
@@ -3002,7 +3046,10 @@ window.LOG_POOL = [
       $('#v2AgentPreset').value = c.agentPreset || '';
       $('#v2ProvideRecommendations').checked = c.provideRecommendations !== false;
       $$('[data-v2-tool]').forEach(el => {
-        el.checked = (c.tools && c.tools[el.dataset.v2Tool] !== false);
+        const defaultOff = el.dataset.v2ToolDefault === 'off';
+        el.checked = defaultOff
+          ? c.tools?.[el.dataset.v2Tool] === true
+          : (c.tools && c.tools[el.dataset.v2Tool] !== false);
       });
       const w = c.wake || {};
       $('#v2WakeDefaultMode').value = w.defaultMode === 'active' ? 'active' : 'diving';
@@ -3079,6 +3126,22 @@ window.LOG_POOL = [
       if (biList && biPanel) biPanel.checked = biList.checked;
     } catch (e) {}
   }
+
+  // 高风险工具不能被一次误点悄悄开启：先恢复关闭态，再展示明确的副作用警示。
+  $$('[data-risk-tool="card-button"]').forEach((el) => {
+    el.addEventListener('change', async () => {
+      if (!el.checked) return;
+      el.checked = false;
+      const accepted = await confirmBox(
+        '开启 qq_click_card_button 后，Agent 可以申请代表当前 QQ 账号点击机器人卡片按钮。按钮可能触发签到、抽奖、订阅、授权或其他外部状态变化；确认后工具会持续开启，直到你手动关闭并保存；每次工具调用仍需显式确认，风险或用途未知的按钮仍必须由管理员逐次批准。确定要允许吗？',
+        '知晓风险并开启'
+      );
+      if (accepted) {
+        el.checked = true;
+        toast('已确认风险并在表单中保持开启；请点击“保存二代配置”使其生效。下次从关闭状态重新开启时仍需再次确认', { type: 'warn', ms: 6200 });
+      }
+    });
+  });
 
   $('#fileSendPanelToggle')?.addEventListener('change', (e) => {
     const fsList = $('[data-v2-tool="fileSend"]');
@@ -3333,6 +3396,15 @@ window.LOG_POOL = [
     } else if (t.includes('qq_send_poke')) {
       push('key', obj.key);
       if (obj.targetUserId != null && obj.targetUserId !== '') push('target', obj.targetUserId);
+    } else if (t.includes('qq_click_card_button')) {
+      push('key', obj.key);
+      push('messageId', obj.messageId);
+      push('cardIndex', obj.cardIndex != null ? obj.cardIndex : 0);
+      push('buttonIndex', obj.buttonIndex);
+      push('已确认风险', obj.confirm === true ? '是' : '否');
+    } else if (t.includes('qq_get_card_button_approval')) {
+      push('key', obj.key);
+      push('approvalId', obj.approvalId);
     } else if (t.includes('qq_get_forward_msg')) {
       push('key', obj.key);
       if (obj.id != null && obj.id !== '') push('id', String(obj.id).slice(0, 40));

@@ -31,6 +31,7 @@ import {
   cardSegmentPlaceholder,
   sanitizeCardRef,
   formatCardResponse,
+  selectCardButton,
   buildCardHint,
   MAX_CARD_RAW_CHARS
 } from './qq-card.js';
@@ -398,6 +399,7 @@ function loadConfig() {
         getImages: true,
         getForwardMsg: true,
         getCardMsg: true,
+        clickCardButton: false,
         sendPoke: true,
         listStickers: true,
         getStickerImage: true,
@@ -510,6 +512,7 @@ function loadConfig() {
     getImages: true,
     getForwardMsg: true,
     getCardMsg: true,
+    clickCardButton: false,
     sendPoke: true,
     listStickers: true,
     getStickerImage: true,
@@ -1639,6 +1642,7 @@ async function main() {
         if (lastMode === 'reserved2' && currentMode !== 'reserved2') {
           clearAllSocialV2Timers();
           drainAllPromptQueues('模式切换，已取消排队中的投递');
+          cancelPendingCardButtonApprovals('模式已离开 reserved2，风险卡片审批已撤销', 'mode-change');
           log('桥接模式已离开二代仿真模式，清理 reserved2 定时器与排队投递');
         }
         if (currentMode === 'reserved2' && lastMode !== 'reserved2') {
@@ -1768,7 +1772,11 @@ async function main() {
     };
     // 二代会话工具必须仍命中当前模式的白名单/准入；避免白名单移除后旧 agentToken 继续读状态。
     const v2SessionAllowed = isSessionAllowedInCurrentMode;
-    const v2ToolEnabled = (flag) => cfg.socialV2?.tools?.[flag] !== false;
+    // 卡片按钮点击会代表当前 QQ 账号向外部机器人提交回调，属于高风险写操作：
+    // 只有明确配置为 true 才启用；旧配置缺少该字段时必须保持关闭。
+    const v2ToolEnabled = (flag) => flag === 'clickCardButton'
+      ? cfg.socialV2?.tools?.clickCardButton === true
+      : cfg.socialV2?.tools?.[flag] !== false;
     const server = http.createServer(async (req, res) => {
       const url = new URL(req.url ?? '/', `http://127.0.0.1:${port}`);
       const SECURITY_HEADERS = {
@@ -2035,6 +2043,7 @@ async function main() {
             // （含 QQ 官方机器人 markdown 卡片），避免“代码已改但进程没重启”的误判。
             cardSegments: [...CARD_SEGMENT_TYPES],
             cardToolEnabled: cfg.socialV2?.tools?.getCardMsg !== false,
+            cardButtonClickToolEnabled: cfg.socialV2?.tools?.clickCardButton === true,
             activity: readActivityTail(100)
           });
           return;
@@ -2071,6 +2080,7 @@ async function main() {
           if (currentMode === 'reserved2' && body.mode !== 'reserved2') {
             clearAllSocialV2Timers();
             drainAllPromptQueues('模式切换，已取消排队中的投递');
+            cancelPendingCardButtonApprovals('模式已离开 reserved2，风险卡片审批已撤销', 'mode-change');
             log('控制台：模式离开二代仿真模式，清理 reserved2 定时器与排队投递');
           }
           currentMode = body.mode;
@@ -2420,7 +2430,23 @@ async function main() {
               ...(p.kind === 'question' ? { questions: p.questions } : {})
             });
           }
+          pruneCardButtonApprovals();
+          for (const record of cardButtonApprovals.values()) {
+            if (record.status !== 'pending' && record.status !== 'processing') continue;
+            list.push({ kind: 'card-approval', ...publicCardButtonApproval(record) });
+          }
           sendJson({ pending: list });
+          return;
+        }
+        // 风险卡片审批仅允许已登录控制台管理端调用；即使请求同时带有合法 agent token 也拒绝。
+        const cardApprovalDecisionMatch = /^\/api\/card-button-approvals\/(card_[a-f0-9]{24})\/decision$/.exec(url.pathname);
+        if (req.method === 'POST' && cardApprovalDecisionMatch) {
+          if (req.headers['x-agent-token']) { sendJson({ ok: false, error: '卡片按钮审批仅管理员可操作' }, 403); return; }
+          const body = await readBody();
+          const decision = String(body.decision ?? '').trim().toLowerCase();
+          const result = await decideCardButtonApproval(cardApprovalDecisionMatch[1], decision, 'console');
+          if (!result.ok) { sendJson({ ok: false, error: result.error, approval: result.approval ?? null }, result.status); return; }
+          sendJson(result);
           return;
         }
         // ── 白名单可视化编辑（写 config.json + 热更新内存） ───────────────────
@@ -2863,11 +2889,16 @@ async function main() {
             merged.autoReplyCheckMs = Number.isFinite(n) ? Math.max(1000, Math.round(n)) : (current.autoReplyCheckMs ?? 30000);
           }
           // tools：只接受布尔开关
-          const toolFlags = ['getPrompt', 'getUnread', 'getRecent', 'socialState', 'sendGroup', 'sendPrivate', 'reply', 'sendBurst', 'sendMessage', 'waitMessages', 'feedback', 'getMyRecent', 'getMessageDetail', 'getActiveMembers', 'setWakeConfig', 'markRead', 'memory', 'slangQuery', 'slangSubmit', 'getImages', 'getForwardMsg', 'getCardMsg', 'sendPoke', 'listStickers', 'getStickerImage', 'sendSticker', 'setStickerRemark', 'stickerNote', 'collectSticker', 'getSelfImage', 'fileSend', 'audioSearch', 'bilibili'];
+          const toolFlags = ['getPrompt', 'getUnread', 'getRecent', 'socialState', 'sendGroup', 'sendPrivate', 'reply', 'sendBurst', 'sendMessage', 'waitMessages', 'feedback', 'getMyRecent', 'getMessageDetail', 'getActiveMembers', 'setWakeConfig', 'markRead', 'memory', 'slangQuery', 'slangSubmit', 'getImages', 'getForwardMsg', 'getCardMsg', 'clickCardButton', 'sendPoke', 'listStickers', 'getStickerImage', 'sendSticker', 'setStickerRemark', 'stickerNote', 'collectSticker', 'getSelfImage', 'fileSend', 'audioSearch', 'bilibili'];
           if (body.tools && typeof body.tools === 'object') {
             merged.tools = { ...(current.tools ?? {}), ...body.tools };
+            const defaultOffTools = new Set(['clickCardButton', 'setStickerRemark']);
             for (const k of toolFlags) {
-              if (typeof merged.tools[k] !== 'boolean') merged.tools[k] = current.tools?.[k] !== false;
+              if (typeof merged.tools[k] !== 'boolean') {
+                merged.tools[k] = defaultOffTools.has(k)
+                  ? current.tools?.[k] === true
+                  : current.tools?.[k] !== false;
+              }
             }
           }
           // wake：数值与字符串数组归一化
@@ -2979,6 +3010,9 @@ async function main() {
           file.socialV2 = merged;
           atomicWriteJson(configFile, file);
           cfg.socialV2 = { ...(cfg.socialV2 ?? {}), ...merged };
+          if (body.enabled === false || body.tools?.clickCardButton === false) {
+            cancelPendingCardButtonApprovals('二代模式或卡片点击工具已被管理员关闭', 'config-disabled');
+          }
           // 仅当“会影响默认唤醒配置”的字段变化时，才同步到仍使用默认配置的现有会话。
           // 避免只改发送/等待/工具开关时，意外重置正在等待的潜水/唤醒计划。
           const WAKE_DEFAULT_KEYS = [
@@ -3005,6 +3039,7 @@ async function main() {
           socialV2.paused = paused;
           if (paused) {
             clearAllSocialV2Timers();
+            cancelPendingCardButtonApprovals('二代 AI 已暂停', 'paused');
             log('控制台：二代 AI 已暂停（唤醒/等待任务已停止）');
           } else {
             log('控制台：二代 AI 已恢复');
@@ -3038,6 +3073,7 @@ async function main() {
             socialV2.conversations.delete(key);
             seenForwardIds.delete(key);
             messageCardStore.delete(key);
+            removeCardButtonApprovalsForKey(key);
           }
           saveMessageCardStore();
           pendingWakeKeys.clear();
@@ -3105,6 +3141,7 @@ async function main() {
             getImages: 'qq_get_message_images',
             getForwardMsg: 'qq_get_forward_msg',
             getCardMsg: 'qq_get_card_msg',
+            clickCardButton: 'qq_click_card_button / qq_get_card_button_approval（风险内容需管理员审批）',
             sendPoke: 'qq_send_poke',
             listStickers: 'qq_list_stickers',
             getStickerImage: 'qq_get_sticker_image',
@@ -3118,7 +3155,7 @@ async function main() {
           const stickerToolFlags = new Set(['listStickers', 'getStickerImage', 'sendSticker', 'setStickerRemark', 'stickerNote', 'collectSticker']);
           const enabledTools = [];
           for (const [flag, name] of Object.entries(toolMap)) {
-            if (tools[flag] !== false && !(stickerToolFlags.has(flag) && !stickerEnabled())) enabledTools.push(name);
+            if (v2ToolEnabled(flag) && !(stickerToolFlags.has(flag) && !stickerEnabled())) enabledTools.push(name);
           }
           sendJson({
             ok: true,
@@ -4510,7 +4547,84 @@ async function main() {
           }
           const shaped = index === null ? formatCardResponse(cards) : formatCardResponse(cards, { index });
           if (index !== null && !shaped.card) { sendJson({ ok: false, error: '卡片序号越界' }, 404); return; }
-          sendJson({ ok: true, key, messageId: ref, ...shaped });
+          sendJson({
+            ok: true,
+            key,
+            messageId: ref,
+            ...shaped,
+            interaction: {
+              tool: 'qq_click_card_button',
+              enabled: v2ToolEnabled('clickCardButton'),
+              supported: kind === 'group',
+              requiresRiskConfirmation: true,
+              approvalPolicy: '按钮标记 requiresApproval=true 时只创建待审批请求；管理员批准后才会重新校验并执行。',
+              note: kind === 'group'
+                ? '仅 clickable=true 的回调/指令按钮可执行；先核对 riskLevel/requiresApproval/riskReasons，再使用 cardIndex/buttonIndex 并显式传 confirm=true。'
+                : '当前网关只支持群聊卡片按钮点击，私聊卡片保持只读。'
+            }
+          });
+          return;
+        }
+        // ── QQ 官方机器人卡片按钮点击端点（MCP qq_click_card_button 走这里） ──
+        // 高风险写操作：严格默认关闭、仅群聊、必须逐次确认；Agent 只能按索引选择本会话
+        // 已收到卡片里的按钮，bot_appid/button_id/callback_data 均由桥接派生，不能自由注入。
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/card-button-click') {
+          const body = await readBody();
+          const key = String(body.key ?? '').trim();
+          const agentToken = String(req.headers['x-agent-token'] ?? '').trim();
+          if (!agentToken || !agentTokenOk(key, agentToken)) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          if (body.confirm !== true) {
+            sendJson({ ok: false, error: '该操作会代表当前 QQ 账号向外部机器人提交回调；确认后请显式传 confirm=true' }, 400);
+            return;
+          }
+          const target = await resolveCardButtonClickTarget({
+            key,
+            messageId: body.messageId,
+            cardIndex: body.cardIndex,
+            buttonIndex: body.buttonIndex
+          });
+          if (!target.ok) { sendJson({ ok: false, error: safeCardApprovalError(target.error) }, target.status); return; }
+
+          // 风险或用途未知的卡片不直接执行：创建一次性审批，管理员批准时再次回源并核对指纹。
+          if (target.selection.requiresApproval) {
+            const queuedApproval = queueCardButtonApproval(target);
+            if (!queuedApproval.ok) {
+              sendJson({
+                ok: false,
+                status: queuedApproval.approval?.status || 'rejected',
+                error: queuedApproval.error,
+                approval: publicCardButtonApproval(queuedApproval.approval)
+              }, queuedApproval.status);
+              return;
+            }
+            sendJson({
+              ok: true,
+              status: 'pending_approval',
+              message: queuedApproval.created
+                ? '检测到卡片内容或按钮用途存在风险，已交由管理员审批；批准前不会执行点击。'
+                : '同一风险按钮已在等待管理员审批，不会重复创建请求。',
+              approval: publicCardButtonApproval(queuedApproval.approval)
+            }, 202);
+            return;
+          }
+
+          const clicked = await executeResolvedCardButtonClick(target);
+          if (!clicked.ok) { sendJson({ ok: false, error: safeCardApprovalError(clicked.error) }, clicked.status); return; }
+          sendJson({ status: 'clicked', ...clicked });
+          return;
+        }
+        // Agent 查询异步审批状态；只能查看与自己会话绑定的审批，不能据此作出审批决定。
+        if (req.method === 'GET' && url.pathname === '/api/socialV2/card-button-approval') {
+          const key = String(url.searchParams.get('key') ?? '').trim();
+          const approvalId = String(url.searchParams.get('approvalId') ?? '').trim();
+          const agentToken = String(req.headers['x-agent-token'] ?? '').trim();
+          if (!agentToken || !agentTokenOk(key, agentToken)) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          if (!v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+          if (!/^card_[a-f0-9]{24}$/.test(approvalId)) { sendJson({ ok: false, error: 'approvalId 格式非法' }, 400); return; }
+          pruneCardButtonApprovals();
+          const approval = cardButtonApprovals.get(approvalId);
+          if (!approval || approval.key !== key) { sendJson({ ok: false, error: '审批不存在或不属于当前会话' }, 404); return; }
+          sendJson({ ok: true, approval: publicCardButtonApproval(approval) });
           return;
         }
         if (req.method === 'GET' && url.pathname === '/api/socialV2/active-members') {
@@ -4982,6 +5096,7 @@ async function main() {
           socialV2.conversations.delete(key);
           seenForwardIds.delete(key);
           messageCardStore.delete(key);
+          removeCardButtonApprovalsForKey(key);
           saveMessageCardStore();
           saveSocialV2State();
           saveState();
@@ -5019,6 +5134,7 @@ async function main() {
           messageMediaStore.clear();
           seenForwardIds.clear();
           messageCardStore.clear();
+          cardButtonApprovals.clear();
           saveMessageCardStore();
           social.pendingSummaries.clear();
           social.silentContext.clear();
@@ -5848,6 +5964,16 @@ async function main() {
   // 供 MCP 工具 qq_get_card_msg 按需读取（开发调试时提取查看卡片数据）。
   // 有界：每会话限制条数与原始内容总字节数，防止异常/刷屏 payload 撑爆内存与状态文件。
   const messageCardStore = new Map();
+  // 防止 Agent/模型重试在极短时间内重复按下同一个按钮。
+  const recentCardButtonClicks = new Map();
+  const CARD_BUTTON_CLICK_COOLDOWN_MS = 5000;
+  // 风险卡片按钮审批独立于 DSH 的提问/工具审批，避免互相覆盖。
+  // 审批仅保存在内存中：桥接重启即失效（fail-closed），不会在重启后自动补执行。
+  const cardButtonApprovals = new Map();
+  const CARD_BUTTON_APPROVAL_TTL_MS = 10 * 60 * 1000;
+  const CARD_BUTTON_APPROVAL_RETENTION_MS = 60 * 60 * 1000;
+  const CARD_BUTTON_APPROVAL_MAX = 100;
+  const CARD_BUTTON_APPROVAL_RETAIN_MAX = 500;
   const MAX_CARD_REFS_PER_KEY = 100;      // 每个会话最多保留多少条消息的卡片
   const MAX_CARD_BYTES_PER_KEY = 1500000; // 每个会话卡片原始内容总量上限（约 1.5MB）
   let cardStoreLoaded = false;
@@ -5943,6 +6069,7 @@ async function main() {
     const convId = keyMatch[2];
     let realId = String(ref ?? '').trim();
     let seq = null;
+    let knownMessageSeq = null;
     try {
       // 只读已有状态，避免为未知会话创建影子状态。
       const st = socialV2.conversations.get(key);
@@ -5951,6 +6078,7 @@ async function main() {
         : null;
       if (found?.messageId) realId = String(found.messageId);
       if (found?.seq != null) seq = String(found.seq);
+      if (found?.messageSeq != null) knownMessageSeq = String(found.messageSeq);
     } catch {}
     const numericId = Number(realId);
     if (!Number.isSafeInteger(numericId)) return null;
@@ -5964,7 +6092,13 @@ async function main() {
       const rawGroup = raw.group_id ?? raw.groupId;
       if (rawGroup != null || rawUser == null || String(rawUser) !== String(convId)) return null;
     }
-    return { raw, messageId: realId, seq };
+    const messageSeq = raw.message_seq ?? raw.msg_seq ?? raw.real_seq ?? knownMessageSeq;
+    return {
+      raw,
+      messageId: realId,
+      seq,
+      messageSeq: messageSeq != null ? String(messageSeq) : null
+    };
   }
 
   // 回源解析卡片与媒体并回填缓存，返回 { cards, media }。
@@ -5974,7 +6108,7 @@ async function main() {
       const got = await fetchRawMessageByRef(key, ref);
       if (!got) return empty;
       const segments = Array.isArray(got.raw.message) ? got.raw.message : [];
-      const refs = [...new Set([got.messageId, got.seq, String(ref ?? '')].filter(Boolean).map(String))];
+      const refs = [...new Set([got.messageId, got.seq, got.messageSeq, String(ref ?? '')].filter(Boolean).map(String))];
       const cards = extractCardsFromSegments(segments, { maxRawChars: MAX_CARD_RAW_CHARS });
       const media = extractMediaFromSegments(segments);
       if (cards.length) rememberMessageCards(key, refs, cards);
@@ -5996,6 +6130,324 @@ async function main() {
       log(`回源消息失败 ${key} ${ref}:`, error?.message ?? error);
       return empty;
     }
+  }
+
+  function cardButtonFailure(status, error) {
+    return { ok: false, status, error };
+  }
+
+  function validateCardButtonScope(key) {
+    const keyMatch = /^group:(\d+)$/.exec(String(key ?? '').trim());
+    if (!keyMatch) return cardButtonFailure(400, '卡片按钮点击目前仅支持 group:群号');
+    if (currentMode !== 'reserved2') return cardButtonFailure(403, '卡片按钮点击仅 reserved2 模式可用');
+    if (cfg.socialV2?.enabled === false) return cardButtonFailure(403, '二代模式已关闭，拒绝执行卡片点击');
+    if (socialV2.paused) return cardButtonFailure(403, '二代 AI 已暂停，拒绝执行卡片点击');
+    if (cfg.socialV2?.tools?.clickCardButton !== true) {
+      return cardButtonFailure(403, '高风险工具未启用：qq_click_card_button（请在桥接控制台确认风险后开启）');
+    }
+    const groupId = Number(keyMatch[1]);
+    if (!Number.isSafeInteger(groupId) || groupId <= 0 || !modeAllowed(key, 'group', groupId, cfg, currentMode)) {
+      return cardButtonFailure(403, '当前模式不允许操作该会话');
+    }
+    return { ok: true, groupId };
+  }
+
+  // 每次请求和每次管理员批准时都重新回源原消息。审批记录只保存索引和不可逆指纹，
+  // 不保存可被重放的 callback_data；管理员批准后看到/执行的必须仍是同一个按钮。
+  async function resolveCardButtonClickTarget({ key, messageId, cardIndex, buttonIndex }) {
+    const scope = validateCardButtonScope(key);
+    if (!scope.ok) return scope;
+    const ref = sanitizeCardRef(messageId);
+    if (!ref) return cardButtonFailure(400, 'messageId 不能为空或格式非法');
+    const safeCardIndex = cardIndex === undefined ? 0 : Number(cardIndex);
+    const safeButtonIndex = Number(buttonIndex);
+    if (!Number.isInteger(safeCardIndex) || safeCardIndex < 0 || !Number.isInteger(safeButtonIndex) || safeButtonIndex < 0) {
+      return cardButtonFailure(400, 'cardIndex/buttonIndex 必须是非负整数');
+    }
+
+    let got;
+    try {
+      got = await fetchRawMessageByRef(key, ref);
+    } catch (error) {
+      return cardButtonFailure(502, `回源卡片消息失败：${error?.message ?? error}`);
+    }
+    if (!got) return cardButtonFailure(404, '该消息不在当前会话可见范围内，或已无法回源');
+    const msgSeq = String(got.messageSeq ?? '').trim();
+    if (!/^[1-9]\d*$/.test(msgSeq)) {
+      return cardButtonFailure(409, '无法取得卡片的 OneBot message_seq，拒绝执行点击');
+    }
+
+    let cards = extractCardsFromSegments(Array.isArray(got.raw.message) ? got.raw.message : [], { maxRawChars: MAX_CARD_RAW_CHARS });
+    if (!cards.length) {
+      loadMessageCardStore();
+      cards = findMessageCards(key, ref);
+    } else {
+      rememberMessageCards(key, [ref, got.messageId, got.messageSeq], cards);
+    }
+    const picked = selectCardButton(cards, { cardIndex: safeCardIndex, buttonIndex: safeButtonIndex });
+    if (!picked.selection) return cardButtonFailure(400, picked.error || '无法选择该按钮');
+    const selection = picked.selection;
+    const cardRaw = String(cards[safeCardIndex]?.raw ?? '');
+    const fingerprint = crypto.createHash('sha256').update([
+      key,
+      got.messageId || ref,
+      msgSeq,
+      selection.cardIndex,
+      selection.buttonIndex,
+      selection.botAppId,
+      selection.buttonId,
+      selection.callbackData,
+      selection.buttonLabel,
+      selection.action,
+      cardRaw
+    ].map((v) => String(v ?? '')).join('\u0000')).digest('hex');
+
+    return {
+      ok: true,
+      key,
+      ref,
+      groupId: scope.groupId,
+      messageId: got.messageId || ref,
+      messageSeq: msgSeq,
+      cardIndex: safeCardIndex,
+      buttonIndex: safeButtonIndex,
+      selection,
+      fingerprint
+    };
+  }
+
+  async function executeResolvedCardButtonClick(target) {
+    const scope = validateCardButtonScope(target?.key);
+    if (!scope.ok) return scope;
+    if (!target || scope.groupId !== target.groupId) return cardButtonFailure(409, '卡片点击目标已失效');
+
+    const clickKey = [target.key, target.messageId || target.ref, target.cardIndex, target.buttonIndex].join('|');
+    const now = Date.now();
+    const lastClickAt = Number(recentCardButtonClicks.get(clickKey)) || 0;
+    if (lastClickAt && now - lastClickAt < CARD_BUTTON_CLICK_COOLDOWN_MS) {
+      return cardButtonFailure(429, `同一按钮 ${Math.ceil((CARD_BUTTON_CLICK_COOLDOWN_MS - (now - lastClickAt)) / 1000)} 秒内不可重复点击`);
+    }
+    recentCardButtonClicks.set(clickKey, now);
+    if (recentCardButtonClicks.size > 500) {
+      for (const [oldKey, ts] of recentCardButtonClicks) {
+        if (now - Number(ts) > 60000 || recentCardButtonClicks.size > 400) recentCardButtonClicks.delete(oldKey);
+        if (recentCardButtonClicks.size <= 400) break;
+      }
+    }
+
+    let gatewayResult;
+    try {
+      gatewayResult = await withTimeout(bot.raw('click_inline_keyboard_button', {
+        group_id: target.groupId,
+        bot_appid: target.selection.botAppId,
+        msg_seq: target.messageSeq,
+        button_id: target.selection.buttonId,
+        callback_data: target.selection.callbackData
+      }), SEND_TIMEOUT_MS, 'QQ 卡片按钮点击');
+    } catch (error) {
+      return cardButtonFailure(502, `卡片按钮点击失败：${error?.message ?? error}`);
+    }
+
+    appendActivity(`${target.key} 桥接执行机器人卡片按钮：${target.selection.buttonLabel || target.selection.buttonId}`);
+    return {
+      ok: true,
+      key: target.key,
+      messageId: target.messageId,
+      messageSeq: target.messageSeq,
+      clicked: {
+        cardIndex: target.selection.cardIndex,
+        buttonIndex: target.selection.buttonIndex,
+        cardTitle: target.selection.cardTitle,
+        label: target.selection.buttonLabel,
+        action: target.selection.action,
+        riskLevel: target.selection.riskLevel
+      },
+      result: gatewayResult
+    };
+  }
+
+  function safeCardApprovalError(value) {
+    const text = redactKnownTokensOnly(String(value ?? '')).slice(0, 500);
+    return SENSITIVE_RE.test(text) ? '错误详情可能含敏感信息，已隐藏' : text;
+  }
+
+  function publicCardButtonApproval(record) {
+    if (!record) return null;
+    return {
+      id: record.id,
+      status: record.status,
+      key: record.key,
+      messageId: record.messageId,
+      cardIndex: record.cardIndex,
+      buttonIndex: record.buttonIndex,
+      cardTitle: record.cardTitle,
+      buttonLabel: record.buttonLabel,
+      action: record.action,
+      riskLevel: record.riskLevel,
+      riskReasons: record.riskReasons,
+      createdAt: record.createdAt,
+      expiresAt: record.expiresAt,
+      resolvedAt: record.resolvedAt || null,
+      decisionSource: record.decisionSource || '',
+      error: record.error ? safeCardApprovalError(record.error) : '',
+      clicked: record.clicked || null
+    };
+  }
+
+  function pruneCardButtonApprovals() {
+    const now = Date.now();
+    for (const [id, record] of cardButtonApprovals) {
+      if (record.status === 'pending' && now >= record.expiresAt) {
+        record.status = 'expired';
+        record.resolvedAt = now;
+        record.error = '等待管理员审批超时，未执行点击';
+        appendActivity(`${record.key} 风险卡片按钮审批已超时：${record.buttonLabel || id}`);
+      }
+      const resolvedAt = Number(record.resolvedAt) || 0;
+      if (record.status !== 'pending' && record.status !== 'processing' && resolvedAt && now - resolvedAt > CARD_BUTTON_APPROVAL_RETENTION_MS) {
+        cardButtonApprovals.delete(id);
+      }
+    }
+    if (cardButtonApprovals.size > CARD_BUTTON_APPROVAL_RETAIN_MAX) {
+      for (const [id, record] of cardButtonApprovals) {
+        if (record.status === 'pending' || record.status === 'processing') continue;
+        cardButtonApprovals.delete(id);
+        if (cardButtonApprovals.size <= CARD_BUTTON_APPROVAL_RETAIN_MAX) break;
+      }
+    }
+  }
+
+  function removeCardButtonApprovalsForKey(key) {
+    for (const [id, record] of cardButtonApprovals) {
+      if (record.key === key) cardButtonApprovals.delete(id);
+    }
+  }
+
+  function cancelPendingCardButtonApprovals(reason, source = 'system') {
+    const now = Date.now();
+    for (const record of cardButtonApprovals.values()) {
+      if (record.status !== 'pending') continue;
+      record.status = 'rejected';
+      record.resolvedAt = now;
+      record.decisionSource = source;
+      record.error = reason;
+      appendActivity(`${record.key} 风险卡片审批已取消：${record.buttonLabel || record.id}（${reason}）`);
+    }
+  }
+
+  function queueCardButtonApproval(target) {
+    pruneCardButtonApprovals();
+    for (const record of cardButtonApprovals.values()) {
+      if (record.fingerprint !== target.fingerprint) continue;
+      if (record.status === 'pending' || record.status === 'processing') {
+        return { ok: true, created: false, approval: record };
+      }
+      if (record.status === 'rejected' && Date.now() - Number(record.resolvedAt || 0) < CARD_BUTTON_APPROVAL_TTL_MS) {
+        return { ok: false, status: 409, error: '管理员刚刚拒绝了同一按钮，审批冷却期内不会重复发起', approval: record };
+      }
+    }
+    const activeCount = [...cardButtonApprovals.values()].filter((r) => r.status === 'pending' || r.status === 'processing').length;
+    if (activeCount >= CARD_BUTTON_APPROVAL_MAX) {
+      return { ok: false, status: 429, error: '风险卡片审批队列已满，拒绝新增请求' };
+    }
+
+    const now = Date.now();
+    const id = 'card_' + crypto.randomBytes(12).toString('hex');
+    const record = {
+      id,
+      status: 'pending',
+      key: target.key,
+      messageId: target.messageId,
+      cardIndex: target.cardIndex,
+      buttonIndex: target.buttonIndex,
+      cardTitle: String(target.selection.cardTitle || '').slice(0, 200),
+      buttonLabel: String(target.selection.buttonLabel || '').slice(0, 100),
+      action: String(target.selection.action || ''),
+      riskLevel: target.selection.riskLevel,
+      riskReasons: Array.isArray(target.selection.riskReasons) ? target.selection.riskReasons.slice(0, 6) : [],
+      fingerprint: target.fingerprint,
+      createdAt: now,
+      expiresAt: now + CARD_BUTTON_APPROVAL_TTL_MS,
+      resolvedAt: 0,
+      decisionSource: '',
+      error: '',
+      clicked: null
+    };
+    cardButtonApprovals.set(id, record);
+    appendActivity(`${record.key} 风险卡片按钮等待管理员审批：${record.buttonLabel || record.id}`);
+
+    const ownerQQ = String(cfg.ownerQQ ?? '').trim();
+    if (/^[1-9]\d*$/.test(ownerQQ) && allowed('private', ownerQQ, cfg)) {
+      const reasons = record.riskReasons.length ? record.riskReasons.join('；') : '用途无法可靠判断';
+      const notice = [
+        '🔐 风险卡片按钮等待审批',
+        `会话：${record.key}`,
+        `卡片：${record.cardTitle || '（无标题）'}`,
+        `按钮：${record.buttonLabel || '（无文案）'}`,
+        `原因：${reasons}`,
+        `审批编号：${record.id}`,
+        `可在桥接控制台处理，或回复 /card-approve ${record.id}；拒绝请回复 /card-reject ${record.id}。未批准前不会点击。`
+      ].join('\n');
+      sendToQQ(`private:${ownerQQ}`, notice).catch(() => {});
+    }
+    return { ok: true, created: true, approval: record };
+  }
+
+  async function decideCardButtonApproval(id, decision, source = 'console') {
+    pruneCardButtonApprovals();
+    const record = cardButtonApprovals.get(String(id ?? ''));
+    if (!record) return cardButtonFailure(404, '卡片按钮审批不存在或已清理');
+    if (record.status !== 'pending') {
+      const status = record.status === 'expired' ? 410 : 409;
+      return { ...cardButtonFailure(status, `该审批当前状态为 ${record.status}，不能重复处理`), approval: publicCardButtonApproval(record) };
+    }
+    if (decision === 'reject') {
+      record.status = 'rejected';
+      record.resolvedAt = Date.now();
+      record.decisionSource = source;
+      record.error = '管理员已拒绝，未执行点击';
+      appendActivity(`${record.key} 管理员拒绝风险卡片按钮：${record.buttonLabel || record.id}`);
+      return { ok: true, approval: publicCardButtonApproval(record) };
+    }
+    if (decision !== 'approve') return cardButtonFailure(400, 'decision 必须是 approve 或 reject');
+
+    record.status = 'processing';
+    record.decisionSource = source;
+    const target = await resolveCardButtonClickTarget({
+      key: record.key,
+      messageId: record.messageId,
+      cardIndex: record.cardIndex,
+      buttonIndex: record.buttonIndex
+    });
+    if (!target.ok) {
+      record.status = 'failed';
+      record.resolvedAt = Date.now();
+      record.error = target.error;
+      appendActivity(`${record.key} 风险卡片审批执行失败：${target.error}`);
+      return { ...target, approval: publicCardButtonApproval(record) };
+    }
+    if (target.fingerprint !== record.fingerprint) {
+      record.status = 'failed';
+      record.resolvedAt = Date.now();
+      record.error = '卡片内容或按钮参数已变化，为避免错点已拒绝执行';
+      appendActivity(`${record.key} 风险卡片审批指纹不一致，已拒绝执行`);
+      return { ...cardButtonFailure(409, record.error), approval: publicCardButtonApproval(record) };
+    }
+
+    const clicked = await executeResolvedCardButtonClick(target);
+    if (!clicked.ok) {
+      record.status = 'failed';
+      record.resolvedAt = Date.now();
+      record.error = clicked.error;
+      appendActivity(`${record.key} 风险卡片审批执行失败：${clicked.error}`);
+      return { ...clicked, approval: publicCardButtonApproval(record) };
+    }
+    record.status = 'completed';
+    record.resolvedAt = Date.now();
+    record.clicked = clicked.clicked;
+    record.error = '';
+    appendActivity(`${record.key} 管理员批准并执行风险卡片按钮：${record.buttonLabel || record.id}`);
+    return { ok: true, approval: publicCardButtonApproval(record), ...clicked };
   }
 
   // 启动后回填：卡片支持上线前收到的卡片消息没有卡片/媒体元数据，AI 既看不到卡片也读不到插图。
@@ -7299,7 +7751,7 @@ async function main() {
   }
 
   // ── 二代仿真模式（reserved2）唤醒调度 ──────────────────────────────────
-  function appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, messageId, media = [], userId = null, forwardIds = [], cards = []) {
+  function appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, messageId, media = [], userId = null, forwardIds = [], cards = [], messageSeq = null) {
     const st = getSocialV2State(key);
     const recentLimit = Number(cfg.socialV2?.context?.recentLimit) || 100;
     const unreadLimit = Number(cfg.socialV2?.context?.unreadLimit) || 30;
@@ -7333,6 +7785,8 @@ async function main() {
     const msg = {
       seq,
       messageId: messageId != null ? String(messageId) : null,
+      // QQ/OneBot 的真实消息序列号；卡片按钮点击接口需要它，不能拿本地 seq 代替。
+      messageSeq: messageSeq != null ? String(messageSeq) : null,
       sender,
       userId: userId != null ? String(userId) : null,
       text: String(textContent).slice(0, 200),
@@ -7353,7 +7807,7 @@ async function main() {
       cardHint: cardSummary ? buildCardHint(key, refForHint, cardSummary).replace(/^\n+/, '') : '',
       time: Date.now()
     };
-    if (safeCards.length) rememberMessageCards(key, [messageId != null ? String(messageId) : '', String(seq)], safeCards);
+    if (safeCards.length) rememberMessageCards(key, [messageId != null ? String(messageId) : '', messageSeq != null ? String(messageSeq) : '', String(seq)], safeCards);
     st.lastUnreadSeq = msg.seq;
     st.lastIncomingAt = Date.now();
     st.preSleepWaitSatisfiedAt = 0; // 有新消息进来，之前的“沉睡前已等待/已观察”作废
@@ -8035,6 +8489,10 @@ async function main() {
     const messageRef = String(event.message_id ?? event.msg_id ?? event.message_seq ?? '');
     const seqRef = event.message_seq != null ? String(event.message_seq) : '';
     const refsToStore = [...new Set([messageRef, seqRef].filter(Boolean))];
+    // 卡片同时按 message_id 与 OneBot message_seq 建索引；后者也是实际点击动作所需的 msg_seq。
+    if (currentMode === 'reserved2' && refsToStore.length > 0 && cardList.length > 0) {
+      rememberMessageCards(key, refsToStore, cardList);
+    }
     if (refsToStore.length > 0 && mediaList.length > 0) {
       let mediaByRef = messageMediaStore.get(key);
       if (!mediaByRef) {
@@ -8055,6 +8513,25 @@ async function main() {
     if (!plainContent && !quoteTargetIsSelf) return;
     const isOwner = String(event.user_id) === String(cfg.ownerQQ ?? '');
     const roleState = readRoleState();
+
+    // 风险卡片审批命令优先于 DSH 自身的挂起提问/审批，避免被误当成普通回答消费。
+    const cardDecisionCommand = /^\/card-(approve|reject)\s+(card_[a-f0-9]{24})$/i.exec(plainContent.trim());
+    if (cardDecisionCommand) {
+      if (!isOwner) {
+        await sendToQQ(key, '卡片按钮审批仅管理员可操作。');
+        return;
+      }
+      const decision = cardDecisionCommand[1].toLowerCase() === 'approve' ? 'approve' : 'reject';
+      const result = await decideCardButtonApproval(cardDecisionCommand[2].toLowerCase(), decision, `qq:${key}`);
+      if (!result.ok) {
+        await sendToQQ(key, `⚠️ 卡片按钮审批处理失败：${result.error}`);
+      } else if (decision === 'approve') {
+        await sendToQQ(key, `✅ 已批准并执行卡片按钮：${result.approval?.buttonLabel || cardDecisionCommand[2]}`);
+      } else {
+        await sendToQQ(key, `❌ 已拒绝卡片按钮：${result.approval?.buttonLabel || cardDecisionCommand[2]}`);
+      }
+      return;
+    }
 
     // 若该会话有挂起的提问/审批，先当作回答处理（用当前消息自己的文字，不含引用原文）。
     // 审批只有管理员消息会被消费；群友消息不能因为“审批挂起”而被吞掉，应继续走正常处理。
@@ -8125,6 +8602,7 @@ async function main() {
           socialV2.conversations.delete(key);
           seenForwardIds.delete(key);
           messageCardStore.delete(key);
+          removeCardButtonApprovalsForKey(key);
           saveMessageCardStore();
           saveSocialV2State();
           saveState();
@@ -8169,7 +8647,7 @@ async function main() {
     // 二代仿真模式（reserved2）：唤醒调度
     if (currentMode === 'reserved2') {
       const sender = kind === 'group' ? (event.sender?.card || event.sender?.nickname || String(event.user_id)) : '私聊';
-      appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, event.message_id ?? event.msg_id ?? null, mediaList, event.user_id ?? null, extractForwardIds(event.message ?? []), cardList);
+      appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, event.message_id ?? event.msg_id ?? null, mediaList, event.user_id ?? null, extractForwardIds(event.message ?? []), cardList, event.message_seq ?? null);
       // 卡片到达时在活动日志留痕，方便开发调试时定位是哪条消息带了卡片。
       if (cardList.length) {
         appendActivity(`${key} 收到 ${cardList.length} 张 QQ 官方卡片：${cardList.map((c) => summarizeCard(c)).join(' | ').slice(0, 160)}`);
