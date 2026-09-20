@@ -121,16 +121,26 @@ function agentApiBase() {
   const port = Number(getConfig().consolePort) || 3100;
   return `http://127.0.0.1:${port}`;
 }
-function readConsoleToken() {
-  // 每次请求都重新读取，优先 config.json 里的 consoleToken，其次 state/console-token，
-  // 避免 token 变化后 MCP 仍使用启动时缓存的旧值导致一直 401。
+// 桥接访问令牌：优先用「服务令牌」（state/agent-token，只有数据面权限）。
+// MCP/agent 侧不再持有控制台令牌——否则该凭据一旦泄漏（prompt injection、日志等）就能
+// 触达 /api/terminal/*（本机命令执行）与服务启停等控制面接口。
+// 每次请求都重新读取，避免控制台轮换令牌后 MCP 仍用启动时的旧值导致一直 401。
+function readBridgeToken() {
+  try {
+    const token = fs.readFileSync(path.join(ROOT, 'state', 'agent-token'), 'utf8').trim();
+    if (token) return token;
+  } catch {}
+  try {
+    const c = getConfig();
+    if (c.agentToken) return String(c.agentToken);
+  } catch {}
+  // 兜底：老环境尚未生成 state/agent-token 时退回控制台令牌（桥接启动会自动创建前者）
   try {
     const c = getConfig();
     if (c.consoleToken) return String(c.consoleToken);
   } catch {}
   try {
-    const tokenFile = path.join(ROOT, 'state', 'console-token');
-    return fs.readFileSync(tokenFile, 'utf8').trim();
+    return fs.readFileSync(path.join(ROOT, 'state', 'console-token'), 'utf8').trim();
   } catch {
     return '';
   }
@@ -139,10 +149,10 @@ function readConsoleToken() {
 async function agentApi(path, init = {}) {
   const timeoutMs = init.timeoutMs || 15000;
   const { timeoutMs: _omit, ...rest } = init;
-  const consoleToken = readConsoleToken();
+  const bridgeToken = readBridgeToken();
   const headers = {
     'content-type': 'application/json',
-    ...(consoleToken ? { 'x-console-token': consoleToken } : {}),
+    ...(bridgeToken ? { 'x-console-token': bridgeToken } : {}),
     ...(rest.headers ?? {})
   };
   const res = await fetch(`${agentApiBase()}${path}`, { ...rest, headers, signal: AbortSignal.timeout(timeoutMs) });

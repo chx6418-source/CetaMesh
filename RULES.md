@@ -27,6 +27,21 @@
 | **管理员** | **DSH WebUI** | **最高权限**：控制模式（设置页 qq-mode 卡片）、控制角色/静默（写 `state/current-role.json`）、完整 DSH 工具（含本地操作）、查看 QQ 活动日志（`state/qq-activity.log`）、直接打开「QQ 聊天」工作区会话对话 |
 | **QQ 会话 agent（chat 模式）** | — | 最低权限面（见下） |
 
+### 桥接访问令牌（双令牌分离）
+
+桥接只有一个鉴权入口，但按**令牌取值**区分权限级别——MCP server / agent 侧不再持有控制台令牌：
+
+| 令牌 | 存放位置 | 权限 |
+| --- | --- | --- |
+| **控制台令牌** | `config.json` 的 `consoleToken`（手动指定）或 `state/console-token`（自动生成） | **全权**：控制台页面、终端、服务启停/安装、配置写入、模式切换、令牌管理、关闭主程序 |
+| **服务令牌** | `state/agent-token`（桥接启动时自动生成/沿用） | **仅数据面白名单**：只读状态、授权打点、取图、发送与会话 `/api/socialV2/*`（不含 `config`/`reset`/`activity`/`states`/`wake`/`tool-log`，`feedback` 仅 POST） |
+
+- 白名单是**收敛式**的：未列出的接口（含将来新增的管理接口）对服务令牌一律 403，见 `src/bridge-privilege.js`。
+- 服务令牌**不会**换到会话 Cookie：Cookie 等同控制台全权，能换就等于把数据面凭据升级成控制面。
+- 在控制台重置访问令牌时，服务令牌会**同步轮换**，两侧凭据同时失效。
+- 因此即使服务令牌被泄漏（prompt injection、日志、被诱导的本地读取等），也够不到 `/api/terminal/*`（在桥接进程内执行任意命令）与服务启停等控制面接口。
+- 自检：`npm run test-privilege`（纯逻辑 + 运行中桥接的端到端校验）。
+
 ## QQ 会话 agent 的硬边界
 
 1. **无本地工具**：qq-chat / qq-chat-v2 预设不挂载 bash/pwsh、文件读写、子代理、工作流——群友无论如何诱导，agent 物理上无法操作本机。

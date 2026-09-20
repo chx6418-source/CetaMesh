@@ -221,6 +221,12 @@ history:
     result: "删除：design-demos/src/console/{part1,part2,part3}.html、assemble.mjs、test-dsh-v2-wait.mjs、docs/MIGRATION.md；修改：src/local-services.js、src/mcp-qq-file-send.js、scripts/test-card.mjs、scripts/test-local-services.mjs、README.md、public/console.html、console.baseline.html"
     risk_audit: "跟踪文件无真实凭据；无「已 gitignore 但仍被跟踪」的文件；鉴权为全局闸门（除登录页外所有 /api 需 consoleToken）。已评估并**保留**：assets/project-intro.mp4（11.2MB，占跟踪体积 76%）——README 第 17 行引用中，且从工作区删除不减 git 历史、反而破坏文档，瘦身需 Releases/LFS 或重编码；src/pinyin-data.js（365KB 生成物）——生成脚本需 npm pack 取源、运行时不依赖任何 npm 包，刻意入库。遗留建议：/api/terminal/* 等价本机 RCE（建议二次确认或独立令牌）；src/mcp-host-server.js 的 pid 建议参数化传递"
 
+  - step: T15
+    date: "2026-09-20"
+    action: "[安全加固] ① **令牌分离**：新增 src/bridge-privilege.js（纯函数策略）——控制台令牌=全权，服务令牌=数据面白名单；桥接启动生成 state/agent-token；同一鉴权入口按令牌**取值**判定权限级别；服务令牌仅可访问 /api/status、/api/authorize/read、/api/images/message、/api/send/*、/api/socialV2/*（剔除 config/reset/activity/states/wake/tool-log，feedback 仅 POST，路径先 URL 归一化防 ../ 绕过）；服务令牌**不换发会话 Cookie**（否则等于把数据面凭据升级成控制面）；控制台重置令牌时同步轮换服务令牌。mcp-snowluma-safe.js / mcp-host-server.js 改读 state/agent-token（不再首选控制台令牌）。② mcp-host-server.js 的 OneBot 端口与 pid 改为经环境变量 QQ_BRIDGE_ONEBOT_PORT / QQ_BRIDGE_PID 传入 PowerShell，不再拼进命令文本，并加 -NonInteractive"
+    result: "src/bridge-privilege.js（新增）、src/bridge.js、src/mcp-snowluma-safe.js、src/mcp-host-server.js、scripts/test-bridge-privilege.mjs（新增，npm run test-privilege）、package.json、RULES.md（新增「桥接访问令牌（双令牌分离）」小节）"
+    verification: "纯逻辑 25 项全通过（含 ../ 与反斜杠绕过、相对路径拒绝、控制面接口逐条拒绝）；端到端校验以 /api/status 的 tokenModel==='dual' 为开关自动执行（服务令牌打 /api/terminal/open、服务启停、/api/socialV2/config 必须 403，且响应不种 Cookie），未重启时打印跳过而非误报"
+
   deprecated_experiments:
     - id: "DEP-01"
       name: "侧边栏滑动激活胶囊（nav-ind）"

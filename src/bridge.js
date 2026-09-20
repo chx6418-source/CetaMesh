@@ -18,6 +18,13 @@ import { createStatusPanel } from './status-panel.js';
 import { mdToPlain, splitForQQ } from './md-to-plain.js';
 import { SENSITIVE_RE } from './sensitive.js';
 import { looksLikeUnfinished } from './v2-wait.js';
+import {
+  PRIVILEGE_AGENT,
+  agentPrivilegeAllows,
+  describePrivilegeSurface,
+  resolvePrivilege,
+  shouldIssueConsoleSession
+} from './bridge-privilege.js';
 import { safeFetchBuffer, validateFetchUrl, looksLikeImageBuffer } from './safe-fetch.js';
 import { extractForwardIds, forwardIdFromData, sanitizeForwardId, formatForwardResponse } from './forward.js';
 import {
@@ -127,6 +134,22 @@ function loadOrCreateConsoleToken() {
   } catch {}
   const token = crypto.randomBytes(24).toString('hex');
   atomicWriteText(tokenFile, token);
+  return token;
+}
+
+// 服务令牌：给 MCP server / agent 侧使用的**数据面**凭据，与控制台令牌分离。
+// 即使它被泄漏，也够不到 /api/terminal/*（本机命令执行）、/api/services/*（服务启停/安装）、
+// /api/shutdown、配置写入等控制面接口。force=true 时强制轮换（控制台重置令牌时同步失效）。
+function loadOrCreateAgentToken(force = false) {
+  const tokenFile = path.join(STATE_DIR, 'agent-token');
+  if (!force) {
+    try {
+      const existing = fs.readFileSync(tokenFile, 'utf8').trim();
+      if (existing) return existing;
+    } catch {}
+  }
+  const token = crypto.randomBytes(24).toString('hex');
+  try { atomicWriteText(tokenFile, token); } catch {}
   return token;
 }
 
@@ -1697,6 +1720,9 @@ async function main() {
     let consoleToken = tokenValid ? configuredToken : loadOrCreateConsoleToken();
     if (!tokenValid && configuredToken) log(`控制台 config.consoleToken 长度/字符不合法，已忽略并回退到自动生成令牌`);
     if (!configuredToken) log(`控制台未配置 consoleToken，已自动生成：${String(consoleToken).slice(0, 6)}…（完整值保存在 state/console-token）`);
+    // 服务令牌（MCP / agent 侧数据面）：与控制台令牌分离，随进程启动确保存在。
+    let agentToken = loadOrCreateAgentToken();
+    log('已加载服务令牌（MCP/agent 数据面，权限低于控制台令牌；见 state/agent-token）');
     // 控制台会话（仅存进程内存）：进程存活期间 F5 刷新/路由切换/休眠唤醒均凭 Cookie 免登续持；
     // 进程终止即全部失效，冷重启后必须重新令牌鉴权。
     const consoleSessions = new Set();
@@ -1864,7 +1890,9 @@ async function main() {
       });
       const sessionValid = typeof cookieMap.consoleSession === 'string' && consoleSessions.has(cookieMap.consoleSession);
       const suppliedToken = url.searchParams.get('token') ?? req.headers['x-console-token'];
-      if (consoleToken && !sessionValid && suppliedToken !== consoleToken) {
+      // 双令牌：同一鉴权入口按*取值*区分权限级别（控制台=全权，服务=仅数据面白名单）
+      const privilege = resolvePrivilege({ sessionValid, suppliedToken, consoleToken, agentToken });
+      if (consoleToken && !privilege) {
         if (req.method === 'GET' && url.pathname === '/') {
           res.writeHead(401, { 'content-type': 'text/html; charset=utf-8', ...SECURITY_HEADERS });
           try {
@@ -1879,11 +1907,19 @@ async function main() {
       }
       // 令牌鉴权通过且尚无有效会话：签发进程内存会话并种 HttpOnly Cookie，
       // 之后同浏览器的请求凭 Cookie 静默续持登录态（Set-Cookie 随本次响应带回）
-      if (consoleToken && !sessionValid) {
+      // 仅控制台级别签发会话 Cookie：若服务令牌也能换来 Cookie，等于把数据面凭据
+      // 一步升级成控制面（Cookie 走全权通道），令牌分离就白做了。
+      if (shouldIssueConsoleSession(privilege)) {
         const sid = crypto.randomBytes(32).toString('hex');
         consoleSessions.add(sid);
         while (consoleSessions.size > 200) consoleSessions.delete(consoleSessions.values().next().value);
         res.setHeader('Set-Cookie', `consoleSession=${sid}; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000`);
+      }
+      // 服务令牌（agent/MCP 侧）只允许数据面白名单；终端、服务启停/安装、配置、模式、
+      // 令牌管理、shutdown 等控制面接口一律拒绝。
+      if (privilege === PRIVILEGE_AGENT && !agentPrivilegeAllows(req.method, url.pathname)) {
+        sendJson({ ok: false, error: `服务令牌无权访问 ${url.pathname}（该接口仅控制台令牌可用）` }, 403);
+        return;
       }
       // CSRF 防护：所有写操作必须是 application/json，且（若带 Origin）必须来自本机页面。
       // 默认未配 consoleToken 时，这可阻止任意网页用表单/跨站请求触发
@@ -2135,6 +2171,10 @@ async function main() {
             // （含 QQ 官方机器人 markdown 卡片），避免“代码已改但进程没重启”的误判。
             cardSegments: [...CARD_SEGMENT_TYPES],
             cardToolEnabled: cfg.socialV2?.tools?.getCardMsg !== false,
+            // 令牌模型自描述：dual = 控制台令牌(全权) + 服务令牌(仅数据面白名单)。
+            // 供自检/运维判断运行中的桥接是否已加载双令牌，避免把「没重启」误判成回归。
+            tokenModel: 'dual',
+            agentSurface: describePrivilegeSurface(),
             cardButtonClickToolEnabled: cfg.socialV2?.tools?.clickCardButton === true,
             services: localServices.snapshot(),
             activity: readActivityTail(100)
@@ -2779,6 +2819,8 @@ async function main() {
           cfg.consoleToken = generated ? '' : newToken;
           atomicWriteText(path.join(STATE_DIR, 'console-token'), newToken);
           consoleToken = newToken;
+          // 同步轮换服务令牌：重置一次即让控制台与 MCP 侧凭据同时失效（MCP 每次请求都会重读文件）
+          agentToken = loadOrCreateAgentToken(true);
           log(`控制台：访问令牌已${generated ? '重新生成' : '手动修改'}（不记录完整值）`);
           sendJson({ ok: true, token: newToken, generated });
           return;

@@ -17,6 +17,7 @@
     "test-forward": "node scripts/test-forward.mjs",
     "test-card": "node scripts/test-card.mjs",
     "test-local-services": "node scripts/test-local-services.mjs",
+    "test-privilege": "node scripts/test-bridge-privilege.mjs",
     "test-slang": "node scripts/test-slang-learn.mjs",
     "test-stickers": "node scripts/test-stickers.mjs",
     "postinstall": "node scripts/patch-snowluma-sdk.mjs"

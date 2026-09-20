@@ -55,14 +55,23 @@ function getConsolePort() {
   }
 }
 
-function readConsoleToken() {
+// 与控制台分离的「服务令牌」：本 MCP 只读 /api/status，走数据面白名单即可，
+// 不需要（也不应该）持有控制台令牌。
+function readBridgeToken() {
+  try {
+    const token = fs.readFileSync(path.join(ROOT, 'state', 'agent-token'), 'utf8').trim();
+    if (token) return token;
+  } catch {}
+  try {
+    const c = getConfig();
+    if (c.agentToken) return String(c.agentToken);
+  } catch {}
   try {
     const c = getConfig();
     if (c.consoleToken) return String(c.consoleToken);
   } catch {}
   try {
-    const tokenFile = path.join(ROOT, 'state', 'console-token');
-    return fs.readFileSync(tokenFile, 'utf8').trim();
+    return fs.readFileSync(path.join(ROOT, 'state', 'console-token'), 'utf8').trim();
   } catch {
     return '';
   }
@@ -71,7 +80,7 @@ function readConsoleToken() {
 // 进程控制只允许在 closed-agent（仅管理员私聊）模式下使用，防止 chat/reserved 的 agent 被群友诱导启停 SnowLuma。
 async function bridgeModeAllowsProcessControl() {
   try {
-    const token = readConsoleToken();
+    const token = readBridgeToken();
     const res = await fetch(`http://127.0.0.1:${getConsolePort()}/api/status`, {
       headers: token ? { 'x-console-token': token } : {},
       signal: AbortSignal.timeout(5000)
@@ -115,8 +124,12 @@ function findSnowLumaPids() {
   if (!Number.isInteger(portNum) || portNum <= 0 || portNum > 65535) return [];
   const pids = new Set();
   try {
-    const byPort = `Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $_.LocalPort -eq ${portNum} } | Select-Object -ExpandProperty OwningProcess -Unique`;
-    const out = execFileSync('powershell.exe', ['-NoProfile', '-Command', byPort], { timeout: 15000, windowsHide: true, encoding: 'utf8' });
+    // 端口经环境变量传入脚本，不拼进命令文本：避免字符串插值成为注入面。
+    const byPort = 'Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $_.LocalPort -eq [int]$env:QQ_BRIDGE_ONEBOT_PORT } | Select-Object -ExpandProperty OwningProcess -Unique';
+    const out = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', byPort], {
+      timeout: 15000, windowsHide: true, encoding: 'utf8',
+      env: { ...process.env, QQ_BRIDGE_ONEBOT_PORT: String(portNum) }
+    });
     for (const s of out.split(/\s+/)) {
       const n = Number(s.trim());
       if (Number.isInteger(n) && n > 0) pids.add(n);
@@ -126,7 +139,11 @@ function findSnowLumaPids() {
   const result = [];
   for (const pid of pids) {
     try {
-      const cmd = execFileSync('powershell.exe', ['-NoProfile', '-Command', `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`], { timeout: 10000, windowsHide: true, encoding: 'utf8' }).trim();
+      // 同理：pid 也经环境变量传入，绝不拼进 PowerShell 命令文本。
+      const cmd = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '(Get-CimInstance Win32_Process -Filter ("ProcessId=" + [int]$env:QQ_BRIDGE_PID)).CommandLine'], {
+        timeout: 10000, windowsHide: true, encoding: 'utf8',
+        env: { ...process.env, QQ_BRIDGE_PID: String(pid) }
+      }).trim();
       const cmdLower = String(cmd || '').toLowerCase().replace(/\\/g, '/');
       if (home && cmdLower.includes(home)) result.push(pid);
     } catch {
