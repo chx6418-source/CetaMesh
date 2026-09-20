@@ -4,14 +4,19 @@
     "provider": "deepseek-official",
     "model": "deepseek-flash",
     "reasoningEffort": "max",
-    "authCookie": ""
+    "authCookie": "",
+    "homeDir": "",
+    "executable": "",
+    "customPaths": []
   },
   "snowluma": {
     "wsUrl": "ws://127.0.0.1:3001",
     "httpUrl": "http://127.0.0.1:3000",
     "accessToken": "",
-    "launcherPath": "C:\\path\\to\\SnowLuma\\launcher.bat",
-    "homeDir": "C:\\path\\to\\SnowLuma",
+    "launcherPath": "SnowLuma\\launcher.bat",
+    "homeDir": "SnowLuma",
+    "webUrl": "",
+    "customPaths": [],
     "allowProcessControl": false
   },
   "ownerQQ": 123456789,

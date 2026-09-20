@@ -1659,10 +1659,19 @@ html.login-arrive .nav-btn {
   <section class="module" data-module="terminal" id="module-terminal" hidden>
     <div class="page-head">
       <h1>终端</h1>
-      <p class="page-sub">运行控制台 · 内嵌命令提示符——桥接运行日志与实时状态面板同步呈现，命令进程内执行，不再弹出独立窗口</p>
+      <p class="page-sub">桥接、SnowLuma 与 dsh 服务终端——可选服务失败时不阻塞 qq_bridge 主流程</p>
+    </div>
+    <div class="row" style="margin-bottom:12px">
+      <div class="seg" id="serviceTerminalTabs" aria-label="服务终端标签页">
+        <button type="button" data-service-tab="runtime" class="active">桥接运行控制台</button>
+        <button type="button" data-service-tab="snowluma">SnowLuma 后台终端</button>
+      </div>
+      <span class="meta" id="serviceTerminalHint">SnowLuma 启动优先于 QQ 桥接；启动失败会自动降级。</span>
+      <button id="servicesRescan" class="btn sm ghost" type="button">重新检测</button>
+      <span class="meta" id="servicesDetectionMeta">后台并行检测中…</span>
     </div>
     <div class="grid">
-      <article class="card c-12">
+      <article class="card c-12" id="runtimeTerminalCard" data-service-pane="runtime">
         <header class="card-head">
           <h2><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>运行控制台</h2>
           <span class="hint">等效外部 cmd 窗口：桥接运行日志 + 实时状态面板</span>
@@ -1673,6 +1682,58 @@ html.login-arrive .nav-btn {
         <div class="card-body">
           <pre class="term-screen" id="rtScreen" style="height:380px">正在连接运行日志…</pre>
           <pre class="term-status" id="rtStatus" hidden>状态面板加载中…</pre>
+        </div>
+      </article>
+
+      <article class="card c-12" id="snowlumaTerminalCard" data-service-pane="snowluma" hidden>
+        <header class="card-head">
+          <h2><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 17h16M4 12h16M4 7h16"/><path d="M7 3v18"/></svg>SnowLuma 后台终端</h2>
+          <span class="pill pill-warn" id="snowlumaServicePill"><span class="dot"></span>检测中…</span>
+          <div style="display:flex;gap:6px;flex-wrap:wrap">
+            <button id="snowlumaInstall" class="btn sm" type="button" hidden>安装最新发布版</button>
+            <button id="snowlumaStart" class="btn sm primary" type="button">启动 SnowLuma</button>
+            <button id="snowlumaStop" class="btn sm danger" type="button" hidden>停止</button>
+            <button id="snowlumaOpenWeb" class="btn sm ghost" type="button">打开 SnowLuma 网页</button>
+            <a class="btn sm ghost" href="https://github.com/SnowLuma/SnowLuma/releases/latest" target="_blank" rel="noreferrer">发布页</a>
+          </div>
+        </header>
+        <div class="card-body">
+          <pre class="term-screen" id="snowlumaScreen" style="height:380px">正在连接 SnowLuma 后台日志…</pre>
+          <div class="meta" id="snowlumaServiceMeta">检测中…</div>
+          <div class="row" style="margin-top:10px">
+            <select id="snowlumaVersionSelect" style="flex:1;min-width:260px" aria-label="SnowLuma 已安装版本"><option value="">等待检测…</option></select>
+            <button id="snowlumaVersionApply" class="btn sm" type="button">使用所选版本</button>
+          </div>
+          <div class="row" style="margin-top:8px">
+            <input id="snowlumaCustomPath" style="flex:1;min-width:260px" placeholder="手动路径，例如 D:\Apps\SnowLuma" autocomplete="off" spellcheck="false">
+            <button id="snowlumaPathAdd" class="btn sm ghost" type="button">检测此路径</button>
+          </div>
+          <div class="meta err-text" id="snowlumaInvalidMeta" style="margin-top:6px" hidden></div>
+        </div>
+      </article>
+
+      <article class="card c-12" id="dshServiceCard">
+        <header class="card-head">
+          <h2><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h18M12 3v18"/><circle cx="12" cy="12" r="9"/></svg>dsh 服务监控</h2>
+          <span class="pill pill-warn" id="dshServicePill"><span class="dot"></span>检测中…</span>
+          <div style="display:flex;gap:6px;flex-wrap:wrap">
+            <button id="dshStart" class="btn sm primary" type="button">一键启动 dsh 服务</button>
+            <button id="dshStop" class="btn sm danger" type="button" hidden>停止</button>
+            <button id="dshMonitorOpen" class="btn sm ghost" type="button">打开 dsh 监控终端</button>
+          </div>
+        </header>
+        <div class="card-body">
+          <div class="meta" id="dshServiceMeta">检测中…</div>
+          <div class="row" style="margin-top:10px">
+            <select id="dshVersionSelect" style="flex:1;min-width:260px" aria-label="dsh 已安装版本"><option value="">等待检测…</option></select>
+            <button id="dshVersionApply" class="btn sm" type="button">使用所选版本</button>
+          </div>
+          <div class="row" style="margin-top:8px">
+            <input id="dshCustomPath" style="flex:1;min-width:260px" placeholder="手动路径，例如 C:\Users\Administrator\.dsh 或 dsh.cmd" autocomplete="off" spellcheck="false">
+            <button id="dshPathAdd" class="btn sm ghost" type="button">检测此路径</button>
+          </div>
+          <div class="meta err-text" id="dshInvalidMeta" style="margin-top:6px" hidden></div>
+          <div class="meta" style="margin-top:6px">监控终端以独立应用窗口打开（不带浏览器地址栏），只读展示，不提供交互输入。</div>
         </div>
       </article>
 
@@ -2326,6 +2387,209 @@ window.LOG_POOL = [
     });
     $('.nav-btn[data-module="terminal"]').addEventListener('click', () => { if (!rtSource) rtConnect(); });
     if ((location.hash || '').replace('#', '') === 'terminal') rtConnect();
+  })();
+
+  /* ================= 本地子服务终端（SnowLuma / dsh） ================= */
+  (() => {
+    const tabs = $$('#serviceTerminalTabs [data-service-tab]');
+    const panes = $$('[data-service-pane]');
+    const snowPill = $('#snowlumaServicePill');
+    const snowScreen = $('#snowlumaScreen');
+    const snowMeta = $('#snowlumaServiceMeta');
+    const dshPill = $('#dshServicePill');
+    const dshMeta = $('#dshServiceMeta');
+    const detectionMeta = $('#servicesDetectionMeta');
+    let serviceSource = null;
+    let services = null;
+    let promptedSnow = false;
+    let promptedDsh = false;
+    let promptChain = Promise.resolve();
+
+    function queuePrompt(task) {
+      promptChain = promptChain.then(task).catch(() => {});
+      return promptChain;
+    }
+
+    function setTab(name) {
+      tabs.forEach((tab) => tab.classList.toggle('active', tab.dataset.serviceTab === name));
+      panes.forEach((pane) => { pane.hidden = pane.dataset.servicePane !== name; });
+    }
+    tabs.forEach((tab) => tab.addEventListener('click', () => setTab(tab.dataset.serviceTab)));
+
+    function pill(pillEl, service) {
+      if (!pillEl || !service) return;
+      const ready = service.ready === true;
+      const checking = ['pending', 'checking'].includes(service.detection?.status);
+      const missing = service.installed === false;
+      const invalid = service.status === 'invalid';
+      const status = checking ? '检测中…' : invalid ? '安装无效' : missing ? '未安装' : (service.status || '未知');
+      pillEl.className = 'pill ' + (ready ? 'pill-ok' : checking ? 'pill-warn' : missing || invalid || service.status === 'failed' ? 'pill-err' : 'pill-warn');
+      pillEl.innerHTML = '<span class="dot' + (ready ? ' pulse' : '') + '"></span>' + status;
+    }
+    function detectionLabel(detection) {
+      const layers = { cache: '缓存校验', priority: '优先路径', 'full-scan': '全量扫描', failed: '检测失败', none: '等待检测' };
+      if (!detection || ['pending', 'checking'].includes(detection.status)) return '后台并行检测中…';
+      return (layers[detection.layer] || detection.layer || '检测完成') + ' · ' + Number(detection.durationMs || 0) + 'ms' + (detection.truncated ? ' · 扫描已达上限' : '');
+    }
+    function renderInstallations(serviceName, service) {
+      const select = $('#' + serviceName + 'VersionSelect');
+      const invalidMeta = $('#' + serviceName + 'InvalidMeta');
+      const installations = Array.isArray(service.installations) ? service.installations : [];
+      const valid = installations.filter((item) => item.valid);
+      const invalid = installations.filter((item) => !item.valid);
+      const signature = valid.map((item) => item.id + ':' + item.version).join('|') + '#' + (service.selectedId || '');
+      if (select.dataset.signature !== signature) {
+        select.replaceChildren();
+        if (!valid.length) {
+          const option = document.createElement('option');
+          option.value = '';
+          option.textContent = service.detection?.status === 'checking' ? '检测中…' : '未找到可启动版本';
+          select.appendChild(option);
+        } else {
+          valid.forEach((item) => {
+            const option = document.createElement('option');
+            option.value = item.id;
+            option.textContent = 'v' + (item.version || '未知') + ' · ' + (item.entrypoint || item.homeDir);
+            option.selected = item.id === service.selectedId;
+            select.appendChild(option);
+          });
+        }
+        select.dataset.signature = signature;
+      }
+      select.disabled = !valid.length;
+      $('#' + serviceName + 'VersionApply').disabled = !valid.length;
+      invalidMeta.hidden = !invalid.length;
+      invalidMeta.textContent = invalid.length
+        ? ('发现 ' + invalid.length + ' 个不完整安装：' + invalid.map((item) => (item.homeDir || item.packageDir || '-') + '（' + item.invalidReason + '）').join('；') + '。请重新安装。')
+        : '';
+    }
+    function renderLog(el, service) {
+      if (!el || !service) return;
+      const next = Array.isArray(service.logs) && service.logs.length
+        ? service.logs.map((item) => '[' + new Date(item.time).toLocaleTimeString() + '] ' + item.text).join('\n') + '\n'
+        : '（暂无后台输出）\n';
+      const stick = el.scrollHeight - el.clientHeight - el.scrollTop < 48;
+      if (el.textContent !== next) el.textContent = next;
+      if (stick) el.scrollTop = el.scrollHeight;
+    }
+    function render(data, allowPrompt = true) {
+      if (!data) return;
+      services = data.services || data;
+      const snow = services.snowluma || {};
+      const dsh = services.dsh || {};
+      pill(snowPill, snow);
+      pill(dshPill, dsh);
+      renderLog(snowScreen, snow);
+      renderInstallations('snowluma', snow);
+      renderInstallations('dsh', dsh);
+      detectionMeta.textContent = 'SnowLuma：' + detectionLabel(snow.detection) + '；dsh：' + detectionLabel(dsh.detection);
+      snowMeta.textContent = snow.installed
+        ? ('版本：' + (snow.version || '未知') + ' · 目录：' + (snow.homeDir || '-') + (snow.ready ? ' · HTTP API 已就绪' : ' · ' + (snow.lastError || '等待启动')) + (snow.webUrl ? ' · 网页控制台 ' + snow.webUrl : ''))
+        : snow.status === 'invalid' ? ('检测到不完整的 SnowLuma 安装：' + (snow.lastError || '缺少启动文件') + '，请重新安装。')
+          : ['pending', 'checking'].includes(snow.detection?.status) ? '正在后台检测 SnowLuma，不影响控制台启动。'
+            : '未检测到 SnowLuma 文件。安装目录固定为 qq_bridge\\SnowLuma，可从 GitHub 最新发布版安装。';
+      dshMeta.textContent = dsh.installed
+        ? ('版本：' + (dsh.version || '未知') + ' · 可执行文件：' + (dsh.executable || '-') + (dsh.ready ? ' · Web API 已就绪' : ' · ' + (dsh.lastError || '未启动')))
+        : dsh.status === 'invalid' ? ('检测到不完整的 dsh 安装：' + (dsh.lastError || '缺少可执行文件') + '，请重新安装。')
+          : ['pending', 'checking'].includes(dsh.detection?.status) ? '正在后台检测 dsh，不影响控制台启动。'
+            : '未检测到 dsh 服务。前置依赖：需先安装 Node.js 环境；安装命令：npx @deepseek-ai/dsh web';
+      $('#snowlumaInstall').hidden = !!snow.installed || snow.status === 'installing';
+      $('#snowlumaStart').disabled = snow.status === 'starting' || snow.status === 'installing';
+      $('#snowlumaStop').hidden = !snow.running || snow.managed === false;
+      $('#dshStart').disabled = dsh.status === 'starting';
+      $('#dshStop').hidden = !dsh.running || dsh.managed === false;
+      if (!allowPrompt) return;
+      const snowComplete = snow.detection?.status === 'complete';
+      const dshComplete = dsh.detection?.status === 'complete';
+      if (snowComplete && !snow.installed && !promptedSnow) {
+        promptedSnow = true;
+        const snowProblem = snow.status === 'invalid' ? '检测到 SnowLuma 安装不完整，无法安全启动。是否重新安装最新发布版？' : '未检测到 SnowLuma 文件。是否从 GitHub 最新发布版下载并安装到 qq_bridge\\SnowLuma？';
+        queuePrompt(() => confirmBox(snowProblem + '\\n\\n安装源：https://github.com/SnowLuma/SnowLuma/releases/latest', '下载并安装'))
+          .then((ok) => { if (ok) $('#snowlumaInstall').click(); });
+      }
+      if (dshComplete && !dsh.installed && !promptedDsh) {
+        promptedDsh = true;
+        const dshProblem = dsh.status === 'invalid' ? '检测到 dsh 安装不完整，请重新安装。' : '未检测到 dsh 服务。';
+        queuePrompt(() => confirmBox(dshProblem + '\\n\\n前置依赖：需先安装 Node.js 环境\\n安装命令：npx @deepseek-ai/dsh web', '知道了'))
+          .then(() => toast('请在 Node.js 环境中执行 npx @deepseek-ai/dsh web，完成后刷新检测。', { type: 'warn' }));
+      }
+    }
+    async function refresh(allowPrompt = true) {
+      try { render(await api('/api/services'), allowPrompt); } catch {}
+    }
+    async function action(path, label, body = {}) {
+      const button = document.activeElement;
+      if (button && button.tagName === 'BUTTON') button.disabled = true;
+      try {
+        const result = await api(path, 'POST', body);
+        if (result.service) render({ snowluma: result.service.name === 'SnowLuma' ? result.service : services?.snowluma, dsh: result.service.name === 'dsh' ? result.service : services?.dsh }, false);
+        toast(result.ok ? label + '已执行' : (label + '未完成：' + (result.service?.lastError || '请查看终端日志')), { type: result.ok ? 'ok' : 'warn' });
+        await refresh(false);
+      } catch (error) {
+        toast(label + '失败：' + (error?.message || error), { type: 'err' });
+      } finally {
+        if (button && button.tagName === 'BUTTON') button.disabled = false;
+      }
+    }
+    $('#snowlumaInstall').addEventListener('click', () => action('/api/services/snowluma/install', 'SnowLuma 安装'));
+    $('#snowlumaStart').addEventListener('click', () => action('/api/services/snowluma/start', 'SnowLuma 启动'));
+    $('#snowlumaStop').addEventListener('click', () => action('/api/services/snowluma/stop', 'SnowLuma 停止'));
+    $('#dshStart').addEventListener('click', () => action('/api/services/dsh/start', 'dsh 启动'));
+    $('#dshStop').addEventListener('click', () => action('/api/services/dsh/stop', 'dsh 停止'));
+    $('#servicesRescan').addEventListener('click', async () => {
+      promptedSnow = false;
+      promptedDsh = false;
+      try {
+        await api('/api/services/detect', 'POST', { force: true });
+        toast('已在后台并行重新检测 SnowLuma 与 dsh；完成后会自动通知。', { type: 'ok' });
+      } catch (error) { toast('重新检测启动失败：' + (error?.message || error), { type: 'err' }); }
+    });
+    $('#snowlumaVersionApply').addEventListener('click', () => action('/api/services/snowluma/select', 'SnowLuma 版本切换', { id: $('#snowlumaVersionSelect').value }));
+    $('#dshVersionApply').addEventListener('click', () => action('/api/services/dsh/select', 'dsh 版本切换', { id: $('#dshVersionSelect').value }));
+    $('#snowlumaPathAdd').addEventListener('click', () => action('/api/services/snowluma/select', 'SnowLuma 自定义路径检测', { path: $('#snowlumaCustomPath').value.trim() }));
+    $('#dshPathAdd').addEventListener('click', () => action('/api/services/dsh/select', 'dsh 自定义路径检测', { path: $('#dshCustomPath').value.trim() }));
+    // 独立应用窗口（Edge/Chrome --app）打开，去掉了浏览器标题栏与地址栏；后端不可用时回退弹窗。
+    $('#dshMonitorOpen').addEventListener('click', async () => {
+      try {
+        const r = await api('/api/services/dsh/open', 'POST', {});
+        if (r && r.ok) { toast('已在独立窗口打开 dsh 监控终端'); return; }
+      } catch {}
+      const win = window.open('/dsh-monitor.html', 'qq-bridge-dsh-monitor', 'popup=yes,width=980,height=640,resizable=yes,scrollbars=yes');
+      if (!win) toast('浏览器阻止了弹出窗口，请允许 qq_bridge 打开 dsh 监控终端。', { type: 'warn' });
+    });
+    // 一键打开 SnowLuma 图形控制台（网页配置页）：后端解析真实 WebUI 地址并以应用窗口打开。
+    $('#snowlumaOpenWeb').addEventListener('click', async () => {
+      const button = $('#snowlumaOpenWeb');
+      button.disabled = true;
+      try {
+        const r = await api('/api/services/snowluma/open', 'POST', {});
+        if (r && r.ok) toast('已在' + (r.mode === 'app' ? '独立应用窗口' : '默认浏览器') + '打开 SnowLuma 网页：' + r.webUrl);
+        else toast('打开 SnowLuma 网页失败：' + ((r && r.error) || '未知错误'), { type: 'warn' });
+      } catch (error) {
+        toast('打开 SnowLuma 网页失败：' + (error?.message || error), { type: 'err' });
+      } finally {
+        button.disabled = false;
+      }
+    });
+    function connect() {
+      if (serviceSource) serviceSource.close();
+      serviceSource = new EventSource('/api/services/stream?service=all');
+      serviceSource.onmessage = (event) => {
+        try {
+          const message = JSON.parse(event.data);
+          if (message.service === 'all') render(message.snapshot, true);
+          else if (message.service && services) render({ ...services, [message.service]: message.snapshot }, true);
+          if (message.event === 'detection-complete') {
+            toast('本地服务检测完成：耗时 ' + Number(message.durationMs || 0) + 'ms，找到 ' + Number(message.matches || 0) + ' 个可用版本' + (message.invalid ? '，另有 ' + message.invalid + ' 个无效安装' : '') + '。', { type: message.invalid ? 'warn' : 'ok' });
+          }
+        } catch {}
+      };
+      serviceSource.onerror = () => {};
+    }
+    connect();
+    refresh(true);
+    $('.nav-btn[data-module="terminal"]').addEventListener('click', () => refresh(false));
+    window.addEventListener('beforeunload', () => serviceSource && serviceSource.close());
   })();
 
   /* ================= 主题切换（苏打 / 深海 / 护眼） ================= */

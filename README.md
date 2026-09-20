@@ -47,9 +47,9 @@ QQ 消息 ──► SnowLuma（OneBot v11 WS）──► 本桥接进程 ──�
 
 ## 前置条件
 
-1. 运行中的 DeepSeek Harness Web（默认 `http://127.0.0.1:3080`）
-2. 运行中的 SnowLuma，且配置好 OneBot WebSocket 与 HTTP API（默认 `ws://127.0.0.1:3001` / `http://127.0.0.1:3000`，`accessToken` 视配置填写）
-3. Node.js ≥ 22.13
+1. 运行中的 DeepSeek Harness Web（默认 `http://127.0.0.1:3080`；未运行时桥接会保留消息队列并继续提供控制台）
+2. Node.js ≥ 22.13
+3. SnowLuma 为可选本地子服务：已安装时桥接启动会优先尝试启动；未安装或启动失败不会阻塞 qq_bridge 主程序
 
 ## 安装与配置
 
@@ -70,7 +70,7 @@ npm install        # 安装依赖（postinstall 会自动修补 @snowluma/sdk �
 | `snowluma.wsUrl` | SnowLuma OneBot **WebSocket** 地址（如 `ws://127.0.0.1:3001`） |
 | `snowluma.httpUrl` | OneBot **HTTP API** 地址（如 `http://127.0.0.1:3000`）；不要填 WebSocket 端口，否则会报 HTTP 426 |
 | `snowluma.accessToken` | OneBot accessToken，未配置留空 |
-| `snowluma.launcherPath` / `homeDir` | SnowLuma 启动脚本与安装目录（供 agent 自动启动/停止） |
+| `snowluma.launcherPath` / `homeDir` | SnowLuma 启动脚本与安装目录；控制台会优先使用这两个字段，缺省时检测 qq_bridge 根目录下的 `SnowLuma` 文件夹 |
 | `agentPreset` | QQ 会话使用的 DSH agent preset，默认 `qq-chat`（改性格见下文） |
 | `socialV2.agentPreset` | `reserved2` 模式使用的 DSH agent preset，默认 `qq-chat-v2` |
 | `workspaceTitle` | QQ 会话在 DSH 界面中的归组名称，默认「QQ 聊天」 |
@@ -82,6 +82,20 @@ npm install        # 安装依赖（postinstall 会自动修补 @snowluma/sdk �
 | `consoleToken` | 控制台访问令牌；留空时启动自动生成并保存到 `state/console-token` |
 
 > ⚠️ `allowAllWhenEmpty: true` 表示「白名单没填就全部放行」——把 agent 接入 QQ 等于把账号控制权交给了模型，建议先填白名单。
+
+### 控制台内嵌 SnowLuma / dsh 子服务
+
+启动“启动桥接.vbs”后，qq_bridge 控制台会先上线并扫描本机服务：
+
+- SnowLuma 与 dsh 在后台并行检测，不阻塞控制台首屏。每项检测都按“有效缓存 → 默认/历史/自定义路径 → 有界全量扫描”执行，并在完成后通过控制台通知展示耗时与结果。
+- SnowLuma 会覆盖仓库 SnowLuma 目录、Program Files、Program Files (x86)、LOCALAPPDATA、PATH 中包含 snowluma 的目录以及历史自定义路径；dsh 会覆盖 C:\Users\Administrator\.dsh、%USERPROFILE%\.dsh、npm 全局包/全局 bin 和 PATH 可执行文件。
+- 检测不只判断目录：还会校验启动文件并读取版本。缺少启动文件的目录会标记为“安装无效”并提示重装；检测到多个可用版本时，可在控制台选择当前使用版本，也可手动添加路径。
+- SnowLuma 已安装时，桥接按“先 SnowLuma、后 QQ WebSocket”顺序启动；HTTP API 探测超时或启动失败时，控制台和 DSH 监控仍继续运行，QQ 链路可稍后在“终端 → SnowLuma 后台终端”重试。
+- 未检测到 SnowLuma 时，控制台会弹出确认框；确认后从 [SnowLuma 最新发布版](https://github.com/SnowLuma/SnowLuma/releases/latest) 下载 Windows ZIP，并解压到仓库根目录的 SnowLuma 文件夹。安装后路径会自动写回 config.json。
+- “SnowLuma 后台终端”只读展示启动日志与 HTTP 就绪状态，不把服务命令输入暴露给控制台；面板上的「打开 SnowLuma 网页」会用 Edge/Chrome 的**应用窗口**（不带浏览器标签栏与地址栏）打开 SnowLuma 图形控制台，地址优先取自本实例启动日志（5099 被占用回退 5100 时也能拿到正确端口），未启动时按 5099→5102 探测、确认是 SnowLuma 页面才打开。
+- **启动超时不等于启动失败**：SnowLuma 往往已在运行、网页控制台也可访问，只是还没在网页里配好 OneBot 网关（HTTP API 未监听）。面板会直接说明这一原因，并提示点「打开 SnowLuma 网页」完成配置；桥接自身保持可用，不会因此退出。
+- dsh 未检测到时会提示 Node.js 前置依赖和 npx @deepseek-ai/dsh web 安装命令；检测到可执行文件后可点击“一键启动 dsh 服务”。
+- dsh 监控终端通过独立应用窗口打开（同样不带浏览器地址栏），默认不自动弹出，只展示 dsh 日志与状态，不提供交互输入。
 
 ### DSH 端安装（另一台设备 / 新环境）
 
@@ -97,14 +111,14 @@ node scripts/setup-dsh.mjs
 
 ## 完整启动流程（从零开始）
 
-共 5 步，DSH 和桥接都已就绪，缺的只是 SnowLuma 本体：
+现在只需启动 qq_bridge，控制台会自动完成可选子服务检测；已有安装仍可按以下配置核对：
 
-1. **DSH**（已运行，无需操作）
-   确认 `http://127.0.0.1:3080` 能打开即可。
+1. **DSH**（可选自动启动）
+   如果本机已存在 dsh 配置目录，可在控制台“终端”点击“一键启动 dsh 服务”；否则按提示先安装 Node.js，再执行 `npx @deepseek-ai/dsh web`。确认 `http://127.0.0.1:3080` 能打开即可。
 
-2. **下载并解压 SnowLuma**
-   - 下载：<https://github.com/SnowLuma/SnowLuma/releases/latest> 选 `SnowLuma-v<版本>-win-x64.zip`（完整版，自带 Node 运行时；Lite 版需本机 Node 22.13+）
-   - 解压到任意目录（例如 `C:\SnowLuma`），双击 `launcher.bat`
+2. **SnowLuma（可选手动准备）**
+   - 控制台会从 <https://github.com/SnowLuma/SnowLuma/releases/latest> 自动安装到仓库根目录的 SnowLuma 文件夹；也可以手动解压后在 config.json 填写 snowluma.homeDir / launcherPath。
+   - 完整版自带 Node 运行时；Lite 版需本机 Node 22.13+。
 
 3. **首次引导（WebUI）**
    - 打开启动日志里的 WebUI 地址（README 写的是 `http://localhost:5099`，以你启动日志里实际打印的为准）
@@ -127,7 +141,7 @@ node scripts/setup-dsh.mjs
    cd qq-bridge
    npm start          # 或双击 start.bat
    ```
-   看到 `SnowLuma 已连接` 即成功；然后 QQ 上给机器人账号发条消息测试。
+    控制台会先展示 SnowLuma/dsh 检测状态；SnowLuma 就绪后才连接 QQ，若服务失败则保持 qq_bridge 控制台可用，稍后可从终端页重试。
 
 ## 运行与运维
 

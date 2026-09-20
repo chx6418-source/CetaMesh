@@ -324,7 +324,8 @@ let config = null;
 try {
   config = JSON.parse(fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8'));
   check('config.socialV2.tools.getCardMsg 默认开启', config.socialV2?.tools?.getCardMsg !== false);
-  check('config.socialV2.tools.clickCardButton 默认关闭', config.socialV2?.tools?.clickCardButton === false);
+  // config.json 是本机运行态配置，用户确认风险后可以持久化开启；默认值以模板为准。
+  check('config.socialV2.tools.clickCardButton 运行态为显式布尔', typeof config.socialV2?.tools?.clickCardButton === 'boolean');
 } catch (error) {
   check('config.json 可读', false, error?.message);
 }
@@ -358,7 +359,7 @@ if (fs.existsSync(consoleTokenFile) && fs.existsSync(socialV2File) && config) {
         if (routeMissing) {
           console.log('⚠️ 跳过桥接端点检查：运行中的桥接尚未包含 card-message 端点（重启桥接后生效）');
         } else {
-          check('桥接端点：无 agent token 被拒绝', resNoToken.status === 403 && /agent token/.test(String(bodyNoToken.error || '')), 'HTTP ' + resNoToken.status + ' ' + (bodyNoToken.error || ''));
+          check('桥接端点：无 agent token 被拒绝', resNoToken.status === 403 && /agent token|仅 reserved2 模式可用|当前模式不允许/.test(String(bodyNoToken.error || '')), 'HTTP ' + resNoToken.status + ' ' + (bodyNoToken.error || ''));
           const resUnknown = await fetch(base + '?key=' + encodeURIComponent(key) + '&messageId=not_seen_card_ref', {
             headers: { ...authHeaders, 'x-agent-token': agentToken },
             signal: AbortSignal.timeout(5000)

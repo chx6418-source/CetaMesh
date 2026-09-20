@@ -60,6 +60,7 @@ import {
   markStickerUsed
 } from './sticker-lib.js';
 import { loginInfo, extractKugouAuth, createQrLogin, pollQrLogin } from './kugou-api.js';
+import { createLocalServiceManager, SNOWLUMA_RELEASE_PAGE, DSH_INSTALL_HINT } from './local-services.js';
 let kugouQrSession = null; // 进行中的二维码登录会话 { key, mid, dfid, createdAt }
 let kugouLoginCache = null; // { cookie, info, fetchedAt } 缓存的完整登录信息（含 roleinfo 探测的会员状态）
 async function probeKugouLogin(cookie) {
@@ -806,6 +807,16 @@ async function main() {
   fs.mkdirSync(STATE_DIR, { recursive: true });
   acquireLock();
   loadState();
+
+  // 可选本地子服务：SnowLuma/dsh 的检测、启动、安装和日志流都由控制台共享。
+  // 构造时只在后台并行检测本地文件，不启动任何进程、也不阻塞控制台上线；
+  // 随后再按“SnowLuma 优先、失败降级”的顺序推进桥接启动。
+  const localServices = createLocalServiceManager({
+    root: ROOT,
+    config: cfg,
+    onLog: (line) => log(line),
+    onConfigPatch: (patch) => log(`本地子服务配置已更新：${JSON.stringify(patch)}`)
+  });
 
   // ── 群聊黑话/网络用语学习（slang） ──────────────────────────────────────
   let slangEntries = loadSlang(SLANG_FILE);
@@ -1676,6 +1687,7 @@ async function main() {
 
   // ── 本地控制台（独立 Web 面板，不依赖 DSH WebUI） ───────────────────────────
   // 模式/角色/静默状态都存 state/*.json，桥接即时感知；此服务只读写这些文件。
+  let connectSnowLuma = async () => ({ ok: false, error: 'SnowLuma 客户端尚未初始化' });
   function startConsoleServer() {
     const port = cfg.consolePort ?? 3100;
     // 控制台鉴权：优先用 config.consoleToken，未配置则自动生成并持久化，不再默认无鉴权。
@@ -2011,6 +2023,86 @@ async function main() {
           req.on('close', () => { clearInterval(beat); runtimeLogHub.clients.delete(res); });
           return;
         }
+        // 本地子服务：SnowLuma 优先启动、dsh 可选启动；所有失败都只反映在状态里，
+        // 不会阻塞控制台或让 qq_bridge 主流程退出。
+        if (req.method === 'GET' && url.pathname === '/api/services') {
+          sendJson({ ok: true, services: localServices.refresh(), releasePage: SNOWLUMA_RELEASE_PAGE, dshInstallHint: DSH_INSTALL_HINT });
+          return;
+        }
+        if (req.method === 'GET' && url.pathname === '/api/services/stream') {
+          const requested = String(url.searchParams.get('service') || 'all');
+          const service = ['snowluma', 'dsh'].includes(requested) ? requested : 'all';
+          res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-store', connection: 'keep-alive', ...SECURITY_HEADERS });
+          const send = (payload) => { try { res.write(`data: ${JSON.stringify(payload)}\n\n`); } catch {} };
+          const unsubscribe = localServices.subscribe(service, send);
+          const beat = setInterval(() => { try { res.write(': ping\n\n'); } catch {} }, 15000);
+          req.on('close', () => { clearInterval(beat); unsubscribe(); });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/services/detect') {
+          const body = await readBody().catch(() => ({}));
+          void localServices.detectAll({ force: body?.force !== false }).catch((error) => log(`本地服务后台检测失败：${error?.message ?? error}`));
+          sendJson({ ok: true, started: true, services: localServices.snapshot() }, 202);
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/services/snowluma/select') {
+          const body = await readBody().catch(() => ({}));
+          const result = await localServices.selectSnowLuma({ id: String(body?.id || ''), path: String(body?.path || '') });
+          sendJson({ ok: result.installed && !result.lastError, service: result });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/services/dsh/select') {
+          const body = await readBody().catch(() => ({}));
+          const result = await localServices.selectDsh({ id: String(body?.id || ''), path: String(body?.path || '') });
+          sendJson({ ok: result.installed && !result.lastError, service: result });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/services/snowluma/install') {
+          const result = await localServices.installSnowLuma();
+          sendJson({ ok: result.status !== 'failed', service: result, releasePage: SNOWLUMA_RELEASE_PAGE });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/services/snowluma/start') {
+          const result = await localServices.startSnowLuma();
+          let bridge = null;
+          if (result.ready) {
+            bridge = await connectSnowLuma().catch((error) => ({ ok: false, error: error?.message ?? String(error) }));
+          }
+          sendJson({ ok: result.ready === true, service: result, bridge });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/services/snowluma/stop') {
+          sendJson({ ok: true, service: await localServices.stopSnowLuma() });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/services/dsh/start') {
+          const result = await localServices.startDsh();
+          sendJson({ ok: result.ready === true, service: result, dshInstallHint: DSH_INSTALL_HINT });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/services/dsh/stop') {
+          sendJson({ ok: true, service: await localServices.stopDsh() });
+          return;
+        }
+        // 一键打开服务网页界面：SnowLuma 图形控制台 / dsh 只读监控终端。
+        // 后端用 Edge/Chrome 的 --app 模式唤起，窗口不带浏览器地址栏（形如独立应用窗口）。
+        if (req.method === 'POST' && url.pathname === '/api/services/snowluma/open') {
+          sendJson(await localServices.openSnowLumaWeb());
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/services/dsh/open') {
+          sendJson(localServices.openDshMonitor());
+          return;
+        }
+        if (req.method === 'GET' && url.pathname === '/dsh-monitor.html') {
+          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', ...SECURITY_HEADERS });
+          try {
+            res.end(fs.readFileSync(path.join(ROOT, 'public', 'dsh-monitor.html'), 'utf8'));
+          } catch {
+            res.end('<!doctype html><meta charset="utf-8"><title>dsh 监控终端</title><p>监控页面缺失：qq-bridge/public/dsh-monitor.html</p>');
+          }
+          return;
+        }
         // 关闭主程序：终止守护循环与全量桥接进程（含内嵌终端会话），完整退出应用
         if (req.method === 'POST' && url.pathname === '/api/shutdown') {
           log('控制台：收到关闭主程序请求，正在终止全量进程…');
@@ -2044,6 +2136,7 @@ async function main() {
             cardSegments: [...CARD_SEGMENT_TYPES],
             cardToolEnabled: cfg.socialV2?.tools?.getCardMsg !== false,
             cardButtonClickToolEnabled: cfg.socialV2?.tools?.clickCardButton === true,
+            services: localServices.snapshot(),
             activity: readActivityTail(100)
           });
           return;
@@ -9487,26 +9580,68 @@ async function main() {
     try { await handlePokeNotice(event); } catch (error) { log('处理拍一拍事件出错:', error?.message ?? error); }
   });
 
-  bot.on('open', () => log(`SnowLuma 已连接：${cfg.snowluma.wsUrl}`));
+  let botConnectPromise = null;
+  let botConnected = false;
+  let botIdentityLoaded = false;
+  async function loadBotIdentity() {
+    if (botIdentityLoaded) return;
+    try {
+      const login = await bot.getLoginInfo();
+      if (login?.nickname) {
+        selfNickname = String(login.nickname).toLowerCase();
+        botIdentityLoaded = true;
+        log(`机器人昵称: ${login.nickname}`);
+      }
+    } catch {}
+  }
+  bot.on('open', () => {
+    botConnected = true;
+    log(`SnowLuma 已连接：${cfg.snowluma.wsUrl}`);
+    loadBotIdentity();
+  });
   bot.on('close', (info) => log(`SnowLuma 连接断开（code=${info?.code ?? '?'}），重连中…`));
   bot.on('error', (error) => log('SnowLuma 错误:', error));
 
-  await bot.connect();
-  // 读取机器人昵称（用于社交模式"被提到"识别）
-  try {
-    const login = await bot.getLoginInfo();
-    if (login?.nickname) {
-      selfNickname = String(login.nickname).toLowerCase();
-      log(`机器人昵称: ${login.nickname}`);
+  // 控制台先上线，之后按“SnowLuma 优先”尝试启动；启动失败只降级 QQ 链路，
+  // 允许管理员在控制台安装/启动服务后再次连接，不让主程序被外部服务阻塞。
+  connectSnowLuma = async () => {
+    if (botConnected) return { ok: true, connected: true };
+    if (botConnectPromise) return { ok: false, pending: true, message: 'SnowLuma 连接正在建立' };
+    botConnectPromise = (async () => {
+      try {
+        await Promise.race([
+          bot.connect(),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('SnowLuma WebSocket 连接超时')), 15000))
+        ]);
+        botConnected = true;
+        await loadBotIdentity();
+        return { ok: true, connected: true };
+      } catch (error) {
+        log(`SnowLuma WebSocket 连接失败，桥接继续独立运行：${error?.message ?? error}`);
+        return { ok: false, error: error?.message ?? String(error) };
+      } finally {
+        botConnectPromise = null;
+      }
+    })();
+    return botConnectPromise;
+  };
+
+  startConsoleServer();
+  // 启动探测在后台进行：QQ WebSocket 只有 SnowLuma ready 后才会连接，
+  // 但控制台、DSH 探活与日志终端不会被最多 35 秒的服务启动等待卡住。
+  localServices.startSnowLuma({ waitMs: 35000 }).then(async (snowStartup) => {
+    if (snowStartup.ready) {
+      await connectSnowLuma();
+    } else {
+      log(`SnowLuma 未就绪（${snowStartup.status}），qq_bridge 已降级独立启动；可在控制台终端中重试。`);
     }
-  } catch {}
-  log('桥接已启动。按 Ctrl+C 退出。');
+  }).catch((error) => log(`SnowLuma 启动流程异常，qq_bridge 已降级：${error?.message ?? error}`));
+  log('桥接控制台已启动。SnowLuma 就绪后将自动连接 QQ；按 Ctrl+C 退出。');
   // 预热表情库：启动时同步一次 QQ 收藏表情，失败不阻塞（AI 首次调用工具时还会再试）。
   if (cfg.socialV2?.sticker?.enabled !== false) {
     syncStickerLibrary(true).catch((error) => log('启动预热表情库失败:', error?.message ?? error));
   }
   startDshWatch();
-  startConsoleServer();
   // 启动后延迟回填历史卡片元数据（本功能上线前收到的卡片消息），失败不影响启动。
   setTimeout(() => {
     backfillRecentCardsV2().catch((error) => log('卡片回填失败:', error?.message ?? error));
@@ -9520,7 +9655,10 @@ async function main() {
   function gatherStatusLines() {
     const now = new Date();
     const clock = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
-    const head = `${clock} 模式 ${currentMode} · DSH ${dshReady ? '已就绪' : '不可用（消息排队中）'}${socialV2.paused ? ' · 二代已暂停' : ''} · 会话 ${Object.keys(state.sessions).length}${followStreams.size ? ` · 事件流 ${followStreams.size}` : ''}`;
+    const services = localServices.snapshot();
+    const snowLabel = services.snowluma.ready ? '已就绪' : services.snowluma.installed ? services.snowluma.status : '未安装';
+    const dshLabel = services.dsh.ready ? '已就绪' : services.dsh.installed ? services.dsh.status : '未安装';
+    const head = `${clock} 模式 ${currentMode} · SnowLuma ${snowLabel} · dsh ${dshLabel} · DSH ${dshReady ? '已就绪' : '不可用（消息排队中）'}${socialV2.paused ? ' · 二代已暂停' : ''} · 会话 ${Object.keys(state.sessions).length}${followStreams.size ? ` · 事件流 ${followStreams.size}` : ''}`;
     const lines = [{ rule: true, text: '─'.repeat(64) }, head];
     const keys = new Set([...Object.keys(state.sessions), ...socialV2.conversations.keys()]);
     const sorted = [...keys].sort((a, b) => (socialV2.conversations.get(b)?.lastIncomingAt ?? 0) - (socialV2.conversations.get(a)?.lastIncomingAt ?? 0));

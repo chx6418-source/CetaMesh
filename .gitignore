@@ -7,6 +7,10 @@ node_modules/
 # design-demos/bg-ripple/tools/ 的融合工具链与校验夹具，那些是要入库的）
 /tools/
 
+# Optional SnowLuma runtime installed/detected by the local service manager
+/SnowLuma/
+/SnowLuma-v*/
+
 # Runtime state and local config (never publish)
 state/
 config.json
