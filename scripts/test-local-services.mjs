@@ -41,11 +41,14 @@ try {
     ? '@echo off\necho DSH_START_OK:%1\necho DSH_HOME_OK:%DSH_HOME%\nexit /b 0\n'
     : '#!/bin/sh\necho DSH_START_OK:$1\n');
 
+  // 端口 9（discard）必然连不上：让这些用例与「开发机上是否真跑着服务」彻底解耦。
+  const DEAD_CONFIG = { snowluma: { httpUrl: 'http://127.0.0.1:9' }, dsh: { baseUrl: 'http://127.0.0.1:9' } };
   const config = {
     snowluma: {
       homeDir: snowDir,
       launcherPath: path.join(snowDir, 'launcher.bat'),
-      customPaths: [snowV2, invalidSnow]
+      customPaths: [snowV2, invalidSnow],
+      httpUrl: 'http://127.0.0.1:9'
     },
     dsh: { baseUrl: 'http://127.0.0.1:9', homeDir: dshHome }
   };
@@ -93,7 +96,7 @@ try {
 
   const missingManager = createLocalServiceManager({
     root: path.join(temp, 'empty'),
-    config: {},
+    config: DEAD_CONFIG,
     detectionOptions: { userHome: path.join(temp, 'empty-user'), fullScanRoots: [], environment: { PATH: '' } }
   });
   const missing = await missingManager.detectAll();
@@ -136,7 +139,7 @@ try {
   fs.mkdirSync(path.join(homeOnlyDsh, 'profiles'), { recursive: true });
   const homeOnlyManager = createLocalServiceManager({
     root: path.join(temp, 'home-only-root'),
-    config: {},
+    config: DEAD_CONFIG,
     detectionOptions: { userHome: homeOnly, fullScanRoots: [], environment: { PATH: '', APPDATA: path.join(temp, 'no-appdata'), LOCALAPPDATA: '' } }
   });
   const homeOnlyResult = await homeOnlyManager.detectAll();
@@ -149,7 +152,7 @@ try {
   // ── 子进程输出解码：Node(UTF-8) 与 cmd(GBK) 混排、跨块多字节都不能变乱码 ──
   // 截图里那条 cmd 报错就是“首行 ASCII 锁定 UTF-8、后面的中文全变 �”的典型症状。
   const mixed = createAdaptiveProcessDecoder();
-  let mixedText = mixed.write(Buffer.from('D:\\GIT-QQ-BRIDGE>echo on\n'));
+  let mixedText = mixed.write(Buffer.from('D:\\repo>echo on\n'));
   mixedText += mixed.write(Buffer.from('✅ 全部通过\n', 'utf8'));
   mixedText += mixed.write(iconv.encode('不是内部或外部命令，也不是可运行的程序或批处理文件。\n', 'gbk'));
   mixedText += mixed.end();
@@ -182,7 +185,7 @@ try {
   const fakeWebPort = fakeWeb.address().port;
   const webManager = createLocalServiceManager({
     root: path.join(temp, 'web-root'),
-    config: {},
+    config: DEAD_CONFIG,
     detectionOptions: {
       userHome: temp, fullScanRoots: [], snowLumaWebPorts: [fakeWebPort],
       environment: { PATH: '', APPDATA: path.join(temp, 'no-appdata'), LOCALAPPDATA: '' }
@@ -195,7 +198,7 @@ try {
 
   const noWebManager = createLocalServiceManager({
     root: path.join(temp, 'no-web-root'),
-    config: {},
+    config: DEAD_CONFIG,
     detectionOptions: { userHome: temp, fullScanRoots: [], snowLumaWebPorts: [], environment: { PATH: '', APPDATA: path.join(temp, 'no-appdata'), LOCALAPPDATA: '' } }
   });
   const noWeb = await noWebManager.openSnowLumaWeb();

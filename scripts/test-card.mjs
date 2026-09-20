@@ -168,9 +168,9 @@ check('buildCardRecord 空原始内容返回 null', buildCardRecord('json', '') 
 // ── 3.5 QQ 官方机器人 Markdown 卡片（真实抓包 payload） ────────────────────
 // 这两条是 QQ 官方机器人「随机图」与「今日梦境」卡片在 NapCat/SnowLuma 下的真实形态：
 // 插图是 markdown 里的 ![#宽 #高](https://qqbot.ugcimg.cn/…)，按钮在 inline_keyboard 段。
-const BOT_MD_RANDOM = '[](%7B%22version%22%3A2%7D)\n![#3204px #3887px](https://qqbot.ugcimg.cn/102084850/37885e4b049089455eb4964dd328f107ceca4da0/f39bc97cb2ea30c1ee7cac92b0b0e20e)\n![#20px #20px](https://qqbot.ugcimg.cn/102084850/1db0bbfe38dbd3d653a2da093e033caf8e822adb/2b00cd42c7401674091d8320a4fead8d) [@宇宙Ω银河](mqqapi://markdown/mention?at_type=1&at_tinyid=3273753820)**的随机图** (剩余: **19**)\n\n> 图片作者: **Ohihil** (ID:73272100)\n\n![#20px #20px](https://qqbot.ugcimg.cn/102084850/7e99bc94eda363e8967dadc795f1a6d763ccd834/8e5fb5ae2c3db2f3c12b0d4d457c50d1) [🔗使用声明](https://xbdqwq.com/about/rule/image)';
+const BOT_MD_RANDOM = '[](%7B%22version%22%3A2%7D)\n![#3204px #3887px](https://qqbot.ugcimg.cn/100000001/37885e4b049089455eb4964dd328f107ceca4da0/f39bc97cb2ea30c1ee7cac92b0b0e20e)\n![#20px #20px](https://qqbot.ugcimg.cn/100000001/1db0bbfe38dbd3d653a2da093e033caf8e822adb/2b00cd42c7401674091d8320a4fead8d) [@测试成员A](mqqapi://markdown/mention?at_type=1&at_tinyid=100001)**的随机图** (剩余: **19**)\n\n> 图片作者: **Ohihil** (ID:73272100)\n\n![#20px #20px](https://qqbot.ugcimg.cn/100000001/7e99bc94eda363e8967dadc795f1a6d763ccd834/8e5fb5ae2c3db2f3c12b0d4d457c50d1) [🔗使用声明](https://xbdqwq.com/about/rule/image)';
 const BOT_KB_RANDOM = {
-  bot_appid: '102084850',
+  bot_appid: '100000001',
   rows: [
     { buttons: [
       { id: '1', label: '💖喜欢', visited_label: '💖喜欢', style: 1, type: 1, click_limit: 1, data: 'BOT1.0_xxx', permission_type: 2, unsupport_tips: '版本过低' },
@@ -179,10 +179,10 @@ const BOT_KB_RANDOM = {
     { buttons: [ { id: '3', label: '🔄再来一张', visited_label: '🔄再来一张', style: 4, type: 2, click_limit: 1, data: '随机图', permission_type: 2 } ] }
   ]
 };
-const BOT_MD_DREAM = '[](%7B%22version%22%3A2%7D)\n![#1672px #940px](https://qqbot.ugcimg.cn/102084850/74079e4681200f40248977de3953c1d4bda5abed/b9ce2982362d6b1ca125a548d54b6fac)\n\n![#20px #20px](https://qqbot.ugcimg.cn/102084850/b60869357240073efbffcbe373ea33ac08f97931/45983ec12383b36098a333082acd18f7) **今日梦境** [@蓝色鲸鱼](mqqapi://markdown/mention?at_type=1&at_tinyid=3638296285) \n**你抽到了:** 泡影之梦\n**梦境名:**《贩卖机的心意》\n> **介绍:** 深夜的自动贩卖机多找了你一枚硬币，还朝你闪了两下灯。你们对视了很久，谁也没先说话。\n> —— 幻梦的评语: 它大概只是想请小人类喝一罐吧。这种小心意，收下就好啦。\n![#20px #20px](https://qqbot.ugcimg.cn/102084850/e96e02a28380c3a7fc1fa9ba2d33514e46be95b4/9fbfe6cb0796ca07ae39e5ff971bcf8e)梦境名: **「贩卖机的心意」**已收入梦境图鉴（1/65）\n> 你是今天第4395位入梦的~';
+const BOT_MD_DREAM = '[](%7B%22version%22%3A2%7D)\n![#1672px #940px](https://qqbot.ugcimg.cn/100000001/74079e4681200f40248977de3953c1d4bda5abed/b9ce2982362d6b1ca125a548d54b6fac)\n\n![#20px #20px](https://qqbot.ugcimg.cn/100000001/b60869357240073efbffcbe373ea33ac08f97931/45983ec12383b36098a333082acd18f7) **今日梦境** [@测试成员B](mqqapi://markdown/mention?at_type=1&at_tinyid=100002) \n**你抽到了:** 泡影之梦\n**梦境名:**《贩卖机的心意》\n> **介绍:** 深夜的自动贩卖机多找了你一枚硬币，还朝你闪了两下灯。你们对视了很久，谁也没先说话。\n> —— 幻梦的评语: 它大概只是想请小人类喝一罐吧。这种小心意，收下就好啦。\n![#20px #20px](https://qqbot.ugcimg.cn/100000001/e96e02a28380c3a7fc1fa9ba2d33514e46be95b4/9fbfe6cb0796ca07ae39e5ff971bcf8e)梦境名: **「贩卖机的心意」**已收入梦境图鉴（1/65）\n> 你是今天第4395位入梦的~';
 
 const botSegs = [
-  { type: 'at', data: { qq: '3273753820' } },
+  { type: 'at', data: { qq: '100001' } },
   { type: 'markdown', data: { content: BOT_MD_RANDOM } },
   { type: 'inline_keyboard', data: BOT_KB_RANDOM }
 ];
@@ -190,14 +190,14 @@ const botCards = extractCardsFromSegments(botSegs);
 check('Markdown 卡片：markdown+按钮合并为一张卡', botCards.length === 1 && botCards[0].type === 'markdown+inline_keyboard');
 const botCard = botCards[0];
 check('Markdown 卡片 kind=bot_markdown_card', botCard.kind === 'bot_markdown_card' && botCard.kindLabel === 'QQ 官方机器人卡片');
-check('Markdown 卡片 bot_appid 提取', botCard.app === '102084850' && botCard.botAppId === '102084850');
+check('Markdown 卡片 bot_appid 提取', botCard.app === '100000001' && botCard.botAppId === '100000001');
 check('Markdown 卡片 去掉模板头 [](/%7B%22version%22…)', !botCard.text.includes('version') && !botCard.raw.startsWith('[](#'));
 check('Markdown 卡片 插图提取（含尺寸）', botCard.markdownImages.length === 3 && botCard.markdownImages[0].width === 3204 && botCard.markdownImages[0].height === 3887);
-check('Markdown 卡片 @提及还原为文案', botCard.mentions.length === 1 && botCard.mentions[0].userId === '3273753820' && botCard.text.includes('@宇宙Ω银河'));
+check('Markdown 卡片 @提及还原为文案', botCard.mentions.length === 1 && botCard.mentions[0].userId === '100001' && botCard.text.includes('@测试成员A'));
 check('Markdown 卡片 外链还原', botCard.markdownLinks.some((l) => l.kind === 'web' && l.url === 'https://xbdqwq.com/about/rule/image'));
 check('Markdown 卡片 按钮结构化', botCard.buttons.length === 3 && botCard.buttons[0].text === '💖喜欢' && botCard.buttons[0].action === 'callback' && botCard.buttons[2].action === 'command' && botCard.buttons[2].data === '随机图');
 const pickedCallback = selectCardButton(botCards, { cardIndex: 0, buttonIndex: 0 });
-check('卡片按钮点击：按索引派生网关参数', pickedCallback.selection?.botAppId === '102084850' && pickedCallback.selection?.buttonId === '1' && pickedCallback.selection?.callbackData === 'BOT1.0_xxx');
+check('卡片按钮点击：按索引派生网关参数', pickedCallback.selection?.botAppId === '100000001' && pickedCallback.selection?.buttonId === '1' && pickedCallback.selection?.callbackData === 'BOT1.0_xxx');
 check('卡片风险分级：明确偏好按钮为低风险', pickedCallback.selection?.riskLevel === 'low' && pickedCallback.selection?.requiresApproval === false);
 const pickedCommand = selectCardButton(botCards, { cardIndex: 0, buttonIndex: 2 });
 check('卡片按钮点击：支持指令按钮', pickedCommand.selection?.action === 'command' && pickedCommand.selection?.callbackData === '随机图');
@@ -272,7 +272,8 @@ check('sanitizeCardRef 拒绝空白与超长', sanitizeCardRef('1 2') === '' && 
 const bridgeSrc = fs.readFileSync(path.join(ROOT, 'src', 'bridge.js'), 'utf8');
 const mcpSrc = fs.readFileSync(path.join(ROOT, 'src', 'mcp-snowluma-safe.js'), 'utf8');
 const consoleHtml = fs.readFileSync(path.join(ROOT, 'public', 'console.html'), 'utf8');
-const part2 = fs.readFileSync(path.join(ROOT, 'design-demos', 'src', 'console', 'part2.html'), 'utf8');
+// 控制台唯一事实源（旧 part1-3 + assemble.mjs 已删除，二者长期分叉且运行会覆盖生产页）
+const consoleBaseline = fs.readFileSync(path.join(ROOT, 'design-demos', 'bg-ripple', 'tools', 'fixtures', 'console.baseline.html'), 'utf8');
 
 check('bridge.js 引入 qq-card 模块', /from '\.\/qq-card\.js'/.test(bridgeSrc));
 check('bridge.js 导入 extractCardsFromSegments', /extractCardsFromSegments/.test(bridgeSrc));
@@ -311,9 +312,9 @@ check('mcp-snowluma-safe.js 卡片点击要求 confirm=true', /confirm:\s*z\.lit
 check('mcp-snowluma-safe.js 注册审批状态查询工具', mcpSrc.includes("'qq_get_card_button_approval'") && mcpSrc.includes('/api/socialV2/card-button-approval'));
 
 check('控制台开关面板含 getCardMsg（public/console.html）', consoleHtml.includes('data-v2-tool="getCardMsg"'));
-check('控制台开关面板含 getCardMsg（part2.html 源）', part2.includes('data-v2-tool="getCardMsg"'));
+check('控制台开关面板含 getCardMsg（基线源）', consoleBaseline.includes('data-v2-tool="getCardMsg"'));
 check('控制台卡片点击开关默认关闭并标注风险', consoleHtml.includes('data-v2-tool="clickCardButton"') && consoleHtml.includes('data-v2-tool-default="off"') && consoleHtml.includes('高风险 · 默认关闭'));
-check('控制台卡片点击开关同步到 part2 源', part2.includes('data-v2-tool="clickCardButton"') && part2.includes('data-risk-tool="card-button"') && part2.includes('首次确认后立即保存并持续开启'));
+check('控制台卡片点击开关同步到基线源', consoleBaseline.includes('data-v2-tool="clickCardButton"') && consoleBaseline.includes('data-risk-tool="card-button"') && consoleBaseline.includes('首次确认后立即保存并持续开启'));
 check('控制台开启卡片点击前弹出风险确认', consoleHtml.includes('知晓风险并开启') && consoleHtml.includes('每次工具调用仍需显式确认'));
 check('控制台风险开关确认后保持开启、再次开启需复核', consoleHtml.includes('确认后工具会持续开启') && consoleHtml.includes('下次从关闭状态重新开启时仍需再次确认'));
 check('控制台风险开关开启/关闭即时持久化', consoleHtml.includes('persistCardButtonTool') && /clickCardButton:\s*enabled/.test(consoleHtml) && consoleHtml.includes('待审批请求已撤销'));

@@ -88,7 +88,7 @@ npm install        # 安装依赖（postinstall 会自动修补 @snowluma/sdk �
 启动“启动桥接.vbs”后，qq_bridge 控制台会先上线并扫描本机服务：
 
 - SnowLuma 与 dsh 在后台并行检测，不阻塞控制台首屏。每项检测都按“有效缓存 → 默认/历史/自定义路径 → 有界全量扫描”执行，并在完成后通过控制台通知展示耗时与结果。
-- SnowLuma 会覆盖仓库 SnowLuma 目录、Program Files、Program Files (x86)、LOCALAPPDATA、PATH 中包含 snowluma 的目录以及历史自定义路径；dsh 会覆盖 C:\Users\Administrator\.dsh、%USERPROFILE%\.dsh、npm 全局包/全局 bin 和 PATH 可执行文件。
+- SnowLuma 会覆盖仓库 SnowLuma 目录、Program Files、Program Files (x86)、LOCALAPPDATA、PATH 中包含 snowluma 的目录以及历史自定义路径；dsh 会覆盖 `%USERPROFILE%\.dsh`、`DSH_HOME`、config.json 指定的目录、npm 全局包/全局 bin 和 PATH 可执行文件。
 - 检测不只判断目录：还会校验启动文件并读取版本。缺少启动文件的目录会标记为“安装无效”并提示重装；检测到多个可用版本时，可在控制台选择当前使用版本，也可手动添加路径。
 - SnowLuma 已安装时，桥接按“先 SnowLuma、后 QQ WebSocket”顺序启动；HTTP API 探测超时或启动失败时，控制台和 DSH 监控仍继续运行，QQ 链路可稍后在“终端 → SnowLuma 后台终端”重试。
 - 未检测到 SnowLuma 时，控制台会弹出确认框；确认后从 [SnowLuma 最新发布版](https://github.com/SnowLuma/SnowLuma/releases/latest) 下载 Windows ZIP，并解压到仓库根目录的 SnowLuma 文件夹。安装后路径会自动写回 config.json。

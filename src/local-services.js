@@ -574,13 +574,14 @@ export function createLocalServiceManager({ root, config = {}, onLog = () => {},
     const prefixPackage = npmPrefix ? path.join(npmPrefix, 'node_modules', '@deepseek-ai', 'dsh') : '';
     const configuredHome = normalizeDir(config?.dsh?.homeDir, repoRoot);
     const configuredExecutable = normalizeDir(config?.dsh?.executable, repoRoot);
+    // 只依据「配置 / DSH_HOME / 当前用户主目录」推导，不硬编码某个机器的用户名：
+    // 写死 C:\Users\<某人>\.dsh 在别人机器上必然落空，还会把本机信息带进仓库。
     const dshHomeCandidates = uniquePaths([
       configuredHome,
       environment.DSH_HOME,
-      'C:\\Users\\Administrator\\.dsh',
-      // 兼容早期部署使用的非标准目录名。
-      'C:\\Users\\Administrator.dsh',
-      userHome ? path.join(userHome, '.dsh') : ''
+      userHome ? path.join(userHome, '.dsh') : '',
+      // 兼容早期部署使用的非标准目录名（少一个点）。
+      userHome ? path.join(path.dirname(userHome), path.basename(userHome) + '.dsh') : ''
     ]);
     const executableNames = process.platform === 'win32' ? ['dsh.cmd', 'dsh.exe'] : ['dsh'];
     const pathExecutables = pathDirectories.flatMap((dir) => executableNames.map((name) => path.join(dir, name)));

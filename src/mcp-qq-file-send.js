@@ -645,7 +645,7 @@ server.tool(
 
 server.tool(
   'qq_search_local_audio',
-  '在本地读取目录（config.json fileSend.localDirs，当前如 F:\\Administrator\\Music）中按文件名搜索音频文件。支持：精确/子串/分词匹配、拼音容错（如查 huahai 命中「花海」，yinyue 命中「音乐」）、模糊子序列匹配，结果按关联度降序返回。返回结构化列表 [{index,path,name,ext,sizeMb,score,matchType}]，可直接把 path 交给 qq_send_file 发送。入参仅 query（必填）与 limit（可选，默认 10，最大 50）。',
+  '在本地读取目录（config.json 的 fileSend.localDirs，例如 D:\\Music）中按文件名搜索音频文件。支持：精确/子串/分词匹配、拼音容错（如查 huahai 命中「花海」，yinyue 命中「音乐」）、模糊子序列匹配，结果按关联度降序返回。返回结构化列表 [{index,path,name,ext,sizeMb,score,matchType}]，可直接把 path 交给 qq_send_file 发送。入参仅 query（必填）与 limit（可选，默认 10，最大 50）。',
   {
     query: z.string().describe('搜索关键词：中文/拼音/英文片段均可，如「花海」「huahai」「Moment」「Odesza」'),
     limit: z.number().int().min(1).max(50).optional().describe('最多返回条数，默认 10')

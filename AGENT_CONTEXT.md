@@ -215,6 +215,12 @@ history:
     verification: "① **屏幕级**落定帧背景取点 vs 官方主题图：深海 左 #1a1f42/上 #252749/右 #152033/下 #1b2d43（官方 #1a2145/#262a4c/#172338/#1b2641，差 1–7）、苏打 左 #dbdcff/上 #e2defd/下 #cee9f2（官方 #d9deff/#e3e1ff/#cedef6，差 1–7）—— **基座纯色 #131a2e 已从屏幕上消失**，说明这一层真的显示出来了。② **隔离观测复测**：p=0.94 时整屏可见我的深海画布（左上蓝光/右下青绿），撤层后露出宿主 `.bg-decor`。③ **真实播放 + 中途注入 30 次强制重绘**：p 单调 0.27→0.47→0.64→0.78→0.87→0.94→0.99→1（1358ms），全程无中断、无冻住。④ `check-fusion.mjs` 三条硬校验 PASS。"
     scope_note: "生产文件仍只有 `public/console.html`（标记块内纯新增）与 `public/token-login.html`（基线原样）；`src/*` 零改动。**方法论教训（已写入 SOP-03 STEP-8 / ACC-7）**：这类"背景层"必须**看屏幕**（截图取点并与基准图比对），不能只读画布内部像素或只看动画差值——本轮前四次「验证通过」都是读内部状态造成的假阳性。"
 
+  - step: T14
+    date: "2026-09-20"
+    action: "[仓库卫生·审计] 清理不应纳入管理的代码：① 删除过期控制台组装链 design-demos/src/console/{part1,part2,part3}.html + assemble.mjs（与生产页分叉，实测运行会把生产页 292,512 字符覆盖成 219,207 字符、丢失约 25%）；② 删除根目录过期副本 test-dsh-v2-wait.mjs（无引用，已被 scripts/test-v2-wait.mjs 取代）；③ 删除一次性本机迁移记录 docs/MIGRATION.md；④ 清理硬编码本机信息（src/local-services.js 的 C:\Users\<用户名>\.dsh 候选改为由 %USERPROFILE% 推导、src/mcp-qq-file-send.js 的 F:\Administrator\Music 示例、README 与控制台占位符、测试提示符）；⑤ 脱敏 scripts/test-card.mjs 中真实 QQ 号与群昵称；⑥ 修复测试隐式依赖真实服务端口（改为注入 127.0.0.1:9，否则开发机跑着 SnowLuma/dsh 时必然失败）"
+    result: "删除：design-demos/src/console/{part1,part2,part3}.html、assemble.mjs、test-dsh-v2-wait.mjs、docs/MIGRATION.md；修改：src/local-services.js、src/mcp-qq-file-send.js、scripts/test-card.mjs、scripts/test-local-services.mjs、README.md、public/console.html、console.baseline.html"
+    risk_audit: "跟踪文件无真实凭据；无「已 gitignore 但仍被跟踪」的文件；鉴权为全局闸门（除登录页外所有 /api 需 consoleToken）。已评估并**保留**：assets/project-intro.mp4（11.2MB，占跟踪体积 76%）——README 第 17 行引用中，且从工作区删除不减 git 历史、反而破坏文档，瘦身需 Releases/LFS 或重编码；src/pinyin-data.js（365KB 生成物）——生成脚本需 npm pack 取源、运行时不依赖任何 npm 包，刻意入库。遗留建议：/api/terminal/* 等价本机 RCE（建议二次确认或独立令牌）；src/mcp-host-server.js 的 pid 建议参数化传递"
+
   deprecated_experiments:
     - id: "DEP-01"
       name: "侧边栏滑动激活胶囊（nav-ind）"
@@ -263,7 +269,7 @@ style_baseline:
     - "低饱和糖果配色全链路；accent 双色渐变(var(--accent)→var(--accent-2))"
     - "主题切换即时生效，无全局过渡动画"
 
-  design_tokens.source: "design-demos/src/console/part1.html 顶部 :root[data-theme=light|dark|warm]（唯一 token 定义处）"
+  design_tokens.source: "design-demos/bg-ripple/tools/fixtures/console.baseline.html 顶部 :root[data-theme=light|dark|warm]（唯一 token 定义处）；生产页 public/console.html 由 fuse-console.mjs 在该基线上叠加 4 个涟漪标记块生成"
   design_tokens.core: { accent: "#5b7cfa", accent2: "#7cc7f2", radius: "26px/16px/999px", spring: "cubic-bezier(.3,1.6,.5,1)", glass_blur: "20px(light/dark)/18px(warm)" }
 
   forbidden:  # 禁用设计反例 [强制]
@@ -271,7 +277,7 @@ style_baseline:
     - "禁止主题切换全局渐变（html.theme-anim）——见 §5 SOP-02"
     - "禁止原生 prompt()/alert()/confirm()——必须使用 toast()/confirmBox()/promptModal()/连点两次确认(data-arm)"
     - "禁止圆角 < 12px 的控件造型与高饱和纯色 accent（低饱和糖果双色渐变为准）"
-    - "禁止 DOM 中出现三连以上 $ 前缀（$$$()/$$$$(）与单 $ 链式 forEach（历史转义事故，assemble.mjs 已有守卫）"
+    - "禁止 DOM 中出现三连以上 $ 前缀（$$$()/$$$$(）与单 $ 链式 forEach（历史转义事故）"
 
 # ================================================================
 # §4 资产归档合规规则 [MODULE=ARCHIVE_COMPLIANCE]
@@ -295,11 +301,11 @@ sop:
       - "STEP-1 [复现] 录屏定位断层帧，确认涉及元素是否含 backdrop-filter"
       - "STEP-2 [决策] 依据 §3.forbidden 第 1 条：此类问题禁止再引入滑动胶囊变体，采用回退/简化策略"
       - "STEP-3 [执行] 侧边栏动画整体回退至基线行为（激活态=按钮自身渐变 + 即时切换），删除 nav-ind 相关 CSS/JS"
-      - "STEP-4 [回归] node design-demos/src/console/assemble.mjs 断言通过"
+      - "STEP-4 [回归] node design-demos/bg-ripple/tools/check-fusion.mjs 三条硬校验 PASS"
     acceptance:
       - "ACC-1 快速连续切换导航 10 次，录屏逐帧检查：无残影、无割裂、无文字不可读"
       - "ACC-2 三主题（苏打/深海/护眼）各自验证通过"
-      - "ACC-3 assemble.mjs 三重断言（id 完整性/关键标记/语法）通过且页面 0 报错"
+      - "ACC-3 check-fusion.mjs 三条硬校验 PASS（控制台剥离标记块 == 基线逐字节、登录页未改、内联引擎 == 源）且页面 0 报错"
     status: "CLOSED（最终方案已落地于当前基线）"
   - sop_id: "SOP-02"
     title: "主题切换模糊残影（已闭环）"
@@ -317,19 +323,18 @@ sop:
 # ================================================================
 anchors:
   file_map:
-    console_css: "design-demos/src/console/part1.html（全部样式 + 设计 token）"
-    console_html: "design-demos/src/console/part2.html（四模块 DOM + 弹窗）"
-    console_js: "design-demos/src/console/part3.html（全部交互/API 逻辑）"
-    assembler: "design-demos/src/console/assemble.mjs（组装 + 三重断言）"
-    assembler_warning: "[重要·2026-09-13 实测] public/console.html **当前不是** part1-3 的可复现产物：生产控制台含大量未回移植到 part1-3 的较新功能（退出登录 nav-logout、内嵌终端、会话管理模块、user-select 规则、interpolate-size 等，约 500+ 行）。直接运行 assemble.mjs **会覆盖并丢失**这些功能（实测产物 226KB vs 生产 248KB）。修改控制台时：以 public/console.html 为生产事实源直接编辑，并把对应改动**同步**回 part1/2/3 作为参考源，**不要贸然重跑 assemble**；若要恢复组装链，需先做一次 part1-3 ← public/console.html 的全量回移植。"
+    console_source: "design-demos/bg-ripple/tools/fixtures/console.baseline.html（控制台唯一事实源：全部样式 + 设计 token + 四模块 DOM + 全部交互/API 逻辑）"
+    console_production: "public/console.html（由 fuse-console.mjs 生成，勿手改；改完基线必须重跑 fuse + check-fusion）"
+    assembler: "design-demos/bg-ripple/tools/fuse-console.mjs（基线 + 4 个标记块 → public/console.html，幂等）"
+    assembler_warning: "[已闭环·2026-09-20·T14] 旧组装链 design-demos/src/console/{part1,part2,part3}.html + assemble.mjs **已删除**：它与生产页长期分叉，直接运行会把生产页从 292,512 字符覆盖成 219,207 字符（丢失约 25%），实测会丢退出登录、内嵌终端、服务面板、卡片工具开关等。控制台改动一律走「改 console.baseline.html → fuse-console.mjs → check-fusion.mjs（三条硬校验必须 PASS）」，不要再引入第二套组装链。"
     mock_data: "design-demos/src/data.js（Demo 用 Mock）"
-    preview_server: "design-demos/src/console/serve.mjs"
+    preview_server: "design-demos/src/serve.mjs（Design Demo 选型页静态预览，端口 4173）"
     login_page: "public/token-login.html（无令牌入口页，随改动即时生效，无需重启桥接）——「柔光浮雕 Soft Emboss + 静水浮升转场」：入场动画 + 提交后卡片压入水面（640ms）+ 主题色自右下角 .morph 铺满再跳转，控制台侧读 sessionStorage.loginArrive 做卡片依次浮升（见 public/console.html 的 login-arrive 段）。**该页不含任何涟漪/渐变背景动画**（T25 已还原为基线，check-fusion 硬校验）"
     console_arrive: "public/console.html 的「落场涟漪」段（T25 融合，4 个 bg-ripple 标记块）：从登录页进来时播一次湖面涟漪，起始 = 主题底色 --bg、目标 = 当前主题的 .bg-decor 画布（THEME_MAP）；图层在 .bg-decor 之后、z-index:-1，默认 display:none，只有 html.login-arrive 才显示，落定 onDone 即撤层交还。改引擎后必须重跑 tools/fuse-console.mjs 同步内联副本"
     bg_ripple: "design-demos/bg-ripple/（湖面涟漪主题背景渐变引擎，非生产入口）：ripple-bg.js=引擎唯一事实源（四套背景配方 + 纯色配方 + 涟漪遮罩着色器 + 定版 PRESET + once/loop3 双模式 + THEME_MAP + setTime 确定性定位）；index.html=两模式 lab（①进入主页面可切主题 ②三组渐变循环，?t/?hud/?mode/?theme）；serve.mjs=本机服务 4175（静态根只暴露本目录 + /public/token-login.html、/public/console.html 白名单）；README.md=参数表/工具/降级/实测数据；tools/fuse-console.mjs=融合生成器（基线 + 4 标记块 → public/console.html，幂等）；tools/check-fusion.mjs=三条硬校验（控制台零改动 + 登录页无涟漪 + 引擎一致）；tools/fixtures/{console,token-login}.baseline.html=融合前基线（勿手改）。T24 已删除其它 4 版参数与其机制"
   commands:
-    assemble: "node design-demos/src/console/assemble.mjs（改 part1/2/3 后必须执行并确认 ✓）"
-    preview_static: "node design-demos/src/console/serve.mjs → http://127.0.0.1:4173"
+    assemble: "node design-demos/bg-ripple/tools/fuse-console.mjs → node design-demos/bg-ripple/tools/check-fusion.mjs（改控制台基线后必须执行，三条硬校验必须 PASS）"
+    preview_static: "node design-demos/src/serve.mjs → http://127.0.0.1:4173（Design Demo 选型页）"
     login_samples: "node design-demos/login-proposals/serve.mjs → http://127.0.0.1:4174/（登录页 10 方案样品 + 演示视频；单页可加 ?take=1 隐藏提示、?enter=300 延迟入场便于录屏）"
     bg_ripple_preview: "node design-demos/bg-ripple/serve.mjs → http://127.0.0.1:4175/（涟漪 lab：①进入主页面可切三主题验证联动 ②三组渐变循环；/view 已合并进 index.html，用 ?mode/?theme/?t/?hud 切）。同端口可直接开被融合的两个生产页面：http://127.0.0.1:4175/public/token-login.html、http://127.0.0.1:4175/public/console.html（控制台需要 /api，静态服务下只能看版面与落场背景）"
     bg_ripple_fuse: "node design-demos/bg-ripple/tools/fuse-console.mjs [--dry]（重新生成 public/console.html）→ node design-demos/bg-ripple/tools/check-fusion.mjs（三条硬校验必须 PASS：控制台剥离标记块 == 基线 逐字节、登录页 == 基线 逐字节、内联引擎 == ripple-bg.js 逐字节）"
