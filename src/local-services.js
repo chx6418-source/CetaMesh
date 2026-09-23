@@ -1,8 +1,9 @@
-// qq-bridge 本地子服务管理：SnowLuma 与 dsh。
+// whalebridge 本地子服务管理：SnowLuma 与 dsh。
 //
 // 这个模块只负责本机进程、安装文件检测和日志流，不把任何一个可选服务的
 // 失败向上抛成桥接主流程启动失败。调用方可以在控制台启动后再按需重试。
 import fs from 'node:fs';
+import net from 'node:net';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -19,29 +20,37 @@ export const SNOWLUMA_RELEASE_PAGE = 'https://github.com/SnowLuma/SnowLuma/relea
 export const SNOWLUMA_RELEASE_API = 'https://api.github.com/repos/SnowLuma/SnowLuma/releases/latest';
 export const DSH_INSTALL_HINT = '前置依赖：需先安装 Node.js 环境\n安装命令：npx @deepseek-ai/dsh web';
 
-// SnowLuma WebUI（图形控制台）默认端口：优先 5099，被占用时会自动回退 5100/5101…
-export const SNOWLUMA_WEB_PORTS = [5099, 5100, 5101, 5102];
-// SnowLuma 启动日志里的 WebUI 就绪行：`[WebUI] listening http://127.0.0.1:5100`
-const SNOWLUMA_WEB_LOG_RE = /\[WebUI\]\s*listening\s+(https?:\/\/[^\s)\]，。]+)/i;
-
-// 从一行日志里解析 SnowLuma WebUI 地址（拿不到返回空串）。
-export function extractSnowLumaWebUrl(text) {
-  const match = SNOWLUMA_WEB_LOG_RE.exec(String(text ?? ''));
-  if (!match) return '';
-  return match[1].replace(/[)\]，。;；]+$/, '').replace(/\/+$/, '');
+/**
+ * 从进程列表里挑出「QQ 顶层进程」。
+ *
+ * 为什么要挑顶层：QQ 是多进程应用（主进程 + 一堆子进程），要让它彻底退出必须从顶层连子树一起结束；
+ * 而反过来，只杀子进程会留下主进程继续占用。判定"顶层"用父进程不在同一批 QQ 进程里来识别，
+ * 不依赖进程名以外的任何猜测。
+ */
+export function selectTopLevelQqProcesses(processes = []) {
+  const qq = processes.filter((item) => /^qq(\.exe)?$/i.test(String(item?.name ?? '')));
+  const ids = new Set(qq.map((item) => Number(item.pid)));
+  return qq.filter((item) => !ids.has(Number(item.parentPid)));
 }
 
-// 只允许打开本机地址：避免把“唤起浏览器”变成任意 URL 跳板。
-export function isLocalHttpUrl(value) {
-  try {
-    const url = new URL(String(value));
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') return false;
-    return url.hostname === '127.0.0.1' || url.hostname === 'localhost' || url.hostname === '[::1]';
-  } catch {
-    return false;
+/**
+ * 结束指定的 QQ 顶层进程及其子树。`killer` 可注入，便于测试不真的杀进程。
+ * 返回每个进程的结果，便于控制台如实展示（不静默失败）。
+ */
+export async function quitQqProcesses({ listProcesses, killer } = {}) {
+  const processes = await listProcesses();
+  const targets = selectTopLevelQqProcesses(processes);
+  const results = [];
+  for (const target of targets) {
+    try {
+      await killer(target.pid);
+      results.push({ pid: target.pid, ok: true });
+    } catch (error) {
+      results.push({ pid: target.pid, ok: false, error: error?.message ?? String(error) });
+    }
   }
+  return { targets, results };
 }
-
 const MAX_RELEASE_BYTES = 2 * 1024 * 1024 * 1024;
 const LOG_LIMIT = 600;
 const DETECTION_CACHE_VERSION = 2;
@@ -260,6 +269,107 @@ async function readDshExecutableVersion(executable) {
   }
 }
 
+/**
+ * 记录由 WhaleBridge 启动的 SnowLuma launcher，供后续管理与诊断使用。
+ * WhaleBridge 完全退出时会保留 SnowLuma 进程，让它继续管理 QQ。
+ */
+function snowLumaMarkerFile(root) {
+  return path.join(root, 'state', 'snowluma.pid');
+}
+
+export function readSnowLumaMarker(file) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const pid = Number(parsed?.pid);
+    return Number.isInteger(pid) && pid > 0 ? { ...parsed, pid } : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeSnowLumaMarker(root, { pid, launcherPath, homeDir }) {
+  try {
+    const file = snowLumaMarkerFile(root);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(
+      file,
+      JSON.stringify({ pid, launcherPath, homeDir, startedAt: new Date().toISOString() }, null, 2),
+      'utf8'
+    );
+  } catch {
+    /* 记录失败不影响启动：最坏情况是后续无法通过 marker 识别这个实例 */
+  }
+}
+
+function clearSnowLumaMarker(root) {
+  try {
+    fs.rmSync(snowLumaMarkerFile(root), { force: true });
+  } catch {}
+}
+
+/**
+ * 结束"本应用此前启动、现在仍在运行"的 SnowLuma（跨应用重启的场景）。
+ * 只认记录文件里的 pid：调用方负责先确认进程身份（见 identifyProcess），避免 pid 被复用后误杀。
+ * 依赖全部可注入，便于测试不真的杀进程。
+ */
+export async function stopRecordedSnowLuma({
+  file,
+  readMarker = readSnowLumaMarker,
+  identify = null,
+  killer = null,
+  clearMarker = null
+} = {}) {
+  const markerFile = file ?? null;
+  if (!markerFile) return { stopped: false, reason: 'no-record-file' };
+  const marker = readMarker(markerFile);
+  if (!marker) return { stopped: false, reason: 'no-record' };
+  const discard = () => {
+    if (clearMarker) clearMarker(markerFile);
+  };
+  let identity = null;
+  try {
+    identity = identify ? await identify(marker.pid) : null;
+  } catch {
+    identity = null;
+  }
+  // 记录里有 launcherPath 时要求进程身份匹配（SnowLuma 是 node 进程），
+  // 避免 pid 被复用后误杀别的程序。
+  if (marker.launcherPath && identity && !String(identity).toLowerCase().includes('snowluma') && !/^node(\.exe)?$/i.test(String(identity))) {
+    discard();
+    return { stopped: false, reason: 'pid-reused', pid: marker.pid, identity: String(identity) };
+  }
+  if (identity === null) {
+    discard();
+    return { stopped: false, reason: 'not-running', pid: marker.pid };
+  }
+  try {
+    if (killer) await killer(marker.pid);
+    discard();
+    return { stopped: true, pid: marker.pid };
+  } catch (error) {
+    return { stopped: false, reason: 'kill-failed', pid: marker.pid, error: error?.message ?? String(error) };
+  }
+}
+
+/** 列出本机进程（pid / 父 pid / 名称）。只读查询，用于精确识别 QQ 进程树。 */
+async function listWindowsProcesses() {
+  if (process.platform !== 'win32') return [];
+  try {
+    const { stdout } = await execFileAsync(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-Command',
+       'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name | ConvertTo-Json -Compress'],
+      { windowsHide: true, timeout: 20000, maxBuffer: 4 * 1024 * 1024 }
+    );
+    const parsed = JSON.parse(String(stdout).trim() || '[]');
+    const rows = Array.isArray(parsed) ? parsed : [parsed];
+    return rows.map((row) => ({ pid: row.ProcessId, parentPid: row.ParentProcessId, name: row.Name }));
+  } catch {
+    // 查询失败时返回空列表：调用方会如实报"没有可结束的 QQ 进程"，绝不猜测性杀进程。
+    return [];
+  }
+}
+
 function environmentComSpec() {
   return process.env.ComSpec || 'cmd.exe';
 }
@@ -438,7 +548,7 @@ function publicSnapshot(state) {
   return result;
 }
 
-export function createLocalServiceManager({ root, config = {}, onLog = () => {}, onConfigPatch = () => {}, detectionOptions = {} } = {}) {
+export function createLocalServiceManager({ root, config = {}, onLog = () => {}, onConfigPatch = () => {}, detectionOptions = {}, captureSnowLumaOutput = true } = {}) {
   const repoRoot = path.resolve(root || process.cwd());
   const configFile = path.join(repoRoot, 'config.json');
   const cacheFile = path.join(repoRoot, 'state', 'local-service-detection.json');
@@ -451,11 +561,10 @@ export function createLocalServiceManager({ root, config = {}, onLog = () => {},
     environment.LOCALAPPDATA
   ]);
   const configuredFullScanRoots = Array.isArray(detectionOptions.fullScanRoots) ? detectionOptions.fullScanRoots : null;
-  const snowLumaWebPorts = Array.isArray(detectionOptions.snowLumaWebPorts) ? detectionOptions.snowLumaWebPorts : SNOWLUMA_WEB_PORTS;
   const state = {
     snowluma: {
       name: 'SnowLuma', status: 'checking', installed: false, running: false, ready: false,
-      homeDir: '', launcherPath: '', installDir: path.join(repoRoot, 'SnowLuma'), webUrl: '',
+      homeDir: '', launcherPath: '', installDir: path.join(repoRoot, 'SnowLuma'),
       source: 'unknown', pid: null, lastError: '', releasePage: SNOWLUMA_RELEASE_PAGE,
       version: '', installations: [], selectedId: '', managed: false,
       detection: { status: 'pending', layer: 'none', durationMs: 0, completedAt: '', fromCache: false },
@@ -498,12 +607,6 @@ export function createLocalServiceManager({ root, config = {}, onLog = () => {},
     state[service].logs.push(entry);
     if (state[service].logs.length > LOG_LIMIT) state[service].logs.splice(0, state[service].logs.length - LOG_LIMIT);
     state[service].updatedAt = entry.time;
-    // SnowLuma 启动日志里会打印 WebUI 实际监听地址（5099 被占用时会回退 5100），
-    // 这里顺手解析出来，控制台就能一键打开“正确的那个”图形控制台。
-    if (service === 'snowluma') {
-      const webUrl = extractSnowLumaWebUrl(line);
-      if (webUrl && state.snowluma.webUrl !== webUrl) setState('snowluma', { webUrl });
-    }
     try { onLog(`[${service}] ${line}`); } catch {}
     emit(service, 'log');
   }
@@ -743,6 +846,38 @@ export function createLocalServiceManager({ root, config = {}, onLog = () => {},
     return snapshot();
   }
 
+
+  /** 从 SnowLuma 的 http/ws 端点里取出 host:port，用于纯 TCP 探测。 */
+  function endpointHostPort(rawUrl) {
+    try {
+      const url = new URL(String(rawUrl));
+      const port = url.port ? Number(url.port) : (url.protocol === 'wss:' || url.protocol === 'https:' ? 443 : 80);
+      return { host: url.hostname || '127.0.0.1', port };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 纯 TCP 探测：只要端口上有人监听就认为「外部已有 SnowLuma 在跑」。
+   * 比 HTTP 探测更宽松——SnowLuma 的 WebUI 端口会因占用而漂移（实测出现过 5099 → 5100），
+   * 而 OneBot 端口可能只开 WebSocket、不响应普通 HTTP GET，只靠 HTTP 探测会误判成「没在运行」
+   * 并再拉起第二个实例。
+   */
+  async function probeTcp(rawUrl) {
+    const target = endpointHostPort(rawUrl);
+    if (!target) return false;
+    return new Promise((resolve) => {
+      const socket = net.connect({ host: target.host, port: target.port });
+      let settled = false;
+      const done = (value) => { if (settled) return; settled = true; socket.destroy(); resolve(value); };
+      socket.setTimeout(1500);
+      socket.once('connect', () => done(true));
+      socket.once('timeout', () => done(false));
+      socket.once('error', () => done(false));
+    });
+  }
+
   async function probeUrl(url, headers = {}) {
     const base = String(url ?? '').replace(/\/+$/, '');
     if (!base) return false;
@@ -757,6 +892,11 @@ export function createLocalServiceManager({ root, config = {}, onLog = () => {},
 
   function snowLumaHttpUrl() {
     return String(config?.snowluma?.httpUrl || 'http://127.0.0.1:3000');
+  }
+
+  /** OneBot 端点：用于纯 TCP 探测（SnowLuma 可能只开 WebSocket，不响应普通 HTTP GET）。 */
+  function snowLumaWsUrl() {
+    return String(config?.snowluma?.wsUrl || config?.snowluma?.httpUrl || 'ws://127.0.0.1:3001');
   }
 
   function snowLumaProbeHeaders() {
@@ -905,9 +1045,10 @@ export function createLocalServiceManager({ root, config = {}, onLog = () => {},
     return commandLineQuote(text);
   }
 
-  function spawnServiceProcess(executable, args, { cwd, env } = {}) {
+  function spawnServiceProcess(executable, args, { cwd, env, captureOutput = true } = {}) {
+    const stdio = captureOutput ? ['ignore', 'pipe', 'pipe'] : ['ignore', 'ignore', 'ignore'];
     if (process.platform !== 'win32') {
-      return spawn(executable, args, { cwd, env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      return spawn(executable, args, { cwd, env, windowsHide: true, stdio });
     }
     const isBatch = /\.(?:bat|cmd)$/i.test(executable);
     const invocation = `${isBatch ? 'call ' : ''}${commandLineQuote(executable)}${args.length ? ` ${args.map(commandLineArg).join(' ')}` : ''}`;
@@ -916,101 +1057,8 @@ export function createLocalServiceManager({ root, config = {}, onLog = () => {},
     const command = `chcp 65001>nul & ${invocation}`;
     return spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', command], {
       cwd, env, windowsHide: true, windowsVerbatimArguments: true,
-      stdio: ['ignore', 'pipe', 'pipe']
+      stdio
     });
-  }
-
-  // ── 打开 SnowLuma / dsh 的网页界面 ────────────────────────────────────────
-  // 用 Edge/Chrome 的 --app 模式打开：窗口不带标签栏与地址栏，形如独立应用窗口
-  // （这正是“把浏览器自带的标题/地址栏去掉”的做法）；找不到浏览器时退回系统默认打开方式。
-
-  async function resolveSnowLumaWebUrl({ probe = false } = {}) {
-    // 1) 优先用本实例启动日志里打印的真实地址（多实例/端口回退时最准）
-    if (state.snowluma.webUrl) return state.snowluma.webUrl;
-    // 2) 配置显式指定
-    const configured = String(config?.snowluma?.webUrl || '').replace(/\/+$/, '');
-    if (configured && isLocalHttpUrl(configured)) return configured;
-    // 3) 探测常见端口：只有确实返回 SnowLuma 页面才认，避免把别的服务当成它
-    if (!probe) return '';
-    for (const port of snowLumaWebPorts) {
-      const url = `http://127.0.0.1:${port}`;
-      try {
-        const response = await fetch(`${url}/`, { signal: AbortSignal.timeout(1200) });
-        if (!response.ok) continue;
-        const html = (await response.text()).slice(0, 4096);
-        if (/SnowLuma/i.test(html)) {
-          setState('snowluma', { webUrl: url });
-          return url;
-        }
-      } catch {}
-    }
-    return '';
-  }
-
-  function findBrowserExecutable() {
-    if (process.platform !== 'win32') return '';
-    const pf = environment.ProgramFiles;
-    const pf86 = environment['ProgramFiles(x86)'];
-    const local = environment.LOCALAPPDATA;
-    const candidates = [
-      pf && path.join(pf, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
-      pf86 && path.join(pf86, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
-      pf && path.join(pf, 'Google', 'Chrome', 'Application', 'chrome.exe'),
-      pf86 && path.join(pf86, 'Google', 'Chrome', 'Application', 'chrome.exe'),
-      local && path.join(local, 'Google', 'Chrome', 'Application', 'chrome.exe')
-    ].filter(Boolean);
-    for (const candidate of candidates) {
-      try { if (fs.existsSync(candidate)) return candidate; } catch {}
-    }
-    return '';
-  }
-
-  function openAppWindow(url) {
-    if (!isLocalHttpUrl(url)) return { ok: false, mode: 'none', error: '只允许打开本机服务地址' };
-    const browser = findBrowserExecutable();
-    if (browser) {
-      try {
-        spawn(browser, [`--app=${url}`, '--new-window'], { detached: true, windowsHide: true, stdio: 'ignore' }).unref();
-        return { ok: true, mode: 'app', browser };
-      } catch {
-        // 落到系统默认打开方式
-      }
-    }
-    try {
-      if (process.platform === 'win32') {
-        spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', 'start', '""', url], { detached: true, windowsHide: true, stdio: 'ignore' }).unref();
-      } else if (process.platform === 'darwin') {
-        spawn('open', [url], { detached: true, stdio: 'ignore' }).unref();
-      } else {
-        spawn('xdg-open', [url], { detached: true, stdio: 'ignore' }).unref();
-      }
-      return { ok: true, mode: 'browser' };
-    } catch (error) {
-      return { ok: false, mode: 'none', error: asText(error?.message ?? error) };
-    }
-  }
-
-  // 一键打开 SnowLuma 图形控制台（网页配置页）
-  async function openSnowLumaWeb() {
-    const webUrl = await resolveSnowLumaWebUrl({ probe: true });
-    if (!webUrl) {
-      const hint = '未发现 SnowLuma 网页控制台：请先启动 SnowLuma，或在 config.json 的 snowluma.webUrl 指定地址';
-      push('snowluma', hint, 'warn');
-      return { ok: false, webUrl: '', mode: 'none', error: hint };
-    }
-    const launched = openAppWindow(`${webUrl}/`);
-    push('snowluma', launched.ok
-      ? `已打开 SnowLuma 网页控制台：${webUrl}（${launched.mode === 'app' ? '独立应用窗口' : '默认浏览器'}）`
-      : `打开 SnowLuma 网页失败：${launched.error}`, launched.ok ? 'info' : 'warn');
-    return { ok: launched.ok, webUrl, mode: launched.mode, error: launched.error || '' };
-  }
-
-  // 一键打开 dsh 只读监控终端（同样用应用窗口，避免浏览器地址栏）
-  function openDshMonitor() {
-    const port = Number(config?.consolePort) || 3100;
-    const url = `http://127.0.0.1:${port}/dsh-monitor.html`;
-    const launched = openAppWindow(url);
-    return { ok: launched.ok, webUrl: url, mode: launched.mode, error: launched.error || '' };
   }
 
   async function startSnowLuma({ waitMs = 35000 } = {}) {
@@ -1020,6 +1068,29 @@ export function createLocalServiceManager({ root, config = {}, onLog = () => {},
     // 先探测“外部已启动”的实例，避免控制台再次拉起第二个 SnowLuma。
     if (await probeUrl(snowLumaHttpUrl(), httpHeaders)) {
       setState('snowluma', { status: 'ready', running: true, ready: true, managed: false, lastError: '' });
+      return publicSnapshot(current);
+    }
+    // HTTP 探测可能因为端口漂移或端点不响应 HTTP 而误判「没在运行」，进而重复拉起实例
+    // （实测：WebUI 一度从 5099 漂到 5106，每重启一次桥接就多一个实例）。
+    // 因此再按端点做一次纯 TCP 探测：有监听就复用、不再拉起第二个。
+    // 但**不能因此判定 ready**：SnowLuma 会先占住 OneBot 端口、注入 QQ 成功后才真正提供 API，
+    // 早先这里直接置 ready 会盖掉更有用的「OneBot 尚未就绪」提示。
+    if (await probeTcp(snowLumaWsUrl())) {
+      const reuseText =
+        `SnowLuma 端点 ${snowLumaWsUrl()} 已有实例在监听，直接复用（不再拉起第二个实例）；` +
+        `OneBot API（${snowLumaHttpUrl()}）尚未就绪：请在 SnowLuma 网页控制台完成进程注入` +
+        '（由 SnowLuma 拉起并登录 QQ）与 OneBot 配置；WhaleBridge 将继续独立运行。';
+      setState('snowluma', {
+        status: 'start-timeout',
+        running: true,
+        ready: false,
+        managed: false,
+        lastError: reuseText
+      });
+      // 同一个状态每个检测周期都会走到这里：只在文案变化时记一条，
+      // 否则终端会被同一句话刷屏（实测每 10 秒一条，把有用信息挤掉了）。
+      const lastLog = state.snowluma.logs[state.snowluma.logs.length - 1];
+      if (!lastLog || lastLog.text !== reuseText) push('snowluma', reuseText, 'warn');
       return publicSnapshot(current);
     }
     if (!current.installed) {
@@ -1052,9 +1123,15 @@ export function createLocalServiceManager({ root, config = {}, onLog = () => {},
     try {
       const child = spawnServiceProcess(current.launcherPath, [], {
         cwd: current.homeDir || repoRoot,
-        env: process.env
+        env: process.env,
+        // SnowLuma continues running after WhaleBridge exits. Give it independent NUL output handles
+        // so it cannot inherit the worker's pipes and hit EPIPE when the bridge closes.
+        captureOutput: captureSnowLumaOutput
       });
       attachProcess('snowluma', child);
+      // 持久化记录启动来源，便于后续管理和诊断；WhaleBridge 退出时保留 SnowLuma，
+      // 下一次启动会通过 OneBot 端点探测复用这个仍在运行的实例。
+      writeSnowLumaMarker(repoRoot, { pid: child.pid, launcherPath: current.launcherPath, homeDir: current.homeDir || repoRoot });
       const ready = await waitFor(
         'snowluma',
         () => probeUrl(snowLumaHttpUrl(), httpHeaders),
@@ -1063,22 +1140,18 @@ export function createLocalServiceManager({ root, config = {}, onLog = () => {},
       );
       const alive = !!processes.snowluma && processes.snowluma.exitCode == null && !processes.snowluma.killed;
       const failed = !ready && !alive;
-      // 超时并不等于启动失败：SnowLuma 往往已经跑起来（网页控制台可访问），只是还没在网页里
-      // 配好 OneBot 网关，所以桥接探不到 HTTP API。这里把两种原因说清楚并指向「打开 SnowLuma 网页」。
+      // 超时并不等于启动失败：SnowLuma 进程可能仍在运行，但 OneBot HTTP API 尚未就绪。
       let timeoutHint = '';
       if (!ready && alive) {
-        const webUrl = await resolveSnowLumaWebUrl({ probe: true });
         const apiUrl = snowLumaHttpUrl();
-        timeoutHint = webUrl
-          ? `SnowLuma 正在运行（网页控制台 ${webUrl} 可访问），但 OneBot API（${apiUrl}）尚未就绪：请点「打开 SnowLuma 网页」完成 OneBot 配置后重试`
-          : `SnowLuma 进程仍在运行，但 OneBot API（${apiUrl}）未就绪，请检查 SnowLuma 配置`;
+        timeoutHint = `SnowLuma 进程仍在运行，但 OneBot API（${apiUrl}）未就绪；请检查 OneBot 网关、QQ 登录和 API 地址配置`;
       }
       setState('snowluma', { status: ready ? 'ready' : failed ? 'failed' : 'start-timeout', running: ready || alive, ready, lastError: ready ? '' : failed ? (state.snowluma.lastError || 'SnowLuma 进程已退出') : timeoutHint });
-      push('snowluma', ready ? 'SnowLuma 已就绪，可以连接 QQ 桥接。' : failed ? 'SnowLuma 进程已退出，qq_bridge 将继续独立运行。' : `${timeoutHint}；qq_bridge 将继续独立运行。`, ready ? 'info' : 'warn');
+      push('snowluma', ready ? 'SnowLuma 已就绪，可以连接 鲸桥。' : failed ? 'SnowLuma 进程已退出，WhaleBridge 将继续独立运行。' : `${timeoutHint}；WhaleBridge 将继续独立运行。`, ready ? 'info' : 'warn');
       return publicSnapshot(current);
     } catch (error) {
       setState('snowluma', { status: 'failed', running: false, ready: false, lastError: asText(error?.message ?? error) });
-      push('snowluma', `启动失败：${error?.message ?? error}；qq_bridge 将继续独立运行。`, 'error');
+      push('snowluma', `启动失败：${error?.message ?? error}；WhaleBridge 将继续独立运行。`, 'error');
       return publicSnapshot(current);
     }
   }
@@ -1189,7 +1262,7 @@ export function createLocalServiceManager({ root, config = {}, onLog = () => {},
       await detectAll();
       if (state.snowluma.installed) return publicSnapshot(state.snowluma);
       const installDir = path.resolve(repoRoot, 'SnowLuma');
-      const tempRoot = fs.mkdtempSync(path.join(repoRoot, '.qq-bridge-snowluma-'));
+      const tempRoot = fs.mkdtempSync(path.join(repoRoot, '.whalebridge-snowluma-'));
       const zipFile = path.join(tempRoot, 'SnowLuma-release.zip');
       const extractDir = path.join(tempRoot, 'extract');
       try {
@@ -1197,7 +1270,7 @@ export function createLocalServiceManager({ root, config = {}, onLog = () => {},
         setState('snowluma', { status: 'installing', lastError: '', installDir });
         push('snowluma', '正在查询 GitHub SnowLuma 最新发布版…');
         const releaseResponse = await fetch(SNOWLUMA_RELEASE_API, {
-          headers: { accept: 'application/vnd.github+json', 'user-agent': 'qq-bridge-local-service-manager' },
+          headers: { accept: 'application/vnd.github+json', 'user-agent': 'whalebridge-local-service-manager' },
           signal: AbortSignal.timeout(20000)
         });
         if (!releaseResponse.ok) throw new Error(`GitHub 最新发布版查询失败：HTTP ${releaseResponse.status}`);
@@ -1210,7 +1283,7 @@ export function createLocalServiceManager({ root, config = {}, onLog = () => {},
         }
         push('snowluma', `下载 ${asset.name}…`);
         const assetResponse = await fetch(assetUrl, {
-          headers: { accept: 'application/octet-stream', 'user-agent': 'qq-bridge-local-service-manager' },
+          headers: { accept: 'application/octet-stream', 'user-agent': 'whalebridge-local-service-manager' },
           signal: AbortSignal.timeout(120000)
         });
         if (!assetResponse.ok || !assetResponse.body) throw new Error(`SnowLuma 安装包下载失败：HTTP ${assetResponse.status}`);
@@ -1219,7 +1292,7 @@ export function createLocalServiceManager({ root, config = {}, onLog = () => {},
         await pipeline(Readable.fromWeb(assetResponse.body), createWriteStream(zipFile));
         const actual = fs.statSync(zipFile).size;
         if (actual <= 0 || actual > MAX_RELEASE_BYTES) throw new Error('下载的安装包大小异常，已拒绝解压');
-        push('snowluma', '正在解压安装包到 qq_bridge/SnowLuma…');
+        push('snowluma', '正在解压安装包到 WhaleBridge/SnowLuma…');
         const command = `Expand-Archive -LiteralPath ${psQuote(zipFile)} -DestinationPath ${psQuote(extractDir)} -Force`;
         await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', command], {
           windowsHide: true,
@@ -1327,9 +1400,25 @@ export function createLocalServiceManager({ root, config = {}, onLog = () => {},
     selectDsh: (choice) => selectInstallation('dsh', choice),
     installSnowLuma,
     startSnowLuma,
-    openSnowLumaWeb,
-    openDshMonitor,
-    resolveSnowLumaWebUrl,
+    // 「退出 QQ 以便 SnowLuma 重新注入」：只结束 QQ 顶层进程及其子树，绝不按名字模糊查杀其它进程。
+    listQqProcesses: async () => selectTopLevelQqProcesses(await listWindowsProcesses()),
+    quitQqProcesses: () =>
+      quitQqProcesses({
+        listProcesses: listWindowsProcesses,
+        killer: (pid) => execFileAsync('taskkill.exe', ['/pid', String(pid), '/t', '/f'], { windowsHide: true, timeout: 15000 })
+      }),
+    // 「本应用此前启动、现在仍在运行的 SnowLuma」——跨应用重启也能收掉。
+    stopRecordedSnowLuma: () =>
+      stopRecordedSnowLuma({
+        file: snowLumaMarkerFile(repoRoot),
+        clearMarker: () => clearSnowLumaMarker(repoRoot),
+        identify: async (pid) => {
+          const rows = await listWindowsProcesses();
+          const hit = rows.find((row) => Number(row.pid) === Number(pid));
+          return hit ? String(hit.name) : null;
+        },
+        killer: (pid) => execFileAsync('taskkill.exe', ['/pid', String(pid), '/t', '/f'], { windowsHide: true, timeout: 15000 })
+      }),
     stopSnowLuma: () => stopService('snowluma'),
     startDsh,
     stopDsh: () => stopService('dsh'),

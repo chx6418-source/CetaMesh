@@ -1,6 +1,6 @@
 // 桥接双令牌（控制台令牌 / 服务令牌）权限分离自检：
 // 1. resolvePrivilege：按令牌取值判级，空值/错值不得通过
-// 2. shouldIssueConsoleSession：只有控制台级别能换会话 Cookie（服务令牌不得升级成控制面）
+// 2. loopback API 只通过明确令牌认证，不提供浏览器 session/cookie 登录
 // 3. agentPrivilegeAllows：数据面白名单 + 归一化防绕过
 // 4. 源码接入断言：桥接生成 state/agent-token、MCP 改读服务令牌、pid/端口不再拼进命令文本
 // 5. 桥接运行且已加载双令牌时，做真实端到端验证（服务令牌打控制面必须 403）
@@ -13,8 +13,7 @@ import {
   PRIVILEGE_CONSOLE,
   agentPrivilegeAllows,
   describePrivilegeSurface,
-  resolvePrivilege,
-  shouldIssueConsoleSession
+  resolvePrivilege
 } from '../src/bridge-privilege.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -36,12 +35,7 @@ check('两个令牌不会互相误判', resolvePrivilege({ ...base, suppliedToke
 check('错误令牌被拒', resolvePrivilege({ ...base, suppliedToken: 'nope' }) === '');
 check('空令牌被拒', resolvePrivilege({ ...base, suppliedToken: '' }) === '' && resolvePrivilege(base) === '');
 check('null/undefined 令牌被拒', resolvePrivilege({ ...base, suppliedToken: null }) === '' && resolvePrivilege({ ...base, suppliedToken: undefined }) === '');
-check('会话 Cookie → console 级（与令牌取值无关）', resolvePrivilege({ sessionValid: true, suppliedToken: '', consoleToken: CT, agentToken: AT }) === PRIVILEGE_CONSOLE);
 check('配置为空时不得用空令牌通过', resolvePrivilege({ sessionValid: false, suppliedToken: '', consoleToken: '', agentToken: '' }) === '');
-
-// ── 2. shouldIssueConsoleSession ──────────────────────────────────────────
-check('仅控制台级别签发会话 Cookie', shouldIssueConsoleSession(PRIVILEGE_CONSOLE) === true);
-check('服务令牌不签发会话 Cookie（防止升级成控制面）', shouldIssueConsoleSession(PRIVILEGE_AGENT) === false && shouldIssueConsoleSession('') === false);
 
 // ── 3. agentPrivilegeAllows ───────────────────────────────────────────────
 const mustAllow = [
@@ -83,6 +77,12 @@ const mustDeny = [
   ['POST', '/api/stickers'],
   ['GET', '/api/roles'],
   ['POST', '/api/role'],
+  ['POST', '/api/roles/create'],
+  ['GET', '/api/security'],
+  ['POST', '/api/security'],
+  ['POST', '/api/slang/config'],
+  ['GET', '/api/sessions'],
+  ['POST', '/api/social/state'],
   ['GET', '/api/fileSend']
 ];
 const badAllows = mustAllow.filter(([m, p]) => !agentPrivilegeAllows(m, p)).map(([m, p]) => m + ' ' + p);
@@ -104,15 +104,26 @@ const bridgeSrc = fs.readFileSync(path.join(ROOT, 'src', 'bridge.js'), 'utf8');
 const safeSrc = fs.readFileSync(path.join(ROOT, 'src', 'mcp-snowluma-safe.js'), 'utf8');
 const hostSrc = fs.readFileSync(path.join(ROOT, 'src', 'mcp-host-server.js'), 'utf8');
 check('bridge 引入双令牌策略模块', /from '\.\/bridge-privilege\.js'/.test(bridgeSrc) && bridgeSrc.includes('agentPrivilegeAllows(') && bridgeSrc.includes('resolvePrivilege('));
+check('social state HTTP adapter dispatches through ControlService', bridgeSrc.includes('runControlCommand(CONTROL_METHODS.SET_SOCIAL_PHASE, body)') && bridgeSrc.includes('INVALID_SESSION_KEY: 400') && bridgeSrc.includes('INVALID_PHASE: 400'));
 check('bridge 生成并持久化 state/agent-token', bridgeSrc.includes("'agent-token'") && /loadOrCreateAgentToken/.test(bridgeSrc));
-check('bridge 仅控制台级别签发会话 Cookie', bridgeSrc.includes('shouldIssueConsoleSession(privilege)') && !bridgeSrc.includes('if (consoleToken && !sessionValid) {'));
+check('loopback API 采用 token-only 鉴权（不消费 Cookie/session）',
+  bridgeSrc.includes("const suppliedToken = url.searchParams.get('token') ?? req.headers['x-console-token'];")
+  && bridgeSrc.includes('resolvePrivilege({ sessionValid: false, suppliedToken, consoleToken, agentToken })')
+  && !bridgeSrc.includes('shouldIssueConsoleSession')
+  && !bridgeSrc.includes('consoleSession')
+  && !bridgeSrc.includes('sessionValid ='));
+check('移除网页登录与 session Cookie 签发/验证流程',
+  !/Set-Cookie/i.test(bridgeSrc)
+  && !/Cookie\s*:\s*consoleSession/i.test(bridgeSrc)
+  && !bridgeSrc.includes('shouldIssueConsoleSession')
+  && bridgeSrc.includes("网页控制台已移除；请使用 WhaleBridge 原生应用。"));
 check('bridge 重置控制台令牌时同步轮换服务令牌', /loadOrCreateAgentToken\(true\)/.test(bridgeSrc));
 check('bridge 暴露 tokenModel 自描述', bridgeSrc.includes("tokenModel: 'dual'"));
 check('MCP 改读服务令牌（不再首选控制台令牌）', safeSrc.includes("'agent-token'") && hostSrc.includes("'agent-token'") && !safeSrc.includes('readConsoleToken') && !hostSrc.includes('readConsoleToken'));
 check('MCP 读 agent-token 的位置早于 console-token', safeSrc.indexOf("'agent-token'") < safeSrc.indexOf("'console-token'") && hostSrc.indexOf("'agent-token'") < hostSrc.indexOf("'console-token'"));
 check('pid/端口不再拼进 PowerShell 命令文本',
   !/ProcessId=\$\{/.test(hostSrc) && !/LocalPort -eq \$\{/.test(hostSrc)
-  && hostSrc.includes('QQ_BRIDGE_PID') && hostSrc.includes('QQ_BRIDGE_ONEBOT_PORT'));
+  && hostSrc.includes('WHALEBRIDGE_PID') && hostSrc.includes('WHALEBRIDGE_ONEBOT_PORT'));
 
 // ── 5. 真实端到端（桥接运行且已加载双令牌时） ─────────────────────────────
 const consoleTokenFile = path.join(ROOT, 'state', 'console-token');
@@ -134,7 +145,7 @@ async function call(method, p, token, body) {
   const text = await res.text();
   let parsed = null;
   try { parsed = JSON.parse(text); } catch {}
-  return { status: res.status, body: parsed, setCookie: res.headers.get('set-cookie') || '' };
+  return { status: res.status, body: parsed, setCookie: res.headers.get('set-cookie') || '', contentType: res.headers.get('content-type') || '' };
 }
 
 if (!consoleToken) {
@@ -158,6 +169,9 @@ if (!consoleToken) {
       check('服务令牌访问 v2 管理端配置被拒绝', s4.status === 403, 'HTTP ' + s4.status + ' ' + (s4.body?.error || ''));
       const s5 = await call('GET', '/api/status', consoleToken);
       check('控制台令牌仍可正常访问', s5.status === 200, 'HTTP ' + s5.status);
+      const page = await call('GET', '/', consoleToken);
+      check('原控制台根路径不再提供登录页或 HTML 页面', page.status === 404 && /网页控制台已移除/.test(page.body?.error || '') && !/text\/html/i.test(page.contentType), 'HTTP ' + page.status + ' ' + (page.body?.error || ''));
+      check('loopback API 响应不签发页面 session Cookie', !/consoleSession=/i.test(page.setCookie), page.setCookie || '(无 Set-Cookie)');
     }
   } catch (error) {
     console.log('⚠️ 真实端到端检查跳过：' + (error?.message ?? error));

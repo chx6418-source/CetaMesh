@@ -1,11 +1,11 @@
-# AGENT_CONTEXT — QQ 桥接控制台前端 · 结构化上下文说明书
+# AGENT_CONTEXT — 鲸桥控制台前端 · 结构化上下文说明书
 # 文档性质: 多智能体协作唯一事实源 (Single Source of Truth)
 # 解析约定: 本文档全篇为缩进式 KEY: VALUE 结构（YAML 兼容）；`[强制]` 前缀条目违反即任务不合规；禁止凭空补充未列出的约束
 
 meta:
   doc_version: "1.0"
   doc_date: "2026-09-12"
-  doc_scope: "qq-bridge 前端控制台 UI（海盐苏打 Soda Gummy）"
+  doc_scope: "WhaleBridge 前端控制台 UI（海盐苏打 Soda Gummy）"
   doc_maint_rule: "每次需求落地合并后，执行 Agent 必须增量更新本文件 §2/§3/§6 对应字段"
   read_order: "§1 → §6 → §3 → §5 → §2 → §4"
 
@@ -13,7 +13,7 @@ meta:
 # §1 项目基础元数据 [MODULE=METADATA]
 # ================================================================
 metadata:
-  project.name: "QQ 桥接控制台（qq-bridge · DeepSeek Harness × SnowLuma）"
+  project.name: "鲸桥控制台（WhaleBridge · DeepSeek Harness × SnowLuma）"
   project.repo: "D:/GIT-QQ-BRIDGE (git main 分支)"
   project.origin: "2025-08（桥接本体）；前端 UI 重设计启动：2026-09-12"
   baseline.commit_before_ui: "3eff47e（本次 UI 工作前的最后基线）"
@@ -78,14 +78,14 @@ history:
     scope_note: "本条为后端模型配置修复（用户直接下达），非前端 UI 迭代；red_line.backend_zero_change 对 UI 任务继续生效"
   - step: T12
     date: "2026-09-13"
-    action: "[后端+控制台] 新增「QQ 官方卡片查看」能力：新增 src/qq-card.js（json/ark/xml/lightapp/miniapp 卡片段提取 + 完整原始内容 + 结构化字段解析纯函数）；bridge.js 接入卡片缓存（按会话有界、单独落盘 state/social-v2-cards.json）、消息记录卡片摘要（hasCard/cardCount/cardKinds/cardHint）、GET /api/socialV2/card-message 端点、socialV2.tools.getCardMsg 开关与 toolMap 提示词；mcp-snowluma-safe.js 新增 qq_get_card_msg（**常驻注册 + 执行期读 config.json**，实现开关即时生效无需重启）；控制台「Agent 预设 → 工具开关」新增 qq_get_card_msg 独立开关；qq-chat-v2 preset 增加卡片工具协议条目与用途速查"
-    result: "src/qq-card.js（新增）、src/bridge.js、src/mcp-snowluma-safe.js、public/console.html、design-demos/src/console/part2.html、dsh/agent-presets/qq-chat-v2/agent.cordis.yml、config.json、config.example.json、scripts/test-card.mjs（新增，65 项断言全通过）、README.md、RULES.md、docs/PROJECT_GUIDE.md"
+    action: "[后端+控制台] 新增「QQ 官方卡片查看」能力：新增 src/qq-card.js（json/ark/xml/lightapp/miniapp 卡片段提取 + 完整原始内容 + 结构化字段解析纯函数）；bridge.js 接入卡片缓存（按会话有界、单独落盘 state/social-v2-cards.json）、消息记录卡片摘要（hasCard/cardCount/cardKinds/cardHint）、GET /api/socialV2/card-message 端点、socialV2.tools.getCardMsg 开关与 toolMap 提示词；mcp-snowluma-safe.js 新增 qq_get_card_msg（**常驻注册 + 执行期读 config.json**，实现开关即时生效无需重启）；控制台「Agent 预设 → 工具开关」新增 qq_get_card_msg 独立开关；whale-chat-v2 preset 增加卡片工具协议条目与用途速查"
+    result: "src/qq-card.js（新增）、src/bridge.js、src/mcp-snowluma-safe.js、public/console.html、design-demos/src/console/part2.html、dsh/agent-presets/whale-chat-v2/agent.cordis.yml、config.json、config.example.json、scripts/test-card.mjs（新增，65 项断言全通过）、README.md、RULES.md、docs/PROJECT_GUIDE.md"
     scope_note: "本条为后端工具能力 + 控制台单点开关新增（用户直接下达），未触碰 red_line.backend_zero_change 所保护的 API/令牌/会话行为；控制台仅按既有 v2-tool-item 模式新增一个复选框"
     discovered_issue: "public/console.html 与 design-demos/src/console/part1-3 **已漂移**：重跑 assemble.mjs 会丢失生产控制台的 500+ 行较新功能——见 §6.anchors.assembler_warning"
   - step: T13
     date: "2026-09-13"
     action: "[后端·根因修正] 用户反馈「工具无法查看 QQ 官方卡片内容」。抓取真实群消息（OneBot get_group_msg_history）后确认：QQ 官方机器人卡片**根本不是 json/ark 段**，而是 `markdown` + `inline_keyboard` 两个消息段（raw_message 形如 [CQ:markdown][CQ:inline_keyboard]）。T12 的实现只覆盖 json/ark/xml，因此这类卡片完全没被识别：AI 只看到 [markdown][inline_keyboard] 占位、卡片插图（markdown 里的 ![#宽 #高](https://qqbot.ugcimg.cn/…)）也没进图片管线。修正：src/qq-card.js 增加 `parseBotMarkdown`（去模板头 [](/%7B%22version%22…)/图片转占位并抽 URL/链接与 @提及还原）与 `parseInlineKeyboard`（按钮 label/type/data/style 结构化）、`buildBotMarkdownCard`（markdown+按钮合并为一张卡）、`extractCardMediaFromSegments`（插图进入媒体管线、过滤 ≤64px 装饰图标）；bridge.js 的 segmentsToText 渲染 markdown 正文与 [按钮:…]、extractMediaFromSegments 接入卡片插图；新增 `fetchRawMessageByRef`/`backfillMessageCache`（缓存未命中时用 get_msg 按需回源，归属校验与 resolveReplyInfo 一致）+ 启动后 `backfillRecentCardsV2`（回填历史卡片元数据）；/api/status 增加 cardSegments/cardToolEnabled 能力自描述"
-    result: "src/qq-card.js、src/bridge.js、src/forward.js、dsh/agent-presets/qq-chat-v2/agent.cordis.yml、scripts/test-card.mjs（99 项断言，含真实抓包 payload 夹具 + 桥接正向端到端检查）、README.md、RULES.md、docs/PROJECT_GUIDE.md"
+    result: "src/qq-card.js、src/bridge.js、src/forward.js、dsh/agent-presets/whale-chat-v2/agent.cordis.yml、scripts/test-card.mjs（99 项断言，含真实抓包 payload 夹具 + 桥接正向端到端检查）、README.md、RULES.md、docs/PROJECT_GUIDE.md"
     scope_note: "T12 的结论「工具无法查看卡片」由本条修正；T12 的控制台开关、端点、MCP 工具、即时生效机制均保留不变"
     verification: "解析层用真实抓包 payload 验证通过；图片 URL 已验证可直接抓取（safeFetchBuffer 取回 PNG/JPEG）；桥接进程需重启后由 `npm run test-card` 自动完成正向端到端确认（/api/status.cardSegments 含 markdown 时才会执行，避免把「没重启」误判为回归）"
   - step: T14
@@ -223,9 +223,86 @@ history:
 
   - step: T15
     date: "2026-09-20"
-    action: "[安全加固] ① **令牌分离**：新增 src/bridge-privilege.js（纯函数策略）——控制台令牌=全权，服务令牌=数据面白名单；桥接启动生成 state/agent-token；同一鉴权入口按令牌**取值**判定权限级别；服务令牌仅可访问 /api/status、/api/authorize/read、/api/images/message、/api/send/*、/api/socialV2/*（剔除 config/reset/activity/states/wake/tool-log，feedback 仅 POST，路径先 URL 归一化防 ../ 绕过）；服务令牌**不换发会话 Cookie**（否则等于把数据面凭据升级成控制面）；控制台重置令牌时同步轮换服务令牌。mcp-snowluma-safe.js / mcp-host-server.js 改读 state/agent-token（不再首选控制台令牌）。② mcp-host-server.js 的 OneBot 端口与 pid 改为经环境变量 QQ_BRIDGE_ONEBOT_PORT / QQ_BRIDGE_PID 传入 PowerShell，不再拼进命令文本，并加 -NonInteractive"
+    action: "[安全加固] ① **令牌分离**：新增 src/bridge-privilege.js（纯函数策略）——控制台令牌=全权，服务令牌=数据面白名单；桥接启动生成 state/agent-token；同一鉴权入口按令牌**取值**判定权限级别；服务令牌仅可访问 /api/status、/api/authorize/read、/api/images/message、/api/send/*、/api/socialV2/*（剔除 config/reset/activity/states/wake/tool-log，feedback 仅 POST，路径先 URL 归一化防 ../ 绕过）；服务令牌**不换发会话 Cookie**（否则等于把数据面凭据升级成控制面）；控制台重置令牌时同步轮换服务令牌。mcp-snowluma-safe.js / mcp-host-server.js 改读 state/agent-token（不再首选控制台令牌）。② mcp-host-server.js 的 OneBot 端口与 pid 改为经环境变量 WHALEBRIDGE_ONEBOT_PORT / WHALEBRIDGE_PID 传入 PowerShell，不再拼进命令文本，并加 -NonInteractive"
     result: "src/bridge-privilege.js（新增）、src/bridge.js、src/mcp-snowluma-safe.js、src/mcp-host-server.js、scripts/test-bridge-privilege.mjs（新增，npm run test-privilege）、package.json、RULES.md（新增「桥接访问令牌（双令牌分离）」小节）"
     verification: "纯逻辑 25 项全通过（含 ../ 与反斜杠绕过、相对路径拒绝、控制面接口逐条拒绝）；端到端校验以 /api/status 的 tokenModel==='dual' 为开关自动执行（服务令牌打 /api/terminal/open、服务启停、/api/socialV2/config 必须 403，且响应不种 Cookie），未重启时打印跳过而非误报"
+
+  - step: T16
+    date: "2026-09-20"
+    action: "[改名] 项目 `qq-bridge`（qq_bridge）更名为「鲸桥 WhaleBridge」：package.json name → whalebridge；两套 agent preset `qq-chat`/`qq-chat-v2` → `whale-chat`/`whale-chat-v2`（目录 git mv）；控制台插件 `qq-mode-console` → `whale-mode-console`，settings 命名空间 `qq-mode` → `whale-mode`（src/bridge.js 读取处同步）；MCP 注释标记 `# === qq-bridge MCP ... ===` → `# === whalebridge MCP ... ===`；环境变量 QQ_BRIDGE_PID / QQ_BRIDGE_ONEBOT_PORT / QQ_BRIDGE_TEST_LIVE → WHALEBRIDGE_*。**刻意保留**与平台绑定的命名：`qq_*` MCP 工具 id、src/qq-card.js、mcp-qq-file-send、state/qq-activity.log、本地 localStorage.qqbd-theme-* 等，避免破坏工具协议与用户既有本地状态。"
+    result: "package.json、package-lock.json、README.md、README.en.md、RULES.md、AGENT_CONTEXT.md、docs/{PROJECT_GUIDE,DSH_SETUP}.md、roles/小鲸鱼.md、config.example.json、src/{bridge,local-services,dsh-client,safe-fetch,slang-learner,mcp-host-server}.js、scripts/{setup-dsh,test-local-services,test-bridge-privilege,test-stickers}.mjs、public/{console,token-login,dsh-monitor}.html、启动桥接.vbs、重启桥接.vbs、design-demos/bg-ripple/tools/fixtures/{console,token-login}.baseline.html（控制台唯一事实源，改名后必须重跑 fuse）"
+    verification: "① `check-fusion.mjs` 三条硬校验全 PASS（先改基线，再重跑 `fuse-console.mjs` 重新生成 public/console.html，未手改生产页）；② `npm run test-privilege` 31/31 通过；③ `scripts/test-local-services.mjs` 40 通过 / 3 失败，该 3 项（Windows 下 spawn .cmd/.bat）已在**未改动的 HEAD 工作树上复现同样 3 项**，与本次改名无关；④ node --check 全部改动 JS 通过，package.json / config*.json JSON 解析通过；⑤ 全仓 grep 已无旧名残留（仅 setup-dsh.mjs 的 LEGACY 迁移块刻意保留）。setup-dsh.mjs 新增旧安装物清理（删 ~/.dsh 下 qq-chat* preset、qq-mode-console 插件链接与 profile 依赖、迁移 settings.yaml 的 qq-mode 命名空间），并修掉 Windows 上 spawn('dsh.cmd') 的 EINVAL（补 shell:true）。"
+    scope_note: "[本机已执行] node scripts/setup-dsh.mjs 已把 whale-chat / whale-chat-v2 preset 与 whale-mode-console 插件装入 ~/.dsh 并清掉旧物；**需重启 DSH 后新 preset/插件才生效**（DSH 设置页的模式值已随 settings.yaml 迁移保留）。仓库目录仍是 D:\GIT-QQ-BRIDGE：改目录名后须重跑 setup-dsh.mjs 同步 MCP/插件的绝对路径，config.json 内绝对路径也要改；docs/DSH_SETUP.md 的 clone URL 已改为 .../WhaleBridge.git，需同步重命名 GitHub 仓库。"
+
+  - step: T17
+    date: "2026-09-20"
+    action: "[桌面化阶段 2·统一路径层] 新增 src/app-paths.js，将只读资源根与可写数据根分离：WHALEBRIDGE_DATA_DIR 管理 config/state/用户角色/日志/缓存，WHALEBRIDGE_RESOURCE_DIR 管理 public/assets/tools/内置角色；未设置时两者均回退仓库根目录，源码模式布局不变。主桥、mcp-snowluma-safe、mcp-host-server、mcp-qq-file-send、mcp-bilibili、self-test、tts-prosody 全部接入统一路径。角色读取为用户目录优先、内置目录兜底；新建角色只写数据目录。"
+    result: "src/app-paths.js、scripts/test-app-paths.mjs、src/{bridge,mcp-snowluma-safe,mcp-host-server,mcp-qq-file-send,mcp-bilibili,self-test,tts-prosody}.js、package.json、desktop-shell/README.md、DESKTOP_APP_WORKPLAN.tmp.md；另修 scripts/test-vision-media.mjs 在 Node 24/Windows 下强制 process.exit 导致的退出期 libuv 断言。"
+    verification: "test-app-paths 通过；src 25 个 JS 语法通过；test-privilege 31/31、test-local-services 43/43、test-card 134/134、test-stickers 40/40、test-forward 25/25、test-md 15/15、test-vision 7/7、test-wait 全通过；控制台融合检查三项 PASS。"
+    scope_note: "默认环境下所有路径仍与改造前完全一致；只有显式设置 WHALEBRIDGE_DATA_DIR/WHALEBRIDGE_RESOURCE_DIR 才分离。未迁移或删除任何现有用户数据；旧 qq-* 升级兼容规则未改。"
+
+  - step: T18
+    date: "2026-09-20"
+    action: "[桌面化阶段 3·统一 Core/MCP 入口] 新增 src/core-entry.js，统一分派 --worker、--mcp snowluma/snowluma-host/web-search-safe/qq-file-send/bilibili、--self-test；新增 src/entrypoint.js 统一判断直接执行与错误出口。bridge 和五个 MCP 的顶层自动启动改为显式 run 函数，import 不再占用 stdio；原脚本直接执行保持兼容。setup-dsh 的新生成配置改为五个 MCP 共用 core-entry.js + --mcp mode，当前 ~/.dsh 未主动改写。"
+    result: "src/{core-entry,entrypoint}.js（新增）、src/{bridge,mcp-snowluma-safe,mcp-host-server,mcp-web-search-safe,mcp-qq-file-send,mcp-bilibili,self-test}.js、scripts/{setup-dsh,test-core-entry,test-card}.mjs、package.json、desktop-shell/README.md、DESKTOP_APP_WORKPLAN.tmp.md。"
+    verification: "五个统一 MCP 模式真实子进程 initialize/listTools/callTool 全通过；五个旧独立入口 initialize/listTools 全通过；--worker 在隔离 dataRoot/资源根/服务发现环境/临时端口启动成功并生成 agent-token 与 lock，随后正常退出；卡片 134/134、权限 31/31、本地服务 43/43、路径隔离继续通过。"
+    scope_note: "npm start 与原 src/bridge.js、各 MCP 文件、src/self-test.js 直接入口均保留；协议错误走 stderr，MCP stdout 保持纯 JSON-RPC。未重启当前桥接或 DSH，未改写用户现有 ~/.dsh。"
+
+  - step: T19
+    date: "2026-09-20"
+    action: "[桌面化阶段 4·Bundle 与 SEA 独立可执行文件] 新增打包链：esbuild 把 src/core-sea.js 打成单文件 CJS bundle（platform=node、Node 内置模块与 ws 可选加速 bufferutil/utf-8-validate 保持 external），再用 Node SEA 生成不依赖系统 Node.js 的 dist/core/WhaleBridgeCore.exe，资源以 exe 同目录 resources\\ 形式外置（public/roles/assets/dsh/plugins）。为让 SEA 与源码共用一套分派，把原 src/core-entry.js 的解析/分派抽到 src/core-dispatch.js：core-entry.js 仅保留 isMainModule 守卫（源码直接运行），新增 src/core-sea.js 作为打包入口无条件调用 runCore()——**刻意让 CJS bundle 中 import.meta 为空**，否则 bridge.js 与五个 MCP 顶层的 isMainModule 守卫会在 SEA 中全部成立、一次启动 bridge 加五个 MCP。src/app-paths.js 增加打包分支：node:sea 经 process.getBuiltinModule 探测，resourceRoot 默认 exe 同目录 resources\\，dataRoot 默认 %LOCALAPPDATA%\\WhaleBridge（exe 同目录存在 portable.flag 时改用 exe 同目录 data\\），并新增 --data-dir 参数（优先于 WHALEBRIDGE_DATA_DIR）。desktop-shell 新增 src/core_launch.rs：开发模式用 node src/core-entry.js、发布模式优先 exe 同目录或 resources\\ 下的 WhaleBridgeCore.exe，可用 --core-mode/WHALEBRIDGE_CORE_MODE、--core-command/WHALEBRIDGE_CORE_EXE 覆盖，并新增 `--print-core-command` 诊断输出。"
+    result: "scripts/{build-core,test-core-dist,test-app-paths}.mjs、src/{core-dispatch,core-sea}.js（新增）、src/{core-entry,app-paths}.js、desktop-shell/src/{core_launch.rs（新增）,main.rs}、package.json（新增 iconv-lite 直接依赖与 build:core/test-core-dist 脚本，esbuild 0.25.12 / postject 1.0.0-alpha.6 固定版本 devDependencies）、.gitignore（/dist/、*.blob、sea-config.json）、desktop-shell/README.md、DESKTOP_APP_WORKPLAN.tmp.md。"
+    verification: "build:core 产出 91.7MB WhaleBridgeCore.exe（bundle 3143KB，打包 12 个第三方包，全部为纯 JS，无 .node、无未解析裸模块依赖）；test-core-dist 全通过：--help/无参数/非法参数退出码与输出通道、--self-test（DSH 不可达时非零退出）、五个 MCP 模式真实 stdio initialize/listTools/tools/call、worker 在显式资源目录/自动发现资源目录/默认 %LOCALAPPDATA%/--data-dir/portable.flag 五种路径下 401 鉴权与 200 放行、agent-token 与 bridge.lock 落盘、首次启动生成 console-token 并可鉴权、401 页面与控制台页面内容确实来自 resources\\、进程树无 node.exe 且 worker 镜像为发行 exe、测试后无 WhaleBridgeCore.exe 残留。test-app-paths 扩展覆盖打包分支（resources 自动发现、%LOCALAPPDATA%、portable.flag、--data-dir 优先级）通过；cargo test 16/16 通过（core_launch 12 项 + 原有 4 项）；test-core-entry、test-card 134/134、test-privilege 31/31、test-local-services 43/43、test-stickers 40/40、test-forward 25/25、test-wait、test-vision 7/7、test-md、控制台融合检查三项 PASS、src+scripts 55 个 JS/MJS 语法检查、git diff --check 全部通过。"
+    scope_note: "全程使用临时端口、临时数据目录、临时 HOME/LOCALAPPDATA/ProgramFiles 与无 node.exe 的 PATH；未连接或重启用户正在运行的桥接/QQ/DSH/SnowLuma，未改写 ~/.dsh 与真实 config.json。test-core-dist 刻意不调用 /api/shutdown——该接口会杀机器上任何命令行含 start.bat 的 cmd.exe 守护循环，会误伤用户正在运行的桥接（已列为阶段 6 风险）。已知遗留：exe 未做图标/版本资源/签名与杀软白名单验证；test-slang 的既有文案断言差异与本阶段无关，未改动。"
+
+  - step: T20
+    date: "2026-09-20"
+    action: "[桌面化阶段 5·DSH 集成安装与迁移] 把 setup-dsh 从一次性脚本改造成可重复、可回滚、可迁移的集成安装器：新增 src/dsh-integration.js（计划/执行分离，无 import 副作用），scripts/setup-dsh.mjs 变为薄 CLI，并新增统一入口模式 `WhaleBridgeCore.exe --setup-dsh [profile]`。MCP 配置的 command 统一用 process.execPath，靠 args 前缀区分模式——开发模式为 node.exe + <仓库>/src/core-entry.js + --mcp <mode>，发布模式为 WhaleBridgeCore.exe + --mcp <mode>（不带入口脚本），从而同时解决阶段 4 记录的「setup-dsh 用 process.execPath，在 SEA 下会变成 Core exe」风险。归属判定落在 <DSH_HOME>/.whalebridge-integration.json：只有由本应用安装且此后未被改动的 preset 才会自动升级，用户改过或来源不明的一律保留并提示 --force-presets；用户自建 preset、用户自己的 MCP 条目、非链接的插件目录只报告不删除。旧配置迁移覆盖 qq-* preset/插件链接/settings 命名空间/profile 旧依赖与旧 bundle，以及把指向 src/mcp-*.js 的旧 MCP command/args 就地改成统一入口（不补标记块，避免与既有条目重复注册 MCP server）。执行前对所有将被触碰的路径做快照，失败逆序回滚；回滚干净则连备份目录一并删除。插件在开发模式链接回仓库、发布模式按版本释放到 <dataRoot>/runtime/<version>/whale-mode-console 再链接；构建产物新增 resources/product.json 供打包运行时读取版本号。"
+    result: "src/dsh-integration.js（新增）、src/core-dispatch.js（新增 --setup-dsh 模式）、scripts/{setup-dsh,test-dsh-integration,test-core-dist,test-core-entry,build-core}.mjs、package.json（新增 setup:dsh / test-dsh-integration 脚本）、DESKTOP_APP_WORKPLAN.tmp.md（阶段 5 记录 + ADR-008/009）。"
+    verification: "test-dsh-integration 17 项全通过：新装（preset/插件/MCP 块/package.json/mode.json/manifest）、幂等（重复执行零 effect 且目录树逐字节不变）、旧路径迁移（用本机真实旧配置 node.exe + src/mcp-*.js，迁移后五条全变 core-entry.js + --mcp <mode>，用户条目/uiskin-theme/disabled/超时全保留，再跑一次仍空操作）、无标记旧配置（只就地修本项目条目，用户 my-own-server 原样保留且不补标记块）、升级（未改动的自有 preset 自动更新）、用户改动保护（keep-user-modified + --force-presets 才覆盖）、回滚（注入故障后目录树与执行前完全一致）、发布模式（command=Core exe、args 仅 --mcp <mode>、插件版本化释放与链接切换、重复执行幂等）、旧命名清理（qq-chat/qq-mode-console/qq-mode 命名空间/profile 旧依赖全清且用户 liangshen preset 未动）、生成配置真实 stdio initialize+listTools 五个模式全通过、CLI --dry-run 零写入与重复执行幂等；test-core-dist 新增打包模式 --setup-dsh 用例通过；test-app-paths、test-core-entry、test-card 134/134、test-privilege 31/31、test-local-services 43/43、test-stickers 40/40、test-forward 25/25、test-wait、test-vision 7/7、test-md、cargo test 16/16、57 个 JS/MJS 语法检查、git diff --check 全部通过。"
+    scope_note: "全程只操作临时 DSH_HOME/临时数据目录；**未改写用户真实的 ~/.dsh**（真实 cordis.patch.yml 仍是旧布局，mtime 与内容未变），未重启用户的桥接/DSH/SnowLuma。对真实配置的只读预演显示唯一需要的改动是 MCP 块更新；执行 node scripts/setup-dsh.mjs 即可迁移，但必须重启 DSH 才生效，交由用户择时执行。真实 DSH 会话内的 qq_* 工具调用属阶段 8 端到端验收；卸载流程属阶段 7。"
+
+  - step: T21
+    date: "2026-09-20"
+    action: "[桌面化阶段 6·桌面启动器正式接入] 桌面壳真正接管 Core 生命周期。Rust 侧新增 desktop_paths.rs（数据目录优先级 --data-dir > WHALEBRIDGE_DATA_DIR > portable.flag > %LOCALAPPDATA%\\WhaleBridge，与 app-paths.js 同源；config.json 端口解析含 BOM/缺字段/损坏/缺失四种情况）与 supervisor.rs（spawn worker、HTTP 健康探针、退出码决策、退避重启、优雅停止、状态机），main.rs 接入窗口/托盘/状态页与退出编排：先建状态页窗口、健康后 navigate 到控制台，托盘菜单为 显示主窗口/系统浏览器打开/重启桥接/打开日志目录/退出，关闭窗口隐藏到托盘，退出时丢弃 worker stdin 触发优雅停机。Node 侧新增托管模式：WHALEBRIDGE_SUPERVISED=1 时 /api/shutdown 跳过「杀掉机器上所有 start.bat 守护循环」的全局清理（阶段 4 记录的跨实例误伤风险），stdin EOF 作为父进程存活凭据实现孤儿守卫；/api/restart 退出码从 0 改为 10（start.bat 因 10≠2 仍会重启，兼容不变），退出码契约 0/2/10/其它 由 cargo test 与 npm run test-desktop-supervisor 双重锁定。构建脚本 build.rs 生成 32×32 占位图标供托盘显示（发布前替换）。"
+    result: "desktop-shell/src/{desktop_paths.rs,supervisor.rs}（新增）、desktop-shell/src/main.rs、desktop-shell/{build.rs,Cargo.toml}（tauri 加 tray-icon feature、serde_json 直接依赖）、desktop-shell/ui/status.html（新增）、src/bridge.js（托管模式/退出码 10/孤儿守卫）、scripts/{test-desktop-supervisor,test-desktop-shell}.mjs（新增）、package.json（新增 test-desktop-supervisor / test-desktop-shell / desktop:build:debug 脚本）、DESKTOP_APP_WORKPLAN.tmp.md（阶段 6 记录 + ADR-009/010/012）。"
+    verification: "test-desktop-shell 12 项全通过（临时数据目录 + 临时端口）：--print-core-command 开发/发布选路与 consolePort 解析；--smoke-test worker 拉起 ~520ms 健康、日志与锁文件就位；重启链路 POST /api/restart → exit 10 → 壳 791ms 内换 pid（断言 <5000ms 以区分立即重启与异常退避）且 bridge 日志出现「重启桥接（exit 10）」、spawn_count=2；端口冲突 exit 2 → 不重启、退出码 4；GUI 真实创建窗口（标题「鲸桥 WhaleBridge」）并于就绪后切到控制台；孤儿守卫在进程级验证（taskkill /F 只杀壳 → worker 因 stdin 关闭自行优雅退出并释放锁，worker 日志留痕）；无残留进程。test-desktop-supervisor 5 项通过：托管契约、非托管默认不变、源码层面确认全局 start.bat 清理只在非托管分支。cargo test 27/27。回归：test-core-entry、test-app-paths、test-dsh-integration、test-core-dist、test-card 134/134、test-privilege 31/31、test-local-services 43/43、test-stickers 40/40、test-forward 25/25、test-vision 7/7、test-wait、test-md、59 个 JS/MJS 语法检查、git diff --check 全部通过；release 构建（含 tray-icon + LTO）成功。"
+    scope_note: "全程使用临时数据目录与临时端口，未触碰用户正在运行的桥接（start.bat 守护 pid 22056 / 桥接 pid 32680 测试前后一致、3100 与 3001 仍在监听），未重启 DSH/SnowLuma。GUI 用例会短暂弹出真实窗口用于验证托盘与 WebView2 初始化，验证后立即结束进程。未做：托盘菜单项点击、WebView2 交互细节（缩放/复制/外链/同源弹窗）、WebView2 Runtime 缺失引导安装（归阶段 7）、正式图标与签名（归阶段 7）。"
+
+  - step: T23
+    date: "2026-09-20"
+    action: "[桌面化阶段 7·安装器/迁移器/卸载器] 新增 Rust 侧 installer.rs（安装/修复/卸载的计划与执行：effect 列表 + 快照回滚 + install-manifest.json 归属清单）、migrate.rs（旧数据发现、JSON 校验、备份式迁移、外部工具路径告警）、install_cli.rs（WhaleBridge.exe --install/--repair/--uninstall/--migrate，全部根目录可注入），并接入 main.rs。安装器即桌面壳自身的模式，不新增二进制；从安装目录内卸载时自动复制自身到 %TEMP% 并以 --wait-pid 重新执行，由副本完成卸载并自删。卸载默认保留用户数据，--remove-data 显式删除并二次警告；--remove-dsh-integration 走 Core 新增的 --uninstall-dsh（src/dsh-integration.js 的 planDshRemoval/runDshRemoval：只删 manifest 记录且未被改过的 preset/插件副本与 MCP 条目，用户改过或自建的一律保留）。build-core.mjs 增加第 6 步产物审计：禁止项（config.json/state/日志/.node/.dll/SnowLuma/令牌凭据）、bundle 与 exe 的构建机绝对路径、以及用本机真实 config.json 的 consoleToken/accessToken 做凭据泄漏对照。"
+    result: "desktop-shell/src/{installer.rs,migrate.rs,install_cli.rs}（新增）、desktop-shell/src/main.rs、src/{dsh-integration,core-dispatch}.js、scripts/{build-core,test-desktop-install,test-dsh-integration}.mjs、package.json（新增 test-desktop-install / desktop:install 脚本）、DESKTOP_APP_WORKPLAN.tmp.md（阶段 7 记录 + ADR-011/012/013/014）。"
+    verification: "test-desktop-install 全生命周期通过（全部在临时沙箱：安装目录/数据目录/开始菜单/桌面/HKCU 键均注入临时目录）：新装（--dry-run 零写入；程序文件/resources/数据目录/两处快捷方式/HKCU 卸载项/安装清单全部就位）、幂等、升级（识别已安装版本、更新程序与 resources、用户 config.json 原样保留）、修复（补回被删的 Core exe 并刷新清单哈希）、迁移（候选只报告、state/roles 迁移、config 不覆盖、畸形 JSON 跳过、外部路径告警、敏感值不打印、旧目录保留）、卸载（保留数据）、重装（配置与数据继续可用）、卸载助手（从安装目录内也能完整卸载且自删）、彻底卸载（--remove-data 清空数据与安装目录）、无残留（无进程/无注册表键/%TEMP% 无助手副本）。cargo test 37/37（含安装生命周期、用户改动保护、失败回滚、SHA-256 标准向量、删除链接不跟随目标、迁移计划、参数解析）。test-dsh-integration 新增卸载用例通过。产物审计用注入 public/debug.log 与 public/state/sessions.json 验证会按预期失败，清理后重建通过且确认本机真实 consoleToken 未进入 bundle/exe。回归：test-core-dist、test-desktop-supervisor、test-desktop-shell、test-core-entry、test-app-paths、test-card 134/134、test-privilege 31/31、test-local-services 43/43、test-stickers 40/40、test-forward 25/25、test-vision 7/7、test-wait、test-md 全通过。"
+    scope_note: "全程沙箱化，未在本机真实安装（真实安装会写 Program Files/开始菜单/HKCU，需用户决策）；用户正在运行的桥接（守护 pid 22056 / 桥接 pid 32680）与真实 ~/.dsh 未被触碰；测试产生的 HKCU\\Software\\WhaleBridgeTest\\* 与 %TEMP% 助手副本已清理。未做：WhaleBridge-Setup-x64.exe（ADR-013 说明：App ID 与签名主体未定、图标仍是占位图，启用 NSIS 只需声明式改动）、正式图标与签名、升级时替换正在运行的自身（与常规安装器一样需先退出程序）。"
+
+  - step: T24
+    date: "2026-09-20"
+    action: "[桌面化阶段 8·发布候选] 新增 scripts/build-release.mjs（组装 dist/app 发布候选：release 桌面壳 + payload=dist/core；生成 INSTALL.txt、licenses/THIRD-PARTY.md 与 licenses/README.md、SHA256SUMS.txt、CycloneDX 1.5 最小 SBOM、release-manifest.json；并对产物做发行审计）与 scripts/test-release-candidate.mjs（用发行包跑真实配置的安装与运行）。desktop:build 改为经 scripts/build-desktop.mjs 调用 cargo 并注入 --remap-path-prefix，减少产物里的本机路径痕迹。installer.rs 的注册表写入失败时改为带上 reg.exe 的原始错误（原来被丢弃，故障不可诊断）。"
+    result: "scripts/{build-release,test-release-candidate,build-desktop}.mjs（新增）、desktop-shell/src/installer.rs、desktop-shell/build.rs（注明路径字面量偏差）、package.json（新增 build:release / test-release-candidate，desktop:build 改走包装脚本）、DESKTOP_APP_WORKPLAN.tmp.md（阶段 8 记录 + §11.1/§11.2 状态更新）"
+    verification: "build:release 产出 dist/app（95.7MB，13 个组件）；发行审计通过（payload 与 Core exe 无禁止文件/无构建机路径/与本机真实 config.json 对照无凭据泄漏），并记录 1 项已知偏差：WhaleBridge.exe 内含构建机仓库路径字符串（Tauri/Cargo 以字符串字面量写入，remap 与 strip 均无效，已实测），影响仅限暴露构建机目录布局。test-release-candidate 全通过：中文+空格路径（「鲸桥 发布 候选 测试\\程序 安装 目录」）安装成功；桌面壳拉起的是 WhaleBridgeCore.exe 而非 node，后代进程无 node.exe，控制台 401/200 正常；运行前后安装目录逐字节不变（只读）；强杀 Core 后 5947ms 内按退避自动拉起并恢复控制台（断言 ≥4000ms 以区分退避与立即重启）；第二次启动静默退出且仍只有一个 Core worker（单实例）；强杀壳后 Core 自行退出无残留（孤儿守卫在发行配置下有效）；卸载保留用户数据、无残留进程。回归：test-desktop-install、test-desktop-shell、test-desktop-supervisor、test-core-dist 全通过；用户服务 3100/3001 仍在监听，无残留进程与注册表键。稳定性复跑时孤儿守卫曾失败一次，据此为 src/bridge.js 的托管模式加了第二道保险（除 stdin EOF 外每 5 秒检查父进程是否存在），随后连续 4 次运行全部通过；bridge.js 改动后 test-desktop-supervisor / test-core-entry / test-privilege 31/31 / test-card 134/134 复跑通过。"
+    scope_note: "全部沙箱化：安装/数据/开始菜单/桌面/HKCU 键均指向临时目录，未在本机真实安装、未触碰真实 ~/.dsh 与正在运行的桥接/SnowLuma。本机账号为普通用户（非提升），因此安装验收一律指向沙箱目录；这也确认了运行期不需要管理员权限。阶段 8 中无法自动化的项目已逐条列出原因并写入 workplan §11.2 与 release-manifest.json 的 notVerified：真实安装到本机、Windows 10 x64、四种模式/全部 MCP 工具/媒体/卡片/审批（需真实 QQ+DSH）、DSH/SnowLuma 重启恢复、托盘菜单点击与 WebView2 交互、代码签名与正式图标（无证书）。阶段 8 退出条件「发布清单无阻断项且用户确认候选版」尚未达成：自动化侧无阻断项，等待用户完成上述人工验收。"
+
+  - step: T25
+    date: "2026-09-20"
+    action: "[桌面化阶段 9·文档收口] 新建 docs/DESKTOP_APP.md 作为桌面版正式文档（架构总览与工艺图、路径契约表、进程与退出码契约、托管模式语义、Node SEA 打包方式与三条硬约束、构建与发布步骤、DSH 集成要点、安装/迁移/卸载命令表、故障排查对照表、测试矩阵、14 条决策记录（ADR）汇总表、当前状态与未验证项），并在 docs/PROJECT_GUIDE.md 与 README.md 顶部加文档入口。**未删除 DESKTOP_APP_WORKPLAN.tmp.md**：阶段 8 的 6 项人工验收未完成，而原始要求是「整个项目真正完成时才删除该文件」，ADR-005 也写的是「开发和验收完成后」；已在 workplan 阶段 9 记录审计结论、不删除的原因与用户完成验收后的删除步骤。"
+    result: "docs/DESKTOP_APP.md（新增）、docs/PROJECT_GUIDE.md、README.md、DESKTOP_APP_WORKPLAN.tmp.md（阶段 9 状态与审计结论）"
+    verification: "独有信息审计：14 条 ADR 全部进入 DESKTOP_APP.md §10；退出码契约（§3）、路径优先级（§2）、SEA 的 import.meta 陷阱（§4）、安装/迁移/卸载（§7）、故障排查（§8）、测试矩阵（§9）均已落地；逐阶段实现细节由 AGENT_CONTEXT 的 T17~T24 与 git 历史覆盖。剩余未转移内容仅为「进行中的跟踪信息」（§11.2 人工验收表、§14 待办顺序），删除前需先并入 DESKTOP_APP.md §11。临时文档保留（76680 字节）。"
+    scope_note: "本阶段只新增/更新文档，未改动任何代码与产物，也未执行删除。桌面版的正式文档现已足以维护产品；临时工作文档的删除被显式推迟到用户完成 6 项人工验收之后。"
+
+  - step: T26
+    date: "2026-09-21"
+    action: "[真机缺陷修复·release 构建暴露的 7 个问题 + 第三方链路未决项] 用户在实际安装并运行 release 构建后暴露出一批只在「release 壳 + 打包 Core」组合下才出现的问题，逐条修复：(1) 导航白名单只允许控制台 origin，把 Tauri 自定义协议的自家状态页判成外链——窗口里被拦、同时弹系统浏览器；新增 is_app_internal_url() 放行 tauri.localhost/tauri://，外链交浏览器时写壳日志 [external]。(2) 壳是 GUI 子系统、Core 是控制台子系统，spawn 未加 CREATE_NO_WINDOW 导致每次启动弹黑框；在 supervisor::hidden() 里统一加标志并覆盖 shell 侧全部子进程。(3) 安装器生成的占位 config.json 与迁移「默认不覆盖」冲突，真实配置被静默跳过；新增 is_shipped_placeholder()，并在「运行中 exe 同目录」也查找 config.example.json。(4) 迁移回滚备份目录由安装目录推导 → %ProgramFiles% 不可写；改到数据目录 .whalebridge-backup。(5) HTTP 探测在 SnowLuma 启动期偶发超时导致重复拉起实例；新增纯 TCP 探测复用现有实例，且**不**据此判定 ready（否则盖掉「OneBot 尚未就绪」提示）。(6) DSH 拉起的 5 个 MCP 子进程锁住安装目录 Core 使升级失败且报错误导；计划阶段先做占用检测并给出可操作指引，新增 --stop-core（只结束可执行路径位于本安装目录的进程）。(7) 退出路径把停止 Core 丢给独立线程，进程可能先退出 → 孤儿 Core 攒到 5 个；改为同步停止。"
+    result: "desktop-shell/src/{main.rs,supervisor.rs,installer.rs,install_cli.rs,migrate.rs}、src/{bridge.js,local-services.js}、scripts/{test-desktop-shell,test-desktop-supervisor}.mjs、docs/DESKTOP_APP.md（新增 §12 真机缺陷表 + §12.1 QQ 注入链路）、DESKTOP_APP_WORKPLAN.tmp.md（阶段 8 补充记录）。"
+    verification: "逐条实测：导航修复后壳日志 [external] 计数为 0；Core 直接子进程无 conhost；占位配置被真实配置替换且目标与源逐字节一致；迁移在可写目录建备份并成功；SnowLuma 复用日志正确且失败时仍提示 OneBot 未就绪；占用检测输出明确指引、--stop-core 后安装成功；强杀壳后孤儿 Core = 0。自动化：cargo test 43/43（新增导航白名单回归、占用检测、release conhost 检查）；test-local-services 43/43；test-desktop-supervisor 全部通过（含错误页按启动方式区分指引、外链留痕断言）。未重跑全套（budget）：test-desktop-shell 的 GUI 用例需先退出用户正在运行的应用（单实例互斥量），已改为显式跳过并打印原因。"
+    scope_note: "真机操作均在有备份的前提下进行：迁移前手工备份了数据目录、安装/迁移的自动回滚快照在 <data>\\.whalebridge-backup。为完成安装曾两次停止用户实例并停过一次 DSH（DSH 的 5 个 MCP 子进程会锁住 Core exe，不停无法覆盖安装）——已如实告知用户，DSH 需由其重启。未决项：QQ 进程注入 —— 日志确认 QQ 由 explorer 启动，而注入要求由 SnowLuma 自己拉起 QQ，且注入是 OneBot API 上线的必要步骤；该项目无法从代码侧修复，操作顺序与排查方向已写入 docs/DESKTOP_APP.md §12.1。"
+
+  - step: T27
+    date: "2026-09-22"
+    action: "[正式应用图标·C4 浅色简洁苏打] 用户在 A/B/C 候选与多轮简化后确定 C4：保留 C 的双向连接鲸鱼构图，采用浅紫薄荷底和蓝青双色的克制苏打风格。新增可复现的 Windows 图标生成脚本，以选定 PNG 为唯一源，清理圆角外透明杂点并生成 16/20/24/32/40/48/64/128/256 九层 ICO、Tauri 标准 PNG 和界面品牌图；build.rs 移除阶段 1 的 32px 程序化占位图，EXE/窗口/托盘统一使用正式 icon.ico；安装向导、启动状态页、控制台和令牌登录页同步替换原 SVG/Q 占位标志。IExpress 不提供自定义外壳图标参数，新增 Win32 资源写入脚本在封装后、签名前替换安装器的全部 RT_GROUP_ICON，使单文件安装器也使用同一 C4。"
+    result: "desktop-shell/icons/{source-c4.png,icon.ico,icon.png,32x32.png,128x128.png,128x128@2x.png}、desktop-shell/{build.rs,tauri.conf.json,README.md}、desktop-shell/ui/{whalebridge-icon.png,installer.html,status.html}、public/{whalebridge-icon.png,console.html,token-login.html}、design-demos/bg-ripple/tools/fixtures/{console.baseline.html,token-login.baseline.html}、scripts/{build-app-icons.ps1,set-exe-icon.ps1,test-app-icon.mjs,package-installer.mjs,test-installer-package.mjs}、package.json、README.md、docs/DESKTOP_APP.md、DESKTOP_APP_WORKPLAN.tmp.md、dist/app。"
+    verification: "npm run test-app-icon 通过：C4 源图一致、PNG 尺寸正确、ICO 9 层均为 32bpp PNG 编码、安装器资源链与四个界面引用正确；npm run test-installer-package 通过并由 Windows 成功提取蓝青 C4 图标；融合链三条硬校验全部 PASS；cargo test 44/44；debug/release 桌面壳与 release 单文件安装器均可提取 C4，两个发布 EXE 的提取图标 SHA-256 完全一致；build:release 发行审计通过；最终 test-release-candidate 全链路通过（中文空格路径、无系统 Node、只读安装目录、崩溃恢复、单实例、孤儿守卫、卸载），无临时目录或测试进程残留，本机 5 个已安装 MCP Core 未受影响。"
+    scope_note: "没有覆盖或删除任何设计候选；C4 原图保留在 output/imagegen，desktop-shell/icons/source-c4.png 是正式构建源。正式图标已完成，仍待版本资源、Authenticode 签名与真实 GUI 小尺寸人工观感验收。"
 
   deprecated_experiments:
     - id: "DEP-01"
@@ -373,6 +450,7 @@ anchors:
 # §7 当前待办状态 [MODULE=OPEN_ITEMS]
 # ================================================================
 open_items:
+  rename_pending: "[改名落地·T16] 需重启一次 DSH，whale-chat / whale-chat-v2 preset 与 whale-mode-console 插件才生效；插件 settings 命名空间已由 qq-mode 改为 whale-mode，若设置页模式值异常需重选一次。桥接进程会在下次读取 config.json 后使用 whale-chat* preset。"
   uncommitted: "T23–T25 未提交（用户未要求提交）：design-demos/bg-ripple/（新增目录，待入库）、public/console.html（T25 落场涟漪，纯新增）、public/token-login.html（T23 融合后又在 T25 还原为基线，最终态 = 基线原样）、design-demos/index.html、AGENT_CONTEXT.md；另有更早的 console.html / token-login.html 主题联动改动（T20–T22）同样未提交。提交前先跑 node design-demos/bg-ripple/tools/check-fusion.mjs 确认三条 PASS"
   known_stable: "本次提交已含：QQ 官方机器人卡片查看工具（markdown+inline_keyboard 卡片 / json 图文卡 / ark 活动卡）、控制台「Agent 预设 → 工具开关」独立开关（socialV2.tools.getCardMsg，开/关即时生效）、卡片插图进图片管线（qq_get_message_images 可看图）、按需回源 get_msg 与启动历史回填"
   pending_ops: "[部署] 后端卡片支持需重启一次桥接生效；重启后执行 npm run test-card 完成正向端到端确认（脚本会先检查 /api/status.cardSegments 是否含 markdown，未重启则跳过而非误报失败）。[无需重启] 涟漪落场是纯前端静态产物，刷新页面即生效"

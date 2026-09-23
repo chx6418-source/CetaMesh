@@ -1,4 +1,4 @@
-// 只读 HTTP(S) 安全抓取工具：供 qq-bridge / MCP 共用。
+// 只读 HTTP(S) 安全抓取工具：供 whalebridge / MCP 共用。
 // 设计目标与 mcp-web-search-safe 一致：
 // - 仅 http/https
 // - 禁止 localhost / .local / 私有 IP / 环回 / 链路本地 / CGNAT 等内网地址

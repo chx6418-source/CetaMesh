@@ -1,13 +1,16 @@
-# DSH QQ 桥接（qq-bridge）项目说明书
+# 鲸桥 WhaleBridge —— DSH × QQ 桥接项目说明书
 
 > 让 DeepSeek Harness（DSH）的 agent 以“仿真群友”身份接入 QQ 群/私聊。
 > 本文是面向公开仓库的精简版说明；本地开发历史、个人配置与运行状态不会包含在仓库中。
+>
+> 桌面版（Windows 独立应用、安装器、构建发布与故障排查）见 **[DESKTOP_APP.md](DESKTOP_APP.md)**；
+> DSH 端安装见 **[DSH_SETUP.md](DSH_SETUP.md)**；需要人工完成的验收项见 **[DESKTOP_ACCEPTANCE.md](DESKTOP_ACCEPTANCE.md)**。
 
 ---
 
 ## 1. 项目是什么
 
-`qq-bridge` 是一个独立的 Node.js 进程，做三件事：
+`WhaleBridge` 是一个独立的 Node.js 进程，做三件事：
 
 1. **连接 QQ**：通过 SnowLuma（OneBot v11 WebSocket）收发 QQ 群/私聊消息。
 2. **连接 DSH**：通过 DSH Web API（默认 `127.0.0.1:3080`）创建会话、投递 prompt、接收事件流。
@@ -21,7 +24,7 @@
 
 ```
 ┌─────────────┐   OneBot WS   ┌──────────────────────┐   HTTP/WS   ┌──────────────────┐
-│  SnowLuma   │◄─────────────►│      qq-bridge       │◄───────────►│   DSH Harness    │
+│  SnowLuma   │◄─────────────►│      WhaleBridge     │◄───────────►│   DSH Harness    │
 │  (QQ 网关)  │               │   src/bridge.js      │             │  (agent 会话)    │
 └─────────────┘               │   src/dsh-client.js  │             └──────────────────┘
                               │   src/mcp-*.js       │
@@ -51,7 +54,7 @@
 ## 3. 目录结构（公开仓库）
 
 ```
-qq-bridge/
+WhaleBridge/
 ├── src/
 │   ├── bridge.js               # 主程序（核心）
 │   ├── dsh-client.js           # DSH API 客户端
@@ -72,9 +75,9 @@ qq-bridge/
 │   ├── PROJECT_GUIDE.md        # 本文档（公开版）
 │   └── DSH_SETUP.md            # DSH 端安装说明（另一台设备）
 ├── dsh/
-│   └── agent-presets/          # qq-chat / qq-chat-v2 的 DSH preset 模板
+│   └── agent-presets/          # whale-chat / whale-chat-v2 的 DSH preset 模板
 ├── plugins/
-│   └── qq-mode-console/        # DSH 设置页 qq-mode 卡片插件
+│   └── whale-mode-console/        # DSH 设置页 whale-mode 卡片插件
 ├── assets/
 │   ├── deepseek娘.png          # AI 自我形象图（qq_get_self_image）
 │   └── project-intro.mp4       # 项目介绍视频（README 可查看）
@@ -287,7 +290,7 @@ DSH 事件流（api.events.mux）→ pumpMux()
 - `start.bat`：守护启动（自动拉起、崩溃重启）。
 - `restart.bat`：停止旧 bridge 进程并重新拉起。
 - 控制台：`http://127.0.0.1:3100`（模式、人格、社交参数、白名单/管理员、黑话管理、控制台访问令牌、会话/挂起/日志）。
-- 模式：`state/mode.json` 或 DSH settings 的 `qq-mode`；运行 `scripts/setup-dsh.mjs` 的全新环境默认 `reserved2`。
+- 模式：`state/mode.json` 或 DSH settings 的 `whale-mode`；运行 `scripts/setup-dsh.mjs` 的全新环境默认 `reserved2`。
 
 ### 常用调试/测试脚本
 
@@ -349,7 +352,7 @@ restart.bat
 
 ### Q：MCP 工具改了不生效？
 
-- MCP 由 DSH 拉起，修改 `src/mcp-*.js` 后需要**重启 DSH 进程本身**（不是只重启 qq-bridge），或让 DSH 重连 MCP。
+- MCP 由 DSH 拉起，修改 `src/mcp-*.js` 后需要**重启 DSH 进程本身**（不是只重启 WhaleBridge），或让 DSH 重连 MCP。
 - 修改 DSH preset 或 `cordis.patch.yml` 后，同样需要重启 DSH。
 
 ### Q：黑话提取/联网研究没生效？

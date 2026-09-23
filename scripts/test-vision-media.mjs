@@ -83,4 +83,6 @@ if (fs.existsSync(consoleTokenFile) && fs.existsSync(socialV2File)) {
 }
 
 console.log(`\n结果：${passed} 通过，${failed} 失败`);
-process.exit(failed > 0 ? 1 : 0);
+// 让 Node 自然排空 fetch/undici 的 Windows 异步句柄；Node 24 下在这里强制
+// process.exit() 可能触发 libuv 的 UV_HANDLE_CLOSING 断言，即使所有检查均已通过。
+process.exitCode = failed > 0 ? 1 : 0;

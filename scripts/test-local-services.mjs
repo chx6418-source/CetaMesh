@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import iconv from 'iconv-lite';
-import { createLocalServiceManager, pickSnowLumaReleaseAsset, DSH_INSTALL_HINT, SNOWLUMA_RELEASE_PAGE, createAdaptiveProcessDecoder, extractSnowLumaWebUrl, isLocalHttpUrl } from '../src/local-services.js';
+import { createLocalServiceManager, pickSnowLumaReleaseAsset, DSH_INSTALL_HINT, SNOWLUMA_RELEASE_PAGE, createAdaptiveProcessDecoder } from '../src/local-services.js';
 
 let passed = 0;
 let failed = 0;
@@ -14,7 +14,7 @@ function check(name, condition, extra = '') {
   else { failed += 1; console.error(`❌ ${name}${extra ? ` — ${extra}` : ''}`); }
 }
 
-const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-bridge-local-services-'));
+const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'whalebridge-local-services-'));
 try {
   const snowDir = path.join(temp, 'SnowLuma');
   fs.mkdirSync(snowDir, { recursive: true });
@@ -169,57 +169,28 @@ try {
   const tailText = tailOnly.write(Buffer.from('no newline tail', 'utf8')) + tailOnly.end();
   check('无换行残留内容在流结束时输出', tailText.includes('no newline tail'));
 
-  // ── SnowLuma 网页控制台：地址解析、应用窗口白名单、端口探测 ──────────────
-  check('从 SnowLuma 启动日志解析 WebUI 地址（含 5099→5100 回退）',
-    extractSnowLumaWebUrl('12:30:20 INFO               [WebUI] listening http://127.0.0.1:5100') === 'http://127.0.0.1:5100'
-    && extractSnowLumaWebUrl('12:30:20 INFO [WebUI] listening http://127.0.0.1:5099，') === 'http://127.0.0.1:5099'
-    && extractSnowLumaWebUrl('12:30:20 WARN  [WebUI] port 5099 is in use, using 5100 instead') === ''
-    && extractSnowLumaWebUrl('') === '');
-  check('唤起浏览器只允许本机 http(s) 地址',
-    isLocalHttpUrl('http://127.0.0.1:5100/') && isLocalHttpUrl('http://localhost:3100/dsh-monitor.html') && isLocalHttpUrl('http://127.0.0.1:5100')
-    && !isLocalHttpUrl('https://example.com/') && !isLocalHttpUrl('file:///C:/Windows/System32/calc.exe')
-    && !isLocalHttpUrl('javascript:alert(1)') && !isLocalHttpUrl('http://192.168.1.9:5100/') && !isLocalHttpUrl('not a url') && !isLocalHttpUrl(''));
-
-  const fakeWeb = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); res.end('<title>SnowLuma 控制台</title>'); });
-  await listen(fakeWeb);
-  const fakeWebPort = fakeWeb.address().port;
-  const webManager = createLocalServiceManager({
-    root: path.join(temp, 'web-root'),
-    config: DEAD_CONFIG,
-    detectionOptions: {
-      userHome: temp, fullScanRoots: [], snowLumaWebPorts: [fakeWebPort],
-      environment: { PATH: '', APPDATA: path.join(temp, 'no-appdata'), LOCALAPPDATA: '' }
-    }
-  });
-  const probedWebUrl = await webManager.resolveSnowLumaWebUrl({ probe: true });
-  check('探测到 SnowLuma 网页控制台端口', probedWebUrl === 'http://127.0.0.1:' + fakeWebPort, String(probedWebUrl));
-  check('解析结果写回雪碧快照 webUrl', webManager.snapshot().snowluma.webUrl === 'http://127.0.0.1:' + fakeWebPort);
-  await closeServer(fakeWeb);
-
-  const noWebManager = createLocalServiceManager({
-    root: path.join(temp, 'no-web-root'),
-    config: DEAD_CONFIG,
-    detectionOptions: { userHome: temp, fullScanRoots: [], snowLumaWebPorts: [], environment: { PATH: '', APPDATA: path.join(temp, 'no-appdata'), LOCALAPPDATA: '' } }
-  });
-  const noWeb = await noWebManager.openSnowLumaWeb();
-  check('找不到网页控制台时安全失败并给出提示', noWeb.ok === false && /未发现 SnowLuma 网页控制台/.test(noWeb.error || ''), JSON.stringify(noWeb));
+  // ── 服务管理边界：只负责本地进程与 OneBot/DSH API，不负责打开网页 ──────
+  const managerMethods = Object.keys(manager);
+  check('管理器保留服务检测、版本选择及进程生命周期 API',
+    ['detectAll', 'snapshot', 'selectSnowLuma', 'selectDsh', 'startSnowLuma', 'stopSnowLuma', 'startDsh', 'stopDsh'].every((name) => managerMethods.includes(name)));
+  check('管理器不暴露浏览器、应用窗口或网页 URL 打开入口',
+    !managerMethods.some((name) => /open.*(?:web|monitor|window|browser)|resolveSnowLumaWebUrl/i.test(name)));
+  const snapshot = manager.snapshot();
+  check('服务快照不携带 SnowLuma / DSH 网页入口地址',
+    !Object.hasOwn(snapshot.snowluma, 'webUrl') && !Object.hasOwn(snapshot.dsh, 'webUrl'));
 
   const bridgeSource = fs.readFileSync(path.join(scriptDir, '..', 'src', 'bridge.js'), 'utf8');
   const managerSource = fs.readFileSync(path.join(scriptDir, '..', 'src', 'local-services.js'), 'utf8');
-  const consoleHtml = fs.readFileSync(path.join(scriptDir, '..', 'public', 'console.html'), 'utf8');
   check('SnowLuma 与 dsh 使用同一并行调度批次', managerSource.includes('Promise.allSettled([') && managerSource.includes('timed(() => detectSnowLuma(force))') && managerSource.includes('timed(() => detectDshInstallations(force))'));
   check('检测采用缓存、优先路径、全量扫描三层策略', managerSource.includes("layer: 'cache'") && managerSource.includes("layer: 'priority'") && managerSource.includes("layer: 'full-scan'"));
   check('管理器提供就绪校正（外部服务不被显示成未运行）', managerSource.includes('reconcileReadiness') && managerSource.includes('applyReadiness') && managerSource.includes('probeDshUrl'));
+  check('SnowLuma 就绪状态基于 OneBot HTTP/WebSocket 端点，而非 WebUI 端口', managerSource.includes('snowLumaHttpUrl()') && managerSource.includes('snowLumaWsUrl()') && managerSource.includes('probeUrl(snowLumaHttpUrl()') && managerSource.includes('probeTcp(snowLumaWsUrl())'));
   check('桥接端点暴露本地服务状态与 SSE', bridgeSource.includes("url.pathname === '/api/services'") && bridgeSource.includes("url.pathname === '/api/services/stream'"));
   check('桥接端点支持后台重检和版本选择', bridgeSource.includes("url.pathname === '/api/services/detect'") && bridgeSource.includes("url.pathname === '/api/services/snowluma/select'") && bridgeSource.includes("url.pathname === '/api/services/dsh/select'"));
-  check('桥接端点支持一键打开 SnowLuma 网页 / dsh 监控', bridgeSource.includes("url.pathname === '/api/services/snowluma/open'") && bridgeSource.includes("url.pathname === '/api/services/dsh/open'"));
-  check('管理器提供应用窗口打开能力', managerSource.includes('openSnowLumaWeb') && managerSource.includes('openAppWindow') && managerSource.includes('--app='));
-  check('控制台 SnowLuma 面板有打开网页按钮并接线', consoleHtml.includes('id="snowlumaOpenWeb"') && consoleHtml.includes("'/api/services/snowluma/open'"));
-  check('dsh 监控按钮走后端应用窗口（带回退）', consoleHtml.includes("'/api/services/dsh/open'") && consoleHtml.includes('window.open(\'/dsh-monitor.html\''));
-  check('控制台提供 SnowLuma 后台终端标签', consoleHtml.includes('SnowLuma 后台终端') && consoleHtml.includes('data-service-tab="snowluma"'));
-  check('控制台展示多版本选择与自定义路径', consoleHtml.includes('snowlumaVersionSelect') && consoleHtml.includes('dshVersionSelect') && consoleHtml.includes('snowlumaCustomPath') && consoleHtml.includes('dshCustomPath'));
-  check('控制台通过 SSE 异步通知检测完成', consoleHtml.includes("message.event === 'detection-complete'") && consoleHtml.includes('本地服务检测完成'));
-  check('dsh 监控终端为独立只读页面', consoleHtml.includes('/dsh-monitor.html') && fs.existsSync(path.join(scriptDir, '..', 'public', 'dsh-monitor.html')) && !consoleHtml.includes('id="dshMonitorInput"'));
+  check('桥接不再暴露 SnowLuma / DSH 的浏览器打开接口',
+    !bridgeSource.includes("url.pathname === '/api/services/snowluma/open'") && !bridgeSource.includes("url.pathname === '/api/services/dsh/open'"));
+  check('桥接不再提供 HTML 监控页或网页内容类型',
+    !bridgeSource.includes("url.pathname === '/dsh-monitor.html'") && !bridgeSource.includes('text/html'));
 } finally {
   fs.rmSync(temp, { recursive: true, force: true });
 }

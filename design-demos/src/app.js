@@ -1,4 +1,4 @@
-/* QQ 桥接控制台 Demo · 共享交互层（Mock，无任何真实请求） */
+/* 鲸桥控制台 Demo · 共享交互层（Mock，无任何真实请求） */
 (function () {
   'use strict';
   var CFG = window.DEMO_CONFIG || { themes: [], palette: false };

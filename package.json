@@ -1,5 +1,5 @@
 {
-  "name": "qq-bridge",
+  "name": "whalebridge",
   "version": "0.1.0",
   "private": true,
   "description": "Bridge between SnowLuma (OneBot v11 / QQ) and DeepSeek Harness Web API: QQ messages become DSH agent prompts, agent replies go back to QQ.",
@@ -9,7 +9,10 @@
   },
   "scripts": {
     "start": "node src/bridge.js",
+    "start:core": "node src/core-entry.js --worker",
+    "core:help": "node src/core-entry.js --help",
     "self-test": "node src/self-test.js",
+    "setup:dsh": "node scripts/setup-dsh.mjs",
     "test-md": "node scripts/test-md-to-plain.mjs",
     "test-wait": "node scripts/test-v2-wait.mjs",
     "test-vision": "node scripts/test-vision-media.mjs",
@@ -20,6 +23,24 @@
     "test-privilege": "node scripts/test-bridge-privilege.mjs",
     "test-slang": "node scripts/test-slang-learn.mjs",
     "test-stickers": "node scripts/test-stickers.mjs",
+    "test-app-paths": "node scripts/test-app-paths.mjs",
+    "test-core-entry": "node scripts/test-core-entry.mjs",
+    "test-dsh-integration": "node scripts/test-dsh-integration.mjs",
+    "test-desktop-supervisor": "node scripts/test-desktop-supervisor.mjs",
+    "test-desktop-shell": "node scripts/test-desktop-shell.mjs",
+    "test-desktop-install": "node scripts/test-desktop-install.mjs",
+    "test-installer-package": "node scripts/test-installer-package.mjs",
+    "test-app-icon": "node scripts/test-app-icon.mjs",
+    "desktop:install": "cargo build --manifest-path desktop-shell/Cargo.toml && desktop-shell/target/debug/whalebridge-desktop.exe --install",
+    "build:icons": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-app-icons.ps1",
+    "build:core": "node scripts/build-core.mjs",
+    "build:release": "node scripts/build-release.mjs",
+    "test-release-candidate": "node scripts/test-release-candidate.mjs",
+    "test-core-dist": "node scripts/test-core-dist.mjs",
+    "desktop:check": "cargo check --manifest-path desktop-shell/Cargo.toml",
+    "desktop:test": "cargo test --manifest-path desktop-shell/Cargo.toml",
+    "desktop:build:debug": "node scripts/build-desktop.mjs",
+    "desktop:build": "node scripts/build-desktop.mjs --release",
     "postinstall": "node scripts/patch-snowluma-sdk.mjs"
   },
   "dependencies": {
@@ -28,7 +49,12 @@
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@snowluma/mcp": "^1.14.10",
     "@snowluma/sdk": "^1.14.0",
+    "iconv-lite": "^0.7.3",
     "ws": "^8.21.3",
     "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12",
+    "postject": "1.0.0-alpha.6"
   }
 }

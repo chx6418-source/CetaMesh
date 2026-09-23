@@ -7,12 +7,13 @@
 // 用法：node src/bridge.js （先编辑 ../config.json）
 import fs from 'node:fs';
 import http from 'node:http';
+import net from 'node:net';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { spawn, execFileSync } from 'node:child_process';
-import iconv from 'iconv-lite';
-import { fileURLToPath } from 'node:url';
+import { execFileSync } from 'node:child_process';
 import { SnowLumaWebSocketClient, text } from '@snowluma/sdk';
+import { APP_PATHS, listRoleNames, resolveRoleFile } from './app-paths.js';
+import { isMainModule, reportEntrypointError } from './entrypoint.js';
 import { NodeApiClient, unwrap, createTurnCollector } from './dsh-client.js';
 import { createStatusPanel } from './status-panel.js';
 import { mdToPlain, splitForQQ } from './md-to-plain.js';
@@ -20,10 +21,10 @@ import { SENSITIVE_RE } from './sensitive.js';
 import { looksLikeUnfinished } from './v2-wait.js';
 import {
   PRIVILEGE_AGENT,
+  PRIVILEGE_CONSOLE,
   agentPrivilegeAllows,
   describePrivilegeSurface,
-  resolvePrivilege,
-  shouldIssueConsoleSession
+  resolvePrivilege
 } from './bridge-privilege.js';
 import { safeFetchBuffer, validateFetchUrl, looksLikeImageBuffer } from './safe-fetch.js';
 import { extractForwardIds, forwardIdFromData, sanitizeForwardId, formatForwardResponse } from './forward.js';
@@ -68,6 +69,8 @@ import {
 } from './sticker-lib.js';
 import { loginInfo, extractKugouAuth, createQrLogin, pollQrLogin } from './kugou-api.js';
 import { createLocalServiceManager, SNOWLUMA_RELEASE_PAGE, DSH_INSTALL_HINT } from './local-services.js';
+import { CONTROL_METHODS, ControlServiceError, createControlService } from './control/control-service.js';
+import { startIpcProtocol } from './control/ipc-protocol.js';
 let kugouQrSession = null; // 进行中的二维码登录会话 { key, mid, dfid, createdAt }
 let kugouLoginCache = null; // { cookie, info, fetchedAt } 缓存的完整登录信息（含 roleinfo 探测的会员状态）
 async function probeKugouLogin(cookie) {
@@ -79,9 +82,41 @@ async function probeKugouLogin(cookie) {
   return info;
 }
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const ROOT = path.resolve(__dirname, '..');
-const STATE_DIR = path.join(ROOT, 'state');
+const DATA_ROOT = APP_PATHS.dataRoot;
+const STATE_DIR = APP_PATHS.stateDir;
+const CONFIG_FILE = APP_PATHS.configFile;
+const ROLES_DIR = APP_PATHS.rolesDir;
+
+// 退出码约定（守护脚本 start.bat 与桌面启动器 WhaleBridge.exe 共同遵守）：
+//   0   正常结束：用户在控制台点了「关闭主程序」，或启动器要求退出 → 不要重启
+//   2   已有实例在运行（锁/端口被占用），或用户要求停止 → 不要重启
+//   10  请求重启（/api/restart）→ 重新拉起
+//   其它 异常退出 → 记录原因后按退避策略重启
+const EXIT_RESTART = 10;
+
+// 桌面启动器以 WHALEBRIDGE_SUPERVISED=1 启动本进程时，生命周期由启动器负责：
+//   1. /api/shutdown 不再执行"杀掉机器上所有 start.bat 守护循环"的全局清理
+//      —— 那会误伤用户另外用 start.bat 跑着的实例；启动器只终止自己拉起的这个子进程。
+//   2. 监听 stdin：启动器被强杀导致管道关闭时优雅退出，避免留下孤儿 worker。
+const SUPERVISED = process.env.WHALEBRIDGE_SUPERVISED === '1';
+
+/** 是否由桌面启动器托管（供测试与诊断使用）。 */
+export function isSupervised() {
+  return SUPERVISED;
+}
+
+// 本进程创建的子服务管理器（main() 里赋值）。SnowLuma 与 WhaleBridge 独立运行；
+// WhaleBridge 退出时保留 SnowLuma，避免中断 QQ 注入和 OneBot 会话。
+let managedServices = null;
+
+/**
+ * WhaleBridge 退出时让 SnowLuma 继续作为独立服务运行。
+ * SnowLuma 自己持有 QQ 注入和 OneBot 会话；强杀其 launcher 进程树会使这些状态异常。
+ */
+function leaveSnowLumaRunningOnExit() {
+  if (!managedServices) return;
+  log('鲸桥正在完全退出；SnowLuma 保持运行，可继续管理 QQ。');
+}
 const STATE_FILE = path.join(STATE_DIR, 'sessions.json');
 const ROLE_STATE_FILE = path.join(STATE_DIR, 'current-role.json');
 const SLANG_FILE = path.join(STATE_DIR, 'slang.json');
@@ -95,6 +130,12 @@ const FEEDBACK_FILE = path.join(STATE_DIR, 'feedback.json');
 const TOOL_LOG_FILE = path.join(STATE_DIR, 'tool-calls.jsonl');
 const ACTIVITY_LOG = path.join(STATE_DIR, 'qq-activity.log');
 const BRIDGE_LOG = path.join(STATE_DIR, 'bridge.log');
+const CONTROL_LOG_FILES = Object.freeze({
+  bridge: BRIDGE_LOG,
+  worker: path.join(APP_PATHS.dataRoot, 'logs', 'worker.log'),
+  desktop: path.join(APP_PATHS.dataRoot, 'logs', 'desktop-shell.log')
+});
+const CONTROL_LOG_MAX_BYTES = 1024 * 1024;
 
 // 读取 JSON 文件并容错：Windows 下常见 UTF-8 BOM（\uFEFF）会令 JSON.parse 失败。
 // required=true 时文件缺失或解析失败直接抛错（用于启动必需配置，fail-fast）。
@@ -138,7 +179,7 @@ function loadOrCreateConsoleToken() {
 }
 
 // 服务令牌：给 MCP server / agent 侧使用的**数据面**凭据，与控制台令牌分离。
-// 即使它被泄漏，也够不到 /api/terminal/*（本机命令执行）、/api/services/*（服务启停/安装）、
+// 即使它被泄漏，也够不到 /api/services/*（服务启停/安装）、
 // /api/shutdown、配置写入等控制面接口。force=true 时强制轮换（控制台重置令牌时同步失效）。
 function loadOrCreateAgentToken(force = false) {
   const tokenFile = path.join(STATE_DIR, 'agent-token');
@@ -154,24 +195,54 @@ function loadOrCreateAgentToken(force = false) {
 }
 
 function readActivityTail(n) {
+  return readControlTextTail(ACTIVITY_LOG, n).join('\n');
+}
+
+// Native control RPC only reads fixed, allowlisted files and a bounded tail. Reading the final
+// megabyte keeps an unexpectedly large child-process log from becoming an unbounded memory read.
+function readControlTextTail(file, limit) {
+  let fd;
   try {
-    const raw = fs.readFileSync(ACTIVITY_LOG, 'utf8');
-    const lines = raw.split('\n').filter(Boolean);
-    return lines.slice(-n).join('\n');
+    fd = fs.openSync(file, 'r');
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.size <= 0) return [];
+    const byteLength = Math.min(stat.size, CONTROL_LOG_MAX_BYTES);
+    const offset = stat.size - byteLength;
+    const buffer = Buffer.allocUnsafe(byteLength);
+    const bytesRead = fs.readSync(fd, buffer, 0, byteLength, offset);
+    let text = buffer.subarray(0, bytesRead).toString('utf8');
+    if (offset > 0) {
+      // The beginning of a bounded suffix may start in the middle of a line or UTF-8 code point.
+      // Drop that whole partial line so only complete UTF-8 tail lines are returned.
+      const firstNewline = text.indexOf('\n');
+      if (firstNewline < 0) return [];
+      text = text.slice(firstNewline + 1);
+    }
+    if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+    return text.split(/\r?\n/).filter(Boolean).slice(-limit);
   } catch {
-    return '';
+    // Missing/unreadable optional logs are normal on first run and must not fail the RPC.
+    return [];
+  } finally {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch {}
+    }
   }
 }
 
+function readControlActivityTail(limit) {
+  const text = readActivityTail(limit);
+  return text ? text.split('\n') : [];
+}
+
+function readControlLogTail(source, limit) {
+  // `source` is validated by ControlService; this closed map never incorporates request paths.
+  const file = CONTROL_LOG_FILES[source];
+  return file ? readControlTextTail(file, limit) : [];
+}
+
 function listRoles() {
-  try {
-    return fs.readdirSync(path.join(ROOT, 'roles'))
-      .filter((f) => f.endsWith('.md') && f !== 'README.md')
-      .map((f) => f.slice(0, -3))
-      .sort((a, b) => a.localeCompare(b, 'zh-CN'));
-  } catch {
-    return [];
-  }
+  return listRoleNames(APP_PATHS);
 }
 
 // 回复审计：agent 回复若命中以下特征（本机路径/凭据），硬性拦截不发送。
@@ -273,34 +344,6 @@ function normalizeIdList(value) {
 }
 
 // ── 配置 ────────────────────────────────────────────────────────────────────
-// 启动致命错误兜底：在约定端口挂一个仅展示错误信息的极简页面（不弹黑框、不崩溃），
-// 自动唤起的浏览器会直接看到友好的错误说明；修复后经 重启桥接.vbs 重启即恢复。
-function startFatalErrorServer(port, title, detail) {
-  const safe = String(detail).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
-  const page = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>QQ 桥接控制台 · 启动失败</title><style>
-  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:linear-gradient(140deg,#d5e3ff,#ded7ff 55%,#ccf1ef);font-family:"Segoe UI",system-ui,"Microsoft YaHei",sans-serif;color:#333d5c}
-  .card{width:min(560px,90vw);background:rgba(255,255,255,.92);border-radius:22px;padding:30px 34px;box-shadow:0 24px 70px rgba(110,130,230,.28)}
-  h1{font-size:19px;margin:0 0 10px}code{background:#eef2fc;border-radius:8px;padding:2px 6px;font-size:12.5px}
-  pre{background:#0f1428;color:#d9e3ff;border-radius:14px;padding:14px 16px;font-size:12.5px;white-space:pre-wrap;word-break:break-all;max-height:40vh;overflow:auto}
-  p{font-size:13px;color:#5a6482;line-height:1.7}
-  </style></head><body><div class="card"><h1>⚠️ ${title}</h1>
-  <p>桥接后端启动失败，进程已在后台保持运行并展示本错误页，不会弹出命令行窗口。请根据下方信息修复后，双击 <code>重启桥接.vbs</code> 重新启动。</p>
-  <pre>${safe}</pre>
-  <p>修复并重启后，本页地址即可访问控制台登录页。</p>
-  </div></body></html>`;
-  const server = http.createServer((req, res) => {
-    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-    res.end(page);
-  });
-  server.on('error', () => process.exit(1));
-  server.listen(port, '127.0.0.1', () => {
-    const url = `http://127.0.0.1:${port}/`;
-    if (process.argv.includes('--open') || process.env.QQ_OPEN_BROWSER === '1') {
-      try { spawn('cmd.exe', ['/d', '/s', '/c', 'start', '""', url], { detached: true, windowsHide: true, stdio: 'ignore' }).unref(); } catch {}
-    }
-    console.error(`[bridge] ${title}：${detail}（错误页已挂载：${url}）`);
-  });
-}
 
 // 桥接默认模型：新建会话显式绑定它；config.json 显式写了 dsh.model 时以配置为准。
 // 必须是官方目录里声明了 image 输入的模型——QQ 图片工具（qq_get_message_images /
@@ -311,7 +354,7 @@ function startFatalErrorServer(port, title, detail) {
 const DEFAULT_MODEL = 'deepseek-flash';
 
 function loadConfig() {
-  const p = path.join(ROOT, 'config.json');
+  const p = CONFIG_FILE;
   const file = readJsonSafe(p, null, true);
   if (!file || typeof file !== 'object' || Array.isArray(file)) throw new Error(`配置格式错误：${p}`);
   const cfg = {
@@ -325,7 +368,7 @@ function loadConfig() {
     snowluma: { wsUrl: 'ws://127.0.0.1:3001', accessToken: '', ...(file.snowluma ?? {}) },
     // 空 => 每个会话在 state/agents/<key> 下建独立工作目录
     sessionCwd: file.sessionCwd ?? '',
-    agentPreset: file.agentPreset ?? 'qq-chat',
+    agentPreset: file.agentPreset ?? 'whale-chat',
     workspaceTitle: file.workspaceTitle ?? 'QQ 聊天',
     ownerQQ: normalizeOwnerQQ(file.ownerQQ),
     allow: {
@@ -353,7 +396,7 @@ function loadConfig() {
       extractCooldownMs: 5 * 60 * 1000,
       inferenceThresholds: [2, 4, 8],
       injectMax: 8,
-      learnerPreset: 'qq-chat',
+      learnerPreset: 'whale-chat',
       workspaceTitle: 'QQ 黑话学习',
       autoResearch: true,
       ...(file.slang ?? {})
@@ -400,7 +443,7 @@ function loadConfig() {
     socialV2: {
       enabled: true,
       autoReplyCheckMs: 30000,
-      agentPreset: 'qq-chat-v2',
+      agentPreset: 'whale-chat-v2',
       provideRecommendations: true,
       tools: {
         getPrompt: true,
@@ -678,6 +721,38 @@ function log(...args) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const convKey = (kind, id) => `${kind}:${id}`;
 const SEND_TIMEOUT_MS = 15000;
+
+function startUiIpcServer(controlService) {
+  const pipeName = String(process.env.WHALEBRIDGE_UI_PIPE ?? '').trim();
+  if (!pipeName) return null;
+
+  const server = net.createServer((socket) => {
+    socket.setNoDelay(true);
+    const connection = startIpcProtocol({
+      input: socket,
+      output: socket,
+      dispatch: ({ method, params }) => controlService.execute({
+        method,
+        params,
+        actor: { privilege: PRIVILEGE_CONSOLE }
+      })
+    });
+    connection.done.catch((error) => {
+      if (!socket.destroyed) log(`Native UI IPC connection failed: ${error?.message ?? error}`);
+    });
+  });
+  server.maxConnections = 16;
+  server.on('error', (error) => {
+    log(`Native UI IPC server failed: ${error?.message ?? error}`);
+    process.exit(error?.code === 'EADDRINUSE' ? 2 : 1);
+  });
+  server.listen(pipeName, () => log('Native UI IPC server is ready.'));
+  process.once('exit', () => {
+    try { server.close(); } catch {}
+  });
+  return server;
+}
+
 function withTimeout(promise, ms, label) {
   let timer;
   const timeout = new Promise((_, reject) => {
@@ -820,11 +895,12 @@ async function main() {
   try {
     cfg = loadConfig();
   } catch (error) {
-    // 配置缺失/格式错误：不崩溃、不弹黑框，端口上挂友好错误页供自动唤起的浏览器展示
+    // 配置缺失/格式错误时记入 Core 日志后退出；原生桌面壳通过 Supervisor 状态呈现故障。
     const title = '配置加载失败';
     const detail = `${error?.message ?? error}\n（文件：config.json）`;
-    try { fs.appendFileSync(path.join(ROOT, 'bridge.err.log'), `${new Date().toISOString()} ${title}: ${detail}\n`); } catch {}
-    startFatalErrorServer(cfg?.consolePort ?? 3100, title, detail);
+    try { fs.appendFileSync(APP_PATHS.errorLogFile, `${new Date().toISOString()} ${title}: ${detail}\n`); } catch {}
+    console.error(`[bridge] ${title}：${detail}`);
+    process.exitCode = 1;
     return;
   }
   fs.mkdirSync(STATE_DIR, { recursive: true });
@@ -835,11 +911,14 @@ async function main() {
   // 构造时只在后台并行检测本地文件，不启动任何进程、也不阻塞控制台上线；
   // 随后再按“SnowLuma 优先、失败降级”的顺序推进桥接启动。
   const localServices = createLocalServiceManager({
-    root: ROOT,
+    root: DATA_ROOT,
     config: cfg,
+    captureSnowLumaOutput: false,
     onLog: (line) => log(line),
     onConfigPatch: (patch) => log(`本地子服务配置已更新：${JSON.stringify(patch)}`)
   });
+  // 登记给退出路径用：完全退出时保留 SnowLuma，避免 worker 的 stdio / 进程树中断 QQ 注入。
+  managedServices = localServices;
 
   // ── 群聊黑话/网络用语学习（slang） ──────────────────────────────────────
   let slangEntries = loadSlang(SLANG_FILE);
@@ -1336,7 +1415,7 @@ async function main() {
   // session/prompt 需要必填 requestId 与 mode；统一在这里补齐，失败时抛错（含端点信息）。
   async function promptSession(sessionId, content, mode = 'queue') {
     return api.callEndpoint('session/prompt', {
-      request: { requestId: `qq-bridge-p${Date.now().toString(36)}-${(++promptSeq).toString(36)}`, sessionId, mode, content }
+      request: { requestId: `whalebridge-p${Date.now().toString(36)}-${(++promptSeq).toString(36)}`, sessionId, mode, content }
     });
   }
 
@@ -1505,7 +1584,7 @@ async function main() {
   let modeSyncSeq = 0;
   async function readDshMode() {
     const s = await api.callEndpoint('settings/describe', {});
-    const ns = (Array.isArray(s.namespaces) ? s.namespaces : []).find((n) => n.ns === 'qq-mode');
+    const ns = (Array.isArray(s.namespaces) ? s.namespaces : []).find((n) => n.ns === 'whale-mode');
     if (!ns?.value || typeof ns.value !== 'object') return null;
     return { value: ns.value, revision: ns.revision, writable: s.writable !== false };
   }
@@ -1515,7 +1594,7 @@ async function main() {
       const ns = await readDshMode();
       if (!ns || !ns.writable) return false;
       const args = {
-        ns: 'qq-mode',
+        ns: 'whale-mode',
         ops: [{ op: 'set', path: ['mode'], value: mode }]
       };
       if (ns.revision !== undefined) args.expectedRevision = ns.revision;
@@ -1711,8 +1790,11 @@ async function main() {
   // ── 本地控制台（独立 Web 面板，不依赖 DSH WebUI） ───────────────────────────
   // 模式/角色/静默状态都存 state/*.json，桥接即时感知；此服务只读写这些文件。
   let connectSnowLuma = async () => ({ ok: false, error: 'SnowLuma 客户端尚未初始化' });
+  let resolveConnectSnowLumaReady;
+  const connectSnowLumaReady = new Promise((resolve) => { resolveConnectSnowLumaReady = resolve; });
   function startConsoleServer() {
     const port = cfg.consolePort ?? 3100;
+    const nativeUiMode = Boolean(String(process.env.WHALEBRIDGE_UI_PIPE ?? '').trim());
     // 控制台鉴权：优先用 config.consoleToken，未配置则自动生成并持久化，不再默认无鉴权。
     // 使用 let 以便控制台内手动修改令牌后热更新。
     const configuredToken = String(cfg.consoleToken ?? '').trim();
@@ -1723,84 +1805,8 @@ async function main() {
     // 服务令牌（MCP / agent 侧数据面）：与控制台令牌分离，随进程启动确保存在。
     let agentToken = loadOrCreateAgentToken();
     log('已加载服务令牌（MCP/agent 数据面，权限低于控制台令牌；见 state/agent-token）');
-    // 控制台会话（仅存进程内存）：进程存活期间 F5 刷新/路由切换/休眠唤醒均凭 Cookie 免登续持；
-    // 进程终止即全部失效，冷重启后必须重新令牌鉴权。
-    const consoleSessions = new Set();
-
-    // 主程序启动联动：--open（或环境变量 QQ_OPEN_BROWSER=1）时，后端就绪即自动唤起系统浏览器；
-    // 仅首次启动生效，守护循环内的重启由前端断线自动恢复承接，不重复开标签。
-    const autoOpenBrowser = process.argv.includes('--open') || process.env.QQ_OPEN_BROWSER === '1';
-    function openConsoleInBrowser() {
-      const url = `http://127.0.0.1:${port}/`;
-      try {
-        spawn('cmd.exe', ['/d', '/s', '/c', 'start', '""', url], { detached: true, windowsHide: true, stdio: 'ignore' }).unref();
-        log(`控制台已就绪，已唤起系统浏览器：${url}`);
-      } catch (e) {
-        log(`唤起系统浏览器失败：${e?.message ?? e}`);
-      }
-    }
-
-    // ============ 内嵌命令提示符：进程内 cmd.exe 持久会话（windowsHide，不弹系统窗口） ============
-    // 每个会话是一条真实 cmd.exe 管道进程：工作目录/环境变量/内置状态跨命令自然延续；
-    // 输出经 SSE 实时推送；完成检测用“追加 echo __TERM_END_<seq>__ %CD%”标记行。
-    // 代码页保持系统默认（中文 Windows 为 936/GBK，与真实命令提示符一致）：
-    // 输入经 iconv 转 GBK 写入 stdin，输出按 GBK 解码，规避 cp65001 管道多字节输入致 cmd 退出的系统怪癖。
-    const terminalSessions = new Map(); // id -> session
-    const TERM_SCROLLBACK_MAX = 120_000;   // 会话回滚缓冲上限（字符）
-    const TERM_IDLE_KILL_MS = 15 * 60_000; // 空闲自动回收
-    const TERM_MAX_SESSIONS = 5;
-
-    function termDecode(session, stream, buf) {
-      if (!session.dec[stream]) session.dec[stream] = new TextDecoder('gbk');
-      return session.dec[stream].decode(buf, { stream: true });
-    }
-    function termEmit(session, text) {
-      if (!text) return;
-      session.buffer += text;
-      if (session.buffer.length > TERM_SCROLLBACK_MAX) session.buffer = session.buffer.slice(-TERM_SCROLLBACK_MAX);
-      for (const res of session.clients) { try { res.write(`data: ${JSON.stringify({ t: text })}\n\n`); } catch {} }
-    }
-    function termScanMarker(session, text) {
-      // 输出里可能出现完成标记行：不进入前端显示，仅用于判定命令结束并捕获 %CD%
-      const re = /__TERM_END_(\d+)__[ \t]*(\S[^\r\n]*)?/g;
-      let m;
-      while ((m = re.exec(text))) {
-        session.cwd = (m[2] ?? '').trim() || session.cwd;
-        for (const res of session.clients) { try { res.write(`data: ${JSON.stringify({ end: Number(m[1]), cwd: session.cwd })}\n\n`); } catch {} }
-      }
-      return text.replace(/^[^\r\n]*__TERM_END_\d+__[^\r\n]*(\r?\n)?/gm, '');
-    }
-    function termClose(session, reason) {
-      if (!terminalSessions.has(session.id)) return;
-      terminalSessions.delete(session.id);
-      try { session.child.kill(); } catch {}
-      for (const res of session.clients) { try { res.write(`data: ${JSON.stringify({ exited: reason || 'closed' })}\n\n`); res.end(); } catch {} }
-      session.clients.clear();
-    }
-    function termOpen() {
-      while (terminalSessions.size >= TERM_MAX_SESSIONS) {
-        termClose(terminalSessions.values().next().value, 'replaced');
-      }
-      const id = crypto.randomBytes(12).toString('hex');
-      const child = spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/k'], { cwd: ROOT, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
-      const session = { id, child, buffer: '', clients: new Set(), seq: 0, cwd: ROOT, dec: {}, lastActive: Date.now() };
-      terminalSessions.set(id, session);
-      child.stdout.on('data', (buf) => { let t = termDecode(session, 'out', buf); t = termScanMarker(session, t); termEmit(session, t); });
-      child.stderr.on('data', (buf) => { let t = termDecode(session, 'err', buf); t = termScanMarker(session, t); termEmit(session, t); });
-      child.on('error', (err) => { log(`控制台：内嵌终端进程异常：${err?.message ?? err}`); termClose(session, 'error'); });
-      child.on('exit', () => termClose(session, 'exit'));
-      // 会话启动即绪：翻回 UTF-8 已由 /k chcp 完成，这里只补发结束标记拿 %CD%
-      session.child.stdin.write('echo on\r\necho __TERM_END_0__ %CD%\r\n');
-      log(`控制台：内嵌终端会话已开启（${id.slice(0, 8)}…）`);
-      return session;
-    }
-    setInterval(() => {
-      const now = Date.now();
-      for (const session of [...terminalSessions.values()]) {
-        if (now - session.lastActive > TERM_IDLE_KILL_MS) termClose(session, 'idle');
-      }
-    }, 60_000);
-    process.once('exit', () => { for (const session of terminalSessions.values()) { try { session.child.kill(); } catch {} } });
+    // Native UI IPC is the shipped product management surface. The loopback listener keeps
+    // programmatic Agent/DSH data APIs; legacy console-token control routes are dev-only.
     // 二代会话级隔离：MCP 工具调用时若带 x-agent-token，则必须匹配该会话的 agentToken。
     // 控制台/管理端请求不带此头，仍走 consoleToken 管理通道。
     const agentTokenOk = (key, token) => {
@@ -1815,6 +1821,352 @@ async function main() {
     const v2ToolEnabled = (flag) => flag === 'clickCardButton'
       ? cfg.socialV2?.tools?.clickCardButton === true
       : cfg.socialV2?.tools?.[flag] !== false;
+    const controlService = createControlService({
+      listRoles,
+      roleExists: (name) => Boolean(resolveRoleFile(name, APP_PATHS)),
+      roleFileExists: (name) => fs.existsSync(path.join(ROLES_DIR, name + '.md')),
+      createRoleFile: (name, content) => {
+        const roleFile = path.join(ROLES_DIR, name + '.md');
+        fs.mkdirSync(ROLES_DIR, { recursive: true });
+        atomicWriteText(roleFile, content);
+      },
+      sanitizeRoleName,
+      readRoleState,
+      writeRoleState,
+      readRuntimeSecurity: () => cfg.security,
+      readPersistedSecurity: () => readJsonSafe(CONFIG_FILE, null, true).security ?? {},
+      writePersistedSecurity: (security) => {
+        const file = readJsonSafe(CONFIG_FILE, null, true);
+        file.security = security;
+        atomicWriteJson(CONFIG_FILE, file);
+      },
+      writeRuntimeSecurity: (security) => {
+        cfg.security = security;
+        return cfg.security;
+      },
+      readRuntimePolicy: () => ({
+        mode: currentMode,
+        allow: cfg.allow ?? { private: [], groups: [] },
+        deny: cfg.deny ?? { private: [], groups: [] },
+        ownerQQ: cfg.ownerQQ ?? null
+      }),
+      readPersistedPolicy: () => {
+        const storedConfig = readJsonSafe(CONFIG_FILE, null, true) ?? {};
+        const modeFilePath = path.join(STATE_DIR, 'mode.json');
+        const storedMode = fs.existsSync(modeFilePath)
+          ? (readJsonSafe(modeFilePath, null, true) ?? {})
+          : {};
+        return {
+          mode: VALID_MODES.includes(storedMode.mode) ? storedMode.mode : currentMode,
+          allow: storedConfig.allow ?? { private: [], groups: [] },
+          deny: storedConfig.deny ?? { private: [], groups: [] },
+          ownerQQ: storedConfig.ownerQQ ?? null
+        };
+      },
+      writePersistedPolicy: (policy, { modeProvided = false } = {}) => {
+        const modeFilePath = path.join(STATE_DIR, 'mode.json');
+        const originalConfigText = fs.readFileSync(CONFIG_FILE, 'utf8');
+        const file = readJsonSafe(CONFIG_FILE, null, true);
+        // mode.json is optional until the first explicit mode change. If it exists, however,
+        // malformed content must still fail closed instead of being silently overwritten.
+        const existingMode = fs.existsSync(modeFilePath)
+          ? (readJsonSafe(modeFilePath, null, true) ?? {})
+          : {};
+        const persistedMode = VALID_MODES.includes(existingMode.mode) ? existingMode.mode : currentMode;
+        const updateMode = modeProvided && policy.mode !== persistedMode;
+        const nextFile = {
+          ...file,
+          allow: { private: [...policy.allow.private], groups: [...policy.allow.groups] },
+          deny: { private: [...policy.deny.private], groups: [...policy.deny.groups] },
+          ownerQQ: policy.ownerQQ
+        };
+        const nextMode = updateMode
+          ? {
+              ...existingMode,
+              mode: policy.mode,
+              closedAgentPreset: existingMode.closedAgentPreset || closedAgentPreset || 'router-standard',
+              source: 'console'
+            }
+          : existingMode;
+        let configWritten = false;
+        try {
+          atomicWriteJson(CONFIG_FILE, nextFile);
+          configWritten = true;
+          if (updateMode) atomicWriteJson(modeFilePath, nextMode);
+        } catch (error) {
+          if (configWritten) {
+            try { atomicWriteText(CONFIG_FILE, originalConfigText); }
+            catch (rollbackError) {
+              throw new Error(`策略配置写入失败且 config.json 回滚失败：${rollbackError?.message ?? rollbackError}`, { cause: error });
+            }
+          }
+          throw error;
+        }
+      },
+      writeRuntimePolicy: (policy) => {
+        cfg.allow = { private: [...policy.allow.private], groups: [...policy.allow.groups] };
+        cfg.deny = { private: [...policy.deny.private], groups: [...policy.deny.groups] };
+        cfg.ownerQQ = policy.ownerQQ;
+        if (currentMode !== policy.mode) {
+          const previousMode = currentMode;
+          if (previousMode === 'reserved' && policy.mode !== 'reserved') {
+            cleanupSocialForModeChange();
+            log('控制台：模式离开一代仿真模式，清理社交状态');
+          }
+          if (previousMode === 'reserved2' && policy.mode !== 'reserved2') {
+            clearAllSocialV2Timers();
+            drainAllPromptQueues('模式切换，已取消排队中的投递');
+            cancelPendingCardButtonApprovals('模式已离开 reserved2，风险卡片审批已撤销', 'mode-change');
+            log('控制台：模式离开二代仿真模式，清理 reserved2 定时器与排队投递');
+          }
+          const modeState = readJsonSafe(path.join(STATE_DIR, 'mode.json'), {}, true) ?? {};
+          if (typeof modeState.closedAgentPreset === 'string' && modeState.closedAgentPreset) {
+            closedAgentPreset = modeState.closedAgentPreset;
+          }
+          currentMode = policy.mode;
+          lastMode = policy.mode;
+          if (policy.mode === 'reserved2') {
+            for (const key of socialV2.conversations.keys()) {
+              setupSleepTimerV2(key);
+              scheduleProactiveCheckV2(key);
+            }
+            log('控制台：模式进入二代仿真模式，重建有限睡眠定时器');
+          }
+          log(`控制台：模式已设置为 ${policy.mode}${closedAgentPreset ? `（closed-agent preset: ${closedAgentPreset}）` : ''}`);
+          const syncSeq = ++modeSyncSeq;
+          void syncModeToDsh(policy.mode).then((synced) => {
+            if (!synced || syncSeq !== modeSyncSeq) return;
+            const persisted = readJsonSafe(path.join(STATE_DIR, 'mode.json'), null);
+            if (persisted?.mode !== policy.mode || persisted.source !== 'console') return;
+            const shared = { ...persisted };
+            delete shared.source;
+            atomicWriteJson(path.join(STATE_DIR, 'mode.json'), shared);
+          });
+        }
+        return {
+          mode: currentMode,
+          allow: cfg.allow,
+          deny: cfg.deny,
+          ownerQQ: cfg.ownerQQ
+        };
+      },
+      readRuntimeSlangConfig: () => cfg.slang,
+      readPersistedSlangConfig: () => readJsonSafe(CONFIG_FILE, null, true).slang ?? {},
+      writePersistedSlangConfig: (slang) => {
+        const file = readJsonSafe(CONFIG_FILE, null, true);
+        file.slang = slang;
+        atomicWriteJson(CONFIG_FILE, file);
+      },
+      writeRuntimeSlangConfig: (slang) => {
+        cfg.slang = slang;
+        return cfg.slang;
+      },
+      invalidateSlangLearnerSession,
+      readSessions: () => state.sessions,
+      readActivityTail: readControlActivityTail,
+      readLogTail: readControlLogTail,
+      redactLogLine: redactSensitiveText,
+      readOwnerQQ: () => cfg.ownerQQ,
+      ensureSocialState: (key) => socialState(key),
+      readSocialTimingConfig: () => cfg.social,
+      runDiagnostics: (checks) => {
+        const result = {};
+        if (checks.includes('runtime')) {
+          const memory = process.memoryUsage();
+          result.runtime = {
+            pid: process.pid,
+            node: process.version,
+            platform: process.platform,
+            uptimeSeconds: Math.floor(process.uptime()),
+            memoryMb: Math.round(memory.rss / 1024 / 1024)
+          };
+        }
+        if (checks.includes('config')) {
+          try {
+            const text = fs.readFileSync(CONFIG_FILE, 'utf8').replace(String.fromCharCode(0xfeff), '');
+            JSON.parse(text);
+            result.config = { ok: true, readable: true, validJson: true };
+          } catch (error) {
+            result.config = { ok: false, readable: false, validJson: false, error: String(error?.message ?? error).slice(0, 300) };
+          }
+        }
+        if (checks.includes('paths')) {
+          const targets = { dataRoot: DATA_ROOT, state: STATE_DIR, roles: ROLES_DIR, config: CONFIG_FILE };
+          result.paths = Object.fromEntries(Object.entries(targets).map(([name, target]) => {
+            const exists = fs.existsSync(target);
+            let directory = false;
+            let readable = false;
+            let writable = false;
+            let error = '';
+            if (exists) {
+              try { directory = fs.statSync(target).isDirectory(); } catch (cause) { error = String(cause?.message ?? cause); }
+              try { fs.accessSync(target, fs.constants.R_OK); readable = true; } catch (cause) { error ||= String(cause?.message ?? cause); }
+              try { fs.accessSync(target, fs.constants.W_OK); writable = true; } catch (cause) { error ||= String(cause?.message ?? cause); }
+            }
+            return [name, { exists, directory, readable, writable, ...(error ? { error: error.slice(0, 200) } : {}) }];
+          }));
+        }
+        if (checks.includes('services')) {
+          const snapshot = localServices.snapshot();
+          result.services = Object.fromEntries(Object.entries(snapshot).map(([name, service]) => [name, {
+            status: service.status,
+            installed: service.installed === true,
+            running: service.running === true,
+            ready: service.ready === true,
+            managed: service.managed === true,
+            lastError: String(service.lastError ?? '').slice(0, 300)
+          }]));
+        }
+        return result;
+      },
+      now: () => Date.now(),
+      randInt: (min, max) => randInt(min, max),
+      cancelSocialTimers: (key) => cancelSocialTimers(key),
+      deleteSocialState: (key) => social.states.delete(key),
+      deleteSilentContext: (key) => social.silentContext.delete(key),
+      readLocalServices: () => localServices.snapshot(),
+      detectLocalServices: () => localServices.detectAll({ force: true }),
+      selectLocalService: (service, id) => service === 'snowluma'
+        ? localServices.selectSnowLuma({ id })
+        : localServices.selectDsh({ id }),
+      installLocalSnowLuma: () => localServices.installSnowLuma(),
+      startLocalService: (service) => service === 'snowluma'
+        ? localServices.startSnowLuma()
+        : localServices.startDsh(),
+      stopLocalService: (service) => service === 'snowluma'
+        ? localServices.stopSnowLuma()
+        : localServices.stopDsh(),
+      connectSnowLuma: async () => {
+        await connectSnowLumaReady;
+        return connectSnowLuma();
+      },
+      readModelDefaults: () => ({
+        provider: String(cfg.dsh?.provider ?? ''),
+        model: String(cfg.dsh?.model ?? ''),
+        reasoningEffort: String(cfg.dsh?.reasoningEffort ?? 'max')
+      }),
+      readModelCatalog: async () => {
+        const described = await api.callEndpoint('settings/describe', {}, AbortSignal.timeout(2500));
+        const models = [];
+        for (const section of Array.isArray(described?.namespaces) ? described.namespaces : []) {
+          const value = section?.value;
+          if (!value || typeof value !== 'object' || Array.isArray(value) || !Array.isArray(value.models)) continue;
+          const provider = String(value.provider ?? section.provider ?? section.ns ?? section.id ?? '').trim();
+          if (!provider) continue;
+          for (const entry of value.models.slice(0, 500)) {
+            const model = String(entry?.id ?? '').trim();
+            if (!model || model.length > 128) continue;
+            models.push({
+              provider,
+              model,
+              image: Array.isArray(entry?.inputModalities) && entry.inputModalities.includes('image')
+            });
+          }
+        }
+        return { models };
+      },
+      writeModelDefaults: (next) => {
+        const file = readJsonSafe(CONFIG_FILE, null, true);
+        const original = fs.readFileSync(CONFIG_FILE, 'utf8');
+        try {
+          file.dsh = { ...(file.dsh ?? {}), ...next };
+          atomicWriteJson(CONFIG_FILE, file);
+          cfg.dsh = { ...(cfg.dsh ?? {}), ...next };
+          return {
+            provider: String(cfg.dsh.provider),
+            model: String(cfg.dsh.model),
+            reasoningEffort: String(cfg.dsh.reasoningEffort)
+          };
+        } catch (error) {
+          try { atomicWriteText(CONFIG_FILE, original); } catch {}
+          throw error;
+        }
+      },
+      readPresetList: async () => {
+        const result = await api.callEndpoint('agentPresets/list', {}, AbortSignal.timeout(2500));
+        return (Array.isArray(result?.presets) ? result.presets : []).map((preset) => ({
+          id: preset?.id,
+          trust: preset?.trust ?? 'system'
+        }));
+      },
+      readPresetBindings: () => {
+        const mode = readJsonSafe(path.join(STATE_DIR, 'mode.json'), {}) ?? {};
+        return {
+          chat: cfg.agentPreset ? String(cfg.agentPreset) : null,
+          closedAgent: String(closedAgentPreset || mode.closedAgentPreset || 'router-standard'),
+          reserved2: cfg.socialV2?.agentPreset ? String(cfg.socialV2.agentPreset) : (cfg.agentPreset ? String(cfg.agentPreset) : null),
+          learner: cfg.slang?.learnerPreset ? String(cfg.slang.learnerPreset) : (cfg.agentPreset ? String(cfg.agentPreset) : null)
+        };
+      },
+      writePresetBinding: (target, presetId) => {
+        const file = readJsonSafe(CONFIG_FILE, null, true);
+        const modePath = path.join(STATE_DIR, 'mode.json');
+        const mode = fs.existsSync(modePath) ? (readJsonSafe(modePath, null, true) ?? {}) : {};
+        const id = presetId ? String(presetId) : '';
+        if (target === 'chat') {
+          file.agentPreset = id;
+          cfg.agentPreset = id;
+        } else if (target === 'reserved2') {
+          file.socialV2 = { ...(file.socialV2 ?? {}), agentPreset: id };
+          cfg.socialV2 = { ...(cfg.socialV2 ?? {}), agentPreset: id };
+        } else if (target === 'learner') {
+          file.slang = { ...(file.slang ?? {}), learnerPreset: id };
+          cfg.slang = { ...(cfg.slang ?? {}), learnerPreset: id };
+        } else if (target === 'closedAgent') {
+          mode.closedAgentPreset = id || 'router-standard';
+          closedAgentPreset = mode.closedAgentPreset;
+        }
+        atomicWriteJson(CONFIG_FILE, file);
+        if (target === 'closedAgent') atomicWriteJson(modePath, mode);
+        return {
+          chat: cfg.agentPreset ? String(cfg.agentPreset) : null,
+          closedAgent: String(closedAgentPreset || mode.closedAgentPreset || 'router-standard'),
+          reserved2: cfg.socialV2?.agentPreset ? String(cfg.socialV2.agentPreset) : (cfg.agentPreset ? String(cfg.agentPreset) : null),
+          learner: cfg.slang?.learnerPreset ? String(cfg.slang.learnerPreset) : (cfg.agentPreset ? String(cfg.agentPreset) : null)
+        };
+      },
+      readPending: () => {
+        const list = [];
+        for (const [key, pendingEntry] of pending.entries()) {
+          list.push({
+            key,
+            kind: pendingEntry.kind,
+            sessionId: pendingEntry.sessionId,
+            ...(pendingEntry.kind === 'approval'
+              ? { toolName: pendingEntry.toolName, reason: pendingEntry.reason, eventId: pendingEntry.eventId }
+              : {}),
+            ...(pendingEntry.kind === 'question' ? { questions: pendingEntry.questions } : {})
+          });
+        }
+        pruneCardButtonApprovals();
+        for (const record of cardButtonApprovals.values()) {
+          if (record.status !== 'pending' && record.status !== 'processing') continue;
+          list.push({ kind: 'card-approval', ...publicCardButtonApproval(record) });
+        }
+        return { pending: list };
+      },
+      decidePending: async (request) => {
+        if (request.kind === 'card-approval') {
+          return decideCardButtonApproval(request.id, request.decision, 'native');
+        }
+        const key = String(request.key ?? '').trim();
+        const pendingEntry = pending.get(key);
+        if (!pendingEntry || pendingEntry.kind !== request.kind) {
+          return { ok: false, error: '挂起请求不存在、类型不匹配或已结束' };
+        }
+        if (request.kind === 'question') {
+          return handlePendingAnswer(pendingEntry, request.answer, key, true);
+        }
+        return handlePendingAnswer(
+          pendingEntry,
+          request.decision === 'approve' ? '通过' : '拒绝',
+          key,
+          true
+        );
+      },
+      log
+    });
+    startUiIpcServer(controlService);
     const server = http.createServer(async (req, res) => {
       const url = new URL(req.url ?? '/', `http://127.0.0.1:${port}`);
       const SECURITY_HEADERS = {
@@ -1882,38 +2234,17 @@ async function main() {
         req.on('error', () => fail(400, '请求体读取失败'));
         req.on('aborted', () => fail(400, '请求体读取中断'));
       });
-      // 控制台鉴权：?token= / x-console-token / 进程内会话 Cookie 三者其一即可。
-      const cookieMap = {};
-      String(req.headers.cookie ?? '').split(';').forEach(function (pair) {
-        const idx = pair.indexOf('=');
-        if (idx > 0) cookieMap[pair.slice(0, idx).trim()] = decodeURIComponent(pair.slice(idx + 1).trim());
-      });
-      const sessionValid = typeof cookieMap.consoleSession === 'string' && consoleSessions.has(cookieMap.consoleSession);
+      // This loopback listener is an API compatibility surface only; authentication is token-only.
       const suppliedToken = url.searchParams.get('token') ?? req.headers['x-console-token'];
       // 双令牌：同一鉴权入口按*取值*区分权限级别（控制台=全权，服务=仅数据面白名单）
-      const privilege = resolvePrivilege({ sessionValid, suppliedToken, consoleToken, agentToken });
-      if (consoleToken && !privilege) {
-        if (req.method === 'GET' && url.pathname === '/') {
-          res.writeHead(401, { 'content-type': 'text/html; charset=utf-8', ...SECURITY_HEADERS });
-          try {
-            res.end(fs.readFileSync(path.join(ROOT, 'public', 'token-login.html'), 'utf8'));
-          } catch {
-            res.end('控制台登录页缺失：qq-bridge/public/token-login.html');
-          }
-        } else {
-          sendJson({ ok: false, error: '未授权：请提供控制台访问令牌' }, 401);
-        }
+      const privilege = resolvePrivilege({ sessionValid: false, suppliedToken, consoleToken, agentToken });
+      if (nativeUiMode && privilege === PRIVILEGE_CONSOLE) {
+        sendJson({ ok: false, error: '原生桌面模式下管理命令仅能通过受限本机 IPC 使用' }, 403);
         return;
       }
-      // 令牌鉴权通过且尚无有效会话：签发进程内存会话并种 HttpOnly Cookie，
-      // 之后同浏览器的请求凭 Cookie 静默续持登录态（Set-Cookie 随本次响应带回）
-      // 仅控制台级别签发会话 Cookie：若服务令牌也能换来 Cookie，等于把数据面凭据
-      // 一步升级成控制面（Cookie 走全权通道），令牌分离就白做了。
-      if (shouldIssueConsoleSession(privilege)) {
-        const sid = crypto.randomBytes(32).toString('hex');
-        consoleSessions.add(sid);
-        while (consoleSessions.size > 200) consoleSessions.delete(consoleSessions.values().next().value);
-        res.setHeader('Set-Cookie', `consoleSession=${sid}; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000`);
+      if (consoleToken && !privilege) {
+        sendJson({ ok: false, error: '未授权：请提供控制台访问令牌' }, 401);
+        return;
       }
       // 服务令牌（agent/MCP 侧）只允许数据面白名单；终端、服务启停/安装、配置、模式、
       // 令牌管理、shutdown 等控制面接口一律拒绝。
@@ -1940,6 +2271,27 @@ async function main() {
           }
         }
       }
+      const runControlCommand = (method, params = {}) => {
+        try {
+          sendJson(controlService.execute({ method, params, actor: { privilege } }));
+        } catch (error) {
+          if (!(error instanceof ControlServiceError)) throw error;
+          const statusByCode = {
+            FORBIDDEN: 403,
+            INVALID_PARAMS: 400,
+            INVALID_ROLE: 400,
+            INVALID_ROLE_NAME: 400,
+            INVALID_ROLE_CONTENT: 400,
+            RESERVED_ROLE_NAME: 400,
+            ROLE_EXISTS: 400,
+            INVALID_SESSION_KEY: 400,
+            INVALID_PHASE: 400,
+            INVALID_DIAGNOSTIC_CHECK: 400,
+            METHOD_NOT_FOUND: 404
+          };
+          sendJson({ ok: false, error: error.message }, statusByCode[error.code] ?? 500);
+        }
+      };
       try {
         // 空 agent token 一律拒绝，防止 MCP 传入空字符串时被当作“管理端/无 token”绕过校验
         if (req.headers['x-agent-token'] === '') {
@@ -1973,80 +2325,7 @@ async function main() {
           return;
         }
         if (req.method === 'GET' && url.pathname === '/') {
-          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', ...SECURITY_HEADERS });
-          try {
-            res.end(fs.readFileSync(path.join(ROOT, 'public', 'console.html'), 'utf8'));
-          } catch {
-            res.end('控制台页面缺失：qq-bridge/public/console.html');
-          }
-          return;
-        }
-        // 登出：删除进程内会话并过期 Cookie；本地令牌由前端自行清空
-        if (req.method === 'POST' && url.pathname === '/api/logout') {
-          if (cookieMap.consoleSession) consoleSessions.delete(cookieMap.consoleSession);
-          res.setHeader('Set-Cookie', 'consoleSession=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0');
-          sendJson({ ok: true, message: '已退出登录' });
-          return;
-        }
-        // ============ 内嵌命令提示符 ============
-        if (req.method === 'POST' && url.pathname === '/api/terminal/open') {
-          // 带上 id 且会话仍活着 => 复用（保留回滚内容与工作目录），否则新建。
-          // 页面刷新/重开终端页都走这里：不复用会让每次打开都换一个新 cmd，内容凭空消失。
-          const body = await readBody().catch(() => ({}));
-          const existing = terminalSessions.get(String(body?.id ?? ''));
-          if (existing) {
-            existing.lastActive = Date.now();
-            sendJson({ ok: true, id: existing.id, cwd: existing.cwd, buffer: existing.buffer, reused: true });
-            return;
-          }
-          const session = termOpen();
-          sendJson({ ok: true, id: session.id, cwd: session.cwd, buffer: session.buffer });
-          return;
-        }
-        if (req.method === 'GET' && url.pathname === '/api/terminal/stream') {
-          const session = terminalSessions.get(String(url.searchParams.get('id') ?? ''));
-          if (!session) { sendJson({ ok: false, error: '终端会话不存在或已关闭' }, 404); return; }
-          res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-store', connection: 'keep-alive', ...SECURITY_HEADERS });
-          // 首帧单独标记为 snapshot：前端据此「替换」而不是「追加」，否则与 open() 预填的回滚内容重复一份
-          res.write(`data: ${JSON.stringify({ snapshot: session.buffer, cwd: session.cwd })}\n\n`);
-          session.clients.add(res);
-          const beat = setInterval(() => { try { res.write(': ping\n\n'); } catch {} }, 15_000);
-          req.on('close', () => { clearInterval(beat); session.clients.delete(res); });
-          return;
-        }
-        if (req.method === 'POST' && url.pathname === '/api/terminal/write') {
-          const body = await readBody();
-          const session = terminalSessions.get(String(body?.id ?? url.searchParams.get('id') ?? ''));
-          if (!session) { sendJson({ ok: false, error: '终端会话不存在或已关闭' }, 404); return; }
-          session.lastActive = Date.now();
-          if (body.interrupt) {
-            // 管道 stdin 无法投递控制台 Ctrl+C 事件（那是控制台机制而非输入字节）；
-            // 中断 = 终止当前 cmd 会话（连带结束运行中的命令）并重开一个干净会话
-            termClose(session, 'interrupt');
-            const fresh = termOpen();
-            sendJson({ ok: true, id: fresh.id, cwd: fresh.cwd });
-            return;
-          }
-          if (body.clear) {
-            session.buffer = '';
-            for (const res of session.clients) { try { res.write(`data: ${JSON.stringify({ reset: true })}\n\n`); } catch {} }
-            sendJson({ ok: true });
-            return;
-          }
-          const input = String(body.input ?? '');
-          if (input.length > 8000) { sendJson({ ok: false, error: '单条命令过长' }, 400); return; }
-          session.seq += 1;
-          // GBK 编码写入，与真实命令提示符的输入行为一致；
-          // 完成标记与 echo on 合并为单行命令，避免多出一行空提示符
-          session.child.stdin.write(iconv.encode(input + '\r\n' + `echo on & echo __TERM_END_${session.seq}__ %CD%\r\n`, 'gbk'));
-          sendJson({ ok: true });
-          return;
-        }
-        if (req.method === 'POST' && url.pathname === '/api/terminal/close') {
-          const body = await readBody().catch(() => ({}));
-          const session = terminalSessions.get(String(body?.id ?? url.searchParams.get('id') ?? ''));
-          if (session) termClose(session, 'closed');
-          sendJson({ ok: true });
+          sendJson({ ok: false, error: '网页控制台已移除；请使用 WhaleBridge 原生应用。' }, 404);
           return;
         }
         // 运行控制台：桥接运行日志（log()）实时流 + 状态面板快照，内嵌等效外部 cmd 窗口
@@ -2060,7 +2339,7 @@ async function main() {
           return;
         }
         // 本地子服务：SnowLuma 优先启动、dsh 可选启动；所有失败都只反映在状态里，
-        // 不会阻塞控制台或让 qq_bridge 主流程退出。
+        // 不会阻塞控制台或让 WhaleBridge 主流程退出。
         if (req.method === 'GET' && url.pathname === '/api/services') {
           sendJson({ ok: true, services: localServices.refresh(), releasePage: SNOWLUMA_RELEASE_PAGE, dshInstallHint: DSH_INSTALL_HINT });
           return;
@@ -2107,6 +2386,19 @@ async function main() {
           sendJson({ ok: result.ready === true, service: result, bridge });
           return;
         }
+        if (req.method === 'POST' && url.pathname === '/api/services/snowluma/quit-qq') {
+          // 让 QQ 彻底退出，好让 SnowLuma 自己重新拉起并注入（注入要求 QQ 由 SnowLuma 启动）。
+          // 两步式：不带 confirm 只列出将结束的进程，带 confirm:true 才真的结束。
+          const body = (await readBody().catch(() => ({}))) ?? {};
+          if (body.confirm !== true) {
+            const listed = await localServices.listQqProcesses();
+            sendJson({ ok: true, confirmed: false, targets: listed });
+            return;
+          }
+          const result = await localServices.quitQqProcesses();
+          sendJson({ ok: result.results.every((item) => item.ok), ...result });
+          return;
+        }
         if (req.method === 'POST' && url.pathname === '/api/services/snowluma/stop') {
           sendJson({ ok: true, service: await localServices.stopSnowLuma() });
           return;
@@ -2120,35 +2412,22 @@ async function main() {
           sendJson({ ok: true, service: await localServices.stopDsh() });
           return;
         }
-        // 一键打开服务网页界面：SnowLuma 图形控制台 / dsh 只读监控终端。
-        // 后端用 Edge/Chrome 的 --app 模式唤起，窗口不带浏览器地址栏（形如独立应用窗口）。
-        if (req.method === 'POST' && url.pathname === '/api/services/snowluma/open') {
-          sendJson(await localServices.openSnowLumaWeb());
-          return;
-        }
-        if (req.method === 'POST' && url.pathname === '/api/services/dsh/open') {
-          sendJson(localServices.openDshMonitor());
-          return;
-        }
-        if (req.method === 'GET' && url.pathname === '/dsh-monitor.html') {
-          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', ...SECURITY_HEADERS });
-          try {
-            res.end(fs.readFileSync(path.join(ROOT, 'public', 'dsh-monitor.html'), 'utf8'));
-          } catch {
-            res.end('<!doctype html><meta charset="utf-8"><title>dsh 监控终端</title><p>监控页面缺失：qq-bridge/public/dsh-monitor.html</p>');
-          }
-          return;
-        }
-        // 关闭主程序：终止守护循环与全量桥接进程（含内嵌终端会话），完整退出应用
+        // 关闭主程序：终止全量桥接进程（含内嵌终端会话），完整退出应用
         if (req.method === 'POST' && url.pathname === '/api/shutdown') {
           log('控制台：收到关闭主程序请求，正在终止全量进程…');
           sendJson({ ok: true, message: '正在关闭主程序…' });
-          setTimeout(() => {
-            try { for (const session of terminalSessions.values()) { try { session.child.kill(); } catch {} } } catch {}
-            try {
-              // 先杀守护循环（start.bat cmd），避免进程退出后被守护重拉
-              execFileSync('powershell.exe', ['-NoProfile', '-Command', "Get-CimInstance Win32_Process -Filter \"Name='cmd.exe'\" | Where-Object { $_.CommandLine -like '*start.bat*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"], { timeout: 8000, windowsHide: true, stdio: 'ignore' });
-            } catch {}
+          setTimeout(async () => {
+            if (SUPERVISED) {
+              // 启动器托管：只退出本进程，由启动器决定后续（不会扫描/终止机器上的其它 cmd 守护循环）。
+              log('启动器托管模式：跳过 start.bat 守护循环清理，仅退出本进程。');
+            } else {
+              try {
+                // 先杀守护循环（start.bat cmd），避免进程退出后被守护重拉
+                execFileSync('powershell.exe', ['-NoProfile', '-Command', "Get-CimInstance Win32_Process -Filter \"Name='cmd.exe'\" | Where-Object { $_.CommandLine -like '*start.bat*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"], { timeout: 8000, windowsHide: true, stdio: 'ignore' });
+              } catch {}
+            }
+            // 完全退出时让 SnowLuma 继续独立运行，再释放锁退出。
+            leaveSnowLumaRunningOnExit();
             try { releaseLock(); } catch {}
             log('桥接已完全关闭。');
             process.exit(0);
@@ -2240,51 +2519,22 @@ async function main() {
         }
         if (req.method === 'POST' && url.pathname === '/api/role') {
           const body = await readBody();
-          const rs = readRoleState();
-          if (body.role && typeof body.role === 'string') {
-            const name = sanitizeRoleName(body.role);
-            if (!fs.existsSync(path.join(ROOT, 'roles', name + '.md'))) {
-              sendJson({ ok: false, error: `角色「${name}」不存在（roles/${name}.md）` }, 400);
-              return;
-            }
-            writeRoleState(name, rs.mode);
-            log(`控制台：角色已设置为 ${name}`);
-            sendJson({ ok: true, role: name });
-          } else {
-            writeRoleState(null, rs.mode);
-            log('控制台：角色已清除');
-            sendJson({ ok: true, role: null });
-          }
+          runControlCommand(CONTROL_METHODS.SET_ROLE, body);
           return;
         }
         if (req.method === 'POST' && url.pathname === '/api/role-mode') {
           const body = await readBody();
-          const rs = readRoleState();
-          const mode = body.mode === 'silent' ? 'silent' : 'active';
-          writeRoleState(rs.role, mode);
-          log(`控制台：静默模式 ${mode === 'silent' ? '开启' : '关闭'}`);
-          sendJson({ ok: true, roleMode: mode });
+          runControlCommand(CONTROL_METHODS.SET_ROLE_MODE, body);
           return;
         }
         // ── 人格管理 ──────────────────────────────────────────────────────────
         if (req.method === 'GET' && url.pathname === '/api/roles') {
-          const rs = readRoleState();
-          sendJson({ roles: listRoles(), current: rs.role ?? null });
+          runControlCommand(CONTROL_METHODS.LIST_ROLES);
           return;
         }
         if (req.method === 'POST' && url.pathname === '/api/roles/create') {
           const body = await readBody();
-          const name = sanitizeRoleName(body.name);
-          const content = String(body.content ?? '').trim();
-          if (!name) { sendJson({ ok: false, error: '角色名不能为空（仅限中文/字母/数字/横线）' }, 400); return; }
-          if (!content) { sendJson({ ok: false, error: '角色内容不能为空' }, 400); return; }
-          if (name === 'README') { sendJson({ ok: false, error: '该名称被保留' }, 400); return; }
-          const roleFile = path.join(ROOT, 'roles', name + '.md');
-          if (fs.existsSync(roleFile)) { sendJson({ ok: false, error: `角色「${name}」已存在` }, 400); return; }
-          fs.mkdirSync(path.join(ROOT, 'roles'), { recursive: true });
-          atomicWriteText(roleFile, content + (content.endsWith('\n') ? '' : '\n'));
-          log(`控制台：创建人格「${name}」`);
-          sendJson({ ok: true, role: name });
+          runControlCommand(CONTROL_METHODS.CREATE_ROLE, body);
           return;
         }
         // ── 黑话库管理 ──────────────────────────────────────────────────────
@@ -2508,47 +2758,12 @@ async function main() {
         }
         if (req.method === 'POST' && url.pathname === '/api/slang/config') {
           const body = await readBody();
-          const oldPreset = cfg.slang?.learnerPreset;
-          const oldWorkspaceTitle = cfg.slang?.workspaceTitle;
-          const configFile = path.join(ROOT, 'config.json');
-          const file = readJsonSafe(configFile, null, true);
-          const merged = { ...(file.slang ?? {}), ...body };
-          if (typeof merged.enabled === 'boolean') merged.enabled = merged.enabled;
-          else if (merged.enabled !== undefined) merged.enabled = merged.enabled === true;
-          if (merged.extractMinMessages !== undefined) merged.extractMinMessages = Math.max(1, Math.round(Number(merged.extractMinMessages) || 1));
-          if (merged.extractCooldownMs !== undefined) merged.extractCooldownMs = Math.max(0, Math.round(Number(merged.extractCooldownMs) || 0));
-          if (merged.injectMax !== undefined) merged.injectMax = Math.min(30, Math.max(1, Math.round(Number(merged.injectMax) || 1)));
-          if (merged.autoResearch !== undefined) merged.autoResearch = merged.autoResearch === true;
-          if (merged.learnerPreset !== undefined) merged.learnerPreset = String(merged.learnerPreset ?? '').trim();
-          if (merged.workspaceTitle !== undefined) merged.workspaceTitle = String(merged.workspaceTitle ?? '').trim() || 'QQ 黑话学习';
-          if (body.inferenceThresholds !== undefined) {
-            const raw = Array.isArray(body.inferenceThresholds)
-              ? body.inferenceThresholds
-              : String(body.inferenceThresholds).split(/[,，\s]+/);
-            merged.inferenceThresholds = [...new Set(raw.map((n) => Math.max(1, Math.round(Number(n) || 1))))].sort((a, b) => a - b);
-            if (!merged.inferenceThresholds.length) merged.inferenceThresholds = [2, 4, 8];
-          }
-          file.slang = merged;
-          atomicWriteJson(configFile, file);
-          cfg.slang = { ...cfg.slang, ...merged };
-          if (body.learnerPreset !== undefined && String(body.learnerPreset ?? '').trim() !== String(oldPreset ?? '')) {
-            invalidateSlangLearnerSession();
-            log('黑话学习 preset 已变更，已重置学习会话');
-          } else if (body.workspaceTitle !== undefined && String(body.workspaceTitle ?? '').trim() !== String(oldWorkspaceTitle ?? '')) {
-            invalidateSlangLearnerSession();
-            log('黑话学习工作区名已变更，已重置学习会话');
-          }
-          log('控制台：黑话系统配置已更新');
-          sendJson({ ok: true, config: cfg.slang });
+          runControlCommand(CONTROL_METHODS.UPDATE_SLANG_CONFIG, body);
           return;
         }
         // ── 会话查看 ──────────────────────────────────────────────────────────
         if (req.method === 'GET' && url.pathname === '/api/sessions') {
-          const list = [];
-          for (const [key, sessionId] of Object.entries(state.sessions)) {
-            list.push({ key, sessionId, owner: key === `private:${String(cfg.ownerQQ ?? '')}` });
-          }
-          sendJson({ sessions: list });
+          runControlCommand(CONTROL_METHODS.LIST_SESSIONS);
           return;
         }
         // ── 挂起审批 / 提问 ───────────────────────────────────────────────────
@@ -2590,7 +2805,7 @@ async function main() {
         if (req.method === 'POST' && url.pathname === '/api/whitelist') {
           const body = await readBody();
           const toNum = (arr) => Array.isArray(arr) ? [...new Set(arr.map((x) => Number(String(x).trim())).filter((n) => Number.isFinite(n)))] : undefined;
-          const configFile = path.join(ROOT, 'config.json');
+          const configFile = CONFIG_FILE;
           // fail-fast：配置文件损坏时直接 500，绝不回写，避免把整个配置清成只剩 allow/deny/ownerQQ
           const file = readJsonSafe(configFile, null, true);
           const allow = {
@@ -2625,13 +2840,13 @@ async function main() {
 
         // ── 文件发送配置（音量增益/大小上限/读取目录；写 config.json + 热更新内存） ──
         if (req.method === 'GET' && url.pathname === '/api/fileSend') {
-          const file = readJsonSafe(path.join(ROOT, 'config.json'), null, true) || {};
+          const file = readJsonSafe(CONFIG_FILE, null, true) || {};
           sendJson({ ok: true, fileSend: file.fileSend && typeof file.fileSend === 'object' ? file.fileSend : {} });
           return;
         }
         if (req.method === 'POST' && url.pathname === '/api/fileSend') {
           const body = await readBody();
-          const configFile = path.join(ROOT, 'config.json');
+          const configFile = CONFIG_FILE;
           const file = readJsonSafe(configFile, null, true) || {};
           const current = file.fileSend && typeof file.fileSend === 'object' ? file.fileSend : {};
           const next = { ...current };
@@ -2676,7 +2891,7 @@ async function main() {
             const r = await pollQrLogin(s.key, s.mid);
             if (r.status === 4 && r.userid && r.token) {
               const cookie = 'kg_mid=' + s.mid + '; kg_dfid=' + s.dfid + '; userid=' + r.userid + '; token=' + r.token;
-              const configFile = path.join(ROOT, 'config.json');
+          const configFile = CONFIG_FILE;
               const file = readJsonSafe(configFile, null, true) || {};
               const current = file.kugou && typeof file.kugou === 'object' ? file.kugou : {};
               const prevSession = current.session && typeof current.session === 'object' ? current.session : {};
@@ -2703,7 +2918,7 @@ async function main() {
 
         // ── 酷狗登录态（cookie 保存/验证/清除；会员状态经 roleinfo 探测并缓存 10 分钟） ──
         if (req.method === 'GET' && url.pathname === '/api/kugou') {
-          const file = readJsonSafe(path.join(ROOT, 'config.json'), null, true) || {};
+          const file = readJsonSafe(CONFIG_FILE, null, true) || {};
           const session = file.kugou?.session && typeof file.kugou.session === 'object' ? file.kugou.session : {};
           const cookie = String(session.cookie ?? '').trim();
           const auth = extractKugouAuth(cookie);
@@ -2750,7 +2965,7 @@ async function main() {
             info = { loggedIn: auth.playbackReady, userId: auth.userid || null, nickname: auth.nickname || null, avatar: auth.avatar || null, isVip: auth.isVip, isSvip: auth.isSvip, vipLevel: auth.vipLevel };
           }
           if (!info.loggedIn) { sendJson({ ok: false, error: 'cookie 未通过登录态校验（缺少 userid 或 token）', info }, 400); return; }
-          const configFile = path.join(ROOT, 'config.json');
+          const configFile = CONFIG_FILE;
           const file = readJsonSafe(configFile, null, true) || {};
           const current = file.kugou && typeof file.kugou === 'object' ? file.kugou : {};
           file.kugou = { ...current, session: { ...(current.session || {}), cookie, mid: String(body.mid ?? '').trim(), dfid: String(body.dfid ?? '').trim(), appid: String(body.appid ?? '1014') } };
@@ -2761,7 +2976,7 @@ async function main() {
           return;
         }
         if (req.method === 'DELETE' && url.pathname === '/api/kugou') {
-          const configFile = path.join(ROOT, 'config.json');
+          const configFile = CONFIG_FILE;
           const file = readJsonSafe(configFile, null, true) || {};
           if (file.kugou && typeof file.kugou === 'object') file.kugou.session = { dfid: '', mid: '', appid: '1014', cookie: '' };
           atomicWriteJson(configFile, file);
@@ -2774,21 +2989,12 @@ async function main() {
 
         // ── 安全拦截通知设置 ─────────────────────────────────────────────────
         if (req.method === 'GET' && url.pathname === '/api/security') {
-          sendJson({ security: cfg.security ?? { interceptNotify: true } });
+          runControlCommand(CONTROL_METHODS.GET_SECURITY);
           return;
         }
         if (req.method === 'POST' && url.pathname === '/api/security') {
           const body = await readBody();
-          const configFile = path.join(ROOT, 'config.json');
-          const file = readJsonSafe(configFile, null, true);
-          const next = { ...(file.security ?? {}), ...body };
-          if (typeof next.interceptNotify === 'boolean') next.interceptNotify = next.interceptNotify;
-          else if (next.interceptNotify !== undefined) next.interceptNotify = Boolean(next.interceptNotify);
-          file.security = next;
-          atomicWriteJson(configFile, file);
-          cfg.security = { ...(cfg.security ?? {}), ...next };
-          log(`控制台：安全拦截通知已更新（interceptNotify=${cfg.security.interceptNotify}）`);
-          sendJson({ ok: true, security: cfg.security });
+          runControlCommand(CONTROL_METHODS.UPDATE_SECURITY, body);
           return;
         }
         // ── 控制台访问令牌（可手动修改/生成随机） ─────────────────────────────
@@ -2811,7 +3017,7 @@ async function main() {
             sendJson({ ok: false, error: '控制台访问令牌只能包含字母、数字、下划线或短横线' }, 400);
             return;
           }
-          const configFile = path.join(ROOT, 'config.json');
+          const configFile = CONFIG_FILE;
           const file = readJsonSafe(configFile, null, true);
           // 手动令牌写入 config.json（用户可见、可再改）；随机令牌写入 state/console-token 并清空 config 中的手动值。
           file.consoleToken = generated ? '' : newToken;
@@ -2850,21 +3056,7 @@ async function main() {
         }
         if (req.method === 'POST' && url.pathname === '/api/social/state') {
           const body = await readBody();
-          const key = String(body.key ?? '').trim();
-          if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
-          const phase = body.phase;
-          if (phase === 'active') {
-            // 手动进入活跃：相当于第四种触发方式，之后按正常活跃流程跑
-            enterActive(key);
-            log(`控制台：手动将 ${key} 设为活跃`);
-            sendJson({ ok: true, key, phase: 'active' });
-          } else if (phase === 'idle') {
-            leaveActive(key);
-            log(`控制台：手动将 ${key} 设为观望`);
-            sendJson({ ok: true, key, phase: 'idle' });
-          } else {
-            sendJson({ ok: false, error: 'phase 必须是 active 或 idle' }, 400);
-          }
+          runControlCommand(CONTROL_METHODS.SET_SOCIAL_PHASE, body);
           return;
         }
         // ── 仿真群友模式（社交引擎）配置 ──────────────────────────────────────
@@ -2882,7 +3074,7 @@ async function main() {
         }
         if (req.method === 'POST' && url.pathname === '/api/social') {
           const body = await readBody();
-          const configFile = path.join(ROOT, 'config.json');
+          const configFile = CONFIG_FILE;
           // fail-fast：配置文件损坏时直接 500，绝不回写，避免把整个配置清成只剩 social
           const file = readJsonSafe(configFile, null, true);
           const merged = { ...(file.social ?? {}), ...body };
@@ -3009,7 +3201,7 @@ async function main() {
         }
         if (req.method === 'POST' && url.pathname === '/api/socialV2/config') {
           const body = await readBody();
-          const configFile = path.join(ROOT, 'config.json');
+          const configFile = CONFIG_FILE;
           const file = readJsonSafe(configFile, null, true);
           const current = file.socialV2 ?? {};
           const merged = { ...current, ...body };
@@ -3976,7 +4168,7 @@ async function main() {
           if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2ToolEnabled('getSelfImage')) { sendJson({ ok: false, error: '工具未启用：qq_get_self_image' }, 403); return; }
-          const selfPath = path.join(ROOT, 'assets', 'deepseek娘.png');
+          const selfPath = path.join(APP_PATHS.assetsDir, 'deepseek娘.png');
           try {
             if (!fs.existsSync(selfPath)) { sendJson({ ok: false, error: '未找到 AI 形象图片 assets/deepseek娘.png' }, 404); return; }
             const buf = fs.readFileSync(selfPath);
@@ -5299,13 +5491,13 @@ async function main() {
           sendJson({ ok: true, archivedCount });
           return;
         }
-        // ── 重启桥接（守护模式下 5 秒后自动拉起） ──────────────────────────────
+        // ── 重启桥接（守护模式下 5 秒后自动拉起；桌面启动器下立即重新拉起） ──────
         if (req.method === 'POST' && url.pathname === '/api/restart') {
           sendJson({ ok: true, message: '正在重启桥接（若由守护窗口启动，5 秒后自动恢复）…' });
           setTimeout(() => {
-            log('控制台：重启桥接');
+            log(`控制台：重启桥接（exit ${EXIT_RESTART}）`);
             releaseLock();
-            process.exit(0);
+            process.exit(EXIT_RESTART);
           }, 500);
           return;
         }
@@ -5316,16 +5508,13 @@ async function main() {
       }
     });
     server.listen(port, '127.0.0.1', () => {
-      log(`本地控制台已启动：http://127.0.0.1:${port}`);
-      if (autoOpenBrowser) openConsoleInBrowser();
+      log(`本地程序间 API 已就绪（loopback:${port}）；产品 UI 通过原生 IPC 提供。`);
     });
     // 端口被占用说明已有实例在跑：以 exit 2 退出，守护脚本会识别为"已有实例"而不是无限重启
     server.on('error', (error) => {
       if (error?.code === 'EADDRINUSE') {
-        // 端口被占用：大概率已有桥接实例在运行——直接唤起浏览器打开现有控制台，
-        // 本实例静默退出（exit 2，守护脚本识别为"已有实例"不再重拉），全程无黑框。
+        // 端口被占用：大概率已有桥接实例在运行，当前实例退出，避免争抢本地 API。
         log(`控制台端口 ${port} 已被占用（可能已有桥接实例在运行），本实例静默退出。`);
-        if (autoOpenBrowser) openConsoleInBrowser();
         process.exit(2);
       }
       log(`控制台服务错误: ${error?.message ?? error}`);
@@ -7579,8 +7768,8 @@ async function main() {
     try {
       const rs = readRoleState();
       if (!rs.role) return '';
-      const roleFile = path.join(ROOT, 'roles', rs.role + '.md');
-      if (!fs.existsSync(roleFile)) return '';
+      const roleFile = resolveRoleFile(rs.role, APP_PATHS);
+      if (!roleFile) return '';
       const stateStat = fs.statSync(ROLE_STATE_FILE);
       const roleStat = fs.statSync(roleFile);
       const cacheKey = `${stateStat.mtimeMs}:${roleStat.mtimeMs}`;
@@ -8756,9 +8945,9 @@ async function main() {
           writeRoleState(null, roleState.mode);
           await sendToQQ(key, '已清除角色，恢复正常人格。');
         } else {
-          const roleFile = path.join(ROOT, 'roles', name + '.md');
-          if (!fs.existsSync(roleFile)) {
-            await sendToQQ(key, `角色「${name}」不存在。角色文件放 qq-bridge/roles/ 目录。`);
+          const roleFile = resolveRoleFile(name, APP_PATHS);
+          if (!roleFile) {
+            await sendToQQ(key, `角色「${name}」不存在。角色文件放 whalebridge/roles/ 目录。`);
           } else {
             writeRoleState(name, roleState.mode);
             await sendToQQ(key, `已切换角色：${name}。`);
@@ -8982,16 +9171,18 @@ async function main() {
         log(`已回答提问 (${key})`);
         // 只有回执成功才移除挂起，且必须仍是同一个挂起（防止期间被新请求覆盖）
         if (pending.get(key) === p) pending.delete(key);
+        return { ok: true };
       } catch (error) {
         log('回答问题失败（保留挂起以便重试）:', error.message);
         await sendToQQ(key, '⚠️ 回答提交失败，请再回复一次。');
+        return { ok: false, error: '回答提交失败，请稍后重试' };
       }
       return;
     }
     if (p.kind === 'approval') {
       if (!isOwner) {
         await sendToQQ(key, '审批仅管理员可操作');
-        return;
+        return { ok: false, error: '审批仅管理员可操作' };
       }
       const t = answerText.trim().toLowerCase();
       let outcome = null;
@@ -8999,7 +9190,7 @@ async function main() {
       for (const w of REJECT_WORDS) if (t === w) outcome = 'rejected';
       if (!outcome) {
         await sendToQQ(key, '请回复「通过」或「拒绝」来决定这个审批');
-        return;
+        return { ok: false, error: '审批决定必须是通过或拒绝' };
       }
       try {
         await api.answerRemoteEvent(p.clientId, p.eventId, { kind: 'result', value: outcome });
@@ -9007,12 +9198,15 @@ async function main() {
         await sendToQQ(key, outcome === 'allowed-once' ? '✅ 已通过审批' : '❌ 已拒绝审批');
         // 只有回执成功才移除挂起，且必须仍是同一个挂起（防止期间被新请求覆盖）
         if (pending.get(key) === p) pending.delete(key);
+        return { ok: true };
       } catch (error) {
         log('处理审批失败（保留挂起以便重试）:', error.message);
         await sendToQQ(key, '⚠️ 审批回执提交失败，请再回复一次「通过」或「拒绝」。');
+        return { ok: false, error: '审批回执提交失败，请稍后重试' };
       }
       return;
     }
+    return { ok: false, error: '未知挂起请求类型' };
   }
 
   // 二代拍一拍（notify/poke）事件处理：写入消息流并按需唤醒。
@@ -9667,6 +9861,7 @@ async function main() {
     })();
     return botConnectPromise;
   };
+  resolveConnectSnowLumaReady();
 
   startConsoleServer();
   // 启动探测在后台进行：QQ WebSocket 只有 SnowLuma ready 后才会连接，
@@ -9675,9 +9870,9 @@ async function main() {
     if (snowStartup.ready) {
       await connectSnowLuma();
     } else {
-      log(`SnowLuma 未就绪（${snowStartup.status}），qq_bridge 已降级独立启动；可在控制台终端中重试。`);
+      log(`SnowLuma 未就绪（${snowStartup.status}），WhaleBridge 已降级独立启动；可在控制台终端中重试。`);
     }
-  }).catch((error) => log(`SnowLuma 启动流程异常，qq_bridge 已降级：${error?.message ?? error}`));
+  }).catch((error) => log(`SnowLuma 启动流程异常，WhaleBridge 已降级：${error?.message ?? error}`));
   log('桥接控制台已启动。SnowLuma 就绪后将自动连接 QQ；按 Ctrl+C 退出。');
   // 预热表情库：启动时同步一次 QQ 收藏表情，失败不阻塞（AI 首次调用工具时还会再试）。
   if (cfg.socialV2?.sticker?.enabled !== false) {
@@ -9740,21 +9935,69 @@ async function main() {
   await pumpMux();
 }
 
-process.on('SIGINT', () => {
-  log('退出中…');
-  saveState();
-  releaseLock();
-  process.exit(0);
-});
-process.on('SIGTERM', () => {
-  saveState();
-  releaseLock();
-  process.exit(0);
-});
-process.on('unhandledRejection', (error) => log('未处理异常:', error?.message ?? error));
-process.on('exit', () => releaseLock());
+let lifecycleHandlersInstalled = false;
+function installLifecycleHandlers() {
+  if (lifecycleHandlersInstalled) return;
+  lifecycleHandlersInstalled = true;
+  process.on('SIGINT', () => {
+    log('退出中…');
+    saveState();
+    leaveSnowLumaRunningOnExit();
+    releaseLock();
+    process.exit(0);
+  });
+  process.on('SIGTERM', () => {
+    saveState();
+    leaveSnowLumaRunningOnExit();
+    releaseLock();
+    process.exit(0);
+  });
+  process.on('unhandledRejection', (error) => log('未处理异常:', error?.message ?? error));
+  process.on('exit', () => releaseLock());
+}
 
-main().catch((error) => {
-  console.error('[bridge] 启动失败:', error);
-  process.exit(1);
-});
+// 孤儿守卫：启动器托管时把 stdin 当作"父进程存活"的凭据。启动器正常退出会先发关闭请求，
+// 异常被强杀时管道随之关闭（EOF），这里立即优雅退出，不让 worker 残留在后台。
+// 双保险：stdin EOF 是即时的，但极端情况下（管道被其它进程继承等）可能收不到，
+// 因此再加一个"父进程是否还活着"的定时检查（process.ppid 在 Windows 上同样可用）。
+let orphanGuardInstalled = false;
+function installOrphanGuard({ exit = (code) => process.exit(code), log: write = log } = {}) {
+  if (!SUPERVISED || orphanGuardInstalled) return false;
+  orphanGuardInstalled = true;
+  const parentPid = process.ppid;
+  let leaving = false;
+  const leave = (reason) => {
+    if (leaving) return;
+    leaving = true;
+    write(`${reason}，桥接随之退出。`);
+    try { saveState(); } catch {}
+    // SnowLuma 有独立生命周期；断开 worker 时让它保持运行，避免破坏 QQ 注入状态。
+    leaveSnowLumaRunningOnExit();
+    try { releaseLock(); } catch {}
+    exit(0);
+  };
+  process.stdin.resume();
+  process.stdin.on('end', () => leave('启动器已退出（stdin 关闭）'));
+  process.stdin.on('error', () => {});
+  if (parentPid && parentPid > 0) {
+    const timer = setInterval(() => {
+      try {
+        process.kill(parentPid, 0);
+      } catch (error) {
+        if (error?.code === 'ESRCH') leave('启动器进程已消失');
+      }
+    }, 5000);
+    timer.unref?.();
+  }
+  return true;
+}
+
+export async function runBridge() {
+  installLifecycleHandlers();
+  installOrphanGuard();
+  return main();
+}
+
+if (isMainModule(import.meta.url)) {
+  runBridge().catch((error) => reportEntrypointError('bridge', error));
+}

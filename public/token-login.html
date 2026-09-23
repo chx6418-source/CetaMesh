@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>QQ 桥接控制台 · 令牌登录</title>
+<title>鲸桥控制台 · 令牌登录</title>
 <style>
   /* ==========================================================================
      令牌登录页 · 已落地方案：柔光浮雕 Soft Emboss（方案 09）+ 静水浮升转场（涟漪变体 10）
@@ -73,10 +73,8 @@
 
   .logo {
     width: 58px; height: 58px; margin: 0 auto 16px; border-radius: 19px;
-    background: #eef2fc; color: #6a7bb8;
-    display: flex; align-items: center; justify-content: center;
-    font-size: 26px; font-weight: 800;
-    box-shadow: 8px 9px 20px rgba(172,187,228,.85), -8px -9px 20px rgba(255,255,255,1), inset 0 0 0 1px rgba(255,255,255,.5);
+    display: block;
+    box-shadow: 8px 9px 20px rgba(172,187,228,.85), -8px -9px 20px rgba(255,255,255,1);
   }
   h1 { font-size: 21.5px; letter-spacing: .3px; color: #4a5578; }
   .ver {
@@ -168,8 +166,8 @@
 <body>
   <div class="rings" aria-hidden="true"><span></span><span></span></div>
   <div class="card">
-    <div class="logo">Q</div>
-    <h1>QQ 桥接控制台<span class="ver">Soda UI</span></h1>
+    <img class="logo" src="/whalebridge-icon.png" alt="">
+    <h1>鲸桥控制台<span class="ver">Soda UI</span></h1>
     <div class="sub">DeepSeek Harness × SnowLuma · 安全登录</div>
     <div class="field">
       <span class="key"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg></span>
@@ -183,7 +181,7 @@
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h13m-5-6 6 6-6 6"/></svg>
     </button>
     <div class="err" id="err"></div>
-    <div class="foot">© 2026 QQ Bridge · DeepSeek Harness × SnowLuma</div>
+    <div class="foot">© 2026 WhaleBridge · DeepSeek Harness × SnowLuma</div>
   </div>
   <div class="morph" aria-hidden="true"></div>
 <script>

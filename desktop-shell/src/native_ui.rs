@@ -1,0 +1,3483 @@
+//! Native management UI for the desktop shell.
+//!
+//! The shell supplies a `CoreApi` backed by its authenticated local IPC transport. This module
+//! intentionally contains no browser, HTML, WebView, or arbitrary command execution path.
+
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use crate::supervisor::{Status, Supervisor};
+use eframe::egui;
+use serde_json::{Value, json};
+
+/// Synchronous Core transport. Calls are only made on this module's worker thread.
+pub trait CoreApi: Send + Sync + 'static {
+    fn request(&self, method: &str, params: Value) -> Result<Value, String>;
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum Area {
+    Overview,
+    Roles,
+    Policy,
+    Services,
+    ModelCatalog,
+    ModelDefaults,
+    PresetList,
+    PresetBindings,
+    Pending,
+    Security,
+    Slang,
+    Sessions,
+    Activity,
+    Logs,
+    Diagnostics,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Tab {
+    Overview,
+    Roles,
+    Policy,
+    Services,
+    ModelsPresets,
+    Pending,
+    Security,
+    Slang,
+    Sessions,
+    Activity,
+    Logs,
+    Diagnostics,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Operation {
+    OverviewPing,
+    RolesRefresh,
+    RoleSet,
+    RoleCreate,
+    RoleMode,
+    PolicyLoad,
+    PolicySave,
+    ServicesRefresh,
+    ServicesDetect,
+    ServiceSelect(ServiceKind),
+    ServiceInstallSnowLuma,
+    ServiceStart(ServiceKind),
+    ServiceStop(ServiceKind),
+    ModelCatalogLoad,
+    ModelDefaultsLoad,
+    ModelDefaultsSave,
+    PresetListLoad,
+    PresetBindingsLoad,
+    PresetBindingSave(PresetTarget),
+    PendingRefresh,
+    PendingDecision,
+    SecurityLoad,
+    SecuritySave,
+    SlangLoad,
+    SlangSave,
+    SessionsRefresh,
+    SessionPhase,
+    ActivityRefresh,
+    LogsRefresh,
+    DiagnosticsPing,
+    DiagnosticsRun,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ServiceKind {
+    SnowLuma,
+    Dsh,
+}
+
+impl ServiceKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::SnowLuma => "snowluma",
+            Self::Dsh => "dsh",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::SnowLuma => "SnowLuma",
+            Self::Dsh => "DSH",
+        }
+    }
+
+    #[cfg(test)]
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "snowluma" => Some(Self::SnowLuma),
+            "dsh" => Some(Self::Dsh),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ServiceAction {
+    InstallSnowLuma,
+    Start(ServiceKind),
+    Stop(ServiceKind),
+}
+
+#[derive(Clone, Debug, Default)]
+struct DetectedInstall {
+    id: String,
+    name: String,
+    version: Option<String>,
+    source: Option<String>,
+    valid: Option<bool>,
+    status: Option<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ServiceSnapshot {
+    installed: Option<bool>,
+    running: Option<bool>,
+    status: Option<String>,
+    message: Option<String>,
+    selected_id: Option<String>,
+    installations: Vec<DetectedInstall>,
+}
+
+impl ServiceSnapshot {
+    fn has_selectable_install(&self, id: &str) -> bool {
+        self.installations
+            .iter()
+            .any(|installation| installation.id == id && installation.valid == Some(true))
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ModelEntry {
+    provider: String,
+    model: String,
+    image: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ModelDefaults {
+    provider: String,
+    model: String,
+    reasoning_effort: String,
+}
+
+impl Default for ModelDefaults {
+    fn default() -> Self {
+        Self {
+            provider: String::new(),
+            model: String::new(),
+            reasoning_effort: "off".to_owned(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct PresetRecord {
+    id: String,
+    trust: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PresetTarget {
+    Chat,
+    ClosedAgent,
+    Reserved2,
+    Learner,
+}
+
+impl PresetTarget {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::ClosedAgent => "closedAgent",
+            Self::Reserved2 => "reserved2",
+            Self::Learner => "learner",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Chat => "聊天",
+            Self::ClosedAgent => "封闭代理",
+            Self::Reserved2 => "保留模式二",
+            Self::Learner => "黑话学习",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "chat" => Some(Self::Chat),
+            "closedAgent" => Some(Self::ClosedAgent),
+            "reserved2" => Some(Self::Reserved2),
+            "learner" => Some(Self::Learner),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct PresetBindings {
+    chat: Option<String>,
+    closed_agent: Option<String>,
+    reserved2: Option<String>,
+    learner: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct PresetSelection {
+    chat: String,
+    closed_agent: String,
+    reserved2: String,
+    learner: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct PendingItem {
+    kind: String,
+    key: String,
+    id: String,
+    session_id: String,
+    tool_name: String,
+    reason: String,
+    question: String,
+    options: Vec<String>,
+    status: String,
+    card_title: String,
+    button_label: String,
+    risk_reasons: Vec<String>,
+}
+
+impl PresetBindings {
+    fn get(&self, target: PresetTarget) -> Option<&str> {
+        match target {
+            PresetTarget::Chat => self.chat.as_deref(),
+            PresetTarget::ClosedAgent => self.closed_agent.as_deref(),
+            PresetTarget::Reserved2 => self.reserved2.as_deref(),
+            PresetTarget::Learner => self.learner.as_deref(),
+        }
+    }
+}
+
+impl PresetSelection {
+    fn get(&self, target: PresetTarget) -> &str {
+        match target {
+            PresetTarget::Chat => &self.chat,
+            PresetTarget::ClosedAgent => &self.closed_agent,
+            PresetTarget::Reserved2 => &self.reserved2,
+            PresetTarget::Learner => &self.learner,
+        }
+    }
+
+    fn get_mut(&mut self, target: PresetTarget) -> &mut String {
+        match target {
+            PresetTarget::Chat => &mut self.chat,
+            PresetTarget::ClosedAgent => &mut self.closed_agent,
+            PresetTarget::Reserved2 => &mut self.reserved2,
+            PresetTarget::Learner => &mut self.learner,
+        }
+    }
+}
+
+enum ApiCall {
+    Ping,
+    Control { method: &'static str, params: Value },
+}
+
+struct WorkerJob {
+    id: u64,
+    area: Area,
+    operation: Operation,
+    call: ApiCall,
+}
+
+struct WorkerEvent {
+    id: u64,
+    area: Area,
+    operation: Operation,
+    result: Result<Value, String>,
+}
+
+#[derive(Clone, Debug)]
+struct SessionRow {
+    key: String,
+    session_id: String,
+    owner: bool,
+}
+
+const ACTIVITY_LIMITS: [usize; 4] = [50, 100, 250, 500];
+const LOG_LIMITS: [usize; 4] = [50, 100, 250, 500];
+const MAX_ACTIVITY_ITEMS: usize = 500;
+const MAX_LOG_LINES: usize = 500;
+const MAX_DISPLAY_LINE_CHARS: usize = 1_600;
+const MODEL_REASONING_EFFORTS: [&str; 4] = ["off", "low", "high", "max"];
+const PRESET_TARGETS: [PresetTarget; 4] = [
+    PresetTarget::Chat,
+    PresetTarget::ClosedAgent,
+    PresetTarget::Reserved2,
+    PresetTarget::Learner,
+];
+
+#[derive(Clone, Debug)]
+struct SlangForm {
+    enabled: bool,
+    extract_min_messages: String,
+    extract_cooldown_ms: String,
+    inject_max: String,
+    auto_research: bool,
+    learner_preset: String,
+    workspace_title: String,
+    inference_thresholds: String,
+}
+
+#[derive(Clone, Debug)]
+struct PolicyForm {
+    mode: String,
+    allow_private: String,
+    allow_groups: String,
+    deny_private: String,
+    deny_groups: String,
+    owner_qq: String,
+}
+
+impl Default for PolicyForm {
+    fn default() -> Self {
+        Self {
+            mode: "chat".to_owned(),
+            allow_private: String::new(),
+            allow_groups: String::new(),
+            deny_private: String::new(),
+            deny_groups: String::new(),
+            owner_qq: String::new(),
+        }
+    }
+}
+
+impl PolicyForm {
+    fn params(&self, include_mode: bool) -> Result<Value, String> {
+        const MODES: [&str; 4] = ["chat", "closed-agent", "reserved", "reserved2"];
+        if !MODES.contains(&self.mode.as_str()) {
+            return Err("运行模式必须是 chat、closed-agent、reserved 或 reserved2。".to_owned());
+        }
+        let owner_qq = if self.owner_qq.trim().is_empty() {
+            None
+        } else {
+            Some(parse_policy_id("管理员 QQ", self.owner_qq.trim())?)
+        };
+        let mut params = json!({
+            "allow": {
+                "private": parse_policy_id_list("私聊白名单", &self.allow_private)?,
+                "groups": parse_policy_id_list("群白名单", &self.allow_groups)?,
+            },
+            "deny": {
+                "private": parse_policy_id_list("私聊黑名单", &self.deny_private)?,
+                "groups": parse_policy_id_list("群黑名单", &self.deny_groups)?,
+            },
+            "ownerQQ": owner_qq,
+        });
+        if include_mode {
+            params["mode"] = json!(self.mode);
+        }
+        Ok(params)
+    }
+
+    fn apply(&mut self, value: &Value) -> Result<(), String> {
+        let policy = value.get("policy").unwrap_or(value);
+        let mode = policy
+            .get("mode")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "Core 返回的运行模式缺失或无效。".to_owned())?;
+        if !["chat", "closed-agent", "reserved", "reserved2"].contains(&mode) {
+            return Err("Core 返回了不支持的运行模式。".to_owned());
+        }
+        self.mode = mode.to_owned();
+        self.allow_private = format_policy_id_list(policy.pointer("/allow/private"), "私聊白名单")?;
+        self.allow_groups = format_policy_id_list(policy.pointer("/allow/groups"), "群白名单")?;
+        self.deny_private = format_policy_id_list(policy.pointer("/deny/private"), "私聊黑名单")?;
+        self.deny_groups = format_policy_id_list(policy.pointer("/deny/groups"), "群黑名单")?;
+        self.owner_qq = match policy.get("ownerQQ") {
+            None | Some(Value::Null) => String::new(),
+            Some(value) => parse_policy_id_value("管理员 QQ", value)?.to_string(),
+        };
+        Ok(())
+    }
+}
+
+impl Default for SlangForm {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            extract_min_messages: "10".to_owned(),
+            extract_cooldown_ms: "300000".to_owned(),
+            inject_max: "8".to_owned(),
+            auto_research: true,
+            learner_preset: "whale-chat".to_owned(),
+            workspace_title: "QQ 黑话学习".to_owned(),
+            inference_thresholds: "2, 4, 8".to_owned(),
+        }
+    }
+}
+
+/// The native egui management application. Construct this from the shell with its Core IPC
+/// implementation and the creation context's egui context.
+pub struct NativeUi {
+    supervisor: Arc<Supervisor>,
+    job_tx: Sender<WorkerJob>,
+    event_rx: Receiver<WorkerEvent>,
+    worker_available: bool,
+    worker_error: Option<String>,
+    active_tab: Tab,
+    pending: HashSet<Area>,
+    feedback: HashMap<Area, Result<Value, String>>,
+    next_id: u64,
+
+    core_online: Option<bool>,
+    core_summary: String,
+
+    roles: Vec<String>,
+    current_role: Option<String>,
+    selected_role: String,
+    role_mode: String,
+    new_role_name: String,
+    new_role_content: String,
+
+    security_loaded: bool,
+    intercept_notify: bool,
+
+    policy_loaded: bool,
+    policy: PolicyForm,
+    loaded_policy_mode: Option<String>,
+    policy_confirmation: Option<Value>,
+
+    services_snowluma: ServiceSnapshot,
+    services_dsh: ServiceSnapshot,
+    services_loaded: bool,
+    selected_snowluma_install: String,
+    selected_dsh_install: String,
+    service_confirmation: Option<ServiceAction>,
+    services_notice: Option<String>,
+
+    model_catalog: Vec<ModelEntry>,
+    model_catalog_loaded: bool,
+    model_defaults: ModelDefaults,
+    model_defaults_loaded: bool,
+    model_notice: Option<String>,
+
+    presets: Vec<PresetRecord>,
+    preset_list_loaded: bool,
+    preset_bindings: PresetBindings,
+    preset_selection: PresetSelection,
+    preset_bindings_loaded: bool,
+    preset_notice: Option<String>,
+
+    pending_items: Vec<PendingItem>,
+    pending_loaded: bool,
+    pending_answer: String,
+    pending_notice: Option<String>,
+    pending_refresh_at: Instant,
+
+    slang_loaded: bool,
+    slang: SlangForm,
+
+    sessions: Vec<SessionRow>,
+
+    activity_entries: Vec<String>,
+    activity_limit: usize,
+    log_lines: Vec<String>,
+    log_limit: usize,
+    log_source: String,
+
+    diagnostics_runtime: bool,
+    diagnostics_config: bool,
+    diagnostics_paths: bool,
+    diagnostics_services: bool,
+}
+
+#[derive(Clone, Copy)]
+struct NativePalette {
+    background: egui::Color32,
+    surface: egui::Color32,
+    surface_alt: egui::Color32,
+    border: egui::Color32,
+    text: egui::Color32,
+    muted: egui::Color32,
+    accent: egui::Color32,
+    accent_bg: egui::Color32,
+    success: egui::Color32,
+    warning: egui::Color32,
+    error: egui::Color32,
+    error_bg: egui::Color32,
+}
+
+fn native_palette() -> NativePalette {
+    NativePalette {
+        background: egui::Color32::from_rgb(15, 23, 42),
+        surface: egui::Color32::from_rgb(24, 36, 58),
+        surface_alt: egui::Color32::from_rgb(30, 45, 70),
+        border: egui::Color32::from_rgb(51, 65, 85),
+        text: egui::Color32::from_rgb(248, 250, 252),
+        muted: egui::Color32::from_rgb(203, 213, 225),
+        accent: egui::Color32::from_rgb(56, 189, 248),
+        accent_bg: egui::Color32::from_rgb(12, 74, 110),
+        success: egui::Color32::from_rgb(74, 222, 128),
+        warning: egui::Color32::from_rgb(251, 191, 36),
+        error: egui::Color32::from_rgb(248, 113, 113),
+        error_bg: egui::Color32::from_rgb(69, 32, 45),
+    }
+}
+
+fn native_widget_visuals(
+    bg_fill: egui::Color32,
+    weak_bg_fill: egui::Color32,
+    fg_color: egui::Color32,
+    border: egui::Color32,
+) -> egui::style::WidgetVisuals {
+    egui::style::WidgetVisuals {
+        bg_fill,
+        weak_bg_fill,
+        bg_stroke: egui::Stroke::new(1.0, border),
+        corner_radius: egui::CornerRadius::same(6),
+        fg_stroke: egui::Stroke::new(1.0, fg_color),
+        expansion: 0.0,
+    }
+}
+
+fn native_style() -> egui::Style {
+    let palette = native_palette();
+    let mut style = egui::Style::default();
+    style.spacing.item_spacing = egui::vec2(10.0, 8.0);
+    style.spacing.window_margin = egui::Margin::symmetric(18, 16);
+    style.spacing.button_padding = egui::vec2(12.0, 7.0);
+    style.spacing.menu_margin = egui::Margin::same(8);
+    style.spacing.interact_size = egui::vec2(40.0, 32.0);
+    style.spacing.combo_width = 260.0;
+    style.spacing.text_edit_width = 320.0;
+    style.spacing.extra_text_line_spacing = 2.0;
+
+    style
+        .text_styles
+        .insert(egui::TextStyle::Heading, egui::FontId::proportional(24.0));
+    style
+        .text_styles
+        .insert(egui::TextStyle::Body, egui::FontId::proportional(15.0));
+    style
+        .text_styles
+        .insert(egui::TextStyle::Button, egui::FontId::proportional(14.0));
+    style
+        .text_styles
+        .insert(egui::TextStyle::Small, egui::FontId::proportional(13.0));
+    style
+        .text_styles
+        .insert(egui::TextStyle::Monospace, egui::FontId::monospace(13.0));
+
+    let mut visuals = egui::Visuals::dark();
+    visuals.dark_mode = true;
+    visuals.override_text_color = Some(palette.text);
+    visuals.weak_text_color = Some(palette.muted);
+    visuals.panel_fill = palette.background;
+    visuals.window_fill = palette.background;
+    visuals.window_stroke = egui::Stroke::new(1.0, palette.border);
+    visuals.window_corner_radius = egui::CornerRadius::same(10);
+    visuals.faint_bg_color = egui::Color32::from_rgb(22, 34, 53);
+    visuals.extreme_bg_color = egui::Color32::from_rgb(10, 16, 30);
+    visuals.text_edit_bg_color = Some(palette.surface_alt);
+    visuals.code_bg_color = egui::Color32::from_rgb(10, 16, 30);
+    visuals.hyperlink_color = palette.accent;
+    visuals.warn_fg_color = palette.warning;
+    visuals.error_fg_color = palette.error;
+    visuals.selection = egui::style::Selection {
+        bg_fill: palette.accent_bg,
+        stroke: egui::Stroke::new(1.0, palette.accent),
+    };
+    visuals.widgets.noninteractive = native_widget_visuals(
+        palette.surface,
+        palette.surface,
+        palette.text,
+        palette.border,
+    );
+    visuals.widgets.inactive = native_widget_visuals(
+        palette.surface_alt,
+        palette.surface,
+        palette.text,
+        palette.border,
+    );
+    visuals.widgets.hovered = native_widget_visuals(
+        egui::Color32::from_rgb(39, 62, 91),
+        palette.surface_alt,
+        palette.text,
+        palette.accent,
+    );
+    visuals.widgets.active = native_widget_visuals(
+        palette.accent_bg,
+        palette.accent_bg,
+        palette.text,
+        palette.accent,
+    );
+    visuals.widgets.open = visuals.widgets.active;
+    visuals.button_frame = true;
+    visuals.collapsing_header_frame = true;
+    visuals.striped = true;
+    visuals.disabled_alpha = 0.55;
+    style.visuals = visuals;
+    style
+}
+
+fn configure_native_theme(context: &egui::Context) {
+    context.set_theme(egui::Theme::Dark);
+    context.set_global_style(native_style());
+}
+
+fn friendly_read_error(area: Area, error: &str) -> Option<&'static str> {
+    let is_model_or_preset = matches!(
+        area,
+        Area::ModelCatalog | Area::ModelDefaults | Area::PresetList | Area::PresetBindings
+    );
+    let is_dsh_method_error = error.contains("settings/describe") || error.contains("agentPresets");
+    if is_model_or_preset && is_dsh_method_error && error.contains("ECONNREFUSED") {
+        Some("DSH/目录服务当前不可用。Core IPC 仍在线，请启动 DSH 后重试。")
+    } else {
+        None
+    }
+}
+
+impl NativeUi {
+    pub fn new(
+        api: Arc<dyn CoreApi>,
+        supervisor: Arc<Supervisor>,
+        egui_context: egui::Context,
+    ) -> Self {
+        // Use installed system fonts as a fallback so the Chinese UI remains readable without
+        // shipping a browser font stack. The app still uses egui's native text rendering.
+        let _detected_fonts =
+            egui_system_fonts::add_auto(&egui_context, egui_system_fonts::FontStyle::Sans);
+        configure_native_theme(&egui_context);
+        let (job_tx, job_rx) = mpsc::channel::<WorkerJob>();
+        let (event_tx, event_rx) = mpsc::channel::<WorkerEvent>();
+        let worker_context = egui_context.clone();
+        let worker = thread::Builder::new()
+            .name("whalebridge-core-ui-worker".to_owned())
+            .spawn(move || {
+                while let Ok(job) = job_rx.recv() {
+                    let result = match job.call {
+                        ApiCall::Ping => api.request("core.ping", json!({})),
+                        ApiCall::Control { method, params } => api.request(
+                            "control.execute",
+                            json!({ "method": method, "params": params }),
+                        ),
+                    };
+                    if event_tx
+                        .send(WorkerEvent {
+                            id: job.id,
+                            area: job.area,
+                            operation: job.operation,
+                            result,
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                    worker_context.request_repaint();
+                }
+            });
+
+        let mut app = Self {
+            supervisor,
+            job_tx,
+            event_rx,
+            worker_available: worker.is_ok(),
+            worker_error: worker
+                .err()
+                .map(|error| format!("无法启动 Core 工作线程：{error}")),
+            active_tab: Tab::Overview,
+            pending: HashSet::new(),
+            feedback: HashMap::new(),
+            next_id: 1,
+
+            core_online: None,
+            core_summary: "尚未连接".to_owned(),
+
+            roles: Vec::new(),
+            current_role: None,
+            selected_role: String::new(),
+            role_mode: "unknown".to_owned(),
+            new_role_name: String::new(),
+            new_role_content: String::new(),
+
+            security_loaded: false,
+            intercept_notify: true,
+
+            policy_loaded: false,
+            policy: PolicyForm::default(),
+            loaded_policy_mode: None,
+            policy_confirmation: None,
+
+            services_snowluma: ServiceSnapshot::default(),
+            services_dsh: ServiceSnapshot::default(),
+            services_loaded: false,
+            selected_snowluma_install: String::new(),
+            selected_dsh_install: String::new(),
+            service_confirmation: None,
+            services_notice: None,
+
+            model_catalog: Vec::new(),
+            model_catalog_loaded: false,
+            model_defaults: ModelDefaults::default(),
+            model_defaults_loaded: false,
+            model_notice: None,
+
+            presets: Vec::new(),
+            preset_list_loaded: false,
+            preset_bindings: PresetBindings::default(),
+            preset_selection: PresetSelection::default(),
+            preset_bindings_loaded: false,
+            preset_notice: None,
+
+            pending_items: Vec::new(),
+            pending_loaded: false,
+            pending_answer: String::new(),
+            pending_notice: None,
+            pending_refresh_at: Instant::now(),
+
+            slang_loaded: false,
+            slang: SlangForm::default(),
+
+            sessions: Vec::new(),
+
+            activity_entries: Vec::new(),
+            activity_limit: 100,
+            log_lines: Vec::new(),
+            log_limit: 200,
+            log_source: "bridge".to_owned(),
+
+            diagnostics_runtime: true,
+            diagnostics_config: true,
+            diagnostics_paths: false,
+            diagnostics_services: false,
+        };
+
+        // Start with read-only snapshots. The only initial write-like form request is also
+        // read-only: slang.getConfig must be implemented as a pure query by the Core adapter.
+        app.issue(Area::Overview, Operation::OverviewPing, ApiCall::Ping);
+        app.issue_control(Area::Roles, Operation::RolesRefresh, "role.list", json!({}));
+        app.issue_control(
+            Area::Security,
+            Operation::SecurityLoad,
+            "security.get",
+            json!({}),
+        );
+        app.issue_control(Area::Policy, Operation::PolicyLoad, "policy.get", json!({}));
+        app.issue_control(
+            Area::Services,
+            Operation::ServicesRefresh,
+            "services.get",
+            json!({}),
+        );
+        app.issue_control(
+            Area::ModelCatalog,
+            Operation::ModelCatalogLoad,
+            "model.catalog.list",
+            json!({}),
+        );
+        app.issue_control(
+            Area::ModelDefaults,
+            Operation::ModelDefaultsLoad,
+            "model.defaults.get",
+            json!({}),
+        );
+        app.issue_control(
+            Area::PresetList,
+            Operation::PresetListLoad,
+            "preset.list",
+            json!({}),
+        );
+        app.issue_control(
+            Area::PresetBindings,
+            Operation::PresetBindingsLoad,
+            "preset.bindings.get",
+            json!({}),
+        );
+        app.issue_control(
+            Area::Pending,
+            Operation::PendingRefresh,
+            "pending.list",
+            json!({}),
+        );
+        app.issue_control(
+            Area::Slang,
+            Operation::SlangLoad,
+            "slang.getConfig",
+            json!({}),
+        );
+        app.issue_control(
+            Area::Sessions,
+            Operation::SessionsRefresh,
+            "session.list",
+            json!({}),
+        );
+        app.issue_control(
+            Area::Activity,
+            Operation::ActivityRefresh,
+            "activity.list",
+            json!({ "limit": app.activity_limit }),
+        );
+        app.issue_control(
+            Area::Logs,
+            Operation::LogsRefresh,
+            "logs.read",
+            json!({ "source": app.log_source, "limit": app.log_limit }),
+        );
+        app
+    }
+
+    fn issue_control(
+        &mut self,
+        area: Area,
+        operation: Operation,
+        method: &'static str,
+        params: Value,
+    ) {
+        if method == "pending.list" {
+            self.pending_refresh_at = Instant::now();
+        }
+        self.issue(area, operation, ApiCall::Control { method, params });
+    }
+
+    fn maybe_refresh_pending(&mut self) {
+        if self.active_tab != Tab::Pending
+            || self.pending.contains(&Area::Pending)
+            || self.pending_refresh_at.elapsed() < Duration::from_secs(3)
+        {
+            return;
+        }
+        self.issue_control(
+            Area::Pending,
+            Operation::PendingRefresh,
+            "pending.list",
+            json!({}),
+        );
+    }
+
+    fn issue(&mut self, area: Area, operation: Operation, call: ApiCall) {
+        if self.pending.contains(&area) {
+            return;
+        }
+        if !self.worker_available {
+            self.feedback.insert(
+                area,
+                Err(self
+                    .worker_error
+                    .clone()
+                    .unwrap_or_else(|| "Core 工作线程不可用".to_owned())),
+            );
+            return;
+        }
+
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1).max(1);
+        match self.job_tx.send(WorkerJob {
+            id,
+            area,
+            operation,
+            call,
+        }) {
+            Ok(()) => {
+                self.pending.insert(area);
+                self.feedback.remove(&area);
+                if area == Area::Services {
+                    self.services_notice = None;
+                }
+            }
+            Err(error) => {
+                self.worker_available = false;
+                let message = format!("Core 工作线程已停止：{error}");
+                self.worker_error = Some(message.clone());
+                self.feedback.insert(area, Err(message));
+            }
+        }
+    }
+
+    fn receive_events(&mut self) {
+        while let Ok(event) = self.event_rx.try_recv() {
+            // The single worker serializes calls. An id mismatch is ignored defensively in case
+            // a future transport introduces cancellation or retries.
+            let _request_id = event.id;
+            self.pending.remove(&event.area);
+            self.feedback.insert(event.area, event.result.clone());
+
+            match (event.operation, event.result.as_ref()) {
+                (Operation::OverviewPing, Ok(value)) => {
+                    self.core_online = Some(true);
+                    self.core_summary = core_summary(value);
+                }
+                (Operation::OverviewPing, Err(error)) => {
+                    self.core_online = Some(false);
+                    self.core_summary = error.clone();
+                }
+                (Operation::DiagnosticsPing, Ok(value)) => {
+                    self.core_online = Some(true);
+                    self.core_summary = core_summary(value);
+                }
+                (Operation::DiagnosticsPing, Err(error)) => {
+                    self.core_online = Some(false);
+                    self.core_summary = error.clone();
+                }
+                (Operation::RolesRefresh, Ok(value)) => self.apply_roles(value),
+                (Operation::RoleSet, Ok(value)) => {
+                    self.current_role = value
+                        .get("role")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned);
+                    self.issue_control(
+                        Area::Roles,
+                        Operation::RolesRefresh,
+                        "role.list",
+                        json!({}),
+                    );
+                }
+                (Operation::RoleCreate, Ok(_)) => {
+                    self.new_role_name.clear();
+                    self.new_role_content.clear();
+                    self.issue_control(
+                        Area::Roles,
+                        Operation::RolesRefresh,
+                        "role.list",
+                        json!({}),
+                    );
+                }
+                (Operation::RoleMode, Ok(value)) => {
+                    if let Some(mode) = value.get("roleMode").and_then(Value::as_str) {
+                        self.role_mode = mode.to_owned();
+                    }
+                }
+                (Operation::SecurityLoad, Ok(value)) => self.apply_security(value),
+                (Operation::SecuritySave, Ok(value)) => self.apply_security(value),
+                (Operation::PolicyLoad, Ok(value)) => self.apply_policy(value),
+                (Operation::PolicySave, Ok(value)) => {
+                    self.policy_confirmation = None;
+                    self.apply_policy(value);
+                }
+                (Operation::ServicesRefresh, Ok(value)) => {
+                    self.services_notice = Some("服务状态已刷新。".to_owned());
+                    self.apply_services(value);
+                }
+                (Operation::ServicesDetect, Ok(value)) => {
+                    self.services_notice =
+                        Some("检测任务已提交；如仍显示旧状态，请稍后刷新。".to_owned());
+                    self.apply_services(value);
+                }
+                (Operation::ServiceSelect(service), Ok(value)) => {
+                    self.services_notice =
+                        Some("安装项选择已提交；可刷新确认最新状态。".to_owned());
+                    self.apply_service(service, value);
+                }
+                (Operation::ServiceStart(service), Ok(value)) => {
+                    self.services_notice = Some(format!(
+                        "{} 启动请求已提交；任务可能仍在后台运行，可稍后刷新。",
+                        service.label()
+                    ));
+                    self.apply_service(service, value);
+                }
+                (Operation::ServiceStop(service), Ok(value)) => {
+                    self.services_notice = Some(format!(
+                        "{} 停止请求已提交；任务可能仍在后台运行，可稍后刷新。",
+                        service.label()
+                    ));
+                    self.apply_service(service, value);
+                }
+                (Operation::ServiceInstallSnowLuma, Ok(value)) => {
+                    self.services_notice = Some(
+                        "SnowLuma 安装已提交；下载/安装可能仍在后台运行，可稍后刷新。".to_owned(),
+                    );
+                    self.apply_service(ServiceKind::SnowLuma, value);
+                }
+                (Operation::ModelCatalogLoad, Ok(value)) => self.apply_model_catalog(value),
+                (Operation::ModelDefaultsLoad, Ok(value)) => self.apply_model_defaults(value),
+                (Operation::ModelDefaultsSave, Ok(value)) => {
+                    self.model_notice = Some(
+                        "默认模型已保存；仅影响未来新建会话，不会传递 secret/settings 全文。"
+                            .to_owned(),
+                    );
+                    self.apply_model_defaults(value);
+                }
+                (Operation::PresetListLoad, Ok(value)) => self.apply_preset_list(value),
+                (Operation::PresetBindingsLoad, Ok(value)) => self.apply_preset_bindings(value),
+                (Operation::PresetBindingSave(target), Ok(value)) => {
+                    self.preset_notice = Some(format!("{} 的 Preset 绑定已保存。", target.label()));
+                    self.apply_preset_bindings(value);
+                }
+                (Operation::PendingRefresh, Ok(value)) => {
+                    self.pending_notice = Some("挂起请求已刷新。".to_owned());
+                    self.apply_pending(value);
+                }
+                (Operation::PendingDecision, Ok(_)) => {
+                    self.pending_answer.clear();
+                    self.pending_notice = Some("决定已提交，正在刷新挂起请求。".to_owned());
+                    self.issue_control(
+                        Area::Pending,
+                        Operation::PendingRefresh,
+                        "pending.list",
+                        json!({}),
+                    );
+                }
+                (Operation::SlangLoad, Ok(value)) => self.apply_slang(value),
+                (Operation::SlangSave, Ok(value)) => self.apply_slang(value),
+                (Operation::SessionsRefresh, Ok(value)) => self.apply_sessions(value),
+                (Operation::SessionPhase, Ok(_)) => self.issue_control(
+                    Area::Sessions,
+                    Operation::SessionsRefresh,
+                    "session.list",
+                    json!({}),
+                ),
+                (Operation::ActivityRefresh, Ok(value)) => self.apply_activity(value),
+                (Operation::LogsRefresh, Ok(value)) => self.apply_logs(value),
+                _ => {}
+            }
+        }
+    }
+
+    fn apply_roles(&mut self, value: &Value) {
+        let result = value.get("roles").unwrap_or(&Value::Null);
+        let mut roles = Vec::new();
+        if let Some(items) = result.as_array() {
+            for item in items {
+                let name = item
+                    .as_str()
+                    .or_else(|| item.get("name").and_then(Value::as_str));
+                if let Some(name) = name {
+                    roles.push(name.to_owned());
+                }
+            }
+        }
+        self.roles = roles;
+        self.current_role = value
+            .get("current")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        self.role_mode = value
+            .get("mode")
+            .and_then(Value::as_str)
+            .unwrap_or(&self.role_mode)
+            .to_owned();
+
+        if !self.roles.iter().any(|role| role == &self.selected_role) {
+            self.selected_role = self
+                .current_role
+                .clone()
+                .or_else(|| self.roles.first().cloned())
+                .unwrap_or_default();
+        }
+    }
+
+    fn apply_security(&mut self, value: &Value) {
+        let security = value.get("security").unwrap_or(value);
+        if let Some(enabled) = security.get("interceptNotify").and_then(Value::as_bool) {
+            self.intercept_notify = enabled;
+            self.security_loaded = true;
+        }
+    }
+
+    fn apply_policy(&mut self, value: &Value) {
+        match self.policy.apply(value) {
+            Ok(()) => {
+                self.loaded_policy_mode = Some(self.policy.mode.clone());
+                self.policy_loaded = true;
+            }
+            Err(error) => {
+                self.policy_loaded = false;
+                self.feedback.insert(Area::Policy, Err(error));
+            }
+        }
+    }
+
+    fn apply_services(&mut self, value: &Value) {
+        let services = value.get("services").unwrap_or(value);
+        let snowluma = services
+            .get("snowluma")
+            .ok_or_else(|| "Core 返回的 SnowLuma 状态缺失。".to_owned())
+            .and_then(parse_service_snapshot);
+        let dsh = services
+            .get("dsh")
+            .ok_or_else(|| "Core 返回的 DSH 状态缺失。".to_owned())
+            .and_then(parse_service_snapshot);
+        match (snowluma, dsh) {
+            (Ok(snowluma), Ok(dsh)) => {
+                self.services_snowluma = snowluma;
+                self.services_dsh = dsh;
+                self.services_loaded = true;
+                self.reconcile_selected_install(ServiceKind::SnowLuma);
+                self.reconcile_selected_install(ServiceKind::Dsh);
+            }
+            (Err(error), _) | (_, Err(error)) => {
+                self.feedback.insert(Area::Services, Err(error));
+            }
+        }
+    }
+
+    fn apply_service(&mut self, service: ServiceKind, value: &Value) {
+        let snapshot_value = value.get("service").unwrap_or(value);
+        let result = parse_service_snapshot(snapshot_value);
+        match result {
+            Ok(snapshot) => {
+                match service {
+                    ServiceKind::SnowLuma => self.services_snowluma = snapshot,
+                    ServiceKind::Dsh => self.services_dsh = snapshot,
+                }
+                self.reconcile_selected_install(service);
+                self.services_loaded = true;
+            }
+            Err(error) => {
+                self.feedback.insert(Area::Services, Err(error));
+            }
+        }
+    }
+
+    fn apply_model_catalog(&mut self, value: &Value) {
+        match parse_model_catalog(value) {
+            Ok(models) => {
+                self.model_catalog = models;
+                self.model_catalog_loaded = true;
+            }
+            Err(error) => {
+                self.feedback.insert(Area::ModelCatalog, Err(error));
+            }
+        }
+    }
+
+    fn apply_model_defaults(&mut self, value: &Value) {
+        match parse_model_defaults(value) {
+            Ok(defaults) => {
+                self.model_defaults = defaults;
+                self.model_defaults_loaded = true;
+            }
+            Err(error) => {
+                self.feedback.insert(Area::ModelDefaults, Err(error));
+            }
+        }
+    }
+
+    fn apply_preset_list(&mut self, value: &Value) {
+        match parse_preset_list(value) {
+            Ok(presets) => {
+                self.presets = presets;
+                self.preset_list_loaded = true;
+                self.reconcile_preset_selections();
+            }
+            Err(error) => {
+                self.feedback.insert(Area::PresetList, Err(error));
+            }
+        }
+    }
+
+    fn apply_preset_bindings(&mut self, value: &Value) {
+        match parse_preset_bindings(value) {
+            Ok(bindings) => {
+                self.preset_bindings = bindings;
+                self.preset_bindings_loaded = true;
+                self.reconcile_preset_selections();
+            }
+            Err(error) => {
+                self.feedback.insert(Area::PresetBindings, Err(error));
+            }
+        }
+    }
+
+    fn apply_pending(&mut self, value: &Value) {
+        match parse_pending(value) {
+            Ok(items) => {
+                self.pending_items = items;
+                self.pending_loaded = true;
+            }
+            Err(error) => {
+                self.pending_loaded = false;
+                self.feedback.insert(Area::Pending, Err(error));
+            }
+        }
+    }
+
+    fn reconcile_preset_selections(&mut self) {
+        for target in PRESET_TARGETS {
+            let selected = self.preset_selection.get(target);
+            if self.presets.iter().any(|preset| preset.id == selected) && !selected.is_empty() {
+                continue;
+            }
+            let current = self.preset_bindings.get(target).unwrap_or_default();
+            *self.preset_selection.get_mut(target) =
+                if self.presets.iter().any(|preset| preset.id == current) {
+                    current.to_owned()
+                } else {
+                    String::new()
+                };
+        }
+    }
+
+    fn reconcile_selected_install(&mut self, service: ServiceKind) {
+        let (snapshot, selected) = match service {
+            ServiceKind::SnowLuma => (&self.services_snowluma, &mut self.selected_snowluma_install),
+            ServiceKind::Dsh => (&self.services_dsh, &mut self.selected_dsh_install),
+        };
+        if snapshot.has_selectable_install(selected) {
+            return;
+        }
+        *selected = snapshot
+            .selected_id
+            .as_ref()
+            .filter(|selected_id| snapshot.has_selectable_install(selected_id))
+            .or_else(|| {
+                snapshot
+                    .installations
+                    .iter()
+                    .find(|item| item.valid == Some(true))
+                    .map(|item| &item.id)
+            })
+            .cloned()
+            .unwrap_or_default();
+    }
+
+    fn apply_slang(&mut self, value: &Value) {
+        let config = value
+            .get("config")
+            .or_else(|| value.get("slang"))
+            .unwrap_or(value);
+        if let Some(enabled) = config.get("enabled").and_then(Value::as_bool) {
+            self.slang.enabled = enabled;
+        }
+        if let Some(number) = config.get("extractMinMessages").and_then(Value::as_u64) {
+            self.slang.extract_min_messages = number.to_string();
+        }
+        if let Some(number) = config.get("extractCooldownMs").and_then(Value::as_u64) {
+            self.slang.extract_cooldown_ms = number.to_string();
+        }
+        if let Some(number) = config.get("injectMax").and_then(Value::as_u64) {
+            self.slang.inject_max = number.to_string();
+        }
+        if let Some(enabled) = config.get("autoResearch").and_then(Value::as_bool) {
+            self.slang.auto_research = enabled;
+        }
+        if let Some(text) = config.get("learnerPreset").and_then(Value::as_str) {
+            self.slang.learner_preset = text.to_owned();
+        }
+        if let Some(text) = config.get("workspaceTitle").and_then(Value::as_str) {
+            self.slang.workspace_title = text.to_owned();
+        }
+        if let Some(values) = config.get("inferenceThresholds").and_then(Value::as_array) {
+            self.slang.inference_thresholds = values
+                .iter()
+                .filter_map(Value::as_u64)
+                .map(|number| number.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+        }
+        self.slang_loaded = true;
+    }
+
+    fn apply_sessions(&mut self, value: &Value) {
+        let mut sessions = Vec::new();
+        if let Some(items) = value.get("sessions").and_then(Value::as_array) {
+            for item in items {
+                let key = match item.get("key").and_then(Value::as_str) {
+                    Some(key) => key.to_owned(),
+                    None => continue,
+                };
+                let session_id = item
+                    .get("sessionId")
+                    .map(compact_value)
+                    .unwrap_or_else(|| "—".to_owned());
+                let owner = item.get("owner").and_then(Value::as_bool).unwrap_or(false);
+                sessions.push(SessionRow {
+                    key,
+                    session_id,
+                    owner,
+                });
+            }
+        }
+        self.sessions = sessions;
+    }
+
+    fn apply_activity(&mut self, value: &Value) {
+        match read_string_collection(
+            value,
+            "entries",
+            self.activity_limit.min(MAX_ACTIVITY_ITEMS),
+            "活动记录",
+        ) {
+            Ok(entries) => self.activity_entries = entries,
+            Err(error) => {
+                self.feedback.insert(Area::Activity, Err(error));
+            }
+        }
+    }
+
+    fn apply_logs(&mut self, value: &Value) {
+        match read_string_collection(value, "lines", self.log_limit.min(MAX_LOG_LINES), "日志") {
+            Ok(lines) => self.log_lines = lines,
+            Err(error) => {
+                self.feedback.insert(Area::Logs, Err(error));
+            }
+        }
+    }
+
+    fn show_header(&mut self, ui: &mut egui::Ui) {
+        let palette = native_palette();
+        egui::Frame::new()
+            .fill(palette.surface)
+            .stroke(egui::Stroke::new(1.0, palette.border))
+            .corner_radius(egui::CornerRadius::same(10))
+            .inner_margin(egui::Margin::symmetric(16, 12))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.heading(egui::RichText::new("WhaleBridge 原生控制台").strong());
+                    ui.add_space(12.0);
+                    let (status, color) = match self.core_online {
+                        Some(true) => ("Core 在线", palette.success),
+                        Some(false) => ("Core 不可用", palette.error),
+                        None => ("Core 状态未知", palette.warning),
+                    };
+                    ui.label(egui::RichText::new(status).color(color).strong());
+                });
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(
+                        "纯原生界面：不启动浏览器或 WebView；管理请求通过本机 IPC 发送。",
+                    )
+                    .color(palette.muted),
+                );
+                ui.add_space(10.0);
+                egui::ScrollArea::horizontal()
+                    .id_salt("native_tabs_scroll")
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            self.tab_button(ui, Tab::Overview, "概览");
+                            self.tab_button(ui, Tab::Roles, "角色");
+                            self.tab_button(ui, Tab::Policy, "运行策略");
+                            self.tab_button(ui, Tab::Services, "本地服务");
+                            self.tab_button(ui, Tab::ModelsPresets, "模型与 Preset");
+                            self.tab_button(ui, Tab::Pending, "审批 / 提问");
+                            self.tab_button(ui, Tab::Security, "安全");
+                            self.tab_button(ui, Tab::Slang, "黑话配置");
+                            self.tab_button(ui, Tab::Sessions, "会话");
+                            self.tab_button(ui, Tab::Activity, "活动记录");
+                            self.tab_button(ui, Tab::Logs, "日志");
+                            self.tab_button(ui, Tab::Diagnostics, "诊断");
+                        });
+                    });
+            });
+        ui.add_space(12.0);
+    }
+
+    fn tab_button(&mut self, ui: &mut egui::Ui, tab: Tab, label: &str) {
+        let palette = native_palette();
+        let active = self.active_tab == tab;
+        let text_color = if active { palette.text } else { palette.muted };
+        let response = ui.add(
+            egui::Button::new(egui::RichText::new(label).color(text_color))
+                .selected(active)
+                .frame(true),
+        );
+        if response.clicked() {
+            self.active_tab = tab;
+        }
+    }
+
+    fn show_overview(&mut self, ui: &mut egui::Ui) {
+        let palette = native_palette();
+        ui.heading("运行概览");
+        ui.horizontal(|ui| {
+            ui.label("监管状态：");
+            let status = self.supervisor.status();
+            match &status {
+                Status::Ready { .. } => ui.colored_label(palette.success, status.summary()),
+                Status::Stopped { .. } | Status::GivenUp { .. } => {
+                    ui.colored_label(palette.error, status.summary())
+                }
+                _ => ui.label(status.summary()),
+            };
+            if self.button(ui, Area::Overview, "重新检查") {
+                self.issue(Area::Overview, Operation::OverviewPing, ApiCall::Ping);
+            }
+            if ui.button("重启桥接").clicked() {
+                self.supervisor.request_restart();
+            }
+        });
+        if let Some(pid) = self.supervisor.child_pid() {
+            ui.label(format!("Core PID：{pid}"));
+        }
+        ui.label(format!("IPC：{}", self.core_summary));
+        ui.label("管理流量使用当前桌面实例的本机命名管道；后台兼容 API 仅用于 DSH/MCP 数据面。");
+        self.show_feedback(ui, Area::Overview);
+    }
+
+    fn show_roles(&mut self, ui: &mut egui::Ui) {
+        ui.heading("角色管理");
+        ui.horizontal(|ui| {
+            if self.button(ui, Area::Roles, "刷新角色") {
+                self.issue_control(Area::Roles, Operation::RolesRefresh, "role.list", json!({}));
+            }
+            ui.label(format!("共 {} 个角色", self.roles.len()));
+        });
+        ui.horizontal(|ui| {
+            ui.label("当前角色：");
+            ui.label(self.current_role.as_deref().unwrap_or("未指定"));
+        });
+        if self.roles.is_empty() {
+            ui.weak("暂无角色或尚未读取角色列表。");
+        } else {
+            egui::ComboBox::from_label("选择角色")
+                .selected_text(if self.selected_role.is_empty() {
+                    "请选择"
+                } else {
+                    self.selected_role.as_str()
+                })
+                .show_ui(ui, |ui| {
+                    for name in &self.roles {
+                        ui.selectable_value(&mut self.selected_role, name.clone(), name.as_str());
+                    }
+                });
+        }
+        ui.horizontal(|ui| {
+            if self.button(ui, Area::Roles, "设为当前角色") {
+                if !self.selected_role.trim().is_empty() {
+                    self.issue_control(
+                        Area::Roles,
+                        Operation::RoleSet,
+                        "role.set",
+                        json!({ "role": self.selected_role.trim() }),
+                    );
+                }
+            }
+            if self.button(ui, Area::Roles, "清除当前角色") {
+                self.issue_control(
+                    Area::Roles,
+                    Operation::RoleSet,
+                    "role.set",
+                    json!({ "role": null }),
+                );
+            }
+        });
+
+        ui.separator();
+        ui.label("默认模式");
+        ui.horizontal(|ui| {
+            ui.label(match self.role_mode.as_str() {
+                "active" => "当前值：活跃",
+                "silent" => "当前值：静默",
+                _ => "当前值：未读取，请选择后保存",
+            });
+            ui.radio_value(&mut self.role_mode, "active".to_owned(), "活跃");
+            ui.radio_value(&mut self.role_mode, "silent".to_owned(), "静默");
+            let valid_mode = self.role_mode == "active" || self.role_mode == "silent";
+            let response = ui.add_enabled(
+                valid_mode && !self.pending.contains(&Area::Roles),
+                egui::Button::new("保存模式"),
+            );
+            if response.clicked() {
+                self.issue_control(
+                    Area::Roles,
+                    Operation::RoleMode,
+                    "role.setMode",
+                    json!({ "mode": self.role_mode }),
+                );
+            }
+        });
+
+        ui.separator();
+        ui.label("新建角色");
+        ui.horizontal(|ui| {
+            ui.label("名称");
+            ui.text_edit_singleline(&mut self.new_role_name);
+        });
+        ui.label("内容");
+        ui.add(
+            egui::TextEdit::multiline(&mut self.new_role_content)
+                .desired_rows(5)
+                .hint_text("输入角色说明"),
+        );
+        if self.button(ui, Area::Roles, "创建角色") {
+            let name = self.new_role_name.trim();
+            let content = self.new_role_content.trim();
+            if name.is_empty() || content.is_empty() {
+                self.feedback
+                    .insert(Area::Roles, Err("角色名称和内容都不能为空。".to_owned()));
+            } else {
+                self.issue_control(
+                    Area::Roles,
+                    Operation::RoleCreate,
+                    "role.create",
+                    json!({ "name": name, "content": content }),
+                );
+            }
+        }
+        self.show_feedback(ui, Area::Roles);
+    }
+
+    fn show_security(&mut self, ui: &mut egui::Ui) {
+        ui.heading("安全设置");
+        ui.label("通知拦截设置。更改后会由 Core 写入配置并更新当前进程行为。");
+        ui.horizontal(|ui| {
+            if self.button(ui, Area::Security, "重新读取") {
+                self.issue_control(
+                    Area::Security,
+                    Operation::SecurityLoad,
+                    "security.get",
+                    json!({}),
+                );
+            }
+            if !self.security_loaded {
+                ui.weak("尚未读取当前值");
+            }
+        });
+        ui.checkbox(&mut self.intercept_notify, "拦截通知");
+        let can_save = self.security_loaded && !self.pending.contains(&Area::Security);
+        if ui
+            .add_enabled(can_save, egui::Button::new("保存安全设置"))
+            .clicked()
+        {
+            self.issue_control(
+                Area::Security,
+                Operation::SecuritySave,
+                "security.update",
+                json!({ "interceptNotify": self.intercept_notify }),
+            );
+        }
+        self.show_feedback(ui, Area::Security);
+    }
+
+    fn show_policy(&mut self, ui: &mut egui::Ui) {
+        ui.heading("运行策略");
+        ui.label("管理全局运行模式、私聊/群聊白名单与黑名单，以及管理员 QQ。保存仅提交这些明确列出的字段。");
+        ui.horizontal(|ui| {
+            if self.button(ui, Area::Policy, "重新读取") {
+                self.issue_control(Area::Policy, Operation::PolicyLoad, "policy.get", json!({}));
+            }
+            if !self.policy_loaded {
+                ui.weak("尚未读取 Core 当前策略，读取前不能保存。");
+            }
+        });
+        egui::Grid::new("policy_config_grid")
+            .num_columns(2)
+            .spacing([12.0, 8.0])
+            .show(ui, |ui| {
+                ui.label("运行模式");
+                egui::ComboBox::from_id_salt("policy_mode")
+                    .selected_text(self.policy.mode.as_str())
+                    .show_ui(ui, |ui| {
+                        for mode in ["chat", "closed-agent", "reserved", "reserved2"] {
+                            ui.selectable_value(&mut self.policy.mode, mode.to_owned(), mode);
+                        }
+                    });
+                ui.end_row();
+                ui.label("私聊白名单");
+                ui.add(egui::TextEdit::multiline(&mut self.policy.allow_private).desired_rows(2));
+                ui.end_row();
+                ui.label("群白名单");
+                ui.add(egui::TextEdit::multiline(&mut self.policy.allow_groups).desired_rows(2));
+                ui.end_row();
+                ui.label("私聊黑名单");
+                ui.add(egui::TextEdit::multiline(&mut self.policy.deny_private).desired_rows(2));
+                ui.end_row();
+                ui.label("群黑名单");
+                ui.add(egui::TextEdit::multiline(&mut self.policy.deny_groups).desired_rows(2));
+                ui.end_row();
+                ui.label("管理员 QQ（留空清除）");
+                ui.text_edit_singleline(&mut self.policy.owner_qq);
+                ui.end_row();
+            });
+        ui.weak("QQ 号使用正整数，多个值以逗号、空格或换行分隔；黑名单优先于白名单。");
+
+        let can_save = self.policy_loaded
+            && !self.pending.contains(&Area::Policy)
+            && self.policy_confirmation.is_none();
+        if ui
+            .add_enabled(can_save, egui::Button::new("应用运行策略"))
+            .clicked()
+        {
+            let mode_changed =
+                self.loaded_policy_mode.as_deref() != Some(self.policy.mode.as_str());
+            match self.policy.params(mode_changed) {
+                Ok(params) => {
+                    if mode_changed {
+                        self.policy_confirmation = Some(params);
+                    } else {
+                        self.issue_control(
+                            Area::Policy,
+                            Operation::PolicySave,
+                            "policy.update",
+                            params,
+                        );
+                    }
+                }
+                Err(error) => {
+                    self.feedback.insert(Area::Policy, Err(error));
+                }
+            }
+        }
+
+        if self.policy_confirmation.is_some() {
+            let mut open = true;
+            let mut decision = None;
+            egui::Window::new("确认切换运行模式")
+                .collapsible(false)
+                .resizable(false)
+                .open(&mut open)
+                .show(ui.ctx(), |ui| {
+                    ui.label("切换模式可能清理社交状态、待处理投递队列和定时器。是否确认应用本次模式及策略更改？");
+                    ui.horizontal(|ui| {
+                        if ui.button("确认应用").clicked() {
+                            decision = Some(true);
+                        }
+                        if ui.button("取消").clicked() {
+                            decision = Some(false);
+                        }
+                    });
+                });
+            if !open && decision.is_none() {
+                decision = Some(false);
+            }
+            match decision {
+                Some(true) => {
+                    if let Some(params) = self.policy_confirmation.take() {
+                        self.issue_control(
+                            Area::Policy,
+                            Operation::PolicySave,
+                            "policy.update",
+                            params,
+                        );
+                    }
+                }
+                Some(false) => {
+                    self.policy_confirmation = None;
+                }
+                None => {}
+            }
+        }
+        self.show_feedback(ui, Area::Policy);
+    }
+
+    fn show_services(&mut self, ui: &mut egui::Ui) {
+        ui.heading("本地服务");
+        ui.label("通过本机 Core IPC 查看和控制 SnowLuma、DSH。安装项由 Core 检测返回；此页不接受命令、URL 或路径输入。");
+        ui.horizontal(|ui| {
+            if self.button(ui, Area::Services, "刷新状态") {
+                self.issue_control(
+                    Area::Services,
+                    Operation::ServicesRefresh,
+                    "services.get",
+                    json!({}),
+                );
+            }
+            if self.button(ui, Area::Services, "检测安装项") {
+                self.issue_control(
+                    Area::Services,
+                    Operation::ServicesDetect,
+                    "services.detect",
+                    json!({}),
+                );
+            }
+            if !self.services_loaded {
+                ui.weak("尚未读取服务状态。");
+            }
+        });
+        ui.separator();
+        self.show_service_card(ui, ServiceKind::SnowLuma);
+        ui.separator();
+        self.show_service_card(ui, ServiceKind::Dsh);
+
+        if let Some(action) = self.service_confirmation {
+            let mut open = true;
+            let mut decision = None;
+            egui::Window::new("确认本地服务操作")
+                .collapsible(false)
+                .resizable(false)
+                .open(&mut open)
+                .show(ui.ctx(), |ui| {
+                    ui.label(service_confirmation_text(action));
+                    ui.horizontal(|ui| {
+                        if ui.button("确认操作").clicked() {
+                            decision = Some(true);
+                        }
+                        if ui.button("取消").clicked() {
+                            decision = Some(false);
+                        }
+                    });
+                });
+            if !open && decision.is_none() {
+                decision = Some(false);
+            }
+            match decision {
+                Some(true) => {
+                    self.service_confirmation = None;
+                    self.issue_service_action(action);
+                }
+                Some(false) => self.service_confirmation = None,
+                None => {}
+            }
+        }
+        self.show_service_feedback(ui);
+    }
+
+    fn show_models_presets(&mut self, ui: &mut egui::Ui) {
+        ui.heading("模型与 Preset");
+        ui.label("模型只从 Core 返回的 catalog 选择；默认模型更改只影响未来新建会话，不会传递 secret 或 settings 全文。");
+        ui.separator();
+
+        ui.heading("默认模型");
+        ui.horizontal_wrapped(|ui| {
+            if self.button(ui, Area::ModelCatalog, "刷新模型目录") {
+                self.issue_control(
+                    Area::ModelCatalog,
+                    Operation::ModelCatalogLoad,
+                    "model.catalog.list",
+                    json!({}),
+                );
+            }
+            if self.button(ui, Area::ModelDefaults, "重新读取默认值") {
+                self.issue_control(
+                    Area::ModelDefaults,
+                    Operation::ModelDefaultsLoad,
+                    "model.defaults.get",
+                    json!({}),
+                );
+            }
+            if !self.model_defaults_loaded {
+                ui.weak("尚未读取当前默认值。");
+            }
+            if !self.model_catalog_loaded {
+                ui.weak("尚未读取模型目录。");
+            }
+        });
+
+        if self.model_catalog.is_empty() {
+            ui.weak("Core 暂未返回可选模型。请检查 provider 配置后刷新目录。");
+        } else {
+            let selected_text = model_entry_label(self.model_catalog.iter().find(|entry| {
+                entry.provider == self.model_defaults.provider
+                    && entry.model == self.model_defaults.model
+            }))
+            .unwrap_or_else(|| "请选择目录中的模型".to_owned());
+            let catalog = self.model_catalog.clone();
+            egui::ComboBox::from_id_salt("native_model_default_choice")
+                .selected_text(selected_text)
+                .show_ui(ui, |ui| {
+                    for entry in catalog {
+                        let label = model_entry_label(Some(&entry)).unwrap_or_default();
+                        let is_selected = self.model_defaults.provider == entry.provider
+                            && self.model_defaults.model == entry.model;
+                        if ui.selectable_label(is_selected, label).clicked() {
+                            self.model_defaults.provider = entry.provider;
+                            self.model_defaults.model = entry.model;
+                        }
+                    }
+                });
+        }
+        if self.model_defaults_loaded
+            && !self.model_catalog.iter().any(|entry| {
+                entry.provider == self.model_defaults.provider
+                    && entry.model == self.model_defaults.model
+            })
+        {
+            ui.colored_label(
+                native_palette().warning,
+                "当前默认模型不在 catalog 中；请选择目录项后才能保存。",
+            );
+        }
+
+        ui.horizontal(|ui| {
+            ui.label("推理强度");
+            egui::ComboBox::from_id_salt("native_model_reasoning_effort")
+                .selected_text(
+                    if is_supported_reasoning_effort(&self.model_defaults.reasoning_effort) {
+                        self.model_defaults.reasoning_effort.as_str()
+                    } else {
+                        "请选择支持的强度"
+                    },
+                )
+                .show_ui(ui, |ui| {
+                    for effort in MODEL_REASONING_EFFORTS {
+                        ui.selectable_value(
+                            &mut self.model_defaults.reasoning_effort,
+                            effort.to_owned(),
+                            effort,
+                        );
+                    }
+                });
+        });
+        if self.model_defaults_loaded
+            && !is_supported_reasoning_effort(&self.model_defaults.reasoning_effort)
+        {
+            ui.colored_label(
+                native_palette().warning,
+                format!(
+                    "当前推理强度 {:?} 不受支持；请选择 off、low、high 或 max 后保存。",
+                    self.model_defaults.reasoning_effort
+                ),
+            );
+        }
+
+        let model_is_catalogued = self.model_catalog.iter().any(|entry| {
+            entry.provider == self.model_defaults.provider
+                && entry.model == self.model_defaults.model
+        });
+        let can_save_defaults = self.model_catalog_loaded
+            && self.model_defaults_loaded
+            && model_is_catalogued
+            && is_supported_reasoning_effort(&self.model_defaults.reasoning_effort)
+            && !self.pending.contains(&Area::ModelDefaults);
+        if ui
+            .add_enabled(can_save_defaults, egui::Button::new("保存默认模型"))
+            .clicked()
+        {
+            match model_defaults_payload(&self.model_defaults, &self.model_catalog) {
+                Ok(params) => self.issue_control(
+                    Area::ModelDefaults,
+                    Operation::ModelDefaultsSave,
+                    "model.defaults.update",
+                    params,
+                ),
+                Err(error) => {
+                    self.feedback.insert(Area::ModelDefaults, Err(error));
+                }
+            }
+        }
+        self.show_read_status(ui, Area::ModelCatalog);
+        self.show_read_status(ui, Area::ModelDefaults);
+        if let Some(notice) = self.model_notice.as_deref() {
+            ui.weak(notice);
+        }
+
+        ui.separator();
+        ui.heading("Preset 綁定");
+        ui.label("目標與 Preset ID 均受白名單限制；只提交当前目标与所选 Preset ID，不传递 secret/settings 全文。");
+        ui.horizontal_wrapped(|ui| {
+            if self.button(ui, Area::PresetList, "刷新 Preset 列表") {
+                self.issue_control(
+                    Area::PresetList,
+                    Operation::PresetListLoad,
+                    "preset.list",
+                    json!({}),
+                );
+            }
+            if self.button(ui, Area::PresetBindings, "重新读取绑定") {
+                self.issue_control(
+                    Area::PresetBindings,
+                    Operation::PresetBindingsLoad,
+                    "preset.bindings.get",
+                    json!({}),
+                );
+            }
+            if !self.preset_list_loaded {
+                ui.weak("尚未读取 Preset 列表。");
+            }
+            if !self.preset_bindings_loaded {
+                ui.weak("尚未读取当前绑定。");
+            }
+        });
+        if self.presets.is_empty() {
+            ui.weak("Core 未返回可选 Preset；列表为空时不能提交绑定。");
+        }
+        for target in PRESET_TARGETS {
+            self.show_preset_target(ui, target);
+        }
+        self.show_read_status(ui, Area::PresetList);
+        self.show_read_status(ui, Area::PresetBindings);
+        if let Some(notice) = self.preset_notice.as_deref() {
+            ui.weak(notice);
+        }
+    }
+
+    fn show_preset_target(&mut self, ui: &mut egui::Ui, target: PresetTarget) {
+        let mut selected_id = self.preset_selection.get(target).to_owned();
+        let current_id = self
+            .preset_bindings
+            .get(target)
+            .unwrap_or_default()
+            .to_owned();
+        let current = if current_id.is_empty() {
+            "未绑定".to_owned()
+        } else if self.presets.iter().any(|preset| preset.id == current_id) {
+            format!("当前绑定：{current_id}")
+        } else {
+            format!("当前绑定：{current_id}（不在当前列表中）")
+        };
+
+        ui.horizontal_wrapped(|ui| {
+            ui.label(target.label());
+            ui.weak(current);
+            let selected_text =
+                preset_entry_label(self.presets.iter().find(|preset| preset.id == selected_id))
+                    .unwrap_or_else(|| "请选择列表中的 Preset".to_owned());
+            let presets = self.presets.clone();
+            egui::ComboBox::from_id_salt(format!("native_preset_{}", target.as_str()))
+                .selected_text(selected_text)
+                .show_ui(ui, |ui| {
+                    for preset in presets {
+                        let label = preset_entry_label(Some(&preset)).unwrap_or_default();
+                        ui.selectable_value(&mut selected_id, preset.id, label);
+                    }
+                });
+            *self.preset_selection.get_mut(target) = selected_id.clone();
+
+            let can_save = self.preset_list_loaded
+                && self.preset_bindings_loaded
+                && self.presets.iter().any(|preset| preset.id == selected_id)
+                && !self.pending.contains(&Area::PresetBindings);
+            if ui
+                .add_enabled(can_save, egui::Button::new("保存绑定"))
+                .clicked()
+            {
+                match preset_binding_payload(target.as_str(), &selected_id, &self.presets) {
+                    Ok(params) => self.issue_control(
+                        Area::PresetBindings,
+                        Operation::PresetBindingSave(target),
+                        "preset.bindings.update",
+                        params,
+                    ),
+                    Err(error) => {
+                        self.feedback.insert(Area::PresetBindings, Err(error));
+                    }
+                }
+            }
+        });
+    }
+
+    fn show_service_card(&mut self, ui: &mut egui::Ui, service: ServiceKind) {
+        let snapshot = self.service_snapshot(service).clone();
+        let selected_id = self.selected_install_id(service).to_owned();
+        ui.heading(service.label());
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!("安装：{}", bool_status(snapshot.installed)));
+            ui.label(format!("运行：{}", bool_status(snapshot.running)));
+            if let Some(status) = snapshot.status.as_deref() {
+                ui.label(format!("状态：{status}"));
+            }
+        });
+        if let Some(message) = snapshot.message.as_deref() {
+            ui.weak(message);
+        }
+
+        ui.label("Core 已发现的安装项");
+        if snapshot.installations.is_empty() {
+            ui.weak("没有已发现安装项；可重新检测。DSH 未安装时属于正常状态。");
+        } else {
+            let valid_installations = snapshot
+                .installations
+                .iter()
+                .filter(|item| item.valid == Some(true))
+                .collect::<Vec<_>>();
+            if valid_installations.is_empty() {
+                ui.weak("检测到了安装记录，但 Core 未将其标记为可用，因此不能选择。");
+                for item in &snapshot.installations {
+                    ui.weak(install_label(item));
+                }
+            } else {
+                let mut selected_id = selected_id;
+                egui::ComboBox::from_id_salt(format!("service_install_{}", service.as_str()))
+                    .selected_text(selected_install_label(&snapshot, &selected_id))
+                    .show_ui(ui, |ui| {
+                        for item in &valid_installations {
+                            ui.selectable_value(
+                                &mut selected_id,
+                                item.id.clone(),
+                                install_label(item),
+                            );
+                        }
+                    });
+                if selected_id != self.selected_install_id(service) {
+                    *self.selected_install_id_mut(service) = selected_id.clone();
+                }
+                let response = ui.add_enabled(
+                    valid_installations
+                        .iter()
+                        .any(|item| item.id == selected_id)
+                        && !self.pending.contains(&Area::Services),
+                    egui::Button::new("选择此安装项"),
+                );
+                if response.clicked() {
+                    self.select_detected_install(service, &selected_id);
+                }
+            }
+        }
+
+        ui.horizontal_wrapped(|ui| {
+            if service == ServiceKind::SnowLuma {
+                let can_install =
+                    snapshot.installed != Some(true) && !self.pending.contains(&Area::Services);
+                if ui
+                    .add_enabled(can_install, egui::Button::new("安装 SnowLuma…"))
+                    .clicked()
+                {
+                    self.service_confirmation = Some(ServiceAction::InstallSnowLuma);
+                }
+            }
+            let can_start = snapshot.installed != Some(false)
+                && snapshot.running != Some(true)
+                && !self.pending.contains(&Area::Services);
+            if ui
+                .add_enabled(
+                    can_start,
+                    egui::Button::new(format!("启动 {}…", service.label())),
+                )
+                .clicked()
+            {
+                self.service_confirmation = Some(ServiceAction::Start(service));
+            }
+            let can_stop =
+                snapshot.running == Some(true) && !self.pending.contains(&Area::Services);
+            if ui
+                .add_enabled(
+                    can_stop,
+                    egui::Button::new(format!("停止 {}…", service.label())),
+                )
+                .clicked()
+            {
+                self.service_confirmation = Some(ServiceAction::Stop(service));
+            }
+        });
+    }
+
+    fn select_detected_install(&mut self, service: ServiceKind, id: &str) {
+        let is_detected = self.service_snapshot(service).has_selectable_install(id);
+        if !is_detected {
+            self.feedback.insert(
+                Area::Services,
+                Err("只能选择 Core 已发现的本地安装项。".to_owned()),
+            );
+            return;
+        }
+        self.issue_control(
+            Area::Services,
+            Operation::ServiceSelect(service),
+            "services.select",
+            json!({ "service": service.as_str(), "id": id }),
+        );
+    }
+
+    fn issue_service_action(&mut self, action: ServiceAction) {
+        let (operation, method, params) = match action {
+            ServiceAction::InstallSnowLuma => (
+                Operation::ServiceInstallSnowLuma,
+                "services.installSnowLuma",
+                json!({}),
+            ),
+            ServiceAction::Start(service) => (
+                Operation::ServiceStart(service),
+                "services.start",
+                json!({ "service": service.as_str() }),
+            ),
+            ServiceAction::Stop(service) => (
+                Operation::ServiceStop(service),
+                "services.stop",
+                json!({ "service": service.as_str() }),
+            ),
+        };
+        self.issue_control(Area::Services, operation, method, params);
+    }
+
+    fn service_snapshot(&self, service: ServiceKind) -> &ServiceSnapshot {
+        match service {
+            ServiceKind::SnowLuma => &self.services_snowluma,
+            ServiceKind::Dsh => &self.services_dsh,
+        }
+    }
+
+    fn selected_install_id(&self, service: ServiceKind) -> &str {
+        match service {
+            ServiceKind::SnowLuma => &self.selected_snowluma_install,
+            ServiceKind::Dsh => &self.selected_dsh_install,
+        }
+    }
+
+    fn selected_install_id_mut(&mut self, service: ServiceKind) -> &mut String {
+        match service {
+            ServiceKind::SnowLuma => &mut self.selected_snowluma_install,
+            ServiceKind::Dsh => &mut self.selected_dsh_install,
+        }
+    }
+
+    fn show_slang(&mut self, ui: &mut egui::Ui) {
+        ui.heading("黑话学习配置");
+        ui.label("读取和保存均经本机 IPC；读取使用只读命令 slang.getConfig。");
+        ui.horizontal(|ui| {
+            if self.button(ui, Area::Slang, "重新读取") {
+                self.issue_control(
+                    Area::Slang,
+                    Operation::SlangLoad,
+                    "slang.getConfig",
+                    json!({}),
+                );
+            }
+            if !self.slang_loaded {
+                ui.weak("尚未读取当前值，显示的是可编辑默认值。");
+            }
+        });
+        ui.checkbox(&mut self.slang.enabled, "启用黑话学习");
+        ui.checkbox(&mut self.slang.auto_research, "自动研究候选");
+        egui::Grid::new("slang_config_grid")
+            .num_columns(2)
+            .spacing([12.0, 8.0])
+            .show(ui, |ui| {
+                ui.label("提取最少消息数");
+                ui.text_edit_singleline(&mut self.slang.extract_min_messages);
+                ui.end_row();
+                ui.label("提取冷却（毫秒）");
+                ui.text_edit_singleline(&mut self.slang.extract_cooldown_ms);
+                ui.end_row();
+                ui.label("注入上限");
+                ui.text_edit_singleline(&mut self.slang.inject_max);
+                ui.end_row();
+                ui.label("学习 Preset");
+                ui.text_edit_singleline(&mut self.slang.learner_preset);
+                ui.end_row();
+                ui.label("工作区标题");
+                ui.text_edit_singleline(&mut self.slang.workspace_title);
+                ui.end_row();
+                ui.label("推断阈值（逗号分隔）");
+                ui.text_edit_singleline(&mut self.slang.inference_thresholds);
+                ui.end_row();
+            });
+        let can_save = self.slang_loaded && !self.pending.contains(&Area::Slang);
+        if ui
+            .add_enabled(can_save, egui::Button::new("保存黑话配置"))
+            .clicked()
+        {
+            match self.slang_params() {
+                Ok(params) => self.issue_control(
+                    Area::Slang,
+                    Operation::SlangSave,
+                    "slang.updateConfig",
+                    params,
+                ),
+                Err(error) => {
+                    self.feedback.insert(Area::Slang, Err(error));
+                }
+            }
+        }
+        self.show_feedback(ui, Area::Slang);
+    }
+
+    fn slang_params(&self) -> Result<Value, String> {
+        let extract_min_messages = parse_number("最少消息数", &self.slang.extract_min_messages)?;
+        let extract_cooldown_ms = parse_number("提取冷却", &self.slang.extract_cooldown_ms)?;
+        let inject_max = parse_number("注入上限", &self.slang.inject_max)?;
+        let mut thresholds = Vec::new();
+        for part in self
+            .slang
+            .inference_thresholds
+            .split(|character: char| {
+                character == ',' || character == '，' || character.is_whitespace()
+            })
+            .filter(|part| !part.trim().is_empty())
+        {
+            thresholds.push(parse_number("推断阈值", part.trim())?);
+        }
+        if thresholds.is_empty() {
+            return Err("至少填写一个推断阈值。".to_owned());
+        }
+        Ok(json!({
+            "enabled": self.slang.enabled,
+            "extractMinMessages": extract_min_messages,
+            "extractCooldownMs": extract_cooldown_ms,
+            "injectMax": inject_max,
+            "autoResearch": self.slang.auto_research,
+            "learnerPreset": self.slang.learner_preset.trim(),
+            "workspaceTitle": self.slang.workspace_title.trim(),
+            "inferenceThresholds": thresholds,
+        }))
+    }
+
+    fn show_sessions(&mut self, ui: &mut egui::Ui) {
+        ui.heading("会话映射");
+        ui.horizontal(|ui| {
+            if self.button(ui, Area::Sessions, "刷新会话") {
+                self.issue_control(
+                    Area::Sessions,
+                    Operation::SessionsRefresh,
+                    "session.list",
+                    json!({}),
+                );
+            }
+            ui.label(format!("共 {} 个会话", self.sessions.len()));
+        });
+        if self.sessions.is_empty() {
+            ui.weak("暂无会话映射。");
+        } else {
+            egui::Grid::new("sessions_grid")
+                .striped(true)
+                .num_columns(4)
+                .show(ui, |ui| {
+                    ui.strong("会话键");
+                    ui.strong("Session ID");
+                    ui.strong("所有者");
+                    ui.strong("社交状态");
+                    ui.end_row();
+                    let rows = self.sessions.clone();
+                    for session in rows {
+                        ui.label(session.key.as_str());
+                        ui.label(session.session_id.as_str());
+                        ui.label(if session.owner { "是" } else { "否" });
+                        ui.horizontal(|ui| {
+                            if self.button(ui, Area::Sessions, "活跃") {
+                                self.issue_control(
+                                    Area::Sessions,
+                                    Operation::SessionPhase,
+                                    "social.setPhase",
+                                    json!({ "key": session.key, "phase": "active" }),
+                                );
+                            }
+                            if self.button(ui, Area::Sessions, "休息") {
+                                self.issue_control(
+                                    Area::Sessions,
+                                    Operation::SessionPhase,
+                                    "social.setPhase",
+                                    json!({ "key": session.key, "phase": "idle" }),
+                                );
+                            }
+                        });
+                        ui.end_row();
+                    }
+                });
+        }
+        self.show_feedback(ui, Area::Sessions);
+    }
+
+    fn show_pending(&mut self, ui: &mut egui::Ui) {
+        ui.heading("审批 / 提问");
+        ui.label("通过本机 IPC 查看并处理 DSH 的提问、工具审批和风险卡片审批；不开放任意 RPC 或脚本入口。");
+        ui.horizontal(|ui| {
+            if self.button(ui, Area::Pending, "刷新挂起请求") {
+                self.issue_control(
+                    Area::Pending,
+                    Operation::PendingRefresh,
+                    "pending.list",
+                    json!({}),
+                );
+            }
+            ui.label(format!("{} 条待处理", self.pending_items.len()));
+        });
+
+        if !self.pending_loaded && !self.pending.contains(&Area::Pending) {
+            ui.weak("尚未读取挂起请求。");
+        } else if self.pending_items.is_empty() && !self.pending.contains(&Area::Pending) {
+            ui.weak("当前没有待处理的审批或提问。");
+        }
+
+        let rows = self.pending_items.clone();
+        for item in rows {
+            ui.group(|ui| {
+                let title = match item.kind.as_str() {
+                    "question" => "提问",
+                    "approval" => "工具审批",
+                    "card-approval" => "风险卡片审批",
+                    _ => "挂起请求",
+                };
+                ui.horizontal(|ui| {
+                    ui.strong(title);
+                    if !item.key.is_empty() {
+                        ui.weak(item.key.as_str());
+                    }
+                    if !item.status.is_empty() {
+                        ui.weak(format!("状态：{}", item.status));
+                    }
+                });
+                if !item.session_id.is_empty() {
+                    ui.weak(format!("Session：{}", item.session_id));
+                }
+                match item.kind.as_str() {
+                    "question" => {
+                        if !item.question.is_empty() {
+                            ui.label(item.question.as_str());
+                        }
+                        if !item.options.is_empty() {
+                            ui.weak(format!("选项：{}", item.options.join(" / ")));
+                        }
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.pending_answer)
+                                    .hint_text("输入回答或选项文字"),
+                            );
+                            let enabled = !self.pending.contains(&Area::Pending)
+                                && !self.pending_answer.trim().is_empty();
+                            if ui.add_enabled(enabled, egui::Button::new("提交回答")).clicked() {
+                                self.issue_control(
+                                    Area::Pending,
+                                    Operation::PendingDecision,
+                                    "pending.decide",
+                                    json!({
+                                        "kind": "question",
+                                        "key": item.key,
+                                        "answer": self.pending_answer.trim()
+                                    }),
+                                );
+                            }
+                        });
+                    }
+                    "approval" => {
+                        if !item.tool_name.is_empty() {
+                            ui.label(format!("工具：{}", item.tool_name));
+                        }
+                        if !item.reason.is_empty() {
+                            ui.label(format!("理由：{}", item.reason));
+                        }
+                        ui.horizontal(|ui| {
+                            let enabled = !self.pending.contains(&Area::Pending);
+                            if ui.add_enabled(enabled, egui::Button::new("通过")).clicked() {
+                                self.issue_control(
+                                    Area::Pending,
+                                    Operation::PendingDecision,
+                                    "pending.decide",
+                                    json!({ "kind": "approval", "key": item.key, "decision": "approve" }),
+                                );
+                            }
+                            if ui.add_enabled(enabled, egui::Button::new("拒绝")).clicked() {
+                                self.issue_control(
+                                    Area::Pending,
+                                    Operation::PendingDecision,
+                                    "pending.decide",
+                                    json!({ "kind": "approval", "key": item.key, "decision": "reject" }),
+                                );
+                            }
+                        });
+                    }
+                    "card-approval" => {
+                        if !item.card_title.is_empty() {
+                            ui.label(format!("卡片：{}", item.card_title));
+                        }
+                        if !item.button_label.is_empty() {
+                            ui.label(format!("按钮：{}", item.button_label));
+                        }
+                        if !item.risk_reasons.is_empty() {
+                            ui.weak(format!("风险：{}", item.risk_reasons.join("；")));
+                        }
+                        ui.horizontal(|ui| {
+                            let enabled = !self.pending.contains(&Area::Pending);
+                            if ui.add_enabled(enabled, egui::Button::new("批准执行")).clicked() {
+                                self.issue_control(
+                                    Area::Pending,
+                                    Operation::PendingDecision,
+                                    "pending.decide",
+                                    json!({ "kind": "card-approval", "id": item.id, "decision": "approve" }),
+                                );
+                            }
+                            if ui.add_enabled(enabled, egui::Button::new("拒绝")).clicked() {
+                                self.issue_control(
+                                    Area::Pending,
+                                    Operation::PendingDecision,
+                                    "pending.decide",
+                                    json!({ "kind": "card-approval", "id": item.id, "decision": "reject" }),
+                                );
+                            }
+                        });
+                    }
+                    _ => {}
+                }
+            });
+        }
+        if let Some(notice) = self.pending_notice.as_deref() {
+            ui.weak(notice);
+        }
+        self.show_feedback(ui, Area::Pending);
+    }
+
+    fn show_diagnostics(&mut self, ui: &mut egui::Ui) {
+        ui.heading("诊断");
+        ui.label("此页仅提供安全的只读检查提示，不提供任意命令或脚本执行入口。");
+        ui.separator();
+        ui.label("• 确认桌面壳已启动 Core，并检查窗口顶部的 IPC 在线状态。");
+        ui.label("• 若 Core 不可用，请检查本地服务进程、命名管道 ACL 和日志文件。");
+        ui.label("• 可在概览页重新执行 core.ping；本页不会读取或运行系统命令。");
+        if self.button(ui, Area::Diagnostics, "只读检查 Core 连接") {
+            self.issue(Area::Diagnostics, Operation::DiagnosticsPing, ApiCall::Ping);
+        }
+        ui.separator();
+        ui.label("只读诊断项（固定白名单）");
+        ui.horizontal_wrapped(|ui| {
+            ui.checkbox(&mut self.diagnostics_runtime, "运行状态");
+            ui.checkbox(&mut self.diagnostics_config, "配置摘要");
+            ui.checkbox(&mut self.diagnostics_paths, "路径检查");
+            ui.checkbox(&mut self.diagnostics_services, "服务检查");
+        });
+        let mut checks = Vec::new();
+        if self.diagnostics_runtime {
+            checks.push("runtime");
+        }
+        if self.diagnostics_config {
+            checks.push("config");
+        }
+        if self.diagnostics_paths {
+            checks.push("paths");
+        }
+        if self.diagnostics_services {
+            checks.push("services");
+        }
+        let can_run_checks = !checks.is_empty() && !self.pending.contains(&Area::Diagnostics);
+        if ui
+            .add_enabled(can_run_checks, egui::Button::new("运行选中检查"))
+            .clicked()
+        {
+            self.issue_control(
+                Area::Diagnostics,
+                Operation::DiagnosticsRun,
+                "diagnostics.run",
+                json!({ "checks": checks }),
+            );
+        }
+        self.show_feedback(ui, Area::Diagnostics);
+    }
+
+    fn show_activity(&mut self, ui: &mut egui::Ui) {
+        ui.heading("活动记录");
+        ui.label("只读查看最近的活动摘要；内容通过本机 IPC 获取，不执行命令。 ");
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt("activity_limit")
+                .selected_text(format!("{} 条", self.activity_limit))
+                .show_ui(ui, |ui| {
+                    for limit in ACTIVITY_LIMITS {
+                        ui.selectable_value(&mut self.activity_limit, limit, format!("{limit} 条"));
+                    }
+                });
+            if self.button(ui, Area::Activity, "刷新活动记录") {
+                self.issue_control(
+                    Area::Activity,
+                    Operation::ActivityRefresh,
+                    "activity.list",
+                    json!({ "limit": self.activity_limit }),
+                );
+            }
+            ui.label(format!("当前显示 {} 条", self.activity_entries.len()));
+        });
+        if self.activity_entries.is_empty() && !self.pending.contains(&Area::Activity) {
+            if self.area_failed(Area::Activity) {
+                ui.weak("活动记录读取失败，请检查 Core 连接后重试。");
+            } else {
+                ui.weak("暂无活动记录。");
+            }
+        } else {
+            egui::ScrollArea::vertical()
+                .id_salt("activity_entries_scroll")
+                .max_height(440.0)
+                .show(ui, |ui| {
+                    for (index, entry) in self.activity_entries.iter().enumerate() {
+                        ui.horizontal_top(|ui| {
+                            ui.weak(format!("{}.", index + 1));
+                            ui.label(entry);
+                        });
+                        ui.separator();
+                    }
+                });
+        }
+        self.show_read_status(ui, Area::Activity);
+    }
+
+    fn show_logs(&mut self, ui: &mut egui::Ui) {
+        ui.heading("本机日志");
+        ui.label("只读日志查看器；每次请求和显示内容都有数量与单行长度上限。 ");
+        ui.horizontal_wrapped(|ui| {
+            egui::ComboBox::from_id_salt("logs_source")
+                .selected_text(log_source_label(&self.log_source))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.log_source, "bridge".to_owned(), "桥接 Core");
+                    ui.selectable_value(&mut self.log_source, "worker".to_owned(), "Worker");
+                    ui.selectable_value(&mut self.log_source, "desktop".to_owned(), "桌面壳");
+                });
+            egui::ComboBox::from_id_salt("logs_limit")
+                .selected_text(format!("{} 行", self.log_limit))
+                .show_ui(ui, |ui| {
+                    for limit in LOG_LIMITS {
+                        ui.selectable_value(&mut self.log_limit, limit, format!("{limit} 行"));
+                    }
+                });
+            if self.button(ui, Area::Logs, "刷新日志") {
+                self.issue_control(
+                    Area::Logs,
+                    Operation::LogsRefresh,
+                    "logs.read",
+                    json!({ "source": self.log_source, "limit": self.log_limit }),
+                );
+            }
+            ui.label(format!(
+                "{}：{} 行",
+                log_source_label(&self.log_source),
+                self.log_lines.len()
+            ));
+        });
+        if self.log_lines.is_empty() && !self.pending.contains(&Area::Logs) {
+            if self.area_failed(Area::Logs) {
+                ui.weak("日志读取失败，请确认所选日志源可用后重试。");
+            } else {
+                ui.weak("所选日志源暂无内容。");
+            }
+        } else {
+            egui::ScrollArea::vertical()
+                .id_salt("logs_lines_scroll")
+                .max_height(500.0)
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    for line in &self.log_lines {
+                        ui.label(egui::RichText::new(line).monospace());
+                    }
+                });
+        }
+        self.show_read_status(ui, Area::Logs);
+    }
+
+    fn button(&self, ui: &mut egui::Ui, area: Area, label: &str) -> bool {
+        let response = ui.add_enabled(!self.pending.contains(&area), egui::Button::new(label));
+        response.clicked()
+    }
+
+    fn show_error_message(&self, ui: &mut egui::Ui, area: Area, error: &str) {
+        let palette = native_palette();
+        let hint = friendly_read_error(area, error);
+        egui::Frame::new()
+            .fill(palette.error_bg)
+            .stroke(egui::Stroke::new(1.0, palette.error))
+            .corner_radius(egui::CornerRadius::same(8))
+            .inner_margin(egui::Margin::symmetric(12, 9))
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        egui::RichText::new("处理失败")
+                            .color(palette.error)
+                            .strong(),
+                    );
+                    ui.label(egui::RichText::new(error).color(palette.text));
+                });
+                if let Some(hint) = hint {
+                    ui.label(egui::RichText::new(hint).color(palette.warning));
+                }
+            });
+    }
+
+    fn show_service_feedback(&self, ui: &mut egui::Ui) {
+        if self.pending.contains(&Area::Services) {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.weak("正在通过本机 IPC 处理服务请求…");
+            });
+        }
+        if let Some(Err(error)) = self.feedback.get(&Area::Services) {
+            self.show_error_message(ui, Area::Services, error);
+        } else if let Some(notice) = self.services_notice.as_deref() {
+            ui.weak(notice);
+        }
+    }
+
+    fn show_feedback(&self, ui: &mut egui::Ui, area: Area) {
+        if self.pending.contains(&area) {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.weak("正在通过本机 IPC 处理…");
+            });
+        }
+        if let Some(result) = self.feedback.get(&area) {
+            match result {
+                Ok(value) => {
+                    let summary = concise_result(value);
+                    if !summary.is_empty() {
+                        ui.label(egui::RichText::new(summary).color(native_palette().success));
+                    }
+                }
+                Err(error) => {
+                    self.show_error_message(ui, area, error);
+                }
+            }
+        }
+    }
+
+    fn show_read_status(&self, ui: &mut egui::Ui, area: Area) {
+        if self.pending.contains(&area) {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.weak("正在通过本机 IPC 读取…");
+            });
+        }
+        if let Some(Err(error)) = self.feedback.get(&area) {
+            self.show_error_message(ui, area, error);
+        } else if !self.pending.contains(&area) && self.feedback.contains_key(&area) {
+            ui.label(egui::RichText::new("读取完成。").color(native_palette().success));
+        }
+    }
+
+    fn area_failed(&self, area: Area) -> bool {
+        matches!(self.feedback.get(&area), Some(Err(_)))
+    }
+}
+
+impl eframe::App for NativeUi {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.receive_events();
+        self.maybe_refresh_pending();
+        let palette = native_palette();
+        egui::Frame::new()
+            .fill(palette.background)
+            .inner_margin(egui::Margin::symmetric(18, 14))
+            .show(ui, |ui| {
+                self.show_header(ui);
+                egui::ScrollArea::vertical()
+                    .id_salt("native_content_scroll")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        egui::Frame::new()
+                            .fill(palette.surface)
+                            .stroke(egui::Stroke::new(1.0, palette.border))
+                            .corner_radius(egui::CornerRadius::same(10))
+                            .inner_margin(egui::Margin::symmetric(18, 16))
+                            .show(ui, |ui| match self.active_tab {
+                                Tab::Overview => self.show_overview(ui),
+                                Tab::Roles => self.show_roles(ui),
+                                Tab::Policy => self.show_policy(ui),
+                                Tab::Services => self.show_services(ui),
+                                Tab::ModelsPresets => self.show_models_presets(ui),
+                                Tab::Pending => self.show_pending(ui),
+                                Tab::Security => self.show_security(ui),
+                                Tab::Slang => self.show_slang(ui),
+                                Tab::Sessions => self.show_sessions(ui),
+                                Tab::Activity => self.show_activity(ui),
+                                Tab::Logs => self.show_logs(ui),
+                                Tab::Diagnostics => self.show_diagnostics(ui),
+                            });
+                    });
+            });
+        ui.ctx().request_repaint_after(Duration::from_millis(500));
+    }
+}
+
+fn bounded_model_text(value: Option<&Value>, field: &str) -> Result<String, String> {
+    let text = value
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty() && text.len() <= 128 && !text.chars().any(char::is_control))
+        .ok_or_else(|| format!("Core 返回的 {field} 无效。"))?;
+    Ok(text.to_owned())
+}
+
+fn parse_model_catalog(value: &Value) -> Result<Vec<ModelEntry>, String> {
+    let items = value
+        .get("models")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "Core 返回的模型目录格式无效。".to_owned())?;
+    let mut seen = HashSet::new();
+    let mut models = Vec::with_capacity(items.len().min(500));
+    for item in items.iter().take(500) {
+        let provider = bounded_model_text(item.get("provider"), "provider")?;
+        let model = bounded_model_text(item.get("model"), "model")?;
+        let key = format!("{provider}\u{0000}{model}");
+        if !seen.insert(key) {
+            continue;
+        }
+        let image = item
+            .get("image")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| "Core 返回的模型目录缺少 image 标志。".to_owned())?;
+        models.push(ModelEntry {
+            provider,
+            model,
+            image,
+        });
+    }
+    Ok(models)
+}
+
+fn parse_model_defaults(value: &Value) -> Result<ModelDefaults, String> {
+    let defaults = value
+        .get("defaults")
+        .ok_or_else(|| "Core 返回的默认模型格式无效。".to_owned())?;
+    let provider = bounded_model_text(defaults.get("provider"), "provider")?;
+    let model = bounded_model_text(defaults.get("model"), "model")?;
+    let reasoning_effort = bounded_model_text(defaults.get("reasoningEffort"), "reasoningEffort")?;
+    Ok(ModelDefaults {
+        provider,
+        model,
+        reasoning_effort,
+    })
+}
+
+fn parse_preset_list(value: &Value) -> Result<Vec<PresetRecord>, String> {
+    let items = value
+        .get("presets")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "Core 返回的 Preset 列表格式无效。".to_owned())?;
+    let mut seen = HashSet::new();
+    let mut presets = Vec::with_capacity(items.len().min(500));
+    for item in items.iter().take(500) {
+        let id = bounded_model_text(item.get("id"), "Preset ID")?;
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        let trust = match item.get("trust") {
+            Some(Value::String(text)) => truncate_display_line(text.trim(), 80),
+            Some(value) if value.is_number() || value.is_boolean() => value.to_string(),
+            _ => "unknown".to_owned(),
+        };
+        presets.push(PresetRecord { id, trust });
+    }
+    Ok(presets)
+}
+
+fn parse_optional_preset(value: Option<&Value>, field: &str) -> Result<Option<String>, String> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) if text.trim().is_empty() => Ok(None),
+        Some(Value::String(_)) => bounded_model_text(value, field).map(Some),
+        _ => Err(format!("Core 返回的 {field} 无效。")),
+    }
+}
+
+fn parse_preset_bindings(value: &Value) -> Result<PresetBindings, String> {
+    let bindings = value
+        .get("bindings")
+        .ok_or_else(|| "Core 返回的 Preset 绑定格式无效。".to_owned())?;
+    Ok(PresetBindings {
+        chat: parse_optional_preset(bindings.get("chat"), "chat preset")?,
+        closed_agent: parse_optional_preset(bindings.get("closedAgent"), "closedAgent preset")?,
+        reserved2: parse_optional_preset(bindings.get("reserved2"), "reserved2 preset")?,
+        learner: parse_optional_preset(bindings.get("learner"), "learner preset")?,
+    })
+}
+
+fn parse_pending(value: &Value) -> Result<Vec<PendingItem>, String> {
+    let items = value
+        .get("pending")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "Core 返回的挂起请求格式无效。".to_owned())?;
+    let mut pending = Vec::with_capacity(items.len().min(100));
+    for item in items.iter().take(100) {
+        let Some(kind) = item.get("kind").and_then(Value::as_str) else {
+            continue;
+        };
+        if !["question", "approval", "card-approval"].contains(&kind) {
+            continue;
+        }
+        let text = |field: &str, max: usize| {
+            item.get(field)
+                .and_then(Value::as_str)
+                .map(|value| truncate_display_line(value.trim(), max))
+                .unwrap_or_default()
+        };
+        let mut entry = PendingItem {
+            kind: kind.to_owned(),
+            key: text("key", 256),
+            id: text("id", 128),
+            session_id: text("sessionId", 256),
+            tool_name: text("toolName", 256),
+            reason: text("reason", 2_000),
+            question: String::new(),
+            options: Vec::new(),
+            status: text("status", 80),
+            card_title: text("cardTitle", 240),
+            button_label: text("buttonLabel", 160),
+            risk_reasons: Vec::new(),
+        };
+        if kind == "question" {
+            if let Some(question) = item
+                .get("questions")
+                .and_then(Value::as_array)
+                .and_then(|questions| questions.first())
+            {
+                entry.question = question
+                    .get("question")
+                    .and_then(Value::as_str)
+                    .map(|value| truncate_display_line(value.trim(), 2_000))
+                    .unwrap_or_default();
+                if let Some(options) = question.get("options").and_then(Value::as_array) {
+                    entry.options = options
+                        .iter()
+                        .take(20)
+                        .filter_map(|option| option.get("label").and_then(Value::as_str))
+                        .map(|label| truncate_display_line(label.trim(), 256))
+                        .filter(|label| !label.is_empty())
+                        .collect();
+                }
+            }
+        } else if kind == "card-approval" {
+            if let Some(reasons) = item.get("riskReasons").and_then(Value::as_array) {
+                entry.risk_reasons = reasons
+                    .iter()
+                    .take(6)
+                    .filter_map(Value::as_str)
+                    .map(|reason| truncate_display_line(reason.trim(), 256))
+                    .filter(|reason| !reason.is_empty())
+                    .collect();
+            }
+        }
+        pending.push(entry);
+    }
+    Ok(pending)
+}
+
+fn model_entry_label(entry: Option<&ModelEntry>) -> Option<String> {
+    entry.map(|entry| {
+        format!(
+            "{}/{}{}",
+            entry.provider,
+            entry.model,
+            if entry.image { " · 图像" } else { "" }
+        )
+    })
+}
+
+fn is_supported_reasoning_effort(value: &str) -> bool {
+    MODEL_REASONING_EFFORTS.contains(&value)
+}
+
+fn model_defaults_payload(
+    defaults: &ModelDefaults,
+    catalog: &[ModelEntry],
+) -> Result<Value, String> {
+    if !catalog
+        .iter()
+        .any(|entry| entry.provider == defaults.provider && entry.model == defaults.model)
+    {
+        return Err("默认模型必须来自当前 Core 返回的目录。".to_owned());
+    }
+    if !is_supported_reasoning_effort(&defaults.reasoning_effort) {
+        return Err("推理强度必须是 off、low、high 或 max。".to_owned());
+    }
+    Ok(json!({
+        "provider": defaults.provider,
+        "model": defaults.model,
+        "reasoningEffort": defaults.reasoning_effort,
+    }))
+}
+
+fn preset_entry_label(entry: Option<&PresetRecord>) -> Option<String> {
+    entry.map(|entry| format!("{} · trust: {}", entry.id, entry.trust))
+}
+
+fn preset_binding_payload(
+    target: &str,
+    preset_id: &str,
+    presets: &[PresetRecord],
+) -> Result<Value, String> {
+    if PresetTarget::parse(target).is_none() {
+        return Err("Preset 绑定目标不在白名单中。".to_owned());
+    }
+    let preset_id = preset_id.trim();
+    if preset_id.is_empty() || !presets.iter().any(|preset| preset.id == preset_id) {
+        return Err("Preset ID 必须来自当前 Core 返回的列表。".to_owned());
+    }
+    Ok(json!({ "target": target, "presetId": preset_id }))
+}
+
+fn parse_service_snapshot(value: &Value) -> Result<ServiceSnapshot, String> {
+    if !value.is_object() {
+        return Err("Core 返回的服务状态不是对象。".to_owned());
+    }
+
+    let installations_value = value
+        .get("installations")
+        .or_else(|| value.get("detectedInstallations"));
+    let mut installations = Vec::new();
+    if let Some(items) = installations_value {
+        let items = items
+            .as_array()
+            .ok_or_else(|| "Core 返回的已发现安装项格式无效。".to_owned())?;
+        let mut seen_ids = HashSet::new();
+        for item in items.iter().take(100) {
+            let id = item
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|id| !id.is_empty() && id.len() <= 128 && !id.chars().any(char::is_control))
+                .ok_or_else(|| "Core 返回了无效的已发现安装项 ID。".to_owned())?
+                .to_owned();
+            if !seen_ids.insert(id.clone()) {
+                continue;
+            }
+            installations.push(DetectedInstall {
+                id,
+                name: bounded_snapshot_text(item.get("name"))
+                    .filter(|name| !name.trim().is_empty())
+                    .unwrap_or_else(|| "检测到的安装项".to_owned()),
+                version: bounded_snapshot_text(item.get("version")),
+                source: bounded_snapshot_text(item.get("source")),
+                valid: item.get("valid").and_then(Value::as_bool),
+                status: bounded_snapshot_text(item.get("status"))
+                    .or_else(|| bounded_snapshot_text(item.get("invalidReason"))),
+            });
+        }
+    }
+
+    let selected_id = value
+        .get("selectedId")
+        .and_then(Value::as_str)
+        .or_else(|| value.pointer("/selected/id").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|id| !id.is_empty() && id.len() <= 128 && !id.chars().any(char::is_control))
+        .filter(|id| {
+            installations
+                .iter()
+                .any(|item| item.id == *id && item.valid == Some(true))
+        })
+        .map(ToOwned::to_owned);
+
+    Ok(ServiceSnapshot {
+        installed: value
+            .get("installed")
+            .and_then(Value::as_bool)
+            .or_else(|| value.get("isInstalled").and_then(Value::as_bool)),
+        running: value
+            .get("running")
+            .and_then(Value::as_bool)
+            .or_else(|| value.get("isRunning").and_then(Value::as_bool)),
+        status: bounded_snapshot_text(value.get("status")),
+        message: bounded_snapshot_text(value.get("message"))
+            .or_else(|| bounded_snapshot_text(value.get("lastError"))),
+        selected_id,
+        installations,
+    })
+}
+
+fn bounded_snapshot_text(value: Option<&Value>) -> Option<String> {
+    value
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(|text| truncate_display_line(text, 240))
+}
+
+fn bool_status(value: Option<bool>) -> &'static str {
+    match value {
+        Some(true) => "是",
+        Some(false) => "否",
+        None => "未知",
+    }
+}
+
+fn install_label(installation: &DetectedInstall) -> String {
+    let mut label = installation.name.clone();
+    if let Some(version) = installation.version.as_deref() {
+        label.push_str(" · ");
+        label.push_str(version);
+    }
+    if let Some(status) = installation.status.as_deref() {
+        label.push_str(" · ");
+        label.push_str(status);
+    }
+    if let Some(source) = installation.source.as_deref() {
+        label.push_str(" · ");
+        label.push_str(source);
+    }
+    if installation.valid == Some(false) {
+        label.push_str(" · 无效");
+    }
+    label
+}
+
+fn selected_install_label(snapshot: &ServiceSnapshot, selected_id: &str) -> String {
+    snapshot
+        .installations
+        .iter()
+        .find(|item| item.id == selected_id && item.valid == Some(true))
+        .map(install_label)
+        .unwrap_or_else(|| "请选择 Core 已发现的安装项".to_owned())
+}
+
+fn service_confirmation_text(action: ServiceAction) -> String {
+    match action {
+        ServiceAction::InstallSnowLuma => {
+            "将由本地 Core 安装 SnowLuma，可能下载组件、写入本机文件并更改系统状态。确认继续？"
+                .to_owned()
+        }
+        ServiceAction::Start(service) => format!(
+            "将启动 {}，会在本机创建或恢复服务进程，并可能影响正在使用它的应用。确认继续？",
+            service.label()
+        ),
+        ServiceAction::Stop(service) => format!(
+            "将停止 {}，可能中断当前服务连接或正在运行的任务。确认继续？",
+            service.label()
+        ),
+    }
+}
+
+fn parse_number(label: &str, text: &str) -> Result<u64, String> {
+    text.trim()
+        .parse::<u64>()
+        .map_err(|_| format!("{label}必须是非负整数。"))
+}
+
+const MAX_SAFE_QQ_ID: u64 = 9_007_199_254_740_991;
+
+fn parse_policy_id(label: &str, text: &str) -> Result<u64, String> {
+    if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(format!("{label}必须是正整数 QQ 号。"));
+    }
+    let id = text
+        .parse::<u64>()
+        .map_err(|_| format!("{label}超出有效 QQ 号范围。"))?;
+    if id == 0 || id > MAX_SAFE_QQ_ID {
+        return Err(format!("{label}必须是有效范围内的正整数 QQ 号。"));
+    }
+    Ok(id)
+}
+
+fn parse_policy_id_value(label: &str, value: &Value) -> Result<u64, String> {
+    match value {
+        Value::String(text) => parse_policy_id(label, text.trim()),
+        Value::Number(number) => match number.as_u64() {
+            Some(id) if id > 0 && id <= MAX_SAFE_QQ_ID => Ok(id),
+            _ => Err(format!("Core 返回的{label}不是有效正整数 QQ 号。")),
+        },
+        _ => Err(format!("Core 返回的{label}不是有效 QQ 号。")),
+    }
+}
+
+fn parse_policy_id_list(label: &str, text: &str) -> Result<Vec<u64>, String> {
+    let mut seen = HashSet::new();
+    let mut ids = Vec::new();
+    for token in text
+        .split(|character: char| character == ',' || character == '，' || character.is_whitespace())
+    {
+        let token = token.trim();
+        if token.is_empty() {
+            continue;
+        }
+        let id = parse_policy_id(label, token)?;
+        if seen.insert(id) {
+            ids.push(id);
+        }
+    }
+    Ok(ids)
+}
+
+fn format_policy_id_list(value: Option<&Value>, label: &str) -> Result<String, String> {
+    let values = value
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("Core 返回的{label}格式无效。"))?;
+    let mut ids = Vec::with_capacity(values.len());
+    for item in values {
+        ids.push(parse_policy_id_value(label, item)?.to_string());
+    }
+    Ok(ids.join(", "))
+}
+
+fn compact_value(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        _ => serde_json::to_string(value).unwrap_or_else(|_| "未知".to_owned()),
+    }
+}
+
+fn read_string_collection(
+    value: &Value,
+    field: &str,
+    max_items: usize,
+    label: &str,
+) -> Result<Vec<String>, String> {
+    let entries = value
+        .get(field)
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("Core 返回的{label}格式无效。"))?;
+    let mut bounded = Vec::with_capacity(entries.len().min(max_items));
+    for item in entries.iter().take(max_items) {
+        let text = item
+            .as_str()
+            .ok_or_else(|| format!("Core 返回的{label}包含非文本项目。"))?;
+        bounded.push(truncate_display_line(text, MAX_DISPLAY_LINE_CHARS));
+    }
+    Ok(bounded)
+}
+
+fn truncate_display_line(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars();
+    let prefix = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{prefix}…")
+    } else {
+        prefix
+    }
+}
+
+fn log_source_label(source: &str) -> &'static str {
+    match source {
+        "worker" => "Worker",
+        "desktop" => "桌面壳",
+        _ => "桥接 Core",
+    }
+}
+
+fn core_summary(value: &Value) -> String {
+    let status = value
+        .get("status")
+        .and_then(Value::as_str)
+        .or_else(|| value.pointer("/result/status").and_then(Value::as_str));
+    match status {
+        Some("pong") => "在线（pong）".to_owned(),
+        Some(text) => format!("在线（{text}）"),
+        None if value.get("ok").and_then(Value::as_bool) == Some(true) => "在线".to_owned(),
+        None => format!("已响应：{}", concise_result(value)),
+    }
+}
+
+fn concise_result(value: &Value) -> String {
+    if let Some(error) = value.get("error").and_then(Value::as_str) {
+        return error.to_owned();
+    }
+    if value.get("ok").and_then(Value::as_bool) == Some(true) {
+        return "操作成功。".to_owned();
+    }
+    if let Some(status) = value.get("status").and_then(Value::as_str) {
+        return format!("状态：{status}");
+    }
+    if value.is_null() {
+        return String::new();
+    }
+    let serialized = serde_json::to_string(value).unwrap_or_else(|_| "结果无法显示".to_owned());
+    const MAX_CHARS: usize = 420;
+    if serialized.chars().count() > MAX_CHARS {
+        let prefix = serialized.chars().take(MAX_CHARS).collect::<String>();
+        format!("{prefix}…")
+    } else {
+        serialized
+    }
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::{MAX_SAFE_QQ_ID, PolicyForm, parse_policy_id_list};
+    use serde_json::json;
+
+    #[test]
+    fn policy_id_lists_are_strict_positive_safe_integers_and_deduplicated() {
+        assert_eq!(
+            parse_policy_id_list("QQ 列表", "123, 456，123\n789").unwrap(),
+            vec![123, 456, 789]
+        );
+        for invalid in [
+            "0",
+            "-1",
+            "1.5",
+            "1e3",
+            "12abc",
+            "Infinity",
+            "9007199254740992",
+        ] {
+            assert!(
+                parse_policy_id_list("QQ 列表", invalid).is_err(),
+                "accepted {invalid}"
+            );
+        }
+        assert_eq!(
+            parse_policy_id_list("QQ 列表", &MAX_SAFE_QQ_ID.to_string()).unwrap(),
+            vec![MAX_SAFE_QQ_ID]
+        );
+        assert_eq!(
+            parse_policy_id_list("QQ 列表", "   ").unwrap(),
+            Vec::<u64>::new()
+        );
+    }
+
+    #[test]
+    fn policy_payload_contains_only_allowlisted_fields() {
+        let form = PolicyForm {
+            mode: "reserved2".to_owned(),
+            allow_private: "123".to_owned(),
+            allow_groups: String::new(),
+            deny_private: String::new(),
+            deny_groups: "456".to_owned(),
+            owner_qq: String::new(),
+        };
+        let params = form.params(true).unwrap();
+        assert_eq!(
+            params,
+            json!({
+                "mode": "reserved2",
+                "allow": { "private": [123], "groups": [] },
+                "deny": { "private": [], "groups": [456] },
+                "ownerQQ": null,
+            })
+        );
+        let keys = params
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(keys, vec!["allow", "deny", "mode", "ownerQQ"]);
+        let policy_only = form.params(false).unwrap();
+        let policy_only_keys = policy_only
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(policy_only_keys, vec!["allow", "deny", "ownerQQ"]);
+    }
+
+    #[test]
+    fn only_supported_policy_modes_are_accepted() {
+        let mut form = PolicyForm::default();
+        for mode in ["chat", "closed-agent", "reserved", "reserved2"] {
+            form.mode = mode.to_owned();
+            assert!(form.params(true).is_ok());
+        }
+        form.mode = "unknown".to_owned();
+        assert!(form.params(true).is_err());
+    }
+}
+
+#[cfg(test)]
+mod readonly_view_tests {
+    use super::{MAX_DISPLAY_LINE_CHARS, read_string_collection};
+    use serde_json::json;
+
+    #[test]
+    fn activity_and_log_collections_are_schema_checked_and_bounded() {
+        let long_line = "x".repeat(MAX_DISPLAY_LINE_CHARS + 20);
+        let value = json!({ "lines": ["one", long_line, "three"] });
+        let lines = read_string_collection(&value, "lines", 2, "日志").unwrap();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], "one");
+        assert_eq!(lines[1].chars().count(), MAX_DISPLAY_LINE_CHARS + 1);
+        assert!(lines[1].ends_with('…'));
+    }
+
+    #[test]
+    fn readonly_collection_rejects_wrong_shape_and_non_text_entries() {
+        assert!(read_string_collection(&json!({}), "entries", 10, "活动记录").is_err());
+        assert!(
+            read_string_collection(
+                &json!({ "entries": "not-array" }),
+                "entries",
+                10,
+                "活动记录"
+            )
+            .is_err()
+        );
+        assert!(
+            read_string_collection(&json!({ "entries": [1] }), "entries", 10, "活动记录").is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod services_ui_tests {
+    use super::{ServiceKind, parse_service_snapshot};
+    use serde_json::json;
+
+    #[test]
+    fn only_supported_local_service_names_are_allowed() {
+        assert_eq!(ServiceKind::parse("snowluma"), Some(ServiceKind::SnowLuma));
+        assert_eq!(ServiceKind::parse("dsh"), Some(ServiceKind::Dsh));
+        for unsupported in [
+            "",
+            "SnowLuma",
+            "node",
+            "https://example.invalid",
+            "C:\\temp",
+        ] {
+            assert_eq!(ServiceKind::parse(unsupported), None);
+        }
+    }
+
+    #[test]
+    fn service_snapshot_parses_only_core_discovered_install_items() {
+        let snapshot = parse_service_snapshot(&json!({
+            "installed": true,
+            "running": false,
+            "status": "stopped",
+            "lastError": "启动失败提示",
+            "selectedId": "local-1",
+            "installations": [
+                { "id": "local-1", "name": "SnowLuma", "version": "1.2", "status": "ready", "source": "configured", "valid": true, "path": "ignored" },
+                { "id": "local-1", "name": "duplicate", "valid": false },
+                { "id": "invalid-1", "name": "Invalid install", "valid": false, "invalidReason": "missing launcher" },
+                { "id": "unknown-1", "name": "Missing validity field" }
+            ]
+        }))
+        .unwrap();
+
+        assert_eq!(snapshot.installed, Some(true));
+        assert_eq!(snapshot.running, Some(false));
+        assert_eq!(snapshot.status.as_deref(), Some("stopped"));
+        assert_eq!(snapshot.message.as_deref(), Some("启动失败提示"));
+        assert_eq!(snapshot.selected_id.as_deref(), Some("local-1"));
+        assert_eq!(snapshot.installations.len(), 3);
+        assert_eq!(snapshot.installations[0].name, "SnowLuma");
+        assert_eq!(snapshot.installations[0].version.as_deref(), Some("1.2"));
+        assert_eq!(snapshot.installations[0].status.as_deref(), Some("ready"));
+        assert_eq!(
+            snapshot.installations[0].source.as_deref(),
+            Some("configured")
+        );
+        assert_eq!(snapshot.installations[0].valid, Some(true));
+        assert!(snapshot.has_selectable_install("local-1"));
+        assert!(!snapshot.has_selectable_install("invalid-1"));
+        assert!(!snapshot.has_selectable_install("unknown-1"));
+        assert_eq!(
+            snapshot.installations[1].status.as_deref(),
+            Some("missing launcher")
+        );
+    }
+
+    #[test]
+    fn service_snapshot_rejects_malformed_or_unidentified_install_items() {
+        assert!(parse_service_snapshot(&json!({ "installations": "arbitrary path" })).is_err());
+        assert!(
+            parse_service_snapshot(&json!({ "installations": [{ "name": "No ID" }] })).is_err()
+        );
+        assert!(parse_service_snapshot(&json!("not a snapshot")).is_err());
+    }
+}
+
+#[cfg(test)]
+mod model_preset_ui_tests {
+    use super::{
+        is_supported_reasoning_effort, model_defaults_payload, parse_model_catalog,
+        parse_model_defaults, parse_preset_bindings, parse_preset_list, preset_binding_payload,
+    };
+    use serde_json::json;
+
+    #[test]
+    fn model_catalog_and_defaults_are_schema_checked_and_allowlisted() {
+        let catalog = parse_model_catalog(&json!({
+            "models": [
+                { "provider": "p", "model": "m", "image": true, "secret": "ignored" },
+                { "provider": "p", "model": "m", "image": false },
+            ]
+        }))
+        .unwrap();
+        assert_eq!(catalog.len(), 1);
+        assert!(catalog[0].image);
+        let defaults = parse_model_defaults(&json!({
+            "defaults": { "provider": "p", "model": "m", "reasoningEffort": "low", "token": "ignored" }
+        }))
+        .unwrap();
+        assert_eq!(
+            model_defaults_payload(&defaults, &catalog).unwrap(),
+            json!({ "provider": "p", "model": "m", "reasoningEffort": "low" })
+        );
+        for effort in ["off", "low", "high", "max"] {
+            assert!(is_supported_reasoning_effort(effort));
+        }
+        assert!(!is_supported_reasoning_effort("medium"));
+        assert!(
+            model_defaults_payload(
+                &super::ModelDefaults {
+                    provider: "p".into(),
+                    model: "missing".into(),
+                    reasoning_effort: "low".into()
+                },
+                &catalog
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn preset_bindings_only_accept_known_targets_and_listed_ids() {
+        let presets = parse_preset_list(&json!({
+            "presets": [
+                { "id": "router-standard", "trust": "system", "path": "ignored" },
+                { "id": "router-standard", "trust": "duplicate" },
+                { "id": "whale-chat", "trust": true },
+            ]
+        }))
+        .unwrap();
+        assert_eq!(presets.len(), 2);
+        let bindings = parse_preset_bindings(&json!({
+            "bindings": { "chat": null, "closedAgent": "router-standard", "reserved2": "whale-chat", "learner": "" }
+        }))
+        .unwrap();
+        assert!(bindings.chat.is_none());
+        assert_eq!(bindings.closed_agent.as_deref(), Some("router-standard"));
+        assert!(preset_binding_payload("chat", "router-standard", &presets).is_ok());
+        assert!(preset_binding_payload("unknown", "router-standard", &presets).is_err());
+        assert!(preset_binding_payload("chat", "not-listed", &presets).is_err());
+    }
+}
+
+#[cfg(test)]
+mod pending_ui_tests {
+    use super::parse_pending;
+    use serde_json::json;
+
+    #[test]
+    fn pending_view_projects_questions_approvals_and_card_risks() {
+        let pending = parse_pending(&json!({
+            "pending": [
+                {
+                    "kind": "question",
+                    "key": "private:1",
+                    "sessionId": "session-1",
+                    "questions": [{ "id": "q1", "question": "继续吗？", "options": [{ "label": "是" }] }],
+                    "secret": "ignored"
+                },
+                {
+                    "kind": "approval",
+                    "key": "group:2",
+                    "toolName": "web_search",
+                    "reason": "联网",
+                    "eventId": "event-1"
+                },
+                {
+                    "kind": "card-approval",
+                    "id": "card_1",
+                    "status": "pending",
+                    "cardTitle": "卡片",
+                    "buttonLabel": "打开",
+                    "riskReasons": ["外部跳转"]
+                },
+                { "kind": "arbitrary", "command": "ignored" }
+            ]
+        }))
+        .unwrap();
+        assert_eq!(pending.len(), 3);
+        assert_eq!(pending[0].question, "继续吗？");
+        assert_eq!(pending[0].options, vec!["是"]);
+        assert_eq!(pending[1].tool_name, "web_search");
+        assert_eq!(pending[2].button_label, "打开");
+        assert_eq!(pending[2].risk_reasons, vec!["外部跳转"]);
+    }
+
+    #[test]
+    fn pending_view_rejects_missing_collection() {
+        assert!(parse_pending(&json!({})).is_err());
+    }
+}
+
+#[cfg(test)]
+mod theme_tests {
+    use super::{Area, friendly_read_error, native_style};
+    use eframe::egui::{self, Color32, TextStyle};
+
+    #[test]
+    fn native_theme_uses_readable_text_and_touch_targets() {
+        let style = native_style();
+
+        assert_eq!(style.spacing.item_spacing, egui::vec2(10.0, 8.0));
+        assert_eq!(style.spacing.button_padding, egui::vec2(12.0, 7.0));
+        assert!(style.spacing.interact_size.y >= 30.0);
+        assert_eq!(style.text_styles[&TextStyle::Body].size, 15.0);
+        assert_eq!(style.text_styles[&TextStyle::Small].size, 13.0);
+        assert_eq!(style.text_styles[&TextStyle::Heading].size, 24.0);
+        assert!(style.visuals.override_text_color.is_some());
+        assert!(style.visuals.weak_text_color.unwrap_or(Color32::BLACK).r() >= 120);
+        assert_ne!(style.visuals.panel_fill, Color32::BLACK);
+    }
+
+    #[test]
+    fn dsh_connection_errors_have_actionable_model_and_preset_hint() {
+        let error = "Core IPC INTERNAL_ERROR: agentPresets/list: 传输失败 (ECONNREFUSED)";
+        let expected = Some("DSH/目录服务当前不可用。Core IPC 仍在线，请启动 DSH 后重试。");
+
+        assert_eq!(friendly_read_error(Area::ModelCatalog, error), expected);
+        assert_eq!(friendly_read_error(Area::ModelDefaults, error), expected);
+        assert_eq!(friendly_read_error(Area::PresetList, error), expected);
+        assert_eq!(friendly_read_error(Area::PresetBindings, error), expected);
+        assert_eq!(friendly_read_error(Area::Overview, error), None);
+        assert_eq!(
+            friendly_read_error(Area::ModelCatalog, "模型目录格式无效"),
+            None
+        );
+        assert_eq!(
+            friendly_read_error(Area::ModelCatalog, "Core IPC transport ECONNREFUSED"),
+            None
+        );
+    }
+}

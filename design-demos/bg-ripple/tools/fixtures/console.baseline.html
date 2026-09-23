@@ -3,10 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>QQ 桥接控制台 · 海盐苏打</title>
+<title>鲸桥控制台 · 海盐苏打</title>
 <style>
 /* ============================================================
-   QQ 桥接控制台 · 海盐苏打 Soda Gummy（软糖拟物 × 糖果玻璃）
+   鲸桥控制台 · 海盐苏打 Soda Gummy（软糖拟物 × 糖果玻璃）
    设计来源：design-demos/fusion-4-soda.html（已选型方案，2026-09）
    ============================================================ */
 
@@ -132,10 +132,8 @@ body.layout-sidebar .nav {
 }
 body > main { grid-area: main; padding: 82px 28px 70px; max-width: 1240px; width: 100%; margin: 0 auto; }
 .brand .logo {
-  display: inline-flex; width: 36px; height: 36px; align-items: center; justify-content: center;
-  border-radius: 13px; font-weight: 700; font-size: 15px; flex: none;
-  background: linear-gradient(145deg, var(--accent), var(--accent-2)); color: var(--on-accent);
-  box-shadow: 4px 5px 12px var(--accent-shadow), -3px -4px 9px var(--shadow-c2), inset 0 1.5px 0 rgba(255, 255, 255, .45);
+  display: block; width: 36px; height: 36px; flex: none; border-radius: 13px;
+  box-shadow: 4px 5px 12px var(--accent-shadow), -3px -4px 9px var(--shadow-c2);
 }
 .brand b { font-size: 15px; display: block; line-height: 1.25; white-space: nowrap; }
 .brand small { color: var(--text-3); font-size: 11px; display: block; line-height: 1.25; white-space: nowrap; }
@@ -834,8 +832,8 @@ html.login-arrive .nav-btn {
 
 <header class="top">
   <div class="brand">
-    <span class="logo">Q</span>
-    <div class="brand-text"><b>QQ 桥接控制台</b><small>DeepSeek Harness × SnowLuma</small></div>
+    <img class="logo" src="/whalebridge-icon.png" alt="">
+    <div class="brand-text"><b>鲸桥控制台</b><small>DeepSeek Harness × SnowLuma</small></div>
   </div>
   <nav class="nav" id="nav" aria-label="功能分区">
     <button class="nav-btn active" data-module="models">
@@ -898,7 +896,7 @@ html.login-arrive .nav-btn {
         </header>
         <div class="card-body">
           <div class="mode-tiles" id="modeRow">
-            <button class="mode-tile" data-mode="chat"><b>chat <span class="pill">聊天模式</span></b><small>白名单群 + 白名单私聊 → qq-chat 安全聊天</small></button>
+            <button class="mode-tile" data-mode="chat"><b>chat <span class="pill">聊天模式</span></b><small>白名单群 + 白名单私聊 → whale-chat 安全聊天</small></button>
             <button class="mode-tile" data-mode="closed-agent"><b>closed-agent <span class="pill">封闭 Agent</span></b><small>仅 Owner 私聊 → router-standard 完整工具，可在 QQ 上操控 DSH</small></button>
             <button class="mode-tile" data-mode="reserved"><b>reserved <span class="pill">一代仿真</span></b><small>仿真群友状态机：观望 / 活跃 / 试探 / 退场，选择性参聊</small></button>
             <button class="mode-tile" data-mode="reserved2"><b>reserved2 <span class="pill">二代仿真</span></b><small>文本不自动转发，AI 通过工具自主看消息、发言、唤醒与潜水</small></button>
@@ -977,7 +975,7 @@ html.login-arrive .nav-btn {
         </header>
         <div class="card-body">
           <div class="switch-row"><label class="switch"><input type="checkbox" id="v2Enabled"><span class="track"></span></label>启用二代模式（reserved2）<small>写入 config.json</small></div>
-          <label class="field"><span>agentPreset（二代会话使用的 DSH 预设）</span><input type="text" id="v2AgentPreset" placeholder="qq-chat-v2"></label>
+          <label class="field"><span>agentPreset（二代会话使用的 DSH 预设）</span><input type="text" id="v2AgentPreset" placeholder="whale-chat-v2"></label>
           <div class="switch-row"><label class="switch"><input type="checkbox" id="v2ProvideRecommendations"><span class="track"></span></label>提供推荐值给 AI<small>关闭后 qq_get_prompt 不返回推荐值</small></div>
           <div class="row">
             <button id="v2PauseBtn" class="btn danger sm">暂停二代 AI</button>
@@ -1154,7 +1152,7 @@ html.login-arrive .nav-btn {
               <div class="row"><span style="flex:1" class="meta">提取冷却（毫秒）</span><input type="number" id="slangCooldown" min="0" step="1000" style="width:110px;flex:none"></div>
               <div class="row"><span style="flex:1" class="meta">研究触发阈值（逗号分隔）</span><input type="text" id="slangThresholds" placeholder="2,4,8" style="width:130px;flex:none"></div>
               <div class="row"><span style="flex:1" class="meta">注入最大条数</span><input type="number" id="slangInjectMax" min="1" max="30" style="width:90px;flex:none"></div>
-              <div class="row"><span style="flex:1" class="meta">学习会话 preset</span><input type="text" id="slangLearnerPreset" placeholder="qq-chat" style="width:130px;flex:none"></div>
+              <div class="row"><span style="flex:1" class="meta">学习会话 preset</span><input type="text" id="slangLearnerPreset" placeholder="whale-chat" style="width:130px;flex:none"></div>
               <div class="row"><span style="flex:1" class="meta">学习工作区名</span><input type="text" id="slangWorkspaceTitle" placeholder="QQ 黑话学习" style="width:150px;flex:none"></div>
               <div class="switch-row"><label class="switch"><input type="checkbox" id="slangAutoResearch"><span class="track"></span></label>自动联网研究<small>达到阈值自动送 DSH 研究</small></div>
               <div class="row"><button id="slangConfigSave" class="btn sm primary">保存黑话参数</button><span class="meta" id="slangConfigMsg"></span></div>
@@ -1659,14 +1657,14 @@ html.login-arrive .nav-btn {
   <section class="module" data-module="terminal" id="module-terminal" hidden>
     <div class="page-head">
       <h1>终端</h1>
-      <p class="page-sub">桥接、SnowLuma 与 dsh 服务终端——可选服务失败时不阻塞 qq_bridge 主流程</p>
+      <p class="page-sub">桥接、SnowLuma 与 dsh 服务终端——可选服务失败时不阻塞 WhaleBridge 主流程</p>
     </div>
     <div class="row" style="margin-bottom:12px">
       <div class="seg" id="serviceTerminalTabs" aria-label="服务终端标签页">
         <button type="button" data-service-tab="runtime" class="active">桥接运行控制台</button>
         <button type="button" data-service-tab="snowluma">SnowLuma 后台终端</button>
       </div>
-      <span class="meta" id="serviceTerminalHint">SnowLuma 启动优先于 QQ 桥接；启动失败会自动降级。</span>
+      <span class="meta" id="serviceTerminalHint">SnowLuma 启动优先于 鲸桥；启动失败会自动降级。</span>
       <button id="servicesRescan" class="btn sm ghost" type="button">重新检测</button>
       <span class="meta" id="servicesDetectionMeta">后台并行检测中…</span>
     </div>
@@ -1807,7 +1805,7 @@ html.login-arrive .nav-btn {
 <div class="modal-overlay" id="authOverlay">
   <div class="modal auth-modal">
     <div class="auth-logo">Q</div>
-    <h3>QQ 桥接控制台</h3>
+    <h3>鲸桥控制台</h3>
     <div class="meta">输入控制台访问令牌后进入（config.json 的 consoleToken）</div>
     <div class="auth-field">
       <span class="auth-key"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg></span>
@@ -1827,7 +1825,7 @@ html.login-arrive .nav-btn {
 <div class="toasts" id="toasts" aria-live="polite"></div>
 
 <script>
-/* QQ 桥接控制台 · Mock 数据（贴合 config.example.json / 现有 console.html 功能） */
+/* 鲸桥控制台 · Mock 数据（贴合 config.example.json / 现有 console.html 功能） */
 window.MOCK = {
   dsh: {
     url: 'http://127.0.0.1:3080',
@@ -1845,16 +1843,16 @@ window.MOCK = {
   ],
   effort: 'medium',
   modes: [
-    { id: 'chat', name: 'chat', desc: '白名单群 + 私聊安全聊天', preset: 'qq-chat', scene: '日常挂机' },
+    { id: 'chat', name: 'chat', desc: '白名单群 + 私聊安全聊天', preset: 'whale-chat', scene: '日常挂机' },
     { id: 'closed-agent', name: 'closed-agent', desc: '仅 Owner 私聊，完整工具可操控 DSH', preset: 'router-standard', scene: '远程运维' },
-    { id: 'reserved', name: 'reserved', desc: '一代仿真群友 · 状态机主动参聊', preset: 'qq-chat', scene: '仿真一代' },
-    { id: 'reserved2', name: 'reserved2', desc: '二代仿真 · AI 自主收发 / 唤醒 / 潜水', preset: 'qq-chat-v2', scene: '仿真二代' }
+    { id: 'reserved', name: 'reserved', desc: '一代仿真群友 · 状态机主动参聊', preset: 'whale-chat', scene: '仿真一代' },
+    { id: 'reserved2', name: 'reserved2', desc: '二代仿真 · AI 自主收发 / 唤醒 / 潜水', preset: 'whale-chat-v2', scene: '仿真二代' }
   ],
   currentMode: 'chat',
   presets: [
-    { id: 'qq-chat', name: 'qq-chat', desc: 'QQ 安全聊天人格，仅附加 QQ 场景规则', model: 'deepseek-v3.2-exp', tools: 6,
+    { id: 'whale-chat', name: 'whale-chat', desc: 'QQ 安全聊天人格，仅附加 QQ 场景规则', model: 'deepseek-v3.2-exp', tools: 6,
       prompt: '你是 QQ 群聊 / 私聊中的 AI 桥接代理。规则：\n1. 只使用安全子集工具（收发消息 / 查历史 / 表情包）。\n2. 语气自然，像真人群友，短句为主，可用空格分条。\n3. 涉及敏感内容一律拒绝并提醒 Owner。\n4. 引用消息注意判断说话对象，不要误接话。' },
-    { id: 'qq-chat-v2', name: 'qq-chat-v2', desc: '二代仿真 · AI 自主看消息、发言、等待、设置唤醒', model: 'deepseek-v3.2-exp', tools: 9,
+    { id: 'whale-chat-v2', name: 'whale-chat-v2', desc: '二代仿真 · AI 自主看消息、发言、等待、设置唤醒', model: 'deepseek-v3.2-exp', tools: 9,
       prompt: '你是二代仿真群友。通过 qq_get_unread_messages 主动看消息，用 qq_send_message 发言；\n可以使用 set_wake_config 设置沉睡/唤醒，潜水时无需逐条回复。\n保持人设一致，控制发言频率（maxSendPerMinute）。' },
     { id: 'router-standard', name: 'router-standard', desc: 'closed-agent 完整工具，可在 QQ 上操控 DSH', model: 'deepseek-r1', tools: 14,
       prompt: '你是 Owner 的远程运维代理，运行在 closed-agent 模式。\n拥有完整 DSH 工具与 snowluma-host 进程控制（需显式开启）。\n执行前简要确认影响面，执行后回报结果。' }
@@ -2487,7 +2485,7 @@ window.LOG_POOL = [
         ? ('版本：' + (snow.version || '未知') + ' · 目录：' + (snow.homeDir || '-') + (snow.ready ? ' · HTTP API 已就绪' : ' · ' + (snow.lastError || '等待启动')) + (snow.webUrl ? ' · 网页控制台 ' + snow.webUrl : ''))
         : snow.status === 'invalid' ? ('检测到不完整的 SnowLuma 安装：' + (snow.lastError || '缺少启动文件') + '，请重新安装。')
           : ['pending', 'checking'].includes(snow.detection?.status) ? '正在后台检测 SnowLuma，不影响控制台启动。'
-            : '未检测到 SnowLuma 文件。安装目录固定为 qq_bridge\\SnowLuma，可从 GitHub 最新发布版安装。';
+            : '未检测到 SnowLuma 文件。安装目录固定为 WhaleBridge\\SnowLuma，可从 GitHub 最新发布版安装。';
       dshMeta.textContent = dsh.installed
         ? ('版本：' + (dsh.version || '未知') + ' · 可执行文件：' + (dsh.executable || '-') + (dsh.ready ? ' · Web API 已就绪' : ' · ' + (dsh.lastError || '未启动')))
         : dsh.status === 'invalid' ? ('检测到不完整的 dsh 安装：' + (dsh.lastError || '缺少可执行文件') + '，请重新安装。')
@@ -2503,7 +2501,7 @@ window.LOG_POOL = [
       const dshComplete = dsh.detection?.status === 'complete';
       if (snowComplete && !snow.installed && !promptedSnow) {
         promptedSnow = true;
-        const snowProblem = snow.status === 'invalid' ? '检测到 SnowLuma 安装不完整，无法安全启动。是否重新安装最新发布版？' : '未检测到 SnowLuma 文件。是否从 GitHub 最新发布版下载并安装到 qq_bridge\\SnowLuma？';
+        const snowProblem = snow.status === 'invalid' ? '检测到 SnowLuma 安装不完整，无法安全启动。是否重新安装最新发布版？' : '未检测到 SnowLuma 文件。是否从 GitHub 最新发布版下载并安装到 WhaleBridge\\SnowLuma？';
         queuePrompt(() => confirmBox(snowProblem + '\\n\\n安装源：https://github.com/SnowLuma/SnowLuma/releases/latest', '下载并安装'))
           .then((ok) => { if (ok) $('#snowlumaInstall').click(); });
       }
@@ -2554,8 +2552,8 @@ window.LOG_POOL = [
         const r = await api('/api/services/dsh/open', 'POST', {});
         if (r && r.ok) { toast('已在独立窗口打开 dsh 监控终端'); return; }
       } catch {}
-      const win = window.open('/dsh-monitor.html', 'qq-bridge-dsh-monitor', 'popup=yes,width=980,height=640,resizable=yes,scrollbars=yes');
-      if (!win) toast('浏览器阻止了弹出窗口，请允许 qq_bridge 打开 dsh 监控终端。', { type: 'warn' });
+      const win = window.open('/dsh-monitor.html', 'whalebridge-dsh-monitor', 'popup=yes,width=980,height=640,resizable=yes,scrollbars=yes');
+      if (!win) toast('浏览器阻止了弹出窗口，请允许 WhaleBridge 打开 dsh 监控终端。', { type: 'warn' });
     });
     // 一键打开 SnowLuma 图形控制台（网页配置页）：后端解析真实 WebUI 地址并以应用窗口打开。
     $('#snowlumaOpenWeb').addEventListener('click', async () => {
@@ -4345,7 +4343,7 @@ window.LOG_POOL = [
       $('#slangCooldown').value = c.extractCooldownMs ?? 300000;
       $('#slangThresholds').value = (c.inferenceThresholds || [2, 4, 8]).join(', ');
       $('#slangInjectMax').value = c.injectMax ?? 8;
-      $('#slangLearnerPreset').value = c.learnerPreset || 'qq-chat';
+      $('#slangLearnerPreset').value = c.learnerPreset || 'whale-chat';
       $('#slangWorkspaceTitle').value = c.workspaceTitle || 'QQ 黑话学习';
       $('#slangAutoResearch').checked = c.autoResearch !== false;
     }).catch(() => {});

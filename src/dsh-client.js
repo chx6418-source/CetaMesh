@@ -24,7 +24,7 @@ export class NodeApiClient {
 
   /** 新版 unary RPC：payload 固定包一层 {args}；业务错误与传输错误都抛 Error（含端点名）。 */
   async callEndpoint(endpoint, args = {}, signal) {
-    const rpcId = `qq-bridge-${Date.now().toString(36)}-${(++this.rpcSeq).toString(36)}`;
+    const rpcId = `whalebridge-${Date.now().toString(36)}-${(++this.rpcSeq).toString(36)}`;
     let res;
     try {
       res = await fetch(`${this.baseUrl}/api/${endpoint}`, {
@@ -64,7 +64,7 @@ export class NodeApiClient {
    * options.signal 中止时立即关闭 socket；options.onSocket 用于外部监听底层连接事件。
    */
   async *openRemoteStream(endpoint, args = {}, options = {}) {
-    const streamId = `qq-bridge-s${(++this.streamSeq).toString(36)}`;
+    const streamId = `whalebridge-s${(++this.streamSeq).toString(36)}`;
     const url = this.baseUrl.replace(/^http/, 'ws') + '/api/remote.mux';
     const socket = new WebSocket(url, { headers: { cookie: this.authCookie() } });
     const inbox = [];

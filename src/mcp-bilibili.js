@@ -9,21 +9,18 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { APP_PATHS } from './app-paths.js';
+import { isMainModule, reportEntrypointError } from './entrypoint.js';
 
 const BILI_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
 const SEARCH_URL = 'https://api.bilibili.com/x/web-interface/search/type';
 const POPULAR_URL = 'https://api.bilibili.com/x/web-interface/popular';
 const TIMEOUT_MS = 20000;
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const ROOT = path.resolve(__dirname, '..');
-
 // 工具总开关：socialV2.tools.bilibili（桥接控制台 12e 面板 / 07 工具开关），false 时返回 403。
 function loadConfig() {
   try {
-    let text = fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8');
+    let text = fs.readFileSync(APP_PATHS.configFile, 'utf8');
     if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
     return JSON.parse(text);
   } catch { return {}; }
@@ -254,4 +251,11 @@ server.tool(
   }
 );
 
-await server.connect(new StdioServerTransport());
+export async function runMcpBilibili(transport = new StdioServerTransport()) {
+  await server.connect(transport);
+  return server;
+}
+
+if (isMainModule(import.meta.url)) {
+  runMcpBilibili().catch((error) => reportEntrypointError('mcp-bilibili', error));
+}

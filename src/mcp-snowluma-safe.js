@@ -8,18 +8,16 @@
 // - 所有调用走 OneBot HTTP API（httpUrl + accessToken）。
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { SENSITIVE_RE } from './sensitive.js';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const ROOT = path.resolve(__dirname, '..');
+import { APP_PATHS } from './app-paths.js';
+import { isMainModule, reportEntrypointError } from './entrypoint.js';
 
 function loadConfig() {
   try {
-    let text = fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8');
+    let text = fs.readFileSync(APP_PATHS.configFile, 'utf8');
     if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
     return JSON.parse(text);
   } catch {
@@ -127,7 +125,7 @@ function agentApiBase() {
 // 每次请求都重新读取，避免控制台轮换令牌后 MCP 仍用启动时的旧值导致一直 401。
 function readBridgeToken() {
   try {
-    const token = fs.readFileSync(path.join(ROOT, 'state', 'agent-token'), 'utf8').trim();
+    const token = fs.readFileSync(path.join(APP_PATHS.stateDir, 'agent-token'), 'utf8').trim();
     if (token) return token;
   } catch {}
   try {
@@ -140,7 +138,7 @@ function readBridgeToken() {
     if (c.consoleToken) return String(c.consoleToken);
   } catch {}
   try {
-    return fs.readFileSync(path.join(ROOT, 'state', 'console-token'), 'utf8').trim();
+    return fs.readFileSync(path.join(APP_PATHS.stateDir, 'console-token'), 'utf8').trim();
   } catch {
     return '';
   }
@@ -1192,4 +1190,11 @@ server.tool(
   }
 );
 
-await server.connect(new StdioServerTransport());
+export async function runMcpSnowLuma(transport = new StdioServerTransport()) {
+  await server.connect(transport);
+  return server;
+}
+
+if (isMainModule(import.meta.url)) {
+  runMcpSnowLuma().catch((error) => reportEntrypointError('mcp-snowluma', error));
+}

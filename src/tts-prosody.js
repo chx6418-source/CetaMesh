@@ -12,6 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { parseAudioFile } from './audio-probe.js';
+import { APP_PATHS } from './app-paths.js';
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 const jitter = (v, amt) => v + (Math.random() * 2 - 1) * amt;
@@ -129,7 +130,7 @@ export function splitForPause(text) {
 
 // ── 工具函数 ──
 function ffmpegBin(cfg) {
-  return String(cfg.fileSend?.ffmpegPath ?? '').trim() || path.resolve(process.cwd(), '..', 'tools', 'ffmpeg', 'ffmpeg.exe');
+  return String(cfg.fileSend?.ffmpegPath ?? '').trim() || path.join(APP_PATHS.toolsDir, 'ffmpeg', 'ffmpeg.exe');
 }
 function run(cmd, args, timeoutMs = 180000) {
   return spawnSync(cmd, args, { encoding: 'utf8', timeout: timeoutMs, windowsHide: true });

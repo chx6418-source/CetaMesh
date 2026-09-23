@@ -8,18 +8,16 @@
 //   stop_snowluma     —— 停止 SnowLuma（按安装目录匹配进程）
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { spawn, execFileSync } from 'node:child_process';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const ROOT = path.resolve(__dirname, '..');
+import { APP_PATHS } from './app-paths.js';
+import { isMainModule, reportEntrypointError } from './entrypoint.js';
 
 function loadConfig() {
   try {
-    let text = fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8');
+    let text = fs.readFileSync(APP_PATHS.configFile, 'utf8');
     if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
     return JSON.parse(text);
   } catch {
@@ -59,7 +57,7 @@ function getConsolePort() {
 // 不需要（也不应该）持有控制台令牌。
 function readBridgeToken() {
   try {
-    const token = fs.readFileSync(path.join(ROOT, 'state', 'agent-token'), 'utf8').trim();
+    const token = fs.readFileSync(path.join(APP_PATHS.stateDir, 'agent-token'), 'utf8').trim();
     if (token) return token;
   } catch {}
   try {
@@ -71,7 +69,7 @@ function readBridgeToken() {
     if (c.consoleToken) return String(c.consoleToken);
   } catch {}
   try {
-    return fs.readFileSync(path.join(ROOT, 'state', 'console-token'), 'utf8').trim();
+    return fs.readFileSync(path.join(APP_PATHS.stateDir, 'console-token'), 'utf8').trim();
   } catch {
     return '';
   }
@@ -125,10 +123,10 @@ function findSnowLumaPids() {
   const pids = new Set();
   try {
     // 端口经环境变量传入脚本，不拼进命令文本：避免字符串插值成为注入面。
-    const byPort = 'Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $_.LocalPort -eq [int]$env:QQ_BRIDGE_ONEBOT_PORT } | Select-Object -ExpandProperty OwningProcess -Unique';
+    const byPort = 'Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $_.LocalPort -eq [int]$env:WHALEBRIDGE_ONEBOT_PORT } | Select-Object -ExpandProperty OwningProcess -Unique';
     const out = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', byPort], {
       timeout: 15000, windowsHide: true, encoding: 'utf8',
-      env: { ...process.env, QQ_BRIDGE_ONEBOT_PORT: String(portNum) }
+      env: { ...process.env, WHALEBRIDGE_ONEBOT_PORT: String(portNum) }
     });
     for (const s of out.split(/\s+/)) {
       const n = Number(s.trim());
@@ -140,9 +138,9 @@ function findSnowLumaPids() {
   for (const pid of pids) {
     try {
       // 同理：pid 也经环境变量传入，绝不拼进 PowerShell 命令文本。
-      const cmd = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '(Get-CimInstance Win32_Process -Filter ("ProcessId=" + [int]$env:QQ_BRIDGE_PID)).CommandLine'], {
+      const cmd = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '(Get-CimInstance Win32_Process -Filter ("ProcessId=" + [int]$env:WHALEBRIDGE_PID)).CommandLine'], {
         timeout: 10000, windowsHide: true, encoding: 'utf8',
-        env: { ...process.env, QQ_BRIDGE_PID: String(pid) }
+        env: { ...process.env, WHALEBRIDGE_PID: String(pid) }
       }).trim();
       const cmdLower = String(cmd || '').toLowerCase().replace(/\\/g, '/');
       if (home && cmdLower.includes(home)) result.push(pid);
@@ -240,4 +238,11 @@ if (getHostConfig().allowProcessControl) {
   );
 }
 
-await server.connect(new StdioServerTransport());
+export async function runMcpSnowLumaHost(transport = new StdioServerTransport()) {
+  await server.connect(transport);
+  return server;
+}
+
+if (isMainModule(import.meta.url)) {
+  runMcpSnowLumaHost().catch((error) => reportEntrypointError('mcp-snowluma-host', error));
+}

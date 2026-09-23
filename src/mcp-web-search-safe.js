@@ -18,6 +18,7 @@ import { StringDecoder } from 'node:string_decoder';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
+import { isMainModule, reportEntrypointError } from './entrypoint.js';
 
 const dnsLookup = dns.promises.lookup;
 
@@ -403,4 +404,11 @@ server.tool(
   }
 );
 
-await server.connect(new StdioServerTransport());
+export async function runMcpWebSearchSafe(transport = new StdioServerTransport()) {
+  await server.connect(transport);
+  return server;
+}
+
+if (isMainModule(import.meta.url)) {
+  runMcpWebSearchSafe().catch((error) => reportEntrypointError('mcp-web-search-safe', error));
+}

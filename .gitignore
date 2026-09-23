@@ -2,6 +2,17 @@
 node_modules/
 .npm-cache/
 
+# WhaleBridge desktop shell (Rust/Tauri) build output
+/desktop-shell/target/
+/desktop-shell/gen/
+
+# Packaged Core distribution (dist/core: WhaleBridgeCore.exe + resources + build cache).
+# 产物可达 90MB+，绝不入库；用 npm run build:core 重新生成。
+/dist/
+# Node SEA 构建中间产物若落在 dist/ 之外（手工实验）也一并忽略
+*.blob
+sea-config.json
+
 # Bundled local binaries (ffmpeg, portable git, etc.) —— 锚定仓库根目录，
 # 不要写成 `tools/`：那会连带忽略任意层级下的 tools 目录（例如
 # design-demos/bg-ripple/tools/ 的融合工具链与校验夹具，那些是要入库的）

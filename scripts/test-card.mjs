@@ -9,7 +9,7 @@
 // 运行：node scripts/test-card.mjs
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import {
   CARD_SEGMENT_TYPES,
   MAX_CARDS_PER_MESSAGE,
@@ -435,25 +435,16 @@ if (fs.existsSync(consoleTokenFile) && fs.existsSync(socialV2File) && config) {
 // ── 7. MCP 常驻注册检查（进程内内存传输，绕开子进程管道沙箱限制） ──────────
 // 「开关即时生效」的前提是工具**无条件注册**、开关只在执行期判断：
 // 因此这里断言 qq_get_card_msg 在 MCP server 启动时就一定出现在工具列表里。
-const mcpEntry = path.join(ROOT, 'src', 'mcp-snowluma-safe.js');
-const tempMcpEntry = path.join(ROOT, 'src', '_tmp-card-test-' + process.pid + '.mjs');
 try {
-  const source = fs.readFileSync(mcpEntry, 'utf8');
-  const needle = 'await server.connect(new StdioServerTransport());';
-  check('MCP 常驻注册：定位 stdio 连接语句', source.includes(needle));
-  if (source.includes(needle)) {
-    const patched = source.replace(needle, [
-      "import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';",
-      'const [__cardTestClientTransport, __cardTestServerTransport] = InMemoryTransport.createLinkedPair();',
-      'await server.connect(__cardTestServerTransport);',
-      'globalThis.__cardTestClientTransport = __cardTestClientTransport;',
-      'globalThis.__cardTestServer = server;'
-    ].join('\n'));
-    fs.writeFileSync(tempMcpEntry, patched, 'utf8');
-    await import(pathToFileURL(tempMcpEntry).href);
-    const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
+  const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js');
+  const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
+  const { runMcpSnowLuma } = await import('../src/mcp-snowluma-safe.js');
+  check('MCP 常驻注册：提供显式 runMcpSnowLuma 入口', typeof runMcpSnowLuma === 'function');
+  if (typeof runMcpSnowLuma === 'function') {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const mcpServer = await runMcpSnowLuma(serverTransport);
     const client = new Client({ name: 'card-test', version: '0.0.1' });
-    await client.connect(globalThis.__cardTestClientTransport);
+    await client.connect(clientTransport);
     const listed = await client.listTools();
     const names = listed.tools.map((t) => t.name);
     check('MCP 常驻注册 qq_get_card_msg（不随启动期开关消失）', names.includes('qq_get_card_msg'));
@@ -471,12 +462,10 @@ try {
     const approvalProps = Object.keys(approvalTool?.inputSchema?.properties ?? {});
     check('MCP 审批查询仅需会话令牌和审批编号', approvalProps.includes('key') && approvalProps.includes('token') && approvalProps.includes('approvalId'));
     await client.close();
-    try { await globalThis.__cardTestServer?.close(); } catch {}
+    try { await mcpServer.close(); } catch {}
   }
 } catch (error) {
   check('MCP 常驻注册检查（内存传输）', false, error?.message ?? String(error));
-} finally {
-  try { fs.unlinkSync(tempMcpEntry); } catch {}
 }
 
 console.log('\n结果：' + passed + ' 通过，' + failed + ' 失败');

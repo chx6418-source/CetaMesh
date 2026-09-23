@@ -1,4 +1,4 @@
-/* QQ 桥接控制台 · Mock 数据（贴合 config.example.json / 现有 console.html 功能） */
+/* 鲸桥控制台 · Mock 数据（贴合 config.example.json / 现有 console.html 功能） */
 window.MOCK = {
   dsh: {
     url: 'http://127.0.0.1:3080',
@@ -16,16 +16,16 @@ window.MOCK = {
   ],
   effort: 'medium',
   modes: [
-    { id: 'chat', name: 'chat', desc: '白名单群 + 私聊安全聊天', preset: 'qq-chat', scene: '日常挂机' },
+    { id: 'chat', name: 'chat', desc: '白名单群 + 私聊安全聊天', preset: 'whale-chat', scene: '日常挂机' },
     { id: 'closed-agent', name: 'closed-agent', desc: '仅 Owner 私聊，完整工具可操控 DSH', preset: 'router-standard', scene: '远程运维' },
-    { id: 'reserved', name: 'reserved', desc: '一代仿真群友 · 状态机主动参聊', preset: 'qq-chat', scene: '仿真一代' },
-    { id: 'reserved2', name: 'reserved2', desc: '二代仿真 · AI 自主收发 / 唤醒 / 潜水', preset: 'qq-chat-v2', scene: '仿真二代' }
+    { id: 'reserved', name: 'reserved', desc: '一代仿真群友 · 状态机主动参聊', preset: 'whale-chat', scene: '仿真一代' },
+    { id: 'reserved2', name: 'reserved2', desc: '二代仿真 · AI 自主收发 / 唤醒 / 潜水', preset: 'whale-chat-v2', scene: '仿真二代' }
   ],
   currentMode: 'chat',
   presets: [
-    { id: 'qq-chat', name: 'qq-chat', desc: 'QQ 安全聊天人格，仅附加 QQ 场景规则', model: 'deepseek-v3.2-exp', tools: 6,
+    { id: 'whale-chat', name: 'whale-chat', desc: 'QQ 安全聊天人格，仅附加 QQ 场景规则', model: 'deepseek-v3.2-exp', tools: 6,
       prompt: '你是 QQ 群聊 / 私聊中的 AI 桥接代理。规则：\n1. 只使用安全子集工具（收发消息 / 查历史 / 表情包）。\n2. 语气自然，像真人群友，短句为主，可用空格分条。\n3. 涉及敏感内容一律拒绝并提醒 Owner。\n4. 引用消息注意判断说话对象，不要误接话。' },
-    { id: 'qq-chat-v2', name: 'qq-chat-v2', desc: '二代仿真 · AI 自主看消息、发言、等待、设置唤醒', model: 'deepseek-v3.2-exp', tools: 9,
+    { id: 'whale-chat-v2', name: 'whale-chat-v2', desc: '二代仿真 · AI 自主看消息、发言、等待、设置唤醒', model: 'deepseek-v3.2-exp', tools: 9,
       prompt: '你是二代仿真群友。通过 qq_get_unread_messages 主动看消息，用 qq_send_message 发言；\n可以使用 set_wake_config 设置沉睡/唤醒，潜水时无需逐条回复。\n保持人设一致，控制发言频率（maxSendPerMinute）。' },
     { id: 'router-standard', name: 'router-standard', desc: 'closed-agent 完整工具，可在 QQ 上操控 DSH', model: 'deepseek-r1', tools: 14,
       prompt: '你是 Owner 的远程运维代理，运行在 closed-agent 模式。\n拥有完整 DSH 工具与 snowluma-host 进程控制（需显式开启）。\n执行前简要确认影响面，执行后回报结果。' }

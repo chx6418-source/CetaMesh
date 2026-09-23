@@ -1,7 +1,7 @@
 // 表情包体系自检：
 // 1) sticker-lib 纯函数（合并/查找/格式化/笔记/使用统计）
 // 2) 配置项与 MCP 工具描述存在性
-// 3) 可选 live 模式：QQ_BRIDGE_TEST_LIVE=1 时调用 SnowLuma 拉取收藏表情并验证 safeFetchBuffer 可抓图
+// 3) 可选 live 模式：WHALEBRIDGE_TEST_LIVE=1 时调用 SnowLuma 拉取收藏表情并验证 safeFetchBuffer 可抓图
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -124,7 +124,7 @@ console.log('## bridge 路由/函数存在性');
   }
 }
 
-if (process.env.QQ_BRIDGE_TEST_LIVE === '1') {
+if (process.env.WHALEBRIDGE_TEST_LIVE === '1') {
   console.log('## live：SnowLuma 收藏表情链路');
   try {
     const cfg = JSON.parse(fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8'));

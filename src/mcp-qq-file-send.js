@@ -20,7 +20,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
@@ -29,16 +28,15 @@ import { PINYIN } from './pinyin-data.js';
 import { parseAudioFile } from './audio-probe.js';
 import { synthesizeProsody } from './tts-prosody.js';
 import { kugouSearch, resolveSongUrl } from './kugou-api.js';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const ROOT = path.resolve(__dirname, '..');
+import { APP_PATHS } from './app-paths.js';
+import { isMainModule, reportEntrypointError } from './entrypoint.js';
 
 const AUDIO_EXTS = new Set(['.mp3', '.wav', '.flac', '.ogg', '.m4a', '.aac', '.amr', '.silk', '.opus', '.wma']);
 const DEFAULT_MAX_SIZE_MB = 25;
 
 function loadConfig() {
   try {
-    let text = fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8');
+    let text = fs.readFileSync(APP_PATHS.configFile, 'utf8');
     if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
     return JSON.parse(text);
   } catch {
@@ -81,7 +79,7 @@ async function onebot(cfg, action, params) {
 }
 
 // ── 本地 TTS 合成（GPT-SoVITS ayane，启动入口 start_api_ayane.bat，韵律自适应）/ 缓存 / 语音发送 ──
-const CACHE_DIR = path.join(ROOT, 'state', 'file-send-cache');
+const CACHE_DIR = APP_PATHS.fileSendCacheDir;
 
 function sanitizeQuery(query) {
   return String(query ?? '')
@@ -302,7 +300,7 @@ function resolveGain(cfg, gainArg) {
   return 1;
 }
 function ffmpegPath(cfg) {
-  return String(cfg.fileSend?.ffmpegPath ?? '').trim() || path.join(ROOT, 'tools', 'ffmpeg', 'ffmpeg.exe');
+  return String(cfg.fileSend?.ffmpegPath ?? '').trim() || path.join(APP_PATHS.toolsDir, 'ffmpeg', 'ffmpeg.exe');
 }
 function ffmpegExists(cfg) {
   try { return fs.existsSync(ffmpegPath(cfg)); } catch { return false; }
@@ -760,10 +758,16 @@ server.tool(
   }
 );
 
-// 启动标记：写入 state/mcp-qq-file-send.version（时间戳），供确认 MCP 进程已加载本版代码。
-try {
-  fs.mkdirSync(path.join(ROOT, 'state'), { recursive: true });
-  fs.writeFileSync(path.join(ROOT, 'state', 'mcp-qq-file-send.version'), 'kugou-gateway-resolve ' + new Date().toISOString() + '\n');
-} catch {}
+export async function runMcpQqFileSend(transport = new StdioServerTransport()) {
+  // 启动标记：写入 state/mcp-qq-file-send.version（时间戳），供确认 MCP 进程已加载本版代码。
+  try {
+    fs.mkdirSync(APP_PATHS.stateDir, { recursive: true });
+    fs.writeFileSync(path.join(APP_PATHS.stateDir, 'mcp-qq-file-send.version'), 'kugou-gateway-resolve ' + new Date().toISOString() + '\n');
+  } catch {}
+  await server.connect(transport);
+  return server;
+}
 
-await server.connect(new StdioServerTransport());
+if (isMainModule(import.meta.url)) {
+  runMcpQqFileSend().catch((error) => reportEntrypointError('mcp-qq-file-send', error));
+}

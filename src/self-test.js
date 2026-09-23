@@ -8,24 +8,21 @@
 // 说明：不靠 session/follow 的实时事件——该流在会话空闲时会「推完快照就结束」，
 // 订阅时机稍晚就会整轮漏掉（曾表现为「等待回复超时」）。快照本身带完整历史，
 // 这里改为轮询快照里最后一条 assistant 文本，稳定且不依赖订阅时序。
-import { fileURLToPath } from 'node:url';
-import path from 'node:path';
 import fs from 'node:fs';
 import { NodeApiClient } from './dsh-client.js';
+import { APP_PATHS } from './app-paths.js';
+import { isMainModule, reportEntrypointError } from './entrypoint.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const ROOT = path.resolve(__dirname, '..');
-
-async function main() {
-  const baseUrl = process.argv[2] ?? 'http://127.0.0.1:3080';
+export async function runSelfTest(options = {}) {
+  const baseUrl = options.baseUrl ?? process.argv[2] ?? 'http://127.0.0.1:3080';
   const api = new NodeApiClient(baseUrl);
-  const promptText = process.argv[3] ?? '只回复两个字：收到';
+  const promptText = options.promptText ?? process.argv[3] ?? '只回复两个字：收到';
 
   await api.callEndpoint('settings/describe', {});
   console.log('✅ DSH 连接成功（settings/describe 探活通过）');
 
   // 独立测试会话，cwd 用临时目录
-  const cwd = path.join(ROOT, 'state', 'self-test');
+  const cwd = APP_PATHS.selfTestDir;
   fs.mkdirSync(cwd, { recursive: true });
   const created = await api.callEndpoint('session/create', { request: { cwd } });
   const sessionId = created.sessionId;
@@ -77,10 +74,8 @@ async function main() {
   console.log('🤖 agent 回复:');
   console.log(state.text);
   console.log('🎉 自测通过 —— DSH 侧链路可用');
-  process.exit(0);
 }
 
-main().catch((error) => {
-  console.error('❌ 自测失败:', error?.message ?? error);
-  process.exit(1);
-});
+if (isMainModule(import.meta.url)) {
+  runSelfTest().catch((error) => reportEntrypointError('self-test', error));
+}

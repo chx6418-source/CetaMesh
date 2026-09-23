@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * QQ 桥接控制台 · UI Demo 构建脚本（已选型：海盐苏打 软糖拟物 × 糖果玻璃融合）
+ * 鲸桥控制台 · UI Demo 构建脚本（已选型：海盐苏打 软糖拟物 × 糖果玻璃融合）
  * 用法: node design-demos/src/build.mjs
  * 产物: design-demos/fusion-4-soda.html + index.html
  * 未选中的方案已归档至 design-demos/archive/（git 忽略，不入库）
@@ -68,7 +68,7 @@ const indexHtml = `<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>QQ 桥接控制台 · 已选型方案预览</title>
+<title>鲸桥控制台 · 已选型方案预览</title>
 <style>
   body { margin: 0; min-height: 100vh; display: grid; place-items: center; color: #333d5c;
     font-family: "Segoe UI", system-ui, "Microsoft YaHei", sans-serif;
