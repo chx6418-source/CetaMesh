@@ -1,165 +1,180 @@
-# CetaMesh Mobile
+# CetaMesh
 
-Independent React Native/TypeScript mobile node. M0–M4 foundations and the M5–M8
-Device Mesh track are implemented: Task/Approval, trusted transport and durable
-sync contracts, local-only inbox/voice foundations, Action Center, and safe
-declarative extensions. Mobile remains usable without Desktop, DSH or QQ; a
-peer is an optional future mesh participant. See [PROJECT_STATE.md](PROJECT_STATE.md),
-[M5–M8 implementation acceptance](docs/acceptance/M5_M8_IMPLEMENTATION.md),
-and [current architecture](docs/architecture/MOBILE_ARCHITECTURE.md).
+**CetaMesh** is a local-first AI node and collaboration runtime designed to connect conversations, memory, tasks, tools, devices, and external model providers without making any single platform the center of the system.
 
-The repository/Node/JavaScript gate passes locally. Android Debug Build/APK
-static evidence is retained from CI, but the current Linux workspace has not
-run a fresh APK install/start, iOS native compilation, physical capability
-behavior, Push delivery, or real Desktop/Server interoperability. Those items
-are explicitly not claimed as PASS.
+> 当前公开仓库首先提供 **CetaMesh Mobile** 基线。移动端是独立的 CetaMesh Node，不依赖 Desktop、QQ、DSH 或中心服务器才能运行其本地能力。
 
-Memory works offline without Provider setup: open Memory to create/search/edit/
-pin/delete local records. In Chat, “提取记忆候选” previews explicit “记住/Remember”
-requests; each needs confirmation. Scope is local-only and memories are never
-automatically uploaded or sent to a model.
-See [M2 architecture](docs/architecture/M2_LOCAL_MEMORY.md) and
-[M2 acceptance](docs/acceptance/M2_ACCEPTANCE.md).
+CetaMesh is still under active development. Interfaces, protocols, and product behavior may change before a stable release.
 
-Open Devices to view the hardware-backed public device identity and scan a
-compatible peer's short-lived pairing QR. Confirm the HTTPS destination before
-key exchange, then compare the device ID/public key and explicitly confirm trust.
-Trusted devices can be removed. Chat and Memory work without a paired device.
-Pairing does not start sync or upload Memory. Android requires a hardware-backed
-Keystore; iOS requires Secure Enclave, so pairing may be unavailable on simulators.
-The Desktop repository has not been changed; real peer interoperability is still
-pending. See [M3 architecture](docs/architecture/M3_IDENTITY_PAIRING.md),
-[wire contract](docs/protocol/M3_PAIRING_V1.md) and
-[acceptance](docs/acceptance/M3_ACCEPTANCE.md).
+## What CetaMesh is building
 
-Configure a trusted HTTPS Chat Completions provider, save its key in system
-secure storage, then enter/discover a Model ID and create a chat. Model,
-reasoning and mode are saved per session. Smart currently uses the model only.
-Text documents and JPEG/PNG/WebP images can be selected through permissioned
-pickers; no content is uploaded until Send. Desktop/DSH/QQ are not required.
+CetaMesh is intended to grow beyond a single chat client. The long-term direction is a network of independent nodes that can cooperate while keeping capability boundaries, user approval, workspace scope, and memory authorization explicit.
 
-M5–M8 additions are intentionally contract-first. Tasks are CetaMesh-owned and
-reference replaceable Provider/Session executions. Memory synchronization is
-limited to an explicitly authorized `my-devices` scope; Task synchronization
-contains state and artifact metadata, not transcripts. Remote capabilities are
-finally authorized by the local device. Extensions are declarative or
-remote-transport data only: no downloaded JavaScript, executable payload,
-unrestricted shell or unrestricted native bridge.
+The current Mobile baseline includes:
 
-Run `npm ci`, then `npm run check` for local automated checks. Android uses the
-committed Gradle wrapper and SDK/NDK versions in android/build.gradle
-(SDK 37, Build Tools 37.0.0, NDK 27.1.12297006, minimum Android API 24).
-The published SDK Manager platform package is `platforms;android-37.0`, not
-`platforms;android-37`; CI installs that explicit package without lowering API level.
-CI verifies the Debug APK signature, manifest/permissions, configured ABIs and M3
-native module presence with `scripts/verify-android-debug-apk.sh` before upload.
-Install those using Android Studio, configure ANDROID_HOME, and use
-`npm run android:debug` to build or `npm run android` to install.
-iOS native build requires macOS/Xcode and Pods. Commands below are the standard
-React Native setup reference; Android CI is verified above, while local native
-startup and iOS build have not been verified in this environment.
+- **Chat** — configurable model providers, sessions, reasoning options, streaming, attachments, retry/cancel, and token-usage handling.
+- **Local Memory** — offline create/search/edit/pin/delete, explicit memory candidates, confirmation before long-term writes, and local-first storage.
+- **Tasks & Approvals** — CetaMesh-owned task state, execution references, attention events, approvals, and Action Center flows.
+- **Device Mesh foundations** — device identity, pairing, trust metadata, capability advertisement, presence/sync contracts, and bounded peer communication.
+- **Capability Runtime** — permission-gated access to camera, microphone, files/photos, notifications, QR scanning, and remote capability requests.
+- **Extensions** — declarative and remote-transport extension contracts with validation, permission review, lifecycle handling, and no downloaded executable JavaScript path.
+- **Android / iOS native bridges** — React Native shared product code with Kotlin and Swift providers behind capability interfaces.
 
-# Getting Started
+## Core principles
 
-> **Note**: Make sure you have completed the [Set Up Your Environment](https://reactnative.dev/docs/set-up-your-environment) guide before proceeding.
+CetaMesh follows a few architectural rules that are more important than any individual feature:
 
-## Step 1: Start Metro
+1. **Local first.** Local chat state, memory, task state, and identity should remain useful without a CetaMesh cloud service.
+2. **Task is not Session.** Tasks belong to CetaMesh; model/provider sessions are replaceable execution references.
+3. **Trust is not permission.** A trusted device still needs local authorization before a capability executes.
+4. **Advertisement is not authorization.** A peer may advertise a capability without automatically receiving permission to invoke it.
+5. **Memory is scoped before retrieval.** Authorization is evaluated before ranking or synchronization.
+6. **Native access is bounded.** Product features do not call unrestricted Android/iOS APIs directly; they go through capability contracts and policy.
+7. **No hidden executable plugin path.** The current extension system does not download or execute arbitrary JavaScript, shell commands, or unrestricted native code.
 
-First, you will need to run **Metro**, the JavaScript build tool for React Native.
+## Repository status
 
-To start the Metro dev server, run the following command from the root of your React Native project:
+The current public repository contains the **CetaMesh Mobile** source baseline at the repository root.
 
-```sh
-# Using npm
-npm start
+Primary stack:
 
-# OR using Yarn
-yarn start
+- React Native
+- TypeScript
+- Kotlin for Android native providers
+- Swift / Objective-C++ bridges for iOS native providers
+- SQLite for local structured data
+
+The project is currently **pre-stable**. Automated checks cover TypeScript, linting, architecture boundaries, unit/integration behavior, and Android CI build/verification. Hardware-specific behavior and cross-device interoperability still require real-device validation as development continues.
+
+For the detailed implementation record, see [PROJECT_STATE.md](PROJECT_STATE.md).
+
+## Repository layout
+
+```text
+.
+├── android/                 Android project and native capability providers
+├── ios/                     iOS project and native capability providers
+├── src/
+│   ├── app/                 Bootstrap and composition
+│   ├── data/                SQLite/database repositories and migrations
+│   ├── domain/              Platform-independent contracts and entities
+│   ├── features/            Product UI/features
+│   ├── native/              React Native native-provider adapters
+│   ├── protocol/            Pairing / Device Mesh protocol contracts
+│   ├── providers/           Model/network/update/desktop adapters
+│   ├── runtime/             Chat, task, memory, capability and sync runtimes
+│   ├── security/            Capability / memory / attachment policies
+│   ├── shared/              UI, i18n, errors, utilities and logging
+│   └── test/                Automated test suite
+├── docs/                    Architecture, protocol, security and acceptance docs
+├── PROJECT_STATE.md         Current implementation and verification state
+├── AGENTS.md                Repository rules for coding agents
+└── LICENSE                  GNU GPL v3
 ```
 
-## Step 2: Build and run your app
+## Quick start
 
-With Metro running, open a new terminal window/pane from the root of your React Native project, and use one of the following commands to build and run your Android or iOS app:
+### Requirements
+
+- Node.js **22.11+**
+- npm
+- Android Studio + Android SDK for Android builds
+- macOS + Xcode + CocoaPods for iOS native builds
+
+Install dependencies:
+
+```bash
+npm ci
+```
+
+Run the full repository check:
+
+```bash
+npm run check
+```
+
+This runs TypeScript checks, ESLint, architecture-boundary checks, and the Jest test suite.
 
 ### Android
 
-```sh
-# Using npm
-npm run android
+Start Metro for development:
 
-# OR using Yarn
-yarn android
+```bash
+npm start
 ```
+
+Then install/run the development app:
+
+```bash
+npm run android
+```
+
+Or build a Debug APK without installing it:
+
+```bash
+npm run android:debug
+```
+
+The repository also contains Android CI and standalone/debug APK verification scripts under `.github/workflows/` and `scripts/`.
 
 ### iOS
 
-For iOS, remember to install CocoaPods dependencies (this only needs to be run on first clone or after updating native deps).
+On macOS:
 
-The first time you create a new project, run the Ruby bundler to install CocoaPods itself:
-
-```sh
+```bash
 bundle install
-```
-
-Then, and every time you update your native dependencies, run:
-
-```sh
+cd ios
 bundle exec pod install
-```
-
-For more information, please visit [CocoaPods Getting Started guide](https://guides.cocoapods.org/using/getting-started.html).
-
-```sh
-# Using npm
+cd ..
 npm run ios
-
-# OR using Yarn
-yarn ios
 ```
 
-If everything is set up correctly, you should see your new app running in the Android Emulator, iOS Simulator, or your connected device.
+iOS support exists in the source tree, but native verification should be treated separately from Android CI.
 
-This is one way to run your app — you can also build it directly from Android Studio or Xcode.
+## Model providers and privacy
 
-## Step 3: Modify your app
+CetaMesh does not bundle a model API key.
 
-Now that you have successfully run the app, let's make changes!
+Provider credentials are configured by the user and are intended to be stored through platform secure storage. Chat content is sent to the provider selected by the user when a request is made. Local Memory is not automatically uploaded merely because a model provider is configured.
 
-Open `App.tsx` in your text editor of choice and make some changes. When you save, your app will automatically update and reflect these changes — this is powered by [Fast Refresh](https://reactnative.dev/docs/fast-refresh).
+Before using a third-party model provider, review that provider's privacy, retention, pricing, and acceptable-use terms.
 
-When you want to forcefully reload, for example to reset the state of your app, you can perform a full reload:
+## Security model
 
-- **Android**: Press the <kbd>R</kbd> key twice or select **"Reload"** from the **Dev Menu**, accessed via <kbd>Ctrl</kbd> + <kbd>M</kbd> (Windows/Linux) or <kbd>Cmd ⌘</kbd> + <kbd>M</kbd> (macOS).
-- **iOS**: Press <kbd>R</kbd> in iOS Simulator.
+The current Mobile architecture uses explicit capability routing and permission policy for sensitive device operations. Unknown capabilities default to denial, and trust/pairing does not automatically grant execution permission.
 
-## Congratulations! :tada:
+Please do **not** publish vulnerability details in a public issue. See [SECURITY.md](SECURITY.md) for the disclosure process.
 
-You've successfully run and modified your React Native App. :partying_face:
+## Documentation
 
-### Now what?
+Useful starting points:
 
-- If you want to add this new React Native code to an existing application, check out the [Integration guide](https://reactnative.dev/docs/integration-with-existing-apps).
-- If you're curious to learn more about React Native, check out the [docs](https://reactnative.dev/docs/getting-started).
+- [Project state](PROJECT_STATE.md)
+- [Mobile architecture](docs/architecture/MOBILE_ARCHITECTURE.md)
+- [Protocol v1](docs/protocol/PROTOCOL_V1.md)
+- [Mobile security notes](docs/security/MOBILE_SECURITY.md)
+- [Mobile acceptance status](docs/acceptance/MOBILE_ACCEPTANCE.md)
+- [Open-source policy](OPEN_SOURCE.md)
+- [Contributing guide](CONTRIBUTING.md)
 
-# Troubleshooting
+## Contributing
 
-If you're having issues getting the above steps to work, see the [Troubleshooting](https://reactnative.dev/docs/troubleshooting) page.
+Contributions are welcome while the project evolves. Please read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 
-# Learn More
+Keep changes focused, preserve architecture/security boundaries, add or update tests when behavior changes, and run:
 
-To learn more about React Native, take a look at the following resources:
+```bash
+npm run check
+```
 
-- [React Native Website](https://reactnative.dev) - learn more about React Native.
-- [Getting Started](https://reactnative.dev/docs/environment-setup) - an **overview** of React Native and how setup your environment.
-- [Learn the Basics](https://reactnative.dev/docs/getting-started) - a **guided tour** of the React Native **basics**.
-- [Blog](https://reactnative.dev/blog) - read the latest official React Native **Blog** posts.
-- [`@facebook/react-native`](https://github.com/facebook/react-native) - the Open Source; GitHub **repository** for React Native.
+before submitting.
 
-## Debug signing
+## License
 
-Signing keys are not committed. CI generates a disposable Debug key per run.
-For local Android builds, first generate `android/app/debug.keystore` using the
-`Generate disposable Debug signing key` command in `.github/workflows/android-ci.yml`.
-CI APKs from different runs use different keys; Android may require uninstalling
-the earlier APK (which clears its data). For upgrade/persistence acceptance, build
-both versions locally with the same locally retained Debug key.
+CetaMesh source code in this repository is licensed under the **GNU General Public License v3.0 only (GPL-3.0-only)** unless a file or bundled third-party component states otherwise.
+
+The full legal text is in [LICENSE](LICENSE). A practical project-level explanation of redistribution, contributions, third-party code, and branding is available in [OPEN_SOURCE.md](OPEN_SOURCE.md).
+
+## Project stage
+
+CetaMesh is currently an actively developed open-source project, not a finished security-audited production platform. Please evaluate builds, permissions, provider configuration, and device-to-device features carefully before relying on them for sensitive or critical workloads.
