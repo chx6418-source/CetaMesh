@@ -1,0 +1,129 @@
+name: Android CI
+
+on:
+  push:
+    branches:
+      - main
+      - "develop/**"
+      - "feature/**"
+      - "recovery/**"
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: "22"
+  JAVA_VERSION: "17"
+  ANDROID_API_LEVEL: "37"
+  ANDROID_PLATFORM_PACKAGE: "platforms;android-37.0"
+  ANDROID_BUILD_TOOLS: "37.0.0"
+  ANDROID_NDK_VERSION: "27.1.12297006"
+
+jobs:
+  android:
+    name: Typecheck, Test & Standalone APK Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Set up JDK
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Install required Android SDK packages
+        shell: bash
+        run: |
+          sdkmanager \
+            "platform-tools" \
+            "${ANDROID_PLATFORM_PACKAGE}" \
+            "build-tools;${ANDROID_BUILD_TOOLS}" \
+            "ndk;${ANDROID_NDK_VERSION}"
+
+      - name: Set up Gradle cache
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-provider: basic
+
+      - name: Show toolchain versions
+        shell: bash
+        run: |
+          node --version
+          npm --version
+          java -version
+          adb version
+          sdkmanager --version
+          grep -n "distributionUrl" android/gradle/wrapper/gradle-wrapper.properties || true
+
+      - name: Install JavaScript dependencies
+        run: npm ci
+
+      - name: TypeScript, lint, architecture and unit checks
+        run: npm run check
+
+      - name: Make Gradle wrapper executable
+        run: chmod +x android/gradlew
+
+      - name: Validate Gradle wrapper
+        working-directory: android
+        run: ./gradlew --version --no-daemon
+
+      - name: Generate disposable beta signing key
+        run: |
+          keytool -genkeypair -noprompt -keystore android/app/debug.keystore \
+            -storepass android -alias androiddebugkey -keypass android \
+            -keyalg RSA -keysize 2048 -validity 30 \
+            -dname "CN=Android Debug,O=Android,C=US"
+
+      - name: Build Android Standalone APK
+        working-directory: android
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: Verify Android Standalone APK
+        env:
+          ANDROID_BUILD_TOOLS_DIR: ${{ env.ANDROID_HOME }}/build-tools/${{ env.ANDROID_BUILD_TOOLS }}
+        run: bash scripts/verify-android-standalone-apk.sh android/app/build/outputs/apk/release/app-release.apk
+
+      - name: Upload Standalone APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: cetamesh-mobile-android-standalone-${{ github.sha }}
+          path: android/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload Android build reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-build-reports-${{ github.sha }}
+          path: |
+            android/app/build/reports/**
+            android/build/reports/**
+          if-no-files-found: ignore
+          retention-days: 7

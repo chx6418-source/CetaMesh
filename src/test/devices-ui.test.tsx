@@ -1,0 +1,57 @@
+import React from 'react';
+import renderer,{act} from 'react-test-renderer';
+import {DevicesScreen} from '../features/devices/DevicesScreen';
+import {IdentityRuntime} from '../runtime/identity/IdentityRuntime';
+import {PairingRuntime} from '../runtime/identity/PairingRuntime';
+import {NodeDatabase} from './helpers/NodeDatabase';
+import {migrateDatabase} from '../data/database/MigrationEngine';
+import {appMigrations} from '../data/migrations/AppMigrations';
+import {SqliteTrustRepository} from '../data/repositories/SqliteTrustRepository';
+import {pairingFixture} from './helpers/PairingPeer';
+import type {MobileServices} from '../runtime/session/MobileServices';
+import {CetaError} from '../shared/errors/CetaError';
+it('shows destination before exchange, explicit trust confirmation and trusted device without leaking token',async()=>{
+ const f=pairingFixture(),db=new NodeDatabase();await migrateDatabase(db,appMigrations);
+ const identity=new IdentityRuntime(f.mobile),pairing=new PairingRuntime(identity,f.mobile,new SqliteTrustRepository(db),f.transport,()=>Date.parse('2026-09-30T00:00:00.000Z'));
+ const services={identity,pairing,qrScanner:{scan:async()=>f.raw,cancel:()=>{}}} as unknown as MobileServices;
+ let tree!:renderer.ReactTestRenderer;
+ await act(async()=>{tree=renderer.create(<DevicesScreen services={services} onBack={()=>{}}/>);});
+ expect(JSON.stringify(tree.toJSON())).toContain('尚无受信任设备');
+ const click=async(id:string)=>act(async()=>{await tree.root.findByProps({testID:id}).props.onPress();});
+ await click('scan-pairing');expect(f.calls()).toBe(0);expect(JSON.stringify(tree.toJSON())).toContain('https://desktop.example');expect(JSON.stringify(tree.toJSON())).not.toContain(f.invitation.token);
+ await click('pairing-exchange');expect(await pairing.listTrust()).toEqual([]);
+ await click('pairing-confirm');expect((await pairing.listTrust()).length).toBe(1);expect(JSON.stringify(tree.toJSON())).toContain('Desktop');
+ await act(async()=>tree.unmount());await db.close();
+});
+it('finishes confirmation before a delayed trust refresh and displays persisted trust',async()=>{
+ const f=pairingFixture(),db=new NodeDatabase();await migrateDatabase(db,appMigrations);
+ const identity=new IdentityRuntime(f.mobile),pairing=new PairingRuntime(identity,f.mobile,new SqliteTrustRepository(db),f.transport,()=>Date.parse('2026-09-30T00:00:00.000Z'));
+ const list=pairing.listTrust.bind(pairing);let finish!:(v:Awaited<ReturnType<typeof list>>)=>void;
+ jest.spyOn(pairing,'listTrust').mockImplementationOnce(list).mockImplementationOnce(()=>new Promise(resolve=>{finish=resolve;}));
+ const services={identity,pairing,qrScanner:{scan:async()=>f.raw,cancel:()=>{}}} as unknown as MobileServices;
+ let tree!:renderer.ReactTestRenderer;
+ await act(async()=>{tree=renderer.create(<DevicesScreen services={services} onBack={()=>{}}/>);});
+ const click=async(id:string)=>act(async()=>{await tree.root.findByProps({testID:id}).props.onPress();});
+ await click('scan-pairing');await click('pairing-exchange');
+ let confirmation!:Promise<void>;
+ await act(async()=>{confirmation=tree.root.findByProps({testID:'pairing-confirm'}).props.onPress();for(let n=0;n<30;n++){await Promise.resolve();}});
+ expect((await list()).length).toBe(1);
+ expect(tree.root.findAllByProps({testID:'pairing-cancel'})).toHaveLength(0);
+ await act(async()=>{finish(await list());await confirmation;});
+ expect(tree.root.findAllByProps({testID:'remove-trust-desktop-1'}).length).toBeGreaterThan(0);
+ await act(async()=>tree.unmount());await db.close();
+});
+
+it('does not show an empty trusted-device state when the trust list fails',async()=>{
+ const f=pairingFixture(),db=new NodeDatabase();await migrateDatabase(db,appMigrations);
+ const identity=new IdentityRuntime(f.mobile),pairing=new PairingRuntime(identity,f.mobile,new SqliteTrustRepository(db),f.transport,()=>Date.parse('2026-09-30T00:00:00.000Z'));
+ jest.spyOn(pairing,'listTrust').mockRejectedValue(new CetaError('network_unavailable','Connection lost'));
+ const services={identity,pairing,qrScanner:{scan:async()=>f.raw,cancel:()=>{}}} as unknown as MobileServices;
+ let tree!:renderer.ReactTestRenderer;
+ await act(async()=>{tree=renderer.create(<DevicesScreen services={services} onBack={()=>{}}/>);});
+ expect(tree.root.findAllByProps({testID:'trusted-devices-empty'})).toHaveLength(0);
+ const output=JSON.stringify(tree.toJSON());
+ expect(output).toContain('网络不可用，请连接后重试。');
+ expect(output).toContain('Trusted devices unavailable');
+ await act(async()=>tree.unmount());await db.close();
+});
