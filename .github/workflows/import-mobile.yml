@@ -1,0 +1,34 @@
+name: Import CetaMesh Mobile source
+on:
+  push:
+    paths:
+      - ".github/workflows/import-mobile.yml"
+permissions:
+  contents: write
+jobs:
+  import-mobile:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout target repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Import mobile baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin import/mobile-2026-10-03
+          git checkout import/mobile-2026-10-03
+          tmp="$(mktemp -d)"
+          git clone --no-checkout https://github.com/chx6418-source/cetamesh-mobile.git "$tmp/source"
+          git -C "$tmp/source" checkout 59b42898931db8b6ecad59d743d09d6748b7b608
+          rsync -a --delete --exclude=".git/" "$tmp/source/" ./
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to import."
+            exit 0
+          fi
+          git commit -m "chore: import CetaMesh Mobile source baseline"
+          git push origin HEAD:import/mobile-2026-10-03
