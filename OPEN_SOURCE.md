@@ -1,5 +1,7 @@
 # CetaMesh Open-Source Policy
 
+**English** | [简体中文](OPEN_SOURCE.zh-CN.md)
+
 This document explains how the CetaMesh repository is intended to be used and contributed to. It is a project guide, not a replacement for the legal text of the license.
 
 ## License

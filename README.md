@@ -1,5 +1,7 @@
 # CetaMesh
 
+**English** | [简体中文](README.zh-CN.md)
+
 **CetaMesh** is a local-first AI node and collaboration runtime designed to connect conversations, memory, tasks, tools, devices, and external model providers without making any single platform the center of the system.
 
 > 当前公开仓库首先提供 **CetaMesh Mobile** 基线。移动端是独立的 CetaMesh Node，不依赖 Desktop、QQ、DSH 或中心服务器才能运行其本地能力。
