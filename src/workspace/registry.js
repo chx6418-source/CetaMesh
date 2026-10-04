@@ -138,7 +138,10 @@ export function createWorkspaceRegistry({ file, now = () => Date.now() } = {}) {
     },
 
     list() {
-      return state.workspaces.map((entry) => ({ ...entry }));
+      // Recent Workspaces：按最近打开倒序（未打开过的排最后，同序按登记时间倒序）。
+      return [...state.workspaces]
+        .sort((a, b) => (b.lastOpenedAt - a.lastOpenedAt) || (b.createdAt - a.createdAt))
+        .map((entry) => ({ ...entry }));
     },
 
     get(id) {

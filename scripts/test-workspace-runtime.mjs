@@ -332,6 +332,21 @@ await check('registry: open 设为当前工作区', async () => {
   assert.equal(read.content, 'hello workspace');
 });
 
+await check('registry: list 按最近打开倒序（Recent Workspaces）', async () => {
+  const newer = await service.execute({
+    method: 'workspace.create',
+    params: { name: 'Newer', root: wsPath('newer-root'), createIfMissing: true }
+  });
+  const listedBefore = await service.execute({ method: 'workspace.list', params: {} });
+  assert.equal(listedBefore.workspaces[0].id, WS, '刚打开的 WS 应排最前');
+  await service.execute({ method: 'workspace.open', params: { id: newer.workspace.id } });
+  const listedAfter = await service.execute({ method: 'workspace.list', params: {} });
+  assert.equal(listedAfter.workspaces[0].id, newer.workspace.id, '最近打开的工作区应排最前');
+  // 还原当前工作区，避免影响后续用例。
+  await service.execute({ method: 'workspace.open', params: { id: WS } });
+  await service.execute({ method: 'workspace.remove', params: { id: newer.workspace.id } });
+});
+
 await check('registry: remove 只移除登记，目录保留', async () => {
   const temp2 = await service.execute({
     method: 'workspace.create',

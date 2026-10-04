@@ -487,13 +487,13 @@ Work/Artifacts/Decisions/MemoryRefs 全部保留）、**更换 Agent Provider**�
   - `service.js`：IPC 方法白名单 `workspace.*`（create/list/open/rename/remove/info/settings/read/write/file.search/git.status/git.diff/git.commit/test.run/pending.list/pending.decide）。git.commit 按工作区策略：`allow` 直通 / `approval`（默认）进入待审批，由 `workspace.pending.decide` 显式批准后才执行 / `deny` 拒绝。`workspace.info` 聚合 git 状态、最近文件、产物、活动流、待审批、Task 关联位（Persistent Task 冻结中显示未启用）。
   - `index.js`：统一出口。
 - `desktop-shell/src/workspace_ui.rs`（新）：Workspace 产品页（清单/新建/重命名/从清单移除/设置/工具动作/commit 审批/最近文件/产物/Agent 活动/任务关联位）。镜像 `memory_ui.rs` 契约：只维护状态与 `WorkspaceAction` 意图，IPC 由 `native_ui.rs` 下发；含 3 个单元测试。`native_ui.rs` 接线（Area/Operation/字段/初始化/页面/响应刷新型链）与 `native_main.rs` 的 `mod` 声明。
-- `scripts/test-workspace-runtime.mjs`（服务层验收，46 项）+ `scripts/test-workspace-ipc.mjs`（IPC 端到端，11 项）+ `package.json` 的 `test-workspace` 脚本。
+- `scripts/test-workspace-runtime.mjs`（服务层验收，47 项）+ `scripts/test-workspace-ipc.mjs`（IPC 端到端，11 项）+ `package.json` 的 `test-workspace` 脚本。
 
 ### 本阶段验证（本机实测）
 
 | 检查 | 状态 | 说明 |
 | --- | --- | --- |
-| `node scripts/test-workspace-runtime.mjs` | `PASS` | 46/46：正常读写/搜索/git 全流程 + 全部 escape case（`../`、多级穿越、绝对路径、junction 读写逃逸、`.. ` 尾部空格、UNC/`\\?\`、NUL、保留设备名读写、盘符相对路径）+ Windows 行为（大小写不敏感、8.3 短名归一、危险 root 拒绝）+ 清单生命周期（remove 不删目录）+ commit 三策略（allow/approval 批准与拒绝/deny）+ test.run（成功/失败码/cwd 断言） |
+| `node scripts/test-workspace-runtime.mjs` | `PASS` | 47/47：正常读写/搜索/git 全流程 + 全部 escape case（`../`、多级穿越、绝对路径、junction 读写逃逸、`.. ` 尾部空格、UNC/`\\?\`、NUL、保留设备名读写、盘符相对路径）+ Windows 行为（大小写不敏感、8.3 短名归一、危险 root 拒绝）+ 清单生命周期（remove 不删目录、Recent Workspaces 最近打开排序）+ commit 三策略（allow/approval 批准与拒绝/deny）+ test.run（成功/失败码/cwd 断言） |
 | `node scripts/test-workspace-ipc.mjs` | `PASS` | 11/11：真实 Core worker + 真实命名管道（`\\.\pipe\…`）往返；`workspace.*` 经 bridge.js 接线可达；`../` 与绝对路径逃逸在 IPC 层返回 `BOUNDARY_ESCAPE` 错误帧；清单持久化在隔离 data-dir |
 | `cargo test`（desktop-shell） | `PASS` | 79 passed（含 workspace_ui 3 项单元测试） |
 | `cargo check` | `PASS` | 0 error；0 warning（本阶段文件）；既有 warning 6 项（`show_product_placeholder` 全页面实现后成为死代码等，未处置） |
