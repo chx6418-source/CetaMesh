@@ -70,6 +70,8 @@ import {
   markStickerUsed
 } from './sticker-lib.js';
 import { loginInfo, extractKugouAuth, createQrLogin, pollQrLogin } from './kugou-api.js';
+import { createMemoryService } from './memory/service.js';
+import { createTaskService } from './task/service.js';
 import { createLocalServiceManager, SNOWLUMA_RELEASE_PAGE, DSH_INSTALL_HINT } from './local-services.js';
 import { CONTROL_METHODS, ControlServiceError, createControlService } from './control/control-service.js';
 import { startIpcProtocol } from './control/ipc-protocol.js';
@@ -439,20 +441,29 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const convKey = (kind, id) => `${kind}:${id}`;
 const SEND_TIMEOUT_MS = 15000;
 
-function startUiIpcServer(controlService) {
+function startUiIpcServer(controlService, memoryService, taskService) {
   const pipeName = String(process.env.WHALEBRIDGE_UI_PIPE ?? '').trim();
   if (!pipeName) return null;
 
+  const dispatchCommand = ({ method, params }) => {
+    if (method.startsWith('memory.')) {
+      return memoryService.execute({ method, params });
+    }
+    if (method.startsWith('task.')) {
+      return taskService.execute({ method, params });
+    }
+    return controlService.execute({
+      method,
+      params,
+      actor: { privilege: PRIVILEGE_CONSOLE }
+    });
+  };
   const server = net.createServer((socket) => {
     socket.setNoDelay(true);
     const connection = startIpcProtocol({
       input: socket,
       output: socket,
-      dispatch: ({ method, params }) => controlService.execute({
-        method,
-        params,
-        actor: { privilege: PRIVILEGE_CONSOLE }
-      })
+      dispatch: dispatchCommand
     });
     connection.done.catch((error) => {
       if (!socket.destroyed) log(`Native UI IPC connection failed: ${error?.message ?? error}`);
@@ -1883,7 +1894,18 @@ async function main() {
       },
       log
     });
-    startUiIpcServer(controlService);
+    // 统一 Memory Runtime（阶段 04）与 Persistent Task v1（阶段 07）的 Core 侧接线。
+    const memoryService = createMemoryService({
+      stateDir: STATE_DIR,
+      socialV2File: SOCIAL_V2_FILE,
+      audit: (decision) => {
+        if (decision.action !== 'read') {
+          log('Memory ' + decision.action + ' by ' + decision.principal.kind + ':' + decision.principal.id);
+        }
+      }
+    });
+    const taskService = createTaskService({ stateDir: STATE_DIR });
+    startUiIpcServer(controlService, memoryService, taskService);
     const server = http.createServer(async (req, res) => {
       const url = new URL(req.url ?? '/', `http://127.0.0.1:${port}`);
       const SECURITY_HEADERS = {

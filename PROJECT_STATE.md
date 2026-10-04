@@ -52,6 +52,78 @@
 
 ---
 
+## 阶段 07 — Persistent Task v1（2026-10-04）
+
+**冻结已由所有者显式解除**：本阶段按所有者直接指令实施 Persistent Task v1，
+取代此前「Persistent Task v1 / Context Rollover / Agent Handoff 维持搁置」的记录。
+
+核心原则落地：**Task 属于 CetaMesh，不属于 Agent Session**。
+一个 Task 可先后绑定多个 Agent Provider 的 Session，更换 Provider 只追加 `agentHistory`，任务 id 永不改变。
+
+### 已完成（本次提交内容）
+
+- `src/task/`（新增）Persistent Task 运行时：
+  - `types.js`：8 个状态 `queued|running|waiting|blocked|paused|completed|failed|cancelled`；
+    **显式迁移表** `TASK_TRANSITIONS`（终态不可再迁移）；`ATTENTION_STATUSES` 定义 Needs Attention。
+  - `store.js`：原子写（临时文件 + rename、0600）+ 每任务 `rev` 的显式冲突检测；损坏 fail-closed。
+  - `runtime.js`：生命周期（start/pause/resume/wait/block/complete/fail/cancel）、
+    Agent Provider 绑定与切换、Checkpoint、Completed/Pending Work、Artifacts、Decisions、
+    Memory References、Acceptance Criteria、Progress、`overview` 页面聚合。
+  - `service.js` / `index.js`：`task.*` 方法白名单。
+- `desktop-shell/src/task_ui.rs`（新增）：Tasks 产品页——Task list / Create / Open / Pause / Resume /
+  Cancel / Status / Progress / Needs Attention / Artifacts / History + Agent Provider 绑定/更换 + Checkpoint。
+- `scripts/test-task-runtime.mjs`（新增）：验收测试。
+- Core 侧接线（本提交一并纳入）：`src/control/ipc-protocol.js` 增加 `memory.*` / `task.*` 私有方法族路由；
+  `src/bridge.js` 创建 `createMemoryService` / `createTaskService` 并接入 UI 命名管道 dispatch。
+  这两处提交的是「HEAD + 本会话改动」，把并行会话在制 Chat 接线完整留在工作区。
+- `package.json`：新增 `test-task` 脚本。
+
+### 已验证（本机实跑，全部 PASS）
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm run test-task`（`scripts/test-task-runtime.mjs`） | `PASS` 90/90 |
+| `npm run desktop:test`（cargo test） | `PASS` 73/73（含本阶段 `task_ui` 3 项与阶段 04 `memory_ui` 3 项单测） |
+| `npm run desktop:check`（cargo check） | `PASS` 0 error（桌面壳恢复可编译） |
+| `npm run test-memory` | `PASS` 85/85 |
+| `npm run test-config` | `PASS` 69/69 |
+| `npm run test-core-entry` | `PASS`（含用本次「HEAD+本会话接线」版本启动真实 worker） |
+| `npm run test-privilege` | `PASS` 24/24 |
+
+`test-task` 覆盖验收项：**新建**（17 个 Task Domain 字段齐备 / Goal 必填 / 验收标准归一化）、
+**修改**（rev 递增、过期 rev → `TASK_CONFLICT`、缺 rev → `REVISION_REQUIRED`、冲突后数据未破坏）、
+**执行**（queued→running 并绑定 Provider/Session，重复执行幂等且不递增 rev）、
+**暂停 / 恢复**、**重启恢复**（Task/Goal/Status/Progress/Checkpoint/Agent History/Workspace/rev/
+Work/Artifacts/Decisions/MemoryRefs 全部保留）、**更换 Agent Provider**（id 不变、history 追加、
+上一 Session 标记 detached、任务总数不变）、**失败**（failure.reason、解绑 Agent、终态）、
+**取消**、**完成**（Progress=100、result.summary、终态），外加非法迁移拒绝、Needs Attention、
+`task.overview` 聚合、Service 层方法白名单与 `task.*` 的 IPC 端到端往返。
+
+### 未验证 / 未纳入本次提交
+
+- **Tasks 页接线未提交**：`desktop-shell/src/native_ui.rs`（`Area::Task` / `Operation::TaskCall` /
+  `TaskUi` 字段 / `show_tasks_page`）与 `desktop-shell/src/native_main.rs`（`mod task_ui;`）已在工作区就位，
+  且随 `cargo check` / `cargo test` 一起通过；但它们与并行会话在制 Chat UI 位于同一批 hunk，
+  单独提交会连带引用未跟踪的 `desktop-shell/src/chat_ui.rs`。故 `task_ui.rs` 已入库、
+  **页面上线随 Chat 提交一并完成**；当前提交状态下 Tasks 页仍是占位页。
+- Tasks 页视觉交互：`PENDING_NATIVE_VERIFICATION`（需真机运行桌面壳）。
+- 真实 Agent 执行链路（Task 驱动某个 Provider 实际干活）：未接线、未验证；本阶段只做 Task 领域与运行时。
+
+### 已知问题
+
+1. 按阶段要求**有意不做**：cron 调度、云端任务编排、多 Agent 自动编排。`resume` 只改状态与绑定，
+   不会自动去启动某个 Agent 去执行。
+2. `agentHistory` 上限 100 条、Artifacts/Decisions/MemoryRefs 上限 200 条，超出后丢弃最旧项。
+3. Task 与 Workspace 目前只是 ID 关联（`workspaceId`），没有 Workspace 安全边界 enforcement——
+   与 PROJECT_STATE 第 9 节的 Workspace 现状一致。
+4. 工作区存在字面目录 `%SystemDrive%/`（并行会话命令变量未展开的副产物），非本阶段产生，未处置。
+
+### 下一阶段入口
+
+- Tasks 页上线：随 Chat UI 合并后提交 `native_ui.rs` / `native_main.rs`，并做真机视觉验收。
+- Task ↔ Agent 执行接线：`resume`/`start` 时按 `currentAgent` 调用 Agent Provider（需先有统一 AgentProvider 抽象）。
+- Context Rollover / Agent Handoff：本阶段只落地了 Checkpoint 与 Agent History 两个基座，
+  迁移/接力运行时仍未实现。
 ## 阶段 04 — Desktop Memory v1（2026-10-04）
 
 本轮由并行会话完成 **统一 Memory 运行时**（roadmap 未编号；与 D1-001 配置服务、产品级 Chat 并行施工）。

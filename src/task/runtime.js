@@ -1,0 +1,435 @@
+// CetaMesh Persistent Task v1 —— 任务运行时（阶段 07）。
+//
+// 定位：Task 是 CetaMesh 自己持有的长期工作对象，**不是** Agent Session 的投影。
+//   一个 Task 可以先后/同时被多个 Agent Provider 的 Session 推进；
+//   attachAgent 只追加 agentHistory 并更新 currentAgent，任务 id 永不改变。
+//
+// 生命周期：queued → running → (waiting|blocked|paused) → running → completed|failed|cancelled
+// 迁移合法性由 types.js 的迁移表强制；非法迁移抛 TASK_INVALID_TRANSITION。
+// 重复设置同一状态是幂等 no-op（不写库、不递增 rev），避免 UI 重复点击产生垃圾版本。
+//
+// 落库：任何变更都经 store 的原子写 + rev 冲突检测；重启后 Task/Progress/Checkpoint/
+// Agent History/Workspace 关联全部保留。
+//
+// 边界（按阶段要求有意不做）：不做 cron 调度、不做云端任务编排、不做多 Agent 自动编排。
+
+import crypto from 'node:crypto';
+import {
+  ATTENTION_STATUSES,
+  TASK_LIMITS,
+  TASK_STATUSES,
+  assertTransition,
+  isTerminalStatus,
+  needsAttention,
+  normalizeAcceptance,
+  normalizePercent,
+  normalizeProvider,
+  normalizeStatus,
+  normalizeStringList,
+  normalizeText,
+  normalizeWorkspaceId,
+  taskError
+} from './types.js';
+import { createTaskStore } from './store.js';
+
+function subId(prefix) {
+  return prefix + '_' + crypto.randomBytes(4).toString('hex');
+}
+
+export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory } = {}) {
+  if (!stateDir || typeof stateDir !== 'string') throw new Error('createTaskRuntime 需要 stateDir');
+  const store = createTaskStore({ stateDir, now, idFactory });
+
+  function requireTask(id) {
+    const task = store.get(id);
+    if (!task) throw taskError('TASK_NOT_FOUND', '任务不存在：' + String(id));
+    return task;
+  }
+
+  function mutate(id, expectedRev, fn) {
+    return store.update(id, expectedRev, (task) => fn(task));
+  }
+
+  /**
+   * 状态迁移统一入口：合法则写库，同状态则幂等返回。
+   * 返回 { task, changed }。
+   */
+  function applyStatus({ id, expectedRev, target, mutateExtra }) {
+    const current = requireTask(id);
+    if (current.status === target) return { task: current, changed: false };
+    assertTransition(current.status, target);
+    const task = mutate(current.id, expectedRev, (draft) => {
+      draft.status = target;
+      if (typeof mutateExtra === 'function') mutateExtra(draft);
+      return draft;
+    });
+    return { task, changed: true };
+  }
+
+  // ── 创建 / 读取 / 修改 ─────────────────────────────────────────────────
+  function create({
+    goal, requirements, workspaceId, currentPhase, acceptanceCriteria, status, note
+  } = {}) {
+    const initialStatus = status === undefined || status === null ? 'queued' : normalizeStatus(status);
+    const timestamp = now();
+    const task = {
+      id: store.newId(),
+      goal: normalizeText(goal, 'goal', TASK_LIMITS.goalChars, { required: true }),
+      requirements: normalizeStringList(requirements, 'requirements', TASK_LIMITS.requirements),
+      status: initialStatus,
+      currentPhase: normalizeText(currentPhase, 'currentPhase', TASK_LIMITS.phaseChars),
+      progress: { percent: 0, note: normalizeText(note, 'note', TASK_LIMITS.noteChars) },
+      completedWork: [],
+      pendingWork: [],
+      workspaceId: normalizeWorkspaceId(workspaceId),
+      artifacts: [],
+      decisions: [],
+      memoryRefs: [],
+      checkpoint: null,
+      acceptance: normalizeAcceptance(acceptanceCriteria).map((item) => ({ ...item, id: item.id || subId('acc') })),
+      agentHistory: [],
+      currentAgent: null,
+      result: null,
+      failure: null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      rev: 1
+    };
+    return store.insert(task);
+  }
+
+  function get({ id } = {}) {
+    return { task: requireTask(id) };
+  }
+
+  function list({ status, statuses, workspaceId, onlyNeedsAttention, query, limit } = {}) {
+    let rows = store.listAll();
+    if (status !== undefined && status !== null) {
+      const wanted = normalizeStatus(status);
+      rows = rows.filter((task) => task.status === wanted);
+    }
+    if (Array.isArray(statuses) && statuses.length) {
+      const wanted = statuses.map(normalizeStatus);
+      rows = rows.filter((task) => wanted.includes(task.status));
+    }
+    if (workspaceId !== undefined && workspaceId !== null && String(workspaceId).trim()) {
+      const wanted = normalizeWorkspaceId(workspaceId);
+      rows = rows.filter((task) => task.workspaceId === wanted);
+    }
+    if (onlyNeedsAttention === true) {
+      rows = rows.filter((task) => needsAttention(task));
+    }
+    const text = query === undefined || query === null ? '' : String(query).trim().toLowerCase();
+    if (text) {
+      rows = rows.filter((task) => task.goal.toLowerCase().includes(text)
+        || task.currentPhase.toLowerCase().includes(text)
+        || task.requirements.some((item) => item.toLowerCase().includes(text)));
+    }
+    rows.sort((a, b) => {
+      const attention = (needsAttention(b) ? 1 : 0) - (needsAttention(a) ? 1 : 0);
+      if (attention !== 0) return attention;
+      if (b.updatedAt !== a.updatedAt) return b.updatedAt - a.updatedAt;
+      return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+    });
+    const max = Number.isSafeInteger(limit) && limit > 0 ? Math.min(limit, TASK_LIMITS.listItems) : 50;
+    return { tasks: rows.slice(0, max), total: rows.length };
+  }
+
+  function update({ id, expectedRev, goal, requirements, workspaceId, currentPhase, progress, note } = {}) {
+    const patch = {};
+    if (goal !== undefined) patch.goal = normalizeText(goal, 'goal', TASK_LIMITS.goalChars, { required: true });
+    if (requirements !== undefined) patch.requirements = normalizeStringList(requirements, 'requirements', TASK_LIMITS.requirements);
+    if (workspaceId !== undefined) patch.workspaceId = normalizeWorkspaceId(workspaceId);
+    if (currentPhase !== undefined) patch.currentPhase = normalizeText(currentPhase, 'currentPhase', TASK_LIMITS.phaseChars);
+    if (progress !== undefined) {
+      const percent = normalizePercent(progress === null || typeof progress !== 'object' ? progress : progress.percent);
+      patch.progressPercent = percent;
+      if (progress && typeof progress === 'object' && progress.note !== undefined) {
+        patch.progressNote = normalizeText(progress.note, 'progress.note', TASK_LIMITS.noteChars);
+      }
+    }
+    if (note !== undefined) patch.progressNote = normalizeText(note, 'note', TASK_LIMITS.noteChars);
+    if (Object.keys(patch).length === 0) throw taskError('INVALID_PARAMS', '没有需要修改的字段');
+    return mutate(id, expectedRev, (task) => {
+      if (patch.goal !== undefined) task.goal = patch.goal;
+      if (patch.requirements !== undefined) task.requirements = patch.requirements;
+      if (patch.workspaceId !== undefined) task.workspaceId = patch.workspaceId;
+      if (patch.currentPhase !== undefined) task.currentPhase = patch.currentPhase;
+      if (patch.progressPercent !== undefined && patch.progressPercent !== null) task.progress.percent = patch.progressPercent;
+      if (patch.progressNote !== undefined) task.progress.note = patch.progressNote;
+      return task;
+    });
+  }
+
+  function remove({ id, expectedRev } = {}) {
+    return store.remove(id, expectedRev);
+  }
+
+  function setProgress({ id, expectedRev, percent, note } = {}) {
+    const nextPercent = normalizePercent(percent);
+    return mutate(id, expectedRev, (task) => {
+      if (nextPercent !== null) task.progress.percent = nextPercent;
+      if (note !== undefined) task.progress.note = normalizeText(note, 'note', TASK_LIMITS.noteChars);
+      if (task.progress.percent >= 100 && !isTerminalStatus(task.status)) task.progress.percent = 100;
+      return task;
+    });
+  }
+
+  // ── Agent Provider / Session 绑定（切换 Provider 不新建 Task） ──────────
+  function attachAgent({ id, expectedRev, provider, sessionId, note } = {}) {
+    const normalizedProvider = normalizeProvider(provider);
+    if (!normalizedProvider) throw taskError('INVALID_PROVIDER', 'attachAgent 需要 provider');
+    const normalizedSession = normalizeText(sessionId, 'sessionId', TASK_LIMITS.idChars, { required: true });
+    const current = requireTask(id);
+    if (current.currentAgent
+      && current.currentAgent.provider === normalizedProvider
+      && current.currentAgent.sessionId === normalizedSession) {
+      return { task: current, changed: false };
+    }
+    const task = mutate(current.id, expectedRev, (draft) => {
+      const timestamp = now();
+      const last = draft.agentHistory[draft.agentHistory.length - 1];
+      if (last && last.detachedAt === null) last.detachedAt = timestamp;
+      draft.agentHistory.push({
+        provider: normalizedProvider,
+        sessionId: normalizedSession,
+        attachedAt: timestamp,
+        detachedAt: null,
+        note: normalizeText(note, 'note', TASK_LIMITS.noteChars)
+      });
+      if (draft.agentHistory.length > TASK_LIMITS.agentHistory) {
+        draft.agentHistory = draft.agentHistory.slice(-TASK_LIMITS.agentHistory);
+      }
+      draft.currentAgent = { provider: normalizedProvider, sessionId: normalizedSession };
+      return draft;
+    });
+    return { task, changed: true };
+  }
+
+  function detachAgent({ id, expectedRev, note } = {}) {
+    const current = requireTask(id);
+    if (!current.currentAgent) return { task: current, changed: false };
+    const task = mutate(current.id, expectedRev, (draft) => {
+      const timestamp = now();
+      const last = draft.agentHistory[draft.agentHistory.length - 1];
+      if (last && last.detachedAt === null) {
+        last.detachedAt = timestamp;
+        if (note !== undefined) last.note = normalizeText(note, 'note', TASK_LIMITS.noteChars);
+      }
+      draft.currentAgent = null;
+      return draft;
+    });
+    return { task, changed: true };
+  }
+
+  // ── 生命周期 ───────────────────────────────────────────────────────────
+  function start({ id, expectedRev, provider, sessionId, note } = {}) {
+    const result = applyStatus({ id, expectedRev, target: 'running', mutateExtra: (draft) => {
+      draft.failure = null;
+      if (note !== undefined) draft.progress.note = normalizeText(note, 'note', TASK_LIMITS.noteChars);
+    } });
+    if (provider !== undefined && provider !== null) {
+      return attachAgent({ id: result.task.id, expectedRev: result.task.rev, provider, sessionId, note });
+    }
+    return result;
+  }
+
+  function pause({ id, expectedRev, reason } = {}) {
+    return applyStatus({ id, expectedRev, target: 'paused', mutateExtra: (draft) => {
+      if (reason !== undefined) draft.progress.note = normalizeText(reason, 'reason', TASK_LIMITS.noteChars);
+    } });
+  }
+
+  function resume({ id, expectedRev, provider, sessionId, note } = {}) {
+    const result = applyStatus({ id, expectedRev, target: 'running', mutateExtra: (draft) => {
+      if (note !== undefined) draft.progress.note = normalizeText(note, 'note', TASK_LIMITS.noteChars);
+    } });
+    if (provider !== undefined && provider !== null) {
+      return attachAgent({ id: result.task.id, expectedRev: result.task.rev, provider, sessionId, note });
+    }
+    return result;
+  }
+
+  function wait({ id, expectedRev, reason } = {}) {
+    return applyStatus({ id, expectedRev, target: 'waiting', mutateExtra: (draft) => {
+      if (reason !== undefined) draft.progress.note = normalizeText(reason, 'reason', TASK_LIMITS.noteChars);
+    } });
+  }
+
+  function block({ id, expectedRev, reason } = {}) {
+    return applyStatus({ id, expectedRev, target: 'blocked', mutateExtra: (draft) => {
+      if (reason !== undefined) draft.progress.note = normalizeText(reason, 'reason', TASK_LIMITS.noteChars);
+    } });
+  }
+
+  function complete({ id, expectedRev, summary } = {}) {
+    return applyStatus({ id, expectedRev, target: 'completed', mutateExtra: (draft) => {
+      draft.progress.percent = 100;
+      draft.result = { summary: normalizeText(summary, 'summary', TASK_LIMITS.noteChars), at: now() };
+      const last = draft.agentHistory[draft.agentHistory.length - 1];
+      if (last && last.detachedAt === null) last.detachedAt = now();
+      draft.currentAgent = null;
+    } });
+  }
+
+  function fail({ id, expectedRev, reason } = {}) {
+    return applyStatus({ id, expectedRev, target: 'failed', mutateExtra: (draft) => {
+      draft.failure = { reason: normalizeText(reason, 'reason', TASK_LIMITS.noteChars, { required: true }), at: now() };
+      const last = draft.agentHistory[draft.agentHistory.length - 1];
+      if (last && last.detachedAt === null) last.detachedAt = now();
+      draft.currentAgent = null;
+    } });
+  }
+
+  function cancel({ id, expectedRev, reason } = {}) {
+    return applyStatus({ id, expectedRev, target: 'cancelled', mutateExtra: (draft) => {
+      draft.failure = { reason: normalizeText(reason, 'reason', TASK_LIMITS.noteChars), at: now(), cancelled: true };
+      const last = draft.agentHistory[draft.agentHistory.length - 1];
+      if (last && last.detachedAt === null) last.detachedAt = now();
+      draft.currentAgent = null;
+    } });
+  }
+
+  // ── Checkpoint ─────────────────────────────────────────────────────────
+  function setCheckpoint({ id, expectedRev, summary, nextAction } = {}) {
+    return mutate(id, expectedRev, (task) => {
+      task.checkpoint = {
+        at: now(),
+        summary: normalizeText(summary, 'checkpoint.summary', TASK_LIMITS.checkpointChars),
+        nextAction: normalizeText(nextAction, 'checkpoint.nextAction', TASK_LIMITS.checkpointChars)
+      };
+      return task;
+    });
+  }
+
+  // ── 工作项 / 产物 / 决策 / 记忆引用 / 验收标准 ──────────────────────────
+  function addWork({ id, expectedRev, kind, text } = {}) {
+    if (kind !== 'completed' && kind !== 'pending') {
+      throw taskError('INVALID_PARAMS', 'work.kind 只能是 completed / pending');
+    }
+    const item = { at: now(), text: normalizeText(text, 'text', TASK_LIMITS.noteChars, { required: true }) };
+    return mutate(id, expectedRev, (task) => {
+      const bucket = kind === 'completed' ? task.completedWork : task.pendingWork;
+      bucket.push(item);
+      if (bucket.length > TASK_LIMITS.listItems) bucket.splice(0, bucket.length - TASK_LIMITS.listItems);
+      return task;
+    });
+  }
+
+  function addArtifact({ id, expectedRev, kind, label, ref } = {}) {
+    const artifact = {
+      id: subId('art'),
+      kind: normalizeText(kind, 'artifact.kind', 60) || 'file',
+      label: normalizeText(label, 'artifact.label', 300, { required: true }),
+      ref: normalizeText(ref, 'artifact.ref', 1000),
+      createdAt: now()
+    };
+    return mutate(id, expectedRev, (task) => {
+      task.artifacts.push(artifact);
+      if (task.artifacts.length > TASK_LIMITS.artifacts) {
+        task.artifacts = task.artifacts.slice(-TASK_LIMITS.artifacts);
+      }
+      return task;
+    });
+  }
+
+  function addDecision({ id, expectedRev, decision, rationale } = {}) {
+    const item = {
+      at: now(),
+      decision: normalizeText(decision, 'decision', TASK_LIMITS.noteChars, { required: true }),
+      rationale: normalizeText(rationale, 'rationale', TASK_LIMITS.noteChars)
+    };
+    return mutate(id, expectedRev, (task) => {
+      task.decisions.push(item);
+      if (task.decisions.length > TASK_LIMITS.decisions) {
+        task.decisions = task.decisions.slice(-TASK_LIMITS.decisions);
+      }
+      return task;
+    });
+  }
+
+  function linkMemory({ id, expectedRev, memoryId, note } = {}) {
+    const item = {
+      at: now(),
+      memoryId: normalizeText(memoryId, 'memoryId', TASK_LIMITS.idChars, { required: true }),
+      note: normalizeText(note, 'note', TASK_LIMITS.noteChars)
+    };
+    return mutate(id, expectedRev, (task) => {
+      if (!task.memoryRefs.some((ref) => ref.memoryId === item.memoryId)) task.memoryRefs.push(item);
+      return task;
+    });
+  }
+
+  function addAcceptance({ id, expectedRev, text } = {}) {
+    const item = {
+      id: subId('acc'),
+      text: normalizeText(text, 'text', TASK_LIMITS.requirementChars, { required: true }),
+      met: false,
+      metAt: null
+    };
+    return mutate(id, expectedRev, (task) => {
+      task.acceptance.push(item);
+      return task;
+    });
+  }
+
+  function setAcceptance({ id, expectedRev, acceptanceId, text, met } = {}) {
+    const targetId = acceptanceId === undefined || acceptanceId === null ? '' : String(acceptanceId);
+    const targetText = text === undefined || text === null ? '' : String(text).trim();
+    return mutate(id, expectedRev, (task) => {
+      const item = task.acceptance.find((entry) => (targetId && entry.id === targetId)
+        || (!targetId && targetText && entry.text === targetText));
+      if (!item) throw taskError('ACCEPTANCE_NOT_FOUND', '找不到验收标准：' + (targetId || targetText));
+      if (met !== undefined) {
+        item.met = met === true;
+        item.metAt = item.met ? now() : null;
+      }
+      return task;
+    });
+  }
+
+  /** 页面聚合查询：一次往返拿到列表 + 计数 + 需要关注的任务。 */
+  function overview({ status, workspaceId, query, limit } = {}) {
+    const listed = list({ status, workspaceId, query, limit });
+    const all = store.listAll();
+    const counts = {};
+    for (const name of TASK_STATUSES) counts[name] = 0;
+    for (const task of all) counts[task.status] = (counts[task.status] || 0) + 1;
+    return {
+      tasks: listed.tasks,
+      total: listed.total,
+      counts,
+      needsAttention: all.filter((task) => needsAttention(task)).map((task) => task.id),
+      attentionStatuses: [...ATTENTION_STATUSES]
+    };
+  }
+
+  return {
+    create,
+    get,
+    list,
+    update,
+    remove,
+    setProgress,
+    start,
+    pause,
+    resume,
+    wait,
+    block,
+    complete,
+    fail,
+    cancel,
+    attachAgent,
+    detachAgent,
+    setCheckpoint,
+    addWork,
+    addArtifact,
+    addDecision,
+    linkMemory,
+    addAcceptance,
+    setAcceptance,
+    overview,
+    countAll: () => store.count(),
+    _store: store
+  };
+}
