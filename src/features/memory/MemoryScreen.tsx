@@ -146,12 +146,6 @@ export function MemoryScreen({
     <ScrollView
       contentContainerStyle={styles.page}
       keyboardShouldPersistTaps="handled">
-      <View style={styles.intro}>
-        <Text style={styles.eyebrow}>{tr('YOUR NOTES AND CONTEXT')}</Text>
-        <Text style={ui.title}>{tr('Memory')}</Text>
-        <Text style={ui.text}>{tr('A private library of details you chose to keep.')}</Text>
-      </View>
-
       <View style={styles.libraryHeading}>
         <View style={styles.libraryCopy}>
           <Text style={styles.libraryTitle}>{tr('Saved memories')}</Text>
@@ -305,8 +299,6 @@ function formatDate(value: string): string {
 
 const styles = StyleSheet.create({
   page: {padding: space.lg, gap: space.md, paddingBottom: space.xxl},
-  intro: {gap: space.sm, paddingBottom: space.xs},
-  eyebrow: {fontSize: 11, lineHeight: 15, letterSpacing: 1.1, fontWeight: '700', color: colors.accent},
   libraryHeading: {flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: space.md},
   libraryCopy: {flex: 1, gap: 3},
   libraryTitle: {fontSize: 16, lineHeight: 22, fontWeight: '700', color: colors.text},

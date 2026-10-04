@@ -6,7 +6,7 @@ export type UpdateAnnouncement = {
   importance: 'feature' | 'fix' | 'security' | 'important';
 };
 
-export type UpdateCheck = {status: 'available'; version: string} | {status: 'current'} | {status: 'unavailable'};
+export type UpdateCheck = {status: 'available'; version: string} | {status: 'current'} | {status: 'unavailable'} | {status: 'unconfigured'};
 
 export interface UpdateService {
   checkForUpdate(): Promise<UpdateCheck>;
@@ -17,7 +17,7 @@ export interface UpdateService {
 
 // Private beta has no authenticated release feed yet. Never embed a GitHub token in the APK.
 export const unconfiguredUpdateService: UpdateService = {
-  checkForUpdate: async () => ({status: 'unavailable'}),
+  checkForUpdate: async () => ({status: 'unconfigured'}),
   getLatestVersion: async () => undefined,
   getReleaseNotes: async () => [],
   downloadUpdate: async () => undefined,

@@ -1,9 +1,30 @@
 # CetaMesh Mobile Project State
 
-UI/UX Refactor (2026-10-01):
+UI/UX Refactor (2026-10-04):
 
-- Branch `feature/mobile-ui-ux-v1`: IMPLEMENTATION COMPLETE through Phase 7.
-- GitHub Actions run `36858043412`: PASS — `npm run check`, Standalone Release APK build, standalone verification, and artifact upload.
+- Branch `feature/mobile-ui-ux-v1`: Phase 1–7 IMPLEMENTATION COMPLETE, followed by
+  four device-feedback fix rounds (records in `UI_REFACTOR_PROGRESS.md`); the
+  latest round (2026-10-04) dedupes the release-title version in update
+  announcements and removes the duplicated page intros on Tasks and Memory
+  (PR #10, open).
+- Merged to `main` (2026-10-04): PR #7 `feat/context-budget-v1`
+  (model-specific context budget with paged history admission), PR #8
+  `fix/workspace-header-duplication`, PR #9 `fix/public-update-source`
+  (public `chx6418-source/CetaMesh` Releases update source; only Releases with
+  direct APK assets count as installable updates), PR #1 (roadmap v1.1 as the
+  authoritative plan) and the dependabot bump to `react-native-nitro-sqlite`
+  10.1.0 (PR #11). Current `main`: `3e3f1df`.
+- Local `npm run check` PASS on `main` `3d34957` (2026-10-04, Windows): TypeScript,
+  ESLint, architecture checks, Jest 69 suites / 268 tests, 0 skipped; PASS again
+  on the PR #10 tree merged with `main` `3e3f1df`: 69 suites / 269 tests.
+- Android CI run `37171452572` on `3d34957`: PASS — checks, Standalone Release APK
+  build, standalone APK verification, and artifact upload. Artifact `11292450299`
+  (31,425,084-byte archive, expires 2026-10-18). The PR #7 and PR #8 merge commits
+  also have PASS Android CI runs; PR #10's branch CI PASSed on `8b9683f`.
+- Public `chx6418-source/CetaMesh` `V1.1.0` Release still carries only the ZIP asset
+  built from `59b4289`; a direct APK asset must be attached before the update check
+  can offer it as an installable update. The open-source `main` is being synced to
+  the current private-`main` source so the public tree matches the shipped code.
 - Physical Android visual/interaction verification: PENDING USER DEVICE REVIEW.
 - Existing M0–M9 runtime and Standalone APK packaging baseline preserved.
 
@@ -46,6 +67,7 @@ Execution Decision:
 - 2026-09-30 user explicitly requested entering M4. Complete M4 sequentially
   from TASK-M4-001; do not implement later-phase Agent, Sync, Plugin, Social or
   Marketplace features.
+- 2026-09-30 Mobile roadmap v1.1 adopted for M3–M8. M3-001 through M3-004 remain completed; after Android CI Recovery, continue with TASK-M3-005 Node Role Model, then M3-006 capability advertisement. Do not skip directly to M4. Implementation and Native Verification gates are tracked separately.
 
 - 2026-09-30 user explicitly requested “完成 M3”. Implement identity, protocol, QR and pairing sequentially; prior native gates remain BLOCKED. New mobile repository writes authorized; whalebridge remains read-only.
 
@@ -163,6 +185,21 @@ Blocked:
 
 Last Verification:
 
+- 2026-10-04 round-4 device-feedback fixes (PR #10 branch, merged with `main`
+  `3e3f1df`; PROJECT_STATE conflict resolved by keeping both sides) — `npm run
+  check` PASS: TypeScript, ESLint, architecture boundary checks, and Jest 69
+  suites / 269 tests, 0 skipped. Fixes: update-announcement titles no longer
+  repeat a version already present in the release name; the duplicated intro
+  blocks were removed from the Tasks and Memory screens; about-app and task-ui
+  regressions cover both. Native/device behavior remains NOT_RUN_ENVIRONMENT
+  until the next APK build and device pass.
+- 2026-10-04 local Windows gate on `main` `3d34957` — `npm run check` PASS:
+  TypeScript, ESLint, architecture boundary checks, and Jest 69 suites / 268
+  tests, 0 skipped. Includes the PR #7 context-budget history admission, the
+  PR #8 workspace intro dedup and the PR #9 public update source. Android/iOS
+  native builds and device behavior remain NOT_RUN_ENVIRONMENT on this machine;
+  the matching Android CI run `37171452572` (Standalone APK build, verification,
+  upload) PASSed.
 - 2026-09-30 M5–M8 final repository gate — `npm run check` PASS: TypeScript,
   ESLint, architecture boundary checks (5 Node checks), and Jest 56 suites /
   213 tests, 0 skipped. Targeted M5–M8 gate tests, extension lifecycle tests,

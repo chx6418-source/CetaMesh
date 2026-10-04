@@ -27,7 +27,7 @@ const release = {
 };
 
 test('GitHub release updater reports newer stable versions and APK assets', async () => {
-  const service = new GitHubReleaseUpdateService(new StaticTransport([release]), '0.0.1');
+  const service = new GitHubReleaseUpdateService(new StaticTransport([release]), '0.0.1', 'public-owner/mobile-releases');
   await expect(service.checkForUpdate()).resolves.toEqual({status: 'available', version: '0.0.2'});
   await expect(service.getLatestVersion()).resolves.toBe('0.0.2');
   await expect(service.downloadUpdate()).resolves.toContain('.apk');
@@ -42,21 +42,32 @@ test('GitHub release updater reports newer stable versions and APK assets', asyn
 });
 
 test('GitHub release updater reports current version and ignores drafts or prereleases', async () => {
-  const current = new GitHubReleaseUpdateService(new StaticTransport([release]), '0.0.2');
+  const current = new GitHubReleaseUpdateService(new StaticTransport([release]), '0.0.2', 'public-owner/mobile-releases');
   await expect(current.checkForUpdate()).resolves.toEqual({status: 'current'});
   await expect(current.downloadUpdate()).resolves.toBeUndefined();
 
   const unavailable = new GitHubReleaseUpdateService(new StaticTransport([
     {...release, draft: true},
     {...release, tag_name: 'v0.0.3-beta.1', draft: false, prerelease: true},
-  ]), '0.0.1');
+  ]), '0.0.1', 'public-owner/mobile-releases');
   await expect(unavailable.checkForUpdate()).resolves.toEqual({status: 'unavailable'});
   await expect(unavailable.getLatestVersion()).resolves.toBeUndefined();
 });
 
 test('GitHub release updater handles an empty release feed', async () => {
-  const service = new GitHubReleaseUpdateService(new StaticTransport([]), '0.0.1');
+  const service = new GitHubReleaseUpdateService(new StaticTransport([]), '0.0.1', 'public-owner/mobile-releases');
   await expect(service.checkForUpdate()).resolves.toEqual({status: 'unavailable'});
   await expect(service.getReleaseNotes()).resolves.toEqual([]);
+  await expect(service.downloadUpdate()).resolves.toBeUndefined();
+});
+
+test('GitHub release updater does not advertise a ZIP-only release as an installable update', async () => {
+  const zipOnly = {...release, assets: [{
+    name: 'cetamesh-mobile-android-standalone.zip',
+    browser_download_url: 'https://github.com/chx6418-source/CetaMesh/releases/download/V1.1.0/mobile.zip',
+  }]};
+  const service = new GitHubReleaseUpdateService(new StaticTransport([zipOnly]), '0.0.1', 'chx6418-source/CetaMesh');
+  await expect(service.checkForUpdate()).resolves.toEqual({status: 'unavailable'});
+  await expect(service.getLatestVersion()).resolves.toBeUndefined();
   await expect(service.downloadUpdate()).resolves.toBeUndefined();
 });

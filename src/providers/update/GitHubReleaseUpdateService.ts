@@ -63,7 +63,7 @@ export class GitHubReleaseUpdateService implements UpdateService {
   constructor(
     private readonly transport: HttpTransport,
     private readonly currentVersion: string,
-    private readonly repository = 'chx6418-source/cetamesh-mobile',
+    private readonly repository: string,
   ) {}
 
   private async releases(): Promise<GitHubRelease[]> {
@@ -85,7 +85,9 @@ export class GitHubReleaseUpdateService implements UpdateService {
   }
 
   private async latest(): Promise<GitHubRelease | undefined> {
-    return (await this.releases())[0];
+    return (await this.releases()).find(release =>
+      release.assets?.some(asset => asset.name.toLowerCase().endsWith('.apk')),
+    );
   }
 
   async checkForUpdate(): Promise<UpdateCheck> {

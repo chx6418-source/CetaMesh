@@ -60,3 +60,20 @@ Next Action: Install the Phase 7 Standalone APK on a physical Android device and
 - E：工作区加入“关于应用”入口；Android Native Module 读取已安装 APK 的 versionName，展示作者、版本；检查更新、应用更新和更新公告均有设置行与 UpdateService 契约。私有更新源尚未提供，明确显示未配置/暂无公告，不内置 GitHub Token 或虚构新版本。`npm run check`：67 套件 / 257 项通过。最终 Android CI 待验证。
 - F：补齐工作区模型服务数量中文和更新下载状态说明。`npm run check`：67 套件 / 257 项通过。远端最新代码 `b9b15895035935ec085f0a0e11d69b7eac4b2e93`；草稿 PR #2 用于触发 CI，但尚无新运行。上一成功运行 `36987032197` 只覆盖 C 提交，不能作为最终 APK 验证。
 - 未完成验收：最新提交的 assembleRelease、Standalone APK Verification 和 Artifact Upload；真机键盘/附件手势/长输出验证；实际 Tool/Search 事件仍缺少上游 Runtime 数据，当前只折叠模型文本中的过程行。
+
+## 后续真机问题处理（2026-10-04）
+- P0：PR #6 已于 2026-10-03 合并至 `main`；当前 `main` 为 `59b42898931db8b6ecad59d743d09d6748b7b608`。Android CI `37092103563` 的检查、Release 构建、Standalone APK 验证及 Artifact 上传均成功。保存新对话默认设置的真机复测仍为 `PENDING_NATIVE_VERIFICATION`。
+- P1：开发仍在私有 `cetamesh-mobile`；匿名 APK 的更新源切到公开 `chx6418-source/CetaMesh`，地址集中在 `src/app/bootstrap/updateSource.ts`。未配置源时提示“更新服务暂未开放”。公开仓库当前 `V1.1.0` Release 仅有 ZIP 资源；更新检查只把带直接 APK 资源的 Release 视为可安装更新，避免出现“发现新版本”却无法下载的假提示。添加直接 APK 资源后即可发现该版本。
+- P2：扫描 `src/` 与 `App.tsx`，无 `accessibilityRole="status"` 残留；保留已合并的 `accessibilityLiveRegion="polite"` 修复。Android 真机交互回归仍为 `PENDING_NATIVE_VERIFICATION`。
+
+## 状态同步（2026-10-04）
+- PR #7 `feat/context-budget-v1`（2026-10-03 合并，`dc7151f`）：PromptBuilder 新增按模型上下文预算的历史准入——默认窗口 128k / 输入预算 96k；模型 ID 显式标注 1M（`1m`/`1000k`/`1024k`/`1048576`）时按 1M 窗口 / 900k 预算。token 估算仅用于准入（ASCII 约 0.3/字符、非 ASCII 1/字符，data 图像预留 4096、URL 图像 1024），产品内 Token 用量仍以 provider 上报为唯一来源。ChatRuntime 取消“满 200 条即报错”的硬限制，改为按 200 条分页从新到旧装载 completed 消息并按预算截断；仅当最新一条消息本身超预算时抛出受控 `unsupported` 错误。
+- PR #8 `fix/workspace-header-duplication`（2026-10-03 合并，`59b4289`）：移除 ChatHome 工作区页重复的介绍文案（删 6 行）。
+- PR #9 `fix/public-update-source`（2026-10-04 合并，`3d34957`）：即上方 P1 的落地——更新源集中在 `src/app/bootstrap/updateSource.ts` 并指向公开 `chx6418-source/CetaMesh` Releases；仅当 Release 带直接 APK 资产才视为可安装更新。经查公开仓库 `V1.1.0` 目前仍只有 ZIP 资产（对应 `59b4289`），补传直接 APK 后即可被识别。
+- 2026-10-04 本地验证（Windows，`main` `3d34957`）：`npm run check` PASS —— TypeScript、ESLint、架构检查、Jest 69 套件 / 268 项、0 跳过（上一记录为 67 套件 / 257 项）。
+- CI 与 APK：三个合并提交的 Android CI 均为 success（`dc7151f`、`59b4289`，及 `3d34957` 的运行 `37171452572`，含 Standalone Release 构建、APK 验证与产物上传）；`3d34957` 的 Standalone APK 产物 `11292450299`（31,425,084 字节，2026-10-18 过期）。真机验证仍 `PENDING_NATIVE_VERIFICATION`。
+
+## 第四轮真机修正（2026-10-04）
+- A：更新公告标题去重——Release 名称已含版本号时只显示名称（此前显示“CetaMesh 1.1.0 · 1.1.0”）；名称不含版本时仍拼接“名称 · 版本”。附 about-app 回归测试（含版本不重复、不含版本正常拼接两例）。
+- B：任务页与记忆页移除与页头重复的介绍块（“任务进展/任务 + Work keeps…”、“我的记忆/记忆 + 保存你选择留下的重要信息”）；任务页直接从统计卡开始，记忆页直接从“已保存的记忆”开始。task-ui 测试加入介绍块不再出现的回归断言。
+- 验证：`npm run check` PASS —— TypeScript、ESLint、架构检查、Jest 69 套件 / 269 项、0 跳过。改动未提交；真机复测待安装新 APK。

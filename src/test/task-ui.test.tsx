@@ -126,6 +126,8 @@ test('Tasks workspace does not show an empty state when loading fails', async ()
   expect(output).toContain('网络不可用，请连接后重试。');
   expect(output).toContain('无法加载任务统计');
   expect(output).not.toContain('还没有任务');
+  expect(output).not.toContain('任务进展');
+  expect(output).not.toContain('Work keeps its progress');
 
   await act(async () => view.unmount());
   await db.close();

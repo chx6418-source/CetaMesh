@@ -26,23 +26,24 @@ export function AboutAppScreen({onBack, version = '—', updates = unconfiguredU
       <Card><Text style={styles.brand}>CetaMesh</Text><InfoText label="作者" value="chx6418-source" /><InfoText label="版本" value={version} /></Card>
       <Card>
         <SettingsRow icon={<RefreshCw size={21} color={colors.accent} />} title="检查更新" subtitle="检查是否有新版本" testID="check-update" onPress={async () => {
-          try {const result = await updates.checkForUpdate(); setMessage(result.status === 'available' ? `发现新版本 ${result.version}` : result.status === 'current' ? '当前已是最新版本' : '暂未发现可用发布版本');}
+          try {const result = await updates.checkForUpdate(); setMessage(result.status === 'available' ? `发现新版本 ${result.version}` : result.status === 'current' ? '当前已是最新版本' : result.status === 'unconfigured' ? '更新服务暂未开放' : '暂未发现可用发布版本');}
           catch {setMessage('检查更新失败，请稍后重试');}
         }} />
         <SettingsRow icon={<Download size={21} color={colors.accent} />} title="应用更新" subtitle="下载并安装最新版本" testID="download-update" onPress={async () => {
-          try {const result = await updates.downloadUpdate(); if (result) {await Linking.openURL(result); setMessage('已打开 APK 下载地址');} else {setMessage('暂无可下载的 APK 更新包');}}
+          try {const check = await updates.checkForUpdate(); if (check.status === 'unconfigured') {setMessage('更新服务暂未开放'); return;} const result = await updates.downloadUpdate(); if (result) {await Linking.openURL(result); setMessage('已打开 APK 下载地址');} else {setMessage('暂无可下载的 APK 更新包');}}
           catch {setMessage('下载更新失败，请稍后重试');}
         }} />
         <SettingsRow icon={<Bell size={21} color={colors.accent} />} title="更新公告" subtitle="查看版本更新内容与改进" testID="release-notes" onPress={() => {setMessage(''); setPage('announcements');}} />
       </Card>
     </> : <Card>
       <InfoText label="当前版本" value={version} /><InfoText label="最新版本" value={latest ?? '暂不可用'} />
-      {notes.length ? notes.map(note => <View key={`${note.version}:${note.publishedAt}`} style={styles.note}><Text style={styles.rowTitle}>{note.title} · {note.version}</Text><Text style={styles.subtle}>{note.publishedAt}</Text><Text style={styles.body}>{note.content}</Text></View>) : <Text style={styles.subtle}>暂无更新公告</Text>}
+      {notes.length ? notes.map(note => <View key={`${note.version}:${note.publishedAt}`} style={styles.note}><Text style={styles.rowTitle}>{announcementTitle(note)}</Text><Text style={styles.subtle}>{note.publishedAt}</Text><Text style={styles.body}>{note.content}</Text></View>) : <Text style={styles.subtle}>暂无更新公告</Text>}
     </Card>}
     {message ? <Text accessibilityLiveRegion="polite" style={styles.subtle}>{message}</Text> : null}
   </ScrollView>;
 }
 
+function announcementTitle(note: UpdateAnnouncement): string {return note.title.includes(note.version) ? note.title : `${note.title} · ${note.version}`;}
 function InfoText({label, value}: {label: string; value: string}) {return <View style={styles.infoRow}><Text style={styles.subtle}>{label}</Text><Text style={styles.rowTitle}>{value}</Text></View>;}
 function SettingsRow({icon, title, subtitle, onPress, testID}: {icon: React.ReactNode; title: string; subtitle: string; onPress: () => void; testID: string}) {
   return <Pressable accessibilityRole="button" accessibilityLabel={title} testID={testID} onPress={onPress} style={styles.settingsRow}>

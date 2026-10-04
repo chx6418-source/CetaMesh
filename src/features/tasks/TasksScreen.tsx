@@ -103,14 +103,6 @@ export function TasksScreen({services}: {services: MobileServices}) {
 
   return (
     <ScrollView contentContainerStyle={styles.page}>
-      <View style={styles.intro}>
-        <Text style={styles.eyebrow}>{tr('WORK IN MOTION')}</Text>
-        <Text style={ui.title}>{tr('Tasks')}</Text>
-        <Text style={ui.text}>
-          Work keeps its progress even when a conversation ends.
-        </Text>
-      </View>
-
       {loading || error ? (
         <Text style={ui.label}>{loading ? tr('Loading task totals…') : tr('Task totals unavailable')}</Text>
       ) : (
@@ -264,8 +256,6 @@ function formatDate(value: string): string {
 
 const styles = StyleSheet.create({
   page: {padding: space.lg, gap: space.md, paddingBottom: space.xxl},
-  intro: {gap: space.sm, paddingBottom: space.xs},
-  eyebrow: {fontSize: 11, lineHeight: 15, letterSpacing: 1.1, fontWeight: '700', color: colors.accent},
   summaryRow: {flexDirection: 'row', gap: space.sm},
   summaryCard: {flex: 1, minWidth: 0, paddingHorizontal: space.md, paddingVertical: space.md, gap: 2},
   summaryValue: {fontSize: 20, lineHeight: 26, fontWeight: '700', color: colors.text},

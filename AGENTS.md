@@ -1,9 +1,13 @@
 # CetaMesh Mobile Agent Rules
 
-- The repository roadmap under `docs/roadmap/` and the approved current
-  implementation plan are authoritative. Process exactly one `TASK-ID` at a
-  time; do not implement items marked Deferred or pull work forward from a
-  later phase.
+- The repository roadmap under `docs/roadmap/` is authoritative:
+  `docs/roadmap/CETAMESH_MOBILE_CODEX_WORKPLAN_v1.1.md` drives current Mobile
+  development; `docs/roadmap/CETAMESH_MOBILE_CODEX_WORKPLAN_v1.0.md` remains
+  historical context for M0–M2 and the original M3 baseline. Do not redo
+  completed tasks.
+- `PROJECT_STATE.md` is the source of truth for what is actually completed,
+  blocked, verified, or pending. Process exactly one `TASK-ID` at a time; do
+  not implement items marked Deferred or pull work forward from a later phase.
 - CetaMesh Mobile is an independent React Native/TypeScript node. Android is
   first priority, but all public contracts and composition must remain
   iOS-compatible. Do not copy Desktop code into Mobile.
@@ -33,4 +37,4 @@
   `PENDING_NATIVE_VERIFICATION` with the reason.
 - Avoid unrelated refactors, heavy new dependencies and global-state
   shortcuts. Keep UI State, Runtime State, Persistent State and Remote/Sync
-  State separate.
+  State separate. Do not make unauthorized remote writes.

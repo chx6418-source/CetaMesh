@@ -18,7 +18,7 @@ import {InMemoryCapabilityAuditLog} from '../../domain/capability/CapabilityAudi
 import {ExtensionPackagePickerProvider} from '../../native/files/ExtensionPackagePickerProvider';
 import {NativeExtensionPackagePickerDriver} from '../../native/files/NativeExtensionPackagePickerDriver';
 import {installedAppVersion} from '../../providers/appinfo/AppInfo';
-import {GitHubReleaseUpdateService} from '../../providers/update/GitHubReleaseUpdateService';
+import {createUpdateService} from './updateSource';
 export async function createServices() {
   const cameraProvider = new CameraCaptureProvider();
   const microphoneProvider = new MicrophoneRecordProvider();
@@ -90,7 +90,7 @@ export async function createServices() {
     new ExtensionPackagePickerProvider(new NativeExtensionPackagePickerDriver()),
   );
   services.appVersion = installedAppVersion();
-  services.updates = new GitHubReleaseUpdateService(networkTransport, services.appVersion ?? '0.0.0');
+  services.updates = createUpdateService(networkTransport, services.appVersion ?? '0.0.0');
   services.qrScanner=new QrScannerRuntime(new QrScanPolicy(()=>new Promise(resolve=>{
     Alert.alert('允许扫描二维码一次？','相机仅用于本次配对扫描。扫描结果会先显示目标地址，确认后才发送配对请求。',[
       {text:'拒绝',style:'cancel',onPress:()=>resolve(false)},
