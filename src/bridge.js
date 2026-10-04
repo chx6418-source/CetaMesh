@@ -72,6 +72,7 @@ import {
 import { loginInfo, extractKugouAuth, createQrLogin, pollQrLogin } from './kugou-api.js';
 import { createMemoryService } from './memory/service.js';
 import { createTaskService } from './task/service.js';
+import { createDefaultAgentService } from './agent/index.js';
 import { createExtensionService } from './extension/service.js';
 import { createMeshService } from './mesh/service.js';
 import { createChannelService } from './channel/service.js';
@@ -447,7 +448,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const convKey = (kind, id) => `${kind}:${id}`;
 const SEND_TIMEOUT_MS = 15000;
 
-function startUiIpcServer(controlService, memoryService, taskService, extensionService, meshService, channelService, systemServices) {
+function startUiIpcServer(controlService, memoryService, taskService, extensionService, meshService, channelService, systemServices, agentService) {
   const pipeName = String(process.env.WHALEBRIDGE_UI_PIPE ?? '').trim();
   if (!pipeName) return null;
 
@@ -457,6 +458,9 @@ function startUiIpcServer(controlService, memoryService, taskService, extensionS
     }
     if (method.startsWith('task.')) {
       return taskService.execute({ method, params });
+    }
+    if (method.startsWith('agent.')) {
+      return agentService.execute({ method, params });
     }
     if (method.startsWith('ext.')) {
       return extensionService.execute({ method, params });
@@ -1929,6 +1933,13 @@ async function main() {
       }
     });
     const taskService = createTaskService({ stateDir: STATE_DIR });
+    // Agent Provider（阶段 06）：标准契约层 + DSH 首个实现；经 agent.* 私有方法族暴露。
+    const agentService = createDefaultAgentService({
+      api,
+      defaults: { provider: cfg.dsh.provider, model: cfg.dsh.model, reasoningEffort: cfg.dsh.reasoningEffort },
+      log
+    });
+    process.once('exit', () => agentService.close());
     // 本地扩展体系（阶段 10）：扩展只在用户本地导入，能力与权限均需显式声明与批准。
     const extensionService = createExtensionService({ stateDir: STATE_DIR });
     // Device Mesh（阶段 11）：Desktop 作为标准 CetaMesh Node；mesh 与 Channel Adapter 解耦。
@@ -1946,7 +1957,7 @@ async function main() {
       settings: settingsService,
       about: aboutService,
       update: updateService
-    });
+    }, agentService);
     const server = http.createServer(async (req, res) => {
       const url = new URL(req.url ?? '/', `http://127.0.0.1:${port}`);
       const SECURITY_HEADERS = {

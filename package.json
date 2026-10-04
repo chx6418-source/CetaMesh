@@ -27,6 +27,7 @@
     "test-stickers": "node scripts/test-stickers.mjs",
     "test-app-paths": "node scripts/test-app-paths.mjs",
     "test-config": "node scripts/test-config-service.mjs",
+    "test-agent": "node scripts/test-agent-provider.mjs",
     "test-memory": "node scripts/test-memory-runtime.mjs",
     "test-task": "node scripts/test-task-runtime.mjs",
     "test-extension": "node scripts/test-extension-runtime.mjs",

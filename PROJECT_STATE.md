@@ -52,6 +52,76 @@
 
 ---
 
+## 阶段 06 — Agent Provider v1（2026-10-04）
+
+把 DSH 从"写死的特殊系统"变成第一个标准 Agent Provider；**Agent Provider != Model Provider**，
+保持两个独立概念（Model Provider 仍在 `control-service` 的 `model.*` 与 `chat-service` 的
+`config.provider/model`，Agent Provider 决定"任务由哪种 Agent Runtime 执行"）。
+
+### 落盘内容
+
+- 新增 `src/agent/`（四文件）：
+  - `agent-provider.js`：领域契约。`AGENT_PROVIDER_METHODS` = createSession / send / cancel /
+    status / contextUsage / checkpoint / resume / handoff / capabilities / closeSession +
+    扩展方法 follow / selectModel / health；`defineAgentProvider()` 为未实现方法**自动填充显式
+    unsupported 桩**（抛 `AGENT_UNSUPPORTED`），`capabilities()` 同时列出 supported / unsupported；
+    `AGENT_EVENT_PROTOCOL_DSH = 'dsh-session-events'` 标识会话事件流协议。
+  - `dsh-agent-provider.js`：DSH 映射，复用现有 `src/dsh-client.js`（注入 bridge 共享的
+    `NodeApiClient` 实例，不重写、不新建第二套 DSH 通道）。端点映射以真实调用与对运行中
+    DSH 的探测为准：createSession→session/create(+selectModel)、send→session/prompt、
+    cancel→session/cancel、status→session/list 投影、contextUsage→session/list 的
+    tokenUsage/contextPressure、resume→session/list 存在性校验、closeSession→workspace/archiveSession、
+    follow→session/follow 流、health→settings/describe。传输层失败统一归类
+    `PROVIDER_UNAVAILABLE`（DSH 未启动的优雅降级依据）。
+  - `service.js`：Provider 注册表 + `agent.*` 私有方法族（与 chat./memory./task. 同一接入模式，
+    经桌面命名管道）；`createDefaultAgentService` 组合内置 DSH Provider，bridge 只导入这一个符号
+    （避免与 continuity 侧同名的窄接口 provider 冲突）。
+  - `index.js`：层入口。
+- `src/control/ipc-protocol.js`：私有方法族前缀白名单追加 `agent.`。
+- `src/bridge.js`：`createDefaultAgentService({ api, defaults: cfg.dsh..., log })` 接线；
+  `startUiIpcServer` 增加 `agentService` 参数与 `agent.*` dispatch 分支。
+- `src/desktop/chat-service.js`：会话新增可选 `config.agentProvider`（默认 `null` = 普通模型）。
+  选择后回合经标准契约执行（agent.createSession / agent.send / agent.cancel），事件流协议
+  经 `eventProtocol === 'dsh-session-events'` 校验后才允许选择；`chat.catalog` 返回
+  `agentProviders` 列表供 UI 渲染"执行方式"选择。**不改变默认路径**：不选 Provider 时
+  行为与阶段 03 完全一致（直连 DSH）。
+- `package.json`：新增 `test-agent` 脚本。
+
+### 验收（本机实测，`npm run test-agent`）
+
+| 段 | 状态 | 说明 |
+| --- | --- | --- |
+| A 契约 | `PASS` | unsupported 自动填充与显式拒绝（checkpoint/handoff）；prompt 内容归一化 |
+| B DSH 映射（mock api） | `PASS` | B1–B8：每个契约方法调用的端点与 payload 形状逐项断言；DSH 的 unsupported 精确等于 `['checkpoint','handoff']`（实测 DSH 无 session/checkpoint 端点，HTTP 404；handoff 无跨 Provider 协议）——不得为接口完整伪造能力 |
+| C 优雅降级 | `PASS` | C2 mock 不可达 + **C3 真实死端口（127.0.0.1:9）**：health 返回 available:false；create/status/send/cancel/contextUsage/resume 全部结构化失败 `PROVIDER_UNAVAILABLE`，进程不崩 |
+| E Chat 集成 | `PASS` | E1 catalog 暴露 agentProviders；E2 Agent 路径经 agent.createSession/send（不直连 DSH）；E3 不选 Provider 时保持直连 DSH（回归不变）；E4 未知 Provider / 事件协议不兼容均被拒 |
+| D 真机验收（DSH 在线） | `PASS` | D1 createSession → D2/D3 send + follow 进度（turn/end completed，16 事件）→ D4 status + contextUsage（pressure=10488）→ D5 cancel（受理 + running 15s 内回落）→ D6 resume（新 provider 实例重挂既有会话）→ D7 closeSession（归档受理 ×2；实测归档后会话仍可能在 session/list 出现，按真实语义断言） |
+| 单元/映射段合计 | `PASS` | 23 通过，0 失败；真机段 `PASS`（本机 DSH 127.0.0.1:3080 在线） |
+| `npm run test-core-entry` | `PASS` | worker 隔离数据目录实跑含 agent 接线的 bridge 启动；五个 MCP 模式通过 |
+| `npm run test-privilege` | `PASS` | 24/24（真实端到端部分仍 `NOT_RUN_ENVIRONMENT`） |
+
+真机段会经本机 DSH 创建/取消/归档真实会话（测试自建的会话在 D 段末尾归档）。
+
+### 边界与已知问题
+
+- **UI 选择器未落 Rust**：数据面已就绪（`chat.catalog.agentProviders` + `chat.config.set` 的
+  `agentProvider`），Rust 侧 Chat UI 是并发会话的后续工作，避免与其未提交 WIP 交织。
+- **continuity 侧存在两套 DSH provider**：`src/continuity/provider.js` 的窄接口版
+  （createContextSession/sendPrompt/cancel/archiveSession/estimateTokens）与本层全契约版并存；
+  已知差异：窄接口版 `archiveSession` 报告"不支持单会话归档"，但实测 `workspace/archiveSession`
+  可用（本层 closeSession 基于它）。后续应由 continuity 委托到本层收敛，属跨阶段重构。
+- Task ↔ Agent 执行接线（PROJECT_STATE §7「resume/start 时按 currentAgent 调用 Agent Provider」）
+  现在具备了统一抽象基础，接线本身未做。
+- `follow` 不经一元 IPC 暴露（有状态 async iterable），进程内消费方直接持有 provider。
+
+### 下一阶段入口
+
+- Rust Chat UI 补"执行方式：Normal Model / Agent Provider"选择器（消费 `chat.catalog.agentProviders`）。
+- continuity 窄接口 provider 委托到 `src/agent/`（消除双实现）。
+- Task ↔ Agent Provider 接线（`task.start`/`task.resume` 按 `currentAgent` 调用 agent.*）。
+
+---
+
 ## 阶段 12 — Desktop 系统页面（2026-10-04）
 
 把此前散落的工程配置整理成成熟产品设置：Settings / About / Update / Diagnostics / 日志脱敏。
@@ -1061,6 +1131,10 @@ Task / Agent Session / Artifact 均引用 Workspace ID
 ---
 
 ## 10. Agent Provider 当前状态
+
+> 更新（2026-10-04，阶段 06）：统一 AgentProvider 抽象**已落地**（`src/agent/`，DSH 为首个
+> Provider，`agent.*` 方法族 + Chat 可选执行方式）。本节下方"未实现"描述指抽象落地前的状态，
+> 保留作为 DSH 集成能力清单。
 
 ### 状态：**DSH 集成存在；统一 AgentProvider 抽象未实现**
 

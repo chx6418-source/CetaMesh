@@ -72,6 +72,8 @@ function extractUsage(event) {
 export function createChatService({
   api,
   controlExecute,
+  agentExecute = null,
+  agentProviders = [],
   defaults,
   stateDir,
   now = () => Date.now(),
@@ -79,6 +81,15 @@ export function createChatService({
 }) {
   if (!api?.callEndpoint) throw new Error('chat-service 需要 DSH api 客户端');
   if (typeof controlExecute !== 'function') throw new Error('chat-service 需要 controlExecute（模型目录）');
+  // Agent Provider（阶段 06）：会话可选指定 agentProvider（如 'dsh'），其回合经标准
+  // AgentProvider 契约（agent.createSession / agent.send / agent.cancel）执行；
+  // 未指定时保持"普通模型"直连路径，行为与阶段 03 完全一致。
+  // 只有事件协议与 Chat 回合状态机兼容（dsh-session-events）的 Provider 可被选择。
+  const selectableAgentProviders = new Map(
+    (Array.isArray(agentProviders) ? agentProviders : [])
+      .filter((entry) => entry && typeof entry.id === 'string')
+      .map((entry) => [entry.id, entry])
+  );
   const dir = path.join(stateDir, 'desktop-chat');
   const sessionsFile = path.join(dir, 'sessions.json');
   const historyDir = path.join(dir, 'history');
@@ -112,7 +123,10 @@ export function createChatService({
         provider: PROVIDERS.includes(record.config?.provider) ? record.config.provider : baseConfig.provider,
         model: typeof record.config?.model === 'string' ? record.config.model : baseConfig.model,
         reasoning: REASONING_EFFORTS.includes(record.config?.reasoning) ? record.config.reasoning : baseConfig.reasoning,
-        mode: CHAT_MODES.includes(record.config?.mode) ? record.config.mode : baseConfig.mode
+        mode: CHAT_MODES.includes(record.config?.mode) ? record.config.mode : baseConfig.mode,
+        agentProvider: typeof record.config?.agentProvider === 'string' && record.config.agentProvider
+          ? record.config.agentProvider
+          : null
       }
     };
   }
@@ -235,10 +249,26 @@ export function createChatService({
     if (config?.model !== undefined && (typeof config.model !== 'string' || config.model.length > 200)) {
       throw chatError('INVALID_PARAMS', 'model 必须是不超过 200 字符的字符串');
     }
+    if (config?.agentProvider !== undefined) {
+      // 普通模型 = null / ''；Agent Provider = 已注册且事件协议兼容的 id。
+      if (config.agentProvider === null || config.agentProvider === '') {
+        config.agentProvider = null;
+      } else {
+        const entry = selectableAgentProviders.get(String(config.agentProvider));
+        if (!entry) {
+          throw chatError('INVALID_PARAMS', `未知 Agent Provider：${String(config.agentProvider)}`);
+        }
+        if (entry.eventProtocol !== 'dsh-session-events') {
+          throw chatError('INVALID_PARAMS', `Agent Provider「${entry.id}」的事件协议与 Chat 回合状态机不兼容`);
+        }
+        config.agentProvider = entry.id;
+      }
+    }
     if (config.provider !== undefined) record.config.provider = config.provider;
     if (config.model !== undefined) record.config.model = config.model;
     if (config.reasoning !== undefined) record.config.reasoning = config.reasoning;
     if (config.mode !== undefined) record.config.mode = config.mode;
+    if (config.agentProvider !== undefined) record.config.agentProvider = config.agentProvider;
     touch(record);
     // 模型/reasoning 变更即时生效：已有 DSH 会话立即重新绑定（切换模型验收项）。
     if (record.dshSessionId && (config.model !== undefined || config.reasoning !== undefined)) {
@@ -267,6 +297,7 @@ export function createChatService({
       const entries = Array.isArray(value?.models) ? value.models : Array.isArray(value) ? value : [];
       return {
         providers: [...PROVIDERS],
+        agentProviders: [...selectableAgentProviders.values()].map((entry) => ({ id: entry.id, label: entry.label ?? entry.id })),
         modes: [...CHAT_MODES],
         reasoning: [...REASONING_EFFORTS],
         models: entries.map((entry) => ({
@@ -280,6 +311,7 @@ export function createChatService({
       // 空 Provider / 目录不可用：返回明确 error，UI 下拉显示不可用而不是伪造列表。
       return {
         providers: [...PROVIDERS],
+        agentProviders: [...selectableAgentProviders.values()].map((entry) => ({ id: entry.id, label: entry.label ?? entry.id })),
         modes: [...CHAT_MODES],
         reasoning: [...REASONING_EFFORTS],
         models: [],
@@ -461,17 +493,44 @@ export function createChatService({
     state.messageTexts = [];
     state.chunkBuffer = '';
     state.turn = { id: crypto.randomUUID(), state: 'streaming', displayText: '', error: null, usage: null };
+    const agentProviderId = record.config.agentProvider ?? null;
     try {
-      await ensureDshSession(record);
-      ensureFollow(record);
-      await api.callEndpoint('session/prompt', {
-        request: {
-          requestId: `cetamesh-chat-${Date.now().toString(36)}-${crypto.randomBytes(4).toString('hex')}`,
-          sessionId: record.dshSessionId,
-          mode: 'queue',
-          content: [{ type: 'text', text: promptText }]
+      if (agentProviderId && agentExecute) {
+        // Agent Provider 路径：会话生命周期与回合提交经标准契约；
+        // 事件流协议已由 setConfig 校验为 dsh-session-events，follow 状态机不变。
+        if (!record.dshSessionId) {
+          const created = await agentExecute({
+            method: 'agent.createSession',
+            params: {
+              provider: agentProviderId,
+              model: record.config.model || undefined,
+              reasoningEffort: record.config.reasoning || undefined
+            }
+          });
+          record.dshSessionId = String(created?.sessionId ?? '');
+          if (!record.dshSessionId) throw chatError('PROVIDER_ERROR', 'Agent Provider 未返回 sessionId');
+          saveStore();
         }
-      });
+        ensureFollow(record);
+        await agentExecute({
+          method: 'agent.send',
+          params: { provider: agentProviderId, sessionId: record.dshSessionId, content: promptText }
+        });
+      } else {
+        if (agentProviderId && !agentExecute) {
+          throw chatError('PROVIDER_ERROR', `Agent Provider 运行时不可用（${agentProviderId}）`);
+        }
+        await ensureDshSession(record);
+        ensureFollow(record);
+        await api.callEndpoint('session/prompt', {
+          request: {
+            requestId: `cetamesh-chat-${Date.now().toString(36)}-${crypto.randomBytes(4).toString('hex')}`,
+            sessionId: record.dshSessionId,
+            mode: 'queue',
+            content: [{ type: 'text', text: promptText }]
+          }
+        });
+      }
     } catch (error) {
       state.turn = null;
       state.messageTexts = [];
@@ -516,7 +575,14 @@ export function createChatService({
     turn.state = 'cancelling';
     try {
       if (record.dshSessionId) {
-        await api.callEndpoint('session/cancel', { request: { sessionId: record.dshSessionId } });
+        if (record.config.agentProvider && agentExecute) {
+          await agentExecute({
+            method: 'agent.cancel',
+            params: { provider: record.config.agentProvider, sessionId: record.dshSessionId }
+          });
+        } else {
+          await api.callEndpoint('session/cancel', { request: { sessionId: record.dshSessionId } });
+        }
       }
       // turn/end（cancelled）由 follow 流异步确认；此处仅上报已受理。
       return { stopped: true, state: 'cancelling' };
