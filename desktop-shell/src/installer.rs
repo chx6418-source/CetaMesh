@@ -1121,7 +1121,7 @@ fn snapshot_path(path: &Path, backup_dir: &Path, index: usize) -> Result<Snapsho
     remove_path(&backup);
     if metadata.is_dir() {
         fs::create_dir_all(&backup).map_err(|error| error.to_string())?;
-        copy_dir(path, &backup)?;
+        copy_dir_excluding(path, &backup, Some(backup_dir))?;
         Ok(Snapshot::Dir {
             path: path.to_path_buf(),
             backup,
@@ -1191,13 +1191,24 @@ pub fn remove_path(path: &Path) {
 }
 
 fn copy_dir(from: &Path, to: &Path) -> Result<(), String> {
+    copy_dir_excluding(from, to, None)
+}
+
+/// 跳过 `skip` 子树。备份目录就建在被快照目录内部（data_dir/.whalebridge-backup/…），
+/// 不排除的话复制目标会出现在复制源里，copy_dir 无限递归直到栈溢出（--remove-data 卸载必现）。
+fn copy_dir_excluding(from: &Path, to: &Path, skip: Option<&Path>) -> Result<(), String> {
     fs::create_dir_all(to).map_err(|error| error.to_string())?;
     for entry in fs::read_dir(from).map_err(|error| error.to_string())? {
         let entry = entry.map_err(|error| error.to_string())?;
         let source = entry.path();
+        if let Some(skip) = skip {
+            if source == skip || source.starts_with(skip) {
+                continue;
+            }
+        }
         let target = to.join(entry.file_name());
         if source.is_dir() {
-            copy_dir(&source, &target)?;
+            copy_dir_excluding(&source, &target, skip)?;
         } else {
             fs::copy(&source, &target).map_err(|error| format!("{}: {error}", source.display()))?;
         }
