@@ -473,6 +473,53 @@ Work/Artifacts/Decisions/MemoryRefs 全部保留）、**更换 Agent Provider**�
 - Task ↔ Agent 执行接线：`resume`/`start` 时按 `currentAgent` 调用 Agent Provider（需先有统一 AgentProvider 抽象）。
 - Context Rollover / Agent Handoff：本阶段只落地了 Checkpoint 与 Agent History 两个基座，
   迁移/接力运行时仍未实现。
+## 阶段 05 — Workspace v1（2026-10-04）
+
+建立真正属于 CetaMesh 的 Workspace，作为 Agent 与工具访问文件系统的**安全边界**。
+本节记录本阶段实际落盘与验证；验证只对本机实跑负责。
+
+### 已完成（本次提交内容）
+
+- 新增 `src/workspace/`（五文件）：
+  - `boundary.js`（安全核心）：`canonicalizeRoot`（拒绝盘符根 / Windows / Program Files / ProgramData / 用户主目录及其祖先作为 root；UNC/设备路径、NUL 拒绝）+ `resolveInside`（词法 contain 校验 → 逐段 Win32 特例检查 → 存在部分 realpath 复检）。拒绝面：`../` 穿越、绝对路径逃逸、junction/symlink 逃逸（realpath 复检）、8.3 短名（realpath 归一）、`.. ` 尾部空格段（Win32 会改写语义）、保留设备名（con/nul/com1…含带扩展名形式）、UNC/`\\?\`、NUL、超长路径。root 内 junction 指向 root 内仍允许（不误伤）。
+  - `registry.js`：工作区清单（`state/workspaces.json`，原子写复用阶段 01 的 `atomicWriteConfig`）。create/list/get/rename/remove/open/updateSettings + recentFiles/artifacts/activity 记录。**remove 只从清单移除登记，绝不删除用户目录**（测试断言目录保留）。commit 审批请求（10 分钟过期、remove 时级联清理）。
+  - `tools.js`：`workspace.read`（截断/二进制 base64）、`workspace.write`（createDirs、写入前父目录 realpath 复验收窄 TOCTOU）、`file.search`（子串 + glob、跳过 `.git`/`node_modules`、**不跟随逃逸 junction**、条数与深度上限）、git 三动词 `status` / `diff` / `commit`（execFile 参数数组，无 shell；**代码中不存在 reset --hard / clean / push 的任何构造路径**）、`test.run`（只执行工作区设置登记的 testCommand，cwd 强制为 root）。
+  - `service.js`：IPC 方法白名单 `workspace.*`（create/list/open/rename/remove/info/settings/read/write/file.search/git.status/git.diff/git.commit/test.run/pending.list/pending.decide）。git.commit 按工作区策略：`allow` 直通 / `approval`（默认）进入待审批，由 `workspace.pending.decide` 显式批准后才执行 / `deny` 拒绝。`workspace.info` 聚合 git 状态、最近文件、产物、活动流、待审批、Task 关联位（Persistent Task 冻结中显示未启用）。
+  - `index.js`：统一出口。
+- `desktop-shell/src/workspace_ui.rs`（新）：Workspace 产品页（清单/新建/重命名/从清单移除/设置/工具动作/commit 审批/最近文件/产物/Agent 活动/任务关联位）。镜像 `memory_ui.rs` 契约：只维护状态与 `WorkspaceAction` 意图，IPC 由 `native_ui.rs` 下发；含 3 个单元测试。`native_ui.rs` 接线（Area/Operation/字段/初始化/页面/响应刷新型链）与 `native_main.rs` 的 `mod` 声明。
+- `scripts/test-workspace-runtime.mjs`（服务层验收，46 项）+ `scripts/test-workspace-ipc.mjs`（IPC 端到端，11 项）+ `package.json` 的 `test-workspace` 脚本。
+
+### 本阶段验证（本机实测）
+
+| 检查 | 状态 | 说明 |
+| --- | --- | --- |
+| `node scripts/test-workspace-runtime.mjs` | `PASS` | 46/46：正常读写/搜索/git 全流程 + 全部 escape case（`../`、多级穿越、绝对路径、junction 读写逃逸、`.. ` 尾部空格、UNC/`\\?\`、NUL、保留设备名读写、盘符相对路径）+ Windows 行为（大小写不敏感、8.3 短名归一、危险 root 拒绝）+ 清单生命周期（remove 不删目录）+ commit 三策略（allow/approval 批准与拒绝/deny）+ test.run（成功/失败码/cwd 断言） |
+| `node scripts/test-workspace-ipc.mjs` | `PASS` | 11/11：真实 Core worker + 真实命名管道（`\\.\pipe\…`）往返；`workspace.*` 经 bridge.js 接线可达；`../` 与绝对路径逃逸在 IPC 层返回 `BOUNDARY_ESCAPE` 错误帧；清单持久化在隔离 data-dir |
+| `cargo test`（desktop-shell） | `PASS` | 79 passed（含 workspace_ui 3 项单元测试） |
+| `cargo check` | `PASS` | 0 error；0 warning（本阶段文件）；既有 warning 6 项（`show_product_placeholder` 全页面实现后成为死代码等，未处置） |
+| `node scripts/test-ipc-protocol.mjs` | `PASS` | 协议帧/版本/错误帧回归 |
+| `npm run test-core-entry` | `PASS` | worker 隔离数据目录启动 + 五个 MCP 模式；本次 worker 启动同时覆盖新增 workspace 服务构造 |
+| `npm run test-privilege` | `PASS` | 24/24；运行中桥接端到端部分 fetch failed 自动跳过（`NOT_RUN_ENVIRONMENT`） |
+| 真机视觉验收（Workspace 页交互） | `PENDING_NATIVE_VERIFICATION` | 单元测试覆盖状态机与解析；未做人工视觉走查 |
+| `git.commit` 之外的危险 git 操作 | `PASS`（静态） | 源码中不存在 `reset --hard` / `clean` / `push` 构造路径（评审项，非运行断言） |
+
+### 边界与已知问题
+
+- **TOCTOU（如实记录）**：`realpath` 校验与实际 open 之间存在窗口；写入路径通过"写前父目录 realpath 复验"收窄，彻底解决需要 openat2 风格支持，超出本阶段。
+- `test.run` 执行的是 owner 在工作区设置里登记的**整串命令**（cmd 语义），这是产品设计（工作区自带测试入口），不是任意命令注入面；但拥有工作区设置写权限即等于拥有该工作区内的命令执行权。
+- 工具仅暴露 read/write/file.search/git.status/diff/commit/test.run 七类；`workspace.write` 不提供删除/移动动词（避免破坏性文件操作进入本阶段）。
+- Workspace 页的 Task 关联位为占位（Persistent Task 冻结中）。
+
+### 与并行会话的交织（如实记录）
+
+- `src/bridge.js` / `src/control/ipc-protocol.js` 的 workspace.* 接线（import、`startUiIpcServer` 参数、dispatch 分支、服务构造、`workspace.` 方法族透传）由本阶段实际编写并在工作区验证（test-workspace-ipc 11/11）；由于两文件当时与并行会话的未提交改动交织，本提交采用索引级部分暂存（`git hash-object` + `update-index --cacheinfo`，等价于既有 `git apply --cached` 做法）**仅提交本阶段的接线 hunk**，并行改动原样留在工作区由其自行提交。
+- `native_ui.rs` 的 Area/Operation/字段/初始化/页面接线已被并行提交（`14c6a70`）携带入库；本提交补其响应刷新型链的最终版本。
+
+### 下一阶段入口
+
+- roadmap `TASK-D1-002` Named Pipe Security Audit（SID/ACL、未授权拒绝、超大帧与版本拒绝 + 自动测试）。
+- Workspace 后续小步：Workspace 页真机视觉验收；`workspace.write` 的 artifact 登记联到产物面板；Task 关联位在 Persistent Task 解冻后接线。
+
 ## 阶段 04 — Desktop Memory v1（2026-10-04）
 
 本轮由并行会话完成 **统一 Memory 运行时**（roadmap 未编号；与 D1-001 配置服务、产品级 Chat 并行施工）。

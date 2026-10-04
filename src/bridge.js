@@ -71,6 +71,7 @@ import {
 } from './sticker-lib.js';
 import { loginInfo, extractKugouAuth, createQrLogin, pollQrLogin } from './kugou-api.js';
 import { createMemoryService } from './memory/service.js';
+import { createWorkspaceService } from './workspace/index.js';
 import { createTaskService } from './task/service.js';
 import { createDefaultAgentService } from './agent/index.js';
 import { createExtensionService } from './extension/service.js';
@@ -448,7 +449,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const convKey = (kind, id) => `${kind}:${id}`;
 const SEND_TIMEOUT_MS = 15000;
 
-function startUiIpcServer(controlService, memoryService, taskService, extensionService, meshService, channelService, systemServices, agentService) {
+function startUiIpcServer(controlService, memoryService, taskService, extensionService, meshService, channelService, systemServices, agentService, workspaceService) {
   const pipeName = String(process.env.WHALEBRIDGE_UI_PIPE ?? '').trim();
   if (!pipeName) return null;
 
@@ -461,6 +462,10 @@ function startUiIpcServer(controlService, memoryService, taskService, extensionS
     }
     if (method.startsWith('agent.')) {
       return agentService.execute({ method, params });
+    }
+    // 工作区安全边界（阶段 05）：workspace.* 全部经 boundary 裁决，见 src/workspace/。
+    if (method.startsWith('workspace.')) {
+      return workspaceService.execute({ method, params });
     }
     if (method.startsWith('ext.')) {
       return extensionService.execute({ method, params });
@@ -1940,6 +1945,13 @@ async function main() {
       log
     });
     process.once('exit', () => agentService.close());
+    // 工作区安全边界（阶段 05）：Workspace 清单与 workspace.read/write/file.search/
+    // git.*/test.run 工具。所有路径访问经 src/workspace/boundary.js 裁决，
+    // root 之外一律拒绝；git.commit 默认走审批策略。
+    const workspaceService = createWorkspaceService({
+      stateDir: STATE_DIR,
+      audit: (event) => log(`Workspace ${event.action}（${event.workspaceId ?? 'none'}）`)
+    });
     // 本地扩展体系（阶段 10）：扩展只在用户本地导入，能力与权限均需显式声明与批准。
     const extensionService = createExtensionService({ stateDir: STATE_DIR });
     // Device Mesh（阶段 11）：Desktop 作为标准 CetaMesh Node；mesh 与 Channel Adapter 解耦。
@@ -1957,7 +1969,7 @@ async function main() {
       settings: settingsService,
       about: aboutService,
       update: updateService
-    }, agentService);
+    }, agentService, workspaceService);
     const server = http.createServer(async (req, res) => {
       const url = new URL(req.url ?? '/', `http://127.0.0.1:${port}`);
       const SECURITY_HEADERS = {

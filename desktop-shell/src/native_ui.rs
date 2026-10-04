@@ -1216,22 +1216,42 @@ ApiCall::Family { method, params } => api.request(method, params),
                     }
                 }
                 (Operation::WorkspaceCall, Ok(value)) => {
-                    let refresh_method = if value.get("workspaces").is_some() {
-                        None
-                    } else {
-                        Some("workspace.list")
-                    };
-                    if self.workspace.apply(value) {
-                        if let Some(method) = refresh_method {
-                            // 非 list 响应（open/rename/remove/pending/settings）先重拉清单，
-                            // 再由 apply 内部的 selected 变化触发详情刷新。
+                    // 单飞守卫：每个 area 同时只有一个在途调用，因此这里每步只发一个请求，
+                    // 形成可终止的刷新链：变更 → info → list（detail 已就绪则停止）。
+                    let is_list = value.get("workspaces").is_some();
+                    let needs_refresh = self.workspace.apply(value);
+                    let selected = self.workspace.selected.clone();
+                    if is_list {
+                        // 首次清单：自动加载选中工作区的详情（最近文件 / 活动 / 待审批）。
+                        if self.workspace.detail.is_none() {
+                            if let Some(id) = selected {
+                                self.issue_family(
+                                    Area::Workspace,
+                                    Operation::WorkspaceCall,
+                                    "workspace.info",
+                                    json!({ "id": id }),
+                                );
+                            }
+                        }
+                    } else if needs_refresh && selected.is_some() {
+                        // 变更类响应（create/open/rename/remove/settings/commit/decide）：
+                        // 先刷详情（含 pending），详情到达后再补一次清单同步行级数据。
+                        if let Some(id) = selected {
                             self.issue_family(
                                 Area::Workspace,
                                 Operation::WorkspaceCall,
-                                method,
-                                json!({}),
+                                "workspace.info",
+                                json!({ "id": id }),
                             );
                         }
+                    } else {
+                        // 详情 / 工具响应：同步一次清单（行级数据可能已变化）。
+                        self.issue_family(
+                            Area::Workspace,
+                            Operation::WorkspaceCall,
+                            "workspace.list",
+                            json!({}),
+                        );
                     }
                 }
                 (Operation::TaskCall, Ok(value)) => {

@@ -145,8 +145,8 @@ export function startIpcProtocol({
       writeFrame({ version: IPC_PROTOCOL_VERSION, id, ok: true, result: { status: 'pong' } });
       return;
     }
-    // 产品私有方法族（memory.* / task.* / agent.*）：由注入 dispatch 侧做二级白名单。
-    if (request.method.startsWith('memory.') || request.method.startsWith('task.') || request.method.startsWith('agent.') || request.method.startsWith('ext.')
+    // 产品私有方法族（memory.* / task.* / agent.* / workspace.*）：由注入 dispatch 侧做二级白名单。
+    if (request.method.startsWith('memory.') || request.method.startsWith('task.') || request.method.startsWith('agent.') || request.method.startsWith('workspace.') || request.method.startsWith('ext.')
       || request.method.startsWith('mesh.') || request.method.startsWith('channel.')
       || request.method.startsWith('settings.') || request.method.startsWith('about.') || request.method.startsWith('update.')) {
       try {
