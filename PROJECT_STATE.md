@@ -1445,3 +1445,33 @@ current branch
 ### 下一阶段入口
 
 - 真机人工验收桌面 Chat（启动 DSH → 原生窗口全验收项）→ D1-004 Capability Registry。Persistent Task 由并行会话按其阶段指令处理。
+
+---
+
+## 阶段 09 — Context Rollover 与 Agent Handoff（2026-10-04）
+
+目标：长 Task 不依赖单个 Agent Session 上下文永久存在。实现为 `src/continuity/`（types/provider/monitor/runtime/service），构建在 Task Runtime（阶段 07）之上。
+
+### 已完成
+
+- **Context Monitor**（`monitor.js`）：per-session 使用跟踪；真实 usage（inputTokens/outputTokens）优先标记 `source:'usage'`，缺失时按字符估算（chars/token，标记 `estimated:true`）——不伪造真实数字。阈值带对齐 Continuity spec 第 5 节：normal<70 / prepare 70-78 / ready 78-85 / rollover 85-90 / forced 90-92 / emergency 92+，policy 可配置（单字段更新自动联动收敛 prepare<=rollover<=forced）。
+- **AgentProvider 抽象**（`provider.js`）：注册表 + 接口（createContextSession/sendPrompt/cancel/archiveSession/estimateTokens）；DSH 为当前唯一实现（复用 worker 既有 NodeApiClient，不建第二套通道）；`archiveSession` 如实报告 DSH 无单会话归档端点（supported:false），由 detach+不复用实现"结束旧会话"语义。跨 Provider Handoff 走同一注册表，未来 Provider 零改动接入。
+- **Handoff Packet**（`types.js` normalizePacket）：结构化字段齐全——taskId/goal/requirements/currentPhase/completedWork/pendingWork/decisions/workspace/relevantFiles/artifacts/checkpoint/acceptanceCriteria/previousAgent/reasonForHandoff；Coding 扩展段（branch/headSha/gitStatus/gitDiffSummary/testsRun/buildStatus/knownFailures）由调用方提供真实事实，缺失即 null/空数组，绝不编造。packet 按 sequence 递增落盘（state/continuity/handoff/<taskId>/）。
+- **Rollover 编排**（`runtime.js`）：evaluate（none/checkpoint/rollover 三态）→ rollover（安全点检查钩子 canRollover → build packet → Task Checkpoint 落库 → cancel+archive 旧会话 → detachAgent → 新 Provider Session + 结构化 bootstrap（"不要重做已完成工作/从这里继续"，不携带聊天历史）→ attachAgent——**Task ID 不变** → rollover 历史落盘 + monitor 重置）。防重复执行：同 task 串行互斥（ROLLOVER_IN_FLIGHT）+ sequence 递增 + agentHistory 完整链。
+- **IPC**：`continuity.*` 方法族（status/policy/context.record/evaluate/rollover/packet/history/providers），经 Named Pipe 白名单透传，错误 code 原样回传。
+
+### 已验证（本机实跑）
+
+- `node scripts/test-continuity-rollover.mjs`：**PASS（6 组）**——阈值带（70% 只 checkpoint 不切换）、模拟低阈值强制 rollover 后 Task ID/Workspace/Progress/completedWork/pendingWork/decisions/artifacts 全保留、新 Session bootstrap 含结构化恢复且明示不重做、并发互斥防重复执行、跨 Provider Handoff（alpha→beta）+ 未注册 Provider 明确拒绝、canRollover 不安全点拒绝、usage 与估算来源区分、policy 白名单。
+- 回归：`test-ipc-protocol`（含 continuity 透传新用例）PASS、`test-core-entry` PASS、`test-task-runtime` PASS、`test-memory-runtime` PASS、`test-privilege` 24/24 PASS、`desktop:check` 通过（全树含并行会话改动编译）。
+
+### 未验证 / 已知限制
+
+- 真实 DSH 多轮长任务的端到端 rollover（DSH 未运行；fixture provider 验收）。bootstrap prompt 的模型实际执行效果待真机人工验收。
+- 自动触发器未接入回合机：chat/task 回合结束 hook（context.record + evaluate 自动 rollover）为下一步；当前 rollover 由显式 API 触发（测试用低阈值模拟强制触发）。
+- Workspace Reconciliation（D6-009）待 Workspace Runtime（D1-006 只建模）；packet 的 workspace facts 当前由调用方提供，文件级事实收集待 Workspace Runtime。
+- `bridge.js` / `ipc-protocol.js` 的 continuity 接线与并行会话的 ext/mesh/channel 改动交织，随其合并提交落库（当前工作树已验证编译与全部测试）。
+
+### 下一阶段入口
+
+- 回合机 hook：chat-service 回合结束处上报 context.record 并在 rollover 带自动触发安全 rollover → D6-009 Workspace Reconciliation（依赖 Workspace Runtime）→ Work UI 上下文控制条（D6-013）。

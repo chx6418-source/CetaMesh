@@ -169,5 +169,25 @@ function request(id, method, params) {
   assert.equal(signalAborted, true);
 }
 
+
+// continuity.*（阶段 09）与 chat.* / task.* 同一透传路径：方法族直接进 dispatch，错误 code 原样回传。
+{
+  const harness = makeHarness({ dispatch: async (command) => {
+    if (command.method === 'continuity.evaluate') return { taskId: command.params.taskId, action: 'rollover' };
+    throw Object.assign(new Error('任务不存在'), { code: 'TASK_NOT_FOUND' });
+  } });
+  const messages = await harness.finish([
+    request('c1', 'continuity.evaluate', { taskId: 't1' }),
+    request('c2', 'continuity.rollover', { taskId: 'missing' })
+  ]);
+  assert.deepEqual(messages.find((m) => m.id === 'c1'), {
+    version: 1, id: 'c1', ok: true, result: { taskId: 't1', action: 'rollover' }
+  });
+  const errorFrame = messages.find((m) => m.id === 'c2');
+  assert.equal(errorFrame.ok, false);
+  assert.equal(errorFrame.error.code, 'TASK_NOT_FOUND');
+  harness.ipc.close();
+  await harness.ipc.done;
+}
 assert.equal(IPC_PROTOCOL_MAX_FRAME_BYTES, 1024 * 1024);
 console.log('ipc-protocol tests: PASS');
