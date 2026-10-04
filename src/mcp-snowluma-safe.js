@@ -14,15 +14,12 @@ import { z } from 'zod';
 import { SENSITIVE_RE } from './sensitive.js';
 import { APP_PATHS } from './app-paths.js';
 import { isMainModule, reportEntrypointError } from './entrypoint.js';
+import { readRawConfigOrEmpty } from './config/loader.js';
 
+// 统一配置读取（TASK-D1-001）：BOM 容错与 fail-closed 语义集中在 src/config/loader.js。
+// 读不到 / 损坏按“未配置”空对象处理，安全开关在使用点以 !== true 自行关闭。
 function loadConfig() {
-  try {
-    let text = fs.readFileSync(APP_PATHS.configFile, 'utf8');
-    if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
-    return JSON.parse(text);
-  } catch {
-    return {};
-  }
+  return readRawConfigOrEmpty(APP_PATHS.configFile);
 }
 
 const cfg = loadConfig();

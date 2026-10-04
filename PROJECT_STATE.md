@@ -1,6 +1,54 @@
 # CetaMesh Desktop — PROJECT_STATE
 
-## Current authoritative snapshot — 2026-10-04
+## Current authoritative snapshot — 2026-10-04（TASK-D1-001 Unified Config Service）
+
+本快照取代下方 D0 快照。本阶段完成 roadmap **TASK-D1-001**：统一配置服务（Unified Config Service）。
+
+### 本阶段落盘内容
+
+- 新增 `src/config/`（四文件）：
+  - `loader.js`：BOM 容错读取、fail-closed（缺失/损坏/根非对象 → `ConfigError`，错误文案与旧 `readJsonSafe` 一致）、`readRawConfigOrEmpty`（MCP"未配置"语义）、`atomicWriteConfig`（临时文件+rename，0600）。
+  - `migrate.js`：旧 config → 规范配置的逐字段等价移植（旧 `loadConfig` 的默认值、`allow.privates/group` 别名、`ownerQQ`/白名单规范化、`socialV2.tools` 与 `sticker.collect` 深度合并），导出 `DEFAULT_MODEL` / `normalizeOwnerQQ` / `normalizeIdList`。
+  - `schema.js`：Zod 4 校验契约（`validateRawConfig` 只做诊断不改写）、`SECURITY_DEFAULTS`、`assertSecurityInvariants`（迁移不得把未显式开启的安全开关升级为 true）。
+  - `service.js`：`createConfigService({ configFile })` → `load / readRaw / updateSection(merge|replace) / writeFile`。
+- `src/bridge.js`：`loadConfig()` 改为薄封装委托 `migrateLegacyConfig(readRawConfig(CONFIG_FILE, { required: true }))`，删除约 290 行内联合并逻辑；`DEFAULT_MODEL` / `normalizeOwnerQQ` 改从 config 模块导入（运行期控制台直接改写 `cfg` 的行为不变）。
+- 4 个 MCP 模块（`mcp-snowluma-safe` / `mcp-qq-file-send` / `mcp-bilibili` / `mcp-host-server`）的重复 raw 读取统一到 `readRawConfigOrEmpty`（行为等价：读不到按 `{}`，使用点 `!== true` / `=== false` 自行 fail-closed）。
+- `package.json`：新增 `test-config` 脚本。
+- 附带修复：esbuild 构建曾告警的 `src/bridge.js` 重复 `collect` 键已消除（迁移实现用单次显式合并达成相同最终结果）。
+
+### 本阶段验证（本机实测）
+
+| 检查 | 状态 | 说明 |
+| --- | --- | --- |
+| `npm run test-config`（`scripts/test-config-service.mjs`） | `PASS` | 黄金参照等价测试：内嵌迁移前 `loadConfig` 原文副本（git d35dbfe 行 329-619 提取），7 组夹具（空/最小/旧别名/socialV2 局部覆盖/全量/错误类型/未知字段）全部 deepEqual；另覆盖 loader fail-closed、BOM、orEmpty、schema 诊断、service 读写、ownerQQ 非法值、安全不变量 |
+| 真实 `config.json` 新旧迁移输出 deepEqual | `PASS` | 一次性验证脚本（未入库）：对仓库当前真实配置，新旧实现输出完全一致 |
+| `npm run test-core-entry` | `PASS` | worker 隔离数据目录启动成功——新 `loadConfig` 在 worker 模式实跑通过；五个 MCP 模式 initialize/listTools/callTool 通过 |
+| `npm run test-privilege` | `PASS` | 24/24；运行中桥接端到端部分 fetch failed 自动跳过（该部分 `NOT_RUN_ENVIRONMENT`） |
+| `npm run self-test` | `PASS` | 本机 DSH（127.0.0.1:3080）在线：探活/建会话/prompt/回合 completed/回复正常。注意 self-test 不经过 loadConfig，模型链路验证与配置改造相互独立 |
+| `npm run test-app-paths` | `PASS` | 路径解析回归 |
+| `esbuild`（ESM bundle `src/core-sea.js`） | `PASS` | 0 告警（duplicate collect-key 告警已消失） |
+| Release / SEA 产物重建 | `NOT_RUN_ENVIRONMENT` | 本阶段未重建 dist/ 与 RC；安装器不受影响（无 Rust 改动） |
+
+### 边界与已知问题
+
+- **控制台 30+ 处写路径未迁移**：仍按原样直接读改写原始文件（保留未知字段）。`ConfigService.updateSection / writeFile` 已就绪并测试，逐个迁移是后续小阶段。
+- `src/local-services.js` 安装期仍直写 `config.json`（snowluma/dsh 两个字段补丁）——后续迁移。
+- `migrateLegacyConfig` 按等价性要求**原样保留**非布尔的安全开关值（如字符串 `'true'`）；fail-closed 由使用点 `=== true` 保证，类型异常由 `validateRawConfig` 诊断。二者配合即红线语义。
+- schema 为诊断性校验，不因新增未知字段阻断启动（宽松透传）。
+
+### 并发工作观察（重要，待所有者裁决）
+
+本阶段执行期间（约 20:05–20:10），另一会话在同一工作区并行修改了**本阶段未触碰**的文件：`desktop-shell/*`（`native_ui.rs` +321 行等）、`src/control/ipc-protocol.js`（新增 `chat.*` 方法族）、新增 `src/desktop/`（含 `chat-service.js`）、`desktop-shell/src/chat_ui.rs`、`src/memory/`、`scripts/test-desktop-chat-product.mjs`，并在 `src/bridge.js` 追加了 17 行 chat 接线。该工作与本文下方"桌面 Chat 闭环不得恢复重建"的历史决定方向相反，**未提交、未由本阶段验证、未纳入本阶段提交**。本阶段对 `src/bridge.js` 采用了部分暂存（`git apply --cached` 仅暂存配置相关 hunk），并发改动完整保留在工作区。另发现异常目录 `%SystemDrive%/`（疑似环境变量展开错误产生），未处置。请所有者确认该并行方向是否有效。
+
+### 下一阶段入口
+
+- 按 roadmap：**TASK-D1-002 Named Pipe Security Audit**（当前用户 SID/ACL、未授权拒绝、协议版本/超大帧/超时拒绝 + 自动测试）。
+- 小型后续（可先做）：把控制台写路径逐个迁移到 `ConfigService`；`local-services.js` 安装期写入接入。
+- Persistent Task v1 / Context Rollover / Agent Handoff 维持搁置（见下方第 20 节禁扩建清单）。
+
+---
+
+## D0 snapshot — 2026-10-04（TASK-D0-001/002 基线快照，被上方快照取代）
 
 This snapshot supersedes older status notes below. The repository is Desktop / Windows only; Mobile is a separate project.
 

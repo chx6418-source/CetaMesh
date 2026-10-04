@@ -30,18 +30,15 @@ import { synthesizeProsody } from './tts-prosody.js';
 import { kugouSearch, resolveSongUrl } from './kugou-api.js';
 import { APP_PATHS } from './app-paths.js';
 import { isMainModule, reportEntrypointError } from './entrypoint.js';
+import { readRawConfigOrEmpty } from './config/loader.js';
 
 const AUDIO_EXTS = new Set(['.mp3', '.wav', '.flac', '.ogg', '.m4a', '.aac', '.amr', '.silk', '.opus', '.wma']);
 const DEFAULT_MAX_SIZE_MB = 25;
 
+// 统一配置读取（TASK-D1-001）：BOM 容错与 fail-closed 语义集中在 src/config/loader.js。
+// 读不到 / 损坏按“未配置”空对象处理，白名单判断在使用点自行 fail-closed。
 function loadConfig() {
-  try {
-    let text = fs.readFileSync(APP_PATHS.configFile, 'utf8');
-    if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
-    return JSON.parse(text);
-  } catch {
-    return {};
-  }
+  return readRawConfigOrEmpty(APP_PATHS.configFile);
 }
 
 // 与桥接 allowed() 保持一致：allow 列表为空时按 allowAllWhenEmpty 放行
