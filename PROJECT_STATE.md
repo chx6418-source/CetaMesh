@@ -76,6 +76,80 @@ Recommended: roadmap D1 Foundation / `TASK-D1-001`, first inventorying configura
 
 ---
 
+## 阶段 01 审计 — 2026-10-04（真实状态审计，基线 `main@d35dbfe`）
+
+本节是「阶段 01：CetaMesh Desktop 真实状态审计」的产物，方法为打开实际代码取证（grep / 读文件 / 实跑测试），不按名字判断。它不重复上方快照，只补充证据位置与增量结论。v1 交付检查表见 `docs/desktop/DESKTOP_V1_PLAN.md`。
+
+### 能力矩阵（17 项，证据为本机源码）
+
+| 能力 | 标签 | 证据（file:line 为 2026-10-04 实测） |
+| --- | --- | --- |
+| Chat | PARTIAL | QQ↔DSH 桥接聊天全链路在 `src/bridge.js`（10003 行）；桌面 Chat 产品页不存在（`cdb3bd8` 已弃、`34b321d` revert）；`public/console.html`（324KB）为旧 Web 控制台遗留，发行构建不打包 |
+| Session | IMPLEMENTED | QQ 会话↔DSH 会话映射 `state/sessions.json`（`bridge.js:120,624`）；DSH session API（`src/dsh-client.js:7-8` 端点速查） |
+| Model Provider | PARTIAL | 模型目录/默认模型/preset 绑定（control 28 方法中 model.*/preset.*）；`settings/describe`×8、`selectModel`×4 实际调用；无通用 ModelProvider 抽象、无独立凭据库 |
+| DSH | IMPLEMENTED | `src/dsh-client.js`：session/create\|prompt\|cancel\|list、selectModel、workspace/create\|rename\|list\|reset\|archiveSession、settings/describe、agentPresets/list、`$events/result`、remote.mux WS follow |
+| Agent | PARTIAL | whale-chat / whale-chat-v2 preset + 角色注入 + `dsh/agent-presets/*/qq-tool-restrict.mjs` 工具收敛；**无 AgentProvider 抽象**（grep 0 命中） |
+| Task | PARTIAL | 仅内部 service task；Persistent Task 无任何实现（grep 0）；**BLOCKED（所有者冻结）** |
+| Memory | PARTIAL | `qq_memory_append/query/remove/clear`（`bridge.js:4992-5111`，socialV2 存储 + `v2ToolEnabled('memory')` 会话令牌门）；无统一 Memory Runtime、无跨会话/任务记忆 |
+| Workspace | PARTIAL | DSH 侧 workspace API（create/rename/list/reset/archiveSession）；无 CetaMesh 自有文件安全边界 |
+| Capability | MISSING | 无 Registry/Permission 引擎（grep 0）；未知能力默认拒绝的原则只在旧模块局部成立 |
+| Approval | IMPLEMENTED | legacy 队列：`pending.list/decide`（`control-service.js:31-32,150-206`）+ ask_user 转发 + 风险卡逐次审批（`state/social-v2-cards.json`） |
+| Security | IMPLEMENTED | 双令牌分离（`src/bridge-privilege.js` 收敛式白名单）、回复审计硬拦截（`src/sensitive.js`）、SSRF 防护（`src/safe-fetch.js`）、发送强制白名单；安全默认 `allowAllWhenEmpty=false` / `snowluma.allowProcessControl=false` / `socialV2.tools.clickCardButton=false`（源码证实） |
+| IPC | IMPLEMENTED | `src/control/ipc-protocol.js` v1（4 字节长度前缀 JSON、1MiB 帧、30s 超时、结构化错误）；`control.execute` 28 方法白名单 + `core.ping`；事件仅 `core.ready` |
+| Named Pipe | IMPLEMENTED | `desktop-shell/src/ipc_client.rs` + `supervisor.rs` + `core_launch.rs`；shell smoke PASS |
+| Installer | IMPLEMENTED | `installer.rs` / `install_cli.rs` / `migrate.rs` / `native_installer_ui.rs`；安装/升级/修复/迁移/卸载/重装全生命周期测试 PASS |
+| Update | MISSING | 无任何自动更新机制（auto-update/checkForUpdate grep 0）；仅有重装/修复路径 |
+| QQ / Channel | IMPLEMENTED | SnowLuma OneBot v11 + `mcp-snowluma-safe/host` + 卡片风险审批；定位为 Channel Adapter，非 Core 中心 |
+| Plugin | PARTIAL | DSH 侧 `plugins/whale-mode-console`（已跟踪）；桌面插件系统仅存在于**未跟踪草稿**（`src/desktop-plugin-*.js` 等），不作为已有能力 |
+
+### 6 项“是否真有 Runtime”的确认
+
+`AgentProvider` / `PersistentTask` / `rollover` / `handoff` / `Checkpoint` / `CapabilityRegistry` 在 `src/` 与 `desktop-shell/src/` 中 **grep 全部 0 命中**。Workspace 安全边界与统一 Memory Runtime 同样无 runtime。相关设计只存在于 `docs/architecture/CETAMESH_CONTINUITY_RUNTIME_v1.0.md` 与 roadmap（PLANNED，非实现）。Context Rollover / Agent Handoff / Persistent Task 运行时：**BLOCKED（所有者冻结）**。
+
+### 旧四模式现存位置（只记录，本阶段不重构）
+
+`chat` / `closed-agent` / `reserved` / `reserved2` 出现于：`src/bridge.js`(14 处)、`src/control/control-service.js`(3)、`desktop-shell/src/native_ui.rs`(5)、`README.md`(2)、`RULES.md`(2)。处置属 workplan TASK-D7-001，reserved* 去留需所有者决策。
+
+### 代码与旧文档的不一致（增量补充）
+
+- `AGENT_CONTEXT.md`（116KB，09-22）：WhaleBridge/QQ 时代内容；其“多智能体协作唯一事实源”自我定位已过时。**历史参考地位**（详见第 17 节）：`PROJECT_STATE.md` = 当前状态入口；`AGENT_CONTEXT.md` = WhaleBridge 历史实现资料。保留，不删除。
+- `README.md` / `RULES.md` / `config.example.json`：品牌与结构仍是 WhaleBridge QQ 桥（与代码一致，但产品名已定 CetaMesh；全仓改名被 workplan 规则 13 明确暂缓）。
+- `desktop-shell/README.md`：Tauri/WebView 描述为历史段落（文件头已注明以 Cargo/native_main.rs 为准）。
+- `docs/DESKTOP_APP.md` / `DESKTOP_ACCEPTANCE.md`（09-23）：未反映 10-04 的 D0 复验与缺陷修复。
+- roadmap / continuity spec：**规划文档，不构成实现证据**（上方快照已声明，此处重申）。
+- `AGENTS.md` 不存在。
+
+### 本阶段测试结果（2026-10-04 本机实跑，基线 `main@d35dbfe`）
+
+| 测试 | 结果 |
+| --- | --- |
+| `npm run desktop:test` | PASS（62/62，含 `d35dbfe` 新增 remove-data 事务回归） |
+| `npm run test-core-dist` | PASS（`d35dbfe` 改后复验） |
+| `npm run test-desktop-install` | PASS（`d35dbfe` 改后复验） |
+| `npm run test-privilege` | PASS（24/24） |
+| `npm run test-core-entry` | PASS |
+| `npm run test-dsh-integration` | PASS |
+| `node scripts/test-control-service.mjs` | PASS |
+| `node scripts/test-ipc-protocol.mjs` | PASS |
+| `npm run test-desktop-shell` | PASS（视觉交互 PENDING_NATIVE_VERIFICATION） |
+| `npm run self-test` | NOT_RUN_ENVIRONMENT（DSH 127.0.0.1:3080 拒绝连接，实测） |
+
+### 技术债与风险
+
+1. `src/bridge.js` 10003 行单体（模式/会话/审批/记忆/贴纸/TTS 混居）——D1-008 增量抽取对象，禁止一次性重写。
+2. 配置系统：默认值内联于 `loadConfig()` 约 290 行 + 三个旁路读取者（`local-services.js` / `mcp-host-server.js` / `mcp-snowluma-safe.js` 执行期直读 config.json）——D1-001 统一入口待建。
+3. 卸载回滚弱点仍在：data_dir 快照备份位于 data_dir 内部，中途失败触发回滚时备份会随数据目录先被删除（`d35dbfe` 回归测试只覆盖成功路径）。
+4. 无自动更新通道（About/Update 缺失）。
+5. 未跟踪插件草稿长期漂移：保留/删除需所有者决策（禁止 `git add -A`，提交只按文件）。
+6. 本地 main 领先 origin/main 5 个提交未推送——推送时机由所有者决定。
+7. 构建警告：`src/bridge.js` 重复 `collect` key、Windows SEA 注入签名警告（不阻塞，未修）。
+
+### 推荐下一阶段
+
+**D1 Foundation / TASK-D1-001 Unified Config Service**（入口与前置盘点见 `docs/desktop/DESKTOP_V1_PLAN.md` Stage B）。Persistent Task / Rollover / Handoff 冻结照旧。
+
+---
+
 ## 0. 本文件用途
 
 这是 CetaMesh Desktop 当前阶段的项目状态事实表，用于让后续 Agent / DSH / Codex / 开发者快速判断：
