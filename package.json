@@ -28,6 +28,7 @@
     "test-memory": "node scripts/test-memory-runtime.mjs",
     "test-task": "node scripts/test-task-runtime.mjs",
     "test-extension": "node scripts/test-extension-runtime.mjs",
+    "test-mesh": "node scripts/test-mesh-runtime.mjs",
     "test-core-entry": "node scripts/test-core-entry.mjs",
     "test-dsh-integration": "node scripts/test-dsh-integration.mjs",
     "test-desktop-supervisor": "node scripts/test-desktop-supervisor.mjs",

@@ -146,7 +146,8 @@ export function startIpcProtocol({
       return;
     }
     // 产品私有方法族（memory.* / task.*）：由注入 dispatch 侧做二级白名单。
-    if (request.method.startsWith('memory.') || request.method.startsWith('task.') || request.method.startsWith('ext.')) {
+    if (request.method.startsWith('memory.') || request.method.startsWith('task.') || request.method.startsWith('ext.')
+      || request.method.startsWith('mesh.') || request.method.startsWith('channel.')) {
       try {
         const result = await runDispatch({ method: request.method, params });
         if (!disconnected) writeFrame({ version: IPC_PROTOCOL_VERSION, id, ok: true, result: result === undefined ? null : result });

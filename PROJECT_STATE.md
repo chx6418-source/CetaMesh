@@ -52,6 +52,101 @@
 
 ---
 
+## 阶段 11 — Device Mesh Desktop（2026-10-04）
+
+让 Desktop 成为**标准 CetaMesh Node**：有身份、能被配对、能被信任、能被授权、能被撤销。
+Desktop 不是 Mobile 的遥控器——它自己就是一个对等节点。
+
+### 已完成（本次提交内容）
+
+- `src/mesh/`（新增）：
+  - `types.js`：Node Role（desktop/mobile/server/edge）、Trust 状态（pending/trusted/blocked）、
+    Presence（unknown/online/offline）、Transport（loopback/pipe/tcp/relay）、协议版本与 7 项能力清单。
+  - `identity.js`：**Device Identity** = Ed25519 密钥对 + 由公钥派生的稳定 node id
+    （`node_<sha256(spki)[:32]>`，对端可独立复算）。私钥单独存 `identity.key`（0600），重启后身份不变。
+  - `trust.js`：信任库。**trust 与 grants 分离**——已信任的节点默认没有任何能力；
+    撤销信任 = 置 blocked + 清空全部授权。Disconnect 只清在线状态，不动信任与授权。
+  - `capabilities.js`：Capability Manifest（本节点对外声明什么）。声明 != 授权。
+  - `protocol.js`：信封结构/版本/时效/重放校验 + 签名，以及**远程能力请求授权链**（纯函数，可穷举）。
+  - `node.js`：MeshNode —— createInvite / pair / trust / block / grant / revoke / disconnect /
+    removeTrust / touch / handleEnvelope / approvals / decideApproval / audit / status。
+  - `service.js` / `index.js`：`mesh.*` 方法白名单（含页面聚合 `mesh.snapshot`）。
+- `src/channel/`（新增）：**Channel Adapter 定位**。把 QQ（OneBot v11 / SnowLuma）显式声明为
+  `kind: 'channel-adapter'` 且 `coreDependency: false`，并提供可断言的不变量
+  `channel.independence().coreGatedByChannels === false`。`channel.*` 方法族。
+- `desktop-shell/src/mesh_ui.rs`（新增）：Devices / Mesh 区域（挂在 Settings 页顶部），
+  展示 Device / Role / Trust / Transport / Last seen / Capabilities / Status / Last error，
+  以及本节点身份、Channel Adapter 状态、配对邀请码、逐次审批。
+- `scripts/test-mesh-runtime.mjs`（新增）：验收测试。
+- Core 接线：`ipc-protocol.js` 增加 `mesh.*` / `channel.*` 路由；`bridge.js` 创建
+  `createMeshService` / `createChannelService` 并接入 dispatch。
+- `package.json`：新增 `test-mesh`。
+
+### 授权链（Trusted != Authorized）
+
+远程能力请求按固定阶段判定，每一步失败都返回带 `stage` 的决策，便于审计与 UI 展示卡在哪一步：
+
+```text
+1. protocol     信封结构 / 协议版本 / 时间偏移 / 重放 nonce
+2. trust        对端存在 + trust===trusted + 签名有效（用对端公钥验签）
+3. availability 能力在本节点清单内且当前可用
+4. policy       该能力已显式授予该对端  ← Trusted != Authorized 的落点
+5. approval     需要审批的能力必须有已批准请求（否则 pending_approval）
+```
+
+实现顺序把 **protocol 放在最前**（而不是按需求列表的 Trust 在前），因为「信任谁」必须先知道
+「这条消息在语法上是谁发的、有没有被篡改」；这是有意偏离并在此说明。
+
+### 已验证（本机实跑）
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm run test-mesh` | `PASS` 86/86 |
+| `npm run desktop:test`（cargo test） | `PASS` 76/76（含本阶段 `mesh_ui` 3 项单测） |
+| `npm run desktop:check` | `PASS` 0 error |
+| `npm run test-extension` / `test-task` / `test-memory` / `test-config` | `PASS` 87/87、90/90、85/85、69/69 |
+| `npm run test-core-entry` | `PASS`（用本次接线版本启动真实 worker） |
+| `npm run test-privilege` | `PASS` 24/24 |
+
+`test-mesh` 用**两个真实 MeshNode 实例在进程内互发信封**（协议、签名、信任、授权、审批、在线判定
+全部真跑，只有 transport 是 loopback）覆盖：身份派生与重启不变；配对（邀请码一次性 / 过期 / 禁止自配对，
+且配对成功只得到 pending）；未信任与未配对一律拒绝；**已信任但未授权在 policy 阶段被拒**；
+授权后仍需逐次审批；批准放行 / 拒绝生效 / 审批不可重复决定；协议版本不符、载荷篡改（签名失败）、
+过期消息、错误收件人、未知能力、重放 nonce、能力不可用、已拉黑对端 —— 各自命中正确的 stage；
+Presence 心跳与 TTL 离线；Disconnect 不动信任与授权；Remove Trust 置 blocked 并清空授权；
+零对端时 Core 仍 ready；Channel 出错不影响 Core；QQ 工具名仍在源码中（未删能力）；重启持久化；IPC 往返。
+
+### PENDING_NATIVE_VERIFICATION（不要伪造跨设备 PASS）
+
+- **真实跨设备链路未实现也未验证**：单机环境没有第二台 CetaMesh Node，
+  `pipe` / `tcp` / `relay` 三种传输只在词表里声明，实际只支持 `loopback`（进程内）。
+  本阶段的全部结论**只覆盖本机协议语义**，不代表两台设备之间能互通。
+- Devices / Mesh 区域的视觉交互：未做真机目视确认。
+
+### 未纳入本次提交
+
+- **Rust 侧页面挂载未提交**：`desktop-shell/src/mesh_ui.rs` 已入库并单测通过，
+  但把它挂到 Settings 页所需的 `native_ui.rs`（`Area::Mesh` / `Area::Channel` / `Operation::MeshCall` /
+  `show_settings_page`）与 `native_main.rs`（`mod mesh_ui;`）改动目前与并行会话在制的 Chat UI /
+  产品导航位于同一批未提交改动里（HEAD 的 `native_main.rs` 连 `mod app_shell;` 都还没有），
+  单独提交会连带引用未跟踪的 `chat_ui.rs` / `app_shell.rs`。
+  当前工作区里这些改动是**完整且已通过** `cargo check`(0 error) 与 `cargo test`(76/76) 的，
+  属提交顺序问题而非代码缺口；等 Chat/导航一起提交后即可入库。
+
+### 已知问题
+
+1. 跨设备执行未接线：授权通过后，除 `mesh.presence` / `mesh.manifest` 由本节点直接处理外，
+   其余能力返回 `executor_not_wired` —— 授权链是真的，远程执行器还没有。
+2. 无端到端加密与会话密钥协商；信封只做签名（完整性 + 身份），不做加密（机密性）。
+3. 重放防护是 10 分钟窗口内的 nonce 集合，重启后清空（跨重启重放未覆盖）。
+4. 无 NAT 穿透 / 中继；`relay` 只是词表占位。
+5. `startUiIpcServer` 已经累积到 7 个位置参数，产品方法族分派值得改成表驱动（技术债）。
+
+### 下一阶段入口
+
+- 真实跨设备传输：先实现 `tcp`（本机双进程即可验证）再谈 `relay`；补端到端加密与密钥协商。
+- 远程执行器接线：把 chat / memory / task / workspace / extension 的真实执行接到授权链之后。
+- Rust 页面挂载随 Chat/导航一并提交，然后做 Devices 区域的真机目视验收。
 ## 阶段 10 — Desktop Extension v1（2026-10-04）
 
 本地扩展体系：只做 Local Import 与生命周期，**不做市场服务器**。
