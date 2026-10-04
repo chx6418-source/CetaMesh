@@ -52,6 +52,72 @@
 
 ---
 
+## 阶段 04 — Desktop Memory v1（2026-10-04）
+
+本轮由并行会话完成 **统一 Memory 运行时**（roadmap 未编号；与 D1-001 配置服务、产品级 Chat 并行施工）。
+本节的验证只对本机实跑负责。
+
+### 已完成（本次提交内容）
+
+- `src/memory/`（新增）统一 Memory Runtime：
+  - `types.js`：类型 `working|chat|user|task|workspace`；Scope `global|workspace|task|chat|user`；
+    来源 `user|chat-candidate|qq-adapter|system`；`LONG_TERM_TYPES` 显式标出需用户确认的类型。
+  - `store.js`：原子写 + 每记录 `rev` 的 revision/冲突检测。**只对外暴露按授权分区的检索原语**
+    `scanAuthorized(scopeKeys, predicate)`，不提供「取全量再过滤」的入口——授权先于检索由结构保证。
+  - `policy.js`：`authorize` 产出检索过滤器（已授权 scopeKey + 允许类型）。Agent 默认只读 `working`/`chat`、
+    只写 `working`；写长期类型在策略层直接拒绝（`LONG_TERM_REQUIRES_CONFIRMATION`）；`confirm`/`admin` 仅限用户主体。
+  - `runtime.js`：固定顺序 authorize → retrieve → rank；CRUD / 搜索 / Pin / stats；
+    Chat 候选两阶段——`proposeCandidate` 只登记候选（不产生记忆），`confirmCandidate` 由用户确认后才落库并记录
+    `confirmedAt`/`confirmedBy`/`origin.candidateId`。
+  - `adapters/qq.js`：旧 QQ/socialV2 记忆**只读**适配器（`activeTopic→chat`、`pendingThought→working`、
+    `memberImpression→user`），稳定 `origin.ref` 保证幂等导入，从不改写 `social-v2.json`。旧 QQ 记忆数据与工具保留不动。
+  - `service.js` / `index.js`：`memory.*` 方法白名单 + `memory.overview` 页面聚合查询；主体固定为 `user:desktop`，
+    IPC 调用方不能自带 principal。
+- `desktop-shell/src/memory_ui.rs`（新增）：Memory 产品页——查看 / 搜索 / 过滤 / 创建 / 编辑 / 删除 / Pin /
+  来源 / 更新时间 / Scope / rev，含待确认候选区。仅维护状态并返回调用意图，不直接持有 CoreApi。
+- `scripts/test-memory-runtime.mjs`（新增）：验收测试。
+- `package.json`：新增 `test-memory` 脚本。
+
+### 已验证（本机实跑）
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm run test-memory` | `PASS` 85/85 |
+| `memory_ui.rs` 独立类型检查（`rustc --test --emit=metadata`） | `PASS`（0 error / 0 warning） |
+
+`test-memory` 覆盖：CRUD；search 命中/排序/pinned 优先；scope 过滤；**授权先于检索的可证明性**
+（受限 Agent 的 `meta.scanned` 只等于已授权分区条数，未授权分区既不读也不计数）；未知类型/未知 Scope 拒绝；
+Agent 直接写长期记忆被拒、可写 `working`；Agent 不能删除、不能自行确认候选；候选 accept/reject 全路径；
+候选不可重复确认；revision 冲突（过期 `expectedRev` → `MEMORY_CONFLICT`，缺 `expectedRev` → `REVISION_REQUIRED`，
+冲突后数据未被破坏）；重启持久化（记录/id/rev/候选状态一致）；QQ 适配器只读（导入前后 `social-v2.json` 字节一致）
+与幂等（二次导入 0 新增/4 跳过）；`memory.*` 的 IPC 端到端往返。
+
+### 未验证 / 未纳入本次提交
+
+- **IPC 接线未提交**：`src/control/ipc-protocol.js`（`memory.*` 路由）、`src/bridge.js`（`createMemoryService` +
+  dispatch 分支）、`desktop-shell/src/native_main.rs`（`mod memory_ui;`）三处改动已在工作区就位并复核在位，
+  但它们与并行会话的在制 Chat 接线**位于同一批 hunk**，单独提交会连带提交 `src/desktop/chat-service.js` 的引用，
+  而该文件当前未跟踪，会让提交处于不可构建状态。故留给两侧工作合并后再提交。
+  因此**本次提交的 Memory 运行时暂时不能从桌面壳直接调用**（Node API 与测试可用）。
+- `cargo check` / `cargo test` 整体：`FAIL`，但与本阶段无关——`desktop-shell/src/native_ui.rs` 与 `chat_ui.rs`
+  当前处于并行会话的编辑中间态（缺 `NativeUi.chat` 字段、缺 `Area::Chat`/`Area::ChatStatus`、
+  第 1744 行 Rust 字符串内引号未转义）。剔除这些后，138 个错误中**引用本阶段符号的错误数为 0**。
+- `memory_ui.rs` 的 3 个 Rust 单测：`BLOCKED`（整体构建不可用；且本会话进程内无 `link.exe`，无法单独链接）。
+- Memory 页视觉交互：`PENDING_NATIVE_VERIFICATION`。真实 DSH / 真机链路：未跑。
+
+### 已知问题
+
+1. `rank` 为确定性启发式（pin > 命中质量 > 新鲜度 > 类型权重），不含向量检索——按阶段要求有意不做向量库平台化。
+2. QQ 适配器为显式调用导入，未做后台自动同步。
+3. 控制台尚未接入 Memory 页所需的写路径迁移（沿用 D1-001 的边界）。
+4. 工作区存在字面目录 `%SystemDrive%/`（疑似环境变量未展开的副产物），非本阶段产生，未处置。
+
+### 下一阶段入口
+
+- 合并接线后重跑 `cargo check` / `cargo test`，并对 Memory 页做真机视觉验收。
+- Memory 后续：按 workspace/task 维度的细粒度授权、长期记忆 Consolidation、
+  以及在 Chat 回合中调用 `proposeCandidate` 的接线（候选→确认→落库链路已可用）。
+
 ## D0 snapshot — 2026-10-04（TASK-D0-001/002 基线快照，被上方快照取代）
 
 This snapshot supersedes older status notes below. The repository is Desktop / Windows only; Mobile is a separate project.

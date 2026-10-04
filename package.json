@@ -25,6 +25,7 @@
     "test-stickers": "node scripts/test-stickers.mjs",
     "test-app-paths": "node scripts/test-app-paths.mjs",
     "test-config": "node scripts/test-config-service.mjs",
+    "test-memory": "node scripts/test-memory-runtime.mjs",
     "test-core-entry": "node scripts/test-core-entry.mjs",
     "test-dsh-integration": "node scripts/test-dsh-integration.mjs",
     "test-desktop-supervisor": "node scripts/test-desktop-supervisor.mjs",
