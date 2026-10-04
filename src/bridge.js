@@ -75,6 +75,9 @@ import { createTaskService } from './task/service.js';
 import { createExtensionService } from './extension/service.js';
 import { createMeshService } from './mesh/service.js';
 import { createChannelService } from './channel/service.js';
+import { createSettingsService } from './settings/service.js';
+import { createAboutService } from './about/service.js';
+import { createUpdateService } from './update/service.js';
 import { createLocalServiceManager, SNOWLUMA_RELEASE_PAGE, DSH_INSTALL_HINT } from './local-services.js';
 import { CONTROL_METHODS, ControlServiceError, createControlService } from './control/control-service.js';
 import { startIpcProtocol } from './control/ipc-protocol.js';
@@ -444,7 +447,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const convKey = (kind, id) => `${kind}:${id}`;
 const SEND_TIMEOUT_MS = 15000;
 
-function startUiIpcServer(controlService, memoryService, taskService, extensionService, meshService, channelService) {
+function startUiIpcServer(controlService, memoryService, taskService, extensionService, meshService, channelService, systemServices) {
   const pipeName = String(process.env.WHALEBRIDGE_UI_PIPE ?? '').trim();
   if (!pipeName) return null;
 
@@ -463,6 +466,15 @@ function startUiIpcServer(controlService, memoryService, taskService, extensionS
     }
     if (method.startsWith('channel.')) {
       return channelService.execute({ method, params });
+    }
+    if (method.startsWith('settings.')) {
+      return systemServices.settings.execute({ method, params });
+    }
+    if (method.startsWith('about.')) {
+      return systemServices.about.execute({ method, params });
+    }
+    if (method.startsWith('update.')) {
+      return systemServices.update.execute({ method, params });
     }
     return controlService.execute({
       method,
@@ -1922,7 +1934,19 @@ async function main() {
     // Device Mesh（阶段 11）：Desktop 作为标准 CetaMesh Node；mesh 与 Channel Adapter 解耦。
     const meshService = createMeshService({ stateDir: STATE_DIR });
     const channelService = createChannelService();
-    startUiIpcServer(controlService, memoryService, taskService, extensionService, meshService, channelService);
+    // 系统页面（阶段 12）：产品设置（持久化）+ About（版本单一事实源）+ 安全更新检查。
+    // 更新检查是惰性的：构造时绝不联网，只有显式 update.check 才会发起请求。
+    const aboutService = createAboutService({ rootDir: APP_PATHS.sourceRoot });
+    const settingsService = createSettingsService({ stateDir: STATE_DIR });
+    const updateService = createUpdateService({
+      currentVersion: aboutService.about.info().version,
+      settingsStore: settingsService.store
+    });
+    startUiIpcServer(controlService, memoryService, taskService, extensionService, meshService, channelService, {
+      settings: settingsService,
+      about: aboutService,
+      update: updateService
+    });
     const server = http.createServer(async (req, res) => {
       const url = new URL(req.url ?? '/', `http://127.0.0.1:${port}`);
       const SECURITY_HEADERS = {

@@ -52,6 +52,123 @@
 
 ---
 
+## 阶段 12 — Desktop 系统页面（2026-10-04）
+
+把此前散落的工程配置整理成成熟产品设置：Settings / About / Update / Diagnostics / 日志脱敏。
+
+### Settings（10 个分区，可持久化）
+
+`src/settings/` —— General / Models / Agents / Memory / Workspace / Devices / Extensions /
+Security / Updates / Advanced。每项都有类型、默认值与描述，UI 只负责渲染。
+
+**锁定项**表达的是「这不是偏好，而是产品的安全姿态」—— 可见、可理解，但改不动
+（试图关闭返回 `LOCKED_SETTING`）：
+
+| 锁定项 | 含义 |
+| --- | --- |
+| `security.redactLogs` | 日志脱敏始终开启 |
+| `memory.requireConfirmationForLongTerm` | 长期记忆必须经用户确认 |
+| `devices.requireApprovalForRemoteCapabilities` | 远程能力请求必须本地批准 |
+| `extensions.requireReviewApproval` | 扩展高风险权限必须显式批准 |
+
+损坏的 `settings.json` **不阻断启动**：解析失败回落默认值并如实上报 `lastError`。
+
+### About
+
+`src/about/` —— CetaMesh / Edition / Version / Build(commit, buildTime, buildId) / Runtime(node,
+v8, platform, arch, packaged) / License / Repository。
+
+「Version 与构建版本一致」不是文案承诺而是**算出来的**：版本只从 `package.json` 读，
+同时从 `desktop-shell/Cargo.toml` 读桌面壳版本做交叉核对，输出 `versionConsistent`。
+commit 优先取 `build-info.json`（发布构建写入），开发态可回退 git，两者都没有就报 `unknown`**绝不编造**。
+顺带补齐了 `package.json` 的 `license`（GPL-3.0-only，与 LICENSE 一致）与 `repository`。
+
+### Update（安全更新流程）
+
+`src/update/` —— 支持 check / version compare / release notes / 下载链接与安装器接力：
+
+- **签名必验**：清单必须用配置的 Ed25519 公钥验签通过才被采信；**没有配置公钥就一律不信任**
+  （fail-closed，而不是「先装上再说」）。验签对象是**发布出来的那个对象**，不是归一化结果。
+- **客户端不内嵌任何 Token**：检查走公开地址 + 用户可配公钥，不需要凭据。
+- **不静默执行安装程序**：本模块**没有** `download` / `execute` / `install` / `run` 任何入口
+  （测试断言它们不存在），只产出「有新版 + notes + 下载链接 + 需要用户确认的安装器接力信息」。
+- 下载地址必须是 https，且主机命中设置里的允许列表，否则拒绝。
+- 通道不匹配 / 版本不更新 / 低于 minVersion / 非 2xx / 非 JSON / 超时 / 网络错误，全部返回**结构化结果**，
+  从不抛给调用方；构造更新服务时**不发起任何网络请求**（惰性）。
+
+### Diagnostics 归位
+
+`src/settings/pages.js` 把归位变成可断言的数据：产品主区只有 chat/tasks/memory/workspace，
+原工程页面全部移到 diagnostics 或 advanced ——
+
+| 工程页面 | 归入 |
+| --- | --- |
+| Core status / DSH service / SnowLuma / IPC / Logs | diagnostics |
+| Whitelists / Runtime policy | advanced |
+
+`engineeringPlacement()` 输出不变量与越界列表，UI 与测试直接消费。
+
+### 日志默认脱敏
+
+`src/logging/redact.js` —— 默认禁止输出：API key / Token / Pairing secret / Private key /
+完整敏感 prompt / Credential（外加 cookie）。两层：
+
+- **文本层**：正则命中即替换，保留「哪一类被抹掉」的标记，便于排查而不泄漏原值；
+  **单遍处理**——每条规则的产物先换成不含字母数字的占位符，跑完再还原。
+- **字段层**：按 key 名判定（prompt / messages / token / privateKey …）整体替换为摘要（只报长度），
+  因为「完整敏感 prompt」无法靠正则识别。
+
+`createRedactingSink({ enabled: false })` 会被拒绝（`REDACTION_REQUIRED`）：脱敏不是偏好。
+
+### 已验证（本机实跑）
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm run test-system` | `PASS` 102/102 |
+| `npm run desktop:test`（cargo test） | `PASS` 76/76 |
+| `npm run desktop:check` | `PASS` 0 error |
+| `npm run test-mesh` / `test-extension` / `test-task` / `test-memory` / `test-config` | `PASS` 86/86、87/87、90/90、85/85、69/69 |
+| `npm run test-core-entry` | `PASS`（用本次接线版本启动真实 worker） |
+| `npm run test-privilege` | `PASS` 24/24 |
+
+验收项对应：**Settings 重启持久化**（新实例读回同一份，revision 保持）；
+**About Version 与构建版本一致**（`versionConsistent === true`，且两个版本源都取自真实文件）；
+**Update 网络异常时不影响主应用启动**（构造不联网、check 返回结构化错误、离线时 Settings/About 照常可用）。
+
+### 本阶段发现并修复的两个真实缺陷
+
+1. **验签对象错误**：最初对「归一化后的清单」验签，而归一化会补齐 `minVersion: null` 等字段，
+   导致发布侧与客户端对「签的是什么」产生分歧 —— 合法清单也会被判 `SIGNATURE_INVALID`。
+   改为对**发布出来的原始对象**验签（归一化是它的确定性函数）。
+2. **Bearer token 泄漏**：`Authorization: Bearer <jwt>` 里，通用的 token 规则先匹配到
+   `Authorization: Bearer`，只抹掉 `Bearer` 这个词，**真正的 JWT 留在日志里**。
+   修复：把 Bearer 规则提前，并把测试从「包含 [REDACTED:token]」加强为「原值必须消失」，
+   否则这个漏法仍然会通过断言。同一轮还修了「后一条规则命中前一条输出」导致的类别标错。
+
+### 未纳入本次提交
+
+- **Rust 侧页面挂载未提交**：`native_ui.rs` / `native_main.rs` 目前仍在被并行会话高频修改
+  （本阶段执行期间又新增了 `continuityService` 接线），HEAD 的 `native_main.rs` 至今没有
+  `mod app_shell;`，`native_ui.rs` 也不引用任何页面模块。因此 Settings 分区、About、Update、
+  Diagnostics 归位的**后端与 IPC 已入库并可调用**，但把它们渲染成页面仍需等这批改动一并提交。
+  本阶段已交付 5 个 UI 模块（memory_ui / task_ui / mesh_ui 及本阶段的系统页规划）处于同一状态。
+
+### 已知问题
+
+1. 更新检查默认**不可用**：未配置签名公钥时一律不信任（这是有意的安全默认），
+   因此开箱状态下 Update 页会显示「未配置公钥，已停用」。发布流程需要生成密钥对并把公钥写进设置。
+2. 没有自动更新执行：即使检查到新版也只给链接与 sha256，安装由用户手动完成（阶段要求如此）。
+3. Settings 目前只作用到本模块自身（更新配置、脱敏开关等），尚未反向驱动旧 `config.json`；
+   两者仍是并存的：config.json 是 WhaleBridge 时代运行时配置，settings.json 是 CetaMesh 产品设置。
+4. `startUiIpcServer` 的位置参数已到 9 个，亟需改成表驱动（本阶段已把三个系统服务合并为一个对象，
+   算是局部止血）。
+5. 脱敏是「尽力而为」：无法靠正则识别的裸密钥（没有键名的随机串）不会被抹掉。
+
+### 下一阶段入口
+
+- 把 5 个 UI 模块一次性挂进 `native_ui.rs`（待并行会话提交 Chat/导航/连续性之后）。
+- 发布流程：生成更新签名密钥、产出 `build-info.json`、把公钥写入默认设置。
+- Settings 反向驱动运行时（模型默认值、脱敏级别真正作用到 Core 日志）。
 ## 阶段 11 — Device Mesh Desktop（2026-10-04）
 
 让 Desktop 成为**标准 CetaMesh Node**：有身份、能被配对、能被信任、能被授权、能被撤销。
@@ -1475,3 +1592,41 @@ current branch
 ### 下一阶段入口
 
 - 回合机 hook：chat-service 回合结束处上报 context.record 并在 rollover 带自动触发安全 rollover → D6-009 Workspace Reconciliation（依赖 Workspace Runtime）→ Work UI 上下文控制条（D6-013）。
+
+## 最新进度：阶段 02 Desktop 产品外壳（2026-10-04）
+
+### 基线与范围
+
+- 本阶段基线：`main@400dbac`（`feat(desktop): complete desktop node mesh integration`）。本阶段沿用 Windows Desktop 的 Rust + eframe/egui Shell、Node Core 与 Named Pipe IPC，没有更换架构或修改 Mobile。
+- 本阶段提交目标：`feat(desktop): establish CetaMesh product shell`。本记录与本阶段代码一并提交；未推送远端。
+- 共享工作区另有阶段外的修改。本阶段只提交下列桌面 Shell、安装器品牌、测试和状态文件；其它已修改或未跟踪文件保持原样，未暂存。
+
+### 已完成
+
+- 新增 `desktop-shell/src/app_shell.rs`：集中定义 Chat / Tasks / Memory / Workspace 主导航、Settings / Diagnostics / Advanced 次级导航、`NavigationState` 与旧管理页映射。
+- `native_ui.rs` 建立统一侧边栏、顶部标题/Core 状态区、次级页内导航和真实页面路由。Chat、Tasks、Memory 接入现有页面；Workspace 是明确标注能力边界的占位页。Overview、Runtime、本地服务、Security、Logs 等旧管理功能保留并移入次级区域。
+- 统一本阶段的间距、标题层级、卡片与按钮样式，并提供加载、错误和空内容提示；主视觉不再使用大面积深蓝按钮。
+- 桌面窗口、安装器标题与安装器可见品牌更新为 CetaMesh；开始菜单/桌面快捷方式采用 CetaMesh 名称，并迁移清理旧品牌快捷方式。原有 `WhaleBridge.exe`、Core 文件名、IPC/环境变量和卸载注册表路径作为内部兼容名称保留。
+
+### 验证结果（本机 Windows）
+
+| 项目 | 状态 | 证据 |
+| --- | --- | --- |
+| `cargo check --offline --manifest-path desktop-shell/Cargo.toml` | `PASS` | 成功；有 Chat/Task 未使用字段警告。 |
+| `cargo test --offline --manifest-path desktop-shell/Cargo.toml` | `PASS` | 73 passed，0 failed；包含新增导航路由测试。 |
+| `cargo build --offline --manifest-path desktop-shell/Cargo.toml` | `PASS` | 原生 Desktop 可执行文件成功构建；有未使用字段/模块警告。 |
+| `npm run test-core-entry` | `PASS` | Core worker 与 MCP 入口检查通过。 |
+| `npm run test-desktop-supervisor` | `PASS` | 孤儿回收、重启、关闭契约通过。 |
+| `npm run test-desktop-shell` | `PASS` | IPC、重启、优雅退出及 GUI 本地冒烟通过；创建原生窗口并读取到标题 `CetaMesh`，Core IPC ready。测试结束无残留进程。 |
+| `npm run test-desktop-install` | `PASS` | 新装、升级、修复、迁移、卸载、保留数据与重装全流程通过（沙箱目录）。 |
+| `node scripts/test-desktop-chat-product.mjs` | `PASS` | 11 组通过。 |
+| `node scripts/test-memory-runtime.mjs` | `PASS` | 85 项通过。 |
+| `node scripts/test-task-runtime.mjs` | `PASS` | 90 项通过。 |
+| `git diff --check` | `PASS` | 无空白错误；仅有 Git 行尾转换提示。 |
+| 原生 UI 手工视觉/逐项导航交互验收 | `PENDING_NATIVE_VERIFICATION` | 自动冒烟已启动新构建并验证窗口标题与 IPC；尚未完成人工视觉检查。 |
+
+### 已知问题与下一步
+
+- Workspace 页面当前只说明安全边界尚未实现，不提供文件访问能力；不能把占位页视为 Workspace Runtime。
+- Chat/Task 编译有少量未使用字段/模块警告；不影响当前 check、test 或 build 结果。
+- 下一步先完成人工视觉检查（侧边导航、次级页面、窗口尺寸与交互），再按后续已授权阶段推进 Workspace 安全边界。不要据本阶段记录宣称 Persistent Task、Capability 或 Workspace 全部完成。
