@@ -1,5 +1,7 @@
 # WhaleBridge desktop shell
 
+Current target (2026-10-04): Rust eframe/egui native UI in src/native_main.rs and src/native_ui.rs, Node Core/SEA, Named Pipe IPC. The Stage 1 WebView notes below are historical; inspect current Cargo targets and source for implementation status. Native Desktop Chat is now available for simple DSH turns; tool approval and user questions for that session remain pending.
+
 This directory contains the staged Windows desktop shell for WhaleBridge. It is intentionally
 separate from the existing Node.js bridge so the desktop migration can be verified without
 changing QQ, DSH, MCP, or console behavior.

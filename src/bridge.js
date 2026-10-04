@@ -70,6 +70,7 @@ import {
 import { loginInfo, extractKugouAuth, createQrLogin, pollQrLogin } from './kugou-api.js';
 import { createLocalServiceManager, SNOWLUMA_RELEASE_PAGE, DSH_INSTALL_HINT } from './local-services.js';
 import { CONTROL_METHODS, ControlServiceError, createControlService } from './control/control-service.js';
+import { createDesktopChatService } from './desktop-chat-service.js';
 import { startIpcProtocol } from './control/ipc-protocol.js';
 let kugouQrSession = null; // 进行中的二维码登录会话 { key, mid, dfid, createdAt }
 let kugouLoginCache = null; // { cookie, info, fetchedAt } 缓存的完整登录信息（含 roleinfo 探测的会员状态）
@@ -722,7 +723,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const convKey = (kind, id) => `${kind}:${id}`;
 const SEND_TIMEOUT_MS = 15000;
 
-function startUiIpcServer(controlService) {
+function startUiIpcServer(controlService, chatService) {
   const pipeName = String(process.env.WHALEBRIDGE_UI_PIPE ?? '').trim();
   if (!pipeName) return null;
 
@@ -731,11 +732,9 @@ function startUiIpcServer(controlService) {
     const connection = startIpcProtocol({
       input: socket,
       output: socket,
-      dispatch: ({ method, params }) => controlService.execute({
-        method,
-        params,
-        actor: { privilege: PRIVILEGE_CONSOLE }
-      })
+      dispatch: ({ method, params }) => method.startsWith('chat.')
+        ? chatService.execute(method, params)
+        : controlService.execute({ method, params, actor: { privilege: PRIVILEGE_CONSOLE } })
     });
     connection.done.catch((error) => {
       if (!socket.destroyed) log(`Native UI IPC connection failed: ${error?.message ?? error}`);
@@ -2166,7 +2165,16 @@ async function main() {
       },
       log
     });
-    startUiIpcServer(controlService);
+    const desktopChat = createDesktopChatService({
+      api,
+      stateDir: STATE_DIR,
+      model: () => ({
+        provider: String(cfg.dsh?.provider || 'deepseek-official'),
+        model: String(cfg.dsh?.model || DEFAULT_MODEL),
+        reasoningEffort: String(cfg.dsh?.reasoningEffort || 'max')
+      })
+    });
+    startUiIpcServer(controlService, desktopChat);
     const server = http.createServer(async (req, res) => {
       const url = new URL(req.url ?? '/', `http://127.0.0.1:${port}`);
       const SECURITY_HEADERS = {
