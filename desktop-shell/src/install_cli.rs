@@ -18,7 +18,7 @@ use crate::migrate::{
 };
 use crate::supervisor::hidden;
 
-pub const USAGE: &str = r#"鲸桥 WhaleBridge 安装器
+pub const USAGE: &str = r#"CetaMesh 安装器
 
 用法：
   WhaleBridge.exe --install            安装（已安装则升级）

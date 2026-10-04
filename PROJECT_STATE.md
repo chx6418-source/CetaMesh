@@ -1595,30 +1595,31 @@ current branch
 
 ## 最新进度：阶段 02 Desktop 产品外壳（2026-10-04）
 
-### 基线与范围
+### 基线与提交
 
-- 本阶段基线：`main@400dbac`（`feat(desktop): complete desktop node mesh integration`）。本阶段沿用 Windows Desktop 的 Rust + eframe/egui Shell、Node Core 与 Named Pipe IPC，没有更换架构或修改 Mobile。
-- 本阶段提交目标：`feat(desktop): establish CetaMesh product shell`。本记录与本阶段代码一并提交；未推送远端。
-- 共享工作区另有阶段外的修改。本阶段只提交下列桌面 Shell、安装器品牌、测试和状态文件；其它已修改或未跟踪文件保持原样，未暂存。
+- 阶段开始时仓库为 `main@ce46175`。并行工作期间共享分支前进至 `202df3b`；本轮最终验证以当时的 `main@202df3b` 源码为准，未回退或覆盖后来提交。
+- 本阶段第一版状态记录先随本地提交 `202df3b` 进入历史，当时阶段 02 源码尚未提交。本阶段 `feat(desktop): establish CetaMesh product shell` 提交将收束阶段 02 源码、测试和本次更正后的状态记录；未推送远端。
+- 共享工作区仍有阶段外的修改。本阶段仅提交桌面 Shell、安装器品牌、对应测试和 `PROJECT_STATE.md`；其它已修改或未跟踪文件保持原样，未暂存。
 
 ### 已完成
 
 - 新增 `desktop-shell/src/app_shell.rs`：集中定义 Chat / Tasks / Memory / Workspace 主导航、Settings / Diagnostics / Advanced 次级导航、`NavigationState` 与旧管理页映射。
 - `native_ui.rs` 建立统一侧边栏、顶部标题/Core 状态区、次级页内导航和真实页面路由。Chat、Tasks、Memory 接入现有页面；Workspace 是明确标注能力边界的占位页。Overview、Runtime、本地服务、Security、Logs 等旧管理功能保留并移入次级区域。
-- 统一本阶段的间距、标题层级、卡片与按钮样式，并提供加载、错误和空内容提示；主视觉不再使用大面积深蓝按钮。
+- 统一间距、标题层级、卡片与按钮样式，并提供加载、错误和空内容提示；主视觉不再使用大面积深蓝按钮。
 - 桌面窗口、安装器标题与安装器可见品牌更新为 CetaMesh；开始菜单/桌面快捷方式采用 CetaMesh 名称，并迁移清理旧品牌快捷方式。原有 `WhaleBridge.exe`、Core 文件名、IPC/环境变量和卸载注册表路径作为内部兼容名称保留。
 
 ### 验证结果（本机 Windows）
 
 | 项目 | 状态 | 证据 |
 | --- | --- | --- |
-| `cargo check --offline --manifest-path desktop-shell/Cargo.toml` | `PASS` | 成功；有 Chat/Task 未使用字段警告。 |
-| `cargo test --offline --manifest-path desktop-shell/Cargo.toml` | `PASS` | 73 passed，0 failed；包含新增导航路由测试。 |
-| `cargo build --offline --manifest-path desktop-shell/Cargo.toml` | `PASS` | 原生 Desktop 可执行文件成功构建；有未使用字段/模块警告。 |
+| `cargo check --offline --manifest-path desktop-shell/Cargo.toml` | `PASS` | 成功；有 Chat/Task/Mesh 未使用字段警告。 |
+| `cargo test --offline --manifest-path desktop-shell/Cargo.toml` | `PASS` | 76 passed，0 failed；包含新增导航路由测试。 |
+| `cargo build --offline --manifest-path desktop-shell/Cargo.toml` | `PASS` | 原生 Desktop 可执行文件成功构建；有未使用字段警告。 |
 | `npm run test-core-entry` | `PASS` | Core worker 与 MCP 入口检查通过。 |
 | `npm run test-desktop-supervisor` | `PASS` | 孤儿回收、重启、关闭契约通过。 |
 | `npm run test-desktop-shell` | `PASS` | IPC、重启、优雅退出及 GUI 本地冒烟通过；创建原生窗口并读取到标题 `CetaMesh`，Core IPC ready。测试结束无残留进程。 |
 | `npm run test-desktop-install` | `PASS` | 新装、升级、修复、迁移、卸载、保留数据与重装全流程通过（沙箱目录）。 |
+| `npm run test-system` | `PASS` | Settings / About / Update / Diagnostics / 脱敏验收，102 项通过。 |
 | `node scripts/test-desktop-chat-product.mjs` | `PASS` | 11 组通过。 |
 | `node scripts/test-memory-runtime.mjs` | `PASS` | 85 项通过。 |
 | `node scripts/test-task-runtime.mjs` | `PASS` | 90 项通过。 |
@@ -1628,5 +1629,5 @@ current branch
 ### 已知问题与下一步
 
 - Workspace 页面当前只说明安全边界尚未实现，不提供文件访问能力；不能把占位页视为 Workspace Runtime。
-- Chat/Task 编译有少量未使用字段/模块警告；不影响当前 check、test 或 build 结果。
+- Chat/Task/Mesh 编译有少量未使用字段警告；不影响当前 check、test 或 build 结果。
 - 下一步先完成人工视觉检查（侧边导航、次级页面、窗口尺寸与交互），再按后续已授权阶段推进 Workspace 安全边界。不要据本阶段记录宣称 Persistent Task、Capability 或 Workspace 全部完成。

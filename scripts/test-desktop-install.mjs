@@ -136,9 +136,9 @@ try {
     assert.ok(fs.existsSync(path.join(sandbox.installDir, 'install-manifest.json')), '应写入安装清单');
     assert.ok(fs.existsSync(path.join(sandbox.dataDir, 'config.json')), '应初始化 config.json');
     assert.ok(fs.existsSync(path.join(sandbox.dataDir, 'state')), '应创建 state 目录');
-    assert.ok(shortcutExists(path.join(sandbox.startMenuDir, '鲸桥 WhaleBridge.lnk')), '应创建开始菜单快捷方式');
-    assert.ok(shortcutExists(path.join(sandbox.startMenuDir, '卸载鲸桥.lnk')), '应创建卸载快捷方式');
-    assert.ok(shortcutExists(path.join(sandbox.desktopDir, '鲸桥 WhaleBridge.lnk')), '应创建桌面快捷方式');
+    assert.ok(shortcutExists(path.join(sandbox.startMenuDir, 'CetaMesh.lnk')), '应创建 CetaMesh 开始菜单快捷方式');
+    assert.ok(shortcutExists(path.join(sandbox.startMenuDir, '卸载 CetaMesh.lnk')), '应创建 CetaMesh 卸载快捷方式');
+    assert.ok(shortcutExists(path.join(sandbox.desktopDir, 'CetaMesh.lnk')), '应创建 CetaMesh 桌面快捷方式');
     assert.ok(registryExists(sandbox.registryKey), '应写入卸载注册表项');
     const manifest = JSON.parse(fs.readFileSync(path.join(sandbox.installDir, 'install-manifest.json'), 'utf8'));
     assert.equal(manifest.version, '0.1.0');
@@ -260,8 +260,8 @@ try {
     assert.equal(removed.status, 0, removed.output);
     assert.ok(!fs.existsSync(path.join(sandbox.installDir, 'WhaleBridgeCore.exe')), '应删除 Core');
     assert.ok(!fs.existsSync(path.join(sandbox.installDir, 'install-manifest.json')), '应删除安装清单');
-    assert.ok(!shortcutExists(path.join(sandbox.startMenuDir, '鲸桥 WhaleBridge.lnk')), '应删除开始菜单快捷方式');
-    assert.ok(!shortcutExists(path.join(sandbox.desktopDir, '鲸桥 WhaleBridge.lnk')), '应删除桌面快捷方式');
+    assert.ok(!shortcutExists(path.join(sandbox.startMenuDir, 'CetaMesh.lnk')), '应删除 CetaMesh 开始菜单快捷方式');
+    assert.ok(!shortcutExists(path.join(sandbox.desktopDir, 'CetaMesh.lnk')), '应删除 CetaMesh 桌面快捷方式');
     assert.equal(registryExists(sandbox.registryKey), false, '应删除注册表项');
     assert.ok(fs.existsSync(path.join(sandbox.dataDir, 'config.json')), '默认必须保留数据目录');
     assert.ok(fs.existsSync(path.join(sandbox.dataDir, 'state', 'sessions.json')), '默认必须保留 state');

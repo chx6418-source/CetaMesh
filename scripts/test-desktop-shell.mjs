@@ -374,7 +374,7 @@ try {
         await new Promise((resolve) => setTimeout(resolve, 400));
       }
       assert.ok(title.length > 0, `未创建原生桌面窗口（标题为空）\nstderr: ${stderr}`);
-      assert.match(title, /WhaleBridge/, `窗口标题异常：'${title}'`);
+      assert.match(title, /CetaMesh/, `窗口标题异常：'${title}'`);
       step(`✅ GUI：原生窗口已创建（标题「${title}」）`);
 
       const shellLogFile = path.join(dataDir, 'logs', 'desktop-shell.log');

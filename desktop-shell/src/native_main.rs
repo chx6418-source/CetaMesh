@@ -1,11 +1,17 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod chat_ui;
 mod core_launch;
+mod app_shell;
 mod desktop_paths;
 mod install_cli;
 mod installer;
 mod ipc_client;
 mod migrate;
+mod memory_ui;
+mod task_ui;
+mod mesh_ui;
+mod workspace_ui;
 mod native_installer_ui;
 mod native_ui;
 mod supervisor;
@@ -421,11 +427,11 @@ fn run_native_ui(paths: DesktopPaths) -> Result<(), String> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1180.0, 780.0])
             .with_min_inner_size([920.0, 640.0])
-            .with_title("鲸桥 WhaleBridge"),
+            .with_title("CetaMesh"),
         ..Default::default()
     };
     let app_result = eframe::run_native(
-        "鲸桥 WhaleBridge",
+        "CetaMesh",
         options,
         Box::new(move |creation_context| {
             Ok(Box::new(NativeUi::new(

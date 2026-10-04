@@ -15,15 +15,18 @@ use std::process::{Command, Stdio};
 
 use crate::desktop_paths;
 
-pub const PRODUCT_NAME: &str = "鲸桥 WhaleBridge";
+pub const PRODUCT_NAME: &str = "CetaMesh";
 pub const INSTALL_MANIFEST: &str = "install-manifest.json";
 /// 回滚快照目录（位于数据目录下，与 DSH 集成侧同名）。
 pub const BACKUP_DIR_NAME: &str = ".whalebridge-backup";
 pub const SHELL_EXE_NAME: &str = "WhaleBridge.exe";
 pub const CORE_EXE_NAME: &str = "WhaleBridgeCore.exe";
-pub const START_MENU_SHORTCUT: &str = "鲸桥 WhaleBridge.lnk";
-pub const UNINSTALL_SHORTCUT: &str = "卸载鲸桥.lnk";
-pub const DESKTOP_SHORTCUT: &str = "鲸桥 WhaleBridge.lnk";
+pub const START_MENU_SHORTCUT: &str = "CetaMesh.lnk";
+pub const UNINSTALL_SHORTCUT: &str = "卸载 CetaMesh.lnk";
+pub const DESKTOP_SHORTCUT: &str = "CetaMesh.lnk";
+const LEGACY_START_MENU_SHORTCUT: &str = "鲸桥 WhaleBridge.lnk";
+const LEGACY_UNINSTALL_SHORTCUT: &str = "卸载鲸桥.lnk";
+const LEGACY_DESKTOP_SHORTCUT: &str = "鲸桥 WhaleBridge.lnk";
 pub const UNINSTALL_KEY: &str =
     r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\WhaleBridge";
 
@@ -118,7 +121,7 @@ impl Plan {
 
     pub fn report(&self, dry_run: bool) -> String {
         let mut lines = vec![format!(
-            "鲸桥{}计划{}",
+            "CetaMesh {} 计划{}",
             self.action,
             if dry_run {
                 "（预演，未写入任何文件）"
@@ -448,7 +451,7 @@ fn registry_effects(layout: &InstallLayout, version: &str, install_dir: &Path) -
         values: vec![
             ("DisplayName".to_owned(), PRODUCT_NAME.to_owned()),
             ("DisplayVersion".to_owned(), version.to_owned()),
-            ("Publisher".to_owned(), "WhaleBridge".to_owned()),
+            ("Publisher".to_owned(), "CetaMesh".to_owned()),
             (
                 "InstallLocation".to_owned(),
                 install_dir.display().to_string(),
@@ -465,6 +468,18 @@ fn registry_effects(layout: &InstallLayout, version: &str, install_dir: &Path) -
 }
 
 /// 生成安装计划：复制 payload、初始化数据目录、创建快捷方式、写卸载注册表项、可选装 DSH 集成。
+fn add_legacy_shortcut_removals(plan: &mut Plan, layout: &InstallLayout) {
+    for path in [
+        layout.start_menu_dir.join(LEGACY_START_MENU_SHORTCUT),
+        layout.start_menu_dir.join(LEGACY_UNINSTALL_SHORTCUT),
+        layout.desktop_dir.join(LEGACY_DESKTOP_SHORTCUT),
+    ] {
+        if path.is_file() {
+            plan.effects.push(Effect::RemovePath { path });
+        }
+    }
+}
+
 pub fn plan_install(
     layout: &InstallLayout,
     payload: &Payload,
@@ -550,7 +565,7 @@ pub fn plan_install(
         shell.clone(),
         "",
         layout.install_dir.clone(),
-        "启动鲸桥桌面应用",
+        "启动 CetaMesh Desktop",
     ));
     let uninstall = layout.start_menu_dir.join(UNINSTALL_SHORTCUT);
     plan.effects.push(shortcut_effect(
@@ -558,7 +573,7 @@ pub fn plan_install(
         shell.clone(),
         "--uninstall",
         layout.install_dir.clone(),
-        "卸载鲸桥",
+        "卸载 CetaMesh",
     ));
     let desktop = layout.desktop_dir.join(DESKTOP_SHORTCUT);
     if layout.create_desktop_shortcut {
@@ -567,9 +582,11 @@ pub fn plan_install(
             shell.clone(),
             "",
             layout.install_dir.clone(),
-            "启动鲸桥桌面应用",
+            "启动 CetaMesh Desktop",
         ));
     }
+
+    add_legacy_shortcut_removals(&mut plan, layout);
 
     plan.effects.extend(registry_effects(
         layout,
@@ -679,12 +696,12 @@ pub fn plan_repair(
         (
             layout.start_menu_dir.join(START_MENU_SHORTCUT),
             "",
-            "启动鲸桥桌面应用",
+            "启动 CetaMesh Desktop",
         ),
         (
             layout.start_menu_dir.join(UNINSTALL_SHORTCUT),
             "--uninstall",
-            "卸载鲸桥",
+            "卸载 CetaMesh",
         ),
     ] {
         if !path.is_file() {
@@ -706,11 +723,12 @@ pub fn plan_repair(
                 shell.clone(),
                 "",
                 layout.install_dir.clone(),
-                "启动鲸桥桌面应用",
+                "启动 CetaMesh Desktop",
             ));
             plan.notes.push("重建桌面快捷方式".to_owned());
         }
     }
+    add_legacy_shortcut_removals(&mut plan, layout);
     if registry_installed(&layout.registry_key) {
         plan.notes.push("卸载注册表项已存在".to_owned());
     } else {
@@ -759,30 +777,20 @@ pub fn plan_repair(
                 .filter(|value| !value.is_empty())
                 .unwrap_or_else(|| options.now.clone()),
             files,
-            start_menu_shortcut: manifest
-                .as_ref()
-                .and_then(|item| item.start_menu_shortcut.clone())
-                .or_else(|| {
-                    Some(
-                        layout
-                            .start_menu_dir
-                            .join(START_MENU_SHORTCUT)
-                            .display()
-                            .to_string(),
-                    )
-                }),
-            uninstall_shortcut: manifest
-                .as_ref()
-                .and_then(|item| item.uninstall_shortcut.clone())
-                .or_else(|| {
-                    Some(
-                        layout
-                            .start_menu_dir
-                            .join(UNINSTALL_SHORTCUT)
-                            .display()
-                            .to_string(),
-                    )
-                }),
+            start_menu_shortcut: Some(
+                layout
+                    .start_menu_dir
+                    .join(START_MENU_SHORTCUT)
+                    .display()
+                    .to_string(),
+            ),
+            uninstall_shortcut: Some(
+                layout
+                    .start_menu_dir
+                    .join(UNINSTALL_SHORTCUT)
+                    .display()
+                    .to_string(),
+            ),
             desktop_shortcut: if layout.create_desktop_shortcut {
                 Some(
                     layout
@@ -840,6 +848,9 @@ pub fn plan_uninstall(layout: &InstallLayout, options: &UninstallOptions) -> Pla
         layout.start_menu_dir.join(START_MENU_SHORTCUT),
         layout.start_menu_dir.join(UNINSTALL_SHORTCUT),
         layout.desktop_dir.join(DESKTOP_SHORTCUT),
+        layout.start_menu_dir.join(LEGACY_START_MENU_SHORTCUT),
+        layout.start_menu_dir.join(LEGACY_UNINSTALL_SHORTCUT),
+        layout.desktop_dir.join(LEGACY_DESKTOP_SHORTCUT),
     ] {
         if path.is_file() {
             plan.effects.push(Effect::RemovePath { path: path.clone() });
@@ -1583,8 +1594,23 @@ mod tests {
         let layout = layout(&root);
         let options = options();
 
+        for legacy in [
+            layout.start_menu_dir.join(LEGACY_START_MENU_SHORTCUT),
+            layout.start_menu_dir.join(LEGACY_UNINSTALL_SHORTCUT),
+            layout.desktop_dir.join(LEGACY_DESKTOP_SHORTCUT),
+        ] {
+            fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+            fs::write(legacy, b"legacy shortcut").unwrap();
+        }
+
         let plan = plan_install(&layout, &payload, &options, false).unwrap();
         apply_plan_with_backup(&plan, &quiet, &root.join("backup")).unwrap();
+        assert!(layout.start_menu_dir.join(START_MENU_SHORTCUT).is_file());
+        assert!(layout.start_menu_dir.join(UNINSTALL_SHORTCUT).is_file());
+        assert!(layout.desktop_dir.join(DESKTOP_SHORTCUT).is_file());
+        assert!(!layout.start_menu_dir.join(LEGACY_START_MENU_SHORTCUT).exists());
+        assert!(!layout.start_menu_dir.join(LEGACY_UNINSTALL_SHORTCUT).exists());
+        assert!(!layout.desktop_dir.join(LEGACY_DESKTOP_SHORTCUT).exists());
         assert!(layout.install_dir.join(SHELL_EXE_NAME).is_file());
         assert!(layout.install_dir.join(CORE_EXE_NAME).is_file());
         assert!(
@@ -1793,7 +1819,7 @@ mod tests {
             target,
             args: "--uninstall".to_owned(),
             workdir: root.clone(),
-            description: "卸载鲸桥".to_owned(),
+            description: "卸载 CetaMesh".to_owned(),
         };
         apply_effect(&effect, &quiet, &root.join("backup")).unwrap();
         if path.is_file() {

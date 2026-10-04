@@ -16,7 +16,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use eframe::egui;
 
-const WINDOW_TITLE: &str = "鲸桥 WhaleBridge 安装程序";
+const WINDOW_TITLE: &str = "CetaMesh 安装程序";
 const ARCHIVE_EXPAND_SCRIPT: &str = "Expand-Archive -LiteralPath $env:WHALEBRIDGE_INSTALL_ARCHIVE -DestinationPath $env:WHALEBRIDGE_INSTALL_PAYLOAD";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -244,7 +244,7 @@ impl InstallerApp {
                     self.cancel_token = None;
                     match result {
                         Ok(()) => {
-                            self.status = "安装完成，可以启动鲸桥了。".to_owned();
+                            self.status = "安装完成，可以启动 CetaMesh 了。".to_owned();
                             self.error = None;
                         }
                         Err(error) if error == "__CANCELLED__" => {
@@ -282,20 +282,20 @@ impl InstallerApp {
         let install_dir = PathBuf::from(self.install_dir.trim());
         let executable = install_dir.join(crate::installer::SHELL_EXE_NAME);
         if !executable.is_file() {
-            self.error = Some(format!("找不到已安装的鲸桥程序：{}", executable.display()));
+            self.error = Some(format!("找不到已安装的 CetaMesh 程序：{}", executable.display()));
             return;
         }
         match Command::new(&executable).current_dir(&install_dir).spawn() {
             Ok(_) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             Err(error) => {
-                self.error = Some(format!("无法启动鲸桥：{error}"));
+                self.error = Some(format!("无法启动 CetaMesh：{error}"));
             }
         }
     }
 
     fn show_header(&self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.heading("鲸桥 WhaleBridge");
+            ui.heading("CetaMesh");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label("Windows 原生安装向导");
             });
@@ -368,7 +368,7 @@ impl InstallerApp {
         ui.with_layout(egui::Layout::bottom_up(egui::Align::RIGHT), |ui| {
             ui.horizontal(|ui| {
                 if self.finished && self.error.is_none() && self.status.contains("安装完成") {
-                    if ui.button("启动鲸桥").clicked() {
+                    if ui.button("启动 CetaMesh").clicked() {
                         self.launch_installed(ctx);
                     }
                     if ui.button("完成").clicked() {
@@ -406,7 +406,7 @@ impl InstallerApp {
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
-                ui.label("将鲸桥程序文件安装到以下位置：");
+                ui.label("将 CetaMesh 程序文件安装到以下位置：");
                 ui.add(egui::Label::new(self.install_dir.trim()).wrap());
                 ui.add_space(6.0);
                 ui.label("个人数据将保留在：");
@@ -495,7 +495,7 @@ fn execute_install(work: InstallWork, events: &mpsc::Sender<WorkerEvent>) -> Res
             .payload_archive
             .as_ref()
             .filter(|path| path.is_file())
-            .ok_or_else(|| "安装文件不完整，请重新下载鲸桥安装程序后重试。".to_owned())?;
+            .ok_or_else(|| "安装文件不完整，请重新下载 CetaMesh 安装程序后重试。".to_owned())?;
         let staging = create_payload_staging_dir()?;
         send_phase(events, InstallPhase::Extracting, "正在准备安装文件…");
         expand_archive(archive, &staging)?;
@@ -507,7 +507,7 @@ fn execute_install(work: InstallWork, events: &mpsc::Sender<WorkerEvent>) -> Res
     if !payload_core.join(crate::installer::CORE_EXE_NAME).is_file()
         || !payload_core.join("resources").is_dir()
     {
-        return Err("安装文件不完整，请重新下载鲸桥安装程序后重试。".to_owned());
+        return Err("安装文件不完整，请重新下载 CetaMesh 安装程序后重试。".to_owned());
     }
     if work
         .cancel_token
@@ -605,7 +605,7 @@ fn expand_archive(archive: &Path, destination: &Path) -> Result<(), String> {
     } else {
         let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
         Err(if detail.is_empty() {
-            "无法展开安装文件，请重新下载鲸桥安装程序后重试。".to_owned()
+            "无法展开安装文件，请重新下载 CetaMesh 安装程序后重试。".to_owned()
         } else {
             format!("无法展开安装文件：{detail}")
         })

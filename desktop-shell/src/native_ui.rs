@@ -3,12 +3,18 @@
 //! The shell supplies a `CoreApi` backed by its authenticated local IPC transport. This module
 //! intentionally contains no browser, HTML, WebView, or arbitrary command execution path.
 
+use crate::chat_ui::{ChatUi, parse_catalog, parse_history, parse_sessions, parse_turn};
+use crate::memory_ui::MemoryUi;
+use crate::task_ui::TaskUi;
+use crate::mesh_ui::{MeshArea, MeshUi};
+use crate::workspace_ui::WorkspaceUi;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::app_shell::{AppPage, LegacyTab as Tab, NavigationState, tabs_for};
 use crate::supervisor::{Status, Supervisor};
 use eframe::egui;
 use serde_json::{Value, json};
@@ -20,6 +26,8 @@ pub trait CoreApi: Send + Sync + 'static {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum Area {
+    Chat,
+    ChatStatus,
     Overview,
     Roles,
     Policy,
@@ -35,26 +43,28 @@ enum Area {
     Activity,
     Logs,
     Diagnostics,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Tab {
-    Overview,
-    Roles,
-    Policy,
-    Services,
-    ModelsPresets,
-    Pending,
-    Security,
-    Slang,
-    Sessions,
-    Activity,
-    Logs,
-    Diagnostics,
+    Memory,
+    Task,
+    Mesh,
+    Channel,
+    Workspace,
 }
 
 #[derive(Clone, Copy, Debug)]
 enum Operation {
+    ChatSessionsLoad,
+    ChatSessionCreate,
+    ChatSessionRename,
+    ChatSessionArchive,
+    ChatSessionDelete,
+    ChatHistoryLoad,
+    ChatSend,
+    ChatStop,
+    ChatRetry,
+    ChatContinue,
+    ChatConfigSave,
+    ChatCatalogLoad,
+    ChatStatusPoll,
     OverviewPing,
     RolesRefresh,
     RoleSet,
@@ -86,6 +96,11 @@ enum Operation {
     LogsRefresh,
     DiagnosticsPing,
     DiagnosticsRun,
+    MemoryCall,
+    TaskCall,
+    MeshCall,
+    ChannelCall,
+    WorkspaceCall,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -288,6 +303,8 @@ impl PresetSelection {
 enum ApiCall {
     Ping,
     Control { method: &'static str, params: Value },
+    /// 产品私有方法族（chat.* / memory.*）：作为顶层 IPC method 发送。
+    Family { method: &'static str, params: Value },
 }
 
 struct WorkerJob {
@@ -432,7 +449,12 @@ pub struct NativeUi {
     event_rx: Receiver<WorkerEvent>,
     worker_available: bool,
     worker_error: Option<String>,
-    active_tab: Tab,
+    navigation: NavigationState,
+    memory: MemoryUi,
+    task: TaskUi,
+    mesh: MeshUi,
+    chat: ChatUi,
+    workspace: WorkspaceUi,
     pending: HashSet<Area>,
     feedback: HashMap<Area, Result<Value, String>>,
     next_id: u64,
@@ -517,18 +539,18 @@ struct NativePalette {
 
 fn native_palette() -> NativePalette {
     NativePalette {
-        background: egui::Color32::from_rgb(15, 23, 42),
-        surface: egui::Color32::from_rgb(24, 36, 58),
-        surface_alt: egui::Color32::from_rgb(30, 45, 70),
-        border: egui::Color32::from_rgb(51, 65, 85),
-        text: egui::Color32::from_rgb(248, 250, 252),
-        muted: egui::Color32::from_rgb(203, 213, 225),
-        accent: egui::Color32::from_rgb(56, 189, 248),
-        accent_bg: egui::Color32::from_rgb(12, 74, 110),
-        success: egui::Color32::from_rgb(74, 222, 128),
-        warning: egui::Color32::from_rgb(251, 191, 36),
-        error: egui::Color32::from_rgb(248, 113, 113),
-        error_bg: egui::Color32::from_rgb(69, 32, 45),
+        background: egui::Color32::from_rgb(244, 247, 247),
+        surface: egui::Color32::WHITE,
+        surface_alt: egui::Color32::from_rgb(246, 249, 248),
+        border: egui::Color32::from_rgb(220, 228, 226),
+        text: egui::Color32::from_rgb(34, 48, 48),
+        muted: egui::Color32::from_rgb(103, 119, 117),
+        accent: egui::Color32::from_rgb(23, 126, 115),
+        accent_bg: egui::Color32::from_rgb(222, 241, 237),
+        success: egui::Color32::from_rgb(35, 125, 83),
+        warning: egui::Color32::from_rgb(151, 102, 21),
+        error: egui::Color32::from_rgb(174, 54, 49),
+        error_bg: egui::Color32::from_rgb(253, 237, 234),
     }
 }
 
@@ -551,9 +573,9 @@ fn native_widget_visuals(
 fn native_style() -> egui::Style {
     let palette = native_palette();
     let mut style = egui::Style::default();
-    style.spacing.item_spacing = egui::vec2(10.0, 8.0);
+    style.spacing.item_spacing = egui::vec2(12.0, 10.0);
     style.spacing.window_margin = egui::Margin::symmetric(18, 16);
-    style.spacing.button_padding = egui::vec2(12.0, 7.0);
+    style.spacing.button_padding = egui::vec2(10.0, 6.0);
     style.spacing.menu_margin = egui::Margin::same(8);
     style.spacing.interact_size = egui::vec2(40.0, 32.0);
     style.spacing.combo_width = 260.0;
@@ -562,7 +584,7 @@ fn native_style() -> egui::Style {
 
     style
         .text_styles
-        .insert(egui::TextStyle::Heading, egui::FontId::proportional(24.0));
+        .insert(egui::TextStyle::Heading, egui::FontId::proportional(26.0));
     style
         .text_styles
         .insert(egui::TextStyle::Body, egui::FontId::proportional(15.0));
@@ -576,18 +598,18 @@ fn native_style() -> egui::Style {
         .text_styles
         .insert(egui::TextStyle::Monospace, egui::FontId::monospace(13.0));
 
-    let mut visuals = egui::Visuals::dark();
-    visuals.dark_mode = true;
+    let mut visuals = egui::Visuals::light();
+    visuals.dark_mode = false;
     visuals.override_text_color = Some(palette.text);
     visuals.weak_text_color = Some(palette.muted);
     visuals.panel_fill = palette.background;
     visuals.window_fill = palette.background;
     visuals.window_stroke = egui::Stroke::new(1.0, palette.border);
     visuals.window_corner_radius = egui::CornerRadius::same(10);
-    visuals.faint_bg_color = egui::Color32::from_rgb(22, 34, 53);
-    visuals.extreme_bg_color = egui::Color32::from_rgb(10, 16, 30);
-    visuals.text_edit_bg_color = Some(palette.surface_alt);
-    visuals.code_bg_color = egui::Color32::from_rgb(10, 16, 30);
+    visuals.faint_bg_color = egui::Color32::from_rgb(237, 243, 241);
+    visuals.extreme_bg_color = egui::Color32::from_rgb(255, 255, 255);
+    visuals.text_edit_bg_color = Some(egui::Color32::WHITE);
+    visuals.code_bg_color = egui::Color32::from_rgb(239, 243, 242);
     visuals.hyperlink_color = palette.accent;
     visuals.warn_fg_color = palette.warning;
     visuals.error_fg_color = palette.error;
@@ -608,13 +630,13 @@ fn native_style() -> egui::Style {
         palette.border,
     );
     visuals.widgets.hovered = native_widget_visuals(
-        egui::Color32::from_rgb(39, 62, 91),
+        egui::Color32::from_rgb(232, 242, 239),
         palette.surface_alt,
         palette.text,
         palette.accent,
     );
     visuals.widgets.active = native_widget_visuals(
-        palette.accent_bg,
+        egui::Color32::from_rgb(209, 232, 226),
         palette.accent_bg,
         palette.text,
         palette.accent,
@@ -629,7 +651,7 @@ fn native_style() -> egui::Style {
 }
 
 fn configure_native_theme(context: &egui::Context) {
-    context.set_theme(egui::Theme::Dark);
+    context.set_theme(egui::Theme::Light);
     context.set_global_style(native_style());
 }
 
@@ -670,6 +692,7 @@ impl NativeUi {
                             "control.execute",
                             json!({ "method": method, "params": params }),
                         ),
+ApiCall::Family { method, params } => api.request(method, params),
                     };
                     if event_tx
                         .send(WorkerEvent {
@@ -694,7 +717,12 @@ impl NativeUi {
             worker_error: worker
                 .err()
                 .map(|error| format!("无法启动 Core 工作线程：{error}")),
-            active_tab: Tab::Overview,
+            navigation: NavigationState::default(),
+            memory: MemoryUi::default(),
+            task: TaskUi::default(),
+            mesh: MeshUi::default(),
+            chat: ChatUi::default(),
+            workspace: WorkspaceUi::default(),
             pending: HashSet::new(),
             feedback: HashMap::new(),
             next_id: 1,
@@ -835,6 +863,45 @@ impl NativeUi {
         app
     }
 
+    fn issue_chat_sessions(&mut self) {
+        self.issue_control(Area::Chat, Operation::ChatSessionsLoad, "chat.sessions.list", json!({}));
+    }
+
+    fn issue_chat_history(&mut self) {
+        if let Some(id) = self.chat.active_id.clone() {
+            self.issue_control(Area::Chat, Operation::ChatHistoryLoad, "chat.history", json!({ "id": id }));
+        }
+    }
+
+    /// Chat 流式轮询：仅在存在在途回合或等待首个回合确认时进行。
+    fn maybe_poll_chat(&mut self, ctx: &egui::Context) {
+        if self.navigation.page != AppPage::Chat {
+            return;
+        }
+        let streaming = self
+            .chat
+            .turn
+            .as_ref()
+            .is_some_and(|turn| turn.state == "streaming" || turn.state == "cancelling");
+        let watching = streaming || self.chat.expecting_turn;
+        if !watching || self.pending.contains(&Area::ChatStatus) || !self.worker_available {
+            return;
+        }
+        let due = match self.chat.last_poll {
+            None => true,
+            Some(at) => at.elapsed() >= Duration::from_millis(150),
+        };
+        if due {
+            if let Some(id) = self.chat.active_id.clone() {
+                self.chat.last_poll = Some(Instant::now());
+                self.issue_control(Area::ChatStatus, Operation::ChatStatusPoll, "chat.status", json!({ "id": id }));
+            }
+        }
+        if streaming {
+            ctx.request_repaint_after(Duration::from_millis(120));
+        }
+    }
+
     fn issue_control(
         &mut self,
         area: Area,
@@ -848,8 +915,19 @@ impl NativeUi {
         self.issue(area, operation, ApiCall::Control { method, params });
     }
 
+    /// 产品私有方法族（chat.* / memory.*）：作为顶层 IPC method 发送，不经 control.execute。
+    fn issue_family(
+        &mut self,
+        area: Area,
+        operation: Operation,
+        method: &'static str,
+        params: Value,
+    ) {
+        self.issue(area, operation, ApiCall::Family { method, params });
+    }
+
     fn maybe_refresh_pending(&mut self) {
-        if self.active_tab != Tab::Pending
+        if self.navigation.legacy_tab != Tab::Pending
             || self.pending.contains(&Area::Pending)
             || self.pending_refresh_at.elapsed() < Duration::from_secs(3)
         {
@@ -911,6 +989,97 @@ impl NativeUi {
             self.feedback.insert(event.area, event.result.clone());
 
             match (event.operation, event.result.as_ref()) {
+                // ── 产品 Chat（阶段 03）──
+                (Operation::ChatSessionsLoad, Ok(value)) => match parse_sessions(value) {
+                    Ok(sessions) => {
+                        self.chat.sessions = sessions;
+                        self.chat.sessions_loaded = true;
+                        let active_alive = self
+                            .chat
+                            .active_id
+                            .as_ref()
+                            .is_some_and(|id| self.chat.sessions.iter().any(|s| &s.id == id));
+                        if !active_alive {
+                            self.chat.active_id = self.chat.sessions.first().map(|s| s.id.clone());
+                            self.chat.reset();
+                            self.issue_chat_history();
+                        }
+                    }
+                    Err(error) => self.chat.notice = Some(error),
+                },
+                (Operation::ChatSessionCreate, Ok(value)) => {
+                    if let Some(id) = value.get("id").and_then(Value::as_str) {
+                        self.chat.active_id = Some(id.to_owned());
+                        self.chat.reset();
+                    }
+                    self.chat.notice = Some("新会话已创建。".to_owned());
+                    self.issue_chat_sessions();
+                }
+                (Operation::ChatSessionRename, Ok(_)) => {
+                    self.chat.renaming = None;
+                    self.chat.notice = Some("会话已重命名。".to_owned());
+                    self.issue_chat_sessions();
+                }
+                (Operation::ChatSessionArchive, Ok(_)) => {
+                    self.chat.notice = Some("会话归档状态已更新。".to_owned());
+                    self.issue_chat_sessions();
+                }
+                (Operation::ChatSessionDelete, Ok(_)) => {
+                    if self.chat.active_id.is_some() {
+                        self.chat.active_id = None;
+                        self.chat.reset();
+                    }
+                    self.chat.notice = Some("会话已删除。".to_owned());
+                    self.issue_chat_sessions();
+                }
+                (Operation::ChatHistoryLoad, Ok(value)) => match parse_history(value) {
+                    Ok(messages) => {
+                        self.chat.messages = messages;
+                        self.chat.history_loaded = true;
+                    }
+                    Err(error) => self.chat.notice = Some(error),
+                },
+                (Operation::ChatSend, Ok(_)) => {
+                    self.chat.expecting_turn = true;
+                    self.chat.last_poll = None;
+                    self.issue_chat_history();
+                }
+                (Operation::ChatStop, Ok(_)) => {
+                    self.chat.last_poll = None;
+                }
+                (Operation::ChatRetry | Operation::ChatContinue, Ok(_)) => {
+                    self.chat.expecting_turn = true;
+                    self.chat.last_poll = None;
+                }
+                (Operation::ChatConfigSave, Ok(_)) => {
+                    self.chat.notice = Some("会话配置已保存并生效。".to_owned());
+                    self.issue_chat_sessions();
+                }
+                (Operation::ChatCatalogLoad, Ok(value)) => {
+                    let (models, error) = parse_catalog(value);
+                    self.chat.catalog = Some(json!({
+                        "models": models.iter().map(|(id, label)| json!({"id": id, "label": label})).collect::<Vec<_>>(),
+                        "error": error,
+                    }));
+                }
+                (Operation::ChatStatusPoll, Ok(value)) => {
+                    match parse_turn(value) {
+                        Some(turn) => {
+                            self.chat.turn = Some(turn);
+                            self.chat.had_turn = true;
+                            self.chat.expecting_turn = false;
+                        }
+                        None => {
+                            if self.chat.had_turn {
+                                // 回合刚结束：清空在途状态并刷新历史拿最终消息。
+                                self.chat.turn = None;
+                                self.chat.had_turn = false;
+                                self.issue_chat_history();
+                            }
+                            self.chat.expecting_turn = false;
+                        }
+                    }
+                }
                 (Operation::OverviewPing, Ok(value)) => {
                     self.core_online = Some(true);
                     self.core_summary = core_summary(value);
@@ -1036,6 +1205,55 @@ impl NativeUi {
                 ),
                 (Operation::ActivityRefresh, Ok(value)) => self.apply_activity(value),
                 (Operation::LogsRefresh, Ok(value)) => self.apply_logs(value),
+                (Operation::MemoryCall, Ok(value)) => {
+                    if self.memory.apply(value) {
+                        self.issue_family(
+                            Area::Memory,
+                            Operation::MemoryCall,
+                            "memory.overview",
+                            json!({}),
+                        );
+                    }
+                }
+                (Operation::WorkspaceCall, Ok(value)) => {
+                    let refresh_method = if value.get("workspaces").is_some() {
+                        None
+                    } else {
+                        Some("workspace.list")
+                    };
+                    if self.workspace.apply(value) {
+                        if let Some(method) = refresh_method {
+                            // 非 list 响应（open/rename/remove/pending/settings）先重拉清单，
+                            // 再由 apply 内部的 selected 变化触发详情刷新。
+                            self.issue_family(
+                                Area::Workspace,
+                                Operation::WorkspaceCall,
+                                method,
+                                json!({}),
+                            );
+                        }
+                    }
+                }
+                (Operation::TaskCall, Ok(value)) => {
+                    if self.task.apply(value) {
+                        self.issue_family(
+                            Area::Task,
+                            Operation::TaskCall,
+                            "task.overview",
+                            json!({}),
+                        );
+                    }
+                }
+                (Operation::MeshCall, Ok(value)) => {
+                    if self.mesh.apply(value) {
+                        self.issue_family(Area::Mesh, Operation::MeshCall, "mesh.snapshot", json!({}));
+                    }
+                }
+                (Operation::ChannelCall, Ok(value)) => {
+                    if self.mesh.apply(value) {
+                        self.issue_family(Area::Channel, Operation::ChannelCall, "channel.list", json!({}));
+                    }
+                }
                 _ => {}
             }
         }
@@ -1322,58 +1540,612 @@ impl NativeUi {
         }
     }
 
-    fn show_header(&mut self, ui: &mut egui::Ui) {
+    fn show_header(&self, ui: &mut egui::Ui) {
         let palette = native_palette();
         egui::Frame::new()
             .fill(palette.surface)
             .stroke(egui::Stroke::new(1.0, palette.border))
             .corner_radius(egui::CornerRadius::same(10))
-            .inner_margin(egui::Margin::symmetric(16, 12))
+            .inner_margin(egui::Margin::symmetric(20, 14))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.heading(egui::RichText::new("WhaleBridge 原生控制台").strong());
-                    ui.add_space(12.0);
-                    let (status, color) = match self.core_online {
-                        Some(true) => ("Core 在线", palette.success),
-                        Some(false) => ("Core 不可用", palette.error),
-                        None => ("Core 状态未知", palette.warning),
-                    };
-                    ui.label(egui::RichText::new(status).color(color).strong());
+                    ui.vertical(|ui| {
+                        ui.heading(self.navigation.page.label());
+                        ui.label(
+                            egui::RichText::new(self.navigation.page.description())
+                                .color(palette.muted),
+                        );
+                    });
+                    ui.with_layout(
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            let (status, color) = match self.core_online {
+                                Some(true) => ("Core 已连接", palette.success),
+                                Some(false) => ("Core 不可用", palette.error),
+                                None => ("Core 状态未知", palette.warning),
+                            };
+                            ui.label(egui::RichText::new(status).color(color).strong());
+                        },
+                    );
                 });
-                ui.add_space(4.0);
-                ui.label(
-                    egui::RichText::new(
-                        "纯原生界面：不启动浏览器或 WebView；管理请求通过本机 IPC 发送。",
-                    )
-                    .color(palette.muted),
-                );
-                ui.add_space(10.0);
-                egui::ScrollArea::horizontal()
-                    .id_salt("native_tabs_scroll")
-                    .auto_shrink([false, true])
+            });
+    }
+
+    fn page_button(&mut self, ui: &mut egui::Ui, page: AppPage) {
+        let palette = native_palette();
+        let selected = self.navigation.page == page;
+        let color = if selected { palette.text } else { palette.muted };
+        let response = ui.add_sized(
+            egui::vec2(176.0, 36.0),
+            egui::Button::new(egui::RichText::new(page.label()).color(color)).selected(selected),
+        );
+        if response.clicked() {
+            self.navigation.select_page(page);
+        }
+    }
+
+    fn show_sidebar(&mut self, ui: &mut egui::Ui) {
+        let palette = native_palette();
+        egui::Frame::new()
+            .fill(palette.surface)
+            .stroke(egui::Stroke::new(1.0, palette.border))
+            .corner_radius(egui::CornerRadius::same(10))
+            .inner_margin(egui::Margin::symmetric(12, 16))
+            .show(ui, |ui| {
+                ui.set_min_width(176.0);
+                ui.set_max_width(190.0);
+                ui.heading(egui::RichText::new("CetaMesh").strong());
+                ui.label(egui::RichText::new("Desktop").color(palette.muted));
+                ui.add_space(18.0);
+                for page in AppPage::PRIMARY {
+                    self.page_button(ui, page);
+                }
+                ui.add_space(16.0);
+                ui.separator();
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("管理").small().color(palette.muted).strong());
+                ui.add_space(6.0);
+                for page in AppPage::SECONDARY {
+                    self.page_button(ui, page);
+                }
+            });
+    }
+
+    fn show_page_section_nav(&mut self, ui: &mut egui::Ui) {
+        let tabs = tabs_for(self.navigation.page);
+        if tabs.is_empty() {
+            return;
+        }
+
+        let palette = native_palette();
+        egui::Frame::new()
+            .fill(palette.surface)
+            .stroke(egui::Stroke::new(1.0, palette.border))
+            .corner_radius(egui::CornerRadius::same(8))
+            .inner_margin(egui::Margin::symmetric(10, 8))
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    for tab in tabs {
+                        self.tab_button(ui, *tab, tab.label());
+                    }
+                });
+            });
+    }
+
+    fn show_product_placeholder(
+        &self,
+        ui: &mut egui::Ui,
+        title: &str,
+        description: &str,
+        state: &str,
+    ) {
+        let palette = native_palette();
+        ui.heading(title);
+        egui::Frame::new()
+            .fill(palette.surface_alt)
+            .stroke(egui::Stroke::new(1.0, palette.border))
+            .corner_radius(egui::CornerRadius::same(10))
+            .inner_margin(egui::Margin::symmetric(18, 16))
+            .show(ui, |ui| {
+                ui.label(egui::RichText::new(description).color(palette.text));
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new(state).color(palette.muted));
+            });
+    }
+
+    fn show_chat_page(&mut self, ui: &mut egui::Ui) {
+        let palette = native_palette();
+        if !self.chat.sessions_loaded && !self.pending.contains(&Area::Chat) && self.worker_available {
+            self.issue_chat_sessions();
+        }
+        if self.chat.catalog.is_none() && !self.pending.contains(&Area::Chat) && self.worker_available {
+            self.issue_control(Area::Chat, Operation::ChatCatalogLoad, "chat.catalog", json!({}));
+        }
+        self.accept_chat_drops(ui);
+
+        // ── 会话管理行 ────────────────────────────────────────────────
+        ui.horizontal_wrapped(|ui| {
+            ui.heading("对话");
+            ui.add_space(6.0);
+            if ui.small_button("＋ 新会话").clicked() && !self.pending.contains(&Area::Chat) {
+                self.issue_control(Area::Chat, Operation::ChatSessionCreate, "chat.sessions.create", json!({"title": "新会话"}));
+            }
+            let sessions = self.chat.sessions.clone();
+            let active_id = self.chat.active_id.clone();
+            egui::ComboBox::from_id_salt("chat_session_select")
+                .selected_text(
+                    sessions
+                        .iter()
+                        .find(|session| Some(&session.id) == active_id.as_ref())
+                        .map(|session| session.title.clone())
+                        .unwrap_or_else(|| "选择会话".to_owned()),
+                )
+                .width(240.0)
+                .show_ui(ui, |ui| {
+                    for session in &sessions {
+                        let label = if session.archived {
+                            format!("[归档] {}", session.title)
+                        } else {
+                            session.title.clone()
+                        };
+                        if ui.selectable_label(Some(&session.id) == active_id.as_ref(), label).clicked() {
+                            self.chat.active_id = Some(session.id.clone());
+                            self.chat.reset();
+                            self.issue_chat_history();
+                        }
+                    }
+                });
+            if self.chat.active_id.is_some() {
+                if ui.small_button("重命名").clicked() {
+                    let title = self.chat.active_session().map(|s| s.title.clone()).unwrap_or_default();
+                    self.chat.renaming = Some((self.chat.active_id.clone().unwrap_or_default(), title));
+                }
+                let delete_label = if self.chat.confirm_delete { "确认删除？" } else { "删除" };
+                if ui.small_button(delete_label).clicked() {
+                    if self.chat.confirm_delete {
+                        if let Some(id) = self.chat.active_id.clone() {
+                            self.chat.confirm_delete = false;
+                            if !self.pending.contains(&Area::Chat) {
+                                self.issue_control(Area::Chat, Operation::ChatSessionDelete, "chat.sessions.delete", json!({"id": id}));
+                            }
+                        }
+                    } else {
+                        self.chat.confirm_delete = true;
+                    }
+                } else if self.chat.confirm_delete {
+                    self.chat.confirm_delete = false;
+                }
+                let archived = self.chat.active_session().is_some_and(|s| s.archived);
+                let archive_label = if archived { "取消归档" } else { "归档" };
+                if ui.small_button(archive_label).clicked() && !self.pending.contains(&Area::Chat) {
+                    if let Some(id) = self.chat.active_id.clone() {
+                        self.issue_control(Area::Chat, Operation::ChatSessionArchive, "chat.sessions.archive", json!({"id": id, "archived": !archived}));
+                    }
+                }
+            }
+        });
+        let mut rename_confirmed = false;
+        let mut rename_cancelled = false;
+        if let Some((_, buffer)) = self.chat.renaming.as_mut() {
+            ui.horizontal(|ui| {
+                let response = ui.add(egui::TextEdit::singleline(buffer).desired_width(280.0).hint_text("新的会话名"));
+                if ui.button("确定").clicked() {
+                    rename_confirmed = true;
+                }
+                if response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
+                    rename_confirmed = true;
+                }
+                if ui.button("取消").clicked() {
+                    rename_cancelled = true;
+                }
+            });
+        }
+        if rename_confirmed {
+            if let Some((id, buffer)) = self.chat.renaming.take() {
+                if !buffer.trim().is_empty() && !self.pending.contains(&Area::Chat) {
+                    self.issue_control(Area::Chat, Operation::ChatSessionRename, "chat.sessions.rename", json!({"id": id, "title": buffer.trim()}));
+                }
+            }
+        }
+        if rename_cancelled {
+            self.chat.renaming = None;
+        }
+        if !self.chat.notice_or_empty().is_empty() {
+            ui.label(egui::RichText::new(self.chat.notice_or_empty().to_owned()).small().color(palette.muted));
+        }
+        ui.add_space(8.0);
+
+        // ── 对话区 ───────────────────────────────────────────────────
+        let active_title = self.chat.active_session().map(|s| s.title.clone()).unwrap_or_default();
+        let config = self.chat.active_config();
+        egui::Frame::new()
+            .fill(palette.surface_alt)
+            .stroke(egui::Stroke::new(1.0, palette.border))
+            .corner_radius(egui::CornerRadius::same(10))
+            .inner_margin(egui::Margin::symmetric(14, 10))
+            .show(ui, |ui| {
+                if active_title.is_empty() {
+                    ui.weak("选择或新建一个会话开始对话。");
+                } else {
+                    ui.horizontal(|ui| {
+                        ui.strong(active_title);
+                        ui.small(format!("{} · {} · reasoning={}", config.provider, config.model, config.reasoning));
+                    });
+                }
+                ui.separator();
+                egui::ScrollArea::vertical()
+                    .id_salt("chat_transcript_scroll")
+                    .auto_shrink([false, false])
+                    .stick_to_bottom(true)
+                    .max_height(400.0)
                     .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            self.tab_button(ui, Tab::Overview, "概览");
-                            self.tab_button(ui, Tab::Roles, "角色");
-                            self.tab_button(ui, Tab::Policy, "运行策略");
-                            self.tab_button(ui, Tab::Services, "本地服务");
-                            self.tab_button(ui, Tab::ModelsPresets, "模型与 Preset");
-                            self.tab_button(ui, Tab::Pending, "审批 / 提问");
-                            self.tab_button(ui, Tab::Security, "安全");
-                            self.tab_button(ui, Tab::Slang, "黑话配置");
-                            self.tab_button(ui, Tab::Sessions, "会话");
-                            self.tab_button(ui, Tab::Activity, "活动记录");
-                            self.tab_button(ui, Tab::Logs, "日志");
-                            self.tab_button(ui, Tab::Diagnostics, "诊断");
-                        });
+                        self.show_chat_transcript(ui);
                     });
             });
-        ui.add_space(12.0);
+        ui.add_space(8.0);
+
+        // ── Composer ────────────────────────────────────────────────
+        self.show_chat_composer(ui);
+        ui.add_space(6.0);
+
+        // ── 弱化的会话配置（次级控件行） ───────────────────────────────
+        self.show_chat_secondary_controls(ui);
+    }
+
+    fn show_chat_transcript(&mut self, ui: &mut egui::Ui) {
+        let palette = native_palette();
+        if !self.chat.history_loaded && !self.pending.contains(&Area::Chat) {
+            ui.weak("正在加载对话历史…");
+        }
+        let messages = self.chat.messages.clone();
+        for message in &messages {
+            let is_user = message.role == "user";
+            ui.push_id(&message.id, |ui| {
+            egui::Frame::new()
+                .fill(if is_user { palette.surface } else { palette.surface_alt })
+                .stroke(egui::Stroke::new(1.0, palette.border))
+                .corner_radius(egui::CornerRadius::same(8))
+                .inner_margin(egui::Margin::symmetric(10, 6))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.small(if is_user { "你" } else { "助手" });
+                    });
+                    ui.label(message.text.clone());
+                    if let Some(error) = &message.error {
+                        ui.label(egui::RichText::new(format!("错误：{error}")).color(palette.error));
+                    }
+                    if message.cancelled {
+                        ui.label(egui::RichText::new("已停止（保留部分结果，可发送\"继续\"）").color(palette.muted));
+                    }
+                    ui.horizontal(|ui| {
+                        if ui.small_button("复制").clicked() {
+                            ui.ctx().copy_text(message.text.clone());
+                        }
+                        if let Some(usage) = &message.usage {
+                            ui.small(format!("usage：{usage}"));
+                        }
+                    });
+                });
+            });
+            ui.add_space(4.0);
+        }
+        if let Some(turn) = self.chat.turn.clone() {
+            egui::Frame::new()
+                .fill(palette.surface_alt)
+                .stroke(egui::Stroke::new(1.0, palette.border))
+                .corner_radius(egui::CornerRadius::same(8))
+                .inner_margin(egui::Margin::symmetric(10, 6))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.small("助手");
+                        let state_label = match turn.state.as_str() {
+                            "streaming" => "（回复中…）",
+                            "cancelling" => "（正在停止…）",
+                            _ => "",
+                        };
+                        if !state_label.is_empty() {
+                            ui.small(state_label);
+                        }
+                    });
+                    if turn.display_text.is_empty() {
+                        ui.weak("正在等待模型输出…");
+                    } else {
+                        let mut display = turn.display_text.clone();
+                        if turn.state == "streaming" {
+                            display.push('▍');
+                        }
+                        ui.label(display);
+                    }
+                    if let Some(error) = &turn.error {
+                        ui.label(egui::RichText::new(format!("错误：{error}")).color(palette.error));
+                    }
+                });
+        } else if self.chat.history_loaded && self.chat.messages.last().is_some_and(|m| m.role == "user") {
+            ui.label(egui::RichText::new("上一条消息尚未获得回复；可重试或重新发送。").color(palette.muted));
+        }
+        if self.chat.messages.is_empty() && self.chat.history_loaded {
+            ui.weak("还没有消息。在下方输入并发送第一条消息。");
+        }
+    }
+
+    fn show_chat_composer(&mut self, ui: &mut egui::Ui) {
+        let palette = native_palette();
+        let streaming = self.chat.turn.as_ref().is_some_and(|turn| turn.state == "streaming" || turn.state == "cancelling");
+        let last_is_user = self.chat.messages.last().is_some_and(|m| m.role == "user");
+        let can_continue = self
+            .chat
+            .messages
+            .iter()
+            .any(|m| m.role == "assistant" && (m.cancelled || m.error.is_some()));
+        egui::Frame::new()
+            .fill(palette.surface_alt)
+            .stroke(egui::Stroke::new(1.0, palette.border))
+            .corner_radius(egui::CornerRadius::same(10))
+            .inner_margin(egui::Margin::symmetric(12, 10))
+            .show(ui, |ui| {
+                if !self.chat.attachments.is_empty() {
+                    ui.horizontal_wrapped(|ui| {
+                        let attachments = self.chat.attachments.clone();
+                        for (index, (name, content)) in attachments.iter().enumerate() {
+                            ui.label(format!("📎 {}（{} 字符）", name, content.chars().count()));
+                            if ui.small_button("✕").clicked() {
+                                self.chat.attachments.remove(index);
+                            }
+                        }
+                    });
+                }
+                let enter_send = ui
+                    .add(
+                        egui::TextEdit::multiline(&mut self.chat.input)
+                            .hint_text("输入消息；Enter 发送，Shift+Enter 换行")
+                            .desired_rows(3)
+                            .desired_width(f32::INFINITY),
+                    )
+                    .lost_focus()
+                    && ui.input(|input| input.key_pressed(egui::Key::Enter))
+                    && !ui.input(|input| input.modifiers.shift);
+                ui.horizontal(|ui| {
+                    if streaming {
+                        if ui.button("■ 停止").clicked() && !self.pending.contains(&Area::ChatStatus) {
+                            if let Some(id) = self.chat.active_id.clone() {
+                                self.issue_control(Area::Chat, Operation::ChatStop, "chat.stop", json!({"id": id}));
+                            }
+                        }
+                    } else {
+                        let can_send = self.chat.active_id.is_some()
+                            && (!self.chat.input.trim().is_empty() || !self.chat.attachments.is_empty());
+                        let send_button = ui.add_enabled(can_send, egui::Button::new("发送"));
+                        let busy = self.pending.contains(&Area::Chat);
+                        if (send_button.clicked() || (enter_send && can_send)) && !busy {
+                            let text = self.chat.input.trim().to_owned();
+                            let attachments = self.chat.attachments.clone();
+                            if let Some(id) = self.chat.active_id.clone() {
+                                let payload = json!({
+                                    "id": id,
+                                    "text": text,
+                                    "attachments": attachments.iter().map(|(name, content)| json!({
+                                        "name": name,
+                                        "content": content,
+                                    })).collect::<Vec<_>>(),
+                                });
+                                self.chat.input.clear();
+                                self.chat.attachments.clear();
+                                self.issue_control(Area::Chat, Operation::ChatSend, "chat.send", payload);
+                            }
+                        }
+                        ui.small("拖入文本文件可作为附件");
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if !streaming && last_is_user && ui.small_button("重试").clicked() && !self.pending.contains(&Area::Chat) {
+                            if let Some(id) = self.chat.active_id.clone() {
+                                self.issue_control(Area::Chat, Operation::ChatRetry, "chat.retry", json!({"id": id}));
+                            }
+                        }
+                        if !streaming && can_continue && ui.small_button("继续").clicked() && !self.pending.contains(&Area::Chat) {
+                            if let Some(id) = self.chat.active_id.clone() {
+                                self.issue_control(Area::Chat, Operation::ChatContinue, "chat.continue", json!({"id": id}));
+                            }
+                        }
+                    });
+                });
+            });
+    }
+
+    fn show_chat_secondary_controls(&mut self, ui: &mut egui::Ui) {
+        let palette = native_palette();
+        let config = self.chat.active_config();
+        let catalog = self.chat.catalog.clone();
+        let active_id = self.chat.active_id.clone();
+        ui.horizontal_wrapped(|ui| {
+            ui.small("会话配置：");
+            let (models, catalog_error) = match &catalog {
+                Some(value) => {
+                    let models = value
+                        .get("models")
+                        .and_then(Value::as_array)
+                        .map(|items| {
+                            items
+                                .iter()
+                                .filter_map(|item| Some((
+                                    item.get("id").and_then(Value::as_str)?.to_owned(),
+                                    item.get("label").and_then(Value::as_str).unwrap_or("").to_owned(),
+                                )))
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    let error = value.get("error").and_then(Value::as_str).map(ToOwned::to_owned);
+                    (models, error)
+                }
+                None => (Vec::new(), None),
+            };
+            if models.is_empty() {
+                let reason = catalog_error.unwrap_or_else(|| "模型目录为空".to_owned());
+                ui.label(egui::RichText::new(format!("模型不可用（{reason}）")).small().color(palette.error));
+            } else {
+                egui::ComboBox::from_id_salt("chat_model_select")
+                    .selected_text(config.model.clone())
+                    .width(200.0)
+                    .show_ui(ui, |ui| {
+                        for (id, label) in &models {
+                            let selected = config.model == *id;
+                            let display = if label.is_empty() { id.clone() } else { format!("{label} ({id})") };
+                            if ui.selectable_label(selected, display).clicked() {
+                                if let Some(session_id) = active_id.clone() {
+                                    self.issue_control(Area::Chat, Operation::ChatConfigSave, "chat.config.set", json!({"id": session_id, "config": {"model": id}}));
+                                }
+                            }
+                        }
+                    });
+            }
+            egui::ComboBox::from_id_salt("chat_reasoning_select")
+                .selected_text(format!("reasoning: {}", config.reasoning))
+                .width(140.0)
+                .show_ui(ui, |ui| {
+                    for effort in ["off", "low", "high", "max"] {
+                        if ui.selectable_label(config.reasoning == effort, effort).clicked() {
+                            if let Some(session_id) = active_id.clone() {
+                                self.issue_control(Area::Chat, Operation::ChatConfigSave, "chat.config.set", json!({"id": session_id, "config": {"reasoning": effort}}));
+                            }
+                        }
+                    }
+                });
+            egui::ComboBox::from_id_salt("chat_mode_select")
+                .selected_text(format!("模式: {}", config.mode))
+                .width(110.0)
+                .show_ui(ui, |ui| {
+                    for mode in ["chat", "smart"] {
+                        if ui.selectable_label(config.mode == mode, mode).clicked() {
+                            if let Some(session_id) = active_id.clone() {
+                                self.issue_control(Area::Chat, Operation::ChatConfigSave, "chat.config.set", json!({"id": session_id, "config": {"mode": mode}}));
+                            }
+                        }
+                    }
+                });
+            ui.small("Provider: DSH");
+        });
+    }
+
+    fn accept_chat_drops(&mut self, ui: &mut egui::Ui) {
+        let dropped = ui.ctx().input(|input| input.raw.dropped_files.clone());
+        for file in dropped {
+            let path = file.path().to_path_buf();
+            let name = path
+                .file_name()
+                .map(|item| item.to_string_lossy().to_string())
+                .unwrap_or_else(|| "file".to_owned());
+            match std::fs::read_to_string(&path) {
+                Ok(content) => {
+                    const MAX_ATTACHMENT_CHARS: usize = 256 * 1024;
+                    if content.chars().count() > MAX_ATTACHMENT_CHARS {
+                        self.chat.notice = Some(format!("附件「{name}」超过 256K 字符上限，未添加。"));
+                    } else {
+                        self.chat.attachments.push((name, content));
+                    }
+                }
+                Err(error) => {
+                    self.chat.notice = Some(format!("附件「{name}」读取失败：{error}（仅支持文本文件）"));
+                }
+        }
+            }
+    }
+    fn show_tasks_page(&mut self, ui: &mut egui::Ui) {
+        let actions = self.task.show(ui);
+        for action in actions {
+            self.issue_family(Area::Task, Operation::TaskCall, action.method, action.params);
+        }
+        if let Some(Err(error)) = self.feedback.get(&Area::Task) {
+            self.task.set_error(error.clone());
+        }
+        self.show_feedback(ui, Area::Task);
+    }
+
+    fn show_memory_page(&mut self, ui: &mut egui::Ui) {
+        let actions = self.memory.show(ui);
+        for action in actions {
+            self.issue_family(Area::Memory, Operation::MemoryCall, action.method, action.params);
+        }
+        if let Some(Err(error)) = self.feedback.get(&Area::Memory) {
+            self.memory.set_error(error.clone());
+        }
+        self.show_feedback(ui, Area::Memory);
+    }
+
+    fn show_workspace_page(&mut self, ui: &mut egui::Ui) {
+        let actions = self.workspace.show(ui);
+        for action in actions {
+            self.issue_family(Area::Workspace, Operation::WorkspaceCall, action.method, action.params);
+        }
+        if let Some(Err(error)) = self.feedback.get(&Area::Workspace) {
+            self.workspace.set_error(error.clone());
+        }
+        self.show_feedback(ui, Area::Workspace);
+    }
+
+    fn show_legacy_tab_page(&mut self, ui: &mut egui::Ui) {
+        match self.navigation.legacy_tab {
+            Tab::Overview => self.show_overview(ui),
+            Tab::Roles => self.show_roles(ui),
+            Tab::Policy => self.show_policy(ui),
+            Tab::Services => self.show_services(ui),
+            Tab::ModelsPresets => self.show_models_presets(ui),
+            Tab::Pending => self.show_pending(ui),
+            Tab::Security => self.show_security(ui),
+            Tab::Slang => self.show_slang(ui),
+            Tab::Sessions => self.show_sessions(ui),
+            Tab::Activity => self.show_activity(ui),
+            Tab::Logs => self.show_logs(ui),
+            Tab::Diagnostics => self.show_diagnostics(ui),
+        }
+    }
+
+    fn show_settings_page(&mut self, ui: &mut egui::Ui) {
+        // 阶段 11：Settings 里的 Devices / Mesh 区域。
+        // mesh 与 channel 分属两个 Area，因此同一帧可以各发一条请求（Area 互斥只作用于同一个 Area）。
+        let mesh_actions = self.mesh.show(ui);
+        for action in mesh_actions {
+            match action.area {
+                MeshArea::Mesh => {
+                    self.issue_family(Area::Mesh, Operation::MeshCall, action.method, action.params)
+                }
+                MeshArea::Channel => {
+                    self.issue_family(Area::Channel, Operation::ChannelCall, action.method, action.params)
+                }
+            }
+        }
+        if let Some(Err(error)) = self.feedback.get(&Area::Mesh) {
+            self.mesh.set_error(error.clone());
+        }
+        if let Some(Err(error)) = self.feedback.get(&Area::Channel) {
+            self.mesh.set_error(error.clone());
+        }
+        ui.add_space(10.0);
+        ui.separator();
+        self.show_legacy_tab_page(ui);
+    }
+
+    fn show_diagnostics_page(&mut self, ui: &mut egui::Ui) {
+        self.show_legacy_tab_page(ui);
+    }
+
+    fn show_advanced_page(&mut self, ui: &mut egui::Ui) {
+        self.show_legacy_tab_page(ui);
+    }
+
+    fn show_page(&mut self, ui: &mut egui::Ui) {
+        match self.navigation.page {
+            AppPage::Chat => self.show_chat_page(ui),
+            AppPage::Tasks => self.show_tasks_page(ui),
+            AppPage::Memory => self.show_memory_page(ui),
+            AppPage::Workspace => self.show_workspace_page(ui),
+            AppPage::Settings => self.show_settings_page(ui),
+            AppPage::Diagnostics => self.show_diagnostics_page(ui),
+            AppPage::Advanced => self.show_advanced_page(ui),
+        }
     }
 
     fn tab_button(&mut self, ui: &mut egui::Ui, tab: Tab, label: &str) {
         let palette = native_palette();
-        let active = self.active_tab == tab;
+        let active = self.navigation.legacy_tab == tab;
         let text_color = if active { palette.text } else { palette.muted };
         let response = ui.add(
             egui::Button::new(egui::RichText::new(label).color(text_color))
@@ -1381,7 +2153,7 @@ impl NativeUi {
                 .frame(true),
         );
         if response.clicked() {
-            self.active_tab = tab;
+            self.navigation.select_legacy_tab(tab);
         }
     }
 
@@ -2553,12 +3325,24 @@ impl NativeUi {
             });
     }
 
+    fn show_loading_state(&self, ui: &mut egui::Ui, message: &str) {
+        let palette = native_palette();
+        egui::Frame::new()
+            .fill(palette.surface_alt)
+            .stroke(egui::Stroke::new(1.0, palette.border))
+            .corner_radius(egui::CornerRadius::same(8))
+            .inner_margin(egui::Margin::symmetric(12, 9))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(egui::RichText::new(message).color(palette.muted));
+                });
+            });
+    }
+
     fn show_service_feedback(&self, ui: &mut egui::Ui) {
         if self.pending.contains(&Area::Services) {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.weak("正在通过本机 IPC 处理服务请求…");
-            });
+            self.show_loading_state(ui, "正在通过本机 IPC 处理服务请求…");
         }
         if let Some(Err(error)) = self.feedback.get(&Area::Services) {
             self.show_error_message(ui, Area::Services, error);
@@ -2569,10 +3353,7 @@ impl NativeUi {
 
     fn show_feedback(&self, ui: &mut egui::Ui, area: Area) {
         if self.pending.contains(&area) {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.weak("正在通过本机 IPC 处理…");
-            });
+            self.show_loading_state(ui, "正在通过本机 IPC 处理…");
         }
         if let Some(result) = self.feedback.get(&area) {
             match result {
@@ -2591,10 +3372,7 @@ impl NativeUi {
 
     fn show_read_status(&self, ui: &mut egui::Ui, area: Area) {
         if self.pending.contains(&area) {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.weak("正在通过本机 IPC 读取…");
-            });
+            self.show_loading_state(ui, "正在通过本机 IPC 读取…");
         }
         if let Some(Err(error)) = self.feedback.get(&area) {
             self.show_error_message(ui, area, error);
@@ -2611,37 +3389,34 @@ impl NativeUi {
 impl eframe::App for NativeUi {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.receive_events();
+        self.maybe_poll_chat(ui.ctx());
         self.maybe_refresh_pending();
         let palette = native_palette();
         egui::Frame::new()
             .fill(palette.background)
-            .inner_margin(egui::Margin::symmetric(18, 14))
+            .inner_margin(egui::Margin::symmetric(16, 14))
             .show(ui, |ui| {
-                self.show_header(ui);
-                egui::ScrollArea::vertical()
-                    .id_salt("native_content_scroll")
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        egui::Frame::new()
-                            .fill(palette.surface)
-                            .stroke(egui::Stroke::new(1.0, palette.border))
-                            .corner_radius(egui::CornerRadius::same(10))
-                            .inner_margin(egui::Margin::symmetric(18, 16))
-                            .show(ui, |ui| match self.active_tab {
-                                Tab::Overview => self.show_overview(ui),
-                                Tab::Roles => self.show_roles(ui),
-                                Tab::Policy => self.show_policy(ui),
-                                Tab::Services => self.show_services(ui),
-                                Tab::ModelsPresets => self.show_models_presets(ui),
-                                Tab::Pending => self.show_pending(ui),
-                                Tab::Security => self.show_security(ui),
-                                Tab::Slang => self.show_slang(ui),
-                                Tab::Sessions => self.show_sessions(ui),
-                                Tab::Activity => self.show_activity(ui),
-                                Tab::Logs => self.show_logs(ui),
-                                Tab::Diagnostics => self.show_diagnostics(ui),
+                ui.horizontal_top(|ui| {
+                    self.show_sidebar(ui);
+                    ui.add_space(14.0);
+                    ui.vertical(|ui| {
+                        self.show_header(ui);
+                        ui.add_space(12.0);
+                        self.show_page_section_nav(ui);
+                        ui.add_space(10.0);
+                        egui::ScrollArea::vertical()
+                            .id_salt("cetamesh_product_page_scroll")
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                egui::Frame::new()
+                                    .fill(palette.surface)
+                                    .stroke(egui::Stroke::new(1.0, palette.border))
+                                    .corner_radius(egui::CornerRadius::same(10))
+                                    .inner_margin(egui::Margin::symmetric(20, 18))
+                                    .show(ui, |ui| self.show_page(ui));
                             });
                     });
+                });
             });
         ui.ctx().request_repaint_after(Duration::from_millis(500));
     }
@@ -3450,14 +4225,15 @@ mod theme_tests {
     fn native_theme_uses_readable_text_and_touch_targets() {
         let style = native_style();
 
-        assert_eq!(style.spacing.item_spacing, egui::vec2(10.0, 8.0));
-        assert_eq!(style.spacing.button_padding, egui::vec2(12.0, 7.0));
+        assert!(!style.visuals.dark_mode, "CetaMesh product pages use the light shell theme");
+        assert_eq!(style.spacing.item_spacing, egui::vec2(12.0, 10.0));
+        assert_eq!(style.spacing.button_padding, egui::vec2(10.0, 6.0));
         assert!(style.spacing.interact_size.y >= 30.0);
         assert_eq!(style.text_styles[&TextStyle::Body].size, 15.0);
         assert_eq!(style.text_styles[&TextStyle::Small].size, 13.0);
-        assert_eq!(style.text_styles[&TextStyle::Heading].size, 24.0);
+        assert_eq!(style.text_styles[&TextStyle::Heading].size, 26.0);
         assert!(style.visuals.override_text_color.is_some());
-        assert!(style.visuals.weak_text_color.unwrap_or(Color32::BLACK).r() >= 120);
+        assert!(style.visuals.weak_text_color.unwrap_or(Color32::BLACK).r() < 150);
         assert_ne!(style.visuals.panel_fill, Color32::BLACK);
     }
 
