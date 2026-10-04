@@ -1247,3 +1247,39 @@ current branch
 ### 下一阶段入口
 
 - D1 Foundation → **TASK-D1-001 Unified Config Service**（`src/config/`：Zod schema + 旧 config 迁移 + 损坏 fail-closed；验证 `test-core-entry` / `test-privilege` / `self-test`）。尚未开工。
+
+---
+
+## 阶段 03 — 产品级 Desktop Chat（2026-10-04）
+
+目标：Chat 成为核心产品页面（对话列表 / 对话区 / Composer / 弱化配置），不再是管理控制台附属模块。实现为全新的 `src/desktop/chat-service.js` + `desktop-shell/src/chat_ui.rs`（未复用已弃用的 cdb3bd8 代码路径）。
+
+### 已完成
+
+- **ChatRuntime**（`src/desktop/chat-service.js`）：多会话（创建/重命名/归档/删除/列表）、每会话配置（provider=dsh、model、reasoning off|low|high|max、mode chat|smart）、回合状态机（streaming → done/cancelled/error）、流式（assistant/chunk 增量 + assistant/message 校准 + turn/end 定稿，不翻倍）、停止（session/cancel → cancelled，丢弃 DSH 会话隔离迟到事件）、重试（尾部 user 消息重发，不重复落盘）、继续（"继续"新回合）、usage 仅透传事件真实回传（缺失即 null，UI 显示"未知"，禁止伪造）、本地持久化 `state/desktop-chat/`（sessions.json + history/<id>.json）、防护（TURN_BUSY / 参数校验 / 附件 256K×8 上限）。
+- **IPC 白名单**（`src/control/ipc-protocol.js`）：`chat.*`（与并行会话的 memory.* / task.* 融合）方法族经协议层放行、二级白名单在 chat-service。
+- **接线**（`src/bridge.js`）：worker 内创建 ChatRuntime，dispatch 按 `chat.` 前缀分流；复用既有 DSH 客户端与 `model.catalog.list`（不造第二套 Provider Runtime）。
+- **原生 UI**（`desktop-shell/src/chat_ui.rs` + `native_ui.rs` show_chat_page）：产品 Chat 页（导航第一位、默认页），会话下拉管理、消息流（user/assistant 帧、流式光标、错误/停止态、复制、usage 行）、Composer（多行、Enter 发送 Shift+Enter 换行、拖入文本文件作附件）、次级配置行（模型/reasoning/mode 下拉，Provider 只读显示）——工程配置不占页面中心。
+
+### 已验证（本机实跑）
+
+- `node scripts/test-desktop-chat-product.mjs`：**PASS（11 组）**——CRUD、发送+流式+usage 透传、usage 未知为 null、停止+partial+DSH 会话重置、异常 Provider+ECONNREFUSED+retry 恢复、空/异常模型目录不伪造、切换模型即时 selectModel、长输出 20×500 字完整定稿、重启后历史完整、TURN_BUSY/continue/参数校验、turn 异常结束 partial 落盘。
+- `cargo test`：**PASS（73/73，含 chat_ui 2 项解析测试）**；`cargo check` 通过（并行会话的 memory/task 模块同树共存编译）。
+- 回归：`test-core-entry` / `test-ipc-protocol` / `test-control-service` / `test-dsh-integration` 全 PASS。
+
+### 未验证
+
+- 真实 DSH 模型会话（self-test 仍 NOT_RUN_ENVIRONMENT，DSH 未运行）——真机发送/流式/停止/切换模型的端到端待人工验收（PENDING_NATIVE_VERIFICATION）。
+- 原生窗口的视觉与交互（布局、滚动、拖拽手感）待人工确认。
+
+### 已知问题 / 限制
+
+- Smart 模式初期为会话元数据标注（工具面与 Chat 相同——DSH profile 既有的安全 MCP 工具，如 web-search-safe）；真正的能力网关待 D1-004/005 Capability/Permission。
+- 会话独占假设：与 DSH 网页端并发使用同一会话时事件可能混流。
+- 附件仅支持文本文件（拖拽入口）；图片附件待后续（DSH content 已支持 image block，链路未接）。
+- Core 重启时在途回合无 interrupted 标记（历史如实归位为 awaiting-reply，可重试，不自动重发）。
+- 本提交只含 Chat 自有文件与状态记录；`bridge.js` / `ipc-protocol.js` / `native_ui.rs` / `native_main.rs` 因与并行阶段 04（Memory）/07（Task）会话共享编辑，接线随其合并提交落库（当前工作树已验证全部编译与测试）。
+
+### 下一阶段入口
+
+- 真机人工验收桌面 Chat（启动 DSH → 原生窗口全验收项）→ D1-004 Capability Registry。Persistent Task 由并行会话按其阶段指令处理。
