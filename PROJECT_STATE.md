@@ -36,9 +36,13 @@
 - `migrateLegacyConfig` 按等价性要求**原样保留**非布尔的安全开关值（如字符串 `'true'`）；fail-closed 由使用点 `=== true` 保证，类型异常由 `validateRawConfig` 诊断。二者配合即红线语义。
 - schema 为诊断性校验，不因新增未知字段阻断启动（宽松透传）。
 
-### 并发工作观察（重要，待所有者裁决）
+### 并发工作记录
 
-本阶段执行期间（约 20:05–20:10），另一会话在同一工作区并行修改了**本阶段未触碰**的文件：`desktop-shell/*`（`native_ui.rs` +321 行等）、`src/control/ipc-protocol.js`（新增 `chat.*` 方法族）、新增 `src/desktop/`（含 `chat-service.js`）、`desktop-shell/src/chat_ui.rs`、`src/memory/`、`scripts/test-desktop-chat-product.mjs`，并在 `src/bridge.js` 追加了 17 行 chat 接线。该工作与本文下方"桌面 Chat 闭环不得恢复重建"的历史决定方向相反，**未提交、未由本阶段验证、未纳入本阶段提交**。本阶段对 `src/bridge.js` 采用了部分暂存（`git apply --cached` 仅暂存配置相关 hunk），并发改动完整保留在工作区。另发现异常目录 `%SystemDrive%/`（疑似环境变量展开错误产生），未处置。请所有者确认该并行方向是否有效。
+本阶段执行期间（约 20:05–20:10），另一会话在同一工作区并行修改了本阶段未触碰的文件：`desktop-shell/*`（`native_ui.rs` 等）、`src/control/ipc-protocol.js`（新增 `chat.*` 方法族）、新增 `src/desktop/`（含 `chat-service.js`）、`desktop-shell/src/chat_ui.rs`、`src/memory/`、`scripts/test-desktop-chat-product.mjs` 与 `scripts/test-memory-runtime.mjs`，并在 `src/bridge.js` 追加了 17 行 chat 接线，`package.json` 追加 `test-memory` 脚本。按所有者说明，这属于按当前目标（CetaMesh Desktop v1 完整产品，含 Chat / Memory）正常推进的项目工作；下文 D0 快照中"不得恢复重建"的注释是旧阶段规则，已被当前目标取代。
+
+本阶段对这些并行改动**未验证、未纳入提交**：`src/bridge.js` 采用部分暂存（`git apply --cached` 仅暂存配置相关 hunk），并行改动完整保留在工作区，由其所属会话自行提交与验证。另发现异常目录 `%SystemDrive%/`（疑似环境变量展开错误产生），未处置，留待其产生方清理。
+
+另：同会话在分支 `codex/d1-unified-config-service` 提交了统一配置服务设计文档（`docs/superpowers/specs/2026-10-04-unified-config-service-design.md`）。与本实现的主要分歧，供后续对齐：① 该设计要求 MCP 读配置失败时"拒绝工具动作"，本实现沿用现行行为（按"未配置"空对象 + 使用点 fail-closed，能力被拒但进程可读），语义更宽松；② 该设计要求管理接口全部改走配置服务并做候选文档 schema 校验，本实现按最小边界暂缓（写路径迁移列为后续小阶段）。
 
 ### 下一阶段入口
 
