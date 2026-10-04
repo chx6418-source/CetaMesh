@@ -52,6 +52,73 @@
 
 ---
 
+## 阶段 10 — Desktop Extension v1（2026-10-04）
+
+本地扩展体系：只做 Local Import 与生命周期，**不做市场服务器**。
+
+### 已完成（本次提交内容）
+
+- `src/extension/`（新增）：
+  - `types.js`：7 种扩展类型（tool / external-api / workflow / memory-pack / channel-adapter /
+    agent-adapter / ui）；权限表带风险等级；**shell / native / download / process 登记为 risk:'forbidden'
+    ——永久不可授予**；id / 版本 / scope.paths / network.hosts 归一化（拒绝绝对路径与目录穿越）。
+  - `manifest.js`：manifest 校验（`extension.json` / `manifest.json`）。声明 network 必须给 hosts、
+    声明 filesystem.* 必须给 scope.paths，否则 fail-closed；fingerprint 作为批准凭据的锚点。
+  - `scan.js`：入口源码静态预检。**先按词法剥掉注释再匹配**（否则正常文档注释会被误判），
+    require / ESM import / 动态 import / child_process / exec|spawn / process / fs 等一律拒绝安装。
+  - `review.js`：Permission Review 文档（权限 / 风险 / 能力 / 网络白名单 / scope + fingerprint + token）；
+    能力不得声明未在 permissions 里出现过的权限；`enforced` 如实标注哪些权限运行期真的会被注入。
+  - `host.js`：受限执行宿主。上下文里**不存在** require / module 加载器 / process / Buffer / fs / net /
+    child_process；`codeGeneration:{strings:false,wasm:false}` 关掉上下文内的 eval 与 new Function；
+    只有被授予的权限才注入对应能力；network 必须命中 manifest 白名单（并复用 safe-fetch 的 SSRF 防护）；
+    每次调用有墙钟超时。
+  - `store.js`：已安装注册表 + 扩展私有存储（按扩展 id 命名空间隔离）。
+  - `installer.js`：Local Import → manifest 校验 → 源码预检 → Review → 批准 token → 复制进受管目录 → 落库；
+    update 强制版本递增，且**新增权限必须重新批准**；uninstall 删除受管目录、不碰用户来源目录。
+  - `runtime.js`：enable / disable / invoke / logs；重启后按注册表**惰性重建宿主**，让「启用」跨重启生效。
+  - `service.js` / `index.js`：`ext.*` 方法白名单。
+- `extensions/`（新增两个验收扩展）：
+  - `cetamesh-hello-tool`：无敏感权限的简单 Tool（仅 log；纯计算能力 `hello.greet`）。
+  - `cetamesh-http-meta`：需要明确 Permission 的扩展（log + storage + network，网络白名单 example.com）。
+- Core 接线：`ipc-protocol.js` 增加 `ext.*` 路由；`bridge.js` 创建 `createExtensionService` 并接入 dispatch。
+- `package.json`：新增 `test-extension`。
+
+### 已验证（本机实跑）
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm run test-extension` | `PASS` 87/87 |
+| `npm run test-task` / `test-memory` / `test-config` | `PASS` 90/90、85/85、69/69 |
+| `npm run test-core-entry` | `PASS`（用本次接线版本启动真实 worker） |
+
+覆盖：两个扩展的 安装 → 启用 → 调用 → 禁用 → 卸载 全链路；review 风险分级与批准凭据
+（未批准 → APPROVAL_REQUIRED，凭据不符 → REVIEW_MISMATCH）；四项禁止权限全部被拒；
+5 类源码违规被预检拒绝且注释不误伤；能力声明未授权权限被拒；manifest 校验（无 hosts / 非法 id /
+非法版本 / entry 穿越 / scope 穿越 / 未知类型）；vm 上下文遏制（require / process / fetch / storage
+均为 undefined，eval 与 new Function 均被禁用）；网络主机白名单与非 http(s) 协议拒绝；
+Update 的版本与权限提升检查；重启持久化与惰性重建；卸载清受管目录并保留来源目录；`ext.*` IPC 往返。
+
+### 未验证 / 未纳入本次提交
+
+- **桌面扩展管理页未做**。本阶段「只做」清单是生命周期，原文亦明确「不要求本阶段实现复杂插件 UI」。
+  因此 Permission Review 目前由 `ext.review` 提供、且 `ext.install` **强制要求 review token**——
+  「没审查过就装不上」在 API 层已经成立，只是还没有渲染到桌面页面上。
+- 视觉 / 真机：`PENDING_NATIVE_VERIFICATION`。
+
+### 已知问题
+
+1. **vm 是遏制（containment），不是安全沙箱**。真正的隔离边界应当是「独立进程 + OS 级限制」，本阶段未做。
+   `codeGeneration` 关闭 + 无 require/process + 无 fs/net 已挡住常见逃逸路径，但同进程执行的残余风险仍在。
+2. 无代码签名 / 来源校验；只支持本地目录导入，不做任何下载，因此「任意下载 JS 后执行」在数据流上不存在。
+3. `filesystem.*` / `memory.*` 权限目前**只有声明与审查面**，宿主尚未注入对应能力（review 的 `enforced=false` 已如实标注）。
+4. 扩展为单文件入口（上下文里没有 require，因此不能自行拆分模块）。
+5. 不做市场服务器，只保留 source metadata / publisher / version 字段。
+
+### 下一阶段入口
+
+- 桌面扩展管理页：需要同时在 `app_shell.rs` 的导航里加一项，再在 `native_ui.rs` 挂页面。
+- 真隔离：把扩展宿主移到子进程并做权限降级；补齐 filesystem / memory 权限的实际注入。
+- 来源校验（摘要 / 签名）与更新通道。
 ## 阶段 07 — Persistent Task v1（2026-10-04）
 
 **冻结已由所有者显式解除**：本阶段按所有者直接指令实施 Persistent Task v1，

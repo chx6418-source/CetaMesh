@@ -72,6 +72,7 @@ import {
 import { loginInfo, extractKugouAuth, createQrLogin, pollQrLogin } from './kugou-api.js';
 import { createMemoryService } from './memory/service.js';
 import { createTaskService } from './task/service.js';
+import { createExtensionService } from './extension/service.js';
 import { createLocalServiceManager, SNOWLUMA_RELEASE_PAGE, DSH_INSTALL_HINT } from './local-services.js';
 import { CONTROL_METHODS, ControlServiceError, createControlService } from './control/control-service.js';
 import { startIpcProtocol } from './control/ipc-protocol.js';
@@ -441,7 +442,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const convKey = (kind, id) => `${kind}:${id}`;
 const SEND_TIMEOUT_MS = 15000;
 
-function startUiIpcServer(controlService, memoryService, taskService) {
+function startUiIpcServer(controlService, memoryService, taskService, extensionService) {
   const pipeName = String(process.env.WHALEBRIDGE_UI_PIPE ?? '').trim();
   if (!pipeName) return null;
 
@@ -451,6 +452,9 @@ function startUiIpcServer(controlService, memoryService, taskService) {
     }
     if (method.startsWith('task.')) {
       return taskService.execute({ method, params });
+    }
+    if (method.startsWith('ext.')) {
+      return extensionService.execute({ method, params });
     }
     return controlService.execute({
       method,
@@ -1905,7 +1909,9 @@ async function main() {
       }
     });
     const taskService = createTaskService({ stateDir: STATE_DIR });
-    startUiIpcServer(controlService, memoryService, taskService);
+    // 本地扩展体系（阶段 10）：扩展只在用户本地导入，能力与权限均需显式声明与批准。
+    const extensionService = createExtensionService({ stateDir: STATE_DIR });
+    startUiIpcServer(controlService, memoryService, taskService, extensionService);
     const server = http.createServer(async (req, res) => {
       const url = new URL(req.url ?? '/', `http://127.0.0.1:${port}`);
       const SECURITY_HEADERS = {
