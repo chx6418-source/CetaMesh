@@ -1,9 +1,9 @@
 # CetaMesh Desktop — PROJECT_STATE
 
-> 状态日期：2026-10-03  
+> 状态日期：2026-10-04  
 > 仓库：`chx6418-source/whalebridge`  
 > 产品名称：`CetaMesh`  
-> 当前基线：`main@09d2758c663e353c30e1bf4a605c914ccd3fdc87`  
+> 当前基线：`main@05a6c991c980ff951ea5f357699c657eb0b4c629`（D0 基线复验 + installer 栈溢出修复；本文件更新在其后的 docs 提交中）  
 > 范围：**Desktop / Windows only**。Mobile 已独立到 `chx6418-source/cetamesh-mobile`，本文件不记录 Mobile 具体实现。
 
 ---
@@ -869,3 +869,49 @@ current branch
 ## 23. 当前一句话状态
 
 > **CetaMesh Desktop 已拥有较成熟的 Windows 原生运行、Core、DSH/QQ 集成与安全基础，但新的 CetaMesh Chat / Persistent Task / Memory / Workspace / Agent Provider / Context Rollover 产品层仍未完成；当前先整理真实状态，不启动 Persistent Task v1。**
+
+---
+
+## 24. 2026-10-04 本机基线验证记录（TASK-D0-001 / D0-002）
+
+范围：Windows 10（10.0.22631 x64）开发机，`D:\GIT-QQ-BRIDGE`，分支 `main`。验证基线：`main@05a6c99`（本文件在其后的提交中更新）。
+
+### 已验证（PASS）
+
+| 测试 | 结果 | 备注 |
+| --- | --- | --- |
+| `npm run test-privilege` | PASS | 24/24；运行中桥接的端到端部分由脚本自动跳过（本机桥接未运行） |
+| `npm run test-core-entry` | PASS | worker + 五个 MCP 模式 |
+| `npm run test-dsh-integration` | PASS | 隔离沙箱；真实 `~/.dsh` 字节级未触碰 |
+| `npm run desktop:check` | PASS | cargo check 无警告错误 |
+| `npm run desktop:test` | PASS | 61/61 |
+| `npm run test-desktop-supervisor` | PASS | 孤儿守卫 / restart / shutdown 契约 |
+| `npm run test-desktop-shell` | PASS | 首跑 FAIL 是 `target/debug` 旧 exe（09-22）与 09-23 源码不匹配；重建后通过 |
+| `npm run test-desktop-install` | PASS | 先修复下述 P1 缺陷后全生命周期通过 |
+| `npm run test-core-dist` | PASS | 无系统 Node 参与 |
+| `npm run build:core` + `build:release` + `test-release-candidate` | PASS | 中文+空格路径 / 无系统 Node / 只读安装目录 / 崩溃恢复 / 单实例 / 孤儿守卫 / 卸载保留数据 |
+
+### NOT_RUN_ENVIRONMENT
+
+- `npm run self-test`：需要运行中的 DSH（`127.0.0.1:3080`），本机未启动（ECONNREFUSED）。真实模型链路仍未验证，不得记为 PASS。
+
+### D0 期间发现并修复
+
+- **P1：`--uninstall --remove-data` 必现栈溢出（0xC00000FD）**。备份目录建在 `data_dir/.whalebridge-backup/<stamp>/` 内部，而卸载计划对 `data_dir` 本身做快照，`snapshot_path → copy_dir` 的复制源包含复制目标，无限递归（并伴随备份树指数复制、磁盘占满风险）。修复：`copy_dir_excluding` 在快照复制时排除备份子树（`installer.rs`）。修复后 `test-desktop-install` 全生命周期 PASS。
+- **已知遗留（未修，D1 候选）**：回滚路径中 `data_dir` 的快照备份位于 `data_dir` 内部——若卸载中途失败触发回滚，`remove_path(data_dir)` 会先删掉备份导致恢复不完整。需要把备份目录设计到被删树之外（涉及备份位置契约，非本阶段范围）。
+
+### 基线清点结论（对照正文其余章节）
+
+- 正文的架构 / 入口 / 安全默认描述与本机代码一致，无需改写；本节仅补充日期化验证记录。
+- 安全红线复验：`test-privilege`（双令牌收敛）、RC 测试断言（HTTP console-token 管理调用被拒、根路径仅 JSON、PATH 无 node）均通过。
+- `dist/core`、`dist/app` 已从当前源码重建；旧产物（09-21/22，缺 `noWebUi` 标记）曾让 `test-release-candidate` 首跑 FAIL——**产物过期会伪装成回归，先核对 `builtAt` 再下结论**。
+
+### 历史事实（防止重复踩坑）
+
+- 2026-10-04 17:47 的提交 `cdb3bd8`（native desktop chat loop）已于当日 18:00 被 reset 主动放弃；所有者已确认该方向作废：桌面 Chat 闭环（`src/desktop-chat-service.js`、`chat.*` IPC、`native_ui.rs` 对话页）与 desktop-utilities 插件接线（`--plugins` CLI、`mcp-cetamesh-desktop` 注册）均**不得恢复重建**。当日曾有一次错误恢复（`d632720`），已用 `34b321d` revert 撤销。
+- 工作区存在未跟踪文件：`src/desktop-plugin-host.js`、`src/desktop-plugin-storage.js`、`src/mcp-desktop-utilities.js`、`plugins/cetamesh-*`、`scripts/test-desktop-plugin-*.mjs`、`desktop-shell/native-spike/`、`output/`。这些文件**保留原样：不接线、不引用、不删除、不作为开发基础**；其存在不代表已批准的产品方向。
+- Persistent Task v1 等禁扩建清单照旧（见第 20 节）。
+
+### 下一阶段入口
+
+- D1 Foundation → **TASK-D1-001 Unified Config Service**（`src/config/`：Zod schema + 旧 config 迁移 + 损坏 fail-closed；验证 `test-core-entry` / `test-privilege` / `self-test`）。尚未开工。
