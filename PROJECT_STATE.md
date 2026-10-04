@@ -1,5 +1,73 @@
 # CetaMesh Desktop — PROJECT_STATE
 
+## Current authoritative snapshot — 2026-10-04
+
+This snapshot supersedes older status notes below. The repository is Desktop / Windows only; Mobile is a separate project.
+
+### Repository and working tree
+
+- Audit start: branch `main`, HEAD `90def05` (`docs(desktop): D0 基线复验记录（TASK-D0-001/002）`), four local commits ahead of `origin/main@1b8ef61`. The earlier local commits include the installer `--remove-data` fix (`05a6c99`) and the explicit Chat-loop revert (`34b321d`).
+- The only configured remote is `origin` → `https://github.com/chx6418-source/whalebridge.git`. No `CetaMesh` remote is configured. No fetch, push, or upload was performed.
+- At audit start tracked files were clean. Existing untracked paths are preserved and excluded from this work: `desktop-shell/native-spike/`, `output/`, five `plugins/cetamesh-*` directories, `scripts/test-desktop-plugin-helpers.mjs`, `scripts/test-desktop-plugins.mjs`, `src/desktop-plugin-host.js`, `src/desktop-plugin-storage.js`, and `src/mcp-desktop-utilities.js`.
+- `AGENTS.md` is absent. `RULES.md` and `README.md` retain WhaleBridge / QQ bridge era context. `docs/roadmap/CETAMESH_DESKTOP_CODEX_WORKPLAN_v3.0.md` is a plan, not evidence of implementation.
+
+### Actual implementation status
+
+| Area | Source inspection | Verification |
+|---|---|---|
+| Desktop Shell | Native Windows Rust `eframe/egui` UI; currently an administration console | Cargo check/test and shell smoke ran; visual interaction is `PENDING_NATIVE_VERIFICATION` |
+| Core and lifecycle | Node.js ESM Core; source worker and Node SEA executable; Rust supervisor starts, restarts, stops, and waits for readiness | Core entry, supervisor, and SEA worker tests ran as listed below |
+| IPC | Windows Named Pipe; v1 little-endian length-prefixed JSON, requests/responses, events, structured errors, version checks | Rust tests, Node IPC test, and shell smoke `PASS` |
+| Chat / Agent | No mature independent CetaMesh Chat product page; DSH client/session APIs exist, but no generic AgentProvider contract | Chat loop from `d632720` was reverted by `34b321d`; it is not current functionality |
+| Model Provider | DSH model catalog, default model, and presets exist; no generic Model Provider or credential store | Generic provider flow not verified |
+| Memory | Primarily QQ/Social Memory tools and storage; no unified authorized Memory Runtime | Product-level cross-session/task/workspace memory not implemented or verified |
+| Workspace | DSH workspace API concepts exist; no CetaMesh-owned file security boundary | Product-level isolation not implemented or verified |
+| Tasks / Continuity | Internal service tasks exist; no CetaMesh Persistent Task, Context Rollover, or Agent Handoff runtime | Deferred: the earlier explicit instruction not to start Persistent Task v1 remains in force |
+| Capability / Approval | Legacy roles/policy and approval/question/risk queues exist; no unified Capability, Permission, Approval, Audit, and Workspace Scope engine | Only legacy module regression coverage ran |
+| Channels / MCP | QQ/SnowLuma adapters and MCP host/dispatch exist; they are adapters, not the Core center | Core entry, DSH integration, and privilege tests ran |
+| Plugins / Device Mesh | No verified Desktop plugin install/execution system or Device Mesh protocol in tracked source | Untracked plugin drafts/declarations are not treated as runnable features |
+| Installer / release | Native install, repair, migration, uninstall, SEA, and release scripts exist | Installer lifecycle and SEA/Core distribution tests ran; full Release Candidate remains unverified |
+
+Security defaults confirmed in source: `allowAllWhenEmpty=false`, `snowluma.allowProcessControl=false`, and `socialV2.tools.clickCardButton=false`.
+
+### Source checks and automated verification
+
+`PASS` applies only to the command run on this machine; it does not imply external services, native visual interaction, or release coverage.
+
+| Check | Status | Result and boundary |
+|---|---|---|
+| `npm run test-privilege` | `PASS` | 24 passed, 0 failed; live end-to-end portion did not run because fetch failed (`NOT_RUN_ENVIRONMENT`) |
+| `npm run test-core-entry` | `PASS` | Core entry, MCP modes, and temporary worker startup |
+| `npm run test-dsh-integration` | `PASS` | Install/repair/migration/rollback/idempotence and DSH config snapshot preservation |
+| `npm run test-desktop-supervisor` | `PASS` | Supervisor lifecycle |
+| `npm run desktop:check` | `PASS` | Rust Desktop check |
+| `npm run desktop:test` | `PASS` | Final run: 62 Rust tests, including remove-data uninstall transaction regression |
+| `node scripts/test-control-service.mjs`; `node scripts/test-ipc-protocol.mjs` | `PASS` | Control service and Node IPC protocol |
+| `npm run test-desktop-shell` | `PASS` | Core/Shell IPC, query/control, restart, shutdown, and conflict paths; existing instance held the single-instance lock, so interactive UI was not verified (`PENDING_NATIVE_VERIFICATION`) |
+| `node scripts/test-desktop-install.mjs` | `PASS` | Final standalone run covered install, upgrade, repair, migration, preserve-data uninstall, full data removal, and reinstall. An earlier concurrent run once exited with stack overflow `3221225725`; subsequent isolated and parallel runs passed and did not reproduce it. This remains an intermittent observation, not a confirmed root-cause fix. |
+| Core SEA build in a unique temporary output directory | `PASS` | Resource/executable audit passed; executable `--help` ran; existing `dist/` was not overwritten |
+| `scripts/test-core-dist.mjs` against that temporary SEA output | `PASS` | PATH-isolated worker, data paths, MCP stdio, API authentication, DSH compatibility, and process cleanup; assertions now reflect the API-only/no-product-HTML Core contract |
+| `npm run self-test` | `NOT_RUN_ENVIRONMENT` | It creates a DSH session and sends a prompt, so requires a live DSH/model and external session side effects; not launched |
+| Release build / Release Candidate / installer package / icon checks | `NOT_RUN_ENVIRONMENT` | No fresh complete candidate was produced; existing ignored `dist/` was preserved, so there is no release verification claim |
+| Native Windows UI visual operation | `PENDING_NATIVE_VERIFICATION` | Automated shell smoke is not a visual interaction check |
+
+The Core build emitted a duplicate `collect` key warning in `src/bridge.js` and a Windows SEA injection signature warning. Neither failed the build. The earlier installer stack overflow was not reproduced; do not claim its cause is resolved.
+
+### D0 changes in this stage
+
+- `desktop-shell/src/installer.rs`: added a regression test ensuring successful `--remove-data` uninstall removes user data, the empty install directory, and the temporary backup.
+- `scripts/test-desktop-install.mjs`: scoped registry cleanup to this run's unique test key and added opt-in preservation of the temporary directory for debugging.
+- `scripts/test-core-dist.mjs`: asserts the current API-only SEA contract, checks resource trees contain no product HTML, and registers child-process exit listeners before killing processes.
+- This file records the verified repository snapshot and test boundaries.
+
+Only these three code/test files and `PROJECT_STATE.md` are candidates for this local commit. Pre-existing untracked paths remain excluded. Do not push.
+
+### Next stage entry
+
+Recommended: roadmap D1 Foundation / `TASK-D1-001`, first inventorying configuration readers/writers, data paths, sensitive fields, and callers, then defining the smallest backward-compatible Unified Config Service boundary. Do not start Persistent Task v1, Context Rollover, or Agent Handoff runtime until the user explicitly lifts the existing deferral. Candidate product order after that: Chat, Memory, Workspace security boundary, then AgentProvider, each with its own verifiable loop.
+
+---
+
 > 状态日期：2026-10-04  
 > 仓库：`chx6418-source/whalebridge`  
 > 产品名称：`CetaMesh`  

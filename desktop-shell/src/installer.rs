@@ -1674,6 +1674,34 @@ mod tests {
     }
 
     #[test]
+    fn remove_data_uses_external_backup_and_cleans_transaction() {
+        let root = temp_dir("remove-data-transaction");
+        let layout = layout(&root);
+        fs::create_dir_all(layout.data_dir.join("state")).unwrap();
+        fs::write(layout.data_dir.join("state").join("sessions.json"), b"[]").unwrap();
+
+        let purge = plan_uninstall(
+            &layout,
+            &UninstallOptions {
+                remove_data: true,
+                remove_dsh_integration: false,
+                dsh_profile: "web".to_owned(),
+            },
+        );
+        let applied = apply_plan(&purge, &quiet).expect("remove-data uninstall should complete");
+
+        assert!(!layout.data_dir.exists(), "--remove-data should remove the data directory");
+        assert!(!layout.install_dir.exists(), "uninstall should remove an empty install directory");
+        assert!(
+            !applied.backup_dir.exists(),
+            "the temporary data snapshot should be deleted after a successful purge"
+        );
+
+        cleanup_registry(&layout.registry_key);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn uninstall_keeps_user_modified_files_and_reports_them() {
         let root = temp_dir("modified");
         let payload = fake_payload(&root);

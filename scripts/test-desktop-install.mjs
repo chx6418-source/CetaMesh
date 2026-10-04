@@ -342,8 +342,11 @@ try {
   }
 } finally {
   cleanupRegistry();
-  spawnSync('reg.exe', ['delete', 'HKCU\\Software\\WhaleBridgeTest', '/f'], { encoding: 'utf8' });
-  fs.rmSync(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
+  if (process.env.WHALEBRIDGE_TEST_KEEP_TEMP === '1') {
+    step(`TEST_TEMP_ROOT=${tempRoot}`);
+  } else {
+    fs.rmSync(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
+  }
 }
 
 step('🎉 安装 / 升级 / 修复 / 迁移 / 卸载 / 重装 全生命周期通过（全部在沙箱目录内）');

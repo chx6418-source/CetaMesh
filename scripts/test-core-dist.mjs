@@ -6,7 +6,7 @@
 //   2. 五个 MCP 模式真实 stdio：initialize → tools/list → 安全 tools/call；
 //   3. --worker 在临时端口 + 临时数据目录启动，显式资源目录与自动发现资源目录均生效；
 //   4. 临时数据目录内生成 console-token / agent-token / bridge.lock；
-//   5. HTTP 根路径要求鉴权，带令牌可访问，页面内容确实来自资源目录；
+//   5. HTTP loopback 仅提供 API：根路径要求鉴权，且不再提供产品网页控制台；
 //   6. 全程 PATH 中不存在 node.exe，且 worker 进程树中没有 node.exe；
 //   7. 数据目录优先级：WHALEBRIDGE_DATA_DIR > --data-dir > portable.flag > %LOCALAPPDATA%；
 //   8. 旧 Node.js 入口（node src/core-entry.js、原独立 MCP 文件）继续可用；
@@ -25,6 +25,7 @@ import { once } from 'node:events';
 import { spawn, spawnSync } from 'node:child_process';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { assertNoWebUiHtmlArtifacts } from './no-web-release-policy.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DIST = process.env.WHALEBRIDGE_DIST_DIR
@@ -64,12 +65,13 @@ async function waitForHttp(url, timeoutMs = 20000) {
 }
 
 // 归一化后比较页面内容：忽略 BOM 与缩进差异，只验证确实读到了资源目录里的文件。
-function normalize(text) {
-  return String(text).replace(/^\uFEFF/, '').replace(/\s+/g, ' ').trim();
-}
-
-function markerOf(source) {
-  return normalize(source).slice(0, 200);
+function listFiles(dir, base = dir, out = []) {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) listFiles(full, base, out);
+    else if (entry.isFile()) out.push(path.relative(base, full).split(path.sep).join('/'));
+  }
+  return out;
 }
 
 // 只保留 Windows 自身目录：cmd / powershell / taskkill 仍可用，但 PATH 中没有任何 Node.js。
@@ -187,9 +189,11 @@ function processInfo(pid, tempRoot) {
 }
 
 async function stopProcess(child, label) {
-  if (child.exitCode === null && child.signalCode === null) child.kill();
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const exit = once(child, 'exit').then(() => true);
+  child.kill();
   const exited = await Promise.race([
-    once(child, 'exit').then(() => true),
+    exit,
     new Promise((resolve) => setTimeout(resolve, 10000))
   ]);
   assert.equal(exited, true, `${label} 未在 10 秒内退出`);
@@ -205,8 +209,9 @@ function track(child) {
 /** 终止并等待退出，不抛错（用于清理路径）。 */
 async function killQuietly(child) {
   if (child.exitCode !== null || child.signalCode !== null) return;
+  const exit = once(child, 'exit').then(() => true);
   child.kill();
-  await Promise.race([once(child, 'exit'), new Promise((resolve) => setTimeout(resolve, 10000))]);
+  await Promise.race([exit, new Promise((resolve) => setTimeout(resolve, 10000))]);
 }
 
 // ---------------------------------------------------------------- 产物检查
@@ -217,7 +222,7 @@ assert.ok(fs.statSync(path.join(DIST, 'build', 'core.bundle.cjs')).isFile(), '�
 for (const dir of ['public', 'roles', 'assets', 'dsh', 'plugins']) {
   assert.ok(fs.existsSync(path.join(RESOURCES, dir)), `resources/${dir} 缺失`);
 }
-assert.ok(fs.existsSync(path.join(RESOURCES, 'public', 'console.html')), 'resources/public/console.html 缺失');
+assertNoWebUiHtmlArtifacts(listFiles(RESOURCES), 'Core resources');
 
 const manifest = JSON.parse(fs.readFileSync(path.join(DIST, 'runtime-manifest.json'), 'utf8'));
 assert.equal(manifest.executable, 'WhaleBridgeCore.exe');
@@ -239,8 +244,6 @@ const whereNode = spawnSync('cmd.exe', ['/d', '/s', '/c', 'where node'], {
 assert.notEqual(whereNode.status, 0, 'PATH 隔离失败：仍然能解析到 node.exe');
 step('✅ PATH 隔离：隔离环境中 where node 解析失败，全程无系统 Node.js 参与');
 
-const LOGIN_MARKER = markerOf(fs.readFileSync(path.join(RESOURCES, 'public', 'token-login.html'), 'utf8'));
-const CONSOLE_MARKER = markerOf(fs.readFileSync(path.join(RESOURCES, 'public', 'console.html'), 'utf8'));
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'whalebridge-dist-'));
 const dataDir = path.join(tempRoot, 'data');
 fs.mkdirSync(dataDir, { recursive: true });
@@ -280,17 +283,12 @@ async function runWorker({ label, dataDir: workerDataDir, resourceDir, useDefaul
   try {
     const anonymous = await waitForHttp(`http://127.0.0.1:${port}/`);
     assert.equal(anonymous.status, 401, `${label}: 根路径必须要求鉴权`);
-    assert.ok(
-      normalize(await anonymous.text()).includes(LOGIN_MARKER),
-      `${label}: 401 页面未使用资源目录中的登录页`
-    );
+    assert.match(anonymous.headers.get('content-type') ?? '', /^application\/json\b/i);
 
     const authorized = await fetch(`http://127.0.0.1:${port}/?token=${CONSOLE_TOKEN}`, { redirect: 'manual' });
-    assert.equal(authorized.status, 200, `${label}: 带令牌应可访问控制台`);
-    assert.ok(
-      normalize(await authorized.text()).includes(CONSOLE_MARKER),
-      `${label}: 控制台页面内容不来自资源目录`
-    );
+    assert.equal(authorized.status, 404, `${label}: Core 不得提供产品网页控制台`);
+    assert.match(authorized.headers.get('content-type') ?? '', /^application\/json\b/i);
+    assert.match((await authorized.json()).error ?? '', /网页控制台已移除/);
 
     const status = await fetch(`http://127.0.0.1:${port}/api/status?token=${CONSOLE_TOKEN}`);
     assert.equal(status.status, 200, `${label}: /api/status 带令牌应返回 200`);
@@ -318,7 +316,7 @@ async function runWorker({ label, dataDir: workerDataDir, resourceDir, useDefaul
     const nodeChildren = descendants.filter((item) => /^node(\.exe)?$/i.test(item.Name ?? ''));
     assert.deepEqual(nodeChildren, [], `${label}: worker 拉起了 node.exe 子进程：${JSON.stringify(nodeChildren)}`);
     step(
-      `✅ ${label}：401/200 鉴权、agent-token/bridge.lock 落盘、` +
+      `✅ ${label}：401/404 根路径与 200/401 API 鉴权、agent-token/bridge.lock 落盘、` +
         `资源目录生效、后代进程 ${descendants.length} 个（${descendants.map((item) => item.Name).join(', ') || '无'}）且无 node.exe`
     );
   } catch (error) {
@@ -480,8 +478,11 @@ try {
     const generated = fs.readFileSync(tokenFile, 'utf8').trim();
     assert.ok(generated.length >= 32, '生成的 console-token 长度异常');
     const authorized = await fetch(`http://127.0.0.1:${argPort}/?token=${generated}`, { redirect: 'manual' });
-    assert.equal(authorized.status, 200, '生成的 console-token 应能通过鉴权');
-    step('✅ --data-dir：覆盖默认数据目录，首次启动生成 console-token 并可用于鉴权');
+    assert.equal(authorized.status, 404, '生成的 console-token 应通过鉴权，但 Core 不提供网页控制台');
+    assert.match((await authorized.json()).error ?? '', /网页控制台已移除/);
+    const status = await fetch(`http://127.0.0.1:${argPort}/api/status?token=${generated}`);
+    assert.equal(status.status, 200, '生成的 console-token 应能访问控制 API');
+    step('✅ --data-dir：覆盖默认数据目录，生成 console-token 并用于控制 API 鉴权');
   } catch (error) {
     await killQuietly(argWorker);
     error.message = `${error.message}\n--- worker stderr ---\n${argStderr}`;
