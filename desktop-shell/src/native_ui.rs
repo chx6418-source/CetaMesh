@@ -20,7 +20,6 @@ pub trait CoreApi: Send + Sync + 'static {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum Area {
-    Chat,
     Overview,
     Roles,
     Policy,
@@ -40,7 +39,6 @@ enum Area {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Tab {
-    Chat,
     Overview,
     Roles,
     Policy,
@@ -55,11 +53,8 @@ enum Tab {
     Diagnostics,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug)]
 enum Operation {
-    ChatStatus,
-    ChatStart,
-    ChatCancel,
     OverviewPing,
     RolesRefresh,
     RoleSet,
@@ -292,7 +287,6 @@ impl PresetSelection {
 
 enum ApiCall {
     Ping,
-    Chat { method: &'static str, params: Value },
     Control { method: &'static str, params: Value },
 }
 
@@ -439,9 +433,6 @@ pub struct NativeUi {
     worker_available: bool,
     worker_error: Option<String>,
     active_tab: Tab,
-    chat_input: String,
-    chat_snapshot: Value,
-    chat_refresh_at: Instant,
     pending: HashSet<Area>,
     feedback: HashMap<Area, Result<Value, String>>,
     next_id: u64,
@@ -675,7 +666,6 @@ impl NativeUi {
                 while let Ok(job) = job_rx.recv() {
                     let result = match job.call {
                         ApiCall::Ping => api.request("core.ping", json!({})),
-                        ApiCall::Chat { method, params } => api.request(method, params),
                         ApiCall::Control { method, params } => api.request(
                             "control.execute",
                             json!({ "method": method, "params": params }),
@@ -705,9 +695,6 @@ impl NativeUi {
                 .err()
                 .map(|error| format!("无法启动 Core 工作线程：{error}")),
             active_tab: Tab::Overview,
-            chat_input: String::new(),
-            chat_snapshot: json!({"status":"idle","history":[]}),
-            chat_refresh_at: Instant::now(),
             pending: HashSet::new(),
             feedback: HashMap::new(),
             next_id: 1,
@@ -777,7 +764,6 @@ impl NativeUi {
         // Start with read-only snapshots. The only initial write-like form request is also
         // read-only: slang.getConfig must be implemented as a pure query by the Core adapter.
         app.issue(Area::Overview, Operation::OverviewPing, ApiCall::Ping);
-        app.issue_chat(Operation::ChatStatus, "chat.status", json!({}));
         app.issue_control(Area::Roles, Operation::RolesRefresh, "role.list", json!({}));
         app.issue_control(
             Area::Security,
@@ -862,29 +848,6 @@ impl NativeUi {
         self.issue(area, operation, ApiCall::Control { method, params });
     }
 
-    fn issue_chat(&mut self, operation: Operation, method: &'static str, params: Value) {
-        self.chat_refresh_at = Instant::now();
-        self.issue(Area::Chat, operation, ApiCall::Chat { method, params });
-    }
-
-    fn maybe_refresh_chat(&mut self) {
-        if self.active_tab != Tab::Chat || self.pending.contains(&Area::Chat) {
-            return;
-        }
-        let active = matches!(
-            self.chat_snapshot.get("status").and_then(Value::as_str),
-            Some("preparing" | "running" | "cancelling")
-        );
-        let interval = if active {
-            Duration::from_millis(500)
-        } else {
-            Duration::from_secs(3)
-        };
-        if self.chat_refresh_at.elapsed() >= interval {
-            self.issue_chat(Operation::ChatStatus, "chat.status", json!({}));
-        }
-    }
-
     fn maybe_refresh_pending(&mut self) {
         if self.active_tab != Tab::Pending
             || self.pending.contains(&Area::Pending)
@@ -948,15 +911,6 @@ impl NativeUi {
             self.feedback.insert(event.area, event.result.clone());
 
             match (event.operation, event.result.as_ref()) {
-                (
-                    Operation::ChatStatus | Operation::ChatStart | Operation::ChatCancel,
-                    Ok(value),
-                ) => {
-                    if event.operation == Operation::ChatStart {
-                        self.chat_input.clear();
-                    }
-                    self.chat_snapshot = value.clone();
-                }
                 (Operation::OverviewPing, Ok(value)) => {
                     self.core_online = Some(true);
                     self.core_summary = core_summary(value);
@@ -1399,7 +1353,6 @@ impl NativeUi {
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            self.tab_button(ui, Tab::Chat, "对话");
                             self.tab_button(ui, Tab::Overview, "概览");
                             self.tab_button(ui, Tab::Roles, "角色");
                             self.tab_button(ui, Tab::Policy, "运行策略");
@@ -1429,110 +1382,6 @@ impl NativeUi {
         );
         if response.clicked() {
             self.active_tab = tab;
-        }
-    }
-
-    fn show_chat(&mut self, ui: &mut egui::Ui) {
-        let palette = native_palette();
-        ui.heading("桌面 Agent 对话");
-        ui.weak("使用当前 DSH 模型设置。对话保存在桌面数据目录；QQ 会话独立。");
-        let status = self
-            .chat_snapshot
-            .get("status")
-            .and_then(Value::as_str)
-            .unwrap_or("idle");
-        ui.label(format!("状态：{status}"));
-        if let Some(error) = self.chat_snapshot.get("error").and_then(Value::as_str) {
-            if !error.is_empty() {
-                ui.colored_label(palette.error, error);
-            }
-        }
-        if let Some(Err(error)) = self.feedback.get(&Area::Chat) {
-            ui.colored_label(palette.error, error);
-        }
-        egui::ScrollArea::vertical()
-            .id_salt("desktop_chat_history")
-            .max_height(430.0)
-            .show(ui, |ui| {
-                if let Some(history) = self.chat_snapshot.get("history").and_then(Value::as_array) {
-                    for item in history {
-                        let role = if item.get("role").and_then(Value::as_str) == Some("user") {
-                            "我"
-                        } else {
-                            "Agent"
-                        };
-                        if let Some(text) = item.get("text").and_then(Value::as_str) {
-                            ui.group(|ui| {
-                                ui.strong(role);
-                                ui.label(text);
-                            });
-                        }
-                    }
-                }
-                if matches!(status, "preparing" | "running" | "cancelling") {
-                    let draft = self
-                        .chat_snapshot
-                        .get("reply")
-                        .and_then(Value::as_str)
-                        .filter(|v| !v.is_empty())
-                        .or_else(|| self.chat_snapshot.get("draft").and_then(Value::as_str))
-                        .unwrap_or("");
-                    if !draft.is_empty() {
-                        ui.group(|ui| {
-                            ui.strong("Agent · 生成中");
-                            ui.label(draft);
-                        });
-                    }
-                }
-            });
-        ui.separator();
-        ui.add(
-            egui::TextEdit::multiline(&mut self.chat_input)
-                .hint_text("输入要发给桌面 Agent 的内容")
-                .desired_rows(4)
-                .desired_width(f32::INFINITY),
-        );
-        let busy = matches!(
-            status,
-            "preparing" | "running" | "cancelling" | "interrupted"
-        );
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(
-                    !busy
-                        && !self.pending.contains(&Area::Chat)
-                        && !self.chat_input.trim().is_empty(),
-                    egui::Button::new("发送"),
-                )
-                .clicked()
-            {
-                self.issue_chat(
-                    Operation::ChatStart,
-                    "chat.start",
-                    json!({ "text": self.chat_input.trim() }),
-                );
-            }
-            if ui
-                .add_enabled(
-                    busy && !self.pending.contains(&Area::Chat),
-                    egui::Button::new("取消当前回合"),
-                )
-                .clicked()
-            {
-                self.issue_chat(Operation::ChatCancel, "chat.cancel", json!({}));
-            }
-            if ui
-                .add_enabled(
-                    !self.pending.contains(&Area::Chat),
-                    egui::Button::new("刷新"),
-                )
-                .clicked()
-            {
-                self.issue_chat(Operation::ChatStatus, "chat.status", json!({}));
-            }
-        });
-        if self.pending.contains(&Area::Chat) {
-            ui.spinner();
         }
     }
 
@@ -2763,7 +2612,6 @@ impl eframe::App for NativeUi {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.receive_events();
         self.maybe_refresh_pending();
-        self.maybe_refresh_chat();
         let palette = native_palette();
         egui::Frame::new()
             .fill(palette.background)
@@ -2780,7 +2628,6 @@ impl eframe::App for NativeUi {
                             .corner_radius(egui::CornerRadius::same(10))
                             .inner_margin(egui::Margin::symmetric(18, 16))
                             .show(ui, |ui| match self.active_tab {
-                                Tab::Chat => self.show_chat(ui),
                                 Tab::Overview => self.show_overview(ui),
                                 Tab::Roles => self.show_roles(ui),
                                 Tab::Policy => self.show_policy(ui),

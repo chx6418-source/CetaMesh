@@ -35,7 +35,7 @@ QQ 消息 ──► SnowLuma（OneBot v11 WS）──► 本桥接进程 ──�
 - **会话模型**：每个 QQ 会话（私聊/群）对应一个独立的 DSH 会话，统一归组到「QQ 聊天」工作区（不再散落未分组）；映射持久化在 `state/sessions.json`。会话创建后桥接会立即 `selectModel` 绑定 `dsh.model`（默认 DeepSeek-V41-Flash），因此新建会话无需手动切模型（该调用同时会把模型写进 DSH 的 `agent-default-model` 设置）
 - **性格定制**：QQ 会话默认使用 `whale-chat` agent preset（`~/.dsh/.agent-presets/whale-chat/agent.cordis.yml`），`reserved2` 使用 `whale-chat-v2`（`~/.dsh/.agent-presets/whale-chat-v2/agent.cordis.yml`）；人格与默认 DSH 一致（coding agent），仅附加 QQ 场景规则；**角色扮演**是可选机制——由控制台或管理端设置 `state/current-role.json` 注入（群友无法更改）
 - **命令行实时状态面板**：在交互式命令提示符里运行时，日志下方常驻一块状态区（1 秒刷新）：模式、DSH 连接状态、每个会话的实时状态（回合中 / 待回答 / 沉睡至几点 / 长潜 / 未读数 / 最后来讯时间等）；日志从面板上方滚动，互不干扰。输出被重定向到文件时面板自动关闭（设 `NO_STATUS_PANEL=1` 也可强制关闭）
-- **本机管理界面（迁移中）**：桌面版使用 Rust/egui 原生窗口与命名管道，不依赖 WhaleBridge 网页；当前覆盖原生桌面 Agent 对话（单会话发送、流式显示、取消与重启恢复）、概览/重启、角色、安全通知、全局模式与 Owner/allow-deny、本地 SnowLuma/DSH 服务发现/选择/安装/启停、模型目录与默认模型、Preset 列表/绑定、审批/提问与风险卡片审批、黑话配置、会话状态、活动/日志只读查看和白名单诊断。发送参数、实时事件订阅、记忆、贴纸、文件/音频/Kugou 及其它旧控制台功能仍待迁移，不能通过新桌面版 HTTP console token 代替。
+- **本机管理界面（迁移中）**：桌面版使用 Rust/egui 原生窗口与命名管道，不依赖 WhaleBridge 网页；当前覆盖概览/重启、角色、安全通知、全局模式与 Owner/allow-deny、本地 SnowLuma/DSH 服务发现/选择/安装/启停、模型目录与默认模型、Preset 列表/绑定、审批/提问与风险卡片审批、黑话配置、会话状态、活动/日志只读查看和白名单诊断。发送参数、实时事件订阅、记忆、贴纸、文件/音频/Kugou 及其它旧控制台功能仍待迁移，不能通过新桌面版 HTTP console token 代替。
 - **运行模式**：
   - `chat`：白名单群 + 白名单私聊 → whale-chat 安全聊天
   - `closed-agent`：仅私聊 owner（config.json 的 ownerQQ，可在控制台设置）→ router-standard 完整工具，可在 QQ 上操控 DSH

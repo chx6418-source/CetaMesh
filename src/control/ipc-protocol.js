@@ -145,15 +145,6 @@ export function startIpcProtocol({
       writeFrame({ version: IPC_PROTOCOL_VERSION, id, ok: true, result: { status: 'pong' } });
       return;
     }
-    if (['chat.status', 'chat.start', 'chat.cancel'].includes(request.method)) {
-      try {
-        const result = await runDispatch({ method: request.method, params });
-        if (!disconnected) writeFrame({ version: IPC_PROTOCOL_VERSION, id, ok: true, result: result === undefined ? null : result });
-      } catch (error) {
-        if (!disconnected) writeError(id, typeof error?.code === 'string' ? error.code : 'INTERNAL_ERROR', typeof error?.message === 'string' ? error.message : DEFAULT_ERROR_MESSAGE);
-      }
-      return;
-    }
     if (request.method !== 'control.execute') {
       writeError(id, 'METHOD_NOT_FOUND', `Unknown IPC method: ${request.method}`);
       return;

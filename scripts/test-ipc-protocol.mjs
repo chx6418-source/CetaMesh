@@ -86,17 +86,6 @@ function request(id, method, params) {
 }
 
 {
-  const harness = makeHarness({ dispatch: async (command) => {
-    assert.deepEqual(command, { method: 'chat.start', params: { text: 'hello' } });
-    return { status: 'preparing' };
-  } });
-  const messages = await harness.finish([
-    encodeFrame(request('chat-1', 'chat.start', { text: 'hello' }))
-  ]);
-  assert.deepEqual(messages[1], { version: 1, id: 'chat-1', ok: true, result: { status: 'preparing' } });
-}
-
-{
   const harness = makeHarness({ dispatch: async () => {
     throw Object.assign(new Error('Permission denied'), { code: 'FORBIDDEN' });
   } });
