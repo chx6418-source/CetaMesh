@@ -355,5 +355,259 @@ const turnEnd = (id, kind, error) => ({ type: 'turn/end', data: { reason: { kind
   service.close();
 }
 
+// ── 会话 1 扩展：Model Runtime 双通道（Standalone Chat / Smart Router / Agent）──
+import { createOpenAiCompatibleModelProvider, createModelProviderRegistry, createModelRuntimeService } from '../src/model/index.js';
+import { createProviderSecrets } from '../src/providers/secrets.js';
+import { createRouterService } from '../src/router/index.js';
+
+const API_KEY = 'sk-standalone-test-key-1234567890';
+const MODEL_SSE = [
+  'data: {"model":"deepseek-chat","choices":[{"index":0,"delta":{"role":"assistant","content":"你好"}}]}',
+  '',
+  'data: {"model":"deepseek-chat","choices":[{"index":0,"delta":{"content":"，独立世界"}}]}',
+  '',
+  'data: {"model":"deepseek-chat","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
+  '',
+  'data: {"model":"deepseek-chat","choices":[],"usage":{"prompt_tokens":7,"completion_tokens":4,"total_tokens":11}}',
+  '',
+  'data: [DONE]',
+  ''
+].join('\n');
+
+/** DSH 完全不可达的 api fixture：任何 DSH 端点调用都失败（Standalone Chat 的前提）。 */
+function dshDownApi() {
+  return {
+    calls: [],
+    async callEndpoint(endpoint) {
+      this.calls.push({ endpoint });
+      throw new Error(`${endpoint}: 传输失败（ECONNREFUSED）`);
+    },
+    async *openRemoteStream() { await new Promise(() => {}); }
+  };
+}
+
+function sseFetch(text = MODEL_SSE) {
+  const requests = [];
+  return {
+    requests,
+    async fetch(url, init = {}) {
+      requests.push({ url, body: init.body ? JSON.parse(init.body) : null });
+      if (String(url).endsWith('/models')) {
+        return new Response(JSON.stringify({ data: [{ id: 'deepseek-chat' }, { id: 'deepseek-reasoner' }] }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      return new Response(text, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    }
+  };
+}
+
+function abortableSseFetch() {
+  let controller = null;
+  const stream = new ReadableStream({
+    start(c) {
+      controller = c;
+      c.enqueue(new TextEncoder().encode(`data: {"choices":[{"delta":{"content":"长回答前半段"}}]}\n\n`));
+    }
+  });
+  return {
+    async fetch(url, init = {}) {
+      init.signal?.addEventListener('abort', () => {
+        try { controller.error(new Error('aborted')); } catch { /* 已结束 */ }
+      });
+      return new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    }
+  };
+}
+
+/** 组装带 Model Runtime / Router / Agent 的完整 chat-service（全 fixture，不联网不碰 DSH）。 */
+function makeFullService({ withKey = true, fetchImpl, router = true, api = dshDownApi(), agent = false, stateDir: overrideDir } = {}) {
+  const dir = overrideDir ?? path.join(stateDir, 's1-' + (++caseSeq));
+  fs.mkdirSync(dir, { recursive: true });
+  const secrets = createProviderSecrets({ root: dir });
+  if (withKey) secrets.set({ provider: 'deepseek-official', apiKey: API_KEY });
+  const modelRuntime = createModelRuntimeService({
+    registry: createModelProviderRegistry({
+      providers: [
+        createOpenAiCompatibleModelProvider({
+          id: 'deepseek-official', label: 'DeepSeek 官方', baseUrl: 'https://api.deepseek.test',
+          defaultModel: 'deepseek-chat', secrets, fetchImpl: fetchImpl?.fetch ?? fetch,
+          supportsStreamOptions: true, log: () => {}
+        }),
+        createOpenAiCompatibleModelProvider({
+          id: 'openai', label: 'OpenAI', baseUrl: 'https://api.openai.test/v1',
+          defaultModel: 'gpt-4o-mini', secrets, fetchImpl: fetchImpl?.fetch ?? fetch,
+          reasoningParam: 'reasoning_effort', log: () => {}
+        })
+      ]
+    }),
+    secrets
+  });
+  const routerService = router ? createRouterService({ stateDir: dir, log: () => {} }) : null;
+  const agentCalls = [];
+  const agentExecute = agent
+    ? async ({ method, params }) => {
+      agentCalls.push({ method, params });
+      if (method === 'agent.createSession') return { sessionId: `agent-${agentCalls.length}` };
+      return { ok: true };
+    }
+    : null;
+  const service = createChatService({
+    api,
+    controlExecute: fixtureControl('throw'), // DSH 模型目录不可用：Model Runtime 目录不受影响
+    agentProviders: agent ? [{ id: 'dsh', label: 'DSH Agent', eventProtocol: 'dsh-session-events' }] : [],
+    agentExecute,
+    modelRuntime,
+    router: routerService,
+    defaults: { provider: 'deepseek-official', model: 'deepseek-flash', reasoningEffort: 'max' },
+    stateDir: dir
+  });
+  return { service, api, fetchImpl, agentCalls, dir };
+}
+
+// ── 12. Standalone Chat：DSH 完全不可达，仅凭 Model Provider Key 完成整回合 ────
+{
+  const f = sseFetch();
+  const { service, api } = makeFullService({ fetchImpl: f });
+  const session = await service.execute({ method: 'chat.sessions.create', params: { title: '独立聊天' } });
+  await service.execute({ method: 'chat.send', params: { id: session.id, text: '你好，不启动 DSH 试试' } });
+  const status = await service.execute({ method: 'chat.status', params: { id: session.id } });
+  assert.equal(status.turn, null);
+  assert.equal(status.lastState, 'idle');
+  const history = await service.execute({ method: 'chat.history', params: { id: session.id } });
+  assert.equal(history.messages.length, 2);
+  assert.equal(history.messages[1].text, '你好，独立世界');
+  assert.deepEqual(history.messages[1].usage, { prompt_tokens: 7, completion_tokens: 4, total_tokens: 11 }, '真实 usage 透传');
+  assert.equal(api.calls.length, 0, 'DSH 零调用（未启动 DSH 也能完成 Chat）');
+  assert.ok(!JSON.stringify(history).includes(API_KEY), 'API Key 不进入 Chat 历史');
+  assert.equal(f.requests[0].body.model, 'deepseek-chat', 'DSH 缺省模型不外发，用 Provider 默认模型');
+  assert.equal(f.requests[0].body.messages.at(-1).content, '你好，不启动 DSH 试试');
+  ok('Standalone Chat：无 DSH → 配 Key → 发送 → 流式 → usage → 历史（DSH 零调用，Key 不落历史）');
+  service.close();
+}
+
+// ── 13. Model 通道：停止（abort → cancelled partial）→ retry ─────────────────
+{
+  const f = abortableSseFetch();
+  const { service } = makeFullService({ fetchImpl: f });
+  const session = await service.execute({ method: 'chat.sessions.create', params: {} });
+  const pending = service.execute({ method: 'chat.send', params: { id: session.id, text: '写一篇长文' } });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const streaming = await service.execute({ method: 'chat.status', params: { id: session.id } });
+  assert.equal(streaming.turn.state, 'streaming');
+  assert.equal(streaming.turn.displayText, '长回答前半段');
+  const stopped = await service.execute({ method: 'chat.stop', params: { id: session.id } });
+  assert.equal(stopped.stopped, true);
+  await pending;
+  const history = await service.execute({ method: 'chat.history', params: { id: session.id } });
+  assert.equal(history.messages[1].cancelled, true, '取消的 partial 保留并标记');
+  assert.equal(history.messages[1].text, '长回答前半段');
+  assert.equal(history.messages.length, 2);
+  ok('Model 通道停止：abort → cancelled → partial 落盘');
+  service.close();
+}
+
+// ── 14. Agent=DSH 显式选择：整回合走 Agent Provider，不走 Model Runtime ────────
+{
+  const f = sseFetch();
+  const { service, agentCalls } = makeFullService({ fetchImpl: f, agent: true });
+  const session = await service.execute({ method: 'chat.sessions.create', params: {} });
+  await service.execute({ method: 'chat.config.set', params: { id: session.id, config: { agentProvider: 'dsh' } } });
+  await service.execute({ method: 'chat.send', params: { id: session.id, text: '走 DSH Agent' } });
+  // DSH Agent 事件经 _injectEvent 注入（与真实 follow 流等价）。
+  service._injectEvent(session.id, { type: 'turn/start', data: {} });
+  service._injectEvent(session.id, { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'DSH Agent 回答' }] } } });
+  service._injectEvent(session.id, { type: 'turn/end', data: { reason: { kind: 'completed' } } });
+  const history = await service.execute({ method: 'chat.history', params: { id: session.id } });
+  assert.equal(history.messages[1].text, 'DSH Agent 回答', 'Agent Provider 路径回答落盘');
+  assert.ok(agentCalls.some((c) => c.method === 'agent.createSession' && c.params.provider === 'dsh'));
+  assert.ok(agentCalls.some((c) => c.method === 'agent.send'));
+  assert.equal(f.requests.length, 0, '显式 Agent 时不请求 Model Provider');
+  await assert.rejects(
+    service.execute({ method: 'chat.config.set', params: { id: session.id, config: { agentProvider: 'nope' } } }),
+    (error) => error.code === 'INVALID_PARAMS'
+  );
+  ok('Agent=DSH：显式选择 → Agent 契约路径（Model Runtime 零请求）+ 未知 Agent 拒绝');
+  service.close();
+}
+
+// ── 15. Smart 路由：project 产生 agent-intent（只记录不执行）；你好 → simple ───
+{
+  const f = sseFetch();
+  const { service } = makeFullService({ fetchImpl: f });
+  const session = await service.execute({ method: 'chat.sessions.create', params: {} });
+  await service.execute({ method: 'chat.config.set', params: { id: session.id, config: { mode: 'smart' } } });
+  await service.execute({ method: 'chat.send', params: { id: session.id, text: '修改这个项目并跑测试' } });
+  let history = await service.execute({ method: 'chat.history', params: { id: session.id } });
+  const routing = history.messages[1].routing;
+  assert.equal(routing.class, 'project');
+  assert.equal(routing.route, 'agent');
+  assert.equal(routing.agentIntent, true);
+  assert.equal(routing.resolvedRoute, 'model', 'v1 无 Agent Broker：意图记录，回合仍由 Model 执行');
+  assert.equal(routing.fallbackReason, 'agent-broker-not-available');
+  assert.equal(routing.costPolicy, 'balanced');
+  assert.equal(history.messages[1].text, '你好，独立世界', '回合适配完成');
+  // 普通聊天 → simple → model，无 agent 意图
+  await service.execute({ method: 'chat.send', params: { id: session.id, text: '你好' } });
+  history = await service.execute({ method: 'chat.history', params: { id: session.id } });
+  const simple = history.messages[3].routing;
+  assert.equal(simple.class, 'simple');
+  assert.equal(simple.agentIntent, false);
+  assert.equal(simple.fallbackReason, null);
+  // Agent=Disabled：即使工程任务也不产生 agent 意图
+  await service.execute({ method: 'chat.config.set', params: { id: session.id, config: { agentProvider: 'none' } } });
+  await service.execute({ method: 'chat.send', params: { id: session.id, text: '重构整个仓库' } });
+  history = await service.execute({ method: 'chat.history', params: { id: session.id } });
+  const disabled = history.messages[5].routing;
+  assert.equal(disabled.class, 'project');
+  assert.equal(disabled.agentIntent, false);
+  assert.equal(disabled.route, 'model');
+  assert.equal(disabled.agentEnabled, false);
+  ok('Smart 路由：project→agent-intent 记录/你好→simple/Disabled 不产生意图');
+  service.close();
+}
+
+// ── 16. Model Provider 配置：显式指定 / Key 缺失明确报错 / 配好后恢复 ──────────
+{
+  const f = sseFetch();
+  const { service, fetchImpl } = makeFullService({ withKey: false, fetchImpl: f });
+  const session = await service.execute({ method: 'chat.sessions.create', params: {} });
+  // 自动解析：无任何 Key → 回落 DSH 通道 → DSH 不可达 → 明确传输错误（而非挂起）
+  await assert.rejects(
+    service.execute({ method: 'chat.send', params: { id: session.id, text: '没有 Key' } }),
+    (error) => error.code === 'PROVIDER_ERROR' && /ECONNREFUSED/.test(error.message)
+  );
+  // 显式指定 openai（未配 Key）→ KEY_MISSING 明确指向设置页
+  await service.execute({ method: 'chat.config.set', params: { id: session.id, config: { modelProvider: 'openai' } } });
+  await assert.rejects(
+    service.execute({ method: 'chat.send', params: { id: session.id, text: 'OpenAI 没有 Key' } }),
+    (error) => error.code === 'MODEL_PROVIDER_KEY_MISSING' && /设置 → 模型/.test(error.message)
+  );
+  assert.equal((await service.execute({ method: 'chat.status', params: { id: session.id } })).lastState, 'awaiting-reply', '失败回合保留可重试');
+  await assert.rejects(
+    service.execute({ method: 'chat.config.set', params: { id: session.id, config: { modelProvider: 'nope' } } }),
+    (error) => error.code === 'INVALID_PARAMS'
+  );
+  ok('Provider 配置：无 Key 自动回落 DSH / 显式指定缺 Key 明确报错 / 非法 Provider 拒绝');
+  service.close();
+}
+
+// ── 17. catalog：Model Runtime 目录与 DSH 目录并存，无 Key 材料 ────────────────
+{
+  const f = sseFetch();
+  const { service } = makeFullService({ fetchImpl: f });
+  const catalog = await service.execute({ method: 'chat.catalog', params: {} });
+  assert.match(catalog.error, /ECONNREFUSED/, 'DSH 目录不可用如实上报');
+  assert.deepEqual(catalog.models, []);
+  assert.equal(catalog.defaultModelProvider, 'deepseek-official');
+  const deepseek = catalog.modelProviders.find((p) => p.id === 'deepseek-official');
+  const openai = catalog.modelProviders.find((p) => p.id === 'openai');
+  assert.equal(deepseek.hasKey, true);
+  assert.deepEqual(deepseek.models.map((m) => m.id), ['deepseek-chat', 'deepseek-reasoner']);
+  assert.equal(openai.hasKey, false, '未配 Key 的 Provider 如实标记');
+  assert.deepEqual(openai.models, []);
+  assert.ok(!JSON.stringify(catalog).includes(API_KEY), 'catalog 不含 Key 材料');
+  ok('catalog：DSH 目录错误不阻塞 Model 目录 / hasKey 标记 / 无 Key 泄漏');
+  service.close();
+}
+
 fs.rmSync(temp, { recursive: true, force: true });
 console.log(`\n🎉 阶段 03 Chat 运行时全部通过（${step} 组）`);

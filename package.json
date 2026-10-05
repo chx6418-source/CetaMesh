@@ -34,6 +34,8 @@
     "test-mesh": "node scripts/test-mesh-runtime.mjs",
     "test-system": "node scripts/test-system-pages.mjs",
     "test-provider-secrets": "node scripts/test-provider-secrets.mjs",
+    "test-model-runtime": "node scripts/test-model-runtime.mjs",
+    "test-smart-router": "node scripts/test-smart-router.mjs",
     "test-model-selection": "node scripts/test-dsh-model-selection.mjs",
     "test-architecture": "node scripts/test-desktop-architecture.mjs",
     "test-workspace": "node scripts/test-workspace-runtime.mjs",

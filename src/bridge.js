@@ -76,6 +76,8 @@ import { CONTROL_METHODS, ControlServiceError, createControlService } from './co
 import { startIpcProtocol } from './control/ipc-protocol.js';
 import { createChatService } from './desktop/chat-service.js';
 import { createProviderSecrets } from './providers/secrets.js';
+import { createModelProviderRegistry, createModelRuntimeService, createOpenAiCompatibleModelProvider } from './model/index.js';
+import { createRouterService } from './router/index.js';
 import { createMemoryService } from './memory/service.js';
 import { createWorkspaceService } from './workspace/index.js';
 import { createTaskService } from './task/service.js';
@@ -453,7 +455,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const convKey = (kind, id) => `${kind}:${id}`;
 const SEND_TIMEOUT_MS = 15000;
 
-function startUiIpcServer(controlService, chatService, memoryService, taskService, continuityService, extensionService, meshService, channelService, systemServices, agentService, workspaceService, providerSecrets) {
+function startUiIpcServer(controlService, chatService, memoryService, taskService, continuityService, extensionService, meshService, channelService, systemServices, agentService, workspaceService, providerSecrets, modelRuntime, routerService) {
   const pipeName = String(process.env.WHALEBRIDGE_UI_PIPE ?? '').trim();
   if (!pipeName) return null;
 
@@ -472,6 +474,15 @@ function startUiIpcServer(controlService, chatService, memoryService, taskServic
     }
     if (method.startsWith('providers.')) {
       return providerSecrets.execute({ method, params });
+    }
+    // Model Runtime / Smart Router（会话 1）：模型目录与健康、Cost Policy 与分类调试。
+    // 注意：控制面的 model.defaults.* / model.catalog.* 仍归 controlService（DSH 模型管理）；
+    // Model Runtime 私有家族用 modelrt.* 避免前缀碰撞。
+    if (method.startsWith('modelrt.')) {
+      return modelRuntime.execute({ method, params });
+    }
+    if (method.startsWith('router.')) {
+      return routerService.execute({ method, params });
     }
     if (method.startsWith('ext.')) {
       return extensionService.execute({ method, params });
@@ -2002,16 +2013,66 @@ async function main() {
       },
       log
     });
-    // 产品级 Chat 运行时（阶段 03）：复用本 worker 的 DSH 客户端与控制面模型目录。
+    // Provider API Key 存储（本地凭据，掩码返回；Model Runtime 直连与连通性测试共用）。
+    const providerSecrets = createProviderSecrets({ root: DATA_ROOT });
+    // Agent Provider（阶段 06）：标准契约层 + DSH 首个实现；经 agent.* 私有方法族暴露。
+    // 与 continuity 的窄接口 provider 各自独立（后续由 continuity 委托到本层收敛）。
+    const agentService = createDefaultAgentService({
+      api,
+      defaults: { provider: cfg.dsh.provider, model: cfg.dsh.model, reasoningEffort: cfg.dsh.reasoningEffort },
+      log
+    });
+    process.once('exit', () => agentService.close());
+    // Model Runtime（会话 1）：普通聊天直连 Model Provider，不再要求 DSH 运行。
+    // DeepSeek / OpenAI / OpenAI 兼容共享 OpenAI-compatible 实现；Key 只在调用时经
+    // providerSecrets 解析，不缓存不入日志。注册顺序即自动解析优先级。
+    const modelRegistry = createModelProviderRegistry({
+      providers: [
+        createOpenAiCompatibleModelProvider({
+          id: 'deepseek-official',
+          label: 'DeepSeek 官方',
+          baseUrl: 'https://api.deepseek.com',
+          defaultModel: 'deepseek-chat',
+          secrets: providerSecrets,
+          supportsStreamOptions: true,
+          log
+        }),
+        createOpenAiCompatibleModelProvider({
+          id: 'openai',
+          label: 'OpenAI',
+          baseUrl: 'https://api.openai.com/v1',
+          defaultModel: 'gpt-4o-mini',
+          secrets: providerSecrets,
+          reasoningParam: 'reasoning_effort',
+          supportsStreamOptions: true,
+          log
+        }),
+        createOpenAiCompatibleModelProvider({
+          id: 'openai-compatible',
+          label: 'OpenAI 兼容',
+          baseUrl: '',
+          secrets: providerSecrets,
+          reasoningParam: 'reasoning_effort',
+          log
+        })
+      ]
+    });
+    const modelRuntime = createModelRuntimeService({ registry: modelRegistry, secrets: providerSecrets, log });
+    // Smart Router v1（会话 1）：确定性分类 + Cost Policy（默认 balanced，持久化）。
+    const routerService = createRouterService({ stateDir: STATE_DIR, log });
+    // 产品级 Chat 运行时（阶段 03；会话 1 双通道化）：普通回合走 Model Runtime，
+    // 显式选择 Agent Provider（如 DSH）时走 Agent 契约路径。
     const chatService = createChatService({
       api,
       controlExecute: (command) => controlService.execute({ ...command, actor: { privilege: PRIVILEGE_CONSOLE } }),
+      agentProviders: agentService.listProviders(),
+      agentExecute: (command) => agentService.execute(command),
+      modelRuntime,
+      router: routerService,
       defaults: { provider: cfg.dsh.provider, model: cfg.dsh.model, reasoningEffort: cfg.dsh.reasoningEffort },
       stateDir: STATE_DIR
     });
     process.once('exit', () => chatService.close());
-    // Provider API Key 存储（本地凭据，掩码返回；只用于显式测试/未来的直连 Provider）。
-    const providerSecrets = createProviderSecrets({ root: DATA_ROOT });
     // 统一 Memory Runtime（阶段 04）：与 Chat 同级的私有方法族 memory.*。
     // 主体由 memory/service.js 固定为桌面用户，IPC 调用方不能自带 principal。
     const memoryService = createMemoryService({
@@ -2025,14 +2086,6 @@ async function main() {
     });
     // Persistent Task v1（阶段 07）：Task 由 CetaMesh 持有，独立于任何 Agent Session。
     const taskService = createTaskService({ stateDir: STATE_DIR });
-    // Agent Provider（阶段 06）：标准契约层 + DSH 首个实现；经 agent.* 私有方法族暴露。
-    // 与 continuity 的窄接口 provider 各自独立（后续由 continuity 委托到本层收敛）。
-    const agentService = createDefaultAgentService({
-      api,
-      defaults: { provider: cfg.dsh.provider, model: cfg.dsh.model, reasoningEffort: cfg.dsh.reasoningEffort },
-      log
-    });
-    process.once('exit', () => agentService.close());
     // 工作区安全边界（阶段 05）：Workspace 清单与 workspace.read/write/file.search/
     // git.*/test.run 工具。所有路径访问经 src/workspace/boundary.js 裁决，
     // root 之外一律拒绝；git.commit 默认走审批策略。
@@ -2064,7 +2117,7 @@ async function main() {
       settings: settingsService,
       about: aboutService,
       update: updateService
-    }, agentService, workspaceService, providerSecrets);
+    }, agentService, workspaceService, providerSecrets, modelRuntime, routerService);
     const server = http.createServer(async (req, res) => {
       const url = new URL(req.url ?? '/', `http://127.0.0.1:${port}`);
       const SECURITY_HEADERS = {

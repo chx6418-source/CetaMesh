@@ -1,8 +1,13 @@
-// CetaMesh Desktop 产品级 Chat 运行时（阶段 03）。
+// CetaMesh Desktop 产品级 Chat 运行时（阶段 03；会话 1 改造为双通道）。
 //
-// 分层：IPC(chat.*) → 本模块（会话存储 + 回合状态机）→ dsh-client.js（唯一 DSH 通道）。
-// 不依赖 bridge.js 内部状态；模型目录经注入的 controlExecute 复用现有
-// model.catalog.list，不另造第二套 Provider Runtime。
+// 分层：IPC(chat.*) → 本模块（会话存储 + 回合状态机）→ 两条执行通道：
+//   1) Model Runtime（注入 modelRuntime，src/model/）：普通聊天的默认通道。
+//      DeepSeek / OpenAI / OpenAI 兼容直连，事件协议 model-stream-v1 与 DSH
+//      回合事件同形，回合状态机复用；不要求 DSH 运行（Standalone Chat）。
+//   2) DSH 通道（api + agentExecute）：Agent Provider 显式选择（agentProvider，
+//      如 'dsh'）或 Model Runtime 不可用（无任何 Key 配置）时的既有路径。
+// 不依赖 bridge.js 内部状态；DSH 模型目录经注入的 controlExecute 复用现有
+// model.catalog.list，Model Provider 目录由注入的 modelRuntime 提供。
 //
 // 回合协议（DSH 0.1.5 Typert 网关，与 QQ 桥接同源）：
 //   session/create → session/selectModel → session/prompt(mode:'queue')
@@ -11,6 +16,11 @@
 //   → session/cancel。
 // 流式展示 = 已定稿段落连接 + 当前段 chunk 增量；turn/end 以最终文本定稿。
 // usage：仅在事件携带结构化 usage 时透传，否则为 null（UI 显示"未知"），禁止伪造。
+//
+// Smart Router v1（注入 router，src/router/）：mode=smart 时对回合做确定性分类
+// （simple/tool/project）。project → agent-intent 只记录不执行（本阶段无 Agent
+// Broker），回合仍经 Model Runtime 执行并在 assistant 消息落盘 routing 供下阶段消费；
+// 用户显式选择 Agent Provider（agentProvider，如 'dsh'）时整回合走该 Agent。
 //
 // 会话独占假设：一个 Chat 会话同时只允许一个回合（TURN_BUSY）；
 // 与 DSH 网页端并发使用同一会话时事件可能混流，属已知限制。
@@ -24,6 +34,8 @@ const SCHEMA_VERSION = 1;
 const REASONING_EFFORTS = Object.freeze(['off', 'low', 'high', 'max']);
 const CHAT_MODES = Object.freeze(['chat', 'smart']);
 const PROVIDERS = Object.freeze(['dsh']);
+/** agentProvider 哨兵值：用户显式禁用 Agent（Smart 路由不得产生 agent 意图/执行）。 */
+const AGENT_PROVIDER_DISABLED = 'none';
 
 const MAX_TITLE_CHARS = 200;
 const MAX_PROMPT_CHARS = 32 * 1024;
@@ -32,6 +44,8 @@ const MAX_ATTACHMENT_CHARS = 256 * 1024;
 const MAX_MESSAGES_RETURNED = 200;
 const MAX_MESSAGE_CHARS_RETURNED = 32 * 1024;
 const FOLLOW_RECONNECT_MS = 2000;
+/** Model Runtime 每回合携带的历史消息上限（对话历史仍在本地完整保留）。 */
+const MODEL_HISTORY_MAX_MESSAGES = 40;
 
 function chatError(code, message) {
   return Object.assign(new Error(message), { code });
@@ -75,6 +89,8 @@ export function createChatService({
   controlExecute,
   agentExecute = null,
   agentProviders = [],
+  modelRuntime = null,
+  router = null,
   defaults,
   stateDir,
   now = () => Date.now(),
@@ -82,9 +98,10 @@ export function createChatService({
 }) {
   if (!api?.callEndpoint) throw new Error('chat-service 需要 DSH api 客户端');
   if (typeof controlExecute !== 'function') throw new Error('chat-service 需要 controlExecute（模型目录）');
-  // Agent Provider（阶段 06）：会话可选指定 agentProvider（如 'dsh'），其回合经标准
-  // AgentProvider 契约（agent.createSession / agent.send / agent.cancel）执行；
-  // 未指定时保持"普通模型"直连路径，行为与阶段 03 完全一致。
+  // Agent Provider（阶段 06）：会话显式指定 agentProvider（如 'dsh'）时，其回合经标准
+  // AgentProvider 契约（agent.createSession / agent.send / agent.cancel）执行。
+  // agentProvider='none' 表示用户显式禁用 Agent；null（未选择）表示 Agent=Auto——
+  // 回合走 Model Runtime / 既有 DSH 直连，Smart 路由的 agent 意图只记录不执行。
   // 只有事件协议与 Chat 回合状态机兼容（dsh-session-events）的 Provider 可被选择。
   const selectableAgentProviders = new Map(
     (Array.isArray(agentProviders) ? agentProviders : [])
@@ -98,11 +115,12 @@ export function createChatService({
     provider: 'dsh',
     model: String(defaults?.model ?? ''),
     reasoning: String(defaults?.reasoningEffort ?? 'max'),
-    mode: 'chat'
+    mode: 'chat',
+    modelProvider: null
   };
 
   const sessions = new Map(); // id -> record（含 config / dshSessionId / archived）
-  const runtime = new Map(); // id -> { turn?, follow?: { controller, active } }
+  const runtime = new Map(); // id -> { turn?, follow?, modelTurn? }
 
   function loadStore() {
     const store = readJsonFile(sessionsFile, null);
@@ -125,6 +143,10 @@ export function createChatService({
         model: typeof record.config?.model === 'string' ? record.config.model : baseConfig.model,
         reasoning: REASONING_EFFORTS.includes(record.config?.reasoning) ? record.config.reasoning : baseConfig.reasoning,
         mode: CHAT_MODES.includes(record.config?.mode) ? record.config.mode : baseConfig.mode,
+        modelProvider: typeof record.config?.modelProvider === 'string' && record.config.modelProvider
+          && (!modelRuntime || modelRuntime.isRegistered(record.config.modelProvider))
+          ? record.config.modelProvider
+          : null,
         agentProvider: typeof record.config?.agentProvider === 'string' && record.config.agentProvider
           ? record.config.agentProvider
           : null
@@ -250,10 +272,22 @@ export function createChatService({
     if (config?.model !== undefined && (typeof config.model !== 'string' || config.model.length > 200)) {
       throw chatError('INVALID_PARAMS', 'model 必须是不超过 200 字符的字符串');
     }
+    if (config?.modelProvider !== undefined) {
+      // Model Provider（Model Runtime）：null = 自动（按已配置 Key 的 Provider 解析）。
+      if (config.modelProvider === null || config.modelProvider === '') {
+        config.modelProvider = null;
+      } else if (!modelRuntime || !modelRuntime.isRegistered(String(config.modelProvider))) {
+        throw chatError('INVALID_PARAMS', `未知 Model Provider：${String(config.modelProvider)}`);
+      } else {
+        config.modelProvider = String(config.modelProvider);
+      }
+    }
     if (config?.agentProvider !== undefined) {
-      // 普通模型 = null / ''；Agent Provider = 已注册且事件协议兼容的 id。
+      // 普通/自动 = null；显式禁用 = 'none'；Agent Provider = 已注册且事件协议兼容的 id。
       if (config.agentProvider === null || config.agentProvider === '') {
         config.agentProvider = null;
+      } else if (config.agentProvider === AGENT_PROVIDER_DISABLED) {
+        config.agentProvider = AGENT_PROVIDER_DISABLED;
       } else {
         const entry = selectableAgentProviders.get(String(config.agentProvider));
         if (!entry) {
@@ -269,13 +303,21 @@ export function createChatService({
     if (config.model !== undefined) record.config.model = config.model;
     if (config.reasoning !== undefined) record.config.reasoning = config.reasoning;
     if (config.mode !== undefined) record.config.mode = config.mode;
+    if (config.modelProvider !== undefined) record.config.modelProvider = config.modelProvider;
     if (config.agentProvider !== undefined) record.config.agentProvider = config.agentProvider;
     touch(record);
-    // 模型/reasoning 变更即时生效：已有 DSH 会话立即重新绑定（切换模型验收项）。
+    // 模型/reasoning 变更即时生效：仍在 DSH 通道上的会话立即重新绑定（切换模型验收项）；
+    // 已走 Model Runtime 的会话没有 DSH 绑定可刷——丢弃遗留 DSH 会话，模型下次回合生效。
     if (record.dshSessionId && (config.model !== undefined || config.reasoning !== undefined)) {
-      return selectModel(record).then(() => publicSession(record), (error) => {
-        throw chatError('MODEL_BIND_FAILED', `模型切换失败：${error?.message ?? error}`);
-      });
+      const agentActive = record.config.agentProvider && record.config.agentProvider !== AGENT_PROVIDER_DISABLED;
+      const modelPathAvailable = Boolean(modelRuntime && modelRuntime.defaultProviderId());
+      if (agentActive || !modelPathAvailable) {
+        return selectModel(record).then(() => publicSession(record), (error) => {
+          throw chatError('MODEL_BIND_FAILED', `模型切换失败：${error?.message ?? error}`);
+        });
+      }
+      record.dshSessionId = null;
+      saveStore();
     }
     return publicSession(record);
   }
@@ -294,6 +336,29 @@ export function createChatService({
   }
 
   async function catalog() {
+    // Model Runtime 目录（独立于 DSH，DSH 不运行时依然可用）。
+    // 只返回 hasKey 布尔与模型列表，绝不携带 API Key 材料。
+    const modelProviders = [];
+    if (modelRuntime) {
+      for (const entry of modelRuntime.listProviders()) {
+        if (!entry.hasKey) {
+          modelProviders.push({ id: entry.id, label: entry.label, hasKey: false, models: [], error: null });
+          continue;
+        }
+        const listing = await modelRuntime.listModels(entry.id);
+        modelProviders.push({
+          id: entry.id,
+          label: entry.label,
+          hasKey: true,
+          models: listing.models,
+          error: listing.error
+        });
+      }
+    }
+    const modelProviderBase = {
+      modelProviders,
+      defaultModelProvider: modelRuntime ? modelRuntime.defaultProviderId() : null
+    };
     try {
       const value = await controlExecute({ method: 'model.catalog.list', params: {} });
       const entries = Array.isArray(value?.models) ? value.models : Array.isArray(value) ? value : [];
@@ -307,7 +372,8 @@ export function createChatService({
           label: String(entry?.label ?? entry?.model ?? entry?.id ?? ''),
           provider: String(entry?.provider ?? defaults?.provider ?? 'deepseek-official')
         })).filter((entry) => entry.id),
-        error: null
+        error: null,
+        ...modelProviderBase
       };
     } catch (error) {
       // 空 Provider / 目录不可用：返回明确 error，UI 下拉显示不可用而不是伪造列表。
@@ -317,7 +383,8 @@ export function createChatService({
         modes: [...CHAT_MODES],
         reasoning: [...REASONING_EFFORTS],
         models: [],
-        error: String(error?.message ?? error)
+        error: String(error?.message ?? error),
+        ...modelProviderBase
       };
     }
   }
@@ -402,6 +469,7 @@ export function createChatService({
         at: now(),
         turnId: turn.id,
         usage: turn.usage ?? null,
+        ...(turn.routing ? { routing: turn.routing } : {}),
         ...(turn.state === 'error' ? { error: turn.error ?? '回合异常' } : {}),
         ...(turn.state === 'cancelled' ? { cancelled: true } : {})
       });
@@ -449,6 +517,107 @@ export function createChatService({
     }
   }
 
+  // ── Model Runtime 通道（Standalone Chat）───────────────────────────────────
+  /**
+   * 从本地历史构建模型消息序列：只带正常终态的 user/assistant 文本，错误/取消的
+   * 半截回复不进入上下文；不含任何凭据材料。send/retry 前刚落盘（或待重发）的
+   * 尾部 user 消息就是当前 prompt，需去重，避免同一消息在载荷里出现两次。
+   */
+  function buildModelMessages(recordId, promptText) {
+    const history = readHistory(recordId).slice(-MODEL_HISTORY_MAX_MESSAGES);
+    const prior = history.length > 0 && history[history.length - 1]?.role === 'user'
+      ? history.slice(0, -1)
+      : history;
+    const messages = [];
+    for (const message of prior) {
+      if (message.role !== 'user' && message.role !== 'assistant') continue;
+      if (message.error || message.cancelled) continue;
+      const text = typeof message.text === 'string' ? message.text : '';
+      if (!text.trim()) continue;
+      messages.push({ role: message.role, content: text });
+    }
+    messages.push({ role: 'user', content: promptText });
+    return messages;
+  }
+
+  /**
+   * Model Runtime 回合：流事件与 DSH 回合事件同形，直接驱动同一状态机；
+   * abort 经 controller 传给 Provider（turn/end aborted → cancelled 落盘 partial）。
+   * 会话默认模型若仍是 DSH 缺省值（未在 Model 目录里显式选择过），交给 Provider
+   * 默认模型解析，避免把 DSH 内部模型 id 发给直连 API。
+   */
+  async function runModelTurn(record, state, promptText, routing) {
+    const resolved = modelRuntime.resolveProvider(record.config.modelProvider);
+    if (state.turn) state.turn.routing = routing ?? null;
+    const rawModel = typeof record.config.model === 'string' ? record.config.model.trim() : '';
+    const sessionDefaultModel = String(defaults?.model ?? '');
+    const model = rawModel && rawModel !== sessionDefaultModel ? rawModel : null;
+    const controller = new AbortController();
+    state.modelTurn = { controller, providerId: resolved.id };
+    try {
+      const events = modelRuntime.stream({
+        providerId: resolved.id,
+        model,
+        messages: buildModelMessages(record.id, promptText),
+        reasoning: record.config.reasoning,
+        signal: controller.signal
+      });
+      for await (const event of events) {
+        if (!state.turn) break;
+        handleChatEvent(record, state, event);
+      }
+    } catch (error) {
+      const turn = state.turn;
+      if (turn) {
+        const aborted = controller.signal.aborted || error?.code === 'ABORTED' || error?.name === 'AbortError';
+        turn.displayText = displayTextOf(state);
+        if (aborted) {
+          turn.state = 'cancelled';
+        } else {
+          turn.state = 'error';
+          turn.error = String(error?.message ?? error).slice(0, 1000);
+        }
+        finalizeTurn(record, state);
+      } else {
+        throw error;
+      }
+    } finally {
+      state.modelTurn = null;
+    }
+  }
+
+  /** Smart 路由 + 通道选择：Model Runtime 优先，无 Key 配置时回落既有 DSH 直连。 */
+  async function startModelOrDshTurn(record, state, promptText, { attachments, sourceText }) {
+    // Smart Router v1：mode=smart 且注入 router 时做确定性分类。route=agent 的意图
+    // 本阶段只记录（Agent Broker 属会话 2）：无显式 Agent Provider 时回合仍由 Model
+    // 执行，意图与原因落盘 routing 供下阶段消费；Agent=Disabled 时不产生 agent 意图。
+    let routing = null;
+    if (router && record.config.mode === 'smart') {
+      routing = router.classify({
+        text: sourceText ?? promptText,
+        attachments,
+        agentEnabled: record.config.agentProvider !== AGENT_PROVIDER_DISABLED
+      }).decision;
+    }
+    const modelPathAvailable = modelRuntime && (record.config.modelProvider || modelRuntime.defaultProviderId());
+    if (modelPathAvailable) {
+      const fallbackReason = routing?.agentIntent ? 'agent-broker-not-available' : null;
+      await runModelTurn(record, state, promptText, routing ? { ...routing, resolvedRoute: 'model', fallbackReason } : null);
+      return;
+    }
+    if (state.turn) state.turn.routing = routing ? { ...routing, resolvedRoute: routing.route } : null;
+    await ensureDshSession(record);
+    ensureFollow(record);
+    await api.callEndpoint('session/prompt', {
+      request: {
+        requestId: `cetamesh-chat-${Date.now().toString(36)}-${crypto.randomBytes(4).toString('hex')}`,
+        sessionId: record.dshSessionId,
+        mode: 'queue',
+        content: [{ type: 'text', text: promptText }]
+      }
+    });
+  }
+
   // ── 回合操作 ─────────────────────────────────────────────────────────────
   async function send({ id, text, attachments } = {}) {
     const record = sessionOrThrow(id);
@@ -464,7 +633,10 @@ export function createChatService({
     }
     const userMessage = { id: crypto.randomUUID(), role: 'user', text: content, at: now(), attachments: list.map((item) => String(item?.name ?? 'attachment')) };
     appendMessage(record.id, userMessage);
-    await startTurn(record, state, promptText);
+    await startTurn(record, state, promptText, {
+      attachments: userMessage.attachments,
+      sourceText: content
+    });
     return { userMessageId: userMessage.id };
   }
 
@@ -479,7 +651,7 @@ export function createChatService({
     let promptText = last.text;
     // retry 只重发内容，不重复落盘 user 消息（同一条用户消息的新一次尝试）。
     for (const name of attachments) promptText += `\n\n[附件 ${name}]（内容见上一条消息）`;
-    await startTurn(record, state, promptText);
+    await startTurn(record, state, promptText, { attachments, sourceText: last.text });
     return { userMessageId: last.id };
   }
 
@@ -487,18 +659,18 @@ export function createChatService({
     const record = sessionOrThrow(id);
     const state = runtimeOf(record.id);
     if (state.turn) throw chatError('TURN_BUSY', '当前会话有回合进行中');
-    await startTurn(record, state, '继续');
+    await startTurn(record, state, '继续', { attachments: [], sourceText: '继续' });
     return { continued: true };
   }
 
-  async function startTurn(record, state, promptText) {
+  async function startTurn(record, state, promptText, { attachments = [], sourceText } = {}) {
     state.messageTexts = [];
     state.chunkBuffer = '';
-    state.turn = { id: crypto.randomUUID(), state: 'streaming', displayText: '', error: null, usage: null };
+    state.turn = { id: crypto.randomUUID(), state: 'streaming', displayText: '', error: null, usage: null, routing: null };
     const agentProviderId = record.config.agentProvider ?? null;
     try {
-      if (agentProviderId && agentExecute) {
-        // Agent Provider 路径：会话生命周期与回合提交经标准契约；
+      if (agentProviderId && agentProviderId !== AGENT_PROVIDER_DISABLED && agentExecute) {
+        // Agent Provider 路径：用户显式选择 Agent 时，会话生命周期与回合提交经标准契约；
         // 事件流协议已由 setConfig 校验为 dsh-session-events，follow 状态机不变。
         if (!record.dshSessionId) {
           const created = await agentExecute({
@@ -519,19 +691,10 @@ export function createChatService({
           params: { provider: agentProviderId, sessionId: record.dshSessionId, content: promptText }
         });
       } else {
-        if (agentProviderId && !agentExecute) {
+        if (agentProviderId && agentProviderId !== AGENT_PROVIDER_DISABLED && !agentExecute) {
           throw chatError('PROVIDER_ERROR', `Agent Provider 运行时不可用（${agentProviderId}）`);
         }
-        await ensureDshSession(record);
-        ensureFollow(record);
-        await api.callEndpoint('session/prompt', {
-          request: {
-            requestId: `cetamesh-chat-${Date.now().toString(36)}-${crypto.randomBytes(4).toString('hex')}`,
-            sessionId: record.dshSessionId,
-            mode: 'queue',
-            content: [{ type: 'text', text: promptText }]
-          }
-        });
+        await startModelOrDshTurn(record, state, promptText, { attachments, sourceText });
       }
     } catch (error) {
       state.turn = null;
@@ -562,7 +725,8 @@ export function createChatService({
         state: turn.state,
         displayText: turn.displayText,
         error: turn.error,
-        usage: turn.usage
+        usage: turn.usage,
+        routing: turn.routing ?? null
       }
     };
   }
@@ -573,6 +737,13 @@ export function createChatService({
     const turn = state.turn;
     if (!turn || turn.state !== 'streaming') {
       return { stopped: false, reason: 'no-active-turn' };
+    }
+    if (state.modelTurn) {
+      // Model Runtime 通道：abort 下行到 Provider 流，循环在下一次迭代感知取消，
+      // 以 turn/end(aborted) → cancelled 收尾并落盘 partial（无需等待外部确认）。
+      turn.state = 'cancelling';
+      try { state.modelTurn.controller.abort(); } catch { /* 已退出 */ }
+      return { stopped: true, state: 'cancelling' };
     }
     turn.state = 'cancelling';
     try {
