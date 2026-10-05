@@ -17,7 +17,8 @@ export const WORKSPACE_CAPABILITIES = Object.freeze({
 /** Trusted in-process API. Public transports must use execute/executeWorkspace,
  * which bind the Owner identity; Agent/Extension grants never come from IPC. */
 export function createCapabilityService({ stateDir, workspaceService, memoryService,
-  taskRuntime, agentBroker, bindAgentSession, searchImpl = null, audit = () => {}, now } = {}) {
+  taskRuntime, agentBroker, bindAgentSession, searchImpl = null, audit = () => {}, now,
+  isolatedRunner = null } = {}) {
   const file = stateDir ? path.join(stateDir, 'capability', 'task-grants.json') : null;
   let grants = file && fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : {};
   const provisioning = new Map();
@@ -88,7 +89,14 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
             return;
           }
           if (id === 'test.run' && request.actor.kind !== 'owner') {
-            throw capabilityError('TEST_SANDBOX_UNAVAILABLE', 'Agent code execution requires an isolated test runner; Owner may run reviewed tests');
+            // v2 hardening：有 Isolated Runner 时 agent 可走受控执行（allowlist /
+            // 最小 env / 固定 cwd / 超时杀树）；runner 不可用时维持 fail-closed DENY。
+            if (!isolatedRunner) {
+              throw capabilityError('TEST_SANDBOX_UNAVAILABLE', 'Isolated test runner unavailable; Agent test execution stays denied');
+            }
+            if (typeof request.input?.tool !== 'string' || !Array.isArray(request.input?.args)) {
+              throw capabilityError('INVALID_PARAMS', 'test.run 需要 { tool, args }（allowlist 形态）');
+            }
           }
           if (id === 'filesystem.read' || id === 'filesystem.write') {
             const ws = resolveWorkspace(request.workspaceId);
@@ -121,6 +129,12 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
               const list = await workspaceService.execute({ method: 'workspace.list' });
               const existing = list.workspaces.find(ws => path.resolve(ws.root) === path.resolve(request.input.root));
               if (existing) return { workspace: existing, recovered: true };
+            }
+            if (id === 'test.run' && request.actor.kind !== 'owner') {
+              // Agent 的 test.run 走 Isolated Runner（命令 allowlist，绝不执行
+              // Owner 的 testCommand 字符串，也绝不接受调用方 shell）。
+              return isolatedRunner.run({ workspaceId: request.workspaceId,
+                tool: request.input.tool, args: request.input.args, timeoutMs: request.input.timeoutMs });
             }
             return workspaceService.execute({ method, params: { ...request.input,
               ...(id === 'git.diff' ? { excludeSensitive: request.actor.kind !== 'owner' } : {}),

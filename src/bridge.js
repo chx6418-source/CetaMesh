@@ -86,6 +86,7 @@ import { createModelProviderRegistry, createModelRuntimeService, createOpenAiCom
 import { createRouterService } from './router/index.js';
 import { createMemoryService } from './memory/service.js';
 import { createWorkspaceService } from './workspace/index.js';
+import { createIsolatedTestRunner } from './workspace/isolated-runner.js';
 import { createTaskService } from './task/service.js';
 import { createContinuityService, createWorkspaceReconciler } from './continuity/index.js';
 import { gitDiff, gitHead, gitStatus } from './workspace/tools.js';
@@ -2122,7 +2123,13 @@ async function main() {
     });
     const capabilityService = createCapabilityService({ stateDir: STATE_DIR, workspaceService, memoryService,
       taskRuntime: taskService.runtime, agentBroker, bindAgentSession: managedAgent.bindSession, searchImpl: searchWeb,
-      audit: event => log(`Capability ${event.capability} ${event.status}`) });
+      audit: event => log(`Capability ${event.capability} ${event.status}`),
+      // v2 hardening / Phase E：Managed Agent 的 test.run 从 DENY 升级为受控执行
+      //（命令 allowlist + 最小 env + 固定 workspace cwd + 超时杀树）。
+      isolatedRunner: createIsolatedTestRunner({
+        resolveWorkspace: async (workspaceId) => workspaceService.describeWorkspace(workspaceId),
+        log
+      }) });
     const platformRuntime = createDesktopPlatformRuntime({ capabilityService, workspaceService,
       taskRuntime: taskService.runtime, agentBroker, legacyModel: cfg.dsh.model });
     const workshopService = createWorkshopService({ stateDir: STATE_DIR, workspaceService,
