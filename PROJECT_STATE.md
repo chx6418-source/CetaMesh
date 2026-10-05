@@ -8,6 +8,15 @@
 - 边界：Key 目前用于本地保存与连通性测试；若 DSH 支持按 provider 注入 Key，再接入真实模型调用。目录选择器为阻塞式原生对话框。
 - 验证：`test-provider-secrets` 6/6、`test-control-service`、`test-core-entry`、`test-privilege` 24/24、`test-system` 108/108、`test-architecture` 8 组、chat-product 11 组、`cargo test` 86/86 全部 PASS。
 
+### 产物（commit `ca0eefa`）
+
+- `dist/app-1.0.0-rc.1-final`（buildId `1.0.0-rc.1+ca0eefa`，dirty=false）；
+  单文件安装包 `dist/CetaMesh-Setup-1.0.0-rc.1.exe`，41,938,944 字节，
+  SHA256 `3A165B5AE22B748BE002B5856B169D9CB0BB2F43FE5A58A91E02A13D10296B23`；
+  WhaleBridge.exe `C7B901A2473EA0EF1473ADF5FA3B29344966C7E3659382842767338EF2E40A0A`；
+  WhaleBridgeCore.exe `40C6037A3F4D564518ABA2D2629129FF9E0B5469F8182CB875E73B6CB8E80377`。
+- 本机安装已升级到 `ca0eefa` 并启动（用户数据保留）；RC 回归（凭据/Core/安装包/GUI/发布候选/Rust）全部 PASS。
+
 ## 模式重构 — 2026-10-05（social / workshop，已获用户批准）
 
 | 模式 | 最终形态 |
