@@ -17,7 +17,14 @@ function readJson(file) {
   return JSON.parse(text);
 }
 
-const config = readJson(path.join(ROOT, 'config.json'));
+// 优先用户 config.json；干净检出时使用随仓库的 config.example.json。
+const configFile = [path.join(ROOT, 'config.json'), path.join(ROOT, 'config.example.json')]
+  .find((file) => fs.existsSync(file));
+if (!configFile) {
+  console.error('❌ 缺少 config.json 与 config.example.json：NOT_RUN_ENVIRONMENT');
+  process.exit(2);
+}
+const config = readJson(configFile);
 let passed = 0;
 let failed = 0;
 

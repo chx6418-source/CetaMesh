@@ -111,9 +111,7 @@ try {
   }
   Write-Ico (Join-Path $OutputDir 'icon.ico') $frames
 
-  $uiIcon = Join-Path $repoRoot 'desktop-shell\ui\whalebridge-icon.png'
   $publicIcon = Join-Path $repoRoot 'public\whalebridge-icon.png'
-  Save-IconPng $sourceImage 256 $uiIcon
   Save-IconPng $sourceImage 256 $publicIcon
 } finally {
   $sourceImage.Dispose()
@@ -125,4 +123,4 @@ try {
 Write-Host "WhaleBridge icons generated: $OutputDir"
 Write-Host '  icon.ico: 16/20/24/32/40/48/64/128/256 px'
 Write-Host '  PNG: 32x32, 128x128, 256x256, 512x512'
-Write-Host '  UI: 256x256 brand image for desktop-shell/ui and public'
+Write-Host '  UI: 256x256 brand image for the public console pages'

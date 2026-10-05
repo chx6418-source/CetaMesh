@@ -71,14 +71,20 @@ for (const text of finishedCases) {
   assert(looksLikeUnfinished(text) === false, `已说完/普通判定 false: ${JSON.stringify(text)}`);
 }
 
-// 3. 配置允许长等待
-try {
-  const cfg = JSON.parse(fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8'));
-  const maxMs = Number(cfg.socialV2?.wait?.maxMs) || 0;
-  assert(maxMs >= END_ROUND_WAIT_MAX_MS, `wait.maxMs=${maxMs} >= 600000`);
-} catch (error) {
-  console.error('❌ 读取 config.json 失败:', error.message);
-  failed = 1;
+// 3. 配置允许长等待（优先用户 config.json；干净检出时以 config.example.json 为基准）
+const waitConfigFile = [path.join(ROOT, 'config.json'), path.join(ROOT, 'config.example.json')]
+  .find((file) => fs.existsSync(file));
+if (waitConfigFile) {
+  try {
+    const cfg = JSON.parse(fs.readFileSync(waitConfigFile, 'utf8'));
+    const maxMs = Number(cfg.socialV2?.wait?.maxMs) || 0;
+    assert(maxMs >= END_ROUND_WAIT_MAX_MS, `${path.basename(waitConfigFile)} wait.maxMs=${maxMs} >= 600000`);
+  } catch (error) {
+    console.error(`❌ 读取 ${path.basename(waitConfigFile)} 失败:`, error.message);
+    failed = 1;
+  }
+} else {
+  console.log('⚠️ 缺少 config.json 与 config.example.json：配置读取校验 NOT_RUN_ENVIRONMENT');
 }
 
 // 4. 催话短句

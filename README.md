@@ -1,16 +1,26 @@
-# 鲸桥 WhaleBridge — QQ ↔ DeepSeek Harness 桥接
+# CetaMesh Desktop — Windows 产品（含 WhaleBridge QQ 适配器）
+
+**产品**：CetaMesh Desktop v1 Release Candidate（`1.0.0-rc.1`）· **平台**：Windows 10/11 x64
+
+CetaMesh Desktop 是原生 Windows 应用：**Chat / Tasks / Memory / Workspace** 是产品主区；
+DSH 等作为 Agent Provider，QQ（SnowLuma / OneBot v11）作为可选的 Channel Adapter。
+安装包 `WhaleBridge-Setup-x64.exe` 自带 Core（Node SEA）与只读资源，安装后不依赖源码、
+`npm start`、开发终端或手动启动 Core。
+
+- 安装：`dist/app-1.0.0-rc.1/WhaleBridge-Setup-x64.exe`（默认 `%LOCALAPPDATA%\Programs\WhaleBridge`，无需管理员权限）
+- 数据：`%LOCALAPPDATA%\WhaleBridge`（`config.json` / `settings.json` / `state`）；卸载默认保留数据，只有 `--remove-data` 才删除，用户 Workspace 目录永不被卸载删除
+- 架构与红线：[docs/desktop/ARCHITECTURE.md](docs/desktop/ARCHITECTURE.md)
+- 构建与发布：[docs/desktop/BUILD_AND_RELEASE.md](docs/desktop/BUILD_AND_RELEASE.md)
+- 已知限制：[docs/desktop/KNOWN_LIMITATIONS.md](docs/desktop/KNOWN_LIMITATIONS.md)
+- 当前状态与验收证据：[PROJECT_STATE.md](PROJECT_STATE.md)
+
+> **状态**：Desktop v1 目前是 **Release Candidate**。自动化验收与真实 Windows 冒烟已通过；
+> 干净 VM 人工 UI 走查、真实 QQ 全模式与代码签名仍未完成，详见已知限制文档。
+
+以下内容保留为 **WhaleBridge QQ 适配器（Channel Adapter）** 的历史与运维文档；
+产品主区（Chat/Tasks/Memory/Workspace）以桌面应用与 `PROJECT_STATE.md` 为准。
 
 **English**: [README.en.md](README.en.md) | **中文**: [README.md](README.md)
-
-> 📘 详细内外核说明书见 **[docs/PROJECT_GUIDE.md](docs/PROJECT_GUIDE.md)**（架构、数据流、配置全解、调试与改进指南）。
-> 🖥️ 桌面版（独立应用、安装/迁移/卸载、构建发布、故障排查、决策记录）见 **[docs/DESKTOP_APP.md](docs/DESKTOP_APP.md)**；
-> ✅ 需要人工完成的验收项见 **[docs/DESKTOP_ACCEPTANCE.md](docs/DESKTOP_ACCEPTANCE.md)**。
-
-把 QQ 消息接入 DSH agent：QQ 好友/群发来的消息会变成 DSH 会话里的用户消息，agent 的回复（含提问、工具审批）会发回 QQ。
-
-> **桌面 UI 迁移状态（2026-09-23）**：默认发行构建已改为不打包 WhaleBridge 产品网页，桌面窗口/安装向导已切到 Rust 原生 UI，
-> 控制管理走本机 IPC；最新 no-web release candidate 已在仓库外隔离目录通过自动化安装/恢复验收。旧控制台的完整功能仍在迁移，现有 `dist/app` 是历史产物、不是新原生发行包；详见
-> [原生迁移状态](docs/DESKTOP_APP.md#13-去网页化迁移当前状态)。不要按下文旧控制台截图/流程推断当前原生界面已具备相同功能。
 
 ```
 QQ 消息 ──► SnowLuma（OneBot v11 WS）──► 本桥接进程 ──► DSH Web API (127.0.0.1:3080/api)

@@ -70,9 +70,14 @@ import {
   markStickerUsed
 } from './sticker-lib.js';
 import { loginInfo, extractKugouAuth, createQrLogin, pollQrLogin } from './kugou-api.js';
+import { createLocalServiceManager, SNOWLUMA_RELEASE_PAGE, DSH_INSTALL_HINT } from './local-services.js';
+import { CONTROL_METHODS, ControlServiceError, createControlService } from './control/control-service.js';
+import { startIpcProtocol } from './control/ipc-protocol.js';
+import { createChatService } from './desktop/chat-service.js';
 import { createMemoryService } from './memory/service.js';
 import { createWorkspaceService } from './workspace/index.js';
 import { createTaskService } from './task/service.js';
+import { createContinuityService, createDshAgentProvider } from './continuity/service.js';
 import { createDefaultAgentService } from './agent/index.js';
 import { createExtensionService } from './extension/service.js';
 import { createMeshService } from './mesh/service.js';
@@ -80,9 +85,6 @@ import { createChannelService } from './channel/service.js';
 import { createSettingsService } from './settings/service.js';
 import { createAboutService } from './about/service.js';
 import { createUpdateService } from './update/service.js';
-import { createLocalServiceManager, SNOWLUMA_RELEASE_PAGE, DSH_INSTALL_HINT } from './local-services.js';
-import { CONTROL_METHODS, ControlServiceError, createControlService } from './control/control-service.js';
-import { startIpcProtocol } from './control/ipc-protocol.js';
 let kugouQrSession = null; // 进行中的二维码登录会话 { key, mid, dfid, createdAt }
 let kugouLoginCache = null; // { cookie, info, fetchedAt } 缓存的完整登录信息（含 roleinfo 探测的会员状态）
 async function probeKugouLogin(cookie) {
@@ -449,23 +451,22 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const convKey = (kind, id) => `${kind}:${id}`;
 const SEND_TIMEOUT_MS = 15000;
 
-function startUiIpcServer(controlService, memoryService, taskService, extensionService, meshService, channelService, systemServices, agentService, workspaceService) {
+function startUiIpcServer(controlService, chatService, memoryService, taskService, continuityService, extensionService, meshService, channelService, systemServices, agentService, workspaceService) {
   const pipeName = String(process.env.WHALEBRIDGE_UI_PIPE ?? '').trim();
   if (!pipeName) return null;
 
   const dispatchCommand = ({ method, params }) => {
+    if (method.startsWith('chat.')) {
+      return chatService.execute({ method, params });
+    }
     if (method.startsWith('memory.')) {
       return memoryService.execute({ method, params });
     }
     if (method.startsWith('task.')) {
       return taskService.execute({ method, params });
     }
-    if (method.startsWith('agent.')) {
-      return agentService.execute({ method, params });
-    }
-    // 工作区安全边界（阶段 05）：workspace.* 全部经 boundary 裁决，见 src/workspace/。
-    if (method.startsWith('workspace.')) {
-      return workspaceService.execute({ method, params });
+    if (method.startsWith('continuity.')) {
+      return continuityService.execute({ method, params });
     }
     if (method.startsWith('ext.')) {
       return extensionService.execute({ method, params });
@@ -476,6 +477,15 @@ function startUiIpcServer(controlService, memoryService, taskService, extensionS
     if (method.startsWith('channel.')) {
       return channelService.execute({ method, params });
     }
+    if (method.startsWith('agent.')) {
+      return agentService.execute({ method, params });
+    }
+    // 工作区安全边界（阶段 05）：workspace.* 全部经 boundary 裁决，见 src/workspace/。
+    if (method.startsWith('workspace.')) {
+      return workspaceService.execute({ method, params });
+    }
+    // 系统页面（阶段 12）：settings / about / update 合成一个对象传递，
+    // 避免 startUiIpcServer 的位置参数继续膨胀（已到 9 个，属已知技术债）。
     if (method.startsWith('settings.')) {
       return systemServices.settings.execute({ method, params });
     }
@@ -1927,7 +1937,16 @@ async function main() {
       },
       log
     });
-    // 统一 Memory Runtime（阶段 04）与 Persistent Task v1（阶段 07）的 Core 侧接线。
+    // 产品级 Chat 运行时（阶段 03）：复用本 worker 的 DSH 客户端与控制面模型目录。
+    const chatService = createChatService({
+      api,
+      controlExecute: (command) => controlService.execute({ ...command, actor: { privilege: PRIVILEGE_CONSOLE } }),
+      defaults: { provider: cfg.dsh.provider, model: cfg.dsh.model, reasoningEffort: cfg.dsh.reasoningEffort },
+      stateDir: STATE_DIR
+    });
+    process.once('exit', () => chatService.close());
+    // 统一 Memory Runtime（阶段 04）：与 Chat 同级的私有方法族 memory.*。
+    // 主体由 memory/service.js 固定为桌面用户，IPC 调用方不能自带 principal。
     const memoryService = createMemoryService({
       stateDir: STATE_DIR,
       socialV2File: SOCIAL_V2_FILE,
@@ -1937,8 +1956,10 @@ async function main() {
         }
       }
     });
+    // Persistent Task v1（阶段 07）：Task 由 CetaMesh 持有，独立于任何 Agent Session。
     const taskService = createTaskService({ stateDir: STATE_DIR });
     // Agent Provider（阶段 06）：标准契约层 + DSH 首个实现；经 agent.* 私有方法族暴露。
+    // 与 continuity 的窄接口 provider 各自独立（后续由 continuity 委托到本层收敛）。
     const agentService = createDefaultAgentService({
       api,
       defaults: { provider: cfg.dsh.provider, model: cfg.dsh.model, reasoningEffort: cfg.dsh.reasoningEffort },
@@ -1952,9 +1973,16 @@ async function main() {
       stateDir: STATE_DIR,
       audit: (event) => log(`Workspace ${event.action}（${event.workspaceId ?? 'none'}）`)
     });
+    // Continuity Runtime（阶段 09）：Context Rollover / Agent Handoff。
+    // DSH 是当前唯一的 AgentProvider 实现；注册表为未来多 Provider 预留。
+    const continuityService = createContinuityService({
+      taskRuntime: taskService.runtime,
+      stateDir: STATE_DIR,
+      dshProvider: createDshAgentProvider({ api, defaults: { provider: cfg.dsh.provider, model: cfg.dsh.model, reasoningEffort: cfg.dsh.reasoningEffort } }),
+    });
     // 本地扩展体系（阶段 10）：扩展只在用户本地导入，能力与权限均需显式声明与批准。
     const extensionService = createExtensionService({ stateDir: STATE_DIR });
-    // Device Mesh（阶段 11）：Desktop 作为标准 CetaMesh Node；mesh 与 Channel Adapter 解耦。
+    // Device Mesh（阶段 11）：Desktop 作为标准 CetaMesh Node；mesh/carrier 与 QQ 通道解耦。
     const meshService = createMeshService({ stateDir: STATE_DIR });
     const channelService = createChannelService();
     // 系统页面（阶段 12）：产品设置（持久化）+ About（版本单一事实源）+ 安全更新检查。
@@ -1965,7 +1993,7 @@ async function main() {
       currentVersion: aboutService.about.info().version,
       settingsStore: settingsService.store
     });
-    startUiIpcServer(controlService, memoryService, taskService, extensionService, meshService, channelService, {
+    startUiIpcServer(controlService, chatService, memoryService, taskService, continuityService, extensionService, meshService, channelService, {
       settings: settingsService,
       about: aboutService,
       update: updateService

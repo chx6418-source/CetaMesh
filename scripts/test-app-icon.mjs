@@ -46,17 +46,12 @@ assert.deepEqual(dimensions, [16, 20, 24, 32, 40, 48, 64, 128, 256]);
 
 const selected = fs.readFileSync(path.join(root, 'output', 'imagegen', 'whalebridge-icons-20260921-c-simple', 'c4-simple-light.png'));
 assert.deepEqual(fs.readFileSync(path.join(icons, 'source-c4.png')), selected, '正式源图必须对应选定的 C4');
-assert.deepEqual(
-  fs.readFileSync(path.join(root, 'desktop-shell', 'ui', 'whalebridge-icon.png')),
-  fs.readFileSync(path.join(root, 'public', 'whalebridge-icon.png')),
-  '桌面内页与控制台应使用同一品牌图'
-);
+const publicIcon = fs.readFileSync(path.join(root, 'public', 'whalebridge-icon.png'));
+assert.ok(publicIcon.length > 0, '控制台品牌图必须存在');
 
 const build = fs.readFileSync(path.join(root, 'desktop-shell', 'build.rs'), 'utf8');
 assert.match(build, /icons.*icon\.ico/s);
 assert.doesNotMatch(build, /prototype_icon|prototype\.ico/);
-const tauri = JSON.parse(fs.readFileSync(path.join(root, 'desktop-shell', 'tauri.conf.json'), 'utf8'));
-assert.ok(tauri.bundle.icon.includes('icons/icon.ico'));
 const installerPackager = fs.readFileSync(path.join(root, 'scripts', 'package-installer.mjs'), 'utf8');
 assert.match(installerPackager, /set-exe-icon\.ps1/);
 assert.match(installerPackager, /desktop-shell.*icons.*icon\.ico/s);
@@ -65,12 +60,10 @@ assert.match(installerIconWriter, /RT_GROUP_ICON/);
 assert.match(installerIconWriter, /UpdateResourceW/);
 
 for (const relative of [
-  'desktop-shell/ui/installer.html',
-  'desktop-shell/ui/status.html',
   'public/console.html',
   'public/token-login.html'
 ]) {
   assert.match(fs.readFileSync(path.join(root, relative), 'utf8'), /whalebridge-icon\.png/, `${relative} 未接入品牌图`);
 }
 
-process.stdout.write('✅ C4 已接入多尺寸 ICO、桌面壳、单文件安装器、安装向导、状态页、控制台与令牌登录页。\n');
+process.stdout.write('✅ C4 已接入多尺寸 ICO、桌面壳、单文件安装器、控制台与令牌登录页。\n');

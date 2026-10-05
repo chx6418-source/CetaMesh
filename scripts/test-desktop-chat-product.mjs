@@ -6,6 +6,7 @@ import path from 'node:path';
 import { createChatService } from '../src/desktop/chat-service.js';
 
 const root = path.resolve(import.meta.dirname, '..');
+fs.mkdirSync(path.join(root, 'output'), { recursive: true });
 const temp = fs.mkdtempSync(path.join(root, 'output', 'chat-product-test-'));
 const stateDir = path.join(temp, 'state');
 fs.mkdirSync(stateDir, { recursive: true });

@@ -1,5 +1,23 @@
 # WhaleBridge desktop shell
 
+## Current state (2026-10-05, CetaMesh Desktop v1 RC)
+
+This is the **native eframe/egui** desktop shell for CetaMesh Desktop. It supervises the Node SEA
+Core, talks to it over a per-instance named pipe, owns the Windows tray icon, window preferences
+(`state/desktop-ui.json`) and the installer/uninstaller CLI. Tauri/WebView and its `ui/*.html`
+pages were removed in stage 15; `Cargo.toml` pins a single binary at `src/native_main.rs`.
+
+```powershell
+npm run desktop:check         # cargo check
+npm run desktop:test          # cargo test
+npm run desktop:build:debug   # debug shell (tests / local run)
+npm run desktop:build         # release shell
+```
+
+Installer / lifecycle commands are documented in `docs/desktop/BUILD_AND_RELEASE.md`; architecture
+and red lines in `docs/desktop/ARCHITECTURE.md`. The sections below are kept as historical notes
+from the staged migration and may describe removed Tauri-era behaviour.
+
 This directory contains the staged Windows desktop shell for WhaleBridge. It is intentionally
 separate from the existing Node.js bridge so the desktop migration can be verified without
 changing QQ, DSH, MCP, or console behavior.

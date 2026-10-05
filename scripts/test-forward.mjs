@@ -17,6 +17,8 @@ import {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
+// 优先用户 config.json；干净检出时使用随仓库的 config.example.json。
+const CONFIG_FILE = [path.join(ROOT, 'config.json'), path.join(ROOT, 'config.example.json')].find((candidate) => fs.existsSync(candidate));
 
 let passed = 0;
 let failed = 0;
@@ -87,12 +89,12 @@ check('nodeText 清洗 CQ 字符串', nodeText({ message: '[CQ:image,file=x]' })
 
 // 4. 配置默认开关
 try {
-  const config = JSON.parse(fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8'));
+  const config = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
   check('config.socialV2.tools.getForwardMsg 默认开启', config.socialV2?.tools?.getForwardMsg !== false);
   check('config.socialV2.tools.sendPoke 默认开启', config.socialV2?.tools?.sendPoke !== false);
   check('config.socialV2.wake.recommendedPoke 默认开启', config.socialV2?.wake?.recommendedPoke !== false);
 } catch (error) {
-  check('config.json 可读', false, error?.message);
+  check('config.json/config.example.json 可读', false, error?.message);
 }
 
 // 5. 桥接端点安全拒绝（可选，桥接运行且状态存在时）
@@ -100,7 +102,7 @@ const consoleTokenFile = path.join(ROOT, 'state', 'console-token');
 const socialV2File = path.join(ROOT, 'state', 'social-v2.json');
 if (fs.existsSync(consoleTokenFile) && fs.existsSync(socialV2File)) {
   try {
-    const config = JSON.parse(fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8'));
+    const config = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
     const social = JSON.parse(fs.readFileSync(socialV2File, 'utf8'));
     const conv = social?.conversations ? Object.entries(social.conversations)[0] : null;
     const consoleToken = fs.readFileSync(consoleTokenFile, 'utf8').trim();

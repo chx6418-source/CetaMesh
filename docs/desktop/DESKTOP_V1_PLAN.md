@@ -1,5 +1,10 @@
 # CetaMesh Desktop v1 开发检查表
 
+> **历史文档（2026-10-04 基线 `d35dbfe`）**：本检查表记录的是 v1 施工前的规划与状态，
+> 其中的 PARTIAL/MISSING/BLOCKED 判断已被后续阶段（Chat/Tasks/Memory/Workspace/Agent/
+> Continuity/Extension/Mesh/Settings/Installer）取代。**当前权威状态以 `PROJECT_STATE.md`
+> 的阶段 14/15 快照为准**；本文件仅保留施工范围映射与历史决策，不再作为状态事实源。
+
 > 建立日期：2026-10-04（阶段 01 真实状态审计产物）
 > 基线：`main@d35dbfe`（Windows，分支 main）
 > 上游施工文档：`docs/roadmap/CETAMESH_DESKTOP_CODEX_WORKPLAN_v3.0.md`（本文件把其 D0–D10 任务映射为可勾选的 v1 交付序列）

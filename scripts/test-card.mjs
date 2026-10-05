@@ -33,6 +33,8 @@ import {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
+// 优先用户 config.json；干净检出时使用随仓库的 config.example.json。
+const CONFIG_FILE = [path.join(ROOT, 'config.json'), path.join(ROOT, 'config.example.json')].find((candidate) => fs.existsSync(candidate));
 
 let passed = 0;
 let failed = 0;
@@ -279,8 +281,13 @@ check('bridge.js 引入 qq-card 模块', /from '\.\/qq-card\.js'/.test(bridgeSrc
 check('bridge.js 导入 extractCardsFromSegments', /extractCardsFromSegments/.test(bridgeSrc));
 check('bridge.js 提供 /api/socialV2/card-message 端点', bridgeSrc.includes("url.pathname === '/api/socialV2/card-message'"));
 check('bridge.js 端点受 getCardMsg 开关控制', /v2ToolEnabled\('getCardMsg'\)/.test(bridgeSrc));
-check('bridge.js 工具开关默认含 getCardMsg', /getCardMsg:\s*true/.test(bridgeSrc));
-check('bridge.js 卡片点击工具严格默认关闭', /clickCardButton:\s*false/.test(bridgeSrc) && /clickCardButton\s*===\s*true/.test(bridgeSrc));
+// 默认值在 TASK-D1-001 后由 src/config 持有（bridge.js 只保留严格 === true 的使用点）。
+const configSources = [
+  fs.readFileSync(path.join(ROOT, 'src', 'config', 'migrate.js'), 'utf8'),
+  fs.readFileSync(path.join(ROOT, 'src', 'config', 'schema.js'), 'utf8')
+].join('\n');
+check('config 工具开关默认含 getCardMsg', /getCardMsg:\s*true/.test(configSources));
+check('config 卡片点击工具严格默认关闭', /clickCardButton:\s*false/.test(configSources) && /clickCardButton\s*===\s*true/.test(bridgeSrc));
 check('bridge.js toolFlags 含 getCardMsg', /'getCardMsg'/.test(bridgeSrc));
 check('bridge.js toolMap 映射 qq_get_card_msg', bridgeSrc.includes("getCardMsg: 'qq_get_card_msg'"));
 check('bridge.js 提供卡片按钮点击端点与 OneBot 动作', bridgeSrc.includes("url.pathname === '/api/socialV2/card-button-click'") && bridgeSrc.includes("bot.raw('click_inline_keyboard_button'"));
@@ -323,12 +330,12 @@ check('控制台可批准或拒绝风险卡片按钮', consoleHtml.includes('dat
 // 6. 配置默认开关
 let config = null;
 try {
-  config = JSON.parse(fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8'));
+  config = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
   check('config.socialV2.tools.getCardMsg 默认开启', config.socialV2?.tools?.getCardMsg !== false);
   // config.json 是本机运行态配置，用户确认风险后可以持久化开启；默认值以模板为准。
   check('config.socialV2.tools.clickCardButton 运行态为显式布尔', typeof config.socialV2?.tools?.clickCardButton === 'boolean');
 } catch (error) {
-  check('config.json 可读', false, error?.message);
+  check('config.json/config.example.json 可读', false, error?.message);
 }
 try {
   const example = JSON.parse(fs.readFileSync(path.join(ROOT, 'config.example.json'), 'utf8'));
@@ -383,7 +390,7 @@ if (fs.existsSync(consoleTokenFile) && fs.existsSync(socialV2File) && config) {
               console.log('⚠️ 跳过卡片正向验证：运行中的桥接尚未加载 QQ 官方 markdown 卡片支持（重启桥接后生效）');
             } else if (conv[0].startsWith('group:')) {
               // 从 OneBot 真实历史里挑一条带卡片的群消息，走桥接端点读回卡片与插图。
-              const rawCfg = JSON.parse(fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8'));
+              const rawCfg = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
               const ob = rawCfg.snowluma ?? {};
               const groupId = Number(conv[0].slice('group:'.length));
               const histRes = await fetch(String(ob.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '') + '/get_group_msg_history', {

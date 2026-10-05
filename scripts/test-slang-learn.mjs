@@ -45,7 +45,8 @@ function ok(name) {
   const prompt = buildResearchPrompt([{ content: 'yyds', evidence: [{ text: '这波 yyds' }] }]);
   assert.ok(prompt.includes('web_fetch'), 'prompt 应要求 web_fetch 抓正文');
   assert.ok(prompt.includes('"sources"'), 'prompt 应要求输出 sources');
-  assert.ok(prompt.includes('深度联网考究'), 'prompt 应强调深度联网考究');
+  assert.ok(prompt.includes('深度考究'), 'prompt 应强调深度考究');
+  assert.ok(prompt.includes('无法联网'), 'prompt 应说明无法联网时的处理');
   ok('buildResearchPrompt 深度研究指令');
 }
 

@@ -18,6 +18,8 @@ import {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
+// 优先用户 config.json；干净检出时使用随仓库的 config.example.json。
+const CONFIG_FILE = [path.join(ROOT, 'config.json'), path.join(ROOT, 'config.example.json')].find((candidate) => fs.existsSync(candidate));
 
 let pass = 0;
 let fail = 0;
@@ -86,7 +88,7 @@ console.log('## sticker-lib 纯函数');
 
 console.log('## 配置文件');
 {
-  const cfg = JSON.parse(fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8'));
+  const cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
   const tools = cfg.socialV2?.tools ?? {};
   ok(tools.listStickers === true, 'config listStickers=true');
   ok(tools.getStickerImage === true, 'config getStickerImage=true');
@@ -127,7 +129,7 @@ console.log('## bridge 路由/函数存在性');
 if (process.env.WHALEBRIDGE_TEST_LIVE === '1') {
   console.log('## live：SnowLuma 收藏表情链路');
   try {
-    const cfg = JSON.parse(fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8'));
+    const cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
     const base = String(cfg.snowluma?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
     const headers = { 'content-type': 'application/json', ...(cfg.snowluma?.accessToken ? { authorization: `Bearer ${cfg.snowluma.accessToken}` } : {}) };
     const res = await fetch(`${base}/fetch_custom_face_detail`, {

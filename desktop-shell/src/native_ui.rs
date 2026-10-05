@@ -2347,27 +2347,6 @@ ApiCall::Family { method, params } => api.request(method, params),
             });
     }
 
-    fn show_product_placeholder(
-        &self,
-        ui: &mut egui::Ui,
-        title: &str,
-        description: &str,
-        state: &str,
-    ) {
-        let palette = native_palette();
-        ui.heading(title);
-        egui::Frame::new()
-            .fill(palette.surface_alt)
-            .stroke(egui::Stroke::new(1.0, palette.border))
-            .corner_radius(egui::CornerRadius::same(10))
-            .inner_margin(egui::Margin::symmetric(18, 16))
-            .show(ui, |ui| {
-                ui.label(egui::RichText::new(description).color(palette.text));
-                ui.add_space(8.0);
-                ui.label(egui::RichText::new(state).color(palette.muted));
-            });
-    }
-
     fn show_chat_page(&mut self, ui: &mut egui::Ui) {
         let palette = native_palette();
         if !self.chat.sessions_loaded && !self.pending.contains(&Area::Chat) && self.worker_available {
