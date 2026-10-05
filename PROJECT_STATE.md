@@ -12,13 +12,32 @@
 - **Memory:** Types include `working`, `chat`, `user`, `task`, `workspace`, `social`, `knowledge`, and `skill`. Links and bounded context packages preserve source references and enforce explicit authorization for cross-scope retrieval. Long-term Agent/Extension writes remain confirmation candidates.
 - **Extension:** Filesystem, Memory, and network requests pass through Capability Policy. Memory Packs are JSON reference data with an immutable Base and private User Overlay; code, shell, network, and instruction escalation are rejected. `VmExtensionHost` is the current host behind the replaceable host interface.
 - **Product vocabulary:** `closed-agent` reads as `owner-agent`; `reserved` migrates to `chat`; `reserved2` migrates to `social`. Desktop navigation uses Home, Chat, Work, Social, Agents, Plugins, Memory, Workspaces, Devices, Connections, Security, and Settings.
-- **Verification:** Final regression matrix 31/31 PASS, including the final standalone Chat test with no DSH client supplied. Release pipeline 4/4 PASS (`build:core`, `desktop:build`, `build:release`, `test-release-candidate`). No requested check was skipped for environment reasons.
-- **Known boundaries:** Managed Agent `test.run` remains denied until an isolated test runner exists; Owner may run reviewed tests. VM Extension hosting is not process isolation. The full Channel/Mesh capability catalog and a dedicated Workshop review screen remain deferred.
-- **Integration:** Sessions 1–3 are integrated into `main` and pushed. The current round
-  (`feature/desktop-v2-hardening`) covers: fact-source reconciliation, real standalone
-  model verification, Workshop Owner UI, Capability Broker coverage (Channel/Mesh/MCP
-  adapters), isolated test runner, ProcessExtensionHost contract, product positioning
-  cleanup, and a repeatable Release Candidate. See `DESKTOP_V2_HARDENING_REPORT.md`.
+- **Verification:** v2 hardening round completed on `feature/desktop-v2-hardening`
+  (base `74ede4e`, final `32571d4`): new suites `test-standalone-model` (7, real
+  TCP/HTTP), `test-capability-coverage` (6), `test-isolated-runner` (6, real child
+  processes), `test-process-extension-host` (8), `test-security-negatives` (8); full
+  regression PASS incl. `desktop:test` 100/100 and `test-core-dist` (assertion scoped to
+  test artifacts); Release pipeline 4/4 PASS from a **clean worktree** (buildId
+  `1.0.0-rc.1+32571d4`, dirty=false). Two real product defects were found and fixed via
+  the real-path tests (SSE abort not observed on a stalled stream; Model-channel `send`
+  blocking the whole turn past the UI IPC timeout). Details:
+  `DESKTOP_V2_HARDENING_REPORT.md`.
+- **Known boundaries:** Managed Agent `test.run` now runs through the **Isolated Test
+  Runner** (command allowlist / minimal env / fixed workspace cwd / timeout kill tree)
+  — a controlled-execution boundary, **not** an OS sandbox; the runner stays
+  fail-closed when not wired. VM Extension hosting is not process isolation;
+  `ProcessExtensionHost` is contract + frame protocol only (no real process transport
+  yet). Workshop Owner review UI lives inside the Work page. `channel.send` exposes a
+  validated capability surface but no bound transport yet (QQ sending keeps its own
+  adapter boundary). Real provider-key turns / real QQ / cross-device Mesh / signing
+  remain NOT_RUN_ENVIRONMENT.
+- **Integration:** Sessions 1–3 are integrated into `main` and pushed. The v2 hardening
+  round (`feature/desktop-v2-hardening`) covers: fact-source reconciliation, real
+  standalone model verification, Workshop Owner UI, Capability Broker coverage
+  (Channel/Mesh adapters), isolated test runner, ProcessExtensionHost contract, product
+  positioning cleanup, and a repeatable Release Candidate. Work on this branch is
+  committed locally; merge into `main` and delete the branch after Owner confirmation.
+  See `DESKTOP_V2_HARDENING_REPORT.md`.
 
 ## HISTORICAL / SUPERSEDED RECORD
 
