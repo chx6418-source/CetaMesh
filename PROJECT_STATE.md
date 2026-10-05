@@ -1,6 +1,99 @@
 # CetaMesh Desktop — PROJECT_STATE
 
-## Current authoritative snapshot — 2026-10-05（阶段 14：Windows Release / Desktop v1 RC）
+## Current authoritative snapshot — 2026-10-05（阶段 15：CetaMesh Desktop v1 Final Audit）
+
+### 结论：Desktop v1 = RELEASE CANDIDATE（不是 COMPLETE）
+
+18 个模块与 8 条架构红线全部逐项核对，并补齐了一个真实缺口（见下）；但仍有未验证项（干净 VM 整体验收、已安装 UI 人工走查、真实 QQ 全模式、跨设备 Mesh 真链路、代码签名），按阶段 15 判定规则必须写 **RELEASE CANDIDATE**。
+
+| 项 | 值 |
+| --- | --- |
+| Branch | `main` |
+| 源码提交（产物 build-info 指向） | `d66effe5e6609d38f04b9fc513b5d29c8985b13c` (`d66effe`，release commit) |
+| 本记录提交 | 紧随 `d66effe` 的 docs 提交 |
+| Version / Build ID | `1.0.0-rc.1` / `1.0.0-rc.1+d66effe`（`dirty=false`，2026-10-05T05:13:58Z） |
+| Installer | `dist/app-1.0.0-rc.1-final/WhaleBridge-Setup-x64.exe`，41,930,752 字节 |
+| Installer SHA256 | `4EC60C2AAA97EFFD8415ED413B8982A8C18E3C53E3DDA1BEFEFCE394AAE667C9` |
+| WhaleBridge.exe SHA256 | `F107686EEDB2D0D15EE9A1C3BCF27586B48294DC76307A5058E1AAF6383BA7B5` |
+| WhaleBridgeCore.exe SHA256 | `4A65DD8BAFA51A8DD536E0BE4A50B3B901D23ED3B61805EDDF596C85E802C7DA` |
+| 产物目录 | 26 文件 / 138.2 MB（`dist/` 为 gitignored 交付目录） |
+
+### 终审发现并修复的真实缺口
+
+- `src/control/ipc-protocol.js` + `src/bridge.js` 的 **chat.* / continuity.* IPC 方法族接线此前只存在于未提交工作区**。在提交树 `6716e55` 上运行 `test-ipc-protocol` 得到 `continuity.evaluate → METHOD_NOT_FOUND`，等于“文档声称 Chat/Continuity 存在，但提交代码未接线”。
+- 处理：对工作区接线做全量回归（IPC / Chat / Continuity / Core entry / privilege / DSH integration / system 全部 PASS）后纳入 release 提交 `d66effe`，并在新提交上重建 RC、复跑关键套件（全部 PASS）。新增 `npm run test-architecture` 防止 UI/Runtime/Provider 红线回退。
+
+### 清理（确认无引用后删除）
+
+- 删除 Tauri/WebView 时代死代码：`desktop-shell/src/main.rs`、`tauri.conf.json`、`ui/index.html`、`ui/installer.html`、`ui/status.html`、`ui/whalebridge-icon.png`；图标流水线不再生成废弃 PNG，图标测试改为校验当前原生发行面。
+- 删除未使用的 `NativeUi::show_product_placeholder`（编译警告 7 → 6）。
+- 修正 7 个只能在开发者本机通过的过时/环境依赖测试：root config.json 回退 config.example.json（wait/vision/forward/stickers）、默认值来源改为 `src/config`（card）、文案断言对齐现提示词（slang）、自动创建 `output/`（chat product）。
+- 新增文档：`docs/desktop/ARCHITECTURE.md`、`BUILD_AND_RELEASE.md`、`KNOWN_LIMITATIONS.md`；`DESKTOP_V1_PLAN.md` 标记为历史文档；README 与 `desktop-shell/README.md` 更新为当前产品状态。
+
+### 模块终审（18/18）
+
+| 模块 | 状态 | 关键证据 |
+| --- | --- | --- |
+| Chat | PASS | `src/desktop/chat-service.js` + IPC 接线；chat-product 11 组、test-ipc-protocol、RC payload DSH 回合 |
+| Tasks | PASS | `src/task/`；test-task 90/90 |
+| Memory | PASS | `src/memory/`；test-memory 85/85 |
+| Workspace | PASS | `src/workspace/boundary.js`；test-workspace 47/47 + workspace-ipc |
+| Model Provider | PASS | 模型目录/默认值 + 凭据保持；test-agent 真机段、test-system |
+| Agent Provider | PASS | `src/agent/` 契约 + DSH 映射；test-agent 23 + 真机 PASS |
+| Persistent Task | PASS | rev / attention / agent attach；test-task |
+| Agent execution | PASS | 真实 DSH 回合 completed（“收到”），RC payload self-test |
+| Approval | PASS | pending / 审批 / 风险卡；test-system + test-task + test-mesh |
+| Capability | PASS | 能力声明 + 权限/沙箱边界；test-extension + test-agent |
+| Context Rollover | PASS | continuity monitor/rollover；test-continuity-rollover 6 组 |
+| Agent Handoff | PASS | handoff packet / sequence；test-continuity-rollover |
+| Extension | PASS | 静态扫描 + vm 沙箱 + review；test-extension 87/87 |
+| Device Mesh | PASS（本机） | test-mesh；跨设备真链路 `PENDING_NATIVE_VERIFICATION` |
+| Settings | PASS | test-system 108/108（持久化 / 锁定项 / 归位） |
+| Updates | PASS（fail-closed） | 签名必验 + 版本比较（含预发布修复）；test-system |
+| Diagnostics | PASS | 活动/日志/诊断 + 强制脱敏；test-system |
+| Installer | PASS | 安装/升级/修复/迁移/卸载/重装全生命周期；外部 Workspace 安全 |
+
+### 架构红线（`npm run test-architecture` 7 组 PASS + 人工核对）
+
+| 红线 | 结论 |
+| --- | --- |
+| UI 绕过 Runtime | 未发现：UI 仅走 IPC；唯一直接文件读取是用户拖入的有界文本附件，唯一进程启动是 Explorer 打开日志目录 |
+| Agent 任意访问磁盘 | 未发现：workspace boundary 词法 + realpath 收敛，禁止盘根/系统目录 |
+| Trust 自动变 Permission | 未发现：能力必须声明权限并获得显式批准 |
+| Task 依附 Agent Session | 未发现：`currentAgent` 可空且 task id 不变 |
+| QQ 成为 Core 必需依赖 | 未发现：产品运行时零 SnowLuma 引用，仅 Channel Adapter 注册表 |
+| Secret 进入日志 | 未发现：强制脱敏 + bearer token 回归 |
+| Extension 任意执行下载代码 | 未发现：静态扫描 + `vm.createContext`，无 host `require`/`process`/fs/net |
+| reserved 残留正式产品流程 | 未发现：仅 QQ Adapter 的 Advanced 工程面保留 |
+
+### 最终测试矩阵（本机真实运行）
+
+- Node 产品/架构：architecture 7 组、system 108/108、config 69/69、agent 23+真机、memory 85/85、task 90/90、workspace 47/47、extension 87/87、mesh（跨设备 `PENDING_NATIVE_VERIFICATION`）、chat-product 11 组、continuity 6 组、ipc-protocol、control-service、workspace-ipc、local-services 36/36、app-paths、md/wait/vision/forward/card/slang/stickers、no-web、mcp-safe/host/web-search 全部 PASS。
+- Core/桥接：core-entry（五 MCP + worker + 损坏配置 fail-closed）、privilege 24/24、dsh-integration 全生命周期 PASS；core-dist 功能段全部 PASS（全局无残留断言因用户实例运行 `NOT_RUN_ENVIRONMENT`）。
+- 桌面/发行：desktop-supervisor PASS、desktop-install 全生命周期 PASS、installer-package PASS、release 构建审计 PASS、RC payload self-test PASS；desktop-shell 非 GUI 段 PASS（GUI 单实例被用户实例占用 `NOT_RUN_ENVIRONMENT`）。
+- Rust：`desktop:check` PASS；`desktop:test` 86/86 PASS。
+- TypeScript / lint：`NOT_APPLICABLE`（仓库无 TypeScript 源码与 lint 工具链）。
+
+### NOT_RUN_ENVIRONMENT
+
+- 干净 Windows VM / 新镜像整体验收：本机非全新镜像。
+- 已安装 UI 人工走查、托盘鼠标交互、GUI 单实例用例、release-candidate 安装后启动：本机已安装的 CetaMesh 正在运行并持有单实例互斥量（PID 28884 + Core 34520），未关闭用户应用。
+- 真实 QQ（SnowLuma）全模式工具链路与 live 探针（test-console / test-onebot-connection / test-mcp-exec）。
+- 跨设备 Device Mesh 真链路；代码签名 / 安装包签名。
+
+### 已知问题
+
+- 未签名；Update 检查默认关闭（未配置签名公钥，fail-closed）；Node.js 许可证文本待补；`WhaleBridge.exe` 含构建机仓库路径（known deviation）；Provider secrets 以本地 JSON 存储而非系统密钥链。
+- 6 个既有 dead-code/未用字段编译警告保留（属于解析数据保真，不做无意义删除）。
+
+### 是否满足 Desktop v1 发布条件
+
+- 作为 **Release Candidate：满足** —— 可安装、可升级、可卸载，用户数据/Workspace/密钥边界与 Core/UI 运行时均通过自动化验收。
+- 作为 **COMPLETE v1.0.0：不满足** —— 需先完成干净 VM 人工走查、真实 QQ 全模式、跨设备 Mesh 验证与代码签名。
+
+---
+
+## （历史）2026-10-05 快照 — 阶段 14：Windows Release / Desktop v1 RC
 
 本快照取代下方阶段 13 快照。本阶段产出可安装的 **CetaMesh Desktop v1 Release Candidate**。
 
