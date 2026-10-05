@@ -1,5 +1,53 @@
 # CetaMesh Desktop — PROJECT_STATE
 
+## 补丁 — 2026-10-05 窗口排版与安装体验修复（commit `dc45fb1`）
+
+用户反馈：主窗口排版被裁切/遮挡；安装包被 Windows Defender 报 `Trojan:Win32/Bearfoos.A!ml`。
+
+### 修复内容
+
+- **排版**：`NativeUi::ui()` 从嵌套 `horizontal_top + vertical + ScrollArea` 改为真正的
+  `egui::Panel::left` / `Panel::top` / `CentralPanel` 布局；侧栏按钮按可用宽度渲染，窄于 1040px
+  时切换为顶部紧凑导航，标题/描述/Core 状态在窄屏自动分行。实拍 1194×818 与 965×678 两种窗口
+  均无裁切（截图存于 `output/layout-default.png`、`output/layout-small.png`）。
+- **测试实例隔离**：新增 `WHALEBRIDGE_INSTANCE_SUFFIX`（仅测试设置），单实例互斥量与“再次启动恢复”
+  事件按后缀命名；`test-desktop-shell` 与 `test-release-candidate` 使用独立命名空间，用户的应用
+  运行中也能完成 GUI/安装验收。
+- **可执行文件元数据**：`desktop-shell/whalebridge.rc` 增加 VERSIONINFO（ProductName
+  `CetaMesh Desktop`、ProductVersion `1.0.0-rc.1`、CompanyName `CetaMesh`、OriginalFilename 等）；
+  架构测试新增第 8 组断言，防止元数据或版本同步回退。
+- **安装版本显示**：此前 `install-manifest.json` 的 `version` 为 `0.0.0`（旧安装显示
+  `0.0.0 → 0.0.0`）。本次升级后新清单写入 `1.0.0-rc.1`，向导显示 `0.0.0 → 1.0.0-rc.1`；注册表
+  `InstallLocation` 也修正回用户目录 `%LOCALAPPDATA%\Programs\WhaleBridge`，后续升级不再回退到
+  Program Files。
+
+### 验证（本机真实运行）
+
+| 检查 | 状态 | 说明 |
+| --- | --- | --- |
+| `cargo test` | PASS | 86/86 |
+| `npm run test-architecture` | PASS | 8 组（含新的产品元数据断言） |
+| `npm run test-desktop-shell` | PASS | 用户应用运行中完成 GUI + Stage 13 + 孤儿守卫 |
+| `npm run test-release-candidate` | PASS | 沙箱安装/启动/崩溃恢复/单实例/卸载（带实例后缀） |
+| `npm run test-desktop-install` / `test-installer-package` | PASS | 全生命周期与单文件安装器守卫 |
+| 排版实拍 | PASS | 默认/小窗口截图无裁切、无遮挡 |
+| Defender 定向扫描（新 `WhaleBridge.exe`，禁用自动处置） | PASS | `found no threats`；最近告警记录均为 12:39–12:42 的旧构建 |
+
+### 交付与安装状态
+
+- 产物：`dist/app-1.0.0-rc.1-final`（buildId `1.0.0-rc.1+dc45fb1`，dirty=false）；
+  单文件安装包 `dist/CetaMesh-Setup-1.0.0-rc.1.exe`，41,934,848 字节，
+  SHA256 `5E13F004C5A11E93A2872DC8D546212CEA12C965BCB02FD84FFBBBC6CE536113`；
+  WhaleBridge.exe `C81F4CC60F12FD416339C24EAA636299F688D4E84D0251B4E0DA8DB8AB47833F`；
+  WhaleBridgeCore.exe `4A65DD8BAFA51A8DD536E0BE4A50B3B901D23ED3B61805EDDF596C85E802C7DA`。
+- 本机安装已用 `--install --install-dir %LOCALAPPDATA%\Programs\WhaleBridge --stop-core` 升级到
+  `dc45fb1`：用户数据保留（`config.json` 哈希不变），应用已重新启动。
+
+### 仍未完成
+
+- 代码签名与微软误报正式复审（当前新增元数据后本地 Defender 扫描干净，但未签名仍是长期风险）；
+  DSH 重启后才会应用新的 MCP 配置。
+
 ## Current authoritative snapshot — 2026-10-05（阶段 15：CetaMesh Desktop v1 Final Audit）
 
 ### 结论：Desktop v1 = RELEASE CANDIDATE（不是 COMPLETE）
