@@ -1,9 +1,10 @@
-// CetaMesh Workspace v1 —— 工作区工具（阶段 05）。
+// CetaMesh Workspace v1 —— 工作区工具（阶段 05；会话 2 增补只读 HEAD/diff 摘要）。
 //
 // 所有文件访问都经 boundary.resolveInto 裁决，工具自身绝不接收/使用绝对路径。
-// git 只暴露 status / diff / commit 三个动词；reset --hard、clean、push 类
-// 破坏性操作在本模块没有任何构造路径。test.run 只执行工作区设置里登记的
-// 测试命令（owner 配置），不接受调用方自带命令串。
+// git 只暴露 status / diff / commit 三个动词与只读的 head 检查（rev-parse HEAD，
+// 供 Continuity Workspace Reconciliation 核对 checkpoint 与真实工作区）；
+// reset --hard、clean、push 类破坏性操作在本模块没有任何构造路径。
+// test.run 只执行工作区设置里登记的测试命令（owner 配置），不接受调用方自带命令串。
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -251,8 +252,14 @@ export async function gitStatus(rootReal) {
   return { isRepo: true, branch, dirty: entries.length > 0, entries };
 }
 
-export async function gitDiff(rootReal, { cached = false, context = 3 } = {}) {
-  const args = ['diff', '--no-color', `-U${Math.max(0, Math.min(64, Number(context) || 0))}`];
+export async function gitDiff(rootReal, { cached = false, context = 3, statOnly = false } = {}) {
+  const args = ['diff', '--no-color'];
+  if (statOnly) {
+    // 摘要模式（--stat）：给 Continuity / Handoff Packet 的 diff 摘要用，不携带全文。
+    args.push('--stat');
+  } else {
+    args.push(`-U${Math.max(0, Math.min(64, Number(context) || 0))}`);
+  }
   if (cached) args.push('--cached');
   let out;
   try {
@@ -262,14 +269,34 @@ export async function gitDiff(rootReal, { cached = false, context = 3 } = {}) {
     fail('GIT_FAILED', `git diff 失败：${error.gitStderr || error.message}`);
   }
   const output = out.stdout;
-  const cap = 512 * 1024;
+  const cap = statOnly ? 16 * 1024 : 512 * 1024;
   return {
     isRepo: true,
     cached: cached === true,
+    statOnly: statOnly === true,
     output: output.length > cap ? output.slice(0, cap) : output,
     truncated: output.length > cap,
     hasChanges: output.length > 0
   };
+}
+
+/** 只读 HEAD 检查：`git rev-parse HEAD`。空仓库（无提交）→ headSha:null，不伪造。 */
+export async function gitHead(rootReal) {
+  try {
+    const out = await gitRun(rootReal, ['rev-parse', 'HEAD']);
+    const headSha = String(out.stdout ?? '').trim();
+    return { isRepo: true, headSha: /^[0-9a-f]{40}$/i.test(headSha) ? headSha : null };
+  } catch (error) {
+    if (gitUnavailable(error)) fail('GIT_UNAVAILABLE', 'git 不可用（未安装或不在 PATH）');
+    if (/not a git repository/i.test(error.gitStderr ?? '')) {
+      return { isRepo: false, headSha: null };
+    }
+    // 无提交的空仓库 rev-parse HEAD 报错：如实返回 null（分支存在但没有 HEAD）。
+    if (/ambiguous argument 'HEAD'|unknown revision|bad revision/i.test(error.gitStderr ?? '')) {
+      return { isRepo: true, headSha: null };
+    }
+    fail('GIT_FAILED', `git rev-parse HEAD 失败：${error.gitStderr || error.message}`);
+  }
 }
 
 /**

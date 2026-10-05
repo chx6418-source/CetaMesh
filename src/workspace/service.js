@@ -253,7 +253,22 @@ export function createWorkspaceService({ stateDir, now = () => Date.now(), audit
     return handler(params ?? {});
   }
 
-  return { execute };
+  /**
+   * 只读内部入口（Continuity Workspace Reconciliation 适配用）：按 id 取登记条目投影。
+   * 不存在时返回 null（不抛错，由调用方决定"事实不可得"的语义）；绝不触发审计或状态写。
+   */
+  function describeWorkspace(id) {
+    const text = String(id ?? '').trim();
+    if (!text) return null;
+    try {
+      const entry = registry.get(text);
+      return { id: entry.id, name: entry.name, root: entry.root };
+    } catch {
+      return null;
+    }
+  }
+
+  return { execute, describeWorkspace };
 }
 
 export { WorkspaceBoundaryError, WorkspaceRegistryError, WorkspaceToolError };
