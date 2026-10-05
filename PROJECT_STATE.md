@@ -1,5 +1,44 @@
 # CetaMesh Desktop — PROJECT_STATE
 
+## 修复 — 2026-10-05（切模型报 `no adapter registered for provider "llm-deepseek"`）
+
+- **根因**：用户 config.json 里 `dsh.provider = "llm-deepseek"`。`llm-deepseek` 是 DSH 的
+  **LLM 适配器配置命名空间**，不是 `session/selectModel` 接受的可路由 provider；DSH 只认
+  `session/modelCatalog` 登记的 `routableProviders`（内置为 `deepseek-official`）。
+  另外设置页“模型目录”曾用 `settings/describe` 的命名空间名当 provider，正是这个错误值
+  被写进配置的来源。
+- **修复**：
+  - 新增 `src/dsh-model-selection.js`：`session/selectModel` 先按请求值调用，**仅**在错误为
+    `NO_ADAPTER` 时查官方 `session/modelCatalog`，按模型归属解析 provider（默认 provider
+    优先）并重试一次；模型不存在、传输失败等其他错误原样上抛；非法 reasoning 退回模型默认强度。
+  - 接入全部 4 个绑定调用点：`src/desktop/chat-service.js`（Chat 页）、`src/bridge.js`
+    （QQ 桥接 `ensureSessionModel`）、`src/agent/dsh-agent-provider.js`、`src/continuity/provider.js`。
+  - `src/bridge.js` 的 `readModelCatalog` 改用 `session/modelCatalog`（`group.id` 即可路由
+    provider），旧 DSH 才退回原 `settings/describe` 扫描，且兼容路径不再拿 ns 名当 provider。
+    设置页从此只会写合法 provider/model 组合。
+- **验证**：
+  - `node scripts/test-dsh-model-selection.mjs`（新增，7 组）PASS：含“llm-deepseek → deepseek-official
+    自动重试”的端到端回归（复现截图操作：`chat.config.set` 切到 `deepseek-v4-flash` 成功）。
+  - 真实 DSH 探测：临时会话 `provider=llm-deepseek` 绑定 `deepseek-v4-flash` / `deepseek-flash`
+    均成功，日志给出解析说明。
+  - 隔离桌面实例（真实 DSH + `llm-deepseek` 配置）经产品 IPC 端到端：发送“只回复两个字：收到”
+    收到真实回复 `收到`；`chat.config.set` 切模型 `deepseek-v4-flash`、切 reasoning `max`、
+    切 mode 均成功（截图里的 `MODEL_BIND_FAILED` 不再出现）。
+  - 回归：chat-product 11 组、agent-provider 23 单元+真机段、control-service、system 108、
+    privilege 24、architecture 8 组、provider-secrets 6、`cargo test` 86/86 全部 PASS；
+    RC 冒烟（test-release-candidate）7 项 PASS。
+- **边界**：DSH `agent-default-model` 已被成功绑定改写为 `deepseek-official/deepseek-flash`；
+  用户 config.json 仍保留 `llm-deepseek`（运行时自动解析，不再报错）；设置页会提示当前默认值
+  不在目录中，重新选择保存即可写入合法值。
+
+### 产物（commit `27e9606`，buildId `1.0.0-rc.1+27e9606`，dirty=false）
+
+- `dist/app-1.0.0-rc.1-27e9606`；单文件安装包 `dist/CetaMesh-Setup-1.0.0-rc.1.exe`，
+  41,943,040 字节，SHA256 `7430725B340D205D44738131E1836275411E5FA601784180843EB84E505F1C72`；
+  WhaleBridgeCore.exe `FE4AAFD6B1F360B4F9BAA762A786FD3999A8608C7C9BDAAF18250CBA70B1E2C1`。
+- 本机安装已升级到 `27e9606`（`--stop-core`，config.json / 用户数据保留）并启动；
+  安装目录 build-info 与 config `dsh.provider=llm-deepseek` 均确认。
+
 ## UX 收尾 — 2026-10-05（切模型 / 工作区选择器 / Provider API Key）
 
 - **模型与思考强度切换**：Chat 页现在渲染 `Area::Chat` 的错误反馈（`MODEL_BIND_FAILED`、参数错误不再“无反应”）；新增“自定义模型”输入 + 应用按钮，DSH 模型目录不可用时也能切换；保存成功后刷新会话列表使下拉立即反映新配置。
