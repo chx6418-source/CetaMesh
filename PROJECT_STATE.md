@@ -1,5 +1,74 @@
 # CetaMesh Desktop — PROJECT_STATE
 
+## 会话 2：Agent Broker + Continuity Runtime v2 + 自动 Fresh Session Rollover（2026-10-05）
+
+分支 `feature/desktop-continuity-v2`（base `08a3934`，会话 1 最终提交），详见 `HANDOFF_SESSION_2.md`。
+
+### 已完成
+
+- **双 Provider 抽象收口**：`src/agent/` 成为唯一正式 AgentProvider 契约（核心方法
+  + 可选能力 archiveSession/nativeCheckpoint/nativeHandoff 显式 unsupported）；
+  删除 `src/continuity/provider.js` 窄注册表与窄 DSH 实现。Chat / Task / Continuity
+  一律经 **Agent Broker**（`src/agent/registry.js` + `broker.js`：注册表、统一分发、
+  可选能力诚实包装 `{supported:false, reason:'UNSUPPORTED'}`、回合结束事件扇出）。
+  DSH 保持第一个真实 Provider 并声明 `rolloverStrategy: fresh-session`。
+- **自动 Context Monitoring**：chat-service Agent/DSH 通道回合结束 → `onTurnEnd` →
+  bridge 接线 `broker.reportTurnEnd` → Continuity `observeAgentTurn`。真实 usage 优先
+  （`normalizeUsageTokens` 兼容三种形状）；无真实 usage 用字符估算并明确
+  `estimated:true`，估算绝不冒充真实 Token。Model 通道不上报；上报失败不影响回合机。
+- **自动 Fresh Session Rollover**：阈值带 none/checkpoint(70)/ready(78)/rollover(85)/
+  forced(90)/emergency(92)，均可在 policy 配置（`autoRollover` 开关默认 true）。达
+  rollover+ 且绑定 Task：安全点检查（canRollover / 互斥窗口，未到 → ROLLOver_NOT_SAFE
+  保留当前 Session）→ Checkpoint v2 → 结束旧 Session → Broker 开新 Session →
+  Bootstrap → task.attachAgent（Task ID 不变）→ Workspace Reconciliation → 历史落盘
+  + monitor 重置。
+- **Checkpoint v2**：packet 新增 `memoryRefs`（仅 memoryId 引用，Memory 原文不复制）
+  与 `workspaceFacts`（真实 git branch/HEAD/dirty/diff --stat + 相关文件存在性）；
+  缺失如实 null/[]。Bootstrap v2 为结构化恢复说明（含记忆引用与工作区核验事实），
+  明示旧任务续接/不重做/先验证工作区/从 nextAction 继续，绝不复制聊天历史。
+- **Workspace Reconciliation**（`src/continuity/reconcile.js`）：真实 Workspace >
+  旧 Agent 摘要；discrepancy（branch/headSha/missing-file/no-git-repo）逐条记录，
+  绝不静默篡改 Task State；consistent 三态（true/false/null，null=无法核验）。
+  workspace tools 增补只读 `gitHead` 与 `gitDiff{statOnly}`；service 增补只读
+  `describeWorkspace`。
+- **同 Provider / Cross Provider**：同 Provider Fresh Session 为默认路径；Cross
+  Provider 经 `targetProvider` + 同一 Broker 寻址（fixture A→B 验证 Task ID/
+  Workspace/Progress 不变）。task runtime 增补只读 `findByAgent`。
+- **IPC**：agent.* 经 Broker（未知 Provider 专用错误码 AGENT_PROVIDER_UNKNOWN；
+  新增 agent.archiveSession/nativeCheckpoint/nativeHandoff）；continuity.* 新增
+  `turn.observe` / `reconcile`。Work UI 未改（Runtime 完整优先，记为后续）。
+
+### 验证（本机实跑）
+
+| 检查 | 状态 |
+| --- | --- |
+| `test-agent-broker.mjs`（新增） | PASS 7 组 |
+| `test-continuity-auto-rollover.mjs`（新增） | PASS 9 组（阈值带/估算/自动切换/数据保留/防重复/安全点/策略/跨 Provider/Checkpoint v2） |
+| `test-workspace-reconciliation.mjs`（新增，真实临时 git 仓库） | PASS 6 组 |
+| `test-continuity-rollover.mjs`（移植 Broker） | PASS 6 组 |
+| `test-agent`（23 单元 + 真机 DSH 段） | PASS |
+| test-task / test-memory / test-workspace / chat-product 17 组 | PASS |
+| test-core-entry / test-privilege 24 / test-dsh-integration | PASS |
+| test-architecture 8 组 / test-ipc-protocol | PASS |
+| desktop:check / desktop:test 87/87 | PASS |
+| test-system 108 / control-service / model-runtime 12 / smart-router 9 / model-selection 7 / provider-secrets 6 | PASS |
+
+### 边界 / 已知限制
+
+- 自动上报的回合机目前只有 chat-service；Task 专属 Agent 执行器尚不存在——绑定
+  Task 的自动 rollover 已就绪（fixture 全链路验证），经 `continuity.turn.observe`
+  或未来执行器接入即生效。
+- rollover 策略只实现 fresh-session（其他 Provider 声明照实透传不执行）；Work UI
+  状态展示与操作入口记为后续；DSH contextUsage 投影未并入 Monitor（语义不同，
+  不冒充累计使用率）。
+- 未跟踪杂项文件（`%SystemDrive%/`、`plugins/cetamesh-*`、`output/` 等）保持原样。
+
+### 下一阶段入口
+
+- 会话 3（Capability + Workshop + Memory v2 + 收口）：入口健康基线 = 三套新测试 +
+  rollover/agent-provider 全 PASS；chat 回合 `routing.agentIntent` 仍待升级为经
+  Broker 的受控执行。见 `HANDOFF_SESSION_2.md`。
+
 ## 会话 1：Model Runtime + Standalone Chat + Smart Router v1 + Cost Policy（2026-10-05）
 
 分支 `feature/desktop-model-router-v1`（base `aa5d28e`），详见 `HANDOFF_SESSION_1.md`。
