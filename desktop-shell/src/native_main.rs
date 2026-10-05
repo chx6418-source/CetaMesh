@@ -10,6 +10,7 @@ mod ipc_client;
 mod migrate;
 mod memory_ui;
 mod task_ui;
+mod workshop_ui;
 mod mesh_ui;
 mod workspace_ui;
 mod native_installer_ui;

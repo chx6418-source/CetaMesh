@@ -6,6 +6,7 @@
 use crate::chat_ui::{ChatUi, parse_catalog, parse_history, parse_model_providers, parse_sessions, parse_turn};
 use crate::memory_ui::MemoryUi;
 use crate::task_ui::TaskUi;
+use crate::workshop_ui::WorkshopUi;
 use crate::mesh_ui::{MeshArea, MeshUi};
 use crate::tray::{TrayCommand, TrayHandle, TrayStatus};
 use crate::ui_prefs::{CloseBehavior, ThemePreference, UiPrefs};
@@ -33,6 +34,14 @@ pub trait CoreApi: Send + Sync + 'static {
     fn request(&self, method: &str, params: Value) -> Result<Value, String>;
 }
 
+/// Work 页内部区域（Tasks / Workshop Owner 审阅）。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum WorkTab {
+    #[default]
+    Tasks,
+    Workshop,
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum Area {
     Chat,
@@ -55,6 +64,7 @@ enum Area {
     Diagnostics,
     Memory,
     Task,
+    Workshop,
     Mesh,
     Channel,
     Workspace,
@@ -112,6 +122,7 @@ enum Operation {
     DiagnosticsRun,
     MemoryCall,
     TaskCall,
+    WorkshopCall,
     MeshCall,
     ChannelCall,
     WorkspaceCall,
@@ -556,6 +567,8 @@ pub struct NativeUi {
     navigation: NavigationState,
     memory: MemoryUi,
     task: TaskUi,
+    workshop: WorkshopUi,
+    work_tab: WorkTab,
     mesh: MeshUi,
     chat: ChatUi,
     workspace: WorkspaceUi,
@@ -927,6 +940,8 @@ ApiCall::Family { method, params } => api.request(method, params),
             navigation: NavigationState::default(),
             memory: MemoryUi::default(),
             task: TaskUi::default(),
+            workshop: WorkshopUi::default(),
+            work_tab: WorkTab::default(),
             mesh: MeshUi::default(),
             chat: ChatUi::default(),
             workspace: WorkspaceUi::default(),
@@ -1553,6 +1568,16 @@ ApiCall::Family { method, params } => api.request(method, params),
                             Operation::TaskCall,
                             "task.overview",
                             json!({}),
+                        );
+                    }
+                }
+                (Operation::WorkshopCall, Ok(value)) => {
+                    if self.workshop.apply(value) {
+                        self.issue_family(
+                            Area::Workshop,
+                            Operation::WorkshopCall,
+                            "workshop.proposal.list",
+                            json!({ "limit": 200 }),
                         );
                     }
                 }
@@ -3061,6 +3086,30 @@ ApiCall::Family { method, params } => api.request(method, params),
         self.show_feedback(ui, Area::Task);
     }
 
+    /// Work 页：Tasks 与 Workshop（Owner 审阅）两个内部区域。
+    fn show_work_page(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.work_tab, WorkTab::Tasks, "Tasks");
+            ui.selectable_value(&mut self.work_tab, WorkTab::Workshop, "Workshop（工作坊）");
+        });
+        ui.separator();
+        match self.work_tab {
+            WorkTab::Tasks => self.show_tasks_page(ui),
+            WorkTab::Workshop => self.show_workshop_page(ui),
+        }
+    }
+
+    fn show_workshop_page(&mut self, ui: &mut egui::Ui) {
+        let actions = self.workshop.show(ui);
+        for action in actions {
+            self.issue_family(Area::Workshop, Operation::WorkshopCall, action.method, action.params);
+        }
+        if let Some(Err(error)) = self.feedback.get(&Area::Workshop) {
+            self.workshop.set_error(error.clone());
+        }
+        self.show_feedback(ui, Area::Workshop);
+    }
+
     fn show_memory_page(&mut self, ui: &mut egui::Ui) {
         let actions = self.memory.show(ui);
         for action in actions {
@@ -3128,7 +3177,7 @@ ApiCall::Family { method, params } => api.request(method, params),
     fn show_page(&mut self, ui: &mut egui::Ui) {
         match self.navigation.page {
             AppPage::Chat => self.show_chat_page(ui),
-            AppPage::Work => self.show_tasks_page(ui),
+            AppPage::Work => self.show_work_page(ui),
             AppPage::Memory => self.show_memory_page(ui),
             AppPage::Workspaces => self.show_workspace_page(ui),
             AppPage::Settings => self.show_settings_page(ui),

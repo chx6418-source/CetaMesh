@@ -10,6 +10,7 @@
 //! 只需一次往返即可刷新列表与详情（避免同一 Area 的并发 issue 互斥）。
 
 use eframe::egui;
+use std::collections::HashMap;
 use serde_json::{Map, Value, json};
 
 const SURFACE_ALT: egui::Color32 = egui::Color32::from_rgb(246, 249, 248);
@@ -207,7 +208,7 @@ fn status_color(status: &str) -> egui::Color32 {
 
 pub struct TaskUi {
     pub loaded: bool,
-    requested: bool,
+    pub requested: bool,
     pub details: Vec<TaskDetail>,
     pub counts: Vec<(String, u64)>,
     pub attention: Vec<String>,
@@ -230,6 +231,12 @@ pub struct TaskUi {
     pub agent_provider: String,
     pub agent_session: String,
     pub context: Map<String, Value>,
+    /// 等待 continuity.history 响应的 taskId 队列（apply 时按序关联）。
+    pending_history: Vec<String>,
+    /// 已自动发起过 Continuity 读取的选中任务，避免每帧重复下发。
+    context_issued: Vec<String>,
+    /// Rollover 历史（key = taskId）。
+    pub rollovers: HashMap<String, Vec<RolloverEntry>>,
 }
 
 impl Default for TaskUi {
@@ -259,7 +266,63 @@ impl Default for TaskUi {
             agent_provider: "dsh".to_owned(),
             agent_session: String::new(),
             context: Map::new(),
+            pending_history: Vec::new(),
+            context_issued: Vec::new(),
+            rollovers: HashMap::new(),
         }
+    }
+}
+
+/// 一条 Fresh Session Rollover 历史（continuity.history 条目）。
+#[derive(Clone, Debug, PartialEq)]
+pub struct RolloverEntry {
+    pub sequence: u64,
+    pub from: String,
+    pub to: String,
+    pub reason: String,
+    pub cross_provider: bool,
+    pub at: u64,
+}
+
+/// 解析 continuity.history 响应。响应本身不带 taskId，关联由调用方按请求顺序维护。
+pub fn parse_rollover_history(value: &Value) -> Vec<RolloverEntry> {
+    let rows = match value.get("rollovers").and_then(Value::as_array) {
+        Some(rows) => rows,
+        None => return Vec::new(),
+    };
+    rows.iter()
+        .filter_map(|row| {
+            let sequence = row.get("sequence").and_then(Value::as_u64)?;
+            let bind = |side: &str| {
+                let item = row.get(side).unwrap_or(&Value::Null);
+                format!(
+                    "{}:{}",
+                    string_field(item, "provider"),
+                    string_field(item, "sessionId")
+                )
+            };
+            Some(RolloverEntry {
+                sequence,
+                from: bind("from"),
+                to: bind("to"),
+                reason: string_field(row, "reason"),
+                cross_provider: row.get("crossProvider").and_then(Value::as_bool).unwrap_or(false),
+                at: row.get("at").and_then(Value::as_u64).unwrap_or(0),
+            })
+        })
+        .collect()
+}
+
+/// 把 Continuity 动作映射为人读提示（Work 页详情用）。
+pub fn continuity_action_hint(action: &str) -> &'static str {
+    match action {
+        "none" => "正常",
+        "checkpoint" => "建议生成 Checkpoint",
+        "ready" => "寻求安全点（接近 rollover）",
+        "rollover" => "达到 Rollover 阈值（将自动 Fresh Session）",
+        "forced" => "Forced Rollover（临限强制）",
+        "emergency" => "Emergency Rollover",
+        _ => "未知",
     }
 }
 
@@ -276,6 +339,14 @@ impl TaskUi {
                 self.context.insert(task_id.to_owned(), value.clone());
                 return false;
             }
+        }
+        if value.get("rollovers").is_some() {
+            // continuity.history：响应无 taskId，按请求顺序关联（pending_history 队列）。
+            let task_id = self.pending_history.pop().unwrap_or_default();
+            if !task_id.is_empty() {
+                self.rollovers.insert(task_id, parse_rollover_history(value));
+            }
+            return false;
         }
         if value.get("tasks").is_some() || value.get("counts").is_some() {
             self.details = parse_details(value);
@@ -525,25 +596,72 @@ impl TaskUi {
             });
 
             let session_key = format!("{}:{}", task.agent_provider, task.agent_session);
+            // 选中任务自动读取 Continuity 状态（每任务一次；页面回到详情即有数据）。
+            if !task.agent_session.is_empty() && !self.context_issued.contains(&task.id) {
+                self.context_issued.push(task.id.clone());
+                actions.push(TaskAction::new("continuity.status", json!({ "taskId": task.id })));
+                self.pending_history.push(task.id.clone());
+                actions.push(TaskAction::new("continuity.history", json!({ "taskId": task.id })));
+            }
             let context = self.context.get(&task.id)
-                .filter(|value| value.get("sessionKey").and_then(Value::as_str) == Some(session_key.as_str()));
+                .filter(|value| value.get("sessionKey").and_then(Value::as_str) == Some(session_key.as_str()))
+                .cloned();
             ui.horizontal_wrapped(|ui| {
-                if let Some(value) = context {
+                if let Some(value) = &context {
                     let level = value.get("level").unwrap_or(&Value::Null);
                     let percent = level.get("percent").and_then(Value::as_u64);
-                    let estimated = level.get("estimated").and_then(Value::as_bool).unwrap_or(true);
+                    let source = string_field(level, "source");
+                    let source_text = if source == "usage" { "真实 usage".to_owned() } else if source == "estimated" { "字符估算".to_owned() } else { source };
                     ui.weak(match percent {
-                        Some(percent) => format!("Context（最近读取）：{percent}%{}", if estimated { "（估算）" } else { "" }),
+                        Some(percent) => format!("Context：{percent}%（{source_text}）"),
                         None => "Context：未知".to_owned(),
                     });
-                    ui.weak(format!("状态：{} / {}", string_field(level, "band"), string_field(value, "action")));
+                    let action_text = continuity_action_hint(&string_field(value, "action"));
+                    let hint = match percent {
+                        Some(percent) if percent >= 85 => format!("{action_text}"),
+                        Some(percent) if percent >= 70 => format!("{action_text}"),
+                        _ => action_text.to_owned(),
+                    };
+                    ui.weak(format!("建议：{hint}"));
+                    let strategy = value.get("strategy").unwrap_or(&Value::Null);
+                    if strategy.is_object() {
+                        ui.weak(format!(
+                            "Rollover 策略：{}（实现 {}）",
+                            string_field(strategy, "preferred"),
+                            string_field(strategy, "implemented")
+                        ));
+                    }
                 } else {
-                    ui.weak("Context：未知（尚未读取当前 Session）");
+                    ui.weak(if task.agent_session.is_empty() { "Context：未绑定 Agent Session" } else { "Context：读取中…" });
                 }
-                if !task.agent_session.is_empty() && ui.button("读取 Context 状态").clicked() {
-                    actions.push(TaskAction::new("continuity.status", json!({ "taskId": task.id })));
+                if !task.agent_session.is_empty() && ui.button("重新读取 Context").clicked() {
+                    self.context_issued.retain(|id| id != &task.id);
                 }
             });
+
+            // Rollover 历史：让 Owner 看到发生了什么（同一 Task 换了 Session）。
+            if let Some(entries) = self.rollovers.get(&task.id) {
+                if !entries.is_empty() {
+                    egui::CollapsingHeader::new(format!("Rollover 历史（{}）", entries.len()))
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            for entry in entries {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.weak(format!(
+                                        "#{} {} → {} · {}{} · seq {}",
+                                        entry.sequence,
+                                        entry.from,
+                                        entry.to,
+                                        entry.reason,
+                                        if entry.cross_provider { " · 跨 Provider" } else { "" },
+                                        entry.at,
+                                    ));
+                                });
+                            }
+                            ui.weak("以上为同一 Task 的 Fresh Session 交接记录；Task ID 始终不变。");
+                        });
+                }
+            }
 
             egui::CollapsingHeader::new(format!("需求（{}）", task.requirements.len())).show(ui, |ui| {
                 for item in &task.requirements { ui.label(item.as_str()); }
@@ -759,5 +877,50 @@ mod tests {
         assert!(!ui.loaded, "context results do not replace Task overview");
         assert!(!ui.apply(&json!({ "taskId": "t", "attached": false, "action": "none" })));
         assert!(ui.context["t"].get("level").is_none());
+    }
+
+    #[test]
+    fn parses_rollover_history_entries() {
+        let value = json!({ "rollovers": [
+            { "sequence": 1, "from": { "provider": "dsh", "sessionId": "sA" },
+              "to": { "provider": "dsh", "sessionId": "sB" }, "reason": "context-threshold",
+              "crossProvider": false, "at": 1759651200000u64 },
+            { "sequence": 2, "from": { "provider": "dsh", "sessionId": "sB" },
+              "to": { "provider": "cetamesh", "sessionId": "sC" }, "reason": "provider-switch",
+              "crossProvider": true, "at": 1759651300000u64 },
+            { "sequence": 3 }
+        ]});
+        let rows = super::parse_rollover_history(&value);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].from, "dsh:sA");
+        assert_eq!(rows[0].to, "dsh:sB");
+        assert_eq!(rows[0].reason, "context-threshold");
+        assert!(!rows[0].cross_provider);
+        assert!(rows[1].cross_provider);
+        assert_eq!(rows[2].from, ":");
+        assert_eq!(super::parse_rollover_history(&json!({ "total": 0 })), Vec::new());
+    }
+
+    #[test]
+    fn rollover_history_response_binds_to_pending_request_order() {
+        let mut ui = super::TaskUi::default();
+        ui.pending_history.push("task-b".to_owned());
+        ui.pending_history.push("task-a".to_owned());
+        let payload = json!({ "rollovers": [ { "sequence": 4, "from": { "provider": "dsh", "sessionId": "s1" },
+            "to": { "provider": "dsh", "sessionId": "s2" }, "reason": "context-threshold", "crossProvider": false, "at": 1 } ]});
+        assert!(!ui.apply(&payload));
+        assert_eq!(ui.rollovers["task-a"].len(), 1, "响应无 taskId：按请求顺序（LIFO）关联");
+        ui.pending_history.clear();
+    }
+
+    #[test]
+    fn continuity_action_hints_cover_all_bands() {
+        assert_eq!(super::continuity_action_hint("none"), "正常");
+        assert_eq!(super::continuity_action_hint("checkpoint"), "建议生成 Checkpoint");
+        assert_eq!(super::continuity_action_hint("ready"), "寻求安全点（接近 rollover）");
+        assert_eq!(super::continuity_action_hint("rollover"), "达到 Rollover 阈值（将自动 Fresh Session）");
+        assert_eq!(super::continuity_action_hint("forced"), "Forced Rollover（临限强制）");
+        assert_eq!(super::continuity_action_hint("emergency"), "Emergency Rollover");
+        assert_eq!(super::continuity_action_hint("mystery"), "未知");
     }
 }
