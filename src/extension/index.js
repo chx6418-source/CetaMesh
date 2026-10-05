@@ -4,6 +4,7 @@ export { createExtensionRuntime } from './runtime.js';
 export { createExtensionInstaller } from './installer.js';
 export { createExtensionStore, EXTENSION_REGISTRY_VERSION } from './store.js';
 export { createExtensionHost } from './host.js';
+export { createProcessExtensionHost, createInProcessTransportPair } from './process-host.js';
 export { ENFORCED_PERMISSIONS, buildReview, isEnforced, permissionDelta, reviewSummaryLines, reviewToken } from './review.js';
 export {
   assertManifest,
