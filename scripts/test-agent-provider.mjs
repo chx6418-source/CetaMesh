@@ -1,7 +1,8 @@
 // 阶段 06 Agent Provider 验收测试。
 //
 // 覆盖：
-//   A. 契约：defineAgentProvider 显式 unsupported（checkpoint / handoff 拒绝）；
+//   A. 契约：defineAgentProvider 显式 unsupported（可选能力 archiveSession /
+//      nativeCheckpoint / nativeHandoff 拒绝，会话 2 改名对齐）；
 //   B. DSH 映射（注入 mock api，断言每个契约方法调用的端点与 payload 形状）；
 //   C. 优雅降级：DSH 不可达（死端口）时 health/status/createSession 结构化失败，进程不崩；
 //   D. 真机验收（DSH 在 127.0.0.1:3080 时执行）：createSession → send → follow 进度 →
@@ -44,15 +45,16 @@ function ok(name) { results.pass += 1; console.log(`PASS ${name}`); }
     }
   });
   const caps = provider.capabilities();
-  for (const name of AGENT_PROVIDER_METHODS) assert.ok(['createSession', 'send', 'cancel', 'status', 'contextUsage', 'checkpoint', 'resume', 'handoff', 'closeSession'].includes(name) || typeof provider[name] === 'function', `契约方法缺失：${name}`);
-  assert.equal(caps.supported.checkpoint, false);
-  assert.equal(caps.supported.handoff, false);
+  for (const name of AGENT_PROVIDER_METHODS) assert.ok(['createSession', 'send', 'cancel', 'status', 'contextUsage', 'resume', 'closeSession', 'nativeCheckpoint', 'nativeHandoff', 'archiveSession'].includes(name) || typeof provider[name] === 'function', `契约方法缺失：${name}`);
+  assert.equal(caps.supported.nativeCheckpoint, false);
+  assert.equal(caps.supported.nativeHandoff, false);
+  assert.equal(caps.supported.archiveSession, false);
   // 假 Provider 未实现扩展方法（follow/selectModel/health）→ 同样如实标记 unsupported。
-  assert.ok(caps.unsupported.includes('checkpoint') && caps.unsupported.includes('handoff'));
+  assert.ok(caps.unsupported.includes('nativeCheckpoint') && caps.unsupported.includes('nativeHandoff') && caps.unsupported.includes('archiveSession'));
   assert.ok(caps.unsupported.includes('follow') && caps.unsupported.includes('selectModel') && caps.unsupported.includes('health'));
-  await assert.rejects(() => provider.checkpoint({ sessionId: 'x' }), (e) => e.code === 'AGENT_UNSUPPORTED' && /Fake Agent/.test(e.message));
-  await assert.rejects(() => provider.handoff({}), (e) => e.code === 'AGENT_UNSUPPORTED');
-  ok('A1 契约填充与显式 unsupported（checkpoint/handoff）');
+  await assert.rejects(() => provider.nativeCheckpoint({ sessionId: 'x' }), (e) => e.code === 'AGENT_UNSUPPORTED' && /Fake Agent/.test(e.message));
+  await assert.rejects(() => provider.nativeHandoff({}), (e) => e.code === 'AGENT_UNSUPPORTED');
+  ok('A1 契约填充与显式 unsupported（archiveSession/nativeCheckpoint/nativeHandoff）');
 
   assert.deepEqual(normalizePromptContent('hi'), [{ type: 'text', text: 'hi' }]);
   assert.deepEqual(normalizePromptContent([{ type: 'text', text: 'a' }]), [{ type: 'text', text: 'a' }]);
@@ -94,10 +96,11 @@ function ok(name) { results.pass += 1; console.log(`PASS ${name}`); }
   assert.equal(created.sessionId, 'session-mock-1');
   assert.equal(created.model, 'deepseek-flash');
   assert.equal(created.modelBindingError, null);
-  // DSH 契约红线：唯一不支持的能力就是 checkpoint 与 handoff（实测无端点/无协议），
-  // 其余契约方法必须全部真实实现——不得为接口完整伪造能力，也不得漏报。
+  // DSH 契约红线：不支持的能力只有 archiveSession / nativeCheckpoint / nativeHandoff
+  //（实测无端点/无协议，会话 2 契约改名），其余契约方法必须全部真实实现——
+  // 不得为接口完整伪造能力，也不得漏报。
   const dshCaps = provider.capabilities();
-  assert.deepEqual([...dshCaps.unsupported].sort(), ['checkpoint', 'handoff']);
+  assert.deepEqual([...dshCaps.unsupported].sort(), ['archiveSession', 'nativeCheckpoint', 'nativeHandoff']);
   assert.equal(dshCaps.eventProtocol, 'dsh-session-events');
   ok('B1 createSession → session/create + 默认模型 selectModel');
 
@@ -150,10 +153,15 @@ function ok(name) { results.pass += 1; console.log(`PASS ${name}`); }
   const list = await service.execute({ method: 'agent.list', params: {} });
   assert.equal(list.providers.length, 1);
   assert.equal(list.providers[0].id, 'dsh');
-  assert.equal(list.providers[0].capabilities.supported.checkpoint, false);
+  assert.equal(list.providers[0].capabilities.supported.nativeCheckpoint, false);
   await assert.rejects(() => service.execute({ method: 'agent.status', params: { provider: 'dsh', sessionId: 'x' } }), (e) => e.code === 'PROVIDER_UNAVAILABLE' || e.code === 'PROVIDER_ERROR');
-  await assert.rejects(() => service.execute({ method: 'agent.checkpoint', params: { provider: 'dsh', sessionId: 'x' } }), (e) => e.code === 'AGENT_UNSUPPORTED');
-  await assert.rejects(() => service.execute({ method: 'agent.createSession', params: { provider: 'nope' } }), (e) => e.code === 'INVALID_PARAMS');
+  // 可选能力经 Broker 诚实包装：agent.nativeCheckpoint 返回 UNSUPPORTED 形状而非抛断。
+  const unsupported = await service.execute({ method: 'agent.nativeCheckpoint', params: { provider: 'dsh', sessionId: 'x' } });
+  assert.deepEqual(
+    { supported: unsupported.supported, reason: unsupported.reason },
+    { supported: false, reason: 'UNSUPPORTED' }
+  );
+  await assert.rejects(() => service.execute({ method: 'agent.createSession', params: { provider: 'nope' } }), (e) => e.code === 'AGENT_PROVIDER_UNKNOWN', '未知 Provider 结构化拒绝（会话 2 起专用错误码）');
   await assert.rejects(() => service.execute({ method: 'agent.nonsense', params: {} }), (e) => e.code === 'METHOD_NOT_FOUND');
   ok('C1 service 路由 / 未知 provider / 未知方法 / 透传 unsupported');
 

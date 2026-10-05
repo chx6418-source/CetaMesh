@@ -1,4 +1,5 @@
-// DSH Agent Provider（阶段 06）：把 DSH 0.1.5 Typert 网关映射到标准 AgentProvider 契约。
+// DSH Agent Provider（阶段 06；会话 2 起作为 Agent Broker 的第一个真实 Provider）：
+// 把 DSH 0.1.5 Typert 网关映射到标准 AgentProvider 契约。
 //
 // 复用现有 src/dsh-client.js 的 NodeApiClient（由 bridge 注入共享实例，不重写、不另建连接）。
 // 端点映射（均以本仓库真实调用与 2026-10-04 对运行中 DSH 的探测为准）：
@@ -12,8 +13,11 @@
 //   follow         → session/follow 流（turn/start / assistant/chunk / assistant/message / turn/end）
 //   selectModel    → session/selectModel
 //   health         → settings/describe（3s 超时；DSH 未启动时的优雅降级依据）
-//   checkpoint     → 不支持：DSH 无 session/checkpoint 端点（实测 HTTP 404），由契约桩显式拒绝
-//   handoff        → 不支持：尚无跨 Provider 交接协议，由契约桩显式拒绝
+//   archiveSession / nativeCheckpoint / nativeHandoff → 不支持：DSH 无对应端点
+//   （checkpoint 实测 HTTP 404、无跨 Provider 交接协议），由契约桩显式拒绝；
+//   Broker 包装为 { supported:false, reason:'UNSUPPORTED' }，绝不伪造。
+//
+// rolloverStrategy：DSH 无原生压缩/续接能力，上下文临限时的推荐策略是"开新会话"。
 import crypto from 'node:crypto';
 import { agentProviderError, defineAgentProvider, normalizePromptContent, AGENT_EVENT_PROTOCOL_DSH } from './agent-provider.js';
 import { selectDshSessionModel } from '../dsh-model-selection.js';
@@ -66,6 +70,12 @@ export function createDshAgentProvider({ api, defaults = {}, log = () => {} } = 
     id: 'dsh',
     label: 'DSH Agent',
     eventProtocol: AGENT_EVENT_PROTOCOL_DSH,
+    capabilityExtras: {
+      rolloverStrategy: {
+        preferred: 'fresh-session',
+        note: 'DSH 无原生压缩/续接端点：上下文临限时优先结束旧会话并开新会话（Bootstrap 结构化恢复）'
+      }
+    },
     methods: {
       async createSession({ cwd, model, reasoningEffort, modelProvider } = {}) {
         const request = {};
