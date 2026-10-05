@@ -15,10 +15,12 @@ mod workspace_ui;
 mod native_installer_ui;
 mod native_ui;
 mod supervisor;
+mod tray;
+mod ui_prefs;
 
 use std::env;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use core_launch::{CoreLaunchSpec, ResolveOptions};
@@ -111,7 +113,7 @@ impl SingleInstance {
     fn acquire() -> Result<Option<Self>, String> {
         use std::os::windows::ffi::OsStrExt;
         use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError};
-        use windows_sys::Win32::System::Threading::CreateMutexW;
+        use windows_sys::Win32::System::Threading::{CreateEventW, CreateMutexW, SetEvent};
 
         let mut name: Vec<u16> = std::ffi::OsStr::new("Local\\WhaleBridge.Desktop")
             .encode_wide()
@@ -128,6 +130,22 @@ impl SingleInstance {
         }
         if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
             unsafe { CloseHandle(handle) };
+            // A second launch is the user asking for the hidden window back. Signal the running
+            // instance and exit; the tray listener restores the window from the system tray.
+            let mut event_name: Vec<u16> =
+                std::ffi::OsStr::new("Local\\CetaMesh.Desktop.ShowWindow")
+                    .encode_wide()
+                    .collect();
+            event_name.push(0);
+            // SAFETY: NUL-terminated UTF-16 name; default attributes; auto-reset, unsignaled.
+            let event =
+                unsafe { CreateEventW(std::ptr::null(), 0, 0, event_name.as_ptr()) };
+            if !event.is_null() {
+                unsafe {
+                    SetEvent(event);
+                    CloseHandle(event);
+                }
+            }
             return Ok(None);
         }
         Ok(Some(Self(Some(handle))))
@@ -422,26 +440,72 @@ fn run_native_ui(paths: DesktopPaths) -> Result<(), String> {
     let (supervisor, pipe, _port) = start_supervisor(&paths)?;
     let supervisor = Arc::new(supervisor);
     let api = Arc::new(IpcClient::new(pipe));
+    let (prefs, prefs_warning) = ui_prefs::UiPrefs::load(&paths.data_dir);
+    if let Some(warning) = &prefs_warning {
+        supervisor::write_shell_log(&paths.data_dir, &format!("[ui-prefs] {warning}"));
+    }
+    let prefs = Arc::new(Mutex::new(prefs));
     let ui_supervisor = Arc::clone(&supervisor);
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("CetaMesh")
+        .with_min_inner_size([ui_prefs::MIN_WINDOW_WIDTH, ui_prefs::MIN_WINDOW_HEIGHT]);
+    match prefs.lock().expect("ui prefs lock").geometry {
+        Some(geometry) => {
+            viewport = viewport
+                .with_inner_size([geometry.width, geometry.height])
+                .with_position([geometry.x, geometry.y]);
+            if geometry.maximized {
+                viewport = viewport.with_maximized(true);
+            }
+        }
+        None => {
+            viewport = viewport.with_inner_size([
+                ui_prefs::DEFAULT_WINDOW_WIDTH,
+                ui_prefs::DEFAULT_WINDOW_HEIGHT,
+            ]);
+        }
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1180.0, 780.0])
-            .with_min_inner_size([920.0, 640.0])
-            .with_title("CetaMesh"),
+        viewport,
         ..Default::default()
     };
+    let prefs_for_ui = Arc::clone(&prefs);
+    let tray_data_dir = paths.data_dir.clone();
+    let ui_data_dir = paths.data_dir.clone();
+    let tray_supervisor = Arc::clone(&supervisor);
     let app_result = eframe::run_native(
         "CetaMesh",
         options,
         Box::new(move |creation_context| {
+            let tray = tray::TrayHandle::new(
+                Arc::clone(&tray_supervisor),
+                tray_data_dir.clone(),
+                creation_context.egui_ctx.clone(),
+            )
+            .map_err(|error| {
+                supervisor::write_shell_log(
+                    &tray_data_dir,
+                    &format!("[tray] {error}；本次运行没有托盘图标"),
+                );
+                error
+            })
+            .ok();
             Ok(Box::new(NativeUi::new(
                 api,
                 ui_supervisor,
                 creation_context.egui_ctx.clone(),
+                ui_data_dir,
+                prefs_for_ui,
+                tray,
             )))
         }),
     );
     supervisor.shutdown();
+    if let Ok(prefs) = prefs.lock() {
+        if let Err(error) = prefs.save(&paths.data_dir) {
+            supervisor::write_shell_log(&paths.data_dir, &format!("[ui-prefs] {error}"));
+        }
+    }
     app_result.map_err(|error| format!("原生主窗口启动失败：{error}"))
 }
 

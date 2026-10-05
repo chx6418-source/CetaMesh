@@ -445,6 +445,146 @@ try {
     }
   }
 
+  // ------------------- 4c. Stage 13：托盘 / 关闭语义 / 窗口偏好 / 元数据安全
+  {
+    const dataDir = path.join(tempRoot, 'stage13', 'data');
+    const port = await freePort();
+    writeConfig(dataDir, port);
+    const env = {
+      ...shellEnv(tempRoot, dataDir),
+      WHALEBRIDGE_CORE_MODE: 'development',
+      WHALEBRIDGE_REPO_ROOT: ROOT
+    };
+
+    // Representative Core metadata that the UI must never rewrite.
+    const sentinelFile = path.join(dataDir, 'state', 'task-memory-workspace-sentinel.json');
+    fs.mkdirSync(path.dirname(sentinelFile), { recursive: true });
+    const sentinelText = JSON.stringify({
+      tasks: [{ id: 'task-1', status: 'running' }],
+      memory: [{ id: 'memory-1', text: 'keep' }],
+      workspaces: [{ id: 'workspace-1', root: 'C:/work' }]
+    });
+    fs.writeFileSync(sentinelFile, sentinelText);
+    const configBefore = fs.readFileSync(path.join(dataDir, 'config.json'), 'utf8');
+
+    const titleOf = (pid) =>
+      spawnSync(
+        'powershell.exe',
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          `[Console]::OutputEncoding=[Text.Encoding]::UTF8; (Get-Process -Id ${pid} -ErrorAction SilentlyContinue).MainWindowTitle`
+        ],
+        { encoding: 'utf8', timeout: 60000 }
+      ).stdout.trim();
+    const waitFor = async (predicate, timeoutMs, label) => {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        const value = await predicate();
+        if (value) return value;
+        await new Promise((resolve) => setTimeout(resolve, 300));
+      }
+      throw new Error(`等待超时：${label}`);
+    };
+
+    const first = spawn(SHELL, [], { env, cwd: ROOT, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
+    let stderr = '';
+    first.stderr.on('data', (chunk) => {
+      stderr += String(chunk);
+    });
+    try {
+      const title = await waitFor(async () => titleOf(first.pid), 40000, 'Stage 13 窗口创建');
+      assert.match(title, /CetaMesh/, `Stage 13 窗口标题异常：'${title}'\nstderr: ${stderr}`);
+      const shellLogFile = path.join(dataDir, 'logs', 'desktop-shell.log');
+      const shellLog = () => (fs.existsSync(shellLogFile) ? fs.readFileSync(shellLogFile, 'utf8') : '');
+      await waitFor(
+        async () => /\[tray\] 系统托盘已创建/.test(shellLog()),
+        20000,
+        '系统托盘创建日志'
+      );
+      step('✅ Stage 13：真实窗口创建 + 系统托盘已创建');
+
+      await waitFor(
+        async () => fs.existsSync(path.join(dataDir, 'state', 'desktop-ui.json')),
+        20000,
+        '界面偏好落盘'
+      );
+      const prefs = JSON.parse(fs.readFileSync(path.join(dataDir, 'state', 'desktop-ui.json'), 'utf8'));
+      assert.equal(prefs.closeBehavior, 'hide-to-tray', '默认关闭行为应为隐藏到托盘');
+      assert.equal(typeof prefs.zoom, 'number');
+
+      const workerPid = Number.parseInt(
+        spawnSync(
+          'powershell.exe',
+          ['-NoProfile', '-NonInteractive', '-Command',
+           `(Get-CimInstance Win32_Process -Filter "ParentProcessId=${first.pid}" | Select-Object -First 1).ProcessId`],
+          { encoding: 'utf8', timeout: 60000 }
+        ).stdout.trim(),
+        10
+      );
+      assert.ok(Number.isInteger(workerPid) && workerPid > 0, `未找到 Core worker\nstderr: ${stderr}`);
+
+      // Closing the window hides to the tray; the shell and Core keep running.
+      spawnSync(
+        'powershell.exe',
+        ['-NoProfile', '-NonInteractive', '-Command',
+         `(Get-Process -Id ${first.pid}).CloseMainWindow() | Out-Null; 'closed'`],
+        { encoding: 'utf8', timeout: 60000 }
+      );
+      await waitFor(async () => (titleOf(first.pid) || '') === '', 15000, '窗口隐藏到托盘');
+      assert.ok(isRunning(first.pid) && isRunning(workerPid), '隐藏到托盘后壳与 Core 必须继续运行');
+      assert.match(shellLog(), /主窗口已隐藏到托盘；Core 与任务继续运行/);
+      step('✅ Stage 13：关闭窗口 → 隐藏到托盘，Core/任务继续运行');
+
+      // Launching the app again restores the hidden window instead of silently doing nothing.
+      const second = runShell([], env, 30000);
+      assert.equal(second.status, 0, `第二次启动应唤醒现有实例后退出：${second.output}`);
+      await waitFor(async () => /CetaMesh/.test(titleOf(first.pid) || ''), 15000, '从托盘恢复窗口');
+      assert.match(shellLog(), /再次启动应用：从托盘恢复显示主窗口/);
+      step('✅ Stage 13：再次启动应用 → 从托盘恢复窗口');
+
+      // UI crash + restart must not touch Core metadata or config.json bytes.
+      spawnSync('taskkill.exe', ['/PID', String(first.pid), '/F'], { encoding: 'utf8' });
+      await waitFor(async () => !isRunning(workerPid), 20000, 'worker 孤儿守卫退出');
+      // Re-launch with explicit dark theme + zoom preferences to prove they are actually applied.
+      const prefsFile = path.join(dataDir, 'state', 'desktop-ui.json');
+      const storedPrefs = JSON.parse(fs.readFileSync(prefsFile, 'utf8'));
+      storedPrefs.theme = 'dark';
+      storedPrefs.zoom = 1.1;
+      storedPrefs.closeBehavior = 'hide-to-tray';
+      fs.writeFileSync(prefsFile, JSON.stringify(storedPrefs, null, 2));
+      const relaunched = spawn(SHELL, [], { env, cwd: ROOT, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
+      try {
+        await waitFor(async () => /CetaMesh/.test(titleOf(relaunched.pid) || ''), 40000, '重启后窗口');
+        await waitFor(async () => /主题已应用：深色/.test(shellLog()), 15000, '深色主题应用日志');
+        assert.match(shellLog(), /界面缩放已应用：110%/, '界面缩放偏好应在启动时应用');
+        assert.match(shellLog(), /窗口几何已恢复：/, '窗口几何偏好应在启动时恢复');
+        assert.equal(
+          fs.readFileSync(sentinelFile, 'utf8'),
+          sentinelText,
+          'UI 重启不得改写 Task/Memory/Workspace 元数据'
+        );
+        assert.equal(
+          fs.readFileSync(path.join(dataDir, 'config.json'), 'utf8'),
+          configBefore,
+          'UI 重启不得改写 config.json'
+        );
+        step('✅ Stage 13：UI 强杀重启后 Task/Memory/Workspace 元数据与 config.json 字节不变');
+      } finally {
+        if (relaunched.exitCode === null) {
+          spawnSync('taskkill.exe', ['/PID', String(relaunched.pid), '/T', '/F'], { encoding: 'utf8' });
+        }
+        await new Promise((resolve) => setTimeout(resolve, 800));
+      }
+    } finally {
+      if (first.exitCode === null) {
+        spawnSync('taskkill.exe', ['/PID', String(first.pid), '/T', '/F'], { encoding: 'utf8' });
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  }
+
   // ------------------------ 4b. release 构建：Core 不得分配控制台窗口（否则每次启动弹黑框）
   // 只在 release 构建暴露：debug 的壳自身是控制台程序，子进程会继承控制台而不新建窗口。
   {

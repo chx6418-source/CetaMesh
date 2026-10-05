@@ -1,6 +1,56 @@
 # CetaMesh Desktop — PROJECT_STATE
 
-## Current authoritative snapshot — 2026-10-04（TASK-D1-001 Unified Config Service）
+## Current authoritative snapshot — 2026-10-05（阶段 13：Desktop UX / Windows 完整性）
+
+本快照取代下方 2026-10-04 D1 快照。本阶段把原生桌面壳从“功能齐全”推进到“可长期使用”：系统托盘、关闭语义、窗口/主题/缩放偏好、快捷键与中文输入安全、崩溃重启安全，并完成一次真实 Windows 冒烟。
+
+### 本机验收环境（真实记录，不推断）
+
+| 项 | 值 |
+| --- | --- |
+| OS | Windows 11 23H2，build 22631.6199（`HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion` 的 ProductName 仍为 Windows 10 Pro，属系统遗留值） |
+| DPI / 缩放 | AppliedDPI=120（125%） |
+| IME | `0804:{81D4E9C9-1D3B-41BC-9E6C-4B40BF79E35E}{FA550B04-5AD7-411F-A5AC-CA038EC515D7}`（微软拼音）+ `0409:00000409`（美式键盘） |
+| 构建 | `npm run desktop:build:debug` → `desktop-shell/target/debug/whalebridge-desktop.exe`（35,481,600 字节，SHA256 `9E94DD98A85F922C6E92BE757F77D5CCCC5A557CC12CBD2E7388EE293B98309F`） |
+| 运行数据 | 冒烟全部使用唯一临时目录；未触碰用户 config.json / DSH / SnowLuma |
+
+### 阶段 13 落盘内容
+
+- **系统托盘**（`desktop-shell/src/tray.rs`，tray-icon 0.23.1，本地缓存离线解析）：菜单含 显示主窗口 / 隐藏到托盘 / Core 状态（实时）/ 需要处理（任务与审批计数，有需要时变为可点击）/ 重启 Core / 打开日志目录 / 退出 CetaMesh（停止 Core 与任务）；左键单击切换显示/隐藏；使用 EXE 内嵌图标（资源 ID 1），加载失败时有确定性回退图标。
+- **关闭语义显式化**：默认“关闭主窗口 = 隐藏到托盘，Core 与任务继续运行”；Settings → 外观与窗口 可切换为“退出应用并停止 Core”。只有托盘“退出”、Ctrl+Q 或显式退出选项会走退出确认（列出正在生成的回复、未发送草稿、待处理任务），确认后停止 Core。
+- **再次启动 = 从托盘恢复**：第二个实例通过命名事件唤醒既有实例并恢复主窗口（`Local\CetaMesh.Desktop.ShowWindow`），不会留下第二个进程。
+- **窗口偏好持久化**（`desktop-shell/src/ui_prefs.rs`）：`state/desktop-ui.json` 保存 主题（跟随系统/浅色/深色）、缩放（0.8–1.6）、关闭行为、窗口几何（位置/尺寸/最大化）；原子写入（同目录临时文件 + rename），缺失/损坏/非法值一律回退默认且不阻塞启动。UI 只写这一个文件，不触碰 Task / Memory / Workspace 元数据。
+- **主题与可访问性**：深/浅色调色板与全局样式，跟随 OS 或手动选择；缩放支持 Ctrl+0 / Ctrl+= / Ctrl+- 与设置页按钮，启动时应用；窗口最小 900×620，宽度 < 1040 时侧边栏折叠为顶部紧凑导航；进入 Chat 自动聚焦输入框，对话框支持 Esc 关闭。
+- **快捷键**（F1 可查看列表）：Ctrl+1…Ctrl+7 切换 Chat/Tasks/Memory/Workspace/Settings/Diagnostics/Advanced；Ctrl+, 打开 Settings；Ctrl+Q 退出确认；Esc 关闭对话框；Enter 发送、Shift+Enter 换行。
+- **中文输入 / IME 安全**：仅当输入框获得焦点、未按 Shift、且本帧没有 IME preedit/commit 事件时 Enter 才发送（`should_send_on_enter` 纯函数 + 5 组单测），确认候选词不会误发；提示文案说明该行为。egui/winit 原生处理 IME 组合，本机已安装微软拼音。
+- **剪贴板与错误态**：输入框原生复制/粘贴；消息气泡提供“复制”；错误框新增“复制错误”；加载态（spinner + 文案）与空态沿用各页面既有实现。
+- **崩溃 / 重启安全**：UI 被强杀后 Core 通过孤儿守卫退出；重启 UI 后 Task/Memory/Workspace 哨兵文件与 config.json 字节不变（真实冒烟断言）。Core worker 异常或 IPC 不可用时，页面顶部出现红色恢复横幅：重启 Core / 重新检查 / 打开日志目录。
+
+### 阶段 13 验证（本机实测）
+
+| 检查 | 状态 | 说明 |
+| --- | --- | --- |
+| `cargo test --offline --manifest-path desktop-shell/Cargo.toml` | PASS | 86 passed（含新增 ui_prefs 4、tray 1、主题 1、快捷键/IME 2） |
+| `npm run desktop:check` | PASS | 0 error（7 个既有 dead-code/未用项 warning） |
+| `npm run test-desktop-shell` | PASS | 进程监管契约 + 真实窗口 + Stage 13 场景全部通过 |
+| Stage 13 真实窗口冒烟 | PASS | 真实窗口创建、系统托盘创建（Shell_NotifyIcon）、关闭→隐藏到托盘且 Core/worker 继续运行、再次启动→从托盘恢复、UI 强杀重启→元数据字节不变、无残留进程 |
+| 主题/缩放/几何启动应用 | PASS | 冒烟以 dark + 110% + 已保存几何重启，日志确认“主题已应用：深色 / 界面缩放已应用：110% / 窗口几何已恢复” |
+| 单实例唤醒 | PASS | 第二个实例退出码 0 且主窗口恢复（真实冒烟） |
+
+### 未验证 / PENDING_NATIVE_VERIFICATION
+
+- **Computer Use 在本会话不可用**（无 `node_repl` 工具、插件缓存中无 `@oai/sky`），因此纯视觉/鼠标走查未自动化：托盘图标的真实鼠标点击（菜单各项）、托盘菜单退出确认、深色主题观感、紧凑布局观感、中文 IME 候选窗交互均需人工确认。
+- 人工验收脚本：F1 查看快捷键；Ctrl+2 / Ctrl+1 切换页面；Settings → 外观与窗口 切换深色与缩放；拖动窗口到不同显示器后重启验证几何恢复；点击托盘图标左键隐藏/恢复、右键菜单逐项验证（含“退出”确认）；在 Chat 输入框用微软拼音输入候选词并确认不会误发送。
+- 多显示器：本机为单显示器 + 125% DPI；跨屏几何恢复逻辑有单测（允许负坐标、拒绝非法值），但未在双屏环境实测。
+- 未做 release 安装包 / 更新链路验收；本阶段只构建 debug 壳。
+
+### 下一阶段入口
+
+按 roadmap 继续（例如 TASK-D1-002 Named Pipe Security Audit）；本阶段的托盘、窗口偏好与退出语义作为后续所有桌面功能的基础设施复用。
+
+---
+
+## （历史）2026-10-04 快照 — TASK-D1-001 Unified Config Service
 
 本快照取代下方 D0 快照。本阶段完成 roadmap **TASK-D1-001**：统一配置服务（Unified Config Service）。
 

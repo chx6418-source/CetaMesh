@@ -7,17 +7,26 @@ use crate::chat_ui::{ChatUi, parse_catalog, parse_history, parse_sessions, parse
 use crate::memory_ui::MemoryUi;
 use crate::task_ui::TaskUi;
 use crate::mesh_ui::{MeshArea, MeshUi};
+use crate::tray::{TrayCommand, TrayHandle, TrayStatus};
+use crate::ui_prefs::{CloseBehavior, ThemePreference, UiPrefs};
 use crate::workspace_ui::WorkspaceUi;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::app_shell::{AppPage, LegacyTab as Tab, NavigationState, tabs_for};
 use crate::supervisor::{Status, Supervisor};
 use eframe::egui;
+use raw_window_handle::HasWindowHandle;
 use serde_json::{Value, json};
+
+/// The active shell theme, shared by the palette helpers and the global style.
+static DARK_THEME: AtomicBool = AtomicBool::new(false);
 
 /// Synchronous Core transport. Calls are only made on this module's worker thread.
 pub trait CoreApi: Send + Sync + 'static {
@@ -341,6 +350,39 @@ const PRESET_TARGETS: [PresetTarget; 4] = [
     PresetTarget::Learner,
 ];
 
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Ctrl+1 … Ctrl+7", "切换 Chat / Tasks / Memory / Workspace / Settings / Diagnostics / Advanced"),
+    ("Ctrl+,", "打开 Settings"),
+    ("F1", "显示/关闭本快捷键列表"),
+    ("Ctrl+0", "重置界面缩放"),
+    ("Ctrl+=", "放大界面"),
+    ("Ctrl+-", "缩小界面"),
+    ("Enter", "发送消息（输入框内；中文输入法组合完成前不会误发）"),
+    ("Shift+Enter", "在消息中换行"),
+    ("Ctrl+Q", "退出 CetaMesh（会先确认）"),
+    ("Esc", "关闭当前对话框"),
+];
+
+/// Ctrl+1 … Ctrl+7 map onto the product navigation in this order.
+fn page_for_shortcut_slot(slot: u8) -> Option<AppPage> {
+    match slot {
+        1 => Some(AppPage::Chat),
+        2 => Some(AppPage::Tasks),
+        3 => Some(AppPage::Memory),
+        4 => Some(AppPage::Workspace),
+        5 => Some(AppPage::Settings),
+        6 => Some(AppPage::Diagnostics),
+        7 => Some(AppPage::Advanced),
+        _ => None,
+    }
+}
+
+/// Enter sends only when the composer owns focus, Shift is not held, and no IME composition
+/// event was part of the same frame (so confirming a Chinese candidate never sends).
+fn should_send_on_enter(has_focus: bool, enter_pressed: bool, shift: bool, ime_active: bool) -> bool {
+    has_focus && enter_pressed && !shift && !ime_active
+}
+
 #[derive(Clone, Debug)]
 struct SlangForm {
     enabled: bool,
@@ -519,6 +561,25 @@ pub struct NativeUi {
     diagnostics_config: bool,
     diagnostics_paths: bool,
     diagnostics_services: bool,
+
+    prefs: Arc<Mutex<UiPrefs>>,
+    data_dir: PathBuf,
+    tray: Option<TrayHandle>,
+    tray_window_attached: bool,
+    window_hidden: bool,
+    hidden_notice_shown: bool,
+    exit_confirmed: bool,
+    quit_confirm: Option<String>,
+    shortcuts_open: bool,
+    /// Per-session chat drafts so switching sessions (or hiding to the tray) never loses text.
+    chat_drafts: HashMap<String, String>,
+    last_active_chat: Option<String>,
+    last_tray_status: Option<TrayStatus>,
+    toast: Option<(String, Instant)>,
+    last_prefs_sync: Instant,
+    last_page: AppPage,
+    applied_theme_dark: Option<bool>,
+    applied_zoom: Option<f32>,
 }
 
 #[derive(Clone, Copy)]
@@ -538,6 +599,13 @@ struct NativePalette {
 }
 
 fn native_palette() -> NativePalette {
+    if DARK_THEME.load(AtomicOrdering::Relaxed) {
+        return dark_palette();
+    }
+    light_palette()
+}
+
+fn light_palette() -> NativePalette {
     NativePalette {
         background: egui::Color32::from_rgb(244, 247, 247),
         surface: egui::Color32::WHITE,
@@ -551,6 +619,23 @@ fn native_palette() -> NativePalette {
         warning: egui::Color32::from_rgb(151, 102, 21),
         error: egui::Color32::from_rgb(174, 54, 49),
         error_bg: egui::Color32::from_rgb(253, 237, 234),
+    }
+}
+
+fn dark_palette() -> NativePalette {
+    NativePalette {
+        background: egui::Color32::from_rgb(18, 22, 24),
+        surface: egui::Color32::from_rgb(27, 33, 35),
+        surface_alt: egui::Color32::from_rgb(33, 40, 42),
+        border: egui::Color32::from_rgb(58, 70, 71),
+        text: egui::Color32::from_rgb(230, 237, 236),
+        muted: egui::Color32::from_rgb(152, 167, 165),
+        accent: egui::Color32::from_rgb(72, 190, 174),
+        accent_bg: egui::Color32::from_rgb(31, 58, 55),
+        success: egui::Color32::from_rgb(98, 201, 148),
+        warning: egui::Color32::from_rgb(226, 178, 84),
+        error: egui::Color32::from_rgb(240, 124, 112),
+        error_bg: egui::Color32::from_rgb(58, 32, 32),
     }
 }
 
@@ -598,18 +683,23 @@ fn native_style() -> egui::Style {
         .text_styles
         .insert(egui::TextStyle::Monospace, egui::FontId::monospace(13.0));
 
-    let mut visuals = egui::Visuals::light();
-    visuals.dark_mode = false;
+    let dark = DARK_THEME.load(AtomicOrdering::Relaxed);
+    let mut visuals = if dark {
+        egui::Visuals::dark()
+    } else {
+        egui::Visuals::light()
+    };
+    visuals.dark_mode = dark;
     visuals.override_text_color = Some(palette.text);
     visuals.weak_text_color = Some(palette.muted);
     visuals.panel_fill = palette.background;
-    visuals.window_fill = palette.background;
+    visuals.window_fill = palette.surface;
     visuals.window_stroke = egui::Stroke::new(1.0, palette.border);
     visuals.window_corner_radius = egui::CornerRadius::same(10);
-    visuals.faint_bg_color = egui::Color32::from_rgb(237, 243, 241);
-    visuals.extreme_bg_color = egui::Color32::from_rgb(255, 255, 255);
-    visuals.text_edit_bg_color = Some(egui::Color32::WHITE);
-    visuals.code_bg_color = egui::Color32::from_rgb(239, 243, 242);
+    visuals.faint_bg_color = palette.surface_alt;
+    visuals.extreme_bg_color = palette.surface;
+    visuals.text_edit_bg_color = Some(palette.surface);
+    visuals.code_bg_color = palette.surface_alt;
     visuals.hyperlink_color = palette.accent;
     visuals.warn_fg_color = palette.warning;
     visuals.error_fg_color = palette.error;
@@ -630,13 +720,13 @@ fn native_style() -> egui::Style {
         palette.border,
     );
     visuals.widgets.hovered = native_widget_visuals(
-        egui::Color32::from_rgb(232, 242, 239),
+        palette.accent_bg,
         palette.surface_alt,
         palette.text,
         palette.accent,
     );
     visuals.widgets.active = native_widget_visuals(
-        egui::Color32::from_rgb(209, 232, 226),
+        palette.accent_bg,
         palette.accent_bg,
         palette.text,
         palette.accent,
@@ -651,8 +741,28 @@ fn native_style() -> egui::Style {
 }
 
 fn configure_native_theme(context: &egui::Context) {
-    context.set_theme(egui::Theme::Light);
+    let dark = DARK_THEME.load(AtomicOrdering::Relaxed);
+    context.set_theme(if dark {
+        egui::Theme::Dark
+    } else {
+        egui::Theme::Light
+    });
     context.set_global_style(native_style());
+}
+
+/// Follow the stored theme preference (and the OS theme when set to `System`).
+fn sync_theme_preference(context: &egui::Context, preference: ThemePreference) {
+    let system_dark = context.system_theme() == Some(egui::Theme::Dark);
+    let dark = preference.resolves_to_dark(system_dark);
+    let previous = DARK_THEME.swap(dark, AtomicOrdering::Relaxed);
+    if previous != dark {
+        context.set_global_style(native_style());
+    }
+    context.set_theme(if dark {
+        egui::Theme::Dark
+    } else {
+        egui::Theme::Light
+    });
 }
 
 fn friendly_read_error(area: Area, error: &str) -> Option<&'static str> {
@@ -673,12 +783,39 @@ impl NativeUi {
         api: Arc<dyn CoreApi>,
         supervisor: Arc<Supervisor>,
         egui_context: egui::Context,
+        data_dir: PathBuf,
+        prefs: Arc<Mutex<UiPrefs>>,
+        tray: Option<TrayHandle>,
     ) -> Self {
+        let initial_prefs = prefs.lock().expect("ui prefs lock").clone();
+        let system_dark = egui_context.system_theme() == Some(egui::Theme::Dark);
+        DARK_THEME.store(
+            initial_prefs.theme.resolves_to_dark(system_dark),
+            AtomicOrdering::Relaxed,
+        );
+        match initial_prefs.geometry {
+            Some(geometry) => crate::supervisor::write_shell_log(
+                &data_dir,
+                &format!(
+                    "[ui] 窗口几何已恢复：{:.0}x{:.0} @ ({:.0},{:.0}){}",
+                    geometry.width,
+                    geometry.height,
+                    geometry.x,
+                    geometry.y,
+                    if geometry.maximized { "（最大化）" } else { "" }
+                ),
+            ),
+            None => crate::supervisor::write_shell_log(
+                &data_dir,
+                "[ui] 窗口几何：使用默认 1180x780（首帧后写回偏好）",
+            ),
+        }
         // Use installed system fonts as a fallback so the Chinese UI remains readable without
         // shipping a browser font stack. The app still uses egui's native text rendering.
         let _detected_fonts =
             egui_system_fonts::add_auto(&egui_context, egui_system_fonts::FontStyle::Sans);
         configure_native_theme(&egui_context);
+        egui_context.set_zoom_factor(initial_prefs.zoom);
         let (job_tx, job_rx) = mpsc::channel::<WorkerJob>();
         let (event_tx, event_rx) = mpsc::channel::<WorkerEvent>();
         let worker_context = egui_context.clone();
@@ -787,6 +924,24 @@ ApiCall::Family { method, params } => api.request(method, params),
             diagnostics_config: true,
             diagnostics_paths: false,
             diagnostics_services: false,
+
+            prefs,
+            data_dir,
+            tray,
+            tray_window_attached: false,
+            window_hidden: false,
+            hidden_notice_shown: false,
+            exit_confirmed: false,
+            quit_confirm: None,
+            shortcuts_open: false,
+            chat_drafts: HashMap::new(),
+            last_active_chat: None,
+            last_tray_status: None,
+            toast: None,
+            last_prefs_sync: Instant::now(),
+            last_page: AppPage::Chat,
+            applied_theme_dark: None,
+            applied_zoom: None,
         };
 
         // Start with read-only snapshots. The only initial write-like form request is also
@@ -1560,6 +1715,546 @@ ApiCall::Family { method, params } => api.request(method, params),
         }
     }
 
+    fn prefs_snapshot(&self) -> UiPrefs {
+        self.prefs.lock().expect("ui prefs lock").clone()
+    }
+
+    fn update_prefs(&mut self, update: impl FnOnce(&mut UiPrefs)) -> UiPrefs {
+        let snapshot = {
+            let mut prefs = self.prefs.lock().expect("ui prefs lock");
+            update(&mut prefs);
+            prefs.clone()
+        };
+        self.save_prefs_now();
+        snapshot
+    }
+
+    fn save_prefs_now(&self) {
+        let result = {
+            let prefs = self.prefs.lock().expect("ui prefs lock");
+            prefs.save(&self.data_dir)
+        };
+        if let Err(error) = result {
+            crate::supervisor::write_shell_log(&self.data_dir, &format!("[ui-prefs] {error}"));
+        }
+    }
+
+    fn save_geometry(&mut self, ctx: &egui::Context) {
+        let viewport = ctx.input(|input| input.viewport().clone());
+        let Some(rect) = viewport.outer_rect else {
+            return;
+        };
+        let maximized = viewport.maximized.unwrap_or(false);
+        let Some(geometry) = crate::ui_prefs::sanitize_geometry(
+            rect.min.x,
+            rect.min.y,
+            rect.width(),
+            rect.height(),
+            maximized,
+        ) else {
+            return;
+        };
+        let changed = {
+            let mut prefs = self.prefs.lock().expect("ui prefs lock");
+            if prefs.geometry == Some(geometry) {
+                false
+            } else {
+                prefs.geometry = Some(geometry);
+                true
+            }
+        };
+        if changed {
+            self.save_prefs_now();
+        }
+    }
+
+    fn quit_blockers(&self) -> Vec<String> {
+        let mut blockers = Vec::new();
+        let streaming = self
+            .chat
+            .turn
+            .as_ref()
+            .is_some_and(|turn| turn.state == "streaming" || turn.state == "cancelling");
+        if streaming {
+            blockers.push("有一条回复正在生成（退出会中断它）".to_owned());
+        }
+        let mut draft_count = self
+            .chat_drafts
+            .values()
+            .filter(|draft| !draft.trim().is_empty())
+            .count();
+        if !self.chat.input.trim().is_empty() {
+            draft_count += 1;
+        }
+        if draft_count > 0 {
+            blockers.push(format!("有 {draft_count} 条未发送的聊天草稿"));
+        }
+        if !self.task.attention.is_empty() {
+            blockers.push(format!(
+                "有 {} 个任务正在等待人工处理",
+                self.task.attention.len()
+            ));
+        }
+        blockers
+    }
+
+    fn request_quit(&mut self, ctx: &egui::Context, reason: &str) {
+        if self.exit_confirmed {
+            return;
+        }
+        if self.quit_blockers().is_empty() {
+            self.exit_confirmed = true;
+            crate::supervisor::write_shell_log(
+                &self.data_dir,
+                &format!("[ui] 退出应用：{reason}"),
+            );
+            self.save_geometry(ctx);
+            self.save_prefs_now();
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        } else {
+            self.quit_confirm = Some(reason.to_owned());
+        }
+    }
+
+    fn hide_to_tray(&mut self, ctx: &egui::Context) {
+        if self.tray.is_none() {
+            self.request_quit(ctx, "关闭主窗口");
+            return;
+        }
+        self.window_hidden = true;
+        if let Some(tray) = &self.tray {
+            tray.set_window_visible(false);
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        self.save_geometry(ctx);
+        self.save_prefs_now();
+        crate::supervisor::write_shell_log(
+            &self.data_dir,
+            "[ui] 主窗口已隐藏到托盘；Core 与任务继续运行",
+        );
+        if !self.hidden_notice_shown {
+            self.hidden_notice_shown = true;
+            self.toast = Some((
+                "已隐藏到托盘：Core 与任务继续运行；托盘菜单选择“退出”才会停止。".to_owned(),
+                Instant::now(),
+            ));
+        }
+    }
+
+    fn show_main_window(&mut self, ctx: &egui::Context) {
+        self.window_hidden = false;
+        if let Some(tray) = &self.tray {
+            tray.set_window_visible(true);
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+    }
+
+    fn handle_close_request(&mut self, ctx: &egui::Context) {
+        if !ctx.input(|input| input.viewport().close_requested()) {
+            return;
+        }
+        if self.exit_confirmed {
+            return;
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        let close_behavior = self.prefs_snapshot().close_behavior;
+        if self.tray.is_some() && close_behavior == CloseBehavior::HideToTray {
+            self.hide_to_tray(ctx);
+        } else {
+            self.request_quit(ctx, "关闭主窗口");
+        }
+    }
+
+    fn handle_tray_commands(&mut self, ctx: &egui::Context) {
+        let commands = match &self.tray {
+            Some(tray) => tray.poll(),
+            None => Vec::new(),
+        };
+        for command in commands {
+            match command {
+                TrayCommand::ShowWindow => self.show_main_window(ctx),
+                TrayCommand::HideWindow => self.hide_to_tray(ctx),
+                TrayCommand::RestartCore => {
+                    self.supervisor.request_restart();
+                    self.toast = Some(("已请求重启 Core…".to_owned(), Instant::now()));
+                }
+                TrayCommand::ExitRequested => self.request_quit(ctx, "托盘菜单选择退出"),
+            }
+        }
+    }
+
+    fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        use egui::{Key, Modifiers};
+        let mut target: Option<AppPage> = None;
+        if !ctx.egui_wants_keyboard_input() {
+            let keys = [
+                Key::Num1,
+                Key::Num2,
+                Key::Num3,
+                Key::Num4,
+                Key::Num5,
+                Key::Num6,
+                Key::Num7,
+            ];
+            for (index, key) in keys.iter().enumerate() {
+                if ctx.input_mut(|input| input.consume_key(Modifiers::CTRL, *key)) {
+                    target = page_for_shortcut_slot((index + 1) as u8);
+                }
+            }
+            if ctx.input_mut(|input| input.consume_key(Modifiers::CTRL, Key::Comma)) {
+                target = Some(AppPage::Settings);
+            }
+            if ctx.input_mut(|input| input.consume_key(Modifiers::CTRL, Key::Q)) {
+                self.request_quit(ctx, "快捷键 Ctrl+Q");
+            }
+            if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::F1)) {
+                self.shortcuts_open = true;
+            }
+            if self.quit_confirm.is_some()
+                && ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape))
+            {
+                self.quit_confirm = None;
+            } else if self.shortcuts_open
+                && ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape))
+            {
+                self.shortcuts_open = false;
+            }
+        }
+
+        // Zoom works even while typing, like a browser.
+        let current = self.prefs_snapshot().zoom;
+        let mut zoom: Option<f32> = None;
+        if ctx.input_mut(|input| input.consume_key(Modifiers::CTRL, Key::Num0)) {
+            zoom = Some(1.0);
+        }
+        if ctx.input_mut(|input| input.consume_key(Modifiers::CTRL, Key::Plus))
+            || ctx.input_mut(|input| input.consume_key(Modifiers::CTRL, Key::Equals))
+        {
+            zoom = Some(crate::ui_prefs::clamp_zoom(current + 0.1));
+        }
+        if ctx.input_mut(|input| input.consume_key(Modifiers::CTRL, Key::Minus)) {
+            zoom = Some(crate::ui_prefs::clamp_zoom(current - 0.1));
+        }
+        if let Some(zoom) = zoom {
+            let snapshot = self.update_prefs(|prefs| prefs.zoom = zoom);
+            ctx.set_zoom_factor(snapshot.zoom);
+        }
+        if let Some(page) = target {
+            self.navigation.select_page(page);
+        }
+    }
+
+    fn sync_theme_and_zoom(&mut self, ctx: &egui::Context) {
+        let prefs = self.prefs_snapshot();
+        let system_dark = ctx.system_theme() == Some(egui::Theme::Dark);
+        let dark = prefs.theme.resolves_to_dark(system_dark);
+        if self.applied_theme_dark != Some(dark) {
+            self.applied_theme_dark = Some(dark);
+            crate::supervisor::write_shell_log(
+                &self.data_dir,
+                &format!(
+                    "[ui] 主题已应用：{}（偏好：{}）",
+                    if dark { "深色" } else { "浅色" },
+                    prefs.theme.as_str()
+                ),
+            );
+        }
+        if self.applied_zoom != Some(prefs.zoom) {
+            self.applied_zoom = Some(prefs.zoom);
+            crate::supervisor::write_shell_log(
+                &self.data_dir,
+                &format!(
+                    "[ui] 界面缩放已应用：{}%",
+                    (prefs.zoom * 100.0).round() as i32
+                ),
+            );
+        }
+        sync_theme_preference(ctx, prefs.theme);
+        if (ctx.zoom_factor() - prefs.zoom).abs() > 0.001 {
+            ctx.set_zoom_factor(prefs.zoom);
+        }
+    }
+
+    fn sync_chat_draft(&mut self) {
+        if self.chat.active_id != self.last_active_chat {
+            if let Some(previous) = self.last_active_chat.clone() {
+                if self.chat.input.trim().is_empty() {
+                    self.chat_drafts.remove(&previous);
+                } else {
+                    self.chat_drafts.insert(previous, self.chat.input.clone());
+                }
+            }
+            self.last_active_chat = self.chat.active_id.clone();
+            self.chat.input = self
+                .chat
+                .active_id
+                .as_ref()
+                .and_then(|id| self.chat_drafts.get(id).cloned())
+                .unwrap_or_default();
+            self.chat.attachments.clear();
+        } else if let Some(active) = self.chat.active_id.clone() {
+            if self.chat.input.trim().is_empty() {
+                self.chat_drafts.remove(&active);
+            } else {
+                self.chat_drafts.insert(active, self.chat.input.clone());
+            }
+        }
+    }
+
+    fn tray_status(&self) -> TrayStatus {
+        let core = match self.core_online {
+            Some(true) => "已连接".to_owned(),
+            Some(false) => "不可用".to_owned(),
+            None => "正在启动…".to_owned(),
+        };
+        let mut details = Vec::new();
+        if !self.task.attention.is_empty() {
+            details.push(format!("{} 个任务", self.task.attention.len()));
+        }
+        if !self.pending_items.is_empty() {
+            details.push(format!("{} 项审批/问题", self.pending_items.len()));
+        }
+        let attention = if details.is_empty() {
+            None
+        } else {
+            Some(details.join("，"))
+        };
+        TrayStatus { core, attention }
+    }
+
+    fn update_tray(&mut self) {
+        let Some(tray) = &self.tray else {
+            return;
+        };
+        let status = self.tray_status();
+        if self.last_tray_status.as_ref() != Some(&status) {
+            tray.update_status(&status);
+            self.last_tray_status = Some(status);
+        }
+    }
+
+    fn open_logs(&self) {
+        let directory = crate::desktop_paths::log_dir(&self.data_dir);
+        crate::supervisor::write_shell_log(
+            &self.data_dir,
+            &format!("[ui] 打开日志目录 {}", directory.display()),
+        );
+        let _ = std::process::Command::new("explorer.exe")
+            .arg(directory)
+            .spawn();
+    }
+
+    fn show_core_attention_banner(&mut self, ui: &mut egui::Ui) {
+        let status = self.supervisor.status();
+        let core_offline = self.core_online == Some(false);
+        if !status.needs_attention() && !core_offline {
+            return;
+        }
+        let palette = native_palette();
+        egui::Frame::new()
+            .fill(palette.error_bg)
+            .stroke(egui::Stroke::new(1.0, palette.error))
+            .corner_radius(egui::CornerRadius::same(8))
+            .inner_margin(egui::Margin::symmetric(12, 10))
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!("Core 需要处理：{}", status.summary()))
+                            .color(palette.error)
+                            .strong(),
+                    );
+                    if ui.button("重启 Core").clicked() {
+                        self.supervisor.request_restart();
+                    }
+                    if ui.button("重新检查").clicked() {
+                        self.issue(Area::Overview, Operation::OverviewPing, ApiCall::Ping);
+                    }
+                    if ui.button("打开日志目录").clicked() {
+                        self.open_logs();
+                    }
+                });
+            });
+        ui.add_space(8.0);
+    }
+
+    fn show_toast(&mut self, ui: &mut egui::Ui) {
+        let Some((message, created)) = self.toast.clone() else {
+            return;
+        };
+        if created.elapsed() > Duration::from_secs(8) {
+            self.toast = None;
+            return;
+        }
+        let palette = native_palette();
+        egui::Frame::new()
+            .fill(palette.accent_bg)
+            .stroke(egui::Stroke::new(1.0, palette.accent))
+            .corner_radius(egui::CornerRadius::same(8))
+            .inner_margin(egui::Margin::symmetric(12, 8))
+            .show(ui, |ui| {
+                ui.label(egui::RichText::new(message).color(palette.text));
+            });
+        ui.add_space(8.0);
+    }
+
+    fn show_shortcuts_window(&mut self, ctx: &egui::Context) {
+        if !self.shortcuts_open {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new("键盘快捷键")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                for (keys, description) in SHORTCUTS {
+                    ui.horizontal(|ui| {
+                        ui.monospace(*keys);
+                        ui.label(*description);
+                    });
+                }
+            });
+        if !open {
+            self.shortcuts_open = false;
+        }
+    }
+
+    fn show_quit_confirm(&mut self, ctx: &egui::Context) {
+        let Some(reason) = self.quit_confirm.clone() else {
+            return;
+        };
+        let blockers = self.quit_blockers();
+        let mut cancel = false;
+        let mut quit = false;
+        egui::Window::new("退出 CetaMesh 前确认")
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label(egui::RichText::new(format!("触发：{reason}")).strong());
+                ui.label("退出会停止 Core；正在运行的任务与正在生成的回复将被中断。");
+                if !blockers.is_empty() {
+                    ui.separator();
+                    for blocker in &blockers {
+                        ui.label(format!("• {blocker}"));
+                    }
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("继续使用").clicked() {
+                        cancel = true;
+                    }
+                    if ui
+                        .button(
+                            egui::RichText::new("退出并停止 Core").color(native_palette().error),
+                        )
+                        .clicked()
+                    {
+                        quit = true;
+                    }
+                });
+            });
+        if cancel {
+            self.quit_confirm = None;
+        }
+        if quit {
+            self.quit_confirm = None;
+            self.exit_confirmed = true;
+            self.save_geometry(ctx);
+            self.save_prefs_now();
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
+    fn compact_page_button(&mut self, ui: &mut egui::Ui, page: AppPage) {
+        let selected = self.navigation.page == page;
+        if ui.selectable_label(selected, page.label()).clicked() {
+            self.navigation.select_page(page);
+        }
+    }
+
+    fn show_compact_nav(&mut self, ui: &mut egui::Ui) {
+        let palette = native_palette();
+        egui::Frame::new()
+            .fill(palette.surface)
+            .stroke(egui::Stroke::new(1.0, palette.border))
+            .corner_radius(egui::CornerRadius::same(8))
+            .inner_margin(egui::Margin::symmetric(10, 8))
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.strong("CetaMesh");
+                    ui.separator();
+                    for page in AppPage::PRIMARY {
+                        self.compact_page_button(ui, page);
+                    }
+                    ui.separator();
+                    for page in AppPage::SECONDARY {
+                        self.compact_page_button(ui, page);
+                    }
+                });
+            });
+    }
+
+    fn show_settings_appearance(&mut self, ui: &mut egui::Ui) {
+        let mut prefs = self.prefs_snapshot();
+        let mut changed = false;
+        ui.heading("外观与窗口");
+        ui.horizontal_wrapped(|ui| {
+            ui.label("主题：");
+            changed |= ui
+                .radio_value(&mut prefs.theme, ThemePreference::System, "跟随系统")
+                .changed();
+            changed |= ui
+                .radio_value(&mut prefs.theme, ThemePreference::Light, "浅色")
+                .changed();
+            changed |= ui
+                .radio_value(&mut prefs.theme, ThemePreference::Dark, "深色")
+                .changed();
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.label("界面缩放：");
+            if ui.small_button("－").clicked() {
+                prefs.zoom = crate::ui_prefs::clamp_zoom(prefs.zoom - 0.1);
+                changed = true;
+            }
+            ui.monospace(format!("{}%", (prefs.zoom * 100.0).round() as i32));
+            if ui.small_button("＋").clicked() {
+                prefs.zoom = crate::ui_prefs::clamp_zoom(prefs.zoom + 0.1);
+                changed = true;
+            }
+            if ui.small_button("重置").clicked() {
+                prefs.zoom = 1.0;
+                changed = true;
+            }
+            ui.small("快捷键：Ctrl+0 重置，Ctrl+= 放大，Ctrl+- 缩小");
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.label("关闭主窗口时：");
+            changed |= ui
+                .radio_value(
+                    &mut prefs.close_behavior,
+                    CloseBehavior::HideToTray,
+                    "隐藏到托盘，任务继续运行",
+                )
+                .changed();
+            changed |= ui
+                .radio_value(
+                    &mut prefs.close_behavior,
+                    CloseBehavior::Quit,
+                    "退出应用并停止 Core",
+                )
+                .changed();
+        });
+        ui.small("只有托盘菜单“退出”或上面的退出选项会停止 Core；隐藏到托盘不会。");
+        if ui.button("查看键盘快捷键（F1）").clicked() {
+            self.shortcuts_open = true;
+        }
+        if changed {
+            self.update_prefs(|stored| *stored = prefs);
+        }
+    }
+
     fn show_header(&self, ui: &mut egui::Ui) {
         let palette = native_palette();
         egui::Frame::new()
@@ -1914,16 +2609,28 @@ ApiCall::Family { method, params } => api.request(method, params),
                         }
                     });
                 }
-                let enter_send = ui
-                    .add(
-                        egui::TextEdit::multiline(&mut self.chat.input)
-                            .hint_text("输入消息；Enter 发送，Shift+Enter 换行")
-                            .desired_rows(3)
-                            .desired_width(f32::INFINITY),
-                    )
-                    .lost_focus()
-                    && ui.input(|input| input.key_pressed(egui::Key::Enter))
-                    && !ui.input(|input| input.modifiers.shift);
+                let composer = ui.add(
+                    egui::TextEdit::multiline(&mut self.chat.input)
+                        .id(egui::Id::new("cetamesh_chat_composer"))
+                        .hint_text("输入消息；Enter 发送，Shift+Enter 换行（中文输入法不会误发）")
+                        .desired_rows(3)
+                        .desired_width(f32::INFINITY),
+                );
+                // IME-safe Enter-to-send: the composer must own focus, Shift must not be held, and
+                // the same frame must not carry IME preedit/commit events. Confirming a Chinese
+                // candidate therefore never sends the message by accident.
+                let ime_active = ui.input(|input| {
+                    input
+                        .events
+                        .iter()
+                        .any(|event| matches!(event, egui::Event::Ime(_)))
+                });
+                let enter_send = should_send_on_enter(
+                    composer.has_focus(),
+                    ui.input(|input| input.key_pressed(egui::Key::Enter)),
+                    ui.input(|input| input.modifiers.shift),
+                    ime_active,
+                );
                 ui.horizontal(|ui| {
                     if streaming {
                         if ui.button("■ 停止").clicked() && !self.pending.contains(&Area::ChatStatus) {
@@ -1950,6 +2657,7 @@ ApiCall::Family { method, params } => api.request(method, params),
                                 });
                                 self.chat.input.clear();
                                 self.chat.attachments.clear();
+                                self.chat_drafts.remove(&id);
                                 self.issue_control(Area::Chat, Operation::ChatSend, "chat.send", payload);
                             }
                         }
@@ -2119,6 +2827,11 @@ ApiCall::Family { method, params } => api.request(method, params),
     }
 
     fn show_settings_page(&mut self, ui: &mut egui::Ui) {
+        // 阶段 13：外观、缩放与关闭行为的显式设置（含快捷键入口）。
+        self.show_settings_appearance(ui);
+        ui.add_space(10.0);
+        ui.separator();
+        ui.add_space(6.0);
         // 阶段 11：Settings 里的 Devices / Mesh 区域。
         // mesh 与 channel 分属两个 Area，因此同一帧可以各发一条请求（Area 互斥只作用于同一个 Area）。
         let mesh_actions = self.mesh.show(ui);
@@ -3338,6 +4051,9 @@ ApiCall::Family { method, params } => api.request(method, params),
                             .strong(),
                     );
                     ui.label(egui::RichText::new(error).color(palette.text));
+                    if ui.small_button("复制错误").clicked() {
+                        ui.ctx().copy_text(error.to_owned());
+                    }
                 });
                 if let Some(hint) = hint {
                     ui.label(egui::RichText::new(hint).color(palette.warning));
@@ -3407,21 +4123,62 @@ ApiCall::Family { method, params } => api.request(method, params),
 }
 
 impl eframe::App for NativeUi {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        if !self.tray_window_attached {
+            if let Some(tray) = &self.tray {
+                if let Ok(handle) = frame.window_handle() {
+                    if let raw_window_handle::RawWindowHandle::Win32(win32) = handle.as_raw() {
+                        tray.attach_window(win32.hwnd.get());
+                        self.tray_window_attached = true;
+                    }
+                }
+            }
+        }
+        self.handle_tray_commands(&ctx);
+        self.handle_shortcuts(&ctx);
+        if self.last_page != self.navigation.page {
+            self.last_page = self.navigation.page;
+            if self.navigation.page == AppPage::Chat {
+                // Keyboard-first flow: entering Chat focuses the composer for immediate typing/IME.
+                ctx.memory_mut(|memory| {
+                    memory.request_focus(egui::Id::new("cetamesh_chat_composer"));
+                });
+            }
+        }
+        self.sync_theme_and_zoom(&ctx);
+        self.handle_close_request(&ctx);
         self.receive_events();
-        self.maybe_poll_chat(ui.ctx());
+        self.sync_chat_draft();
+        self.maybe_poll_chat(&ctx);
         self.maybe_refresh_pending();
+        if self.last_prefs_sync.elapsed() >= Duration::from_secs(2) {
+            self.save_geometry(&ctx);
+            self.last_prefs_sync = Instant::now();
+        }
+        self.update_tray();
+
         let palette = native_palette();
+        let narrow = ui.available_width() < 1040.0;
         egui::Frame::new()
             .fill(palette.background)
             .inner_margin(egui::Margin::symmetric(16, 14))
             .show(ui, |ui| {
                 ui.horizontal_top(|ui| {
-                    self.show_sidebar(ui);
-                    ui.add_space(14.0);
+                    if !narrow {
+                        self.show_sidebar(ui);
+                        ui.add_space(14.0);
+                    }
                     ui.vertical(|ui| {
+                        if narrow {
+                            self.show_compact_nav(ui);
+                            ui.add_space(10.0);
+                        }
                         self.show_header(ui);
-                        ui.add_space(12.0);
+                        ui.add_space(8.0);
+                        self.show_core_attention_banner(ui);
+                        self.show_toast(ui);
+                        ui.add_space(4.0);
                         self.show_page_section_nav(ui);
                         ui.add_space(10.0);
                         egui::ScrollArea::vertical()
@@ -3438,7 +4195,9 @@ impl eframe::App for NativeUi {
                     });
                 });
             });
-        ui.ctx().request_repaint_after(Duration::from_millis(500));
+        self.show_shortcuts_window(&ctx);
+        self.show_quit_confirm(&ctx);
+        ctx.request_repaint_after(Duration::from_millis(500));
     }
 }
 
@@ -4238,23 +4997,32 @@ mod pending_ui_tests {
 
 #[cfg(test)]
 mod theme_tests {
-    use super::{Area, friendly_read_error, native_style};
+    use super::{Area, DARK_THEME, friendly_read_error, native_style};
     use eframe::egui::{self, Color32, TextStyle};
+    use std::sync::atomic::Ordering;
 
     #[test]
-    fn native_theme_uses_readable_text_and_touch_targets() {
-        let style = native_style();
+    fn native_theme_uses_readable_text_and_touch_targets_in_both_modes() {
+        DARK_THEME.store(false, Ordering::Relaxed);
+        let light = native_style();
+        assert!(!light.visuals.dark_mode, "light shell theme");
+        assert_eq!(light.spacing.item_spacing, egui::vec2(12.0, 10.0));
+        assert_eq!(light.spacing.button_padding, egui::vec2(10.0, 6.0));
+        assert!(light.spacing.interact_size.y >= 30.0);
+        assert_eq!(light.text_styles[&TextStyle::Body].size, 15.0);
+        assert_eq!(light.text_styles[&TextStyle::Small].size, 13.0);
+        assert_eq!(light.text_styles[&TextStyle::Heading].size, 26.0);
+        assert!(light.visuals.override_text_color.is_some());
+        assert!(light.visuals.weak_text_color.unwrap_or(Color32::BLACK).r() < 150);
+        assert_ne!(light.visuals.panel_fill, Color32::BLACK);
 
-        assert!(!style.visuals.dark_mode, "CetaMesh product pages use the light shell theme");
-        assert_eq!(style.spacing.item_spacing, egui::vec2(12.0, 10.0));
-        assert_eq!(style.spacing.button_padding, egui::vec2(10.0, 6.0));
-        assert!(style.spacing.interact_size.y >= 30.0);
-        assert_eq!(style.text_styles[&TextStyle::Body].size, 15.0);
-        assert_eq!(style.text_styles[&TextStyle::Small].size, 13.0);
-        assert_eq!(style.text_styles[&TextStyle::Heading].size, 26.0);
-        assert!(style.visuals.override_text_color.is_some());
-        assert!(style.visuals.weak_text_color.unwrap_or(Color32::BLACK).r() < 150);
-        assert_ne!(style.visuals.panel_fill, Color32::BLACK);
+        DARK_THEME.store(true, Ordering::Relaxed);
+        let dark = native_style();
+        assert!(dark.visuals.dark_mode, "dark shell theme");
+        assert!(dark.visuals.weak_text_color.unwrap_or(Color32::WHITE).r() > 100);
+        assert_ne!(dark.visuals.panel_fill, Color32::WHITE);
+        assert!(dark.visuals.override_text_color.is_some());
+        DARK_THEME.store(false, Ordering::Relaxed);
     }
 
     #[test]
@@ -4275,5 +5043,32 @@ mod theme_tests {
             friendly_read_error(Area::ModelCatalog, "Core IPC transport ECONNREFUSED"),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod interaction_tests {
+    use super::{AppPage, page_for_shortcut_slot, should_send_on_enter};
+
+    #[test]
+    fn navigation_shortcuts_cover_all_seven_pages() {
+        assert_eq!(page_for_shortcut_slot(1), Some(AppPage::Chat));
+        assert_eq!(page_for_shortcut_slot(2), Some(AppPage::Tasks));
+        assert_eq!(page_for_shortcut_slot(3), Some(AppPage::Memory));
+        assert_eq!(page_for_shortcut_slot(4), Some(AppPage::Workspace));
+        assert_eq!(page_for_shortcut_slot(5), Some(AppPage::Settings));
+        assert_eq!(page_for_shortcut_slot(6), Some(AppPage::Diagnostics));
+        assert_eq!(page_for_shortcut_slot(7), Some(AppPage::Advanced));
+        assert_eq!(page_for_shortcut_slot(0), None);
+        assert_eq!(page_for_shortcut_slot(8), None);
+    }
+
+    #[test]
+    fn enter_send_requires_focus_and_is_ime_safe() {
+        assert!(should_send_on_enter(true, true, false, false));
+        assert!(!should_send_on_enter(true, true, true, false), "Shift+Enter inserts a newline");
+        assert!(!should_send_on_enter(true, true, false, true), "IME composition must not send");
+        assert!(!should_send_on_enter(false, true, false, false), "composer must own focus");
+        assert!(!should_send_on_enter(true, false, false, false), "no Enter, no send");
     }
 }
