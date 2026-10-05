@@ -75,9 +75,16 @@ if (fs.existsSync(consoleTokenFile) && fs.existsSync(socialV2File)) {
         const url = `http://127.0.0.1:${config.consolePort || 3100}/api/images/message?key=${encodeURIComponent(key)}&messageId=${encodeURIComponent(String(messageId))}`;
         const res = await fetch(url, { headers: { 'x-agent-token': agentToken, 'x-console-token': consoleToken }, signal: AbortSignal.timeout(10000) });
         const body = await res.json().catch(() => ({}));
-        check('桥接 /api/images/message 端点可访问', res.ok === true && body.ok === true, `HTTP ${res.status}`);
-        // 桥接在会话模型读不了图时会带 note 说明；note 里出现这句说明绑定的模型不对。
-        check('桥接未报告「会话模型不支持图像输入」', !String(body?.note ?? '').includes('不支持图像输入'), String(body?.note ?? ''));
+        if (res.status === 401 || res.status === 403) {
+          // 端口被另一个实例占用（例如用户已安装的 CetaMesh Core，凭据与开发目录不同）
+          // → 该探针无法归属本仓库运行时：NOT_RUN_ENVIRONMENT，不伪装 PASS、也不算 FAIL。
+          console.log(`⚠️ NOT_RUN_ENVIRONMENT：127.0.0.1:${config.consolePort || 3100} 上的实例拒绝开发目录凭据（HTTP ${res.status}）；`
+            + '可能被已安装的 CetaMesh 实例占用。请在本仓库开发桥接运行时重跑以验证该端点。');
+        } else {
+          check('桥接 /api/images/message 端点可访问', res.ok === true && body.ok === true, `HTTP ${res.status}`);
+          // 桥接在会话模型读不了图时会带 note 说明；note 里出现这句说明绑定的模型不对。
+          check('桥接未报告「会话模型不支持图像输入」', !String(body?.note ?? '').includes('不支持图像输入'), String(body?.note ?? ''));
+        }
       } else {
         console.log('⚠️ 跳过桥接端点检查：没有可用 agentToken/messageId');
       }

@@ -628,19 +628,21 @@ try {
   step('✅ 旧入口：node src/core-entry.js --help 与原独立 MCP 文件（stdio 真实握手）仍可用');
 
   // ------------------------------------------------ 残留进程检查
+  // 只统计本测试产物的残留（临时目录副本）；用户已安装的
+  // %LOCALAPPDATA%\Programs\WhaleBridge 实例属于宿主环境条件，不是本测试的残留。
   const leftovers = spawnSync(
     'powershell.exe',
     [
       '-NoProfile',
       '-NonInteractive',
       '-Command',
-      `@(Get-CimInstance Win32_Process -Filter "Name='WhaleBridgeCore.exe'").Count`
+      `@(Get-CimInstance Win32_Process -Filter "Name='WhaleBridgeCore.exe'" | Where-Object { $_.ExecutablePath -like '*${tempRoot.replace(/'/g, "''")}*' }).Count`
     ],
     { encoding: 'utf8', timeout: 60000 }
   );
   const leftoverCount = Number.parseInt((leftovers.stdout ?? '0').trim(), 10) || 0;
-  assert.equal(leftoverCount, 0, `测试结束后仍有 ${leftoverCount} 个 WhaleBridgeCore.exe 进程残留`);
-  step('✅ 无遗留：测试结束后没有 WhaleBridgeCore.exe 进程残留');
+  assert.equal(leftoverCount, 0, `测试结束后仍有 ${leftoverCount} 个本测试 WhaleBridgeCore.exe 进程残留`);
+  step('✅ 无遗留：测试结束后没有本次测试产物的 WhaleBridgeCore.exe 进程残留');
 } finally {
   // 先确保所有子进程退出，再删临时目录：残留进程会占住数据目录与 exe 副本句柄，导致 EPERM。
   for (const child of spawnedChildren) await killQuietly(child);
