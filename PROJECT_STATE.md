@@ -33,6 +33,17 @@
 - DSH settings 命名空间中的旧值需要一次显式模式写入才会改写；运行时读取已按新模式工作。
 - workshop 默认沿用 DSH 内置 `router-standard`（与 closed-agent 同完整工具面）；专用 `cetamesh-workshop` preset 包待明确要挂载的工具清单后再内置。
 
+### 产物与本机验证（commit `9f394ae`）
+
+- 交付：`dist/app-1.0.0-rc.1-final`（buildId `1.0.0-rc.1+9f394ae`，dirty=false）；
+  单文件安装包 `dist/CetaMesh-Setup-1.0.0-rc.1.exe`，41,934,848 字节，
+  SHA256 `8776A13EC6951CE195DA7BF734A1CA674A6F588DB9F7C0F73693E053F4F7EE46`；
+  WhaleBridgeCore.exe `5579C33B3F315B48DEF3CF7B7BB1665743E2B5E8CFBA0D634B87D8BB49DE35C8`。
+- 本机安装已升级到 `9f394ae`（--stop-core，用户数据保留）并启动；`/api/status` 返回
+  `mode=social`，证明旧 `state/mode.json` 的 `reserved2` 已在运行时迁移。
+- 回归：架构 8 组、ControlService 迁移断言、core-entry、dsh-integration、desktop-shell（GUI）、
+  installer-package、release-candidate、cargo 86/86 全部 PASS。
+
 ## 补丁 — 2026-10-05 窗口排版与安装体验修复（commit `dc45fb1`）
 
 用户反馈：主窗口排版被裁切/遮挡；安装包被 Windows Defender 报 `Trojan:Win32/Bearfoos.A!ml`。
