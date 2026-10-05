@@ -94,7 +94,11 @@ export function createChatService({
   defaults,
   stateDir,
   now = () => Date.now(),
-  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  // 会话 2 / 自动 Context Monitoring：Agent/DSH 通道回合结束时上报 usage（真实优先，
+  // 否则字符估算）。由 bridge 注入（→ Agent Broker 回合结束事件 → Continuity）；
+  // Model Runtime 通道（非 Agent 会话）不上报。上报失败绝不影响回合机。
+  onTurnEnd = null
 }) {
   if (!api?.callEndpoint) throw new Error('chat-service 需要 DSH api 客户端');
   if (typeof controlExecute !== 'function') throw new Error('chat-service 需要 controlExecute（模型目录）');
@@ -460,6 +464,10 @@ export function createChatService({
   /** 回合终态：有文本就落盘 assistant 消息；取消后丢弃 DSH 会话以隔离迟到事件。 */
   function finalizeTurn(record, state) {
     const turn = state.turn;
+    // Agent/DSH 通道判定要在读取 state.modelTurn 之前：Model 通道的 finalize
+    // 发生在其 finally 之前（modelTurn 仍非空）。Model 通道不是 Agent 会话，不上报。
+    const isModelChannel = state.modelTurn != null;
+    const sessionId = record.dshSessionId;
     const text = turn.displayText ?? '';
     if (text.trim() || turn.state === 'done') {
       appendMessage(record.id, {
@@ -473,6 +481,23 @@ export function createChatService({
         ...(turn.state === 'error' ? { error: turn.error ?? '回合异常' } : {}),
         ...(turn.state === 'cancelled' ? { cancelled: true } : {})
       });
+    }
+    // 自动 Context Monitoring（会话 2）：Agent/DSH 会话回合结束 → 真实 usage 优先
+    // （事件携带），否则字符估算（Continuity 明确标记 estimated）。火后不管。
+    if (!isModelChannel && sessionId && typeof onTurnEnd === 'function') {
+      const providerId = record.config.agentProvider && record.config.agentProvider !== AGENT_PROVIDER_DISABLED
+        ? record.config.agentProvider
+        : 'dsh';
+      try {
+        Promise.resolve(onTurnEnd({
+          provider: providerId,
+          sessionId,
+          usage: turn.usage ?? null,
+          promptChars: Number(state.promptChars) || 0,
+          outputChars: text.length,
+          source: 'chat'
+        })).catch(() => {});
+      } catch { /* 上报绝不影响回合机 */ }
     }
     turn.state = turn.state === 'done' ? 'idle-done' : turn.state;
     state.turn = null;
@@ -666,6 +691,7 @@ export function createChatService({
   async function startTurn(record, state, promptText, { attachments = [], sourceText } = {}) {
     state.messageTexts = [];
     state.chunkBuffer = '';
+    state.promptChars = promptText.length;
     state.turn = { id: crypto.randomUUID(), state: 'streaming', displayText: '', error: null, usage: null, routing: null };
     const agentProviderId = record.config.agentProvider ?? null;
     try {

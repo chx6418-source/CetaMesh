@@ -81,7 +81,8 @@ import { createRouterService } from './router/index.js';
 import { createMemoryService } from './memory/service.js';
 import { createWorkspaceService } from './workspace/index.js';
 import { createTaskService } from './task/service.js';
-import { createContinuityService, createDshAgentProvider } from './continuity/service.js';
+import { createContinuityService, createWorkspaceReconciler } from './continuity/index.js';
+import { gitDiff, gitHead, gitStatus } from './workspace/tools.js';
 import { createDefaultAgentService } from './agent/index.js';
 import { createExtensionService } from './extension/service.js';
 import { createMeshService } from './mesh/service.js';
@@ -2015,13 +2016,15 @@ async function main() {
     });
     // Provider API Key 存储（本地凭据，掩码返回；Model Runtime 直连与连通性测试共用）。
     const providerSecrets = createProviderSecrets({ root: DATA_ROOT });
-    // Agent Provider（阶段 06）：标准契约层 + DSH 首个实现；经 agent.* 私有方法族暴露。
-    // 与 continuity 的窄接口 provider 各自独立（后续由 continuity 委托到本层收敛）。
+    // Agent Provider（阶段 06；会话 2 收口为 Broker）：标准契约层 + 注册表 + Broker +
+    // DSH 首个实现；经 agent.* 私有方法族暴露。Chat / Task / Continuity 一律只依赖
+    // Broker，不再各自持有 DSH 通道。
     const agentService = createDefaultAgentService({
       api,
       defaults: { provider: cfg.dsh.provider, model: cfg.dsh.model, reasoningEffort: cfg.dsh.reasoningEffort },
       log
     });
+    const agentBroker = agentService.broker;
     process.once('exit', () => agentService.close());
     // Model Runtime（会话 1）：普通聊天直连 Model Provider，不再要求 DSH 运行。
     // DeepSeek / OpenAI / OpenAI 兼容共享 OpenAI-compatible 实现；Key 只在调用时经
@@ -2070,7 +2073,10 @@ async function main() {
       modelRuntime,
       router: routerService,
       defaults: { provider: cfg.dsh.provider, model: cfg.dsh.model, reasoningEffort: cfg.dsh.reasoningEffort },
-      stateDir: STATE_DIR
+      stateDir: STATE_DIR,
+      // 会话 2 / 自动 Context Monitoring：Agent/DSH 通道回合结束 → Broker 事件 →
+      // Continuity observeAgentTurn（接线在 continuityService 创建之后注册）。
+      onTurnEnd: (payload) => agentBroker.reportTurnEnd(payload)
     });
     process.once('exit', () => chatService.close());
     // 统一 Memory Runtime（阶段 04）：与 Chat 同级的私有方法族 memory.*。
@@ -2093,13 +2099,36 @@ async function main() {
       stateDir: STATE_DIR,
       audit: (event) => log(`Workspace ${event.action}（${event.workspaceId ?? 'none'}）`)
     });
-    // Continuity Runtime（阶段 09）：Context Rollover / Agent Handoff。
-    // DSH 是当前唯一的 AgentProvider 实现；注册表为未来多 Provider 预留。
+    // Continuity Runtime v2（阶段 09；会话 2）：Context Rollover / Agent Handoff /
+    // 自动 Fresh Session。唯一会话通道是 Agent Broker（DSH 只是第一个 Provider）；
+    // Workspace Reconciliation 经只读适配器使用 workspace 登记与 git 只读动词。
+    const continuityReconciler = createWorkspaceReconciler({
+      resolveWorkspace: async (workspaceId) => workspaceService.describeWorkspace(workspaceId),
+      gitStatus: (root) => gitStatus(root),
+      gitHead: (root) => gitHead(root),
+      gitDiffSummary: async (root) => {
+        const diff = await gitDiff(root, { statOnly: true });
+        return diff?.output ?? null;
+      },
+      fileExists: (root, relPath) => {
+        // 只做存在性检查；收敛在 root 内，防止 relevantFiles 越界探测。
+        const resolvedRoot = path.resolve(root);
+        const target = path.resolve(resolvedRoot, String(relPath ?? ''));
+        if (target !== resolvedRoot && !target.startsWith(resolvedRoot + path.sep)) return false;
+        return fs.existsSync(target);
+      }
+    });
     const continuityService = createContinuityService({
       taskRuntime: taskService.runtime,
       stateDir: STATE_DIR,
-      dshProvider: createDshAgentProvider({ api, defaults: { provider: cfg.dsh.provider, model: cfg.dsh.model, reasoningEffort: cfg.dsh.reasoningEffort } }),
+      agentBroker,
+      reconciler: continuityReconciler,
+      log
     });
+    // 回合结束自动上报：Broker 事件 → Continuity（记录真实 usage / 估算 →
+    // evaluate → 达阈值且绑定 Task 时自动 Fresh Session Rollover）。
+    agentBroker.onTurnEnd((payload) => continuityService.runtime.observeAgentTurn(payload)
+      .catch((error) => log(`Continuity 回合观察失败：${String(error?.message ?? error)}`)));
     // 本地扩展体系（阶段 10）：扩展只在用户本地导入，能力与权限均需显式声明与批准。
     const extensionService = createExtensionService({ stateDir: STATE_DIR });
     // Device Mesh（阶段 11）：Desktop 作为标准 CetaMesh Node；mesh/carrier 与 QQ 通道解耦。

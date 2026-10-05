@@ -1,11 +1,14 @@
-// 阶段 09 验收：Context Rollover 与 Agent Handoff。
-// fixture AgentProvider + 隔离 stateDir + 真实 TaskRuntime（store 落盘、乐观锁 expectedRev）。
-// 验证：模拟低阈值强制 rollover；Task/Workspace/Progress 不丢；新 Session 可继续；无重复执行；跨 Provider Handoff。
+// 阶段 09 验收（会话 2 移植到 Agent Broker）：Context Rollover 与 Agent Handoff。
+// fixture AgentProvider（正式契约，经 Broker）+ 隔离 stateDir + 真实 TaskRuntime。
+// 验证：模拟低阈值强制 rollover；Task/Workspace/Progress 不丢；新 Session 可继续；
+// 无重复执行；跨 Provider Handoff；Bootstrap 结构化恢复（不复制聊天历史）。
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createTaskRuntime } from '../src/task/runtime.js';
-import { createProviderRegistry } from '../src/continuity/provider.js';
+import { defineAgentProvider } from '../src/agent/agent-provider.js';
+import { createAgentProviderRegistry } from '../src/agent/registry.js';
+import { createAgentBroker } from '../src/agent/broker.js';
 import { createContinuityService } from '../src/continuity/service.js';
 import { bandFor, normalizePacket } from '../src/continuity/types.js';
 
@@ -19,33 +22,50 @@ function ok(label) { step += 1; console.log(`✅ [${step}] ${label}`); }
 
 function mockProvider(id, log, options = {}) {
   let seq = 0;
-  return {
+  return defineAgentProvider({
     id,
-    defaults: { model: `mock-model-${id}`, reasoningEffort: 'max' },
-    async createContextSession({ taskId, bootstrapPrompt }) {
-      if (options.gate?.blocked) {
-        await new Promise((resolve) => { options.gate.release = resolve; });
+    label: `Mock ${id}`,
+    methods: {
+      async createSession() {
+        if (options.gate?.blocked) {
+          await new Promise((resolve) => { options.gate.release = resolve; });
+        }
+        seq += 1;
+        log.push({ kind: 'create', provider: id, seq });
+        return { sessionId: `${id}-s${seq}`, providerId: id };
+      },
+      async send({ sessionId, content }) {
+        log.push({ kind: 'prompt', sessionId, text: content });
+        return { accepted: true };
+      },
+      async cancel(sessionId) {
+        log.push({ kind: 'cancel', sessionId: sessionId?.sessionId ?? sessionId });
+        return { cancelled: true };
+      },
+      async status() {
+        return { running: false };
+      },
+      async contextUsage() {
+        return { available: false };
+      },
+      async resume({ sessionId }) {
+        return { resumed: true, sessionId };
+      },
+      async closeSession({ sessionId }) {
+        log.push({ kind: 'archive', sessionId });
+        return { archived: true, supported: true, sessionId };
+      },
+      async selectModel({ sessionId, model }) {
+        return { sessionId, selected: { model } };
+      },
+      async health() {
+        return { available: true, provider: id };
+      },
+      follow() {
+        throw Object.assign(new Error('mock 无事件流'), { code: 'AGENT_UNSUPPORTED' });
       }
-      seq += 1;
-      log.push({ kind: 'create', provider: id, taskId, bootstrapPrompt, seq });
-      return { sessionId: `${id}-s${seq}`, providerId: id };
-    },
-    async sendPrompt(sessionId, text) {
-      log.push({ kind: 'prompt', sessionId, text });
-      return { accepted: true };
-    },
-    async cancel(sessionId) {
-      log.push({ kind: 'cancel', sessionId });
-      return { cancelled: true };
-    },
-    async archiveSession(sessionId) {
-      log.push({ kind: 'archive', sessionId });
-      return { archived: true, supported: true, sessionId };
-    },
-    estimateTokens({ promptChars = 0, outputChars = 0 }) {
-      return Math.ceil((promptChars + outputChars) / 4);
     }
-  };
+  });
 }
 
 /** 每组独立 stateDir；task 写操作统一带最新 rev（store 乐观锁）。 */
@@ -54,13 +74,14 @@ function setup({ policy, gate } = {}) {
   const dir = fs.mkdtempSync(path.join(stateRoot, 'case-'));
   const taskRuntime = createTaskRuntime({ stateDir: dir });
   const rev = (id) => taskRuntime.get({ id }).task.rev;
-  const registry = createProviderRegistry();
+  const registry = createAgentProviderRegistry();
   const alpha = mockProvider('alpha', log, { gate });
   const beta = mockProvider('beta', log);
   registry.register(alpha);
   registry.register(beta);
-  const service = createContinuityService({ taskRuntime, stateDir: dir, providers: registry, policy });
-  return { service, runtime: service.runtime, taskRuntime, log, rev, dir };
+  const broker = createAgentBroker({ registry });
+  const service = createContinuityService({ taskRuntime, stateDir: dir, agentBroker: broker, policy });
+  return { service, runtime: service.runtime, broker, taskRuntime, log, rev, dir };
 }
 
 // ── 1. 阈值带与 evaluate：70% 只建议 checkpoint 不切换（workplan D6-014 要求） ──
@@ -106,7 +127,7 @@ function setup({ policy, gate } = {}) {
   runtime.setPolicy({ rolloverPercent: 5, forcedPercent: 8, preparePercent: 3 });
   runtime.monitor.record('alpha:alpha-s1', { inputTokens: 1000, windowTokens: 10000 });
   const verdict = runtime.evaluate({ taskId: task.id });
-  assert.equal(verdict.action, 'rollover', '低阈值下必须判定 rollover');
+  assert.ok(['rollover', 'forced'].includes(verdict.action), '低阈值下必须判定自动 rollover（10% ≥ forced 8% → forced）');
 
   const result = await runtime.rollover({ taskId: task.id, reason: 'context-threshold' });
   assert.equal(result.from.sessionId, 'alpha-s1');
@@ -126,14 +147,14 @@ function setup({ policy, gate } = {}) {
   assert.equal(after.status, 'running', 'rollover 不改变任务状态');
   assert.equal(after.checkpoint.nextAction, '实现 CSV writer', 'checkpoint.nextAction 指向待办');
 
-  // 新 Session 能继续：bootstrap 是结构化恢复说明，含目标/待办/决策，明示不重做
-  const createCall = log.filter((entry) => entry.kind === 'create').pop();
-  assert.ok(createCall.bootstrapPrompt.includes('[CetaMesh Task 恢复]'));
-  assert.ok(createCall.bootstrapPrompt.includes('重写导出器'));
-  assert.ok(createCall.bootstrapPrompt.includes('实现 CSV writer'));
-  assert.ok(createCall.bootstrapPrompt.includes('不要重做'));
-  assert.ok(createCall.bootstrapPrompt.includes('采用流式写入'));
-  assert.ok(createCall.bootstrapPrompt.includes('从这里继续'));
+  // 新 Session 能继续：bootstrap 是结构化恢复说明（经 Broker send），含目标/待办/决策
+  const bootstrap = log.filter((entry) => entry.kind === 'prompt').pop();
+  assert.ok(bootstrap.text.includes('[CetaMesh Task 恢复]'));
+  assert.ok(bootstrap.text.includes('重写导出器'));
+  assert.ok(bootstrap.text.includes('实现 CSV writer'));
+  assert.ok(bootstrap.text.includes('不要重做'));
+  assert.ok(bootstrap.text.includes('采用流式写入'));
+  assert.ok(bootstrap.text.includes('从这里继续'));
 
   // agentHistory：旧记录 detach、新记录 attach（Task 视角的一次交接）
   assert.equal(after.agentHistory.length, 2);
@@ -160,7 +181,7 @@ function setup({ policy, gate } = {}) {
   runtime.setPolicy({ rolloverPercent: 5 });
   runtime.monitor.record('alpha:alpha-s1', { inputTokens: 999, windowTokens: 10000 });
 
-  // 第一次 rollover 卡在 createContextSession（gate.blocked）→ 互斥窗口
+  // 第一次 rollover 卡在 createSession（gate.blocked）→ 互斥窗口
   const first = runtime.rollover({ taskId: task.id, reason: 'context-threshold' });
   await new Promise((resolve) => setTimeout(resolve, 40));
   await assert.rejects(
@@ -178,14 +199,14 @@ function setup({ policy, gate } = {}) {
   assert.equal(second.sequence, 2);
   assert.equal(runtime.history({ taskId: task.id }).total, 2);
   const after = taskRuntime.get({ id: task.id }).task;
-  assert.equal(after.currentAgent.sessionId, done.to.sessionId === after.currentAgent.sessionId ? second.to.sessionId : second.to.sessionId);
+  assert.equal(after.currentAgent.sessionId, second.to.sessionId);
   assert.equal(after.agentHistory.length, 3, '两次 rollover = 三条 agentHistory');
   ok('无重复执行：并发互斥 + sequence 递增 + agentHistory 完整');
 }
 
-// ── 4. 跨 Provider Handoff：alpha → beta（未来多 Provider 的架构路径） ────────
+// ── 4. 跨 Provider Handoff：alpha → beta（同一 Broker 内寻址） ────────────────
 {
-  const { runtime, taskRuntime, log, rev } = setup();
+  const { runtime, broker, taskRuntime, log, rev } = setup();
   const task = taskRuntime.create({ goal: '跨 provider 迁移' });
   taskRuntime.attachAgent({ id: task.id, expectedRev: rev(task.id), provider: 'alpha', sessionId: 'alpha-s9' });
   const result = await runtime.rollover({ taskId: task.id, reason: 'provider-switch', targetProvider: 'beta' });
@@ -194,12 +215,13 @@ function setup({ policy, gate } = {}) {
   const after = taskRuntime.get({ id: task.id }).task;
   assert.equal(after.currentAgent.provider, 'beta', 'Task 挂到新 Provider，ID 不变');
   assert.equal(after.agentHistory[0].provider, 'alpha');
-  const bootstrap = log.filter((entry) => entry.kind === 'create' && entry.provider === 'beta').pop();
-  assert.ok(bootstrap.bootstrapPrompt.includes('跨 provider 迁移'), '新 Provider 收到同一结构化恢复说明');
+  const bootstrap = log.filter((entry) => entry.kind === 'prompt').pop();
+  assert.ok(bootstrap.text.includes('跨 provider 迁移'), '新 Provider 收到同一结构化恢复说明');
   await assert.rejects(
     runtime.rollover({ taskId: task.id, targetProvider: 'ghost' }),
-    (error) => error.code === 'PROVIDER_NOT_FOUND'
+    (error) => error.code === 'AGENT_PROVIDER_UNKNOWN'
   );
+  void broker;
   ok('跨 Provider Handoff：同 packet、Task ID 不变、未注册 Provider 明确拒绝');
 }
 
@@ -216,7 +238,11 @@ function setup({ policy, gate } = {}) {
   const guarded = createContinuityService({
     taskRuntime,
     stateDir: path.join(stateRoot, 'guarded'),
-    providers: (() => { const r = createProviderRegistry(); r.register(mockProvider('alpha', guardedLog)); return r; })(),
+    agentBroker: (() => {
+      const r = createAgentProviderRegistry();
+      r.register(mockProvider('alpha', guardedLog));
+      return createAgentBroker({ registry: r });
+    })(),
     canRollover: () => false
   });
   taskRuntime.attachAgent({ id: task.id, expectedRev: rev(task.id), provider: 'alpha', sessionId: 'alpha-s1' });
@@ -230,16 +256,26 @@ function setup({ policy, gate } = {}) {
   assert.equal(packet.coding.branch, null);
   assert.deepEqual(packet.relevantFiles, []);
   assert.equal(packet.workspace, null);
+  assert.deepEqual(packet.memoryRefs, [], 'Checkpoint v2：无 memoryRefs 时如实空数组');
   ok('无 Agent / 不安全点拒绝 / packet 校验收敛');
 }
 
 // ── 6. IPC 服务白名单与默认阈值 ──────────────────────────────────────────────
 {
   const { taskRuntime, rev } = setup();
-  const service = createContinuityService({ taskRuntime, stateDir: path.join(stateRoot, 'ipc'), providers: (() => { const r = createProviderRegistry(); r.register(mockProvider('alpha', [])); return r; })() });
+  const service = createContinuityService({
+    taskRuntime,
+    stateDir: path.join(stateRoot, 'ipc'),
+    agentBroker: (() => {
+      const r = createAgentProviderRegistry();
+      r.register(mockProvider('alpha', []));
+      return createAgentBroker({ registry: r });
+    })()
+  });
   const policy = await service.execute({ method: 'continuity.policy.get' });
   assert.equal(policy.policy.rolloverPercent, 85, '默认阈值对齐 spec（85 = preferred rollover）');
   assert.equal(policy.policy.preparePercent, 70);
+  assert.equal(policy.policy.autoRollover, true, '默认自动 rollover 开启');
   await service.execute({ method: 'continuity.policy.set', params: { policy: { rolloverPercent: 60 } } });
   const updated = await service.execute({ method: 'continuity.policy.get' });
   assert.equal(updated.policy.rolloverPercent, 60);

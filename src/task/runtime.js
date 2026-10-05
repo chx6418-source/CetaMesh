@@ -176,6 +176,19 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory 
   }
 
   // ── Agent Provider / Session 绑定（切换 Provider 不新建 Task） ──────────
+  /** 只读反查：按当前绑定的 Agent (provider, sessionId) 找任务；找不到返回 null。 */
+  function findByAgent({ provider, sessionId } = {}) {
+    const wantedProvider = normalizeProvider(provider);
+    const wantedSession = typeof sessionId === 'string' ? sessionId.trim() : '';
+    if (!wantedProvider || !wantedSession) return null;
+    for (const task of store.listAll()) {
+      if (task.currentAgent?.provider === wantedProvider && task.currentAgent?.sessionId === wantedSession) {
+        return task;
+      }
+    }
+    return null;
+  }
+
   function attachAgent({ id, expectedRev, provider, sessionId, note } = {}) {
     const normalizedProvider = normalizeProvider(provider);
     if (!normalizedProvider) throw taskError('INVALID_PROVIDER', 'attachAgent 需要 provider');
@@ -408,6 +421,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory 
     create,
     get,
     list,
+    findByAgent,
     update,
     remove,
     setProgress,
