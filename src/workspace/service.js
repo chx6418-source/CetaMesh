@@ -195,7 +195,7 @@ export function createWorkspaceService({ stateDir, now = () => Date.now(), audit
 
     'workspace.git.diff': async (p) => {
       const entry = requireWorkspace(p);
-      const result = await gitDiff(entry.root, { cached: p?.cached === true, context: p?.context });
+      const result = await gitDiff(entry.root, { cached: p?.cached === true, context: p?.context, excludeSensitive: p?.excludeSensitive === true });
       record(entry, String(p?.actor ?? 'user'), 'git.diff', '');
       return result;
     },

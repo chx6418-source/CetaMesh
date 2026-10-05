@@ -190,11 +190,21 @@ export function fileSearch(rootReal, { query = '', glob = '', includeHidden = fa
 
 // ── Git（只读直接执行；commit 由 service 层按策略审批后调用） ────────────────
 
-function gitRun(cwd, args, { timeoutMs = GIT_TIMEOUT_MS } = {}) {
+async function gitRun(cwd, args, { timeoutMs = GIT_TIMEOUT_MS } = {}) {
+  // Git's clean/process filters execute commands even for status/diff. Enumerate
+  // configuration without running worktree conversions, then disable every driver.
+  const keys = await new Promise((resolve, reject) => {
+    execFile('git', ['config', '--null', '--name-only', '--get-regexp', '^filter\\..*\\.(clean|smudge|process|required)$'],
+      { cwd, windowsHide: true, timeout: timeoutMs, maxBuffer: GIT_MAX_BUFFER }, (error, stdout) => {
+        if (error && error.code !== 1) { reject(error); return; }
+        resolve(String(stdout ?? '').split('\0').filter(Boolean));
+      });
+  });
+  const filters = keys.flatMap(key => ['-c', key + (key.endsWith('.required') ? '=false' : '=')]);
   return new Promise((resolve, reject) => {
     execFile(
       'git',
-      args,
+      ['-c', 'core.fsmonitor=false', '-c', `core.hooksPath=${process.platform === 'win32' ? 'NUL' : '/dev/null'}`, ...filters, ...args],
       {
         cwd,
         windowsHide: true,
@@ -252,8 +262,8 @@ export async function gitStatus(rootReal) {
   return { isRepo: true, branch, dirty: entries.length > 0, entries };
 }
 
-export async function gitDiff(rootReal, { cached = false, context = 3, statOnly = false } = {}) {
-  const args = ['diff', '--no-color'];
+export async function gitDiff(rootReal, { cached = false, context = 3, statOnly = false, excludeSensitive = false } = {}) {
+  const args = ['diff', '--no-color', '--no-ext-diff', '--no-textconv'];
   if (statOnly) {
     // 摘要模式（--stat）：给 Continuity / Handoff Packet 的 diff 摘要用，不携带全文。
     args.push('--stat');
@@ -261,6 +271,14 @@ export async function gitDiff(rootReal, { cached = false, context = 3, statOnly 
     args.push(`-U${Math.max(0, Math.min(64, Number(context) || 0))}`);
   }
   if (cached) args.push('--cached');
+  if (excludeSensitive) args.push('--', '.', ...[
+    '**/.env', '**/.env.*', '**/.env/**',
+    '**/.git/**', '**/.ssh/**', '**/.aws/**',
+    '**/credentials', '**/credentials.*', '**/credentials/**',
+    '**/secret', '**/secret.*', '**/secret/**',
+    '**/secrets', '**/secrets.*', '**/secrets/**',
+    '**/id_rsa', '**/id_ed25519'
+  ].map(pattern => `:(exclude,icase,glob)${pattern}`));
   let out;
   try {
     out = await gitRun(rootReal, args);

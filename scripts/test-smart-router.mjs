@@ -145,6 +145,8 @@ function classify(text, params = {}) {
   );
   const classifyResult = await service.execute({ method: 'router.classify', params: { text: '修改这个项目并跑测试' } });
   assert.equal(classifyResult.decision.class, 'project');
+  const toolClassify = await service.execute({ method: 'router.classify', params: { text: 'what time is it?' } });
+  assert.deepEqual(toolClassify.decision.signals?.tool, ['time'], 'Smart runtime needs the classified signal to select a registered Capability');
   assert.equal(classifyResult.decision.costPolicy, 'agent-first', '未显式传策略时使用持久化策略');
   const explicit = await service.execute({ method: 'router.classify', params: { text: '你好', costPolicy: 'economy' } });
   assert.equal(explicit.decision.costPolicy, 'economy');

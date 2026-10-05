@@ -31,6 +31,10 @@ export function normalizeDecision(decision) {
     resolvedRoute: decision.resolvedRoute ?? decision.route,
     agentIntent: decision.agentIntent === true,
     capabilityIntent: decision.capabilityIntent === true,
+    signals: {
+      project: Array.isArray(decision.signals?.project) ? decision.signals.project.slice(0, 12) : [],
+      tool: Array.isArray(decision.signals?.tool) ? decision.signals.tool.slice(0, 12) : []
+    },
     costPolicy: decision.costPolicy,
     agentEnabled: decision.agentEnabled !== false,
     fallbackReason: decision.fallbackReason ?? null,

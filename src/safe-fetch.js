@@ -211,14 +211,16 @@ function requestOnce(url, ip, maxChars = 50000) {
   });
 }
 
-export async function safeFetch(urlString, maxChars = 50000) {
+export async function safeFetch(urlString, maxChars = 50000, { authorizeUrl = null } = {}) {
   const MAX_REDIRECTS = 5;
+  if (authorizeUrl) authorizeUrl(new URL(urlString));
   let { url, ip } = await validateFetchUrl(urlString);
   for (let i = 0; i <= MAX_REDIRECTS; i++) {
     const result = await requestOnce(url, ip, maxChars);
     if ([301, 302, 303, 307, 308].includes(result.statusCode)) {
       if (!result.redirect) throw new Error(`重定向缺少 Location: ${result.statusCode}`);
       const next = new URL(result.redirect, url).toString();
+      if (authorizeUrl) authorizeUrl(new URL(next));
       ({ url, ip } = await validateFetchUrl(next));
       continue;
     }

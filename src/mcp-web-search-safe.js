@@ -362,6 +362,15 @@ async function sogouSearch(query) {
   return { query, engine: 'sogou', results };
 }
 
+export async function searchWeb(query) {
+  const clean = sanitizeSearchQuery(query);
+  if (!clean) throw Object.assign(new Error('Search query is empty'), { code: 'INVALID_QUERY' });
+  let result;
+  try { result = await googleSearch(clean); } catch { /* existing backup */ }
+  if (!result || result.results.length === 0) result = await sogouSearch(clean);
+  return result;
+}
+
 server.tool(
   'web_search',
   '只读联网搜索（主 Google，失败自动备用 Sogou，无 Bing）。返回 {engine, query, results:[{title,url}]}。仅用于查资料/网络用语/事实确认，不执行任何本地操作。建议对最相关结果再用 web_fetch 打开正文阅读。',
