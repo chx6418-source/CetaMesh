@@ -254,7 +254,15 @@ try {
   assert.ok(fs.existsSync(path.join(installDir, 'WhaleBridge.exe')));
   assert.ok(fs.existsSync(path.join(installDir, 'WhaleBridgeCore.exe')));
   assertNoWebUiHtmlArtifacts(listFiles(path.join(installDir, 'resources')), 'installed Core resources');
-  step(`✅ 安装（中文+空格路径）：程序与资源就位 → ${installDir}`);
+  const installedBuildInfo = JSON.parse(fs.readFileSync(path.join(installDir, 'build-info.json'), 'utf8'));
+  assert.equal(installedBuildInfo.version, releaseManifest.version, 'build-info 版本应与发行清单一致');
+  assert.ok(
+    /^[0-9a-f]{7,40}$/i.test(String(installedBuildInfo.commit ?? '')),
+    `build-info 必须记录 commit SHA：${installedBuildInfo.commit}`
+  );
+  step(
+    `✅ 安装（中文+空格路径）：程序与资源就位；build-info ${installedBuildInfo.version} @ ${String(installedBuildInfo.commitShort ?? installedBuildInfo.commit).slice(0, 12)} → ${installDir}`
+  );
 
   // 预置隔离配置，避免回落到 3100（用户真实的桥接正在用那个端口）
   const port = await freePort();

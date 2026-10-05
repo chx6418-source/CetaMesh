@@ -15,14 +15,58 @@ export const UPDATE_MANIFEST_VERSION = 1;
 export const UPDATE_CHANNELS = Object.freeze(['stable', 'beta']);
 
 /** semver 主次修订比较（与其它模块同一语义；放在这里避免 update 反向依赖 extension）。 */
-export function compareVersions(a, b) {
-  const pa = String(a).split('-')[0].split('.').map((n) => Number(n) || 0);
-  const pb = String(b).split('-')[0].split('.').map((n) => Number(n) || 0);
-  for (let i = 0; i < 3; i += 1) {
-    const diff = (pa[i] || 0) - (pb[i] || 0);
-    if (diff !== 0) return diff > 0 ? 1 : -1;
+function parseVersion(value) {
+  const raw = String(value ?? '').trim();
+  const withoutBuild = raw.split('+')[0];
+  const hyphen = withoutBuild.indexOf('-');
+  const core = hyphen >= 0 ? withoutBuild.slice(0, hyphen) : withoutBuild;
+  const preRelease = hyphen >= 0 ? withoutBuild.slice(hyphen + 1) : '';
+  return {
+    numbers: core.split('.').map((n) => Number.parseInt(n, 10) || 0),
+    preRelease: preRelease ? preRelease.split('.') : []
+  };
+}
+
+function comparePreRelease(a, b) {
+  if (a.length === 0 && b.length === 0) return 0;
+  // A released version has higher precedence than any of its pre-releases.
+  if (a.length === 0) return 1;
+  if (b.length === 0) return -1;
+  const length = Math.max(a.length, b.length);
+  for (let i = 0; i < length; i += 1) {
+    const left = a[i];
+    const right = b[i];
+    if (left === undefined) return -1; // fewer identifiers = lower precedence
+    if (right === undefined) return 1;
+    const leftNumeric = /^\d+$/.test(left);
+    const rightNumeric = /^\d+$/.test(right);
+    if (leftNumeric && rightNumeric) {
+      const diff = Number(left) - Number(right);
+      if (diff !== 0) return diff > 0 ? 1 : -1;
+    } else if (leftNumeric) {
+      return -1; // numeric identifiers have lower precedence
+    } else if (rightNumeric) {
+      return 1;
+    } else if (left !== right) {
+      return left > right ? 1 : -1;
+    }
   }
   return 0;
+}
+
+/**
+ * Semantic version comparison with pre-release precedence:
+ * 1.0.0-rc.1 < 1.0.0-rc.2 < 1.0.0. Build metadata (`+...`) is ignored.
+ * Malformed segments degrade to 0 instead of throwing, matching the previous parser.
+ */
+export function compareVersions(a, b) {
+  const pa = parseVersion(a);
+  const pb = parseVersion(b);
+  for (let i = 0; i < 3; i += 1) {
+    const diff = (pa.numbers[i] || 0) - (pb.numbers[i] || 0);
+    if (diff !== 0) return diff > 0 ? 1 : -1;
+  }
+  return comparePreRelease(pa.preRelease, pb.preRelease);
 }
 
 export function updateError(code, message) {

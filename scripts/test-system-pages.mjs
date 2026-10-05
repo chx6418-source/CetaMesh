@@ -23,7 +23,7 @@ import {
 import { createAboutInfo, createAboutService, readShellVersion, PRODUCT_NAME } from '../src/about/index.js';
 import {
   createUpdateChecker, createUpdateService, signManifest, validateManifest,
-  verifyManifestSignature, UPDATE_MANIFEST_VERSION
+  verifyManifestSignature, UPDATE_MANIFEST_VERSION, compareVersions
 } from '../src/update/index.js';
 import { createRedactingSink, redactLogLine, redactObject, redactText } from '../src/logging/index.js';
 import { startIpcProtocol, IPC_PROTOCOL_VERSION } from '../src/control/ipc-protocol.js';
@@ -58,10 +58,10 @@ function makeManifest(over = {}) {
   const base = {
     schemaVersion: UPDATE_MANIFEST_VERSION,
     channel: 'stable',
-    version: '0.2.0',
+    version: '1.0.0-rc.2',
     releasedAt: '2026-10-04T00:00:00Z',
     notes: ['修复已知问题', '新增 About 与更新页面'],
-    downloadUrl: 'https://github.com/chx6418-source/whalebridge/releases/download/v0.2.0/CetaMesh-Setup.exe',
+    downloadUrl: 'https://github.com/chx6418-source/whalebridge/releases/download/v1.0.0-rc.2/CetaMesh-Setup.exe',
     sha256: 'a'.repeat(64),
     ...over
   };
@@ -152,6 +152,13 @@ try {
   fs.rmSync(withBuildInfo, { recursive: true, force: true });
 
   // ── 4. Update：安全边界 ───────────────────────────────────────────────
+  equal('版本比较：预发布递增', compareVersions('1.0.0-rc.2', '1.0.0-rc.1'), 1);
+  equal('版本比较：正式版高于预发布', compareVersions('1.0.0', '1.0.0-rc.2'), 1);
+  equal('版本比较：预发布仍高于更早的正式版', compareVersions('1.0.0-rc.1', '0.9.9'), 1);
+  equal('版本比较：相同版本为 0', compareVersions('1.0.0-rc.1', '1.0.0-rc.1'), 0);
+  equal('版本比较：忽略 build metadata', compareVersions('1.0.0+build.5', '1.0.0'), 0);
+  equal('版本比较：数字标识小于字母标识', compareVersions('1.0.0-1', '1.0.0-alpha'), -1);
+
   const checker = createUpdateChecker({ currentVersion: pkg.version, fetchImpl: fetchOnce(makeManifest()) });
   equal('更新能力边界：不下载、不执行', [checker.capabilities().canDownload, checker.capabilities().canExecuteInstaller], [false, false]);
   check('更新器没有 download/execute/install 入口',

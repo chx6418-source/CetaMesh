@@ -165,6 +165,20 @@ try {
     fs.mkdirSync(path.join(tempRoot, 'staging-v2'), { recursive: true });
     fs.copyFileSync(SHELL, path.join(tempRoot, 'staging-v2', 'WhaleBridge.exe'));
 
+    // 升级必须保留全部用户数据：设置、Memory、Tasks、Workspace metadata 与 Provider secrets。
+    const upgradeSentinels = {
+      'settings.json': JSON.stringify({ providers: { deepseek: { apiKey: 'SENTINEL-PROVIDER-SECRET' } } }),
+      'state/task-store.json': JSON.stringify({ tasks: [{ id: 'task-1', status: 'running' }] }),
+      'state/memory-store.json': JSON.stringify({ memory: [{ id: 'memory-1', text: 'keep' }] }),
+      'state/workspace-metadata.json': JSON.stringify({ workspaces: [{ id: 'workspace-1', root: 'C:/external-work' }] }),
+      'state/continuity/handoff.json': JSON.stringify({ sequence: 3 })
+    };
+    for (const [relative, text] of Object.entries(upgradeSentinels)) {
+      const file = path.join(sandbox.dataDir, relative);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, text);
+    }
+
     // 新版本换一份 payload，其余沙箱参数不变（去掉 sandboxArgs 里的 --payload-core，改用 v2）
     const argsWithoutPayload = sandboxArgs().filter((item, index, all) => all[index - 1] !== '--payload-core');
     const upgraded = spawnSync(
@@ -185,7 +199,14 @@ try {
       JSON.stringify({ consolePort: 4321 }),
       '升级绝不能覆盖用户配置'
     );
-    step('✅ 升级：程序与 resources 更新到新版本，用户 config.json 原样保留');
+    for (const [relative, text] of Object.entries(upgradeSentinels)) {
+      assert.equal(
+        fs.readFileSync(path.join(sandbox.dataDir, relative), 'utf8'),
+        text,
+        `升级必须字节级保留 ${relative}`
+      );
+    }
+    step('✅ 升级：程序与 resources 更新，config / 设置 / Memory / Tasks / Workspace metadata / Provider secrets 字节级保留');
   }
 
   // ---------------------------------------------------------------- 3. 修复
@@ -314,12 +335,25 @@ try {
     // 重新装一份，再 --remove-data
     const reinstalled = runInstaller(['--install']);
     assert.equal(reinstalled.status, 0, reinstalled.output);
+    // 用户 Workspace 位于数据目录之外：--remove-data 只允许删除数据目录，绝不能碰工作区文件。
+    const externalWorkspace = path.join(tempRoot, '用户 工作区', '项目');
+    fs.mkdirSync(externalWorkspace, { recursive: true });
+    const workspaceFile = path.join(externalWorkspace, 'README.md');
+    fs.writeFileSync(workspaceFile, '# 用户工作区：卸载不得删除');
+    fs.writeFileSync(
+      path.join(sandbox.dataDir, 'config.json'),
+      JSON.stringify({ consolePort: 4321, sessionCwd: externalWorkspace })
+    );
     const purge = runInstaller(['--uninstall', '--remove-data']);
     assert.equal(purge.status, 0, purge.output);
     assert.match(purge.stdout, /永久删除|危险/, '应给出删数据的警告');
     assert.ok(!fs.existsSync(sandbox.dataDir), '--remove-data 应删除数据目录');
     assert.ok(!fs.existsSync(sandbox.installDir), '安装目录应被清空删除');
-    step('✅ 彻底卸载：--remove-data 删除数据目录并清空安装目录');
+    assert.ok(
+      fs.existsSync(workspaceFile),
+      '--remove-data 不得删除数据目录之外的用户 Workspace'
+    );
+    step('✅ 彻底卸载：--remove-data 删除数据目录并清空安装目录；数据目录之外的用户 Workspace 原样保留');
   }
 
   // ------------------------------------------------------------- 9. 残留检查

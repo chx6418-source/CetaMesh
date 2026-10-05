@@ -152,6 +152,39 @@ for (const relative of listFiles(CORE_DIR)) {
 fs.copyFileSync(SHELL_EXE, path.join(BUILD_DIR, 'WhaleBridge.exe'));
 log(`  WhaleBridge.exe ${mb(shellSize)}，payload/ ${listFiles(payloadDir).length} 个文件 ${mb(directorySize(payloadDir))}`);
 
+// 构建来源信息：About 页面在打包运行时读取 <资源根>/build-info.json。
+const gitOutput = (args) => {
+  const result = spawnSync('git', args, {
+    cwd: ROOT,
+    encoding: 'utf8',
+    timeout: 5000,
+    windowsHide: true
+  });
+  return result.status === 0 ? String(result.stdout ?? '').trim() : '';
+};
+const commit = gitOutput(['rev-parse', 'HEAD']);
+const commitShort = gitOutput(['rev-parse', '--short', 'HEAD']);
+const dirty = gitOutput(['status', '--porcelain']).length > 0;
+const buildInfo = {
+  product: 'CetaMesh',
+  version: PKG.version,
+  commit: commit || 'unknown',
+  commitShort: commitShort || 'unknown',
+  dirty,
+  buildTime: new Date().toISOString(),
+  buildId: `${PKG.version}+${commitShort || 'unknown'}${dirty ? '.dirty' : ''}`,
+  node: process.version,
+  platform: `${process.platform}-${process.arch}`
+};
+for (const directory of [BUILD_DIR, payloadDir]) {
+  fs.writeFileSync(
+    path.join(directory, 'build-info.json'),
+    `${JSON.stringify(buildInfo, null, 2)}\n`,
+    'utf8'
+  );
+}
+log(`  build-info.json：${buildInfo.buildId}（dirty=${dirty}）`);
+
 log('[2/5] 生成许可证清单与 SBOM');
 const metaFile = path.join(CORE_DIR, 'build', 'core.bundle.meta.json');
 let bundledPackages = [];
@@ -374,6 +407,10 @@ for (const deviation of deviations) log(`  ⚠️ 已知偏差：${deviation.ite
 const manifest = {
   product: '鲸桥 WhaleBridge',
   version: PKG.version,
+  commit: buildInfo.commit,
+  commitShort: buildInfo.commitShort,
+  buildId: buildInfo.buildId,
+  dirtySourceTree: buildInfo.dirty,
   builtAt: new Date().toISOString(),
   noWebUi: options.noWebUi,
   uiDistribution: options.noWebUi ? 'native-no-web' : 'web-compatibility',
