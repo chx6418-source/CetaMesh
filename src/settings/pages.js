@@ -8,7 +8,7 @@
 //   - ENGINEERING_PAGES 明确标注每个工程页归属 diagnostics 还是 advanced；
 //   - engineeringPlacement() 供 UI 与测试直接检查"没有工程页残留在产品主区"。
 
-export const PRIMARY_PAGES = Object.freeze(['chat', 'tasks', 'memory', 'workspace']);
+export const PRIMARY_PAGES = Object.freeze(['home', 'chat', 'work', 'social', 'agents', 'plugins', 'memory', 'workspaces', 'devices', 'connections', 'security', 'settings']);
 
 export const ENGINEERING_PAGES = Object.freeze([
   { id: 'core.status', label: 'Core status', area: 'diagnostics', source: 'legacy:Overview' },

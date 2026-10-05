@@ -267,7 +267,7 @@ impl PresetTarget {
     fn label(self) -> &'static str {
         match self {
             Self::Chat => "聊天",
-            Self::ClosedAgent => "封闭代理",
+            Self::ClosedAgent => "Owner Agent",
             Self::Social => "社交仿生",
             Self::Workshop => "工作坊",
             Self::Learner => "黑话学习",
@@ -397,7 +397,7 @@ const PRESET_TARGETS: [PresetTarget; 5] = [
 ];
 
 const SHORTCUTS: &[(&str, &str)] = &[
-    ("Ctrl+1 … Ctrl+7", "切换 Chat / Tasks / Memory / Workspace / Settings / Diagnostics / Advanced"),
+    ("Ctrl+1 … Ctrl+7", "切换 Home / Chat / Work / Social / Agents / Plugins / Memory"),
     ("Ctrl+,", "打开 Settings"),
     ("F1", "显示/关闭本快捷键列表"),
     ("Ctrl+0", "重置界面缩放"),
@@ -412,13 +412,13 @@ const SHORTCUTS: &[(&str, &str)] = &[
 /// Ctrl+1 … Ctrl+7 map onto the product navigation in this order.
 fn page_for_shortcut_slot(slot: u8) -> Option<AppPage> {
     match slot {
-        1 => Some(AppPage::Chat),
-        2 => Some(AppPage::Tasks),
-        3 => Some(AppPage::Memory),
-        4 => Some(AppPage::Workspace),
-        5 => Some(AppPage::Settings),
-        6 => Some(AppPage::Diagnostics),
-        7 => Some(AppPage::Advanced),
+        1 => Some(AppPage::Home),
+        2 => Some(AppPage::Chat),
+        3 => Some(AppPage::Work),
+        4 => Some(AppPage::Social),
+        5 => Some(AppPage::Agents),
+        6 => Some(AppPage::Plugins),
+        7 => Some(AppPage::Memory),
         _ => None,
     }
 }
@@ -464,11 +464,21 @@ impl Default for PolicyForm {
     }
 }
 
+fn runtime_policy_label(mode: &str) -> &str {
+    match mode {
+        "owner-agent" => "Owner Agent",
+        "social" => "Social",
+        "workshop" => "Workshop",
+        "chat" => "Chat (legacy runtime)",
+        other => other,
+    }
+}
+
 impl PolicyForm {
     fn params(&self, include_mode: bool) -> Result<Value, String> {
-        const MODES: [&str; 4] = ["chat", "closed-agent", "social", "workshop"];
+        const MODES: [&str; 4] = ["chat", "owner-agent", "social", "workshop"];
         if !MODES.contains(&self.mode.as_str()) {
-            return Err("运行模式必须是 chat、closed-agent、social 或 workshop。".to_owned());
+            return Err("运行策略必须是 chat、owner-agent、social 或 workshop。".to_owned());
         }
         let owner_qq = if self.owner_qq.trim().is_empty() {
             None
@@ -498,7 +508,13 @@ impl PolicyForm {
             .get("mode")
             .and_then(Value::as_str)
             .ok_or_else(|| "Core 返回的运行模式缺失或无效。".to_owned())?;
-        if !["chat", "closed-agent", "social", "workshop"].contains(&mode) {
+        let mode = match mode {
+            "closed-agent" => "owner-agent",
+            "reserved" => "chat",
+            "reserved2" => "social",
+            canonical => canonical,
+        };
+        if !["chat", "owner-agent", "social", "workshop"].contains(&mode) {
             return Err("Core 返回了不支持的运行模式。".to_owned());
         }
         self.mode = mode.to_owned();
@@ -2992,7 +3008,7 @@ ApiCall::Family { method, params } => api.request(method, params),
                     }
                 });
             egui::ComboBox::from_id_salt("chat_mode_select")
-                .selected_text(format!("模式: {}", config.mode))
+                .selected_text(format!("Chat Session: {}", config.mode))
                 .width(110.0)
                 .show_ui(ui, |ui| {
                     for mode in ["chat", "smart"] {
@@ -3085,12 +3101,10 @@ ApiCall::Family { method, params } => api.request(method, params),
     }
 
     fn show_settings_page(&mut self, ui: &mut egui::Ui) {
-        // 阶段 13：外观、缩放与关闭行为的显式设置（含快捷键入口）。
         self.show_settings_appearance(ui);
-        ui.add_space(10.0);
-        ui.separator();
-        ui.add_space(6.0);
-        // 阶段 11：Settings 里的 Devices / Mesh 区域。
+    }
+
+    fn show_devices_page(&mut self, ui: &mut egui::Ui) {
         // mesh 与 channel 分属两个 Area，因此同一帧可以各发一条请求（Area 互斥只作用于同一个 Area）。
         let mesh_actions = self.mesh.show(ui);
         for action in mesh_actions {
@@ -3109,28 +3123,23 @@ ApiCall::Family { method, params } => api.request(method, params),
         if let Some(Err(error)) = self.feedback.get(&Area::Channel) {
             self.mesh.set_error(error.clone());
         }
-        ui.add_space(10.0);
-        ui.separator();
-        self.show_legacy_tab_page(ui);
-    }
-
-    fn show_diagnostics_page(&mut self, ui: &mut egui::Ui) {
-        self.show_legacy_tab_page(ui);
-    }
-
-    fn show_advanced_page(&mut self, ui: &mut egui::Ui) {
-        self.show_legacy_tab_page(ui);
     }
 
     fn show_page(&mut self, ui: &mut egui::Ui) {
         match self.navigation.page {
             AppPage::Chat => self.show_chat_page(ui),
-            AppPage::Tasks => self.show_tasks_page(ui),
+            AppPage::Work => self.show_tasks_page(ui),
             AppPage::Memory => self.show_memory_page(ui),
-            AppPage::Workspace => self.show_workspace_page(ui),
+            AppPage::Workspaces => self.show_workspace_page(ui),
             AppPage::Settings => self.show_settings_page(ui),
-            AppPage::Diagnostics => self.show_diagnostics_page(ui),
-            AppPage::Advanced => self.show_advanced_page(ui),
+            AppPage::Devices => self.show_devices_page(ui),
+            AppPage::Home | AppPage::Social | AppPage::Agents | AppPage::Connections | AppPage::Security => {
+                self.show_legacy_tab_page(ui);
+            }
+            AppPage::Plugins => {
+                ui.heading("Plugins");
+                ui.label("插件管理页面尚未接入。已注册的能力继续由 Core 管理。");
+            }
         }
     }
 
@@ -3164,7 +3173,7 @@ ApiCall::Family { method, params } => api.request(method, params),
             if self.button(ui, Area::Overview, "重新检查") {
                 self.issue(Area::Overview, Operation::OverviewPing, ApiCall::Ping);
             }
-            if ui.button("重启桥接").clicked() {
+            if ui.button("重启 Core").clicked() {
                 self.supervisor.request_restart();
             }
         });
@@ -3313,7 +3322,8 @@ ApiCall::Family { method, params } => api.request(method, params),
 
     fn show_policy(&mut self, ui: &mut egui::Ui) {
         ui.heading("运行策略");
-        ui.label("管理全局运行模式、私聊/群聊白名单与黑名单，以及管理员 QQ。保存仅提交这些明确列出的字段。");
+        ui.label("Social、Owner Agent 与 Workshop 是运行策略。Chat / Smart 在 Chat 页按 Session 设置。");
+        ui.label("管理连接渠道的访问名单与管理员身份。");
         ui.horizontal(|ui| {
             if self.button(ui, Area::Policy, "重新读取") {
                 self.issue_control(Area::Policy, Operation::PolicyLoad, "policy.get", json!({}));
@@ -3328,10 +3338,10 @@ ApiCall::Family { method, params } => api.request(method, params),
             .show(ui, |ui| {
                 ui.label("运行模式");
                 egui::ComboBox::from_id_salt("policy_mode")
-                    .selected_text(self.policy.mode.as_str())
+                    .selected_text(runtime_policy_label(self.policy.mode.as_str()))
                     .show_ui(ui, |ui| {
-                        for mode in ["chat", "closed-agent", "social", "workshop"] {
-                            ui.selectable_value(&mut self.policy.mode, mode.to_owned(), mode);
+                        for mode in ["social", "owner-agent", "workshop"] {
+                            ui.selectable_value(&mut self.policy.mode, mode.to_owned(), runtime_policy_label(mode));
                         }
                     });
                 ui.end_row();
@@ -5122,12 +5132,25 @@ mod policy_tests {
     #[test]
     fn only_supported_policy_modes_are_accepted() {
         let mut form = PolicyForm::default();
-        for mode in ["chat", "closed-agent", "social", "workshop"] {
+        for mode in ["chat", "owner-agent", "social", "workshop"] {
             form.mode = mode.to_owned();
             assert!(form.params(true).is_ok());
         }
         form.mode = "unknown".to_owned();
         assert!(form.params(true).is_err());
+    }
+
+    #[test]
+    fn old_runtime_policy_responses_are_read_with_canonical_names() {
+        for (legacy, canonical) in [("closed-agent", "owner-agent"), ("reserved", "chat"), ("reserved2", "social")] {
+            let mut form = PolicyForm::default();
+            form.apply(&json!({ "policy": {
+                "mode": legacy, "allow": { "private": [], "groups": [] },
+                "deny": { "private": [], "groups": [] }, "ownerQQ": null
+            }})).unwrap();
+            assert_eq!(form.mode, canonical);
+            assert_eq!(form.params(true).unwrap()["mode"], canonical);
+        }
     }
 }
 
@@ -5408,14 +5431,14 @@ mod interaction_tests {
     use super::{AppPage, page_for_shortcut_slot, should_send_on_enter};
 
     #[test]
-    fn navigation_shortcuts_cover_all_seven_pages() {
-        assert_eq!(page_for_shortcut_slot(1), Some(AppPage::Chat));
-        assert_eq!(page_for_shortcut_slot(2), Some(AppPage::Tasks));
-        assert_eq!(page_for_shortcut_slot(3), Some(AppPage::Memory));
-        assert_eq!(page_for_shortcut_slot(4), Some(AppPage::Workspace));
-        assert_eq!(page_for_shortcut_slot(5), Some(AppPage::Settings));
-        assert_eq!(page_for_shortcut_slot(6), Some(AppPage::Diagnostics));
-        assert_eq!(page_for_shortcut_slot(7), Some(AppPage::Advanced));
+    fn navigation_shortcuts_cover_the_first_seven_product_pages() {
+        assert_eq!(page_for_shortcut_slot(1), Some(AppPage::Home));
+        assert_eq!(page_for_shortcut_slot(2), Some(AppPage::Chat));
+        assert_eq!(page_for_shortcut_slot(3), Some(AppPage::Work));
+        assert_eq!(page_for_shortcut_slot(4), Some(AppPage::Social));
+        assert_eq!(page_for_shortcut_slot(5), Some(AppPage::Agents));
+        assert_eq!(page_for_shortcut_slot(6), Some(AppPage::Plugins));
+        assert_eq!(page_for_shortcut_slot(7), Some(AppPage::Memory));
         assert_eq!(page_for_shortcut_slot(0), None);
         assert_eq!(page_for_shortcut_slot(8), None);
     }

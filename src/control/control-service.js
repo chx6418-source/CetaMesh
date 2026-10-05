@@ -1,4 +1,6 @@
 import { PRIVILEGE_CONSOLE } from '../bridge-privilege.js';
+import { CONTROL_MODES, migrateLegacyMode } from '../runtime-policy.js';
+export { CONTROL_MODES, migrateLegacyMode } from '../runtime-policy.js';
 
 export const CONTROL_METHODS = Object.freeze({
   LIST_ROLES: 'role.list',
@@ -33,18 +35,12 @@ export const CONTROL_METHODS = Object.freeze({
 });
 
 export const DIAGNOSTIC_CHECKS = Object.freeze(['runtime', 'config', 'paths', 'services']);
-export const CONTROL_MODES = Object.freeze(['chat', 'closed-agent', 'social', 'workshop']);
 export const CONTROL_LOG_SOURCES = Object.freeze(['bridge', 'worker', 'desktop']);
 export const CONTROL_SERVICES = Object.freeze(['snowluma', 'dsh']);
 export const CONTROL_REASONING_EFFORTS = Object.freeze(['off', 'low', 'high', 'max']);
 export const PRESET_BINDING_TARGETS = Object.freeze(['chat', 'closedAgent', 'social', 'workshop', 'learner']);
-// reserved 已弃用（→ chat），reserved2 更名为 social。读取旧值时在内存迁移，写入时用新值。
-const LEGACY_MODE_MIGRATIONS = Object.freeze({ reserved: 'chat', reserved2: 'social' });
-const MODE_LIST_TEXT = 'chat / closed-agent / social / workshop';
-export function migrateLegacyMode(value) {
-  const text = String(value ?? '').trim();
-  return LEGACY_MODE_MIGRATIONS[text] ?? text;
-}
+// Legacy mode aliases are normalized at read/write boundaries; preset keys remain compatible.
+const MODE_LIST_TEXT = 'chat / owner-agent / social / workshop';
 const CONTROL_LOG_MAX_RETURN_CHARS = 64 * 1024;
 const DSH_CATALOG_ID_MAX_CHARS = 128;
 

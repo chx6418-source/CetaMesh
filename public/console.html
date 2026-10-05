@@ -928,16 +928,15 @@ html.login-arrive .nav-btn {
         </header>
         <div class="card-body">
           <div class="mode-tiles" id="modeRow">
-            <button class="mode-tile" data-mode="chat"><b>chat <span class="pill">聊天模式</span></b><small>白名单群 + 白名单私聊 → whale-chat 安全聊天</small></button>
-            <button class="mode-tile" data-mode="closed-agent"><b>closed-agent <span class="pill">封闭 Agent</span></b><small>仅 Owner 私聊 → router-standard 完整工具，可在 QQ 上操控 DSH</small></button>
-            <button class="mode-tile" data-mode="reserved"><b>reserved <span class="pill">一代仿真</span></b><small>仿真群友状态机：观望 / 活跃 / 试探 / 退场，选择性参聊</small></button>
-            <button class="mode-tile" data-mode="reserved2"><b>reserved2 <span class="pill">二代仿真</span></b><small>文本不自动转发，AI 通过工具自主看消息、发言、唤醒与潜水</small></button>
+            <button class="mode-tile" data-mode="owner-agent"><b>Owner Agent <span class="pill">管理员代理</span></b><small>管理员私聊使用配置的 Agent；权限由 Core 策略控制</small></button>
+            <button class="mode-tile" data-mode="social"><b>Social <span class="pill">社交互动</span></b><small>AI 通过工具看消息、发言、唤醒与潜水</small></button>
+            <button class="mode-tile" data-mode="workshop"><b>Workshop <span class="pill">工作坊</span></b><small>外部需求经管理员审核，批准后交给 Task Agent 执行</small></button>
           </div>
           <div class="row">
-            <span class="sub-label" style="flex:1">封闭 Agent（closed-agent）使用的 DSH 预设</span>
+            <span class="sub-label" style="flex:1">Owner Agent 使用的 Agent 预设</span>
             <select id="closedPreset" style="max-width:300px"><option value="">加载中…</option></select>
           </div>
-          <div class="meta">切换预设会立即保存：当前是 closed-agent 则即时生效，否则供下次切换使用。</div>
+          <div class="meta">切换预设会立即保存：当前是 Owner Agent 则即时生效，否则供下次切换使用。Chat / Smart 在 Desktop 的 Chat Session 中设置。</div>
         </div>
       </article>
 
@@ -977,7 +976,7 @@ html.login-arrive .nav-btn {
           </div>
           <div style="display:flex; flex-direction:column; gap:10px; flex:1; min-width:240px;">
             <label class="field"><span>投递回执 ackMessage（留空关闭）</span><input type="text" id="ackMessage" value="" placeholder="例如：✅ 已收到"></label>
-            <div class="switch-row"><label class="switch"><input type="checkbox" id="splitSend" checked><span class="track"></span></label>按空格分句发送<small>一代仿真 reserved 生效</small></div>
+            <div class="switch-row"><label class="switch"><input type="checkbox" id="splitSend" checked><span class="track"></span></label>按空格分句发送<small>旧版仿真兼容参数</small></div>
           </div>
         </div>
       </article>
@@ -1006,7 +1005,7 @@ html.login-arrive .nav-btn {
           <span class="pill" id="v2ActivityStatus">读取中…</span>
         </header>
         <div class="card-body">
-          <div class="switch-row"><label class="switch"><input type="checkbox" id="v2Enabled"><span class="track"></span></label>启用二代模式（reserved2）<small>写入 config.json</small></div>
+          <div class="switch-row"><label class="switch"><input type="checkbox" id="v2Enabled"><span class="track"></span></label>启用 Social 互动<small>写入 config.json</small></div>
           <label class="field"><span>agentPreset（二代会话使用的 DSH 预设）</span><input type="text" id="v2AgentPreset" placeholder="whale-chat-v2"></label>
           <div class="switch-row"><label class="switch"><input type="checkbox" id="v2ProvideRecommendations"><span class="track"></span></label>提供推荐值给 AI<small>关闭后 qq_get_prompt 不返回推荐值</small></div>
           <div class="row">
@@ -1022,7 +1021,7 @@ html.login-arrive .nav-btn {
 
       <article class="card c-12">
         <header class="card-head">
-          <h2><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>一代仿真（reserved）实时状态</h2>
+          <h2><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>旧版仿真兼容实时状态</h2>
         </header>
         <div class="card-body">
           <div class="meta" id="socialStatus">加载中…</div>
@@ -1037,7 +1036,7 @@ html.login-arrive .nav-btn {
         </header>
         <div class="card-body">
           <details class="group">
-            <summary>安全子集工具（chat / reserved 可用）</summary>
+            <summary>安全子集工具（Chat 兼容运行策略可用）</summary>
             <div class="group-body">
               <div class="tbl-wrap"><table class="tbl">
                 <tr><th>工具</th><th>说明</th></tr>
@@ -1053,7 +1052,7 @@ html.login-arrive .nav-btn {
             </div>
           </details>
           <details class="group">
-            <summary>二代仿真工具（reserved2，按「Agent 预设 → 工具开关」启用）</summary>
+            <summary>二代仿真工具（Social，按「Agent 预设 → 工具开关」启用）</summary>
             <div class="group-body">
               <div class="meta">qq_get_prompt / qq_get_unread_messages / qq_get_recent_messages / qq_social_state / qq_send_burst / qq_send_message / qq_wait_for_messages / qq_set_wake_config / qq_mark_read / qq_memory_* / qq_slang_query / qq_slang_submit / 表情包体系 / qq_send_file / 音频与 B站 工具等。</div>
             </div>
@@ -1195,7 +1194,7 @@ html.login-arrive .nav-btn {
 
       <article class="card c-12">
         <header class="card-head">
-          <h2><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="12" rx="3"/><path d="M12 8V4m-3 0h6"/></svg>二代仿真（reserved2）行为参数</h2>
+          <h2><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="12" rx="3"/><path d="M12 8V4m-3 0h6"/></svg>Social行为参数</h2>
           <span class="hint">保存后写入 config.json 并热更新；关闭的工具桥接 API 直接拒绝</span>
         </header>
         <div class="card-body">
@@ -1331,7 +1330,7 @@ html.login-arrive .nav-btn {
 
       <article class="card c-12">
         <header class="card-head">
-          <h2><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>一代仿真（reserved）行为参数</h2>
+          <h2><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>旧版仿真兼容行为参数</h2>
         </header>
         <div class="card-body">
           <details class="group">
@@ -1475,7 +1474,7 @@ html.login-arrive .nav-btn {
           <label class="field"><span>允许的群号（逗号分隔）</span><input type="text" id="wlGroups" placeholder="123456789, 123456"></label>
           <label class="field"><span>允许的私聊 QQ（逗号分隔）</span><input type="text" id="wlPrivate" placeholder="123456789"></label>
           <label class="field"><span>管理员 QQ（ownerQQ，最高权限）</span><input type="text" id="ownerQQ" placeholder="123456789"></label>
-          <div class="meta">管理员是唯一可执行管理命令/审批/closed-agent 的 QQ；可留空清除（清除后无管理员，fail-closed）。</div>
+          <div class="meta">管理员是唯一可执行管理命令/审批/Owner Agent 的 QQ；可留空清除（清除后无管理员，fail-closed）。</div>
           <label class="field"><span>拒绝的群号（黑名单，逗号分隔）</span><input type="text" id="dnGroups"></label>
           <label class="field"><span>拒绝的私聊 QQ（黑名单，逗号分隔）</span><input type="text" id="dnPrivate"></label>
           <div class="row"><button id="wlSave" class="btn primary">保存白名单</button><span class="meta">保存后立即生效并写入 config.json</span></div>
@@ -1875,19 +1874,18 @@ window.MOCK = {
   ],
   effort: 'medium',
   modes: [
-    { id: 'chat', name: 'chat', desc: '白名单群 + 私聊安全聊天', preset: 'whale-chat', scene: '日常挂机' },
-    { id: 'closed-agent', name: 'closed-agent', desc: '仅 Owner 私聊，完整工具可操控 DSH', preset: 'router-standard', scene: '远程运维' },
-    { id: 'reserved', name: 'reserved', desc: '一代仿真群友 · 状态机主动参聊', preset: 'whale-chat', scene: '仿真一代' },
-    { id: 'reserved2', name: 'reserved2', desc: '二代仿真 · AI 自主收发 / 唤醒 / 潜水', preset: 'whale-chat-v2', scene: '仿真二代' }
+    { id: 'owner-agent', name: 'Owner Agent', desc: '管理员代理 · Core 权限策略', preset: 'router-standard', scene: '管理员工作' },
+    { id: 'social', name: 'Social', desc: 'AI 自主收发 / 唤醒 / 潜水', preset: 'whale-chat-v2', scene: '社交互动' },
+    { id: 'workshop', name: 'Workshop', desc: '审核需求并创建持久 Task', preset: '', scene: '工作坊' }
   ],
-  currentMode: 'chat',
+  currentMode: 'social',
   presets: [
     { id: 'whale-chat', name: 'whale-chat', desc: 'QQ 安全聊天人格，仅附加 QQ 场景规则', model: 'deepseek-v3.2-exp', tools: 6,
       prompt: '你是 QQ 群聊 / 私聊中的 AI 桥接代理。规则：\n1. 只使用安全子集工具（收发消息 / 查历史 / 表情包）。\n2. 语气自然，像真人群友，短句为主，可用空格分条。\n3. 涉及敏感内容一律拒绝并提醒 Owner。\n4. 引用消息注意判断说话对象，不要误接话。' },
     { id: 'whale-chat-v2', name: 'whale-chat-v2', desc: '二代仿真 · AI 自主看消息、发言、等待、设置唤醒', model: 'deepseek-v3.2-exp', tools: 9,
       prompt: '你是二代仿真群友。通过 qq_get_unread_messages 主动看消息，用 qq_send_message 发言；\n可以使用 set_wake_config 设置沉睡/唤醒，潜水时无需逐条回复。\n保持人设一致，控制发言频率（maxSendPerMinute）。' },
-    { id: 'router-standard', name: 'router-standard', desc: 'closed-agent 完整工具，可在 QQ 上操控 DSH', model: 'deepseek-r1', tools: 14,
-      prompt: '你是 Owner 的远程运维代理，运行在 closed-agent 模式。\n拥有完整 DSH 工具与 snowluma-host 进程控制（需显式开启）。\n执行前简要确认影响面，执行后回报结果。' }
+    { id: 'router-standard', name: 'router-standard', desc: 'Owner Agent 预设，操作由 Core 权限策略控制', model: 'deepseek-r1', tools: 14,
+      prompt: '你是 Owner 的工作代理，运行在 Owner Agent 策略下。\n所有操作遵守 Core 权限与审批要求。\n执行前简要说明影响面，执行后回报结果。' }
   ],
   roles: [
     { name: '默认（关闭角色扮演）', content: '' },
@@ -1944,7 +1942,7 @@ window.LOG_POOL = [
   { dir: 'in',  msg: '<span class="who">群 · AI仿真群</span> 谁懂啊，这桥接也太好玩了吧' },
   { dir: 'out', msg: '→ 群 · AI仿真群：El Psy Kongroo~（0.9s）' },
   { dir: 'in',  msg: '<span class="who">私聊 · Owner</span> /model deepseek-r1' },
-  { dir: 'sys', msg: '模式切换：chat → closed-agent，预设 router-standard 已加载' },
+  { dir: 'sys', msg: '策略切换：Social → Owner Agent，预设 router-standard 已加载' },
   { dir: 'out', msg: '→ 私聊 · Owner：已切换模型 deepseek-r1，推理强度=高' },
   { dir: 'in',  msg: '<span class="who">群 · 测试群</span> [引用 芝士雪豹：今晚八点集合] 收到喵' },
   { dir: 'sys', msg: 'DSH 会话已创建（workspace: QQ 聊天 · 4 个活跃会话）' },
@@ -2811,7 +2809,7 @@ window.LOG_POOL = [
       var row = document.createElement('div');
       row.className = 'row';
       row.className = 'row bind-row';
-      row.innerHTML = '<b class="mono" style="width:112px;flex:none">' + md.id + '</b>' +
+      row.innerHTML = '<b class="mono" style="width:112px;flex:none">' + md.name + '</b>' +
         '<small style="flex:1;min-width:140px">' + md.desc + '</small>' +
         '<select data-mode="' + md.id + '" style="width:230px;flex:none">' + opts + '</select>' +
         '<span class="pill" style="min-width:78px;justify-content:center">' + md.scene + '</span>';
@@ -2841,10 +2839,13 @@ window.LOG_POOL = [
   $('#splitSend').addEventListener('change', function () { toast('分句发送：' + (this.checked ? '开' : '关')); });
 
   /* ================= 状态轮询（核心刷新） ================= */
-  const MODE_LABEL = { chat: '聊天模式', 'closed-agent': '封闭 Agent', reserved: '一代仿真', reserved2: '二代仿真' };
+  const LEGACY_RUNTIME_MODES = { 'closed-agent': 'owner-agent', reserved: 'chat', reserved2: 'social' };
+  const normalizeRuntimeMode = mode => Object.hasOwn(LEGACY_RUNTIME_MODES, mode) ? LEGACY_RUNTIME_MODES[mode] : mode;
+  const MODE_LABEL = { chat: 'Chat（兼容运行策略）', 'owner-agent': 'Owner Agent', social: 'Social', workshop: 'Workshop' };
   async function refresh() {
     try {
       const s = await api('/api/status');
+      s.mode = normalizeRuntimeMode(s.mode);
       $$('#modeRow .mode-tile').forEach(b => b.classList.toggle('active', b.dataset.mode === s.mode));
       const modeLabel = MODE_LABEL[s.mode] || s.mode;
       const dshPill = $('#pillDsh');
@@ -2974,7 +2975,7 @@ window.LOG_POOL = [
       sel.innerHTML = '';
       const ph = document.createElement('option');
       ph.value = '';
-      ph.textContent = '未设置（closed-agent 默认 router-standard）';
+      ph.textContent = '未设置（Owner Agent 默认 router-standard）';
       sel.appendChild(ph);
       for (const p of (r.presets || [])) {
         const opt = document.createElement('option');

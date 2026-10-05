@@ -1,3 +1,4 @@
+import { normalizeRuntimeMode } from './runtime-policy.js';
 // SnowLuma 进程管理 MCP server（stdio）。
 // 由 DSH 的 MCP 客户端 spawn（cordis.patch.yml 里 mcp-snowluma-host 行），
 // 给 agent 提供 SnowLuma 网关的状态查询与启停工具。
@@ -72,7 +73,7 @@ function readBridgeToken() {
   }
 }
 
-// 进程控制只允许在 closed-agent（仅管理员私聊）模式下使用，防止 chat/reserved 的 agent 被群友诱导启停 SnowLuma。
+// 进程控制只允许在 owner-agent（仅管理员私聊）模式下使用，防止 chat/reserved 的 agent 被群友诱导启停 SnowLuma。
 async function bridgeModeAllowsProcessControl() {
   try {
     const token = readBridgeToken();
@@ -82,7 +83,7 @@ async function bridgeModeAllowsProcessControl() {
     });
     if (!res.ok) return false;
     const body = await res.json();
-    return body?.mode === 'closed-agent';
+    return normalizeRuntimeMode(body?.mode) === 'owner-agent';
   } catch {
     return false;
   }
@@ -157,7 +158,7 @@ server.tool(
   async () => {
     const hc = getHostConfig();
     const info = await gatewayInfo();
-    // 只有显式开启进程控制且当前为 closed-agent 时，才暴露本机路径/PID 这类敏感信息。
+    // 只有显式开启进程控制且当前为 owner-agent 时，才暴露本机路径/PID 这类敏感信息。
     const admin = hc.allowProcessControl && await bridgeModeAllowsProcessControl();
     const extra = admin ? { launcher: hc.launcher, homeDir: hc.homeDir, processPids: findSnowLumaPids() } : {};
     return {
@@ -180,7 +181,7 @@ if (getHostConfig().allowProcessControl) {
         return { content: [{ type: 'text', text: '拒绝：进程控制未开启（config.json 需设置 snowluma.allowProcessControl=true）。' }], isError: true };
       }
       if (!(await bridgeModeAllowsProcessControl())) {
-        return { content: [{ type: 'text', text: '拒绝：进程控制仅允许在 closed-agent（管理员私聊）模式下使用。' }], isError: true };
+        return { content: [{ type: 'text', text: '拒绝：进程控制仅允许在 owner-agent（管理员私聊）模式下使用。' }], isError: true };
       }
       const before = await gatewayInfo();
       if (before.reachable && before.online) {
@@ -215,7 +216,7 @@ if (getHostConfig().allowProcessControl) {
         return { content: [{ type: 'text', text: '拒绝：进程控制未开启（config.json 需设置 snowluma.allowProcessControl=true）。' }], isError: true };
       }
       if (!(await bridgeModeAllowsProcessControl())) {
-        return { content: [{ type: 'text', text: '拒绝：进程控制仅允许在 closed-agent（管理员私聊）模式下使用。' }], isError: true };
+        return { content: [{ type: 'text', text: '拒绝：进程控制仅允许在 owner-agent（管理员私聊）模式下使用。' }], isError: true };
       }
       const pids = findSnowLumaPids();
       if (pids.length === 0) {

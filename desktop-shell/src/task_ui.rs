@@ -56,6 +56,8 @@ pub struct TaskDetail {
     pub acceptance: Vec<(String, bool)>,
     pub agent_history: Vec<String>,
     pub current_agent: String,
+    pub agent_provider: String,
+    pub agent_session: String,
     pub rev: u64,
     pub updated_at: u64,
 }
@@ -166,6 +168,8 @@ pub fn parse_details(value: &Value) -> Vec<TaskDetail> {
                     })
                     .unwrap_or_default(),
                 current_agent,
+                agent_provider: string_field(&agent, "provider"),
+                agent_session: string_field(&agent, "sessionId"),
                 rev: u64_field(item, "rev"),
                 updated_at: u64_field(item, "updatedAt"),
             }
@@ -225,6 +229,7 @@ pub struct TaskUi {
     pub artifact_label: String,
     pub agent_provider: String,
     pub agent_session: String,
+    pub context: Map<String, Value>,
 }
 
 impl Default for TaskUi {
@@ -253,6 +258,7 @@ impl Default for TaskUi {
             artifact_label: String::new(),
             agent_provider: "dsh".to_owned(),
             agent_session: String::new(),
+            context: Map::new(),
         }
     }
 }
@@ -265,6 +271,12 @@ impl TaskUi {
     /// 应用一次 task.overview 返回。返回 true 表示需要重新拉取。
     pub fn apply(&mut self, value: &Value) -> bool {
         self.error = None;
+        if let Some(task_id) = value.get("taskId").and_then(Value::as_str) {
+            if value.get("attached").is_some() {
+                self.context.insert(task_id.to_owned(), value.clone());
+                return false;
+            }
+        }
         if value.get("tasks").is_some() || value.get("counts").is_some() {
             self.details = parse_details(value);
             self.counts = parse_counts(value);
@@ -462,7 +474,7 @@ impl TaskUi {
                                 actions.push(TaskAction::new("task.pause", json!({ "id": task.id, "expectedRev": task.rev, "reason": "用户暂停" })));
                             }
                             if ui.button("完成").clicked() {
-                                actions.push(TaskAction::new("task.complete", json!({ "id": task.id, "expectedRev": task.rev, "summary": "由 Tasks 页标记完成" })));
+                                actions.push(TaskAction::new("task.complete", json!({ "id": task.id, "expectedRev": task.rev, "summary": "由 Work 页标记完成" })));
                             }
                         }
                         let terminal = task.status == "completed" || task.status == "failed" || task.status == "cancelled";
@@ -505,9 +517,31 @@ impl TaskUi {
             ui.horizontal_wrapped(|ui| {
                 ui.weak(format!("Workspace：{}", if task.workspace_id.is_empty() { "未绑定" } else { task.workspace_id.as_str() }));
                 ui.weak(format!("阶段：{}", if task.current_phase.is_empty() { "—" } else { task.current_phase.as_str() }));
-                ui.weak(format!("当前 Agent：{}", if task.current_agent.is_empty() { "无" } else { task.current_agent.as_str() }));
+                ui.weak(format!("Task Agent：{}", if task.agent_provider.is_empty() { "未绑定" } else { task.agent_provider.as_str() }));
+                ui.weak(format!("Session：{}", if task.agent_session.is_empty() { "未绑定" } else { task.agent_session.as_str() }));
                 if !task.checkpoint_summary.is_empty() {
                     ui.weak(format!("Checkpoint：{}", task.checkpoint_summary.as_str()));
+                }
+            });
+
+            let session_key = format!("{}:{}", task.agent_provider, task.agent_session);
+            let context = self.context.get(&task.id)
+                .filter(|value| value.get("sessionKey").and_then(Value::as_str) == Some(session_key.as_str()));
+            ui.horizontal_wrapped(|ui| {
+                if let Some(value) = context {
+                    let level = value.get("level").unwrap_or(&Value::Null);
+                    let percent = level.get("percent").and_then(Value::as_u64);
+                    let estimated = level.get("estimated").and_then(Value::as_bool).unwrap_or(true);
+                    ui.weak(match percent {
+                        Some(percent) => format!("Context（最近读取）：{percent}%{}", if estimated { "（估算）" } else { "" }),
+                        None => "Context：未知".to_owned(),
+                    });
+                    ui.weak(format!("状态：{} / {}", string_field(level, "band"), string_field(value, "action")));
+                } else {
+                    ui.weak("Context：未知（尚未读取当前 Session）");
+                }
+                if !task.agent_session.is_empty() && ui.button("读取 Context 状态").clicked() {
+                    actions.push(TaskAction::new("continuity.status", json!({ "taskId": task.id })));
                 }
             });
 
@@ -565,10 +599,10 @@ impl TaskUi {
                 }
                 if !terminal {
                     if ui.button("标记完成").clicked() {
-                        actions.push(TaskAction::new("task.complete", json!({ "id": task.id, "expectedRev": task.rev, "summary": "由 Tasks 页标记完成" })));
+                        actions.push(TaskAction::new("task.complete", json!({ "id": task.id, "expectedRev": task.rev, "summary": "由 Work 页标记完成" })));
                     }
                     if ui.button("标记失败").clicked() {
-                        actions.push(TaskAction::new("task.fail", json!({ "id": task.id, "expectedRev": task.rev, "reason": "由 Tasks 页标记失败" })));
+                        actions.push(TaskAction::new("task.fail", json!({ "id": task.id, "expectedRev": task.rev, "reason": "由 Work 页标记失败" })));
                     }
                 }
             });
@@ -680,6 +714,8 @@ mod tests {
         assert_eq!(task.acceptance[0], ("可安装".to_string(), true));
         assert_eq!(task.agent_history.len(), 1);
         assert_eq!(task.current_agent, "codex / s2");
+        assert_eq!(task.agent_provider, "codex");
+        assert_eq!(task.agent_session, "s2");
         assert_eq!(task.rev, 7);
         assert_eq!(task.updated_at, 99);
         assert!(parse_details(&json!({})).is_empty());
@@ -709,5 +745,19 @@ mod tests {
         assert!(details[0].requirements.is_empty());
         assert!(details[0].current_agent.is_empty());
         assert_eq!(details[0].checkpoint_next, "");
+    }
+
+    #[test]
+    fn context_status_preserves_unknown_and_estimated_provider_data() {
+        let mut ui = super::TaskUi::default();
+        assert!(ui.context.is_empty());
+        let status = json!({ "taskId": "t", "attached": true, "sessionKey": "dsh:s1",
+            "level": { "percent": 70, "estimated": true, "source": "estimated", "band": "prepare" },
+            "action": "checkpoint" });
+        assert!(!ui.apply(&status));
+        assert_eq!(ui.context["t"], status);
+        assert!(!ui.loaded, "context results do not replace Task overview");
+        assert!(!ui.apply(&json!({ "taskId": "t", "attached": false, "action": "none" })));
+        assert!(ui.context["t"].get("level").is_none());
     }
 }

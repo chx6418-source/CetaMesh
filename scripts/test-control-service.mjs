@@ -586,7 +586,7 @@ const flushServiceTasks = () => new Promise((resolve) => setImmediate(resolve));
     actor: { privilege: PRIVILEGE_CONSOLE }
   });
   assert.deepEqual(result.policy, {
-    mode: 'closed-agent',
+    mode: 'owner-agent',
     allow: { private: [111], groups: [222] },
     deny: { private: [333], groups: [] },
     ownerQQ: null

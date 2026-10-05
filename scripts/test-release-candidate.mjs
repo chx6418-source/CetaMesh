@@ -357,7 +357,8 @@ try {
       encoding: 'utf8',
       windowsHide: true,
       timeout: 30000,
-      env: { ...process.env, PATH: noNodePath(), Path: noNodePath(), WHALEBRIDGE_DATA_DIR: dataDir }
+      env: { ...process.env, PATH: noNodePath(), Path: noNodePath(), WHALEBRIDGE_DATA_DIR: dataDir,
+        WHALEBRIDGE_INSTANCE_SUFFIX: `rc-${process.pid}` }
     });
     assert.equal(second.status, 0, `第二个实例应静默退出（实际 ${second.status}）\n${second.stderr}`);
     assert.ok(isRunning(shell.pid), '第二个实例不得影响已在运行的实例');

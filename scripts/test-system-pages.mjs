@@ -296,7 +296,7 @@ try {
   const placement = engineeringPlacement();
   equal('工程页面不变量成立', placement.ok, true);
   equal('没有工程页残留在产品主区', placement.leakedIntoPrimary, []);
-  equal('产品主区只有四页', [...PRIMARY_PAGES], ['chat', 'tasks', 'memory', 'workspace']);
+  equal('产品导航统一为 CetaMesh Desktop 概念', [...PRIMARY_PAGES], ['home', 'chat', 'work', 'social', 'agents', 'plugins', 'memory', 'workspaces', 'devices', 'connections', 'security', 'settings']);
   equal('工程页面共 7 个', ENGINEERING_PAGES.length, 7);
   for (const label of ['Core status', 'DSH service', 'SnowLuma（Channel Adapter）', 'IPC', 'Logs', 'Whitelists', 'Runtime policy']) {
     check('工程页面已归位：' + label, ENGINEERING_PAGES.some((p) => p.label === label));

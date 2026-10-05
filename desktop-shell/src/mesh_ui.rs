@@ -1,6 +1,6 @@
 //! CetaMesh Desktop —— Devices / Mesh 产品区（阶段 11）。
 //!
-//! 放在 Settings 页顶部（与「阶段 11」要求一致：Workspace 或 Settings 中增加 Devices / Mesh 区域）。
+//! 由 Desktop 的 Devices 页面展示现有 Mesh 与 Channel 功能。
 //! 展示：Device / Role / Trust / Transport / Last seen / Capabilities / Status / Last error，
 //! 以及本节点的 Device Identity、Node Role、Pending Approval 与 Channel Adapter 状态。
 //!
