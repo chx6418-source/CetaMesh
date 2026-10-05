@@ -16,6 +16,7 @@
 //   handoff        → 不支持：尚无跨 Provider 交接协议，由契约桩显式拒绝
 import crypto from 'node:crypto';
 import { agentProviderError, defineAgentProvider, normalizePromptContent, AGENT_EVENT_PROTOCOL_DSH } from './agent-provider.js';
+import { selectDshSessionModel } from '../dsh-model-selection.js';
 
 const CALL_TIMEOUT_MS = 15_000;
 const LIST_TIMEOUT_MS = 10_000;
@@ -84,14 +85,12 @@ export function createDshAgentProvider({ api, defaults = {}, log = () => {} } = 
         let modelBindingError = null;
         if (wantModel) {
           try {
-            const result = await api.callEndpoint('session/selectModel', {
-              request: {
-                sessionId,
-                provider: String(modelProvider ?? dshDefaults.provider),
-                model: wantModel,
-                reasoningEffort: String(reasoningEffort ?? dshDefaults.reasoningEffort ?? 'max')
-              }
-            }, AbortSignal.timeout(CALL_TIMEOUT_MS));
+            const { value: result } = await selectDshSessionModel(api, {
+              sessionId,
+              provider: String(modelProvider ?? dshDefaults.provider),
+              model: wantModel,
+              reasoningEffort: String(reasoningEffort ?? dshDefaults.reasoningEffort ?? 'max')
+            }, { timeoutMs: CALL_TIMEOUT_MS, log });
             bound = result?.selected ?? null;
           } catch (error) {
             modelBindingError = String(error?.message ?? error);
@@ -206,14 +205,12 @@ export function createDshAgentProvider({ api, defaults = {}, log = () => {} } = 
         if (!model) throw agentProviderError('INVALID_PARAMS', 'selectModel 需要 model');
         let value;
         try {
-          value = await api.callEndpoint('session/selectModel', {
-            request: {
-              sessionId: sid,
-              provider: String(modelProvider ?? dshDefaults.provider),
-              model: String(model),
-              reasoningEffort: String(reasoningEffort ?? dshDefaults.reasoningEffort ?? 'max')
-            }
-          }, AbortSignal.timeout(CALL_TIMEOUT_MS));
+          ({ value } = await selectDshSessionModel(api, {
+            sessionId: sid,
+            provider: String(modelProvider ?? dshDefaults.provider),
+            model: String(model),
+            reasoningEffort: String(reasoningEffort ?? dshDefaults.reasoningEffort ?? 'max')
+          }, { timeoutMs: CALL_TIMEOUT_MS, log }));
         } catch (error) {
           throw wrapDshError(error, '绑定模型失败');
         }

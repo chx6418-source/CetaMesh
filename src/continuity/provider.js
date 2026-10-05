@@ -13,6 +13,7 @@
 // 无需改动 Continuity Runtime 即可接入（跨 Provider Handoff 走同一 Handoff Packet）。
 
 import { continuityError } from './types.js';
+import { selectDshSessionModel } from '../dsh-model-selection.js';
 
 export function createProviderRegistry() {
   const providers = new Map();
@@ -56,8 +57,12 @@ export function createDshAgentProvider({ api, defaults, now = () => Date.now() }
       const provider = defaults?.provider ?? 'deepseek-official';
       const modelId = model ?? defaults?.model;
       if (modelId) {
-        await api.callEndpoint('session/selectModel', {
-          request: { sessionId, provider, model: modelId, reasoningEffort: reasoningEffort ?? defaults?.reasoningEffort ?? 'max' }
+        // provider 可能是历史配置值（如 llm-deepseek）：仅在 NO_ADAPTER 时按目录解析重试。
+        await selectDshSessionModel(api, {
+          sessionId,
+          provider,
+          model: modelId,
+          reasoningEffort: reasoningEffort ?? defaults?.reasoningEffort ?? 'max'
         });
       }
       if (bootstrapPrompt) {

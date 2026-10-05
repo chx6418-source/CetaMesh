@@ -18,6 +18,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { blocksToText } from '../dsh-client.js';
+import { selectDshSessionModel } from '../dsh-model-selection.js';
 
 const SCHEMA_VERSION = 1;
 const REASONING_EFFORTS = Object.freeze(['off', 'low', 'high', 'max']);
@@ -280,13 +281,14 @@ export function createChatService({
   }
 
   async function selectModel(record) {
-    const value = await api.callEndpoint('session/selectModel', {
-      request: {
-        sessionId: record.dshSessionId,
-        provider: record.config.provider === 'dsh' ? (defaults?.provider ?? 'deepseek-official') : record.config.provider,
-        model: record.config.model,
-        reasoningEffort: record.config.reasoning
-      }
+    // provider 归一化：config.json 的 dsh.provider 可能是历史值（llm-deepseek / dsh
+    // 等）而非 DSH 可路由 provider；selectDshSessionModel 会在 NO_ADAPTER 时按官方
+    // 模型目录解析并重试一次，其余错误（模型不存在等）原样上抛。
+    const { value } = await selectDshSessionModel(api, {
+      sessionId: record.dshSessionId,
+      provider: record.config.provider === 'dsh' ? (defaults?.provider ?? 'deepseek-official') : record.config.provider,
+      model: record.config.model,
+      reasoningEffort: record.config.reasoning
     });
     return value;
   }

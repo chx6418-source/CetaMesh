@@ -71,6 +71,7 @@ import {
 } from './sticker-lib.js';
 import { loginInfo, extractKugouAuth, createQrLogin, pollQrLogin } from './kugou-api.js';
 import { createLocalServiceManager, SNOWLUMA_RELEASE_PAGE, DSH_INSTALL_HINT } from './local-services.js';
+import { selectDshSessionModel } from './dsh-model-selection.js';
 import { CONTROL_METHODS, ControlServiceError, createControlService } from './control/control-service.js';
 import { startIpcProtocol } from './control/ipc-protocol.js';
 import { createChatService } from './desktop/chat-service.js';
@@ -1246,9 +1247,16 @@ async function main() {
     const effort = String(cfg.dsh?.reasoningEffort || 'max');
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       try {
-        const result = await api.callEndpoint('session/selectModel', { request: { sessionId, provider, model, reasoningEffort: effort } });
+        // provider 可能是历史配置值（如 llm-deepseek）：selectDshSessionModel 仅在
+        // DSH 报 NO_ADAPTER 时按官方模型目录解析并重试一次。
+        const { value: result, request: boundRequest } = await selectDshSessionModel(api, {
+          sessionId, provider, model, reasoningEffort: effort
+        }, { log });
         modelBoundSessions.add(sessionId);
         const bound = result.selected;
+        if (boundRequest.provider !== provider) {
+          log(`会话模型 provider "${provider}" 不是 DSH 可路由 provider，已解析为 "${boundRequest.provider}"`);
+        }
         // 图片能力自检只是「附加告警」：查不到就当作可读图，绝不影响模型绑定本身。
         let support = { known: false, image: true };
         try {
@@ -1839,12 +1847,42 @@ async function main() {
         reasoningEffort: String(cfg.dsh?.reasoningEffort ?? 'max')
       }),
       readModelCatalog: async () => {
+        // 首选 DSH 官方模型目录（session/modelCatalog）：group.id 就是真正可路由的
+        // provider（内置为 deepseek-official），模型自带 inputModalities。
+        // 不能再用 settings/describe 的命名空间名当 provider（llm-deepseek 是适配器
+        // 配置命名空间，不是 provider，曾导致模型默认值写入后无法 selectModel）。
+        try {
+          const catalog = await api.callEndpoint('session/modelCatalog', {}, AbortSignal.timeout(2500));
+          const models = [];
+          for (const group of Array.isArray(catalog?.groups) ? catalog.groups : []) {
+            const provider = String(group?.id ?? '').trim();
+            if (!provider || provider.length > 128) continue;
+            for (const entry of (Array.isArray(group?.models) ? group.models : []).slice(0, 500)) {
+              const model = String(entry?.id ?? '').trim();
+              if (!model || model.length > 128) continue;
+              models.push({
+                provider,
+                model,
+                image: Array.isArray(entry?.inputModalities) && entry.inputModalities.includes('image')
+              });
+            }
+          }
+          if (models.length) return { models };
+        } catch {
+          // 旧版 DSH 没有 session/modelCatalog 端点：退回 settings/describe 扫描。
+        }
         const described = await api.callEndpoint('settings/describe', {}, AbortSignal.timeout(2500));
+        const namespaces = Array.isArray(described?.namespaces) ? described.namespaces : [];
+        // 兼容路径的 provider 必须来自 DSH 注册信息：命名空间自报 provider 优先，
+        // 否则用 agent-default-model 里 DSH 校验过的 provider；绝不拿 ns 名充当 provider。
+        const defaultProvider = String(
+          namespaces.find((section) => section?.ns === 'agent-default-model')?.value?.provider ?? ''
+        ).trim();
         const models = [];
-        for (const section of Array.isArray(described?.namespaces) ? described.namespaces : []) {
+        for (const section of namespaces) {
           const value = section?.value;
           if (!value || typeof value !== 'object' || Array.isArray(value) || !Array.isArray(value.models)) continue;
-          const provider = String(value.provider ?? section.provider ?? section.ns ?? section.id ?? '').trim();
+          const provider = String(value.provider ?? '').trim() || defaultProvider;
           if (!provider) continue;
           for (const entry of value.models.slice(0, 500)) {
             const model = String(entry?.id ?? '').trim();
