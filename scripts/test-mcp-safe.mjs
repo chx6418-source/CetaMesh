@@ -15,7 +15,7 @@ function currentMode() {
   }
 }
 const MODE = currentMode();
-const RESERVED2 = MODE === 'reserved2';
+const RESERVED2 = MODE === 'social';
 
 const entry = fileURLToPath(new URL('../src/mcp-snowluma-safe.js', import.meta.url));
 
@@ -37,7 +37,7 @@ try {
   const history = await client.callTool({ name: 'qq_get_group_history', arguments: { groupId: 123456789 } });
   const histText = history.content?.[0]?.text ?? '';
   if (RESERVED2) {
-    console.log('🚫 reserved2 下旧只读工具不可用:', history.isError ? '被拒绝 ✓' : '⚠️ 未被拒绝（异常！）', histText.slice(0, 120));
+    console.log('🚫 social 下旧只读工具不可用:', history.isError ? '被拒绝 ✓' : '⚠️ 未被拒绝（异常！）', histText.slice(0, 120));
   } else {
     console.log('✅ qq_get_group_history 含 message_id:', /message_id/.test(histText) ? '是 ✓' : '否 ✗');
   }
@@ -74,7 +74,7 @@ try {
     arguments: { groupId: 987654321, message: '测试', replyToMessageId: -123456789 }
   });
   const negText = negativeReply.content?.[0]?.text ?? '';
-  console.log('🚫 负 id + 白名单外 结果:', negativeReply.isError ? '被拒绝 ✓' : '⚠️ 未被拒绝（异常！）', negText.slice(0, 120), '| 校验阶段:', negText.includes('白名单') ? '白名单（参数已通过）' : (RESERVED2 ? 'token/模式（reserved2 要求 agent token）' : '参数'));
+  console.log('🚫 负 id + 白名单外 结果:', negativeReply.isError ? '被拒绝 ✓' : '⚠️ 未被拒绝（异常！）', negText.slice(0, 120), '| 校验阶段:', negText.includes('白名单') ? '白名单（参数已通过）' : (RESERVED2 ? 'token/模式（social 要求 agent token）' : '参数'));
 
   // 专用引用工具 qq_reply：白名单外 + 负 id 应被白名单拦截（参数已通过）
   const replyDenied = await client.callTool({
@@ -82,7 +82,7 @@ try {
     arguments: { groupId: 987654321, replyToMessageId: -123456789, message: '测试' }
   });
   const replyText = replyDenied.content?.[0]?.text ?? '';
-  console.log('🚫 qq_reply 白名单外 结果:', replyDenied.isError ? '被拒绝 ✓' : '⚠️ 未被拒绝（异常！）', replyText.slice(0, 120), '| 校验阶段:', replyText.includes('白名单') ? '白名单（参数已通过）' : (RESERVED2 ? 'token/模式（reserved2 要求 agent token）' : '参数'));
+  console.log('🚫 qq_reply 白名单外 结果:', replyDenied.isError ? '被拒绝 ✓' : '⚠️ 未被拒绝（异常！）', replyText.slice(0, 120), '| 校验阶段:', replyText.includes('白名单') ? '白名单（参数已通过）' : (RESERVED2 ? 'token/模式（social 要求 agent token）' : '参数'));
 
   process.exit(0);
 } catch (error) {

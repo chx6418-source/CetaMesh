@@ -212,7 +212,8 @@ struct PresetRecord {
 enum PresetTarget {
     Chat,
     ClosedAgent,
-    Reserved2,
+    Social,
+    Workshop,
     Learner,
 }
 
@@ -221,7 +222,8 @@ impl PresetTarget {
         match self {
             Self::Chat => "chat",
             Self::ClosedAgent => "closedAgent",
-            Self::Reserved2 => "reserved2",
+            Self::Social => "social",
+            Self::Workshop => "workshop",
             Self::Learner => "learner",
         }
     }
@@ -230,7 +232,8 @@ impl PresetTarget {
         match self {
             Self::Chat => "聊天",
             Self::ClosedAgent => "封闭代理",
-            Self::Reserved2 => "保留模式二",
+            Self::Social => "社交仿生",
+            Self::Workshop => "工作坊",
             Self::Learner => "黑话学习",
         }
     }
@@ -239,7 +242,8 @@ impl PresetTarget {
         match value {
             "chat" => Some(Self::Chat),
             "closedAgent" => Some(Self::ClosedAgent),
-            "reserved2" => Some(Self::Reserved2),
+            "social" => Some(Self::Social),
+            "workshop" => Some(Self::Workshop),
             "learner" => Some(Self::Learner),
             _ => None,
         }
@@ -250,7 +254,8 @@ impl PresetTarget {
 struct PresetBindings {
     chat: Option<String>,
     closed_agent: Option<String>,
-    reserved2: Option<String>,
+    social: Option<String>,
+    workshop: Option<String>,
     learner: Option<String>,
 }
 
@@ -258,7 +263,8 @@ struct PresetBindings {
 struct PresetSelection {
     chat: String,
     closed_agent: String,
-    reserved2: String,
+    social: String,
+    workshop: String,
     learner: String,
 }
 
@@ -283,7 +289,8 @@ impl PresetBindings {
         match target {
             PresetTarget::Chat => self.chat.as_deref(),
             PresetTarget::ClosedAgent => self.closed_agent.as_deref(),
-            PresetTarget::Reserved2 => self.reserved2.as_deref(),
+            PresetTarget::Social => self.social.as_deref(),
+            PresetTarget::Workshop => self.workshop.as_deref(),
             PresetTarget::Learner => self.learner.as_deref(),
         }
     }
@@ -294,7 +301,8 @@ impl PresetSelection {
         match target {
             PresetTarget::Chat => &self.chat,
             PresetTarget::ClosedAgent => &self.closed_agent,
-            PresetTarget::Reserved2 => &self.reserved2,
+            PresetTarget::Social => &self.social,
+            PresetTarget::Workshop => &self.workshop,
             PresetTarget::Learner => &self.learner,
         }
     }
@@ -303,7 +311,8 @@ impl PresetSelection {
         match target {
             PresetTarget::Chat => &mut self.chat,
             PresetTarget::ClosedAgent => &mut self.closed_agent,
-            PresetTarget::Reserved2 => &mut self.reserved2,
+            PresetTarget::Social => &mut self.social,
+            PresetTarget::Workshop => &mut self.workshop,
             PresetTarget::Learner => &mut self.learner,
         }
     }
@@ -343,10 +352,11 @@ const MAX_ACTIVITY_ITEMS: usize = 500;
 const MAX_LOG_LINES: usize = 500;
 const MAX_DISPLAY_LINE_CHARS: usize = 1_600;
 const MODEL_REASONING_EFFORTS: [&str; 4] = ["off", "low", "high", "max"];
-const PRESET_TARGETS: [PresetTarget; 4] = [
+const PRESET_TARGETS: [PresetTarget; 5] = [
     PresetTarget::Chat,
     PresetTarget::ClosedAgent,
-    PresetTarget::Reserved2,
+    PresetTarget::Social,
+    PresetTarget::Workshop,
     PresetTarget::Learner,
 ];
 
@@ -420,9 +430,9 @@ impl Default for PolicyForm {
 
 impl PolicyForm {
     fn params(&self, include_mode: bool) -> Result<Value, String> {
-        const MODES: [&str; 4] = ["chat", "closed-agent", "reserved", "reserved2"];
+        const MODES: [&str; 4] = ["chat", "closed-agent", "social", "workshop"];
         if !MODES.contains(&self.mode.as_str()) {
-            return Err("运行模式必须是 chat、closed-agent、reserved 或 reserved2。".to_owned());
+            return Err("运行模式必须是 chat、closed-agent、social 或 workshop。".to_owned());
         }
         let owner_qq = if self.owner_qq.trim().is_empty() {
             None
@@ -452,7 +462,7 @@ impl PolicyForm {
             .get("mode")
             .and_then(Value::as_str)
             .ok_or_else(|| "Core 返回的运行模式缺失或无效。".to_owned())?;
-        if !["chat", "closed-agent", "reserved", "reserved2"].contains(&mode) {
+        if !["chat", "closed-agent", "social", "workshop"].contains(&mode) {
             return Err("Core 返回了不支持的运行模式。".to_owned());
         }
         self.mode = mode.to_owned();
@@ -3059,7 +3069,7 @@ ApiCall::Family { method, params } => api.request(method, params),
                 egui::ComboBox::from_id_salt("policy_mode")
                     .selected_text(self.policy.mode.as_str())
                     .show_ui(ui, |ui| {
-                        for mode in ["chat", "closed-agent", "reserved", "reserved2"] {
+                        for mode in ["chat", "closed-agent", "social", "workshop"] {
                             ui.selectable_value(&mut self.policy.mode, mode.to_owned(), mode);
                         }
                     });
@@ -4297,7 +4307,8 @@ fn parse_preset_bindings(value: &Value) -> Result<PresetBindings, String> {
     Ok(PresetBindings {
         chat: parse_optional_preset(bindings.get("chat"), "chat preset")?,
         closed_agent: parse_optional_preset(bindings.get("closedAgent"), "closedAgent preset")?,
-        reserved2: parse_optional_preset(bindings.get("reserved2"), "reserved2 preset")?,
+        social: parse_optional_preset(bindings.get("social"), "social preset")?,
+        workshop: parse_optional_preset(bindings.get("workshop"), "workshop preset")?,
         learner: parse_optional_preset(bindings.get("learner"), "learner preset")?,
     })
 }
@@ -4737,7 +4748,7 @@ mod policy_tests {
     #[test]
     fn policy_payload_contains_only_allowlisted_fields() {
         let form = PolicyForm {
-            mode: "reserved2".to_owned(),
+            mode: "social".to_owned(),
             allow_private: "123".to_owned(),
             allow_groups: String::new(),
             deny_private: String::new(),
@@ -4748,7 +4759,7 @@ mod policy_tests {
         assert_eq!(
             params,
             json!({
-                "mode": "reserved2",
+                "mode": "social",
                 "allow": { "private": [123], "groups": [] },
                 "deny": { "private": [], "groups": [456] },
                 "ownerQQ": null,
@@ -4774,7 +4785,7 @@ mod policy_tests {
     #[test]
     fn only_supported_policy_modes_are_accepted() {
         let mut form = PolicyForm::default();
-        for mode in ["chat", "closed-agent", "reserved", "reserved2"] {
+        for mode in ["chat", "closed-agent", "social", "workshop"] {
             form.mode = mode.to_owned();
             assert!(form.params(true).is_ok());
         }
@@ -4943,11 +4954,12 @@ mod model_preset_ui_tests {
         .unwrap();
         assert_eq!(presets.len(), 2);
         let bindings = parse_preset_bindings(&json!({
-            "bindings": { "chat": null, "closedAgent": "router-standard", "reserved2": "whale-chat", "learner": "" }
+            "bindings": { "chat": null, "closedAgent": "router-standard", "social": "whale-chat", "workshop": "router-standard", "learner": "" }
         }))
         .unwrap();
         assert!(bindings.chat.is_none());
         assert_eq!(bindings.closed_agent.as_deref(), Some("router-standard"));
+        assert_eq!(bindings.workshop.as_deref(), Some("router-standard"));
         assert!(preset_binding_payload("chat", "router-standard", &presets).is_ok());
         assert!(preset_binding_payload("unknown", "router-standard", &presets).is_err());
         assert!(preset_binding_payload("chat", "not-listed", &presets).is_err());

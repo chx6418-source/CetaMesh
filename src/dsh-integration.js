@@ -903,10 +903,10 @@ export function planIntegration(options) {
     effects.push({
       type: 'write-file',
       path: modeFile,
-      content: `${JSON.stringify({ mode: 'reserved2', closedAgentPreset: 'router-standard' }, null, 2)}\n`,
+      content: `${JSON.stringify({ mode: 'social', closedAgentPreset: 'router-standard' }, null, 2)}\n`,
       reason: 'state/mode.json 兜底'
     });
-    notes.push('state/mode.json：创建（mode=reserved2）');
+    notes.push('state/mode.json：创建（mode=social）');
   } else {
     notes.push('state/mode.json：已存在，保持不变（可能是用户选择的模式）');
   }

@@ -186,12 +186,12 @@ server.tool(
   '列出机器人所在的全部 QQ 群（只读）：群号、群名。',
   {},
   async () => {
-    // 旧只读工具没有 agent token；reserved2 模式下通过桥接 /api/status 直接拒绝，
+    // 旧只读工具没有 agent token；social 模式下通过桥接 /api/status 直接拒绝，
     // 避免绕过二代仿真模式的令牌隔离。
     try {
       const status = await agentApi('/api/status');
-      if (status?.mode === 'reserved2') {
-        return { content: [{ type: 'text', text: 'reserved2 模式下旧只读工具不可用，请使用带会话令牌的 v2 读工具' }], isError: true };
+      if (status?.mode === 'social') {
+        return { content: [{ type: 'text', text: 'social 模式下旧只读工具不可用，请使用带会话令牌的 v2 读工具' }], isError: true };
       }
     } catch (error) {
       return { content: [{ type: 'text', text: `无法确认当前模式，拒绝执行：${error?.message ?? error}` }], isError: true };
@@ -258,12 +258,12 @@ server.tool(
 
 server.tool(
   'qq_send_group_message',
-  '向指定 QQ 群发送一条纯文本消息；如需引用某条消息，可传 replyToMessageId（非零整数，可为负数），可先用 qq_get_recent_messages / qq_get_message_detail 查询。二代模式（reserved2）下这是可用的发送工具之一，但优先使用 qq_send_message；reserved2 下调用时必须携带会话令牌 token，否则会被拒绝。不要在发送后输出“已发送”类汇报。目标群必须命中系统白名单（config.json 的 allow.groups），否则拒绝。',
+  '向指定 QQ 群发送一条纯文本消息；如需引用某条消息，可传 replyToMessageId（非零整数，可为负数），可先用 qq_get_recent_messages / qq_get_message_detail 查询。二代模式（social）下这是可用的发送工具之一，但优先使用 qq_send_message；social 下调用时必须携带会话令牌 token，否则会被拒绝。不要在发送后输出“已发送”类汇报。目标群必须命中系统白名单（config.json 的 allow.groups），否则拒绝。',
   {
     groupId: z.union([z.number(), z.string()]).describe('群号（必须在白名单内）'),
     message: z.string().describe('消息文本，纯文本，不要用 Markdown 或 CQ 码'),
     replyToMessageId: z.union([z.number(), z.string()]).optional().describe('要引用/回复的消息 id（非零整数，可为负数，可选）'),
-    token: z.string().optional().describe('二代会话令牌（reserved2 模式下必填；closed-agent 模式不需要）')
+    token: z.string().optional().describe('二代会话令牌（social 模式下必填；closed-agent 模式不需要）')
   },
   async ({ groupId, message, replyToMessageId, token }) => {
     try {
@@ -281,12 +281,12 @@ server.tool(
 
 server.tool(
   'qq_reply',
-  '在指定 QQ 群里引用/回复某条消息，并发送一条文本。适合群消息很多、需要明确“我回的是哪条”时使用；replyToMessageId 是被引用消息的 id（非零整数，QQ 消息 id 可能为负数），可先用 qq_get_recent_messages / qq_get_unread_messages / qq_get_message_detail 查到具体消息内容和 id。发送前桥接会校验该 id 存在且属于当前会话。二代模式下这是你正常可用的引用工具，但不要每条都引用。只有以下情况才需要引用：① 你这条消息指向的人或消息并非最新一条别人的消息（也就是你在回更早的某条）；② 你连续几句话里不同消息指代的是不同的消息或不同的人。其他情况（上下文唯一、刚在接同一条最新消息）不要引用，别让对方猜，也别为了用工具而用。reserved2 下调用时必须携带会话令牌 token。目标群必须命中系统白名单（config.json 的 allow.groups），否则拒绝。',
+  '在指定 QQ 群里引用/回复某条消息，并发送一条文本。适合群消息很多、需要明确“我回的是哪条”时使用；replyToMessageId 是被引用消息的 id（非零整数，QQ 消息 id 可能为负数），可先用 qq_get_recent_messages / qq_get_unread_messages / qq_get_message_detail 查到具体消息内容和 id。发送前桥接会校验该 id 存在且属于当前会话。二代模式下这是你正常可用的引用工具，但不要每条都引用。只有以下情况才需要引用：① 你这条消息指向的人或消息并非最新一条别人的消息（也就是你在回更早的某条）；② 你连续几句话里不同消息指代的是不同的消息或不同的人。其他情况（上下文唯一、刚在接同一条最新消息）不要引用，别让对方猜，也别为了用工具而用。social 下调用时必须携带会话令牌 token。目标群必须命中系统白名单（config.json 的 allow.groups），否则拒绝。',
   {
     groupId: z.union([z.number(), z.string()]).describe('群号（必须在白名单内）'),
     replyToMessageId: z.union([z.number(), z.string()]).describe('被引用/回复的消息 id（非零整数，可为负数）'),
     message: z.string().describe('要发送的文本，纯文本，不要用 Markdown 或 CQ 码'),
-    token: z.string().optional().describe('二代会话令牌（reserved2 模式下必填；closed-agent 模式不需要）')
+    token: z.string().optional().describe('二代会话令牌（social 模式下必填；closed-agent 模式不需要）')
   },
   async ({ groupId, replyToMessageId, message, token }) => {
     try {
@@ -304,12 +304,12 @@ server.tool(
 
 server.tool(
   'qq_send_private_message',
-  '向指定 QQ 好友发送一条私聊消息。若提供 replyToMessageId，会以 QQ 引用/回复形式发出（引用条 + 文本）。replyToMessageId 必须是非零整数消息 id（QQ 消息 id 可能为负数），可先用 qq_get_message_detail 查询。二代模式（reserved2）下这是可用的发送工具之一，但优先使用 qq_send_message；调用时必须携带会话令牌 token，否则会被拒绝。不要在发送后输出“已发送”类汇报。目标 QQ 必须命中系统白名单（config.json 的 allow.private），否则拒绝。',
+  '向指定 QQ 好友发送一条私聊消息。若提供 replyToMessageId，会以 QQ 引用/回复形式发出（引用条 + 文本）。replyToMessageId 必须是非零整数消息 id（QQ 消息 id 可能为负数），可先用 qq_get_message_detail 查询。二代模式（social）下这是可用的发送工具之一，但优先使用 qq_send_message；调用时必须携带会话令牌 token，否则会被拒绝。不要在发送后输出“已发送”类汇报。目标 QQ 必须命中系统白名单（config.json 的 allow.private），否则拒绝。',
   {
     userId: z.union([z.number(), z.string()]).describe('好友 QQ 号（必须在白名单内）'),
     message: z.string().describe('消息文本，纯文本，不要用 Markdown 或 CQ 码'),
     replyToMessageId: z.union([z.number(), z.string()]).optional().describe('要引用/回复的消息 id（非零整数，可为负数，可选）'),
-    token: z.string().optional().describe('二代会话令牌（reserved2 模式下必填；closed-agent 模式不需要）')
+    token: z.string().optional().describe('二代会话令牌（social 模式下必填；closed-agent 模式不需要）')
   },
   async ({ userId, message, replyToMessageId, token }) => {
     try {
@@ -325,7 +325,7 @@ server.tool(
   }
 );
 
-// ── 二代仿真模式（reserved2）工具 ─────────────────────────────────────────
+// ── 二代仿真模式（social）工具 ─────────────────────────────────────────
 server.tool(
   'qq_get_prompt',
   '查看当前二代仿真模式的提示词/角色/推荐值/可用工具/当前唤醒配置（只读）。',
@@ -526,7 +526,7 @@ server.tool(
 if (cfg.socialV2?.tools?.sendPoke !== false) {
   server.tool(
     'qq_send_poke',
-    '发送 QQ 拍一拍（群聊/私聊）。适合用“戳一下”代替一句废话、提醒对方、自然回应别人的拍一拍，或偶尔主动戳一下正在聊的人/熟人——这样更拟真；但别频繁，真人不会一直戳人。群聊必须传 targetUserId（要拍的群友 QQ 号，可从 qq_get_active_members / qq_get_message_detail 的 userId 获取）；私聊可不传 targetUserId（默认拍当前私聊对象）。reserved2 下必须携带会话令牌 token，发送会受桥接白名单与发送频率限制。',
+    '发送 QQ 拍一拍（群聊/私聊）。适合用“戳一下”代替一句废话、提醒对方、自然回应别人的拍一拍，或偶尔主动戳一下正在聊的人/熟人——这样更拟真；但别频繁，真人不会一直戳人。群聊必须传 targetUserId（要拍的群友 QQ 号，可从 qq_get_active_members / qq_get_message_detail 的 userId 获取）；私聊可不传 targetUserId（默认拍当前私聊对象）。social 下必须携带会话令牌 token，发送会受桥接白名单与发送频率限制。',
     {
       key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
       token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
@@ -796,7 +796,7 @@ if (cfg.socialV2?.tools?.getImages !== false) {
     {
       key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
       messageId: z.union([z.number(), z.string()]).describe('要查看的消息 id（QQ 消息 id 可为负数；二代也可用本地 seq）'),
-      token: z.string().optional().describe('二代会话令牌（reserved2 下必填，见唤醒提示中的【会话令牌】）')
+      token: z.string().optional().describe('二代会话令牌（social 下必填，见唤醒提示中的【会话令牌】）')
     },
     async ({ key, messageId, token }) => {
       try {

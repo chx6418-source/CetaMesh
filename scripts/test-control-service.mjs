@@ -70,7 +70,8 @@ function fixture(
   let presetBindings = structuredClone(modelState.bindings ?? {
     chat: null,
     closedAgent: 'router-standard',
-    reserved2: 'whale-chat-v2',
+    social: 'whale-chat-v2',
+    workshop: 'router-standard',
     learner: 'whale-chat'
   });
   const modelCatalog = structuredClone(modelState.catalog ?? [
@@ -547,7 +548,7 @@ const flushServiceTasks = () => new Promise((resolve) => setImmediate(resolve));
   const result = fx.service.execute({
     method: CONTROL_METHODS.UPDATE_POLICY,
     params: {
-      mode: 'reserved2',
+      mode: 'social',
       allow: { private: ['123', '123', 456], groups: [789] },
       ownerQQ: ' 987654 '
     },
@@ -556,7 +557,7 @@ const flushServiceTasks = () => new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(result, {
     ok: true,
     policy: {
-      mode: 'reserved2',
+      mode: 'social',
       allow: { private: [123, 456], groups: [789] },
       deny: { private: [444], groups: [] },
       ownerQQ: 987654
@@ -601,7 +602,7 @@ const flushServiceTasks = () => new Promise((resolve) => setImmediate(resolve));
       ownerQQ: 555
     },
     runtime: {
-      mode: 'reserved2',
+      mode: 'social',
       allow: { private: [111], groups: [] },
       deny: { private: [], groups: [] },
       ownerQQ: 555
@@ -612,10 +613,41 @@ const flushServiceTasks = () => new Promise((resolve) => setImmediate(resolve));
     params: { allow: { groups: [123] } },
     actor: { privilege: PRIVILEGE_CONSOLE }
   });
-  assert.equal(result.policy.mode, 'reserved2', 'omitted mode must preserve effective DSH mode, not stale local mode.json');
+  assert.equal(result.policy.mode, 'social', 'omitted mode must preserve effective DSH mode, not stale local mode.json');
   assert.deepEqual(result.policy.allow, { private: [111], groups: [123] });
-  assert.equal(fx.runtimePolicy.mode, 'reserved2');
+  assert.equal(fx.runtimePolicy.mode, 'social');
   assert.deepEqual(fx.policyWriteOptions, [{ modeProvided: false }]);
+}
+
+// 旧模式迁移：reserved 弃用→chat；reserved2 更名→social。读到旧值必须迁移，写盘用新值。
+{
+  const fx = fixture(undefined, {}, {}, {}, {}, {
+    persisted: {
+      mode: 'reserved2',
+      allow: { private: [111], groups: [] },
+      deny: { private: [], groups: [] },
+      ownerQQ: 555
+    }
+  });
+  const migrated = fx.service.execute({
+    method: CONTROL_METHODS.UPDATE_POLICY,
+    params: { allow: { groups: [222] } },
+    actor: { privilege: PRIVILEGE_CONSOLE }
+  });
+  assert.equal(migrated.policy.mode, 'social', 'reserved2 must migrate to social');
+
+  const explicit = fx.service.execute({
+    method: CONTROL_METHODS.UPDATE_POLICY,
+    params: {
+      mode: 'reserved',
+      allow: { private: [111], groups: [] },
+      deny: { private: [], groups: [] },
+      ownerQQ: 555
+    },
+    actor: { privilege: PRIVILEGE_CONSOLE }
+  });
+  assert.equal(explicit.policy.mode, 'chat', 'reserved must migrate to chat');
+  assert.equal(fx.policyWrites.at(-1).mode, 'chat');
 }
 
 {
@@ -1207,7 +1239,7 @@ const flushServiceTasks = () => new Promise((resolve) => setImmediate(resolve));
 {
   const fx = fixture(undefined, {}, {}, {}, {}, {}, {}, {}, {
     defaults: { provider: 'deepseek-official', model: 'deepseek-flash', reasoningEffort: 'max' },
-    bindings: { chat: null, closedAgent: 'router-standard', reserved2: 'whale-chat-v2', learner: 'whale-chat' }
+    bindings: { chat: null, closedAgent: 'router-standard', social: 'whale-chat-v2', workshop: 'router-standard', learner: 'whale-chat' }
   });
   assert.deepEqual(await fx.service.execute({
     method: CONTROL_METHODS.GET_MODEL_DEFAULTS,
@@ -1255,7 +1287,7 @@ const flushServiceTasks = () => new Promise((resolve) => setImmediate(resolve));
 
 {
   const fx = fixture(undefined, {}, {}, {}, {}, {}, {}, {}, {
-    bindings: { chat: null, closedAgent: 'router-standard', reserved2: 'whale-chat-v2', learner: 'whale-chat' },
+    bindings: { chat: null, closedAgent: 'router-standard', social: 'whale-chat-v2', workshop: 'router-standard', learner: 'whale-chat' },
     presets: [{ id: 'router-standard', trust: 'system' }, { id: 'whale-chat', trust: 'project' }]
   });
   assert.deepEqual(await fx.service.execute({
@@ -1274,6 +1306,12 @@ const flushServiceTasks = () => new Promise((resolve) => setImmediate(resolve));
   assert.equal(changed.ok, true);
   assert.equal(changed.bindings.chat, 'router-standard');
   assert.deepEqual(fx.modelWrites.at(-1), { type: 'binding', target: 'chat', presetId: 'router-standard' });
+  const workshop = await fx.service.execute({
+    method: CONTROL_METHODS.UPDATE_PRESET_BINDINGS,
+    params: { target: 'workshop', presetId: 'router-standard' },
+    actor: { privilege: PRIVILEGE_CONSOLE }
+  });
+  assert.equal(workshop.bindings.workshop, 'router-standard', 'workshop preset binding must be accepted');
   const reset = await fx.service.execute({
     method: CONTROL_METHODS.UPDATE_PRESET_BINDINGS,
     params: { target: 'chat', presetId: '' },

@@ -1,5 +1,38 @@
 # CetaMesh Desktop — PROJECT_STATE
 
+## 模式重构 — 2026-10-05（social / workshop，已获用户批准）
+
+| 模式 | 最终形态 |
+| --- | --- |
+| `chat` | 不变 |
+| `closed-agent` | 不变（owner 私聊 + 完整工具） |
+| `social` | 由 `reserved2` 改名，行为不变；`reserved2` 为旧别名自动迁移 |
+| `workshop` | 新增独立模式：以 closed-agent 为基（owner 私聊 + 完整工具），不启用 social 回合/睡眠/发言工具 |
+| `reserved` | 弃用：不再出现在 UI/选择中；旧值自动迁移为 `chat` |
+
+### 已实现
+
+- `src/bridge.js`：`VALID_MODES = chat / closed-agent / social / workshop`；`MODE_MIGRATIONS`（reserved→chat、reserved2→social）接入 `refreshMode`（本地 mode.json 与 DSH settings 两路）、持久化策略读取、`/api/mode` 校验；`workshop` 与 closed-agent 同为 owner 私聊权限；`modePreset` 支持 `workshopPreset`（默认 `router-standard`，即 closed-agent 同款完整工具面）；preset 绑定新增 `workshop` 槽；社交 V2 门禁与日志文案全部由 reserved2 改为 social。
+- `src/control/control-service.js`：`CONTROL_MODES`、`PRESET_BINDING_TARGETS`、`migrateLegacyMode`，policy.update / normalize 对旧值内存迁移。
+- `desktop-shell/src/native_ui.rs`：运行策略下拉与校验改为 4 个新模式；Preset 目标新增 Workshop（标签“工作坊”）；绑定读写覆盖 social/workshop。
+- 旧别名兼容：`reserved2` / `reserved` 在 bridge 与 ControlService 读取时自动迁移，写盘使用新值；遗留数据夹具（migrate.rs / dsh-integration / desktop-install）保留以验证兼容。
+
+### 验证（本机）
+
+| 检查 | 状态 | 说明 |
+| --- | --- | --- |
+| `node scripts/test-control-service.mjs` | PASS | 含 reserved→chat、reserved2→social 迁移断言与 workshop 绑定 |
+| `npm run test-core-entry` / `test-dsh-integration` | PASS | worker/MCP/DSH 集成 |
+| `cargo test` | PASS | 86/86（含 UI 模式列表与绑定测试） |
+| `npm run test-architecture` | PASS | 8 组红线（产品运行时不得出现 reserved 字样） |
+| `test-card` / `test-forward` / MCP 套件 | PASS | 兼容 live 旧 bridge 与原生 403 文案 |
+
+### 未完成 / 边界
+
+- 一代 reserved 仿真引擎代码仍保留但不可达（旧值已在内存迁移为 chat）；物理删除列为后续清理，避免本阶段大重构。
+- DSH settings 命名空间中的旧值需要一次显式模式写入才会改写；运行时读取已按新模式工作。
+- workshop 默认沿用 DSH 内置 `router-standard`（与 closed-agent 同完整工具面）；专用 `cetamesh-workshop` preset 包待明确要挂载的工具清单后再内置。
+
 ## 补丁 — 2026-10-05 窗口排版与安装体验修复（commit `dc45fb1`）
 
 用户反馈：主窗口排版被裁切/遮挡；安装包被 Windows Defender 报 `Trojan:Win32/Bearfoos.A!ml`。

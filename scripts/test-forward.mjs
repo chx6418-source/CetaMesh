@@ -112,14 +112,14 @@ if (fs.existsSync(consoleTokenFile) && fs.existsSync(socialV2File)) {
       const urlBase = `http://127.0.0.1:${config.consolePort || 3100}/api/socialV2/forward-message`;
       const authHeaders = { 'x-console-token': consoleToken };
       if (agentToken) {
-        // 端点检查只在桥接处于 reserved2 模式时有意义：chat/closed-agent/reserved 下
-        // 该接口会直接以“仅 reserved2 模式可用”拒绝，属于预期行为，不能判成失败。
+        // 端点检查只在桥接处于 social 模式时有意义：chat/closed-agent/reserved 下
+        // 该接口会直接以“仅 social 模式可用”拒绝，属于预期行为，不能判成失败。
         const statusRes = await fetch(`http://127.0.0.1:${config.consolePort || 3100}/api/status`, { headers: authHeaders, signal: AbortSignal.timeout(5000) });
         const statusBody = await statusRes.json().catch(() => ({}));
-        if (statusBody.mode !== 'reserved2') {
-          console.log(`⚠️ 跳过桥接端点检查：当前模式 ${statusBody.mode || '未知'}，合并转发接口仅 reserved2 可用`);
+        if (statusBody.mode !== 'social') {
+          console.log(`⚠️ 跳过桥接端点检查：当前模式 ${statusBody.mode || '未知'}，合并转发接口仅 social 可用`);
         } else {
-          // 未带 agent token 应被拒绝（reserved2）
+          // 未带 agent token 应被拒绝（social）
           const resNoToken = await fetch(`${urlBase}?key=${encodeURIComponent(key)}&id=abc`, { headers: authHeaders, signal: AbortSignal.timeout(5000) });
           const bodyNoToken = await resNoToken.json().catch(() => ({}));
           check('桥接端点：无 agent token 被拒绝', resNoToken.status === 403 && /agent token/.test(bodyNoToken.error || ''), `HTTP ${resNoToken.status} ${bodyNoToken.error || ''}`);

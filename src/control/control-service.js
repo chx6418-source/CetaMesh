@@ -33,11 +33,18 @@ export const CONTROL_METHODS = Object.freeze({
 });
 
 export const DIAGNOSTIC_CHECKS = Object.freeze(['runtime', 'config', 'paths', 'services']);
-export const CONTROL_MODES = Object.freeze(['chat', 'closed-agent', 'reserved', 'reserved2']);
+export const CONTROL_MODES = Object.freeze(['chat', 'closed-agent', 'social', 'workshop']);
 export const CONTROL_LOG_SOURCES = Object.freeze(['bridge', 'worker', 'desktop']);
 export const CONTROL_SERVICES = Object.freeze(['snowluma', 'dsh']);
 export const CONTROL_REASONING_EFFORTS = Object.freeze(['off', 'low', 'high', 'max']);
-export const PRESET_BINDING_TARGETS = Object.freeze(['chat', 'closedAgent', 'reserved2', 'learner']);
+export const PRESET_BINDING_TARGETS = Object.freeze(['chat', 'closedAgent', 'social', 'workshop', 'learner']);
+// reserved 已弃用（→ chat），reserved2 更名为 social。读取旧值时在内存迁移，写入时用新值。
+const LEGACY_MODE_MIGRATIONS = Object.freeze({ reserved: 'chat', reserved2: 'social' });
+const MODE_LIST_TEXT = 'chat / closed-agent / social / workshop';
+export function migrateLegacyMode(value) {
+  const text = String(value ?? '').trim();
+  return LEGACY_MODE_MIGRATIONS[text] ?? text;
+}
 const CONTROL_LOG_MAX_RETURN_CHARS = 64 * 1024;
 const DSH_CATALOG_ID_MAX_CHARS = 128;
 
@@ -294,9 +301,10 @@ function normalizePolicyListPatch(value, field, current) {
 }
 
 function normalizePolicySnapshot(value = {}) {
-  const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const source = value && typeof value === 'object' && !Array.isArray(value) ? { ...value } : {};
+  if (source.mode !== undefined) source.mode = migrateLegacyMode(source.mode);
   if (source.mode !== undefined && !CONTROL_MODES.includes(source.mode)) {
-    throw new ControlServiceError('INVALID_MODE', 'mode 必须是 chat / closed-agent / reserved / reserved2');
+    throw new ControlServiceError('INVALID_MODE', `mode 必须是 ${MODE_LIST_TEXT}（旧值 reserved→chat、reserved2→social 自动迁移）`);
   }
   const normalizeList = (list, field) => {
     if (list === undefined) return [];
@@ -381,7 +389,7 @@ export function createControlService({
   readModelCatalog = () => [],
   writeModelDefaults = () => { throw new ControlServiceError('MODEL_UNAVAILABLE', 'model defaults are unavailable'); },
   readPresetList = () => [],
-  readPresetBindings = () => ({ chat: null, closedAgent: null, reserved2: null, learner: null }),
+  readPresetBindings = () => ({ chat: null, closedAgent: null, social: null, workshop: null, learner: null }),
   writePresetBinding = () => { throw new ControlServiceError('PRESET_UNAVAILABLE', 'preset bindings are unavailable'); },
   readPending = () => [],
   decidePending = () => { throw new ControlServiceError('PENDING_UNAVAILABLE', 'pending approvals are unavailable'); }
@@ -606,7 +614,7 @@ export function createControlService({
         rejectUnknownFields(body, ['target', 'presetId'], method);
         return Promise.resolve().then(() => {
           if (typeof body.target !== 'string' || !PRESET_BINDING_TARGETS.includes(body.target)) {
-            throw new ControlServiceError('INVALID_PRESET_TARGET', 'target must be chat, closedAgent, reserved2, or learner');
+            throw new ControlServiceError('INVALID_PRESET_TARGET', 'target must be chat, closedAgent, social, workshop, or learner');
           }
           if (body.presetId !== null && body.presetId !== undefined && typeof body.presetId !== 'string') {
             throw new ControlServiceError('INVALID_PRESET', 'presetId must be a string or empty');
@@ -733,7 +741,7 @@ export function createControlService({
         const next = {
           // A whitelist-only patch must keep the effective mode; DSH may have changed it
           // without a matching local mode.json update.
-          mode: body.mode === undefined ? runtime.mode : body.mode,
+          mode: body.mode === undefined ? runtime.mode : migrateLegacyMode(body.mode),
           allow: normalizePolicyListPatch(body.allow, 'allow', persisted.allow),
           deny: normalizePolicyListPatch(body.deny, 'deny', persisted.deny),
           ownerQQ: body.ownerQQ === undefined
@@ -743,7 +751,7 @@ export function createControlService({
               : normalizePolicyId(body.ownerQQ, 'ownerQQ'))
         };
         if (!CONTROL_MODES.includes(next.mode)) {
-          throw new ControlServiceError('INVALID_MODE', 'mode 必须是 chat / closed-agent / reserved / reserved2');
+          throw new ControlServiceError('INVALID_MODE', `mode 必须是 ${MODE_LIST_TEXT}（旧值 reserved→chat、reserved2→social 自动迁移）`);
         }
 
         // The adapter owns persistence/runtime application details (including mode-transition

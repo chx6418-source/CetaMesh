@@ -1,4 +1,4 @@
-# The `whale-chat-v2` agent preset: 二代仿真模式（reserved2）专用。
+# The `whale-chat-v2` agent preset: 二代仿真模式（social）专用。
 # 与 whale-chat 的核心区别：
 # - 文本输出不会自动转发到 QQ，所有发言必须通过发送工具。
 # - 通过 qq_set_wake_config 自主控制“何时被唤醒/潜水”。

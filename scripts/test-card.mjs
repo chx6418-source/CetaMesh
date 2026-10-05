@@ -367,15 +367,15 @@ if (fs.existsSync(consoleTokenFile) && fs.existsSync(socialV2File) && config) {
         if (routeMissing) {
           console.log('⚠️ 跳过桥接端点检查：运行中的桥接尚未包含 card-message 端点（重启桥接后生效）');
         } else {
-          check('桥接端点：无 agent token 被拒绝', resNoToken.status === 403 && /agent token|仅 reserved2 模式可用|当前模式不允许/.test(String(bodyNoToken.error || '')), 'HTTP ' + resNoToken.status + ' ' + (bodyNoToken.error || ''));
+          check('桥接端点：无 agent token 被拒绝', resNoToken.status === 403 && /agent token|仅 (social|reserved2) 模式可用|当前模式不允许|本机 IPC|原生桌面模式/.test(String(bodyNoToken.error || '')), 'HTTP ' + resNoToken.status + ' ' + (bodyNoToken.error || ''));
           const resUnknown = await fetch(base + '?key=' + encodeURIComponent(key) + '&messageId=not_seen_card_ref', {
             headers: { ...authHeaders, 'x-agent-token': agentToken },
             signal: AbortSignal.timeout(5000)
           });
           const bodyUnknown = await resUnknown.json().catch(() => ({}));
-          const v2Inactive = resUnknown.status === 403 && /二代模式已关闭|仅 reserved2 模式可用|当前模式不允许/.test(String(bodyUnknown.error || ''));
+          const v2Inactive = resUnknown.status === 403 && /二代模式已关闭|仅 (social|reserved2) 模式可用|当前模式不允许|本机 IPC|原生桌面模式/.test(String(bodyUnknown.error || ''));
           if (v2Inactive) {
-            console.log('⚠️ 跳过桥接端点正向检查：运行中的桥接当前未处于 reserved2 模式');
+            console.log('⚠️ 跳过桥接端点正向检查：运行中的桥接当前未处于 social 模式');
           } else {
             check('桥接端点：未知 messageId 被拒绝', resUnknown.status === 404 && /没有卡片内容|不在当前会话可见范围/.test(String(bodyUnknown.error || '')), 'HTTP ' + resUnknown.status + ' ' + (bodyUnknown.error || ''));
 
