@@ -76,7 +76,7 @@ import { CONTROL_METHODS, ControlServiceError, createControlService } from './co
 import { startIpcProtocol } from './control/ipc-protocol.js';
 import { createChatService } from './desktop/chat-service.js';
 import { createDesktopPlatformRuntime } from './desktop/platform-runtime.js';
-import { createCapabilityService } from './capability/index.js';
+import { createCapabilityService, registerChannelMeshCapabilities } from './capability/index.js';
 import { createWorkshopService } from './workshop/index.js';
 import { createManagedAgentProvider } from './agent/managed-agent-provider.js';
 import { normalizeRuntimeMode } from './runtime-policy.js';
@@ -2163,10 +2163,20 @@ async function main() {
     // Device Mesh（阶段 11）：Desktop 作为标准 CetaMesh Node；mesh/carrier 与 QQ 通道解耦。
     const meshService = createMeshService({ stateDir: STATE_DIR });
     const channelService = createChannelService();
-    capabilityService.broker.register({ id: 'channel.list', permission: 'log', provider: 'channel', risk: 'low',
-      execute: () => channelService.execute({ method: 'channel.list' }) });
-    capabilityService.broker.register({ id: 'mesh.status', permission: 'log', provider: 'mesh', risk: 'low',
-      execute: () => meshService.execute({ method: 'mesh.status' }) });
+    // Capability 覆盖扩展（v2 hardening / Phase D）：Channel/Mesh 只读状态面与
+    // message.send 校验面进入统一 Registry（此前只有两个 inline 只读注册）。
+    // QQ 发送不搬进 Broker——sendImpl 本轮不绑定（execute 如实 PROVIDER_UNAVAILABLE），
+    // 目标白名单与 config.allow 同源，actor/channel/target/risk 全部可检查。
+    registerChannelMeshCapabilities({
+      broker: capabilityService.broker,
+      channelService,
+      meshService,
+      isTargetAllowed: (kind, id) => {
+        const allow = cfg.allow ?? {};
+        const list = kind === 'group' ? allow.groups : allow.private;
+        return Array.isArray(list) && list.map(String).includes(String(id));
+      }
+    });
     // 系统页面（阶段 12）：产品设置（持久化）+ About（版本单一事实源）+ 安全更新检查。
     // 更新检查是惰性的：构造时绝不联网，只有显式 update.check 才会发起请求。
     const aboutService = createAboutService({ rootDir: APP_PATHS.sourceRoot });
