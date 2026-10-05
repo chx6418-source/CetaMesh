@@ -12,7 +12,7 @@ import { createMemoryService } from '../src/memory/index.js';
 import { OWNER_ACTOR } from '../src/capability/types.js';
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-smart-route-'));
-const apiCalls = [], modelRequests = [], agentCalls = [], audit = [];
+const modelRequests = [], agentCalls = [], audit = [];
 let agentSeq = 0;
 let chat;
 try {
@@ -50,11 +50,6 @@ try {
   };
   const router = createRouterService({ stateDir, log: () => {} });
   chat = createChatService({
-    api: {
-      async callEndpoint(endpoint) { apiCalls.push(endpoint); throw new Error('DSH unavailable: ' + endpoint); },
-      async *openRemoteStream() { await new Promise(() => {}); }
-    },
-    controlExecute: async () => { throw new Error('DSH catalog unavailable'); },
     modelRuntime,
     router,
     platformRoute: request => platformRuntime.route(request),
@@ -88,8 +83,7 @@ try {
   assert.equal(tasks[0].currentAgent.sessionId, 'managed-1');
   assert.deepEqual(agentCalls.filter(call => call.kind === 'send').map(call => call.content), ['fix a bug in this project']);
   assert.equal(modelRequests.length, 2, 'Project intent runs through Task and Agent, not the Model turn');
-  assert.deepEqual(apiCalls, [], 'Chat, Smart capability route, and project Agent route make no DSH calls');
-  console.log('Smart platform routing: Chat -> Model, Smart tool -> Capability -> Model context, Smart project -> Task -> Agent; DSH calls=0');
+  console.log('Smart platform routing: Chat -> Model, Smart tool -> Capability -> Model context, Smart project -> Task -> Agent; no DSH client supplied');
 } finally {
   chat?.close();
   fs.rmSync(dir, { recursive: true, force: true });

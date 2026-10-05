@@ -51,6 +51,13 @@ function chatError(code, message) {
   return Object.assign(new Error(message), { code });
 }
 
+function requireDshApi(api, operation) {
+  if (typeof api?.callEndpoint !== 'function') {
+    throw chatError('DSH_UNAVAILABLE', `DSH adapter is unavailable for ${operation}`);
+  }
+  return api;
+}
+
 function readJsonFile(file, fallback) {
   try {
     let text = fs.readFileSync(file, 'utf8');
@@ -102,8 +109,6 @@ export function createChatService({
   // Model Runtime 通道（非 Agent 会话）不上报。上报失败绝不影响回合机。
   onTurnEnd = null
 }) {
-  if (!api?.callEndpoint) throw new Error('chat-service 需要 DSH api 客户端');
-  if (typeof controlExecute !== 'function') throw new Error('chat-service 需要 controlExecute（模型目录）');
   // Agent Provider（阶段 06）：会话显式指定 agentProvider（如 'dsh'）时，其回合经标准
   // AgentProvider 契约（agent.createSession / agent.send / agent.cancel）执行。
   // agentProvider='none' 表示用户显式禁用 Agent；null（未选择）表示 Agent=Auto——
@@ -333,6 +338,7 @@ export function createChatService({
   }
 
   async function selectModel(record) {
+    requireDshApi(api, 'session model selection');
     // provider 归一化：config.json 的 dsh.provider 可能是历史值（llm-deepseek / dsh
     // 等）而非 DSH 可路由 provider；selectDshSessionModel 会在 NO_ADAPTER 时按官方
     // 模型目录解析并重试一次，其余错误（模型不存在等）原样上抛。
@@ -370,6 +376,7 @@ export function createChatService({
       defaultModelProvider: modelRuntime ? modelRuntime.defaultProviderId() : null
     };
     try {
+      if (typeof controlExecute !== 'function') throw chatError('DSH_UNAVAILABLE', 'DSH model catalog is unavailable');
       const value = await controlExecute({ method: 'model.catalog.list', params: {} });
       const entries = Array.isArray(value?.models) ? value.models : Array.isArray(value) ? value : [];
       return {
@@ -402,6 +409,7 @@ export function createChatService({
   // ── DSH 会话与 follow 流 ─────────────────────────────────────────────────
   async function ensureDshSession(record) {
     if (record.dshSessionId) return record.dshSessionId;
+    requireDshApi(api, 'session creation');
     const value = await api.callEndpoint('session/create', { request: {} });
     record.dshSessionId = String(value?.sessionId ?? '');
     if (!record.dshSessionId) throw chatError('PROVIDER_ERROR', 'DSH 未返回 sessionId');
@@ -529,7 +537,7 @@ export function createChatService({
           const provider = record.runtimeProvider || record.config.agentProvider;
           const stream = provider && provider !== AGENT_PROVIDER_DISABLED && typeof agentFollow === 'function'
             ? agentFollow({ provider, sessionId, signal: controller.signal })
-            : api.openRemoteStream('session/follow', { request: { address: { kind: 'session', sessionId } } }, { signal: controller.signal });
+            : requireDshApi(api, 'session follow').openRemoteStream('session/follow', { request: { address: { kind: 'session', sessionId } } }, { signal: controller.signal });
           for await (const item of stream) {
             const event = item.type === 'event' ? item.event : item;
             if (!event) continue;
@@ -662,7 +670,7 @@ export function createChatService({
     if (state.turn) state.turn.routing = routing ? { ...routing, resolvedRoute: routing.route } : null;
     await ensureDshSession(record);
     ensureFollow(record);
-    await api.callEndpoint('session/prompt', {
+    await requireDshApi(api, 'session prompt').callEndpoint('session/prompt', {
       request: {
         requestId: `cetamesh-chat-${Date.now().toString(36)}-${crypto.randomBytes(4).toString('hex')}`,
         sessionId: record.dshSessionId,
@@ -811,7 +819,7 @@ export function createChatService({
             params: { provider: record.runtimeProvider || record.config.agentProvider, sessionId: record.dshSessionId }
           });
         } else {
-          await api.callEndpoint('session/cancel', { request: { sessionId: record.dshSessionId } });
+          await requireDshApi(api, 'session cancellation').callEndpoint('session/cancel', { request: { sessionId: record.dshSessionId } });
         }
       }
       // turn/end（cancelled）由 follow 流异步确认；此处仅上报已受理。
