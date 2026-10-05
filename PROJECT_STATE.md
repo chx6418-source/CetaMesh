@@ -1,5 +1,68 @@
 # CetaMesh Desktop — PROJECT_STATE
 
+## 会话 1：Model Runtime + Standalone Chat + Smart Router v1 + Cost Policy（2026-10-05）
+
+分支 `feature/desktop-model-router-v1`（base `aa5d28e`），详见 `HANDOFF_SESSION_1.md`。
+
+### 已完成
+
+- **ModelProvider 契约与运行时**（`src/model/`）：契约（id/label/listModels/chat/
+  stream/abort/health，`defineModelProvider` 强制真实实现不造假桩）；OpenAI 兼容实现
+  共享给 DeepSeek 官方 / OpenAI / 自定义端点；注册表按注册顺序自动解析（无 Key →
+  fail-closed `MODEL_PROVIDER_KEY_MISSING`）。流事件协议 `model-stream-v1` 与 DSH
+  session/follow 回合事件同名同形，Chat 回合状态机零改动复用。Key 每次调用经
+  `src/providers/secrets.js` 解析（不缓存），错误文本源头 scrub，`hasKey` 只输出布尔。
+- **Standalone Chat**（`src/desktop/chat-service.js` 双通道化）：普通回合 → Model
+  Runtime（DSH 零调用）；显式 `agentProvider='dsh'` → Agent 契约路径；无任何 Key
+  配置 → 回落既有 DSH 直连（旧会话行为不变）。会话 config 新增 `modelProvider`，
+  `agentProvider` 支持 `'none'`（禁用 Agent）。停止经 AbortSignal 下行（turn/end
+  aborted → cancelled partial）；retry/continue/usage/历史持久化不回退。
+- **Smart Router v1**（`src/router/`）：确定性分类 simple/tool/project（规则 + 任务
+  特征 + 代码附件/工作区上下文），不调用 LLM 预判。mode=smart 每回合分类；project →
+  agent-intent **只记录不执行**（`routing.resolvedRoute='model'` +
+  `fallbackReason='agent-broker-not-available'`），routing 随 assistant 消息落盘供
+  会话 2 Agent Broker 消费。"你好"/"总结这段文字"绝不产生 agent 路由；
+  "修改这个项目并跑测试"→ project。
+- **Cost Policy**：economy/balanced/quality/agent-first（默认 balanced，持久化
+  `state/router/policy.json`）。economy 收紧 project 阈值；agent-first 将 tool 升级
+  agent；quality 路由同 balanced（v1）。
+- **Desktop UI**：Chat 页 Agent 下拉（Auto/Disabled/DSH）+ Model Provider 下拉
+  （未配 Key 如实标注）+ 模型列表按通道切换来源（显式 Agent→DSH 目录，Model 通道→
+  所选 Provider 目录）；`chat.catalog` 并入 `modelProviders`/`defaultModelProvider`。
+- **IPC**：私有方法族 `modelrt.*`（providers.list / models.list / health）与
+  `router.*`（policy.get/set / classify）入白名单。**前缀碰撞教训**：初版用
+  `model.*`，与控制面既有 `model.defaults.*`（DSH 模型管理）冲突，GUI 冒烟抓到
+  `modelRuntime is not defined`，改名 `modelrt.*` 修复——控制面 `model.*` 方法族
+  语义保持不变。
+
+### 验证（本机实跑）
+
+| 检查 | 状态 |
+| --- | --- |
+| `test-model-runtime.mjs`（新增） | PASS 12 组 |
+| `test-smart-router.mjs`（新增） | PASS 9 组 |
+| `test-desktop-chat-product.mjs`（11 旧 + 6 新） | PASS 17 组 |
+| `test-core-entry` / `test-privilege` 24 / `test-dsh-integration` | PASS |
+| `desktop:check` / `desktop:test` | PASS / 87/87 |
+| `test-desktop-shell`（GUI 冒烟） | PASS（并抓出前缀碰撞 bug） |
+| `self-test`（真实 DSH 链路） | PASS（回合 completed） |
+| `test-architecture` 8 组 / `test-ipc-protocol` / `test-provider-secrets` 6 / `test-model-selection` 7 / `test-agent` / `test-control-service` / `test-system` 108 / `test-task` 90 / `test-memory` 85 / `test-extension` 87 / `test-mesh` / `test-continuity-rollover` 6 / `test-desktop-supervisor` | PASS |
+| 真实 DeepSeek API 直连回合（需真实 Key） | NOT_RUN_ENVIRONMENT（本机未配置 Key；fixture 端到端已覆盖） |
+| `build:release` / RC 套件 | NOT_RUN_ENVIRONMENT（本会话未要求产出安装包） |
+
+### 边界 / 已知限制
+
+- agent-intent 本阶段不执行（Agent Broker 属会话 2）；Cost Policy 暂无 UI 入口。
+- DSH 模型 id 与直连 API 模型 id 命名空间不互通，切换 Agent 选择后需重选模型。
+- DeepSeek reasoning_content 增量不展示（v1 只渲染最终文本）。
+- 未跟踪文件（`%SystemDrive%/`、`plugins/cetamesh-*`、`desktop-shell/native-spike/`、
+  `output/`、`src/desktop-plugin-*.js` 等）保持原样，未纳入本阶段提交。
+
+### 下一阶段入口
+
+- 会话 2（Agent Broker + Continuity Runtime v2）：消费 assistant 消息的
+  `routing.agentIntent`；入口健康基线 = 三套新测试全 PASS。见 `HANDOFF_SESSION_1.md`。
+
 ## 修复 — 2026-10-05（切模型报 `no adapter registered for provider "llm-deepseek"`）
 
 - **根因**：用户 config.json 里 `dsh.provider = "llm-deepseek"`。`llm-deepseek` 是 DSH 的
