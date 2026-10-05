@@ -570,10 +570,10 @@ function makeFullService({ withKey = true, fetchImpl, router = true, api = dshDo
   const f = sseFetch();
   const { service, fetchImpl } = makeFullService({ withKey: false, fetchImpl: f });
   const session = await service.execute({ method: 'chat.sessions.create', params: {} });
-  // 自动解析：无任何 Key → 回落 DSH 通道 → DSH 不可达 → 明确传输错误（而非挂起）
+  // Automatic model resolution never starts DSH when no Key is configured.
   await assert.rejects(
     service.execute({ method: 'chat.send', params: { id: session.id, text: '没有 Key' } }),
-    (error) => error.code === 'PROVIDER_ERROR' && /ECONNREFUSED/.test(error.message)
+    (error) => error.code === 'MODEL_PROVIDER_KEY_MISSING' && /设置 → 模型/.test(error.message)
   );
   // 显式指定 openai（未配 Key）→ KEY_MISSING 明确指向设置页
   await service.execute({ method: 'chat.config.set', params: { id: session.id, config: { modelProvider: 'openai' } } });
@@ -586,7 +586,7 @@ function makeFullService({ withKey = true, fetchImpl, router = true, api = dshDo
     service.execute({ method: 'chat.config.set', params: { id: session.id, config: { modelProvider: 'nope' } } }),
     (error) => error.code === 'INVALID_PARAMS'
   );
-  ok('Provider 配置：无 Key 自动回落 DSH / 显式指定缺 Key 明确报错 / 非法 Provider 拒绝');
+  ok('Provider 配置：无 Key 明确报错且不启动 DSH / 显式缺 Key 报错 / 非法 Provider 拒绝');
   service.close();
 }
 

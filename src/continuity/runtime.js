@@ -346,6 +346,16 @@ export function createContinuityRuntime({
     if (!previousAgent) {
       throw continuityError('ROLLOVER_NO_AGENT', '任务没有绑定的 Agent Session，无需 rollover（直接 attachAgent 即可）');
     }
+    if (agentBroker.capabilities(previousAgent.provider)?.workspaceBoundary === 'capability-broker') {
+      const status = await agentBroker.status(previousAgent);
+      if (status.running || status.queued > 0 || status.waitingForApproval) {
+        throw continuityError('ROLLOVER_NOT_SAFE', 'Managed Agent has active work or an unresolved Owner approval');
+      }
+      const target = targetProvider ? agentBroker.require(targetProvider) : agentBroker.require(previousAgent.provider);
+      if (target.capabilities().workspaceBoundary !== 'capability-broker') {
+        throw continuityError('ROLLOVER_NOT_SAFE', 'A managed Task cannot switch to an unrestricted Provider');
+      }
+    }
     inFlight.add(task.id);
     try {
       const sequence = nextSequence(task.id);
@@ -390,19 +400,19 @@ export function createContinuityRuntime({
       if (!created?.sessionId) {
         throw continuityError('PROVIDER_ERROR', `Agent Provider「${target.id}」未返回 sessionId`);
       }
-      await agentBroker.send({
-        provider: target.id,
-        sessionId: created.sessionId,
-        content: renderResumePrompt(packet)
-      });
-
-      // 5) 绑定新 Agent
+      // Bind before bootstrap: broker-only providers resolve authorization from the
+      // current Task binding. Sending before attachment left fresh sessions unassigned.
       const attached = taskRuntime.attachAgent({
         id: task.id,
         expectedRev: currentRev(),
         provider: target.id,
         sessionId: created.sessionId,
         note: `rollover #${sequence} 自 ${previousAgent.provider}:${previousAgent.sessionId}${archive.supported === true && archive.archived ? '（旧会话已归档）' : ''}`
+      });
+      await agentBroker.send({
+        provider: target.id,
+        sessionId: created.sessionId,
+        content: renderResumePrompt(packet)
       });
 
       // 6) Workspace Reconciliation：用真实工作区核验 checkpoint（TASK-S2-007）。

@@ -75,6 +75,12 @@ import { selectDshSessionModel } from './dsh-model-selection.js';
 import { CONTROL_METHODS, ControlServiceError, createControlService } from './control/control-service.js';
 import { startIpcProtocol } from './control/ipc-protocol.js';
 import { createChatService } from './desktop/chat-service.js';
+import { createDesktopPlatformRuntime } from './desktop/platform-runtime.js';
+import { createCapabilityService } from './capability/index.js';
+import { createWorkshopService } from './workshop/index.js';
+import { createManagedAgentProvider } from './agent/managed-agent-provider.js';
+import { normalizeRuntimeMode } from './runtime-policy.js';
+import { searchWeb } from './mcp-web-search-safe.js';
 import { createProviderSecrets } from './providers/secrets.js';
 import { createModelProviderRegistry, createModelRuntimeService, createOpenAiCompatibleModelProvider } from './model/index.js';
 import { createRouterService } from './router/index.js';
@@ -456,16 +462,18 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const convKey = (kind, id) => `${kind}:${id}`;
 const SEND_TIMEOUT_MS = 15000;
 
-function startUiIpcServer(controlService, chatService, memoryService, taskService, continuityService, extensionService, meshService, channelService, systemServices, agentService, workspaceService, providerSecrets, modelRuntime, routerService) {
+function startUiIpcServer(controlService, chatService, memoryService, taskService, continuityService, extensionService, meshService, channelService, systemServices, agentService, workspaceService, providerSecrets, modelRuntime, routerService, capabilityService, workshopService) {
   const pipeName = String(process.env.WHALEBRIDGE_UI_PIPE ?? '').trim();
   if (!pipeName) return null;
 
   const dispatchCommand = ({ method, params }) => {
+    if (method.startsWith('capability.')) return capabilityService.execute({ method, params });
+    if (method.startsWith('workshop.')) return workshopService.executeOwner({ method, params });
     if (method.startsWith('chat.')) {
       return chatService.execute({ method, params });
     }
     if (method.startsWith('memory.')) {
-      return memoryService.execute({ method, params });
+      return capabilityService.executeMemory({ method, params });
     }
     if (method.startsWith('task.')) {
       return taskService.execute({ method, params });
@@ -499,7 +507,7 @@ function startUiIpcServer(controlService, chatService, memoryService, taskServic
     }
     // 工作区安全边界（阶段 05）：workspace.* 全部经 boundary 裁决，见 src/workspace/。
     if (method.startsWith('workspace.')) {
-      return workspaceService.execute({ method, params });
+      return capabilityService.executeWorkspace({ method, params });
     }
     // 系统页面（阶段 12）：settings / about / update 合成一个对象传递，
     // 避免 startUiIpcServer 的位置参数继续膨胀（已到 9 个，属已知技术债）。
@@ -1347,10 +1355,11 @@ async function main() {
   let dshReady = false;
   let dshCheckStarted = false;
   let dshFailureLogged = false; // 首次探测失败打一条原因，之后转为静默（切换状态时再报）
-  let currentMode = 'chat'; // chat | closed-agent | social | workshop（由 DSH settings / state/mode.json 驱动）
+  let currentMode = 'chat'; // chat | owner-agent | social | workshop（由 DSH settings / state/mode.json 驱动）
   let lastMode = currentMode;
-  let closedAgentPreset = 'router-standard'; // closed-agent 模式使用的 DSH agent preset
+  let closedAgentPreset = 'router-standard'; // owner-agent 模式使用的 DSH agent preset
   let workshopPreset = 'cetamesh-workshop'; // workshop 模式使用的 DSH agent preset
+  let workshopRuntimeService = null;
   const queued = new Map(); // key -> { promptText }[]
   const queuedHintAt = new Map(); // key -> timestamp（冷却提示）
   const QUEUE_MAX = 50;
@@ -1378,9 +1387,8 @@ async function main() {
   // 则在本地文件标记 source=console，避免下一轮 5 秒探活又被 DSH 的旧值覆盖。
   // 旧模式迁移：reserved 弃用（→ chat），social 更名为 social。
   // 读取旧值时只在内存迁移；真正写盘发生在显式模式/策略写入路径。
-  const MODE_MIGRATIONS = { reserved: 'chat', reserved2: 'social' };
-  const migrateModeValue = (value) => MODE_MIGRATIONS[String(value ?? '').trim()] ?? String(value ?? '').trim();
-  const VALID_MODES = ['chat', 'closed-agent', 'social', 'workshop'];
+  const migrateModeValue = normalizeRuntimeMode;
+  const VALID_MODES = ['chat', 'owner-agent', 'social', 'workshop'];
   let modeSyncSeq = 0;
   async function readDshMode() {
     const s = await api.callEndpoint('settings/describe', {});
@@ -1441,7 +1449,7 @@ async function main() {
 
   /** 当前模式是否允许该会话进入 */
   function modeAllowed(key, kind, id, cfg, mode) {
-    if (mode === 'closed-agent' || mode === 'workshop') {
+    if (mode === 'owner-agent') {
       // 封闭 agent / workshop：仅 owner 私聊
       return key === `private:${String(cfg.ownerQQ ?? '')}`;
     }
@@ -1451,7 +1459,7 @@ async function main() {
 
   /** 当前模式下的会话预设 */
   function modePreset(key, mode, cfg) {
-    if (mode === 'closed-agent') return closedAgentPreset || 'router-standard';
+    if (mode === 'owner-agent') return closedAgentPreset || 'router-standard';
     if (mode === 'workshop') return workshopPreset || 'cetamesh-workshop';
     // social（原 social）优先使用 socialV2.agentPreset；未配置时回退到默认聊天预设
     if (mode === 'social') return cfg.socialV2?.agentPreset || cfg.agentPreset || undefined;
@@ -1745,7 +1753,7 @@ async function main() {
             }
             log('控制台：模式进入二代仿真模式，重建有限睡眠定时器');
           }
-          log(`控制台：模式已设置为 ${policy.mode}${closedAgentPreset ? `（closed-agent preset: ${closedAgentPreset}）` : ''}`);
+          log(`控制台：模式已设置为 ${policy.mode}${closedAgentPreset ? `（owner-agent preset: ${closedAgentPreset}）` : ''}`);
           const syncSeq = ++modeSyncSeq;
           void syncModeToDsh(policy.mode).then((synced) => {
             if (!synced || syncSeq !== modeSyncSeq) return;
@@ -2061,6 +2069,17 @@ async function main() {
       ]
     });
     const modelRuntime = createModelRuntimeService({ registry: modelRegistry, secrets: providerSecrets, log });
+    const managedAgent = createManagedAgentProvider({
+      modelRuntime,
+      capabilityExecutor: request => capabilityService.broker.execute(request),
+      taskPrincipalResolver: ({ provider, sessionId }) => {
+        const task = taskService.runtime.findByAgent({ provider, sessionId });
+        return task ? { taskId: task.id, workspaceId: task.workspaceId, actor: capabilityService.principalForTask(task.id) } : null;
+      },
+      onTurnEnd: payload => agentBroker.reportTurnEnd(payload)
+    });
+    agentBroker.register(managedAgent.provider);
+    process.once('exit', () => { void managedAgent.close(); });
     // Smart Router v1（会话 1）：确定性分类 + Cost Policy（默认 balanced，持久化）。
     const routerService = createRouterService({ stateDir: STATE_DIR, log });
     // 产品级 Chat 运行时（阶段 03；会话 1 双通道化）：普通回合走 Model Runtime，
@@ -2072,6 +2091,8 @@ async function main() {
       agentExecute: (command) => agentService.execute(command),
       modelRuntime,
       router: routerService,
+      platformRoute: request => platformRuntime.route(request),
+      agentFollow: request => agentBroker.follow(request),
       defaults: { provider: cfg.dsh.provider, model: cfg.dsh.model, reasoningEffort: cfg.dsh.reasoningEffort },
       stateDir: STATE_DIR,
       // 会话 2 / 自动 Context Monitoring：Agent/DSH 通道回合结束 → Broker 事件 →
@@ -2099,6 +2120,14 @@ async function main() {
       stateDir: STATE_DIR,
       audit: (event) => log(`Workspace ${event.action}（${event.workspaceId ?? 'none'}）`)
     });
+    const capabilityService = createCapabilityService({ stateDir: STATE_DIR, workspaceService, memoryService,
+      taskRuntime: taskService.runtime, agentBroker, bindAgentSession: managedAgent.bindSession, searchImpl: searchWeb,
+      audit: event => log(`Capability ${event.capability} ${event.status}`) });
+    const platformRuntime = createDesktopPlatformRuntime({ capabilityService, workspaceService,
+      taskRuntime: taskService.runtime, agentBroker, legacyModel: cfg.dsh.model });
+    const workshopService = createWorkshopService({ stateDir: STATE_DIR, workspaceService,
+      taskRuntime: taskService.runtime, capabilityBroker: capabilityService.broker });
+    workshopRuntimeService = workshopService;
     // Continuity Runtime v2（阶段 09；会话 2）：Context Rollover / Agent Handoff /
     // 自动 Fresh Session。唯一会话通道是 Agent Broker（DSH 只是第一个 Provider）；
     // Workspace Reconciliation 经只读适配器使用 workspace 登记与 git 只读动词。
@@ -2130,10 +2159,14 @@ async function main() {
     agentBroker.onTurnEnd((payload) => continuityService.runtime.observeAgentTurn(payload)
       .catch((error) => log(`Continuity 回合观察失败：${String(error?.message ?? error)}`)));
     // 本地扩展体系（阶段 10）：扩展只在用户本地导入，能力与权限均需显式声明与批准。
-    const extensionService = createExtensionService({ stateDir: STATE_DIR });
+    const extensionService = createExtensionService({ stateDir: STATE_DIR, capabilityBroker: capabilityService.broker });
     // Device Mesh（阶段 11）：Desktop 作为标准 CetaMesh Node；mesh/carrier 与 QQ 通道解耦。
     const meshService = createMeshService({ stateDir: STATE_DIR });
     const channelService = createChannelService();
+    capabilityService.broker.register({ id: 'channel.list', permission: 'log', provider: 'channel', risk: 'low',
+      execute: () => channelService.execute({ method: 'channel.list' }) });
+    capabilityService.broker.register({ id: 'mesh.status', permission: 'log', provider: 'mesh', risk: 'low',
+      execute: () => meshService.execute({ method: 'mesh.status' }) });
     // 系统页面（阶段 12）：产品设置（持久化）+ About（版本单一事实源）+ 安全更新检查。
     // 更新检查是惰性的：构造时绝不联网，只有显式 update.check 才会发起请求。
     const aboutService = createAboutService({ rootDir: APP_PATHS.sourceRoot });
@@ -2146,7 +2179,7 @@ async function main() {
       settings: settingsService,
       about: aboutService,
       update: updateService
-    }, agentService, workspaceService, providerSecrets, modelRuntime, routerService);
+    }, agentService, workspaceService, providerSecrets, modelRuntime, routerService, capabilityService, workshopService);
     const server = http.createServer(async (req, res) => {
       const url = new URL(req.url ?? '/', `http://127.0.0.1:${port}`);
       const SECURITY_HEADERS = {
@@ -2453,8 +2486,8 @@ async function main() {
         if (req.method === 'POST' && url.pathname === '/api/mode') {
           const body = await readBody();
           body.mode = migrateModeValue(body.mode);
-          if (!['chat', 'closed-agent', 'social', 'workshop'].includes(body.mode)) {
-            sendJson({ ok: false, error: 'mode 必须是 chat / closed-agent / social / workshop（旧值 reserved→chat、reserved2→social 自动迁移）' }, 400);
+          if (!['chat', 'owner-agent', 'social', 'workshop'].includes(body.mode)) {
+            sendJson({ ok: false, error: 'mode 必须是 chat / owner-agent / social / workshop（旧值 reserved→chat、reserved2→social 自动迁移）' }, 400);
             return;
           }
           const existing = readJsonSafe(path.join(STATE_DIR, 'mode.json'), {});
@@ -2488,7 +2521,7 @@ async function main() {
             }
             log('控制台：模式进入二代仿真模式，重建有限睡眠定时器');
           }
-          log(`控制台：模式已设置为 ${body.mode}${next.closedAgentPreset ? `（closed-agent preset: ${next.closedAgentPreset}）` : ''}`);
+          log(`控制台：模式已设置为 ${body.mode}${next.closedAgentPreset ? `（owner-agent preset: ${next.closedAgentPreset}）` : ''}`);
           const syncSeq = ++modeSyncSeq;
           void syncModeToDsh(body.mode).then((synced) => {
             if (!synced || syncSeq !== modeSyncSeq) return;
@@ -5232,7 +5265,7 @@ async function main() {
             sendJson({ ok: false, error: '工具未启用：qq_get_message_images' }, 403);
             return;
           }
-          if (!agentToken && currentMode === 'closed-agent' && !v2ToolEnabled('getImages')) {
+          if (!agentToken && currentMode === 'owner-agent' && !v2ToolEnabled('getImages')) {
             sendJson({ ok: false, error: '工具未启用：qq_get_message_images' }, 403);
             return;
           }
@@ -5269,10 +5302,10 @@ async function main() {
           const replyToMessageId = isReply ? body.replyToMessageId : body.replyToMessageId;
           const atUserId = body.atUserId ?? null;
           const key = isPrivate ? `private:${targetId}` : `group:${targetId}`;
-          // 安全边界：发送工具只允许在 closed-agent（管理员私聊）或 social（二代 AI 带会话令牌）下使用；
+          // 安全边界：发送工具只允许在 owner-agent（管理员私聊）或 social（二代 AI 带会话令牌）下使用；
           // chat/reserved 的自动转发已覆盖正常回复，MCP 发送工具不应成为 prompt injection 的越权出口。
           if (currentMode === 'chat' || currentMode === 'reserved') {
-            sendJson({ ok: false, error: '发送工具仅限 closed-agent / social 模式使用' }, 403);
+            sendJson({ ok: false, error: '发送工具仅限 owner-agent / social 模式使用' }, 403);
             return;
           }
           if (socialV2.paused && token) {
@@ -6140,9 +6173,9 @@ async function main() {
     });
   }
 
-  // 审计范围：closed-agent 仅对 owner 私聊跳过；其余模式/会话一律审计
+  // 审计范围：owner-agent 仅对 owner 私聊跳过；其余模式/会话一律审计
   function shouldAuditKey(key) {
-    if (currentMode === 'closed-agent') {
+    if (currentMode === 'owner-agent') {
       return !(key === `private:${String(cfg.ownerQQ ?? '')}`);
     }
     return true;
@@ -8791,6 +8824,27 @@ async function main() {
     // plainContent 只保留当前消息自己的文字，用于命令/指向性判断，避免被引用原文干扰。
     const textContent = await segmentsToText(event.message ?? [], { resolveAtName, resolveReply });
     const plainContent = await segmentsToText(event.message ?? [], { resolveAtName, includeReply: false });
+    if (currentMode === 'workshop') {
+      if (!workshopRuntimeService) { await sendToQQ(key, 'Workshop Runtime 尚未启动。'); return; }
+      const actor = { kind: 'external', id: `qq:${String(event.user_id)}` };
+      try {
+        const status = /^\/proposal-status\s+(\S+)$/i.exec(plainContent.trim());
+        const supplement = /^\/proposal-add\s+(\S+)\s+([\s\S]+)$/i.exec(plainContent.trim());
+        let result;
+        if (status) result = await workshopRuntimeService.execute({ method: 'workshop.proposal.get', params: { id: status[1] }, actor });
+        else if (supplement) result = await workshopRuntimeService.execute({ method: 'workshop.proposal.supplement', params: { id: supplement[1], text: supplement[2] }, actor });
+        else {
+          const description = plainContent.replace(/^\/proposal\s*/i, '').trim();
+          if (!description) { await sendToQQ(key, '请用 /proposal 需求 提交项目；/proposal-status 编号 查看状态。'); return; }
+          result = await workshopRuntimeService.execute({ method: 'workshop.proposal.submit', params: { title: description.slice(0, 100), description,
+            requestId: `qq:${String(event.user_id)}:${String(event.message_id ?? event.msg_id ?? crypto.randomUUID())}` }, actor });
+        }
+        const proposal = result.proposal;
+        const deliveries = proposal.artifacts?.map(a => `${a.label}\n${a.content}`).join('\n') || '';
+        await sendToQQ(key, `Proposal ${proposal.id}\n状态：${proposal.status}\n${deliveries || 'Owner 将在桌面审阅；提交项目不会授予工作区访问权限。'}`);
+      } catch (error) { await sendToQQ(key, `Workshop：${error.code || 'REQUEST_FAILED'}`); }
+      return;
+    }
     const mediaList = extractMediaFromSegments(event.message ?? []);
     // QQ 官方机器人卡片（普通消息卡片/活动类卡片）：提取完整原始内容，仅 social 会落库并可被工具读取。
     const cardList = extractCardsFromSegments(event.message ?? [], { maxRawChars: MAX_CARD_RAW_CHARS });
