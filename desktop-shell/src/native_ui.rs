@@ -3,7 +3,7 @@
 //! The shell supplies a `CoreApi` backed by its authenticated local IPC transport. This module
 //! intentionally contains no browser, HTML, WebView, or arbitrary command execution path.
 
-use crate::chat_ui::{ChatUi, parse_catalog, parse_history, parse_sessions, parse_turn};
+use crate::chat_ui::{ChatUi, parse_catalog, parse_history, parse_model_providers, parse_sessions, parse_turn};
 use crate::memory_ui::MemoryUi;
 use crate::task_ui::TaskUi;
 use crate::mesh_ui::{MeshArea, MeshUi};
@@ -1279,9 +1279,19 @@ ApiCall::Family { method, params } => api.request(method, params),
                 }
                 (Operation::ChatCatalogLoad, Ok(value)) => {
                     let (models, error) = parse_catalog(value);
+                    let model_providers = parse_model_providers(value);
                     self.chat.catalog = Some(json!({
                         "models": models.iter().map(|(id, label)| json!({"id": id, "label": label})).collect::<Vec<_>>(),
                         "error": error,
+                        "agentProviders": value.get("agentProviders").cloned().unwrap_or(json!([])),
+                        "modelProviders": model_providers.iter().map(|provider| json!({
+                            "id": provider.id,
+                            "label": provider.label,
+                            "hasKey": provider.has_key,
+                            "models": provider.models.iter().map(|(id, label)| json!({"id": id, "label": label})).collect::<Vec<_>>(),
+                            "error": provider.error,
+                        })).collect::<Vec<_>>(),
+                        "defaultModelProvider": value.get("defaultModelProvider").cloned().unwrap_or(json!(null)),
                     }));
                 }
                 (Operation::ChatStatusPoll, Ok(value)) => {
@@ -2789,32 +2799,149 @@ ApiCall::Family { method, params } => api.request(method, params),
         }
         let catalog = self.chat.catalog.clone();
         let active_id = self.chat.active_id.clone();
+        // Agent 选择：""=Auto（Smart 路由），"none"=Disabled，其余为显式 Agent Provider（如 dsh）。
+        let agent_value = config.agent_provider.clone();
+        let dsh_agent_selected = !agent_value.is_empty() && agent_value != "none";
         ui.horizontal_wrapped(|ui| {
             ui.small("会话配置：");
-            let (models, catalog_error) = match &catalog {
-                Some(value) => {
-                    let models = value
-                        .get("models")
-                        .and_then(Value::as_array)
-                        .map(|items| {
-                            items
-                                .iter()
-                                .filter_map(|item| Some((
-                                    item.get("id").and_then(Value::as_str)?.to_owned(),
-                                    item.get("label").and_then(Value::as_str).unwrap_or("").to_owned(),
-                                )))
-                                .collect::<Vec<_>>()
-                        })
-                        .unwrap_or_default();
-                    let error = value.get("error").and_then(Value::as_str).map(ToOwned::to_owned);
-                    (models, error)
-                }
-                None => (Vec::new(), None),
+            let agent_options = match &catalog {
+                Some(value) => value
+                    .get("agentProviders")
+                    .and_then(Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(|item| Some((
+                                item.get("id").and_then(Value::as_str)?.to_owned(),
+                                item.get("label").and_then(Value::as_str).unwrap_or("").to_owned(),
+                            )))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default(),
+                None => Vec::new(),
             };
-            if models.is_empty() {
-                let reason = catalog_error.unwrap_or_else(|| "模型目录为空".to_owned());
-                ui.label(egui::RichText::new(format!("模型不可用（{reason}）")).small().color(palette.error));
+            egui::ComboBox::from_id_salt("chat_agent_select")
+                .selected_text(match agent_value.as_str() {
+                    "" => "Agent: Auto".to_owned(),
+                    "none" => "Agent: Disabled".to_owned(),
+                    id => format!(
+                        "Agent: {}",
+                        agent_options
+                            .iter()
+                            .find(|(option, _)| option == id)
+                            .map(|(_, label)| label.clone())
+                            .unwrap_or_else(|| id.to_owned())
+                    ),
+                })
+                .width(130.0)
+                .show_ui(ui, |ui| {
+                    if ui.selectable_label(agent_value.is_empty(), "Auto").clicked() {
+                        if let Some(session_id) = active_id.clone() {
+                            self.issue_control(Area::Chat, Operation::ChatConfigSave, "chat.config.set", json!({"id": session_id, "config": {"agentProvider": null}}));
+                        }
+                    }
+                    if ui.selectable_label(agent_value == "none", "Disabled").clicked() {
+                        if let Some(session_id) = active_id.clone() {
+                            self.issue_control(Area::Chat, Operation::ChatConfigSave, "chat.config.set", json!({"id": session_id, "config": {"agentProvider": "none"}}));
+                        }
+                    }
+                    for (id, label) in &agent_options {
+                        if ui.selectable_label(agent_value == *id, label).clicked() {
+                            if let Some(session_id) = active_id.clone() {
+                                self.issue_control(Area::Chat, Operation::ChatConfigSave, "chat.config.set", json!({"id": session_id, "config": {"agentProvider": id}}));
+                            }
+                        }
+                    }
+                });
+            let (model_providers, default_model_provider) = match &catalog {
+                Some(value) => {
+                    let providers = parse_model_providers(value);
+                    let default_id = value
+                        .get("defaultModelProvider")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned();
+                    (providers, default_id)
+                }
+                None => (Vec::new(), String::new()),
+            };
+            let selected_provider = if config.model_provider.is_empty() {
+                default_model_provider.clone()
             } else {
+                config.model_provider.clone()
+            };
+            // Model Provider 下拉只在非显式 Agent 时出现：普通聊天属于 Model Runtime。
+            if !dsh_agent_selected {
+                if model_providers.is_empty() {
+                    ui.label(egui::RichText::new("Model Provider 不可用").small().color(palette.error));
+                } else {
+                    egui::ComboBox::from_id_salt("chat_model_provider_select")
+                        .selected_text(format!(
+                            "Provider: {}",
+                            model_providers
+                                .iter()
+                                .find(|provider| provider.id == selected_provider)
+                                .map(|provider| provider.label.clone())
+                                .unwrap_or_else(|| "自动".to_owned())
+                        ))
+                        .width(150.0)
+                        .show_ui(ui, |ui| {
+                            for provider in &model_providers {
+                                let suffix = if provider.has_key { "" } else { "（未配置 Key）" };
+                                if ui
+                                    .selectable_label(selected_provider == provider.id, format!("{}{suffix}", provider.label))
+                                    .clicked()
+                                {
+                                    if let Some(session_id) = active_id.clone() {
+                                        self.issue_control(
+                                            Area::Chat,
+                                            Operation::ChatConfigSave,
+                                            "chat.config.set",
+                                            json!({"id": session_id, "config": {"modelProvider": provider.id}}),
+                                        );
+                                    }
+                                }
+                            }
+                        });
+                }
+            }
+            // 模型列表来源：显式 Agent → DSH 目录；Model 通道 → 所选 Provider 的模型目录。
+            let (models, model_source_error) = if dsh_agent_selected {
+                match &catalog {
+                    Some(value) => {
+                        let models = value
+                            .get("models")
+                            .and_then(Value::as_array)
+                            .map(|items| {
+                                items
+                                    .iter()
+                                    .filter_map(|item| Some((
+                                        item.get("id").and_then(Value::as_str)?.to_owned(),
+                                        item.get("label").and_then(Value::as_str).unwrap_or("").to_owned(),
+                                    )))
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default();
+                        let error = value.get("error").and_then(Value::as_str).map(ToOwned::to_owned);
+                        (models, error)
+                    }
+                    None => (Vec::new(), None),
+                }
+            } else {
+                match model_providers
+                    .iter()
+                    .find(|provider| provider.id == selected_provider)
+                    .or_else(|| model_providers.iter().find(|provider| provider.has_key))
+                {
+                    Some(provider) if !provider.has_key => (Vec::new(), Some(format!("{} 未配置 API Key（设置 → 模型）", provider.label))),
+                    Some(provider) => (provider.models.clone(), provider.error.clone()),
+                    None => (Vec::new(), Some("未配置任何 Model Provider API Key（设置 → 模型）".to_owned())),
+                }
+            };
+            if dsh_agent_selected && models.is_empty() {
+                let reason = model_source_error.unwrap_or_else(|| "模型目录为空".to_owned());
+                ui.label(egui::RichText::new(format!("模型不可用（{reason}）")).small().color(palette.error));
+            } else if !models.is_empty() {
                 egui::ComboBox::from_id_salt("chat_model_select")
                     .selected_text(config.model.clone())
                     .width(200.0)
@@ -2829,6 +2956,8 @@ ApiCall::Family { method, params } => api.request(method, params),
                             }
                         }
                     });
+            } else if !dsh_agent_selected {
+                ui.label(egui::RichText::new(model_source_error.unwrap_or_else(|| "模型列表不可用".to_owned())).small().color(palette.error));
             }
             // 目录不可用或需要指定目录外模型时，允许直接输入模型 ID。
             ui.label("自定义模型");
@@ -2874,7 +3003,11 @@ ApiCall::Family { method, params } => api.request(method, params),
                         }
                     }
                 });
-            ui.small("Provider: DSH");
+            if dsh_agent_selected {
+                ui.small("通道：DSH Agent");
+            } else {
+                ui.small("通道：Model Runtime");
+            }
         });
     }
 

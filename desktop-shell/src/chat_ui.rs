@@ -13,6 +13,10 @@ pub struct ChatSessionConfig {
     pub model: String,
     pub reasoning: String,
     pub mode: String,
+    /// Model Runtime Provider（Model 通道）；空串 = 自动（按已配置 Key 解析）。
+    pub model_provider: String,
+    /// Agent Provider 选择；空串 = Auto，"none" = 显式禁用，"dsh" 等 = 显式指定。
+    pub agent_provider: String,
 }
 
 #[derive(Clone, Debug)]
@@ -134,6 +138,16 @@ pub fn parse_sessions(value: &Value) -> Result<Vec<ChatSession>, String> {
                     .and_then(Value::as_str)
                     .unwrap_or("chat")
                     .to_owned(),
+                model_provider: config
+                    .and_then(|c| c.get("modelProvider"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                agent_provider: config
+                    .and_then(|c| c.get("agentProvider"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
             },
         });
     }
@@ -202,6 +216,53 @@ pub fn parse_catalog(value: &Value) -> (Vec<(String, String)>, Option<String>) {
     (models, value.get("error").and_then(Value::as_str).map(ToOwned::to_owned))
 }
 
+/// Model Runtime Provider 目录项（会话 1）：hasKey 仅为布尔，绝无 Key 材料。
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModelProviderInfo {
+    pub id: String,
+    pub label: String,
+    pub has_key: bool,
+    pub models: Vec<(String, String)>,
+    pub error: Option<String>,
+}
+
+/// 解析 chat.catalog 的 modelProviders 段（Model Runtime 目录，独立于 DSH 存活）。
+pub fn parse_model_providers(value: &Value) -> Vec<ModelProviderInfo> {
+    value
+        .get("modelProviders")
+        .and_then(Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|entry| ModelProviderInfo {
+                    id: entry.get("id").and_then(Value::as_str).unwrap_or_default().to_owned(),
+                    label: entry
+                        .get("label")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                    has_key: entry.get("hasKey").and_then(Value::as_bool).unwrap_or(false),
+                    models: entry
+                        .get("models")
+                        .and_then(Value::as_array)
+                        .map(|models| {
+                            models
+                                .iter()
+                                .filter_map(|model| {
+                                    let id = model.get("id").and_then(Value::as_str)?;
+                                    let label = model.get("label").and_then(Value::as_str).unwrap_or(id);
+                                    Some((id.to_owned(), label.to_owned()))
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    error: entry.get("error").and_then(Value::as_str).map(ToOwned::to_owned),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn string_field(value: &Value, field: &str) -> Result<String, String> {
     value
         .get(field)
@@ -229,7 +290,7 @@ fn compact_value(value: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChatUi, parse_catalog, parse_history, parse_sessions, parse_turn};
+    use super::{ChatUi, ModelProviderInfo, parse_catalog, parse_history, parse_model_providers, parse_sessions, parse_turn};
     use serde_json::json;
 
     #[test]
@@ -237,13 +298,26 @@ mod tests {
         let sessions = parse_sessions(&json!({
             "sessions": [
                 {"id": "s1", "title": "项目", "updatedAt": 10, "archived": false,
-                 "config": {"provider": "dsh", "model": "deepseek-flash", "reasoning": "max", "mode": "chat"}}
+                 "config": {"provider": "dsh", "model": "deepseek-flash", "reasoning": "max", "mode": "chat",
+                            "modelProvider": "deepseek-official", "agentProvider": "none"}}
             ]
         }))
         .expect("sessions parse");
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].title, "项目");
         assert_eq!(sessions[0].config.model, "deepseek-flash");
+        assert_eq!(sessions[0].config.model_provider, "deepseek-official");
+        assert_eq!(sessions[0].config.agent_provider, "none");
+        // 旧记录缺新字段：归一化为空串（Auto / 未指定）
+        let legacy = parse_sessions(&json!({
+            "sessions": [
+                {"id": "s2", "title": "旧", "updatedAt": 5, "archived": false,
+                 "config": {"provider": "dsh", "model": "m", "reasoning": "off", "mode": "chat"}}
+            ]
+        }))
+        .expect("legacy parse");
+        assert_eq!(legacy[0].config.model_provider, "");
+        assert_eq!(legacy[0].config.agent_provider, "");
 
         let history = parse_history(&json!({
             "messages": [
@@ -278,6 +352,32 @@ mod tests {
         let (models, error) = parse_catalog(&json!({"models": [], "error": "settings/describe: 传输失败"}));
         assert!(models.is_empty());
         assert!(error.is_some());
+    }
+
+    #[test]
+    fn parses_model_providers_from_catalog() {
+        let providers = parse_model_providers(&json!({
+            "modelProviders": [
+                {"id": "deepseek-official", "label": "DeepSeek 官方", "hasKey": true,
+                 "models": [{"id": "deepseek-chat", "label": "deepseek-chat"}], "error": null},
+                {"id": "openai", "label": "OpenAI", "hasKey": false, "models": [], "error": null}
+            ],
+            "defaultModelProvider": "deepseek-official"
+        }));
+        assert_eq!(providers.len(), 2);
+        assert_eq!(
+            providers[0],
+            ModelProviderInfo {
+                id: "deepseek-official".into(),
+                label: "DeepSeek 官方".into(),
+                has_key: true,
+                models: vec![("deepseek-chat".into(), "deepseek-chat".into())],
+                error: None
+            }
+        );
+        assert!(!providers[1].has_key);
+        // 旧 Core（无 modelProviders 段）→ 空列表，不报错
+        assert!(parse_model_providers(&json!({"models": []})).is_empty());
     }
 
     #[test]
