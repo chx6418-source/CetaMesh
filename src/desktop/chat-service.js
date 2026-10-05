@@ -17,9 +17,10 @@
 // 流式展示 = 已定稿段落连接 + 当前段 chunk 增量；turn/end 以最终文本定稿。
 // usage：仅在事件携带结构化 usage 时透传，否则为 null（UI 显示"未知"），禁止伪造。
 //
-// Smart Router v1（注入 router，src/router/）：mode=smart 时对回合做确定性分类
-// （simple/tool/project）。project → agent-intent 只记录不执行（本阶段无 Agent
-// Broker），回合仍经 Model Runtime 执行并在 assistant 消息落盘 routing 供下阶段消费；
+// Smart Router（注入 router，src/router/）：mode=smart 时对回合做确定性分类
+// （simple/tool/project）。project → agent-intent 经注入的 platformRoute 升级为
+// 受控执行（Task + Agent Broker）；未注入 platformRoute 时（测试/精简装配）
+// routing 仍会如实落盘 resolvedRoute='model' + fallbackReason='agent-broker-not-available'；
 // 用户显式选择 Agent Provider（agentProvider，如 'dsh'）时整回合走该 Agent。
 //
 // 会话独占假设：一个 Chat 会话同时只允许一个回合（TURN_BUSY）；
@@ -112,7 +113,8 @@ export function createChatService({
   // Agent Provider（阶段 06）：会话显式指定 agentProvider（如 'dsh'）时，其回合经标准
   // AgentProvider 契约（agent.createSession / agent.send / agent.cancel）执行。
   // agentProvider='none' 表示用户显式禁用 Agent；null（未选择）表示 Agent=Auto——
-  // 回合走 Model Runtime / 既有 DSH 直连，Smart 路由的 agent 意图只记录不执行。
+  // 回合走 Model Runtime / 既有 DSH 直连；Smart 的 agent-intent 在注入 platformRoute
+  // 时经 Capability → Agent Broker 受控执行（见 startModelOrDshTurn）。
   // 只有事件协议与 Chat 回合状态机兼容（dsh-session-events）的 Provider 可被选择。
   const selectableAgentProviders = new Map(
     (Array.isArray(agentProviders) ? agentProviders : [])
@@ -652,9 +654,10 @@ export function createChatService({
 
   /** Smart 路由 + 通道选择：Model Runtime 优先，无 Key 配置时回落既有 DSH 直连。 */
   async function startModelOrDshTurn(record, state, promptText, { attachments, sourceText, forceProject = false }) {
-    // Smart Router v1：mode=smart 且注入 router 时做确定性分类。route=agent 的意图
-    // 本阶段只记录（Agent Broker 属会话 2）：无显式 Agent Provider 时回合仍由 Model
-    // 执行，意图与原因落盘 routing 供下阶段消费；Agent=Disabled 时不产生 agent 意图。
+    // Smart Router：mode=smart 且注入 router 时做确定性分类。route=agent 的意图经
+    // platformRoute（Capability → Agent Broker）受控执行；未注入 platformRoute
+    // （测试/精简装配）时不执行，routing 如实记录 fallbackReason；Agent=Disabled
+    // 时不产生 agent 意图。
     let routing = null;
     if (router && record.config.mode === 'smart') {
       routing = router.classify({

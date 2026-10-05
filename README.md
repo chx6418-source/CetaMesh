@@ -1,9 +1,23 @@
-# CetaMesh Desktop — Windows 产品（含 WhaleBridge QQ 适配器）
+# CetaMesh Desktop
 
 **产品**：CetaMesh Desktop v1 Release Candidate（`1.0.0-rc.1`）· **平台**：Windows 10/11 x64
 
-CetaMesh Desktop 是原生 Windows 应用：**Chat / Tasks / Memory / Workspace** 是产品主区；
-DSH 等作为 Agent Provider，QQ（SnowLuma / OneBot v11）作为可选的 Channel Adapter。
+CetaMesh Desktop 是 **local-first 的智能工作与协作运行时**：一个原生 Windows 应用，
+把聊天、记忆、任务、能力、Agent、通道与设备网格放在同一个本地事实源上。
+
+产品主区（桌面导航）：
+
+| 区域 | 能力 |
+| --- | --- |
+| **Chat** | Standalone Chat：仅配置 Model Provider API Key 即可对话（不要求 DSH/QQ 运行）；Smart 模式确定性路由简单对话/工具/工程任务 |
+| **Work** | Persistent Task（Task 属于 CetaMesh，不依附 Agent Session）+ Workshop Owner 审阅；Context 水位与 Fresh Session rollover 记录 |
+| **Memory** | 八类记忆（working/chat/user/task/workspace/social/knowledge/skill）、链接与有界上下文包，跨作用域需显式授权 |
+| **Workspaces** | 工作区边界（realpath 收敛）、文件 / Git / 测试工具，git.commit 默认审批 |
+| **Agents** | Agent Broker：模型选择与 Agent 执行分离；Managed Agent 的所有文件/记忆/Git/进程访问经 Capability Broker |
+| **Plugins** | 本地扩展（静态扫描 + vm 遏制宿主 + 能力声明与权限审批；进程隔离有明确演进契约） |
+| **Devices / Connections** | Device Mesh（节点身份、配对、信任与授权）与 Channel Adapter（外部通道接入，不是 Core 依赖） |
+| **Security / Settings** | Capability 审批、凭据（掩码）、更新（fail-closed）、诊断与脱敏 |
+
 安装包 `WhaleBridge-Setup-x64.exe` 自带 Core（Node SEA）与只读资源，安装后不依赖源码、
 `npm start`、开发终端或手动启动 Core。
 
@@ -12,13 +26,21 @@ DSH 等作为 Agent Provider，QQ（SnowLuma / OneBot v11）作为可选的 Chan
 - 架构与红线：[docs/desktop/ARCHITECTURE.md](docs/desktop/ARCHITECTURE.md)
 - 构建与发布：[docs/desktop/BUILD_AND_RELEASE.md](docs/desktop/BUILD_AND_RELEASE.md)
 - 已知限制：[docs/desktop/KNOWN_LIMITATIONS.md](docs/desktop/KNOWN_LIMITATIONS.md)
+- Capability 覆盖矩阵：[CAPABILITY_COVERAGE.md](CAPABILITY_COVERAGE.md)
 - 当前状态与验收证据：[PROJECT_STATE.md](PROJECT_STATE.md)
 
 > **状态**：Desktop v1 目前是 **Release Candidate**。自动化验收与真实 Windows 冒烟已通过；
 > 干净 VM 人工 UI 走查、真实 QQ 全模式与代码签名仍未完成，详见已知限制文档。
 
+## Optional Integrations（可选集成，不是 Core 依赖）
+
+- **DSH（DeepSeek Harness）**：可选的 Agent Provider 之一（`dsh`）。Standalone Chat 与
+  Model Runtime 不要求 DSH 运行；DSH 会话仅在显式选择该 Provider 时使用。
+- **QQ（SnowLuma / OneBot v11）**：可选的 Channel Adapter（`src/channel/registry.js` 声明）。
+  QQ 不可用时只降级该通道，Desktop Core 继续独立运行。
+
 以下内容保留为 **WhaleBridge QQ 适配器（Channel Adapter）** 的历史与运维文档；
-产品主区（Chat/Tasks/Memory/Workspace）以桌面应用与 `PROJECT_STATE.md` 为准。
+产品主区（Chat/Work/Memory/Workspaces 等）以桌面应用与 `PROJECT_STATE.md` 为准。
 
 **English**: [README.en.md](README.en.md) | **中文**: [README.md](README.md)
 

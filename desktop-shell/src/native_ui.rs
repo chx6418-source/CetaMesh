@@ -42,6 +42,48 @@ enum WorkTab {
     Workshop,
 }
 
+/// Capability 审批队列条目（Managed Agent 高风险能力请求；Owner 决定）。
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CapabilityApprovalRow {
+    pub id: String,
+    pub capability: String,
+    pub permission: String,
+    pub risk: String,
+    pub actor: String,
+    pub task_id: String,
+    pub workspace_id: String,
+    pub reason: String,
+    pub expires_at: u64,
+}
+
+pub fn parse_capability_approvals(value: &Value) -> Vec<CapabilityApprovalRow> {
+    let rows = match value.get("approvals").and_then(Value::as_array) {
+        Some(rows) => rows,
+        None => return Vec::new(),
+    };
+    rows.iter()
+        .filter_map(|row| {
+            let id = row.get("id").and_then(Value::as_str)?;
+            let actor = row.get("actor").unwrap_or(&Value::Null);
+            Some(CapabilityApprovalRow {
+                id: id.to_owned(),
+                capability: row.get("capability").and_then(Value::as_str).unwrap_or("").to_owned(),
+                permission: row.get("permission").and_then(Value::as_str).unwrap_or("").to_owned(),
+                risk: row.get("risk").and_then(Value::as_str).unwrap_or("").to_owned(),
+                actor: format!(
+                    "{}:{}",
+                    actor.get("kind").and_then(Value::as_str).unwrap_or("?"),
+                    actor.get("id").and_then(Value::as_str).unwrap_or("?")
+                ),
+                task_id: row.get("taskId").and_then(Value::as_str).unwrap_or("").to_owned(),
+                workspace_id: row.get("workspaceId").and_then(Value::as_str).unwrap_or("").to_owned(),
+                reason: row.get("reason").and_then(Value::as_str).unwrap_or("").to_owned(),
+                expires_at: row.get("expiresAt").and_then(Value::as_u64).unwrap_or(0),
+            })
+        })
+        .collect()
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum Area {
     Chat,
@@ -56,6 +98,7 @@ enum Area {
     PresetList,
     PresetBindings,
     Pending,
+    CapabilityApproval,
     Security,
     Slang,
     Sessions,
@@ -110,6 +153,8 @@ enum Operation {
     PresetBindingSave(PresetTarget),
     PendingRefresh,
     PendingDecision,
+    CapabilityApprovalList,
+    CapabilityApprovalDecide,
     SecurityLoad,
     SecuritySave,
     SlangLoad,
@@ -626,6 +671,9 @@ pub struct NativeUi {
     pending_answer: String,
     pending_notice: Option<String>,
     pending_refresh_at: Instant,
+    capability_approvals: Vec<CapabilityApprovalRow>,
+    capability_approvals_loaded: bool,
+    capability_approval_notice: Option<String>,
 
     slang_loaded: bool,
     slang: SlangForm,
@@ -999,6 +1047,9 @@ ApiCall::Family { method, params } => api.request(method, params),
             pending_answer: String::new(),
             pending_notice: None,
             pending_refresh_at: Instant::now(),
+            capability_approvals: Vec::new(),
+            capability_approvals_loaded: false,
+            capability_approval_notice: None,
 
             slang_loaded: false,
             slang: SlangForm::default(),
@@ -1190,6 +1241,22 @@ ApiCall::Family { method, params } => api.request(method, params),
             Area::Pending,
             Operation::PendingRefresh,
             "pending.list",
+            json!({}),
+        );
+    }
+
+    /// 进入审批页时自动读取一次 Capability 审批队列（每次进入读取一次）。
+    fn maybe_load_capability_approvals(&mut self) {
+        if self.navigation.legacy_tab != Tab::Pending
+            || self.capability_approvals_loaded
+            || self.pending.contains(&Area::CapabilityApproval)
+        {
+            return;
+        }
+        self.issue_family(
+            Area::CapabilityApproval,
+            Operation::CapabilityApprovalList,
+            "capability.approval.list",
             json!({}),
         );
     }
@@ -1498,6 +1565,19 @@ ApiCall::Family { method, params } => api.request(method, params),
                         Area::Pending,
                         Operation::PendingRefresh,
                         "pending.list",
+                        json!({}),
+                    );
+                }
+                (Operation::CapabilityApprovalList, Ok(value)) => {
+                    self.capability_approvals = parse_capability_approvals(value);
+                    self.capability_approvals_loaded = true;
+                }
+                (Operation::CapabilityApprovalDecide, Ok(_)) => {
+                    self.capability_approval_notice = Some("决定已提交，正在刷新能力审批队列。".to_owned());
+                    self.issue_family(
+                        Area::CapabilityApproval,
+                        Operation::CapabilityApprovalList,
+                        "capability.approval.list",
                         json!({}),
                     );
                 }
@@ -4279,6 +4359,81 @@ ApiCall::Family { method, params } => api.request(method, params),
             ui.weak(notice);
         }
         self.show_feedback(ui, Area::Pending);
+
+        // ── Capability 审批（Managed Agent 高风险能力请求）──────────────────
+        ui.add_space(14.0);
+        ui.separator();
+        ui.heading("Capability 审批");
+        ui.label(
+            "Managed Agent 的受控能力请求。批准只影响这一次请求（指纹绑定）；拒绝不改变已授予的 Task 能力集。",
+        );
+        ui.horizontal(|ui| {
+            if self.button(ui, Area::CapabilityApproval, "刷新能力审批") {
+                self.issue_family(
+                    Area::CapabilityApproval,
+                    Operation::CapabilityApprovalList,
+                    "capability.approval.list",
+                    json!({}),
+                );
+            }
+            if self.capability_approvals_loaded {
+                ui.label(format!("{} 条待决定", self.capability_approvals.len()));
+            } else {
+                ui.weak("尚未读取；点击刷新或进入本页后自动读取。");
+            }
+        });
+        let rows = self.capability_approvals.clone();
+        for row in rows {
+            ui.group(|ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.strong(row.capability.as_str());
+                    ui.weak(format!("权限 {}", row.permission));
+                    if row.risk == "high" || row.risk == "critical" {
+                        ui.colored_label(native_palette().warning, format!("风险 {}", row.risk));
+                    } else {
+                        ui.weak(format!("风险 {}", row.risk));
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.weak(format!("请求者 {}", row.actor));
+                    if !row.task_id.is_empty() {
+                        ui.weak(format!("Task {}", row.task_id));
+                    }
+                    if !row.workspace_id.is_empty() {
+                        ui.weak(format!("Workspace {}", row.workspace_id));
+                    }
+                    ui.weak(format!("到期 {}", row.expires_at));
+                });
+                if !row.reason.is_empty() {
+                    ui.label(format!("理由：{}", row.reason));
+                }
+                ui.horizontal(|ui| {
+                    let enabled = !self.pending.contains(&Area::CapabilityApproval);
+                    if ui.add_enabled(enabled, egui::Button::new("批准一次")).clicked() {
+                        self.issue_family(
+                            Area::CapabilityApproval,
+                            Operation::CapabilityApprovalDecide,
+                            "capability.approval.decide",
+                            json!({ "id": row.id, "approve": true }),
+                        );
+                    }
+                    if ui.add_enabled(enabled, egui::Button::new("拒绝")).clicked() {
+                        self.issue_family(
+                            Area::CapabilityApproval,
+                            Operation::CapabilityApprovalDecide,
+                            "capability.approval.decide",
+                            json!({ "id": row.id, "approve": false }),
+                        );
+                    }
+                });
+            });
+        }
+        if let Some(notice) = self.capability_approval_notice.as_deref() {
+            ui.weak(notice);
+        }
+        if let Some(Err(error)) = self.feedback.get(&Area::CapabilityApproval) {
+            ui.colored_label(native_palette().error, error.as_str());
+        }
     }
 
     fn show_diagnostics(&mut self, ui: &mut egui::Ui) {
@@ -4545,6 +4700,7 @@ impl eframe::App for NativeUi {
         self.sync_chat_draft();
         self.maybe_poll_chat(&ctx);
         self.maybe_refresh_pending();
+        self.maybe_load_capability_approvals();
         if self.last_prefs_sync.elapsed() >= Duration::from_secs(2) {
             self.save_geometry(&ctx);
             self.last_prefs_sync = Instant::now();
@@ -5103,6 +5259,33 @@ fn concise_result(value: &Value) -> String {
         format!("{prefix}…")
     } else {
         serialized
+    }
+}
+
+#[cfg(test)]
+mod capability_approval_tests {
+    use super::parse_capability_approvals;
+    use serde_json::json;
+
+    #[test]
+    fn parses_capability_approval_queue() {
+        let value = json!({ "approvals": [
+            { "id": "cap-1", "capability": "filesystem.write", "permission": "filesystem.write",
+              "risk": "medium", "actor": { "kind": "agent", "id": "task:t1" },
+              "taskId": "t1", "workspaceId": "ws1", "reason": "写入导出文件", "expiresAt": 1759660000000u64 }
+        ]});
+        let rows = parse_capability_approvals(&value);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "cap-1");
+        assert_eq!(rows[0].capability, "filesystem.write");
+        assert_eq!(rows[0].risk, "medium");
+        assert_eq!(rows[0].actor, "agent:task:t1");
+        assert_eq!(rows[0].task_id, "t1");
+        assert_eq!(rows[0].workspace_id, "ws1");
+        assert_eq!(rows[0].reason, "写入导出文件");
+        assert_eq!(rows[0].expires_at, 1759660000000);
+        assert!(parse_capability_approvals(&json!({ "approvals": [] })).is_empty());
+        assert!(parse_capability_approvals(&json!({})).is_empty());
     }
 }
 
