@@ -589,45 +589,65 @@ export function createChatService({
    * abort 经 controller 传给 Provider（turn/end aborted → cancelled 落盘 partial）。
    * 会话默认模型若仍是 DSH 缺省值（未在 Model 目录里显式选择过），交给 Provider
    * 默认模型解析，避免把 DSH 内部模型 id 发给直连 API。
+   *
+   * 握手语义（v2 hardening 修正）：调用方 await 的 promise 在"首个流事件到达或
+   * 回合终结"时落定——Key 缺失 / 401 / 连接拒绝等首事件前的失败仍然同步拒绝
+   * （会话 1 契约不变）；流开始后调用方立即返回，剩余回合在后台推进。UI 的单
+   * worker IPC 线程因此能继续轮询 chat.status（流式可见、停止可达），且回合时长
+   * 不再受 IPC 请求超时约束。回合内错误经 finalizeTurn 落为 turn error。
    */
-  async function runModelTurn(record, state, promptText, routing) {
-    const resolved = modelRuntime.resolveProvider(record.config.modelProvider);
+  function startModelTurn(record, state, promptText, routing, resolved) {
     if (state.turn) state.turn.routing = routing ?? null;
     const rawModel = typeof record.config.model === 'string' ? record.config.model.trim() : '';
     const sessionDefaultModel = String(defaults?.model ?? '');
     const model = rawModel && rawModel !== sessionDefaultModel ? rawModel : null;
     const controller = new AbortController();
     state.modelTurn = { controller, providerId: resolved.id };
-    try {
-      const events = modelRuntime.stream({
-        providerId: resolved.id,
-        model,
-        messages: buildModelMessages(record.id, promptText),
-        reasoning: record.config.reasoning,
-        signal: controller.signal
-      });
-      for await (const event of events) {
-        if (!state.turn) break;
-        handleChatEvent(record, state, event);
-      }
-    } catch (error) {
-      const turn = state.turn;
-      if (turn) {
-        const aborted = controller.signal.aborted || error?.code === 'ABORTED' || error?.name === 'AbortError';
-        turn.displayText = displayTextOf(state);
-        if (aborted) {
-          turn.state = 'cancelled';
-        } else {
-          turn.state = 'error';
-          turn.error = String(error?.message ?? error).slice(0, 1000);
+    let settleHandshake = null;
+    // 首个事件前的失败 → handshake reject（send 同步失败，契约同会话 1）；
+    // 首个事件到达 → handshake resolve（流开始，剩余回合后台推进）。
+    const handshake = new Promise((resolve, reject) => {
+      settleHandshake = { resolve, reject, settled: false };
+    });
+    const settleOk = () => { if (settleHandshake && !settleHandshake.settled) { settleHandshake.settled = true; settleHandshake.resolve(); } };
+    const settleErr = (error) => { if (settleHandshake && !settleHandshake.settled) { settleHandshake.settled = true; settleHandshake.reject(error); } };
+    const done = (async () => {
+      try {
+        const events = modelRuntime.stream({
+          providerId: resolved.id,
+          model,
+          messages: buildModelMessages(record.id, promptText),
+          reasoning: record.config.reasoning,
+          signal: controller.signal
+        });
+        for await (const event of events) {
+          if (!state.turn) break;
+          settleOk();
+          handleChatEvent(record, state, event);
         }
-        finalizeTurn(record, state);
-      } else {
-        throw error;
+        settleOk();
+      } catch (error) {
+        const turn = state.turn;
+        settleErr(error);
+        if (turn) {
+          const aborted = controller.signal.aborted || error?.code === 'ABORTED' || error?.name === 'AbortError';
+          turn.displayText = displayTextOf(state);
+          if (aborted) {
+            turn.state = 'cancelled';
+          } else {
+            turn.state = 'error';
+            turn.error = String(error?.message ?? error).slice(0, 1000);
+          }
+          finalizeTurn(record, state);
+        } else {
+          throw error;
+        }
+      } finally {
+        settleOk();
+        state.modelTurn = null;
       }
-    } finally {
-      state.modelTurn = null;
-    }
+    })();
+    return { handshake, done };
   }
 
   /** Smart 路由 + 通道选择：Model Runtime 优先，无 Key 配置时回落既有 DSH 直连。 */
@@ -662,9 +682,15 @@ export function createChatService({
     }
     const modelPathAvailable = Boolean(modelRuntime);
     if (modelPathAvailable) {
+      // Provider 解析保持同步（Key 缺失/未知 Provider 同步失败）；随后等待"首个流
+      // 事件"握手落定——首事件前的失败同步拒绝，流开始后 send 返回、剩余回合
+      // 后台推进（详见 startModelTurn 注释）。
+      const resolved = modelRuntime.resolveProvider(record.config.modelProvider);
       const fallbackReason = routing?.agentIntent && !platformRoute ? 'agent-broker-not-available' : null;
-      await runModelTurn(record, state, promptText, routing ? { ...routing,
-        resolvedRoute: platformRoute && routing.resolvedRoute === 'capability' ? 'capability' : 'model', fallbackReason } : null);
+      const { handshake, done } = startModelTurn(record, state, promptText, routing ? { ...routing,
+        resolvedRoute: platformRoute && routing.resolvedRoute === 'capability' ? 'capability' : 'model', fallbackReason } : null, resolved);
+      done.catch(() => { /* 后台终态已经 finalizeTurn；兜底防未处理 rejection */ });
+      await handshake;
       return;
     }
     if (state.turn) state.turn.routing = routing ? { ...routing, resolvedRoute: routing.route } : null;

@@ -244,9 +244,20 @@ export function createOpenAiCompatibleModelProvider({
         };
         let pendingEvents = [];
         yield modelStreamEvent('turn/start', {});
+        // abort 竞争：undici 的 signal 只保证到响应头为止；响应体 reader.read() 在
+        // 挂流（服务端停发数据）上会永久阻塞且不感知 abort。这里显式把 abort 注入
+        // 读取循环：竞争命中即 cancel reader（关闭 socket）并按 aborted 收尾。
+        const abortWait = signal
+          ? new Promise((_, reject) => {
+              if (signal.aborted) reject(Object.assign(new Error('请求已取消'), { name: 'AbortError' }));
+              else signal.addEventListener('abort', () => reject(Object.assign(new Error('请求已取消'), { name: 'AbortError' })), { once: true });
+            })
+          : null;
         try {
           while (true) {
-            const { done, value } = await reader.read();
+            const { done, value } = await (abortWait
+              ? Promise.race([reader.read(), abortWait])
+              : reader.read());
             if (done) break;
             pendingEvents = [];
             let streamEnded = false;
@@ -267,6 +278,7 @@ export function createOpenAiCompatibleModelProvider({
         } catch (error) {
           const aborted = signal?.aborted || error?.name === 'AbortError';
           if (aborted) {
+            try { await reader.cancel('aborted'); } catch { /* 流已关闭 */ }
             yield modelStreamEvent('turn/end', { reason: { kind: 'aborted', usage } });
             return;
           }

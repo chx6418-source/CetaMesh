@@ -469,7 +469,13 @@ function makeFullService({ withKey = true, fetchImpl, router = true, api = dshDo
   const { service, api } = makeFullService({ fetchImpl: f });
   const session = await service.execute({ method: 'chat.sessions.create', params: { title: '独立聊天' } });
   await service.execute({ method: 'chat.send', params: { id: session.id, text: '你好，不启动 DSH 试试' } });
-  const status = await service.execute({ method: 'chat.status', params: { id: session.id } });
+  // v2 hardening：send 在首个流事件后返回（握手），等回合落定再断言（同真实 UI 轮询）。
+  let status = null;
+  for (let i = 0; i < 200; i += 1) {
+    status = await service.execute({ method: 'chat.status', params: { id: session.id } });
+    if (!status.turn) break;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
   assert.equal(status.turn, null);
   assert.equal(status.lastState, 'idle');
   const history = await service.execute({ method: 'chat.history', params: { id: session.id } });
@@ -535,7 +541,16 @@ function makeFullService({ withKey = true, fetchImpl, router = true, api = dshDo
   const { service } = makeFullService({ fetchImpl: f });
   const session = await service.execute({ method: 'chat.sessions.create', params: {} });
   await service.execute({ method: 'chat.config.set', params: { id: session.id, config: { mode: 'smart' } } });
+  // v2 hardening：Model 通道 send 在首个流事件后返回，回合落定后读历史（同真实 UI）。
+  const waitForIdle = async (id) => {
+    for (let i = 0; i < 200; i += 1) {
+      const status = await service.execute({ method: 'chat.status', params: { id } });
+      if (!status.turn) return;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  };
   await service.execute({ method: 'chat.send', params: { id: session.id, text: '修改这个项目并跑测试' } });
+  await waitForIdle(session.id);
   let history = await service.execute({ method: 'chat.history', params: { id: session.id } });
   const routing = history.messages[1].routing;
   assert.equal(routing.class, 'project');
@@ -547,6 +562,7 @@ function makeFullService({ withKey = true, fetchImpl, router = true, api = dshDo
   assert.equal(history.messages[1].text, '你好，独立世界', '回合适配完成');
   // 普通聊天 → simple → model，无 agent 意图
   await service.execute({ method: 'chat.send', params: { id: session.id, text: '你好' } });
+  await waitForIdle(session.id);
   history = await service.execute({ method: 'chat.history', params: { id: session.id } });
   const simple = history.messages[3].routing;
   assert.equal(simple.class, 'simple');
@@ -555,6 +571,7 @@ function makeFullService({ withKey = true, fetchImpl, router = true, api = dshDo
   // Agent=Disabled：即使工程任务也不产生 agent 意图
   await service.execute({ method: 'chat.config.set', params: { id: session.id, config: { agentProvider: 'none' } } });
   await service.execute({ method: 'chat.send', params: { id: session.id, text: '重构整个仓库' } });
+  await waitForIdle(session.id);
   history = await service.execute({ method: 'chat.history', params: { id: session.id } });
   const disabled = history.messages[5].routing;
   assert.equal(disabled.class, 'project');
