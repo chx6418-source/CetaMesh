@@ -43,6 +43,7 @@ enum Area {
     Services,
     ModelCatalog,
     ModelDefaults,
+    ProviderKeys,
     PresetList,
     PresetBindings,
     Pending,
@@ -90,6 +91,10 @@ enum Operation {
     ModelCatalogLoad,
     ModelDefaultsLoad,
     ModelDefaultsSave,
+    ProviderSecretsLoad,
+    ProviderSecretSave,
+    ProviderSecretDelete,
+    ProviderSecretTest,
     PresetListLoad,
     PresetBindingsLoad,
     PresetBindingSave(PresetTarget),
@@ -200,6 +205,37 @@ impl Default for ModelDefaults {
             reasoning_effort: "off".to_owned(),
         }
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ProviderSecretRow {
+    provider: String,
+    hint: String,
+    base_url: String,
+    updated_at: String,
+}
+
+fn parse_provider_secrets(value: &Value) -> Result<Vec<ProviderSecretRow>, String> {
+    let items = value
+        .get("secrets")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "Core 返回的 Provider 凭据列表格式无效。".to_owned())?;
+    let mut rows = Vec::with_capacity(items.len().min(100));
+    for item in items.iter().take(100) {
+        let provider = item
+            .get("provider")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty() && text.chars().count() <= 64)
+            .ok_or_else(|| "Provider 凭据缺少 provider。".to_owned())?;
+        rows.push(ProviderSecretRow {
+            provider: provider.to_owned(),
+            hint: item.get("hint").and_then(Value::as_str).unwrap_or("").to_owned(),
+            base_url: item.get("baseUrl").and_then(Value::as_str).unwrap_or("").to_owned(),
+            updated_at: item.get("updatedAt").and_then(Value::as_str).unwrap_or("").to_owned(),
+        });
+    }
+    Ok(rows)
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -542,6 +578,12 @@ pub struct NativeUi {
     model_defaults: ModelDefaults,
     model_defaults_loaded: bool,
     model_notice: Option<String>,
+    provider_secrets: Vec<ProviderSecretRow>,
+    provider_secrets_loaded: bool,
+    provider_key_provider: String,
+    provider_key_input: String,
+    provider_key_base: String,
+    provider_secrets_notice: Option<String>,
 
     presets: Vec<PresetRecord>,
     preset_list_loaded: bool,
@@ -584,6 +626,8 @@ pub struct NativeUi {
     /// Per-session chat drafts so switching sessions (or hiding to the tray) never loses text.
     chat_drafts: HashMap<String, String>,
     last_active_chat: Option<String>,
+    /// Manual model id entry, used when the DSH catalog is unavailable or stale.
+    chat_model_input: String,
     last_tray_status: Option<TrayStatus>,
     toast: Option<(String, Instant)>,
     last_prefs_sync: Instant,
@@ -905,6 +949,12 @@ ApiCall::Family { method, params } => api.request(method, params),
             model_defaults: ModelDefaults::default(),
             model_defaults_loaded: false,
             model_notice: None,
+            provider_secrets: Vec::new(),
+            provider_secrets_loaded: false,
+            provider_key_provider: "deepseek-official".to_owned(),
+            provider_key_input: String::new(),
+            provider_key_base: String::new(),
+            provider_secrets_notice: None,
 
             presets: Vec::new(),
             preset_list_loaded: false,
@@ -946,6 +996,7 @@ ApiCall::Family { method, params } => api.request(method, params),
             shortcuts_open: false,
             chat_drafts: HashMap::new(),
             last_active_chat: None,
+            chat_model_input: String::new(),
             last_tray_status: None,
             toast: None,
             last_prefs_sync: Instant::now(),
@@ -981,6 +1032,12 @@ ApiCall::Family { method, params } => api.request(method, params),
             Area::ModelDefaults,
             Operation::ModelDefaultsLoad,
             "model.defaults.get",
+            json!({}),
+        );
+        app.issue_family(
+            Area::ProviderKeys,
+            Operation::ProviderSecretsLoad,
+            "providers.secrets.list",
             json!({}),
         );
         app.issue_control(
@@ -1338,6 +1395,50 @@ ApiCall::Family { method, params } => api.request(method, params),
                             .to_owned(),
                     );
                     self.apply_model_defaults(value);
+                }
+                (Operation::ProviderSecretsLoad, Ok(value)) => {
+                    match parse_provider_secrets(value) {
+                        Ok(rows) => {
+                            self.provider_secrets = rows;
+                            self.provider_secrets_loaded = true;
+                        }
+                        Err(error) => {
+                            self.feedback.insert(Area::ProviderKeys, Err(error));
+                        }
+                    }
+                }
+                (Operation::ProviderSecretSave, Ok(_)) => {
+                    self.provider_key_input.clear();
+                    self.provider_secrets_notice = Some("API Key 已保存（仅本机，界面只显示掩码）。".to_owned());
+                    self.issue_family(
+                        Area::ProviderKeys,
+                        Operation::ProviderSecretsLoad,
+                        "providers.secrets.list",
+                        json!({}),
+                    );
+                }
+                (Operation::ProviderSecretDelete, Ok(value)) => {
+                    let removed = value.get("removed").and_then(Value::as_bool).unwrap_or(false);
+                    self.provider_secrets_notice = Some(if removed {
+                        "API Key 已删除。".to_owned()
+                    } else {
+                        "该 Provider 未配置 API Key。".to_owned()
+                    });
+                    self.issue_family(
+                        Area::ProviderKeys,
+                        Operation::ProviderSecretsLoad,
+                        "providers.secrets.list",
+                        json!({}),
+                    );
+                }
+                (Operation::ProviderSecretTest, Ok(value)) => {
+                    let provider = value.get("provider").and_then(Value::as_str).unwrap_or("provider");
+                    let message = value.get("message").and_then(Value::as_str).unwrap_or("测试完成");
+                    let ok = value.get("ok").and_then(Value::as_bool).unwrap_or(false);
+                    self.provider_secrets_notice = Some(format!(
+                        "{provider}：{}{message}",
+                        if ok { "可用 — " } else { "不可用 — " }
+                    ));
                 }
                 (Operation::PresetListLoad, Ok(value)) => self.apply_preset_list(value),
                 (Operation::PresetBindingsLoad, Ok(value)) => self.apply_preset_bindings(value),
@@ -2502,6 +2603,10 @@ ApiCall::Family { method, params } => api.request(method, params),
 
         // ── 弱化的会话配置（次级控件行） ───────────────────────────────
         self.show_chat_secondary_controls(ui);
+
+        // 配置保存失败（例如 DSH 未连接导致 MODEL_BIND_FAILED）时必须可见，否则下拉看起来像“没反应”。
+        ui.add_space(8.0);
+        self.show_feedback(ui, Area::Chat);
     }
 
     fn show_chat_transcript(&mut self, ui: &mut egui::Ui) {
@@ -2679,6 +2784,9 @@ ApiCall::Family { method, params } => api.request(method, params),
     fn show_chat_secondary_controls(&mut self, ui: &mut egui::Ui) {
         let palette = native_palette();
         let config = self.chat.active_config();
+        if self.chat_model_input.trim().is_empty() && !config.model.is_empty() {
+            self.chat_model_input = config.model.clone();
+        }
         let catalog = self.chat.catalog.clone();
         let active_id = self.chat.active_id.clone();
         ui.horizontal_wrapped(|ui| {
@@ -2721,6 +2829,26 @@ ApiCall::Family { method, params } => api.request(method, params),
                             }
                         }
                     });
+            }
+            // 目录不可用或需要指定目录外模型时，允许直接输入模型 ID。
+            ui.label("自定义模型");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.chat_model_input)
+                    .desired_width(150.0)
+                    .hint_text("模型 ID"),
+            );
+            if ui.small_button("应用").clicked() {
+                let model = self.chat_model_input.trim().to_owned();
+                if !model.is_empty() {
+                    if let Some(session_id) = active_id.clone() {
+                        self.issue_control(
+                            Area::Chat,
+                            Operation::ChatConfigSave,
+                            "chat.config.set",
+                            json!({"id": session_id, "config": {"model": model}}),
+                        );
+                    }
+                }
             }
             egui::ComboBox::from_id_salt("chat_reasoning_select")
                 .selected_text(format!("reasoning: {}", config.reasoning))
@@ -3349,6 +3477,82 @@ ApiCall::Family { method, params } => api.request(method, params),
         self.show_read_status(ui, Area::ModelCatalog);
         self.show_read_status(ui, Area::ModelDefaults);
         if let Some(notice) = self.model_notice.as_deref() {
+            ui.weak(notice);
+        }
+
+        ui.add_space(12.0);
+        ui.separator();
+        ui.heading("Provider API Key");
+        ui.label("Key 只保存在本机 state/provider-keys.json（0600），界面仅显示掩码；测试会用 Key 访问该 Provider 的 /models 端点。");
+        for row in self.provider_secrets.clone() {
+            ui.horizontal_wrapped(|ui| {
+                ui.monospace(row.provider.as_str());
+                ui.label(row.hint.as_str());
+                if !row.base_url.is_empty() {
+                    ui.weak(row.base_url.as_str());
+                }
+                if !row.updated_at.is_empty() {
+                    ui.weak(row.updated_at.as_str());
+                }
+                if ui.small_button("测试").clicked() {
+                    self.issue_family(
+                        Area::ProviderKeys,
+                        Operation::ProviderSecretTest,
+                        "providers.secrets.test",
+                        json!({"provider": row.provider}),
+                    );
+                }
+                if ui.small_button("删除").clicked() {
+                    self.issue_family(
+                        Area::ProviderKeys,
+                        Operation::ProviderSecretDelete,
+                        "providers.secrets.delete",
+                        json!({"provider": row.provider}),
+                    );
+                }
+            });
+        }
+        if self.provider_secrets.is_empty() && self.provider_secrets_loaded {
+            ui.weak("尚未配置任何 Provider API Key。");
+        }
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Provider");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.provider_key_provider)
+                    .desired_width(170.0)
+                    .hint_text("deepseek-official"),
+            );
+            ui.label("API Key");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.provider_key_input)
+                    .password(true)
+                    .desired_width(220.0)
+                    .hint_text("sk-…"),
+            );
+            ui.label("Base URL（可选）");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.provider_key_base)
+                    .desired_width(220.0)
+                    .hint_text("https://…"),
+            );
+            if ui.button("保存 Key").clicked() {
+                let provider = self.provider_key_provider.trim().to_owned();
+                let api_key = self.provider_key_input.trim().to_owned();
+                let base_url = self.provider_key_base.trim().to_owned();
+                if provider.is_empty() || api_key.is_empty() {
+                    self.provider_secrets_notice = Some("Provider 与 API Key 不能为空。".to_owned());
+                } else {
+                    self.issue_family(
+                        Area::ProviderKeys,
+                        Operation::ProviderSecretSave,
+                        "providers.secrets.set",
+                        json!({"provider": provider, "apiKey": api_key, "baseUrl": base_url}),
+                    );
+                }
+            }
+        });
+        self.show_read_status(ui, Area::ProviderKeys);
+        if let Some(notice) = self.provider_secrets_notice.as_deref() {
             ui.weak(notice);
         }
 

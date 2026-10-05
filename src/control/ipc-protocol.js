@@ -147,7 +147,7 @@ export function startIpcProtocol({
     }
     // 产品私有方法族（chat.* / memory.* / task.* / continuity.*）：
     // 由注入 dispatch 侧做二级白名单（desktop/chat-service.js、memory/service.js）。
-    if (request.method.startsWith('chat.') || request.method.startsWith('memory.') || request.method.startsWith('task.') || request.method.startsWith('agent.') || request.method.startsWith('workspace.') || request.method.startsWith('continuity.') || request.method.startsWith('ext.') || request.method.startsWith('mesh.') || request.method.startsWith('channel.')
+    if (request.method.startsWith('chat.') || request.method.startsWith('memory.') || request.method.startsWith('task.') || request.method.startsWith('agent.') || request.method.startsWith('workspace.') || request.method.startsWith('continuity.') || request.method.startsWith('providers.') || request.method.startsWith('ext.') || request.method.startsWith('mesh.') || request.method.startsWith('channel.')
       || request.method.startsWith('settings.') || request.method.startsWith('about.') || request.method.startsWith('update.')) {
       try {
         const result = await runDispatch({ method: request.method, params });

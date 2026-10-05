@@ -1,5 +1,13 @@
 # CetaMesh Desktop — PROJECT_STATE
 
+## UX 收尾 — 2026-10-05（切模型 / 工作区选择器 / Provider API Key）
+
+- **模型与思考强度切换**：Chat 页现在渲染 `Area::Chat` 的错误反馈（`MODEL_BIND_FAILED`、参数错误不再“无反应”）；新增“自定义模型”输入 + 应用按钮，DSH 模型目录不可用时也能切换；保存成功后刷新会话列表使下拉立即反映新配置。
+- **工作区添加**：表单新增“浏览…”原生目录选择器（`rfd` 0.15.4，本地缓存离线编译）；选中目录自动填入根目录，名称留空时自动取目录名，不再需要手动复制路径。
+- **Provider API Key**：新增 `src/providers/secrets.js` —— `state/provider-keys.json`（0600、原子替换、损坏 fail-closed、界面只返回掩码 hint），支持可选 https `baseUrl`；IPC 家族 `providers.secrets.list/set/delete/test`；设置 → 模型与 Preset 新增管理区（保存 / 删除 / 测试）。测试用 Key 访问该 Provider 的 `/models`，只返回状态与固定文案，绝不回显 Key。
+- 边界：Key 目前用于本地保存与连通性测试；若 DSH 支持按 provider 注入 Key，再接入真实模型调用。目录选择器为阻塞式原生对话框。
+- 验证：`test-provider-secrets` 6/6、`test-control-service`、`test-core-entry`、`test-privilege` 24/24、`test-system` 108/108、`test-architecture` 8 组、chat-product 11 组、`cargo test` 86/86 全部 PASS。
+
 ## 模式重构 — 2026-10-05（social / workshop，已获用户批准）
 
 | 模式 | 最终形态 |

@@ -369,6 +369,20 @@ impl WorkspaceUi {
                             .desired_width(360.0)
                             .hint_text(r"D:\projects\demo"),
                     );
+                    if ui.button("浏览…").clicked() {
+                        // Native folder picker: avoids hand-copying long Windows paths.
+                        if let Some(folder) = rfd::FileDialog::new()
+                            .set_title("选择工作区根目录")
+                            .pick_folder()
+                        {
+                            self.new_root = folder.display().to_string();
+                            if self.new_name.trim().is_empty() {
+                                if let Some(name) = folder.file_name().and_then(|value| value.to_str()) {
+                                    self.new_name = name.to_owned();
+                                }
+                            }
+                        }
+                    }
                     ui.checkbox(&mut self.new_create_dir, "目录不存在时创建");
                     if ui.button("登记工作区").clicked() {
                         actions.push(WorkspaceAction::new(

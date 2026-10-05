@@ -74,6 +74,7 @@ import { createLocalServiceManager, SNOWLUMA_RELEASE_PAGE, DSH_INSTALL_HINT } fr
 import { CONTROL_METHODS, ControlServiceError, createControlService } from './control/control-service.js';
 import { startIpcProtocol } from './control/ipc-protocol.js';
 import { createChatService } from './desktop/chat-service.js';
+import { createProviderSecrets } from './providers/secrets.js';
 import { createMemoryService } from './memory/service.js';
 import { createWorkspaceService } from './workspace/index.js';
 import { createTaskService } from './task/service.js';
@@ -451,7 +452,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const convKey = (kind, id) => `${kind}:${id}`;
 const SEND_TIMEOUT_MS = 15000;
 
-function startUiIpcServer(controlService, chatService, memoryService, taskService, continuityService, extensionService, meshService, channelService, systemServices, agentService, workspaceService) {
+function startUiIpcServer(controlService, chatService, memoryService, taskService, continuityService, extensionService, meshService, channelService, systemServices, agentService, workspaceService, providerSecrets) {
   const pipeName = String(process.env.WHALEBRIDGE_UI_PIPE ?? '').trim();
   if (!pipeName) return null;
 
@@ -467,6 +468,9 @@ function startUiIpcServer(controlService, chatService, memoryService, taskServic
     }
     if (method.startsWith('continuity.')) {
       return continuityService.execute({ method, params });
+    }
+    if (method.startsWith('providers.')) {
+      return providerSecrets.execute({ method, params });
     }
     if (method.startsWith('ext.')) {
       return extensionService.execute({ method, params });
@@ -1968,6 +1972,8 @@ async function main() {
       stateDir: STATE_DIR
     });
     process.once('exit', () => chatService.close());
+    // Provider API Key 存储（本地凭据，掩码返回；只用于显式测试/未来的直连 Provider）。
+    const providerSecrets = createProviderSecrets({ root: DATA_ROOT });
     // 统一 Memory Runtime（阶段 04）：与 Chat 同级的私有方法族 memory.*。
     // 主体由 memory/service.js 固定为桌面用户，IPC 调用方不能自带 principal。
     const memoryService = createMemoryService({
@@ -2020,7 +2026,7 @@ async function main() {
       settings: settingsService,
       about: aboutService,
       update: updateService
-    }, agentService, workspaceService);
+    }, agentService, workspaceService, providerSecrets);
     const server = http.createServer(async (req, res) => {
       const url = new URL(req.url ?? '/', `http://127.0.0.1:${port}`);
       const SECURITY_HEADERS = {
