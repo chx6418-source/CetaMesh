@@ -24,7 +24,7 @@ export function reviewToken(fingerprint, permissionNames, riskLevel) {
  * 其余权限目前只是「声明 + 审查」面：用户可以批准，但宿主还不会给出对应能力 —— 
  * review 里如实标 enforced=false，避免让用户以为批准了就真的放开了磁盘或记忆。
  */
-export const ENFORCED_PERMISSIONS = Object.freeze(['log', 'storage', 'network']);
+export const ENFORCED_PERMISSIONS = Object.freeze(['log', 'storage', 'network', 'memory.read', 'memory.write', 'filesystem.read', 'filesystem.write']);
 
 export function isEnforced(name) {
   return ENFORCED_PERMISSIONS.includes(name);

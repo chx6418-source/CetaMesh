@@ -17,12 +17,13 @@ import { EXTENSION_LIMITS, extensionError, hostAllowed } from './types.js';
 
 const MAX_LOG_ENTRIES = 200;
 
-export function createExtensionHost({
+export function createVmExtensionHost({
   manifest,
   source,
   storage,
   logger = () => {},
   fetchImpl = null,
+  capabilityExecutor = null,
   timeoutMs = EXTENSION_LIMITS.invokeTimeoutMs
 } = {}) {
   if (!manifest || typeof manifest !== 'object') throw new Error('createExtensionHost 需要 manifest');
@@ -56,7 +57,14 @@ export function createExtensionHost({
     if (!hostAllowed(parsed.hostname, manifest.network?.hosts || [])) {
       throw extensionError('HOST_NOT_ALLOWED', '主机不在声明白名单内：' + parsed.hostname);
     }
-    return fetchImpl(url, init);
+    if (typeof capabilityExecutor !== 'function') {
+      throw extensionError('CAPABILITY_BROKER_REQUIRED', 'Extension network requires Capability Broker');
+    }
+    const response = await capabilityExecutor('network', { url: parsed.toString(), init });
+    if (response && typeof response.body === 'string' && Number.isInteger(response.statusCode)) {
+      return new Response(response.body, { status: response.statusCode });
+    }
+    return response;
   }
 
   const sandbox = Object.create(null);
@@ -76,6 +84,21 @@ export function createExtensionHost({
   }
   if (granted.has('network')) {
     sandbox.fetch = (url, init) => guardedFetch(url, init);
+  }
+  const invokeCapability = async (capability, input) => {
+    if (!granted.has(capability)) throw extensionError('PERMISSION_DENIED', capability + ' not declared');
+    if (typeof capabilityExecutor !== 'function') throw extensionError('CAPABILITY_BROKER_REQUIRED', 'Capability Broker unavailable');
+    return capabilityExecutor(capability, input);
+  };
+  if (granted.has('memory.read') || granted.has('memory.write')) {
+    sandbox.memory = {};
+    if (granted.has('memory.read')) sandbox.memory.read = input => invokeCapability('memory.read', input);
+    if (granted.has('memory.write')) sandbox.memory.write = input => invokeCapability('memory.write', input);
+  }
+  if (granted.has('filesystem.read') || granted.has('filesystem.write')) {
+    sandbox.workspace = {};
+    if (granted.has('filesystem.read')) sandbox.workspace.read = input => invokeCapability('filesystem.read', input);
+    if (granted.has('filesystem.write')) sandbox.workspace.write = input => invokeCapability('filesystem.write', input);
   }
   // 明确把宿主对象置为 undefined，避免扩展依赖"碰巧存在"的东西。
   sandbox.require = undefined;
@@ -136,6 +159,7 @@ export function createExtensionHost({
         log: (...args) => record('info', args),
         storage: sandbox.storage,
         fetch: sandbox.fetch
+        ,memory: sandbox.memory, workspace: sandbox.workspace
       };
       let timer = null;
       const timeout = new Promise((_, reject) => {
@@ -155,3 +179,6 @@ export function createExtensionHost({
     }
   };
 }
+
+// ExtensionHost factory contract; process isolation can replace this implementation later.
+export const createExtensionHost = createVmExtensionHost;

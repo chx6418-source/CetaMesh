@@ -133,9 +133,9 @@ try {
     id: 'test.declarative', permissions: ['filesystem.read', 'memory.read'],
     scope: { workspace: null, paths: ['src'] }, capabilities: [{ id: 'd.r', kind: 'tool', title: 'R', requires: ['filesystem.read'] }]
   })).manifest);
-  equal('未实现的权限标记 enforced=false',
-    declarativeOnly.permissions.filter((p) => !p.enforced).map((p) => p.name), ['filesystem.read', 'memory.read']);
-  check('审查摘要点明未实现能力', reviewSummaryLines(declarativeOnly).join('\n').includes('宿主尚未提供该能力'));
+  equal('Workspace/Memory 权限经 Capability Broker 执行',
+    declarativeOnly.permissions.filter((p) => p.enforced).map((p) => p.name), ['filesystem.read', 'memory.read']);
+  check('审查摘要不再将已接线能力标成未实现', !reviewSummaryLines(declarativeOnly).join('\n').includes('宿主尚未提供该能力'));
 
   // ── 5. 未批准 / 凭据不符 -> 拒绝安装 ───────────────────────────────────
   const noApproval = capture(() => runtime.install({ sourceDir: HTTP_META }));

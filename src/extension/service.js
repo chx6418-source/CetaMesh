@@ -7,10 +7,10 @@ import { createExtensionRuntime } from './runtime.js';
 import { createExtensionStore } from './store.js';
 import { extensionError } from './types.js';
 
-export function createExtensionService({ stateDir, fetchImpl = null, now } = {}) {
+export function createExtensionService({ stateDir, fetchImpl = null, capabilityBroker = null, hostFactory, now } = {}) {
   if (!stateDir || typeof stateDir !== 'string') throw new Error('createExtensionService 需要 stateDir');
   const store = createExtensionStore({ stateDir, now });
-  const runtime = createExtensionRuntime({ store, fetchImpl, now });
+  const runtime = createExtensionRuntime({ store, fetchImpl, capabilityBroker, hostFactory, now });
 
   const handlers = {
     'ext.overview': () => runtime.overview(),
@@ -24,6 +24,7 @@ export function createExtensionService({ stateDir, fetchImpl = null, now } = {})
     'ext.disable': (p) => runtime.disable({ id: p.id }),
     'ext.invoke': (p) => runtime.invoke({ id: p.id, capability: p.capability, input: p.input }),
     'ext.logs': (p) => runtime.logs({ id: p.id })
+    ,'ext.memory-pack.overlay': (p) => runtime.updateMemoryPackOverlay({ id: p.id, patch: p.patch })
   };
 
   return {

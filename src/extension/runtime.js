@@ -9,11 +9,44 @@ import { createExtensionHost } from './host.js';
 import { createExtensionInstaller } from './installer.js';
 import { reviewSummaryLines } from './review.js';
 import { extensionError } from './types.js';
+import { createMemoryPackHost } from './memory-pack.js';
+import { createCapabilityBroker } from '../capability/broker.js';
+import { createCapabilityPolicy } from '../capability/policy.js';
 
-export function createExtensionRuntime({ store, fetchImpl = null, now = () => Date.now() } = {}) {
+export function createExtensionRuntime({ store, fetchImpl = null, capabilityBroker = null, hostFactory = createExtensionHost, now = () => Date.now() } = {}) {
   if (!store) throw new Error('createExtensionRuntime 需要 store');
   const installer = createExtensionInstaller({ store, now });
   const hosts = new Map(); // id -> host
+  const broker = capabilityBroker || createCapabilityBroker({ policy: createCapabilityPolicy() });
+  if (!capabilityBroker) {
+    broker.register({ id: 'network', permission: 'network', risk: 'high', provider: 'extension-adapter', execute: async r => {
+      if (typeof fetchImpl !== 'function') throw extensionError('PROVIDER_UNAVAILABLE', 'Network adapter unavailable');
+      return fetchImpl(r.input.url, r.input.init);
+    }});
+  }
+  const actors = new Map();
+  function actorFor(entry) {
+    // Only installed manifest/review metadata creates grants, never handler input.
+    const scope = entry.manifest.scope?.workspace;
+    return { kind: 'extension', id: entry.id, grants: {
+      capabilities: [...entry.permissions, ...(entry.manifest.capabilities || []).map(c => 'extension.' + entry.id + '.' + c.id)],
+      approvedCapabilities: entry.permissions.filter(p => ['network', 'filesystem.read', 'filesystem.write', 'memory.write'].includes(p)),
+      workspaceIds: scope ? [scope] : [], paths: entry.manifest.scope?.paths || [], hosts: entry.manifest.network?.hosts || [],
+      scopes: scope ? ['workspace:' + scope] : [], types: ['working', 'workspace', 'knowledge', 'skill']
+    }};
+  }
+  function registerEntry(entry) {
+    actors.set(entry.id, actorFor(entry));
+    for (const cap of entry.manifest.capabilities || []) {
+      const id = 'extension.' + entry.id + '.' + cap.id;
+      if (broker.registry.has(id)) continue;
+      broker.register({ id, permission: 'extension.invoke', provider: 'extension', risk: 'low', execute: async r => {
+        const { entry: current, host } = hostOrThrow(entry.id);
+        if (!current.manifest.capabilities.some(c => c.id === cap.id)) throw extensionError('CAPABILITY_NOT_DECLARED', cap.id);
+        return host.invoke(cap.id, r.input);
+      }});
+    }
+  }
 
   function entryOrThrow(id) {
     const entry = store.get(id);
@@ -27,11 +60,21 @@ export function createExtensionRuntime({ store, fetchImpl = null, now = () => Da
       throw extensionError('ENTRY_MISSING', '受管目录中的入口文件缺失：' + entry.manifest.entry + '（请重新安装）');
     }
     const source = fs.readFileSync(entryPath, 'utf8');
-    return createExtensionHost({
+    registerEntry(entry);
+    const factory = entry.type === 'memory-pack' ? createMemoryPackHost : hostFactory;
+    return factory({
       manifest: entry.manifest,
       source,
       storage: store.storage(entry.id),
-      fetchImpl
+      fetchImpl,
+      capabilityExecutor: async (capability, input) => {
+        const current = entryOrThrow(entry.id);
+        if (current.status !== 'enabled') throw extensionError('EXTENSION_DISABLED', entry.id);
+        const result = await broker.execute({ actor: actorFor(current), capability,
+          workspaceId: current.manifest.scope?.workspace || undefined, input: input || {}, reason: 'Installed Extension capability' });
+        if (result.status !== 'completed') throw extensionError('APPROVAL_REQUIRED', result.approvalId);
+        return result.result;
+      }
     });
   }
 
@@ -141,8 +184,17 @@ export function createExtensionRuntime({ store, fetchImpl = null, now = () => Da
     },
 
     async invoke({ id, capability, input } = {}) {
-      const { host } = hostOrThrow(id);
-      return host.invoke(capability, input === undefined ? null : input);
+      const { entry } = hostOrThrow(id);
+      if (!entry.manifest.capabilities.some(c => c.id === capability)) throw extensionError('CAPABILITY_NOT_DECLARED', String(capability));
+      const result = await broker.execute({ actor: actorFor(entry), capability: 'extension.' + entry.id + '.' + capability,
+        input: input === undefined ? null : input, reason: 'Extension invocation' });
+      return result.result;
+    },
+
+    updateMemoryPackOverlay({ id, patch } = {}) {
+      const { entry, host } = hostOrThrow(id);
+      if (entry.type !== 'memory-pack') throw extensionError('MEMORY_PACK_INVALID', 'Not a Memory Pack');
+      return host.updateOverlay({ principal: { kind: 'user', id: 'desktop' }, patch });
     },
 
     logs({ id } = {}) {

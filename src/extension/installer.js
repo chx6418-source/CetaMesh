@@ -13,6 +13,7 @@ import { assertManifest, MANIFEST_FILENAMES } from './manifest.js';
 import { scanEntrySource } from './scan.js';
 import { buildReview, permissionDelta } from './review.js';
 import { EXTENSION_LIMITS, compareVersions, extensionError } from './types.js';
+import { validateMemoryPack, validateMemoryPackManifest } from './memory-pack.js';
 
 function collectFiles(rootDir, relative = '', acc = { files: [], bytes: 0 }) {
   const dir = relative ? path.join(rootDir, relative) : rootDir;
@@ -88,7 +89,16 @@ export function createExtensionInstaller({ store, now = () => Date.now() } = {})
       throw extensionError('ENTRY_MISSING', 'manifest.entry 指向的文件不存在：' + manifest.entry);
     }
     const source = fs.readFileSync(entryPath, 'utf8');
-    const scan = scanEntrySource(source);
+    let scan;
+    if (manifest.type === 'memory-pack') {
+      validateMemoryPackManifest(manifest);
+      validateMemoryPack(source);
+      const packageFiles = collectFiles(dir);
+      if (packageFiles.files.some(p => !/\.(json|md|txt)$/i.test(p))) {
+        throw extensionError('MEMORY_PACK_INVALID', 'Memory Pack contains executable or undeclared content');
+      }
+      scan = { ok: true, findings: [] };
+    } else scan = scanEntrySource(source);
     const review = buildReview(manifest);
     const collected = collectFiles(dir);
     return { manifest, review, scan, source, sourceDir: dir, manifestFile: name, files: collected.files, bytes: collected.bytes };
