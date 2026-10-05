@@ -1,6 +1,78 @@
 # CetaMesh Desktop — PROJECT_STATE
 
-## Current authoritative snapshot — 2026-10-05（阶段 13：Desktop UX / Windows 完整性）
+## Current authoritative snapshot — 2026-10-05（阶段 14：Windows Release / Desktop v1 RC）
+
+本快照取代下方阶段 13 快照。本阶段产出可安装的 **CetaMesh Desktop v1 Release Candidate**。
+
+### Release artifact（真实产物）
+
+| 项 | 值 |
+| --- | --- |
+| Version | `1.0.0-rc.1` |
+| Commit SHA | `35261e9e4a575fe1386d63438b3dce513ddbd2a5` (`35261e9`) |
+| Build ID | `1.0.0-rc.1+35261e9`（干净树，`dirty=false`） |
+| Built At | `2026-10-05T04:33:02.819Z`（北京时间 12:33） |
+| Installer | `dist/app-1.0.0-rc.1/WhaleBridge-Setup-x64.exe`，41,914,368 字节（40.0 MB） |
+| Installer SHA256 | `82EB7C41C4164D051794EDC8E2B1CF91A574BEA210C5724507B08FC19C008343` |
+| WhaleBridge.exe SHA256 | `0249304a8b460577dd2bacd381e18f59bb880acf2b8d132e580fe589e19f251f` |
+| WhaleBridgeCore.exe SHA256 | `fbbac7d34ccdb09d5ab50e87cab45ea2a1fe692a154510de39b36ea0cedf1669` |
+| RC 目录 | `D:\GIT-QQ-BRIDGE\dist\app-1.0.0-rc.1`（26 个文件，138.1 MB；`dist/` 为 gitignored 交付目录） |
+
+构建方式：在 `%TEMP%` 以 commit `35261e9` 创建干净 worktree（排除并行会话的未提交文件），junction 复用 node_modules，依次执行 `build:core` / `desktop:build` / `desktop:build:debug` / `build:release`；产物 `build-info.json` 记录 `dirty=false`；构建后临时 worktree 已删除。
+
+### 安装器与分发内容
+
+- 单文件安装器 `WhaleBridge-Setup-x64.exe`（Windows 自带 IExpress，含 C4 图标；构建中间文件不进入发布目录）。
+- 安装后：`%LOCALAPPDATA%\Programs\WhaleBridge\WhaleBridge.exe`（桌面壳/卸载器）、`WhaleBridgeCore.exe`（Node SEA）、`resources\`（只读资源）、`build-info.json`、`install-manifest.json`；开始菜单与桌面快捷方式 + HKCU 卸载项；用户数据目录 `%LOCALAPPDATA%\WhaleBridge`（config.json + state）。
+- 运行不依赖开发目录 / `npm start` / 源码路径 / 开发终端 / 手动启动 Core：发行验收在 PATH 无 `node.exe` 的隔离环境完成，由桌面壳自动拉起 Core。
+- 命令行（高级）：`--install` / `--repair` / `--uninstall` / `--migrate`；只有 `--remove-data` 才会删除数据目录。
+- 卸载语义：默认只删程序文件、快捷方式与注册表项，完整保留用户数据；`--remove-data` 为显式危险操作；`--remove-dsh-integration` 另行显式。
+
+### 升级保留（真实断言）
+
+沙箱中“先装 v1 → 写入用户数据 → 用 v2 payload 覆盖安装”后，字节级断言保留：
+
+- `config.json`、`settings.json`（Provider secrets 哨兵）、`state/task-store.json`（Tasks）、`state/memory-store.json`（Memory）、`state/workspace-metadata.json`（Workspace metadata）、`state/continuity/handoff.json`。
+- 程序文件与 `resources` 正常升级；`install-manifest.json` 哈希刷新；修复 / 迁移 / 重装 / 卸载 / 彻底卸载全部通过。
+- JSON 数据存储无 SQL 数据库；“数据库 migration”在本项目等价于配置/设置/状态的兼容迁移：统一配置服务旧别名迁移与 `--migrate` 旧数据迁移均有测试覆盖。
+
+### 已执行验收（真实 Windows 本机）
+
+| 验收项 | 状态 | 证据 |
+| --- | --- | --- |
+| install | PASS | RC 沙箱安装（中文+空格路径）；安装器全生命周期测试 |
+| launch | PASS | 已安装 `WhaleBridge.exe` 拉起 release Core；子进程无 `node.exe`；安装目录运行期只读 |
+| Chat / Agent | PASS | 安装包 `payload\WhaleBridgeCore.exe --self-test`：真实 DSH 回合 completed，回复“收到”（PATH 无 node） |
+| restart | PASS | worker 强杀后 5.8s 退避自动拉起；单实例；壳强杀孤儿守卫 |
+| upgrade | PASS | 见“升级保留” |
+| uninstall | PASS | 默认保留数据；`--remove-data` 只删数据目录；数据目录之外的用户 Workspace 原样保留 |
+| Memory / Task / Mesh / Extension | PASS（源码提交） | `test-memory` 85/85、`test-task` 90/90、`test-mesh`（跨设备真链路 `PENDING_NATIVE_VERIFICATION`）、`test-extension` 87/87 |
+| 安装包 / 发布候选 | PASS | `test-installer-package`、`test-release-candidate` 全绿 |
+| `cargo test` | PASS | 86/86 |
+| `npm run test-system` | PASS | 108/108（含预发布版本比较修复） |
+
+### NOT_RUN_ENVIRONMENT / 未验证
+
+- **干净 Windows 全新环境（VM/新镜像）整体验收：NOT_RUN_ENVIRONMENT**。本机不是全新镜像；本轮为真实 Windows 上的隔离沙箱安装/升级/卸载与真实进程验收。
+- 已安装 UI 的 Chat / Memory / Workspace / Task 手工交互走查：**NOT_RUN_ENVIRONMENT**（无 UI 自动化；Computer Use 不可用）。安装级验证的是 Core 启动、API、数据保留与元数据安全。
+- 真实 QQ 全模式 MCP 工具链路（SnowLuma）与 DSH 重启恢复：**NOT_RUN_ENVIRONMENT**（未改动外部服务）。
+- 代码签名 / 安装包签名：未执行（无证书）；未签名安装器会触发 Windows 来源提示。
+- 第三方许可证文本：Node.js 运行时许可证文本需在公开发布前补齐（`licenses/README.md` 已列明）。
+
+### 已知问题（发布前）
+
+- 未签名（安装器与两个 exe），SmartScreen 警告预期。
+- Update 检查默认关闭（未配置签名公钥，fail-closed）；RC 不含自动更新。
+- `WhaleBridge.exe` 内含构建机仓库路径，审计记录为 known deviation（不含凭据/用户数据）。
+- 构建源码为 commit `35261e9`；本文件记录产物的提交在其后（docs commit），产物 `build-info.json` 记录的是 `35261e9`。
+
+### 下一阶段入口
+
+人工在干净 VM 完成 UI 走查 + 真实 QQ 全模式验收；补齐 Node LICENSE 与代码签名后转正式 `v1.0.0`。
+
+---
+
+## （历史）2026-10-05 快照 — 阶段 13：Desktop UX / Windows 完整性
 
 本快照取代下方 2026-10-04 D1 快照。本阶段把原生桌面壳从“功能齐全”推进到“可长期使用”：系统托盘、关闭语义、窗口/主题/缩放偏好、快捷键与中文输入安全、崩溃重启安全，并完成一次真实 Windows 冒烟。
 
