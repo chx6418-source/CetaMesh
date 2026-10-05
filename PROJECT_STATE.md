@@ -1,8 +1,11 @@
 # CetaMesh Desktop — PROJECT_STATE
 
-## CURRENT STATE (2026-10-05 — Session 3)
+## CURRENT STATE (2026-10-05 — Session 3 merged; v2 hardening round)
 
-- **Verified base:** `6903dd0` (`main` after Sessions 1 and 2). GitHub `origin/main` was fetched at `aa5d28e`; it predates both session completion commits, so the local merged `main` is the correct base for this session. **Working branch:** `feature/desktop-platform-integration-v2`.
+- **Verified base:** `74ede4e` (`main`). Sessions 1–3 are **merged into main**; at the start
+  of the v2 hardening round, local `main` and `origin/main` are identical at `74ede4e`.
+  Earlier "local only / do not push / not merged" statements in this file and in session
+  reports describe those sessions' working time and are superseded.
 - **Runtime:** Standalone Chat uses Model Runtime; Smart routes simple turns to Model, mapped tools through Capability, and project work through Task → Agent Broker → Continuity. Agent sessions can roll over while the Task and Workspace remain attached.
 - **Capability and Workspace:** Unknown capability/permission requests deny by default. Workspace file/Git/test, Agent assignment, Memory, and Extension calls enter the shared broker. Workspace boundary checks reject traversal and sensitive aliases; managed Git diffs suppress sensitive paths case-insensitively and disable configured command filters.
 - **Workshop:** External users can submit proposals and see limited status. Owner approval is required before Workspace/Task/Agent provisioning. Proposal submission alone gives no file or execution access; artifacts remain Owner-reviewed.
@@ -11,7 +14,11 @@
 - **Product vocabulary:** `closed-agent` reads as `owner-agent`; `reserved` migrates to `chat`; `reserved2` migrates to `social`. Desktop navigation uses Home, Chat, Work, Social, Agents, Plugins, Memory, Workspaces, Devices, Connections, Security, and Settings.
 - **Verification:** Final regression matrix 31/31 PASS, including the final standalone Chat test with no DSH client supplied. Release pipeline 4/4 PASS (`build:core`, `desktop:build`, `build:release`, `test-release-candidate`). No requested check was skipped for environment reasons.
 - **Known boundaries:** Managed Agent `test.run` remains denied until an isolated test runner exists; Owner may run reviewed tests. VM Extension hosting is not process isolation. The full Channel/Mesh capability catalog and a dedicated Workshop review screen remain deferred.
-- **Integration:** Work on this branch is committed locally only. Do not push or merge until the Owner confirms; after confirmed merge, delete this work branch.
+- **Integration:** Sessions 1–3 are integrated into `main` and pushed. The current round
+  (`feature/desktop-v2-hardening`) covers: fact-source reconciliation, real standalone
+  model verification, Workshop Owner UI, Capability Broker coverage (Channel/Mesh/MCP
+  adapters), isolated test runner, ProcessExtensionHost contract, product positioning
+  cleanup, and a repeatable Release Candidate. See `DESKTOP_V2_HARDENING_REPORT.md`.
 
 ## HISTORICAL / SUPERSEDED RECORD
 

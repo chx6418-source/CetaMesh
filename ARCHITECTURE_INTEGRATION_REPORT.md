@@ -2,14 +2,21 @@
 
 Date: 2026-10-05
 
+> **UPDATE (v2 hardening round, 2026-10-05):** Sessions 1–3 are **integrated into
+> `main`**; local `main` and `origin/main` are identical at `74ede4e`. The Git-state
+> statements below ("local branch only", "nothing was pushed or merged",
+> "origin/main predates …") were accurate while the session branch was in progress and
+> are now historical. Deferred items listed at the bottom of this report are the scope
+> of the current `feature/desktop-v2-hardening` round; results are recorded in
+> `DESKTOP_V2_HARDENING_REPORT.md`.
+
 ## Final Base / HEAD
 
 - Repository: `https://github.com/chx6418-source/whalebridge`
 - Base: `6903dd0` — local `main` after Sessions 1 and 2.
 - Implementation HEAD: `76f8b63` — standalone Chat no longer requires a DSH client at service construction.
-- Working branch: `feature/desktop-platform-integration-v2`.
-- `origin/main` was fetched and resolved to `aa5d28e`. It predates the Session 1 and Session 2 completion commits; local `main` is nine commits ahead and contains both handoff commits. This branch is therefore based on the merged local `main` at `6903dd0`.
-- All Session 3 commits are local. Nothing was pushed or merged.
+- Working branch: `feature/desktop-platform-integration-v2` (since merged into `main`).
+- At session time the fetched `origin/main` pointed to `aa5d28e`, predating the Session 1 and Session 2 completion commits; the branch was therefore based on the merged local `main` at `6903dd0`. Both sessions have since been pushed.
 
 ## Overall Status
 
@@ -104,7 +111,7 @@ Focused safety coverage confirms unknown Capability and Permission denial, Works
 - Channel and Mesh are adapted at selected read/status surfaces, not comprehensively routed through Capability Broker.
 - Workshop lifecycle exists behind trusted runtime/IPC surfaces, but Owner review UI and product-level status presentation remain incomplete.
 - Provider API behavior was exercised with deterministic test fixtures; no live provider credentials or external model request was used for this verification.
-- Local `main` contains Session 1 and Session 2 commits that are absent from the fetched `origin/main` ref. This Session 3 branch was based on local `main` as instructed and has not been pushed.
+- The "local main ahead of origin/main" divergence described above was resolved after Owner confirmation: all session branches were merged into `main` and pushed (see the update banner at the top of this report).
 
 ## Deferred Work
 

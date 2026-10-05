@@ -1,6 +1,11 @@
 # AGENT_CONTEXT — 鲸桥控制台前端 · 结构化上下文说明书
 # 文档性质: 多智能体协作唯一事实源 (Single Source of Truth)
 # 解析约定: 本文档全篇为缩进式 KEY: VALUE 结构（YAML 兼容）；`[强制]` 前缀条目违反即任务不合规；禁止凭空补充未列出的约束
+#
+# SUPERSEDED（2026-10-05）：本文件描述的是**旧版 Web 控制台前端**（海盐苏打）的事实源，
+# 属历史协作记录。当前产品是 CetaMesh Desktop（原生 Rust/egui 桌面壳 + Node Core），
+# 产品事实源为 PROJECT_STATE.md 顶部 CURRENT STATE 与 docs/desktop/ARCHITECTURE.md；
+# 不要把本文件的 UI/控制台状态当作桌面产品的当前状态。§A 的开发日志仅具历史价值。
 
 meta:
   doc_version: "1.0"

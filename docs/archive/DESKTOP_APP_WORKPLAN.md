@@ -1,5 +1,12 @@
 # 独立桌面应用迁移临时工作文档
 
+> **ARCHIVED / SUPERSEDED（2026-10-05）**：本文件是历史开发工作台记录，不再是任何
+> 当前状态的事实源。桌面产品已经发展为 CetaMesh Desktop（原生 Rust/egui 壳 + Node
+> Core，Model Runtime / Agent Broker / Capability / Workshop / Memory v2 / Continuity
+> 全链路），当前状态以 `PROJECT_STATE.md` 顶部 `CURRENT STATE` 为准；正式产品文档见
+> `docs/DESKTOP_APP.md` 与 `docs/desktop/`。本文件从仓库根目录归档至 `docs/archive/`，
+> 只保留阶段 0–10 的历史决策与验收记录价值。
+
 > 文档性质：临时开发工作台，不是正式产品文档，不进入发布包。
 >
 > 生命周期：原桌面版开发与验收已由用户确认完成。本文件因新增“无网页原生化”后续计划而继续保留；后续计划完成、验收记录转入正式文档后再删除。

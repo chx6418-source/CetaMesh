@@ -310,8 +310,8 @@ release-manifest.json       版本/体积/哈希/审计结论/已知偏差/未�
 
 > 尚未完成（需要你的环境）：真实安装到本机、Windows 10、真实 QQ/DSH 会话下的四种模式与全部
 > MCP 工具、DSH/SnowLuma 重启恢复、托盘菜单点击与 WebView2 交互、代码签名。
-> 这些项已逐条记录在 `DESKTOP_APP_WORKPLAN.tmp.md` 的 §11.2 与 `dist/app/release-manifest.json`
-> 的 `notVerified` 中。
+> 这些项已逐条记录在 `docs/archive/DESKTOP_APP_WORKPLAN.md` 的 §11.2 与
+> `dist/app/release-manifest.json` 的 `notVerified` 中。
 
 ## 目录结构
 
