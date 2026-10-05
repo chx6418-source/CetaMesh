@@ -31,7 +31,7 @@ export function createMemoryService({ stateDir, socialV2File, now, audit } = {})
     'memory.get': (p) => runtime.get({ principal: user, id: p.id }),
     'memory.create': (p) => runtime.create({
       principal: user, type: p.type, scope: p.scope, content: p.content,
-      tags: p.tags, source: p.source, pinned: p.pinned
+      tags: p.tags, source: p.source, pinned: p.pinned, sourceRefs: p.sourceRefs, entityIds: p.entityIds
     }),
     'memory.update': (p) => runtime.update({
       principal: user, id: p.id, expectedRev: p.expectedRev, content: p.content, tags: p.tags, pinned: p.pinned
@@ -57,12 +57,16 @@ export function createMemoryService({ stateDir, socialV2File, now, audit } = {})
         id: String(p.agentId === undefined || p.agentId === null ? 'chat' : p.agentId),
         grants: { scopes: Array.isArray(p.scopes) ? p.scopes : [] }
       },
-      type: p.type, scope: p.scope, content: p.content, reason: p.reason
+      type: p.type, scope: p.scope, content: p.content, reason: p.reason, sourceRefs: p.sourceRefs, entityIds: p.entityIds
     }),
     // 长期写入的唯一入口：用户明确确认。
     'memory.candidates.confirm': (p) => runtime.confirmCandidate({
       principal: user, id: p.id, decision: p.decision, content: p.content, pinned: p.pinned
     }),
+    'memory.links.create': (p) => runtime.createLink({ principal: user, source: p.source, target: p.target, relation: p.relation, explicit: p.explicit, context: p.context }),
+    'memory.links.list': (p) => runtime.listLinks({ principal: user, scope: p.scope, entityId: p.entityId, explicitCrossScope: p.explicitCrossScope }),
+    'memory.references.resolve': (p) => runtime.resolveReferences({ principal: user, refs: p.refs, sourceScope: p.sourceScope, explicitCrossScope: p.explicitCrossScope }),
+    'memory.context.build': (p) => runtime.buildContextPackage({ principal: user, scope: p.scope, query: p.query, types: p.types, limit: p.limit, explicitCrossScope: p.explicitCrossScope }),
     'memory.adapters.qq.import': (p) => adapter.importInto({
       runtime, principal: user, dryRun: p.dryRun === true
     })

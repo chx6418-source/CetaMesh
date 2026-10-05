@@ -1,6 +1,7 @@
 // CetaMesh Memory v1 —— 统一 Memory Runtime 公共入口（阶段 04）。
 export { createMemoryService, DESKTOP_USER_PRINCIPAL } from './service.js';
 export { createMemoryRuntime } from './runtime.js';
+export { MEMORY_RELATIONS, REFERENCE_KINDS, CONTEXT_LIMITS, normalizeReference, normalizeReferences, normalizeContextPackage } from './references.js';
 export { createMemoryStore, MEMORY_SCHEMA_VERSION } from './store.js';
 export {
   createMemoryPolicy,

@@ -5,11 +5,11 @@
 //
 // Fail-closed 原则：未知类型 / 未知 Scope / 非法主体一律拒绝，绝不"猜一个默认值"。
 
-export const MEMORY_TYPES = Object.freeze(['working', 'chat', 'user', 'task', 'workspace']);
+export const MEMORY_TYPES = Object.freeze(['working', 'chat', 'user', 'task', 'workspace', 'social', 'knowledge', 'skill']);
 
 // 长期记忆：Agent / Chat 候选 / 导入写入这些类型前必须先取得用户确认。
 // working 是短期工作记忆，允许 Agent 在授权范围内直接写入（仍然受 Scope 与授权约束）。
-export const LONG_TERM_TYPES = Object.freeze(['chat', 'user', 'task', 'workspace']);
+export const LONG_TERM_TYPES = Object.freeze(['chat', 'user', 'task', 'workspace', 'social', 'knowledge', 'skill']);
 
 export const MEMORY_SOURCES = Object.freeze(['user', 'chat-candidate', 'qq-adapter', 'system']);
 

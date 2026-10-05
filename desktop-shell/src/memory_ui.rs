@@ -17,7 +17,7 @@ const ACCENT: egui::Color32 = egui::Color32::from_rgb(23, 126, 115);
 const MUTED: egui::Color32 = egui::Color32::from_rgb(103, 119, 117);
 const ERROR: egui::Color32 = egui::Color32::from_rgb(174, 54, 49);
 
-const MEMORY_TYPES: [&str; 5] = ["working", "chat", "user", "task", "workspace"];
+const MEMORY_TYPES: [&str; 8] = ["working", "chat", "user", "task", "workspace", "social", "knowledge", "skill"];
 
 /// 一条待下发的 Core 调用意图。
 pub struct MemoryAction {

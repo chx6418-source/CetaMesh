@@ -31,6 +31,8 @@ import {
 } from './types.js';
 import { createMemoryPolicy } from './policy.js';
 import { createMemoryStore } from './store.js';
+import { createMemoryLinks } from './links.js';
+import { normalizeReferences } from './references.js';
 
 const CANDIDATE_SCHEMA_VERSION = 1;
 const MAX_CANDIDATES = 500;
@@ -59,6 +61,13 @@ function atomicWrite(file, data) {
   fs.renameSync(temp, file);
 }
 
+function normalizeEntityIds(values) {
+  if (!Array.isArray(values) || values.length > 24 || values.some((id) => typeof id !== 'string' || !/^[A-Za-z0-9._:@-]{1,128}$/.test(id))) {
+    throw memoryError('INVALID_REFERENCE', 'entityIds must contain at most 24 bounded entity ids');
+  }
+  return [...new Set(values)];
+}
+
 /** 对外投影：UI 需要 来源 / 更新时间 / Scope / rev / pinned。 */
 function toView(record) {
   return {
@@ -76,7 +85,9 @@ function toView(record) {
     rev: record.rev,
     confirmedAt: record.confirmedAt,
     confirmedBy: record.confirmedBy,
-    origin: record.origin
+    origin: record.origin ? structuredClone(record.origin) : null,
+    sourceRefs: structuredClone(record.sourceRefs || []),
+    entityIds: [...(record.entityIds || [])]
   };
 }
 
@@ -85,8 +96,10 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
   const policy = createMemoryPolicy({ audit });
   const store = createMemoryStore({ stateDir, now });
   const candidatesFile = path.join(stateDir, 'memory', 'candidates.json');
+  const links = createMemoryLinks({ stateDir, policy, store, now, list: listRecords });
 
   const candidates = new Map(); // id -> candidate
+  const confirmingCandidates = new Set(); // only the trusted confirmation path may consume a candidate
   let candidatesLoaded = false;
 
   function loadCandidates() {
@@ -120,7 +133,9 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
       proposedAt: candidate.proposedAt,
       decidedAt: candidate.decidedAt,
       decidedBy: candidate.decidedBy,
-      memoryId: candidate.memoryId
+      memoryId: candidate.memoryId,
+      sourceRefs: structuredClone(candidate.sourceRefs || []),
+      entityIds: [...(candidate.entityIds || [])]
     };
   }
 
@@ -128,7 +143,7 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
   function findAuthorized(decision, id) {
     const target = String(id === null || id === undefined ? '' : id);
     if (!target) return null;
-    const hits = store.scanAuthorized(effectiveScopes(decision), (record) => record.id === target);
+    const hits = scanFor(decision, (record) => record.id === target);
     return hits.length ? hits[0] : null;
   }
 
@@ -151,6 +166,18 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
     return policy.requireAuthorization({ ...request, action: 'read' });
   }
 
+  function readView(record, principal) {
+    const view = toView(record);
+    view.sourceRefs = view.sourceRefs.filter((ref) => {
+      try { links.authorizeRefs({ principal, sourceScope: record.scope, refs: [ref] }); return true; }
+      catch (error) {
+        if (['MEMORY_NOT_FOUND', 'SCOPE_NOT_AUTHORIZED', 'TYPE_NOT_AUTHORIZED', 'CROSS_SCOPE_LINK_REQUIRED'].includes(error.code)) return false;
+        throw error;
+      }
+    });
+    return view;
+  }
+
   function listRecords({ principal, scope, types, pinned, query, limit } = {}) {
     const scopes = scope === undefined || scope === null ? null : [normalizeScope(scope)];
     const decision = authorizeRead({ principal, scopes, types: types || null });
@@ -164,13 +191,14 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
       return record.content.toLowerCase().includes(needle)
         || record.tags.some((tag) => tag.toLowerCase().includes(needle));
     });
-    const results = rank(rows, needle, text).slice(0, max).map(toView);
+    const scanned = store.stats.lastScanned;
+    const results = rank(rows, needle, text).slice(0, max).map((record) => readView(record, principal));
     return {
       memories: results,
       meta: {
         authorizedScopes: decision.scopeKeys,
         authorizedTypes: decision.types,
-        scanned: store.stats.lastScanned,
+        scanned,
         returned: results.length
       }
     };
@@ -202,12 +230,14 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
       .map((entry) => entry.record);
   }
 
-  function createMemory({ principal, type, scope, content, tags, source, pinned, confirmationId, originRef } = {}) {
+  function createMemory({ principal, type, scope, content, tags, source, pinned, confirmationId, originRef, sourceRefs = [], entityIds = [] } = {}) {
     const normalizedType = normalizeMemoryType(type);
     const normalizedScope = normalizeScope(scope);
     const normalizedSource = normalizeSource(source);
     const text = normalizeContent(content);
     const normalizedTags = normalizeTags(tags);
+    const references = normalizeReferences(sourceRefs);
+    const entities = normalizeEntityIds(entityIds);
 
     const decision = policy.requireAuthorization({
       principal,
@@ -215,6 +245,7 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
       scopes: [normalizedScope],
       types: [normalizedType]
     });
+    links.authorizeRefs({ principal, sourceScope: normalizedScope, refs: references });
 
     let confirmedAt = null;
     let confirmedBy = null;
@@ -226,7 +257,7 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
       }
       loadCandidates();
       const candidate = candidates.get(String(confirmationId));
-      if (!candidate || candidate.status !== 'accepted') {
+      if (!candidate || !confirmingCandidates.has(candidate.id) || candidate.status !== 'accepted' || candidate.memoryId || candidate.type !== normalizedType || candidate.scope.key !== scopeKey(normalizedScope) || candidate.confirmedContent !== text) {
         throw memoryError('MEMORY_CONFIRMATION_REQUIRED', '候选未经用户确认，不能写入长期记忆');
       }
       confirmedAt = candidate.decidedAt;
@@ -258,7 +289,9 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
       rev: 1,
       confirmedAt,
       confirmedBy,
-      origin
+      origin,
+      sourceRefs: references,
+      entityIds: entities
     };
     return toView(store.insert(record));
   }
@@ -277,7 +310,7 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
     if (pinned !== undefined) patch.pinned = pinned === true;
     if (Object.keys(patch).length === 0) throw memoryError('INVALID_PARAMS', '没有需要更新的字段');
     const updated = store.update(existing.id, expectedRev, (record) => ({ ...record, ...patch, updatedAt: now() }));
-    return toView(updated);
+    return readView(updated, principal);
   }
 
   function deleteMemory({ principal, id, expectedRev } = {}) {
@@ -291,10 +324,11 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
     const decision = authorizeRead({ principal });
     const existing = findAuthorized(decision, id);
     if (!existing) throw memoryError('MEMORY_NOT_FOUND', '记忆不存在：' + String(id));
-    return { memory: toView(existing), meta: { scanned: store.stats.lastScanned } };
+    const scanned = store.stats.lastScanned;
+    return { memory: readView(existing, principal), meta: { scanned } };
   }
 
-  function proposeCandidate({ principal, type, scope, content, reason } = {}) {
+  function proposeCandidate({ principal, type, scope, content, reason, sourceRefs = [], entityIds = [] } = {}) {
     const normalizedType = normalizeMemoryType(type);
     const normalizedScope = normalizeScope(scope);
     const decision = policy.requireAuthorization({
@@ -304,6 +338,9 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
       types: [normalizedType]
     });
     if (!decision) throw memoryError('UNAUTHORIZED', '候选未被授权');
+    const references = normalizeReferences(sourceRefs);
+    links.authorizeRefs({ principal, sourceScope: normalizedScope, refs: references });
+    const entities = normalizeEntityIds(entityIds);
     loadCandidates();
     if (candidates.size >= MAX_CANDIDATES) {
       throw memoryError('STORE_FULL', '候选数量已达上限 ' + MAX_CANDIDATES);
@@ -319,7 +356,9 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
       proposedAt: now(),
       decidedAt: null,
       decidedBy: null,
-      memoryId: null
+      memoryId: null,
+      sourceRefs: references,
+      entityIds: entities
     };
     candidates.set(candidate.id, candidate);
     persistCandidates();
@@ -333,6 +372,7 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
     const all = principal.kind === 'user' && decision.scopeKeys.includes('*');
     const rows = [...candidates.values()]
       .filter((candidate) => (all ? true : allowed.has(candidate.scope.key)))
+      .filter((candidate) => !decision.types || decision.types.includes(candidate.type) || candidate.proposedBy === principal.kind + ':' + principal.id)
       .filter((candidate) => (status ? candidate.status === status : true))
       .sort((a, b) => b.proposedAt - a.proposedAt)
       .map(candidateView);
@@ -358,20 +398,33 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
       return { candidate: candidateView(candidate), memory: null };
     }
 
+    const confirmedContent = normalizeContent(content === undefined ? candidate.content : content);
+    // Revalidate provenance before marking accepted so invalid confirmation remains pending.
+    links.authorizeRefs({ principal, sourceScope: candidate.scope, refs: candidate.sourceRefs || [] });
+    candidate.confirmedContent = confirmedContent;
     candidate.status = 'accepted';
     candidate.decidedAt = now();
     candidate.decidedBy = principal.kind + ':' + principal.id;
     persistCandidates();
 
-    const memory = createMemory({
-      principal,
-      type: candidate.type,
-      scope: candidate.scope,
-      content: content === undefined ? candidate.content : content,
-      source: 'chat-candidate',
-      pinned: pinned === true,
-      confirmationId: candidate.id
-    });
+    let memory;
+    confirmingCandidates.add(candidate.id);
+    try {
+      memory = createMemory({
+        principal, type: candidate.type, scope: candidate.scope, content: confirmedContent,
+        source: 'chat-candidate', pinned: pinned === true, confirmationId: candidate.id,
+        sourceRefs: candidate.sourceRefs || [], entityIds: candidate.entityIds || []
+      });
+    } catch (error) {
+      candidate.status = 'pending';
+      candidate.decidedAt = null;
+      candidate.decidedBy = null;
+      delete candidate.confirmedContent;
+      persistCandidates();
+      throw error;
+    } finally {
+      confirmingCandidates.delete(candidate.id);
+    }
     candidate.memoryId = memory.id;
     persistCandidates();
     return { candidate: candidateView(candidate), memory };
@@ -418,6 +471,10 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
     proposeCandidate,
     listCandidates,
     confirmCandidate,
+    createLink: links.createLink,
+    listLinks: links.listLinks,
+    resolveReferences: links.resolveReferences,
+    buildContextPackage: links.buildContextPackage,
     stats,
     authorize: (request) => policy.authorize(request),
     _store: store,

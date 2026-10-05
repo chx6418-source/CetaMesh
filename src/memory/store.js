@@ -57,7 +57,9 @@ function normalizeLoadedRecord(raw) {
     rev: Number.isSafeInteger(raw.rev) && raw.rev > 0 ? raw.rev : 1,
     confirmedAt: raw.confirmedAt === undefined ? null : raw.confirmedAt,
     confirmedBy: raw.confirmedBy === undefined ? null : raw.confirmedBy,
-    origin: raw.origin && typeof raw.origin === 'object' ? raw.origin : null
+    origin: raw.origin && typeof raw.origin === 'object' ? raw.origin : null,
+    sourceRefs: Array.isArray(raw.sourceRefs) ? structuredClone(raw.sourceRefs) : [],
+    entityIds: Array.isArray(raw.entityIds) ? [...raw.entityIds] : []
   };
 }
 
