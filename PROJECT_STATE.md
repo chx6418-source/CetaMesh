@@ -1,5 +1,22 @@
 # CetaMesh Desktop — PROJECT_STATE
 
+## CURRENT STATE (2026-10-05 — Session 3)
+
+- **Verified base:** `6903dd0` (`main` after Sessions 1 and 2). GitHub `origin/main` was fetched at `aa5d28e`; it predates both session completion commits, so the local merged `main` is the correct base for this session. **Working branch:** `feature/desktop-platform-integration-v2`.
+- **Runtime:** Standalone Chat uses Model Runtime; Smart routes simple turns to Model, mapped tools through Capability, and project work through Task → Agent Broker → Continuity. Agent sessions can roll over while the Task and Workspace remain attached.
+- **Capability and Workspace:** Unknown capability/permission requests deny by default. Workspace file/Git/test, Agent assignment, Memory, and Extension calls enter the shared broker. Workspace boundary checks reject traversal and sensitive aliases; managed Git diffs suppress sensitive paths case-insensitively and disable configured command filters.
+- **Workshop:** External users can submit proposals and see limited status. Owner approval is required before Workspace/Task/Agent provisioning. Proposal submission alone gives no file or execution access; artifacts remain Owner-reviewed.
+- **Memory:** Types include `working`, `chat`, `user`, `task`, `workspace`, `social`, `knowledge`, and `skill`. Links and bounded context packages preserve source references and enforce explicit authorization for cross-scope retrieval. Long-term Agent/Extension writes remain confirmation candidates.
+- **Extension:** Filesystem, Memory, and network requests pass through Capability Policy. Memory Packs are JSON reference data with an immutable Base and private User Overlay; code, shell, network, and instruction escalation are rejected. `VmExtensionHost` is the current host behind the replaceable host interface.
+- **Product vocabulary:** `closed-agent` reads as `owner-agent`; `reserved` migrates to `chat`; `reserved2` migrates to `social`. Desktop navigation uses Home, Chat, Work, Social, Agents, Plugins, Memory, Workspaces, Devices, Connections, Security, and Settings.
+- **Verification:** Final regression matrix 31/31 PASS, including the final standalone Chat test with no DSH client supplied. Release pipeline 4/4 PASS (`build:core`, `desktop:build`, `build:release`, `test-release-candidate`). No requested check was skipped for environment reasons.
+- **Known boundaries:** Managed Agent `test.run` remains denied until an isolated test runner exists; Owner may run reviewed tests. VM Extension hosting is not process isolation. The full Channel/Mesh capability catalog and a dedicated Workshop review screen remain deferred.
+- **Integration:** Work on this branch is committed locally only. Do not push or merge until the Owner confirms; after confirmed merge, delete this work branch.
+
+## HISTORICAL / SUPERSEDED RECORD
+
+The sections below retain earlier implementation snapshots and decisions for traceability. Where they conflict with this `CURRENT STATE`, the current summary above is authoritative.
+
 ## 会话 2：Agent Broker + Continuity Runtime v2 + 自动 Fresh Session Rollover（2026-10-05）
 
 分支 `feature/desktop-continuity-v2`（base `08a3934`，会话 1 最终提交），详见 `HANDOFF_SESSION_2.md`。
