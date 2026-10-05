@@ -115,9 +115,8 @@ impl SingleInstance {
         use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError};
         use windows_sys::Win32::System::Threading::{CreateEventW, CreateMutexW, SetEvent};
 
-        let mut name: Vec<u16> = std::ffi::OsStr::new("Local\\WhaleBridge.Desktop")
-            .encode_wide()
-            .collect();
+        let mutex_name = format!("Local\\WhaleBridge.Desktop{}", crate::tray::instance_suffix());
+        let mut name: Vec<u16> = std::ffi::OsStr::new(&mutex_name).encode_wide().collect();
         name.push(0);
         // SAFETY: the name is a NUL-terminated UTF-16 string and null attributes select the
         // process token's default DACL. The returned handle remains owned by this guard.
@@ -132,10 +131,12 @@ impl SingleInstance {
             unsafe { CloseHandle(handle) };
             // A second launch is the user asking for the hidden window back. Signal the running
             // instance and exit; the tray listener restores the window from the system tray.
+            let show_event = format!(
+                "Local\\CetaMesh.Desktop.ShowWindow{}",
+                crate::tray::instance_suffix()
+            );
             let mut event_name: Vec<u16> =
-                std::ffi::OsStr::new("Local\\CetaMesh.Desktop.ShowWindow")
-                    .encode_wide()
-                    .collect();
+                std::ffi::OsStr::new(&show_event).encode_wide().collect();
             event_name.push(0);
             // SAFETY: NUL-terminated UTF-16 name; default attributes; auto-reset, unsignaled.
             let event =

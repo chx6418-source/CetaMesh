@@ -18,6 +18,23 @@ use crate::supervisor::Supervisor;
 
 const TRAY_ID: &str = "cetamesh-desktop-tray";
 
+/// Test-only instance namespace. `WHALEBRIDGE_INSTANCE_SUFFIX` keeps a test shell from colliding
+/// with the user's installed app (single-instance mutex and show-window event). Production runs
+/// leave the variable unset, so names stay exactly as before.
+pub(crate) fn instance_suffix() -> String {
+    let raw = std::env::var("WHALEBRIDGE_INSTANCE_SUFFIX").unwrap_or_default();
+    let sanitized: String = raw
+        .chars()
+        .filter(|value| value.is_ascii_alphanumeric() || *value == '-' || *value == '_')
+        .take(32)
+        .collect();
+    if sanitized.is_empty() {
+        String::new()
+    } else {
+        format!(".{sanitized}")
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TrayCommand {
     ShowWindow,
@@ -263,9 +280,8 @@ fn spawn_show_signal_listener(
     use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
     use windows_sys::Win32::System::Threading::{CreateEventW, INFINITE, WaitForSingleObject};
 
-    let mut name: Vec<u16> = std::ffi::OsStr::new("Local\\CetaMesh.Desktop.ShowWindow")
-        .encode_wide()
-        .collect();
+    let event_name = format!("Local\\CetaMesh.Desktop.ShowWindow{}", instance_suffix());
+    let mut name: Vec<u16> = std::ffi::OsStr::new(&event_name).encode_wide().collect();
     name.push(0);
     let _ = std::thread::Builder::new()
         .name("cetamesh-show-signal".to_owned())

@@ -329,23 +329,21 @@ try {
     if (process.env.WHALEBRIDGE_SKIP_GUI_TEST === '1') {
       step('⏭️  跳过需要显示真实窗口的 GUI 用例（WHALEBRIDGE_SKIP_GUI_TEST=1）');
     } else {
-    const runningApps = spawnSync(
-      'powershell.exe',
-      ['-NoProfile', '-NonInteractive', '-Command',
-       `@(Get-CimInstance Win32_Process -Filter "Name='WhaleBridge.exe' or Name='whalebridge-desktop.exe'").Count`],
-      { encoding: 'utf8', timeout: 60000 }
-    );
-    const alreadyRunning = (Number.parseInt((runningApps.stdout ?? '0').trim(), 10) || 0) > 0;
-    if (alreadyRunning) {
-      step('⏭️  跳过 GUI 用例：本机已有一个鲸桥应用实例在运行（单实例互斥量被占用）');
-    } else {
+    // The test shell uses its own WHALEBRIDGE_INSTANCE_SUFFIX namespace, so a user's installed
+    // app can stay open without colliding with the single-instance mutex.
+    {
       const dataDir = path.join(tempRoot, 'gui', 'data');
       const port = await freePort();
       writeConfig(dataDir, port);
       const env = shellEnv(tempRoot, dataDir);
 
       const child = spawn(SHELL, [], {
-        env: { ...env, WHALEBRIDGE_CORE_MODE: 'development', WHALEBRIDGE_REPO_ROOT: ROOT },
+        env: {
+          ...env,
+          WHALEBRIDGE_CORE_MODE: 'development',
+          WHALEBRIDGE_REPO_ROOT: ROOT,
+          WHALEBRIDGE_INSTANCE_SUFFIX: `test-gui-${process.pid}`
+        },
         cwd: ROOT,
         windowsHide: true,
         stdio: ['ignore', 'ignore', 'pipe']
@@ -453,7 +451,8 @@ try {
     const env = {
       ...shellEnv(tempRoot, dataDir),
       WHALEBRIDGE_CORE_MODE: 'development',
-      WHALEBRIDGE_REPO_ROOT: ROOT
+      WHALEBRIDGE_REPO_ROOT: ROOT,
+      WHALEBRIDGE_INSTANCE_SUFFIX: `test-stage13-${process.pid}`
     };
 
     // Representative Core metadata that the UI must never rewrite.

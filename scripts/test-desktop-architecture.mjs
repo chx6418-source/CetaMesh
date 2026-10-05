@@ -140,4 +140,17 @@ check('logging redaction is present and fail-closed', () => {
   assert.match(read('src/logging/index.js'), /createRedactingSink/);
 });
 
+// 8. The shipped executable carries real product metadata (unsigned ML heuristics weigh this).
+check('desktop executable declares product version metadata', () => {
+  const pkg = JSON.parse(read('package.json'));
+  const rc = read('desktop-shell/whalebridge.rc');
+  assert.match(rc, /VERSIONINFO/, 'Windows VERSIONINFO must be embedded');
+  assert.match(rc, /VALUE "ProductName", "CetaMesh Desktop\\0"/);
+  assert.match(rc, /VALUE "CompanyName", "CetaMesh\\0"/);
+  assert.ok(
+    rc.includes(`VALUE "ProductVersion", "${pkg.version}\\0"`),
+    `whalebridge.rc ProductVersion must match package.json (${pkg.version})`
+  );
+});
+
 console.log(`\nDesktop v1 architecture red lines: ${passed} groups PASS`);

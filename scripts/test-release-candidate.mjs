@@ -294,6 +294,7 @@ try {
       PATH: noNodePath(),
       Path: noNodePath(),
       WHALEBRIDGE_DATA_DIR: dataDir,
+      WHALEBRIDGE_INSTANCE_SUFFIX: `rc-${process.pid}`,
       LOCALAPPDATA: path.join(sandboxRoot, 'LocalAppData'),
       APPDATA: path.join(sandboxRoot, 'Roaming')
     }

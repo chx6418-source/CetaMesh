@@ -2255,34 +2255,47 @@ ApiCall::Family { method, params } => api.request(method, params),
         }
     }
 
-    fn show_header(&self, ui: &mut egui::Ui) {
+    fn show_header(&self, ui: &mut egui::Ui, narrow: bool) {
         let palette = native_palette();
+        let (status, color) = match self.core_online {
+            Some(true) => ("Core 已连接", palette.success),
+            Some(false) => ("Core 不可用", palette.error),
+            None => ("Core 状态未知", palette.warning),
+        };
         egui::Frame::new()
             .fill(palette.surface)
             .stroke(egui::Stroke::new(1.0, palette.border))
             .corner_radius(egui::CornerRadius::same(10))
             .inner_margin(egui::Margin::symmetric(20, 14))
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
+                ui.set_min_width(ui.available_width());
+                if narrow {
                     ui.vertical(|ui| {
                         ui.heading(self.navigation.page.label());
                         ui.label(
                             egui::RichText::new(self.navigation.page.description())
                                 .color(palette.muted),
                         );
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new(status).color(color).strong());
                     });
+                } else {
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.heading(self.navigation.page.label());
+                            ui.label(
+                                egui::RichText::new(self.navigation.page.description())
+                                    .color(palette.muted),
+                            );
+                        });
                     ui.with_layout(
                         egui::Layout::right_to_left(egui::Align::Center),
                         |ui| {
-                            let (status, color) = match self.core_online {
-                                Some(true) => ("Core 已连接", palette.success),
-                                Some(false) => ("Core 不可用", palette.error),
-                                None => ("Core 状态未知", palette.warning),
-                            };
                             ui.label(egui::RichText::new(status).color(color).strong());
                         },
                     );
-                });
+                    });
+                }
             });
     }
 
@@ -2290,8 +2303,9 @@ ApiCall::Family { method, params } => api.request(method, params),
         let palette = native_palette();
         let selected = self.navigation.page == page;
         let color = if selected { palette.text } else { palette.muted };
+        let width = ui.available_width().clamp(120.0, 240.0);
         let response = ui.add_sized(
-            egui::vec2(176.0, 36.0),
+            egui::vec2(width, 34.0),
             egui::Button::new(egui::RichText::new(page.label()).color(color)).selected(selected),
         );
         if response.clicked() {
@@ -2301,29 +2315,23 @@ ApiCall::Family { method, params } => api.request(method, params),
 
     fn show_sidebar(&mut self, ui: &mut egui::Ui) {
         let palette = native_palette();
-        egui::Frame::new()
-            .fill(palette.surface)
-            .stroke(egui::Stroke::new(1.0, palette.border))
-            .corner_radius(egui::CornerRadius::same(10))
-            .inner_margin(egui::Margin::symmetric(12, 16))
-            .show(ui, |ui| {
-                ui.set_min_width(176.0);
-                ui.set_max_width(190.0);
-                ui.heading(egui::RichText::new("CetaMesh").strong());
-                ui.label(egui::RichText::new("Desktop").color(palette.muted));
-                ui.add_space(18.0);
-                for page in AppPage::PRIMARY {
-                    self.page_button(ui, page);
-                }
-                ui.add_space(16.0);
-                ui.separator();
-                ui.add_space(6.0);
-                ui.label(egui::RichText::new("管理").small().color(palette.muted).strong());
-                ui.add_space(6.0);
-                for page in AppPage::SECONDARY {
-                    self.page_button(ui, page);
-                }
-            });
+        ui.add_space(4.0);
+        ui.heading(egui::RichText::new("CetaMesh").strong());
+        ui.label(egui::RichText::new("Desktop").color(palette.muted));
+        ui.add_space(16.0);
+        for page in AppPage::PRIMARY {
+            self.page_button(ui, page);
+            ui.add_space(4.0);
+        }
+        ui.add_space(12.0);
+        ui.separator();
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new("管理").small().color(palette.muted).strong());
+        ui.add_space(6.0);
+        for page in AppPage::SECONDARY {
+            self.page_button(ui, page);
+            ui.add_space(4.0);
+        }
     }
 
     fn show_page_section_nav(&mut self, ui: &mut egui::Ui) {
@@ -4138,41 +4146,62 @@ impl eframe::App for NativeUi {
         self.update_tray();
 
         let palette = native_palette();
-        let narrow = ui.available_width() < 1040.0;
-        egui::Frame::new()
-            .fill(palette.background)
-            .inner_margin(egui::Margin::symmetric(16, 14))
+        // Layout is built from real panels: the navigation can never squeeze the page, panels wrap
+        // their own content, and the central page always gets the remaining rectangle.
+        let narrow = ctx.viewport_rect().width() < 1040.0;
+        if !narrow {
+            egui::Panel::left("cetamesh_sidebar")
+                .resizable(false)
+                .exact_size(196.0)
+                .frame(
+                    egui::Frame::new()
+                        .fill(palette.background)
+                        .inner_margin(egui::Margin::symmetric(12, 14)),
+                )
+                .show(ui, |ui| {
+                    self.show_sidebar(ui);
+                });
+        }
+        egui::Panel::top("cetamesh_header")
+            .resizable(false)
+            .frame(
+                egui::Frame::new()
+                    .fill(palette.background)
+                    .inner_margin(egui::Margin::symmetric(16, 12)),
+            )
             .show(ui, |ui| {
-                ui.horizontal_top(|ui| {
-                    if !narrow {
-                        self.show_sidebar(ui);
-                        ui.add_space(14.0);
-                    }
-                    ui.vertical(|ui| {
-                        if narrow {
-                            self.show_compact_nav(ui);
-                            ui.add_space(10.0);
-                        }
-                        self.show_header(ui);
-                        ui.add_space(8.0);
-                        self.show_core_attention_banner(ui);
-                        self.show_toast(ui);
-                        ui.add_space(4.0);
-                        self.show_page_section_nav(ui);
-                        ui.add_space(10.0);
-                        egui::ScrollArea::vertical()
-                            .id_salt("cetamesh_product_page_scroll")
-                            .auto_shrink([false, false])
+                if narrow {
+                    self.show_compact_nav(ui);
+                    ui.add_space(8.0);
+                }
+                self.show_header(ui, narrow);
+                ui.add_space(8.0);
+                self.show_core_attention_banner(ui);
+                self.show_toast(ui);
+                ui.add_space(4.0);
+                self.show_page_section_nav(ui);
+            });
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(palette.background)
+                    .inner_margin(egui::Margin::symmetric(16, 4)),
+            )
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("cetamesh_product_page_scroll")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        egui::Frame::new()
+                            .fill(palette.surface)
+                            .stroke(egui::Stroke::new(1.0, palette.border))
+                            .corner_radius(egui::CornerRadius::same(10))
+                            .inner_margin(egui::Margin::symmetric(20, 18))
                             .show(ui, |ui| {
-                                egui::Frame::new()
-                                    .fill(palette.surface)
-                                    .stroke(egui::Stroke::new(1.0, palette.border))
-                                    .corner_radius(egui::CornerRadius::same(10))
-                                    .inner_margin(egui::Margin::symmetric(20, 18))
-                                    .show(ui, |ui| self.show_page(ui));
+                                ui.set_min_width(ui.available_width());
+                                self.show_page(ui);
                             });
                     });
-                });
             });
         self.show_shortcuts_window(&ctx);
         self.show_quit_confirm(&ctx);
