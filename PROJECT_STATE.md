@@ -1,47 +1,64 @@
 # CetaMesh Desktop — PROJECT_STATE
 
-## CURRENT STATE (2026-10-05 — Session 3 merged; v2 hardening round)
+## CURRENT STATE (2026-10-06 — Final Security Hardening: agent test.run 权限模型)
 
-- **Verified base:** `74ede4e` (`main`). Sessions 1–3 are **merged into main**; at the start
-  of the v2 hardening round, local `main` and `origin/main` are identical at `74ede4e`.
-  Earlier "local only / do not push / not merged" statements in this file and in session
-  reports describe those sessions' working time and are superseded.
+- **Git facts:** `origin/main` = `9861976`（v2 hardening 已合并并推送，2026-10-05 Owner 确认）。
+  本地 `main` 在其上含主题/品牌提交 `4f6e3e8`。本轮安全修复在分支
+  `fix/agent-test-run-security`（base `4f6e3e8`；final code commit `f0696f1`）。
+  历史"local only / not merged"表述一律指当时的工作状态，均已过时。
+- **Agent test.run 权限模型（本轮核心修正）：**
+  1. 默认 Agent Task Grant **不含 `test.run`**（filesystem read/write/search +
+     git.status/diff + memory.read）——"可修改 Workspace"绝不隐含"可执行 Workspace 代码"；
+  2. `test.run` risk **high**：Agent 请求（即使 grant 包含）一律进入 Owner 审批队列；
+     **Grant = 可请求，Approval = 这次可执行（Approve Once）**；replay / 载荷篡改 /
+     过期 / 跨工作区全部拒绝；
+  3. Owner 在 Workspace UI 直接点击"运行测试"保持直接执行语义（Owner 的点击即显式决定）；
+  4. Smart Project Task 显式携带 request-only 的 test.run grant：请求 → pending →
+     Owner 决定 → 执行一次 → 结果回到 Agent；绝不静默自动执行。Workshop 勾选
+     test.run 同样只代表"可请求"；
+  5. Managed Agent 等待审批期间 rollover 被既有 ROLLOVER_NOT_SAFE 守卫拒绝；
+     rollover 的 Checkpoint 记录待审批请求**引用**（approvalId/capability/expiresAt），
+     审批绝不作为可继承权限随 Session 交接。
+- **Runner 定位：** `src/workspace/isolated-runner.js` 语义为 **Controlled Test Runner
+  （受控测试执行器）**，**不是 OS 沙箱**——它执行的是 Agent 可经 filesystem.write
+  修改的项目代码，allowlist 只防命令注入；runner 是审批之后的纵深防御层
+  （allowlist / 最小 env / 固定 cwd / 超时杀树 / output 有界 / stdin 关闭）。
 - **Runtime:** Standalone Chat uses Model Runtime; Smart routes simple turns to Model, mapped tools through Capability, and project work through Task → Agent Broker → Continuity. Agent sessions can roll over while the Task and Workspace remain attached.
 - **Capability and Workspace:** Unknown capability/permission requests deny by default. Workspace file/Git/test, Agent assignment, Memory, and Extension calls enter the shared broker. Workspace boundary checks reject traversal and sensitive aliases; managed Git diffs suppress sensitive paths case-insensitively and disable configured command filters.
 - **Workshop:** External users can submit proposals and see limited status. Owner approval is required before Workspace/Task/Agent provisioning. Proposal submission alone gives no file or execution access; artifacts remain Owner-reviewed.
 - **Memory:** Types include `working`, `chat`, `user`, `task`, `workspace`, `social`, `knowledge`, and `skill`. Links and bounded context packages preserve source references and enforce explicit authorization for cross-scope retrieval. Long-term Agent/Extension writes remain confirmation candidates.
-- **Extension:** Filesystem, Memory, and network requests pass through Capability Policy. Memory Packs are JSON reference data with an immutable Base and private User Overlay; code, shell, network, and instruction escalation are rejected. `VmExtensionHost` is the current host behind the replaceable host interface.
+- **Extension:** Filesystem, Memory, and network requests pass through Capability Policy. Memory Packs are JSON reference data with an immutable Base and private User Overlay; code, shell, network, and instruction escalation are rejected. `VmExtensionHost` is the current host behind the replaceable host interface; `ProcessExtensionHost` remains contract + frame protocol only.
 - **Product vocabulary:** `closed-agent` reads as `owner-agent`; `reserved` migrates to `chat`; `reserved2` migrates to `social`. Desktop navigation uses Home, Chat, Work, Social, Agents, Plugins, Memory, Workspaces, Devices, Connections, Security, and Settings.
-- **Verification:** v2 hardening round completed on `feature/desktop-v2-hardening`
-  (base `74ede4e`, final `32571d4`): new suites `test-standalone-model` (7, real
-  TCP/HTTP), `test-capability-coverage` (6), `test-isolated-runner` (6, real child
-  processes), `test-process-extension-host` (8), `test-security-negatives` (8); full
-  regression PASS incl. `desktop:test` 100/100 and `test-core-dist` (assertion scoped to
-  test artifacts); Release pipeline 4/4 PASS from a **clean worktree** (buildId
-  `1.0.0-rc.1+32571d4`, dirty=false). Two real product defects were found and fixed via
-  the real-path tests (SSE abort not observed on a stalled stream; Model-channel `send`
-  blocking the whole turn past the UI IPC timeout). Details:
-  `DESKTOP_V2_HARDENING_REPORT.md`.
-- **Known boundaries:** Managed Agent `test.run` now runs through the **Isolated Test
-  Runner** (command allowlist / minimal env / fixed workspace cwd / timeout kill tree)
-  — a controlled-execution boundary, **not** an OS sandbox; the runner stays
-  fail-closed when not wired. VM Extension hosting is not process isolation;
-  `ProcessExtensionHost` is contract + frame protocol only (no real process transport
-  yet). Workshop Owner review UI lives inside the Work page. `channel.send` exposes a
-  validated capability surface but no bound transport yet (QQ sending keeps its own
-  adapter boundary). Real provider-key turns / real QQ / cross-device Mesh / signing
-  remain NOT_RUN_ENVIRONMENT.
-- **Integration:** Sessions 1–3 are integrated into `main` and pushed. The v2 hardening
-  round (`feature/desktop-v2-hardening`) covers: fact-source reconciliation, real
-  standalone model verification, Workshop Owner UI, Capability Broker coverage
-  (Channel/Mesh adapters), isolated test runner, ProcessExtensionHost contract, product
-  positioning cleanup, and a repeatable Release Candidate. Work on this branch is
-  committed locally; merge into `main` and delete the branch after Owner confirmation.
-  See `DESKTOP_V2_HARDENING_REPORT.md`.
+- **Verification（final security round）:** 新增 `test-agent-test-run-security`（10 组，
+  含写后执行攻击 fixture）；`test-isolated-runner` 负面扩至 powershell/cmd/python/
+  node/npm install|exec/npx/cargo run|build|publish；`test-security-negatives` 更新
+  （危险命令进待审批、Owner 拒绝生效）；修复审批 UI 解析（approval 行字段在 request
+  内层）并新增 test.run 高风险文案与 tool/args 展示（cargo 109/109）。回归全绿
+  （capability / capability-coverage / isolated-runner / managed-agent / workshop /
+  task / continuity×2 / architecture / agent-broker / workspace / memory /
+  core-entry / privilege / dsh-integration / system / chat-product / platform）。
+  Release Candidate 在最终代码提交上干净重建并验收（见 `FINAL_DESKTOP_RC_REPORT.md`）。
+- **Known boundaries:** Controlled Test Runner 不是 OS 沙箱；VM Extension hosting
+  不是进程隔离（`ProcessExtensionHost` 仅契约）；`channel.send` 有校验面但未绑定
+  真实传输；Workshop Owner 审阅 UI 在 Work 页内。真实 provider-key 回合 / 真实 QQ /
+  跨设备 Mesh / 签名 = NOT_RUN_ENVIRONMENT。
+- **Integration:** v2 hardening 已合并 main 并推送（`9861976`）。本轮安全修复在
+  `fix/agent-test-run-security`，Owner 确认后合并 main（fast-forward）并推送。
+  See `FINAL_DESKTOP_RC_REPORT.md`.
 
 ## HISTORICAL / SUPERSEDED RECORD
 
 The sections below retain earlier implementation snapshots and decisions for traceability. Where they conflict with this `CURRENT STATE`, the current summary above is authoritative.
+
+## （历史）v2 hardening round — 2026-10-05（分支 `feature/desktop-v2-hardening`，已合并 main 并推送）
+
+- Base `74ede4e` → final `32571d4`（10 提交），Owner 确认后 fast-forward 合并并推送
+  （origin/main 曾为 `9861976`）。内容：文档事实源收口、Standalone Model 真实路径
+  验证（并修复 SSE abort 不生效 / Model 通道 send 阻塞整回合两个真实缺陷）、
+  Capability Channel/Mesh Adapter、Isolated Test Runner、ProcessExtensionHost 契约、
+  Workshop Owner UI + Continuity UI + Capability 审批入口、产品定位、攻击性
+  negative 补齐。RC `1.0.0-rc.1+32571d4`（dirty=false）4/4 PASS。
+- 详见 `DESKTOP_V2_HARDENING_REPORT.md`（其开发期 Git 状态描述为历史）。
 
 ## 会话 2：Agent Broker + Continuity Runtime v2 + 自动 Fresh Session Rollover（2026-10-05）
 

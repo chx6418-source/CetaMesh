@@ -2,6 +2,17 @@
 
 Date: 2026-10-05 · Branch: `feature/desktop-v2-hardening`（本地提交，未 push）
 
+> ## Current Integration Status（2026-10-06 更新）
+>
+> 本报告所述工作已 **合并进 `main` 并推送远端**：Owner 确认后
+> `feature/desktop-v2-hardening` fast-forward 合并，`origin/main` = `9861976`。
+> 其后 `main` 追加主题/品牌提交 `4f6e3e8`；当前安全修复轮
+> （`fix/agent-test-run-security`，见 `FINAL_DESKTOP_RC_REPORT.md`）基于其上。
+>
+> **下方正文中所有 "本地提交，未 push"、"Branch: feature/desktop-v2-hardening"、
+> "local only" 等描述均为开发期（Historical Build Context）状态，不再是当前事实。**
+> Base/Final HEAD 表、测试矩阵与产物哈希保留为历史构建记录。
+
 ## Base / Final HEAD
 
 | 项 | 值 |
