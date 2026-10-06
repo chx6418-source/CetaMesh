@@ -1,7 +1,20 @@
-// CetaMesh Workspace —— Isolated Test Runner（v2 hardening / Phase E）。
+// CetaMesh Workspace —— Controlled Test Runner（v2 hardening Phase E；final security 修正定位）。
 //
-// 目的：让 Managed Agent 的 `test.run` 从"无条件 DENY"升级为**受控执行**，同时
-// 保持硬边界。安全包络（全部强制，缺一拒绝）：
+// 文件名保持 isolated-runner.js（兼容），但产品语义是 **Controlled Test Runner
+//（受控测试执行器）**，不是 Sandbox：
+//
+//   > This is not an OS sandbox.
+//
+// 本模块执行的是 Workspace 中**可被 Agent 经 filesystem.write 修改的项目代码**
+// （package.json scripts / 测试 / 构建脚本）。命令 allowlist 只能防止直接命令注入，
+// 防不了项目代码本身以当前 Windows 用户权限做任何事。因此：
+//   - test.run risk = high：Agent 每一次执行都必须 Owner Approve Once
+//     （即使 Agent 的 Task Grant 包含 test.run 也一样——grant = 可以请求，
+//       approval = 这次可以执行）；
+//   - 本模块只是审批之后的**纵深防御层**，不是安全边界本身。
+//
+// 目的：让 Managed Agent 的 `test.run` 在 Owner 显式批准后**受控执行**。安全包络
+// （全部强制，缺一拒绝）：
 //   - 固定 cwd：只能是指定 Workspace 的 root（经登记表解析，绝不接受调用方路径）；
 //   - 命令 allowlist：仅 `npm test` / `npm run <script>` / `cargo test [name]`，
 //     script/name 必须是有界 token（无空格、无 shell 元字符）；绝不执行调用方
@@ -16,10 +29,7 @@
 //   - output 有界（maxBuffer + 截断标记）；
 //   - 不提供任何"其它 workspace / 宿主任意进程"路径——本模块没有构造它们的入口。
 //
-// 边界如实声明：这是**受控执行边界**（allowlist + 固定 cwd + 最小 env + 资源上限），
-// 不是 OS 级沙箱——子进程理论上的系统能力与任何本地进程相同；allowlist 的意义是
-// 模型只能触发 Owner 工作区自身定义的测试入口（package.json scripts / cargo test），
-// 不能注入命令。OS 级隔离仍是后续阶段（与 ProcessExtensionHost 同属进程隔离工作）。
+// OS 级隔离仍是后续阶段（与 ProcessExtensionHost 同属进程隔离工作）。
 
 import { execFile } from 'node:child_process';
 import path from 'node:path';

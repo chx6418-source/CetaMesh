@@ -60,7 +60,13 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
   function grantTask(taskId, value) {
     const task = taskFor(taskId);
     if (!task?.workspaceId) throw capabilityError('WORKSPACE_REQUIRED', 'Task workspace required');
-    const capabilities = value?.capabilities ?? ['filesystem.read', 'filesystem.write', 'filesystem.search', 'git.status', 'git.diff', 'test.run', 'memory.read'];
+    // 默认 Agent 能力集（v2 final security）：**不含 test.run**。
+    // Agent 可以默认修改 Workspace ≠ Agent 可以默认执行 Workspace 代码——
+    // test.run 执行的是 Agent 可经 filesystem.write 修改的项目代码（package.json
+    // 脚本 / 测试 / 构建脚本），allowlist 只防命令注入、防不了项目代码本身。
+    // 需要 test.run 的任务必须显式传入（Workshop Owner 勾选 / Smart 路径显式
+    // request-only grant），且每一次执行仍需 Owner Approve Once（risk=high）。
+    const capabilities = value?.capabilities ?? ['filesystem.read', 'filesystem.write', 'filesystem.search', 'git.status', 'git.diff', 'memory.read'];
     for (const id of capabilities) broker.registry.require(id);
     if ((value?.workspaceIds ?? [task.workspaceId]).some(id => id !== task.workspaceId)) {
       throw capabilityError('WORKSPACE_NOT_AUTHORIZED', 'A Task grant cannot include another workspace');
@@ -81,7 +87,10 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
   if (workspaceService) {
     for (const [method, id] of Object.entries(WORKSPACE_CAPABILITIES)) {
       broker.register({ id, permission: id, provider: 'workspace', workspace: id !== 'workspace.create',
-        risk: ['workspace.create', 'git.commit'].includes(id) ? 'high' : id === 'filesystem.write' || id === 'test.run' ? 'medium' : 'low',
+        // test.run = 执行 Workspace 中可被 Agent 修改的代码：high（审批必经），
+        // 不是普通 medium。Owner 直接点击"运行测试"走 executeWorkspace 的
+        // approved:true（Owner 的点击本身就是显式决定，语义与既往一致）。
+        risk: ['workspace.create', 'git.commit', 'test.run'].includes(id) ? 'high' : id === 'filesystem.write' ? 'medium' : 'low',
         validate(request) {
           if (id === 'workspace.create') {
             assertSafeRootForm(request.input.root);
@@ -89,10 +98,14 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
             return;
           }
           if (id === 'test.run' && request.actor.kind !== 'owner') {
-            // v2 hardening：有 Isolated Runner 时 agent 可走受控执行（allowlist /
-            // 最小 env / 固定 cwd / 超时杀树）；runner 不可用时维持 fail-closed DENY。
+            // v2 final security：Agent test.run = 三层同时满足——
+            //   1) Agent Grant 含 test.run（= 可以"请求"，不等于可以执行）；
+            //   2) Capability Permission（policy.authorize）；
+            //   3) Owner Approve Once（risk=high → 审批必经，见 broker policy）。
+            // 缺第一层 → PERMISSION_DENIED；缺第三层 → pending 待 Owner 决定。
+            // grant 含 test.run 绝不会被解释为"无需审批"。
             if (!isolatedRunner) {
-              throw capabilityError('TEST_SANDBOX_UNAVAILABLE', 'Isolated test runner unavailable; Agent test execution stays denied');
+              throw capabilityError('TEST_SANDBOX_UNAVAILABLE', 'Controlled test runner unavailable; Agent test execution stays denied');
             }
             if (typeof request.input?.tool !== 'string' || !Array.isArray(request.input?.args)) {
               throw capabilityError('INVALID_PARAMS', 'test.run 需要 { tool, args }（allowlist 形态）');
@@ -131,8 +144,9 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
               if (existing) return { workspace: existing, recovered: true };
             }
             if (id === 'test.run' && request.actor.kind !== 'owner') {
-              // Agent 的 test.run 走 Isolated Runner（命令 allowlist，绝不执行
+              // Agent 的 test.run 走 Controlled Test Runner（命令 allowlist，绝不执行
               // Owner 的 testCommand 字符串，也绝不接受调用方 shell）。
+              // 到达这里意味着 Owner 已经 Approve Once（risk=high 审批已消费）。
               return isolatedRunner.run({ workspaceId: request.workspaceId,
                 tool: request.input.tool, args: request.input.args, timeoutMs: request.input.timeoutMs });
             }
@@ -249,8 +263,12 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     const capability = WORKSPACE_CAPABILITIES[method];
     if (!capability) return workspaceService.execute({ method, params }); // Owner-only registry/settings/legacy approvals
     const workspaceId = params.id || (await workspaceService.execute({ method: 'workspace.list' })).activeId;
+    // test.run 保持 Owner 直接操作语义：Owner 在 Workspace UI 点击"运行测试"就是
+    // 显式决定（approved:true，跳过审批队列）；Managed Agent 的 test.run 不走此
+    // 路径，risk=high 使其必然进入 Approve Once。
+    const ownerDirect = ['workspace.create', 'test.run'].includes(capability);
     const result = await broker.execute({ capability, actor: OWNER_ACTOR, input: params,
-      ...(capability !== 'workspace.create' ? { workspaceId } : {}), approved: capability === 'workspace.create', reason: 'Desktop Owner action' });
+      ...(capability !== 'workspace.create' ? { workspaceId } : {}), approved: ownerDirect, reason: 'Desktop Owner action' });
     return result.status === 'completed' ? result.result : result;
   }
   async function executeMemory(command) {

@@ -17,9 +17,16 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
         record.taskId = task.id;
       }
       const provider = record.config.agentProvider && record.config.agentProvider !== 'none' ? record.config.agentProvider : 'cetamesh';
+      // Smart Project 的 test.run 语义（v2 final security）：
+      //   Grant（此处显式传入，含 test.run）= Agent 可以"请求"测试；
+      //   执行 = 仍需 Owner Approve Once（test.run risk=high → 审批必经）。
+      // 流程：Agent request test.run → pending → Owner 批准/拒绝 → 执行一次 →
+      // 结果经决策参考数据回到 Agent。绝不因 grant 静默自动执行。
       const result = await capabilityService.broker.execute({ actor: OWNER_ACTOR, taskId: task.id, workspaceId,
         capability: 'agent.run', input: { provider, content: text, modelProvider: record.config.modelProvider,
-          model: record.config.model !== legacyModel ? record.config.model : undefined, reasoningEffort: record.config.reasoning }, reason: 'Smart project task' });
+          model: record.config.model !== legacyModel ? record.config.model : undefined, reasoningEffort: record.config.reasoning,
+          grants: { capabilities: ['filesystem.read', 'filesystem.write', 'filesystem.search', 'git.status', 'git.diff', 'memory.read', 'test.run'] } },
+        reason: 'Smart project task' });
       if (result.result.reused) {
         await agentBroker.send({ provider: result.result.provider, sessionId: result.result.sessionId, content: text });
       }

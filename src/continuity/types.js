@@ -184,6 +184,19 @@ export function normalizePacket(packet) {
           note: text(packet.reconciliation.note, 2000) || null
         }
       : null,
+    // Pending Capability Approval 引用（会话 2 final security）：rollover 时任务
+    // 仍在等待 Owner 审批的能力请求。Checkpoint 只保存**引用**（approvalId /
+    // capability / expiresAt）——审批本身不作为可继承权限随 Session 交接：
+    // 新 Session 若要继续，必须在审批仍有效时严格按同一 request fingerprint
+    // 复用，否则重新请求审批。
+    pendingApprovals: (() => {
+      const rows = Array.isArray(packet.pendingApprovals) ? packet.pendingApprovals : [];
+      return rows.slice(0, 20).map((row) => ({
+        approvalId: text(row?.approvalId, 128) || null,
+        capability: text(row?.capability, 200) || null,
+        expiresAt: Number.isFinite(row?.expiresAt) ? row.expiresAt : null
+      })).filter((row) => row.approvalId && row.capability);
+    })(),
     sequence: Number.isSafeInteger(packet.sequence) && packet.sequence > 0 ? packet.sequence : 1,
     createdAt: Number.isFinite(packet.createdAt) ? packet.createdAt : null
   };

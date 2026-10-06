@@ -68,6 +68,7 @@ export function createContinuityRuntime({
   now = () => Date.now(),
   canRollover = null,
   reconciler = null,
+  listPendingApprovals = null,
   log = () => {}
 } = {}) {
   if (!taskRuntime?.get) throw continuityError('INVALID_PARAMS', 'createContinuityRuntime 需要 taskRuntime');
@@ -131,7 +132,7 @@ export function createContinuityRuntime({
   }
 
   /** 从 Task Runtime 组装结构化 Handoff Packet（Checkpoint v2）。 */
-  function buildHandoffPacket({ taskId, reason, sequence, coding, relevantFiles, workspaceFacts } = {}) {
+  function buildHandoffPacket({ taskId, reason, sequence, coding, relevantFiles, workspaceFacts, pendingApprovals } = {}) {
     const task = requireTask(taskId);
     const packet = normalizePacket({
       taskId: task.id,
@@ -155,6 +156,7 @@ export function createContinuityRuntime({
       reasonForHandoff: normalizeReason(reason),
       coding: coding ?? null,
       workspaceFacts: workspaceFacts ?? null,
+      pendingApprovals: Array.isArray(pendingApprovals) ? pendingApprovals : null,
       sequence,
       createdAt: now()
     });
@@ -223,6 +225,13 @@ export function createContinuityRuntime({
     lines.push(`检查点摘要: ${packet.checkpoint.summary || '（无）'}`);
     lines.push(`下一步（从这里继续）: ${packet.checkpoint.nextAction || packet.pendingWork[0] || '向所有者确认当前进度'}`);
     lines.push(`交接原因: ${packet.reasonForHandoff}`);
+    if (packet.pendingApprovals?.length) {
+      const rows = packet.pendingApprovals
+        .map((row) => `${row.capability}（审批 ${row.approvalId}${row.expiresAt ? `，到期 ${row.expiresAt}` : ''}）`)
+        .join('；');
+      lines.push(`待审批能力请求: ${rows}`);
+      lines.push(`审批规则: 审批不随 Session 交接继承——仅当同一请求（相同 requestId/指纹）且审批未过期时方可继续；否则重新发起请求等待 Owner 审批。`);
+    }
     lines.push(`上下文规则: 这是旧任务续接，不要重做已完成工作；先验证以上事实与工作区真实状态再行动；从"下一步"继续；不要要求重新提供本摘要中的信息。`);
     return lines.join('\n');
   }
@@ -364,9 +373,15 @@ export function createContinuityRuntime({
       if (!facts && task.workspaceId) {
         facts = await collectWorkspaceFacts({ workspaceId: task.workspaceId, relevantFiles });
       }
+      // Pending Capability Approval 引用（final security）：checkpoint 只记录引用，
+      // 审批不作为可继承权限随 Session 交接（同指纹且未过期才可继续，否则重新请求）。
+      const pendingApprovals = typeof listPendingApprovals === 'function'
+        ? listPendingApprovals({ taskId: task.id })
+        : null;
       const packet = buildHandoffPacket({
         taskId: task.id, reason, sequence, coding, relevantFiles,
-        workspaceFacts: facts ?? null
+        workspaceFacts: facts ?? null,
+        pendingApprovals: Array.isArray(pendingApprovals) ? pendingApprovals : null
       });
       const packetPath = savePacket(task.id, packet);
 

@@ -2124,8 +2124,10 @@ async function main() {
     const capabilityService = createCapabilityService({ stateDir: STATE_DIR, workspaceService, memoryService,
       taskRuntime: taskService.runtime, agentBroker, bindAgentSession: managedAgent.bindSession, searchImpl: searchWeb,
       audit: event => log(`Capability ${event.capability} ${event.status}`),
-      // v2 hardening / Phase E：Managed Agent 的 test.run 从 DENY 升级为受控执行
-      //（命令 allowlist + 最小 env + 固定 workspace cwd + 超时杀树）。
+      // final security：Managed Agent 的 test.run = Approve Once 之后经 Controlled
+      // Test Runner 执行（命令 allowlist + 最小 env + 固定 workspace cwd + 超时杀树）。
+      // Runner 是审批之后的纵深防御层，不是 OS 沙箱——它执行的是 Agent 可修改的
+      // Workspace 项目代码，因此 risk=high、每次执行都需要 Owner 批准。
       isolatedRunner: createIsolatedTestRunner({
         resolveWorkspace: async (workspaceId) => workspaceService.describeWorkspace(workspaceId),
         log
@@ -2159,6 +2161,12 @@ async function main() {
       stateDir: STATE_DIR,
       agentBroker,
       reconciler: continuityReconciler,
+      // final security：rollover 的 Checkpoint 记录待审批能力请求的**引用**
+      // （审批本身绝不作为可继承权限随 Session 交接）。
+      listPendingApprovals: ({ taskId }) => capabilityService.broker.approvals
+        .list()
+        .filter((row) => row.request?.taskId === taskId)
+        .map((row) => ({ approvalId: row.id, capability: row.request?.capability ?? null, expiresAt: row.expiresAt })),
       log
     });
     // 回合结束自动上报：Broker 事件 → Continuity（记录真实 usage / 估算 →
