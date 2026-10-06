@@ -57,6 +57,9 @@ pub struct CapabilityApprovalRow {
     pub workspace_id: String,
     pub reason: String,
     pub expires_at: u64,
+    /// test.run 请求的命令形态（row.request.input.tool / args）；其它能力为空。
+    pub tool: String,
+    pub args: Vec<String>,
 }
 
 pub fn parse_capability_approvals(value: &Value) -> Vec<CapabilityApprovalRow> {
@@ -67,21 +70,55 @@ pub fn parse_capability_approvals(value: &Value) -> Vec<CapabilityApprovalRow> {
     rows.iter()
         .filter_map(|row| {
             let id = row.get("id").and_then(Value::as_str)?;
-            let actor = row.get("actor").unwrap_or(&Value::Null);
+            let request = row.get("request").unwrap_or(&Value::Null);
+            let actor = row.get("actor").unwrap_or(request.get("actor").unwrap_or(&Value::Null));
+            let input = request.get("input").unwrap_or(&Value::Null);
             Some(CapabilityApprovalRow {
                 id: id.to_owned(),
-                capability: row.get("capability").and_then(Value::as_str).unwrap_or("").to_owned(),
+                capability: row
+                    .get("capability")
+                    .and_then(Value::as_str)
+                    .or_else(|| request.get("capability").and_then(Value::as_str))
+                    .unwrap_or("")
+                    .to_owned(),
                 permission: row.get("permission").and_then(Value::as_str).unwrap_or("").to_owned(),
-                risk: row.get("risk").and_then(Value::as_str).unwrap_or("").to_owned(),
+                risk: row
+                    .get("risk")
+                    .and_then(Value::as_str)
+                    .or_else(|| request.get("risk").and_then(Value::as_str))
+                    .unwrap_or("")
+                    .to_owned(),
                 actor: format!(
                     "{}:{}",
                     actor.get("kind").and_then(Value::as_str).unwrap_or("?"),
                     actor.get("id").and_then(Value::as_str).unwrap_or("?")
                 ),
-                task_id: row.get("taskId").and_then(Value::as_str).unwrap_or("").to_owned(),
-                workspace_id: row.get("workspaceId").and_then(Value::as_str).unwrap_or("").to_owned(),
-                reason: row.get("reason").and_then(Value::as_str).unwrap_or("").to_owned(),
+                task_id: row
+                    .get("taskId")
+                    .and_then(Value::as_str)
+                    .or_else(|| request.get("taskId").and_then(Value::as_str))
+                    .unwrap_or("")
+                    .to_owned(),
+                workspace_id: row
+                    .get("workspaceId")
+                    .and_then(Value::as_str)
+                    .or_else(|| request.get("workspaceId").and_then(Value::as_str))
+                    .unwrap_or("")
+                    .to_owned(),
+                reason: request.get("reason").and_then(Value::as_str).unwrap_or("").to_owned(),
                 expires_at: row.get("expiresAt").and_then(Value::as_u64).unwrap_or(0),
+                tool: input.get("tool").and_then(Value::as_str).unwrap_or("").to_owned(),
+                args: input
+                    .get("args")
+                    .and_then(Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(ToOwned::to_owned)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
             })
         })
         .collect()
@@ -4581,13 +4618,25 @@ ApiCall::Family { method, params } => api.request(method, params),
                         ui.weak(format!("风险 {}", row.risk));
                     }
                 });
+                // test.run + Agent：明确高风险语义，不用"运行测试"掩盖。
+                // 该请求执行的是 Agent 可经 filesystem.write 修改的项目代码。
+                if row.capability == "test.run" && row.actor.starts_with("agent:") {
+                    ui.colored_label(native_palette().error, "高风险：将执行当前 Workspace 中的项目代码。");
+                    ui.colored_label(
+                        native_palette().error,
+                        "该 Workspace 可能刚刚由 Agent 修改。测试脚本、构建脚本、依赖或测试代码可能以当前 Windows 用户权限执行。",
+                    );
+                    ui.colored_label(native_palette().error, "本次批准仅执行一次；批准后的重放 / 篡改 / 过期请求都会被拒绝。");
+                }
                 ui.horizontal_wrapped(|ui| {
-                    ui.weak(format!("请求者 {}", row.actor));
-                    if !row.task_id.is_empty() {
-                        ui.weak(format!("Task {}", row.task_id));
+                    ui.weak(format!("Agent {}", row.actor));
+                    ui.weak(format!("Task {}", if row.task_id.is_empty() { "—" } else { row.task_id.as_str() }));
+                    ui.weak(format!("Workspace {}", if row.workspace_id.is_empty() { "—" } else { row.workspace_id.as_str() }));
+                    if !row.tool.is_empty() {
+                        ui.weak(format!("命令类型 {}", row.tool));
                     }
-                    if !row.workspace_id.is_empty() {
-                        ui.weak(format!("Workspace {}", row.workspace_id));
+                    if !row.args.is_empty() {
+                        ui.weak(format!("请求执行 {}", row.args.join(" ")));
                     }
                     ui.weak(format!("到期 {}", row.expires_at));
                 });
@@ -5456,10 +5505,14 @@ mod capability_approval_tests {
 
     #[test]
     fn parses_capability_approval_queue() {
+        // 真实 approval 行形状：capability/taskId/workspaceId/reason/risk 都在
+        // request 内层（approval.pending 存储 {id, fingerprint, request, ...}）。
         let value = json!({ "approvals": [
-            { "id": "cap-1", "capability": "filesystem.write", "permission": "filesystem.write",
-              "risk": "medium", "actor": { "kind": "agent", "id": "task:t1" },
-              "taskId": "t1", "workspaceId": "ws1", "reason": "写入导出文件", "expiresAt": 1759660000000u64 }
+            { "id": "cap-1",
+              "request": { "capability": "filesystem.write", "risk": "medium",
+                "actor": { "kind": "agent", "id": "task:t1" },
+                "taskId": "t1", "workspaceId": "ws1", "reason": "写入导出文件", "input": {} },
+              "status": "pending", "expiresAt": 1759660000000u64 }
         ]});
         let rows = parse_capability_approvals(&value);
         assert_eq!(rows.len(), 1);
@@ -5473,6 +5526,29 @@ mod capability_approval_tests {
         assert_eq!(rows[0].expires_at, 1759660000000);
         assert!(parse_capability_approvals(&json!({ "approvals": [] })).is_empty());
         assert!(parse_capability_approvals(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn parses_agent_test_run_request_shape() {
+        // test.run 审批行：UI 需要展示命令类型与请求执行的脚本/参数。
+        let value = json!({ "approvals": [
+            { "id": "cap-test-1",
+              "request": { "capability": "test.run", "risk": "high",
+                "actor": { "kind": "agent", "id": "task:t9" },
+                "taskId": "t9", "workspaceId": "ws1",
+                "reason": "Managed Agent Task step",
+                "input": { "tool": "npm", "args": ["run", "dangerous"] } },
+              "status": "pending", "expiresAt": 1759660000000u64 }
+        ]});
+        let rows = parse_capability_approvals(&value);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].capability, "test.run");
+        assert_eq!(rows[0].risk, "high");
+        assert!(rows[0].actor.starts_with("agent:"));
+        assert_eq!(rows[0].tool, "npm");
+        assert_eq!(rows[0].args, vec!["run".to_owned(), "dangerous".to_owned()]);
+        assert!(rows[0].actor.starts_with("agent:") && rows[0].capability == "test.run",
+            "UI 高风险文案的触发条件：agent + test.run");
     }
 }
 

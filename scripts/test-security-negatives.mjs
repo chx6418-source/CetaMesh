@@ -90,10 +90,22 @@ try {
   await deny(svc.broker.execute({ actor: owner, capability: 'publish.artifact', input: {}, requestId: 'neg-4', approvalId: approvedRow.approvalId }), 'APPROVAL_EXPIRED');
   ok('过期审批：pending 过期后 decide → APPROVAL_EXPIRED；已批准但过期后消费同样 APPROVAL_EXPIRED');
 
-  // ── 6. Agent test.run 经 Broker：非 allowlist 命令 ────────────────────────
-  await deny(svc.broker.execute({ actor: agentA, taskId: taskA.id, workspaceId: wsA, capability: 'test.run', input: { tool: 'bash', args: ['-c', 'rm -rf /'] } }), 'TEST_COMMAND_NOT_ALLOWED');
-  await deny(svc.broker.execute({ actor: agentA, taskId: taskA.id, workspaceId: wsA, capability: 'test.run', input: { tool: 'npm', args: ['install', 'malicious'] } }), 'TEST_COMMAND_NOT_ALLOWED');
-  ok('Agent test.run：非 allowlist 命令经 Broker 仍被拒（bash / npm install → TEST_COMMAND_NOT_ALLOWED）');
+  // ── 6. Agent test.run 经 Broker：非 allowlist 命令进入待审批（不执行） ────
+  // final security：test.run risk=high → Agent 请求（即使是非 allowlist 形态）
+  // 一律先到 Owner 审批，绝不静默执行；allowlist 拒绝发生在审批后的执行层
+  //（由 test-isolated-runner 覆盖）。
+  {
+    const dangerous = await svc.broker.execute({ actor: agentA, taskId: taskA.id, workspaceId: wsA, capability: 'test.run', input: { tool: 'bash', args: ['-c', 'rm -rf /'] } });
+    assert.equal(dangerous.status, 'pending', 'bash 请求进入待审批，绝不静默执行');
+    const install = await svc.broker.execute({ actor: agentA, taskId: taskA.id, workspaceId: wsA, capability: 'test.run', input: { tool: 'npm', args: ['install', 'malicious'] } });
+    assert.equal(install.status, 'pending', 'npm install 请求进入待审批');
+    // Owner 拒绝这些危险请求。
+    for (const row of [dangerous, install]) {
+      const decided = await svc.execute({ method: 'capability.approval.decide', params: { id: row.approvalId, approve: false } });
+      assert.equal(decided.status, 'rejected');
+    }
+    ok('Agent test.run：bash / npm install 请求进入待审批（不静默执行），Owner 拒绝生效');
+  }
 
   // ── 7. Agent test.run 指向未授权 Workspace ───────────────────────────────
   await deny(svc.broker.execute({ actor: agentA, taskId: taskA.id, workspaceId: wsB, capability: 'test.run', input: { tool: 'npm', args: ['test'] } }), 'WORKSPACE_NOT_AUTHORIZED');

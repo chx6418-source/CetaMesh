@@ -15,10 +15,10 @@ Broker，走自身更严格的边界）· **Deferred**（本轮明确不做）�
 | --- | --- | --- | --- | --- | --- |
 | Workspace | workspace.read / write / file.search | Desktop IPC → capabilityService.executeWorkspace → Broker | Brokered | low/medium | 已完成（会话 3） |
 | Workspace | workspace.git.status / git.diff / git.commit | 同上（commit 走审批策略；非 owner diff 抑制敏感路径） | Brokered | high(commit) | 已完成 |
-| Workspace | workspace.test.run | Owner 路径 → Broker `test.run`；**Agent 路径 → DENY**（见下"Agent"行） | Owner: Brokered / Agent: DENY→Runner | medium | 本轮引入 Isolated Runner（见 Phase E） |
+| Workspace | workspace.test.run | Owner 路径 → Broker `test.run`（Owner 点击即显式决定，approved:true）；Agent 路径见下"Agent"行 | Owner: Brokered 直执行 | **high** | final security：risk 升为 high；Owner 直接操作语义保持 |
 | Workspace | workspace.create | Broker `workspace.create`（幂等恢复 + root 形状校验） | Brokered | high | 已完成 |
 | Agent | agent.run（Managed/DSH 会话分配） | Broker `agent.run`（owner-only，task/workspace 绑定，grant 持久化） | Brokered | medium | 已完成 |
-| Agent | test.run（Managed Agent 请求） | capability validate 拒绝（TEST_SANDBOX_UNAVAILABLE） | DENY → Brokered Runner | high | **本轮落地**：`test.run` 对 agent 经 Isolated Test Runner（allowlist/env/timeout/output 边界）放行；runner 不可用时仍 DENY |
+| Agent | test.run（Managed Agent 请求） | 三层同时满足：Grant（= 可请求）+ Permission + **Owner Approve Once**（risk=high → 每次执行必经审批）→ Controlled Test Runner | Brokered + Approve Once | **high** | **final security 收口**：默认 grant 不含 test.run；grant 绝不被解释为"无需审批"；执行的是 Agent 可经 filesystem.write 修改的项目代码——allowlist 只防命令注入，防不了项目代码本身（**This is not an OS sandbox**）；replay / 篡改 / 过期 / 跨工作区全部拒绝 |
 | Memory | memory.read / write / link + desktop 管理 | Broker `memory.*`（owner 管理 / agent 作用域写） | Brokered | low/medium | 已完成 |
 | Extension | filesystem.* / memory.* / network | 扩展运行时 → Capability Policy（hosts/paths 白名单在 policy 层强制） | Brokered | medium/high | 已完成 |
 | Extension | shell / native / download / process | FORBIDDEN_PERMISSIONS 一律拒绝 | DENY（by design） | forbidden | 不迁移（红线） |
@@ -33,17 +33,47 @@ Broker，走自身更严格的边界）· **Deferred**（本轮明确不做）�
 | Desktop | clock.now | Broker `clock.now` | Brokered | low | 已完成 |
 | Device | 设备本地能力（进程内桌面本体） | 无独立 device capability 面 | N/A | — | 本机本体不是远端设备；Mesh 对端能力走 mesh/trust.js 授权 |
 
-## 本轮变更（v2 hardening）
+## 本轮变更（final security，2026-10-06）
+
+1. **Agent test.run 权限模型修正**（核心）：
+   - 默认 Agent Task Grant **不含 `test.run`**（收敛为
+     filesystem.read/write/search + git.status/diff + memory.read）——
+     Agent 可以默认修改 Workspace ≠ Agent 可以默认执行 Workspace 代码；
+   - `test.run` risk **medium → high**：Agent 请求无论 grant 是否包含，
+     一律进入 Owner 审批队列（grant = 可以请求；approval = 这次可以执行）；
+   - Approve Once：批准只消费一次（指纹绑定），replay / 载荷篡改 / 过期 /
+     跨工作区全部拒绝；拒绝则不执行；
+   - Owner 在 Workspace UI 直接点击"运行测试"保持既有直接执行语义
+     （Owner 的点击本身就是显式决定）；
+   - Smart Project Task 显式携带 request-only 的 test.run grant：
+     Agent 请求 → pending → Owner 决定 → 执行一次 → 结果回到 Agent，
+     绝不静默自动执行；
+   - Workshop 勾选 `test.run` 同样只代表"可请求"。
+2. **Continuity 兼容**：Managed Agent 等待审批期间 rollover 被
+   ROLLOVER_NOT_SAFE 守卫拒绝（既有安全点）；rollover 的 Checkpoint 记录
+   待审批请求的**引用**（approvalId/capability/expiresAt），审批绝不作为
+   可继承权限随 Session 交接——新 Session 必须同指纹且未过期才可继续，
+   否则重新请求审批。
+3. **Runner 定位修正**：`src/workspace/isolated-runner.js` 文件名保持兼容，
+   语义明确为 **Controlled Test Runner（受控测试执行器）**，不是 OS 沙箱
+   （This is not an OS sandbox）——它执行的是 Agent 可经 filesystem.write
+   修改的项目代码，allowlist 只防命令注入；runner 是审批之后的纵深防御层。
+4. **测试**：`scripts/test-agent-test-run-security.mjs`（10 组，含"Agent 改写
+   package.json 后 test.run 仍需审批"的写后执行攻击 fixture）；
+   `test-isolated-runner` 负面扩至 bash/powershell/cmd/python/node/
+   npm install|exec/npx/cargo run|build|publish；`test-security-negatives`
+   组 6 更新为"危险命令进待审批、Owner 拒绝生效"。
+
+## 上轮变更（v2 hardening，2026-10-05）
 
 1. **新增 `src/capability/adapters.js`**：Channel/Mesh 只读能力（`channel.status`、
    `channel.declarations`、`mesh.status`、`mesh.capabilities`）与 `channel.send`
    校验面进入 Registry。`channel.send` = permission `message.send`、risk high
    （high-risk 审批语义）、target 必须命中注入的 allowlist（与 `config.allow` 同源，
    未配置一律 fail-closed）、text 有界；`sendImpl` 为注入点，本轮不绑定真实传输。
-2. **`test.run` 拆分**：Owner 路径保持原 `workspace.test.run`（owner 配置的命令 +
-   审批策略）；Managed Agent 的 `test.run` 从"无条件 DENY"升级为"经 Isolated Test
-   Runner 的受控执行"（见 `src/workspace/isolated-runner.js`），runner 拒绝的一切
-   形态仍然 DENY。
+2. **`test.run` 首次拆分**（已被 final security 进一步收口）：当时 Owner 路径保持
+   `workspace.test.run`，Managed Agent 从"无条件 DENY"升级为经 Runner 受控执行——
+   final security 在此之上补齐"risk=high + 默认 grant 移除 + Approve Once"。
 3. **测试**：`scripts/test-capability-coverage.mjs`（6 组）覆盖注册面、只读完成、
    send 正面、五类负面（白名单外/未配置/未知通道/非法 kind/超长 text）、sendImpl
    未绑定如实报告、external actor 拒绝。

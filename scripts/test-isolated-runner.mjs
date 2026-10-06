@@ -61,17 +61,31 @@ function makeWorkspace(name, files) {
     (e) => e.code === 'TEST_COMMAND_NOT_ALLOWED', 'bash 不在 allowlist');
   await assert.rejects(() => runner.run({ workspaceId: 'ws-ok', tool: 'node', args: ['-e', 'process.exit(1)'] }),
     (e) => e.code === 'TEST_COMMAND_NOT_ALLOWED', '任意 node 不在 allowlist');
+  await assert.rejects(() => runner.run({ workspaceId: 'ws-ok', tool: 'powershell', args: ['-Command', 'whoami'] }),
+    (e) => e.code === 'TEST_COMMAND_NOT_ALLOWED', 'powershell 不在 allowlist');
+  await assert.rejects(() => runner.run({ workspaceId: 'ws-ok', tool: 'cmd', args: ['/c', 'whoami'] }),
+    (e) => e.code === 'TEST_COMMAND_NOT_ALLOWED', 'cmd 不在 allowlist');
+  await assert.rejects(() => runner.run({ workspaceId: 'ws-ok', tool: 'python', args: ['-c', 'print(1)'] }),
+    (e) => e.code === 'TEST_COMMAND_NOT_ALLOWED', 'python 不在 allowlist');
   await assert.rejects(() => runner.run({ workspaceId: 'ws-ok', tool: 'npm', args: ['install', 'left-pad'] }),
     (e) => e.code === 'TEST_COMMAND_NOT_ALLOWED', 'npm install 拒绝');
+  await assert.rejects(() => runner.run({ workspaceId: 'ws-ok', tool: 'npm', args: ['exec', 'x'] }),
+    (e) => e.code === 'TEST_COMMAND_NOT_ALLOWED', 'npm exec 拒绝');
+  await assert.rejects(() => runner.run({ workspaceId: 'ws-ok', tool: 'npx', args: ['x'] }),
+    (e) => e.code === 'TEST_COMMAND_NOT_ALLOWED', 'npx 拒绝');
+  await assert.rejects(() => runner.run({ workspaceId: 'ws-ok', tool: 'cargo', args: ['run'] }),
+    (e) => e.code === 'TEST_COMMAND_NOT_ALLOWED', 'cargo run 拒绝');
+  await assert.rejects(() => runner.run({ workspaceId: 'ws-ok', tool: 'cargo', args: ['build'] }),
+    (e) => e.code === 'TEST_COMMAND_NOT_ALLOWED', 'cargo build 拒绝');
+  await assert.rejects(() => runner.run({ workspaceId: 'ws-ok', tool: 'cargo', args: ['publish'] }),
+    (e) => e.code === 'TEST_COMMAND_NOT_ALLOWED', 'cargo publish 拒绝');
   await assert.rejects(() => runner.run({ workspaceId: 'ws-ok', tool: 'npm', args: ['run', 'spec; rm -rf /'] }),
     (e) => e.code === 'INVALID_PARAMS', 'shell 元字符拒绝');
   await assert.rejects(() => runner.run({ workspaceId: 'ws-ok', tool: 'npm', args: ['run', 'two words'] }),
     (e) => e.code === 'INVALID_PARAMS', '空白参数拒绝');
-  await assert.rejects(() => runner.run({ workspaceId: 'ws-ok', tool: 'cargo', args: ['publish'] }),
-    (e) => e.code === 'TEST_COMMAND_NOT_ALLOWED', 'cargo publish 拒绝');
   await assert.rejects(() => runner.run({ workspaceId: 'ws-ghost', tool: 'npm', args: ['test'] }),
     (e) => e.code === 'WORKSPACE_NOT_FOUND', '未登记 workspace 拒绝');
-  ok('allowlist 负面：bash/node/npm install/元字符/空白/cargo publish/未登记 workspace 全部拒绝');
+  ok('allowlist 负面：bash/powershell/cmd/python/node/npm install/exec/npx/cargo run|build|publish/元字符/空白/未登记 workspace 全部拒绝');
 }
 
 // ── 4. 最小 env：宿主自定义变量不透传 ────────────────────────────────────────
