@@ -11,13 +11,9 @@
 //!   显式批准/拒绝；deny 策略的工作区不提供 commit 入口。
 
 use eframe::egui;
+use crate::native_ui::native_palette;
 use serde_json::{json, Value};
 
-const SURFACE_ALT: egui::Color32 = egui::Color32::from_rgb(246, 249, 248);
-const BORDER: egui::Color32 = egui::Color32::from_rgb(220, 228, 226);
-const ACCENT: egui::Color32 = egui::Color32::from_rgb(23, 126, 115);
-const MUTED: egui::Color32 = egui::Color32::from_rgb(103, 119, 117);
-const ERROR: egui::Color32 = egui::Color32::from_rgb(174, 54, 49);
 
 const COMMIT_POLICIES: [&str; 3] = ["allow", "approval", "deny"];
 
@@ -330,7 +326,7 @@ impl WorkspaceUi {
 
         ui.label(
             egui::RichText::new("工作区是 Agent 与工具访问文件系统的唯一安全边界：root 之外一律拒绝。")
-                .color(MUTED),
+                .color(native_palette().muted),
         );
         ui.add_space(4.0);
 
@@ -340,7 +336,7 @@ impl WorkspaceUi {
         }
 
         if let Some(error) = &self.error {
-            ui.colored_label(ERROR, error.as_str());
+            ui.colored_label(native_palette().error, error.as_str());
         }
         if let Some(notice) = &self.notice {
             ui.add_space(2.0);
@@ -350,8 +346,8 @@ impl WorkspaceUi {
 
         // ── 新建 / 打开（选择已有目录） ─────────────────────────────────
         egui::Frame::new()
-            .fill(SURFACE_ALT)
-            .stroke(egui::Stroke::new(1.0, BORDER))
+            .fill(native_palette().surface_alt)
+            .stroke(egui::Stroke::new(1.0, native_palette().border))
             .corner_radius(egui::CornerRadius::same(8))
             .inner_margin(egui::Margin::symmetric(12, 10))
             .show(ui, |ui| {
@@ -421,14 +417,14 @@ impl WorkspaceUi {
                     }
                     ui.monospace(row.root.as_str());
                     if row.active {
-                        ui.colored_label(ACCENT, "当前");
+                        ui.colored_label(native_palette().accent, "当前");
                     }
                     if row.is_repo {
                         ui.label(format!("⎇ {}", row.branch));
                         if row.dirty {
-                            ui.colored_label(egui::Color32::from_rgb(196, 143, 0), "有未提交改动");
+                            ui.colored_label(native_palette().warning, "有未提交改动");
                         } else {
-                            ui.colored_label(ACCENT, "clean");
+                            ui.colored_label(native_palette().accent, "clean");
                         }
                     } else {
                         ui.weak("非 git 仓库");
@@ -457,8 +453,8 @@ impl WorkspaceUi {
 
         ui.add_space(10.0);
         egui::Frame::new()
-            .fill(SURFACE_ALT)
-            .stroke(egui::Stroke::new(1.0, BORDER))
+            .fill(native_palette().surface_alt)
+            .stroke(egui::Stroke::new(1.0, native_palette().border))
             .corner_radius(egui::CornerRadius::same(8))
             .inner_margin(egui::Margin::symmetric(12, 10))
             .show(ui, |ui| {
@@ -549,7 +545,7 @@ impl WorkspaceUi {
             ui.monospace(
                 egui::RichText::new(self.test_output.as_str())
                     .size(11.0)
-                    .color(MUTED),
+                    .color(native_palette().muted),
             );
         }
 

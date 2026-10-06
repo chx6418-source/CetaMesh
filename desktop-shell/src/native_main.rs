@@ -450,6 +450,8 @@ fn run_native_ui(paths: DesktopPaths) -> Result<(), String> {
     let ui_supervisor = Arc::clone(&supervisor);
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("CetaMesh")
+        .with_icon(eframe::icon_data::from_png_bytes(include_bytes!("../icons/128x128.png"))
+            .expect("bundled CetaMesh window icon"))
         .with_min_inner_size([ui_prefs::MIN_WINDOW_WIDTH, ui_prefs::MIN_WINDOW_HEIGHT]);
     match prefs.lock().expect("ui prefs lock").geometry {
         Some(geometry) => {

@@ -8,15 +8,9 @@
 //! 真正下发 IPC 的是 native_ui。mesh 与 channel 分属两个 Area，因此同一帧可以各发一条。
 
 use eframe::egui;
+use crate::native_ui::native_palette;
 use serde_json::{Map, Value, json};
 
-const SURFACE_ALT: egui::Color32 = egui::Color32::from_rgb(246, 249, 248);
-const BORDER: egui::Color32 = egui::Color32::from_rgb(220, 228, 226);
-const ACCENT: egui::Color32 = egui::Color32::from_rgb(23, 126, 115);
-const MUTED: egui::Color32 = egui::Color32::from_rgb(103, 119, 117);
-const ERROR: egui::Color32 = egui::Color32::from_rgb(174, 54, 49);
-const WARNING: egui::Color32 = egui::Color32::from_rgb(151, 102, 21);
-const SUCCESS: egui::Color32 = egui::Color32::from_rgb(35, 125, 83);
 
 /// 规范能力清单来自 src/mesh/types.js 的 NODE_CAPABILITIES；这里只做 UI 下拉的镜像。
 const KNOWN_CAPABILITIES: [&str; 7] = [
@@ -211,9 +205,9 @@ fn format_time(ms: u64) -> String {
 
 fn trust_color(trust: &str) -> egui::Color32 {
     match trust {
-        "trusted" => SUCCESS,
-        "blocked" => ERROR,
-        _ => WARNING,
+        "trusted" => native_palette().success,
+        "blocked" => native_palette().error,
+        _ => native_palette().warning,
     }
 }
 
@@ -313,17 +307,17 @@ impl MeshUi {
         ui.heading("Devices / Mesh");
         ui.label(
             egui::RichText::new("Desktop 是独立的 CetaMesh Node：信任一个设备不等于授权它调用能力。")
-                .color(MUTED),
+                .color(native_palette().muted),
         );
         if let Some(error) = &self.error {
-            ui.colored_label(ERROR, error.as_str());
+            ui.colored_label(native_palette().error, error.as_str());
         }
 
         // ── 本节点身份 ────────────────────────────────────────────────────
         if let Some(status) = self.status.clone() {
             egui::Frame::new()
-                .fill(SURFACE_ALT)
-                .stroke(egui::Stroke::new(1.0, BORDER))
+                .fill(native_palette().surface_alt)
+                .stroke(egui::Stroke::new(1.0, native_palette().border))
                 .corner_radius(egui::CornerRadius::same(8))
                 .inner_margin(egui::Margin::symmetric(12, 10))
                 .show(ui, |ui| {
@@ -331,7 +325,7 @@ impl MeshUi {
                         ui.label(egui::RichText::new(format!("本节点 {}", status.name)).strong());
                         ui.weak(format!("role {}", status.role));
                         ui.weak(format!("protocol v{}", status.protocol_version));
-                        ui.colored_label(if status.core_ready { SUCCESS } else { ERROR },
+                        ui.colored_label(if status.core_ready { native_palette().success } else { native_palette().error },
                             if status.core_ready { "Core ready" } else { "Core not ready" });
                     });
                     ui.weak(format!("Device Identity: {}", status.node_id));
@@ -339,7 +333,7 @@ impl MeshUi {
                         ui.weak(format!("对端 {}（已信任 {}，在线 {}）", status.peer_count, status.trusted_count, status.online_count));
                         ui.weak(format!("待审批 {}", status.pending_approvals));
                         if !status.deferred_transports.is_empty() {
-                            ui.colored_label(WARNING, format!("跨设备传输未实现：{}", status.deferred_transports.join(", ")));
+                            ui.colored_label(native_palette().warning, format!("跨设备传输未实现：{}", status.deferred_transports.join(", ")));
                         }
                     });
                 });
@@ -364,7 +358,7 @@ impl MeshUi {
                 for channel in self.channels.clone() {
                     ui.label(channel.name.as_str());
                     ui.label(channel.kind.as_str());
-                    ui.colored_label(if channel.status == "online" { SUCCESS } else { MUTED }, channel.status.as_str());
+                    ui.colored_label(if channel.status == "online" { native_palette().success } else { native_palette().muted }, channel.status.as_str());
                     ui.label(if channel.core_dependency { "是" } else { "否" });
                     ui.label(if channel.last_error.is_empty() { "—" } else { channel.last_error.as_str() });
                     ui.end_row();
@@ -379,7 +373,7 @@ impl MeshUi {
                 actions.push(MeshAction::mesh("mesh.invite.create", json!({})));
             }
             if let Some((code, expires_at)) = self.invite.clone() {
-                ui.label(egui::RichText::new(code).color(ACCENT).strong());
+                ui.label(egui::RichText::new(code).color(native_palette().accent).strong());
                 ui.weak(format!("有效期至 {}", format_time(expires_at)));
             }
             if ui.button("刷新").clicked() {
@@ -400,8 +394,8 @@ impl MeshUi {
         let mut want_grant_peer: Option<String> = None;
         for peer in self.peers.clone() {
             egui::Frame::new()
-                .fill(SURFACE_ALT)
-                .stroke(egui::Stroke::new(1.0, BORDER))
+                .fill(native_palette().surface_alt)
+                .stroke(egui::Stroke::new(1.0, native_palette().border))
                 .corner_radius(egui::CornerRadius::same(8))
                 .inner_margin(egui::Margin::symmetric(12, 10))
                 .show(ui, |ui| {
@@ -419,7 +413,7 @@ impl MeshUi {
                         ui.weak(format!("对端声明：{}", if peer.advertised.is_empty() { "无".to_owned() } else { peer.advertised.join("、") }));
                     });
                     if !peer.last_error.is_empty() {
-                        ui.colored_label(WARNING, format!("Last error：{}", peer.last_error));
+                        ui.colored_label(native_palette().warning, format!("Last error：{}", peer.last_error));
                     }
                     ui.horizontal_wrapped(|ui| {
                         if peer.trust != "trusted" && ui.button("信任").clicked() {

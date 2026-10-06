@@ -9,13 +9,9 @@
 //! - 编辑 / 删除携带 rev，冲突时由 Core 返回错误而不是静默覆盖。
 
 use eframe::egui;
+use crate::native_ui::native_palette;
 use serde_json::{Map, Value, json};
 
-const SURFACE_ALT: egui::Color32 = egui::Color32::from_rgb(246, 249, 248);
-const BORDER: egui::Color32 = egui::Color32::from_rgb(220, 228, 226);
-const ACCENT: egui::Color32 = egui::Color32::from_rgb(23, 126, 115);
-const MUTED: egui::Color32 = egui::Color32::from_rgb(103, 119, 117);
-const ERROR: egui::Color32 = egui::Color32::from_rgb(174, 54, 49);
 
 const MEMORY_TYPES: [&str; 8] = ["working", "chat", "user", "task", "workspace", "social", "knowledge", "skill"];
 
@@ -243,7 +239,7 @@ impl MemoryUi {
 
         ui.label(
             egui::RichText::new("统一记忆：检索先经授权，长期记忆只在用户确认后写入。")
-                .color(MUTED),
+                .color(native_palette().muted),
         );
         ui.add_space(4.0);
 
@@ -253,13 +249,13 @@ impl MemoryUi {
         }
 
         if let Some(error) = &self.error {
-            ui.colored_label(ERROR, error.as_str());
+            ui.colored_label(native_palette().error, error.as_str());
         }
 
         // ── 过滤 / 查询 ──────────────────────────────────────────────────
         egui::Frame::new()
-            .fill(SURFACE_ALT)
-            .stroke(egui::Stroke::new(1.0, BORDER))
+            .fill(native_palette().surface_alt)
+            .stroke(egui::Stroke::new(1.0, native_palette().border))
             .corner_radius(egui::CornerRadius::same(8))
             .inner_margin(egui::Margin::symmetric(12, 10))
             .show(ui, |ui| {
@@ -328,7 +324,7 @@ impl MemoryUi {
             );
             ui.label(
                 egui::RichText::new("模型只能提出候选；只有你确认后才会写入长期记忆。")
-                    .color(MUTED),
+                    .color(native_palette().muted),
             );
             for candidate in &pending {
                 ui.group(|ui| {
@@ -453,14 +449,14 @@ impl MemoryUi {
         let mut want_edit: Option<(String, u64, String)> = None;
         for row in &rows {
             egui::Frame::new()
-                .fill(SURFACE_ALT)
-                .stroke(egui::Stroke::new(1.0, BORDER))
+                .fill(native_palette().surface_alt)
+                .stroke(egui::Stroke::new(1.0, native_palette().border))
                 .corner_radius(egui::CornerRadius::same(8))
                 .inner_margin(egui::Margin::symmetric(12, 10))
                 .show(ui, |ui| {
                     ui.horizontal_wrapped(|ui| {
                         ui.label(
-                            egui::RichText::new(if row.pinned { "★" } else { "☆" }).color(ACCENT),
+                            egui::RichText::new(if row.pinned { "★" } else { "☆" }).color(native_palette().accent),
                         );
                         ui.label(egui::RichText::new(format!("[{}]", row.type_name)).strong());
                         ui.weak(row.scope.as_str());

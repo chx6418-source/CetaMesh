@@ -18,17 +18,11 @@
 use std::collections::HashMap;
 
 use eframe::egui;
+use crate::native_ui::native_palette;
 use serde_json::{json, Map, Value};
 
 use crate::task_ui::continuity_action_hint;
 
-const SURFACE_ALT: egui::Color32 = egui::Color32::from_rgb(246, 249, 248);
-const BORDER: egui::Color32 = egui::Color32::from_rgb(220, 228, 226);
-const ACCENT: egui::Color32 = egui::Color32::from_rgb(23, 126, 115);
-const MUTED: egui::Color32 = egui::Color32::from_rgb(103, 119, 117);
-const ERROR: egui::Color32 = egui::Color32::from_rgb(174, 54, 49);
-const WARNING: egui::Color32 = egui::Color32::from_rgb(151, 102, 21);
-const SUCCESS: egui::Color32 = egui::Color32::from_rgb(35, 125, 83);
 
 /// 与 src/workshop/service.js 的 WORKSHOP_GRANT_CAPABILITIES 保持一致。
 pub const WORKSHOP_CAPABILITIES: [&str; 11] = [
@@ -101,15 +95,15 @@ impl ProposalRow {
     /// 派生风险（页面展示用；由能力集推导，非运行时字段）。
     pub fn derived_risk(&self) -> (&'static str, egui::Color32) {
         if self.plan_capabilities.is_empty() {
-            return ("未授予", MUTED);
+            return ("未授予", native_palette().muted);
         }
         if self.plan_capabilities.iter().any(|cap| cap == "git.commit" || cap == "test.run" || cap == "workspace.create") {
-            return ("高（含 commit / test.run / workspace.create）", ERROR);
+            return ("高（含 commit / test.run / workspace.create）", native_palette().error);
         }
         if self.plan_capabilities.iter().any(|cap| cap == "filesystem.write" || cap == "memory.write") {
-            return ("中（含写权限）", WARNING);
+            return ("中（含写权限）", native_palette().warning);
         }
-        ("低（只读）", SUCCESS)
+        ("低（只读）", native_palette().success)
     }
 
     pub fn is_pending(&self) -> bool {
@@ -370,7 +364,7 @@ impl WorkshopUi {
         let mut actions: Vec<WorkshopAction> = Vec::new();
         ui.label(
             egui::RichText::new("外部提交经 Owner 审阅后才会获得 Workspace / Task / Agent；提交本身不授予任何文件或执行权限。")
-                .color(MUTED),
+                .color(native_palette().muted),
         );
         ui.add_space(4.0);
 
@@ -379,7 +373,7 @@ impl WorkshopUi {
             actions.push(WorkshopAction::new("workshop.proposal.list", json!({ "limit": 200 })));
         }
         if let Some(error) = &self.error {
-            ui.colored_label(ERROR, error.as_str());
+            ui.colored_label(native_palette().error, error.as_str());
         }
         if let Some(notice) = &self.notice {
             ui.weak(notice.as_str());
@@ -422,8 +416,8 @@ impl WorkshopUi {
         let mut want_select: Option<String> = None;
         for row in &visible {
             egui::Frame::new()
-                .fill(SURFACE_ALT)
-                .stroke(egui::Stroke::new(1.0, BORDER))
+                .fill(native_palette().surface_alt)
+                .stroke(egui::Stroke::new(1.0, native_palette().border))
                 .corner_radius(egui::CornerRadius::same(8))
                 .inner_margin(egui::Margin::symmetric(12, 10))
                 .show(ui, |ui| {
@@ -554,7 +548,7 @@ impl WorkshopUi {
                     ui.weak(format!("审阅理由：{}", proposal.review_reason));
                 }
                 if proposal.status == "provision_failed" {
-                    ui.colored_label(ERROR, format!("Provision 失败（{}）：{}", proposal.provision_step, proposal.provision_error));
+                    ui.colored_label(native_palette().error, format!("Provision 失败（{}）：{}", proposal.provision_step, proposal.provision_error));
                     if ui.button("重试 Provision").clicked() {
                         actions.push(WorkshopAction::new("workshop.proposal.retry", json!({ "id": proposal.id })));
                     }
@@ -629,7 +623,7 @@ impl WorkshopUi {
                 ui.label(egui::RichText::new(format!("Artifacts（{}，仅 Owner 可见全部内容）", proposal.artifacts.len())).strong());
                 for artifact in &proposal.artifacts {
                     ui.horizontal_wrapped(|ui| {
-                        ui.label(egui::RichText::new(format!("[{}]", artifact.media_type)).color(ACCENT).strong());
+                        ui.label(egui::RichText::new(format!("[{}]", artifact.media_type)).color(native_palette().accent).strong());
                         ui.label(artifact.label.as_str());
                         ui.weak(format!("交付于 {}", artifact.delivered_at));
                     });
@@ -681,13 +675,13 @@ impl WorkshopUi {
 
 pub fn status_color(status: &str) -> egui::Color32 {
     match status {
-        "submitted" => WARNING,
-        "approved" | "active" => ACCENT,
-        "provisioning" => MUTED,
-        "provision_failed" => ERROR,
-        "rejected" => ERROR,
-        "delivered" => SUCCESS,
-        _ => MUTED,
+        "submitted" => native_palette().warning,
+        "approved" | "active" => native_palette().accent,
+        "provisioning" => native_palette().muted,
+        "provision_failed" => native_palette().error,
+        "rejected" => native_palette().error,
+        "delivered" => native_palette().success,
+        _ => native_palette().muted,
     }
 }
 
@@ -829,7 +823,7 @@ mod tests {
     #[test]
     fn status_filter_is_applied_in_show_and_status_colors_are_stable() {
         assert_ne!(status_color("submitted"), status_color("rejected"));
-        assert_eq!(status_color("delivered"), SUCCESS);
+        assert_eq!(status_color("delivered"), native_palette().success);
         let mut ui = WorkshopUi::default();
         ui.apply(&json!({ "proposals": [sample_proposal()], "total": 1 }));
         ui.status_filter = "approved".to_owned();

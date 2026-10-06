@@ -183,8 +183,16 @@ whalebridge-desktop.exe --smoke-test --supervise-seconds 8   # keep supervising 
   worker so both agree on where data lives. Pass `--data-dir <path>` to point the shell elsewhere.
 - Logs: `<data>\logs\worker.log` (worker stdout/stderr, appended across restarts) and
   `<data>\logs\desktop-shell.log` (shell status transitions).
-- The window, tray and EXE use `icons/icon.ico` (C4 light soda, nine layers from 16 to 256 px).
-  `app.default_window_icon()` supplies the same embedded icon to the tray.
+- The Logo-05 whale master is `icons/source-logo-05.png`; `source-c4.png` remains as the
+  original C4 source. Run `npm run build:icons` to regenerate PNGs and the nine-layer
+  `icons/icon.ico` (16–256 px). The EXE, tray and installer share this icon; native windows
+  explicitly use the matching 128 px PNG and the tray fallback uses the 32 px PNG.
+- Appearance offers System plus Soda, Deep, Warm, Ink, Forest, Rose, Sand, Ice, Dusk and
+  Violet. Preferences remain in `<data>/state/desktop-ui.json`: old `light`/`dark` values
+  migrate to `soda`/`deep`; unrecognized values fall back to System. System tracks the OS
+  using Soda/Deep. Fixed themes apply immediately, including switches within one brightness.
+- The sidebar C monogram stays blue/cyan across themes. Pending IPC cards add an accent
+  ripple with a 1.2-second cycle; only visible pending indicators request animation frames.
 
 ## Stage 7 installer, migrator and uninstaller
 

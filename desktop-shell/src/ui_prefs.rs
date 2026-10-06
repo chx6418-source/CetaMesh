@@ -23,35 +23,95 @@ const MAX_ABSOLUTE_POSITION: f32 = 40_000.0;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThemePreference {
     System,
-    Light,
-    Dark,
+    Soda,
+    Deep,
+    Warm,
+    Ink,
+    Forest,
+    Rose,
+    Sand,
+    Ice,
+    Dusk,
+    Violet,
 }
 
 impl ThemePreference {
+    pub const THEMES: [Self; 10] = [
+        Self::Soda,
+        Self::Deep,
+        Self::Warm,
+        Self::Ink,
+        Self::Forest,
+        Self::Rose,
+        Self::Sand,
+        Self::Ice,
+        Self::Dusk,
+        Self::Violet,
+    ];
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::System => "system",
-            Self::Light => "light",
-            Self::Dark => "dark",
+            Self::Soda => "soda",
+            Self::Deep => "deep",
+            Self::Warm => "warm",
+            Self::Ink => "ink",
+            Self::Forest => "forest",
+            Self::Rose => "rose",
+            Self::Sand => "sand",
+            Self::Ice => "ice",
+            Self::Dusk => "dusk",
+            Self::Violet => "violet",
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::System => "跟随系统",
+            Self::Soda => "苏打",
+            Self::Deep => "深海",
+            Self::Warm => "护眼",
+            Self::Ink => "纸墨",
+            Self::Forest => "松林",
+            Self::Rose => "樱白",
+            Self::Sand => "暖砂",
+            Self::Ice => "冰川",
+            Self::Dusk => "暮灰",
+            Self::Violet => "星紫",
         }
     }
 
     pub fn parse(text: &str) -> Option<Self> {
         match text.trim().to_ascii_lowercase().as_str() {
             "system" | "auto" => Some(Self::System),
-            "light" => Some(Self::Light),
-            "dark" => Some(Self::Dark),
+            "soda" | "light" => Some(Self::Soda),
+            "deep" | "dark" => Some(Self::Deep),
+            "warm" => Some(Self::Warm),
+            "ink" => Some(Self::Ink),
+            "forest" => Some(Self::Forest),
+            "rose" => Some(Self::Rose),
+            "sand" => Some(Self::Sand),
+            "ice" => Some(Self::Ice),
+            "dusk" => Some(Self::Dusk),
+            "violet" => Some(Self::Violet),
             _ => None,
         }
     }
 
-    /// Resolve the preference against the current OS theme.
-    pub fn resolves_to_dark(self, system_dark: bool) -> bool {
+    /// Return a concrete palette ID, including when following an OS theme change.
+    pub fn resolve(self, system_dark: bool) -> Self {
         match self {
-            Self::System => system_dark,
-            Self::Light => false,
-            Self::Dark => true,
+            Self::System if system_dark => Self::Deep,
+            Self::System => Self::Soda,
+            theme => theme,
         }
+    }
+
+    pub fn resolves_to_dark(self, system_dark: bool) -> bool {
+        matches!(
+            self.resolve(system_dark),
+            Self::Deep | Self::Dusk | Self::Violet
+        )
     }
 }
 
@@ -283,6 +343,38 @@ mod tests {
     }
 
     #[test]
+    fn all_named_themes_survive_save_and_reload() {
+        let dir = temp_dir();
+        for id in [
+            "soda", "deep", "warm", "ink", "forest", "rose", "sand", "ice", "dusk", "violet",
+        ] {
+            let prefs = prefs_from_value(&json!({ "theme": id }));
+            assert_eq!(prefs.to_value()["theme"], id, "unrecognized theme {id}");
+            prefs.save(&dir).expect("save named theme");
+            let (loaded, warning) = UiPrefs::load(&dir);
+            assert!(warning.is_none());
+            assert_eq!(loaded.to_value()["theme"], id, "theme lost on restart");
+        }
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn legacy_theme_ids_migrate_and_unknown_values_follow_system() {
+        for (input, expected) in [
+            ("system", "system"),
+            ("AUTO", "system"),
+            ("light", "soda"),
+            ("dark", "deep"),
+            ("future-theme", "system"),
+        ] {
+            assert_eq!(
+                prefs_from_value(&json!({ "theme": input })).to_value()["theme"],
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn malformed_values_fall_back_to_safe_defaults() {
         let prefs = prefs_from_value(&json!({
             "theme": "neon",
@@ -315,7 +407,7 @@ mod tests {
     fn save_load_round_trip_is_atomic_and_corruption_is_fail_soft() {
         let dir = temp_dir();
         let prefs = UiPrefs {
-            theme: ThemePreference::Dark,
+            theme: ThemePreference::Deep,
             zoom: 1.25,
             close_behavior: CloseBehavior::Quit,
             geometry: sanitize_geometry(120.0, 80.0, 1280.0, 800.0, false),
@@ -345,8 +437,22 @@ mod tests {
     fn theme_resolution_follows_the_system_preference() {
         assert!(ThemePreference::System.resolves_to_dark(true));
         assert!(!ThemePreference::System.resolves_to_dark(false));
-        assert!(ThemePreference::Dark.resolves_to_dark(false));
-        assert!(!ThemePreference::Light.resolves_to_dark(true));
+        assert_eq!(ThemePreference::System.resolve(true), ThemePreference::Deep);
+        assert_eq!(
+            ThemePreference::System.resolve(false),
+            ThemePreference::Soda
+        );
+        for theme in ThemePreference::THEMES {
+            assert_eq!(theme.resolve(false), theme);
+            assert_eq!(theme.resolve(true), theme);
+            assert_eq!(
+                theme.resolves_to_dark(false),
+                matches!(
+                    theme,
+                    ThemePreference::Deep | ThemePreference::Dusk | ThemePreference::Violet
+                )
+            );
+        }
         assert_eq!(
             ThemePreference::parse("AUTO"),
             Some(ThemePreference::System)

@@ -8,7 +8,7 @@ Set-StrictMode -Version Latest
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 if ([string]::IsNullOrWhiteSpace($Source)) {
-  $Source = Join-Path $repoRoot 'desktop-shell\icons\source-c4.png'
+  $Source = Join-Path $repoRoot 'desktop-shell\icons\source-logo-05.png'
 }
 if ([string]::IsNullOrWhiteSpace($OutputDir)) {
   $OutputDir = Join-Path $repoRoot 'desktop-shell\icons'
@@ -23,8 +23,9 @@ Add-Type -AssemblyName System.Drawing
 New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
 
 function New-RoundedTilePath([int]$size) {
-  $padding = [single]($size * 0.041)
-  $diameter = [single]($size * 0.245)
+  # Keep the generated master inside a clean, consistent rounded contour at every size.
+  $padding = [single]($size * 0.07)
+  $diameter = [single]($size * 0.38)
   $right = [single]($size - $padding)
   $bottom = [single]($size - $padding)
   $path = New-Object System.Drawing.Drawing2D.GraphicsPath
@@ -116,6 +117,12 @@ try {
 } finally {
   $sourceImage.Dispose()
   if (Test-Path -LiteralPath $tempDir) {
+    $resolvedTemp = [IO.Path]::GetFullPath($tempDir)
+    $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')
+    if (([IO.Path]::GetDirectoryName($resolvedTemp) -ne $tempRoot) -or
+        -not ([IO.Path]::GetFileName($resolvedTemp).StartsWith('whalebridge-icons-'))) {
+      throw "Refusing to clean unexpected temporary path: $resolvedTemp"
+    }
     Remove-Item -LiteralPath $tempDir -Recurse -Force
   }
 }

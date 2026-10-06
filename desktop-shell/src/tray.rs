@@ -314,21 +314,10 @@ fn spawn_show_signal_listener(
 ) {
 }
 
-/// Deterministic fallback so the tray still appears even if the resource icon cannot be loaded.
+/// Use the same whale asset if Windows cannot load the executable's icon resource.
 fn fallback_icon() -> Option<Icon> {
-    const SIZE: u32 = 32;
-    let mut rgba = Vec::with_capacity((SIZE * SIZE * 4) as usize);
-    for y in 0..SIZE {
-        for x in 0..SIZE {
-            let border = x < 2 || y < 2 || x >= SIZE - 2 || y >= SIZE - 2;
-            if border {
-                rgba.extend_from_slice(&[255, 255, 255, 255]);
-            } else {
-                rgba.extend_from_slice(&[23, 126, 115, 255]);
-            }
-        }
-    }
-    Icon::from_rgba(rgba, SIZE, SIZE).ok()
+    let image = eframe::icon_data::from_png_bytes(include_bytes!("../icons/32x32.png")).ok()?;
+    Icon::from_rgba(image.rgba, image.width, image.height).ok()
 }
 
 #[cfg(windows)]

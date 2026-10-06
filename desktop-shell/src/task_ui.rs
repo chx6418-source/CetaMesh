@@ -10,16 +10,10 @@
 //! 只需一次往返即可刷新列表与详情（避免同一 Area 的并发 issue 互斥）。
 
 use eframe::egui;
+use crate::native_ui::native_palette;
 use std::collections::HashMap;
 use serde_json::{Map, Value, json};
 
-const SURFACE_ALT: egui::Color32 = egui::Color32::from_rgb(246, 249, 248);
-const BORDER: egui::Color32 = egui::Color32::from_rgb(220, 228, 226);
-const ACCENT: egui::Color32 = egui::Color32::from_rgb(23, 126, 115);
-const MUTED: egui::Color32 = egui::Color32::from_rgb(103, 119, 117);
-const ERROR: egui::Color32 = egui::Color32::from_rgb(174, 54, 49);
-const WARNING: egui::Color32 = egui::Color32::from_rgb(151, 102, 21);
-const SUCCESS: egui::Color32 = egui::Color32::from_rgb(35, 125, 83);
 
 const TASK_STATUSES: [&str; 8] = [
     "queued", "running", "waiting", "blocked", "paused", "completed", "failed", "cancelled",
@@ -198,11 +192,11 @@ pub fn parse_attention(value: &Value) -> Vec<String> {
 
 fn status_color(status: &str) -> egui::Color32 {
     match status {
-        "running" => ACCENT,
-        "completed" => SUCCESS,
-        "failed" | "cancelled" => ERROR,
-        "blocked" | "waiting" => WARNING,
-        _ => MUTED,
+        "running" => native_palette().accent,
+        "completed" => native_palette().success,
+        "failed" | "cancelled" => native_palette().error,
+        "blocked" | "waiting" => native_palette().warning,
+        _ => native_palette().muted,
     }
 }
 
@@ -399,7 +393,7 @@ impl TaskUi {
 
         ui.label(
             egui::RichText::new("Task 由 CetaMesh 持有，独立于任何 Agent Session；更换 Provider 不会新建 Task。")
-                .color(MUTED),
+                .color(native_palette().muted),
         );
         ui.add_space(4.0);
 
@@ -408,7 +402,7 @@ impl TaskUi {
             actions.push(self.overview_action());
         }
         if let Some(error) = &self.error {
-            ui.colored_label(ERROR, error.as_str());
+            ui.colored_label(native_palette().error, error.as_str());
         }
         if let Some(notice) = &self.notice {
             ui.weak(notice.as_str());
@@ -421,13 +415,13 @@ impl TaskUi {
             }
         });
         if !self.attention.is_empty() {
-            ui.colored_label(WARNING, format!("Needs Attention：{} 个任务需要人介入", self.attention.len()));
+            ui.colored_label(native_palette().warning, format!("Needs Attention：{} 个任务需要人介入", self.attention.len()));
         }
 
         // ── 过滤 ──────────────────────────────────────────────────────────
         egui::Frame::new()
-            .fill(SURFACE_ALT)
-            .stroke(egui::Stroke::new(1.0, BORDER))
+            .fill(native_palette().surface_alt)
+            .stroke(egui::Stroke::new(1.0, native_palette().border))
             .corner_radius(egui::CornerRadius::same(8))
             .inner_margin(egui::Margin::symmetric(12, 10))
             .show(ui, |ui| {
@@ -505,8 +499,8 @@ impl TaskUi {
         for task in &visible {
             let attention = self.attention.contains(&task.id);
             egui::Frame::new()
-                .fill(SURFACE_ALT)
-                .stroke(egui::Stroke::new(1.0, if attention { WARNING } else { BORDER }))
+                .fill(native_palette().surface_alt)
+                .stroke(egui::Stroke::new(1.0, if attention { native_palette().warning } else { native_palette().border }))
                 .corner_radius(egui::CornerRadius::same(8))
                 .inner_margin(egui::Margin::symmetric(12, 10))
                 .show(ui, |ui| {
@@ -514,7 +508,7 @@ impl TaskUi {
                         ui.label(egui::RichText::new(format!("[{}]", task.status)).color(status_color(&task.status)).strong());
                         ui.label(egui::RichText::new(task.goal.as_str()).strong());
                         if attention {
-                            ui.colored_label(WARNING, "Needs Attention");
+                            ui.colored_label(native_palette().warning, "Needs Attention");
                         }
                     });
                     ui.horizontal_wrapped(|ui| {
@@ -573,7 +567,7 @@ impl TaskUi {
                 ui.label(egui::RichText::new(format!("[{}]", task.status)).color(status_color(&task.status)).strong());
                 ui.weak(format!("rev {}", task.rev));
                 if attention {
-                    ui.colored_label(WARNING, "Needs Attention");
+                    ui.colored_label(native_palette().warning, "Needs Attention");
                 }
                 if ui.button("关闭详情").clicked() {
                     self.selected = None;

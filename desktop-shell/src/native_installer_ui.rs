@@ -50,6 +50,8 @@ pub fn run_installer_ui(
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
+            .with_icon(eframe::icon_data::from_png_bytes(include_bytes!("../icons/128x128.png"))
+                .expect("bundled CetaMesh installer icon"))
             .with_inner_size([760.0, 580.0])
             .with_min_inner_size([680.0, 500.0])
             .with_resizable(false),
