@@ -28,7 +28,7 @@
 
 import path from 'node:path';
 import fs from 'node:fs';
-import { StorageError, readJsonFile, writeJsonAtomic } from '../storage/json-file.js';
+import { StorageError, discardFile, readJsonFile, writeJsonAtomic } from '../storage/json-file.js';
 import {
   DEFAULT_CONTEXT_POLICY,
   IMPLEMENTED_ROLLOVER_STRATEGY,
