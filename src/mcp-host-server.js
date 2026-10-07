@@ -16,6 +16,7 @@ import { z } from 'zod';
 import { APP_PATHS } from './app-paths.js';
 import { isMainModule, reportEntrypointError } from './entrypoint.js';
 import { readRawConfigOrEmpty } from './config/loader.js';
+import { dataCall } from './control/data-ipc.js';
 
 // 统一配置读取（TASK-D1-001）：BOM 容错与 fail-closed 语义集中在 src/config/loader.js。
 // 读不到 / 损坏按“未配置”空对象处理，allowProcessControl 在使用点以 !== true 自行关闭。
@@ -42,15 +43,6 @@ function getHostConfig() {
   };
 }
 
-function getConsolePort() {
-  try {
-    const c = getConfig();
-    return Number(c.consolePort) || 3100;
-  } catch {
-    return 3100;
-  }
-}
-
 // 与控制台分离的「服务令牌」：本 MCP 只读 /api/status，走数据面白名单即可，
 // 不需要（也不应该）持有控制台令牌。
 function readBridgeToken() {
@@ -74,17 +66,16 @@ function readBridgeToken() {
 }
 
 // 进程控制只允许在 owner-agent（仅管理员私聊）模式下使用，防止 chat/reserved 的 agent 被群友诱导启停 SnowLuma。
+// 桥接数据面走 Local IPC（D1-003）：release worker 不监听 loopback HTTP，
+// /api/status 经数据面 pipe 的同一套鉴权白名单到达。
 async function bridgeModeAllowsProcessControl() {
   try {
     const token = readBridgeToken();
-    const res = await fetch(`http://127.0.0.1:${getConsolePort()}/api/status`, {
-      headers: token ? { 'x-console-token': token } : {},
-      signal: AbortSignal.timeout(5000)
-    });
+    const res = await dataCall({ path: '/api/status', token, timeoutMs: 5000 });
     if (!res.ok) return false;
-    const body = await res.json();
-    return normalizeRuntimeMode(body?.mode) === 'owner-agent';
+    return normalizeRuntimeMode(res.json?.mode) === 'owner-agent';
   } catch {
+    // 桥接不可达时保守视为不允许进程控制（fail closed），不打断 MCP 启动。
     return false;
   }
 }

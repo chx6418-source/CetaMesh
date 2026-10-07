@@ -118,6 +118,9 @@ if (options.noWebUi) {
   if (coreRuntimeManifest.noWebUi !== true || coreRuntimeManifest.uiDistribution !== 'native-no-web') {
     fail('Core was not built with --no-web-ui; refusing to produce a mixed web/native release');
   }
+  if (coreRuntimeManifest.legacyHttp !== false) {
+    fail('Core runtime manifest must record legacyHttp: false; refusing to release a worker that can listen on consolePort');
+  }
   try {
     assertNoWebUiBinaryMarkers(fs.readFileSync(SHELL_EXE), 'desktop shell');
     assertNoWebUiBinaryMarkers(fs.readFileSync(path.join(CORE_DIR, 'WhaleBridgeCore.exe')), 'Core executable');
@@ -413,6 +416,8 @@ const manifest = {
   dirtySourceTree: buildInfo.dirty,
   builtAt: new Date().toISOString(),
   noWebUi: options.noWebUi,
+  // 发行运行面红线（D1）：与 runtime-manifest.legacyHttp 一致，release worker 不监听 consolePort。
+  legacyHttp: false,
   uiDistribution: options.noWebUi ? 'native-no-web' : 'web-compatibility',
   node: process.version,
   platform: `${process.platform}-${process.arch}`,

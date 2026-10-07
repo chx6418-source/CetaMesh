@@ -369,6 +369,9 @@ async function main() {
     resourceFiles: copied,
     excludedResources: excluded,
     noWebUi: options.noWebUi,
+    // 发行运行面红线（D1）：native/release 模式不启动 loopback HTTP（consolePort），
+    // legacy WHALEBRIDGE_LEGACY_HTTP 在 SEA 产物中被忽略。字段供 RC 行为测试对照。
+    legacyHttp: false,
     uiDistribution: options.noWebUi ? 'native-no-web' : 'web-compatibility',
     // 打包运行时可读的版本文件（安装目录里没有 package.json）
     productFile: 'resources/product.json',

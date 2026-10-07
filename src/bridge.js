@@ -74,6 +74,8 @@ import { createLocalServiceManager, SNOWLUMA_RELEASE_PAGE, DSH_INSTALL_HINT } fr
 import { selectDshSessionModel } from './dsh-model-selection.js';
 import { CONTROL_METHODS, ControlServiceError, createControlService } from './control/control-service.js';
 import { startIpcProtocol } from './control/ipc-protocol.js';
+import { startDataIpcServer, resolveDataPipeName } from './control/data-ipc.js';
+import { describeRuntimeSurfacePolicy, resolveRuntimeSurfacePolicy } from './runtime-surface.js';
 import { createChatService } from './desktop/chat-service.js';
 import { createDesktopPlatformRuntime } from './desktop/platform-runtime.js';
 import { createCapabilityService, registerChannelMeshCapabilities } from './capability/index.js';
@@ -1608,9 +1610,16 @@ async function main() {
   let connectSnowLuma = async () => ({ ok: false, error: 'SnowLuma 客户端尚未初始化' });
   let resolveConnectSnowLumaReady;
   const connectSnowLumaReady = new Promise((resolve) => { resolveConnectSnowLumaReady = resolve; });
-  function startConsoleServer() {
+  function startProductSurfaces() {
     const port = cfg.consolePort ?? 3100;
-    const nativeUiMode = Boolean(String(process.env.WHALEBRIDGE_UI_PIPE ?? '').trim());
+    // 运行面策略（D1-001）：唯一判定点在 src/runtime-surface.js。
+    // nativeControl = 原生桌面管理面（UI pipe）；localDataIpc = MCP 数据面 pipe（恒开）；
+    // legacyHttp = 旧 Web 控制台 HTTP 面，默认 OFF，仅源码开发显式 opt-in（发行构建无法开启）。
+    const surfacePolicy = resolveRuntimeSurfacePolicy();
+    const nativeUiMode = surfacePolicy.nativeControl;
+    if (surfacePolicy.legacyHttpRequested && !surfacePolicy.legacyHttp) {
+      log('LEGACY DEV SURFACE 请求被忽略：WHALEBRIDGE_LEGACY_HTTP 仅在源码开发模式有效，发行构建不提供旧 Web 控制台 HTTP 面。');
+    }
     // 控制台鉴权：优先用 config.consoleToken，未配置则自动生成并持久化，不再默认无鉴权。
     // 使用 let 以便控制台内手动修改令牌后热更新。
     const configuredToken = String(cfg.consoleToken ?? '').trim();
@@ -2205,7 +2214,60 @@ async function main() {
       about: aboutService,
       update: updateService
     }, agentService, workspaceService, providerSecrets, modelRuntime, routerService, capabilityService, workshopService);
-    const server = http.createServer(async (req, res) => {
+
+    // MCP 数据面 IPC（D1-003）：恒启动，pipe 名按数据目录派生。
+    // 这是 MCP/agent 在 release 模式下唯一的数据通道；控制面方法在此不可达（D1-004）。
+    const dataServer = startDataIpcServer({ handleApiRequest, log });
+    dataServer.on('error', (error) => {
+      log(`MCP 数据面 IPC 启动失败: ${error?.message ?? error}`);
+      // 数据面不可用 = MCP 工具全坏，fail fast 交由守护方重启，绝不静默降级。
+      process.exit(error?.code === 'EADDRINUSE' ? 2 : 1);
+    });
+    dataServer.listen(resolveDataPipeName(), () => {
+      log(`MCP 数据面 IPC 已就绪（${resolveDataPipeName()}）。`);
+    });
+    process.once('exit', () => {
+      try { dataServer.close(); } catch { /* 进程退出路径，尽力关闭 */ }
+    });
+
+    if (surfacePolicy.legacyHttp) {
+      log('LEGACY DEV SURFACE: 已按 WHALEBRIDGE_LEGACY_HTTP=1 启动 loopback HTTP API（仅源码开发；发行版不含该面）。');
+      startLegacyHttpServer();
+    } else if (!nativeUiMode) {
+      log('loopback HTTP API 未启动（legacy HTTP 默认关闭；源码开发可用 WHALEBRIDGE_LEGACY_HTTP=1 显式开启）。');
+    }
+
+    // 旧 Web 控制台 HTTP 面（LEGACY DEV SURFACE，D1-005）：仅 surfacePolicy.legacyHttp 时
+    // 才创建与监听。native/release 模式下 server 根本不存在，127.0.0.1:consolePort 不监听。
+    function startLegacyHttpServer() {
+      const server = http.createServer((req, res) => {
+        handleApiRequest(req, res).catch((error) => {
+          // handleApiRequest 内部已有 try/catch 兜底；到这里是兜底之外的失败，必须留痕（D13）。
+          log(`legacy HTTP handler 异常: ${error?.message ?? error}`);
+          try { res.destroy(); } catch { /* 连接可能已断开 */ }
+        });
+      });
+      server.listen(port, '127.0.0.1', () => {
+        log(`[LEGACY DEV SURFACE] 本地程序间 API 已就绪（loopback:${port}）；产品 UI 通过原生 IPC 提供。`);
+      });
+      // 端口被占用说明已有实例在跑：以 exit 2 退出，守护脚本会识别为"已有实例"而不是无限重启
+      server.on('error', (error) => {
+        if (error?.code === 'EADDRINUSE') {
+          // 端口被占用：大概率已有桥接实例在运行，当前实例退出，避免争抢本地 API。
+          log(`控制台端口 ${port} 已被占用（可能已有桥接实例在运行），本实例静默退出。`);
+          process.exit(2);
+        }
+        log(`控制台服务错误: ${error?.message ?? error}`);
+        process.exit(1);
+      });
+      process.once('exit', () => {
+        try { server.close(); } catch { /* 进程退出路径，尽力关闭 */ }
+      });
+      return server;
+    }
+
+    // 数据面 IPC 与 legacy HTTP 共用的 API 处理体：路由逻辑只此一份，两套传输不会语义漂移。
+    async function handleApiRequest(req, res) {
       const url = new URL(req.url ?? '/', `http://127.0.0.1:${port}`);
       const SECURITY_HEADERS = {
         'X-Frame-Options': 'DENY',
@@ -5548,21 +5610,9 @@ async function main() {
         const status = Number(error?.statusCode) || 500;
         sendJson({ ok: false, error: error?.message ?? String(error) }, status);
       }
-    });
-    server.listen(port, '127.0.0.1', () => {
-      log(`本地程序间 API 已就绪（loopback:${port}）；产品 UI 通过原生 IPC 提供。`);
-    });
-    // 端口被占用说明已有实例在跑：以 exit 2 退出，守护脚本会识别为"已有实例"而不是无限重启
-    server.on('error', (error) => {
-      if (error?.code === 'EADDRINUSE') {
-        // 端口被占用：大概率已有桥接实例在运行，当前实例退出，避免争抢本地 API。
-        log(`控制台端口 ${port} 已被占用（可能已有桥接实例在运行），本实例静默退出。`);
-        process.exit(2);
-      }
-      log(`控制台服务错误: ${error?.message ?? error}`);
-      process.exit(1);
-    });
-    return server;
+    }
+    // native/headless 模式没有 HTTP server；各运行面的启动结果见 startProductSurfaces 内的日志。
+    return null;
   }
 
   // 会话代际：reset/清空工作区时递增，防止在途 ensureSession 把旧会话"复活"
@@ -9926,7 +9976,7 @@ async function main() {
   };
   resolveConnectSnowLumaReady();
 
-  startConsoleServer();
+  startProductSurfaces();
   // 启动探测在后台进行：QQ WebSocket 只有 SnowLuma ready 后才会连接，
   // 但控制台、DSH 探活与日志终端不会被最多 35 秒的服务启动等待卡住。
   localServices.startSnowLuma({ waitMs: 35000 }).then(async (snowStartup) => {
@@ -9936,7 +9986,7 @@ async function main() {
       log(`SnowLuma 未就绪（${snowStartup.status}），WhaleBridge 已降级独立启动；可在控制台终端中重试。`);
     }
   }).catch((error) => log(`SnowLuma 启动流程异常，WhaleBridge 已降级：${error?.message ?? error}`));
-  log('桥接控制台已启动。SnowLuma 就绪后将自动连接 QQ；按 Ctrl+C 退出。');
+  log(`桥接运行面: ${describeRuntimeSurfacePolicy()}。SnowLuma 就绪后将自动连接 QQ；按 Ctrl+C 退出。`);
   // 预热表情库：启动时同步一次 QQ 收藏表情，失败不阻塞（AI 首次调用工具时还会再试）。
   if (cfg.socialV2?.sticker?.enabled !== false) {
     syncStickerLibrary(true).catch((error) => log('启动预热表情库失败:', error?.message ?? error));

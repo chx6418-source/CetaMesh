@@ -21,7 +21,8 @@ export function startIpcProtocol({
   output = process.stdout,
   dispatch,
   maxFrameBytes = IPC_PROTOCOL_MAX_FRAME_BYTES,
-  dispatchTimeoutMs = IPC_PROTOCOL_DISPATCH_TIMEOUT_MS
+  dispatchTimeoutMs = IPC_PROTOCOL_DISPATCH_TIMEOUT_MS,
+  methodFilter = null
 } = {}) {
   if (!input || typeof input.on !== 'function' || typeof input.off !== 'function') {
     throw new TypeError('input must be a readable event stream');
@@ -143,6 +144,23 @@ export function startIpcProtocol({
     const params = request.params ?? {};
     if (request.method === 'core.ping') {
       writeFrame({ version: IPC_PROTOCOL_VERSION, id, ok: true, result: { status: 'pong' } });
+      return;
+    }
+    // methodFilter：数据面等专用 pipe 用它把可调用 method 收敛到显式白名单。
+    // 提供该选项时，产品私有方法族与 control.execute 一律不可用（控制面不外借）。
+    if (methodFilter) {
+      if (!methodFilter(request.method)) {
+        writeError(id, 'METHOD_NOT_FOUND', `Unknown IPC method: ${request.method}`);
+        return;
+      }
+      try {
+        const result = await runDispatch({ method: request.method, params });
+        if (!disconnected) writeFrame({ version: IPC_PROTOCOL_VERSION, id, ok: true, result: result === undefined ? null : result });
+      } catch (error) {
+        if (!disconnected) {
+          writeError(id, typeof error?.code === 'string' ? error.code : 'INTERNAL_ERROR', typeof error?.message === 'string' ? error.message : DEFAULT_ERROR_MESSAGE);
+        }
+      }
       return;
     }
     // 产品私有方法族（chat.* / memory.* / task.* / continuity.* 等）：

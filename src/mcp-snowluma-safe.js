@@ -15,6 +15,7 @@ import { SENSITIVE_RE } from './sensitive.js';
 import { APP_PATHS } from './app-paths.js';
 import { isMainModule, reportEntrypointError } from './entrypoint.js';
 import { readRawConfigOrEmpty } from './config/loader.js';
+import { dataCall } from './control/data-ipc.js';
 
 // 统一配置读取（TASK-D1-001）：BOM 容错与 fail-closed 语义集中在 src/config/loader.js。
 // 读不到 / 损坏按“未配置”空对象处理，安全开关在使用点以 !== true 自行关闭。
@@ -111,14 +112,13 @@ async function onebot(action, params = {}) {
   return body.data;
 }
 
-// 桥接控制台/内部 Agent API 访问：二代仿真模式的状态工具都通过这里读写桥接内存态。
-function agentApiBase() {
-  const port = Number(getConfig().consolePort) || 3100;
-  return `http://127.0.0.1:${port}`;
-}
+// 桥接数据面访问（D1-003）：二代仿真模式的状态工具都通过这里读写桥接内存态。
+// 传输是 named pipe 数据面 IPC（src/control/data-ipc.js），不再是 loopback HTTP——
+// release worker 不监听 127.0.0.1，MCP 经 worker 的 data.call 分派到达同一套
+// 数据面路由与鉴权闸门。
 // 桥接访问令牌：优先用「服务令牌」（state/agent-token，只有数据面权限）。
 // MCP/agent 侧不再持有控制台令牌——否则该凭据一旦泄漏（prompt injection、日志等）就能
-// 触达 /api/terminal/*（本机命令执行）与服务启停等控制面接口。
+// 触达服务启停等控制面接口。
 // 每次请求都重新读取，避免控制台轮换令牌后 MCP 仍用启动时的旧值导致一直 401。
 function readBridgeToken() {
   try {
@@ -143,20 +143,25 @@ function readBridgeToken() {
 
 async function agentApi(path, init = {}) {
   const timeoutMs = init.timeoutMs || 15000;
-  const { timeoutMs: _omit, ...rest } = init;
-  const bridgeToken = readBridgeToken();
-  const headers = {
-    'content-type': 'application/json',
-    ...(bridgeToken ? { 'x-console-token': bridgeToken } : {}),
-    ...(rest.headers ?? {})
-  };
-  const res = await fetch(`${agentApiBase()}${path}`, { ...rest, headers, signal: AbortSignal.timeout(timeoutMs) });
-  let body = null;
-  try { body = await res.json(); } catch { body = null; }
+  // 旧调用点把 query 直接拼在 path 里；这里拆开交给 data IPC 统一编码。
+  const questionAt = String(path).indexOf('?');
+  const rawPath = questionAt >= 0 ? String(path).slice(0, questionAt) : String(path);
+  const query = questionAt >= 0 ? Object.fromEntries(new URLSearchParams(String(path).slice(questionAt + 1))) : undefined;
+  const body = init.body !== undefined && init.body !== null ? JSON.parse(init.body) : undefined;
+  const headers = init.headers ?? {};
+  const res = await dataCall({
+    method: String(init.method ?? (body !== undefined ? 'POST' : 'GET')).toUpperCase(),
+    path: rawPath,
+    query,
+    body,
+    token: readBridgeToken(),
+    sessionToken: typeof headers['x-agent-token'] === 'string' ? headers['x-agent-token'] : undefined,
+    timeoutMs
+  });
   if (!res.ok) {
-    throw new Error(body?.error || `桥接 API HTTP ${res.status}`);
+    throw new Error(res.json?.error || `桥接 API HTTP ${res.status}`);
   }
-  return body;
+  return res.json;
 }
 
 async function authorizeRead(key, token) {
