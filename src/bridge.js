@@ -21,6 +21,8 @@ import { createStatusPanel } from './status-panel.js';
 import { mdToPlain, splitForQQ } from './md-to-plain.js';
 import { SENSITIVE_RE } from './sensitive.js';
 import { looksLikeUnfinished } from './v2-wait.js';
+import { rotateLogFileBySize } from './logging/rotate.js';
+import { applySocialCardRetention, applySocialConversationRetention } from './social-retention.js';
 import {
   PRIVILEGE_AGENT,
   PRIVILEGE_CONSOLE,
@@ -369,10 +371,8 @@ function loadState() {
   else state = { sessions: {} };
 }
 function saveState() {
-  fs.mkdirSync(STATE_DIR, { recursive: true });
-  const tmp = STATE_FILE + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(state, null, 2));
-  fs.renameSync(tmp, STATE_FILE);
+  // 会话状态是持久化数据：统一走原子写（crypto 随机临时名），不再使用固定 .tmp 名。
+  atomicWriteJson(STATE_FILE, state);
 }
 
 // ── 单实例锁 ─────────────────────────────────────────────────────────────────
@@ -455,11 +455,12 @@ function log(...args) {
   statusPanel.logAbove(line);
   try {
     fs.mkdirSync(STATE_DIR, { recursive: true });
+    // D12：日志按大小轮转（bridge.log → bridge.log.1），不再每条日志整读文件截行。
+    rotateLogFileBySize(BRIDGE_LOG, { maxBytes: CONTROL_LOG_MAX_BYTES, pendingBytes: line.length + 1 });
     fs.appendFileSync(BRIDGE_LOG, line + '\n');
-    const raw = fs.readFileSync(BRIDGE_LOG, 'utf8');
-    const lines = raw.split('\n');
-    if (lines.length > 2000) fs.writeFileSync(BRIDGE_LOG, lines.slice(-2000).join('\n'));
-  } catch {}
+  } catch {
+    // 日志写盘是尽力而为的旁路（守护窗口场景 stdout 已有同一行），失败不阻塞业务。
+  }
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const convKey = (kind, id) => `${kind}:${id}`;
@@ -6433,6 +6434,8 @@ async function main() {
         }
         if (Object.keys(obj).length) conversations[key] = obj;
       }
+      // D12 Retention：卡片是可回源的缓存，过期/超量的会话不再持久化。
+      applySocialCardRetention(conversations, { now: Date.now() });
       atomicWriteJson(SOCIAL_V2_CARD_FILE, { conversations });
     } catch (error) {
       log('保存卡片缓存失败:', error?.message ?? error);
@@ -6441,7 +6444,9 @@ async function main() {
 
   // 记录一条消息里的卡片：同时按 messageId 与 seq 建索引，工具用任意一个 ref 都能查到。
   function rememberMessageCards(key, refs, cards) {
-    const list = (Array.isArray(cards) ? cards : []).filter(Boolean).slice(0, 4);
+    const at = Date.now();
+    // 卡片条目打上缓存时间戳（D12 retention 以此判断会话卡片缓存的新鲜度）。
+    const list = (Array.isArray(cards) ? cards : []).filter(Boolean).slice(0, 4).map((card) => ({ ...card, time: at }));
     if (!list.length) return;
     const safeRefs = [...new Set((Array.isArray(refs) ? refs : []).map((r) => sanitizeCardRef(r)).filter(Boolean))];
     if (!safeRefs.length) return;
@@ -6451,6 +6456,9 @@ async function main() {
       messageCardStore.set(key, byRef);
     }
     for (const ref of safeRefs) byRef.set(ref, list);
+    // 刷新该会话在缓存里的“最近使用”位置（Map 保持插入序），使总量淘汰按近期使用而非首次出现。
+    messageCardStore.delete(key);
+    messageCardStore.set(key, byRef);
     // 有界淘汰：先按条数，再按原始内容总字节（Map 保持插入序，最旧在头部）。
     while (byRef.size > MAX_CARD_REFS_PER_KEY) {
       const oldest = byRef.keys().next().value;
@@ -7228,6 +7236,8 @@ async function main() {
           seenForwardIds: Array.from(seenForwardIds.get(key) || []).slice(-1000)
         };
       }
+      // D12 Retention：休眠会话只保留配置与标量状态，消息缓冲按 TTL 淘汰；总会话数有硬上限。
+      applySocialConversationRetention(obj.conversations, { now: Date.now() });
       atomicWriteJson(SOCIAL_V2_FILE, obj);
     } catch (error) {
       log('保存 socialV2 状态失败:', error?.message ?? error);

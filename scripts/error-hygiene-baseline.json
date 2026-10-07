@@ -327,6 +327,11 @@
       "processExit": 0,
       "setInterval": 0
     },
+    "src/logging/rotate.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
     "src/mcp-bilibili.js": {
       "bareCatch": 1,
       "processExit": 0,
@@ -562,12 +567,22 @@
       "processExit": 0,
       "setInterval": 0
     },
+    "src/social-retention.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
     "src/status-panel.js": {
       "bareCatch": 0,
       "processExit": 0,
       "setInterval": 1
     },
     "src/sticker-lib.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/storage/json-file.js": {
       "bareCatch": 0,
       "processExit": 0,
       "setInterval": 0
@@ -638,7 +653,7 @@
       "setInterval": 0
     },
     "src/workshop/service.js": {
-      "bareCatch": 1,
+      "bareCatch": 0,
       "processExit": 0,
       "setInterval": 0
     },
