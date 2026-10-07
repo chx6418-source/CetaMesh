@@ -12,9 +12,9 @@
 //
 // 边界：不做 Knowledge Graph、不做向量检索、不做 Marketplace。
 
-import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { StorageError, readJsonFile, writeJsonAtomic } from '../storage/json-file.js';
 import {
   LONG_TERM_TYPES,
   MEMORY_LIMITS,
@@ -36,29 +36,30 @@ import { normalizeReferences } from './references.js';
 
 const CANDIDATE_SCHEMA_VERSION = 1;
 const MAX_CANDIDATES = 500;
+/** 已决策候选（accepted/rejected）的保留上限：accepted 的结果已在 memories 里，这只是决策流水。 */
+const MAX_DECIDED_CANDIDATES = 200;
 const TYPE_WEIGHT = Object.freeze({ working: 5, chat: 4, user: 3, task: 2, workspace: 1 });
 
-function readJson(file, fallback) {
-  let text;
+function loadCandidateFile(file, fallback) {
   try {
-    text = fs.readFileSync(file, 'utf8');
+    return readJsonFile(file, { missing: fallback });
   } catch (error) {
-    if (error && error.code === 'ENOENT') return fallback;
-    throw memoryError('STORE_CORRUPT', '候选读取失败：' + file);
-  }
-  if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
-  try {
-    return JSON.parse(text);
-  } catch (error) {
-    throw memoryError('STORE_CORRUPT', '候选解析失败：' + file);
+    if (error instanceof StorageError) {
+      if (error.code === 'CORRUPT') throw memoryError('STORE_CORRUPT', '候选解析失败：' + file);
+      throw memoryError('STORE_CORRUPT', '候选读取失败：' + file);
+    }
+    throw error;
   }
 }
 
-function atomicWrite(file, data) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const temp = file + '.' + process.pid + '.' + crypto.randomBytes(6).toString('hex') + '.tmp';
-  fs.writeFileSync(temp, JSON.stringify(data, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 });
-  fs.renameSync(temp, file);
+/** Retention：已决策候选只保留最近 MAX_DECIDED_CANDIDATES 条；pending 绝不自动清。 */
+export function pruneDecidedCandidates(list) {
+  const decided = list
+    .filter((candidate) => candidate && candidate.status !== 'pending')
+    .sort((a, b) => (Number(a.decidedAt) || 0) - (Number(b.decidedAt) || 0));
+  if (decided.length <= MAX_DECIDED_CANDIDATES) return list;
+  const evict = new Set(decided.slice(0, decided.length - MAX_DECIDED_CANDIDATES).map((c) => c.id));
+  return list.filter((candidate) => !evict.has(candidate?.id));
 }
 
 function normalizeEntityIds(values) {
@@ -105,7 +106,7 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
   function loadCandidates() {
     if (candidatesLoaded) return;
     candidatesLoaded = true;
-    const raw = readJson(candidatesFile, null);
+    const raw = loadCandidateFile(candidatesFile, null);
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return;
     const list = Array.isArray(raw.candidates) ? raw.candidates : [];
     for (const item of list) {
@@ -114,10 +115,18 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
   }
 
   function persistCandidates() {
-    atomicWrite(candidatesFile, {
+    // Retention 与内存态同步淘汰：文件里不留，Map 里也不留，list/confirm 行为一致。
+    const pruned = pruneDecidedCandidates([...candidates.values()]);
+    if (pruned.length !== candidates.size) {
+      const keep = new Set(pruned.map((candidate) => candidate.id));
+      for (const id of [...candidates.keys()]) {
+        if (!keep.has(id)) candidates.delete(id);
+      }
+    }
+    writeJsonAtomic(candidatesFile, {
       schemaVersion: CANDIDATE_SCHEMA_VERSION,
       updatedAt: now(),
-      candidates: [...candidates.values()]
+      candidates: pruned
     });
   }
 

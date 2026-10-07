@@ -1,11 +1,10 @@
 // CetaMesh Desktop —— 产品设置持久化（阶段 12）。
 //
-// 落库要求：Settings 重启后必须保持。写入沿用项目统一的原子写（临时文件 + rename，0600）。
+// 落库要求：Settings 重启后必须保持。写入走统一 Storage Primitive（原子写、0600、BOM 容错）。
 // 损坏的 settings.json 不会让应用起不来：解析失败即回落到默认值，并把问题如实上报。
 
-import fs from 'node:fs';
 import path from 'node:path';
-import crypto from 'node:crypto';
+import { StorageError, readJsonFile, writeJsonAtomic } from '../storage/json-file.js';
 import {
   SETTINGS_SCHEMA_VERSION,
   defaultSettings,
@@ -13,13 +12,6 @@ import {
   settingsError,
   validateSectionPatch
 } from './schema.js';
-
-function atomicWriteJson(file, data) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const temp = file + '.' + process.pid + '.' + crypto.randomBytes(6).toString('hex') + '.tmp';
-  fs.writeFileSync(temp, JSON.stringify(data, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 });
-  fs.renameSync(temp, file);
-}
 
 export function createSettingsStore({ stateDir, now = () => Date.now() } = {}) {
   if (!stateDir || typeof stateDir !== 'string') throw new Error('createSettingsStore 需要 stateDir');
@@ -34,17 +26,23 @@ export function createSettingsStore({ stateDir, now = () => Date.now() } = {}) {
   function load() {
     if (loaded) return;
     loaded = true;
-    let text;
+    let raw;
     try {
-      text = fs.readFileSync(file, 'utf8');
+      raw = readJsonFile(file);
     } catch (error) {
-      if (error && error.code === 'ENOENT') return;
-      lastError = '读取失败：' + (error && error.message);
-      return;
+      if (error instanceof StorageError) {
+        if (error.code === 'MISSING') return;
+        // 损坏：不阻断启动，回落默认值并记录，让用户可以从 UI 重新保存。
+        lastError = error.code === 'CORRUPT'
+          ? '解析失败，已回落默认设置：' + (error?.cause?.message ?? error.message)
+          : '读取失败：' + (error?.cause?.message ?? error.message);
+        values = defaultSettings();
+        revision = 0;
+        return;
+      }
+      throw error;
     }
-    if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
     try {
-      const raw = JSON.parse(text);
       values = normalizeSettings(raw.settings ? raw.settings : raw);
       revision = Number.isSafeInteger(raw.revision) && raw.revision > 0 ? raw.revision : 0;
     } catch (error) {
@@ -57,7 +55,7 @@ export function createSettingsStore({ stateDir, now = () => Date.now() } = {}) {
 
   function persist() {
     revision += 1;
-    atomicWriteJson(file, {
+    writeJsonAtomic(file, {
       schemaVersion: SETTINGS_SCHEMA_VERSION,
       revision,
       updatedAt: now(),

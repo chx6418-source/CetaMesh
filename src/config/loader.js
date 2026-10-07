@@ -9,8 +9,7 @@
 // - 错误消息文本与旧实现保持一致，避免破坏依赖该文案的日志/诊断。
 
 import fs from 'node:fs';
-import path from 'node:path';
-import crypto from 'node:crypto';
+import { parseJsonText, writeJsonAtomic } from '../storage/json-file.js';
 
 export class ConfigError extends Error {
   constructor(code, message, { cause } = {}) {
@@ -21,18 +20,17 @@ export class ConfigError extends Error {
   }
 }
 
-/** 解析配置文本：BOM 容错；损坏或根不是对象时抛 ConfigError。 */
+/** 解析配置文本：BOM 容错由 Storage Primitive 统一处理；损坏或根不是对象时抛 ConfigError。 */
 export function parseConfigText(text, { file = '<memory>' } = {}) {
-  let working = String(text ?? '');
-  if (working.charCodeAt(0) === 0xFEFF) working = working.slice(1);
   let parsed;
   try {
-    parsed = JSON.parse(working);
+    parsed = parseJsonText(text, { file });
   } catch (error) {
+    const cause = error?.cause ?? error;
     throw new ConfigError(
       'CONFIG_CORRUPT',
-      `配置文件读取/解析失败：${file}（${error?.message ?? error}）`,
-      { cause: error }
+      `配置文件读取/解析失败：${file}（${cause?.message ?? cause}）`,
+      { cause }
     );
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
@@ -77,12 +75,10 @@ export function readRawConfigOrEmpty(file) {
 }
 
 /**
- * 原子写 JSON：唯一临时文件 + rename（与旧 atomicWriteJson 一致），
+ * 原子写 JSON：临时文件 + rename 由 Storage Primitive 统一提供
+ * （crypto 随机临时名、0600、fsync、失败清理、Windows rename 重试），
  * 避免进程中断写坏配置，也避免固定临时名被并发/符号链接攻击利用。
  */
 export function atomicWriteConfig(file, obj) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(obj, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 });
-  fs.renameSync(tmp, file);
+  writeJsonAtomic(file, obj);
 }

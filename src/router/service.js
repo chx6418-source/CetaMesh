@@ -1,10 +1,10 @@
 // Smart Router 服务（会话 1 / TASK-S1-005/006）。
 //
-// Cost Policy 持久化在 <stateDir>/router/policy.json（原子写、损坏回落默认值）。
+// Cost Policy 持久化在 <stateDir>/router/policy.json（走统一 Storage Primitive 原子写；
+// 损坏回落默认值——策略文件不是关键数据，不 fail-closed 阻塞聊天）。
 // router.* 是桌面私有方法族：policy.get / policy.set / classify。
-import fs from 'node:fs';
 import path from 'node:path';
-import crypto from 'node:crypto';
+import { readJsonFile, writeJsonAtomic } from '../storage/json-file.js';
 import { classifyTask, costPolicies } from './smart-router.js';
 import { DEFAULT_COST_POLICY, normalizeCostPolicy, normalizeDecision, routerError } from './types.js';
 
@@ -16,8 +16,7 @@ export function createRouterService({ stateDir, log = () => {} } = {}) {
 
   function readPolicy() {
     try {
-      const text = fs.readFileSync(file, 'utf8');
-      const parsed = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text);
+      const parsed = readJsonFile(file);
       return normalizeCostPolicy(parsed?.costPolicy);
     } catch (error) {
       if (error?.code === 'INVALID_PARAMS') throw error;
@@ -27,10 +26,7 @@ export function createRouterService({ stateDir, log = () => {} } = {}) {
   }
 
   function writePolicy(policy) {
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    const temp = `${file}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
-    fs.writeFileSync(temp, JSON.stringify({ schemaVersion: POLICY_SCHEMA_VERSION, costPolicy: policy }, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 });
-    fs.renameSync(temp, file);
+    writeJsonAtomic(file, { schemaVersion: POLICY_SCHEMA_VERSION, costPolicy: policy });
   }
 
   function classify(params = {}) {

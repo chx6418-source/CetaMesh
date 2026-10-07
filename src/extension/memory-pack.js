@@ -1,5 +1,6 @@
 // Data-only Memory Pack protocol. The immutable Base and User Overlay never execute code.
 import crypto from 'node:crypto';
+import { parseJsonText } from '../storage/json-file.js';
 import { extensionError } from './types.js';
 import { normalizeMemoryType } from '../memory/types.js';
 import { normalizeContextPackage } from '../memory/references.js';
@@ -45,7 +46,7 @@ export function validateMemoryPack(source) {
   let raw = source;
   if (typeof source === 'string') {
     if (Buffer.byteLength(source, 'utf8') > MAX_BYTES) fail('Memory Pack exceeds 256 KiB');
-    try { raw = JSON.parse(source.replace(/^\uFEFF/, '')); } catch { fail('Memory Pack must be reference JSON, never JavaScript'); }
+    try { raw = parseJsonText(source); } catch { fail('Memory Pack must be reference JSON, never JavaScript'); }
   }
   object(raw, ['schemaVersion', 'kind', 'base'], 'Memory Pack');
   if (raw.schemaVersion !== MEMORY_PACK_SCHEMA_VERSION || raw.kind !== 'memory-pack') fail('Unsupported Memory Pack protocol');

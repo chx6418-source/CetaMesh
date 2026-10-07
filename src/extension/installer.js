@@ -9,6 +9,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { parseJsonText } from '../storage/json-file.js';
 import { assertManifest, MANIFEST_FILENAMES } from './manifest.js';
 import { scanEntrySource } from './scan.js';
 import { buildReview, permissionDelta } from './review.js';
@@ -47,9 +48,10 @@ function readManifestFile(rootDir) {
     if (!fs.existsSync(candidate)) continue;
     let raw;
     try {
-      raw = JSON.parse(fs.readFileSync(candidate, 'utf8').replace(/^\uFEFF/, ''));
+      raw = parseJsonText(fs.readFileSync(candidate, 'utf8'), { file: name });
     } catch (error) {
-      throw extensionError('MANIFEST_CORRUPT', 'manifest 解析失败：' + name + '（' + (error && error.message) + '）');
+      const detail = error?.cause?.message ?? error?.message ?? error;
+      throw extensionError('MANIFEST_CORRUPT', 'manifest 解析失败：' + name + '（' + detail + '）');
     }
     return { name, raw };
   }

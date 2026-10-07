@@ -7,36 +7,28 @@
 // 冲突策略：每条记录带单调递增 rev。update / remove 必须携带 expectedRev，
 // 不匹配即 MEMORY_CONFLICT，避免并发写覆盖（与 Chat 会话存储同为原子写 + 显式冲突）。
 
-import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { StorageError, readJsonFile, writeJsonAtomic } from '../storage/json-file.js';
 import { memoryError, scopeKey } from './types.js';
 
 export const MEMORY_SCHEMA_VERSION = 1;
 const MAX_RECORDS = 20000;
 const MAX_IDS_PER_SCOPE = 5000;
 
-function readJsonFile(file, fallback) {
-  let text;
+function loadMemoryFile(file, fallback) {
   try {
-    text = fs.readFileSync(file, 'utf8');
+    return readJsonFile(file, { missing: fallback });
   } catch (error) {
-    if (error && error.code === 'ENOENT') return fallback;
-    throw memoryError('STORE_CORRUPT', '记忆数据读取失败：' + file + '（' + (error && error.message) + '）');
+    if (error instanceof StorageError) {
+      const detail = error?.cause?.message ?? error.message;
+      if (error.code === 'CORRUPT') {
+        throw memoryError('STORE_CORRUPT', '记忆数据解析失败：' + file + '（' + detail + '）');
+      }
+      throw memoryError('STORE_CORRUPT', '记忆数据读取失败：' + file + '（' + detail + '）');
+    }
+    throw error;
   }
-  if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
-  try {
-    return JSON.parse(text);
-  } catch (error) {
-    throw memoryError('STORE_CORRUPT', '记忆数据解析失败：' + file + '（' + (error && error.message) + '）');
-  }
-}
-
-function atomicWriteJson(file, data) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const temp = file + '.' + process.pid + '.' + crypto.randomBytes(6).toString('hex') + '.tmp';
-  fs.writeFileSync(temp, JSON.stringify(data, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 });
-  fs.renameSync(temp, file);
 }
 
 function normalizeLoadedRecord(raw) {
@@ -101,7 +93,7 @@ export function createMemoryStore({ stateDir, now = () => Date.now(), idFactory 
   function load() {
     if (loaded) return;
     loaded = true;
-    const raw = readJsonFile(file, null);
+    const raw = loadMemoryFile(file, null);
     if (!raw) return;
     if (typeof raw !== 'object' || Array.isArray(raw)) {
       throw memoryError('STORE_CORRUPT', '记忆数据根节点必须是对象：' + file);
@@ -116,7 +108,7 @@ export function createMemoryStore({ stateDir, now = () => Date.now(), idFactory 
 
   function persist() {
     fileRevision += 1;
-    atomicWriteJson(file, {
+    writeJsonAtomic(file, {
       schemaVersion: MEMORY_SCHEMA_VERSION,
       revision: fileRevision,
       updatedAt: now(),

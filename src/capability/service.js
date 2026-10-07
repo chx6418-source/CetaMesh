@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { resolveInside, canonicalizeRoot, assertSafeRootForm } from '../workspace/boundary.js';
@@ -28,7 +29,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
   function saveJournal() {
     if (!journalFile) return;
     fs.mkdirSync(path.dirname(journalFile), { recursive: true });
-    const temp = journalFile + '.' + process.pid + '.tmp';
+    const temp = journalFile + '.' + process.pid + '.' + crypto.randomBytes(6).toString('hex') + '.tmp';
     fs.writeFileSync(temp, JSON.stringify(journal, null, 2), { mode: 0o600 });
     fs.renameSync(temp, journalFile);
   }
@@ -53,7 +54,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
   function saveGrants() {
     if (!file) return;
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    const temp = file + '.' + process.pid + '.tmp';
+    const temp = file + '.' + process.pid + '.' + crypto.randomBytes(6).toString('hex') + '.tmp';
     fs.writeFileSync(temp, JSON.stringify(grants, null, 2), { mode: 0o600 });
     fs.renameSync(temp, file);
   }

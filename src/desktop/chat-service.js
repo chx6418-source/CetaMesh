@@ -28,6 +28,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { StorageError, readJsonFile, writeJsonAtomic } from '../storage/json-file.js';
 import { blocksToText } from '../dsh-client.js';
 import { selectDshSessionModel } from '../dsh-model-selection.js';
 
@@ -59,22 +60,16 @@ function requireDshApi(api, operation) {
   return api;
 }
 
-function readJsonFile(file, fallback) {
+function loadChatFile(file, fallback) {
   try {
-    let text = fs.readFileSync(file, 'utf8');
-    if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
-    return JSON.parse(text);
+    return readJsonFile(file, { missing: fallback });
   } catch (error) {
-    if (error?.code === 'ENOENT') return fallback;
-    throw chatError('STORE_CORRUPT', `会话数据读取失败：${file}（${error?.message ?? error}）`);
+    if (error instanceof StorageError) {
+      const detail = error?.cause?.message ?? error.message;
+      throw chatError('STORE_CORRUPT', `会话数据读取失败：${file}（${detail}）`);
+    }
+    throw error;
   }
-}
-
-function atomicWriteJson(file, data) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const temp = `${file}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
-  fs.writeFileSync(temp, JSON.stringify(data, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 });
-  fs.renameSync(temp, file);
 }
 
 function requireText(value, label, maxChars) {
@@ -136,7 +131,7 @@ export function createChatService({
   const runtime = new Map(); // id -> { turn?, follow?, modelTurn? }
 
   function loadStore() {
-    const store = readJsonFile(sessionsFile, null);
+    const store = loadChatFile(sessionsFile, null);
     const list = Array.isArray(store?.sessions) ? store.sessions : [];
     for (const record of list) {
       if (record && typeof record.id === 'string') sessions.set(record.id, normalizeRecord(record));
@@ -171,7 +166,7 @@ export function createChatService({
   }
 
   function saveStore() {
-    atomicWriteJson(sessionsFile, { schemaVersion: SCHEMA_VERSION, sessions: [...sessions.values()] });
+    writeJsonAtomic(sessionsFile, { schemaVersion: SCHEMA_VERSION, sessions: [...sessions.values()] });
   }
 
   function historyFile(id) {
@@ -179,14 +174,14 @@ export function createChatService({
   }
 
   function readHistory(id) {
-    const store = readJsonFile(historyFile(id), null);
+    const store = loadChatFile(historyFile(id), null);
     return Array.isArray(store?.messages) ? store.messages : [];
   }
 
   function appendMessage(id, message) {
     const messages = readHistory(id);
     messages.push(message);
-    atomicWriteJson(historyFile(id), { schemaVersion: SCHEMA_VERSION, messages });
+    writeJsonAtomic(historyFile(id), { schemaVersion: SCHEMA_VERSION, messages });
   }
 
   function touch(record) {

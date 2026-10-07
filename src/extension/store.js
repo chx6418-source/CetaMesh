@@ -1,36 +1,25 @@
 // CetaMesh Desktop Extension v1 —— 已安装扩展注册表与扩展私有存储（阶段 10）。
 //
 // registry.json 是"装了什么、什么状态、批准了哪一份"的唯一事实源；
-// 应用重启后必须仍然存在。写入沿用项目统一的原子写（临时文件 + rename，0600）。
+// 应用重启后必须仍然存在。写入走统一 Storage Primitive（原子写、0600、BOM 容错）。
 
-import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { StorageError, readJsonFile, writeJsonAtomic } from '../storage/json-file.js';
 import { extensionError } from './types.js';
 
 export const EXTENSION_REGISTRY_VERSION = 1;
 
-function readJson(file, fallback) {
-  let text;
+function loadRegistryFile(file, fallback) {
   try {
-    text = fs.readFileSync(file, 'utf8');
+    return readJsonFile(file, { missing: fallback });
   } catch (error) {
-    if (error && error.code === 'ENOENT') return fallback;
-    throw extensionError('REGISTRY_UNREADABLE', '扩展注册表读取失败：' + file);
+    if (error instanceof StorageError) {
+      if (error.code === 'CORRUPT') throw extensionError('REGISTRY_CORRUPT', '扩展注册表解析失败：' + file);
+      throw extensionError('REGISTRY_UNREADABLE', '扩展注册表读取失败：' + file);
+    }
+    throw error;
   }
-  if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
-  try {
-    return JSON.parse(text);
-  } catch (error) {
-    throw extensionError('REGISTRY_CORRUPT', '扩展注册表解析失败：' + file);
-  }
-}
-
-function atomicWriteJson(file, data) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const temp = file + '.' + process.pid + '.' + crypto.randomBytes(6).toString('hex') + '.tmp';
-  fs.writeFileSync(temp, JSON.stringify(data, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 });
-  fs.renameSync(temp, file);
 }
 
 export function createExtensionStore({ stateDir, now = () => Date.now() } = {}) {
@@ -46,7 +35,7 @@ export function createExtensionStore({ stateDir, now = () => Date.now() } = {}) 
   function load() {
     if (loaded) return;
     loaded = true;
-    const raw = readJson(file, null);
+    const raw = loadRegistryFile(file, null);
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return;
     const list = Array.isArray(raw.extensions) ? raw.extensions : [];
     for (const item of list) {
@@ -55,7 +44,7 @@ export function createExtensionStore({ stateDir, now = () => Date.now() } = {}) 
   }
 
   function persist() {
-    atomicWriteJson(file, {
+    writeJsonAtomic(file, {
       schemaVersion: EXTENSION_REGISTRY_VERSION,
       updatedAt: now(),
       extensions: [...entries.values()]
@@ -86,7 +75,7 @@ export function createExtensionStore({ stateDir, now = () => Date.now() } = {}) 
     /** 扩展私有存储：按扩展 id 命名空间隔离，互不可见。 */
     storage(extensionId) {
       const filePath = path.join(dataDir, String(extensionId) + '.json');
-      let cache = readJson(filePath, null);
+      let cache = loadRegistryFile(filePath, null);
       if (!cache || typeof cache !== 'object' || Array.isArray(cache)) cache = {};
       return {
         file: filePath,
@@ -96,13 +85,13 @@ export function createExtensionStore({ stateDir, now = () => Date.now() } = {}) 
         },
         set(key, value) {
           cache[String(key)] = value === undefined ? null : value;
-          atomicWriteJson(filePath, cache);
+          writeJsonAtomic(filePath, cache);
           return true;
         },
         delete(key) {
           const name = String(key);
           const existed = Object.hasOwn(cache, name);
-          if (existed) { delete cache[name]; atomicWriteJson(filePath, cache); }
+          if (existed) { delete cache[name]; writeJsonAtomic(filePath, cache); }
           return existed;
         },
         keys() { return Object.keys(cache); }

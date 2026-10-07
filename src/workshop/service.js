@@ -1,8 +1,8 @@
 // Workshop is a trusted-transport facade. Never take actor identity from params.
 // External callers can submit text and read their own sanitized project projection.
-import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { StorageError, readJsonFile, writeJsonAtomic } from '../storage/json-file.js';
 
 export const WORKSHOP_GRANT_CAPABILITIES = Object.freeze([
   'filesystem.read', 'filesystem.write', 'filesystem.search', 'git.status', 'git.diff', 'git.commit',
@@ -36,22 +36,20 @@ export function createWorkshopService({ stateDir, workspaceService, taskRuntime,
   const file = path.join(stateDir, 'workshop', 'proposals.json');
   let state = { schemaVersion: 1, proposals: [] };
   try {
-    state = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
+    state = readJsonFile(file);
     if (state?.schemaVersion !== 1 || !Array.isArray(state.proposals)
       || state.proposals.some((p) => !p?.id || !p.submitter?.id || !Array.isArray(p.supplements) || !Array.isArray(p.artifacts))) {
       fail('WORKSHOP_STORE_CORRUPT', 'Invalid Workshop store');
     }
   } catch (error) {
-    if (error.code !== 'ENOENT') fail('WORKSHOP_STORE_CORRUPT', 'Cannot read Workshop store');
+    // 首次启动没有状态文件 → 用默认空状态；其余（损坏/校验失败/读失败）一律 fail-closed。
+    if (!(error instanceof StorageError && error.code === 'MISSING')) {
+      fail('WORKSHOP_STORE_CORRUPT', 'Cannot read Workshop store');
+    }
   }
   let queue = Promise.resolve();
   function save() {
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    const tmp = file + '.' + process.pid + '.' + crypto.randomUUID() + '.tmp';
-    try {
-      fs.writeFileSync(tmp, JSON.stringify(state, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 });
-      fs.renameSync(tmp, file);
-    } finally { try { fs.unlinkSync(tmp); } catch {} }
+    writeJsonAtomic(file, state);
   }
   function changed(p) { p.updatedAt = now(); p.rev++; save(); }
   function trustedActor(actor) {

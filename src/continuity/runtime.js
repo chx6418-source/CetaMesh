@@ -26,8 +26,9 @@
 // 核心原则：Tasks belong to CetaMesh, not to agents.
 //           Sessions are disposable; progress is persistent.
 
-import fs from 'node:fs';
 import path from 'node:path';
+import fs from 'node:fs';
+import { StorageError, readJsonFile, writeJsonAtomic } from '../storage/json-file.js';
 import {
   DEFAULT_CONTEXT_POLICY,
   IMPLEMENTED_ROLLOVER_STRATEGY,
@@ -42,22 +43,47 @@ import { createContextMonitor } from './monitor.js';
 
 const AUTO_ROLLOVER_ACTIONS = Object.freeze(['rollover', 'forced', 'emergency']);
 
-function readJsonFile(file, fallback) {
+/** 每个 Task 保留的 handoff packet / reconciliation 文件数上限（更旧的在写入时清理）。 */
+const PACKET_FILES_KEEP = 20;
+
+function loadContinuityFile(file, fallback) {
   try {
-    let text = fs.readFileSync(file, 'utf8');
-    if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
-    return JSON.parse(text);
+    return readJsonFile(file, { missing: fallback });
   } catch (error) {
-    if (error?.code === 'ENOENT') return fallback;
-    throw continuityError('STORE_CORRUPT', `Continuity 数据读取失败：${file}（${error?.message ?? error}）`);
+    if (error instanceof StorageError) {
+      const detail = error?.cause?.message ?? error.message;
+      throw continuityError('STORE_CORRUPT', `Continuity 数据读取失败：${file}（${detail}）`);
+    }
+    throw error;
   }
 }
 
-function atomicWriteJson(file, data) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const temp = `${file}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
-  fs.writeFileSync(temp, JSON.stringify(data, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 });
-  fs.renameSync(temp, file);
+/** Retention：packet 目录里每个 Task 只保留最近 KEEP 个 packet/reconciliation 文件。 */
+export function prunePacketFiles(dir, keep = PACKET_FILES_KEEP) {
+  let names;
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    // 目录还不存在（从未落过 packet）是正常状态，无需清理。
+    return;
+  }
+  const sequenceOf = (name) => {
+    const match = /^(?:packet|reconciliation)-(\d+)\.json$/.exec(name);
+    return match ? Number(match[1]) : null;
+  };
+  const keepNames = new Set(
+    names
+      .map((name) => ({ name, seq: sequenceOf(name) }))
+      .filter((entry) => entry.seq !== null)
+      .sort((a, b) => a.seq - b.seq)
+      .slice(-keep)
+      .map((entry) => entry.name)
+  );
+  for (const name of names) {
+    if (sequenceOf(name) === null || keepNames.has(name)) continue;
+    // 清理失败不影响本次落盘：文件带序号命名，下次写入会再次尝试清理。
+    discardFile(path.join(dir, name));
+  }
 }
 
 export function createContinuityRuntime({
@@ -85,7 +111,7 @@ export function createContinuityRuntime({
   const inFlight = new Set(); // taskId：rollover 串行互斥
 
   function readHistory() {
-    const store = readJsonFile(historyFile, { schemaVersion: 2, rollovers: [] });
+    const store = loadContinuityFile(historyFile, { schemaVersion: 2, rollovers: [] });
     return Array.isArray(store.rollovers) ? store : { schemaVersion: 2, rollovers: [] };
   }
 
@@ -93,7 +119,7 @@ export function createContinuityRuntime({
     if (store.rollovers.length > PACKET_LIMITS.history) {
       store.rollovers = store.rollovers.slice(-PACKET_LIMITS.history);
     }
-    atomicWriteJson(historyFile, store);
+    writeJsonAtomic(historyFile, store);
   }
 
   function requireTask(id) {
@@ -164,8 +190,9 @@ export function createContinuityRuntime({
   }
 
   function savePacket(taskId, packet) {
-    atomicWriteJson(packetFile(taskId, packet.sequence), packet);
-    atomicWriteJson(latestPacketFile(taskId), packet);
+    writeJsonAtomic(packetFile(taskId, packet.sequence), packet);
+    writeJsonAtomic(latestPacketFile(taskId), packet);
+    prunePacketFiles(path.join(packetDir, String(taskId)));
     return packetFile(taskId, packet.sequence);
   }
 
@@ -438,9 +465,10 @@ export function createContinuityRuntime({
         if (freshFacts) {
           reconciliation = reconciler.reconcile({ packet, facts: freshFacts });
           packet.reconciliation = reconciliation;
-          atomicWriteJson(path.join(packetDir, String(task.id), `reconciliation-${String(sequence).padStart(4, '0')}.json`), {
+          writeJsonAtomic(path.join(packetDir, String(task.id), `reconciliation-${String(sequence).padStart(4, '0')}.json`), {
             taskId: task.id, sequence, reconciliation, facts: freshFacts
           });
+          prunePacketFiles(path.join(packetDir, String(task.id)));
           if (reconciliation.consistent === false) {
             log(`Continuity reconciliation：任务 ${task.id} 发现 ${reconciliation.discrepancies.length} 处 checkpoint/工作区不一致（已记录）`);
           }
@@ -484,7 +512,7 @@ export function createContinuityRuntime({
   /** 按需核验：对任务最近一次 Handoff Packet 重新收集工作区事实并比对。 */
   async function reconcile({ taskId } = {}) {
     const task = requireTask(taskId);
-    const packet = readJsonFile(latestPacketFile(task.id), null);
+    const packet = loadContinuityFile(latestPacketFile(task.id), null);
     if (!packet) throw continuityError('PACKET_NOT_FOUND', '该任务尚无 Handoff Packet');
     if (!reconciler) throw continuityError('INVALID_PARAMS', '未注入 Workspace Reconciler，无法核验');
     if (!task.workspaceId) {
@@ -500,7 +528,7 @@ export function createContinuityRuntime({
 
   function latestPacket({ taskId } = {}) {
     requireTask(taskId);
-    const packet = readJsonFile(latestPacketFile(taskId), null);
+    const packet = loadContinuityFile(latestPacketFile(taskId), null);
     if (!packet) throw continuityError('PACKET_NOT_FOUND', '该任务尚无 Handoff Packet');
     return { packet };
   }

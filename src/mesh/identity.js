@@ -8,31 +8,25 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { StorageError, readJsonFile, writeTextAtomic } from '../storage/json-file.js';
 import { meshError, normalizeName, normalizeRole } from './types.js';
 
 const IDENTITY_SCHEMA_VERSION = 1;
 
-function readJson(file, fallback) {
-  let text;
+function loadIdentityFile(file, fallback) {
   try {
-    text = fs.readFileSync(file, 'utf8');
+    return readJsonFile(file, { missing: fallback });
   } catch (error) {
-    if (error && error.code === 'ENOENT') return fallback;
-    throw meshError('IDENTITY_UNREADABLE', '设备身份读取失败：' + file);
-  }
-  if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
-  try {
-    return JSON.parse(text);
-  } catch (error) {
-    throw meshError('IDENTITY_CORRUPT', '设备身份解析失败：' + file);
+    if (error instanceof StorageError) {
+      if (error.code === 'CORRUPT') throw meshError('IDENTITY_CORRUPT', '设备身份解析失败：' + file);
+      throw meshError('IDENTITY_UNREADABLE', '设备身份读取失败：' + file);
+    }
+    throw error;
   }
 }
 
 function writeFilePrivate(file, text) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const temp = file + '.' + process.pid + '.' + crypto.randomBytes(6).toString('hex') + '.tmp';
-  fs.writeFileSync(temp, text, { encoding: 'utf8', mode: 0o600 });
-  fs.renameSync(temp, file);
+  writeTextAtomic(file, text);
 }
 
 /** node id 由公钥 DER 的 sha256 派生：对端可独立复算。 */
@@ -65,7 +59,7 @@ export function loadOrCreateIdentity({ stateDir, name = 'CetaMesh Desktop', role
   const metaFile = path.join(dir, 'identity.json');
   const keyFile = path.join(dir, 'identity.key');
 
-  const meta = readJson(metaFile, null);
+  const meta = loadIdentityFile(metaFile, null);
   if (meta && typeof meta === 'object' && meta.nodeId && fs.existsSync(keyFile)) {
     const privateKeyPem = fs.readFileSync(keyFile, 'utf8');
     const derived = deriveNodeId(meta.publicKeyPem);

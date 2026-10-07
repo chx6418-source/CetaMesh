@@ -1,7 +1,7 @@
 // Persistent links contain authorized references and bounded context, never copied sessions.
-import fs from 'node:fs';
-import path from 'node:path';
 import crypto from 'node:crypto';
+import path from 'node:path';
+import { StorageError, readJsonFile, writeJsonAtomic } from '../storage/json-file.js';
 import { memoryError, normalizeScope, scopeKey } from './types.js';
 import { CONTEXT_LIMITS, MEMORY_RELATIONS, normalizeContextPackage, normalizeReference, normalizeReferences, referenceKey } from './references.js';
 
@@ -11,9 +11,17 @@ export function createMemoryLinks({ stateDir, policy, store, now, list }) {
   function load() {
     if (links) return;
     let raw;
-    try { raw = JSON.parse(fs.readFileSync(file, 'utf8')); }
-    catch (error) { if (error.code === 'ENOENT') { links = []; return; } throw memoryError('STORE_CORRUPT', 'Memory links could not be read'); }
-    if (raw.schemaVersion !== 1 || !Array.isArray(raw.links) || raw.links.length > 5000) throw memoryError('STORE_CORRUPT', 'Invalid Memory links');
+    try {
+      raw = readJsonFile(file, { missing: null });
+    } catch (error) {
+      if (error instanceof StorageError) throw memoryError('STORE_CORRUPT', 'Memory links could not be read');
+      throw error;
+    }
+    if (raw === null) {
+      links = [];
+      return;
+    }
+    if (!raw || typeof raw !== 'object' || raw.schemaVersion !== 1 || !Array.isArray(raw.links) || raw.links.length > 5000) throw memoryError('STORE_CORRUPT', 'Invalid Memory links');
     const loaded = raw.links.map((link) => {
       if (!link || typeof link.id !== 'string' || !MEMORY_RELATIONS.includes(link.relation)) throw memoryError('STORE_CORRUPT', 'Invalid Memory link');
       const source = normalizeReference(link.source), target = normalizeReference(link.target);
@@ -23,10 +31,7 @@ export function createMemoryLinks({ stateDir, policy, store, now, list }) {
     links = loaded;
   }
   function persist() {
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    const temp = file + '.' + crypto.randomBytes(6).toString('hex') + '.tmp';
-    fs.writeFileSync(temp, JSON.stringify({ schemaVersion: 1, links }, null, 2) + '\n', { mode: 0o600 });
-    fs.renameSync(temp, file);
+    writeJsonAtomic(file, { schemaVersion: 1, links });
   }
   function authorized(principal, ref) {
     return policy.requireAuthorization({ principal, action: 'read', scopes: [normalizeScope(ref.scope)] });

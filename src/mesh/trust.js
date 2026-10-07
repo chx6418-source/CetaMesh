@@ -6,9 +6,9 @@
 // 两者分离，所以"已信任"的节点默认仍然**没有任何能力**——必须显式授予。
 // 撤销信任 = 信任状态改 blocked + 清空 grants（一次性收回全部授权）。
 
-import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { StorageError, readJsonFile, writeJsonAtomic } from '../storage/json-file.js';
 import {
   MESH_LIMITS,
   meshError,
@@ -22,27 +22,16 @@ import {
 
 const TRUST_SCHEMA_VERSION = 1;
 
-function readJson(file, fallback) {
-  let text;
+function loadTrustFile(file, fallback) {
   try {
-    text = fs.readFileSync(file, 'utf8');
+    return readJsonFile(file, { missing: fallback });
   } catch (error) {
-    if (error && error.code === 'ENOENT') return fallback;
-    throw meshError('TRUST_UNREADABLE', '信任库读取失败：' + file);
+    if (error instanceof StorageError) {
+      if (error.code === 'CORRUPT') throw meshError('TRUST_CORRUPT', '信任库解析失败：' + file);
+      throw meshError('TRUST_UNREADABLE', '信任库读取失败：' + file);
+    }
+    throw error;
   }
-  if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
-  try {
-    return JSON.parse(text);
-  } catch (error) {
-    throw meshError('TRUST_CORRUPT', '信任库解析失败：' + file);
-  }
-}
-
-function atomicWriteJson(file, data) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const temp = file + '.' + process.pid + '.' + crypto.randomBytes(6).toString('hex') + '.tmp';
-  fs.writeFileSync(temp, JSON.stringify(data, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 });
-  fs.renameSync(temp, file);
 }
 
 export function createTrustStore({ stateDir, now = () => Date.now() } = {}) {
@@ -55,7 +44,7 @@ export function createTrustStore({ stateDir, now = () => Date.now() } = {}) {
   function load() {
     if (loaded) return;
     loaded = true;
-    const raw = readJson(file, null);
+    const raw = loadTrustFile(file, null);
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return;
     for (const item of Array.isArray(raw.peers) ? raw.peers : []) {
       if (item && typeof item.nodeId === 'string' && item.nodeId) peers.set(item.nodeId, item);
@@ -63,7 +52,7 @@ export function createTrustStore({ stateDir, now = () => Date.now() } = {}) {
   }
 
   function persist() {
-    atomicWriteJson(file, {
+    writeJsonAtomic(file, {
       schemaVersion: TRUST_SCHEMA_VERSION,
       updatedAt: now(),
       peers: [...peers.values()]

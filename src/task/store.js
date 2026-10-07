@@ -3,37 +3,27 @@
 // 落库要求：应用重启后 Task / Progress / Checkpoint / Agent History / Workspace 关联必须仍然存在。
 // 因此所有变更都经过本项目唯一的原子写入口，并且每条任务带单调递增 rev（显式冲突检测）。
 //
-// 与 memory/chat 的存储保持同一套约定：临时文件 + rename、0600、BOM 容错、损坏 fail-closed。
+// 与 memory/chat 的存储保持同一套约定：统一走 Storage Primitive（原子写、0600、BOM 容错），
+// 损坏 fail-closed，对外仍是 Task 自己的错误码（StorageError 在这里收敛为 taskError）。
 
-import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { StorageError, readJsonFile, writeJsonAtomic } from '../storage/json-file.js';
 import { taskError } from './types.js';
 
 export const TASK_SCHEMA_VERSION = 1;
 const MAX_TASKS = 5000;
 
-function readJsonFile(file, fallback) {
-  let text;
+function loadTaskFile(file, fallback) {
   try {
-    text = fs.readFileSync(file, 'utf8');
+    return readJsonFile(file, { missing: fallback });
   } catch (error) {
-    if (error && error.code === 'ENOENT') return fallback;
-    throw taskError('STORE_UNREADABLE', '任务数据读取失败：' + file);
+    if (error instanceof StorageError) {
+      if (error.code === 'CORRUPT') throw taskError('STORE_CORRUPT', '任务数据解析失败：' + file);
+      throw taskError('STORE_UNREADABLE', '任务数据读取失败：' + file);
+    }
+    throw error;
   }
-  if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
-  try {
-    return JSON.parse(text);
-  } catch (error) {
-    throw taskError('STORE_CORRUPT', '任务数据解析失败：' + file);
-  }
-}
-
-function atomicWriteJson(file, data) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const temp = file + '.' + process.pid + '.' + crypto.randomBytes(6).toString('hex') + '.tmp';
-  fs.writeFileSync(temp, JSON.stringify(data, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 });
-  fs.renameSync(temp, file);
 }
 
 function asArray(value) {
@@ -96,7 +86,7 @@ export function createTaskStore({ stateDir, now = () => Date.now(), idFactory } 
   function load() {
     if (loaded) return;
     loaded = true;
-    const raw = readJsonFile(file, null);
+    const raw = loadTaskFile(file, null);
     if (!raw) return;
     if (typeof raw !== 'object' || Array.isArray(raw)) {
       throw taskError('STORE_CORRUPT', '任务数据根节点必须是对象：' + file);
@@ -110,7 +100,7 @@ export function createTaskStore({ stateDir, now = () => Date.now(), idFactory } 
 
   function persist() {
     fileRevision += 1;
-    atomicWriteJson(file, {
+    writeJsonAtomic(file, {
       schemaVersion: TASK_SCHEMA_VERSION,
       revision: fileRevision,
       updatedAt: now(),
