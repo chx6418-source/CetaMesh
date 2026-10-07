@@ -185,16 +185,19 @@ async function main() {
     assert.equal(message.result.content, 'hello-ipc-boundary');
   });
 
-  await check('IPC escape：../ 穿越返回 BOUNDARY_ESCAPE 错误帧', async () => {
+  // 语义：越界一律拒绝（deny-by-default）。错误码经 Capability Broker 归一化为
+  // PATH_OUTSIDE_WORKSPACE（src/capability/service.js 把 BOUNDARY_ESCAPE/TRAVERSAL 等
+  // 边界错误统一映射，不向调用方泄漏具体边界实现）——此测试曾因孤儿漂移指向旧码。
+  await check('IPC escape：../ 穿越被拒绝（归一化 PATH_OUTSIDE_WORKSPACE）', async () => {
     const message = await call('workspace.read', { id: workspaceId, path: '../../../secret.txt' });
     assert.equal(message.ok, false);
-    assert.equal(message.error.code, 'BOUNDARY_ESCAPE');
+    assert.equal(message.error.code, 'PATH_OUTSIDE_WORKSPACE');
   });
 
-  await check('IPC escape：绝对路径越界返回 BOUNDARY_ESCAPE', async () => {
+  await check('IPC escape：绝对路径越界被拒绝（归一化 PATH_OUTSIDE_WORKSPACE）', async () => {
     const message = await call('workspace.read', { id: workspaceId, path: 'C:\\Windows\\win.ini' });
     assert.equal(message.ok, false);
-    assert.equal(message.error.code, 'BOUNDARY_ESCAPE');
+    assert.equal(message.error.code, 'PATH_OUTSIDE_WORKSPACE');
   });
 
   await check('workspace.file.search 经 IPC 返回结果', async () => {

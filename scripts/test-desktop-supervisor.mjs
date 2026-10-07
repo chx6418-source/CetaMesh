@@ -165,7 +165,7 @@ try {
   // ------------------------------------------------ 1. 托管 worker 启动 + 孤儿守卫
   {
     const port = JSON.parse(fs.readFileSync(path.join(dataDir, 'config.json'), 'utf8')).consolePort;
-    const env = isolatedEnv(tempRoot, dataDir, { WHALEBRIDGE_SUPERVISED: '1' });
+    const env = isolatedEnv(tempRoot, dataDir, { WHALEBRIDGE_SUPERVISED: '1', WHALEBRIDGE_LEGACY_HTTP: '1' });
     const { child, stderr } = startWorker(dataDir, env);
     try {
       const response = await waitForHttp(`http://127.0.0.1:${port}/`);
@@ -195,7 +195,7 @@ try {
   {
     const port = JSON.parse(fs.readFileSync(path.join(dataDir, 'config.json'), 'utf8')).consolePort;
     fs.rmSync(path.join(dataDir, 'state', 'bridge.lock'), { force: true });
-    const env = isolatedEnv(tempRoot, dataDir, { WHALEBRIDGE_SUPERVISED: '1' });
+    const env = isolatedEnv(tempRoot, dataDir, { WHALEBRIDGE_SUPERVISED: '1', WHALEBRIDGE_LEGACY_HTTP: '1' });
     const { child, stderr } = startWorker(dataDir, env);
     try {
       await waitForHttp(`http://127.0.0.1:${port}/`);
@@ -213,7 +213,7 @@ try {
   {
     const port = JSON.parse(fs.readFileSync(path.join(dataDir, 'config.json'), 'utf8')).consolePort;
     fs.rmSync(path.join(dataDir, 'state', 'bridge.lock'), { force: true });
-    const env = isolatedEnv(tempRoot, dataDir, { WHALEBRIDGE_SUPERVISED: '1' });
+    const env = isolatedEnv(tempRoot, dataDir, { WHALEBRIDGE_SUPERVISED: '1', WHALEBRIDGE_LEGACY_HTTP: '1' });
     const { child, stderr } = startWorker(dataDir, env);
     try {
       await waitForHttp(`http://127.0.0.1:${port}/`);

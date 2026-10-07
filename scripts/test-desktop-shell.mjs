@@ -143,10 +143,6 @@ function descendants(pid) {
   return Array.isArray(parsed) ? parsed : [parsed];
 }
 
-function postJson(url) {
-  return fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
-}
-
 // ---------------------------------------------------------------- 前置检查
 
 assert.ok(
@@ -223,16 +219,25 @@ try {
       const pidLine = await shell.waitFor((line) => line.startsWith('worker_pid='));
       firstPid = Number.parseInt(pidLine.split('=')[1], 10);
       assert.ok(Number.isInteger(firstPid) && firstPid > 0, `worker pid 异常：${pidLine}`);
-      // Probe the loopback compatibility surface immediately after IPC readiness.
-      // The smoke process has a deliberately short lifetime, and process inspection below
-      // can be slow on Windows; doing these requests later can race orderly shutdown.
-      const nativeOnly = await fetch(`http://127.0.0.1:${port}/?token=${CONSOLE_TOKEN}`, { redirect: 'manual' });
-      assert.equal(nativeOnly.status, 403, '原生模式不得接受 HTTP console token 控制管理功能');
-      assert.match(nativeOnly.headers.get('content-type') ?? '', /application\/json/i, '根路径应返回 JSON 而非 HTML');
-      assert.match((await nativeOnly.json()).error, /本机 IPC/, '应提示管理命令只能经本机 IPC');
-      const adminOverHttp = await postJson(`http://127.0.0.1:${port}/api/restart?token=${CONSOLE_TOKEN}`);
-      assert.equal(adminOverHttp.status, 403, 'native 模式必须拒绝 HTTP console-token 管理操作');
-
+      // D1 契约：native 模式下 loopback HTTP 面根本不存在 —— consolePort 必须拒连。
+      // （原先这里是 403 断言：HTTP 在但管理请求被拒；现在 server 不再创建。）
+      // 注意必须快速完成：--test-restart-once 随时可能重启 worker，不能在这里等。
+      const probeOnce = () => new Promise((resolve) => {
+        const socket = net.connect({ host: '127.0.0.1', port });
+        socket.once('connect', () => { socket.destroy(); resolve({ connected: true, code: null }); });
+        socket.once('error', (error) => { socket.destroy(); resolve({ connected: false, code: error.code }); });
+        socket.setTimeout(1000, () => { socket.destroy(); resolve({ connected: false, code: 'ETIMEDOUT' }); });
+      });
+      let httpRefused = { connected: false, code: 'ECONNREFUSED' };
+      for (let i = 0; i < 3; i += 1) {
+        const outcome = await probeOnce();
+        if (outcome.connected) { httpRefused = outcome; break; }
+        httpRefused = outcome;
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+      assert.equal(httpRefused.connected, false, `native worker 在 ${port} 上监听了 HTTP —— 发行面禁止`);
+      assert.equal(['ECONNREFUSED', 'ETIMEDOUT', 'EACCES'].includes(httpRefused.code), true, `端口应拒连，实际 ${httpRefused.code}`);
+      // 管理命令只能经本机 IPC 的语义不变：worker 日志应声明原生 UI IPC 就绪。
       assert.ok(isRunning(firstPid), 'worker 进程应当存活');
       assert.ok(fs.existsSync(path.join(dataDir, 'state', 'bridge.lock')), 'worker 应持有锁文件');
       assert.ok(fs.existsSync(path.join(dataDir, 'logs', 'worker.log')), '应写入 worker 日志');
@@ -298,26 +303,25 @@ try {
     step('✅ 退出语义：壳退出后 worker 被优雅停止、锁已释放、无孤儿进程');
   }
 
-  // ---------------------------------------------------- 3. 端口冲突：exit 2 → 不重启
+  // ---------------------------------------------------- 3. 单实例冲突：exit 2 → 不重启
   {
     const dataDir = path.join(tempRoot, 'conflict', 'data');
     const port = await freePort();
     writeConfig(dataDir, port);
-    // 占用端口，模拟"已有实例在运行"
-    const blocker = net.createServer();
-    await new Promise((resolve, reject) => {
-      blocker.listen(port, '127.0.0.1', resolve);
-      blocker.once('error', reject);
-    });
+    // D1 之后 release/native worker 不再监听 HTTP，端口占用不再是单实例信号；
+    // 锁文件里的活跃 PID 才是判据（acquireLock → exit 2）。这里写入测试进程自己的
+    // PID —— 它在 worker 启动时必然还活着。
+    fs.mkdirSync(path.join(dataDir, 'state'), { recursive: true });
+    fs.writeFileSync(path.join(dataDir, 'state', 'bridge.lock'), String(process.pid));
     try {
       const result = runShell(['--smoke-test'], { ...shellEnv(tempRoot, dataDir), WHALEBRIDGE_CORE_MODE: 'development', WHALEBRIDGE_REPO_ROOT: ROOT });
-      assert.equal(result.status, 4, `端口冲突时自检应报未就绪（实际 ${result.status}）\n${result.output}`);
+      assert.equal(result.status, 4, `单实例冲突时自检应报未就绪（实际 ${result.status}）\n${result.output}`);
       assert.match(result.output, /reached_ready=false/);
-      assert.match(result.output, /已有实例在运行|端口被占用/, '应给出"已有实例/端口占用"的说明');
-      assert.match(result.stdout, /spawn_count_after_supervise=1/, '端口冲突不应触发重启');
-      step('✅ 端口冲突：worker exit 2 → 壳判定"已有实例"、不自动重启、需要人工处理');
+      assert.match(result.output, /已有实例在运行/, '应给出"已有实例"的说明');
+      assert.match(result.stdout, /spawn_count_after_supervise=1/, '单实例冲突不应触发重启');
+      step('✅ 单实例冲突：锁文件活跃 PID → worker exit 2 → 壳判定"已有实例"、不自动重启、需要人工处理');
     } finally {
-      await new Promise((resolve) => blocker.close(resolve));
+      fs.rmSync(path.join(dataDir, 'state', 'bridge.lock'), { force: true });
     }
   }
 
@@ -388,11 +392,15 @@ try {
       }
       assert.match(shellLog, /ipc_pipe=.*WhaleBridge-UI-\d+/, '桌面壳日志应记录本实例私有 IPC pipe');
       assert.match(workerLog, /Native UI IPC server is ready\./, 'Core 应启动供原生界面使用的 IPC 服务');
-      const nativeOnly = await fetch(`http://127.0.0.1:${port}/?token=${CONSOLE_TOKEN}`, { redirect: 'manual' });
-      assert.equal(nativeOnly.status, 403, '原生模式不得接受 HTTP console-token 管理操作');
-      assert.match(nativeOnly.headers.get('content-type') ?? '', /application\/json/i, '根路径应返回 JSON 而非 HTML');
-      assert.match((await nativeOnly.json()).error, /本机 IPC/, 'HTTP 管理面应提示使用本机 IPC');
-      step('✅ GUI：原生窗口创建，Core IPC 就绪，HTTP console token 管理调用被拒绝');
+      // D1 契约：native 模式下没有 HTTP 管理面 —— consolePort 拒连（而非 403）。
+      const guiHttpRefused = await new Promise((resolve) => {
+        const socket = net.connect({ host: '127.0.0.1', port });
+        socket.once('connect', () => { socket.destroy(); resolve(false); });
+        socket.once('error', () => { socket.destroy(); resolve(true); });
+        socket.setTimeout(1000, () => { socket.destroy(); resolve(true); });
+      });
+      assert.equal(guiHttpRefused, true, 'native 模式下 worker 在 consolePort 上监听了 HTTP');
+      step('✅ GUI：原生窗口创建，Core IPC 就绪，consolePort 无 HTTP listener');
 
       // 只强杀壳本身（不带 /T，不连带子进程），验证孤儿守卫：
       // 壳消失 → stdout/stdin 管道关闭 → worker 自行优雅退出并释放锁。

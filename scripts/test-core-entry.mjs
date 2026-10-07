@@ -9,6 +9,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { MCP_MODES, parseCoreArgs } from '../src/core-entry.js';
+import { resolveDataPipeName, dataCall } from '../src/control/data-ipc.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ENTRY = path.join(ROOT, 'src', 'core-entry.js');
@@ -21,18 +22,22 @@ async function freePort() {
   return port;
 }
 
-async function waitForHttp(url, timeoutMs = 10000) {
+async function waitForDataIpc(dataRoot, { timeoutMs = 15000 } = {}) {
+  // D1：worker 不监听 loopback HTTP，就绪与数据面健康走数据面 IPC。
+  const pipeName = resolveDataPipeName({ dataRoot });
   const deadline = Date.now() + timeoutMs;
   let lastError = null;
   while (Date.now() < deadline) {
     try {
-      return await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(500) });
+      const token = fs.readFileSync(path.join(dataRoot, 'state', 'agent-token'), 'utf8').trim();
+      const res = await dataCall({ path: '/api/status', token, timeoutMs: 2000, pipeName });
+      return res;
     } catch (error) {
       lastError = error;
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await new Promise((resolve) => setTimeout(resolve, 150));
     }
   }
-  throw lastError ?? new Error(`timeout waiting for ${url}`);
+  throw lastError ?? new Error(`timeout waiting for data IPC ${pipeName}`);
 }
 
 assert.deepEqual(parseCoreArgs(['--worker']), { mode: 'worker' });
@@ -186,11 +191,12 @@ try {
     }
   });
   try {
-    const response = await waitForHttp(`http://127.0.0.1:${workerPort}/`);
-    assert.equal(response.status, 401);
+    // D1 契约：隔离 worker 不监听 consolePort；就绪 = 数据面 IPC 可用。
+    const status = await waitForDataIpc(tempRoot);
+    assert.equal(status.ok, true, `数据面 IPC /api/status 应可用（status ${status.status}）`);
     assert.ok(fs.existsSync(path.join(tempRoot, 'state', 'agent-token')));
     assert.ok(fs.existsSync(path.join(tempRoot, 'state', 'bridge.lock')));
-    console.log('✅ worker: 隔离数据目录与临时端口启动成功');
+    console.log('✅ worker: 隔离数据目录启动成功（数据面 IPC 健康，无 HTTP listener）');
   } finally {
     if (worker.exitCode === null) worker.kill();
     const exited = await Promise.race([

@@ -26,6 +26,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { assertNoWebUiHtmlArtifacts } from './no-web-release-policy.mjs';
+import { resolveDataPipeName, dataCall } from '../src/control/data-ipc.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DIST = process.env.WHALEBRIDGE_DIST_DIR
@@ -50,18 +51,39 @@ function freePort() {
   });
 }
 
-async function waitForHttp(url, timeoutMs = 20000) {
+// D1 行为契约：发行 worker 不监听 loopback HTTP，就绪探测与数据请求都走数据面 IPC。
+async function waitForDataIpc(dataRoot, { timeoutMs = 30000 } = {}) {
+  const pipeName = resolveDataPipeName({ dataRoot });
   const deadline = Date.now() + timeoutMs;
   let lastError = null;
   while (Date.now() < deadline) {
     try {
-      return await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(1000) });
+      const token = fs.readFileSync(path.join(dataRoot, 'state', 'agent-token'), 'utf8').trim();
+      const res = await dataCall({ path: '/api/status', token, timeoutMs: 3000, pipeName });
+      return { pipeName, token, res };
     } catch (error) {
       lastError = error;
-      await new Promise((resolve) => setTimeout(resolve, 150));
+      await new Promise((resolve) => setTimeout(resolve, 200));
     }
   }
-  throw lastError ?? new Error(`等待超时：${url}`);
+  throw lastError ?? new Error(`数据面 IPC 等待超时：${pipeName}`);
+}
+
+/** 反复探测 consolePort：发行 worker 必须始终拒绝连接（不是 401/403 —— 是没有 server）。 */
+async function assertTcpAlwaysRefused(port, label, { attempts = 5, intervalMs = 400 } = {}) {
+  for (let i = 0; i < attempts; i += 1) {
+    const outcome = await new Promise((resolve) => {
+      const socket = net.connect({ host: '127.0.0.1', port });
+      socket.once('connect', () => { socket.destroy(); resolve({ connected: true, code: null }); });
+      socket.once('error', (error) => { socket.destroy(); resolve({ connected: false, code: error.code }); });
+      socket.setTimeout(1000, () => { socket.destroy(); resolve({ connected: false, code: 'ETIMEDOUT' }); });
+    });
+    assert.equal(
+      outcome.connected, false,
+      `${label}: worker 在 consolePort ${port} 上监听了 HTTP（第 ${i + 1} 次探测连上了）——发行版禁止启动 HTTP 面`
+    );
+    if (i < attempts - 1) await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
 }
 
 // 归一化后比较页面内容：忽略 BOM 与缩进差异，只验证确实读到了资源目录里的文件。
@@ -281,21 +303,13 @@ async function runWorker({ label, dataDir: workerDataDir, resourceDir, useDefaul
   });
 
   try {
-    const anonymous = await waitForHttp(`http://127.0.0.1:${port}/`);
-    assert.equal(anonymous.status, 401, `${label}: 根路径必须要求鉴权`);
-    assert.match(anonymous.headers.get('content-type') ?? '', /^application\/json\b/i);
+    // D1 契约：发行 worker 不监听 consolePort。就绪与数据请求全部走数据面 IPC。
+    const { res } = await waitForDataIpc(effectiveDataDir);
+    assert.equal(res.ok, true, `${label}: 数据面 IPC /api/status 应可用`);
+    assert.equal(typeof res.json?.mode, 'string', `${label}: /api/status 应返回运行模式`);
+    assert.equal(res.json?.tokenModel, 'dual', `${label}: 双令牌模型自描述`);
 
-    const authorized = await fetch(`http://127.0.0.1:${port}/?token=${CONSOLE_TOKEN}`, { redirect: 'manual' });
-    assert.equal(authorized.status, 404, `${label}: Core 不得提供产品网页控制台`);
-    assert.match(authorized.headers.get('content-type') ?? '', /^application\/json\b/i);
-    assert.match((await authorized.json()).error ?? '', /网页控制台已移除/);
-
-    const status = await fetch(`http://127.0.0.1:${port}/api/status?token=${CONSOLE_TOKEN}`);
-    assert.equal(status.status, 200, `${label}: /api/status 带令牌应返回 200`);
-    assert.equal(typeof (await status.json()).mode, 'string');
-
-    const noToken = await fetch(`http://127.0.0.1:${port}/api/status`, { redirect: 'manual' });
-    assert.equal(noToken.status, 401, `${label}: /api/status 无令牌必须 401`);
+    await assertTcpAlwaysRefused(port, label);
 
     // console-token 只在未配置 consoleToken 时生成；agent-token 与 bridge.lock 每次启动都会落盘。
     for (const file of ['agent-token', 'bridge.lock']) {
@@ -316,7 +330,7 @@ async function runWorker({ label, dataDir: workerDataDir, resourceDir, useDefaul
     const nodeChildren = descendants.filter((item) => /^node(\.exe)?$/i.test(item.Name ?? ''));
     assert.deepEqual(nodeChildren, [], `${label}: worker 拉起了 node.exe 子进程：${JSON.stringify(nodeChildren)}`);
     step(
-      `✅ ${label}：401/404 根路径与 200/401 API 鉴权、agent-token/bridge.lock 落盘、` +
+      `✅ ${label}：数据面 IPC /api/status 200、consolePort 拒连（无 HTTP server）、agent-token/bridge.lock 落盘、` +
         `资源目录生效、后代进程 ${descendants.length} 个（${descendants.map((item) => item.Name).join(', ') || '无'}）且无 node.exe`
     );
   } catch (error) {
@@ -471,18 +485,16 @@ try {
     argStderr += String(chunk);
   });
   try {
-    const response = await waitForHttp(`http://127.0.0.1:${argPort}/`);
-    assert.equal(response.status, 401);
+    // 就绪与鉴权验证都走数据面 IPC（发行 worker 没有 HTTP 面可探测）。
+    await waitForDataIpc(argDataDir);
     const tokenFile = path.join(argDataDir, 'state', 'console-token');
     assert.ok(fs.existsSync(tokenFile), '--data-dir 未被采用：未在指定目录生成 state/console-token');
     const generated = fs.readFileSync(tokenFile, 'utf8').trim();
     assert.ok(generated.length >= 32, '生成的 console-token 长度异常');
-    const authorized = await fetch(`http://127.0.0.1:${argPort}/?token=${generated}`, { redirect: 'manual' });
-    assert.equal(authorized.status, 404, '生成的 console-token 应通过鉴权，但 Core 不提供网页控制台');
-    assert.match((await authorized.json()).error ?? '', /网页控制台已移除/);
-    const status = await fetch(`http://127.0.0.1:${argPort}/api/status?token=${generated}`);
-    assert.equal(status.status, 200, '生成的 console-token 应能访问控制 API');
-    step('✅ --data-dir：覆盖默认数据目录，生成 console-token 并用于控制 API 鉴权');
+    const status = await dataCall({ path: '/api/status', token: generated, timeoutMs: 5000, pipeName: resolveDataPipeName({ dataRoot: argDataDir }) });
+    assert.equal(status.ok, true, '生成的 console-token 应能访问控制 API');
+    await assertTcpAlwaysRefused(argPort, 'worker（--data-dir）');
+    step('✅ --data-dir：覆盖默认数据目录，生成 console-token 并经数据面 IPC 通过鉴权');
   } catch (error) {
     await killQuietly(argWorker);
     error.message = `${error.message}\n--- worker stderr ---\n${argStderr}`;
@@ -513,13 +525,13 @@ try {
     portableStderr += String(chunk);
   });
   try {
-    const response = await waitForHttp(`http://127.0.0.1:${portablePort}/`);
-    assert.equal(response.status, 401);
+    await waitForDataIpc(portableDataDir);
     assert.ok(
       fs.existsSync(path.join(portableDataDir, 'state', 'console-token')),
       'portable.flag 未被采用：数据未写入 exe 同目录 data/'
     );
-    step('✅ portable.flag：便携模式下数据写入 exe 同目录 data/（含资源自动发现）');
+    await assertTcpAlwaysRefused(portablePort, 'worker（便携模式）');
+    step('✅ portable.flag：便携模式下数据写入 exe 同目录 data/（含资源自动发现），且不监听 consolePort');
   } catch (error) {
     await killQuietly(portableWorker);
     error.message = `${error.message}\n--- worker stderr ---\n${portableStderr}`;

@@ -17,6 +17,7 @@ import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { assertNoWebUiBinaryMarkers, assertNoWebUiHtmlArtifacts } from './no-web-release-policy.mjs';
+import { resolveDataPipeName, dataCall } from '../src/control/data-ipc.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const RC_DIR = process.env.WHALEBRIDGE_RC_DIR
@@ -48,46 +49,48 @@ function freePort() {
   });
 }
 
-async function waitForHttp(url, timeoutMs = 40000) {
+// D1：发行 worker 不监听 HTTP，就绪探测与数据请求都走数据面 IPC。
+async function waitForDataIpc(dataRoot, { timeoutMs = 40000 } = {}) {
+  const pipeName = resolveDataPipeName({ dataRoot });
   const deadline = Date.now() + timeoutMs;
   let last = null;
   while (Date.now() < deadline) {
     try {
-      return await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(1500) });
+      const token = fs.readFileSync(path.join(dataRoot, 'state', 'agent-token'), 'utf8').trim();
+      const res = await dataCall({ path: '/api/status', token, timeoutMs: 3000, pipeName });
+      return { pipeName, token, res };
     } catch (error) {
       last = error;
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      await new Promise((resolve) => setTimeout(resolve, 250));
     }
   }
-  throw last ?? new Error(`等待超时：${url}`);
+  throw last ?? new Error(`等待超时：数据面 IPC ${pipeName}`);
 }
 
-async function assertJsonResponse(response, expectedStatus, label) {
-  assert.equal(response.status, expectedStatus, `${label} HTTP 状态不符`);
-  assert.match(response.headers.get('content-type') ?? '', /^application\/json\b/i, `${label} 必须返回 JSON，不能回退到网页`);
-  return response.json();
+/** consolePort 必须始终拒连：发行 worker 根本没有 HTTP server（不是 401/403）。 */
+async function assertConsolePortRefused(port, { rounds = 4, intervalMs = 300 } = {}) {
+  for (let i = 0; i < rounds; i += 1) {
+    const outcome = await new Promise((resolve) => {
+      const socket = net.connect({ host: '127.0.0.1', port });
+      socket.once('connect', () => { socket.destroy(); resolve({ connected: true, code: null }); });
+      socket.once('error', (error) => { socket.destroy(); resolve({ connected: false, code: error.code }); });
+      socket.setTimeout(1000, () => { socket.destroy(); resolve({ connected: false, code: 'ETIMEDOUT' }); });
+    });
+    assert.equal(outcome.connected, false, `consolePort ${port} 不应监听（第 ${i + 1} 次探测连上了）`);
+    if (i < rounds - 1) await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
 }
 
-async function assertNativeApiSurface(port, dataDir, { waitForListener = false } = {}) {
-  const base = `http://127.0.0.1:${port}`;
-  const anonymousRoot = waitForListener
-    ? await waitForHttp(`${base}/`)
-    : await fetch(`${base}/`, { redirect: 'manual' });
-  await assertJsonResponse(anonymousRoot, 401, '未授权根路径');
-
-  const authorizedRoot = await fetch(`${base}/?token=${encodeURIComponent(CONSOLE_TOKEN)}`, { redirect: 'manual' });
-  const rootError = await assertJsonResponse(authorizedRoot, 403, '原生模式根路径');
-  assert.match(String(rootError.error ?? ''), /原生桌面|IPC/i, '根路径应明确提示使用原生应用/IPC，不应提供控制台页面');
-
-  // Native UI 管理能力走 IPC；HTTP 仅保留 Agent/DSH 数据 API。用隔离数据目录生成的服务令牌检查 Core 健康。
-  const agentTokenPath = path.join(dataDir, 'state', 'agent-token');
-  assert.ok(fs.existsSync(agentTokenPath), `Core 未生成服务令牌：${agentTokenPath}`);
-  const agentToken = fs.readFileSync(agentTokenPath, 'utf8').trim();
-  assert.ok(agentToken, '服务令牌不能为空');
-  const status = await fetch(`${base}/api/status?token=${encodeURIComponent(agentToken)}`, { redirect: 'manual' });
-  const payload = await assertJsonResponse(status, 200, 'Core 状态 API');
+async function assertNativeApiSurface(port, dataDir) {
+  // Native UI 管理能力走 IPC；发行 worker 不再监听任何 HTTP。
+  // 就绪与数据面健康都经数据面 pipe 验证（服务令牌鉴权 + 完整 JSON 状态载荷）。
+  const { res } = await waitForDataIpc(dataDir);
+  assert.equal(res.ok, true, `数据面 IPC /api/status 应可用（status ${res.status}）`);
+  const payload = res.json ?? {};
   assert.equal(payload.tokenModel, 'dual', 'Core 状态 API 应返回有效状态载荷');
   assert.ok(Object.hasOwn(payload, 'mode'), '状态载荷缺少 mode');
+
+  await assertConsolePortRefused(port);
   return payload;
 }
 
@@ -195,6 +198,10 @@ const releaseManifest = JSON.parse(fs.readFileSync(path.join(RC_DIR, 'release-ma
 const noWebUi = releaseManifest.noWebUi === true;
 assert.equal(noWebUi, true, '默认发行必须是 no-web 原生桌面发行，不能回退到网页兼容包');
 assert.equal(releaseManifest.uiDistribution, 'native-no-web');
+// D1 红线：发行清单必须声明 worker 不监听 loopback HTTP（legacyHttp=false）。
+assert.equal(releaseManifest.legacyHttp, false, 'release-manifest.legacyHttp 必须为 false（发行 worker 禁止监听 consolePort）');
+const coreRuntimeManifest = JSON.parse(fs.readFileSync(path.join(RC_DIR, 'payload', 'runtime-manifest.json'), 'utf8'));
+assert.equal(coreRuntimeManifest.legacyHttp, false, 'runtime-manifest.legacyHttp 必须为 false');
 assertNoWebUiHtmlArtifacts(listFiles(path.join(RC_DIR, 'payload')), 'release-candidate payload');
 assertNoWebUiBinaryMarkers(fs.readFileSync(path.join(RC_DIR, 'WhaleBridge.exe')), 'release-candidate shell');
 assertNoWebUiBinaryMarkers(fs.readFileSync(path.join(RC_DIR, 'payload', 'WhaleBridgeCore.exe')), 'release-candidate Core');
@@ -306,7 +313,7 @@ try {
 
   let workerPid = null;
   try {
-    await assertNativeApiSurface(port, dataDir, { waitForListener: true });
+    await assertNativeApiSurface(port, dataDir);
 
     const tree = descendants(shell.pid);
     assertNoBrowserRuntime(shell.pid, '首次启动');
@@ -321,7 +328,7 @@ try {
     );
     workerPid = tree.find((item) => path.basename(item.ExecutablePath ?? '').toLowerCase() === 'whalebridgecore.exe').ProcessId;
     assert.ok(isRunning(workerPid), 'worker 应当存活');
-    step(`✅ 运行（发行配置）：Core(pid ${workerPid}) 由桌面壳拉起；根路径仅返回 JSON、原生管理面走 IPC、状态 API 健康，子进程里没有 node.exe`);
+    step(`✅ 运行（发行配置）：Core(pid ${workerPid}) 由桌面壳拉起；数据面 IPC 健康、consolePort 拒连（无 HTTP server）、子进程里没有 node.exe`);
 
     // 运行期安装目录必须保持只读
     await new Promise((resolve) => setTimeout(resolve, 1500));
@@ -348,8 +355,8 @@ try {
     assert.ok(newPid, `worker 被强杀后应由壳自动拉起（stderr: ${shellStderr}）`);
     assertNoBrowserRuntime(shell.pid, '崩溃恢复');
     assert.ok(recoverMs >= 4000, `异常退出应走退避（实测 ${recoverMs}ms，若 <4000ms 说明没走退避）`);
-    await assertNativeApiSurface(port, dataDir, { waitForListener: true });
-    step(`✅ 崩溃恢复：worker 被强杀后在 ${recoverMs}ms 内按退避自动拉起（pid ${workerPid} → ${newPid}），原生 IPC/JSON API 健康恢复`);
+    await assertNativeApiSurface(port, dataDir);
+    step(`✅ 崩溃恢复：worker 被强杀后在 ${recoverMs}ms 内按退避自动拉起（pid ${workerPid} → ${newPid}），数据面 IPC 健康恢复`);
     workerPid = newPid;
 
     // ------------------------------------------------- 3b. 单实例
