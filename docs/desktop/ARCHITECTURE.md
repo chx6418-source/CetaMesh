@@ -11,16 +11,32 @@
   reference. A DSH (or future) Agent session is an attachable execution reference only.
 - **Agent Provider != Model Provider.** Providers implement a contract; DSH is the first Agent
   Provider. Model selection lives with the chat/provider configuration.
-- **QQ / SnowLuma is a Channel Adapter, never the Core.** The product runtime has no SnowLuma
-  imports; the adapter is optional at run time and appears under Diagnostics/Settings.
+- **QQ / SnowLuma is a Channel Adapter, never the Core.** The SDK import and connection runtime
+  live under `src/channel/qq/`; Core services construct without importing that adapter or needing
+  DSH readiness.
 - Desktop and Mobile are independent CetaMesh Nodes; Device Mesh is a separate protocol layer.
+
+## Process composition
+
+The desktop shell starts one Node worker at `src/bridge.js`. That worker is the compatibility
+entry for legacy QQ/Social behavior and calls `src/app/bootstrap.js` to construct modern Core
+services. `src/app/service-container.js` owns service wiring, `src/app/ipc-runtime.js` owns the
+existing UI IPC method routing, and the application lifecycle closes registered services.
+The bridge retains QQ/Social policy and injects its DSH client into Core when present; Core
+construction itself succeeds without a QQ client or a ready DSH provider.
+
+```text
+Desktop shell → one Node worker (`src/bridge.js`)
+                    ├─ `src/app/bootstrap.js` → service container → IPC runtime
+                    └─ legacy QQ/Social integration → `src/channel/qq/` adapter
+```
 
 ## Layers
 
 ```
 UI (egui native shell)                      desktop-shell/src/native_ui.rs, *_ui.rs, app_shell.rs
         |  versioned JSON over a per-instance named pipe
-Runtime / Application services              src/desktop, src/task, src/memory, src/workspace,
+Composition root / Runtime services       src/app, src/desktop, src/task, src/memory, src/workspace,
                                             src/agent, src/continuity, src/settings, src/about,
                                             src/update, src/extension, src/mesh, src/channel
         |
@@ -41,7 +57,7 @@ Native / Infrastructure                     Node SEA Core, Rust supervisor/insta
 | Workspace | `src/workspace/` | root canonicalization and path containment (`boundary.js`) |
 | Agent Provider | `src/agent/` | provider contract + DSH adapter + registry |
 | Continuity | `src/continuity/` | context monitor, rollover, handoff packets |
-| Extensions | `src/extension/` | manifest review, static scan, sandboxed `vm` host, no host fs/process |
+| Extensions | Runtime: `src/extension/`; packages and fixtures: `extensions/` | The only canonical Extension runtime; manifest review, static scan and sandboxed `vm` host. |
 | Device Mesh | `src/mesh/` | identity/trust, capabilities, transport and approval |
 | Channels | `src/channel/` | Channel Adapter registry (QQ/SnowLuma entry lives here) |
 | Settings / About / Update | `src/settings`, `src/about`, `src/update` | product settings, build provenance, signed-manifest update checks |
@@ -69,7 +85,7 @@ Native / Infrastructure                     Node SEA Core, Rust supervisor/insta
 | Agent must not access the disk arbitrarily | Workspace tools resolve user paths through `src/workspace/boundary.js` (lexical + realpath containment, forbidden roots); runtime tests: `npm run test-workspace`. |
 | Trust must not become Permission | Agent/extension capabilities require declared permissions plus explicit grants/approval (`src/extension/review.js`, `src/extension/host.js`, task/agent approval paths); tests: `test-extension`, `test-task`, `test-mesh`. |
 | Task must not depend on an Agent Session | `src/task/runtime.js` keeps `currentAgent` as an optional attachment; detach sets it to `null` without touching task identity. Tests: `npm run test-task`. |
-| QQ must not be a Core dependency | Product runtime has zero SnowLuma imports; the adapter only appears in `src/channel/registry.js` and diagnostics placement. Test: `test-architecture` + `test-core-entry`. |
+| QQ must not be a Core dependency | The service-container import closure excludes SnowLuma SDK, QQ runtime and Social adapters; Core constructs with no QQ/DSH injection. Tests: `test-composition-boundary`, `test-service-container`. |
 | Secrets must not reach logs | `src/logging/redact.js` (mandatory `createRedactingSink`, text + field rules). Test: `npm run test-system` (includes bearer-token regression). |
 | Extensions must not execute downloaded code freely | Static scan forbids `child_process`/`fs`/dynamic import/`new Function`; the host runs code in `vm.createContext` with no host `require`/`process`/`Buffer`/fs/net; high-risk permissions need explicit review approval. Tests: `npm run test-extension`. |
 | Legacy reserved modes stay out of the product flow | No `reserved`/`reserved2` references in `src/desktop`, `src/agent`, `src/memory`, `src/task`, `src/workspace`, `src/continuity`; they remain only in the legacy QQ adapter surfaces (Advanced). Test: `test-architecture`. |

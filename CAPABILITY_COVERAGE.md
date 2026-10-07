@@ -1,13 +1,19 @@
-# CetaMesh Desktop — Capability Coverage（v2 hardening, 2026-10-05）
+# CetaMesh Desktop — Capability Coverage（v2 hardening, 2026-10-07）
 
-唯一裁决点：`src/capability/broker.js`（policy fail-closed：未知 capability →
-`UNKNOWN_CAPABILITY`；未知 permission → `UNKNOWN_PERMISSION`；external/device
-caller → `PERMISSION_DENIED`；agent 需显式 task grant + workspace 匹配）。
-本表逐模块核对"调用路径是否经过 Broker"，并列出本轮（v2 hardening）迁移结果。
+**Capability Broker (`src/capability/broker.js`) 是 CetaMesh generic Capability Plane 的权威裁决点。**
+新增长期通用 Capability 必须注册并经 Broker policy 授权；未知 capability / permission fail closed，
+agent 请求还需 task grant 与 workspace 匹配。Broker 不宣称覆盖所有系统操作路径。
+
+明确的 Direct Exceptions（各自保留更窄的适配器/控制面边界）：
+- QQ MCP adapter-specific boundary：白名单、只读子集、风险卡逐次审批，见 `src/mcp-snowluma-safe.js` 与 `RULES.md`。
+- Mesh trust/pairing control plane：Owner 明确操作与配对授权，见 `src/mesh/trust.js` 与 `src/mesh/service.js`。
+
+这两项例外不为新增 generic capability 提供先例；任何新通用能力仍必须经 Broker。
+本表逐模块核对调用路径，并记录已明确的 Direct / Adapter / Deferred 边界。
 
 状态词表：**Brokered**（注册进 Registry 且经 policy.authorize）· **Adapter（bounded）**
 （有限 Adapter 已建，完整目录待后续）· **Direct（by design）**（按安全设计不走
-Broker，走自身更严格的边界）· **Deferred**（本轮明确不做）。
+Broker，走自身更窄的适配器或控制面边界）· **Deferred**（本轮明确不做）。
 
 ## 覆盖矩阵
 

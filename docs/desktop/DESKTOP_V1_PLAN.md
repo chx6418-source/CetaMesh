@@ -112,7 +112,9 @@
 ## Stage I — Plugin / Tool Lab（workplan D9）【PLANNED】
 
 - [ ] TASK-D9-001~005（Tool Builder / Manifest v1 / Import Pipeline / Install Lifecycle / Memory Pack）
-- 注：`plugins/cetamesh-*` 与 `src/desktop-plugin-*.js` 是**未跟踪草稿**，不代表已批准方向；启用其任何内容前必须所有者明确决策。
+- Canonical Extension runtime 唯一为 `src/extension/`，扩展包/测试样例位于 `extensions/`。
+- 旧原型名 `plugins/cetamesh-*`、`src/desktop-plugin-*.js`、`src/mcp-desktop-utilities.js` 已废弃且不在生产源码树；历史文档仅保留审计事实。
+- 跟踪的 `plugins/whale-mode-console` 是历史插件，不是 CetaMesh Extension runtime。
 
 ## Stage J — Private RC / 发布（workplan D10）【PLANNED】
 

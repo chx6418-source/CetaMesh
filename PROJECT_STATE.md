@@ -6,17 +6,18 @@
 
 ## Git facts（2026-10-07）
 
-- `main` = `142ebb6`（技术债会话 1 已合并：release HTTP 完整移除 + 统一测试入口/CI + 仓库卫生 + 静默失败红线）。
-- 当前工作分支：`refactor/storage-foundation-v1`（技术债会话 2：D3 Storage Primitive + D12 State Retention + D7 文档瘦身）。
-- 会话 1 的交接：`docs/archive/handoffs/HANDOFF_TECHDEBT_SESSION_1.md`。
+- Session 3 基准 HEAD：`aaff6bf490c95f77e64aed3ebef61f8dbdeb6fba`（本地 `main`，包含 Session 1 + Session 2 交接提交）。
+- `origin/main` 仍停在 Session 1 基准 `142ebb6`；Session 2 与本轮均未 push。
+- 当前工作分支：`refactor/core-composition-v1`（Session 3）；需 Owner 确认后才合并到 `main`，验证合并结果后删除工作分支。
+- Session 1 / 2 交接文档：`docs/archive/handoffs/HANDOFF_TECHDEBT_SESSION_1.md`、`HANDOFF_TECHDEBT_SESSION_2.md`。
 
 ## Architecture（稳定面）
 
-- **产品形态**：原生 Rust/egui 桌面壳（`desktop-shell/`）+ Node Core（`src/bridge.js` worker）。
+- **产品形态**：原生 Rust/egui 桌面壳（`desktop-shell/`）+ 单个 Node worker（`src/bridge.js` 兼容入口）。
   Release 无 HTTP：数据面走 `\\.\pipe\WhaleBridge-Data-*`（MCP → `src/control/data-ipc.js` → handleApiRequest），
   管理面走 `\\.\pipe\WhaleBridge-UI-*`；legacy HTTP 仅 dev 显式 opt-in（SEA 内无效）。
 - **运行模式**（`src/runtime-surface.js`）：`native-release / native-dev / headless-dev / legacy-web-dev`。
-- **Core 服务装配**（bridge.js 内组装）：Chat（`desktop/chat-service.js`，Model Runtime + DSH 双通道）→
+- **Core 服务装配**：`src/app/bootstrap.js` → `src/app/service-container.js` 构造现代服务 → `src/app/ipc-runtime.js` 接管 UI IPC 路由。`src/bridge.js` 留作 worker 兼容入口和 Legacy QQ/Social runtime；Chat（`desktop/chat-service.js`，Model Runtime + 可选 DSH Agent Provider）→
   Smart Router（`router/`）→ Task（`task/`）→ Agent Broker（`agent/`）→ Continuity（`continuity/`，rollover/handoff）；
   Memory（`memory/`，授权分区检索）、Workspace（`workspace/`）、Capability Broker（`capability/`，fail-closed）、
   Extension（`extension/`）、Mesh（`mesh/`）、Workshop（`workshop/`）、Settings（`settings/`）、Config（`config/`）。
@@ -33,7 +34,9 @@
   分类入口 `npm run test:core|architecture|security|runtime|integration|desktop|release|environment`；
   CI：`.github/workflows/ci.yml`（windows-latest：`npm ci → npm test → desktop:check → desktop:test`）。
 - 会话 2 新增套件：`test-json-storage`（原语行为/Windows 语义）、`test-storage-migrations`（各 store 迁移回归）、
-  `test-state-retention`（日志轮转/状态 TTL/候选淘汰）。
+  `test-state-retention`（日志轮转/状态 TTL/候选淘汰）。Session 3 新增 `test-service-container`、
+  `test-composition-boundary`、`test-ipc-runtime`、`test-dsh-lifecycle`、`test-qq-runtime` 和
+  `test-runner-environment`（真实旧控制台测试须显式 opt-in）。
 - Storage 迁移范围（会话 2）：task / memory（store+runtime+links） / extension（registry+manifest 解析+memory-pack） /
   settings / continuity（含 packet 清理）/ chat session / mesh（trust+identity）/ workshop / router policy /
   config loader 底层复用。capability 仅加固临时文件命名（crypto 随机），未整体迁移。
@@ -64,19 +67,12 @@
 - 桌面壳 `supervisor.rs` 的 HTTP 探活 fallback 已是死代码（待后续会话删除）。
 - NOT_RUN_ENVIRONMENT（无真实环境时如实不跑）：真实 provider-key 回合 / 真实 QQ / 跨设备 Mesh / 签名 / 真实发行产物。
 
-## Active Work（技术债会话 2）
+## Active Work（技术债会话 3）
 
-- 分支 `refactor/storage-foundation-v1`；完成后由 Owner 确认合并 main，交接见根目录 `HANDOFF_TECHDEBT_SESSION_2.md`。
-- 本轮明确不做：Composition Root、IPC 结构大改、SQLite/向量库、bridge.js 大拆、DSH lifecycle、品牌 rename。
-
-## Next Steps（技术债会话 3 入口）
-
-1. D4 Composition Root：bridge.js 服务装配收拢（装配顺序与依赖注入显式化）。
-2. D5 IPC 结构收口（Control Plane / Data Plane 既有分离之上的结构化，不改协议）。
-3. DSH Lifecycle（启停/健康/版本边界）。
-4. D6/D9/D11/D14 收尾 + 全量 RC（`build:core → desktop:build → build:release → test-release-candidate`）。
-5. 建议（非阻塞）：历史裸 catch 按 config/storage/security 优先级逐类消化；删除 supervisor HTTP 死代码。
-
+- 分支 `refactor/core-composition-v1`，基于 Session 2 完整交接 HEAD `aaff6bf`。本轮未 push。
+- Owner 确认前不合并；确认后 merge → verify → 删除本地工作分支。流程见 `docs/development/GIT_WORKFLOW.md`。
+- Session 3 收口 D4 Composition Root、D5 IPC、DSH Lifecycle、D6/D9/D11/D14 与 RC；D8 品牌内部兼容名不做。
+- 全量报告：`TECH_DEBT_CONSOLIDATION_REPORT.md`。
 ## 文档地图（Agent 默认只读这里列的）
 
 - 开始工作必读：`RULES.md` → 本文件 → 相关架构文档（`docs/desktop/ARCHITECTURE.md` 等）。
