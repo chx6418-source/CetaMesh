@@ -8,9 +8,11 @@ export function bootstrapCetaMesh(options = {}) {
     log: options.log ?? (() => {})
   });
 
-  lifecycle.register(() => services.chatService.close());
-  lifecycle.register(() => services.managedAgent.close());
+  // Shutdown runs in reverse registration order: stop Chat consumers before their
+  // Agent provider, then release the Agent Broker after provider cleanup.
   lifecycle.register(() => services.agentService.close());
+  lifecycle.register(() => services.managedAgent.close());
+  lifecycle.register(() => services.chatService.close());
 
   return { services, lifecycle };
 }
