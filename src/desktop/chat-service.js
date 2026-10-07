@@ -101,7 +101,7 @@ export function createChatService({
   now = () => Date.now(),
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   // 会话 2 / 自动 Context Monitoring：Agent/DSH 通道回合结束时上报 usage（真实优先，
-  // 否则字符估算）。由 bridge 注入（→ Agent Broker 回合结束事件 → Continuity）；
+  // 否则字符估算）。由 app composition root 注入（→ Agent Broker 回合结束事件 → Continuity）；
   // Model Runtime 通道（非 Agent 会话）不上报。上报失败绝不影响回合机。
   onTurnEnd = null
 }) {

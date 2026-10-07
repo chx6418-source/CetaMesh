@@ -7,15 +7,15 @@
 //   - Channel Adapter 是外部通道的接入层，不是 Core 的入口，也不是 Core 的依赖；
 //   - adapter 的 state 只描述"这条通道能不能用"，绝不参与 Core readiness 判定。
 //
-// 注：SnowLuma/QQ 的实际生命周期早已按此实现（bridge.js 里 SnowLuma 连接失败只降级 QQ 链路，
-// 主程序继续独立运行）。这里补的是**显式声明与回归锁**，不是行为改造。
+// 注：SnowLuma/QQ 的连接生命周期位于 src/channel/qq/runtime.js；bridge.js 保留 Legacy QQ/Social 策略。
+// 连接失败只降级 QQ 链路，Core 继续运行。这里声明的是通道与 Core 的独立关系。
 
 export const CHANNEL_ADAPTERS = Object.freeze([
   {
     id: 'qq',
     name: 'QQ（OneBot v11 / SnowLuma）',
     kind: 'channel-adapter',
-    implementation: 'src/bridge.js + src/mcp-snowluma-safe.js',
+    implementation: 'src/channel/qq/runtime.js + src/bridge.js + src/mcp-snowluma-safe.js',
     provides: ['qq.message.receive', 'qq.message.send', 'qq.card.read', 'qq.file.send'],
     coreDependency: false,
     notes: '外部通道接入层；不可用时只降级 QQ 链路，Desktop Core 继续运行。'

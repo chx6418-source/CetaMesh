@@ -329,7 +329,7 @@ try {
   const { startIpcProtocol, IPC_PROTOCOL_VERSION } = await import('../src/control/ipc-protocol.js');
   const ipcDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-memory-ipc-'));
   const ipcService = createMemoryService({ stateDir: ipcDir, now });
-  // 与 bridge.js 的 startUiIpcServer 相同的分派形状：memory.* 走 Memory 服务。
+  // 复现 src/app/ipc-runtime.js 的分派形状：memory.* 走 Memory 服务。
   const ipcDispatch = ({ method, params }) => {
     if (method.startsWith('memory.')) return ipcService.execute({ method, params });
     throw new Error('unexpected method ' + method);

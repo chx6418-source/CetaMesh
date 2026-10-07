@@ -1,17 +1,11 @@
-// QQ ↔ DeepSeek Harness 桥接主程序。
-//
-// 链路：
-//   QQ 消息 → SnowLuma (OneBot v11 WS) → 本进程 → DSH Web API session.prompt
-//   DSH agent 回复/提问/审批 → events.mux 事件流 → 本进程 → send_msg → QQ
-//
-// 用法：node src/bridge.js （先编辑 ../config.json）
+// CetaMesh worker compatibility entry + Legacy QQ/Social integration runtime.
+// Core service construction lives in src/app; this file retains the legacy QQ/Social behavior.
+// 用法：node src/bridge.js
 import fs from 'node:fs';
 import http from 'node:http';
-import net from 'node:net';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { SnowLumaWebSocketClient, text } from '@snowluma/sdk';
 import { APP_PATHS, listRoleNames, resolveRoleFile } from './app-paths.js';
 import { readRawConfig } from './config/loader.js';
 import { DEFAULT_MODEL, migrateLegacyConfig, normalizeOwnerQQ } from './config/migrate.js';
@@ -73,34 +67,16 @@ import {
 } from './sticker-lib.js';
 import { loginInfo, extractKugouAuth, createQrLogin, pollQrLogin } from './kugou-api.js';
 import { createLocalServiceManager, SNOWLUMA_RELEASE_PAGE, DSH_INSTALL_HINT } from './local-services.js';
+import { bootstrapCetaMesh } from './app/bootstrap.js';
+import { createDesktopIpcRuntime } from './app/ipc-runtime.js';
+import { createDshLifecycle } from './providers/dsh/lifecycle.js';
+import { createQqRuntime } from './channel/qq/runtime.js';
+import { createQqTransport } from './channel/qq/transport.js';
 import { selectDshSessionModel } from './dsh-model-selection.js';
 import { CONTROL_METHODS, ControlServiceError, createControlService } from './control/control-service.js';
-import { startIpcProtocol } from './control/ipc-protocol.js';
 import { startDataIpcServer, resolveDataPipeName } from './control/data-ipc.js';
 import { describeRuntimeSurfacePolicy, resolveRuntimeSurfacePolicy } from './runtime-surface.js';
-import { createChatService } from './desktop/chat-service.js';
-import { createDesktopPlatformRuntime } from './desktop/platform-runtime.js';
-import { createCapabilityService, registerChannelMeshCapabilities } from './capability/index.js';
-import { createWorkshopService } from './workshop/index.js';
-import { createManagedAgentProvider } from './agent/managed-agent-provider.js';
 import { normalizeRuntimeMode } from './runtime-policy.js';
-import { searchWeb } from './mcp-web-search-safe.js';
-import { createProviderSecrets } from './providers/secrets.js';
-import { createModelProviderRegistry, createModelRuntimeService, createOpenAiCompatibleModelProvider } from './model/index.js';
-import { createRouterService } from './router/index.js';
-import { createMemoryService } from './memory/service.js';
-import { createWorkspaceService } from './workspace/index.js';
-import { createIsolatedTestRunner } from './workspace/isolated-runner.js';
-import { createTaskService } from './task/service.js';
-import { createContinuityService, createWorkspaceReconciler } from './continuity/index.js';
-import { gitDiff, gitHead, gitStatus } from './workspace/tools.js';
-import { createDefaultAgentService } from './agent/index.js';
-import { createExtensionService } from './extension/service.js';
-import { createMeshService } from './mesh/service.js';
-import { createChannelService } from './channel/service.js';
-import { createSettingsService } from './settings/service.js';
-import { createAboutService } from './about/service.js';
-import { createUpdateService } from './update/service.js';
 let kugouQrSession = null; // 进行中的二维码登录会话 { key, mid, dfid, createdAt }
 let kugouLoginCache = null; // { cookie, info, fetchedAt } 缓存的完整登录信息（含 roleinfo 探测的会员状态）
 async function probeKugouLogin(cookie) {
@@ -465,93 +441,6 @@ function log(...args) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const convKey = (kind, id) => `${kind}:${id}`;
 const SEND_TIMEOUT_MS = 15000;
-
-function startUiIpcServer(controlService, chatService, memoryService, taskService, continuityService, extensionService, meshService, channelService, systemServices, agentService, workspaceService, providerSecrets, modelRuntime, routerService, capabilityService, workshopService) {
-  const pipeName = String(process.env.WHALEBRIDGE_UI_PIPE ?? '').trim();
-  if (!pipeName) return null;
-
-  const dispatchCommand = ({ method, params }) => {
-    if (method.startsWith('capability.')) return capabilityService.execute({ method, params });
-    if (method.startsWith('workshop.')) return workshopService.executeOwner({ method, params });
-    if (method.startsWith('chat.')) {
-      return chatService.execute({ method, params });
-    }
-    if (method.startsWith('memory.')) {
-      return capabilityService.executeMemory({ method, params });
-    }
-    if (method.startsWith('task.')) {
-      return taskService.execute({ method, params });
-    }
-    if (method.startsWith('continuity.')) {
-      return continuityService.execute({ method, params });
-    }
-    if (method.startsWith('providers.')) {
-      return providerSecrets.execute({ method, params });
-    }
-    // Model Runtime / Smart Router（会话 1）：模型目录与健康、Cost Policy 与分类调试。
-    // 注意：控制面的 model.defaults.* / model.catalog.* 仍归 controlService（DSH 模型管理）；
-    // Model Runtime 私有家族用 modelrt.* 避免前缀碰撞。
-    if (method.startsWith('modelrt.')) {
-      return modelRuntime.execute({ method, params });
-    }
-    if (method.startsWith('router.')) {
-      return routerService.execute({ method, params });
-    }
-    if (method.startsWith('ext.')) {
-      return extensionService.execute({ method, params });
-    }
-    if (method.startsWith('mesh.')) {
-      return meshService.execute({ method, params });
-    }
-    if (method.startsWith('channel.')) {
-      return channelService.execute({ method, params });
-    }
-    if (method.startsWith('agent.')) {
-      return agentService.execute({ method, params });
-    }
-    // 工作区安全边界（阶段 05）：workspace.* 全部经 boundary 裁决，见 src/workspace/。
-    if (method.startsWith('workspace.')) {
-      return capabilityService.executeWorkspace({ method, params });
-    }
-    // 系统页面（阶段 12）：settings / about / update 合成一个对象传递，
-    // 避免 startUiIpcServer 的位置参数继续膨胀（已到 9 个，属已知技术债）。
-    if (method.startsWith('settings.')) {
-      return systemServices.settings.execute({ method, params });
-    }
-    if (method.startsWith('about.')) {
-      return systemServices.about.execute({ method, params });
-    }
-    if (method.startsWith('update.')) {
-      return systemServices.update.execute({ method, params });
-    }
-    return controlService.execute({
-      method,
-      params,
-      actor: { privilege: PRIVILEGE_CONSOLE }
-    });
-  };
-  const server = net.createServer((socket) => {
-    socket.setNoDelay(true);
-    const connection = startIpcProtocol({
-      input: socket,
-      output: socket,
-      dispatch: dispatchCommand
-    });
-    connection.done.catch((error) => {
-      if (!socket.destroyed) log(`Native UI IPC connection failed: ${error?.message ?? error}`);
-    });
-  });
-  server.maxConnections = 16;
-  server.on('error', (error) => {
-    log(`Native UI IPC server failed: ${error?.message ?? error}`);
-    process.exit(error?.code === 'EADDRINUSE' ? 2 : 1);
-  });
-  server.listen(pipeName, () => log('Native UI IPC server is ready.'));
-  process.once('exit', () => {
-    try { server.close(); } catch {}
-  });
-  return server;
-}
 
 function withTimeout(promise, ms, label) {
   let timer;
@@ -1020,7 +909,7 @@ async function main() {
 
   async function runSlangExtraction(key) {
     if (cfg.slang?.enabled === false) return;
-    if (!dshReady) return;
+    if (!isDshReady()) return;
     const messages = slangWindows.get(key) ?? [];
     const min = Math.max(1, Number(cfg.slang?.extractMinMessages ?? 10));
     if (messages.length < min) return;
@@ -1079,7 +968,7 @@ async function main() {
   async function runSlangResearch(candidates) {
     if (!candidates || !candidates.length) return;
     if (cfg.slang?.enabled === false) return;
-    if (!dshReady) return;
+    if (!isDshReady()) return;
     // 过滤掉已经在研究队列里的候选，避免同一批被重复排队研究。
     const targets = candidates.filter((e) => e && !slangResearchingIds.has(e.id));
     if (!targets.length) return;
@@ -1128,7 +1017,7 @@ async function main() {
 
   function maybeQueueSlangExtraction(key) {
     if (cfg.slang?.enabled === false) return;
-    if (!dshReady) return;
+    if (!isDshReady()) return;
     const cooldown = Number(cfg.slang?.extractCooldownMs ?? 300000);
     const last = slangExtractionCooldowns.get(key) ?? 0;
     if (Date.now() - last < cooldown) return;
@@ -1356,11 +1245,9 @@ async function main() {
 
   // DSH 可用性探活 + 重启容错队列：
   // DSH 重启期间收到的 QQ 消息先入队（不丢），DSH 恢复后按序补投。
-  let dshReady = false;
-  let dshCheckStarted = false;
-  let dshFailureLogged = false; // 首次探测失败打一条原因，之后转为静默（切换状态时再报）
   let currentMode = 'chat'; // chat | owner-agent | social | workshop（由 DSH settings / state/mode.json 驱动）
   let lastMode = currentMode;
+  const isDshReady = () => dshLifecycle.status().ready;
   let closedAgentPreset = 'router-standard'; // owner-agent 模式使用的 DSH agent preset
   let workshopPreset = 'cetamesh-workshop'; // workshop 模式使用的 DSH agent preset
   let workshopRuntimeService = null;
@@ -1537,73 +1424,62 @@ async function main() {
       flushingQueue = false;
     }
   };
-  const checkDsh = async () => {
-    let ok = false;
-    let lastError = null;
-    try {
+  const dshLifecycle = createDshLifecycle({
+    probe: async () => {
       await api.callEndpoint('settings/describe', {});
-      ok = true;
-    } catch (error) {
-      lastError = error;
-    }
-    if (ok) {
       await refreshMode();
-      if (!dshReady) {
-        dshReady = true;
-        lastMode = currentMode;
-        log(`DSH 已就绪（模式: ${currentMode}）`);
-        // 恢复既有会话的 follow 流（ensureFollowStream 幂等；黑话学习会话按需建立）
-        for (const sid of new Set(Object.values(state.sessions))) ensureFollowStream(sid);
-        if (currentMode === 'social') {
-          // 首次确定模式为 social 后再恢复持久化的有限睡眠定时器，
-          // 避免在 initial chat 模式下设置定时器导致 timeout 唤醒被模式守卫吞掉。
-          for (const key of socialV2.conversations.keys()) {
-            setupSleepTimerV2(key);
-            scheduleProactiveCheckV2(key);
+    },
+    intervalMs: cfg.dsh?.healthCheckIntervalMs,
+    log,
+    onRefresh: async ({ status, previousStatus }) => {
+      if (status.ready) {
+        if (!previousStatus.ready) {
+          lastMode = currentMode;
+          log('DSH 已就绪（模式: ' + currentMode + '）');
+          // 恢复既有会话的 follow 流（ensureFollowStream 幂等；黑话学习会话按需建立）
+          for (const sid of new Set(Object.values(state.sessions))) ensureFollowStream(sid);
+          if (currentMode === 'social') {
+            // 首次确定模式为 social 后再恢复持久化的有限睡眠定时器，
+            // 避免在 initial chat 模式下设置定时器导致 timeout 唤醒被模式守卫吞掉。
+            for (const key of socialV2.conversations.keys()) {
+              setupSleepTimerV2(key);
+              scheduleProactiveCheckV2(key);
+            }
+            log('桥接模式已确定为 social，恢复有限睡眠定时器');
           }
-          log('桥接模式已确定为 social，恢复有限睡眠定时器');
-        }
-        try { await flushQueue(); } catch (error) { log('补投队列异常:', error?.message ?? error); }
-        // DSH 恢复后，把离线期间攒下的黑话学习窗口补触发
-        for (const key of [...slangWindows.keys()]) maybeQueueSlangExtraction(key);
-      } else if (currentMode !== lastMode) {
-        if (lastMode === 'reserved' && currentMode !== 'reserved') {
-          cleanupSocialForModeChange();
-          log('桥接模式已离开一代仿真模式，清理社交状态');
-        }
-        if (lastMode === 'social' && currentMode !== 'social') {
-          clearAllSocialV2Timers();
-          drainAllPromptQueues('模式切换，已取消排队中的投递');
-          cancelPendingCardButtonApprovals('模式已离开 social，风险卡片审批已撤销', 'mode-change');
-          log('桥接模式已离开二代仿真模式，清理 social 定时器与排队投递');
-        }
-        if (currentMode === 'social' && lastMode !== 'social') {
-          for (const key of socialV2.conversations.keys()) {
-            setupSleepTimerV2(key);
-            scheduleProactiveCheckV2(key);
+          try { await flushQueue(); } catch (error) { log('补投队列异常:', error?.message ?? error); }
+          // DSH 恢复后，把离线期间攒下的黑话学习窗口补触发
+          for (const key of [...slangWindows.keys()]) maybeQueueSlangExtraction(key);
+        } else if (currentMode !== lastMode) {
+          if (lastMode === 'reserved' && currentMode !== 'reserved') {
+            cleanupSocialForModeChange();
+            log('桥接模式已离开一代仿真模式，清理社交状态');
           }
-          log('桥接模式已进入二代仿真模式，重建有限睡眠定时器');
+          if (lastMode === 'social' && currentMode !== 'social') {
+            clearAllSocialV2Timers();
+            drainAllPromptQueues('模式切换，已取消排队中的投递');
+            cancelPendingCardButtonApprovals('模式已离开 social，风险卡片审批已撤销', 'mode-change');
+            log('桥接模式已离开二代仿真模式，清理 social 定时器与排队投递');
+          }
+          if (currentMode === 'social' && lastMode !== 'social') {
+            for (const key of socialV2.conversations.keys()) {
+              setupSleepTimerV2(key);
+              scheduleProactiveCheckV2(key);
+            }
+            log('桥接模式已进入二代仿真模式，重建有限睡眠定时器');
+          }
+          log('桥接模式已切换为: ' + currentMode);
+          lastMode = currentMode;
         }
-        log(`桥接模式已切换为: ${currentMode}`);
-        lastMode = currentMode;
-      }
-    } else {
-      // 不再静默吞错：打印失败原因（401/403/连接拒绝各不相同），但只在状态切换时打一条，避免刷屏。
-      if (dshReady) {
-        dshReady = false;
-        log(`⚠️ DSH 不可用（重启中？），QQ 消息将入队等待。原因: ${lastError?.message ?? '未知'}`);
-      } else if (!dshFailureLogged) {
-        dshFailureLogged = true;
-        log(`⚠️ DSH 尚未就绪: ${lastError?.message ?? '未知'}`);
+      } else if (previousStatus.state === 'ready') {
+        log('⚠️ DSH 不可用（重启中？），QQ 消息将入队等待。原因: ' + (status.error ?? '未知'));
+      } else if (previousStatus.state === 'unknown') {
+        log('⚠️ DSH 尚未就绪: ' + (status.error ?? '未知'));
       }
     }
-    if (ok) dshFailureLogged = false;
-  };
+  });
   function startDshWatch() {
-    if (dshCheckStarted) return;
-    dshCheckStarted = true;
-    checkDsh();
-    setInterval(checkDsh, 5000);
+    return dshLifecycle.start();
   }
 
   // ── 本地控制台（独立 Web 面板，不依赖 DSH WebUI） ───────────────────────────
@@ -2033,188 +1909,24 @@ async function main() {
       },
       log
     });
-    // Provider API Key 存储（本地凭据，掩码返回；Model Runtime 直连与连通性测试共用）。
-    const providerSecrets = createProviderSecrets({ root: DATA_ROOT });
-    // Agent Provider（阶段 06；会话 2 收口为 Broker）：标准契约层 + 注册表 + Broker +
-    // DSH 首个实现；经 agent.* 私有方法族暴露。Chat / Task / Continuity 一律只依赖
-    // Broker，不再各自持有 DSH 通道。
-    const agentService = createDefaultAgentService({
-      api,
-      defaults: { provider: cfg.dsh.provider, model: cfg.dsh.model, reasoningEffort: cfg.dsh.reasoningEffort },
-      log
-    });
-    const agentBroker = agentService.broker;
-    process.once('exit', () => agentService.close());
-    // Model Runtime（会话 1）：普通聊天直连 Model Provider，不再要求 DSH 运行。
-    // DeepSeek / OpenAI / OpenAI 兼容共享 OpenAI-compatible 实现；Key 只在调用时经
-    // providerSecrets 解析，不缓存不入日志。注册顺序即自动解析优先级。
-    const modelRegistry = createModelProviderRegistry({
-      providers: [
-        createOpenAiCompatibleModelProvider({
-          id: 'deepseek-official',
-          label: 'DeepSeek 官方',
-          baseUrl: 'https://api.deepseek.com',
-          defaultModel: 'deepseek-chat',
-          secrets: providerSecrets,
-          supportsStreamOptions: true,
-          log
-        }),
-        createOpenAiCompatibleModelProvider({
-          id: 'openai',
-          label: 'OpenAI',
-          baseUrl: 'https://api.openai.com/v1',
-          defaultModel: 'gpt-4o-mini',
-          secrets: providerSecrets,
-          reasoningParam: 'reasoning_effort',
-          supportsStreamOptions: true,
-          log
-        }),
-        createOpenAiCompatibleModelProvider({
-          id: 'openai-compatible',
-          label: 'OpenAI 兼容',
-          baseUrl: '',
-          secrets: providerSecrets,
-          reasoningParam: 'reasoning_effort',
-          log
-        })
-      ]
-    });
-    const modelRuntime = createModelRuntimeService({ registry: modelRegistry, secrets: providerSecrets, log });
-    const managedAgent = createManagedAgentProvider({
-      modelRuntime,
-      capabilityExecutor: request => capabilityService.broker.execute(request),
-      taskPrincipalResolver: ({ provider, sessionId }) => {
-        const task = taskService.runtime.findByAgent({ provider, sessionId });
-        return task ? { taskId: task.id, workspaceId: task.workspaceId, actor: capabilityService.principalForTask(task.id) } : null;
-      },
-      onTurnEnd: payload => agentBroker.reportTurnEnd(payload)
-    });
-    agentBroker.register(managedAgent.provider);
-    process.once('exit', () => { void managedAgent.close(); });
-    // Smart Router v1（会话 1）：确定性分类 + Cost Policy（默认 balanced，持久化）。
-    const routerService = createRouterService({ stateDir: STATE_DIR, log });
-    // 产品级 Chat 运行时（阶段 03；会话 1 双通道化）：普通回合走 Model Runtime，
-    // 显式选择 Agent Provider（如 DSH）时走 Agent 契约路径。
-    const chatService = createChatService({
-      api,
-      controlExecute: (command) => controlService.execute({ ...command, actor: { privilege: PRIVILEGE_CONSOLE } }),
-      agentProviders: agentService.listProviders(),
-      agentExecute: (command) => agentService.execute(command),
-      modelRuntime,
-      router: routerService,
-      platformRoute: request => platformRuntime.route(request),
-      agentFollow: request => agentBroker.follow(request),
-      defaults: { provider: cfg.dsh.provider, model: cfg.dsh.model, reasoningEffort: cfg.dsh.reasoningEffort },
+    const application = bootstrapCetaMesh({
+      config: cfg,
+      dataRoot: DATA_ROOT,
       stateDir: STATE_DIR,
-      // 会话 2 / 自动 Context Monitoring：Agent/DSH 通道回合结束 → Broker 事件 →
-      // Continuity observeAgentTurn（接线在 continuityService 创建之后注册）。
-      onTurnEnd: (payload) => agentBroker.reportTurnEnd(payload)
-    });
-    process.once('exit', () => chatService.close());
-    // 统一 Memory Runtime（阶段 04）：与 Chat 同级的私有方法族 memory.*。
-    // 主体由 memory/service.js 固定为桌面用户，IPC 调用方不能自带 principal。
-    const memoryService = createMemoryService({
-      stateDir: STATE_DIR,
+      sourceRoot: APP_PATHS.sourceRoot,
       socialV2File: SOCIAL_V2_FILE,
-      audit: (decision) => {
-        if (decision.action !== 'read') {
-          log('Memory ' + decision.action + ' by ' + decision.principal.kind + ':' + decision.principal.id);
-        }
-      }
-    });
-    // Persistent Task v1（阶段 07）：Task 由 CetaMesh 持有，独立于任何 Agent Session。
-    const taskService = createTaskService({ stateDir: STATE_DIR });
-    // 工作区安全边界（阶段 05）：Workspace 清单与 workspace.read/write/file.search/
-    // git.*/test.run 工具。所有路径访问经 src/workspace/boundary.js 裁决，
-    // root 之外一律拒绝；git.commit 默认走审批策略。
-    const workspaceService = createWorkspaceService({
-      stateDir: STATE_DIR,
-      audit: (event) => log(`Workspace ${event.action}（${event.workspaceId ?? 'none'}）`)
-    });
-    const capabilityService = createCapabilityService({ stateDir: STATE_DIR, workspaceService, memoryService,
-      taskRuntime: taskService.runtime, agentBroker, bindAgentSession: managedAgent.bindSession, searchImpl: searchWeb,
-      audit: event => log(`Capability ${event.capability} ${event.status}`),
-      // final security：Managed Agent 的 test.run = Approve Once 之后经 Controlled
-      // Test Runner 执行（命令 allowlist + 最小 env + 固定 workspace cwd + 超时杀树）。
-      // Runner 是审批之后的纵深防御层，不是 OS 沙箱——它执行的是 Agent 可修改的
-      // Workspace 项目代码，因此 risk=high、每次执行都需要 Owner 批准。
-      isolatedRunner: createIsolatedTestRunner({
-        resolveWorkspace: async (workspaceId) => workspaceService.describeWorkspace(workspaceId),
-        log
-      }) });
-    const platformRuntime = createDesktopPlatformRuntime({ capabilityService, workspaceService,
-      taskRuntime: taskService.runtime, agentBroker, legacyModel: cfg.dsh.model });
-    const workshopService = createWorkshopService({ stateDir: STATE_DIR, workspaceService,
-      taskRuntime: taskService.runtime, capabilityBroker: capabilityService.broker });
-    workshopRuntimeService = workshopService;
-    // Continuity Runtime v2（阶段 09；会话 2）：Context Rollover / Agent Handoff /
-    // 自动 Fresh Session。唯一会话通道是 Agent Broker（DSH 只是第一个 Provider）；
-    // Workspace Reconciliation 经只读适配器使用 workspace 登记与 git 只读动词。
-    const continuityReconciler = createWorkspaceReconciler({
-      resolveWorkspace: async (workspaceId) => workspaceService.describeWorkspace(workspaceId),
-      gitStatus: (root) => gitStatus(root),
-      gitHead: (root) => gitHead(root),
-      gitDiffSummary: async (root) => {
-        const diff = await gitDiff(root, { statOnly: true });
-        return diff?.output ?? null;
-      },
-      fileExists: (root, relPath) => {
-        // 只做存在性检查；收敛在 root 内，防止 relevantFiles 越界探测。
-        const resolvedRoot = path.resolve(root);
-        const target = path.resolve(resolvedRoot, String(relPath ?? ''));
-        if (target !== resolvedRoot && !target.startsWith(resolvedRoot + path.sep)) return false;
-        return fs.existsSync(target);
-      }
-    });
-    const continuityService = createContinuityService({
-      taskRuntime: taskService.runtime,
-      stateDir: STATE_DIR,
-      agentBroker,
-      reconciler: continuityReconciler,
-      // final security：rollover 的 Checkpoint 记录待审批能力请求的**引用**
-      // （审批本身绝不作为可继承权限随 Session 交接）。
-      listPendingApprovals: ({ taskId }) => capabilityService.broker.approvals
-        .list()
-        .filter((row) => row.request?.taskId === taskId)
-        .map((row) => ({ approvalId: row.id, capability: row.request?.capability ?? null, expiresAt: row.expiresAt })),
+      api,
+      controlService,
       log
     });
-    // 回合结束自动上报：Broker 事件 → Continuity（记录真实 usage / 估算 →
-    // evaluate → 达阈值且绑定 Task 时自动 Fresh Session Rollover）。
-    agentBroker.onTurnEnd((payload) => continuityService.runtime.observeAgentTurn(payload)
-      .catch((error) => log(`Continuity 回合观察失败：${String(error?.message ?? error)}`)));
-    // 本地扩展体系（阶段 10）：扩展只在用户本地导入，能力与权限均需显式声明与批准。
-    const extensionService = createExtensionService({ stateDir: STATE_DIR, capabilityBroker: capabilityService.broker });
-    // Device Mesh（阶段 11）：Desktop 作为标准 CetaMesh Node；mesh/carrier 与 QQ 通道解耦。
-    const meshService = createMeshService({ stateDir: STATE_DIR });
-    const channelService = createChannelService();
-    // Capability 覆盖扩展（v2 hardening / Phase D）：Channel/Mesh 只读状态面与
-    // message.send 校验面进入统一 Registry（此前只有两个 inline 只读注册）。
-    // QQ 发送不搬进 Broker——sendImpl 本轮不绑定（execute 如实 PROVIDER_UNAVAILABLE），
-    // 目标白名单与 config.allow 同源，actor/channel/target/risk 全部可检查。
-    registerChannelMeshCapabilities({
-      broker: capabilityService.broker,
-      channelService,
-      meshService,
-      isTargetAllowed: (kind, id) => {
-        const allow = cfg.allow ?? {};
-        const list = kind === 'group' ? allow.groups : allow.private;
-        return Array.isArray(list) && list.map(String).includes(String(id));
-      }
-    });
-    // 系统页面（阶段 12）：产品设置（持久化）+ About（版本单一事实源）+ 安全更新检查。
-    // 更新检查是惰性的：构造时绝不联网，只有显式 update.check 才会发起请求。
-    const aboutService = createAboutService({ rootDir: APP_PATHS.sourceRoot });
-    const settingsService = createSettingsService({ stateDir: STATE_DIR });
-    const updateService = createUpdateService({
-      currentVersion: aboutService.about.info().version,
-      settingsStore: settingsService.store
-    });
-    startUiIpcServer(controlService, chatService, memoryService, taskService, continuityService, extensionService, meshService, channelService, {
-      settings: settingsService,
-      about: aboutService,
-      update: updateService
-    }, agentService, workspaceService, providerSecrets, modelRuntime, routerService, capabilityService, workshopService);
+    const services = application.services;
+    workshopRuntimeService = services.workshopService;
+
+    const ipcRuntime = createDesktopIpcRuntime({ services, system: services.systemServices, log });
+    application.lifecycle.register(() => dshLifecycle.stop());
+    application.lifecycle.register(() => ipcRuntime.stop());
+    application.lifecycle.bind();
+    ipcRuntime.start();
 
     // MCP 数据面 IPC（D1-003）：恒启动，pipe 名按数据目录派生。
     // 这是 MCP/agent 在 release 模式下唯一的数据通道；控制面方法在此不可达（D1-004）。
@@ -2543,7 +2255,7 @@ async function main() {
             workshopPreset,
             role: rs.role ?? null,
             roleMode: rs.mode ?? 'active',
-            dshReady,
+            dshReady: isDshReady(),
             ownerQQ: cfg.ownerQQ ?? null,
             allowGroups: cfg.allow?.groups ?? [],
             allowPrivate: cfg.allow?.private ?? [],
@@ -3150,8 +2862,8 @@ async function main() {
           try {
             const safeMessage = escapeCqText(redactKnownTokensOnly(message));
             const result = kind === 'private'
-              ? await bot.sendPrivateMessage(id, text(safeMessage))
-              : await bot.sendGroupMessage(id, text(safeMessage));
+              ? await qqTransport.send('private', id, safeMessage)
+              : await qqTransport.send('group', id, safeMessage);
             log(`控制台：测试发送 ${kind}:${id} 成功`);
             sendJson({ ok: true, kind, id, message_id: result?.message_id ?? result });
           } catch (error) {
@@ -3257,7 +2969,7 @@ async function main() {
             sendJson({ ok: false, error: '该会话不在白名单内，且尚未创建' }, 403);
             return;
           }
-          if (!dshReady) {
+          if (!isDshReady()) {
             sendJson({ ok: false, error: 'DSH 当前不可用，请稍后再试' }, 503);
             return;
           }
@@ -5639,8 +5351,8 @@ async function main() {
     for (const part of parts) {
       sendChain = sendChain
         .then(async () => {
-          if (kind === 'private') await withTimeout(bot.sendPrivateMessage(Number(id), text(escapeCqText(part))), SEND_TIMEOUT_MS, `QQ发送 ${kind}:${id}`);
-          else await withTimeout(bot.sendGroupMessage(Number(id), text(escapeCqText(part))), SEND_TIMEOUT_MS, `QQ发送 ${kind}:${id}`);
+          if (kind === 'private') await withTimeout(qqTransport.send('private', id, escapeCqText(part)), SEND_TIMEOUT_MS, `QQ发送 ${kind}:${id}`);
+          else await withTimeout(qqTransport.send('group', id, escapeCqText(part)), SEND_TIMEOUT_MS, `QQ发送 ${kind}:${id}`);
         })
         .catch((error) => log(`QQ 发送失败 (${key}):`, error?.message ?? error))
         .then(() => sleep(cfg.sendDelayMs));
@@ -5783,8 +5495,8 @@ async function main() {
       const isLast = i === messages.length - 1;
       sendChain = sendChain
         .then(async () => {
-          if (kind === 'private') await withTimeout(bot.sendPrivateMessage(Number(id), text(escapeCqText(msg))), SEND_TIMEOUT_MS, `QQ发送 ${kind}:${id}`);
-          else await withTimeout(bot.sendGroupMessage(Number(id), text(escapeCqText(msg))), SEND_TIMEOUT_MS, `QQ发送 ${kind}:${id}`);
+          if (kind === 'private') await withTimeout(qqTransport.send('private', id, escapeCqText(msg)), SEND_TIMEOUT_MS, `QQ发送 ${kind}:${id}`);
+          else await withTimeout(qqTransport.send('group', id, escapeCqText(msg)), SEND_TIMEOUT_MS, `QQ发送 ${kind}:${id}`);
           sent.push(msg);
         })
         .catch((error) => log(`QQ 发送失败 (${key}):`, error?.message ?? error));
@@ -7602,7 +7314,7 @@ async function main() {
 
   // 实际的 DSH prompt 投递（不再直接对外暴露，统一走 promptQueues 串行队列）。
   async function deliverPromptNow(key, promptText, opts = {}) {
-    if (!dshReady) {
+    if (!isDshReady()) {
       const items = queued.get(key) ?? [];
       if (items.length >= QUEUE_MAX) {
         items.shift();
@@ -9218,7 +8930,7 @@ async function main() {
     }
 
     // DSH 重启容错：DSH 不可用时消息入队（不丢），恢复后自动补投
-    if (!dshReady) {
+    if (!isDshReady()) {
       const items = queued.get(key) ?? [];
       if (items.length >= QUEUE_MAX) {
         items.shift();
@@ -9920,70 +9632,43 @@ async function main() {
       await sleep(3000);
     }
   }
-  // QQ 侧（SnowLuma OneBot WebSocket 客户端）
-  const bot = new SnowLumaWebSocketClient({
-    url: cfg.snowluma.wsUrl,
-    accessToken: cfg.snowluma.accessToken || undefined,
-    reconnect: true
-  });
-
-  bot.onPrivateMessage(async (event) => {
-    if (event.user_id === event.self_id) return;
-    try { await handleIncoming('private', event.user_id, event, cfg); } catch (error) { log('处理私聊消息出错:', error?.message ?? error); }
-  });
-  bot.onGroupMessage(async (event) => {
-    if (event.sender?.user_id === event.self_id || event.user_id === event.self_id) return;
-    try { await handleIncoming('group', event.group_id, event, cfg); } catch (error) { log('处理群消息出错:', error?.message ?? error); }
-  });
-  bot.onNotice('notify', async (event) => {
-    try { await handlePokeNotice(event); } catch (error) { log('处理拍一拍事件出错:', error?.message ?? error); }
-  });
-
-  let botConnectPromise = null;
-  let botConnected = false;
+  // QQ 侧（SnowLuma OneBot WebSocket 客户端）由 Legacy QQ runtime 持有；消息策略仍留在 bridge。
   let botIdentityLoaded = false;
   async function loadBotIdentity() {
     if (botIdentityLoaded) return;
     try {
-      const login = await bot.getLoginInfo();
+      const login = await qqRuntime.client.getLoginInfo();
       if (login?.nickname) {
         selfNickname = String(login.nickname).toLowerCase();
         botIdentityLoaded = true;
-        log(`机器人昵称: ${login.nickname}`);
+        log('机器人昵称: ' + login.nickname);
       }
     } catch {}
   }
-  bot.on('open', () => {
-    botConnected = true;
-    log(`SnowLuma 已连接：${cfg.snowluma.wsUrl}`);
-    loadBotIdentity();
+  const qqRuntime = createQqRuntime({
+    config: cfg,
+    log,
+    onPrivateMessage: async (event) => {
+      if (event.user_id === event.self_id) return;
+      try { await handleIncoming('private', event.user_id, event, cfg); } catch (error) { log('处理私聊消息出错:', error?.message ?? error); }
+    },
+    onGroupMessage: async (event) => {
+      if (event.sender?.user_id === event.self_id || event.user_id === event.self_id) return;
+      try { await handleIncoming('group', event.group_id, event, cfg); } catch (error) { log('处理群消息出错:', error?.message ?? error); }
+    },
+    onNotice: async (event) => {
+      try { await handlePokeNotice(event); } catch (error) { log('处理拍一拍事件出错:', error?.message ?? error); }
+    },
+    onOpen: () => {
+      log('SnowLuma 已连接：' + cfg.snowluma.wsUrl);
+      loadBotIdentity();
+    },
+    onClose: (info) => log('SnowLuma 连接断开（code=' + (info?.code ?? '?') + '），重连中…'),
+    onError: (error) => log('SnowLuma 错误:', error)
   });
-  bot.on('close', (info) => log(`SnowLuma 连接断开（code=${info?.code ?? '?'}），重连中…`));
-  bot.on('error', (error) => log('SnowLuma 错误:', error));
-
-  // 控制台先上线，之后按“SnowLuma 优先”尝试启动；启动失败只降级 QQ 链路，
-  // 允许管理员在控制台安装/启动服务后再次连接，不让主程序被外部服务阻塞。
-  connectSnowLuma = async () => {
-    if (botConnected) return { ok: true, connected: true };
-    if (botConnectPromise) return { ok: false, pending: true, message: 'SnowLuma 连接正在建立' };
-    botConnectPromise = (async () => {
-      try {
-        await Promise.race([
-          bot.connect(),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('SnowLuma WebSocket 连接超时')), 15000))
-        ]);
-        botConnected = true;
-        await loadBotIdentity();
-        return { ok: true, connected: true };
-      } catch (error) {
-        log(`SnowLuma WebSocket 连接失败，桥接继续独立运行：${error?.message ?? error}`);
-        return { ok: false, error: error?.message ?? String(error) };
-      } finally {
-        botConnectPromise = null;
-      }
-    })();
-    return botConnectPromise;
-  };
+  const bot = qqRuntime.client;
+  const qqTransport = createQqTransport({ client: bot });
+  connectSnowLuma = () => qqRuntime.connect();
   resolveConnectSnowLumaReady();
 
   startProductSurfaces();
@@ -10018,7 +9703,7 @@ async function main() {
     const services = localServices.snapshot();
     const snowLabel = services.snowluma.ready ? '已就绪' : services.snowluma.installed ? services.snowluma.status : '未安装';
     const dshLabel = services.dsh.ready ? '已就绪' : services.dsh.installed ? services.dsh.status : '未安装';
-    const head = `${clock} 模式 ${currentMode} · SnowLuma ${snowLabel} · dsh ${dshLabel} · DSH ${dshReady ? '已就绪' : '不可用（消息排队中）'}${socialV2.paused ? ' · 二代已暂停' : ''} · 会话 ${Object.keys(state.sessions).length}${followStreams.size ? ` · 事件流 ${followStreams.size}` : ''}`;
+    const head = `${clock} 模式 ${currentMode} · SnowLuma ${snowLabel} · dsh ${dshLabel} · DSH ${isDshReady() ? '已就绪' : '不可用（消息排队中）'}${socialV2.paused ? ' · 二代已暂停' : ''} · 会话 ${Object.keys(state.sessions).length}${followStreams.size ? ` · 事件流 ${followStreams.size}` : ''}`;
     const lines = [{ rule: true, text: '─'.repeat(64) }, head];
     const keys = new Set([...Object.keys(state.sessions), ...socialV2.conversations.keys()]);
     const sorted = [...keys].sort((a, b) => (socialV2.conversations.get(b)?.lastIncomingAt ?? 0) - (socialV2.conversations.get(a)?.lastIncomingAt ?? 0));

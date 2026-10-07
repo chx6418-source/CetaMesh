@@ -11,13 +11,14 @@ import { createAgentBroker } from './broker.js';
 import { createDshAgentProvider } from './dsh-agent-provider.js';
 
 /**
- * 便捷组合：注册表 + Agent Broker + 内置 DSH Provider（复用 bridge 的共享
- * NodeApiClient）。返回的服务对象带 .broker 引用——bridge 需要它接线回合结束
- * 事件（chat-service onTurnEnd → broker.reportTurnEnd → Continuity）。
+ * Compose the Agent registry and Broker. The desktop composition root injects a shared
+ * NodeApiClient when the legacy runtime is present; Core may omit DSH entirely.
+ * The returned .broker supports process-local turn-end wiring for Chat and Continuity.
  */
 export function createDefaultAgentService({ api, defaults, log } = {}) {
   const registry = createAgentProviderRegistry({
-    providers: [createDshAgentProvider({ api, defaults, log })]
+    // Core composition omits DSH until the legacy runtime injects its transport.
+    providers: api ? [createDshAgentProvider({ api, defaults, log })] : []
   });
   const broker = createAgentBroker({ registry, log });
   const service = createAgentService({ broker, log });

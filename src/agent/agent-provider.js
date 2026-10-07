@@ -13,7 +13,7 @@
 // 禁止为了接口完整而伪造能力（DSH 无 checkpoint / handoff 端点，实测 404 / 无协议）。
 //
 // 依赖方向：agent-provider（契约）← dsh-agent-provider（实现，复用 dsh-client.js）
-//          ← registry / broker ← service（注册与 agent.* 方法族）← bridge（注入共享 api 实例）。
+//          ← registry / broker ← service（注册与 agent.* 方法族）← app composition root（共享注入）。
 
 /** 核心契约方法：每个 Provider 必须真实实现（或在 capabilities 中显式 unsupported）。 */
 export const AGENT_PROVIDER_CORE_METHODS = Object.freeze([

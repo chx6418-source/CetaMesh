@@ -4,7 +4,7 @@
 //       boundary.js（安全裁决）+ tools.js（工具实现）+ registry.js（清单）。
 //
 // 安全立场（与 memory/service.js 一致）：
-// - workspace.* 只经桌面 Shell 的命名管道暴露（bridge.js 的 startUiIpcServer），
+// - workspace.* 只经桌面 Shell 的命名管道暴露（src/app/ipc-runtime.js 路由），
 //   调用方就是用户控制面；方法白名单之外一律 METHOD_NOT_FOUND。
 // - 所有文件路径只接受"相对当前工作区 root"的输入，绝对路径 / 越界输入由
 //   boundary 拒绝。服务层不出现任何绕过 boundary 的直连 fs 调用。

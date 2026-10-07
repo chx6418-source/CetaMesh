@@ -1,7 +1,7 @@
 // CetaMesh Memory v1 —— 桌面 Memory 服务（阶段 04）。
 //
 // 分层：IPC(memory.*) → 本模块（主体绑定 + 方法白名单）→ Memory Runtime。
-// 安全前提：memory.* 只经桌面 Shell 的命名管道暴露（bridge.js 的 startUiIpcServer），
+// 安全前提：memory.* 只经桌面 Shell 的命名管道暴露（src/app/ipc-runtime.js 路由），
 // 该通道本身就是用户级控制面；因此这里把主体固定为用户，**不接受调用方自带 principal**，
 // 避免通过 IPC 伪造用户身份。Agent 侧只能走 runtime.proposeCandidate（候选，需用户确认）。
 

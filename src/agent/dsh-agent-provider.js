@@ -1,7 +1,7 @@
 // DSH Agent Provider（阶段 06；会话 2 起作为 Agent Broker 的第一个真实 Provider）：
 // 把 DSH 0.1.5 Typert 网关映射到标准 AgentProvider 契约。
 //
-// 复用现有 src/dsh-client.js 的 NodeApiClient（由 bridge 注入共享实例，不重写、不另建连接）。
+// 复用现有 src/dsh-client.js 的 NodeApiClient（由 Desktop composition root 注入共享实例，不重写、不另建连接）。
 // 端点映射（均以本仓库真实调用与 2026-10-04 对运行中 DSH 的探测为准）：
 //   createSession  → session/create（+ 可选 session/selectModel 绑定模型）
 //   send           → session/prompt（requestId/mode/content 内容块数组）

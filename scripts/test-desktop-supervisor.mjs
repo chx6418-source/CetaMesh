@@ -144,7 +144,8 @@ step('✅ 源码断言：/api/shutdown 的全局守护清理被限制在非托�
 assert.doesNotMatch(patchSource, /function\s+renderFatalErrorPage\s*\(/, 'Core 不应再渲染 HTML 致命错误页');
 assert.doesNotMatch(patchSource, /text\/html|<!doctype\s+html/i, 'Core 不应再生成网页界面');
 assert.match(patchSource, /网页控制台已移除；请使用 WhaleBridge 原生应用/, '根路径应明确提示使用原生应用');
-assert.match(patchSource, /WHALEBRIDGE_UI_PIPE/, 'Core 应从启动器注入的 IPC pipe 启动原生管理通道');
+const ipcSource = fs.readFileSync(path.join(ROOT, 'src', 'app', 'ipc-runtime.js'), 'utf8');
+assert.match(ipcSource, /WHALEBRIDGE_UI_PIPE/, 'IPC runtime 应从启动器注入的 pipe 启动原生管理通道');
 step('✅ no-web 源码断言：Core 不渲染网页/致命错误页，并支持启动器注入的原生 IPC');
 
 // 非托管默认值（BAT/VBS 路径行为不变）

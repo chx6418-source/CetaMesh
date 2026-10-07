@@ -21,6 +21,7 @@ import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { readRawConfigOrEmpty } from '../src/config/loader.js';
 import { APP_PATHS } from '../src/app-paths.js';
+import { isLegacyBridgeTestOptedIn } from './environment-policy.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SCRIPTS = path.join(ROOT, 'scripts');
@@ -44,9 +45,15 @@ const REGISTRY = {
   'test-slang-learn.mjs': { category: 'core' },
   'test-owner-agent-mode.mjs': { category: 'core' },
   'test-core-entry.mjs': { category: 'core' },
+  'test-service-container.mjs': { category: 'core' },
+  'test-ipc-runtime.mjs': { category: 'core' },
+  'test-dsh-lifecycle.mjs': { category: 'core' },
+  'test-qq-runtime.mjs': { category: 'core' },
+  'test-runner-environment.mjs': { category: 'core' },
 
   // ── architecture：结构契约 / 源码不变量 ────────────────────────────────────
   'test-desktop-architecture.mjs': { category: 'architecture' },
+  'test-composition-boundary.mjs': { category: 'architecture' },
   'test-capability-coverage.mjs': { category: 'architecture' },
   'test-desktop-chat-product.mjs': { category: 'architecture' },
   'test-process-extension-host.mjs': { category: 'architecture' },
@@ -98,7 +105,7 @@ const REGISTRY = {
   'test-mcp-exec.mjs': { category: 'environment', requires: ['gateway'], note: '需要真实 SnowLuma 网关（@snowluma/mcp 执行工具）' },
   'test-mcp-web-search.mjs': { category: 'environment', requires: ['network'], note: '访问公网搜索引擎' },
   'test-onebot-connection.mjs': { category: 'environment', requires: ['gateway'], note: '连接真实 OneBot WebSocket 网关' },
-  'test-console.mjs': { category: 'environment', requires: ['legacy-bridge'], note: '需要以 WHALEBRIDGE_LEGACY_HTTP=1 运行中的开发桥接' },
+  'test-console.mjs': { category: 'environment', requires: ['legacy-bridge'], note: '仅在显式设置 WHALEBRIDGE_TEST_LEGACY_BRIDGE=1 且测试端口指向隔离开发桥接时运行' },
 
   // ── desktop：桌面壳 / 安装器（需要 Rust 构建） ─────────────────────────────
   'test-desktop-shell.mjs': { category: 'desktop', requires: ['shell-debug'], timeoutMs: 600_000 },
@@ -164,7 +171,8 @@ async function probeAvailability() {
     'release-dist': exists(path.join('dist', 'app', 'WhaleBridge.exe')),
     network: process.env.WHALEBRIDGE_TEST_NETWORK === '1',
     gateway: await probeTcp(gatewayPort),
-    'legacy-bridge': await probeTcp(consolePort),
+    // A live TCP listener may be the user’s real desktop bridge; this suite mutates roles/allowlists and sends a test QQ message.
+    'legacy-bridge': isLegacyBridgeTestOptedIn() && await probeTcp(consolePort),
     cargo: spawnSync('cargo', ['--version'], { timeout: 20000 }).status === 0
   };
   return availabilityCache;

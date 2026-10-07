@@ -1,9 +1,9 @@
 // CetaMesh Workspace v1 —— IPC 级端到端验证（阶段 05）。
 //
 // 与 test-workspace-runtime.mjs（服务层验收）互补：本脚本启动真实 Core worker
-// （node src/core-entry.js --worker + 命名管道），证明 bridge.js 的
-// startUiIpcServer 接线把 workspace.* 方法族路由到 src/workspace/service.js，
-// 且边界裁决在真实 IPC 往返中生效（escape 输入返回 BOUNDARY_ESCAPE 错误帧）。
+// （node src/core-entry.js --worker + 命名管道），证明 src/app/ipc-runtime.js 将
+// workspace.* 方法族路由到 Core service container，经 Capability Broker 与 Workspace boundary
+// 裁决；越界输入在真实 IPC 往返中返回 PATH_OUTSIDE_WORKSPACE 错误帧。
 //
 // 运行：node scripts/test-workspace-ipc.mjs
 
