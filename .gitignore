@@ -60,3 +60,13 @@ design-demos/login-proposals/
 
 # UI design demos archive (unselected proposals, local reference only)
 /design-demos/archive/
+
+# Build / experiment byproducts (D10 repo hygiene)。目录当前可能不存在，
+# 显式登记防止历史脚本的错误展开（如 %SystemDrive%）或实验产物再次入库。
+/output/
+/desktop-shell/native-spike/
+/%SystemDrive%/
+/desktop-shell/target-released/
+
+# Test runner scratch state
+/scripts/.test-runner/
