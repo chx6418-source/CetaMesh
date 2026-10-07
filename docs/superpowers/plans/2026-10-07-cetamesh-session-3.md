@@ -17,14 +17,15 @@
 - Core construction must not import bridge.js or require QQ, OneBot, SnowLuma readiness, Social runtime, or DSH readiness.
 - Preserve IPC protocol and existing method families. Do not do D8 branding work.
 - Register every new scripts/test-*.mjs in scripts/run-all-tests.mjs; use npm test as the supported suite entry.
-- Do not push. Merge only after owner confirmation, then delete the work branch.
+- No push before Owner confirmation. Owner has since explicitly authorized the merge, cloud push, and local work-branch deletion.
 - Preserve plugins/whale-mode-console and tracked history.
 
 ## Execution status
 
 - Tasks 1–6 are implemented on the work branch. The D6 audit found no prototype files from the listed paths in the active tree; D9 found no production `unwrap`/`expect` in the audited user-controlled flows.
 - `npm test` passes 65 suites with 0 failures; 8 environment suites are not run. `desktop:check` passes and `desktop:test` passes 109 tests. The requested focused suites passed.
-- Task 7 remains open until the clean-tree Core, Desktop Release, Release package, and Release Candidate commands finish.
+- Task 7 is complete on source commit `dba403d60c92cedf4f8b1cf54bc84f94df31393e`: `npm test` 67 PASS / 0 FAIL / 6 NOT_RUN_ENVIRONMENT; `desktop:check`, `desktop:test` (109/109), `build:core`, `desktop:build`, `build:release`, and `test-release-candidate` pass. Native Release has `legacyHttp=false`, the installed RC starts with no HTTP listener, and a direct host probe to `127.0.0.1:3100` was unreachable.
+- The fetched `origin/main` (`142ebb61024648f948cf6e001cb94b6f77e473f6`) is an ancestor of local Session 2 `main`; the explicitly authorized fast-forward merge and push follow report completion.
 
 ## Review focus
 
@@ -94,4 +95,4 @@ Create docs/development/GIT_WORKFLOW.md and TECH_DEBT_CONSOLIDATION_REPORT.md; u
 - Run npm test, npm run desktop:check and npm run desktop:test, then the requested focused architecture/security/release/DSH/Extension/Workshop/Continuity suites.
 - Produce a clean commit and run build:core, desktop:build, build:release and test-release-candidate.
 - Verify Native Release has no HTTP listener and 127.0.0.1:3100 is unreachable. Record build ID and SHA256.
-- Leave merge and branch deletion for owner confirmation.
+- Complete the owner-authorized merge, verify `main`, push to origin, and delete the work branch after the final report is committed.
