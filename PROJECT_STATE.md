@@ -4,12 +4,11 @@
 > 历史阶段快照与旧执行报告已归档至 `docs/archive/`，调查历史时才需要读取（见文末「文档地图」）。
 > 读取契约见根目录 `AGENTS.md`；协作红线见 `RULES.md`。
 
-## Git facts（2026-10-07）
-
-- Session 3 基准 HEAD：`aaff6bf490c95f77e64aed3ebef61f8dbdeb6fba`（本地 `main`，包含 Session 1 + Session 2 交接提交）。
-- `origin/main` 仍停在 Session 1 基准 `142ebb6`；Session 2 与本轮均未 push。
-- 当前工作分支：`refactor/core-composition-v1`（Session 3）；需 Owner 确认后才合并到 `main`，验证合并结果后删除工作分支。
-- Session 1 / 2 交接文档：`docs/archive/handoffs/HANDOFF_TECHDEBT_SESSION_1.md`、`HANDOFF_TECHDEBT_SESSION_2.md`。
+## Git facts (2026-10-08)
+- Session 3 base HEAD: `aaff6bf490c95f77e64aed3ebef61f8dbdeb6fba` on local `main`, including Sessions 1 and 2.
+- Session 3 integration commit: `c22257240be86f7c8dfd2badee5b3f862a134cc6`; integrated into `main` and pushed to `origin/main`.
+- `refactor/core-composition-v1` was merged to `main`; its managed worktree was archived and the local branch was deleted.
+- Session 1 / 2 handoffs: `docs/archive/handoffs/HANDOFF_TECHDEBT_SESSION_1.md` and `docs/archive/handoffs/HANDOFF_TECHDEBT_SESSION_2.md`.
 
 ## Architecture（稳定面）
 
@@ -67,12 +66,11 @@
 - 桌面壳 `supervisor.rs` 的 HTTP 探活 fallback 已是死代码（待后续会话删除）。
 - NOT_RUN_ENVIRONMENT（无真实环境时如实不跑）：真实 provider-key 回合 / 真实 QQ / 跨设备 Mesh / 签名 / 真实发行产物。
 
-## Active Work（技术债会话 3）
+## Active Work (none)
+- Session 3 is complete and integrated on `main`.
+- The final consolidation report is `TECH_DEBT_CONSOLIDATION_REPORT.md`.
+- No technical-debt session branch remains active.
 
-- 分支 `refactor/core-composition-v1`，基于 Session 2 完整交接 HEAD `aaff6bf`。本轮未 push。
-- Owner 确认前不合并；确认后 merge → verify → 删除本地工作分支。流程见 `docs/development/GIT_WORKFLOW.md`。
-- Session 3 收口 D4 Composition Root、D5 IPC、DSH Lifecycle、D6/D9/D11/D14 与 RC；D8 品牌内部兼容名不做。
-- 全量报告：`TECH_DEBT_CONSOLIDATION_REPORT.md`。
 ## 文档地图（Agent 默认只读这里列的）
 
 - 开始工作必读：`RULES.md` → 本文件 → 相关架构文档（`docs/desktop/ARCHITECTURE.md` 等）。
