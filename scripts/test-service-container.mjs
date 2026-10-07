@@ -17,7 +17,17 @@ try {
   };
 
   const { createCetaMeshServices } = await import('../src/app/service-container.js');
-  const services = createCetaMeshServices();
+  const config = { allow: { private: [], groups: ['7'] } };
+  const services = createCetaMeshServices({ config });
+
+  const validateChannelSend = id => services.capabilityService.broker.registry.require('channel.send').validate({
+    input: { kind: 'group', id: String(id), text: 'message' }
+  });
+  assert.doesNotThrow(() => validateChannelSend('7'), 'initial allowlist entry is accepted');
+  assert.throws(() => validateChannelSend('8'), { code: 'TARGET_NOT_ALLOWED' });
+  config.allow = { private: [], groups: ['8'] };
+  assert.throws(() => validateChannelSend('7'), { code: 'TARGET_NOT_ALLOWED' }, 'replaced allowlist removes the old entry');
+  assert.doesNotThrow(() => validateChannelSend('8'), 'replaced allowlist adds the new entry');
 
   for (const name of [
     'modelRuntime',

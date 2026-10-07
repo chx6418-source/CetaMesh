@@ -42,7 +42,6 @@ export function createCetaMeshServices(options = {}) {
   const api = options.api ?? null;
   const controlService = options.controlService ?? null;
   const log = options.log ?? (() => {});
-  const allow = config.allow ?? {};
 
   const providerSecrets = createProviderSecrets({ root: dataRoot });
   const agentService = createDefaultAgentService({ api, defaults: dshDefaults, log });
@@ -188,7 +187,7 @@ export function createCetaMeshServices(options = {}) {
     channelService,
     meshService,
     isTargetAllowed: (kind, id) => {
-      const list = kind === 'group' ? allow.groups : allow.private;
+      const list = kind === 'group' ? config.allow?.groups : config.allow?.private;
       return Array.isArray(list) && list.map(String).includes(String(id));
     }
   });
