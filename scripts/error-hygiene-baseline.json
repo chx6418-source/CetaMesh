@@ -1,0 +1,676 @@
+{
+  "_comment": "静默失败红线基线（scripts/test-error-hygiene.mjs）。数值 = 允许存在的上限；只许减少，不许增加。",
+  "generatedAt": "2026-10-07",
+  "files": {
+    "src/about/build-info.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/about/index.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/about/service.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/agent/agent-provider.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/agent/broker.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/agent/dsh-agent-provider.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/agent/index.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/agent/managed-agent-provider.js": {
+      "bareCatch": 1,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/agent/registry.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/agent/service.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/app-paths.js": {
+      "bareCatch": 1,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/audio-probe.js": {
+      "bareCatch": 2,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/bridge-privilege.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/bridge.js": {
+      "bareCatch": 34,
+      "processExit": 8,
+      "setInterval": 5
+    },
+    "src/capability/adapters.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/capability/approval.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/capability/broker.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/capability/index.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/capability/policy.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/capability/registry.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/capability/service.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/capability/types.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/channel/index.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/channel/registry.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/channel/service.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/config/loader.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/config/migrate.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/config/schema.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/config/service.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/continuity/index.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/continuity/monitor.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/continuity/reconcile.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/continuity/runtime.js": {
+      "bareCatch": 2,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/continuity/service.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/continuity/types.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/control/control-service.js": {
+      "bareCatch": 1,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/control/data-ipc.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/control/ipc-protocol.js": {
+      "bareCatch": 2,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/core-dispatch.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/core-entry.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/core-sea.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/desktop/chat-service.js": {
+      "bareCatch": 4,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/desktop/platform-runtime.js": {
+      "bareCatch": 1,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/dsh-auth.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/dsh-client.js": {
+      "bareCatch": 3,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/dsh-integration.js": {
+      "bareCatch": 4,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/dsh-model-selection.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/entrypoint.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/extension/host.js": {
+      "bareCatch": 1,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/extension/index.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/extension/installer.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/extension/manifest.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/extension/memory-pack.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/extension/process-host.js": {
+      "bareCatch": 3,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/extension/review.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/extension/runtime.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/extension/scan.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/extension/service.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/extension/store.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/extension/types.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/forward.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/kugou-api.js": {
+      "bareCatch": 7,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/local-services.js": {
+      "bareCatch": 9,
+      "processExit": 0,
+      "setInterval": 1
+    },
+    "src/logging/index.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/logging/redact.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/mcp-bilibili.js": {
+      "bareCatch": 1,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/mcp-host-server.js": {
+      "bareCatch": 6,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/mcp-qq-file-send.js": {
+      "bareCatch": 4,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/mcp-snowluma-safe.js": {
+      "bareCatch": 9,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/mcp-web-search-safe.js": {
+      "bareCatch": 2,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/md-to-plain.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/memory/adapters/qq.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/memory/index.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/memory/links.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/memory/policy.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/memory/references.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/memory/runtime.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/memory/service.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/memory/store.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/memory/types.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/mesh/capabilities.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/mesh/identity.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/mesh/index.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/mesh/node.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/mesh/protocol.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/mesh/service.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/mesh/trust.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/mesh/types.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/model/index.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/model/model-provider.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/model/providers/openai-compatible.js": {
+      "bareCatch": 2,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/model/registry.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/model/service.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/model/types.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/pinyin-data.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/providers/secrets.js": {
+      "bareCatch": 1,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/qq-card.js": {
+      "bareCatch": 2,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/router/index.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/router/service.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/router/smart-router.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/router/types.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/runtime-policy.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/runtime-surface.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/safe-fetch.js": {
+      "bareCatch": 2,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/self-test.js": {
+      "bareCatch": 1,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/sensitive.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/settings/index.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/settings/pages.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/settings/schema.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/settings/service.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/settings/store.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/slang-learner.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/status-panel.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 1
+    },
+    "src/sticker-lib.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/task/index.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/task/runtime.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/task/service.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/task/store.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/task/types.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/tts-prosody.js": {
+      "bareCatch": 2,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/update/checker.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/update/index.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/update/manifest.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/update/service.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/update/verify.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/v2-wait.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/workshop/index.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/workshop/service.js": {
+      "bareCatch": 1,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/workspace/boundary.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/workspace/index.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/workspace/isolated-runner.js": {
+      "bareCatch": 1,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/workspace/registry.js": {
+      "bareCatch": 1,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/workspace/service.js": {
+      "bareCatch": 0,
+      "processExit": 0,
+      "setInterval": 0
+    },
+    "src/workspace/tools.js": {
+      "bareCatch": 2,
+      "processExit": 0,
+      "setInterval": 0
+    }
+  }
+}
