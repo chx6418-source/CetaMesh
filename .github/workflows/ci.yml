@@ -1,0 +1,93 @@
+# CetaMesh Desktop — 最小 CI（D2）
+#
+# 目标平台：Windows（产品主平台：named pipe / SEA / 安装器均为 Windows 语义）。
+# 原则：
+#   · CI 不依赖真实 QQ / 真实 DSH / 真实 Provider Key —— run-all-tests 会把这类
+#     suite 如实记为 NOT_RUN_ENVIRONMENT（网关探测失败 / 显式 opt-in 才跑公网）；
+#   · 每次 push 只跑测试与 cargo 检查，不做完整 installer 构建；
+#     release 构建仅在工作流手动触发或 main 分支 push 时执行（见 release-build job）。
+name: ci
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: test (windows, node 22, rust stable)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      # CI 无真实 SnowLuma/DSH/公网依赖：网关类 suite 走 NOT_RUN_ENVIRONMENT。
+      WHALEBRIDGE_TEST_NETWORK: '0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # build:release 记录 commit dirty 状态；完整历史便于追溯构建输入
+          fetch-depth: 0
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Setup Rust stable
+        uses: dtolnay/rust-toolchain@stable
+      - name: Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop-shell
+      - name: Install dependencies
+        run: npm ci
+      - name: Unified test suite
+        run: npm test
+      - name: Desktop shell check
+        run: npm run desktop:check
+      - name: Desktop shell tests
+        run: npm run desktop:test
+
+  release-build:
+    name: release build (main / manual)
+    runs-on: windows-latest
+    needs: test
+    timeout-minutes: 90
+    # installer 构建较重：仅 main push 或手动触发时执行（commit 级不构建）
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Setup Rust stable
+        uses: dtolnay/rust-toolchain@stable
+      - name: Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop-shell
+      - name: Install dependencies
+        run: npm ci
+      - name: Build core (Node SEA)
+        run: npm run build:core
+      - name: Build desktop shell (release)
+        run: npm run desktop:build
+      - name: Assemble release candidate
+        run: npm run build:release
+      - name: Release candidate acceptance
+        run: npm run test-release-candidate
+      - name: Upload RC artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: whalebridge-rc
+          path: |
+            dist/app/WhaleBridge.exe
+            dist/app/WhaleBridge-Setup-x64.exe
+            dist/app/release-manifest.json
+            dist/app/SHA256SUMS.txt
+            dist/app/sbom.json
+          if-no-files-found: error
+          retention-days: 14
