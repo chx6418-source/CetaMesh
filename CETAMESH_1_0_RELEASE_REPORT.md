@@ -32,6 +32,8 @@ Integration branch: `codex/production-release-integration`
 | Theme migration | **PASS (automated/history); manual QA NOT_RUN** | Existing migration report and automated Desktop checks cover the 10 themes. No live screenshot review was completed in this integration run. |
 | GitCode distribution / GitHub fallback | **NOT_RUN_ENVIRONMENT** | GitCode updater implementation is present, but release publication and fallback pull were not verified. `git ls-remote` against both remotes failed with `SEC_E_NO_CREDENTIALS`; `gh` CLI was unavailable. No cloud push occurred. |
 
+The authorized push to the configured GitHub `origin` was rejected by automatic approval review because the destination was not established as a trusted organization/user-owned remote for this repository payload. No alternate push path was used. Cloud synchronization remains blocked pending destination authorization.
+
 ## Artifact facts
 
 - Desktop output directory: `dist/app` in the detached build checkout at `C:\Users\Administrator\AppData\Local\Temp\cetamesh-release-rc2`.
