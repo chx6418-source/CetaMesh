@@ -58,6 +58,7 @@
 **Files:**
 - Create: src/extension/process-transport.js
 - Create: src/extension/process-tree.js
+- Create: src/extension/worker-env.js
 - Modify: src/extension/process-host.js
 - Test: scripts/test-process-extension-host.mjs
 
@@ -67,13 +68,13 @@
 - Produces: createProcessTransport({ packageRoot, extensionId, version, launch }) returns send(frame), onMessage(handler), alive(), close(), and killTree().
 - ProcessHost accepts an injected transport for focused fixtures; production construction creates the real child transport. The child cwd is the canonical package root for the active Extension id/version and is checked to remain under the Extension store.
 
-- [ ] Add failing tests for explicit environment allowlisting, launch resolution, fixed package cwd, and real child invoke/parallel invoke.
-- [ ] Add failing tests for partial-line and full-frame size limits, malformed frames, timeout, cancel, and process-tree cleanup.
-- [ ] Run npm test and confirm those new transport assertions fail.
-- [ ] Implement the shell-free spawn transport with stdio pipes, bounded stdout/stderr handling, and platform process-tree termination.
-- [ ] Extend ProcessHost to fail pending calls and close the whole process tree on protocol violation, shutdown timeout, or child exit.
-- [ ] Run npm test and confirm transport and real Node child tests pass.
-- [ ] Commit the process transport and host changes.
+- [x] Add failing tests for explicit environment allowlisting, launch resolution, fixed package cwd, and real child invoke/parallel invoke.
+- [x] Add failing tests for partial-line and full-frame size limits, malformed frames, timeout, cancel, and process-tree cleanup.
+- [x] Run npm test and confirm those new transport assertions fail.
+- [x] Implement the shell-free spawn transport with stdio pipes, bounded stdout/stderr handling, and platform process-tree termination.
+- [x] Extend ProcessHost to fail pending calls and close the whole process tree on protocol violation, shutdown timeout, or child exit.
+- [x] Run npm test and confirm transport and real Node child tests pass.
+- [x] Commit the process transport and host changes.
 
 ### Task 3: Runtime selection, bound Broker calls, health, and bounded recovery
 

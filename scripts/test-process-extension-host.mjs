@@ -10,10 +10,13 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createProcessExtensionHost, createInProcessTransportPair } from '../src/extension/process-host.js';
+import { buildExtensionWorkerEnv, createProcessTransport, resolveExtensionWorkerLaunch } from '../src/extension/process-transport.js';
+import { sanitizeExtensionWorkerEnv } from '../src/extension/worker-env.js';
 import { createVmExtensionHost, createExtensionHost } from '../src/extension/host.js';
+import { assertManifest, manifestFingerprint } from '../src/extension/manifest.js';
 
 const manifest = {
   id: 'fixture-ext',
@@ -40,22 +43,168 @@ function makeHost({ latencyMs = 0, childBehavior } = {}) {
   return { host, pair };
 }
 
+function makeInstalledPackage({ id = 'fixture-ext', version = '1.0.0', source } = {}) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-process-package-'));
+  const storeRoot = path.join(root, 'packages');
+  const packageRoot = path.join(storeRoot, id, version);
+  const manifest = assertManifest({
+    id, name: 'Fixture Extension', version, entry: 'index.js', type: 'tool', permissions: [],
+    capabilities: [
+      { id: 'echo', kind: 'tool', title: 'Echo', requires: [] },
+      { id: 'never', kind: 'tool', title: 'Never', requires: [] }
+    ]
+  });
+  fs.mkdirSync(packageRoot, { recursive: true });
+  fs.writeFileSync(path.join(packageRoot, 'extension.json'), JSON.stringify(manifest));
+  fs.writeFileSync(path.join(packageRoot, 'index.js'), source ?? [
+    'module.exports.handlers = {',
+    '  echo: input => input,',
+    '  never: () => new Promise(() => {})',
+    '};'
+  ].join('\n'));
+  return { root, storeRoot, packageRoot, manifest, cleanup: () => fs.rmSync(root, { recursive: true, force: true }) };
+}
+
+function pidIsAlive(pid) {
+  try { process.kill(pid, 0); return true; }
+  catch (error) { if (error?.code === 'ESRCH') return false; throw error; }
+}
+
+// Worker launch policy must be explicit and start from a blank environment.
+{
+  const parentEnv = {
+    PATH: 'C:\\Windows\\System32;C:\\Users\\owner\\bin', TEMP: 'C:\\Temp', TMP: 'C:\\Temp', SystemRoot: 'C:\\Windows',
+    OPENAI_API_KEY: 'provider-secret', WHALEBRIDGE_CONSOLE_TOKEN: 'console-secret',
+    WHALEBRIDGE_AGENT_TOKEN: 'agent-secret', GIT_ASKPASS: 'git-secret', AWS_ACCESS_KEY_ID: 'aws-secret',
+    NODE_OPTIONS: '--require=evil.js', NODE_PATH: 'evil-modules', HOME: 'C:\\Users\\owner'
+  };
+  const env = buildExtensionWorkerEnv({
+    parentEnv,
+    metadata: { extensionId: 'fixture-ext', version: '1.0.0', fingerprint: 'sha256:fixture' }
+  });
+  assert.deepEqual(env, {
+    PATH: 'C:\\Windows\\System32', TEMP: parentEnv.TEMP, TMP: parentEnv.TMP, SystemRoot: parentEnv.SystemRoot,
+    CETAMESH_EXTENSION_ID: 'fixture-ext', CETAMESH_EXTENSION_VERSION: '1.0.0',
+    CETAMESH_EXTENSION_FINGERPRINT: 'sha256:fixture'
+  });
+  assert.deepEqual(resolveExtensionWorkerLaunch({ packaged: false, execPath: 'node.exe', workerEntry: 'worker.js' }), {
+    executable: 'node.exe', args: ['worker.js']
+  });
+  assert.deepEqual(resolveExtensionWorkerLaunch({ packaged: true, execPath: 'WhaleBridgeCore.exe', workerEntry: 'worker.js' }), {
+    executable: 'WhaleBridgeCore.exe', args: ['--extension-worker']
+  });
+  const simulatedPlatformEnv = {
+    PATH: 'C:\\Windows\\System32', SYSTEMROOT: 'C:\\Windows', TEMP: 'C:\\Temp',
+    CETAMESH_EXTENSION_ID: 'fixture-ext', CETAMESH_EXTENSION_VERSION: '1.0.0',
+    CETAMESH_EXTENSION_FINGERPRINT: 'sha256:fixture', USERPROFILE: 'C:\\Users\\owner',
+    HOMEDRIVE: 'C:', LOGONSERVER: '\\\\domain-controller', AWS_ACCESS_KEY_ID: 'injected-secret'
+  };
+  sanitizeExtensionWorkerEnv(simulatedPlatformEnv);
+  assert.deepEqual(Object.keys(simulatedPlatformEnv).sort(), [
+    'CETAMESH_EXTENSION_FINGERPRINT', 'CETAMESH_EXTENSION_ID', 'CETAMESH_EXTENSION_VERSION',
+    'PATH', 'SYSTEMROOT', 'TEMP'
+  ]);
+  ok('worker env 采用空白 allowlist；source 与 SEA 使用不同参数');
+}
+
+// Production ProcessExtensionHost must spawn a real Worker and support parallel calls.
+{
+  const fixture = makeInstalledPackage();
+  const host = createProcessExtensionHost({
+    manifest: fixture.manifest, packageRoot: fixture.packageRoot, storeRoot: fixture.storeRoot,
+    extensionId: fixture.manifest.id, version: fixture.manifest.version, packaged: false, timeoutMs: 5000
+  });
+  try {
+    const results = await Promise.all([
+      host.invoke('echo', { sequence: 1 }),
+      host.invoke('echo', { sequence: 2 })
+    ]);
+    assert.deepEqual(results.map((item) => item.result), [{ sequence: 1 }, { sequence: 2 }]);
+    ok('ProcessExtensionHost 真实 spawn 支持并行 invoke');
+  } finally {
+    await host.shutdown();
+    fixture.cleanup();
+  }
+}
+
+// The transport must launch with only allowlisted env vars, the versioned package cwd, and kill descendants.
+{
+  const fixture = makeInstalledPackage();
+  const probeEntry = path.join(fixture.packageRoot, 'tree-probe.mjs');
+  fs.writeFileSync(probeEntry, [
+    "import { spawn } from 'node:child_process';",
+    `import { sanitizeExtensionWorkerEnv } from '${new URL('../src/extension/worker-env.js', import.meta.url).href}';`,
+    'sanitizeExtensionWorkerEnv();',
+    "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', windowsHide: true });",
+    'let data = "";',
+    "process.stdin.on('data', chunk => { data += chunk.toString(); let i; while ((i = data.indexOf('\\n')) >= 0) { const frame = JSON.parse(data.slice(0, i)); data = data.slice(i + 1); if (frame.kind === 'ping') process.stdout.write(JSON.stringify({ v: 1, id: frame.id, kind: 'pong', result: { cwd: process.cwd(), env: process.env, childPid: child.pid } }) + '\\n'); } });"
+  ].join('\n'));
+  const parentEnv = {
+    PATH: process.env.PATH, TEMP: os.tmpdir(), TMP: os.tmpdir(), SystemRoot: process.env.SystemRoot || 'C:\\Windows',
+    OPENAI_API_KEY: 'provider-secret', WHALEBRIDGE_CONSOLE_TOKEN: 'console-secret',
+    WHALEBRIDGE_AGENT_TOKEN: 'agent-secret', GIT_ASKPASS: 'git-secret', AWS_SECRET_ACCESS_KEY: 'aws-secret',
+    NODE_OPTIONS: '--require=evil.js', NODE_PATH: 'evil-modules', HOME: 'C:\\Users\\owner'
+  };
+  let transport;
+  try {
+    transport = createProcessTransport({
+      packageRoot: fixture.packageRoot, storeRoot: fixture.storeRoot, extensionId: fixture.manifest.id,
+      version: fixture.manifest.version,
+      launch: resolveExtensionWorkerLaunch({ packaged: false, execPath: process.execPath, workerEntry: probeEntry }),
+      parentEnv, metadata: { extensionId: fixture.manifest.id, version: fixture.manifest.version, fingerprint: 'sha256:fixture' }
+    });
+    assert.equal(transport.cwd, path.resolve(fixture.packageRoot));
+    const received = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('probe timeout')), 5000);
+      transport.onMessage((raw) => {
+        const frame = JSON.parse(raw);
+        if (frame.id === 'probe-cwd-env') { clearTimeout(timer); resolve(frame); }
+      });
+    });
+    transport.send(JSON.stringify({ v: 1, id: 'probe-cwd-env', kind: 'ping' }));
+    const frame = await received;
+    assert.equal(frame.kind, 'pong');
+    assert.equal(path.resolve(frame.result.cwd), path.resolve(fixture.packageRoot));
+    const envKeys = Object.keys(frame.result.env).map((key) => key.toUpperCase());
+    const allowlistedKeys = ['PATH', 'TEMP', 'TMP', 'SYSTEMROOT', 'CETAMESH_EXTENSION_ID', 'CETAMESH_EXTENSION_VERSION', 'CETAMESH_EXTENSION_FINGERPRINT'];
+    assert.ok(envKeys.every((key) => allowlistedKeys.includes(key)), 'unexpected Worker env key(s): ' + envKeys.join(', '));
+    assert.equal(frame.result.env.OPENAI_API_KEY, undefined);
+    assert.equal(frame.result.env.WHALEBRIDGE_CONSOLE_TOKEN, undefined);
+    assert.equal(frame.result.env.AWS_SECRET_ACCESS_KEY, undefined);
+    const descendantPid = frame.result.childPid;
+    assert.ok(Number.isInteger(descendantPid));
+    await transport.close({ graceMs: 100 });
+    const deadline = Date.now() + 3000;
+    while (pidIsAlive(descendantPid) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(pidIsAlive(descendantPid), false, 'shutdown kills the descendant process tree');
+    ok('real transport uses fixed package cwd, minimal child env, and whole-tree shutdown');
+  } finally {
+    if (transport) await transport.killTree();
+    fixture.cleanup();
+  }
+}
+
 // Worker process smoke test: the bootstrap must speak only the existing frame protocol.
 {
   const packageRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-worker-bootstrap-'));
   const workerEntry = fileURLToPath(new URL('../src/extension/process-worker.js', import.meta.url));
   try {
-    fs.writeFileSync(path.join(packageRoot, 'extension.json'), JSON.stringify({
+    const workerManifest = assertManifest({
       id: 'fixture-ext', name: 'Fixture Extension', version: '1.0.0', entry: 'index.js', type: 'tool', permissions: [],
       capabilities: [{ id: 'greet', requires: [] }]
-    }));
+    });
+    fs.writeFileSync(path.join(packageRoot, 'extension.json'), JSON.stringify(workerManifest));
     fs.writeFileSync(path.join(packageRoot, 'index.js'), 'module.exports.handlers = { greet: () => ({ hello: "worker" }) };');
     const input = [
       { v: 1, id: 'probe-1', kind: 'ping' },
       { v: 1, id: 'stop-1', kind: 'shutdown' }
     ].map((frame) => JSON.stringify(frame)).join('\n') + '\n';
     const child = spawnSync(process.execPath, [workerEntry], {
-      cwd: packageRoot, env: process.env, input, encoding: 'utf8', timeout: 5000, windowsHide: true
+      cwd: packageRoot,
+      env: buildExtensionWorkerEnv({ parentEnv: process.env, metadata: {
+        extensionId: workerManifest.id, version: workerManifest.version, fingerprint: manifestFingerprint(workerManifest)
+      } }),
+      input, encoding: 'utf8', timeout: 5000, windowsHide: true
     });
     assert.equal(child.error, undefined, `worker spawn failed: ${child.error?.message}`);
     assert.equal(child.status, 0, `worker exit: ${child.status}; stderr=${child.stderr}`);
@@ -107,14 +256,13 @@ function makeHost({ latencyMs = 0, childBehavior } = {}) {
 // ── 4. 帧模式校验：坏帧丢弃，宿主不炸 ────────────────────────────────────────
 {
   const { host, pair } = makeHost();
-  for (const bad of ['not-json{', JSON.stringify({ v: 2, id: 'x', kind: 'result' }),
-    JSON.stringify({ v: 1, id: '', kind: 'result' }), JSON.stringify({ v: 1, id: 'x', kind: 'explode' }),
-    JSON.stringify({ v: 1, id: 'x', kind: 'result', capability: 42 }), 42, null]) {
-    pair.host.onMessage && pair.child.send(typeof bad === 'string' ? bad : JSON.stringify(bad));
-  }
-  const result = await host.invoke('greet', { still: 'alive' });
-  assert.deepEqual(result.result, { echoed: { still: 'alive' } }, '坏帧全部丢弃，正常调用不受影响');
-  ok('帧模式校验：非 JSON / 错版本 / 坏 id / 未知 kind / 坏形状 / 非 Object 全部丢弃');
+  let killed = false;
+  pair.host.killTree = () => { killed = true; };
+  pair.child.send('not-json{');
+  assert.equal(host.available(), false, 'malformed frame marks ProcessHost unavailable');
+  assert.equal(killed, true, 'malformed frame terminates the Worker process tree');
+  await assert.rejects(() => host.invoke('greet', {}), (error) => error.code === 'PROVIDER_UNAVAILABLE');
+  ok('malformed frame fails closed and terminates its Worker');
 }
 
 // ── 5. 超时 ──────────────────────────────────────────────────────────────────

@@ -24,6 +24,10 @@
 //   - shutdown 后不可再用；health 反映 transport 存活。
 
 import { EXTENSION_LIMITS, extensionError } from './types.js';
+import { fileURLToPath } from 'node:url';
+import { isPackagedRuntime } from '../app-paths.js';
+import { manifestFingerprint } from './manifest.js';
+import { createProcessTransport, resolveExtensionWorkerLaunch } from './process-transport.js';
 
 const PROTOCOL_VERSION = 1;
 const MAX_INFLIGHT = 16;
@@ -64,7 +68,17 @@ function parseFrame(raw) {
 
 export function createProcessExtensionHost({
   manifest,
-  transport,               // 注入：{ send(frame), onMessage(handler), close(), alive() }
+  transport: injectedTransport = null,
+  packageRoot = null,
+  storeRoot = null,
+  extensionId = null,
+  version = null,
+  fingerprint = null,
+  packaged = undefined,
+  execPath = process.execPath,
+  workerEntry = null,
+  parentEnv = process.env,
+  shutdownGraceMs = 1000,
   storage = null,
   logger = () => {},
   capabilityExecutor = null,
@@ -72,6 +86,26 @@ export function createProcessExtensionHost({
   maxMessageBytes = 2 * 1024 * 1024
 } = {}) {
   if (!manifest || typeof manifest !== 'object') throw new Error('createProcessExtensionHost 需要 manifest');
+  let transport = injectedTransport;
+  if (!transport) {
+    const isPackaged = packaged ?? isPackagedRuntime();
+    const resolvedWorkerEntry = isPackaged
+      ? undefined
+      : workerEntry || fileURLToPath(new URL('./process-worker.js', import.meta.url));
+    const launch = resolveExtensionWorkerLaunch({ packaged: isPackaged, execPath, workerEntry: resolvedWorkerEntry });
+    const activeId = extensionId || manifest.id;
+    const activeVersion = version || manifest.version;
+    transport = createProcessTransport({
+      packageRoot,
+      storeRoot,
+      extensionId: activeId,
+      version: activeVersion,
+      launch,
+      parentEnv,
+      metadata: { extensionId: activeId, version: activeVersion, fingerprint: fingerprint || manifestFingerprint(manifest) },
+      graceMs: shutdownGraceMs
+    });
+  }
   if (!transport || typeof transport.send !== 'function' || typeof transport.onMessage !== 'function') {
     throw new Error('createProcessExtensionHost 需要注入 transport（send/onMessage/close）');
   }
@@ -80,6 +114,8 @@ export function createProcessExtensionHost({
   const pending = new Map(); // invokeId -> { capability, resolve, reject, timer, cancelled }
   const logs = [];
   let closed = false;
+  let crashed = false;
+  maxMessageBytes = Math.max(1, Math.min(Number(maxMessageBytes) || 2 * 1024 * 1024, 2 * 1024 * 1024));
 
   const record = (level, message) => {
     logs.push({ at: Date.now(), level, message: String(message).slice(0, 2000) });
@@ -88,6 +124,30 @@ export function createProcessExtensionHost({
   };
 
   function fail(code, message) { throw extensionError(code, message); }
+
+  function settlePending(error) {
+    for (const [id, entry] of pending) {
+      clearTimeout(entry.timer);
+      pending.delete(id);
+      if (!entry.settled) { entry.settled = true; entry.reject(error); }
+    }
+  }
+
+  function failHost(code, message) {
+    if (closed) return;
+    closed = true;
+    crashed = true;
+    settlePending(extensionError(code, message));
+    record('error', message);
+    try {
+      const cleanup = typeof transport.killTree === 'function' ? transport.killTree() : transport.close?.();
+      if (cleanup && typeof cleanup.then === 'function') {
+        cleanup.catch(error => record('error', 'Worker cleanup failed: ' + String(error?.message ?? error)));
+      }
+    } catch (error) {
+      record('error', 'Worker cleanup failed: ' + String(error?.message ?? error));
+    }
+  }
 
   function capabilityOrThrow(capabilityId) {
     const entry = declared.get(capabilityId);
@@ -117,30 +177,48 @@ export function createProcessExtensionHost({
   transport.onMessage((raw) => {
     if (closed) return;
     if (typeof raw === 'string' && Buffer.byteLength(raw, 'utf8') > maxMessageBytes) {
-      record('error', '收到超限帧，已丢弃');
-      return;
+      return failHost('PROTOCOL_VIOLATION', 'Worker emitted an oversized frame');
     }
     let parsed = raw;
     if (typeof raw === 'string') {
-      try { parsed = JSON.parse(raw); } catch { record('error', '收到非 JSON 帧，已丢弃'); return; }
+      try {
+        parsed = JSON.parse(raw);
+      } catch (error) {
+        return failHost('PROTOCOL_VIOLATION', 'Worker emitted malformed JSON: ' + String(error?.message ?? error));
+      }
     }
     const frame = parseFrame(parsed);
-    if (!frame) { record('error', '收到不合协议的帧，已丢弃'); return; }
+    if (!frame) return failHost('PROTOCOL_VIOLATION', 'Worker emitted malformed or unsupported frame');
     if (frame.kind === 'pong') return;
     if (frame.kind === 'ping') {
-      checkedSend({ v: PROTOCOL_VERSION, id: frame.id, kind: 'pong' });
+      try {
+        checkedSend({ v: PROTOCOL_VERSION, id: frame.id, kind: 'pong' });
+      } catch (error) {
+        record('error', 'Unable to answer Worker ping: ' + String(error?.message ?? error));
+      }
+      return;
+    }
+    if (frame.kind === 'invoke') {
+      try {
+        checkedSend({ v: PROTOCOL_VERSION, id: frame.id, kind: 'error', capability: frame.capability,
+          error: { code: 'CAPABILITY_BROKER_REQUIRED', message: 'Host capability broker is not configured' } });
+      } catch (error) {
+        record('error', 'Unable to reject Worker capability request: ' + String(error?.message ?? error));
+      }
       return;
     }
     const entry = pending.get(frame.id);
     if (!entry) {
-      // 未知的 id：串话/重放/迟到的结果——一律丢弃并记录，不进入任何调用方。
-      record('warn', `丢弃未知 id 的帧：${frame.kind}:${frame.id}`);
+      record('warn', 'Ignoring late or unknown Worker response: ' + frame.kind + ':' + frame.id);
       return;
+    }
+    if (frame.capability !== entry.capability) {
+      return failHost('PROTOCOL_VIOLATION', 'Worker response capability does not match the request');
     }
     if (frame.kind === 'cancel') {
       clearTimeout(entry.timer);
       pending.delete(frame.id);
-      if (!entry.settled) { entry.settled = true; entry.reject(extensionError('INVOKE_CANCELLED', '调用已被取消')); }
+      if (!entry.settled) { entry.settled = true; entry.reject(extensionError('INVOKE_CANCELLED', 'Invocation cancelled by Worker')); }
       return;
     }
     clearTimeout(entry.timer);
@@ -148,12 +226,15 @@ export function createProcessExtensionHost({
     if (entry.settled) return;
     entry.settled = true;
     if (frame.kind === 'error') {
-      entry.reject(extensionError(frame.error.code || 'EXTENSION_ERROR', String(frame.error.message ?? '扩展返回错误')));
+      entry.reject(extensionError(frame.error.code || 'EXTENSION_ERROR', String(frame.error.message ?? 'Extension error')));
     } else {
       entry.resolve({ capability: frame.capability, result: frame.result ?? null });
     }
   });
-
+  transport.onExit?.(({ code, signal } = {}) => {
+    if (!closed) failHost('PROVIDER_UNAVAILABLE', 'Extension Worker exited (' + String(code) + ', ' + String(signal) + ')');
+  });
+  transport.onError?.((error) => failHost(error?.code || 'PROTOCOL_VIOLATION', String(error?.message ?? error)));
   return {
     manifest,
     logs,
@@ -161,7 +242,8 @@ export function createProcessExtensionHost({
     loadError: () => null,
     available() { return !closed && (typeof transport.alive !== 'function' || transport.alive()); },
     health() {
-      return { available: this.available(), closed, inflight: pending.size, provider: 'process-contract' };
+      return { available: this.available(), closed, crashed, inflight: pending.size,
+        provider: transport.pid ? 'process-child' : 'process-transport' };
     },
     /** 发起一次受控调用：能力白名单 → 帧发送 → 超时/取消/结果裁决（async：同步拒绝即 rejection）。 */
     async invoke(capabilityId, input) {
@@ -174,6 +256,8 @@ export function createProcessExtensionHost({
         const timer = setTimeout(() => {
           pending.delete(id);
           reject(extensionError('INVOKE_TIMEOUT', `进程扩展调用超时（${timeoutMs}ms）`));
+          try { checkedSend({ v: PROTOCOL_VERSION, id, kind: 'cancel', capability: capabilityId }); }
+          catch (error) { record('warn', 'Unable to send cancellation frame: ' + String(error?.message ?? error)); }
         }, timeoutMs);
         // 不 unref：等待子进程应答期间超时必须能够触发（否则挂死调用方）。
         pending.set(id, { capability: capabilityId, resolve, reject, timer, settled: false });
@@ -212,15 +296,18 @@ export function createProcessExtensionHost({
       return { cancelled: true };
     },
     shutdown() {
-      if (closed) return;
+      if (closed) return Promise.resolve();
       closed = true;
-      for (const [id, entry] of [...pending]) {
-        clearTimeout(entry.timer);
-        if (!entry.settled) { entry.settled = true; entry.reject(extensionError('PROVIDER_UNAVAILABLE', '宿主已关闭')); }
-        pending.delete(id);
+      settlePending(extensionError('PROVIDER_UNAVAILABLE', 'Process Extension Host is shut down'));
+      record('info', 'Process Extension Host shut down');
+      try {
+        return Promise.resolve(transport.close?.()).catch((error) => {
+          record('error', 'Worker shutdown failed: ' + String(error?.message ?? error));
+        });
+      } catch (error) {
+        record('error', 'Worker shutdown failed: ' + String(error?.message ?? error));
+        return Promise.resolve();
       }
-      try { transport.close?.(); } catch { /* transport 自行处理 */ }
-      record('info', 'Process extension host 已关闭');
     },
     /** 测试/诊断：直接查看在途集合。 */
     _inflight: () => [...pending.keys()]

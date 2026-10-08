@@ -4,6 +4,7 @@ import { isMainModule, reportEntrypointError } from '../entrypoint.js';
 import { createVmExtensionHost } from './host.js';
 import { assertManifest, MANIFEST_FILENAMES, manifestFingerprint } from './manifest.js';
 import { scanEntrySource } from './scan.js';
+import { sanitizeExtensionWorkerEnv } from './worker-env.js';
 
 const PROTOCOL_VERSION = 1;
 const MAX_FRAME_BYTES = 2 * 1024 * 1024;
@@ -87,6 +88,7 @@ function readPackage() {
 
 /** Run the Extension worker on the existing newline-delimited version-1 frame protocol. */
 export async function runExtensionWorker({ input = process.stdin, output = process.stdout, diagnostic = process.stderr } = {}) {
+  sanitizeExtensionWorkerEnv();
   const { manifest, source } = readPackage();
   const pendingCapabilities = new Map();
   const activeInvokes = new Map();
