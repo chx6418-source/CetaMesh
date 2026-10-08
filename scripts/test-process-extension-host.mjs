@@ -43,12 +43,12 @@ function makeHost({ latencyMs = 0, childBehavior } = {}) {
   return { host, pair };
 }
 
-function makeInstalledPackage({ id = 'fixture-ext', version = '1.0.0', source } = {}) {
+function makeInstalledPackage({ id = 'fixture-ext', version = '1.0.0', source, permissions = [] } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-process-package-'));
   const storeRoot = path.join(root, 'packages');
   const packageRoot = path.join(storeRoot, id, version);
   const manifest = assertManifest({
-    id, name: 'Fixture Extension', version, entry: 'index.js', type: 'tool', permissions: [],
+    id, name: 'Fixture Extension', version, entry: 'index.js', type: 'tool', permissions,
     capabilities: [
       { id: 'echo', kind: 'tool', title: 'Echo', requires: [] },
       { id: 'never', kind: 'tool', title: 'Never', requires: [] }
@@ -68,6 +68,39 @@ function makeInstalledPackage({ id = 'fixture-ext', version = '1.0.0', source } 
 function pidIsAlive(pid) {
   try { process.kill(pid, 0); return true; }
   catch (error) { if (error?.code === 'ESRCH') return false; throw error; }
+}
+
+async function waitUntil(predicate, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error('condition timed out');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
+// Extension-private synchronous storage remains scoped and uses the shared JSON Storage Primitive.
+{
+  const fixture = makeInstalledPackage({ permissions: ['storage'], source: [
+    'module.exports.handlers = {',
+    '  echo: (input, ctx) => { if (input.read) return ctx.storage.get("saved"); ctx.storage.set("saved", input.value); return input.value; },',
+    '  never: () => new Promise(() => {})',
+    '};'
+  ].join('\n') });
+  const storageFile = path.join(fixture.root, 'private-data', 'fixture-ext.json');
+  const host = createProcessExtensionHost({
+    manifest: fixture.manifest, packageRoot: fixture.packageRoot, storeRoot: fixture.storeRoot,
+    extensionId: fixture.manifest.id, version: fixture.manifest.version, packaged: false,
+    storageFile, timeoutMs: 5000
+  });
+  try {
+    assert.deepEqual((await host.invoke('echo', { value: 'private value' })).result, 'private value');
+    assert.deepEqual((await host.invoke('echo', { read: true })).result, 'private value');
+    assert.equal(fs.existsSync(storageFile), true);
+    ok('real Worker retains scoped private storage without exposing unrestricted fs');
+  } finally {
+    await host.shutdown();
+    fixture.cleanup();
+  }
 }
 
 // Worker launch policy must be explicit and start from a blank environment.
@@ -120,7 +153,110 @@ function pidIsAlive(pid) {
       host.invoke('echo', { sequence: 2 })
     ]);
     assert.deepEqual(results.map((item) => item.result), [{ sequence: 1 }, { sequence: 2 }]);
+    assert.equal(await host.ping({ timeoutMs: 2000 }), true, 'real Worker answers heartbeat ping');
     ok('ProcessExtensionHost 真实 spawn 支持并行 invoke');
+  } finally {
+    await host.shutdown();
+    fixture.cleanup();
+  }
+}
+
+// Real child processes exercise deadline cancellation, explicit cancel, and bounded host-to-worker frames.
+{
+  const fixture = makeInstalledPackage();
+  const host = createProcessExtensionHost({
+    manifest: fixture.manifest, packageRoot: fixture.packageRoot, storeRoot: fixture.storeRoot,
+    extensionId: fixture.manifest.id, version: fixture.manifest.version, packaged: false,
+    timeoutMs: 300, maxMessageBytes: 1024
+  });
+  try {
+    assert.equal(host.health().provider, 'process-child');
+    assert.equal(await host.ping({ timeoutMs: 2000 }), true, 'Worker is a live spawned child before fault probes');
+    await assert.rejects(host.invoke('never', {}), (error) => error.code === 'INVOKE_TIMEOUT');
+    assert.equal(host.available(), true, 'timeout cancels the call without crashing the Worker');
+
+    const pending = host.invoke('never', { cancel: true });
+    const [invokeId] = host._inflight();
+    assert.ok(invokeId);
+    assert.equal(host.cancel(invokeId).cancelled, true);
+    await assert.rejects(pending, (error) => error.code === 'INVOKE_CANCELLED');
+    assert.equal(await host.ping({ timeoutMs: 2000 }), true, 'Worker responds after explicit cancel');
+
+    await assert.rejects(host.invoke('echo', { blob: 'x'.repeat(2048) }), (error) => error.code === 'MESSAGE_TOO_LARGE');
+    assert.equal(host.available(), true, 'oversized input is rejected before transport and leaves Worker healthy');
+    await host.shutdown();
+    assert.equal(host.health().state, 'stopped');
+    ok('real Worker enforces timeout, cancellation, bounded input, and shutdown');
+  } finally {
+    await host.shutdown();
+    fixture.cleanup();
+  }
+}
+
+// Real malformed and oversized Worker output is treated as a protocol violation and contained to the child.
+{
+  const fixture = makeInstalledPackage();
+  const sanitizerUrl = new URL('../src/extension/worker-env.js', import.meta.url).href;
+  for (const [name, workerBody] of [
+    ['malformed', "process.stdout.write('not-json\\n');"],
+    ['oversized', "process.stdout.write(JSON.stringify({v:1,id:'too-large',kind:'pong',padding:'x'.repeat(4096)})+'\\n');"]
+  ]) {
+    const workerEntry = path.join(fixture.packageRoot, `${name}-worker.mjs`);
+    fs.writeFileSync(workerEntry, [
+      `import { sanitizeExtensionWorkerEnv } from '${sanitizerUrl}';`,
+      'sanitizeExtensionWorkerEnv();',
+      workerBody
+    ].join('\n'));
+    let crashedResolve;
+    const crashed = new Promise((resolve) => { crashedResolve = resolve; });
+    const host = createProcessExtensionHost({
+      manifest: fixture.manifest, packageRoot: fixture.packageRoot, storeRoot: fixture.storeRoot,
+      extensionId: fixture.manifest.id, version: fixture.manifest.version, packaged: false,
+      workerEntry, maxMessageBytes: 1024, onCrash: crashedResolve
+    });
+    try {
+      const failure = await Promise.race([
+        crashed,
+        new Promise((_, reject) => setTimeout(() => reject(new Error(`${name} Worker did not fail`)), 5000))
+      ]);
+      assert.equal(failure.code, 'PROTOCOL_VIOLATION');
+      assert.equal(host.health().state, 'crashed');
+      assert.equal(host.available(), false);
+      await host.shutdown();
+    } finally {
+      await host.shutdown();
+    }
+  }
+  ok('real malformed and oversized output crashes only the Worker host');
+  fixture.cleanup();
+}
+
+// A real nonzero child exit is reported as a contained host crash.
+{
+  const fixture = makeInstalledPackage();
+  const sanitizerUrl = new URL('../src/extension/worker-env.js', import.meta.url).href;
+  const workerEntry = path.join(fixture.packageRoot, 'crash-worker.mjs');
+  fs.writeFileSync(workerEntry, [
+    `import { sanitizeExtensionWorkerEnv } from '${sanitizerUrl}';`,
+    'sanitizeExtensionWorkerEnv();',
+    'setTimeout(() => process.exit(23), 20);'
+  ].join('\n'));
+  let crashedResolve;
+  const crashed = new Promise((resolve) => { crashedResolve = resolve; });
+  const host = createProcessExtensionHost({
+    manifest: fixture.manifest, packageRoot: fixture.packageRoot, storeRoot: fixture.storeRoot,
+    extensionId: fixture.manifest.id, version: fixture.manifest.version, packaged: false,
+    workerEntry, onCrash: crashedResolve
+  });
+  try {
+    const failure = await Promise.race([
+      crashed,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('crashing Worker did not exit')), 5000))
+    ]);
+    assert.equal(failure.code, 'PROVIDER_UNAVAILABLE');
+    assert.equal(host.health().state, 'crashed');
+    await assert.rejects(host.invoke('echo', {}), (error) => error.code === 'PROVIDER_UNAVAILABLE');
+    ok('real nonzero Worker exit is contained and reported to the host');
   } finally {
     await host.shutdown();
     fixture.cleanup();
@@ -182,6 +318,36 @@ function pidIsAlive(pid) {
     if (transport) await transport.killTree();
     fixture.cleanup();
   }
+}
+
+// A reverse Worker invoke reaches only the Host capability executor; frame-supplied identity is ignored.
+{
+  const pair = createInProcessTransportPair();
+  const requests = [];
+  const host = createProcessExtensionHost({
+    manifest, transport: pair.host,
+    capabilityExecutor: async (capability, input) => {
+      requests.push({ capability, input });
+      return { brokered: true };
+    }
+  });
+  const response = new Promise((resolve) => {
+    pair.child.onMessage((raw) => {
+      const frame = JSON.parse(raw);
+      if (frame.id === 'reverse-capability') resolve(frame);
+    });
+  });
+  pair.child.send(JSON.stringify({
+    v: 1, id: 'reverse-capability', kind: 'invoke', capability: 'network',
+    input: { url: 'https://example.com/' }, extensionId: 'spoofed-extension',
+    actor: { kind: 'owner', id: 'desktop' }, grants: ['*']
+  }));
+  const frame = await response;
+  assert.deepEqual(requests, [{ capability: 'network', input: { url: 'https://example.com/' } }]);
+  assert.equal(frame.kind, 'result');
+  assert.deepEqual(frame.result, { brokered: true });
+  await host.shutdown();
+  ok('reverse Worker capability frames pass through Host executor; frame identity fields are ignored');
 }
 
 // Worker process smoke test: the bootstrap must speak only the existing frame protocol.

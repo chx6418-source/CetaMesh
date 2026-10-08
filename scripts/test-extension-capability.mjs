@@ -62,6 +62,9 @@ try {
   const installed = await extensions.execute({ method: 'ext.install', params: { sourceDir,
     approval: { approved: true, token: review.review.token } } });
   await extensions.execute({ method: 'ext.enable', params: { id: manifest.id } });
+  const running = await extensions.execute({ method: 'ext.overview', params: {} });
+  assert.equal(running.extensions.find(item => item.id === manifest.id).provider, 'process-child',
+    'ordinary installed code Extensions run in a real Worker process');
   const read = await extensions.execute({ method: 'ext.invoke', params: { id: manifest.id, capability: 'read-file', input: { path: 'src/readme.txt' } } });
   assert.equal(read.result.content, 'workspace data');
   await assert.rejects(extensions.execute({ method: 'ext.invoke', params: { id: manifest.id, capability: 'read-file', input: { path: 'docs/private.txt' } } }),
@@ -80,6 +83,6 @@ try {
     'Declared Extension network requests reach the shared Broker and its safe-fetch policy');
   console.log('Extension Capability integration: filesystem, Memory, and network use the shared broker; scopes hold; long-term writes stay candidates');
 } finally {
-  extensions?.close();
+  await extensions?.close();
   fs.rmSync(dir, { recursive: true, force: true });
 }

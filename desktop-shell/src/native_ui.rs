@@ -148,6 +148,7 @@ enum Area {
     Memory,
     Task,
     Workshop,
+    Plugins,
     Mesh,
     Channel,
     Workspace,
@@ -211,6 +212,44 @@ enum Operation {
     MeshCall,
     ChannelCall,
     WorkspaceCall,
+    PluginsOverview,
+    PluginRestart,
+    PluginDisable,
+    PluginRemove,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PluginAction {
+    Restart,
+    Disable,
+    Remove,
+}
+
+fn plugin_status_labels(status: &str, runtime_state: &str, needs_review: bool) -> Vec<&'static str> {
+    let mut labels = Vec::new();
+    if status == "enabled" { labels.push("Enabled"); }
+    if status == "disabled" || status == "installed" { labels.push("Disabled"); }
+    if runtime_state == "running" { labels.push("Running"); }
+    if runtime_state == "crashed" || status == "disabled_due_to_crash" { labels.push("Crashed"); }
+    if needs_review { labels.push("Needs Review"); }
+    labels
+}
+
+fn plugin_action_request(action: PluginAction, id: &str) -> (&'static str, Value) {
+    let method = match action {
+        PluginAction::Restart => "ext.restart",
+        PluginAction::Disable => "ext.disable",
+        PluginAction::Remove => "ext.uninstall",
+    };
+    (method, json!({ "id": id }))
+}
+
+fn plugin_action_operation(action: PluginAction) -> Operation {
+    match action {
+        PluginAction::Restart => Operation::PluginRestart,
+        PluginAction::Disable => Operation::PluginDisable,
+        PluginAction::Remove => Operation::PluginRemove,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -663,6 +702,8 @@ pub struct NativeUi {
 
     core_online: Option<bool>,
     core_summary: String,
+    plugins_data: Option<Value>,
+    plugins_loaded: bool,
 
     roles: Vec<String>,
     current_role: Option<String>,
@@ -1229,6 +1270,8 @@ ApiCall::Family { method, params } => api.request(method, params),
             core_online: None,
             core_summary: "尚未连接".to_owned(),
 
+            plugins_data: None,
+            plugins_loaded: false,
             roles: Vec::new(),
             current_role: None,
             selected_role: String::new(),
@@ -1538,6 +1581,14 @@ ApiCall::Family { method, params } => api.request(method, params),
             self.feedback.insert(event.area, event.result.clone());
 
             match (event.operation, event.result.as_ref()) {
+                (Operation::PluginsOverview, Ok(value)) => {
+                    self.plugins_data = Some(value.clone());
+                    self.plugins_loaded = true;
+                }
+                (Operation::PluginsOverview, Err(_)) => self.plugins_loaded = true,
+                (Operation::PluginRestart | Operation::PluginDisable | Operation::PluginRemove, Ok(_)) => {
+                    self.issue_family(Area::Plugins, Operation::PluginsOverview, "ext.overview", json!({}));
+                }
                 // ── 产品 Chat（阶段 03）──
                 (Operation::ChatSessionsLoad, Ok(value)) => match parse_sessions(value) {
                     Ok(sessions) => {
@@ -3478,6 +3529,59 @@ ApiCall::Family { method, params } => api.request(method, params),
         }
     }
 
+    fn show_plugins_page(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Plugins");
+        if !self.plugins_loaded && !self.pending.contains(&Area::Plugins) {
+            self.issue_family(Area::Plugins, Operation::PluginsOverview, "ext.overview", json!({}));
+        }
+        if ui.button("Refresh").clicked() {
+            self.issue_family(Area::Plugins, Operation::PluginsOverview, "ext.overview", json!({}));
+        }
+        if let Some(Err(error)) = self.feedback.get(&Area::Plugins) {
+            ui.colored_label(native_palette().error, error);
+        }
+        if let Some(data) = self.plugins_data.clone() {
+            let extensions = data.get("extensions").and_then(Value::as_array).cloned().unwrap_or_default();
+            if extensions.is_empty() { ui.weak("No installed Extensions."); }
+            for extension in extensions {
+                let id = extension.get("id").and_then(Value::as_str).unwrap_or("");
+                let name = extension.get("name").and_then(Value::as_str).unwrap_or(id);
+                let version = extension.get("version").and_then(Value::as_str).unwrap_or("?");
+                let status = extension.get("status").and_then(Value::as_str).unwrap_or("disabled");
+                let runtime_state = extension.get("runtimeState").and_then(Value::as_str).unwrap_or("stopped");
+                let needs_review = extension.get("pendingReview").is_some_and(|value| !value.is_null());
+                ui.group(|ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.strong(format!("{name}  v{version}"));
+                        ui.weak(id);
+                        for label in plugin_status_labels(status, runtime_state, needs_review) {
+                            ui.label(label);
+                        }
+                    });
+                    let mut action = None;
+                    ui.horizontal(|ui| {
+                        if ui.button("Restart").clicked() { action = Some(PluginAction::Restart); }
+                        if ui.button("Disable").clicked() { action = Some(PluginAction::Disable); }
+                        if ui.button("Remove").clicked() { action = Some(PluginAction::Remove); }
+                    });
+                    if let Some(action) = action {
+                        let (method, params) = plugin_action_request(action, id);
+                        self.issue_family(Area::Plugins, plugin_action_operation(action), method, params);
+                    }
+                });
+            }
+            if let Some(reviews) = data.get("reviews").and_then(Value::as_array) {
+                for review in reviews {
+                    let name = review.get("name").and_then(Value::as_str).unwrap_or("Extension");
+                    let version = review.get("version").and_then(Value::as_str).unwrap_or("?");
+                    ui.label(format!("Needs Review: {name}  v{version}"));
+                }
+            }
+        } else if !self.pending.contains(&Area::Plugins) {
+            ui.weak("Extension status is not available.");
+        }
+    }
+
     fn show_page(&mut self, ui: &mut egui::Ui) {
         match self.navigation.page {
             AppPage::Chat => self.show_chat_page(ui),
@@ -3490,8 +3594,7 @@ ApiCall::Family { method, params } => api.request(method, params),
                 self.show_legacy_tab_page(ui);
             }
             AppPage::Plugins => {
-                ui.heading("Plugins");
-                ui.label("插件管理页面尚未接入。已注册的能力继续由 Core 管理。");
+                self.show_plugins_page(ui);
             }
         }
     }
@@ -6162,7 +6265,11 @@ mod theme_tests {
 
 #[cfg(test)]
 mod interaction_tests {
-    use super::{AppPage, page_for_shortcut_slot, should_send_on_enter};
+    use super::{
+        AppPage, PluginAction, page_for_shortcut_slot, plugin_action_request,
+        plugin_status_labels, should_send_on_enter,
+    };
+    use serde_json::json;
 
     #[test]
     fn navigation_shortcuts_cover_the_first_seven_product_pages() {
@@ -6184,5 +6291,21 @@ mod interaction_tests {
         assert!(!should_send_on_enter(true, true, false, true), "IME composition must not send");
         assert!(!should_send_on_enter(false, true, false, false), "composer must own focus");
         assert!(!should_send_on_enter(true, false, false, false), "no Enter, no send");
+    }
+
+    #[test]
+    fn plugin_page_maps_runtime_states_and_review_status() {
+        assert_eq!(plugin_status_labels("enabled", "healthy", false), vec!["Enabled"]);
+        assert_eq!(plugin_status_labels("disabled", "stopped", false), vec!["Disabled"]);
+        assert_eq!(plugin_status_labels("enabled", "running", false), vec!["Enabled", "Running"]);
+        assert_eq!(plugin_status_labels("disabled_due_to_crash", "crashed", true), vec!["Crashed", "Needs Review"]);
+        assert_eq!(plugin_status_labels("installed", "stopped", true), vec!["Disabled", "Needs Review"]);
+    }
+
+    #[test]
+    fn plugin_controls_route_restart_disable_and_remove_to_core() {
+        assert_eq!(plugin_action_request(PluginAction::Restart, "ext.one"), ("ext.restart", json!({"id":"ext.one"})));
+        assert_eq!(plugin_action_request(PluginAction::Disable, "ext.one"), ("ext.disable", json!({"id":"ext.one"})));
+        assert_eq!(plugin_action_request(PluginAction::Remove, "ext.one"), ("ext.uninstall", json!({"id":"ext.one"})));
     }
 }

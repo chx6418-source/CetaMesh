@@ -84,7 +84,7 @@ export function createProcessTransport({
   const frameLimit = Math.max(1, Math.min(Number(maxFrameBytes) || DEFAULT_MAX_FRAME_BYTES, DEFAULT_MAX_FRAME_BYTES));
   const env = buildExtensionWorkerEnv({
     parentEnv,
-    metadata: { extensionId, version, fingerprint: metadata.fingerprint }
+    metadata: { extensionId, version, fingerprint: metadata.fingerprint, storageFile: metadata.storageFile }
   });
   const child = spawn(launch.executable, launch.args, {
     shell: false,
@@ -98,8 +98,10 @@ export function createProcessTransport({
   let messageHandler = null;
   let exitHandler = null;
   let errorHandler = null;
+  let diagnosticHandler = null;
   let messages = [];
   let errors = [];
+  let diagnostics = [];
   let exited = false;
   let closing = false;
   let killPromise = null;
@@ -158,6 +160,9 @@ export function createProcessTransport({
   child.stderr.on('data', (chunk) => {
     stderrTail = Buffer.concat([stderrTail, Buffer.from(chunk)]);
     if (stderrTail.length > MAX_STDERR_BYTES) stderrTail = stderrTail.subarray(stderrTail.length - MAX_STDERR_BYTES);
+    const diagnostic = Buffer.from(chunk).toString('utf8').slice(-2000);
+    if (diagnosticHandler) diagnosticHandler(diagnostic);
+    else if (diagnostics.length < 16) diagnostics.push(diagnostic);
   });
   child.once('error', (error) => {
     notifyError(extensionError('PROVIDER_UNAVAILABLE', 'Unable to spawn Extension Worker: ' + String(error?.message ?? error)));
@@ -195,7 +200,7 @@ export function createProcessTransport({
 
   return {
     cwd,
-    pid: child.pid ?? null,
+    get pid() { return child.pid ?? null; },
     send,
     onMessage(handler) {
       messageHandler = handler;
@@ -208,6 +213,10 @@ export function createProcessTransport({
     onError(handler) {
       errorHandler = handler;
       for (const error of errors.splice(0)) handler(error);
+    },
+    onDiagnostic(handler) {
+      diagnosticHandler = handler;
+      for (const diagnostic of diagnostics.splice(0)) handler(diagnostic);
     },
     alive() { return !exited && child.exitCode === null && child.signalCode === null; },
     stderr() { return stderrTail.toString('utf8'); },

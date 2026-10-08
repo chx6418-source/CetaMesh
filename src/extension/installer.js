@@ -9,6 +9,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { parseJsonText } from '../storage/json-file.js';
 import { assertManifest, MANIFEST_FILENAMES } from './manifest.js';
 import { scanEntrySource } from './scan.js';
@@ -134,12 +135,47 @@ export function createExtensionInstaller({ store, now = () => Date.now() } = {})
     return delta;
   }
 
-  function stagePackage(reviewed) {
+  function packageFingerprint(rootDir) {
+    const hash = crypto.createHash('sha256');
+    for (const relative of collectFiles(rootDir).files.sort()) {
+      hash.update(relative, 'utf8');
+      hash.update('\0');
+      hash.update(fs.readFileSync(path.join(rootDir, relative)));
+      hash.update('\0');
+    }
+    return hash.digest('hex');
+  }
+
+  function preparePackage(reviewed) {
     const manifest = reviewed.manifest;
     const target = path.join(store.packagesDir, manifest.id, manifest.version);
-    fs.rmSync(target, { recursive: true, force: true });
-    copyTree(reviewed.sourceDir, target);
-    return target;
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    const staging = `${target}.staging-${process.pid}-${crypto.randomBytes(8).toString('hex')}`;
+    const expectedFingerprint = packageFingerprint(reviewed.sourceDir);
+    try {
+      copyTree(reviewed.sourceDir, staging);
+      const stagedReview = reviewFromDirectory({ sourceDir: staging });
+      if (stagedReview.review.fingerprint !== reviewed.review.fingerprint
+        || packageFingerprint(staging) !== expectedFingerprint) {
+        throw extensionError('SOURCE_CHANGED_DURING_STAGE', 'Extension source changed while it was being staged');
+      }
+      return { staging, target, expectedFingerprint };
+    } catch (error) {
+      fs.rmSync(staging, { recursive: true, force: true });
+      throw error;
+    }
+  }
+
+  function finalizePackage(prepared) {
+    if (fs.existsSync(prepared.target)) {
+      if (packageFingerprint(prepared.target) !== prepared.expectedFingerprint) {
+        throw extensionError('IMMUTABLE_VERSION_COLLISION', 'This Extension version already contains different package files');
+      }
+      fs.rmSync(prepared.staging, { recursive: true, force: true });
+      return { target: prepared.target, created: false };
+    }
+    fs.renameSync(prepared.staging, prepared.target);
+    return { target: prepared.target, created: true };
   }
 
   function commit({ reviewed, approval, isUpdate }) {
@@ -147,7 +183,13 @@ export function createExtensionInstaller({ store, now = () => Date.now() } = {})
     const previous = store.get(manifest.id);
     const delta = assertInstallable(reviewed, { approval, previousEntry: previous, isUpdate });
 
-    const target = stagePackage(reviewed);
+    const prepared = preparePackage(reviewed);
+    let finalized;
+    try { finalized = finalizePackage(prepared); }
+    catch (error) {
+      fs.rmSync(prepared.staging, { recursive: true, force: true });
+      throw error;
+    }
     const timestamp = now();
     const entry = {
       id: manifest.id,
@@ -155,31 +197,33 @@ export function createExtensionInstaller({ store, now = () => Date.now() } = {})
       name: manifest.name,
       type: manifest.type,
       publisher: manifest.publisher || reviewed.review.publisher || '',
-      status: 'installed',
+      status: previous?.status || 'installed',
       permissions: manifest.permissions,
       fingerprint: reviewed.review.fingerprint,
       reviewToken: reviewed.review.token,
       riskLevel: reviewed.review.riskLevel,
       manifest,
       manifestFile: reviewed.manifestFile,
-      sourceRoot: target,
+      sourceRoot: finalized.target,
       importedFrom: reviewed.sourceDir,
       fileCount: reviewed.files.length,
       bytes: reviewed.bytes,
       installedAt: previous ? previous.installedAt : timestamp,
       updatedAt: timestamp,
-      enabledAt: null,
-      disabledAt: null,
+      enabledAt: previous?.enabledAt || null,
+      disabledAt: previous?.disabledAt || null,
       previousVersion: previous ? previous.version : null,
       permissionDelta: delta
     };
 
-    // 更新时清掉旧版本目录，受管目录里只保留当前版本。
-    if (previous && previous.sourceRoot && previous.sourceRoot !== target) {
-      fs.rmSync(previous.sourceRoot, { recursive: true, force: true });
+    // 新版本先在同一文件系统暂存并原子落位；旧版本保留供回滚。
+    try { store.put(entry); }
+    catch (error) {
+      if (finalized.created) fs.rmSync(finalized.target, { recursive: true, force: true });
+      fs.rmSync(prepared.staging, { recursive: true, force: true });
+      throw error;
     }
-    store.put(entry);
-    return { entry, review: reviewed.review, permissionDelta: delta };
+    return { entry, previousEntry: previous, review: reviewed.review, permissionDelta: delta };
   }
 
   return {
@@ -196,7 +240,7 @@ export function createExtensionInstaller({ store, now = () => Date.now() } = {})
     },
 
     /** 覆盖安装新版本；版本必须更高。 */
-    update({ sourceDir, approval } = {}) {
+    async update({ sourceDir, approval, beforeSwitch } = {}) {
       const reviewed = reviewFromDirectory({ sourceDir });
       const previous = store.get(reviewed.manifest.id);
       if (!previous) {
@@ -206,20 +250,86 @@ export function createExtensionInstaller({ store, now = () => Date.now() } = {})
         throw extensionError('VERSION_NOT_NEWER',
           '更新版本必须高于已安装版本（已装 ' + previous.version + '，来源 ' + reviewed.manifest.version + '）');
       }
-      return commit({ reviewed, approval, isUpdate: true });
+      const delta = assertInstallable(reviewed, { approval, previousEntry: previous, isUpdate: true });
+      const prepared = preparePackage(reviewed);
+      try {
+        if (typeof beforeSwitch === 'function') await beforeSwitch({ id: previous.id, previousEntry: previous });
+        const finalized = finalizePackage(prepared);
+        const timestamp = now();
+        const entry = {
+          id: reviewed.manifest.id, version: reviewed.manifest.version, name: reviewed.manifest.name,
+          type: reviewed.manifest.type, publisher: reviewed.manifest.publisher || reviewed.review.publisher || '',
+          status: previous.status, permissions: reviewed.manifest.permissions,
+          fingerprint: reviewed.review.fingerprint, reviewToken: reviewed.review.token,
+          riskLevel: reviewed.review.riskLevel, manifest: reviewed.manifest, manifestFile: reviewed.manifestFile,
+          sourceRoot: finalized.target, importedFrom: reviewed.sourceDir, fileCount: reviewed.files.length,
+          bytes: reviewed.bytes, installedAt: previous.installedAt, updatedAt: timestamp,
+          enabledAt: previous.enabledAt || null, disabledAt: previous.disabledAt || null,
+          previousVersion: previous.version, permissionDelta: delta
+        };
+        try { store.put(entry); }
+        catch (error) {
+          if (finalized.created) fs.rmSync(finalized.target, { recursive: true, force: true });
+          throw error;
+        }
+        return { entry, previousEntry: previous, review: reviewed.review, permissionDelta: delta };
+      } finally {
+        fs.rmSync(prepared.staging, { recursive: true, force: true });
+      }
+    },
+
+    async rollback({ id, approval, beforeSwitch } = {}) {
+      const previous = store.get(id);
+      if (!previous) throw extensionError('NOT_INSTALLED', 'Extension is not installed: ' + String(id));
+      if (!previous.previousVersion) throw extensionError('ROLLBACK_UNAVAILABLE', 'No previous Extension version is retained');
+      const priorRoot = path.join(store.packagesDir, previous.id, previous.previousVersion);
+      const reviewed = reviewFromDirectory({ sourceDir: priorRoot });
+      if (reviewed.manifest.id !== previous.id || reviewed.manifest.version !== previous.previousVersion) {
+        throw extensionError('ROLLBACK_PACKAGE_MISMATCH', 'Retained rollback package does not match the registry version');
+      }
+      const delta = assertInstallable(reviewed, { approval, previousEntry: previous, isUpdate: true });
+      const prepared = preparePackage(reviewed);
+      try {
+        if (typeof beforeSwitch === 'function') await beforeSwitch({ id: previous.id, previousEntry: previous });
+        const finalized = finalizePackage(prepared);
+        const timestamp = now();
+        const entry = {
+          id: reviewed.manifest.id, version: reviewed.manifest.version, name: reviewed.manifest.name,
+          type: reviewed.manifest.type, publisher: reviewed.manifest.publisher || reviewed.review.publisher || '',
+          status: previous.status, permissions: reviewed.manifest.permissions,
+          fingerprint: reviewed.review.fingerprint, reviewToken: reviewed.review.token,
+          riskLevel: reviewed.review.riskLevel, manifest: reviewed.manifest, manifestFile: reviewed.manifestFile,
+          sourceRoot: finalized.target, importedFrom: reviewed.sourceDir, fileCount: reviewed.files.length,
+          bytes: reviewed.bytes, installedAt: previous.installedAt, updatedAt: timestamp,
+          enabledAt: previous.enabledAt || null, disabledAt: previous.disabledAt || null,
+          previousVersion: previous.version, permissionDelta: delta
+        };
+        try { store.put(entry); }
+        catch (error) {
+          if (finalized.created) fs.rmSync(finalized.target, { recursive: true, force: true });
+          throw error;
+        }
+        return { entry, previousEntry: previous, review: reviewed.review, permissionDelta: delta };
+      } finally {
+        fs.rmSync(prepared.staging, { recursive: true, force: true });
+      }
     },
 
     /** 卸载：移除注册表条目，并删除受管包目录（不触碰用户的来源目录）。 */
     uninstall({ id, keepFiles = false } = {}) {
       const entry = store.get(id);
       if (!entry) throw extensionError('NOT_INSTALLED', '扩展未安装：' + String(id));
+      store.remove(entry.id);
+      let removedFiles = false;
       if (!keepFiles && entry.sourceRoot) {
         const root = path.resolve(store.packagesDir);
-        const target = path.resolve(entry.sourceRoot);
-        if (target.startsWith(root + path.sep)) fs.rmSync(target, { recursive: true, force: true });
+        const target = path.resolve(root, entry.id);
+        if (target !== root && target.startsWith(root + path.sep)) {
+          fs.rmSync(target, { recursive: true, force: true });
+          removedFiles = true;
+        }
       }
-      store.remove(entry.id);
-      return { id: entry.id, version: entry.version, removedFiles: keepFiles !== true };
+      return { id: entry.id, version: entry.version, removedFiles };
     }
   };
 }

@@ -17,15 +17,20 @@ import {
   createExtensionService,
   createExtensionStore,
   createExtensionHost,
+  createProcessExtensionHost,
+  createInProcessTransportPair,
   scanEntrySource,
   validateManifest,
   buildReview,
-  reviewSummaryLines
+  reviewSummaryLines,
+  manifestFingerprint
 } from '../src/extension/index.js';
 import { startIpcProtocol, IPC_PROTOCOL_VERSION } from '../src/control/ipc-protocol.js';
+import { createCapabilityBroker } from '../src/capability/index.js';
 
 let passed = 0;
 let failed = 0;
+const runtimeCleanups = [];
 const check = (name, condition, extra = '') => {
   if (condition) { passed += 1; console.log('PASS ' + name + (extra ? ' — ' + extra : '')); }
   else { failed += 1; console.log('FAIL ' + name + (extra ? ' — ' + extra : '')); }
@@ -65,6 +70,13 @@ function writeExtension(folder, manifest, source) {
   fs.writeFileSync(path.join(dir, manifest.entry || 'index.js'), source, 'utf8');
   return dir;
 }
+async function waitUntil(predicate, timeoutMs = 7000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error('condition timed out');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
 const fakeFetch = async (url) => ({
   status: 200,
   body: '<html><head><title>Example Domain</title></head><body>hi</body></html>',
@@ -74,6 +86,7 @@ const fakeFetch = async (url) => ({
 try {
   const store = createExtensionStore({ stateDir: root });
   const runtime = createExtensionRuntime({ store, fetchImpl: fakeFetch });
+  runtimeCleanups.push(() => runtime.close());
 
   // ── 1. 无敏感权限的简单 Tool：审查 -> 安装 ─────────────────────────────
   const helloReview = runtime.review({ sourceDir: HELLO });
@@ -111,7 +124,7 @@ try {
   check('扩展日志被记录', logs.logs.length >= 2);
 
   // ── 3. 禁用 -> 卸载 ────────────────────────────────────────────────────
-  const disabled = runtime.disable({ id: 'cetamesh.hello-tool' });
+  const disabled = await runtime.disable({ id: 'cetamesh.hello-tool' });
   equal('禁用后状态 disabled', disabled.extension.status, 'disabled');
   const afterDisable = await asyncCapture(() => runtime.invoke({ id: 'cetamesh.hello-tool', capability: 'hello.greet' }));
   check('禁用后调用被拒绝', afterDisable.threw && afterDisable.code === 'EXTENSION_DISABLED', String(afterDisable.code));
@@ -243,22 +256,92 @@ try {
   // ── 12. Update：版本与权限提升 ─────────────────────────────────────────
   const v1Same = writeExtension('upd-same', baseManifest({ id: 'test.updatable' }), 'module.exports.handlers={"sample.run":()=>({v:1})};');
   runtime.install({ sourceDir: v1Same });
-  const notNewer = capture(() => runtime.update({ sourceDir: v1Same }));
+  await runtime.enable({ id: 'test.updatable' });
+  runtime.review({ sourceDir: v1Same });
+  const notNewer = await asyncCapture(() => runtime.update({ sourceDir: v1Same }));
   check('同版本更新被拒绝', notNewer.threw && notNewer.code === 'VERSION_NOT_NEWER', String(notNewer.code));
 
   const v11 = writeExtension('upd-110', baseManifest({ id: 'test.updatable', version: '1.1.0', permissions: ['storage'] }), 'module.exports.handlers={"sample.run":()=>({v:11})};');
-  const escalate = capture(() => runtime.update({ sourceDir: v11 }));
+  const escalate = await asyncCapture(() => runtime.update({ sourceDir: v11 }));
   check('新增权限的更新需要重新批准', escalate.threw && escalate.code === 'APPROVAL_REQUIRED', String(escalate.code));
   check('拒绝信息点明新增权限', escalate.message.includes('storage'), escalate.message);
 
   const v11Review = runtime.review({ sourceDir: v11 }).review;
-  const updated = runtime.update({ sourceDir: v11, approval: { approved: true, token: v11Review.token } });
+  const updated = await runtime.update({ sourceDir: v11, approval: { approved: true, token: v11Review.token } });
+  equal('Update keeps the installed Extension enabled', updated.entry.status, 'enabled');
+  equal('Update launches the new version in a real Process Worker', runtime.get({ id: 'test.updatable' }).provider, 'process-child');
+  equal('new version is active after atomic switch', (await runtime.invoke({ id: 'test.updatable', capability: 'sample.run', input: {} })).result.v, 11);
+  check('previous immutable package remains available for rollback', fs.existsSync(path.join(store.packagesDir, 'test.updatable', '1.0.0')));
+  runtime.review({ sourceDir: v11 });
+  const sameVersion = await asyncCapture(() => runtime.update({ sourceDir: v11 }));
+  check('same-version update is rejected after activation', sameVersion.threw && sameVersion.code === 'VERSION_NOT_NEWER');
+  runtime.reviewRollback({ id: 'test.updatable' });
+  const rolledBack = await runtime.rollback({ id: 'test.updatable' });
+  equal('rollback atomically restores the previous version', rolledBack.entry.version, '1.0.0');
+  equal('rollback preserves enabled state', rolledBack.entry.status, 'enabled');
+  equal('rollback runs the restored version', (await runtime.invoke({ id: 'test.updatable', capability: 'sample.run', input: {} })).result.v, 1);
+  const silentReExpansion = await asyncCapture(() => runtime.update({ sourceDir: v11, approval: { approved: true, token: v11Review.token } }));
+  check('permission expansion requires a fresh Owner Review after rollback', silentReExpansion.threw && silentReExpansion.code === 'APPROVAL_REQUIRED');
+  const freshV11Review = runtime.review({ sourceDir: v11 }).review;
+  const reUpdated = await runtime.update({ sourceDir: v11, approval: { approved: true, token: freshV11Review.token } });
+  equal('fresh review permits the exact new version', reUpdated.entry.version, '1.1.0');
+
+  const failedStartStore = createExtensionStore({ stateDir: path.join(root, 'failed-worker-start-state') });
+  const failedStartRuntime = createExtensionRuntime({
+    store: failedStartStore, monitorIntervalMs: 0,
+    processHostFactory: ({ manifest }) => ({
+      manifest, available: () => true,
+      health: () => ({ available: true, closed: false, crashed: false, inflight: 0, provider: 'test-process-host' }),
+      ping: async () => manifest.version === '1.0.0',
+      invoke: async () => ({ result: null }),
+      shutdown: async () => {}
+    })
+  });
+  runtimeCleanups.push(() => failedStartRuntime.close());
+  const startFailureV1 = writeExtension('worker-start-v1', baseManifest({ id: 'test.worker-start-rollback' }),
+    'module.exports.handlers={"sample.run":()=>1};');
+  const startFailureV2 = writeExtension('worker-start-v2', baseManifest({ id: 'test.worker-start-rollback', version: '2.0.0' }),
+    'module.exports.handlers={"sample.run":()=>2};');
+  failedStartRuntime.install({ sourceDir: startFailureV1 });
+  await failedStartRuntime.enable({ id: 'test.worker-start-rollback' });
+  failedStartRuntime.review({ sourceDir: startFailureV2 });
+  const failedStart = await asyncCapture(() => failedStartRuntime.update({ sourceDir: startFailureV2 }));
+  check('failed new Worker startup reports the switch failure', failedStart.threw && failedStart.code === 'WORKER_START_FAILED');
+  equal('failed new Worker startup restores the prior active version', failedStartStore.get('test.worker-start-rollback').version, '1.0.0');
+  equal('failed update rollback keeps the Extension enabled', failedStartStore.get('test.worker-start-rollback').status, 'enabled');
+  equal('failed update rollback restarts the previous host', failedStartRuntime.get({ id: 'test.worker-start-rollback' }).provider, 'test-process-host');
+  await failedStartRuntime.close();
+
+  const failingStateDir = path.join(root, 'registry-write-failure-state');
+  const failingStore = createExtensionStore({ stateDir: failingStateDir });
+  const failingRuntime = createExtensionRuntime({ store: failingStore, monitorIntervalMs: 0 });
+  runtimeCleanups.push(() => failingRuntime.close());
+  const failureV1 = writeExtension('registry-failure-v1', baseManifest({ id: 'test.registry-failure' }),
+    'module.exports.handlers={"sample.run":()=>({v:1})};');
+  const failureV2 = writeExtension('registry-failure-v2', baseManifest({ id: 'test.registry-failure', version: '2.0.0' }),
+    'module.exports.handlers={"sample.run":()=>({v:2})};');
+  failingRuntime.install({ sourceDir: failureV1 });
+  failingRuntime.review({ sourceDir: failureV2 });
+  const registryBackup = failingStore.file + '.backup';
+  fs.renameSync(failingStore.file, registryBackup);
+  fs.mkdirSync(failingStore.file);
+  try {
+    const failedSwitch = await asyncCapture(() => failingRuntime.update({ sourceDir: failureV2 }));
+    check('registry write failure is reported in the Extension domain', failedSwitch.threw && failedSwitch.code === 'REGISTRY_WRITE_FAILED');
+    equal('registry write failure restores the in-memory active version', failingStore.get('test.registry-failure').version, '1.0.0');
+    check('failed registry switch removes the staged version directory', !fs.existsSync(path.join(failingStore.packagesDir, 'test.registry-failure', '2.0.0')));
+  } finally {
+    fs.rmSync(failingStore.file, { recursive: true, force: true });
+    fs.renameSync(registryBackup, failingStore.file);
+  }
   equal('批准后更新成功', updated.entry.version, '1.1.0');
   equal('记录了权限差异', updated.permissionDelta.added, ['storage']);
 
   // ── 13. 重启持久化 ────────────────────────────────────────────────────
+  await runtime.close();
   const restartedStore = createExtensionStore({ stateDir: root });
   const restarted = createExtensionRuntime({ store: restartedStore, fetchImpl: fakeFetch });
+  runtimeCleanups.push(() => restarted.close());
   const restored = restarted.get({ id: 'cetamesh.http-meta' }).extension;
   equal('重启后扩展仍在', restored.id, 'cetamesh.http-meta');
   equal('重启后状态保持 enabled', restored.status, 'enabled');
@@ -270,12 +353,12 @@ try {
   // ── 14. 卸载 ──────────────────────────────────────────────────────────
   const helloEntry = restarted.get({ id: 'cetamesh.hello-tool' }).extension;
   const packageDir = helloEntry.sourceRoot;
-  const uninstalled = restarted.uninstall({ id: 'cetamesh.hello-tool' });
+  const uninstalled = await restarted.uninstall({ id: 'cetamesh.hello-tool' });
   equal('卸载返回被移除的版本', uninstalled.version, '1.0.0');
   check('注册表条目已移除', restartedStore.get('cetamesh.hello-tool') === null);
   check('受管包目录已删除', fs.existsSync(packageDir) === false);
   check('用户的来源目录未被触碰', fs.existsSync(path.join(HELLO, 'extension.json')) === true);
-  const uninstallAgain = capture(() => restarted.uninstall({ id: 'cetamesh.hello-tool' }));
+  const uninstallAgain = await asyncCapture(() => restarted.uninstall({ id: 'cetamesh.hello-tool' }));
   check('重复卸载被拒绝', uninstallAgain.threw && uninstallAgain.code === 'NOT_INSTALLED', String(uninstallAgain.code));
 
   const overview = restarted.overview();
@@ -283,8 +366,209 @@ try {
   check('overview 列出已启用数量', typeof overview.enabled === 'number');
 
   // ── 15. Service 层 + IPC 往返 ─────────────────────────────────────────
+  // Host selection keeps Memory Packs data-only, routes regular Extensions to processes,
+  // and permits VM execution only through an explicit trusted predicate.
+  const selectionStore = createExtensionStore({ stateDir: path.join(root, 'selection-state') });
+  const selectedKinds = [];
+  const selectedHost = (manifest, provider) => ({
+    manifest, logs: [], capabilities: () => manifest.capabilities.map(capability => capability.id),
+    available: () => true, loadError: () => null,
+    health: () => ({ available: true, closed: false, crashed: false, inflight: 0, provider }),
+    invoke: async (capability, input) => ({ capability, result: input }),
+    shutdown: async () => {}
+  });
+  const selectionRuntime = createExtensionRuntime({
+    store: selectionStore, monitorIntervalMs: 0,
+    processHostFactory: ({ manifest }) => { selectedKinds.push('process'); return selectedHost(manifest, 'process-child'); },
+    vmHostFactory: ({ manifest }) => { selectedKinds.push('vm'); return selectedHost(manifest, 'vm'); },
+    memoryPackHostFactory: ({ manifest }) => { selectedKinds.push('memory-pack'); return selectedHost(manifest, 'memory-pack'); },
+    isTrustedVmExtension: entry => entry.id === 'test.trusted-vm'
+  });
+  runtimeCleanups.push(() => selectionRuntime.close());
+  const ordinarySource = writeExtension('runtime-ordinary', baseManifest({ id: 'test.ordinary' }), 'module.exports.handlers={"sample.run":()=>1};');
+  const trustedSource = writeExtension('runtime-trusted', baseManifest({ id: 'test.trusted-vm' }), 'module.exports.handlers={"sample.run":()=>1};');
+  selectionRuntime.install({ sourceDir: ordinarySource });
+  selectionRuntime.install({ sourceDir: trustedSource });
+  selectionRuntime.enable({ id: 'test.ordinary' });
+  selectionRuntime.enable({ id: 'test.trusted-vm' });
+  const memoryPackRoot = path.join(root, 'selection-memory-pack');
+  fs.mkdirSync(memoryPackRoot, { recursive: true });
+  fs.writeFileSync(path.join(memoryPackRoot, 'pack.json'), JSON.stringify({ schemaVersion: 1, kind: 'memory-pack', base: { summary: '', entries: [] } }));
+  const memoryPackManifest = { ...baseManifest({ id: 'test.memory-pack', type: 'memory-pack', entry: 'pack.json',
+    capabilities: [{ id: 'memory.list', kind: 'memory', title: 'List', requires: [] }] }) };
+  selectionStore.put({ id: memoryPackManifest.id, version: memoryPackManifest.version, name: memoryPackManifest.name,
+    type: 'memory-pack', status: 'installed', permissions: [], manifest: memoryPackManifest,
+    sourceRoot: memoryPackRoot, fingerprint: manifestFingerprint(memoryPackManifest) });
+  selectionRuntime.enable({ id: memoryPackManifest.id });
+  equal('ordinary, trusted VM, and Memory Pack host selection', selectedKinds, ['process', 'vm', 'memory-pack']);
+  const selectedOverview = selectionRuntime.overview();
+  equal('overview exposes process provider and runtime state',
+    selectedOverview.extensions.find(entry => entry.id === 'test.ordinary')?.provider, 'process-child');
+  check('overview exposes runtimeState', typeof selectedOverview.extensions.find(entry => entry.id === 'test.ordinary')?.runtimeState === 'string');
+  await selectionRuntime.close();
+
+  // Reverse capability requests are bound to the installed identity and reviewed grants.
+  const bindingStore = createExtensionStore({ stateDir: path.join(root, 'binding-state') });
+  const bindingPair = createInProcessTransportPair();
+  const bindingBroker = createCapabilityBroker();
+  bindingBroker.register({ id: 'memory.read', permission: 'memory.read', provider: 'test', risk: 'low',
+    execute: request => ({ actorId: request.actor.id, input: request.input }) });
+  const bindingRuntime = createExtensionRuntime({
+    store: bindingStore, capabilityBroker: bindingBroker, monitorIntervalMs: 0,
+    processHostFactory: ({ manifest, capabilityExecutor }) => createProcessExtensionHost({
+      manifest, transport: bindingPair.host, capabilityExecutor
+    })
+  });
+  runtimeCleanups.push(() => bindingRuntime.close());
+  const boundSource = writeExtension('runtime-bound', baseManifest({
+    id: 'test.bound-worker', permissions: ['memory.read'],
+    capabilities: [{ id: 'bound.run', kind: 'tool', title: 'Bound', requires: ['memory.read'] }]
+  }), 'module.exports.handlers={"bound.run":(input,ctx)=>ctx.memory.read(input)};');
+  bindingRuntime.install({ sourceDir: boundSource });
+  bindingRuntime.enable({ id: 'test.bound-worker' });
+  let sequence = 0;
+  const waiters = new Map();
+  bindingPair.child.onMessage(raw => {
+    const frame = JSON.parse(raw);
+    const resolve = waiters.get(frame.id);
+    if (resolve) { waiters.delete(frame.id); resolve(frame); }
+  });
+  const reverseCapability = extra => new Promise(resolve => {
+    const id = 'runtime-bound-' + (++sequence);
+    const timeout = setTimeout(() => { waiters.delete(id); resolve({ kind: 'timeout', error: { code: 'TEST_TIMEOUT' } }); }, 3000);
+    waiters.set(id, frame => { clearTimeout(timeout); resolve(frame); });
+    bindingPair.child.send(JSON.stringify({ v: 1, id, kind: 'invoke', capability: 'memory.read', input: { probe: sequence }, ...extra }));
+  });
+  const boundResult = await reverseCapability({ extensionId: 'spoofed-id', actor: { kind: 'owner', id: 'desktop' }, grants: ['*'] });
+  equal('Worker-supplied identity cannot replace the host-bound actor', boundResult.result?.actorId, 'test.bound-worker');
+  const installedBinding = bindingStore.get('test.bound-worker');
+  bindingStore.put({ ...installedBinding, permissions: [] });
+  const deniedGrant = await reverseCapability({});
+  equal('removed approved grant denies reverse capability', deniedGrant.error.code, 'PERMISSION_DENIED');
+  bindingStore.put({ ...installedBinding, permissions: ['memory.read', 'storage'] });
+  const expandedGrant = await reverseCapability({});
+  equal('expanded approved grant invalidates the running Worker', expandedGrant.error.code, 'STALE_EXTENSION_GRANTS');
+  bindingStore.put({ ...installedBinding, version: '2.0.0' });
+  const staleVersion = await reverseCapability({});
+  equal('stale active version denies reverse capability', staleVersion.error.code, 'STALE_EXTENSION_HOST');
+  bindingStore.put({ ...installedBinding, fingerprint: 'stale-fingerprint' });
+  const staleFingerprint = await reverseCapability({});
+  equal('stale active fingerprint denies reverse capability', staleFingerprint.error.code, 'STALE_EXTENSION_HOST');
+  await bindingRuntime.close();
+
+  // Health monitors distinguish heartbeat misses and bound automatic recovery to a rolling window.
+  const recoveryStore = createExtensionStore({ stateDir: path.join(root, 'recovery-state') });
+  const recoveryHosts = [];
+  let recoveryNow = 0;
+  const recoveryRuntime = createExtensionRuntime({
+    store: recoveryStore, monitorIntervalMs: 0, now: () => recoveryNow,
+    maxAutomaticRestarts: 3, restartWindowMs: 300_000, stableWindowMs: 300_000,
+    maxHeartbeatMisses: 3,
+    processHostFactory: ({ manifest }) => {
+      const worker = {
+        manifest, alive: true, responds: true,
+        available() { return this.alive; },
+        health() { return { available: this.alive, closed: !this.alive, crashed: !this.alive, inflight: 0, provider: 'process-child' }; },
+        async ping() { return this.alive && this.responds; },
+        invoke: async () => ({ result: null }),
+        async shutdown() { this.alive = false; }
+      };
+      recoveryHosts.push(worker);
+      return worker;
+    }
+  });
+  runtimeCleanups.push(() => recoveryRuntime.close());
+  const recoverySource = writeExtension('runtime-recovery', baseManifest({ id: 'test.recovery' }), 'module.exports.handlers={"sample.run":()=>1};');
+  recoveryRuntime.install({ sourceDir: recoverySource });
+  recoveryRuntime.enable({ id: 'test.recovery' });
+  check('runtime exposes heartbeat check', typeof recoveryRuntime.checkHealth === 'function');
+  if (typeof recoveryRuntime.checkHealth === 'function') {
+    await recoveryRuntime.checkHealth({ id: 'test.recovery' });
+    equal('healthy heartbeat sets healthy state', recoveryRuntime.overview().extensions.find(entry => entry.id === 'test.recovery')?.runtimeState, 'healthy');
+    recoveryHosts.at(-1).responds = false;
+    await recoveryRuntime.checkHealth({ id: 'test.recovery' });
+    equal('missed heartbeat exposes unresponsive state', recoveryRuntime.overview().extensions.find(entry => entry.id === 'test.recovery')?.runtimeState, 'unresponsive');
+    await recoveryRuntime.checkHealth({ id: 'test.recovery' });
+    await recoveryRuntime.checkHealth({ id: 'test.recovery' });
+    check('three heartbeat misses restart the Worker', recoveryHosts.length === 2);
+    await recoveryRuntime.checkHealth({ id: 'test.recovery' });
+    recoveryNow = 300_001;
+    await recoveryRuntime.checkHealth({ id: 'test.recovery' });
+    for (let i = 0; i < 3; i += 1) {
+      recoveryHosts.at(-1).alive = false;
+      await recoveryRuntime.checkHealth({ id: 'test.recovery' });
+      await recoveryRuntime.checkHealth({ id: 'test.recovery' });
+    }
+    equal('five stable minutes reset the restart window', recoveryStore.get('test.recovery').status, 'enabled');
+    for (let i = 0; i < 4; i += 1) {
+      recoveryHosts.at(-1).alive = false;
+      await recoveryRuntime.checkHealth({ id: 'test.recovery' });
+    }
+    equal('fourth restart inside the rolling limit disables crash loop', recoveryStore.get('test.recovery').status, 'disabled_due_to_crash');
+    check('crash loop state is visible', recoveryRuntime.overview().extensions.find(entry => entry.id === 'test.recovery')?.runtimeState === 'crashed');
+    const explicitRestart = await recoveryRuntime.restart?.({ id: 'test.recovery' });
+    check('explicit Restart clears crash-disabled state for one start', explicitRestart?.extension.status === 'enabled');
+    recoveryHosts.at(-1).alive = false;
+    await recoveryRuntime.checkHealth({ id: 'test.recovery' });
+    equal('explicit Restart preserves automatic restart history', recoveryStore.get('test.recovery').status, 'disabled_due_to_crash');
+  }
+  await recoveryRuntime.close();
+
+  // Crash recovery and the automatic restart limit are exercised with real Worker child processes.
+  const processRecoveryState = path.join(root, 'process-recovery-state');
+  const processRecoveryStore = createExtensionStore({ stateDir: processRecoveryState });
+  const crashWorkerEntry = path.join(root, 'crash-on-invoke-worker.mjs');
+  const sanitizerUrl = new URL('../src/extension/worker-env.js', import.meta.url).href;
+  fs.writeFileSync(crashWorkerEntry, [
+    `import { sanitizeExtensionWorkerEnv } from '${sanitizerUrl}';`,
+    'sanitizeExtensionWorkerEnv();',
+    'let buffered = "";',
+    "process.stdin.on('data', chunk => {",
+    '  buffered += chunk.toString();',
+    '  let newline;',
+    "  while ((newline = buffered.indexOf('\\n')) >= 0) {",
+    '    const frame = JSON.parse(buffered.slice(0, newline));',
+    '    buffered = buffered.slice(newline + 1);',
+    "    if (frame.kind === 'ping') process.stdout.write(JSON.stringify({v:1,id:frame.id,kind:'pong'})+'\\n');",
+    "    else if (frame.kind === 'shutdown') process.exit(0);",
+    "    else if (frame.kind === 'invoke') process.exit(23);",
+    '  }',
+    '});'
+  ].join('\n'), 'utf8');
+  let realChildHosts = 0;
+  const processRecoveryRuntime = createExtensionRuntime({
+    store: processRecoveryStore, monitorIntervalMs: 0,
+    maxAutomaticRestarts: 3, restartWindowMs: 300_000, stableWindowMs: 300_000,
+    processHostFactory: (options) => {
+      realChildHosts += 1;
+      return createProcessExtensionHost({ ...options, packaged: false, workerEntry: crashWorkerEntry, timeoutMs: 2000 });
+    }
+  });
+  runtimeCleanups.push(() => processRecoveryRuntime.close());
+  const processRecoverySource = writeExtension('real-process-recovery', baseManifest({ id: 'test.real-process-recovery' }),
+    'module.exports.handlers={"sample.run":()=>1};');
+  processRecoveryRuntime.install({ sourceDir: processRecoverySource });
+  processRecoveryRuntime.enable({ id: 'test.real-process-recovery' });
+  for (let crash = 1; crash <= 4; crash += 1) {
+    await asyncCapture(() => processRecoveryRuntime.invoke({ id: 'test.real-process-recovery', capability: 'sample.run', input: {} }));
+    if (crash < 4) {
+      await waitUntil(() => realChildHosts === crash + 1);
+    } else {
+      await waitUntil(() => processRecoveryStore.get('test.real-process-recovery')?.status === 'disabled_due_to_crash');
+    }
+  }
+  equal('three real child crashes trigger only three automatic restarts', realChildHosts, 4);
+  equal('real child crash loop persists disabled_due_to_crash', processRecoveryStore.get('test.real-process-recovery').status, 'disabled_due_to_crash');
+  await processRecoveryRuntime.restart({ id: 'test.real-process-recovery' });
+  equal('explicit restart starts a new real Worker', realChildHosts, 5);
+  await asyncCapture(() => processRecoveryRuntime.invoke({ id: 'test.real-process-recovery', capability: 'sample.run', input: {} }));
+  await waitUntil(() => processRecoveryStore.get('test.real-process-recovery')?.status === 'disabled_due_to_crash');
+  equal('real Worker crash after explicit restart still respects stored restart history', processRecoveryStore.get('test.real-process-recovery').status, 'disabled_due_to_crash');
+  await processRecoveryRuntime.close();
+
   const svcDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-ext-svc-'));
   const service = createExtensionService({ stateDir: svcDir, fetchImpl: fakeFetch });
+  runtimeCleanups.push(() => service.close());
   const svcReview = await service.execute({ method: 'ext.review', params: { sourceDir: HELLO } });
   check('service ext.review 可用', svcReview.review.id === 'cetamesh.hello-tool');
   const svcInstall = await service.execute({ method: 'ext.install', params: { sourceDir: HELLO } });
@@ -293,11 +577,17 @@ try {
   const svcInvoke = await service.execute({ method: 'ext.invoke', params: { id: 'cetamesh.hello-tool', capability: 'hello.greet', input: { name: 'IPC' } } });
   equal('service ext.invoke 可用', svcInvoke.result.greeting, 'Hello, IPC!');
   const svcOverview = await service.execute({ method: 'ext.overview', params: {} });
+  const svcRestart = await service.execute({ method: 'ext.restart', params: { id: 'cetamesh.hello-tool' } });
+  equal('service ext.restart keeps the Extension enabled', svcRestart.extension.status, 'enabled');
+  const svcDisabled = await service.execute({ method: 'ext.disable', params: { id: 'cetamesh.hello-tool' } });
+  equal('service ext.disable stops and disables the Extension', svcDisabled.extension.status, 'disabled');
+  await service.execute({ method: 'ext.enable', params: { id: 'cetamesh.hello-tool' } });
   equal('service ext.overview 可用', svcOverview.total, 1);
   const unknownMethod = await asyncCapture(() => service.execute({ method: 'ext.nope', params: {} }));
   check('未知方法报 METHOD_NOT_FOUND', unknownMethod.threw && unknownMethod.code === 'METHOD_NOT_FOUND', String(unknownMethod.code));
 
   const ipcService = createExtensionService({ stateDir: svcDir, fetchImpl: fakeFetch });
+  runtimeCleanups.push(() => ipcService.close());
   const dispatch = ({ method, params }) => {
     if (method.startsWith('ext.')) return ipcService.execute({ method, params });
     throw new Error('unexpected method ' + method);
@@ -331,8 +621,17 @@ try {
   check('IPC ext.overview 往返成功', Boolean(ovFrame && ovFrame.ok === true), JSON.stringify(ovFrame && ovFrame.error));
   check('IPC ext.invoke 往返成功', Boolean(invFrame && invFrame.ok === true), JSON.stringify(invFrame && invFrame.error));
   equal('IPC ext.invoke 结果正确', invFrame && invFrame.result.result.greeting, 'Hello, IPC2!');
+  await ipcService.close();
+  const svcRemoved = await service.execute({ method: 'ext.uninstall', params: { id: 'cetamesh.hello-tool' } });
+  check('service ext.uninstall removes the registry row and managed package', svcRemoved.removedFiles && service.store.get('cetamesh.hello-tool') === null);
+  await service.close();
+  await runtime.close();
+  await restarted.close();
   fs.rmSync(svcDir, { recursive: true, force: true });
 } finally {
+  for (const close of runtimeCleanups) {
+    try { await close(); } catch (error) { console.warn('Extension runtime cleanup failed:', error?.message || error); }
+  }
   fs.rmSync(root, { recursive: true, force: true });
 }
 

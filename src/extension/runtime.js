@@ -5,18 +5,40 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { createExtensionHost } from './host.js';
+import { createVmExtensionHost } from './host.js';
+import { createProcessExtensionHost } from './process-host.js';
 import { createExtensionInstaller } from './installer.js';
-import { reviewSummaryLines } from './review.js';
+import { reviewSummaryLines, permissionDelta } from './review.js';
 import { extensionError } from './types.js';
 import { createMemoryPackHost } from './memory-pack.js';
+import { manifestFingerprint } from './manifest.js';
 import { createCapabilityBroker } from '../capability/broker.js';
 import { createCapabilityPolicy } from '../capability/policy.js';
 
-export function createExtensionRuntime({ store, fetchImpl = null, capabilityBroker = null, hostFactory = createExtensionHost, now = () => Date.now() } = {}) {
+export function createExtensionRuntime({
+  store,
+  fetchImpl = null,
+  capabilityBroker = null,
+  hostFactory = null,
+  processHostFactory = createProcessExtensionHost,
+  vmHostFactory = createVmExtensionHost,
+  memoryPackHostFactory = createMemoryPackHost,
+  isTrustedVmExtension = () => false,
+  now = () => Date.now(),
+  monitorIntervalMs = 15_000,
+  heartbeatTimeoutMs = 3_000,
+  maxHeartbeatMisses = 3,
+  maxAutomaticRestarts = 3,
+  restartWindowMs = 300_000,
+  stableWindowMs = 300_000
+} = {}) {
   if (!store) throw new Error('createExtensionRuntime 需要 store');
   const installer = createExtensionInstaller({ store, now });
   const hosts = new Map(); // id -> host
+  const runtimeRecords = new Map();
+  const pendingReviews = new Map();
+  const regularHostFactory = hostFactory || processHostFactory;
+  const trustedVmFactory = hostFactory || vmHostFactory;
   const broker = capabilityBroker || createCapabilityBroker({ policy: createCapabilityPolicy() });
   if (!capabilityBroker) {
     broker.register({ id: 'network', permission: 'network', risk: 'high', provider: 'extension-adapter', execute: async r => {
@@ -25,6 +47,38 @@ export function createExtensionRuntime({ store, fetchImpl = null, capabilityBrok
     }});
   }
   const actors = new Map();
+  function runtimeRecord(id) {
+    const key = String(id);
+    if (!runtimeRecords.has(key)) runtimeRecords.set(key, {
+      state: 'stopped', startedAt: null, healthySince: null, heartbeatMisses: 0,
+      restartTimes: [], monitorTimer: null, recovering: false, switching: false,
+      suppressRecovery: false, lastError: null
+    });
+    return runtimeRecords.get(key);
+  }
+
+  function runtimeState(entry) {
+    if (entry.status === 'disabled_due_to_crash') return 'crashed';
+    if (entry.status !== 'enabled') return 'stopped';
+    return runtimeRecord(entry.id).state;
+  }
+
+  function clearMonitor(id) {
+    const record = runtimeRecord(id);
+    if (record.monitorTimer) clearTimeout(record.monitorTimer);
+    record.monitorTimer = null;
+  }
+
+  function scheduleMonitor(id) {
+    if (!(monitorIntervalMs > 0) || !hosts.has(String(id))) return;
+    const record = runtimeRecord(id);
+    if (record.monitorTimer) clearTimeout(record.monitorTimer);
+    record.monitorTimer = setTimeout(() => {
+      record.monitorTimer = null;
+      checkHealth({ id }).catch((error) => { record.lastError = String(error?.message ?? error); });
+    }, monitorIntervalMs);
+    record.monitorTimer.unref?.();
+  }
   function actorFor(entry) {
     // Only installed manifest/review metadata creates grants, never handler input.
     const scope = entry.manifest.scope?.workspace;
@@ -35,15 +89,28 @@ export function createExtensionRuntime({ store, fetchImpl = null, capabilityBrok
       scopes: scope ? ['workspace:' + scope] : [], types: ['working', 'workspace', 'knowledge', 'skill']
     }};
   }
+  async function invokeOnHost(id, capability, input) {
+    const { host } = hostOrThrow(id);
+    const record = runtimeRecord(id);
+    record.state = 'running';
+    try { return await host.invoke(capability, input); }
+    finally {
+      if (hosts.get(String(id)) === host && host.available()) {
+        const health = host.health?.() || {};
+        record.state = health.inflight > 0 ? 'running' : 'healthy';
+        record.healthySince ??= now();
+      }
+    }
+  }
   function registerEntry(entry) {
     actors.set(entry.id, actorFor(entry));
     for (const cap of entry.manifest.capabilities || []) {
       const id = 'extension.' + entry.id + '.' + cap.id;
       if (broker.registry.has(id)) continue;
       broker.register({ id, permission: 'extension.invoke', provider: 'extension', risk: 'low', execute: async r => {
-        const { entry: current, host } = hostOrThrow(entry.id);
+        const { entry: current } = hostOrThrow(entry.id);
         if (!current.manifest.capabilities.some(c => c.id === cap.id)) throw extensionError('CAPABILITY_NOT_DECLARED', cap.id);
-        return host.invoke(cap.id, r.input);
+        return invokeOnHost(entry.id, cap.id, r.input);
       }});
     }
   }
@@ -54,6 +121,36 @@ export function createExtensionRuntime({ store, fetchImpl = null, capabilityBrok
     return entry;
   }
 
+  function capabilityExecutorFor(bound) {
+    return async (capability, input) => {
+      const current = entryOrThrow(bound.id);
+      const currentManifestFingerprint = manifestFingerprint(current.manifest);
+      const currentFingerprint = current.fingerprint || currentManifestFingerprint;
+      const currentGrants = [...(current.permissions || [])].sort();
+      if (current.status !== 'enabled') throw extensionError('EXTENSION_DISABLED', current.id);
+      if (current.version !== bound.version || currentFingerprint !== bound.fingerprint
+        || currentManifestFingerprint !== bound.manifestFingerprint) {
+        throw extensionError('STALE_EXTENSION_HOST', 'Worker identity no longer matches the active Extension version');
+      }
+      if (!(current.manifest.permissions || []).includes(capability)) {
+        throw extensionError('CAPABILITY_NOT_DECLARED', 'Extension manifest does not declare ' + capability);
+      }
+      if (!(current.permissions || []).includes(capability)) {
+        throw extensionError('PERMISSION_DENIED', 'Extension grant is not approved: ' + capability);
+      }
+      if (JSON.stringify(currentGrants) !== JSON.stringify(bound.approvedGrants)) {
+        throw extensionError('STALE_EXTENSION_GRANTS', 'Approved Extension grants changed while the Worker was running');
+      }
+      if (!broker.registry.has(capability)) {
+        throw extensionError('CAPABILITY_NOT_DECLARED', 'Capability Broker has no adapter for ' + capability);
+      }
+      const result = await broker.execute({ actor: actorFor(current), capability,
+        workspaceId: current.manifest.scope?.workspace || undefined, input: input || {}, reason: 'Installed Extension capability' });
+      if (result.status !== 'completed') throw extensionError('APPROVAL_REQUIRED', result.approvalId);
+      return result.result;
+    };
+  }
+
   function buildHost(entry) {
     const entryPath = path.join(entry.sourceRoot, entry.manifest.entry);
     if (!fs.existsSync(entryPath)) {
@@ -61,39 +158,257 @@ export function createExtensionRuntime({ store, fetchImpl = null, capabilityBrok
     }
     const source = fs.readFileSync(entryPath, 'utf8');
     registerEntry(entry);
-    const factory = entry.type === 'memory-pack' ? createMemoryPackHost : hostFactory;
+    const bound = {
+      id: entry.id,
+      version: entry.version,
+      fingerprint: entry.fingerprint || manifestFingerprint(entry.manifest),
+      manifestFingerprint: manifestFingerprint(entry.manifest),
+      approvedGrants: [...(entry.permissions || [])].sort()
+    };
+    const trustedVm = entry.type !== 'memory-pack' && isTrustedVmExtension(entry) === true;
+    const isProcess = entry.type !== 'memory-pack' && !trustedVm;
+    const factory = entry.type === 'memory-pack' ? memoryPackHostFactory : trustedVm ? trustedVmFactory : regularHostFactory;
     return factory({
       manifest: entry.manifest,
       source,
       storage: store.storage(entry.id),
       fetchImpl,
-      capabilityExecutor: async (capability, input) => {
-        const current = entryOrThrow(entry.id);
-        if (current.status !== 'enabled') throw extensionError('EXTENSION_DISABLED', entry.id);
-        const result = await broker.execute({ actor: actorFor(current), capability,
-          workspaceId: current.manifest.scope?.workspace || undefined, input: input || {}, reason: 'Installed Extension capability' });
-        if (result.status !== 'completed') throw extensionError('APPROVAL_REQUIRED', result.approvalId);
-        return result.result;
-      }
+      capabilityExecutor: capabilityExecutorFor(bound),
+      ...(isProcess ? {
+        packageRoot: entry.sourceRoot,
+        storeRoot: store.packagesDir,
+        extensionId: entry.id,
+        version: entry.version,
+        fingerprint: bound.manifestFingerprint,
+        storageFile: (entry.manifest.permissions || []).includes('storage') ? store.storage(entry.id).file : null,
+        onCrash: () => {
+          if (runtimeRecord(entry.id).suppressRecovery) {
+            runtimeRecord(entry.id).state = 'crashed';
+            return;
+          }
+          recoverAfterFailure(entry.id).catch((error) => { runtimeRecord(entry.id).lastError = String(error?.message ?? error); });
+        }
+      } : {})
     });
+  }
+
+  async function stopHost(id) {
+    const key = String(id);
+    clearMonitor(key);
+    const host = hosts.get(key);
+    hosts.delete(key);
+    runtimeRecord(key).state = 'stopped';
+    if (typeof host?.shutdown === 'function') await host.shutdown();
+  }
+
+  function reviewResult(reviewed, sourceDir, kind = 'package') {
+    const current = store.get(reviewed.manifest.id);
+    const delta = current
+      ? permissionDelta(current.permissions || [], reviewed.manifest.permissions || [])
+      : { added: [...(reviewed.manifest.permissions || [])], removed: [] };
+    const candidate = {
+      id: reviewed.manifest.id,
+      name: reviewed.manifest.name,
+      version: reviewed.manifest.version,
+      sourceDir,
+      kind,
+      review: reviewed.review,
+      permissionDelta: delta,
+      reviewedAt: now()
+    };
+    pendingReviews.set(candidate.id, candidate);
+    return {
+      review: reviewed.review,
+      summary: reviewSummaryLines(reviewed.review),
+      scan: reviewed.scan,
+      files: reviewed.files,
+      bytes: reviewed.bytes,
+      permissionDelta: delta
+    };
+  }
+
+  function assertOwnerReview(reviewed, current, approval) {
+    const delta = permissionDelta(current.permissions || [], reviewed.manifest.permissions || []);
+    const needsReview = delta.added.length > 0 || reviewed.review.requiresExplicitApproval;
+    const added = delta.added.length ? ' Added permissions: ' + delta.added.join(', ') + '.' : '';
+    const candidate = pendingReviews.get(current.id);
+    if (!candidate || candidate.review.token !== reviewed.review.token
+      || candidate.version !== reviewed.manifest.version) {
+      throw extensionError(needsReview ? 'APPROVAL_REQUIRED' : 'REVIEW_REQUIRED',
+        'Review this Extension version and its permissions before switching it.' + added);
+    }
+    if (!needsReview) return;
+    if (!approval || approval.approved !== true || String(approval.token || '') !== candidate.review.token) {
+      throw extensionError('APPROVAL_REQUIRED', 'Owner approval must match the reviewed Extension version and permissions.' + added);
+    }
+  }
+
+  async function applyVersionChange({ id, switchVersion }) {
+    const previous = entryOrThrow(id);
+    const record = runtimeRecord(id);
+    if (record.switching) throw extensionError('EXTENSION_UPDATE_IN_PROGRESS', 'An Extension version switch is already in progress');
+    record.switching = true;
+    record.suppressRecovery = true;
+    let stopped = false;
+    try {
+      const result = await switchVersion(async () => {
+        if (previous.status === 'enabled' || hosts.has(id)) {
+          await stopHost(id);
+          stopped = true;
+        }
+      });
+      if (previous.status === 'enabled') {
+        const host = startHost(result.entry);
+        const responsive = typeof host.ping !== 'function'
+          || await host.ping({ timeoutMs: heartbeatTimeoutMs });
+        if (!responsive) throw extensionError('WORKER_START_FAILED', 'Updated Extension Worker did not answer its startup ping');
+      }
+      return result;
+    } catch (error) {
+      const active = store.get(id);
+      if (active && active.version !== previous.version) {
+        await stopHost(id);
+        store.put(previous);
+      }
+      const currentHost = hosts.get(id);
+      if (previous.status === 'enabled' && (!currentHost || !currentHost.available())) {
+        if (currentHost) await stopHost(id);
+        try {
+          const restoredHost = startHost(previous);
+          if (typeof restoredHost.ping === 'function'
+            && !(await restoredHost.ping({ timeoutMs: heartbeatTimeoutMs }))) {
+            await stopHost(id);
+            record.lastError = 'Previous Extension Worker did not answer after rollback';
+          }
+        } catch (restoreError) {
+          record.lastError = String(restoreError?.message ?? restoreError);
+        }
+      }
+      throw error;
+    } finally {
+      record.suppressRecovery = false;
+      record.switching = false;
+      if (stopped && store.get(id)?.status === 'enabled' && !hosts.has(id)) {
+        record.state = 'crashed';
+      }
+    }
+  }
+
+  function startHost(entry) {
+    const host = buildHost(entry);
+    if (!host.available()) {
+      const failure = host.loadError?.() || { code: 'EXTENSION_LOAD_FAILED', message: 'Extension host is unavailable' };
+      throw extensionError(failure.code || 'EXTENSION_LOAD_FAILED', 'Extension failed to load: ' + failure.message);
+    }
+    hosts.set(entry.id, host);
+    const record = runtimeRecord(entry.id);
+    record.startedAt = now();
+    record.healthySince = typeof host.ping === 'function' ? null : now();
+    record.heartbeatMisses = 0;
+    record.state = typeof host.ping === 'function' ? 'starting' : 'healthy';
+    record.lastError = null;
+    scheduleMonitor(entry.id);
+    return host;
+  }
+
+  async function recoverAfterFailure(id) {
+    const record = runtimeRecord(id);
+    if (record.recovering) return { id, state: record.state };
+    const previous = store.get(id);
+    if (!previous || previous.status !== 'enabled') {
+      record.state = previous?.status === 'disabled_due_to_crash' ? 'crashed' : 'stopped';
+      return { id, state: record.state };
+    }
+    record.recovering = true;
+    try {
+      await stopHost(id);
+      const current = entryOrThrow(id);
+      const cutoff = now() - Math.max(1, restartWindowMs);
+      record.restartTimes = record.restartTimes.filter((timestamp) => timestamp > cutoff);
+      if (record.restartTimes.length >= Math.max(0, maxAutomaticRestarts)) {
+        store.put({ ...current, status: 'disabled_due_to_crash', disabledAt: now(), updatedAt: now() });
+        record.state = 'crashed';
+        record.lastError = 'Automatic Worker restart limit reached';
+        return { id, state: record.state };
+      }
+      record.restartTimes.push(now());
+      try {
+        startHost(current);
+      } catch (error) {
+        record.state = 'crashed';
+        record.lastError = String(error?.message ?? error);
+      }
+      return { id, state: record.state };
+    } finally {
+      record.recovering = false;
+    }
+  }
+
+  async function checkHealth({ id } = {}) {
+    const entry = entryOrThrow(id);
+    const record = runtimeRecord(entry.id);
+    if (entry.status === 'disabled_due_to_crash') {
+      record.state = 'crashed';
+      return { id: entry.id, state: record.state };
+    }
+    if (entry.status !== 'enabled') {
+      record.state = 'stopped';
+      return { id: entry.id, state: record.state };
+    }
+    const host = hosts.get(entry.id);
+    if (!host) {
+      await recoverAfterFailure(entry.id);
+      return { id: entry.id, state: runtimeState(store.get(entry.id)) };
+    }
+    const health = host.health?.() || {};
+    if (!host.available() || health.crashed) {
+      record.state = 'crashed';
+      await recoverAfterFailure(entry.id);
+      return { id: entry.id, state: runtimeState(store.get(entry.id)) };
+    }
+    if (typeof host.ping === 'function') {
+      let responsive = false;
+      try { responsive = await host.ping({ timeoutMs: heartbeatTimeoutMs }); }
+      catch { responsive = false; }
+      if (!responsive) {
+        record.heartbeatMisses += 1;
+        record.state = 'unresponsive';
+        if (record.heartbeatMisses >= Math.max(1, maxHeartbeatMisses)) {
+          await recoverAfterFailure(entry.id);
+        }
+      } else {
+        record.heartbeatMisses = 0;
+        record.healthySince ??= now();
+        if (now() - record.healthySince >= Math.max(1, stableWindowMs)) {
+          record.restartTimes = [];
+          record.healthySince = now();
+        }
+        record.state = health.inflight > 0 ? 'running' : 'healthy';
+      }
+    } else {
+      record.healthySince ??= now();
+      if (now() - record.healthySince >= Math.max(1, stableWindowMs)) record.restartTimes = [];
+      record.state = health.inflight > 0 ? 'running' : 'healthy';
+    }
+    scheduleMonitor(entry.id);
+    return { id: entry.id, state: runtimeState(store.get(entry.id)), health: host.health?.() || null };
   }
 
   function hostOrThrow(id) {
     const entry = entryOrThrow(id);
+    if (entry.status === 'disabled_due_to_crash') {
+      throw extensionError('EXTENSION_CRASH_LOOP_DISABLED', 'Extension was disabled after repeated Worker crashes');
+    }
     if (entry.status !== 'enabled') {
       throw extensionError('EXTENSION_DISABLED', '扩展未启用：' + entry.id);
     }
     let host = hosts.get(entry.id);
-    if (!host) {
-      // 重启后注册表里仍是 enabled，但宿主不在内存里：这里惰性重建，
-      // 让"启用"这个状态跨重启真正生效，而不是要求用户再点一次。
-      host = buildHost(entry);
-      if (!host.available()) {
-        const failure = host.loadError();
-        throw extensionError(failure.code, '扩展加载失败：' + failure.message);
-      }
-      hosts.set(entry.id, host);
+    if (host && !host.available()) {
+      runtimeRecord(entry.id).state = 'crashed';
+      recoverAfterFailure(entry.id).catch((error) => { runtimeRecord(entry.id).lastError = String(error?.message ?? error); });
+      throw extensionError('PROVIDER_UNAVAILABLE', 'Extension Worker is not available');
     }
+    if (!host) host = startHost(entry);
     return { entry, host };
   }
 
@@ -106,14 +421,20 @@ export function createExtensionRuntime({ store, fetchImpl = null, capabilityBrok
 
     get({ id } = {}) {
       const entry = entryOrThrow(id);
-      return { extension: entry, loaded: hosts.has(entry.id) };
+      const host = hosts.get(entry.id);
+      const health = host?.health?.() || null;
+      return { extension: entry, loaded: Boolean(host), runtimeState: runtimeState(entry), health, provider: health?.provider || null };
     },
 
     /** UI 用聚合：已安装列表 + 各自权限摘要 + 运行状态。 */
     overview() {
       const entries = store.list();
       return {
-        extensions: entries.map((entry) => ({
+        extensions: entries.map((entry) => {
+          const host = hosts.get(entry.id);
+          const health = host?.health?.() || null;
+          const pendingReview = pendingReviews.get(entry.id) || null;
+          return ({
           id: entry.id,
           name: entry.name,
           version: entry.version,
@@ -122,9 +443,16 @@ export function createExtensionRuntime({ store, fetchImpl = null, capabilityBrok
           riskLevel: entry.riskLevel,
           permissions: entry.permissions,
           capabilities: (entry.manifest.capabilities || []).map((c) => c.id),
-          loaded: hosts.has(entry.id),
+          loaded: Boolean(host),
+          runtimeState: runtimeState(entry),
+          health,
+          provider: health?.provider || null,
+          pendingReview,
           updatedAt: entry.updatedAt
-        })),
+          });
+        }),
+        reviews: [...pendingReviews.values()],
+        needsReview: pendingReviews.size,
         total: entries.length,
         enabled: entries.filter((e) => e.status === 'enabled').length
       };
@@ -132,39 +460,68 @@ export function createExtensionRuntime({ store, fetchImpl = null, capabilityBrok
 
     review({ sourceDir } = {}) {
       const reviewed = installer.reviewFromDirectory({ sourceDir });
-      return {
-        review: reviewed.review,
-        summary: reviewSummaryLines(reviewed.review),
-        scan: reviewed.scan,
-        files: reviewed.files,
-        bytes: reviewed.bytes
-      };
+      return reviewResult(reviewed, sourceDir);
+    },
+
+    reviewRollback({ id } = {}) {
+      const current = entryOrThrow(id);
+      if (!current.previousVersion) throw extensionError('ROLLBACK_UNAVAILABLE', 'No previous Extension version is retained');
+      const sourceDir = path.join(store.packagesDir, current.id, current.previousVersion);
+      const reviewed = installer.reviewFromDirectory({ sourceDir });
+      return reviewResult(reviewed, sourceDir, 'rollback');
     },
 
     install({ sourceDir, approval } = {}) {
       const result = installer.install({ sourceDir, approval });
-      hosts.delete(result.entry.id);
+      pendingReviews.delete(result.entry.id);
       return result;
     },
 
-    update({ sourceDir, approval } = {}) {
-      const result = installer.update({ sourceDir, approval });
-      hosts.delete(result.entry.id); // 旧宿主作废，需重新启用
+    async update({ sourceDir, approval } = {}) {
+      const reviewed = installer.reviewFromDirectory({ sourceDir });
+      const current = entryOrThrow(reviewed.manifest.id);
+      assertOwnerReview(reviewed, current, approval);
+      const result = await applyVersionChange({
+        id: current.id,
+        switchVersion: beforeSwitch => installer.update({ sourceDir, approval, beforeSwitch })
+      });
+      pendingReviews.delete(result.entry.id);
       return result;
     },
 
-    uninstall({ id, keepFiles } = {}) {
+    async rollback({ id, approval } = {}) {
+      const current = entryOrThrow(id);
+      if (!current.previousVersion) throw extensionError('ROLLBACK_UNAVAILABLE', 'No previous Extension version is retained');
+      const previousRoot = path.join(store.packagesDir, current.id, current.previousVersion);
+      const reviewed = installer.reviewFromDirectory({ sourceDir: previousRoot });
+      assertOwnerReview(reviewed, current, approval);
+      const result = await applyVersionChange({
+        id: current.id,
+        switchVersion: beforeSwitch => installer.rollback({ id: current.id, approval, beforeSwitch })
+      });
+      pendingReviews.delete(result.entry.id);
+      return result;
+    },
+
+    async uninstall({ id, keepFiles } = {}) {
       const entry = entryOrThrow(id);
-      hosts.delete(entry.id);
-      return installer.uninstall({ id: entry.id, keepFiles });
+      await stopHost(entry.id);
+      const result = installer.uninstall({ id: entry.id, keepFiles });
+      pendingReviews.delete(entry.id);
+      return result;
     },
 
     enable({ id } = {}) {
       const entry = entryOrThrow(id);
-      if (entry.status === 'enabled' && hosts.has(entry.id)) {
+      if (entry.status === 'disabled_due_to_crash') {
+        throw extensionError('EXTENSION_CRASH_LOOP_DISABLED', 'Use explicit Restart to start this Extension again');
+      }
+      const existing = hosts.get(entry.id);
+      if (entry.status === 'enabled' && existing?.available()) {
         return { extension: entry, changed: false };
       }
-      const host = buildHost(entry);
+      if (existing) stopHost(entry.id).catch((error) => { runtimeRecord(entry.id).lastError = String(error?.message ?? error); });
+      const host = startHost(entry);
       if (!host.available()) {
         hosts.delete(entry.id);
         const failure = host.loadError();
@@ -175,13 +532,27 @@ export function createExtensionRuntime({ store, fetchImpl = null, capabilityBrok
       return { extension: updated, changed: true };
     },
 
-    disable({ id } = {}) {
+    async disable({ id } = {}) {
       const entry = entryOrThrow(id);
-      hosts.delete(entry.id);
+      await stopHost(entry.id);
       if (entry.status === 'disabled') return { extension: entry, changed: false };
       const updated = store.put({ ...entry, status: 'disabled', disabledAt: now(), updatedAt: now() });
       return { extension: updated, changed: true };
     },
+
+    async restart({ id } = {}) {
+      let entry = entryOrThrow(id);
+      if (entry.status === 'disabled_due_to_crash') {
+        entry = store.put({ ...entry, status: 'enabled', updatedAt: now() });
+      } else if (entry.status !== 'enabled') {
+        throw extensionError('EXTENSION_DISABLED', 'Only an enabled or crash-disabled Extension can be restarted');
+      }
+      await stopHost(entry.id);
+      const host = startHost(entry);
+      return { extension: store.get(entry.id), runtimeState: runtimeState(store.get(entry.id)), health: host.health?.() || null };
+    },
+
+    checkHealth,
 
     async invoke({ id, capability, input } = {}) {
       const { entry } = hostOrThrow(id);
@@ -204,7 +575,7 @@ export function createExtensionRuntime({ store, fetchImpl = null, capabilityBrok
     },
 
     close() {
-      hosts.clear();
+      return Promise.all([...hosts.keys()].map((id) => stopHost(id))).then(() => undefined);
     }
   };
 }

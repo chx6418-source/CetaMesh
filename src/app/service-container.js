@@ -179,7 +179,8 @@ export function createCetaMeshServices(options = {}) {
   agentBroker.onTurnEnd(payload => continuityService.runtime.observeAgentTurn(payload)
     .catch(error => log('Continuity 回合观察失败：' + String(error?.message ?? error))));
 
-  const extensionService = createExtensionService({ stateDir, capabilityBroker: capabilityService.broker });
+  const extensionService = createExtensionService({ stateDir, capabilityBroker: capabilityService.broker,
+    isTrustedVmExtension: options.isTrustedVmExtension });
   const meshService = createMeshService({ stateDir });
   const channelService = createChannelService();
   registerChannelMeshCapabilities({

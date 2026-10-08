@@ -7,7 +7,8 @@ const ALLOWED_WORKER_ENV_KEYS = new Set([
   'SYSTEMROOT',
   'CETAMESH_EXTENSION_ID',
   'CETAMESH_EXTENSION_VERSION',
-  'CETAMESH_EXTENSION_FINGERPRINT'
+  'CETAMESH_EXTENSION_FINGERPRINT',
+  'CETAMESH_EXTENSION_STORAGE_FILE'
 ]);
 
 function copyString(target, outputName, source, inputName = outputName) {
@@ -31,6 +32,7 @@ export function buildExtensionWorkerEnv({ parentEnv = process.env, metadata = {}
   copyString(env, 'CETAMESH_EXTENSION_ID', metadata, 'extensionId');
   copyString(env, 'CETAMESH_EXTENSION_VERSION', metadata, 'version');
   copyString(env, 'CETAMESH_EXTENSION_FINGERPRINT', metadata, 'fingerprint');
+  copyString(env, 'CETAMESH_EXTENSION_STORAGE_FILE', metadata, 'storageFile');
   return env;
 }
 

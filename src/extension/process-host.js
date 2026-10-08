@@ -74,6 +74,7 @@ export function createProcessExtensionHost({
   extensionId = null,
   version = null,
   fingerprint = null,
+  storageFile = null,
   packaged = undefined,
   execPath = process.execPath,
   workerEntry = null,
@@ -82,6 +83,7 @@ export function createProcessExtensionHost({
   storage = null,
   logger = () => {},
   capabilityExecutor = null,
+  onCrash = null,
   timeoutMs = EXTENSION_LIMITS.invokeTimeoutMs,
   maxMessageBytes = 2 * 1024 * 1024
 } = {}) {
@@ -102,7 +104,7 @@ export function createProcessExtensionHost({
       version: activeVersion,
       launch,
       parentEnv,
-      metadata: { extensionId: activeId, version: activeVersion, fingerprint: fingerprint || manifestFingerprint(manifest) },
+      metadata: { extensionId: activeId, version: activeVersion, fingerprint: fingerprint || manifestFingerprint(manifest), storageFile },
       graceMs: shutdownGraceMs
     });
   }
@@ -112,9 +114,13 @@ export function createProcessExtensionHost({
   const granted = new Set(manifest.permissions || []);
   const declared = new Map((manifest.capabilities || []).map((entry) => [entry.id, entry]));
   const pending = new Map(); // invokeId -> { capability, resolve, reject, timer, cancelled }
+  const pendingPings = new Map();
+  const reversePending = new Map();
   const logs = [];
   let closed = false;
   let crashed = false;
+  let crashNotified = false;
+  let cleanupPromise = Promise.resolve();
   maxMessageBytes = Math.max(1, Math.min(Number(maxMessageBytes) || 2 * 1024 * 1024, 2 * 1024 * 1024));
 
   const record = (level, message) => {
@@ -131,6 +137,12 @@ export function createProcessExtensionHost({
       pending.delete(id);
       if (!entry.settled) { entry.settled = true; entry.reject(error); }
     }
+    for (const [id, entry] of pendingPings) {
+      clearTimeout(entry.timer);
+      pendingPings.delete(id);
+      entry.resolve(false);
+    }
+    reversePending.clear();
   }
 
   function failHost(code, message) {
@@ -141,11 +153,14 @@ export function createProcessExtensionHost({
     record('error', message);
     try {
       const cleanup = typeof transport.killTree === 'function' ? transport.killTree() : transport.close?.();
-      if (cleanup && typeof cleanup.then === 'function') {
-        cleanup.catch(error => record('error', 'Worker cleanup failed: ' + String(error?.message ?? error)));
-      }
+      cleanupPromise = Promise.resolve(cleanup).catch(error => record('error', 'Worker cleanup failed: ' + String(error?.message ?? error)));
     } catch (error) {
       record('error', 'Worker cleanup failed: ' + String(error?.message ?? error));
+    }
+    if (!crashNotified && typeof onCrash === 'function') {
+      crashNotified = true;
+      try { onCrash({ code, message }); }
+      catch (error) { record('error', 'Worker crash callback failed: ' + String(error?.message ?? error)); }
     }
   }
 
@@ -189,7 +204,15 @@ export function createProcessExtensionHost({
     }
     const frame = parseFrame(parsed);
     if (!frame) return failHost('PROTOCOL_VIOLATION', 'Worker emitted malformed or unsupported frame');
-    if (frame.kind === 'pong') return;
+    if (frame.kind === 'pong') {
+      const ping = pendingPings.get(frame.id);
+      if (ping) {
+        clearTimeout(ping.timer);
+        pendingPings.delete(frame.id);
+        ping.resolve(true);
+      }
+      return;
+    }
     if (frame.kind === 'ping') {
       try {
         checkedSend({ v: PROTOCOL_VERSION, id: frame.id, kind: 'pong' });
@@ -199,13 +222,39 @@ export function createProcessExtensionHost({
       return;
     }
     if (frame.kind === 'invoke') {
-      try {
-        checkedSend({ v: PROTOCOL_VERSION, id: frame.id, kind: 'error', capability: frame.capability,
-          error: { code: 'CAPABILITY_BROKER_REQUIRED', message: 'Host capability broker is not configured' } });
-      } catch (error) {
-        record('error', 'Unable to reject Worker capability request: ' + String(error?.message ?? error));
+      if (reversePending.has(frame.id)) return failHost('PROTOCOL_VIOLATION', 'Worker reused an active reverse capability id');
+      if (reversePending.size >= MAX_INFLIGHT) {
+        try { checkedSend({ v: PROTOCOL_VERSION, id: frame.id, kind: 'error', capability: frame.capability,
+          error: { code: 'INVOKE_OVERLOAD', message: 'Too many pending Worker capability requests' } }); }
+        catch (error) { record('error', 'Unable to reject overloaded Worker capability request: ' + String(error?.message ?? error)); }
+        return;
       }
+      if (typeof capabilityExecutor !== 'function') {
+        try { checkedSend({ v: PROTOCOL_VERSION, id: frame.id, kind: 'error', capability: frame.capability,
+          error: { code: 'CAPABILITY_BROKER_REQUIRED', message: 'Host capability broker is not configured' } }); }
+        catch (error) { record('error', 'Unable to reject Worker capability request: ' + String(error?.message ?? error)); }
+        return;
+      }
+      const active = { capability: frame.capability };
+      reversePending.set(frame.id, active);
+      Promise.resolve().then(() => capabilityExecutor(frame.capability, frame.input ?? {})).then((result) => {
+        if (reversePending.get(frame.id) !== active) return;
+        reversePending.delete(frame.id);
+        checkedSend({ v: PROTOCOL_VERSION, id: frame.id, kind: 'result', capability: frame.capability, result: result ?? null });
+      }).catch((error) => {
+        if (reversePending.get(frame.id) !== active) return;
+        reversePending.delete(frame.id);
+        try { checkedSend({ v: PROTOCOL_VERSION, id: frame.id, kind: 'error', capability: frame.capability,
+          error: { code: String(error?.code || 'CAPABILITY_ERROR').slice(0, 80), message: String(error?.message || error).slice(0, 2000) } }); }
+        catch (sendError) { record('error', 'Unable to send Worker capability error: ' + String(sendError?.message ?? sendError)); }
+      });
       return;
+    }
+    if (frame.kind === 'cancel') {
+      if (reversePending.has(frame.id)) {
+        reversePending.delete(frame.id);
+        return;
+      }
     }
     const entry = pending.get(frame.id);
     if (!entry) {
@@ -235,15 +284,31 @@ export function createProcessExtensionHost({
     if (!closed) failHost('PROVIDER_UNAVAILABLE', 'Extension Worker exited (' + String(code) + ', ' + String(signal) + ')');
   });
   transport.onError?.((error) => failHost(error?.code || 'PROTOCOL_VIOLATION', String(error?.message ?? error)));
+  transport.onDiagnostic?.((message) => record('info', message));
   return {
     manifest,
     logs,
+    get pid() { return transport.pid ?? null; },
+    get cwd() { return transport.cwd ?? null; },
     capabilities: () => [...declared.keys()],
     loadError: () => null,
     available() { return !closed && (typeof transport.alive !== 'function' || transport.alive()); },
     health() {
-      return { available: this.available(), closed, crashed, inflight: pending.size,
-        provider: transport.pid ? 'process-child' : 'process-transport' };
+      const available = this.available();
+      const state = closed ? (crashed ? 'crashed' : 'stopped') : available ? (transport.pid ? 'running' : 'starting') : 'crashed';
+      return { available, closed, crashed, state, inflight: pending.size,
+        provider: transport.pid || typeof transport.killTree === 'function' ? 'process-child' : 'process-transport' };
+    },
+    ping({ timeoutMs: pingTimeoutMs = 2000 } = {}) {
+      if (closed || !this.available()) return Promise.resolve(false);
+      const id = 'ping_' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+      return new Promise((resolve) => {
+        const timer = setTimeout(() => { pendingPings.delete(id); resolve(false); }, Math.max(1, Number(pingTimeoutMs) || 2000));
+        timer.unref?.();
+        pendingPings.set(id, { resolve, timer });
+        try { checkedSend({ v: PROTOCOL_VERSION, id, kind: 'ping' }); }
+        catch { clearTimeout(timer); pendingPings.delete(id); resolve(false); }
+      });
     },
     /** 发起一次受控调用：能力白名单 → 帧发送 → 超时/取消/结果裁决（async：同步拒绝即 rejection）。 */
     async invoke(capabilityId, input) {
@@ -296,14 +361,15 @@ export function createProcessExtensionHost({
       return { cancelled: true };
     },
     shutdown() {
-      if (closed) return Promise.resolve();
+      if (closed) return cleanupPromise;
       closed = true;
       settlePending(extensionError('PROVIDER_UNAVAILABLE', 'Process Extension Host is shut down'));
       record('info', 'Process Extension Host shut down');
       try {
-        return Promise.resolve(transport.close?.()).catch((error) => {
+        cleanupPromise = Promise.resolve(transport.close?.()).catch((error) => {
           record('error', 'Worker shutdown failed: ' + String(error?.message ?? error));
         });
+        return cleanupPromise;
       } catch (error) {
         record('error', 'Worker shutdown failed: ' + String(error?.message ?? error));
         return Promise.resolve();

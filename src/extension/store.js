@@ -44,11 +44,16 @@ export function createExtensionStore({ stateDir, now = () => Date.now() } = {}) 
   }
 
   function persist() {
-    writeJsonAtomic(file, {
-      schemaVersion: EXTENSION_REGISTRY_VERSION,
-      updatedAt: now(),
-      extensions: [...entries.values()]
-    });
+    try {
+      writeJsonAtomic(file, {
+        schemaVersion: EXTENSION_REGISTRY_VERSION,
+        updatedAt: now(),
+        extensions: [...entries.values()]
+      });
+    } catch (error) {
+      if (error instanceof StorageError) throw extensionError('REGISTRY_WRITE_FAILED', 'Extension registry could not be saved: ' + error.message);
+      throw error;
+    }
   }
 
   return {
@@ -62,14 +67,26 @@ export function createExtensionStore({ stateDir, now = () => Date.now() } = {}) 
     has: (id) => { load(); return entries.has(String(id)); },
     put(entry) {
       load();
+      const hadPrevious = entries.has(entry.id);
+      const previous = entries.get(entry.id);
       entries.set(entry.id, entry);
-      persist();
+      try { persist(); }
+      catch (error) {
+        if (hadPrevious) entries.set(entry.id, previous);
+        else entries.delete(entry.id);
+        throw error;
+      }
       return JSON.parse(JSON.stringify(entry));
     },
     remove(id) {
       load();
-      const existed = entries.delete(String(id));
-      if (existed) persist();
+      const key = String(id);
+      const previous = entries.get(key);
+      const existed = entries.delete(key);
+      if (existed) {
+        try { persist(); }
+        catch (error) { entries.set(key, previous); throw error; }
+      }
       return existed;
     },
     /** 扩展私有存储：按扩展 id 命名空间隔离，互不可见。 */

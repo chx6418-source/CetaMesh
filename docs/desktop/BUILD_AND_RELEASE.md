@@ -62,6 +62,31 @@ npm run test-core-dist           # SEA distribution contract (WHALEBRIDGE_DIST_D
 
 The RC artifacts (version / SHA256 / commit / test results) are recorded in `PROJECT_STATE.md`.
 
+## Extension Worker process isolation
+
+Installed ordinary code Extensions run in a separate Core SEA process started with
+`WhaleBridgeCore.exe --extension-worker`. The Worker uses the existing bounded frame protocol,
+starts with an explicit environment allowlist, and runs with its current versioned Extension
+package directory as `cwd`. Capability requests return to the host and pass through the
+Capability Broker and policy checks. Updates stage and validate a package before switching the
+registry; new permissions require a fresh Owner Review, and the immediately previous package is
+retained for rollback.
+
+`ProcessExtensionHost` and the Extension VM provide process separation and API restriction. They do
+**not** provide Windows Sandbox or AppContainer isolation. The Worker is not an OS sandbox.
+Memory Packs remain data-only and do not run in the Extension Worker. Manifest requests for
+`shell`, `native`, `process`, or downloaded executables remain denied.
+
+Run the release Worker end-to-end check after building the Core SEA:
+
+```powershell
+npm run build:core
+npm test
+```
+
+The `test-process-extension-sea` suite is marked `NOT_RUN_ENVIRONMENT` when the Core SEA artifact is
+not present. Set `WHALEBRIDGE_DIST_DIR` when testing a Core build stored outside `dist/core`.
+
 ## Install / upgrade / uninstall semantics
 
 ```text

@@ -93,14 +93,14 @@
 - overview() returns persisted Extension status plus runtimeState and health fields. restart({ id }) clears disabled_due_to_crash for one explicit start but does not reset automatic restart history.
 - Runtime states are starting, healthy, running, unresponsive, crashed, and stopped. Automatic recovery allows three restarts per five minutes; five continuous healthy minutes reset the counter.
 
-- [ ] Add failing tests for VM trust selection, ordinary Extension process selection, and unchanged Memory Pack routing.
-- [ ] Add failing Broker tests for declared and granted capability success, undeclared capability denial, missing grant denial, stale fingerprint denial, and Extension-id spoof denial.
-- [ ] Add failing tests for health transitions, heartbeat misses, three automatic restarts, exhaustion, stable-window counter reset, and explicit Restart.
-- [ ] Run npm test and confirm the new runtime assertions fail.
-- [ ] Implement runtime host selection and host-bound Broker dispatch.
-- [ ] Implement health state, heartbeat, stable-window restart accounting, persistent disabled_due_to_crash, and restart service method.
-- [ ] Run npm test and confirm runtime, Broker, and real child suites pass.
-- [ ] Commit runtime selection and recovery changes.
+- [x] Add failing tests for VM trust selection, ordinary Extension process selection, and unchanged Memory Pack routing.
+- [x] Add failing Broker tests for declared and granted capability success, undeclared capability denial, missing grant denial, stale fingerprint denial, and Extension-id spoof denial.
+- [x] Add failing tests for health transitions, heartbeat misses, three automatic restarts, exhaustion, stable-window counter reset, and explicit Restart.
+- [x] Run npm test and confirm the new runtime assertions fail.
+- [x] Implement runtime host selection and host-bound Broker dispatch.
+- [x] Implement health state, heartbeat, stable-window restart accounting, persistent disabled_due_to_crash, and restart service method.
+- [x] Run npm test and confirm runtime, Broker, and real child suites pass.
+- [x] Commit runtime selection and recovery changes in the consolidated implementation commit.
 
 ### Task 4: Transactional install, permission review, update, rollback, and remove
 
@@ -120,12 +120,12 @@
 - update stages and validates before switching the active registry entry. Added permissions require a fresh matching Owner review. Failed stage, review, package move, or registry write preserves the previous package and active registry entry.
 - Successful rollback atomically activates the retained version; permission additions relative to the active version require fresh Owner review.
 
-- [ ] Add failing tests for version staging, new-permission re-review, update switch failure, registry write failure, explicit rollback, and rollback permission escalation.
-- [ ] Run npm test and confirm the new lifecycle assertions fail.
-- [ ] Implement transactional registry mutations and staged immutable version activation.
-- [ ] Implement explicit rollback and ensure active Workers are shut down/rebuilt only around successful registry switches.
-- [ ] Run npm test and confirm lifecycle and permission review tests pass.
-- [ ] Commit installer and store lifecycle changes.
+- [x] Add failing tests for version staging, new-permission re-review, update switch failure, registry write failure, explicit rollback, and rollback permission escalation.
+- [x] Run npm test and confirm the new lifecycle assertions fail.
+- [x] Implement transactional registry mutations and staged immutable version activation.
+- [x] Implement explicit rollback and ensure active Workers are shut down/rebuilt only around successful registry switches.
+- [x] Run npm test and confirm lifecycle and permission review tests pass.
+- [x] Commit installer and store lifecycle changes in the consolidated implementation commit.
 
 ### Task 5: Minimal Plugins page
 
@@ -139,11 +139,11 @@
 - The page reads ext.overview and displays Enabled, Disabled, Running, Crashed, and Needs Review. Needs Review is shown for an install/update review row keyed by Extension id; the installed version remains active until approval and atomic switch.
 - Restart invokes ext.restart; Disable invokes ext.disable; Remove invokes ext.uninstall. Refresh after each completed operation.
 
-- [ ] Add failing Rust/UI assertions for status mapping and the Restart, Disable, Remove actions.
-- [ ] Run npm test and confirm the new UI assertions fail.
-- [ ] Implement the status list and controls in the existing Plugins page without changing the overall navigation or page design.
-- [ ] Run npm test and confirm the desktop tests pass.
-- [ ] Commit the Plugins page changes.
+- [x] Add failing Rust/UI assertions for status mapping and the Restart, Disable, Remove actions.
+- [x] Run npm test and confirm the new UI assertions fail.
+- [x] Implement the status list and controls in the existing Plugins page without changing the overall navigation or page design.
+- [x] Run npm test and confirm the desktop tests pass.
+- [x] Commit the Plugins page changes in the consolidated implementation commit.
 
 ### Task 6: Formal Core SEA E2E, release documentation, and report
 
@@ -160,11 +160,11 @@
 - The SEA E2E uses dist/core/WhaleBridgeCore.exe as the ProcessHost child with --extension-worker, exchanges real stdio frames, invokes an Extension and a Brokered capability, checks shutdown, and asserts the process tree is gone. It does not substitute Node source mode for the SEA executable.
 - The release guide documents npm run build:core followed by npm test for the SEA suite. The final report records launch mode, allowlist, cwd, capability binding, restart/cleanup policy, lifecycle, tests, and limitations.
 
-- [ ] Add failing assertions for SEA-mode launch selection and aggregator registration.
-- [ ] Add the SEA E2E that launches the built Core SEA Worker through the real ProcessExtensionHost transport.
-- [ ] Run npm run build:core, then npm test, and confirm the SEA E2E fails until SEA dispatch is implemented.
-- [ ] Implement any missing SEA packaging/dispatch wiring and update release documentation.
-- [ ] Run npm run build:core, then npm test. Confirm all runnable suites pass and the SEA suite runs rather than being skipped.
-- [ ] Write EXTENSION_PROCESS_RUNTIME_REPORT.md and verify it clearly states ProcessHost plus VM is not Windows Sandbox or AppContainer.
-- [ ] Commit the SEA E2E, test registry, release guide, and final report.
+- [x] Add failing assertions for SEA-mode launch selection and aggregator registration.
+- [x] Add the SEA E2E that launches the built Core SEA Worker through the real ProcessExtensionHost transport.
+- [x] Run npm run build:core, then npm test, and confirm the SEA E2E fails until SEA dispatch is implemented.
+- [x] Implement Core SEA dispatch and update release documentation.
+- [x] Run npm run build:core and the full npm test suite. All runnable suites pass; the SEA suite runs instead of being skipped.
+- [x] Write EXTENSION_PROCESS_RUNTIME_REPORT.md and verify it clearly states ProcessHost plus VM is not Windows Sandbox or AppContainer.
+- [x] Commit the SEA E2E, test registry, release guide, and final report in the consolidated implementation commit.
 

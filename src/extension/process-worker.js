@@ -5,6 +5,7 @@ import { createVmExtensionHost } from './host.js';
 import { assertManifest, MANIFEST_FILENAMES, manifestFingerprint } from './manifest.js';
 import { scanEntrySource } from './scan.js';
 import { sanitizeExtensionWorkerEnv } from './worker-env.js';
+import { createExtensionPrivateStorage } from './private-storage.js';
 
 const PROTOCOL_VERSION = 1;
 const MAX_FRAME_BYTES = 2 * 1024 * 1024;
@@ -158,7 +159,13 @@ export async function runExtensionWorker({ input = process.stdin, output = proce
     });
   };
 
-  const host = createVmExtensionHost({ manifest, source, capabilityExecutor: requestCapability });
+  const storageFile = process.env.CETAMESH_EXTENSION_STORAGE_FILE;
+  const storage = manifest.permissions.includes('storage') && storageFile
+    ? createExtensionPrivateStorage({ file: storageFile }) : null;
+  const host = createVmExtensionHost({
+    manifest, source, storage, capabilityExecutor: requestCapability,
+    logger: (line) => log(`${line.level}: ${line.message}`)
+  });
   if (!host.available()) throw Object.assign(new Error(host.loadError()?.message || 'Extension failed to load'), { code: 'EXTENSION_LOAD_FAILED' });
 
   const handleFrame = (frame) => {
