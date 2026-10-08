@@ -7,6 +7,11 @@
 // 帧模式校验（坏帧丢弃）/ 超时 / cancel + 迟到结果丢弃 / shutdown / health /
 // 与 VmExtensionHost 接口形状一致（start 无需显式、invoke/cancel/shutdown/health）。
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { createProcessExtensionHost, createInProcessTransportPair } from '../src/extension/process-host.js';
 import { createVmExtensionHost, createExtensionHost } from '../src/extension/host.js';
 
@@ -33,6 +38,33 @@ function makeHost({ latencyMs = 0, childBehavior } = {}) {
   });
   const host = createProcessExtensionHost({ manifest, transport: pair.host, timeoutMs: 2000 });
   return { host, pair };
+}
+
+// Worker process smoke test: the bootstrap must speak only the existing frame protocol.
+{
+  const packageRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-worker-bootstrap-'));
+  const workerEntry = fileURLToPath(new URL('../src/extension/process-worker.js', import.meta.url));
+  try {
+    fs.writeFileSync(path.join(packageRoot, 'extension.json'), JSON.stringify({
+      id: 'fixture-ext', name: 'Fixture Extension', version: '1.0.0', entry: 'index.js', type: 'tool', permissions: [],
+      capabilities: [{ id: 'greet', requires: [] }]
+    }));
+    fs.writeFileSync(path.join(packageRoot, 'index.js'), 'module.exports.handlers = { greet: () => ({ hello: "worker" }) };');
+    const input = [
+      { v: 1, id: 'probe-1', kind: 'ping' },
+      { v: 1, id: 'stop-1', kind: 'shutdown' }
+    ].map((frame) => JSON.stringify(frame)).join('\n') + '\n';
+    const child = spawnSync(process.execPath, [workerEntry], {
+      cwd: packageRoot, env: process.env, input, encoding: 'utf8', timeout: 5000, windowsHide: true
+    });
+    assert.equal(child.error, undefined, `worker spawn failed: ${child.error?.message}`);
+    assert.equal(child.status, 0, `worker exit: ${child.status}; stderr=${child.stderr}`);
+    const frames = child.stdout.trim().split(/\r?\n/).map((line) => JSON.parse(line));
+    assert.deepEqual(frames, [{ v: 1, id: 'probe-1', kind: 'pong' }]);
+    ok('Worker subprocess handles existing ping/pong/shutdown frames');
+  } finally {
+    fs.rmSync(packageRoot, { recursive: true, force: true });
+  }
 }
 
 // ── 1. invoke 往返 ───────────────────────────────────────────────────────────

@@ -11,6 +11,7 @@ import { runMcpQqFileSend } from './mcp-qq-file-send.js';
 import { runMcpBilibili } from './mcp-bilibili.js';
 import { runSelfTest } from './self-test.js';
 import { runSetupDshFromApp, runDshRemovalFromApp } from './dsh-integration.js';
+import { runExtensionWorker } from './extension/process-worker.js';
 
 export const MCP_MODES = Object.freeze({
   snowluma: runMcpSnowLuma,
@@ -48,6 +49,7 @@ export const CORE_USAGE = `鲸桥 WhaleBridge Core
 
 用法：
   WhaleBridgeCore.exe --worker [--data-dir <目录>]
+  WhaleBridgeCore.exe --extension-worker
   WhaleBridgeCore.exe --mcp <${Object.keys(MCP_MODES).join('|')}> [--data-dir <目录>]
   WhaleBridgeCore.exe --setup-dsh [profile] [--dry-run] [--force-presets]
   WhaleBridgeCore.exe --uninstall-dsh [profile] [--dry-run]
@@ -67,6 +69,10 @@ export function parseCoreArgs(argv = process.argv.slice(2)) {
   if (args[0] === '--worker') {
     if (args.length !== 1) throw new Error(`--worker 不接受额外参数\n\n${CORE_USAGE}`);
     return { mode: 'worker' };
+  }
+  if (args[0] === '--extension-worker') {
+    if (args.length !== 1) throw new Error(`--extension-worker 不接受额外参数\n\n${CORE_USAGE}`);
+    return { mode: 'extension-worker' };
   }
   if (args[0] === '--setup-dsh') {
     const options = { mode: 'setup-dsh', profile: undefined, dryRun: false, force: false };
@@ -120,6 +126,7 @@ export async function runCore(argv = process.argv.slice(2)) {
     return;
   }
   if (command.mode === 'worker') return runBridge();
+  if (command.mode === 'extension-worker') return runExtensionWorker();
   if (command.mode === 'setup-dsh') {
     return runSetupDshFromApp({
       profile: command.profile,
