@@ -419,12 +419,7 @@ impl TaskUi {
         }
 
         // ── 过滤 ──────────────────────────────────────────────────────────
-        egui::Frame::new()
-            .fill(native_palette().surface_alt)
-            .stroke(egui::Stroke::new(1.0, native_palette().border))
-            .corner_radius(egui::CornerRadius::same(8))
-            .inner_margin(egui::Margin::symmetric(12, 10))
-            .show(ui, |ui| {
+        crate::theme::card_compact(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.label("状态");
                     egui::ComboBox::from_id_salt("task_status_filter")
@@ -498,12 +493,7 @@ impl TaskUi {
         let mut want_select: Option<String> = None;
         for task in &visible {
             let attention = self.attention.contains(&task.id);
-            egui::Frame::new()
-                .fill(native_palette().surface_alt)
-                .stroke(egui::Stroke::new(1.0, if attention { native_palette().warning } else { native_palette().border }))
-                .corner_radius(egui::CornerRadius::same(8))
-                .inner_margin(egui::Margin::symmetric(12, 10))
-                .show(ui, |ui| {
+            crate::theme::card_compact_with(ui, attention.then(|| native_palette().warning), |ui| {
                     ui.horizontal_wrapped(|ui| {
                         ui.label(egui::RichText::new(format!("[{}]", task.status)).color(status_color(&task.status)).strong());
                         ui.label(egui::RichText::new(task.goal.as_str()).strong());

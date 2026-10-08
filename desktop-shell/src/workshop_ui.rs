@@ -415,12 +415,7 @@ impl WorkshopUi {
         }
         let mut want_select: Option<String> = None;
         for row in &visible {
-            egui::Frame::new()
-                .fill(native_palette().surface_alt)
-                .stroke(egui::Stroke::new(1.0, native_palette().border))
-                .corner_radius(egui::CornerRadius::same(8))
-                .inner_margin(egui::Margin::symmetric(12, 10))
-                .show(ui, |ui| {
+            crate::theme::card_compact(ui, |ui| {
                     ui.horizontal_wrapped(|ui| {
                         ui.label(egui::RichText::new(format!("[{}]", row.status)).color(status_color(&row.status)).strong());
                         ui.label(egui::RichText::new(row.title.as_str()).strong());

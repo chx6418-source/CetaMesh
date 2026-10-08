@@ -15,6 +15,7 @@ mod mesh_ui;
 mod workspace_ui;
 mod native_installer_ui;
 mod native_ui;
+mod theme;
 mod supervisor;
 mod tray;
 mod ui_prefs;
@@ -448,6 +449,16 @@ fn run_native_ui(paths: DesktopPaths) -> Result<(), String> {
     }
     let prefs = Arc::new(Mutex::new(prefs));
     let ui_supervisor = Arc::clone(&supervisor);
+    // Debug-only QA hook: `--screenshot-dir <dir>` captures every theme at 1280x800. Release
+    // builds compile the whole driver out (see `theme::qa`).
+    #[cfg(debug_assertions)]
+    let screenshot_dir = {
+        let argv: Vec<String> = env::args().skip(1).collect();
+        argv.iter()
+            .position(|arg| arg == "--screenshot-dir")
+            .and_then(|index| argv.get(index + 1))
+            .map(PathBuf::from)
+    };
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("CetaMesh")
         .with_icon(eframe::icon_data::from_png_bytes(include_bytes!("../icons/128x128.png"))
@@ -468,6 +479,15 @@ fn run_native_ui(paths: DesktopPaths) -> Result<(), String> {
                 ui_prefs::DEFAULT_WINDOW_HEIGHT,
             ]);
         }
+    }
+    #[cfg(debug_assertions)]
+    if screenshot_dir.is_some() {
+        // Acceptance shots are specified at exactly 1280x800.
+        viewport = viewport
+            .with_inner_size([1280.0, 800.0])
+            .with_min_inner_size([1280.0, 800.0])
+            .with_maximized(false)
+            .with_resizable(false);
     }
     let options = eframe::NativeOptions {
         viewport,
@@ -494,14 +514,20 @@ fn run_native_ui(paths: DesktopPaths) -> Result<(), String> {
                 error
             })
             .ok();
-            Ok(Box::new(NativeUi::new(
+            let mut app = NativeUi::new(
                 api,
                 ui_supervisor,
                 creation_context.egui_ctx.clone(),
                 ui_data_dir,
                 prefs_for_ui,
                 tray,
-            )))
+            );
+            #[cfg(debug_assertions)]
+            if let Some(dir) = &screenshot_dir {
+                eprintln!("[qa] theme screenshot pass → {}", dir.display());
+                app.qa_screenshots = Some(crate::theme::qa::ScreenshotPlan::new(dir));
+            }
+            Ok(Box::new(app))
         }),
     );
     supervisor.shutdown();

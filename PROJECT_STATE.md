@@ -26,6 +26,9 @@
   Storage 层只报 `StorageError`（MISSING/CORRUPT/READ_FAILED/TOO_LARGE/WRITE_FAILED）；
   Domain 把它映射为自己的错误码（STORE_CORRUPT / CONFIG_CORRUPT / REGISTRY_CORRUPT / ...），UI 侧契约不变。
   **统一的是 JSON 文件可靠 I/O，不是 Domain Schema**；没有 GenericStore 接管业务语义。
+- **主题系统（Task D 后，分支待批）**：`desktop-shell/src/theme/` 是 Native 壳的唯一视觉事实源——
+  `ThemeSpec`（背景配方/表面/阴影/圆角/按钮/动效）+ 主题插值过渡 + egui 绘制器；页面经
+  `native_palette()` 读取插值 token。`--screenshot-dir` 截图验收能力仅存在于 debug 构建（release 排除）。
 
 ## Verified State
 
@@ -66,10 +69,21 @@
 - 桌面壳 `supervisor.rs` 的 HTTP 探活 fallback 已是死代码（待后续会话删除）。
 - NOT_RUN_ENVIRONMENT（无真实环境时如实不跑）：真实 provider-key 回合 / 真实 QQ / 跨设备 Mesh / 签名 / 真实发行产物。
 
-## Active Work (none)
-- Session 3 is complete and integrated on `main`.
-- The final consolidation report is `TECH_DEBT_CONSOLIDATION_REPORT.md`.
-- No technical-debt session branch remains active.
+## Active Work
+- **Task D · Web → Native High-Fidelity Theme Migration** on `feature/native-theme-fidelity-v1`
+  (branched from `main` @ `e8a122a`; local only — not pushed, not merged).
+  - Native themes upgraded from flat palettes to a full Theme Engine
+    (`desktop-shell/src/theme/`: `spec` / `themes` / `painter` / `motion` / debug-only `qa`).
+  - Ten theme recipes transcribed 1:1 from `design-demos/CetaMesh-ten-themes/public/console.html`;
+    Soda restored to the Web three-stop gradient + three ambient blobs + top fog + gummy glass.
+  - Motion: 700 ms theme interpolation with ripple, 30 fps blob drift, page enter,
+    persisted Reduce Motion (auto follows the Windows animation flag).
+  - Verification: `cargo test` 138/138 PASS, `desktop:check` PASS, three desktop node suites PASS;
+    acceptance screenshots at 1280×800 under `output/theme-qa/` (gitignored).
+  - Report: `NATIVE_THEME_MIGRATION_REPORT.md`.
+  - **Awaiting Owner confirmation before merge to `main`**; delete the branch only after that merge.
+- Session 3 is complete and integrated on `main`; its consolidation report is
+  `TECH_DEBT_CONSOLIDATION_REPORT.md`.
 
 ## 文档地图（Agent 默认只读这里列的）
 
