@@ -12,6 +12,11 @@
 - 上线冲刺任务 B（统一配对）：`feature/unified-device-pairing-v1`（基线 `e8a122a`）已在 Owner 确认后**快进合并**到本地
   `main`（实现 `18a2d5d` + 文档 `3f28079`），工作分支已删除；两端协议副本与 `fixtures/pairing/` 已核对为 blob 级一致。
   **未 push**（等 Owner 指示）。协议事实源 `docs/protocol/UNIFIED_PAIRING_V1_1.md`，验收报告 `UNIFIED_PAIRING_INTEROP_REPORT.md`。
+- 上线冲刺任务 D（Web → Native 高保真主题迁移）：`feature/native-theme-fidelity-v1`（基线 `e8a122a`，实现 `13a54d4`）已在 Owner
+  确认后**合并**到本地 `main`（merge commit `ce647b1`；与任务 B 的 `PROJECT_STATE.md` / `mesh_ui.rs` 冲突已按双方保留原则解决）。
+  合并验证时发现并修复一处**先于本分支的既有回归**：`4f6e3e8` 改写了主题应用日志措辞，`test-desktop-shell` 一直等待「主题已应用：深色」
+  （此前无 debug 产物故未暴露）；修复为「深色/浅色 · 主题名」并保留历史契约（`6103199`）。合并后 `npm test` **70 PASS · 0 FAIL**。
+  工作分支已删除。**未 push**（等 Owner 指示）。报告 `NATIVE_THEME_MIGRATION_REPORT.md`。
 
 ## Architecture（稳定面）
 
@@ -87,16 +92,16 @@
 - 桌面壳 `supervisor.rs` 的 HTTP 探活 fallback 已是死代码（待后续会话删除）。
 - NOT_RUN_ENVIRONMENT（无真实环境时如实不跑）：真实 provider-key 回合 / 真实 QQ / 跨设备 Mesh / 签名 / 真实发行产物。
 
-## Active Work
-- 上线冲刺任务 B（统一配对）已完成并在 Owner 确认后合并到本地 `main`（`3f28079`），本地工作分支与临时 worktree 已清理；
-  Mobile 仓 `feature/unified-device-pairing-v1` 同样已合并到其本地 `main`（`de0f0de`）并删除分支。**两个仓库均未 push**（等 Owner 指示）。
+## Active Work (none)
+- 上线冲刺任务 B（统一配对）已完成并在 Owner 确认后合并到本地 `main`，工作分支与临时 worktree 已清理；
+  Mobile 仓 `feature/unified-device-pairing-v1` 同样已合并到其本地 `main` 并删除分支。**两个仓库均未 push**（等 Owner 指示）。
 - 上线冲刺任务 D（Web → Native 高保真主题迁移）已完成并在 Owner 确认后合并到本地 `main`；工作分支
-  `feature/native-theme-fidelity-v1` 在合并验证通过后删除。**未 push**（等 Owner 指示）。
+  `feature/native-theme-fidelity-v1` 已删除。**未 push**（等 Owner 指示）。
   - Native 十主题升级为完整 Theme Engine（`desktop-shell/src/theme/`：spec / themes / painter / motion + debug-only qa 截图驱动）。
   - 配方逐值转写自 `design-demos/CetaMesh-ten-themes/public/console.html`；Soda 还原旧 Web 三段渐变 + 三光斑 + 白雾 + 软糖玻璃。
   - 动效：700ms 主题插值 + ripple、30fps blob 漂移、页面淡入、Reduce Motion 持久化（auto 跟随 Windows 动画开关）。
-  - 验证：`cargo test` 138/138、`desktop:check`、三个桌面 node 套件全 PASS；1280×800 验收截图在 `output/theme-qa/`（gitignored）。
-  - 报告：`NATIVE_THEME_MIGRATION_REPORT.md`。
+  - 验证：合并后 `npm test` 70 PASS · 0 FAIL（含 `desktop:check` / `cargo test` 142 项 / `test-desktop-shell`）；
+    1280×800 验收截图在 `output/theme-qa/`（gitignored）。报告：`NATIVE_THEME_MIGRATION_REPORT.md`。
 - 验收记录、遗留清单（M6 Memory/Task 同步未接；真机 Android/iOS = NOT_RUN_ENVIRONMENT）见 `UNIFIED_PAIRING_INTEROP_REPORT.md`。
 - Session 3 技术债收口（`TECH_DEBT_CONSOLIDATION_REPORT.md`）仍有效。
 
