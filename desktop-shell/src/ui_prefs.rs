@@ -129,6 +129,44 @@ pub enum CloseBehavior {
     Quit,
 }
 
+/// Reduce Motion preference for the native theme engine, persisted with the other UI prefs.
+/// `Auto` follows the OS “show animations in Windows” setting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ReduceMotion {
+    #[default]
+    Auto,
+    On,
+    Off,
+}
+
+impl ReduceMotion {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::On => "on",
+            Self::Off => "off",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "auto" | "system" => Some(Self::Auto),
+            "on" | "true" | "reduce" => Some(Self::On),
+            "off" | "false" | "full" => Some(Self::Off),
+            _ => None,
+        }
+    }
+
+    /// Resolve against the OS flag (true = animations disabled system-wide).
+    pub const fn resolve(self, system_disabled: bool) -> bool {
+        match self {
+            Self::Auto => system_disabled,
+            Self::On => true,
+            Self::Off => false,
+        }
+    }
+}
+
 impl CloseBehavior {
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -166,6 +204,7 @@ pub struct UiPrefs {
     pub theme: ThemePreference,
     pub zoom: f32,
     pub close_behavior: CloseBehavior,
+    pub reduce_motion: ReduceMotion,
     pub geometry: Option<WindowGeometry>,
 }
 
@@ -175,6 +214,7 @@ impl Default for UiPrefs {
             theme: ThemePreference::default(),
             zoom: 1.0,
             close_behavior: CloseBehavior::default(),
+            reduce_motion: ReduceMotion::default(),
             geometry: None,
         }
     }
@@ -237,6 +277,11 @@ pub fn prefs_from_value(value: &Value) -> UiPrefs {
         .and_then(Value::as_str)
         .and_then(CloseBehavior::parse)
         .unwrap_or(defaults.close_behavior);
+    let reduce_motion = value
+        .get("reduceMotion")
+        .and_then(Value::as_str)
+        .and_then(ReduceMotion::parse)
+        .unwrap_or(defaults.reduce_motion);
     let geometry = sanitize_geometry(
         f32_field(value.pointer("/window/x")).unwrap_or(f32::NAN),
         f32_field(value.pointer("/window/y")).unwrap_or(f32::NAN),
@@ -251,6 +296,7 @@ pub fn prefs_from_value(value: &Value) -> UiPrefs {
         theme,
         zoom,
         close_behavior,
+        reduce_motion,
         geometry,
     }
 }
@@ -262,6 +308,7 @@ impl UiPrefs {
             "theme": self.theme.as_str(),
             "zoom": self.zoom,
             "closeBehavior": self.close_behavior.as_str(),
+            "reduceMotion": self.reduce_motion.as_str(),
         });
         if let Some(geometry) = self.geometry {
             value["window"] = json!({
@@ -410,6 +457,7 @@ mod tests {
             theme: ThemePreference::Deep,
             zoom: 1.25,
             close_behavior: CloseBehavior::Quit,
+            reduce_motion: ReduceMotion::Off,
             geometry: sanitize_geometry(120.0, 80.0, 1280.0, 800.0, false),
         };
         prefs.save(&dir).expect("save prefs");
@@ -431,6 +479,33 @@ mod tests {
         assert_eq!(fallback, UiPrefs::default());
         assert!(warning.is_some());
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn reduce_motion_preference_round_trips_and_defaults_to_auto() {
+        let defaults = prefs_from_value(&json!({}));
+        assert_eq!(defaults.reduce_motion, ReduceMotion::Auto);
+        assert!(ReduceMotion::Auto.resolve(true));
+        assert!(!ReduceMotion::Auto.resolve(false));
+        assert!(ReduceMotion::On.resolve(false));
+        assert!(!ReduceMotion::Off.resolve(true));
+        assert_eq!(ReduceMotion::parse("REDUCE"), Some(ReduceMotion::On));
+        assert_eq!(ReduceMotion::parse("bogus"), None);
+        for setting in [ReduceMotion::Auto, ReduceMotion::On, ReduceMotion::Off] {
+            let dir = temp_dir();
+            let mut prefs = prefs_from_value(&json!({}));
+            prefs.reduce_motion = setting;
+            prefs.save(&dir).expect("save reduce motion");
+            let (loaded, warning) = UiPrefs::load(&dir);
+            assert!(warning.is_none());
+            assert_eq!(loaded.reduce_motion, setting, "reduce motion lost on restart");
+            fs::remove_dir_all(&dir).ok();
+        }
+        // An unknown value falls back to the safe default instead of erroring.
+        assert_eq!(
+            prefs_from_value(&json!({ "reduceMotion": "sometimes" })).reduce_motion,
+            ReduceMotion::Auto
+        );
     }
 
     #[test]

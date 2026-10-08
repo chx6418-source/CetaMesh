@@ -36,6 +36,9 @@
   Storage 层只报 `StorageError`（MISSING/CORRUPT/READ_FAILED/TOO_LARGE/WRITE_FAILED）；
   Domain 把它映射为自己的错误码（STORE_CORRUPT / CONFIG_CORRUPT / REGISTRY_CORRUPT / ...），UI 侧契约不变。
   **统一的是 JSON 文件可靠 I/O，不是 Domain Schema**；没有 GenericStore 接管业务语义。
+- **主题系统（Task D 后，分支待批）**：`desktop-shell/src/theme/` 是 Native 壳的唯一视觉事实源——
+  `ThemeSpec`（背景配方/表面/阴影/圆角/按钮/动效）+ 主题插值过渡 + egui 绘制器；页面经
+  `native_palette()` 读取插值 token。`--screenshot-dir` 截图验收能力仅存在于 debug 构建（release 排除）。
 
 ## Verified State
 
@@ -84,9 +87,16 @@
 - 桌面壳 `supervisor.rs` 的 HTTP 探活 fallback 已是死代码（待后续会话删除）。
 - NOT_RUN_ENVIRONMENT（无真实环境时如实不跑）：真实 provider-key 回合 / 真实 QQ / 跨设备 Mesh / 签名 / 真实发行产物。
 
-## Active Work (none)
+## Active Work
 - 上线冲刺任务 B（统一配对）已完成并在 Owner 确认后合并到本地 `main`（`3f28079`），本地工作分支与临时 worktree 已清理；
   Mobile 仓 `feature/unified-device-pairing-v1` 同样已合并到其本地 `main`（`de0f0de`）并删除分支。**两个仓库均未 push**（等 Owner 指示）。
+- 上线冲刺任务 D（Web → Native 高保真主题迁移）已完成并在 Owner 确认后合并到本地 `main`；工作分支
+  `feature/native-theme-fidelity-v1` 在合并验证通过后删除。**未 push**（等 Owner 指示）。
+  - Native 十主题升级为完整 Theme Engine（`desktop-shell/src/theme/`：spec / themes / painter / motion + debug-only qa 截图驱动）。
+  - 配方逐值转写自 `design-demos/CetaMesh-ten-themes/public/console.html`；Soda 还原旧 Web 三段渐变 + 三光斑 + 白雾 + 软糖玻璃。
+  - 动效：700ms 主题插值 + ripple、30fps blob 漂移、页面淡入、Reduce Motion 持久化（auto 跟随 Windows 动画开关）。
+  - 验证：`cargo test` 138/138、`desktop:check`、三个桌面 node 套件全 PASS；1280×800 验收截图在 `output/theme-qa/`（gitignored）。
+  - 报告：`NATIVE_THEME_MIGRATION_REPORT.md`。
 - 验收记录、遗留清单（M6 Memory/Task 同步未接；真机 Android/iOS = NOT_RUN_ENVIRONMENT）见 `UNIFIED_PAIRING_INTEROP_REPORT.md`。
 - Session 3 技术债收口（`TECH_DEBT_CONSOLIDATION_REPORT.md`）仍有效。
 

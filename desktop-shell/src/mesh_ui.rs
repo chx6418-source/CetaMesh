@@ -551,12 +551,7 @@ impl MeshUi {
 
         // ── 本节点身份 ────────────────────────────────────────────────────
         if let Some(status) = self.status.clone() {
-            egui::Frame::new()
-                .fill(native_palette().surface_alt)
-                .stroke(egui::Stroke::new(1.0, native_palette().border))
-                .corner_radius(egui::CornerRadius::same(8))
-                .inner_margin(egui::Margin::symmetric(12, 10))
-                .show(ui, |ui| {
+            crate::theme::card_compact(ui, |ui| {
                     ui.horizontal_wrapped(|ui| {
                         ui.label(egui::RichText::new(format!("本节点 {}", status.name)).strong());
                         ui.weak(format!("role {}", status.role));
@@ -704,12 +699,7 @@ impl MeshUi {
         }
         let mut want_grant_peer: Option<String> = None;
         for peer in self.peers.clone() {
-            egui::Frame::new()
-                .fill(native_palette().surface_alt)
-                .stroke(egui::Stroke::new(1.0, native_palette().border))
-                .corner_radius(egui::CornerRadius::same(8))
-                .inner_margin(egui::Margin::symmetric(12, 10))
-                .show(ui, |ui| {
+            crate::theme::card_compact(ui, |ui| {
                     ui.horizontal_wrapped(|ui| {
                         ui.label(egui::RichText::new(peer.name.as_str()).strong());
                         ui.weak(peer.node_id.as_str());

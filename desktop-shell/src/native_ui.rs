@@ -751,6 +751,9 @@ pub struct NativeUi {
     last_page: AppPage,
     applied_theme: Option<ThemePreference>,
     applied_zoom: Option<f32>,
+    /// Debug-only screenshot QA driver (`--screenshot-dir`); never present in release builds.
+    #[cfg(debug_assertions)]
+    pub(crate) qa_screenshots: Option<crate::theme::qa::ScreenshotPlan>,
 }
 
 #[derive(Clone, Copy)]
@@ -770,199 +773,78 @@ pub(crate) struct NativePalette {
 }
 
 pub(crate) fn native_palette() -> NativePalette {
-    palette_for(ACTIVE_THEME.get())
+    palette_from_spec(&crate::theme::current())
 }
 
+#[cfg(test)]
 fn palette_for(theme: ThemePreference) -> NativePalette {
-    // Reference: design-demos/CetaMesh-ten-themes/public/console.html.
-    // Native surfaces are opaque; light accents are deepened for readable small text.
-    let colors = match theme.resolve(false) {
-        ThemePreference::Soda => [
-            0xeef2fc, 0xffffff, 0xf5f7ff, 0xced8f0, 0x333d5c, 0x5a6482, 0x405abd, 0xe7ecfe,
-        ],
-        ThemePreference::Deep => [
-            0x131a2e, 0x1c2642, 0x222e4d, 0x3d4b70, 0xe8edfb, 0xb4bedb, 0x8ba4ff, 0x2b3b66,
-        ],
-        ThemePreference::Warm => [
-            0xeaede0, 0xfcfdf6, 0xf3f6e9, 0xcbd3bf, 0x37423c, 0x5f6b62, 0x50648b, 0xe1e7ed,
-        ],
-        ThemePreference::Ink => [
-            0xf3f2ee, 0xffffff, 0xf8f7f3, 0xd7d7d0, 0x252a2d, 0x515b5e, 0x303d42, 0xe7eaeb,
-        ],
-        ThemePreference::Forest => [
-            0xeaf0e7, 0xfafcf7, 0xf1f6ed, 0xc7d8c7, 0x253c32, 0x526c5f, 0x2e694c, 0xdcebe1,
-        ],
-        ThemePreference::Rose => [
-            0xfcf0f1, 0xfffcfd, 0xfff5f8, 0xead0da, 0x513b49, 0x7c5f6e, 0x9c4262, 0xf6e4eb,
-        ],
-        ThemePreference::Sand => [
-            0xf4eee2, 0xfffaf0, 0xf9f3e8, 0xdfcfb9, 0x40372c, 0x746657, 0x885633, 0xefe3d1,
-        ],
-        ThemePreference::Ice => [
-            0xeff8fb, 0xffffff, 0xf4fbfd, 0xc8dfe8, 0x233d4a, 0x57717d, 0x226c83, 0xdfedf3,
-        ],
-        ThemePreference::Dusk => [
-            0x1c252d, 0x262f39, 0x303c47, 0x485967, 0xf0f3f6, 0xb9c2cb, 0xb1c8d2, 0x3b4b56,
-        ],
-        ThemePreference::Violet => [
-            0x211d38, 0x302b4c, 0x383150, 0x564a73, 0xf0edf9, 0xc8c0dd, 0xc3a8ff, 0x483965,
-        ],
-        ThemePreference::System => unreachable!("system is resolved above"),
-    };
-    let [
-        background,
-        surface,
-        surface_alt,
-        border,
-        text,
-        muted,
-        accent,
-        accent_bg,
-    ] = colors.map(rgb);
-    let dark = theme.resolves_to_dark(false);
+    palette_from_spec(crate::theme::themes::spec_for(theme, false))
+}
+
+/// Legacy flat-palette view of the live theme tokens. Pages keep reading named colours; the
+/// values now come from the interpolated `ThemeSpec`, so a theme switch animates every page.
+fn palette_from_spec(spec: &crate::theme::spec::ThemeSpec) -> NativePalette {
+    let tokens = spec.tokens;
     NativePalette {
-        background,
-        surface,
-        surface_alt,
-        border,
-        text,
-        muted,
-        accent,
-        accent_bg,
-        success: rgb(if dark { 0x83d9ab } else { 0x24653f }),
-        warning: rgb(if dark { 0xf2cd83 } else { 0x80551b }),
-        error: rgb(if dark { 0xffaaa5 } else { 0xad3043 }),
-        error_bg: rgb(if dark { 0x492b37 } else { 0xfbe9ed }),
+        background: tokens.bg.to_color32(),
+        surface: tokens.panel_solid.over(tokens.bg).to_color32(),
+        surface_alt: tokens.bg_soft.to_color32(),
+        border: tokens.border.to_color32(),
+        text: tokens.text.to_color32(),
+        muted: tokens.text_2.to_color32(),
+        // Text-mode accent: the Web hue walks toward black/white only as far as WCAG AA
+        // requires (fills keep the raw `--accent` inside the theme painter).
+        accent: spec.readable_accent().to_color32(),
+        accent_bg: tokens.accent_soft.over(tokens.bg).to_color32(),
+        success: spec.readable_semantic(tokens.ok, tokens.ok_bg).to_color32(),
+        warning: spec.readable_semantic(tokens.warn, tokens.warn_bg).to_color32(),
+        error: spec.readable_semantic(tokens.err, tokens.err_bg).to_color32(),
+        error_bg: tokens.err_bg.over(tokens.bg).to_color32(),
     }
 }
 
-const fn rgb(hex: u32) -> egui::Color32 {
-    egui::Color32::from_rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
-}
-
-fn native_widget_visuals(
-    bg_fill: egui::Color32,
-    weak_bg_fill: egui::Color32,
-    fg_color: egui::Color32,
-    border: egui::Color32,
-) -> egui::style::WidgetVisuals {
-    egui::style::WidgetVisuals {
-        bg_fill,
-        weak_bg_fill,
-        bg_stroke: egui::Stroke::new(1.0, border),
-        corner_radius: egui::CornerRadius::same(6),
-        fg_stroke: egui::Stroke::new(1.0, fg_color),
-        expansion: 0.0,
-    }
-}
-
+#[cfg(test)]
 fn native_style(theme: ThemePreference) -> egui::Style {
-    let palette = palette_for(theme);
-    let mut style = egui::Style::default();
-    style.spacing.item_spacing = egui::vec2(12.0, 10.0);
-    style.spacing.window_margin = egui::Margin::symmetric(18, 16);
-    style.spacing.button_padding = egui::vec2(10.0, 6.0);
-    style.spacing.menu_margin = egui::Margin::same(8);
-    style.spacing.interact_size = egui::vec2(40.0, 32.0);
-    style.spacing.combo_width = 260.0;
-    style.spacing.text_edit_width = 320.0;
-    style.spacing.extra_text_line_spacing = 2.0;
-
-    style
-        .text_styles
-        .insert(egui::TextStyle::Heading, egui::FontId::proportional(26.0));
-    style
-        .text_styles
-        .insert(egui::TextStyle::Body, egui::FontId::proportional(15.0));
-    style
-        .text_styles
-        .insert(egui::TextStyle::Button, egui::FontId::proportional(14.0));
-    style
-        .text_styles
-        .insert(egui::TextStyle::Small, egui::FontId::proportional(13.0));
-    style
-        .text_styles
-        .insert(egui::TextStyle::Monospace, egui::FontId::monospace(13.0));
-
-    let dark = theme.resolves_to_dark(false);
-    let mut visuals = if dark {
-        egui::Visuals::dark()
-    } else {
-        egui::Visuals::light()
-    };
-    visuals.dark_mode = dark;
-    visuals.override_text_color = Some(palette.text);
-    visuals.weak_text_color = Some(palette.muted);
-    visuals.panel_fill = palette.background;
-    visuals.window_fill = palette.surface;
-    visuals.window_stroke = egui::Stroke::new(1.0, palette.border);
-    visuals.window_corner_radius = egui::CornerRadius::same(10);
-    visuals.faint_bg_color = palette.surface_alt;
-    visuals.extreme_bg_color = palette.surface;
-    visuals.text_edit_bg_color = Some(palette.surface);
-    visuals.code_bg_color = palette.surface_alt;
-    visuals.hyperlink_color = palette.accent;
-    visuals.warn_fg_color = palette.warning;
-    visuals.error_fg_color = palette.error;
-    visuals.selection = egui::style::Selection {
-        bg_fill: palette.accent_bg,
-        stroke: egui::Stroke::new(1.0, palette.accent),
-    };
-    visuals.widgets.noninteractive = native_widget_visuals(
-        palette.surface,
-        palette.surface,
-        palette.text,
-        palette.border,
-    );
-    visuals.widgets.inactive = native_widget_visuals(
-        palette.surface_alt,
-        palette.surface,
-        palette.text,
-        palette.border,
-    );
-    visuals.widgets.hovered = native_widget_visuals(
-        palette.accent_bg,
-        palette.surface_alt,
-        palette.text,
-        palette.accent,
-    );
-    visuals.widgets.active = native_widget_visuals(
-        palette.accent_bg,
-        palette.accent_bg,
-        palette.text,
-        palette.accent,
-    );
-    visuals.widgets.open = visuals.widgets.active;
-    visuals.button_frame = true;
-    visuals.collapsing_header_frame = true;
-    visuals.striped = true;
-    visuals.disabled_alpha = 0.55;
-    style.visuals = visuals;
-    style
+    crate::theme::style(crate::theme::themes::spec_for(theme, false))
 }
 
 /// Apply by concrete theme ID, so switching between two light/dark palettes also works.
+/// The theme engine owns the transition: the first call after a switch starts the 700 ms
+/// cross-fade, and every later call is a no-op until the target changes again.
 fn sync_theme_preference(context: &egui::Context, preference: ThemePreference) {
+    sync_theme_preference_with(
+        context,
+        preference,
+        crate::theme::ReduceMotion::Auto,
+        false,
+    );
+}
+
+fn sync_theme_preference_with(
+    context: &egui::Context,
+    preference: ThemePreference,
+    reduce_motion: crate::theme::ReduceMotion,
+    system_reduce_motion: bool,
+) -> crate::theme::FrameOutcome {
     let system_dark = context.system_theme() == Some(egui::Theme::Dark);
-    let theme = preference.resolve(system_dark);
-    ACTIVE_THEME.set(theme);
-    let id = egui::Id::new("cetamesh-applied-theme");
-    let changed = context.data_mut(|data| {
-        let changed = data.get_temp::<ThemePreference>(id) != Some(theme);
-        if changed {
-            data.insert_temp(id, theme);
-        }
-        changed
-    });
-    if changed {
-        context.set_theme(if theme.resolves_to_dark(false) {
+    ACTIVE_THEME.set(preference.resolve(system_dark));
+    let outcome = crate::theme::begin_frame(
+        context,
+        preference,
+        system_dark,
+        reduce_motion,
+        system_reduce_motion,
+    );
+    if outcome.spec_changed {
+        let spec = crate::theme::current();
+        context.set_theme(if spec.dark {
             egui::Theme::Dark
         } else {
             egui::Theme::Light
         });
-        context.set_global_style(native_style(theme));
-        context.request_repaint();
+        context.set_global_style(crate::theme::style(&spec));
     }
+    outcome
 }
 
 fn show_theme_selector(ui: &mut egui::Ui, selected: &mut ThemePreference) -> bool {
@@ -1006,9 +888,9 @@ fn theme_choice(
     });
     if ui.is_rect_visible(rect) {
         let current = native_palette();
-        let preview = palette_for(theme);
+        let spec = crate::theme::themes::spec_for(theme, false);
         let highlighted = selected || response.hovered() || response.has_focus();
-        let painter = ui.painter();
+        let painter = ui.painter().clone();
         painter.rect(
             rect,
             8,
@@ -1027,30 +909,30 @@ fn theme_choice(
             ),
             egui::StrokeKind::Inside,
         );
+        // Live preview: the *real* background recipe (gradient + blobs + fog) rendered into
+        // the swatch, then a miniature glass card and the accent gradient on top. What the
+        // picker shows is literally what the switch will paint.
         let swatch =
             egui::Rect::from_min_size(rect.min + egui::vec2(10.0, 12.0), egui::vec2(42.0, 38.0));
-        painter.rect(
+        let swatch_painter = painter.with_clip_rect(swatch.intersect(painter.clip_rect()));
+        crate::theme::painter::paint_background(&swatch_painter, ui.ctx(), swatch, spec, None);
+        let card = swatch.shrink2(egui::vec2(7.0, 9.0));
+        crate::theme::painter::paint_card(&swatch_painter, card, spec);
+        crate::theme::painter::fill_linear_gradient(
+            &swatch_painter,
+            egui::Rect::from_min_size(
+                card.min + egui::vec2(4.0, 4.0),
+                egui::vec2(18.0, 4.0),
+            ),
+            spec.tokens.accent,
+            spec.tokens.accent_2,
+            140.0,
+        );
+        painter.rect_stroke(
             swatch,
             5,
-            preview.background,
-            egui::Stroke::new(1.0, preview.border),
+            egui::Stroke::new(1.0, current.border),
             egui::StrokeKind::Inside,
-        );
-        let card = swatch.shrink2(egui::vec2(6.0, 7.0));
-        painter.rect_filled(card, 3, preview.surface);
-        painter.line_segment(
-            [
-                card.min + egui::vec2(4.0, 7.0),
-                card.min + egui::vec2(21.0, 7.0),
-            ],
-            egui::Stroke::new(3.0, preview.accent),
-        );
-        painter.line_segment(
-            [
-                card.min + egui::vec2(4.0, 15.0),
-                card.min + egui::vec2(15.0, 15.0),
-            ],
-            egui::Stroke::new(2.0, preview.muted),
         );
         painter.text(
             rect.min + egui::vec2(62.0, 21.0),
@@ -1062,11 +944,7 @@ fn theme_choice(
         painter.text(
             rect.min + egui::vec2(62.0, 42.0),
             egui::Align2::LEFT_CENTER,
-            if theme.resolves_to_dark(false) {
-                "深色"
-            } else {
-                "浅色"
-            },
+            if spec.dark { "深色" } else { "浅色" },
             egui::TextStyle::Small.resolve(ui.style()),
             current.muted,
         );
@@ -1314,6 +1192,8 @@ ApiCall::Family { method, params } => api.request(method, params),
             last_page: AppPage::Chat,
             applied_theme: None,
             applied_zoom: None,
+            #[cfg(debug_assertions)]
+            qa_screenshots: None,
         };
 
         // Start with read-only snapshots. The only initial write-like form request is also
@@ -2417,7 +2297,7 @@ ApiCall::Family { method, params } => api.request(method, params),
         }
     }
 
-    fn sync_theme_and_zoom(&mut self, ctx: &egui::Context) {
+    fn sync_theme_and_zoom(&mut self, ctx: &egui::Context) -> crate::theme::FrameOutcome {
         let prefs = self.prefs_snapshot();
         let system_dark = ctx.system_theme() == Some(egui::Theme::Dark);
         let theme = prefs.theme.resolve(system_dark);
@@ -2442,10 +2322,16 @@ ApiCall::Family { method, params } => api.request(method, params),
                 ),
             );
         }
-        sync_theme_preference(ctx, prefs.theme);
+        let outcome = sync_theme_preference_with(
+            ctx,
+            prefs.theme,
+            prefs.reduce_motion,
+            crate::theme::system_reduce_motion(),
+        );
         if (ctx.zoom_factor() - prefs.zoom).abs() > 0.001 {
             ctx.set_zoom_factor(prefs.zoom);
         }
+        outcome
     }
 
     fn sync_chat_draft(&mut self) {
@@ -2536,13 +2422,34 @@ ApiCall::Family { method, params } => api.request(method, params),
                             .color(palette.error)
                             .strong(),
                     );
-                    if ui.button("重启 Core").clicked() {
+                    if crate::theme::gummy_button(
+                        ui,
+                        "重启 Core",
+                        crate::theme::painter::ButtonKind::Armed,
+                        true,
+                    )
+                    .clicked()
+                    {
                         self.supervisor.request_restart();
                     }
-                    if ui.button("重新检查").clicked() {
+                    if crate::theme::gummy_button(
+                        ui,
+                        "重新检查",
+                        crate::theme::painter::ButtonKind::Normal,
+                        true,
+                    )
+                    .clicked()
+                    {
                         self.issue(Area::Overview, Operation::OverviewPing, ApiCall::Ping);
                     }
-                    if ui.button("打开日志目录").clicked() {
+                    if crate::theme::gummy_button(
+                        ui,
+                        "打开日志目录",
+                        crate::theme::painter::ButtonKind::Normal,
+                        true,
+                    )
+                    .clicked()
+                    {
                         self.open_logs();
                     }
                 });
@@ -2646,13 +2553,7 @@ ApiCall::Family { method, params } => api.request(method, params),
     }
 
     fn show_compact_nav(&mut self, ui: &mut egui::Ui) {
-        let palette = native_palette();
-        egui::Frame::new()
-            .fill(palette.surface)
-            .stroke(egui::Stroke::new(1.0, palette.border))
-            .corner_radius(egui::CornerRadius::same(8))
-            .inner_margin(egui::Margin::symmetric(10, 8))
-            .show(ui, |ui| {
+        crate::theme::card_compact(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     show_brand_mark(ui, 22.0, false);
                     ui.strong("CetaMesh");
@@ -2708,11 +2609,30 @@ ApiCall::Family { method, params } => api.request(method, params),
                 .changed();
         });
         ui.small("只有托盘菜单“退出”或上面的退出选项会停止 Core；隐藏到托盘不会。");
+        ui.add_space(4.0);
+        ui.label("动态效果：");
+        ui.horizontal_wrapped(|ui| {
+            for (value, label) in [
+                (crate::ui_prefs::ReduceMotion::Auto, "跟随系统"),
+                (crate::ui_prefs::ReduceMotion::Off, "完整动效"),
+                (crate::ui_prefs::ReduceMotion::On, "减少动效"),
+            ] {
+                changed |= ui.radio_value(&mut prefs.reduce_motion, value, label).changed();
+            }
+        });
+        ui.small(
+            "减少动效时：主题切换变为 150ms 短淡变，背景光斑停止漂移，页面切换不再浮升。",
+        );
         if ui.button("查看键盘快捷键（F1）").clicked() {
             self.shortcuts_open = true;
         }
         if changed {
-            sync_theme_preference(ui.ctx(), prefs.theme);
+            sync_theme_preference_with(
+                ui.ctx(),
+                prefs.theme,
+                prefs.reduce_motion,
+                crate::theme::system_reduce_motion(),
+            );
             self.update_prefs(|stored| *stored = prefs);
         }
     }
@@ -2724,13 +2644,8 @@ ApiCall::Family { method, params } => api.request(method, params),
             Some(false) => ("Core 不可用", palette.error),
             None => ("Core 状态未知", palette.warning),
         };
-        egui::Frame::new()
-            .fill(palette.surface)
-            .stroke(egui::Stroke::new(1.0, palette.border))
-            .corner_radius(egui::CornerRadius::same(10))
-            .inner_margin(egui::Margin::symmetric(20, 14))
-            .show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
+        crate::theme::card(ui, |ui| {
+            ui.set_min_width(ui.available_width());
                 if narrow {
                     ui.vertical(|ui| {
                         ui.heading(self.navigation.page.label());
@@ -2762,14 +2677,81 @@ ApiCall::Family { method, params } => api.request(method, params),
     }
 
     fn page_button(&mut self, ui: &mut egui::Ui, page: AppPage) {
-        let palette = native_palette();
+        // `.nav-btn` from the Web console: transparent until hovered, and the active item is
+        // a gradient pill (`linear-gradient(140deg, accent, accent-2)`) with a soft shadow.
+        let spec = crate::theme::current();
+        let tokens = spec.tokens;
         let selected = self.navigation.page == page;
-        let color = if selected { palette.text } else { palette.muted };
         let width = ui.available_width().clamp(120.0, 240.0);
-        let response = ui.add_sized(
-            egui::vec2(width, 34.0),
-            egui::Button::new(egui::RichText::new(page.label()).color(color)).selected(selected),
-        );
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(width, 34.0), egui::Sense::click());
+        response.widget_info(|| {
+            egui::WidgetInfo::selected(egui::WidgetType::Button, true, selected, page.label())
+        });
+        if ui.is_rect_visible(rect) {
+            let hover_t = ui
+                .ctx()
+                .animate_bool_with_time(response.id.with("hover"), response.hovered(), 0.18);
+            let press_t = ui.ctx().animate_bool_with_time(
+                response.id.with("press"),
+                response.is_pointer_button_down_on(),
+                0.08,
+            );
+            if selected {
+                crate::theme::painter::paint_button(
+                    ui.painter(),
+                    rect,
+                    18.0,
+                    &spec,
+                    crate::theme::painter::ButtonKind::Primary,
+                    hover_t,
+                    press_t,
+                    true,
+                );
+            } else if hover_t > 0.01 || press_t > 0.01 {
+                let ease = crate::theme::motion::spring(hover_t);
+                let lifted = rect.translate(egui::vec2(0.0, -ease + 2.0 * press_t));
+                let corner = egui::CornerRadius::same(18);
+                crate::theme::painter::paint_soft_shadow(
+                    ui.painter(),
+                    lifted,
+                    18.0,
+                    egui::vec2(4.0, 5.0),
+                    12.0,
+                    tokens.shadow_c1.scale_alpha(hover_t),
+                );
+                let fill = if press_t > 0.5 {
+                    tokens.accent_soft.over(tokens.bg)
+                } else {
+                    tokens.hover
+                };
+                ui.painter()
+                    .rect_filled(lifted, corner, fill.scale_alpha(hover_t).to_color32());
+                ui.painter().rect_stroke(
+                    lifted,
+                    corner,
+                    egui::Stroke::new(1.0, tokens.edge_hi.to_color32()),
+                    egui::StrokeKind::Inside,
+                );
+            }
+            let text_color = if selected {
+                tokens.on_accent
+            } else {
+                tokens.text_2
+            };
+            let galley = ui.painter().layout_no_wrap(
+                page.label().to_owned(),
+                egui::TextStyle::Button.resolve(ui.style()),
+                text_color.to_color32(),
+            );
+            ui.painter().galley(
+                egui::pos2(rect.left() + 16.0, rect.center().y)
+                    - egui::vec2(0.0, galley.size().y / 2.0)
+                    + egui::vec2(0.0, 2.0 * press_t),
+                galley,
+                text_color.to_color32(),
+            );
+        }
         if response.clicked() {
             self.navigation.select_page(page);
         }
@@ -2806,19 +2788,13 @@ ApiCall::Family { method, params } => api.request(method, params),
             return;
         }
 
-        let palette = native_palette();
-        egui::Frame::new()
-            .fill(palette.surface)
-            .stroke(egui::Stroke::new(1.0, palette.border))
-            .corner_radius(egui::CornerRadius::same(8))
-            .inner_margin(egui::Margin::symmetric(10, 8))
-            .show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    for tab in tabs {
-                        self.tab_button(ui, *tab, tab.label());
-                    }
-                });
+        crate::theme::card_compact(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for tab in tabs {
+                    self.tab_button(ui, *tab, tab.label());
+                }
             });
+        });
     }
 
     fn show_chat_page(&mut self, ui: &mut egui::Ui) {
@@ -2926,12 +2902,7 @@ ApiCall::Family { method, params } => api.request(method, params),
         // ── 对话区 ───────────────────────────────────────────────────
         let active_title = self.chat.active_session().map(|s| s.title.clone()).unwrap_or_default();
         let config = self.chat.active_config();
-        egui::Frame::new()
-            .fill(palette.surface_alt)
-            .stroke(egui::Stroke::new(1.0, palette.border))
-            .corner_radius(egui::CornerRadius::same(10))
-            .inner_margin(egui::Margin::symmetric(14, 10))
-            .show(ui, |ui| {
+        crate::theme::card_compact(ui, |ui| {
                 if active_title.is_empty() {
                     ui.weak("选择或新建一个会话开始对话。");
                 } else {
@@ -2974,7 +2945,7 @@ ApiCall::Family { method, params } => api.request(method, params),
             let is_user = message.role == "user";
             ui.push_id(&message.id, |ui| {
             egui::Frame::new()
-                .fill(if is_user { palette.surface } else { palette.surface_alt })
+                .fill(if is_user { crate::theme::tokens().panel_solid.to_color32() } else { crate::theme::tokens().panel.to_color32() })
                 .stroke(egui::Stroke::new(1.0, palette.border))
                 .corner_radius(egui::CornerRadius::same(8))
                 .inner_margin(egui::Margin::symmetric(10, 6))
@@ -3003,10 +2974,10 @@ ApiCall::Family { method, params } => api.request(method, params),
         }
         if let Some(turn) = self.chat.turn.clone() {
             egui::Frame::new()
-                .fill(palette.surface_alt)
-                .stroke(egui::Stroke::new(1.0, palette.border))
-                .corner_radius(egui::CornerRadius::same(8))
-                .inner_margin(egui::Margin::symmetric(10, 6))
+                .fill(crate::theme::tokens().panel.to_color32())
+.stroke(egui::Stroke::new(1.0, crate::theme::tokens().border.to_color32()))
+.corner_radius(egui::CornerRadius::same(8))
+.inner_margin(egui::Margin::symmetric(10, 6))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.small("助手");
@@ -3041,7 +3012,6 @@ ApiCall::Family { method, params } => api.request(method, params),
     }
 
     fn show_chat_composer(&mut self, ui: &mut egui::Ui) {
-        let palette = native_palette();
         let streaming = self.chat.turn.as_ref().is_some_and(|turn| turn.state == "streaming" || turn.state == "cancelling");
         let last_is_user = self.chat.messages.last().is_some_and(|m| m.role == "user");
         let can_continue = self
@@ -3049,12 +3019,7 @@ ApiCall::Family { method, params } => api.request(method, params),
             .messages
             .iter()
             .any(|m| m.role == "assistant" && (m.cancelled || m.error.is_some()));
-        egui::Frame::new()
-            .fill(palette.surface_alt)
-            .stroke(egui::Stroke::new(1.0, palette.border))
-            .corner_radius(egui::CornerRadius::same(10))
-            .inner_margin(egui::Margin::symmetric(12, 10))
-            .show(ui, |ui| {
+        crate::theme::card_compact(ui, |ui| {
                 if !self.chat.attachments.is_empty() {
                     ui.horizontal_wrapped(|ui| {
                         let attachments = self.chat.attachments.clone();
@@ -3066,13 +3031,18 @@ ApiCall::Family { method, params } => api.request(method, params),
                         }
                     });
                 }
-                let composer = ui.add(
-                    egui::TextEdit::multiline(&mut self.chat.input)
-                        .id(egui::Id::new("cetamesh_chat_composer"))
-                        .hint_text("输入消息；Enter 发送，Shift+Enter 换行（中文输入法不会误发）")
-                        .desired_rows(3)
-                        .desired_width(f32::INFINITY),
-                );
+                // Inset neumorphic well behind the composer (`inset 3px 4px 10px` recipe).
+                let composer = crate::theme::well(ui, |ui| {
+                    ui.add(
+                        egui::TextEdit::multiline(&mut self.chat.input)
+                            .id(egui::Id::new("cetamesh_chat_composer"))
+                            .hint_text("输入消息；Enter 发送，Shift+Enter 换行（中文输入法不会误发）")
+                            .desired_rows(3)
+                            .desired_width(f32::INFINITY)
+                            .frame(egui::Frame::NONE),
+                    )
+                })
+                .inner;
                 // IME-safe Enter-to-send: the composer must own focus, Shift must not be held, and
                 // the same frame must not carry IME preedit/commit events. Confirming a Chinese
                 // candidate therefore never sends the message by accident.
@@ -3090,7 +3060,15 @@ ApiCall::Family { method, params } => api.request(method, params),
                 );
                 ui.horizontal(|ui| {
                     if streaming {
-                        if ui.button("■ 停止").clicked() && !self.pending.contains(&Area::ChatStatus) {
+                        if crate::theme::gummy_button(
+                            ui,
+                            "■ 停止",
+                            crate::theme::painter::ButtonKind::Danger,
+                            true,
+                        )
+                        .clicked()
+                            && !self.pending.contains(&Area::ChatStatus)
+                        {
                             if let Some(id) = self.chat.active_id.clone() {
                                 self.issue_control(Area::Chat, Operation::ChatStop, "chat.stop", json!({"id": id}));
                             }
@@ -3098,7 +3076,13 @@ ApiCall::Family { method, params } => api.request(method, params),
                     } else {
                         let can_send = self.chat.active_id.is_some()
                             && (!self.chat.input.trim().is_empty() || !self.chat.attachments.is_empty());
-                        let send_button = ui.add_enabled(can_send, egui::Button::new("发送"));
+                        // Gummy gradient primary button — the Web `.btn.primary` recipe.
+                        let send_button = crate::theme::gummy_button(
+                            ui,
+                            "发送",
+                            crate::theme::painter::ButtonKind::Primary,
+                            can_send,
+                        );
                         let busy = self.pending.contains(&Area::Chat);
                         if (send_button.clicked() || (enter_send && can_send)) && !busy {
                             let text = self.chat.input.trim().to_owned();
@@ -4847,12 +4831,7 @@ ApiCall::Family { method, params } => api.request(method, params),
 
     fn show_loading_state(&self, ui: &mut egui::Ui, message: &str) {
         let palette = native_palette();
-        egui::Frame::new()
-            .fill(palette.surface_alt)
-            .stroke(egui::Stroke::new(1.0, palette.border))
-            .corner_radius(egui::CornerRadius::same(8))
-            .inner_margin(egui::Margin::symmetric(12, 9))
-            .show(ui, |ui| {
+        crate::theme::card_compact(ui, |ui| {
                 ui.horizontal(|ui| {
                     show_brand_mark(ui, 30.0, true);
                     ui.label(egui::RichText::new(message).color(palette.muted));
@@ -4923,6 +4902,9 @@ impl eframe::App for NativeUi {
         self.handle_shortcuts(&ctx);
         if self.last_page != self.navigation.page {
             self.last_page = self.navigation.page;
+            // The module switch plays once: content fades in and rises (`moduleIn` in the
+            // Web reference). Reduce Motion keeps only a short fade.
+            crate::theme::begin_page_enter();
             if self.navigation.page == AppPage::Chat {
                 // Keyboard-first flow: entering Chat focuses the composer for immediate typing/IME.
                 ctx.memory_mut(|memory| {
@@ -4930,7 +4912,7 @@ impl eframe::App for NativeUi {
                 });
             }
         }
-        self.sync_theme_and_zoom(&ctx);
+        let frame_outcome = self.sync_theme_and_zoom(&ctx);
         self.handle_close_request(&ctx);
         self.receive_events();
         self.sync_chat_draft();
@@ -4943,28 +4925,41 @@ impl eframe::App for NativeUi {
         }
         self.update_tray();
 
-        let palette = native_palette();
+        // Theme engine first: it advances the cross-fade, drives the background layer and
+        // decides the honest repaint budget for this frame.
+        crate::theme::paint_background(&ctx);
+        let tokens = crate::theme::tokens();
+
         // Layout is built from real panels: the navigation can never squeeze the page, panels wrap
         // their own content, and the central page always gets the remaining rectangle.
+        // Panels are translucent glass over the painted canvas (`--glass-weak`), matching the
+        // fixed `.bg-decor` + fixed glass bars structure of the Web console.
         let narrow = ctx.viewport_rect().width() < 1040.0;
         if !narrow {
-            egui::Panel::left("cetamesh_sidebar")
+            let sidebar = egui::Panel::left("cetamesh_sidebar")
                 .resizable(false)
                 .exact_size(196.0)
                 .frame(
                     egui::Frame::new()
-                        .fill(palette.background)
+                        .fill(tokens.glass_weak.to_color32())
                         .inner_margin(egui::Margin::symmetric(12, 14)),
                 )
                 .show(ui, |ui| {
                     self.show_sidebar(ui);
                 });
+            // `border-right: 1px solid var(--edge-hi)`
+            let rect = sidebar.response.rect;
+            ui.painter().vline(
+                rect.right() - 0.5,
+                rect.y_range(),
+                egui::Stroke::new(1.0, tokens.edge_hi.to_color32()),
+            );
         }
-        egui::Panel::top("cetamesh_header")
+        let header = egui::Panel::top("cetamesh_header")
             .resizable(false)
             .frame(
                 egui::Frame::new()
-                    .fill(palette.background)
+                    .fill(tokens.glass_weak.to_color32())
                     .inner_margin(egui::Margin::symmetric(16, 12)),
             )
             .show(ui, |ui| {
@@ -4979,31 +4974,118 @@ impl eframe::App for NativeUi {
                 ui.add_space(4.0);
                 self.show_page_section_nav(ui);
             });
+        // `border-bottom: 1px solid var(--edge-hi)`
+        let header_rect = header.response.rect;
+        ui.painter().hline(
+            header_rect.x_range(),
+            header_rect.bottom() - 0.5,
+            egui::Stroke::new(1.0, tokens.edge_hi.to_color32()),
+        );
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
-                    .fill(palette.background)
-                    .inner_margin(egui::Margin::symmetric(16, 4)),
+                    .fill(egui::Color32::TRANSPARENT)
+                    .inner_margin(egui::Margin::symmetric(16, 8)),
             )
             .show(ui, |ui| {
                 egui::ScrollArea::vertical()
                     .id_salt("cetamesh_product_page_scroll")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        egui::Frame::new()
-                            .fill(palette.surface)
-                            .stroke(egui::Stroke::new(1.0, palette.border))
-                            .corner_radius(egui::CornerRadius::same(10))
-                            .inner_margin(egui::Margin::symmetric(20, 18))
-                            .show(ui, |ui| {
-                                ui.set_min_width(ui.available_width());
-                                self.show_page(ui);
-                            });
+                        let (enter_alpha, enter_rise) = crate::theme::page_enter_state();
+                        ui.add_space(enter_rise);
+                        ui.scope(|ui| {
+                            ui.set_opacity(enter_alpha);
+                            // Like the Web console, the page floats on the fixed gradient:
+                            // page sections carry their own glass cards, and the canvas stays
+                            // visible between them.
+                            ui.set_min_width(ui.available_width());
+                            self.show_page(ui);
+                        });
                     });
             });
         self.show_shortcuts_window(&ctx);
         self.show_quit_confirm(&ctx);
-        ctx.request_repaint_after(Duration::from_millis(500));
+        #[cfg(debug_assertions)]
+        self.drive_qa_screenshots(&ctx);
+        // Repaint budget: while the theme cross-fade / ripple or the blob drift animates,
+        // the engine already schedules 16–33 ms frames; when everything is settled only the
+        // slow state poll keeps the app honest — no idle spinning.
+        if !(frame_outcome.transitioning || frame_outcome.drifting) {
+            ctx.request_repaint_after(Duration::from_millis(500));
+        }
+    }
+}
+
+#[cfg(debug_assertions)]
+impl NativeUi {
+    /// Debug-only `--screenshot-dir` driver: walk every theme, wait for the cross-fade to
+    /// settle, capture the viewport, write a PNG, finish with the Settings theme picker.
+    fn drive_qa_screenshots(&mut self, ctx: &egui::Context) {
+        use crate::theme::qa::{self, Stage};
+        // Detach the plan so `self` stays borrowable for prefs / navigation side effects.
+        let Some(mut plan) = self.qa_screenshots.take() else {
+            return;
+        };
+        if plan.finished {
+            self.qa_screenshots = Some(plan);
+            return;
+        }
+        ctx.request_repaint();
+        let now = Instant::now();
+        if let Some(image) = qa::ScreenshotPlan::take_screenshot(ctx) {
+            if let Some(spec) = plan.current() {
+                let label = spec.label.clone();
+                let dir = plan.dir.clone();
+                match qa::save_color_image(&dir, &label, &image) {
+                    Ok(path) => eprintln!("[qa] wrote {}", path.display()),
+                    Err(error) => eprintln!("[qa] {label}: {error}"),
+                }
+            }
+            plan.advance(now);
+            if plan.finished {
+                // QA runs must terminate even when the tray + HideToTray would keep the app alive.
+                self.exit_confirmed = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            self.qa_screenshots = Some(plan);
+            return;
+        }
+        let Some(spec) = plan.current().cloned() else {
+            plan.finished = true;
+            self.exit_confirmed = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            self.qa_screenshots = Some(plan);
+            return;
+        };
+        match plan.stage {
+            Stage::Apply => {
+                if spec.settings {
+                    self.navigation.select_page(AppPage::Settings);
+                }
+                let theme = spec.theme;
+                self.update_prefs(|prefs| {
+                    prefs.theme = theme;
+                    prefs.reduce_motion = crate::ui_prefs::ReduceMotion::Off;
+                });
+                plan.set_stage(Stage::Wait, now);
+            }
+            Stage::Wait => {
+                if now.saturating_duration_since(plan.since) >= qa::SETTLE {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(
+                        egui::UserData::default(),
+                    ));
+                    plan.set_stage(Stage::Capture, now);
+                }
+            }
+            Stage::Capture => {
+                if plan.timed_out(now) {
+                    eprintln!("[qa] {}: no screenshot arrived; skipping", spec.label);
+                    plan.advance(now);
+                }
+            }
+        }
+        self.qa_screenshots = Some(plan);
     }
 }
 
@@ -5876,11 +5958,50 @@ mod theme_tests {
     use crate::ui_prefs::ThemePreference;
     use eframe::egui::{self, Color32, TextStyle};
 
+    /// Drive the theme engine to a settled state so tests observe the final recipe instead of
+    /// a mid-transition interpolation: one frame starts the cross-fade, a far-future frame
+    /// finishes it and applies the target style — exactly what the shell does over 700 ms.
+    fn settle(ctx: &egui::Context, theme: ThemePreference, system_dark: bool) {
+        let now = std::time::Instant::now();
+        for at in [now, now + std::time::Duration::from_millis(2_000)] {
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    system_theme: Some(if system_dark {
+                        egui::Theme::Dark
+                    } else {
+                        egui::Theme::Light
+                    }),
+                    ..Default::default()
+                },
+                |ctx| {
+                    let outcome = crate::theme::begin_frame_at(
+                        ctx,
+                        at,
+                        theme,
+                        system_dark,
+                        crate::theme::ReduceMotion::Off,
+                        false,
+                    );
+                    if outcome.spec_changed {
+                        let spec = crate::theme::current();
+                        ctx.set_theme(if spec.dark {
+                            egui::Theme::Dark
+                        } else {
+                            egui::Theme::Light
+                        });
+                        ctx.set_global_style(crate::theme::style(&spec));
+                    }
+                },
+            );
+            output.drop_without_applying_deltas();
+        }
+    }
+
     #[test]
     fn switching_between_themes_of_the_same_brightness_updates_all_controls() {
         use crate::ui_prefs::ThemePreference;
         let ctx = egui::Context::default();
-        super::sync_theme_preference(&ctx, ThemePreference::Soda);
+        settle(&ctx, ThemePreference::Soda, false);
         for themes in [
             vec![
                 ThemePreference::Soda,
@@ -5896,7 +6017,7 @@ mod theme_tests {
         ] {
             let mut previous = None;
             for theme in themes {
-                super::sync_theme_preference(&ctx, theme);
+                settle(&ctx, theme, false);
                 let mode = if theme.resolves_to_dark(false) {
                     egui::Theme::Dark
                 } else {
@@ -5904,15 +6025,22 @@ mod theme_tests {
                 };
                 let visuals = &ctx.style_of(mode).visuals;
                 let colors = (
-                    visuals.panel_fill,
                     visuals.window_fill,
                     visuals.widgets.active.bg_fill,
                     visuals.hyperlink_color,
+                    visuals.window_corner_radius,
                 );
                 if let Some(old) = previous {
                     assert_ne!(colors, old, "same-brightness switch ignored: {theme:?}");
                 }
-                assert_eq!(visuals.panel_fill, super::native_palette().background);
+                // The canvas is painted by the theme engine on the background layer, so the
+                // panel fill itself must stay transparent and the palette must match the
+                // settling theme exactly.
+                assert_eq!(visuals.panel_fill, Color32::TRANSPARENT);
+                assert_eq!(
+                    super::native_palette().background,
+                    super::palette_for(theme).background
+                );
                 previous = Some(colors);
             }
         }
@@ -5938,7 +6066,7 @@ mod theme_tests {
     fn all_themes_keep_body_secondary_selection_and_status_text_readable() {
         let ctx = egui::Context::default();
         for theme in crate::ui_prefs::ThemePreference::THEMES {
-            super::sync_theme_preference(&ctx, theme);
+            settle(&ctx, theme, false);
             let p = super::native_palette();
             for foreground in [p.text, p.muted, p.accent, p.success, p.warning, p.error] {
                 for background in [p.background, p.surface, p.surface_alt] {
@@ -5974,20 +6102,11 @@ mod theme_tests {
                 ThemePreference::Violet,
             ),
         ] {
-            let output = ctx.run_ui(
-                egui::RawInput {
-                    system_theme: Some(system),
-                    ..Default::default()
-                },
-                |ui| {
-                    super::sync_theme_preference(ui.ctx(), preference);
-                },
-            );
+            settle(&ctx, preference, system == egui::Theme::Dark);
             assert_eq!(
                 super::native_palette().background,
                 super::palette_for(expected).background
             );
-            output.drop_without_applying_deltas();
         }
     }
 

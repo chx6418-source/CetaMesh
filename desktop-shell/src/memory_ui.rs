@@ -253,12 +253,7 @@ impl MemoryUi {
         }
 
         // ── 过滤 / 查询 ──────────────────────────────────────────────────
-        egui::Frame::new()
-            .fill(native_palette().surface_alt)
-            .stroke(egui::Stroke::new(1.0, native_palette().border))
-            .corner_radius(egui::CornerRadius::same(8))
-            .inner_margin(egui::Margin::symmetric(12, 10))
-            .show(ui, |ui| {
+        crate::theme::card_compact(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.label("搜索");
                     ui.add(
@@ -448,12 +443,7 @@ impl MemoryUi {
         let rows = self.rows.clone();
         let mut want_edit: Option<(String, u64, String)> = None;
         for row in &rows {
-            egui::Frame::new()
-                .fill(native_palette().surface_alt)
-                .stroke(egui::Stroke::new(1.0, native_palette().border))
-                .corner_radius(egui::CornerRadius::same(8))
-                .inner_margin(egui::Margin::symmetric(12, 10))
-                .show(ui, |ui| {
+            crate::theme::card_compact(ui, |ui| {
                     ui.horizontal_wrapped(|ui| {
                         ui.label(
                             egui::RichText::new(if row.pinned { "★" } else { "☆" }).color(native_palette().accent),

@@ -345,12 +345,7 @@ impl WorkspaceUi {
         ui.add_space(6.0);
 
         // ── 新建 / 打开（选择已有目录） ─────────────────────────────────
-        egui::Frame::new()
-            .fill(native_palette().surface_alt)
-            .stroke(egui::Stroke::new(1.0, native_palette().border))
-            .corner_radius(egui::CornerRadius::same(8))
-            .inner_margin(egui::Margin::symmetric(12, 10))
-            .show(ui, |ui| {
+        crate::theme::card_compact(ui, |ui| {
                 ui.label(egui::RichText::new("新建 / 登记工作区").strong());
                 ui.horizontal_wrapped(|ui| {
                     ui.label("名称");
@@ -452,12 +447,7 @@ impl WorkspaceUi {
         }
 
         ui.add_space(10.0);
-        egui::Frame::new()
-            .fill(native_palette().surface_alt)
-            .stroke(egui::Stroke::new(1.0, native_palette().border))
-            .corner_radius(egui::CornerRadius::same(8))
-            .inner_margin(egui::Margin::symmetric(12, 10))
-            .show(ui, |ui| {
+        crate::theme::card_compact(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(egui::RichText::new(string_field(&ws, "name")).strong());
                     ui.monospace(string_field(&ws, "root"));
