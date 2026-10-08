@@ -32,7 +32,7 @@ Integration branch: `codex/production-release-integration`
 | Theme migration | **PASS (automated/history); manual QA NOT_RUN** | Existing migration report and automated Desktop checks cover the 10 themes. No live screenshot review was completed in this integration run. |
 | GitCode distribution / GitHub fallback | **NOT_RUN_ENVIRONMENT** | GitCode updater implementation is present, but release publication and fallback pull were not verified. `git ls-remote` against both remotes failed with `SEC_E_NO_CREDENTIALS`; `gh` CLI was unavailable. No cloud push occurred. |
 
-The authorized push to the configured GitHub `origin` was rejected by automatic approval review because the destination was not established as a trusted organization/user-owned remote for this repository payload. No alternate push path was used. Cloud synchronization remains blocked pending destination authorization.
+After the user explicitly selected both remotes, the Desktop integration branch was pushed to GitHub `origin` as `codex/production-release-integration`. GitCode branch push was attempted but could not obtain a password (`unable to get password from user`), so GitCode synchronization remains incomplete. The Mobile integration branch was also pushed to its GitHub `origin`; its GitCode push is blocked by the same missing credential. No `main` branch was pushed and no release was published.
 
 ## Artifact facts
 
