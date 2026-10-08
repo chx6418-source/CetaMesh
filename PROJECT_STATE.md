@@ -9,9 +9,9 @@
 - Session 3 integration commit: `c22257240be86f7c8dfd2badee5b3f862a134cc6`; integrated into `main` and pushed to `origin/main`.
 - `refactor/core-composition-v1` was merged to `main`; its managed worktree was archived and the local branch was deleted.
 - Session 1 / 2 handoffs: `docs/archive/handoffs/HANDOFF_TECHDEBT_SESSION_1.md` and `docs/archive/handoffs/HANDOFF_TECHDEBT_SESSION_2.md`.
-- 上线冲刺任务 B（统一配对）工作分支：`feature/unified-device-pairing-v1`，基线 `e8a122a`（= 当时 `main`），
-  协议事实源 `docs/protocol/UNIFIED_PAIRING_V1_1.md`，验收报告 `UNIFIED_PAIRING_INTEROP_REPORT.md`。
-  等待 Owner 确认后再合并 `main`（多会话并行，合并前先核对本分支的配对协议副本与 Mobile 仓一致）。
+- 上线冲刺任务 B（统一配对）：`feature/unified-device-pairing-v1`（基线 `e8a122a`）已在 Owner 确认后**快进合并**到本地
+  `main`（实现 `18a2d5d` + 文档 `3f28079`），工作分支已删除；两端协议副本与 `fixtures/pairing/` 已核对为 blob 级一致。
+  **未 push**（等 Owner 指示）。协议事实源 `docs/protocol/UNIFIED_PAIRING_V1_1.md`，验收报告 `UNIFIED_PAIRING_INTEROP_REPORT.md`。
 
 ## Architecture（稳定面）
 
@@ -84,12 +84,11 @@
 - 桌面壳 `supervisor.rs` 的 HTTP 探活 fallback 已是死代码（待后续会话删除）。
 - NOT_RUN_ENVIRONMENT（无真实环境时如实不跑）：真实 provider-key 回合 / 真实 QQ / 跨设备 Mesh / 签名 / 真实发行产物。
 
-## Active Work — 上线冲刺任务 B：Desktop ↔ Mobile 统一配对与真机 Mesh 互操作（2026-10-08）
-- 工作分支：Desktop `feature/unified-device-pairing-v1`；Mobile 仓（cetamesh-mobile）同名分支。
-- 状态：实现与验收完成（验收记录见 `UNIFIED_PAIRING_INTEROP_REPORT.md`）。
-  **等待 Owner 确认后合并 `main` 并删除工作分支**（多会话并行，合并前核对两端协议副本与 fixtures 逐字节一致）。
-- 协议事实源：`docs/protocol/UNIFIED_PAIRING_V1_1.md`（两端各一份相同副本）；共享向量 `fixtures/pairing/`。
-- 本分支在独立 worktree 上完成，未改动 `main` 共享检出；Session 3 技术债收口（`TECH_DEBT_CONSOLIDATION_REPORT.md`）仍有效。
+## Active Work (none)
+- 上线冲刺任务 B（统一配对）已完成并在 Owner 确认后合并到本地 `main`（`3f28079`），本地工作分支与临时 worktree 已清理；
+  Mobile 仓 `feature/unified-device-pairing-v1` 同样已合并到其本地 `main`（`de0f0de`）并删除分支。**两个仓库均未 push**（等 Owner 指示）。
+- 验收记录、遗留清单（M6 Memory/Task 同步未接；真机 Android/iOS = NOT_RUN_ENVIRONMENT）见 `UNIFIED_PAIRING_INTEROP_REPORT.md`。
+- Session 3 技术债收口（`TECH_DEBT_CONSOLIDATION_REPORT.md`）仍有效。
 
 ## 文档地图（Agent 默认只读这里列的）
 
