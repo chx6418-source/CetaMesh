@@ -115,6 +115,14 @@
 
 ## Native Verification（如实清单）
 
+**本机复现备注（切到 main 后跑测试前先看）：**
+- 本分支在独立 worktree 上开发；新检出/切换 `main` 后需先 `npm install` —— `package.json` 新增了两个运行时依赖
+  `qrcode`（邀请二维码矩阵）与 `selfsigned`（每安装唯一配对证书）。
+- 本机全新安装得到的 `@snowluma/sdk@1.14.9`（与锁文件 integrity 一致）与主检出内已安装副本**内容不同**：
+  registry 版 `dist/index.js` 的 ESM 相对导入缺 `.js` 扩展名，会让 6 个既有套件（core-entry / qq-runtime /
+  desktop-supervisor / workspace-ipc / dsh-integration / no-web-release）直接失败；本次以主检出副本覆盖后全绿。
+  这是环境差异、与本次改动无关，但 CI `npm ci` 与后续会话值得复核 registry 端 tarball。
+
 **NOT_RUN_ENVIRONMENT（不在本机环境内，未伪造）：**
 1. Android 编译与真机运行（本机无 Android SDK / adb / 模拟器 / 设备，`android_preflight` 实证）；
 2. iOS 编译与运行（无 macOS/Xcode）；
