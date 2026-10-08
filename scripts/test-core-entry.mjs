@@ -41,6 +41,7 @@ async function waitForDataIpc(dataRoot, { timeoutMs = 15000 } = {}) {
 }
 
 assert.deepEqual(parseCoreArgs(['--worker']), { mode: 'worker' });
+assert.deepEqual(parseCoreArgs(['--extension-worker']), { mode: 'extension-worker' });
 assert.deepEqual(parseCoreArgs(['--mcp', 'snowluma']), { mode: 'mcp', mcp: 'snowluma' });
 assert.deepEqual(parseCoreArgs(['--mcp=mcp-bilibili']), { mode: 'mcp', mcp: 'bilibili' });
 assert.deepEqual(parseCoreArgs(['--self-test', 'http://127.0.0.1:3080', '测试']), {
@@ -53,6 +54,7 @@ assert.deepEqual(Object.keys(MCP_MODES), ['snowluma', 'snowluma-host', 'web-sear
 const help = spawnSync(process.execPath, [ENTRY, '--help'], { cwd: ROOT, encoding: 'utf8' });
 assert.equal(help.status, 0, help.stderr);
 assert.match(help.stdout, /--worker/);
+assert.match(help.stdout, /--extension-worker/);
 assert.match(help.stdout, /--mcp/);
 
 const invalid = spawnSync(process.execPath, [ENTRY, '--mcp', 'unknown'], { cwd: ROOT, encoding: 'utf8' });

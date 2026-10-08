@@ -7,21 +7,31 @@ import { createExtensionRuntime } from './runtime.js';
 import { createExtensionStore } from './store.js';
 import { extensionError } from './types.js';
 
-export function createExtensionService({ stateDir, fetchImpl = null, capabilityBroker = null, hostFactory, now } = {}) {
+export function createExtensionService({
+  stateDir, fetchImpl = null, capabilityBroker = null, hostFactory,
+  processHostFactory, vmHostFactory, memoryPackHostFactory, isTrustedVmExtension,
+  now, monitorIntervalMs, heartbeatTimeoutMs, maxHeartbeatMisses,
+  maxAutomaticRestarts, restartWindowMs, stableWindowMs
+} = {}) {
   if (!stateDir || typeof stateDir !== 'string') throw new Error('createExtensionService 需要 stateDir');
   const store = createExtensionStore({ stateDir, now });
-  const runtime = createExtensionRuntime({ store, fetchImpl, capabilityBroker, hostFactory, now });
+  const runtime = createExtensionRuntime({ store, fetchImpl, capabilityBroker, hostFactory,
+    processHostFactory, vmHostFactory, memoryPackHostFactory, isTrustedVmExtension, now,
+    monitorIntervalMs, heartbeatTimeoutMs, maxHeartbeatMisses, maxAutomaticRestarts, restartWindowMs, stableWindowMs });
 
   const handlers = {
     'ext.overview': () => runtime.overview(),
     'ext.list': () => ({ extensions: runtime.list() }),
     'ext.get': (p) => runtime.get({ id: p.id }),
     'ext.review': (p) => runtime.review({ sourceDir: p.sourceDir }),
+    'ext.rollback.review': (p) => runtime.reviewRollback({ id: p.id }),
     'ext.install': (p) => runtime.install({ sourceDir: p.sourceDir, approval: p.approval }),
     'ext.update': (p) => runtime.update({ sourceDir: p.sourceDir, approval: p.approval }),
+    'ext.rollback': (p) => runtime.rollback({ id: p.id, approval: p.approval }),
     'ext.uninstall': (p) => runtime.uninstall({ id: p.id, keepFiles: p.keepFiles === true }),
     'ext.enable': (p) => runtime.enable({ id: p.id }),
     'ext.disable': (p) => runtime.disable({ id: p.id }),
+    'ext.restart': (p) => runtime.restart({ id: p.id }),
     'ext.invoke': (p) => runtime.invoke({ id: p.id, capability: p.capability, input: p.input }),
     'ext.logs': (p) => runtime.logs({ id: p.id })
     ,'ext.memory-pack.overlay': (p) => runtime.updateMemoryPackOverlay({ id: p.id, patch: p.patch })
@@ -39,7 +49,7 @@ export function createExtensionService({ stateDir, fetchImpl = null, capabilityB
       return Promise.resolve().then(() => handler(params || {}));
     },
     close() {
-      runtime.close();
+      return runtime.close();
     }
   };
 }

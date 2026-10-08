@@ -8,10 +8,11 @@ import crypto from 'node:crypto';
 import { manifestFingerprint } from './manifest.js';
 import { PERMISSIONS, maxRisk, permissionRisk, requiresExplicitApproval, riskRank } from './types.js';
 
-export function reviewToken(fingerprint, permissionNames, riskLevel) {
+export function reviewToken(fingerprint, permissionNames, riskLevel, packageFingerprint = '') {
   return crypto
     .createHash('sha256')
-    .update('cetamesh-extension-review-v1:' + fingerprint + ':' + permissionNames.slice().sort().join(',') + ':' + riskLevel)
+    .update('cetamesh-extension-review-v2:' + fingerprint + ':' + String(packageFingerprint)
+      + ':' + permissionNames.slice().sort().join(',') + ':' + riskLevel)
     .digest('hex');
 }
 
@@ -30,7 +31,7 @@ export function isEnforced(name) {
   return ENFORCED_PERMISSIONS.includes(name);
 }
 
-export function buildReview(manifest) {
+export function buildReview(manifest, { packageFingerprint = '' } = {}) {
   const declared = Array.isArray(manifest.permissions) ? manifest.permissions : [];
   const permissions = declared.map((name) => ({
     name,
@@ -93,7 +94,8 @@ export function buildReview(manifest) {
     scope: { workspace: manifest.scope?.workspace ?? null, paths },
     source: manifest.source,
     fingerprint,
-    token: reviewToken(fingerprint, declared, riskLevel),
+    packageFingerprint,
+    token: reviewToken(fingerprint, declared, riskLevel, packageFingerprint),
     blockers,
     installable: blockers.length === 0
   };

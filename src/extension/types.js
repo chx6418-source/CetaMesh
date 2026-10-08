@@ -65,7 +65,7 @@ export function requiresExplicitApproval(name) {
   return riskRank(permissionRisk(name)) >= riskRank('high');
 }
 
-export const EXTENSION_STATUSES = Object.freeze(['installed', 'enabled', 'disabled']);
+export const EXTENSION_STATUSES = Object.freeze(['installed', 'enabled', 'disabled', 'disabled_due_to_crash']);
 
 export const EXTENSION_LIMITS = Object.freeze({
   idChars: 64,

@@ -148,6 +148,7 @@ enum Area {
     Memory,
     Task,
     Workshop,
+    Plugins,
     Mesh,
     Channel,
     Workspace,
@@ -211,6 +212,87 @@ enum Operation {
     MeshCall,
     ChannelCall,
     WorkspaceCall,
+    PluginsOverview,
+    PluginPackageReview,
+    PluginPackageInstall,
+    PluginPackageUpdate,
+    PluginRestart,
+    PluginDisable,
+    PluginRemove,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PluginAction {
+    Restart,
+    Disable,
+    Remove,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PluginPackageAction {
+    Install,
+    Update,
+}
+
+fn plugin_package_review_request(source_dir: &str) -> (&'static str, Value) {
+    ("ext.review", json!({ "sourceDir": source_dir }))
+}
+
+fn plugin_package_switch_request(
+    action: PluginPackageAction,
+    source_dir: &str,
+    review_token: &str,
+    owner_approved: bool,
+) -> (&'static str, Value) {
+    let method = match action {
+        PluginPackageAction::Install => "ext.install",
+        PluginPackageAction::Update => "ext.update",
+    };
+    let mut params = json!({ "sourceDir": source_dir });
+    if owner_approved {
+        params["approval"] = json!({ "approved": true, "token": review_token });
+    }
+    (method, params)
+}
+
+fn plugin_review_requires_owner_approval(review: &Value, is_update: bool) -> bool {
+    review
+        .pointer("/review/requiresExplicitApproval")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || (is_update
+            && review
+                .pointer("/permissionDelta/added")
+                .and_then(Value::as_array)
+                .is_some_and(|added| !added.is_empty()))
+}
+
+fn plugin_status_labels(status: &str, runtime_state: &str, needs_review: bool) -> Vec<&'static str> {
+    let mut labels = Vec::new();
+    if status == "enabled" { labels.push("Enabled"); }
+    if status == "disabled" || status == "installed" { labels.push("Disabled"); }
+    if matches!(runtime_state, "starting" | "healthy" | "running") { labels.push("Running"); }
+    if runtime_state == "unresponsive" { labels.push("Unresponsive"); }
+    if runtime_state == "crashed" || status == "disabled_due_to_crash" { labels.push("Crashed"); }
+    if needs_review { labels.push("Needs Review"); }
+    labels
+}
+
+fn plugin_action_request(action: PluginAction, id: &str) -> (&'static str, Value) {
+    let method = match action {
+        PluginAction::Restart => "ext.restart",
+        PluginAction::Disable => "ext.disable",
+        PluginAction::Remove => "ext.uninstall",
+    };
+    (method, json!({ "id": id }))
+}
+
+fn plugin_action_operation(action: PluginAction) -> Operation {
+    match action {
+        PluginAction::Restart => Operation::PluginRestart,
+        PluginAction::Disable => Operation::PluginDisable,
+        PluginAction::Remove => Operation::PluginRemove,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -663,6 +745,13 @@ pub struct NativeUi {
 
     core_online: Option<bool>,
     core_summary: String,
+    plugins_data: Option<Value>,
+    plugins_loaded: bool,
+    plugins_source_path: String,
+    plugins_review: Option<Value>,
+    plugins_review_source: Option<String>,
+    plugins_pending_review_source: Option<String>,
+    plugins_owner_approved: bool,
 
     roles: Vec<String>,
     current_role: Option<String>,
@@ -1107,6 +1196,13 @@ ApiCall::Family { method, params } => api.request(method, params),
             core_online: None,
             core_summary: "尚未连接".to_owned(),
 
+            plugins_data: None,
+            plugins_loaded: false,
+            plugins_source_path: String::new(),
+            plugins_review: None,
+            plugins_review_source: None,
+            plugins_pending_review_source: None,
+            plugins_owner_approved: false,
             roles: Vec::new(),
             current_role: None,
             selected_role: String::new(),
@@ -1418,6 +1514,38 @@ ApiCall::Family { method, params } => api.request(method, params),
             self.feedback.insert(event.area, event.result.clone());
 
             match (event.operation, event.result.as_ref()) {
+                (Operation::PluginsOverview, Ok(value)) => {
+                    self.plugins_data = Some(value.clone());
+                    self.plugins_loaded = true;
+                }
+                (Operation::PluginsOverview, Err(_)) => self.plugins_loaded = true,
+                (Operation::PluginPackageReview, Ok(value)) => {
+                    self.plugins_review = Some(value.clone());
+                    self.plugins_review_source = self.plugins_pending_review_source.take();
+                    self.plugins_owner_approved = false;
+                }
+                (Operation::PluginPackageReview, Err(_)) => {
+                    self.plugins_review = None;
+                    self.plugins_review_source = None;
+                    self.plugins_pending_review_source = None;
+                    self.plugins_owner_approved = false;
+                }
+                (Operation::PluginPackageInstall | Operation::PluginPackageUpdate, Ok(_)) => {
+                    self.plugins_review = None;
+                    self.plugins_review_source = None;
+                    self.plugins_pending_review_source = None;
+                    self.plugins_owner_approved = false;
+                    self.issue_family(Area::Plugins, Operation::PluginsOverview, "ext.overview", json!({}));
+                }
+                (Operation::PluginPackageInstall | Operation::PluginPackageUpdate, Err(_)) => {
+                    self.plugins_review = None;
+                    self.plugins_review_source = None;
+                    self.plugins_pending_review_source = None;
+                    self.plugins_owner_approved = false;
+                }
+                (Operation::PluginRestart | Operation::PluginDisable | Operation::PluginRemove, Ok(_)) => {
+                    self.issue_family(Area::Plugins, Operation::PluginsOverview, "ext.overview", json!({}));
+                }
                 // ── 产品 Chat（阶段 03）──
                 (Operation::ChatSessionsLoad, Ok(value)) => match parse_sessions(value) {
                     Ok(sessions) => {
@@ -3470,6 +3598,150 @@ ApiCall::Family { method, params } => api.request(method, params),
         }
     }
 
+    fn show_plugins_page(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Plugins");
+        ui.label("Package source directory");
+        ui.horizontal(|ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.plugins_source_path)
+                .desired_width(420.0)
+                .hint_text("Path to an Extension package directory"));
+            if ui.add_enabled(
+                !self.plugins_source_path.trim().is_empty() && !self.pending.contains(&Area::Plugins),
+                egui::Button::new("Review Package"),
+            ).clicked() {
+                let source_dir = self.plugins_source_path.trim().to_owned();
+                self.plugins_review = None;
+                self.plugins_review_source = None;
+                self.plugins_owner_approved = false;
+                self.plugins_pending_review_source = Some(source_dir.clone());
+                let (method, params) = plugin_package_review_request(&source_dir);
+                self.issue_family(Area::Plugins, Operation::PluginPackageReview, method, params);
+            }
+        });
+        if self.plugins_review_source.as_deref().is_some_and(|source| source != self.plugins_source_path.trim()) {
+            self.plugins_review = None;
+            self.plugins_review_source = None;
+            self.plugins_owner_approved = false;
+        }
+        if let Some(review_result) = self.plugins_review.clone() {
+            let reviewed_source = self.plugins_review_source.clone().unwrap_or_default();
+            if !reviewed_source.is_empty() {
+                let review = review_result.get("review").unwrap_or(&Value::Null);
+                let id = review.get("id").and_then(Value::as_str).unwrap_or("");
+                let name = review.get("name").and_then(Value::as_str).unwrap_or(id);
+                let version = review.get("version").and_then(Value::as_str).unwrap_or("?");
+                let risk = review.get("riskLevel").and_then(Value::as_str).unwrap_or("unknown");
+                let extensions = self.plugins_data.as_ref()
+                    .and_then(|data| data.get("extensions"))
+                    .and_then(Value::as_array);
+                let is_update = extensions.is_some_and(|items| items.iter().any(|item| {
+                    item.get("id").and_then(Value::as_str) == Some(id)
+                }));
+                let requires_approval = plugin_review_requires_owner_approval(&review_result, is_update);
+                ui.group(|ui| {
+                    ui.strong(format!("Reviewed package: {name}  v{version}"));
+                    ui.label(format!("Risk: {risk}"));
+                    if let Some(permissions) = review.get("permissions").and_then(Value::as_array) {
+                        ui.label("Declared permissions:");
+                        for permission in permissions {
+                            let permission_name = permission.get("name").and_then(Value::as_str).unwrap_or("unknown");
+                            let summary = permission.get("summary").and_then(Value::as_str).unwrap_or("");
+                            ui.label(format!("• {permission_name} — {summary}"));
+                        }
+                    }
+                    if let Some(delta) = review_result.get("permissionDelta") {
+                        for (key, label) in [("added", "Added permissions"), ("removed", "Removed permissions")] {
+                            if let Some(items) = delta.get(key).and_then(Value::as_array).filter(|items| !items.is_empty()) {
+                                let names = items.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ");
+                                ui.label(format!("{label}: {names}"));
+                            }
+                        }
+                    }
+                    if let Some(blockers) = review.get("blockers").and_then(Value::as_array) {
+                        for blocker in blockers {
+                            ui.colored_label(native_palette().error,
+                                blocker.get("message").and_then(Value::as_str).unwrap_or("Package review blocked"));
+                        }
+                    }
+                    if let Some(findings) = review_result.pointer("/scan/findings").and_then(Value::as_array) {
+                        for finding in findings {
+                            ui.colored_label(native_palette().error,
+                                finding.get("reason").and_then(Value::as_str).unwrap_or("Source scan finding"));
+                        }
+                    }
+                    if requires_approval {
+                        ui.checkbox(&mut self.plugins_owner_approved,
+                            "I reviewed and approve this package and its requested permissions");
+                    }
+                    let installable = review.get("installable").and_then(Value::as_bool).unwrap_or(false)
+                        && review_result.pointer("/scan/ok").and_then(Value::as_bool).unwrap_or(false);
+                    let can_switch = self.plugins_loaded && installable
+                        && (!requires_approval || self.plugins_owner_approved)
+                        && !self.pending.contains(&Area::Plugins);
+                    let label = if is_update { "Update Extension" } else { "Install Extension" };
+                    if ui.add_enabled(can_switch, egui::Button::new(label)).clicked() {
+                        let token = review.get("token").and_then(Value::as_str).unwrap_or("");
+                        let action = if is_update { PluginPackageAction::Update } else { PluginPackageAction::Install };
+                        let (method, params) = plugin_package_switch_request(
+                            action, &reviewed_source, token, requires_approval && self.plugins_owner_approved,
+                        );
+                        let operation = if is_update { Operation::PluginPackageUpdate } else { Operation::PluginPackageInstall };
+                        self.issue_family(Area::Plugins, operation, method, params);
+                    }
+                });
+            }
+        }
+        if !self.plugins_loaded && !self.pending.contains(&Area::Plugins) {
+            self.issue_family(Area::Plugins, Operation::PluginsOverview, "ext.overview", json!({}));
+        }
+        if ui.button("Refresh").clicked() {
+            self.issue_family(Area::Plugins, Operation::PluginsOverview, "ext.overview", json!({}));
+        }
+        if let Some(Err(error)) = self.feedback.get(&Area::Plugins) {
+            ui.colored_label(native_palette().error, error);
+        }
+        if let Some(data) = self.plugins_data.clone() {
+            let extensions = data.get("extensions").and_then(Value::as_array).cloned().unwrap_or_default();
+            if extensions.is_empty() { ui.weak("No installed Extensions."); }
+            for extension in extensions {
+                let id = extension.get("id").and_then(Value::as_str).unwrap_or("");
+                let name = extension.get("name").and_then(Value::as_str).unwrap_or(id);
+                let version = extension.get("version").and_then(Value::as_str).unwrap_or("?");
+                let status = extension.get("status").and_then(Value::as_str).unwrap_or("disabled");
+                let runtime_state = extension.get("runtimeState").and_then(Value::as_str).unwrap_or("stopped");
+                let needs_review = extension.get("pendingReview").is_some_and(|value| !value.is_null());
+                ui.group(|ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.strong(format!("{name}  v{version}"));
+                        ui.weak(id);
+                        for label in plugin_status_labels(status, runtime_state, needs_review) {
+                            ui.label(label);
+                        }
+                    });
+                    let mut action = None;
+                    ui.horizontal(|ui| {
+                        if ui.button("Restart").clicked() { action = Some(PluginAction::Restart); }
+                        if ui.button("Disable").clicked() { action = Some(PluginAction::Disable); }
+                        if ui.button("Remove").clicked() { action = Some(PluginAction::Remove); }
+                    });
+                    if let Some(action) = action {
+                        let (method, params) = plugin_action_request(action, id);
+                        self.issue_family(Area::Plugins, plugin_action_operation(action), method, params);
+                    }
+                });
+            }
+            if let Some(reviews) = data.get("reviews").and_then(Value::as_array) {
+                for review in reviews {
+                    let name = review.get("name").and_then(Value::as_str).unwrap_or("Extension");
+                    let version = review.get("version").and_then(Value::as_str).unwrap_or("?");
+                    ui.label(format!("Needs Review: {name}  v{version}"));
+                }
+            }
+        } else if !self.pending.contains(&Area::Plugins) {
+            ui.weak("Extension status is not available.");
+        }
+    }
+
     fn show_page(&mut self, ui: &mut egui::Ui) {
         match self.navigation.page {
             AppPage::Chat => self.show_chat_page(ui),
@@ -3482,8 +3754,7 @@ ApiCall::Family { method, params } => api.request(method, params),
                 self.show_legacy_tab_page(ui);
             }
             AppPage::Plugins => {
-                ui.heading("Plugins");
-                ui.label("插件管理页面尚未接入。已注册的能力继续由 Core 管理。");
+                self.show_plugins_page(ui);
             }
         }
     }
@@ -6289,7 +6560,12 @@ mod theme_tests {
 
 #[cfg(test)]
 mod interaction_tests {
-    use super::{AppPage, page_for_shortcut_slot, should_send_on_enter};
+    use super::{
+        AppPage, PluginAction, PluginPackageAction, page_for_shortcut_slot, plugin_action_request,
+        plugin_package_review_request, plugin_package_switch_request, plugin_review_requires_owner_approval,
+        plugin_status_labels, should_send_on_enter,
+    };
+    use serde_json::json;
 
     #[test]
     fn navigation_shortcuts_cover_the_first_seven_product_pages() {
@@ -6311,5 +6587,48 @@ mod interaction_tests {
         assert!(!should_send_on_enter(true, true, false, true), "IME composition must not send");
         assert!(!should_send_on_enter(false, true, false, false), "composer must own focus");
         assert!(!should_send_on_enter(true, false, false, false), "no Enter, no send");
+    }
+
+    #[test]
+    fn plugin_page_maps_runtime_states_and_review_status() {
+        assert_eq!(plugin_status_labels("enabled", "healthy", false), vec!["Enabled", "Running"]);
+        assert_eq!(plugin_status_labels("disabled", "stopped", false), vec!["Disabled"]);
+        assert_eq!(plugin_status_labels("enabled", "running", false), vec!["Enabled", "Running"]);
+        assert_eq!(plugin_status_labels("enabled", "unresponsive", false), vec!["Enabled", "Unresponsive"]);
+        assert_eq!(plugin_status_labels("disabled_due_to_crash", "crashed", true), vec!["Crashed", "Needs Review"]);
+        assert_eq!(plugin_status_labels("installed", "stopped", true), vec!["Disabled", "Needs Review"]);
+    }
+
+    #[test]
+    fn plugin_controls_route_restart_disable_and_remove_to_core() {
+        assert_eq!(plugin_action_request(PluginAction::Restart, "ext.one"), ("ext.restart", json!({"id":"ext.one"})));
+        assert_eq!(plugin_action_request(PluginAction::Disable, "ext.one"), ("ext.disable", json!({"id":"ext.one"})));
+        assert_eq!(plugin_action_request(PluginAction::Remove, "ext.one"), ("ext.uninstall", json!({"id":"ext.one"})));
+    }
+
+    #[test]
+    fn plugin_package_review_and_switch_requests_bind_source_and_review_token() {
+        assert_eq!(plugin_package_review_request("C:/packages/demo"),
+            ("ext.review", json!({"sourceDir":"C:/packages/demo"})));
+        assert_eq!(plugin_package_switch_request(PluginPackageAction::Install, "C:/packages/demo", "review-token", false),
+            ("ext.install", json!({"sourceDir":"C:/packages/demo"})));
+        assert_eq!(plugin_package_switch_request(PluginPackageAction::Update, "C:/packages/demo", "review-token", true),
+            ("ext.update", json!({"sourceDir":"C:/packages/demo", "approval":{"approved":true,"token":"review-token"}})));
+    }
+
+    #[test]
+    fn plugin_updates_require_owner_approval_when_permissions_are_added() {
+        let review = json!({"review":{"requiresExplicitApproval":false},"permissionDelta":{"added":["network"]}});
+        assert!(plugin_review_requires_owner_approval(&review, true));
+        assert!(!plugin_review_requires_owner_approval(&review, false));
+        assert!(plugin_review_requires_owner_approval(&json!({"review":{"requiresExplicitApproval":true}}), false));
+    }
+
+    #[test]
+    fn plugins_page_exposes_package_review_install_and_update_controls() {
+        let source = include_str!("native_ui.rs");
+        for label in [concat!("Review", " Package"), concat!("Install", " Extension"), concat!("Update", " Extension")] {
+            assert!(source.contains(&format!("\"{label}\"")), "missing Plugins action: {label}");
+        }
     }
 }

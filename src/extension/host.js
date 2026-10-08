@@ -13,6 +13,7 @@
 // - 安装期还有 scan.js 的静态预检做纵深防御。
 
 import vm from 'node:vm';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { EXTENSION_LIMITS, extensionError, hostAllowed } from './types.js';
 
 const MAX_LOG_ENTRIES = 200;
@@ -29,6 +30,7 @@ export function createVmExtensionHost({
   if (!manifest || typeof manifest !== 'object') throw new Error('createExtensionHost 需要 manifest');
   const granted = new Set(manifest.permissions || []);
   const logs = [];
+  const invocationContext = new AsyncLocalStorage();
 
   const record = (level, args) => {
     const line = { at: Date.now(), level, message: args.map((a) => (typeof a === 'string' ? a : safeStringify(a))).join(' ') };
@@ -60,7 +62,8 @@ export function createVmExtensionHost({
     if (typeof capabilityExecutor !== 'function') {
       throw extensionError('CAPABILITY_BROKER_REQUIRED', 'Extension network requires Capability Broker');
     }
-    const response = await capabilityExecutor('network', { url: parsed.toString(), init });
+    const response = await capabilityExecutor('network', { url: parsed.toString(), init },
+      { signal: invocationContext.getStore() });
     if (response && typeof response.body === 'string' && Number.isInteger(response.statusCode)) {
       return new Response(response.body, { status: response.statusCode });
     }
@@ -88,7 +91,7 @@ export function createVmExtensionHost({
   const invokeCapability = async (capability, input) => {
     if (!granted.has(capability)) throw extensionError('PERMISSION_DENIED', capability + ' not declared');
     if (typeof capabilityExecutor !== 'function') throw extensionError('CAPABILITY_BROKER_REQUIRED', 'Capability Broker unavailable');
-    return capabilityExecutor(capability, input);
+    return capabilityExecutor(capability, input, { signal: invocationContext.getStore() });
   };
   if (granted.has('memory.read') || granted.has('memory.write')) {
     sandbox.memory = {};
@@ -144,10 +147,14 @@ export function createVmExtensionHost({
     available() {
       return !loadError.code;
     },
-    async invoke(capabilityId, input) {
+    async invoke(capabilityId, input, { signal: outerSignal } = {}) {
       capabilityOrThrow(capabilityId);
       if (loadError.code) {
         throw extensionError(loadError.code, '扩展加载失败：' + loadError.message);
+      }
+      if (outerSignal?.aborted) {
+        throw outerSignal.reason?.code ? outerSignal.reason
+          : extensionError('INVOKE_CANCELLED', 'Extension invocation cancelled');
       }
       const handler = handlerTable[capabilityId];
       if (typeof handler !== 'function') {
@@ -161,24 +168,43 @@ export function createVmExtensionHost({
         fetch: sandbox.fetch
         ,memory: sandbox.memory, workspace: sandbox.workspace
       };
+      const controller = new AbortController();
+      let rejectAbort;
+      const aborted = new Promise((_, reject) => { rejectAbort = reject; });
+      const rejectForAbort = () => {
+        const reason = controller.signal.reason;
+        rejectAbort(reason?.code ? reason : extensionError('INVOKE_CANCELLED', 'Extension invocation cancelled'));
+      };
+      controller.signal.addEventListener('abort', rejectForAbort, { once: true });
+      const abortFromOuter = () => controller.abort(outerSignal.reason
+        || extensionError('INVOKE_CANCELLED', 'Extension invocation cancelled'));
+      outerSignal?.addEventListener('abort', abortFromOuter, { once: true });
       let timer = null;
       const timeout = new Promise((_, reject) => {
-        timer = setTimeout(() => reject(extensionError('INVOKE_TIMEOUT', '扩展调用超时（' + timeoutMs + 'ms）')), timeoutMs);
+        timer = setTimeout(() => {
+          const error = extensionError('INVOKE_TIMEOUT', '扩展调用超时（' + timeoutMs + 'ms）');
+          controller.abort(error);
+          reject(error);
+        }, timeoutMs);
         if (timer.unref) timer.unref();
       });
+      if (outerSignal?.aborted) abortFromOuter();
       try {
         const started = Date.now();
+        const execution = invocationContext.run(controller.signal,
+          () => Promise.resolve().then(() => handler(input, context)));
         const result = await Promise.race([
-          Promise.resolve().then(() => handler(input, context)),
-          timeout
+          execution, timeout, aborted
         ]);
         return { capability: capabilityId, result: result === undefined ? null : result, elapsedMs: Date.now() - started };
       } finally {
         if (timer) clearTimeout(timer);
+        outerSignal?.removeEventListener('abort', abortFromOuter);
+        controller.signal.removeEventListener('abort', rejectForAbort);
       }
     }
   };
 }
 
-// ExtensionHost factory contract; process isolation can replace this implementation later.
+// Trusted builtin/dev Extensions may use the VM host; production third-party Extensions use ProcessExtensionHost.
 export const createExtensionHost = createVmExtensionHost;

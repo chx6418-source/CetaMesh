@@ -25,6 +25,9 @@ import { isLegacyBridgeTestOptedIn } from './environment-policy.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SCRIPTS = path.join(ROOT, 'scripts');
+const CORE_DIST_DIR = process.env.WHALEBRIDGE_DIST_DIR
+  ? path.resolve(process.env.WHALEBRIDGE_DIST_DIR)
+  : path.join(ROOT, 'dist', 'core');
 
 export const CATEGORIES = ['core', 'architecture', 'security', 'runtime', 'integration', 'desktop', 'release', 'environment'];
 
@@ -117,6 +120,7 @@ const REGISTRY = {
   'test-installer-package.mjs': { category: 'release' },
   'test-app-icon.mjs': { category: 'release' },
   'test-core-dist.mjs': { category: 'release', requires: ['core-dist'], timeoutMs: 600_000 },
+  'test-process-extension-sea.mjs': { category: 'release', requires: ['core-dist'], timeoutMs: 600_000 },
   'test-release-candidate.mjs': { category: 'release', requires: ['release-dist'], timeoutMs: 900_000 },
 
   // cargo 套件不是 test-*.mjs，作为虚拟 suite 登记（见 EXTRA_SUITES）。
@@ -169,7 +173,7 @@ async function probeAvailability() {
   const exists = (relative) => fs.existsSync(path.join(ROOT, relative));
   availabilityCache = {
     'shell-debug': exists(path.join('desktop-shell', 'target', 'debug', 'whalebridge-desktop.exe')),
-    'core-dist': exists(path.join('dist', 'core', 'WhaleBridgeCore.exe')),
+    'core-dist': fs.existsSync(path.join(CORE_DIST_DIR, 'WhaleBridgeCore.exe')),
     'release-dist': exists(path.join('dist', 'app', 'WhaleBridge.exe')),
     network: process.env.WHALEBRIDGE_TEST_NETWORK === '1',
     gateway: await probeTcp(gatewayPort),
