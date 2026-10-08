@@ -1,6 +1,6 @@
 # CetaMesh Desktop v1 — Known Limitations (Release Candidate)
 
-> Desktop v1 is currently a **RELEASE CANDIDATE** (`1.0.0-rc.1`), not yet COMPLETE. This file lists
+> Desktop v1 is currently a **RELEASE CANDIDATE** (`1.0.0-rc.2`), not yet COMPLETE. This file lists
 > what is verified, what is not, and what must happen before a final `v1.0.0` claim.
 
 ## Not verified yet (release gates)

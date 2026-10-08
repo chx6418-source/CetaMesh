@@ -1,6 +1,6 @@
 # CetaMesh Desktop
 
-**产品**：CetaMesh Desktop v1 Release Candidate（`1.0.0-rc.1`）· **平台**：Windows 10/11 x64
+**产品**：CetaMesh Desktop v1 Release Candidate（`1.0.0-rc.2`）· **平台**：Windows 10/11 x64
 
 CetaMesh Desktop 是 **local-first 的智能工作与协作运行时**：一个原生 Windows 应用，
 把聊天、记忆、任务、能力、Agent、通道与设备网格放在同一个本地事实源上。
@@ -21,7 +21,7 @@ CetaMesh Desktop 是 **local-first 的智能工作与协作运行时**：一个�
 安装包 `WhaleBridge-Setup-x64.exe` 自带 Core（Node SEA）与只读资源，安装后不依赖源码、
 `npm start`、开发终端或手动启动 Core。
 
-- 安装：`dist/app-1.0.0-rc.1/WhaleBridge-Setup-x64.exe`（默认 `%LOCALAPPDATA%\Programs\WhaleBridge`，无需管理员权限）
+- 安装：`dist/app-1.0.0-rc.2/WhaleBridge-Setup-x64.exe`（默认 `%LOCALAPPDATA%\Programs\WhaleBridge`，无需管理员权限）
 - 数据：`%LOCALAPPDATA%\WhaleBridge`（`config.json` / `settings.json` / `state`）；卸载默认保留数据，只有 `--remove-data` 才删除，用户 Workspace 目录永不被卸载删除
 - 架构与红线：[docs/desktop/ARCHITECTURE.md](docs/desktop/ARCHITECTURE.md)
 - 构建与发布：[docs/desktop/BUILD_AND_RELEASE.md](docs/desktop/BUILD_AND_RELEASE.md)
