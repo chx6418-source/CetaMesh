@@ -103,6 +103,73 @@ export function signManifest(manifest, privateKeyPem) {
   return crypto.sign(null, data, crypto.createPrivateKey(privateKeyPem)).toString('base64');
 }
 
+// ── 统一 Release Manifest（分发运行时 v1）：平台中立，与既有单平台扁平字段兼容 ──
+//
+// 统一格式（Desktop / Mobile 共用同一份清单，避免两套互不兼容格式）：
+//   { schemaVersion, product, channel, version, publishedAt, sourceCommit,
+//     notes, artifacts: { "windows-x64": {filename,url,sha256,bytes}, "android": {...} }, signature }
+// 兼容：仅有扁平 `downloadUrl` + `sha256`（无 artifacts）的旧清单照旧通过校验；
+//       两者同时存在时全部校验，平台包选择由 selectArtifact(manifest, platform) 完成。
+const MAX_ARTIFACT_BYTES = 8 * 1024 * 1024 * 1024;
+const PLATFORM_KEY_RE = /^[a-z0-9][a-z0-9._-]{0,39}$/;
+
+function artifactEntry(value, label) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw updateError('MANIFEST_INVALID', label + '必须是对象');
+  }
+  const filename = text(value.filename, label + '.filename', 200, { required: true });
+  const url = text(value.url, label + '.url', 600, { required: true });
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw updateError('MANIFEST_INVALID', '非法下载地址：' + url.slice(0, 120));
+  }
+  if (parsed.protocol !== 'https:') {
+    throw updateError('MANIFEST_INSECURE_URL', label + ' 下载地址必须是 https');
+  }
+  const sha256 = text(value.sha256, label + '.sha256', 128, { required: true });
+  if (!/^[a-f0-9]{64}$/i.test(sha256)) {
+    throw updateError('MANIFEST_INVALID', label + '.sha256 必须是 64 位十六进制');
+  }
+  const bytes = value.bytes;
+  if (!Number.isInteger(bytes) || bytes <= 0 || bytes > MAX_ARTIFACT_BYTES) {
+    throw updateError('MANIFEST_INVALID', label + '.bytes 必须是合理的正整数');
+  }
+  return { filename, url, sha256: sha256.toLowerCase(), bytes };
+}
+
+function artifactSet(rawArtifacts) {
+  if (rawArtifacts === undefined || rawArtifacts === null) return null;
+  if (typeof rawArtifacts !== 'object' || Array.isArray(rawArtifacts)) {
+    throw updateError('MANIFEST_INVALID', 'artifacts 必须是平台到安装包的映射对象');
+  }
+  const keys = Object.keys(rawArtifacts);
+  if (!keys.length) throw updateError('MANIFEST_INVALID', 'artifacts 不能为空');
+  const out = {};
+  for (const key of keys) {
+    if (!PLATFORM_KEY_RE.test(key)) throw updateError('MANIFEST_INVALID', '非法平台键：' + key);
+    out[key] = artifactEntry(rawArtifacts[key], 'artifacts.' + key);
+  }
+  return out;
+}
+
+/**
+ * 选出本平台安装包：优先 artifacts[platform]；否则回落到旧格式的扁平 downloadUrl+sha256。
+ * 返回 null 表示清单里没有本平台可用的安装包（调用方应视为「该源不可用」，而不是「无更新」）。
+ */
+export function selectArtifact(manifest, platform) {
+  const key = String(platform || '').trim();
+  const entry = key && manifest && manifest.artifacts ? manifest.artifacts[key] : null;
+  if (entry) {
+    return { platform: key, filename: entry.filename, url: entry.url, sha256: entry.sha256, bytes: entry.bytes };
+  }
+  if (manifest && manifest.downloadUrl && manifest.sha256) {
+    return { platform: 'legacy-flat', filename: '', url: manifest.downloadUrl, sha256: manifest.sha256, bytes: null };
+  }
+  return null;
+}
+
 /** 纯校验：返回 { ok, issues, manifest }，不抛错。 */
 export function validateManifest(raw) {
   try {
@@ -120,19 +187,27 @@ export function validateManifest(raw) {
     if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version)) {
       throw updateError('MANIFEST_INVALID', '非法版本号：' + version);
     }
-    const downloadUrl = text(raw.downloadUrl, 'downloadUrl', 600, { required: true });
-    let parsed;
-    try {
-      parsed = new URL(downloadUrl);
-    } catch {
-      throw updateError('MANIFEST_INVALID', '非法下载地址：' + downloadUrl.slice(0, 120));
-    }
-    if (parsed.protocol !== 'https:') {
-      throw updateError('MANIFEST_INSECURE_URL', '下载地址必须是 https');
-    }
-    const sha256 = text(raw.sha256, 'sha256', 128, { required: true });
-    if (!/^[a-f0-9]{64}$/i.test(sha256)) {
-      throw updateError('MANIFEST_INVALID', 'sha256 必须是 64 位十六进制');
+    const artifacts = artifactSet(raw.artifacts);
+    const flatPresent = raw.downloadUrl !== undefined || raw.sha256 !== undefined;
+    let downloadUrl = '';
+    let sha256 = '';
+    if (!artifacts || flatPresent) {
+      // 旧格式（无 artifacts）必须带扁平字段；统一格式若同时保留扁平字段也必须完整合法。
+      downloadUrl = text(raw.downloadUrl, 'downloadUrl', 600, { required: true });
+      let parsed;
+      try {
+        parsed = new URL(downloadUrl);
+      } catch {
+        throw updateError('MANIFEST_INVALID', '非法下载地址：' + downloadUrl.slice(0, 120));
+      }
+      if (parsed.protocol !== 'https:') {
+        throw updateError('MANIFEST_INSECURE_URL', '下载地址必须是 https');
+      }
+      sha256 = text(raw.sha256, 'sha256', 128, { required: true });
+      if (!/^[a-f0-9]{64}$/i.test(sha256)) {
+        throw updateError('MANIFEST_INVALID', 'sha256 必须是 64 位十六进制');
+      }
+      sha256 = sha256.toLowerCase();
     }
     const signature = text(raw.signature, 'signature', 400, { required: true });
     const notes = Array.isArray(raw.notes) ? raw.notes.map((n) => String(n)).slice(0, 100) : [];
@@ -141,12 +216,16 @@ export function validateManifest(raw) {
       issues: [],
       manifest: {
         schemaVersion: UPDATE_MANIFEST_VERSION,
+        product: text(raw.product, 'product', 40) || null,
         channel,
         version,
         releasedAt: text(raw.releasedAt, 'releasedAt', 40) || null,
+        publishedAt: text(raw.publishedAt, 'publishedAt', 40) || null,
+        sourceCommit: text(raw.sourceCommit, 'sourceCommit', 64) || null,
         notes,
+        artifacts,
         downloadUrl,
-        sha256: sha256.toLowerCase(),
+        sha256,
         signature,
         minVersion: text(raw.minVersion, 'minVersion', 40) || null
       }
