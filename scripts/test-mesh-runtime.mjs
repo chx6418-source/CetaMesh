@@ -233,7 +233,9 @@ try {
   equal('零对端时 Core 仍 ready', lonelyStatus.coreReady, true);
   equal('Core readiness 不依赖任何东西', lonelyStatus.coreReadinessDependsOn, []);
   equal('零对端时 peerCount 为 0', lonelyStatus.peerCount, 0);
-  check('真实跨设备传输标为未实现', lonelyStatus.deferredTransports.length === 3 && lonelyStatus.supportedTransports.length === 1);
+  // 统一配对 v1.1 起：tcp（局域网 TLS 配对通道）已实现并有真实 socket 验收
+  // （见 scripts/test-mesh-pairing-interop.mjs）；pipe/relay 仍未实现。
+  check('已实现传输 = loopback + tcp；未实现 = pipe/relay', lonelyStatus.supportedTransports.join(',') === 'loopback,tcp' && lonelyStatus.deferredTransports.join(',') === 'pipe,relay');
 
   const registry = createChannelRegistry({ now });
   const independence = registry.independence();

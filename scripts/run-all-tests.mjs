@@ -87,6 +87,7 @@ const REGISTRY = {
   'test-workspace-reconciliation.mjs': { category: 'runtime' },
   'test-extension-runtime.mjs': { category: 'runtime' },
   'test-mesh-runtime.mjs': { category: 'runtime' },
+  'test-mesh-pairing-interop.mjs': { category: 'runtime', note: '统一配对 v1.1：golden fixtures + 真实局域网 TLS/HTTP 互操作（Node fixture 模拟 Mobile）' },
   'test-card.mjs': { category: 'runtime' },
   'test-stickers.mjs': { category: 'runtime' },
   'test-forward.mjs': { category: 'runtime' },

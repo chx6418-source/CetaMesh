@@ -1,0 +1,18 @@
+{
+  "description": "Mobile → Desktop 的合法 confirm（v1.1 transcript 的固定签名向量）。",
+  "now": "2026-10-08T12:00:00.000Z",
+  "expect": "accept",
+  "envelope": {
+    "protocol": "cetamesh",
+    "version": 1,
+    "id": "mobile-event-0002",
+    "type": "pairing.confirm",
+    "timestamp": "2026-10-08T12:00:00.000Z",
+    "payload": {
+      "invitationId": "inv_7f3a91c2d4e5b6a8",
+      "nonce": "1FjvZHds0sO8Ze9HXRskvXgwlq4NoqgnXXabHXtulMM=",
+      "deviceId": "a7f3c1e0-9b2d-4e6a-9f11-7c3d5e8b0a42",
+      "signature": "MEYCIQCwcVhebhqHqnigkuRFe7Apic/Mbhi1OyvmYX7mpwPBGwIhAJdrmLARh/Pk20YDe84dwP/6bxQFB2pn/urH0w9cfAIY"
+    }
+  }
+}

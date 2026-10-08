@@ -8,13 +8,38 @@
 
 import crypto from 'node:crypto';
 import { capabilityManifest, allCapabilities } from './capabilities.js';
-import { deriveNodeId, loadOrCreateIdentity, signPayload, verifyPayload } from './identity.js';
+import {
+  deriveNodeId,
+  loadOrCreateIdentity,
+  publicKeyPemToX963,
+  signPayload,
+  verifyPayload,
+  x963ToPublicKeyPem
+} from './identity.js';
 import {
   authorizeCapabilityRequest,
   createEnvelope,
   signingString,
   validateEnvelope
 } from './protocol.js';
+import {
+  PAIRING_LIMITS,
+  createInvitationEnvelope,
+  createMeshEnvelope,
+  normalizeEndpointOrigin,
+  normalizeIso,
+  normalizeNonce,
+  normalizePeerIdentity,
+  normalizeSignature,
+  normalizeTlsPin,
+  transcript,
+  validateCetameshEnvelope,
+  validateMeshEnvelope
+} from './pairing/protocol.js';
+import { createInvitationStore } from './pairing/invitations.js';
+import { createMeshPairingServer } from './pairing/server.js';
+import { requestPeerMesh } from './pairing/client.js';
+import { loadOrCreatePairingTls, pickLanAddress } from './pairing/tls.js';
 import { createTrustStore } from './trust.js';
 import {
   MESH_LIMITS,
@@ -42,6 +67,15 @@ export function createMeshNode({
   const approvals = new Map();   // requestId -> { state, ... }
   const invites = new Map();     // code -> { createdAt, expiresAt, usedAt }
   const audit = [];              // 最近的授权决策
+
+  // 统一配对 v1.1（QR + HTTPS + token + 签名 transcript + TLS pinning）。
+  const invitations = createInvitationStore({ stateDir, now });
+  let pairingTls = null;         // 配对 TLS 身份（懒加载，持久化于 state/mesh/pairing-tls.json）
+  let pairingServer = null;      // 配对服务器（首次会话时启动；重启后端口/证书稳定）
+  let pendingPairing = null;     // exchange 已完成、等待 confirm 的配对
+
+  // 配对完成后的默认授权（Trusted != Authorized：仅这两个低风险能力默认放行）。
+  const PAIRING_DEFAULT_GRANTS = Object.freeze(['mesh.presence', 'mesh.manifest']);
 
   function record(entry) {
     audit.push({ at: now(), ...entry });
@@ -186,9 +220,376 @@ export function createMeshNode({
     return { ok: false, stage: 'protocol', code: 'UNSUPPORTED_VIA_ENVELOPE', message: '该消息类型不通过 handleEnvelope 处理：' + raw.type };
   }
 
+  // ── 统一配对 v1.1：本机公开身份 / 邀请视图 / cetamesh 响应信封 ─────────────
+
+  function localPeerIdentity() {
+    return {
+      deviceId: identity.nodeId,
+      deviceName: identity.name,
+      publicKey: publicKeyPemToX963(identity.publicKeyPem),
+      keyAlgorithm: 'p256'
+    };
+  }
+
+  function invitationPublicView(session) {
+    return {
+      invitationId: session.invitationId,
+      endpoint: session.endpoint,
+      peer: { deviceId: identity.nodeId, publicKey: publicKeyPemToX963(identity.publicKeyPem) },
+      expiresAt: new Date(session.expiresAt).toISOString(),
+      tlsPin: session.tlsPin || null
+    };
+  }
+
+  function pairingEnvelope(type, payload, nowMs) {
+    return {
+      protocol: 'cetamesh',
+      version: 1,
+      id: 'desktop-pairing-' + crypto.randomBytes(8).toString('hex'),
+      type,
+      timestamp: new Date(nowMs).toISOString(),
+      payload
+    };
+  }
+
+  function parseCetameshRequest(rawText, { maxChars, expectedType }) {
+    let parsed;
+    try { parsed = JSON.parse(String(rawText || '')); } catch { throw meshError('REFUSED_REQUEST', '请求不是合法 JSON'); }
+    const envelope = validateCetameshEnvelope(parsed, { nowMs: now(), maxChars });
+    if (envelope.type !== expectedType) {
+      throw meshError('REFUSED_REQUEST', '该端点不接受消息类型：' + envelope.type);
+    }
+    return envelope;
+  }
+
+  /** POST /cetamesh/v1/pairing/exchange：校验 token/签名/时效并原子消费，返回 challenge。 */
+  function handlePairingExchange(rawText) {
+    const nowMs = now();
+    pruneNonces(nowMs);
+    const envelope = parseCetameshRequest(rawText, { maxChars: PAIRING_LIMITS.requestChars, expectedType: 'pairing.exchange' });
+    const session = invitations.raw();
+    if (!session) throw meshError('REFUSED_NOT_FOUND', '没有活动配对会话');
+    if (nowMs > session.expiresAt) throw meshError('REFUSED_EXPIRED', '配对邀请已过期');
+
+    const payload = envelope.payload;
+    if (String(payload.invitationId) !== session.invitationId) {
+      throw meshError('REFUSED_NOT_FOUND', '邀请编号不匹配');
+    }
+    const platform = String(payload.device && payload.device.platform || '');
+    if (!['android', 'ios'].includes(platform)) throw meshError('REFUSED_REQUEST', '非法 platform');
+    const createdAt = normalizeIso(payload.device && payload.device.createdAt);
+    const device = { ...normalizePeerIdentity(payload.device), platform, createdAt };
+    const peerPublicKeyPem = x963ToPublicKeyPem(device.publicKey);
+    const peerNodeId = deriveNodeId(peerPublicKeyPem);
+    if (peerNodeId === identity.nodeId) throw meshError('REFUSED_REQUEST', '不能与自身配对');
+    const nonce = normalizeNonce(payload.nonce);
+    const signature = normalizeSignature(payload.signature);
+
+    const view = invitationPublicView(session);
+    if (!verifyPayload(peerPublicKeyPem, transcript(view, device, nonce, 'exchange'), signature)) {
+      record({ direction: 'in', code: 'REFUSED_SIGNATURE', stage: 'pairing', from: device.deviceId });
+      throw meshError('REFUSED_SIGNATURE', 'exchange 签名校验失败');
+    }
+    invitations.consume({ invitationId: payload.invitationId, token: payload.token, peerDeviceId: device.deviceId });
+    if (nonces.has('pairing:' + nonce)) throw meshError('REFUSED_REPLAY', '重复的 exchange nonce');
+    nonces.set('pairing:' + nonce, nowMs);
+
+    pendingPairing = {
+      sessionId: session.sessionId,
+      invitationId: session.invitationId,
+      invitationView: view,
+      nonce,
+      expiresAt: session.expiresAt,
+      device: { ...device, publicKeyPem: peerPublicKeyPem, nodeId: peerNodeId },
+      endpoint: payload.endpoint ? normalizeEndpointOrigin(payload.endpoint) : null,
+      tlsPin: payload.tlsPin ? normalizeTlsPin(payload.tlsPin) : null,
+      finalized: false
+    };
+    record({ direction: 'in', code: 'PAIRING_EXCHANGE_OK', stage: 'pairing', from: device.deviceId });
+
+    const challengeSignature = signPayload(identity.privateKeyPem, transcript(view, device, nonce, 'challenge'));
+    return {
+      envelope: pairingEnvelope('pairing.challenge', {
+        invitationId: session.invitationId,
+        nonce,
+        peer: localPeerIdentity(),
+        expiresAt: view.expiresAt,
+        signature: challengeSignature
+      }, nowMs)
+    };
+  }
+
+  /** POST /cetamesh/v1/pairing/confirm：校验 confirm 签名；提交信任（幂等）后返回 accepted。 */
+  function handlePairingConfirm(rawText) {
+    const nowMs = now();
+    const envelope = parseCetameshRequest(rawText, { maxChars: PAIRING_LIMITS.requestChars, expectedType: 'pairing.confirm' });
+    const pending = pendingPairing;
+    if (!pending || !invitations.raw()) throw meshError('REFUSED_NOT_FOUND', '没有等待确认的配对');
+    if (nowMs > pending.expiresAt) throw meshError('REFUSED_EXPIRED', '配对邀请已过期');
+
+    const payload = envelope.payload;
+    if (String(payload.invitationId) !== pending.invitationId) throw meshError('REFUSED_NOT_FOUND', '邀请编号不匹配');
+    if (normalizeNonce(payload.nonce) !== pending.nonce) throw meshError('REFUSED_REQUEST', 'nonce 不匹配');
+    if (String(payload.deviceId) !== pending.device.deviceId) throw meshError('REFUSED_REQUEST', 'deviceId 不匹配');
+    const signature = normalizeSignature(payload.signature);
+    if (!verifyPayload(pending.device.publicKeyPem, transcript(pending.invitationView, pending.device, pending.nonce, 'confirm'), signature)) {
+      record({ direction: 'in', code: 'REFUSED_SIGNATURE', stage: 'pairing', from: pending.device.deviceId });
+      throw meshError('REFUSED_SIGNATURE', 'confirm 签名校验失败');
+    }
+
+    if (!pending.finalized) {
+      trust.addPending({
+        nodeId: pending.device.nodeId,
+        name: pending.device.deviceName,
+        role: 'mobile',
+        publicKeyPem: pending.device.publicKeyPem,
+        transport: 'tcp',
+        advertised: [],
+        peerDeviceId: pending.device.deviceId,
+        keyAlgorithm: pending.device.keyAlgorithm || 'p256',
+        endpoint: pending.endpoint,
+        tlsPin: pending.tlsPin,
+        now: nowMs
+      });
+      trust.setTrust(pending.device.nodeId, 'trusted');
+      trust.grant(pending.device.nodeId, [...PAIRING_DEFAULT_GRANTS]);
+      pending.finalized = true;
+      invitations.markFinalized({ peerNodeId: pending.device.nodeId, peerName: pending.device.deviceName });
+      record({ direction: 'local', code: 'PAIRED_TRUSTED', stage: 'pairing', from: pending.device.nodeId });
+    }
+
+    const acceptedSignature = signPayload(identity.privateKeyPem, transcript(pending.invitationView, pending.device, pending.nonce, 'accepted'));
+    return {
+      envelope: pairingEnvelope('pairing.accepted', {
+        invitationId: pending.invitationId,
+        nonce: pending.nonce,
+        peer: localPeerIdentity(),
+        expiresAt: pending.invitationView.expiresAt,
+        signature: acceptedSignature
+      }, nowMs)
+    };
+  }
+
+  /**
+   * 配对完成后的远程能力请求 —— Trusted != Authorized 的同一条链：
+   * 已声明 → 已显式授予（grants）→ 需要审批的能力必须有本地批准。
+   */
+  function meshCapabilityDecision(peer, capability, input, requestId, nowMs) {
+    const name = String(capability || '');
+    const declared = manifest().capabilities.find((item) => item.id === name);
+    if (!declared) return { decision: 'deny', code: 'CAPABILITY_NOT_DECLARED' };
+    const grants = Array.isArray(peer.grants) ? peer.grants : [];
+    if (!grants.includes(name)) return { decision: 'deny', code: 'CAPABILITY_NOT_AUTHORIZED' };
+    const state = approvalStateFor(requestId);
+    if (declared.requiresApproval === true) {
+      if (!state || state === 'pending') {
+        if (!approvals.has(requestId)) {
+          approvals.set(requestId, {
+            requestId,
+            from: peer.nodeId,
+            capability: name,
+            input: input === undefined ? null : input,
+            state: 'pending',
+            at: nowMs,
+            expiresAt: nowMs + MESH_LIMITS.approvalTimeoutMs
+          });
+          if (approvals.size > MESH_LIMITS.pendingApprovals) {
+            const oldest = [...approvals.values()].sort((a, b) => a.at - b.at)[0];
+            if (oldest) approvals.delete(oldest.requestId);
+          }
+        }
+        return { decision: 'pending_approval', code: 'APPROVAL_REQUIRED' };
+      }
+      if (state === 'rejected') return { decision: 'deny', code: 'APPROVAL_REJECTED' };
+      if (state === 'expired') return { decision: 'deny', code: 'APPROVAL_EXPIRED' };
+      if (state !== 'approved') return { decision: 'deny', code: 'APPROVAL_UNKNOWN' };
+    }
+    if (name === 'mesh.presence') {
+      return { decision: 'allow', code: 'ALLOWED', result: { presence: 'online', role: identity.role, nodeId: identity.nodeId } };
+    }
+    if (name === 'mesh.manifest') {
+      return { decision: 'allow', code: 'ALLOWED', result: manifest() };
+    }
+    if (typeof executeCapability === 'function') {
+      try {
+        const result = executeCapability({ capability: name, input, from: peer.nodeId });
+        return { decision: 'allow', code: 'ALLOWED', result: result === undefined ? null : result };
+      } catch (error) {
+        return { decision: 'allow', code: (error && error.code) || 'EXECUTION_FAILED' };
+      }
+    }
+    return { decision: 'allow', code: 'ALLOWED', result: { executed: false, reason: 'executor_not_wired' } };
+  }
+
+  /** POST /cetamesh/v1/mesh/envelope：配对后的 presence / manifest / capability 通道。 */
+  function handlePairingMesh(rawText) {
+    const nowMs = now();
+    pruneNonces(nowMs);
+    let parsed;
+    try { parsed = JSON.parse(String(rawText || '')); } catch { throw meshError('REFUSED_REQUEST', '请求不是合法 JSON'); }
+    const message = validateMeshEnvelope(parsed, { nowMs, toDeviceId: identity.nodeId });
+
+    const peer = trust.rawByPeerDeviceId(message.from);
+    if (!peer) throw meshError('PEER_UNKNOWN', '未配对的对端：' + String(message.from).slice(0, 40));
+    if (peer.trust !== 'trusted') throw meshError('PEER_UNTRUSTED', '对端未被信任（当前 ' + peer.trust + '）');
+    if (!verifyPayload(peer.publicKeyPem, message.signingString, message.signature)) {
+      throw meshError('REFUSED_SIGNATURE', 'Mesh 消息签名校验失败');
+    }
+    if (nonces.has('mesh:' + message.id) || nonces.has('mesh:' + message.nonce)) {
+      throw meshError('REFUSED_REPLAY', '重复的 Mesh 消息');
+    }
+    nonces.set('mesh:' + message.id, nowMs);
+    nonces.set('mesh:' + message.nonce, nowMs);
+
+    let responseType;
+    let responsePayload;
+    if (message.type === 'mesh.presence.ping') {
+      trust.touch(peer.nodeId);
+      responseType = 'mesh.presence.pong';
+      responsePayload = { presence: 'online', role: identity.role, nodeId: identity.nodeId, at: new Date(nowMs).toISOString() };
+      record({ direction: 'in', code: 'PRESENCE_OK', stage: 'trust', from: peer.nodeId });
+    } else if (message.type === 'mesh.manifest.request') {
+      trust.touch(peer.nodeId);
+      responseType = 'mesh.manifest.response';
+      responsePayload = manifest();
+      record({ direction: 'in', code: 'MANIFEST_OK', stage: 'trust', from: peer.nodeId });
+    } else if (message.type === 'mesh.capability.request') {
+      const capability = String(message.payload.capability || '');
+      const requestId = String(message.payload.requestId || message.id);
+      const decision = meshCapabilityDecision(peer, capability, message.payload.input, requestId, nowMs);
+      record({ direction: 'in', code: decision.code, stage: 'capability', from: peer.nodeId, capability, decision: decision.decision });
+      responseType = 'mesh.capability.response';
+      responsePayload = {
+        requestId,
+        decision: decision.decision,
+        code: decision.code,
+        ...(decision.result === undefined ? {} : { result: decision.result })
+      };
+    } else {
+      throw meshError('REFUSED_REQUEST', '该消息类型不接受入站请求：' + message.type);
+    }
+
+    return {
+      envelope: createMeshEnvelope({
+        type: responseType,
+        from: identity.nodeId,
+        to: message.from,
+        payload: responsePayload,
+        privateKeyPem: identity.privateKeyPem,
+        nowMs
+      })
+    };
+  }
+
+  // ── 公开操作：配对会话 / 反向能力请求 / 关闭 ────────────────────────────────
+
+  async function startPairingSession({ ttlMs } = {}) {
+    const lan = pickLanAddress();
+    if (!lan) throw meshError('PAIRING_NO_LAN', '未检测到局域网 IPv4 地址，无法生成手机可访问的配对邀请');
+    if (!pairingTls) pairingTls = await loadOrCreatePairingTls({ stateDir, name: identity.name, now });
+    if (!pairingServer) {
+      pairingServer = createMeshPairingServer({
+        tls: pairingTls,
+        handlers: { exchange: handlePairingExchange, confirm: handlePairingConfirm, mesh: handlePairingMesh },
+        log: (entry) => record({ direction: 'local', code: 'PAIRING_SERVER_' + entry.code, stage: 'pairing' })
+      });
+    }
+    const started = await pairingServer.start({ port: pairingTls.port, fallbackPort: 0 });
+    const endpoint = 'https://' + lan + ':' + started.port;
+    const session = invitations.createSession({
+      endpoint,
+      peer: localPeerIdentity(),
+      tlsPin: pairingTls.fingerprint,
+      ttlMs
+    });
+    const envelope = createInvitationEnvelope({
+      invitationId: session.invitationId,
+      endpoint,
+      token: session.token,
+      expiresAt: new Date(session.expiresAt).toISOString(),
+      peer: session.peer,
+      tlsPin: session.tlsPin
+    }, { nowMs: now() });
+    pendingPairing = null;
+    record({ direction: 'local', code: 'PAIRING_SESSION_STARTED', stage: 'pairing' });
+    return {
+      sessionId: session.sessionId,
+      invitation: JSON.stringify(envelope),
+      endpoint,
+      port: started.port,
+      portFallback: Boolean(started.fallback),
+      expiresAt: session.expiresAt,
+      tlsPin: pairingTls.fingerprint,
+      tlsReused: Boolean(pairingTls.reused),
+      deviceName: identity.name,
+      nodeId: identity.nodeId
+    };
+  }
+
+  function pairingStatus() {
+    return invitations.active();
+  }
+
+  function cancelPairingSession() {
+    const result = invitations.cancel();
+    pendingPairing = null;
+    if (result.cancelled) record({ direction: 'local', code: 'PAIRING_SESSION_CANCELLED', stage: 'pairing' });
+    return { cancelled: result.cancelled };
+  }
+
+  /** 向已配对对端发起真实远程能力请求（如 notification.send）：pin 外联 + Mesh 通道签名请求。 */
+  async function requestPeerCapability({ nodeId, capability, input = null } = {}) {    const peer = trust.raw(nodeId);
+    if (!peer) throw meshError('PEER_NOT_FOUND', '对端不存在：' + String(nodeId));
+    if (peer.trust !== 'trusted') throw meshError('PEER_UNTRUSTED', '对端未被信任（当前 ' + peer.trust + '）');
+    const name = String(capability || '').trim();
+    if (!name || name.length > 64) throw meshError('INVALID_PARAMS', 'capability 非法');
+    if (Array.isArray(peer.advertised) && peer.advertised.length && !peer.advertised.includes(name)) {
+      throw meshError('CAPABILITY_NOT_ADVERTISED', '对端未声明该能力：' + name);
+    }
+    const response = await requestPeerMesh({
+      peer,
+      identity,
+      privateKeyPem: identity.privateKeyPem,
+      type: 'mesh.capability.request',
+      payload: { capability: name, input, requestId: 'req_' + crypto.randomBytes(6).toString('hex') },
+      expectType: 'mesh.capability.response'
+    });
+    record({ direction: 'out', code: 'REMOTE_CAPABILITY_' + String(response.payload.decision || 'unknown').toUpperCase(), stage: 'capability', from: peer.nodeId, capability: name });
+    return { nodeId: peer.nodeId, response: response.payload };
+  }
+
+  async function close() {
+    if (pairingServer) await pairingServer.stop();
+  }
+
+  /** 读取已配对对端的能力清单（pin 外联，对端需提供 endpoint+tlsPin）。 */
+  async function requestPeerManifest({ nodeId } = {}) {
+    const peer = trust.raw(nodeId);
+    if (!peer) throw meshError('PEER_NOT_FOUND', '对端不存在：' + String(nodeId));
+    if (peer.trust !== 'trusted') throw meshError('PEER_UNTRUSTED', '对端未被信任（当前 ' + peer.trust + '）');
+    const response = await requestPeerMesh({
+      peer,
+      identity,
+      privateKeyPem: identity.privateKeyPem,
+      type: 'mesh.manifest.request',
+      payload: {},
+      expectType: 'mesh.manifest.response'
+    });
+    record({ direction: 'out', code: 'REMOTE_MANIFEST_OK', stage: 'capability', from: peer.nodeId });
+    return { nodeId: peer.nodeId, manifest: response.payload };
+  }
+
   return {
     stateDir,
-    identity: () => ({ nodeId: identity.nodeId, name: identity.name, role: identity.role, publicKeyPem: identity.publicKeyPem, createdAt: identity.createdAt }),
+    identity: () => ({
+      nodeId: identity.nodeId,
+      name: identity.name,
+      role: identity.role,
+      publicKeyPem: identity.publicKeyPem,
+      keyAlgorithm: identity.keyAlgorithm || 'p256',
+      createdAt: identity.createdAt,
+      ...(identity.legacyNodeId ? { legacyNodeId: identity.legacyNodeId, migratedAt: identity.migratedAt } : {})
+    }),
     publicKeyPem: () => identity.publicKeyPem,
     manifest,
 
@@ -288,6 +689,14 @@ export function createMeshNode({
 
     audit: () => audit.map((entry) => ({ ...entry })),
 
+    // ── 统一配对 v1.1（QR 邀请 / HTTPS 配对 / 配对后 Mesh 通道）────────────────
+    startPairingSession,
+    pairingStatus,
+    cancelPairingSession,
+    requestPeerCapability,
+    requestPeerManifest,
+    close,
+
     /**
      * 节点状态。**不依赖任何对端，也不依赖 Channel Adapter**：
      * 这是「不让 QQ 生命周期决定 Desktop Core 生命周期」在代码里的落点。
@@ -305,8 +714,8 @@ export function createMeshNode({
         trustedCount: peers.filter((p) => p.trust === 'trusted').length,
         onlineCount: peers.filter((p) => p.presence === 'online').length,
         pendingApprovals: approvals.size,
-        supportedTransports: ['loopback'],
-        deferredTransports: ['pipe', 'tcp', 'relay']
+        supportedTransports: ['loopback', 'tcp'],
+        deferredTransports: ['pipe', 'relay']
       };
     }
   };

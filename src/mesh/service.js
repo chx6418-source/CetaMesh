@@ -5,6 +5,9 @@
 
 import { createMeshNode } from './node.js';
 import { meshError } from './types.js';
+import { invitationQr } from './pairing/qr.js';
+
+const PAIRING_SECURITY_NOTE = '配对邀请一次性、5 分钟内有效，请勿转发。手机只接受证书指纹与邀请一致的 Desktop；请在手机屏幕上核对设备名称后再确认。配对完成后默认仅放行 mesh.presence / mesh.manifest，其他能力需逐项授权与本地批准。';
 
 export function createMeshService({ stateDir, name, role, available = null, executeCapability = null, now } = {}) {
   if (!stateDir || typeof stateDir !== 'string') throw new Error('createMeshService 需要 stateDir');
@@ -12,11 +15,12 @@ export function createMeshService({ stateDir, name, role, available = null, exec
 
   const handlers = {
     'mesh.status': () => node.status(),
-    // 页面聚合：一次 IPC 往返拿到节点状态 + 对端列表 + 待审批（UI 只需挂一个 Area）。
+    // 页面聚合：一次 IPC 往返拿到节点状态 + 对端列表 + 待审批 + 配对会话（UI 只需挂一个 Area）。
     'mesh.snapshot': () => ({
       status: node.status(),
       peers: node.peers(),
       approvals: node.approvals(),
+      pairing: node.pairingStatus(),
       audit: node.audit().slice(-20)
     }),
     'mesh.identity': () => ({ identity: node.identity() }),
@@ -43,7 +47,18 @@ export function createMeshService({ stateDir, name, role, available = null, exec
     'mesh.envelope.handle': (p) => node.handleEnvelope(p.envelope),
     'mesh.approvals': () => ({ approvals: node.approvals() }),
     'mesh.approval.decide': (p) => node.decideApproval({ requestId: p.requestId, decision: p.decision }),
-    'mesh.audit': () => ({ audit: node.audit() })
+    'mesh.audit': () => ({ audit: node.audit() }),
+
+    // ── 统一配对 v1.1：QR 邀请 / 会话状态 / 取消 / 反向能力请求 ────────────────
+    'mesh.pairing.start': (p) => node.startPairingSession({ ttlMs: p.ttlMs }).then((result) => ({
+      ...result,
+      qr: invitationQr(result.invitation),
+      securityNote: PAIRING_SECURITY_NOTE
+    })),
+    'mesh.pairing.status': () => node.pairingStatus(),
+    'mesh.pairing.cancel': () => node.cancelPairingSession(),
+    'mesh.capability.request': (p) => node.requestPeerCapability({ nodeId: p.nodeId, capability: p.capability, input: p.input }),
+    'mesh.peer.manifest': (p) => node.requestPeerManifest({ nodeId: p.nodeId })
   };
 
   return {
@@ -54,6 +69,6 @@ export function createMeshService({ stateDir, name, role, available = null, exec
       if (!handler) return Promise.reject(meshError('METHOD_NOT_FOUND', '未知 Mesh 方法：' + String(method)));
       return Promise.resolve().then(() => handler(params || {}));
     },
-    close() {}
+    close() { return node.close(); }
   };
 }

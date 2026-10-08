@@ -93,6 +93,8 @@
     "@snowluma/mcp": "^1.14.10",
     "@snowluma/sdk": "^1.14.0",
     "iconv-lite": "^0.7.3",
+    "qrcode": "^1.5.4",
+    "selfsigned": "^5.5.0",
     "ws": "^8.21.3",
     "zod": "^4.4.3"
   },

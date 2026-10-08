@@ -1,0 +1,12 @@
+{
+  "description": "同一 token 的第二次使用向量：token 指纹（小写 hex）与消费语义（必须被拒绝：REFUSED_CONSUMED）。",
+  "expect": "reject",
+  "token": "WY2u5fd2IV3Yf05Qxq7cQWX+deExWS8U7FHEnIinwaQ=",
+  "tokenFingerprint": "909058b79be68093ea98a7ebc8d44a828d88e98fb4a46b7318d3f03748c57292",
+  "firstUse": "accept",
+  "secondUse": "reject",
+  "secondUseWith": {
+    "invitationId": "inv_0000000000000000",
+    "expect": "reject"
+  }
+}

@@ -111,7 +111,7 @@ export function createTrustStore({ stateDir, now = () => Date.now() } = {}) {
     },
 
     /** 首次配对：登记为 pending（还没被信任）。 */
-    addPending({ nodeId, name, role, publicKeyPem, transport, advertised, now: at }) {
+    addPending({ nodeId, name, role, publicKeyPem, transport, advertised, now: at, peerDeviceId = null, keyAlgorithm = null, endpoint = null, tlsPin = null }) {
       load();
       const id = normalizeNodeId(nodeId);
       const existing = peers.get(id);
@@ -129,9 +129,25 @@ export function createTrustStore({ stateDir, now = () => Date.now() } = {}) {
         lastError: null,
         updatedAt: now()
       };
+      // 统一配对 v1.1（可选）：对端自己的 deviceId / 算法 / 可直连端点 + 证书 pin。
+      if (peerDeviceId) peer.peerDeviceId = String(peerDeviceId).slice(0, 100);
+      if (keyAlgorithm) peer.keyAlgorithm = String(keyAlgorithm).slice(0, 16);
+      if (endpoint) peer.endpoint = String(endpoint).slice(0, 512);
+      if (tlsPin) peer.tlsPin = String(tlsPin).slice(0, 64);
       peers.set(id, peer);
       persist();
       return view(peer);
+    },
+
+    /** 按对端自己的 deviceId（如手机 UUID）查找原始记录；找不到再按 nodeId 精确查（loopback/桌面对桌面）。 */
+    rawByPeerDeviceId(deviceId) {
+      load();
+      const text = String(deviceId || '');
+      if (!text) return null;
+      for (const peer of peers.values()) {
+        if (peer.peerDeviceId === text) return clone(peer);
+      }
+      return clone(peers.get(text));
     },
 
     setTrust(nodeId, state) {
