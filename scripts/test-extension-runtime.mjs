@@ -271,6 +271,13 @@ try {
   equal('Update keeps the installed Extension enabled', updated.entry.status, 'enabled');
   equal('Update launches the new version in a real Process Worker', runtime.get({ id: 'test.updatable' }).provider, 'process-child');
   equal('new version is active after atomic switch', (await runtime.invoke({ id: 'test.updatable', capability: 'sample.run', input: {} })).result.v, 11);
+  const v12 = writeExtension('v12-changed-after-review', baseManifest({ id: 'test.updatable', version: '1.2.0', permissions: ['storage'] }),
+    'module.exports.handlers={"sample.run":()=>({v:12})};');
+  runtime.review({ sourceDir: v12 });
+  fs.writeFileSync(path.join(v12, 'index.js'), 'module.exports.handlers={"sample.run":()=>({v:120})};');
+  const changedAfterReview = await asyncCapture(() => runtime.update({ sourceDir: v12 }));
+  check('package content changed after review is rejected before update',
+    changedAfterReview.threw && changedAfterReview.code === 'REVIEW_MISMATCH');
   check('previous immutable package remains available for rollback', fs.existsSync(path.join(store.packagesDir, 'test.updatable', '1.0.0')));
   runtime.review({ sourceDir: v11 });
   const sameVersion = await asyncCapture(() => runtime.update({ sourceDir: v11 }));
@@ -333,6 +340,38 @@ try {
   } finally {
     fs.rmSync(failingStore.file, { recursive: true, force: true });
     fs.renameSync(registryBackup, failingStore.file);
+  }
+
+  const enableFailureStore = createExtensionStore({ stateDir: path.join(root, 'enable-registry-failure') });
+  let enableHostAlive = false;
+  let enableHostShutdowns = 0;
+  const enableFailureRuntime = createExtensionRuntime({
+    store: enableFailureStore, monitorIntervalMs: 0,
+    processHostFactory: () => {
+      enableHostAlive = true;
+      return {
+        available: () => enableHostAlive,
+        health: () => ({ available: enableHostAlive, closed: !enableHostAlive, crashed: false, inflight: 0, provider: 'test-process-host' }),
+        ping: async () => enableHostAlive,
+        shutdown: async () => { enableHostAlive = false; enableHostShutdowns += 1; }
+      };
+    }
+  });
+  runtimeCleanups.push(() => enableFailureRuntime.close());
+  const enableFailureSource = writeExtension('enable-registry-failure', baseManifest({ id: 'test.enable-registry-failure' }),
+    'module.exports.handlers={"sample.run":()=>1};');
+  enableFailureRuntime.install({ sourceDir: enableFailureSource });
+  const enableRegistryBackup = enableFailureStore.file + '.backup';
+  fs.renameSync(enableFailureStore.file, enableRegistryBackup);
+  fs.mkdirSync(enableFailureStore.file);
+  try {
+    const enableFailure = await asyncCapture(() => enableFailureRuntime.enable({ id: 'test.enable-registry-failure' }));
+    check('enable reports registry persistence failure', enableFailure.threw && enableFailure.code === 'REGISTRY_WRITE_FAILED');
+    check('failed enable stops its newly started Worker', enableHostShutdowns === 1 && !enableHostAlive);
+    equal('failed enable leaves the Extension unenabled', enableFailureStore.get('test.enable-registry-failure').status, 'installed');
+  } finally {
+    fs.rmSync(enableFailureStore.file, { recursive: true, force: true });
+    fs.renameSync(enableRegistryBackup, enableFailureStore.file);
   }
   equal('批准后更新成功', updated.entry.version, '1.1.0');
   equal('记录了权限差异', updated.permissionDelta.added, ['storage']);

@@ -17,12 +17,15 @@ The Worker and host reuse the existing version-1 frame vocabulary: `invoke`, `re
 - The Worker environment is created as a new empty object. It includes only the minimum platform runtime values (`PATH`, `TEMP`, `TMP`, and Windows `SystemRoot` where needed) plus approved CetaMesh Extension metadata. The parent environment is never spread or copied and then scrubbed. The Worker also removes unexpected variables before loading package code.
 - Provider keys, console and agent tokens, Git/AWS credentials, `NODE_OPTIONS`, `NODE_PATH`, Core objects, Memory Runtime, Workspace Runtime, unrestricted filesystem access, and network secrets are not passed to Extension code.
 - Frames and partial line buffers are capped at 2 MiB. The host limits in-flight calls and transport queues; stderr diagnostics are separately bounded. Invalid, oversized, malformed, or directionally invalid frames fail the Worker closed.
+- The Owner Review token includes a stable SHA-256 fingerprint of every package file and relative path. The same fingerprint is persisted with the active version, rechecked during staging and Worker startup, and checked on reverse capability calls so code changes cannot reuse an old manifest-only review.
 
 ## Capability boundary
 
 Worker capability calls use the existing reverse `invoke` frame. The host ignores Extension identity supplied by a frame and binds each Worker to the active Extension id, version, package fingerprint, and manifest fingerprint. Before dispatch, the runtime verifies that the capability is declared and present in the currently approved grants, builds the Extension actor from the active registry entry, and sends the request through the existing Capability Broker and policy. Stale Workers, undeclared capabilities, and missing grants are denied.
 
 Filesystem, memory, and network operations remain brokered. Extension-scoped private storage is separately namespaced and persisted through `src/storage/json-file.js`.
+
+Invocation timeout and cancellation propagate through the Worker VM context, reverse IPC, and Capability Broker; pending reverse calls are aborted and removed when cancelled.
 
 ## Health and recovery
 
@@ -38,7 +41,7 @@ The runtime supports review, install, enable, disable, update, rollback, restart
 
 Each update and rollback needs a current review candidate. Any newly added permission requires an Owner approval matching that candidate; previous grants cannot silently expand. Registry writes use the JSON Storage Primitive, and in-memory state is restored if persistence fails.
 
-The existing Plugins page shows Enabled, Disabled, Running, Crashed, and Needs Review states and exposes Restart, Disable, and Remove actions.
+The existing Plugins page shows Enabled, Disabled, Running, Crashed, and Needs Review states and exposes Restart, Disable, and Remove actions. It also exposes a package source field with Review Package, then Install Extension or Update Extension after showing risk and permission changes. High-risk installs and updates that add permissions require a separate Owner approval checkbox tied to the review token.
 
 ## Memory Packs and executable requests
 
@@ -46,12 +49,12 @@ Memory Packs remain data-only and keep Base + Overlay behavior; they do not star
 
 ## Verification
 
-- `npm run build:core` — passed; produced `dist/core/WhaleBridgeCore.exe` for release verification.
+- `npm run build:core` — passed after the review fixes; produced `dist/core/WhaleBridgeCore.exe` for release verification.
 - `npm test` — **74 suites: 67 PASS, 0 FAIL, 7 NOT_RUN_ENVIRONMENT**.
-- The registered Core SEA end-to-end suite ran against the built `WhaleBridgeCore.exe`, spawned it through the real `ProcessExtensionHost`, invoked an Extension, completed a brokered capability call, and verified clean shutdown.
+- The registered Core SEA end-to-end suite ran against that rebuilt `WhaleBridgeCore.exe`, spawned it through the real `ProcessExtensionHost`, invoked an Extension, completed a brokered capability call, and verified clean shutdown.
 - Process-host tests cover real child invocation and parallel invocation, timeout, cancellation, oversized and malformed frames, crash and exit, restart and restart exhaustion, shutdown, environment isolation, package-root cwd, process-tree cleanup, and Brokered capability allow/deny.
 - Runtime tests cover host selection, bound reverse calls, health transitions, stable-window restart reset, explicit restart, transactional update/rollback, failed startup restoration, and fresh permission review.
-- UI status and action tests run through the desktop Rust test suite registered in `npm test`.
+- UI status and action tests, including Review/Install/Update request mapping and added-permission approval behavior, run through the desktop Rust test suite registered in `npm test` (114 Rust tests passed).
 - Seven environment-dependent suites reported `NOT_RUN_ENVIRONMENT` because this machine lacks the required legacy bridge, shell debug runtime, external gateway/network, or release distribution. They are not counted as pass or fail.
 
 ## Security limitation

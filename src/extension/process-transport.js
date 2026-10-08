@@ -4,6 +4,7 @@ import { spawn } from 'node:child_process';
 import { extensionError } from './types.js';
 import { terminateProcessTree, waitForChildExit } from './process-tree.js';
 import { buildExtensionWorkerEnv } from './worker-env.js';
+import { fingerprintExtensionPackage } from './package-fingerprint.js';
 export { buildExtensionWorkerEnv } from './worker-env.js';
 
 const PROTOCOL_VERSION = 1;
@@ -84,7 +85,11 @@ export function createProcessTransport({
   const frameLimit = Math.max(1, Math.min(Number(maxFrameBytes) || DEFAULT_MAX_FRAME_BYTES, DEFAULT_MAX_FRAME_BYTES));
   const env = buildExtensionWorkerEnv({
     parentEnv,
-    metadata: { extensionId, version, fingerprint: metadata.fingerprint, storageFile: metadata.storageFile }
+    metadata: {
+      extensionId, version, fingerprint: metadata.fingerprint,
+      packageFingerprint: metadata.packageFingerprint || fingerprintExtensionPackage(cwd),
+      storageFile: metadata.storageFile
+    }
   });
   const child = spawn(launch.executable, launch.args, {
     shell: false,

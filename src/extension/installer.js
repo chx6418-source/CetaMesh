@@ -16,6 +16,7 @@ import { scanEntrySource } from './scan.js';
 import { buildReview, permissionDelta } from './review.js';
 import { EXTENSION_LIMITS, compareVersions, extensionError } from './types.js';
 import { validateMemoryPack, validateMemoryPackManifest } from './memory-pack.js';
+import { fingerprintExtensionPackage } from './package-fingerprint.js';
 
 function collectFiles(rootDir, relative = '', acc = { files: [], bytes: 0 }) {
   const dir = relative ? path.join(rootDir, relative) : rootDir;
@@ -85,6 +86,8 @@ export function createExtensionInstaller({ store, now = () => Date.now() } = {})
     }
     if (!stat.isDirectory()) throw extensionError('SOURCE_NOT_DIRECTORY', '扩展来源必须是目录：' + dir);
 
+    const collected = collectFiles(dir);
+    const packageFingerprintBeforeReview = fingerprintExtensionPackage(dir);
     const { name, raw } = readManifestFile(dir);
     const manifest = assertManifest(raw);
     const entryPath = path.join(dir, manifest.entry);
@@ -96,15 +99,18 @@ export function createExtensionInstaller({ store, now = () => Date.now() } = {})
     if (manifest.type === 'memory-pack') {
       validateMemoryPackManifest(manifest);
       validateMemoryPack(source);
-      const packageFiles = collectFiles(dir);
-      if (packageFiles.files.some(p => !/\.(json|md|txt)$/i.test(p))) {
+      if (collected.files.some(p => !/\.(json|md|txt)$/i.test(p))) {
         throw extensionError('MEMORY_PACK_INVALID', 'Memory Pack contains executable or undeclared content');
       }
       scan = { ok: true, findings: [] };
     } else scan = scanEntrySource(source);
-    const review = buildReview(manifest);
-    const collected = collectFiles(dir);
-    return { manifest, review, scan, source, sourceDir: dir, manifestFile: name, files: collected.files, bytes: collected.bytes };
+    const packageFingerprint = fingerprintExtensionPackage(dir);
+    if (packageFingerprint !== packageFingerprintBeforeReview) {
+      throw extensionError('SOURCE_CHANGED_DURING_REVIEW', 'Extension package changed while it was being reviewed');
+    }
+    const review = buildReview(manifest, { packageFingerprint });
+    return { manifest, review, scan, source, sourceDir: dir, manifestFile: name,
+      packageFingerprint, files: collected.files, bytes: collected.bytes };
   }
 
   function assertInstallable(reviewed, { approval, previousEntry, isUpdate }) {
@@ -135,28 +141,17 @@ export function createExtensionInstaller({ store, now = () => Date.now() } = {})
     return delta;
   }
 
-  function packageFingerprint(rootDir) {
-    const hash = crypto.createHash('sha256');
-    for (const relative of collectFiles(rootDir).files.sort()) {
-      hash.update(relative, 'utf8');
-      hash.update('\0');
-      hash.update(fs.readFileSync(path.join(rootDir, relative)));
-      hash.update('\0');
-    }
-    return hash.digest('hex');
-  }
-
   function preparePackage(reviewed) {
     const manifest = reviewed.manifest;
     const target = path.join(store.packagesDir, manifest.id, manifest.version);
     fs.mkdirSync(path.dirname(target), { recursive: true });
     const staging = `${target}.staging-${process.pid}-${crypto.randomBytes(8).toString('hex')}`;
-    const expectedFingerprint = packageFingerprint(reviewed.sourceDir);
+    const expectedFingerprint = reviewed.packageFingerprint;
     try {
       copyTree(reviewed.sourceDir, staging);
       const stagedReview = reviewFromDirectory({ sourceDir: staging });
-      if (stagedReview.review.fingerprint !== reviewed.review.fingerprint
-        || packageFingerprint(staging) !== expectedFingerprint) {
+      if (!stagedReview.scan.ok || stagedReview.review.token !== reviewed.review.token
+        || stagedReview.packageFingerprint !== expectedFingerprint) {
         throw extensionError('SOURCE_CHANGED_DURING_STAGE', 'Extension source changed while it was being staged');
       }
       return { staging, target, expectedFingerprint };
@@ -168,7 +163,7 @@ export function createExtensionInstaller({ store, now = () => Date.now() } = {})
 
   function finalizePackage(prepared) {
     if (fs.existsSync(prepared.target)) {
-      if (packageFingerprint(prepared.target) !== prepared.expectedFingerprint) {
+      if (fingerprintExtensionPackage(prepared.target) !== prepared.expectedFingerprint) {
         throw extensionError('IMMUTABLE_VERSION_COLLISION', 'This Extension version already contains different package files');
       }
       fs.rmSync(prepared.staging, { recursive: true, force: true });
@@ -200,6 +195,7 @@ export function createExtensionInstaller({ store, now = () => Date.now() } = {})
       status: previous?.status || 'installed',
       permissions: manifest.permissions,
       fingerprint: reviewed.review.fingerprint,
+      packageFingerprint: reviewed.packageFingerprint,
       reviewToken: reviewed.review.token,
       riskLevel: reviewed.review.riskLevel,
       manifest,
@@ -240,8 +236,11 @@ export function createExtensionInstaller({ store, now = () => Date.now() } = {})
     },
 
     /** 覆盖安装新版本；版本必须更高。 */
-    async update({ sourceDir, approval, beforeSwitch } = {}) {
+    async update({ sourceDir, approval, expectedReviewToken, beforeSwitch } = {}) {
       const reviewed = reviewFromDirectory({ sourceDir });
+      if (expectedReviewToken && String(expectedReviewToken) !== reviewed.review.token) {
+        throw extensionError('REVIEW_MISMATCH', 'Extension package changed after Owner Review; review it again');
+      }
       const previous = store.get(reviewed.manifest.id);
       if (!previous) {
         throw extensionError('NOT_INSTALLED', '扩展尚未安装：' + reviewed.manifest.id);
@@ -260,7 +259,8 @@ export function createExtensionInstaller({ store, now = () => Date.now() } = {})
           id: reviewed.manifest.id, version: reviewed.manifest.version, name: reviewed.manifest.name,
           type: reviewed.manifest.type, publisher: reviewed.manifest.publisher || reviewed.review.publisher || '',
           status: previous.status, permissions: reviewed.manifest.permissions,
-          fingerprint: reviewed.review.fingerprint, reviewToken: reviewed.review.token,
+          fingerprint: reviewed.review.fingerprint, packageFingerprint: reviewed.packageFingerprint,
+          reviewToken: reviewed.review.token,
           riskLevel: reviewed.review.riskLevel, manifest: reviewed.manifest, manifestFile: reviewed.manifestFile,
           sourceRoot: finalized.target, importedFrom: reviewed.sourceDir, fileCount: reviewed.files.length,
           bytes: reviewed.bytes, installedAt: previous.installedAt, updatedAt: timestamp,
@@ -278,12 +278,15 @@ export function createExtensionInstaller({ store, now = () => Date.now() } = {})
       }
     },
 
-    async rollback({ id, approval, beforeSwitch } = {}) {
+    async rollback({ id, approval, expectedReviewToken, beforeSwitch } = {}) {
       const previous = store.get(id);
       if (!previous) throw extensionError('NOT_INSTALLED', 'Extension is not installed: ' + String(id));
       if (!previous.previousVersion) throw extensionError('ROLLBACK_UNAVAILABLE', 'No previous Extension version is retained');
       const priorRoot = path.join(store.packagesDir, previous.id, previous.previousVersion);
       const reviewed = reviewFromDirectory({ sourceDir: priorRoot });
+      if (expectedReviewToken && String(expectedReviewToken) !== reviewed.review.token) {
+        throw extensionError('REVIEW_MISMATCH', 'Retained package changed after Owner Review; review it again');
+      }
       if (reviewed.manifest.id !== previous.id || reviewed.manifest.version !== previous.previousVersion) {
         throw extensionError('ROLLBACK_PACKAGE_MISMATCH', 'Retained rollback package does not match the registry version');
       }
@@ -297,7 +300,8 @@ export function createExtensionInstaller({ store, now = () => Date.now() } = {})
           id: reviewed.manifest.id, version: reviewed.manifest.version, name: reviewed.manifest.name,
           type: reviewed.manifest.type, publisher: reviewed.manifest.publisher || reviewed.review.publisher || '',
           status: previous.status, permissions: reviewed.manifest.permissions,
-          fingerprint: reviewed.review.fingerprint, reviewToken: reviewed.review.token,
+          fingerprint: reviewed.review.fingerprint, packageFingerprint: reviewed.packageFingerprint,
+          reviewToken: reviewed.review.token,
           riskLevel: reviewed.review.riskLevel, manifest: reviewed.manifest, manifestFile: reviewed.manifestFile,
           sourceRoot: finalized.target, importedFrom: reviewed.sourceDir, fileCount: reviewed.files.length,
           bytes: reviewed.bytes, installedAt: previous.installedAt, updatedAt: timestamp,

@@ -6,6 +6,7 @@ import { assertManifest, MANIFEST_FILENAMES, manifestFingerprint } from './manif
 import { scanEntrySource } from './scan.js';
 import { sanitizeExtensionWorkerEnv } from './worker-env.js';
 import { createExtensionPrivateStorage } from './private-storage.js';
+import { fingerprintExtensionPackage } from './package-fingerprint.js';
 
 const PROTOCOL_VERSION = 1;
 const MAX_FRAME_BYTES = 2 * 1024 * 1024;
@@ -69,10 +70,15 @@ function readPackage() {
   const expectedId = process.env.CETAMESH_EXTENSION_ID;
   const expectedVersion = process.env.CETAMESH_EXTENSION_VERSION;
   const expectedFingerprint = process.env.CETAMESH_EXTENSION_FINGERPRINT;
+  const expectedPackageFingerprint = process.env.CETAMESH_EXTENSION_PACKAGE_FINGERPRINT;
   if (expectedId && expectedId !== manifest.id) throw new Error('Extension package id does not match host metadata');
   if (expectedVersion && expectedVersion !== manifest.version) throw new Error('Extension package version does not match host metadata');
   if (expectedFingerprint && expectedFingerprint !== manifestFingerprint(manifest)) {
     throw new Error('Extension manifest fingerprint does not match host metadata');
+  }
+  if (!/^[a-f0-9]{64}$/i.test(String(expectedPackageFingerprint || ''))
+    || fingerprintExtensionPackage(packageRoot) !== expectedPackageFingerprint.toLowerCase()) {
+    throw Object.assign(new Error('Extension package fingerprint does not match host metadata'), { code: 'PACKAGE_FINGERPRINT_MISMATCH' });
   }
 
   const entryPath = path.resolve(packageRoot, manifest.entry);
@@ -116,6 +122,7 @@ export async function runExtensionWorker({ input = process.stdin, output = proce
   const rejectPending = (error) => {
     for (const entry of pendingCapabilities.values()) {
       clearTimeout(entry.timer);
+      entry.signal?.removeEventListener('abort', entry.onAbort);
       entry.reject(error);
     }
     pendingCapabilities.clear();
@@ -137,22 +144,39 @@ export async function runExtensionWorker({ input = process.stdin, output = proce
     input.destroy?.();
   };
 
-  const requestCapability = (capability, requestInput) => {
+  const requestCapability = (capability, requestInput, { signal } = {}) => {
     if (stopped) return Promise.reject(Object.assign(new Error('Extension worker stopped'), { code: 'PROVIDER_UNAVAILABLE' }));
     if (pendingCapabilities.size >= MAX_PENDING_CAPABILITY_CALLS) {
       return Promise.reject(Object.assign(new Error('Too many pending capability requests'), { code: 'INVOKE_OVERLOAD' }));
     }
     const id = `worker-cap-${++nextRequest}`;
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
+      const cancel = (error) => {
+        const request = pendingCapabilities.get(id);
+        if (!request) return;
+        clearTimeout(request.timer);
+        signal?.removeEventListener('abort', request.onAbort);
         pendingCapabilities.delete(id);
-        reject(Object.assign(new Error('Capability request timed out'), { code: 'INVOKE_TIMEOUT' }));
-      }, CAPABILITY_TIMEOUT_MS);
-      pendingCapabilities.set(id, { capability, resolve, reject, timer });
+        try { send({ v: PROTOCOL_VERSION, id, kind: 'cancel', capability }); }
+        catch (sendError) { log(`unable to cancel Broker request: ${String(sendError?.message ?? sendError)}`); }
+        reject(error);
+      };
+      const onAbort = () => {
+        const reason = signal?.reason;
+        cancel(reason?.code ? reason : Object.assign(new Error('Capability request cancelled'), { code: 'INVOKE_CANCELLED' }));
+      };
+      const timer = setTimeout(() => cancel(Object.assign(new Error('Capability request timed out'), { code: 'INVOKE_TIMEOUT' })), CAPABILITY_TIMEOUT_MS);
+      pendingCapabilities.set(id, { capability, resolve, reject, timer, signal, onAbort });
+      signal?.addEventListener('abort', onAbort, { once: true });
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
       try {
         send({ v: PROTOCOL_VERSION, id, kind: 'invoke', capability, input: requestInput ?? {} });
       } catch (error) {
         clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
         pendingCapabilities.delete(id);
         reject(error);
       }
@@ -184,11 +208,15 @@ export async function runExtensionWorker({ input = process.stdin, output = proce
       const capabilityCall = pendingCapabilities.get(frame.id);
       if (capabilityCall) {
         clearTimeout(capabilityCall.timer);
+        capabilityCall.signal?.removeEventListener('abort', capabilityCall.onAbort);
         pendingCapabilities.delete(frame.id);
         capabilityCall.reject(Object.assign(new Error('Capability request cancelled'), { code: 'INVOKE_CANCELLED' }));
       } else {
         const active = activeInvokes.get(frame.id);
-        if (active) active.cancelled = true;
+        if (active) {
+          active.cancelled = true;
+          active.controller.abort(Object.assign(new Error('Extension invocation cancelled'), { code: 'INVOKE_CANCELLED' }));
+        }
       }
       return;
     }
@@ -196,6 +224,7 @@ export async function runExtensionWorker({ input = process.stdin, output = proce
       const request = pendingCapabilities.get(frame.id);
       if (!request || request.capability !== frame.capability) return failProtocol('response did not match an active Worker capability request');
       clearTimeout(request.timer);
+      request.signal?.removeEventListener('abort', request.onAbort);
       pendingCapabilities.delete(frame.id);
       if (frame.kind === 'error') {
         request.reject(Object.assign(new Error(String(frame.error.message || 'Host capability failed')), { code: frame.error.code }));
@@ -206,9 +235,9 @@ export async function runExtensionWorker({ input = process.stdin, output = proce
     }
     if (frame.kind === 'invoke') {
       if (activeInvokes.has(frame.id)) return failProtocol('duplicate invoke id');
-      const active = { cancelled: false };
+      const active = { cancelled: false, controller: new AbortController() };
       activeInvokes.set(frame.id, active);
-      Promise.resolve().then(() => host.invoke(frame.capability, frame.input)).then((result) => {
+      Promise.resolve().then(() => host.invoke(frame.capability, frame.input, { signal: active.controller.signal })).then((result) => {
         if (!stopped && !active.cancelled) {
           send({ v: PROTOCOL_VERSION, id: frame.id, kind: 'result', capability: frame.capability, result: result.result ?? null });
         }

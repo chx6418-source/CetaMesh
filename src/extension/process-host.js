@@ -1,14 +1,8 @@
-// CetaMesh Extension —— ProcessExtensionHost 契约（v2 hardening / Phase F）。
-//
-// 立场（如实）：node:vm 是遏制不是隔离。真正想给"不受信任代码"的隔离是独立进程
-// + OS 限制。本轮**只交付契约与协议**，不交付真实进程沙箱：
-//   - `createExtensionHost`（当前 = VmExtensionHost）保持不变，仍是 Alpha/受信扩展
-//     的活动宿主；
-//   - 本模块定义 ProcessExtensionHost 的**接口与消息协议**，transport 是注入的
-//     （fixture 可全测）；真实进程 transport 有意不在本轮实现（半吊子进程沙箱
-//     比没有更危险），待用户批准后按同一契约接入。
-//
-// 协议（帧 = 一个 JSON 对象，经 transport 单向发送）：
+// CetaMesh Extension independent ProcessExtensionHost.
+// Trusted builtin/dev Extensions may use the VM host; production Extensions use the Core SEA --extension-worker.
+// ProcessHost isolates process faults and state. It is not Windows Sandbox or AppContainer.
+// The in-process pair below is only a protocol test fixture; production uses a real child process.
+
 //   { v:1, id, kind:'invoke',  capability, input }
 //   { v:1, id, kind:'result',  capability, result }
 //   { v:1, id, kind:'error',   capability, error:{ code, message } }
@@ -74,6 +68,7 @@ export function createProcessExtensionHost({
   extensionId = null,
   version = null,
   fingerprint = null,
+  packageFingerprint = null,
   storageFile = null,
   packaged = undefined,
   execPath = process.execPath,
@@ -104,7 +99,10 @@ export function createProcessExtensionHost({
       version: activeVersion,
       launch,
       parentEnv,
-      metadata: { extensionId: activeId, version: activeVersion, fingerprint: fingerprint || manifestFingerprint(manifest), storageFile },
+      metadata: {
+        extensionId: activeId, version: activeVersion,
+        fingerprint: fingerprint || manifestFingerprint(manifest), packageFingerprint, storageFile
+      },
       graceMs: shutdownGraceMs
     });
   }
@@ -141,6 +139,9 @@ export function createProcessExtensionHost({
       clearTimeout(entry.timer);
       pendingPings.delete(id);
       entry.resolve(false);
+    }
+    for (const active of reversePending.values()) {
+      active.controller.abort(error);
     }
     reversePending.clear();
   }
@@ -235,9 +236,11 @@ export function createProcessExtensionHost({
         catch (error) { record('error', 'Unable to reject Worker capability request: ' + String(error?.message ?? error)); }
         return;
       }
-      const active = { capability: frame.capability };
+      const active = { capability: frame.capability, controller: new AbortController() };
       reversePending.set(frame.id, active);
-      Promise.resolve().then(() => capabilityExecutor(frame.capability, frame.input ?? {})).then((result) => {
+      Promise.resolve().then(() => capabilityExecutor(frame.capability, frame.input ?? {}, {
+        signal: active.controller.signal
+      })).then((result) => {
         if (reversePending.get(frame.id) !== active) return;
         reversePending.delete(frame.id);
         checkedSend({ v: PROTOCOL_VERSION, id: frame.id, kind: 'result', capability: frame.capability, result: result ?? null });
@@ -251,8 +254,10 @@ export function createProcessExtensionHost({
       return;
     }
     if (frame.kind === 'cancel') {
-      if (reversePending.has(frame.id)) {
+      const reverse = reversePending.get(frame.id);
+      if (reverse) {
         reversePending.delete(frame.id);
+        reverse.controller.abort(extensionError('INVOKE_CANCELLED', 'Worker cancelled the Broker request'));
         return;
       }
     }
@@ -381,8 +386,7 @@ export function createProcessExtensionHost({
 }
 
 /**
- * 进程内双工 transport fixture（仅测试用）：host 端与"进程端"各持一半，
- * 通过队列互投。真实进程 transport（子进程 + 同一帧协议）是后续工作。
+ * In-process duplex transport fixture for protocol tests; production transport uses a real child process.
  */
 export function createInProcessTransportPair({ onHostFrame = null, latencyMs = 0 } = {}) {
   const deliver = (queue, frame) => {

@@ -72,6 +72,12 @@ Capability Broker and policy checks. Updates stage and validate a package before
 registry; new permissions require a fresh Owner Review, and the immediately previous package is
 retained for rollback.
 
+The Owner Review token binds the full package tree (relative paths and file contents), not only
+the manifest. The active Worker verifies that fingerprint before loading Extension code. Invocation
+timeouts and cancellation propagate through reverse IPC into Brokered capability calls. The
+Plugins page provides Review Package followed by Install Extension or Update Extension, and asks
+for explicit Owner approval when an install is high risk or an update adds permissions.
+
 `ProcessExtensionHost` and the Extension VM provide process separation and API restriction. They do
 **not** provide Windows Sandbox or AppContainer isolation. The Worker is not an OS sandbox.
 Memory Packs remain data-only and do not run in the Extension Worker. Manifest requests for

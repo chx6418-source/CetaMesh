@@ -14,6 +14,7 @@ import { createMemoryPackHost } from './memory-pack.js';
 import { manifestFingerprint } from './manifest.js';
 import { createCapabilityBroker } from '../capability/broker.js';
 import { createCapabilityPolicy } from '../capability/policy.js';
+import { fingerprintExtensionPackage } from './package-fingerprint.js';
 
 export function createExtensionRuntime({
   store,
@@ -43,7 +44,7 @@ export function createExtensionRuntime({
   if (!capabilityBroker) {
     broker.register({ id: 'network', permission: 'network', risk: 'high', provider: 'extension-adapter', execute: async r => {
       if (typeof fetchImpl !== 'function') throw extensionError('PROVIDER_UNAVAILABLE', 'Network adapter unavailable');
-      return fetchImpl(r.input.url, r.input.init);
+      return fetchImpl(r.input.url, { ...(r.input.init || {}), signal: r.signal });
     }});
   }
   const actors = new Map();
@@ -89,11 +90,11 @@ export function createExtensionRuntime({
       scopes: scope ? ['workspace:' + scope] : [], types: ['working', 'workspace', 'knowledge', 'skill']
     }};
   }
-  async function invokeOnHost(id, capability, input) {
+  async function invokeOnHost(id, capability, input, { signal } = {}) {
     const { host } = hostOrThrow(id);
     const record = runtimeRecord(id);
     record.state = 'running';
-    try { return await host.invoke(capability, input); }
+    try { return await host.invoke(capability, input, { signal }); }
     finally {
       if (hosts.get(String(id)) === host && host.available()) {
         const health = host.health?.() || {};
@@ -110,7 +111,7 @@ export function createExtensionRuntime({
       broker.register({ id, permission: 'extension.invoke', provider: 'extension', risk: 'low', execute: async r => {
         const { entry: current } = hostOrThrow(entry.id);
         if (!current.manifest.capabilities.some(c => c.id === cap.id)) throw extensionError('CAPABILITY_NOT_DECLARED', cap.id);
-        return invokeOnHost(entry.id, cap.id, r.input);
+        return invokeOnHost(entry.id, cap.id, r.input, { signal: r.signal });
       }});
     }
   }
@@ -122,14 +123,18 @@ export function createExtensionRuntime({
   }
 
   function capabilityExecutorFor(bound) {
-    return async (capability, input) => {
+    return async (capability, input, { signal } = {}) => {
       const current = entryOrThrow(bound.id);
       const currentManifestFingerprint = manifestFingerprint(current.manifest);
       const currentFingerprint = current.fingerprint || currentManifestFingerprint;
+      const currentPackageFingerprint = bound.packageFingerprint
+        ? current.packageFingerprint || fingerprintExtensionPackage(current.sourceRoot)
+        : null;
       const currentGrants = [...(current.permissions || [])].sort();
       if (current.status !== 'enabled') throw extensionError('EXTENSION_DISABLED', current.id);
       if (current.version !== bound.version || currentFingerprint !== bound.fingerprint
-        || currentManifestFingerprint !== bound.manifestFingerprint) {
+        || currentManifestFingerprint !== bound.manifestFingerprint
+        || (bound.packageFingerprint && currentPackageFingerprint !== bound.packageFingerprint)) {
         throw extensionError('STALE_EXTENSION_HOST', 'Worker identity no longer matches the active Extension version');
       }
       if (!(current.manifest.permissions || []).includes(capability)) {
@@ -145,13 +150,20 @@ export function createExtensionRuntime({
         throw extensionError('CAPABILITY_NOT_DECLARED', 'Capability Broker has no adapter for ' + capability);
       }
       const result = await broker.execute({ actor: actorFor(current), capability,
-        workspaceId: current.manifest.scope?.workspace || undefined, input: input || {}, reason: 'Installed Extension capability' });
+        workspaceId: current.manifest.scope?.workspace || undefined, input: input || {}, reason: 'Installed Extension capability' }, { signal });
       if (result.status !== 'completed') throw extensionError('APPROVAL_REQUIRED', result.approvalId);
       return result.result;
     };
   }
 
   function buildHost(entry) {
+    if (!entry.packageFingerprint && entry.type !== 'memory-pack') {
+      const reviewed = installer.reviewFromDirectory({ sourceDir: entry.sourceRoot });
+      if (!reviewed.scan.ok || reviewed.review.fingerprint !== (entry.fingerprint || manifestFingerprint(entry.manifest))) {
+        throw extensionError('REVIEW_REQUIRED', 'Installed Extension must be reviewed again before its package can be bound');
+      }
+      entry = store.put({ ...entry, packageFingerprint: reviewed.packageFingerprint, reviewToken: reviewed.review.token });
+    }
     const entryPath = path.join(entry.sourceRoot, entry.manifest.entry);
     if (!fs.existsSync(entryPath)) {
       throw extensionError('ENTRY_MISSING', '受管目录中的入口文件缺失：' + entry.manifest.entry + '（请重新安装）');
@@ -162,6 +174,7 @@ export function createExtensionRuntime({
       id: entry.id,
       version: entry.version,
       fingerprint: entry.fingerprint || manifestFingerprint(entry.manifest),
+      packageFingerprint: entry.packageFingerprint,
       manifestFingerprint: manifestFingerprint(entry.manifest),
       approvedGrants: [...(entry.permissions || [])].sort()
     };
@@ -180,6 +193,7 @@ export function createExtensionRuntime({
         extensionId: entry.id,
         version: entry.version,
         fingerprint: bound.manifestFingerprint,
+        packageFingerprint: bound.packageFingerprint,
         storageFile: (entry.manifest.permissions || []).includes('storage') ? store.storage(entry.id).file : null,
         onCrash: () => {
           if (runtimeRecord(entry.id).suppressRecovery) {
@@ -232,6 +246,10 @@ export function createExtensionRuntime({
     const needsReview = delta.added.length > 0 || reviewed.review.requiresExplicitApproval;
     const added = delta.added.length ? ' Added permissions: ' + delta.added.join(', ') + '.' : '';
     const candidate = pendingReviews.get(current.id);
+    if (candidate && candidate.version === reviewed.manifest.version
+      && candidate.review.packageFingerprint !== reviewed.packageFingerprint) {
+      throw extensionError('REVIEW_MISMATCH', 'Extension package changed after Owner Review; review it again');
+    }
     if (!candidate || candidate.review.token !== reviewed.review.token
       || candidate.version !== reviewed.manifest.version) {
       throw extensionError(needsReview ? 'APPROVAL_REQUIRED' : 'REVIEW_REQUIRED',
@@ -483,7 +501,8 @@ export function createExtensionRuntime({
       assertOwnerReview(reviewed, current, approval);
       const result = await applyVersionChange({
         id: current.id,
-        switchVersion: beforeSwitch => installer.update({ sourceDir, approval, beforeSwitch })
+        switchVersion: beforeSwitch => installer.update({ sourceDir, approval,
+          expectedReviewToken: reviewed.review.token, beforeSwitch })
       });
       pendingReviews.delete(result.entry.id);
       return result;
@@ -497,7 +516,8 @@ export function createExtensionRuntime({
       assertOwnerReview(reviewed, current, approval);
       const result = await applyVersionChange({
         id: current.id,
-        switchVersion: beforeSwitch => installer.rollback({ id: current.id, approval, beforeSwitch })
+        switchVersion: beforeSwitch => installer.rollback({ id: current.id, approval,
+          expectedReviewToken: reviewed.review.token, beforeSwitch })
       });
       pendingReviews.delete(result.entry.id);
       return result;
@@ -528,8 +548,15 @@ export function createExtensionRuntime({
         throw extensionError(failure.code, '扩展加载失败：' + failure.message);
       }
       hosts.set(entry.id, host);
-      const updated = store.put({ ...entry, status: 'enabled', enabledAt: now(), updatedAt: now() });
-      return { extension: updated, changed: true };
+      try {
+        const updated = store.put({ ...entry, status: 'enabled', enabledAt: now(), updatedAt: now() });
+        return { extension: updated, changed: true };
+      } catch (error) {
+        void stopHost(entry.id).catch((cleanupError) => {
+          runtimeRecord(entry.id).lastError = 'Worker cleanup after enable failure: ' + String(cleanupError?.message ?? cleanupError);
+        });
+        throw error;
+      }
     },
 
     async disable({ id } = {}) {

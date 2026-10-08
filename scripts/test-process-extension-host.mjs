@@ -1,11 +1,6 @@
-// v2 hardening / Phase F 验收：ProcessExtensionHost 契约。
-//
-// 立场：本轮只交付契约 + 注入 transport（fixture）；真实进程沙箱有意不实现。
-// createExtensionHost 仍 = VmExtensionHost（活动宿主不变）。
-//
-// 覆盖：invoke 往返 / 能力白名单（未声明不出帧）/ 权限未授予 / 帧大小上限 /
-// 帧模式校验（坏帧丢弃）/ 超时 / cancel + 迟到结果丢弃 / shutdown / health /
-// 与 VmExtensionHost 接口形状一致（start 无需显式、invoke/cancel/shutdown/health）。
+// ProcessExtensionHost transport, lifecycle, and protocol regression checks.
+// Source-level tests use fixtures; the formal Core SEA worker E2E is in test-process-extension-sea.mjs.
+// ProcessHost is not Windows Sandbox or AppContainer.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -17,6 +12,7 @@ import { buildExtensionWorkerEnv, createProcessTransport, resolveExtensionWorker
 import { sanitizeExtensionWorkerEnv } from '../src/extension/worker-env.js';
 import { createVmExtensionHost, createExtensionHost } from '../src/extension/host.js';
 import { assertManifest, manifestFingerprint } from '../src/extension/manifest.js';
+import { fingerprintExtensionPackage } from '../src/extension/package-fingerprint.js';
 
 const manifest = {
   id: 'fixture-ext',
@@ -113,12 +109,15 @@ async function waitUntil(predicate, timeoutMs = 5000) {
   };
   const env = buildExtensionWorkerEnv({
     parentEnv,
-    metadata: { extensionId: 'fixture-ext', version: '1.0.0', fingerprint: 'sha256:fixture' }
+    metadata: {
+      extensionId: 'fixture-ext', version: '1.0.0', fingerprint: 'sha256:fixture',
+      packageFingerprint: 'b'.repeat(64)
+    }
   });
   assert.deepEqual(env, {
     PATH: 'C:\\Windows\\System32', TEMP: parentEnv.TEMP, TMP: parentEnv.TMP, SystemRoot: parentEnv.SystemRoot,
     CETAMESH_EXTENSION_ID: 'fixture-ext', CETAMESH_EXTENSION_VERSION: '1.0.0',
-    CETAMESH_EXTENSION_FINGERPRINT: 'sha256:fixture'
+    CETAMESH_EXTENSION_FINGERPRINT: 'sha256:fixture', CETAMESH_EXTENSION_PACKAGE_FINGERPRINT: 'b'.repeat(64)
   });
   assert.deepEqual(resolveExtensionWorkerLaunch({ packaged: false, execPath: 'node.exe', workerEntry: 'worker.js' }), {
     executable: 'node.exe', args: ['worker.js']
@@ -129,13 +128,14 @@ async function waitUntil(predicate, timeoutMs = 5000) {
   const simulatedPlatformEnv = {
     PATH: 'C:\\Windows\\System32', SYSTEMROOT: 'C:\\Windows', TEMP: 'C:\\Temp',
     CETAMESH_EXTENSION_ID: 'fixture-ext', CETAMESH_EXTENSION_VERSION: '1.0.0',
-    CETAMESH_EXTENSION_FINGERPRINT: 'sha256:fixture', USERPROFILE: 'C:\\Users\\owner',
+    CETAMESH_EXTENSION_FINGERPRINT: 'sha256:fixture', CETAMESH_EXTENSION_PACKAGE_FINGERPRINT: 'b'.repeat(64),
+    USERPROFILE: 'C:\\Users\\owner',
     HOMEDRIVE: 'C:', LOGONSERVER: '\\\\domain-controller', AWS_ACCESS_KEY_ID: 'injected-secret'
   };
   sanitizeExtensionWorkerEnv(simulatedPlatformEnv);
   assert.deepEqual(Object.keys(simulatedPlatformEnv).sort(), [
-    'CETAMESH_EXTENSION_FINGERPRINT', 'CETAMESH_EXTENSION_ID', 'CETAMESH_EXTENSION_VERSION',
-    'PATH', 'SYSTEMROOT', 'TEMP'
+    'CETAMESH_EXTENSION_FINGERPRINT', 'CETAMESH_EXTENSION_ID', 'CETAMESH_EXTENSION_PACKAGE_FINGERPRINT',
+    'CETAMESH_EXTENSION_VERSION', 'PATH', 'SYSTEMROOT', 'TEMP'
   ]);
   ok('worker env 采用空白 allowlist；source 与 SEA 使用不同参数');
 }
@@ -155,6 +155,24 @@ async function waitUntil(predicate, timeoutMs = 5000) {
     assert.deepEqual(results.map((item) => item.result), [{ sequence: 1 }, { sequence: 2 }]);
     assert.equal(await host.ping({ timeoutMs: 2000 }), true, 'real Worker answers heartbeat ping');
     ok('ProcessExtensionHost 真实 spawn 支持并行 invoke');
+  } finally {
+    await host.shutdown();
+    fixture.cleanup();
+  }
+}
+
+// The Worker verifies the full package digest that was reviewed by the Host before loading code.
+{
+  const fixture = makeInstalledPackage();
+  const host = createProcessExtensionHost({
+    manifest: fixture.manifest, packageRoot: fixture.packageRoot, storeRoot: fixture.storeRoot,
+    extensionId: fixture.manifest.id, version: fixture.manifest.version, packageFingerprint: '0'.repeat(64),
+    packaged: false, timeoutMs: 1000
+  });
+  try {
+    assert.equal(await host.ping({ timeoutMs: 500 }), false, 'tampered package digest prevents Worker startup');
+    await waitUntil(() => host.health().state === 'crashed');
+    ok('Worker rejects a package whose content no longer matches its approved digest');
   } finally {
     await host.shutdown();
     fixture.cleanup();
@@ -302,7 +320,7 @@ async function waitUntil(predicate, timeoutMs = 5000) {
     assert.equal(frame.kind, 'pong');
     assert.equal(path.resolve(frame.result.cwd), path.resolve(fixture.packageRoot));
     const envKeys = Object.keys(frame.result.env).map((key) => key.toUpperCase());
-    const allowlistedKeys = ['PATH', 'TEMP', 'TMP', 'SYSTEMROOT', 'CETAMESH_EXTENSION_ID', 'CETAMESH_EXTENSION_VERSION', 'CETAMESH_EXTENSION_FINGERPRINT'];
+    const allowlistedKeys = ['PATH', 'TEMP', 'TMP', 'SYSTEMROOT', 'CETAMESH_EXTENSION_ID', 'CETAMESH_EXTENSION_VERSION', 'CETAMESH_EXTENSION_FINGERPRINT', 'CETAMESH_EXTENSION_PACKAGE_FINGERPRINT'];
     assert.ok(envKeys.every((key) => allowlistedKeys.includes(key)), 'unexpected Worker env key(s): ' + envKeys.join(', '));
     assert.equal(frame.result.env.OPENAI_API_KEY, undefined);
     assert.equal(frame.result.env.WHALEBRIDGE_CONSOLE_TOKEN, undefined);
@@ -368,7 +386,8 @@ async function waitUntil(predicate, timeoutMs = 5000) {
     const child = spawnSync(process.execPath, [workerEntry], {
       cwd: packageRoot,
       env: buildExtensionWorkerEnv({ parentEnv: process.env, metadata: {
-        extensionId: workerManifest.id, version: workerManifest.version, fingerprint: manifestFingerprint(workerManifest)
+        extensionId: workerManifest.id, version: workerManifest.version, fingerprint: manifestFingerprint(workerManifest),
+        packageFingerprint: fingerprintExtensionPackage(packageRoot)
       } }),
       input, encoding: 'utf8', timeout: 5000, windowsHide: true
     });
