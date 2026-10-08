@@ -9,6 +9,8 @@
 // 锁定项（locked）表达的是"这不是偏好，而是产品的安全姿态"：
 // 用户可以看见它、知道它开着，但不能在 UI 上把它关掉。试图关闭 -> LOCKED_SETTING。
 
+import { DEFAULT_GITHUB_FALLBACK_MANIFEST_URL, DEFAULT_GITCODE_MANIFEST_URL } from '../update/sources.js';
+
 export const SETTINGS_SCHEMA_VERSION = 1;
 
 export const SETTING_SECTIONS = Object.freeze([
@@ -88,12 +90,13 @@ export const FIELDS = Object.freeze({
       description: '日志脱敏（API key / Token / 配对密钥 / 私钥 / 凭据 / 完整敏感 prompt，安全姿态，不可关闭）'
     }),
     auditRetention: num(500, { min: 0, max: 10000, description: '审计保留条数' }),
-    allowedUpdateHosts: text('github.com,objects.githubusercontent.com', { description: '允许的更新下载主机（逗号分隔）' })
+    allowedUpdateHosts: text('github.com,objects.githubusercontent.com,gitcode.com,raw.gitcode.com', { description: '允许的更新下载主机（逗号分隔）' })
   }),
   updates: Object.freeze({
     channel: text('stable', { choices: ['stable', 'beta'], description: '更新通道' }),
     autoCheck: bool(false, { description: '启动时自动检查更新（默认关闭）' }),
-    manifestUrl: text('', { description: '更新清单 HTTPS 地址' }),
+    manifestUrl: text(DEFAULT_GITCODE_MANIFEST_URL, { description: '主更新源清单 HTTPS 地址（默认：GitCode 中国区优先源）' }),
+    fallbackManifestUrl: text(DEFAULT_GITHUB_FALLBACK_MANIFEST_URL, { description: '备用更新源清单 HTTPS 地址（默认：GitHub；仅主源失败时访问）' }),
     pinnedPublicKey: text('', { description: '签名验证公钥（Ed25519, SPKI PEM）' })
   }),
   advanced: Object.freeze({

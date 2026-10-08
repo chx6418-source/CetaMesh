@@ -94,6 +94,7 @@ const REGISTRY = {
   'test-vision-media.mjs': { category: 'runtime' },
   'test-local-services.mjs': { category: 'runtime' },
   'test-system-pages.mjs': { category: 'runtime' },
+  'test-update-source.mjs': { category: 'runtime', note: '分发运行时：GitCode 主源 + GitHub 备用 + 校验下载' },
 
   // ── integration：DSH / MCP / 进程间链路 ────────────────────────────────────
   'test-dsh-integration.mjs': { category: 'integration' },
