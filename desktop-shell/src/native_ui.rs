@@ -2306,7 +2306,15 @@ ApiCall::Family { method, params } => api.request(method, params),
             crate::supervisor::write_shell_log(
                 &self.data_dir,
                 &format!(
-                    "[ui] 主题已应用：{}（偏好：{}）",
+                    // The `深色/浅色` prefix keeps the historical shell-log contract
+                    // (`test-desktop-shell` waits for it after switching the stored
+                    // preference to dark); the label names which theme was chosen.
+                    "[ui] 主题已应用：{} · {}（偏好：{}）",
+                    if theme.resolves_to_dark(false) {
+                        "深色"
+                    } else {
+                        "浅色"
+                    },
                     theme.label(),
                     prefs.theme.as_str()
                 ),
