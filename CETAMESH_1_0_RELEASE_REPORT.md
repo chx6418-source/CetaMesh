@@ -32,7 +32,7 @@ Integration branch: `codex/production-release-integration`
 | Theme migration | **PASS (automated/history); manual QA NOT_RUN** | Existing migration report and automated Desktop checks cover the 10 themes. No live screenshot review was completed in this integration run. |
 | GitCode distribution / GitHub fallback | **NOT_RUN_ENVIRONMENT** | GitCode updater implementation is present, but release publication and fallback pull were not verified. `git ls-remote` against both remotes failed with `SEC_E_NO_CREDENTIALS`; `gh` CLI was unavailable. No cloud push occurred. |
 
-After the user explicitly selected both remotes, the Desktop integration branch was pushed to GitHub `origin` as `codex/production-release-integration`. GitCode branch push was attempted but could not obtain a password (`unable to get password from user`), so GitCode synchronization remains incomplete. The Mobile integration branch was also pushed to its GitHub `origin`; its GitCode push is blocked by the same missing credential. No `main` branch was pushed and no release was published.
+After the user explicitly selected both remotes, the Desktop integration branch was pushed to GitHub `origin` and GitCode as `codex/production-release-integration` (HEAD `a50b022`). The Mobile integration branch was pushed to GitHub `origin` as `codex/production-release-integration` (HEAD `4b80d2d`). Its GitCode remote points to the same `ygdnn/CetaMesh` repository as Desktop, where that common branch name already contains Desktop history; to avoid overwriting it, the Mobile commit was pushed to the distinct GitCode branch `codex/mobile-production-release-integration` (HEAD `4b80d2d`). Remote refs were verified. No `main` branch was pushed and no release was published.
 
 ## Artifact facts
 
