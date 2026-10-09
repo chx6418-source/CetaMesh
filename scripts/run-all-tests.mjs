@@ -79,6 +79,7 @@ const REGISTRY = {
   'test-memory-link.mjs': { category: 'runtime' },
   'test-state-retention.mjs': { category: 'runtime' },
   'test-task-runtime.mjs': { category: 'runtime' },
+  'test-product-context.mjs': { category: 'runtime' },
   'test-continuity-rollover.mjs': { category: 'runtime' },
   'test-continuity-auto-rollover.mjs': { category: 'runtime' },
   'test-model-runtime.mjs': { category: 'runtime' },
