@@ -32,7 +32,7 @@ function ok(label) { step += 1; console.log(`✅ [${step}] ${label}`); }
 
 /** 真实 TCP HTTP 服务器：模拟 OpenAI 兼容 Provider（流式 SSE + 校验 Authorization）。 */
 function startProviderServer({ mode = 'ok', latencyMs = 0 } = {}) {
-  const state = { mode };
+  const state = { mode, requests: [] };
   const server = http.createServer((req, res) => {
     let body = '';
     req.on('data', (chunk) => { body += chunk; });
@@ -49,6 +49,7 @@ function startProviderServer({ mode = 'ok', latencyMs = 0 } = {}) {
         return;
       }
       const payload = JSON.parse(body || '{}');
+      state.requests.push(payload);
       const respond = () => {
         if (mode === 'stream-abort-hang') {
           // 先吐两个增量然后挂住不结束：客户端 abort 的真实测试点。
@@ -71,6 +72,7 @@ function startProviderServer({ mode = 'ok', latencyMs = 0 } = {}) {
     server.listen(0, '127.0.0.1', () => resolve({
       server,
       port: server.address().port,
+      requests: state.requests,
       setMode: (next) => { state.mode = next; },
       // closeAllConnections：挂住的 abort fixture socket 不结束，必须强断，
       // 否则 close() 永不返回、测试进程悬死。
@@ -83,7 +85,7 @@ function startProviderServer({ mode = 'ok', latencyMs = 0 } = {}) {
 }
 
 /** 无 DSH 的 Chat 服务：api 显式 null，controlExecute 缺省——Standalone 唯一通道是 Model Runtime。 */
-function makeChatService(stateDir, port) {
+function makeChatService(stateDir, port, { buildProductContext } = {}) {
   const secrets = createProviderSecrets({ root: stateDir });
   secrets.set({ provider: 'fixture-provider', apiKey: VALID_KEY });
   const registry = createModelProviderRegistry({
@@ -102,6 +104,7 @@ function makeChatService(stateDir, port) {
     api: null,             // 无 DSH 客户端对象：任何 DSH 路径都必然 requireDshApi 报错
     controlExecute: null,  // 无 DSH 模型目录
     modelRuntime,
+    buildProductContext,
     defaults: { provider: 'deepseek-official', model: '', reasoningEffort: 'max' },
     stateDir
   });
@@ -109,9 +112,15 @@ function makeChatService(stateDir, port) {
 
 // ── 1. 零 DSH 依赖的完整 Chat 回合（真实 HTTP 流式） ─────────────────────────
 {
-  const { server, port, close } = await startProviderServer();
+  const { server, port, close, requests } = await startProviderServer();
   const stateDir = path.join(temp, 'case1');
-  const service = makeChatService(stateDir, port);
+  const contextCalls = [];
+  const service = makeChatService(stateDir, port, {
+    buildProductContext: async (request) => {
+      contextCalls.push(request);
+      return JSON.stringify({ schemaVersion: 1, mode: 'chat', task: null, workspace: null });
+    }
+  });
   const created = await service.execute({ method: 'chat.sessions.create', params: {} });
   await service.execute({ method: 'chat.config.set', params: { id: created.id, config: { modelProvider: 'fixture-provider', model: 'fixture-model-a', reasoning: 'off' } } });
   await service.execute({ method: 'chat.send', params: { id: created.id, text: '只回复两个字：收到' } });
@@ -127,6 +136,15 @@ function makeChatService(stateDir, port) {
   assert.equal(history.messages.length, 2);
   assert.equal(history.messages[1].text, '你好，收到。', '流式增量组装为最终文本');
   assert.deepEqual(history.messages[1].usage, { prompt_tokens: 21, completion_tokens: 4, total_tokens: 25 }, '真实 usage 透传');
+  assert.equal(contextCalls.length, 1, '每个 Model 回合解析一次动态上下文');
+  assert.equal(contextCalls[0].record.taskId, null, '普通聊天不会创建或附加 Task');
+  assert.equal(contextCalls[0].record.config.workspaceId, null, '普通聊天不自动附加 Workspace');
+  assert.equal(contextCalls[0].modelProvider, 'fixture-provider');
+  assert.match(requests[0].messages[0].content, /You are operating inside CetaMesh/);
+  assert.match(requests[0].messages[1].content, /"schemaVersion":1/);
+  assert.equal(requests[0].messages.at(-1).role, 'user');
+  assert.equal(JSON.stringify(history).includes('You are operating inside CetaMesh'), false, '身份与动态上下文不落入 Chat 历史');
+  assert.equal(JSON.stringify(history).includes('"schemaVersion":1'), false, '动态上下文不落入 Chat 历史');
   await close();
   ok('零 DSH 依赖：无 api/controlExecute 构造的 Chat 完成真实 HTTP 流式回合 + usage 落盘');
 }

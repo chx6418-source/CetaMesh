@@ -25,6 +25,7 @@ import { createChannelService } from '../channel/service.js';
 import { createSettingsService } from '../settings/service.js';
 import { createAboutService } from '../about/service.js';
 import { createUpdateService } from '../update/service.js';
+import { createProductContextService } from '../context/service.js';
 
 const DEFAULT_DSH_CONFIG = Object.freeze({
   provider: 'deepseek-official',
@@ -79,8 +80,11 @@ export function createCetaMeshServices(options = {}) {
     ]
   });
   const modelRuntime = createModelRuntimeService({ registry: modelRegistry, secrets: providerSecrets, log });
+  // Chat and Managed Agent are composed before all context sources exist; the callback is bound later.
+  let productContextService = null;
   const managedAgent = createManagedAgentProvider({
     modelRuntime,
+    buildProductContext: request => productContextService?.buildForAgent(request),
     capabilityExecutor: request => capabilityService.broker.execute(request),
     taskPrincipalResolver: ({ provider, sessionId }) => {
       const task = taskService.runtime.findByAgent({ provider, sessionId });
@@ -101,6 +105,7 @@ export function createCetaMeshServices(options = {}) {
     agentExecute: command => agentService.execute(command),
     modelRuntime,
     router: routerService,
+    buildProductContext: request => productContextService?.buildForChat(request),
     platformRoute: request => platformRuntime.route(request),
     agentFollow: request => agentBroker.follow(request),
     defaults: dshDefaults,
@@ -193,6 +198,15 @@ export function createCetaMeshServices(options = {}) {
     }
   });
 
+  productContextService = createProductContextService({
+    taskRuntime: taskService.runtime,
+    workspaceService,
+    memoryService,
+    capabilityService,
+    extensionService,
+    agentBroker
+  });
+
   const aboutService = createAboutService({ rootDir: sourceRoot });
   const settingsService = createSettingsService({ stateDir });
   const updateService = createUpdateService({
@@ -213,6 +227,7 @@ export function createCetaMeshServices(options = {}) {
     managedAgent,
     modelRegistry,
     modelRuntime,
+    productContextService,
     routerService,
     chatService,
     memoryService,

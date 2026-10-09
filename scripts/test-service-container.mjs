@@ -32,6 +32,7 @@ try {
   for (const name of [
     'modelRuntime',
     'chatService',
+    'productContextService',
     'routerService',
     'taskService',
     'memoryService',
@@ -51,6 +52,82 @@ try {
   assert.ok(providers.includes('cetamesh'), 'local CetaMesh Agent Provider remains available');
   assert.equal(providers.includes('dsh'), false, 'DSH provider is absent when no DSH API is injected');
   assert.equal(networkAttempts, 0, 'constructing Core services does not probe a provider');
+
+  const simpleContext = JSON.parse(await services.productContextService.buildForChat({
+    record: { id: 'simple-chat', taskId: null, config: { mode: 'chat', workspaceId: null } },
+    routing: { class: 'simple', resolvedRoute: 'model' },
+    modelProvider: 'openai'
+  }));
+  assert.equal(simpleContext.task, null);
+  assert.equal(simpleContext.workspace, null, 'simple Chat does not attach the active Workspace');
+  assert.deepEqual(simpleContext.capabilities.requestable, [], 'Chat has no arbitrary model-callable capability ids');
+
+  const workspaceRoot = path.join(root, 'linked-workspace');
+  fs.mkdirSync(workspaceRoot);
+  const { workspace } = await services.workspaceService.execute({
+    method: 'workspace.create', params: { name: 'Linked Project', root: workspaceRoot }
+  });
+  const noLinks = JSON.parse(await services.productContextService.buildForChat({
+    record: { id: 'unlinked-chat', taskId: null, config: { mode: 'chat', workspaceId: null } },
+    routing: null,
+    modelProvider: 'openai'
+  }));
+  assert.equal(noLinks.workspace, null, 'an active Workspace is not substituted for an absent explicit link');
+
+  const task = services.taskService.runtime.create({ goal: 'Use only linked project context', workspaceId: workspace.id, currentPhase: 'inspect' });
+  const userPrincipal = { kind: 'user', id: 'desktop' };
+  const linkedMemory = services.memoryService.runtime.create({
+    principal: userPrincipal, type: 'working', scope: `task:${task.id}`, content: 'Authorized task memory reference'
+  });
+  const foreignMemory = services.memoryService.runtime.create({
+    principal: userPrincipal, type: 'working', scope: 'task:unrelated', content: 'Unrelated task memory must stay hidden'
+  });
+  let currentTask = services.taskService.runtime.get({ id: task.id }).task;
+  currentTask = services.taskService.runtime.linkMemory({ id: task.id, expectedRev: currentTask.rev, memoryId: linkedMemory.id });
+  currentTask = services.taskService.runtime.linkMemory({ id: task.id, expectedRev: currentTask.rev, memoryId: foreignMemory.id });
+
+  const linkedContext = JSON.parse(await services.productContextService.buildForChat({
+    record: { id: 'linked-chat', taskId: task.id, config: { mode: 'chat', workspaceId: workspace.id } },
+    routing: { class: 'project', resolvedRoute: 'model' },
+    modelProvider: 'openai'
+  }));
+  assert.equal(linkedContext.task.id, task.id);
+  assert.equal(linkedContext.workspace.name, 'Linked Project');
+  assert.equal(linkedContext.workspace.root, undefined);
+  assert.equal(linkedContext.memoryReferences.length, 1, 'unresolvable cross-scope Memory references are omitted');
+  assert.match(linkedContext.memoryReferences[0].excerpt, /Authorized task memory reference/);
+  assert.equal(JSON.stringify(linkedContext).includes(foreignMemory.id), false);
+
+  const taskOnly = JSON.parse(await services.productContextService.buildForChat({
+    record: { id: 'task-only-chat', taskId: task.id, config: { mode: 'chat', workspaceId: null } },
+    routing: null,
+    modelProvider: 'openai'
+  }));
+  assert.equal(taskOnly.task.id, task.id);
+  assert.equal(taskOnly.workspace, null, 'Task workspace is not substituted for the Chat’s missing explicit Workspace link');
+  const staleLinks = JSON.parse(await services.productContextService.buildForChat({
+    record: { id: 'stale-chat', taskId: 'missing-task', config: { mode: 'chat', workspaceId: 'missing-workspace' } },
+    routing: null,
+    modelProvider: 'openai'
+  }));
+  assert.equal(staleLinks.task, null);
+  assert.equal(staleLinks.workspace, null);
+
+  const agentPrincipal = services.capabilityService.grantTask(task.id, { capabilities: ['filesystem.read', 'web.search'] });
+  const agentSessionId = `context-agent-${task.id}`;
+  services.taskService.runtime.attachAgent({ id: task.id, expectedRev: currentTask.rev, provider: 'cetamesh', sessionId: agentSessionId });
+  const agentContext = JSON.parse(await services.productContextService.buildForAgent({
+    sessionId: agentSessionId,
+    provider: 'cetamesh',
+    principal: { taskId: task.id, workspaceId: workspace.id, actor: agentPrincipal },
+    modelProvider: 'openai',
+    model: 'gpt-4o-mini'
+  }));
+  assert.deepEqual(agentContext.capabilities.requestable, ['filesystem.read', 'web.search']);
+  assert.deepEqual(agentContext.capabilities.mcp, ['web.search']);
+  const cetameshProvider = agentContext.agentProviders.find((provider) => provider.id === 'cetamesh');
+  assert.equal(cetameshProvider.availability, 'registered');
+  assert.equal(cetameshProvider.health, 'unknown', 'context construction does not probe provider health');
 
   const { createApplicationLifecycle } = await import('../src/app/lifecycle.js');
   const lifecycle = createApplicationLifecycle({

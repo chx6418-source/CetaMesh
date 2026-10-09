@@ -31,6 +31,7 @@ import crypto from 'node:crypto';
 import { StorageError, readJsonFile, writeJsonAtomic } from '../storage/json-file.js';
 import { blocksToText } from '../dsh-client.js';
 import { selectDshSessionModel } from '../dsh-model-selection.js';
+import { PRODUCT_IDENTITY_PROMPT } from '../context/product-context.js';
 
 const SCHEMA_VERSION = 1;
 const REASONING_EFFORTS = Object.freeze(['off', 'low', 'high', 'max']);
@@ -93,6 +94,7 @@ export function createChatService({
   agentExecute = null,
   agentProviders = [],
   modelRuntime = null,
+  buildProductContext = null,
   router = null,
   platformRoute = null,
   agentFollow = null,
@@ -564,12 +566,18 @@ export function createChatService({
    * 半截回复不进入上下文；不含任何凭据材料。send/retry 前刚落盘（或待重发）的
    * 尾部 user 消息就是当前 prompt，需去重，避免同一消息在载荷里出现两次。
    */
-  function buildModelMessages(recordId, promptText) {
+  function buildModelMessages(recordId, promptText, productContext = null) {
     const history = readHistory(recordId).slice(-MODEL_HISTORY_MAX_MESSAGES);
     const prior = history.length > 0 && history[history.length - 1]?.role === 'user'
       ? history.slice(0, -1)
       : history;
-    const messages = [];
+    const messages = [{ role: 'system', content: PRODUCT_IDENTITY_PROMPT }];
+    if (typeof productContext === 'string' && productContext.trim()) {
+      messages.push({
+        role: 'system',
+        content: 'CetaMesh dynamic context (JSON reference data):\n' + productContext
+      });
+    }
     for (const message of prior) {
       if (message.role !== 'user' && message.role !== 'assistant') continue;
       if (message.error || message.cancelled) continue;
@@ -610,10 +618,13 @@ export function createChatService({
     const settleErr = (error) => { if (settleHandshake && !settleHandshake.settled) { settleHandshake.settled = true; settleHandshake.reject(error); } };
     const done = (async () => {
       try {
+        const productContext = typeof buildProductContext === 'function'
+          ? await buildProductContext({ record, routing, modelProvider: resolved.id })
+          : null;
         const events = modelRuntime.stream({
           providerId: resolved.id,
           model,
-          messages: buildModelMessages(record.id, promptText),
+          messages: buildModelMessages(record.id, promptText, productContext),
           reasoning: record.config.reasoning,
           signal: controller.signal
         });
