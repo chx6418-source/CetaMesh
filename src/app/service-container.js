@@ -23,6 +23,7 @@ import { createExtensionService } from '../extension/service.js';
 import { createMeshService } from '../mesh/service.js';
 import { createChannelService } from '../channel/service.js';
 import { createSettingsService } from '../settings/service.js';
+import { createIntegrationService } from '../integrations/index.js';
 import { createAboutService } from '../about/service.js';
 import { createUpdateService } from '../update/service.js';
 
@@ -193,6 +194,19 @@ export function createCetaMeshServices(options = {}) {
     }
   });
 
+  // 产品化任务 B：Plugins / Tools / MCP 统一入口。底层仍是既有 Channel/Agent Provider 与
+  // Extension/ProcessExtensionHost；本服务只做注册表、开关、生命周期与能力边界适配。
+  const integrationService = createIntegrationService({
+    stateDir,
+    capabilityBroker: capabilityService.broker,
+    ...(options.localServices ? { localServices: options.localServices } : {}),
+    providerSnapshot: () => ({
+      channel: channelService.registry.list().map(channel => channel.id),
+      agent: agentService.listProviders().map(provider => provider.id)
+    }),
+    log
+  });
+
   const aboutService = createAboutService({ rootDir: sourceRoot });
   const settingsService = createSettingsService({ stateDir });
   const updateService = createUpdateService({
@@ -225,6 +239,7 @@ export function createCetaMeshServices(options = {}) {
     extensionService,
     meshService,
     channelService,
+    integrationService,
     aboutService,
     settingsService,
     updateService,
