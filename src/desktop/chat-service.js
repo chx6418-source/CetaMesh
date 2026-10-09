@@ -619,7 +619,7 @@ export function createChatService({
     const done = (async () => {
       try {
         const productContext = typeof buildProductContext === 'function'
-          ? await buildProductContext({ record, routing, modelProvider: resolved.id })
+          ? await buildProductContext({ record, routing, modelProvider: resolved.id, model })
           : null;
         const events = modelRuntime.stream({
           providerId: resolved.id,

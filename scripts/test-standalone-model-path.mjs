@@ -85,7 +85,7 @@ function startProviderServer({ mode = 'ok', latencyMs = 0 } = {}) {
 }
 
 /** 无 DSH 的 Chat 服务：api 显式 null，controlExecute 缺省——Standalone 唯一通道是 Model Runtime。 */
-function makeChatService(stateDir, port, { buildProductContext } = {}) {
+function makeChatService(stateDir, port, { buildProductContext, defaultModel = '' } = {}) {
   const secrets = createProviderSecrets({ root: stateDir });
   secrets.set({ provider: 'fixture-provider', apiKey: VALID_KEY });
   const registry = createModelProviderRegistry({
@@ -105,7 +105,7 @@ function makeChatService(stateDir, port, { buildProductContext } = {}) {
     controlExecute: null,  // 无 DSH 模型目录
     modelRuntime,
     buildProductContext,
-    defaults: { provider: 'deepseek-official', model: '', reasoningEffort: 'max' },
+    defaults: { provider: 'deepseek-official', model: defaultModel, reasoningEffort: 'max' },
     stateDir
   });
 }
@@ -116,6 +116,7 @@ function makeChatService(stateDir, port, { buildProductContext } = {}) {
   const stateDir = path.join(temp, 'case1');
   const contextCalls = [];
   const service = makeChatService(stateDir, port, {
+    defaultModel: 'fixture-model-a',
     buildProductContext: async (request) => {
       contextCalls.push(request);
       return JSON.stringify({ schemaVersion: 1, mode: 'chat', task: null, workspace: null });
@@ -140,6 +141,8 @@ function makeChatService(stateDir, port, { buildProductContext } = {}) {
   assert.equal(contextCalls[0].record.taskId, null, '普通聊天不会创建或附加 Task');
   assert.equal(contextCalls[0].record.config.workspaceId, null, '普通聊天不自动附加 Workspace');
   assert.equal(contextCalls[0].modelProvider, 'fixture-provider');
+  assert.equal(contextCalls[0].model, null, 'provider default model is not reported as an explicit model selection');
+  assert.equal(requests[0].model, 'fixture-model-a', 'provider resolves its own default model for the request');
   assert.match(requests[0].messages[0].content, /You are operating inside CetaMesh/);
   assert.match(requests[0].messages[1].content, /"schemaVersion":1/);
   assert.equal(requests[0].messages.at(-1).role, 'user');

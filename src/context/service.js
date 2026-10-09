@@ -115,7 +115,7 @@ export function createProductContextService({
   extensionService,
   agentBroker
 } = {}) {
-  async function buildForChat({ record, routing, modelProvider } = {}) {
+  async function buildForChat({ record, routing, modelProvider, model } = {}) {
     const source = record && typeof record === 'object' ? record : {};
     const task = taskFromRuntime(taskRuntime, source.taskId);
     const workspaceId = source.config?.workspaceId;
@@ -135,7 +135,7 @@ export function createProductContextService({
       workspace,
       memoryReferences,
       modelProvider,
-      model: source.config?.model,
+      model,
       registered: registeredCapabilities(capabilityService),
       extensionService,
       agentBroker
