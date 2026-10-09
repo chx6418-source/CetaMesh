@@ -70,6 +70,45 @@ function registeredCapabilities(capabilityService) {
   return capabilityService?.broker?.list?.() ?? [];
 }
 
+function capabilityAvailabilityFromExtensions(extensions) {
+  const availabilityByCapability = new Map();
+  if (!Array.isArray(extensions)) return availabilityByCapability;
+
+  for (const extension of extensions) {
+    if (!extension || typeof extension.id !== 'string' || !Array.isArray(extension.capabilities)) continue;
+    const runtimeState = typeof extension.runtimeState === 'string' ? extension.runtimeState : '';
+    let availability;
+    if (extension.status === 'enabled') {
+      availability = ['crashed', 'unresponsive'].includes(runtimeState) || extension.health?.crashed === true
+        ? 'unavailable'
+        : extension.loaded === true && ['starting', 'running', 'healthy'].includes(runtimeState)
+          ? 'available'
+          : 'registered';
+    } else if (extension.status === 'disabled' || extension.status === 'installed') {
+      availability = 'disabled';
+    } else {
+      availability = 'unavailable';
+    }
+
+    for (const capability of extension.capabilities) {
+      if (typeof capability !== 'string' || !capability) continue;
+      availabilityByCapability.set(`extension.${extension.id}.${capability}`, availability);
+    }
+  }
+  return availabilityByCapability;
+}
+
+function applyExtensionAvailability(registered, extensions) {
+  const availabilityByCapability = capabilityAvailabilityFromExtensions(extensions);
+  return (Array.isArray(registered) ? registered : []).map((capability) => {
+    if (capability?.provider !== 'extension') return capability;
+    return {
+      ...capability,
+      availability: availabilityByCapability.get(capability.id) ?? 'unavailable'
+    };
+  });
+}
+
 function serializeContext({
   mode,
   executionPath,
@@ -86,8 +125,9 @@ function serializeContext({
   extensionService,
   agentBroker
 }) {
+  const extensions = extensionSummaries(extensionService);
   const capabilities = buildCapabilityContext({
-    registered,
+    registered: applyExtensionAvailability(registered, extensions),
     grantedIds,
     requestableIds,
     executionPath
@@ -101,7 +141,7 @@ function serializeContext({
     workspace,
     memoryReferences,
     capabilities,
-    extensions: extensionSummaries(extensionService),
+    extensions,
     agentProviders: agentProviderSummaries(agentBroker)
   });
 }

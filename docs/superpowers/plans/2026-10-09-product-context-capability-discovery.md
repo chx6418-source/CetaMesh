@@ -67,11 +67,11 @@
 - Create: PRODUCT_INTELLIGENCE_RUNTIME_REPORT.md
 
 **Interfaces:**
-- createProductContextService({ taskRuntime, workspaceService, memoryService, capabilityService, extensionService, agentBroker }) returns buildForChat({ record, routing, modelProvider }) and buildForAgent({ sessionId, provider, principal, modelProvider, model }).
+- createProductContextService({ taskRuntime, workspaceService, memoryService, capabilityService, extensionService, agentBroker }) returns buildForChat({ record, routing, modelProvider, model }) and buildForAgent({ sessionId, provider, principal, modelProvider, model }).
 - buildForChat resolves only record.taskId and record.config.workspaceId; it does not substitute the active Workspace when either link is absent or stale. Chat has no arbitrary model-callable capability ids in this slice; the existing deterministic Smart Router result remains reference data.
 - buildForAgent re-resolves the live Task principal for every inference step and advertises only its current granted capabilities as requestable through the existing structured protocol.
 - Both methods return the serialized JSON string from Task 1. Memory refs go through memoryService.runtime.resolveReferences with the user principal for Chat and current Task actor for Managed Agent.
-- The context service reads capabilityService.broker.list(), extensionService.runtime.overview(), and agentBroker.listProviders(). It does not call external Agent health endpoints just to build Chat context; unknown provider health remains unknown.
+- The context service reads capabilityService.broker.list(), extensionService.runtime.overview(), and agentBroker.listProviders(). Extension availability is joined with broker registrations so disabled, removed, and crash-disabled extension capabilities are not requestable. It does not call external Agent health endpoints just to build Chat context; unknown provider health remains unknown.
 - Chat and Managed Agent constructors accept a buildProductContext callback. Chat calls it after Smart Router resolution and before Model Runtime streaming. Managed Agent calls it before each inference step.
 - PRODUCT_INTELLIGENCE_RUNTIME_REPORT.md records only this approved slice's actual behavior, verification, and explicit deferred scope.
 
@@ -83,4 +83,4 @@
 - [x] **Step 6: Extend integration assertions** to prove simple Chat does not create Tasks, stale links do not widen scope, unauthorized Memory refs are omitted, requestable grants are accurate, and existing external Agent Provider prompt semantics stay unchanged.
 - [x] **Step 7: Write PRODUCT_INTELLIGENCE_RUNTIME_REPORT.md** with actual delivered behavior and verification; state that arbitrary model tool calling, broader Task routing, and UI changes are deferred.
 - [x] **Step 8: Run npm test** and confirm all suites pass or report environment-gated suites as NOT_RUN_ENVIRONMENT.
-- [ ] **Step 9: Review the branch diff and commit the integration, regression coverage, and report** on codex/session-20261009-rules-confirm. Do not merge, push main, or delete the branch before Owner confirmation.
+- [x] **Step 9: Review the branch diff and commit the integration, regression coverage, and report** on codex/session-20261009-rules-confirm. Do not merge, push main, or delete the branch before Owner confirmation.
