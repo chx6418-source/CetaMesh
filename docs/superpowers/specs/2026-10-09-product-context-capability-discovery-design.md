@@ -1,6 +1,6 @@
 # CetaMesh Product Context and Capability Discovery Design
 
-**Status:** Draft for Owner review  
+**Status:** Draft for Owner review
 **Scope:** Product Context and Capability Discovery (first vertical slice of productization task A)
 
 ## Goal
