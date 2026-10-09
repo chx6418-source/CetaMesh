@@ -97,6 +97,9 @@ const REGISTRY = {
   'test-vision-media.mjs': { category: 'runtime' },
   'test-local-services.mjs': { category: 'runtime' },
   'test-system-pages.mjs': { category: 'runtime' },
+  'test-product-services.mjs': { category: 'runtime', note: '产品化 D：About / 更新公告 / 诊断脱敏 / 反馈离线队列与重试 / 新 IPC 命名空间' },
+  'test-onboarding.mjs': { category: 'runtime', note: '产品化 D：首次运行引导（无 QQ/DSH/移动端也可完成）' },
+  'test-product-copy.mjs': { category: 'runtime', note: '产品化 D：空状态文案与 Provider 基础/高级字段分离' },
   'test-update-source.mjs': { category: 'runtime', note: '分发运行时：GitCode 主源 + GitHub 备用 + 校验下载' },
 
   // ── integration：DSH / MCP / 进程间链路 ────────────────────────────────────

@@ -3,6 +3,20 @@ export { createUpdateService } from './service.js';
 export { createUpdateChecker } from './checker.js';
 export { verifyManifestSignature } from './verify.js';
 export {
+  NOTES_CACHE_FILENAME,
+  NOTES_CACHE_VERSION,
+  createNotesCache
+} from './notes-cache.js';
+export {
+  RELEASE_NOTE_MAX,
+  RELEASE_NOTES_MAX_ITEMS,
+  RELEASE_TEXT_MAX,
+  RELEASE_TITLE_MAX,
+  buildReleaseAnnouncement,
+  plainTextFromMarkdown,
+  sanitizeReleaseNotes
+} from './notes.js';
+export {
   DOWNLOAD_MAX_BYTES_DEFAULT,
   DOWNLOAD_MAX_REDIRECTS_DEFAULT,
   DOWNLOAD_TIMEOUT_MS_DEFAULT,

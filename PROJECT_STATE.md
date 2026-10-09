@@ -92,7 +92,18 @@
 - 桌面壳 `supervisor.rs` 的 HTTP 探活 fallback 已是死代码（待后续会话删除）。
 - NOT_RUN_ENVIRONMENT（无真实环境时如实不跑）：真实 provider-key 回合 / 真实 QQ / 跨设备 Mesh / 签名 / 真实发行产物。
 
-## Active Work (none)
+## Active Work
+
+- **产品化任务 D（Product Services / Onboarding / Feedback）**：工作分支 `codex/session-20261009-2145-rules-confirm`，
+  隔离工作区 `.worktrees/2026-10-09-2145`（基线本地 `main` = `ce83264`）。交付物与验收见 `PRODUCT_SERVICES_REPORT.md`：
+  About 服务（build/release manifest 驱动，不写死版本）、更新公告安全渲染 + 离线缓存、Feedback（本地 Outbox +
+  自动/手动重试 + 诊断 redaction + 安全漏洞最小 metadata）、First Run Onboarding（7 步，**不依赖 QQ/DSH/移动端**）、
+  Provider 基础/高级字段视图与空状态文案；新增 `test-product-services` / `test-onboarding` / `test-product-copy`
+  三个套件（已登记聚合器）。验证：`npm test` → **PASS 69 · FAIL 1 · NOT_RUN_ENVIRONMENT 9**，唯一 FAIL 为
+  `desktop/cargo:test`（本会话受限令牌无法在用户 TEMP 建目录，`desktop-shell/` 零改动；见报告 §6.5）。
+  **等 Owner 确认后合并 `main`、删除工作分支**。本轮按"不要大改最终 UI"未改桌面壳 UI，
+  UI 需要的 IPC 契约（`about.*` / `update.notes` / `feedback.*` / `onboarding.*` / `product.*`）见报告。
+
 - 上线冲刺任务 B（统一配对）已完成并在 Owner 确认后合并到本地 `main`，工作分支与临时 worktree 已清理；
   Mobile 仓 `feature/unified-device-pairing-v1` 同样已合并到其本地 `main` 并删除分支。**两个仓库均未 push**（等 Owner 指示）。
 - 上线冲刺任务 D（Web → Native 高保真主题迁移）已完成并在 Owner 确认后合并到本地 `main`；工作分支

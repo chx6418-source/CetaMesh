@@ -19,12 +19,18 @@ const ROUTES = [
   ['workspace.', (services, system) => [services.capabilityService, 'executeWorkspace']],
   ['settings.', (services, system) => [system.settings, 'execute']],
   ['about.', (services, system) => [system.about, 'execute']],
-  ['update.', (services, system) => [system.update, 'execute']]
+  ['update.', (services, system) => [system.update, 'execute']],
+  // 产品化任务 D：反馈 / 首次运行引导 / 产品文案（同一份 UI 契约，见 src/feedback、src/onboarding、src/product）。
+  ['feedback.', (services, system) => [system.feedback, 'execute']],
+  ['onboarding.', (services, system) => [system.onboarding, 'execute']],
+  ['product.', (services, system) => [system.product, 'execute']]
 ];
 
 export function createDesktopIpcRuntime({
   services = {},
   system = services.systemServices ?? services.system ?? {},
+  // 最近错误码环：只记错误码（不记消息），供 About/Feedback 的诊断信息使用。
+  errorRegistry = services.errorRegistry ?? null,
   log = () => {},
   pipeName,
   processRef = process,
@@ -33,18 +39,34 @@ export function createDesktopIpcRuntime({
   let server = null;
   let exitBound = false;
 
+  /** 调用 + 记录错误码：失败仍然原样抛给 IPC 协议层（错误语义不变）。 */
+  function invoke(invokeFn, method) {
+    const source = String(method ?? '').split('.')[0] || null;
+    try {
+      const result = invokeFn();
+      if (!errorRegistry || !result || typeof result.catch !== 'function') return result;
+      return result.catch((error) => {
+        errorRegistry.recordError(error, { source });
+        throw error;
+      });
+    } catch (error) {
+      if (errorRegistry) errorRegistry.recordError(error, { source });
+      throw error;
+    }
+  }
+
   function dispatch({ method, params } = {}) {
     const name = String(method ?? '');
     const route = ROUTES.find(([prefix]) => name.startsWith(prefix));
     if (route) {
       const [owner, methodName] = route[1](services, system);
-      return owner[methodName]({ method: name, params });
+      return invoke(() => owner[methodName]({ method: name, params }), name);
     }
-    return services.controlService.execute({
+    return invoke(() => services.controlService.execute({
       method: name,
       params,
       actor: { privilege: PRIVILEGE_CONSOLE }
-    });
+    }), name);
   }
 
   function stop() {

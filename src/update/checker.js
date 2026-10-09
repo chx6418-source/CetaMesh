@@ -148,7 +148,18 @@ export function createUpdateChecker({
 
       const comparison = compareVersions(manifest.version, current);
       if (comparison <= 0) {
-        return ok({ updateAvailable: false, reason: 'UP_TO_DATE', source: source.id, current, latest: manifest.version });
+        // 即使无更新也带上公告字段：About 页要显示「最近一次更新公告」，
+        // 而这份清单此刻已经验签通过，是可信的 —— 不需要为了展示公告再请求一次网络。
+        return ok({
+          updateAvailable: false,
+          reason: 'UP_TO_DATE',
+          source: source.id,
+          current,
+          latest: manifest.version,
+          title: manifest.title,
+          publishedAt: manifest.publishedAt,
+          notes: manifest.notes
+        });
       }
 
       const artifact = selectArtifact(manifest, platform);
@@ -175,6 +186,8 @@ export function createUpdateChecker({
         current,
         latest: manifest.version,
         channel: manifest.channel,
+        title: manifest.title,
+        publishedAt: manifest.publishedAt,
         releasedAt: manifest.releasedAt,
         notes: manifest.notes,
         download: { url: artifact.url, sha256: artifact.sha256, bytes: artifact.bytes, filename: artifact.filename },

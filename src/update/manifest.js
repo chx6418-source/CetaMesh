@@ -219,6 +219,8 @@ export function validateManifest(raw) {
         product: text(raw.product, 'product', 40) || null,
         channel,
         version,
+        // 更新公告标题（产品化任务 D）：可选字段，缺失时保持 null —— About 页不得编造标题。
+        title: text(raw.title, 'title', 120) || null,
         releasedAt: text(raw.releasedAt, 'releasedAt', 40) || null,
         publishedAt: text(raw.publishedAt, 'publishedAt', 40) || null,
         sourceCommit: text(raw.sourceCommit, 'sourceCommit', 64) || null,

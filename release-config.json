@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "product": "CetaMesh",
+  "edition": "Desktop",
+  "developer": "",
+  "website": "",
+  "repositories": {
+    "gitcode": "https://gitcode.com/ygdnn/CetaMesh",
+    "github": "https://github.com/chx6418-source/whalebridge"
+  },
+  "license": {
+    "name": "GPL-3.0-only",
+    "file": "LICENSE",
+    "url": "https://www.gnu.org/licenses/gpl-3.0.html"
+  },
+  "privacy": {
+    "doc": "docs/product/PRIVACY.md"
+  },
+  "security": {
+    "doc": "docs/product/SECURITY.md",
+    "contact": ""
+  },
+  "feedback": {
+    "endpoint": "",
+    "requestTimeoutMs": 4000,
+    "outboxMaxEntries": 100
+  }
+}
