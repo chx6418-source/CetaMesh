@@ -15,6 +15,7 @@ mod mesh_ui;
 mod workspace_ui;
 mod native_installer_ui;
 mod native_ui;
+mod product_ui;
 mod theme;
 mod supervisor;
 mod tray;

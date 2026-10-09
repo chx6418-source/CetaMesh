@@ -11,6 +11,7 @@ use crate::mesh_ui::{MeshArea, MeshUi};
 use crate::tray::{TrayCommand, TrayHandle, TrayStatus};
 use crate::ui_prefs::{CloseBehavior, ThemePreference, UiPrefs};
 use crate::workspace_ui::WorkspaceUi;
+use crate::product_ui::{self, FeedbackDraft, ProductCopy};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -152,6 +153,13 @@ enum Area {
     Mesh,
     Channel,
     Workspace,
+    /// 产品化任务 D：产品文案表（`product.copy`），供三个新产品页统一取用户语言。
+    ProductCopy,
+    About,
+    AboutUpdate,
+    AboutDiagnostics,
+    Feedback,
+    Onboarding,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -219,6 +227,25 @@ enum Operation {
     PluginRestart,
     PluginDisable,
     PluginRemove,
+    // 产品化任务 D：About / 更新公告 / Feedback / 首次运行引导。
+    ProductCopyLoad,
+    AboutLoad,
+    AboutUpdateLoad,
+    AboutDiagnosticsLoad,
+    AboutUpdateCheck,
+    FeedbackConfigLoad,
+    FeedbackListLoad,
+    FeedbackSubmit,
+    FeedbackRetry,
+    FeedbackClearSent,
+    FeedbackRemove,
+    OnboardingStatusLoad,
+    OnboardingStepComplete,
+    OnboardingStepSkip,
+    OnboardingTestProvider,
+    OnboardingSetModel,
+    OnboardingFinish,
+    OnboardingReset,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -743,6 +770,37 @@ pub struct NativeUi {
     feedback: HashMap<Area, Result<Value, String>>,
     next_id: u64,
 
+    // ── 产品化任务 D：About / 更新公告 / Feedback / 首次运行引导 ──────────────
+    // 文案表先放本地兜底，`product.copy` 返回后覆盖（Core 是文案的唯一事实源）。
+    product_copy: ProductCopy,
+    product_copy_loaded: bool,
+    about_data: Option<Value>,
+    about_loaded: bool,
+    about_update_data: Option<Value>,
+    about_update_loaded: bool,
+    about_diagnostics_data: Option<Value>,
+    about_diagnostics_loaded: bool,
+    about_notice: Option<String>,
+    about_notice_error: bool,
+    feedback_config: Option<Value>,
+    feedback_config_loaded: bool,
+    feedback_list_loaded: bool,
+    /// `feedback.list` 的最近一次结果（本地队列视图；与 `feedback` 错误表分开存）。
+    feedback_list_data: Option<Value>,
+    feedback_draft: FeedbackDraft,
+    feedback_notice: Option<String>,
+    feedback_notice_error: bool,
+    onboarding_status: Option<Value>,
+    onboarding_status_loaded: bool,
+    /// 首次运行只判定一次：避免用户在完成引导后又被自动切回引导页。
+    onboarding_first_run_decided: bool,
+    onboarding_provider: String,
+    onboarding_api_key: String,
+    onboarding_base_url: String,
+    onboarding_model: String,
+    onboarding_test_result: Option<Value>,
+    onboarding_notice: Option<String>,
+
     core_online: Option<bool>,
     core_summary: String,
     plugins_data: Option<Value>,
@@ -1097,6 +1155,42 @@ fn show_brand_mark(ui: &mut egui::Ui, size: f32, loading: bool) -> egui::Respons
     response
 }
 
+/// 产品页统一提示条：错误用警示色、信息用弱色；主文案永远是用户语言（技术细节另附）。
+fn product_notice(ui: &mut egui::Ui, notice: Option<&str>, is_error: bool) {
+    let Some(text) = notice else { return };
+    if text.is_empty() {
+        return;
+    }
+    let palette = native_palette();
+    let color = if is_error { palette.error } else { palette.muted };
+    ui.horizontal_wrapped(|ui| {
+        ui.label(egui::RichText::new(text).color(color));
+        if ui.small_button("复制").clicked() {
+            ui.ctx().copy_text(text.to_owned());
+        }
+    });
+}
+
+/// 可复制的一行产品事实；未配置时如实显示"未配置"（绝不显示空白或编造值）。
+fn copyable_line(ui: &mut egui::Ui, label: &str, value: Option<&str>) {
+    ui.horizontal_wrapped(|ui| {
+        match value.filter(|text| !text.is_empty()) {
+            Some(text) => {
+                ui.label(format!("{label}：{text}"));
+                if ui.small_button("复制").clicked() {
+                    ui.ctx().copy_text(text.to_owned());
+                }
+            }
+            None => {
+                ui.label(
+                    egui::RichText::new(format!("{label}：未配置"))
+                        .color(native_palette().muted),
+                );
+            }
+        }
+    });
+}
+
 fn friendly_read_error(area: Area, error: &str) -> Option<&'static str> {
     let is_model_or_preset = matches!(
         area,
@@ -1192,6 +1286,33 @@ ApiCall::Family { method, params } => api.request(method, params),
             pending: HashSet::new(),
             feedback: HashMap::new(),
             next_id: 1,
+
+            product_copy: product_ui::builtin_copy(),
+            product_copy_loaded: false,
+            about_data: None,
+            about_loaded: false,
+            about_update_data: None,
+            about_update_loaded: false,
+            about_diagnostics_data: None,
+            about_diagnostics_loaded: false,
+            about_notice: None,
+            about_notice_error: false,
+            feedback_config: None,
+            feedback_config_loaded: false,
+            feedback_list_loaded: false,
+            feedback_list_data: None,
+            feedback_draft: FeedbackDraft::default(),
+            feedback_notice: None,
+            feedback_notice_error: false,
+            onboarding_status: None,
+            onboarding_status_loaded: false,
+            onboarding_first_run_decided: false,
+            onboarding_provider: "deepseek-official".to_owned(),
+            onboarding_api_key: String::new(),
+            onboarding_base_url: String::new(),
+            onboarding_model: "deepseek-chat".to_owned(),
+            onboarding_test_result: None,
+            onboarding_notice: None,
 
             core_online: None,
             core_summary: "尚未连接".to_owned(),
@@ -1370,6 +1491,94 @@ ApiCall::Family { method, params } => api.request(method, params),
             json!({ "source": app.log_source, "limit": app.log_limit }),
         );
         app
+    }
+
+    /// 技术错误 → 用户语言：Core 文案表优先、本地兜底其次，技术原文只作补充（不进主文案）。
+    fn product_error_notice(&self, scope: &str, error: &str) -> String {
+        let (title, message, detail) = product_ui::friendly_error(&self.product_copy, error);
+        match detail.as_deref().and_then(|text| text.lines().next()) {
+            Some(suffix) if !suffix.is_empty() => {
+                format!("{scope}：{title}——{message}（技术细节：{suffix}）")
+            }
+            _ => format!("{scope}：{title}——{message}"),
+        }
+    }
+
+    /// 重新读取本地反馈队列（提交 / 重试 / 清理后调用）。
+    fn refresh_feedback_list(&mut self) {
+        self.feedback_list_loaded = false;
+        if !self.pending.contains(&Area::Feedback) && self.worker_available {
+            self.issue_family(
+                Area::Feedback,
+                Operation::FeedbackListLoad,
+                "feedback.list",
+                json!({}),
+            );
+        }
+    }
+
+    /// 产品页按需加载：进入页面才请求，不让启动路径变成一串无用 IPC。
+    fn maybe_load_product_pages(&mut self) {
+        if !self.worker_available {
+            return;
+        }
+        // 文案表只取一次；取不到就继续用本地兜底（界面永远不会只剩技术错误）。
+        if !self.product_copy_loaded && !self.pending.contains(&Area::ProductCopy) {
+            self.issue_family(
+                Area::ProductCopy,
+                Operation::ProductCopyLoad,
+                "product.copy",
+                json!({}),
+            );
+        }
+        // 首次运行判定与当前页面无关：即使停在 Chat 也要知道是否该进引导。
+        if !self.onboarding_first_run_decided
+            && self.onboarding_status.is_none()
+            && !self.pending.contains(&Area::Onboarding)
+        {
+            self.issue_family(
+                Area::Onboarding,
+                Operation::OnboardingStatusLoad,
+                "onboarding.status",
+                json!({}),
+            );
+        }
+        match self.navigation.page {
+            AppPage::About => {
+                if !self.about_loaded && !self.pending.contains(&Area::About) {
+                    self.issue_family(Area::About, Operation::AboutLoad, "about.info", json!({}));
+                }
+                if !self.about_update_loaded && !self.pending.contains(&Area::AboutUpdate) {
+                    self.issue_family(
+                        Area::AboutUpdate,
+                        Operation::AboutUpdateLoad,
+                        "about.update",
+                        json!({}),
+                    );
+                }
+            }
+            AppPage::Feedback => {
+                if !self.feedback_config_loaded && !self.pending.contains(&Area::Feedback) {
+                    self.issue_family(
+                        Area::Feedback,
+                        Operation::FeedbackConfigLoad,
+                        "feedback.config",
+                        json!({}),
+                    );
+                }
+            }
+            AppPage::Onboarding => {
+                if !self.onboarding_status_loaded && !self.pending.contains(&Area::Onboarding) {
+                    self.issue_family(
+                        Area::Onboarding,
+                        Operation::OnboardingStatusLoad,
+                        "onboarding.status",
+                        json!({}),
+                    );
+                }
+            }
+            _ => {}
+        }
     }
 
     fn issue_chat_sessions(&mut self) {
@@ -1907,6 +2116,202 @@ ApiCall::Family { method, params } => api.request(method, params),
                     if self.mesh.apply(value) {
                         self.issue_family(Area::Channel, Operation::ChannelCall, "channel.list", json!({}));
                     }
+                }
+                // ── 产品化任务 D：About / 更新公告 / Feedback / 首次运行引导 ──
+                (Operation::ProductCopyLoad, Ok(value)) => {
+                    self.product_copy = ProductCopy::from_value(value);
+                    self.product_copy_loaded = true;
+                }
+                (Operation::AboutLoad, Ok(value)) => {
+                    self.about_data = Some(
+                        value.get("about").cloned().unwrap_or_else(|| value.clone()),
+                    );
+                    self.about_loaded = true;
+                }
+                (Operation::AboutLoad, Err(error)) => {
+                    self.about_loaded = true;
+                    self.about_notice = Some(self.product_error_notice("about.info", error));
+                    self.about_notice_error = true;
+                }
+                (Operation::AboutUpdateLoad, Ok(value)) => {
+                    self.about_update_data = Some(
+                        value.get("update").cloned().unwrap_or_else(|| value.clone()),
+                    );
+                    self.about_update_loaded = true;
+                }
+                (Operation::AboutUpdateLoad, Err(error)) => {
+                    self.about_update_loaded = true;
+                    self.about_notice = Some(self.product_error_notice("about.update", error));
+                    self.about_notice_error = true;
+                }
+                (Operation::AboutUpdateCheck, Ok(value)) => {
+                    let ok = value.get("ok").and_then(Value::as_bool).unwrap_or(false);
+                    let available =
+                        value.get("updateAvailable").and_then(Value::as_bool).unwrap_or(false);
+                    if ok && available {
+                        self.about_notice = Some("发现新版本，更新公告已刷新。".to_owned());
+                        self.about_notice_error = false;
+                    } else if ok {
+                        self.about_notice = Some("当前已是最新版本。".to_owned());
+                        self.about_notice_error = false;
+                    } else {
+                        // 检查失败也要说人话 + 保留技术原因（用户可复制反馈）。
+                        let reason = value
+                            .get("message")
+                            .and_then(Value::as_str)
+                            .unwrap_or("未知原因");
+                        self.about_notice = Some(format!(
+                            "检查更新未完成——{reason}（已保留上次公告与本地队列，不影响使用）"
+                        ));
+                        self.about_notice_error = true;
+                    }
+                    // 无论成功失败，Core 都写过公告缓存；重新读一次让页面反映真实状态。
+                    self.about_update_loaded = false;
+                }
+                (Operation::AboutUpdateCheck, Err(error)) => {
+                    self.about_notice = Some(self.product_error_notice("update.check", error));
+                    self.about_notice_error = true;
+                }
+                (Operation::AboutDiagnosticsLoad, Ok(value)) => {
+                    self.about_diagnostics_data = Some(value.clone());
+                    self.about_diagnostics_loaded = true;
+                }
+                (Operation::AboutDiagnosticsLoad, Err(error)) => {
+                    self.about_diagnostics_loaded = true;
+                    self.about_notice = Some(self.product_error_notice("about.diagnostics", error));
+                    self.about_notice_error = true;
+                }
+                (Operation::FeedbackConfigLoad, Ok(value)) => {
+                    self.feedback_config = Some(value.clone());
+                    self.feedback_config_loaded = true;
+                    // 配置先到、队列后到：Area 互斥决定了同一帧只能发一条，这里串起来。
+                    if !self.feedback_list_loaded && !self.pending.contains(&Area::Feedback) {
+                        self.issue_family(
+                            Area::Feedback,
+                            Operation::FeedbackListLoad,
+                            "feedback.list",
+                            json!({}),
+                        );
+                    }
+                }
+                (Operation::FeedbackConfigLoad, Err(error)) => {
+                    self.feedback_config_loaded = true;
+                    self.feedback_notice = Some(self.product_error_notice("feedback.config", error));
+                    self.feedback_notice_error = true;
+                }
+                (Operation::FeedbackListLoad, Ok(value)) => {
+                    self.feedback_list_data = Some(value.clone());
+                    self.feedback_list_loaded = true;
+                }
+                (Operation::FeedbackListLoad, Err(error)) => {
+                    self.feedback_list_loaded = true;
+                    self.feedback_notice = Some(self.product_error_notice("feedback.list", error));
+                    self.feedback_notice_error = true;
+                }
+                (Operation::FeedbackSubmit, Ok(value)) => {
+                    let sent = product_ui::feedback_submit_sent(value);
+                    self.feedback_notice = Some(product_ui::feedback_submit_message(value));
+                    // 离线入队也是"成功提交"（不阻塞软件），因此不按错误色显示。
+                    self.feedback_notice_error = false;
+                    if sent {
+                        self.feedback_draft.clear_body();
+                    }
+                    self.refresh_feedback_list();
+                }
+                (Operation::FeedbackSubmit, Err(error)) => {
+                    self.feedback_notice = Some(self.product_error_notice("feedback.submit", error));
+                    self.feedback_notice_error = true;
+                }
+                (Operation::FeedbackRetry, Ok(value)) => {
+                    let count = value
+                        .get("results")
+                        .and_then(Value::as_array)
+                        .map(Vec::len)
+                        .unwrap_or(0);
+                    self.feedback_notice = Some(format!("已尝试重试 {count} 条反馈。"));
+                    self.feedback_notice_error = false;
+                    self.refresh_feedback_list();
+                }
+                (Operation::FeedbackRetry, Err(error)) => {
+                    self.feedback_notice = Some(self.product_error_notice("feedback.retry", error));
+                    self.feedback_notice_error = true;
+                }
+                (Operation::FeedbackClearSent, Ok(value)) => {
+                    let removed = value.get("removed").and_then(Value::as_u64).unwrap_or(0);
+                    self.feedback_notice = Some(format!("已清理 {removed} 条已发送记录。"));
+                    self.feedback_notice_error = false;
+                    self.refresh_feedback_list();
+                }
+                (Operation::FeedbackClearSent, Err(error)) => {
+                    self.feedback_notice = Some(self.product_error_notice("feedback.clear", error));
+                    self.feedback_notice_error = true;
+                }
+                (Operation::FeedbackRemove, Ok(value)) => {
+                    let removed = value.get("removed").and_then(Value::as_u64).unwrap_or(0);
+                    self.feedback_notice = Some(format!("已删除 {removed} 条本地反馈记录。"));
+                    self.feedback_notice_error = false;
+                    self.refresh_feedback_list();
+                }
+                (Operation::FeedbackRemove, Err(error)) => {
+                    self.feedback_notice = Some(self.product_error_notice("feedback.remove", error));
+                    self.feedback_notice_error = true;
+                }
+                (Operation::OnboardingStatusLoad, Ok(value)) => {
+                    self.onboarding_status = Some(value.clone());
+                    self.onboarding_status_loaded = true;
+                    if !self.onboarding_first_run_decided {
+                        self.onboarding_first_run_decided = true;
+                        // 只有明确读到"未完成"才自动进入引导页；读取失败不打扰用户。
+                        if product_ui::should_open_onboarding_on_launch(value) {
+                            self.navigation.select_page(AppPage::Onboarding);
+                        }
+                    }
+                }
+                (Operation::OnboardingStatusLoad, Err(error)) => {
+                    self.onboarding_status_loaded = true;
+                    self.onboarding_notice = Some(self.product_error_notice("onboarding.status", error));
+                }
+                (
+                    Operation::OnboardingStepComplete
+                    | Operation::OnboardingStepSkip
+                    | Operation::OnboardingFinish
+                    | Operation::OnboardingReset,
+                    Ok(value),
+                ) => {
+                    self.onboarding_status = Some(value.clone());
+                    self.onboarding_notice = Some(match self.onboarding_status.as_ref() {
+                        Some(status) if product_ui::onboarding_is_complete(status) => {
+                            "引导已完成，可以开始使用 CetaMesh。".to_owned()
+                        }
+                        _ => "进度已保存。".to_owned(),
+                    });
+                    self.onboarding_test_result = None;
+                }
+                (Operation::OnboardingSetModel, Ok(_)) => {
+                    self.onboarding_notice = Some("已保存默认模型。".to_owned());
+                }
+                (Operation::OnboardingTestProvider, Ok(value)) => {
+                    self.onboarding_test_result = Some(value.clone());
+                    self.onboarding_notice = Some(if value.get("ok").and_then(Value::as_bool) == Some(true) {
+                        "连接成功，API Key 可用。".to_owned()
+                    } else {
+                        value
+                            .get("message")
+                            .and_then(Value::as_str)
+                            .unwrap_or("连接失败，请检查 API Key 与网络。")
+                            .to_owned()
+                    });
+                }
+                (
+                    Operation::OnboardingStepComplete
+                    | Operation::OnboardingStepSkip
+                    | Operation::OnboardingFinish
+                    | Operation::OnboardingReset
+                    | Operation::OnboardingSetModel
+                    | Operation::OnboardingTestProvider,
+                    Err(error),
+                ) => {
+                    self.onboarding_notice = Some(self.product_error_notice("onboarding", error));
                 }
                 _ => {}
             }
@@ -3742,6 +4147,719 @@ ApiCall::Family { method, params } => api.request(method, params),
         }
     }
 
+    /// 产品化任务 D：About 页（版本 / 构建 / 产品入口 / 更新公告 / 法律与安全 / 诊断）。
+    fn show_about_page(&mut self, ui: &mut egui::Ui) {
+        let palette = native_palette();
+        ui.heading("About CetaMesh");
+        ui.label(
+            egui::RichText::new(
+                "版本、Build ID、Commit 与更新公告都读自安装包自带的构建/发行清单（build-info.json / \
+                 release-manifest.json / 发行配置），不在代码里写死；界面从不直接读 Core 的数据文件。",
+            )
+            .color(palette.muted),
+        );
+        if self.pending.contains(&Area::About) && self.about_data.is_none() {
+            self.show_loading_state(ui, "正在读取版本与构建信息…");
+        }
+        if let Some(notice) = self.about_notice.clone() {
+            product_notice(ui, Some(notice.as_str()), self.about_notice_error);
+        }
+        if let Some(Err(error)) = self.feedback.get(&Area::About).cloned() {
+            self.show_error_message(ui, Area::About, &error);
+        }
+        if let Some(data) = self.about_data.clone() {
+            let view = product_ui::about_view(&data);
+            crate::theme::card_compact(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.strong(format!("{} {}", view.product, view.edition));
+                    if view.version_consistent {
+                        ui.colored_label(native_palette().success, "版本与桌面壳一致");
+                    } else {
+                        ui.colored_label(
+                            native_palette().warning,
+                            "版本与桌面壳不一致：请重新安装官方构建",
+                        );
+                    }
+                });
+                ui.label(format!("版本：{}", view.version));
+                ui.label(format!("Build ID：{}", view.build_id));
+                ui.label(format!("Commit：{}", view.commit));
+                ui.label(format!("构建时间：{}", view.build_time));
+                ui.label(format!("平台：{} · {}", view.platform, view.arch));
+                if ui.small_button("复制版本信息").clicked() {
+                    ui.ctx().copy_text(format!(
+                        "{} {} | Build {} | Commit {} | {} {}",
+                        view.product, view.version, view.build_id, view.commit, view.platform, view.arch
+                    ));
+                }
+            });
+            crate::theme::card_compact(ui, |ui| {
+                ui.strong("产品入口");
+                copyable_line(ui, "开发者", view.developer.as_deref());
+                copyable_line(ui, "官方网站", view.website.as_deref());
+                copyable_line(ui, "GitCode", view.gitcode.as_deref());
+                copyable_line(ui, "GitHub", view.github.as_deref());
+                copyable_line(ui, "许可证", Some(view.license.as_str()));
+                if let Some(source) = view.release_config_source.as_deref() {
+                    ui.label(egui::RichText::new(format!("发行配置来源：{source}")).small());
+                }
+                if let Some(error) = view.release_config_error.as_deref() {
+                    ui.colored_label(
+                        native_palette().warning,
+                        format!("发行配置读取异常：{error}（已回落默认值，界面不编造）"),
+                    );
+                }
+                if let Some(url) = view.license_url.as_deref() {
+                    if ui.small_button("复制许可证地址").clicked() {
+                        ui.ctx().copy_text(url.to_owned());
+                    }
+                }
+                if !view.unconfigured.is_empty() {
+                    ui.colored_label(
+                        native_palette().muted,
+                        format!(
+                            "未配置：{}（发行时由发行方在发行配置中填写，界面不会编造）",
+                            view.unconfigured.join("、")
+                        ),
+                    );
+                }
+                if view.release_manifest_available {
+                    ui.label(format!(
+                        "发布清单：可用（{}）",
+                        view.release_manifest_version.as_deref().unwrap_or("版本未标注")
+                    ));
+                }
+            });
+        } else if !self.pending.contains(&Area::About) {
+            ui.weak("版本信息暂时不可用。");
+        }
+
+        // ── 更新 ───────────────────────────────────────────────────────────
+        let update = product_ui::update_view(&self.about_update_data.clone().unwrap_or(Value::Null));
+        let can_touch_update = self.worker_available && !self.pending.contains(&Area::AboutUpdate);
+        crate::theme::card_compact(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.strong("更新");
+                ui.label(update.status_label());
+                if ui
+                    .add_enabled(can_touch_update, egui::Button::new("检查更新"))
+                    .clicked()
+                {
+                    self.issue_family(
+                        Area::AboutUpdate,
+                        Operation::AboutUpdateCheck,
+                        "update.check",
+                        json!({}),
+                    );
+                }
+                if ui
+                    .add_enabled(can_touch_update, egui::Button::new("刷新公告"))
+                    .clicked()
+                {
+                    self.issue_family(
+                        Area::AboutUpdate,
+                        Operation::AboutUpdateLoad,
+                        "about.update",
+                        json!({}),
+                    );
+                }
+            });
+            ui.label(format!("当前版本：{}", update.current));
+            ui.label(format!(
+                "最新版本：{}",
+                update
+                    .latest
+                    .clone()
+                    .unwrap_or_else(|| "未知（尚未检查）".to_owned())
+            ));
+            if let Some(checked_at) = update.checked_at.as_deref() {
+                ui.label(format!("上次检查：{checked_at}"));
+            }
+            if let Some(code) = update.failure_code.as_deref() {
+                ui.colored_label(
+                    native_palette().warning,
+                    format!(
+                        "上次检查失败：{code} {}",
+                        update.failure_message.clone().unwrap_or_default()
+                    ),
+                );
+            }
+            ui.separator();
+            match (
+                update.announcement_title.as_deref(),
+                update.announcement_version.as_deref(),
+            ) {
+                (Some(title), Some(version)) => {
+                    ui.strong(format!("更新公告：{title}（{version}）"));
+                }
+                (None, Some(version)) => {
+                    ui.strong(format!("更新公告：CetaMesh {version}"));
+                }
+                _ => {
+                    ui.weak("尚无更新公告（检查一次更新，或等待官网发布清单）。");
+                }
+            }
+            if !update.cache_available {
+                ui.weak("离线公告缓存：暂无（成功检查一次更新后即可离线显示最近公告）。");
+            }
+            if let Some(published) = update.announcement_published_at.as_deref() {
+                ui.label(format!("发布时间：{published}"));
+            }
+            if let Some(text) = update.announcement_text.as_deref() {
+                // 纯文本渲染：Core 已剥离 HTML / 丢弃非 http(s) 链接目标，这里不再解释任何标记。
+                ui.label(egui::RichText::new(text).color(native_palette().text));
+            } else if !update.announcement_notes.is_empty() {
+                for note in &update.announcement_notes {
+                    ui.label(format!("• {note}"));
+                }
+            }
+            if !update.sources.is_empty() {
+                ui.label("下载源（按优先级）：");
+                for (id, url) in &update.sources {
+                    let shown = if url.is_empty() { "未配置清单地址" } else { url.as_str() };
+                    ui.label(egui::RichText::new(format!("• {id}：{shown}")).small());
+                }
+            }
+        });
+
+        // ── 许可证 / 隐私 / 安全 ───────────────────────────────────────────
+        if let Some(data) = self.about_data.clone() {
+            let view = product_ui::about_view(&data);
+            crate::theme::card_compact(ui, |ui| {
+                ui.strong("许可证 / 隐私 / 安全");
+                ui.label(format!("许可证：{}", view.license));
+                match view.privacy_summary.as_deref() {
+                    Some(summary) => {
+                        ui.label(format!("隐私说明：{summary}"));
+                    }
+                    None => {
+                        ui.weak("隐私说明：文档缺失");
+                    }
+                }
+                match view.security_summary.as_deref() {
+                    Some(summary) => {
+                        ui.label(format!("安全说明：{summary}"));
+                    }
+                    None => {
+                        ui.weak("安全说明：文档缺失");
+                    }
+                }
+                copyable_line(ui, "安全联系入口", view.security_contact.as_deref());
+                if let Some(source) = view.security_contact_source.as_deref() {
+                    ui.label(egui::RichText::new(format!("入口来源：{source}")).small());
+                }
+                ui.weak("漏洞报告请不要走公开渠道；安全类反馈也不会自动附带日志。");
+            });
+        }
+
+        // ── 诊断信息（与反馈附件同一份实现） ────────────────────────────────
+        let can_load_diagnostics =
+            self.worker_available && !self.pending.contains(&Area::AboutDiagnostics);
+        crate::theme::card_compact(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.strong("诊断信息");
+                if ui
+                    .add_enabled(can_load_diagnostics, egui::Button::new("查看诊断信息"))
+                    .clicked()
+                {
+                    self.issue_family(
+                        Area::AboutDiagnostics,
+                        Operation::AboutDiagnosticsLoad,
+                        "about.diagnostics",
+                        json!({}),
+                    );
+                }
+            });
+            ui.weak("诊断信息不含 API Key、token、聊天内容、Memory、文件正文与私钥。");
+        });
+        if let Some(diag) = self.about_diagnostics_data.clone() {
+            let payload = diag.get("diagnostics").cloned().unwrap_or(Value::Null);
+            let policy = diag.get("policy").cloned().unwrap_or(Value::Null);
+            crate::theme::card_compact(ui, |ui| {
+                ui.label(format!(
+                    "版本 / Build：{} / {}",
+                    payload
+                        .pointer("/product/version")
+                        .and_then(Value::as_str)
+                        .unwrap_or("未知"),
+                    payload
+                        .pointer("/build/buildId")
+                        .and_then(Value::as_str)
+                        .unwrap_or("未知")
+                ));
+                ui.label(format!(
+                    "平台：{} · {}",
+                    payload
+                        .pointer("/platform/os")
+                        .and_then(Value::as_str)
+                        .unwrap_or("-"),
+                    payload
+                        .pointer("/platform/arch")
+                        .and_then(Value::as_str)
+                        .unwrap_or("-")
+                ));
+                ui.label(format!(
+                    "最近错误码：{}",
+                    payload
+                        .get("lastErrorCode")
+                        .and_then(Value::as_str)
+                        .unwrap_or("无")
+                ));
+                ui.label(format!(
+                    "插件：启用 {} / 关闭 {}",
+                    payload
+                        .pointer("/plugins/enabled")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0),
+                    payload
+                        .pointer("/plugins/disabled")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0)
+                ));
+                if let Some(excludes) = policy.get("excludes").and_then(Value::as_array) {
+                    ui.colored_label(native_palette().success, "绝不包含：");
+                    for item in excludes.iter().filter_map(Value::as_str) {
+                        ui.label(egui::RichText::new(format!("• {item}")).small());
+                    }
+                }
+                if ui.small_button("复制诊断信息").clicked() {
+                    ui.ctx().copy_text(serde_json::to_string_pretty(&payload).unwrap_or_default());
+                }
+            });
+        }
+    }
+
+    /// 产品化任务 D：Feedback 页（类型 / 字段 / 诊断勾选 / 本地队列与重试）。
+    fn show_feedback_page(&mut self, ui: &mut egui::Ui) {
+        let palette = native_palette();
+        ui.heading("反馈");
+        ui.label(
+            egui::RichText::new(
+                "反馈会先保存在本地队列；官方反馈服务不可用时不会阻塞软件，之后可自动或手动重试。",
+            )
+            .color(palette.muted),
+        );
+        if self.pending.contains(&Area::Feedback) && self.feedback_config.is_none() {
+            self.show_loading_state(ui, "正在读取反馈配置…");
+        }
+        if let Some(Err(error)) = self.feedback.get(&Area::Feedback).cloned() {
+            self.show_error_message(ui, Area::Feedback, &error);
+        }
+        if let Some(notice) = self.feedback_notice.clone() {
+            product_notice(ui, Some(notice.as_str()), self.feedback_notice_error);
+        }
+
+        let config = product_ui::feedback_config_view(
+            &self.feedback_config.clone().unwrap_or(Value::Null),
+        );
+        if !config.endpoint_configured {
+            product_notice(
+                ui,
+                Some("官方反馈地址尚未配置（网站 API 未上线）：现在提交的反馈会留在本地队列，不会丢。"),
+                false,
+            );
+        } else if let Some(host) = config.endpoint_host.as_deref() {
+            ui.label(egui::RichText::new(format!("反馈地址：{host}")).small());
+        }
+
+        let is_security = self.feedback_draft.is_security();
+        if is_security {
+            let notice = product_ui::security_notice(&config);
+            product_notice(ui, Some(notice.as_str()), true);
+            copyable_line(ui, "官方安全联系入口", config.security_contact.as_deref());
+        }
+
+        let mut submit = false;
+        crate::theme::card_compact(ui, |ui| {
+            ui.strong("提交反馈");
+            let current_kind = self.feedback_draft.kind.clone();
+            let selected = config
+                .types
+                .iter()
+                .find(|(id, _)| *id == current_kind)
+                .map(|(_, label)| label.clone())
+                .unwrap_or_else(|| current_kind.clone());
+            egui::ComboBox::from_id_salt("feedback_kind")
+                .selected_text(selected)
+                .show_ui(ui, |ui| {
+                    for (id, label) in &config.types {
+                        ui.selectable_value(&mut self.feedback_draft.kind, id.clone(), label);
+                    }
+                });
+            ui.label(format!("标题（必填，≤{} 字）", config.title_max));
+            ui.add(
+                egui::TextEdit::singleline(&mut self.feedback_draft.title).desired_width(460.0),
+            );
+            ui.label(format!("描述（必填，≤{} 字）", config.description_max));
+            ui.add(
+                egui::TextEdit::multiline(&mut self.feedback_draft.description)
+                    .desired_rows(4)
+                    .desired_width(520.0),
+            );
+            ui.label("复现步骤（可选）");
+            ui.add(
+                egui::TextEdit::multiline(&mut self.feedback_draft.steps)
+                    .desired_rows(3)
+                    .desired_width(520.0),
+            );
+            ui.label("联系方式（可选）");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.feedback_draft.contact).desired_width(320.0),
+            );
+            if is_security {
+                // 安全漏洞：不提供"附加诊断"的入口，避免用户把利用细节与日志一起发进普通通道。
+                ui.colored_label(
+                    native_palette().warning,
+                    "安全漏洞反馈只发送最小 metadata（产品名、版本、平台/架构），不附加日志。",
+                );
+            } else {
+                ui.checkbox(
+                    &mut self.feedback_draft.attach_diagnostics,
+                    "附加诊断信息（版本、平台、Build ID、最近错误码、Provider/插件状态；不含任何凭据与聊天内容）",
+                );
+            }
+            if ui
+                .add_enabled(
+                    self.worker_available && !self.pending.contains(&Area::Feedback),
+                    egui::Button::new("提交反馈"),
+                )
+                .clicked()
+            {
+                submit = true;
+            }
+        });
+        if submit {
+            match self.feedback_draft.validate() {
+                Ok(()) => {
+                    let params = self.feedback_draft.submit_params();
+                    self.issue_family(
+                        Area::Feedback,
+                        Operation::FeedbackSubmit,
+                        "feedback.submit",
+                        params,
+                    );
+                }
+                Err(message) => {
+                    self.feedback_notice = Some(message.to_owned());
+                    self.feedback_notice_error = true;
+                }
+            }
+        }
+
+        // ── 本地队列 ───────────────────────────────────────────────────────
+        let entries = product_ui::feedback_entries(
+            &self.feedback_list_data.clone().unwrap_or(Value::Null),
+        );
+        let mut retry = false;
+        let mut clear_sent = false;
+        let mut remove_id: Option<String> = None;
+        crate::theme::card_compact(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.strong(format!("本地队列（{} 条）", entries.len()));
+                if ui
+                    .add_enabled(
+                        !entries.is_empty()
+                            && self.worker_available
+                            && !self.pending.contains(&Area::Feedback),
+                        egui::Button::new("重试全部"),
+                    )
+                    .clicked()
+                {
+                    retry = true;
+                }
+                if ui
+                    .add_enabled(
+                        entries.iter().any(|entry| entry.status == "sent")
+                            && self.worker_available
+                            && !self.pending.contains(&Area::Feedback),
+                        egui::Button::new("清理已发送"),
+                    )
+                    .clicked()
+                {
+                    clear_sent = true;
+                }
+            });
+            if entries.is_empty() {
+                ui.weak("还没有反馈记录。");
+            }
+            for entry in &entries {
+                let kind_label = config
+                    .types
+                    .iter()
+                    .find(|(id, _)| *id == entry.kind)
+                    .map(|(_, label)| label.clone())
+                    .unwrap_or_else(|| entry.kind.clone());
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(egui::RichText::new(format!(
+                        "{} ｜ {} ｜ {} ｜ 尝试 {} 次",
+                        entry.title,
+                        kind_label,
+                        entry.status_label(),
+                        entry.attempts
+                    )));
+                    if let Some(next) = entry.next_attempt_at.as_deref() {
+                        ui.label(egui::RichText::new(format!("下次重试：{next}")).small());
+                    }
+                    if let Some(code) = entry.error_code.as_deref() {
+                        ui.colored_label(
+                            native_palette().warning,
+                            egui::RichText::new(format!("上次失败：{code}")).small(),
+                        );
+                    }
+                    if entry.status != "sent"
+                        && ui
+                            .add_enabled(
+                                self.worker_available && !self.pending.contains(&Area::Feedback),
+                                egui::Button::new("删除").small(),
+                            )
+                            .clicked()
+                    {
+                        remove_id = Some(entry.id.clone());
+                    }
+                });
+            }
+        });
+        if retry {
+            self.issue_family(Area::Feedback, Operation::FeedbackRetry, "feedback.retry", json!({}));
+        }
+        if clear_sent {
+            self.issue_family(
+                Area::Feedback,
+                Operation::FeedbackClearSent,
+                "feedback.clear",
+                json!({ "scope": "sent" }),
+            );
+        }
+        if let Some(id) = remove_id {
+            self.issue_family(
+                Area::Feedback,
+                Operation::FeedbackRemove,
+                "feedback.remove",
+                json!({ "id": id }),
+            );
+        }
+    }
+
+    /// 产品化任务 D：首帧引导页（完成条件不含 QQ / DSH / 移动端 / Agent / 扩展）。
+    fn show_onboarding_page(&mut self, ui: &mut egui::Ui) {
+        let palette = native_palette();
+        ui.heading("首次运行引导");
+        ui.label(
+            egui::RichText::new(
+                "只需要配置一个 Model Provider 并选定默认模型即可开始使用。Agent 与 Integration \
+                 都是可选增项，不安装也不影响使用；CetaMesh 不要求 QQ、DSH 或移动端。",
+            )
+            .color(palette.muted),
+        );
+        if self.pending.contains(&Area::Onboarding) && self.onboarding_status.is_none() {
+            self.show_loading_state(ui, "正在读取引导进度…");
+        }
+        if let Some(notice) = self.onboarding_notice.clone() {
+            product_notice(ui, Some(notice.as_str()), false);
+        }
+        if let Some(Err(error)) = self.feedback.get(&Area::Onboarding).cloned() {
+            self.show_error_message(ui, Area::Onboarding, &error);
+        }
+
+        let status = self.onboarding_status.clone().unwrap_or(Value::Null);
+        let complete = product_ui::onboarding_is_complete(&status);
+        if let Some(last_error) = product_ui::onboarding_notice(&status) {
+            product_notice(
+                ui,
+                Some(&format!("引导进度读取有异常：{last_error}")),
+                true,
+            );
+        }
+
+        let steps = product_ui::onboarding_step_rows(&status);
+        let current = product_ui::onboarding_current_step(&status);
+        crate::theme::card_compact(ui, |ui| {
+            ui.strong(if complete { "引导已完成" } else { "步骤" });
+            if steps.is_empty() {
+                ui.weak("尚未读取到引导步骤。");
+            }
+            for step in &steps {
+                let marker = match step.state {
+                    product_ui::StepVisualState::Completed => "✓",
+                    product_ui::StepVisualState::Skipped => "－",
+                    product_ui::StepVisualState::Current => "▶",
+                    product_ui::StepVisualState::Pending => "·",
+                };
+                let optional = if step.optional { "（可选）" } else { "" };
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(format!(
+                        "{marker} {}. {}{optional} ｜ {}",
+                        step.order,
+                        step.label,
+                        step.state.label()
+                    ));
+                    // 步骤 id 用等宽小字显示：用户报"卡在哪一步"时能直接对上 Core 的状态机。
+                    ui.label(egui::RichText::new(&step.id).monospace().small());
+                    if step.state == product_ui::StepVisualState::Current && !step.description.is_empty() {
+                        ui.colored_label(
+                            native_palette().success,
+                            egui::RichText::new(&step.description).small(),
+                        );
+                    }
+                });
+            }
+        });
+
+        if complete {
+            crate::theme::card_compact(ui, |ui| {
+                if let Some(at) = status.get("completedAt").and_then(Value::as_str) {
+                    ui.label(format!("完成时间：{at}"));
+                }
+                if ui
+                    .add_enabled(
+                        self.worker_available && !self.pending.contains(&Area::Onboarding),
+                        egui::Button::new("重新运行引导"),
+                    )
+                    .clicked()
+                {
+                    self.issue_family(
+                        Area::Onboarding,
+                        Operation::OnboardingReset,
+                        "onboarding.reset",
+                        json!({}),
+                    );
+                }
+            });
+            return;
+        }
+
+        // ── 当前步骤的操作区 ────────────────────────────────────────────────
+        let step_id = current.clone().unwrap_or_default();
+        let mut action: Option<(&'static str, Value)> = None;
+        let busy = self.pending.contains(&Area::Onboarding) || !self.worker_available;
+        crate::theme::card_compact(ui, |ui| {
+            ui.strong(format!("当前步骤：{}", if step_id.is_empty() { "（无）" } else { step_id.as_str() }));
+            match step_id.as_str() {
+                "welcome" => {
+                    ui.weak("CetaMesh 是本地优先的 AI 工作台：模型与数据默认留在你自己的机器上。");
+                    if ui.add_enabled(!busy, egui::Button::new("开始配置模型")).clicked() {
+                        action = Some(("onboarding.completeStep", product_ui::complete_step_params("welcome")));
+                    }
+                }
+                "provider" => {
+                    ui.label("服务商 id（例如 deepseek-official / openai / openai-compatible）");
+                    ui.add(egui::TextEdit::singleline(&mut self.onboarding_provider).desired_width(280.0));
+                    ui.label("API Key（保存在本机 state/provider-keys.json，界面不回显）");
+                    ui.add(egui::TextEdit::singleline(&mut self.onboarding_api_key).password(true).desired_width(360.0));
+                    ui.label("Base URL（可选，仅自建/代理网关需要）");
+                    ui.add(egui::TextEdit::singleline(&mut self.onboarding_base_url).desired_width(360.0));
+                    if ui.add_enabled(!busy, egui::Button::new("保存并继续")).clicked() {
+                        action = Some((
+                            "onboarding.completeStep",
+                            json!({ "stepId": "provider", "data": { "provider": self.onboarding_provider.trim() } }),
+                        ));
+                    }
+                }
+                "connection" => {
+                    ui.weak("会用刚填写的凭据真实请求一次服务商接口；失败不会中断引导。");
+                    if ui.add_enabled(!busy, egui::Button::new("测试连接")).clicked() {
+                        action = Some((
+                            "onboarding.testProvider",
+                            json!({
+                                "provider": self.onboarding_provider.trim(),
+                                "apiKey": self.onboarding_api_key.trim(),
+                                "baseUrl": self.onboarding_base_url.trim(),
+                            }),
+                        ));
+                    }
+                    if ui.button("跳过测试（稍后再测）").clicked() {
+                        action = Some(("onboarding.completeStep", product_ui::complete_step_params("connection")));
+                    }
+                }
+                "model" => {
+                    ui.label("默认模型");
+                    ui.add(egui::TextEdit::singleline(&mut self.onboarding_model).desired_width(280.0));
+                    if ui.add_enabled(!busy, egui::Button::new("保存默认模型并继续")).clicked() {
+                        action = Some((
+                            "onboarding.setModel",
+                            json!({
+                                "provider": self.onboarding_provider.trim(),
+                                "model": self.onboarding_model.trim(),
+                            }),
+                        ));
+                    }
+                }
+                "agent" => {
+                    ui.weak("可选：接入 Codex 之类的 Agent。没有 Agent 也能正常使用 CetaMesh。");
+                    if ui.add_enabled(!busy, egui::Button::new("记录选择")).clicked() {
+                        action = Some((
+                            "onboarding.connectAgent",
+                            json!({ "provider": "codex" }),
+                        ));
+                    }
+                    if ui.add_enabled(!busy, egui::Button::new("跳过")).clicked() {
+                        action = Some(("onboarding.skipStep", product_ui::skip_step_params("agent")));
+                    }
+                }
+                "integration" => {
+                    ui.weak("可选：安装或启用一个扩展 Integration。不安装任何扩展也能正常使用。");
+                    if ui.add_enabled(!busy, egui::Button::new("跳过")).clicked() {
+                        action = Some(("onboarding.skipStep", product_ui::skip_step_params("integration")));
+                    }
+                }
+                "done" => {
+                    ui.weak("全部必填步骤已完成。");
+                }
+                _ => {
+                    ui.weak("尚未读取到当前步骤。");
+                }
+            }
+            ui.separator();
+            let can_finish = product_ui::onboarding_can_finish(&status) && !busy;
+            if ui
+                .add_enabled(can_finish, egui::Button::new("完成引导"))
+                .clicked()
+            {
+                action = Some(("onboarding.finish", json!({})));
+            }
+            if !product_ui::onboarding_can_finish(&status) {
+                ui.weak("还有必填步骤未完成（欢迎 → 配置 Provider → 测试连接 → 选择模型）。");
+            }
+        });
+        if let Some((method, params)) = action {
+            let operation = match method {
+                "onboarding.testProvider" => Operation::OnboardingTestProvider,
+                "onboarding.setModel" => Operation::OnboardingSetModel,
+                "onboarding.skipStep" => Operation::OnboardingStepSkip,
+                "onboarding.finish" => Operation::OnboardingFinish,
+                "onboarding.connectAgent" => Operation::OnboardingStepComplete,
+                _ => Operation::OnboardingStepComplete,
+            };
+            // connectAgent 不会自动完成 agent 步骤（Core 只记录选择），这里补一次完成，保持界面推进。
+            if method == "onboarding.connectAgent" {
+                self.issue_family(Area::Onboarding, operation, "onboarding.connectAgent", params);
+                self.issue_family(
+                    Area::Onboarding,
+                    Operation::OnboardingStepComplete,
+                    "onboarding.completeStep",
+                    product_ui::complete_step_params("agent"),
+                );
+            } else {
+                self.issue_family(Area::Onboarding, operation, method, params);
+            }
+        }
+        if let Some(result) = self.onboarding_test_result.clone() {
+            let ok = result.get("ok").and_then(Value::as_bool).unwrap_or(false);
+            let message = result
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("连接测试完成");
+            if ok {
+                ui.colored_label(palette.success, format!("连接测试：{message}"));
+            } else {
+                ui.colored_label(palette.warning, format!("连接测试：{message}"));
+                if let Some(detail) = result.get("detail").and_then(Value::as_str) {
+                    ui.label(egui::RichText::new(format!("技术细节：{detail}")).small());
+                }
+            }
+        }
+    }
+
     fn show_page(&mut self, ui: &mut egui::Ui) {
         match self.navigation.page {
             AppPage::Chat => self.show_chat_page(ui),
@@ -3756,6 +4874,9 @@ ApiCall::Family { method, params } => api.request(method, params),
             AppPage::Plugins => {
                 self.show_plugins_page(ui);
             }
+            AppPage::About => self.show_about_page(ui),
+            AppPage::Feedback => self.show_feedback_page(ui),
+            AppPage::Onboarding => self.show_onboarding_page(ui),
         }
     }
 
@@ -5085,6 +6206,9 @@ ApiCall::Family { method, params } => api.request(method, params),
     fn show_error_message(&self, ui: &mut egui::Ui, area: Area, error: &str) {
         let palette = native_palette();
         let hint = friendly_read_error(area, error);
+        // 产品化任务 D：所有页面的错误条都先给用户语言（"先添加一个模型 / Codex 未安装 /
+        // 插件已关闭 / 需要审批"…），原始技术串收进"技术细节"，不再直接糊在用户脸上。
+        let (title, message, detail) = product_ui::friendly_error(&self.product_copy, error);
         egui::Frame::new()
             .fill(palette.error_bg)
             .stroke(egui::Stroke::new(1.0, palette.error))
@@ -5093,15 +6217,20 @@ ApiCall::Family { method, params } => api.request(method, params),
             .show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(
-                        egui::RichText::new("处理失败")
+                        egui::RichText::new(&title)
                             .color(palette.error)
                             .strong(),
                     );
-                    ui.label(egui::RichText::new(error).color(palette.text));
-                    if ui.small_button("复制错误").clicked() {
-                        ui.ctx().copy_text(error.to_owned());
-                    }
+                    ui.label(egui::RichText::new(&message).color(palette.text));
                 });
+                if let Some(detail) = detail.as_deref() {
+                    ui.collapsing("技术细节", |ui| {
+                        ui.label(egui::RichText::new(detail).monospace().small());
+                        if ui.small_button("复制技术细节").clicked() {
+                            ui.ctx().copy_text(detail.to_owned());
+                        }
+                    });
+                }
                 if let Some(hint) = hint {
                     ui.label(egui::RichText::new(hint).color(palette.warning));
                 }
@@ -5198,6 +6327,7 @@ impl eframe::App for NativeUi {
         self.maybe_poll_chat(&ctx);
         self.maybe_refresh_pending();
         self.maybe_load_capability_approvals();
+        self.maybe_load_product_pages();
         if self.last_prefs_sync.elapsed() >= Duration::from_secs(2) {
             self.save_geometry(&ctx);
             self.last_prefs_sync = Instant::now();

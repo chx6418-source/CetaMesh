@@ -13,13 +13,20 @@ pub enum AppPage {
     Devices,
     Connections,
     Security,
+    /// 产品化任务 D：版本 / 构建信息 / 更新公告 / 许可证 / 诊断信息。
+    About,
+    /// 产品化任务 D：全局反馈（含安全漏洞通道与本地待发队列）。
+    Feedback,
+    /// 产品化任务 D：首次运行引导（完成条件不含 QQ / DSH / 移动端）。
+    Onboarding,
     Settings,
 }
 
 impl AppPage {
     pub const PRIMARY: [Self; 8] = [Self::Home, Self::Chat, Self::Work, Self::Social,
         Self::Agents, Self::Plugins, Self::Memory, Self::Workspaces];
-    pub const SECONDARY: [Self; 4] = [Self::Devices, Self::Connections, Self::Security, Self::Settings];
+    pub const SECONDARY: [Self; 7] = [Self::Devices, Self::Connections, Self::Security,
+        Self::About, Self::Feedback, Self::Onboarding, Self::Settings];
 
     pub const fn label(self) -> &'static str {
         match self {
@@ -34,6 +41,9 @@ impl AppPage {
             Self::Devices => "Devices",
             Self::Connections => "Connections",
             Self::Security => "Security",
+            Self::About => "About",
+            Self::Feedback => "Feedback",
+            Self::Onboarding => "Onboarding",
             Self::Settings => "Settings",
         }
     }
@@ -51,6 +61,9 @@ impl AppPage {
             Self::Devices => "设备与 Mesh 连接。",
             Self::Connections => "服务连接与安装状态。",
             Self::Security => "权限与安全通知。",
+            Self::About => "版本、Build ID、Commit、更新公告、许可证、隐私与安全说明、诊断信息。",
+            Self::Feedback => "提交缺陷 / 功能建议 / 体验问题 / 安全漏洞；反馈服务不可用时先保存在本地队列。",
+            Self::Onboarding => "首次运行引导：配置模型服务商、测试连接、选定默认模型（Agent 与扩展都是可选）。",
             Self::Settings => "外观、快捷键与应用偏好。",
         }
     }
@@ -162,7 +175,20 @@ mod tests {
         let secondary = AppPage::SECONDARY.map(AppPage::label);
 
         assert_eq!(primary, ["Home", "Chat", "Work", "Social", "Agents", "Plugins", "Memory", "Workspaces"]);
-        assert_eq!(secondary, ["Devices", "Connections", "Security", "Settings"]);
+        assert_eq!(secondary, ["Devices", "Connections", "Security", "About", "Feedback", "Onboarding", "Settings"]);
+    }
+
+    #[test]
+    fn product_service_pages_live_in_secondary_navigation_with_copy() {
+        for page in [AppPage::About, AppPage::Feedback, AppPage::Onboarding] {
+            assert!(AppPage::SECONDARY.contains(&page), "{page:?} must be reachable");
+            assert!(!page.label().is_empty());
+            assert!(!page.description().is_empty());
+        }
+        // 新产品页不是工程页：不能混进 legacy tabs 的归属里。
+        assert!(tabs_for(AppPage::About).is_empty());
+        assert!(tabs_for(AppPage::Feedback).is_empty());
+        assert!(tabs_for(AppPage::Onboarding).is_empty());
     }
 
     #[test]

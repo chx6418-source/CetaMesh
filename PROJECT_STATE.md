@@ -98,10 +98,13 @@
   隔离工作区 `.worktrees/2026-10-09-2145`（基线本地 `main` = `ce83264`）。交付物与验收见 `PRODUCT_SERVICES_REPORT.md`：
   About 服务（build/release manifest 驱动，不写死版本）、更新公告安全渲染 + 离线缓存、Feedback（本地 Outbox +
   自动/手动重试 + 诊断 redaction + 安全漏洞最小 metadata）、First Run Onboarding（7 步，**不依赖 QQ/DSH/移动端**）、
-  Provider 基础/高级字段视图与空状态文案；新增 `test-product-services` / `test-onboarding` / `test-product-copy`
-  三个套件（已登记聚合器）。验证：`npm test` → **PASS 69 · FAIL 1 · NOT_RUN_ENVIRONMENT 9**，唯一 FAIL 为
-  `desktop/cargo:test`（本会话受限令牌无法在用户 TEMP 建目录，`desktop-shell/` 零改动；见报告 §6.5）。
-  **等 Owner 确认后合并 `main`、删除工作分支**。本轮按"不要大改最终 UI"未改桌面壳 UI，
+  Provider 基础/高级字段视图与空状态文案；**原生桌面壳新增 About / Feedback / Onboarding 三个页面并接线**
+  （`desktop-shell/src/product_ui.rs` + `native_ui.rs`，首次运行自动进入引导页；全站错误条统一为"用户语言优先 +
+  技术细节折叠"）；新增 `test-product-services` / `test-onboarding` / `test-product-copy` 三个套件（已登记聚合器）。
+  验证：`npm test` → **PASS 69 · FAIL 1 · NOT_RUN_ENVIRONMENT 9**（唯一 FAIL 为 `desktop/cargo:test` 的本会话令牌
+  TEMP 限制）；`cargo test` **157 passed · 2 failed**（+12 新单测；2 项为 HKCU 注册表限制）；
+  `test-desktop-shell`（构建 debug 壳 + `dist/core` 后）**全部通过**。详见报告 §5/§6.5。
+  **等 Owner 确认后合并 `main`、删除工作分支**。
   UI 需要的 IPC 契约（`about.*` / `update.notes` / `feedback.*` / `onboarding.*` / `product.*`）见报告。
 
 - 上线冲刺任务 B（统一配对）已完成并在 Owner 确认后合并到本地 `main`，工作分支与临时 worktree 已清理；

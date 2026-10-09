@@ -29,7 +29,29 @@
    四类必需空状态文案（先添加一个模型 / Codex 未安装 / 插件已关闭 / 需要审批）与技术错误码映射集中在一张表里，
    技术串只进 `detail`，产品文案恒为中文人话。
 
-按任务要求「不要大改最终 UI」，本轮**未改桌面壳（Rust）代码**；UI 接线所需的 IPC 契约见 §4。
+按任务要求，本轮交付**后端服务 + IPC 契约 + 原生桌面壳页面**三层；UI 与 Core 之间只走既有 IPC 命名空间，
+没有引入任何新的传输、WebView 或命令执行路径。
+
+### 1.3 桌面壳（原生 UI，第二轮补）
+
+| 文件 | 改动 |
+| --- | --- |
+| `desktop-shell/src/app_shell.rs` | 新增 `AppPage::{About, Feedback, Onboarding}` 并纳入 SECONDARY 导航（7 项），补标签与页面说明 |
+| `desktop-shell/src/product_ui.rs`（新增） | 纯逻辑层：About / 更新公告 / Feedback / 引导的 JSON→视图解析、提交参数构造、本地文案兜底、技术码→用户语言映射；**11 个单元测试** |
+| `desktop-shell/src/native_ui.rs` | 三个页面（`show_about_page` / `show_feedback_page` / `show_onboarding_page`）、6 个 Area / 18 个 Operation、按页面懒加载、事件归位、统一错误条改为"用户语言优先 + 技术细节折叠" |
+| `desktop-shell/src/native_main.rs` | 注册 `mod product_ui;` |
+
+UI 行为要点：
+
+- **About**：版本 / Build ID / Commit / 构建时间 / 平台与架构 / 版本一致性标记、开发者与官网（未配置如实显示"未配置"）、
+  GitCode / GitHub / 许可证（逐行"复制"）、更新区块（当前版本、最新版本、更新状态、上次检查、公告标题/时间/正文、下载源优先级、
+  「检查更新」「刷新公告」）、许可证 / 隐私 / 安全说明与官方安全联系入口、诊断信息（含"绝不包含"清单与"复制诊断信息"）。
+- **Feedback**：类型下拉（取自 Core 的 5 类）、标题 / 描述 / 复现步骤 / 联系方式、诊断勾选（安全漏洞类型不提供该入口并给出警示）、
+  提交、本地队列列表（状态 / 尝试次数 / 下次重试 / 上次失败码）与「重试全部 / 清理已发送 / 单条删除」。
+- **Onboarding**：步骤列表（含状态与步骤 id）、按当前步骤给出操作区（欢迎 → 服务商凭据 → 连接测试 → 默认模型 → 可选 Agent/Integration → 完成）、
+  「完成引导」与「重新运行引导」；**首次运行自动进入引导页**（只有在 Core 明确返回未完成时才自动跳转，读取失败不打扰用户）。
+- **统一错误条**：全站 `show_error_message` 现在先给用户语言（先添加一个模型 / Codex 未安装 / 插件已关闭 / 需要审批……），
+  原始技术串收进"技术细节"折叠区并可复制 —— 满足"不要只显示技术错误"。
 
 ---
 
@@ -81,7 +103,7 @@
 
 | 任务书要求 | 实现位置 | 验收 |
 | --- | --- | --- |
-| §一 About：产品名/版本/Build ID/Commit/平台/架构/开发者/官网/GitCode/GitHub | `src/about/build-info.js`、`release-config.json` | `test-product-services`：版本 = package.json、平台/架构、开发者与官网未配置不编造、GitCode/GitHub、许可证、隐私/安全说明可用 |
+| §一 About：产品名/版本/Build ID/Commit/平台/架构/开发者/官网/GitCode/GitHub | `src/about/build-info.js`、`release-config.json`、`desktop-shell/src/product_ui.rs`（解析）、`native_ui.rs`（渲染） | `test-product-services`：版本 = package.json、平台/架构、开发者与官网未配置不编造、GitCode/GitHub、许可证、隐私/安全说明可用；`product_ui` 单测覆盖 About 解析与未配置标记 |
 | §一 更新：当前/最新版本、公告、检查更新、下载源、更新状态 | `src/about/service.js`（`about.update`）+ `src/update/service.js`（`update.notes`/`update.check`） | 离线读取缓存公告、下载源优先级 `[gitcode, github]`、状态 `update_available` / `up_to_date` / `error` |
 | §一 许可证/隐私/安全/诊断信息 | `about.info.legal`、`about.diagnostics`、`docs/product/*` | 隐私/安全说明读自文档；安全联系入口 https；诊断与反馈同一口径 |
 | §一 不写死版本、读 build/release manifest | `package.json` + `build-info.json` + `release-manifest.json` | `test-product-services`：`build-info.json` 提供 Build ID/Commit、发布清单读取、缺失时如实不可用 |
@@ -118,7 +140,7 @@
 
 ---
 
-## 4. IPC 契约（UI 后续接线用）
+## 4. IPC 契约（原生 UI 已按此接线；保留给后续页面/插件参考）
 
 新增/扩展的方法（`ipc-protocol.js` 前缀白名单与 `ipc-runtime.js` 路由均已登记）：
 
@@ -150,27 +172,45 @@
 | `scripts/test-onboarding.mjs` | 31 | 无 QQ/DSH/移动端/Agent/扩展完成引导、必填顺序、可选跳过、进度持久化、连接测试五条失败路径、默认模型写入设置、损坏文件处理与 reset |
 | `scripts/test-product-copy.mjs` | 38 | 四条必需空状态、技术码映射、技术串与产品文案分离、Provider 基础/高级字段、连接失败文案、`product.*` 服务 |
 
-全量聚合器（`node scripts/run-all-tests.mjs`，等价 `npm test`）在本工作区的实测结果：
+全量聚合器（`node scripts/run-all-tests.mjs`，等价 `npm test`）在**未构建任何产物**的工作区（与全新 clone 相同）实测：
 
 ```
 PASS 69 · FAIL 1 · NOT_RUN_ENVIRONMENT 9
 ```
 
-- 唯一的 FAIL 是 `desktop/cargo:test`，**与本分支无关**（本分支 `desktop-shell/` 零改动），
-  16 项 Rust 用例在本会话受限令牌下无法在用户 TEMP 建目录；证据与复现见 §6.5。
+- 唯一的 FAIL 是 `desktop/cargo:test`，**与本分支无关**（本分支 `desktop-shell/` 的失败项是环境问题；且该套件在
+  另外两项 Rust 用例之外全部通过，见下），16 项 Rust 用例在本会话受限令牌下无法在用户 TEMP 建目录；证据与复现见 §6.5。
 - 三个新套件全部 PASS；其余 Node 套件（含 `test-system-pages` / `test-ipc-runtime` / `test-error-hygiene` /
-  `test-service-container` / `test-workspace-*`）全部 PASS，说明新增命名空间与装配没有回归。
+  `test-service-container` / `test-workspace-*` / `test-desktop-architecture`）全部 PASS，说明新增命名空间、装配与
+  原生 UI 都没有回归。
 - 本仓库测试唯一入口是 `npm test`；新增套件已登记 `scripts/run-all-tests.mjs`（未登记会被孤儿检测判 FAIL）。
+
+### 5.1 原生桌面壳（Rust）验证
+
+| 项目 | 结果 |
+| --- | --- |
+| `cargo check --manifest-path desktop-shell/Cargo.toml` | 通过（无 error；warning 均为仓库既有项） |
+| `cargo test --manifest-path desktop-shell/Cargo.toml` | **157 passed · 2 failed**（基线为 145 passed · 2 failed，本分支 +12 项：`product_ui` 11 + `app_shell` 1） |
+| 新增单测覆盖 | About 解析（含未配置标记）、更新公告视图（标题/说明/下载源/失败态）、反馈配置与队列解析、提交草稿校验与参数、四类必需文案、技术码映射、本地兜底与 Core 文案覆盖、首次运行判定、步骤与顺序解析 |
+| `node scripts/test-desktop-shell.mjs`（需 debug 壳 + `dist/core`） | **全部通过**：IPC 握手、策略读写、重启换进程、单实例冲突、真实原生窗口（标题「CetaMesh」）、系统托盘隐藏/恢复、强杀后无残留进程 |
+| 那 2 项失败的 Rust 用例 | `installer::tests::{install_then_repair_then_uninstall_keeps_data, uninstall_keeps_user_modified_files_and_reports_them}`：需要写 `HKCU\Software\WhaleBridgeTest\...` 注册表，被本会话受限令牌拒绝；与本分支无关（未改 `desktop-shell/` 的既有逻辑） |
+
+> 说明：桌面壳的自检需要 `dist/core/WhaleBridgeCore.exe`（由 `node scripts/build-core.mjs` 生成）与 debug 壳，
+> 这两样都是 gitignored 产物；未构建时该套件按环境记为 NOT_RUN_ENVIRONMENT（上表 9 项之一）。
 
 ---
 
 ## 6. 未做与后续
 
-### 6.1 桌面壳 UI 未接线（按任务约束）
+### 6.1 桌面壳 UI 已接线（原生页面，非大改）
 
-任务明确「不要大改最终 UI」，且 About 一节写的是「UI 后续需要」。因此本轮只交付**后端服务 + IPC 契约 + 文案数据**，
-没有改 `desktop-shell/`（`git status` 可验证：本分支 `desktop-shell/` 零改动）。后续会话按 §4 的契约新增
-About / Onboarding / Feedback 页面即可，不需要再动服务层。
+新增 `AppPage::{About, Feedback, Onboarding}` 三个原生页面接在既有 SECONDARY 导航下，渲染与交互全部走既有
+`ApiCall::Family` IPC 通道；未引入 WebView、未引入子进程、未改写既有页面结构（既有页只把统一错误条改成
+"用户语言优先 + 技术细节折叠"）。`scripts/test-desktop-architecture.mjs` 已把新的 UI 纯逻辑模块 `product_ui.rs`
+纳入"UI 不得直接引用 Core 数据文件 / 不得起进程 / 不得用 WebView"的架构守卫。
+
+尚未做的（需要人或后续会话）：**Windows 视觉验收**（截图/手工点按）——壳自检只覆盖进程、IPC、窗口与托盘契约，
+不判断排版效果；`--screenshot-dir` 能力仅存在于 debug 构建。
 
 ### 6.2 发行配置里有四个字段需要发行方填写
 
@@ -194,11 +234,13 @@ About / Onboarding / Feedback 页面即可，不需要再动服务层。
 
 - **`cargo:test`（唯一 FAIL，16/147 项）**：本会话受限令牌下，Rust 测试二进制在用户 TEMP
   （`C:\Users\Administrator\AppData\Local\Temp`）下建目录得到 `ACCESS_DENIED`。
-  对照实验：把 `TEMP/TMP` 指向工作区内目录后，同样两个 target 变成 **145 passed / 2 failed**，
+  对照实验：把 `TEMP/TMP` 指向工作区内目录后，同样两个 target 变成 **157 passed / 2 failed**，
   只剩 2 项需要写 `HKCU\Software\WhaleBridgeTest\...` 注册表的 installer 用例如实被拒。
-  本分支未改任何 Rust 文件（`git diff --stat ce83264 -- desktop-shell` 为空），非受限环境（CI / Owner 本地）不受影响。
+  非受限环境（CI / Owner 本地）不受影响。
   另注：把 `TEMP` 放进工作区会让 `test-workspace-*` 的「非 repo 工作区」判定反向失效
   （临时目录落进了本仓库），因此正式口径使用默认 TEMP，并如实记录这一项 FAIL。
+- **`test-desktop-shell`（原生壳自检）同样受该限制**：默认 TEMP 下壳无法创建日志目录（os error 5）而失败；
+  把 `TEMP/TMP` 指向工作区内目录后**全部通过**（见 §5.1）。这是本会话令牌的限制，不是壳的缺陷。
 - **`test-continuity-rollover` / `test-continuity-auto-rollover`**：依赖 `output/` 目录（gitignored），
   全新 worktree/clone 不含该目录时会 `ENOENT` 失败。这是**既有脆弱性**（本分支未改这两个脚本）；
   本工作区创建 `output/` 后两者均 PASS。建议后续把这两个脚本改为自建目录（`fs.mkdirSync(dir, { recursive: true })`）。

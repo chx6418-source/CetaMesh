@@ -53,7 +53,9 @@ check('UI does not bypass the runtime data/process boundary', () => {
     'desktop-shell/src/memory_ui.rs',
     'desktop-shell/src/workspace_ui.rs',
     'desktop-shell/src/mesh_ui.rs',
-    'desktop-shell/src/app_shell.rs'
+    'desktop-shell/src/app_shell.rs',
+    // 产品化任务 D 新增的 UI 纯逻辑模块：同样必须只经 Core IPC 取数、不碰 Core 数据文件、不起进程。
+    'desktop-shell/src/product_ui.rs'
   ];
   for (const file of uiFiles) {
     const source = read(file);
