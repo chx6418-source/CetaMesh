@@ -92,10 +92,12 @@
 - 桌面壳 `supervisor.rs` 的 HTTP 探活 fallback 已是死代码（待后续会话删除）。
 - NOT_RUN_ENVIRONMENT（无真实环境时如实不跑）：真实 provider-key 回合 / 真实 QQ / 跨设备 Mesh / 签名 / 真实发行产物。
 
-## Active Work
+## Active Work (none)
 
-- **产品化任务 D（Product Services / Onboarding / Feedback）**：工作分支 `codex/session-20261009-2145-rules-confirm`，
-  隔离工作区 `.worktrees/2026-10-09-2145`（基线本地 `main` = `ce83264`）。交付物与验收见 `PRODUCT_SERVICES_REPORT.md`：
+- 产品化任务 D（Product Services / Onboarding / Feedback）**已完成并在 Owner 确认后快进合并**到本地 `main`
+  （`ce83264..33ed3ce`：`049129f` 服务层 / `9f7d050` 原生 UI / `33ed3ce` 侧边栏与截图验收）；
+  工作分支 `codex/session-20261009-2145-rules-confirm` 与隔离 worktree `.worktrees/2026-10-09-2145` 已删除。
+  **未 push**（等 Owner 指示）。交付物与验收见 `PRODUCT_SERVICES_REPORT.md`：
   About 服务（build/release manifest 驱动，不写死版本）、更新公告安全渲染 + 离线缓存、Feedback（本地 Outbox +
   自动/手动重试 + 诊断 redaction + 安全漏洞最小 metadata）、First Run Onboarding（7 步，**不依赖 QQ/DSH/移动端**）、
   Provider 基础/高级字段视图与空状态文案；**原生桌面壳新增 About / Feedback / Onboarding 三个页面并接线**
@@ -104,10 +106,10 @@
   验证：`npm test` → **PASS 69 · FAIL 1 · NOT_RUN_ENVIRONMENT 9**（唯一 FAIL 为 `desktop/cargo:test` 的本会话令牌
   TEMP 限制）；`cargo test` **157 passed · 2 failed**（+12 新单测；2 项为 HKCU 注册表限制）；
   `test-desktop-shell`（构建 debug 壳 + `dist/core` 后）**全部通过**；debug 截图验收扩到 14 张
-  （`output/product-qa/`，新增 About/Feedback/Onboarding 三页），并据此修掉"15 个导航项在 1280×800 下
-  侧边栏被裁、Settings 点不到"的真实缺陷（侧边栏改为可滚动）。详见报告 §5/§6.5。
-  **等 Owner 确认后合并 `main`、删除工作分支**。
-  UI 需要的 IPC 契约（`about.*` / `update.notes` / `feedback.*` / `onboarding.*` / `product.*`）见报告。
+  （新增 About/Feedback/Onboarding 三页），并据此修掉"15 个导航项在 1280×800 下侧边栏被裁、Settings 点不到"
+  的真实缺陷（侧边栏改为可滚动）。About/Feedback/Onboarding 三张验收截图保留在 `output/product-qa-task-d/`。
+  详见报告 §5/§6.5；UI 需要的 IPC 契约（`about.*` / `update.notes` / `feedback.*` / `onboarding.*` / `product.*`）
+  见报告 §4。
 
 - 上线冲刺任务 B（统一配对）已完成并在 Owner 确认后合并到本地 `main`，工作分支与临时 worktree 已清理；
   Mobile 仓 `feature/unified-device-pairing-v1` 同样已合并到其本地 `main` 并删除分支。**两个仓库均未 push**（等 Owner 指示）。
