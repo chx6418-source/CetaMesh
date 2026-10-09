@@ -16,13 +16,24 @@ use eframe::egui;
 
 use crate::ui_prefs::ThemePreference;
 
+/// Which product page a shot must show. QA-only: the driver switches the real navigation,
+/// so the captured pixels are the real page (including the new product-service pages).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QaPage {
+    Home,
+    Settings,
+    About,
+    Feedback,
+    Onboarding,
+}
+
 /// One screenshot request.
 #[derive(Clone, Debug)]
 pub struct ShotSpec {
     pub label: String,
     pub theme: ThemePreference,
-    /// Navigate to the Settings page (theme picker) before shooting.
-    pub settings: bool,
+    /// Page to navigate to before shooting.
+    pub page: QaPage,
 }
 
 /// How long a freshly applied theme is given to finish its 700 ms cross-fade plus layout.
@@ -41,7 +52,8 @@ pub enum Stage {
     Capture,
 }
 
-/// The full QA run: ten theme shots on the Home page plus one Settings shot for Soda.
+/// The full QA run: ten theme shots on Home, the Soda Settings shot, then the three
+/// product-service pages (About / Feedback / Onboarding) so UI changes there are visually covered.
 pub struct ScreenshotPlan {
     pub dir: PathBuf,
     pub shots: Vec<ShotSpec>,
@@ -60,14 +72,26 @@ impl ScreenshotPlan {
             .map(|(position, theme)| ShotSpec {
                 label: format!("{:02}-{}-home", position + 1, theme.as_str()),
                 theme: *theme,
-                settings: false,
+                page: QaPage::Home,
             })
             .collect();
         shots.push(ShotSpec {
             label: "11-soda-settings".to_owned(),
             theme: ThemePreference::Soda,
-            settings: true,
+            page: QaPage::Settings,
         });
+        // 产品化任务 D：三个新产品页各自留一张 Soda 主题截图（debug-only 视觉验收）。
+        for (label, page) in [
+            ("12-soda-about", QaPage::About),
+            ("13-soda-feedback", QaPage::Feedback),
+            ("14-soda-onboarding", QaPage::Onboarding),
+        ] {
+            shots.push(ShotSpec {
+                label: label.to_owned(),
+                theme: ThemePreference::Soda,
+                page,
+            });
+        }
         Self {
             dir: dir.to_path_buf(),
             shots,
@@ -238,18 +262,22 @@ mod tests {
     }
 
     #[test]
-    fn plan_covers_ten_themes_plus_settings_and_advances_to_finish() {
+    fn plan_covers_ten_themes_plus_product_pages_and_advances_to_finish() {
         let plan = ScreenshotPlan::new(Path::new("unused"));
-        assert_eq!(plan.shots.len(), 11);
+        // 10 themes on Home + Settings + 产品化任务 D 的三个产品页。
+        assert_eq!(plan.shots.len(), 14);
         assert_eq!(plan.shots[0].theme, ThemePreference::Soda);
-        assert_eq!(plan.shots[10].theme, ThemePreference::Soda);
-        assert!(plan.shots[10].settings);
+        assert_eq!(plan.shots[0].page, QaPage::Home);
+        assert_eq!(plan.shots[10].page, QaPage::Settings);
+        assert_eq!(plan.shots[11].page, QaPage::About);
+        assert_eq!(plan.shots[12].page, QaPage::Feedback);
+        assert_eq!(plan.shots[13].page, QaPage::Onboarding);
         for spec in &plan.shots {
             assert!(!spec.label.contains(['/', '\\', ' ']));
         }
         let mut plan = ScreenshotPlan::new(Path::new("unused"));
         let now = Instant::now();
-        for _ in 0..11 {
+        for _ in 0..14 {
             plan.advance(now);
         }
         assert!(plan.finished);

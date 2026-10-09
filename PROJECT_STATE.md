@@ -103,7 +103,9 @@
   技术细节折叠"）；新增 `test-product-services` / `test-onboarding` / `test-product-copy` 三个套件（已登记聚合器）。
   验证：`npm test` → **PASS 69 · FAIL 1 · NOT_RUN_ENVIRONMENT 9**（唯一 FAIL 为 `desktop/cargo:test` 的本会话令牌
   TEMP 限制）；`cargo test` **157 passed · 2 failed**（+12 新单测；2 项为 HKCU 注册表限制）；
-  `test-desktop-shell`（构建 debug 壳 + `dist/core` 后）**全部通过**。详见报告 §5/§6.5。
+  `test-desktop-shell`（构建 debug 壳 + `dist/core` 后）**全部通过**；debug 截图验收扩到 14 张
+  （`output/product-qa/`，新增 About/Feedback/Onboarding 三页），并据此修掉"15 个导航项在 1280×800 下
+  侧边栏被裁、Settings 点不到"的真实缺陷（侧边栏改为可滚动）。详见报告 §5/§6.5。
   **等 Owner 确认后合并 `main`、删除工作分支**。
   UI 需要的 IPC 契约（`about.*` / `update.notes` / `feedback.*` / `onboarding.*` / `product.*`）见报告。
 

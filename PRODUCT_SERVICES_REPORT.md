@@ -198,6 +198,26 @@ PASS 69 · FAIL 1 · NOT_RUN_ENVIRONMENT 9
 > 说明：桌面壳的自检需要 `dist/core/WhaleBridgeCore.exe`（由 `node scripts/build-core.mjs` 生成）与 debug 壳，
 > 这两样都是 gitignored 产物；未构建时该套件按环境记为 NOT_RUN_ENVIRONMENT（上表 9 项之一）。
 
+### 5.2 原生 UI 视觉验收（debug 截图）
+
+`--screenshot-dir` 是仓库既有的 debug-only 截图能力（release 构建不含）。本轮把它从"10 个主题 + 1 张 Settings"
+扩展为 **14 张**：新增 `12-soda-about` / `13-soda-feedback` / `14-soda-onboarding`（`theme/qa.rs` 的 `ShotSpec`
+从 `settings: bool` 改为 `page: QaPage`，驱动真实导航后截图）。固定 1280×800（产品最小窗口）实测：
+
+| 截图 | 结论 |
+| --- | --- |
+| `12-soda-about.png` | About 页渲染正常：页头 + 版本/构建说明、更新卡片（状态 / 当前版本 / 最新版本 / 公告占位 / 离线缓存提示）、诊断卡片（含"绝不包含"清单）；Core 未就绪时显示加载态而不是空白或崩溃 |
+| `13-soda-feedback.png` | Feedback 页渲染正常：端点未配置提示（含复制）、类型下拉、标题/描述/复现步骤/联系方式表单 |
+| `14-soda-onboarding.png` | Onboarding 页渲染正常：引导说明（明确不要求 QQ / DSH / 移动端）、步骤区、当前步骤区、完成按钮与"还有必填步骤未完成"提示 |
+
+**截图发现并修复的真实缺陷**：产品页从 12 个增加到 15 个后，1280×800 下侧边栏装不下整列导航，
+最后几项被裁掉（`Settings` 鼠标点不到）。修法是把侧边栏内容放进 `egui::ScrollArea::vertical()`
+（不动导航分组、不缩小字号硬塞）；重跑截图可见滚动条生效、所有页面可达。
+
+注：截图模式在 Core 就绪前就开始拍摄，因此这三张展示的是"数据未到达"的加载态；数据填充后的解析与文案
+由 `product_ui` 的 11 个单测（真实 JSON payload）与 `test-product-services` 的 IPC 端到端覆盖。
+截图产物在 `output/product-qa/`（gitignored）。
+
 ---
 
 ## 6. 未做与后续

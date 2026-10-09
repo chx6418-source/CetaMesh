@@ -6354,7 +6354,14 @@ impl eframe::App for NativeUi {
                         .inner_margin(egui::Margin::symmetric(12, 14)),
                 )
                 .show(ui, |ui| {
-                    self.show_sidebar(ui);
+                    // 侧边栏必须可滚动：产品页从 12 个增加到 15 个后，1280×800 的最小窗口高度
+                    // 装不下整列导航（最后几项会被裁掉、鼠标点不到）。滚动是诚实的修法，
+                    // 既不改导航分组，也不靠缩小字号硬塞。
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            self.show_sidebar(ui);
+                        });
                 });
             // `border-right: 1px solid var(--edge-hi)`
             let rect = sidebar.response.rect;
@@ -6469,9 +6476,15 @@ impl NativeUi {
         };
         match plan.stage {
             Stage::Apply => {
-                if spec.settings {
-                    self.navigation.select_page(AppPage::Settings);
-                }
+                // 截图请求里的页面由 QA 计划指定（含产品化任务 D 的三个新产品页）。
+                let page = match spec.page {
+                    qa::QaPage::Home => AppPage::Home,
+                    qa::QaPage::Settings => AppPage::Settings,
+                    qa::QaPage::About => AppPage::About,
+                    qa::QaPage::Feedback => AppPage::Feedback,
+                    qa::QaPage::Onboarding => AppPage::Onboarding,
+                };
+                self.navigation.select_page(page);
                 let theme = spec.theme;
                 self.update_prefs(|prefs| {
                     prefs.theme = theme;
