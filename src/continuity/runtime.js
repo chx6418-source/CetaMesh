@@ -372,6 +372,7 @@ export function createContinuityRuntime({
    */
   async function rollover({ taskId, reason, targetProvider, coding, relevantFiles, workspaceFacts, model, reasoningEffort } = {}) {
     const task = requireTask(taskId);
+    if (!task.workspaceId) throw continuityError('WORKSPACE_REQUIRED', 'Continuity requires a Task-bound Workspace');
     if (inFlight.has(task.id)) {
       throw continuityError('ROLLOVER_IN_FLIGHT', '该任务已有一次 rollover 正在进行，拒绝重复执行');
     }
@@ -382,14 +383,22 @@ export function createContinuityRuntime({
     if (!previousAgent) {
       throw continuityError('ROLLOVER_NO_AGENT', '任务没有绑定的 Agent Session，无需 rollover（直接 attachAgent 即可）');
     }
-    if (agentBroker.capabilities(previousAgent.provider)?.workspaceBoundary === 'capability-broker') {
+    const previousCapabilities = agentBroker.capabilities(previousAgent.provider);
+    const previousBoundary = previousCapabilities?.workspaceBoundary;
+    const taskBoundaries = new Set(['capability-broker', 'staged-capability-broker']);
+    if (!taskBoundaries.has(previousBoundary)) {
+      throw continuityError('ROLLOVER_NOT_SAFE', previousBoundary === 'unverified'
+        ? 'The current Provider has no verified Task Workspace boundary'
+        : 'The current Provider has an unsupported Workspace boundary');
+    }
+    if (taskBoundaries.has(previousBoundary)) {
       const status = await agentBroker.status(previousAgent);
       if (status.running || status.queued > 0 || status.waitingForApproval) {
-        throw continuityError('ROLLOVER_NOT_SAFE', 'Managed Agent has active work or an unresolved Owner approval');
+        throw continuityError('ROLLOVER_NOT_SAFE', 'Agent has active work or an unresolved Owner approval');
       }
       const target = targetProvider ? agentBroker.require(targetProvider) : agentBroker.require(previousAgent.provider);
-      if (target.capabilities().workspaceBoundary !== 'capability-broker') {
-        throw continuityError('ROLLOVER_NOT_SAFE', 'A managed Task cannot switch to an unrestricted Provider');
+      if (!taskBoundaries.has(target.capabilities().workspaceBoundary)) {
+        throw continuityError('ROLLOVER_NOT_SAFE', 'A Task cannot switch to a Provider without an enforced Workspace boundary');
       }
     }
     inFlight.add(task.id);
@@ -435,7 +444,13 @@ export function createContinuityRuntime({
 
       // 4) 经 Broker 创建新 Session 并发送结构化 bootstrap（不是聊天历史）
       const target = targetProvider ? agentBroker.require(targetProvider) : fromProvider;
+      const targetBoundary = target.capabilities().workspaceBoundary;
+      if (!taskBoundaries.has(targetBoundary)) {
+        throw continuityError('ROLLOVER_NOT_SAFE', 'A Task cannot switch to a Provider without an enforced Workspace boundary');
+      }
       const created = await agentBroker.createSession(target.id, {
+        taskId: task.id,
+        workspaceId: task.workspaceId,
         model: model ?? target.defaults?.model,
         reasoningEffort: reasoningEffort ?? target.defaults?.reasoningEffort
       });
@@ -456,6 +471,13 @@ export function createContinuityRuntime({
         sessionId: created.sessionId,
         content: renderResumePrompt(packet)
       });
+
+      if (previousBoundary === 'staged-capability-broker' || previousCapabilities?.requiresSessionCleanup === true) {
+        try { await agentBroker.closeSession({ provider: fromProvider.id, sessionId: previousAgent.sessionId }); }
+        catch (error) {
+          if (error?.code !== 'SESSION_NOT_FOUND') log(`Continuity staging cleanup failed: ${error?.code ?? 'PROVIDER_ERROR'}`);
+        }
+      }
 
       // 6) Workspace Reconciliation：用真实工作区核验 checkpoint（TASK-S2-007）。
       //    不一致只记录 discrepancy，绝不静默改写 Task State。

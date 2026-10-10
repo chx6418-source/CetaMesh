@@ -304,7 +304,7 @@ export function createChatService({
         if (!entry) {
           throw chatError('INVALID_PARAMS', `未知 Agent Provider：${String(config.agentProvider)}`);
         }
-        if (entry.eventProtocol !== 'dsh-session-events') {
+        if (!['dsh-session-events', 'agent-turn-events-v1'].includes(entry.eventProtocol)) {
           throw chatError('INVALID_PARAMS', `Agent Provider「${entry.id}」的事件协议与 Chat 回合状态机不兼容`);
         }
         config.agentProvider = entry.id;
@@ -349,6 +349,19 @@ export function createChatService({
   }
 
   async function catalog() {
+    const chatAgentProvider = entry => ({
+      id: entry.id,
+      label: entry.label ?? entry.displayName ?? entry.id,
+      displayName: entry.displayName ?? entry.label ?? entry.id,
+      eventProtocol: entry.eventProtocol,
+      available: typeof entry.available === 'boolean' ? entry.available : null,
+      version: entry.version ?? null,
+      reason: entry.reason ?? null,
+      workspaceBoundary: entry.workspaceBoundary ?? 'unsupported',
+      supportsFreshSession: entry.supportsFreshSession === true,
+      supportsResume: entry.supportsResume === true,
+      health: entry.health ?? 'unknown'
+    });
     // Model Runtime 目录（独立于 DSH，DSH 不运行时依然可用）。
     // 只返回 hasKey 布尔与模型列表，绝不携带 API Key 材料。
     const modelProviders = [];
@@ -378,7 +391,7 @@ export function createChatService({
       const entries = Array.isArray(value?.models) ? value.models : Array.isArray(value) ? value : [];
       return {
         providers: [...PROVIDERS],
-        agentProviders: [...selectableAgentProviders.values()].map((entry) => ({ id: entry.id, label: entry.label ?? entry.id })),
+        agentProviders: [...selectableAgentProviders.values()].map(chatAgentProvider),
         modes: [...CHAT_MODES],
         reasoning: [...REASONING_EFFORTS],
         models: entries.map((entry) => ({
@@ -393,7 +406,7 @@ export function createChatService({
       // 空 Provider / 目录不可用：返回明确 error，UI 下拉显示不可用而不是伪造列表。
       return {
         providers: [...PROVIDERS],
-        agentProviders: [...selectableAgentProviders.values()].map((entry) => ({ id: entry.id, label: entry.label ?? entry.id })),
+        agentProviders: [...selectableAgentProviders.values()].map(chatAgentProvider),
         modes: [...CHAT_MODES],
         reasoning: [...REASONING_EFFORTS],
         models: [],
@@ -757,6 +770,10 @@ export function createChatService({
     const agentProviderId = record.config.agentProvider ?? null;
     try {
       if (agentProviderId === 'cetamesh' && platformRoute) {
+        await startModelOrDshTurn(record, state, promptText, { attachments, sourceText, forceProject: true });
+      } else if (agentProviderId && agentProviderId !== AGENT_PROVIDER_DISABLED
+        && ['capability-broker', 'staged-capability-broker'].includes(selectableAgentProviders.get(agentProviderId)?.workspaceBoundary)) {
+        if (typeof platformRoute !== 'function') throw chatError('TASK_REQUIRED', 'Workspace-bound Agent sessions require Task assignment');
         await startModelOrDshTurn(record, state, promptText, { attachments, sourceText, forceProject: true });
       } else if (agentProviderId && agentProviderId !== AGENT_PROVIDER_DISABLED && agentExecute) {
         // Agent Provider 路径：用户显式选择 Agent 时，会话生命周期与回合提交经标准契约；

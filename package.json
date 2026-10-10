@@ -43,6 +43,7 @@
     "test-config": "node scripts/test-config-service.mjs",
     "test-agent": "node scripts/test-agent-provider.mjs",
     "test-agent-broker": "node scripts/test-agent-broker.mjs",
+    "test-agent-provider-expansion": "node scripts/test-agent-provider-expansion.mjs",
     "test-continuity-rollover": "node scripts/test-continuity-rollover.mjs",
     "test-continuity-auto-rollover": "node scripts/test-continuity-auto-rollover.mjs",
     "test-workspace-reconciliation": "node scripts/test-workspace-reconciliation.mjs",

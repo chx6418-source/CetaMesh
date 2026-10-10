@@ -71,6 +71,7 @@ const REGISTRY = {
 
   // ── runtime：产品运行时（chat/memory/task/continuity/model/social…） ───────
   'test-agent-broker.mjs': { category: 'runtime' },
+  'test-agent-provider-expansion.mjs': { category: 'security' },
   'test-managed-agent-provider.mjs': { category: 'runtime' },
   'test-memory-runtime.mjs': { category: 'runtime' },
   'test-memory-link.mjs': { category: 'runtime' },

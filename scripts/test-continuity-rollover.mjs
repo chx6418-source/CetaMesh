@@ -13,6 +13,7 @@ import { createContinuityService } from '../src/continuity/service.js';
 import { bandFor, normalizePacket } from '../src/continuity/types.js';
 
 const root = path.resolve(import.meta.dirname, '..');
+fs.mkdirSync(path.join(root, 'output'), { recursive: true });
 const temp = fs.mkdtempSync(path.join(root, 'output', 'continuity-test-'));
 const stateRoot = path.join(temp, 'state');
 fs.mkdirSync(stateRoot, { recursive: true });
@@ -25,6 +26,7 @@ function mockProvider(id, log, options = {}) {
   return defineAgentProvider({
     id,
     label: `Mock ${id}`,
+    capabilityExtras: { workspaceBoundary: 'capability-broker' },
     methods: {
       async createSession() {
         if (options.gate?.blocked) {
@@ -176,7 +178,7 @@ function setup({ policy, gate } = {}) {
 {
   const gate = { blocked: true, release: null };
   const { runtime, taskRuntime, rev } = setup({ gate });
-  const task = taskRuntime.create({ goal: '长任务' });
+  const task = taskRuntime.create({ goal: '长任务', workspaceId: 'ws-long' });
   taskRuntime.attachAgent({ id: task.id, expectedRev: rev(task.id), provider: 'alpha', sessionId: 'alpha-s1' });
   runtime.setPolicy({ rolloverPercent: 5 });
   runtime.monitor.record('alpha:alpha-s1', { inputTokens: 999, windowTokens: 10000 });
@@ -207,7 +209,7 @@ function setup({ policy, gate } = {}) {
 // ── 4. 跨 Provider Handoff：alpha → beta（同一 Broker 内寻址） ────────────────
 {
   const { runtime, broker, taskRuntime, log, rev } = setup();
-  const task = taskRuntime.create({ goal: '跨 provider 迁移' });
+  const task = taskRuntime.create({ goal: '跨 provider 迁移', workspaceId: 'ws-cross-provider' });
   taskRuntime.attachAgent({ id: task.id, expectedRev: rev(task.id), provider: 'alpha', sessionId: 'alpha-s9' });
   const result = await runtime.rollover({ taskId: task.id, reason: 'provider-switch', targetProvider: 'beta' });
   assert.equal(result.crossProvider, true);
@@ -228,7 +230,7 @@ function setup({ policy, gate } = {}) {
 // ── 5. 无 Agent / 不安全点 / packet 校验 ─────────────────────────────────────
 {
   const { runtime, taskRuntime, rev } = setup();
-  const task = taskRuntime.create({ goal: '未绑定会话' });
+  const task = taskRuntime.create({ goal: '未绑定会话', workspaceId: 'ws-no-session' });
   await assert.rejects(
     runtime.rollover({ taskId: task.id }),
     (error) => error.code === 'ROLLOVER_NO_AGENT'
@@ -279,7 +281,7 @@ function setup({ policy, gate } = {}) {
   await service.execute({ method: 'continuity.policy.set', params: { policy: { rolloverPercent: 60 } } });
   const updated = await service.execute({ method: 'continuity.policy.get' });
   assert.equal(updated.policy.rolloverPercent, 60);
-  const task = taskRuntime.create({ goal: 'IPC 路径' });
+  const task = taskRuntime.create({ goal: 'IPC 路径', workspaceId: 'ws-ipc' });
   taskRuntime.attachAgent({ id: task.id, expectedRev: rev(task.id), provider: 'alpha', sessionId: 'alpha-s1' });
   const recorded = await service.execute({
     method: 'continuity.context.record',

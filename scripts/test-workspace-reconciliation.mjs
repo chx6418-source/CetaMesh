@@ -175,9 +175,10 @@ function makeReconciler({ entries = {} } = {}) {
   const registry = createAgentProviderRegistry({ providers: [] });
   const alpha = {
     id: 'alpha', label: 'Alpha',
-    capabilities: () => ({ id: 'alpha', label: 'Alpha', eventProtocol: null, supported: {}, unsupported: [] }),
+    capabilities: () => ({ id: 'alpha', label: 'Alpha', eventProtocol: null, supported: {}, unsupported: [], workspaceBoundary: 'capability-broker' }),
     async createSession() { return { sessionId: 'alpha-s2', provider: 'alpha' }; },
     async send() { return { accepted: true }; },
+    async status() { return { running: false, queued: 0, waitingForApproval: false }; },
     async cancel() { return { cancelled: true }; },
     async archiveSession() { return { archived: true, supported: true }; }
   };

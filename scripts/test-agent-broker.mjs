@@ -35,7 +35,7 @@ function fixtureProvider(id, { label, eventProtocol = null, withArchive = false,
     id,
     label: label ?? `Fixture ${id}`,
     eventProtocol,
-    capabilityExtras,
+    capabilityExtras: { workspaceBoundary: 'capability-broker', ...(capabilityExtras ?? {}) },
     methods: {
       async createSession({ model } = {}) {
         seq += 1;
@@ -143,8 +143,8 @@ function fixtureProvider(id, { label, eventProtocol = null, withArchive = false,
   });
   const broker = createAgentBroker({ registry, log: () => {} });
 
-  const createdA = await broker.createSession('alpha', { model: 'm1' });
-  const createdB = await broker.createSession('beta', {});
+  const createdA = await broker.createSession('alpha', { taskId: 'task-a', workspaceId: 'ws-a', model: 'm1' });
+  const createdB = await broker.createSession('beta', { taskId: 'task-b', workspaceId: 'ws-b' });
   assert.match(createdA.sessionId, /^alpha-s\d+$/);
   assert.match(createdB.sessionId, /^beta-s\d+$/);
 
@@ -231,7 +231,9 @@ function fixtureProvider(id, { label, eventProtocol = null, withArchive = false,
   assert.equal(listed.providers[0].capabilities.supported.archiveSession, true);
   assert.equal(listed.providers[1].capabilities.supported.archiveSession, false);
 
-  const created = await fixtureService.execute({ method: 'agent.createSession', params: { provider: 'alpha', model: 'm9' } });
+  await assert.rejects(() => fixtureService.execute({ method: 'agent.createSession', params: { provider: 'alpha', model: 'm9' } }),
+    (error) => error.code === 'TASK_REQUIRED');
+  const created = await broker.createSession('alpha', { taskId: 'task-fixture', workspaceId: 'ws-fixture', model: 'm9' });
   assert.match(created.sessionId, /^alpha-s\d+$/);
   const archived = await fixtureService.execute({ method: 'agent.archiveSession', params: { provider: 'alpha', sessionId: created.sessionId } });
   assert.equal(archived.supported, true);
@@ -251,10 +253,10 @@ function fixtureProvider(id, { label, eventProtocol = null, withArchive = false,
     providers: [fixtureProvider('prov-a'), fixtureProvider('prov-b')]
   });
   const broker = createAgentBroker({ registry });
-  const sessionA = await broker.createSession('prov-a', {});
+  const sessionA = await broker.createSession('prov-a', { taskId: 'task-a', workspaceId: 'ws-a' });
   await broker.cancel({ provider: 'prov-a', sessionId: sessionA.sessionId });
   await broker.closeSession({ provider: 'prov-a', sessionId: sessionA.sessionId });
-  const sessionB = await broker.createSession('prov-b', {});
+  const sessionB = await broker.createSession('prov-b', { taskId: 'task-b', workspaceId: 'ws-b' });
   assert.match(sessionB.sessionId, /^prov-b-s\d+$/);
   assert.equal(broker.ids().length, 2);
   ok('Cross Provider 结构：A/B 两 Provider 同一 Broker 注册、独立寻址、互不串扰');
