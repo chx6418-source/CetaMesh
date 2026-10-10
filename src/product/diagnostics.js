@@ -1,20 +1,21 @@
-// CetaMesh Desktop —— 诊断信息（产品化任务 D，第四节）。
+// CetaMesh Desktop —— 诊断信息（产品化任务 D，第四节；反馈修正后只用于**本机展示**）。
 //
-// 诊断附件的安全模型是**白名单 + 二次脱敏**，而不是黑名单：
+// 反馈现在是「链接入口 + 系统默认浏览器」：软件内不再收集、不再排队、不再上传任何诊断附件。
+// 因此本模块只剩一个用途 —— About 页把**本机**诊断快照显示给用户看（用户可自己复制）。
+// 即便如此构造仍坚持白名单，因为"展示在本机屏幕上"也不该把用户数据摊开：
 //   1) 只有本文件里显式列出的字段会进 payload —— 版本、平台、Build ID、最近错误码、
 //      Provider/Plugin 的**状态布尔值**。聊天内容、Memory、文件正文、prompt 根本没有入口，
 //      因为它们不在白名单里（即使调用方把整个对象塞进来也不会被读取）；
 //   2) 所有剩下的字符串仍然过一次既有 redaction（src/logging/redact.js），
 //      防止「插件 id 里被人塞了 token」这类意外；
-//   3) 长度有界，整个 payload 有硬上限，避免把状态文件整份带出去。
+//   3) 长度有界，整个 payload 有硬上限。
 //
-// 用户可见性：DIAGNOSTICS_POLICY 明确列出「包含什么/绝不包含什么」，UI 直接展示给用户看，
-// 而不是让用户盲选一个「附加诊断信息」的勾选框。
+// DIAGNOSTICS_POLICY 仍然明确列出「包含什么/绝不包含什么」，UI 直接展示给用户看。
 
 import { redactText } from '../logging/index.js';
 
 export const DIAGNOSTICS_SCHEMA_VERSION = 1;
-/** 整个诊断附件的硬上限（字节）。超过就丢弃低价值字段，绝不截断成半截 JSON。 */
+/** 诊断快照的硬上限（字节）。超过就丢弃低价值字段，绝不截断成半截 JSON。 */
 export const DIAGNOSTICS_MAX_BYTES = 32 * 1024;
 
 export const DIAGNOSTICS_POLICY = Object.freeze({
@@ -67,7 +68,7 @@ function safeCount(value) {
 }
 
 /**
- * 组装诊断附件。
+ * 组装诊断快照。
  * 所有输入都可为空 —— 拿不到的部分如实缺省（null / 0），绝不编造，也绝不因为缺数据而抛错。
  */
 export function buildDiagnostics({
@@ -125,76 +126,9 @@ export function buildDiagnostics({
 
   const serialized = JSON.stringify(payload);
   if (Buffer.byteLength(serialized, 'utf8') > DIAGNOSTICS_MAX_BYTES) {
-    // 理论上到不了这里（字段全部有界）；真到了就丢掉历史错误码而不是产出超大附件。
+    // 理论上到不了这里（字段全部有界）；真到了就丢掉历史错误码而不是产出超大快照。
     payload.recentErrorCodes = [];
     payload.truncated = true;
   }
   return payload;
-}
-
-/**
- * 二次防线：任何要进入反馈 payload 的对象都过一遍。
- * 逐字段保留白名单结构，并把所有字符串再脱敏一次；非白名单字段直接丢弃。
- */
-export function sanitizeDiagnostics(diagnostics) {
-  if (!diagnostics || typeof diagnostics !== 'object') return null;
-  return {
-    schemaVersion: diagnostics.schemaVersion ?? DIAGNOSTICS_SCHEMA_VERSION,
-    generatedAt: safeText(diagnostics.generatedAt, 40),
-    product: {
-      name: safeText(diagnostics.product?.name, 40),
-      edition: safeText(diagnostics.product?.edition, 40),
-      version: safeText(diagnostics.product?.version, 40),
-      shellVersion: safeText(diagnostics.product?.shellVersion, 40),
-      versionConsistent: diagnostics.product?.versionConsistent === true ? true : null
-    },
-    build: {
-      buildId: safeText(diagnostics.build?.buildId, 80),
-      commit: safeText(diagnostics.build?.commit, 64),
-      commitSource: safeCode(diagnostics.build?.commitSource),
-      buildTime: safeText(diagnostics.build?.buildTime, 40)
-    },
-    platform: {
-      os: safeText(diagnostics.platform?.os, 40),
-      arch: safeText(diagnostics.platform?.arch, 40),
-      node: safeText(diagnostics.platform?.node, 40)
-    },
-    providers: (Array.isArray(diagnostics.providers) ? diagnostics.providers : []).slice(0, 20).map((provider) => ({
-      id: safeText(provider?.id, 64),
-      label: safeText(provider?.label, 80),
-      hasKey: provider?.hasKey === true
-    })),
-    plugins: {
-      total: safeCount(diagnostics.plugins?.total),
-      enabled: safeCount(diagnostics.plugins?.enabled),
-      disabled: safeCount(diagnostics.plugins?.disabled)
-    },
-    settings: {
-      theme: safeText(diagnostics.settings?.theme, 20),
-      autoCheckUpdates: diagnostics.settings?.autoCheckUpdates === true,
-      redactLogs: diagnostics.settings?.redactLogs === true
-    },
-    lastErrorCode: safeCode(diagnostics.lastErrorCode),
-    recentErrorCodes: (Array.isArray(diagnostics.recentErrorCodes) ? diagnostics.recentErrorCodes : [])
-      .slice(-10)
-      .map((code) => safeCode(code))
-      .filter(Boolean)
-  };
-}
-
-/** 「最小 metadata」：安全漏洞反馈默认只带这些，绝不自动附加日志。 */
-export function minimalDiagnostics({ aboutInfo = null, now = () => Date.now() } = {}) {
-  return {
-    schemaVersion: DIAGNOSTICS_SCHEMA_VERSION,
-    generatedAt: new Date(now()).toISOString(),
-    product: {
-      name: safeText(aboutInfo?.product, 40),
-      version: safeText(aboutInfo?.version, 40)
-    },
-    platform: {
-      os: safeText(aboutInfo?.runtime?.platform ?? process.platform, 40),
-      arch: safeText(aboutInfo?.runtime?.arch ?? process.arch, 40)
-    },
-    minimal: true
-  };
 }

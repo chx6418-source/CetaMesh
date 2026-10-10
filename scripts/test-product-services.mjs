@@ -1,13 +1,14 @@
-// CetaMesh Desktop —— 产品化任务 D 验收：About / 更新公告 / Feedback / 诊断 redaction / 离线队列 / 重试。
+// CetaMesh Desktop —— 产品化任务 D 验收：About / 更新公告 / 诊断（本机展示）/ 装配与 IPC。
 // 用法：node scripts/test-product-services.mjs
 //
-// 覆盖验收项（对应任务书第十节）：
+// 反馈已改为"链接入口 + 系统浏览器"（见 scripts/test-feedback-links.mjs）：
+// 本文件不再覆盖任何反馈收集 / 队列 / 重试行为。
+//
+// 覆盖验收项：
 //   About build info（版本不写死、构建/发布清单、未配置不编造）
 //   Update notes（title/version/publishedAt/notes + 纯文本安全渲染 + 离线缓存）
-//   Feedback redaction（白名单诊断，绝不带 Key/token/聊天/Memory/文件正文/私钥）
-//   Offline feedback queue（无 endpoint 也能提交、落盘、不阻塞）
-//   Retry（5xx 退避重试、4xx 不可重试、未到点不重发）
-//   装配与 IPC 可达性（feedback./onboarding./product. 三个新命名空间）
+//   诊断快照（白名单 + 脱敏，只在本机展示）
+//   装配与 IPC 可达性（onboarding. / product. 命名空间）
 
 import fs from 'node:fs';
 import os from 'node:os';
@@ -24,12 +25,7 @@ import {
   plainTextFromMarkdown,
   signManifest
 } from '../src/update/index.js';
-import {
-  createFeedbackOutbox,
-  createFeedbackService,
-  createFeedbackTransport
-} from '../src/feedback/index.js';
-import { DIAGNOSTICS_POLICY, buildDiagnostics, sanitizeDiagnostics } from '../src/product/diagnostics.js';
+import { DIAGNOSTICS_POLICY, buildDiagnostics } from '../src/product/diagnostics.js';
 import { createErrorRegistry } from '../src/product/error-registry.js';
 import { loadReleaseConfig } from '../src/product/release-config.js';
 
@@ -43,10 +39,6 @@ const equal = (name, actual, expected) => {
   const a = JSON.stringify(actual); const b = JSON.stringify(expected);
   check(name, a === b, a === b ? '' : 'got ' + a + ' want ' + b);
 };
-const asyncCapture = async (fn) => {
-  try { return { threw: false, value: await fn() }; }
-  catch (error) { return { threw: true, code: error && error.code, message: String(error && error.message) }; }
-};
 const tmpDir = (prefix) => fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 const jsonFetch = (status, body = '{}') => async () => ({ ok: status >= 200 && status < 300, status, text: async () => body });
 
@@ -55,27 +47,6 @@ const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf
 const workDirs = [];
 const originalDataDir = process.env.WHALEBRIDGE_DATA_DIR;
 const track = (dir) => { workDirs.push(dir); return dir; };
-
-/** 故意"脏"的诊断来源：既含非白名单字段，也含应被二次脱敏的字符串。 */
-const dirtyDiagnostics = () => ({
-  schemaVersion: 1,
-  generatedAt: '2026-10-09T00:00:00Z',
-  product: { name: 'CetaMesh', edition: 'Desktop', version: '1.0.0-rc.1', shellVersion: '1.0.0-rc.1', versionConsistent: true },
-  build: { buildId: 'ci-42', commit: 'deadbee', commitSource: 'build-info', buildTime: '2026-10-09T00:00:00Z' },
-  platform: { os: 'win32', arch: 'x64', node: '24.19.0' },
-  providers: [{ id: 'deepseek-official', label: 'apiKey=sk-live-abcdef1234567890', hasKey: true }],
-  plugins: { total: 2, enabled: 1, disabled: 1 },
-  settings: { theme: 'dark', autoCheckUpdates: false, redactLogs: true },
-  lastErrorCode: 'TOOL_DENIED',
-  recentErrorCodes: ['TOOL_DENIED'],
-  // 以下字段**不在白名单**：任何一条出现在附件里都是缺陷。
-  apiKey: 'sk-live-abcdef1234567890',
-  token: 'ghp_abcdefghijklmnopqrst',
-  chatContent: '用户与模型的聊天正文',
-  memory: '长期记忆正文',
-  fileBody: '文件正文内容',
-  privateKey: '-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBg\n-----END PRIVATE KEY-----'
-});
 
 try {
   // ── 1. About：构建信息与发行事实 ────────────────────────────────────────
@@ -116,19 +87,19 @@ try {
       developer: '示例开发者',
       website: 'https://cetamesh.example.com',
       security: { contact: 'https://security.example.com/report' },
-      feedback: { endpoint: 'https://feedback.example.com/v1/feedback' }
+      feedback: { baseUrl: 'https://feedback.example.com' }
     })
   });
   equal('发行配置可提供开发者与官网', [configured.config.developer, configured.config.website], ['示例开发者', 'https://cetamesh.example.com']);
   equal('readiness 反映配置完整度', configured.readiness, {
     developerConfigured: true,
     websiteConfigured: true,
-    feedbackEndpointConfigured: true,
+    feedbackBaseConfigured: true,
     securityContactConfigured: true,
     securityContactSource: 'configured'
   });
-  const insecure = loadReleaseConfig({ rootDir: repoRoot, read: () => ({ website: 'http://cetamesh.example.com', feedback: { endpoint: 'http://feedback.example.com' } }) });
-  equal('非 https 的官方地址视为未配置', [insecure.config.website, insecure.config.feedback.endpoint], [null, null]);
+  const insecure = loadReleaseConfig({ rootDir: repoRoot, read: () => ({ website: 'http://cetamesh.example.com', feedback: { baseUrl: 'http://feedback.example.com' } }) });
+  equal('非 https 的官方地址视为未配置', [insecure.config.website, insecure.config.feedback.baseUrl], [null, null]);
   const corrupt = loadReleaseConfig({ rootDir: repoRoot, read: () => { throw Object.assign(new Error('bad json'), { code: 'CORRUPT' }); } });
   equal('发行配置损坏时如实上报并回落默认值', [corrupt.lastError, corrupt.source, corrupt.config.product], ['CORRUPT', 'defaults', 'CetaMesh']);
 
@@ -210,116 +181,41 @@ try {
   const failedRecord = (await failingService.execute({ method: 'update.notes', params: {} })).record;
   equal('检查失败也如实缓存失败态', [failedRecord.status, failedRecord.failureCode], ['error', 'NETWORK_ERROR']);
 
-  // ── 4. 诊断附件 redaction ─────────────────────────────────────────────
-  const sanitized = sanitizeDiagnostics(dirtyDiagnostics());
-  const flatDiagnostics = JSON.stringify(sanitized);
-  check('丢弃非白名单字段：Key/token/私钥', !flatDiagnostics.includes('ghp_abcdefghijklmnopqrst') && !flatDiagnostics.includes('sk-live-abcdef1234567890') && !flatDiagnostics.includes('MIIEvQIBADANBg'));
-  check('丢弃非白名单字段：聊天/Memory/文件正文', !flatDiagnostics.includes('聊天正文') && !flatDiagnostics.includes('长期记忆正文') && !flatDiagnostics.includes('文件正文内容'));
-  check('保留白名单字段', sanitized.product.version === '1.0.0-rc.1' && sanitized.providers[0].hasKey === true && sanitized.lastErrorCode === 'TOOL_DENIED');
-  check('白名单字段内的凭据字样也被二次脱敏', flatDiagnostics.includes('[REDACTED:apiKey]'));
-
+  // ── 4. 诊断快照：白名单 + 脱敏（只在本机展示，不再有任何上传通道） ───────
   const registry = createErrorRegistry();
   registry.record('TOOL_DENIED', { source: 'capability' });
-  const builtDiagnostics = buildDiagnostics({
+  const diagnostics = buildDiagnostics({
     aboutInfo: info,
-    providers: [{ id: 'deepseek-official', label: 'DeepSeek 官方', hasKey: true }],
+    // Provider label 里塞了凭据字样：字符串层必须被脱敏。
+    providers: [{ id: 'deepseek-official', label: 'apiKey=sk-live-abcdef1234567890', hasKey: true }],
     extensions: [{ id: 'a', enabled: true }, { id: 'b', enabled: false }],
-    settings: { general: { theme: 'dark' }, updates: { autoCheck: false }, security: { redactLogs: true } },
+    settings: {
+      general: { theme: 'dark' },
+      updates: { autoCheck: false },
+      security: { redactLogs: true },
+      // 非白名单字段：构造时根本不会被读取。
+      apiKey: 'sk-live-abcdef1234567890',
+      chatContent: '用户与模型的聊天正文'
+    },
     errorRegistry: registry
   });
-  equal('诊断含最近错误码', [builtDiagnostics.lastErrorCode, builtDiagnostics.recentErrorCodes.includes('TOOL_DENIED')], ['TOOL_DENIED', true]);
-  equal('诊断含插件启用/关闭计数', builtDiagnostics.plugins, { total: 2, enabled: 1, disabled: 1 });
-  check('诊断 Provider 只报布尔状态', builtDiagnostics.providers.every((p) => typeof p.hasKey === 'boolean') && !JSON.stringify(builtDiagnostics).includes('sk-'));
-  check('诊断策略向用户明示排除项', DIAGNOSTICS_POLICY.excludes.some((t) => t.includes('API Key')) && DIAGNOSTICS_POLICY.excludes.some((t) => t.includes('聊天内容')));
+  const flatDiagnostics = JSON.stringify(diagnostics);
+  equal('诊断含最近错误码', [diagnostics.lastErrorCode, diagnostics.recentErrorCodes.includes('TOOL_DENIED')], ['TOOL_DENIED', true]);
+  equal('诊断含插件启用/关闭计数', diagnostics.plugins, { total: 2, enabled: 1, disabled: 1 });
+  equal('诊断只报 Provider 布尔状态', [diagnostics.providers[0].id, diagnostics.providers[0].hasKey], ['deepseek-official', true]);
+  check('白名单字段内的凭据字样也被脱敏', flatDiagnostics.includes('[REDACTED:apiKey]'));
+  check('诊断不含明文凭据与聊天内容', !flatDiagnostics.includes('sk-live-abcdef1234567890') && !flatDiagnostics.includes('聊天正文'));
+  check('诊断策略向用户明示包含/排除项',
+    DIAGNOSTICS_POLICY.includes.some((t) => t.includes('最近错误码')) &&
+    DIAGNOSTICS_POLICY.excludes.some((t) => t.includes('API Key')) &&
+    DIAGNOSTICS_POLICY.excludes.some((t) => t.includes('聊天内容')));
 
-  // ── 5. Feedback：离线队列 / 安全类型 / 重试 ─────────────────────────────
-  const baseConfig = loadReleaseConfig({ rootDir: repoRoot }).config;
-  const offlineDir = track(tmpDir('cetamesh-d-fb-'));
-  const offlineService = createFeedbackService({ stateDir: offlineDir, releaseConfig: baseConfig, diagnosticsProvider: dirtyDiagnostics });
-  const fbConfig = await offlineService.execute({ method: 'feedback.config', params: {} });
-  equal('反馈类型为 5 种', fbConfig.types.map((t) => t.id), ['bug', 'feature', 'experience', 'security', 'other']);
-  equal('官方反馈地址未配置时如实标注', fbConfig.endpoint.configured, false);
-  check('提供官方安全联系入口', String(fbConfig.security.contactUrl).startsWith('https://'));
-
-  const submitted = await offlineService.execute({
-    method: 'feedback.submit',
-    params: { type: 'bug', title: '点开始就崩溃', description: '启动后立即退出', steps: '1. 双击图标', attachDiagnostics: true }
-  });
-  equal('反馈服务器不可用不阻塞提交（留本地队列）', [submitted.sent, submitted.queued, submitted.offline], [false, true, true]);
-  check('给出用户可读的离线提示', String(submitted.message).includes('本地'));
-  check('反馈队列文件已落盘', fs.existsSync(path.join(offlineDir, 'feedback', 'outbox.json')));
-  const listed = await offlineService.execute({ method: 'feedback.list', params: {} });
-  equal('队列保留用户填写的内容', [listed.entries[0].title, listed.entries[0].type, listed.entries[0].status], ['点开始就崩溃', 'bug', 'queued']);
-  check('附加诊断已 redaction 且不含凭据', listed.entries[0].diagnosticsKind === 'full' && !JSON.stringify(listed.entries[0].diagnostics).includes('sk-live-abcdef1234567890'));
-
-  const preview = await offlineService.execute({ method: 'feedback.previewDiagnostics', params: { type: 'bug', attachDiagnostics: false } });
-  equal('未勾选时不附加诊断', [preview.kind, preview.payload], ['none', null]);
-
-  const securitySubmit = await offlineService.execute({
-    method: 'feedback.submit',
-    params: { type: 'security', title: '越权访问', description: '详情仅提供给维护者', attachDiagnostics: true }
-  });
-  equal('安全反馈强制最小 metadata', [securitySubmit.diagnostics.kind, securitySubmit.diagnostics.attached], ['minimal', true]);
-  check('安全反馈给出官方入口与"不要公开提交"提示', securitySubmit.security.notice.includes('不要公开提交') && String(securitySubmit.security.contactUrl).startsWith('https://'));
-  const securityEntry = (await offlineService.execute({ method: 'feedback.list', params: {} })).entries.find((e) => e.type === 'security');
-  check('安全反馈不自动附加日志', securityEntry.diagnostics.minimal === true && !JSON.stringify(securityEntry.diagnostics).includes('recentErrorCodes'));
-
-  const invalid = await asyncCapture(() => offlineService.execute({ method: 'feedback.submit', params: { type: 'bug', title: '', description: '' } }));
-  check('缺标题返回 FEEDBACK_INVALID', invalid.threw && invalid.code === 'FEEDBACK_INVALID', String(invalid.code));
-
-  // 退避重试：5xx → 排队等待；到点 → 成功；4xx → 不可重试
-  const clock = { t: 1_700_000_000_000 };
-  const retryDir = track(tmpDir('cetamesh-d-retry-'));
-  const outbox = createFeedbackOutbox({ stateDir: retryDir, maxEntries: 10, now: () => clock.t });
-  const mode = { status: 503 };
-  const transport = createFeedbackTransport({
-    endpoint: 'https://feedback.example.com/v1/feedback',
-    fetchImpl: async () => ({ ok: mode.status >= 200 && mode.status < 300, status: mode.status, text: async () => '{}' }),
-    timeoutMs: 1000,
-    now: () => clock.t
-  });
-  const retryService = createFeedbackService({ outbox, transport, releaseConfig: baseConfig, diagnosticsProvider: dirtyDiagnostics, now: () => clock.t });
-  const firstAttempt = await retryService.execute({ method: 'feedback.submit', params: { type: 'feature', title: '希望支持导出', description: 'x' } });
-  check('服务器 5xx 时留在队列并给出下次重试时间', firstAttempt.queued === true && firstAttempt.errorCode === 'HTTP_ERROR' && typeof firstAttempt.nextAttemptAt === 'string');
-  const earlyRetry = await retryService.execute({ method: 'feedback.retry', params: {} });
-  equal('未到重试时间不重复发送', earlyRetry.results.length, 0);
-  clock.t += 31_000;
-  mode.status = 200;
-  const lateRetry = await retryService.execute({ method: 'feedback.retry', params: {} });
-  check('到点重试后发送成功', lateRetry.results.length === 1 && lateRetry.results[0].sent === true, JSON.stringify(lateRetry.results[0] ?? null));
-  equal('队列统计：已发送 1 条', lateRetry.outbox.sent, 1);
-  mode.status = 400;
-  const rejected = await retryService.execute({ method: 'feedback.submit', params: { type: 'other', title: '被服务器拒绝', description: 'x' } });
-  equal('4xx 视为不可重试（标记 failed）', [rejected.queued, rejected.status], [false, 'failed']);
-
-  // 队列上限与损坏文件
-  const fullDir = track(tmpDir('cetamesh-d-full-'));
-  const fullService = createFeedbackService({
-    outbox: createFeedbackOutbox({ stateDir: fullDir, maxEntries: 1, now: () => clock.t }),
-    transport: createFeedbackTransport({ endpoint: null }),
-    releaseConfig: baseConfig,
-    diagnosticsProvider: dirtyDiagnostics
-  });
-  await fullService.execute({ method: 'feedback.submit', params: { type: 'bug', title: '第一条', description: 'x' } });
-  const overflow = await asyncCapture(() => fullService.execute({ method: 'feedback.submit', params: { type: 'bug', title: '第二条', description: 'x' } }));
-  check('队列满时明确拒绝而不是静默丢弃', overflow.threw && overflow.code === 'FEEDBACK_QUEUE_FULL', String(overflow.code));
-
-  const corruptDir = track(tmpDir('cetamesh-d-corrupt-'));
-  fs.mkdirSync(path.join(corruptDir, 'feedback'), { recursive: true });
-  fs.writeFileSync(path.join(corruptDir, 'feedback', 'outbox.json'), '{ not json', 'utf8');
-  const corruptService = createFeedbackService({ stateDir: corruptDir, releaseConfig: baseConfig, diagnosticsProvider: dirtyDiagnostics });
-  const afterCorrupt = await corruptService.execute({ method: 'feedback.submit', params: { type: 'bug', title: '损坏后仍可提交', description: 'x' } });
-  check('队列文件损坏后仍能提交反馈', afterCorrupt.queued === true);
-  const corruptConfig = await corruptService.execute({ method: 'feedback.config', params: {} });
-  check('队列损坏如实上报', typeof corruptConfig.lastError === 'string' && corruptConfig.lastError.length > 0, String(corruptConfig.lastError));
-  check('损坏文件另存备查', fs.readdirSync(path.join(corruptDir, 'feedback')).some((name) => name.includes('.corrupt-')));
-
-  // ── 6. 装配与 IPC 可达性 ──────────────────────────────────────────────
+  // ── 5. 装配与 IPC 可达性 ──────────────────────────────────────────────
   const containerDir = track(tmpDir('cetamesh-d-container-'));
   process.env.WHALEBRIDGE_DATA_DIR = containerDir;
   const { createCetaMeshServices } = await import('../src/app/service-container.js');
   const services = createCetaMeshServices({ config: { allow: { private: [], groups: [] } } });
-  check('容器装配 feedback/onboarding/product', Boolean(services.feedbackService && services.onboardingService && services.productService));
+  check('容器装配 onboarding/product', Boolean(services.onboardingService && services.productService));
   check('容器装配最近错误码环', Boolean(services.errorRegistry));
   const { createDesktopIpcRuntime } = await import('../src/app/ipc-runtime.js');
   const ipc = createDesktopIpcRuntime({ services, system: services.systemServices, log: () => {} });
@@ -327,14 +223,12 @@ try {
   check('IPC about.info 可达且版本一致', ipcAbout.about.version === pkg.version);
   const ipcAboutUpdate = await ipc.dispatch({ method: 'about.update', params: {} });
   check('IPC about.update 可达（离线）', ipcAboutUpdate.update.currentVersion === pkg.version);
-  const ipcFeedback = await ipc.dispatch({ method: 'feedback.config', params: {} });
-  check('IPC feedback.config 可达', Array.isArray(ipcFeedback.types) && ipcFeedback.types.length === 5);
   const ipcOnboarding = await ipc.dispatch({ method: 'onboarding.status', params: {} });
   equal('IPC onboarding.status 可达', [ipcOnboarding.status, ipcOnboarding.steps.length], ['not_started', 7]);
   const ipcEmpty = await ipc.dispatch({ method: 'product.emptyState', params: { key: 'chat.no-model' } });
   equal('IPC product.emptyState 可达', ipcEmpty.state.key, 'chat.no-model');
-  await ipc.dispatch({ method: 'feedback.submit', params: { type: 'bug' } }).catch(() => {});
-  check('IPC 失败方法记录最近错误码', services.errorRegistry.list().some((entry) => entry.code === 'FEEDBACK_INVALID'), JSON.stringify(services.errorRegistry.list()));
+  await ipc.dispatch({ method: 'product.nope', params: {} }).catch(() => {});
+  check('IPC 失败方法记录最近错误码', services.errorRegistry.list().some((entry) => entry.code === 'METHOD_NOT_FOUND'), JSON.stringify(services.errorRegistry.list()));
 } finally {
   if (originalDataDir === undefined) delete process.env.WHALEBRIDGE_DATA_DIR;
   else process.env.WHALEBRIDGE_DATA_DIR = originalDataDir;
@@ -344,4 +238,4 @@ try {
 console.log('');
 console.log('通过 ' + passed + ' 项，失败 ' + failed + ' 项');
 if (failed > 0) process.exit(1);
-console.log('产品服务（About / 更新公告 / Feedback / 诊断脱敏 / 离线队列 / 重试 / IPC）验收全部通过');
+console.log('产品服务（About / 更新公告 / 诊断本机展示 / 装配与 IPC）验收全部通过');

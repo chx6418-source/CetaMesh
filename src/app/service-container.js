@@ -26,7 +26,6 @@ import { createSettingsService } from '../settings/service.js';
 import { createAboutService } from '../about/service.js';
 import { createUpdateService } from '../update/service.js';
 import { createNotesCache } from '../update/notes-cache.js';
-import { createFeedbackService } from '../feedback/service.js';
 import { createOnboardingService } from '../onboarding/service.js';
 import { createProductService } from '../product/service.js';
 import { createErrorRegistry } from '../product/error-registry.js';
@@ -200,23 +199,23 @@ export function createCetaMeshServices(options = {}) {
     }
   });
 
-  // ── 产品化任务 D：产品面服务（About / 更新公告 / Feedback / Onboarding / 产品文案） ──
-  // 发行配置 release-config.json 与"最近错误码"是 About 与 Feedback 共用的事实源，各建一份。
+  // ── 产品化任务 D：产品面服务（About / 更新公告 / 反馈入口 / Onboarding / 产品文案） ──
+  // 发行配置 release-config.json 与"最近错误码"是 About 与产品服务共用的事实源，各建一份。
   const releaseConfig = loadReleaseConfig({ rootDir: sourceRoot });
   const errorRegistry = createErrorRegistry();
   const settingsService = createSettingsService({ stateDir });
   const notesCache = createNotesCache({ stateDir });
 
   /**
-   * 诊断快照：About 的「诊断信息」与反馈的「诊断附件」共用同一份实现，
-   * 保证两处口径一致（白名单字段 + 脱敏在 buildDiagnostics 内部完成）。
+   * 诊断快照：**只在本机展示**（About 页）。反馈已改为"链接入口 + 系统浏览器"，
+   * 软件内不再有诊断附件与上传通道；这里依旧坚持白名单 + 脱敏构造。
    */
   function diagnosticsSnapshot() {
     let extensions = [];
     try {
       extensions = extensionService.runtime?.list?.() ?? [];
     } catch (error) {
-      // 扩展注册表损坏不该让"查看/附加诊断信息"失败：如实降级为空列表并记录。
+      // 扩展注册表损坏不该让"查看诊断信息"失败：如实降级为空列表并记录。
       log('诊断信息读取扩展列表失败：' + String(error?.message ?? error));
     }
     return buildDiagnostics({
@@ -240,14 +239,11 @@ export function createCetaMeshServices(options = {}) {
     notesCache,
     log
   });
-  // 产品文案/Provider 配置视图：纯函数服务，UI 直接消费，避免同一句话在多处漂移。
-  const productService = createProductService();
-  const feedbackService = createFeedbackService({
-    stateDir,
-    releaseConfig: releaseConfig.config,
-    diagnosticsProvider: diagnosticsSnapshot,
+  // 产品文案 / Provider 配置视图 / 反馈入口链接：纯函数服务，UI 直接消费，
+  // 避免同一句话、同一个官方域名在多处漂移。
+  const productService = createProductService({
     aboutInfo: () => aboutService.about.info(),
-    log
+    releaseConfig: releaseConfig.config
   });
   // 首次运行引导：QQ / DSH / 移动端 / Agent 都不在完成条件里（见 src/onboarding/steps.js）。
   const onboardingService = createOnboardingService({
@@ -261,7 +257,6 @@ export function createCetaMeshServices(options = {}) {
     settings: settingsService,
     about: aboutService,
     update: updateService,
-    feedback: feedbackService,
     onboarding: onboardingService,
     product: productService
   };
@@ -289,7 +284,6 @@ export function createCetaMeshServices(options = {}) {
     aboutService,
     settingsService,
     updateService,
-    feedbackService,
     onboardingService,
     productService,
     releaseConfig,

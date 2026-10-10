@@ -21,8 +21,12 @@
     "contact": ""
   },
   "feedback": {
-    "endpoint": "",
-    "requestTimeoutMs": 4000,
-    "outboxMaxEntries": 100
+    "baseUrl": "",
+    "paths": {
+      "general": "/feedback",
+      "bug": "/feedback?type=bug",
+      "feature": "/feedback?type=feature",
+      "security": "/security"
+    }
   }
 }

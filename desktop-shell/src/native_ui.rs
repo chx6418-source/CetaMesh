@@ -11,7 +11,7 @@ use crate::mesh_ui::{MeshArea, MeshUi};
 use crate::tray::{TrayCommand, TrayHandle, TrayStatus};
 use crate::ui_prefs::{CloseBehavior, ThemePreference, UiPrefs};
 use crate::workspace_ui::WorkspaceUi;
-use crate::product_ui::{self, FeedbackDraft, ProductCopy};
+use crate::product_ui::{self, ProductCopy};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -233,12 +233,7 @@ enum Operation {
     AboutUpdateLoad,
     AboutDiagnosticsLoad,
     AboutUpdateCheck,
-    FeedbackConfigLoad,
-    FeedbackListLoad,
-    FeedbackSubmit,
-    FeedbackRetry,
-    FeedbackClearSent,
-    FeedbackRemove,
+    FeedbackLinksLoad,
     OnboardingStatusLoad,
     OnboardingStepComplete,
     OnboardingStepSkip,
@@ -782,12 +777,9 @@ pub struct NativeUi {
     about_diagnostics_loaded: bool,
     about_notice: Option<String>,
     about_notice_error: bool,
-    feedback_config: Option<Value>,
-    feedback_config_loaded: bool,
-    feedback_list_loaded: bool,
-    /// `feedback.list` 的最近一次结果（本地队列视图；与 `feedback` 错误表分开存）。
-    feedback_list_data: Option<Value>,
-    feedback_draft: FeedbackDraft,
+    /// `product.feedbackLinks` 的最近一次结果（四个官方入口 + 文案）。
+    feedback_links: Option<Value>,
+    feedback_links_loaded: bool,
     feedback_notice: Option<String>,
     feedback_notice_error: bool,
     onboarding_status: Option<Value>,
@@ -1297,11 +1289,8 @@ ApiCall::Family { method, params } => api.request(method, params),
             about_diagnostics_loaded: false,
             about_notice: None,
             about_notice_error: false,
-            feedback_config: None,
-            feedback_config_loaded: false,
-            feedback_list_loaded: false,
-            feedback_list_data: None,
-            feedback_draft: FeedbackDraft::default(),
+            feedback_links: None,
+            feedback_links_loaded: false,
             feedback_notice: None,
             feedback_notice_error: false,
             onboarding_status: None,
@@ -1504,19 +1493,6 @@ ApiCall::Family { method, params } => api.request(method, params),
         }
     }
 
-    /// 重新读取本地反馈队列（提交 / 重试 / 清理后调用）。
-    fn refresh_feedback_list(&mut self) {
-        self.feedback_list_loaded = false;
-        if !self.pending.contains(&Area::Feedback) && self.worker_available {
-            self.issue_family(
-                Area::Feedback,
-                Operation::FeedbackListLoad,
-                "feedback.list",
-                json!({}),
-            );
-        }
-    }
-
     /// 产品页按需加载：进入页面才请求，不让启动路径变成一串无用 IPC。
     fn maybe_load_product_pages(&mut self) {
         if !self.worker_available {
@@ -1558,11 +1534,11 @@ ApiCall::Family { method, params } => api.request(method, params),
                 }
             }
             AppPage::Feedback => {
-                if !self.feedback_config_loaded && !self.pending.contains(&Area::Feedback) {
+                if !self.feedback_links_loaded && !self.pending.contains(&Area::Feedback) {
                     self.issue_family(
                         Area::Feedback,
-                        Operation::FeedbackConfigLoad,
-                        "feedback.config",
+                        Operation::FeedbackLinksLoad,
+                        "product.feedbackLinks",
                         json!({}),
                     );
                 }
@@ -2181,79 +2157,13 @@ ApiCall::Family { method, params } => api.request(method, params),
                     self.about_notice = Some(self.product_error_notice("about.diagnostics", error));
                     self.about_notice_error = true;
                 }
-                (Operation::FeedbackConfigLoad, Ok(value)) => {
-                    self.feedback_config = Some(value.clone());
-                    self.feedback_config_loaded = true;
-                    // 配置先到、队列后到：Area 互斥决定了同一帧只能发一条，这里串起来。
-                    if !self.feedback_list_loaded && !self.pending.contains(&Area::Feedback) {
-                        self.issue_family(
-                            Area::Feedback,
-                            Operation::FeedbackListLoad,
-                            "feedback.list",
-                            json!({}),
-                        );
-                    }
+                (Operation::FeedbackLinksLoad, Ok(value)) => {
+                    self.feedback_links = Some(value.clone());
+                    self.feedback_links_loaded = true;
                 }
-                (Operation::FeedbackConfigLoad, Err(error)) => {
-                    self.feedback_config_loaded = true;
-                    self.feedback_notice = Some(self.product_error_notice("feedback.config", error));
-                    self.feedback_notice_error = true;
-                }
-                (Operation::FeedbackListLoad, Ok(value)) => {
-                    self.feedback_list_data = Some(value.clone());
-                    self.feedback_list_loaded = true;
-                }
-                (Operation::FeedbackListLoad, Err(error)) => {
-                    self.feedback_list_loaded = true;
-                    self.feedback_notice = Some(self.product_error_notice("feedback.list", error));
-                    self.feedback_notice_error = true;
-                }
-                (Operation::FeedbackSubmit, Ok(value)) => {
-                    let sent = product_ui::feedback_submit_sent(value);
-                    self.feedback_notice = Some(product_ui::feedback_submit_message(value));
-                    // 离线入队也是"成功提交"（不阻塞软件），因此不按错误色显示。
-                    self.feedback_notice_error = false;
-                    if sent {
-                        self.feedback_draft.clear_body();
-                    }
-                    self.refresh_feedback_list();
-                }
-                (Operation::FeedbackSubmit, Err(error)) => {
-                    self.feedback_notice = Some(self.product_error_notice("feedback.submit", error));
-                    self.feedback_notice_error = true;
-                }
-                (Operation::FeedbackRetry, Ok(value)) => {
-                    let count = value
-                        .get("results")
-                        .and_then(Value::as_array)
-                        .map(Vec::len)
-                        .unwrap_or(0);
-                    self.feedback_notice = Some(format!("已尝试重试 {count} 条反馈。"));
-                    self.feedback_notice_error = false;
-                    self.refresh_feedback_list();
-                }
-                (Operation::FeedbackRetry, Err(error)) => {
-                    self.feedback_notice = Some(self.product_error_notice("feedback.retry", error));
-                    self.feedback_notice_error = true;
-                }
-                (Operation::FeedbackClearSent, Ok(value)) => {
-                    let removed = value.get("removed").and_then(Value::as_u64).unwrap_or(0);
-                    self.feedback_notice = Some(format!("已清理 {removed} 条已发送记录。"));
-                    self.feedback_notice_error = false;
-                    self.refresh_feedback_list();
-                }
-                (Operation::FeedbackClearSent, Err(error)) => {
-                    self.feedback_notice = Some(self.product_error_notice("feedback.clear", error));
-                    self.feedback_notice_error = true;
-                }
-                (Operation::FeedbackRemove, Ok(value)) => {
-                    let removed = value.get("removed").and_then(Value::as_u64).unwrap_or(0);
-                    self.feedback_notice = Some(format!("已删除 {removed} 条本地反馈记录。"));
-                    self.feedback_notice_error = false;
-                    self.refresh_feedback_list();
-                }
-                (Operation::FeedbackRemove, Err(error)) => {
-                    self.feedback_notice = Some(self.product_error_notice("feedback.remove", error));
+                (Operation::FeedbackLinksLoad, Err(error)) => {
+                    self.feedback_links_loaded = true;
+                    self.feedback_notice = Some(self.product_error_notice("product.feedbackLinks", error));
                     self.feedback_notice_error = true;
                 }
                 (Operation::OnboardingStatusLoad, Ok(value)) => {
@@ -4430,213 +4340,93 @@ ApiCall::Family { method, params } => api.request(method, params),
     }
 
     /// 产品化任务 D：Feedback 页（类型 / 字段 / 诊断勾选 / 本地队列与重试）。
+    /// 产品化任务 D（修正版）：反馈入口页 —— 只提供入口，点击用系统默认浏览器打开官网页面。
     fn show_feedback_page(&mut self, ui: &mut egui::Ui) {
         let palette = native_palette();
         ui.heading("反馈");
         ui.label(
             egui::RichText::new(
-                "反馈会先保存在本地队列；官方反馈服务不可用时不会阻塞软件，之后可自动或手动重试。",
+                "CetaMesh 不在软件内收集反馈：下面每个入口都会用系统默认浏览器打开官方网站对应页面，链接只携带 version / build / platform 三个非敏感字段。",
             )
             .color(palette.muted),
         );
-        if self.pending.contains(&Area::Feedback) && self.feedback_config.is_none() {
-            self.show_loading_state(ui, "正在读取反馈配置…");
-        }
-        if let Some(Err(error)) = self.feedback.get(&Area::Feedback).cloned() {
-            self.show_error_message(ui, Area::Feedback, &error);
+
+        if self.pending.contains(&Area::Feedback) && self.feedback_links.is_none() {
+            self.show_loading_state(ui, "正在读取反馈入口…");
         }
         if let Some(notice) = self.feedback_notice.clone() {
             product_notice(ui, Some(notice.as_str()), self.feedback_notice_error);
         }
-
-        let config = product_ui::feedback_config_view(
-            &self.feedback_config.clone().unwrap_or(Value::Null),
-        );
-        if !config.endpoint_configured {
-            product_notice(
-                ui,
-                Some("官方反馈地址尚未配置（网站 API 未上线）：现在提交的反馈会留在本地队列，不会丢。"),
-                false,
-            );
-        } else if let Some(host) = config.endpoint_host.as_deref() {
-            ui.label(egui::RichText::new(format!("反馈地址：{host}")).small());
+        if let Some(Err(error)) = self.feedback.get(&Area::Feedback).cloned() {
+            self.show_error_message(ui, Area::Feedback, &error);
         }
 
-        let is_security = self.feedback_draft.is_security();
-        if is_security {
-            let notice = product_ui::security_notice(&config);
-            product_notice(ui, Some(notice.as_str()), true);
-            copyable_line(ui, "官方安全联系入口", config.security_contact.as_deref());
+        let view = product_ui::feedback_links_view(&self.feedback_links.clone().unwrap_or(Value::Null));
+        if !view.configured {
+            let message = view.not_configured_message.clone();
+            product_notice(ui, Some(message.as_str()), false);
         }
 
-        let mut submit = false;
-        crate::theme::card_compact(ui, |ui| {
-            ui.strong("提交反馈");
-            let current_kind = self.feedback_draft.kind.clone();
-            let selected = config
-                .types
-                .iter()
-                .find(|(id, _)| *id == current_kind)
-                .map(|(_, label)| label.clone())
-                .unwrap_or_else(|| current_kind.clone());
-            egui::ComboBox::from_id_salt("feedback_kind")
-                .selected_text(selected)
-                .show_ui(ui, |ui| {
-                    for (id, label) in &config.types {
-                        ui.selectable_value(&mut self.feedback_draft.kind, id.clone(), label);
+        let mut open_target: Option<String> = None;
+        for entry in &view.entries {
+            let is_security = entry.security;
+            crate::theme::card_compact(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    let title = if is_security {
+                        format!("{}（请走官方安全通道）", entry.label)
+                    } else {
+                        entry.label.clone()
+                    };
+                    ui.strong(title);
+                    // 入口 id 用等宽小字显示：用户报"哪个入口打不开"时能直接对上发行配置。
+                    ui.label(egui::RichText::new(&entry.id).monospace().small());
+                    let enabled = entry.url.is_some() && self.worker_available;
+                    if ui.add_enabled(enabled, egui::Button::new("打开官网页面")).clicked() {
+                        open_target = entry.url.clone();
                     }
                 });
-            ui.label(format!("标题（必填，≤{} 字）", config.title_max));
-            ui.add(
-                egui::TextEdit::singleline(&mut self.feedback_draft.title).desired_width(460.0),
-            );
-            ui.label(format!("描述（必填，≤{} 字）", config.description_max));
-            ui.add(
-                egui::TextEdit::multiline(&mut self.feedback_draft.description)
-                    .desired_rows(4)
-                    .desired_width(520.0),
-            );
-            ui.label("复现步骤（可选）");
-            ui.add(
-                egui::TextEdit::multiline(&mut self.feedback_draft.steps)
-                    .desired_rows(3)
-                    .desired_width(520.0),
-            );
-            ui.label("联系方式（可选）");
-            ui.add(
-                egui::TextEdit::singleline(&mut self.feedback_draft.contact).desired_width(320.0),
-            );
-            if is_security {
-                // 安全漏洞：不提供"附加诊断"的入口，避免用户把利用细节与日志一起发进普通通道。
-                ui.colored_label(
-                    native_palette().warning,
-                    "安全漏洞反馈只发送最小 metadata（产品名、版本、平台/架构），不附加日志。",
-                );
-            } else {
-                ui.checkbox(
-                    &mut self.feedback_draft.attach_diagnostics,
-                    "附加诊断信息（版本、平台、Build ID、最近错误码、Provider/插件状态；不含任何凭据与聊天内容）",
-                );
-            }
-            if ui
-                .add_enabled(
-                    self.worker_available && !self.pending.contains(&Area::Feedback),
-                    egui::Button::new("提交反馈"),
-                )
-                .clicked()
-            {
-                submit = true;
-            }
-        });
-        if submit {
-            match self.feedback_draft.validate() {
-                Ok(()) => {
-                    let params = self.feedback_draft.submit_params();
-                    self.issue_family(
-                        Area::Feedback,
-                        Operation::FeedbackSubmit,
-                        "feedback.submit",
-                        params,
-                    );
+                if !entry.description.is_empty() {
+                    ui.label(egui::RichText::new(&entry.description).color(native_palette().muted));
                 }
-                Err(message) => {
-                    self.feedback_notice = Some(message.to_owned());
-                    self.feedback_notice_error = true;
+                if is_security {
+                    ui.colored_label(native_palette().warning, &view.security_notice);
                 }
-            }
-        }
-
-        // ── 本地队列 ───────────────────────────────────────────────────────
-        let entries = product_ui::feedback_entries(
-            &self.feedback_list_data.clone().unwrap_or(Value::Null),
-        );
-        let mut retry = false;
-        let mut clear_sent = false;
-        let mut remove_id: Option<String> = None;
-        crate::theme::card_compact(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.strong(format!("本地队列（{} 条）", entries.len()));
-                if ui
-                    .add_enabled(
-                        !entries.is_empty()
-                            && self.worker_available
-                            && !self.pending.contains(&Area::Feedback),
-                        egui::Button::new("重试全部"),
-                    )
-                    .clicked()
-                {
-                    retry = true;
-                }
-                if ui
-                    .add_enabled(
-                        entries.iter().any(|entry| entry.status == "sent")
-                            && self.worker_available
-                            && !self.pending.contains(&Area::Feedback),
-                        egui::Button::new("清理已发送"),
-                    )
-                    .clicked()
-                {
-                    clear_sent = true;
+                match entry.url.as_deref() {
+                    Some(url) => ui.label(egui::RichText::new(url).small().monospace()),
+                    None => ui.weak("官方页面尚未配置"),
                 }
             });
-            if entries.is_empty() {
-                ui.weak("还没有反馈记录。");
+        }
+        if view.entries.is_empty() && !self.pending.contains(&Area::Feedback) {
+            ui.weak("反馈入口暂时不可用（Core 未就绪）；软件其它功能不受影响。");
+        }
+
+        // 链接携带什么，对用户完全透明：不多发一个字节，也没有"附加日志"这种东西。
+        let summary = view.query_summary.clone();
+        let allowed = view.allowed_query_keys.join(" / ");
+        crate::theme::card_compact(ui, |ui| {
+            ui.strong("链接携带的信息");
+            if summary.is_empty() {
+                ui.weak("version / build / platform（当前值暂不可用）");
+            } else {
+                ui.label(summary);
             }
-            for entry in &entries {
-                let kind_label = config
-                    .types
-                    .iter()
-                    .find(|(id, _)| *id == entry.kind)
-                    .map(|(_, label)| label.clone())
-                    .unwrap_or_else(|| entry.kind.clone());
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(egui::RichText::new(format!(
-                        "{} ｜ {} ｜ {} ｜ 尝试 {} 次",
-                        entry.title,
-                        kind_label,
-                        entry.status_label(),
-                        entry.attempts
-                    )));
-                    if let Some(next) = entry.next_attempt_at.as_deref() {
-                        ui.label(egui::RichText::new(format!("下次重试：{next}")).small());
-                    }
-                    if let Some(code) = entry.error_code.as_deref() {
-                        ui.colored_label(
-                            native_palette().warning,
-                            egui::RichText::new(format!("上次失败：{code}")).small(),
-                        );
-                    }
-                    if entry.status != "sent"
-                        && ui
-                            .add_enabled(
-                                self.worker_available && !self.pending.contains(&Area::Feedback),
-                                egui::Button::new("删除").small(),
-                            )
-                            .clicked()
-                    {
-                        remove_id = Some(entry.id.clone());
-                    }
-                });
-            }
+            ui.colored_label(native_palette().success, format!("只包含：{allowed}"));
+            ui.weak("不包含 API Key、Token、聊天内容、Memory、文件路径、插件配置、设备密钥或日志正文。");
         });
-        if retry {
-            self.issue_family(Area::Feedback, Operation::FeedbackRetry, "feedback.retry", json!({}));
+        if let Some(base) = view.base_url.clone() {
+            copyable_line(ui, "官方站点", Some(base.as_str()));
         }
-        if clear_sent {
-            self.issue_family(
-                Area::Feedback,
-                Operation::FeedbackClearSent,
-                "feedback.clear",
-                json!({ "scope": "sent" }),
-            );
-        }
-        if let Some(id) = remove_id {
-            self.issue_family(
-                Area::Feedback,
-                Operation::FeedbackRemove,
-                "feedback.remove",
-                json!({ "id": id }),
-            );
+
+        if let Some(url) = open_target {
+            // 打开失败只提示、不影响软件：绝不因为反馈入口不可用而阻断任何功能。
+            if crate::external_link::open_in_default_browser(&url).is_err() {
+                self.feedback_notice = Some(view.open_failure_message.clone());
+                self.feedback_notice_error = true;
+            } else {
+                self.feedback_notice = Some("已用系统默认浏览器打开官方页面。".to_owned());
+                self.feedback_notice_error = false;
+            }
         }
     }
 

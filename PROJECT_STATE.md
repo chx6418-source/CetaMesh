@@ -92,14 +92,24 @@
 - 桌面壳 `supervisor.rs` 的 HTTP 探活 fallback 已是死代码（待后续会话删除）。
 - NOT_RUN_ENVIRONMENT（无真实环境时如实不跑）：真实 provider-key 回合 / 真实 QQ / 跨设备 Mesh / 签名 / 真实发行产物。
 
-## Active Work (none)
+## Active Work
+
+- **反馈功能修正（2026-10-10）**：分支 `codex/session-20261010-feedback-links`（隔离工作区
+  `.worktrees/2026-10-10-feedback-links`，基线本地 `main` = `cc201ee`）。按产品决定**移除软件内反馈收集**：
+  删除 `src/feedback/**`（FeedbackService / Outbox / 发送通道）、`feedback.*` IPC 与软件内表单；
+  改为**只提供入口**——反馈与建议 / Bug 反馈 / 功能建议 / 安全漏洞，点击用系统默认浏览器打开官网页面
+  （`/feedback`、`/feedback?type=bug`、`/feedback?type=feature`、`/security`），站点根来自 `release-config.json`，
+  链接只带 `version` / `build` / `platform`。新增 `src/product/feedback-links.js`、
+  `desktop-shell/src/external_link.rs`（唯一允许调 `explorer.exe` 的模块）与 `test-feedback-links.mjs`。
+  **等 Owner 确认后合并 `main`、删除工作分支**。验证与边界见 `PRODUCT_SERVICES_REPORT.md`。
 
 - 产品化任务 D（Product Services / Onboarding / Feedback）**已完成并在 Owner 确认后快进合并**到本地 `main`
   （`ce83264..33ed3ce`：`049129f` 服务层 / `9f7d050` 原生 UI / `33ed3ce` 侧边栏与截图验收）；
   工作分支 `codex/session-20261009-2145-rules-confirm` 与隔离 worktree `.worktrees/2026-10-09-2145` 已删除。
   **未 push**（等 Owner 指示）。交付物与验收见 `PRODUCT_SERVICES_REPORT.md`：
-  About 服务（build/release manifest 驱动，不写死版本）、更新公告安全渲染 + 离线缓存、Feedback（本地 Outbox +
-  自动/手动重试 + 诊断 redaction + 安全漏洞最小 metadata）、First Run Onboarding（7 步，**不依赖 QQ/DSH/移动端**）、
+  About 服务（build/release manifest 驱动，不写死版本）、更新公告安全渲染 + 离线缓存、
+  ~~Feedback（本地 Outbox + 重试 + 诊断附件）~~（见上条修正：已改为纯入口）、
+  First Run Onboarding（7 步，**不依赖 QQ/DSH/移动端**）、
   Provider 基础/高级字段视图与空状态文案；**原生桌面壳新增 About / Feedback / Onboarding 三个页面并接线**
   （`desktop-shell/src/product_ui.rs` + `native_ui.rs`，首次运行自动进入引导页；全站错误条统一为"用户语言优先 +
   技术细节折叠"）；新增 `test-product-services` / `test-onboarding` / `test-product-copy` 三个套件（已登记聚合器）。

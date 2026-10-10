@@ -20,8 +20,7 @@ const ROUTES = [
   ['settings.', (services, system) => [system.settings, 'execute']],
   ['about.', (services, system) => [system.about, 'execute']],
   ['update.', (services, system) => [system.update, 'execute']],
-  // 产品化任务 D：反馈 / 首次运行引导 / 产品文案（同一份 UI 契约，见 src/feedback、src/onboarding、src/product）。
-  ['feedback.', (services, system) => [system.feedback, 'execute']],
+  // 产品化任务 D：首次运行引导 / 产品文案与反馈入口（同一份 UI 契约，见 src/onboarding、src/product）。
   ['onboarding.', (services, system) => [system.onboarding, 'execute']],
   ['product.', (services, system) => [system.product, 'execute']]
 ];

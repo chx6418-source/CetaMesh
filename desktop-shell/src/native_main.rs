@@ -4,6 +4,7 @@ mod chat_ui;
 mod core_launch;
 mod app_shell;
 mod desktop_paths;
+mod external_link;
 mod install_cli;
 mod installer;
 mod ipc_client;

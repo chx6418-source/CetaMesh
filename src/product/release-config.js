@@ -1,14 +1,14 @@
 // CetaMesh Desktop —— 官方发行配置（产品化任务 D）。
 //
 // 为什么要有这个文件：About 页要显示的「开发者 / 官方网站 / GitCode / GitHub / 许可证 /
-// 隐私说明 / 安全说明」，以及 Feedback 要用的「反馈 endpoint / 安全联系入口」，都是
-// **发行方的事实**，不是代码里可以随手写死的字符串。写死在源码里意味着：改一个链接要重新
-// 发版，而且无法区分「尚未配置」和「配置成空」。所以统一放 `release-config.json`
-// （随安装包分发的静态配置），运行时读取 + 归一化。
+// 隐私说明 / 安全说明」，以及**反馈入口的官方站点与页面路径**，都是**发行方的事实**，
+// 不是代码里可以随手写死的字符串。写死在源码里意味着：改一个链接要重新发版，而且无法区分
+// 「尚未配置」和「配置成空」。所以统一放 `release-config.json`（随安装包分发的静态配置），
+// 运行时读取 + 归一化。
 //
 // 红线：
-//   1) 没有配置就如实报 null（UI 显示「未配置」），**绝不编造**一个看起来像真的官网/邮箱；
-//   2) 所有对外 URL 必须是 https（反馈会带诊断信息，明文 http 一律拒绝）；
+//   1) 没有配置就如实报 null（UI 显示「未配置」并提示稍后再试），**绝不编造**一个看起来像真的官网；
+//   2) 所有对外 URL 必须是 https；页面路径必须是站点内的绝对路径（拒绝 `//host` 协议相对写法）；
 //   3) 配置损坏不影响软件启动：回落默认值 + 如实带上 lastError，由 UI 提示，而不是崩溃或静默。
 
 import path from 'node:path';
@@ -19,6 +19,19 @@ export const RELEASE_CONFIG_FILENAME = 'release-config.json';
 
 const MAX_TEXT = 300;
 const MAX_URL = 600;
+const MAX_PATH = 200;
+
+/**
+ * 反馈入口的默认页面路径（概念路径，来自产品设计）：
+ *   /feedback、/feedback?type=bug、/feedback?type=feature、/security
+ * 域名/站点根由 `feedback.baseUrl`（或 `website`）提供，**不在代码或页面里散落硬编码**。
+ */
+export const DEFAULT_FEEDBACK_PATHS = Object.freeze({
+  general: '/feedback',
+  bug: '/feedback?type=bug',
+  feature: '/feedback?type=feature',
+  security: '/security'
+});
 
 /** 未提供配置时的事实默认值：产品身份来自仓库既有事实，链接留空表示「未配置」。 */
 export const DEFAULT_RELEASE_CONFIG = Object.freeze({
@@ -39,7 +52,7 @@ export const DEFAULT_RELEASE_CONFIG = Object.freeze({
   }),
   privacy: Object.freeze({ doc: 'docs/product/PRIVACY.md', summary: '' }),
   security: Object.freeze({ doc: 'docs/product/SECURITY.md', contact: null, advisoryUrl: null }),
-  feedback: Object.freeze({ endpoint: null, requestTimeoutMs: 4000, outboxMaxEntries: 100 })
+  feedback: Object.freeze({ baseUrl: null, paths: DEFAULT_FEEDBACK_PATHS })
 });
 
 function textOrNull(value, max = MAX_TEXT) {
@@ -60,6 +73,29 @@ function httpsOrNull(value, max = MAX_URL) {
   } catch {
     return null; // 非法 URL 视为未配置：About 要能照常显示，配置问题由 lastError 上报。
   }
+}
+
+/**
+ * 站点内绝对路径校验。拒绝：
+ *   - 不以 `/` 开头（可能是绝对 URL，会把用户带去别的站点）；
+ *   - `//host/...`（协议相对，等于换域名）；
+ *   - 反斜杠 / 空白 / 控制字符（Windows 路径写法与注入面）。
+ */
+function sitePath(value, fallbackPath) {
+  const text = textOrNull(value, MAX_PATH);
+  if (!text) return fallbackPath;
+  if (!text.startsWith('/') || text.startsWith('//')) return fallbackPath;
+  if (/[\\\s\u0000-\u001f]/.test(text)) return fallbackPath;
+  return text;
+}
+
+function feedbackPaths(rawPaths, fallbackPaths) {
+  const source = rawPaths && typeof rawPaths === 'object' && !Array.isArray(rawPaths) ? rawPaths : {};
+  const out = {};
+  for (const key of Object.keys(DEFAULT_FEEDBACK_PATHS)) {
+    out[key] = sitePath(source[key], fallbackPaths[key] ?? DEFAULT_FEEDBACK_PATHS[key]);
+  }
+  return out;
 }
 
 /**
@@ -84,6 +120,14 @@ export function resolveSecurityContact(config) {
   return { url: null, source: 'unconfigured' };
 }
 
+/**
+ * 反馈/安全入口的站点根：`feedback.baseUrl` 优先，其次 `website`。
+ * 两者都没配置就返回 null —— UI 如实提示「官方页面尚未配置，请稍后访问」，绝不猜域名。
+ */
+export function resolveFeedbackBaseUrl(config) {
+  return httpsOrNull(config?.feedback?.baseUrl) || httpsOrNull(config?.website) || null;
+}
+
 function normalize(raw, fallback) {
   const repo = raw && typeof raw.repositories === 'object' && raw.repositories ? raw.repositories : {};
   const license = raw && typeof raw.license === 'object' && raw.license ? raw.license : {};
@@ -94,9 +138,6 @@ function normalize(raw, fallback) {
   const gitcode = httpsOrNull(repo.gitcode) || fallback.repositories.gitcode;
   const github = httpsOrNull(repo.github) || fallback.repositories.github;
   const primary = httpsOrNull(repo.primary) || github || gitcode || fallback.repositories.primary;
-
-  const timeout = Number(feedback.requestTimeoutMs);
-  const maxEntries = Number(feedback.outboxMaxEntries);
 
   return {
     schemaVersion: RELEASE_CONFIG_VERSION,
@@ -120,9 +161,8 @@ function normalize(raw, fallback) {
       advisoryUrl: httpsOrNull(security.advisoryUrl)
     },
     feedback: {
-      endpoint: httpsOrNull(feedback.endpoint),
-      requestTimeoutMs: Number.isFinite(timeout) ? Math.min(Math.max(Math.round(timeout), 500), 30000) : fallback.feedback.requestTimeoutMs,
-      outboxMaxEntries: Number.isFinite(maxEntries) ? Math.min(Math.max(Math.round(maxEntries), 1), 1000) : fallback.feedback.outboxMaxEntries
+      baseUrl: httpsOrNull(feedback.baseUrl),
+      paths: feedbackPaths(feedback.paths, fallback.feedback.paths)
     }
   };
 }
@@ -133,7 +173,7 @@ export function configReadiness(config) {
   return {
     developerConfigured: Boolean(config?.developer),
     websiteConfigured: Boolean(config?.website),
-    feedbackEndpointConfigured: Boolean(config?.feedback?.endpoint),
+    feedbackBaseConfigured: Boolean(resolveFeedbackBaseUrl(config)),
     securityContactConfigured: Boolean(contact.url),
     securityContactSource: contact.source
   };

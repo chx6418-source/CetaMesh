@@ -296,199 +296,136 @@ pub(crate) fn update_view(update: &Value) -> UpdateView {
     }
 }
 
-// ── Feedback ───────────────────────────────────────────────────────────────
+// ── 反馈入口（修正版：只提供入口，不在软件内收集反馈） ─────────────────────
+//
+// 产品决策：软件内**没有**反馈表单 / Bug 提交 / 漏洞上传 / 本地队列，也不自动上传日志。
+// 这里只做一件事：把 Core（依据随安装包分发的发行配置）给出的四个官方入口渲染出来，
+// 点击交给系统默认浏览器。链接允许携带的 query 只有 version / build / platform ——
+// 由 Core 构造，UI 只显示、不追加任何字段。
 
-#[derive(Clone, Debug, Default)]
-pub(crate) struct FeedbackConfigView {
-    pub types: Vec<(String, String)>,
-    pub endpoint_configured: bool,
-    pub endpoint_host: Option<String>,
-    pub security_contact: Option<String>,
-    pub security_notice: Option<String>,
-    pub title_max: u64,
-    pub description_max: u64,
-}
-
-pub(crate) fn feedback_config_view(config: &Value) -> FeedbackConfigView {
-    let types = config
-        .get("types")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| {
-                    let id = item.get("id").and_then(Value::as_str)?.to_owned();
-                    let label = item
-                        .get("label")
-                        .and_then(Value::as_str)
-                        .unwrap_or(&id)
-                        .to_owned();
-                    Some((id, label))
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    FeedbackConfigView {
-        types,
-        endpoint_configured: config
-            .pointer("/endpoint/configured")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        endpoint_host: string_at(config, "/endpoint/host"),
-        security_contact: string_at(config, "/security/contactUrl"),
-        security_notice: string_at(config, "/security/notice"),
-        title_max: config
-            .pointer("/limits/title")
-            .and_then(Value::as_u64)
-            .unwrap_or(120),
-        description_max: config
-            .pointer("/limits/description")
-            .and_then(Value::as_u64)
-            .unwrap_or(4000),
-    }
+#[derive(Clone, Debug)]
+pub(crate) struct FeedbackEntryRow {
+    pub id: String,
+    pub label: String,
+    pub description: String,
+    pub url: Option<String>,
+    pub security: bool,
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct FeedbackEntryView {
-    pub id: String,
-    pub kind: String,
-    pub title: String,
-    pub status: String,
-    pub attempts: u64,
-    pub next_attempt_at: Option<String>,
-    pub error_code: Option<String>,
+pub(crate) struct FeedbackLinksView {
+    pub configured: bool,
+    pub base_url: Option<String>,
+    pub entries: Vec<FeedbackEntryRow>,
+    pub security_notice: String,
+    pub open_failure_message: String,
+    pub not_configured_message: String,
+    /// 会随链接一起带上的三个字段（对用户透明；不是让 UI 自己拼）。
+    pub query_summary: String,
+    pub allowed_query_keys: Vec<String>,
 }
 
-impl FeedbackEntryView {
-    pub(crate) fn status_label(&self) -> &'static str {
-        match self.status.as_str() {
-            "sent" => "已发送",
-            "failed" => "发送被拒绝",
-            _ => "等待发送",
+impl Default for FeedbackLinksView {
+    fn default() -> Self {
+        Self {
+            configured: false,
+            base_url: None,
+            entries: Vec::new(),
+            // 兜底文案与 Core（src/product/feedback-links.js）保持一致；Core 一到就以 Core 为准。
+            security_notice: "安全问题请通过官方安全反馈页面提交，不要在公开 Issue 中披露敏感漏洞。"
+                .to_owned(),
+            open_failure_message: "无法打开浏览器，请稍后访问 CetaMesh 官方网站。".to_owned(),
+            not_configured_message: "官方反馈页面尚未配置，请稍后访问 CetaMesh 官方网站。".to_owned(),
+            query_summary: String::new(),
+            allowed_query_keys: vec!["version".to_owned(), "build".to_owned(), "platform".to_owned()],
         }
     }
 }
 
-pub(crate) fn feedback_entries(list: &Value) -> Vec<FeedbackEntryView> {
-    list.get("entries")
+fn payload_message(value: &Value, pointer: &str, fallback: &str) -> String {
+    value
+        .pointer(pointer)
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| fallback.to_owned())
+}
+
+fn query_summary(query: &Value) -> String {
+    let mut parts = Vec::new();
+    for key in ["version", "build", "platform"] {
+        if let Some(value) = query.get(key).and_then(Value::as_str).filter(|text| !text.is_empty()) {
+            parts.push(format!("{key}={value}"));
+        }
+    }
+    parts.join(" · ")
+}
+
+/// 解析 `product.feedbackLinks` 的返回（兼容 `{ links: {...} }` 与直接给 links 两种形态）。
+pub(crate) fn feedback_links_view(result: &Value) -> FeedbackLinksView {
+    let links = result.get("links").unwrap_or(result);
+    let mut view = FeedbackLinksView {
+        configured: links.get("configured").and_then(Value::as_bool).unwrap_or(false),
+        base_url: links
+            .get("baseUrl")
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned),
+        security_notice: payload_message(
+            links,
+            "/securityNotice",
+            "安全问题请通过官方安全反馈页面提交，不要在公开 Issue 中披露敏感漏洞。",
+        ),
+        open_failure_message: payload_message(
+            links,
+            "/messages/openFailure",
+            "无法打开浏览器，请稍后访问 CetaMesh 官方网站。",
+        ),
+        not_configured_message: payload_message(
+            links,
+            "/messages/notConfigured",
+            "官方反馈页面尚未配置，请稍后访问 CetaMesh 官方网站。",
+        ),
+        query_summary: query_summary(links.get("query").unwrap_or(&Value::Null)),
+        allowed_query_keys: links
+            .get("allowedQueryKeys")
+            .and_then(Value::as_array)
+            .map(|items| items.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+            .unwrap_or_else(|| vec!["version".to_owned(), "build".to_owned(), "platform".to_owned()]),
+        ..FeedbackLinksView::default()
+    };
+    view.entries = links
+        .get("entries")
         .and_then(Value::as_array)
         .map(|items| {
             items
                 .iter()
                 .filter_map(|item| {
                     let id = item.get("id").and_then(Value::as_str)?.to_owned();
-                    Some(FeedbackEntryView {
-                        kind: item
-                            .get("type")
+                    Some(FeedbackEntryRow {
+                        label: item
+                            .get("label")
                             .and_then(Value::as_str)
-                            .unwrap_or("other")
+                            .unwrap_or(&id)
                             .to_owned(),
-                        title: item
-                            .get("title")
+                        description: item
+                            .get("description")
                             .and_then(Value::as_str)
                             .unwrap_or("")
                             .to_owned(),
-                        status: item
-                            .get("status")
+                        url: item
+                            .get("url")
                             .and_then(Value::as_str)
-                            .unwrap_or("queued")
-                            .to_owned(),
-                        attempts: item.get("attempts").and_then(Value::as_u64).unwrap_or(0),
-                        next_attempt_at: item
-                            .get("nextAttemptAt")
-                            .and_then(Value::as_str)
+                            .filter(|text| !text.is_empty())
                             .map(str::to_owned),
-                        error_code: item
-                            .get("lastErrorCode")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned),
+                        security: item.get("kind").and_then(Value::as_str) == Some("security"),
                         id,
                     })
                 })
                 .collect()
         })
-        .unwrap_or_default()
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct FeedbackDraft {
-    pub kind: String,
-    pub title: String,
-    pub description: String,
-    pub steps: String,
-    pub contact: String,
-    pub attach_diagnostics: bool,
-}
-
-impl Default for FeedbackDraft {
-    fn default() -> Self {
-        Self {
-            kind: "bug".to_owned(),
-            title: String::new(),
-            description: String::new(),
-            steps: String::new(),
-            contact: String::new(),
-            // 默认不勾选：诊断附件必须由用户显式选择（安全漏洞类型即使勾了也只发最小 metadata）。
-            attach_diagnostics: false,
-        }
-    }
-}
-
-impl FeedbackDraft {
-    pub(crate) fn is_security(&self) -> bool {
-        self.kind == "security"
-    }
-
-    /// 提交前校验：与 Core 的 `validateSubmission` 保持同一套必填规则，避免白跑一次 IPC。
-    pub(crate) fn validate(&self) -> Result<(), &'static str> {
-        if self.title.trim().is_empty() {
-            return Err("请填写标题");
-        }
-        if self.description.trim().is_empty() {
-            return Err("请填写描述");
-        }
-        Ok(())
-    }
-
-    /// 清空用户输入（提交成功后调用；类型与勾选项保留，便于连续反馈同类问题）。
-    pub(crate) fn clear_body(&mut self) {
-        self.title.clear();
-        self.description.clear();
-        self.steps.clear();
-    }
-
-    pub(crate) fn submit_params(&self) -> Value {
-        json!({
-            "type": self.kind,
-            "title": self.title.trim(),
-            "description": self.description.trim(),
-            "steps": self.steps.trim(),
-            "contact": self.contact.trim(),
-            "attachDiagnostics": self.attach_diagnostics,
-        })
-    }
-}
-
-/// 提交结果 → 是否已真正送达（未送达时 UI 必须说明"已保存在本地队列"）。
-pub(crate) fn feedback_submit_sent(result: &Value) -> bool {
-    result.get("sent").and_then(Value::as_bool).unwrap_or(false)
-}
-
-pub(crate) fn feedback_submit_message(result: &Value) -> String {
-    result
-        .get("message")
-        .and_then(Value::as_str)
-        .filter(|text| !text.is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| "反馈已处理。".to_owned())
-}
-
-/// 安全漏洞类型的落地提示：Core 已给 notice 就用它，否则用本地兜底。
-pub(crate) fn security_notice(config: &FeedbackConfigView) -> String {
-    config
-        .security_notice
-        .clone()
-        .unwrap_or_else(|| "安全漏洞请不要公开提交：请通过官方安全通道报告，并避免披露利用细节。".to_owned())
+        .unwrap_or_default();
+    view
 }
 
 // ── product.copy（Core 文案表 + 本地兜底） ──────────────────────────────────
@@ -794,48 +731,69 @@ mod tests {
     }
 
     #[test]
-    fn feedback_config_and_entries_are_parsed() {
-        let config = json!({
-            "types": [ { "id": "bug", "label": "缺陷（Bug）" }, { "id": "security", "label": "安全漏洞" } ],
-            "limits": { "title": 120, "description": 4000 },
-            "endpoint": { "configured": false, "host": null },
-            "security": { "contactUrl": "https://github.com/x/y/security/advisories/new", "notice": "安全漏洞请不要公开提交" }
+    fn feedback_links_view_parses_entries_messages_and_query() {
+        let result = json!({
+            "links": {
+                "configured": true,
+                "baseUrl": "https://cetamesh.example.com",
+                "allowedQueryKeys": ["version", "build", "platform"],
+                "query": { "version": "1.0.0", "build": "1052", "platform": "windows" },
+                "securityNotice": "安全问题请通过官方安全反馈页面提交，不要在公开 Issue 中披露敏感漏洞。",
+                "messages": {
+                    "openFailure": "无法打开浏览器，请稍后访问 CetaMesh 官方网站。",
+                    "notConfigured": "官方反馈页面尚未配置，请稍后访问 CetaMesh 官方网站。"
+                },
+                "entries": [
+                    { "id": "general", "label": "反馈与建议", "description": "整体意见", "kind": "feedback", "url": "https://cetamesh.example.com/feedback?version=1.0.0&build=1052&platform=windows" },
+                    { "id": "bug", "label": "Bug 反馈", "description": "功能异常", "kind": "feedback", "url": "https://cetamesh.example.com/feedback?type=bug&version=1.0.0" },
+                    { "id": "feature", "label": "功能建议", "description": "新增能力", "kind": "feedback", "url": "https://cetamesh.example.com/feedback?type=feature" },
+                    { "id": "security", "label": "安全漏洞", "description": "安全问题", "kind": "security", "url": "https://cetamesh.example.com/security" }
+                ]
+            }
         });
-        let view = feedback_config_view(&config);
-        assert_eq!(view.types.len(), 2);
-        assert!(!view.endpoint_configured);
-        assert_eq!(view.description_max, 4000);
-        assert!(security_notice(&view).contains("不要公开提交"));
-
-        let entries = feedback_entries(&json!({ "entries": [
-            { "id": "fb-1", "type": "bug", "title": "崩溃", "status": "queued", "attempts": 2, "nextAttemptAt": "2026-10-09T01:00:00Z" },
-            { "id": "fb-2", "type": "security", "title": "越权", "status": "sent", "attempts": 1 }
-        ] }));
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].status_label(), "等待发送");
-        assert_eq!(entries[0].attempts, 2);
-        assert_eq!(entries[1].status_label(), "已发送");
+        let view = feedback_links_view(&result);
+        assert!(view.configured);
+        assert_eq!(view.entries.len(), 4);
+        assert_eq!(view.entries[0].label, "反馈与建议");
+        assert!(view.entries[3].security);
+        assert!(!view.entries[0].security);
+        assert_eq!(view.query_summary, "version=1.0.0 · build=1052 · platform=windows");
+        assert_eq!(view.allowed_query_keys, vec!["version", "build", "platform"]);
+        assert!(view.security_notice.contains("不要"));
+        assert!(view.open_failure_message.contains("无法打开浏览器"));
+        assert_eq!(
+            view.entries[3].url.as_deref(),
+            Some("https://cetamesh.example.com/security")
+        );
+        assert!(view.entries[3].security);
     }
 
     #[test]
-    fn feedback_draft_validates_and_builds_submit_params() {
-        let mut draft = FeedbackDraft::default();
-        assert_eq!(draft.validate(), Err("请填写标题"));
-        draft.title = "  崩溃  ".to_owned();
-        assert_eq!(draft.validate(), Err("请填写描述"));
-        draft.description = "启动即退出".to_owned();
-        draft.steps = "1. 双击".to_owned();
-        assert!(draft.validate().is_ok());
-        // 诊断附件默认不勾选：必须是用户显式选择。
-        assert!(!draft.attach_diagnostics);
-        let params = draft.submit_params();
-        assert_eq!(params["type"], "bug");
-        assert_eq!(params["title"], "崩溃");
-        assert_eq!(params["attachDiagnostics"], false);
-        draft.kind = "security".to_owned();
-        assert!(draft.is_security());
-        draft.clear_body();
-        assert!(draft.title.is_empty() && draft.description.is_empty());
+    fn feedback_links_view_falls_back_when_unconfigured_or_missing() {
+        // 未配置：configured=false、url 为空，文案仍是产品给定原文。
+        let unconfigured = json!({
+            "links": {
+                "configured": false,
+                "baseUrl": null,
+                "entries": [
+                    { "id": "general", "label": "反馈与建议", "kind": "feedback", "url": null },
+                    { "id": "security", "label": "安全漏洞", "kind": "security", "url": null }
+                ]
+            }
+        });
+        let view = feedback_links_view(&unconfigured);
+        assert!(!view.configured);
+        assert!(view.entries.iter().all(|entry| entry.url.is_none()));
+        assert!(view.not_configured_message.contains("尚未配置"));
+        assert_eq!(view.entries[0].url.as_deref(), None);
+
+        // 空 payload（Core 未就绪/返回异常）：不 panic，且四条必需文案仍在。
+        let empty = feedback_links_view(&json!({}));
+        assert!(!empty.configured);
+        assert!(empty.entries.is_empty());
+        assert!(empty.security_notice.contains("不要在公开 Issue"));
+        assert!(empty.open_failure_message.contains("无法打开浏览器，请稍后访问 CetaMesh 官方网站。"));
+        assert_eq!(empty.allowed_query_keys, vec!["version", "build", "platform"]);
     }
 
     #[test]

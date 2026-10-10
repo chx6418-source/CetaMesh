@@ -62,7 +62,7 @@ impl AppPage {
             Self::Connections => "服务连接与安装状态。",
             Self::Security => "权限与安全通知。",
             Self::About => "版本、Build ID、Commit、更新公告、许可证、隐私与安全说明、诊断信息。",
-            Self::Feedback => "提交缺陷 / 功能建议 / 体验问题 / 安全漏洞；反馈服务不可用时先保存在本地队列。",
+            Self::Feedback => "反馈与建议 / Bug 反馈 / 功能建议 / 安全漏洞：用系统默认浏览器打开官方网站对应页面。",
             Self::Onboarding => "首次运行引导：配置模型服务商、测试连接、选定默认模型（Agent 与扩展都是可选）。",
             Self::Settings => "外观、快捷键与应用偏好。",
         }
