@@ -26,7 +26,8 @@ import {
   gitStatus,
   readFile,
   testRun,
-  writeFile
+  writeFile,
+  applyWorkspaceChanges
 } from './tools.js';
 
 const GIT_INFO_TTL_MS = 5000;
@@ -253,6 +254,16 @@ export function createWorkspaceService({ stateDir, now = () => Date.now(), audit
     return handler(params ?? {});
   }
 
+  function applyChanges({ id, changes, actor = 'capability-broker' } = {}) {
+    const entry = requireWorkspace({ id });
+    const result = applyWorkspaceChanges(entry.root, changes);
+    for (const change of result.changes) {
+      registry.recordFileAccess(entry.id, { relPath: change.path, action: change.action });
+      record(entry, String(actor), change.action, change.path);
+    }
+    return { workspaceId: entry.id, ...result };
+  }
+
   /**
    * 只读内部入口（Continuity Workspace Reconciliation 适配用）：按 id 取登记条目投影。
    * 不存在时返回 null（不抛错，由调用方决定"事实不可得"的语义）；绝不触发审计或状态写。
@@ -268,7 +279,7 @@ export function createWorkspaceService({ stateDir, now = () => Date.now(), audit
     }
   }
 
-  return { execute, describeWorkspace };
+  return { execute, describeWorkspace, applyChanges };
 }
 
 export { WorkspaceBoundaryError, WorkspaceRegistryError, WorkspaceToolError };

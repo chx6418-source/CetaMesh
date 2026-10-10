@@ -13,6 +13,8 @@
 //      依赖方向仍然是 Continuity → Broker。
 import { AGENT_PROVIDER_OPTIONAL_METHODS, agentProviderError } from './agent-provider.js';
 
+const TASK_WORKSPACE_BOUNDARIES = new Set(['capability-broker', 'staged-capability-broker']);
+
 export function createAgentBroker({ registry, log = () => {} } = {}) {
   if (!registry || typeof registry.require !== 'function' || typeof registry.register !== 'function') {
     throw agentProviderError('INVALID_PARAMS', 'createAgentBroker 需要 Agent Provider 注册表');
@@ -91,8 +93,24 @@ export function createAgentBroker({ registry, log = () => {} } = {}) {
     // ── 会话操作（统一入口；provider id 必填首参） ────────────────────────────
     async createSession(providerId, params = {}) {
       const provider = requireProvider(providerId);
+      const capabilities = provider.capabilities();
+      const boundary = capabilities?.workspaceBoundary;
+      if (boundary !== undefined && boundary !== null && !TASK_WORKSPACE_BOUNDARIES.has(boundary) && boundary !== 'unverified' && boundary !== 'unsupported') {
+        throw agentProviderError('AGENT_BOUNDARY_UNSUPPORTED', `Provider ${provider.id} declares an unknown workspace boundary`);
+      }
+      if (boundary === 'unverified' || boundary === undefined || boundary === null) {
+        throw agentProviderError('AGENT_BOUNDARY_UNSUPPORTED', `Provider ${provider.id} has no verified Task Workspace boundary`);
+      }
+      if (TASK_WORKSPACE_BOUNDARIES.has(boundary)) {
+        if (typeof params?.taskId !== 'string' || !params.taskId.trim()
+          || typeof params?.workspaceId !== 'string' || !params.workspaceId.trim()) {
+          throw agentProviderError('TASK_REQUIRED', 'Workspace-bound Agents require a Task and Workspace binding');
+        }
+      }
       return provider.createSession({
-        cwd: params?.cwd,
+        ...(boundary === 'staged-capability-broker' ? {} : { cwd: params?.cwd }),
+        taskId: params?.taskId,
+        workspaceId: params?.workspaceId,
         model: params?.model,
         reasoningEffort: params?.reasoningEffort,
         modelProvider: params?.modelProvider

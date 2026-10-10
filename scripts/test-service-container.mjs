@@ -51,8 +51,13 @@ try {
   }
   const providers = services.agentService.listProviders().map((provider) => provider.id);
   assert.ok(providers.includes('cetamesh'), 'local CetaMesh Agent Provider remains available');
-  assert.equal(providers.includes('dsh'), false, 'DSH provider is absent when no DSH API is injected');
-  assert.equal(networkAttempts, 0, 'constructing Core services does not probe a provider');
+  assert.ok(providers.includes('dsh'), 'DSH provider remains registered without a transport');
+  assert.ok(providers.includes('codex'), 'Codex provider remains registered when unavailable');
+  assert.ok(providers.includes('zcode'), 'ZCode provider remains registered when unavailable');
+  const dshHealth = await services.agentService.execute({ method: 'agent.health', params: { provider: 'dsh' } });
+  assert.equal(dshHealth.available, false);
+  assert.equal(dshHealth.reason, 'not_connected');
+  assert.equal(networkAttempts, 0, 'constructing Core services does not make network requests');
 
   const simpleContext = JSON.parse(await services.productContextService.buildForChat({
     record: { id: 'simple-chat', taskId: null, config: { mode: 'chat', workspaceId: null } },
@@ -212,7 +217,7 @@ try {
   onExit();
   assert.deepEqual(closed, ['second', 'first'], 'exit cleanup is idempotent');
 
-  console.log('PASS Core service container constructs without DSH, QQ or provider probes');
+  console.log('PASS Core container registers all Agent Providers without DSH or QQ network requests');
 } finally {
   if (services) {
     await Promise.all([

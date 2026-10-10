@@ -149,11 +149,14 @@ function ok(name) { results.pass += 1; console.log(`PASS ${name}`); }
 // ── C. service 注册与路由 ────────────────────────────────────────────────────
 {
   const deadApi = { async callEndpoint() { throw new Error('settings/describe: 传输失败（ECONNREFUSED）'); }, async *openRemoteStream() { throw new Error('ws error'); } };
-  const service = createDefaultAgentService({ api: deadApi, defaults: {}, log: () => {} });
+  const service = createDefaultAgentService({ api: deadApi, defaults: {}, codexExecutable: null,
+    zcodeOptions: { desktopDetected: false }, log: () => {} });
   const list = await service.execute({ method: 'agent.list', params: {} });
-  assert.equal(list.providers.length, 1);
+  assert.deepEqual(list.providers.map((item) => item.id), ['dsh', 'codex', 'zcode']);
   assert.equal(list.providers[0].id, 'dsh');
   assert.equal(list.providers[0].capabilities.supported.nativeCheckpoint, false);
+  assert.equal(list.providers.find((item) => item.id === 'codex').reason, 'not_installed');
+  assert.equal(list.providers.find((item) => item.id === 'zcode').reason, 'not_installed');
   await assert.rejects(() => service.execute({ method: 'agent.status', params: { provider: 'dsh', sessionId: 'x' } }), (e) => e.code === 'PROVIDER_UNAVAILABLE' || e.code === 'PROVIDER_ERROR');
   // 可选能力经 Broker 诚实包装：agent.nativeCheckpoint 返回 UNSUPPORTED 形状而非抛断。
   const unsupported = await service.execute({ method: 'agent.nativeCheckpoint', params: { provider: 'dsh', sessionId: 'x' } });
@@ -176,7 +179,7 @@ function ok(name) { results.pass += 1; console.log(`PASS ${name}`); }
   const deadCall = (method, params) => deadService.execute({ method, params });
   const health2 = await deadCall('agent.health', { provider: 'dsh' });
   assert.equal(health2.available, false);
-  await assert.rejects(() => deadCall('agent.createSession', { provider: 'dsh' }), (e) => e.code === 'PROVIDER_UNAVAILABLE', 'createSession 应报 PROVIDER_UNAVAILABLE');
+  await assert.rejects(() => deadCall('agent.createSession', { provider: 'dsh' }), (e) => e.code === 'AGENT_BOUNDARY_UNSUPPORTED', 'unverified DSH sessions must not accept a free cwd');
   await assert.rejects(() => deadCall('agent.status', { provider: 'dsh', sessionId: 'x' }), (e) => e.code === 'PROVIDER_UNAVAILABLE', 'status 应报 PROVIDER_UNAVAILABLE');
   await assert.rejects(() => deadCall('agent.send', { provider: 'dsh', sessionId: 'x', content: 'hi' }), (e) => e.code === 'PROVIDER_UNAVAILABLE', 'send 应报 PROVIDER_UNAVAILABLE');
   await assert.rejects(() => deadCall('agent.cancel', { provider: 'dsh', sessionId: 'x' }), (e) => e.code === 'PROVIDER_UNAVAILABLE', 'cancel 应报 PROVIDER_UNAVAILABLE');
@@ -213,7 +216,11 @@ function ok(name) { results.pass += 1; console.log(`PASS ${name}`); }
 
     // E1 目录暴露可选择的 Agent Provider
     const catalog = await exec('chat.catalog', {});
-    assert.deepEqual(catalog.agentProviders, [{ id: 'dsh', label: 'DSH Agent' }]);
+    assert.deepEqual(catalog.agentProviders, [{
+      id: 'dsh', label: 'DSH Agent', displayName: 'DSH Agent', eventProtocol: 'dsh-session-events',
+      available: null, version: null, reason: null, workspaceBoundary: 'unsupported',
+      supportsFreshSession: false, supportsResume: false, health: 'unknown'
+    }]);
     ok('E1 chat.catalog 暴露 agentProviders（UI 选择数据源）');
 
     // E2 Agent Provider 路径：createSession + send 走标准契约

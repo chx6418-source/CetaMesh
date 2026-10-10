@@ -25,6 +25,7 @@ import { createAgentBroker } from '../src/agent/broker.js';
 import { createContinuityService } from '../src/continuity/service.js';
 
 const root = path.resolve(import.meta.dirname, '..');
+fs.mkdirSync(path.join(root, 'output'), { recursive: true });
 const temp = fs.mkdtempSync(path.join(root, 'output', 'auto-rollover-test-'));
 
 let step = 0;
@@ -38,7 +39,7 @@ function fixtureProvider(id, { gate = null, failCreate = false } = {}) {
     provider: defineAgentProvider({
       id,
       label: `Fixture ${id}`,
-      capabilityExtras: { rolloverStrategy: { preferred: 'fresh-session', note: 'fixture' } },
+      capabilityExtras: { workspaceBoundary: 'capability-broker', rolloverStrategy: { preferred: 'fresh-session', note: 'fixture' } },
       methods: {
         async createSession() {
           if (gate?.blocked) await new Promise((resolve) => { gate.release = resolve; });
@@ -369,7 +370,7 @@ function seedTask(taskRuntime, rev, { provider = 'alpha', sessionId = 'alpha-s1'
   assert.equal(packet.workspaceFacts.git.headSha, 'a'.repeat(40));
 
   const plain = setup();
-  const task2 = plain.taskRuntime.create({ goal: '无工作区任务' });
+  const task2 = plain.taskRuntime.create({ goal: '无 Workspace facts 任务', workspaceId: 'ws-no-facts' });
   plain.taskRuntime.attachAgent({ id: task2.id, expectedRev: plain.rev(task2.id), provider: 'alpha', sessionId: 'alpha-s1' });
   await plain.runtime.rollover({ taskId: task2.id, reason: 'owner-request' });
   const { packet: packet2 } = plain.runtime.latestPacket({ taskId: task2.id });

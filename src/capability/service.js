@@ -12,8 +12,18 @@ export const WORKSPACE_CAPABILITIES = Object.freeze({
   'workspace.read': 'filesystem.read', 'workspace.write': 'filesystem.write',
   'workspace.file.search': 'filesystem.search', 'workspace.git.status': 'git.status',
   'workspace.git.diff': 'git.diff', 'workspace.git.commit': 'git.commit',
-  'workspace.test.run': 'test.run', 'workspace.create': 'workspace.create'
+  'workspace.test.run': 'test.run', 'workspace.create': 'workspace.create',
+  'workspace.apply': 'workspace.apply'
 });
+
+const MAX_AGENT_IMPORT_FILES = 500;
+const MAX_AGENT_IMPORT_BYTES = 20 * 1024 * 1024;
+const MAX_AGENT_IMPORT_FILE_BYTES = 5 * 1024 * 1024;
+const SENSITIVE_IMPORT_SEGMENT = /^(?:\.git|\.codex|\.ssh|\.aws|\.azure|\.gnupg|\.cetamesh|\.env(?:\..*)?|credentials(?:\..*)?|secrets?(?:\..*)?|private_keys|id_(?:rsa|ed25519|ecdsa)|known_hosts|authorized_keys)$/i;
+
+function sha256(value) {
+  return crypto.createHash('sha256').update(value).digest('hex');
+}
 
 const stringField = description => ({ type: 'string', description });
 const objectInput = (properties = {}, required = []) => ({
@@ -27,7 +37,19 @@ const WORKSPACE_TOOL_DESCRIPTORS = Object.freeze({
   'git.diff': ['Read a bounded Git diff summary inside the authorized Workspace.', objectInput({ path: stringField('Optional Workspace-relative file path.'), statOnly: { type: 'boolean' } })],
   'git.commit': ['Create a Git commit in the authorized Workspace.', objectInput({ message: stringField('Commit message.') }, ['message'])],
   'test.run': ['Run an allowlisted test command in the authorized Workspace. Owner approval is required.', objectInput({ tool: stringField('Allowlisted test tool.'), args: { type: 'array', items: { type: 'string' }, maxItems: 40 }, timeoutMs: { type: 'integer', minimum: 1000, maximum: 600000 } }, ['tool', 'args'])],
-  'workspace.create': ['Register an explicitly selected local Workspace root. Owner approval is required.', objectInput({ root: stringField('Local directory selected by the Owner.'), name: stringField('Optional Workspace display name.') }, ['root'])]
+  'workspace.create': ['Register an explicitly selected local Workspace root. Owner approval is required.', objectInput({ root: stringField('Local directory selected by the Owner.'), name: stringField('Optional Workspace display name.') }, ['root'])],
+  'workspace.apply': ['Import a staged Task Workspace change set. Owner approval is required.', objectInput({
+    changes: { type: 'array', minItems: 1, maxItems: 500, items: {
+      type: 'object', properties: {
+        action: { type: 'string', enum: ['write', 'delete'] },
+        path: stringField('Workspace-relative file path.'),
+        content: stringField('Replacement text for write actions.'),
+        expectedHash: stringField('Hash of the source file when it was staged.'),
+        hash: stringField('Hash of the staged file content.')
+      }, required: ['action', 'path'], additionalProperties: false
+    } },
+    summary: { type: 'object' }
+  }, ['changes'])]
 });
 
 /** Trusted in-process API. Public transports must use execute/executeWorkspace,
@@ -38,6 +60,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
   const file = stateDir ? path.join(stateDir, 'capability', 'task-grants.json') : null;
   let grants = file && fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : {};
   const provisioning = new Map();
+  const workspaceImportStates = new Map();
   let approvalDecisionListener = null;
   const journalFile = stateDir ? path.join(stateDir, 'capability', 'requests.json') : null;
   const journal = journalFile && fs.existsSync(journalFile) ? JSON.parse(fs.readFileSync(journalFile, 'utf8')) : {};
@@ -74,6 +97,72 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     fs.writeFileSync(temp, JSON.stringify(grants, null, 2), { mode: 0o600 });
     fs.renameSync(temp, file);
   }
+  function rememberWorkspaceImport(id, state) {
+    if (!id) return;
+    workspaceImportStates.delete(String(id));
+    workspaceImportStates.set(String(id), state);
+    while (workspaceImportStates.size > 1000) workspaceImportStates.delete(workspaceImportStates.keys().next().value);
+  }
+  function validateWorkspaceImport(request) {
+    const changes = request.input?.changes;
+    if (!Array.isArray(changes) || changes.length < 1 || changes.length > MAX_AGENT_IMPORT_FILES) {
+      throw capabilityError('INVALID_CHANGES', `Workspace import requires 1-${MAX_AGENT_IMPORT_FILES} changes`);
+    }
+    const workspace = resolveWorkspace(request.workspaceId);
+    if (!workspace) throw capabilityError('WORKSPACE_NOT_FOUND', request.workspaceId);
+    const seen = new Set();
+    let totalBytes = 0;
+    for (const change of changes) {
+      if (!change || !['write', 'delete'].includes(change.action) || typeof change.path !== 'string' || !change.path.trim()) {
+        throw capabilityError('INVALID_CHANGES', 'Each Workspace import change needs an action and relative path');
+      }
+      const relative = change.path.replaceAll('\\', '/');
+      const key = process.platform === 'win32' ? relative.toLowerCase() : relative;
+      if (seen.has(key)) throw capabilityError('INVALID_CHANGES', `Workspace import contains a duplicate path: ${relative}`);
+      seen.add(key);
+      if (relative.split('/').some(segment => SENSITIVE_IMPORT_SEGMENT.test(segment)
+        || /\.(?:pem|p12|pfx|key|keystore)$/i.test(segment))) {
+        throw capabilityError('SENSITIVE_RESOURCE_DENIED', 'Workspace import cannot modify repository controls or credentials');
+      }
+      let resolved;
+      try { resolved = resolveInside(workspace.root, relative, { forWrite: true }); }
+      catch (error) {
+        if (/OUTSIDE|ESCAPE|ABSOLUTE|TRAVERSAL|INVALID_PATH|BOUNDARY/.test(error.code ?? '')) {
+          throw capabilityError('PATH_OUTSIDE_WORKSPACE', error.message);
+        }
+        throw error;
+      }
+      const parts = path.relative(workspace.root, resolved.absolute).split(path.sep).filter(Boolean);
+      let cursor = workspace.root;
+      let existing = null;
+      for (let index = 0; index < parts.length; index += 1) {
+        cursor = path.join(cursor, parts[index]);
+        let stat;
+        try { stat = fs.lstatSync(cursor); }
+        catch (error) { if (error.code === 'ENOENT') break; throw error; }
+        if (stat.isSymbolicLink()) throw capabilityError('PATH_SYMLINK_DENIED', `Workspace import refuses symbolic links: ${relative}`);
+        if (index < parts.length - 1 && !stat.isDirectory()) throw capabilityError('PATH_INVALID', `Workspace import parent is not a directory: ${relative}`);
+        if (index === parts.length - 1) existing = stat;
+      }
+      const currentHash = existing?.isFile() ? sha256(fs.readFileSync(resolved.absolute)) : null;
+      if (existing && !existing.isFile()) throw capabilityError('IMPORT_TARGET_INVALID', `Workspace import target is not a regular file: ${relative}`);
+      if ((change.expectedHash ?? null) !== currentHash) {
+        throw capabilityError('WORKSPACE_CONFLICT', `Workspace file changed since staging: ${relative}`);
+      }
+      if (change.action === 'write') {
+        if (typeof change.content !== 'string') throw capabilityError('INVALID_CHANGES', `Workspace write content must be text: ${relative}`);
+        const bytes = Buffer.byteLength(change.content, 'utf8');
+        if (bytes > MAX_AGENT_IMPORT_FILE_BYTES) throw capabilityError('IMPORT_TOO_LARGE', `Workspace import file exceeds limit: ${relative}`);
+        totalBytes += bytes;
+        if (typeof change.hash !== 'string' || change.hash !== sha256(Buffer.from(change.content, 'utf8'))) {
+          throw capabilityError('IMPORT_HASH_MISMATCH', `Workspace import content hash does not match: ${relative}`);
+        }
+      } else if (typeof change.expectedHash !== 'string' || change.hash !== null) {
+        throw capabilityError('INVALID_CHANGES', `Workspace delete requires the original file hash: ${relative}`);
+      }
+      if (totalBytes > MAX_AGENT_IMPORT_BYTES) throw capabilityError('IMPORT_TOO_LARGE', 'Workspace import exceeds the total size limit');
+    }
+  }
   function grantTask(taskId, value) {
     const task = taskFor(taskId);
     if (!task?.workspaceId) throw capabilityError('WORKSPACE_REQUIRED', 'Task workspace required');
@@ -83,12 +172,13 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     // 脚本 / 测试 / 构建脚本），allowlist 只防命令注入、防不了项目代码本身。
     // 需要 test.run 的任务必须显式传入（Workshop Owner 勾选 / Smart 路径显式
     // request-only grant），且每一次执行仍需 Owner Approve Once（risk=high）。
-    const capabilities = value?.capabilities ?? ['filesystem.read', 'filesystem.write', 'filesystem.search', 'git.status', 'git.diff', 'memory.read'];
+    const capabilities = new Set(value?.capabilities ?? ['filesystem.read', 'filesystem.write', 'filesystem.search', 'git.status', 'git.diff', 'memory.read']);
+    if (capabilities.has('filesystem.write')) capabilities.add('workspace.apply');
     for (const id of capabilities) broker.registry.require(id);
     if ((value?.workspaceIds ?? [task.workspaceId]).some(id => id !== task.workspaceId)) {
       throw capabilityError('WORKSPACE_NOT_AUTHORIZED', 'A Task grant cannot include another workspace');
     }
-    grants[taskId] = { capabilities: [...new Set(capabilities)], workspaceIds: [task.workspaceId], taskIds: [taskId],
+    grants[taskId] = { capabilities: [...capabilities], workspaceIds: [task.workspaceId], taskIds: [taskId],
       scopes: [`task:${taskId}`, `workspace:${task.workspaceId}`], types: ['working', 'task', 'workspace', 'knowledge', 'skill'] };
     saveGrants();
     return principalForTask(taskId);
@@ -113,15 +203,19 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
   }
   if (workspaceService) {
     for (const [method, id] of Object.entries(WORKSPACE_CAPABILITIES)) {
-      broker.register({ id, permission: id, provider: 'workspace', workspace: id !== 'workspace.create',
+      broker.register({ id, permission: id === 'workspace.apply' ? 'filesystem.write' : id, provider: 'workspace', workspace: id !== 'workspace.create',
         description: WORKSPACE_TOOL_DESCRIPTORS[id][0],
         inputSchema: WORKSPACE_TOOL_DESCRIPTORS[id][1],
         category: id.startsWith('filesystem.') ? 'filesystem' : id.startsWith('git.') ? 'git' : 'workspace',
         // test.run = 执行 Workspace 中可被 Agent 修改的代码：high（审批必经），
         // 不是普通 medium。Owner 直接点击"运行测试"走 executeWorkspace 的
         // approved:true（Owner 的点击本身就是显式决定，语义与既往一致）。
-        risk: ['workspace.create', 'git.commit', 'test.run'].includes(id) ? 'high' : id === 'filesystem.write' ? 'medium' : 'low',
+        risk: ['workspace.create', 'git.commit', 'test.run', 'workspace.apply'].includes(id) ? 'high' : id === 'filesystem.write' ? 'medium' : 'low',
         validate(request) {
+          if (id === 'workspace.apply') {
+            validateWorkspaceImport(request);
+            return;
+          }
           if (id === 'workspace.create') {
             assertSafeRootForm(request.input.root);
             if (fs.existsSync(request.input.root)) canonicalizeRoot(request.input.root);
@@ -179,6 +273,9 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
               // 到达这里意味着 Owner 已经 Approve Once（risk=high 审批已消费）。
               return isolatedRunner.run({ workspaceId: request.workspaceId,
                 tool: request.input.tool, args: request.input.args, timeoutMs: request.input.timeoutMs });
+            }
+            if (id === 'workspace.apply') {
+              return workspaceService.applyChanges({ id: request.workspaceId, changes: request.input.changes, actor: request.actor.id });
             }
             return workspaceService.execute({ method, params: { ...request.input,
               ...(id === 'git.diff' ? { excludeSensitive: request.actor.kind !== 'owner' } : {}),
@@ -295,8 +392,12 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       let task = taskFor(r.taskId);
       if (!task || task.workspaceId !== r.workspaceId) throw capabilityError('TASK_NOT_AUTHORIZED', 'Task workspace required');
       const provider = String(r.input.agentProvider || r.input.provider || 'cetamesh');
-      if (agentBroker?.capabilities(provider)?.workspaceBoundary !== 'capability-broker') {
+      const boundary = agentBroker?.capabilities(provider)?.workspaceBoundary;
+      if (!['capability-broker', 'staged-capability-broker'].includes(boundary)) {
         throw capabilityError('AGENT_BOUNDARY_UNSUPPORTED', 'Provider has no enforced Capability Broker workspace boundary');
+      }
+      if (task.currentAgent && task.currentAgent.provider !== provider) {
+        throw capabilityError('AGENT_PROVIDER_SWITCH_REQUIRES_CONTINUITY', 'An existing Task must change Agent Providers through Continuity Fresh Session');
       }
       if (provisioning.has(task.id)) return provisioning.get(task.id);
       const pending = (async () => {
@@ -311,7 +412,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
           }
         }
         const ws = resolveWorkspace(r.workspaceId);
-        const created = await agentBroker.createSession(provider, { cwd: ws.root,
+        const created = await agentBroker.createSession(provider, { cwd: ws.root, taskId: task.id, workspaceId: ws.id,
           model: r.input.model, modelProvider: r.input.modelProvider, reasoningEffort: r.input.reasoningEffort });
         if (!created?.sessionId) throw capabilityError('PROVIDER_ERROR', 'Agent returned no session');
         const attached = taskRuntime.attachAgent({ id: task.id, expectedRev: task.rev, provider, sessionId: created.sessionId });
@@ -330,6 +431,10 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     if (method === 'capability.approval.decide') {
       const original = broker.approvals.get(params.id).request;
       const result = await broker.decide({ id: params.id, approve: params.approve === true, actor: OWNER_ACTOR });
+      if (original.capability === 'workspace.apply') rememberWorkspaceImport(params.id, {
+        status: result.status,
+        ...(result.status === 'completed' ? { result: result.result } : {})
+      });
       if (typeof approvalDecisionListener === 'function') {
         const resumed = await approvalDecisionListener({ approvalId: params.id,
           requestFingerprint: requestFingerprint(original), decisionResult: result, request: original });
@@ -364,7 +469,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     // test.run 保持 Owner 直接操作语义：Owner 在 Workspace UI 点击"运行测试"就是
     // 显式决定（approved:true，跳过审批队列）；Managed Agent 的 test.run 不走此
     // 路径，risk=high 使其必然进入 Approve Once。
-    const ownerDirect = ['workspace.create', 'test.run'].includes(capability);
+    const ownerDirect = ['workspace.create', 'test.run', 'workspace.apply'].includes(capability);
     const result = await broker.execute({ capability, actor: OWNER_ACTOR, input: params,
       ...(capability !== 'workspace.create' ? { workspaceId } : {}), approved: ownerDirect, reason: 'Desktop Owner action' });
     return result.status === 'completed' ? result.result : result;
@@ -378,7 +483,22 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       actor: OWNER_ACTOR, input: command, reason: 'Desktop Owner Memory action' });
     return result.result;
   }
+  async function applyAgentWorkspaceChanges({ taskId, workspaceId, requestId, changes, summary } = {}) {
+    const task = taskFor(String(taskId ?? ''));
+    if (!task || task.workspaceId !== String(workspaceId ?? '')) {
+      throw capabilityError('TASK_NOT_AUTHORIZED', 'Agent Workspace import requires its Task binding');
+    }
+    const actor = principalForTask(task.id);
+    const result = await broker.execute({ actor, taskId: task.id, workspaceId: task.workspaceId,
+      capability: 'workspace.apply', requestId, input: { changes, summary }, reason: 'Agent staging Workspace reconciliation' });
+    if (result.status === 'pending') rememberWorkspaceImport(result.approvalId, { status: 'pending' });
+    return result;
+  }
+  function workspaceImportStatus(approvalId) {
+    return workspaceImportStates.get(String(approvalId ?? '')) ?? null;
+  }
   return { execute, executeWorkspace, executeMemory, broker, grantTask, principalForTask, refreshTaskWorkspaceGrant, memoryPrincipal,
+    applyAgentWorkspaceChanges, workspaceImportStatus,
     setApprovalDecisionListener(listener) {
       if (listener !== null && typeof listener !== 'function') throw capabilityError('INVALID_PARAMS', 'Approval decision listener must be a function');
       approvalDecisionListener = listener;

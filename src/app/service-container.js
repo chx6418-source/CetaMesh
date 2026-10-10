@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { APP_PATHS } from '../app-paths.js';
 import { DEFAULT_MODEL } from '../config/migrate.js';
@@ -51,8 +52,30 @@ export function createCetaMeshServices(options = {}) {
   const controlService = options.controlService ?? null;
   const log = options.log ?? (() => {});
 
+  const taskService = createTaskService({ stateDir });
+  const workspaceService = createWorkspaceService({
+    stateDir,
+    audit: event => log('Workspace ' + event.action + '（' + (event.workspaceId ?? 'none') + '）')
+  });
+  let capabilityService = null;
+  let continuityService = null;
+  const agentTaskOptions = {
+    stagingRoot: options.agentStagingRoot ?? path.join(os.tmpdir(), 'CetaMesh', 'agent-staging'),
+    excludedRoots: [stateDir, dataRoot],
+    resolveTaskWorkspace: ({ taskId, workspaceId }) => {
+      const task = taskService.runtime.get({ id: taskId }).task;
+      if (task.workspaceId !== workspaceId) return null;
+      const workspace = workspaceService.describeWorkspace(workspaceId);
+      return workspace ? { task, workspace } : null;
+    },
+    listWorkspaceRoots: async () => (await workspaceService.execute({ method: 'workspace.list' })).workspaces,
+    applyChanges: request => capabilityService.applyAgentWorkspaceChanges(request),
+    approvalStatus: approvalId => capabilityService.workspaceImportStatus(approvalId)
+  };
+
   const providerSecrets = createProviderSecrets({ root: dataRoot });
-  const agentService = createDefaultAgentService({ api, defaults: dshDefaults, log });
+  const agentService = createDefaultAgentService({ api, defaults: dshDefaults, log,
+    dshOptions: agentTaskOptions, codexOptions: agentTaskOptions });
   const agentBroker = agentService.broker;
 
   const modelRegistry = createModelProviderRegistry({
@@ -91,7 +114,6 @@ export function createCetaMeshServices(options = {}) {
   const modelRuntime = createModelRuntimeService({ registry: modelRegistry, secrets: providerSecrets, log });
   // Chat and Managed Agent are composed before all context sources exist; the callback is bound later.
   let productContextService = null;
-  let capabilityService = null;
   let managedAgent = null;
   let toolExecutionCoordinator = null;
   const toolExecutionProxy = {
@@ -152,11 +174,6 @@ export function createCetaMeshServices(options = {}) {
       }
     }
   });
-  const taskService = createTaskService({ stateDir });
-  const workspaceService = createWorkspaceService({
-    stateDir,
-    audit: event => log('Workspace ' + event.action + '（' + (event.workspaceId ?? 'none') + '）')
-  });
   capabilityService = createCapabilityService({
     stateDir,
     workspaceService,
@@ -190,6 +207,10 @@ export function createCetaMeshServices(options = {}) {
     workspaceService,
     taskRuntime: taskService.runtime,
     agentBroker,
+    continuityRuntime: { rollover: params => {
+      if (!continuityService) throw Object.assign(new Error('Continuity Runtime is unavailable'), { code: 'PROVIDER_UNAVAILABLE' });
+      return continuityService.runtime.rollover(params);
+    } },
     legacyModel: dshDefaults.model
   });
   const workshopService = createWorkshopService({
@@ -214,7 +235,7 @@ export function createCetaMeshServices(options = {}) {
       return fs.existsSync(target);
     }
   });
-  const continuityService = createContinuityService({
+  continuityService = createContinuityService({
     taskRuntime: taskService.runtime,
     stateDir,
     agentBroker,

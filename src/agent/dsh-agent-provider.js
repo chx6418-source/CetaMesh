@@ -71,6 +71,16 @@ export function createDshAgentProvider({ api, defaults = {}, log = () => {} } = 
     label: 'DSH Agent',
     eventProtocol: AGENT_EVENT_PROTOCOL_DSH,
     capabilityExtras: {
+      displayName: 'DSH',
+      available: null,
+      version: null,
+      reason: null,
+      // DSH's remote session API is stable, but the API adapter cannot prove that
+      // every remote filesystem mutation is broker-mediated. Keep task execution fail-closed.
+      workspaceBoundary: 'unverified',
+      supportsFreshSession: true,
+      supportsResume: true,
+      contextUsage: { available: true, source: 'DSH session/list projections when present' },
       rolloverStrategy: {
         preferred: 'fresh-session',
         note: 'DSH 无原生压缩/续接端点：上下文临限时优先结束旧会话并开新会话（Bootstrap 结构化恢复）'

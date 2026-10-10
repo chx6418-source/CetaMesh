@@ -90,6 +90,28 @@ export function writeFile(rootReal, relPath, content, { createDirs = true } = {}
   return { path: relPath, size, bytes: Buffer.byteLength(content, 'utf8') };
 }
 
+/** Apply a prevalidated staging import. Callers must authorize the complete batch first. */
+export function applyWorkspaceChanges(rootReal, changes) {
+  if (!Array.isArray(changes) || changes.length > 500) fail('INVALID_CHANGES', 'Workspace import needs a bounded changes array');
+  const results = [];
+  for (const change of changes) {
+    if (change?.action === 'write') {
+      results.push({ action: 'write', ...writeFile(rootReal, change.path, change.content) });
+      continue;
+    }
+    if (change?.action !== 'delete') fail('INVALID_CHANGES', 'Workspace import action must be write or delete');
+    const resolved = resolveInside(rootReal, change.path, { forWrite: true });
+    let stat;
+    try { stat = fs.lstatSync(resolved.absolute); }
+    catch (error) { fail('FILE_NOT_FOUND', `Delete target does not exist: ${change.path} (${error?.code ?? error})`); }
+    if (!stat.isFile() || stat.isSymbolicLink()) fail('DELETE_TARGET_INVALID', 'Workspace import can delete regular files only');
+    try { fs.unlinkSync(resolved.absolute); }
+    catch (error) { fail('DELETE_FAILED', `Unable to delete Workspace file: ${change.path} (${error?.code ?? error})`); }
+    results.push({ action: 'delete', path: change.path });
+  }
+  return { changes: results };
+}
+
 // ── 文件搜索 ────────────────────────────────────────────────────────────────
 
 function globToRegExp(glob) {

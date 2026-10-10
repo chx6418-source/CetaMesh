@@ -1,7 +1,7 @@
 import { OWNER_ACTOR, capabilityError } from '../capability/types.js';
 
 /** Smart decisions are consumed here; authority is always the trusted Desktop Owner. */
-export function createDesktopPlatformRuntime({ capabilityService, workspaceService, taskRuntime, agentBroker, legacyModel }) {
+export function createDesktopPlatformRuntime({ capabilityService, workspaceService, taskRuntime, agentBroker, continuityRuntime, legacyModel }) {
   async function route({ decision, record, text }) {
     if (decision.agentIntent) {
       const workspaceId = record.config.workspaceId || (await workspaceService.execute({ method: 'workspace.list' })).activeId;
@@ -17,6 +17,22 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
         record.taskId = task.id;
       }
       const provider = record.config.agentProvider && record.config.agentProvider !== 'none' ? record.config.agentProvider : 'cetamesh';
+      if (task.currentAgent && task.currentAgent.provider !== provider) {
+        if (typeof continuityRuntime?.rollover !== 'function') {
+          throw capabilityError('AGENT_PROVIDER_SWITCH_REQUIRES_CONTINUITY', 'Changing Agent Provider on an existing Task requires Continuity Fresh Session');
+        }
+        const rollover = await continuityRuntime.rollover({
+          taskId: task.id,
+          targetProvider: provider,
+          reason: 'agent-provider-switch'
+        });
+        const nextAgent = rollover?.to;
+        if (!nextAgent?.sessionId || nextAgent.provider !== provider) {
+          throw capabilityError('PROVIDER_ERROR', 'Continuity did not create the selected Agent Provider session');
+        }
+        await agentBroker.send({ provider, sessionId: nextAgent.sessionId, content: text });
+        return { kind: 'agent', taskId: task.id, workspaceId, provider, sessionId: nextAgent.sessionId, accepted: true, continued: true };
+      }
       // Smart Project 的 test.run 语义（v2 final security）：
       //   Grant（此处显式传入，含 test.run）= Agent 可以"请求"测试；
       //   执行 = 仍需 Owner Approve Once（test.run risk=high → 审批必经）。
