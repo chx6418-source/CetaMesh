@@ -15,6 +15,18 @@ import { capabilityError } from './types.js';
 
 const TARGET_KINDS = Object.freeze(['group', 'private']);
 const TEXT_MAX_CHARS = 8000;
+const emptyInput = { type: 'object', properties: {}, required: [], additionalProperties: false };
+const channelSendInput = {
+  type: 'object',
+  properties: {
+    channelId: { type: 'string', description: 'Registered Channel Adapter id.' },
+    kind: { type: 'string', enum: ['group', 'private'], description: 'Allowed target kind.' },
+    id: { type: 'string', description: 'Target id from the configured allowlist.' },
+    text: { type: 'string', description: 'Message text to send.' }
+  },
+  required: ['kind', 'id', 'text'],
+  additionalProperties: false
+};
 
 function isAllowedTarget(config, kind, id) {
   const allow = config?.allow;
@@ -46,14 +58,21 @@ export function registerChannelMeshCapabilities({
   if (channelService) {
     broker.register({
       id: 'channel.status', permission: 'log', provider: 'channel', risk: 'low',
+      description: 'List registered communication Channels and their status.',
+      inputSchema: emptyInput,
       execute: () => channelService.execute({ method: 'channel.list' })
     });
     broker.register({
       id: 'channel.declarations', permission: 'log', provider: 'channel', risk: 'low',
+      description: 'Read the registered Channel capability declarations.',
+      inputSchema: emptyInput,
       execute: () => ({ declarations: channelService.declarations, independence: channelService.registry.independence() })
     });
     broker.register({
       id: 'channel.send', permission: 'message.send', provider: 'channel', risk: 'high',
+      available: typeof sendImpl === 'function' && typeof isTargetAllowed === 'function',
+      description: 'Send a message to an explicitly allowlisted Channel target. Owner approval is required.',
+      inputSchema: channelSendInput,
       validate(request) {
         const input = request.input ?? {};
         const channelId = String(input.channelId ?? 'qq').trim();
@@ -98,10 +117,14 @@ export function registerChannelMeshCapabilities({
   if (meshService) {
     broker.register({
       id: 'mesh.status', permission: 'log', provider: 'mesh', risk: 'low',
+      description: 'Read the current CetaMesh Device Mesh status.',
+      inputSchema: emptyInput,
       execute: () => meshService.execute({ method: 'mesh.status' })
     });
     broker.register({
       id: 'mesh.capabilities', permission: 'log', provider: 'mesh', risk: 'low',
+      description: 'Read the current Device Mesh capability manifest.',
+      inputSchema: emptyInput,
       execute: () => meshService.execute({ method: 'mesh.manifest' })
     });
   }

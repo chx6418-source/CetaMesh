@@ -419,7 +419,7 @@ function abortableSseFetch() {
 }
 
 /** 组装带 Model Runtime / Router / Agent 的完整 chat-service（全 fixture，不联网不碰 DSH）。 */
-function makeFullService({ withKey = true, fetchImpl, router = true, api = dshDownApi(), agent = false, stateDir: overrideDir } = {}) {
+function makeFullService({ withKey = true, fetchImpl, router = true, api = dshDownApi(), agent = false, stateDir: overrideDir, buildProductContext } = {}) {
   const dir = overrideDir ?? path.join(stateDir, 's1-' + (++caseSeq));
   fs.mkdirSync(dir, { recursive: true });
   const secrets = createProviderSecrets({ root: dir });
@@ -457,6 +457,7 @@ function makeFullService({ withKey = true, fetchImpl, router = true, api = dshDo
     agentExecute,
     modelRuntime,
     router: routerService,
+    buildProductContext,
     defaults: { provider: 'deepseek-official', model: 'deepseek-flash', reasoningEffort: 'max' },
     stateDir: dir
   });
@@ -538,7 +539,14 @@ function makeFullService({ withKey = true, fetchImpl, router = true, api = dshDo
 // ── 15. Smart 路由：project 产生 agent-intent（只记录不执行）；你好 → simple ───
 {
   const f = sseFetch();
-  const { service } = makeFullService({ fetchImpl: f });
+  const contextCalls = [];
+  const { service } = makeFullService({
+    fetchImpl: f,
+    buildProductContext: async (request) => {
+      contextCalls.push(request);
+      return JSON.stringify({ marker: 'ephemeral-product-context', call: contextCalls.length });
+    }
+  });
   const session = await service.execute({ method: 'chat.sessions.create', params: {} });
   await service.execute({ method: 'chat.config.set', params: { id: session.id, config: { mode: 'smart' } } });
   // v2 hardening：Model 通道 send 在首个流事件后返回，回合落定后读历史（同真实 UI）。
@@ -558,6 +566,14 @@ function makeFullService({ withKey = true, fetchImpl, router = true, api = dshDo
   assert.equal(routing.agentIntent, true);
   assert.equal(routing.resolvedRoute, 'model', 'v1 无 Agent Broker：意图记录，回合仍由 Model 执行');
   assert.equal(routing.fallbackReason, 'agent-broker-not-available');
+  assert.equal(contextCalls.length, 1, 'Smart Router 完成后为 Model 回合解析 Context');
+  assert.equal(contextCalls[0].routing.class, 'project');
+  assert.equal(contextCalls[0].routing.resolvedRoute, 'model');
+  assert.equal(contextCalls[0].record.taskId, null, 'Model fallback 不会创建 Task');
+  const modelRequest = f.requests.find((request) => request.body?.messages?.some((message) => message.role === 'user'));
+  assert.match(modelRequest.body.messages[0].content, /You are operating inside CetaMesh/);
+  assert.match(modelRequest.body.messages[1].content, /ephemeral-product-context/);
+  assert.equal(JSON.stringify(history).includes('ephemeral-product-context'), false, 'Product Context 不落入 Chat 历史');
   assert.equal(routing.costPolicy, 'balanced');
   assert.equal(history.messages[1].text, '你好，独立世界', '回合适配完成');
   // 普通聊天 → simple → model，无 agent 意图
@@ -565,6 +581,8 @@ function makeFullService({ withKey = true, fetchImpl, router = true, api = dshDo
   await waitForIdle(session.id);
   history = await service.execute({ method: 'chat.history', params: { id: session.id } });
   const simple = history.messages[3].routing;
+  assert.equal(contextCalls.length, 2);
+  assert.equal(contextCalls[1].routing.class, 'simple');
   assert.equal(simple.class, 'simple');
   assert.equal(simple.agentIntent, false);
   assert.equal(simple.fallbackReason, null);

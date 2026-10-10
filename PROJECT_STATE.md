@@ -94,6 +94,8 @@
 
 ## Active Work (none)
 
+- Product Intelligence Runtime / Product Context tool-calling follow-up is merged into local `main` through feature commit `b8c0cbc`; merged-tree `npm test` reported 73 PASS, 0 FAIL, 9 NOT_RUN_ENVIRONMENT (2026-10-10). Not pushed per Owner instruction.
+
 - 反馈功能修正（2026-10-10）**已完成并在 Owner 确认后快进合并**到本地 `main`（`cc201ee..bf12184`）；
   工作分支 `codex/session-20261010-feedback-links` 与隔离 worktree `.worktrees/2026-10-10-feedback-links` 已删除。
   **未 push**（等 Owner 指示）。按产品决定**移除软件内反馈收集**：

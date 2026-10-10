@@ -20,7 +20,7 @@ BEGIN
             VALUE "LegalCopyright", "GPL-3.0-only\0"
             VALUE "OriginalFilename", "WhaleBridge.exe\0"
             VALUE "ProductName", "CetaMesh Desktop\0"
-            VALUE "ProductVersion", "1.0.0-rc.1\0"
+            VALUE "ProductVersion", "1.0.0-rc.2\0"
         END
     END
     BLOCK "VarFileInfo"

@@ -101,10 +101,16 @@ export function createModelRuntimeService({ registry, secrets, log = () => {} } 
       })();
     }
     log(`Model Runtime 回合开始（provider=${provider.id} model=${effectiveModel}）`);
-    return provider.stream({ model: effectiveModel, messages, reasoning, signal });
+    return provider.stream({
+      model: effectiveModel,
+      requestedModel: typeof model === 'string' && model.trim() ? model.trim() : 'provider-default',
+      messages,
+      reasoning,
+      signal
+    });
   }
 
-  async function chat({ providerId, model, messages, reasoning, signal }) {
+  async function chat({ providerId, model, messages, reasoning, signal, tools, toolChoice }) {
     const provider = resolveProvider(providerId);
     const effectiveModel = typeof model === 'string' && model.trim() ? model.trim() : provider.defaultModel;
     if (!effectiveModel) {
@@ -113,7 +119,17 @@ export function createModelRuntimeService({ registry, secrets, log = () => {} } 
         `Model Provider「${provider.label}」未指定模型且没有默认模型`
       );
     }
-    return provider.chat({ model: effectiveModel, messages, reasoning, signal });
+    if (Array.isArray(tools) && tools.length && provider.supportsTools !== true) {
+      throw modelRuntimeError('MODEL_TOOL_CALLING_UNSUPPORTED', 'This Model Provider does not support structured tool calling');
+    }
+    const response = await provider.chat({ model: effectiveModel, messages, reasoning, signal, tools, toolChoice });
+    return {
+      ...(response && typeof response === 'object' ? response : { text: String(response ?? '') }),
+      providerId: provider.id,
+      requestedModel: typeof model === 'string' && model.trim() ? model.trim() : 'provider-default',
+      resolvedModel: typeof response?.model === 'string' && response.model.trim() ? response.model.trim() : null,
+      toolCalling: provider.supportsTools === true ? 'supported' : 'unsupported'
+    };
   }
 
   // IPC 家族命名说明：控制面早已有 model.defaults.* / model.catalog.*（DSH 模型管理，
@@ -130,6 +146,9 @@ export function createModelRuntimeService({ registry, secrets, log = () => {} } 
     defaultProviderId,
     listProviders,
     hasKey,
+    supportsToolCalling(providerId) {
+      return resolveProvider(providerId).supportsTools === true;
+    },
     listModels,
     health,
     stream,

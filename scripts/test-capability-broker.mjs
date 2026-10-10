@@ -80,7 +80,7 @@ try {
    'Agent cached diff must omit protected paths');
  assert.equal(fs.existsSync(marker),false,'Brokered cached diff must not execute Git clean filters');
  await deny(svc.broker.execute({actor,taskId:task.id,workspaceId:ws,capability:'filesystem.write',input:{path:'../escape',content:'bad'}}),'PATH_OUTSIDE_WORKSPACE');
- await deny(svc.broker.execute({actor,taskId:task.id,workspaceId:'outside',capability:'filesystem.read',input:{path:'a.js'}}),'WORKSPACE_NOT_AUTHORIZED');
+ await deny(svc.broker.execute({actor,taskId:task.id,workspaceId:'outside',capability:'filesystem.read',input:{path:'a.js'}}),'WORKSPACE_RECONCILIATION_REQUIRED');
  await deny(svc.broker.execute({actor:{kind:'external',id:'qq:1'},workspaceId:ws,capability:'filesystem.read',input:{path:'a.js'}}),'PERMISSION_DENIED');
  const userRead=await svc.execute({method:'capability.execute',params:{actor:{kind:'external',id:'evil'},capability:'filesystem.read',workspaceId:ws,input:{path:'a.js'}}});
  assert.equal(userRead.result.content,'hello'); // trusted desktop transport binds owner, never payload actor

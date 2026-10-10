@@ -1,6 +1,6 @@
 # CetaMesh Desktop v1 — Build, Test and Release
 
-> Applies to Windows x64. The release candidate `1.0.0-rc.1` was produced with these steps.
+> Applies to Windows x64. The prior release candidate was `1.0.0-rc.1`; the current integration candidate is `1.0.0-rc.2`.
 
 ## Prerequisites
 

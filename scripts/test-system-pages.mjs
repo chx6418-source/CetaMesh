@@ -58,10 +58,10 @@ function makeManifest(over = {}) {
   const base = {
     schemaVersion: UPDATE_MANIFEST_VERSION,
     channel: 'stable',
-    version: '1.0.0-rc.2',
+    version: '1.0.0',
     releasedAt: '2026-10-04T00:00:00Z',
     notes: ['修复已知问题', '新增 About 与更新页面'],
-    downloadUrl: 'https://github.com/chx6418-source/whalebridge/releases/download/v1.0.0-rc.2/CetaMesh-Setup.exe',
+    downloadUrl: 'https://github.com/chx6418-source/whalebridge/releases/download/v1.0.0/CetaMesh-Setup.exe',
     sha256: 'a'.repeat(64),
     ...over
   };

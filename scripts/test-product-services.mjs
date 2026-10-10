@@ -44,6 +44,11 @@ const jsonFetch = (status, body = '{}') => async () => ({ ok: status >= 200 && s
 
 const repoRoot = path.resolve(import.meta.dirname, '..');
 const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf8'));
+const newerUpdateVersion = (() => {
+  const match = String(pkg.version).match(/^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/);
+  if (!match) throw new Error('package.json version must be semantic for update checks');
+  return `${match[1]}.${match[2]}.${Number(match[3]) + 1}`;
+})();
 const workDirs = [];
 const originalDataDir = process.env.WHALEBRIDGE_DATA_DIR;
 const track = (dir) => { workDirs.push(dir); return dir; };
@@ -126,11 +131,11 @@ try {
   const manifest = {
     schemaVersion: UPDATE_MANIFEST_VERSION,
     channel: 'stable',
-    version: '1.0.0-rc.2',
+    version: newerUpdateVersion,
     title: '<b>CetaMesh 1.0 RC2</b>',
     publishedAt: '2026-10-09T00:00:00Z',
     notes: ['<script>alert(1)</script>安全渲染', '修复更新检查'],
-    downloadUrl: 'https://github.com/chx6418-source/whalebridge/releases/download/v1.0.0-rc.2/CetaMesh-Setup.exe',
+    downloadUrl: `https://github.com/chx6418-source/whalebridge/releases/download/v${newerUpdateVersion}/CetaMesh-Setup.exe`,
     sha256: 'a'.repeat(64)
   };
   manifest.signature = signManifest(manifest, privateKeyPem);
@@ -160,7 +165,7 @@ try {
 
   const aboutService = createAboutService({ rootDir: repoRoot, notesCache });
   const aboutUpdate = await aboutService.execute({ method: 'about.update', params: {} });
-  equal('About 离线显示最近一次更新公告', [aboutUpdate.update.cacheAvailable, aboutUpdate.update.announcement.version], [true, '1.0.0-rc.2']);
+  equal('About 离线显示最近一次更新公告', [aboutUpdate.update.cacheAvailable, aboutUpdate.update.announcement.version], [true, newerUpdateVersion]);
   equal('About 更新区块含当前版本', aboutUpdate.update.currentVersion, pkg.version);
   equal('About 更新状态为有新版本', aboutUpdate.update.status, 'update_available');
   check('About 离线也能给出下载源', aboutUpdate.update.sources.length === 2);

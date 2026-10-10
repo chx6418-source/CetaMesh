@@ -10,7 +10,7 @@ import { createWorkshopService } from '../workshop/index.js';
 import { createManagedAgentProvider } from '../agent/managed-agent-provider.js';
 import { searchWeb } from '../mcp-web-search-safe.js';
 import { createProviderSecrets } from '../providers/secrets.js';
-import { createModelProviderRegistry, createModelRuntimeService, createOpenAiCompatibleModelProvider } from '../model/index.js';
+import { createModelProviderRegistry, createModelRuntimeService, createOpenAiCompatibleModelProvider, createToolExecutionCoordinator } from '../model/index.js';
 import { createRouterService } from '../router/index.js';
 import { createMemoryService } from '../memory/service.js';
 import { createWorkspaceService } from '../workspace/index.js';
@@ -31,6 +31,8 @@ import { createProductService } from '../product/service.js';
 import { createErrorRegistry } from '../product/error-registry.js';
 import { buildDiagnostics } from '../product/diagnostics.js';
 import { loadReleaseConfig } from '../product/release-config.js';
+import { createProductContextService } from '../context/service.js';
+import { OWNER_ACTOR } from '../capability/types.js';
 
 const DEFAULT_DSH_CONFIG = Object.freeze({
   provider: 'deepseek-official',
@@ -60,6 +62,7 @@ export function createCetaMeshServices(options = {}) {
         label: 'DeepSeek 官方',
         baseUrl: 'https://api.deepseek.com',
         defaultModel: 'deepseek-chat',
+        supportsTools: true,
         secrets: providerSecrets,
         supportsStreamOptions: true,
         log
@@ -69,6 +72,7 @@ export function createCetaMeshServices(options = {}) {
         label: 'OpenAI',
         baseUrl: 'https://api.openai.com/v1',
         defaultModel: 'gpt-4o-mini',
+        supportsTools: true,
         secrets: providerSecrets,
         reasoningParam: 'reasoning_effort',
         supportsStreamOptions: true,
@@ -85,12 +89,33 @@ export function createCetaMeshServices(options = {}) {
     ]
   });
   const modelRuntime = createModelRuntimeService({ registry: modelRegistry, secrets: providerSecrets, log });
-  const managedAgent = createManagedAgentProvider({
+  // Chat and Managed Agent are composed before all context sources exist; the callback is bound later.
+  let productContextService = null;
+  let capabilityService = null;
+  let managedAgent = null;
+  let toolExecutionCoordinator = null;
+  const toolExecutionProxy = {
+    run: request => {
+      if (!toolExecutionCoordinator) throw new Error('Model tool execution is unavailable');
+      return toolExecutionCoordinator.run(request);
+    },
+    resumeApproval: request => {
+      if (!toolExecutionCoordinator) throw new Error('Model tool execution is unavailable');
+      return toolExecutionCoordinator.resumeApproval(request);
+    },
+    pendingTarget: approvalId => toolExecutionCoordinator?.pendingTarget(approvalId) ?? null
+  };
+  managedAgent = createManagedAgentProvider({
     modelRuntime,
+    toolExecutionCoordinator: toolExecutionProxy,
+    buildProductTurnContext: request => productContextService?.buildForAgentTurn(request),
+    requireProductContext: true,
     capabilityExecutor: request => capabilityService.broker.execute(request),
     taskPrincipalResolver: ({ provider, sessionId }) => {
       const task = taskService.runtime.findByAgent({ provider, sessionId });
-      return task ? { taskId: task.id, workspaceId: task.workspaceId, actor: capabilityService.principalForTask(task.id) } : null;
+      return task ? { taskId: task.id, expectedWorkspaceId: task.workspaceId,
+        workspaceId: managedAgent.executionWorkspaceId(sessionId) ?? task.workspaceId,
+        actor: capabilityService.principalForTask(task.id) } : null;
     },
     onTurnEnd: payload => agentBroker.reportTurnEnd(payload)
   });
@@ -106,7 +131,11 @@ export function createCetaMeshServices(options = {}) {
     agentProviders: agentService.listProviders(),
     agentExecute: command => agentService.execute(command),
     modelRuntime,
+    toolExecutionCoordinator: toolExecutionProxy,
+    buildProductTurnContext: request => productContextService?.buildForChatTurn(request),
+    requireProductContext: true,
     router: routerService,
+    buildProductContext: request => productContextService?.buildForChat(request),
     platformRoute: request => platformRuntime.route(request),
     agentFollow: request => agentBroker.follow(request),
     defaults: dshDefaults,
@@ -128,19 +157,33 @@ export function createCetaMeshServices(options = {}) {
     stateDir,
     audit: event => log('Workspace ' + event.action + '（' + (event.workspaceId ?? 'none') + '）')
   });
-  const capabilityService = createCapabilityService({
+  capabilityService = createCapabilityService({
     stateDir,
     workspaceService,
     memoryService,
     taskRuntime: taskService.runtime,
     agentBroker,
     bindAgentSession: managedAgent.bindSession,
+    resumeAgentApproval: managedAgent.resumeLegacyApproval,
     searchImpl: searchWeb,
     audit: event => log('Capability ' + event.capability + ' ' + event.status),
     isolatedRunner: createIsolatedTestRunner({
       resolveWorkspace: async workspaceId => workspaceService.describeWorkspace(workspaceId),
       log
     })
+  });
+  toolExecutionCoordinator = createToolExecutionCoordinator({
+    modelRuntime,
+    capabilityBroker: capabilityService.broker,
+    stateDir,
+    actorResolver: ({ actorKind, actorId, scope }) => {
+      if (actorKind === 'owner') return OWNER_ACTOR;
+      if (actorKind === 'agent') {
+        const actor = capabilityService.principalForTask(scope?.taskId)?.actor;
+        return actor?.id === actorId ? actor : null;
+      }
+      return null;
+    }
   });
   const platformRuntime = createDesktopPlatformRuntime({
     capabilityService,
@@ -176,6 +219,8 @@ export function createCetaMeshServices(options = {}) {
     stateDir,
     agentBroker,
     reconciler: continuityReconciler,
+    workspaceService,
+    capabilityService,
     listPendingApprovals: ({ taskId }) => capabilityService.broker.approvals
       .list()
       .filter(row => row.request?.taskId === taskId)
@@ -203,6 +248,23 @@ export function createCetaMeshServices(options = {}) {
   // 发行配置 release-config.json 与"最近错误码"是 About 与产品服务共用的事实源，各建一份。
   const releaseConfig = loadReleaseConfig({ rootDir: sourceRoot });
   const errorRegistry = createErrorRegistry();
+  productContextService = createProductContextService({
+    taskRuntime: taskService.runtime,
+    workspaceService,
+    memoryService,
+    capabilityService,
+    extensionService,
+    agentBroker,
+    modelRuntime
+  });
+
+  capabilityService.setApprovalDecisionListener(async decision => {
+    const target = toolExecutionCoordinator.pendingTarget(decision.approvalId);
+    if (target?.kind === 'chat') return chatService.resumeApproval(decision);
+    if (target?.kind === 'agent') return managedAgent.resumeApproval(decision);
+    return null;
+  });
+
   const settingsService = createSettingsService({ stateDir });
   const notesCache = createNotesCache({ stateDir });
 
@@ -269,6 +331,7 @@ export function createCetaMeshServices(options = {}) {
     managedAgent,
     modelRegistry,
     modelRuntime,
+    productContextService,
     routerService,
     chatService,
     memoryService,

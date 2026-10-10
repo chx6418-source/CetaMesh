@@ -79,9 +79,11 @@ const REGISTRY = {
   'test-memory-link.mjs': { category: 'runtime' },
   'test-state-retention.mjs': { category: 'runtime' },
   'test-task-runtime.mjs': { category: 'runtime' },
+  'test-product-context.mjs': { category: 'runtime' },
   'test-continuity-rollover.mjs': { category: 'runtime' },
   'test-continuity-auto-rollover.mjs': { category: 'runtime' },
   'test-model-runtime.mjs': { category: 'runtime' },
+  'test-model-tool-calling.mjs': { category: 'runtime' },
   'test-smart-router.mjs': { category: 'runtime' },
   'test-standalone-model-path.mjs': { category: 'runtime' },
   'test-dsh-model-selection.mjs': { category: 'runtime' },
@@ -175,12 +177,13 @@ async function probeAvailability() {
   } catch { /* 默认 3000 */ }
   const consolePort = Number(cfg.consolePort) || 3100;
   const exists = (relative) => fs.existsSync(path.join(ROOT, relative));
+  const gatewayConfigPresent = fs.existsSync(path.join(ROOT, 'config.json'));
   availabilityCache = {
     'shell-debug': exists(path.join('desktop-shell', 'target', 'debug', 'whalebridge-desktop.exe')),
     'core-dist': fs.existsSync(path.join(CORE_DIST_DIR, 'WhaleBridgeCore.exe')),
     'release-dist': exists(path.join('dist', 'app', 'WhaleBridge.exe')),
     network: process.env.WHALEBRIDGE_TEST_NETWORK === '1',
-    gateway: await probeTcp(gatewayPort),
+    gateway: gatewayConfigPresent && await probeTcp(gatewayPort),
     // A live TCP listener may be the user’s real desktop bridge; this suite mutates roles/allowlists and sends a test QQ message.
     'legacy-bridge': isLegacyBridgeTestOptedIn() && await probeTcp(consolePort),
     cargo: spawnSync('cargo', ['--version'], { timeout: 20000 }).status === 0

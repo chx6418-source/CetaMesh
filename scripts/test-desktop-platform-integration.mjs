@@ -46,7 +46,8 @@ try {
     onTurnEnd: async (payload) => { observations.push(payload); await agentBroker.reportTurnEnd(payload); }
   });
   agentBroker = createAgentBroker({ registry: createAgentProviderRegistry({ providers: [managed.provider] }) });
-  capabilities = createCapabilityService({ stateDir, workspaceService, taskRuntime, agentBroker, bindAgentSession: managed.bindSession });
+  capabilities = createCapabilityService({ stateDir, workspaceService, taskRuntime, agentBroker, bindAgentSession: managed.bindSession,
+    resumeAgentApproval: managed.resumeLegacyApproval });
   const continuity = createContinuityService({ stateDir, taskRuntime, agentBroker,
     canRollover: ({ taskId }) => taskRuntime.get({ id: taskId }).task.status === 'running' });
   agentBroker.onTurnEnd((payload) => continuity.runtime.observeAgentTurn(payload));
@@ -87,7 +88,7 @@ try {
   const agent = capabilities.principalForTask(task.id);
   await rejected(() => capabilities.broker.execute({ actor: agent, taskId: task.id, workspaceId: task.workspaceId, capability: 'filesystem.read', input: { path: '../outside.txt' } }), 'PATH_OUTSIDE_WORKSPACE');
   const secondWorkspace = (await workspaceService.execute({ method: 'workspace.create', params: { name: 'Other project', root: path.join(fixture, 'other-project'), createIfMissing: true } })).workspace;
-  await rejected(() => capabilities.broker.execute({ actor: agent, taskId: task.id, workspaceId: secondWorkspace.id, capability: 'filesystem.read', input: { path: 'secret.txt' } }), 'WORKSPACE_NOT_AUTHORIZED');
+  await rejected(() => capabilities.broker.execute({ actor: agent, taskId: task.id, workspaceId: secondWorkspace.id, capability: 'filesystem.read', input: { path: 'secret.txt' } }), 'WORKSPACE_RECONCILIATION_REQUIRED');
   await rejected(() => capabilities.broker.execute({ actor: agent, taskId: task.id, workspaceId: task.workspaceId, capability: 'memory.read', input: {} }), 'UNKNOWN_CAPABILITY');
   // Restart creates a new provider with no in-memory sessions, preserving disk state.
   const preRestartSession = task.currentAgent.sessionId;
@@ -114,7 +115,8 @@ try {
     onTurnEnd: (payload) => { restartObservations.push(payload); return agentBroker.reportTurnEnd(payload); }
   });
   agentBroker = createAgentBroker({ registry: createAgentProviderRegistry({ providers: [managed.provider] }) });
-  capabilities = createCapabilityService({ stateDir, workspaceService, taskRuntime, agentBroker, bindAgentSession: managed.bindSession });
+  capabilities = createCapabilityService({ stateDir, workspaceService, taskRuntime, agentBroker, bindAgentSession: managed.bindSession,
+    resumeAgentApproval: managed.resumeLegacyApproval });
   workshop = createWorkshopService({ stateDir, workspaceService, taskRuntime, capabilityBroker: capabilities.broker });
   const recovered = (await workshop.executeOwner({ method: 'workshop.proposal.retry', params: { id: proposal.id } })).proposal;
   check(recovered.status, 'active');

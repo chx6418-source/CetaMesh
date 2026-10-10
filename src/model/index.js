@@ -9,3 +9,4 @@ export { defineModelProvider, modelStreamEvent, MODEL_STREAM_PROTOCOL, MODEL_PRO
 export { createModelProviderRegistry } from './registry.js';
 export { createOpenAiCompatibleModelProvider } from './providers/openai-compatible.js';
 export { createModelRuntimeService } from './service.js';
+export { createToolExecutionCoordinator } from './tool-execution.js';

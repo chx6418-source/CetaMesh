@@ -10,6 +10,7 @@
 //   - 所有错误文本在源头 scrub（Key 字符串出现即替换为 ***）；
 //   - 事件与错误都不回显请求头。
 
+import crypto from 'node:crypto';
 import {
   modelRuntimeError,
   mapReasoningEffort,
@@ -43,6 +44,7 @@ export function createOpenAiCompatibleModelProvider({
   fetchImpl = fetch,
   reasoningParam = null,
   supportsStreamOptions = false,
+  supportsTools = false,
   log = () => {}
 } = {}) {
   if (!secrets || typeof secrets.raw !== 'function') {
@@ -96,7 +98,50 @@ export function createOpenAiCompatibleModelProvider({
     return modelRuntimeError(MODEL_ERROR_CODES.MODEL_PROVIDER_ERROR, message);
   }
 
-  function buildBody({ model, messages, reasoning, stream }) {
+  function capabilityToolName(id) {
+    const value = String(id ?? '');
+    if (!value || value.length > 128) {
+      throw modelRuntimeError('MODEL_INVALID_TOOL_SCHEMA', 'Capability id is missing or too long');
+    }
+    const safe = value.replace(/[^A-Za-z0-9_-]/g, '_');
+    if (safe.length <= 60) return 'cap_' + safe;
+    const digest = crypto.createHash('sha256').update(value).digest('hex').slice(0, 8);
+    return 'cap_' + safe.slice(0, 50) + '_' + digest;
+  }
+
+  function buildToolSchemas(tools) {
+    const names = new Map();
+    const byName = new Map();
+    for (const descriptor of Array.isArray(tools) ? tools : []) {
+      const id = typeof descriptor?.id === 'string' ? descriptor.id.trim() : '';
+      const description = typeof descriptor?.description === 'string' ? descriptor.description.trim() : '';
+      const parameters = descriptor?.inputSchema;
+      if (!id || !description || !parameters || typeof parameters !== 'object' || Array.isArray(parameters)) {
+        throw modelRuntimeError('MODEL_INVALID_TOOL_SCHEMA', 'Capability tool requires id, description, and an object input schema');
+      }
+      const name = capabilityToolName(id);
+      const previous = names.get(name);
+      if (previous && previous !== id) {
+        throw modelRuntimeError('MODEL_INVALID_TOOL_SCHEMA', 'Capability ids collide after Provider tool-name mapping');
+      }
+      names.set(name, id);
+      byName.set(name, id);
+    }
+    const schemas = [...names.entries()].map(([name, id]) => {
+      const descriptor = tools.find((item) => item.id === id);
+      return {
+        type: 'function',
+        function: {
+          name,
+          description: descriptor.description,
+          parameters: descriptor.inputSchema
+        }
+      };
+    });
+    return { schemas, byName };
+  }
+
+  function buildBody({ model, messages, reasoning, stream, tools = [], toolChoice }) {
     if (typeof model !== 'string' || !model.trim()) {
       throw modelRuntimeError(
         MODEL_ERROR_CODES.MODEL_NO_MODEL,
@@ -107,6 +152,15 @@ export function createOpenAiCompatibleModelProvider({
       throw modelRuntimeError(MODEL_ERROR_CODES.INVALID_PARAMS, 'messages 不能为空');
     }
     const body = { model: model.trim(), messages, stream: Boolean(stream) };
+    if (Array.isArray(tools) && tools.length) {
+      if (!supportsTools) {
+        throw modelRuntimeError('MODEL_TOOL_CALLING_UNSUPPORTED', 'This Model Provider does not support structured tool calling');
+      }
+      body.tools = buildToolSchemas(tools).schemas;
+      body.tool_choice = toolChoice === 'none' ? 'none' : 'auto';
+    } else if (toolChoice === 'none' && supportsTools) {
+      body.tool_choice = 'none';
+    }
     const effort = reasoningParam ? mapReasoningEffort(reasoning) : null;
     if (effort) body[reasoningParam] = effort;
     if (stream && supportsStreamOptions) body.stream_options = { include_usage: true };
@@ -142,6 +196,7 @@ export function createOpenAiCompatibleModelProvider({
     id,
     label,
     defaultModel,
+    supportsTools,
     methods: {
       async listModels({ signal } = {}) {
         const { apiKey, base } = resolveCredentials();
@@ -177,6 +232,7 @@ export function createOpenAiCompatibleModelProvider({
 
       async chat(options) {
         const body = buildBody({ ...options, stream: false });
+        const { byName } = buildToolSchemas(options?.tools);
         const { response } = await request('/chat/completions', {
           body,
           signal: options?.signal,
@@ -197,8 +253,17 @@ export function createOpenAiCompatibleModelProvider({
             : '';
         return {
           text,
+          toolCalls: (Array.isArray(choice?.message?.tool_calls) ? choice.message.tool_calls : []).map((call) => {
+            const name = String(call?.function?.name ?? '');
+            return {
+              id: typeof call?.id === 'string' ? call.id : '',
+              name,
+              ...(byName.has(name) ? { capabilityId: byName.get(name) } : {}),
+              arguments: typeof call?.function?.arguments === 'string' ? call.function.arguments : ''
+            };
+          }),
           usage: payload?.usage && typeof payload.usage === 'object' ? payload.usage : null,
-          model: String(payload?.model ?? body.model),
+          model: typeof payload?.model === 'string' && payload.model.trim() ? payload.model.trim() : null,
           finishReason: choice?.finish_reason ?? null
         };
       },
@@ -214,7 +279,7 @@ export function createOpenAiCompatibleModelProvider({
         let fullText = '';
         let usage = null;
         let finished = false;
-        let streamModel = body.model;
+        let streamModel = null;
         /** 处理一行 SSE：返回 true 表示遇到 [DONE]，流结束。 */
         const consumeLine = (line) => {
           if (!line.startsWith('data:')) return false;
@@ -243,7 +308,11 @@ export function createOpenAiCompatibleModelProvider({
           return false;
         };
         let pendingEvents = [];
-        yield modelStreamEvent('turn/start', {});
+        yield modelStreamEvent('turn/start', {
+          providerId: id,
+          requestedModel: options?.requestedModel ?? 'provider-default',
+          resolvedModel: null
+        });
         // abort 竞争：undici 的 signal 只保证到响应头为止；响应体 reader.read() 在
         // 挂流（服务端停发数据）上会永久阻塞且不感知 abort。这里显式把 abort 注入
         // 读取循环：竞争命中即 cancel reader（关闭 socket）并按 aborted 收尾。
@@ -290,7 +359,10 @@ export function createOpenAiCompatibleModelProvider({
         yield modelStreamEvent('assistant/message', {
           message: { content: [{ type: 'text', text: fullText }], ...(usage ? { usage } : {}) }
         });
-        yield modelStreamEvent('turn/end', { reason: { kind: 'completed', usage } });
+        yield modelStreamEvent('turn/end', { providerId: id,
+          requestedModel: options?.requestedModel ?? 'provider-default',
+          resolvedModel: streamModel,
+          reason: { kind: 'completed', usage } });
       }
     }
   });

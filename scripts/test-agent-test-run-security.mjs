@@ -189,7 +189,7 @@ fs.writeFileSync(path.join(root, 'src.txt'), 'ok');
   const agent = svc.grantTask(task.id, { capabilities: ['test.run'] }); // grant 绑定 task.workspaceId
   await assert.rejects(
     () => svc.broker.execute(agentReq(agent, task.id, other.workspace.id, 'test.run', { tool: 'npm', args: ['test'] })),
-    (e) => e.code === 'WORKSPACE_NOT_AUTHORIZED',
+    (e) => e.code === 'WORKSPACE_RECONCILIATION_REQUIRED',
     '审批（或请求）换 Workspace → 策略层直接拒绝'
   );
   ok('Workspace 变更：Task grant 绑定原工作区，跨工作区请求被拒');

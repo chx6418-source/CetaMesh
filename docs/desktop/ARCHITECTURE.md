@@ -1,6 +1,6 @@
 # CetaMesh Desktop v1 — Architecture and Red Lines
 
-> Status: Desktop v1 **Release Candidate** (`1.0.0-rc.1`). Authoritative evidence lives in
+> Status: Desktop v1 **Release Candidate** (`1.0.0-rc.2`). Authoritative evidence lives in
 > `PROJECT_STATE.md`; this document explains the shape and the invariants the code must keep.
 
 ## Product model

@@ -7,10 +7,15 @@ export function createCapabilityPolicy({resolveWorkspace,resolveTask}={}){
   const actor=request.actor;
   if(actor.kind==='external'||actor.kind==='device')throw capabilityError('PERMISSION_DENIED','External/device callers require a trusted restricted adapter');
   if(actor.kind!=='owner' && !actor.grants?.capabilities?.includes(entry.id))throw capabilityError('PERMISSION_DENIED',entry.id+' not granted');
+  if(request.taskId){
+   const task=resolveTask?.(request.taskId);
+   if(!task)throw capabilityError('TASK_NOT_AUTHORIZED','Assigned Task required');
+   if((task.workspaceId??null)!==(request.workspaceId??null))throw capabilityError('WORKSPACE_RECONCILIATION_REQUIRED','Task and execution Workspace do not match');
+  }
   if(actor.kind==='agent'){
    if(!request.taskId || !actor.grants?.taskIds?.includes(request.taskId))throw capabilityError('TASK_NOT_AUTHORIZED','Assigned task required');
    const task=resolveTask?.(request.taskId);
-   if(!task || (request.workspaceId && task.workspaceId!==request.workspaceId))throw capabilityError('WORKSPACE_NOT_AUTHORIZED','Task workspace mismatch');
+   if(!task)throw capabilityError('TASK_NOT_AUTHORIZED','Assigned Task required');
   }
   if(entry.workspace){
    if(!request.workspaceId)throw capabilityError('WORKSPACE_REQUIRED','Explicit workspace required');
