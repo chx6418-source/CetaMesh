@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>方案 02 · 指挥台（图标栏+上下文列）— CetaMesh UI 探索</title>
+<style>
+:root{
+  --bg:#1d2126; --rail:#171a1e; --panel:#22262c; --card:#282d34; --ink:#e6e9ec; --muted:#8b939c;
+  --accent:#5aa7c7; --accent-deep:#7fc0dc; --line:#31373f; --chip:#2c323a; --danger:#c77f6a;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{height:100%}
+body{font-family:"Segoe UI","Microsoft YaHei UI",sans-serif;background:var(--bg);color:var(--ink);font-size:14px;overflow:hidden}
+.app{display:flex;height:100vh}
+
+/* rail */
+.rail{width:56px;background:var(--rail);display:flex;flex-direction:column;align-items:center;padding:12px 0;gap:6px}
+.rail .logo{width:30px;height:30px;border-radius:9px;background:var(--accent);color:#10222b;font-weight:800;display:flex;align-items:center;justify-content:center;font-size:14px;margin-bottom:14px}
+.rail a{width:38px;height:38px;border-radius:10px;display:flex;align-items:center;justify-content:center;text-decoration:none}
+.rail a svg{width:18px;height:18px;stroke:var(--muted);fill:none;stroke-width:1.8}
+.rail a.on{background:var(--chip)}
+.rail a.on svg{stroke:var(--accent-deep)}
+.rail .sp{flex:1}
+.rail .foot{display:flex;flex-direction:column;gap:6px}
+
+/* context column */
+.ctx{width:236px;background:var(--panel);border-right:1px solid var(--line);display:flex;flex-direction:column;padding:16px 10px 10px}
+.ctx h3{font-size:15px;padding:0 8px 12px;display:flex;align-items:center}
+.ctx h3 svg{width:14px;height:14px;stroke:var(--muted);margin-left:auto}
+.newbtn{margin:0 6px 12px;border:1px solid var(--line);border-radius:9px;padding:8px 10px;font-size:13px;display:flex;gap:8px;align-items:center;background:var(--card)}
+.newbtn svg{width:14px;height:14px;stroke:var(--muted)}
+.grp{font-size:11px;color:var(--muted);padding:10px 8px 5px;letter-spacing:.05em}
+.sess{display:flex;align-items:center;gap:8px;padding:7px 9px;border-radius:8px;font-size:12.5px;color:var(--ink);text-decoration:none}
+.sess .ic{width:16px;height:16px;border-radius:5px;background:var(--chip);flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:9px;color:var(--muted)}
+.sess .tm{margin-left:auto;font-size:10.5px;color:var(--muted)}
+.sess.on{background:var(--chip)}
+.sess.on .ic{background:var(--accent);color:#10222b}
+
+.main{flex:1;display:flex;flex-direction:column;min-width:0}
+.view{display:none;flex:1;min-height:0}
+.view.on{display:flex;flex-direction:column}
+
+/* home */
+.home{flex:1;display:flex;flex-direction:column}
+.home.on{display:flex}
+.home-c{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:0 80px}
+.home-c h1{font-size:26px;font-weight:600;margin-bottom:14px}
+.home-c .sub{color:var(--muted);font-size:13.5px;margin-bottom:30px}
+.capline{display:flex;gap:8px;margin-bottom:26px}
+.capline .c{border:1px solid var(--line);background:var(--card);color:var(--muted);border-radius:8px;padding:6px 13px;font-size:12px}
+.capline .c b{color:var(--ink);font-weight:600;margin-right:6px}
+.composer{width:100%;max-width:720px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:12px 14px 10px}
+.composer .ctxrow{display:flex;gap:8px;margin-bottom:10px}
+.chip{display:inline-flex;align-items:center;gap:6px;background:var(--chip);border-radius:7px;padding:4px 10px;font-size:12px;color:var(--ink)}
+.chip svg{width:12px;height:12px;stroke:var(--muted)}
+.composer input{width:100%;border:0;outline:0;background:transparent;color:var(--ink);font-size:14px}
+.composer input::placeholder{color:#6b747e}
+.crow{display:flex;align-items:center;gap:6px;margin-top:12px}
+.crow .b{border:0;background:transparent;color:var(--muted);font-size:12.5px;display:flex;align-items:center;gap:5px;padding:4px 7px;border-radius:7px}
+.crow .b:hover{background:var(--chip);color:var(--ink)}
+.crow .b svg{width:13px;height:13px;stroke:currentColor}
+.crow .model{margin-left:auto;font-size:11.5px;color:var(--muted);display:flex;align-items:center;gap:5px}
+.crow .model svg{width:12px;height:12px;stroke:var(--muted)}
+.send{width:28px;height:28px;border-radius:8px;background:var(--accent);display:flex;align-items:center;justify-content:center;margin-left:8px}
+.send svg{width:13px;height:13px;stroke:#10222b}
+
+/* thread */
+.thread-head{height:50px;border-bottom:1px solid var(--line);display:flex;align-items:center;padding:0 22px;gap:10px}
+.thread-head .t{font-size:14px;font-weight:600}
+.thread-head .st{font-size:11px;color:var(--accent-deep);border:1px solid var(--line);border-radius:6px;padding:2px 8px}
+.thread{flex:1;overflow:hidden;padding:24px 0;display:flex;justify-content:center}
+.tcol{width:100%;max-width:680px;display:flex;flex-direction:column;gap:18px}
+.mu{align-self:flex-end;background:var(--chip);border-radius:12px 12px 3px 12px;padding:10px 14px;max-width:500px;line-height:1.65;font-size:13.5px}
+.att{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--line);border-radius:8px;padding:5px 10px;font-size:11.5px;color:var(--muted);margin-top:8px;background:var(--card)}
+.ma{max-width:640px}
+.ma .tag{font-size:11px;color:var(--muted);margin-bottom:8px;display:flex;align-items:center;gap:7px}
+.ma .tag .dot{width:6px;height:6px;border-radius:50%;background:var(--accent)}
+.tools{border:1px solid var(--line);border-radius:11px;background:var(--panel);margin:10px 0;font-size:12.5px}
+.tools .th{padding:8px 14px;color:var(--muted);display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--line);font-size:11.5px}
+.tools .th .ok{margin-left:auto;color:var(--accent-deep)}
+.tr{display:flex;align-items:center;gap:10px;padding:8px 14px;border-top:1px solid var(--line)}
+.tr:first-of-type{border-top:0}
+.tr svg{width:13px;height:13px;stroke:var(--muted);flex-shrink:0}
+.tr .d{margin-left:auto;font-size:11px;color:var(--muted)}
+.tr .d.g{color:var(--accent-deep)}
+.ma .txt{font-size:13.5px;line-height:1.75}
+.pill{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--line);background:var(--card);border-radius:9px;padding:7px 12px;font-size:12.5px;margin-top:10px;margin-right:8px}
+.pill .dot{width:7px;height:7px;border-radius:50%;background:var(--accent);animation:pl 1.6s infinite}
+.pill.t .dot{background:#c9a85c}
+@keyframes pl{50%{opacity:.3}}
+.pill .go{color:var(--accent-deep)}
+
+/* generic page */
+.pagerow{flex:1;display:flex;min-height:0}
+.pmain{flex:1;min-width:0;padding:26px 34px;overflow:hidden}
+.pmain h2{font-size:16px;margin-bottom:4px}
+.pmain .lead{color:var(--muted);font-size:13px;margin-bottom:22px}
+
+/* work */
+.sumrow{display:flex;gap:10px;margin-bottom:18px}
+.sum{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 16px;font-size:12px;color:var(--muted)}
+.sum b{display:block;font-size:17px;color:var(--ink);margin-bottom:2px}
+.ttable{background:var(--panel);border:1px solid var(--line);border-radius:12px;max-width:820px}
+.trow{display:flex;align-items:center;gap:14px;padding:11px 18px;border-top:1px solid var(--line);font-size:13px}
+.trow:first-child{border-top:0}
+.trow .name{width:220px}
+.trow .stt{font-size:11px;border-radius:6px;padding:2px 8px}
+.trow .ag{color:var(--muted);font-size:12px;margin-left:auto}
+.st-run{background:#20313a;color:var(--accent-deep)}
+.st-wait{background:#3a3320;color:#d4b56a}
+.st-done{background:#28312a;color:#8fbf9a}
+.trow .tm{color:var(--muted);font-size:11.5px;width:64px;text-align:right}
+
+/* memory */
+.mem3{display:flex;gap:16px;max-width:860px}
+.memcol{flex:1;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px}
+.memcol h4{font-size:13px;margin-bottom:10px;display:flex;align-items:center;gap:8px}
+.memcol .i{font-size:12.5px;padding:8px 0;border-top:1px dashed var(--line);line-height:1.6}
+.memcol .i .w{color:var(--muted);font-size:11px;margin-left:6px}
+
+/* agents master-detail */
+.aglist .sess .st{margin-left:auto;font-size:10px;border-radius:5px;padding:1px 6px}
+.agdetail{flex:1;padding:26px 34px}
+.agdetail h2{font-size:16px;margin-bottom:4px}
+.agdetail .lead{color:var(--muted);font-size:13px;margin-bottom:18px}
+.agcard{background:var(--panel);border:1px solid var(--line);border-radius:12px;max-width:640px;padding:18px 22px}
+.agcard .row{display:flex;gap:12px;align-items:center;padding:10px 0;border-top:1px dashed var(--line);font-size:13px}
+.agcard .row:first-of-type{border-top:0}
+.agcard .k{width:90px;color:var(--muted);font-size:12.5px}
+.btnrow{display:flex;gap:10px;margin-top:16px}
+.btn{border:1px solid var(--line);border-radius:9px;padding:7px 16px;font-size:12.5px}
+.btn.pri{background:var(--accent);border-color:var(--accent);color:#10222b;font-weight:600}
+
+/* plugins master-detail */
+.pd-head{display:flex;align-items:center;gap:13px;margin-bottom:16px}
+.pd-head .ic{width:42px;height:42px;border-radius:11px;display:flex;align-items:center;justify-content:center;font-weight:700;color:#10222b;font-size:15px}
+.pd-head h2{font-size:16px}
+.pd-head .s{font-size:12px;color:var(--muted);margin-top:2px}
+.searchbox{border:1px solid var(--line);background:var(--card);border-radius:8px;padding:6px 12px;font-size:12px;color:var(--muted);max-width:300px;margin-bottom:10px}
+.ptable{background:var(--panel);border:1px solid var(--line);border-radius:12px;max-width:680px}
+.prow{display:flex;align-items:center;gap:12px;padding:8px 16px;border-top:1px solid var(--line);font-size:12.5px}
+.prow:first-child{border-top:0}
+.prow .pm{margin-left:auto;font-size:10.5px;color:var(--muted);border:1px solid var(--line);border-radius:5px;padding:1px 6px}
+.tg{width:28px;height:16px;border-radius:8px;background:var(--accent);position:relative;flex-shrink:0}
+.tg::after{content:"";position:absolute;width:12px;height:12px;border-radius:50%;background:#10222b;top:2px;right:2px}
+.tg.off{background:#3c434c}
+.tg.off::after{left:2px;background:var(--muted)}
+.psec{font-size:10.5px;color:var(--muted);background:var(--card);padding:4px 16px;letter-spacing:.05em}
+
+/* settings */
+.setrow{display:flex;align-items:center;gap:14px;max-width:640px;padding:12px 0;border-bottom:1px solid var(--line)}
+.setrow .l{flex:1}
+.setrow .l b{font-size:13px;display:block;margin-bottom:2px}
+.setrow .l span{font-size:11.5px;color:var(--muted)}
+.setrow .ctl{font-size:12px;border:1px solid var(--line);border-radius:7px;padding:4px 11px;background:var(--card)}
+
+/* about modal */
+.aboutmo{position:absolute;inset:0;background:rgba(10,12,14,.55);display:flex;align-items:center;justify-content:center}
+.mo{width:460px;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px 24px;box-shadow:0 20px 60px rgba(0,0,0,.45)}
+.mo h2{font-size:15px;margin-bottom:14px}
+.mo .vr{color:var(--muted);font-size:12.5px;margin-bottom:14px}
+.mo .r{display:flex;align-items:center;font-size:12.5px;padding:9px 0;border-top:1px solid var(--line)}
+.mo .r .k{width:96px;color:var(--muted)}
+.mo .r .go{margin-left:auto;color:var(--accent-deep)}
+</style>
+</head>
+<body>
+<div class="app" style="position:relative">
+  <nav class="rail">
+    <div class="logo">C</div>
+    <a href="#/home" data-v="home" title="对话"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9 10h6M9 13.5h4"/></svg></a>
+    <a href="#/work" data-v="work" title="工作"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M8 9h8M8 13h5"/></svg></a>
+    <a href="#/memory" data-v="memory" title="记忆"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3v4M12 17v4M3 12h4M17 12h4"/></svg></a>
+    <a href="#/agents" data-v="agents" title="智能体"><svg viewBox="0 0 24 24"><rect x="5" y="7" width="14" height="11" rx="3"/><path d="M12 7V4M9 12h.01M15 12h.01"/></svg></a>
+    <a href="#/plugins" data-v="plugins" title="插件"><svg viewBox="0 0 24 24"><path d="M9 4v3M15 4v3M7 7h10v4a5 5 0 0 1-10 0V7zM12 16v4"/></svg></a>
+    <div class="sp"></div>
+    <div class="foot">
+      <a href="#/settings" data-v="settings" title="设置"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/></svg></a>
+      <a href="#/about" data-v="about" title="关于"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8h.01M12 11v5"/></svg></a>
+    </div>
+  </nav>
+
+  <aside class="ctx" id="ctx">
+    <!-- 会话列表（对话页） -->
+    <div id="c-chat">
+      <h3>对话 <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="M21 21l-4.3-4.3M17 11a6 6 0 1 1-12 0 6 6 0 0 1 12 0z"/></svg></h3>
+      <div class="newbtn"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>新对话</div>
+      <div class="grp">今天</div>
+      <a class="sess on" href="#/thread"><span class="ic">✓</span>周末计划<span class="tm">进行中</span></a>
+      <a class="sess" href="#/thread"><span class="ic">Q</span>周六天气怎么穿<span class="tm">2 时</span></a>
+      <div class="grp">项目 · GIT-QQ-BRIDGE</div>
+      <a class="sess" href="#/thread"><span class="ic">G</span>发布更新公告<span class="tm">昨天</span></a>
+      <a class="sess" href="#/thread"><span class="ic">G</span>黑话库清洗<span class="tm">昨天</span></a>
+      <div class="grp">更早</div>
+      <a class="sess" href="#/thread"><span class="ic">M</span>手机配对排查<span class="tm">3 天</span></a>
+    </div>
+    <!-- 工作列表（工作页） -->
+    <div id="c-work" style="display:none">
+      <h3>任务</h3>
+      <div class="newbtn"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>新任务</div>
+      <div class="grp">进行中</div>
+      <a class="sess on" href="#/work"><span class="ic">周</span>周末计划<span class="tm">2 分</span></a>
+      <a class="sess" href="#/work"><span class="ic">黑</span>黑话库清洗<span class="tm">1 时</span></a>
+      <div class="grp">等待确认</div>
+      <a class="sess" href="#/work"><span class="ic">发</span>发布更新公告<span class="tm">昨天</span></a>
+      <div class="grp">已完成</div>
+      <a class="sess" href="#/work"><span class="ic">手</span>手机配对<span class="tm">3 天</span></a>
+    </div>
+    <!-- 智能体列表（智能体页） -->
+    <div id="c-agents" style="display:none">
+      <h3>智能体</h3>
+      <a class="sess on" href="#/agents"><span class="ic" style="background:#5f8467;color:#fff">D</span>DSH<span class="st" style="background:#20313a;color:#7fc0dc">就绪</span></a>
+      <a class="sess" href="#/agents"><span class="ic" style="background:#8d9bb0;color:#fff">C</span>Codex<span class="st" style="background:#3a3320;color:#d4b56a">需设置</span></a>
+      <a class="sess" href="#/agents"><span class="ic" style="background:#6f7d94;color:#fff">Z</span>ZCode<span class="st" style="background:#2c323a;color:#8b939c">未安装</span></a>
+      <a class="sess" href="#/agents"><span class="ic" style="background:#b0715d;color:#fff">S</span>SnowLuma Host<span class="st" style="background:#3a2520;color:#c77f6a">不可用</span></a>
+    </div>
+    <!-- 插件列表（插件页） -->
+    <div id="c-plugins" style="display:none">
+      <h3>插件</h3>
+      <a class="sess on" href="#/plugin"><span class="ic" style="background:#5f8467;color:#fff">S</span>SnowLuma</a>
+      <a class="sess" href="#/plugin"><span class="ic" style="background:#8d9bb0;color:#fff">D</span>DSH</a>
+      <a class="sess" href="#/plugin"><span class="ic" style="background:#c9a85c;color:#fff">B</span>Bionic Chat Tools</a>
+      <a class="sess" href="#/plugin"><span class="ic" style="background:#6f7d94;color:#fff">W</span>Web Search Safe</a>
+      <a class="sess" href="#/plugin"><span class="ic" style="background:#9b8db0;color:#fff">M</span>Memory Pack</a>
+      <a class="sess" href="#/plugin"><span class="ic" style="background:#b09a8d;color:#fff">C</span>Card Approvals</a>
+    </div>
+  </aside>
+
+  <main class="main">
+    <section class="view on" id="v-home">
+      <div class="home">
+        <div class="home-c">
+          <h1>今天想从哪里开始？</h1>
+          <div class="sub">直接问，或让我用工具、建任务、交给 Agent。</div>
+          <div class="capline">
+            <span class="c"><b>直接回答</b>想到就问</span>
+            <span class="c"><b>使用工具</b>搜索 · 文件</span>
+            <span class="c"><b>创建任务</b>追踪到完成</span>
+            <span class="c"><b>交给 Agent</b>放手去做</span>
+          </div>
+          <div class="composer">
+            <div class="ctxrow"><span class="chip"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>GIT-QQ-BRIDGE</span><span class="chip">模式 · 自动</span></div>
+            <input placeholder="随心输入…">
+            <div class="crow">
+              <span class="b"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg></span>
+              <span class="b"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="M14.7 6.3a4.5 4.5 0 0 0-6 6L3 18v3h3l5.7-5.7a4.5 4.5 0 0 0 6-6L15 12l-3-3 2.7-2.7z"/></svg>工具</span>
+              <span class="b"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><rect x="5" y="7" width="14" height="11" rx="3"/><path d="M12 7V4"/></svg>Agent</span>
+              <span class="model"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>当前模型</span>
+              <span class="send"><svg viewBox="0 0 24 24" fill="none" stroke-width="2.2"><path d="M12 19V5M5 12l7-7 7 7"/></svg></span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="view" id="v-thread">
+      <div class="thread-head"><span class="t">周末计划</span><span class="st">任务进行中</span></div>
+      <div class="thread"><div class="tcol">
+        <div class="mu">帮我把周末的灵感整理成一个计划，顺便看看周六的天气。
+          <div class="att">灵感.md · 3 KB</div>
+        </div>
+        <div class="ma">
+          <div class="tag"><span class="dot"></span>CetaMesh · 过程</div>
+          <div class="tools">
+            <div class="th">过程 · 3 步<span class="ok">全部完成</span></div>
+            <div class="tr"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="M12 3v4M12 17v4M3 12h4M17 12h4"/></svg>记忆 · 写入灵感要点<span class="d g">完成</span></div>
+            <div class="tr"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="M14.7 6.3a4.5 4.5 0 0 0-6 6L3 18v3h3l5.7-5.7a4.5 4.5 0 0 0 6-6L15 12l-3-3 2.7-2.7z"/></svg>工具 · 查询周六天气<span class="d g">完成</span></div>
+            <div class="tr"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M8 9h8"/></svg>创建任务 · 周末计划<span class="d g">完成</span></div>
+          </div>
+          <div class="txt">周六晴，22°C，适合出门。灵感已整理成任务「周末计划」，摄影偏好记进了记忆。要把周六上午交给 DSH 执行吗？</div>
+          <div>
+            <span class="pill t"><span class="dot"></span>任务 · 周末计划<span class="go">工作页 →</span></span>
+            <span class="pill"><span class="dot"></span>DSH 运行中 · 排周六日程<span class="go">详情 →</span></span>
+          </div>
+        </div>
+      </div></div>
+    </section>
+
+    <section class="view" id="v-work"><div class="pagerow">
+      <div class="pmain">
+        <h2>工作</h2><div class="lead">正在推进和需要你的事。</div>
+        <div class="sumrow">
+          <div class="sum"><b>2</b>进行中</div><div class="sum"><b>1</b>等待确认</div><div class="sum"><b>12</b>今日完成</div>
+        </div>
+        <div class="ttable">
+          <div class="trow"><span class="name">周末计划</span><span class="stt st-run">进行中</span><span class="ag">Agent · DSH</span><span class="tm">2 分前</span></div>
+          <div class="trow"><span class="name">黑话库清洗</span><span class="stt st-run">进行中</span><span class="ag">无 Agent</span><span class="tm">1 时前</span></div>
+          <div class="trow"><span class="name">发布 1.0 更新公告</span><span class="stt st-wait">等待确认</span><span class="ag">—</span><span class="tm">昨天</span></div>
+          <div class="trow"><span class="name">手机配对</span><span class="stt st-done">已完成</span><span class="ag">—</span><span class="tm">3 天前</span></div>
+        </div>
+      </div>
+    </div></section>
+
+    <section class="view" id="v-memory"><div class="pagerow">
+      <div class="pmain">
+        <h2>记忆</h2><div class="lead">只在你允许时记住；随时可改。</div>
+        <div class="mem3">
+          <div class="memcol"><h4>灵感与偏好</h4><div class="i">喜欢在周六上午摄影<span class="w">今天</span></div><div class="i">偏好简洁的中文回复<span class="w">昨天</span></div></div>
+          <div class="memcol"><h4>事情与约定</h4><div class="i">周日和家人吃饭<span class="w">今天</span></div><div class="i">1.0 发布前写更新公告<span class="w">3 天前</span></div></div>
+          <div class="memcol"><h4>事实与背景</h4><div class="i">常用工作区 GIT-QQ-BRIDGE<span class="w">上周</span></div><div class="i">手机已与桌面配对<span class="w">上周</span></div></div>
+        </div>
+      </div>
+    </div></section>
+
+    <section class="view" id="v-agents"><div class="pagerow">
+      <div class="agdetail">
+        <h2>DSH</h2><div class="lead">本机 Agent · 就绪</div>
+        <div class="agcard">
+          <div class="row"><span class="k">状态</span>就绪 · 空闲，可接任务</div>
+          <div class="row"><span class="k">能力</span>查资料 · 整理文件 · 运行命令</div>
+          <div class="row"><span class="k">当前任务</span>周末计划 · 排周六日程</div>
+          <div class="row"><span class="k">历史</span>本周完成 5 件事</div>
+        </div>
+        <div class="btnrow"><span class="btn pri">交给 DSH</span><span class="btn">查看会话</span><span class="btn">设置</span></div>
+      </div>
+    </div></section>
+
+    <section class="view" id="v-plugins"><div class="pagerow">
+      <div class="pmain">
+        <h2>插件</h2><div class="lead">扩展工具与连接；选中查看详情。</div>
+        <div class="ttable" style="max-width:560px">
+          <div class="trow"><span class="name">SnowLuma</span><span class="ag">频道连接 · 8 工具</span><span class="tm">已启用</span></div>
+          <div class="trow"><span class="name">DSH</span><span class="ag">Agent Provider · 6 工具</span><span class="tm">已启用</span></div>
+          <div class="trow"><span class="name">Bionic Chat Tools</span><span class="ag">工具集 · 7 工具</span><span class="tm">已启用</span></div>
+          <div class="trow"><span class="name">Web Search Safe</span><span class="ag">扩展 · 2 工具</span><span class="tm">已启用</span></div>
+          <div class="trow"><span class="name">Memory Pack</span><span class="ag">扩展 · 2 工具</span><span class="tm">已关闭</span></div>
+        </div>
+      </div>
+    </div></section>
+
+    <section class="view" id="v-plugin"><div class="pagerow">
+      <div class="pmain">
+        <h2 style="font-size:13px;color:var(--muted);font-weight:400">插件 / <b style="color:var(--ink);font-size:16px">SnowLuma</b></h2>
+        <div class="pd-head"><div class="ic" style="background:#5f8467;color:#fff">S</div>
+          <div><h2>SnowLuma</h2><div class="s">频道连接 · v1.4 · 已启用</div></div></div>
+        <div class="searchbox">搜索工具…</div>
+        <div class="ptable">
+          <div class="psec">收发消息</div>
+          <div class="prow">发送群消息<span class="pm">发送</span><i class="tg"></i></div>
+          <div class="prow">发送私聊消息<span class="pm">发送</span><i class="tg"></i></div>
+          <div class="prow">回复消息<span class="pm">发送</span><i class="tg"></i></div>
+          <div class="prow">戳一戳<span class="pm">发送</span><i class="tg off"></i></div>
+          <div class="psec">读取</div>
+          <div class="prow">读取会话消息<span class="pm">读取</span><i class="tg"></i></div>
+          <div class="prow">查看卡片消息<span class="pm">读取</span><i class="tg"></i></div>
+          <div class="prow">获取群成员列表<span class="pm">读取</span><i class="tg"></i></div>
+          <div class="psec">管理</div>
+          <div class="prow">设置唤醒与潜水<span class="pm">写入</span><i class="tg"></i></div>
+        </div>
+      </div>
+    </div></section>
+
+    <section class="view" id="v-settings"><div class="pagerow">
+      <div class="pmain">
+        <h2>设置</h2><div class="lead">常用选项都在这一页；高级项默认收起。</div>
+        <div class="setrow"><div class="l"><b>语言</b><span>界面显示语言</span></div><span class="ctl">中文</span></div>
+        <div class="setrow"><div class="l"><b>主题</b><span>外观明暗</span></div><span class="ctl">深色</span></div>
+        <div class="setrow"><div class="l"><b>关闭窗口时</b><span>隐藏到托盘，任务继续</span></div><span class="ctl">隐藏到托盘</span></div>
+        <div class="setrow"><div class="l"><b>模型与提供方</b><span>高级 · 需要时再配置</span></div><span class="ctl">打开</span></div>
+      </div>
+    </div></section>
+
+    <section class="view" id="v-about">
+      <div class="aboutmo">
+        <div class="mo">
+          <h2>关于 CetaMesh</h2>
+          <div class="vr">版本 1.0.0-rc.1 · Windows · 已是最新</div>
+          <div class="r"><span class="k">检查更新</span>今天已检查<span class="go">再次检查</span></div>
+          <div class="r"><span class="k">更新公告</span>1.0 候选版说明<span class="go">查看</span></div>
+          <div class="r"><span class="k">反馈与建议</span>官网页面<span class="go">浏览器打开 ↗</span></div>
+          <div class="r"><span class="k">Bug 反馈</span>官网页面<span class="go">浏览器打开 ↗</span></div>
+          <div class="r"><span class="k">安全漏洞</span>披露渠道<span class="go">浏览器打开 ↗</span></div>
+          <div class="r"><span class="k">开源许可</span>第三方组件<span class="go">查看</span></div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+<script>
+const ctxmap={home:'c-chat',thread:'c-chat',work:'c-work',memory:null,agents:'c-agents',plugins:'c-plugins',plugin:'c-plugins',settings:null,about:null};
+function route(){
+  const h=(location.hash||'#/home').replace('#/','');
+  document.querySelectorAll('.view').forEach(el=>el.classList.toggle('on',el.id==='v-'+(h==='plugin'?'plugin':h)));
+  document.querySelectorAll('.rail a').forEach(a=>a.classList.toggle('on',a.dataset.v===h||(h==='plugin'&&a.dataset.v==='plugins')||(h==='thread'&&a.dataset.v==='home')));
+  const c=ctxmap[h];
+  ['c-chat','c-work','c-agents','c-plugins'].forEach(id=>{
+    const el=document.getElementById(id);
+    el.style.display=(c===id)?'flex':'none';
+    el.style.flexDirection='column';
+  });
+  document.getElementById('ctx').style.display=c?'flex':'none';
+}
+addEventListener('hashchange',route);route();
+</script>
+</body>
+</html>

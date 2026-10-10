@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>方案 04 · 今日（流与看板）— CetaMesh UI 探索</title>
+<style>
+:root{
+  --bg:#eef0f3; --panel:#e6e9ee; --card:#ffffff; --ink:#2b3138; --muted:#7d858f;
+  --accent:#d99a3d; --accent-deep:#b57c26; --accent-soft:#faf1e0; --line:#dde1e7; --chip:#f0f2f5;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{height:100%}
+body{font-family:"Segoe UI","Microsoft YaHei UI",sans-serif;background:var(--bg);color:var(--ink);font-size:14px;overflow:hidden}
+.app{display:flex;height:100vh}
+
+/* sidebar */
+.side{width:250px;background:var(--panel);border-right:1px solid var(--line);display:flex;flex-direction:column;padding:18px 12px 12px}
+.logo{display:flex;align-items:center;gap:9px;font-weight:700;font-size:15px;padding:2px 8px 16px}
+.logo .m{width:26px;height:26px;border-radius:8px;background:linear-gradient(135deg,#d99a3d,#e8b567);color:#fff;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:800}
+.nav{display:flex;flex-direction:column;gap:2px;margin-bottom:6px}
+.nav a{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:13.5px}
+.nav a svg{width:15px;height:15px;stroke:var(--muted);fill:none;stroke-width:1.8}
+.nav a.on{background:var(--card);font-weight:600;box-shadow:0 1px 4px rgba(30,40,60,.06)}
+.nav a.on svg{stroke:var(--accent-deep)}
+.today-pill{margin-left:auto;font-size:10px;background:var(--accent-soft);color:var(--accent-deep);border-radius:6px;padding:1px 7px}
+.side .grp{font-size:11px;color:var(--muted);padding:12px 10px 5px;letter-spacing:.05em}
+.sess{display:flex;align-items:center;gap:8px;padding:6px 10px;border-radius:8px;font-size:12.5px;text-decoration:none;color:var(--ink)}
+.sess .tm{margin-left:auto;font-size:10.5px;color:var(--muted)}
+.sess.on{background:var(--card);box-shadow:0 1px 4px rgba(30,40,60,.06)}
+.side .sp{flex:1}
+.user{display:flex;align-items:center;gap:10px;background:var(--card);border-radius:11px;padding:10px 12px;box-shadow:0 1px 4px rgba(30,40,60,.06)}
+.user .av{width:28px;height:28px;border-radius:50%;background:linear-gradient(135deg,#7d92b8,#5c6f92);color:#fff;display:flex;align-items:center;justify-content:center;font-size:11px}
+.user .nm{font-size:12.5px;font-weight:600}
+.user .sub{font-size:10.5px;color:var(--muted)}
+.user .gear{margin-left:auto}
+.user .gear svg{width:15px;height:15px;stroke:var(--muted);fill:none;stroke-width:1.8}
+
+.main{flex:1;min-width:0;display:flex;flex-direction:column}
+.view{display:none;flex:1;min-height:0;flex-direction:column;overflow:hidden}
+.view.on{display:flex}
+
+/* today home */
+.today{flex:1;overflow:hidden;padding:34px 44px}
+.today .hi{font-size:24px;font-weight:700;margin-bottom:4px}
+.today .date{color:var(--muted);font-size:13px;margin-bottom:24px}
+.quick4{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;max-width:980px;margin-bottom:28px}
+.quick4 .q{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px 18px;box-shadow:0 1px 4px rgba(30,40,60,.05)}
+.quick4 .q .ic{width:28px;height:28px;border-radius:9px;background:var(--accent-soft);display:flex;align-items:center;justify-content:center;margin-bottom:10px}
+.quick4 .q .ic svg{width:15px;height:15px;stroke:var(--accent-deep);fill:none;stroke-width:1.8}
+.quick4 .q b{font-size:13.5px;display:block;margin-bottom:4px}
+.quick4 .q span{font-size:12px;color:var(--muted);line-height:1.55}
+.h2{font-size:13px;color:var(--muted);letter-spacing:.04em;margin-bottom:10px}
+.stream{max-width:980px;display:flex;flex-direction:column;gap:10px}
+.srow{display:flex;align-items:center;gap:12px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 16px;font-size:13px}
+.srow .ic{width:26px;height:26px;border-radius:8px;background:var(--chip);display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--muted);flex-shrink:0}
+.srow .ic.a{background:var(--accent-soft);color:var(--accent-deep)}
+.srow .tm{margin-left:auto;font-size:11px;color:var(--muted)}
+.srow .st{font-size:10.5px;border-radius:6px;padding:2px 8px;background:var(--chip);color:var(--muted)}
+.srow .st.run{background:var(--accent-soft);color:var(--accent-deep)}
+
+/* thread */
+.strip{display:flex;gap:8px;align-items:center;padding:12px 30px;border-bottom:1px solid var(--line);background:color-mix(in srgb,var(--bg),#ffffff 40%);font-size:12px}
+.strip .lab{color:var(--muted)}
+.strip .bc{display:inline-flex;align-items:center;gap:6px;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:4px 10px;font-size:11.5px}
+.strip .bc .dot{width:6px;height:6px;border-radius:50%;background:var(--accent)}
+.strip .bc .dotg{width:6px;height:6px;border-radius:50%;background:#5c8f68}
+.chat{flex:1;overflow:hidden;display:flex;justify-content:center;padding:22px 0}
+.ccol{width:100%;max-width:660px;display:flex;flex-direction:column;gap:16px}
+.mu{align-self:flex-end;background:var(--accent-soft);border-radius:13px 13px 4px 13px;padding:10px 15px;max-width:480px;line-height:1.65;font-size:13.5px}
+.att{display:inline-flex;align-items:center;gap:7px;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:5px 10px;font-size:11.5px;color:var(--muted);margin-top:8px}
+.mc .who{font-size:11px;color:var(--muted);margin-bottom:6px}
+.tl{border-left:2px solid var(--line);margin:8px 0 8px 6px;padding-left:16px;display:flex;flex-direction:column;gap:8px;font-size:12.5px}
+.tl .ti{display:flex;align-items:center;gap:9px;color:var(--ink)}
+.tl .ti .b{width:8px;height:8px;border-radius:50%;background:var(--accent);margin-left:-21px;border:2px solid var(--bg)}
+.tl .ti .st{margin-left:auto;font-size:10.5px;color:var(--muted)}
+.tl .ti .st.ok{color:#5c8f68}
+.mc .txt{font-size:13.5px;line-height:1.75}
+.agentcard{display:flex;align-items:center;gap:12px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:11px 15px;font-size:12.5px;margin-top:10px}
+.agentcard .ic{width:30px;height:30px;border-radius:9px;background:#5f8467;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px}
+.agentcard .live{width:7px;height:7px;border-radius:50%;background:var(--accent);animation:pl 1.6s infinite;margin-left:auto}
+@keyframes pl{50%{opacity:.3}}
+.agentcard .go{font-size:11.5px;color:var(--accent-deep)}
+.composer{margin:0 30px 20px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:12px 14px 9px;box-shadow:0 6px 20px rgba(30,40,60,.06)}
+.composer input{width:100%;border:0;outline:0;font-size:14px;background:transparent;color:var(--ink)}
+.composer input::placeholder{color:#a4abb4}
+.crow{display:flex;align-items:center;gap:7px;margin-top:11px}
+.crow .b{border:1px solid var(--line);border-radius:8px;padding:4px 11px;font-size:12px;color:var(--ink);display:flex;gap:5px;align-items:center;background:var(--chip)}
+.crow .b svg{width:12px;height:12px;stroke:var(--muted);fill:none;stroke-width:1.8}
+.crow .send{margin-left:auto;width:30px;height:30px;border-radius:9px;background:var(--accent);display:flex;align-items:center;justify-content:center}
+.crow .send svg{width:14px;height:14px;stroke:#fff;fill:none;stroke-width:2.2}
+
+/* kanban work */
+.kb{flex:1;overflow:hidden;padding:24px 30px}
+.kb h2{font-size:16px;margin-bottom:16px}
+.kbrow{display:flex;gap:14px;height:calc(100% - 60px)}
+.kcol{flex:1;background:color-mix(in srgb,var(--panel),#ffffff 45%);border-radius:14px;padding:12px;overflow:hidden}
+.kcol h4{font-size:12px;color:var(--muted);display:flex;align-items:center;gap:8px;margin-bottom:10px;padding:0 4px}
+.kcol h4 .n{background:var(--card);border-radius:6px;padding:1px 7px;font-size:10.5px}
+.kcard{background:var(--card);border:1px solid var(--line);border-radius:11px;padding:12px 14px;margin-bottom:9px;box-shadow:0 1px 3px rgba(30,40,60,.05)}
+.kcard b{font-size:13px;display:block;margin-bottom:5px}
+.kcard .m{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--muted)}
+.kcard .m .a{display:inline-flex;align-items:center;gap:5px}
+.kcard .m .ad{width:16px;height:16px;border-radius:5px;background:#5f8467;color:#fff;font-size:8px;display:flex;align-items:center;justify-content:center}
+.kcard .m .lk{margin-left:auto;color:var(--accent-deep)}
+.kcard .nx{font-size:11.5px;color:var(--muted);margin-top:6px;line-height:1.5}
+
+/* memory timeline */
+.mem{padding:30px 44px;overflow:hidden}
+.mem .h2{margin-bottom:16px}
+.memline{max-width:720px}
+.mrow{display:flex;gap:14px;margin-bottom:14px}
+.mrow .ic{width:32px;height:32px;border-radius:10px;background:var(--card);border:1px solid var(--line);display:flex;align-items:center;justify-content:center;font-size:13px;flex-shrink:0}
+.mrow .c{flex:1;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 16px;font-size:13px;line-height:1.6}
+.mrow .c .t{font-size:11px;color:var(--muted);margin-bottom:4px;display:flex;gap:8px}
+.mrow .c .t .tag{background:var(--chip);border-radius:5px;padding:1px 7px}
+
+/* agents */
+.agpage{padding:30px 44px;overflow:hidden}
+.ags{display:flex;gap:10px;margin-bottom:20px}
+.agb{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 16px;font-size:12px;color:var(--muted)}
+.agb b{color:var(--ink)}
+.agrow{display:flex;gap:14px;flex-wrap:wrap}
+.agc{width:250px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:17px 19px;box-shadow:0 1px 4px rgba(30,40,60,.05)}
+.agc .h{display:flex;gap:11px;align-items:center;margin-bottom:10px}
+.agc .ic{width:36px;height:36px;border-radius:11px;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px}
+.agc b{font-size:14px;display:block}
+.agc .r{font-size:11px;color:var(--muted)}
+.agc .st{display:inline-block;font-size:10.5px;border-radius:6px;padding:2px 9px;margin-bottom:8px}
+.agc p{font-size:12px;color:var(--muted);line-height:1.6;margin-bottom:11px}
+.agc .act{font-size:12px;border:1px solid var(--line);border-radius:8px;padding:5px 13px;display:inline-block}
+.agc .act.pri{background:var(--accent);color:#fff;border-color:var(--accent)}
+
+/* plugins toolbox */
+.tb{padding:30px 44px;overflow:hidden}
+.tabs{display:flex;gap:6px;margin-bottom:18px}
+.tabs a{font-size:12.5px;color:var(--muted);text-decoration:none;border:1px solid var(--line);background:var(--card);border-radius:8px;padding:5px 13px}
+.tabs a.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+.tbgrid{display:grid;grid-template-columns:repeat(3,230px);gap:13px}
+.tbc{background:var(--card);border:1px solid var(--line);border-radius:13px;padding:15px 17px}
+.tbc .h{display:flex;gap:10px;align-items:center;margin-bottom:8px}
+.tbc .ic{width:32px;height:32px;border-radius:9px;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px}
+.tbc b{font-size:13px;display:block}
+.tbc .r{font-size:10.5px;color:var(--muted)}
+.tbc p{font-size:11.5px;color:var(--muted);line-height:1.6;margin-bottom:9px}
+.tbc .m{font-size:11px;color:var(--muted)}
+
+/* plugin detail full page */
+.pd{padding:26px 44px;overflow:hidden}
+.back{font-size:12.5px;color:var(--muted);text-decoration:none;display:inline-block;margin-bottom:14px}
+.pdh{display:flex;align-items:center;gap:14px;margin-bottom:18px}
+.pdh .ic{width:44px;height:44px;border-radius:12px;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:15px}
+.pdh h2{font-size:16px}
+.pdh .s{font-size:12px;color:var(--muted);margin-top:2px}
+.toolgrp{background:var(--card);border:1px solid var(--line);border-radius:12px;max-width:700px;margin-bottom:14px}
+.toolgrp h4{font-size:12px;color:var(--muted);padding:9px 16px;border-bottom:1px solid var(--line);letter-spacing:.04em}
+.trow{display:flex;align-items:center;gap:12px;padding:9px 16px;font-size:12.5px;border-top:1px dashed var(--line)}
+.trow:first-of-type{border-top:0}
+.trow .pm{margin-left:auto;font-size:10px;color:var(--muted);border:1px solid var(--line);border-radius:5px;padding:1px 6px}
+.tg{width:30px;height:17px;border-radius:9px;background:var(--accent);position:relative;flex-shrink:0}
+.tg::after{content:"";position:absolute;width:13px;height:13px;border-radius:50%;background:#fff;top:2px;right:2px}
+.tg.off{background:#cfd4da}
+
+/* settings single page */
+.setpage{padding:30px 0 30px 44px;display:flex;gap:34px;overflow:hidden}
+.anch{width:150px;display:flex;flex-direction:column;gap:2px;flex-shrink:0}
+.anch a{font-size:12.5px;color:var(--muted);text-decoration:none;padding:6px 10px;border-radius:8px}
+.anch a.on{background:var(--card);color:var(--ink);font-weight:600}
+.setsc{overflow:hidden;padding-right:40px;max-width:640px}
+.setsc h2{font-size:15px;margin:0 0 12px}
+.setrow{display:flex;align-items:center;gap:14px;padding:12px 0;border-bottom:1px solid var(--line)}
+.setrow .l{flex:1}
+.setrow .l b{font-size:13px;display:block;margin-bottom:2px}
+.setrow .l span{font-size:11.5px;color:var(--muted)}
+.setrow .ctl{font-size:12px;border:1px solid var(--line);border-radius:7px;padding:4px 11px;background:var(--card)}
+.aboutbit{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 18px;display:flex;align-items:center;gap:12px;margin-top:26px}
+.aboutbit .m{width:34px;height:34px;border-radius:10px;background:linear-gradient(135deg,#d99a3d,#e8b567);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:800}
+.aboutbit b{font-size:13px;display:block}
+.aboutbit span{font-size:11.5px;color:var(--muted)}
+.aboutbit .go{margin-left:auto;font-size:12px;color:var(--accent-deep)}
+
+/* user popover (about) */
+.pop{position:absolute;left:250px;bottom:70px;width:320px;background:var(--card);border:1px solid var(--line);border-radius:14px;box-shadow:0 16px 50px rgba(30,40,60,.16);padding:16px 18px;z-index:5}
+.pop .r{display:flex;align-items:center;font-size:12.5px;padding:8px 0;border-top:1px solid var(--line)}
+.pop .r:first-of-type{border-top:0}
+.pop .r .k{width:90px;color:var(--muted);font-size:12px}
+.pop .r .go{margin-left:auto;color:var(--accent-deep);font-size:12px}
+.pop h4{font-size:13px;margin-bottom:2px}
+.pop .v{font-size:11px;color:var(--muted);margin-bottom:8px}
+</style>
+</head>
+<body>
+<div class="app" style="position:relative">
+  <aside class="side">
+    <div class="logo"><span class="m">C</span>CetaMesh</div>
+    <nav class="nav">
+      <a href="#/home" data-v="home"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9 10h6M9 13.5h4"/></svg>今日<span class="today-pill">10月10日</span></a>
+      <a href="#/work" data-v="work"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M8 9h8M8 13h5"/></svg>工作</a>
+      <a href="#/memory" data-v="memory"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3v4M12 17v4M3 12h4M17 12h4"/></svg>记忆</a>
+      <a href="#/agents" data-v="agents"><svg viewBox="0 0 24 24"><rect x="5" y="7" width="14" height="11" rx="3"/><path d="M12 7V4M9 12h.01M15 12h.01"/></svg>智能体</a>
+      <a href="#/plugins" data-v="plugins"><svg viewBox="0 0 24 24"><path d="M9 4v3M15 4v3M7 7h10v4a5 5 0 0 1-10 0V7zM12 16v4"/></svg>插件</a>
+    </nav>
+    <div class="grp">今天</div>
+    <a class="sess on" href="#/thread">周末计划<span class="tm">进行中</span></a>
+    <a class="sess" href="#/thread">周六天气怎么穿<span class="tm">2 时</span></a>
+    <div class="grp">昨天</div>
+    <a class="sess" href="#/thread">发布更新公告<span class="tm">18 时</span></a>
+    <a class="sess" href="#/thread">黑话库清洗<span class="tm">20 时</span></a>
+    <div class="grp">更早</div>
+    <a class="sess" href="#/thread">手机配对排查<span class="tm">3 天</span></a>
+    <div class="sp"></div>
+    <div class="user"><span class="av">宇</span><div><div class="nm">宇</div><div class="sub">本地账户</div></div>
+      <a class="gear" href="#/settings"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/></svg></a></div>
+  </aside>
+
+  <main class="main">
+    <!-- 今日首页 -->
+    <section class="view on" id="v-home">
+      <div class="today">
+        <div class="hi">早上好，宇。</div>
+        <div class="date">10 月 10 日 周六 · 有 2 件事在进行，1 件等你确认</div>
+        <div class="quick4">
+          <div class="q"><div class="ic"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9 10h6M9 13.5h4"/></svg></div><b>直接问</b><span>日常问题想到就问，CetaMesh 直接回答。</span></div>
+          <div class="q"><div class="ic"><svg viewBox="0 0 24 24"><path d="M14.7 6.3a4.5 4.5 0 0 0-6 6L3 18v3h3l5.7-5.7a4.5 4.5 0 0 0 6-6L15 12l-3-3 2.7-2.7z"/></svg></div><b>用工具查</b><span>查资料、读文件、看日程，我来动手。</span></div>
+          <div class="q"><div class="ic"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M8 9h8M8 13h5"/></svg></div><b>建任务</b><span>多步骤的事进工作页，盯到完成。</span></div>
+          <div class="q"><div class="ic"><svg viewBox="0 0 24 24"><rect x="5" y="7" width="14" height="11" rx="3"/><path d="M12 7V4M9 12h.01M15 12h.01"/></svg></div><b>交给 Agent</b><span>让 DSH / Codex 执行，我盯着进度。</span></div>
+        </div>
+        <div class="h2">进行中</div>
+        <div class="stream">
+          <div class="srow"><span class="ic a">周</span>任务 · 周末计划 — DSH 正在排周六日程<span class="st run">进行中</span><span class="tm">2 分前</span></div>
+          <div class="srow"><span class="ic a">黑</span>任务 · 黑话库清洗 — 候选词条已提取<span class="st run">进行中</span><span class="tm">1 时前</span></div>
+          <div class="srow"><span class="ic">发</span>任务 · 发布 1.0 更新公告 — 等你确认文案<span class="st">等待确认</span><span class="tm">昨天</span></div>
+          <div class="srow"><span class="ic">聊</span>对话 · 周六天气怎么穿 — 晴，22°C<span class="tm">2 时前</span></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 会话线程 -->
+    <section class="view" id="v-thread">
+      <div class="strip">
+        <span class="lab">脉络</span>
+        <span class="bc"><span class="dotg"></span>记忆 · 摄影偏好已写入</span>
+        <span class="bc"><span class="dot"></span>任务 · 周末计划</span>
+        <span class="bc">Agent · DSH</span>
+      </div>
+      <div class="chat"><div class="ccol">
+        <div class="mu">帮我把周末的灵感整理成一个计划，顺便看看周六的天气。
+          <div class="att">灵感.md · 3 KB</div>
+        </div>
+        <div class="mc">
+          <div class="who">CetaMesh</div>
+          <div class="tl">
+            <div class="ti"><span class="b"></span>把灵感要点写进记忆<span class="st ok">完成</span></div>
+            <div class="ti"><span class="b"></span>用工具查了周六天气<span class="st ok">完成</span></div>
+            <div class="ti"><span class="b"></span>创建了任务「周末计划」<span class="st ok">完成</span></div>
+          </div>
+          <div class="txt">周六晴，22°C，适合出门。灵感整理成了任务「周末计划」，摄影偏好记进了记忆。</div>
+          <div class="agentcard"><span class="ic">D</span>DSH · 正在排周六上午的日程<span class="live"></span><span class="go">详情</span></div>
+        </div>
+      </div></div>
+      <div class="composer">
+        <input placeholder="继续这个话题…">
+        <div class="crow">
+          <span class="b"><svg viewBox="0 0 24 24" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg></span>
+          <span class="b"><svg viewBox="0 0 24 24"><path d="M14.7 6.3a4.5 4.5 0 0 0-6 6L3 18v3h3l5.7-5.7a4.5 4.5 0 0 0 6-6L15 12l-3-3 2.7-2.7z"/></svg>工具</span>
+          <span class="b"><svg viewBox="0 0 24 24"><rect x="5" y="7" width="14" height="11" rx="3"/><path d="M12 7V4"/></svg>Agent</span>
+          <span class="b">模式 · 自动</span>
+          <span class="send"><svg viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg></span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Work 看板 -->
+    <section class="view" id="v-work">
+      <div class="kb">
+        <h2>工作</h2>
+        <div class="kbrow">
+          <div class="kcol"><h4>待开始<span class="n">1</span></h4>
+            <div class="kcard"><b>写 1.0 更新公告</b><div class="m">来源 · 昨天的对话<span class="lk">打开 →</span></div></div></div>
+          <div class="kcol"><h4>进行中<span class="n">2</span></h4>
+            <div class="kcard"><b>周末计划</b><div class="m"><span class="a"><span class="ad">D</span>DSH</span><span class="lk">脉络 →</span></div><div class="nx">正在排周六上午日程</div></div>
+            <div class="kcard"><b>黑话库清洗</b><div class="m">无 Agent<span class="lk">打开 →</span></div><div class="nx">候选词条提取中</div></div></div>
+          <div class="kcol"><h4>等待确认<span class="n">1</span></h4>
+            <div class="kcard"><b>发布 1.0 更新公告</b><div class="m">—<span class="lk">查看 →</span></div><div class="nx">文案已就绪，等你确认</div></div></div>
+          <div class="kcol"><h4>已完成<span class="n">12</span></h4>
+            <div class="kcard"><b>手机配对</b><div class="m">上周完成</div></div></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Memory 时间流 -->
+    <section class="view" id="v-memory">
+      <div class="mem">
+        <div class="h2">记忆 · 最近被记住的事（可随时修改或删除）</div>
+        <div class="memline">
+          <div class="mrow"><span class="ic">📷</span><div class="c"><div class="t"><span class="tag">灵感与偏好</span>今天 09:12</div>喜欢在周六上午摄影 — 来自「周末计划」对话</div></div>
+          <div class="mrow"><span class="ic">🍚</span><div class="c"><div class="t"><span class="tag">事情与约定</span>今天 08:40</div>周日和家人吃饭</div></div>
+          <div class="mrow"><span class="ic">💬</span><div class="c"><div class="t"><span class="tag">灵感与偏好</span>昨天</div>偏好简洁的中文回复</div></div>
+          <div class="mrow"><span class="ic">📁</span><div class="c"><div class="t"><span class="tag">事实与背景</span>上周</div>常用工作区 GIT-QQ-BRIDGE</div></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Agents 团队 -->
+    <section class="view" id="v-agents">
+      <div class="agpage">
+        <div class="ags">
+          <span class="agb"><b>1</b> 就绪</span><span class="agb"><b>1</b> 需要设置</span><span class="agb"><b>1</b> 未安装</span><span class="agb"><b>1</b> 不可用</span>
+        </div>
+        <div class="agrow">
+          <div class="agc"><div class="h"><div class="ic" style="background:#5f8467">D</div><div><b>DSH</b><span class="r">本机 Agent</span></div></div>
+            <span class="st" style="background:#e6efe7;color:#4c7d58">就绪</span><p>查资料、整理文件、运行命令。当前在执行「周末计划」。</p><span class="act pri">交给 DSH</span></div>
+          <div class="agc"><div class="h"><div class="ic" style="background:#8d9bb0">C</div><div><b>Codex</b><span class="r">编程 Agent</span></div></div>
+            <span class="st" style="background:#faf1e0;color:#b57c26">需要设置</span><p>本机检测到 Codex，待接入授权。</p><span class="act">去设置</span></div>
+          <div class="agc"><div class="h"><div class="ic" style="background:#6f7d94">Z</div><div><b>ZCode</b><span class="r">通用 Agent</span></div></div>
+            <span class="st" style="background:#eceef1;color:#7d858f">未安装</span><p>安装后即可接任务。</p><span class="act">了解安装</span></div>
+          <div class="agc"><div class="h"><div class="ic" style="background:#b0715d">S</div><div><b>SnowLuma Host</b><span class="r">QQ 频道 Agent</span></div></div>
+            <span class="st" style="background:#f7e8e2;color:#a45c48">暂不可用</span><p>运行时离线，恢复后自动就绪。</p><span class="act">查看原因</span></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Plugins 工具箱 -->
+    <section class="view" id="v-plugins">
+      <div class="tb">
+        <div class="tabs"><a class="on">全部</a><a>频道</a><a>Agent</a><a>工具集</a><a>扩展</a></div>
+        <div class="tbgrid">
+          <div class="tbc" onclick="location.hash='#/plugin'"><div class="h"><div class="ic" style="background:#5f8467">S</div><div><b>SnowLuma</b><span class="r">频道连接</span></div></div><p>连接 QQ 频道收发消息。</p><div class="m">8 个工具 · 已启用</div></div>
+          <div class="tbc" onclick="location.hash='#/plugin'"><div class="h"><div class="ic" style="background:#8d9bb0">D</div><div><b>DSH</b><span class="r">Agent Provider</span></div></div><p>把任务交给本机 DSH。</p><div class="m">6 个工具 · 已启用</div></div>
+          <div class="tbc" onclick="location.hash='#/plugin'"><div class="h"><div class="ic" style="background:#c9a85c">B</div><div><b>Bionic Chat Tools</b><span class="r">工具集</span></div></div><p>日程、提醒、摘要。</p><div class="m">7 个工具 · 已启用</div></div>
+          <div class="tbc"><div class="h"><div class="ic" style="background:#6f7d94">W</div><div><b>Web Search Safe</b><span class="r">扩展</span></div></div><p>只读联网搜索。</p><div class="m">2 个工具 · 已启用</div></div>
+          <div class="tbc"><div class="h"><div class="ic" style="background:#9b8db0">M</div><div><b>Memory Pack</b><span class="r">扩展</span></div></div><p>记忆整理与导入导出。</p><div class="m">2 个工具 · 已关闭</div></div>
+          <div class="tbc"><div class="h"><div class="ic" style="background:#b09a8d">C</div><div><b>Card Approvals</b><span class="r">扩展</span></div></div><p>卡片审批与安全点击。</p><div class="m">2 个工具 · 已启用</div></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 插件二级：整页 -->
+    <section class="view" id="v-plugin">
+      <div class="pd">
+        <a class="back" href="#/plugins">← 返回插件</a>
+        <div class="pdh"><div class="ic" style="background:#5f8467">S</div>
+          <div><h2>SnowLuma</h2><div class="s">频道连接 · v1.4 · 已启用 · 仅白名单会话</div></div></div>
+        <div class="toolgrp"><h4>收发消息</h4>
+          <div class="trow">发送群消息<span class="pm">发送</span><i class="tg"></i></div>
+          <div class="trow">发送私聊消息<span class="pm">发送</span><i class="tg"></i></div>
+          <div class="trow">回复消息<span class="pm">发送</span><i class="tg"></i></div>
+          <div class="trow">戳一戳<span class="pm">发送</span><i class="tg off"></i></div>
+        </div>
+        <div class="toolgrp"><h4>读取</h4>
+          <div class="trow">读取会话消息<span class="pm">读取</span><i class="tg"></i></div>
+          <div class="trow">查看卡片消息<span class="pm">读取</span><i class="tg"></i></div>
+          <div class="trow">获取群成员列表<span class="pm">读取</span><i class="tg"></i></div>
+        </div>
+        <div class="toolgrp"><h4>管理</h4>
+          <div class="trow">设置唤醒与潜水<span class="pm">写入</span><i class="tg"></i></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 设置：单页滚动 -->
+    <section class="view" id="v-settings">
+      <div class="setpage">
+        <nav class="anch"><a class="on">通用</a><a>外观</a><a>通知</a><a>隐私与安全</a><a>记忆与工作区</a><a style="color:#b57c26">高级</a></nav>
+        <div class="setsc">
+          <h2>通用</h2>
+          <div class="setrow"><div class="l"><b>语言</b><span>界面显示语言</span></div><span class="ctl">中文</span></div>
+          <div class="setrow"><div class="l"><b>开机自动启动</b><span>登录后后台运行</span></div><i class="tg"></i></div>
+          <div class="setrow"><div class="l"><b>关闭窗口时</b><span>隐藏到托盘，任务继续</span></div><span class="ctl">隐藏到托盘</span></div>
+          <div class="setrow" style="border-bottom:0"><div class="l"><b>模型与提供方</b><span>高级 · 大多数时候不需要动</span></div><span class="ctl">打开</span></div>
+          <div class="aboutbit"><span class="m">C</span><div><b>CetaMesh 1.0.0-rc.1</b><span>已是最新 · 更新公告 · 反馈在官网</span></div><span class="go" onclick="location.hash='#/about'">关于与反馈 →</span></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 关于：用户弹层 -->
+    <section class="view" id="v-about">
+      <div class="pop" style="display:block">
+        <h4>CetaMesh</h4>
+        <div class="v">版本 1.0.0-rc.1 · Windows · 已是最新</div>
+        <div class="r"><span class="k">检查更新</span><span class="go">再次检查</span></div>
+        <div class="r"><span class="k">更新公告</span><span class="go">查看</span></div>
+        <div class="r"><span class="k">反馈与建议</span><span class="go">浏览器打开 ↗</span></div>
+        <div class="r"><span class="k">Bug 反馈</span><span class="go">浏览器打开 ↗</span></div>
+        <div class="r"><span class="k">安全漏洞</span><span class="go">浏览器打开 ↗</span></div>
+        <div class="r"><span class="k">开源许可</span><span class="go">查看</span></div>
+      </div>
+    </section>
+  </main>
+</div>
+<script>
+function route(){
+  const h=(location.hash||'#/home').replace('#/','');
+  document.querySelectorAll('.view').forEach(el=>el.classList.toggle('on',el.id==='v-'+h));
+  document.querySelectorAll('.nav a').forEach(a=>a.classList.toggle('on',a.dataset.v===h||(h==='plugin'&&a.dataset.v==='plugins')||(h==='thread'&&a.dataset.v==='home')||(h==='about'&&a.dataset.v==='home')||(h==='settings'&&a.dataset.v==='home')));
+}
+addEventListener('hashchange',route);route();
+</script>
+</body>
+</html>
