@@ -92,16 +92,21 @@
 - 桌面壳 `supervisor.rs` 的 HTTP 探活 fallback 已是死代码（待后续会话删除）。
 - NOT_RUN_ENVIRONMENT（无真实环境时如实不跑）：真实 provider-key 回合 / 真实 QQ / 跨设备 Mesh / 签名 / 真实发行产物。
 
-## Active Work
+## Active Work (none)
 
-- **反馈功能修正（2026-10-10）**：分支 `codex/session-20261010-feedback-links`（隔离工作区
-  `.worktrees/2026-10-10-feedback-links`，基线本地 `main` = `cc201ee`）。按产品决定**移除软件内反馈收集**：
+- 反馈功能修正（2026-10-10）**已完成并在 Owner 确认后快进合并**到本地 `main`（`cc201ee..bf12184`）；
+  工作分支 `codex/session-20261010-feedback-links` 与隔离 worktree `.worktrees/2026-10-10-feedback-links` 已删除。
+  **未 push**（等 Owner 指示）。按产品决定**移除软件内反馈收集**：
   删除 `src/feedback/**`（FeedbackService / Outbox / 发送通道）、`feedback.*` IPC 与软件内表单；
   改为**只提供入口**——反馈与建议 / Bug 反馈 / 功能建议 / 安全漏洞，点击用系统默认浏览器打开官网页面
-  （`/feedback`、`/feedback?type=bug`、`/feedback?type=feature`、`/security`），站点根来自 `release-config.json`，
-  链接只带 `version` / `build` / `platform`。新增 `src/product/feedback-links.js`、
-  `desktop-shell/src/external_link.rs`（唯一允许调 `explorer.exe` 的模块）与 `test-feedback-links.mjs`。
-  **等 Owner 确认后合并 `main`、删除工作分支**。验证与边界见 `PRODUCT_SERVICES_REPORT.md`。
+  （`/feedback`、`/feedback?type=bug`、`/feedback?type=feature`、`/security`），站点根来自 `release-config.json`
+  （`feedback.baseUrl`，缺省回落 `website`），链接只带 `version` / `build` / `platform`（形状白名单）。
+  新增 `src/product/feedback-links.js`、`desktop-shell/src/external_link.rs`（唯一允许调 `explorer.exe`
+  的模块，https-only 校验）与 `test-feedback-links.mjs`（40 项）。
+  验证（合并后在 `main` 上复跑）：`npm test` → PASS 70 · FAIL 3 · NOT_RUN 7（3 个 FAIL 全部是环境：
+  `cargo:test` 的本会话 TEMP 限制 + 本机 3000 端口恰好有网关监听导致两个 environment 套件真实运行并失败）；
+  `cargo test` 161 passed / 2 failed（HKCU 注册表限制）；`test-desktop-shell` 全通过。
+  边界与细节见 `PRODUCT_SERVICES_REPORT.md`（含 §0.1 修订记录）。
 
 - 产品化任务 D（Product Services / Onboarding / Feedback）**已完成并在 Owner 确认后快进合并**到本地 `main`
   （`ce83264..33ed3ce`：`049129f` 服务层 / `9f7d050` 原生 UI / `33ed3ce` 侧边栏与截图验收）；
