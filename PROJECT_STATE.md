@@ -94,6 +94,18 @@
 
 ## Active Work (none)
 
+- 产品化任务 B（Tools / MCP / Plugin Integration Restoration）**已完成并在 Owner 确认后合并**到本地 `main`
+  （merge commit `04ab303`：first parent `38ff756` = 合并前 main，实现 `ed3331d`）；工作分支
+  `feature/tools-mcp-plugin-restoration-v1` 已删除。**未 push**（等 Owner 指示）。
+  审计先把"工具消失"证伪：QQ MCP 工具全历史**只增不减**（39 个从未删改），不可用是挂载/白名单/默认开关问题——
+  见 `LEGACY_TOOL_INVENTORY.md`（90 条历史条目，逐条 commit/路径取证）。
+  交付：`src/integrations/**`（Plugins/Tools/MCP Registry + MCP Runtime，复用官方 MCP SDK 与既有
+  `src/mcp-*.js`），IPC `plugins.` / `tools.` / `mcp.` / `integrations.` 四族；SnowLuma=Channel Provider、
+  DSH=Agent Provider 以 Integration Plugin 呈现（不改底层架构）；CetaMesh 仿生聊天工具包 53 个工具
+  = 46 restored / 5 partial（默认关，Owner 逐项开）/ 2 legacy-unsupported（进程控制）；
+  所有工具调用与管理动作经 Capability Broker（high 风险 Owner Approve Once）。
+  合并后全量：**PASS 78 · FAIL 0 · NOT_RUN_ENVIRONMENT 9**。报告 `TOOLS_MCP_PLUGIN_RESTORATION_REPORT.md`。
+
 - Product Intelligence Runtime / Product Context tool-calling follow-up is merged into local `main` through feature commit `b8c0cbc`; merged-tree `npm test` reported 73 PASS, 0 FAIL, 9 NOT_RUN_ENVIRONMENT (2026-10-10). Not pushed per Owner instruction.
 
 - 反馈功能修正（2026-10-10）**已完成并在 Owner 确认后快进合并**到本地 `main`（`cc201ee..bf12184`）；

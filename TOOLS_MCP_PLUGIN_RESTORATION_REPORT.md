@@ -203,7 +203,7 @@ Tool Source 取值：`builtin` / `mcp` / `extension` / `agent` / `channel`（`or
 - **最终全量**（`node scripts/run-all-tests.mjs`，80 suites，退出码 0）：**PASS 76 · FAIL 0 · NOT_RUN_ENVIRONMENT 4**
   （`test-console`[legacy-bridge]、`test-mcp-exec`[gateway]、`test-onebot-connection`[gateway]、`test-mcp-web-search`[network] —— 均为仓库既有的真实环境依赖项）。
 - 新增 4 个 suite 全绿；`test-composition-boundary` / `test-service-container` / `test-ipc-runtime` / `test-error-hygiene` / `test-capability-coverage` / `cargo:check` / `cargo:test` 均无回归。
-- 未 push、未合并 `main`（等 Owner 确认）。
+- 合并前状态：未 push、未合并 `main`（等 Owner 确认）；合并结果见 §14。
 
 ## 13. 已知边界与下一步（不静默）
 
@@ -213,4 +213,21 @@ Tool Source 取值：`builtin` / `mcp` / `extension` / `agent` / `channel`（`or
 4. **侧分支 Task 工具**（`cetamesh_task_*`，6 个）与 `process_run`：本轮登记为历史下线条目，未恢复；恢复需评审并遵守 `FORBIDDEN_PERMISSIONS`。
 5. **视觉工具**（`read_image` / `describe_image` / `vision_*`）：preset 白名单放行但仓库内无实现，标记 `partial` 默认关闭；需确认 DSH 侧视觉 provider 是否真实挂载。
 6. **真实环境未跑**：本轮的 MCP 生命周期用注入的传输工厂验收；真实启停 5 个 MCP Server 需在带 SnowLuma/DSH 的机器上按 `NOT_RUN_ENVIRONMENT` 口径单独验收。
-7. 分支策略：按 AGENTS.md，完成 → Owner 确认 → 合并 `main` → 删除工作分支（本分支尚未合并、未 push）。
+7. 分支策略：按 AGENTS.md，完成 → Owner 确认 → 合并 `main` → 删除工作分支（已完成，见 §14）。
+
+---
+
+## 14. 合并记录（main）
+
+- 工作分支 `feature/tools-mcp-plugin-restoration-v1`（实现 `ed3331d`，基线 `ce83264`）在 Owner 确认后合并到本地 `main`：
+  **merge commit `04ab303`**（first parent `38ff756` = 合并前的 main，second parent `ed3331d`）。
+- 合并时 main 已前进 21 个提交（Product Intelligence Runtime / 产品面服务 / 反馈入口修正等），唯一真冲突：
+  `src/app/service-container.js` —— 按"双方保留"解决：main 的产品面服务装配 + 本任务的 `integrationService` 装配。
+- **合并期适配（main 已改变的事实）**：main 的 Agent Provider 现在**始终注册 `dsh`**，但未注入 API 时
+  `available=false / health=unavailable`。因此 `providerSnapshot` 改为只报告 `available===true` 的 Agent Provider
+  （**注册 ≠ 可用**）；Channel 侧仍以"Channel Provider 是否存在"为准（实时连接由通道 state 与本地服务上报）。
+  对应断言同步为"集成状态必须与 Provider 真实可用性一致"。
+- **合并后全量验证**（worktree `product-context-main-merge`）：`node scripts/run-all-tests.mjs`（87 suites）
+  → **PASS 78 · FAIL 0 · NOT_RUN_ENVIRONMENT 9**（9 项为真实环境/构建产物缺失：legacy-bridge、gateway×2、
+  network、core-dist×2、release-dist、shell-debug×2，按仓库口径如实记录）。
+- 工作分支已删除；`main` 领先 `origin/main` 41 个提交，**未 push**（等 Owner 指示）。
