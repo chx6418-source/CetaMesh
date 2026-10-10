@@ -105,6 +105,8 @@
   = 46 restored / 5 partial（默认关，Owner 逐项开）/ 2 legacy-unsupported（进程控制）；
   所有工具调用与管理动作经 Capability Broker（high 风险 Owner Approve Once）。
   合并后全量：**PASS 78 · FAIL 0 · NOT_RUN_ENVIRONMENT 9**。报告 `TOOLS_MCP_PLUGIN_RESTORATION_REPORT.md`。
+  Owner 确认后已 **push 到 `origin/main`**（`e8a122a..bd60537`，2026-10-10）；GitCode 远端
+  `gitcode/main`（`5633dd7`）存在 1 个本地没有的提交，**未**强行推送（等 Owner 指示）。
 
 - Product Intelligence Runtime / Product Context tool-calling follow-up is merged into local `main` through feature commit `b8c0cbc`; merged-tree `npm test` reported 73 PASS, 0 FAIL, 9 NOT_RUN_ENVIRONMENT (2026-10-10). Not pushed per Owner instruction.
 
