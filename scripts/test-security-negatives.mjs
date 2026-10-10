@@ -51,7 +51,7 @@ try {
 
   // ── 1. 跨任务越权：Task A 的 grant 指向 Task B ────────────────────────────
   await deny(svc.broker.execute({ actor: agentA, taskId: taskB.id, workspaceId: wsB, capability: 'filesystem.read', input: { path: 'secret.txt' } }), 'TASK_NOT_AUTHORIZED');
-  await deny(svc.broker.execute({ actor: agentA, taskId: taskA.id, workspaceId: wsB, capability: 'filesystem.read', input: { path: 'secret.txt' } }), 'WORKSPACE_NOT_AUTHORIZED');
+  await deny(svc.broker.execute({ actor: agentA, taskId: taskA.id, workspaceId: wsB, capability: 'filesystem.read', input: { path: 'secret.txt' } }), 'WORKSPACE_RECONCILIATION_REQUIRED');
   ok('跨任务/跨工作区越权：Task A 的 grant 无法读取 Task B / 工作区 B（TASK_NOT_AUTHORIZED + WORKSPACE_NOT_AUTHORIZED）');
 
   // ── 2. 无 grant 的 agent ─────────────────────────────────────────────────
@@ -108,7 +108,7 @@ try {
   }
 
   // ── 7. Agent test.run 指向未授权 Workspace ───────────────────────────────
-  await deny(svc.broker.execute({ actor: agentA, taskId: taskA.id, workspaceId: wsB, capability: 'test.run', input: { tool: 'npm', args: ['test'] } }), 'WORKSPACE_NOT_AUTHORIZED');
+  await deny(svc.broker.execute({ actor: agentA, taskId: taskA.id, workspaceId: wsB, capability: 'test.run', input: { tool: 'npm', args: ['test'] } }), 'WORKSPACE_RECONCILIATION_REQUIRED');
   ok('Agent test.run：跨工作区（未授权）→ WORKSPACE_NOT_AUTHORIZED');
 
   // ── 8. Extension 未声明 host 的网络请求（Broker 网络能力面复核） ──────────

@@ -1,12 +1,7 @@
 import { redactText } from '../logging/redact.js';
 
-const AVAILABILITY_STATES = new Set([
-  'registered',
-  'available',
-  'disabled',
-  'unavailable',
-  'unknown'
-]);
+const AVAILABILITY_STATES = new Set(['available', 'registered', 'disabled', 'unavailable', 'unknown']);
+const OPTIONAL_FIELDS = ['risk', 'source', 'grantState', 'category'];
 
 function safeText(value, maxLength = 240) {
   if (typeof value !== 'string') return undefined;
@@ -20,28 +15,40 @@ function idSet(values) {
   return new Set(values.filter((value) => typeof value === 'string' && value.trim()).map((value) => value.trim()));
 }
 
-function isMcpProvider(provider) {
-  return typeof provider === 'string' && /^mcp(?:[-:/.]|$)/i.test(provider);
-}
-
 function compareIds(left, right) {
   return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
 }
 
+function validSchema(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) && value.type === 'object';
+}
+
 /**
- * Projects registry data into bounded, descriptive capability facts.
- * Requestability is only advertised for the managed-agent execution path and
- * requires both a live grant and an explicit requestable id.
+ * Pure projection of a runtime capability snapshot into callable tool descriptors and
+ * non-callable status facts. It performs no probes and never grants authority.
  */
 export function buildCapabilityContext({
   registered = [],
   grantedIds = [],
   requestableIds = [],
-  executionPath = 'chat'
+  executionPath = 'chat',
+  actorKind = 'owner',
+  mode = 'chat',
+  workspaceAvailable = true,
+  taskAvailable = false,
+  workspaceReconciliationRequired = false,
+  toolCalling = 'supported',
+  allowTools = true,
+  maxCapabilities = 128
 } = {}) {
   const granted = idSet(grantedIds);
-  const allowedRequestable = idSet(requestableIds);
-  const canRequest = executionPath === 'managed-agent';
+  const explicitRequestable = idSet(requestableIds);
+  const restrictedToRequestable = explicitRequestable.size > 0 || executionPath === 'managed-agent';
+  const canCall = allowTools === true
+    && toolCalling === 'supported'
+    && !workspaceReconciliationRequired
+    && ['chat', 'smart', 'task-agent', 'managed-agent'].includes(mode)
+    && ['chat', 'managed-agent'].includes(executionPath);
   const byId = new Map();
 
   for (const item of Array.isArray(registered) ? registered : []) {
@@ -49,44 +56,79 @@ export function buildCapabilityContext({
     const id = safeText(item.id, 160);
     if (!id || byId.has(id)) continue;
 
-    const provider = safeText(item.provider, 100);
     const availabilityValue = safeText(item.availability, 40)?.toLowerCase();
     const availability = AVAILABILITY_STATES.has(availabilityValue)
       ? availabilityValue
-      : 'unknown';
-    const isGranted = granted.has(id);
-    const requestable = canRequest
+      : item.available === false ? 'unavailable' : 'available';
+    const description = safeText(item.description, 240);
+    const inputSchema = validSchema(item.inputSchema) ? structuredClone(item.inputSchema) : null;
+    const isGranted = actorKind === 'owner' ? true : granted.has(id);
+    const explicitlyRequestable = !restrictedToRequestable || explicitRequestable.has(id);
+    const scopeAllowed = (item.workspace !== true || workspaceAvailable === true)
+      && (item.requiresTask !== true || taskAvailable === true);
+    const callable = canCall
+      && item.modelCallable !== false
+      && item.available !== false
+      && availability === 'available'
+      && Boolean(description)
+      && Boolean(inputSchema)
       && isGranted
-      && allowedRequestable.has(id)
-      && availability !== 'disabled'
-      && availability !== 'unavailable';
-
+      && explicitlyRequestable
+      && scopeAllowed;
+    const risk = safeText(item.risk, 40)?.toLowerCase();
     const descriptor = {
       id,
+      available: callable,
+      availability,
       granted: isGranted,
-      requestable,
-      availability
+      requestable: callable
     };
-    const permission = safeText(item.permission, 120);
-    const risk = safeText(item.risk, 40);
-    if (permission) descriptor.permission = permission;
-    if (risk) descriptor.risk = risk;
-    if (provider) descriptor.provider = provider;
-    if (typeof item.workspace === 'boolean') descriptor.workspace = item.workspace;
-    const label = safeText(item.label ?? item.name, 160);
-    if (label) descriptor.label = label;
-
+    if (callable) {
+      descriptor.description = description;
+      descriptor.inputSchema = inputSchema;
+      descriptor.requiresApproval = item.requiresApproval === true || ['high', 'critical'].includes(risk);
+      for (const key of OPTIONAL_FIELDS) {
+        const value = key === 'source'
+          ? safeText(item.source ?? item.provider, 100)
+          : safeText(item[key], key === 'category' ? 80 : 60);
+        if (value) descriptor[key] = value;
+      }
+      if (actorKind !== 'owner') descriptor.grantState = 'granted';
+      else descriptor.grantState = 'owner';
+    } else {
+      const reason = item.requiresTask === true && taskAvailable !== true ? 'task-required'
+        : item.workspace === true && workspaceAvailable !== true ? 'scope-unavailable'
+        : workspaceReconciliationRequired ? 'workspace-reconciliation-required'
+          : toolCalling !== 'supported' ? 'tool-calling-unsupported'
+            : !description || !inputSchema ? 'descriptor-incomplete'
+              : undefined;
+      if (reason) descriptor.reason = reason;
+    }
     byId.set(id, descriptor);
   }
 
-  const descriptors = [...byId.values()].sort(compareIds);
-  const requestableIdsOut = descriptors.filter((item) => item.requestable).map((item) => item.id);
-  const mcp = descriptors.filter((item) => isMcpProvider(item.provider)).map((item) => item.id);
+  const rows = [...byId.values()].sort(compareIds);
+  const maximum = Number.isSafeInteger(maxCapabilities) ? Math.max(0, Math.min(maxCapabilities, 128)) : 128;
+  const manifest = rows.filter((item) => item.requestable).slice(0, maximum);
+  const manifestIds = new Set(manifest.map((item) => item.id));
+  const statusSummary = rows
+    .filter((item) => !manifestIds.has(item.id))
+    .map((item) => ({
+      id: item.id,
+      availability: item.availability,
+      ...(item.reason ? { reason: item.reason } : {})
+    }));
+  const mcp = manifest
+    .filter((item) => /^(?:mcp(?:[-:/.]|$)|mcp-adapter$)/i.test(item.source ?? ''))
+    .map((item) => item.id);
 
   return {
     executionPath: safeText(executionPath, 80) ?? 'unknown',
-    registered: descriptors,
-    mcp,
-    requestable: requestableIdsOut
+    mode: safeText(mode, 80) ?? 'unknown',
+    toolCalling: toolCalling === 'supported' ? 'supported' : 'unsupported',
+    manifest,
+    statusSummary,
+    requestable: manifest.map((item) => item.id),
+    mcp
   };
 }

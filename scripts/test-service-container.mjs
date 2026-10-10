@@ -8,6 +8,7 @@ const originalDataDir = process.env.WHALEBRIDGE_DATA_DIR;
 const originalFetch = globalThis.fetch;
 let networkAttempts = 0;
 let onExit = null;
+let services = null;
 
 try {
   process.env.WHALEBRIDGE_DATA_DIR = root;
@@ -18,7 +19,7 @@ try {
 
   const { createCetaMeshServices } = await import('../src/app/service-container.js');
   const config = { allow: { private: [], groups: ['7'] } };
-  const services = createCetaMeshServices({ config });
+  services = createCetaMeshServices({ config });
 
   const validateChannelSend = id => services.capabilityService.broker.registry.require('channel.send').validate({
     input: { kind: 'group', id: String(id), text: 'message' }
@@ -127,7 +128,7 @@ try {
   const extensionCapability = services.capabilityService.broker.list()
     .find(capability => capability.id === extensionCapabilityId);
   assert.ok(extensionCapability, 'enabling an Extension registers its capability in the real Broker');
-  assert.equal(extensionCapability.availability, undefined, 'the real registry does not supply lifecycle availability');
+  assert.equal(extensionCapability.availability, 'available', 'the real registry reports current lifecycle availability');
 
   const agentPrincipal = services.capabilityService.grantTask(task.id, {
     capabilities: ['filesystem.read', 'web.search', extensionCapabilityId]
@@ -139,49 +140,55 @@ try {
     provider: 'cetamesh',
     principal: { taskId: task.id, workspaceId: workspace.id, actor: agentPrincipal },
     modelProvider: 'openai',
-    model: 'gpt-4o-mini'
+    model: 'gpt-4o-mini',
+    toolCalling: 'supported'
   }));
   assert.deepEqual(agentContext.capabilities.requestable, [extensionCapabilityId, 'filesystem.read', 'web.search']);
   assert.deepEqual(agentContext.capabilities.mcp, ['web.search']);
-  const extensionDescriptor = agentContext.capabilities.registered.find(item => item.id === extensionCapabilityId);
-  assert.equal(extensionDescriptor.requestable, true, 'enabled registered Extension capability is requestable when granted');
+  const extensionDescriptor = agentContext.capabilities.manifest.find(item => item.id === extensionCapabilityId);
+  assert.ok(extensionDescriptor, 'enabled registered Extension capability is in the model manifest when granted');
 
   await services.extensionService.execute({ method: 'ext.disable', params: { id: extensionId } });
   const disabledExtensionContext = JSON.parse(await services.productContextService.buildForAgent({
     sessionId: agentSessionId,
     provider: 'cetamesh',
     principal: { taskId: task.id, workspaceId: workspace.id, actor: agentPrincipal },
-    modelProvider: 'openai'
+    modelProvider: 'openai',
+    toolCalling: 'supported'
   }));
-  const disabledExtensionDescriptor = disabledExtensionContext.capabilities.registered
+  const disabledExtensionDescriptor = disabledExtensionContext.capabilities.statusSummary
     .find(item => item.id === extensionCapabilityId);
   assert.equal(disabledExtensionDescriptor.availability, 'disabled');
-  assert.equal(disabledExtensionDescriptor.granted, true, 'disabling an Extension does not erase the Task grant');
-  assert.equal(disabledExtensionDescriptor.requestable, false, 'disabled Extension capability is not advertised as requestable');
+  assert.equal(disabledExtensionContext.capabilities.requestable.includes(extensionCapabilityId), false,
+    'disabled Extension capability is not advertised as requestable');
 
   await services.extensionService.execute({ method: 'ext.enable', params: { id: extensionId } });
   const reenabledExtensionContext = JSON.parse(await services.productContextService.buildForAgent({
     sessionId: agentSessionId,
     provider: 'cetamesh',
     principal: { taskId: task.id, workspaceId: workspace.id, actor: agentPrincipal },
-    modelProvider: 'openai'
+    modelProvider: 'openai',
+    toolCalling: 'supported'
   }));
-  assert.equal(reenabledExtensionContext.capabilities.registered
-    .find(item => item.id === extensionCapabilityId).requestable, true,
+  assert.equal(reenabledExtensionContext.capabilities.requestable.includes(extensionCapabilityId), true,
   're-enabling restores requestability without changing the Task grant');
 
-  await services.extensionService.execute({ method: 'ext.uninstall', params: { id: extensionId } });
+  const uninstall = await services.extensionService.execute({ method: 'ext.uninstall', params: { id: extensionId } });
+  assert.equal(uninstall.removedFiles, true, 'uninstall removes the copied Extension package');
+  assert.equal(fs.existsSync(path.join(services.extensionService.store.packagesDir, extensionId)), false,
+    'uninstall releases the native Extension package directory before fixture cleanup');
   const removedExtensionContext = JSON.parse(await services.productContextService.buildForAgent({
     sessionId: agentSessionId,
     provider: 'cetamesh',
     principal: { taskId: task.id, workspaceId: workspace.id, actor: agentPrincipal },
-    modelProvider: 'openai'
+    modelProvider: 'openai',
+    toolCalling: 'supported'
   }));
-  const removedExtensionDescriptor = removedExtensionContext.capabilities.registered
+  const removedExtensionDescriptor = removedExtensionContext.capabilities.statusSummary
     .find(item => item.id === extensionCapabilityId);
   assert.equal(removedExtensionDescriptor.availability, 'unavailable');
-  assert.equal(removedExtensionDescriptor.granted, true, 'uninstalling an Extension does not erase the Task grant');
-  assert.equal(removedExtensionDescriptor.requestable, false, 'removed Extension capability is not advertised as requestable');
+  assert.equal(removedExtensionContext.capabilities.requestable.includes(extensionCapabilityId), false,
+    'removed Extension capability is not advertised as requestable');
   const cetameshProvider = agentContext.agentProviders.find((provider) => provider.id === 'cetamesh');
   assert.equal(cetameshProvider.availability, 'registered');
   assert.equal(cetameshProvider.health, 'unknown', 'context construction does not probe provider health');
@@ -207,6 +214,13 @@ try {
 
   console.log('PASS Core service container constructs without DSH, QQ or provider probes');
 } finally {
+  if (services) {
+    await Promise.all([
+      services.extensionService.close(),
+      services.chatService.close(),
+      services.agentService.close()
+    ]);
+  }
   globalThis.fetch = originalFetch;
   if (originalDataDir === undefined) delete process.env.WHALEBRIDGE_DATA_DIR;
   else process.env.WHALEBRIDGE_DATA_DIR = originalDataDir;

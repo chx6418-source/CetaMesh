@@ -1,6 +1,6 @@
 import { DESKTOP_USER_PRINCIPAL } from '../memory/service.js';
 import { buildCapabilityContext } from './capability-context.js';
-import { buildProductContext } from './product-context.js';
+import { projectProductContext } from './product-context.js';
 
 const OMIT_MEMORY_ERRORS = new Set([
   'CROSS_SCOPE_LINK_REQUIRED',
@@ -119,31 +119,55 @@ function serializeContext({
   memoryReferences,
   modelProvider,
   model,
+  requestedModel,
+  resolvedModel,
   registered,
   grantedIds = [],
   requestableIds = [],
   extensionService,
-  agentBroker
+  agentBroker,
+  actorKind = 'owner',
+  taskAvailable = Boolean(task),
+  workspaceReconciliation = null,
+  toolCalling = 'supported'
 }) {
   const extensions = extensionSummaries(extensionService);
   const capabilities = buildCapabilityContext({
     registered: applyExtensionAvailability(registered, extensions),
     grantedIds,
     requestableIds,
-    executionPath
+    executionPath,
+    actorKind,
+    mode,
+    taskAvailable,
+    workspaceAvailable: Boolean(workspace),
+    workspaceReconciliationRequired: workspaceReconciliation?.required === true,
+    toolCalling
   });
-  return buildProductContext({
+  const projection = projectProductContext({
     mode,
     executionPath,
-    session: { id: record?.id, modelProvider, model },
+    session: { id: record?.id, modelProvider, model,
+      requestedModel: requestedModel ?? (model ?? 'provider-default'),
+      ...(typeof resolvedModel === 'string' && resolvedModel ? { resolvedModel } : {}) },
     routing,
     task,
     workspace,
     memoryReferences,
     capabilities,
     extensions,
-    agentProviders: agentProviderSummaries(agentBroker)
+    agentProviders: agentProviderSummaries(agentBroker),
+    workspaceReconciliation,
+    toolCalling
   });
+  return {
+    context: projection.serialized,
+    serialized: projection.serialized,
+    manifest: projection.manifest,
+    truncated: projection.truncated,
+    workspaceReconciliation,
+    scope: { taskId: task?.id ?? null, workspaceId: workspace?.id ?? null }
+  };
 }
 
 /** Resolves only explicitly linked runtime facts for Chat and a live Task Agent session. */
@@ -153,15 +177,23 @@ export function createProductContextService({
   memoryService,
   capabilityService,
   extensionService,
-  agentBroker
+  agentBroker,
+  modelRuntime = null
 } = {}) {
-  async function buildForChat({ record, routing, modelProvider, model } = {}) {
+  async function buildForChatTurn({ record, routing, modelProvider, model, requestedModel, resolvedModel, toolCalling } = {}) {
     const source = record && typeof record === 'object' ? record : {};
     const task = taskFromRuntime(taskRuntime, source.taskId);
     const workspaceId = source.config?.workspaceId;
     const workspace = typeof workspaceId === 'string' && workspaceId.trim()
       ? workspaceService?.describeWorkspace(workspaceId) ?? null
       : null;
+    const expectedWorkspaceId = task?.workspaceId ?? null;
+    const observedWorkspaceId = typeof workspaceId === 'string' && workspaceId.trim() ? workspaceId : null;
+    const workspaceReconciliation = task && expectedWorkspaceId !== observedWorkspaceId
+      ? { required: true, status: 'required', expectedWorkspaceId, observedWorkspaceId,
+        code: 'WORKSPACE_RECONCILIATION_REQUIRED' }
+      : task ? { required: false, status: 'resolved', expectedWorkspaceId, observedWorkspaceId }
+        : null;
     const memoryReferences = task
       ? resolveMemoryReferences(memoryService, task, DESKTOP_USER_PRINCIPAL)
       : [];
@@ -176,23 +208,37 @@ export function createProductContextService({
       memoryReferences,
       modelProvider,
       model,
+      requestedModel,
+      resolvedModel,
       registered: registeredCapabilities(capabilityService),
       extensionService,
-      agentBroker
+      agentBroker,
+      taskAvailable: Boolean(task),
+      workspaceReconciliation,
+      toolCalling: toolCalling ?? 'unsupported'
     });
   }
 
-  async function buildForAgent({ sessionId, provider = 'cetamesh', principal, modelProvider, model } = {}) {
+  async function buildForChat(request = {}) {
+    return (await buildForChatTurn(request)).context;
+  }
+
+  async function buildForAgentTurn({ sessionId, provider = 'cetamesh', principal, modelProvider, model, requestedModel, resolvedModel, toolCalling } = {}) {
     const task = taskRuntime?.findByAgent?.({ provider, sessionId }) ?? null;
     const liveActor = task ? capabilityService?.principalForTask?.(task.id) : null;
     if (!task || !liveActor || !principal
       || principal.taskId !== task.id
-      || principal.workspaceId !== task.workspaceId
+      || (principal.expectedWorkspaceId ?? task.workspaceId) !== task.workspaceId
       || principal.actor?.id !== liveActor.id) {
       throw Object.assign(new Error('Managed Agent Task binding is no longer valid'), { code: 'AGENT_ASSIGNMENT_REQUIRED' });
     }
 
-    const workspace = workspaceService?.describeWorkspace(task.workspaceId) ?? null;
+    const observedWorkspaceId = principal.workspaceId ?? null;
+    const workspace = observedWorkspaceId ? workspaceService?.describeWorkspace(observedWorkspaceId) ?? null : null;
+    const workspaceReconciliation = task.workspaceId !== observedWorkspaceId
+      ? { required: true, status: 'required', expectedWorkspaceId: task.workspaceId, observedWorkspaceId,
+        code: 'WORKSPACE_RECONCILIATION_REQUIRED' }
+      : { required: false, status: 'resolved', expectedWorkspaceId: task.workspaceId, observedWorkspaceId };
     const memoryPrincipal = capabilityService.memoryPrincipal(liveActor);
     const memoryReferences = resolveMemoryReferences(memoryService, task, memoryPrincipal);
     const grantedIds = Array.isArray(liveActor.grants?.capabilities) ? liveActor.grants.capabilities : [];
@@ -205,13 +251,23 @@ export function createProductContextService({
       memoryReferences,
       modelProvider,
       model,
+      requestedModel,
+      resolvedModel,
       registered: registeredCapabilities(capabilityService),
       grantedIds,
       requestableIds: grantedIds,
       extensionService,
-      agentBroker
+      agentBroker,
+      actorKind: 'agent',
+      taskAvailable: true,
+      workspaceReconciliation,
+      toolCalling: toolCalling ?? 'unsupported'
     });
   }
 
-  return { buildForChat, buildForAgent };
+  async function buildForAgent(request = {}) {
+    return (await buildForAgentTurn(request)).context;
+  }
+
+  return { buildForChat, buildForChatTurn, buildForAgent, buildForAgentTurn };
 }

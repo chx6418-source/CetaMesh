@@ -92,7 +92,8 @@
 - 桌面壳 `supervisor.rs` 的 HTTP 探活 fallback 已是死代码（待后续会话删除）。
 - NOT_RUN_ENVIRONMENT（无真实环境时如实不跑）：真实 provider-key 回合 / 真实 QQ / 跨设备 Mesh / 签名 / 真实发行产物。
 
-## Active Work (none)
+## Active Work
+- Product Intelligence Runtime / Product Context tool-calling follow-up is implemented on `codex/product-context-tool-calling` in its isolated worktree; `npm test` reports 69 PASS, 0 FAIL, 9 NOT_RUN_ENVIRONMENT (2026-10-10). Changes remain uncommitted for Owner review. Follow the repository delivery rule: wait for Owner confirmation, then merge to `main`, then delete this work branch. Do not push `main`.
 - 上线冲刺任务 B（统一配对）已完成并在 Owner 确认后合并到本地 `main`，工作分支与临时 worktree 已清理；
   Mobile 仓 `feature/unified-device-pairing-v1` 同样已合并到其本地 `main` 并删除分支。**两个仓库均未 push**（等 Owner 指示）。
 - 上线冲刺任务 D（Web → Native 高保真主题迁移）已完成并在 Owner 确认后合并到本地 `main`；工作分支

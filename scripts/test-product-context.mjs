@@ -22,23 +22,26 @@ run('stable product identity states CetaMesh ownership and context trust boundar
 });
 
 run('capability context sorts descriptors and only marks granted managed-agent tools requestable', () => {
+  const emptySchema = { type: 'object', properties: {}, required: [], additionalProperties: false };
   const context = buildCapabilityContext({
     registered: [
-      { id: 'web.search', permission: 'web.search', provider: 'mcp-adapter', risk: 'medium', workspace: false },
-      { id: 'filesystem.read', permission: 'filesystem.read', provider: 'workspace', risk: 'low', workspace: true },
-      { id: 'admin.publish', permission: 'publish', provider: 'desktop', risk: 'high', workspace: false, availability: 'unavailable' }
+      { id: 'web.search', permission: 'web.search', provider: 'mcp-adapter', risk: 'medium', workspace: false,
+        description: 'Search the web.', inputSchema: emptySchema },
+      { id: 'filesystem.read', permission: 'filesystem.read', provider: 'workspace', risk: 'low', workspace: true,
+        description: 'Read a file in the authorized Workspace.', inputSchema: emptySchema },
+      { id: 'admin.publish', permission: 'publish', provider: 'desktop', risk: 'high', workspace: false,
+        description: 'Publish an artifact.', inputSchema: emptySchema, availability: 'unavailable' }
     ],
     grantedIds: ['filesystem.read', 'web.search'],
     requestableIds: ['filesystem.read', 'web.search', 'admin.publish', 'unknown.capability'],
     executionPath: 'managed-agent'
   });
 
-  assert.deepEqual(context.registered.map(({ id }) => id), ['admin.publish', 'filesystem.read', 'web.search']);
+  assert.deepEqual(context.manifest.map(({ id }) => id), ['filesystem.read', 'web.search']);
+  assert.deepEqual(context.statusSummary, [{ id: 'admin.publish', availability: 'unavailable' }]);
   assert.deepEqual(context.mcp, ['web.search']);
   assert.deepEqual(context.requestable, ['filesystem.read', 'web.search']);
-  assert.equal(context.registered[0].requestable, false);
-  assert.equal(context.registered[0].availability, 'unavailable');
-  assert.equal(context.registered[1].requestable, true);
+  assert.equal(context.manifest[0].requestable, true);
 
   const untrustedFlags = buildCapabilityContext({
     registered: [{ id: 'admin.publish', granted: true, requestable: true }],
@@ -47,16 +50,18 @@ run('capability context sorts descriptors and only marks granted managed-agent t
   assert.deepEqual(untrustedFlags.requestable, []);
 });
 
-run('standalone chat never advertises a registered capability as model-requestable', () => {
+run('standalone Chat advertises complete registered tools to the structured Model runtime', () => {
   const context = buildCapabilityContext({
-    registered: [{ id: 'web.search', permission: 'web.search', provider: 'mcp-adapter', risk: 'medium' }],
+    registered: [{ id: 'web.search', permission: 'web.search', provider: 'mcp-adapter', risk: 'medium',
+      description: 'Search the web.', inputSchema: { type: 'object', properties: {}, required: [], additionalProperties: false } }],
     grantedIds: ['web.search'],
     requestableIds: ['web.search'],
     executionPath: 'chat'
   });
 
-  assert.deepEqual(context.requestable, []);
-  assert.equal(context.registered[0].requestable, false);
+  assert.deepEqual(context.requestable, ['web.search']);
+  assert.equal(context.manifest[0].description, 'Search the web.');
+  assert.equal(context.manifest[0].availability, 'available');
 });
 
 run('Task and Workspace projections independently omit missing links and unsafe fields', () => {
@@ -120,7 +125,7 @@ run('product context is deterministic and stays within the requested character l
   assert.equal(first.includes('must not serialize'), false);
   assert.equal(first.includes('D:\\sensitive\\root'), false);
   assert.equal(first.includes('private'), false);
-  assert.equal(JSON.parse(first).schemaVersion, 1);
+  assert.equal(JSON.parse(first).schemaVersion, 2);
 
   const oversized = buildProductContext({
     ...snapshot,
@@ -149,9 +154,8 @@ run('product context is deterministic and stays within the requested character l
   }, { maxChars: 1800 });
   const compactManifest = JSON.parse(manyCapabilities);
   assert.ok(manyCapabilities.length <= 1800);
-  assert.ok(compactManifest.capabilities.registered.length > 0, 'compaction retains registered capability facts');
-  assert.deepEqual(Object.keys(compactManifest.capabilities.registered[0]).sort(), ['availability', 'granted', 'id', 'requestable']);
-  assert.equal(compactManifest.capabilities.registered[0].availability, 'registered');
-  assert.equal(compactManifest.capabilities.registered[0].granted, false);
-  assert.equal(compactManifest.capabilities.registered[0].requestable, false);
+  assert.ok(compactManifest.capabilities.statusSummary.length > 0, 'compaction retains capability status facts');
+  assert.deepEqual(Object.keys(compactManifest.capabilities.statusSummary[0]).sort(), ['availability', 'id', 'reason']);
+  assert.equal(compactManifest.capabilities.statusSummary[0].availability, 'registered');
+  assert.equal(compactManifest.capabilities.statusSummary[0].reason, 'descriptor-incomplete');
 });

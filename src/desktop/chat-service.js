@@ -95,6 +95,9 @@ export function createChatService({
   agentProviders = [],
   modelRuntime = null,
   buildProductContext = null,
+  buildProductTurnContext = null,
+  toolExecutionCoordinator = null,
+  requireProductContext = false,
   router = null,
   platformRoute = null,
   agentFollow = null,
@@ -132,6 +135,27 @@ export function createChatService({
   const sessions = new Map(); // id -> record（含 config / dshSessionId / archived）
   const runtime = new Map(); // id -> { turn?, follow?, modelTurn? }
 
+  async function buildTurnContext(record, routing, resolved, model) {
+    let snapshot = null;
+    if (typeof buildProductTurnContext === 'function') {
+      snapshot = await buildProductTurnContext({ record, routing, modelProvider: resolved.id, model,
+        requestedModel: model ?? 'provider-default',
+        resolvedModel: record.lastModelResolution?.providerId === resolved.id ? record.lastModelResolution.resolvedModel : null,
+        toolCalling: modelRuntime?.supportsToolCalling?.(resolved.id) ? 'supported' : 'unsupported' });
+    } else if (typeof buildProductContext === 'function') {
+      const value = await buildProductContext({ record, routing, modelProvider: resolved.id, model });
+      snapshot = typeof value === 'string' ? { context: value, manifest: [] } : value;
+    }
+    if (!snapshot && requireProductContext) throw chatError('PRODUCT_CONTEXT_UNAVAILABLE', 'CetaMesh Product Context could not be built');
+    if (!snapshot) return { context: null, manifest: [], scope: { taskId: record.taskId ?? null, workspaceId: record.config.workspaceId ?? null } };
+    if (typeof snapshot.context !== 'string' && typeof snapshot.serialized === 'string') snapshot.context = snapshot.serialized;
+    if (typeof snapshot.context !== 'string' || !Array.isArray(snapshot.manifest)) {
+      if (requireProductContext) throw chatError('PRODUCT_CONTEXT_UNAVAILABLE', 'CetaMesh Product Context returned an incomplete turn snapshot');
+      return { context: null, manifest: [], scope: { taskId: record.taskId ?? null, workspaceId: record.config.workspaceId ?? null } };
+    }
+    return snapshot;
+  }
+
   function loadStore() {
     const store = loadChatFile(sessionsFile, null);
     const list = Array.isArray(store?.sessions) ? store.sessions : [];
@@ -150,6 +174,12 @@ export function createChatService({
       dshSessionId: typeof record.dshSessionId === 'string' && record.dshSessionId ? record.dshSessionId : null,
       runtimeProvider: typeof record.runtimeProvider === 'string' ? record.runtimeProvider : null,
       taskId: typeof record.taskId === 'string' ? record.taskId : null,
+      lastModelResolution: record.lastModelResolution && typeof record.lastModelResolution === 'object'
+        ? { providerId: String(record.lastModelResolution.providerId ?? ''),
+            requestedModel: String(record.lastModelResolution.requestedModel ?? ''),
+            ...(typeof record.lastModelResolution.resolvedModel === 'string' && record.lastModelResolution.resolvedModel
+              ? { resolvedModel: record.lastModelResolution.resolvedModel } : {}) }
+        : null,
       config: {
         provider: PROVIDERS.includes(record.config?.provider) ? record.config.provider : baseConfig.provider,
         model: typeof record.config?.model === 'string' ? record.config.model : baseConfig.model,
@@ -430,6 +460,12 @@ export function createChatService({
     const data = event?.data ?? {};
     if (event.type === 'turn/start') {
       if (state.chunkBuffer) state.chunkBuffer = '';
+      if (state.turn && (data.requestedModel || data.providerId)) state.turn.routing = {
+        ...(state.turn.routing ?? {}),
+        ...(data.providerId ? { modelProvider: data.providerId } : {}),
+        ...(data.requestedModel ? { requestedModel: data.requestedModel } : {}),
+        ...(data.resolvedModel ? { resolvedModel: data.resolvedModel } : {})
+      };
       return;
     }
     if (event.type === 'assistant/chunk') {
@@ -462,6 +498,16 @@ export function createChatService({
       state.turn.displayText = text;
       const usage = extractUsage(event) ?? state.turn.usage ?? null;
       state.turn.usage = usage;
+      if (data.resolvedModel || data.requestedModel) state.turn.routing = {
+        ...(state.turn.routing ?? {}),
+        ...(data.requestedModel ? { requestedModel: data.requestedModel } : {}),
+        ...(data.resolvedModel ? { resolvedModel: data.resolvedModel } : {})
+      };
+      if (data.resolvedModel && state.turn.routing?.modelProvider) {
+        record.lastModelResolution = { providerId: state.turn.routing.modelProvider,
+          requestedModel: state.turn.routing.requestedModel ?? 'provider-default', resolvedModel: data.resolvedModel };
+        saveStore();
+      }
       if (reasonKind === 'completed') {
         state.turn.state = 'done';
       } else if (reasonKind === 'cancelled' || reasonKind === 'aborted') {
@@ -618,13 +664,65 @@ export function createChatService({
     const settleErr = (error) => { if (settleHandshake && !settleHandshake.settled) { settleHandshake.settled = true; settleHandshake.reject(error); } };
     const done = (async () => {
       try {
-        const productContext = typeof buildProductContext === 'function'
-          ? await buildProductContext({ record, routing, modelProvider: resolved.id, model })
-          : null;
+        let productContext = await buildTurnContext(record, routing, resolved, model);
+        const messages = buildModelMessages(record.id, promptText, productContext.context);
+        const supportsTools = modelRuntime.supportsToolCalling?.(resolved.id) === true;
+        if (supportsTools && toolExecutionCoordinator?.run) {
+          const turnId = state.turn?.id ?? crypto.randomUUID();
+          const result = await toolExecutionCoordinator.run({
+            providerId: resolved.id,
+            model: model ?? undefined,
+            reasoning: record.config.reasoning,
+            messages,
+            manifest: productContext.manifest,
+            actor: OWNER_ACTOR,
+            sessionId: record.id,
+            turnId,
+            targetKind: 'chat',
+            scope: productContext.scope ?? { taskId: record.taskId ?? null, workspaceId: record.config.workspaceId ?? null },
+            signal: controller.signal,
+            onCapabilityResult: ({ capability, result: toolResult }) => {
+              if (capability === 'task.create' && toolResult?.status === 'completed') {
+                const taskId = toolResult.result?.task?.id;
+                if (typeof taskId === 'string' && taskId) { record.taskId = taskId; saveStore(); }
+              }
+            },
+            refreshContext: async ({ capability }) => {
+              if (capability !== 'task.create') return null;
+              productContext = await buildTurnContext(record, routing, resolved, model);
+              return productContext;
+            }
+          });
+          settleOk();
+          const turn = state.turn;
+          if (turn) {
+            turn.routing = { ...(routing ?? {}), toolCalling: result.toolCalling,
+              requestedModel: model ?? 'provider-default', resolvedModel: result.resolvedModel ?? null };
+            if (result.resolvedModel) {
+              record.lastModelResolution = { providerId: resolved.id, requestedModel: model ?? 'provider-default', resolvedModel: result.resolvedModel };
+              saveStore();
+            }
+            turn.usage = result.usage ?? null;
+            if (result.status === 'pending') {
+              turn.state = 'waiting-approval';
+              turn.approvalId = result.approvalId;
+              turn.approvalExpiresAt = result.expiresAt ?? null;
+              turn.displayText = 'Waiting for Owner approval.';
+              return;
+            }
+            turn.displayText = result.text ?? '';
+            turn.state = 'done';
+            finalizeTurn(record, state);
+          }
+          return;
+        }
+        const contextText = productContext.context;
+        if (!supportsTools && state.turn) state.turn.routing = { ...(routing ?? {}), toolCalling: 'unsupported',
+          requestedModel: model ?? 'provider-default', resolvedModel: null };
         const events = modelRuntime.stream({
           providerId: resolved.id,
           model,
-          messages: buildModelMessages(record.id, promptText, productContext),
+          messages,
           reasoning: record.config.reasoning,
           signal: controller.signal
         });
@@ -826,9 +924,69 @@ export function createChatService({
         displayText: turn.displayText,
         error: turn.error,
         usage: turn.usage,
+        ...(turn.approvalId ? { approvalId: turn.approvalId, approvalExpiresAt: turn.approvalExpiresAt ?? null } : {}),
         routing: turn.routing ?? null
       }
     };
+  }
+
+  async function resumeApproval({ approvalId, requestFingerprint, decisionResult } = {}) {
+    if (!toolExecutionCoordinator?.resumeApproval) return null;
+    const target = toolExecutionCoordinator.pendingTarget?.(approvalId);
+    if (!target || target.kind !== 'chat') return null;
+    const record = sessionOrThrow(target.sessionId);
+    const state = runtimeOf(record.id);
+    if (!state.turn) state.turn = { id: target.turnId, state: 'waiting-approval', displayText: 'Waiting for Owner approval.', error: null, usage: null, routing: null };
+    if (state.turn.id !== target.turnId) return null;
+    const controller = new AbortController();
+    const resolved = modelRuntime.resolveProvider(record.config.modelProvider);
+    const rawModel = typeof record.config.model === 'string' ? record.config.model.trim() : '';
+    const sessionDefaultModel = String(defaults?.model ?? '');
+    const model = rawModel && rawModel !== sessionDefaultModel ? rawModel : null;
+    state.modelTurn = { controller, providerId: resolved.id };
+    try {
+      const result = await toolExecutionCoordinator.resumeApproval({ approvalId, requestFingerprint, decisionResult, signal: controller.signal,
+        onCapabilityResult: ({ capability, result: toolResult }) => {
+          if (capability === 'task.create' && toolResult?.status === 'completed') {
+            const taskId = toolResult.result?.task?.id;
+            if (typeof taskId === 'string' && taskId) { record.taskId = taskId; saveStore(); }
+          }
+        },
+        refreshContext: async ({ capability }) => {
+          if (capability !== 'task.create' && capability !== null) return null;
+          const snapshot = await buildTurnContext(record, state.turn.routing, resolved, model);
+          return snapshot;
+        }
+      });
+      if (result.status === 'pending') {
+        state.turn.state = 'waiting-approval';
+        state.turn.approvalId = result.approvalId;
+        state.turn.approvalExpiresAt = result.expiresAt ?? null;
+        state.turn.displayText = 'Waiting for Owner approval.';
+        return { resumed: true, pending: true, approvalId: result.approvalId };
+      }
+      state.turn.displayText = result.text ?? '';
+      state.turn.usage = result.usage ?? null;
+      state.turn.routing = { ...(state.turn.routing ?? {}), toolCalling: result.toolCalling,
+        resolvedModel: result.resolvedModel ?? state.turn.routing?.resolvedModel ?? null };
+      if (result.resolvedModel) {
+        record.lastModelResolution = { providerId: resolved.id,
+          requestedModel: state.turn.routing.requestedModel ?? model ?? 'provider-default', resolvedModel: result.resolvedModel };
+        saveStore();
+      }
+      state.turn.state = 'done';
+      delete state.turn.approvalId;
+      delete state.turn.approvalExpiresAt;
+      finalizeTurn(record, state);
+      return { resumed: true, pending: false };
+    } catch (error) {
+      if (state.turn) {
+        state.turn.state = 'error';
+        state.turn.error = String(error?.code ?? 'TOOL_RESUME_FAILED');
+        finalizeTurn(record, state);
+      }
+      return { resumed: false, error: error?.code ?? 'TOOL_RESUME_FAILED' };
+    } finally { state.modelTurn = null; }
   }
 
   async function stop({ id } = {}) {
@@ -888,6 +1046,7 @@ export function createChatService({
   };
 
   return {
+    resumeApproval,
     execute({ method, params }) {
       const handler = handlers[method];
       if (!handler) return Promise.reject(chatError('METHOD_NOT_FOUND', `未知 Chat 方法：${method}`));

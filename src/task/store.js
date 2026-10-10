@@ -57,7 +57,10 @@ function normalizeLoaded(raw) {
       ? {
         at: Number(checkpoint.at) || 0,
         summary: checkpoint.summary === undefined || checkpoint.summary === null ? '' : String(checkpoint.summary),
-        nextAction: checkpoint.nextAction === undefined || checkpoint.nextAction === null ? '' : String(checkpoint.nextAction)
+        nextAction: checkpoint.nextAction === undefined || checkpoint.nextAction === null ? '' : String(checkpoint.nextAction),
+        ...(checkpoint.workspaceReconciliation && typeof checkpoint.workspaceReconciliation === 'object'
+          ? { workspaceReconciliation: checkpoint.workspaceReconciliation }
+          : {})
       }
       : null,
     acceptance: asArray(raw.acceptance),

@@ -24,7 +24,7 @@ export function modelStreamEvent(type, data = {}) {
  * - health 可选，默认视为可用；
  * - 实例不可变（Object.freeze），Key 只能经注入的 secrets 在调用时解析，绝不缓存。
  */
-export function defineModelProvider({ id, label, defaultModel = null, methods }) {
+export function defineModelProvider({ id, label, defaultModel = null, supportsTools = false, methods }) {
   if (typeof id !== 'string' || !id.trim()) throw new Error('defineModelProvider 需要 id');
   if (typeof label !== 'string' || !label.trim()) throw new Error('defineModelProvider 需要 label');
   if (!methods || typeof methods !== 'object') throw new Error('defineModelProvider 需要 methods');
@@ -37,6 +37,7 @@ export function defineModelProvider({ id, label, defaultModel = null, methods })
     id: id.trim(),
     label: label.trim(),
     defaultModel: typeof defaultModel === 'string' && defaultModel ? defaultModel : null,
+    supportsTools: supportsTools === true,
     streamProtocol: MODEL_STREAM_PROTOCOL,
     listModels: methods.listModels,
     chat: methods.chat,

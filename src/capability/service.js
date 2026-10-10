@@ -15,14 +15,30 @@ export const WORKSPACE_CAPABILITIES = Object.freeze({
   'workspace.test.run': 'test.run', 'workspace.create': 'workspace.create'
 });
 
+const stringField = description => ({ type: 'string', description });
+const objectInput = (properties = {}, required = []) => ({
+  type: 'object', properties, required, additionalProperties: false
+});
+const WORKSPACE_TOOL_DESCRIPTORS = Object.freeze({
+  'filesystem.read': ['Read a file inside the authorized Workspace.', objectInput({ path: stringField('Workspace-relative file path.'), maxChars: { type: 'integer', minimum: 1, maximum: 50000 } }, ['path'])],
+  'filesystem.write': ['Write text to a file inside the authorized Workspace. Owner approval is required.', objectInput({ path: stringField('Workspace-relative file path.'), content: stringField('Text to write.'), append: { type: 'boolean' } }, ['path', 'content'])],
+  'filesystem.search': ['Search file names or contents inside the authorized Workspace.', objectInput({ query: stringField('Search text or file-name query.'), path: stringField('Optional Workspace-relative directory.'), maxResults: { type: 'integer', minimum: 1, maximum: 100 } }, ['query'])],
+  'git.status': ['Read the current Git status for the authorized Workspace.', objectInput()],
+  'git.diff': ['Read a bounded Git diff summary inside the authorized Workspace.', objectInput({ path: stringField('Optional Workspace-relative file path.'), statOnly: { type: 'boolean' } })],
+  'git.commit': ['Create a Git commit in the authorized Workspace.', objectInput({ message: stringField('Commit message.') }, ['message'])],
+  'test.run': ['Run an allowlisted test command in the authorized Workspace. Owner approval is required.', objectInput({ tool: stringField('Allowlisted test tool.'), args: { type: 'array', items: { type: 'string' }, maxItems: 40 }, timeoutMs: { type: 'integer', minimum: 1000, maximum: 600000 } }, ['tool', 'args'])],
+  'workspace.create': ['Register an explicitly selected local Workspace root. Owner approval is required.', objectInput({ root: stringField('Local directory selected by the Owner.'), name: stringField('Optional Workspace display name.') }, ['root'])]
+});
+
 /** Trusted in-process API. Public transports must use execute/executeWorkspace,
  * which bind the Owner identity; Agent/Extension grants never come from IPC. */
 export function createCapabilityService({ stateDir, workspaceService, memoryService,
-  taskRuntime, agentBroker, bindAgentSession, searchImpl = null, audit = () => {}, now,
+  taskRuntime, agentBroker, bindAgentSession, resumeAgentApproval = null, searchImpl = null, audit = () => {}, now,
   isolatedRunner = null } = {}) {
   const file = stateDir ? path.join(stateDir, 'capability', 'task-grants.json') : null;
   let grants = file && fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : {};
   const provisioning = new Map();
+  let approvalDecisionListener = null;
   const journalFile = stateDir ? path.join(stateDir, 'capability', 'requests.json') : null;
   const journal = journalFile && fs.existsSync(journalFile) ? JSON.parse(fs.readFileSync(journalFile, 'utf8')) : {};
   const requests = new Map();
@@ -77,6 +93,16 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     saveGrants();
     return principalForTask(taskId);
   }
+  function refreshTaskWorkspaceGrant(taskId) {
+    const task = taskFor(taskId);
+    if (!task?.workspaceId) throw capabilityError('WORKSPACE_REQUIRED', 'Task workspace required');
+    if (!grants[taskId]) return { refreshed: false, actor: null };
+    grants[taskId].workspaceIds = [task.workspaceId];
+    grants[taskId].taskIds = [taskId];
+    grants[taskId].scopes = [...new Set([...(grants[taskId].scopes ?? []).filter(scope => !String(scope).startsWith('workspace:')), `workspace:${task.workspaceId}`])];
+    saveGrants();
+    return { refreshed: true, actor: principalForTask(taskId) };
+  }
   function principalForTask(taskId) {
     if (!grants[taskId] || !taskFor(taskId)) throw capabilityError('TASK_NOT_AUTHORIZED', taskId);
     return { kind: 'agent', id: `task:${taskId}`, grants: structuredClone(grants[taskId]) };
@@ -88,6 +114,9 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
   if (workspaceService) {
     for (const [method, id] of Object.entries(WORKSPACE_CAPABILITIES)) {
       broker.register({ id, permission: id, provider: 'workspace', workspace: id !== 'workspace.create',
+        description: WORKSPACE_TOOL_DESCRIPTORS[id][0],
+        inputSchema: WORKSPACE_TOOL_DESCRIPTORS[id][1],
+        category: id.startsWith('filesystem.') ? 'filesystem' : id.startsWith('git.') ? 'git' : 'workspace',
         // test.run = 执行 Workspace 中可被 Agent 修改的代码：high（审批必经），
         // 不是普通 medium。Owner 直接点击"运行测试"走 executeWorkspace 的
         // approved:true（Owner 的点击本身就是显式决定，语义与既往一致）。
@@ -160,31 +189,73 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       });
     }
   }
+  if (taskRuntime) {
+    broker.register({
+      id: 'task.create',
+      permission: 'task.create',
+      provider: 'task-runtime',
+      risk: 'medium',
+      description: 'Create a CetaMesh Task bound to the current authorized Workspace.',
+      inputSchema: objectInput({
+        goal: stringField('Task outcome to achieve.'),
+        requirements: { type: 'array', items: stringField('Task requirement.'), maxItems: 50 },
+        acceptanceCriteria: { type: 'array', items: stringField('Verifiable completion criterion.'), maxItems: 50 },
+        note: stringField('Short initial Task note.')
+      }, ['goal']),
+      validate(request) {
+        if (request.actor.kind !== 'owner') throw capabilityError('PERMISSION_DENIED', 'Only Owner may create a Task from Chat');
+        if (request.workspaceId && !resolveWorkspace(request.workspaceId)) throw capabilityError('WORKSPACE_NOT_FOUND', request.workspaceId);
+      },
+      execute(request) {
+        const task = taskRuntime.create({
+          goal: request.input.goal,
+          requirements: request.input.requirements,
+          acceptanceCriteria: request.input.acceptanceCriteria,
+          note: request.input.note,
+          workspaceId: request.workspaceId ?? null
+        });
+        return { task: { id: task.id, goal: task.goal, status: task.status, workspaceId: task.workspaceId } };
+      }
+    });
+  }
   if (memoryService) {
     for (const action of ['read', 'write', 'link']) {
       broker.register({ id: 'memory.desktop.' + action, permission: 'memory.' + action,
-        provider: 'memory', risk: 'low', execute: r => {
+        provider: 'memory', risk: 'low', modelCallable: false, execute: r => {
           if (r.actor.kind !== 'owner') throw capabilityError('PERMISSION_DENIED', 'Owner administration only');
           return memoryService.execute(r.input);
         }});
     }
-    broker.register({ id: 'memory.read', permission: 'memory.read', provider: 'memory', risk: 'low', execute: r => {
+    broker.register({ id: 'memory.read', permission: 'memory.read', provider: 'memory', requiresTask: true, risk: 'low',
+      description: 'Search or read Memory only within the current authorized Task scope.',
+      inputSchema: objectInput({ id: stringField('Optional Memory record id.'), query: stringField('Search query within the current Task scope.'), limit: { type: 'integer', minimum: 1, maximum: 20 } }),
+      validate: r => { if (['owner', 'agent'].includes(r.actor.kind) && !r.taskId) throw capabilityError('TASK_REQUIRED', 'Memory model tools require a CetaMesh Task scope'); },
+      execute: r => {
       const principal = memoryPrincipal(r.actor);
-      return r.input.id ? memoryService.runtime.get({ ...r.input, principal }) : memoryService.runtime.search({ ...r.input, principal });
+      const input = { ...r.input, ...(r.taskId ? { scope: 'task:' + r.taskId } : {}), principal };
+      return input.id ? memoryService.runtime.get(input) : memoryService.runtime.search(input);
     }});
-    broker.register({ id: 'memory.write', permission: 'memory.write', provider: 'memory', risk: 'medium', execute: r => {
+    broker.register({ id: 'memory.write', permission: 'memory.write', provider: 'memory', requiresTask: true, risk: 'medium',
+      description: 'Write or propose a Memory item within the current authorized scope.',
+      inputSchema: objectInput({ title: stringField('Memory title.'), content: stringField('Memory content.'), type: stringField('Memory type.') }, ['title', 'content']),
+      validate: r => { if (['owner', 'agent'].includes(r.actor.kind) && !r.taskId) throw capabilityError('TASK_REQUIRED', 'Memory model tools require a CetaMesh Task scope'); },
+      execute: r => {
       const principal = memoryPrincipal(r.actor);
-      const input = r.actor.kind === 'agent' ? { ...r.input, scope: `task:${r.taskId}` } : r.input;
+      const input = { ...r.input, ...(['owner', 'agent'].includes(r.actor.kind) ? { scope: `task:${r.taskId}` } : {}) };
       if (r.actor.kind !== 'owner' && input.type !== 'working') return memoryService.runtime.proposeCandidate({ ...input, principal });
       return memoryService.runtime.create({ ...input, principal });
     }});
-    broker.register({ id: 'memory.link', permission: 'memory.link', provider: 'memory', risk: 'medium', execute: r => {
+    broker.register({ id: 'memory.link', permission: 'memory.link', provider: 'memory', requiresTask: true, risk: 'medium',
+      description: 'Build a bounded Memory reference package from the current authorized Task scope.',
+      inputSchema: objectInput({ query: stringField('Reference query within the current Task scope.') }, ['query']),
+      validate: r => { if (['owner', 'agent'].includes(r.actor.kind) && !r.taskId) throw capabilityError('TASK_REQUIRED', 'Memory model tools require a CetaMesh Task scope'); },
+      execute: r => {
       const principal = memoryPrincipal(r.actor);
-      if (r.input.source && r.input.target) return memoryService.runtime.createLink({ ...r.input, principal });
-      return memoryService.runtime.buildContextPackage({ ...r.input, ...(r.actor.kind === 'agent' ? { scope: `task:${r.taskId}` } : {}), principal });
+      return memoryService.runtime.buildContextPackage({ ...r.input,
+        ...(['owner', 'agent'].includes(r.actor.kind) ? { scope: `task:${r.taskId}` } : {}), principal });
     }});
   }
-  broker.register({ id: 'network', permission: 'network', provider: 'safe-fetch', risk: 'high',
+  broker.register({ id: 'network', permission: 'network', provider: 'safe-fetch', risk: 'high', modelCallable: false,
     validate: r => {
       if (r.input.init?.method && r.input.init.method.toUpperCase() !== 'GET' || r.input.init?.body !== undefined) {
         throw capabilityError('NETWORK_OPERATION_DENIED', 'Only read-only GET is implemented');
@@ -198,18 +269,32 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       }
     }) });
   broker.register({ id: 'web.search', permission: 'web.search', provider: 'mcp-adapter', risk: 'medium',
+    available: typeof searchImpl === 'function',
+    description: 'Search the public web through the configured safe-search adapter.',
+    inputSchema: objectInput({ query: stringField('Public web search query.') }, ['query']),
     execute: r => {
       if (!searchImpl) throw capabilityError('PROVIDER_UNAVAILABLE', 'Web search adapter is not connected');
       return searchImpl(String(r.input.query ?? ''));
     } });
   broker.register({ id: 'clock.now', permission: 'log', provider: 'desktop', risk: 'low',
+    description: 'Return the current local time and timezone.',
+    inputSchema: objectInput(),
     execute: () => ({ iso: new Date().toISOString(), timezone: Intl.DateTimeFormat().resolvedOptions().timeZone }) });
-  broker.register({ id: 'agent.run', permission: 'agent.run', provider: 'agent-broker', workspace: true, risk: 'medium',
+  broker.register({ id: 'agent.run', permission: 'agent.run', provider: 'agent-broker', workspace: true, requiresTask: true, risk: 'medium',
+    available: Boolean(agentBroker?.ids?.().length),
+    description: 'Assign the current CetaMesh Task to a registered Agent Provider.',
+    inputSchema: objectInput({
+      agentProvider: stringField('Registered Agent Provider id.'),
+      content: stringField('Task instructions for the Agent.'),
+      modelProvider: stringField('Optional Model Provider id.'),
+      model: stringField('Optional Model id.'),
+      reasoningEffort: { type: 'string', enum: ['low', 'medium', 'high', 'max'] },
+    }),
     async execute(r) {
       if (r.actor.kind !== 'owner') throw capabilityError('PERMISSION_DENIED', 'Only Owner may assign Agents');
       let task = taskFor(r.taskId);
       if (!task || task.workspaceId !== r.workspaceId) throw capabilityError('TASK_NOT_AUTHORIZED', 'Task workspace required');
-      const provider = String(r.input.provider || 'cetamesh');
+      const provider = String(r.input.agentProvider || r.input.provider || 'cetamesh');
       if (agentBroker?.capabilities(provider)?.workspaceBoundary !== 'capability-broker') {
         throw capabilityError('AGENT_BOUNDARY_UNSUPPORTED', 'Provider has no enforced Capability Broker workspace boundary');
       }
@@ -245,10 +330,22 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     if (method === 'capability.approval.decide') {
       const original = broker.approvals.get(params.id).request;
       const result = await broker.decide({ id: params.id, approve: params.approve === true, actor: OWNER_ACTOR });
+      if (typeof approvalDecisionListener === 'function') {
+        const resumed = await approvalDecisionListener({ approvalId: params.id,
+          requestFingerprint: requestFingerprint(original), decisionResult: result, request: original });
+        if (resumed) return { ...result, turnResumed: resumed.resumed === true, resumePending: resumed.pending === true,
+          ...(resumed.error ? { resumeError: resumed.error } : {}) };
+      }
       if (original.actor.kind === 'agent' && original.taskId && agentBroker) {
         const task = taskFor(original.taskId);
         if (task?.currentAgent?.provider === 'cetamesh' && task.workspaceId === original.workspaceId) {
           try {
+            if (typeof resumeAgentApproval === 'function') {
+              const resumed = await resumeAgentApproval({ sessionId: task.currentAgent.sessionId,
+                approvalId: params.id, decisionResult: result });
+              if (resumed?.resumed === true) return { ...result, taskResumed: true };
+              if (resumed?.error) return { ...result, taskResumed: false, resumeError: resumed.error };
+            }
             await agentBroker.send({ ...task.currentAgent, content: '[Owner capability decision reference data]\n'
               + JSON.stringify({ approvalId: params.id, decision: result }).slice(0, 16000) });
             return { ...result, taskResumed: true };
@@ -281,5 +378,11 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       actor: OWNER_ACTOR, input: command, reason: 'Desktop Owner Memory action' });
     return result.result;
   }
-  return { execute, executeWorkspace, executeMemory, broker, grantTask, principalForTask, memoryPrincipal };
+  return { execute, executeWorkspace, executeMemory, broker, grantTask, principalForTask, refreshTaskWorkspaceGrant, memoryPrincipal,
+    setApprovalDecisionListener(listener) {
+      if (listener !== null && typeof listener !== 'function') throw capabilityError('INVALID_PARAMS', 'Approval decision listener must be a function');
+      approvalDecisionListener = listener;
+      return true;
+    }
+  };
 }

@@ -315,6 +315,38 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory 
     });
   }
 
+  /** Explicitly resolves a Task/execution Workspace conflict with optimistic concurrency. */
+  function reconcileWorkspace({ id, expectedRev, expectedWorkspaceId, observedWorkspaceId, resolution } = {}) {
+    const current = requireTask(id);
+    const expected = expectedWorkspaceId === undefined ? null : normalizeWorkspaceId(expectedWorkspaceId);
+    const observed = normalizeWorkspaceId(observedWorkspaceId);
+    if (resolution !== 'use-observed' || !observed) {
+      throw taskError('INVALID_PARAMS', 'Workspace resolution requires use-observed and a registered Workspace id');
+    }
+    if ((current.workspaceId ?? null) !== expected) {
+      throw taskError('WORKSPACE_RECONCILIATION_STALE', 'Task Workspace changed before resolution');
+    }
+    if (expected === observed) return { task: current, changed: false };
+    const resolvedAt = now();
+    const task = mutate(current.id, expectedRev, (draft) => {
+      if ((draft.workspaceId ?? null) !== expected) throw taskError('WORKSPACE_RECONCILIATION_STALE', 'Task Workspace changed before resolution');
+      draft.workspaceId = observed;
+      draft.checkpoint = {
+        at: resolvedAt,
+        summary: draft.checkpoint?.summary ?? '',
+        nextAction: draft.checkpoint?.nextAction ?? '',
+        workspaceReconciliation: {
+          expectedWorkspaceId: expected,
+          observedWorkspaceId: observed,
+          resolution: 'use-observed',
+          resolvedAt
+        }
+      };
+      return draft;
+    });
+    return { task, changed: true };
+  }
+
   // ── 工作项 / 产物 / 决策 / 记忆引用 / 验收标准 ──────────────────────────
   function addWork({ id, expectedRev, kind, text } = {}) {
     if (kind !== 'completed' && kind !== 'pending') {
@@ -436,6 +468,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory 
     attachAgent,
     detachAgent,
     setCheckpoint,
+    reconcileWorkspace,
     addWork,
     addArtifact,
     addDecision,

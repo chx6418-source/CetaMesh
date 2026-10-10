@@ -14,7 +14,7 @@ export { createContextMonitor } from './monitor.js';
 export { createWorkspaceReconciler } from './reconcile.js';
 
 export function createContinuityService({
-  taskRuntime, stateDir, agentBroker, reconciler, policy, now, canRollover, listPendingApprovals, log
+  taskRuntime, stateDir, agentBroker, reconciler, workspaceService, capabilityService, policy, now, canRollover, listPendingApprovals, log
 } = {}) {
   if (!taskRuntime) throw continuityError('INVALID_PARAMS', 'createContinuityService 需要 taskRuntime');
   if (!stateDir || typeof stateDir !== 'string') throw continuityError('INVALID_PARAMS', 'createContinuityService 需要 stateDir');
@@ -57,6 +57,21 @@ export function createContinuityService({
       reasoningEffort: p.reasoningEffort
     }),
     'continuity.reconcile': (p) => runtime.reconcile({ taskId: p.taskId }),
+    'continuity.workspace.resolve': (p, actor) => {
+      if (actor?.kind !== 'owner') throw continuityError('PERMISSION_DENIED', 'Owner authorization is required');
+      const task = taskRuntime.get({ id: p.taskId }).task;
+      const observed = String(p.observedWorkspaceId ?? '').trim();
+      if (!workspaceService?.describeWorkspace(observed)) throw continuityError('WORKSPACE_NOT_FOUND', 'Observed Workspace is not registered');
+      const result = taskRuntime.reconcileWorkspace({
+        id: task.id,
+        expectedRev: p.expectedRev,
+        expectedWorkspaceId: p.expectedWorkspaceId,
+        observedWorkspaceId: observed,
+        resolution: 'use-observed'
+      });
+      capabilityService?.refreshTaskWorkspaceGrant?.(task.id);
+      return { task: result.task, reconciliation: result.task.checkpoint?.workspaceReconciliation ?? null };
+    },
     'continuity.packet.build': (p) => ({ packet: runtime.buildHandoffPacket({
       taskId: p.taskId,
       reason: p.reason,
@@ -73,12 +88,12 @@ export function createContinuityService({
   return {
     runtime,
     broker: agentBroker,
-    execute({ method, params } = {}) {
+    execute({ method, params, actor } = {}) {
       const handler = handlers[method];
       if (!handler) {
         return Promise.reject(continuityError('METHOD_NOT_FOUND', '未知 Continuity 方法：' + String(method)));
       }
-      return Promise.resolve().then(() => handler(params || {}));
+      return Promise.resolve().then(() => handler(params || {}, actor));
     },
     close() {}
   };

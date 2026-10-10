@@ -108,7 +108,11 @@ export function createExtensionRuntime({
     for (const cap of entry.manifest.capabilities || []) {
       const id = 'extension.' + entry.id + '.' + cap.id;
       if (broker.registry.has(id)) continue;
-      broker.register({ id, permission: 'extension.invoke', provider: 'extension', risk: 'low', execute: async r => {
+      broker.register({ id, permission: 'extension.invoke', provider: 'extension', risk: 'low',
+        description: typeof cap.description === 'string' ? cap.description : 'Invoke the declared Extension capability ' + cap.id + '.',
+        inputSchema: cap.inputSchema && typeof cap.inputSchema === 'object' ? cap.inputSchema : null,
+        modelCallable: Boolean(cap.inputSchema && typeof cap.inputSchema === 'object'),
+        execute: async r => {
         const { entry: current } = hostOrThrow(entry.id);
         if (!current.manifest.capabilities.some(c => c.id === cap.id)) throw extensionError('CAPABILITY_NOT_DECLARED', cap.id);
         return invokeOnHost(entry.id, cap.id, r.input, { signal: r.signal });
