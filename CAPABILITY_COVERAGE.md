@@ -36,6 +36,7 @@ Broker，走自身更窄的适配器或控制面边界）· **Deferred**（本�
 | MCP | web.search | Broker `web.search`（provider: mcp-adapter） | Brokered | medium | 已完成 |
 | MCP | network fetch（受 SSRF 加固） | Broker `network`（safe-fetch + GET-only + extension hosts 白名单） | Brokered | high | 已完成 |
 | MCP | QQ 工具（snowluma-safe）/ host server / bilibili / kugou / qq-file-send | DSH 侧 MCP server（QQ 适配器安全边界，RULES.md 硬边界：白名单、只读子集、审批） | Direct（by design） | high | **不迁移**：这些 server 是 QQ/DSH 适配器的一部分，其安全边界（发送白名单、风险卡审批）比 Broker 更细；迁移会降低边界强度 |
+| Plugins / Tools / MCP | integration.tool.read / write / admin、integration.mcp.manage、integration.plugin.manage | IPC `plugins.` / `tools.` / `mcp.` / `integrations.` → `integrationService` → **Capability Broker** → MCP Runtime（stdio MCP Server）/ Agent Provider | Brokered（新增） | low/medium/high | 产品化任务 B：工具恢复不绕过 Broker；legacy-unsupported 工具不入表、不可开启；未知 MCP 工具一律 UNKNOWN_TOOL / UNKNOWN_MCP_TOOL |
 | Desktop | clock.now | Broker `clock.now` | Brokered | low | 已完成 |
 | Device | 设备本地能力（进程内桌面本体） | 无独立 device capability 面 | N/A | — | 本机本体不是远端设备；Mesh 对端能力走 mesh/trust.js 授权 |
 

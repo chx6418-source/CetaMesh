@@ -53,6 +53,7 @@ const REGISTRY = {
   'test-dsh-lifecycle.mjs': { category: 'core' },
   'test-qq-runtime.mjs': { category: 'core' },
   'test-runner-environment.mjs': { category: 'core' },
+  'test-integration-tool-registry.mjs': { category: 'core', note: '产品化任务 B：Tools Registry 目录/开关/持久化' },
 
   // ── architecture：结构契约 / 源码不变量 ────────────────────────────────────
   'test-desktop-architecture.mjs': { category: 'architecture' },
@@ -62,6 +63,7 @@ const REGISTRY = {
   'test-process-extension-host.mjs': { category: 'architecture' },
   'test-workspace-ipc.mjs': { category: 'architecture' },
   'test-smart-platform-routing.mjs': { category: 'architecture' },
+  'test-integration-descriptors.mjs': { category: 'architecture', note: '产品化任务 B：SnowLuma/DSH 集成描述符 + IPC 路由 + 容器装配' },
 
   // ── security：权限 / 能力 / 攻击负面 ──────────────────────────────────────
   'test-agent-test-run-security.mjs': { category: 'security' },
@@ -71,6 +73,7 @@ const REGISTRY = {
   'test-extension-capability.mjs': { category: 'security' },
   'test-provider-secrets.mjs': { category: 'security' },
   'test-error-hygiene.mjs': { category: 'security' },
+  'test-bionic-chat-plugin.mjs': { category: 'security', note: '产品化任务 B：仿生聊天插件开关 + Capability 强制' },
 
   // ── runtime：产品运行时（chat/memory/task/continuity/model/social…） ───────
   'test-agent-broker.mjs': { category: 'runtime' },
@@ -105,6 +108,7 @@ const REGISTRY = {
   'test-onboarding.mjs': { category: 'runtime', note: '产品化 D：首次运行引导（无 QQ/DSH/移动端也可完成）' },
   'test-product-copy.mjs': { category: 'runtime', note: '产品化 D：空状态文案与 Provider 基础/高级字段分离' },
   'test-update-source.mjs': { category: 'runtime', note: '分发运行时：GitCode 主源 + GitHub 备用 + 校验下载' },
+  'test-mcp-registry.mjs': { category: 'runtime', note: '产品化任务 B：MCP Registry/Runtime（启停/发现/崩溃/重启）' },
 
   // ── integration：DSH / MCP / 进程间链路 ────────────────────────────────────
   'test-dsh-integration.mjs': { category: 'integration' },

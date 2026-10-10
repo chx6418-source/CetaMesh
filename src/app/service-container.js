@@ -24,6 +24,7 @@ import { createExtensionService } from '../extension/service.js';
 import { createMeshService } from '../mesh/service.js';
 import { createChannelService } from '../channel/service.js';
 import { createSettingsService } from '../settings/service.js';
+import { createIntegrationService } from '../integrations/index.js';
 import { createAboutService } from '../about/service.js';
 import { createUpdateService } from '../update/service.js';
 import { createNotesCache } from '../update/notes-cache.js';
@@ -265,6 +266,28 @@ export function createCetaMeshServices(options = {}) {
     }
   });
 
+  // ── 产品化任务 B：Plugins / Tools / MCP 统一入口。底层仍是既有 Channel/Agent Provider 与
+  // Extension/ProcessExtensionHost；本服务只做注册表、开关、生命周期与能力边界适配。 ──
+  const integrationService = createIntegrationService({
+    stateDir,
+    capabilityBroker: capabilityService.broker,
+    ...(options.localServices ? { localServices: options.localServices } : {}),
+    // Provider 快照 = "底层是否真的接入"：
+    //   - agent：DSH 在未注入 API 时**仍会注册**但 available=false / health=unavailable，
+    //     所以必须按真实可用性过滤（注册 ≠ 可用）；
+    //   - channel：注册表即"该 Channel Provider 是否存在"（qq），实时连接状态由通道自身
+    //     state 与本地服务（SnowLuma 进程）另行如实上报。
+    providerSnapshot: () => ({
+      channel: channelService.registry.list()
+        .filter(channel => channel.state !== 'unavailable' && channel.state !== 'error')
+        .map(channel => channel.id),
+      agent: agentService.listProviders()
+        .filter(provider => provider.available === true)
+        .map(provider => provider.id)
+    }),
+    log
+  });
+
   // ── 产品化任务 D：产品面服务（About / 更新公告 / 反馈入口 / Onboarding / 产品文案） ──
   // 发行配置 release-config.json 与"最近错误码"是 About 与产品服务共用的事实源，各建一份。
   const releaseConfig = loadReleaseConfig({ rootDir: sourceRoot });
@@ -365,6 +388,7 @@ export function createCetaMeshServices(options = {}) {
     extensionService,
     meshService,
     channelService,
+    integrationService,
     aboutService,
     settingsService,
     updateService,
