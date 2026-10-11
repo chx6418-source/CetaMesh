@@ -49,6 +49,8 @@ impl AppPage {
         }
     }
 
+    /// 页面一句话说明：UI v1 页头卡移除后仅供测试与文档使用（保留为页面的权威描述）。
+    #[allow(dead_code)]
     pub const fn description(self) -> &'static str {
         match self {
             Self::Chat => "和 CetaMesh 对话；需要时用工具、建任务、交给 Agent。",

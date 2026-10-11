@@ -2798,60 +2798,6 @@ ApiCall::Family { method, params } => api.request(method, params),
             .spawn();
     }
 
-    fn show_core_attention_banner(&mut self, ui: &mut egui::Ui) {
-        let status = self.supervisor.status();
-        let core_offline = self.core_online == Some(false);
-        if !status.needs_attention() && !core_offline {
-            return;
-        }
-        let palette = native_palette();
-        egui::Frame::new()
-            .fill(palette.error_bg)
-            .stroke(egui::Stroke::new(1.0, palette.error))
-            .corner_radius(egui::CornerRadius::same(8))
-            .inner_margin(egui::Margin::symmetric(12, 10))
-            .show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(
-                        egui::RichText::new(format!("Core 需要处理：{}", status.summary()))
-                            .color(palette.error)
-                            .strong(),
-                    );
-                    if crate::theme::gummy_button(
-                        ui,
-                        "重启 Core",
-                        crate::theme::painter::ButtonKind::Armed,
-                        true,
-                    )
-                    .clicked()
-                    {
-                        self.supervisor.request_restart();
-                    }
-                    if crate::theme::gummy_button(
-                        ui,
-                        "重新检查",
-                        crate::theme::painter::ButtonKind::Normal,
-                        true,
-                    )
-                    .clicked()
-                    {
-                        self.issue(Area::Overview, Operation::OverviewPing, ApiCall::Ping);
-                    }
-                    if crate::theme::gummy_button(
-                        ui,
-                        "打开日志目录",
-                        crate::theme::painter::ButtonKind::Normal,
-                        true,
-                    )
-                    .clicked()
-                    {
-                        self.open_logs();
-                    }
-                });
-            });
-        ui.add_space(8.0);
-    }
-
     fn show_toast(&mut self, ui: &mut egui::Ui) {
         let Some((message, created)) = self.toast.clone() else {
             return;
@@ -2950,7 +2896,6 @@ ApiCall::Family { method, params } => api.request(method, params),
     fn show_compact_nav(&mut self, ui: &mut egui::Ui) {
         crate::theme::card_compact(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
-                    show_brand_mark(ui, 22.0, false);
                     ui.strong("CetaMesh");
                     ui.separator();
                     for page in AppPage::PRIMARY {
@@ -3041,54 +2986,25 @@ ApiCall::Family { method, params } => api.request(method, params),
         }
     }
 
-    fn show_header(&self, ui: &mut egui::Ui, narrow: bool) {
-        let palette = native_palette();
-        let (status, color) = match self.core_online {
-            Some(true) => ("Core 已连接", palette.success),
-            Some(false) => ("Core 不可用", palette.error),
-            None => ("Core 状态未知", palette.warning),
-        };
-        crate::theme::card(ui, |ui| {
-            ui.set_min_width(ui.available_width());
-                if narrow {
-                    ui.vertical(|ui| {
-                        ui.heading(self.navigation.page.nav_label());
-                        ui.label(
-                            egui::RichText::new(self.navigation.page.description())
-                                .color(palette.muted),
-                        );
-                        ui.add_space(4.0);
-                        ui.label(egui::RichText::new(status).color(color).strong());
-                    });
-                } else {
-                    ui.horizontal(|ui| {
-                        ui.vertical(|ui| {
-                            ui.heading(self.navigation.page.nav_label());
-                            ui.label(
-                                egui::RichText::new(self.navigation.page.description())
-                                    .color(palette.muted),
-                            );
-                        });
-                    ui.with_layout(
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| {
-                            ui.label(egui::RichText::new(status).color(color).strong());
-                        },
-                    );
-                    });
-                }
-            });
-    }
-
     fn page_button(&mut self, ui: &mut egui::Ui, page: AppPage) {
         // `.nav-btn` from the Web console: transparent until hovered, and the active item is
         // a gradient pill (`linear-gradient(140deg, accent, accent-2)`) with a soft shadow.
         let spec = crate::theme::current();
         let tokens = spec.tokens;
         let selected = self.navigation.page == page;
-        let width = ui.available_width().clamp(120.0, 240.0);
+        // 胶囊贴内容：宽度随文本，不再整行拉满（Owner 反馈"方形的很不好看"）。
+        let label_width = ui
+            .painter()
+            .layout_no_wrap(
+                page.nav_label().to_owned(),
+                egui::TextStyle::Button.resolve(ui.style()),
+                egui::Color32::WHITE,
+            )
+            .size()
+            .x;
+        let width = (label_width + 36.0).clamp(64.0, 240.0);
         let (rect, response) =
-            ui.allocate_exact_size(egui::vec2(width, 34.0), egui::Sense::click());
+            ui.allocate_exact_size(egui::vec2(width, 30.0), egui::Sense::click());
         response.widget_info(|| {
             egui::WidgetInfo::selected(egui::WidgetType::Button, true, selected, page.nav_label())
         });
@@ -3105,7 +3021,7 @@ ApiCall::Family { method, params } => api.request(method, params),
                 crate::theme::painter::paint_button(
                     ui.painter(),
                     rect,
-                    18.0,
+                    9.0,
                     &spec,
                     crate::theme::painter::ButtonKind::Primary,
                     hover_t,
@@ -3113,7 +3029,7 @@ ApiCall::Family { method, params } => api.request(method, params),
                     true,
                 );
             } else if hover_t > 0.01 || press_t > 0.01 {
-                let corner = egui::CornerRadius::same(18);
+                let corner = egui::CornerRadius::same(9);
                 let fill = if press_t > 0.5 {
                     tokens.accent_soft.over(tokens.bg)
                 } else {
@@ -3176,11 +3092,7 @@ ApiCall::Family { method, params } => api.request(method, params),
     fn show_sidebar(&mut self, ui: &mut egui::Ui) {
         let palette = native_palette();
         ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
-            show_brand_mark(ui, 28.0, false);
-            ui.heading(egui::RichText::new("CetaMesh").strong());
-        });
+        ui.heading(egui::RichText::new("CetaMesh").strong());
         ui.label(egui::RichText::new("Desktop").color(palette.muted));
         ui.add_space(14.0);
         // UI v1（方案 01 的导航与信息层级）：产品区 + 能力区 + 应用区，共 5+2 项。
@@ -3198,6 +3110,44 @@ ApiCall::Family { method, params } => api.request(method, params),
         for page in [AppPage::Agents, AppPage::Plugins] {
             self.page_button(ui, page);
             ui.add_space(4.0);
+        }
+        // Core 状态卡（图5：横幅从页头挪进侧栏，不再每页占一条）。
+        let status = self.supervisor.status();
+        let core_offline = self.core_online == Some(false);
+        if status.needs_attention() || core_offline {
+            ui.add_space(12.0);
+            egui::Frame::new()
+                .fill(palette.error_bg)
+                .stroke(egui::Stroke::new(1.0, palette.error))
+                .corner_radius(egui::CornerRadius::same(8))
+                .inner_margin(egui::Margin::symmetric(8, 6))
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.label(
+                        egui::RichText::new("Core 已停止")
+                            .small()
+                            .strong()
+                            .color(palette.error),
+                    );
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.small_button("重启").clicked() {
+                            self.supervisor.request_restart();
+                        }
+                        if ui.small_button("检查").clicked() {
+                            self.issue(Area::Overview, Operation::OverviewPing, ApiCall::Ping);
+                        }
+                        if ui.small_button("日志").clicked() {
+                            self.open_logs();
+                        }
+                    });
+                });
+        } else if self.core_online == Some(true) {
+            ui.add_space(12.0);
+            ui.label(
+                egui::RichText::new("● Core 运行中")
+                    .small()
+                    .color(palette.success),
+            );
         }
         ui.add_space(12.0);
         ui.separator();
@@ -3233,22 +3183,7 @@ ApiCall::Family { method, params } => api.request(method, params),
             self.issue_control(Area::Chat, Operation::ChatCatalogLoad, "chat.catalog", json!({}));
         }
         self.accept_chat_drops(ui);
-
-        // UI v1（方案 02 的 Chat 主结构）：左 = 聊天历史，右 = 消息区 + 底部 Composer。
-        // Chat 页在 update() 里走无外层滚动的专用路径，面板各自内部滚动。
-        let tokens = crate::theme::tokens();
-        let narrow = ui.ctx().viewport_rect().width() < 1040.0;
-        egui::Panel::left("chat_history_panel")
-            .resizable(false)
-            .exact_size(if narrow { 196.0 } else { 248.0 })
-            .frame(
-                egui::Frame::new()
-                    .fill(tokens.glass_weak.to_color32())
-                    .inner_margin(egui::Margin::symmetric(10, 12)),
-            )
-            .show(ui, |ui| {
-                self.show_chat_history_panel(ui);
-            });
+        // 会话历史列已提升到窗口层级（update），这里只排消息区 + 底部 Composer。
         self.show_chat_main(ui);
     }
 
@@ -3413,30 +3348,40 @@ ApiCall::Family { method, params } => api.request(method, params),
         // 空状态：让用户第一眼理解「可以直接问，也可以用工具 / 建任务 / 交给 Agent」。
         let history_empty = self.chat.history_loaded && self.chat.messages.is_empty() && self.chat.turn.is_none();
         if active_empty || history_empty {
-            ui.add_space(ui.available_height() * 0.06);
+            // 空态垂直居中：按内容估计高度把块推到视口中部（方案 01 构图）。
+            let content_h = 240.0_f32;
+            ui.add_space(((ui.available_height() - content_h) / 2.0).max(24.0));
             ui.vertical_centered(|ui| {
                 ui.heading("让零散想法，有一个去处。");
                 ui.label(egui::RichText::new("直接问我；也可以让我使用工具、创建任务，或交给 Agent。").color(palette.muted));
                 ui.add_space(12.0);
-                ui.horizontal_wrapped(|ui| {
-                    for (title, hint) in [
-                        ("直接回答", "想到就问"),
-                        ("使用工具", "搜索 · 文件 · 日程"),
-                        ("创建任务", "追踪到完成"),
-                        ("交给 Agent", "放手让它做"),
-                    ] {
-                        crate::theme::card_compact(ui, |ui| {
-                            ui.set_min_width(120.0);
-                            ui.vertical(|ui| {
-                                ui.strong(title);
-                                ui.small(hint);
+                // 能力四卡整块居中：先开一块固定宽度子区域，再在里面横排。
+                ui.allocate_ui(egui::vec2(524.0, 86.0), |ui| {
+                    ui.horizontal(|ui| {
+                        for (title, hint) in [
+                            ("直接回答", "想到就问"),
+                            ("使用工具", "搜索 · 文件 · 日程"),
+                            ("创建任务", "追踪到完成"),
+                            ("交给 Agent", "放手让它做"),
+                        ] {
+                            crate::theme::card_compact(ui, |ui| {
+                                ui.set_min_width(120.0);
+                                ui.vertical(|ui| {
+                                    ui.strong(title);
+                                    ui.small(hint);
+                                });
                             });
-                        });
-                    }
+                            ui.add_space(6.0);
+                        }
+                    });
                 });
                 if active_empty {
                     ui.add_space(8.0);
-                    ui.label(egui::RichText::new("先在左侧新建或选择一个会话。").small().color(palette.muted));
+                    ui.label(
+                        egui::RichText::new("点左上角「＋ 新对话」开始。")
+                            .small()
+                            .color(palette.muted),
+                    );
                 }
             });
             return;
@@ -4065,8 +4010,8 @@ impl ChatChipButton for egui::Ui {
         egui::Frame::new()
             .fill(tokens.chip.to_color32())
             .stroke(egui::Stroke::new(1.0, palette.border))
-            .corner_radius(egui::CornerRadius::same(7))
-            .inner_margin(egui::Margin::symmetric(9, 4))
+            .corner_radius(egui::CornerRadius::same(13))
+            .inner_margin(egui::Margin::symmetric(11, 4))
             .show(self, |ui| {
                 ui.label(egui::RichText::new(text.into()).small());
             })
@@ -4188,48 +4133,55 @@ impl NativeUi {
             ("advanced", "高级"),
         ];
         ui.heading("设置");
-        ui.label(egui::RichText::new("常用选项都在这一页；工程面收进「高级」。").small().color(native_palette().muted));
-        ui.add_space(8.0);
-        ui.columns(2, |columns| {
-            columns[0].set_min_width(150.0);
-            columns[0].spacing_mut().item_spacing.y = 2.0;
-            let mut jump: Option<&'static str> = self.settings_scroll_target;
-            for (id, label) in SECTIONS {
-                if columns[0].selectable_label(jump == Some(id), label).clicked() {
-                    jump = Some(id);
-                }
-            }
-            self.settings_scroll_target = jump;
-            let target = self.settings_scroll_target;
-            let scope = |ui: &mut egui::Ui, id: &str, body: &mut NativeUi| {
-                ui.push_id(id, |ui| {
-                    if target == Some(id) {
-                        // 锚点跳转：把节顶对齐到视口顶部（None 只是"最小滚动"，
-                        // 节已部分可见时几乎不动——Owner 截图里的 bug）。
-                        let rect = ui.cursor();
-                        ui.scroll_to_rect(rect, Some(egui::Align::Min));
-                        // 只滚动一次：命中后清除目标。
-                        body.settings_scroll_target = None;
+        ui.label(
+            egui::RichText::new("常用选项都在这一页；工程面收进「高级」。")
+                .small()
+                .color(native_palette().muted),
+        );
+        ui.add_space(10.0);
+        // UI v1（Owner 反馈）：锚点窄轨贴顶 + 内容填满右侧，不再半屏留白。
+        ui.horizontal(|ui| {
+            ui.allocate_ui(egui::vec2(150.0, ui.available_height()), |ui| {
+                ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                    for (id, label) in SECTIONS {
+                        if ui
+                            .selectable_label(self.settings_scroll_target == Some(id), label)
+                            .clicked()
+                        {
+                            self.settings_scroll_target = Some(id);
+                        }
+                        ui.add_space(2.0);
                     }
-                    ui.add_space(4.0);
-                    match id {
-                        "appearance" => body.show_settings_appearance(ui),
-                        "security" => body.show_security(ui),
-                        "models" => body.show_models_presets(ui),
-                        "devices" => body.show_devices_page(ui),
-                        "advanced" => body.show_settings_advanced(ui),
-                        _ => {}
-                    }
-                    ui.add_space(14.0);
                 });
-            };
+            });
+            ui.separator();
             egui::ScrollArea::vertical()
                 .id_salt("settings_sections_scroll")
                 .auto_shrink([false, false])
-                .show(&mut columns[1], |ui| {
-                    for (id, label) in SECTIONS {
-                        scope(ui, id, self);
+                .show(ui, |ui| {
+                    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                    let target = self.settings_scroll_target;
+                    for (id, _label) in SECTIONS {
+                        ui.push_id(id, |ui| {
+                            if target == Some(id) {
+                                // 锚点跳转：节顶对齐视口顶部（None 只是"最小滚动"）。
+                                let rect = ui.cursor();
+                                ui.scroll_to_rect(rect, Some(egui::Align::Min));
+                                self.settings_scroll_target = None;
+                            }
+                            ui.add_space(4.0);
+                            match id {
+                                "appearance" => self.show_settings_appearance(ui),
+                                "security" => self.show_security(ui),
+                                "models" => self.show_models_presets(ui),
+                                "devices" => self.show_devices_page(ui),
+                                "advanced" => self.show_settings_advanced(ui),
+                                _ => {}
+                            }
+                            ui.add_space(14.0);
+                        });
                     }
+                    });
                 });
         });
     }
@@ -6564,32 +6516,55 @@ impl eframe::App for NativeUi {
                 egui::Stroke::new(1.0, tokens.edge_hi.to_color32()),
             );
         }
-        let header = egui::Panel::top("cetamesh_header")
-            .resizable(false)
-            .frame(
-                egui::Frame::new()
-                    .fill(tokens.glass_weak.to_color32())
-                    .inner_margin(egui::Margin::symmetric(16, 12)),
-            )
-            .show(ui, |ui| {
-                if narrow {
-                    self.show_compact_nav(ui);
-                    ui.add_space(8.0);
-                }
-                self.show_header(ui, narrow);
-                ui.add_space(8.0);
-                self.show_core_attention_banner(ui);
-                self.show_toast(ui);
-                ui.add_space(4.0);
-                self.show_page_section_nav(ui);
-            });
-        // `border-bottom: 1px solid var(--edge-hi)`
-        let header_rect = header.response.rect;
-        ui.painter().hline(
-            header_rect.x_range(),
-            header_rect.bottom() - 0.5,
-            egui::Stroke::new(1.0, tokens.edge_hi.to_color32()),
-        );
+        // UI v1 Chat：会话历史列在窗口层级常驻（Chat 第一入口，方案 02）。
+        if self.navigation.page == AppPage::Chat {
+            let chat_width = if narrow { 196.0 } else { 248.0 };
+            egui::Panel::left("chat_history_window_panel")
+                .resizable(false)
+                .exact_size(chat_width)
+                .frame(
+                    egui::Frame::new()
+                        .fill(tokens.glass_weak.to_color32())
+                        .inner_margin(egui::Margin::symmetric(10, 12)),
+                )
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            self.show_chat_history_panel(ui);
+                        });
+                });
+        }
+        // UI v1（Owner 反馈）：页头大卡移除——每页自带标题；Core 状态挪进侧栏底部。
+        let has_toast = self
+            .toast
+            .as_ref()
+            .is_some_and(|(_, created)| created.elapsed() <= Duration::from_secs(8));
+        if narrow || !tabs_for(self.navigation.page).is_empty() || has_toast {
+            let header = egui::Panel::top("cetamesh_header")
+                .resizable(false)
+                .frame(
+                    egui::Frame::new()
+                        .fill(tokens.glass_weak.to_color32())
+                        .inner_margin(egui::Margin::symmetric(16, 12)),
+                )
+                .show(ui, |ui| {
+                    if narrow {
+                        self.show_compact_nav(ui);
+                        ui.add_space(8.0);
+                    }
+                    self.show_toast(ui);
+                    ui.add_space(4.0);
+                    self.show_page_section_nav(ui);
+                });
+            // `border-bottom: 1px solid var(--edge-hi)`
+            let header_rect = header.response.rect;
+            ui.painter().hline(
+                header_rect.x_range(),
+                header_rect.bottom() - 0.5,
+                egui::Stroke::new(1.0, tokens.edge_hi.to_color32()),
+            );
+        }
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()

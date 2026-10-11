@@ -187,13 +187,6 @@ impl Blob {
 pub struct BlobSlot(pub Blob);
 
 impl BlobSlot {
-    pub const fn hidden(template: Blob) -> Self {
-        Self(Blob {
-            color: template.color.with_alpha(0.0),
-            ..template
-        })
-    }
-
     pub fn lerp(self, other: Self, t: f32) -> Self {
         Self(self.0.lerp(other.0, t))
     }
