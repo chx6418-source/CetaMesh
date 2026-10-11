@@ -540,7 +540,7 @@ impl MeshUi {
             }
         }
 
-        ui.heading("Devices / Mesh");
+        ui.heading("设备与连接（Mesh）");
         ui.label(
             egui::RichText::new("Desktop 是独立的 CetaMesh Node：信任一个设备不等于授权它调用能力。")
                 .color(native_palette().muted),

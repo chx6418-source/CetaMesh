@@ -4182,7 +4182,7 @@ impl NativeUi {
     fn show_settings_page(&mut self, ui: &mut egui::Ui) {
         const SECTIONS: [(&str, &str); 5] = [
             ("appearance", "外观与窗口"),
-            ("security", "安全通知"),
+            ("security", "安全设置"),
             ("models", "模型与 Preset"),
             ("devices", "设备与连接"),
             ("advanced", "高级"),
@@ -4201,17 +4201,17 @@ impl NativeUi {
             }
             self.settings_scroll_target = jump;
             let target = self.settings_scroll_target;
-            let scope = |ui: &mut egui::Ui, id: &str, title: &str, body: &mut NativeUi| {
+            let scope = |ui: &mut egui::Ui, id: &str, body: &mut NativeUi| {
                 ui.push_id(id, |ui| {
                     if target == Some(id) {
+                        // 锚点跳转：把节顶对齐到视口顶部（None 只是"最小滚动"，
+                        // 节已部分可见时几乎不动——Owner 截图里的 bug）。
                         let rect = ui.cursor();
-                        ui.scroll_to_rect(rect, None);
+                        ui.scroll_to_rect(rect, Some(egui::Align::Min));
                         // 只滚动一次：命中后清除目标。
                         body.settings_scroll_target = None;
                     }
                     ui.add_space(4.0);
-                    ui.strong(title);
-                    ui.add_space(2.0);
                     match id {
                         "appearance" => body.show_settings_appearance(ui),
                         "security" => body.show_security(ui),
@@ -4228,7 +4228,7 @@ impl NativeUi {
                 .auto_shrink([false, false])
                 .show(&mut columns[1], |ui| {
                     for (id, label) in SECTIONS {
-                        scope(ui, id, label, self);
+                        scope(ui, id, self);
                     }
                 });
         });
@@ -4237,6 +4237,7 @@ impl NativeUi {
     /// 设置 → 高级：工程面入口（旧控制台 tab 容器与能力审批队列）。
     fn show_settings_advanced(&mut self, ui: &mut egui::Ui) {
         let palette = native_palette();
+        ui.heading("高级");
         ui.label(egui::RichText::new("这些是工程界面：日常使用不需要打开。").small().color(palette.muted));
         ui.add_space(4.0);
         ui.horizontal_wrapped(|ui| {

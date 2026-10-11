@@ -700,7 +700,12 @@ fn spawn_worker(config: &SupervisorConfig) -> Result<Child, String> {
         .create(true)
         .append(true)
         .open(&log_path)
-        .map_err(|error| format!("打开 worker 日志失败 {}：{error}", log_path.display()))?;
+        .map_err(|error| {
+            format!(
+                "打开 worker 日志失败 {}：{error}。通常是另一个 CetaMesh 实例或旧的 Core 进程仍在运行并占用日志：请在任务管理器结束旧的 WhaleBridge / WhaleBridgeCore 进程后重试。",
+                log_path.display()
+            )
+        })?;
     let log_err = log
         .try_clone()
         .map_err(|error| format!("复制日志句柄失败：{error}"))?;
