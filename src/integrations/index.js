@@ -1,5 +1,7 @@
 // CetaMesh Plugins / Tools / MCP / Integrations（产品化任务 B）公共入口。
 export { createIntegrationService } from './service.js';
+export { createDshDesktopIntegration, discoverDshDesktop, isDshDesktopRunning, parseDshVersion,
+  DSH_OFFICIAL_DOWNLOAD_URL, DSH_DESKTOP_EXECUTABLE, DSH_DESKTOP_STATUS_CACHE_MS } from './dsh-desktop.js';
 export { createIntegrationRegistry } from './registry.js';
 export { createIntegrationStore, INTEGRATION_STORE_VERSION } from './store.js';
 export { createMcpRuntime, createStdioMcpConnection } from './mcp-runtime.js';

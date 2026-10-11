@@ -26,6 +26,10 @@ export function createIntegrationService({
   transportFactory = undefined,
   localServices = null,
   providerSnapshot = null,
+  agentHealth = null,
+  dshDesktop = null,
+  settingsSnapshot = null,
+  now = () => Date.now(),
   agentToolExecutor = null,
   toolExecutor = null,
   log = () => {}
@@ -35,6 +39,45 @@ export function createIntegrationService({
   const broker = capabilityBroker ?? createCapabilityBroker({ audit: event => log('Integration capability ' + event.capability + ' ' + event.status) });
   const resolvedStore = store ?? createIntegrationStore({ stateDir });
   const runtime = mcpRuntime ?? createMcpRuntime({ transportFactory: transportFactory ?? undefined, log });
+  let dshHealthCache = null;
+  let dshHealthCheckedAt = 0;
+  let dshHealthInFlight = null;
+
+  async function currentDshHealth({ refresh = false } = {}) {
+    if (typeof agentHealth !== 'function') return null;
+    if (!refresh && dshHealthCache && now() - dshHealthCheckedAt < 30_000) return structuredClone(dshHealthCache);
+    if (dshHealthInFlight) return dshHealthInFlight;
+    dshHealthInFlight = Promise.resolve().then(() => agentHealth()).then(value => {
+      dshHealthCache = value && typeof value === 'object' ? value : { available: false, reason: 'health_invalid' };
+      dshHealthCheckedAt = now();
+      return structuredClone(dshHealthCache);
+    }).catch(error => {
+      // Integration status remains readable when the optional DSH Agent transport is offline.
+      dshHealthCache = { available: false, reason: error?.code ?? 'health_failed' };
+      dshHealthCheckedAt = now();
+      return structuredClone(dshHealthCache);
+    }).finally(() => { dshHealthInFlight = null; });
+    return dshHealthInFlight;
+  }
+
+  async function currentDshDesktop({ refresh = false } = {}) {
+    const fallback = {
+      id: 'dsh-desktop', displayName: 'DeepSeek Harness', status: 'unavailable',
+      installed: false, available: false, version: null, running: false,
+      lastCheckedAt: null, lastError: null,
+      diagnostics: { reason: 'integration_unavailable', executablePath: null },
+      cli: { available: false, executablePath: null, version: null }
+    };
+    if (!dshDesktop) return fallback;
+    try {
+      const read = refresh ? dshDesktop.refresh : dshDesktop.status;
+      if (typeof read !== 'function') return fallback;
+      return { ...fallback, ...(await read.call(dshDesktop, refresh ? undefined : { refresh: false })) };
+    } catch (error) {
+      // A desktop detection failure must not break Plugin Center or the Agent Provider.
+      return { ...fallback, diagnostics: { ...fallback.diagnostics, lastError: String(error?.message ?? error) } };
+    }
+  }
 
   function providerStatus(provider) {
     if (!provider) return { available: false, lastError: '未声明底层 Provider' };
@@ -130,6 +173,12 @@ export function createIntegrationService({
         }
         return binding(command.params ?? {});
       }
+      case 'dshDesktop.open': {
+        if (typeof dshDesktop?.open !== 'function') {
+          return { opened: false, action: 'unavailable', status: 'unavailable', message: '无法启动 DeepSeek Harness，请确认应用安装完整。' };
+        }
+        return dshDesktop.open();
+      }
       default:
         throw integrationError('UNSUPPORTED_ACTION', '未知管理动作：' + command.action);
     }
@@ -203,18 +252,108 @@ export function createIntegrationService({
     };
   }
 
-  function integrationView(id) {
+  async function dshIntegrationData(plugin, { refresh = false } = {}) {
+    const status = integrationStatus(plugin.id);
+    const desktopApp = await currentDshDesktop({ refresh });
+    const health = await currentDshHealth({ refresh });
+    let providerMetadata = null;
+    try {
+      providerMetadata = (providerSnapshot?.()?.agentProviders ?? []).find(provider => provider.id === 'dsh') ?? null;
+    } catch (error) {
+      // Optional provider metadata cannot make the built-in integration unavailable.
+      log('DSH Agent metadata unavailable: ' + String(error?.message ?? error));
+    }
+    const providerAvailable = typeof health?.available === 'boolean'
+      ? health.available
+      : (providerMetadata?.available === true || status.provider?.available === true);
+    const rawHealthReason = String(health?.reason ?? status.provider?.lastError ?? '').toLowerCase();
+    const healthReason = providerAvailable ? null : (/(?:needs[_ -]?auth|api[_ -]?key|credential)/.test(rawHealthReason) ? 'needs_setup' : 'unavailable');
+    const workspaceBoundary = health?.capabilities?.workspaceBoundary
+      ?? health?.workspaceBoundary
+      ?? providerMetadata?.workspaceBoundary
+      ?? 'unverified';
+    const agentIntegration = {
+      id: 'dsh',
+      displayName: 'DSH Agent Provider',
+      enabled: status.enabled,
+      available: providerAvailable,
+      status: providerAvailable ? 'ready' : (healthReason === 'needs_auth' || healthReason === 'needs_setup' ? 'needs_setup' : 'unavailable'),
+      reason: healthReason,
+      version: health?.version ?? providerMetadata?.version ?? status.provider?.version ?? null,
+      workspaceBoundary,
+      supportsFreshSession: health?.supportsFreshSession ?? providerMetadata?.supportsFreshSession ?? true,
+      supportsResume: health?.supportsResume ?? providerMetadata?.supportsResume ?? true,
+      continuity: { enabled: true, runtime: 'CetaMesh Continuity Runtime' }
+    };
+    const integrationDescriptor = {
+      id: 'dsh',
+      name: 'DeepSeek Harness',
+      category: 'agent',
+      icon: 'deepseek-harness',
+      description: plugin.summary,
+      installed: desktopApp.installed === true,
+      version: desktopApp.version ?? null,
+      desktopAvailable: desktopApp.available === true,
+      agentAvailable: providerAvailable,
+      status: agentIntegration.status,
+      settingsRoute: 'agents.dsh',
+      actions: ['open', 'refresh', 'settings']
+    };
+    return { desktopApp, agentIntegration, integrationDescriptor };
+  }
+
+  async function integrationView(id, { refresh = false } = {}) {
     const plugin = resolvedRegistry.requirePlugin(id);
     const view = resolvedRegistry.pluginView(plugin);
     const status = integrationStatus(id);
     const local = (localServices?.() ?? {})[plugin.localService] ?? null;
+    const dshData = plugin.id === 'cetamesh-dsh' ? await dshIntegrationData(plugin, { refresh }) : {};
     return {
       ...view,
       bottomLayer: plugin.kind === 'channel-integration' ? 'channel-provider' : 'agent-provider',
       integrationStatus: status,
       localService: local,
       provider: status.provider ?? null,
-      actions: plugin.localService ? ['detect', 'start', 'stop', 'install', 'connect'] : []
+      actions: plugin.localService ? ['detect', 'start', 'stop', 'install', 'connect'] : [],
+      ...dshData,
+      ...(plugin.id === 'cetamesh-dsh' ? { settingsRoute: 'agents.dsh' } : {})
+    };
+  }
+
+  async function pluginViewWithDsh(plugin) {
+    const view = resolvedRegistry.pluginView(plugin);
+    if (plugin.id !== 'cetamesh-dsh') return view;
+    const dshData = await dshIntegrationData(plugin);
+    return { ...view, ...dshData, settingsRoute: 'agents.dsh' };
+  }
+
+  async function dshSettings() {
+    const plugin = resolvedRegistry.requirePlugin('cetamesh-dsh');
+    const data = await dshIntegrationData(plugin);
+    const providerSettings = settingsSnapshot?.()?.agents ?? {};
+    const health = await currentDshHealth();
+    const capabilities = health?.capabilities ?? {};
+    const workspaceBoundary = capabilities.workspaceBoundary ?? health?.workspaceBoundary ?? 'unverified';
+    const settings = typeof dshDesktop?.settings === 'function'
+      ? await dshDesktop.settings({
+          agentEnabled: resolvedRegistry.pluginEnabled(plugin.id),
+          agentHealth: health ? { ...health, reason: data.agentIntegration.reason } : null,
+          workspaceBoundary,
+          defaultAgentProvider: providerSettings.defaultAgentProvider ?? 'auto'
+        })
+      : null;
+    return {
+      ...data,
+      settingsRoute: 'agents.dsh',
+      settings: settings ?? {
+        id: 'dsh', displayName: 'DeepSeek Harness',
+        desktop: { installed: data.desktopApp.installed, running: data.desktopApp.running, version: data.desktopApp.version },
+        agent: data.agentIntegration,
+        workspaceMode: workspaceBoundary,
+        continuity: data.agentIntegration.continuity,
+        defaultAgentProvider: providerSettings.defaultAgentProvider ?? 'auto',
+        advanced: { diagnostics: data.desktopApp.diagnostics, cli: data.desktopApp.cli }
+      }
     };
   }
 
@@ -226,14 +365,18 @@ export function createIntegrationService({
       mcp: { total: resolvedRegistry.servers.length, running: resolvedRegistry.listMcpServers().filter(server => server.status === 'running').length },
       integrations: resolvedRegistry.plugins.filter(plugin => plugin.kind === 'channel-integration' || plugin.kind === 'agent-integration').map(plugin => integrationStatus(plugin.id))
     }),
-    'plugins.list': params => ({
-      plugins: resolvedRegistry.listPlugins({
+    'plugins.list': async params => ({
+      plugins: await Promise.all(resolvedRegistry.listPlugins({
         category: params.category ?? null,
         enabled: typeof params.enabled === 'boolean' ? params.enabled : null
-      })
+      }).map(plugin => pluginViewWithDsh(resolvedRegistry.requirePlugin(plugin.id))))
     }),
-    'plugins.get': params => resolvedRegistry.pluginView(resolvedRegistry.requirePlugin(params.id ?? params.pluginId)),
-    'plugins.settings': params => settingsPage(params.id ?? params.pluginId),
+    'plugins.get': params => pluginViewWithDsh(resolvedRegistry.requirePlugin(params.id ?? params.pluginId)),
+    'plugins.settings': async params => {
+      const id = params.id ?? params.pluginId;
+      if (id === 'cetamesh-dsh') return dshSettings();
+      return settingsPage(id);
+    },
     'plugins.enable': params => managePlugin({ action: 'plugin.enable', pluginId: params.id ?? params.pluginId, approved: params.approved === true }),
     'plugins.disable': params => managePlugin({ action: 'plugin.disable', pluginId: params.id ?? params.pluginId, approved: params.approved === true }),
     'plugins.tool.toggle': params => managePlugin({
@@ -284,12 +427,16 @@ export function createIntegrationService({
       }
       return invokeTool({ id: toolId, input: params.input, approved: params.approved, approvalId: params.approvalId, reason: params.reason });
     },
-    'integrations.list': () => ({
-      integrations: resolvedRegistry.plugins
+    'integrations.list': async () => ({
+      integrations: await Promise.all(resolvedRegistry.plugins
         .filter(plugin => plugin.kind === 'channel-integration' || plugin.kind === 'agent-integration')
-        .map(plugin => integrationView(plugin.id))
+        .map(plugin => integrationView(plugin.id)))
     }),
     'integrations.get': params => integrationView(params.id ?? params.pluginId),
+    'integrations.dshDesktop.status': () => currentDshDesktop(),
+    'integrations.dshDesktop.refresh': () => currentDshDesktop({ refresh: true }),
+    'integrations.dshDesktop.open': params => manageMcp({ action: 'dshDesktop.open', approved: params.approved === true }),
+    'integrations.dshDesktop.settings': () => dshSettings(),
     'integrations.action': params => manageMcp({
       action: 'integration.action',
       localService: String(params.localService ?? ''),

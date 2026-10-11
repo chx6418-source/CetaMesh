@@ -45,6 +45,9 @@ pub struct IntegrationPlugin {
     pub tool_count: u64,
     pub enabled_tool_count: u64,
     pub toggleable_tools: bool,
+    pub desktop_app: Option<Value>,
+    pub agent_integration: Option<Value>,
+    pub integration_descriptor: Option<Value>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -83,6 +86,7 @@ pub struct IntegrationsUi {
     pub overview: Option<Value>,
     pub selected_plugin: Option<String>,
     pub plugin_detail: Option<Value>,
+    pub dsh_settings: Option<Value>,
     pub selected_mcp: Option<String>,
     pub mcp_detail: Option<Value>,
     pub mcp_tools: Option<Vec<String>>,
@@ -106,6 +110,7 @@ pub struct IntegrationsUi {
     pub icon_textures: std::collections::HashMap<String, egui::TextureHandle>,
     pub developer_mode: bool,
     pub developer_mode_loaded: bool,
+    pub dsh_default_agent_provider: String,
     pub screenshot_texture: Option<(String, egui::TextureHandle)>,
 }
 
@@ -137,6 +142,7 @@ fn is_manage_method(method: &str) -> bool {
         || method.starts_with("mcp.start")
         || method.starts_with("mcp.stop")
         || method.starts_with("mcp.restart")
+        || method.starts_with("integrations.dshDesktop.open")
 }
 
 impl IntegrationsUi {
@@ -227,9 +233,43 @@ impl IntegrationsUi {
             ("plugins.overview", Err(_)) => {}
             ("plugins.get", Ok(value)) => {
                 self.plugin_detail = Some(value.clone());
+                if value.get("id").and_then(Value::as_str) == Some("cetamesh-dsh") {
+                    self.dsh_settings = None;
+                }
                 if let Some(id) = value.get("id").and_then(Value::as_str) {
                     self.selected_plugin = Some(id.to_owned());
                 }
+            }
+            ("plugins.settings", Ok(value)) => {
+                self.dsh_default_agent_provider = value
+                    .get("settings")
+                    .and_then(|settings| settings.get("defaultAgentProvider"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("auto")
+                    .to_owned();
+                self.dsh_settings = Some(value.clone());
+            }
+            ("integrations.dshDesktop.refresh" | "integrations.dshDesktop.status", Ok(value)) => {
+                if let Some(detail) = self.plugin_detail.as_mut() {
+                    if detail.get("id").and_then(Value::as_str) == Some("cetamesh-dsh") {
+                        detail["desktopApp"] = value.clone();
+                    }
+                }
+                if let Some(plugin) = self.plugins.iter_mut().find(|plugin| plugin.id == "cetamesh-dsh") {
+                    plugin.desktop_app = Some(value.clone());
+                }
+                self.notice = Some("DeepSeek Harness 状态已刷新。".to_owned());
+            }
+            ("integrations.dshDesktop.open", Ok(value)) => {
+                let message = value.get("message").and_then(Value::as_str).unwrap_or("DeepSeek Harness 状态已更新。");
+                self.notice = Some(message.to_owned());
+                if value.get("opened").and_then(Value::as_bool) == Some(true) {
+                    self.plugin_detail = None;
+                    self.plugins_loaded = false;
+                }
+            }
+            ("settings.update", Ok(_)) => {
+                self.notice = Some("新会话的默认 Agent Provider 已更新。".to_owned());
             }
             ("plugins.get", Err(error)) => {
                 self.selected_plugin = None;
@@ -716,7 +756,41 @@ impl IntegrationsUi {
                     ui.label(egui::RichText::new(summary).small().color(palette.muted));
                 }
                 ui.small(meta);
+                if plugin.id == "cetamesh-dsh" {
+                    let desktop = plugin.desktop_app.as_ref();
+                    let installed = desktop.and_then(|value| value.get("installed")).and_then(Value::as_bool);
+                    let running = desktop.and_then(|value| value.get("running")).and_then(Value::as_bool);
+                    let version = desktop.and_then(|value| value.get("version")).and_then(Value::as_str).unwrap_or("未知");
+                    let desktop_label = match (installed, running) {
+                        (_, Some(true)) => "运行中",
+                        (Some(true), _) => "已安装",
+                        (Some(false), _) => "未安装",
+                        _ => "状态未知",
+                    };
+                    let agent = plugin.agent_integration.as_ref();
+                    let agent_label = match agent.and_then(|value| value.get("status")).and_then(Value::as_str) {
+                        Some("ready") => "就绪",
+                        Some("needs_setup") => "需要设置",
+                        Some("not_installed") => "未安装",
+                        Some("unavailable") => "暂不可用",
+                        _ => "状态未知",
+                    };
+                    ui.small(format!("Desktop App：{desktop_label} · 版本 {version} · Agent：{agent_label}"));
+                }
                 ui.horizontal(|ui| {
+                    if plugin.id == "cetamesh-dsh" {
+                        let desktop = plugin.desktop_app.as_ref();
+                        let installed = desktop.and_then(|value| value.get("installed")).and_then(Value::as_bool) == Some(true);
+                        if installed && ui.small_button("打开 DSH").clicked() {
+                            actions.push(IntegrationsAction::new("integrations.dshDesktop.open", json!({ "approved": true })));
+                        }
+                        if !installed && ui.small_button("了解如何安装").clicked() {
+                            actions.push(IntegrationsAction::new("__open_dsh_download", json!({})));
+                        }
+                        if ui.small_button("检查状态").clicked() {
+                            actions.push(IntegrationsAction::new("integrations.dshDesktop.refresh", json!({})));
+                        }
+                    }
                     if ui.small_button("打开详情").clicked() {
                         open = true;
                     }
@@ -773,6 +847,9 @@ impl IntegrationsUi {
             if ui.button(label).clicked() {
                 actions.push(self.set_plugin_enabled(id, next));
             }
+        }
+        if id == "cetamesh-dsh" {
+            self.show_dsh_detail(ui, &detail, &mut actions);
         }
         if detail.get("toggleableTools").and_then(Value::as_bool) == Some(true) {
             if ui.button("全部启用工具").clicked() {
@@ -840,6 +917,89 @@ impl IntegrationsUi {
             }
         }
         actions
+    }
+
+    fn show_dsh_detail(&mut self, ui: &mut egui::Ui, detail: &Value, actions: &mut Vec<IntegrationsAction>) {
+        ui.separator();
+        ui.strong("Desktop App");
+        let desktop = detail.get("desktopApp").cloned().unwrap_or(Value::Null);
+        let desktop_status = desktop.get("status").and_then(Value::as_str).unwrap_or("unknown");
+        let desktop_label = match desktop_status {
+            "running" => "运行中",
+            "installed" => "已安装",
+            "not_installed" => "未安装",
+            "unsupported_version" => "版本尚未验证",
+            _ => "暂不可用",
+        };
+        ui.label(format!("安装状态：{desktop_label}"));
+        ui.label(format!("版本：{}", desktop.get("version").and_then(Value::as_str).unwrap_or("未知")));
+        if desktop.get("installed").and_then(Value::as_bool) == Some(true) {
+            if ui.button("打开 DSH").clicked() {
+                actions.push(IntegrationsAction::new("integrations.dshDesktop.open", json!({ "approved": true })));
+            }
+        } else if ui.button("了解如何安装").clicked() {
+            actions.push(IntegrationsAction::new("__open_dsh_download", json!({})));
+        }
+        if ui.button("检查状态").clicked() {
+            actions.push(IntegrationsAction::new("integrations.dshDesktop.refresh", json!({})));
+        }
+
+        let agent = detail.get("agentIntegration").cloned().unwrap_or(Value::Null);
+        ui.add_space(4.0);
+        ui.strong("Agent Integration");
+        let agent_status = agent.get("status").and_then(Value::as_str).unwrap_or("unavailable");
+        let agent_label = match agent_status {
+            "ready" => "就绪",
+            "needs_setup" => "需要设置",
+            "not_installed" => "未安装",
+            _ => "暂不可用",
+        };
+        ui.label(format!("运行状态：{agent_label}"));
+        if desktop.get("installed").and_then(Value::as_bool) == Some(true) && agent.get("available").and_then(Value::as_bool) == Some(false) {
+            ui.weak("Desktop 已安装，Agent Integration 尚未就绪。");
+        }
+        if ui.button("Agent 设置").clicked() {
+            actions.push(IntegrationsAction::new("plugins.settings", json!({ "id": "cetamesh-dsh" })));
+        }
+        if let Some(settings_view) = &self.dsh_settings {
+            let settings = settings_view.get("settings").unwrap_or(settings_view);
+            ui.separator();
+            ui.strong("DeepSeek Harness 设置");
+            ui.label(format!("Workspace Mode：{}", settings.get("workspaceMode").and_then(Value::as_str).unwrap_or("未知")));
+            ui.label("Continuity：由 CetaMesh Continuity Runtime 管理");
+            let enabled = settings.get("agent").and_then(|value| value.get("enabled")).and_then(Value::as_bool).unwrap_or(false);
+            let enabled_label = if enabled { "停用 Agent Integration" } else { "启用 Agent Integration" };
+            if ui.button(enabled_label).clicked() {
+                let method = if enabled { "plugins.disable" } else { "plugins.enable" };
+                actions.push(IntegrationsAction::new(method, json!({ "id": "cetamesh-dsh", "approved": true })));
+            }
+            let selected = self.dsh_default_agent_provider.clone();
+            egui::ComboBox::from_id_salt("dsh-default-agent-provider")
+                .selected_text(match selected.as_str() { "dsh" => "DSH", "codex" => "Codex", "zcode" => "ZCode", _ => "自动选择" })
+                .show_ui(ui, |ui| {
+                    for (id, label) in [("auto", "自动选择"), ("dsh", "DSH"), ("codex", "Codex"), ("zcode", "ZCode")] {
+                        if ui.selectable_label(selected.as_str() == id, label).clicked() && selected.as_str() != id {
+                            self.dsh_default_agent_provider = id.to_owned();
+                            actions.push(IntegrationsAction::new("settings.update", json!({
+                                "section": "agents", "values": { "defaultAgentProvider": id }
+                            })));
+                        }
+                    }
+                });
+            egui::CollapsingHeader::new("高级诊断").show(ui, |ui| {
+                if let Some(advanced) = settings.get("advanced") {
+                    let cli = advanced.get("cli");
+                    let cli_path = cli.and_then(|value| value.get("executablePath")).and_then(Value::as_str).unwrap_or("未安装");
+                    ui.small(format!("CLI：{cli_path}"));
+                    let executable_path = advanced.get("diagnostics").and_then(|value| value.get("executablePath")).and_then(Value::as_str).unwrap_or("未知");
+                    ui.small(format!("Desktop 可执行文件：{executable_path}"));
+                } else {
+                    ui.small("诊断信息未知");
+                }
+                let health = settings.get("agent").and_then(|value| value.get("health")).and_then(Value::as_str).unwrap_or("未知");
+                ui.small(format!("Agent health：{health}"));
+            });
+        }
     }
 
     fn show_tools_tab(&mut self, ui: &mut egui::Ui) -> Vec<IntegrationsAction> {
@@ -1099,6 +1259,9 @@ fn parse_plugin(item: &Value) -> IntegrationPlugin {
         tool_count: item.get("toolCount").and_then(Value::as_u64).unwrap_or(0),
         enabled_tool_count: item.get("enabledToolCount").and_then(Value::as_u64).unwrap_or(0),
         toggleable_tools: item.get("toggleableTools").and_then(Value::as_bool).unwrap_or(false),
+        desktop_app: item.get("desktopApp").cloned(),
+        agent_integration: item.get("agentIntegration").cloned(),
+        integration_descriptor: item.get("integrationDescriptor").cloned(),
     }
 }
 
@@ -1169,13 +1332,20 @@ mod tests {
         let plugins = parse_plugins(&json!({
             "plugins": [
                 {"id": "cetamesh-bionic-chat", "name": "Bionic Chat Tools", "kind": "tool-pack", "version": "1.0",
-                 "summary": "日程、提醒", "enabled": true, "toolCount": 7, "enabledToolCount": 7, "toggleableTools": true}
+                 "summary": "日程、提醒", "enabled": true, "toolCount": 7, "enabledToolCount": 7, "toggleableTools": true},
+                {"id": "cetamesh-dsh", "name": "DeepSeek Harness", "kind": "agent-integration", "enabled": true,
+                 "desktopApp": {"status": "installed", "installed": true, "running": false, "version": "0.2.0-rc.2"},
+                 "agentIntegration": {"status": "unavailable", "available": false},
+                 "integrationDescriptor": {"id": "dsh", "category": "agent", "settingsRoute": "agents.dsh"}}
             ]
         }));
-        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins.len(), 2);
         assert_eq!(plugins[0].name, "Bionic Chat Tools");
         assert_eq!(plugins[0].enabled_tool_count, 7);
         assert!(plugins[0].toggleable_tools);
+        assert_eq!(plugins[1].desktop_app.as_ref().and_then(|value| value.get("installed")).and_then(serde_json::Value::as_bool), Some(true));
+        assert_eq!(plugins[1].agent_integration.as_ref().and_then(|value| value.get("available")).and_then(serde_json::Value::as_bool), Some(false));
+        assert_eq!(plugins[1].integration_descriptor.as_ref().and_then(|value| value.get("settingsRoute")).and_then(serde_json::Value::as_str), Some("agents.dsh"));
 
         let tools = parse_tools(&json!({
             "tools": [

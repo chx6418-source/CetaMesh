@@ -58,7 +58,7 @@ function summarizeProvider(provider, health = null) {
  * The returned .broker supports process-local turn-end wiring for Chat and Continuity.
  */
 export function createDefaultAgentService({ api, defaults, log, dshOptions = {}, codexOptions = {}, codexExecutable,
-  zcodeOptions = {}, zcodeExecutable } = {}) {
+  zcodeOptions = {}, zcodeExecutable, desktopStatus = null } = {}) {
   const dshProvider = api ? createDshAgentProvider({ api, defaults, log }) : createUnavailableDshProvider();
   const taskBoundDsh = api && typeof dshOptions.resolveTaskWorkspace === 'function' && typeof dshOptions.applyChanges === 'function'
     ? createStagedDshAgentProvider({ ...dshOptions, provider: dshProvider, log })
@@ -71,11 +71,11 @@ export function createDefaultAgentService({ api, defaults, log, dshOptions = {},
     ]
   });
   const broker = createAgentBroker({ registry, log });
-  const service = createAgentService({ broker, log });
+  const service = createAgentService({ broker, log, desktopStatus });
   return Object.assign(service, { broker, registry });
 }
 
-export function createAgentService({ broker, log = () => {} } = {}) {
+export function createAgentService({ broker, log = () => {}, desktopStatus = null } = {}) {
   if (!broker || typeof broker.require !== 'function' || typeof broker.registry !== 'object') {
     throw agentProviderError('INVALID_PARAMS', 'createAgentService 需要 Agent Broker');
   }
@@ -87,7 +87,23 @@ export function createAgentService({ broker, log = () => {} } = {}) {
         let health = null;
         try { health = await broker.health(provider.id); }
         catch (error) { health = { provider: provider.id, available: false, reason: error?.code ?? 'health_failed' }; }
-        return summarizeProvider(provider, health);
+        const summary = summarizeProvider(provider, health);
+        if (provider.id === 'dsh' && typeof desktopStatus === 'function') {
+          try {
+            const desktop = await desktopStatus();
+            if (desktop) summary.desktopApp = {
+              status: desktop.status ?? 'unknown',
+              installed: desktop.installed === true,
+              running: desktop.running === true,
+              version: desktop.version ?? null,
+              lastCheckedAt: desktop.lastCheckedAt ?? null
+            };
+          } catch (error) {
+            // Optional Desktop detection must never make the Agent directory unavailable.
+            summary.desktopApp = { status: 'unknown', installed: false, running: false, version: null, reason: error?.code ?? 'detection_failed' };
+          }
+        }
+        return summary;
       }))
     }),
     'agent.capabilities': (params) => ({ capabilities: broker.capabilities(params?.provider) }),

@@ -53,6 +53,7 @@ export const FIELDS = Object.freeze({
   }),
   agents: Object.freeze({
     defaultAgentPreset: text('whale-chat-v2', { description: '默认 Agent Preset' }),
+    defaultAgentProvider: text('auto', { choices: ['auto', 'dsh', 'codex', 'zcode'], description: '新建会话默认 Agent Provider' }),
     allowBackgroundTurns: bool(true, { description: '允许后台回合' })
   }),
   memory: Object.freeze({

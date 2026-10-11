@@ -102,6 +102,7 @@ export function createChatService({
   platformRoute = null,
   agentFollow = null,
   defaults,
+  defaultAgentProvider = () => 'auto',
   stateDir,
   now = () => Date.now(),
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
@@ -121,6 +122,11 @@ export function createChatService({
       .filter((entry) => entry && typeof entry.id === 'string')
       .map((entry) => [entry.id, entry])
   );
+  function resolveDefaultAgentProvider() {
+    const configured = typeof defaultAgentProvider === 'function' ? defaultAgentProvider() : defaultAgentProvider;
+    if (configured === 'auto' || configured === null || configured === undefined || configured === '') return null;
+    return selectableAgentProviders.has(String(configured)) ? String(configured) : null;
+  }
   const dir = path.join(stateDir, 'desktop-chat');
   const sessionsFile = path.join(dir, 'sessions.json');
   const historyDir = path.join(dir, 'history');
@@ -129,7 +135,8 @@ export function createChatService({
     model: String(defaults?.model ?? ''),
     reasoning: String(defaults?.reasoningEffort ?? 'max'),
     mode: 'chat',
-    modelProvider: null
+    modelProvider: null,
+    agentProvider: null
   };
 
   const sessions = new Map(); // id -> record（含 config / dshSessionId / archived）
@@ -252,7 +259,7 @@ export function createChatService({
       title: title === undefined || title === null || title === '' ? '新会话' : requireText(String(title), '会话标题', MAX_TITLE_CHARS),
       createdAt: now(),
       updatedAt: now(),
-      config: { ...baseConfig }
+      config: { ...baseConfig, agentProvider: resolveDefaultAgentProvider() }
     });
     sessions.set(record.id, record);
     saveStore();

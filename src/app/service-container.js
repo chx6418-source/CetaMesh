@@ -25,6 +25,7 @@ import { createMeshService } from '../mesh/service.js';
 import { createChannelService } from '../channel/service.js';
 import { createSettingsService } from '../settings/service.js';
 import { createIntegrationService } from '../integrations/index.js';
+import { createDshDesktopIntegration } from '../integrations/dsh-desktop.js';
 import { createAboutService } from '../about/service.js';
 import { createUpdateService } from '../update/service.js';
 import { createNotesCache } from '../update/notes-cache.js';
@@ -53,6 +54,8 @@ export function createCetaMeshServices(options = {}) {
   const api = options.api ?? null;
   const controlService = options.controlService ?? null;
   const log = options.log ?? (() => {});
+  const settingsService = options.settingsService ?? createSettingsService({ stateDir });
+  const dshDesktop = options.dshDesktop ?? createDshDesktopIntegration({ platform: options.platform ?? process.platform });
 
   const taskService = createTaskService({ stateDir });
   const workspaceService = createWorkspaceService({
@@ -77,7 +80,8 @@ export function createCetaMeshServices(options = {}) {
 
   const providerSecrets = createProviderSecrets({ root: dataRoot });
   const agentService = createDefaultAgentService({ api, defaults: dshDefaults, log,
-    dshOptions: agentTaskOptions, codexOptions: agentTaskOptions });
+    dshOptions: agentTaskOptions, codexOptions: agentTaskOptions,
+    desktopStatus: () => dshDesktop.status() });
   const agentBroker = agentService.broker;
 
   const modelRegistry = createModelProviderRegistry({
@@ -163,6 +167,7 @@ export function createCetaMeshServices(options = {}) {
     platformRoute: request => platformRuntime.route(request),
     agentFollow: request => agentBroker.follow(request),
     defaults: dshDefaults,
+    defaultAgentProvider: () => settingsService.store.get().settings.agents.defaultAgentProvider,
     stateDir,
     onTurnEnd: payload => agentBroker.reportTurnEnd(payload)
   });
@@ -273,6 +278,9 @@ export function createCetaMeshServices(options = {}) {
     stateDir,
     capabilityBroker: capabilityService.broker,
     ...(options.localServices ? { localServices: options.localServices } : {}),
+    dshDesktop,
+    agentHealth: () => agentBroker.health('dsh'),
+    settingsSnapshot: () => settingsService.store.get().settings,
     // Provider 快照 = "底层是否真的接入"：
     //   - agent：DSH 在未注入 API 时**仍会注册**但 available=false / health=unavailable，
     //     所以必须按真实可用性过滤（注册 ≠ 可用）；
@@ -284,7 +292,8 @@ export function createCetaMeshServices(options = {}) {
         .map(channel => channel.id),
       agent: agentService.listProviders()
         .filter(provider => provider.available === true)
-        .map(provider => provider.id)
+        .map(provider => provider.id),
+      agentProviders: agentService.listProviders()
     }),
     log
   });
@@ -310,7 +319,6 @@ export function createCetaMeshServices(options = {}) {
     return null;
   });
 
-  const settingsService = createSettingsService({ stateDir });
   const notesCache = createNotesCache({ stateDir });
 
   /**
@@ -384,6 +392,7 @@ export function createCetaMeshServices(options = {}) {
     controlService,
     providerSecrets,
     agentService,
+    dshDesktop,
     agentBroker,
     managedAgent,
     modelRegistry,

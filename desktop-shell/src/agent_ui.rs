@@ -18,6 +18,10 @@ pub struct AgentProvider {
     pub capabilities: Vec<String>,
     pub boundary: String,
     pub supports_resume: Option<bool>,
+    pub desktop_app_status: String,
+    pub desktop_app_installed: Option<bool>,
+    pub desktop_app_running: Option<bool>,
+    pub desktop_app_version: String,
 }
 
 /// 智能体页的用户可见状态（方案 01 卡片上的四态）。
@@ -172,6 +176,16 @@ impl AgentUi {
                 provider.capabilities.join(" · ")
             };
             ui.label(egui::RichText::new(summary).color(palette.muted));
+            if provider.id == "dsh" {
+                let desktop = match (provider.desktop_app_installed, provider.desktop_app_running) {
+                    (_, Some(true)) => "运行中",
+                    (Some(true), _) => "已安装",
+                    (Some(false), _) => "未安装",
+                    _ => "状态未知",
+                };
+                let version = if provider.desktop_app_version.is_empty() { "版本未知" } else { provider.desktop_app_version.as_str() };
+                ui.small(format!("Desktop App：{desktop} · {version}"));
+            }
             ui.add_space(6.0);
 
             ui.horizontal(|ui| {
@@ -209,6 +223,19 @@ impl AgentUi {
                     Some(false) => "不支持".to_owned(),
                     None => "未知".to_owned(),
                 });
+                if provider.id == "dsh" {
+                    detail_row(ui, "Desktop App", &if provider.desktop_app_status.is_empty() {
+                        "未知".to_owned()
+                    } else {
+                        provider.desktop_app_status.clone()
+                    });
+                    detail_row(ui, "Desktop 版本", &if provider.desktop_app_version.is_empty() {
+                        "未知".to_owned()
+                    } else {
+                        provider.desktop_app_version.clone()
+                    });
+                    detail_row(ui, "Continuity", "由 CetaMesh Continuity Runtime 管理");
+                }
                 detail_row(ui, "能力", &if provider.capabilities.is_empty() {
                     "未知".to_owned()
                 } else {
@@ -274,15 +301,25 @@ pub fn parse_agent_list(value: &Value) -> Result<Vec<AgentProvider>, String> {
                     .collect()
             })
             .unwrap_or_default();
+        let desktop = item.get("desktopApp");
+        let health_value = item.get("health");
+        let health = match health_value {
+            Some(Value::String(value)) => value.clone(),
+            Some(Value::Object(value)) => {
+                let status = value.get("status").and_then(Value::as_str);
+                let reason = value.get("reason").and_then(Value::as_str);
+                status.or_else(|| reason.filter(|value| matches!(*value, "needs_auth" | "needs_setup" | "not_installed" | "external-control-not-supported")))
+                    .or_else(|| value.get("available").and_then(Value::as_bool).map(|available| if available { "ready" } else { "unavailable" }))
+                    .unwrap_or("unknown")
+                    .to_owned()
+            }
+            _ => String::new(),
+        };
         providers.push(AgentProvider {
             id,
             display_name,
             available: item.get("available").and_then(Value::as_bool),
-            health: item
-                .get("health")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned(),
+            health,
             version: item
                 .get("version")
                 .and_then(Value::as_str)
@@ -295,6 +332,10 @@ pub fn parse_agent_list(value: &Value) -> Result<Vec<AgentProvider>, String> {
                 .unwrap_or_default()
                 .to_owned(),
             supports_resume: item.get("supportsResume").and_then(Value::as_bool),
+            desktop_app_status: desktop.and_then(|value| value.get("status")).and_then(Value::as_str).unwrap_or_default().to_owned(),
+            desktop_app_installed: desktop.and_then(|value| value.get("installed")).and_then(Value::as_bool),
+            desktop_app_running: desktop.and_then(|value| value.get("running")).and_then(Value::as_bool),
+            desktop_app_version: desktop.and_then(|value| value.get("version")).and_then(Value::as_str).unwrap_or_default().to_owned(),
         });
     }
     Ok(providers)
@@ -309,8 +350,9 @@ mod tests {
     fn parses_provider_catalog_with_four_states() {
         let providers = parse_agent_list(&json!({
             "providers": [
-                {"id": "dsh", "displayName": "DSH", "available": true, "health": "ready", "version": "1.4",
-                 "capabilities": ["chat", "tools"], "workspaceBoundary": "staged", "supportsResume": true},
+                {"id": "dsh", "displayName": "DSH", "available": true, "health": {"available": true}, "version": "1.4",
+                 "capabilities": ["chat", "tools"], "workspaceBoundary": "staged", "supportsResume": true,
+                 "desktopApp": {"status": "not_installed", "installed": false, "running": false, "version": null}},
                 {"id": "codex", "displayName": "Codex", "available": false, "health": "needs_auth"},
                 {"id": "zcode", "displayName": "ZCode", "available": false, "health": "external-control-not-supported"},
                 {"id": "legacy", "health": "unavailable"}
@@ -319,6 +361,8 @@ mod tests {
         .expect("agent list parse");
         assert_eq!(providers.len(), 4);
         assert_eq!(providers[0].state(), AgentState::Ready);
+        assert_eq!(providers[0].desktop_app_installed, Some(false));
+        assert_eq!(providers[0].desktop_app_status, "not_installed");
         assert!(providers[0].usable_in_chat());
         assert_eq!(providers[0].capabilities, vec!["chat".to_owned(), "tools".to_owned()]);
         assert_eq!(providers[1].state(), AgentState::NeedsSetup);

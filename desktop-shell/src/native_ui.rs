@@ -3888,7 +3888,13 @@ ApiCall::Family { method, params } => api.request(method, params),
         }
         let actions = self.integrations.show(ui);
         for action in actions {
-            self.issue_integrations(action.method, action.params);
+            if action.method == "__open_dsh_download" {
+                if crate::external_link::open_in_default_browser("https://www.deepseek.com/en/download/").is_err() {
+                    self.integrations.notice = Some("无法打开 DeepSeek Harness 官方下载页，请稍后重试。".to_owned());
+                }
+            } else {
+                self.issue_integrations(action.method, action.params);
+            }
         }
         // MCP 详情打开后自动发现一次工具。
         if self.integrations.mcp_detail.is_some()

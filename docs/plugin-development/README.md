@@ -17,6 +17,7 @@ The guide documents the v1 Extension Runtime contract. Plugins declare capabilit
 13. [Publishing](13-publishing.md)
 14. [Security](14-security.md)
 15. [Versioning](15-versioning.md)
+16. [Built-in Integrations](16-built-in-integrations.md)
 
 The Hello Tool tutorial takes 15–30 minutes. Run npm run plugin:validate -- <directory> before review.
 

@@ -71,6 +71,7 @@ const REGISTRY = {
   'test-workspace-ipc.mjs': { category: 'architecture' },
   'test-smart-platform-routing.mjs': { category: 'architecture' },
   'test-integration-descriptors.mjs': { category: 'architecture', note: '产品化任务 B：SnowLuma/DSH 集成描述符 + IPC 路由 + 容器装配' },
+  'test-dsh-desktop-integration.mjs': { category: 'integration', note: 'DSH Desktop detection, launch, settings contract, and Agent/Desktop separation' },
 
   // ── security：权限 / 能力 / 攻击负面 ──────────────────────────────────────
   'test-agent-test-run-security.mjs': { category: 'security' },

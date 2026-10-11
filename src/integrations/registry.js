@@ -202,6 +202,8 @@ export function createIntegrationRegistry({
       advanced: plugin.advanced ?? {},
       provider: plugin.provider ?? null,
       localService: plugin.localService ?? null,
+      icon: plugin.icon ?? null,
+      settingsRoute: plugin.settingsRoute ?? null,
       mcpServerId: plugin.mcpServerId ?? null,
       enabled,
       status: isMcp ? serverState(plugin.mcpServerId) : { enabled, provider: plugin.provider ?? null, status: enabled ? 'enabled' : 'disabled' },
