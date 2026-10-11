@@ -554,7 +554,10 @@ try {
       // UI crash + restart must not touch Core metadata or config.json bytes.
       spawnSync('taskkill.exe', ['/PID', String(first.pid), '/F'], { encoding: 'utf8' });
       await waitFor(async () => !isRunning(workerPid), 20000, 'worker 孤儿守卫退出');
-      // Re-launch with explicit dark theme + zoom preferences to prove they are actually applied.
+      // Re-launch with a stored legacy theme id + zoom preferences to prove stored UI
+      // preferences are actually applied. UI v1 converged the palette to the single
+      // 纸面 theme (commit 77353ea): legacy ids (dark/soda/…) deliberately fall back
+      // to 浅色 · 纸面 instead of failing, so the log contract is 浅色 here.
       const prefsFile = path.join(dataDir, 'state', 'desktop-ui.json');
       const storedPrefs = JSON.parse(fs.readFileSync(prefsFile, 'utf8'));
       storedPrefs.theme = 'dark';
@@ -564,7 +567,11 @@ try {
       const relaunched = spawn(SHELL, [], { env, cwd: ROOT, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
       try {
         await waitFor(async () => /CetaMesh/.test(titleOf(relaunched.pid) || ''), 40000, '重启后窗口');
-        await waitFor(async () => /主题已应用：深色/.test(shellLog()), 15000, '深色主题应用日志');
+        await waitFor(
+          async () => /主题已应用：浅色 · 纸面/.test(shellLog()),
+          15000,
+          '主题应用日志（legacy dark → 纸面回落）'
+        );
         assert.match(shellLog(), /界面缩放已应用：110%/, '界面缩放偏好应在启动时应用');
         assert.match(shellLog(), /窗口几何已恢复：/, '窗口几何偏好应在启动时恢复');
         assert.equal(
