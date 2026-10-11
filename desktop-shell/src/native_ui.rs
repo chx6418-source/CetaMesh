@@ -3113,30 +3113,42 @@ ApiCall::Family { method, params } => api.request(method, params),
                     true,
                 );
             } else if hover_t > 0.01 || press_t > 0.01 {
-                let ease = crate::theme::motion::spring(hover_t);
-                let lifted = rect.translate(egui::vec2(0.0, -ease + 2.0 * press_t));
                 let corner = egui::CornerRadius::same(18);
-                crate::theme::painter::paint_soft_shadow(
-                    ui.painter(),
-                    lifted,
-                    18.0,
-                    egui::vec2(4.0, 5.0),
-                    12.0,
-                    tokens.shadow_c1.scale_alpha(hover_t),
-                );
                 let fill = if press_t > 0.5 {
                     tokens.accent_soft.over(tokens.bg)
                 } else {
                     tokens.hover
                 };
-                ui.painter()
-                    .rect_filled(lifted, corner, fill.scale_alpha(hover_t).to_color32());
-                ui.painter().rect_stroke(
-                    lifted,
-                    corner,
-                    egui::Stroke::new(1.0, tokens.edge_hi.to_color32()),
-                    egui::StrokeKind::Inside,
-                );
+                if spec.shadow.card_rim {
+                    // 糖玻璃主题的悬浮语言：浮起 + 软阴影 + edge_hi 描边。
+                    let ease = crate::theme::motion::spring(hover_t);
+                    let lifted = rect.translate(egui::vec2(0.0, -ease + 2.0 * press_t));
+                    crate::theme::painter::paint_soft_shadow(
+                        ui.painter(),
+                        lifted,
+                        18.0,
+                        egui::vec2(4.0, 5.0),
+                        12.0,
+                        tokens.shadow_c1.scale_alpha(hover_t),
+                    );
+                    ui.painter()
+                        .rect_filled(lifted, corner, fill.scale_alpha(hover_t).to_color32());
+                    ui.painter().rect_stroke(
+                        lifted,
+                        corner,
+                        egui::Stroke::new(1.0, tokens.edge_hi.to_color32()),
+                        egui::StrokeKind::Inside,
+                    );
+                } else {
+                    // 哑光主题（纸面，方案 01）：悬停只是纸色加深一档的软填充——
+                    // 无阴影、无描边。edge_hi 在纸面上是 85% 白，会画出一个
+                    // "白色贴纸圈"（Owner 视频里的 bug）。
+                    ui.painter().rect_filled(
+                        rect,
+                        corner,
+                        fill.scale_alpha(hover_t).to_color32(),
+                    );
+                }
             }
             let text_color = if selected {
                 tokens.on_accent
