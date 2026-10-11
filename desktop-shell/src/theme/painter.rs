@@ -480,8 +480,11 @@ pub fn paint_button(
             Stroke::new(1.5, tokens.shadow_c2.scale_alpha(0.5).to_color32()),
             StrokeKind::Inside,
         );
-    } else {
+    } else if spec.shadow.card_rim {
         // `inset 0 1.5px 0` top rim. Primary/danger/armed carry their own lighter rim.
+        // 这圈描边被裁到上半部后，圆角处会露出一截白色弧线——它只属于糖玻璃（GUMMY）
+        // 主题的"高光"语言；哑光主题（card_rim=false，如纸面）整条跳过，否则弧线在
+        // 浅色底上会被当成脏东西（Owner 截图 bug）。
         let rim = match kind {
             ButtonKind::Primary | ButtonKind::Danger | ButtonKind::Armed => {
                 Rgba::rgb(255, 255, 255).with_alpha(0.35)
