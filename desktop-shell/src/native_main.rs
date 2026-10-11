@@ -89,11 +89,13 @@ pub(crate) fn default_install_dir() -> PathBuf {
     if installer::InstallManifest::read(&exe_dir).is_some() {
         return exe_dir;
     }
+    // 2026-10 产品化：全新安装默认 per-user（免管理员 / 不触发 UAC），目录品牌为 CetaMesh；
+    // 既有安装在升级时由注册表 InstallLocation / 安装清单发现并复用原位置。
     env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(env::temp_dir)
         .join("Programs")
-        .join("WhaleBridge")
+        .join("CetaMesh")
 }
 
 fn pipe_name() -> String {

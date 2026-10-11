@@ -2619,6 +2619,9 @@ ApiCall::Family { method, params } => api.request(method, params),
                     self.toast = Some(("已请求重启 Core…".to_owned(), Instant::now()));
                 }
                 TrayCommand::ExitRequested => self.request_quit(ctx, "托盘菜单选择退出"),
+                TrayCommand::ExitRequestedByInstaller => {
+                    self.request_quit(ctx, "安装程序请求关闭应用（准备更新）")
+                }
             }
         }
     }

@@ -677,7 +677,29 @@ fn sleep_interruptible(
 /// 只在 release 构建暴露。
 pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+/// 安装器子进程审计（测试钩子，默认零开销）：`WHALEBRIDGE_INSTALLER_SPAWN_LOG` 指向文件时，
+/// 每次经 [`hidden`] 的 spawn 追加一行 JSON。安装器「无控制台窗口」回归测试据此断言
+/// 每个控制台子进程（reg.exe / powershell.exe / WhaleBridgeCore.exe / taskkill.exe…）都被隐藏。
+/// 生产运行不设置该环境变量时不写任何文件。
+pub fn record_spawn(program: &std::ffi::OsStr, hidden: bool) {
+    let Ok(path) = std::env::var("WHALEBRIDGE_INSTALLER_SPAWN_LOG") else {
+        return;
+    };
+    if path.trim().is_empty() {
+        return;
+    }
+    let program_text = program.to_string_lossy().replace('\\', "/").replace('"', "'");
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(
+            file,
+            "{{\"program\":\"{program_text}\",\"hidden\":{hidden}}}"
+        );
+    }
+}
+
 pub fn hidden(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let program = program.as_ref();
+    record_spawn(program, true);
     let mut command = Command::new(program);
     #[cfg(windows)]
     {

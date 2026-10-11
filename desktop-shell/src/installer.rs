@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::desktop_paths;
+use crate::supervisor::hidden;
 
 pub const PRODUCT_NAME: &str = "CetaMesh";
 pub const INSTALL_MANIFEST: &str = "install-manifest.json";
@@ -1011,6 +1012,8 @@ pub fn apply_plan_with_backup(
             }
         }
         for effect in &plan.effects {
+            // 阶段标记：安装器 UI 用它把进度映射到用户可读的安装阶段；命令行输出一并可见。
+            log(&format!("[stage] {}", describe(effect)));
             apply_effect(effect, log, backup_dir)
                 .map_err(|error| format!("[{}] {error}", describe(effect)))?;
         }
@@ -1053,7 +1056,7 @@ pub fn apply_plan_with_backup(
 fn restore_registry(key: &str, backup_dir: &Path) -> Result<(), String> {
     let export = backup_dir.join(format!("registry-{}.reg", sanitize_key(key)));
     if export.is_file() {
-        let status = Command::new("reg.exe")
+        let status = hidden("reg.exe")
             .args(["import", &export.display().to_string()])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -1064,7 +1067,7 @@ fn restore_registry(key: &str, backup_dir: &Path) -> Result<(), String> {
         }
         return Ok(());
     }
-    let _ = Command::new("reg.exe")
+    let _ = hidden("reg.exe")
         .args(["delete", key, "/f"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1319,7 +1322,7 @@ fn apply_effect(effect: &Effect, log: &dyn Fn(&str), backup_dir: &Path) -> Resul
                 let mut last_error = String::new();
                 let mut ok = false;
                 for attempt in 0..3 {
-                    let output = Command::new("reg.exe")
+                    let output = hidden("reg.exe")
                         .args(["add", key, "/v", name, "/t", "REG_SZ", "/d", value, "/f"])
                         .stdout(Stdio::null())
                         .stderr(Stdio::piped())
@@ -1342,7 +1345,7 @@ fn apply_effect(effect: &Effect, log: &dyn Fn(&str), backup_dir: &Path) -> Resul
         }
         Effect::RemoveRegistryKey { key } => {
             backup_registry(key, backup_dir)?;
-            let status = Command::new("reg.exe")
+            let status = hidden("reg.exe")
                 .args(["delete", key, "/f"])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -1358,7 +1361,8 @@ fn apply_effect(effect: &Effect, log: &dyn Fn(&str), backup_dir: &Path) -> Resul
                 log(&format!("跳过（程序不存在）：{}", program.display()));
                 return Ok(());
             }
-            let output = Command::new(program)
+            // Core 是控制台子系统程序：必须隐藏窗口，否则安装期间会弹出黑框。
+            let output = hidden(program)
                 .args(args)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -1388,7 +1392,7 @@ fn backup_registry(key: &str, backup_dir: &Path) -> Result<(), String> {
     if let Some(parent) = export.parent() {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
-    let _ = Command::new("reg.exe")
+    let _ = hidden("reg.exe")
         .args(["export", key, &export.display().to_string(), "/y"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1412,7 +1416,7 @@ fn sanitize_key(key: &str) -> String {
 }
 
 fn registry_installed(key: &str) -> bool {
-    Command::new("reg.exe")
+    hidden("reg.exe")
         .args(["query", key])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1421,7 +1425,126 @@ fn registry_installed(key: &str) -> bool {
         .unwrap_or(false)
 }
 
+// ------------------------------------------------------------------ 既有安装发现
+
+/// 已安装的既有版本（安装器升级检测：默认复用该目录，不要求用户重新选路径）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExistingInstall {
+    pub install_dir: PathBuf,
+    pub version: String,
+}
+
+/// 读取注册表键下某个值（隐藏执行）。安装器用它发现既有安装位置。
+pub fn read_registry_value(key: &str, name: &str) -> Option<String> {
+    read_registry_value_with(key, name, &|key, name| {
+        let output = hidden("reg.exe")
+            .args(["query", key, "/v", name])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        Some(String::from_utf8_lossy(&output.stdout).into_owned())
+    })
+}
+
+/// 从 `reg query` 输出解析 `<name>    REG_SZ    <value>` 行。
+fn parse_registry_value(output: &str, name: &str) -> Option<String> {
+    for line in output.lines() {
+        let Some(rest) = line.trim().strip_prefix(name) else {
+            continue;
+        };
+        let Some(value) = rest.trim_start().strip_prefix("REG_SZ") else {
+            continue;
+        };
+        let value = value.trim().trim_matches('"');
+        if !value.is_empty() {
+            return Some(value.to_owned());
+        }
+    }
+    None
+}
+
+/// 注入式读取（注册表查询可替换，便于测试）。
+pub fn read_registry_value_with(
+    key: &str,
+    name: &str,
+    query: &dyn Fn(&str, &str) -> Option<String>,
+) -> Option<String> {
+    let output = query(key, name)?;
+    parse_registry_value(&output, name)
+}
+
+/// 发现既有安装（安装向导与 `--detect-install` 共用）：
+/// 1) 注册表卸载项的 `InstallLocation`（安装包被下载到任意目录也能识别既有安装）；
+/// 2) 安装包自身所在目录（原地修复/升级）；
+/// 3) 默认安装目录。
+/// 目录必须真实存在且带安装清单才算命中；版本以安装清单为准（注册表 DisplayVersion 兜底）。
+pub fn find_existing_install(
+    registry_key: &str,
+    exe_dir: &Path,
+    default_dir: &Path,
+) -> Option<ExistingInstall> {
+    find_existing_install_with(registry_key, exe_dir, default_dir, &|key| {
+        let location = read_registry_value(key, "InstallLocation")?;
+        let version = read_registry_value(key, "DisplayVersion").unwrap_or_default();
+        Some((PathBuf::from(location.trim()), version))
+    })
+}
+
+pub fn find_existing_install_with(
+    registry_key: &str,
+    exe_dir: &Path,
+    default_dir: &Path,
+    registry_lookup: &dyn Fn(&str) -> Option<(PathBuf, String)>,
+) -> Option<ExistingInstall> {
+    if let Some((dir, version)) = registry_lookup(registry_key) {
+        if dir.is_dir() {
+            let from_manifest = InstallManifest::read(&dir)
+                .map(|item| item.version)
+                .filter(|value| !value.is_empty());
+            return Some(ExistingInstall {
+                install_dir: dir,
+                version: from_manifest.unwrap_or(version),
+            });
+        }
+    }
+    for candidate in [exe_dir, default_dir] {
+        if let Some(manifest) = InstallManifest::read(candidate) {
+            return Some(ExistingInstall {
+                install_dir: candidate.to_path_buf(),
+                version: manifest.version,
+            });
+        }
+    }
+    None
+}
+
+/// 有界执行控制台 helper：窗口隐藏（[`hidden`]）之外再保证不会无限挂起，
+/// 超时即终止并视为失败（安装流程不允许 helper 永久占住 UI 的安装阶段）。
+fn run_with_timeout(
+    command: &mut Command,
+    timeout: std::time::Duration,
+) -> std::io::Result<bool> {
+    let mut child = command.spawn()?;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status.success());
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(false);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(40));
+    }
+}
+
 /// 通过 WScript.Shell 创建 .lnk（避免引入 COM 依赖；PowerShell 不可用时降级为跳过）。
+/// PowerShell 全程隐藏、无 profile、非交互、有界超时——普通安装期间不得出现任何控制台窗口。
 fn create_shortcut(
     path: &Path,
     target: &Path,
@@ -1447,24 +1570,33 @@ fn create_shortcut(
         workdir = escape_ps(workdir),
         desc = description.replace('\'', "''"),
     );
-    let status = Command::new("powershell.exe")
+    let mut command = hidden("powershell.exe");
+    command
         .args([
             "-NoProfile",
             "-NonInteractive",
+            "-WindowStyle",
+            "Hidden",
             "-ExecutionPolicy",
             "Bypass",
             "-Command",
             &script,
         ])
+        .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    match status {
-        Ok(status) if status.success() && path.is_file() => Ok(()),
-        Ok(status) => {
+        .stderr(Stdio::null());
+    match run_with_timeout(&mut command, std::time::Duration::from_secs(30)) {
+        Ok(true) if path.is_file() => Ok(()),
+        Ok(true) => {
             log(&format!(
-                "    警告：创建快捷方式失败（退出码 {:?}）：{}",
-                status.code(),
+                "    警告：创建快捷方式未生成文件，已跳过：{}",
+                path.display()
+            ));
+            Ok(())
+        }
+        Ok(false) => {
+            log(&format!(
+                "    警告：创建快捷方式失败或超时，已跳过：{}",
                 path.display()
             ));
             Ok(())
@@ -1562,12 +1694,12 @@ mod tests {
 
     /// 清理测试用的注册表键（用例失败也不留残留）。
     fn cleanup_registry(key: &str) {
-        let _ = Command::new("reg.exe")
+        let _ = hidden("reg.exe")
             .args(["delete", key, "/f"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
-        let _ = Command::new("reg.exe")
+        let _ = hidden("reg.exe")
             .args(["delete", "HKCU\\Software\\WhaleBridgeTest", "/f"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -1846,6 +1978,90 @@ mod tests {
                 "删除链接不得影响目标目录内容"
             );
         }
+        fs::remove_dir_all(&root).ok();
+    }
+
+    // ---------------------------------------------------------------- 既有安装发现
+
+    #[test]
+    fn parse_registry_value_reads_reg_sz_lines() {
+        let output = "\r\nHKEY_CURRENT_USER\\Software\\Test\\Uninstall\\X\r\n    InstallLocation    REG_SZ    D:\\应用 CetaMesh\\app\r\n\r\n";
+        assert_eq!(
+            parse_registry_value(output, "InstallLocation"),
+            Some("D:\\应用 CetaMesh\\app".to_owned())
+        );
+        assert_eq!(parse_registry_value(output, "DisplayVersion"), None);
+        assert_eq!(
+            parse_registry_value("    DisplayVersion    REG_SZ    1.0.0\r\n", "DisplayVersion"),
+            Some("1.0.0".to_owned())
+        );
+    }
+
+    #[test]
+    fn find_existing_install_prefers_registry_location_manifest_version() {
+        let root = temp_dir("detect-registry");
+        let install_dir = root.join("Old Install");
+        fs::create_dir_all(&install_dir).unwrap();
+        fs::write(
+            install_dir.join(INSTALL_MANIFEST),
+            r#"{"version":"1.0.0-rc.1","files":{}}"#,
+        )
+        .unwrap();
+        let default_dir = root.join("default");
+        fs::create_dir_all(&default_dir).unwrap();
+        let dir_clone = install_dir.clone();
+        let found = find_existing_install_with(
+            UNINSTALL_KEY,
+            &root.join("exe-dir"),
+            &default_dir,
+            &|_key| Some((dir_clone.clone(), "0.9.0".to_owned())),
+        )
+        .unwrap();
+        assert_eq!(found.install_dir, install_dir);
+        assert_eq!(
+            found.version, "1.0.0-rc.1",
+            "安装清单里的版本优先于注册表 DisplayVersion"
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn find_existing_install_skips_stale_registry_and_uses_exe_dir_manifest() {
+        let root = temp_dir("detect-stale");
+        let exe_dir = root.join("exe");
+        fs::create_dir_all(&exe_dir).unwrap();
+        fs::write(
+            exe_dir.join(INSTALL_MANIFEST),
+            r#"{"version":"2.0.0","files":{}}"#,
+        )
+        .unwrap();
+        let stale = root.join("deleted-install");
+        let stale_clone = stale.clone();
+        let found = find_existing_install_with(
+            UNINSTALL_KEY,
+            &exe_dir,
+            &root.join("default"),
+            &|_key| Some((stale_clone.clone(), "1.0.0".to_owned())),
+        )
+        .unwrap();
+        assert_eq!(found.install_dir, exe_dir, "注册表指向已删除目录时应回落");
+        assert_eq!(found.version, "2.0.0");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn find_existing_install_reports_nothing_for_fresh_machine() {
+        let root = temp_dir("detect-fresh");
+        fs::create_dir_all(&root).unwrap();
+        assert_eq!(
+            find_existing_install_with(
+                UNINSTALL_KEY,
+                &root.join("exe"),
+                &root.join("default"),
+                &|_key| None
+            ),
+            None
+        );
         fs::remove_dir_all(&root).ok();
     }
 }

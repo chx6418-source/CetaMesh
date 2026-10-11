@@ -41,6 +41,8 @@ pub enum TrayCommand {
     HideWindow,
     RestartCore,
     ExitRequested,
+    /// 安装程序通过命名事件请求退出（区别于用户点托盘菜单）；UI 走同一套退出清理。
+    ExitRequestedByInstaller,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -116,7 +118,12 @@ impl TrayHandle {
         let hwnd = Arc::new(AtomicIsize::new(0));
         let visible = Arc::new(AtomicBool::new(true));
 
-        spawn_show_signal_listener(Arc::clone(&hwnd), wake.clone(), data_dir.clone());
+        spawn_show_signal_listener(
+            Arc::clone(&hwnd),
+            wake.clone(),
+            data_dir.clone(),
+            commands_tx.clone(),
+        );
 
         // Menu actions are forwarded to the UI thread; the two actions that must work even while
         // the window is hidden (restart Core, open logs) are executed here directly.
@@ -270,37 +277,63 @@ fn embedded_icon() -> Option<Icon> {
 /// A second launch of the app signals this named event; the running instance restores its window
 /// from the tray. The event object is created here (before `run_native` returns) so an earlier
 /// signal is not lost.
+///
+/// The same listener owns `CetaMesh.Desktop.QuitRequest`: the CetaMesh installer signals it so a
+/// running app can quit gracefully (stop Core, release file locks) before files are replaced,
+/// instead of being force-killed. Without the event the installer falls back to a path-scoped
+/// force stop after a timeout, so old app versions remain upgradeable.
 #[cfg(windows)]
 fn spawn_show_signal_listener(
     hwnd: Arc<AtomicIsize>,
     wake: eframe::egui::Context,
     data_dir: PathBuf,
+    commands_tx: std::sync::mpsc::Sender<TrayCommand>,
 ) {
     use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
-    use windows_sys::Win32::System::Threading::{CreateEventW, INFINITE, WaitForSingleObject};
+    use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
+    use windows_sys::Win32::System::Threading::{CreateEventW, INFINITE, WaitForMultipleObjects};
 
-    let event_name = format!("Local\\CetaMesh.Desktop.ShowWindow{}", instance_suffix());
-    let mut name: Vec<u16> = std::ffi::OsStr::new(&event_name).encode_wide().collect();
-    name.push(0);
+    let show_name = format!("Local\\CetaMesh.Desktop.ShowWindow{}", instance_suffix());
+    let quit_name = format!("Local\\CetaMesh.Desktop.QuitRequest{}", instance_suffix());
+    let mut show_name_utf16: Vec<u16> = std::ffi::OsStr::new(&show_name).encode_wide().collect();
+    show_name_utf16.push(0);
+    let mut quit_name_utf16: Vec<u16> = std::ffi::OsStr::new(&quit_name).encode_wide().collect();
+    quit_name_utf16.push(0);
     let _ = std::thread::Builder::new()
         .name("cetamesh-show-signal".to_owned())
         .spawn(move || {
-            // SAFETY: NUL-terminated UTF-16 name, default attributes, auto-reset, unsignaled.
-            let event = unsafe { CreateEventW(std::ptr::null(), 0, 0, name.as_ptr()) };
-            if event.is_null() {
+            // SAFETY: NUL-terminated UTF-16 names, default attributes, auto-reset, unsignaled.
+            let show = unsafe { CreateEventW(std::ptr::null(), 0, 0, show_name_utf16.as_ptr()) };
+            let quit = unsafe { CreateEventW(std::ptr::null(), 0, 0, quit_name_utf16.as_ptr()) };
+            if show.is_null() || quit.is_null() {
                 return;
             }
+            let handles = [show, quit];
             loop {
-                // SAFETY: waiting on an event handle created by this thread; infinite timeout.
-                let result = unsafe { WaitForSingleObject(event, INFINITE) };
-                if result == WAIT_OBJECT_0 {
-                    show_window_handle(hwnd.load(Ordering::Relaxed));
-                    crate::supervisor::write_shell_log(
-                        &data_dir,
-                        "[ui] 再次启动应用：从托盘恢复显示主窗口",
-                    );
-                    wake.request_repaint();
+                // SAFETY: waiting on two event handles created by this thread; infinite timeout.
+                let result = unsafe { WaitForMultipleObjects(2, handles.as_ptr(), 0, INFINITE) };
+                match result {
+                    WAIT_OBJECT_0 => {
+                        show_window_handle(hwnd.load(Ordering::Relaxed));
+                        crate::supervisor::write_shell_log(
+                            &data_dir,
+                            "[ui] 再次启动应用：从托盘恢复显示主窗口",
+                        );
+                        wake.request_repaint();
+                    }
+                    value if value == WAIT_OBJECT_0 + 1 => {
+                        // 安装程序请求关闭：先显示窗口，再按既有退出清理流程处理
+                        // （有未完成任务时仍会弹出确认，由用户决定）。
+                        show_window_handle(hwnd.load(Ordering::Relaxed));
+                        crate::supervisor::write_shell_log(
+                            &data_dir,
+                            "[ui] 安装程序请求关闭应用（QuitRequest 事件）",
+                        );
+                        let _ = commands_tx.send(TrayCommand::ExitRequestedByInstaller);
+                        wake.request_repaint();
+                    }
+                    WAIT_TIMEOUT => continue,
+                    _ => break,
                 }
             }
         });
@@ -311,6 +344,7 @@ fn spawn_show_signal_listener(
     _hwnd: Arc<AtomicIsize>,
     _wake: eframe::egui::Context,
     _data_dir: PathBuf,
+    _commands_tx: std::sync::mpsc::Sender<TrayCommand>,
 ) {
 }
 

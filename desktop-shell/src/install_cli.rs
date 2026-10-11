@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use crate::installer::{
     CORE_EXE_NAME, InstallLayout, InstallManifest, InstallOptions, Payload, Plan, SHELL_EXE_NAME,
-    UninstallOptions, apply_plan, plan_install, plan_repair, plan_uninstall,
+    UninstallOptions, apply_plan, find_existing_install, plan_install, plan_repair, plan_uninstall,
 };
 use crate::migrate::{
     MigrateOptions, default_source_candidates, discover_candidates, plan_migrate,
@@ -43,9 +43,10 @@ pub const USAGE: &str = r#"CetaMesh 安装器
   --remove-data               卸载时同时删除用户数据目录（危险）
   --remove-dsh-integration    卸载时移除 DSH 集成（只删本应用记录的内容）
 
-内部选项（由卸载器自己使用，不建议手工调用）：
+内部选项（由卸载器/安装向导/自动化测试使用，不建议手工调用）：
   --wait-pid <pid>            等待该进程退出后再动手（用于替换正在运行的 exe）
-  --from <目录>               迁移来源目录"#;
+  --from <目录>               迁移来源目录
+  --detect-install            只探测既有安装并输出 JSON（不写文件）"#;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstallCommand {
@@ -53,6 +54,8 @@ pub enum InstallCommand {
     Repair,
     Uninstall,
     Migrate,
+    /// 只探测既有安装（供安装向导与自动化测试；不写任何文件）。
+    DetectInstall,
 }
 
 #[derive(Debug, Clone)]
@@ -107,6 +110,8 @@ pub fn parse(args: &[String]) -> Result<Option<InstallCli>, String> {
         Some(InstallCommand::Uninstall)
     } else if has_flag(args, "--migrate") {
         Some(InstallCommand::Migrate)
+    } else if has_flag(args, "--detect-install") {
+        Some(InstallCommand::DetectInstall)
     } else {
         None
     };
@@ -124,7 +129,9 @@ pub fn parse(args: &[String]) -> Result<Option<InstallCli>, String> {
         .unwrap_or_else(|| PathBuf::from("C:\\Program Files"));
     let install_dir = arg_value(args, "--install-dir")
         .map(PathBuf::from)
-        .unwrap_or_else(|| default_install_dir(&exe_dir, &program_files));
+        .unwrap_or_else(|| {
+            default_install_dir(&exe_dir, &program_files, env_path("LOCALAPPDATA").as_deref())
+        });
 
     let data_dir = crate::desktop_paths::resolve_data_dir(
         arg_value(args, "--data-dir").as_deref(),
@@ -186,13 +193,17 @@ pub fn parse(args: &[String]) -> Result<Option<InstallCli>, String> {
 }
 
 /// 已安装的主程序通过快捷方式启动卸载/修复时，应以自身旁边的安装清单确定目录。
-/// 未安装的发布包则继续使用传统的 Program Files 默认值。
-fn default_install_dir(exe_dir: &Path, program_files: &Path) -> PathBuf {
+/// 全新安装（发布包放任意目录）默认 per-user `%LOCALAPPDATA%\Programs\CetaMesh`：
+/// 免管理员权限、不触发 UAC，与安装向导的默认值保持一致；无法确定 LOCALAPPDATA 时
+/// 退回旧的 Program Files 默认。
+fn default_install_dir(exe_dir: &Path, program_files: &Path, local_app_data: Option<&Path>) -> PathBuf {
     if InstallManifest::read(exe_dir).is_some() {
-        exe_dir.to_path_buf()
-    } else {
-        program_files.join("WhaleBridge")
+        return exe_dir.to_path_buf();
     }
+    if let Some(local) = local_app_data {
+        return local.join("Programs").join("CetaMesh");
+    }
+    program_files.join("CetaMesh")
 }
 
 /// payload 位置：优先 exe 同目录的 payload\（安装包解压布局），其次开发布局 dist\core，最后 exe 同目录。
@@ -247,7 +258,29 @@ pub fn run(cli: &InstallCli) -> i32 {
         InstallCommand::Install | InstallCommand::Repair => run_install(cli, log),
         InstallCommand::Uninstall => run_uninstall(cli, log),
         InstallCommand::Migrate => run_migrate(cli, log),
+        InstallCommand::DetectInstall => run_detect_install(cli, log),
     }
+}
+
+/// 既有安装探测：输出 JSON（`installed` / `installDir` / `version` / `currentVersion`）。
+/// 只读：不写文件、不改注册表。
+fn run_detect_install(cli: &InstallCli, log: impl Fn(&str)) -> i32 {
+    let exe_dir = env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| PathBuf::from("."));
+    let existing = find_existing_install(&cli.layout.registry_key, &exe_dir, &cli.layout.install_dir);
+    let payload = match existing {
+        Some(found) => serde_json::json!({
+            "installed": true,
+            "installDir": found.install_dir.display().to_string(),
+            "version": found.version,
+            "currentVersion": cli.version,
+        }),
+        None => serde_json::json!({ "installed": false, "currentVersion": cli.version }),
+    };
+    log(&payload.to_string());
+    0
 }
 
 fn run_install(cli: &InstallCli, log: impl Fn(&str)) -> i32 {
@@ -608,20 +641,30 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            default_install_dir(&root, Path::new("C:\\Program Files")),
+            default_install_dir(&root, Path::new("C:\\Program Files"), None),
             root
         );
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn default_install_dir_keeps_program_files_for_unstaged_shell() {
+    fn default_install_dir_prefers_per_user_cetamesh_for_fresh_installs() {
         let root = temp_dir("unstaged");
         fs::create_dir_all(&root).unwrap();
 
         assert_eq!(
-            default_install_dir(&root, Path::new("C:\\Program Files")),
-            PathBuf::from("C:\\Program Files\\WhaleBridge")
+            default_install_dir(
+                &root,
+                Path::new("C:\\Program Files"),
+                Some(Path::new("C:\\Users\\u\\AppData\\Local"))
+            ),
+            PathBuf::from("C:\\Users\\u\\AppData\\Local\\Programs\\CetaMesh"),
+            "全新安装默认 per-user（免 UAC）且目录品牌为 CetaMesh"
+        );
+        assert_eq!(
+            default_install_dir(&root, Path::new("C:\\Program Files"), None),
+            PathBuf::from("C:\\Program Files\\CetaMesh"),
+            "无法确定 LOCALAPPDATA 时退回 Program Files\\CetaMesh"
         );
         fs::remove_dir_all(root).unwrap();
     }
