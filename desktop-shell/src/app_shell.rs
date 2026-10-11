@@ -9,7 +9,6 @@ pub enum AppPage {
     Agents,
     Plugins,
     Memory,
-    Workspaces,
     Devices,
     Connections,
     Security,
@@ -23,48 +22,49 @@ pub enum AppPage {
 }
 
 impl AppPage {
-    pub const PRIMARY: [Self; 8] = [Self::Home, Self::Chat, Self::Work, Self::Social,
-        Self::Agents, Self::Plugins, Self::Memory, Self::Workspaces];
-    pub const SECONDARY: [Self; 7] = [Self::Devices, Self::Connections, Self::Security,
-        Self::About, Self::Feedback, Self::Onboarding, Self::Settings];
+    /// UI v1 一级产品导航（方案 01 的信息层级）：对话永远第一，能力区紧随其后。
+    /// 工程面（旧控制台容器 / 设备 / 反馈 / 引导）不在导航里，但从设置与关于可达。
+    pub const PRIMARY: [Self; 5] = [Self::Chat, Self::Work, Self::Memory, Self::Agents, Self::Plugins];
+    /// UI v1 二级导航：设置与关于（方案 01 的侧栏底部区）。
+    pub const SECONDARY: [Self; 2] = [Self::Settings, Self::About];
 
-    pub const fn label(self) -> &'static str {
+    /// 侧栏显示名（用户语言）。不在导航里的页面仍需可读名，供设置入口与
+    /// 旧控制台 tab 容器使用。
+    pub const fn nav_label(self) -> &'static str {
         match self {
-            Self::Home => "Home",
-            Self::Chat => "Chat",
-            Self::Work => "Work",
-            Self::Social => "Social",
-            Self::Agents => "Agents",
-            Self::Plugins => "Plugins",
-            Self::Memory => "Memory",
-            Self::Workspaces => "Workspaces",
-            Self::Devices => "Devices",
-            Self::Connections => "Connections",
-            Self::Security => "Security",
-            Self::About => "About",
-            Self::Feedback => "Feedback",
-            Self::Onboarding => "Onboarding",
-            Self::Settings => "Settings",
+            Self::Chat => "对话",
+            Self::Work => "工作",
+            Self::Memory => "记忆",
+            Self::Agents => "智能体",
+            Self::Plugins => "插件",
+            Self::Settings => "设置",
+            Self::About => "关于",
+            Self::Home => "状态与日志",
+            Self::Social => "渠道控制台",
+            Self::Devices => "设备与连接",
+            Self::Connections => "服务连接",
+            Self::Security => "安全通知",
+            Self::Feedback => "反馈",
+            Self::Onboarding => "首次引导",
         }
     }
 
     pub const fn description(self) -> &'static str {
         match self {
-            Self::Chat => "聊天页面已接入产品导航。",
-            Self::Home => "Core 状态、活动与诊断。",
+            Self::Chat => "和 CetaMesh 对话；需要时用工具、建任务、交给 Agent。",
+            Self::Home => "Core 状态、活动与诊断（旧控制台）。",
             Self::Work => "持久 Task、进度与执行它的 Task Agent Session。",
-            Self::Social => "Social 运行策略与连接渠道的互动。",
-            Self::Agents => "Agent 角色、模型、Preset 与待处理请求。",
-            Self::Plugins => "插件与能力扩展。",
+            Self::Social => "Social 运行策略与连接渠道的互动（旧控制台）。",
+            Self::Agents => "DSH / Codex / ZCode 的就绪状态与能力。",
+            Self::Plugins => "插件、工具与 MCP 服务器。",
             Self::Memory => "管理 CetaMesh 对话和工作区可使用的记忆。",
-            Self::Workspaces => "在明确的安全边界内管理项目和文件。",
             Self::Devices => "设备与 Mesh 连接。",
             Self::Connections => "服务连接与安装状态。",
             Self::Security => "权限与安全通知。",
             Self::About => "版本、Build ID、Commit、更新公告、许可证、隐私与安全说明、诊断信息。",
             Self::Feedback => "反馈与建议 / Bug 反馈 / 功能建议 / 安全漏洞：用系统默认浏览器打开官方网站对应页面。",
             Self::Onboarding => "首次运行引导：配置模型服务商、测试连接、选定默认模型（Agent 与扩展都是可选）。",
-            Self::Settings => "外观、快捷键与应用偏好。",
+            Self::Settings => "通用、外观、模型提供方、设备连接与旧控制台入口。",
         }
     }
 
@@ -104,10 +104,12 @@ impl LegacyTab {
         }
     }
 
+    /// UI v1：旧控制台 tab 全部归属非导航容器页（Home / Social / Connections / Security），
+    /// 产品 Agents 页不再承载工程 tab。
     pub const fn parent_page(self) -> AppPage {
         match self {
             Self::Overview | Self::Activity | Self::Logs | Self::Diagnostics => AppPage::Home,
-            Self::Roles | Self::ModelsPresets | Self::Pending => AppPage::Agents,
+            Self::Roles | Self::ModelsPresets | Self::Pending => AppPage::Social,
             Self::Policy | Self::Slang | Self::Sessions => AppPage::Social,
             Self::Services => AppPage::Connections,
             Self::Security => AppPage::Security,
@@ -127,8 +129,10 @@ pub const fn tabs_for(page: AppPage) -> &'static [LegacyTab] {
             LegacyTab::Policy,
             LegacyTab::Slang,
             LegacyTab::Sessions,
+            LegacyTab::Roles,
+            LegacyTab::ModelsPresets,
+            LegacyTab::Pending,
         ],
-        AppPage::Agents => &[LegacyTab::Roles, LegacyTab::ModelsPresets, LegacyTab::Pending],
         AppPage::Connections => &[LegacyTab::Services],
         AppPage::Security => &[LegacyTab::Security],
         _ => &[],
@@ -171,28 +175,36 @@ mod tests {
 
     #[test]
     fn product_shell_has_the_required_primary_and_secondary_navigation() {
-        let primary = AppPage::PRIMARY.map(AppPage::label);
-        let secondary = AppPage::SECONDARY.map(AppPage::label);
+        let primary = AppPage::PRIMARY.map(AppPage::nav_label);
+        let secondary = AppPage::SECONDARY.map(AppPage::nav_label);
 
-        assert_eq!(primary, ["Home", "Chat", "Work", "Social", "Agents", "Plugins", "Memory", "Workspaces"]);
-        assert_eq!(secondary, ["Devices", "Connections", "Security", "About", "Feedback", "Onboarding", "Settings"]);
+        assert_eq!(primary, ["对话", "工作", "记忆", "智能体", "插件"]);
+        assert_eq!(secondary, ["设置", "关于"]);
     }
 
     #[test]
-    fn product_service_pages_live_in_secondary_navigation_with_copy() {
-        for page in [AppPage::About, AppPage::Feedback, AppPage::Onboarding] {
-            assert!(AppPage::SECONDARY.contains(&page), "{page:?} must be reachable");
-            assert!(!page.label().is_empty());
+    fn nav_labels_are_user_language_and_chat_is_first() {
+        assert_eq!(AppPage::PRIMARY[0], AppPage::Chat);
+        for page in AppPage::PRIMARY {
+            assert!(!page.nav_label().is_empty());
+            assert!(!page.description().is_empty());
+        }
+        // 产品服务页不在导航里，但必须可达且有文案。
+        for page in [AppPage::About, AppPage::Feedback, AppPage::Onboarding, AppPage::Devices] {
+            assert!(!page.nav_label().is_empty());
             assert!(!page.description().is_empty());
         }
         // 新产品页不是工程页：不能混进 legacy tabs 的归属里。
         assert!(tabs_for(AppPage::About).is_empty());
         assert!(tabs_for(AppPage::Feedback).is_empty());
         assert!(tabs_for(AppPage::Onboarding).is_empty());
+        // 产品 Agents 页不再承载旧控制台 tab。
+        assert!(tabs_for(AppPage::Agents).is_empty());
+        assert!(tabs_for(AppPage::Chat).is_empty());
     }
 
     #[test]
-    fn navigation_starts_in_chat_and_routes_legacy_pages_into_secondary_areas() {
+    fn legacy_tabs_consolidate_into_non_nav_containers() {
         let mut navigation = NavigationState::default();
         assert_eq!(navigation.page, AppPage::Chat);
 
@@ -204,9 +216,13 @@ mod tests {
         assert_eq!(navigation.page, AppPage::Home);
         assert_eq!(navigation.legacy_tab, LegacyTab::Logs);
 
+        // 审批队列（Roles / ModelsPresets / Pending）归入渠道控制台容器，不再占用产品 Agents 页。
         navigation.select_legacy_tab(LegacyTab::Pending);
-        assert_eq!(navigation.page, AppPage::Agents);
+        assert_eq!(navigation.page, AppPage::Social);
         assert_eq!(navigation.legacy_tab, LegacyTab::Pending);
+
+        navigation.select_legacy_tab(LegacyTab::ModelsPresets);
+        assert_eq!(navigation.page, AppPage::Social);
     }
 
     #[test]
@@ -220,10 +236,8 @@ mod tests {
         navigation.select_legacy_tab(LegacyTab::Activity);
         navigation.select_page(AppPage::Home);
         assert_eq!(navigation.legacy_tab, LegacyTab::Activity);
-
         assert_eq!(tabs_for(AppPage::Home).len(), 4);
-        assert_eq!(tabs_for(AppPage::Social).len(), 3);
-        assert_eq!(tabs_for(AppPage::Agents).len(), 3);
-        assert!(tabs_for(AppPage::Chat).is_empty());
+        assert_eq!(tabs_for(AppPage::Social).len(), 6);
+        assert!(tabs_for(AppPage::Agents).is_empty());
     }
 }

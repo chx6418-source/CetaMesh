@@ -20,11 +20,16 @@ use crate::ui_prefs::ThemePreference;
 /// so the captured pixels are the real page (including the new product-service pages).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QaPage {
+    /// 主题轮播的目标页（UI v1 起为产品首页 = 对话）。
     Home,
     Settings,
     About,
     Feedback,
     Onboarding,
+    Work,
+    Memory,
+    Agents,
+    Plugins,
 }
 
 /// One screenshot request.
@@ -85,6 +90,19 @@ impl ScreenshotPlan {
             ("12-soda-about", QaPage::About),
             ("13-soda-feedback", QaPage::Feedback),
             ("14-soda-onboarding", QaPage::Onboarding),
+        ] {
+            shots.push(ShotSpec {
+                label: label.to_owned(),
+                theme: ThemePreference::Soda,
+                page,
+            });
+        }
+        // UI v1：新导航 IA 的产品页各自留一张 Soda 截图（对话首页由主题轮播覆盖）。
+        for (label, page) in [
+            ("15-soda-work", QaPage::Work),
+            ("16-soda-memory", QaPage::Memory),
+            ("17-soda-agents", QaPage::Agents),
+            ("18-soda-plugins", QaPage::Plugins),
         ] {
             shots.push(ShotSpec {
                 label: label.to_owned(),
@@ -264,20 +282,24 @@ mod tests {
     #[test]
     fn plan_covers_ten_themes_plus_product_pages_and_advances_to_finish() {
         let plan = ScreenshotPlan::new(Path::new("unused"));
-        // 10 themes on Home + Settings + 产品化任务 D 的三个产品页。
-        assert_eq!(plan.shots.len(), 14);
+        // 10 themes on Home(=Chat) + Settings + 产品页 3 张 + UI v1 产品页 4 张。
+        assert_eq!(plan.shots.len(), 18);
         assert_eq!(plan.shots[0].theme, ThemePreference::Soda);
         assert_eq!(plan.shots[0].page, QaPage::Home);
         assert_eq!(plan.shots[10].page, QaPage::Settings);
         assert_eq!(plan.shots[11].page, QaPage::About);
         assert_eq!(plan.shots[12].page, QaPage::Feedback);
         assert_eq!(plan.shots[13].page, QaPage::Onboarding);
+        assert_eq!(plan.shots[14].page, QaPage::Work);
+        assert_eq!(plan.shots[15].page, QaPage::Memory);
+        assert_eq!(plan.shots[16].page, QaPage::Agents);
+        assert_eq!(plan.shots[17].page, QaPage::Plugins);
         for spec in &plan.shots {
             assert!(!spec.label.contains(['/', '\\', ' ']));
         }
         let mut plan = ScreenshotPlan::new(Path::new("unused"));
         let now = Instant::now();
-        for _ in 0..14 {
+        for _ in 0..18 {
             plan.advance(now);
         }
         assert!(plan.finished);

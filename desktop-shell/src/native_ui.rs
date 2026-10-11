@@ -4,6 +4,8 @@
 //! intentionally contains no browser, HTML, WebView, or arbitrary command execution path.
 
 use crate::chat_ui::{ChatUi, parse_catalog, parse_history, parse_model_providers, parse_sessions, parse_turn};
+use crate::agent_ui::{AgentUi, parse_agent_list};
+use crate::integrations_ui::{IntegrationsTab, IntegrationsUi};
 use crate::memory_ui::MemoryUi;
 use crate::task_ui::TaskUi;
 use crate::workshop_ui::WorkshopUi;
@@ -38,12 +40,25 @@ pub trait CoreApi: Send + Sync + 'static {
     fn request(&self, method: &str, params: Value) -> Result<Value, String>;
 }
 
-/// Work 页内部区域（Tasks / Workshop Owner 审阅）。
+/// Work 页内部区域（任务 / Workshop Owner 审阅 / 工作空间）。
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum WorkTab {
     #[default]
     Tasks,
     Workshop,
+    Workspace,
+}
+
+/// Chat Composer 的渐进披露弹层：默认全部收起，主视觉只有
+/// 历史列表 / 消息区 / Composer（UI v1：Chat 第一优先）。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum ChatPopover {
+    #[default]
+    None,
+    Agent,
+    Model,
+    Mode,
+    Tools,
 }
 
 /// Capability 审批队列条目（Managed Agent 高风险能力请求；Owner 决定）。
@@ -160,6 +175,10 @@ enum Area {
     AboutDiagnostics,
     Feedback,
     Onboarding,
+    /// UI v1：Agent Broker 目录（agent.list），智能体页数据源。
+    AgentCatalog,
+    /// UI v1：任务 B 集成面（plugins.* / tools.* / mcp.*），插件页数据源。
+    Integrations,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -241,6 +260,10 @@ enum Operation {
     OnboardingSetModel,
     OnboardingFinish,
     OnboardingReset,
+    /// UI v1：智能体页目录加载。
+    AgentList,
+    /// UI v1：插件 / 工具 / MCP 的统一调用（一次一个，方法名记录在 integrations_method）。
+    IntegrationsCall,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -597,7 +620,7 @@ const PRESET_TARGETS: [PresetTarget; 5] = [
 ];
 
 const SHORTCUTS: &[(&str, &str)] = &[
-    ("Ctrl+1 … Ctrl+7", "切换 Home / Chat / Work / Social / Agents / Plugins / Memory"),
+    ("Ctrl+1 … Ctrl+7", "切换 对话 / 工作 / 记忆 / 智能体 / 插件 / 设置 / 关于"),
     ("Ctrl+,", "打开 Settings"),
     ("F1", "显示/关闭本快捷键列表"),
     ("Ctrl+0", "重置界面缩放"),
@@ -612,13 +635,13 @@ const SHORTCUTS: &[(&str, &str)] = &[
 /// Ctrl+1 … Ctrl+7 map onto the product navigation in this order.
 fn page_for_shortcut_slot(slot: u8) -> Option<AppPage> {
     match slot {
-        1 => Some(AppPage::Home),
-        2 => Some(AppPage::Chat),
-        3 => Some(AppPage::Work),
-        4 => Some(AppPage::Social),
-        5 => Some(AppPage::Agents),
-        6 => Some(AppPage::Plugins),
-        7 => Some(AppPage::Memory),
+        1 => Some(AppPage::Chat),
+        2 => Some(AppPage::Work),
+        3 => Some(AppPage::Memory),
+        4 => Some(AppPage::Agents),
+        5 => Some(AppPage::Plugins),
+        6 => Some(AppPage::Settings),
+        7 => Some(AppPage::About),
         _ => None,
     }
 }
@@ -761,6 +784,16 @@ pub struct NativeUi {
     mesh: MeshUi,
     chat: ChatUi,
     workspace: WorkspaceUi,
+    /// UI v1：智能体页（agent.list 目录卡）。
+    agents: AgentUi,
+    /// UI v1：插件页（plugins.* / tools.* / mcp.* 集成面）。
+    integrations: IntegrationsUi,
+    /// 当前在途的 IntegrationsCall 方法名（回包按它分发）。
+    integrations_method: Option<&'static str>,
+    /// Chat Composer 当前展开的渐进披露弹层。
+    chat_popover: ChatPopover,
+    /// 设置页锚点滚动目标（方案 04 的单页分区交互）。
+    settings_scroll_target: Option<&'static str>,
     pending: HashSet<Area>,
     feedback: HashMap<Area, Result<Value, String>>,
     next_id: u64,
@@ -1272,6 +1305,11 @@ ApiCall::Family { method, params } => api.request(method, params),
             task: TaskUi::default(),
             workshop: WorkshopUi::default(),
             work_tab: WorkTab::default(),
+            agents: AgentUi::default(),
+            integrations: IntegrationsUi::default(),
+            integrations_method: None,
+            chat_popover: ChatPopover::None,
+            settings_scroll_target: None,
             mesh: MeshUi::default(),
             chat: ChatUi::default(),
             workspace: WorkspaceUi::default(),
@@ -1813,6 +1851,28 @@ ApiCall::Family { method, params } => api.request(method, params),
                         })).collect::<Vec<_>>(),
                         "defaultModelProvider": value.get("defaultModelProvider").cloned().unwrap_or(json!(null)),
                     }));
+                }
+                // ── UI v1：智能体目录 ──
+                (Operation::AgentList, Ok(value)) => match parse_agent_list(value) {
+                    Ok(providers) => {
+                        self.agents.providers = providers;
+                        self.agents.loaded = true;
+                        self.agents.error = None;
+                    }
+                    Err(error) => {
+                        self.agents.loaded = true;
+                        self.agents.set_error(error);
+                    }
+                },
+                (Operation::AgentList, Err(error)) => {
+                    self.agents.loaded = true;
+                    self.agents.set_error(error.clone());
+                }
+                // ── UI v1：插件 / 工具 / MCP 集成面（按在途方法名分发） ──
+                (Operation::IntegrationsCall, result) => {
+                    let method = self.integrations_method.take().unwrap_or("integrations.unknown");
+                    let owned = result.map(|value| value.clone()).map_err(|error| error.clone());
+                    self.integrations.observe(method, &owned);
                 }
                 (Operation::ChatStatusPoll, Ok(value)) => {
                     match parse_turn(value) {
@@ -2998,7 +3058,7 @@ ApiCall::Family { method, params } => api.request(method, params),
 
     fn compact_page_button(&mut self, ui: &mut egui::Ui, page: AppPage) {
         let selected = self.navigation.page == page;
-        if ui.selectable_label(selected, page.label()).clicked() {
+        if ui.selectable_label(selected, page.nav_label()).clicked() {
             self.navigation.select_page(page);
         }
     }
@@ -3099,7 +3159,7 @@ ApiCall::Family { method, params } => api.request(method, params),
             ui.set_min_width(ui.available_width());
                 if narrow {
                     ui.vertical(|ui| {
-                        ui.heading(self.navigation.page.label());
+                        ui.heading(self.navigation.page.nav_label());
                         ui.label(
                             egui::RichText::new(self.navigation.page.description())
                                 .color(palette.muted),
@@ -3110,7 +3170,7 @@ ApiCall::Family { method, params } => api.request(method, params),
                 } else {
                     ui.horizontal(|ui| {
                         ui.vertical(|ui| {
-                            ui.heading(self.navigation.page.label());
+                            ui.heading(self.navigation.page.nav_label());
                             ui.label(
                                 egui::RichText::new(self.navigation.page.description())
                                     .color(palette.muted),
@@ -3137,7 +3197,7 @@ ApiCall::Family { method, params } => api.request(method, params),
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(width, 34.0), egui::Sense::click());
         response.widget_info(|| {
-            egui::WidgetInfo::selected(egui::WidgetType::Button, true, selected, page.label())
+            egui::WidgetInfo::selected(egui::WidgetType::Button, true, selected, page.nav_label())
         });
         if ui.is_rect_visible(rect) {
             let hover_t = ui
@@ -3191,7 +3251,7 @@ ApiCall::Family { method, params } => api.request(method, params),
                 tokens.text_2
             };
             let galley = ui.painter().layout_no_wrap(
-                page.label().to_owned(),
+                page.nav_label().to_owned(),
                 egui::TextStyle::Button.resolve(ui.style()),
                 text_color.to_color32(),
             );
@@ -3217,16 +3277,28 @@ ApiCall::Family { method, params } => api.request(method, params),
             ui.heading(egui::RichText::new("CetaMesh").strong());
         });
         ui.label(egui::RichText::new("Desktop").color(palette.muted));
-        ui.add_space(16.0);
-        for page in AppPage::PRIMARY {
+        ui.add_space(14.0);
+        // UI v1（方案 01 的导航与信息层级）：产品区 + 能力区 + 应用区，共 5+2 项。
+        // 工程面（旧控制台 / 设备 / 工作空间 / 反馈）不进一级导航，
+        // 分别从 设置 → 高级、工作页 tab 与 关于页进入。
+        ui.label(egui::RichText::new("产品").small().color(palette.muted).strong());
+        ui.add_space(4.0);
+        for page in [AppPage::Chat, AppPage::Work, AppPage::Memory] {
+            self.page_button(ui, page);
+            ui.add_space(4.0);
+        }
+        ui.add_space(10.0);
+        ui.label(egui::RichText::new("能力").small().color(palette.muted).strong());
+        ui.add_space(4.0);
+        for page in [AppPage::Agents, AppPage::Plugins] {
             self.page_button(ui, page);
             ui.add_space(4.0);
         }
         ui.add_space(12.0);
         ui.separator();
         ui.add_space(6.0);
-        ui.label(egui::RichText::new("管理").small().color(palette.muted).strong());
-        ui.add_space(6.0);
+        ui.label(egui::RichText::new("应用").small().color(palette.muted).strong());
+        ui.add_space(4.0);
         for page in AppPage::SECONDARY {
             self.page_button(ui, page);
             ui.add_space(4.0);
@@ -3249,7 +3321,6 @@ ApiCall::Family { method, params } => api.request(method, params),
     }
 
     fn show_chat_page(&mut self, ui: &mut egui::Ui) {
-        let palette = native_palette();
         if !self.chat.sessions_loaded && !self.pending.contains(&Area::Chat) && self.worker_available {
             self.issue_chat_sessions();
         }
@@ -3258,49 +3329,100 @@ ApiCall::Family { method, params } => api.request(method, params),
         }
         self.accept_chat_drops(ui);
 
-        // ── 会话管理行 ────────────────────────────────────────────────
-        ui.horizontal_wrapped(|ui| {
-            ui.heading("对话");
-            ui.add_space(6.0);
-            if ui.small_button("＋ 新会话").clicked() && !self.pending.contains(&Area::Chat) {
-                self.issue_control(Area::Chat, Operation::ChatSessionCreate, "chat.sessions.create", json!({"title": "新会话"}));
+        // UI v1（方案 02 的 Chat 主结构）：左 = 聊天历史，右 = 消息区 + 底部 Composer。
+        // Chat 页在 update() 里走无外层滚动的专用路径，面板各自内部滚动。
+        let tokens = crate::theme::tokens();
+        let narrow = ui.ctx().viewport_rect().width() < 1040.0;
+        egui::Panel::left("chat_history_panel")
+            .resizable(false)
+            .exact_size(if narrow { 196.0 } else { 248.0 })
+            .frame(
+                egui::Frame::new()
+                    .fill(tokens.glass_weak.to_color32())
+                    .inner_margin(egui::Margin::symmetric(10, 12)),
+            )
+            .show(ui, |ui| {
+                self.show_chat_history_panel(ui);
+            });
+        self.show_chat_main(ui);
+    }
+
+    /// 聊天历史列（首屏三要素之一）：按 今天 / 更早 / 已归档 分组，真实 chat.sessions 数据。
+    fn show_chat_history_panel(&mut self, ui: &mut egui::Ui) {
+        let palette = native_palette();
+        ui.horizontal(|ui| {
+            ui.strong("对话");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.add_enabled(!self.pending.contains(&Area::Chat), egui::Button::new("＋ 新对话")).clicked() {
+                    self.issue_control(Area::Chat, Operation::ChatSessionCreate, "chat.sessions.create", json!({"title": "新会话"}));
+                }
+            });
+        });
+        ui.add_space(6.0);
+        if !self.chat.sessions_loaded {
+            ui.weak("正在加载会话…");
+            return;
+        }
+        if self.chat.sessions.is_empty() {
+            ui.label(
+                egui::RichText::new("还没有会话。\n点「＋ 新对话」开始第一段对话。")
+                    .small()
+                    .color(palette.muted),
+            );
+            return;
+        }
+
+        let (today, earlier, archived) = group_chat_sessions(self.chat.sessions.clone());
+        let active_id = self.chat.active_id.clone();
+        for (label, sessions) in [("今天", today), ("更早", earlier), ("已归档", archived)] {
+            if sessions.is_empty() {
+                continue;
             }
-            let sessions = self.chat.sessions.clone();
-            let active_id = self.chat.active_id.clone();
-            egui::ComboBox::from_id_salt("chat_session_select")
-                .selected_text(
-                    sessions
-                        .iter()
-                        .find(|session| Some(&session.id) == active_id.as_ref())
-                        .map(|session| session.title.clone())
-                        .unwrap_or_else(|| "选择会话".to_owned()),
+            ui.add_space(8.0);
+            ui.label(egui::RichText::new(label).small().color(palette.muted).strong());
+            ui.add_space(2.0);
+            for session in sessions {
+                let selected = active_id.as_ref() == Some(&session.id);
+                let row_label = format!("{}  ·  {}", session.title, relative_time(session.updated_at));
+                let button = egui::Button::new(
+                    egui::RichText::new(row_label)
+                        .small()
+                        .color(if selected { palette.text } else { palette.muted }),
                 )
-                .width(240.0)
-                .show_ui(ui, |ui| {
-                    for session in &sessions {
-                        let label = if session.archived {
-                            format!("[归档] {}", session.title)
-                        } else {
-                            session.title.clone()
-                        };
-                        if ui.selectable_label(Some(&session.id) == active_id.as_ref(), label).clicked() {
-                            self.chat.active_id = Some(session.id.clone());
-                            self.chat.reset();
-                            self.issue_chat_history();
-                        }
-                    }
-                });
-            if self.chat.active_id.is_some() {
+                .selected(selected)
+                .wrap_mode(egui::TextWrapMode::Truncate);
+                if ui.add_sized([ui.available_width(), 24.0], button).clicked() {
+                    self.chat.active_id = Some(session.id.clone());
+                    self.chat.reset();
+                    self.chat_popover = ChatPopover::None;
+                    self.issue_chat_history();
+                }
+            }
+        }
+
+        // 活动会话的管理操作（重命名 / 归档 / 删除），只在选中会话时出现。
+        if self.chat.active_id.is_some() {
+            ui.add_space(10.0);
+            ui.separator();
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
                 if ui.small_button("重命名").clicked() {
                     let title = self.chat.active_session().map(|s| s.title.clone()).unwrap_or_default();
                     self.chat.renaming = Some((self.chat.active_id.clone().unwrap_or_default(), title));
                 }
+                let archived_now = self.chat.active_session().is_some_and(|s| s.archived);
+                let archive_label = if archived_now { "取消归档" } else { "归档" };
+                if ui.small_button(archive_label).clicked() && !self.pending.contains(&Area::Chat) {
+                    if let Some(id) = self.chat.active_id.clone() {
+                        self.issue_control(Area::Chat, Operation::ChatSessionArchive, "chat.sessions.archive", json!({"id": id, "archived": !archived_now}));
+                    }
+                }
                 let delete_label = if self.chat.confirm_delete { "确认删除？" } else { "删除" };
                 if ui.small_button(delete_label).clicked() {
                     if self.chat.confirm_delete {
-                        if let Some(id) = self.chat.active_id.clone() {
-                            self.chat.confirm_delete = false;
-                            if !self.pending.contains(&Area::Chat) {
+                        self.chat.confirm_delete = false;
+                        if !self.pending.contains(&Area::Chat) {
+                            if let Some(id) = self.chat.active_id.clone() {
                                 self.issue_control(Area::Chat, Operation::ChatSessionDelete, "chat.sessions.delete", json!({"id": id}));
                             }
                         }
@@ -3310,27 +3432,23 @@ ApiCall::Family { method, params } => api.request(method, params),
                 } else if self.chat.confirm_delete {
                     self.chat.confirm_delete = false;
                 }
-                let archived = self.chat.active_session().is_some_and(|s| s.archived);
-                let archive_label = if archived { "取消归档" } else { "归档" };
-                if ui.small_button(archive_label).clicked() && !self.pending.contains(&Area::Chat) {
-                    if let Some(id) = self.chat.active_id.clone() {
-                        self.issue_control(Area::Chat, Operation::ChatSessionArchive, "chat.sessions.archive", json!({"id": id, "archived": !archived}));
-                    }
-                }
-            }
-        });
+            });
+        }
+
+        // 内联重命名。
         let mut rename_confirmed = false;
         let mut rename_cancelled = false;
         if let Some((_, buffer)) = self.chat.renaming.as_mut() {
+            ui.add_space(4.0);
             ui.horizontal(|ui| {
-                let response = ui.add(egui::TextEdit::singleline(buffer).desired_width(280.0).hint_text("新的会话名"));
-                if ui.button("确定").clicked() {
+                let response = ui.add(egui::TextEdit::singleline(buffer).desired_width(140.0).hint_text("新的会话名"));
+                if ui.small_button("确定").clicked() {
                     rename_confirmed = true;
                 }
                 if response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
                     rename_confirmed = true;
                 }
-                if ui.button("取消").clicked() {
+                if ui.small_button("取消").clicked() {
                     rename_cancelled = true;
                 }
             });
@@ -3345,181 +3463,234 @@ ApiCall::Family { method, params } => api.request(method, params),
         if rename_cancelled {
             self.chat.renaming = None;
         }
-        if !self.chat.notice_or_empty().is_empty() {
-            ui.label(egui::RichText::new(self.chat.notice_or_empty().to_owned()).small().color(palette.muted));
-        }
-        ui.add_space(8.0);
+    }
 
-        // ── 对话区 ───────────────────────────────────────────────────
-        let active_title = self.chat.active_session().map(|s| s.title.clone()).unwrap_or_default();
-        let config = self.chat.active_config();
-        crate::theme::card_compact(ui, |ui| {
-                if active_title.is_empty() {
-                    ui.weak("选择或新建一个会话开始对话。");
-                } else {
-                    ui.horizontal(|ui| {
-                        ui.strong(active_title);
-                        ui.small(format!("{} · {} · reasoning={}", config.provider, config.model, config.reasoning));
-                    });
+    /// 消息区 + 底部 Composer（固定），工具 / Agent / 模式全部渐进披露。
+    fn show_chat_main(&mut self, ui: &mut egui::Ui) {
+        let palette = native_palette();
+        egui::Panel::bottom("chat_composer_panel")
+            .resizable(false)
+            .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(14, 8)))
+            .show(ui, |ui| {
+                // 会话级通知（配置保存结果 / 附件提示）显示在 Composer 上方。
+                if !self.chat.notice_or_empty().is_empty() {
+                    ui.label(egui::RichText::new(self.chat.notice_or_empty().to_owned()).small().color(palette.muted));
                 }
-                ui.separator();
-                egui::ScrollArea::vertical()
-                    .id_salt("chat_transcript_scroll")
-                    .auto_shrink([false, false])
-                    .stick_to_bottom(true)
-                    .max_height(400.0)
-                    .show(ui, |ui| {
-                        self.show_chat_transcript(ui);
-                    });
+                self.show_chat_composer(ui);
             });
-        ui.add_space(8.0);
-
-        // ── Composer ────────────────────────────────────────────────
-        self.show_chat_composer(ui);
-        ui.add_space(6.0);
-
-        // ── 弱化的会话配置（次级控件行） ───────────────────────────────
-        self.show_chat_secondary_controls(ui);
-
-        // 配置保存失败（例如 DSH 未连接导致 MODEL_BIND_FAILED）时必须可见，否则下拉看起来像“没反应”。
-        ui.add_space(8.0);
-        self.show_feedback(ui, Area::Chat);
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(14, 10)))
+            .show(ui, |ui| {
+                self.show_chat_transcript(ui);
+            });
     }
 
     fn show_chat_transcript(&mut self, ui: &mut egui::Ui) {
         let palette = native_palette();
-        if !self.chat.history_loaded && !self.pending.contains(&Area::Chat) {
-            ui.weak("正在加载对话历史…");
-        }
-        let messages = self.chat.messages.clone();
-        for message in &messages {
-            let is_user = message.role == "user";
-            ui.push_id(&message.id, |ui| {
-            egui::Frame::new()
-                .fill(if is_user { crate::theme::tokens().panel_solid.to_color32() } else { crate::theme::tokens().panel.to_color32() })
-                .stroke(egui::Stroke::new(1.0, palette.border))
-                .corner_radius(egui::CornerRadius::same(8))
-                .inner_margin(egui::Margin::symmetric(10, 6))
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.small(if is_user { "你" } else { "助手" });
-                    });
-                    ui.label(message.text.clone());
-                    if let Some(error) = &message.error {
-                        ui.label(egui::RichText::new(format!("错误：{error}")).color(palette.error));
+        let tokens = crate::theme::tokens();
+        let active_title = self.chat.active_session().map(|s| s.title.clone()).unwrap_or_default();
+        let active_empty = active_title.is_empty();
+        if !active_empty {
+            ui.horizontal(|ui| {
+                ui.strong(active_title);
+                if let Some(turn) = &self.chat.turn {
+                    if turn.state == "streaming" {
+                        ui.label(egui::RichText::new("回复中…").small().color(palette.accent));
+                    } else if turn.state == "cancelling" {
+                        ui.label(egui::RichText::new("正在停止…").small().color(palette.muted));
                     }
-                    if message.cancelled {
-                        ui.label(egui::RichText::new("已停止（保留部分结果，可发送\"继续\"）").color(palette.muted));
-                    }
-                    ui.horizontal(|ui| {
-                        if ui.small_button("复制").clicked() {
-                            ui.ctx().copy_text(message.text.clone());
-                        }
-                        if let Some(usage) = &message.usage {
-                            ui.small(format!("usage：{usage}"));
-                        }
-                    });
-                });
+                }
             });
             ui.add_space(4.0);
+            ui.separator();
         }
-        if let Some(turn) = self.chat.turn.clone() {
-            egui::Frame::new()
-                .fill(crate::theme::tokens().panel.to_color32())
-.stroke(egui::Stroke::new(1.0, crate::theme::tokens().border.to_color32()))
-.corner_radius(egui::CornerRadius::same(8))
-.inner_margin(egui::Margin::symmetric(10, 6))
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.small("助手");
-                        let state_label = match turn.state.as_str() {
-                            "streaming" => "（回复中…）",
-                            "cancelling" => "（正在停止…）",
-                            _ => "",
-                        };
-                        if !state_label.is_empty() {
-                            ui.small(state_label);
-                        }
-                    });
-                    if turn.display_text.is_empty() {
-                        ui.weak("正在等待模型输出…");
-                    } else {
-                        let mut display = turn.display_text.clone();
-                        if turn.state == "streaming" {
-                            display.push('▍');
-                        }
-                        ui.label(display);
-                    }
-                    if let Some(error) = &turn.error {
-                        ui.label(egui::RichText::new(format!("错误：{error}")).color(palette.error));
+
+        // 空状态：让用户第一眼理解「可以直接问，也可以用工具 / 建任务 / 交给 Agent」。
+        let history_empty = self.chat.history_loaded && self.chat.messages.is_empty() && self.chat.turn.is_none();
+        if active_empty || history_empty {
+            ui.add_space(ui.available_height() * 0.06);
+            ui.vertical_centered(|ui| {
+                ui.heading("让零散想法，有一个去处。");
+                ui.label(egui::RichText::new("直接问我；也可以让我使用工具、创建任务，或交给 Agent。").color(palette.muted));
+                ui.add_space(12.0);
+                ui.horizontal_wrapped(|ui| {
+                    for (title, hint) in [
+                        ("直接回答", "想到就问"),
+                        ("使用工具", "搜索 · 文件 · 日程"),
+                        ("创建任务", "追踪到完成"),
+                        ("交给 Agent", "放手让它做"),
+                    ] {
+                        crate::theme::card_compact(ui, |ui| {
+                            ui.set_min_width(120.0);
+                            ui.vertical(|ui| {
+                                ui.strong(title);
+                                ui.small(hint);
+                            });
+                        });
                     }
                 });
-        } else if self.chat.history_loaded && self.chat.messages.last().is_some_and(|m| m.role == "user") {
-            ui.label(egui::RichText::new("上一条消息尚未获得回复；可重试或重新发送。").color(palette.muted));
+                if active_empty {
+                    ui.add_space(8.0);
+                    ui.label(egui::RichText::new("先在左侧新建或选择一个会话。").small().color(palette.muted));
+                }
+            });
+            return;
         }
-        if self.chat.messages.is_empty() && self.chat.history_loaded {
-            ui.weak("还没有消息。在下方输入并发送第一条消息。");
-        }
+
+        egui::ScrollArea::vertical()
+            .id_salt("chat_transcript_scroll")
+            .auto_shrink([false, false])
+            .stick_to_bottom(true)
+            .show(ui, |ui| {
+                let messages = self.chat.messages.clone();
+                for message in &messages {
+                    let is_user = message.role == "user";
+                    ui.push_id(&message.id, |ui| {
+                        egui::Frame::new()
+                            .fill(if is_user { tokens.accent_soft.over(tokens.bg).to_color32() } else { tokens.panel.to_color32() })
+                            .stroke(egui::Stroke::new(1.0, palette.border))
+                            .corner_radius(egui::CornerRadius::same(10))
+                            .inner_margin(egui::Margin::symmetric(12, 8))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.small(if is_user { "你" } else { "CetaMesh" });
+                                    if let Some(usage) = &message.usage {
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            ui.small(usage.clone());
+                                        });
+                                    }
+                                });
+                                ui.label(message.text.clone());
+                                if let Some(error) = &message.error {
+                                    ui.label(egui::RichText::new(format!("错误：{error}")).color(palette.error));
+                                }
+                                if message.cancelled {
+                                    ui.label(egui::RichText::new("已停止（保留部分结果，可发送\"继续\"）").small().color(palette.muted));
+                                }
+                                if ui.small_button("复制").clicked() {
+                                    ui.ctx().copy_text(message.text.clone());
+                                }
+                            });
+                    });
+                    ui.add_space(6.0);
+                }
+                if let Some(turn) = self.chat.turn.clone() {
+                    egui::Frame::new()
+                        .fill(tokens.panel.to_color32())
+                        .stroke(egui::Stroke::new(1.0, tokens.border.to_color32()))
+                        .corner_radius(egui::CornerRadius::same(10))
+                        .inner_margin(egui::Margin::symmetric(12, 8))
+                        .show(ui, |ui| {
+                            ui.small("CetaMesh");
+                            if turn.display_text.is_empty() {
+                                ui.weak("正在等待模型输出…");
+                            } else {
+                                let mut display = turn.display_text.clone();
+                                if turn.state == "streaming" {
+                                    display.push('▍');
+                                }
+                                ui.label(display);
+                            }
+                            if let Some(error) = &turn.error {
+                                ui.label(egui::RichText::new(format!("错误：{error}")).color(palette.error));
+                            }
+                            if let Some(usage) = &turn.usage {
+                                ui.small(usage.clone());
+                            }
+                        });
+                } else if self.chat.history_loaded && self.chat.messages.last().is_some_and(|m| m.role == "user") {
+                    ui.label(egui::RichText::new("上一条消息尚未获得回复；可重试或重新发送。").color(palette.muted));
+                }
+            });
     }
 
+    /// Composer：附件 → 输入框 → 动作行（＋ 附件 / 工具 / Agent / 模式）。
+    /// 模型选择不占主视觉：右下角「当前模型」小字打开弹层（渐进披露）。
     fn show_chat_composer(&mut self, ui: &mut egui::Ui) {
         let streaming = self.chat.turn.as_ref().is_some_and(|turn| turn.state == "streaming" || turn.state == "cancelling");
-        let last_is_user = self.chat.messages.last().is_some_and(|m| m.role == "user");
-        let can_continue = self
-            .chat
-            .messages
-            .iter()
-            .any(|m| m.role == "assistant" && (m.cancelled || m.error.is_some()));
+        // 渐进披露：弹层内容渲染在 Composer 卡上方。
+        match self.chat_popover {
+            ChatPopover::Agent => self.show_chat_agent_popover(ui),
+            ChatPopover::Model => self.show_chat_model_popover(ui),
+            ChatPopover::Mode => self.show_chat_mode_popover(ui),
+            ChatPopover::Tools => self.show_chat_tools_popover(ui),
+            ChatPopover::None => {}
+        }
         crate::theme::card_compact(ui, |ui| {
-                if !self.chat.attachments.is_empty() {
-                    ui.horizontal_wrapped(|ui| {
-                        let attachments = self.chat.attachments.clone();
-                        for (index, (name, content)) in attachments.iter().enumerate() {
-                            ui.label(format!("📎 {}（{} 字符）", name, content.chars().count()));
-                            if ui.small_button("✕").clicked() {
-                                self.chat.attachments.remove(index);
-                            }
+            if !self.chat.attachments.is_empty() {
+                ui.horizontal_wrapped(|ui| {
+                    let attachments = self.chat.attachments.clone();
+                    for (index, (name, content)) in attachments.iter().enumerate() {
+                        ui.label(format!("📎 {}（{} 字符）", name, content.chars().count()));
+                        if ui.small_button("✕").clicked() {
+                            self.chat.attachments.remove(index);
                         }
-                    });
-                }
-                // Inset neumorphic well behind the composer (`inset 3px 4px 10px` recipe).
-                let composer = crate::theme::well(ui, |ui| {
-                    ui.add(
-                        egui::TextEdit::multiline(&mut self.chat.input)
-                            .id(egui::Id::new("cetamesh_chat_composer"))
-                            .hint_text("输入消息；Enter 发送，Shift+Enter 换行（中文输入法不会误发）")
-                            .desired_rows(3)
-                            .desired_width(f32::INFINITY)
-                            .frame(egui::Frame::NONE),
-                    )
-                })
-                .inner;
-                // IME-safe Enter-to-send: the composer must own focus, Shift must not be held, and
-                // the same frame must not carry IME preedit/commit events. Confirming a Chinese
-                // candidate therefore never sends the message by accident.
-                let ime_active = ui.input(|input| {
-                    input
-                        .events
-                        .iter()
-                        .any(|event| matches!(event, egui::Event::Ime(_)))
+                    }
                 });
-                let enter_send = should_send_on_enter(
-                    composer.has_focus(),
-                    ui.input(|input| input.key_pressed(egui::Key::Enter)),
-                    ui.input(|input| input.modifiers.shift),
-                    ime_active,
-                );
-                ui.horizontal(|ui| {
+            }
+            let composer = crate::theme::well(ui, |ui| {
+                ui.add(
+                    egui::TextEdit::multiline(&mut self.chat.input)
+                        .id(egui::Id::new("cetamesh_chat_composer"))
+                        .hint_text("输入消息；Enter 发送，Shift+Enter 换行（中文输入法不会误发）")
+                        .desired_rows(2)
+                        .desired_width(f32::INFINITY)
+                        .frame(egui::Frame::NONE),
+                )
+            })
+            .inner;
+            let ime_active = ui.input(|input| {
+                input.events.iter().any(|event| matches!(event, egui::Event::Ime(_)))
+            });
+            let enter_send = should_send_on_enter(
+                composer.has_focus(),
+                ui.input(|input| input.key_pressed(egui::Key::Enter)),
+                ui.input(|input| input.modifiers.shift),
+                ime_active,
+            );
+            let config = self.chat.active_config();
+            ui.horizontal_wrapped(|ui| {
+                // ── 附件提示 ──
+                if ui.chip_button("＋ 附件").clicked() {
+                    self.chat.notice = Some("把文本文件拖进窗口即可作为附件。".to_owned());
+                }
+                // ── 工具（渐进披露） ──
+                if ui.chip_button("工具").clicked() {
+                    self.toggle_chat_popover(ChatPopover::Tools);
+                }
+                // ── Agent（渐进披露） ──
+                if ui.chip_button("Agent").clicked() {
+                    self.toggle_chat_popover(ChatPopover::Agent);
+                }
+                // ── 模式（渐进披露） ──
+                if ui.chip_button(format!("模式 · {}", chat_mode_label(&config.mode))).clicked() {
+                    self.toggle_chat_popover(ChatPopover::Mode);
+                }
+                // ── 重试 / 继续（仅上一轮需要时出现） ──
+                let last_is_user = self.chat.messages.last().is_some_and(|m| m.role == "user");
+                let can_continue = self
+                    .chat
+                    .messages
+                    .iter()
+                    .any(|m| m.role == "assistant" && (m.cancelled || m.error.is_some()));
+                if !streaming && last_is_user && ui.small_button("重试").clicked() && !self.pending.contains(&Area::Chat) {
+                    if let Some(id) = self.chat.active_id.clone() {
+                        self.issue_control(Area::Chat, Operation::ChatRetry, "chat.retry", json!({"id": id}));
+                    }
+                }
+                if !streaming && can_continue && ui.small_button("继续").clicked() && !self.pending.contains(&Area::Chat) {
+                    if let Some(id) = self.chat.active_id.clone() {
+                        self.issue_control(Area::Chat, Operation::ChatContinue, "chat.continue", json!({"id": id}));
+                    }
+                }
+                // ── 发送 / 停止 + 模型入口（右对齐） ──
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let model_text = if config.model.is_empty() { "当前模型".to_owned() } else { format!("当前模型 · {}", config.model) };
+                    if ui.small(model_text).clicked() {
+                        self.toggle_chat_popover(ChatPopover::Model);
+                    }
                     if streaming {
-                        if crate::theme::gummy_button(
-                            ui,
-                            "■ 停止",
-                            crate::theme::painter::ButtonKind::Danger,
-                            true,
-                        )
-                        .clicked()
-                            && !self.pending.contains(&Area::ChatStatus)
-                        {
+                        if ui.add_enabled(!self.pending.contains(&Area::ChatStatus), egui::Button::new("■ 停止")).clicked() {
                             if let Some(id) = self.chat.active_id.clone() {
                                 self.issue_control(Area::Chat, Operation::ChatStop, "chat.stop", json!({"id": id}));
                             }
@@ -3527,7 +3698,6 @@ ApiCall::Family { method, params } => api.request(method, params),
                     } else {
                         let can_send = self.chat.active_id.is_some()
                             && (!self.chat.input.trim().is_empty() || !self.chat.attachments.is_empty());
-                        // Gummy gradient primary button — the Web `.btn.primary` recipe.
                         let send_button = crate::theme::gummy_button(
                             ui,
                             "发送",
@@ -3550,28 +3720,141 @@ ApiCall::Family { method, params } => api.request(method, params),
                                 self.chat.input.clear();
                                 self.chat.attachments.clear();
                                 self.chat_drafts.remove(&id);
+                                self.chat_popover = ChatPopover::None;
                                 self.issue_control(Area::Chat, Operation::ChatSend, "chat.send", payload);
                             }
                         }
-                        ui.small("拖入文本文件可作为附件");
                     }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if !streaming && last_is_user && ui.small_button("重试").clicked() && !self.pending.contains(&Area::Chat) {
-                            if let Some(id) = self.chat.active_id.clone() {
-                                self.issue_control(Area::Chat, Operation::ChatRetry, "chat.retry", json!({"id": id}));
-                            }
-                        }
-                        if !streaming && can_continue && ui.small_button("继续").clicked() && !self.pending.contains(&Area::Chat) {
-                            if let Some(id) = self.chat.active_id.clone() {
-                                self.issue_control(Area::Chat, Operation::ChatContinue, "chat.continue", json!({"id": id}));
-                            }
-                        }
-                    });
                 });
             });
+        });
     }
 
-    fn show_chat_secondary_controls(&mut self, ui: &mut egui::Ui) {
+    fn toggle_chat_popover(&mut self, popover: ChatPopover) {
+        self.chat_popover = if self.chat_popover == popover { ChatPopover::None } else { popover };
+    }
+
+    /// Agent 选择弹层：Auto（Smart 路由）/ 禁用 / 显式 Provider —— 真实 chat.config.set。
+    fn show_chat_agent_popover(&mut self, ui: &mut egui::Ui) {
+        let palette = native_palette();
+        let config = self.chat.active_config();
+        let agent_value = config.agent_provider.clone();
+        let agent_options = self
+            .chat
+            .catalog
+            .as_ref()
+            .and_then(|value| value.get("agentProviders"))
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| Some((
+                        item.get("id").and_then(Value::as_str)?.to_owned(),
+                        item.get("label").and_then(Value::as_str).unwrap_or("").to_owned(),
+                    )))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        crate::theme::card(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.strong("Agent");
+            ui.label(egui::RichText::new("默认自动路由；也可以把任务显式交给某个智能体。").small().color(palette.muted));
+            let active_id = self.chat.active_id.clone();
+            let mut choose: Option<Option<String>> = None;
+            ui.horizontal_wrapped(|ui| {
+                if ui.selectable_label(agent_value.is_empty(), "Auto").clicked() {
+                    choose = Some(None);
+                }
+                if ui.selectable_label(agent_value == "none", "禁用").clicked() {
+                    choose = Some(Some("none".to_owned()));
+                }
+                for (id, label) in &agent_options {
+                    let label = if label.is_empty() { id.clone() } else { label.clone() };
+                    if ui.selectable_label(agent_value == *id, label).clicked() {
+                        choose = Some(Some(id.clone()));
+                    }
+                }
+            });
+            if let Some(value) = choose {
+                if let Some(session_id) = active_id.clone() {
+                    let params = match value {
+                        None => json!({"id": session_id, "config": {"agentProvider": null}}),
+                        Some(id) => json!({"id": session_id, "config": {"agentProvider": id}}),
+                    };
+                    self.issue_control(Area::Chat, Operation::ChatConfigSave, "chat.config.set", params);
+                    self.chat_popover = ChatPopover::None;
+                }
+            }
+        });
+        ui.add_space(4.0);
+    }
+
+    /// 模式弹层：chat（普通聊天）/ smart（智能路由）。
+    fn show_chat_mode_popover(&mut self, ui: &mut egui::Ui) {
+        let palette = native_palette();
+        let config = self.chat.active_config();
+        crate::theme::card(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.strong("会话模式");
+            let active_id = self.chat.active_id.clone();
+            let mut choose: Option<&'static str> = None;
+            ui.horizontal_wrapped(|ui| {
+                for (mode, label) in [("chat", "普通聊天"), ("smart", "智能路由")] {
+                    if ui.selectable_label(config.mode == mode, label).clicked() {
+                        choose = Some(mode);
+                    }
+                }
+            });
+            ui.label(egui::RichText::new("普通聊天走 Model Runtime；智能路由会按内容选择通道。").small().color(palette.muted));
+            if let Some(mode) = choose {
+                if let Some(session_id) = active_id.clone() {
+                    self.issue_control(Area::Chat, Operation::ChatConfigSave, "chat.config.set", json!({"id": session_id, "config": {"mode": mode}}));
+                    self.chat_popover = ChatPopover::None;
+                }
+            }
+        });
+        ui.add_space(4.0);
+    }
+
+    /// 工具弹层：任务 B 集成面的真实计数 + 前往插件页管理。
+    fn show_chat_tools_popover(&mut self, ui: &mut egui::Ui) {
+        let palette = native_palette();
+        if self.integrations.overview.is_none()
+            && !self.pending.contains(&Area::Integrations)
+            && self.worker_available
+        {
+            self.issue_integrations("plugins.overview", json!({}));
+        }
+        crate::theme::card(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.strong("工具");
+            ui.label(egui::RichText::new("回复会按需调用已启用的工具；也可以在这里管理它们。").small().color(palette.muted));
+            match &self.integrations.overview {
+                Some(overview) => {
+                    let tools_total = overview.pointer("/tools/total").and_then(Value::as_u64).unwrap_or(0);
+                    let tools_enabled = overview.pointer("/tools/enabled").and_then(Value::as_u64).unwrap_or(0);
+                    let mcp_total = overview.pointer("/mcp/total").and_then(Value::as_u64).unwrap_or(0);
+                    let mcp_running = overview.pointer("/mcp/running").and_then(Value::as_u64).unwrap_or(0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(format!("已启用工具 {tools_enabled} / {tools_total}"));
+                        ui.separator();
+                        ui.label(format!("MCP 运行中 {mcp_running} / {mcp_total}"));
+                    });
+                }
+                None => {
+                    ui.weak("正在读取工具目录…");
+                }
+            }
+            if ui.small_button("管理插件与工具 →").clicked() {
+                self.chat_popover = ChatPopover::None;
+                self.navigation.select_page(AppPage::Plugins);
+            }
+        });
+        ui.add_space(4.0);
+    }
+
+    /// 模型弹层（原「会话配置」行收进来）：Provider / 模型 / 推理力度，全部真实 chat.config.set。
+    fn show_chat_model_popover(&mut self, ui: &mut egui::Ui) {
         let palette = native_palette();
         let config = self.chat.active_config();
         if self.chat_model_input.trim().is_empty() && !config.model.is_empty() {
@@ -3579,60 +3862,15 @@ ApiCall::Family { method, params } => api.request(method, params),
         }
         let catalog = self.chat.catalog.clone();
         let active_id = self.chat.active_id.clone();
-        // Agent 选择：""=Auto（Smart 路由），"none"=Disabled，其余为显式 Agent Provider（如 dsh）。
         let agent_value = config.agent_provider.clone();
         let dsh_agent_selected = !agent_value.is_empty() && agent_value != "none";
-        ui.horizontal_wrapped(|ui| {
-            ui.small("会话配置：");
-            let agent_options = match &catalog {
-                Some(value) => value
-                    .get("agentProviders")
-                    .and_then(Value::as_array)
-                    .map(|items| {
-                        items
-                            .iter()
-                            .filter_map(|item| Some((
-                                item.get("id").and_then(Value::as_str)?.to_owned(),
-                                item.get("label").and_then(Value::as_str).unwrap_or("").to_owned(),
-                            )))
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default(),
-                None => Vec::new(),
-            };
-            egui::ComboBox::from_id_salt("chat_agent_select")
-                .selected_text(match agent_value.as_str() {
-                    "" => "Agent: Auto".to_owned(),
-                    "none" => "Agent: Disabled".to_owned(),
-                    id => format!(
-                        "Agent: {}",
-                        agent_options
-                            .iter()
-                            .find(|(option, _)| option == id)
-                            .map(|(_, label)| label.clone())
-                            .unwrap_or_else(|| id.to_owned())
-                    ),
-                })
-                .width(130.0)
-                .show_ui(ui, |ui| {
-                    if ui.selectable_label(agent_value.is_empty(), "Auto").clicked() {
-                        if let Some(session_id) = active_id.clone() {
-                            self.issue_control(Area::Chat, Operation::ChatConfigSave, "chat.config.set", json!({"id": session_id, "config": {"agentProvider": null}}));
-                        }
-                    }
-                    if ui.selectable_label(agent_value == "none", "Disabled").clicked() {
-                        if let Some(session_id) = active_id.clone() {
-                            self.issue_control(Area::Chat, Operation::ChatConfigSave, "chat.config.set", json!({"id": session_id, "config": {"agentProvider": "none"}}));
-                        }
-                    }
-                    for (id, label) in &agent_options {
-                        if ui.selectable_label(agent_value == *id, label).clicked() {
-                            if let Some(session_id) = active_id.clone() {
-                                self.issue_control(Area::Chat, Operation::ChatConfigSave, "chat.config.set", json!({"id": session_id, "config": {"agentProvider": id}}));
-                            }
-                        }
-                    }
-                });
+        crate::theme::card(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.strong("模型");
+            if active_id.is_none() {
+                ui.label(egui::RichText::new("选择一个会话后才能调整模型。").small().color(palette.muted));
+                return;
+            }
             let (model_providers, default_model_provider) = match &catalog {
                 Some(value) => {
                     let providers = parse_model_providers(value);
@@ -3650,21 +3888,20 @@ ApiCall::Family { method, params } => api.request(method, params),
             } else {
                 config.model_provider.clone()
             };
-            // Model Provider 下拉只在非显式 Agent 时出现：普通聊天属于 Model Runtime。
             if !dsh_agent_selected {
+                ui.label(egui::RichText::new("模型提供方").small().color(palette.muted));
                 if model_providers.is_empty() {
                     ui.label(egui::RichText::new("Model Provider 不可用").small().color(palette.error));
                 } else {
                     egui::ComboBox::from_id_salt("chat_model_provider_select")
-                        .selected_text(format!(
-                            "Provider: {}",
+                        .selected_text(
                             model_providers
                                 .iter()
                                 .find(|provider| provider.id == selected_provider)
                                 .map(|provider| provider.label.clone())
-                                .unwrap_or_else(|| "自动".to_owned())
-                        ))
-                        .width(150.0)
+                                .unwrap_or_else(|| "自动".to_owned()),
+                        )
+                        .width(200.0)
                         .show_ui(ui, |ui| {
                             for provider in &model_providers {
                                 let suffix = if provider.has_key { "" } else { "（未配置 Key）" };
@@ -3722,9 +3959,10 @@ ApiCall::Family { method, params } => api.request(method, params),
                 let reason = model_source_error.unwrap_or_else(|| "模型目录为空".to_owned());
                 ui.label(egui::RichText::new(format!("模型不可用（{reason}）")).small().color(palette.error));
             } else if !models.is_empty() {
+                ui.label(egui::RichText::new("模型").small().color(palette.muted));
                 egui::ComboBox::from_id_salt("chat_model_select")
                     .selected_text(config.model.clone())
-                    .width(200.0)
+                    .width(220.0)
                     .show_ui(ui, |ui| {
                         for (id, label) in &models {
                             let selected = config.model == *id;
@@ -3739,58 +3977,200 @@ ApiCall::Family { method, params } => api.request(method, params),
             } else if !dsh_agent_selected {
                 ui.label(egui::RichText::new(model_source_error.unwrap_or_else(|| "模型列表不可用".to_owned())).small().color(palette.error));
             }
-            // 目录不可用或需要指定目录外模型时，允许直接输入模型 ID。
-            ui.label("自定义模型");
-            ui.add(
-                egui::TextEdit::singleline(&mut self.chat_model_input)
-                    .desired_width(150.0)
-                    .hint_text("模型 ID"),
-            );
-            if ui.small_button("应用").clicked() {
-                let model = self.chat_model_input.trim().to_owned();
-                if !model.is_empty() {
-                    if let Some(session_id) = active_id.clone() {
-                        self.issue_control(
-                            Area::Chat,
-                            Operation::ChatConfigSave,
-                            "chat.config.set",
-                            json!({"id": session_id, "config": {"model": model}}),
-                        );
+            ui.label(egui::RichText::new("目录外的模型 ID").small().color(palette.muted));
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.chat_model_input)
+                        .desired_width(160.0)
+                        .hint_text("模型 ID"),
+                );
+                if ui.small_button("应用").clicked() {
+                    let model = self.chat_model_input.trim().to_owned();
+                    if !model.is_empty() {
+                        if let Some(session_id) = active_id.clone() {
+                            self.issue_control(
+                                Area::Chat,
+                                Operation::ChatConfigSave,
+                                "chat.config.set",
+                                json!({"id": session_id, "config": {"model": model}}),
+                            );
+                        }
                     }
                 }
-            }
-            egui::ComboBox::from_id_salt("chat_reasoning_select")
-                .selected_text(format!("reasoning: {}", config.reasoning))
-                .width(140.0)
-                .show_ui(ui, |ui| {
-                    for effort in ["off", "low", "high", "max"] {
-                        if ui.selectable_label(config.reasoning == effort, effort).clicked() {
-                            if let Some(session_id) = active_id.clone() {
-                                self.issue_control(Area::Chat, Operation::ChatConfigSave, "chat.config.set", json!({"id": session_id, "config": {"reasoning": effort}}));
-                            }
+            });
+            ui.label(egui::RichText::new("推理力度").small().color(palette.muted));
+            ui.horizontal_wrapped(|ui| {
+                for effort in ["off", "low", "high", "max"] {
+                    if ui.selectable_label(config.reasoning == effort, effort).clicked() {
+                        if let Some(session_id) = active_id.clone() {
+                            self.issue_control(Area::Chat, Operation::ChatConfigSave, "chat.config.set", json!({"id": session_id, "config": {"reasoning": effort}}));
                         }
                     }
-                });
-            egui::ComboBox::from_id_salt("chat_mode_select")
-                .selected_text(format!("Chat Session: {}", config.mode))
-                .width(110.0)
-                .show_ui(ui, |ui| {
-                    for mode in ["chat", "smart"] {
-                        if ui.selectable_label(config.mode == mode, mode).clicked() {
-                            if let Some(session_id) = active_id.clone() {
-                                self.issue_control(Area::Chat, Operation::ChatConfigSave, "chat.config.set", json!({"id": session_id, "config": {"mode": mode}}));
-                            }
-                        }
-                    }
-                });
-            if dsh_agent_selected {
-                ui.small("通道：DSH Agent");
-            } else {
-                ui.small("通道：Model Runtime");
-            }
+                }
+            });
+            ui.label(
+                egui::RichText::new(if dsh_agent_selected { "通道：DSH Agent" } else { "通道：Model Runtime" })
+                    .small()
+                    .color(palette.muted),
+            );
         });
+        ui.add_space(4.0);
     }
 
+    /// UI v1：任务 B 集成面的统一出口（记录在途方法名，回包按它分发）。
+    fn issue_integrations(&mut self, method: &'static str, params: Value) {
+        self.integrations_method = Some(method);
+        self.issue_family(Area::Integrations, Operation::IntegrationsCall, method, params);
+    }
+
+    /// UI v1 插件页：集成面目录（plugins.* / tools.* / mcp.*）+ 原扩展包审查流程。
+    fn show_plugins_page(&mut self, ui: &mut egui::Ui) {
+        if self.integrations.tab == IntegrationsTab::Extensions {
+            self.show_extensions_review(ui);
+            return;
+        }
+        if let Some(action) = self.integrations.next_load() {
+            if !self.pending.contains(&Area::Integrations) && self.worker_available {
+                self.issue_integrations(action.method, action.params);
+            }
+        }
+        let actions = self.integrations.show(ui);
+        for action in actions {
+            self.issue_integrations(action.method, action.params);
+        }
+        // MCP 详情打开后自动发现一次工具。
+        if self.integrations.mcp_detail.is_some()
+            && self.integrations.mcp_tools.is_none()
+            && !self.integrations.mcp_tools_requested
+            && !self.pending.contains(&Area::Integrations)
+            && self.worker_available
+        {
+            if let Some(id) = self.integrations.selected_mcp.clone() {
+                let action = self.integrations.request_mcp_tools(&id);
+                self.issue_integrations(action.method, action.params);
+            }
+        }
+        // 二级详情在列表重载后需要重新拉取。
+        if self.integrations.plugin_detail.is_none() && self.integrations.selected_plugin.is_some() {
+            if !self.pending.contains(&Area::Integrations) && self.worker_available {
+                if let Some(id) = self.integrations.selected_plugin.clone() {
+                    let action = self.integrations.request_plugin_detail(&id);
+                    self.issue_integrations(action.method, action.params);
+                }
+            }
+        }
+        if self.integrations.mcp_detail.is_none() && self.integrations.selected_mcp.is_some() {
+            if !self.pending.contains(&Area::Integrations) && self.worker_available {
+                if let Some(id) = self.integrations.selected_mcp.clone() {
+                    let action = self.integrations.request_mcp_detail(&id);
+                    self.issue_integrations(action.method, action.params);
+                }
+            }
+        }
+        // 二级入口：扩展包（原有真实审查安装流程）收进插件页。
+        ui.add_space(8.0);
+        ui.separator();
+        if ui.small_button("扩展包（审查 / 安装） →").clicked() {
+            self.integrations.tab = IntegrationsTab::Extensions;
+        }
+        self.show_feedback(ui, Area::Integrations);
+    }
+
+    /// 原扩展包审查 / 安装 UI（保持真实功能，收进插件页的「扩展包」二级入口）。
+    fn show_extensions_review(&mut self, ui: &mut egui::Ui) {
+        ui.heading("扩展包");
+        ui.label(egui::RichText::new("Extension 包的静态审查、Owner 批准与安装（原 Plugins 页流程）。").small());
+        if ui.small_button("← 返回插件目录").clicked() {
+            self.integrations.tab = IntegrationsTab::Plugins;
+            return;
+        }
+        ui.add_space(6.0);
+        self.show_extensions_review_body(ui);
+    }
+}
+
+/// 会话按最近更新分组：今天（24h 内）/ 更早 / 已归档。不依赖时区，只用毫秒差。
+fn group_chat_sessions(
+    sessions: Vec<crate::chat_ui::ChatSession>,
+) -> (Vec<crate::chat_ui::ChatSession>, Vec<crate::chat_ui::ChatSession>, Vec<crate::chat_ui::ChatSession>) {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0);
+    let day_ms: i64 = 24 * 60 * 60 * 1000;
+    let mut today = Vec::new();
+    let mut earlier = Vec::new();
+    let mut archived = Vec::new();
+    let mut sessions = sessions;
+    sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    for session in sessions {
+        if session.archived {
+            archived.push(session);
+        } else if session.updated_at > 0 && now_ms.saturating_sub(session.updated_at) <= day_ms {
+            today.push(session);
+        } else {
+            earlier.push(session);
+        }
+    }
+    (today, earlier, archived)
+}
+
+/// 会话行右侧的相对时间；更新时间异常时如实显示"-"。
+fn relative_time(updated_at: i64) -> String {
+    if updated_at <= 0 {
+        return "-".to_owned();
+    }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0);
+    let diff = now_ms.saturating_sub(updated_at);
+    let minutes = diff / 60_000;
+    if minutes < 1 {
+        "刚刚".to_owned()
+    } else if minutes < 60 {
+        format!("{minutes} 分")
+    } else if minutes < 60 * 24 {
+        format!("{} 时", minutes / 60)
+    } else if minutes < 60 * 24 * 30 {
+        format!("{} 天", minutes / (60 * 24))
+    } else {
+        format!("{} 月", minutes / (60 * 24 * 30))
+    }
+}
+
+fn chat_mode_label(mode: &str) -> &str {
+    match mode {
+        "chat" => "普通",
+        "smart" => "路由",
+        other => Box::leak(other.to_owned().into_boxed_str()),
+    }
+}
+
+/// Composer 动作行的小 chip 按钮（渐进披露入口）。
+trait ChatChipButton {
+    fn chip_button(&mut self, text: impl Into<String>) -> egui::Response;
+}
+
+impl ChatChipButton for egui::Ui {
+    fn chip_button(&mut self, text: impl Into<String>) -> egui::Response {
+        let palette = crate::native_ui::native_palette();
+        let tokens = crate::theme::tokens();
+        egui::Frame::new()
+            .fill(tokens.chip.to_color32())
+            .stroke(egui::Stroke::new(1.0, palette.border))
+            .corner_radius(egui::CornerRadius::same(7))
+            .inner_margin(egui::Margin::symmetric(9, 4))
+            .show(self, |ui| {
+                ui.label(egui::RichText::new(text.into()).small());
+            })
+            .response
+            .interact(egui::Sense::click())
+    }
+}
+
+// UI v1 的 Chat / Plugins 方法继续在同一个 impl 块里。
+impl NativeUi {
     fn accept_chat_drops(&mut self, ui: &mut egui::Ui) {
         let dropped = ui.ctx().input(|input| input.raw.dropped_files.clone());
         for file in dropped {
@@ -3825,16 +4205,19 @@ ApiCall::Family { method, params } => api.request(method, params),
         self.show_feedback(ui, Area::Task);
     }
 
-    /// Work 页：Tasks 与 Workshop（Owner 审阅）两个内部区域。
+    /// Work 页（UI v1）：任务 / 提案（Owner 审阅）/ 工作空间 三个内部区域，
+    /// 全部复用既有真实服务（task.* / workshop.* / workspace.*）。
     fn show_work_page(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.work_tab, WorkTab::Tasks, "Tasks");
-            ui.selectable_value(&mut self.work_tab, WorkTab::Workshop, "Workshop（工作坊）");
+            ui.selectable_value(&mut self.work_tab, WorkTab::Tasks, "任务");
+            ui.selectable_value(&mut self.work_tab, WorkTab::Workshop, "提案（Owner 审阅）");
+            ui.selectable_value(&mut self.work_tab, WorkTab::Workspace, "工作空间");
         });
         ui.separator();
         match self.work_tab {
             WorkTab::Tasks => self.show_tasks_page(ui),
             WorkTab::Workshop => self.show_workshop_page(ui),
+            WorkTab::Workspace => self.show_workspace_page(ui),
         }
     }
 
@@ -3888,8 +4271,88 @@ ApiCall::Family { method, params } => api.request(method, params),
         }
     }
 
+    /// 设置页（UI v1，方案 04 的交互）：单页分区 + 左侧锚点；
+    /// 全部复用既有真实配置面，工程项收进「高级」。
     fn show_settings_page(&mut self, ui: &mut egui::Ui) {
-        self.show_settings_appearance(ui);
+        const SECTIONS: [(&str, &str); 5] = [
+            ("appearance", "外观与窗口"),
+            ("security", "安全通知"),
+            ("models", "模型与 Preset"),
+            ("devices", "设备与连接"),
+            ("advanced", "高级"),
+        ];
+        ui.heading("设置");
+        ui.label(egui::RichText::new("常用选项都在这一页；工程面收进「高级」。").small().color(native_palette().muted));
+        ui.add_space(8.0);
+        ui.columns(2, |columns| {
+            columns[0].set_min_width(150.0);
+            columns[0].spacing_mut().item_spacing.y = 2.0;
+            let mut jump: Option<&'static str> = self.settings_scroll_target;
+            for (id, label) in SECTIONS {
+                if columns[0].selectable_label(jump == Some(id), label).clicked() {
+                    jump = Some(id);
+                }
+            }
+            self.settings_scroll_target = jump;
+            let target = self.settings_scroll_target;
+            let scope = |ui: &mut egui::Ui, id: &str, title: &str, body: &mut NativeUi| {
+                ui.push_id(id, |ui| {
+                    if target == Some(id) {
+                        let rect = ui.cursor();
+                        ui.scroll_to_rect(rect, None);
+                        // 只滚动一次：命中后清除目标。
+                        body.settings_scroll_target = None;
+                    }
+                    ui.add_space(4.0);
+                    ui.strong(title);
+                    ui.add_space(2.0);
+                    match id {
+                        "appearance" => body.show_settings_appearance(ui),
+                        "security" => body.show_security(ui),
+                        "models" => body.show_models_presets(ui),
+                        "devices" => body.show_devices_page(ui),
+                        "advanced" => body.show_settings_advanced(ui),
+                        _ => {}
+                    }
+                    ui.add_space(14.0);
+                });
+            };
+            egui::ScrollArea::vertical()
+                .id_salt("settings_sections_scroll")
+                .auto_shrink([false, false])
+                .show(&mut columns[1], |ui| {
+                    for (id, label) in SECTIONS {
+                        scope(ui, id, label, self);
+                    }
+                });
+        });
+    }
+
+    /// 设置 → 高级：工程面入口（旧控制台 tab 容器与能力审批队列）。
+    fn show_settings_advanced(&mut self, ui: &mut egui::Ui) {
+        let palette = native_palette();
+        ui.label(egui::RichText::new("这些是工程界面：日常使用不需要打开。").small().color(palette.muted));
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("状态与日志（旧控制台）").clicked() {
+                self.navigation.select_legacy_tab(crate::app_shell::LegacyTab::Overview);
+            }
+            if ui.button("渠道控制台（策略 / 会话 / 审批）").clicked() {
+                self.navigation.select_legacy_tab(crate::app_shell::LegacyTab::Policy);
+            }
+            if ui.button("服务连接").clicked() {
+                self.navigation.select_legacy_tab(crate::app_shell::LegacyTab::Services);
+            }
+            if ui.button("设备与连接（Mesh 配对）").clicked() {
+                self.navigation.select_page(AppPage::Devices);
+            }
+        });
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new("管理动作若需要 Owner 审批，会出现在「渠道控制台 → 审批 / 问题」。")
+                .small()
+                .color(palette.muted),
+        );
     }
 
     fn show_devices_page(&mut self, ui: &mut egui::Ui) {
@@ -3913,8 +4376,8 @@ ApiCall::Family { method, params } => api.request(method, params),
         }
     }
 
-    fn show_plugins_page(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Plugins");
+    fn show_extensions_review_body(&mut self, ui: &mut egui::Ui) {
+        ui.label("Package source directory");
         ui.label("Package source directory");
         ui.horizontal(|ui| {
             ui.add(egui::TextEdit::singleline(&mut self.plugins_source_path)
@@ -4655,10 +5118,10 @@ ApiCall::Family { method, params } => api.request(method, params),
             AppPage::Chat => self.show_chat_page(ui),
             AppPage::Work => self.show_work_page(ui),
             AppPage::Memory => self.show_memory_page(ui),
-            AppPage::Workspaces => self.show_workspace_page(ui),
             AppPage::Settings => self.show_settings_page(ui),
             AppPage::Devices => self.show_devices_page(ui),
-            AppPage::Home | AppPage::Social | AppPage::Agents | AppPage::Connections | AppPage::Security => {
+            AppPage::Agents => self.show_agents_page(ui),
+            AppPage::Home | AppPage::Social | AppPage::Connections | AppPage::Security => {
                 self.show_legacy_tab_page(ui);
             }
             AppPage::Plugins => {
@@ -4668,6 +5131,39 @@ ApiCall::Family { method, params } => api.request(method, params),
             AppPage::Feedback => self.show_feedback_page(ui),
             AppPage::Onboarding => self.show_onboarding_page(ui),
         }
+    }
+
+    /// UI v1 智能体页：`agent.list` 的真实目录卡（DSH / Codex / ZCode）。
+    fn show_agents_page(&mut self, ui: &mut egui::Ui) {
+        if !self.agents.loaded && !self.pending.contains(&Area::AgentCatalog) && self.worker_available {
+            let action = self.agents.refresh_request();
+            self.issue_family(Area::AgentCatalog, Operation::AgentList, action.method, action.params);
+        }
+        let actions = self.agents.show(ui);
+        for action in actions {
+            if action.method == "__use_in_chat" {
+                // 把选中的 Agent Provider 绑到当前对话会话（真实 chat.config.set）。
+                if let Some(session_id) = self.chat.active_id.clone() {
+                    let provider = action.params.get("agentProvider").cloned().unwrap_or(Value::Null);
+                    self.issue_control(
+                        Area::Chat,
+                        Operation::ChatConfigSave,
+                        "chat.config.set",
+                        json!({ "id": session_id, "config": { "agentProvider": provider } }),
+                    );
+                    self.chat.notice = Some("已把该智能体设为当前对话的 Agent。".to_owned());
+                    self.navigation.select_page(AppPage::Chat);
+                } else {
+                    self.agents.set_error("还没有活动会话：先到「对话」新建一个会话。".to_owned());
+                }
+                continue;
+            }
+            self.issue_family(Area::AgentCatalog, Operation::AgentList, action.method, action.params);
+        }
+        if let Some(Err(error)) = self.feedback.get(&Area::AgentCatalog) {
+            self.agents.set_error(error.clone());
+        }
+        self.show_feedback(ui, Area::AgentCatalog);
     }
 
     fn tab_button(&mut self, ui: &mut egui::Ui, tab: Tab, label: &str) {
@@ -6194,6 +6690,17 @@ impl eframe::App for NativeUi {
                     .inner_margin(egui::Margin::symmetric(16, 8)),
             )
             .show(ui, |ui| {
+                // UI v1：Chat 是第一入口，用自己的 双栏 + 底部 Composer 布局，
+                // 不进产品页外层滚动（历史列 / 消息区各自滚动，Composer 固定）。
+                if self.navigation.page == AppPage::Chat {
+                    let (enter_alpha, enter_rise) = crate::theme::page_enter_state();
+                    ui.add_space(enter_rise);
+                    ui.scope(|ui| {
+                        ui.set_opacity(enter_alpha);
+                        self.show_page(ui);
+                    });
+                    return;
+                }
                 egui::ScrollArea::vertical()
                     .id_salt("cetamesh_product_page_scroll")
                     .auto_shrink([false, false])
@@ -6268,11 +6775,16 @@ impl NativeUi {
             Stage::Apply => {
                 // 截图请求里的页面由 QA 计划指定（含产品化任务 D 的三个新产品页）。
                 let page = match spec.page {
-                    qa::QaPage::Home => AppPage::Home,
+                    // UI v1：主题轮播的 "Home" 拍的是产品首页 = 对话页。
+                    qa::QaPage::Home => AppPage::Chat,
                     qa::QaPage::Settings => AppPage::Settings,
                     qa::QaPage::About => AppPage::About,
                     qa::QaPage::Feedback => AppPage::Feedback,
                     qa::QaPage::Onboarding => AppPage::Onboarding,
+                    qa::QaPage::Work => AppPage::Work,
+                    qa::QaPage::Memory => AppPage::Memory,
+                    qa::QaPage::Agents => AppPage::Agents,
+                    qa::QaPage::Plugins => AppPage::Plugins,
                 };
                 self.navigation.select_page(page);
                 let theme = spec.theme;
@@ -7502,13 +8014,13 @@ mod interaction_tests {
 
     #[test]
     fn navigation_shortcuts_cover_the_first_seven_product_pages() {
-        assert_eq!(page_for_shortcut_slot(1), Some(AppPage::Home));
-        assert_eq!(page_for_shortcut_slot(2), Some(AppPage::Chat));
-        assert_eq!(page_for_shortcut_slot(3), Some(AppPage::Work));
-        assert_eq!(page_for_shortcut_slot(4), Some(AppPage::Social));
-        assert_eq!(page_for_shortcut_slot(5), Some(AppPage::Agents));
-        assert_eq!(page_for_shortcut_slot(6), Some(AppPage::Plugins));
-        assert_eq!(page_for_shortcut_slot(7), Some(AppPage::Memory));
+        assert_eq!(page_for_shortcut_slot(1), Some(AppPage::Chat));
+        assert_eq!(page_for_shortcut_slot(2), Some(AppPage::Work));
+        assert_eq!(page_for_shortcut_slot(3), Some(AppPage::Memory));
+        assert_eq!(page_for_shortcut_slot(4), Some(AppPage::Agents));
+        assert_eq!(page_for_shortcut_slot(5), Some(AppPage::Plugins));
+        assert_eq!(page_for_shortcut_slot(6), Some(AppPage::Settings));
+        assert_eq!(page_for_shortcut_slot(7), Some(AppPage::About));
         assert_eq!(page_for_shortcut_slot(0), None);
         assert_eq!(page_for_shortcut_slot(8), None);
     }

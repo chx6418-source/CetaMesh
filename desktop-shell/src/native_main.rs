@@ -2,7 +2,9 @@
 
 mod chat_ui;
 mod core_launch;
+mod agent_ui;
 mod app_shell;
+mod integrations_ui;
 mod desktop_paths;
 mod external_link;
 mod install_cli;

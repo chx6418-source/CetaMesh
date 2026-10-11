@@ -94,6 +94,15 @@
 
 ## Active Work (none)
 
+- UI v1（Owner 选定方案 01/02/04 融合）**已完成，在分支 `feature/product-ui-v1` 等待 Owner 确认**
+  （工作树 `.worktrees/2026-10-11-product-ui-v1`，基于 main `bdf6cc6`）。导航收敛 15→5+2
+  （对话/工作/记忆 + 智能体/插件 + 设置/关于），Chat 重写为第一入口（历史列/消息区/Composer，
+  工具·Agent·模型渐进披露），智能体页接 `agent.list`、插件页接 `plugins.*/tools.*/mcp.*`
+  （任务 B 集成面首次进 UI，pending 不自动批准）。红线未动（Broker/Task/Workspace/Agent/Memory/Approval/ProcessHost）。
+  验证与截图证据见 `FINAL_PRODUCT_UI_REPORT.md`：cargo check 0 error；cargo test 154P/16F（全部 os error 5 TEMP 沙箱）；
+  npm test PASS 77（test-owner-agent-mode 已按新导航契约更新；test-desktop-shell/cargo:test 为会话沙箱限制，同一份代码第一轮曾 PASS）；
+  desktop release/debug 构建成功；debug 截图 18/18 已人工核验（output/uiv1-qa/）。**未 push**。
+
 - 产品化任务 B（Tools / MCP / Plugin Integration Restoration）**已完成并在 Owner 确认后合并**到本地 `main`
   （merge commit `04ab303`：first parent `38ff756` = 合并前 main，实现 `ed3331d`）；工作分支
   `feature/tools-mcp-plugin-restoration-v1` 已删除。**未 push**（等 Owner 指示）。

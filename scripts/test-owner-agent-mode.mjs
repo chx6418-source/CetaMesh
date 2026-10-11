@@ -33,9 +33,14 @@ for (const [legacy, expected] of [['closed-agent', 'owner-agent'], ['reserved', 
 assert.equal(migrateLegacyMode('unknown'), 'unknown', 'unknown modes must remain invalid');
 assert.equal(migrateLegacyMode('toString'), 'toString', 'prototype names cannot become migration aliases');
 const shell = fs.readFileSync(new URL('../desktop-shell/src/app_shell.rs', import.meta.url), 'utf8');
-for (const label of ['Home', 'Chat', 'Work', 'Social', 'Agents', 'Plugins', 'Memory', 'Workspaces', 'Devices', 'Connections', 'Security', 'Settings']) {
+// UI v1：导航收敛为 5+2（对话第一），工程页仍保留用户语言标签（可从设置/关于到达）。
+for (const label of ['对话', '工作', '记忆', '智能体', '插件', '设置', '关于', '状态与日志', '渠道控制台', '设备与连接', '服务连接', '安全通知']) {
   assert.ok(shell.includes('=> "' + label + '"'), 'missing product page: ' + label);
 }
+assert.ok(
+  shell.indexOf('Self::Chat') < shell.indexOf('Self::Work') && shell.includes('PRIMARY: [Self; 5]'),
+  'Chat must be the first primary nav page'
+);
 const ui = fs.readFileSync(new URL('../desktop-shell/src/native_ui.rs', import.meta.url), 'utf8');
 assert.ok(ui.includes('"owner-agent"'));
 assert.ok(ui.includes('"closedAgent"'), 'legacy preset key remains compatible');
