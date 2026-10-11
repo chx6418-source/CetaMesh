@@ -375,10 +375,7 @@ pub fn card_shapes(rect: Rect, spec: &ThemeSpec) -> Vec<Shape> {
     shapes
 }
 
-/// Gummy glass card painted directly (used when no slot is needed).
-pub fn paint_card(painter: &egui::Painter, rect: Rect, spec: &ThemeSpec) {
-    painter.extend(card_shapes(rect, spec));
-}
+
 
 /// Painter-level state of a gummy button.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

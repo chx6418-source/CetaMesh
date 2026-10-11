@@ -22,96 +22,49 @@ const MAX_ABSOLUTE_POSITION: f32 = 40_000.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThemePreference {
+    /// 跟随系统（UI v1 起与纸面等价：唯一的主题是浅色纸面）。
     System,
-    Soda,
-    Deep,
-    Warm,
-    Ink,
-    Forest,
-    Rose,
-    Sand,
-    Ice,
-    Dusk,
-    Violet,
+    /// 纸面工作台（方案 01）：唯一的官方主题。
+    Paper,
 }
 
 impl ThemePreference {
-    pub const THEMES: [Self; 10] = [
-        Self::Soda,
-        Self::Deep,
-        Self::Warm,
-        Self::Ink,
-        Self::Forest,
-        Self::Rose,
-        Self::Sand,
-        Self::Ice,
-        Self::Dusk,
-        Self::Violet,
-    ];
+    /// 主题清单（UI v1 只剩纸面）。运行时不再遍历它；测试与文档用途保留。
+    #[allow(dead_code)]
+    pub const THEMES: [Self; 1] = [Self::Paper];
 
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::System => "system",
-            Self::Soda => "soda",
-            Self::Deep => "deep",
-            Self::Warm => "warm",
-            Self::Ink => "ink",
-            Self::Forest => "forest",
-            Self::Rose => "rose",
-            Self::Sand => "sand",
-            Self::Ice => "ice",
-            Self::Dusk => "dusk",
-            Self::Violet => "violet",
+            Self::Paper => "paper",
         }
     }
 
     pub const fn label(self) -> &'static str {
         match self {
             Self::System => "跟随系统",
-            Self::Soda => "苏打",
-            Self::Deep => "深海",
-            Self::Warm => "护眼",
-            Self::Ink => "纸墨",
-            Self::Forest => "松林",
-            Self::Rose => "樱白",
-            Self::Sand => "暖砂",
-            Self::Ice => "冰川",
-            Self::Dusk => "暮灰",
-            Self::Violet => "星紫",
+            Self::Paper => "纸面",
         }
     }
 
+    /// 旧版设置里存的十主题取值（soda/deep/…）一律回落到纸面，不报错、不丢其它偏好。
     pub fn parse(text: &str) -> Option<Self> {
         match text.trim().to_ascii_lowercase().as_str() {
             "system" | "auto" => Some(Self::System),
-            "soda" | "light" => Some(Self::Soda),
-            "deep" | "dark" => Some(Self::Deep),
-            "warm" => Some(Self::Warm),
-            "ink" => Some(Self::Ink),
-            "forest" => Some(Self::Forest),
-            "rose" => Some(Self::Rose),
-            "sand" => Some(Self::Sand),
-            "ice" => Some(Self::Ice),
-            "dusk" => Some(Self::Dusk),
-            "violet" => Some(Self::Violet),
+            "paper" => Some(Self::Paper),
+            "soda" | "light" | "deep" | "dark" | "warm" | "ink" | "forest"
+            | "rose" | "sand" | "ice" | "dusk" | "violet" => Some(Self::Paper),
             _ => None,
         }
     }
 
-    /// Return a concrete palette ID, including when following an OS theme change.
-    pub fn resolve(self, system_dark: bool) -> Self {
-        match self {
-            Self::System if system_dark => Self::Deep,
-            Self::System => Self::Soda,
-            theme => theme,
-        }
+    /// Return a concrete palette ID. 只有一个主题：任何解析都落到纸面。
+    pub fn resolve(self, _system_dark: bool) -> Self {
+        Self::Paper
     }
 
-    pub fn resolves_to_dark(self, system_dark: bool) -> bool {
-        matches!(
-            self.resolve(system_dark),
-            Self::Deep | Self::Dusk | Self::Violet
-        )
+    pub fn resolves_to_dark(self, _system_dark: bool) -> bool {
+        false
     }
 }
 
@@ -390,17 +343,32 @@ mod tests {
     }
 
     #[test]
-    fn all_named_themes_survive_save_and_reload() {
+    fn named_theme_survives_save_and_reload() {
+        let dir = temp_dir();
+        let prefs = prefs_from_value(&json!({ "theme": "paper" }));
+        assert_eq!(prefs.to_value()["theme"], "paper");
+        prefs.save(&dir).expect("save named theme");
+        let (loaded, warning) = UiPrefs::load(&dir);
+        assert!(warning.is_none());
+        assert_eq!(loaded.to_value()["theme"], "paper", "theme lost on restart");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn legacy_theme_ids_all_fall_back_to_paper() {
         let dir = temp_dir();
         for id in [
             "soda", "deep", "warm", "ink", "forest", "rose", "sand", "ice", "dusk", "violet",
         ] {
             let prefs = prefs_from_value(&json!({ "theme": id }));
-            assert_eq!(prefs.to_value()["theme"], id, "unrecognized theme {id}");
-            prefs.save(&dir).expect("save named theme");
+            assert_eq!(
+                prefs.to_value()["theme"], "paper",
+                "旧主题 {id} 必须回落到纸面"
+            );
+            prefs.save(&dir).expect("save legacy theme");
             let (loaded, warning) = UiPrefs::load(&dir);
             assert!(warning.is_none());
-            assert_eq!(loaded.to_value()["theme"], id, "theme lost on restart");
+            assert_eq!(loaded.to_value()["theme"], "paper");
         }
         fs::remove_dir_all(&dir).ok();
     }
@@ -410,8 +378,10 @@ mod tests {
         for (input, expected) in [
             ("system", "system"),
             ("AUTO", "system"),
-            ("light", "soda"),
-            ("dark", "deep"),
+            ("light", "paper"),
+            ("dark", "paper"),
+            ("soda", "paper"),
+            ("violet", "paper"),
             ("future-theme", "system"),
         ] {
             assert_eq!(
@@ -454,7 +424,7 @@ mod tests {
     fn save_load_round_trip_is_atomic_and_corruption_is_fail_soft() {
         let dir = temp_dir();
         let prefs = UiPrefs {
-            theme: ThemePreference::Deep,
+            theme: ThemePreference::Paper,
             zoom: 1.25,
             close_behavior: CloseBehavior::Quit,
             reduce_motion: ReduceMotion::Off,
@@ -509,24 +479,17 @@ mod tests {
     }
 
     #[test]
-    fn theme_resolution_follows_the_system_preference() {
-        assert!(ThemePreference::System.resolves_to_dark(true));
+    fn theme_resolution_always_lands_on_paper() {
+        // 唯一主题：任何偏好、任何系统明暗都解析到纸面（浅色）。
+        assert!(!ThemePreference::System.resolves_to_dark(true));
         assert!(!ThemePreference::System.resolves_to_dark(false));
-        assert_eq!(ThemePreference::System.resolve(true), ThemePreference::Deep);
-        assert_eq!(
-            ThemePreference::System.resolve(false),
-            ThemePreference::Soda
-        );
+        assert_eq!(ThemePreference::System.resolve(true), ThemePreference::Paper);
+        assert_eq!(ThemePreference::System.resolve(false), ThemePreference::Paper);
         for theme in ThemePreference::THEMES {
-            assert_eq!(theme.resolve(false), theme);
-            assert_eq!(theme.resolve(true), theme);
-            assert_eq!(
-                theme.resolves_to_dark(false),
-                matches!(
-                    theme,
-                    ThemePreference::Deep | ThemePreference::Dusk | ThemePreference::Violet
-                )
-            );
+            assert_eq!(theme.resolve(false), ThemePreference::Paper);
+            assert_eq!(theme.resolve(true), ThemePreference::Paper);
+            assert!(!theme.resolves_to_dark(false));
+            assert!(!theme.resolves_to_dark(true));
         }
         assert_eq!(
             ThemePreference::parse("AUTO"),

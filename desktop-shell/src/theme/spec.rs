@@ -1,10 +1,11 @@
 //! Theme specification: the full visual recipe for one CetaMesh theme.
 //!
-//! Fact source: `design-demos/CetaMesh-ten-themes/public/console.html` — the selected
-//! “海盐苏打 Soda Gummy（软糖拟物 × 糖果玻璃）” design system derived from
-//! `design-demos/fusion-4-soda.html`. Every field here mirrors a CSS custom property or a
-//! `.bg-decor` / `article.card` / `.btn` / `input` recipe from that file, so the native shell
-//! can reproduce the Web look with egui shapes only — no WebView and no HTML.
+//! Fact source: UI v1 的唯一主题是「纸面工作台」（方案 01），配方见 `themes.rs` 的
+//! `PAPER`（探索稿 `design-demos/ui-ia-exploration-2026-10/p01.html` 的 token 转写）。
+//! 数据模型沿用自最早的苏打糖设计系统（`design-demos/CetaMesh-ten-themes`），Every
+//! field here mirrors a CSS custom property or a `.bg-decor` / `article.card` / `.btn` /
+//! `input` recipe from that file, so the native shell can reproduce the Web look with
+//! egui shapes only — no WebView and no HTML.
 //!
 //! Colours are kept as straight-alpha `Rgba` (0..1 floats) instead of `Color32` because theme
 //! switching interpolates every colour for 600–900 ms; premultiplied `Color32` cannot be lerped
@@ -179,7 +180,7 @@ impl Blob {
     }
 }
 
-/// A blob slot: present with a colour, or absent (themes such as Ink / Sand / Dusk hide
+/// A blob slot: present with a colour, or absent（纸面主题隐藏 2/3 的光斑）
 /// individual blobs or the whole layer). Absence is modelled as alpha 0 so a theme switch can
 /// fade blobs in and out instead of popping.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -197,9 +198,6 @@ impl BlobSlot {
         Self(self.0.lerp(other.0, t))
     }
 
-    pub fn color(&self) -> Rgba {
-        self.0.color
-    }
 }
 
 /// Top fog: `.bg-decor::after` — a large soft white radial clamped to the top edge.
@@ -227,15 +225,7 @@ impl Fog {
     }
 }
 
-impl Fog {
-    /// Hidden fog keeps its geometry but reaches alpha 0.
-    pub const fn hidden(template: Fog) -> Self {
-        Self {
-            color: template.color.with_alpha(0.0),
-            ..template
-        }
-    }
-}
+
 
 /// The full background recipe: three-stop linear gradient + up to three ambient blobs + fog.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -357,7 +347,7 @@ impl Tokens {
 pub struct ShadowProfile {
     /// Dark ambient shadow: `(dx, dy, blur)` in logical pixels.
     pub card_dark: [f32; 3],
-    /// Light key shadow. `None` for matte themes (Ink / Sand / Dusk / Ice).
+    /// Light key shadow. `None` for matte themes（纸面 = MATTE，无亮投影）.
     pub card_light: Option<[f32; 3]>,
     /// Matte themes drop the inset top highlight and inner bottom glow entirely.
     pub card_rim: bool,
@@ -493,7 +483,7 @@ impl ThemeSpec {
 /// The full recipe of one theme.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ThemeSpec {
-    /// Stable id matching `ThemePreference::as_str` (`soda`, `deep`, …).
+    /// Stable id matching `ThemePreference::as_str`（UI v1 只有 `paper`）.
     pub id: &'static str,
     pub label: &'static str,
     pub dark: bool,
@@ -539,19 +529,17 @@ mod tests {
     }
 
     #[test]
-    fn spotlight_spec_interpolation_snaps_identity_fields() {
-        let from = crate::theme::themes::by_id("soda").expect("soda");
-        let to = crate::theme::themes::by_id("ink").expect("ink");
-        let start = ThemeSpec::lerp(from, to, 0.0);
-        let end = ThemeSpec::lerp(from, to, 1.0);
-        assert_eq!(start.radius, from.radius);
-        assert_eq!(end.radius, to.radius);
-        assert_eq!(end.id, "ink");
-        assert_eq!(end.tokens.accent, to.tokens.accent);
-        assert!(!end.dark, "the target (ink) is a light theme");
-        let mid = ThemeSpec::lerp(from, to, 0.5);
-        assert!(mid.radius > to.radius.min(from.radius) - 0.01);
-        assert!(mid.radius < from.radius + 0.01);
+    fn spec_interpolation_is_identity_for_the_single_theme() {
+        // UI v1 只有一个主题：插值仅在首次应用时退化为恒等映射。
+        let paper = crate::theme::themes::by_id("paper").expect("paper");
+        let start = ThemeSpec::lerp(paper, paper, 0.0);
+        let end = ThemeSpec::lerp(paper, paper, 1.0);
+        let mid = ThemeSpec::lerp(paper, paper, 0.5);
+        assert_eq!(start.id, "paper");
+        assert_eq!(end.id, "paper");
+        assert_eq!(mid.radius, paper.radius);
+        assert_eq!(mid.tokens.accent, paper.tokens.accent);
+        assert!(!mid.dark, "paper is a light theme");
         assert!(mid.tokens.text.is_finite());
     }
 

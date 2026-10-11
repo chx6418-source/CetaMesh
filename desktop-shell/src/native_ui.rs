@@ -32,7 +32,7 @@ use serde_json::{Value, json};
 // The active shell theme, shared by the palette helpers and the global style.
 // All pages paint on the UI thread; independent contexts in tests keep separate state.
 thread_local! {
-    static ACTIVE_THEME: Cell<ThemePreference> = const { Cell::new(ThemePreference::Soda) };
+    static ACTIVE_THEME: Cell<ThemePreference> = const { Cell::new(ThemePreference::Paper) };
 }
 
 /// Synchronous Core transport. Calls are only made on this module's worker thread.
@@ -1019,127 +1019,6 @@ fn sync_theme_preference_with(
     outcome
 }
 
-fn show_theme_selector(ui: &mut egui::Ui, selected: &mut ThemePreference) -> bool {
-    let mut changed = ui
-        .radio_value(selected, ThemePreference::System, "跟随系统")
-        .changed();
-    ui.label(
-        egui::RichText::new("自动使用苏打或深海，也可以选择固定主题。")
-            .small()
-            .color(native_palette().muted),
-    );
-    let width = ((ui.available_width() - ui.spacing().item_spacing.x) / 2.0).max(0.0);
-    for pair in ThemePreference::THEMES.chunks(2) {
-        ui.horizontal(|ui| {
-            for &theme in pair {
-                let response = theme_choice(ui, theme, *selected == theme, width);
-                if response.clicked() {
-                    changed |= *selected != theme;
-                    *selected = theme;
-                }
-            }
-        });
-    }
-    changed
-}
-
-fn theme_choice(
-    ui: &mut egui::Ui,
-    theme: ThemePreference,
-    selected: bool,
-    width: f32,
-) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 62.0), egui::Sense::click());
-    response.widget_info(|| {
-        egui::WidgetInfo::selected(
-            egui::WidgetType::RadioButton,
-            ui.is_enabled(),
-            selected,
-            theme.label(),
-        )
-    });
-    if ui.is_rect_visible(rect) {
-        let current = native_palette();
-        let spec = crate::theme::themes::spec_for(theme, false);
-        let highlighted = selected || response.hovered() || response.has_focus();
-        let painter = ui.painter().clone();
-        painter.rect(
-            rect,
-            8,
-            if selected {
-                current.accent_bg
-            } else {
-                current.surface
-            },
-            egui::Stroke::new(
-                if highlighted { 1.5 } else { 1.0 },
-                if highlighted {
-                    current.accent
-                } else {
-                    current.border
-                },
-            ),
-            egui::StrokeKind::Inside,
-        );
-        // Live preview: the *real* background recipe (gradient + blobs + fog) rendered into
-        // the swatch, then a miniature glass card and the accent gradient on top. What the
-        // picker shows is literally what the switch will paint.
-        let swatch =
-            egui::Rect::from_min_size(rect.min + egui::vec2(10.0, 12.0), egui::vec2(42.0, 38.0));
-        let swatch_painter = painter.with_clip_rect(swatch.intersect(painter.clip_rect()));
-        crate::theme::painter::paint_background(&swatch_painter, ui.ctx(), swatch, spec, None);
-        let card = swatch.shrink2(egui::vec2(7.0, 9.0));
-        crate::theme::painter::paint_card(&swatch_painter, card, spec);
-        crate::theme::painter::fill_linear_gradient(
-            &swatch_painter,
-            egui::Rect::from_min_size(
-                card.min + egui::vec2(4.0, 4.0),
-                egui::vec2(18.0, 4.0),
-            ),
-            spec.tokens.accent,
-            spec.tokens.accent_2,
-            140.0,
-        );
-        painter.rect_stroke(
-            swatch,
-            5,
-            egui::Stroke::new(1.0, current.border),
-            egui::StrokeKind::Inside,
-        );
-        painter.text(
-            rect.min + egui::vec2(62.0, 21.0),
-            egui::Align2::LEFT_CENTER,
-            theme.label(),
-            egui::TextStyle::Button.resolve(ui.style()),
-            current.text,
-        );
-        painter.text(
-            rect.min + egui::vec2(62.0, 42.0),
-            egui::Align2::LEFT_CENTER,
-            if spec.dark { "深色" } else { "浅色" },
-            egui::TextStyle::Small.resolve(ui.style()),
-            current.muted,
-        );
-        let dot = egui::pos2(rect.right() - 16.0, rect.center().y);
-        painter.circle_stroke(
-            dot,
-            5.0,
-            egui::Stroke::new(
-                1.0,
-                if selected {
-                    current.accent
-                } else {
-                    current.border
-                },
-            ),
-        );
-        if selected {
-            painter.circle_filled(dot, 2.5, current.accent);
-        }
-    }
-    response.on_hover_text(theme.label())
-}
-
 /// The wordmark's open C, drawn as a small blue/cyan ribbon at every display scale.
 /// Only a visible pending indicator requests animation frames; static branding is idle.
 fn show_brand_mark(ui: &mut egui::Ui, size: f32, loading: bool) -> egui::Response {
@@ -1158,7 +1037,12 @@ fn show_brand_mark(ui: &mut egui::Ui, size: f32, loading: bool) -> egui::Respons
             let angle = (48.0 + 264.0 * fraction).to_radians();
             center + egui::vec2(angle.cos(), -angle.sin()) * radius
         };
-        let color = egui::Color32::from_rgb(10, (195.0 - 95.0 * t) as u8, 245);
+        // 纸面主题的品牌 C：鼠尾草渐变（深 5f8467 → 浅 a8bfa0），与方案 01 一致。
+        let color = egui::Color32::from_rgb(
+            (95.0 + 73.0 * t) as u8,
+            (132.0 + 59.0 * t) as u8,
+            (103.0 + 57.0 * t) as u8,
+        );
         painter.line_segment(
             [point(t), point((index + 1) as f32 / segments as f32)],
             egui::Stroke::new(stroke, color),
@@ -3084,7 +2968,16 @@ ApiCall::Family { method, params } => api.request(method, params),
         let mut prefs = self.prefs_snapshot();
         let mut changed = false;
         ui.heading("外观与窗口");
-        changed |= show_theme_selector(ui, &mut prefs.theme);
+        // UI v1：主题收敛为唯一的官方主题（方案 01 纸面工作台），不再提供选择器。
+        ui.horizontal(|ui| {
+            ui.label("主题：");
+            ui.strong("纸面 · 浅色");
+        });
+        ui.label(
+            egui::RichText::new("唯一的官方主题（方案 01 纸面工作台）；旧版设置里存的其它主题会自动回落到这里。")
+                .small()
+                .color(native_palette().muted),
+        );
         ui.horizontal_wrapped(|ui| {
             ui.label("界面缩放：");
             if ui.small_button("－").clicked() {
@@ -7722,52 +7615,28 @@ mod theme_tests {
     }
 
     #[test]
-    fn switching_between_themes_of_the_same_brightness_updates_all_controls() {
+    fn paper_theme_applies_to_all_controls() {
         use crate::ui_prefs::ThemePreference;
         let ctx = egui::Context::default();
-        settle(&ctx, ThemePreference::Soda, false);
-        for themes in [
-            vec![
-                ThemePreference::Soda,
-                ThemePreference::Forest,
-                ThemePreference::Rose,
-                ThemePreference::Ice,
-            ],
-            vec![
-                ThemePreference::Deep,
-                ThemePreference::Dusk,
-                ThemePreference::Violet,
-            ],
-        ] {
-            let mut previous = None;
-            for theme in themes {
-                settle(&ctx, theme, false);
-                let mode = if theme.resolves_to_dark(false) {
-                    egui::Theme::Dark
-                } else {
-                    egui::Theme::Light
-                };
-                let visuals = &ctx.style_of(mode).visuals;
-                let colors = (
-                    visuals.window_fill,
-                    visuals.widgets.active.bg_fill,
-                    visuals.hyperlink_color,
-                    visuals.window_corner_radius,
-                );
-                if let Some(old) = previous {
-                    assert_ne!(colors, old, "same-brightness switch ignored: {theme:?}");
-                }
-                // The canvas is painted by the theme engine on the background layer, so the
-                // panel fill itself must stay transparent and the palette must match the
-                // settling theme exactly.
-                assert_eq!(visuals.panel_fill, Color32::TRANSPARENT);
-                assert_eq!(
-                    super::native_palette().background,
-                    super::palette_for(theme).background
-                );
-                previous = Some(colors);
-            }
-        }
+        settle(&ctx, ThemePreference::Paper, false);
+        let mode = if ThemePreference::Paper.resolves_to_dark(false) {
+            egui::Theme::Dark
+        } else {
+            egui::Theme::Light
+        };
+        let visuals = &ctx.style_of(mode).visuals;
+        // The canvas is painted by the theme engine on the background layer, so the
+        // panel fill itself must stay transparent and the palette must match the
+        // settling theme exactly.
+        assert_eq!(visuals.panel_fill, Color32::TRANSPARENT);
+        assert_eq!(
+            super::native_palette().background,
+            super::palette_for(ThemePreference::Paper).background
+        );
+        // 方案 01：暖纸底 + 鼠尾草点缀（palette 层拿到的是可读化后的 accent）。
+        let palette = super::native_palette();
+        assert_eq!(palette.background, Color32::from_rgb(0xf1, 0xf0, 0xea));
+        assert_ne!(palette.accent, palette.background, "sage accent must differ from paper bg");
     }
 
     fn contrast(a: Color32, b: Color32) -> f32 {
@@ -7807,132 +7676,26 @@ mod theme_tests {
     }
 
     #[test]
-    fn system_theme_reacts_to_os_changes_without_overriding_fixed_choices() {
+    fn system_preference_always_lands_on_paper() {
         let ctx = egui::Context::default();
-        for (system, preference, expected) in [
-            (
-                egui::Theme::Light,
-                ThemePreference::System,
-                ThemePreference::Soda,
-            ),
-            (
-                egui::Theme::Dark,
-                ThemePreference::System,
-                ThemePreference::Deep,
-            ),
-            (
-                egui::Theme::Light,
-                ThemePreference::Violet,
-                ThemePreference::Violet,
-            ),
+        for (system, preference) in [
+            (egui::Theme::Light, ThemePreference::System),
+            (egui::Theme::Dark, ThemePreference::System),
+            (egui::Theme::Dark, ThemePreference::Paper),
         ] {
             settle(&ctx, preference, system == egui::Theme::Dark);
             assert_eq!(
                 super::native_palette().background,
-                super::palette_for(expected).background
+                super::palette_for(ThemePreference::Paper).background,
+                "唯一的主题是纸面（浅色），不随系统变暗"
             );
         }
-    }
-
-    #[test]
-    fn theme_selector_fits_two_columns_at_minimum_window_and_maximum_zoom() {
-        let ctx = egui::Context::default();
-        let _fonts = egui_system_fonts::add_auto(&ctx, egui_system_fonts::FontStyle::Sans);
-        super::sync_theme_preference(&ctx, ThemePreference::Soda);
-        // 900 px minimum width / 1.6 maximum zoom, less the existing panel margins.
-        let width = 900.0 / 1.6 - 76.0;
-        let mut selection = ThemePreference::System;
-        for _ in 0..3 {
-            let output = ctx.run_ui(
-                egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(
-                        egui::Pos2::ZERO,
-                        egui::vec2(width, 800.0),
-                    )),
-                    ..Default::default()
-                },
-                |ui| {
-                    let available = ui.max_rect();
-                    super::show_theme_selector(ui, &mut selection);
-                    assert!(
-                        ui.min_rect().right() <= available.right() + 0.5,
-                        "theme grid overflow"
-                    );
-                },
-            );
-            let labels: Vec<_> = output
-                .shapes
-                .iter()
-                .filter_map(|shape| {
-                    if let egui::Shape::Text(text) = &shape.shape {
-                        Some(text.galley.job.text.as_str())
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            for theme in ThemePreference::THEMES {
-                assert!(
-                    labels.contains(&theme.label()),
-                    "missing theme {}",
-                    theme.label()
-                );
-            }
-            output.drop_without_applying_deltas();
-        }
-    }
-
-    #[test]
-    fn theme_card_handles_pointer_and_keyboard_selection() {
-        let ctx = egui::Context::default();
-        super::sync_theme_preference(&ctx, ThemePreference::Soda);
-        let mut rect = egui::Rect::NOTHING;
-        let mut id = egui::Id::NULL;
-        let mut clicked = false;
-        let mut frame = |events: Vec<egui::Event>| {
-            let output = ctx.run_ui(
-                egui::RawInput {
-                    events,
-                    ..Default::default()
-                },
-                |ui| {
-                    let response = super::theme_choice(ui, ThemePreference::Violet, false, 220.0);
-                    rect = response.rect;
-                    id = response.id;
-                    clicked = response.clicked();
-                },
-            );
-            output.drop_without_applying_deltas();
-            (rect, id, clicked)
-        };
-        let (rect, id, _) = frame(vec![]);
-        let pos = rect.center();
-        let pointer = |pressed| egui::Event::PointerButton {
-            pos,
-            button: egui::PointerButton::Primary,
-            pressed,
-            modifiers: egui::Modifiers::NONE,
-        };
-        frame(vec![egui::Event::PointerMoved(pos), pointer(true)]);
-        assert!(frame(vec![pointer(false)]).2, "pointer must select theme");
-        ctx.memory_mut(|memory| memory.request_focus(id));
-        assert!(
-            frame(vec![egui::Event::Key {
-                key: egui::Key::Space,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
-                modifiers: egui::Modifiers::NONE
-            }])
-            .2,
-            "keyboard must select theme"
-        );
     }
 
     #[test]
     fn pending_brand_animation_stops_requesting_frames_when_finished() {
         let ctx = egui::Context::default();
-        super::sync_theme_preference(&ctx, ThemePreference::Deep);
+        super::sync_theme_preference(&ctx, ThemePreference::Paper);
         let mut time = 0.0;
         let mut frame = |loading| {
             time += 0.02;
@@ -7962,24 +7725,18 @@ mod theme_tests {
     }
 
     #[test]
-    fn native_theme_uses_readable_text_and_touch_targets_in_both_modes() {
-        let light = native_style(ThemePreference::Soda);
-        assert!(!light.visuals.dark_mode, "light shell theme");
-        assert_eq!(light.spacing.item_spacing, egui::vec2(12.0, 10.0));
-        assert_eq!(light.spacing.button_padding, egui::vec2(10.0, 6.0));
-        assert!(light.spacing.interact_size.y >= 30.0);
-        assert_eq!(light.text_styles[&TextStyle::Body].size, 15.0);
-        assert_eq!(light.text_styles[&TextStyle::Small].size, 13.0);
-        assert_eq!(light.text_styles[&TextStyle::Heading].size, 26.0);
-        assert!(light.visuals.override_text_color.is_some());
-        assert!(light.visuals.weak_text_color.unwrap_or(Color32::BLACK).r() < 150);
-        assert_ne!(light.visuals.panel_fill, Color32::BLACK);
-
-        let dark = native_style(ThemePreference::Deep);
-        assert!(dark.visuals.dark_mode, "dark shell theme");
-        assert!(dark.visuals.weak_text_color.unwrap_or(Color32::WHITE).r() > 100);
-        assert_ne!(dark.visuals.panel_fill, Color32::WHITE);
-        assert!(dark.visuals.override_text_color.is_some());
+    fn native_theme_keeps_readable_text_and_touch_targets() {
+        let paper = native_style(ThemePreference::Paper);
+        assert!(!paper.visuals.dark_mode, "纸面是浅色主题");
+        assert_eq!(paper.spacing.item_spacing, egui::vec2(12.0, 10.0));
+        assert_eq!(paper.spacing.button_padding, egui::vec2(10.0, 6.0));
+        assert!(paper.spacing.interact_size.y >= 30.0);
+        assert_eq!(paper.text_styles[&TextStyle::Body].size, 15.0);
+        assert_eq!(paper.text_styles[&TextStyle::Small].size, 13.0);
+        assert_eq!(paper.text_styles[&TextStyle::Heading].size, 26.0);
+        assert!(paper.visuals.override_text_color.is_some());
+        assert!(paper.visuals.weak_text_color.unwrap_or(Color32::BLACK).r() < 150);
+        assert_ne!(paper.visuals.panel_fill, Color32::BLACK);
     }
 
     #[test]

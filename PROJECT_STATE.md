@@ -101,7 +101,8 @@
   （任务 B 集成面首次进 UI，pending 不自动批准）。红线未动（Broker/Task/Workspace/Agent/Memory/Approval/ProcessHost）。
   验证与截图证据见 `FINAL_PRODUCT_UI_REPORT.md`：cargo check 0 error；cargo test 154P/16F（全部 os error 5 TEMP 沙箱）；
   npm test PASS 77（test-owner-agent-mode 已按新导航契约更新；test-desktop-shell/cargo:test 为会话沙箱限制，同一份代码第一轮曾 PASS）；
-  desktop release/debug 构建成功；debug 截图 18/18 已人工核验（output/uiv1-qa/）。**未 push**。
+  主题按 Owner 追加决定收敛为唯一「纸面」（方案 01 样式，其余九主题移除、旧偏好值自动回落，
+  设置页选择器移除、品牌标改鼠尾草）；desktop release/debug 重新构建成功；debug 截图 9/9（纸面 × 每产品页）已人工核验（output/uiv1-qa/）。**未 push**。
 
 - 产品化任务 B（Tools / MCP / Plugin Integration Restoration）**已完成并在 Owner 确认后合并**到本地 `main`
   （merge commit `04ab303`：first parent `38ff756` = 合并前 main，实现 `ed3331d`）；工作分支

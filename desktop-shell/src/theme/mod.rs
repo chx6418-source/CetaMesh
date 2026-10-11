@@ -67,11 +67,11 @@ impl Default for Runtime {
     fn default() -> Self {
         Self {
             initialized: false,
-            target: themes::spec_for(ThemePreference::Soda, false),
-            from: *themes::spec_for(ThemePreference::Soda, false),
+            target: themes::spec_for(ThemePreference::Paper, false),
+            from: *themes::spec_for(ThemePreference::Paper, false),
             transition: Timed::idle(),
             ripple: Timed::idle(),
-            spec: *themes::spec_for(ThemePreference::Soda, false),
+            spec: *themes::spec_for(ThemePreference::Paper, false),
             last_applied: None,
             page_enter: Timed::idle(),
             drift_phase: 0.0,
@@ -602,44 +602,32 @@ mod tests {
     }
 
     #[test]
-    fn theme_switch_interpolates_and_settles_to_the_target() {
+    fn single_theme_applies_once_and_reapply_is_a_no_op() {
         let ctx = egui::Context::default();
         let t0 = Instant::now();
-        run_frame(&ctx, t0, ThemePreference::Soda, ReduceMotion::Off);
-        let soda = current();
-        assert_eq!(soda.id, "soda");
-        // Switch begins at t0+100 ms; the frame it starts on still shows the old spec.
-        run_frame(&ctx, t0 + Duration::from_millis(100), ThemePreference::Ink, ReduceMotion::Off);
-        // Half-way (350 ms into a 700 ms fade) the spec must differ from both endpoints.
-        let mid = run_frame(&ctx, t0 + Duration::from_millis(450), ThemePreference::Ink, ReduceMotion::Off);
-        assert!(mid.transitioning, "mid-transition frame reports animating");
-        let interpolated = current();
-        let ink = themes::by_id("ink").expect("ink");
-        assert_ne!(interpolated.radius, soda.radius);
-        assert!(interpolated.radius > ink.radius);
-        assert!(interpolated.tokens.text.is_finite());
-        // After the transition window the spec is exactly the target.
-        run_frame(&ctx, t0 + Duration::from_millis(1_600), ThemePreference::Ink, ReduceMotion::Off);
-        let settled = current();
-        assert_eq!(settled.id, "ink");
-        assert!((settled.radius - ink.radius).abs() < 1e-4);
-        assert!(!is_transitioning(), "transition must end");
+        let first = run_frame(&ctx, t0, ThemePreference::Paper, ReduceMotion::Off);
+        assert!(first.spec_changed, "first application must install the paper spec");
+        assert_eq!(current().id, "paper");
+        // 主题收敛后没有第二个主题可切换：重放同一偏好必须是稳定的无操作。
+        let again = run_frame(&ctx, t0 + Duration::from_millis(100), ThemePreference::Paper, ReduceMotion::Off);
+        assert!(!again.spec_changed, "re-applying the only theme must not restart a transition");
+        assert!(!is_transitioning());
+        assert_eq!(current().id, "paper");
     }
 
     #[test]
-    fn reduce_motion_shortens_the_transition_and_skips_the_ripple() {
+    fn reduce_motion_keeps_the_single_theme_stable() {
         let ctx = egui::Context::default();
         let t0 = Instant::now();
-        run_frame(&ctx, t0, ThemePreference::Soda, ReduceMotion::On);
+        run_frame(&ctx, t0, ThemePreference::Paper, ReduceMotion::On);
         let outcome = run_frame(
             &ctx,
             t0 + Duration::from_millis(20),
-            ThemePreference::Dusk,
+            ThemePreference::Paper,
             ReduceMotion::On,
         );
-        assert!(outcome.transitioning);
-        run_frame(&ctx, t0 + Duration::from_millis(400), ThemePreference::Dusk, ReduceMotion::On);
-        assert_eq!(current().id, "dusk", "150 ms reduced fade must have settled");
+        assert!(!outcome.spec_changed, "same-theme re-apply never transitions");
+        assert_eq!(current().id, "paper");
         assert!(!RUNTIME.with(|runtime| runtime.borrow().ripple.is_active()));
     }
 
@@ -660,7 +648,7 @@ mod tests {
         });
         output.drop_without_applying_deltas();
         assert!(outcome.expect("frame").spec_changed);
-        assert_eq!(current().id, "deep");
+        assert_eq!(current().id, "paper", "system 跟随也落到唯一的纸面主题");
     }
 
     #[test]

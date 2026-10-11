@@ -19,7 +19,7 @@
 | 方案 01 | 分组侧栏（产品/能力/应用）+ 用户语言导航 + 关于页自然入口 | `show_sidebar`（`native_ui.rs`）、`app_shell.rs` 的 `PRIMARY/SECONDARY/nav_label` |
 | 方案 02 | Chat 双栏主结构：历史列 + 消息区 + 底部 Composer；上下文小字 | `show_chat_page` 重写（`egui::Panel` 左列 + 底部 Composer 面板） |
 | 方案 04 | 首页能力表达、卡片化状态、设置单页锚点分区 | Chat 空状态四卡、智能体/插件卡片、`show_settings_page` 分区锚点 |
-| 主题 | 继续走 Native Theme Engine（十主题插值 + 语义色） | 新页面全部经 `native_palette()/theme::tokens()` 取色，未硬编码 |
+| 主题 | **收敛为唯一的「纸面」主题**（方案 01 的暖纸底 + 鼠尾草点缀 + 哑光卡片），其余九个主题全部移除，历史偏好值自动回落 | `theme/themes.rs` 只剩 `PAPER`；`ui_prefs::ThemePreference` 收敛为 `System/Paper`；设置页主题选择器移除 |
 
 ### 1.1 导航映射（旧 → 新）
 
@@ -94,7 +94,13 @@
 - `desktop-shell/src/native_ui.rs`：侧栏分组、路由（Agents 产品页）、快捷键 1–7 新映射、
   Chat 页重写（历史列/气泡/Composer/弹层）、Work 三 tab、设置单页锚点分区 + 高级入口、
   `Area::AgentCatalog/Integrations` + `Operation::AgentList/IntegrationsCall` + 回包分发。
-- `desktop-shell/src/theme/qa.rs`：截图计划 14 → 18 张（新 IA 各产品页）。
+- `desktop-shell/src/theme/qa.rs`：截图计划收敛为 **9 张**（唯一纸面主题 × 每个产品页）。
+- **主题收敛（Owner 追加决定：只保留方案 01 纸面样式）**：
+  - `theme/themes.rs` 重写：十主题 → 唯一 `PAPER` 配方（暖纸 #f1f0ea 底 + 鼠尾草 #75937b 点缀 + 墨色 #2e3630 文字；哑光阴影、圆角 18/12、单枚极淡草绿光斑）；`spec_for` 对任何偏好（含 system_dark）都返回纸面。
+  - `ui_prefs.rs`：`ThemePreference` 只剩 `System/Paper`；旧存档里的 `soda/deep/…` 解析时一律回落 `Paper`（`parse` 兼容 + `resolve` 兜底），其它偏好项不受影响。
+  - `native_ui.rs`：主题选择器（含 `theme_choice` 卡片）整体移除，外观分区改为静态「主题：纸面 · 浅色」；品牌 "C" 字标从蓝丝带改为鼠尾草渐变；相关测试全部重写（对比度门禁、样式断言、过渡引擎无操作断言）。
+  - `theme/mod.rs` 过渡引擎保留（页面浮升/涟漪/首次应用仍用），跨主题插值测试改为"唯一主题下重放是无操作"。
+  - accent 相比探索稿加深一档（#7d9b82 → #75937b）以满足白字 3:1（AA Large）；正文辅助色 text_2/text_3 按壳内 ≥4.5:1 标准加深。
 - 测试同步：`app_shell` 导航断言、快捷键槽位、QA 计划数、`scripts/test-owner-agent-mode.mjs`
   导航契约（12 个用户语言标签 + 对话必须是第一主导航）；新增 `agent_ui`（3）/`integrations_ui`（4）单测。
 
@@ -103,8 +109,8 @@
 | 命令 | 结果 |
 | --- | --- |
 | `cargo check`（desktop-shell） | **0 error**；剩余 11 条 warning 全部为 main 既有（task_ui/workshop_ui/mesh_ui/theme/tray 的 dead_code） |
-| `cargo test` | **154 passed / 16 failed**；16 个失败全部为 `create temp dir: PermissionDenied (os code 5)` 的会话 TEMP/HKCU 环境限制（installer/migrate/ui_prefs/install_cli/desktop_paths，均为未改动模块） |
-| 改动模块定向测试 | `app_shell`(4) `agent_ui`(3) `integrations_ui`(4) `theme::qa`(3) **全绿** |
+| `cargo test` | **150 passed / 17 failed**；17 个失败全部为 `create temp dir: PermissionDenied (os code 5)` 的会话 TEMP/HKCU 环境限制（installer/migrate/ui_prefs/install_cli/desktop_paths；其中 2 个是本轮新增的纸面偏好落盘测试，同类环境限制，正常环境/CI 会通过） |
+| 改动模块定向测试 | `app_shell`(4) `agent_ui`(3) `integrations_ui`(4) `theme`(全部，含纸面对比度门禁) **全绿** |
 | `npm test` | 三轮见 §6.1；最终除环境限制套件外全 PASS |
 | `npm run desktop:build` | release **成功**（`Finished release profile [optimized] … 57.55s`，11 条既有 dead_code warning）；debug 构建成功（供 QA 截图） |
 
@@ -126,14 +132,13 @@ TEMP 限制"、"HKCU 注册表限制"）同类，不是代码回归。按仓库 
 
 ## 7. 视觉验收
 
-debug 壳 `--screenshot-dir output/uiv1-qa` 生成 **18/18 张**（1280×800；01–10 为十主题轮播的新对话首页，11–18 为 Soda 主题各产品页）。已逐张人工核验：
+debug 壳 `--screenshot-dir output/uiv1-qa` 生成 **9/9 张**（1280×800；唯一的纸面主题 × 每个产品页：01-home / 02-settings / 03-about / 04-feedback / 05-onboarding / 06-work / 07-memory / 08-agents / 09-plugins）。已逐张人工核验：
 
-- 侧栏：产品 / 能力 / 应用 三组、中文标签、激活态高亮正确（十主题各自着色正常，松林主题下的对话页气质接近图1）。
+- **纸面主题整体**：暖纸底（#f1f0ea）+ 极淡草绿光斑、纸片卡 + 柔描边、哑光投影、鼠尾草激活态（侧栏胶囊/发送按钮/品牌 "C" 字标），与方案 01 探索稿气质一致。
+- 侧栏：产品 / 能力 / 应用 三组、中文标签、纸面着色的激活态。
 - 对话首页：历史列（＋新对话 / 加载态）、空状态大标题 + 能力四卡、Composer 动作行（＋附件 / 工具 / Agent / 模式）+ 右下角当前模型。
-- 工作：任务 / 提案（Owner 审阅）/ 工作空间 三 tab，任务筛选与新建表单完整。
-- 智能体 / 插件：目录加载态与 Core 不可用横幅如实呈现（QA 环境无 worker 属预期真实状态）。
-- 设置：五分区锚点 + 外观主题选择器（十主题卡片）正常。
-- 关于：版本/更新/诊断卡正常（QA 环境读不到构建清单时显示未知，不伪造）。
+- 设置：外观分区显示静态「主题：纸面 · 浅色」+ 缩放/关闭行为/动效控件；五分区锚点正常。
+- 工作 / 智能体 / 插件 / 记忆 / 关于：目录加载态与 Core 不可用横幅如实呈现（QA 环境无 worker 属预期真实状态）。
 
 ## 8. 已知边界 / 后续
 
