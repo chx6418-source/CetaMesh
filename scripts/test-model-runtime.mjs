@@ -2,6 +2,7 @@
 // 全部经 fixture fetch（真实 Response/ReadableStream）与隔离临时凭据库，不联网、不触碰真实 Key。
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import {
   createModelProviderRegistry,
@@ -12,9 +13,10 @@ import {
 } from '../src/model/index.js';
 import { createProviderSecrets } from '../src/providers/secrets.js';
 
-const root = path.resolve(import.meta.dirname, '..');
-fs.mkdirSync(path.join(root, 'output'), { recursive: true });
-const temp = fs.mkdtempSync(path.join(root, 'output', 'model-runtime-test-'));
+const allowedTestTempRoot = path.resolve(process.env.WHALEBRIDGE_TEST_TMPDIR || os.tmpdir());
+fs.mkdirSync(allowedTestTempRoot, { recursive: true });
+const temp = fs.mkdtempSync(path.join(allowedTestTempRoot, 'model-runtime-test-'));
+assert.equal(path.dirname(temp), allowedTestTempRoot, 'model runtime fixtures stay inside the aggregate test sandbox or OS Temp');
 
 let step = 0;
 function ok(label) { step += 1; console.log(`✅ [${step}] ${label}`); }

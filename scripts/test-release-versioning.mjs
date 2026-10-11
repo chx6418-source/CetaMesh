@@ -9,6 +9,7 @@ import {
   compareReleaseVersions,
   formatArtifactName,
   loadReleaseVersion,
+  releaseArtifactDirectory,
   setProductVersion,
   validateVersionMirrors
 } from '../src/release/version.js';
@@ -59,6 +60,12 @@ check('SemVer prerelease order and build number order are independent', () => {
 check('artifact names include product version, platform build, and architecture', () => {
   assert.equal(formatArtifactName({ productVersion: '1.0.0-rc.2', buildNumber: 1053, platform: 'windows-x64' }),
     'CetaMesh-Setup-1.0.0-rc.2-build1053-x64.exe');
+});
+
+check('release artifacts resolve to channel/version/build immutable directories', () => {
+  assert.equal(releaseArtifactDirectory({ rootDir: 'D:/fixture', channel: 'rc', productVersion: '1.0.0-rc.2', buildNumber: 1053 }),
+    path.join('D:/fixture', 'artifacts', 'rc', '1.0.0-rc.2', 'build-1053'));
+  assert.throws(() => releaseArtifactDirectory({ rootDir: 'D:/fixture', channel: 'rc', productVersion: '../escape', buildNumber: 1 }));
 });
 
 check('build counter increments without changing product SemVer or channel', () => {

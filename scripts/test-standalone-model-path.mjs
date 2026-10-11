@@ -17,6 +17,7 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { createChatService } from '../src/desktop/chat-service.js';
@@ -24,7 +25,9 @@ import { createModelProviderRegistry, createModelRuntimeService, createOpenAiCom
 import { createProviderSecrets } from '../src/providers/secrets.js';
 
 const root = path.resolve(import.meta.dirname, '..');
-const temp = fs.mkdtempSync(path.join(root, 'output', 'standalone-model-'));
+const tempRoot = process.env.WHALEBRIDGE_TEST_TMPDIR || os.tmpdir();
+fs.mkdirSync(tempRoot, { recursive: true });
+const temp = fs.mkdtempSync(path.join(tempRoot, 'standalone-model-'));
 const VALID_KEY = 'sk-fixture-standalone-000000000000';
 const BAD_KEY = 'sk-wrong-key-abcdefghijklmnop';
 let step = 0;

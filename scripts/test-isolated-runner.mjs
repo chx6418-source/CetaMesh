@@ -111,6 +111,8 @@ function makeWorkspace(name, files) {
   const result = await runner.run({ workspaceId: 'ws-slow', tool: 'npm', args: ['test'], timeoutMs: 3000 });
   assert.equal(result.timedOut, true, '超时必须如实标记');
   assert.notEqual(result.exitCode, 0);
+  assert.doesNotThrow(() => fs.rmSync(dir, { recursive: true, force: false }), 'timed out process tree is stopped before runner completion');
+  assert.equal(fs.existsSync(dir), false, 'timed out workspace can be removed immediately');
   ok('超时：3000ms 到点杀进程树（win32 taskkill /T /F），timedOut=true');
 }
 

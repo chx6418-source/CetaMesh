@@ -22,6 +22,9 @@ import { spawn, spawnSync } from 'node:child_process';
 import { readRawConfigOrEmpty } from '../src/config/loader.js';
 import { APP_PATHS } from '../src/app-paths.js';
 import { isLegacyBridgeTestOptedIn } from './environment-policy.mjs';
+import { loadReleaseVersion, releaseArtifactDirectory } from '../src/release/version.js';
+import { createSuiteSandbox, finalizeSuiteSandbox } from '../src/testing/suite-sandbox.js';
+import { terminateSuiteProcessTree } from '../src/testing/suite-process.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SCRIPTS = path.join(ROOT, 'scripts');
@@ -55,6 +58,9 @@ const REGISTRY = {
   'test-runner-environment.mjs': { category: 'core' },
   'test-integration-tool-registry.mjs': { category: 'core', note: '产品化任务 B：Tools Registry 目录/开关/持久化' },
   'test-release-versioning.mjs': { category: 'release', note: 'Plugin Center: canonical release version and build numbering' },
+  'test-release-staging-protection.mjs': { category: 'release', note: 'Pre-existing release staging directory protection' },
+  'test-storage-hygiene.mjs': { category: 'release', note: 'Exact-path cleanup and release retention fixtures' },
+  'test-suite-process-tree.mjs': { category: 'security', note: 'Timeout termination waits for suite process trees' },
 
   // ── architecture：结构契约 / 源码不变量 ────────────────────────────────────
   'test-desktop-architecture.mjs': { category: 'architecture' },
@@ -148,14 +154,14 @@ const EXTRA_SUITES = [
     id: 'cargo:check',
     command: ['cargo', ['check', '--manifest-path', 'desktop-shell/Cargo.toml']],
     category: 'desktop',
-    requires: ['cargo'],
+    requires: ['cargo-opt-in'],
     timeoutMs: 900_000
   },
   {
     id: 'cargo:test',
     command: ['cargo', ['test', '--manifest-path', 'desktop-shell/Cargo.toml']],
     category: 'desktop',
-    requires: ['cargo'],
+    requires: ['cargo-opt-in'],
     timeoutMs: 900_000
   }
 ];
@@ -187,15 +193,24 @@ async function probeAvailability() {
   const consolePort = Number(cfg.consolePort) || 3100;
   const exists = (relative) => fs.existsSync(path.join(ROOT, relative));
   const gatewayConfigPresent = fs.existsSync(path.join(ROOT, 'config.json'));
+  let canonicalReleaseAvailable = false;
+  try {
+    const release = loadReleaseVersion({ rootDir: ROOT });
+    const releaseDir = releaseArtifactDirectory({ rootDir: ROOT, ...release });
+    canonicalReleaseAvailable = fs.existsSync(path.join(releaseDir, 'release-manifest.json'));
+  } catch {
+    // A missing or malformed release source means the RC suite is unavailable, not a runner crash.
+  }
   availabilityCache = {
     'shell-debug': exists(path.join('desktop-shell', 'target', 'debug', 'whalebridge-desktop.exe')),
     'core-dist': fs.existsSync(path.join(CORE_DIST_DIR, 'WhaleBridgeCore.exe')),
-    'release-dist': exists(path.join('dist', 'app', 'WhaleBridge.exe')),
+    'release-dist': canonicalReleaseAvailable,
     network: process.env.WHALEBRIDGE_TEST_NETWORK === '1',
     gateway: gatewayConfigPresent && await probeTcp(gatewayPort),
     // A live TCP listener may be the user’s real desktop bridge; this suite mutates roles/allowlists and sends a test QQ message.
     'legacy-bridge': isLegacyBridgeTestOptedIn() && await probeTcp(consolePort),
-    cargo: spawnSync('cargo', ['--version'], { timeout: 20000 }).status === 0
+    'cargo-opt-in': process.env.WHALEBRIDGE_TEST_CARGO === '1'
+      && spawnSync('cargo', ['--version'], { timeout: 20000 }).status === 0
   };
   return availabilityCache;
 }
@@ -247,21 +262,68 @@ function runSuite(suite, { verbose }) {
   return new Promise((resolve) => {
     const started = Date.now();
     const [command, commandArgs] = suite.command ?? [process.execPath, [suite.file]];
+    const sandbox = createSuiteSandbox({ suiteId: suite.id });
+    const childEnvironment = {
+      ...process.env,
+      TMPDIR: sandbox.root,
+      TEMP: sandbox.root,
+      TMP: sandbox.root,
+      WHALEBRIDGE_TEST_TMPDIR: sandbox.root
+    };
     let child;
+    let output = '';
+    let timer = null;
+    let timedOut = false;
+    let settled = false;
+    let closeResult = null;
+    let spawnError = null;
+    let terminationSettled = false;
+    let terminationError = null;
+    const finish = (code, signal, error = null, treeError = null) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      const failed = Boolean(error) || Boolean(treeError) || timedOut || code !== 0;
+      let sandboxNote = '';
+      let cleanupFailed = false;
+      if (treeError) {
+        cleanupFailed = true;
+        sandboxNote = `\n[test sandbox retained because suite process-tree termination could not be confirmed] ${sandbox.root}`;
+      } else {
+        try {
+          const result = finalizeSuiteSandbox({ sandbox, failed, keepFailed: process.env.KEEP_TEST_ARTIFACTS === '1' });
+          if (result.retained) sandboxNote = `\n[test sandbox retained] ${sandbox.root}`;
+        } catch (cleanupError) {
+          cleanupFailed = true;
+          sandboxNote = `\n[test sandbox cleanup failed] ${cleanupError?.message ?? cleanupError}`;
+        }
+      }
+      const detail = error
+        ? `${output}\n[run-all-tests] suite process error: ${error?.message ?? error}`
+        : treeError
+          ? `${output}\n[suite process-tree termination failed: ${treeError?.message ?? treeError}]`
+        : timedOut
+          ? `${output}\n[suite timeout (> ${Math.round(suite.timeoutMs / 1000)}s), terminated]`
+          : output;
+      resolve({ suite, status: failed || cleanupFailed ? 'FAIL' : 'PASS', durationMs: Date.now() - started, detail: `${detail}${sandboxNote}` });
+    };
+    const completeAfterClose = () => {
+      if (!closeResult || (timedOut && !terminationSettled)) return;
+      finish(closeResult.code, closeResult.signal, spawnError, terminationError);
+    };
     try {
-      child = spawn(command, commandArgs, { cwd: ROOT, windowsHide: true });
+      child = spawn(command, commandArgs, {
+        cwd: ROOT,
+        windowsHide: true,
+        detached: process.platform !== 'win32',
+        env: childEnvironment
+      });
     } catch (error) {
       // spawn 自身失败（如 .cmd 安全限制、命令不存在）必须成为该 suite 的 FAIL，
       // 不能让聚合器崩溃 —— 否则整个测试体系失去汇总与孤儿检测。
-      resolve({
-        suite,
-        status: 'FAIL',
-        durationMs: 0,
-        detail: `[run-all-tests] 无法启动 suite：${error?.message ?? error}`
-      });
+      finish(null, null, error);
       return;
     }
-    let output = '';
     const collect = (chunk) => {
       const text = String(chunk);
       if (verbose) process.stdout.write(text);
@@ -270,18 +332,25 @@ function runSuite(suite, { verbose }) {
     };
     child.stdout?.on('data', collect);
     child.stderr?.on('data', collect);
-    const timer = setTimeout(() => {
-      try { child.kill(); } catch { /* 已退出 */ }
-    }, suite.timeoutMs);
-    child.once('exit', (code, signal) => {
-      clearTimeout(timer);
-      resolve({
-        suite,
-        status: code === 0 ? 'PASS' : 'FAIL',
-        durationMs: Date.now() - started,
-        detail: signal === 'SIGTERM' ? `${output}\n[suite 超时（>${Math.round(suite.timeoutMs / 1000)}s），已终止]` : output
-      });
+    child.once('error', (error) => { spawnError = error; });
+    child.once('close', (code, signal) => {
+      closeResult = { code, signal };
+      completeAfterClose();
     });
+    timer = setTimeout(() => {
+      timedOut = true;
+      terminateSuiteProcessTree(child).then(() => {
+        terminationSettled = true;
+        completeAfterClose();
+      }, (error) => {
+        terminationError = error;
+        terminationSettled = true;
+        try { child.kill(); } catch { /* tree termination failed; keep the suite sandbox for safety */ }
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        completeAfterClose();
+      });
+    }, suite.timeoutMs);
   });
 }
 
@@ -335,7 +404,10 @@ async function main() {
   for (const suite of selected) {
     const missing = suite.requires.filter((requirement) => !availability[requirement]);
     if (missing.length) {
-      results.push({ suite, status: 'NOT_RUN_ENVIRONMENT', durationMs: 0, detail: `缺少环境：${missing.join(', ')}` });
+      const detail = missing.includes('cargo-opt-in')
+        ? '未设置 WHALEBRIDGE_TEST_CARGO=1；跳过可能触发大规模 Rust 重编译的 Cargo suite'
+        : `缺少环境：${missing.join(', ')}`;
+      results.push({ suite, status: 'NOT_RUN_ENVIRONMENT', durationMs: 0, detail });
       continue;
     }
     results.push(await runSuite(suite, { verbose }));

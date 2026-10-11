@@ -97,10 +97,28 @@ function minimalEnv() {
 function killTree(child, platform) {
   if (platform === 'win32') {
     // execFile 的 timeout 只杀直接子进程；npm.cmd 会派生更深的 cmd/node，须杀树。
-    try { execFile('taskkill', ['/pid', String(child.pid), '/T', '/F'], () => {}); } catch { /* 已退出 */ }
-  } else {
-    try { child.kill('SIGKILL'); } catch { /* 已退出 */ }
+    return new Promise((resolve) => {
+      if (!child.pid) {
+        resolve();
+        return;
+      }
+      try {
+        execFile('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true }, (error) => {
+          if (error) {
+            // taskkill may not start if the direct child exited during timeout handling.
+            try { child.kill('SIGKILL'); } catch { /* timed out process may already have exited */ }
+          }
+          resolve();
+        });
+      } catch (error) {
+        // taskkill may be unavailable; still terminate the direct child before returning.
+        try { child.kill('SIGKILL'); } catch { /* timed out process may already have exited */ }
+        resolve();
+      }
+    });
   }
+  try { child.kill('SIGKILL'); } catch { /* timed out process may already have exited */ }
+  return Promise.resolve();
 }
 
 export function createIsolatedTestRunner({ resolveWorkspace, now = () => Date.now(), log = () => {} } = {}) {
@@ -132,32 +150,50 @@ export function createIsolatedTestRunner({ resolveWorkspace, now = () => Date.no
     const startedAt = now();
     try {
       return await new Promise((resolve) => {
+        let timeoutReached = false;
+        let timeoutTimer = null;
+        let terminationPromise = null;
         const child = execFile(spawnFile, spawnArgs, {
           cwd: path.resolve(entry.root),
           env: minimalEnv(),
-          timeout,
+          // On Windows, use the watchdog below so taskkill can stop the tree before its parent.
+          timeout: process.platform === 'win32' ? 0 : timeout,
           maxBuffer: RUNNER_LIMITS.maxOutputBytes,
           windowsHide: true,
           killSignal: 'SIGKILL'
         }, (error, stdout, stderr) => {
+          if (timeoutTimer) clearTimeout(timeoutTimer);
           const durationMs = now() - startedAt;
-          const timedOut = Boolean(error) && (error.killed === true || error.signal === 'SIGKILL');
-          if (timedOut) killTree(child, process.platform);
-          const exitCode = error
-            ? (typeof error.code === 'number' ? error.code : timedOut ? 124 : 1)
-            : 0;
-          resolve({
-            exitCode,
-            timedOut,
-            command: `${file} ${argv.join(' ')}`,
-            cwd: path.resolve(entry.root),
-            stdout: String(stdout ?? '').slice(0, RUNNER_LIMITS.stdoutCapChars),
-            stderr: String(stderr ?? '').slice(0, RUNNER_LIMITS.stderrCapChars),
-            truncated: String(stdout ?? '').length > RUNNER_LIMITS.stdoutCapChars
-              || String(stderr ?? '').length > RUNNER_LIMITS.stderrCapChars,
-            durationMs
-          });
+          const timedOut = timeoutReached || (Boolean(error) && (error.killed === true || error.signal === 'SIGKILL'));
+          const finish = () => {
+            const exitCode = error
+              ? (typeof error.code === 'number' ? error.code : timedOut ? 124 : 1)
+              : 0;
+            resolve({
+              exitCode,
+              timedOut,
+              command: `${file} ${argv.join(' ')}`,
+              cwd: path.resolve(entry.root),
+              stdout: String(stdout ?? '').slice(0, RUNNER_LIMITS.stdoutCapChars),
+              stderr: String(stderr ?? '').slice(0, RUNNER_LIMITS.stderrCapChars),
+              truncated: String(stdout ?? '').length > RUNNER_LIMITS.stdoutCapChars
+                || String(stderr ?? '').length > RUNNER_LIMITS.stderrCapChars,
+              durationMs
+            });
+          };
+          if (timedOut) {
+            // Do not report timeout completion until the Windows process tree has exited.
+            void (terminationPromise ?? (terminationPromise = killTree(child, process.platform))).then(finish, finish);
+          } else {
+            finish();
+          }
         });
+        if (process.platform === 'win32') {
+          timeoutTimer = setTimeout(() => {
+            timeoutReached = true;
+            terminationPromise = killTree(child, process.platform);
+          }, timeout);
+        }
         // stdin 关闭：测试进程拿不到交互输入。
         try { child.stdin?.destroy(); } catch { /* 已退出 */ }
         void log;

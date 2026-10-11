@@ -17,6 +17,7 @@
 //   9. Checkpoint v2：packet 含 memoryRefs（仅引用）+ workspaceFacts 透传
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { createTaskRuntime } from '../src/task/runtime.js';
 import { defineAgentProvider, AGENT_PROVIDER_CORE_METHODS } from '../src/agent/agent-provider.js';
@@ -25,8 +26,9 @@ import { createAgentBroker } from '../src/agent/broker.js';
 import { createContinuityService } from '../src/continuity/service.js';
 
 const root = path.resolve(import.meta.dirname, '..');
-fs.mkdirSync(path.join(root, 'output'), { recursive: true });
-const temp = fs.mkdtempSync(path.join(root, 'output', 'auto-rollover-test-'));
+const tempRoot = process.env.WHALEBRIDGE_TEST_TMPDIR || os.tmpdir();
+fs.mkdirSync(tempRoot, { recursive: true });
+const temp = fs.mkdtempSync(path.join(tempRoot, 'auto-rollover-test-'));
 
 let step = 0;
 function ok(label) { step += 1; console.log(`✅ [${step}] ${label}`); }
