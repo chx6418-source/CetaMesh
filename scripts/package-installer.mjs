@@ -136,7 +136,7 @@ try {
     'DisplayLicense=',
     'FinishMessage=',
     `TargetName=${packagedExe}`,
-    'FriendlyName=WhaleBridge Setup',
+    'FriendlyName=CetaMesh 安装程序',
     `AppLaunched=WhaleBridge.exe ${setupArgs}`,
     'PostInstallCmd=<None>',
     'AdminQuietInstCmd=',
