@@ -4453,6 +4453,12 @@ impl NativeUi {
                     }
                 });
                 ui.label(format!("版本：{}", view.version));
+                if let Some(channel) = view.channel.as_deref() {
+                    ui.label(format!("发布通道：{}", channel.to_uppercase()));
+                }
+                if let Some(build_number) = view.build_number {
+                    ui.label(format!("Build Number：{}", build_number));
+                }
                 ui.label(format!("Build ID：{}", view.build_id));
                 ui.label(format!("Commit：{}", view.commit));
                 ui.label(format!("构建时间：{}", view.build_time));

@@ -13,6 +13,7 @@ const ROUTES = [
   ['modelrt.', (services, system) => [services.modelRuntime, 'execute']],
   ['router.', (services, system) => [services.routerService, 'execute']],
   ['ext.', (services, system) => [services.extensionService, 'execute']],
+  ['plugin-center.', (services, system) => [services.pluginCenterService, 'execute']],
   ['plugins.', (services, system) => [services.integrationService, 'execute']],
   ['tools.', (services, system) => [services.integrationService, 'execute']],
   ['mcp.', (services, system) => [services.integrationService, 'execute']],

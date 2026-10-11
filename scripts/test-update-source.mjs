@@ -109,8 +109,8 @@ function routedFetch(routes, calls) {
   };
 }
 
-function checkerWith(fetchImpl, currentVersion = '0.9.0') {
-  return createUpdateChecker({ currentVersion, fetchImpl });
+function checkerWith(fetchImpl, currentVersion = '0.9.0', currentBuildNumber = 0) {
+  return createUpdateChecker({ currentVersion, currentBuildNumber, fetchImpl });
 }
 
 const baseCheck = (extra = {}) => ({
@@ -121,6 +121,19 @@ const baseCheck = (extra = {}) => ({
   allowedHosts: ALLOWED_HOSTS,
   ...extra
 });
+
+// Same product SemVer may still advance by monotonic build number. Stable feeds never surface prerelease channels.
+{
+  const newerBuild = manifest({ buildNumber: 1054 });
+  const buildResult = await checkerWith(routedFetch([[GITCODE_URL, jsonResponse(newerBuild)]], []), '1.0.0', 1053)
+    .check(baseCheck());
+  equal('同 SemVer 的更高 build number 可更新', [buildResult.ok, buildResult.updateAvailable, buildResult.latestBuildNumber], [true, true, 1054]);
+
+  const rc = manifest({ channel: 'rc', version: '1.0.1-rc.1', buildNumber: 1055 });
+  const stableResult = await checkerWith(routedFetch([[GITCODE_URL, jsonResponse(rc)]], []), '1.0.0', 1054)
+    .check(baseCheck({ channel: 'stable' }));
+  equal('stable feed 不提供 RC', [stableResult.ok, stableResult.updateAvailable, stableResult.reason], [true, false, 'CHANNEL_MISMATCH']);
+}
 
 // ── 0. 源构造 ───────────────────────────────────────────────────────────────
 equal(

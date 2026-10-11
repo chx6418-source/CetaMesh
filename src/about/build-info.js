@@ -130,6 +130,8 @@ export function readReleaseManifest(file) {
     corrupt: false,
     product: text(raw.product),
     version: text(raw.version),
+    channel: text(raw.channel),
+    buildNumber: Number.isSafeInteger(Number(raw.buildNumber)) ? Number(raw.buildNumber) : null,
     buildId: text(raw.buildId),
     commit: text(raw.commit ?? raw.commitShort),
     builtAt: text(raw.builtAt),
@@ -159,6 +161,7 @@ export function createAboutInfo({
   const cargoFile = cargoTomlFile || path.join(root, 'desktop-shell', 'Cargo.toml');
   const licFile = licenseFile || path.join(root, 'LICENSE');
   const manifestFile = releaseManifestFile || path.join(root, 'release-manifest.json');
+  const versionSourceFile = path.join(root, 'release', 'version.json');
 
   // 发行配置只加载一次（进程内是常量事实）；调用方也可以直接注入已归一化的 config。
   const loaded = releaseConfig
@@ -168,9 +171,19 @@ export function createAboutInfo({
 
   function info() {
     const pkg = readJsonFileLenient(pkgFile) || {};
-    const version = text(pkg.version) || UNKNOWN;
+    let versionSource = {};
+    try { versionSource = readJsonFile(versionSourceFile, { missing: {} }) || {}; }
+    catch {
+      // About remains renderable with missing or corrupt build metadata; release validation reports the defect.
+      versionSource = {};
+    }
     const shellVersion = readShellVersion(cargoFile) || UNKNOWN;
     const build = readJsonFileLenient(buildFile) || {};
+    const version = text(versionSource.productVersion) || text(build.version) || text(pkg.version) || UNKNOWN;
+    const buildNumber = Number.isSafeInteger(Number(build.buildNumber ?? versionSource.buildNumber))
+      ? Number(build.buildNumber ?? versionSource.buildNumber)
+      : null;
+    const channel = text(build.channel) || text(versionSource.channel) || (packaged ? UNKNOWN : 'dev');
 
     let commit = text(build.commit);
     let commitSource = commit ? 'build-info' : null;
@@ -197,10 +210,15 @@ export function createAboutInfo({
       version,
       shellVersion,
       // 一致性是**计算出来的**，不是文案承诺：两个版本源必须吻合。
-      versionConsistent: version !== UNKNOWN && shellVersion !== UNKNOWN && version === shellVersion,
+      versionConsistent: version !== UNKNOWN && shellVersion !== UNKNOWN && version === shellVersion && version === text(pkg.version),
+      channel,
+      buildNumber,
       build: {
         commit,
         commitSource,
+        sourceCommit: text(build.sourceCommit) || commit,
+        channel,
+        buildNumber,
         buildTime: text(build.buildTime) || UNKNOWN,
         buildId: text(build.buildId) || UNKNOWN
       },

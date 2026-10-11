@@ -19,6 +19,7 @@ import { buildUpdateSources } from './sources.js';
 
 export function createUpdateService({
   currentVersion,
+  currentBuildNumber = 0,
   settingsStore = null,
   fetchImpl = null,
   downloader = null,
@@ -26,7 +27,7 @@ export function createUpdateService({
   now = () => Date.now(),
   log = () => {}
 } = {}) {
-  const checker = createUpdateChecker({ currentVersion, fetchImpl });
+  const checker = createUpdateChecker({ currentVersion, currentBuildNumber, fetchImpl });
   const artifactDownloader = downloader || createArtifactDownloader({ fetchImpl });
 
   function effectiveConfig() {
@@ -109,6 +110,7 @@ export function createUpdateService({
         fallbackManifestUrl: p.fallbackManifestUrl === undefined ? config.fallbackManifestUrl : p.fallbackManifestUrl,
         pinnedPublicKey: p.pinnedPublicKey === undefined ? config.pinnedPublicKey : p.pinnedPublicKey,
         channel: p.channel === undefined ? config.channel : p.channel,
+        currentBuild: p.currentBuildNumber === undefined ? currentBuildNumber : p.currentBuildNumber,
         allowedHosts: config.allowedHosts
       });
       recordCheck(result, config);

@@ -78,6 +78,7 @@ export const FIELDS = Object.freeze({
   }),
   extensions: Object.freeze({
     allowLocalImport: bool(true, { description: '允许本地导入扩展' }),
+    developerMode: bool(false, { description: '允许加载未经目录验证的本地插件；本地插件仍须通过 Extension Runtime 审查并默认禁用' }),
     requireReviewApproval: bool(true, {
       locked: true,
       description: '高风险权限必须显式批准（安全姿态，不可关闭）'
@@ -93,7 +94,7 @@ export const FIELDS = Object.freeze({
     allowedUpdateHosts: text('github.com,objects.githubusercontent.com,gitcode.com,raw.gitcode.com', { description: '允许的更新下载主机（逗号分隔）' })
   }),
   updates: Object.freeze({
-    channel: text('stable', { choices: ['stable', 'beta'], description: '更新通道' }),
+    channel: text('stable', { choices: ['stable', 'rc', 'beta'], description: '更新通道' }),
     autoCheck: bool(false, { description: '启动时自动检查更新（默认关闭）' }),
     manifestUrl: text(DEFAULT_GITCODE_MANIFEST_URL, { description: '主更新源清单 HTTPS 地址（默认：GitCode 中国区优先源）' }),
     fallbackManifestUrl: text(DEFAULT_GITHUB_FALLBACK_MANIFEST_URL, { description: '备用更新源清单 HTTPS 地址（默认：GitHub；仅主源失败时访问）' }),

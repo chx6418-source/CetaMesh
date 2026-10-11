@@ -15,6 +15,7 @@
 //     **绝不**把 404 / JSON 损坏 / SHA 不匹配静默当作「无更新」。
 
 import { compareVersions, hostAllowedForDownload, selectArtifact, validateManifest } from './manifest.js';
+import { compareReleaseVersions } from '../release/version.js';
 import { DEFAULT_SOURCE_TIMEOUT_MS, buildUpdateSources } from './sources.js';
 import { verifyManifestSignature } from './verify.js';
 
@@ -31,12 +32,17 @@ function fail(code, message, extra = {}) {
 
 export function createUpdateChecker({
   currentVersion,
+  currentBuildNumber = 0,
   fetchImpl = null,
   timeoutMs = DEFAULT_TIMEOUT_MS
 } = {}) {
   if (!currentVersion || typeof currentVersion !== 'string') {
     throw new Error('createUpdateChecker 需要 currentVersion（单一事实源：package.json）');
   }
+  if (!Number.isSafeInteger(Number(currentBuildNumber)) || Number(currentBuildNumber) < 0) {
+    throw new Error('createUpdateChecker requires a non-negative currentBuildNumber');
+  }
+  currentBuildNumber = Number(currentBuildNumber);
   const doFetch = fetchImpl || (typeof globalThis.fetch === 'function' ? globalThis.fetch : null);
 
   /** 单个源：取回并解析 JSON。不判断内容语义；失败返回结构化 code（不抛出）。 */
@@ -99,6 +105,7 @@ export function createUpdateChecker({
     allowedHosts = [],
     timeout = timeoutMs,
     current = currentVersion,
+    currentBuild = currentBuildNumber,
     platform = DEFAULT_PLATFORM
   } = {}) {
     const list = buildUpdateSources({ manifestUrl, fallbackManifestUrl, sources });
@@ -146,7 +153,10 @@ export function createUpdateChecker({
         });
       }
 
-      const comparison = compareVersions(manifest.version, current);
+      const comparison = compareReleaseVersions(
+        { productVersion: manifest.version, buildNumber: manifest.buildNumber },
+        { productVersion: current, buildNumber: currentBuild }
+      );
       if (comparison <= 0) {
         // 即使无更新也带上公告字段：About 页要显示「最近一次更新公告」，
         // 而这份清单此刻已经验签通过，是可信的 —— 不需要为了展示公告再请求一次网络。
@@ -156,6 +166,8 @@ export function createUpdateChecker({
           source: source.id,
           current,
           latest: manifest.version,
+          currentBuildNumber: currentBuild,
+          latestBuildNumber: manifest.buildNumber,
           title: manifest.title,
           publishedAt: manifest.publishedAt,
           notes: manifest.notes
@@ -185,6 +197,8 @@ export function createUpdateChecker({
         source: source.id,
         current,
         latest: manifest.version,
+        currentBuildNumber: currentBuild,
+        latestBuildNumber: manifest.buildNumber,
         channel: manifest.channel,
         title: manifest.title,
         publishedAt: manifest.publishedAt,

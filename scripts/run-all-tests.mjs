@@ -54,6 +54,7 @@ const REGISTRY = {
   'test-qq-runtime.mjs': { category: 'core' },
   'test-runner-environment.mjs': { category: 'core' },
   'test-integration-tool-registry.mjs': { category: 'core', note: '产品化任务 B：Tools Registry 目录/开关/持久化' },
+  'test-release-versioning.mjs': { category: 'release', note: 'Plugin Center: canonical release version and build numbering' },
 
   // ── architecture：结构契约 / 源码不变量 ────────────────────────────────────
   'test-desktop-architecture.mjs': { category: 'architecture' },
@@ -95,6 +96,8 @@ const REGISTRY = {
   'test-workspace-runtime.mjs': { category: 'runtime' },
   'test-workspace-reconciliation.mjs': { category: 'runtime' },
   'test-extension-runtime.mjs': { category: 'runtime' },
+  'test-plugin-center.mjs': { category: 'runtime', note: 'Catalog, package validation, offline cache, and Extension Runtime delegation' },
+  'test-plugin-sdk.mjs': { category: 'runtime', note: 'Plugin authoring template, validator, and Hello Tool sample' },
   'test-mesh-runtime.mjs': { category: 'runtime' },
   'test-mesh-pairing-interop.mjs': { category: 'runtime', note: '统一配对 v1.1：golden fixtures + 真实局域网 TLS/HTTP 互操作（Node fixture 模拟 Mobile）' },
   'test-card.mjs': { category: 'runtime' },
