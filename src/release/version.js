@@ -157,6 +157,19 @@ export function formatArtifactName({ productVersion, buildNumber, platform }) {
   throw releaseError('PLATFORM_UNSUPPORTED', `artifact platform is not supported: ${value}`);
 }
 
+export function releaseArtifactDirectory({ rootDir = process.cwd(), channel, productVersion, buildNumber } = {}) {
+  const requestedChannel = String(channel ?? '').trim();
+  if (!['dev', 'rc', 'stable', 'beta'].includes(requestedChannel)) {
+    throw releaseError('CHANNEL_INVALID', 'artifact channel is not supported');
+  }
+  const sourceChannel = channelForVersion(productVersion);
+  const release = validateReleaseVersion({ channel: sourceChannel, productVersion, buildNumber });
+  if (requestedChannel !== 'dev' && requestedChannel !== sourceChannel) {
+    throw releaseError('CHANNEL_VERSION_MISMATCH', `artifact channel ${requestedChannel} does not match ${productVersion}`);
+  }
+  return path.join(rootDir, 'artifacts', requestedChannel, release.productVersion, `build-${release.buildNumber}`);
+}
+
 function versionPath({ rootDir = process.cwd(), file = null } = {}) {
   return file || path.join(rootDir, RELEASE_VERSION_FILE);
 }

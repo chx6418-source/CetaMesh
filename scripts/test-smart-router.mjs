@@ -1,13 +1,15 @@
 // 会话 1 验收：Smart Router v1（src/router/）——确定性分类 + Cost Policy。
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { classifyTask } from '../src/router/smart-router.js';
 import { createRouterService } from '../src/router/service.js';
 
 const root = path.resolve(import.meta.dirname, '..');
-fs.mkdirSync(path.join(root, 'output'), { recursive: true });
-const temp = fs.mkdtempSync(path.join(root, 'output', 'smart-router-test-'));
+const tempRoot = process.env.WHALEBRIDGE_TEST_TMPDIR || os.tmpdir();
+fs.mkdirSync(tempRoot, { recursive: true });
+const temp = fs.mkdtempSync(path.join(tempRoot, 'smart-router-test-'));
 
 let step = 0;
 function ok(label) { step += 1; console.log(`✅ [${step}] ${label}`); }

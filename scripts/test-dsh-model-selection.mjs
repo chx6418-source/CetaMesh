@@ -7,6 +7,7 @@
 // 其他错误（模型不存在、传输失败）不得被吞掉或错误重试。
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import {
   isNoAdapterError,
@@ -17,8 +18,9 @@ import {
 import { createChatService } from '../src/desktop/chat-service.js';
 
 const root = path.resolve(import.meta.dirname, '..');
-fs.mkdirSync(path.join(root, 'output'), { recursive: true });
-const temp = fs.mkdtempSync(path.join(root, 'output', 'model-selection-test-'));
+const tempRoot = process.env.WHALEBRIDGE_TEST_TMPDIR || os.tmpdir();
+fs.mkdirSync(tempRoot, { recursive: true });
+const temp = fs.mkdtempSync(path.join(tempRoot, 'model-selection-test-'));
 const stateDir = path.join(temp, 'state');
 fs.mkdirSync(stateDir, { recursive: true });
 

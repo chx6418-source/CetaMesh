@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// 发布候选验收：用**组装好的无网页发行包**（dist/app）跑安装与运行。
+// 发布候选验收：用规范 artifacts/channel/version/build-number 发行包跑安装与运行。
 //
 // 与前面阶段测试的区别（这些正是"发布候选"才暴露的问题）：
 //   - 用的是 release 桌面壳 + Node SEA 的 WhaleBridgeCore.exe（不是 node + 源码）；
@@ -18,11 +18,12 @@ import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { assertNoWebUiBinaryMarkers, assertNoWebUiHtmlArtifacts } from './no-web-release-policy.mjs';
 import { resolveDataPipeName, dataCall } from '../src/control/data-ipc.js';
+import { loadReleaseVersion, releaseArtifactDirectory } from '../src/release/version.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const RC_DIR = process.env.WHALEBRIDGE_RC_DIR
   ? path.resolve(process.env.WHALEBRIDGE_RC_DIR)
-  : path.join(ROOT, 'dist', 'app');
+  : releaseArtifactDirectory({ rootDir: ROOT, ...loadReleaseVersion({ rootDir: ROOT }) });
 const CONSOLE_TOKEN = 'rc-test-console-token-0123456789';
 
 function step(message) {

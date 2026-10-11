@@ -2,12 +2,14 @@
 // fixture DSH（可控注入 follow 事件）+ 隔离临时 stateDir，不触碰真实 DSH / 用户数据。
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { createChatService } from '../src/desktop/chat-service.js';
 
 const root = path.resolve(import.meta.dirname, '..');
-fs.mkdirSync(path.join(root, 'output'), { recursive: true });
-const temp = fs.mkdtempSync(path.join(root, 'output', 'chat-product-test-'));
+const tempRoot = process.env.WHALEBRIDGE_TEST_TMPDIR || os.tmpdir();
+fs.mkdirSync(tempRoot, { recursive: true });
+const temp = fs.mkdtempSync(path.join(tempRoot, 'chat-product-test-'));
 const stateDir = path.join(temp, 'state');
 fs.mkdirSync(stateDir, { recursive: true });
 

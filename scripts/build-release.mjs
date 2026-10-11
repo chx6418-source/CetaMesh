@@ -22,7 +22,9 @@ import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
-import { bumpBuildNumber, formatArtifactName, loadReleaseVersion, validateVersionMirrors } from '../src/release/version.js';
+import { writeJsonAtomic } from '../src/storage/json-file.js';
+import { bumpBuildNumber, formatArtifactName, loadReleaseVersion, releaseArtifactDirectory, validateVersionMirrors } from '../src/release/version.js';
+import { assertSafeStagingDirectory, cleanupStagingDirectory, publishStagedArtifact } from '../src/release/artifacts.js';
 import {
   assertNoWebUiBinaryMarkers,
   assertNoWebUiHtmlArtifacts,
@@ -53,8 +55,7 @@ const options = parseArgs(process.argv.slice(2));
 
 const CORE_DIR = options.coreDir ?? path.join(ROOT, 'dist', 'core');
 const SHELL_EXE = options.shellExe ?? path.join(ROOT, 'desktop-shell', 'target', 'release', 'whalebridge-desktop.exe');
-const OUT_DIR = options.outDir ?? path.join(ROOT, 'dist', 'app');
-const BUILD_DIR = options.buildDir ?? path.join(path.dirname(OUT_DIR), `.whalebridge-app-build-${process.pid}`);
+const STAGING_ROOT = path.join(ROOT, 'artifacts', '.staging');
 
 const versionCheck = validateVersionMirrors({ rootDir: ROOT });
 if (!versionCheck.ok) fail(`release/version.json does not match package/Cargo versions: ${versionCheck.issues.map(issue => issue.code).join(', ')}`);
@@ -66,6 +67,20 @@ const sourceCommitShort = gitOutput(['rev-parse', '--short', 'HEAD']) || 'unknow
 const buildNumber = releaseVersion.buildNumber + 1;
 const buildChannel = options.dev ? 'dev' : releaseVersion.channel;
 const setupFilename = formatArtifactName({ productVersion: releaseVersion.productVersion, buildNumber, platform: 'windows-x64' });
+const OUT_DIR = options.outDir ?? releaseArtifactDirectory({ rootDir: ROOT, channel: buildChannel, productVersion: releaseVersion.productVersion, buildNumber });
+const MANIFEST_INDEX = path.join(ROOT, 'artifacts', 'manifests', buildChannel, releaseVersion.productVersion, `build-${buildNumber}.json`);
+const BUILD_DIR = options.buildDir ?? path.join(STAGING_ROOT, `${process.pid}-${crypto.randomUUID()}`);
+let buildPublished = false;
+let buildDirectoryOwned = false;
+const expectedOutDir = releaseArtifactDirectory({ rootDir: ROOT, channel: buildChannel, productVersion: releaseVersion.productVersion, buildNumber });
+if (path.resolve(OUT_DIR) !== path.resolve(expectedOutDir)) fail('--out-dir must resolve to the canonical channel/version/build directory');
+if (path.dirname(path.resolve(BUILD_DIR)) !== path.resolve(STAGING_ROOT)) fail('--build-dir must be a direct child of artifacts/.staging');
+assertSafeStagingDirectory({ rootDir: ROOT, stagingDirectory: BUILD_DIR });
+process.once('exit', () => {
+  if (buildDirectoryOwned && !buildPublished) {
+    try { cleanupStagingDirectory({ rootDir: ROOT, stagingDirectory: BUILD_DIR }); } catch { /* exit-time cleanup is best effort; never mask the build result */ }
+  }
+});
 
 const FORBIDDEN = [
   { test: (rel) => rel.toLowerCase() === 'config.json', reason: '真实用户配置' },
@@ -157,7 +172,12 @@ if (fs.existsSync(debugShell) && shellSize >= fs.statSync(debugShell).size) {
 
 log(`鲸桥发布候选组装（${PKG.version}）`);
 if (fs.existsSync(BUILD_DIR)) fail(`临时发布目录已存在，拒绝覆盖：${BUILD_DIR}`);
-fs.mkdirSync(BUILD_DIR, { recursive: true });
+if (fs.existsSync(OUT_DIR)) fail(`规范版本产物已存在，拒绝覆盖：${OUT_DIR}`);
+if (fs.existsSync(MANIFEST_INDEX)) fail(`发布清单索引已存在，拒绝覆盖：${MANIFEST_INDEX}`);
+assertSafeStagingDirectory({ rootDir: ROOT, stagingDirectory: BUILD_DIR });
+fs.mkdirSync(path.dirname(BUILD_DIR), { recursive: true });
+fs.mkdirSync(BUILD_DIR, { recursive: false });
+buildDirectoryOwned = true;
 
 const payloadDir = path.join(BUILD_DIR, 'payload');
 log('[1/5] 复制 Core payload 与桌面壳');
@@ -189,11 +209,7 @@ const buildInfo = {
   platform: `${process.platform}-${process.arch}`
 };
 for (const directory of [BUILD_DIR, payloadDir]) {
-  fs.writeFileSync(
-    path.join(directory, 'build-info.json'),
-    `${JSON.stringify(buildInfo, null, 2)}\n`,
-    'utf8'
-  );
+  writeJsonAtomic(path.join(directory, 'build-info.json'), buildInfo, { mode: 0o644 });
 }
 log(`  build-info.json：${buildInfo.buildId}（dirty=${initialDirty}）`);
 
@@ -307,7 +323,7 @@ const sbom = {
     licenses: [{ license: { id: component.license } }]
   }))
 };
-fs.writeFileSync(path.join(BUILD_DIR, 'sbom.json'), `${JSON.stringify(sbom, null, 2)}\n`, 'utf8');
+writeJsonAtomic(path.join(BUILD_DIR, 'sbom.json'), sbom, { mode: 0o644 });
 
 log('[3/5] 生成一键安装器');
 const packager = spawnSync(process.execPath, [
@@ -435,6 +451,14 @@ const manifest = {
   node: process.version,
   platform: `${process.platform}-${process.arch}`,
   entry: setupFilename,
+  remoteBackedUp: false,
+  artifacts: artifacts
+    .filter((relative) => /\.(exe|msi|zip|apk|aab)$/i.test(relative))
+    .map((relative) => ({
+      path: relative,
+      bytes: fs.statSync(path.join(BUILD_DIR, relative)).size,
+      sha256: sha256(path.join(BUILD_DIR, relative))
+    })),
   files: Object.fromEntries(artifacts.map((relative) => [relative, sha256(path.join(BUILD_DIR, relative))])),
   sizes: {
     totalBytes: directorySize(BUILD_DIR),
@@ -460,7 +484,7 @@ const manifest = {
 const manifestPath = path.join(BUILD_DIR, 'release-manifest.json');
 const sumsPath = path.join(BUILD_DIR, 'SHA256SUMS.txt');
 function writeManifestAndSums() {
-  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+  writeJsonAtomic(manifestPath, manifest, { mode: 0o644 });
   // SHA256SUMS includes release-manifest.json, and excludes only itself.
   const finalArtifacts = listFiles(BUILD_DIR).filter((relative) => relative !== 'SHA256SUMS.txt');
   fs.writeFileSync(
@@ -487,27 +511,19 @@ if (manifest.sizes.totalBytes !== directorySize(BUILD_DIR)) {
 const nextCounter = bumpBuildNumber({ rootDir: ROOT });
 if (nextCounter.buildNumber !== buildNumber) fail('release build counter changed during packaging; refusing to publish');
 
-// Publish only after the new candidate is complete, leaving any previous dist/app untouched
-// unless the replacement is ready. Keep the old RC as a dated backup for easy rollback.
-let previousDir = null;
-if (fs.existsSync(OUT_DIR)) {
-  previousDir = path.join(ROOT, 'dist', `app-previous-${new Date().toISOString().replace(/[:.]/g, '-')}`);
-  fs.renameSync(OUT_DIR, previousDir);
-}
+// Publish one canonical immutable build after the staged candidate is complete.
 try {
-  fs.renameSync(BUILD_DIR, OUT_DIR);
+  publishStagedArtifact({ rootDir: ROOT, stagingDirectory: BUILD_DIR, finalDirectory: OUT_DIR });
 } catch (error) {
-  if (previousDir && fs.existsSync(previousDir) && !fs.existsSync(OUT_DIR)) {
-    fs.renameSync(previousDir, OUT_DIR);
-  }
-  throw error;
+  fail(error.message);
 }
-if (previousDir) log(`  旧候选已保存在 ${path.relative(ROOT, previousDir)}`);
+buildPublished = true;
+writeJsonAtomic(MANIFEST_INDEX, manifest, { mode: 0o644 });
 
 // ------------------------------------------------------------- 汇总
 
 log('');
-log(`完成：${OUT_DIR}（${mb(directorySize(OUT_DIR))}）`);
+log(`完成：${path.relative(ROOT, OUT_DIR)}（${mb(directorySize(OUT_DIR))}）`);
 log(`  组件：${components.length} 个（Node.js + ${bundledPackages.length} 个 npm 依赖）`);
 log('  校验：SHA256SUMS.txt / release-manifest.json / sbom.json');
 log(`  审计：禁止项、构建机路径、凭据泄漏均通过`);
