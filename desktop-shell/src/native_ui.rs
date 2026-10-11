@@ -3021,7 +3021,7 @@ ApiCall::Family { method, params } => api.request(method, params),
                 crate::theme::painter::paint_button(
                     ui.painter(),
                     rect,
-                    9.0,
+                    15.0,
                     &spec,
                     crate::theme::painter::ButtonKind::Primary,
                     hover_t,
@@ -3029,7 +3029,7 @@ ApiCall::Family { method, params } => api.request(method, params),
                     true,
                 );
             } else if hover_t > 0.01 || press_t > 0.01 {
-                let corner = egui::CornerRadius::same(9);
+                let corner = egui::CornerRadius::same(15);
                 let fill = if press_t > 0.5 {
                     tokens.accent_soft.over(tokens.bg)
                 } else {
@@ -3110,44 +3110,6 @@ ApiCall::Family { method, params } => api.request(method, params),
         for page in [AppPage::Agents, AppPage::Plugins] {
             self.page_button(ui, page);
             ui.add_space(4.0);
-        }
-        // Core 状态卡（图5：横幅从页头挪进侧栏，不再每页占一条）。
-        let status = self.supervisor.status();
-        let core_offline = self.core_online == Some(false);
-        if status.needs_attention() || core_offline {
-            ui.add_space(12.0);
-            egui::Frame::new()
-                .fill(palette.error_bg)
-                .stroke(egui::Stroke::new(1.0, palette.error))
-                .corner_radius(egui::CornerRadius::same(8))
-                .inner_margin(egui::Margin::symmetric(8, 6))
-                .show(ui, |ui| {
-                    ui.set_min_width(ui.available_width());
-                    ui.label(
-                        egui::RichText::new("Core 已停止")
-                            .small()
-                            .strong()
-                            .color(palette.error),
-                    );
-                    ui.horizontal_wrapped(|ui| {
-                        if ui.small_button("重启").clicked() {
-                            self.supervisor.request_restart();
-                        }
-                        if ui.small_button("检查").clicked() {
-                            self.issue(Area::Overview, Operation::OverviewPing, ApiCall::Ping);
-                        }
-                        if ui.small_button("日志").clicked() {
-                            self.open_logs();
-                        }
-                    });
-                });
-        } else if self.core_online == Some(true) {
-            ui.add_space(12.0);
-            ui.label(
-                egui::RichText::new("● Core 运行中")
-                    .small()
-                    .color(palette.success),
-            );
         }
         ui.add_space(12.0);
         ui.separator();
@@ -3342,7 +3304,6 @@ ApiCall::Family { method, params } => api.request(method, params),
                 }
             });
             ui.add_space(4.0);
-            ui.separator();
         }
 
         // 空状态：让用户第一眼理解「可以直接问，也可以用工具 / 建任务 / 交给 Agent」。
@@ -3540,7 +3501,7 @@ ApiCall::Family { method, params } => api.request(method, params),
                         self.toggle_chat_popover(ChatPopover::Model);
                     }
                     if streaming {
-                        if ui.add_enabled(!self.pending.contains(&Area::ChatStatus), egui::Button::new("■ 停止")).clicked() {
+                        if self.round_icon_button(ui, "■", crate::theme::painter::ButtonKind::Danger, !self.pending.contains(&Area::ChatStatus)) {
                             if let Some(id) = self.chat.active_id.clone() {
                                 self.issue_control(Area::Chat, Operation::ChatStop, "chat.stop", json!({"id": id}));
                             }
@@ -3548,14 +3509,14 @@ ApiCall::Family { method, params } => api.request(method, params),
                     } else {
                         let can_send = self.chat.active_id.is_some()
                             && (!self.chat.input.trim().is_empty() || !self.chat.attachments.is_empty());
-                        let send_button = crate::theme::gummy_button(
-                            ui,
-                            "发送",
-                            crate::theme::painter::ButtonKind::Primary,
-                            can_send,
-                        );
                         let busy = self.pending.contains(&Area::Chat);
-                        if (send_button.clicked() || (enter_send && can_send)) && !busy {
+                        let send_clicked = self.round_icon_button(
+                            ui,
+                            "↑",
+                            crate::theme::painter::ButtonKind::Primary,
+                            can_send && !busy,
+                        );
+                        if (send_clicked || (enter_send && can_send)) && !busy {
                             let text = self.chat.input.trim().to_owned();
                             let attachments = self.chat.attachments.clone();
                             if let Some(id) = self.chat.active_id.clone() {
@@ -3578,6 +3539,44 @@ ApiCall::Family { method, params } => api.request(method, params),
                 });
             });
         });
+    }
+
+    /// Composer 的圆形图标按钮（探索稿图6：鼠尾草圆底 + 白色符号）。
+    fn round_icon_button(
+        &mut self,
+        ui: &mut egui::Ui,
+        glyph: &str,
+        kind: crate::theme::painter::ButtonKind,
+        enabled: bool,
+    ) -> bool {
+        let spec = crate::theme::current();
+        let (rect, response) = ui.allocate_exact_size(egui::vec2(30.0, 30.0), egui::Sense::click());
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, glyph));
+        if ui.is_rect_visible(rect) {
+            crate::theme::painter::paint_button(
+                ui.painter(),
+                rect,
+                15.0,
+                &spec,
+                kind,
+                if response.hovered() { 1.0 } else { 0.0 },
+                if response.is_pointer_button_down_on() { 1.0 } else { 0.0 },
+                enabled,
+            );
+            let tokens = spec.tokens;
+            let color = if enabled { tokens.on_accent.to_color32() } else { tokens.text_3.to_color32() };
+            let galley = ui.painter().layout_no_wrap(
+                glyph.to_owned(),
+                egui::TextStyle::Body.resolve(ui.style()),
+                color,
+            );
+            ui.painter().galley(
+                rect.center() - egui::vec2(galley.size().x / 2.0, galley.size().y / 2.0),
+                galley,
+                color,
+            );
+        }
+        response.clicked()
     }
 
     fn toggle_chat_popover(&mut self, popover: ChatPopover) {
@@ -4008,7 +4007,7 @@ impl ChatChipButton for egui::Ui {
         let palette = crate::native_ui::native_palette();
         let tokens = crate::theme::tokens();
         egui::Frame::new()
-            .fill(tokens.chip.to_color32())
+            .fill(tokens.panel_solid.to_color32())
             .stroke(egui::Stroke::new(1.0, palette.border))
             .corner_radius(egui::CornerRadius::same(13))
             .inner_margin(egui::Margin::symmetric(11, 4))
@@ -4190,6 +4189,46 @@ impl NativeUi {
     fn show_settings_advanced(&mut self, ui: &mut egui::Ui) {
         let palette = native_palette();
         ui.heading("高级");
+        // Core 状态与手动操作住在工程区（Owner：不要出现在主页面）。
+        {
+            let status = self.supervisor.status();
+            let core_offline = self.core_online == Some(false);
+            if status.needs_attention() || core_offline {
+                egui::Frame::new()
+                    .fill(palette.error_bg)
+                    .stroke(egui::Stroke::new(1.0, palette.error))
+                    .corner_radius(egui::CornerRadius::same(8))
+                    .inner_margin(egui::Margin::symmetric(8, 6))
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        ui.label(
+                            egui::RichText::new("Core 已停止")
+                                .small()
+                                .strong()
+                                .color(palette.error),
+                        );
+                        ui.horizontal_wrapped(|ui| {
+                            if crate::theme::gummy_button(
+                                ui,
+                                "重启",
+                                crate::theme::painter::ButtonKind::Armed,
+                                true,
+                            )
+                            .clicked()
+                            {
+                                self.supervisor.request_restart();
+                            }
+                            if ui.small_button("检查").clicked() {
+                                self.issue(Area::Overview, Operation::OverviewPing, ApiCall::Ping);
+                            }
+                            if ui.small_button("日志").clicked() {
+                                self.open_logs();
+                            }
+                        });
+                    });
+                ui.add_space(8.0);
+            }
+        }
         ui.label(egui::RichText::new("这些是工程界面：日常使用不需要打开。").small().color(palette.muted));
         ui.add_space(4.0);
         ui.horizontal_wrapped(|ui| {
@@ -6383,13 +6422,12 @@ impl NativeUi {
     }
 
     fn show_loading_state(&self, ui: &mut egui::Ui, message: &str) {
-        let palette = native_palette();
-        crate::theme::card_compact(ui, |ui| {
-                ui.horizontal(|ui| {
-                    show_brand_mark(ui, 30.0, true);
-                    ui.label(egui::RichText::new(message).color(palette.muted));
-                });
-            });
+        // Owner 反馈：去掉带品牌圆圈的加载胶囊，只留一行安静的加载文字。
+        ui.label(
+            egui::RichText::new(message.to_owned())
+                .small()
+                .color(native_palette().muted),
+        );
     }
 
     fn show_service_feedback(&self, ui: &mut egui::Ui) {

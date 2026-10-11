@@ -454,7 +454,7 @@ pub fn paint_button(
         ButtonKind::Danger => (tokens.err.gamma_scale(brightness), tokens.err_2.gamma_scale(brightness)),
         ButtonKind::Armed => (tokens.warn.gamma_scale(brightness), tokens.warn_2.gamma_scale(brightness)),
     };
-    fill_linear_gradient(painter, rect, top, bottom, 145.0);
+    fill_rounded_gradient(painter, rect, radius, top, bottom, 145.0);
 
     // Border for ghost buttons (they are translucent by design).
     if kind == ButtonKind::Ghost {
@@ -551,7 +551,59 @@ pub fn fill_linear_gradient(
     painter.add(Shape::mesh(mesh));
 }
 
-/// A theme-transition-safe blend of two token colours at progress `t`.
+/// 圆角矩形内的线性渐变填充：沿圆角矩形轮廓采样 64 点，自中心扇形三角化，
+/// 顶点色按渐变轴投影计算。egui 的矩形 mesh 不会裁圆角——这正是此前
+/// "选择框直角、预选框圆角"（Owner 反馈）的根源：rect_filled 走圆角，
+/// fill_linear_gradient 不走。
+pub fn fill_rounded_gradient(
+    painter: &egui::Painter,
+    rect: Rect,
+    radius: f32,
+    from: Rgba,
+    to: Rgba,
+    angle_deg: f32,
+) {
+    let (dir, span, center) = gradient_span(rect, angle_deg);
+    let gradient_at = |point: Pos2| -> Color32 {
+        let t = ((point - center).dot(dir) / span + 0.5).clamp(0.0, 1.0);
+        from.lerp(to, t).to_color32()
+    };
+    let r = radius.clamp(0.0, rect.width().min(rect.height()) / 2.0);
+    let mut points: Vec<Pos2> = Vec::with_capacity(64);
+    // 四条直边 + 四段 90° 圆弧，逐角采样。
+    let corners = [
+        (rect.right() - r, rect.top() + r, 0.0_f32),
+        (rect.right() - r, rect.bottom() - r, 1.0),
+        (rect.left() + r, rect.bottom() - r, 2.0),
+        (rect.left() + r, rect.top() + r, 3.0),
+    ];
+    for (cx, cy, quadrant) in corners {
+        let base_angle = match quadrant {
+            0.0 => -90.0_f32,
+            1.0 => 0.0,
+            2.0 => 90.0,
+            _ => 180.0,
+        };
+        for step in 0..=8 {
+            let a = (base_angle + 90.0 * step as f32 / 8.0).to_radians();
+            points.push(Pos2::new(cx + a.cos() * r, cy + a.sin() * r));
+        }
+    }
+    let center_point = rect.center();
+    let mut mesh = Mesh::default();
+    let center_index = mesh.vertices.len() as u32;
+    mesh.colored_vertex(center_point, gradient_at(center_point));
+    for (index, point) in points.iter().enumerate() {
+        mesh.colored_vertex(*point, gradient_at(*point));
+        let a = center_index;
+        let b = center_index + 1 + index as u32;
+        let c = center_index + 1 + ((index + 1) % points.len()) as u32;
+        mesh.add_triangle(a, b, c);
+    }
+    painter.add(Shape::mesh(mesh));
+}
+
+/// 主题过渡安全的两色混合：进度 t 时取插值色。
 pub fn blend(from: Rgba, to: Rgba, t: f32) -> Color32 {
     from.lerp(to, t).to_color32()
 }
