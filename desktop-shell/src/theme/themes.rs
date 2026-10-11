@@ -123,7 +123,7 @@ const PAPER: ThemeSpec = ThemeSpec {
         panel_solid: Rgba::hex(0xfbfaf6, 0.96),
         glass_weak: Rgba::hex(0xf7f6f1, 0.60),
         chip: Rgba::hex(0xeceae1, 1.0),
-        input_bg: Rgba::hex(0xffffff, 0.72),
+        input_bg: Rgba::hex(0xffffff, 0.78),
         hover: Rgba::hex(0xe6e4da, 0.85),
         border: Rgba::hex(0xdcdad0, 1.0),
         border_soft: Rgba::hex(0xb9b6a8, 0.35),
@@ -135,7 +135,8 @@ const PAPER: ThemeSpec = ThemeSpec {
         text_3: Rgba::hex(0x686f66, 1.0),
         // 方案 01 的鼠尾草（#7d9b82）加深一档：保证 on_accent 文本 ≥3:1（AA Large）。
         accent: Rgba::hex(0x75937b, 1.0),
-        accent_2: Rgba::hex(0xa8bfa0, 1.0),
+        // 渐变端点取中鼠尾草（比探索稿的浅端深一档），保证胶囊文字全程 ≥3:1。
+        accent_2: Rgba::hex(0x8fae94, 1.0),
         accent_soft: Rgba::hex(0x7d9b82, 0.14),
         accent_shadow: Rgba::hex(0x5f8467, 0.35),
         on_accent: Rgba::hex(0xf6f9f5, 1.0),

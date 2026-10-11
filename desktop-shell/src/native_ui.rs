@@ -4034,7 +4034,8 @@ fn relative_time(updated_at: i64) -> String {
 
 fn chat_mode_label(mode: &str) -> &str {
     match mode {
-        "chat" => "普通",
+        // 空值 = 尚无会话的默认展示，按 Core 的缺省 chat 模式显示。
+        "" | "chat" => "普通",
         "smart" => "路由",
         other => Box::leak(other.to_owned().into_boxed_str()),
     }
