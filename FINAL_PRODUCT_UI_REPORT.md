@@ -140,14 +140,25 @@ TEMP 限制"、"HKCU 注册表限制"）同类，不是代码回归。按仓库 
 - `npm run desktop:build`（release）+ `npm run build:release`：**成功**，产出 RC 目录 `dist/app/`（140.7 MB）：
   - `WhaleBridge-Setup-x64.exe`（40.5 MB，一键安装器）+ `WhaleBridge.exe`（6.4 MB，安装/卸载同体）；
   - `payload/`（Node SEA 的 `WhaleBridgeCore.exe` 93.2 MB + resources）+ `INSTALL.txt`；
-  - `build-info.json` = **1.0.0-rc.2+4f2dade（dirty=false，包含全部 UI v1 / 纸面主题 / bug 修复提交）**；
+  - `build-info.json` = **1.0.0-rc.2+ca3be2a（dirty=false，包含全部 UI v1 / 纸面主题 / bug 修复提交）**；
   - `SHA256SUMS.txt`（27 条，逐条复验**全部一致**）、`release-manifest.json`、`sbom.json`、第三方许可清单；
   - 发行审计（禁止项 / 构建机路径 / 凭据泄漏）**通过**；`WhaleBridge.exe` 二进制内含「纸面工作台」UI 标记（已验证）。
-- **沙箱内安装验证受限**：`test-release-candidate` 与手动 `--install --install-dir <可写目录>` 都被
-  本会话沙箱拦在 TEMP 目录创建 / HKCU 注册表 / 开始菜单（`os error 5`，§6.1 同类已知限制；文件复制
-  阶段本身正常，失败后自动回滚并保留备份）。包完整性已按 SHA256SUMS 逐条验证；真机安装请在
+- **沙箱内安装验证受限**：`test-release-candidate` 与手动 `--install --install-dir <可写目录>`
+  都被本会话沙箱拦在 TEMP 目录创建 / HKCU 注册表 / 开始菜单（`os error 5`，§6.1 同类已知限制；
+  文件复制阶段本身正常，失败后自动回滚并保留备份）。包完整性已按 SHA256SUMS 逐条验证；真机安装请在
   Owner 桌面会话直接运行安装器（默认装到 `%ProgramFiles%\WhaleBridge`，覆盖安装前建议退出旧实例，
   需要时用 `--stop-core`）。
+
+### 6.3 补充 bug 修复（Owner 截图二：胶囊右上角白弧）
+
+- **根因**：`paint_button` 的顶部高光边（rim）是一圈圆角描边被裁剪到按钮上半部——圆角处必然露出一截
+  白色弧线。这是糖玻璃（GUMMY）主题的高光语言，但 Primary 按钮的白色 rim 没有跟随阴影档位，哑光
+  主题（纸面）也在画；浅色纸底上这截弧线被 Owner 截图抓个正着（两张截图——蓝色旧版与绿色纸面——
+  右上角的同款白弧，同一个根源）。
+- **修复**：rim 按 `spec.shadow.card_rim` 门控——哑光主题（`card_rim=false`）整条跳过；若未来恢复
+  糖玻璃主题，rim 自动回来。复验截图（`output/uiv1-qa3/` 9/9）胶囊已是干净鼠尾草渐变，无白弧；
+  发送按钮同步生效。
+- 安装包重出：**1.0.0-rc.2+ca3be2a（dirty=false）**，SHA256SUMS 27 条复验一致。
 
 ## 7. 视觉验收
 
