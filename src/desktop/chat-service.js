@@ -109,7 +109,8 @@ export function createChatService({
   // 会话 2 / 自动 Context Monitoring：Agent/DSH 通道回合结束时上报 usage（真实优先，
   // 否则字符估算）。由 app composition root 注入（→ Agent Broker 回合结束事件 → Continuity）；
   // Model Runtime 通道（非 Agent 会话）不上报。上报失败绝不影响回合机。
-  onTurnEnd = null
+  onTurnEnd = null,
+  onEvent = null
 }) {
   // Agent Provider（阶段 06）：会话显式指定 agentProvider（如 'dsh'）时，其回合经标准
   // AgentProvider 契约（agent.createSession / agent.send / agent.cancel）执行。
@@ -476,7 +477,25 @@ export function createChatService({
     return state.messageTexts.join('') + state.chunkBuffer;
   }
 
+  const lastUiStreamAt = new Map();
+
   function handleChatEvent(record, state, event) {
+    applyChatEvent(record, state, event);
+    const type = event?.type;
+    if (type === 'assistant/chunk') {
+      const last = lastUiStreamAt.get(record.id) ?? 0;
+      if (now() - last < 180) return;
+      lastUiStreamAt.set(record.id, now());
+      onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: state.turn?.state ?? 'streaming' } });
+    } else if (type === 'turn/start') {
+      onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: 'streaming' } });
+    } else if (type === 'assistant/message' || type === 'turn/end') {
+      if (type === 'turn/end') lastUiStreamAt.delete(record.id);
+      onEvent?.({ event: 'chat.updated', data: { sessionId: record.id, status: state.turn?.state ?? 'done' } });
+    }
+  }
+
+  function applyChatEvent(record, state, event) {
     const data = event?.data ?? {};
     if (event.type === 'turn/start') {
       if (state.chunkBuffer) state.chunkBuffer = '';

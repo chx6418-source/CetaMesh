@@ -37,6 +37,7 @@ import { loadReleaseConfig } from '../product/release-config.js';
 import { createPluginCenterService } from '../plugin-center/service.js';
 import { createProductContextService } from '../context/service.js';
 import { OWNER_ACTOR } from '../capability/types.js';
+import { createDesktopUiEventBus, createDesktopUiService } from '../desktop/ui-service.js';
 
 const DEFAULT_DSH_CONFIG = Object.freeze({
   provider: 'deepseek-official',
@@ -54,6 +55,7 @@ export function createCetaMeshServices(options = {}) {
   const api = options.api ?? null;
   const controlService = options.controlService ?? null;
   const log = options.log ?? (() => {});
+  const uiEventBus = createDesktopUiEventBus();
   const settingsService = options.settingsService ?? createSettingsService({ stateDir });
   const dshDesktop = options.dshDesktop ?? createDshDesktopIntegration({ platform: options.platform ?? process.platform });
 
@@ -145,7 +147,8 @@ export function createCetaMeshServices(options = {}) {
         workspaceId: managedAgent.executionWorkspaceId(sessionId) ?? task.workspaceId,
         actor: capabilityService.principalForTask(task.id) } : null;
     },
-    onTurnEnd: payload => agentBroker.reportTurnEnd(payload)
+    onTurnEnd: payload => agentBroker.reportTurnEnd(payload),
+    onEvent: event => uiEventBus.publish(event.event, event.data)
   });
   agentBroker.register(managedAgent.provider);
 
@@ -169,7 +172,8 @@ export function createCetaMeshServices(options = {}) {
     defaults: dshDefaults,
     defaultAgentProvider: () => settingsService.store.get().settings.agents.defaultAgentProvider,
     stateDir,
-    onTurnEnd: payload => agentBroker.reportTurnEnd(payload)
+    onTurnEnd: payload => agentBroker.reportTurnEnd(payload),
+    onEvent: event => uiEventBus.publish(event.event, event.data)
   });
 
   const memoryService = createMemoryService({
@@ -387,6 +391,14 @@ export function createCetaMeshServices(options = {}) {
     onboarding: onboardingService,
     product: productService
   };
+  const desktopUiService = createDesktopUiService({
+    services: {
+      chatService, taskService, workspaceService, memoryService, capabilityService,
+      agentService, pluginCenterService, integrationService, settingsService, systemServices
+    },
+    system: systemServices,
+    eventBus: uiEventBus
+  });
 
   return {
     controlService,
@@ -420,6 +432,8 @@ export function createCetaMeshServices(options = {}) {
     releaseConfig,
     errorRegistry,
     systemServices,
-    system: systemServices
+    system: systemServices,
+    desktopUiService,
+    uiEventBus
   };
 }

@@ -151,22 +151,29 @@ assert.ok(
 );
 step('✅ 前置：找到桌面壳自检可执行文件（debug 构建）');
 
-// 锁定正式入口与依赖：打包目标为原生 eframe，旧 Tauri/WebView 源文件不能被编入程序。
+// 锁定 UX v2 正式入口：WebView2 默认承载本地 Harbor，egui 仅供显式 legacy fallback。
 const cargoManifest = fs.readFileSync(path.join(ROOT, 'desktop-shell', 'Cargo.toml'), 'utf8');
 const nativeMain = fs.readFileSync(path.join(ROOT, 'desktop-shell', 'src', 'native_main.rs'), 'utf8');
 const nativeUi = fs.readFileSync(path.join(ROOT, 'desktop-shell', 'src', 'native_ui.rs'), 'utf8');
 const supervisorSource = fs.readFileSync(path.join(ROOT, 'desktop-shell', 'src', 'supervisor.rs'), 'utf8');
+const webviewPolicy = fs.readFileSync(path.join(ROOT, 'desktop-shell', 'src', 'webview_policy.rs'), 'utf8');
+const webviewHost = fs.readFileSync(path.join(ROOT, 'desktop-shell', 'src', 'webview_ui.rs'), 'utf8');
 assert.match(cargoManifest, /autobins\s*=\s*false/, '桌面壳应显式选择原生 binary entry');
 assert.match(cargoManifest, /path\s*=\s*"src\/native_main\.rs"/, '正式 binary 应使用原生 Rust 入口');
-assert.match(cargoManifest, /\beframe\s*=/, '桌面 UI 应由 eframe 绘制');
-assert.doesNotMatch(cargoManifest, /tauri|wry/i, '运行时依赖不应再包含 Tauri/WebView');
-assert.match(nativeMain, /eframe::run_native/, '原生入口应创建 eframe 窗口');
+assert.match(cargoManifest, /\beframe\s*=/, 'legacy fallback 应保留 eframe');
+assert.match(cargoManifest, /\bwry\s*=/, '桌面 UI 应由 WebView2 承载');
+assert.doesNotMatch(cargoManifest, /\btauri\s*=/i, '正式桌面壳不应依赖 Tauri');
+assert.match(webviewPolicy, /UiMode::V2/);
+assert.match(webviewPolicy, /--ui=legacy/);
+assert.match(nativeMain, /webview_ui::run_webview_ui/, '默认入口应启动 WebView2 Harbor');
+assert.match(nativeMain, /eframe::run_native/, '显式 legacy fallback 应保留 eframe 窗口');
+assert.match(webviewHost, /wry::webview_version\(\)/);
 assert.match(nativeMain, /IpcClient::new\(pipe\)/, '原生窗口应连接启动器创建的 Core IPC pipe');
 assert.match(nativeMain, /ipc_pipe:\s*Some\(pipe\.clone\(\)\)/, 'Supervisor 应以 IPC pipe 检查 Core readiness');
 assert.match(nativeUi, /pub struct NativeUi/, '应实现原生管理 UI');
 assert.doesNotMatch(nativeUi, /tauri::|WebviewWindowBuilder|WebviewUrl/i, '原生管理 UI 不应调用浏览器壳');
 assert.match(supervisorSource, /core\.ready[\s\S]*fn wait_for_ipc[\s\S]*probe_ipc/, 'Supervisor readiness 应验证版本化 IPC ready 握手');
-step('✅ 原生架构：eframe 是正式入口，Tauri/WebView 已退出依赖，UI 与 Supervisor 均使用 IPC');
+step('✅ 桌面架构：WebView2 默认承载 Harbor，egui 是显式 fallback，UI 与 Supervisor 均使用 IPC');
 
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'whalebridge-desktop-test-'));
 
@@ -357,7 +364,7 @@ try {
         stderr += String(chunk);
       });
       try {
-      // 原生 eframe 顶层窗口可见即说明桌面 UI 已创建；中文标题按 UTF-8 读取。
+      // 原生 WebView2 顶层窗口可见即说明桌面 UI 已创建；中文标题按 UTF-8 读取。
       let title = '';
       const windowDeadline = Date.now() + 40000;
       while (Date.now() < windowDeadline) {
@@ -554,10 +561,8 @@ try {
       // UI crash + restart must not touch Core metadata or config.json bytes.
       spawnSync('taskkill.exe', ['/PID', String(first.pid), '/F'], { encoding: 'utf8' });
       await waitFor(async () => !isRunning(workerPid), 20000, 'worker 孤儿守卫退出');
-      // Re-launch with a stored legacy theme id + zoom preferences to prove stored UI
-      // preferences are actually applied. UI v1 converged the palette to the single
-      // 纸面 theme (commit 77353ea): legacy ids (dark/soda/…) deliberately fall back
-      // to 浅色 · 纸面 instead of failing, so the log contract is 浅色 here.
+      // Harbor reads its active theme from Core general settings. Keep the legacy
+      // shell theme field intact for the explicit egui fallback and verify WebView2 zoom.
       const prefsFile = path.join(dataDir, 'state', 'desktop-ui.json');
       const storedPrefs = JSON.parse(fs.readFileSync(prefsFile, 'utf8'));
       storedPrefs.theme = 'dark';
@@ -568,12 +573,17 @@ try {
       try {
         await waitFor(async () => /CetaMesh/.test(titleOf(relaunched.pid) || ''), 40000, '重启后窗口');
         await waitFor(
-          async () => /主题已应用：浅色 · 纸面/.test(shellLog()),
+          async () => /110%/.test(shellLog()),
           15000,
-          '主题应用日志（legacy dark → 纸面回落）'
+          'WebView2 zoom preference application log'
         );
         assert.match(shellLog(), /界面缩放已应用：110%/, '界面缩放偏好应在启动时应用');
         assert.match(shellLog(), /窗口几何已恢复：/, '窗口几何偏好应在启动时恢复');
+        assert.equal(
+          JSON.parse(fs.readFileSync(prefsFile, 'utf8')).theme,
+          'paper',
+          'legacy shell theme ids should normalize to the only supported paper fallback'
+        );
         assert.equal(
           fs.readFileSync(sentinelFile, 'utf8'),
           sentinelText,

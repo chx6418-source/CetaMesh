@@ -63,6 +63,36 @@ try {
   assert.equal(pluginCatalog.available, false);
   assert.equal(pluginCatalog.reason, 'service_not_configured', 'missing Plugin Service configuration is graceful');
 
+  const ui = (method, params = {}) => services.desktopUiService.execute({ method, params });
+  const uiIntegrations = await ui('ui.plugins.integration.list');
+  const bionicIntegration = uiIntegrations.integrations.find(item => item.id === 'cetamesh-bionic-chat');
+  assert.ok(bionicIntegration, 'Harbor Plugin Center lists the Bionic tool pack as an Integration');
+  assert.equal(bionicIntegration.available, true, 'Bionic management remains available even when some backing tools are offline');
+  const bionicSettings = await ui('ui.plugins.integration.settings', { id: 'cetamesh-bionic-chat' });
+  assert.ok(bionicSettings.tools.length >= 50, 'Bionic settings project its real individual tool controls');
+  assert.ok(bionicSettings.tools.some(tool => tool.id === 'mcp__snowluma__qq_status'));
+  const uiSession = await ui('ui.chat.sessions.create', { title: 'Harbor Core contract' });
+  const uiHistory = await ui('ui.chat.history', { id: uiSession.id, limit: 100 });
+  assert.equal(uiHistory.id, uiSession.id);
+  assert.equal(uiHistory.total, 0, 'Harbor Chat history projects the actual local Chat service');
+  const uiWorkspaceRoot = path.join(root, 'harbor-ui-workspace');
+  fs.mkdirSync(uiWorkspaceRoot);
+  const uiWorkspace = await ui('ui.workspace.create', { name: 'Harbor Workspace', root: uiWorkspaceRoot });
+  const openedWorkspace = await ui('ui.workspace.open', { id: uiWorkspace.id });
+  const activeWorkspace = await ui('ui.workspace.list');
+  assert.equal(openedWorkspace.activeId, uiWorkspace.id);
+  assert.equal(activeWorkspace.activeId, uiWorkspace.id, 'active Workspace is projected from the Core registry');
+  const workspaceEvents = await ui('ui.events.next', { after: 0, waitMs: 0 });
+  assert.ok(workspaceEvents.events.some(event => event.event === 'workspace.updated' && event.data.workspaceId === uiWorkspace.id));
+  const uiTask = await ui('ui.task.create', { goal: 'Harbor task DTO', requirements: [], workspaceId: uiWorkspace.id });
+  assert.equal((await ui('ui.task.get', { id: uiTask.task.id })).task.id, uiTask.task.id);
+  const taskEvents = await ui('ui.events.next', { after: workspaceEvents.cursor, waitMs: 0 });
+  assert.ok(taskEvents.events.some(event => event.event === 'task.updated' && event.data.taskId === uiTask.task.id));
+  const uiMemory = await ui('ui.memory.create', { type: 'knowledge', scope: 'global', content: 'Harbor memory DTO' });
+  const updatedUiMemory = await ui('ui.memory.update', { id: uiMemory.id, expectedRev: uiMemory.rev, content: 'Updated Harbor memory DTO', tags: [], pinned: false });
+  assert.equal(updatedUiMemory.content, 'Updated Harbor memory DTO');
+  assert.deepEqual((await ui('ui.approvals.list')).approvals, [], 'the live Core approval list has a real empty state');
+
   const simpleContext = JSON.parse(await services.productContextService.buildForChat({
     record: { id: 'simple-chat', taskId: null, config: { mode: 'chat', workspaceId: null } },
     routing: { class: 'simple', resolvedRoute: 'model' },

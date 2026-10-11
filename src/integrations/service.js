@@ -102,6 +102,10 @@ export function createIntegrationService({
   function integrationStatus(id) {
     const plugin = resolvedRegistry.pluginById.get(id);
     if (!plugin) return { enabled: false, available: false, status: 'unknown', lastError: '未知集成：' + id };
+    if (plugin.kind === 'tool-pack') {
+      const view = resolvedRegistry.pluginView(plugin);
+      return { id, enabled: view.enabled, available: true, status: view.enabled ? 'enabled' : 'disabled', toolCount: view.toolCount, lastError: null, provider: null };
+    }
     const enabled = resolvedRegistry.pluginEnabled(id);
     const local = (localServices?.() ?? {})[plugin.localService] ?? null;
     const provider = providerStatus(plugin.provider ?? null);
@@ -310,7 +314,7 @@ export function createIntegrationService({
     const dshData = plugin.id === 'cetamesh-dsh' ? await dshIntegrationData(plugin, { refresh }) : {};
     return {
       ...view,
-      bottomLayer: plugin.kind === 'channel-integration' ? 'channel-provider' : 'agent-provider',
+      bottomLayer: plugin.kind === 'channel-integration' ? 'channel-provider' : plugin.kind === 'agent-integration' ? 'agent-provider' : 'capability-tool-pack',
       integrationStatus: status,
       localService: local,
       provider: status.provider ?? null,
@@ -363,7 +367,7 @@ export function createIntegrationService({
       plugins: resolvedRegistry.listPlugins(),
       tools: { total: resolvedRegistry.tools.length, enabled: resolvedRegistry.listTools({ enabled: true }).length },
       mcp: { total: resolvedRegistry.servers.length, running: resolvedRegistry.listMcpServers().filter(server => server.status === 'running').length },
-      integrations: resolvedRegistry.plugins.filter(plugin => plugin.kind === 'channel-integration' || plugin.kind === 'agent-integration').map(plugin => integrationStatus(plugin.id))
+      integrations: resolvedRegistry.plugins.filter(plugin => ['channel-integration', 'agent-integration', 'tool-pack'].includes(plugin.kind)).map(plugin => integrationStatus(plugin.id))
     }),
     'plugins.list': async params => ({
       plugins: await Promise.all(resolvedRegistry.listPlugins({
@@ -429,8 +433,10 @@ export function createIntegrationService({
     },
     'integrations.list': async () => ({
       integrations: await Promise.all(resolvedRegistry.plugins
-        .filter(plugin => plugin.kind === 'channel-integration' || plugin.kind === 'agent-integration')
-        .map(plugin => integrationView(plugin.id)))
+        .filter(plugin => ['channel-integration', 'agent-integration', 'tool-pack'].includes(plugin.kind))
+        .map(async plugin => plugin.kind === 'tool-pack'
+          ? { id: plugin.id, displayName: plugin.name, ...integrationStatus(plugin.id) }
+          : integrationView(plugin.id)))
     }),
     'integrations.get': params => integrationView(params.id ?? params.pluginId),
     'integrations.dshDesktop.status': () => currentDshDesktop(),

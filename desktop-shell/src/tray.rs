@@ -16,6 +16,8 @@ use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, 
 
 use crate::supervisor::Supervisor;
 
+pub type WakeCallback = Arc<dyn Fn() + Send + Sync>;
+
 const TRAY_ID: &str = "cetamesh-desktop-tray";
 
 /// Test-only instance namespace. `WHALEBRIDGE_INSTANCE_SUFFIX` keeps a test shell from colliding
@@ -72,7 +74,7 @@ impl TrayHandle {
     pub fn new(
         supervisor: Arc<Supervisor>,
         data_dir: PathBuf,
-        wake: eframe::egui::Context,
+        wake: WakeCallback,
     ) -> Result<Self, String> {
         let show = MenuItem::with_id("show", "显示主窗口", true, None);
         let hide = MenuItem::with_id("hide", "隐藏到托盘", true, None);
@@ -173,7 +175,7 @@ impl TrayHandle {
                             }
                             _ => {}
                         }
-                        wake.request_repaint();
+                        wake();
                     }
                 })
                 .map_err(|error| format!("启动托盘菜单线程失败：{error}"))?;
@@ -201,7 +203,7 @@ impl TrayHandle {
                                 show_window_handle(hwnd.load(Ordering::Relaxed));
                                 let _ = commands_tx.send(TrayCommand::ShowWindow);
                             }
-                            wake.request_repaint();
+                            wake();
                         }
                     }
                 })
@@ -285,7 +287,7 @@ fn embedded_icon() -> Option<Icon> {
 #[cfg(windows)]
 fn spawn_show_signal_listener(
     hwnd: Arc<AtomicIsize>,
-    wake: eframe::egui::Context,
+    wake: WakeCallback,
     data_dir: PathBuf,
     commands_tx: std::sync::mpsc::Sender<TrayCommand>,
 ) {
@@ -319,7 +321,7 @@ fn spawn_show_signal_listener(
                             &data_dir,
                             "[ui] 再次启动应用：从托盘恢复显示主窗口",
                         );
-                        wake.request_repaint();
+                        wake();
                     }
                     value if value == WAIT_OBJECT_0 + 1 => {
                         // 安装程序请求关闭：先显示窗口，再按既有退出清理流程处理
@@ -330,7 +332,7 @@ fn spawn_show_signal_listener(
                             "[ui] 安装程序请求关闭应用（QuitRequest 事件）",
                         );
                         let _ = commands_tx.send(TrayCommand::ExitRequestedByInstaller);
-                        wake.request_repaint();
+                        wake();
                     }
                     WAIT_TIMEOUT => continue,
                     _ => break,
@@ -342,7 +344,7 @@ fn spawn_show_signal_listener(
 #[cfg(not(windows))]
 fn spawn_show_signal_listener(
     _hwnd: Arc<AtomicIsize>,
-    _wake: eframe::egui::Context,
+    _wake: WakeCallback,
     _data_dir: PathBuf,
     _commands_tx: std::sync::mpsc::Sender<TrayCommand>,
 ) {

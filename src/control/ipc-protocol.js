@@ -165,7 +165,7 @@ export function startIpcProtocol({
     }
     // 产品私有方法族（chat.* / memory.* / task.* / continuity.* 等）：
     // 由注入 dispatch 侧做二级白名单（desktop/chat-service.js、memory/service.js）。
-    if (request.method.startsWith('capability.') || request.method.startsWith('workshop.') || request.method.startsWith('chat.') || request.method.startsWith('memory.') || request.method.startsWith('task.') || request.method.startsWith('agent.') || request.method.startsWith('workspace.') || request.method.startsWith('continuity.') || request.method.startsWith('providers.') || request.method.startsWith('modelrt.') || request.method.startsWith('router.') || request.method.startsWith('ext.') || request.method.startsWith('mesh.') || request.method.startsWith('channel.')
+    if (request.method.startsWith('ui.') || request.method.startsWith('capability.') || request.method.startsWith('workshop.') || request.method.startsWith('chat.') || request.method.startsWith('memory.') || request.method.startsWith('task.') || request.method.startsWith('agent.') || request.method.startsWith('workspace.') || request.method.startsWith('continuity.') || request.method.startsWith('providers.') || request.method.startsWith('modelrt.') || request.method.startsWith('router.') || request.method.startsWith('ext.') || request.method.startsWith('mesh.') || request.method.startsWith('channel.')
       || request.method.startsWith('settings.') || request.method.startsWith('about.') || request.method.startsWith('update.')
       || request.method.startsWith('onboarding.') || request.method.startsWith('product.')) {
       try {

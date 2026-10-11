@@ -22,6 +22,7 @@ assert.equal(isNoWebUiHtmlArtifact('public/console.html'), true);
 assert.equal(isNoWebUiHtmlArtifact('PUBLIC/legacy-settings.HTML'), true);
 assert.equal(isNoWebUiHtmlArtifact('resources/public/legacy-settings.HTML'), true);
 assert.equal(isNoWebUiHtmlArtifact('ui/installer.html'), true);
+assert.equal(isNoWebUiHtmlArtifact('resources/desktop-ui/index.html'), false);
 assert.equal(isNoWebUiHtmlArtifact('roles/guide.md'), false);
 assert.deepEqual(
   findNoWebUiHtmlArtifacts([

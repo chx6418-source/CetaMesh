@@ -1,4 +1,4 @@
-# CetaMesh Desktop v1 — Build, Test and Release
+# CetaMesh Desktop — Build, Test and Release
 
 > Applies to Windows x64. The prior release candidate was `1.0.0-rc.1`; the current integration candidate is `1.0.0-rc.2`.
 
@@ -12,6 +12,7 @@
 
 | Command | Purpose |
 | --- | --- |
+| `npm run build:ui` | Type-check and bundle the selected 01 Harbor React UI for offline WebView2 use |
 | `npm run desktop:check` | `cargo check` for the native shell |
 | `npm run desktop:test` | Rust unit tests |
 | `npm run desktop:build:debug` | debug shell (required by `test-desktop-shell` / `test-desktop-install`) |
@@ -22,8 +23,10 @@
 | `npm run test-desktop-shell`, `test-desktop-supervisor` | native window/supervisor contract, real window smoke |
 | `npm run self-test` | live DSH round trip (creates one isolated test session) |
 
-There is no TypeScript or lint toolchain in this repository (plain ESM JavaScript + Rust), so
-"TypeScript / lint" is **NOT_APPLICABLE** rather than skipped.
+The Harbor renderer has a separate TypeScript/Vite dependency lockfile at `desktop-ui/package-lock.json`.
+Use `npm ci --offline --prefix desktop-ui` when the locked packages are present in the local cache.
+`npm run build:release` invokes the Harbor build and stages its generated files at
+`payload/resources/desktop-ui/`; the renderer remains offline and does not start an HTTP server.
 
 ## Release candidate build
 
@@ -39,6 +42,7 @@ New-Item -ItemType Junction -Path "$env:TEMP\cetamesh-rc\node_modules" -Target "
 Set-Location "$env:TEMP\cetamesh-rc"
 
 npm run build:core          # Node SEA Core -> dist/core (no-web, API-only)
+npm run build:ui            # Harbor renderer -> desktop-ui/dist (also run automatically by build:release)
 npm run desktop:build       # release native shell
 npm run desktop:build:debug # needed by installer lifecycle tests
 npm run build:release       # dist/app: single-file setup + payload + SBOM + SHA256SUMS
@@ -47,7 +51,8 @@ npm run build:release       # dist/app: single-file setup + payload + SBOM + SHA
 `dist/app` contains:
 
 - `WhaleBridge-Setup-x64.exe` — single-file installer (Windows IExpress, branded icon)
-- `WhaleBridge.exe` — native shell / uninstaller, `payload/` — Core SEA + read-only resources
+- `WhaleBridge.exe` — Rust/WebView2 shell and uninstaller; `payload/` — Core SEA, read-only Core
+  resources, and the local `resources/desktop-ui/` Harbor bundle
 - `build-info.json` (version / commit / buildId / dirty flag), `release-manifest.json`,
   `SHA256SUMS.txt`, `sbom.json`, `licenses/`, `INSTALL.txt`
 

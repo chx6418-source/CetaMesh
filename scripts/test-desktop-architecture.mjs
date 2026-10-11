@@ -24,13 +24,21 @@ const check = (name, fn) => {
   console.log(`PASS ${name}`);
 };
 
-// 1. The shipped desktop shell is the native eframe app; Tauri/WebView source is gone.
-check('native eframe entry, no Tauri/WebView dependency or obsolete shell files', () => {
+// 1. The shipped desktop shell keeps its native entry point and defaults to the bundled WebView2
+//    Harbor UI. egui remains linked only for the explicitly selected legacy fallback.
+check('native desktop entry defaults to bundled WebView2 and has no obsolete UI bundles', () => {
   const cargo = read('desktop-shell/Cargo.toml');
   assert.match(cargo, /autobins\s*=\s*false/);
   assert.match(cargo, /path\s*=\s*"src\/native_main\.rs"/);
   assert.match(cargo, /\beframe\s*=/);
-  assert.doesNotMatch(cargo, /tauri|wry/i);
+  assert.match(cargo, /\bwry\s*=/, 'WebView2 runtime dependency must be explicit');
+  assert.match(cargo, /\btao\s*=/, 'native window/event-loop dependency must be explicit');
+  assert.doesNotMatch(cargo, /\btauri\s*=/i);
+  const policy = read('desktop-shell/src/webview_policy.rs');
+  const entry = read('desktop-shell/src/native_main.rs');
+  assert.match(policy, /UiMode::V2/);
+  assert.match(policy, /--ui=legacy/);
+  assert.match(entry, /run_webview_ui/);
   for (const gone of [
     'desktop-shell/src/main.rs',
     'desktop-shell/tauri.conf.json',

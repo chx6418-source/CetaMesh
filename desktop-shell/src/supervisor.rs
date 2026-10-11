@@ -403,6 +403,8 @@ pub struct SupervisorConfig {
     pub health_timeout: Duration,
 }
 
+pub type StatusListener = Arc<dyn Fn(Status) + Send + Sync>;
+
 /// 进程监管句柄：所有跨线程共享状态都收敛在这里。
 /// 内部全部是可共享的句柄，因此 `Arc<Supervisor>` 的任意克隆都能安全地请求停止。
 pub struct Supervisor {
@@ -416,6 +418,14 @@ pub struct Supervisor {
 
 impl Supervisor {
     pub fn start(config: SupervisorConfig) -> Self {
+        Self::start_inner(config, None)
+    }
+
+    pub fn start_with_status_listener(config: SupervisorConfig, listener: StatusListener) -> Self {
+        Self::start_inner(config, Some(listener))
+    }
+
+    fn start_inner(config: SupervisorConfig, listener: Option<StatusListener>) -> Self {
         let (commands_tx, commands_rx) = mpsc::channel();
         let stdin = Arc::new(Mutex::new(None));
         let child_pid = Arc::new(Mutex::new(None));
@@ -428,7 +438,7 @@ impl Supervisor {
         };
         let thread_status = Arc::clone(&status);
         let thread = thread::spawn(move || {
-            run_supervisor(config, commands_rx, thread_status, worker);
+            run_supervisor(config, commands_rx, thread_status, worker, listener);
         });
         Self {
             commands: commands_tx,
@@ -480,6 +490,7 @@ fn run_supervisor(
     commands: Receiver<SupervisorCommand>,
     status: Arc<Mutex<Status>>,
     handles: WorkerHandles,
+    listener: Option<StatusListener>,
 ) {
     let mut failures: u32 = 0;
     let mut pending_restart = false;
@@ -495,6 +506,7 @@ fn run_supervisor(
                         reason: error,
                         needs_attention: true,
                     },
+                    listener.as_ref(),
                 );
                 if !sleep_interruptible(BACKOFF_MAX, &commands, &mut pending_restart) {
                     return;
@@ -510,7 +522,7 @@ fn run_supervisor(
             *handles.stdin.lock().expect("stdin mutex") = Some(stdin);
         }
         let started = Instant::now();
-        set_status(&status, Status::Starting);
+        set_status(&status, Status::Starting, listener.as_ref());
 
         let health = if let Some(pipe_name) = config.ipc_pipe.as_deref() {
             wait_for_ipc(pipe_name, config.health_timeout, || {
@@ -528,6 +540,7 @@ fn run_supervisor(
                 Status::Ready {
                     startup_ms: startup.as_millis(),
                 },
+                listener.as_ref(),
             ),
             Err(error) => set_status(
                 &status,
@@ -536,6 +549,7 @@ fn run_supervisor(
                     reason: error,
                     needs_attention: true,
                 },
+                listener.as_ref(),
             ),
         }
 
@@ -546,11 +560,11 @@ fn run_supervisor(
                 match command {
                     SupervisorCommand::Shutdown => {
                         shutdown_requested = true;
-                        stop_child(&handles, &mut child, &status);
+                        stop_child(&handles, &mut child, &status, listener.as_ref());
                     }
                     SupervisorCommand::Restart => {
                         pending_restart = true;
-                        stop_child(&handles, &mut child, &status);
+                        stop_child(&handles, &mut child, &status, listener.as_ref());
                     }
                 }
             }
@@ -572,6 +586,7 @@ fn run_supervisor(
                     reason: "已退出".to_owned(),
                     needs_attention: false,
                 },
+                listener.as_ref(),
             );
             return;
         }
@@ -594,6 +609,7 @@ fn run_supervisor(
                         reason,
                         needs_attention,
                     },
+                    listener.as_ref(),
                 );
                 return;
             }
@@ -604,6 +620,7 @@ fn run_supervisor(
                         exit_code,
                         failures,
                     },
+                    listener.as_ref(),
                 );
                 return;
             }
@@ -615,11 +632,12 @@ fn run_supervisor(
                         delay: Duration::ZERO,
                         exit_code,
                     },
+                    listener.as_ref(),
                 );
             }
             RestartAction::RestartAfter(delay) => {
                 failures = failures_after_run(failures, ran_for) + 1;
-                set_status(&status, Status::Restarting { delay, exit_code });
+                set_status(&status, Status::Restarting { delay, exit_code }, listener.as_ref());
                 if !sleep_interruptible(delay, &commands, &mut pending_restart) {
                     return;
                 }
@@ -639,8 +657,11 @@ fn explain_stop(exit_code: i32) -> (String, bool) {
     }
 }
 
-fn set_status(status: &Arc<Mutex<Status>>, next: Status) {
-    *status.lock().expect("status mutex") = next;
+fn set_status(status: &Arc<Mutex<Status>>, next: Status, listener: Option<&StatusListener>) {
+    *status.lock().expect("status mutex") = next.clone();
+    if let Some(listener) = listener {
+        listener(next);
+    }
 }
 
 fn take_command(commands: &Receiver<SupervisorCommand>) -> Option<SupervisorCommand> {
@@ -756,7 +777,7 @@ fn spawn_worker(config: &SupervisorConfig) -> Result<Child, String> {
 }
 
 /// 优雅停止：丢弃 stdin（触发孤儿守卫），超时再只针对本子进程强杀。
-fn stop_child(handles: &WorkerHandles, child: &mut Child, status: &Arc<Mutex<Status>>) {
+fn stop_child(handles: &WorkerHandles, child: &mut Child, status: &Arc<Mutex<Status>>, listener: Option<&StatusListener>) {
     drop(handles.stdin.lock().expect("stdin mutex").take());
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
@@ -765,7 +786,7 @@ fn stop_child(handles: &WorkerHandles, child: &mut Child, status: &Arc<Mutex<Sta
         }
         thread::sleep(Duration::from_millis(100));
     }
-    set_status(status, Status::Starting);
+    set_status(status, Status::Starting, listener);
     let pid = child.id();
     let _ = hidden("taskkill.exe")
         .args(["/PID", &pid.to_string(), "/T", "/F"])

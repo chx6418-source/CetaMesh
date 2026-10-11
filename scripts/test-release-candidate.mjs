@@ -199,7 +199,8 @@ assert.deepEqual([...fs.readFileSync(setupExe).subarray(0, 2)], [0x4d, 0x5a], '�
 assert.ok(fs.existsSync(path.join(RC_DIR, 'payload', 'WhaleBridgeCore.exe')), '发行包缺少 payload/WhaleBridgeCore.exe');
 const noWebUi = releaseManifest.noWebUi === true;
 assert.equal(noWebUi, true, '默认发行必须是 no-web 原生桌面发行，不能回退到网页兼容包');
-assert.equal(releaseManifest.uiDistribution, 'native-no-web');
+assert.equal(releaseManifest.coreUiDistribution, 'native-no-web');
+assert.equal(releaseManifest.uiDistribution, 'webview2-bundled');
 // D1 红线：发行清单必须声明 worker 不监听 loopback HTTP（legacyHttp=false）。
 assert.equal(releaseManifest.legacyHttp, false, 'release-manifest.legacyHttp 必须为 false（发行 worker 禁止监听 consolePort）');
 const coreRuntimeManifest = JSON.parse(fs.readFileSync(path.join(RC_DIR, 'payload', 'runtime-manifest.json'), 'utf8'));
@@ -262,6 +263,7 @@ try {
   assert.equal(installed.status, 0, installed.output);
   assert.ok(fs.existsSync(path.join(installDir, 'WhaleBridge.exe')));
   assert.ok(fs.existsSync(path.join(installDir, 'WhaleBridgeCore.exe')));
+  assert.ok(fs.existsSync(path.join(installDir, 'resources', 'desktop-ui', 'index.html')), 'installed Harbor bundle must be available offline');
   assertNoWebUiHtmlArtifacts(listFiles(path.join(installDir, 'resources')), 'installed Core resources');
   const installedBuildInfo = JSON.parse(fs.readFileSync(path.join(installDir, 'build-info.json'), 'utf8'));
   assert.equal(installedBuildInfo.version, releaseManifest.version, 'build-info 版本应与发行清单一致');

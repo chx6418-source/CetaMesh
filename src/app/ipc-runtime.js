@@ -3,6 +3,7 @@ import { startIpcProtocol } from '../control/ipc-protocol.js';
 import { PRIVILEGE_CONSOLE } from '../bridge-privilege.js';
 
 const ROUTES = [
+  ['ui.', (services) => [services.desktopUiService, 'execute']],
   ['capability.', (services, system) => [services.capabilityService, 'execute']],
   ['workshop.', (services, system) => [services.workshopService, 'executeOwner']],
   ['chat.', (services, system) => [services.chatService, 'execute']],
@@ -59,7 +60,7 @@ export function createDesktopIpcRuntime({
     }
   }
 
-  function dispatch({ method, params } = {}) {
+  function dispatch({ method, params } = {}, context = {}) {
     const name = String(method ?? '');
     const route = ROUTES.find(([prefix]) => name.startsWith(prefix));
     if (route) {
@@ -67,7 +68,7 @@ export function createDesktopIpcRuntime({
       // Every prefixed desktop route is served on the native Owner UI pipe. Bind
       // identity here; never accept an actor claim from IPC parameters.
       const trustedActor = name.startsWith('continuity.') ? { kind: 'owner', id: 'desktop' } : undefined;
-      return invoke(() => owner[methodName]({ method: name, params, ...(trustedActor ? { actor: trustedActor } : {}) }), name);
+      return invoke(() => owner[methodName]({ method: name, params, ...(trustedActor ? { actor: trustedActor } : {}), ...(name.startsWith('ui.') ? { signal: context.signal } : {}) }), name);
     }
     return invoke(() => services.controlService.execute({
       method: name,

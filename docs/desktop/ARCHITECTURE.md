@@ -1,7 +1,8 @@
-# CetaMesh Desktop v1 — Architecture and Red Lines
+# CetaMesh Desktop — Architecture and Red Lines
 
-> Status: Desktop v1 **Release Candidate** (`1.0.0-rc.2`). Authoritative evidence lives in
-> `PROJECT_STATE.md`; this document explains the shape and the invariants the code must keep.
+> Status: UX v2 production implementation uses the Owner-selected **01 Harbor** presentation. The
+> Core, named-pipe protocol, installer and security boundaries remain authoritative; see
+> `UI_SOURCE_OF_TRUTH.md` for the selected desktop visual direction and `PROJECT_STATE.md` for work status.
 
 ## Product model
 
@@ -34,7 +35,9 @@ Desktop shell → one Node worker (`src/bridge.js`)
 ## Layers
 
 ```
-UI (egui native shell)                      desktop-shell/src/native_ui.rs, *_ui.rs, app_shell.rs
+Renderer (01 Harbor React / TypeScript)     desktop-ui/src/app/HarborApp.tsx
+        |  typed `ui.*` bridge DTOs over WebView IPC
+Rust Host (WebView2, tray, lifecycle)        desktop-shell/src/webview_ui.rs, webview_policy.rs
         |  versioned JSON over a per-instance named pipe
 Composition root / Runtime services       src/app, src/desktop, src/task, src/memory, src/workspace,
                                             src/agent, src/continuity, src/settings, src/about,
@@ -52,6 +55,7 @@ Native / Infrastructure                     Node SEA Core, Rust supervisor/insta
 | Area | Location | Notes |
 | --- | --- | --- |
 | Chat | `src/desktop/chat-service.js` | sessions, streaming, stop/retry, attachments; Agent Provider optional |
+| Desktop UI projection | `src/desktop/ui-service.js` | exact `ui.*` route table, bounded safe DTOs and change events; no renderer access to generic Core responses |
 | Tasks | `src/task/` | persistent tasks, revisions, attention; agent attach/detach never changes task id |
 | Memory | `src/memory/` | policy-gated memory runtime + store |
 | Workspace | `src/workspace/` | root canonicalization and path containment (`boundary.js`) |
@@ -64,7 +68,8 @@ Native / Infrastructure                     Node SEA Core, Rust supervisor/insta
 | Config boundary | `src/config/` | one fail-closed config loader/updater for Core, MCP and local services |
 | Logging | `src/logging/` | mandatory redaction (text + field level) |
 | Control / IPC | `src/control/` | named-pipe protocol, method families, privilege model |
-| Native shell | `desktop-shell/` | eframe UI, supervisor, installer/uninstaller, tray, UI prefs |
+| Desktop renderer | `desktop-ui/` | 01 Harbor React 19 / TypeScript / Vite app; bundled locally for offline WebView2 use |
+| Native host | `desktop-shell/` | WebView2 presentation, exact bridge allowlist, supervisor, installer/uninstaller, tray and UI preferences; `--ui=legacy` is an explicit fallback |
 
 ## Data locations
 
@@ -89,12 +94,16 @@ Native / Infrastructure                     Node SEA Core, Rust supervisor/insta
 | Secrets must not reach logs | `src/logging/redact.js` (mandatory `createRedactingSink`, text + field rules). Test: `npm run test-system` (includes bearer-token regression). |
 | Extensions must not execute downloaded code freely | Static scan forbids `child_process`/`fs`/dynamic import/`new Function`; the host runs code in `vm.createContext` with no host `require`/`process`/`Buffer`/fs/net; high-risk permissions need explicit review approval. Tests: `npm run test-extension`. |
 | Legacy reserved modes stay out of the product flow | No `reserved`/`reserved2` references in `src/desktop`, `src/agent`, `src/memory`, `src/task`, `src/workspace`, `src/continuity`; they remain only in the legacy QQ adapter surfaces (Advanced). Test: `test-architecture`. |
-| Docs must not claim missing features | `PROJECT_STATE.md` is the authoritative status source; this audit marks unverified items explicitly. Tauri/WebView shell files were removed once confirmed unused. |
+| Docs must not claim missing features | `PROJECT_STATE.md` is the authoritative status source; this audit marks unverified items explicitly. UX v2 uses the Rust-hosted WebView2 shell; no Tauri/Electron runtime or production localhost server is allowed. |
 
 ## Native shell boundary
 
 - The shell starts and supervises the Core (`Supervisor`), connects to the per-instance named pipe
   and never speaks HTTP for management operations.
+- WebView2 loads the bundled `resources/desktop-ui/` assets under the `https://cetamesh.localhost`
+  app origin. Renderer calls are limited to typed `ui.*` DTOs and native picker/external-link routes;
+  production CSP denies remote navigation and network connections. `--dev-ui-url` is accepted only
+  by debug builds at `http://127.0.0.1:5173`; `--ui=legacy` remains an explicit migration fallback.
 - The system tray owns show/hide/restart/logs/quit plus live Core status and "needs attention".
   Closing the window hides to the tray by default; Core and running tasks keep going. Only the
   explicit quit path stops Core.

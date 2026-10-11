@@ -23,6 +23,9 @@ mod theme;
 mod supervisor;
 mod tray;
 mod ui_prefs;
+mod webview_policy;
+#[cfg(windows)]
+mod webview_ui;
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -34,7 +37,7 @@ use desktop_paths::{DesktopPaths, probe_config, resolve_data_dir};
 use eframe::egui;
 use ipc_client::IpcClient;
 use native_ui::{CoreApi, NativeUi};
-use supervisor::{Status, Supervisor, SupervisorConfig};
+use supervisor::{Status, StatusListener, Supervisor, SupervisorConfig};
 
 fn current_exe_dir() -> PathBuf {
     env::current_exe()
@@ -198,6 +201,13 @@ fn supervise_seconds_from_args(args: &[String]) -> Duration {
 }
 
 fn start_supervisor(paths: &DesktopPaths) -> Result<(Supervisor, String, u16), String> {
+    start_supervisor_with_listener(paths, None)
+}
+
+fn start_supervisor_with_listener(
+    paths: &DesktopPaths,
+    listener: Option<StatusListener>,
+) -> Result<(Supervisor, String, u16), String> {
     let probe = probe_config(&paths.data_dir);
     let launch = resolve_core(&current_exe_dir())?;
     let pipe = pipe_name();
@@ -211,13 +221,17 @@ fn start_supervisor(paths: &DesktopPaths) -> Result<(Supervisor, String, u16), S
             probe.warning.clone().unwrap_or_default()
         ),
     );
-    let supervisor = Supervisor::start(SupervisorConfig {
+    let config = SupervisorConfig {
         launch,
         data_dir: paths.data_dir.clone(),
         console_port: probe.port,
         ipc_pipe: Some(pipe.clone()),
         health_timeout: supervisor::DEFAULT_HEALTH_TIMEOUT,
-    });
+    };
+    let supervisor = match listener {
+        Some(listener) => Supervisor::start_with_status_listener(config, listener),
+        None => Supervisor::start(config),
+    };
     Ok((supervisor, pipe, probe.port))
 }
 
@@ -510,7 +524,10 @@ fn run_native_ui(paths: DesktopPaths) -> Result<(), String> {
             let tray = tray::TrayHandle::new(
                 Arc::clone(&tray_supervisor),
                 tray_data_dir.clone(),
-                creation_context.egui_ctx.clone(),
+                Arc::new({
+                    let context = creation_context.egui_ctx.clone();
+                    move || context.request_repaint()
+                }),
             )
             .map_err(|error| {
                 supervisor::write_shell_log(
@@ -608,7 +625,28 @@ fn main() {
             std::process::exit(2);
         }
     };
-    if let Err(error) = run_native_ui(paths) {
+    let selection = match webview_policy::select_ui(&argv, cfg!(debug_assertions)) {
+        Ok(selection) => selection,
+        Err(error) => {
+            eprintln!("[whalebridge-desktop] {error}");
+            std::process::exit(2);
+        }
+    };
+    let app_result = match selection.mode {
+        webview_policy::UiMode::Legacy => run_native_ui(paths),
+        webview_policy::UiMode::V2 => {
+            #[cfg(windows)]
+            { webview_ui::run_webview_ui(paths, selection.dev_url) }
+            #[cfg(not(windows))]
+            { Err("WebView2 UI is supported on Windows only".to_owned()) }
+        }
+    };
+    if let Err(error) = app_result {
+        let _ = rfd::MessageDialog::new()
+            .set_title("CetaMesh 启动失败")
+            .set_description(&error)
+            .set_buttons(rfd::MessageButtons::Ok)
+            .show();
         eprintln!("[whalebridge-desktop] {error}");
         std::process::exit(1);
     }

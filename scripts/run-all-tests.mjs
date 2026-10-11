@@ -67,6 +67,7 @@ const REGISTRY = {
   'test-composition-boundary.mjs': { category: 'architecture' },
   'test-capability-coverage.mjs': { category: 'architecture' },
   'test-desktop-chat-product.mjs': { category: 'architecture' },
+  'test-desktop-ui-v2-production.mjs': { category: 'architecture', note: 'Owner-selected Harbor WebView2 UI, typed bridge, secure bundle, and production no-HTTP contract' },
   'test-process-extension-host.mjs': { category: 'architecture' },
   'test-workspace-ipc.mjs': { category: 'architecture' },
   'test-smart-platform-routing.mjs': { category: 'architecture' },

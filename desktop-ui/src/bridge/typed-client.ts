@@ -1,0 +1,264 @@
+import type { AboutView } from '../types/views';
+
+export interface ChatSession {
+  id: string; title: string; createdAt: string | number | null; updatedAt: string | number | null;
+  archived: boolean; config: { mode: string; modelProvider: string | null; model: string; agentProvider: string | null };
+}
+export interface ChatMessage {
+  id: string; role: 'user' | 'assistant' | 'system'; text: string; at: string | number | null;
+  attachments: string[]; toolActivity: { id: string; label: string; status: string; summary: string; durationMs: number | null }[];
+  error: string | null; cancelled: boolean;
+}
+export interface Task {
+  id: string; title: string; goal: string; status: string; currentPhase: string;
+  progress: { percent: number; note: string }; workspaceId: string | null; agent: string | null;
+  createdAt: string | number | null; updatedAt: string | number | null; rev: number | null;
+  checkpoint: { summary: string; nextAction: string } | null; result: { summary: string } | null;
+  artifacts: { id: string; kind: string; label: string; createdAt: string | number | null }[];
+}
+export interface Memory {
+  id: string; type: string; scope: string; title: string; content: string; summary: string;
+  tags: string[]; pinned: boolean; rev: number | null; createdAt: string | number | null; updatedAt: string | number | null;
+}
+export interface Agent {
+  id: string; name: string; role: string; description: string; available: boolean; status: string;
+  version: string | null; desktopApp: { installed: boolean; running: boolean; status: string; version: string | null } | null;
+}
+export interface Plugin {
+  id: string; name: string; summary: string; description: string; developer: string; version: string;
+  status: string; category: string; kind: string; featured: boolean; installed: boolean; enabled: boolean;
+  icon: string; permissions: string[]; changelog: string[]; compatibility: { minimum: string | null; maximum: string | null };
+  screenshotCount: number; warning: string | null;
+}
+export interface Approval {
+  id: string; title: string; capability: string; status: string; createdAt: string | number | null;
+  expiresAt: string | number | null; summary: string; risk: string; taskId: string | null;
+}
+export interface Attachment { name: string; content: string; mimeType?: string }
+export type Settings = Record<string, Record<string, string | number | boolean | null>>;
+
+export type DesktopEvent = 'core.status' | 'chat.updated' | 'chat.streaming' | 'task.updated' | 'task.deleted'
+  | 'agent.updated' | 'workspace.updated' | 'plugin.updated' | 'plugin.downloadProgress' | 'approval.pending' | 'approval.resolved'
+  | 'model.updated' | 'memory.updated' | 'update.status' | 'device.updated';
+export interface DesktopEventData {
+  sessionId?: string; taskId?: string; agentId?: string; pluginId?: string; serverId?: string; approvalId?: string;
+  provider?: string; status?: string; progress?: number; ready?: boolean; needsAttention?: boolean;
+}
+type UiMethod =
+  | 'ui.events.next'
+  | 'ui.chat.sessions.list' | 'ui.chat.sessions.create' | 'ui.chat.sessions.rename' | 'ui.chat.sessions.archive' | 'ui.chat.sessions.delete'
+  | 'ui.chat.history' | 'ui.chat.status' | 'ui.chat.send' | 'ui.chat.stop' | 'ui.chat.retry' | 'ui.chat.continue' | 'ui.chat.catalog' | 'ui.chat.config.set'
+  | 'ui.task.overview' | 'ui.task.get' | 'ui.task.create' | 'ui.task.pause' | 'ui.task.resume' | 'ui.task.cancel'
+  | 'ui.workspace.list' | 'ui.workspace.open' | 'ui.workspace.create'
+  | 'ui.memory.overview' | 'ui.memory.get' | 'ui.memory.create' | 'ui.memory.update' | 'ui.memory.pin' | 'ui.memory.delete'
+  | 'ui.agent.list' | 'ui.agent.health'
+  | 'ui.plugins.catalog' | 'ui.plugins.status' | 'ui.plugins.detail' | 'ui.plugins.refresh' | 'ui.plugins.stage' | 'ui.plugins.install'
+  | 'ui.plugins.enable.review' | 'ui.plugins.enable' | 'ui.plugins.disable' | 'ui.plugins.uninstall' | 'ui.plugins.integration.list' | 'ui.plugins.integration.settings'
+  | 'ui.plugins.integration.manage' | 'ui.plugins.integration.tool.toggle'
+  | 'ui.mcp.list' | 'ui.mcp.tools' | 'ui.mcp.manage' | 'ui.mcp.config.get' | 'ui.mcp.config.update'
+  | 'ui.settings.describe' | 'ui.settings.get' | 'ui.settings.update' | 'ui.about.info' | 'ui.about.update'
+  | 'ui.feedback.links'
+  | 'ui.update.capabilities' | 'ui.update.check' | 'ui.update.notes'
+  | 'ui.onboarding.status' | 'ui.onboarding.start' | 'ui.onboarding.completeStep' | 'ui.onboarding.skipStep' | 'ui.onboarding.finish' | 'ui.onboarding.testProvider' | 'ui.onboarding.setModel'
+  | 'ui.approvals.list' | 'ui.approvals.decide' | 'ui.search';
+type Empty = Record<string, never>;
+type HostMethod = 'app.ping' | 'app.status' | 'app.about' | 'app.openExternal' | 'app.pickFolder' | 'app.pickFiles' | 'app.setWindowBehavior';
+type HostMap = {
+  'app.ping': { params: Empty; result: { host: 'webview2'; ready: boolean } };
+  'app.status': { params: Empty; result: { ready: boolean; needsAttention: boolean } };
+  'app.about': { params: Empty; result: AboutView };
+  'app.openExternal': { params: { url: string }; result: { opened: boolean } };
+  'app.pickFolder': { params: Empty; result: { path: string | null } };
+  'app.pickFiles': { params: Empty; result: { attachments: Attachment[] } };
+  'app.setWindowBehavior': { params: { confirmOnExit: boolean }; result: { updated: boolean } };
+};
+type Reply = { id: string; ok: true; result: unknown } | { id: string; ok: false; error: { code: string; message: string } };
+type EventEnvelope = { event: DesktopEvent; data: DesktopEventData };
+interface HostBridge {
+  invoke<M extends HostMethod>(method: M, params: HostMap[M]['params']): Promise<HostMap[M]['result']>;
+  subscribe(event: DesktopEvent, callback: (data: DesktopEventData) => void): () => void;
+}
+declare global {
+  interface Window {
+    ipc?: { postMessage(message: string): void };
+    cetamesh: HostBridge;
+    __cetameshReceive?: (reply: Reply) => void;
+    __cetameshEvent?: (event: EventEnvelope) => void;
+  }
+}
+
+const pending = new Map<string, { resolve(value: unknown): void; reject(error: Error): void; timer: number }>();
+const listeners = new Map<DesktopEvent, Set<(data: DesktopEventData) => void>>();
+let nextId = 0;
+let cursor = 0;
+let eventPump: Promise<void> | null = null;
+const MAX_BRIDGE_REQUEST_BYTES = 900 * 1024;
+
+function send<T>(method: HostMethod | UiMethod, params: object): Promise<T> {
+  if (!window.ipc) return Promise.reject(new Error('桌面主机连接不可用。请从 CetaMesh Desktop 打开此界面。'));
+  const payload = JSON.stringify({ id: `harbor-${nextId + 1}`, method, params });
+  if (new TextEncoder().encode(payload).byteLength > MAX_BRIDGE_REQUEST_BYTES) {
+    return Promise.reject(new Error('此请求超过桌面桥接大小限制。请减少附件数量或选择较小文件。'));
+  }
+  const id = `harbor-${++nextId}`;
+  return new Promise<T>((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      pending.delete(id);
+      reject(new Error('桌面主机响应超时。'));
+    }, 32_000);
+    pending.set(id, { resolve: value => resolve(value as T), reject, timer });
+    window.ipc!.postMessage(JSON.stringify({ id, method, params }));
+  });
+}
+const uiCall = <T>(method: UiMethod, params: object) => send<T>(method, params);
+
+window.__cetameshReceive = (reply) => {
+  const request = pending.get(reply.id);
+  if (!request) return;
+  window.clearTimeout(request.timer);
+  pending.delete(reply.id);
+  if (reply.ok) request.resolve(reply.result);
+  else request.reject(Object.assign(new Error(reply.error.message), { code: reply.error.code }));
+};
+window.__cetameshEvent = ({ event, data }) => {
+  for (const listener of listeners.get(event) ?? []) listener(data);
+};
+
+async function runEventPump(): Promise<void> {
+  while (listeners.size > 0 && window.ipc) {
+    try {
+      const response = await uiCall<{ events: { cursor: number; event: DesktopEvent; data: DesktopEventData }[]; cursor: number }>(
+        'ui.events.next', { after: cursor, waitMs: 20_000 }
+      );
+      cursor = Math.max(cursor, response.cursor);
+      for (const event of response.events) window.__cetameshEvent?.(event);
+    } catch {
+      await new Promise(resolve => window.setTimeout(resolve, 1200));
+    }
+  }
+}
+
+export const bridge: HostBridge = Object.freeze({
+  invoke<M extends HostMethod>(method: M, params: HostMap[M]['params']): Promise<HostMap[M]['result']> {
+    return send(method, params);
+  },
+  subscribe(event: DesktopEvent, callback: (data: DesktopEventData) => void) {
+    const group = listeners.get(event) ?? new Set();
+    group.add(callback);
+    listeners.set(event, group);
+    if (!eventPump && window.ipc) eventPump = runEventPump().finally(() => { eventPump = null; });
+    return () => { group.delete(callback); if (!group.size) listeners.delete(event); };
+  }
+});
+window.cetamesh = bridge;
+
+export const chatClient = {
+  sessions: {
+    list: (includeArchived = false) => uiCall<{ sessions: ChatSession[] }>('ui.chat.sessions.list', { includeArchived }),
+    create: (title = '') => uiCall<ChatSession>('ui.chat.sessions.create', { title }),
+    rename: (id: string, title: string) => uiCall<ChatSession>('ui.chat.sessions.rename', { id, title }),
+    archive: (id: string, archived = true) => uiCall<ChatSession>('ui.chat.sessions.archive', { id, archived }),
+    remove: (id: string) => uiCall<{ id: string; deleted: boolean }>('ui.chat.sessions.delete', { id })
+  },
+  history: (id: string, limit = 100) => uiCall<{ id: string; total: number; messages: ChatMessage[] }>('ui.chat.history', { id, limit }),
+  status: (id: string) => uiCall<{ id: string; state: string; displayText: string; error: string | null; approvalId: string | null; approvalExpiresAt: string | number | null; routing: Record<string, unknown> }>('ui.chat.status', { id }),
+  send: (id: string, text: string, attachments: Attachment[] = []) => uiCall<{ userMessageId?: string }>('ui.chat.send', { id, text, attachments }),
+  stop: (id: string) => uiCall<{ stopped?: boolean; state?: string; reason?: string }>('ui.chat.stop', { id }),
+  retry: (id: string) => uiCall<{ userMessageId?: string }>('ui.chat.retry', { id }),
+  continue: (id: string) => uiCall<{ continued?: boolean }>('ui.chat.continue', { id }),
+  catalog: () => uiCall<{ models: unknown[]; modelProviders: { id: string; label: string; configured: boolean; models: { id?: string; name?: string; label?: string }[] }[]; agentProviders: Agent[]; modes: string[]; defaultModelProvider: string | null; available: boolean; reason: string | null }>('ui.chat.catalog', {}),
+  setConfig: (id: string, config: Record<string, unknown>) => uiCall<ChatSession>('ui.chat.config.set', { id, config })
+};
+export const taskClient = {
+  overview: (query = '', status = '') => uiCall<{ tasks: Task[]; total: number; counts: Record<string, number>; needsAttention: string[] }>('ui.task.overview', { query, status, limit: 100 }),
+  get: (id: string) => uiCall<{ task: Task }>('ui.task.get', { id }),
+  create: (input: { goal: string; requirements?: string[]; workspaceId?: string | null; note?: string }) => uiCall<{ task: Task }>('ui.task.create', input),
+  pause: (id: string, expectedRev?: number) => uiCall<{ task: Task }>('ui.task.pause', { id, expectedRev }),
+  resume: (id: string, expectedRev?: number) => uiCall<{ task: Task }>('ui.task.resume', { id, expectedRev }),
+  cancel: (id: string, expectedRev?: number) => uiCall<{ task: Task }>('ui.task.cancel', { id, expectedRev })
+};
+export const memoryClient = {
+  overview: (query = '', scope = '', limit = 100) => uiCall<{ memories: Memory[]; total: number; candidates: unknown[] }>('ui.memory.overview', { query, scope, limit }),
+  get: (id: string) => uiCall<Memory>('ui.memory.get', { id}),
+  create: (input: { type: string; scope: string; content: string; tags?: string[]; pinned?: boolean }) => uiCall<Memory>('ui.memory.create', input),
+  update: (input: { id: string; expectedRev?: number; content: string; tags?: string[]; pinned?: boolean }) => uiCall<Memory>('ui.memory.update', input),
+  pin: (id: string, pinned: boolean, expectedRev?: number) => uiCall<Memory>('ui.memory.pin', { id, pinned, expectedRev }),
+  remove: (id: string, expectedRev?: number) => uiCall<{ id: string; deleted: boolean }>('ui.memory.delete', { id, expectedRev })
+};
+export const agentClient = {
+  list: () => uiCall<{ agents: Agent[] }>('ui.agent.list', {}),
+  health: (provider: string) => uiCall<Agent>('ui.agent.health', { provider })
+};
+export const pluginClient = {
+  catalog: (query = '', category = '', view = 'all') => uiCall<{ available: boolean; configured: boolean; offline: boolean; reason: string | null; plugins: Plugin[] }>('ui.plugins.catalog', { query, category, view }),
+  status: () => uiCall<{ catalogAvailable: boolean; configured: boolean; offline: boolean; plugins: Plugin[]; installed: Plugin[] }>('ui.plugins.status', {}),
+  detail: (id: string) => uiCall<{ available: boolean; offline: boolean; plugin: Plugin | null }>('ui.plugins.detail', { id }),
+  refresh: () => uiCall<Record<string, unknown>>('ui.plugins.refresh', {}),
+  stage: (id: string) => uiCall<{ stageId: string; plugin: Plugin; requiresReview: boolean; installable: boolean; permissions: string[]; summary: string[]; trust: string }>('ui.plugins.stage', { id }),
+  install: (stageId: string) => uiCall<{ installed: boolean; plugin: Plugin }>('ui.plugins.install', { stageId, reviewed: true }),
+  reviewEnable: (id: string) => uiCall<{ id: string; stageId: string; requiresReview: boolean; installable: boolean; permissions: string[]; summary: string[]; trust: string }>('ui.plugins.enable.review', { id }),
+  enable: (id: string, stageId = '') => uiCall<Record<string, unknown>>('ui.plugins.enable', { id, stageId, reviewed: true }),
+  disable: (id: string) => uiCall<Record<string, unknown>>('ui.plugins.disable', { id }),
+  uninstall: (id: string) => uiCall<Record<string, unknown>>('ui.plugins.uninstall', { id }),
+  integrations: () => uiCall<{ integrations: { id: string; name: string; status: string; enabled: boolean; available: boolean }[] }>('ui.plugins.integration.list', {}),
+  integrationSettings: (id: string) => uiCall<{ id: string; name: string; enabled: boolean; available: boolean; tools: { id: string; name: string; enabled: boolean; available: boolean; permission: string }[]; settings: Record<string, unknown> }>('ui.plugins.integration.settings', { id }),
+  manageIntegration: (id: string, action: 'enable' | 'disable') => uiCall<Record<string, unknown>>('ui.plugins.integration.manage', { id, action }),
+  toggleTool: (pluginId: string, toolId: string, enabled: boolean) => uiCall<Record<string, unknown>>('ui.plugins.integration.tool.toggle', { pluginId, toolId, enabled }),
+  mcp: () => uiCall<{ servers: { id: string; name: string; status: string; enabled: boolean; available: boolean; toolCount: number | null; transport: string; reason: string | null }[] }>('ui.mcp.list', {}),
+  mcpTools: (id: string) => uiCall<{ serverId: string; tools: { id: string; name: string; description: string; enabled: boolean }[] }>('ui.mcp.tools', { id }),
+  manageMcp: (serverId: string, action: 'enable' | 'disable' | 'start' | 'stop' | 'restart') => uiCall<Record<string, unknown>>('ui.mcp.manage', { serverId, action }),
+  mcpConfig: (serverId: string) => uiCall<{ id: string; enabled: boolean; hasArgs: boolean; hasEnvironment: boolean; timeoutMs: number | null; note: string }>('ui.mcp.config.get', { serverId }),
+  updateMcpConfig: (serverId: string, config: { timeoutMs?: number; note?: string }) => uiCall<{ id: string; updatedKeys: string[] }>('ui.mcp.config.update', { serverId, config })
+};
+export const settingsClient = {
+  describe: () => uiCall<{ sections: { section: string; label: string }[]; fields: SettingSection[] }>('ui.settings.describe', {}),
+  get: () => uiCall<{ settings: Settings; revision: number | null }>('ui.settings.get', {}),
+  update: (section: string, values: Record<string, unknown>, expectedRev?: number | null) => uiCall<{ settings: Settings; revision: number | null }>('ui.settings.update', { section, values, expectedRev })
+};
+export interface SettingField {
+  key: string; label: string; type: string; description: string; default: string | number | boolean | null;
+  choices: string[]; locked: boolean; min: number | null; max: number | null;
+}
+export interface SettingSection { section: string; label: string; fields: SettingField[] }
+export const updateClient = {
+  capabilities: () => uiCall<Record<string, unknown>>('ui.update.capabilities', {}),
+  check: () => uiCall<Record<string, unknown>>('ui.update.check', {}),
+  notes: () => uiCall<Record<string, unknown>>('ui.update.notes', {})
+};
+export const aboutClient = {
+  info: () => uiCall<AboutView & { productName?: string; buildNumber?: number; channel?: string; commit?: string; platform?: string }>('ui.about.info', {}),
+  update: () => uiCall<Record<string, unknown>>('ui.about.update', {})
+};
+export const feedbackClient = {
+  links: () => uiCall<{ configured: boolean; entries: { id: string; label: string; description: string; kind: 'feedback' | 'security'; url: string | null }[]; securityNotice: string; message: string }>('ui.feedback.links', {})
+};
+export const workspaceClient = {
+  list: () => uiCall<{ workspaces: { id: string; name: string; status: string; lastActivity: string | number | null }[]; activeId: string | null }>('ui.workspace.list', {}),
+  open: (id: string) => uiCall<{ activeId: string | null; workspace: { id: string; name: string; status: string } }>('ui.workspace.open', { id }),
+  create: (name: string, root: string) => uiCall<{ id: string; name: string; status: string }>('ui.workspace.create', { name, root })
+};
+export const approvalClient = {
+  list: () => uiCall<{ approvals: Approval[] }>('ui.approvals.list', {}),
+  decide: (id: string, approve: boolean) => uiCall<Record<string, unknown>>('ui.approvals.decide', { id, approve })
+};
+export interface OnboardingStatus { complete: boolean; currentStep: string | null; steps: { id: string; title: string; description: string; status: string; optional: boolean }[] }
+export const onboardingClient = {
+  status: () => uiCall<OnboardingStatus>('ui.onboarding.status', {}),
+  start: () => uiCall<OnboardingStatus>('ui.onboarding.start', {}),
+  completeStep: (stepId: string, data: Record<string, unknown> = {}) => uiCall<unknown>('ui.onboarding.completeStep', { stepId, data }),
+  skipStep: (stepId: string) => uiCall<unknown>('ui.onboarding.skipStep', { stepId }),
+  finish: () => uiCall<unknown>('ui.onboarding.finish', {}),
+  testProvider: (provider: string, apiKey: string, baseUrl = '') => uiCall<{ ok: boolean; provider: string; message?: string; code?: string; connectionStepCompleted?: boolean }>('ui.onboarding.testProvider', { provider, apiKey, baseUrl }),
+  setModel: (provider: string, model: string) => uiCall<Record<string, unknown>>('ui.onboarding.setModel', { provider, model })
+};
+export const searchClient = { search: (query: string) => uiCall<{ sessions: ChatSession[]; tasks: Task[]; plugins: Plugin[] }>('ui.search', { query }) };
+export const hostClient = {
+  status: () => bridge.invoke('app.status', {}),
+  about: () => bridge.invoke('app.about', {}),
+  pickFolder: () => bridge.invoke('app.pickFolder', {}),
+  pickFiles: () => bridge.invoke('app.pickFiles', {}),
+  setWindowBehavior: (confirmOnExit: boolean) => bridge.invoke('app.setWindowBehavior', { confirmOnExit })
+};
+export async function openExternal(url: string): Promise<void> {
+  if (url.startsWith('https://')) await bridge.invoke('app.openExternal', { url });
+}

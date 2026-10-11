@@ -54,6 +54,7 @@ function parseArgs(argv) {
 const options = parseArgs(process.argv.slice(2));
 
 const CORE_DIR = options.coreDir ?? path.join(ROOT, 'dist', 'core');
+const UI_DIR = path.join(ROOT, 'desktop-ui', 'dist');
 const SHELL_EXE = options.shellExe ?? path.join(ROOT, 'desktop-shell', 'target', 'release', 'whalebridge-desktop.exe');
 const STAGING_ROOT = path.join(ROOT, 'artifacts', '.staging');
 
@@ -107,6 +108,18 @@ function gitOutput(args) {
   return result.status === 0 ? String(result.stdout ?? '').trim() : '';
 }
 
+function buildHarborUi() {
+  const npmCli = process.env.npm_execpath;
+  if (!npmCli) fail('release build must run through npm so the Harbor UI can be built reproducibly');
+  const result = spawnSync(process.execPath, [npmCli, 'run', 'build:ui'], {
+    cwd: ROOT, encoding: 'utf8', timeout: 240_000, windowsHide: true
+  });
+  if (result.stdout) process.stdout.write(result.stdout);
+  if (result.stderr) process.stderr.write(result.stderr);
+  if (result.error || result.status !== 0) fail(`Harbor UI build failed${result.error ? `: ${result.error.message}` : ''}`);
+  if (!fs.existsSync(path.join(UI_DIR, 'index.html'))) fail('Harbor UI build did not produce desktop-ui/dist/index.html');
+}
+
 function sha256(file) {
   return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 }
@@ -132,6 +145,8 @@ function mb(bytes) {
 }
 
 // ------------------------------------------------------------- 前置检查
+
+buildHarborUi();
 
 if (!fs.existsSync(path.join(CORE_DIR, 'WhaleBridgeCore.exe'))) {
   fail(`未找到 ${path.join(CORE_DIR, 'WhaleBridgeCore.exe')} —— 请先执行 npm run build:core`);
@@ -190,7 +205,17 @@ for (const relative of listFiles(CORE_DIR)) {
   fs.mkdirSync(path.dirname(target), { recursive: true });
   fs.copyFileSync(path.join(CORE_DIR, relative), target);
 }
+const uiFiles = listFiles(UI_DIR);
+if (!uiFiles.includes('index.html')) fail('Harbor UI bundle is missing index.html');
+try { assertNoWebUiHtmlArtifacts(uiFiles, 'Harbor UI bundle'); } catch (error) { fail(error.message); }
+const uiResourceDir = path.join(payloadDir, 'resources', 'desktop-ui');
+for (const relative of uiFiles) {
+  const target = path.join(uiResourceDir, relative);
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.copyFileSync(path.join(UI_DIR, relative), target);
+}
 fs.copyFileSync(SHELL_EXE, path.join(BUILD_DIR, 'WhaleBridge.exe'));
+log(`  Harbor UI ${uiFiles.length} 个静态文件 ${mb(directorySize(uiResourceDir))}`);
 log(`  WhaleBridge.exe ${mb(shellSize)}，payload/ ${listFiles(payloadDir).length} 个文件 ${mb(directorySize(payloadDir))}`);
 
 // 构建来源信息：About 页面在打包运行时读取 <资源根>/build-info.json。
@@ -226,6 +251,14 @@ if (fs.existsSync(metaFile)) {
   }
   bundledPackages = [...names].sort();
 }
+const rendererLockFile = path.join(ROOT, 'desktop-ui', 'package-lock.json');
+let rendererPackages = [];
+if (fs.existsSync(rendererLockFile)) {
+  const rendererLock = JSON.parse(fs.readFileSync(rendererLockFile, 'utf8'));
+  rendererPackages = Object.entries(rendererLock.packages ?? {})
+    .filter(([entry, meta]) => entry.startsWith('node_modules/') && typeof meta.version === 'string' && meta.dev !== true)
+    .map(([entry, meta]) => ({ name: entry.slice('node_modules/'.length), version: meta.version, license: meta.license }));
+}
 
 const components = [];
 const thirdPartyLines = [
@@ -237,14 +270,15 @@ const thirdPartyLines = [
   '|---|---|---|---|'
 ];
 
-function describePackage(name, makeType) {
-  const pkgFile = path.join(ROOT, 'node_modules', name, 'package.json');
-  if (!fs.existsSync(pkgFile)) return null;
-  const meta = JSON.parse(fs.readFileSync(pkgFile, 'utf8'));
-  const licenseDir = path.join(ROOT, 'node_modules', name);
-  const licenseFile = fs
-    .readdirSync(licenseDir)
-    .find((entry) => /^(licen[cs]e|copying)/i.test(entry));
+function describePackage(name, makeType, nodeModulesDir, fallbackMeta = null) {
+  const packageDir = path.join(nodeModulesDir, name);
+  const pkgFile = path.join(packageDir, 'package.json');
+  const meta = fs.existsSync(pkgFile) ? JSON.parse(fs.readFileSync(pkgFile, 'utf8')) : fallbackMeta;
+  if (!meta) return null;
+  const licenseFile = fs.existsSync(packageDir)
+    ? fs.readdirSync(packageDir, { withFileTypes: true })
+      .find((entry) => entry.isFile() && /^(licen[cs]e|copying)/i.test(entry.name))?.name ?? null
+    : null;
   return {
     type: makeType,
     name,
@@ -264,8 +298,13 @@ components.push({
   note: 'WhaleBridgeCore.exe 由 Node.js SEA 宿主 + 注入 bundle 组成'
 });
 for (const name of bundledPackages) {
-  const described = describePackage(name, 'library');
-  if (described) components.push(described);
+  const described = describePackage(name, 'library', path.join(ROOT, 'node_modules'));
+  if (described && !components.some(item => item.name === described.name && item.version === described.version)) components.push(described);
+}
+const rendererNodeModules = path.join(ROOT, 'desktop-ui', 'node_modules');
+for (const item of rendererPackages) {
+  const described = describePackage(item.name, 'library', rendererNodeModules, item);
+  if (described && !components.some(existing => existing.name === described.name && existing.version === described.version)) components.push(described);
 }
 
 for (const component of components) {
@@ -447,7 +486,8 @@ const manifest = {
   noWebUi: options.noWebUi,
   // 发行运行面红线（D1）：与 runtime-manifest.legacyHttp 一致，release worker 不监听 consolePort。
   legacyHttp: false,
-  uiDistribution: options.noWebUi ? 'native-no-web' : 'web-compatibility',
+  coreUiDistribution: options.noWebUi ? 'native-no-web' : 'web-compatibility',
+  uiDistribution: 'webview2-bundled',
   node: process.version,
   platform: `${process.platform}-${process.arch}`,
   entry: setupFilename,
@@ -524,7 +564,7 @@ writeJsonAtomic(MANIFEST_INDEX, manifest, { mode: 0o644 });
 
 log('');
 log(`完成：${path.relative(ROOT, OUT_DIR)}（${mb(directorySize(OUT_DIR))}）`);
-log(`  组件：${components.length} 个（Node.js + ${bundledPackages.length} 个 npm 依赖）`);
+log(`  组件：${components.length} 个（Node.js + ${bundledPackages.length} 个 Core npm 依赖 + ${rendererPackages.length} 个 Harbor 生产依赖）`);
 log('  校验：SHA256SUMS.txt / release-manifest.json / sbom.json');
 log(`  审计：禁止项、构建机路径、凭据泄漏均通过`);
 log('  未验证项已写入 release-manifest.json 的 notVerified');

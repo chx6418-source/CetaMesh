@@ -1,4 +1,4 @@
-// Shared policy for every production release. Product HTML is never shipped.
+// Legacy standalone HTML consoles are excluded. The bundled Harbor WebView2 UI is packaged separately.
 const PRODUCT_HTML_BASENAMES = new Set([
   'console.html',
   'token-login.html',

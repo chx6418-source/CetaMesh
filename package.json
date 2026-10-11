@@ -73,6 +73,7 @@
     "desktop:install": "cargo build --manifest-path desktop-shell/Cargo.toml && desktop-shell/target/debug/whalebridge-desktop.exe --install",
     "build:icons": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-app-icons.ps1",
     "build:core": "node scripts/build-core.mjs",
+    "build:ui": "npm --prefix desktop-ui run build",
     "build:release": "node scripts/build-release.mjs",
     "version:show": "node scripts/release-version.mjs show",
     "version:set": "node scripts/release-version.mjs set",

@@ -22,9 +22,13 @@ try {
     })
   });
   const list = await service.execute({ method: 'integrations.list' });
-  assert.equal(list.integrations.length, 2);
+  assert.equal(list.integrations.length, 3);
   const snow = list.integrations.find(item => item.id === 'cetamesh-snowluma');
   const dsh = list.integrations.find(item => item.id === 'cetamesh-dsh');
+  const bionic = list.integrations.find(item => item.id === 'cetamesh-bionic-chat');
+  assert.ok(bionic, 'Bionic tool pack appears in the Plugin Center Integration list');
+  assert.equal(bionic.available, true);
+  assert.ok(bionic.toolCount >= 50);
 
   assert.equal(snow.kind, 'channel-integration');
   assert.equal(snow.bottomLayer, 'channel-provider');

@@ -15,7 +15,7 @@ use crate::native_ui::CoreApi;
 
 const PROTOCOL_VERSION: u64 = 1;
 const MAX_FRAME_BYTES: usize = 1024 * 1024;
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const CONNECT_RETRY_DELAY: Duration = Duration::from_millis(40);
 const IO_RETRY_DELAY: Duration = Duration::from_millis(4);
 const ERROR_NO_DATA: i32 = 232;
