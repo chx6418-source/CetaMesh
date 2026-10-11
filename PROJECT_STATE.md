@@ -96,7 +96,7 @@
 
 - UI v1（Owner 选定方案 01/02/04 融合，主题收敛为唯一「纸面」）**已完成并在 Owner 确认后合并**到本地
   `main`（快进；探索稿分支 design/ui-ia-exploration-2026-10 同批并入以兑现代码注释引用的视觉事实源）；
-  工作分支 feature/product-ui-v1 与 worktree .worktrees/2026-10-11-product-ui-v1 已删除。
+  合并完成：main 位于探索稿并入后的合并提交；工作分支 feature/product-ui-v1 与 worktree .worktrees/2026-10-11-product-ui-v1 已删除；安装包与纸面验收截图已拷贝到主检出目录 dist/app 与 output/uiv1-qa9。
   最终交付：导航 15→5+2；Chat 第一入口（历史列/消息区/Composer、工具·Agent·模型渐进披露）；
   智能体接 agent.list、插件接 plugins.*/tools.*/mcp.*（pending 不自动批准）；
   主题=唯一「纸面」（十主题移除、旧偏好值回落）；Core 状态卡在 设置→高级。
