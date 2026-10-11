@@ -92,7 +92,9 @@
 - 桌面壳 `supervisor.rs` 的 HTTP 探活 fallback 已是死代码（待后续会话删除）。
 - NOT_RUN_ENVIRONMENT（无真实环境时如实不跑）：真实 provider-key 回合 / 真实 QQ / 跨设备 Mesh / 签名 / 真实发行产物。
 
-## Active Work (none)
+## Active Work (Owner confirmation pending)
+
+- DSH Desktop Application Integration 完成，隔离分支 `codex/dsh-desktop-integration-v1`，worktree `C:\Users\Administrator\.codex\worktrees\dsh-desktop-integration-v1\GIT-QQ-BRIDGE`。Base HEAD `aec93a04a3b2b418f9345250e7fa190bdabef79c`；实现 HEAD `7a92356d11a6f2f6e01640e121c2a888e534e07e`。全量 `npm test`（启用登记的 Cargo suites）为 85 PASS / 0 FAIL / 10 NOT_RUN_ENVIRONMENT。实际检测到 DSH Desktop `0.2.0-rc.2` 运行中，CLI `0.1.5-rc.1` 可用。详见 `DSH_DESKTOP_INTEGRATION_REPORT.md`。尚未合并、推送或删除分支；等待 Owner 确认。
 
 - UI v1（Owner 选定方案 01/02/04 融合，主题收敛为唯一「纸面」）**已完成并在 Owner 确认后合并**到本地
   `main`（快进；探索稿分支 design/ui-ia-exploration-2026-10 同批并入以兑现代码注释引用的视觉事实源）；
