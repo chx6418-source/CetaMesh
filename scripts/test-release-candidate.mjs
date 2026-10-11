@@ -190,11 +190,12 @@ const require = (await import('node:module')).createRequire(import.meta.url);
 // ---------------------------------------------------------------- 前置
 
 assert.ok(fs.existsSync(path.join(RC_DIR, 'WhaleBridge.exe')), `未找到发行包 ${RC_DIR}，请先执行 npm run build:release`);
-const setupExe = path.join(RC_DIR, 'WhaleBridge-Setup-x64.exe');
-assert.ok(fs.existsSync(setupExe), '发行包缺少 WhaleBridge-Setup-x64.exe');
+const releaseManifest = JSON.parse(fs.readFileSync(path.join(RC_DIR, 'release-manifest.json'), 'utf8'));
+const setupExe = path.join(RC_DIR, releaseManifest.entry);
+assert.match(releaseManifest.entry, /^CetaMesh-Setup-.+-build\d+-x64\.exe$/);
+assert.ok(fs.existsSync(setupExe), `发行包缺少 ${releaseManifest.entry}`);
 assert.deepEqual([...fs.readFileSync(setupExe).subarray(0, 2)], [0x4d, 0x5a], '单文件安装器应为 Windows PE');
 assert.ok(fs.existsSync(path.join(RC_DIR, 'payload', 'WhaleBridgeCore.exe')), '发行包缺少 payload/WhaleBridgeCore.exe');
-const releaseManifest = JSON.parse(fs.readFileSync(path.join(RC_DIR, 'release-manifest.json'), 'utf8'));
 const noWebUi = releaseManifest.noWebUi === true;
 assert.equal(noWebUi, true, '默认发行必须是 no-web 原生桌面发行，不能回退到网页兼容包');
 assert.equal(releaseManifest.uiDistribution, 'native-no-web');

@@ -12,7 +12,17 @@ import { assertNoWebUiBinaryMarkers, assertNoWebUiHtmlArtifacts } from './no-web
 
 const args = process.argv.slice(2);
 const noWebUi = true;
-const positionalArgs = args.filter((arg) => arg !== '--no-web-ui');
+let outputName = 'WhaleBridge-Setup-x64.exe';
+const positionalArgs = [];
+for (let index = 0; index < args.length; index += 1) {
+  if (args[index] === '--no-web-ui') continue;
+  if (args[index] === '--output-name') {
+    outputName = String(args[index + 1] ?? '');
+    index += 1;
+    continue;
+  }
+  positionalArgs.push(args[index]);
+}
 const [outDirArg, payloadDirArg] = positionalArgs;
 if (!outDirArg || !payloadDirArg) {
   process.stderr.write('用法：node scripts/package-installer.mjs <输出目录> <payload 目录>\n');
@@ -21,7 +31,11 @@ if (!outDirArg || !payloadDirArg) {
 const outDir = path.resolve(outDirArg);
 const payloadDir = path.resolve(payloadDirArg);
 const shellExe = path.join(outDir, 'WhaleBridge.exe');
-const outputExe = path.join(outDir, 'WhaleBridge-Setup-x64.exe');
+if (path.basename(outputName) !== outputName || !/^[A-Za-z0-9._-]{1,180}\.exe$/i.test(outputName)) {
+  process.stderr.write('[package-installer] output name must be a plain .exe filename\n');
+  process.exit(2);
+}
+const outputExe = path.join(outDir, outputName);
 const systemRoot = process.env.SystemRoot || 'C:\\Windows';
 const iexpress = path.join(systemRoot, 'System32', 'iexpress.exe');
 const scriptsDir = path.dirname(fileURLToPath(import.meta.url));
@@ -81,7 +95,7 @@ process.on('exit', cleanupWorkDir);
 try {
   const archiveName = 'WhaleBridgePayload.zip';
   const archivePath = path.join(workDir, archiveName);
-  const packagedExe = path.join(workDir, 'WhaleBridge-Setup-x64.exe');
+  const packagedExe = path.join(workDir, outputName);
   const archiveScript = path.join(workDir, 'make-payload-archive.ps1');
   const sedPath = path.join(workDir, 'WhaleBridge-Setup.sed');
   fs.copyFileSync(shellExe, path.join(workDir, 'WhaleBridge.exe'));

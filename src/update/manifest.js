@@ -12,7 +12,7 @@
 import crypto from 'node:crypto';
 
 export const UPDATE_MANIFEST_VERSION = 1;
-export const UPDATE_CHANNELS = Object.freeze(['stable', 'beta']);
+export const UPDATE_CHANNELS = Object.freeze(['stable', 'rc', 'beta', 'dev']);
 
 /** semver 主次修订比较（与其它模块同一语义；放在这里避免 update 反向依赖 extension）。 */
 function parseVersion(value) {
@@ -187,6 +187,10 @@ export function validateManifest(raw) {
     if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version)) {
       throw updateError('MANIFEST_INVALID', '非法版本号：' + version);
     }
+    const buildNumber = raw.buildNumber === undefined ? 0 : Number(raw.buildNumber);
+    if (!Number.isSafeInteger(buildNumber) || buildNumber < 0) {
+      throw updateError('MANIFEST_INVALID', 'buildNumber must be a non-negative safe integer');
+    }
     const artifacts = artifactSet(raw.artifacts);
     const flatPresent = raw.downloadUrl !== undefined || raw.sha256 !== undefined;
     let downloadUrl = '';
@@ -219,6 +223,7 @@ export function validateManifest(raw) {
         product: text(raw.product, 'product', 40) || null,
         channel,
         version,
+        buildNumber,
         // 更新公告标题（产品化任务 D）：可选字段，缺失时保持 null —— About 页不得编造标题。
         title: text(raw.title, 'title', 120) || null,
         releasedAt: text(raw.releasedAt, 'releasedAt', 40) || null,

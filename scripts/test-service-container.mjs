@@ -42,6 +42,7 @@ try {
     'capabilityService',
     'continuityService',
     'extensionService',
+    'pluginCenterService',
     'workshopService',
     'meshService',
     'channelService',
@@ -58,6 +59,9 @@ try {
   assert.equal(dshHealth.available, false);
   assert.equal(dshHealth.reason, 'not_connected');
   assert.equal(networkAttempts, 0, 'constructing Core services does not make network requests');
+  const pluginCatalog = await services.pluginCenterService.execute({ method: 'plugin-center.catalog.list', params: {} });
+  assert.equal(pluginCatalog.available, false);
+  assert.equal(pluginCatalog.reason, 'service_not_configured', 'missing Plugin Service configuration is graceful');
 
   const simpleContext = JSON.parse(await services.productContextService.buildForChat({
     record: { id: 'simple-chat', taskId: null, config: { mode: 'chat', workspaceId: null } },
@@ -222,6 +226,7 @@ try {
   if (services) {
     await Promise.all([
       services.extensionService.close(),
+      services.pluginCenterService.close(),
       services.chatService.close(),
       services.agentService.close()
     ]);

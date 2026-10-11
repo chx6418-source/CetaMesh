@@ -22,6 +22,7 @@ import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
+import { bumpBuildNumber, formatArtifactName, loadReleaseVersion, validateVersionMirrors } from '../src/release/version.js';
 import {
   assertNoWebUiBinaryMarkers,
   assertNoWebUiHtmlArtifacts,
@@ -33,10 +34,11 @@ const require = createRequire(import.meta.url);
 const PKG = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
 
 function parseArgs(argv) {
-  const options = { noWebUi: true };
+  const options = { noWebUi: true, dev: false };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--no-web-ui') options.noWebUi = true;
+    else if (arg === '--dev') options.dev = true;
     else if (arg === '--core-dir') options.coreDir = path.resolve(argv[++i] ?? '');
     else if (arg === '--shell-exe') options.shellExe = path.resolve(argv[++i] ?? '');
     else if (arg === '--debug-shell') options.debugShell = path.resolve(argv[++i] ?? '');
@@ -53,6 +55,17 @@ const CORE_DIR = options.coreDir ?? path.join(ROOT, 'dist', 'core');
 const SHELL_EXE = options.shellExe ?? path.join(ROOT, 'desktop-shell', 'target', 'release', 'whalebridge-desktop.exe');
 const OUT_DIR = options.outDir ?? path.join(ROOT, 'dist', 'app');
 const BUILD_DIR = options.buildDir ?? path.join(path.dirname(OUT_DIR), `.whalebridge-app-build-${process.pid}`);
+
+const versionCheck = validateVersionMirrors({ rootDir: ROOT });
+if (!versionCheck.ok) fail(`release/version.json does not match package/Cargo versions: ${versionCheck.issues.map(issue => issue.code).join(', ')}`);
+const releaseVersion = loadReleaseVersion({ rootDir: ROOT });
+const initialDirty = Boolean(gitOutput(['status', '--porcelain']));
+if (initialDirty && !options.dev) fail('formal Release requires a clean source tree; use --dev to label a working-tree build DEV');
+const sourceCommit = gitOutput(['rev-parse', 'HEAD']) || 'unknown';
+const sourceCommitShort = gitOutput(['rev-parse', '--short', 'HEAD']) || 'unknown';
+const buildNumber = releaseVersion.buildNumber + 1;
+const buildChannel = options.dev ? 'dev' : releaseVersion.channel;
+const setupFilename = formatArtifactName({ productVersion: releaseVersion.productVersion, buildNumber, platform: 'windows-x64' });
 
 const FORBIDDEN = [
   { test: (rel) => rel.toLowerCase() === 'config.json', reason: '真实用户配置' },
@@ -72,6 +85,11 @@ function log(message) {
 function fail(message) {
   process.stderr.write(`[build-release] ${message}\n`);
   process.exit(1);
+}
+
+function gitOutput(args) {
+  const result = spawnSync('git', args, { cwd: ROOT, encoding: 'utf8', timeout: 5000, windowsHide: true });
+  return result.status === 0 ? String(result.stdout ?? '').trim() : '';
 }
 
 function sha256(file) {
@@ -156,26 +174,17 @@ fs.copyFileSync(SHELL_EXE, path.join(BUILD_DIR, 'WhaleBridge.exe'));
 log(`  WhaleBridge.exe ${mb(shellSize)}，payload/ ${listFiles(payloadDir).length} 个文件 ${mb(directorySize(payloadDir))}`);
 
 // 构建来源信息：About 页面在打包运行时读取 <资源根>/build-info.json。
-const gitOutput = (args) => {
-  const result = spawnSync('git', args, {
-    cwd: ROOT,
-    encoding: 'utf8',
-    timeout: 5000,
-    windowsHide: true
-  });
-  return result.status === 0 ? String(result.stdout ?? '').trim() : '';
-};
-const commit = gitOutput(['rev-parse', 'HEAD']);
-const commitShort = gitOutput(['rev-parse', '--short', 'HEAD']);
-const dirty = gitOutput(['status', '--porcelain']).length > 0;
 const buildInfo = {
   product: 'CetaMesh',
-  version: PKG.version,
-  commit: commit || 'unknown',
-  commitShort: commitShort || 'unknown',
-  dirty,
+  version: releaseVersion.productVersion,
+  channel: buildChannel,
+  buildNumber,
+  sourceCommit,
+  commit: sourceCommit,
+  commitShort: sourceCommitShort,
+  dirty: initialDirty,
   buildTime: new Date().toISOString(),
-  buildId: `${PKG.version}+${commitShort || 'unknown'}${dirty ? '.dirty' : ''}`,
+  buildId: `${releaseVersion.productVersion}-build${buildNumber}+${sourceCommitShort}${initialDirty || options.dev ? '.DEV' : ''}`,
   node: process.version,
   platform: `${process.platform}-${process.arch}`
 };
@@ -186,7 +195,7 @@ for (const directory of [BUILD_DIR, payloadDir]) {
     'utf8'
   );
 }
-log(`  build-info.json：${buildInfo.buildId}（dirty=${dirty}）`);
+log(`  build-info.json：${buildInfo.buildId}（dirty=${initialDirty}）`);
 
 log('[2/5] 生成许可证清单与 SBOM');
 const metaFile = path.join(CORE_DIR, 'build', 'core.bundle.meta.json');
@@ -305,6 +314,7 @@ const packager = spawnSync(process.execPath, [
   path.join(ROOT, 'scripts', 'package-installer.mjs'),
   BUILD_DIR,
   payloadDir,
+  '--output-name', setupFilename,
   ...(options.noWebUi ? ['--no-web-ui'] : [])
 ], { cwd: ROOT, encoding: 'utf8', stdio: 'inherit', timeout: 900000 });
 if (packager.error) fail(`无法运行单文件安装器打包器：${packager.error.message}`);
@@ -314,9 +324,9 @@ log('[4/5] 写安装说明 + 校验清单');
 fs.writeFileSync(
   path.join(BUILD_DIR, 'INSTALL.txt'),
   [
-    `CetaMesh ${PKG.version} —— 安装说明`,
+    'CetaMesh ' + releaseVersion.productVersion + ' Build ' + buildNumber + ' —— 安装说明',
     '',
-    '双击 WhaleBridge-Setup-x64.exe，按向导选择安装位置并点击“安装”。',
+    '双击 ' + setupFilename + '，选择安装位置并点击“立即安装”。',
     '默认安装到 %LOCALAPPDATA%\\Programs\\CetaMesh，不需要管理员权限（不触发 UAC）。',
     '',
     '安装后：WhaleBridge.exe 是桌面程序；卸载入口在开始菜单（CetaMesh），默认保留个人数据。',
@@ -408,12 +418,15 @@ for (const deviation of deviations) log(`  ⚠️ 已知偏差：${deviation.ite
 // ------------------------------------------------------------- 清单
 
 const manifest = {
-  product: '鲸桥 WhaleBridge',
-  version: PKG.version,
+  product: 'CetaMesh',
+  version: releaseVersion.productVersion,
+  channel: buildChannel,
+  buildNumber,
+  sourceCommit,
   commit: buildInfo.commit,
   commitShort: buildInfo.commitShort,
   buildId: buildInfo.buildId,
-  dirtySourceTree: buildInfo.dirty,
+  dirtySourceTree: initialDirty,
   builtAt: new Date().toISOString(),
   noWebUi: options.noWebUi,
   // 发行运行面红线（D1）：与 runtime-manifest.legacyHttp 一致，release worker 不监听 consolePort。
@@ -421,13 +434,13 @@ const manifest = {
   uiDistribution: options.noWebUi ? 'native-no-web' : 'web-compatibility',
   node: process.version,
   platform: `${process.platform}-${process.arch}`,
-  entry: 'WhaleBridge-Setup-x64.exe',
+  entry: setupFilename,
   files: Object.fromEntries(artifacts.map((relative) => [relative, sha256(path.join(BUILD_DIR, relative))])),
   sizes: {
     totalBytes: directorySize(BUILD_DIR),
     shellBytes: shellSize,
     payloadBytes: directorySize(payloadDir),
-    setupBytes: fs.statSync(path.join(BUILD_DIR, 'WhaleBridge-Setup-x64.exe')).size
+    setupBytes: fs.statSync(path.join(BUILD_DIR, setupFilename)).size
   },
   components: components.map((component) => `${component.name}@${component.version} (${component.license})`),
   knownDeviations: deviations,
@@ -470,6 +483,9 @@ writeManifestAndSums();
 if (manifest.sizes.totalBytes !== directorySize(BUILD_DIR)) {
   fail('release-manifest.json 的 totalBytes 未能与最终发布目录大小收敛');
 }
+
+const nextCounter = bumpBuildNumber({ rootDir: ROOT });
+if (nextCounter.buildNumber !== buildNumber) fail('release build counter changed during packaging; refusing to publish');
 
 // Publish only after the new candidate is complete, leaving any previous dist/app untouched
 // unless the replacement is ready. Keep the old RC as a dated backup for easy rollback.

@@ -97,6 +97,14 @@ function normalizeSource(value) {
   };
 }
 
+function normalizeCompatibilityVersion(value, label) {
+  const version = text(value, label, EXTENSION_LIMITS.versionChars);
+  if (version && !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version)) {
+    throw extensionError('INVALID_MANIFEST', label + ' must be SemVer');
+  }
+  return version || null;
+}
+
 /** 纯校验：返回 { ok, issues, manifest }，不抛错（assertManifest 才抛）。 */
 export function validateManifest(raw) {
   try {
@@ -157,6 +165,8 @@ function buildManifest(raw) {
     publisher: text(raw.publisher, 'publisher', EXTENSION_LIMITS.nameChars),
     description: text(raw.description, 'description', EXTENSION_LIMITS.descriptionChars),
     homepage: text(raw.homepage, 'homepage', 400),
+    minCetaMeshVersion: normalizeCompatibilityVersion(raw.minCetaMeshVersion, 'minCetaMeshVersion'),
+    maxCetaMeshVersion: normalizeCompatibilityVersion(raw.maxCetaMeshVersion, 'maxCetaMeshVersion'),
     capabilities,
     permissions,
     network: { hosts },

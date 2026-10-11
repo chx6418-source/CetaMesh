@@ -13,6 +13,7 @@ use serde_json::{json, Value};
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum IntegrationsTab {
     #[default]
+    Marketplace,
     Plugins,
     Tools,
     Mcp,
@@ -70,7 +71,7 @@ pub struct McpServer {
     pub last_error: String,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct IntegrationsUi {
     pub tab: IntegrationsTab,
     pub plugins: Vec<IntegrationPlugin>,
@@ -88,10 +89,47 @@ pub struct IntegrationsUi {
     /// mcp.tools 只在进入详情后请求一次；管理动作会复位。
     pub mcp_tools_requested: bool,
     pub notice: Option<String>,
+    pub catalog: Vec<Value>,
+    pub catalog_loaded: bool,
+    pub catalog_available: bool,
+    pub catalog_configured: bool,
+    pub catalog_offline: bool,
+    pub catalog_view: String,
+    pub catalog_category: String,
+    pub catalog_query: String,
+    pub catalog_last_query: String,
+    pub catalog_selected: Option<String>,
+    pub catalog_stage: Option<Value>,
+    pub pending_uninstall: Option<String>,
+    pub catalog_screenshot: Option<Value>,
+    pub catalog_icons: std::collections::HashMap<String, Value>,
+    pub icon_textures: std::collections::HashMap<String, egui::TextureHandle>,
+    pub developer_mode: bool,
+    pub developer_mode_loaded: bool,
+    pub screenshot_texture: Option<(String, egui::TextureHandle)>,
+}
+
+fn catalog_icon_texture(ui: &egui::Ui, id: &str, encoded: &str) -> Option<egui::TextureHandle> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).ok()?;
+    let dimensions = image::ImageReader::new(std::io::Cursor::new(&bytes))
+        .with_guessed_format().ok()?.into_dimensions().ok()?;
+    let (width, height) = dimensions;
+    if width > 256 || height > 256 || u64::from(width) * u64::from(height) > 65_536 { return None; }
+    let rgba = image::load_from_memory(&bytes).ok()?.to_rgba8();
+    let color = egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], rgba.as_raw());
+    Some(ui.ctx().load_texture(format!("plugin-icon:{id}"), color, egui::TextureOptions::LINEAR))
 }
 
 fn is_manage_method(method: &str) -> bool {
-    method.starts_with("plugins.enable")
+    method.starts_with("plugin-center.package.install")
+        || method.starts_with("plugin-center.package.rollback")
+        || method.starts_with("plugin-center.developer.installLocal")
+        || method.starts_with("plugin-center.developer.reload")
+        || method.starts_with("plugin-center.plugin.enable")
+        || method.starts_with("plugin-center.plugin.disable")
+        || method.starts_with("plugin-center.plugin.uninstall")
+        || method.starts_with("plugins.enable")
         || method.starts_with("plugins.disable")
         || method.starts_with("plugins.tool")
         || method.starts_with("mcp.enable")
@@ -104,6 +142,12 @@ fn is_manage_method(method: &str) -> bool {
 impl IntegrationsUi {
     /// 首次进入或数据被管理动作标记为脏后，按顺序补拉目录（Area 互斥保证一次一个）。
     pub fn next_load(&self) -> Option<IntegrationsAction> {
+        if self.tab == IntegrationsTab::Marketplace && !self.developer_mode_loaded {
+            return Some(IntegrationsAction::new("plugin-center.configure", json!({})));
+        }
+        if self.tab == IntegrationsTab::Marketplace && !self.catalog_loaded {
+            return Some(IntegrationsAction::new("plugin-center.catalog.list", json!({ "view": "all" })));
+        }
         if !self.plugins_loaded {
             return Some(IntegrationsAction::new("plugins.list", json!({})));
         }
@@ -119,6 +163,51 @@ impl IntegrationsUi {
     /// 接收一次 IPC 回包（成功或失败都算完成）。pending 回包绝不自动批准。
     pub fn observe(&mut self, method: &str, result: &Result<Value, String>) {
         match (method, result) {
+            ("plugin-center.catalog.list", Ok(value)) => {
+                self.catalog_icons.clear();
+                self.icon_textures.clear();
+                self.catalog = value.get("plugins").and_then(Value::as_array).cloned().unwrap_or_default();
+                self.catalog_available = value.get("available").and_then(Value::as_bool).unwrap_or(false);
+                self.catalog_configured = value.get("configured").and_then(Value::as_bool).unwrap_or(false);
+                self.catalog_offline = value.get("offline").and_then(Value::as_bool).unwrap_or(false);
+                self.catalog_loaded = true;
+            }
+            ("plugin-center.configure", Ok(value)) => {
+                self.developer_mode = value.get("developerMode").and_then(Value::as_bool).unwrap_or(false);
+                self.developer_mode_loaded = true;
+            }
+            ("plugin-center.catalog.refresh", Ok(_)) => {
+                self.catalog_icons.clear();
+                self.icon_textures.clear();
+                self.catalog_loaded = false;
+            }
+            ("plugin-center.package.stage" | "plugin-center.developer.stageLocal", Ok(value)) => {
+                self.catalog_stage = Some(value.clone());
+                self.catalog_screenshot = None;
+                self.screenshot_texture = None;
+            }
+            ("plugin-center.plugin.enable.review" | "plugin-center.package.rollback.review", Ok(value)) => {
+                self.catalog_stage = Some(value.clone());
+                self.catalog_screenshot = None;
+                self.screenshot_texture = None;
+            }
+            ("plugin-center.screenshot.get", Ok(value)) => {
+                self.catalog_screenshot = Some(value.clone());
+                self.screenshot_texture = None;
+            }
+            ("plugin-center.icon.get", Ok(value)) => {
+                if let Some(id) = value.get("id").and_then(Value::as_str) {
+                    self.catalog_icons.insert(id.to_owned(), value.clone());
+                }
+            }
+            ("plugin-center.plugin.logs", Ok(value)) => {
+                let lines = value.get("logs").and_then(Value::as_array)
+                    .map(|logs| logs.iter().map(|line| line.get("message").and_then(Value::as_str).unwrap_or("")).filter(|line| !line.is_empty()).collect::<Vec<_>>().join(" · "))
+                    .unwrap_or_default();
+                self.notice = Some(if lines.is_empty() { "插件日志已读取（没有新日志）".to_owned() } else { format!("插件日志：{lines}") });
+            }
+            ("plugin-center.catalog.list", Err(_)) => self.catalog_loaded = true,
+            ("plugin-center.configure", Err(_)) => self.developer_mode_loaded = true,
             ("plugins.list", Ok(value)) => {
                 self.plugins = parse_plugins(value);
                 self.plugins_loaded = true;
@@ -186,6 +275,10 @@ impl IntegrationsUi {
             }
             // 管理动作成功：标记目录为脏，下一帧重新拉取。
             (_, Ok(_)) if is_manage_method(method) => {
+                self.catalog_loaded = false;
+                self.catalog_stage = None;
+                self.catalog_screenshot = None;
+                self.screenshot_texture = None;
                 self.plugins_loaded = false;
                 self.tools_loaded = false;
                 self.mcp_loaded = false;
@@ -246,6 +339,7 @@ impl IntegrationsUi {
         ui.add_space(8.0);
 
         ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.tab, IntegrationsTab::Marketplace, "插件中心");
             ui.selectable_value(&mut self.tab, IntegrationsTab::Plugins, "插件");
             ui.selectable_value(&mut self.tab, IntegrationsTab::Tools, "工具");
             ui.selectable_value(&mut self.tab, IntegrationsTab::Mcp, "MCP");
@@ -257,12 +351,330 @@ impl IntegrationsUi {
         }
 
         match self.tab {
+            IntegrationsTab::Marketplace => actions.extend(self.show_marketplace_tab(ui)),
             IntegrationsTab::Plugins => actions.extend(self.show_plugins_tab(ui)),
             IntegrationsTab::Tools => actions.extend(self.show_tools_tab(ui)),
             IntegrationsTab::Mcp => actions.extend(self.show_mcp_tab(ui)),
             // 扩展包 tab 由 native_ui 渲染（原 ext 审查流程），模块只占位。
             IntegrationsTab::Extensions => {}
         }
+        actions
+    }
+
+    fn catalog_action(&mut self) -> IntegrationsAction {
+        self.catalog_loaded = false;
+        IntegrationsAction::new("plugin-center.catalog.list", json!({
+            "view": if self.catalog_view.is_empty() { "all" } else { self.catalog_view.as_str() },
+            "category": self.catalog_category,
+            "query": self.catalog_query
+        }))
+    }
+
+    fn show_marketplace_tab(&mut self, ui: &mut egui::Ui) -> Vec<IntegrationsAction> {
+        let mut actions = Vec::new();
+        let palette = crate::native_ui::native_palette();
+        if let Some(stage) = self.catalog_stage.clone() {
+            let review = stage.get("review").unwrap_or(&Value::Null);
+            let manifest = review.get("manifest").unwrap_or(&Value::Null);
+            let id = stage.get("id").and_then(Value::as_str)
+                .or_else(|| manifest.get("id").and_then(Value::as_str)).unwrap_or("");
+            let action = stage.get("action").and_then(Value::as_str).unwrap_or("install");
+            ui.horizontal(|ui| {
+                if ui.small_button("← 返回插件目录").clicked() {
+                    self.catalog_stage = None;
+                }
+                ui.heading(manifest.get("name").and_then(Value::as_str).unwrap_or("权限审核"));
+            });
+            ui.label(egui::RichText::new("插件安装后保持禁用。请检查 Extension Runtime 扫描结果与申请的权限。")
+                .small().color(palette.muted));
+            let permissions = review.get("review").and_then(|value| value.get("permissions")).and_then(Value::as_array);
+            if let Some(items) = permissions {
+                if items.is_empty() { ui.weak("此插件未申请额外权限。"); }
+                for permission in items {
+                    ui.label(format!("• {}  | 风险 {} | {}",
+                        permission.get("name").and_then(Value::as_str).unwrap_or("?"),
+                        permission.get("risk").and_then(Value::as_str).unwrap_or("未知"),
+                        permission.get("summary").and_then(Value::as_str).unwrap_or("")));
+                }
+            }
+            if let Some(delta) = review.get("permissionDelta") {
+                if let Some(added) = delta.get("added").and_then(Value::as_array) {
+                    if !added.is_empty() {
+                        ui.colored_label(palette.warning, format!("更新新增权限：{}", added.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("、")));
+                    }
+                }
+            }
+            let scan_ok = review.get("scan").and_then(|value| value.get("ok")).and_then(Value::as_bool).unwrap_or(false);
+            ui.strong(match action {
+                "enable-review" => "Owner Review: inspect these permissions before enabling this local plugin.",
+                "rollback-review" => "Owner Review: inspect the retained version before rollback.",
+                _ => "Review the requested permissions before installing. The plugin will remain disabled.",
+            });
+            ui.label(if scan_ok { "静态扫描通过" } else { "静态扫描未通过，安装会被 Extension Runtime 拒绝" });
+            ui.horizontal(|ui| {
+                if ui.button("取消").clicked() { self.catalog_stage = None; }
+                if ui.add_enabled(scan_ok && !id.is_empty(), egui::Button::new("确认审核并安装（保持禁用）")).clicked() {
+                    let stage_id = stage.get("stageId").and_then(Value::as_str).unwrap_or("");
+                    let request = match action {
+                        "enable-review" => IntegrationsAction::new("plugin-center.plugin.enable", json!({
+                            "id": id,
+                            "stageId": stage_id,
+                            "reviewed": true,
+                            "reviewToken": review.pointer("/review/token").and_then(Value::as_str).unwrap_or("")
+                        })),
+                        "rollback-review" => IntegrationsAction::new("plugin-center.package.rollback", json!({ "id": id, "reviewed": true })),
+                        _ => {
+                            let method = if stage.get("trust").and_then(|value| value.get("level")).and_then(Value::as_str) == Some("local-unverified") {
+                                "plugin-center.developer.installLocal"
+                            } else { "plugin-center.package.install" };
+                            IntegrationsAction::new(method, json!({ "stageId": stage_id, "reviewed": true }))
+                        }
+                    };
+                    actions.push(request);
+                }
+            });
+            return actions;
+        }
+
+        ui.horizontal(|ui| {
+            ui.label("搜索");
+            let changed = ui.text_edit_singleline(&mut self.catalog_query).changed();
+            if changed { self.catalog_last_query = self.catalog_query.clone(); }
+            if ui.button("刷新目录").clicked() {
+                self.catalog_loaded = false;
+                actions.push(IntegrationsAction::new("plugin-center.catalog.refresh", json!({})));
+            } else if changed {
+                actions.push(self.catalog_action());
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            for (view, label) in [("recommended", "推荐"), ("all", "全部"), ("installed", "已安装"), ("update-available", "可更新")] {
+                let selected = if self.catalog_view.is_empty() { view == "all" } else { self.catalog_view == view };
+                if ui.selectable_label(selected, label).clicked() && !selected {
+                    self.catalog_view = view.to_owned();
+                    actions.push(self.catalog_action());
+                }
+            }
+            let mut category_changed = false;
+            egui::ComboBox::from_id_salt("plugin-center-category")
+                .selected_text(if self.catalog_category.is_empty() { "全部分类" } else { self.catalog_category.as_str() })
+                .show_ui(ui, |ui| {
+                    for category in ["", "Tools", "Integrations", "Agent", "Channel", "Workflow", "Memory Pack", "Other"] {
+                        let label = if category.is_empty() { "全部分类" } else { category };
+                        if ui.selectable_value(&mut self.catalog_category, category.to_owned(), label).changed() {
+                            category_changed = true;
+                        }
+                    }
+                });
+            if category_changed { actions.push(self.catalog_action()); }
+        });
+        if self.catalog_offline {
+            ui.colored_label(palette.warning, "离线模式：当前显示上次成功获取的目录缓存，安装与更新需要联网。");
+        } else if !self.catalog_configured {
+            ui.weak("Plugin Service 尚未配置。目录与包下载接口已预留，配置服务地址后即可加载。");
+        }
+        if !self.catalog_available && self.catalog_view != "installed" && ui.button("View Installed Local Plugins").clicked() {
+            self.catalog_view = "installed".to_owned();
+            actions.push(self.catalog_action());
+        }
+        if !self.catalog_available && self.catalog_view != "installed" {
+            self.show_developer_mode_controls(ui, &mut actions);
+        }
+        if !self.catalog_loaded {
+            ui.weak("正在读取 Plugin Catalog…");
+            return actions;
+        }
+        if !self.catalog_available {
+            ui.weak("目录暂不可用；CetaMesh 仍可使用本地已安装插件。");
+            return actions;
+        }
+        let rows = self.catalog.clone();
+        for plugin in rows {
+            let id = plugin.get("id").and_then(Value::as_str).unwrap_or("").to_owned();
+            let status = plugin.get("status").and_then(Value::as_str).unwrap_or("Available");
+            crate::theme::card_compact(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if plugin.get("icon").and_then(Value::as_str).is_some() {
+                        if let Some(image_data) = self.catalog_icons.get(&id) {
+                            if !self.icon_textures.contains_key(&id) {
+                                if let Some(encoded) = image_data.get("data").and_then(Value::as_str) {
+                                    if let Some(texture) = catalog_icon_texture(ui, &id, encoded) {
+                                        self.icon_textures.insert(id.clone(), texture);
+                                    }
+                                }
+                            }
+                            if let Some(texture) = self.icon_textures.get(&id) {
+                                ui.add(egui::Image::new(texture).fit_to_exact_size(egui::vec2(42.0, 42.0)));
+                            }
+                        } else {
+                            actions.push(IntegrationsAction::new("plugin-center.icon.get", json!({ "id": id })));
+                        }
+                    }
+                    ui.vertical(|ui| {
+                        ui.strong(plugin.get("name").and_then(Value::as_str).unwrap_or(&id));
+                        ui.small(format!("{} · v{} · {}", plugin.get("category").and_then(Value::as_str).unwrap_or("Other"),
+                            plugin.get("version").and_then(Value::as_str).unwrap_or("?"),
+                            plugin.get("publisher").and_then(Value::as_str).unwrap_or("未知开发者")));
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(status);
+                        if plugin.get("verified").and_then(Value::as_bool) == Some(true) { ui.small("目录标记 Verified"); }
+                    });
+                });
+                ui.label(egui::RichText::new(plugin.get("summary").and_then(Value::as_str).unwrap_or("")).small().color(palette.muted));
+                ui.horizontal(|ui| {
+                    if ui.small_button("详情").clicked() {
+                        if self.catalog_selected.as_deref() != Some(id.as_str()) {
+                            self.catalog_screenshot = None;
+                            self.screenshot_texture = None;
+                        }
+                        self.catalog_selected = Some(id.clone());
+                    }
+                    if status == "Available" || status == "Update Available" {
+                        let label = if status == "Available" { "安装" } else { "更新" };
+                        if ui.small_button(label).clicked() {
+                            self.catalog_selected = Some(id.clone());
+                            self.catalog_stage = None;
+                            actions.push(IntegrationsAction::new("plugin-center.package.stage", json!({ "id": id })));
+                        }
+                    }
+                });
+            });
+            ui.add_space(5.0);
+        }
+        if let Some(id) = self.catalog_selected.clone() {
+            actions.extend(self.show_marketplace_detail(ui, &id));
+        }
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.developer_mode, "开发者模式");
+            if ui.button("保存").clicked() && self.developer_mode_loaded {
+                actions.push(IntegrationsAction::new("plugin-center.configure", json!({ "developerMode": self.developer_mode })));
+            }
+            if self.developer_mode {
+                if ui.button("加载本地插件目录").clicked() {
+                    if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                        actions.push(IntegrationsAction::new("plugin-center.developer.stageLocal", json!({ "directory": folder.to_string_lossy() })));
+                    }
+                }
+            }
+        });
+        actions
+    }
+
+    fn show_developer_mode_controls(&mut self, ui: &mut egui::Ui, actions: &mut Vec<IntegrationsAction>) {
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.developer_mode, "Developer Mode");
+            if ui.button("Save").clicked() && self.developer_mode_loaded {
+                actions.push(IntegrationsAction::new("plugin-center.configure", json!({ "developerMode": self.developer_mode })));
+            }
+            if self.developer_mode && ui.button("Load Local Plugin").clicked() {
+                if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                    actions.push(IntegrationsAction::new("plugin-center.developer.stageLocal", json!({ "directory": folder.to_string_lossy() })));
+                }
+            }
+        });
+    }
+
+    fn show_marketplace_detail(&mut self, ui: &mut egui::Ui, id: &str) -> Vec<IntegrationsAction> {
+        let mut actions = Vec::new();
+        let Some(plugin) = self.catalog.iter().find(|entry| entry.get("id").and_then(Value::as_str) == Some(id)).cloned() else { return actions; };
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui.small_button("收起详情").clicked() { self.catalog_selected = None; self.catalog_screenshot = None; self.screenshot_texture = None; }
+            ui.heading(plugin.get("name").and_then(Value::as_str).unwrap_or(id));
+            ui.label(format!("v{}", plugin.get("version").and_then(Value::as_str).unwrap_or("?")));
+        });
+        ui.label(plugin.get("description").and_then(Value::as_str).unwrap_or(""));
+        ui.small(format!("开发者：{} · 分类：{} · 状态：{}", plugin.get("publisher").and_then(Value::as_str).unwrap_or("未知"),
+            plugin.get("category").and_then(Value::as_str).unwrap_or("Other"), plugin.get("status").and_then(Value::as_str).unwrap_or("Available")));
+        for label in ["permissions", "capabilities"] {
+            let values = plugin.get(label).and_then(Value::as_array).map(|items| items.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("、")).unwrap_or_default();
+            ui.small(format!("{}：{}", if label == "permissions" { "申请权限" } else { "能力" }, if values.is_empty() { "无".to_owned() } else { values }));
+        }
+        if let Some(shots) = plugin.get("screenshots").and_then(Value::as_array) {
+            if !shots.is_empty() {
+                if self.catalog_screenshot.is_none() {
+                    actions.push(IntegrationsAction::new("plugin-center.screenshot.get", json!({ "id": id, "index": 0 })));
+                }
+            }
+        }
+        if let Some(image_data) = self.catalog_screenshot.clone() {
+            if let Some(encoded) = image_data.get("data").and_then(Value::as_str) {
+                let texture_key = format!("{id}:0");
+                if self.screenshot_texture.as_ref().map(|(key, _)| key.as_str()) != Some(texture_key.as_str()) {
+                    use base64::Engine as _;
+                    let decoded = base64::engine::general_purpose::STANDARD.decode(encoded);
+                    if let Ok(bytes) = decoded {
+                        let dimensions = image::ImageReader::new(std::io::Cursor::new(&bytes))
+                            .with_guessed_format()
+                            .ok()
+                            .and_then(|reader| reader.into_dimensions().ok());
+                        if let Some((width, height)) = dimensions {
+                            if width <= 4096 && height <= 4096 && u64::from(width) * u64::from(height) <= 16_777_216 {
+                                if let Ok(decoded_image) = image::load_from_memory(&bytes) {
+                                    let rgba = decoded_image.to_rgba8();
+                                    let color = egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], rgba.as_raw());
+                                    let texture = ui.ctx().load_texture("plugin-catalog-screenshot", color, egui::TextureOptions::LINEAR);
+                                    self.screenshot_texture = Some((texture_key, texture));
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some((_, texture)) = &self.screenshot_texture {
+                    ui.add(egui::Image::new(texture).max_height(320.0));
+                }
+            }
+        }
+        if let Some(installed) = plugin.get("installedEntry") {
+            let installed_status = installed.get("status").and_then(Value::as_str).unwrap_or("disabled");
+            let local_unverified = plugin.get("trust").and_then(Value::as_str) == Some("local-unverified");
+            let first_enable_reviewed = plugin.get("firstEnableReviewed").and_then(Value::as_bool).unwrap_or(false);
+            ui.separator();
+            ui.horizontal_wrapped(|ui| {
+                if installed_status == "enabled" {
+                    if ui.button("Disable").clicked() {
+                        actions.push(IntegrationsAction::new("plugin-center.plugin.disable", json!({ "id": id })));
+                    }
+                } else if installed_status != "disabled_due_to_crash" {
+                    let label = if local_unverified && !first_enable_reviewed { "Owner Review and Enable" } else { "Enable" };
+                    if ui.button(label).clicked() {
+                        let method = if local_unverified && !first_enable_reviewed {
+                            "plugin-center.plugin.enable.review"
+                        } else {
+                            "plugin-center.plugin.enable"
+                        };
+                        actions.push(IntegrationsAction::new(method, json!({ "id": id })));
+                    }
+                }
+                if installed.get("previousVersion").and_then(Value::as_str).is_some() {
+                    if ui.button("Rollback").clicked() {
+                        actions.push(IntegrationsAction::new("plugin-center.package.rollback.review", json!({ "id": id })));
+                    }
+                }
+                if self.developer_mode {
+                    if ui.button("Reload Plugin").clicked() {
+                        actions.push(IntegrationsAction::new("plugin-center.developer.reload", json!({ "id": id })));
+                    }
+                    if ui.button("Open Plugin Logs").clicked() {
+                        actions.push(IntegrationsAction::new("plugin-center.plugin.logs", json!({ "id": id })));
+                    }
+                }
+                if self.pending_uninstall.as_deref() == Some(id) {
+                    ui.label("Uninstall this plugin?");
+                    if ui.button("Confirm Uninstall").clicked() {
+                        actions.push(IntegrationsAction::new("plugin-center.plugin.uninstall", json!({ "id": id })));
+                        self.pending_uninstall = None;
+                    }
+                    if ui.button("Cancel").clicked() { self.pending_uninstall = None; }
+                } else if ui.button("Uninstall").clicked() {
+                    self.pending_uninstall = Some(id.to_owned());
+                }
+            });
+        }
+        if let Some(warning) = plugin.get("warning").and_then(Value::as_str) { ui.colored_label(crate::native_ui::native_palette().warning, warning); }
         actions
     }
 
@@ -749,7 +1161,7 @@ fn string_field(item: &Value, field: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_mcp_servers, parse_plugins, parse_tools, IntegrationsUi};
+    use super::{parse_mcp_servers, parse_plugins, parse_tools, IntegrationsTab, IntegrationsUi};
     use serde_json::json;
 
     #[test]
@@ -789,8 +1201,23 @@ mod tests {
     }
 
     #[test]
+    fn marketplace_loads_configuration_then_catalog_and_survives_unconfigured_service() {
+        let mut state = IntegrationsUi::default();
+        assert_eq!(state.tab, IntegrationsTab::Marketplace);
+        assert_eq!(state.next_load().unwrap().method, "plugin-center.configure");
+        state.observe("plugin-center.configure", &Ok(json!({ "developerMode": false })));
+        assert_eq!(state.next_load().unwrap().method, "plugin-center.catalog.list");
+        state.observe("plugin-center.catalog.list", &Ok(json!({
+            "available": false, "configured": false, "offline": false, "plugins": []
+        })));
+        assert!(!state.catalog_available);
+        assert!(state.catalog_loaded);
+    }
+
+    #[test]
     fn loads_directories_in_order_and_reloads_after_manage() {
         let mut state = IntegrationsUi::default();
+        state.tab = IntegrationsTab::Plugins;
         assert_eq!(state.next_load().unwrap().method, "plugins.list");
         state.observe("plugins.list", &Ok(json!({"plugins": []})));
         assert_eq!(state.next_load().unwrap().method, "tools.list");
@@ -816,6 +1243,7 @@ mod tests {
     #[test]
     fn errors_surface_as_notice_and_complete_the_load() {
         let mut state = IntegrationsUi::default();
+        state.tab = IntegrationsTab::Plugins;
         state.observe("plugins.list", &Err("传输失败".to_owned()));
         assert!(state.plugins_loaded);
         assert_eq!(state.next_load().unwrap().method, "tools.list");

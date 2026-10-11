@@ -33,6 +33,7 @@ import { createProductService } from '../product/service.js';
 import { createErrorRegistry } from '../product/error-registry.js';
 import { buildDiagnostics } from '../product/diagnostics.js';
 import { loadReleaseConfig } from '../product/release-config.js';
+import { createPluginCenterService } from '../plugin-center/service.js';
 import { createProductContextService } from '../context/service.js';
 import { OWNER_ACTOR } from '../capability/types.js';
 
@@ -339,8 +340,19 @@ export function createCetaMeshServices(options = {}) {
     notesCache,
     diagnosticsProvider: diagnosticsSnapshot
   });
+  const pluginCenterService = createPluginCenterService({
+    stateDir,
+    catalogUrl: options.pluginCatalogUrl ?? releaseConfig.config.pluginService.catalogUrl,
+    allowedHosts: options.pluginCatalogAllowedHosts ?? releaseConfig.config.pluginService.allowedHosts,
+    currentVersion: aboutService.about.info().version,
+    fetchImpl: options.pluginCenterFetchImpl ?? null,
+    extensionRuntime: extensionService.runtime,
+    settingsStore: settingsService.store,
+    log
+  });
   const updateService = createUpdateService({
     currentVersion: aboutService.about.info().version,
+    currentBuildNumber: aboutService.about.info().buildNumber ?? 0,
     settingsStore: settingsService.store,
     notesCache,
     log
@@ -357,6 +369,7 @@ export function createCetaMeshServices(options = {}) {
     providerSecrets,
     settingsService,
     extensionService,
+    pluginCenterService,
     log
   });
   const systemServices = {
@@ -386,6 +399,7 @@ export function createCetaMeshServices(options = {}) {
     workshopService,
     continuityService,
     extensionService,
+    pluginCenterService,
     meshService,
     channelService,
     integrationService,

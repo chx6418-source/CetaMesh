@@ -52,7 +52,8 @@ export const DEFAULT_RELEASE_CONFIG = Object.freeze({
   }),
   privacy: Object.freeze({ doc: 'docs/product/PRIVACY.md', summary: '' }),
   security: Object.freeze({ doc: 'docs/product/SECURITY.md', contact: null, advisoryUrl: null }),
-  feedback: Object.freeze({ baseUrl: null, paths: DEFAULT_FEEDBACK_PATHS })
+  feedback: Object.freeze({ baseUrl: null, paths: DEFAULT_FEEDBACK_PATHS }),
+  pluginService: Object.freeze({ catalogUrl: null, allowedHosts: Object.freeze([]) })
 });
 
 function textOrNull(value, max = MAX_TEXT) {
@@ -134,6 +135,14 @@ function normalize(raw, fallback) {
   const privacy = raw && typeof raw.privacy === 'object' && raw.privacy ? raw.privacy : {};
   const security = raw && typeof raw.security === 'object' && raw.security ? raw.security : {};
   const feedback = raw && typeof raw.feedback === 'object' && raw.feedback ? raw.feedback : {};
+  const pluginService = raw && typeof raw.pluginService === 'object' && raw.pluginService ? raw.pluginService : {};
+  const catalogUrl = httpsOrNull(pluginService.catalogUrl);
+  const configuredHosts = Array.isArray(pluginService.allowedHosts)
+    ? pluginService.allowedHosts.map(value => String(value).trim().toLowerCase())
+      .filter(value => /^[a-z0-9.-]{1,253}$/.test(value)).slice(0, 20)
+    : [];
+  const catalogHost = catalogUrl ? new URL(catalogUrl).hostname.toLowerCase() : null;
+  const pluginHosts = [...new Set([...configuredHosts, ...(catalogHost ? [catalogHost] : [])])];
 
   const gitcode = httpsOrNull(repo.gitcode) || fallback.repositories.gitcode;
   const github = httpsOrNull(repo.github) || fallback.repositories.github;
@@ -163,7 +172,8 @@ function normalize(raw, fallback) {
     feedback: {
       baseUrl: httpsOrNull(feedback.baseUrl),
       paths: feedbackPaths(feedback.paths, fallback.feedback.paths)
-    }
+    },
+    pluginService: { catalogUrl, allowedHosts: pluginHosts }
   };
 }
 
