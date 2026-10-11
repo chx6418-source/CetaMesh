@@ -160,6 +160,14 @@ TEMP 限制"、"HKCU 注册表限制"）同类，不是代码回归。按仓库 
   发送按钮同步生效。
 - 安装包重出：**1.0.0-rc.2+ca3be2a（dirty=false）**，SHA256SUMS 27 条复验一致。
 
+### 6.4 补充 bug 修复（Owner 视频一：悬停的"白色贴纸圈"）
+
+- **根因**：`page_button` 悬停分支同样带糖玻璃语言——浮起 + 软阴影 + `edge_hi` 描边。
+  纸面主题的 `edge_hi` 是 85% 白，悬停「工作/记忆」时画出一个白底白圈的胶囊（视频 0–4s）。
+- **修复**（`0ff0632`）：悬停语言按 `spec.shadow.card_rim` 门控——糖玻璃保留原样；哑光主题
+  （纸面）只画纸色加深一档的软填充（`tokens.hover`），**无阴影、无描边**，对齐方案 01 的安静悬停。
+- 安装包同步重出：**1.0.0-rc.2+0ff0632（dirty=false）**，SHA256SUMS 27 条复验一致，发行审计通过。
+
 ## 7. 视觉验收
 
 debug 壳 `--screenshot-dir output/uiv1-qa` 生成 **9/9 张**（1280×800；唯一的纸面主题 × 每个产品页：01-home / 02-settings / 03-about / 04-feedback / 05-onboarding / 06-work / 07-memory / 08-agents / 09-plugins）。已逐张人工核验：
