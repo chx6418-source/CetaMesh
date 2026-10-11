@@ -135,6 +135,20 @@ installer/migrate/ui_prefs/install_cli/desktop_paths）。**同一份壳代码�
 故为本会话对 TEMP 目录创建的沙箱限制，与 PROJECT_STATE 既有记录（"cargo:test 的本会话
 TEMP 限制"、"HKCU 注册表限制"）同类，不是代码回归。按仓库 NOT_RUN_ENVIRONMENT 精神如实记录。
 
+### 6.2 安装包（Owner 索取）
+
+- `npm run desktop:build`（release）+ `npm run build:release`：**成功**，产出 RC 目录 `dist/app/`（140.7 MB）：
+  - `WhaleBridge-Setup-x64.exe`（40.5 MB，一键安装器）+ `WhaleBridge.exe`（6.4 MB，安装/卸载同体）；
+  - `payload/`（Node SEA 的 `WhaleBridgeCore.exe` 93.2 MB + resources）+ `INSTALL.txt`；
+  - `build-info.json` = **1.0.0-rc.2+4f2dade（dirty=false，包含全部 UI v1 / 纸面主题 / bug 修复提交）**；
+  - `SHA256SUMS.txt`（27 条，逐条复验**全部一致**）、`release-manifest.json`、`sbom.json`、第三方许可清单；
+  - 发行审计（禁止项 / 构建机路径 / 凭据泄漏）**通过**；`WhaleBridge.exe` 二进制内含「纸面工作台」UI 标记（已验证）。
+- **沙箱内安装验证受限**：`test-release-candidate` 与手动 `--install --install-dir <可写目录>` 都被
+  本会话沙箱拦在 TEMP 目录创建 / HKCU 注册表 / 开始菜单（`os error 5`，§6.1 同类已知限制；文件复制
+  阶段本身正常，失败后自动回滚并保留备份）。包完整性已按 SHA256SUMS 逐条验证；真机安装请在
+  Owner 桌面会话直接运行安装器（默认装到 `%ProgramFiles%\WhaleBridge`，覆盖安装前建议退出旧实例，
+  需要时用 `--stop-core`）。
+
 ## 7. 视觉验收
 
 debug 壳 `--screenshot-dir output/uiv1-qa` 生成 **9/9 张**（1280×800；唯一的纸面主题 × 每个产品页：01-home / 02-settings / 03-about / 04-feedback / 05-onboarding / 06-work / 07-memory / 08-agents / 09-plugins）。已逐张人工核验：
