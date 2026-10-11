@@ -168,6 +168,19 @@ TEMP 限制"、"HKCU 注册表限制"）同类，不是代码回归。按仓库 
   （纸面）只画纸色加深一档的软填充（`tokens.hover`），**无阴影、无描边**，对齐方案 01 的安静悬停。
 - 安装包同步重出：**1.0.0-rc.2+0ff0632（dirty=false）**，SHA256SUMS 27 条复验一致，发行审计通过。
 
+### 6.5 补充修复（Owner 截图三：设置页）
+
+- **锚点跳转不动**：`scroll_to_rect(rect, None)` 是"最小滚动"——目标节已部分可见时几乎不滚。
+  改为节顶对齐（`Align::Min`），点「模型与 Preset」等锚点现在把该节顶到视口顶部。
+- **节标题重复**：包装层的小标题 + 节体自带 heading 叠了两份。去掉包装层标题；锚点
+  「安全通知」改名「安全设置」与节体一致；「高级」节补回自己的 heading；mesh 页标题
+  `Devices / Mesh` → 「设备与连接（Mesh）」。
+- **worker.log 占用的人话提示**：supervisor 打不开 worker 日志（os error 5）时，失败文案现在
+  直接给出根因与动作——"通常是另一个 CetaMesh 实例或旧的 Core 进程仍在运行并占用日志：
+  请在任务管理器结束旧的 WhaleBridge / WhaleBridgeCore 进程后重试"（Owner 机器正是这种状态：
+  旧 Core pid 12284 占着日志，新实例的 Core 起不来）。
+- 安装包同步重出：**1.0.0-rc.2+b5d255f（dirty=false）**，SHA256SUMS 27 条复验一致，发行审计通过。
+
 ## 7. 视觉验收
 
 debug 壳 `--screenshot-dir output/uiv1-qa` 生成 **9/9 张**（1280×800；唯一的纸面主题 × 每个产品页：01-home / 02-settings / 03-about / 04-feedback / 05-onboarding / 06-work / 07-memory / 08-agents / 09-plugins）。已逐张人工核验：
