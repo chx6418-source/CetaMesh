@@ -126,6 +126,7 @@ const REGISTRY = {
   // ── desktop：桌面壳 / 安装器（需要 Rust 构建） ─────────────────────────────
   'test-desktop-shell.mjs': { category: 'desktop', requires: ['shell-debug'], timeoutMs: 600_000 },
   'test-desktop-install.mjs': { category: 'desktop', requires: ['shell-debug'], timeoutMs: 600_000 },
+  'test-installer-productization.mjs': { category: 'desktop', requires: ['shell-debug'], note: 'Installer 产品化：无控制台子进程/窗口、升级位置复用、失败回滚、向导 GUI 冒烟', timeoutMs: 600_000 },
 
   // ── release：打包 / 产物 / 发行验收 ───────────────────────────────────────
   'test-installer-package.mjs': { category: 'release' },
