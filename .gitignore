@@ -64,6 +64,7 @@ design-demos/login-proposals/
 # Build / experiment byproducts (D10 repo hygiene)。目录当前可能不存在，
 # 显式登记防止历史脚本的错误展开（如 %SystemDrive%）或实验产物再次入库。
 /output/
+/artifacts/
 /desktop-shell/native-spike/
 /%SystemDrive%/
 /desktop-shell/target-released/
