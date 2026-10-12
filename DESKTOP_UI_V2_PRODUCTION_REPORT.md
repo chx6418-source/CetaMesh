@@ -12,24 +12,27 @@ The renderer is organized around Chat, Work, Memory, Agents, Plugins, Settings, 
 
 In production the Rust host serves the bundled `desktop-ui/dist` files from the `resources/desktop-ui` payload under `https://cetamesh.localhost`. The host validates message source and exact method names, caps bridge payloads, denies remote navigation, popups and downloads, and sets a restrictive CSP. Production has no renderer HTTP server or remote asset dependency. The Vite origin is a debug-only option.
 
-The host now loads and atomically saves `state/desktop-ui.json` for zoom, close behavior and window geometry, while retaining the v1 theme field for the egui fallback. Legacy shell theme identifiers normalize to the supported `paper` value; Harbor's active theme is instead read from Core `general.theme`. The host restores logical position/size, applies WebView2 zoom, saves geometry during normal use and exit, and preserves the default close-to-tray behavior. Core and running tasks continue when the window is hidden.
+The host now loads and atomically saves `state/desktop-ui.json` for zoom, close behavior and window geometry, while retaining the v1 theme field for the egui fallback. Legacy shell theme identifiers normalize to the supported `paper` value; Harbor's active theme is instead read from Core `general.theme`. The host restores logical position/size, applies WebView2 zoom, saves geometry during normal use and exit, and preserves the default close-to-tray behavior. WebView2's mutable browser profile lives at `<user-data-dir>/webview2`, so the installed program directory stays read-only. Core and running tasks continue when the window is hidden.
 
 ## Verification evidence
 
 | Command / suite | Result |
 | --- | --- |
 | `npm ci --offline --prefix desktop-ui` | PASS — locked renderer dependencies installed; 0 reported vulnerabilities. |
-| `npm run build:ui` | PASS — TypeScript and Vite production bundle built after the final source change (JS 490.94 kB / gzip 150.50 kB; CSS 37.34 kB). Vite reported the React Router `use client` directive warning only. |
-| `$env:WHALEBRIDGE_TEST_CARGO='1'; npm test` | PASS — latest run: 96 suites: **91 PASS, 0 FAIL, 5 NOT_RUN_ENVIRONMENT**. Includes Harbor projection contracts, Core DTO checks, Cargo check/tests, desktop shell, installer package/productization and `test-desktop-install`. |
+| `npm run build:ui` | PASS — TypeScript and Vite production bundle built for build-1057 (JS 490.94 kB / gzip 150.50 kB; CSS 37.34 kB). Vite reported the React Router `use client` directive warning only. |
+| `npm run desktop:build` | PASS — release Rust/WebView2 shell built with the user-data profile fix; Cargo emitted 15 existing warnings, no errors. |
+| `npm run build:release` | PASS — formal clean-source `1.0.0-rc.2-build1057+f822667`, `dirty=false`; 142.9 MB package, SHA256SUMS, manifest and SBOM generated; 139 SBOM components; release audit found no forbidden files, build-machine paths or credentials. |
+| `$env:WHALEBRIDGE_TEST_CARGO='1'; npm test` | PASS — latest run: 96 suites: **92 PASS, 0 FAIL, 4 NOT_RUN_ENVIRONMENT**. Includes Harbor projection contracts, Core DTO checks, Cargo check/tests, desktop shell, installer lifecycle and the formal release-candidate suite. |
 | Desktop lifecycle portion of `test-desktop-shell` | PASS — real window/title and tray creation, persisted preferences, close-to-tray, restore through the running instance, stored 110% zoom and geometry restoration. |
 | `test-desktop-install` / `test-installer-productization` | PASS in the aggregate run against the built debug shell and Core; the lifecycle suite exercised install, upgrade, repair, migration and uninstall in its isolated test sandbox. |
+| `test-release-candidate` | PASS — formal build-1057 installed in a Chinese/spaced sandbox path with no system Node; Core IPC was healthy and `consolePort` refused connections; Harbor WebView2 ran from the installed Microsoft Runtime, stored its profile in the user data directory, and left the install tree unchanged. Crash recovery/backoff, single instance, Core orphan exit, uninstall and user-data preservation all passed. |
 
-The five `NOT_RUN_ENVIRONMENT` suites were `test-console` (legacy bridge), `test-mcp-exec` (gateway), `test-mcp-web-search` (network), `test-onebot-connection` (gateway), and `test-release-candidate` (release distribution artifact). They are not counted as passing. The release candidate is still pending at this report stage.
+The four `NOT_RUN_ENVIRONMENT` suites were `test-console` (legacy bridge), `test-mcp-exec` (gateway), `test-mcp-web-search` (network), and `test-onebot-connection` (gateway). They are not counted as passing.
 
 ## Not verified in this run
 
-- Manual pixel comparison of the five supplied screenshots, the Work/Memory walkthrough, renders at the requested resolutions and true Windows DPI scales, keyboard navigation, and loading/error/empty-state review were **NOT_RUN**. The app has not yet been visually accepted in a running production window; no visual acceptance claim is made. See `UI_V2_VISUAL_ACCEPTANCE.md` for the full matrix.
-- `npm run build:core`, `npm run desktop:build`, `npm run build:release` and the release-candidate suite are **pending for the final source commit**. The release builder records a source commit and requires a clean worktree; the next step is a branch commit followed by the clean release build and isolated installer candidate run. Until those finish, this report does not claim a production installer result.
+- Partial manual capture: the isolated build-1057 fresh install opened the real Harbor first-run flow in WebView2. The observed full window capture is 1282 × 831 pixels (including its title bar) and is saved locally at `C:\Users\Administrator\.codex\visualizations\2026\10\11\01a12a6d-a0d3-7022-a6db-5eb120800fcc\harbor-first-run-window-1282x831-build-1057.jpg`. It proves only that the installed app rendered its first-run screen; it is not a reference comparison or a passed page acceptance.
+- Manual visual acceptance remains **NOT_RUN** for the five supplied reference screenshots, Chat/Work/Memory/Agents/Plugins/Settings/About, requested client-area sizes, true Windows DPI scales, keyboard navigation, and loading/error/empty states. First Run requires a real provider API key and successful connection before the main pages are reachable; no credential was entered and no mocked provider success was used. See `UI_V2_VISUAL_ACCEPTANCE.md` for the matrix and capture limits.
 - Real OneBot, SnowLuma, external MCP execution and real provider credentials were not exercised by the environment-gated suites.
 - 100/500 message performance, long Markdown rendering and dense tool-event timing were not measured; the current single history DTO is bounded at 200 messages.
 - Capability completeness and known Core/configuration gaps are recorded in `UI_V2_PRODUCTION_PARITY.md`; artifact open is not exposed, feedback has no configured base URL, some advanced provider / Extension settings are partial, and code-signing plus redistribution license material are still required before public distribution.
@@ -39,6 +42,8 @@ The five `NOT_RUN_ENVIRONMENT` suites were `test-console` (legacy bridge), `test
 - Worktree: `C:\Users\Administrator\.codex\worktrees\desktop-ui-v2-production\GIT-QQ-BRIDGE`
 - Branch: `feature/desktop-ui-v2-production`
 - Base: `2b2e0d98cea97b979290417d9fc3fe4623cd780c`
-- Integration status: source verification is complete; release / installer acceptance is pending. No push, merge, or branch/worktree deletion has been performed. Keep the branch for Owner review. Merge and cleanup remain gated on the Owner's explicit confirmation.
+- Integration status: formal release build and isolated installer candidate acceptance are complete on the feature branch. No push, merge, or branch/worktree deletion has been performed. Keep the branch for Owner review. Merge and cleanup remain gated on the Owner's explicit confirmation.
+
+Only `artifacts/rc/1.0.0-rc.2/build-1057` is the verified candidate from this turn. The earlier build-1056 package was produced before the updated shell binary was rebuilt and is superseded; do not distribute it.
 
 See `UI_FIDELITY_CHECKLIST.md` for the screenshot-by-screenshot implementation and acceptance matrix.

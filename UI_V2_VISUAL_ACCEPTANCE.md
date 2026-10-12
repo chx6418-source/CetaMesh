@@ -4,7 +4,9 @@
 
 ## 当前结果
 
-**NOT_RUN**。本轮尚未完成运行中的 Harbor 窗口截图与逐项人工比较，因此没有通过项，也没有伪造验收截图。`npm run build:ui` 与自动化合同只能证明代码可构建及路由合同成立，不能证明像素、裁切、滚动或真实系统缩放效果。
+**NOT_RUN（仅有首次运行页面的部分观察）**。2026-10-12 在 build-1057 隔离安装中实际启动了 Harbor/WebView2，并看到 First Run 的“配置模型服务商”步骤。保存的窗口截图为 1282 × 831 像素（包含标题栏），文件在 `C:\Users\Administrator\.codex\visualizations\2026\10\11\01a12a6d-a0d3-7022-a6db-5eb120800fcc\harbor-first-run-window-1282x831-build-1057.jpg`。这仅证明首次运行页面渲染；不是 1280 × 800 client area 测量，不代表任何参考页面已通过。完成 First Run 需要真实 API Key 和成功的 provider 连接；本轮没有填写凭据，也没有用 mock 连接冒充成功。没有 Harbor 页面验收通过项。
+
+`npm run build:ui` 与自动化合同只能证明代码可构建及路由合同成立，不能证明像素、裁切、滚动或真实系统缩放效果。
 
 ## 页面基线
 

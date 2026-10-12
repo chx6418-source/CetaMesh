@@ -52,10 +52,11 @@ Owner 选定方向：**01 Harbor**。本表对照用户提出的生产能力与�
 | 正式 UI 方向 | 仅 01 Harbor；没有其他 UI 方案或方向混搭 | READY |
 | Renderer 到 Core | Typed、allowlisted、bounded `ui.*` projection；敏感字段不回传给 React | READY |
 | WebView 网络面 | 本地 `resources/desktop-ui`、`https://cetamesh.localhost`、CSP 与导航限制；生产不启动 UI HTTP/Vite server | READY |
+| WebView2 用户数据 | Wry `WebContext` 将可变 profile 放在 `<user-data-dir>/webview2`；候选验收确认默认 exe 旁目录不存在且安装树不变 | READY |
 | egui | 默认产品 UI 已是 Harbor/WebView2；`--ui=legacy` 与 egui 模块仍保留 | PARTIAL |
 | 视觉一致性 | 用户截图被定义为唯一参考，代码合同覆盖组件和页面入口 | PARTIAL | 代码方向为 01 Harbor；运行中的窗口、五张截图、七页布局、键盘和滚动尚未人工对照。 |
 | 性能 / 长列表 | Chat 历史请求有上限，避免无界 IPC/渲染 | PARTIAL | 当前历史单次上限 200；100/500 条、长 Markdown 和密集工具事件的时间/内存基准未执行，500 条目前没有单次历史 DTO 支持。 |
-| 发行包 / 安装升级 | `build:release`、SBOM、签名和安装生命周期候选验收 | PARTIAL | 以 `DESKTOP_UI_V2_PRODUCTION_REPORT.md` 的最终结果为准；未完成的签名和发行许可证不得标记为公开发布就绪。 |
+| 发行包 / 安装升级 | Formal `build:release` build-1057、release audit、SBOM 与候选安装生命周期已通过 | PARTIAL | 私有候选包已验证；仍需代码签名、公开再分发所需许可证材料及 Owner 的视觉验收，因此尚不能标记为公开发布就绪。 |
 
 ## 对应合同
 
