@@ -45,11 +45,11 @@
 - Consumes: `createStdioMcpConnection`, `createMcpRuntime({ servers, transportFactory })`, and `createIntegrationService({ mcpRuntime })`.
 - Produces: a child-process fixture implementing MCP initialize/listTools/callTool over stdio, with deterministic close/crash behavior and no network listener.
 
-- [ ] **Step 1: Add failing assertions** for register, start, discovery, capability-gated invocation, disable, restart, crash, recovery, and redacted config projection using the stdio fixture.
-- [ ] **Step 2: Run `npm test -- --category runtime --category integration --category security`** and confirm actual process/lifecycle assertions fail.
-- [ ] **Step 3: Implement the fixture and minimal MCP service changes**; process cleanup must use the suite process-tree helper and terminate only the fixture process created by the suite.
-- [ ] **Step 4: Run `npm test -- --category runtime --category integration --category security`** and confirm all MCP local lifecycle assertions pass.
-- [ ] **Step 5: Check external SnowLuma/gateway availability separately**; record real execution as `NOT_RUN_ENVIRONMENT` when credentials or service are absent, and do not send fixture traffic to a production endpoint.
+- [x] **Step 1: Add failing assertions** for register, start, discovery, capability-gated invocation, disable, restart, crash, recovery, and redacted config projection using the stdio fixture.
+- [x] **Step 2: Run `npm test -- --category runtime --category integration --category security`** and confirm actual process/lifecycle assertions fail.
+- [x] **Step 3: Implement the fixture and minimal MCP service changes**; process cleanup must use the suite process-tree helper and terminate only the fixture process created by the suite.
+- [x] **Step 4: Run `npm test -- --category runtime --category integration --category security`** and confirm all MCP local lifecycle assertions pass.
+- [x] **Step 5: Check external SnowLuma/gateway availability separately**; record real execution as `NOT_RUN_ENVIRONMENT` when credentials or service are absent, and do not send fixture traffic to a production endpoint. Observed: local credentials are configured, but the loopback gateway connection was refused (ECONNREFUSED); external execution remains NOT_RUN_ENVIRONMENT.
 
 ### Task 2: Exercise Plugin catalog and package lifecycle over loopback
 

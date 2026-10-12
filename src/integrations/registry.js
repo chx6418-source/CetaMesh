@@ -47,6 +47,16 @@ function assertMcpConfigPatch(patch) {
   return clean;
 }
 
+function projectMcpConfig(config) {
+  if (!config || typeof config !== 'object' || Array.isArray(config) || Object.keys(config).length === 0) return {};
+  return {
+    hasArgs: Array.isArray(config.args) && config.args.length > 0,
+    hasEnvironment: Boolean(config.env && typeof config.env === 'object' && Object.keys(config.env).length > 0),
+    timeoutMs: Number.isSafeInteger(config.timeoutMs) ? config.timeoutMs : null,
+    note: typeof config.note === 'string' ? config.note : ''
+  };
+}
+
 export function createIntegrationRegistry({
   store,
   plugins = allPluginDescriptors(),
@@ -111,7 +121,7 @@ export function createIntegrationRegistry({
       crashes: runtime.crashes ?? 0,
       tools: server.tools.map(tool => tool.id ?? (server.namespace + tool.name)),
       toolCount: server.tools.length,
-      config: mcpRecord(id).config ?? {}
+      config: projectMcpConfig(mcpRecord(id).config)
     };
   }
 
@@ -285,12 +295,18 @@ export function createIntegrationRegistry({
       next.mcp[id] = { ...(next.mcp[id] ?? {}), config: { ...(next.mcp[id]?.config ?? {}), ...clean } };
       return next;
     });
-    return { id, config: mcpRecord(id).config ?? {} };
+    return { id, config: projectMcpConfig(mcpRecord(id).config) };
+  }
+
+  /** Internal launch-only access; config values must not cross the service DTO boundary. */
+  function mcpRuntimeConfig(id) {
+    requireServer(id);
+    return structuredClone(mcpRecord(id).config ?? {});
   }
 
   function mcpConfig(id) {
     requireServer(id);
-    return { id, config: mcpRecord(id).config ?? {}, enabled: serverEnabled(id) };
+    return { id, config: projectMcpConfig(mcpRecord(id).config), enabled: serverEnabled(id) };
   }
 
   /** 供 DSH preset / agent 侧白名单消费：当前被允许调用的工具全名。 */
@@ -321,6 +337,7 @@ export function createIntegrationRegistry({
     getMcpServer: id => serverState(requireServer(id).id),
     setMcpEnabled,
     mcpConfig,
+    mcpRuntimeConfig,
     updateMcpConfig,
     agentAllowlist,
     toolById,

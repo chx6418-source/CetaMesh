@@ -107,7 +107,7 @@ export function createMcpRuntime({
     log('MCP Server ' + id + ' 异常退出：' + record.lastError);
   }
 
-  async function start(id) {
+  async function start(id, config = {}) {
     const server = requireServer(id);
     const record = recordFor(id);
     if (record.status === 'running' || record.status === 'starting') return snapshot(id);
@@ -115,7 +115,7 @@ export function createMcpRuntime({
     record.lastError = null;
     record.stopping = false;
     try {
-      const connection = await transportFactory(server, {});
+      const connection = await transportFactory(server, config);
       record.connection = connection;
       record.pid = connection.pid ?? null;
       const discovered = typeof connection.listTools === 'function' ? await connection.listTools() : [];
@@ -159,13 +159,13 @@ export function createMcpRuntime({
     return snapshot(id);
   }
 
-  async function restart(id) {
+  async function restart(id, config = {}) {
     requireServer(id);
     await stop(id);
     const record = recordFor(id);
     record.restarts += 1;
     record.lastError = null;
-    return start(id);
+    return start(id, config);
   }
 
   /** 工具发现：运行中返回真实 listTools 结果；否则回退到目录声明（available 由 Registry 决定）。 */

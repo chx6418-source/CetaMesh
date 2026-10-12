@@ -4,6 +4,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createIntegrationService } from '../src/integrations/service.js';
+import { createDesktopUiService } from '../src/desktop/ui-service.js';
+import { createIntegrationRegistry, createIntegrationStore, createMcpRuntime, MCP_SERVER_CATALOG } from '../src/integrations/index.js';
+import { fileURLToPath } from 'node:url';
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-mcp-runtime-'));
 let step = 0;
@@ -141,6 +144,85 @@ try {
   assert.match(brokenStatus.lastError, /ENOENT/);
   await broken.close();
   ok('MCP start 失败：MCP_START_FAILED + status=crashed + lastError，绝不假装 running');
+
+  // 11. 真实 stdio 子进程：注册、审批、配置注入、工具调用、停用、崩溃与恢复。
+  const localTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-mcp-stdio-'));
+  const secret = 'mcp-fixture-sentinel-for-redaction';
+  let localService = null;
+  try {
+    const fixtureEntry = fileURLToPath(new URL('./fixtures/mcp-stdio-server.mjs', import.meta.url));
+    const sourceServer = MCP_SERVER_CATALOG.find(server => server.id === 'snowluma');
+    const fixtureServer = { ...sourceServer, entry: fixtureEntry, tools: sourceServer.tools.filter(tool => tool.name === 'qq_status') };
+    const localRuntime = createMcpRuntime({ servers: [fixtureServer] });
+    const localStore = createIntegrationStore({ stateDir: localTmp });
+    const localRegistry = createIntegrationRegistry({ store: localStore, servers: [fixtureServer], mcpStatus: id => localRuntime.status(id) });
+    localService = createIntegrationService({ store: localStore, registry: localRegistry, mcpRuntime: localRuntime });
+    const before = await localService.execute({ method: 'mcp.list' });
+    assert.equal(before.servers.length, 1);
+    assert.equal(before.servers[0].status, 'stopped');
+    const updatedConfig = await localService.execute({
+      method: 'mcp.config.update',
+      params: { id: 'snowluma', approved: true, config: { args: ['fixture-arg'], cwd: localTmp, env: { MCP_FIXTURE_SECRET: secret } } }
+    });
+    assert.equal(JSON.stringify(updatedConfig).includes(secret), false, "MCP config update response must not echo environment values");
+    const ui = createDesktopUiService({ services: { integrationService: localService } });
+    const publicConfig = await ui.execute({ method: 'ui.mcp.config.get', params: { serverId: 'snowluma' } });
+    assert.equal(publicConfig.hasArgs, true);
+    assert.equal(publicConfig.hasEnvironment, true);
+    assert.equal(JSON.stringify(publicConfig).includes(secret), false, "typed UI config must never expose MCP environment values");
+    assert.equal(JSON.stringify(await localService.execute({ method: "mcp.list" })).includes(secret), false, "MCP registry list must not expose config secrets");
+    const pendingStart = await localService.execute({ method: 'mcp.start', params: { id: 'snowluma' } });
+    assert.equal(pendingStart.status, 'pending', 'starting a process requires explicit Owner approval');
+    assert.equal((await localService.execute({ method: 'mcp.get', params: { id: 'snowluma' } })).status, 'stopped');
+    const started = await localService.execute({ method: 'mcp.start', params: { id: 'snowluma', approved: true } });
+    assert.equal(started.status, 'running');
+    assert.ok(Number.isInteger(started.pid));
+    const discovered = await localService.execute({ method: 'mcp.tools', params: { id: 'snowluma' } });
+    assert.equal(discovered.tools.length, 1);
+    assert.equal(discovered.tools[0].name, 'qq_status');
+    assert.equal(discovered.tools[0].discovered, true);
+    const firstCall = await localService.execute({ method: 'tools.invoke', params: { id: 'mcp__snowluma__qq_status', input: {} } });
+    assert.equal(firstCall.status, 'completed');
+    const firstPayload = JSON.parse(firstCall.result.content[0].text);
+    assert.equal(firstPayload.configuredSecretMatches, true, 'saved MCP env config must reach only its child process');
+    assert.deepEqual(firstPayload.args, ['fixture-arg']);
+    assert.equal(path.resolve(firstPayload.cwd), path.resolve(localTmp));
+    const disabled = await localService.execute({ method: 'mcp.disable', params: { id: 'snowluma', approved: true } });
+    assert.equal(disabled.enabled, false);
+    assert.equal(disabled.status, 'disabled');
+    await assert.rejects(() => localService.execute({ method: 'tools.invoke', params: { id: 'mcp__snowluma__qq_status' } }));
+    const enabled = await localService.execute({ method: 'mcp.enable', params: { id: 'snowluma', approved: true } });
+    assert.equal(enabled.enabled, true);
+    const startedAgain = await localService.execute({ method: 'mcp.start', params: { id: 'snowluma', approved: true } });
+    assert.equal(startedAgain.status, 'running');
+    const crashCall = await localService.execute({ method: 'tools.invoke', params: { id: 'mcp__snowluma__qq_status', input: { crash: true } } });
+    assert.equal(crashCall.status, 'completed');
+    let crashed = null;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      crashed = await localService.execute({ method: 'mcp.get', params: { id: 'snowluma' } });
+      if (crashed.status === 'crashed') break;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    assert.equal(crashed.status, 'crashed', 'unexpected fixture process exit must update the real registry');
+    assert.ok(crashed.crashes >= 1);
+    await assert.rejects(() => localService.execute({ method: 'tools.invoke', params: { id: 'mcp__snowluma__qq_status' } }));
+    const recovered = await localService.execute({ method: 'mcp.restart', params: { id: 'snowluma', approved: true } });
+    assert.equal(recovered.status, 'running');
+    assert.ok(recovered.restarts >= 1);
+    const recoveredCall = await localService.execute({ method: 'tools.invoke', params: { id: 'mcp__snowluma__qq_status', input: {} } });
+    assert.equal(recoveredCall.status, 'completed');
+    const recoveredPayload = JSON.parse(recoveredCall.result.content[0].text);
+    assert.equal(recoveredPayload.configuredSecretMatches, true);
+    assert.deepEqual(recoveredPayload.args, ['fixture-arg']);
+    const stopped = await localService.execute({ method: 'mcp.stop', params: { id: 'snowluma', approved: true } });
+    assert.equal(stopped.status, 'stopped');
+    assert.equal(stopped.pid, null);
+    assert.equal(JSON.stringify(publicConfig).includes(secret), false);
+    ok('真实 MCP stdio：配置只注入子进程，UI 脱敏；审批、发现、调用、禁用、崩溃、恢复与停止');
+  } finally {
+    await localService?.close();
+    fs.rmSync(localTmp, { recursive: true, force: true });
+  }
 
   await service.close();
   console.log('\nPASS CetaMesh MCP Registry/Runtime（' + step + ' 组断言）');

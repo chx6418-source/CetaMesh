@@ -159,14 +159,14 @@ export function createIntegrationService({
         if (!resolvedRegistry.serverEnabled(command.serverId)) {
           throw integrationError('MCP_DISABLED', 'MCP Server ' + command.serverId + ' 已被禁用，先启用再启动');
         }
-        return runtime.start(command.serverId);
+        return runtime.start(command.serverId, resolvedRegistry.mcpRuntimeConfig?.(command.serverId) ?? {});
       }
       case 'mcp.stop': return runtime.stop(command.serverId);
       case 'mcp.restart': {
         if (!resolvedRegistry.serverEnabled(command.serverId)) {
           throw integrationError('MCP_DISABLED', 'MCP Server ' + command.serverId + ' 已被禁用，先启用再重启');
         }
-        return runtime.restart(command.serverId);
+        return runtime.restart(command.serverId, resolvedRegistry.mcpRuntimeConfig?.(command.serverId) ?? {});
       }
       case 'mcp.config.update': return resolvedRegistry.updateMcpConfig(command.serverId, command.config ?? {});
       case 'integration.action': {

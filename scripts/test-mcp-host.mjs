@@ -1,23 +1,27 @@
-// 测试桥接自带的 snowluma-host MCP server（status/start/stop）
+#!/usr/bin/env node
+// Exercise the production stdio MCP host with a test-owned local process.
+import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { createStdioMcpConnection } from '../src/integrations/mcp-runtime.js';
 
-const entry = fileURLToPath(new URL('../src/mcp-host-server.js', import.meta.url));
-
-const transport = new StdioClientTransport({ command: process.execPath, args: [entry] });
-const client = new Client({ name: 'bridge-test', version: '0.1.0' });
-
+const fixtureEntry = fileURLToPath(new URL('./fixtures/mcp-stdio-server.mjs', import.meta.url));
+let connection = null;
 try {
-  await client.connect(transport);
-  console.log('✅ snowluma-host MCP 连接成功');
-  const tools = await client.listTools();
-  console.log('工具:', tools.tools.map((t) => t.name).join(', '));
-  const status = await client.callTool({ name: 'snowluma_status', arguments: {} });
-  const text = status.content?.[0]?.text ?? JSON.stringify(status);
-  console.log('✅ snowluma_status:', text);
-  process.exit(0);
-} catch (error) {
-  console.error('❌ 测试失败:', error?.message ?? error);
-  process.exit(1);
+  connection = await createStdioMcpConnection({ id: 'local-fixture', entry: fixtureEntry });
+  assert.ok(Number.isInteger(connection.pid), 'stdio fixture must be an owned child process');
+  const tools = await connection.listTools();
+  assert.deepEqual(tools.map(tool => tool.name), ['qq_status']);
+  const response = await connection.callTool('qq_status', {});
+  const payload = JSON.parse(response.content[0].text);
+  assert.equal(payload.configuredSecretMatches, false);
+  assert.deepEqual(payload.args, []);
+  console.log('PASS official MCP stdio initialize/listTools/callTool against local fixture');
+} finally {
+  await connection?.close();
 }
+
+await assert.rejects(() => createStdioMcpConnection(
+  { id: 'malformed-fixture', entry: fixtureEntry },
+  { env: { MCP_FIXTURE_MODE: 'malformed' } }
+));
+console.log('PASS malformed local MCP protocol data fails closed');

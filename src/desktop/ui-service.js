@@ -606,8 +606,8 @@ export function createDesktopUiService({ services = {}, system = services.system
       const config = record(result.config);
       return {
         id: string(result.id, 160), enabled: result.enabled === true,
-        hasArgs: Array.isArray(config.args) && config.args.length > 0,
-        hasEnvironment: Boolean(config.env && Object.keys(record(config.env)).length),
+        hasArgs: config.hasArgs === true,
+        hasEnvironment: config.hasEnvironment === true,
         timeoutMs: Number.isSafeInteger(config.timeoutMs) ? config.timeoutMs : null,
         note: string(config.note, 500)
       };
