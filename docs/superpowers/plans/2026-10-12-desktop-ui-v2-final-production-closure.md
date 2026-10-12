@@ -18,6 +18,6 @@ This index splits the approved closure design into independently reviewable impl
 
 - Plans 1–6 produce local testable behavior and can be reviewed independently. The final plan depends on their merged-in-branch commits and reports.
 - Keep each change on `feature/desktop-ui-v2-production`. Do not push, publish Stable, merge, or delete the branch/worktree before Owner confirmation.
-- The implementation method is not selected yet. The Harbor UI and typed bridge files recur across plans, so the recommended path is one implementer working sequentially in this worktree, with review checkpoints after each subsystem. Owner may choose subagent-driven execution instead.
+- Execution method: Owner selected Native sequential execution. The Harbor UI and typed bridge files recur across plans, so one implementer works sequentially in this worktree with review checkpoints after each subsystem.
 - Real Provider credential acceptance is `NOT_RUN_ENVIRONMENT` if credentials are absent. Feedback stays `BLOCKED` until an Owner-verified official destination exists.
 - Do not treat the existing build-1057 as the final RC; the final candidate must identify the final committed source and report `dirty=false`.
