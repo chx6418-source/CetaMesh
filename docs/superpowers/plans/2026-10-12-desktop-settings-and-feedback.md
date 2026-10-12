@@ -64,15 +64,15 @@
 - Modify: `src/product/feedback-links.js` only if URL/query construction is missing
 - Modify: `release-config.json` when packaged feedback paths need to match the query allowlist
 - Modify: `scripts/test-feedback-links.mjs`
-- Modify: `src/desktop/ui-service.js`
-- Modify: `desktop-ui/src/bridge/typed-client.ts`
-- Modify: `desktop-ui/src/app/HarborApp.tsx`
+- Verify: `src/desktop/ui-service.js` preserves the typed `ui.feedback.links` projection
+- Verify: `desktop-ui/src/bridge/typed-client.ts` remains the single typed UI client path
+- Verify: `desktop-ui/src/app/HarborApp.tsx` disables null URLs and opens configured HTTPS links through Native Host
 
 **Interfaces:**
 - `ui.feedback.links` remains the only About-page data source; URL query keys are exactly `version`, `build`, and `platform`.
 - With no verified `feedback.baseUrl` or website, entries return `url: null` and the page keeps the existing unavailable state.
 
-- [ ] **Step 1: Add failing assertions** for all four entries, query-key allowlist, malformed config rejection, disabled no-URL state, and native HTTPS opening.
-- [ ] **Step 2: Run `npm test -- --category runtime --category security`** and confirm feedback link assertions fail only where behavior is missing.
-- [ ] **Step 3: Implement only centralized validation/projection gaps.** Do not add a guessed URL or a page-level URL constant.
-- [ ] **Step 4: Run `npm test -- --category runtime --category security`** and confirm feedback tests pass; record the missing official destination as `BLOCKED` in the final report.
+- [x] **Step 1: Add failing assertions** for all four entries, query-key allowlist, malformed config rejection, disabled no-URL state, and native HTTPS opening.
+- [x] **Step 2: Run `npm test -- --category runtime --category security`** and confirm feedback link assertions fail only where behavior is missing.
+- [x] **Step 3: Implement only centralized validation/projection gaps.** Do not add a guessed URL or a page-level URL constant.
+- [x] **Step 4: Run `npm test -- --category runtime --category security`** and confirm feedback tests pass; record the missing official destination as `BLOCKED` in the final report.
