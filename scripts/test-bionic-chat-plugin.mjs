@@ -5,6 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { createIntegrationService } from '../src/integrations/service.js';
 import { OWNER_ACTOR } from '../src/capability/types.js';
+import { buildToolCatalog, LEGACY_RETIRED_TOOLS } from '../src/integrations/catalog.js';
+import { createDesktopUiService } from '../src/desktop/ui-service.js';
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-bionic-chat-'));
 let step = 0;
@@ -25,6 +27,12 @@ function makeTransportFactory() {
 try {
   const service = createIntegrationService({ stateDir: tmp, transportFactory: makeTransportFactory() });
   const PACK = 'cetamesh-bionic-chat';
+  const sourceTools = buildToolCatalog();
+  assert.equal(sourceTools.filter(tool => tool.restore === 'restored').length, 46);
+  assert.equal(sourceTools.filter(tool => tool.restore === 'partial').length, 5);
+  assert.equal(sourceTools.filter(tool => tool.restore === 'legacy-unsupported').length, 2);
+  assert.equal(LEGACY_RETIRED_TOOLS.filter(tool => tool.restore === 'deprecated').length, 6);
+  assert.equal(LEGACY_RETIRED_TOOLS.filter(tool => tool.restore === 'legacy-unsupported').length, 2);
 
   // ── 1. 产品层分类：Plugins 下 Installed / Tools / MCP / Integrations ──────
   const overview = await service.execute({ method: 'plugins.overview' });
@@ -53,6 +61,44 @@ try {
   assert.equal(page.settings.advanced.collapsed, true, 'Advanced 默认折叠');
   assert.ok(page.toolCount >= 50);
   ok('插件卡片 + 二级设置页：总开关、' + page.toolCount + ' 个工具逐项开关、Advanced 折叠');
+  const harborUi = createDesktopUiService({ services: { integrationService: service } });
+  const harborSettings = await harborUi.execute({ method: 'ui.plugins.integration.settings', params: { id: PACK } });
+  assert.deepEqual(harborSettings.inventory, { restored: 46, partial: 5, legacyUnsupported: 2 });
+  const harborPartial = harborSettings.tools.find(tool => tool.id === 'mcp__snowluma__qq_click_card_button');
+  assert.equal(harborPartial.restore, 'partial');
+  assert.equal(harborPartial.restorable, true, 'partial tools remain explicitly toggleable');
+  assert.equal(harborPartial.available, false, 'MCP availability is distinct from toggle eligibility');
+  const harborUnsupported = harborSettings.tools.find(tool => tool.id === 'mcp__snowluma-host__stop_snowluma');
+  assert.equal(harborUnsupported.restore, 'legacy-unsupported');
+  assert.equal(harborUnsupported.restorable, false);
+  assert.equal(harborSettings.legacyRetired.length, 8);
+  assert.equal(harborSettings.legacyRetired.filter(tool => tool.restore === 'deprecated').length, 6);
+  const retiredQuery = harborSettings.legacyRetired.find(tool => tool.id === 'snowluma-mcp.query_action');
+  assert.equal(retiredQuery.restore, 'deprecated');
+  assert.ok(retiredQuery.replacement && harborSettings.tools.some(tool => tool.id === retiredQuery.replacement.id),
+    'replacement is projected only when its target exists in the live tool registry');
+  const registeredReplacementId = retiredQuery.replacement.id;
+  const registeredReplacement = service.registry.toolById.get(registeredReplacementId);
+  assert.ok(registeredReplacement);
+  try {
+    service.registry.toolById.delete(registeredReplacementId);
+    const registryWithoutReplacement = await harborUi.execute({ method: 'ui.plugins.integration.settings', params: { id: PACK } });
+    assert.equal(registryWithoutReplacement.legacyRetired.find(tool => tool.id === retiredQuery.id).replacement, null,
+      'replacement text is omitted when the current registry has no matching target');
+  } finally {
+    service.registry.toolById.set(registeredReplacementId, registeredReplacement);
+  }
+  const enabledPartial = await harborUi.execute({ method: 'ui.plugins.integration.tool.toggle', params: {
+    pluginId: PACK, toolId: harborPartial.id, enabled: true
+  } });
+  assert.equal(enabledPartial.enabled, true);
+  const refreshedPartial = (await harborUi.execute({ method: 'ui.plugins.integration.settings', params: { id: PACK } })).tools
+    .find(tool => tool.id === harborPartial.id);
+  assert.equal(refreshedPartial.enabled, true);
+  assert.equal(refreshedPartial.available, false, 'enabling a partial tool does not claim its source is ready');
+  await harborUi.execute({ method: 'ui.plugins.integration.tool.toggle', params: {
+    pluginId: PACK, toolId: harborPartial.id, enabled: false
+  } });
 
   // ── 3. 父开关级联 + 逐工具开关 + 一键全开/全关 ────────────────────────────
   await service.execute({ method: 'plugins.disable', params: { id: PACK } });
@@ -71,7 +117,9 @@ try {
   assert.equal(allOn.enabledToolCount, restoredCount, '一键全开只恢复 restored（安全默认）');
   assert.ok(allOn.tools.filter(row => row.restore !== 'restored').every(row => row.enabled === false),
     'partial / legacy-unsupported 不参与批量开启，必须逐项显式打开');
-  assert.ok(restoredCount > 40, '安全默认可恢复工具数量异常：' + restoredCount);
+  assert.equal(restoredCount, 46);
+  assert.equal(rows.tools.filter(row => row.restore === 'partial').length, 5);
+  assert.equal(rows.tools.filter(row => row.restore === 'legacy-unsupported').length, 2);
   ok('总开关/逐工具开关/一键全开：级联正确，partial 与 legacy-unsupported 不参与批量开启');
 
   // ── 4. Capability 强制：关闭的工具、不可用来源、未知工具、外部调用者 ──────

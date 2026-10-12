@@ -13,11 +13,21 @@ import { createChannelService } from '../src/channel/service.js';
 import { createMeshService } from '../src/mesh/service.js';
 import { createCapabilityBroker } from '../src/capability/broker.js';
 import { registerChannelMeshCapabilities, isAllowedTarget } from '../src/capability/adapters.js';
+import { buildToolCatalog, LEGACY_RETIRED_TOOLS } from '../src/integrations/catalog.js';
 
 const OWNER = { kind: 'owner', id: 'desktop' };
 let step = 0;
 function ok(label) { step += 1; console.log(`✅ [${step}] ${label}`); }
 
+{
+  const tools = buildToolCatalog();
+  assert.equal(tools.filter(tool => tool.restore === 'restored').length, 46);
+  assert.equal(tools.filter(tool => tool.restore === 'partial').length, 5);
+  assert.equal(tools.filter(tool => tool.restore === 'legacy-unsupported').length, 2);
+  assert.equal(LEGACY_RETIRED_TOOLS.filter(tool => tool.restore === 'deprecated').length, 6);
+  assert.equal(LEGACY_RETIRED_TOOLS.filter(tool => tool.restore === 'legacy-unsupported').length, 2);
+  ok('Bionic 当前清单 46/5/2，历史条目保留 deprecated 与 legacy-unsupported 分类');
+}
 function makeEnv({ allow = { groups: ['111'], private: [] }, sendImpl = null } = {}) {
   const channelService = createChannelService();
   const meshService = createMeshService({ stateDir: path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cap-cov-')), 'state') });

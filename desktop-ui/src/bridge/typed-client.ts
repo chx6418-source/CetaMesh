@@ -51,6 +51,20 @@ export interface ExtensionSettingField {
 export type ExtensionSettingValue = string | number | boolean | null | { configured: boolean };
 export interface ExtensionSettingsDescription { id: string; name: string; available: boolean; fields: ExtensionSettingField[] }
 export interface ExtensionSettingsSnapshot { id: string; values: Record<string, ExtensionSettingValue> }
+export type IntegrationRestoreStatus = 'restored' | 'partial' | 'deprecated' | 'legacy-unsupported' | 'unknown';
+export interface IntegrationToolSetting {
+  id: string; name: string; enabled: boolean; available: boolean; restorable: boolean;
+  restore: IntegrationRestoreStatus; reason: string; risk: string; permission: string;
+}
+export interface RetiredIntegrationTool {
+  id: string; name: string; feature: string; restore: 'deprecated' | 'legacy-unsupported'; reason: string;
+  replacement: { id: string; label: string } | null;
+}
+export interface IntegrationSettings {
+  id: string; name: string; enabled: boolean; available: boolean; tools: IntegrationToolSetting[];
+  inventory: { restored: number; partial: number; legacyUnsupported: number } | null;
+  legacyRetired: RetiredIntegrationTool[]; settings: Record<string, unknown>;
+}
 
 export type DesktopEvent = 'core.status' | 'chat.updated' | 'chat.streaming' | 'task.updated' | 'task.deleted'
   | 'agent.updated' | 'workspace.updated' | 'plugin.updated' | 'plugin.downloadProgress' | 'approval.pending' | 'approval.resolved'
@@ -222,7 +236,7 @@ export const extensionSettingsClient = {
   disable: (id: string) => uiCall<Record<string, unknown>>('ui.plugins.disable', { id }),
   uninstall: (id: string) => uiCall<Record<string, unknown>>('ui.plugins.uninstall', { id }),
   integrations: () => uiCall<{ integrations: { id: string; name: string; status: string; enabled: boolean; available: boolean }[] }>('ui.plugins.integration.list', {}),
-  integrationSettings: (id: string) => uiCall<{ id: string; name: string; enabled: boolean; available: boolean; tools: { id: string; name: string; enabled: boolean; available: boolean; permission: string }[]; settings: Record<string, unknown> }>('ui.plugins.integration.settings', { id }),
+  integrationSettings: (id: string) => uiCall<IntegrationSettings>('ui.plugins.integration.settings', { id }),
   manageIntegration: (id: string, action: 'enable' | 'disable') => uiCall<Record<string, unknown>>('ui.plugins.integration.manage', { id, action }),
   toggleTool: (pluginId: string, toolId: string, enabled: boolean) => uiCall<Record<string, unknown>>('ui.plugins.integration.tool.toggle', { pluginId, toolId, enabled }),
   mcp: () => uiCall<{ servers: { id: string; name: string; status: string; enabled: boolean; available: boolean; toolCount: number | null; transport: string; reason: string | null }[] }>('ui.mcp.list', {}),

@@ -1,3 +1,5 @@
+import { LEGACY_RETIRED_TOOLS } from '../integrations/catalog.js';
+
 // Narrow, renderer-safe DTO adapter for the privileged Desktop WebView.
 // Business state stays in existing Core services; this module owns no persistent data.
 
@@ -617,12 +619,42 @@ export function createDesktopUiService({ services = {}, system = services.system
     },
     'ui.plugins.integration.list': async () => ({ integrations: (await integrations('integrations.list', {})).integrations.map(row => ({ id: string(row.id, 120), name: string(row.displayName ?? row.name ?? row.id, 160), status: string(row.status, 60), enabled: row.enabled === true, available: row.available === true })) }),
     'ui.plugins.integration.settings': async p => {
-      const result = await integrations('plugins.settings', { id: idParam(p) });
+      const id = idParam(p);
+      const result = await integrations('plugins.settings', { id });
       const settingsView = record(result.settings);
+      const rawTools = (result.tools ?? []).slice(0, 100);
+      const tools = rawTools.map(tool => {
+        const item = record(tool);
+        const restore = ['restored', 'partial', 'deprecated', 'legacy-unsupported'].includes(item.restore) ? item.restore : 'unknown';
+        return {
+          id: string(item.id, 160), name: string(item.name ?? item.label ?? item.id, 180),
+          enabled: item.enabled === true, available: item.available === true,
+          restorable: item.restorable === true && ['restored', 'partial'].includes(restore),
+          restore, reason: string(item.reason, 500), risk: string(item.risk, 40), permission: string(item.permission, 100)
+        };
+      });
+      const registeredToolIds = new Set(tools.map(tool => tool.id));
+      const isBionicToolPack = id === 'cetamesh-bionic-chat';
+      const legacyRetired = isBionicToolPack ? LEGACY_RETIRED_TOOLS.map(tool => {
+        const replacementInfo = record(tool.replacement);
+        const replacementId = string(replacementInfo.toolId, 160);
+        return {
+          id: string(tool.id, 160), name: string(tool.name, 120), feature: string(tool.feature, 240),
+          restore: tool.restore === 'legacy-unsupported' ? 'legacy-unsupported' : 'deprecated',
+          reason: string(tool.reason, 500),
+          replacement: replacementId && registeredToolIds.has(replacementId)
+            ? { id: replacementId, label: string(replacementInfo.label, 160) }
+            : null
+        };
+      }) : [];
+      const inventory = isBionicToolPack ? {
+        restored: tools.filter(tool => tool.restore === 'restored').length,
+        partial: tools.filter(tool => tool.restore === 'partial').length,
+        legacyUnsupported: tools.filter(tool => tool.restore === 'legacy-unsupported').length
+      } : null;
       return {
-        id: string(result.id ?? p.id, 120), name: string(result.name, 160),
-        enabled: result.enabled === true, available: result.available !== false,
-        tools: (result.tools ?? []).slice(0, 100).map(tool => ({ id: string(tool.id, 160), name: string(tool.name ?? tool.label ?? tool.id, 180), enabled: tool.enabled === true, available: tool.available !== false, permission: string(tool.permission, 100) })),
+        id: string(result.id ?? id, 120), name: string(result.name, 160),
+        enabled: result.enabled === true, available: result.available !== false, tools, inventory, legacyRetired,
         settings: Object.fromEntries(Object.entries(settingsView).filter(([key]) => !SECRET_KEY.test(key) && !/(path|directory|root|cwd|folder|file)/i.test(key)).map(([key, value]) => [key.slice(0, 100), scalar(value)]))
       };
     },

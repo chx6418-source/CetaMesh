@@ -200,7 +200,8 @@ export const LEGACY_RETIRED_TOOLS = Object.freeze([
     id: 'snowluma-mcp.query_action', name: 'query_action', origin: '@snowluma/mcp（外部 npm 包，从未进入 MCP_SERVERS）',
     path: 'scripts/test-mcp-exec.mjs', evidence: '906f919 起（仅测试脚本与 package.json 留痕）',
     feature: '按名字查询 OneBot 动作（通用只读动作）', present: false, restore: 'deprecated',
-    reason: '已被 mcp-snowluma-safe 的安全子集取代，不再提供通用动作查询面。'
+    reason: '通用 OneBot 动作查询面已退役；不再暴露动态动作名查询入口。',
+    replacement: { toolId: 'mcp__snowluma__qq_status', label: 'SnowLuma 安全工具集' }
   },
   {
     id: 'snowluma-mcp.invoke_action', name: 'invoke_action', origin: '@snowluma/mcp（外部 npm 包）',
@@ -230,7 +231,7 @@ export const LEGACY_RETIRED_TOOLS = Object.freeze([
     id: 'cetamesh-task.git_status', name: 'cetamesh_task_git_status', origin: '侧分支 9391bb8',
     path: 'dsh/agent-presets/cetamesh-task/task-tools-contract.json', evidence: '同上',
     feature: 'Workspace git status（只读）', present: false, restore: 'deprecated',
-    reason: '未合并；HEAD 已有 workspace.git.status 能力面。'
+    reason: '未合并；该历史工具不属于当前工具包目录。'
   },
   {
     id: 'cetamesh-task.git_diff', name: 'cetamesh_task_git_diff', origin: '侧分支 9391bb8',

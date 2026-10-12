@@ -96,7 +96,7 @@
 **Files:**
 - Modify: `scripts/test-bionic-chat-plugin.mjs`
 - Modify: `scripts/test-capability-coverage.mjs`
-- Modify: `src/integrations/catalog.js` only if registry facts are wrong
+- Modify: `src/integrations/catalog.js` for structured replacement metadata; do not alter registry restore statuses
 - Modify: `src/desktop/ui-service.js`
 - Modify: `src/app/service-container.js`
 - Modify: `desktop-ui/src/bridge/typed-client.ts`
@@ -107,7 +107,7 @@
 - Consumes: `buildToolCatalog()`, `LEGACY_RETIRED_TOOLS`, and Integration Registry status.
 - Produces: exact observed counts of 46 restored, 5 partial, and 2 legacy-unsupported tools; deprecated entries remain explicitly deprecated; replacement text appears only for a real registered replacement.
 
-- [ ] **Step 1: Add failing assertions** that compare source catalog states, UI projection states, and bulk/per-tool enable behavior to those exact counts.
-- [ ] **Step 2: Run `npm test -- --category security --category integration`** and confirm any inventory mismatch is visible.
-- [ ] **Step 3: Correct only source facts/projection/rendering that fail those assertions**; do not restore unsupported process-control tools.
-- [ ] **Step 4: Run `npm test -- --category security --category integration`** and confirm inventory and toggle assertions pass.
+- [x] **Step 1: Add failing assertions** comparing source catalog states, UI projection states, retired/deprecated rows, conditional replacement, and bulk/per-tool enable behavior to the exact counts.
+- [x] **Step 2: Run `npm test -- --category security --category integration`**. RED: PASS 17 / FAIL 1; `test-bionic-chat-plugin` exposed the missing Harbor inventory projection.
+- [x] **Step 3: Correct only source facts/projection/rendering that fail those assertions**; exact 46/5/2 counts now come from Integration Registry rows, deprecated entries remain distinct, replacement text is registry-gated, partial tools remain toggleable, and unsupported process-control tools remain disabled.
+- [x] **Step 4: Run `npm test -- --category security --category integration`** → PASS 18/18, FAIL 0, NOT_RUN_ENVIRONMENT 0. `npm test -- --category architecture` → PASS 9/9; after the final absent-replacement assertion, `npm test -- --category security` → PASS 11/11. `npm run build:ui` passed TypeScript and production Vite build.

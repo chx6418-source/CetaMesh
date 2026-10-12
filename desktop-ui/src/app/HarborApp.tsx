@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router';
-import { aboutClient, agentClient, approvalClient, bridge, chatClient, extensionSettingsClient, feedbackClient, hostClient, memoryClient, onboardingClient, openExternal, pluginClient, searchClient, settingsClient, taskClient, updateClient, workspaceClient, type Agent, type Approval, type ChatMessage as ChatMessageDto, type ChatSession, type ExtensionSettingsDescription, type ExtensionSettingsSnapshot, type Memory, type Plugin, type SettingField, type Settings, type Task } from '../bridge/typed-client';
+import { aboutClient, agentClient, approvalClient, bridge, chatClient, extensionSettingsClient, feedbackClient, hostClient, memoryClient, onboardingClient, openExternal, pluginClient, searchClient, settingsClient, taskClient, updateClient, workspaceClient, type Agent, type Approval, type ChatMessage as ChatMessageDto, type ChatSession, type ExtensionSettingsDescription, type ExtensionSettingsSnapshot, type IntegrationSettings, type Memory, type Plugin, type SettingField, type Settings, type Task } from '../bridge/typed-client';
 import { Icon, type IconName } from '../components/icons';
 import { Button, IconButton, Input, SearchInput, Select, Tabs } from '../components/primitives/inputs';
 import { Sheet } from '../components/primitives/overlays';
@@ -675,7 +675,7 @@ function PluginsPage() {
   const extensionSettingsRequest = useRef(0);
   const [extensionSettings, setExtensionSettings] = useState<ExtensionSettingsFormState | null>(null);
   const [extensionSettingsLoading, setExtensionSettingsLoading] = useState(false);
-  const [selectedIntegration, setSelectedIntegration] = useState<{ id: string; name: string; enabled: boolean; available: boolean; tools: { id: string; name: string; enabled: boolean; available: boolean; permission: string }[]; settings: Record<string, unknown> } | null>(null);
+  const [selectedIntegration, setSelectedIntegration] = useState<IntegrationSettings | null>(null);
   const [selectedServer, setSelectedServer] = useState<{ server: McpRow; tools: { id: string; name: string; description: string; enabled: boolean }[]; config: { id: string; enabled: boolean; hasArgs: boolean; hasEnvironment: boolean; timeoutMs: number | null; note: string } } | null>(null);
   const [mcpConfigDraft, setMcpConfigDraft] = useState({ timeoutMs: '', note: '' });
   const [review, setReview] = useState<PluginReview | null>(null);
@@ -764,7 +764,7 @@ function PluginsPage() {
     } catch (cause) { setError(messageOf(cause)); }
     finally { setBusy(''); }
   }
-  async function toggleIntegrationTool(integrationId: string, tool: { id: string; enabled: boolean; available: boolean }) {
+  async function toggleIntegrationTool(integrationId: string, tool: IntegrationSettings['tools'][number]) {
     const key = `${integrationId}:${tool.id}`;
     setBusy(key); setError(''); setNotice('');
     try {
@@ -911,7 +911,38 @@ function PluginsPage() {
       </section>}
       <section><h3>更新说明</h3>{selectedPlugin.changelog.length ? <ul>{selectedPlugin.changelog.map((line, index) => <li key={`${index}-${line}`}>{line}</li>)}</ul> : <p className="muted">没有更新说明。</p>}</section><div className="row detail-actions">{selectedPlugin.status === 'update' ? <Button variant="primary" disabled={busy === selectedPlugin.id} onClick={() => void stage(selectedPlugin)}>查看更新并安装</Button> : !selectedPlugin.installed ? <Button variant="primary" disabled={busy === selectedPlugin.id} onClick={() => void stage(selectedPlugin)}>查看权限并安装</Button> : selectedPlugin.enabled ? <Button disabled={busy === selectedPlugin.id} onClick={() => void pluginAction(selectedPlugin, 'disable')}>停用</Button> : <Button variant="primary" disabled={busy === selectedPlugin.id} onClick={() => void reviewEnable(selectedPlugin)}>查看权限并启用</Button>}{selectedPlugin.installed && <Button variant="danger" disabled={busy === selectedPlugin.id} onClick={() => void pluginAction(selectedPlugin, 'uninstall')}>卸载</Button>}</div></div>}</Sheet>
     <Sheet open={Boolean(review)} title="安装与权限审查" onClose={() => setReview(null)}>{review && <div className="review-detail"><Badge tone={review.requiresReview ? 'warning' : 'success'}>{review.trust || '来源待核验'}</Badge><h3>{review.action === 'update' ? '更新前查看权限' : review.action === 'install' ? '安装前查看权限' : '启用前查看权限'}</h3><p>仅继续本次明确选择的操作。运行时能力仍需 Core 按策略审批。</p>{review.summary.length ? <section><h4>操作说明</h4><ul>{review.summary.map((line, index) => <li key={`${index}-${line}`}>{line}</li>)}</ul></section> : null}<section><h4>请求的权限</h4>{review.permissions.length ? <ul>{review.permissions.map(permission => <li key={permission}>{permission}</li>)}</ul> : <p>没有声明额外权限。</p>}</section>{!review.installable && <ErrorNotice error="Core 尚未允许该插件安装或启用。请先处理完整性或兼容性问题。" />}<div className="row detail-actions"><Button onClick={() => setReview(null)}>取消</Button><Button variant="primary" disabled={!review.installable || busy === review.id} onClick={() => void confirmReview()}>{busy === review.id ? '正在处理…' : review.action === 'update' ? '确认更新' : review.action === 'install' ? '确认安装' : '确认启用'}</Button></div></div>}</Sheet>
-    <Sheet open={Boolean(selectedIntegration)} title={selectedIntegration?.name ?? '集成设置'} onClose={() => setSelectedIntegration(null)}>{selectedIntegration && <div className="plugin-detail"><StatusBadge value={selectedIntegration.enabled ? 'enabled' : 'disabled'} available={selectedIntegration.available} /><h3>能力与工具</h3>{selectedIntegration.tools.length ? selectedIntegration.tools.map(tool => <div className="tool-setting-row" key={tool.id}><span className="grow"><strong>{tool.name}</strong><small>{tool.permission || '权限由 Core 控制'}</small></span><StatusBadge value={tool.available && tool.enabled ? 'enabled' : 'disabled'} /><Button compact disabled={!tool.available || busy === `${selectedIntegration.id}:${tool.id}`} onClick={() => void toggleIntegrationTool(selectedIntegration.id, tool)}>{tool.enabled ? '关闭工具' : '开启工具'}</Button></div>) : <p className="muted">没有公开的工具配置。</p>}<h3>安全设置</h3>{Object.entries(selectedIntegration.settings).length ? Object.entries(selectedIntegration.settings).map(([key, value]) => <div className="tool-setting-row" key={key}><strong>{key}</strong><span>{typeof value === 'boolean' ? value ? '启用' : '停用' : String(value ?? '—')}</span></div>) : <p className="muted">没有可展示的非敏感设置。</p>}</div>}</Sheet>
+    <Sheet open={Boolean(selectedIntegration)} title={selectedIntegration?.name ?? '集成设置'} onClose={() => setSelectedIntegration(null)}>
+      {selectedIntegration && <div className="plugin-detail">
+        <StatusBadge value={selectedIntegration.enabled ? 'enabled' : 'disabled'} available={selectedIntegration.available} />
+        {selectedIntegration.inventory && <Surface className="bionic-inventory">
+          <div className="section-heading"><h3>仿生聊天工具清单</h3><small>按当前 Integration Registry 状态统计</small></div>
+          <div className="bionic-inventory-counts">
+            <Surface><strong>{selectedIntegration.inventory.restored}</strong><small>已恢复</small></Surface>
+            <Surface><strong>{selectedIntegration.inventory.partial}</strong><small>部分恢复</small></Surface>
+            <Surface><strong>{selectedIntegration.inventory.legacyUnsupported}</strong><small>不可恢复</small></Surface>
+          </div>
+        </Surface>}
+        <h3>能力与工具</h3>
+        {selectedIntegration.tools.length ? selectedIntegration.tools.map(tool => {
+          const restoreLabel = tool.restore === 'restored' ? '已恢复' : tool.restore === 'partial' ? '部分恢复'
+            : tool.restore === 'deprecated' ? '已弃用' : tool.restore === 'legacy-unsupported' ? '不可恢复' : '状态未识别';
+          return <div className="tool-setting-row" key={tool.id}>
+            <span className="grow"><strong>{tool.name}</strong><small>{tool.permission || '权限由 Core 控制'} · {restoreLabel}</small>{tool.reason && <small>{tool.reason}</small>}</span>
+            <div className="row"><StatusBadge value={tool.enabled ? 'enabled' : 'disabled'} />{tool.enabled && !tool.available && <StatusBadge value="unavailable" />}</div>
+            <Button compact disabled={!tool.restorable || busy === `${selectedIntegration.id}:${tool.id}`} title={!tool.restorable ? tool.reason : undefined} onClick={() => void toggleIntegrationTool(selectedIntegration.id, tool)}>{tool.enabled ? '关闭工具' : '开启工具'}</Button>
+          </div>;
+        }) : <p className="muted">没有公开的工具配置。</p>}
+        {selectedIntegration.legacyRetired.length > 0 && <details className="bionic-retired-tools">
+          <summary>已退役工具 <span>{selectedIntegration.legacyRetired.length}</span></summary>
+          {selectedIntegration.legacyRetired.map(tool => <div className="tool-setting-row" key={tool.id}>
+            <span className="grow"><strong>{tool.name}</strong><small>{tool.feature}</small><small>{tool.reason}</small>{tool.replacement && <small>已注册替代项：{tool.replacement.label}</small>}</span>
+            <Badge tone={tool.restore === 'deprecated' ? 'default' : 'danger'}>{tool.restore === 'deprecated' ? 'Deprecated' : 'Legacy Unsupported'}</Badge>
+          </div>)}
+        </details>}
+        <h3>安全设置</h3>
+        {Object.entries(selectedIntegration.settings).length ? Object.entries(selectedIntegration.settings).map(([key, value]) => <div className="tool-setting-row" key={key}><strong>{key}</strong><span>{typeof value === 'boolean' ? value ? '启用' : '停用' : String(value ?? '—')}</span></div>) : <p className="muted">没有可展示的非敏感设置。</p>}
+      </div>}
+    </Sheet>
     <Sheet open={Boolean(selectedServer)} title={selectedServer?.server.name ?? 'MCP 工具'} onClose={() => setSelectedServer(null)}>{selectedServer && <div className="plugin-detail">
       <div className="row between"><p>工具描述来自 Core 的 MCP 注册表。调用权限由 Capability Broker 管理。</p><Button compact onClick={() => void manageServer(selectedServer.server, 'restart')}>重启</Button></div>
       <Surface className="mcp-settings-card"><div className="row between"><strong>服务器状态</strong><StatusBadge value={selectedServer.server.status} /></div><p>传输方式：{selectedServer.server.transport || '未检查'} · 启动参数：{selectedServer.config.hasArgs ? '已配置' : '未配置'} · 环境变量：{selectedServer.config.hasEnvironment ? '已配置' : '未配置'}</p><p className="muted">凭据和原始环境值不会传入界面。</p><label>启动超时（毫秒，留空保持现有值）<Input type="number" min={100} max={300000} value={mcpConfigDraft.timeoutMs} onChange={event => setMcpConfigDraft(current => ({ ...current, timeoutMs: event.target.value }))} /></label><label>备注<Input value={mcpConfigDraft.note} onChange={event => setMcpConfigDraft(current => ({ ...current, note: event.target.value }))} maxLength={500} /></label><Button compact disabled={busy === 'mcp-config'} onClick={() => void saveMcpConfig()}>保存 MCP 设置</Button></Surface>

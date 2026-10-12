@@ -388,3 +388,14 @@
   .extension-setting { grid-template-columns: minmax(0, 1fr); gap: 6px; }
   .extension-setting-toggle { justify-content: flex-start; }
 }
+
+.bionic-inventory { display: grid; gap: 10px; margin: 12px 0; padding: 12px; }
+.bionic-inventory .section-heading { margin: 0; }
+.bionic-inventory-counts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.bionic-inventory-counts .cm-surface { display: flex; flex-direction: column; gap: 3px; padding: 9px 11px; }
+.bionic-inventory-counts strong { color: var(--text-primary); font-size: 17px; }
+.bionic-inventory-counts small, .bionic-retired-tools small { color: var(--text-muted); font-size: 11px; }
+.bionic-retired-tools { margin: 10px 0; padding-top: 10px; border-top: 1px solid var(--border); }
+.bionic-retired-tools summary { display: flex; justify-content: space-between; color: var(--text-secondary); cursor: pointer; font-size: 12px; }
+.bionic-retired-tools .tool-setting-row { align-items: flex-start; }
+.bionic-retired-tools .tool-setting-row .grow { gap: 3px; }
