@@ -153,13 +153,56 @@ function descendants(pid) {
   return Array.isArray(parsed) ? parsed : [parsed];
 }
 
-function assertNoBrowserRuntime(pid, phase) {
-  const browserImages = descendants(pid).filter((item) =>
+function processSnapshotsForPids(pids) {
+  const uniquePids = [...new Set(pids.filter((pid) => Number.isInteger(pid) && pid > 0))];
+  if (uniquePids.length === 0) return [];
+  const result = spawnSync(
+    'powershell.exe',
+    ['-NoProfile', '-NonInteractive', '-Command',
+     `$ids = @(${uniquePids.join(',')}); Get-CimInstance Win32_Process | Where-Object { $ids -contains $_.ProcessId } | Select-Object ProcessId,Name,ExecutablePath | ConvertTo-Json -Compress`],
+    { encoding: 'utf8', timeout: 60000 }
+  );
+  assert.equal(result.status, 0, `查询测试子进程失败：${result.stderr ?? ''}`);
+  const text = (result.stdout ?? '').trim();
+  if (!text) return [];
+  const parsed = JSON.parse(text);
+  return Array.isArray(parsed) ? parsed : [parsed];
+}
+
+async function waitForProcessSnapshotsToExit(snapshots, { timeoutMs = 25000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let remaining = snapshots;
+  while (Date.now() < deadline) {
+    const current = processSnapshotsForPids(snapshots.map((item) => item.ProcessId));
+    const currentByPid = new Map(current.map((item) => [item.ProcessId, item]));
+    remaining = snapshots.filter((snapshot) => {
+      const live = currentByPid.get(snapshot.ProcessId);
+      return live
+        && String(live.Name ?? '').toLowerCase() === String(snapshot.Name ?? '').toLowerCase()
+        && path.resolve(live.ExecutablePath ?? '').toLowerCase() === path.resolve(snapshot.ExecutablePath ?? '').toLowerCase();
+    });
+    if (remaining.length === 0) return [];
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  return remaining;
+}
+
+function assertHarborWebViewOnly(pid, phase) {
+  const browserProcesses = descendants(pid).filter((item) =>
     /^(msedge(?:webview2)?|chrome|chromium|firefox|iexplore|brave|opera)(\.exe)?$/i.test(
       path.basename(item.ExecutablePath ?? item.Name ?? '')
     )
   );
-  assert.deepEqual(browserImages, [], `${phase} 不得启动浏览器/WebView 子进程：${JSON.stringify(browserImages, null, 2)}`);
+  const webviewProcesses = browserProcesses.filter((item) =>
+    /^msedgewebview2\.exe$/i.test(path.basename(item.ExecutablePath ?? item.Name ?? ''))
+  );
+  const externalBrowsers = browserProcesses.filter((item) => !webviewProcesses.includes(item));
+  assert.deepEqual(externalBrowsers, [], `${phase} 不得启动独立浏览器进程：${JSON.stringify(externalBrowsers, null, 2)}`);
+  assert.ok(webviewProcesses.length > 0, `${phase} 必须使用 WebView2 承载 Harbor 界面`);
+  const unexpectedWebViewPaths = webviewProcesses.filter((item) =>
+    !/\\Microsoft\\EdgeWebView\\Application\\[^\\]+\\msedgewebview2\.exe$/i.test(item.ExecutablePath ?? '')
+  );
+  assert.deepEqual(unexpectedWebViewPaths, [], `${phase} 必须使用已安装的 Microsoft Edge WebView2 Runtime`);
 }
 
 function isRunning(pid) {
@@ -320,7 +363,12 @@ try {
     await assertNativeApiSurface(port, dataDir);
 
     const tree = descendants(shell.pid);
-    assertNoBrowserRuntime(shell.pid, '首次启动');
+    assertHarborWebViewOnly(shell.pid, '首次启动');
+    const webviewDataDir = path.join(dataDir, 'webview2');
+    assert.ok(fs.statSync(webviewDataDir, { throwIfNoEntry: false })?.isDirectory(),
+      `WebView2 用户数据必须存入用户数据目录：${webviewDataDir}`);
+    assert.ok(!fs.existsSync(path.join(installDir, 'WhaleBridge.exe.WebView2')),
+      '安装目录不得创建默认 WebView2 用户数据目录');
     const images = tree.map((item) => path.basename(item.ExecutablePath ?? item.Name ?? ''));
     assert.ok(
       images.some((name) => name.toLowerCase() === 'whalebridgecore.exe'),
@@ -357,7 +405,7 @@ try {
     }
     const recoverMs = Date.now() - killAt;
     assert.ok(newPid, `worker 被强杀后应由壳自动拉起（stderr: ${shellStderr}）`);
-    assertNoBrowserRuntime(shell.pid, '崩溃恢复');
+    assertHarborWebViewOnly(shell.pid, '崩溃恢复');
     assert.ok(recoverMs >= 4000, `异常退出应走退避（实测 ${recoverMs}ms，若 <4000ms 说明没走退避）`);
     await assertNativeApiSurface(port, dataDir);
     step(`✅ 崩溃恢复：worker 被强杀后在 ${recoverMs}ms 内按退避自动拉起（pid ${workerPid} → ${newPid}），数据面 IPC 健康恢复`);
@@ -380,9 +428,20 @@ try {
     );
     step('✅ 单实例：第二次启动静默退出并激活已有窗口，仍只有一个 Core worker');
   } finally {
+    // WebView2 can take a moment to release its private profile after the host exits.
+    // Snapshot only this test shell's WebView2 processes; never terminate global runtimes.
+    const webviewProcesses = descendants(shell.pid).filter((item) =>
+      /^msedgewebview2\.exe$/i.test(path.basename(item.ExecutablePath ?? item.Name ?? ''))
+    );
     // 强制结束壳（不连带子进程），验证孤儿守卫在发行配置下也生效
     if (shell.exitCode === null) spawnSync('taskkill.exe', ['/PID', String(shell.pid), '/F'], { encoding: 'utf8' });
     await new Promise((resolve) => setTimeout(resolve, 500));
+    const lingeringWebViews = await waitForProcessSnapshotsToExit(webviewProcesses, { timeoutMs: 25000 });
+    assert.deepEqual(
+      lingeringWebViews,
+      [],
+      `Harbor 壳退出后其 WebView2 子进程仍未释放专属配置目录：${JSON.stringify(lingeringWebViews, null, 2)}`
+    );
   }
 
   const sandboxCore = path.join(installDir, 'WhaleBridgeCore.exe');

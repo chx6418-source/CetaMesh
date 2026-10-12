@@ -13,7 +13,7 @@ use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tao::platform::windows::WindowExtWindows;
 use tao::window::{Icon, Window, WindowBuilder};
 use wry::http::{Request, Response};
-use wry::{NewWindowResponse, WebView, WebViewBuilder, WebViewBuilderExtWindows};
+use wry::{NewWindowResponse, WebContext, WebView, WebViewBuilder, WebViewBuilderExtWindows};
 
 use crate::desktop_paths::DesktopPaths;
 use crate::ipc_client::IpcClient;
@@ -332,7 +332,12 @@ pub fn run_webview_ui(paths: DesktopPaths, dev_url: Option<String>) -> Result<()
     let start_url = dev_url
         .clone()
         .unwrap_or_else(|| APP_ORIGIN.to_owned());
-    let builder = WebViewBuilder::new()
+    // Keep the mutable WebView2 profile out of the installed, read-only program directory.
+    let webview_data_dir = paths.data_dir.join("webview2");
+    fs::create_dir_all(&webview_data_dir)
+        .map_err(|error| format!("创建 WebView2 用户数据目录失败 {}：{error}", webview_data_dir.display()))?;
+    let mut web_context = WebContext::new(Some(webview_data_dir));
+    let builder = WebViewBuilder::new_with_web_context(&mut web_context)
         .with_url(start_url)
         .with_devtools(cfg!(debug_assertions))
         .with_clipboard(true)

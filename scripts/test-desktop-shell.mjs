@@ -418,7 +418,7 @@ try {
             '-NoProfile',
             '-NonInteractive',
             '-Command',
-            `(Get-CimInstance Win32_Process -Filter "ParentProcessId=${child.pid}" | Select-Object -First 1).ProcessId`
+            `(Get-CimInstance Win32_Process -Filter "ParentProcessId=${child.pid}" | Where-Object { $_.Name -ieq 'node.exe' } | Select-Object -First 1).ProcessId`
           ],
           { encoding: 'utf8', timeout: 60000 }
         ).stdout.trim(),
