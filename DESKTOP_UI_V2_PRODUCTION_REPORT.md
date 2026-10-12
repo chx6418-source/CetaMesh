@@ -12,7 +12,7 @@ Task 1 history paging is committed as `75f549f1ee90943362de27e93c49fe1f83cdbb12`
 | --- | --- |
 | `npm run build:ui` | PASS — TypeScript and Vite; JS 529.28 kB / gzip 161.88 kB, CSS 39.59 kB. The >500 kB chunk warning is recorded as non-blocking; gzip remains 161.88 kB. |
 | `npm test -- --category architecture --category runtime` | PASS — 44 suites, 0 FAIL, 0 NOT_RUN_ENVIRONMENT. |
-| `npm test` | PASS — 98 suites, 92 PASS, 0 FAIL, 6 NOT_RUN_ENVIRONMENT (legacy bridge, production Gateway/network, and Cargo opt-in). The first full attempt had one 600-second desktop-shell timeout after its contract assertions logged success; an isolated desktop run and the final full rerun both passed. |
+| `npm test` | PASS — standard run: 98 suites, 92 PASS, 0 FAIL, 6 NOT_RUN_ENVIRONMENT (four real external environments plus the Cargo opt-in suites). Final `$env:WHALEBRIDGE_TEST_CARGO='1'; npm test`: 98 suites, 94 PASS, 0 FAIL, 4 NOT_RUN_ENVIRONMENT (legacy bridge, production Gateway, and network). Cargo is included and passes in this final run. The first full attempt had one 600-second desktop-shell timeout after its contract assertions logged success; the isolated desktop run and both final full reruns passed. |
 | `cargo check --manifest-path desktop-shell/Cargo.toml` | PASS — existing Rust dead-code warnings only. |
 | `cargo test --manifest-path desktop-shell/Cargo.toml` | PASS — 187 passed, 0 failed. |
 | Chat 100/200/500 fixture | PASS — 10/101, 10/201, 10/501 initial rows; 10 bottom rows in each fixture; streaming row visible; dynamic measured heights update virtual totals. |
