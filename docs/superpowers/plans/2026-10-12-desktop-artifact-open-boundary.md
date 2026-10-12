@@ -68,7 +68,7 @@
 - Native method: `app.openArtifact({ taskId, artifactId }) -> { opened: boolean }`; the host fetches `task.artifact.resolveOpen` over Core IPC and opens only its authorized canonical result.
 - UI action: ArtifactCard calls `app.openArtifact` with identities only and reports a structured unavailable/error state. External links require an explicit user action through the existing `app.openExternal` HTTPS route; HTTP and custom schemes remain unavailable.
 
-- [ ] **Step 1: Add failing Rust and UI contract tests** for method allowlisting, identity-only request, safe extension acceptance, and no path/URL projection to React.
-- [ ] **Step 2: Run `npm test -- --category architecture --category security`** and confirm the contract assertions fail.
-- [ ] **Step 3: Implement the Rust Host dispatch and Harbor button**; use only the existing native external-action boundary and an explicit extension allowlist.
-- [ ] **Step 4: Run `npm test -- --category architecture --category security`** and confirm bridge and UI contract assertions pass.
+- [x] **Step 1: Add failing Rust and UI contract tests** for method allowlisting, identity-only request, safe extension acceptance, and no path/URL projection to React.
+- [x] **Step 2: Run `npm test -- --category architecture --category security`** and confirm the contract assertions fail.
+- [x] **Step 3: Implement the Rust Host dispatch and Harbor button**; use only the existing native external-action boundary and an explicit extension allowlist.
+- [x] **Step 4: Run `npm test -- --category architecture --category security`** and confirm bridge and UI contract assertions pass.

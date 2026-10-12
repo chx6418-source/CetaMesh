@@ -131,6 +131,28 @@ fn dispatch_bridge(
                 .map_err(|_| "无法打开外部链接，请稍后再试。");
             let _ = proxy.send_event(UiEvent::Reply { id, result });
         }
+        "app.openArtifact" => {
+            let task_id = request.params["taskId"].as_str().unwrap_or_default().to_owned();
+            let artifact_id = request.params["artifactId"].as_str().unwrap_or_default().to_owned();
+            let api = Arc::clone(api);
+            let proxy = proxy.clone();
+            std::thread::spawn(move || {
+                let result = api.request("task.artifact.resolveOpen", json!({
+                    "taskId": task_id,
+                    "artifactId": artifact_id
+                })).map_err(|_| "此交付物当前不可用。")
+                    .and_then(|authorized| {
+                        let canonical_path = authorized["canonicalPath"].as_str()
+                            .ok_or("Core 未返回有效的本地 Artifact 路径。")?;
+                        let extension = authorized["extension"].as_str()
+                            .ok_or("Core 未返回有效的 Artifact 类型。")?;
+                        crate::external_link::open_artifact(canonical_path, extension)
+                            .map(|_| json!({ "opened": true }))
+                            .map_err(|_| "无法安全打开此交付物。")
+                    });
+                let _ = proxy.send_event(UiEvent::Reply { id, result });
+            });
+        }
         "app.about" => {
             let api = Arc::clone(api);
             let proxy = proxy.clone();

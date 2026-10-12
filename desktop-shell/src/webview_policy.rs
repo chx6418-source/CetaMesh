@@ -29,8 +29,25 @@ const UI_METHODS: &[&str] = &[
 ];
 
 fn is_allowed_method(method: &str) -> bool {
-    matches!(method, "app.ping" | "app.about" | "app.status" | "app.openExternal" | "app.pickFolder" | "app.pickFiles" | "app.setWindowBehavior")
+    matches!(method, "app.ping" | "app.about" | "app.status" | "app.openExternal" | "app.openArtifact" | "app.pickFolder" | "app.pickFiles" | "app.setWindowBehavior")
         || UI_METHODS.contains(&method)
+}
+
+fn validate_artifact_open_params(params: &Value) -> Result<(), String> {
+    let object = params.as_object().ok_or("artifact open params must be an object")?;
+    if object.len() != 2 || !object.contains_key("taskId") || !object.contains_key("artifactId") {
+        return Err("artifact open requires only taskId and artifactId".to_owned());
+    }
+    for field in ["taskId", "artifactId"] {
+        let value = object.get(field).and_then(Value::as_str)
+            .ok_or("artifact identity must be a string")?;
+        if value.is_empty() || value.len() > 128
+            || !value.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'@' | b'-'))
+        {
+            return Err("artifact identity is invalid".to_owned());
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -165,6 +182,8 @@ pub fn parse_bridge_request(raw: &str) -> Result<BridgeRequest, String> {
         if params_object.len() != 1 || params_object.get("url").and_then(Value::as_str).is_none_or(|url| url.len() > 2048) {
             return Err("external link requires one bounded URL".to_owned());
         }
+    } else if method == "app.openArtifact" {
+        validate_artifact_open_params(params)?;
     } else if method.starts_with("app.") && !params_object.is_empty() {
         return Err("this bridge method takes no parameters".to_owned());
     }
@@ -227,6 +246,28 @@ mod tests {
         assert!(parse_bridge_request(r#"{"id":"r-4","method":"ui.chat.send","params":{"id":"s","text":"hello"}}"#).is_ok());
         assert!(parse_bridge_request(r#"{"id":"r-5","method":"app.ping","params":[]}"#).is_err());
         assert!(parse_bridge_request(&"x".repeat(70_000)).is_err());
+    }
+
+    #[test]
+    fn artifact_open_bridge_accepts_only_bounded_task_and_artifact_identities() {
+        let request = parse_bridge_request(
+            r#"{"id":"r-open","method":"app.openArtifact","params":{"taskId":"task_123","artifactId":"art_456"}}"#,
+        ).unwrap();
+        assert_eq!(request.params["taskId"], "task_123");
+        assert_eq!(request.params["artifactId"], "art_456");
+        for raw in [
+            r#"{"id":"r-open","method":"app.openArtifact","params":{"taskId":"task_123"}}"#,
+            r#"{"id":"r-open","method":"app.openArtifact","params":{"taskId":"task_123","artifactId":"art_456","path":"C:/secret.txt"}}"#,
+            r#"{"id":"r-open","method":"app.openArtifact","params":{"taskId":"../task","artifactId":"art_456"}}"#,
+            r#"{"id":"r-open","method":"app.openArtifact","params":{"taskId":"task_123","artifactId":"https://example.test/file.pdf"}}"#,
+        ] {
+            assert!(parse_bridge_request(raw).is_err(), "accepted unsafe request: {raw}");
+        }
+        let oversized_id = format!(
+            r#"{{"id":"r-open","method":"app.openArtifact","params":{{"taskId":"{}","artifactId":"art_456"}}}}"#,
+            "t".repeat(129),
+        );
+        assert!(parse_bridge_request(&oversized_id).is_err());
     }
 
     #[test]

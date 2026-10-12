@@ -1,7 +1,9 @@
+import { useState } from 'react';
 import type { AgentView, MemoryView, PluginView, TaskView, UpdateView } from '../../types/views';
 import { Icon } from '../icons';
 import { Badge, Card } from '../primitives/surfaces';
 import { Button } from '../primitives/inputs';
+import { hostClient } from '../../bridge/typed-client';
 
 const taskLabels = { working: '进行中', waiting: '等待批准', paused: '已暂停', completed: '已完成' };
 const agentLabels = { ready: '已就绪', 'needs-setup': '需要设置', 'not-installed': '未安装', 'not-supported': '暂不支持', unavailable: '暂不可用' };
@@ -20,5 +22,37 @@ export function PluginCard({ plugin, onOpen }: { plugin: PluginView; onOpen(): v
 
 export function CapabilityBadge({ label }: { label: string }) { return <Badge tone="accent"><Icon name="tools" size={12} />{label}</Badge>; }
 export function MemoryReference({ memory }: { memory: MemoryView }) { return <div className="memory-ref"><Icon name="memory" size={16} /><div><strong>{memory.title}</strong><small>{memory.category} · {memory.updatedAt}</small></div></div>; }
-export function ArtifactCard({ title, kind }: { title: string; kind: string }) { return <div className="artifact-card"><Icon name="file" size={18} /><span className="grow"><strong>{title}</strong><small>{kind}</small></span><Icon name="right" size={15} /></div>; }
+type ArtifactIdentity = { id: string; label: string; kind: string; createdAt?: string | number | null };
+type ArtifactOpenState = { kind: 'idle' } | { kind: 'opening' } | { kind: 'unavailable'; message: string };
+function artifactOpenMessage(error: unknown): string {
+  const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
+  if (code === 'ARTIFACT_TYPE_UNSUPPORTED') return '此交付物的文件类型暂不支持打开。';
+  if (code === 'ARTIFACT_FILE_NOT_FOUND') return '交付物文件已不存在。';
+  if (code === 'TASK_WORKSPACE_UNAVAILABLE') return '任务工作区当前不可用。';
+  return error instanceof Error ? error.message : '交付物当前无法打开，请稍后重试。';
+}
+export function ArtifactCard({ title, kind, taskId, artifact }: {
+  title?: string; kind?: string; taskId?: string; artifact?: ArtifactIdentity;
+}) {
+  const [state, setState] = useState<ArtifactOpenState>({ kind: 'idle' });
+  const displayTitle = artifact?.label || title || '交付物';
+  const displayKind = artifact?.kind || kind || '文件';
+  async function open() {
+    if (!taskId || !artifact?.id || state.kind === 'opening') return;
+    setState({ kind: 'opening' });
+    try {
+      const result = await hostClient.openArtifact(taskId, artifact.id);
+      setState(result.opened ? { kind: 'idle' } : { kind: 'unavailable', message: '交付物当前无法打开。' });
+    } catch (error) {
+      setState({ kind: 'unavailable', message: artifactOpenMessage(error) });
+    }
+  }
+  const contents = <><Icon name="file" size={17} /><span className="grow"><strong>{displayTitle}</strong><small>{displayKind}</small></span><Icon name="right" size={15} /></>;
+  return <div>{taskId && artifact?.id
+    ? <button className="artifact-card" type="button" onClick={() => void open()} disabled={state.kind === 'opening'} aria-busy={state.kind === 'opening'}>{contents}</button>
+    : <div className="artifact-card">{contents}</div>}
+  {state.kind === 'opening' && <small className="muted" role="status">正在打开交付物…</small>}
+  {state.kind === 'unavailable' && <small className="inline-error" role="status">{state.message}</small>}
+  </div>;
+}
 export function UpdateCard({ update }: { update: UpdateView }) { return <Card className="update-card"><div className="row between"><h3>软件更新</h3><Icon name="update" size={18} /></div><p>当前版本 {update.currentVersion}</p><small>{update.status === 'unknown' ? '尚未检查更新' : update.status === 'current' ? '已是最新版本' : `新版本 ${update.latestVersion}`}</small></Card>; }

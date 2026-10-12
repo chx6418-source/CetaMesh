@@ -92,12 +92,13 @@ type UiMethod =
   | 'ui.onboarding.status' | 'ui.onboarding.start' | 'ui.onboarding.completeStep' | 'ui.onboarding.skipStep' | 'ui.onboarding.finish' | 'ui.onboarding.testProvider' | 'ui.onboarding.setModel'
   | 'ui.approvals.list' | 'ui.approvals.decide' | 'ui.search';
 type Empty = Record<string, never>;
-type HostMethod = 'app.ping' | 'app.status' | 'app.about' | 'app.openExternal' | 'app.pickFolder' | 'app.pickFiles' | 'app.setWindowBehavior';
+type HostMethod = 'app.ping' | 'app.status' | 'app.about' | 'app.openExternal' | 'app.openArtifact' | 'app.pickFolder' | 'app.pickFiles' | 'app.setWindowBehavior';
 type HostMap = {
   'app.ping': { params: Empty; result: { host: 'webview2'; ready: boolean } };
   'app.status': { params: Empty; result: { ready: boolean; needsAttention: boolean } };
   'app.about': { params: Empty; result: AboutView };
   'app.openExternal': { params: { url: string }; result: { opened: boolean } };
+  'app.openArtifact': { params: { taskId: string; artifactId: string }; result: { opened: boolean } };
   'app.pickFolder': { params: Empty; result: { path: string | null } };
   'app.pickFiles': { params: Empty; result: { attachments: Attachment[] } };
   'app.setWindowBehavior': { params: { confirmOnExit: boolean }; result: { updated: boolean } };
@@ -290,6 +291,7 @@ export const searchClient = { search: (query: string) => uiCall<{ sessions: Chat
 export const hostClient = {
   status: () => bridge.invoke('app.status', {}),
   about: () => bridge.invoke('app.about', {}),
+  openArtifact: (taskId: string, artifactId: string) => bridge.invoke('app.openArtifact', { taskId, artifactId }),
   pickFolder: () => bridge.invoke('app.pickFolder', {}),
   pickFiles: () => bridge.invoke('app.pickFiles', {}),
   setWindowBehavior: (confirmOnExit: boolean) => bridge.invoke('app.setWindowBehavior', { confirmOnExit })

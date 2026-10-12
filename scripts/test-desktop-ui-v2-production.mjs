@@ -169,14 +169,14 @@ check('Agent registry states stay distinct and reflect real provider health', ()
   assert.match(app, /agent\.desktopApp\.installed/);
   assert.match(app, /agent\.desktopApp\.running/);
 });
-check('Chat context uses refreshed approval events and shows artifact empty/details states', () => {
+check('Chat context uses refreshed approval events and opens artifacts through the native identity route', () => {
   const app = read('desktop-ui/src/app/HarborApp.tsx');
   assert.match(app, /<ChatContextPanel[^>]*approvals=\{approvals\}/);
   assert.match(app, /function ChatContextPanel\(\{ task, memories, approvals, onOpenMemory \}/);
   assert.doesNotMatch(app, /function ChatContextPanel\([\s\S]{0,260}useState<Approval\[\]>/);
   assert.match(app, /暂无交付物/);
-  assert.match(app, /selectedArtifact/);
-  assert.match(app, /setSelectedArtifact\(artifact\)/);
+  assert.match(app, /<ArtifactCard key=\{artifact\.id\} taskId=\{task\.id\} artifact=\{artifact\} \/>/);
+  assert.doesNotMatch(app, /selectedArtifact|setSelectedArtifact/);
 });
 check('Plugin Center filters featured and updates and stages a real update review', () => {
   const app = read('desktop-ui/src/app/HarborApp.tsx');
@@ -260,5 +260,30 @@ check('Missing WebView2 Runtime shows an actionable desktop startup message', ()
   assert.match(host, /缺少 Microsoft Edge WebView2 Runtime/);
   assert.match(entry, /MessageDialog/);
   assert.match(entry, /set_description\(&error\)/);
+});
+check('Artifact opening keeps renderer requests identity-only and validates the native Core result', () => {
+  const policy = read('desktop-shell/src/webview_policy.rs');
+  const host = read('desktop-shell/src/webview_ui.rs');
+  const external = read('desktop-shell/src/external_link.rs');
+  const client = read('desktop-ui/src/bridge/typed-client.ts');
+  const cards = read('desktop-ui/src/components/product/cards.tsx');
+  const app = read('desktop-ui/src/app/HarborApp.tsx');
+  const taskProjection = read('src/desktop/ui-service.js');
+  assert.match(policy, /app\.openArtifact/);
+  assert.match(policy, /validate_artifact_open_params/);
+  assert.match(host, /api\.request\("task\.artifact\.resolveOpen"/);
+  assert.match(host, /external_link::open_artifact/);
+  assert.match(external, /ALLOWED_ARTIFACT_EXTENSIONS/);
+  assert.match(external, /canonicalize\(\)/);
+  assert.match(external, /explorer\.exe/);
+  assert.match(client, /'app\.openArtifact': \{ params: \{ taskId: string; artifactId: string \}/);
+  assert.doesNotMatch(client, /'app\.openArtifact': \{ params: [^}]*\b(path|url|ref|canonicalPath)\b/);
+  assert.match(cards, /hostClient\.openArtifact\(taskId, artifact\.id\)/);
+  assert.match(cards, /role="status"/);
+  assert.match(app, /<ArtifactCard key=\{artifact\.id\} taskId=\{task\.id\} artifact=\{artifact\} \/>/);
+  assert.match(app, /<ArtifactCard key=\{item\.id\} taskId=\{task\.id\} artifact=\{item\} \/>/);
+  const projectTask = taskProjection.slice(taskProjection.indexOf('function projectTask('), taskProjection.indexOf('function projectWorkspace('));
+  assert.match(projectTask, /id: string\(artifact\.id/);
+  assert.doesNotMatch(projectTask, /artifact\.(ref|canonicalPath|path|url)/);
 });
 process.stdout.write(`PASS ${passed} production UI contracts\n`);

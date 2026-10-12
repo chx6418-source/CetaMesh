@@ -1,21 +1,27 @@
-//! 用系统默认浏览器打开官方页面（反馈入口用）。
+//! 通过系统默认处理程序打开经过验证的官方链接和 Task Artifact。
 //!
-//! 为什么单独成一个模块：整个桌面壳只允许两处"启动外部程序"——打开日志目录、打开官方页面。
-//! 把后者隔离在这里，架构守卫（scripts/test-desktop-architecture.mjs）就能单独盯住它，
-//! URL 校验也只有一处实现。
+//! 为什么单独成一个模块：把外部启动边界集中在这里，架构守卫
+//!（scripts/test-desktop-architecture.mjs）可以单独检查它。官方链接与 Artifact
+//! 分别校验 HTTPS 和本地 canonical 文件路径 / 扩展名。
 //!
 //! 红线：
 //!   - 只接受 `https://` 绝对地址：不猜协议、不放行 `http`/`file`/自定义协议；
 //!   - 主机部分存在、不含凭据（`user:pass@`）、不含反斜杠/空白/控制字符；
 //!   - 长度有界。URL 本身由 Core 依据随安装包分发的发行配置构造
 //!     （`src/product/feedback-links.js`），这里再校验一次，避免任何一层被绕过。
+//!   - Task Artifact 必须来自 Core 返回的 canonical 本地路径，并且扩展名位于显式白名单；
+//!     所有权与 Workspace containment 已由 Core 的 Artifact resolver 裁决。
 //!   - 失败一律返回错误，由 UI 显示"无法打开浏览器，请稍后访问 CetaMesh 官方网站。"，
 //!     **绝不影响软件其它功能**。
+
+use std::path::{Path, PathBuf};
 
 /// 打开失败时给用户看的话（产品给定原文）。
 pub const OPEN_FAILURE_MESSAGE: &str = "无法打开浏览器，请稍后访问 CetaMesh 官方网站。";
 
 const MAX_URL_CHARS: usize = 600;
+const MAX_ARTIFACT_PATH_CHARS: usize = 4096;
+const ALLOWED_ARTIFACT_EXTENSIONS: &[&str] = &["csv", "jpeg", "jpg", "md", "pdf", "png", "txt"];
 
 /// URL 是否允许交给系统浏览器打开。
 pub fn is_openable_url(url: &str) -> bool {
@@ -55,6 +61,49 @@ pub fn open_in_default_browser(url: &str) -> Result<(), String> {
         .map_err(|error| format!("{OPEN_FAILURE_MESSAGE}（{error}）"))
 }
 
+fn canonical_openable_artifact(path: &str, extension: &str) -> Option<PathBuf> {
+    if path.is_empty() || path.len() > MAX_ARTIFACT_PATH_CHARS || path.contains('\0') {
+        return None;
+    }
+    let candidate = Path::new(path);
+    if !candidate.is_absolute() {
+        return None;
+    }
+    let canonical = candidate.canonicalize().ok()?;
+    if !canonical.is_file() {
+        return None;
+    }
+    let actual_extension = canonical.extension()?.to_str()?.to_ascii_lowercase();
+    let requested_extension = extension.strip_prefix('.').unwrap_or(extension).to_ascii_lowercase();
+    if !ALLOWED_ARTIFACT_EXTENSIONS.contains(&actual_extension.as_str()) || actual_extension != requested_extension {
+        return None;
+    }
+    Some(canonical)
+}
+
+/// Re-check the Core result at the native dispatch boundary before handing it to Windows.
+pub fn is_openable_artifact(path: &str, extension: &str) -> bool {
+    canonical_openable_artifact(path, extension).is_some()
+}
+
+pub fn open_artifact(path: &str, extension: &str) -> Result<(), String> {
+    let canonical = canonical_openable_artifact(path, extension)
+        .ok_or_else(|| "Artifact 未通过本地文件和扩展名校验，已拒绝打开".to_owned())?;
+    #[cfg(windows)]
+    {
+        std::process::Command::new("explorer.exe")
+            .arg(canonical)
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| format!("无法打开此交付物（{error}）"))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = canonical;
+        Err("Artifact 只能由 Windows 桌面主机打开".to_owned())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,6 +136,18 @@ mod tests {
     fn url_length_is_bounded() {
         let long = format!("https://example.com/{}", "a".repeat(MAX_URL_CHARS));
         assert!(!is_openable_url(&long));
+    }
+
+    #[test]
+    fn artifact_open_requires_a_local_file_and_allowlisted_matching_extension() {
+        let path = std::env::temp_dir().join(format!("cetamesh-artifact-{}.txt", std::process::id()));
+        std::fs::write(&path, "artifact").unwrap();
+        let local = path.to_string_lossy().into_owned();
+        assert!(is_openable_artifact(&local, ".txt"));
+        assert!(!is_openable_artifact(&local, ".exe"));
+        assert!(!is_openable_artifact(&local, ".pdf"));
+        assert!(!is_openable_artifact("https://example.test/file.txt", ".txt"));
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
