@@ -24,8 +24,8 @@
     "baseUrl": "",
     "paths": {
       "general": "/feedback",
-      "bug": "/feedback?type=bug",
-      "feature": "/feedback?type=feature",
+      "bug": "/feedback",
+      "feature": "/feedback",
       "security": "/security"
     }
   }

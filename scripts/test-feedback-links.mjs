@@ -28,6 +28,7 @@ import {
 import { loadReleaseConfig, resolveFeedbackBaseUrl, DEFAULT_FEEDBACK_PATHS } from '../src/product/release-config.js';
 import { createProductService } from '../src/product/service.js';
 import { createAboutInfo } from '../src/about/index.js';
+import { createDesktopUiService } from '../src/desktop/ui-service.js';
 
 let passed = 0;
 let failed = 0;
@@ -73,10 +74,10 @@ try {
     links.configured === true && links.entries.every((entry) => String(entry.url).startsWith('https://cetamesh.example.com/')));
   equal('反馈与建议 → /feedback', entryById(links, 'general').url,
     'https://cetamesh.example.com/feedback?version=1.0.0&build=1052&platform=windows');
-  equal('Bug 反馈 → /feedback?type=bug', entryById(links, 'bug').url,
-    'https://cetamesh.example.com/feedback?type=bug&version=1.0.0&build=1052&platform=windows');
-  equal('功能建议 → /feedback?type=feature', entryById(links, 'feature').url,
-    'https://cetamesh.example.com/feedback?type=feature&version=1.0.0&build=1052&platform=windows');
+  equal('Bug 反馈使用官方反馈页且 query 只带构建元数据', entryById(links, 'bug').url,
+    'https://cetamesh.example.com/feedback?version=1.0.0&build=1052&platform=windows');
+  equal('功能建议使用官方反馈页且 query 只带构建元数据', entryById(links, 'feature').url,
+    'https://cetamesh.example.com/feedback?version=1.0.0&build=1052&platform=windows');
   equal('安全漏洞 → /security（单独一类）', [entryById(links, 'security').url, entryById(links, 'security').kind],
     ['https://cetamesh.example.com/security?version=1.0.0&build=1052&platform=windows', 'security']);
   check('安全漏洞入口单独给出提示原文', links.securityNotice === SECURITY_NOTICE && SECURITY_NOTICE.includes('不要在公开 Issue 中披露敏感漏洞'));
@@ -87,8 +88,8 @@ try {
   equal('允许的 query 键就是这三个', [...FEEDBACK_ALLOWED_QUERY_KEYS], ['version', 'build', 'platform']);
   equal('返回结果也声明这三个键', links.allowedQueryKeys, ['version', 'build', 'platform']);
   const bugUrl = new URL(entryById(links, 'bug').url);
-  equal('Bug 链接实际只带 type + 三个白名单键',
-    [...bugUrl.searchParams.keys()].sort(), ['build', 'platform', 'type', 'version'].sort());
+  equal('每个入口链接的 query 键只有白名单三项',
+    [...bugUrl.searchParams.keys()].sort(), ['build', 'platform', 'version'].sort());
   equal('链接里没有别的参数', bugUrl.searchParams.get('version'), '1.0.0');
 
   // ── 3. 禁止字段没有进入 URL 的路径（构造层面） ──────────────────────────
@@ -114,7 +115,7 @@ try {
   const hostileBug = new URL(entryById(hostileLinks, 'bug').url);
   equal('形状非法的 version/build 被整体丢弃（不注入、也不残留片段）',
     [hostileBug.searchParams.get('version'), hostileBug.searchParams.get('build')], [null, null]);
-  equal('参数键仍只有页面自带的 type + platform', [...hostileBug.searchParams.keys()].sort(), ['platform', 'type'].sort());
+  equal('污染值被丢弃后只剩有效的 platform', [...hostileBug.searchParams.keys()].sort(), ['platform']);
   check('链接里绝不含 apiKey / token / device secret / 日志正文 / 聊天或记忆内容',
     !/sk-live|ghp_|pairing-secret|FATAL|聊天正文|长期记忆正文|secret\.txt|SECRET-TOKEN/.test(hostileText));
   check('平台标签被归一化成稳定取值', hostileLinks.query.platform === 'windows');
@@ -127,19 +128,34 @@ try {
   check('feedback.baseUrl 缺省时回落 website', viaWebsite.entries[0].url.startsWith('https://cetamesh.example.com/'));
   equal('两者的站点根一致', resolveFeedbackBaseUrl({ ...CONFIG, feedback: { baseUrl: '' } }), 'https://cetamesh.example.com');
   equal('显式 baseUrl 优先于 website', resolveFeedbackBaseUrl({ ...CONFIG, feedback: { baseUrl: 'https://feedback.example.com' } }), 'https://feedback.example.com');
+  const packagedConfig = loadReleaseConfig({ rootDir: repoRoot });
+  equal('仓库打包配置未提供官方站点且反馈路由无 query', [resolveFeedbackBaseUrl(packagedConfig.config),
+    packagedConfig.config.feedback.paths.bug, packagedConfig.config.feedback.paths.feature], [null, '/feedback', '/feedback']);
 
   const hijacked = loadReleaseConfig({
     rootDir: repoRoot,
     read: () => ({
       website: 'https://cetamesh.example.com',
-      feedback: { paths: { bug: '//evil.example/steal', security: 'https://evil.example/security', general: '/feedback ok' } }
+      feedback: { paths: { bug: '//evil.example/steal', security: 'https://evil.example/security', general: '/feedback?token=leak' } }
     })
   });
-  equal('协议相对路径被拒绝（回落到默认 /feedback?type=bug）', hijacked.config.feedback.paths.bug, DEFAULT_FEEDBACK_PATHS.bug);
+  equal('协议相对路径被拒绝（回落到默认 /feedback）', hijacked.config.feedback.paths.bug, DEFAULT_FEEDBACK_PATHS.bug);
   equal('绝对 URL 被拒绝（回落到默认 /security）', hijacked.config.feedback.paths.security, DEFAULT_FEEDBACK_PATHS.security);
-  equal('带空格的路径被拒绝', hijacked.config.feedback.paths.general, DEFAULT_FEEDBACK_PATHS.general);
+  equal('路径中附带任意 query 被拒绝', hijacked.config.feedback.paths.general, DEFAULT_FEEDBACK_PATHS.general);
   check('buildEntryUrl 只接受 https 站点', buildEntryUrl('http://cetamesh.example.com', '/feedback', {}) === null);
   check('buildEntryUrl 对空站点返回 null', buildEntryUrl(null, '/feedback', {}) === null);
+  check('buildEntryUrl 拒绝带 query/fragment 的路径和含凭据的 HTTPS 地址',
+    buildEntryUrl('https://cetamesh.example.com', '/feedback?token=secret', {}) === null
+      && buildEntryUrl('https://user:pass@cetamesh.example.com', '/feedback', {}) === null);
+  const malformedConfig = loadReleaseConfig({
+    rootDir: repoRoot,
+    read: () => ({
+      website: 'https://user:pass@cetamesh.example.com',
+      feedback: { baseUrl: 'https://user:pass@feedback.example.com', paths: { general: '/feedback?apiKey=secret' } }
+    })
+  });
+  equal('发行配置拒绝含凭据 URL 和带 query 页面路径', [malformedConfig.config.website, malformedConfig.config.feedback.baseUrl,
+    malformedConfig.config.feedback.paths.general], [null, null, DEFAULT_FEEDBACK_PATHS.general]);
 
   // ── 5. 未配置 / Core 未就绪时的兜底 ────────────────────────────────────
   const unconfigured = buildFeedbackLinks({ config: { ...CONFIG, website: '', feedback: { baseUrl: '', paths: { ...DEFAULT_FEEDBACK_PATHS } } }, aboutInfo: ABOUT });
@@ -169,6 +185,23 @@ try {
   const response = await product.execute({ method: 'product.feedbackLinks', params: {} });
   equal('product.feedbackLinks 返回四个入口', response.links.entries.map((entry) => entry.id), ['general', 'bug', 'feature', 'security']);
   check('返回值带 query 摘要与允许键', response.links.query.platform === 'windows' && response.links.allowedQueryKeys.length === 3);
+  const unavailableProduct = createProductService({
+    releaseConfig: { ...CONFIG, website: null, feedback: { baseUrl: null, paths: { ...DEFAULT_FEEDBACK_PATHS } } }
+  });
+  const unavailableUi = createDesktopUiService({ system: { product: unavailableProduct } });
+  const unavailableLinks = await unavailableUi.execute({ method: 'ui.feedback.links', params: {} });
+  equal('typed UI projection 保留 disabled 无 URL 状态', [unavailableLinks.configured, unavailableLinks.entries.every((entry) => entry.url === null), unavailableLinks.message],
+    [false, true, FEEDBACK_NOT_CONFIGURED_MESSAGE]);
+  const aboutUi = fs.readFileSync(path.join(repoRoot, 'desktop-ui', 'src', 'app', 'HarborApp.tsx'), 'utf8');
+  const typedClient = fs.readFileSync(path.join(repoRoot, 'desktop-ui', 'src', 'bridge', 'typed-client.ts'), 'utf8');
+  const nativeUi = fs.readFileSync(path.join(repoRoot, 'desktop-shell', 'src', 'webview_ui.rs'), 'utf8');
+  const nativeLinks = fs.readFileSync(path.join(repoRoot, 'desktop-shell', 'src', 'external_link.rs'), 'utf8');
+  check('About 只读取 ui.feedback.links，缺失 URL 禁用按钮并交给 Native HTTPS Host',
+    aboutUi.includes('feedbackClient.links()') && aboutUi.includes('disabled={!entry.url}')
+      && /url\?\.startsWith\('https:\/\/'\).*openExternal\(url\)/s.test(aboutUi)
+      && typedClient.includes("bridge.invoke('app.openExternal', { url })")
+      && nativeUi.includes('crate::external_link::open_in_default_browser(url)')
+      && nativeLinks.includes('strip_prefix("https://")') && nativeLinks.includes("host.contains('@')"));
   const unknown = await capture(() => product.execute({ method: 'product.nope', params: {} }));
   check('未知方法报 METHOD_NOT_FOUND', unknown.threw && unknown.code === 'METHOD_NOT_FOUND', String(unknown.code));
 
@@ -176,6 +209,9 @@ try {
   const ipc = createDesktopIpcRuntime({ services, system: services.systemServices, log: () => {} });
   const viaIpc = await ipc.dispatch({ method: 'product.feedbackLinks', params: {} });
   equal('IPC product.feedbackLinks 可达', viaIpc.links.entries.length, 4);
+  const viaTypedUi = await services.desktopUiService.execute({ method: 'ui.feedback.links', params: {} });
+  equal('仓库未配置官方 URL 时，typed UI 仍返回四个 disabled 入口', [viaTypedUi.configured, viaTypedUi.entries.length,
+    viaTypedUi.entries.every(entry => entry.url === null), viaTypedUi.message], [false, 4, true, FEEDBACK_NOT_CONFIGURED_MESSAGE]);
   const legacy = await capture(() => ipc.dispatch({ method: 'feedback.submit', params: { type: 'bug' } }));
   check('旧的 feedback.* 命名空间不再可用（无收集通道）', legacy.threw === true, String(legacy.code));
 } finally {

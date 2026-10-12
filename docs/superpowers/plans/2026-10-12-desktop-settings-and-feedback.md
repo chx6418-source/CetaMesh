@@ -62,6 +62,7 @@
 **Files:**
 - Modify: `src/product/release-config.js` only if validation is missing
 - Modify: `src/product/feedback-links.js` only if URL/query construction is missing
+- Modify: `release-config.json` when packaged feedback paths need to match the query allowlist
 - Modify: `scripts/test-feedback-links.mjs`
 - Modify: `src/desktop/ui-service.js`
 - Modify: `desktop-ui/src/bridge/typed-client.ts`

@@ -2,8 +2,7 @@
 //
 // 产品决策（WHY）：CetaMesh Desktop **不实现**反馈服务、本地 Outbox、软件内反馈表单 / Bug 提交 /
 // 漏洞上传，也不自动上传日志。软件只提供四个入口，点击后用系统默认浏览器打开**官方网站**的对应页面：
-//   反馈与建议 → /feedback         Bug 反馈 → /feedback?type=bug
-//   功能建议   → /feedback?type=feature            安全漏洞 → /security
+//   反馈与建议 / Bug 反馈 / 功能建议 → /feedback       安全漏洞 → /security
 // 站点根与页面路径来自发行配置 `release-config.json`（`feedback.baseUrl` / `feedback.paths`，
 // `baseUrl` 缺省时回落 `website`）—— 域名只有一个来源，不散落在各个页面里。
 //
@@ -90,23 +89,24 @@ function feedbackQuery(aboutInfo) {
   };
 }
 
-/** 站点根 + 页面路径 + 白名单 query → 绝对 https URL。baseUrl 已由发行配置层校验过 https。 */
+/** 站点根 + 无 query/fragment 的页面路径 + 白名单 query → 绝对 https URL。 */
 export function buildEntryUrl(baseUrl, sitePath, query = {}) {
   const base = String(baseUrl ?? '').trim();
   if (!base) return null;
+  const pagePath = String(sitePath ?? '');
+  if (!pagePath.startsWith('/') || pagePath.startsWith('//') || /[?#\\\s\u0000-\u001f]/.test(pagePath)) return null;
   let url;
   try {
     url = new URL(base);
   } catch {
     return null; // 配置层已过滤过非法 URL；这里再兜一次，绝不拼接半个 URL。
   }
-  if (url.protocol !== 'https:') return null;
-  const [pathPart, queryPart = ''] = String(sitePath ?? '').split('?');
+  if (url.protocol !== 'https:' || !url.hostname || url.username || url.password) return null;
   const basePath = url.pathname.replace(/\/+$/, '');
-  url.pathname = basePath + (pathPart.startsWith('/') ? pathPart : `/${pathPart}`);
-  url.search = queryPart; // 页面自身的参数（例如 type=bug）先放进去
+  url.pathname = basePath + pagePath;
+  url.search = '';
   for (const key of FEEDBACK_ALLOWED_QUERY_KEYS) {
-    const value = query[key];
+    const value = safeQueryValue(key, query[key], MAX_VALUE[key] ?? 64);
     if (value) url.searchParams.set(key, value);
   }
   url.hash = '';

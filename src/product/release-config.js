@@ -23,13 +23,13 @@ const MAX_PATH = 200;
 
 /**
  * 反馈入口的默认页面路径（概念路径，来自产品设计）：
- *   /feedback、/feedback?type=bug、/feedback?type=feature、/security
+ *   /feedback（整体反馈 / Bug / 功能建议）、/security
  * 域名/站点根由 `feedback.baseUrl`（或 `website`）提供，**不在代码或页面里散落硬编码**。
  */
 export const DEFAULT_FEEDBACK_PATHS = Object.freeze({
   general: '/feedback',
-  bug: '/feedback?type=bug',
-  feature: '/feedback?type=feature',
+  bug: '/feedback',
+  feature: '/feedback',
   security: '/security'
 });
 
@@ -69,7 +69,7 @@ function httpsOrNull(value, max = MAX_URL) {
   if (!text) return null;
   try {
     const url = new URL(text);
-    if (url.protocol !== 'https:') return null;
+    if (url.protocol !== 'https:' || !url.hostname || url.username || url.password) return null;
     return url.toString().replace(/\/+$/, '');
   } catch {
     return null; // 非法 URL 视为未配置：About 要能照常显示，配置问题由 lastError 上报。
@@ -80,13 +80,13 @@ function httpsOrNull(value, max = MAX_URL) {
  * 站点内绝对路径校验。拒绝：
  *   - 不以 `/` 开头（可能是绝对 URL，会把用户带去别的站点）；
  *   - `//host/...`（协议相对，等于换域名）；
- *   - 反斜杠 / 空白 / 控制字符（Windows 路径写法与注入面）。
+ *   - query / fragment、反斜杠 / 空白 / 控制字符（避免站点路径扩大链接参数或跳转）。
  */
 function sitePath(value, fallbackPath) {
   const text = textOrNull(value, MAX_PATH);
   if (!text) return fallbackPath;
   if (!text.startsWith('/') || text.startsWith('//')) return fallbackPath;
-  if (/[\\\s\u0000-\u001f]/.test(text)) return fallbackPath;
+  if (/[?#\\\s\u0000-\u001f]/.test(text)) return fallbackPath;
   return text;
 }
 
