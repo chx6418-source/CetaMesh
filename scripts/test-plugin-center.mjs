@@ -8,6 +8,7 @@ import { zipSync } from 'fflate';
 import { normalizeCatalog } from '../src/plugin-center/catalog.js';
 import { extractPluginPackage, verifyPluginPackage } from '../src/plugin-center/package.js';
 import { createPluginCenterService } from '../src/plugin-center/service.js';
+import { createPluginCatalogFixture } from './test-support/plugin-catalog-fixture.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 let passed = 0;
@@ -437,6 +438,167 @@ await check('compatibility and revoked-version policy fail closed before downloa
     assert.equal(packageRequests, 0);
   } finally {
     await service.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+await check('loopback Catalog drives verified install, enable, update, rollback, uninstall, and offline states', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-plugin-loopback-'));
+  const firstBytes = packageBytes('1.0.0');
+  const secondBytes = packageBytes('1.1.0');
+  const mismatchBytes = packageBytes('1.0.0', { id: 'cetamesh.other-plugin' });
+  const packagePath = version => '/packages/hello/' + version + '.cetamesh-plugin';
+  const catalogEntry = (version, bytes, extra = {}) => catalogPlugin({
+    version,
+    packageUrl: 'https://plugins.example.test' + packagePath(version),
+    manifestUrl: 'https://plugins.example.test/packages/hello/' + version + '/extension.json',
+    packageSha256: crypto.createHash('sha256').update(bytes).digest('hex'),
+    packageBytes: bytes.byteLength,
+    updatedAt: '2026-10-12T00:00:00.000Z',
+    ...extra
+  });
+  const firstPlugin = catalogEntry('1.0.0', firstBytes);
+  const secondPlugin = catalogEntry('1.1.0', secondBytes);
+  const mismatchPlugin = catalogEntry('1.0.0', mismatchBytes, {
+    packageUrl: 'https://plugins.example.test/packages/hello/manifest-mismatch.cetamesh-plugin'
+  });
+  let catalogPlugins = [firstPlugin];
+  let offline = false;
+  const fixture = await createPluginCatalogFixture({
+    getCatalog: () => ({ schemaVersion: 1, generatedAt: '2026-10-12T00:00:00Z', plugins: catalogPlugins }),
+    packages: new Map([
+      [packagePath('1.0.0'), firstBytes],
+      [packagePath('1.1.0'), secondBytes],
+      ['/packages/hello/manifest-mismatch.cetamesh-plugin', mismatchBytes]
+    ])
+  });
+  const fixtureOrigin = new URL(fixture.catalogUrl).origin;
+  const fetchImpl = async (input, init = {}) => {
+    const requested = new URL(typeof input === 'string' ? input : input.url);
+    if (requested.origin !== fixtureOrigin) throw new Error('Plugin test adapter rejected a destination outside its fixture origin');
+    if (offline) throw new Error('loopback Plugin Catalog is offline');
+    const localUrl = new URL(requested.pathname + requested.search, fixture.loopbackOrigin);
+    return fetch(localUrl, init);
+  };
+  let current = null;
+  let previous = null;
+  const extensionRuntime = {
+    async review({ sourceDir }) {
+      const found = JSON.parse(fs.readFileSync(path.join(sourceDir, 'extension.json'), 'utf8'));
+      return {
+        manifest: found,
+        review: { id: found.id, token: 'review-' + found.version, requiresExplicitApproval: true, installable: true, blockers: [] },
+        scan: { ok: true, findings: [] },
+        permissionDelta: { added: [], removed: [] }
+      };
+    },
+    async install({ sourceDir, approval }) {
+      assert.equal(approval.approved, true);
+      const found = JSON.parse(fs.readFileSync(path.join(sourceDir, 'extension.json'), 'utf8'));
+      current = { ...found, sourceRoot: sourceDir, status: 'disabled' };
+      return { entry: structuredClone(current) };
+    },
+    async update({ sourceDir, approval }) {
+      assert.equal(approval.approved, true);
+      previous = structuredClone(current);
+      const found = JSON.parse(fs.readFileSync(path.join(sourceDir, 'extension.json'), 'utf8'));
+      current = { ...found, sourceRoot: sourceDir, status: 'disabled' };
+      return { entry: structuredClone(current) };
+    },
+    list() { return current ? [structuredClone(current)] : []; },
+    async get({ id }) {
+      return current?.id === id ? { extension: structuredClone(current), runtimeState: 'stopped' } : null;
+    },
+    async enable({ id }) {
+      assert.equal(current?.id, id);
+      current.status = 'enabled';
+      return { extension: structuredClone(current) };
+    },
+    async disable({ id }) {
+      assert.equal(current?.id, id);
+      current.status = 'disabled';
+      return { extension: structuredClone(current) };
+    },
+    async reviewRollback({ id }) {
+      assert.equal(current?.id, id);
+      assert.ok(previous);
+      return { review: { token: 'rollback-token', installable: true, blockers: [], name: current.name, version: previous.version }, scan: { ok: true, findings: [] } };
+    },
+    async rollback({ id, approval }) {
+      assert.equal(current?.id, id);
+      assert.equal(approval.token, 'rollback-token');
+      current = structuredClone(previous);
+      return { entry: structuredClone(current) };
+    },
+    async uninstall({ id }) {
+      assert.equal(current?.id, id);
+      current = null;
+      return { id, removed: true };
+    }
+  };
+  const service = createPluginCenterService({
+    stateDir: root,
+    catalogUrl: fixture.catalogUrl,
+    allowedHosts: fixture.allowedHosts,
+    currentVersion: '1.0.0',
+    extensionRuntime,
+    fetchImpl
+  });
+  try {
+    await assert.rejects(fetchImpl('https://outside.example.test/catalog.json'), /outside its fixture origin/);
+    const catalog = await service.execute({ method: 'plugin-center.catalog.list', params: { view: 'all' } });
+    assert.equal(catalog.available, true);
+    assert.equal(catalog.offline, false);
+    assert.equal(catalog.plugins[0].id, firstPlugin.id);
+    const detail = await service.execute({ method: 'plugin-center.catalog.detail', params: { id: firstPlugin.id } });
+    assert.equal(detail.plugin.version, '1.0.0');
+
+    catalogPlugins = [catalogEntry('1.0.0', firstBytes, { packageSha256: '0'.repeat(64) })];
+    await assert.rejects(service.execute({ method: 'plugin-center.package.stage', params: { id: firstPlugin.id } }), { code: 'PACKAGE_SHA256_MISMATCH' });
+    catalogPlugins = [mismatchPlugin];
+    await assert.rejects(service.execute({ method: 'plugin-center.package.stage', params: { id: firstPlugin.id } }), { code: 'PACKAGE_MANIFEST_MISMATCH' });
+    catalogPlugins = [firstPlugin];
+
+    const initialStage = await service.execute({ method: 'plugin-center.package.stage', params: { id: firstPlugin.id } });
+    assert.equal(initialStage.review.manifest.version, '1.0.0');
+    assert.equal(initialStage.requiresReview, true);
+    await assert.rejects(service.execute({ method: 'plugin-center.package.install', params: { stageId: initialStage.stageId } }), { code: 'PERMISSION_REVIEW_REQUIRED' });
+    const initialInstall = await service.execute({ method: 'plugin-center.package.install', params: { stageId: initialStage.stageId, reviewed: true } });
+    assert.equal(initialInstall.enabled, false);
+    assert.equal(current.status, 'disabled');
+    const enabled = await service.execute({ method: 'plugin-center.plugin.enable', params: { id: firstPlugin.id } });
+    assert.equal(enabled.extension.status, 'enabled');
+
+    catalogPlugins = [secondPlugin];
+    const updateRows = await service.execute({ method: 'plugin-center.catalog.list', params: { view: 'all' } });
+    assert.equal(updateRows.plugins[0].status, 'Update Available');
+    const updateStage = await service.execute({ method: 'plugin-center.package.stage', params: { id: secondPlugin.id } });
+    assert.equal(updateStage.review.manifest.version, '1.1.0');
+    const updated = await service.execute({ method: 'plugin-center.package.install', params: { stageId: updateStage.stageId, reviewed: true } });
+    assert.equal(updated.entry.version, '1.1.0');
+    assert.equal(updated.enabled, false);
+
+    const rollbackReview = await service.execute({ method: 'plugin-center.package.rollback.review', params: { id: firstPlugin.id } });
+    assert.equal(rollbackReview.action, 'rollback-review');
+    await assert.rejects(service.execute({ method: 'plugin-center.package.rollback', params: { id: firstPlugin.id } }), { code: 'PERMISSION_REVIEW_REQUIRED' });
+    const rolledBack = await service.execute({ method: 'plugin-center.package.rollback', params: { id: firstPlugin.id, reviewed: true } });
+    assert.equal(rolledBack.entry.version, '1.0.0');
+    const removed = await service.execute({ method: 'plugin-center.plugin.uninstall', params: { id: firstPlugin.id } });
+    assert.equal(removed.removed, true);
+    assert.equal((await service.execute({ method: 'plugin-center.status' })).installed.length, 0);
+
+    offline = true;
+    const cached = await service.execute({ method: 'plugin-center.catalog.refresh' });
+    assert.equal(cached.available, true);
+    assert.equal(cached.offline, true);
+    await assert.rejects(service.execute({ method: 'plugin-center.package.stage', params: { id: secondPlugin.id } }), { code: 'PLUGIN_OFFLINE' });
+    assert.ok(fixture.requests.some(request => request.path === '/catalog.json'));
+    assert.ok(fixture.requests.some(request => request.path === packagePath('1.0.0')));
+    assert.ok(fixture.requests.some(request => request.path === packagePath('1.1.0')));
+    assert.ok(fixture.requests.every(request => request.method === 'GET'));
+  } finally {
+    await service.close();
+    await fixture.close();
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

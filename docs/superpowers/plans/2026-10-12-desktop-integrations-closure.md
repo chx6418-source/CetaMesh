@@ -62,10 +62,10 @@
 - Produces: `createPluginCatalogFixture() -> { catalogUrl, allowedHosts, close() }`; it binds only to `127.0.0.1`, serves a catalog and package built by the test, and refuses requests outside its own fixture origin.
 - Consumes: `createPluginCenterService`, existing package SHA-256 verification, manifest validation, permission review, install/update/rollback/uninstall APIs.
 
-- [ ] **Step 1: Add failing service assertions** for catalog/detail, package download, digest and manifest checks, permission review, install, enable, version update, rollback, uninstall, and offline-catalog unavailable state.
-- [ ] **Step 2: Run `npm test -- --category runtime --category security`** and confirm lifecycle assertions fail.
-- [ ] **Step 3: Implement the loopback fixture and only the missing service/UI state behavior**; the test fetch adapter must map the fixture origin to loopback and reject any non-fixture destination.
-- [ ] **Step 4: Run `npm test -- --category runtime --category security`** and confirm Plugin lifecycle assertions pass.
+- [x] **Step 1: Add lifecycle assertions** for catalog/detail, package download, digest and manifest checks, permission review, install, enable, version update, rollback, uninstall, and offline-catalog unavailable state.
+- [x] **Step 2: Run `npm test -- --category runtime --category security`**. RED evidence: 44 passed, 1 failed because the new fixture import did not exist yet (ERR_MODULE_NOT_FOUND); this was a test-infrastructure failure, not a Plugin Center service failure.
+- [x] **Step 3: Implement the loopback fixture and only the missing service/UI state behavior**; the test fetch adapter maps the declared fixture origin to loopback and rejects every other destination. The existing service passed the new lifecycle assertions, so no service change was needed.
+- [x] **Step 4: Run `npm test -- --category runtime --category security`** → PASS 45, FAIL 0, NOT_RUN_ENVIRONMENT 0.
 
 ### Task 3: Add manifest-backed Extension settings
 
