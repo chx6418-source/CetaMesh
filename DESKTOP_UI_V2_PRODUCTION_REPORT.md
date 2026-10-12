@@ -10,6 +10,19 @@ The production desktop entry now renders the selected Harbor React 19 / TypeScri
 
 The renderer is organized around Chat, Work, Memory, Agents, Plugins, Settings, About and onboarding. It uses real, bounded desktop DTOs through `src/desktop/ui-service.js` and `desktop-ui/src/bridge/typed-client.ts`; it does not read Core files or receive generic Core objects. Chat context exposes task, memory, approval and artifact metadata. Task creation now projects the Task Runtime's actual DTO and publishes its update event. Bionic is listed with its 53 individually managed tools. Plugin, integration and MCP actions continue through existing review and permission rules.
 
+## Local Agent Registry observation
+
+At 2026-10-12 20:19 China Standard Time, the product Agent Registry `agent.list` was queried with the active local source configuration. The probe performed provider health/readiness checks and local DSH Desktop detection only.
+
+| Provider | Observed state | Evidence |
+| --- | --- | --- |
+| DSH Agent | Unavailable (`not_connected`) | The loopback `settings/describe` health check could not connect. No DSH Agent task was run. |
+| DSH Desktop | Installed, not running; version `0.2.0-rc.2` | Desktop detection is reported independently from Agent readiness. |
+| Codex | Ready (`codex-cli 0.162.0-alpha.17.2`) | Local CLI compatibility and login-state checks passed. No Codex task was run. |
+| ZCode | Unavailable (`unsupported_external_control`) | The desktop app is detected, but the product has no supported external Agent control interface. |
+
+This is a single-machine health snapshot, not Agent task, Chat provider, gateway, or multi-session acceptance. No Agent task or external Agent action was executed.
+
 In production the Rust host serves the bundled `desktop-ui/dist` files from the `resources/desktop-ui` payload under `https://cetamesh.localhost`. The host validates message source and exact method names, caps bridge payloads, denies remote navigation, popups and downloads, and sets a restrictive CSP. Production has no renderer HTTP server or remote asset dependency. The Vite origin is a debug-only option.
 
 The host now loads and atomically saves `state/desktop-ui.json` for zoom, close behavior and window geometry, while retaining the v1 theme field for the egui fallback. Legacy shell theme identifiers normalize to the supported `paper` value; Harbor's active theme is instead read from Core `general.theme`. The host restores logical position/size, applies WebView2 zoom, saves geometry during normal use and exit, and preserves the default close-to-tray behavior. WebView2's mutable browser profile lives at `<user-data-dir>/webview2`, so the installed program directory stays read-only. Core and running tasks continue when the window is hidden.

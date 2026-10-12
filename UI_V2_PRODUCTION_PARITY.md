@@ -24,8 +24,8 @@ Owner 选定方向：**01 Harbor**。本表对照用户提出的生产能力与�
 | Context Panel | Chat 右侧读取当前 Chat 的 Task 状态、Memory 结果、Approval 列表和 Artifact 元数据；订阅事件并轮询刷新 | PARTIAL | DTO 来自 Core；Artifact 不展示路径或任意 `ref`，且没有安全的打开动作。真实运行期负载与视觉密度未手工验收。 |
 | Artifact 元数据 | Chat 上下文展示列表、空状态与脱敏详情 | PARTIAL | 不展示内部 `ref` / 路径；因为 Core 尚无安全打开动作，不能打开产物。 |
 | Memory | `ui.memory.overview/get/create/update/pin/delete`、`memory.updated`；完整 Memory 通过 Chat 上下文“查看全部”进入，不占主导航 | READY | Core 合同实测创建、更新；页面可编辑、固定、删除。Owner 视觉验收仍待执行。 |
-| Agents | `ui.agent.list/health` 与 Agent 注册表 | PARTIAL | DSH / Codex / ZCode 区分就绪、需设置、未安装、未检查等状态；本轮未连接真实外部 Agent 服务。 |
-| DSH Desktop / DSH Provider | 桌面应用安装状态和 Agent Provider 健康状态分别显示 | PARTIAL | 外部 DSH 未在本轮执行真实任务；运行态可为不可用。 |
+| Agents | `ui.agent.list/health` 与 Agent 注册表 | PARTIAL | 本机真实 Registry 快照（2026-10-12 20:19 CST）：Codex ready（`codex-cli 0.162.0-alpha.17.2`）；DSH Agent unavailable（`not_connected`）；检测到 ZCode，但外部 Agent 控制不受支持。此为单机健康快照，未执行 Agent 任务。 |
+| DSH Desktop / DSH Provider | 桌面应用安装状态和 Agent Provider 健康状态分别显示 | PARTIAL | 本机快照：DSH Desktop 已安装（`0.2.0-rc.2`）、未运行；DSH Agent 为 unavailable（`not_connected`）。桌面安装状态与 Provider 可用状态独立报告；未执行 DSH Agent 任务。 |
 | Plugins 目录 | `ui.plugins.catalog/status/detail/refresh`；全部、精选、已安装、可更新筛选；“Update Available”映射为 update | PARTIAL | Core 返回的截图仅为数量，没有安全本地图片 URL；远程图片不注入特权 WebView。 |
 | Plugin 安装 / 更新 | `ui.plugins.stage/install`；安装和更新均经过包审核 / 权限复核；已安装包更新进入 Extension update 流程 | PARTIAL | 未在本轮下载并安装一个真实远端目录包。 |
 | Plugin 专属设置 | Integration 设置走 `ui.plugins.integration.settings/manage` | PARTIAL | 普通 Extension 的独立设置 schema / 页面未提供。 |
