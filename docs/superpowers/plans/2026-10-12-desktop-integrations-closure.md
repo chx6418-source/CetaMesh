@@ -76,8 +76,10 @@
 - Modify: `src/extension/private-storage.js`
 - Modify: `scripts/test-extension-runtime.mjs`
 - Modify: `src/desktop/ui-service.js`
+- Modify: `src/app/service-container.js`
 - Modify: `desktop-ui/src/bridge/typed-client.ts`
 - Modify: `desktop-ui/src/app/HarborApp.tsx`
+- Modify: `desktop-ui/src/app/harbor.css`
 
 **Interfaces:**
 - Manifest property: `settingsSchema`, either absent or a bounded list of `{ key, label, type, required?, default?, options?, min?, max?, maxLength? }`; `type` is exactly `boolean | string | number | enum | secretRef`.
@@ -85,9 +87,9 @@
 - Renderer result: public values plus `{ configured: boolean }` for `secretRef`; never return a stored secret value.
 
 - [ ] **Step 1: Add failing manifest/runtime tests** for each supported type, invalid/duplicate keys, unknown fields, out-of-range values, empty schema, and secret set/clear/redaction.
-- [ ] **Step 2: Run `npm test -- --category runtime --category security`** and confirm settings-schema assertions fail.
-- [ ] **Step 3: Implement schema validation, settings persistence through `src/storage/json-file.js`, secret values through Extension private storage, and the typed Harbor settings form.** Hide its entry point when the validated schema is empty.
-- [ ] **Step 4: Run `npm test -- --category runtime --category security`** and confirm schema, storage, and redaction assertions pass.
+- [x] **Step 2: Run `npm test -- --category runtime --category security`** and confirm settings-schema assertions fail; observed the expected RED above.
+- [x] **Step 3: Implement schema validation, settings persistence through `src/storage/json-file.js`, secret values through Extension private storage, and the typed Harbor settings form.** Hide its entry point when the validated schema is empty; service-container wiring supplies the existing Extension service to Harbor.
+- [x] **Step 4: Run `npm test -- --category runtime --category security`** and confirm schema, storage, and redaction assertions pass. GREEN: 45 PASS / 0 FAIL / 0 NOT_RUN_ENVIRONMENT. `npm run build:ui` passed TypeScript and Vite production build; `npm test -- --category architecture` passed 9/9.
 
 ### Task 4: Make Bionic inventory and retired states explicit
 
@@ -96,8 +98,10 @@
 - Modify: `scripts/test-capability-coverage.mjs`
 - Modify: `src/integrations/catalog.js` only if registry facts are wrong
 - Modify: `src/desktop/ui-service.js`
+- Modify: `src/app/service-container.js`
 - Modify: `desktop-ui/src/bridge/typed-client.ts`
 - Modify: `desktop-ui/src/app/HarborApp.tsx`
+- Modify: `desktop-ui/src/app/harbor.css`
 
 **Interfaces:**
 - Consumes: `buildToolCatalog()`, `LEGACY_RETIRED_TOOLS`, and Integration Registry status.

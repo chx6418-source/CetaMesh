@@ -371,3 +371,20 @@
   .harbor-footer { padding: 0 8px; }
   .harbor-footer > span:last-child { display: none; }
 }
+.extension-settings { display: grid; gap: 10px; }
+.extension-settings > div:first-child { display: grid; gap: 4px; }
+.extension-settings > div:first-child .muted { margin: 0; }
+.extension-setting { display: grid; grid-template-columns: minmax(95px, 0.8fr) minmax(145px, 1.2fr); align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+.extension-setting-copy { display: grid; gap: 3px; min-width: 0; }
+.extension-setting-copy strong { font-size: 12px; }
+.extension-setting-copy small, .extension-secret-control > .muted { color: var(--text-muted); font-size: 10px; }
+.extension-setting > .cm-input, .extension-setting > label, .extension-secret-control { width: 100%; min-width: 0; }
+.extension-setting-toggle { display: flex; justify-content: flex-end; }
+.extension-setting-toggle .cm-input { width: 38px; min-height: 20px; accent-color: var(--accent); }
+.extension-secret-control { display: flex; align-items: center; gap: 6px; }
+.extension-secret-control .cm-input { flex: 1; min-width: 60px; }
+.extension-secret-control .cm-button { flex: none; }
+@media (max-width: 520px) {
+  .extension-setting { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .extension-setting-toggle { justify-content: flex-start; }
+}

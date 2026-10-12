@@ -25,6 +25,8 @@ import {
   reviewSummaryLines,
   manifestFingerprint
 } from '../src/extension/index.js';
+import { readJsonFile } from '../src/storage/json-file.js';
+import { createDesktopUiService } from '../src/desktop/ui-service.js';
 import { startIpcProtocol, IPC_PROTOCOL_VERSION } from '../src/control/ipc-protocol.js';
 import { createCapabilityBroker } from '../src/capability/index.js';
 
@@ -219,6 +221,41 @@ try {
   check('scope.paths 穿越被拒绝', traversalScope.ok === false && traversalScope.issues[0].code === 'INVALID_SCOPE');
   const unknownType = validateManifest(baseManifest({ type: 'kernel-module' }));
   check('未知扩展类型被拒绝', unknownType.ok === false && unknownType.issues[0].code === 'INVALID_EXTENSION_TYPE');
+  const settingsSchema = [
+    { key: 'enabled', label: '启用功能', type: 'boolean', default: true },
+    { key: 'displayName', label: '显示名称', type: 'string', required: true, maxLength: 60, default: 'Harbor' },
+    { key: 'interval', label: '同步间隔', type: 'number', min: 1, max: 60, default: 10 },
+    { key: 'mode', label: '工作模式', type: 'enum', options: ['safe', 'fast'], default: 'safe' },
+    { key: 'apiToken', label: 'API Token', type: 'secretRef' }
+  ];
+  const validSettingsManifest = validateManifest(baseManifest({ id: 'test.settings', settingsSchema }));
+  check('settingsSchema accepts boolean, string, number, enum, and secretRef fields', validSettingsManifest.ok === true
+    && validSettingsManifest.manifest.settingsSchema?.length === 5);
+  equal('settingsSchema preserves declared types', validSettingsManifest.manifest?.settingsSchema?.map(field => field.type),
+    ['boolean', 'string', 'number', 'enum', 'secretRef']);
+  const emptySettingsManifest = validateManifest(baseManifest({ settingsSchema: [] }));
+  check('empty settingsSchema remains valid and empty', emptySettingsManifest.ok === true
+    && Array.isArray(emptySettingsManifest.manifest.settingsSchema) && emptySettingsManifest.manifest.settingsSchema.length === 0);
+  const unknownSettingField = validateManifest(baseManifest({ settingsSchema: [
+    { key: 'safe', label: 'Safe', type: 'string', placeholder: 'unknown field' }
+  ] }));
+  check('unknown settingsSchema fields are rejected', unknownSettingField.ok === false);
+  const duplicateSettingKeys = validateManifest(baseManifest({ settingsSchema: [
+    { key: 'mode', label: 'Mode', type: 'string' }, { key: 'mode', label: 'Mode again', type: 'boolean' }
+  ] }));
+  check('duplicate settingsSchema keys are rejected', duplicateSettingKeys.ok === false);
+  const invalidSettingType = validateManifest(baseManifest({ settingsSchema: [
+    { key: 'mode', label: 'Mode', type: 'object' }
+  ] }));
+  check('unsupported settingsSchema types are rejected', invalidSettingType.ok === false);
+  const invalidSettingRange = validateManifest(baseManifest({ settingsSchema: [
+    { key: 'interval', label: 'Interval', type: 'number', min: 10, max: 2 }
+  ] }));
+  check('invalid settingsSchema number ranges are rejected', invalidSettingRange.ok === false);
+  const invalidSettingDefault = validateManifest(baseManifest({ settingsSchema: [
+    { key: 'mode', label: 'Mode', type: 'enum', options: ['safe', 'fast'], default: 'unsafe' }
+  ] }));
+  check('settingsSchema defaults must match declared types and enum options', invalidSettingDefault.ok === false);
 
   // ── 11. vm 上下文遏制（直接构造 host，绕过安装期预检） ──────────────────
   const probeSource = [
@@ -625,6 +662,78 @@ try {
   const unknownMethod = await asyncCapture(() => service.execute({ method: 'ext.nope', params: {} }));
   check('未知方法报 METHOD_NOT_FOUND', unknownMethod.threw && unknownMethod.code === 'METHOD_NOT_FOUND', String(unknownMethod.code));
 
+  const settingsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-ext-settings-'));
+  const settingsSource = writeExtension('settings-sample', baseManifest({ id: 'test.settings', settingsSchema }), 'module.exports.handlers={};');
+  const settingsService = createExtensionService({ stateDir: settingsDir, fetchImpl: fakeFetch });
+  runtimeCleanups.push(() => settingsService.close());
+  await settingsService.execute({ method: 'ext.install', params: { sourceDir: settingsSource } });
+  const settingsDescriptionResult = await asyncCapture(() => settingsService.execute({ method: 'ext.settings.describe', params: { id: 'test.settings' } }));
+  check('ext.settings.describe returns the validated schema', !settingsDescriptionResult.threw
+    && settingsDescriptionResult.value?.fields?.length === 5, String(settingsDescriptionResult.code));
+  const initialSettingsResult = await asyncCapture(() => settingsService.execute({ method: 'ext.settings.get', params: { id: 'test.settings' } }));
+  check('ext.settings.get applies public defaults and hides unset secrets', !initialSettingsResult.threw
+    && initialSettingsResult.value?.values?.enabled === true
+    && initialSettingsResult.value?.values?.displayName === 'Harbor'
+    && initialSettingsResult.value?.values?.interval === 10
+    && initialSettingsResult.value?.values?.mode === 'safe'
+    && initialSettingsResult.value?.values?.apiToken?.configured === false, String(initialSettingsResult.code));
+  const emptySchemaResult = await asyncCapture(() => service.execute({ method: 'ext.settings.describe', params: { id: 'cetamesh.hello-tool' } }));
+  check('extensions without settings expose an empty schema', !emptySchemaResult.threw
+    && Array.isArray(emptySchemaResult.value?.fields) && emptySchemaResult.value.fields.length === 0, String(emptySchemaResult.code));
+  const unknownSettingUpdate = await asyncCapture(() => settingsService.execute({
+    method: 'ext.settings.update', params: { id: 'test.settings', values: { unknownKey: 'blocked' } }
+  }));
+  check('ext.settings.update rejects undeclared keys', unknownSettingUpdate.threw && unknownSettingUpdate.code === 'UNKNOWN_EXTENSION_SETTING', String(unknownSettingUpdate.code));
+  const invalidSettingUpdates = await Promise.all([
+    asyncCapture(() => settingsService.execute({ method: 'ext.settings.update', params: { id: 'test.settings', values: { displayName: '' } } })),
+    asyncCapture(() => settingsService.execute({ method: 'ext.settings.update', params: { id: 'test.settings', values: { interval: 61 } } })),
+    asyncCapture(() => settingsService.execute({ method: 'ext.settings.update', params: { id: 'test.settings', values: { mode: 'unsafe' } } })),
+    asyncCapture(() => settingsService.execute({ method: 'ext.settings.update', params: { id: 'test.settings', values: { enabled: 'yes' } } })),
+    asyncCapture(() => settingsService.execute({ method: 'ext.settings.update', params: { id: 'test.settings', values: { displayName: 'x'.repeat(61) } } }))
+  ]);
+  check('required, bounded, length, enum, and boolean setting values reject invalid updates', invalidSettingUpdates.every(result =>
+    result.threw && result.code === 'INVALID_EXTENSION_SETTING'), JSON.stringify(invalidSettingUpdates.map(result => result.code)));
+  const secretSentinel = 'extension-secret-sentinel-value';
+  const savedSettingsResult = await asyncCapture(() => settingsService.execute({
+    method: 'ext.settings.update',
+    params: { id: 'test.settings', values: { enabled: false, displayName: 'CetaMesh', interval: 25, mode: 'fast', apiToken: secretSentinel } }
+  }));
+  check('ext.settings.update persists all public types and accepts a secretRef', !savedSettingsResult.threw
+    && savedSettingsResult.value?.values?.enabled === false
+    && savedSettingsResult.value?.values?.displayName === 'CetaMesh'
+    && savedSettingsResult.value?.values?.interval === 25
+    && savedSettingsResult.value?.values?.mode === 'fast'
+    && savedSettingsResult.value?.values?.apiToken?.configured === true, String(savedSettingsResult.code));
+  check('secretRef value never appears in Extension settings DTOs', !JSON.stringify(savedSettingsResult.value ?? {}).includes(secretSentinel));
+  const publicSettingsFile = path.join(settingsDir, 'extensions', 'settings', 'test.settings.json');
+  const publicSettings = readJsonFile(publicSettingsFile, { missing: null });
+  check('public settings persist only through JSON Storage Primitive and contain no secret', Boolean(publicSettings)
+    && !JSON.stringify(publicSettings).includes(secretSentinel));
+  const privateSettingsFile = path.join(settingsDir, 'extensions', 'private-settings', 'test.settings.json');
+  const privateSettings = readJsonFile(privateSettingsFile, { missing: null });
+  check('secretRef is persisted in Extension private storage', Boolean(privateSettings)
+    && Object.values(privateSettings).includes(secretSentinel));
+  const desktopUiSettings = createDesktopUiService({ services: { extensionService: settingsService } });
+  const rendererSettingsResult = await asyncCapture(() => desktopUiSettings.execute({
+    method: 'ui.extensions.settings.get', params: { id: 'test.settings' }
+  }));
+  check('Harbor DTO contains a configured marker and never the secret value', !rendererSettingsResult.threw
+    && rendererSettingsResult.value?.values?.apiToken?.configured === true
+    && !JSON.stringify(rendererSettingsResult.value ?? {}).includes(secretSentinel), String(rendererSettingsResult.code));
+  const restoredSettingsService = createExtensionService({ stateDir: settingsDir, fetchImpl: fakeFetch });
+  runtimeCleanups.push(() => restoredSettingsService.close());
+  const restoredSettings = await asyncCapture(() => restoredSettingsService.execute({
+    method: 'ext.settings.get', params: { id: 'test.settings' }
+  }));
+  check('public settings and secretRef configured status survive service restart', !restoredSettings.threw
+    && restoredSettings.value?.values?.displayName === 'CetaMesh'
+    && restoredSettings.value?.values?.apiToken?.configured === true, String(restoredSettings.code));
+  const clearedSettings = await asyncCapture(() => restoredSettingsService.execute({
+    method: 'ext.settings.update', params: { id: 'test.settings', values: { apiToken: null } }
+  }));
+  check('secretRef can be cleared without disclosing it', !clearedSettings.threw
+    && clearedSettings.value?.values?.apiToken?.configured === false
+    && !JSON.stringify(clearedSettings.value ?? {}).includes(secretSentinel), String(clearedSettings.code));
   const ipcService = createExtensionService({ stateDir: svcDir, fetchImpl: fakeFetch });
   runtimeCleanups.push(() => ipcService.close());
   const dispatch = ({ method, params }) => {

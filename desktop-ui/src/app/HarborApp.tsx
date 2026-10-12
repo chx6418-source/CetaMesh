@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router';
-import { aboutClient, agentClient, approvalClient, bridge, chatClient, feedbackClient, hostClient, memoryClient, onboardingClient, openExternal, pluginClient, searchClient, settingsClient, taskClient, updateClient, workspaceClient, type Agent, type Approval, type ChatMessage as ChatMessageDto, type ChatSession, type Memory, type Plugin, type SettingField, type Settings, type Task } from '../bridge/typed-client';
+import { aboutClient, agentClient, approvalClient, bridge, chatClient, extensionSettingsClient, feedbackClient, hostClient, memoryClient, onboardingClient, openExternal, pluginClient, searchClient, settingsClient, taskClient, updateClient, workspaceClient, type Agent, type Approval, type ChatMessage as ChatMessageDto, type ChatSession, type ExtensionSettingsDescription, type ExtensionSettingsSnapshot, type Memory, type Plugin, type SettingField, type Settings, type Task } from '../bridge/typed-client';
 import { Icon, type IconName } from '../components/icons';
 import { Button, IconButton, Input, SearchInput, Select, Tabs } from '../components/primitives/inputs';
 import { Sheet } from '../components/primitives/overlays';
@@ -642,6 +642,23 @@ function AgentsPage() {
 }
 
 type PluginReview = { id: string; stageId: string; action: 'install' | 'update' | 'enable'; installable: boolean; requiresReview: boolean; permissions: string[]; summary: string[]; trust: string };
+type ExtensionSettingsFormState = {
+  description: ExtensionSettingsDescription;
+  values: ExtensionSettingsSnapshot['values'];
+  draft: Record<string, string | number | boolean | null>;
+};
+function extensionSettingsDraft(description: ExtensionSettingsDescription, values: ExtensionSettingsSnapshot['values']): Record<string, string | number | boolean | null> {
+  return Object.fromEntries(description.fields.map(field => {
+    const value = values[field.key];
+    if (field.type === 'secretRef') return [field.key, ''];
+    const safeValue = typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean' ? value : undefined;
+    if (safeValue !== undefined) return [field.key, safeValue];
+    if (field.default !== undefined) return [field.key, field.default];
+    if (field.type === 'boolean') return [field.key, false];
+    if (field.type === 'number' || field.type === 'enum') return [field.key, null];
+    return [field.key, ''];
+  }));
+}
 type IntegrationRow = { id: string; name: string; status: string; enabled: boolean; available: boolean };
 type McpRow = { id: string; name: string; status: string; enabled: boolean; available: boolean; toolCount: number | null; transport: string; reason: string | null };
 
@@ -655,6 +672,9 @@ function PluginsPage() {
   const [servers, setServers] = useState<McpRow[]>([]);
   const [pendingApprovals, setPendingApprovals] = useState<Approval[]>([]);
   const [selectedPlugin, setSelectedPlugin] = useState<Plugin | null>(null);
+  const extensionSettingsRequest = useRef(0);
+  const [extensionSettings, setExtensionSettings] = useState<ExtensionSettingsFormState | null>(null);
+  const [extensionSettingsLoading, setExtensionSettingsLoading] = useState(false);
   const [selectedIntegration, setSelectedIntegration] = useState<{ id: string; name: string; enabled: boolean; available: boolean; tools: { id: string; name: string; enabled: boolean; available: boolean; permission: string }[]; settings: Record<string, unknown> } | null>(null);
   const [selectedServer, setSelectedServer] = useState<{ server: McpRow; tools: { id: string; name: string; description: string; enabled: boolean }[]; config: { id: string; enabled: boolean; hasArgs: boolean; hasEnvironment: boolean; timeoutMs: number | null; note: string } } | null>(null);
   const [mcpConfigDraft, setMcpConfigDraft] = useState({ timeoutMs: '', note: '' });
@@ -765,9 +785,43 @@ function PluginsPage() {
     finally { setBusy(''); }
   }
   async function openPlugin(plugin: Plugin) {
+    const request = ++extensionSettingsRequest.current;
     setSelectedPlugin(plugin);
-    try { const result = await pluginClient.detail(plugin.id); if (result.plugin) setSelectedPlugin(result.plugin); }
-    catch (cause) { setError(messageOf(cause)); }
+    setExtensionSettings(null);
+    setExtensionSettingsLoading(true);
+    try {
+      const result = await pluginClient.detail(plugin.id);
+      const selected = result.plugin ?? plugin;
+      if (request !== extensionSettingsRequest.current) return;
+      setSelectedPlugin(selected);
+      if (!selected.installed) return;
+      const description = await extensionSettingsClient.describe(selected.id);
+      if (request !== extensionSettingsRequest.current || !description.available || !description.fields.length) return;
+      const snapshot = await extensionSettingsClient.get(selected.id);
+      if (request !== extensionSettingsRequest.current) return;
+      setExtensionSettings({ description, values: snapshot.values, draft: extensionSettingsDraft(description, snapshot.values) });
+    } catch (cause) { if (request === extensionSettingsRequest.current) setError(messageOf(cause)); }
+    finally { if (request === extensionSettingsRequest.current) setExtensionSettingsLoading(false); }
+  }
+  async function saveExtensionSettings() {
+    if (!extensionSettings || !selectedPlugin) return;
+    const values: Record<string, string | number | boolean | null> = {};
+    for (const field of extensionSettings.description.fields) {
+      const value = extensionSettings.draft[field.key];
+      if (field.type === 'secretRef') {
+        if (value === null) values[field.key] = null;
+        else if (typeof value === 'string' && value.length > 0) values[field.key] = value;
+      } else if (value !== undefined) values[field.key] = value;
+    }
+    setBusy('extension-settings'); setError(''); setNotice('');
+    try {
+      const snapshot = await extensionSettingsClient.update(selectedPlugin.id, values);
+      setExtensionSettings(current => current && current.description.id === snapshot.id
+        ? { ...current, values: snapshot.values, draft: extensionSettingsDraft(current.description, snapshot.values) }
+        : current);
+      setNotice('扩展设置已保存。');
+    } catch (cause) { setError(messageOf(cause)); }
+    finally { setBusy(''); }
   }
   async function openIntegration(item: IntegrationRow) {
     try { setSelectedIntegration(await pluginClient.integrationSettings(item.id)); }
@@ -830,7 +884,32 @@ function PluginsPage() {
     </>}
     {tab === 'connections' && <div className="connection-list">{integrations.length ? integrations.map(item => <Surface className="connection-row" key={item.id}><span className="connection-icon"><Icon name="plug" size={20} /></span><span className="grow"><strong>{item.name}</strong><small>{item.id} · {item.available ? item.status : '当前不可用'}</small></span><StatusBadge value={item.enabled ? 'enabled' : item.status} available={item.enabled} /><Button compact onClick={() => void openIntegration(item)}>详情与设置</Button><Button compact variant={item.enabled ? 'default' : 'primary'} disabled={!item.available || busy === item.id} onClick={() => void toggleIntegration(item)}>{item.enabled ? '停用' : '启用'}</Button></Surface>) : <EmptyNotice icon="plug" title="没有已注册的集成" detail="Integration 状态由本机 Core 提供。安装扩展请前往插件中心。" />}</div>}
     {tab === 'mcp' && <div className="connection-list">{servers.length ? servers.map(item => <Surface className="connection-row" key={item.id}><span className="connection-icon mcp-icon"><Icon name="layers" size={20} /></span><span className="grow"><strong>{item.name}</strong><small>{item.transport || '本机连接'} · {item.toolCount === null ? '工具数量未知' : `${item.toolCount} 个工具`}{item.reason ? ` · ${item.reason}` : ''}</small></span><StatusBadge value={item.status} available={item.available && item.enabled} /><Button compact onClick={() => void openServer(item)}>查看工具</Button><Button compact variant={item.enabled ? 'default' : 'primary'} disabled={busy === item.id || (item.enabled && !item.available)} onClick={() => void manageServer(item, item.enabled ? 'disable' : 'enable')}>{item.enabled ? '禁用' : '启用'}</Button><Button compact disabled={busy === item.id || !item.available || !item.enabled} onClick={() => void manageServer(item, item.status === 'running' ? 'stop' : 'start')}>{item.status === 'running' ? '停止' : '启动'}</Button></Surface>) : <EmptyNotice icon="layers" title="没有配置 MCP 服务" detail="MCP 服务与凭据由本机 Core 配置和管理。" />}</div>}
-    <Sheet open={Boolean(selectedPlugin)} title={selectedPlugin?.name ?? '插件详情'} onClose={() => setSelectedPlugin(null)}>{selectedPlugin && <div className="plugin-detail"><p className="eyebrow">{selectedPlugin.developer} · {selectedPlugin.kind}</p><h3>{selectedPlugin.summary}</h3><p>{selectedPlugin.description || '暂无详细说明。'}</p><div className="detail-facts"><span>版本 <strong>{selectedPlugin.version || '—'}</strong></span><span>分类 <strong>{selectedPlugin.category || '未分类'}</strong></span><span>信任 <strong>{selectedPlugin.compatibility.minimum || 'Core 验证'}</strong></span></div><section><h3>权限</h3>{selectedPlugin.permissions.length ? <ul>{selectedPlugin.permissions.map(permission => <li key={permission}>{permission}</li>)}</ul> : <p className="muted">该插件没有声明权限。</p>}</section>{selectedPlugin.warning && <Banner>{selectedPlugin.warning}</Banner>}<section><h3>更新说明</h3>{selectedPlugin.changelog.length ? <ul>{selectedPlugin.changelog.map((line, index) => <li key={`${index}-${line}`}>{line}</li>)}</ul> : <p className="muted">没有更新说明。</p>}</section><div className="row detail-actions">{selectedPlugin.status === 'update' ? <Button variant="primary" disabled={busy === selectedPlugin.id} onClick={() => void stage(selectedPlugin)}>查看更新并安装</Button> : !selectedPlugin.installed ? <Button variant="primary" disabled={busy === selectedPlugin.id} onClick={() => void stage(selectedPlugin)}>查看权限并安装</Button> : selectedPlugin.enabled ? <Button disabled={busy === selectedPlugin.id} onClick={() => void pluginAction(selectedPlugin, 'disable')}>停用</Button> : <Button variant="primary" disabled={busy === selectedPlugin.id} onClick={() => void reviewEnable(selectedPlugin)}>查看权限并启用</Button>}{selectedPlugin.installed && <Button variant="danger" disabled={busy === selectedPlugin.id} onClick={() => void pluginAction(selectedPlugin, 'uninstall')}>卸载</Button>}</div></div>}</Sheet>
+    <Sheet open={Boolean(selectedPlugin)} title={selectedPlugin?.name ?? '插件详情'} onClose={() => { extensionSettingsRequest.current += 1; setSelectedPlugin(null); setExtensionSettings(null); setExtensionSettingsLoading(false); }}>{selectedPlugin && <div className="plugin-detail"><p className="eyebrow">{selectedPlugin.developer} · {selectedPlugin.kind}</p><h3>{selectedPlugin.summary}</h3><p>{selectedPlugin.description || '暂无详细说明。'}</p><div className="detail-facts"><span>版本 <strong>{selectedPlugin.version || '—'}</strong></span><span>分类 <strong>{selectedPlugin.category || '未分类'}</strong></span><span>信任 <strong>{selectedPlugin.compatibility.minimum || 'Core 验证'}</strong></span></div><section><h3>权限</h3>{selectedPlugin.permissions.length ? <ul>{selectedPlugin.permissions.map(permission => <li key={permission}>{permission}</li>)}</ul> : <p className="muted">该插件没有声明权限。</p>}</section>{selectedPlugin.warning && <Banner>{selectedPlugin.warning}</Banner>}
+      {selectedPlugin.installed && extensionSettingsLoading && <p className="muted">正在读取扩展设置…</p>}
+      {selectedPlugin.installed && extensionSettings && extensionSettings.description.fields.length > 0 && <section className="extension-settings">
+        <div><h3>扩展设置</h3><p className="muted">设置由本机 Core 保存；敏感值只显示是否已配置。</p></div>
+        {extensionSettings.description.fields.map(field => {
+          const draft = extensionSettings.draft[field.key];
+          const stored = extensionSettings.values[field.key];
+          const configured = field.type === 'secretRef' && typeof stored === 'object' && stored !== null && stored.configured;
+          const updateDraft = (value: string | number | boolean | null) => setExtensionSettings(current => current
+            ? { ...current, draft: { ...current.draft, [field.key]: value } } : current);
+          return <div className="extension-setting" key={field.key}>
+            <div className="extension-setting-copy"><strong>{field.label}</strong>{field.required && <small>必填</small>}</div>
+            {field.type === 'boolean'
+              ? <label className="extension-setting-toggle"><span className="sr-only">{field.label}</span><Input type="checkbox" checked={draft === true} onChange={event => updateDraft(event.target.checked)} /></label>
+              : field.type === 'enum'
+                ? <Select label={field.label} value={typeof draft === 'string' ? draft : ''} onChange={event => updateDraft(event.target.value || null)}><option value="">未设置</option>{field.options.map(option => <option key={option} value={option}>{option}</option>)}</Select>
+                : field.type === 'number'
+                  ? <Input type="number" aria-label={field.label} min={field.min ?? undefined} max={field.max ?? undefined} step="any" value={typeof draft === 'number' ? draft : typeof draft === 'string' ? draft : ''} onChange={event => updateDraft(event.target.value === '' ? null : Number(event.target.value))} />
+                  : field.type === 'secretRef'
+                    ? <div className="extension-secret-control"><Input type="password" aria-label={field.label} autoComplete="new-password" maxLength={field.maxLength ?? undefined} value={typeof draft === 'string' ? draft : ''} placeholder={configured ? '已配置，留空保持不变' : '输入敏感值'} onChange={event => updateDraft(event.target.value)} /><span className="muted">{configured ? '已配置' : '未配置'}</span>{configured && draft !== null && <Button compact variant="ghost" onClick={() => updateDraft(null)}>清除</Button>}</div>
+                    : <Input aria-label={field.label} maxLength={field.maxLength ?? undefined} value={typeof draft === 'string' ? draft : ''} onChange={event => updateDraft(event.target.value)} />}
+          </div>;
+        })}
+        <div className="row detail-actions"><Button compact variant="primary" disabled={busy === 'extension-settings'} onClick={() => void saveExtensionSettings()}>{busy === 'extension-settings' ? '正在保存…' : '保存扩展设置'}</Button></div>
+      </section>}
+      <section><h3>更新说明</h3>{selectedPlugin.changelog.length ? <ul>{selectedPlugin.changelog.map((line, index) => <li key={`${index}-${line}`}>{line}</li>)}</ul> : <p className="muted">没有更新说明。</p>}</section><div className="row detail-actions">{selectedPlugin.status === 'update' ? <Button variant="primary" disabled={busy === selectedPlugin.id} onClick={() => void stage(selectedPlugin)}>查看更新并安装</Button> : !selectedPlugin.installed ? <Button variant="primary" disabled={busy === selectedPlugin.id} onClick={() => void stage(selectedPlugin)}>查看权限并安装</Button> : selectedPlugin.enabled ? <Button disabled={busy === selectedPlugin.id} onClick={() => void pluginAction(selectedPlugin, 'disable')}>停用</Button> : <Button variant="primary" disabled={busy === selectedPlugin.id} onClick={() => void reviewEnable(selectedPlugin)}>查看权限并启用</Button>}{selectedPlugin.installed && <Button variant="danger" disabled={busy === selectedPlugin.id} onClick={() => void pluginAction(selectedPlugin, 'uninstall')}>卸载</Button>}</div></div>}</Sheet>
     <Sheet open={Boolean(review)} title="安装与权限审查" onClose={() => setReview(null)}>{review && <div className="review-detail"><Badge tone={review.requiresReview ? 'warning' : 'success'}>{review.trust || '来源待核验'}</Badge><h3>{review.action === 'update' ? '更新前查看权限' : review.action === 'install' ? '安装前查看权限' : '启用前查看权限'}</h3><p>仅继续本次明确选择的操作。运行时能力仍需 Core 按策略审批。</p>{review.summary.length ? <section><h4>操作说明</h4><ul>{review.summary.map((line, index) => <li key={`${index}-${line}`}>{line}</li>)}</ul></section> : null}<section><h4>请求的权限</h4>{review.permissions.length ? <ul>{review.permissions.map(permission => <li key={permission}>{permission}</li>)}</ul> : <p>没有声明额外权限。</p>}</section>{!review.installable && <ErrorNotice error="Core 尚未允许该插件安装或启用。请先处理完整性或兼容性问题。" />}<div className="row detail-actions"><Button onClick={() => setReview(null)}>取消</Button><Button variant="primary" disabled={!review.installable || busy === review.id} onClick={() => void confirmReview()}>{busy === review.id ? '正在处理…' : review.action === 'update' ? '确认更新' : review.action === 'install' ? '确认安装' : '确认启用'}</Button></div></div>}</Sheet>
     <Sheet open={Boolean(selectedIntegration)} title={selectedIntegration?.name ?? '集成设置'} onClose={() => setSelectedIntegration(null)}>{selectedIntegration && <div className="plugin-detail"><StatusBadge value={selectedIntegration.enabled ? 'enabled' : 'disabled'} available={selectedIntegration.available} /><h3>能力与工具</h3>{selectedIntegration.tools.length ? selectedIntegration.tools.map(tool => <div className="tool-setting-row" key={tool.id}><span className="grow"><strong>{tool.name}</strong><small>{tool.permission || '权限由 Core 控制'}</small></span><StatusBadge value={tool.available && tool.enabled ? 'enabled' : 'disabled'} /><Button compact disabled={!tool.available || busy === `${selectedIntegration.id}:${tool.id}`} onClick={() => void toggleIntegrationTool(selectedIntegration.id, tool)}>{tool.enabled ? '关闭工具' : '开启工具'}</Button></div>) : <p className="muted">没有公开的工具配置。</p>}<h3>安全设置</h3>{Object.entries(selectedIntegration.settings).length ? Object.entries(selectedIntegration.settings).map(([key, value]) => <div className="tool-setting-row" key={key}><strong>{key}</strong><span>{typeof value === 'boolean' ? value ? '启用' : '停用' : String(value ?? '—')}</span></div>) : <p className="muted">没有可展示的非敏感设置。</p>}</div>}</Sheet>
     <Sheet open={Boolean(selectedServer)} title={selectedServer?.server.name ?? 'MCP 工具'} onClose={() => setSelectedServer(null)}>{selectedServer && <div className="plugin-detail">

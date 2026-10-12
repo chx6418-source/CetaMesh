@@ -1,5 +1,6 @@
 // CetaMesh Desktop Extension v1 —— 公共入口（阶段 10）。
 export { createExtensionService } from './service.js';
+export { createExtensionSettingsService, normalizeSettingsSchema } from './settings.js';
 export { createExtensionRuntime } from './runtime.js';
 export { createExtensionInstaller } from './installer.js';
 export { createExtensionStore, EXTENSION_REGISTRY_VERSION } from './store.js';

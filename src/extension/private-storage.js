@@ -25,6 +25,7 @@ export function createExtensionPrivateStorage({ file } = {}) {
       if (existed) { delete cache[name]; writeJsonAtomic(filePath, cache); }
       return existed;
     },
+    has(key) { return Object.hasOwn(cache, String(key)); },
     keys() { return Object.keys(cache); }
   };
 }

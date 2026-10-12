@@ -42,6 +42,15 @@ export interface ApprovalDecisionResult {
 }
 export interface Attachment { name: string; content: string; mimeType?: string }
 export type Settings = Record<string, Record<string, string | number | boolean | null>>;
+export type ExtensionSettingType = 'boolean' | 'string' | 'number' | 'enum' | 'secretRef';
+export interface ExtensionSettingField {
+  key: string; label: string; type: ExtensionSettingType; required: boolean;
+  default?: string | number | boolean | null; options: string[];
+  min: number | null; max: number | null; maxLength: number | null;
+}
+export type ExtensionSettingValue = string | number | boolean | null | { configured: boolean };
+export interface ExtensionSettingsDescription { id: string; name: string; available: boolean; fields: ExtensionSettingField[] }
+export interface ExtensionSettingsSnapshot { id: string; values: Record<string, ExtensionSettingValue> }
 
 export type DesktopEvent = 'core.status' | 'chat.updated' | 'chat.streaming' | 'task.updated' | 'task.deleted'
   | 'agent.updated' | 'workspace.updated' | 'plugin.updated' | 'plugin.downloadProgress' | 'approval.pending' | 'approval.resolved'
@@ -58,6 +67,7 @@ type UiMethod =
   | 'ui.workspace.list' | 'ui.workspace.open' | 'ui.workspace.create'
   | 'ui.memory.overview' | 'ui.memory.get' | 'ui.memory.create' | 'ui.memory.update' | 'ui.memory.pin' | 'ui.memory.delete'
   | 'ui.agent.list' | 'ui.agent.health'
+  | 'ui.extensions.settings.describe' | 'ui.extensions.settings.get' | 'ui.extensions.settings.update'
   | 'ui.plugins.catalog' | 'ui.plugins.status' | 'ui.plugins.detail' | 'ui.plugins.refresh' | 'ui.plugins.stage' | 'ui.plugins.install'
   | 'ui.plugins.enable.review' | 'ui.plugins.enable' | 'ui.plugins.disable' | 'ui.plugins.uninstall' | 'ui.plugins.integration.list' | 'ui.plugins.integration.settings'
   | 'ui.plugins.integration.manage' | 'ui.plugins.integration.tool.toggle'
@@ -195,7 +205,12 @@ export const agentClient = {
   list: () => uiCall<{ agents: Agent[] }>('ui.agent.list', {}),
   health: (provider: string) => uiCall<Agent>('ui.agent.health', { provider })
 };
-export const pluginClient = {
+export const extensionSettingsClient = {
+  describe: (id: string) => uiCall<ExtensionSettingsDescription>('ui.extensions.settings.describe', { id }),
+  get: (id: string) => uiCall<ExtensionSettingsSnapshot>('ui.extensions.settings.get', { id }),
+  update: (id: string, values: Record<string, string | number | boolean | null>) =>
+    uiCall<ExtensionSettingsSnapshot>('ui.extensions.settings.update', { id, values })
+};export const pluginClient = {
   catalog: (query = '', category = '', view = 'all') => uiCall<{ available: boolean; configured: boolean; offline: boolean; reason: string | null; plugins: Plugin[] }>('ui.plugins.catalog', { query, category, view }),
   status: () => uiCall<{ catalogAvailable: boolean; configured: boolean; offline: boolean; plugins: Plugin[]; installed: Plugin[] }>('ui.plugins.status', {}),
   detail: (id: string) => uiCall<{ available: boolean; offline: boolean; plugin: Plugin | null }>('ui.plugins.detail', { id }),

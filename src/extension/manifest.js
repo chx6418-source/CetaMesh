@@ -5,6 +5,7 @@
 // 损坏 / 缺字段 / 非法权限名一律 fail-closed，绝不"猜一个默认值"安装。
 
 import crypto from 'node:crypto';
+import { normalizeSettingsSchema } from './settings.js';
 import {
   EXTENSION_LIMITS,
   PERMISSIONS,
@@ -154,6 +155,7 @@ function buildManifest(raw) {
   }
 
   const capabilities = normalizeCapabilities(raw.capabilities);
+  const settingsSchema = normalizeSettingsSchema(raw.settingsSchema);
 
   return {
     manifestVersion,
@@ -171,7 +173,8 @@ function buildManifest(raw) {
     permissions,
     network: { hosts },
     scope: { workspace, paths },
-    source: normalizeSource(raw.source)
+    source: normalizeSource(raw.source),
+    ...(settingsSchema === undefined ? {} : { settingsSchema })
   };
 }
 

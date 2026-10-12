@@ -6,6 +6,7 @@
 import { createExtensionRuntime } from './runtime.js';
 import { createExtensionStore } from './store.js';
 import { extensionError } from './types.js';
+import { createExtensionSettingsService } from './settings.js';
 
 export function createExtensionService({
   stateDir, fetchImpl = null, capabilityBroker = null, hostFactory,
@@ -18,6 +19,8 @@ export function createExtensionService({
   const runtime = createExtensionRuntime({ store, fetchImpl, capabilityBroker, hostFactory,
     processHostFactory, vmHostFactory, memoryPackHostFactory, isTrustedVmExtension, now,
     monitorIntervalMs, heartbeatTimeoutMs, maxHeartbeatMisses, maxAutomaticRestarts, restartWindowMs, stableWindowMs });
+
+  const settings = createExtensionSettingsService({ stateDir, getExtension: id => runtime.get({ id }) });
 
   const handlers = {
     'ext.overview': () => runtime.overview(),
@@ -33,8 +36,11 @@ export function createExtensionService({
     'ext.disable': (p) => runtime.disable({ id: p.id }),
     'ext.restart': (p) => runtime.restart({ id: p.id }),
     'ext.invoke': (p) => runtime.invoke({ id: p.id, capability: p.capability, input: p.input }),
-    'ext.logs': (p) => runtime.logs({ id: p.id })
-    ,'ext.memory-pack.overlay': (p) => runtime.updateMemoryPackOverlay({ id: p.id, patch: p.patch })
+    'ext.logs': (p) => runtime.logs({ id: p.id }),
+    'ext.memory-pack.overlay': (p) => runtime.updateMemoryPackOverlay({ id: p.id, patch: p.patch }),
+    'ext.settings.describe': p => settings.describe({ id: p.id }),
+    'ext.settings.get': p => settings.get({ id: p.id }),
+    'ext.settings.update': p => settings.update({ id: p.id, values: p.values })
   };
 
   return {

@@ -181,6 +181,19 @@ function projectAgent(value) {
   };
 }
 
+function projectExtensionSettingsValues(value, fields) {
+  const row = record(value);
+  const source = record(row.values);
+  const values = {};
+  for (const field of fields) {
+    if (field.type === 'secretRef') {
+      values[field.key] = { configured: record(source[field.key]).configured === true };
+    } else {
+      values[field.key] = scalar(source[field.key]);
+    }
+  }
+  return { id: string(row.id, 160), values };
+}
 function projectPlugin(value) {
   const row = record(value);
   const extension = record(row.installedEntry);
@@ -355,6 +368,7 @@ export function createDesktopUiService({ services = {}, system = services.system
   const memory = (method, params) => call(services.memoryService, method, params);
   const agent = (method, params) => call(services.agentService, method, params);
   const plugins = (method, params) => call(services.pluginCenterService, method, params);
+  const extensions = (method, params) => call(services.extensionService, method, params);
   const integrations = (method, params) => call(services.integrationService, method, params);
   const settings = (method, params) => call(system.settings, method, params);
   const about = (method, params) => call(system.about, method, params);
@@ -496,6 +510,39 @@ export function createDesktopUiService({ services = {}, system = services.system
     },
     'ui.agent.list': async () => ({ agents: (await agent('agent.list', {})).providers.map(projectAgent) }),
     'ui.agent.health': async p => projectAgent(await agent('agent.health', { provider: string(p.provider, 80) })),
+    'ui.extensions.settings.describe': async p => {
+      const result = record(await extensions('ext.settings.describe', { id: idParam(p) }));
+      const fields = (Array.isArray(result.fields) ? result.fields : []).slice(0, 32).map(field => {
+        const item = record(field);
+        const type = ['boolean', 'string', 'number', 'enum', 'secretRef'].includes(item.type) ? item.type : 'string';
+        return {
+          key: string(item.key, 64), label: string(item.label, 100), type, required: item.required === true,
+          ...(type === 'secretRef' ? {} : { default: scalar(item.default) }),
+          options: boundedStrings(item.options, 50, 120),
+          min: typeof item.min === 'number' && Number.isFinite(item.min) ? item.min : null,
+          max: typeof item.max === 'number' && Number.isFinite(item.max) ? item.max : null,
+          maxLength: Number.isSafeInteger(item.maxLength) ? item.maxLength : null
+        };
+      }).filter(field => field.key && field.label);
+      return { id: string(result.id, 160), name: string(result.name, 160), available: fields.length > 0, fields };
+    },
+    'ui.extensions.settings.get': async p => {
+      const id = idParam(p);
+      const description = record(await extensions('ext.settings.describe', { id }));
+      const fields = (Array.isArray(description.fields) ? description.fields : []).slice(0, 32);
+      const result = await extensions('ext.settings.get', { id });
+      return projectExtensionSettingsValues(result, fields);
+    },
+    'ui.extensions.settings.update': async p => {
+      const id = idParam(p);
+      const values = objectParams(p.values);
+      await extensions('ext.settings.update', { id, values });
+      emit('plugin.updated', { pluginId: id });
+      const description = record(await extensions('ext.settings.describe', { id }));
+      const fields = (Array.isArray(description.fields) ? description.fields : []).slice(0, 32);
+      const result = await extensions('ext.settings.get', { id });
+      return projectExtensionSettingsValues(result, fields);
+    },
     'ui.plugins.catalog': async p => {
       const result = await plugins('plugin-center.catalog.list', { query: string(p.query, 200), category: string(p.category, 80), view: ['all', 'installed', 'recommended', 'update-available'].includes(p.view) ? p.view : 'all' });
       return { available: result.available === true, configured: result.configured === true, offline: result.offline === true, reason: string(result.reason ?? result.error, 300) || null, plugins: (result.plugins ?? []).map(projectPlugin) };
