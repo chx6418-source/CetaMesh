@@ -47,10 +47,10 @@
 - Resolver: `resolveTaskArtifactOpen({ artifact, workspaceRoot, ownedArtifactRoot }) -> { canonicalPath, extension }`.
 - Allowlisted local extensions: `.csv`, `.jpeg`, `.jpg`, `.md`, `.pdf`, `.png`, and `.txt`; no scripts, executables, HTML, or arbitrary URI schemes.
 
-- [ ] **Step 1: Add failing tests** for a valid in-root artifact, unknown IDs, wrong task/workspace, missing file, traversal, symlink/junction escape, and rejected file types.
-- [ ] **Step 2: Register `test-artifact-open-boundary.mjs` as category `security` in `scripts/run-all-tests.mjs` and run `npm test -- --category security`.** Confirm the new tests fail.
-- [ ] **Step 3: Implement task/artifact lookup and canonical-path authorization** using `realpath`; do not return `ref` or `canonicalPath` from any renderer projection.
-- [ ] **Step 4: Run `npm test -- --category security`** and confirm Core boundary tests pass.
+- [x] **Step 1: Add failing tests** for a valid in-root artifact, unknown IDs, wrong task/workspace, missing file, traversal, symlink/junction escape, and rejected file types.
+- [x] **Step 2: Register `test-artifact-open-boundary.mjs` as category `security` in `scripts/run-all-tests.mjs` and run `npm test -- --category security`.** Confirm the new tests fail.
+- [x] **Step 3: Implement task/artifact lookup and canonical-path authorization** using `realpath`; do not return `ref` or `canonicalPath` from any renderer projection.
+- [x] **Step 4: Run `npm test -- --category security`** and confirm Core boundary tests pass.
 
 ### Task 2: Native open route and Harbor affordance
 

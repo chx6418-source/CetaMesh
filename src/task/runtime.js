@@ -31,12 +31,14 @@ import {
   taskError
 } from './types.js';
 import { createTaskStore } from './store.js';
+import { resolveTaskArtifactOpen } from './artifact-open.js';
 
 function subId(prefix) {
   return prefix + '_' + crypto.randomBytes(4).toString('hex');
 }
 
-export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory } = {}) {
+export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
+  resolveWorkspace = () => null, ownedArtifactRoot = null } = {}) {
   if (!stateDir || typeof stateDir !== 'string') throw new Error('createTaskRuntime 需要 stateDir');
   const store = createTaskStore({ stateDir, now, idFactory });
 
@@ -378,6 +380,27 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory 
     });
   }
 
+  async function resolveArtifactOpen({ taskId, artifactId } = {}) {
+    const safeTaskId = normalizeText(taskId, 'taskId', TASK_LIMITS.idChars, { required: true });
+    const safeArtifactId = normalizeText(artifactId, 'artifactId', TASK_LIMITS.idChars, { required: true });
+    const task = requireTask(safeTaskId);
+    const artifact = task.artifacts.find(item => item.id === safeArtifactId);
+    if (!artifact) throw taskError('ARTIFACT_NOT_FOUND', 'Artifact 不属于指定 Task');
+
+    const ownedReference = typeof artifact.ref === 'string'
+      && artifact.ref.toLowerCase().startsWith('cetamesh-artifact:');
+    let workspaceRoot = null;
+    if (!ownedReference && task.workspaceId) {
+      const workspace = await resolveWorkspace(task.workspaceId);
+      if (!workspace || workspace.id !== task.workspaceId || typeof workspace.root !== 'string' || !workspace.root.trim()) {
+        throw taskError('TASK_WORKSPACE_UNAVAILABLE', 'Task 绑定的 Workspace 当前不可用');
+      }
+      workspaceRoot = workspace.root;
+    }
+
+    return resolveTaskArtifactOpen({ artifact, workspaceRoot, ownedArtifactRoot });
+  }
+
   function addDecision({ id, expectedRev, decision, rationale } = {}) {
     const item = {
       at: now(),
@@ -471,6 +494,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory 
     reconcileWorkspace,
     addWork,
     addArtifact,
+    resolveArtifactOpen,
     addDecision,
     linkMemory,
     addAcceptance,

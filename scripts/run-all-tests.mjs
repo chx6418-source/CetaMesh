@@ -83,6 +83,7 @@ const REGISTRY = {
   'test-provider-secrets.mjs': { category: 'security' },
   'test-error-hygiene.mjs': { category: 'security' },
   'test-bionic-chat-plugin.mjs': { category: 'security', note: '产品化任务 B：仿生聊天插件开关 + Capability 强制' },
+  'test-artifact-open-boundary.mjs': { category: 'security', note: 'Task and Workspace identity based native artifact opening' },
 
   // ── runtime：产品运行时（chat/memory/task/continuity/model/social…） ───────
   'test-agent-broker.mjs': { category: 'runtime' },

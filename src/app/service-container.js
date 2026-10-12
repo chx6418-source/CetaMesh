@@ -59,10 +59,14 @@ export function createCetaMeshServices(options = {}) {
   const settingsService = options.settingsService ?? createSettingsService({ stateDir });
   const dshDesktop = options.dshDesktop ?? createDshDesktopIntegration({ platform: options.platform ?? process.platform });
 
-  const taskService = createTaskService({ stateDir });
   const workspaceService = createWorkspaceService({
     stateDir,
     audit: event => log('Workspace ' + event.action + '（' + (event.workspaceId ?? 'none') + '）')
+  });
+  const taskService = createTaskService({
+    stateDir,
+    ownedArtifactRoot: path.join(dataRoot, 'artifacts'),
+    resolveWorkspace: workspaceId => workspaceService.describeWorkspace(workspaceId)
   });
   let capabilityService = null;
   let continuityService = null;

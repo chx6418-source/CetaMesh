@@ -7,9 +7,9 @@
 import { createTaskRuntime } from './runtime.js';
 import { taskError } from './types.js';
 
-export function createTaskService({ stateDir, now } = {}) {
+export function createTaskService({ stateDir, now, resolveWorkspace, ownedArtifactRoot } = {}) {
   if (!stateDir || typeof stateDir !== 'string') throw new Error('createTaskService 需要 stateDir');
-  const runtime = createTaskRuntime({ stateDir, now });
+  const runtime = createTaskRuntime({ stateDir, now, resolveWorkspace, ownedArtifactRoot });
 
   const handlers = {
     // 页面聚合：一次往返拿到列表 + 计数 + 需要关注
@@ -71,6 +71,9 @@ export function createTaskService({ stateDir, now } = {}) {
     }),
     'task.artifact.add': (p) => runtime.addArtifact({
       id: p.id, expectedRev: p.expectedRev, kind: p.kind, label: p.label, ref: p.ref
+    }),
+    'task.artifact.resolveOpen': (p) => runtime.resolveArtifactOpen({
+      taskId: p.taskId, artifactId: p.artifactId
     }),
     'task.decision.add': (p) => runtime.addDecision({
       id: p.id, expectedRev: p.expectedRev, decision: p.decision, rationale: p.rationale
