@@ -12,6 +12,10 @@ import {
   defineModelProvider
 } from '../src/model/index.js';
 import { createProviderSecrets } from '../src/providers/secrets.js';
+import {
+  createOpenAiCompatibleFixture,
+  OPENAI_COMPATIBLE_FIXTURE_BASE_URL
+} from './test-support/openai-compatible-fixture.mjs';
 
 const allowedTestTempRoot = path.resolve(process.env.WHALEBRIDGE_TEST_TMPDIR || os.tmpdir());
 fs.mkdirSync(allowedTestTempRoot, { recursive: true });
@@ -55,25 +59,6 @@ function sseResponse(text) {
   return new Response(text, { status: 200, headers: { 'content-type': 'text/event-stream' } });
 }
 
-/** 可控 SSE 流：先发第一块，随后挂起；abort 时以 AbortError 结束流（模拟真实 fetch 取消）。 */
-function abortableSseFetch() {
-  let controller = null;
-  const stream = new ReadableStream({
-    start(c) {
-      controller = c;
-      c.enqueue(new TextEncoder().encode(`data: {"choices":[{"delta":{"content":"前半段"}}]}\n\n`));
-    }
-  });
-  return {
-    async fetch(url, init = {}) {
-      init.signal?.addEventListener('abort', () => {
-        try { controller.error(new Error('The operation was aborted')); } catch { /* 已结束 */ }
-      });
-      return new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } });
-    }
-  };
-}
-
 function makeSecrets(withKey = true) {
   const dir = fs.mkdtempSync(path.join(temp, 'secrets-'));
   const secrets = createProviderSecrets({ root: dir });
@@ -84,15 +69,15 @@ function makeSecrets(withKey = true) {
   return secrets;
 }
 
-function makeService({ withKey = true, fetchImpl } = {}) {
+function makeService({ withKey = true, fetchImpl, baseUrl = 'https://api.deepseek.test' } = {}) {
   const secrets = makeSecrets(withKey);
   const deepseek = createOpenAiCompatibleModelProvider({
     id: 'deepseek-official',
     label: 'DeepSeek 官方',
-    baseUrl: 'https://api.deepseek.test',
+    baseUrl,
     defaultModel: 'deepseek-chat',
     secrets,
-    fetchImpl: fetchImpl?.fetch ?? fetch,
+    fetchImpl: typeof fetchImpl === 'function' ? fetchImpl : fetchImpl?.fetch ?? fetch,
     supportsStreamOptions: true,
     log: () => {}
   });
@@ -102,7 +87,7 @@ function makeService({ withKey = true, fetchImpl } = {}) {
     baseUrl: 'https://api.openai.test/v1',
     defaultModel: 'gpt-4o-mini',
     secrets,
-    fetchImpl: fetchImpl?.fetch ?? fetch,
+    fetchImpl: typeof fetchImpl === 'function' ? fetchImpl : fetchImpl?.fetch ?? fetch,
     reasoningParam: 'reasoning_effort',
     supportsStreamOptions: true,
     log: () => {}
@@ -180,8 +165,10 @@ function makeService({ withKey = true, fetchImpl } = {}) {
 
 // ── 5. stream()：统一事件格式 + 文本聚合 + usage ─────────────────────────────
 {
-  const f = fixtureFetch(() => sseResponse(SSE));
-  const { service } = makeService({ fetchImpl: f });
+  const fixture = createOpenAiCompatibleFixture({
+    responses: [{ kind: 'sse', chunks: SSE.split('\n\n').filter(Boolean).map((part) => `${part}\n\n`) }]
+  });
+  const { service } = makeService({ fetchImpl: fixture.fetchImpl, baseUrl: OPENAI_COMPATIBLE_FIXTURE_BASE_URL });
   const events = [];
   for await (const event of service.stream({
     providerId: 'deepseek-official',
@@ -200,14 +187,19 @@ function makeService({ withKey = true, fetchImpl } = {}) {
   assert.equal(end.type, 'turn/end');
   assert.equal(end.data.reason.kind, 'completed');
   assert.deepEqual(end.data.reason.usage, message.data.message.usage);
-  assert.equal(f.requests[0].body.stream_options.include_usage, true, '内置 Provider 携带 include_usage');
+  assert.equal(fixture.requests[0].body.stream_options.include_usage, true, '内置 Provider 携带 include_usage');
+  assert.equal(fixture.requests[0].url, `${OPENAI_COMPATIBLE_FIXTURE_BASE_URL}/chat/completions`);
+  assert.equal(fixture.requests[0].authorizationConfigured, true, 'fixture 只记录鉴权是否配置，不记录 Key');
+  fixture.close();
   ok('stream()：turn/start → chunk 增量 → message 校准+usage → turn/end(completed)');
 }
 
 // ── 6. Abort：取消以 turn/end(aborted) 收尾，不悬挂 ──────────────────────────
 {
-  const f = abortableSseFetch();
-  const { service } = makeService({ fetchImpl: f });
+  const fixture = createOpenAiCompatibleFixture({
+    responses: [{ kind: 'sse', chunks: ['data: {"choices":[{"delta":{"content":"前半段"}}]}\n\n'] }]
+  });
+  const { service } = makeService({ fetchImpl: fixture.fetchImpl, baseUrl: OPENAI_COMPATIBLE_FIXTURE_BASE_URL });
   const controller = new AbortController();
   const events = [];
   for await (const event of service.stream({
@@ -221,6 +213,7 @@ function makeService({ withKey = true, fetchImpl } = {}) {
   const end = events.at(-1);
   assert.equal(end.type, 'turn/end');
   assert.equal(end.data.reason.kind, 'aborted', '取消以 aborted 收尾（Chat 状态机映射为 cancelled）');
+  fixture.close();
   ok('Abort：流式取消 → turn/end(aborted)，无悬挂无未处理拒绝');
 }
 
@@ -261,6 +254,59 @@ function makeService({ withKey = true, fetchImpl } = {}) {
     (error) => error.code === 'MODEL_PROVIDER_UNAVAILABLE' && /无法连接/.test(error.message)
   );
   ok('错误映射：401 认证 / 429 限频 / 5xx 服务 / 网络不可用；Key 在源头 scrub');
+}
+
+// ── 7a. 显式重试：一次瞬时 HTTP 失败后，新的调用可成功且不复用旧回合 ──
+{
+  let attempts = 0;
+  const fixture = createOpenAiCompatibleFixture({ responses: [
+    { kind: 'http-error', status: 503, body: { error: { message: 'temporary' } } },
+    { kind: 'json', body: { choices: [{ message: { role: 'assistant', content: '恢复成功' }, finish_reason: 'stop' }] } }
+  ] });
+  const originalFetch = fixture.fetchImpl;
+  const fetchImpl = async (...args) => {
+    attempts += 1;
+    return originalFetch(...args);
+  };
+  const { service } = makeService({ fetchImpl, baseUrl: OPENAI_COMPATIBLE_FIXTURE_BASE_URL });
+  await assert.rejects(
+    service.chat({ providerId: 'deepseek-official', messages: [{ role: 'user', content: '重试' }] }),
+    (error) => error.code === 'MODEL_PROVIDER_ERROR'
+  );
+  const result = await service.chat({ providerId: 'deepseek-official', messages: [{ role: 'user', content: '重试' }] });
+  assert.equal(result.text, '恢复成功');
+  assert.equal(attempts, 2, '重试必须发起一次新的 Provider 请求');
+  assert.deepEqual(fixture.requests.map((request) => request.url), [
+    `${OPENAI_COMPATIBLE_FIXTURE_BASE_URL}/chat/completions`,
+    `${OPENAI_COMPATIBLE_FIXTURE_BASE_URL}/chat/completions`
+  ]);
+  await assert.rejects(
+    fixture.fetchImpl('https://api.deepseek.com/models'),
+    /rejected a URL outside its loopback endpoint/
+  );
+  assert.equal(fixture.requests.length, 2, '拒绝公网地址前不记录或消费 fixture 请求');
+  fixture.close();
+  ok('显式重试：瞬时 503 后的新调用成功，且只访问注入的 fixture endpoint');
+}
+
+// ── 7b. 畸形 SSE data 必须形成结构化 Provider 错误，不能伪报成功 ─────────
+{
+  const fixture = createOpenAiCompatibleFixture({
+    responses: [{ kind: 'sse', chunks: ['data: {not-json}\n\n', 'data: [DONE]\n\n'] }]
+  });
+  const { service } = makeService({ fetchImpl: fixture.fetchImpl, baseUrl: OPENAI_COMPATIBLE_FIXTURE_BASE_URL });
+  await assert.rejects(
+    async () => {
+      for await (const _event of service.stream({
+        providerId: 'deepseek-official',
+        messages: [{ role: 'user', content: '畸形 SSE' }],
+        signal: new AbortController().signal
+      })) { void _event; }
+    },
+    (error) => error.code === 'MODEL_PROVIDER_ERROR' && /合法 SSE JSON/.test(error.message) && !error.message.includes(API_KEY)
+  );
+  fixture.close();
+  ok('畸形 SSE：返回结构化 Provider 错误而非完成空回合');
 }
 
 // ── 8. Secret 不泄漏：service 面只返回 hasKey 布尔 ───────────────────────────

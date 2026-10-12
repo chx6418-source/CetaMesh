@@ -4,6 +4,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createProviderSecrets, ProviderSecretError } from '../src/providers/secrets.js';
+import {
+  createOpenAiCompatibleFixture,
+  OPENAI_COMPATIBLE_FIXTURE_BASE_URL
+} from './test-support/openai-compatible-fixture.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -69,6 +73,29 @@ try {
     assert.equal(denied.ok, false);
     assert.match(denied.message, /认证失败/);
     assert.ok(!JSON.stringify(denied).includes(rawKey));
+  });
+
+  await check('provider secret test runs against the injected loopback fixture only', async () => {
+    secrets.set({ provider: 'deepseek-official', apiKey: rawKey, baseUrl: OPENAI_COMPATIBLE_FIXTURE_BASE_URL });
+    const fixture = createOpenAiCompatibleFixture({
+      responses: [{ kind: 'json', body: { data: [{ id: 'deepseek-chat' }] } }]
+    });
+    try {
+      const result = await secrets.test({ provider: 'deepseek-official', fetchImpl: fixture.fetchImpl });
+      assert.deepEqual(result, {
+        provider: 'deepseek-official', ok: true, status: 200, message: 'API Key 可用'
+      });
+      assert.equal(fixture.requests[0].url, `${OPENAI_COMPATIBLE_FIXTURE_BASE_URL}/models`);
+      assert.equal(fixture.requests[0].authorizationConfigured, true);
+      assert.ok(!JSON.stringify({ result, requests: fixture.requests }).includes(rawKey));
+      await assert.rejects(
+        fixture.fetchImpl('https://api.deepseek.com/models'),
+        /rejected a URL outside its loopback endpoint/
+      );
+      assert.equal(fixture.requests.length, 1, 'fixture 只记录已允许的 loopback 调用');
+    } finally {
+      fixture.close();
+    }
   });
 
   await check('remove deletes the entry; corrupt file fails closed without echoing values', () => {

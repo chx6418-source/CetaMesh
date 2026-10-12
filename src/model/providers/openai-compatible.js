@@ -289,8 +289,12 @@ export function createOpenAiCompatibleModelProvider({
           let payload;
           try {
             payload = JSON.parse(data);
-          } catch {
-            return false; // 忽略无法解析的行（兼容端点心跳/注释行）
+          } catch (error) {
+            throw modelRuntimeError(
+              MODEL_ERROR_CODES.MODEL_PROVIDER_ERROR,
+              `「${label}」返回的 SSE data 不是合法 SSE JSON`,
+              { cause: error }
+            );
           }
           if (payload?.model) streamModel = String(payload.model);
           if (payload?.usage && typeof payload.usage === 'object') usage = payload.usage;
