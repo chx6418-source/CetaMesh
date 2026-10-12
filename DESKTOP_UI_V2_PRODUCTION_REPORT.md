@@ -4,6 +4,23 @@ Date: 2026-10-12
 Owner-selected visual direction: **01 Harbor**
 Review state: implementation is on an isolated branch and awaits Owner review.
 
+## Current closure addendum (2026-10-13)
+
+Task 1 history paging is committed as `75f549f1ee90943362de27e93c49fe1f83cdbb12`. Task 2 Harbor Chat virtualization is committed as `d1b114834b8f88ace439b1f4aff0e0353bcdc56e`.
+
+| Current check | Result |
+| --- | --- |
+| `npm run build:ui` | PASS — TypeScript and Vite; JS 529.28 kB / gzip 161.88 kB, CSS 39.59 kB. The >500 kB chunk warning is recorded as non-blocking; gzip remains 161.88 kB. |
+| `npm test -- --category architecture --category runtime` | PASS — 44 suites, 0 FAIL, 0 NOT_RUN_ENVIRONMENT. |
+| `npm test` | PASS — 98 suites, 92 PASS, 0 FAIL, 6 NOT_RUN_ENVIRONMENT (legacy bridge, production Gateway/network, and Cargo opt-in). The first full attempt had one 600-second desktop-shell timeout after its contract assertions logged success; an isolated desktop run and the final full rerun both passed. |
+| `cargo check --manifest-path desktop-shell/Cargo.toml` | PASS — existing Rust dead-code warnings only. |
+| `cargo test --manifest-path desktop-shell/Cargo.toml` | PASS — 187 passed, 0 failed. |
+| Chat 100/200/500 fixture | PASS — 10/101, 10/201, 10/501 initial rows; 10 bottom rows in each fixture; streaming row visible; dynamic measured heights update virtual totals. |
+
+Manual browser/window comparison, requested dimensions and DPI, keyboard/accessibility walkthrough, manual scroll behavior and real DOM memory remain **NOT_RUN_ENVIRONMENT** because `interactive browser/window inspection unavailable in current execution environment`. Automated evidence does not imply visual PASS. Real Provider credentials and production gateways remain environment-gated. `feedback.baseUrl` is empty, so feedback links remain disabled/BLOCKED.
+
+The exact final source HEAD, version/build, artifact SHA256, release audit, Cargo/desktop/Core build results and release-candidate verification are recorded in `FINAL_PRODUCTION_CLOSURE.md` in the retained detached build checkout. Build-1057 is historical and must not be distributed. The candidate remains unsigned and is not public-release ready until signing and redistribution-license requirements are satisfied.
+
 ## Delivered architecture
 
 The production desktop entry now renders the selected Harbor React 19 / TypeScript / Vite UI in the existing Rust WebView2 shell. The implementation keeps the Node/SEA Core, service container, per-instance named-pipe protocol, installer, supervisor, system tray, workspace boundary and Capability Broker. The egui UI is still available only through the explicit `--ui=legacy` fallback.

@@ -31,6 +31,10 @@
 - The last known good upgrade sandbox is unavailable; record the missing baseline and do not call upgrade acceptance PASS.
 - Release build updates the detached checkout's build counter after packaging; verify artifact source commit and branch cleanliness separately.
 
+## Owner-approved manual acceptance disposition
+
+Do not attempt interactive browser/window inspection in this execution environment. Record page comparisons, client-size/DPI captures, manual scrolling, keyboard/accessibility walkthroughs, and real DOM memory measurement as `NOT_RUN_ENVIRONMENT` with the exact reason `interactive browser/window inspection unavailable in current execution environment`. This disposition does not block Task 2 or the automated final release-candidate checks. Fixture and native process-contract evidence must remain clearly separate from visual acceptance.
+
 ---
 
 ### Task 1: Manual Harbor, accessibility, and long-content acceptance
