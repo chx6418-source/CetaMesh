@@ -13,6 +13,50 @@ export const MODEL_STREAM_PROTOCOL = 'model-stream-v1';
 
 export const MODEL_PROVIDER_METHODS = Object.freeze(['listModels', 'chat', 'stream', 'health']);
 
+const SETTING_FIELD_TYPES = new Set(['string', 'number', 'boolean']);
+const SECRET_SETTING_KEY = /(api.?key|secret|token|password|credential|private.?key)/i;
+
+function normalizeSettingsFields(fields = []) {
+  if (!Array.isArray(fields)) throw new Error('Model Provider settingsFields 必须是数组');
+  const seen = new Set();
+  return Object.freeze(fields.map((field, index) => {
+    if (!field || typeof field !== 'object' || Array.isArray(field)) {
+      throw new Error(`Model Provider settingsFields[${index}] 必须是对象`);
+    }
+    const key = typeof field.key === 'string' ? field.key.trim() : '';
+    const label = typeof field.label === 'string' ? field.label.trim() : '';
+    const type = field.type;
+    if (!/^[A-Za-z][A-Za-z0-9_]{0,79}$/.test(key) || SECRET_SETTING_KEY.test(key)
+      || !label || label.length > 120 || !SETTING_FIELD_TYPES.has(type)) {
+      throw new Error(`Model Provider settingsFields[${index}] 的 key、label 或 type 无效`);
+    }
+    if (seen.has(key)) throw new Error(`Model Provider settingsFields 重复字段：${key}`);
+    seen.add(key);
+
+    const descriptor = { key, label, type };
+    if (field.choices !== undefined) {
+      if (type !== 'string' || !Array.isArray(field.choices) || field.choices.length === 0
+        || field.choices.length > 50
+        || field.choices.some(value => typeof value !== 'string' || !value.trim() || value.length > 120)
+        || new Set(field.choices).size !== field.choices.length) {
+        throw new Error(`Model Provider settingsFields[${index}] choices 无效`);
+      }
+      descriptor.choices = Object.freeze([...field.choices]);
+    }
+    if (field.min !== undefined || field.max !== undefined) {
+      if (type !== 'number'
+        || (field.min !== undefined && !Number.isFinite(field.min))
+        || (field.max !== undefined && !Number.isFinite(field.max))
+        || (field.min !== undefined && field.max !== undefined && field.min > field.max)) {
+        throw new Error(`Model Provider settingsFields[${index}] numeric range 无效`);
+      }
+      if (field.min !== undefined) descriptor.min = field.min;
+      if (field.max !== undefined) descriptor.max = field.max;
+    }
+    return Object.freeze(descriptor);
+  }));
+}
+
 /** 构造一条标准流事件（同形于 DSH 回合事件）。 */
 export function modelStreamEvent(type, data = {}) {
   return { type, data };
@@ -24,7 +68,7 @@ export function modelStreamEvent(type, data = {}) {
  * - health 可选，默认视为可用；
  * - 实例不可变（Object.freeze），Key 只能经注入的 secrets 在调用时解析，绝不缓存。
  */
-export function defineModelProvider({ id, label, defaultModel = null, supportsTools = false, methods }) {
+export function defineModelProvider({ id, label, defaultModel = null, supportsTools = false, settingsFields = [], methods }) {
   if (typeof id !== 'string' || !id.trim()) throw new Error('defineModelProvider 需要 id');
   if (typeof label !== 'string' || !label.trim()) throw new Error('defineModelProvider 需要 label');
   if (!methods || typeof methods !== 'object') throw new Error('defineModelProvider 需要 methods');
@@ -33,11 +77,13 @@ export function defineModelProvider({ id, label, defaultModel = null, supportsTo
       throw new Error(`defineModelProvider「${id}」缺少必需方法 ${name}`);
     }
   }
+  const normalizedSettingsFields = normalizeSettingsFields(settingsFields);
   const provider = {
     id: id.trim(),
     label: label.trim(),
     defaultModel: typeof defaultModel === 'string' && defaultModel ? defaultModel : null,
     supportsTools: supportsTools === true,
+    settingsFields: () => normalizedSettingsFields,
     streamProtocol: MODEL_STREAM_PROTOCOL,
     listModels: methods.listModels,
     chat: methods.chat,

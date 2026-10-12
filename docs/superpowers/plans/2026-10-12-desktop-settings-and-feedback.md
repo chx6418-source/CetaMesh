@@ -41,6 +41,8 @@
 - Modify: `src/product/provider-view.js`
 - Modify: `src/product/service.js`
 - Modify: `scripts/test-product-services.mjs`
+- Modify: `scripts/test-product-copy.mjs`
+- Modify: `scripts/test-model-runtime.mjs`
 - Modify: `scripts/test-provider-secrets.mjs`
 - Modify: `desktop-ui/src/bridge/typed-client.ts`
 - Modify: `desktop-ui/src/app/HarborApp.tsx`
@@ -50,10 +52,10 @@
 - Product projection: preserves basic Provider/API Key/Model fields and adds only the selected Provider's supported advanced descriptors.
 - Secret API Key update remains write-only; read projection returns configured status, never the secret.
 
-- [ ] **Step 1: Add failing tests** for providers with different supported field sets, unsupported-field omission, enum/range validation, and write-only API Key projection.
-- [ ] **Step 2: Run `npm test -- --category runtime --category security`** and confirm provider metadata/settings assertions fail.
-- [ ] **Step 3: Implement Provider metadata and render its supported advanced fields** in Settings; do not show a control for any value the selected Provider does not consume.
-- [ ] **Step 4: Run `npm test -- --category runtime --category security`** and confirm Provider settings and secret tests pass.
+- [x] **Step 1: Add failing tests** for providers with different supported field sets, unsupported-field omission, enum/range validation, and write-only API Key projection.
+- [x] **Step 2: Run `npm test -- --category runtime --category security`** and confirm provider metadata/settings assertions fail.
+- [x] **Step 3: Implement Provider metadata and render its supported advanced fields** in Settings; do not show a control for any value the selected Provider does not consume.
+- [x] **Step 4: Run `npm test -- --category runtime --category security`** and confirm Provider settings and secret tests pass.
 
 ### Task 2: Centralized feedback and security links
 

@@ -377,7 +377,8 @@ export function createCetaMeshServices(options = {}) {
   // 避免同一句话、同一个官方域名在多处漂移。
   const productService = createProductService({
     aboutInfo: () => aboutService.about.info(),
-    releaseConfig: releaseConfig.config
+    releaseConfig: releaseConfig.config,
+    modelProviders: () => modelRuntime.listProviders()
   });
   // 首次运行引导：QQ / DSH / 移动端 / Agent 都不在完成条件里（见 src/onboarding/steps.js）。
   const onboardingService = createOnboardingService({

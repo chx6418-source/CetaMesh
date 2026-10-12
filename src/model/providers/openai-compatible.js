@@ -21,6 +21,7 @@ import { defineModelProvider, modelStreamEvent } from '../model-provider.js';
 
 const LIST_TIMEOUT_MS = 10_000;
 const CHAT_TIMEOUT_MS = 300_000;
+const REASONING_EFFORT_CHOICES = Object.freeze(['off', 'low', 'high', 'max']);
 
 function extractProviderMessage(bodyText) {
   if (!bodyText) return null;
@@ -197,6 +198,12 @@ export function createOpenAiCompatibleModelProvider({
     label,
     defaultModel,
     supportsTools,
+    settingsFields: [
+      { key: 'baseUrl', label: 'Base URL', type: 'string' },
+      ...(reasoningParam ? [{
+        key: 'reasoningEffort', label: '推理强度', type: 'string', choices: REASONING_EFFORT_CHOICES
+      }] : [])
+    ],
     methods: {
       async listModels({ signal } = {}) {
         const { apiKey, base } = resolveCredentials();

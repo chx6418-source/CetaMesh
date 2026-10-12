@@ -4,6 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createProviderSecrets, ProviderSecretError } from '../src/providers/secrets.js';
+import { defineModelProvider } from '../src/model/model-provider.js';
+import { coerceField } from '../src/settings/schema.js';
 import {
   createOpenAiCompatibleFixture,
   OPENAI_COMPATIBLE_FIXTURE_BASE_URL
@@ -25,8 +27,43 @@ const check = async (name, fn) => {
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-provider-secrets-'));
 const secrets = createProviderSecrets({ root: temp });
 const rawKey = 'sk-test-deepseek-1234567890';
+const providerMethods = {
+  listModels: async () => [],
+  chat: async () => ({ text: '' }),
+  stream: async function* () {}
+};
 
 try {
+  await check('Provider 声明的枚举和范围字段保留安全元数据', () => {
+    const provider = defineModelProvider({
+      id: 'test-settings',
+      label: 'Test Settings',
+      methods: providerMethods,
+      settingsFields: [
+        { key: 'reasoningEffort', label: '推理强度', type: 'string', choices: ['off', 'low', 'high'] },
+        { key: 'timeoutMs', label: '超时', type: 'number', min: 100, max: 5000 }
+      ]
+    });
+    assert.deepEqual(provider.settingsFields(), [
+      { key: 'reasoningEffort', label: '推理强度', type: 'string', choices: ['off', 'low', 'high'] },
+      { key: 'timeoutMs', label: '超时', type: 'number', min: 100, max: 5000 }
+    ]);
+    assert.throws(() => coerceField('models', 'reasoningEffort', 'unsupported'), error => error.code === 'SETTINGS_INVALID');
+    assert.throws(() => coerceField('memory', 'retrievalLimit', 201), error => error.code === 'SETTINGS_INVALID');
+    assert.throws(() => defineModelProvider({
+      id: 'invalid-enum', label: 'Invalid Enum', methods: providerMethods,
+      settingsFields: [{ key: 'reasoning', label: 'Reasoning', type: 'string', choices: [] }]
+    }), /settingsFields|choices/);
+    assert.throws(() => defineModelProvider({
+      id: 'invalid-range', label: 'Invalid Range', methods: providerMethods,
+      settingsFields: [{ key: 'timeoutMs', label: 'Timeout', type: 'number', min: 500, max: 100 }]
+    }), /settingsFields|range/);
+    assert.throws(() => defineModelProvider({
+      id: 'secret-field', label: 'Secret Field', methods: providerMethods,
+      settingsFields: [{ key: 'apiKey', label: 'API Key', type: 'string' }]
+    }), /settingsFields/);
+  });
+
   await check('list is empty before configuration', () => {
     assert.deepEqual(secrets.list(), []);
   });

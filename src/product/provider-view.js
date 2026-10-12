@@ -27,10 +27,7 @@ const PROVIDER_KEY_RE = /^(provider|provider_?id|provider_?name|vendor)$/;
 const PROVIDER_TEXT_RE = /模型\s*provider|服务商|供应商/;
 const MODEL_KEY_RE = /^(model|default_?model|model_?id|model_?name)$/;
 const MODEL_TEXT_RE = /默认模型|模型名称|模型$/;
-const ADVANCED_KEY_RE = /(base_?url|endpoint|reasoning|effort|timeout|retry|stream|temperature|proxy|api_?version|token_?limit|max_?tokens)/;
-const ADVANCED_TEXT_RE = /推理|超时|重试|流式|地址|代理|温度/;
-// 与 Provider 配置无关的字段（主题、语言、日志级别…）不得混进 advanced。
-const UNRELATED_KEY_RE = /(^|\.)(theme|language|log_?level|verbosity|accent|palette|font)/;
+const SECRET_FIELD_KEY_RE = /(api.?key|secret|token|password|credential|private.?key)/i;
 const UNRELATED_SECTION_RE = /advanced|engineering|诊断|工程/;
 
 /** 安全取字段元数据字符串；只接受真实非空字符串，避免把 undefined 渲染成 "undefined"。 */
@@ -79,22 +76,13 @@ function findMeta(flat, { keyRe, textRe }) {
     ?? flat.find((item) => textRe.test(metaString(item.field, 'description')));
 }
 
-/** 是否属于 Provider 配置相关的工程字段（防止把主题/日志之类混进 advanced）。 */
-function isRelated(row) {
-  if (UNRELATED_KEY_RE.test(row.key)) return false;
-  if (ADVANCED_KEY_RE.test(row.key)) return true;
-  if (ADVANCED_TEXT_RE.test(metaString(row.field, 'description'))) return true;
-  // 与 provider/model 同分区（models 分区）的其余字段，默认也是模型配置的一部分。
-  return row.section === 'models';
-}
-
 /**
  * 依据 describeFields() 的真实元数据切分 Provider 配置：
  *   basic    = 服务商 / API Key / 模型（普通用户三件套，顺序固定）
- *   advanced = base URL、推理强度、超时等工程字段（同一张元数据表里挑出来，不是抄文案）
+ *   advanced = 选中 Provider 明确声明并实际实现的工程字段
  * 返回不冻结：UI 可以在渲染前再过滤/排序。
  */
-export function buildProviderView({ fields } = {}) {
+export function buildProviderView({ fields, settingsFields = [] } = {}) {
   const flat = flattenFields(fields);
 
   const providerMeta = findMeta(flat, { keyRe: PROVIDER_KEY_RE, textRe: PROVIDER_TEXT_RE });
@@ -131,17 +119,35 @@ export function buildProviderView({ fields } = {}) {
       : `必填。选择新会话默认使用的模型；当前保存在设置 ${PROVIDER_FIELD_SOURCES.model.path}。`
   }));
 
-  const advanced = flat
-    .filter((row) => row !== providerMeta && row !== modelMeta)
-    .filter((row) => !PROVIDER_KEY_RE.test(row.key) && !MODEL_KEY_RE.test(row.key))
-    .filter(isRelated)
-    .map((row) => toEntry(row.field, {
-      key: row.key,
-      label: metaString(row.field, 'description') || row.key,
-      // 工程字段都有默认值：普通用户不填也能跑，所以 required 一律 false。
-      required: false,
-      description: `${row.sectionLabel || row.section || 'settings'}：可留默认值，仅高级用户调整。`
-    }));
+  const advanced = Array.isArray(settingsFields)
+    ? settingsFields.flatMap((field) => {
+      if (!field || typeof field !== 'object' || Array.isArray(field)) return [];
+      const key = metaString(field, 'key');
+      const label = metaString(field, 'label');
+      const type = metaString(field, 'type');
+      if (!/^[A-Za-z][A-Za-z0-9_]{0,79}$/.test(key) || SECRET_FIELD_KEY_RE.test(key)
+        || !label || !['string', 'number', 'boolean'].includes(type)) return [];
+      const descriptor = {
+        key, label, type, required: false,
+        description: '此服务商支持的高级选项；仅在需要时调整。'
+      };
+      if (field.choices !== undefined) {
+        if (type !== 'string' || !Array.isArray(field.choices) || field.choices.length === 0
+          || field.choices.length > 50
+          || field.choices.some((choice) => typeof choice !== 'string' || !choice.trim() || choice.length > 120)
+          || new Set(field.choices).size !== field.choices.length) return [];
+        descriptor.choices = [...field.choices];
+      }
+      if (field.min !== undefined || field.max !== undefined) {
+        if (type !== 'number' || (field.min !== undefined && !Number.isFinite(field.min))
+          || (field.max !== undefined && !Number.isFinite(field.max))
+          || (field.min !== undefined && field.max !== undefined && field.min > field.max)) return [];
+        if (field.min !== undefined) descriptor.min = field.min;
+        if (field.max !== undefined) descriptor.max = field.max;
+      }
+      return [descriptor];
+    })
+    : [];
 
   return { basic, advanced };
 }
@@ -161,18 +167,25 @@ export function providerFieldGuidance(view) {
     { key: 'apiKey', label: 'API Key', required: true, hint: '从服务商控制台复制，粘贴后保存即可，本机不回显明文。' },
     { key: 'model', label: modelLabel, required: true, hint: '选择新会话默认使用的模型。' }
   ];
-  const advanced = [
-    { key: 'baseUrl', required: false, hint: '只有使用自建 / 代理网关时才需要改，默认地址通常可用。' },
-    { key: 'reasoning', required: false, hint: '推理强度影响速度与费用，默认值适合大多数场景。' },
-    { key: 'timeout', required: false, hint: '网络较慢时才需要调大。' }
-  ];
+  const hints = {
+    baseUrl: '只有使用自建 / 代理网关时才需要改，默认地址通常可用。',
+    reasoningEffort: '推理强度影响速度与费用，默认值适合大多数场景。'
+  };
+  const advanced = (Array.isArray(resolved.advanced) ? resolved.advanced : []).map((field) => ({
+    key: field.key,
+    label: field.label,
+    required: false,
+    hint: hints[field.key] ?? '这是当前服务商支持的高级选项。'
+  }));
 
   return Object.freeze({
     basic: Object.freeze(basic.map((item) => Object.freeze({ ...item }))),
     advanced: Object.freeze(advanced.map((item) => Object.freeze({ ...item }))),
     advancedFieldKeys: Object.freeze(advancedKeys),
     text: '普通用户只需要填三项：服务商、API Key、模型。'
-      + 'Base URL、推理强度、超时等属于工程选项，默认值即可，只有自建网关或排查网络问题的高级用户才需要调整。'
+      + (resolved.advanced?.length
+        ? `当前服务商支持的高级选项：${resolved.advanced.map((field) => field.label).join('、')}；普通用户可保留默认值。`
+        : '')
   });
 }
 

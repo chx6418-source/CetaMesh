@@ -314,8 +314,17 @@ function makeService({ withKey = true, fetchImpl, baseUrl = 'https://api.deepsee
   const { service } = makeService({});
   const providers = service.listProviders();
   assert.deepEqual(providers, [
-    { id: 'deepseek-official', label: 'DeepSeek 官方', hasKey: true },
-    { id: 'openai', label: 'OpenAI', hasKey: true }
+    {
+      id: 'deepseek-official', label: 'DeepSeek 官方', hasKey: true,
+      settingsFields: [{ key: 'baseUrl', label: 'Base URL', type: 'string' }]
+    },
+    {
+      id: 'openai', label: 'OpenAI', hasKey: true,
+      settingsFields: [
+        { key: 'baseUrl', label: 'Base URL', type: 'string' },
+        { key: 'reasoningEffort', label: '推理强度', type: 'string', choices: ['off', 'low', 'high', 'max'] }
+      ]
+    }
   ]);
   const health = await service.health('deepseek-official');
   assert.equal(health.available, true);

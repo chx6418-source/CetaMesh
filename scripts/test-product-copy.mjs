@@ -68,12 +68,17 @@ equal('未知 code 落 generic 并保留原始信息', [unknownCode.key, unknown
 
 // ── 4. Provider 配置体验：普通用户 vs 高级 ─────────────────────────────
 const fields = describeFields();
-const view = buildProviderView({ fields });
+const viewWithoutProvider = buildProviderView({ fields });
+equal('未选定 Provider 时不推测高级字段', viewWithoutProvider.advanced.map(field => field.key), []);
+const view = buildProviderView({ fields, settingsFields: [
+  { key: 'baseUrl', label: 'Base URL', type: 'string' },
+  { key: 'reasoningEffort', label: '推理强度', type: 'string', choices: ['off', 'low', 'high', 'max'] }
+] });
 equal('普通用户字段固定为 服务商 / API Key / 模型', view.basic.map((field) => field.key), ['provider', 'apiKey', 'model']);
 equal('基础字段常量与视图一致', [...PROVIDER_BASIC_FIELD_KEYS], ['provider', 'apiKey', 'model']);
 check('基础字段都标记必填', view.basic.every((field) => field.required === true));
 check('每个基础字段都有人话说明', view.basic.every((field) => typeof field.description === 'string' && field.description.length > 0));
-check('高级字段来自真实设置元数据（不是抄文案的硬编码列表）', fields.length > 0 && view.advanced.length >= 1, 'advanced=' + view.advanced.map((f) => f.key).join(','));
+equal('高级字段只来自选中 Provider 元数据', view.advanced.map((f) => f.key), ['baseUrl', 'reasoningEffort']);
 check('高级字段一律非必填（默认值可用）', view.advanced.every((field) => field.required === false));
 const guidance = providerFieldGuidance(view);
 check('配置指引说明普通用户只需三项',

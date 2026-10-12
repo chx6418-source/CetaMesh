@@ -12,7 +12,7 @@ import { describeProviderTestFailure, buildProviderView, providerFieldGuidance }
 import { emptyStateFor, emptyStateForError, EMPTY_STATES, TECHNICAL_CODE_TO_STATE } from './empty-states.js';
 import { buildFeedbackLinks } from './feedback-links.js';
 
-export function createProductService({ aboutInfo = null, releaseConfig = null } = {}) {
+export function createProductService({ aboutInfo = null, releaseConfig = null, modelProviders = () => [] } = {}) {
   function resolveAbout() {
     return typeof aboutInfo === 'function' ? aboutInfo() : (aboutInfo ?? null);
   }
@@ -23,8 +23,11 @@ export function createProductService({ aboutInfo = null, releaseConfig = null } 
     /** 技术错误 → 用户语言：永远返回友好文案，技术细节放在 detail 里另附。 */
     'product.emptyStateForError': (p) => ({ state: emptyStateForError({ code: p?.code, message: p?.message }) }),
     /** Provider 配置视图（第八节）：普通用户只看 基础字段，工程字段收进 advanced。 */
-    'product.providerView': () => {
-      const view = buildProviderView({ fields: describeFields() });
+    'product.providerView': (p) => {
+      const rows = typeof modelProviders === 'function' ? modelProviders() : modelProviders;
+      const providerId = typeof p?.provider === 'string' ? p.provider : '';
+      const selectedProvider = Array.isArray(rows) ? rows.find((item) => item?.id === providerId) : null;
+      const view = buildProviderView({ fields: describeFields(), settingsFields: selectedProvider?.settingsFields ?? [] });
       return { view, guidance: providerFieldGuidance(view) };
     },
     /** 连接测试失败的友好文案：UI 把 providerSecrets.test 的结果直接丢进来即可。 */

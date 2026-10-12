@@ -423,6 +423,12 @@ export function createDesktopUiService({ services = {}, system = services.system
         models: (result.models ?? []).map(item => selected(item, ['id', 'label', 'provider'])),
         modelProviders: (result.modelProviders ?? []).map(item => ({
           id: string(item.id, 80), label: string(item.label, 120), configured: item.hasKey === true,
+          settingsFields: (item.settingsFields ?? []).slice(0, 50).map(field => ({
+            key: string(field.key, 80), label: string(field.label, 120), type: string(field.type, 20),
+            ...(Array.isArray(field.choices) ? { choices: boundedStrings(field.choices, 50, 120) } : {}),
+            ...(Number.isFinite(field.min) ? { min: field.min } : {}),
+            ...(Number.isFinite(field.max) ? { max: field.max } : {})
+          })),
           models: (item.models ?? []).map(value => selected(value, ['id', 'name', 'label', 'owned_by']))
         })),
         agentProviders: (result.agentProviders ?? []).map(projectAgent),

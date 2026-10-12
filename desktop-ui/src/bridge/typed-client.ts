@@ -9,6 +9,10 @@ export interface ChatMessage {
   attachments: string[]; toolActivity: { id: string; label: string; status: string; summary: string; durationMs: number | null }[];
   error: string | null; cancelled: boolean;
 }
+export interface ProviderSettingField {
+  key: string; label: string; type: 'string' | 'number' | 'boolean';
+  choices?: string[]; min?: number; max?: number;
+}
 export interface Task {
   id: string; title: string; goal: string; status: string; currentPhase: string;
   progress: { percent: number; note: string }; workspaceId: string | null; agent: string | null;
@@ -197,7 +201,7 @@ export const chatClient = {
   stop: (id: string) => uiCall<{ stopped?: boolean; state?: string; reason?: string }>('ui.chat.stop', { id }),
   retry: (id: string) => uiCall<{ userMessageId?: string }>('ui.chat.retry', { id }),
   continue: (id: string) => uiCall<{ continued?: boolean }>('ui.chat.continue', { id }),
-  catalog: () => uiCall<{ models: unknown[]; modelProviders: { id: string; label: string; configured: boolean; models: { id?: string; name?: string; label?: string }[] }[]; agentProviders: Agent[]; modes: string[]; defaultModelProvider: string | null; available: boolean; reason: string | null }>('ui.chat.catalog', {}),
+  catalog: () => uiCall<{ models: unknown[]; modelProviders: { id: string; label: string; configured: boolean; settingsFields: ProviderSettingField[]; models: { id?: string; name?: string; label?: string }[] }[]; agentProviders: Agent[]; modes: string[]; defaultModelProvider: string | null; available: boolean; reason: string | null }>('ui.chat.catalog', {}),
   setConfig: (id: string, config: Record<string, unknown>) => uiCall<ChatSession>('ui.chat.config.set', { id, config })
 };
 export const taskClient = {

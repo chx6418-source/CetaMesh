@@ -27,7 +27,9 @@ import {
 } from '../src/update/index.js';
 import { DIAGNOSTICS_POLICY, buildDiagnostics } from '../src/product/diagnostics.js';
 import { createErrorRegistry } from '../src/product/error-registry.js';
+import { createProductService } from '../src/product/service.js';
 import { loadReleaseConfig } from '../src/product/release-config.js';
+import { coerceField } from '../src/settings/schema.js';
 
 let passed = 0;
 let failed = 0;
@@ -222,6 +224,43 @@ try {
   const services = createCetaMeshServices({ config: { allow: { private: [], groups: [] } } });
   check('容器装配 onboarding/product', Boolean(services.onboardingService && services.productService));
   check('容器装配最近错误码环', Boolean(services.errorRegistry));
+  const providerSettings = Object.fromEntries(services.modelRuntime.listProviders().map(item => [item.id, item.settingsFields]));
+  equal('Provider 元数据只声明实际支持的字段', Object.fromEntries(Object.entries(providerSettings).map(([id, fields]) => [id, fields?.map(field => field.key)])), {
+    'deepseek-official': ['baseUrl'],
+    openai: ['baseUrl', 'reasoningEffort'],
+    'openai-compatible': ['baseUrl', 'reasoningEffort']
+  });
+  equal('推理枚举来自 Provider 实际支持的值', providerSettings.openai?.find(field => field.key === 'reasoningEffort')?.choices, ['off', 'low', 'high', 'max']);
+  const projectedCatalog = await services.desktopUiService.execute({ method: 'ui.chat.catalog', params: {} });
+  equal('typed Harbor catalog 投影受支持字段且不含凭据', [
+    projectedCatalog.modelProviders.map(item => [item.id, item.settingsFields.map(field => field.key)]),
+    JSON.stringify(projectedCatalog).includes('sk-projection-sentinel')
+  ], [[
+    ['deepseek-official', ['baseUrl']],
+    ['openai', ['baseUrl', 'reasoningEffort']],
+    ['openai-compatible', ['baseUrl', 'reasoningEffort']]
+  ], false]);
+  const projectedDeepSeek = await services.productService.execute({ method: 'product.providerView', params: { provider: 'deepseek-official', apiKey: 'sk-projection-sentinel' } });
+  equal('DeepSeek Provider projection 保留基础三项并仅显示 Base URL', [projectedDeepSeek.view.basic.map(field => field.key), projectedDeepSeek.view.advanced.map(field => field.key)], [
+    ['provider', 'apiKey', 'model'], ['baseUrl']
+  ]);
+  check('API Key 字段只暴露 secret 类型且 projection 不回显凭据',
+    projectedDeepSeek.view.basic.find(field => field.key === 'apiKey')?.type === 'secret'
+      && !JSON.stringify(projectedDeepSeek).includes('sk-projection-sentinel'));
+  const projectedOpenAi = await services.productService.execute({ method: 'product.providerView', params: { provider: 'openai' } });
+  equal('OpenAI projection 只增加其支持的 Reasoning 枚举', projectedOpenAi.view.advanced.map(({ key, type, choices }) => ({ key, type, choices })), [
+    { key: 'baseUrl', type: 'string', choices: undefined },
+    { key: 'reasoningEffort', type: 'string', choices: ['off', 'low', 'high', 'max'] }
+  ]);
+  const boundedProduct = createProductService({ modelProviders: () => [{ id: 'bounded-provider', settingsFields: [
+    { key: 'boundedValue', label: '边界值', type: 'number', min: 10, max: 20 },
+    { key: 'apiKey', label: 'API Key', type: 'string' },
+    { key: 'enumValue', label: '错误枚举', type: 'string', choices: [] },
+    { key: 'badRange', label: '错误范围', type: 'number', min: 20, max: 10 }
+  ] }] });
+  const boundedProjection = await boundedProduct.execute({ method: 'product.providerView', params: { provider: 'bounded-provider' } });
+  equal('数值范围验证并丢弃密钥、错误枚举和错误边界', [boundedProjection.view.advanced.map(field => field.key), boundedProjection.view.advanced[0]?.min, boundedProjection.view.advanced[0]?.max,
+    (() => { try { coerceField('memory', 'retrievalLimit', 201); return false; } catch (error) { return error.code === 'SETTINGS_INVALID'; } })()], [['boundedValue'], 10, 20, true]);
   const { createDesktopIpcRuntime } = await import('../src/app/ipc-runtime.js');
   const ipc = createDesktopIpcRuntime({ services, system: services.systemServices, log: () => {} });
   const ipcAbout = await ipc.dispatch({ method: 'about.info', params: {} });

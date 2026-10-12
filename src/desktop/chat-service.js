@@ -409,7 +409,7 @@ export function createChatService({
     if (modelRuntime) {
       for (const entry of modelRuntime.listProviders()) {
         if (!entry.hasKey) {
-          modelProviders.push({ id: entry.id, label: entry.label, hasKey: false, models: [], error: null });
+          modelProviders.push({ id: entry.id, label: entry.label, hasKey: false, settingsFields: entry.settingsFields, models: [], error: null });
           continue;
         }
         const listing = await modelRuntime.listModels(entry.id);
@@ -417,6 +417,7 @@ export function createChatService({
           id: entry.id,
           label: entry.label,
           hasKey: true,
+          settingsFields: entry.settingsFields,
           models: listing.models,
           error: listing.error
         });

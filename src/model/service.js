@@ -62,7 +62,8 @@ export function createModelRuntimeService({ registry, secrets, log = () => {} } 
     return registry.list().map((provider) => ({
       id: provider.id,
       label: provider.label,
-      hasKey: hasKey(provider.id)
+      hasKey: hasKey(provider.id),
+      settingsFields: typeof provider.settingsFields === 'function' ? provider.settingsFields() : []
     }));
   }
 
