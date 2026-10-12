@@ -14,6 +14,9 @@ const owner={kind:'owner',id:'desktop'};
 const req=(capability,input={},extra={})=>({actor:owner,capability,input,...extra});
 const deny=async(p,code)=>assert.rejects(p,e=>e.code===code);
 try {
+ const stateOnly=svc.broker.approvals.pending({actor:owner,capability:'publish.artifact',input:{},requestId:'approval-state-only',reason:'state fixture'});
+ assert.equal(stateOnly.status,'pending');
+ assert.equal(svc.broker.approvals.decide(stateOnly.id,true,owner).status,'approved','an approval decision is visible before dispatch consumes it');
  await deny(svc.broker.execute(req('missing.tool')),'UNKNOWN_CAPABILITY');
  svc.broker.register({id:'bad.permission',permission:'mystery',execute:()=>{throw Error('must never execute')}});
  await deny(svc.broker.execute(req('bad.permission')),'UNKNOWN_PERMISSION');
@@ -21,6 +24,8 @@ try {
  assert.equal(pending.status,'pending');
  const created=await svc.execute({method:'capability.approval.decide',params:{id:pending.approvalId,approve:true}});
  const ws=created.result.workspace.id;
+ assert.equal(svc.broker.approvals.get(pending.approvalId).status,'consumed','Approve Once consumes its request after one dispatch');
+ await deny(svc.broker.execute({...svc.broker.approvals.get(pending.approvalId).request,approvalId:pending.approvalId}),'APPROVAL_NOT_APPROVED');
  await deny(svc.execute({method:'capability.approval.decide',params:{id:pending.approvalId,approve:true}}),'APPROVAL_ALREADY_DECIDED');
  const task=taskRuntime.create({goal:'change source',workspaceId:ws});
  svc.grantTask(task.id,{capabilities:['filesystem.read','filesystem.write','git.status','git.diff','test.run'],workspaceIds:[ws]});
@@ -84,10 +89,26 @@ try {
  await deny(svc.broker.execute({actor:{kind:'external',id:'qq:1'},workspaceId:ws,capability:'filesystem.read',input:{path:'a.js'}}),'PERMISSION_DENIED');
  const userRead=await svc.execute({method:'capability.execute',params:{actor:{kind:'external',id:'evil'},capability:'filesystem.read',workspaceId:ws,input:{path:'a.js'}}});
  assert.equal(userRead.result.content,'hello'); // trusted desktop transport binds owner, never payload actor
- svc.broker.register({id:'publish.artifact',permission:'publish',risk:'high',execute:()=>({sent:true})});
+ let published=0;
+ svc.broker.register({id:'publish.artifact',permission:'publish',risk:'high',execute:()=>{published++;return {sent:true};}});
  const p=await svc.broker.execute(req('publish.artifact',{}, {requestId:'fixed'}));
  await deny(svc.broker.execute(req('publish.artifact',{changed:true},{requestId:'fixed',approvalId:p.approvalId})),'APPROVAL_MISMATCH');
  assert.equal((await svc.execute({method:'capability.approval.decide',params:{id:p.approvalId,approve:false}})).status,'rejected');
+ assert.equal(svc.broker.approvals.get(p.approvalId).status,'rejected');
+ await deny(svc.broker.execute({...svc.broker.approvals.get(p.approvalId).request,approvalId:p.approvalId}),'APPROVAL_NOT_APPROVED');
+ assert.equal(published,0,'tampered, rejected, or replayed requests never dispatch');
+
+ let clock=1000, expiredExecuted=0;
+ const expiring=createCapabilityService({stateDir:path.join(dir,'expiring'),now:()=>clock});
+ expiring.broker.register({id:'fixture.expiring',permission:'publish',risk:'high',execute:()=>{expiredExecuted++;return {};}});
+ const expiringRequest=req('fixture.expiring',{}, {requestId:'expires-once'});
+ const expiringPending=await expiring.broker.execute(expiringRequest);
+ assert.equal(expiringPending.status,'pending');
+ assert.equal(expiring.broker.approvals.list().length,1,'Pending is visible before its deadline');
+ clock=expiringPending.expiresAt;
+ assert.equal(expiring.broker.approvals.list().length,0,'expired approvals leave the actionable inbox');
+ await deny(expiring.execute({method:'capability.approval.decide',params:{id:expiringPending.approvalId,approve:true}}),'APPROVAL_EXPIRED');
+ assert.equal(expiredExecuted,0,'expired approval cannot dispatch its capability');
  const restart=createCapabilityService({stateDir:path.join(dir,'state'),workspaceService,taskRuntime});
  assert.equal(restart.principalForTask(task.id).grants.workspaceIds[0],ws);
  console.log('PASS capability broker: registry, permission, boundary, owner approval, replay/tamper, external denial, task grants and desktop actor binding');

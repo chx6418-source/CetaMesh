@@ -339,7 +339,11 @@ function ChatPage({ session, onNew, onOpenMemory }: { session: ChatSession | nul
     catch (cause) { setError(messageOf(cause)); }
   }
   async function decideApproval(id: string, approve: boolean) {
-    try { await approvalClient.decide(id, approve); await load(); }
+    try {
+      const result = await approvalClient.decide(id, approve);
+      await load();
+      if (result.resumeError) setError(`审批已记录，但聊天回合继续失败（${result.resumeError}）。`);
+    }
     catch (cause) { setError(messageOf(cause)); }
   }
 
@@ -773,8 +777,11 @@ function PluginsPage() {
   async function decidePendingApproval(id: string, approve: boolean) {
     setBusy(`approval:${id}`); setError(''); setNotice('');
     try {
-      await approvalClient.decide(id, approve);
-      setNotice(approve ? '已批准一次，Core 正在继续操作。' : '已拒绝此操作。');
+      const result = await approvalClient.decide(id, approve);
+      if (result.resumeError) setError(`审批已记录，但回合继续失败（${result.resumeError}）。`);
+      else if (approve && result.resumePending) setNotice('已批准一次，后续敏感操作仍需审批。');
+      else if (approve) setNotice(result.turnResumed ? '已批准一次，聊天回合已继续。' : '已批准一次，Core 正在继续操作。');
+      else setNotice(result.turnResumed ? '已拒绝，聊天回合已收到结果并继续。' : '已拒绝此操作。');
       await refreshApprovals();
     } catch (cause) { setError(messageOf(cause)); }
     finally { setBusy(''); }

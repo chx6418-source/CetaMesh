@@ -30,9 +30,14 @@ export interface Plugin {
   icon: string; permissions: string[]; changelog: string[]; compatibility: { minimum: string | null; maximum: string | null };
   screenshotCount: number; warning: string | null;
 }
+export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'expired' | 'consumed';
 export interface Approval {
-  id: string; title: string; capability: string; status: string; createdAt: string | number | null;
+  id: string; title: string; capability: string; status: ApprovalStatus; createdAt: string | number | null;
   expiresAt: string | number | null; summary: string; risk: string; taskId: string | null;
+}
+export interface ApprovalDecisionResult {
+  status: 'completed' | 'rejected'; approvalId?: string; requestId?: string; turnResumed?: boolean; resumePending?: boolean;
+  resumeError?: string; taskResumed?: boolean;
 }
 export interface Attachment { name: string; content: string; mimeType?: string }
 export type Settings = Record<string, Record<string, string | number | boolean | null>>;
@@ -239,7 +244,7 @@ export const workspaceClient = {
 };
 export const approvalClient = {
   list: () => uiCall<{ approvals: Approval[] }>('ui.approvals.list', {}),
-  decide: (id: string, approve: boolean) => uiCall<Record<string, unknown>>('ui.approvals.decide', { id, approve })
+  decide: (id: string, approve: boolean) => uiCall<ApprovalDecisionResult>('ui.approvals.decide', { id, approve })
 };
 export interface OnboardingStatus { complete: boolean; currentStep: string | null; steps: { id: string; title: string; description: string; status: string; optional: boolean }[] }
 export const onboardingClient = {

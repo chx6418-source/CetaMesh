@@ -700,7 +700,7 @@ export function createDesktopUiService({ services = {}, system = services.system
     'ui.approvals.decide': async p => {
       const result = await capability('capability.approval.decide', { id: idParam(p), approve: p.approve === true });
       emit('approval.resolved', { approvalId: p.id, status: p.approve === true ? 'approved' : 'rejected' });
-      return selected(result, ['status', 'approvalId', 'requestId']);
+      return selected(result, ['status', 'approvalId', 'requestId', 'turnResumed', 'resumePending', 'resumeError', 'taskResumed']);
     },
     'ui.search': async p => {
       const query = boundedText(p.query, 'query', 200).trim();

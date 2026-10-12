@@ -14,11 +14,13 @@ import {
   createToolExecutionCoordinator
 } from '../src/model/index.js';
 import { createCapabilityApproval } from '../src/capability/approval.js';
+import { createCapabilityService } from '../src/capability/service.js';
 import { createProviderSecrets } from '../src/providers/secrets.js';
 import { buildCapabilityContext } from '../src/context/capability-context.js';
 import { createTaskRuntime } from '../src/task/runtime.js';
 import { createContinuityService } from '../src/continuity/service.js';
 import { createChatService } from '../src/desktop/chat-service.js';
+import { createDesktopUiEventBus, createDesktopUiService } from '../src/desktop/ui-service.js';
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-tool-calling-'));
 let step = 0;
@@ -249,6 +251,7 @@ const emptyObjectSchema = {
   assert.equal(row.request.capability, 'publish.release');
   assert.equal(row.request.actor.id, 'desktop');
   const decision = await broker.decide({ id: pending.approvalId, approve: true, actor: OWNER_ACTOR });
+  assert.equal(broker.approvals.get(pending.approvalId).status, 'consumed');
   assert.equal(executed, 1);
   await assert.rejects(() => coordinator.resumeApproval({
     approvalId: pending.approvalId,
@@ -266,6 +269,98 @@ const emptyObjectSchema = {
   assert.equal(resumed.text, 'The release was approved and published.');
   assert.equal(calls.length, 3);
   pass('approval suspends, survives a transient Model continuation failure, and resumes after approval');
+}
+
+{
+  async function approvalHarness(label, answer) {
+    const stateDir = path.join(temp, `ui-approval-${label}`);
+    let executed = 0;
+    const capabilityService = createCapabilityService({ stateDir });
+    capabilityService.broker.register({
+      id: 'fixture.approval', permission: 'publish', description: 'Run a safe in-memory fixture.',
+      inputSchema: { type: 'object', properties: { value: { type: 'string' } }, required: ['value'], additionalProperties: false },
+      provider: 'fixture', risk: 'high', execute: ({ input }) => { executed += 1; return { accepted: input.value }; }
+    });
+    const { runtime, calls } = modelRuntimeWith([
+      { text: '', toolCalls: [{ id: `approval-${label}`, capabilityId: 'fixture.approval', arguments: '{"value":"safe-fixture"}' }], model: 'fixture-model' },
+      { text: answer, toolCalls: [], model: 'fixture-model' }
+    ]);
+    runtime.defaultProviderId = () => 'fixture';
+    runtime.isRegistered = providerId => providerId === 'fixture';
+    runtime.resolveProvider = providerId => ({ id: providerId || 'fixture' });
+    const coordinator = createToolExecutionCoordinator({
+      modelRuntime: runtime, capabilityBroker: capabilityService.broker, stateDir: path.join(stateDir, 'coordinator')
+    });
+    const eventBus = createDesktopUiEventBus();
+    const chatService = createChatService({
+      modelRuntime: runtime,
+      toolExecutionCoordinator: coordinator,
+      stateDir: path.join(stateDir, 'chat'),
+      defaults: { provider: 'fixture', model: 'fixture-model', reasoningEffort: 'medium' },
+      buildProductContext: async () => ({
+        context: 'safe approval fixture',
+        manifest: [{
+          id: 'fixture.approval', description: 'Run a safe in-memory fixture.',
+          inputSchema: { type: 'object', properties: { value: { type: 'string' } }, required: ['value'], additionalProperties: false },
+          available: true, requiresApproval: true
+        }],
+        scope: { taskId: null, workspaceId: null }
+      }),
+      onEvent: event => eventBus.publish(event.event, event.data)
+    });
+    capabilityService.setApprovalDecisionListener(async decision => {
+      const target = coordinator.pendingTarget(decision.approvalId);
+      return target?.kind === 'chat' ? chatService.resumeApproval(decision) : null;
+    });
+    const ui = createDesktopUiService({ services: { chatService, capabilityService }, eventBus });
+    const session = await ui.execute({ method: 'ui.chat.sessions.create', params: { title: `Approval ${label}` } });
+    await ui.execute({ method: 'ui.chat.config.set', params: { id: session.id, config: { modelProvider: 'fixture' } } });
+    await ui.execute({ method: 'ui.chat.send', params: { id: session.id, text: 'Use the safe fixture once.' } });
+    return { calls, capabilityService, chatService, coordinator, eventBus, executed: () => executed, session, ui };
+  }
+
+  const approved = await approvalHarness('approved', 'The approved fixture returned safe-fixture.');
+  try {
+    const pendingStatus = await approved.ui.execute({ method: 'ui.chat.status', params: { id: approved.session.id } });
+    assert.equal(pendingStatus.state, 'waiting-approval');
+    assert.ok(pendingStatus.approvalId);
+    const pendingCoreStatus = await approved.chatService.execute({ method: 'chat.status', params: { id: approved.session.id } });
+    const originalTurnId = pendingCoreStatus.turn.id;
+    const pendingRows = await approved.ui.execute({ method: 'ui.approvals.list', params: {} });
+    assert.equal(pendingRows.approvals.length, 1);
+    assert.equal(pendingRows.approvals[0].status, 'pending');
+    assert.equal(pendingRows.approvals[0].capability, 'fixture.approval');
+    assert.equal(approved.executed(), 0, 'a pending fixture is never executed before approval');
+    const beforeDecision = await approved.eventBus.next({ after: 0, waitMs: 0 });
+    assert.ok(beforeDecision.events.some(event => event.event === 'approval.pending'), 'Harbor receives a pending approval event');
+
+    const decision = await approved.ui.execute({ method: 'ui.approvals.decide', params: { id: pendingStatus.approvalId, approve: true } });
+    assert.equal(decision.status, 'completed');
+    assert.equal(decision.turnResumed, true, 'the typed UI projection confirms that the same Chat turn resumed');
+    assert.equal(approved.executed(), 1, 'Approve Once dispatches the safe fixture exactly once');
+    assert.equal(approved.calls.length, 2, 'approval resumes through the same Model tool loop');
+    assert.match(approved.calls[1].messages.at(-1).content, /safe-fixture/);
+    const approvedHistory = await approved.ui.execute({ method: 'ui.chat.history', params: { id: approved.session.id } });
+    assert.equal(approvedHistory.messages.at(-1).text, 'The approved fixture returned safe-fixture.');
+    const approvedCoreHistory = await approved.chatService.execute({ method: 'chat.history', params: { id: approved.session.id } });
+    assert.equal(approvedCoreHistory.messages.at(-1).turnId, originalTurnId, 'approval continuation keeps the original Chat turn id');
+    const afterDecision = await approved.eventBus.next({ after: 0, waitMs: 0 });
+    assert.ok(afterDecision.events.some(event => event.event === 'chat.updated' && event.data.sessionId === approved.session.id),
+      'Harbor reloads the completed assistant reply after an approval is handled elsewhere');
+  } finally { approved.chatService.close(); }
+
+  const rejected = await approvalHarness('rejected', 'The fixture was rejected and I will not run it.');
+  try {
+    const pendingStatus = await rejected.ui.execute({ method: 'ui.chat.status', params: { id: rejected.session.id } });
+    const decision = await rejected.ui.execute({ method: 'ui.approvals.decide', params: { id: pendingStatus.approvalId, approve: false } });
+    assert.equal(decision.status, 'rejected');
+    assert.equal(decision.turnResumed, true, 'rejection is returned to the active Model turn');
+    assert.equal(rejected.executed(), 0, 'rejection never invokes the fixture executor');
+    assert.match(rejected.calls[1].messages.at(-1).content, /APPROVAL_REJECTED/);
+    const rejectedHistory = await rejected.ui.execute({ method: 'ui.chat.history', params: { id: rejected.session.id } });
+    assert.equal(rejectedHistory.messages.at(-1).text, 'The fixture was rejected and I will not run it.');
+  } finally { rejected.chatService.close(); }
+  pass('typed approval projection keeps the Chat turn pending, then resumes through Approve Once or rejection');
 }
 
 {

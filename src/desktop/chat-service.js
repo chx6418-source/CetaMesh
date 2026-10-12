@@ -32,6 +32,7 @@ import { StorageError, readJsonFile, writeJsonAtomic } from '../storage/json-fil
 import { blocksToText } from '../dsh-client.js';
 import { selectDshSessionModel } from '../dsh-model-selection.js';
 import { PRODUCT_IDENTITY_PROMPT } from '../context/product-context.js';
+import { OWNER_ACTOR } from '../capability/types.js';
 
 const SCHEMA_VERSION = 1;
 const REASONING_EFFORTS = Object.freeze(['off', 'low', 'high', 'max']);
@@ -748,6 +749,8 @@ export function createChatService({
               turn.approvalId = result.approvalId;
               turn.approvalExpiresAt = result.expiresAt ?? null;
               turn.displayText = 'Waiting for Owner approval.';
+              onEvent?.({ event: 'approval.pending', data: { approvalId: result.approvalId, sessionId: record.id } });
+              onEvent?.({ event: 'chat.updated', data: { sessionId: record.id, status: turn.state } });
               return;
             }
             turn.displayText = result.text ?? '';
@@ -1022,6 +1025,8 @@ export function createChatService({
         state.turn.approvalId = result.approvalId;
         state.turn.approvalExpiresAt = result.expiresAt ?? null;
         state.turn.displayText = 'Waiting for Owner approval.';
+        onEvent?.({ event: 'approval.pending', data: { approvalId: result.approvalId, sessionId: record.id } });
+        onEvent?.({ event: 'chat.updated', data: { sessionId: record.id, status: state.turn.state } });
         return { resumed: true, pending: true, approvalId: result.approvalId };
       }
       state.turn.displayText = result.text ?? '';
@@ -1037,6 +1042,7 @@ export function createChatService({
       delete state.turn.approvalId;
       delete state.turn.approvalExpiresAt;
       finalizeTurn(record, state);
+      onEvent?.({ event: 'chat.updated', data: { sessionId: record.id, status: 'idle' } });
       return { resumed: true, pending: false };
     } catch (error) {
       if (state.turn) {
@@ -1044,6 +1050,7 @@ export function createChatService({
         state.turn.error = String(error?.code ?? 'TOOL_RESUME_FAILED');
         finalizeTurn(record, state);
       }
+      onEvent?.({ event: 'chat.updated', data: { sessionId: record.id, status: 'error' } });
       return { resumed: false, error: error?.code ?? 'TOOL_RESUME_FAILED' };
     } finally { state.modelTurn = null; }
   }
