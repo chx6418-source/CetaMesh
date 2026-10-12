@@ -20,8 +20,9 @@ export interface Memory {
   id: string; type: string; scope: string; title: string; content: string; summary: string;
   tags: string[]; pinned: boolean; rev: number | null; createdAt: string | number | null; updatedAt: string | number | null;
 }
+export type AgentStatus = 'ready' | 'needs-setup' | 'not-installed' | 'unavailable' | 'not-supported' | 'not-checked';
 export interface Agent {
-  id: string; name: string; role: string; description: string; available: boolean; status: string;
+  id: string; name: string; role: string; description: string; available: boolean; status: AgentStatus;
   version: string | null; desktopApp: { installed: boolean; running: boolean; status: string; version: string | null } | null;
 }
 export interface Plugin {

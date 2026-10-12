@@ -160,17 +160,21 @@ function projectAgent(value) {
   const health = record(row.health);
   const desktop = record(row.desktopApp);
   const reason = string(row.reason ?? health.reason ?? row.status, 100);
-  const status = row.available === true ? 'ready'
-    : /unsupported|not[_-]supported/i.test(reason) ? 'not-supported'
-      : /not[_-]installed|missing[_-]binary/i.test(reason) ? 'not-installed'
-        : /setup|auth|credential|needs[_-]config/i.test(reason) ? 'needs-setup'
-          : row.available === false ? 'unavailable' : 'not-checked';
+  const healthStatus = string(health.status, 50).toLowerCase();
+  const readiness = `${reason} ${healthStatus}`;
+  const id = string(row.id ?? row.provider, 80);
+  const available = row.available === true && health.available !== false;
+  const status = /unsupported|not[_-]supported/i.test(readiness) ? 'not-supported'
+    : /not[_-]installed|missing[_-]binary/i.test(readiness) ? 'not-installed'
+      : /setup|auth|credential|needs[_-]config/i.test(readiness) ? 'needs-setup'
+        : row.available === false || health.available === false ? 'unavailable'
+          : available ? 'ready' : 'not-checked';
   return {
-    id: string(row.id, 80), name: string(row.displayName ?? row.label ?? row.id, 120),
-    role: row.id === 'codex' ? '代码与项目' : row.id === 'dsh' ? '通用研究与协作' : '开发辅助',
-    description: row.id === 'codex' ? '理解项目、修改代码并检查结果。' : row.id === 'dsh' ? '处理资料、规划和跨工具工作流。' : '在可用时连接本地开发能力。',
-    available: row.available === true, status, version: string(row.version, 80) || null,
-    desktopApp: row.id === 'dsh' ? {
+    id, name: string(row.displayName ?? row.label ?? id, 120),
+    role: id === 'codex' ? '代码与项目' : id === 'dsh' ? '通用研究与协作' : '开发辅助',
+    description: id === 'codex' ? '理解项目、修改代码并检查结果。' : id === 'dsh' ? '处理资料、规划和跨工具工作流。' : '在可用时连接本地开发能力。',
+    available, status, version: string(row.version, 80) || null,
+    desktopApp: id === 'dsh' ? {
       installed: desktop.installed === true, running: desktop.running === true,
       status: string(desktop.status, 50) || 'unknown', version: string(desktop.version, 80) || null
     } : null

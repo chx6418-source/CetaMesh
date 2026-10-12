@@ -8,6 +8,7 @@ import { createDefaultAgentService } from '../src/agent/service.js';
 import { createAgentBroker } from '../src/agent/broker.js';
 import { createAgentProviderRegistry } from '../src/agent/registry.js';
 import { createAgentService } from '../src/agent/service.js';
+import { defineAgentProvider } from '../src/agent/agent-provider.js';
 import { CliAgentProcess } from '../src/agent/cli-agent-process.js';
 import { createCodexAgentProvider } from '../src/agent/codex-agent-provider.js';
 import { createZCodeAgentProvider } from '../src/agent/zcode-agent-provider.js';
@@ -18,6 +19,7 @@ import { createWorkspaceService } from '../src/workspace/service.js';
 import { createStagingWorkspace } from '../src/workspace/staging.js';
 import { createContinuityService } from '../src/continuity/index.js';
 import { createDesktopPlatformRuntime } from '../src/desktop/platform-runtime.js';
+import { createDesktopUiService } from '../src/desktop/ui-service.js';
 
 async function waitFor(read, predicate, timeoutMs = 5000) {
   const deadline = Date.now() + timeoutMs;
@@ -376,6 +378,46 @@ try {
   await assert.rejects(() => service.execute({ method: 'agent.configure', params: { provider: 'codex', settings: { cwd: workspace } } }),
     error => error.code === 'INVALID_PARAMS' || error.code === 'AGENT_BOUNDARY_UNSUPPORTED');
   service.close();
+
+  const liveHealth = {
+    stale: { available: true, status: 'ready' }
+  };
+  const fixtureProvider = (id, capabilityExtras, health) => defineAgentProvider({
+    id, label: `${id} fixture`, capabilityExtras, methods: { health }
+  });
+  const uiAgentRegistry = createAgentProviderRegistry({ providers: [
+    fixtureProvider('ready', { available: true, reason: null }, async () => ({ provider: 'ready', available: true, status: 'ready' })),
+    fixtureProvider('setup', { available: true, reason: null }, async () => ({ provider: 'setup', available: false, status: 'needs_auth', reason: 'needs_auth' })),
+    fixtureProvider('missing', { available: false, reason: 'not_installed' }, async () => ({ provider: 'missing', available: false, reason: 'not_installed' })),
+    fixtureProvider('offline', { available: true, reason: null }, async () => ({ provider: 'offline', available: false, status: 'unavailable', reason: 'connection_lost' })),
+    fixtureProvider('stale', { available: true, reason: null }, async () => liveHealth.stale),
+    fixtureProvider('throwing', { available: true, reason: null, executablePath: path.join(root, 'private', 'agent.exe'), apiKey: 'sk-agent-fixture-secret' }, async () => {
+      throw Object.assign(new Error('private diagnostic path and sk-agent-fixture-secret'), { code: 'PROVIDER_UNAVAILABLE' });
+    }),
+    fixtureProvider('dsh', { available: null, reason: null }, async () => ({ provider: 'dsh', available: false, status: 'unavailable', reason: 'not_connected' }))
+  ] });
+  const uiAgentService = createAgentService({
+    broker: createAgentBroker({ registry: uiAgentRegistry }),
+    desktopStatus: async () => ({ status: 'installed', installed: true, running: false, version: '1.0.0' })
+  });
+  const uiAgent = createDesktopUiService({ services: { agentService: uiAgentService } });
+  const uiAgents = await uiAgent.execute({ method: 'ui.agent.list', params: {} });
+  const uiAgentById = Object.fromEntries(uiAgents.agents.map(agent => [agent.id, agent]));
+  assert.equal(uiAgentById.ready.status, 'ready');
+  assert.equal(uiAgentById.setup.status, 'needs-setup', 'auth readiness must not be projected as ready');
+  assert.equal(uiAgentById.setup.available, false);
+  assert.equal(uiAgentById.missing.status, 'not-installed');
+  assert.equal(uiAgentById.offline.status, 'unavailable');
+  assert.equal(uiAgentById.stale.status, 'ready', 'the cached Registry readiness starts as installed');
+  assert.equal(uiAgentById.throwing.status, 'unavailable', 'a thrown health check overrides stale installed readiness');
+  assert.equal(uiAgentById.dsh.status, 'unavailable');
+  assert.equal(uiAgentById.dsh.desktopApp.installed, true, 'DSH Desktop installation is independent from Agent availability');
+  assert.doesNotMatch(JSON.stringify(uiAgents), /agent\.exe|sk-agent-fixture-secret|private diagnostic path/);
+  liveHealth.stale = { provider: 'stale', available: false, status: 'not-installed', reason: 'not_installed' };
+  const refreshedAgent = await uiAgent.execute({ method: 'ui.agent.health', params: { provider: 'stale' } });
+  assert.equal(refreshedAgent.id, 'stale', 'the refresh path returns the registered Provider identity');
+  assert.equal(refreshedAgent.status, 'not-installed', 'a refresh corrects stale ready state when the executable disappears');
+  assert.equal(refreshedAgent.available, false);
 
   const taskRouteCalls = [];
   const chat = createChatService({

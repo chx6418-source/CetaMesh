@@ -153,12 +153,19 @@ check('About renders real build metadata and cached release notes', () => {
 check('Agent registry states stay distinct and reflect real provider health', () => {
   const app = read('desktop-ui/src/app/HarborApp.tsx');
   const projection = read('src/desktop/ui-service.js');
+  const client = read('desktop-ui/src/bridge/typed-client.ts');
   assert.match(projection, /not-installed/);
   assert.match(projection, /not-supported/);
   assert.match(projection, /not-checked/);
+  assert.match(projection, /healthStatus/);
+  assert.match(projection, /agent\('agent\.health'/);
+  assert.match(client, /export type AgentStatus = 'ready' \| 'needs-setup' \| 'not-installed' \| 'unavailable' \| 'not-supported' \| 'not-checked'/);
   assert.match(app, /'not-installed': '未安装'/);
   assert.match(app, /'not-supported': '不支持'/);
   assert.match(app, /'not-checked': '未检查'/);
+  assert.match(app, /StatusBadge value=\{agent\.status\} available=\{agent\.available\}/);
+  assert.match(app, /agent\.status === 'needs-setup'/);
+  assert.match(app, /\.\.\.item, available: health\.available, status: health\.status/);
   assert.match(app, /agent\.desktopApp\.installed/);
   assert.match(app, /agent\.desktopApp\.running/);
 });

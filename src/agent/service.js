@@ -35,14 +35,21 @@ function createUnavailableDshProvider() {
 
 function summarizeProvider(provider, health = null) {
   const capabilities = provider.capabilities();
+  const registryAvailable = typeof capabilities.available === 'boolean' ? capabilities.available : null;
+  const healthAvailable = typeof health?.available === 'boolean' ? health.available : null;
+  const available = registryAvailable === false || healthAvailable === false ? false
+    : registryAvailable === true || healthAvailable === true ? true : null;
+  const reason = registryAvailable === false
+    ? capabilities.reason ?? health?.reason ?? null
+    : health?.reason ?? capabilities.reason ?? null;
   return {
     id: provider.id,
     displayName: capabilities.displayName ?? (provider.id === 'dsh' ? 'DSH' : provider.label),
     label: provider.label,
     eventProtocol: provider.eventProtocol,
-    available: typeof capabilities.available === 'boolean' ? capabilities.available : health?.available ?? null,
+    available,
     version: capabilities.version ?? health?.version ?? null,
-    reason: capabilities.reason ?? health?.reason ?? null,
+    reason,
     workspaceBoundary: capabilities.workspaceBoundary ?? 'unsupported',
     supportsFreshSession: capabilities.supportsFreshSession === true,
     supportsResume: capabilities.supportsResume === true,
