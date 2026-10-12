@@ -567,7 +567,7 @@ export function createChatService({
     const isModelChannel = state.modelTurn != null;
     const sessionId = record.dshSessionId;
     const text = turn.displayText ?? '';
-    if (text.trim() || turn.state === 'done') {
+    if (text.trim() || turn.state === 'done' || turn.state === 'error') {
       appendMessage(record.id, {
         id: crypto.randomUUID(),
         role: 'assistant',
@@ -651,7 +651,7 @@ export function createChatService({
    * 半截回复不进入上下文；不含任何凭据材料。send/retry 前刚落盘（或待重发）的
    * 尾部 user 消息就是当前 prompt，需去重，避免同一消息在载荷里出现两次。
    */
-  function buildModelMessages(recordId, promptText, productContext = null) {
+  function buildModelMessages(recordId, promptText, productContext = null, omitHistoryMessageId = null) {
     const history = readHistory(recordId).slice(-MODEL_HISTORY_MAX_MESSAGES);
     const prior = history.length > 0 && history[history.length - 1]?.role === 'user'
       ? history.slice(0, -1)
@@ -664,6 +664,7 @@ export function createChatService({
       });
     }
     for (const message of prior) {
+      if (message.id === omitHistoryMessageId) continue;
       if (message.role !== 'user' && message.role !== 'assistant') continue;
       if (message.error || message.cancelled) continue;
       const text = typeof message.text === 'string' ? message.text : '';
@@ -686,7 +687,7 @@ export function createChatService({
    * worker IPC 线程因此能继续轮询 chat.status（流式可见、停止可达），且回合时长
    * 不再受 IPC 请求超时约束。回合内错误经 finalizeTurn 落为 turn error。
    */
-  function startModelTurn(record, state, promptText, routing, resolved) {
+  function startModelTurn(record, state, promptText, routing, resolved, retryMessageId = null) {
     if (state.turn) state.turn.routing = routing ?? null;
     const rawModel = typeof record.config.model === 'string' ? record.config.model.trim() : '';
     const sessionDefaultModel = String(defaults?.model ?? '');
@@ -704,7 +705,7 @@ export function createChatService({
     const done = (async () => {
       try {
         let productContext = await buildTurnContext(record, routing, resolved, model);
-        const messages = buildModelMessages(record.id, promptText, productContext.context);
+        const messages = buildModelMessages(record.id, promptText, productContext.context, retryMessageId);
         const supportsTools = modelRuntime.supportsToolCalling?.(resolved.id) === true;
         if (supportsTools && toolExecutionCoordinator?.run) {
           const turnId = state.turn?.id ?? crypto.randomUUID();
@@ -784,6 +785,7 @@ export function createChatService({
             turn.error = String(error?.message ?? error).slice(0, 1000);
           }
           finalizeTurn(record, state);
+          onEvent?.({ event: 'chat.updated', data: { sessionId: record.id, status: turn.state } });
         } else {
           throw error;
         }
@@ -796,7 +798,7 @@ export function createChatService({
   }
 
   /** Smart 路由 + 通道选择：Model Runtime 优先，无 Key 配置时回落既有 DSH 直连。 */
-  async function startModelOrDshTurn(record, state, promptText, { attachments, sourceText, forceProject = false }) {
+  async function startModelOrDshTurn(record, state, promptText, { attachments, sourceText, forceProject = false, retryMessageId = null }) {
     // Smart Router：mode=smart 且注入 router 时做确定性分类。route=agent 的意图经
     // platformRoute（Capability → Agent Broker）受控执行；未注入 platformRoute
     // （测试/精简装配）时不执行，routing 如实记录 fallbackReason；Agent=Disabled
@@ -834,7 +836,7 @@ export function createChatService({
       const resolved = modelRuntime.resolveProvider(record.config.modelProvider);
       const fallbackReason = routing?.agentIntent && !platformRoute ? 'agent-broker-not-available' : null;
       const { handshake, done } = startModelTurn(record, state, promptText, routing ? { ...routing,
-        resolvedRoute: platformRoute && routing.resolvedRoute === 'capability' ? 'capability' : 'model', fallbackReason } : null, resolved);
+        resolvedRoute: platformRoute && routing.resolvedRoute === 'capability' ? 'capability' : 'model', fallbackReason } : null, resolved, retryMessageId);
       done.catch(() => { /* 后台终态已经 finalizeTurn；兜底防未处理 rejection */ });
       await handshake;
       return;
@@ -879,13 +881,26 @@ export function createChatService({
     const state = runtimeOf(record.id);
     if (state.turn) throw chatError('TURN_BUSY', '当前会话有回合进行中');
     const messages = readHistory(record.id);
-    const last = messages[messages.length - 1];
+    let last = messages[messages.length - 1];
+    if (last?.role !== 'user') {
+      const failedAttempt = last?.role === 'assistant' && (last.error || last.cancelled);
+      if (failedAttempt) {
+        last = null;
+        for (let index = messages.length - 2; index >= 0; index -= 1) {
+          const candidate = messages[index];
+          if (candidate.role === 'user') { last = candidate; break; }
+          if (candidate.role === 'assistant' && !candidate.error && !candidate.cancelled) break;
+        }
+      } else {
+        last = null;
+      }
+    }
     if (!last || last.role !== 'user') throw chatError('NOTHING_TO_RETRY', '没有可重试的用户消息（最后一回合已正常完成）');
     const attachments = Array.isArray(last.attachments) ? last.attachments : [];
     let promptText = last.text;
     // retry 只重发内容，不重复落盘 user 消息（同一条用户消息的新一次尝试）。
     for (const name of attachments) promptText += `\n\n[附件 ${name}]（内容见上一条消息）`;
-    await startTurn(record, state, promptText, { attachments, sourceText: last.text });
+    await startTurn(record, state, promptText, { attachments, sourceText: last.text, retryMessageId: last.id });
     return { userMessageId: last.id };
   }
 
@@ -897,7 +912,7 @@ export function createChatService({
     return { continued: true };
   }
 
-  async function startTurn(record, state, promptText, { attachments = [], sourceText } = {}) {
+  async function startTurn(record, state, promptText, { attachments = [], sourceText, retryMessageId = null } = {}) {
     state.messageTexts = [];
     state.chunkBuffer = '';
     state.promptChars = promptText.length;
@@ -905,11 +920,11 @@ export function createChatService({
     const agentProviderId = record.config.agentProvider ?? null;
     try {
       if (agentProviderId === 'cetamesh' && platformRoute) {
-        await startModelOrDshTurn(record, state, promptText, { attachments, sourceText, forceProject: true });
+        await startModelOrDshTurn(record, state, promptText, { attachments, sourceText, forceProject: true, retryMessageId });
       } else if (agentProviderId && agentProviderId !== AGENT_PROVIDER_DISABLED
         && ['capability-broker', 'staged-capability-broker'].includes(selectableAgentProviders.get(agentProviderId)?.workspaceBoundary)) {
         if (typeof platformRoute !== 'function') throw chatError('TASK_REQUIRED', 'Workspace-bound Agent sessions require Task assignment');
-        await startModelOrDshTurn(record, state, promptText, { attachments, sourceText, forceProject: true });
+        await startModelOrDshTurn(record, state, promptText, { attachments, sourceText, forceProject: true, retryMessageId });
       } else if (agentProviderId && agentProviderId !== AGENT_PROVIDER_DISABLED && agentExecute) {
         // Agent Provider 路径：用户显式选择 Agent 时，会话生命周期与回合提交经标准契约；
         // 事件流协议已由 setConfig 校验为 dsh-session-events，follow 状态机不变。
@@ -935,7 +950,7 @@ export function createChatService({
         if (agentProviderId && agentProviderId !== AGENT_PROVIDER_DISABLED && !agentExecute) {
           throw chatError('PROVIDER_ERROR', `Agent Provider 运行时不可用（${agentProviderId}）`);
         }
-        await startModelOrDshTurn(record, state, promptText, { attachments, sourceText });
+        await startModelOrDshTurn(record, state, promptText, { attachments, sourceText, retryMessageId });
       }
     } catch (error) {
       state.turn = null;
@@ -956,6 +971,7 @@ export function createChatService({
         id: record.id,
         turn: null,
         lastState: last?.role === 'user' ? 'awaiting-reply' : 'idle',
+        lastError: last?.role === 'assistant' && typeof last.error === 'string' ? last.error : null,
         dshSessionAlive: Boolean(record.dshSessionId)
       };
     }

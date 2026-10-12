@@ -214,13 +214,14 @@ function makeChatService(stateDir, port, { buildProductContext, defaultModel = '
     (error) => ['MODEL_PROVIDER_ERROR', 'MODEL_PROVIDER_UNAVAILABLE'].includes(error.code)
   );
   let history = await service.execute({ method: 'chat.history', params: { id: created.id } });
-  assert.deepEqual(history.messages.map((m) => m.role), ['user'], '失败回合只留 user 消息（可重试）');
+  assert.deepEqual(history.messages.map((m) => m.role), ['user', 'assistant'], 'Provider error 作为结构化 assistant 消息投影并可重试');
+  assert.equal(history.messages[1].error?.includes(BAD_KEY), false, '失败消息不得回显 API Key');
   setMode('ok'); // 修复凭据后重试同一消息
   await service.execute({ method: 'chat.retry', params: { id: created.id } });
   await waitForIdle(service, created.id);
   history = await service.execute({ method: 'chat.history', params: { id: created.id } });
-  assert.deepEqual(history.messages.map((m) => m.role), ['user', 'assistant'], 'retry 重发同一 user 消息（不重复落盘）');
-  assert.equal(history.messages[1].text, '你好，收到。');
+  assert.deepEqual(history.messages.map((m) => m.role), ['user', 'assistant', 'assistant'], 'retry 重发同一 user 消息（不重复落盘）');
+  assert.equal(history.messages[2].text, '你好，收到。');
   await close();
   ok('Retry：失败回合 → 修复后重试 → 新回合成功，user 消息不重复');
 }
@@ -255,7 +256,10 @@ function makeChatService(stateDir, port, { buildProductContext, defaultModel = '
     '无效 Key 必须结构化失败'
   );
   const status = await service.execute({ method: 'chat.status', params: { id: created.id } });
-  assert.equal(status.lastState, 'awaiting-reply', '失败回合保留可重试');
+  assert.equal(status.lastState, 'idle', '失败 Provider 状态由落盘的 assistant 错误消息表达');
+  const history = await service.execute({ method: 'chat.history', params: { id: created.id } });
+  assert.ok(history.messages.at(-1).error, '无文本 Provider 失败仍应投影结构化错误消息');
+  assert.ok(!history.messages.at(-1).error.includes(BAD_KEY), '错误消息不泄漏 Key');
   const list = await service.execute({ method: 'chat.sessions.list', params: {} });
   assert.equal(list.sessions.length, 1, '失败不摧毁会话');
   await close();

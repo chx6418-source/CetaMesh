@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createChatService } from '../src/desktop/chat-service.js';
+import { createDesktopUiEventBus, createDesktopUiService } from '../src/desktop/ui-service.js';
 
 const root = path.resolve(import.meta.dirname, '..');
 const tempRoot = process.env.WHALEBRIDGE_TEST_TMPDIR || os.tmpdir();
@@ -348,12 +349,17 @@ const turnEnd = (id, kind, error) => ({ type: 'turn/end', data: { reason: { kind
   assert.equal(history.messages[1].error, '模型服务中断');
   assert.equal(history.messages[1].text, '部分输出', 'error 回合的 partial 保留');
   assert.equal((await service.execute({ method: 'chat.status', params: { id: session.id } })).lastState, 'idle', 'error 已终态化');
-  // 回合已结束（error 是终态），最后一落盘消息是 assistant → NOTHING_TO_RETRY
-  await assert.rejects(
-    service.execute({ method: 'chat.retry', params: { id: session.id } }),
-    (error) => error.code === 'NOTHING_TO_RETRY'
-  );
-  ok('turn 异常结束：partial + error 标记落盘，retry 语义正确');
+  api.setPromptHandler(async () => {
+    service._injectEvent(session.id, { type: 'turn/start', data: {} });
+    service._injectEvent(session.id, message(session.id, '重试后的回答'));
+    service._injectEvent(session.id, turnEnd(session.id, 'completed'));
+  });
+  const retry = await service.execute({ method: 'chat.retry', params: { id: session.id } });
+  assert.equal(retry.userMessageId, history.messages[0].id, '失败回合重试复用原 user 消息');
+  const historyAfterRetry = await service.execute({ method: 'chat.history', params: { id: session.id } });
+  assert.equal(historyAfterRetry.messages.filter(item => item.role === 'user').length, 1);
+  assert.equal(historyAfterRetry.messages.at(-1).text, '重试后的回答');
+  ok('turn 异常结束：partial + error 标记落盘，允许复用原 user 重试');
   service.close();
 }
 
@@ -361,6 +367,10 @@ const turnEnd = (id, kind, error) => ({ type: 'turn/end', data: { reason: { kind
 import { createOpenAiCompatibleModelProvider, createModelProviderRegistry, createModelRuntimeService } from '../src/model/index.js';
 import { createProviderSecrets } from '../src/providers/secrets.js';
 import { createRouterService } from '../src/router/index.js';
+import {
+  createOpenAiCompatibleFixture,
+  OPENAI_COMPATIBLE_FIXTURE_BASE_URL
+} from './test-support/openai-compatible-fixture.mjs';
 
 const API_KEY = 'sk-standalone-test-key-1234567890';
 const MODEL_SSE = [
@@ -421,22 +431,22 @@ function abortableSseFetch() {
 }
 
 /** 组装带 Model Runtime / Router / Agent 的完整 chat-service（全 fixture，不联网不碰 DSH）。 */
-function makeFullService({ withKey = true, fetchImpl, router = true, api = dshDownApi(), agent = false, stateDir: overrideDir, buildProductContext } = {}) {
+function makeFullService({ withKey = true, fetchImpl, baseUrl = 'https://api.deepseek.test', router = true, api = dshDownApi(), agent = false, stateDir: overrideDir, buildProductContext, onEvent } = {}) {
   const dir = overrideDir ?? path.join(stateDir, 's1-' + (++caseSeq));
   fs.mkdirSync(dir, { recursive: true });
   const secrets = createProviderSecrets({ root: dir });
-  if (withKey) secrets.set({ provider: 'deepseek-official', apiKey: API_KEY });
+  if (withKey) secrets.set({ provider: 'deepseek-official', apiKey: API_KEY, baseUrl });
   const modelRuntime = createModelRuntimeService({
     registry: createModelProviderRegistry({
       providers: [
         createOpenAiCompatibleModelProvider({
-          id: 'deepseek-official', label: 'DeepSeek 官方', baseUrl: 'https://api.deepseek.test',
-          defaultModel: 'deepseek-chat', secrets, fetchImpl: fetchImpl?.fetch ?? fetch,
+          id: 'deepseek-official', label: 'DeepSeek 官方', baseUrl,
+          defaultModel: 'deepseek-chat', secrets, fetchImpl: typeof fetchImpl === 'function' ? fetchImpl : fetchImpl?.fetch ?? fetch,
           supportsStreamOptions: true, log: () => {}
         }),
         createOpenAiCompatibleModelProvider({
           id: 'openai', label: 'OpenAI', baseUrl: 'https://api.openai.test/v1',
-          defaultModel: 'gpt-4o-mini', secrets, fetchImpl: fetchImpl?.fetch ?? fetch,
+          defaultModel: 'gpt-4o-mini', secrets, fetchImpl: typeof fetchImpl === 'function' ? fetchImpl : fetchImpl?.fetch ?? fetch,
           reasoningParam: 'reasoning_effort', log: () => {}
         })
       ]
@@ -461,7 +471,8 @@ function makeFullService({ withKey = true, fetchImpl, router = true, api = dshDo
     router: routerService,
     buildProductContext,
     defaults: { provider: 'deepseek-official', model: 'deepseek-flash', reasoningEffort: 'max' },
-    stateDir: dir
+    stateDir: dir,
+    onEvent
   });
   return { service, api, fetchImpl, agentCalls, dir };
 }
@@ -644,6 +655,69 @@ function makeFullService({ withKey = true, fetchImpl, router = true, api = dshDo
   assert.ok(!JSON.stringify(catalog).includes(API_KEY), 'catalog 不含 Key 材料');
   ok('catalog：DSH 目录错误不阻塞 Model 目录 / hasKey 标记 / 无 Key 泄漏');
   service.close();
+}
+
+// ── 18. Provider 失败经 UI 投影可恢复，重试复用同一条 user 消息 ────────────────
+{
+  const text = 'Provider 暂时失败后的提问';
+  const fixture = createOpenAiCompatibleFixture({ responses: [
+    { kind: 'http-error', status: 503, body: { error: { message: `temporary ${API_KEY}` } } },
+    { kind: 'sse', chunks: [
+      'data: {"model":"deepseek-chat","choices":[{"delta":{"content":"重试"}}]}\n\n',
+      'data: {"model":"deepseek-chat","choices":[{"delta":{"content":"成功"}}]}\n\n',
+      'data: [DONE]\n\n'
+    ] }
+  ] });
+  const eventBus = createDesktopUiEventBus();
+  let service = null;
+  try {
+    service = makeFullService({
+      fetchImpl: fixture.fetchImpl,
+      baseUrl: OPENAI_COMPATIBLE_FIXTURE_BASE_URL,
+      onEvent: event => eventBus.publish(event.event, event.data)
+    }).service;
+    const ui = createDesktopUiService({ services: { chatService: service }, eventBus });
+    const session = await ui.execute({ method: 'ui.chat.sessions.create', params: { title: 'Provider retry' } });
+    await assert.rejects(
+      ui.execute({ method: 'ui.chat.send', params: { id: session.id, text } }),
+      error => error.code === 'MODEL_PROVIDER_ERROR' && !error.message.includes(API_KEY)
+    );
+    const failedHistory = await ui.execute({ method: 'ui.chat.history', params: { id: session.id } });
+    assert.equal(failedHistory.messages.length, 2, 'Provider 首次失败仍投影 user 和结构化错误回复');
+    assert.equal(failedHistory.messages[0].role, 'user');
+    assert.equal(failedHistory.messages[1].error.includes(API_KEY), false, '错误投影不得泄漏 Provider Key');
+    const failedStatus = await ui.execute({ method: 'ui.chat.status', params: { id: session.id } });
+    assert.ok(failedStatus.error, 'Harbor status projection exposes a retryable Provider error after the turn closes');
+    assert.ok(!failedStatus.error.includes(API_KEY), 'status error is secret-free');
+    const updates = await eventBus.next({ after: 0, waitMs: 0 });
+    assert.ok(updates.events.some(event => event.event === 'chat.updated'), '首事件前失败也通知 Harbor 刷新会话');
+
+    const retry = await ui.execute({ method: 'ui.chat.retry', params: { id: session.id } });
+    assert.equal(retry.userMessageId, failedHistory.messages[0].id, 'retry 沿用原 user 消息 ID');
+    for (let i = 0; i < 100; i += 1) {
+      const status = await ui.execute({ method: 'ui.chat.status', params: { id: session.id } });
+      if (status.state === 'idle') break;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    const history = await ui.execute({ method: 'ui.chat.history', params: { id: session.id } });
+    assert.equal(history.messages.filter(message => message.role === 'user').length, 1, '重试不能重复落盘 user 消息');
+    assert.equal(history.messages.at(-1).text, '重试成功');
+    assert.equal(fixture.requests.length, 2);
+    assert.deepEqual(fixture.requests.map(request => request.url), [
+      `${OPENAI_COMPATIBLE_FIXTURE_BASE_URL}/chat/completions`,
+      `${OPENAI_COMPATIBLE_FIXTURE_BASE_URL}/chat/completions`
+    ]);
+    assert.deepEqual(
+      fixture.requests[1].body.messages.filter(message => message.role === 'user').map(message => message.content),
+      [text],
+      'Provider retry request contains the prompt exactly once'
+    );
+    assert.ok(!JSON.stringify({ failedHistory, history, requests: fixture.requests }).includes(API_KEY));
+    ok('Provider error → UI event/history projection → retry → one user message + streamed answer');
+  } finally {
+    service?.close();
+    fixture.close();
+  }
 }
 
 fs.rmSync(temp, { recursive: true, force: true });

@@ -379,7 +379,7 @@ export function createDesktopUiService({ services = {}, system = services.system
       const turn = record(result.turn);
       return {
         id: string(result.id, 128), state: string(turn.state ?? result.lastState, 40),
-        displayText: string(turn.displayText, MAX_TEXT), error: string(turn.error, 1000) || null,
+        displayText: string(turn.displayText, MAX_TEXT), error: string(turn.error ?? result.lastError, 1000) || null,
         approvalId: string(turn.approvalId, 128) || null, approvalExpiresAt: scalar(turn.approvalExpiresAt),
         routing: selected(turn.routing, ['modelProvider', 'requestedModel', 'resolvedModel', 'toolCalling', 'taskId'])
       };
