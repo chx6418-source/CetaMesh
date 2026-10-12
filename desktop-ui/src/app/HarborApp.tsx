@@ -1,12 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router';
+import { mergeLatestChatMessages, prependOlderChatMessages } from './chat-history';
 import { aboutClient, agentClient, approvalClient, bridge, chatClient, extensionSettingsClient, feedbackClient, hostClient, memoryClient, onboardingClient, openExternal, pluginClient, searchClient, settingsClient, taskClient, updateClient, workspaceClient, type Agent, type Approval, type ChatMessage as ChatMessageDto, type ChatSession, type ExtensionSettingsDescription, type ExtensionSettingsSnapshot, type IntegrationSettings, type Memory, type Plugin, type ProviderSettingField, type SettingField, type Settings, type Task } from '../bridge/typed-client';
 import { Icon, type IconName } from '../components/icons';
 import { ArtifactCard } from '../components/product/cards';
 import { Button, IconButton, Input, SearchInput, Select, Tabs } from '../components/primitives/inputs';
 import { Sheet } from '../components/primitives/overlays';
 import { Badge, Banner, Card, Divider, LoadingState, Surface } from '../components/primitives/surfaces';
-import { Markdown } from '../components/primitives/content';
+import { Markdown, VirtualList, type VirtualListAnchor, type VirtualListController } from '../components/primitives/content';
 import { useUi } from '../stores/ui';
 import './harbor.css';
 
@@ -260,8 +261,22 @@ function SearchResults({ results, onSelectSession, onSelectPage }: { results: { 
   return <div className="search-results">{results.sessions.map(session => <button key={`s-${session.id}`} onClick={() => onSelectSession(session.id)}><Icon name="chat" size={16} /><span><strong>{session.title || '新会话'}</strong><small>会话 · {dateLabel(session.updatedAt)}</small></span></button>)}{results.tasks.map(task => <button key={`t-${task.id}`} onClick={() => onSelectPage('work')}><Icon name="work" size={16} /><span><strong>{task.title}</strong><small>任务 · {taskStatusLabel(task.status)}</small></span></button>)}{results.plugins.map(plugin => <button key={`p-${plugin.id}`} onClick={() => onSelectPage('plugins')}><Icon name="plugins" size={16} /><span><strong>{plugin.name}</strong><small>插件 · {plugin.developer}</small></span></button>)}</div>;
 }
 
+type ChatTimelineItem =
+  | { id: string; kind: 'message'; message: ChatMessageDto }
+  | { id: 'load-earlier'; kind: 'load-earlier' }
+  | { id: 'loading'; kind: 'loading' }
+  | { id: 'error'; kind: 'error'; message: string }
+  | { id: 'empty'; kind: 'empty' }
+  | { id: 'streaming'; kind: 'streaming'; message: ChatMessageDto }
+  | { id: 'turn-error'; kind: 'turn-error'; message: string }
+  | { id: string; kind: 'approval'; approval: Approval };
+const chatTimelineKey = (item: ChatTimelineItem) => item.id;
+const isChatMessageAnchor = (item: ChatTimelineItem) => item.kind === 'message';
+
 function ChatPage({ session, onNew, onOpenMemory }: { session: ChatSession | null; onNew(): Promise<void>; onOpenMemory(): void }) {
   const [messages, setMessages] = useState<ChatMessageDto[]>([]);
+  const [hasMoreHistory, setHasMoreHistory] = useState(false);
+  const [loadingOlder, setLoadingOlder] = useState(false);
   const [status, setStatus] = useState<{ state: string; displayText: string; error: string | null; approvalId: string | null; routing: Record<string, unknown> }>({ state: 'idle', displayText: '', error: null, approvalId: null, routing: {} });
   const [catalog, setCatalog] = useState<Awaited<ReturnType<typeof chatClient.catalog>> | null>(null);
   const [linkedTask, setLinkedTask] = useState<Task | null>(null);
@@ -269,18 +284,45 @@ function ChatPage({ session, onNew, onOpenMemory }: { session: ChatSession | nul
   const [approvals, setApprovals] = useState<Approval[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [hasNewMessages, setHasNewMessages] = useState(false);
 
-  const streamRef = useRef<HTMLDivElement>(null);
+  const historySessionIdRef = useRef<string | null>(null);
+  const isAtBottomRef = useRef(true);
+  const skipAutomaticScrollRef = useRef(false);
+  const olderPageRequestRef = useRef(false);
+  const virtualListRef = useRef<VirtualListController | null>(null);
+  const streamStatusFrameRef = useRef<number | null>(null);
+  const seenMessageIdsRef = useRef<Set<string>>(new Set());
+  const previousStreamRef = useRef({ state: 'idle', text: '' });
 
   const load = useCallback(async () => {
-    if (!session) { setMessages([]); return; }
+    if (!session) {
+      historySessionIdRef.current = null;
+      seenMessageIdsRef.current.clear();
+      previousStreamRef.current = { state: 'idle', text: '' };
+      setMessages([]);
+      setHasMoreHistory(false);
+      setHasNewMessages(false);
+      return;
+    }
     setLoading(true);
     try {
       const [history, nextStatus, nextCatalog, memoryData, approvalData] = await Promise.all([
         chatClient.history(session.id, 100), chatClient.status(session.id), chatClient.catalog(),
         memoryClient.overview(session.title || '', ''), approvalClient.list()
       ]);
-      setMessages(history.messages);
+      if (historySessionIdRef.current !== session.id) {
+        historySessionIdRef.current = session.id;
+        seenMessageIdsRef.current = new Set(history.messages.map(message => message.id));
+        previousStreamRef.current = { state: nextStatus.state, text: nextStatus.displayText };
+        setHasNewMessages(false);
+        isAtBottomRef.current = true;
+        setMessages(mergeLatestChatMessages([], history.messages));
+        setHasMoreHistory(history.hasMore);
+      } else {
+        setHasMoreHistory(history.hasMore);
+        setMessages(current => mergeLatestChatMessages(current, history.messages));
+      }
       setStatus(nextStatus);
       setCatalog(nextCatalog);
       const taskId = typeof nextStatus.routing.taskId === 'string' ? nextStatus.routing.taskId : '';
@@ -312,16 +354,97 @@ function ChatPage({ session, onNew, onOpenMemory }: { session: ChatSession | nul
     const refreshConversation = () => { void load(); };
     const offUpdated = bridge.subscribe('chat.updated', data => { if (!data.sessionId || data.sessionId === session.id) refreshConversation(); });
     const offStreaming = bridge.subscribe('chat.streaming', data => {
-      if (data.sessionId === session.id) void chatClient.status(session.id).then(setStatus).catch(() => { /* Keep the last known status while the Core reconnects. */ });
+      if (data.sessionId !== session.id || streamStatusFrameRef.current !== null) return;
+      streamStatusFrameRef.current = window.requestAnimationFrame(() => {
+        streamStatusFrameRef.current = null;
+        void chatClient.status(session.id).then(setStatus).catch(() => { /* Keep the last known status while the Core reconnects. */ });
+      });
     });
     const offApproval = bridge.subscribe('approval.pending', () => { void refreshContext(); });
     const offResolved = bridge.subscribe('approval.resolved', refreshContext);
     const offTasks = bridge.subscribe('task.updated', () => { void refreshContext(); });
     const offMemory = bridge.subscribe('memory.updated', () => { void refreshContext(); });
     const timer = window.setInterval(() => { void refreshContext(); }, 2500);
-    return () => { window.clearInterval(timer); offUpdated(); offStreaming(); offApproval(); offResolved(); offTasks(); offMemory(); };
+    return () => {
+      window.clearInterval(timer);
+      if (streamStatusFrameRef.current !== null) {
+        window.cancelAnimationFrame(streamStatusFrameRef.current);
+        streamStatusFrameRef.current = null;
+      }
+      offUpdated(); offStreaming(); offApproval(); offResolved(); offTasks(); offMemory();
+    };
   }, [session?.id, load, refreshContext]);
-  useEffect(() => { if (streamRef.current) streamRef.current.scrollTop = streamRef.current.scrollHeight; }, [messages, status.displayText]);
+  const loadOlderHistory = useCallback(async () => {
+    if (!session || !hasMoreHistory || loadingOlder || olderPageRequestRef.current || !messages.length) return;
+    const cursor = messages[0].id;
+    const anchor: VirtualListAnchor | null = virtualListRef.current?.captureAnchor() ?? null;
+    olderPageRequestRef.current = true;
+    setLoadingOlder(true);
+    try {
+      const page = await chatClient.history(session.id, 100, cursor);
+      const existingBeforeRequest = new Set(messages.map(message => message.id));
+      if (page.messages.some(message => !existingBeforeRequest.has(message.id))) {
+        if (anchor) {
+          virtualListRef.current?.preserveAnchorOnNextChange(anchor);
+          skipAutomaticScrollRef.current = true;
+        }
+        setMessages(current => prependOlderChatMessages(current, page.messages));
+      }
+      setHasMoreHistory(page.hasMore);
+    } catch (cause) { setError(messageOf(cause)); }
+    finally { olderPageRequestRef.current = false; setLoadingOlder(false); }
+  }, [session?.id, hasMoreHistory, loadingOlder, messages]);
+
+  const streaming = ['streaming', 'cancelling'].includes(status.state);
+  const timelineItems = useMemo<ChatTimelineItem[]>(() => {
+    const rows: ChatTimelineItem[] = [];
+    if (hasMoreHistory && messages.length) rows.push({ id: 'load-earlier', kind: 'load-earlier' });
+    if (loading && !messages.length) rows.push({ id: 'loading', kind: 'loading' });
+    if (error) rows.push({ id: 'error', kind: 'error', message: error });
+    if (!messages.length && !loading && !error) rows.push({ id: 'empty', kind: 'empty' });
+    rows.push(...messages.map(message => ({ id: `message:${message.id}`, kind: 'message' as const, message })));
+    if (streaming && status.displayText) rows.push({
+      id: 'streaming', kind: 'streaming',
+      message: { id: 'streaming', role: 'assistant', text: status.displayText, at: null, attachments: [], toolActivity: [], error: null, cancelled: false }
+    });
+    if (status.error && !streaming) rows.push({ id: 'turn-error', kind: 'turn-error', message: status.error });
+    rows.push(...approvals.map(approval => ({ id: `approval:${approval.id}`, kind: 'approval' as const, approval })));
+    return rows;
+  }, [hasMoreHistory, messages, loading, error, streaming, status.displayText, status.error, approvals]);
+
+  useLayoutEffect(() => {
+    const hasNewConversationContent =
+      messages.some(message => !seenMessageIdsRef.current.has(message.id)) ||
+      (streaming && (
+        !['streaming', 'cancelling'].includes(previousStreamRef.current.state) ||
+        status.displayText !== previousStreamRef.current.text
+      ));
+    seenMessageIdsRef.current = new Set(messages.map(message => message.id));
+    previousStreamRef.current = { state: status.state, text: status.displayText };
+    if (skipAutomaticScrollRef.current) {
+      skipAutomaticScrollRef.current = false;
+      return;
+    }
+    if (isAtBottomRef.current) {
+      setHasNewMessages(false);
+      virtualListRef.current?.scrollToBottom();
+    } else if (hasNewConversationContent) {
+      setHasNewMessages(true);
+    }
+  }, [timelineItems, messages, streaming, status.state, status.displayText]);
+
+  const renderTimelineItem = (item: ChatTimelineItem) => {
+    switch (item.kind) {
+      case 'load-earlier': return <div className="chat-load-earlier"><Button compact variant="ghost" disabled={loadingOlder} onClick={() => void loadOlderHistory()}>{loadingOlder ? '正在加载更早消息…' : '加载更早消息'}</Button></div>;
+      case 'loading': return <LoadingState label="正在读取会话…" />;
+      case 'error': return <ErrorNotice error={item.message} onRetry={() => void load()} />;
+      case 'empty': return <EmptyNotice icon="chat" title="还没有消息" detail="写下你要处理的事情。模型和 Agent 会按会话设置运行。" />;
+      case 'message': return <MessageBubble message={item.message} />;
+      case 'streaming': return <MessageBubble message={item.message} streaming />;
+      case 'turn-error': return <div className="turn-error" role="alert">{item.message}<div className="row"><Button compact variant="ghost" onClick={() => void chatClient.retry(session!.id).then(load).catch(cause => setError(messageOf(cause)))}>重试</Button><Button compact variant="ghost" onClick={() => void chatClient.continue(session!.id).then(load).catch(cause => setError(messageOf(cause)))}>继续</Button></div></div>;
+      case 'approval': return <ApprovalCard approval={item.approval} onDecide={decideApproval} />;
+    }
+  };
 
   async function send(text: string, attachments: { name: string; content: string; mimeType?: string }[]) {
     if (!session) return;
@@ -349,14 +472,30 @@ function ChatPage({ session, onNew, onOpenMemory }: { session: ChatSession | nul
   }
 
   if (!session) return <div className="content-page chat-empty-page"><EmptyNotice icon="chat" title="开始一段新会话" detail="会话记录保存在本机 Core 中。发送消息后，当前配置的模型与 Agent 将处理请求。" action={<Button variant="primary" icon="add" onClick={() => void onNew()}>新建会话</Button>} /></div>;
-  const streaming = ['streaming', 'cancelling'].includes(status.state);
   const providers = catalog?.modelProviders ?? [];
   const selectedProvider = providers.find(provider => provider.id === session.config.modelProvider) ?? providers.find(provider => provider.configured) ?? providers[0];
   const selectedModelKey = JSON.stringify([session.config.modelProvider ?? selectedProvider?.id ?? '', session.config.model || '']);
   return <div className="chat-workspace">
     <section className="conversation-pane">
       <div className="conversation-toolbar"><div><p className="eyebrow">CETAMESH · CHAT</p><h1>{session.title || '新会话'}</h1><div className="conversation-meta"><StatusBadge value={status.state || 'idle'} /><span>更新于 {relativeLabel(session.updatedAt)}</span><span>·</span><span>{catalog?.available === false ? catalog.reason || '模型状态不可用' : 'CetaMesh Desktop'}</span></div></div><div className="row"><IconButton label="刷新会话" icon="update" onClick={() => void load()} /><IconButton label="新建会话" icon="add" onClick={() => void onNew()} /></div></div>
-      <div className="message-stream" ref={streamRef} aria-live="polite">{loading && !messages.length ? <LoadingState label="正在读取会话…" /> : null}{error && <ErrorNotice error={error} onRetry={() => void load()} />}{!messages.length && !loading && !error && <EmptyNotice icon="chat" title="还没有消息" detail="写下你要处理的事情。模型和 Agent 会按会话设置运行。" />}{messages.map(message => <MessageBubble key={message.id} message={message} />)}{streaming && status.displayText && <MessageBubble message={{ id: 'streaming', role: 'assistant', text: status.displayText, at: null, attachments: [], toolActivity: [], error: null, cancelled: false }} streaming />}{status.error && !streaming && <div className="turn-error" role="alert">{status.error}<div className="row"><Button compact variant="ghost" onClick={() => void chatClient.retry(session.id).then(load).catch(cause => setError(messageOf(cause)))}>重试</Button><Button compact variant="ghost" onClick={() => void chatClient.continue(session.id).then(load).catch(cause => setError(messageOf(cause)))}>继续</Button></div></div>}{approvals.map(approval => <ApprovalCard key={approval.id} approval={approval} onDecide={decideApproval} />)}</div>
+      <VirtualList
+        items={timelineItems}
+        estimateSize={112}
+        height="100%"
+        getItemKey={chatTimelineKey}
+        isAnchorable={isChatMessageAnchor}
+        controllerRef={virtualListRef}
+        onScrollStateChange={atBottom => {
+          isAtBottomRef.current = atBottom;
+          if (atBottom) setHasNewMessages(false);
+        }}
+        overlay={hasNewMessages ? <Button compact variant="ghost" onClick={() => {
+          setHasNewMessages(false);
+          isAtBottomRef.current = true;
+          virtualListRef.current?.scrollToBottom();
+        }}>有新消息 · 跳到最新</Button> : null}
+        render={renderTimelineItem}
+      />
       <div className="composer-dock"><ChatComposer busy={streaming} models={providers} selectedModelKey={selectedModelKey} agentProviders={catalog?.agentProviders ?? []} selectedAgent={session.config.agentProvider ?? ''} onModelChange={value => { try { const [provider, model] = JSON.parse(value) as [string, string]; void updateModel(provider, model); } catch { setError('无法识别所选模型。'); } }} onAgentChange={updateAgent} onSend={send} onStop={() => void chatClient.stop(session.id).then(load).catch(cause => setError(messageOf(cause)))} /></div>
     </section>
     <ChatContextPanel task={linkedTask} memories={memories} approvals={approvals} onOpenMemory={onOpenMemory} />

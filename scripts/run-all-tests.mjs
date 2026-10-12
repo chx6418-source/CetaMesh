@@ -68,6 +68,7 @@ const REGISTRY = {
   'test-capability-coverage.mjs': { category: 'architecture' },
   'test-desktop-chat-product.mjs': { category: 'architecture' },
   'test-desktop-ui-v2-production.mjs': { category: 'architecture', note: 'Owner-selected Harbor WebView2 UI, typed bridge, secure bundle, and production no-HTTP contract' },
+  'test-desktop-chat-virtualization.mjs': { category: 'architecture', note: 'Harbor Chat React virtual-window, dynamic-height, and long-content fixtures' },
   'test-process-extension-host.mjs': { category: 'architecture' },
   'test-workspace-ipc.mjs': { category: 'architecture' },
   'test-smart-platform-routing.mjs': { category: 'architecture' },

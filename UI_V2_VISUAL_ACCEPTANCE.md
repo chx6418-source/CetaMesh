@@ -8,6 +8,14 @@
 
 `npm run build:ui` 与自动化合同只能证明代码可构建及路由合同成立，不能证明像素、裁切、滚动或真实系统缩放效果。
 
+## Chat history virtualization — automated fixture (2026-10-12)
+
+**Automated PASS:** `scripts/test-desktop-chat-virtualization.mjs` renders the production `VirtualList` React component with deterministic histories of 100, 200, and 500 messages, plus one streaming row. The initial viewport mounted 10/101, 10/201, and 10/501 rows; the bottom window mounted 10 rows in all three cases and kept the streaming row visible. No fixture mounted the full history.
+
+Stable-ID overlap/reconnect merge, older-page prepend order, visible-message anchor selection and offset restoration, the 48 px bottom threshold, and dynamic virtual row measurement passed. The measured virtual total sizes changed from 11,200 to 14,668 (100 messages), 22,400 to 25,868 (200), and 56,000 to 59,468 (500) after the long-content row sizes were applied. Fixtures include long Markdown, a large code block, a long URL, multiple tool cards, Agent activity, approval, artifact, and attachment rows.
+
+**NOT_RUN_ENVIRONMENT:** manual Chat scrolling/visual comparison, real DOM memory measurement, the requested window-size matrix, and Windows DPI captures remain unverified because `interactive browser/window inspection unavailable in current execution environment`. This does not block Task 2 submission, as directed. Automated fixture evidence is not visual acceptance.
+
 ## 页面基线
 
 | 页面 | 参考截图 | 当前源码映射 | 本轮状态 |

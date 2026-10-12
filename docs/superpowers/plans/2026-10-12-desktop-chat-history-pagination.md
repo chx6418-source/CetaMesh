@@ -45,10 +45,10 @@
 - Cursor: `beforeMessageId` identifies the earliest already loaded message; pages remain chronological and exclude the cursor item.
 - Page size is clamped to `1..200`; the initial request returns the newest page.
 
-- [ ] **Step 1: Add failing assertions** for 100-, 200-, and 500-message histories, multi-page order/no overlap, unknown cursor, empty history, and limits `0`, `-1`, `201`, and `NaN`.
-- [ ] **Step 2: Run `npm test -- --category architecture --category runtime`** and confirm pagination assertions fail.
-- [ ] **Step 3: Implement bounded cursor paging** in Chat service and carry its exact DTO through `ui.chat.history` and `chatClient.history`.
-- [ ] **Step 4: Run `npm test -- --category architecture --category runtime`** and confirm paging assertions pass.
+- [x] **Step 1: Add failing assertions** for 100-, 200-, and 500-message histories, multi-page order/no overlap, unknown cursor, empty history, and limits `0`, `-1`, `201`, and `NaN`.
+- [x] **Step 2: Run `npm test -- --category architecture --category runtime`** and confirm pagination assertions fail.
+- [x] **Step 3: Implement bounded cursor paging** in Chat service and carry its exact DTO through `ui.chat.history` and `chatClient.history`.
+- [x] **Step 4: Run `npm test -- --category architecture --category runtime`** and confirm paging assertions pass.
 
 ### Task 2: Older-page loading and scroll anchoring
 
@@ -63,8 +63,10 @@
 - Prepending preserves the first visible message and its viewport offset; stream append follows the existing bottom-stick behavior only when the user was already at the bottom.
 - The renderer continues to use `VirtualList`; it must not render all 500 messages as ordinary mapped DOM rows.
 
-- [ ] **Step 1: Add failing UI contract assertions** for cursor forwarding, page prepend order, `VirtualList` use, and bottom-stick state handling.
-- [ ] **Step 2: Run `npm test -- --category architecture`** and confirm the UI contract assertions fail.
-- [ ] **Step 3: Implement the page-loading and anchor-restoration behavior** with the existing virtual-list primitive.
-- [ ] **Step 4: Run `npm test -- --category architecture`** and confirm UI contract assertions pass.
-- [ ] **Step 5: Measure 100/200/500-message fixtures** with long Markdown, large code, overlong URL, and dense Tool/Agent cards; record mounted rows, paging, scroll-anchor, stream, and memory evidence in the visual acceptance record.
+- [x] **Step 1: Add failing UI contract assertions** for cursor forwarding, page prepend order, `VirtualList` use, and bottom-stick state handling.
+- [x] **Step 2: Run `npm test -- --category architecture`** and confirm the UI contract assertions fail.
+- [x] **Step 3: Implement the page-loading and anchor-restoration behavior** with the existing virtual-list primitive.
+- [x] **Step 4: Run `npm test -- --category architecture`** and confirm UI contract assertions pass.
+- [x] **Step 5: Measure 100/200/500-message fixtures** with long Markdown, large code, overlong URL, and dense Tool/Agent cards; record mounted rows, paging, scroll-anchor, stream, and memory evidence in the visual acceptance record. Automated row counts, scroll-anchor math, bottom behavior, and dynamic measurement are recorded in `UI_V2_VISUAL_ACCEPTANCE.md`; manual scrolling and real DOM memory measurement are `NOT_RUN_ENVIRONMENT` with the exact current-environment reason recorded there.
+
+Task 2 verification: `npm run build:ui` PASS; focused `npm test -- --category architecture --category runtime` PASS 44 / FAIL 0 / NOT_RUN_ENVIRONMENT 0; full `npm test` PASS 92 / FAIL 0 / NOT_RUN_ENVIRONMENT 6. The remaining environment skips are listed in the final closure report. Browser visual inspection was intentionally not attempted per Owner instruction.
