@@ -391,8 +391,13 @@ export function createDesktopUiService({ services = {}, system = services.system
     'ui.chat.sessions.archive': async p => projectSession(await chat('chat.sessions.archive', { id: idParam(p), archived: p.archived !== false })),
     'ui.chat.sessions.delete': async p => selected(await chat('chat.sessions.delete', { id: idParam(p) }), ['id', 'deleted']),
     'ui.chat.history': async p => {
-      const result = await chat('chat.history', { id: idParam(p), limit: Math.max(1, Math.min(200, Number(p.limit) || 100)) });
-      return { id: string(result.id, 128), total: Number(result.total) || 0, messages: (result.messages ?? []).map(projectMessage) };
+      const result = await chat('chat.history', { id: idParam(p), limit: p.limit, beforeMessageId: p.beforeMessageId });
+      return {
+        id: string(result.id, 128), total: Number(result.total) || 0,
+        messages: (result.messages ?? []).map(projectMessage),
+        nextBeforeMessageId: string(result.nextBeforeMessageId, 128) || null,
+        hasMore: result.hasMore === true
+      };
     },
     'ui.chat.status': async p => {
       const result = await chat('chat.status', { id: idParam(p) });

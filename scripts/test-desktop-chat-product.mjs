@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createChatService } from '../src/desktop/chat-service.js';
 import { createDesktopUiEventBus, createDesktopUiService } from '../src/desktop/ui-service.js';
+import { writeJsonAtomic } from '../src/storage/json-file.js';
 
 const root = path.resolve(import.meta.dirname, '..');
 const tempRoot = process.env.WHALEBRIDGE_TEST_TMPDIR || os.tmpdir();
@@ -718,6 +719,74 @@ function makeFullService({ withKey = true, fetchImpl, baseUrl = 'https://api.dee
     service?.close();
     fixture.close();
   }
+}
+
+// ── 19. 历史分页：exclusive cursor / chronological order / bounded limits ───
+{
+  const service = makeService();
+  const ui = createDesktopUiService({ services: { chatService: service } });
+  const seedHistory = async (count) => {
+    const session = await service.execute({ method: 'chat.sessions.create', params: { title: `history-${count}` } });
+    const messages = Array.from({ length: count }, (_, index) => ({
+      id: `history-${String(index).padStart(3, '0')}`,
+      role: index % 2 === 0 ? 'user' : 'assistant',
+      text: `message-${index}`,
+      at: index,
+      attachments: []
+    }));
+    writeJsonAtomic(path.join(service._store.historyDir, `${session.id}.json`), { schemaVersion: 1, messages });
+    return { session, messages };
+  };
+
+  const emptySession = await service.execute({ method: 'chat.sessions.create', params: { title: 'empty-history' } });
+  assert.deepEqual(await service.execute({ method: 'chat.history', params: { id: emptySession.id } }), {
+    id: emptySession.id, total: 0, messages: [], nextBeforeMessageId: null, hasMore: false
+  });
+
+  for (const count of [100, 200, 500]) {
+    const { session, messages } = await seedHistory(count);
+    const defaultPage = await service.execute({ method: 'chat.history', params: { id: session.id } });
+    assert.equal(defaultPage.total, count);
+    assert.equal(defaultPage.messages.length, Math.min(count, 100), `${count}-message default page is 100 or less`);
+    const first = await service.execute({ method: 'chat.history', params: { id: session.id, limit: 200 } });
+    assert.equal(first.messages.length, Math.min(count, 200), `${count}-message page obeys 200 cap`);
+    assert.deepEqual(first.messages.map(message => message.id), messages.slice(-Math.min(count, 200)).map(message => message.id));
+    assert.equal(first.hasMore, count > 200);
+    assert.equal(first.nextBeforeMessageId, count > 200 ? messages[count - 200].id : null);
+
+    if (count === 500) {
+      const loaded = first.messages.map(message => message.id);
+      const seen = new Set(loaded);
+      let cursor = first.nextBeforeMessageId;
+      while (cursor) {
+        const older = await service.execute({ method: 'chat.history', params: { id: session.id, limit: 200, beforeMessageId: cursor } });
+        for (const item of older.messages) {
+          assert.equal(seen.has(item.id), false, `cursor page must not overlap ${item.id}`);
+          seen.add(item.id);
+        }
+        loaded.unshift(...older.messages.map(message => message.id));
+        cursor = older.nextBeforeMessageId;
+        assert.equal(older.hasMore, Boolean(cursor));
+      }
+      assert.deepEqual(loaded, messages.map(message => message.id), 'all pages remain chronological with no gaps or duplicates');
+      const uiPage = await ui.execute({ method: 'ui.chat.history', params: { id: session.id, limit: 10, beforeMessageId: 'history-490' } });
+      assert.deepEqual([uiPage.messages[0]?.id, uiPage.messages.at(-1)?.id, uiPage.nextBeforeMessageId, uiPage.hasMore],
+        ['history-480', 'history-489', 'history-480', true], 'typed UI projection carries the exclusive cursor page contract');
+
+      const limits = [[0, 1], [-1, 1], [201, 200], [NaN, 100]];
+      for (const [limit, expected] of limits) {
+        const page = await service.execute({ method: 'chat.history', params: { id: session.id, limit } });
+        assert.equal(page.messages.length, expected, `limit ${String(limit)} clamps or falls back safely`);
+        assert.equal(page.total, 500);
+      }
+      await assert.rejects(
+        service.execute({ method: 'chat.history', params: { id: session.id, beforeMessageId: 'missing-message' } }),
+        error => error.code === 'INVALID_CURSOR'
+      );
+    }
+  }
+  ok('历史分页：100/200/500 消息、exclusive cursor、顺序/无重叠、未知 cursor 与边界 limit');
+  service.close();
 }
 
 fs.rmSync(temp, { recursive: true, force: true });

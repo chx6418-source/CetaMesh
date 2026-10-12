@@ -45,6 +45,7 @@ const MAX_TITLE_CHARS = 200;
 const MAX_PROMPT_CHARS = 32 * 1024;
 const MAX_ATTACHMENTS = 8;
 const MAX_ATTACHMENT_CHARS = 256 * 1024;
+const DEFAULT_HISTORY_PAGE_SIZE = 100;
 const MAX_MESSAGES_RETURNED = 200;
 const MAX_MESSAGE_CHARS_RETURNED = 32 * 1024;
 const FOLLOW_RECONNECT_MS = 2000;
@@ -296,17 +297,37 @@ export function createChatService({
     return { id: record.id, deleted: true };
   }
 
-  function history({ id, limit } = {}) {
+  function history({ id, limit = DEFAULT_HISTORY_PAGE_SIZE, beforeMessageId = null } = {}) {
     const record = sessionOrThrow(id);
     const all = readHistory(record.id);
-    const count = Math.min(Number(limit) || MAX_MESSAGES_RETURNED, MAX_MESSAGES_RETURNED);
-    const tail = all.slice(-count).map((message) => ({
+    const requestedLimit = Number(limit);
+    const count = Math.max(1, Math.min(
+      MAX_MESSAGES_RETURNED,
+      Number.isFinite(requestedLimit) ? Math.trunc(requestedLimit) : DEFAULT_HISTORY_PAGE_SIZE
+    ));
+    let endIndex = all.length;
+    if (beforeMessageId !== null && beforeMessageId !== undefined) {
+      if (typeof beforeMessageId !== 'string' || !beforeMessageId) {
+        throw chatError('INVALID_CURSOR', '历史消息游标无效');
+      }
+      endIndex = all.findIndex((message) => message?.id === beforeMessageId);
+      if (endIndex < 0) throw chatError('INVALID_CURSOR', '历史消息游标不存在');
+    }
+    const startIndex = Math.max(0, endIndex - count);
+    const page = all.slice(startIndex, endIndex).map((message) => ({
       ...message,
       text: typeof message.text === 'string' && message.text.length > MAX_MESSAGE_CHARS_RETURNED
         ? message.text.slice(0, MAX_MESSAGE_CHARS_RETURNED)
         : message.text
     }));
-    return { id: record.id, total: all.length, messages: tail };
+    const hasMore = startIndex > 0;
+    return {
+      id: record.id,
+      total: all.length,
+      messages: page,
+      nextBeforeMessageId: hasMore ? page[0]?.id ?? null : null,
+      hasMore
+    };
   }
 
   // ── 每会话配置 ───────────────────────────────────────────────────────────

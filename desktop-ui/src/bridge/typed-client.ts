@@ -195,7 +195,9 @@ export const chatClient = {
     archive: (id: string, archived = true) => uiCall<ChatSession>('ui.chat.sessions.archive', { id, archived }),
     remove: (id: string) => uiCall<{ id: string; deleted: boolean }>('ui.chat.sessions.delete', { id })
   },
-  history: (id: string, limit = 100) => uiCall<{ id: string; total: number; messages: ChatMessage[] }>('ui.chat.history', { id, limit }),
+  history: (id: string, limit = 100, beforeMessageId: string | null = null) => uiCall<{
+    id: string; total: number; messages: ChatMessage[]; nextBeforeMessageId: string | null; hasMore: boolean
+  }>('ui.chat.history', { id, limit, beforeMessageId }),
   status: (id: string) => uiCall<{ id: string; state: string; displayText: string; error: string | null; approvalId: string | null; approvalExpiresAt: string | number | null; routing: Record<string, unknown> }>('ui.chat.status', { id }),
   send: (id: string, text: string, attachments: Attachment[] = []) => uiCall<{ userMessageId?: string }>('ui.chat.send', { id, text, attachments }),
   stop: (id: string) => uiCall<{ stopped?: boolean; state?: string; reason?: string }>('ui.chat.stop', { id }),
