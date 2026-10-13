@@ -1,4 +1,5 @@
 import net from 'node:net';
+import crypto from 'node:crypto';
 import { startIpcProtocol } from '../control/ipc-protocol.js';
 import { PRIVILEGE_CONSOLE } from '../bridge-privilege.js';
 
@@ -89,10 +90,18 @@ export function createDesktopIpcRuntime({
     if (server) return server;
     const resolvedPipeName = String(pipeName ?? processRef.env?.WHALEBRIDGE_UI_PIPE ?? '').trim();
     if (!resolvedPipeName) return null;
+    const authToken = String(processRef.env?.WHALEBRIDGE_UI_AUTH_TOKEN ?? '');
+    if (!/^[a-f0-9]{64}$/i.test(authToken)) throw new Error('Native UI IPC authentication token is unavailable');
+    const expectedToken = Buffer.from(authToken, 'hex');
+    const authenticate = (request) => {
+      if (request.role !== 'console') return false;
+      if (typeof request.authToken !== 'string' || !/^[a-f0-9]{64}$/i.test(request.authToken)) return false;
+      return crypto.timingSafeEqual(Buffer.from(request.authToken, 'hex'), expectedToken);
+    };
 
     const nextServer = netModule.createServer(socket => {
       socket.setNoDelay(true);
-      const connection = startIpcProtocol({ input: socket, output: socket, dispatch });
+      const connection = startIpcProtocol({ input: socket, output: socket, dispatch, authenticate });
       connection.done.catch(error => {
         if (!socket.destroyed) log('Native UI IPC connection failed: ' + (error?.message ?? error));
       });

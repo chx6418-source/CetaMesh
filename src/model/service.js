@@ -8,7 +8,7 @@
 // Key 纪律：本层只返回 hasKey 布尔，任何列表/目录/错误都不携带 Key 材料。
 import { modelRuntimeError, MODEL_ERROR_CODES } from './types.js';
 
-export function createModelRuntimeService({ registry, secrets, log = () => {} } = {}) {
+export function createModelRuntimeService({ registry, secrets, preferredProviderId = null, log = () => {} } = {}) {
   if (!registry || typeof registry.require !== 'function') {
     throw new Error('createModelRuntimeService 需要 registry（src/model/registry.js）');
   }
@@ -29,9 +29,16 @@ export function createModelRuntimeService({ registry, secrets, log = () => {} } 
     return configuredProviderIds().has(String(providerId ?? ''));
   }
 
+  function preferredConfiguredProviderId() {
+    const id = typeof preferredProviderId === 'function' ? preferredProviderId() : preferredProviderId;
+    return id && registry.has(id) && hasKey(id) ? id : null;
+  }
+
   /** 解析 Provider：显式 id 必须已注册且已配置 Key；null 时按注册顺序取第一个有 Key 的。 */
   function resolveProvider(providerId) {
     if (providerId === null || providerId === undefined || providerId === '') {
+      const preferred = preferredConfiguredProviderId();
+      if (preferred) return registry.require(preferred);
       for (const id of registry.ids()) {
         if (hasKey(id)) return registry.require(id);
       }
@@ -52,6 +59,8 @@ export function createModelRuntimeService({ registry, secrets, log = () => {} } 
 
   /** 自动解析默认 Provider id（无 Key 配置时返回 null，调用方回退 DSH 直连路径）。 */
   function defaultProviderId() {
+    const preferred = preferredConfiguredProviderId();
+    if (preferred) return preferred;
     for (const id of registry.ids()) {
       if (hasKey(id)) return id;
     }

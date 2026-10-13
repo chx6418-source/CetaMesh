@@ -128,6 +128,12 @@ function makeService({ withKey = true, fetchImpl, baseUrl = 'https://api.deepsee
   assert.equal(withKey.service.resolveProvider(null).id, 'deepseek-official', '自动解析按注册顺序取第一个有 Key 的');
   assert.equal(withKey.service.defaultProviderId(), 'deepseek-official');
   assert.equal(withKey.service.resolveProvider('openai').id, 'openai');
+  let preferred = 'openai';
+  const selected = createModelRuntimeService({ registry: withKey.registry, secrets: withKey.secrets, preferredProviderId: () => preferred });
+  assert.equal(selected.defaultProviderId(), 'openai', '保存的默认 Provider 覆盖注册顺序');
+  assert.equal(selected.resolveProvider(null).id, 'openai', '新回合自动解析使用保存的 Provider');
+  preferred = 'unregistered';
+  assert.equal(selected.defaultProviderId(), 'deepseek-official', '无效默认 Provider 回落到已配置项');
   ok('resolveProvider：无 Key fail-closed / 自动解析按优先级 / 显式指定');
 }
 

@@ -19,6 +19,7 @@ import {
 } from '../src/onboarding/index.js';
 import { createProviderSecrets } from '../src/providers/secrets.js';
 import { createSettingsService } from '../src/settings/index.js';
+import { createDesktopUiService } from '../src/desktop/ui-service.js';
 
 let passed = 0;
 let failed = 0;
@@ -132,13 +133,40 @@ try {
     params: { provider: 'deepseek-official', apiKey: 'sk-test-abcdefgh', fetchImpl: okFetch }
   });
   check('测试成功后自动完成 connection 步骤', autoTest.connectionStepCompleted === true);
+  const existingDir = tmp('cetamesh-onb-existing-key-');
+  const existingSecrets = createProviderSecrets({ root: existingDir });
+  existingSecrets.set({ provider: 'deepseek-official', apiKey: 'sk-existing-abcdefgh' });
+  const existing = createOnboardingService({ stateDir: existingDir, providerSecrets: existingSecrets });
+  for (const stepId of ['welcome', 'provider']) await existing.execute({ method: 'onboarding.completeStep', params: { stepId } });
+  const existingTest = await existing.execute({ method: 'onboarding.testProvider', params: { provider: 'deepseek-official', fetchImpl: okFetch } });
+  check('已有 API Key 无需重输即可测试并保留 Provider 步骤', existingTest.ok === true && stepState(existing.status(), 'connection') === 'completed' && stepState(existing.status(), 'provider') === 'completed');
 
   // ── 6. 默认模型写入设置 ──────────────────────────────────────────────
   const modelDir = tmp('cetamesh-onb-model-');
   const settingsService = createSettingsService({ stateDir: modelDir });
-  const modelService = createOnboardingService({ stateDir: modelDir, settingsService });
+  const modelRuntime = { isRegistered: id => id === 'deepseek-official', hasKey: id => id === 'deepseek-official' };
+  const modelService = createOnboardingService({ stateDir: modelDir, settingsService, modelRuntime });
+  for (const stepId of ['welcome', 'provider', 'connection']) {
+    await modelService.execute({ method: 'onboarding.completeStep', params: { stepId } });
+  }
+  const ui = createDesktopUiService({ system: { onboarding: modelService } });
+  const beforeModel = await ui.execute({ method: 'ui.onboarding.status' });
+  equal('投影使用 Core state 标记已完成步骤', beforeModel.steps.map(step => step.status).slice(0, 4), ['completed', 'completed', 'completed', 'current']);
+  const invalidProvider = await captureError(() => modelService.execute({ method: 'onboarding.setModel', params: { provider: 'unknown', model: 'deepseek-chat' } }));
+  check('未知 Provider 不推进模型步骤', invalidProvider?.code === 'ONBOARDING_INVALID_PARAMS' && stepState(modelService.status(), 'model') === 'current');
   const setModel = await modelService.execute({ method: 'onboarding.setModel', params: { provider: 'deepseek-official', model: 'deepseek-chat' } });
-  equal('默认模型写入设置并生效', [setModel.persisted, settingsService.store.get().settings.models.defaultModel], [true, 'deepseek-chat']);
+  equal('默认 Provider 与 Model 一起保存', [setModel.persisted, settingsService.store.get().settings.models.provider, settingsService.store.get().settings.models.defaultModel], [true, 'deepseek-official', 'deepseek-chat']);
+  equal('保存后投影推进到可选步骤', [(await ui.execute({ method: 'ui.onboarding.status' })).steps[3].status, (await ui.execute({ method: 'ui.onboarding.status' })).currentStep], ['completed', 'agent']);
+  await modelService.execute({ method: 'onboarding.setModel', params: { provider: 'deepseek-official', model: 'deepseek-chat' } });
+  equal('重复保存不会重置引导进度', stepState(modelService.status(), 'model'), 'completed');
+  const restartedModel = createOnboardingService({ stateDir: modelDir, settingsService, modelRuntime });
+  equal('重启后默认模型和进度保留', [settingsService.store.get().settings.models.defaultModel, stepState(restartedModel.status(), 'model')], ['deepseek-chat', 'completed']);
+  const failedDir = tmp('cetamesh-onb-model-failed-');
+  const failedSettings = { store: { update() { throw new Error('disk full'); } } };
+  const failedModel = createOnboardingService({ stateDir: failedDir, settingsService: failedSettings, modelRuntime });
+  for (const stepId of ['welcome', 'provider', 'connection']) await failedModel.execute({ method: 'onboarding.completeStep', params: { stepId } });
+  const failedSave = await captureError(() => failedModel.execute({ method: 'onboarding.setModel', params: { provider: 'deepseek-official', model: 'deepseek-chat' } }));
+  check('持久化失败不推进模型步骤', failedSave?.message === 'disk full' && stepState(failedModel.status(), 'model') === 'current');
 
   // ── 7. 损坏的进度文件 ────────────────────────────────────────────────
   const corruptDir = tmp('cetamesh-onb-corrupt-');

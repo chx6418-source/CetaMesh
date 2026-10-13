@@ -432,7 +432,7 @@ function abortableSseFetch() {
 }
 
 /** 组装带 Model Runtime / Router / Agent 的完整 chat-service（全 fixture，不联网不碰 DSH）。 */
-function makeFullService({ withKey = true, fetchImpl, baseUrl = 'https://api.deepseek.test', router = true, api = dshDownApi(), agent = false, stateDir: overrideDir, buildProductContext, onEvent } = {}) {
+function makeFullService({ withKey = true, fetchImpl, baseUrl = 'https://api.deepseek.test', router = true, api = dshDownApi(), agent = false, stateDir: overrideDir, buildProductContext, defaultModelConfig, onEvent } = {}) {
   const dir = overrideDir ?? path.join(stateDir, 's1-' + (++caseSeq));
   fs.mkdirSync(dir, { recursive: true });
   const secrets = createProviderSecrets({ root: dir });
@@ -472,6 +472,7 @@ function makeFullService({ withKey = true, fetchImpl, baseUrl = 'https://api.dee
     router: routerService,
     buildProductContext,
     defaults: { provider: 'deepseek-official', model: 'deepseek-flash', reasoningEffort: 'max' },
+    defaultModelConfig,
     stateDir: dir,
     onEvent
   });
@@ -479,6 +480,18 @@ function makeFullService({ withKey = true, fetchImpl, baseUrl = 'https://api.dee
 }
 
 // ── 12. Standalone Chat：DSH 完全不可达，仅凭 Model Provider Key 完成整回合 ────
+{
+  const f = sseFetch();
+  const { service } = makeFullService({ fetchImpl: f, defaultModelConfig: () => ({ provider: 'deepseek-official', defaultModel: 'deepseek-flash' }) });
+  const session = await service.execute({ method: 'chat.sessions.create', params: {} });
+  assert.equal(session.config.modelProvider, 'deepseek-official');
+  assert.equal(session.config.model, 'deepseek-flash');
+  await service.execute({ method: 'chat.send', params: { id: session.id, text: '验证默认模型' } });
+  assert.equal(f.requests[0].body.model, 'deepseek-flash', '显式保存的模型即使与 DSH 默认同名也必须传给 Model Runtime');
+  ok('新会话继承首次设置保存的默认 Provider 和 Model');
+  service.close();
+}
+
 {
   const f = sseFetch();
   const { service, api } = makeFullService({ fetchImpl: f });

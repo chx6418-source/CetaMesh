@@ -123,7 +123,11 @@ export function createCetaMeshServices(options = {}) {
       })
     ]
   });
-  const modelRuntime = createModelRuntimeService({ registry: modelRegistry, secrets: providerSecrets, log });
+  const modelRuntime = createModelRuntimeService({
+    registry: modelRegistry, secrets: providerSecrets,
+    preferredProviderId: () => settingsService.store.get().settings.models.provider,
+    log
+  });
   // Chat and Managed Agent are composed before all context sources exist; the callback is bound later.
   let productContextService = null;
   let managedAgent = null;
@@ -174,6 +178,7 @@ export function createCetaMeshServices(options = {}) {
     platformRoute: request => platformRuntime.route(request),
     agentFollow: request => agentBroker.follow(request),
     defaults: dshDefaults,
+    defaultModelConfig: () => settingsService.store.get().settings.models,
     defaultAgentProvider: () => settingsService.store.get().settings.agents.defaultAgentProvider,
     stateDir,
     onTurnEnd: payload => agentBroker.reportTurnEnd(payload),
@@ -384,6 +389,7 @@ export function createCetaMeshServices(options = {}) {
   const onboardingService = createOnboardingService({
     stateDir,
     providerSecrets,
+    modelRuntime,
     settingsService,
     extensionService,
     pluginCenterService,

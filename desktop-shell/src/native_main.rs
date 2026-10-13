@@ -29,7 +29,7 @@ mod webview_ui;
 
 use std::env;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use core_launch::{CoreLaunchSpec, ResolveOptions};
@@ -38,6 +38,17 @@ use eframe::egui;
 use ipc_client::IpcClient;
 use native_ui::{CoreApi, NativeUi};
 use supervisor::{Status, StatusListener, Supervisor, SupervisorConfig};
+
+// Per-shell, in-memory credential for the private UI pipe. It is passed only to
+// this shell's supervised Core child and is never written to the data directory.
+fn client_auth_token() -> &'static str {
+    static TOKEN: OnceLock<String> = OnceLock::new();
+    TOKEN.get_or_init(|| {
+        let mut random = [0_u8; 32];
+        getrandom::fill(&mut random).expect("OS randomness is required for native UI IPC");
+        random.iter().map(|byte| format!("{byte:02x}")).collect()
+    })
+}
 
 fn current_exe_dir() -> PathBuf {
     env::current_exe()

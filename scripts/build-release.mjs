@@ -36,11 +36,12 @@ const require = createRequire(import.meta.url);
 const PKG = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
 
 function parseArgs(argv) {
-  const options = { noWebUi: true, dev: false };
+  const options = { noWebUi: true, dev: false, useCurrentBuildNumber: false };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--no-web-ui') options.noWebUi = true;
     else if (arg === '--dev') options.dev = true;
+    else if (arg === '--use-current-build-number') options.useCurrentBuildNumber = true;
     else if (arg === '--core-dir') options.coreDir = path.resolve(argv[++i] ?? '');
     else if (arg === '--shell-exe') options.shellExe = path.resolve(argv[++i] ?? '');
     else if (arg === '--debug-shell') options.debugShell = path.resolve(argv[++i] ?? '');
@@ -65,7 +66,7 @@ const initialDirty = Boolean(gitOutput(['status', '--porcelain']));
 if (initialDirty && !options.dev) fail('formal Release requires a clean source tree; use --dev to label a working-tree build DEV');
 const sourceCommit = gitOutput(['rev-parse', 'HEAD']) || 'unknown';
 const sourceCommitShort = gitOutput(['rev-parse', '--short', 'HEAD']) || 'unknown';
-const buildNumber = releaseVersion.buildNumber + 1;
+const buildNumber = releaseVersion.buildNumber + (options.useCurrentBuildNumber ? 0 : 1);
 const buildChannel = options.dev ? 'dev' : releaseVersion.channel;
 const setupFilename = formatArtifactName({ productVersion: releaseVersion.productVersion, buildNumber, platform: 'windows-x64' });
 const OUT_DIR = options.outDir ?? releaseArtifactDirectory({ rootDir: ROOT, channel: buildChannel, productVersion: releaseVersion.productVersion, buildNumber });
@@ -548,8 +549,10 @@ if (manifest.sizes.totalBytes !== directorySize(BUILD_DIR)) {
   fail('release-manifest.json 的 totalBytes 未能与最终发布目录大小收敛');
 }
 
-const nextCounter = bumpBuildNumber({ rootDir: ROOT });
-if (nextCounter.buildNumber !== buildNumber) fail('release build counter changed during packaging; refusing to publish');
+if (!options.useCurrentBuildNumber) {
+  const nextCounter = bumpBuildNumber({ rootDir: ROOT });
+  if (nextCounter.buildNumber !== buildNumber) fail('release build counter changed during packaging; refusing to publish');
+}
 
 // Publish one canonical immutable build after the staged candidate is complete.
 try {

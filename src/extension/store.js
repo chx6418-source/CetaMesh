@@ -34,13 +34,18 @@ export function createExtensionStore({ stateDir, now = () => Date.now() } = {}) 
 
   function load() {
     if (loaded) return;
-    loaded = true;
     const raw = loadRegistryFile(file, null);
-    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return;
-    const list = Array.isArray(raw.extensions) ? raw.extensions : [];
-    for (const item of list) {
-      if (item && typeof item.id === 'string' && item.id) entries.set(item.id, item);
+    if (!raw) { loaded = true; return; }
+    if (typeof raw !== 'object' || Array.isArray(raw)) {
+      throw extensionError('REGISTRY_CORRUPT', '扩展注册表根节点必须是对象：' + file);
     }
+    const list = Array.isArray(raw.extensions) ? raw.extensions : [];
+    const nextEntries = new Map();
+    for (const item of list) {
+      if (item && typeof item.id === 'string' && item.id) nextEntries.set(item.id, item);
+    }
+    for (const [id, entry] of nextEntries) entries.set(id, entry);
+    loaded = true;
   }
 
   function persist() {

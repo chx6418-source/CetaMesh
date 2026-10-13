@@ -61,6 +61,23 @@ const caughtCode = (fn) => {
   fs.mkdirSync(path.join(corruptDir, 'tasks'));
   fs.writeFileSync(path.join(corruptDir, 'tasks', 'tasks.json'), '{oops', 'utf8');
   assert(caughtCode(() => createTaskStore({ stateDir: corruptDir }).load()) === 'STORE_CORRUPT', 'Task：损坏文件 → STORE_CORRUPT（fail-closed，码不变）');
+  const failedLoad = createTaskStore({ stateDir: corruptDir });
+  assert(caughtCode(() => failedLoad.load()) === 'STORE_CORRUPT' && caughtCode(() => failedLoad.count()) === 'STORE_CORRUPT', 'Task 读取失败后不得假加载');
+}
+{
+  const dir = freshDir();
+  const store = createTaskStore({ stateDir: dir });
+  const task = { id: 'rollback', goal: 'old', status: 'running', rev: 1 };
+  store.insert(task);
+  const before = fs.readFileSync(store.file, 'utf8');
+  const beforeRevision = store.fileRevision();
+  const rename = fs.renameSync;
+  fs.renameSync = () => { throw Object.assign(new Error('disk full'), { code: 'ENOSPC' }); };
+  try {
+    assert(caughtCode(() => store.update(task.id, 1, (current) => ({ ...current, goal: 'new' }))) === 'WRITE_FAILED', 'Task 写失败抛出 StorageError');
+    assert(store.get(task.id).goal === 'old' && store.fileRevision() === beforeRevision && fs.readFileSync(store.file, 'utf8') === before, 'Task 写失败内存、revision、磁盘保持一致');
+    assert(caughtCode(() => store.remove(task.id, 1)) === 'WRITE_FAILED' && store.get(task.id)?.goal === 'old', 'Task 删除落盘失败回滚');
+  } finally { fs.renameSync = rename; }
 }
 
 // ── 2. Memory Store：分区检索 + BOM + 损坏 ───────────────────────────────────
@@ -85,6 +102,23 @@ const caughtCode = (fn) => {
   fs.mkdirSync(path.join(corruptDir, 'memory'));
   fs.writeFileSync(path.join(corruptDir, 'memory', 'memories.json'), 'not json at all', 'utf8');
   assert(caughtCode(() => createMemoryStore({ stateDir: corruptDir }).load()) === 'STORE_CORRUPT', 'Memory：损坏 → STORE_CORRUPT（码不变）');
+  const failedLoad = createMemoryStore({ stateDir: corruptDir });
+  assert(caughtCode(() => failedLoad.load()) === 'STORE_CORRUPT' && caughtCode(() => failedLoad.count()) === 'STORE_CORRUPT', 'Memory 读取失败后不得假加载');
+}
+{
+  const dir = freshDir();
+  const store = createMemoryStore({ stateDir: dir });
+  const record = { id: 'rollback', type: 'working', scopeKey: 'global:', content: 'old', tags: [], rev: 1 };
+  store.insert(record);
+  const before = fs.readFileSync(store.file, 'utf8');
+  const beforeRevision = store.fileRevision();
+  const rename = fs.renameSync;
+  fs.renameSync = () => { throw Object.assign(new Error('rename denied'), { code: 'EIO' }); };
+  try {
+    assert(caughtCode(() => store.update(record.id, 1, (current) => ({ ...current, content: 'new' }))) === 'WRITE_FAILED', 'Memory 更新落盘失败');
+    assert(store.get(record.id).content === 'old' && store.fileRevision() === beforeRevision && fs.readFileSync(store.file, 'utf8') === before, 'Memory 写失败内存、revision、磁盘保持一致');
+    assert(caughtCode(() => store.remove(record.id, 1)) === 'WRITE_FAILED' && store.get(record.id)?.content === 'old', 'Memory 删除落盘失败回滚');
+  } finally { fs.renameSync = rename; }
 }
 
 // ── 3. Settings Store：损坏回落默认 + lastError 如实上报 ─────────────────────
@@ -103,6 +137,9 @@ const caughtCode = (fn) => {
   corruptStore.load();
   assert(corruptStore.get().lastError?.includes('解析失败') === true, 'Settings：损坏 → 回落默认 + lastError 上报（不静默、不阻断启动）');
   assert(corruptStore.get().settings !== null, 'Settings：损坏后仍返回可用默认值');
+  corruptStore.update('general', { theme: 'dark' });
+  const backup = fs.readdirSync(path.join(corruptDir, 'settings')).find((name) => name.startsWith('settings.corrupt.'));
+  assert(backup && fs.readFileSync(path.join(corruptDir, 'settings', backup), 'utf8') === '{{{', 'Settings 保存前原样备份损坏文件');
 }
 
 // ── 4. Extension Registry：损坏 → REGISTRY_CORRUPT（码不变） ─────────────────
@@ -118,6 +155,8 @@ const caughtCode = (fn) => {
   fs.mkdirSync(path.join(corruptDir, 'extensions'));
   fs.writeFileSync(path.join(corruptDir, 'extensions', 'registry.json'), '\uFEFF[broken', 'utf8');
   assert(caughtCode(() => createExtensionStore({ stateDir: corruptDir }).load()) === 'REGISTRY_CORRUPT', 'Extension：损坏（含 BOM）→ REGISTRY_CORRUPT');
+  const failedLoad = createExtensionStore({ stateDir: corruptDir });
+  assert(caughtCode(() => failedLoad.load()) === 'REGISTRY_CORRUPT' && caughtCode(() => failedLoad.list()) === 'REGISTRY_CORRUPT', 'Extension 读取失败后不得假加载');
 }
 
 // ── 5. Mesh Trust（persistent truth）：损坏 → TRUST_CORRUPT ──────────────────

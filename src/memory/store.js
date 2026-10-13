@@ -92,28 +92,31 @@ export function createMemoryStore({ stateDir, now = () => Date.now(), idFactory 
 
   function load() {
     if (loaded) return;
-    loaded = true;
     const raw = loadMemoryFile(file, null);
-    if (!raw) return;
+    if (!raw) { loaded = true; return; }
     if (typeof raw !== 'object' || Array.isArray(raw)) {
       throw memoryError('STORE_CORRUPT', '记忆数据根节点必须是对象：' + file);
     }
-    fileRevision = Number.isSafeInteger(raw.revision) && raw.revision > 0 ? raw.revision : 0;
     const list = Array.isArray(raw.memories) ? raw.memories : [];
+    const nextRecords = [];
     for (const item of list) {
       const record = normalizeLoadedRecord(item);
-      if (record) indexRecord(record);
+      if (record) nextRecords.push(record);
     }
+    for (const record of nextRecords) indexRecord(record);
+    fileRevision = Number.isSafeInteger(raw.revision) && raw.revision > 0 ? raw.revision : 0;
+    loaded = true;
   }
 
   function persist() {
-    fileRevision += 1;
+    const nextRevision = fileRevision + 1;
     writeJsonAtomic(file, {
       schemaVersion: MEMORY_SCHEMA_VERSION,
-      revision: fileRevision,
+      revision: nextRevision,
       updatedAt: now(),
       memories: [...records.values()]
     });
+    fileRevision = nextRevision;
   }
 
   function get(id) {
@@ -171,7 +174,7 @@ export function createMemoryStore({ stateDir, now = () => Date.now(), idFactory 
     }
     if (records.has(record.id)) throw memoryError('DUPLICATE_ID', '记忆 id 已存在：' + record.id);
     indexRecord(record);
-    persist();
+    try { persist(); } catch (error) { unindexRecord(record); throw error; }
     return { ...record, tags: [...record.tags] };
   }
 
@@ -190,7 +193,7 @@ export function createMemoryStore({ stateDir, now = () => Date.now(), idFactory 
     next.rev = record.rev + 1;
     next.updatedAt = next.updatedAt || now();
     records.set(record.id, next);
-    persist();
+    try { persist(); } catch (error) { records.set(record.id, record); throw error; }
     return { ...next, tags: [...next.tags] };
   }
 
@@ -205,7 +208,7 @@ export function createMemoryStore({ stateDir, now = () => Date.now(), idFactory 
       throw memoryError('MEMORY_CONFLICT', '记忆已被其它操作修改（期望 rev ' + expectedRev + '，当前 rev ' + record.rev + '）');
     }
     unindexRecord(record);
-    persist();
+    try { persist(); } catch (error) { indexRecord(record); throw error; }
     return { id: record.id, deleted: true };
   }
 

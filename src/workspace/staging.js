@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { isInsideRoot } from './boundary.js';
 
 const DEFAULT_MAX_FILES = 25_000;
 const DEFAULT_MAX_BYTES = 512 * 1024 * 1024;
@@ -26,8 +27,7 @@ function fail(code, message, cause) {
 }
 
 function pathContains(parent, candidate) {
-  const relative = path.relative(path.resolve(parent), path.resolve(candidate));
-  return relative === '' || (!relative.startsWith('..' + path.sep) && relative !== '..' && !path.isAbsolute(relative));
+  return isInsideRoot(parent, candidate);
 }
 
 function pathsOverlap(a, b) {
@@ -52,11 +52,32 @@ function sensitiveName(name) {
 
 function normalizeRoots(roots) {
   return [...new Set((Array.isArray(roots) ? roots : []).filter((root) => typeof root === 'string' && root.trim())
-    .map((root) => path.resolve(root)))];
+    .map((root) => canonicalRealPath(root)))];
+}
+
+// Resolve aliases through the nearest existing ancestor, including a staging directory
+// that has not been created yet. A failed realpath must never become a lexical allow.
+function canonicalRealPath(input) {
+  const suffix = [];
+  let cursor = path.resolve(input);
+  for (;;) {
+    try {
+      const real = fs.realpathSync.native(cursor);
+      return path.join(real, ...suffix);
+    } catch (error) {
+      if (error?.code !== 'ENOENT' && error?.code !== 'ENOTDIR') {
+        fail('STAGING_PATH_INVALID', 'Unable to resolve Workspace path', error);
+      }
+      const parent = path.dirname(cursor);
+      if (parent === cursor) fail('STAGING_PATH_INVALID', 'Unable to resolve Workspace path', error);
+      suffix.unshift(path.basename(cursor));
+      cursor = parent;
+    }
+  }
 }
 
 function assertStageOutsideWorkspaces(stagingRoot, workspaceRoots) {
-  const root = path.resolve(stagingRoot);
+  const root = canonicalRealPath(stagingRoot);
   for (const workspace of workspaceRoots) {
     if (pathsOverlap(root, workspace)) {
       fail('STAGING_ROOT_OVERLAPS_WORKSPACE', 'Agent staging directory overlaps a registered Workspace');
@@ -82,6 +103,11 @@ function walkFiles(root, { maxFiles = DEFAULT_MAX_FILES, maxBytes = DEFAULT_MAX_
       let stat;
       try { stat = fs.lstatSync(source); } catch { /* The entry disappeared during the bounded snapshot walk. */ continue; }
       if (stat.isSymbolicLink()) continue;
+      let realSource;
+      try { realSource = fs.realpathSync.native(source); }
+      catch (error) { fail('STAGING_READ_FAILED', 'Unable to resolve a Task Workspace entry', error); }
+      if (!pathContains(root, realSource)) fail('STAGING_PATH_ESCAPE', 'Task Workspace entry resolves outside its root');
+      if (excluded.some((excludedRoot) => pathContains(excludedRoot, realSource))) continue;
       if (stat.isDirectory()) {
         visit(source, rel, depth + 1);
         continue;
@@ -106,15 +132,20 @@ export async function createStagingWorkspace({ taskId, workspaceId, sourceRoot, 
   if (!String(taskId ?? '').trim()) fail('TASK_REQUIRED', 'A Task is required for staging');
   if (!String(workspaceId ?? '').trim()) fail('WORKSPACE_REQUIRED', 'A Workspace is required for staging');
   if (typeof sourceRoot !== 'string' || !path.isAbsolute(sourceRoot)) fail('WORKSPACE_REQUIRED', 'Workspace source root must be an absolute registered root');
-  const source = fs.realpathSync.native(sourceRoot);
-  const stageBase = path.resolve(stagingRoot || path.join(os.tmpdir(), 'CetaMesh', 'agent-staging'));
+  const source = canonicalRealPath(sourceRoot);
+  const stageBase = canonicalRealPath(stagingRoot || path.join(os.tmpdir(), 'CetaMesh', 'agent-staging'));
   const roots = normalizeRoots([source, ...additionalWorkspaceRoots]);
   assertStageOutsideWorkspaces(stageBase, roots);
+  const otherRoots = normalizeRoots(additionalWorkspaceRoots);
+  if (otherRoots.some((workspaceRoot) =>
+    !pathContains(source, workspaceRoot) && pathContains(workspaceRoot, source))) {
+    fail('WORKSPACE_OVERLAP', 'Task Workspace is nested in another registered Workspace');
+  }
+  const nestedWorkspaceRoots = otherRoots
+    .filter((workspaceRoot) => !pathContains(workspaceRoot, source) && pathContains(source, workspaceRoot));
   fs.mkdirSync(stageBase, { recursive: true, mode: 0o700 });
   const stage = path.join(stageBase, crypto.randomUUID());
   fs.mkdirSync(stage, { recursive: false, mode: 0o700 });
-  const nestedWorkspaceRoots = normalizeRoots(additionalWorkspaceRoots)
-    .filter((workspaceRoot) => workspaceRoot !== source && pathContains(source, workspaceRoot));
   const excluded = normalizeRoots([...excludedRoots, ...nestedWorkspaceRoots]);
   try {
     const snapshot = walkFiles(source, { maxFiles, maxBytes, excludedRoots: excluded });
@@ -125,6 +156,10 @@ export async function createStagingWorkspace({ taskId, workspaceId, sourceRoot, 
       // Recheck leaf type immediately before copying. Symlinks and special files stay out.
       const stat = fs.lstatSync(sourcePath);
       if (!stat.isFile() || stat.isSymbolicLink()) continue;
+      const realSource = fs.realpathSync.native(sourcePath);
+      if (!pathContains(source, realSource) || excluded.some((excludedRoot) => pathContains(excludedRoot, realSource))) {
+        fail('STAGING_PATH_ESCAPE', 'Task Workspace file changed to an excluded or external location');
+      }
       fs.copyFileSync(sourcePath, targetPath, fs.constants.COPYFILE_EXCL);
     }
     return {

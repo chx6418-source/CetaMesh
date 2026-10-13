@@ -168,6 +168,8 @@ pub fn probe_ipc(pipe_name: &str, timeout: Duration) -> Result<(), String> {
         "version": 1,
         "id": "supervisor-ready",
         "method": "core.ping",
+        "role": "console",
+        "authToken": crate::client_auth_token(),
         "params": {}
     });
     let request_bytes =
@@ -767,6 +769,7 @@ fn spawn_worker(config: &SupervisorConfig) -> Result<Child, String> {
     }
     if let Some(pipe_name) = config.ipc_pipe.as_deref() {
         command.env("WHALEBRIDGE_UI_PIPE", pipe_name);
+        command.env("WHALEBRIDGE_UI_AUTH_TOKEN", crate::client_auth_token());
     }
     command.spawn().map_err(|error| {
         format!(

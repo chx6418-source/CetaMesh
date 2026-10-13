@@ -49,6 +49,7 @@ async function freePort() {
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-ws-ipc-'));
 // 与 Rust supervisor 一致：WHALEBRIDGE_UI_PIPE 传完整管道路径（\\.\pipe\<name>）。
 const pipePath = `\\\\.\\pipe\\cetamesh-ws-ipc-${process.pid}-${Math.random().toString(16).slice(2, 8)}`;
+const ipcAuthToken = 'a'.repeat(64);
 let worker = null;
 let client = null;
 let pass = 0;
@@ -87,7 +88,8 @@ async function main() {
       ...process.env,
       WHALEBRIDGE_DATA_DIR: tempRoot,
       WHALEBRIDGE_RESOURCE_DIR: ROOT,
-      WHALEBRIDGE_UI_PIPE: pipePath
+      WHALEBRIDGE_UI_PIPE: pipePath,
+      WHALEBRIDGE_UI_AUTH_TOKEN: ipcAuthToken
     }
   });
   let workerStderr = '';
@@ -127,9 +129,10 @@ async function main() {
   });
 
   let nextId = 1;
-  async function call(method, params) {
+  async function call(method, params, { authToken = ipcAuthToken, role = 'console' } = {}) {
     const id = `t${nextId++}`;
-    client.write(encodeFrame({ version: 1, id, method, ...(params === undefined ? {} : { params }) }));
+    client.write(encodeFrame({ version: 1, id, method, role,
+      ...(authToken === null ? {} : { authToken }), ...(params === undefined ? {} : { params }) }));
     const callDeadline = Date.now() + 20_000;
     for (;;) {
       const index = inbox.findIndex((message) => message.id === id);
@@ -145,6 +148,16 @@ async function main() {
     const message = await call('core.ping');
     assert.equal(message.ok, true);
     assert.equal(message.result.status, 'pong');
+  });
+
+  await check('UI IPC rejects missing, invalid token and wrong role', async () => {
+    for (const options of [{ authToken: null }, { authToken: 'b'.repeat(64) }, { role: 'agent' }]) {
+      const message = await call('core.ping', {}, options);
+      assert.equal(message.ok, false);
+      assert.equal(message.error.code, 'IPC_AUTH_DENIED');
+    }
+    const unknown = await call('unknown.method', {});
+    assert.equal(unknown.error.code, 'METHOD_NOT_FOUND');
   });
 
   await check('workspace.list 初始为空清单', async () => {

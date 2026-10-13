@@ -88,27 +88,31 @@ export function createTaskStore({ stateDir, now = () => Date.now(), idFactory } 
 
   function load() {
     if (loaded) return;
-    loaded = true;
     const raw = loadTaskFile(file, null);
-    if (!raw) return;
+    if (!raw) { loaded = true; return; }
     if (typeof raw !== 'object' || Array.isArray(raw)) {
       throw taskError('STORE_CORRUPT', '任务数据根节点必须是对象：' + file);
     }
-    fileRevision = Number.isSafeInteger(raw.revision) && raw.revision > 0 ? raw.revision : 0;
+    const nextTasks = new Map();
     for (const item of asArray(raw.tasks)) {
       const task = normalizeLoaded(item);
-      if (task) tasks.set(task.id, task);
+      if (task) nextTasks.set(task.id, task);
     }
+    tasks.clear();
+    for (const [id, task] of nextTasks) tasks.set(id, task);
+    fileRevision = Number.isSafeInteger(raw.revision) && raw.revision > 0 ? raw.revision : 0;
+    loaded = true;
   }
 
   function persist() {
-    fileRevision += 1;
+    const nextRevision = fileRevision + 1;
     writeJsonAtomic(file, {
       schemaVersion: TASK_SCHEMA_VERSION,
-      revision: fileRevision,
+      revision: nextRevision,
       updatedAt: now(),
       tasks: [...tasks.values()]
     });
+    fileRevision = nextRevision;
   }
 
   function clone(task) {
@@ -137,7 +141,7 @@ export function createTaskStore({ stateDir, now = () => Date.now(), idFactory } 
     if (tasks.size >= MAX_TASKS) throw taskError('STORE_FULL', '任务数量已达上限 ' + MAX_TASKS);
     if (tasks.has(task.id)) throw taskError('DUPLICATE_ID', '任务 id 已存在：' + task.id);
     tasks.set(task.id, task);
-    persist();
+    try { persist(); } catch (error) { tasks.delete(task.id); throw error; }
     return clone(task);
   }
 
@@ -156,7 +160,7 @@ export function createTaskStore({ stateDir, now = () => Date.now(), idFactory } 
     next.rev = task.rev + 1;
     next.updatedAt = now();
     tasks.set(key, next);
-    persist();
+    try { persist(); } catch (error) { tasks.set(key, task); throw error; }
     return clone(next);
   }
 
@@ -172,7 +176,7 @@ export function createTaskStore({ stateDir, now = () => Date.now(), idFactory } 
       throw taskError('TASK_CONFLICT', '任务已被其它操作修改（期望 rev ' + expectedRev + '，当前 rev ' + task.rev + '）');
     }
     tasks.delete(key);
-    persist();
+    try { persist(); } catch (error) { tasks.set(key, task); throw error; }
     return { id: key, deleted: true };
   }
 

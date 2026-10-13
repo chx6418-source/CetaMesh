@@ -22,7 +22,8 @@ export function startIpcProtocol({
   dispatch,
   maxFrameBytes = IPC_PROTOCOL_MAX_FRAME_BYTES,
   dispatchTimeoutMs = IPC_PROTOCOL_DISPATCH_TIMEOUT_MS,
-  methodFilter = null
+  methodFilter = null,
+  authenticate = null
 } = {}) {
   if (!input || typeof input.on !== 'function' || typeof input.off !== 'function') {
     throw new TypeError('input must be a readable event stream');
@@ -138,6 +139,11 @@ export function startIpcProtocol({
     }
     if (request.params !== undefined && (!request.params || typeof request.params !== 'object' || Array.isArray(request.params))) {
       writeError(id, 'INVALID_PARAMS', 'Request params must be a JSON object');
+      return;
+    }
+
+    if (authenticate && !authenticate(request)) {
+      writeError(id, 'IPC_AUTH_DENIED', 'Native UI IPC authentication failed');
       return;
     }
 

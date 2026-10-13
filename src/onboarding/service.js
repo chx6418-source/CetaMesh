@@ -55,6 +55,7 @@ export function createOnboardingService({
   stateDir,
   store = null,
   providerSecrets = null,
+  modelRuntime = null,
   settingsService = null,
   extensionService = null,
   agentService = null,
@@ -266,20 +267,26 @@ export function createOnboardingService({
     };
   }
 
-  /** 选择默认模型：优先用注入的持久化入口，其次 settings.models.defaultModel。 */
+  /** 保存默认 Provider/Model 后才完成必填步骤；失败时进度不得前进。 */
   async function setModel({ provider, model } = {}) {
     const providerId = text(provider, 64);
     const modelId = text(model, 120);
-    if (!modelId) throw onboardingError(ONBOARDING_ERROR_CODES.INVALID_PARAMS, '必须提供 model');
-    let persisted = false;
+    if (!providerId || !modelId) throw onboardingError(ONBOARDING_ERROR_CODES.INVALID_PARAMS, '必须提供 provider 和 model');
+    if (modelRuntime && (!modelRuntime.isRegistered(providerId) || !modelRuntime.hasKey(providerId))) {
+      throw onboardingError(ONBOARDING_ERROR_CODES.INVALID_PARAMS, '请选择已配置凭据的 Model Provider');
+    }
+    const state = currentState();
+    const order = checkRequiredOrder('model', state.completed);
+    if (!order.ok) throw onboardingError(ONBOARDING_ERROR_CODES.STEP_ORDER, '请先完成前面的必填步骤：' + order.missing.join('、'), { missing: order.missing });
     if (typeof setDefaultModel === 'function') {
       await setDefaultModel({ provider: providerId, model: modelId });
-      persisted = true;
     } else if (settingsService?.store?.update) {
-      settingsService.store.update('models', { defaultModel: modelId });
-      persisted = true;
+      settingsService.store.update('models', { provider: providerId, defaultModel: modelId });
+    } else {
+      throw onboardingError(ONBOARDING_ERROR_CODES.INVALID_PARAMS, '当前运行环境无法保存默认模型');
     }
-    return { provider: providerId, model: modelId, persisted };
+    completeStep({ stepId: 'model', data: { provider: providerId, model: modelId } });
+    return { provider: providerId, model: modelId, persisted: true };
   }
 
   async function connectAgent(payload = {}) {

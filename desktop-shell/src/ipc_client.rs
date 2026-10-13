@@ -82,6 +82,8 @@ fn request_pipe(
         "version": PROTOCOL_VERSION,
         "id": request_id,
         "method": method,
+        "role": "console",
+        "authToken": crate::client_auth_token(),
         "params": params,
     });
     write_frame_until(&mut pipe, &request, deadline)

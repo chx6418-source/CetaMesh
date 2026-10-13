@@ -256,6 +256,7 @@ try {
     writeWorkerConfig(dataDir);
     const worker = startWorker(path.join(behaviorTempRoot, 'native'), dataDir, {
       WHALEBRIDGE_UI_PIPE: uiPipe,
+      WHALEBRIDGE_UI_AUTH_TOKEN: crypto.randomBytes(32).toString('hex'),
       WHALEBRIDGE_DATA_PIPE: dataPipeOverride
     });
     try {

@@ -365,6 +365,62 @@ const ARTIFACT_URL = 'https://gitcode.com/ygdnn/CetaMesh/releases/download/v1.0.
 }
 
 {
+  const payload = crypto.randomBytes(1024);
+  const target = path.join(tmpRoot, 'setup-short-write.exe');
+  const downloader = createArtifactDownloader({
+    fetchImpl: async () => downloadResponse(payload), allowedHosts: ALLOWED_HOSTS,
+    fsImpl: {
+      access: fs.promises.access, unlink: fs.promises.unlink, rename: fs.promises.rename,
+      open: async (file, flags) => {
+        const handle = await fs.promises.open(file, flags);
+        if (flags !== 'w') return handle;
+        return { close: () => handle.close(), write: (buffer, offset) => handle.write(buffer, offset, 1) };
+      }
+    }
+  });
+  const result = await downloader.download({ url: ARTIFACT_URL, sha256: sha256Of(payload), bytes: payload.length, targetPath: target });
+  check('短写循环写完并校验磁盘内容', result.ok === true && fs.readFileSync(target).equals(payload), String(result.code));
+}
+
+{
+  const payload = crypto.randomBytes(1024);
+  const target = path.join(tmpRoot, 'setup-corrupt-disk.exe');
+  const downloader = createArtifactDownloader({
+    fetchImpl: async () => downloadResponse(payload), allowedHosts: ALLOWED_HOSTS,
+    fsImpl: {
+      access: fs.promises.access, unlink: fs.promises.unlink, rename: fs.promises.rename,
+      open: async (file, flags) => {
+        const handle = await fs.promises.open(file, flags);
+        if (flags !== 'w') return handle;
+        return { close: () => handle.close(), write: (buffer, offset, length) => handle.write(Buffer.alloc(length), 0, length) };
+      }
+    }
+  });
+  const result = await downloader.download({ url: ARTIFACT_URL, sha256: sha256Of(payload), targetPath: target });
+  check('落盘内容与网络流不同则拒绝安装', result.ok === false && result.code === 'SHA_MISMATCH' && !fs.existsSync(target), String(result.code));
+  equal('校验失败清除临时文件', fs.readdirSync(tmpRoot).filter((name) => name.startsWith('setup-corrupt-disk.exe.part-')), []);
+}
+
+{
+  const payload = crypto.randomBytes(1024);
+  const target = path.join(tmpRoot, 'setup-disk-error.exe');
+  const downloader = createArtifactDownloader({
+    fetchImpl: async () => downloadResponse(payload), allowedHosts: ALLOWED_HOSTS,
+    fsImpl: {
+      access: fs.promises.access, unlink: fs.promises.unlink, rename: fs.promises.rename,
+      open: async (file, flags) => {
+        const handle = await fs.promises.open(file, flags);
+        if (flags !== 'w') return handle;
+        return { close: () => handle.close(), write: async () => { throw Object.assign(new Error('disk full'), { code: 'ENOSPC' }); } };
+      }
+    }
+  });
+  const result = await downloader.download({ url: ARTIFACT_URL, sha256: sha256Of(payload), targetPath: target });
+  check('磁盘写入错误 -> WRITE_FAILED 且目标不存在', result.ok === false && result.code === 'WRITE_FAILED' && !fs.existsSync(target), String(result.code));
+  equal('磁盘写入错误清除临时文件', fs.readdirSync(tmpRoot).filter((name) => name.startsWith('setup-disk-error.exe.part-')), []);
+}
+
+{
   const payload = crypto.randomBytes(8 * 1024);
   const downloader = createArtifactDownloader({ fetchImpl: async () => downloadResponse(payload), allowedHosts: ALLOWED_HOSTS });
   const target = path.join(tmpRoot, 'setup-sha-bad.exe');

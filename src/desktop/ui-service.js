@@ -138,7 +138,7 @@ function projectOnboarding(value) {
       return {
         id: string(item.id, 100), title: string(item.label ?? item.title, 160),
         description: string(item.description, 500),
-        status: item.completed === true ? 'completed' : item.skipped === true ? 'skipped' : item.id === currentStep ? 'current' : 'pending',
+        status: ['completed', 'skipped', 'current', 'pending'].includes(item.state) ? item.state : 'pending',
         optional: item.optional === true
       };
     })

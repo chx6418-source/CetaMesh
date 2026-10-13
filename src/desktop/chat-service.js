@@ -111,6 +111,7 @@ export function createChatService({
   // 会话 2 / 自动 Context Monitoring：Agent/DSH 通道回合结束时上报 usage（真实优先，
   // 否则字符估算）。由 app composition root 注入（→ Agent Broker 回合结束事件 → Continuity）；
   // Model Runtime 通道（非 Agent 会话）不上报。上报失败绝不影响回合机。
+  defaultModelConfig = null,
   onTurnEnd = null,
   onEvent = null
 }) {
@@ -141,6 +142,14 @@ export function createChatService({
     modelProvider: null,
     agentProvider: null
   };
+  function modelForRuntime(record) {
+    const rawModel = typeof record.config.model === 'string' ? record.config.model.trim() : '';
+    if (!rawModel) return null;
+    const legacyDefault = String(defaults?.model ?? '');
+    if (rawModel !== legacyDefault) return rawModel;
+    const selected = typeof defaultModelConfig === 'function' ? defaultModelConfig() : null;
+    return selected?.provider === record.config.modelProvider && selected?.defaultModel === rawModel ? rawModel : null;
+  }
 
   const sessions = new Map(); // id -> record（含 config / dshSessionId / archived）
   const runtime = new Map(); // id -> { turn?, follow?, modelTurn? }
@@ -257,12 +266,14 @@ export function createChatService({
   }
 
   function createSession({ title } = {}) {
+    const modelDefaults = typeof defaultModelConfig === 'function' ? defaultModelConfig() : null;
     const record = normalizeRecord({
       id: crypto.randomUUID(),
       title: title === undefined || title === null || title === '' ? '新会话' : requireText(String(title), '会话标题', MAX_TITLE_CHARS),
       createdAt: now(),
       updatedAt: now(),
-      config: { ...baseConfig, agentProvider: resolveDefaultAgentProvider() }
+      config: { ...baseConfig, model: modelDefaults?.defaultModel || baseConfig.model,
+        modelProvider: modelDefaults?.provider || null, agentProvider: resolveDefaultAgentProvider() }
     });
     sessions.set(record.id, record);
     saveStore();
@@ -712,9 +723,7 @@ export function createChatService({
    */
   function startModelTurn(record, state, promptText, routing, resolved, retryMessageId = null) {
     if (state.turn) state.turn.routing = routing ?? null;
-    const rawModel = typeof record.config.model === 'string' ? record.config.model.trim() : '';
-    const sessionDefaultModel = String(defaults?.model ?? '');
-    const model = rawModel && rawModel !== sessionDefaultModel ? rawModel : null;
+    const model = modelForRuntime(record);
     const controller = new AbortController();
     state.modelTurn = { controller, providerId: resolved.id };
     let settleHandshake = null;
@@ -1024,9 +1033,7 @@ export function createChatService({
     if (state.turn.id !== target.turnId) return null;
     const controller = new AbortController();
     const resolved = modelRuntime.resolveProvider(record.config.modelProvider);
-    const rawModel = typeof record.config.model === 'string' ? record.config.model.trim() : '';
-    const sessionDefaultModel = String(defaults?.model ?? '');
-    const model = rawModel && rawModel !== sessionDefaultModel ? rawModel : null;
+    const model = modelForRuntime(record);
     state.modelTurn = { controller, providerId: resolved.id };
     try {
       const result = await toolExecutionCoordinator.resumeApproval({ approvalId, requestFingerprint, decisionResult, signal: controller.signal,

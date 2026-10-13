@@ -7,7 +7,7 @@
 // 安全约束：
 //   - 仅 https；每一跳重定向都要重新过 https + 主机白名单（默认取设置里的 allowedUpdateHosts）；
 //   - 有界响应：体积上限（默认 512 MiB）+ 全下载超时（默认 5 分钟）+ 最多 5 跳重定向；
-//   - **必须**提供期望 sha256（64 位十六进制）；流式校验，不匹配即失败并清理；
+//   - **必须**提供期望 sha256（64 位十六进制）；落盘后重读校验，不匹配即失败并清理；
 //   - 原子落盘：先写同目录 .part-<random> 临时文件，校验通过后 rename 到目标名；
 //     任何失败（超时 / 超限 / 校验失败 / 写盘失败）都删除临时文件，不留残余；
 //   - 目标已存在 → 拒绝覆盖（TARGET_EXISTS），不静默替换用户已有文件；
@@ -136,9 +136,9 @@ export function createArtifactDownloader({
       if (targetExists) return fail('TARGET_EXISTS', '目标文件已存在，拒绝覆盖：' + targetPath);
 
       const tempPath = targetPath + '.part-' + randomSuffix();
-      const hash = crypto.createHash('sha256');
       let total = 0;
       let handle = null;
+      let writing = false;
       const cleanup = async () => {
         try {
           await fsImpl.unlink(tempPath);
@@ -180,17 +180,50 @@ export function createArtifactDownloader({
             await cleanup();
             return fail('TOO_LARGE', '安装包体积超过上限 ' + limit);
           }
-          hash.update(buf);
-          await handle.write(buf);
+          let offset = 0;
+          while (offset < buf.length) {
+            writing = true;
+            const { bytesWritten } = await handle.write(buf, offset, buf.length - offset);
+            if (!Number.isSafeInteger(bytesWritten) || bytesWritten <= 0 || bytesWritten > buf.length - offset) {
+              throw new Error('磁盘写入未前进');
+            }
+            offset += bytesWritten;
+          }
+          writing = false;
         }
-        await closeQuietly();
+        if (!await closeQuietly()) throw new Error('无法关闭下载文件');
       } catch (error) {
         await closeQuietly();
         await cleanup();
-        return fail(classifyTransportError(error), '下载中断：' + ((error && error.message) || String(error)));
+        return fail(writing || error?.message === '无法关闭下载文件' ? 'WRITE_FAILED' : classifyTransportError(error), '下载中断：' + ((error && error.message) || String(error)));
       }
 
-      const actual = hash.digest('hex');
+      let actual;
+      let diskBytes;
+      try {
+        const reader = await fsImpl.open(tempPath, 'r');
+        try {
+          const hash = crypto.createHash('sha256');
+          const buffer = Buffer.allocUnsafe(64 * 1024);
+          diskBytes = 0;
+          for (;;) {
+            const { bytesRead } = await reader.read(buffer, 0, buffer.length, null);
+            if (!bytesRead) break;
+            hash.update(buffer.subarray(0, bytesRead));
+            diskBytes += bytesRead;
+          }
+          actual = hash.digest('hex');
+        } finally {
+          await reader.close();
+        }
+      } catch (error) {
+        await cleanup();
+        return fail('WRITE_FAILED', '落盘文件无法校验：' + ((error && error.message) || String(error)));
+      }
+      if (diskBytes !== total) {
+        await cleanup();
+        return fail('SIZE_MISMATCH', '落盘体积与下载数据不符', { expected: total, actual: diskBytes });
+      }
       if (actual !== expectedSha) {
         await cleanup();
         return fail('SHA_MISMATCH', 'sha256 校验不匹配（拒绝安装未验证的下载物）', { expected: expectedSha, actual });
