@@ -171,6 +171,7 @@ const emptyObjectSchema = {
     { text: 'It is 00:00 UTC.', toolCalls: [], usage: { total_tokens: 3 }, model: 'fixture-model' }
   ]);
   const coordinator = createToolExecutionCoordinator({ modelRuntime: runtime, capabilityBroker: broker });
+  const activities = [];
   const result = await coordinator.run({
     providerId: 'fixture',
     messages: [{ role: 'user', content: 'What time is it?' }],
@@ -184,13 +185,15 @@ const emptyObjectSchema = {
     actor: OWNER_ACTOR,
     sessionId: 'chat-1',
     turnId: 'turn-1',
-    scope: { taskId: null, workspaceId: null }
+    scope: { taskId: null, workspaceId: null },
+    onActivity: activity => activities.push(activity)
   });
 
   assert.equal(result.status, 'completed');
   assert.equal(result.toolCalling, 'supported');
   assert.equal(result.text, 'It is 00:00 UTC.');
   assert.equal(executed, 1);
+  assert.deepEqual(activities.map(item => item.status), ['running', 'completed']);
   assert.equal(calls.length, 2);
   assert.equal(calls[1].messages.at(-1).role, 'tool');
   assert.equal(calls[1].messages.at(-1).tool_call_id, 'clock-call');
@@ -326,6 +329,9 @@ const emptyObjectSchema = {
     assert.ok(pendingStatus.approvalId);
     const pendingCoreStatus = await approved.chatService.execute({ method: 'chat.status', params: { id: approved.session.id } });
     const originalTurnId = pendingCoreStatus.turn.id;
+    assert.equal(pendingCoreStatus.turn.toolActivity?.length, 1,
+      'active chat status preserves the in-flight tool activity during a refresh');
+    assert.equal(pendingCoreStatus.turn.toolActivity[0].capability, 'fixture.approval');
     const pendingRows = await approved.ui.execute({ method: 'ui.approvals.list', params: {} });
     assert.equal(pendingRows.approvals.length, 1);
     assert.equal(pendingRows.approvals[0].status, 'pending');

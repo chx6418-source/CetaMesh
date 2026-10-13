@@ -7,6 +7,7 @@ export interface ChatSession {
 export interface ChatMessage {
   id: string; role: 'user' | 'assistant' | 'system'; text: string; at: string | number | null;
   attachments: string[]; toolActivity: { id: string; label: string; status: string; summary: string; durationMs: number | null }[];
+  agentActivity?: { providerId: string; label: string; status: 'running' | 'completed' | 'cancelled' | 'failed' } | null;
   error: string | null; cancelled: boolean;
 }
 export interface ProviderSettingField {
@@ -24,14 +25,16 @@ export interface Memory {
   id: string; type: string; scope: string; title: string; content: string; summary: string;
   tags: string[]; pinned: boolean; rev: number | null; createdAt: string | number | null; updatedAt: string | number | null;
 }
-export type AgentStatus = 'ready' | 'needs-setup' | 'not-installed' | 'unavailable' | 'not-supported' | 'not-checked';
+export type AgentStatus = 'ready' | 'needs-setup' | 'descriptor-incomplete' | 'not-installed' | 'unavailable' | 'not-supported' | 'not-checked';
 export interface Agent {
   id: string; name: string; role: string; description: string; available: boolean; status: AgentStatus;
+  eligible: boolean; configured: boolean; reason: string | null; lastError: string | null; workspaceBoundary: string | null;
   version: string | null; desktopApp: { installed: boolean; running: boolean; status: string; version: string | null } | null;
 }
 export interface Plugin {
   id: string; name: string; summary: string; description: string; developer: string; version: string;
   status: string; category: string; kind: string; featured: boolean; installed: boolean; enabled: boolean;
+  available: boolean; configured: boolean; eligible: boolean; reason: string | null; lastError: string | null;
   icon: string; permissions: string[]; changelog: string[]; compatibility: { minimum: string | null; maximum: string | null };
   screenshotCount: number; warning: string | null;
 }
@@ -64,10 +67,15 @@ export interface RetiredIntegrationTool {
   id: string; name: string; feature: string; restore: 'deprecated' | 'legacy-unsupported'; reason: string;
   replacement: { id: string; label: string } | null;
 }
+export interface LocalServiceSettings {
+  status: string; installed: boolean; running: boolean; ready: boolean; configured: boolean;
+  version: string | null; httpUrl: string | null; wsUrl: string | null; accessTokenConfigured: boolean;
+  lastError: string | null; actions: string[];
+}
 export interface IntegrationSettings {
   id: string; name: string; enabled: boolean; available: boolean; tools: IntegrationToolSetting[];
   inventory: { restored: number; partial: number; legacyUnsupported: number } | null;
-  legacyRetired: RetiredIntegrationTool[]; settings: Record<string, unknown>;
+  legacyRetired: RetiredIntegrationTool[]; settings: Record<string, unknown>; localService: LocalServiceSettings | null;
 }
 
 export type DesktopEvent = 'core.status' | 'chat.updated' | 'chat.streaming' | 'task.updated' | 'task.deleted'
@@ -76,6 +84,7 @@ export type DesktopEvent = 'core.status' | 'chat.updated' | 'chat.streaming' | '
 export interface DesktopEventData {
   sessionId?: string; taskId?: string; agentId?: string; pluginId?: string; serverId?: string; approvalId?: string;
   provider?: string; status?: string; progress?: number; ready?: boolean; needsAttention?: boolean;
+  delta?: string; replaceText?: string; reset?: boolean; toolActivity?: ChatMessage['toolActivity']; agentActivity?: ChatMessage['agentActivity'];
 }
 type UiMethod =
   | 'ui.events.next'
@@ -86,9 +95,9 @@ type UiMethod =
   | 'ui.memory.overview' | 'ui.memory.get' | 'ui.memory.create' | 'ui.memory.update' | 'ui.memory.pin' | 'ui.memory.delete'
   | 'ui.agent.list' | 'ui.agent.health'
   | 'ui.extensions.settings.describe' | 'ui.extensions.settings.get' | 'ui.extensions.settings.update'
-  | 'ui.plugins.catalog' | 'ui.plugins.status' | 'ui.plugins.detail' | 'ui.plugins.refresh' | 'ui.plugins.stage' | 'ui.plugins.install'
+  | 'ui.plugins.catalog' | 'ui.plugins.status' | 'ui.plugins.detail' | 'ui.plugins.refresh' | 'ui.plugins.stage' | 'ui.plugins.stage-local' | 'ui.plugins.install'
   | 'ui.plugins.enable.review' | 'ui.plugins.enable' | 'ui.plugins.disable' | 'ui.plugins.uninstall' | 'ui.plugins.integration.list' | 'ui.plugins.integration.settings'
-  | 'ui.plugins.integration.manage' | 'ui.plugins.integration.tool.toggle'
+  | 'ui.plugins.integration.manage' | 'ui.plugins.integration.tool.toggle' | 'ui.plugins.integration.action'
   | 'ui.mcp.list' | 'ui.mcp.tools' | 'ui.mcp.manage' | 'ui.mcp.config.get' | 'ui.mcp.config.update'
   | 'ui.settings.describe' | 'ui.settings.get' | 'ui.settings.update' | 'ui.about.info' | 'ui.about.update'
   | 'ui.feedback.links'
@@ -96,7 +105,7 @@ type UiMethod =
   | 'ui.onboarding.status' | 'ui.onboarding.start' | 'ui.onboarding.completeStep' | 'ui.onboarding.skipStep' | 'ui.onboarding.finish' | 'ui.onboarding.testProvider' | 'ui.onboarding.setModel'
   | 'ui.approvals.list' | 'ui.approvals.decide' | 'ui.search';
 type Empty = Record<string, never>;
-type HostMethod = 'app.ping' | 'app.status' | 'app.about' | 'app.openExternal' | 'app.openArtifact' | 'app.pickFolder' | 'app.pickFiles' | 'app.setWindowBehavior';
+type HostMethod = 'app.ping' | 'app.status' | 'app.about' | 'app.openExternal' | 'app.openArtifact' | 'app.pickFolder' | 'app.pickFiles' | 'app.pickExtensionPackage' | 'app.setWindowBehavior';
 type HostMap = {
   'app.ping': { params: Empty; result: { host: 'webview2'; ready: boolean } };
   'app.status': { params: Empty; result: { ready: boolean; needsAttention: boolean } };
@@ -105,6 +114,7 @@ type HostMap = {
   'app.openArtifact': { params: { taskId: string; artifactId: string }; result: { opened: boolean } };
   'app.pickFolder': { params: Empty; result: { path: string | null } };
   'app.pickFiles': { params: Empty; result: { attachments: Attachment[] } };
+  'app.pickExtensionPackage': { params: Empty; result: { path: string | null } };
   'app.setWindowBehavior': { params: { confirmOnExit: boolean }; result: { updated: boolean } };
 };
 type Reply = { id: string; ok: true; result: unknown } | { id: string; ok: false; error: { code: string; message: string } };
@@ -198,8 +208,8 @@ export const chatClient = {
   history: (id: string, limit = 100, beforeMessageId: string | null = null) => uiCall<{
     id: string; total: number; messages: ChatMessage[]; nextBeforeMessageId: string | null; hasMore: boolean
   }>('ui.chat.history', { id, limit, beforeMessageId }),
-  status: (id: string) => uiCall<{ id: string; state: string; displayText: string; error: string | null; approvalId: string | null; approvalExpiresAt: string | number | null; routing: Record<string, unknown> }>('ui.chat.status', { id }),
-  send: (id: string, text: string, attachments: Attachment[] = []) => uiCall<{ userMessageId?: string }>('ui.chat.send', { id, text, attachments }),
+  status: (id: string) => uiCall<{ id: string; state: string; displayText: string; toolActivity: ChatMessage['toolActivity']; agentActivity: ChatMessage['agentActivity']; error: string | null; approvalId: string | null; approvalExpiresAt: string | number | null; routing: Record<string, unknown> }>('ui.chat.status', { id }),
+  send: (id: string, text: string, attachments: Attachment[] = [], clientMessageId?: string) => uiCall<{ userMessageId?: string }>('ui.chat.send', { id, text, attachments, ...(clientMessageId ? { clientMessageId } : {}) }),
   stop: (id: string) => uiCall<{ stopped?: boolean; state?: string; reason?: string }>('ui.chat.stop', { id }),
   retry: (id: string) => uiCall<{ userMessageId?: string }>('ui.chat.retry', { id }),
   continue: (id: string) => uiCall<{ continued?: boolean }>('ui.chat.continue', { id }),
@@ -233,20 +243,22 @@ export const extensionSettingsClient = {
     uiCall<ExtensionSettingsSnapshot>('ui.extensions.settings.update', { id, values })
 };export const pluginClient = {
   catalog: (query = '', category = '', view = 'all') => uiCall<{ available: boolean; configured: boolean; offline: boolean; reason: string | null; plugins: Plugin[] }>('ui.plugins.catalog', { query, category, view }),
-  status: () => uiCall<{ catalogAvailable: boolean; configured: boolean; offline: boolean; plugins: Plugin[]; installed: Plugin[] }>('ui.plugins.status', {}),
+  status: () => uiCall<{ catalogAvailable: boolean; configured: boolean; offline: boolean; developerMode: boolean; plugins: Plugin[]; installed: Plugin[]; integrations: { id: string; name: string; status: string; enabled: boolean; available: boolean; eligible: boolean; configured: boolean; reason: string | null; lastError: string | null }[]; mcp: { id: string; name: string; status: string; enabled: boolean; available: boolean; eligible: boolean; configured: boolean; source: string; toolCount: number | null; transport: string; reason: string | null; lastError: string | null }[] }>('ui.plugins.status', {}),
   detail: (id: string) => uiCall<{ available: boolean; offline: boolean; plugin: Plugin | null }>('ui.plugins.detail', { id }),
   refresh: () => uiCall<Record<string, unknown>>('ui.plugins.refresh', {}),
   stage: (id: string) => uiCall<{ stageId: string; plugin: Plugin; requiresReview: boolean; installable: boolean; permissions: string[]; summary: string[]; trust: string }>('ui.plugins.stage', { id }),
+  stageLocal: (file: string) => uiCall<{ stageId: string; plugin: Plugin; requiresReview: boolean; installable: boolean; permissions: string[]; summary: string[]; trust: string }>('ui.plugins.stage-local', { file }),
   install: (stageId: string) => uiCall<{ installed: boolean; plugin: Plugin }>('ui.plugins.install', { stageId, reviewed: true }),
   reviewEnable: (id: string) => uiCall<{ id: string; stageId: string; requiresReview: boolean; installable: boolean; permissions: string[]; summary: string[]; trust: string }>('ui.plugins.enable.review', { id }),
   enable: (id: string, stageId = '') => uiCall<Record<string, unknown>>('ui.plugins.enable', { id, stageId, reviewed: true }),
   disable: (id: string) => uiCall<Record<string, unknown>>('ui.plugins.disable', { id }),
   uninstall: (id: string) => uiCall<Record<string, unknown>>('ui.plugins.uninstall', { id }),
-  integrations: () => uiCall<{ integrations: { id: string; name: string; status: string; enabled: boolean; available: boolean }[] }>('ui.plugins.integration.list', {}),
+  integrations: () => uiCall<{ integrations: { id: string; name: string; status: string; enabled: boolean; available: boolean; eligible: boolean; configured: boolean; reason: string | null; lastError: string | null }[] }>('ui.plugins.integration.list', {}),
   integrationSettings: (id: string) => uiCall<IntegrationSettings>('ui.plugins.integration.settings', { id }),
   manageIntegration: (id: string, action: 'enable' | 'disable') => uiCall<Record<string, unknown>>('ui.plugins.integration.manage', { id, action }),
+  integrationAction: (localService: 'snowluma', action: 'detect' | 'start' | 'stop' | 'install' | 'configure', params: Record<string, unknown> = {}) => uiCall<Record<string, unknown>>('ui.plugins.integration.action', { localService, action, params }),
   toggleTool: (pluginId: string, toolId: string, enabled: boolean) => uiCall<Record<string, unknown>>('ui.plugins.integration.tool.toggle', { pluginId, toolId, enabled }),
-  mcp: () => uiCall<{ servers: { id: string; name: string; status: string; enabled: boolean; available: boolean; toolCount: number | null; transport: string; reason: string | null }[] }>('ui.mcp.list', {}),
+  mcp: () => uiCall<{ servers: { id: string; name: string; status: string; enabled: boolean; available: boolean; eligible: boolean; configured: boolean; source: string; toolCount: number | null; transport: string; reason: string | null; lastError: string | null }[] }>('ui.mcp.list', {}),
   mcpTools: (id: string) => uiCall<{ serverId: string; tools: { id: string; name: string; description: string; enabled: boolean }[] }>('ui.mcp.tools', { id }),
   manageMcp: (serverId: string, action: 'enable' | 'disable' | 'start' | 'stop' | 'restart') => uiCall<Record<string, unknown>>('ui.mcp.manage', { serverId, action }),
   mcpConfig: (serverId: string) => uiCall<{ id: string; enabled: boolean; hasArgs: boolean; hasEnvironment: boolean; timeoutMs: number | null; note: string }>('ui.mcp.config.get', { serverId }),
@@ -300,6 +312,7 @@ export const hostClient = {
   openArtifact: (taskId: string, artifactId: string) => bridge.invoke('app.openArtifact', { taskId, artifactId }),
   pickFolder: () => bridge.invoke('app.pickFolder', {}),
   pickFiles: () => bridge.invoke('app.pickFiles', {}),
+  pickExtensionPackage: () => bridge.invoke('app.pickExtensionPackage', {}),
   setWindowBehavior: (confirmOnExit: boolean) => bridge.invoke('app.setWindowBehavior', { confirmOnExit })
 };
 export async function openExternal(url: string): Promise<void> {

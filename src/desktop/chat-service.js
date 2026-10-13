@@ -422,19 +422,42 @@ export function createChatService({
   }
 
   async function catalog() {
-    const chatAgentProvider = entry => ({
-      id: entry.id,
-      label: entry.label ?? entry.displayName ?? entry.id,
-      displayName: entry.displayName ?? entry.label ?? entry.id,
-      eventProtocol: entry.eventProtocol,
-      available: typeof entry.available === 'boolean' ? entry.available : null,
-      version: entry.version ?? null,
-      reason: entry.reason ?? null,
-      workspaceBoundary: entry.workspaceBoundary ?? 'unsupported',
-      supportsFreshSession: entry.supportsFreshSession === true,
-      supportsResume: entry.supportsResume === true,
-      health: entry.health ?? 'unknown'
-    });
+    let liveAgentProviders = [];
+    if (typeof agentExecute === 'function') {
+      try {
+        const liveCatalog = await agentExecute({ method: 'agent.list', params: {} });
+        if (Array.isArray(liveCatalog?.providers)) liveAgentProviders = liveCatalog.providers;
+      } catch {
+        // Chat model catalog remains usable when Agent health discovery is offline; use the registered descriptors as fallback.
+        liveAgentProviders = [...selectableAgentProviders.values()];
+      }
+    }
+    const liveAgentsById = new Map(liveAgentProviders.filter(entry => entry && typeof entry.id === 'string').map(entry => [entry.id, entry]));
+    const chatAgentProvider = entry => {
+      const live = liveAgentsById.get(entry.id) ?? {};
+      const workspaceBoundary = live.workspaceBoundary ?? entry.workspaceBoundary ?? 'unsupported';
+      const health = live.health && typeof live.health === 'object' ? live.health : null;
+      const available = typeof live.available === 'boolean' ? live.available
+        : typeof entry.available === 'boolean' ? entry.available : null;
+      const requiresTask = ['capability-broker', 'staged-capability-broker'].includes(workspaceBoundary);
+      const boundaryUnverified = workspaceBoundary === 'unverified';
+      const reason = live.reason ?? entry.reason ?? (boundaryUnverified ? 'descriptor-incomplete' : requiresTask ? 'task-required' : null);
+      return {
+        ...entry, ...live, id: entry.id,
+        label: live.label ?? entry.label ?? live.displayName ?? entry.displayName ?? entry.id,
+        displayName: live.displayName ?? entry.displayName ?? live.label ?? entry.label ?? entry.id,
+        eventProtocol: entry.eventProtocol,
+        available, eligible: available === true && !requiresTask && !boundaryUnverified,
+        version: live.version ?? entry.version ?? null,
+        reason,
+        workspaceBoundary,
+        supportsFreshSession: live.supportsFreshSession === true || entry.supportsFreshSession === true,
+        supportsResume: live.supportsResume === true || entry.supportsResume === true,
+        health: health ?? live.health ?? entry.health ?? null,
+        status: boundaryUnverified ? 'descriptor-incomplete' : available === true ? 'ready' : available === false ? 'unavailable' : 'not-checked'
+      };
+    };
+    const agentProviders = [...selectableAgentProviders.values()].map(chatAgentProvider);
     // Model Runtime 目录（独立于 DSH，DSH 不运行时依然可用）。
     // 只返回 hasKey 布尔与模型列表，绝不携带 API Key 材料。
     const modelProviders = [];
@@ -465,7 +488,7 @@ export function createChatService({
       const entries = Array.isArray(value?.models) ? value.models : Array.isArray(value) ? value : [];
       return {
         providers: [...PROVIDERS],
-        agentProviders: [...selectableAgentProviders.values()].map(chatAgentProvider),
+        agentProviders,
         modes: [...CHAT_MODES],
         reasoning: [...REASONING_EFFORTS],
         models: entries.map((entry) => ({
@@ -480,7 +503,7 @@ export function createChatService({
       // 空 Provider / 目录不可用：返回明确 error，UI 下拉显示不可用而不是伪造列表。
       return {
         providers: [...PROVIDERS],
-        agentProviders: [...selectableAgentProviders.values()].map(chatAgentProvider),
+        agentProviders,
         modes: [...CHAT_MODES],
         reasoning: [...REASONING_EFFORTS],
         models: [],
@@ -512,19 +535,30 @@ export function createChatService({
   }
 
   const lastUiStreamAt = new Map();
+  const pendingUiDeltas = new Map();
 
   function handleChatEvent(record, state, event) {
     applyChatEvent(record, state, event);
     const type = event?.type;
     if (type === 'assistant/chunk') {
+      const chunk = event?.data?.chunk;
+      if (chunk?.type !== 'text-delta' || typeof chunk.text !== 'string' || !chunk.text) return;
+      pendingUiDeltas.set(record.id, (pendingUiDeltas.get(record.id) ?? '') + chunk.text);
       const last = lastUiStreamAt.get(record.id) ?? 0;
-      if (now() - last < 180) return;
+      if (now() - last < 50) return;
       lastUiStreamAt.set(record.id, now());
-      onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: state.turn?.state ?? 'streaming' } });
+      const delta = pendingUiDeltas.get(record.id) ?? '';
+      pendingUiDeltas.delete(record.id);
+      onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: state.turn?.state ?? 'streaming', delta, toolActivity: state.turn?.toolActivity ?? [], agentActivity: state.turn?.agentActivity ?? null } });
     } else if (type === 'turn/start') {
-      onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: 'streaming' } });
-    } else if (type === 'assistant/message' || type === 'turn/end') {
-      if (type === 'turn/end') lastUiStreamAt.delete(record.id);
+      pendingUiDeltas.delete(record.id);
+      onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: 'streaming', reset: true, toolActivity: state.turn?.toolActivity ?? [], agentActivity: state.turn?.agentActivity ?? null } });
+    } else if (type === 'assistant/message') {
+      pendingUiDeltas.delete(record.id);
+      onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: state.turn?.state ?? 'streaming', replaceText: state.turn?.displayText ?? '', toolActivity: state.turn?.toolActivity ?? [], agentActivity: state.turn?.agentActivity ?? null } });
+    } else if (type === 'turn/end') {
+      pendingUiDeltas.delete(record.id);
+      lastUiStreamAt.delete(record.id);
       onEvent?.({ event: 'chat.updated', data: { sessionId: record.id, status: state.turn?.state ?? 'done' } });
     }
   }
@@ -589,6 +623,12 @@ export function createChatService({
         state.turn.state = 'error';
         state.turn.error = errorMessage ?? `回合异常结束（${reasonKind}）`;
       }
+      if (state.turn.agentActivity) {
+        state.turn.agentActivity = {
+          ...state.turn.agentActivity,
+          status: state.turn.state === 'done' ? 'completed' : state.turn.state === 'cancelled' ? 'cancelled' : 'failed'
+        };
+      }
       finalizeTurn(record, state);
     }
   }
@@ -609,6 +649,8 @@ export function createChatService({
         at: now(),
         turnId: turn.id,
         usage: turn.usage ?? null,
+        toolActivity: Array.isArray(turn.toolActivity) ? turn.toolActivity.slice(-32) : [],
+        ...(turn.agentActivity ? { agentActivity: { ...turn.agentActivity } } : {}),
         ...(turn.routing ? { routing: turn.routing } : {}),
         ...(turn.state === 'error' ? { error: turn.error ?? '回合异常' } : {}),
         ...(turn.state === 'cancelled' ? { cancelled: true } : {})
@@ -662,6 +704,7 @@ export function createChatService({
             handleChatEvent(record, state, event);
           }
         } catch {
+          // Follow transport failures are transient; reconnect below unless cancellation ended this stream.
           if (controller.signal.aborted) break;
         }
         if (!state.follow?.active || state.follow.controller !== controller) break;
@@ -677,6 +720,29 @@ export function createChatService({
       try { state.follow.controller.abort(); } catch { /* 已退出 */ }
       state.follow = null;
     }
+  }
+
+  function agentActivityFor(providerId, status = 'running') {
+    const id = String(providerId ?? '').trim();
+    if (!id || id === AGENT_PROVIDER_DISABLED) return null;
+    const provider = selectableAgentProviders.get(id);
+    return {
+      providerId: id.slice(0, 80),
+      label: String(provider?.displayName ?? provider?.label ?? (id === 'cetamesh' ? 'CetaMesh Managed Agent' : id)).slice(0, 180),
+      status
+    };
+  }
+
+  function setAgentActivity(record, state, providerId) {
+    if (!state.turn) return null;
+    const activity = agentActivityFor(providerId);
+    if (!activity) return null;
+    state.turn.agentActivity = activity;
+    onEvent?.({ event: 'chat.streaming', data: {
+      sessionId: record.id, status: state.turn.state,
+      agentActivity: activity, toolActivity: state.turn.toolActivity ?? []
+    } });
+    return activity;
   }
 
   // ── Model Runtime 通道（Standalone Chat）───────────────────────────────────
@@ -753,6 +819,16 @@ export function createChatService({
             targetKind: 'chat',
             scope: productContext.scope ?? { taskId: record.taskId ?? null, workspaceId: record.config.workspaceId ?? null },
             signal: controller.signal,
+            onActivity: activity => {
+              const turn = state.turn;
+              if (!turn) return;
+              const rows = Array.isArray(turn.toolActivity) ? turn.toolActivity : [];
+              const existing = rows.findIndex(item => item.id === activity.id);
+              const next = { ...activity, label: activity.capability, summary: '' };
+              if (existing >= 0) rows[existing] = next; else rows.push(next);
+              turn.toolActivity = rows.slice(-32);
+              onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: turn.state, toolActivity: rows.slice(-32), agentActivity: turn.agentActivity ?? null } });
+            },
             onCapabilityResult: ({ capability, result: toolResult }) => {
               if (capability === 'task.create' && toolResult?.status === 'completed') {
                 const taskId = toolResult.result?.task?.id;
@@ -846,6 +922,9 @@ export function createChatService({
       }).decision;
     }
     if (forceProject) routing = { class: 'project', route: 'agent', agentIntent: true, capabilityIntent: false, reasons: ['Explicit managed Agent'] };
+    if (routing?.agentIntent && typeof platformRoute === 'function' && !state.turn?.agentActivity) {
+      setAgentActivity(record, state, record.config.agentProvider ?? 'cetamesh');
+    }
     if (routing && typeof platformRoute === 'function' && (routing.agentIntent || routing.capabilityIntent)) {
       const result = await platformRoute({ decision: routing, record, text: promptText });
       if (result?.kind === 'agent') {
@@ -889,11 +968,10 @@ export function createChatService({
   }
 
   // ── 回合操作 ─────────────────────────────────────────────────────────────
-  async function send({ id, text, attachments } = {}) {
+  async function send({ id, text, attachments, clientMessageId } = {}) {
     const record = sessionOrThrow(id);
     const content = requireText(text, '消息内容', MAX_PROMPT_CHARS);
     const state = runtimeOf(record.id);
-    if (state.turn) throw chatError('TURN_BUSY', '当前会话有回合进行中，请先停止或等待完成');
     let promptText = content;
     const list = Array.isArray(attachments) ? attachments.slice(0, MAX_ATTACHMENTS) : [];
     for (const attachment of list) {
@@ -901,7 +979,32 @@ export function createChatService({
       const body = requireText(String(attachment?.content ?? ''), `附件「${name}」内容`, MAX_ATTACHMENT_CHARS);
       promptText += `\n\n[附件 ${name}]\n${body}`;
     }
-    const userMessage = { id: crypto.randomUUID(), role: 'user', text: content, at: now(), attachments: list.map((item) => String(item?.name ?? 'attachment')) };
+    const messageId = clientMessageId === undefined || clientMessageId === null || clientMessageId === ''
+      ? crypto.randomUUID()
+      : String(clientMessageId).trim();
+    if (!/^[a-zA-Z0-9_-]{8,128}$/.test(messageId)) throw chatError('INVALID_MESSAGE_ID', '客户端消息 ID 格式无效');
+    const history = readHistory(record.id);
+    const existingIndex = history.findIndex(message => message.id === messageId);
+    if (existingIndex >= 0) {
+      const existing = history[existingIndex];
+      if (existing.role !== 'user' || existing.text !== content
+        || JSON.stringify(existing.attachments ?? []) !== JSON.stringify(list.map(item => String(item?.name ?? 'attachment')))) {
+        throw chatError('MESSAGE_ID_CONFLICT', '客户端消息 ID 已被其他消息使用');
+      }
+      if (state.turn) return { userMessageId: messageId };
+      const following = history.slice(existingIndex + 1);
+      const nextUser = following.findIndex(message => message.role === 'user');
+      const attempt = following.slice(0, nextUser < 0 ? following.length : nextUser).find(message => message.role === 'assistant');
+      if (attempt && !attempt.error && !attempt.cancelled) return { userMessageId: messageId };
+      if (nextUser >= 0) return { userMessageId: messageId };
+      await startTurn(record, state, promptText, {
+        attachments: existing.attachments ?? [], sourceText: content,
+        ...(attempt ? { retryMessageId: messageId } : {})
+      });
+      return { userMessageId: messageId };
+    }
+    if (state.turn) throw chatError('TURN_BUSY', '当前会话有回合进行中，请先停止或等待完成');
+    const userMessage = { id: messageId, role: 'user', text: content, at: now(), attachments: list.map((item) => String(item?.name ?? 'attachment')) };
     appendMessage(record.id, userMessage);
     await startTurn(record, state, promptText, {
       attachments: userMessage.attachments,
@@ -950,8 +1053,11 @@ export function createChatService({
     state.messageTexts = [];
     state.chunkBuffer = '';
     state.promptChars = promptText.length;
-    state.turn = { id: crypto.randomUUID(), state: 'streaming', displayText: '', error: null, usage: null, routing: null };
     const agentProviderId = record.config.agentProvider ?? null;
+    const agentActivity = agentActivityFor(agentProviderId);
+    state.turn = { id: crypto.randomUUID(), state: 'streaming', displayText: '', toolActivity: [], ...(agentActivity ? { agentActivity } : {}), error: null, usage: null, routing: null };
+    pendingUiDeltas.delete(record.id);
+    onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: 'streaming', reset: true, toolActivity: [], agentActivity } });
     try {
       if (agentProviderId === 'cetamesh' && platformRoute) {
         await startModelOrDshTurn(record, state, promptText, { attachments, sourceText, forceProject: true, retryMessageId });
@@ -1017,6 +1123,8 @@ export function createChatService({
         displayText: turn.displayText,
         error: turn.error,
         usage: turn.usage,
+        toolActivity: Array.isArray(turn.toolActivity) ? turn.toolActivity.slice(-32) : [],
+        agentActivity: turn.agentActivity ?? null,
         ...(turn.approvalId ? { approvalId: turn.approvalId, approvalExpiresAt: turn.approvalExpiresAt ?? null } : {}),
         routing: turn.routing ?? null
       }

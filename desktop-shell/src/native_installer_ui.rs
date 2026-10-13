@@ -73,6 +73,12 @@ enum PickerEvent {
     Picked(Option<PathBuf>),
 }
 
+fn clear_finished_worker(receiver: &mut Option<mpsc::Receiver<WorkerEvent>>, finished: bool) {
+    if finished {
+        receiver.take();
+    }
+}
+
 // ------------------------------------------------------------------ 路径校验
 
 /// 安装位置校验结果（纯逻辑，可单测；文件系统探测在 `validate_install_dir` 内完成）。
@@ -623,6 +629,7 @@ impl InstallerApp {
             return;
         };
         let mut lines = Vec::new();
+        let mut finished = false;
         while let Ok(event) = receiver.try_recv() {
             match event {
                 WorkerEvent::Phase(phase, status) => {
@@ -658,6 +665,7 @@ impl InstallerApp {
                     self.status = "需要先关闭正在运行的 CetaMesh。".to_owned();
                 }
                 WorkerEvent::Finished(result) => {
+                    finished = true;
                     self.phase = InstallPhase::Idle;
                     self.cancel_token = None;
                     self.close_answer = None;
@@ -693,6 +701,7 @@ impl InstallerApp {
         for line in lines {
             self.log(&line);
         }
+        clear_finished_worker(&mut self.event_rx, finished);
     }
 
     fn answer_close_prompt(&mut self, proceed: bool, ctx: &egui::Context) {
@@ -1679,6 +1688,16 @@ mod tests {
         let first = staging_dir_candidate(base, 17, 123, 0);
         let second = staging_dir_candidate(base, 17, 123, 1);
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn finished_worker_releases_receiver_so_installer_can_close() {
+        let (_sender, receiver) = mpsc::channel();
+        let mut active = Some(receiver);
+        clear_finished_worker(&mut active, false);
+        assert!(active.is_some(), "an active install must retain its worker channel");
+        clear_finished_worker(&mut active, true);
+        assert!(active.is_none(), "Finished must release the channel and unblock window close");
     }
 
     #[test]

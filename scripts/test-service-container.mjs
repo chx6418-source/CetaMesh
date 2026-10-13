@@ -19,7 +19,17 @@ try {
 
   const { createCetaMeshServices } = await import('../src/app/service-container.js');
   const config = { allow: { private: [], groups: ['7'] } };
-  services = createCetaMeshServices({ config });
+  let snowLumaActionCalled = false;
+  const desktopLocalServices = () => ({ snowluma: {
+    status: 'stopped', installed: true, running: false, ready: false, configured: true,
+    version: '1.2.3', httpUrl: 'http://127.0.0.1:3000', wsUrl: 'ws://127.0.0.1:3001',
+    accessTokenConfigured: true, accessToken: 'never-project-this-value', lastError: ''
+  } });
+  desktopLocalServices.actions = { snowluma: { detect: async () => {
+    snowLumaActionCalled = true;
+    return { status: 'stopped', installed: true, running: false, ready: false, configured: true };
+  } } };
+  services = createCetaMeshServices({ config, localServices: desktopLocalServices });
 
   const validateChannelSend = id => services.capabilityService.broker.registry.require('channel.send').validate({
     input: { kind: 'group', id: String(id), text: 'message' }
@@ -68,9 +78,21 @@ try {
   const bionicIntegration = uiIntegrations.integrations.find(item => item.id === 'cetamesh-bionic-chat');
   assert.ok(bionicIntegration, 'Harbor Plugin Center lists the Bionic tool pack as an Integration');
   assert.equal(bionicIntegration.available, true, 'Bionic management remains available even when some backing tools are offline');
+  const productPluginCenter = await ui('ui.plugins.status');
+  assert.ok(productPluginCenter.integrations.some(item => item.id === 'cetamesh-snowluma'), 'the unified Plugin Center DTO includes built-in integrations');
+  assert.ok(productPluginCenter.mcp.some(item => item.id === 'snowluma' && item.source === 'builtin'), 'the unified Plugin Center DTO identifies built-in MCP descriptors');
+  const snowLumaSettings = await ui('ui.plugins.integration.settings', { id: 'cetamesh-snowluma' });
+  assert.equal(snowLumaSettings.localService.status, 'stopped');
+  assert.equal(snowLumaSettings.localService.accessTokenConfigured, true);
+  assert.equal(Object.hasOwn(snowLumaSettings.localService, 'accessToken'), false, 'local Integration settings never project the token');
   const bionicSettings = await ui('ui.plugins.integration.settings', { id: 'cetamesh-bionic-chat' });
   assert.ok(bionicSettings.tools.length >= 50, 'Bionic settings project its real individual tool controls');
   assert.ok(bionicSettings.tools.some(tool => tool.id === 'mcp__snowluma__qq_status'));
+  const snowLumaAction = await services.integrationService.execute({
+    method: 'integrations.action', params: { localService: 'snowluma', action: 'detect', approved: true }
+  });
+  assert.equal(snowLumaAction.status, 'stopped');
+  assert.equal(snowLumaActionCalled, true, 'Desktop routes SnowLuma controls through the existing local service manager');
   const uiSession = await ui('ui.chat.sessions.create', { title: 'Harbor Core contract' });
   const uiHistory = await ui('ui.chat.history', { id: uiSession.id, limit: 100 });
   assert.equal(uiHistory.id, uiSession.id);

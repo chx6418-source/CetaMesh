@@ -119,6 +119,14 @@ function startShell(args, env) {
   };
 }
 
+async function closeChildPipes(child, delayMs = 500) {
+  await new Promise((resolve) => setTimeout(resolve, delayMs));
+  // Process trees can leave inherited stderr handles open after taskkill; close test-owned pipes
+  // after checking the child lifecycle so this Node test runner can exit promptly.
+  child.stdout?.destroy();
+  child.stderr?.destroy();
+}
+
 function isRunning(pid) {
   if (!pid) return false;
   const result = spawnSync(
@@ -452,7 +460,7 @@ try {
       if (child.exitCode === null) {
         spawnSync('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { encoding: 'utf8' });
       }
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      await closeChildPipes(child);
     }
     }
     }
@@ -599,13 +607,13 @@ try {
         if (relaunched.exitCode === null) {
           spawnSync('taskkill.exe', ['/PID', String(relaunched.pid), '/T', '/F'], { encoding: 'utf8' });
         }
-        await new Promise((resolve) => setTimeout(resolve, 800));
+        await closeChildPipes(relaunched, 800);
       }
     } finally {
       if (first.exitCode === null) {
         spawnSync('taskkill.exe', ['/PID', String(first.pid), '/T', '/F'], { encoding: 'utf8' });
       }
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      await closeChildPipes(first);
     }
   }
 
@@ -678,7 +686,7 @@ try {
         if (child.exitCode === null) {
           spawnSync('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { encoding: 'utf8' });
         }
-        await new Promise((resolve) => setTimeout(resolve, 500));
+        await closeChildPipes(child);
       }
     }
   }

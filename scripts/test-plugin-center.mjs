@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { zipSync } from 'fflate';
+import { strToU8, zipSync } from 'fflate';
 import { normalizeCatalog } from '../src/plugin-center/catalog.js';
 import { extractPluginPackage, verifyPluginPackage } from '../src/plugin-center/package.js';
 import { createPluginCenterService } from '../src/plugin-center/service.js';
@@ -362,6 +362,48 @@ await check('Developer Mode gates local plugins and never deletes the source dir
     service.close();
     fs.rmSync(root, { recursive: true, force: true });
     fs.rmSync(source, { recursive: true, force: true });
+  }
+});
+
+await check('Native-selected local plugin archives enter Developer Mode review and remain unverified', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-plugin-local-package-'));
+  const packagePath = path.join(root, 'local-plugin.zip');
+  const manifestValue = manifest();
+  fs.writeFileSync(packagePath, zipSync({
+    'extension.json': strToU8(JSON.stringify(manifestValue)),
+    'index.js': strToU8('export async function invoke(input) { return { greeting: input.name }; }\n')
+  }));
+  const reviewSources = [];
+  let installedSource = '';
+  const extensionRuntime = {
+    async review({ sourceDir }) {
+      reviewSources.push(sourceDir);
+      const raw = JSON.parse(fs.readFileSync(path.join(sourceDir, 'extension.json'), 'utf8'));
+      return { manifest: raw, review: { token: 'archive-review', installable: true, blockers: [], permissions: [] }, scan: { ok: true, findings: [] }, summary: ['Local archive content reviewed'] };
+    },
+    list() { return []; },
+    async install(request) { installedSource = request.sourceDir; return { entry: { id: manifestValue.id, status: 'disabled' } }; }
+  };
+  const service = createPluginCenterService({
+    stateDir: root, extensionRuntime, currentVersion: '1.0.0',
+    settingsStore: { get: () => ({ settings: { extensions: { developerMode: true } } }) }
+  });
+  try {
+    const staged = await service.execute({ method: 'plugin-center.developer.stageLocal', params: { file: packagePath } });
+    assert.equal(staged.trust.level, 'local-unverified');
+    assert.equal(staged.requiresReview, true);
+    assert.equal(staged.review.review.installable, true);
+    assert.equal(reviewSources.length, 1);
+    assert.notEqual(reviewSources[0], packagePath, 'Core extracts the archive before review');
+    const installed = await service.execute({ method: 'plugin-center.package.install', params: { stageId: staged.stageId, reviewed: true } });
+    assert.equal(installed.enabled, false, 'local import is installed disabled');
+    assert.equal(installed.trust.level, 'local-unverified');
+    assert.equal(fs.existsSync(packagePath), true, 'the selected source archive is never changed or deleted');
+    assert.equal(fs.existsSync(installedSource), false, 'temporary extracted source is cleaned after installation');
+    await assert.rejects(service.execute({ method: 'plugin-center.developer.stageLocal', params: { file: path.join(root, 'bad.exe') } }), { code: 'PACKAGE_INVALID' });
+  } finally {
+    service.close();
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });
 

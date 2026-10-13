@@ -38,6 +38,8 @@ check('native desktop entry defaults to bundled WebView2 and has no obsolete UI 
   const entry = read('desktop-shell/src/native_main.rs');
   assert.match(policy, /UiMode::V2/);
   assert.match(policy, /--ui=legacy/);
+  const allowedMethods = policy.match(/const UI_METHODS: &\[&str\] = &\[([\s\S]*?)\];/)?.[1] ?? '';
+  assert.match(allowedMethods, /"ui\.plugins\.integration\.action"/, 'Harbor integration setup actions must pass the native WebView IPC allowlist');
   assert.match(entry, /run_webview_ui/);
   for (const gone of [
     'desktop-shell/src/main.rs',

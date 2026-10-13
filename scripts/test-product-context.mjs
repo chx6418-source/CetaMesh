@@ -43,6 +43,13 @@ run('capability context sorts descriptors and only marks granted managed-agent t
   assert.deepEqual(context.requestable, ['filesystem.read', 'web.search']);
   assert.equal(context.manifest[0].requestable, true);
 
+  const management = buildCapabilityContext({
+    registered: [{ id: 'integration.mcp.manage', modelCallable: false }],
+    executionPath: 'chat'
+  });
+  assert.deepEqual(management.manifest, [], 'management capabilities never enter the model tool manifest');
+  assert.deepEqual(management.statusSummary, [{ id: 'integration.mcp.manage', availability: 'available', reason: 'not-model-callable' }]);
+
   const untrustedFlags = buildCapabilityContext({
     registered: [{ id: 'admin.publish', granted: true, requestable: true }],
     executionPath: 'managed-agent'

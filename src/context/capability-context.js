@@ -96,7 +96,8 @@ export function buildCapabilityContext({
       if (actorKind !== 'owner') descriptor.grantState = 'granted';
       else descriptor.grantState = 'owner';
     } else {
-      const reason = item.requiresTask === true && taskAvailable !== true ? 'task-required'
+      const reason = item.modelCallable === false ? 'not-model-callable'
+        : item.requiresTask === true && taskAvailable !== true ? 'task-required'
         : item.workspace === true && workspaceAvailable !== true ? 'scope-unavailable'
         : workspaceReconciliationRequired ? 'workspace-reconciliation-required'
           : toolCalling !== 'supported' ? 'tool-calling-unsupported'

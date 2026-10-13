@@ -13,6 +13,7 @@ import { promisify } from 'node:util';
 import { createWriteStream } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
+import { readJsonFile, writeJsonAtomic as writeJsonFileAtomic } from './storage/json-file.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -81,18 +82,15 @@ async function statSafe(target) {
 
 async function readJsonAsync(file, fallback = null) {
   try {
-    const raw = (await fsp.readFile(file, 'utf8')).replace(/^\uFEFF/, '');
-    return JSON.parse(raw);
-  } catch {
+    return readJsonFile(file);
+  } catch (error) {
+    // A missing or invalid detection cache is recoverable; the next scan rebuilds it.
     return fallback;
   }
 }
 
 async function writeJsonAtomic(file, value) {
-  await fsp.mkdir(path.dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.${crypto.randomBytes(5).toString('hex')}.tmp`;
-  await fsp.writeFile(tmp, JSON.stringify(value, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 });
-  await fsp.rename(tmp, file);
+  writeJsonFileAtomic(file, value);
 }
 
 function uniquePaths(values, base = process.cwd()) {
