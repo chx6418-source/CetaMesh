@@ -329,6 +329,9 @@ const emptyObjectSchema = {
     assert.ok(pendingStatus.approvalId);
     const pendingCoreStatus = await approved.chatService.execute({ method: 'chat.status', params: { id: approved.session.id } });
     const originalTurnId = pendingCoreStatus.turn.id;
+    assert.equal(pendingCoreStatus.turn.toolActivity?.length, 1,
+      'active chat status preserves the in-flight tool activity during a refresh');
+    assert.equal(pendingCoreStatus.turn.toolActivity[0].capability, 'fixture.approval');
     const pendingRows = await approved.ui.execute({ method: 'ui.approvals.list', params: {} });
     assert.equal(pendingRows.approvals.length, 1);
     assert.equal(pendingRows.approvals[0].status, 'pending');

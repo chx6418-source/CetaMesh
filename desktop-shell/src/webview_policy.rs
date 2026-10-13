@@ -19,7 +19,7 @@ const UI_METHODS: &[&str] = &[
     "ui.agent.list", "ui.agent.health",
     "ui.plugins.catalog", "ui.plugins.status", "ui.plugins.detail", "ui.plugins.refresh", "ui.plugins.stage", "ui.plugins.stage-local", "ui.plugins.enable.review",
     "ui.plugins.install", "ui.plugins.enable", "ui.plugins.disable", "ui.plugins.uninstall",
-    "ui.plugins.integration.list", "ui.plugins.integration.settings", "ui.plugins.integration.manage", "ui.plugins.integration.tool.toggle",
+    "ui.plugins.integration.list", "ui.plugins.integration.settings", "ui.plugins.integration.manage", "ui.plugins.integration.action", "ui.plugins.integration.tool.toggle",
     "ui.mcp.list", "ui.mcp.tools", "ui.mcp.manage", "ui.mcp.config.get", "ui.mcp.config.update",
     "ui.settings.describe", "ui.settings.get", "ui.settings.update",
     "ui.about.info", "ui.feedback.links", "ui.about.update", "ui.update.capabilities", "ui.update.check", "ui.update.notes",
@@ -246,6 +246,14 @@ mod tests {
         assert!(parse_bridge_request(r#"{"id":"r-4","method":"ui.chat.send","params":{"id":"s","text":"hello"}}"#).is_ok());
         assert!(parse_bridge_request(r#"{"id":"r-5","method":"app.ping","params":[]}"#).is_err());
         assert!(parse_bridge_request(&"x".repeat(70_000)).is_err());
+    }
+
+    #[test]
+    fn snowluma_integration_action_is_allowlisted_for_the_harbor_ui() {
+        let request = parse_bridge_request(
+            r#"{"id":"r-snow","method":"ui.plugins.integration.action","params":{"id":"snowluma","action":"start"}}"#,
+        ).unwrap();
+        assert_eq!(request.method, "ui.plugins.integration.action");
     }
 
     #[test]

@@ -427,7 +427,10 @@ export function createChatService({
       try {
         const liveCatalog = await agentExecute({ method: 'agent.list', params: {} });
         if (Array.isArray(liveCatalog?.providers)) liveAgentProviders = liveCatalog.providers;
-      } catch { /* Chat model catalog remains usable when Agent health discovery is offline. */ }
+      } catch {
+        // Chat model catalog remains usable when Agent health discovery is offline; use the registered descriptors as fallback.
+        liveAgentProviders = [...selectableAgentProviders.values()];
+      }
     }
     const liveAgentsById = new Map(liveAgentProviders.filter(entry => entry && typeof entry.id === 'string').map(entry => [entry.id, entry]));
     const chatAgentProvider = entry => {
@@ -701,6 +704,7 @@ export function createChatService({
             handleChatEvent(record, state, event);
           }
         } catch {
+          // Follow transport failures are transient; reconnect below unless cancellation ended this stream.
           if (controller.signal.aborted) break;
         }
         if (!state.follow?.active || state.follow.controller !== controller) break;
@@ -1119,6 +1123,7 @@ export function createChatService({
         displayText: turn.displayText,
         error: turn.error,
         usage: turn.usage,
+        toolActivity: Array.isArray(turn.toolActivity) ? turn.toolActivity.slice(-32) : [],
         agentActivity: turn.agentActivity ?? null,
         ...(turn.approvalId ? { approvalId: turn.approvalId, approvalExpiresAt: turn.approvalExpiresAt ?? null } : {}),
         routing: turn.routing ?? null
