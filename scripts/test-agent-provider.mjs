@@ -201,6 +201,7 @@ function ok(name) { results.pass += 1; console.log(`PASS ${name}`); }
       },
       controlExecute: async () => ({ models: [] }),
       agentExecute: async ({ method, params }) => {
+        if (method === 'agent.list') return { providers: [] };
         agentCalls.push({ method, params });
         if (method === 'agent.createSession') return { sessionId: 'dsh-agent-1', provider: 'dsh', model: params.model ?? null, modelBindingError: null };
         if (method === 'agent.send') return { accepted: true };
@@ -218,8 +219,8 @@ function ok(name) { results.pass += 1; console.log(`PASS ${name}`); }
     const catalog = await exec('chat.catalog', {});
     assert.deepEqual(catalog.agentProviders, [{
       id: 'dsh', label: 'DSH Agent', displayName: 'DSH Agent', eventProtocol: 'dsh-session-events',
-      available: null, version: null, reason: null, workspaceBoundary: 'unsupported',
-      supportsFreshSession: false, supportsResume: false, health: 'unknown'
+      available: null, eligible: false, version: null, reason: null, workspaceBoundary: 'unsupported',
+      supportsFreshSession: false, supportsResume: false, health: null, status: 'not-checked'
     }]);
     ok('E1 chat.catalog 暴露 agentProviders（UI 选择数据源）');
 
@@ -289,6 +290,13 @@ if (dshUp) {
     log: () => {}
   });
   const exec = (method, params) => service.execute({ method, params });
+  const descriptor = await exec('agent.capabilities', { provider: 'dsh' });
+  const workspaceBoundary = descriptor.capabilities?.workspaceBoundary;
+  if (workspaceBoundary !== 'unsupported') {
+    results.live = 'NOT_RUN_ENVIRONMENT';
+    console.log(`NOT_RUN_ENVIRONMENT 真机验收：DSH Agent workspaceBoundary=${workspaceBoundary ?? 'unknown'}，裸会话不满足隔离策略`);
+    service.close();
+  } else {
 
   // D1 createSession
   const created = await exec('agent.createSession', { provider: 'dsh' });
@@ -394,6 +402,7 @@ if (dshUp) {
   console.log(`PASS D7 closeSession（归档受理 ×2；归档后 status=${postClose}；重复关闭=${reclose}）`);
   results.pass += 1;
   results.live = 'PASS';
+  }
 }
 
 console.log(`\n单元/映射段：${results.pass} 通过，${results.fail} 失败；真机段：${results.live ?? 'NOT_RUN_ENVIRONMENT'}`);

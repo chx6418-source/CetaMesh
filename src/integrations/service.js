@@ -114,6 +114,22 @@ export function createIntegrationService({
     return { id, enabled, available, status, lastError: local?.lastError ?? provider.lastError ?? null, provider };
   }
 
+  function localServiceView(plugin) {
+    if (!plugin.localService) return null;
+    const local = (localServices?.() ?? {})[plugin.localService] ?? null;
+    if (!local) return null;
+    return {
+      status: local.status ?? 'not-checked', installed: local.installed === true,
+      running: local.running === true, ready: local.ready === true,
+      configured: local.configured === true, version: local.version ?? null,
+      httpUrl: typeof local.httpUrl === 'string' ? local.httpUrl : null,
+      wsUrl: typeof local.wsUrl === 'string' ? local.wsUrl : null,
+      accessTokenConfigured: local.accessTokenConfigured === true,
+      lastError: local.lastError ?? null,
+      actions: Object.keys(localServices?.actions?.[plugin.localService] ?? {})
+    };
+  }
+
   // ── 工具执行适配（真正"恢复"的落点） ────────────────────────────────────────
   async function runTool(toolId, input) {
     // 在能力执行点**重新**校验一次：审批期间开关可能已变化（TOCTOU）。
@@ -170,7 +186,9 @@ export function createIntegrationService({
       }
       case 'mcp.config.update': return resolvedRegistry.updateMcpConfig(command.serverId, command.config ?? {});
       case 'integration.action': {
-        const binding = localServices?.()?.actions?.[command.localService]?.[command.integrationAction];
+        const current = localServices?.() ?? {};
+        const binding = current.actions?.[command.localService]?.[command.integrationAction]
+          ?? localServices?.actions?.[command.localService]?.[command.integrationAction];
         if (typeof binding !== 'function') {
           throw integrationError('UNSUPPORTED_ACTION',
             '本机未绑定 ' + command.localService + '.' + command.integrationAction + '（需控制台本地服务入口）');
@@ -189,6 +207,22 @@ export function createIntegrationService({
   }
 
   function registerCapabilities() {
+    const descriptors = {
+      [TOOL_CAPABILITIES.read]: {
+        description: 'Read or invoke an available integration tool through the registered tool broker.',
+        inputSchema: { type: 'object', properties: { toolId: { type: 'string' }, input: { type: 'object' } }, required: ['toolId'], additionalProperties: false }
+      },
+      [TOOL_CAPABILITIES.write]: {
+        description: 'Invoke an available integration tool that may change local or connected data.',
+        inputSchema: { type: 'object', properties: { toolId: { type: 'string' }, input: { type: 'object' } }, required: ['toolId'], additionalProperties: false }
+      },
+      [TOOL_CAPABILITIES.admin]: {
+        description: 'Invoke a high-risk registered integration tool after Owner approval.',
+        inputSchema: { type: 'object', properties: { toolId: { type: 'string' }, input: { type: 'object' } }, required: ['toolId'], additionalProperties: false }
+      },
+      [TOOL_CAPABILITIES.mcpManage]: { modelCallable: false },
+      [TOOL_CAPABILITIES.pluginManage]: { modelCallable: false }
+    };
     for (const [id, permission] of Object.entries(TOOL_CAPABILITY_PERMISSION)) {
       if (broker.registry.has(id)) continue; // 幂等：容器共享同一 broker 时不重复注册
       broker.register({
@@ -196,6 +230,7 @@ export function createIntegrationService({
         permission,
         provider: 'integration',
         risk: TOOL_CAPABILITY_RISK[id],
+        ...(descriptors[id] ?? {}),
         validate(request) {
           const action = request.input?.action;
           if (id === TOOL_CAPABILITIES.mcpManage && action === undefined) {
@@ -247,6 +282,10 @@ export function createIntegrationService({
     const view = resolvedRegistry.pluginView(plugin);
     return {
       ...view,
+      ...(plugin.localService ? {
+        localService: localServiceView(plugin),
+        actions: Object.keys(localServices?.actions?.[plugin.localService] ?? {})
+      } : {}),
       // 普通用户只看：总开关 + 每个工具（名称/用途/权限/状态/单独开关）；
       // 其余（transport/entry/覆盖项/失败细节）折叠在 Advanced。
       settings: {
@@ -310,7 +349,7 @@ export function createIntegrationService({
     const plugin = resolvedRegistry.requirePlugin(id);
     const view = resolvedRegistry.pluginView(plugin);
     const status = integrationStatus(id);
-    const local = (localServices?.() ?? {})[plugin.localService] ?? null;
+    const local = localServiceView(plugin);
     const dshData = plugin.id === 'cetamesh-dsh' ? await dshIntegrationData(plugin, { refresh }) : {};
     return {
       ...view,
@@ -318,7 +357,7 @@ export function createIntegrationService({
       integrationStatus: status,
       localService: local,
       provider: status.provider ?? null,
-      actions: plugin.localService ? ['detect', 'start', 'stop', 'install', 'connect'] : [],
+      actions: plugin.localService ? Object.keys(localServices?.actions?.[plugin.localService] ?? {}) : [],
       ...dshData,
       ...(plugin.id === 'cetamesh-dsh' ? { settingsRoute: 'agents.dsh' } : {})
     };

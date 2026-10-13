@@ -219,6 +219,11 @@ export function createToolExecutionCoordinator({
         }
         totalCalls += 1;
         const capability = capabilityFromCall(call, known);
+        const activityId = `${turnId}:${callId}`.slice(0, 200);
+        const activityStartedAt = Date.now();
+        if (typeof state.onActivity === 'function') {
+          await state.onActivity({ id: activityId, capability, status: 'running', durationMs: null });
+        }
         let result;
         try {
           const input = parseArguments(call?.arguments);
@@ -245,6 +250,9 @@ export function createToolExecutionCoordinator({
         }
 
         if (result?.status === 'pending') {
+          if (typeof state.onActivity === 'function') {
+            await state.onActivity({ id: activityId, capability, status: 'waiting-approval', durationMs: Date.now() - activityStartedAt });
+          }
           const approvalId = String(result.approvalId ?? '');
           let fingerprint = '';
           try { fingerprint = capabilityBroker.approvals?.get(approvalId)?.fingerprint ?? ''; }
@@ -280,6 +288,13 @@ export function createToolExecutionCoordinator({
             ? safeJson({ status: result.status, result: result.result })
             : safeJson(result?.error ?? result ?? { status: 'denied', code: 'CAPABILITY_DENIED' })
         });
+        if (typeof state.onActivity === 'function') {
+          await state.onActivity({
+            id: activityId, capability,
+            status: result?.status === 'completed' ? 'completed' : 'failed',
+            durationMs: Date.now() - activityStartedAt
+          });
+        }
         if (typeof state.onCapabilityResult === 'function') {
           await state.onCapabilityResult({ capability, result, sessionId, turnId, scope: state.scope });
         }
@@ -304,7 +319,7 @@ export function createToolExecutionCoordinator({
     return { status: 'completed', toolCalling: 'supported', text: text || 'Tool execution limit reached.', usage, resolvedModel, totalCalls };
   }
 
-  async function run({ providerId, model, reasoning, messages = [], manifest = [], actor, sessionId, turnId, targetKind = 'chat', scope = {}, signal, refreshContext, onCapabilityResult } = {}) {
+  async function run({ providerId, model, reasoning, messages = [], manifest = [], actor, sessionId, turnId, targetKind = 'chat', scope = {}, signal, refreshContext, onCapabilityResult, onActivity } = {}) {
     if (!actor || !['owner', 'agent'].includes(actor.kind) || typeof actor.id !== 'string') fail('UNAUTHORIZED', 'Trusted Model actor required');
     const supports = typeof modelRuntime.supportsToolCalling === 'function'
       ? await modelRuntime.supportsToolCalling(providerId)
@@ -325,6 +340,7 @@ export function createToolExecutionCoordinator({
         targetKind: targetKind === 'agent' ? 'agent' : 'chat',
         scope: { taskId: scope.taskId ?? null, workspaceId: scope.workspaceId ?? null },
         messages: structuredClone(messages), cycle: 0, totalCalls: 0,
+        ...(typeof onActivity === 'function' ? { onActivity } : {}),
         ...(typeof refreshContext === 'function' ? { refreshContext } : {}),
         ...(typeof onCapabilityResult === 'function' ? { onCapabilityResult } : {})
       }, controller.signal);

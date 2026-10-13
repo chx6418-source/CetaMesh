@@ -1,6 +1,6 @@
 * { box-sizing: border-box; }
-html, body, #root { width: 100%; height: 100%; min-height: 0; margin: 0; }
-body { font: 14px/1.5 "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif; color: var(--text-primary); background: var(--background); text-rendering: optimizeLegibility; }
+html, body, #root { width: 100%; height: 100%; min-height: 0; margin: 0; overflow: hidden; }
+body { font: 14px/1.5 "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif; color: var(--text-primary); background: var(--background); text-rendering: optimizeLegibility; user-select: none; }
 button, input, textarea, select { font: inherit; }
 button { cursor: pointer; }
 button:disabled { cursor: not-allowed; opacity: .48; }
@@ -33,8 +33,15 @@ a { color: var(--accent-hover); }
 .cm-button.danger { color: var(--danger); }
 .cm-button.compact { min-height: 30px; padding: 4px 9px; font-size: 12px; }
 .cm-icon-button { width: 36px; height: 36px; padding: 0; flex: none; }
-.cm-input, .cm-textarea, .cm-select { width: 100%; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-elevated); color: var(--text-primary); padding: 9px 11px; outline: none; }
-.cm-input:focus, .cm-textarea:focus, .cm-select:focus { border-color: var(--accent); box-shadow: var(--focus); }
+.cm-input, .cm-textarea { width: 100%; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-elevated); color: var(--text-primary); padding: 9px 11px; outline: none; }
+.cm-input:focus, .cm-textarea:focus { border-color: var(--accent); box-shadow: var(--focus); }
+.cm-select { position: relative; display: block; width: 100%; }
+.cm-select-trigger { display: inline-flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; min-height: 38px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-elevated); color: var(--text-primary); text-align: left; }
+.cm-select-trigger:focus-visible { border-color: var(--accent); box-shadow: var(--focus); }
+.cm-select-options { z-index: 80; display: grid; gap: 2px; max-height: min(320px, 55vh); overflow-y: auto; padding: 5px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-elevated); box-shadow: var(--shadow-lg); animation: menu-enter var(--motion-fast) var(--motion-ease) both; }
+.cm-select-option { display: flex; justify-content: space-between; gap: 12px; min-height: 34px; padding: 7px 9px; border: 0; border-radius: 6px; background: transparent; color: var(--text-primary); text-align: left; }
+.cm-select-option[aria-selected='true'], .cm-select-option:focus-visible { background: var(--accent-soft); color: var(--accent-hover); outline: none; }
+.cm-select-option:disabled { color: var(--text-muted); opacity: .55; }
 .cm-input::placeholder, .cm-textarea::placeholder { color: var(--text-muted); }
 .cm-textarea { resize: vertical; min-height: 76px; }
 .cm-search { position: relative; }
@@ -66,4 +73,6 @@ a { color: var(--accent-hover); }
 .cm-markdown p:last-child { margin-bottom: 0; }
 .cm-markdown ul, .cm-markdown ol { padding-left: 20px; }
 .cm-markdown code { padding: 2px 4px; border-radius: 4px; background: var(--background-soft); font: 12px Consolas, ui-monospace, monospace; }
+button, .cm-card, .cm-surface, .nav-item, .session-item, .cm-tabs, .cm-badge, .status-pill { user-select: none; }
+.chat-message, .chat-message *, .cm-markdown, .cm-markdown *, .cm-code, input, textarea, [contenteditable='true'] { user-select: text; }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; } }

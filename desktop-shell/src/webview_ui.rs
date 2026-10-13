@@ -178,6 +178,17 @@ fn dispatch_bridge(
                 let _ = proxy.send_event(UiEvent::Reply { id, result });
             });
         }
+        "app.pickExtensionPackage" => {
+            let proxy = proxy.clone();
+            std::thread::spawn(move || {
+                let path = rfd::FileDialog::new()
+                    .set_title("选择本地扩展包")
+                    .add_filter("CetaMesh 扩展包", &["zip", "cmpkg"])
+                    .pick_file()
+                    .map(|path| path.to_string_lossy().into_owned());
+                let _ = proxy.send_event(UiEvent::Reply { id, result: Ok(json!({ "path": path })) });
+            });
+        }
         "app.setWindowBehavior" => {
             let result = match request.params["confirmOnExit"].as_bool() {
                 Some(confirm_on_exit) => proxy.send_event(UiEvent::WindowBehavior { confirm_on_exit })

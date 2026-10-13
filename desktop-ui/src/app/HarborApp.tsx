@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router';
+import { createPortal } from 'react-dom';
 import { mergeLatestChatMessages, prependOlderChatMessages } from './chat-history';
 import { aboutClient, agentClient, approvalClient, bridge, chatClient, extensionSettingsClient, feedbackClient, hostClient, memoryClient, onboardingClient, openExternal, pluginClient, searchClient, settingsClient, taskClient, updateClient, workspaceClient, type Agent, type Approval, type ChatMessage as ChatMessageDto, type ChatSession, type ExtensionSettingsDescription, type ExtensionSettingsSnapshot, type IntegrationSettings, type Memory, type Plugin, type ProviderSettingField, type SettingField, type Settings, type Task } from '../bridge/typed-client';
 import { Icon, type IconName } from '../components/icons';
@@ -32,6 +33,7 @@ const relativeLabel = (value: string | number | null | undefined) => {
   return minutes < 1 ? '刚刚' : minutes < 60 ? `${minutes} 分钟前` : minutes < 1440 ? `${Math.floor(minutes / 60)} 小时前` : `${Math.floor(minutes / 1440)} 天前`;
 };
 const taskStatusLabel = (status: string) => ({ working: '运行中', running: '运行中', waiting: '等待处理', 'waiting-approval': '等待审批', paused: '已暂停', completed: '已完成', cancelled: '已取消', error: '需要处理' }[status] ?? status);
+const agentActivityStatusLabel = (status: string) => ({ running: '正在运行', completed: '已完成', cancelled: '已停止', failed: '未完成' }[status] ?? status);
 const updateStatusLabel = (status: string) => ({ update_available: '有可用更新', up_to_date: '已是最新版本', checked: '已完成检查', error: '检查失败', unknown: '尚未检查' }[status] ?? status);
 const agentInitials = (id: string) => id.slice(0, 2).toUpperCase();
 
@@ -46,10 +48,19 @@ function Heading({ eyebrow, title, description, action }: { eyebrow: string; tit
 }
 function StatusBadge({ value, available }: { value: string; available?: boolean }) {
   const tone = available === true || ['ready', 'running', 'enabled', 'completed', 'current', 'installed'].includes(value) ? 'success'
-    : ['needs-setup', 'pending', 'waiting-approval', 'starting', 'update'].includes(value) ? 'warning'
+    : ['needs-setup', 'descriptor-incomplete', 'pending', 'waiting-approval', 'starting', 'start-timeout', 'checking', 'update'].includes(value) ? 'warning'
       : ['unavailable', 'error', 'failed', 'stopped', 'disabled'].includes(value) ? 'danger' : 'default';
-  const label = ({ ready: '已就绪', running: '运行中', enabled: '已启用', installed: '已安装', update: '可更新', completed: '已完成', current: '当前步骤', 'needs-setup': '需要设置', 'not-installed': '未安装', 'not-supported': '不支持', 'not-checked': '未检查', unavailable: '暂不可用', disabled: '已停用', stopped: '已停止', pending: '等待处理', 'waiting-approval': '等待审批', starting: '启动中', error: '异常', failed: '失败' } as Record<string, string>)[value] ?? value;
+  const label = ({ ready: '已就绪', running: '运行中', enabled: '已启用', installed: '已安装', update: '可更新', completed: '已完成', current: '当前步骤', 'needs-setup': '需要设置', 'descriptor-incomplete': '配置不完整', 'not-installed': '未安装', 'not-supported': '不支持', 'not-checked': '未检查', checking: '检查中', 'start-timeout': '等待网关就绪', invalid: '安装需修复', unavailable: '暂不可用', disabled: '已停用', stopped: '已停止', pending: '等待处理', 'waiting-approval': '等待审批', starting: '启动中', error: '异常', failed: '失败' } as Record<string, string>)[value] ?? value;
   return <Badge tone={tone}>{label}</Badge>;
+}
+function availabilityReasonLabel(reason: string | null) {
+  if (!reason) return '';
+  return ({
+    'not-installed': '未安装', 'needs-setup': '需要配置', stopped: '已停止', 'start-timeout': '等待网关就绪',
+    'provider-unavailable': '服务未连接', 'server-stopped': '已停止', 'task-required': '创建任务后使用',
+    'workspace-required': '需要工作区', 'scope-unavailable': '需要工作区', 'descriptor-incomplete': '能力描述不完整',
+    'not-supported': '暂不支持', 'not-checked': '尚未检查', unavailable: '服务未连接'
+  } as Record<string, string>)[reason] ?? reason;
 }
 
 export function HarborApp() {
@@ -202,7 +213,11 @@ export function HarborApp() {
     const inScope = allSessionsScope === 'all' || (allSessionsScope === 'archived' ? session.archived : !session.archived);
     return inScope && `${session.title} ${session.id}`.toLowerCase().includes(allSessionsQuery.toLowerCase());
   });
-  return <div className="harbor-shell">
+  return <div className="harbor-shell" onContextMenu={event => {
+    const target = event.target as Element;
+    if (target.closest('input, textarea, [contenteditable="true"], .chat-message, .cm-markdown, .cm-code')) return;
+    event.preventDefault();
+  }}>
     <aside className="harbor-sidebar">
       <div className="brand-lockup"><span className="brand-mark"><Icon name="sparkles" size={20} /></span><span className="brand-copy"><strong>CetaMesh</strong><small>Desktop · UX v2</small></span></div>
       <details className="workspace-switch"><summary><span className="workspace-avatar">CM</span><span className="workspace-label"><strong>{activeWorkspace?.name ?? '个人工作区'}</strong><small>{activeWorkspace?.status ?? '本地工作区'}</small></span><Icon name="down" size={14} /></summary><div className="workspace-menu">{workspaceError && <p role="alert">{workspaceError}</p>}{workspaces.length ? workspaces.map(workspace => <button key={workspace.id} aria-current={workspace.id === activeWorkspaceId ? 'true' : undefined} onClick={() => void openWorkspace(workspace.id)}><strong>{workspace.name}</strong><small>{workspace.status}</small></button>) : <p>尚未登记工作区</p>}<button className="workspace-add" onClick={() => navigate('work')}>管理工作区</button></div></details>
@@ -214,11 +229,7 @@ export function HarborApp() {
           <button className={`session-item ${activeSessionId === session.id ? 'selected' : ''}`} onClick={() => setActiveSessionId(session.id)} aria-current={activeSessionId === session.id ? 'page' : undefined}>
             <span className="session-unread" aria-hidden="true">{activeSessionId === session.id ? '•' : ''}</span><span className="session-copy"><strong>{session.title || '新会话'}</strong><small>{relativeLabel(session.updatedAt)}</small></span><time>{dateLabel(session.updatedAt).split(' ').at(-1)}</time>
           </button>
-          <details className="session-menu"><summary aria-label={`会话操作：${session.title || '新会话'}`}><Icon name="more" size={15} /></summary><div className="session-menu-items">
-            <button onClick={() => void manageSession(session, 'rename')}>重命名</button>
-            <button onClick={() => void manageSession(session, 'archive')}>归档</button>
-            <button className="session-delete" onClick={() => void manageSession(session, 'delete')}>删除会话</button>
-          </div></details>
+          <SessionActionsMenu session={session} onAction={action => { void manageSession(session, action); }} />
         </div>)}</div>
         {!sessions.length && !sessionError && <p className="sidebar-empty">还没有会话</p>}
         <button className="all-sessions" onClick={() => { setAllSessionsOpen(true); setAllSessionsQuery(''); void loadAllSessions(); }}>查看全部会话 <Icon name="right" size={13} /></button>
@@ -230,12 +241,12 @@ export function HarborApp() {
         {globalSearch && <div className="search-popover" role="region" aria-label="搜索结果">{searchError ? <ErrorNotice error={searchError} /> : searchResults ? <SearchResults results={searchResults} onSelectSession={id => navigate('chat', id)} onSelectPage={navigate} /> : <LoadingState label="正在搜索…" />}</div>}
       </header>
       <main className={`page-frame page-${page}`}>
-        {page === 'chat' && <ChatPage session={activeSession} onNew={createSession} onOpenMemory={() => navigate('memory')} />}
+        {page === 'chat' && <ChatPage session={activeSession} onSessionUpdate={updated => setSessions(current => current.map(item => item.id === updated.id ? updated : item))} onNew={createSession} onOpenMemory={() => navigate('memory')} />}
         {page === 'work' && <WorkPage workspaces={workspaces} onRefreshWorkspaces={refreshWorkspaces} />}
         {page === 'memory' && <MemoryPage />}
         {page === 'agents' && <AgentsPage />}
         {page === 'plugins' && <PluginsPage />}
-        {page === 'settings' && <SettingsPage theme={theme} onThemeChange={changeTheme} />}
+        {page === 'settings' && <SettingsPage theme={theme} onThemeChange={changeTheme} onOpenPlugins={() => navigate('plugins')} />}
         {page === 'about' && <AboutPage />}
         {page === 'onboarding' && <OnboardingPage onComplete={async () => { const state = await onboardingClient.status(); setOnboarding(state); navigate('chat'); }} />}
       </main>
@@ -261,6 +272,52 @@ function SearchResults({ results, onSelectSession, onSelectPage }: { results: { 
   return <div className="search-results">{results.sessions.map(session => <button key={`s-${session.id}`} onClick={() => onSelectSession(session.id)}><Icon name="chat" size={16} /><span><strong>{session.title || '新会话'}</strong><small>会话 · {dateLabel(session.updatedAt)}</small></span></button>)}{results.tasks.map(task => <button key={`t-${task.id}`} onClick={() => onSelectPage('work')}><Icon name="work" size={16} /><span><strong>{task.title}</strong><small>任务 · {taskStatusLabel(task.status)}</small></span></button>)}{results.plugins.map(plugin => <button key={`p-${plugin.id}`} onClick={() => onSelectPage('plugins')}><Icon name="plugins" size={16} /><span><strong>{plugin.name}</strong><small>插件 · {plugin.developer}</small></span></button>)}</div>;
 }
 
+function SessionActionsMenu({ session, onAction }: { session: ChatSession; onAction(action: 'rename' | 'archive' | 'delete'): void }) {
+  const [open, setOpen] = useState(false);
+  const [position, setPosition] = useState<{ top: number; left: number }>({ top: 0, left: 0 });
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  function show() {
+    const rect = triggerRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const left = Math.max(8, Math.min(rect.right - 150, window.innerWidth - 158));
+    const top = Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - 136));
+    setPosition({ top, left });
+    setOpen(true);
+  }
+  useEffect(() => {
+    if (!open) return;
+    const outside = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (!menuRef.current?.contains(target) && !triggerRef.current?.contains(target)) setOpen(false);
+    };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { setOpen(false); triggerRef.current?.focus(); }
+    };
+    const scroll = () => setOpen(false);
+    document.addEventListener('pointerdown', outside);
+    document.addEventListener('keydown', escape);
+    window.addEventListener('scroll', scroll, true);
+    window.addEventListener('resize', scroll);
+    return () => {
+      document.removeEventListener('pointerdown', outside);
+      document.removeEventListener('keydown', escape);
+      window.removeEventListener('scroll', scroll, true);
+      window.removeEventListener('resize', scroll);
+    };
+  }, [open]);
+  function action(name: 'rename' | 'archive' | 'delete') { setOpen(false); onAction(name); }
+  const style: CSSProperties = { position: 'fixed', top: position.top, left: position.left };
+  return <>
+    <button ref={triggerRef} type="button" className="session-menu-trigger" aria-label={`会话操作：${session.title || '新会话'}`} aria-haspopup="menu" aria-expanded={open} onClick={() => open ? setOpen(false) : show()}><Icon name="more" size={15} /></button>
+    {open && createPortal(<div ref={menuRef} className="session-menu-items" role="menu" style={style} aria-label={`会话操作：${session.title || '新会话'}`}>
+      <button role="menuitem" onClick={() => action('rename')}>重命名</button>
+      <button role="menuitem" onClick={() => action('archive')}>归档</button>
+      <button role="menuitem" className="session-delete" onClick={() => action('delete')}>删除会话</button>
+    </div>, document.body)}
+  </>;
+}
+
 type ChatTimelineItem =
   | { id: string; kind: 'message'; message: ChatMessageDto }
   | { id: 'load-earlier'; kind: 'load-earlier' }
@@ -273,11 +330,11 @@ type ChatTimelineItem =
 const chatTimelineKey = (item: ChatTimelineItem) => item.id;
 const isChatMessageAnchor = (item: ChatTimelineItem) => item.kind === 'message';
 
-function ChatPage({ session, onNew, onOpenMemory }: { session: ChatSession | null; onNew(): Promise<void>; onOpenMemory(): void }) {
+function ChatPage({ session, onSessionUpdate, onNew, onOpenMemory }: { session: ChatSession | null; onSessionUpdate(session: ChatSession): void; onNew(): Promise<void>; onOpenMemory(): void }) {
   const [messages, setMessages] = useState<ChatMessageDto[]>([]);
   const [hasMoreHistory, setHasMoreHistory] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
-  const [status, setStatus] = useState<{ state: string; displayText: string; error: string | null; approvalId: string | null; routing: Record<string, unknown> }>({ state: 'idle', displayText: '', error: null, approvalId: null, routing: {} });
+  const [status, setStatus] = useState<{ state: string; displayText: string; toolActivity: ChatMessageDto['toolActivity']; agentActivity: ChatMessageDto['agentActivity']; error: string | null; approvalId: string | null; routing: Record<string, unknown> }>({ state: 'idle', displayText: '', toolActivity: [], agentActivity: null, error: null, approvalId: null, routing: {} });
   const [catalog, setCatalog] = useState<Awaited<ReturnType<typeof chatClient.catalog>> | null>(null);
   const [linkedTask, setLinkedTask] = useState<Task | null>(null);
   const [memories, setMemories] = useState<Memory[]>([]);
@@ -285,6 +342,8 @@ function ChatPage({ session, onNew, onOpenMemory }: { session: ChatSession | nul
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [hasNewMessages, setHasNewMessages] = useState(false);
+  const [sendErrors, setSendErrors] = useState<Record<string, string>>({});
+  const [contextCollapsed, setContextCollapsed] = useState(false);
 
   const historySessionIdRef = useRef<string | null>(null);
   const isAtBottomRef = useRef(true);
@@ -292,7 +351,9 @@ function ChatPage({ session, onNew, onOpenMemory }: { session: ChatSession | nul
   const olderPageRequestRef = useRef(false);
   const virtualListRef = useRef<VirtualListController | null>(null);
   const streamStatusFrameRef = useRef<number | null>(null);
+  const streamUpdateRef = useRef<{ sessionId?: string; status?: string; delta?: string; replaceText?: string; reset?: boolean; toolActivity?: ChatMessageDto['toolActivity']; agentActivity?: ChatMessageDto['agentActivity'] } | null>(null);
   const seenMessageIdsRef = useRef<Set<string>>(new Set());
+  const pendingSendsRef = useRef(new Map<string, { text: string; attachments: { name: string; content: string; mimeType?: string }[] }>());
   const previousStreamRef = useRef({ state: 'idle', text: '' });
 
   const load = useCallback(async () => {
@@ -335,6 +396,18 @@ function ChatPage({ session, onNew, onOpenMemory }: { session: ChatSession | nul
   }, [session?.id, session?.title]);
 
   useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    if (!session) return;
+    try { setContextCollapsed(window.localStorage.getItem(`harbor:chat-context:${session.id}`) === 'collapsed'); }
+    catch { setContextCollapsed(false); }
+  }, [session?.id]);
+  function toggleContext() {
+    if (!session) return;
+    const next = !contextCollapsed;
+    setContextCollapsed(next);
+    try { window.localStorage.setItem(`harbor:chat-context:${session.id}`, next ? 'collapsed' : 'expanded'); }
+    catch { /* Context visibility still works for this session when storage is unavailable. */ }
+  }
   const refreshContext = useCallback(async () => {
     if (!session) return;
     try {
@@ -354,10 +427,25 @@ function ChatPage({ session, onNew, onOpenMemory }: { session: ChatSession | nul
     const refreshConversation = () => { void load(); };
     const offUpdated = bridge.subscribe('chat.updated', data => { if (!data.sessionId || data.sessionId === session.id) refreshConversation(); });
     const offStreaming = bridge.subscribe('chat.streaming', data => {
-      if (data.sessionId !== session.id || streamStatusFrameRef.current !== null) return;
+      if (data.sessionId !== session.id) return;
+      streamUpdateRef.current = data;
+      if (streamStatusFrameRef.current !== null) return;
       streamStatusFrameRef.current = window.requestAnimationFrame(() => {
         streamStatusFrameRef.current = null;
-        void chatClient.status(session.id).then(setStatus).catch(() => { /* Keep the last known status while the Core reconnects. */ });
+        const update = streamUpdateRef.current;
+        if (!update || update.sessionId !== session.id) return;
+        setStatus(current => {
+          let displayText = update.reset ? '' : current.displayText;
+          if (typeof update.replaceText === 'string') displayText = update.replaceText;
+          else if (update.delta) displayText += update.delta;
+          return {
+            ...current,
+            state: update.status ?? current.state,
+            displayText,
+            toolActivity: update.toolActivity ?? current.toolActivity,
+            agentActivity: update.agentActivity === undefined ? current.agentActivity : update.agentActivity
+          };
+        });
       });
     });
     const offApproval = bridge.subscribe('approval.pending', () => { void refreshContext(); });
@@ -371,6 +459,7 @@ function ChatPage({ session, onNew, onOpenMemory }: { session: ChatSession | nul
         window.cancelAnimationFrame(streamStatusFrameRef.current);
         streamStatusFrameRef.current = null;
       }
+      streamUpdateRef.current = null;
       offUpdated(); offStreaming(); offApproval(); offResolved(); offTasks(); offMemory();
     };
   }, [session?.id, load, refreshContext]);
@@ -403,14 +492,14 @@ function ChatPage({ session, onNew, onOpenMemory }: { session: ChatSession | nul
     if (error) rows.push({ id: 'error', kind: 'error', message: error });
     if (!messages.length && !loading && !error) rows.push({ id: 'empty', kind: 'empty' });
     rows.push(...messages.map(message => ({ id: `message:${message.id}`, kind: 'message' as const, message })));
-    if (streaming && status.displayText) rows.push({
+    if (streaming) rows.push({
       id: 'streaming', kind: 'streaming',
-      message: { id: 'streaming', role: 'assistant', text: status.displayText, at: null, attachments: [], toolActivity: [], error: null, cancelled: false }
+      message: { id: 'streaming', role: 'assistant', text: status.displayText || (status.agentActivity ? `${status.agentActivity.label} 正在执行…` : status.toolActivity.length ? '正在处理工具调用…' : '正在思考…'), at: null, attachments: [], toolActivity: status.toolActivity, agentActivity: status.agentActivity, error: null, cancelled: false }
     });
     if (status.error && !streaming) rows.push({ id: 'turn-error', kind: 'turn-error', message: status.error });
     rows.push(...approvals.map(approval => ({ id: `approval:${approval.id}`, kind: 'approval' as const, approval })));
     return rows;
-  }, [hasMoreHistory, messages, loading, error, streaming, status.displayText, status.error, approvals]);
+  }, [hasMoreHistory, messages, loading, error, streaming, status.displayText, status.toolActivity, status.error, approvals]);
 
   useLayoutEffect(() => {
     const hasNewConversationContent =
@@ -439,27 +528,47 @@ function ChatPage({ session, onNew, onOpenMemory }: { session: ChatSession | nul
       case 'loading': return <LoadingState label="正在读取会话…" />;
       case 'error': return <ErrorNotice error={item.message} onRetry={() => void load()} />;
       case 'empty': return <EmptyNotice icon="chat" title="还没有消息" detail="写下你要处理的事情。模型和 Agent 会按会话设置运行。" />;
-      case 'message': return <MessageBubble message={item.message} />;
+      case 'message': return <MessageBubble message={item.message} sendError={sendErrors[item.message.id]} onRetry={sendErrors[item.message.id] ? () => void retrySend(item.message.id) : undefined} />;
       case 'streaming': return <MessageBubble message={item.message} streaming />;
       case 'turn-error': return <div className="turn-error" role="alert">{item.message}<div className="row"><Button compact variant="ghost" onClick={() => void chatClient.retry(session!.id).then(load).catch(cause => setError(messageOf(cause)))}>重试</Button><Button compact variant="ghost" onClick={() => void chatClient.continue(session!.id).then(load).catch(cause => setError(messageOf(cause)))}>继续</Button></div></div>;
       case 'approval': return <ApprovalCard approval={item.approval} onDecide={decideApproval} />;
     }
   };
 
-  async function send(text: string, attachments: { name: string; content: string; mimeType?: string }[]) {
+  async function send(text: string, attachments: { name: string; content: string; mimeType?: string }[], clientMessageId: string) {
     if (!session) return;
     setError('');
-    try { await chatClient.send(session.id, text, attachments); await load(); }
-    catch (cause) { setError(messageOf(cause)); }
+    pendingSendsRef.current.set(clientMessageId, { text, attachments });
+    setMessages(current => current.some(message => message.id === clientMessageId) ? current : mergeLatestChatMessages(current, [{
+      id: clientMessageId, role: 'user', text, at: Date.now(), attachments: attachments.map(item => item.name), toolActivity: [], error: null, cancelled: false
+    }]));
+    try {
+      await chatClient.send(session.id, text, attachments, clientMessageId);
+      pendingSendsRef.current.delete(clientMessageId);
+      setSendErrors(current => { const next = { ...current }; delete next[clientMessageId]; return next; });
+      void load();
+    } catch (cause) {
+      const message = messageOf(cause);
+      setSendErrors(current => ({ ...current, [clientMessageId]: message }));
+      setError(message);
+    }
+  }
+  async function retrySend(messageId: string) {
+    const pending = pendingSendsRef.current.get(messageId);
+    if (pending) await send(pending.text, pending.attachments, messageId);
+    else if (session) {
+      try { await chatClient.retry(session.id); setSendErrors(current => { const next = { ...current }; delete next[messageId]; return next; }); void load(); }
+      catch (cause) { setError(messageOf(cause)); }
+    }
   }
   async function updateAgent(provider: string) {
     if (!session) return;
-    try { await chatClient.setConfig(session.id, { ...session.config, agentProvider: provider || null }); await load(); }
+    try { onSessionUpdate(await chatClient.setConfig(session.id, { ...session.config, agentProvider: provider || null })); await load(); }
     catch (cause) { setError(messageOf(cause)); }
   }
   async function updateModel(provider: string, model: string) {
     if (!session) return;
-    try { await chatClient.setConfig(session.id, { ...session.config, modelProvider: provider, model }); await load(); }
+    try { onSessionUpdate(await chatClient.setConfig(session.id, { ...session.config, modelProvider: provider, model })); await load(); }
     catch (cause) { setError(messageOf(cause)); }
   }
   async function decideApproval(id: string, approve: boolean) {
@@ -475,9 +584,9 @@ function ChatPage({ session, onNew, onOpenMemory }: { session: ChatSession | nul
   const providers = catalog?.modelProviders ?? [];
   const selectedProvider = providers.find(provider => provider.id === session.config.modelProvider) ?? providers.find(provider => provider.configured) ?? providers[0];
   const selectedModelKey = JSON.stringify([session.config.modelProvider ?? selectedProvider?.id ?? '', session.config.model || '']);
-  return <div className="chat-workspace">
+  return <div className={`chat-workspace ${contextCollapsed ? 'context-collapsed' : ''}`}>
     <section className="conversation-pane">
-      <div className="conversation-toolbar"><div><p className="eyebrow">CETAMESH · CHAT</p><h1>{session.title || '新会话'}</h1><div className="conversation-meta"><StatusBadge value={status.state || 'idle'} /><span>更新于 {relativeLabel(session.updatedAt)}</span><span>·</span><span>{catalog?.available === false ? catalog.reason || '模型状态不可用' : 'CetaMesh Desktop'}</span></div></div><div className="row"><IconButton label="刷新会话" icon="update" onClick={() => void load()} /><IconButton label="新建会话" icon="add" onClick={() => void onNew()} /></div></div>
+      <div className="conversation-toolbar"><div><p className="eyebrow">CETAMESH · CHAT</p><h1>{session.title || '新会话'}</h1><div className="conversation-meta"><StatusBadge value={status.state || 'idle'} /><span>更新于 {relativeLabel(session.updatedAt)}</span><span>·</span><span>{catalog?.available === false ? catalog.reason || '模型状态不可用' : 'CetaMesh Desktop'}</span></div></div><div className="row"><IconButton label={contextCollapsed ? '显示运行上下文' : '隐藏运行上下文'} icon="work" onClick={toggleContext} /><IconButton label="刷新会话" icon="update" onClick={() => void load()} /><IconButton label="新建会话" icon="add" onClick={() => void onNew()} /></div></div>
       <VirtualList
         items={timelineItems}
         estimateSize={112}
@@ -498,13 +607,14 @@ function ChatPage({ session, onNew, onOpenMemory }: { session: ChatSession | nul
       />
       <div className="composer-dock"><ChatComposer busy={streaming} models={providers} selectedModelKey={selectedModelKey} agentProviders={catalog?.agentProviders ?? []} selectedAgent={session.config.agentProvider ?? ''} onModelChange={value => { try { const [provider, model] = JSON.parse(value) as [string, string]; void updateModel(provider, model); } catch { setError('无法识别所选模型。'); } }} onAgentChange={updateAgent} onSend={send} onStop={() => void chatClient.stop(session.id).then(load).catch(cause => setError(messageOf(cause)))} /></div>
     </section>
-    <ChatContextPanel task={linkedTask} memories={memories} approvals={approvals} onOpenMemory={onOpenMemory} />
+    {!contextCollapsed && <ChatContextPanel task={linkedTask} memories={memories} approvals={approvals} onOpenMemory={onOpenMemory} />}
   </div>;
 }
 
-function MessageBubble({ message, streaming = false }: { message: ChatMessageDto; streaming?: boolean }) {
+function MessageBubble({ message, streaming = false, sendError, onRetry }: { message: ChatMessageDto; streaming?: boolean; sendError?: string; onRetry?(): void }) {
   const role = message.role === 'user' ? 'user' : 'assistant';
-  return <article className={`chat-message ${role} ${streaming ? 'streaming' : ''}`}><div className="message-avatar">{role === 'assistant' ? <Icon name="sparkles" size={16} /> : '你'}</div><div className="message-body"><div className="message-meta"><strong>{role === 'assistant' ? 'CetaMesh' : '你'}</strong><span>{dateLabel(message.at)}</span>{streaming && <Badge tone="accent">生成中</Badge>}</div>{message.text ? <Markdown>{message.text}</Markdown> : <span className="muted">（没有文本内容）</span>}{message.attachments.length > 0 && <div className="message-attachments">{message.attachments.map(name => <span key={name}><Icon name="attach" size={13} />{name}</span>)}</div>}{message.toolActivity.map(tool => <details key={tool.id} className="tool-call"><summary><Icon name={tool.status === 'failed' ? 'help' : 'check'} size={15} /><span>{tool.label || tool.id}</span><span className="tool-duration">{tool.durationMs === null ? taskStatusLabel(tool.status) : `${(tool.durationMs / 1000).toFixed(1)} 秒`}</span><Icon name="down" size={14} /></summary>{tool.summary && <p>{tool.summary}</p>}</details>)}{message.error && <p className="message-error" role="alert">{message.error}</p>}{message.cancelled && <small>本轮已停止</small>}</div></article>;
+  const agentActivity = message.agentActivity;
+  return <article className={`chat-message ${role} ${streaming ? 'streaming' : ''}`}><div className="message-avatar">{role === 'assistant' ? <Icon name="sparkles" size={16} /> : '你'}</div><div className="message-body"><div className="message-meta"><strong>{role === 'assistant' ? 'CetaMesh' : '你'}</strong><span>{dateLabel(message.at)}</span>{streaming && <Badge tone="accent">生成中</Badge>}</div>{agentActivity && <div className={`agent-activity ${agentActivity.status}`} role="status"><Icon name={agentActivity.status === 'running' ? 'sparkles' : agentActivity.status === 'completed' ? 'check' : 'help'} size={15} /><span>{agentActivity.label}</span><strong>{agentActivityStatusLabel(agentActivity.status)}</strong></div>}{message.text ? <Markdown>{message.text}</Markdown> : <span className="muted">（没有文本内容）</span>}{message.attachments.length > 0 && <div className="message-attachments">{message.attachments.map(name => <span key={name}><Icon name="attach" size={13} />{name}</span>)}</div>}{message.toolActivity.map(tool => <details key={tool.id} className="tool-call"><summary><Icon name={tool.status === 'failed' ? 'help' : tool.status === 'running' ? 'update' : 'check'} size={15} /><span>{tool.label || tool.id}</span><span className="tool-duration">{tool.durationMs === null ? taskStatusLabel(tool.status) : `${(tool.durationMs / 1000).toFixed(1)} 秒`}</span><Icon name="down" size={14} /></summary>{tool.summary && <p>{tool.summary}</p>}</details>)}{sendError && <div className="message-error" role="alert">{sendError}<Button compact variant="ghost" onClick={onRetry}>重试发送</Button></div>}{message.error && <p className="message-error" role="alert">{message.error}</p>}{message.cancelled && <small>本轮已停止</small>}</div></article>;
 }
 
 function ApprovalCard({ approval, onDecide }: { approval: Approval; onDecide(id: string, approve: boolean): void }) {
@@ -515,7 +625,7 @@ function ChatComposer({ busy, models, selectedModelKey, agentProviders, selected
   busy: boolean; models: { id: string; label: string; configured: boolean; models: { id?: string; name?: string; label?: string }[] }[];
   selectedModelKey: string; agentProviders: Agent[]; selectedAgent: string;
   onModelChange(value: string): void; onAgentChange(provider: string): void;
-  onSend(text: string, attachments: { name: string; content: string; mimeType?: string }[]): void; onStop(): void;
+  onSend(text: string, attachments: { name: string; content: string; mimeType?: string }[], clientMessageId: string): void; onStop(): void;
 }) {
   const [draft, setDraft] = useState('');
   const [attachments, setAttachments] = useState<{ name: string; content: string; mimeType?: string }[]>([]);
@@ -536,10 +646,10 @@ function ChatComposer({ busy, models, selectedModelKey, agentProviders, selected
   function submit() {
     const text = draft.trim();
     if (!text || busy) return;
-    onSend(text, attachments);
+    onSend(text, attachments, crypto.randomUUID());
     setDraft(''); setAttachments([]);
   }
-  return <div className="chat-composer"><div className="composer-field"><textarea ref={textarea} aria-label="输入消息" placeholder="告诉 CetaMesh 你想做什么。" value={draft} rows={2} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); submit(); } }} /><div className="composer-bottom"><div className="row composer-controls"><IconButton label="添加文本或源码附件" icon="attach" onClick={() => void addFiles()} disabled={picking || busy} /><Select label="选择 Agent" value={selectedAgent} onChange={event => onAgentChange(event.target.value)}><option value="">能力</option><option value="none">不使用 Agent</option>{agentProviders.map(agent => <option key={agent.id} value={agent.id} disabled={!agent.available}>{agent.name}{agent.available ? '' : ' · 不可用'}</option>)}</Select><Select label="选择模型" value={selectedModelKey} onChange={event => onModelChange(event.target.value)} disabled={!modelChoices.length}>{modelChoices.length ? modelChoices.map(choice => <option key={choice.value} value={choice.value}>{choice.label}</option>) : <option value="">暂无已配置模型</option>}</Select></div>{busy ? <Button variant="danger" icon="square" onClick={onStop}>停止</Button> : <Button variant="primary" icon="send" onClick={submit} disabled={!draft.trim()}>发送</Button>}</div>{attachments.length > 0 && <div className="attachment-list">{attachments.map((file, index) => <span key={`${file.name}-${index}`}><Icon name="file" size={13} />{file.name}<button aria-label={`移除 ${file.name}`} onClick={() => setAttachments(current => current.filter((_, item) => item !== index))}><Icon name="close" size={13} /></button></span>)}</div>}{attachmentError && <p className="inline-error" role="alert">{attachmentError}</p>}</div><div className="composer-footnote">消息与附件通过本机 Core 处理，附件总大小上限 128 KiB。</div></div>;
+  return <div className="chat-composer"><div className="composer-field"><textarea ref={textarea} aria-label="输入消息" placeholder="告诉 CetaMesh 你想做什么。" value={draft} rows={2} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); submit(); } }} /><div className="composer-bottom"><div className="row composer-controls"><IconButton label="添加文本或源码附件" icon="attach" onClick={() => void addFiles()} disabled={picking || busy} /><Select label="选择 Agent" value={selectedAgent} onChange={event => onAgentChange(event.target.value)}><option value="">能力</option><option value="none">不使用 Agent</option>{agentProviders.map(agent => { const needsScope = ['task-required', 'workspace-required'].includes(agent.reason ?? ''); const disabled = !agent.available || (!agent.eligible && !needsScope); const state = agent.eligible ? '' : availabilityReasonLabel(agent.reason) || availabilityReasonLabel(agent.status) || (agent.available ? '当前不可使用' : '不可用'); return <option key={agent.id} value={agent.id} disabled={disabled}>{agent.name}{state ? ` · ${state}` : ''}</option>; })}</Select><Select label="选择模型" value={selectedModelKey} onChange={event => onModelChange(event.target.value)} disabled={!modelChoices.length}>{modelChoices.length ? modelChoices.map(choice => <option key={choice.value} value={choice.value}>{choice.label}</option>) : <option value="">暂无已配置模型</option>}</Select></div>{busy ? <Button variant="danger" icon="square" onClick={onStop}>停止</Button> : <Button variant="primary" icon="send" onClick={submit} disabled={!draft.trim()}>发送</Button>}</div>{attachments.length > 0 && <div className="attachment-list">{attachments.map((file, index) => <span key={`${file.name}-${index}`}><Icon name="file" size={13} />{file.name}<button aria-label={`移除 ${file.name}`} onClick={() => setAttachments(current => current.filter((_, item) => item !== index))}><Icon name="close" size={13} /></button></span>)}</div>}{attachmentError && <p className="inline-error" role="alert">{attachmentError}</p>}</div><div className="composer-footnote">消息与附件通过本机 Core 处理，附件总大小上限 128 KiB。</div></div>;
 }
 
 function ChatContextPanel({ task, memories, approvals, onOpenMemory }: { task: Task | null; memories: Memory[]; approvals: Approval[]; onOpenMemory(): void }) {
@@ -755,18 +865,26 @@ function AgentsPage() {
     finally { setLoading(false); }
   }, []);
   useEffect(() => { void refresh(); }, [refresh]);
-  const ready = agents.filter(agent => agent.available).length;
+  const ready = agents.filter(agent => agent.eligible).length;
   const needsSetup = agents.filter(agent => agent.status === 'needs-setup').length;
   const activeTasks = tasks.filter(task => ['working', 'running'].includes(task.status)).length;
-  const visible = agents.filter(agent => (filter === 'all' || (filter === 'ready' ? agent.available : !agent.available)) && `${agent.name} ${agent.role} ${agent.description}`.toLowerCase().includes(query.toLowerCase()));
+  const visible = agents.filter(agent => (filter === 'all' || (filter === 'ready' ? agent.eligible : !agent.eligible)) && `${agent.name} ${agent.role} ${agent.description}`.toLowerCase().includes(query.toLowerCase()));
   async function check(agent: Agent) {
     setChecking(agent.id);
     try {
       const health = await agentClient.health(agent.id);
-      setAgents(current => current.map(item => item.id === agent.id ? {
-        ...item, available: health.available, status: health.status,
-        version: health.version ?? item.version, desktopApp: health.desktopApp ?? item.desktopApp
-      } : item));
+      setAgents(current => current.map(item => {
+        if (item.id !== agent.id) return item;
+        const available = health.available === true;
+        const requiresTask = ['capability-broker', 'staged-capability-broker'].includes(item.workspaceBoundary ?? '');
+        const boundaryUnverified = item.workspaceBoundary === 'unverified';
+        return {
+          ...item, available, eligible: available && !requiresTask && !boundaryUnverified,
+          status: boundaryUnverified && available ? 'descriptor-incomplete' : health.status,
+          reason: health.reason ?? (boundaryUnverified ? 'descriptor-incomplete' : requiresTask ? 'task-required' : null),
+          version: health.version ?? item.version, desktopApp: health.desktopApp ?? item.desktopApp
+        };
+      }));
       setError('');
     }
     catch (cause) { setError(messageOf(cause)); }
@@ -775,7 +893,7 @@ function AgentsPage() {
   return <div className="content-page"><Heading eyebrow="AGENT DIRECTORY" title="Agents" description="查看可用 Agent、连接状态与职责。" action={<Button icon="update" onClick={() => void refresh()}>刷新状态</Button>} />{error && <ErrorNotice error={error} onRetry={() => void refresh()} />}
     <div className="agent-summary-row"><Surface><strong>{agents.length}</strong><span>已配置 Agent</span></Surface><Surface><strong>{ready}</strong><span>当前可用</span></Surface><Surface><strong>{needsSetup}</strong><span>需要设置</span></Surface><Surface><strong>{activeTasks}</strong><span>活跃任务</span></Surface></div>
     <div className="row between work-controls"><Tabs items={[{ id: 'all', label: `全部 Agent ${agents.length}` }, { id: 'ready', label: `可用 ${ready}` }, { id: 'setup', label: `需设置 ${needsSetup}` }]} selected={filter} onChange={setFilter} label="Agent 状态筛选" /><SearchInput label="搜索 Agent" placeholder="搜索名称或职责" value={query} onChange={event => setQuery(event.target.value)} /></div>
-    {loading && !agents.length ? <LoadingState label="正在读取 Agent 状态…" /> : visible.length ? <div className="agent-grid">{visible.map(agent => <Card className="agent-card" key={agent.id}><div className="row between"><div className="agent-avatar">{agentInitials(agent.id)}</div><StatusBadge value={agent.status} available={agent.available} /></div><h3>{agent.name}</h3><strong className="agent-role">{agent.role}</strong><p>{agent.description}</p>{agent.status === 'needs-setup' && <small>请先完成本地登录或凭据配置。</small>}{agent.version && <small>版本 {agent.version}</small>}{agent.desktopApp && <div className="agent-desktop-state"><strong>DeepSeek Harness Desktop</strong><span>桌面应用：{agent.desktopApp.installed ? '已安装' : '未安装'} · {agent.desktopApp.running ? '运行中' : agent.desktopApp.status}</span><span>DSH Agent Provider：{agent.available ? '可用' : agent.status}</span></div>}<Button compact variant="ghost" disabled={checking === agent.id} onClick={() => void check(agent)}>{checking === agent.id ? '检查中…' : '检查连接'} <Icon name="right" size={14} /></Button></Card>)}</div> : !error && <EmptyNotice icon="agents" title="没有匹配的 Agent" detail="当前安装和注册的 Agent 会在这里显示。" />}
+    {loading && !agents.length ? <LoadingState label="正在读取 Agent 状态…" /> : visible.length ? <div className="agent-grid">{visible.map(agent => <Card className="agent-card" key={agent.id}><div className="row between"><div className="agent-avatar">{agentInitials(agent.id)}</div><StatusBadge value={agent.status} available={agent.eligible} /></div><h3>{agent.name}</h3><strong className="agent-role">{agent.role}</strong><p>{agent.description}</p>{agent.status === 'needs-setup' && <small>请先完成本地登录或凭据配置。</small>}{agent.reason === 'task-required' && <small>Agent 已就绪；此能力需要先分配工作区任务。</small>}{agent.reason && agent.reason !== 'task-required' && <small>{availabilityReasonLabel(agent.reason)}</small>}{agent.lastError && <small role="status">{agent.lastError}</small>}{agent.version && <small>版本 {agent.version}</small>}{agent.desktopApp && <div className="agent-desktop-state"><strong>DeepSeek Harness Desktop</strong><span>桌面应用：{agent.desktopApp.installed ? '已安装' : '未安装'} · {agent.desktopApp.running ? '运行中' : agent.desktopApp.status}</span><span>DSH Agent Provider：{agent.available ? '已连接' : agent.status}</span></div>}<Button compact variant="ghost" disabled={checking === agent.id} onClick={() => void check(agent)}>{checking === agent.id ? '检查中…' : '检查连接'} <Icon name="right" size={14} /></Button></Card>)}</div> : !error && <EmptyNotice icon="agents" title="没有匹配的 Agent" detail="当前安装和注册的 Agent 会在这里显示。" />}
     <div className="section-heading page-section-heading"><h2>运行策略</h2></div><Surface className="policy-row"><span className="policy-icon"><Icon name="approval" /></span><span className="grow"><strong>敏感操作需要确认</strong><small>文件写入、网络访问和外部副作用由 Capability Broker 逐次管理。</small></span><Badge tone="success">由 Core 强制执行</Badge></Surface>
   </div>;
 }
@@ -798,8 +916,8 @@ function extensionSettingsDraft(description: ExtensionSettingsDescription, value
     return [field.key, ''];
   }));
 }
-type IntegrationRow = { id: string; name: string; status: string; enabled: boolean; available: boolean };
-type McpRow = { id: string; name: string; status: string; enabled: boolean; available: boolean; toolCount: number | null; transport: string; reason: string | null };
+type IntegrationRow = { id: string; name: string; status: string; enabled: boolean; available: boolean; eligible: boolean; configured: boolean; reason: string | null; lastError: string | null };
+type McpRow = { id: string; name: string; status: string; enabled: boolean; available: boolean; eligible: boolean; configured: boolean; source: string; toolCount: number | null; transport: string; reason: string | null; lastError: string | null };
 
 function PluginsPage() {
   const [tab, setTab] = useState('catalog');
@@ -815,9 +933,11 @@ function PluginsPage() {
   const [extensionSettings, setExtensionSettings] = useState<ExtensionSettingsFormState | null>(null);
   const [extensionSettingsLoading, setExtensionSettingsLoading] = useState(false);
   const [selectedIntegration, setSelectedIntegration] = useState<IntegrationSettings | null>(null);
+  const [snowLumaConfigDraft, setSnowLumaConfigDraft] = useState({ httpUrl: 'http://127.0.0.1:3000', wsUrl: 'ws://127.0.0.1:3001', accessToken: '', clearAccessToken: false });
   const [selectedServer, setSelectedServer] = useState<{ server: McpRow; tools: { id: string; name: string; description: string; enabled: boolean }[]; config: { id: string; enabled: boolean; hasArgs: boolean; hasEnvironment: boolean; timeoutMs: number | null; note: string } } | null>(null);
   const [mcpConfigDraft, setMcpConfigDraft] = useState({ timeoutMs: '', note: '' });
   const [review, setReview] = useState<PluginReview | null>(null);
+  const [developerMode, setDeveloperMode] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
@@ -826,7 +946,13 @@ function PluginsPage() {
   const refreshCatalog = useCallback(async () => {
     setLoading(true);
     try {
-      setCatalog(await pluginClient.catalog(query.trim(), category === 'all' ? '' : category, view));
+      const [catalogResult, statusResult] = await Promise.all([
+        pluginClient.catalog(query.trim(), category === 'all' ? '' : category, view), pluginClient.status()
+      ]);
+      setCatalog(catalogResult);
+      setDeveloperMode(statusResult.developerMode);
+      setIntegrations(statusResult.integrations);
+      setServers(statusResult.mcp);
       setError('');
     } catch (cause) { setError(messageOf(cause)); }
     finally { setLoading(false); }
@@ -859,6 +985,17 @@ function PluginsPage() {
     try {
       const result = await pluginClient.stage(plugin.id);
       setReview({ id: plugin.id, stageId: result.stageId, action: plugin.status === 'update' ? 'update' : 'install', installable: result.installable, requiresReview: result.requiresReview, permissions: result.permissions, summary: result.summary, trust: result.trust });
+    } catch (cause) { setError(messageOf(cause)); }
+    finally { setBusy(''); }
+  }
+  async function stageLocalPackage() {
+    setError(''); setNotice('');
+    try {
+      const selected = await hostClient.pickExtensionPackage();
+      if (!selected.path) return;
+      setBusy('local-package');
+      const result = await pluginClient.stageLocal(selected.path);
+      setReview({ id: result.plugin.id, stageId: result.stageId, action: 'install', installable: result.installable, requiresReview: true, permissions: result.permissions, summary: result.summary, trust: 'local-unverified · Owner Review' });
     } catch (cause) { setError(messageOf(cause)); }
     finally { setBusy(''); }
   }
@@ -914,6 +1051,24 @@ function PluginsPage() {
     } catch (cause) { setError(messageOf(cause)); }
     finally { setBusy(''); }
   }
+  async function manageSnowLuma(action: 'detect' | 'start' | 'stop' | 'configure') {
+    setBusy(`snowluma:${action}`); setError(''); setNotice('');
+    try {
+      const params = action === 'configure' ? {
+        httpUrl: snowLumaConfigDraft.httpUrl,
+        wsUrl: snowLumaConfigDraft.wsUrl,
+        ...(snowLumaConfigDraft.accessToken ? { accessToken: snowLumaConfigDraft.accessToken } : {}),
+        ...(snowLumaConfigDraft.clearAccessToken ? { clearAccessToken: true } : {})
+      } : {};
+      const result = await pluginClient.integrationAction('snowluma', action, params);
+      setNotice(result.pending === true || result.approvalId ? '操作已提交，等待 Core 审批。' : action === 'configure' ? 'SnowLuma 连接设置已保存。' : 'SnowLuma 状态已更新。');
+      const settings = await pluginClient.integrationSettings('cetamesh-snowluma');
+      setSelectedIntegration(settings);
+      setSnowLumaConfigDraft(current => ({ ...current, accessToken: '', clearAccessToken: false }));
+      await Promise.all([refreshConnections(), refreshApprovals()]);
+    } catch (cause) { setError(messageOf(cause)); }
+    finally { setBusy(''); }
+  }
   async function manageServer(item: McpRow, action: 'start' | 'stop' | 'enable' | 'disable' | 'restart') {
     setBusy(item.id); setError(''); setNotice('');
     try {
@@ -963,7 +1118,13 @@ function PluginsPage() {
     finally { setBusy(''); }
   }
   async function openIntegration(item: IntegrationRow) {
-    try { setSelectedIntegration(await pluginClient.integrationSettings(item.id)); }
+    try {
+      const settings = await pluginClient.integrationSettings(item.id);
+      setSelectedIntegration(settings);
+      if (settings.id === 'cetamesh-snowluma' && settings.localService) {
+        setSnowLumaConfigDraft({ httpUrl: settings.localService.httpUrl || 'http://127.0.0.1:3000', wsUrl: settings.localService.wsUrl || 'ws://127.0.0.1:3001', accessToken: '', clearAccessToken: false });
+      }
+    }
     catch (cause) { setError(messageOf(cause)); }
   }
   async function openServer(item: McpRow) {
@@ -1017,12 +1178,12 @@ function PluginsPage() {
     {error && <ErrorNotice error={error} onRetry={() => tab === 'catalog' ? void refreshCatalog() : void refreshConnections()} />}{notice && <p className="inline-success" role="status">{notice}</p>}
     {pendingApprovals.length > 0 && <section className="plugin-approval-inbox"><div className="section-heading"><h2>待处理审批</h2><Badge tone="warning">{pendingApprovals.length}</Badge></div>{pendingApprovals.map(approval => <ApprovalCard key={approval.id} approval={approval} onDecide={(id, approve) => { void decidePendingApproval(id, approve); }} />)}</section>}
     {tab === 'catalog' && <>
-    <div className="catalog-filters"><Tabs label="插件分类" selected={category} onChange={setCategory} items={categories.map(value => ({ id: value, label: value === 'all' ? '全部' : value }))} /><Tabs label="安装状态" selected={view} onChange={setView} items={[{ id: 'all', label: '全部' }, { id: 'recommended', label: '精选' }, { id: 'installed', label: '已安装' }, { id: 'update-available', label: '可更新' }]} /><Button compact icon="update" onClick={() => void refreshCatalog()} disabled={loading}>刷新目录</Button></div>
+    <div className="catalog-filters"><Tabs label="插件分类" selected={category} onChange={setCategory} items={categories.map(value => ({ id: value, label: value === 'all' ? '全部' : value }))} /><Tabs label="安装状态" selected={view} onChange={setView} items={[{ id: 'all', label: '全部' }, { id: 'recommended', label: '精选' }, { id: 'installed', label: '已安装' }, { id: 'update-available', label: '可更新' }]} />{developerMode && <Button compact onClick={() => void stageLocalPackage()} disabled={busy === 'local-package'}>{busy === 'local-package' ? '读取本地包…' : '导入本地扩展'}</Button>}<Button compact icon="update" onClick={() => void refreshCatalog()} disabled={loading}>刷新目录</Button></div>
       {catalog?.offline && <Banner>当前目录离线，显示 Core 缓存的插件信息。{catalog.reason ? ` ${catalog.reason}` : ''}</Banner>}
       {loading && !plugins.length ? <LoadingState label="正在读取插件目录…" /> : plugins.length ? <div className="plugin-grid">{plugins.map(plugin => <Card className="plugin-card" key={plugin.id}><button className="plugin-card-main" onClick={() => void openPlugin(plugin)}><span className={`plugin-icon plugin-icon-${plugin.icon}`}><Icon name={(plugin.icon as IconName) || 'layers'} size={20} /></span><span className="plugin-card-copy"><strong>{plugin.name}</strong><span>{plugin.summary}</span><small>{plugin.developer} · v{plugin.version || '—'} · {plugin.category || plugin.kind}</small></span><StatusBadge value={plugin.status === 'update' ? 'update' : plugin.enabled ? 'enabled' : plugin.installed ? 'installed' : plugin.status} /></button><div className="plugin-card-actions"><Button compact variant="ghost" onClick={() => void openPlugin(plugin)}>查看详情 <Icon name="right" size={13} /></Button>{plugin.status === 'update' ? <Button compact variant="primary" disabled={busy === plugin.id} onClick={() => void stage(plugin)}>查看更新并安装</Button> : !plugin.installed ? <Button compact variant="primary" disabled={busy === plugin.id} onClick={() => void stage(plugin)}>安装</Button> : plugin.enabled ? <Button compact disabled={busy === plugin.id} onClick={() => void pluginAction(plugin, 'disable')}>停用</Button> : <Button compact variant="primary" disabled={busy === plugin.id} onClick={() => void reviewEnable(plugin)}>启用</Button>}</div></Card>)}</div> : !loading && <EmptyNotice icon="plugins" title="没有匹配的插件" detail={catalog?.reason || '调整搜索条件，或刷新插件目录。'} />}
     </>}
-    {tab === 'connections' && <div className="connection-list">{integrations.length ? integrations.map(item => <Surface className="connection-row" key={item.id}><span className="connection-icon"><Icon name="plug" size={20} /></span><span className="grow"><strong>{item.name}</strong><small>{item.id} · {item.available ? item.status : '当前不可用'}</small></span><StatusBadge value={item.enabled ? 'enabled' : item.status} available={item.enabled} /><Button compact onClick={() => void openIntegration(item)}>详情与设置</Button><Button compact variant={item.enabled ? 'default' : 'primary'} disabled={!item.available || busy === item.id} onClick={() => void toggleIntegration(item)}>{item.enabled ? '停用' : '启用'}</Button></Surface>) : <EmptyNotice icon="plug" title="没有已注册的集成" detail="Integration 状态由本机 Core 提供。安装扩展请前往插件中心。" />}</div>}
-    {tab === 'mcp' && <div className="connection-list">{servers.length ? servers.map(item => <Surface className="connection-row" key={item.id}><span className="connection-icon mcp-icon"><Icon name="layers" size={20} /></span><span className="grow"><strong>{item.name}</strong><small>{item.transport || '本机连接'} · {item.toolCount === null ? '工具数量未知' : `${item.toolCount} 个工具`}{item.reason ? ` · ${item.reason}` : ''}</small></span><StatusBadge value={item.status} available={item.available && item.enabled} /><Button compact onClick={() => void openServer(item)}>查看工具</Button><Button compact variant={item.enabled ? 'default' : 'primary'} disabled={busy === item.id || (item.enabled && !item.available)} onClick={() => void manageServer(item, item.enabled ? 'disable' : 'enable')}>{item.enabled ? '禁用' : '启用'}</Button><Button compact disabled={busy === item.id || !item.available || !item.enabled} onClick={() => void manageServer(item, item.status === 'running' ? 'stop' : 'start')}>{item.status === 'running' ? '停止' : '启动'}</Button></Surface>) : <EmptyNotice icon="layers" title="没有配置 MCP 服务" detail="MCP 服务与凭据由本机 Core 配置和管理。" />}</div>}
+    {tab === 'connections' && <div className="connection-list">{integrations.length ? integrations.map(item => <Surface className="connection-row" key={item.id}><span className="connection-icon"><Icon name="plug" size={20} /></span><span className="grow"><strong>{item.name}</strong><small>{item.id} · {availabilityReasonLabel(item.reason) || item.lastError || (item.available ? item.status : '当前不可用')}</small></span><StatusBadge value={item.available ? item.status : item.enabled ? (item.reason === 'needs-setup' ? 'needs-setup' : item.reason === 'not-installed' ? 'not-installed' : 'unavailable') : 'disabled'} available={item.eligible} /><Button compact onClick={() => void openIntegration(item)}>详情与设置</Button><Button compact variant={item.enabled ? 'default' : 'primary'} disabled={busy === item.id} onClick={() => void toggleIntegration(item)}>{item.enabled ? '停用' : '启用'}</Button></Surface>) : <EmptyNotice icon="plug" title="没有已注册的集成" detail="Integration 状态由本机 Core 提供。安装扩展请前往插件中心。" />}</div>}
+    {tab === 'mcp' && <div className="connection-list">{servers.length ? servers.map(item => <Surface className="connection-row" key={item.id}><span className="connection-icon mcp-icon"><Icon name="layers" size={20} /></span><span className="grow"><strong>{item.name}</strong><small>{item.source === 'builtin' ? '内置服务 · 默认启动入口' : item.transport || '本机连接'} · {item.toolCount === null ? '工具数量未知' : `${item.toolCount} 个工具`}{item.reason && item.status !== 'stopped' ? ` · ${item.reason}` : ''}</small></span><StatusBadge value={item.status} available={item.eligible} /><Button compact onClick={() => void openServer(item)}>查看工具</Button><Button compact variant={item.enabled ? 'default' : 'primary'} disabled={busy === item.id} onClick={() => void manageServer(item, item.enabled ? 'disable' : 'enable')}>{item.enabled ? '禁用' : '启用'}</Button><Button compact disabled={busy === item.id || !item.enabled || item.status === 'unsupported'} onClick={() => void manageServer(item, item.status === 'running' ? 'stop' : 'start')}>{item.status === 'running' ? '停止' : '启动'}</Button></Surface>) : <EmptyNotice icon="layers" title="没有配置 MCP 服务" detail="MCP 服务与凭据由本机 Core 配置和管理。" />}</div>}
     <Sheet open={Boolean(selectedPlugin)} title={selectedPlugin?.name ?? '插件详情'} onClose={() => { extensionSettingsRequest.current += 1; setSelectedPlugin(null); setExtensionSettings(null); setExtensionSettingsLoading(false); }}>{selectedPlugin && <div className="plugin-detail"><p className="eyebrow">{selectedPlugin.developer} · {selectedPlugin.kind}</p><h3>{selectedPlugin.summary}</h3><p>{selectedPlugin.description || '暂无详细说明。'}</p><div className="detail-facts"><span>版本 <strong>{selectedPlugin.version || '—'}</strong></span><span>分类 <strong>{selectedPlugin.category || '未分类'}</strong></span><span>信任 <strong>{selectedPlugin.compatibility.minimum || 'Core 验证'}</strong></span></div><section><h3>权限</h3>{selectedPlugin.permissions.length ? <ul>{selectedPlugin.permissions.map(permission => <li key={permission}>{permission}</li>)}</ul> : <p className="muted">该插件没有声明权限。</p>}</section>{selectedPlugin.warning && <Banner>{selectedPlugin.warning}</Banner>}
       {selectedPlugin.installed && extensionSettingsLoading && <p className="muted">正在读取扩展设置…</p>}
       {selectedPlugin.installed && extensionSettings && extensionSettings.description.fields.length > 0 && <section className="extension-settings">
@@ -1053,6 +1214,23 @@ function PluginsPage() {
     <Sheet open={Boolean(selectedIntegration)} title={selectedIntegration?.name ?? '集成设置'} onClose={() => setSelectedIntegration(null)}>
       {selectedIntegration && <div className="plugin-detail">
         <StatusBadge value={selectedIntegration.enabled ? 'enabled' : 'disabled'} available={selectedIntegration.available} />
+        {selectedIntegration.id === 'cetamesh-snowluma' && selectedIntegration.localService && <section className="snowluma-settings">
+          <div className="row between"><h3>SnowLuma 网关</h3><StatusBadge value={selectedIntegration.localService.status} available={selectedIntegration.localService.ready} /></div>
+          <p>{!selectedIntegration.localService.installed ? '未检测到本机 SnowLuma 安装。先安装并启动 SnowLuma，再检测连接状态。' : !selectedIntegration.localService.configured ? '需要配置 OneBot HTTP 地址后才能验证连接。' : selectedIntegration.localService.ready ? '网关已就绪，可以连接 QQ 通道。' : selectedIntegration.localService.running ? '进程正在运行；请在 SnowLuma 中完成 QQ 登录和 OneBot 网关配置。' : 'SnowLuma 已安装但当前已停止。'}</p>
+          {selectedIntegration.localService.version && <small>版本 {selectedIntegration.localService.version}</small>}
+          {selectedIntegration.localService.lastError && <p className="message-error" role="status">{selectedIntegration.localService.lastError}</p>}
+          <label>OneBot HTTP 地址<Input value={snowLumaConfigDraft.httpUrl} onChange={event => setSnowLumaConfigDraft(current => ({ ...current, httpUrl: event.target.value }))} maxLength={500} /></label>
+          <label>OneBot WebSocket 地址<Input value={snowLumaConfigDraft.wsUrl} onChange={event => setSnowLumaConfigDraft(current => ({ ...current, wsUrl: event.target.value }))} maxLength={500} /></label>
+          <label>Access Token<Input type="password" autoComplete="new-password" value={snowLumaConfigDraft.accessToken} placeholder={selectedIntegration.localService.accessTokenConfigured ? '已配置；留空保持不变' : '可选'} onChange={event => setSnowLumaConfigDraft(current => ({ ...current, accessToken: event.target.value, clearAccessToken: false }))} maxLength={512} /></label>
+          {selectedIntegration.localService.accessTokenConfigured && <Button compact variant="ghost" onClick={() => setSnowLumaConfigDraft(current => ({ ...current, accessToken: '', clearAccessToken: !current.clearAccessToken }))}>{snowLumaConfigDraft.clearAccessToken ? '保留已配置令牌' : '清除已保存令牌'}</Button>}
+          <div className="row detail-actions">
+            <Button compact variant="primary" disabled={busy.startsWith('snowluma:')} onClick={() => void manageSnowLuma('configure')}>保存设置</Button>
+            <Button compact disabled={busy.startsWith('snowluma:')} onClick={() => void manageSnowLuma('detect')}>检测安装</Button>
+            {selectedIntegration.localService.running
+              ? <Button compact disabled={busy.startsWith('snowluma:')} onClick={() => void manageSnowLuma('stop')}>停止</Button>
+              : <Button compact variant="primary" disabled={busy.startsWith('snowluma:') || !selectedIntegration.localService.installed || !selectedIntegration.localService.configured} title={!selectedIntegration.localService.configured ? '先保存 OneBot 地址' : undefined} onClick={() => void manageSnowLuma('start')}>启动</Button>}
+          </div>
+        </section>}
         {selectedIntegration.inventory && <Surface className="bionic-inventory">
           <div className="section-heading"><h3>仿生聊天工具清单</h3><small>按当前 Integration Registry 状态统计</small></div>
           <div className="bionic-inventory-counts">
@@ -1084,7 +1262,7 @@ function PluginsPage() {
     </Sheet>
     <Sheet open={Boolean(selectedServer)} title={selectedServer?.server.name ?? 'MCP 工具'} onClose={() => setSelectedServer(null)}>{selectedServer && <div className="plugin-detail">
       <div className="row between"><p>工具描述来自 Core 的 MCP 注册表。调用权限由 Capability Broker 管理。</p><Button compact onClick={() => void manageServer(selectedServer.server, 'restart')}>重启</Button></div>
-      <Surface className="mcp-settings-card"><div className="row between"><strong>服务器状态</strong><StatusBadge value={selectedServer.server.status} /></div><p>传输方式：{selectedServer.server.transport || '未检查'} · 启动参数：{selectedServer.config.hasArgs ? '已配置' : '未配置'} · 环境变量：{selectedServer.config.hasEnvironment ? '已配置' : '未配置'}</p><p className="muted">凭据和原始环境值不会传入界面。</p><label>启动超时（毫秒，留空保持现有值）<Input type="number" min={100} max={300000} value={mcpConfigDraft.timeoutMs} onChange={event => setMcpConfigDraft(current => ({ ...current, timeoutMs: event.target.value }))} /></label><label>备注<Input value={mcpConfigDraft.note} onChange={event => setMcpConfigDraft(current => ({ ...current, note: event.target.value }))} maxLength={500} /></label><Button compact disabled={busy === 'mcp-config'} onClick={() => void saveMcpConfig()}>保存 MCP 设置</Button></Surface>
+      <Surface className="mcp-settings-card"><div className="row between"><strong>服务器状态</strong><StatusBadge value={selectedServer.server.status} /></div><p>传输方式：{selectedServer.server.transport || '未检查'} · {selectedServer.server.source === 'builtin' ? '内置启动配置' : '外部启动配置'}</p><p>{selectedServer.server.source === 'builtin' ? `启动参数覆盖：${selectedServer.config.hasArgs ? '已设置' : '未设置，使用内置入口'} · 环境变量覆盖：${selectedServer.config.hasEnvironment ? '已设置' : '未设置'}` : `启动参数：${selectedServer.config.hasArgs ? '已配置' : '未配置'} · 环境变量：${selectedServer.config.hasEnvironment ? '已配置' : '未配置'}`}</p><p className="muted">凭据和原始环境值不会传入界面。</p><label>启动超时（毫秒，留空保持现有值）<Input type="number" min={100} max={300000} value={mcpConfigDraft.timeoutMs} onChange={event => setMcpConfigDraft(current => ({ ...current, timeoutMs: event.target.value }))} /></label><label>备注<Input value={mcpConfigDraft.note} onChange={event => setMcpConfigDraft(current => ({ ...current, note: event.target.value }))} maxLength={500} /></label><Button compact disabled={busy === 'mcp-config'} onClick={() => void saveMcpConfig()}>保存 MCP 设置</Button></Surface>
       {selectedServer.tools.length ? selectedServer.tools.map(tool => <article className="mcp-tool-row" key={tool.id}><div className="row between"><strong>{tool.name}</strong><StatusBadge value={tool.enabled ? 'enabled' : 'disabled'} /></div><p>{tool.description || '没有描述。'}</p></article>) : <EmptyNotice icon="layers" title="没有发现工具" detail="服务可能尚未启动，或当前没有注册工具。" />}
     </div>}</Sheet>
   </div>;
@@ -1165,7 +1343,8 @@ function ModelConnectionSettings({ provider, model, values, onChange }: { provid
     {!loading && provider && configured === false && <p className="muted">该服务商尚未配置凭据。</p>}
   </div>;
 }
-function SettingsPage({ theme, onThemeChange }: { theme: 'system' | 'light' | 'dark'; onThemeChange(theme: 'system' | 'light' | 'dark'): Promise<void> }) {
+function SettingsPage({ theme, onThemeChange, onOpenPlugins }: { theme: 'system' | 'light' | 'dark'; onThemeChange(theme: 'system' | 'light' | 'dark'): Promise<void>; onOpenPlugins(): void }) {
+  const [activeSection, setActiveSection] = useState('general');
   const [descriptions, setDescriptions] = useState<{ section: string; label: string; fields: SettingField[] }[]>([]);
   const [revision, setRevision] = useState<number | null>(null);
   const [draft, setDraft] = useState<Settings>({});
@@ -1205,13 +1384,32 @@ function SettingsPage({ theme, onThemeChange }: { theme: 'system' | 'light' | 'd
     const description = field.description || '';
     return <div className="setting-row" key={field.key}><span className="setting-copy"><strong>{SETTING_FIELD_LABELS[field.key] ?? field.label}</strong>{description && <small>{description}</small>}</span>{field.choices?.length ? <Select label={SETTING_FIELD_LABELS[field.key] ?? field.label} value={String(value ?? '')} disabled={field.locked} onChange={event => change(section, field.key, event.target.value)}>{field.choices.map(choice => <option key={choice} value={choice}>{choice}</option>)}</Select> : typeof value === 'boolean' ? <button type="button" role="switch" aria-checked={value} aria-label={SETTING_FIELD_LABELS[field.key] ?? field.label} className={`setting-switch ${value ? 'on' : ''}`} disabled={field.locked} onClick={() => change(section, field.key, !value)}><span /></button> : typeof value === 'number' ? <Input type="number" aria-label={SETTING_FIELD_LABELS[field.key] ?? field.label} value={String(value)} disabled={field.locked} onChange={event => change(section, field.key, Number(event.target.value))} /> : <Input aria-label={SETTING_FIELD_LABELS[field.key] ?? field.label} value={String(value ?? '')} disabled={field.locked} onChange={event => change(section, field.key, event.target.value)} />}</div>;
   }
-  return <div className="content-page settings-page"><Heading eyebrow="PREFERENCES" title="Settings" description="调整界面偏好和本地工作行为。" />{error && <ErrorNotice error={error} onRetry={() => void refresh()} />}{notice && <p className="inline-success" role="status">{notice}</p>}{loading ? <LoadingState label="正在读取本机设置…" /> : <>
-    <section className="settings-section"><div className="settings-side-label"><h2>外观</h2><p>选择 CetaMesh 在此设备上显示的颜色主题。</p></div><div className="settings-section-main"><div className="section-heading"><h2>外观</h2><small>更改立即应用</small></div><div className="theme-options">{(['system', 'light', 'dark'] as const).map(value => <button key={value} className={`theme-choice ${theme === value ? 'selected' : ''}`} aria-pressed={theme === value} onClick={() => void onThemeChange(value)}><span className={`theme-preview theme-${value}`}><i /><i /><i /></span><span>{value === 'system' ? '跟随系统' : value === 'light' ? '浅色' : '深色'}</span>{theme === value && <Icon name="check" size={16} />}</button>)}</div></div></section>
-    <section className="settings-section"><div className="settings-side-label"><h2>行为</h2><p>管理会话、Agent 和工作区的默认行为。</p></div><div className="settings-section-main">{descriptions.filter(item => item.section === 'general').map(section => <div className="settings-group" key={section.section}>{section.fields.filter(field => field.key !== 'theme').map(field => renderField(section.section, field))}{section.fields.some(field => field.key !== 'theme') && <div className="settings-save"><Button compact variant="primary" disabled={saving === section.section} onClick={() => void save(section.section)}>保存行为设置</Button></div>}</div>)}{sections.filter(section => ['models', 'agents', 'memory', 'workspace'].includes(section.section)).map(section => <div className="settings-group" key={section.section}><h3>{SETTING_SECTION_LABELS[section.section] ?? section.label}</h3>{section.section === 'models' && <ModelConnectionSettings provider={String(draft.models?.provider ?? '')} model={String(draft.models?.defaultModel ?? '')} values={draft.models ?? {}} onChange={(key, value) => change('models', key, value)} />}
-        {section.fields.filter(field => section.section !== 'models' || !['provider', 'defaultModel', 'reasoningEffort'].includes(field.key)).map(field => renderField(section.section, field))}<div className="settings-save"><Button compact disabled={saving === section.section} onClick={() => void save(section.section)}>保存{SETTING_SECTION_LABELS[section.section] ?? section.label}</Button></div></div>)}</div></section>
-    <section className="settings-section"><div className="settings-side-label"><h2>隐私与安全</h2><p>本地数据与权限</p></div><div className="settings-section-main"><div className="settings-group">{sections.filter(section => ['devices', 'extensions', 'security', 'updates', 'advanced'].includes(section.section)).map(section => <div key={section.section}><h3>{SETTING_SECTION_LABELS[section.section] ?? section.label}</h3>{section.section === 'models' && <ModelConnectionSettings provider={String(draft.models?.provider ?? '')} model={String(draft.models?.defaultModel ?? '')} values={draft.models ?? {}} onChange={(key, value) => change('models', key, value)} />}
-        {section.fields.filter(field => section.section !== 'models' || !['provider', 'defaultModel'].includes(field.key)).map(field => renderField(section.section, field))}<div className="settings-save"><Button compact disabled={saving === section.section} onClick={() => void save(section.section)}>保存{SETTING_SECTION_LABELS[section.section] ?? section.label}</Button></div></div>)}</div><Surface className="privacy-summary"><span className="policy-icon"><Icon name="approval" size={19} /></span><span className="grow"><strong>本地数据与权限</strong><small>会话和配置保存在本机。敏感操作遵循逐次审批。</small></span><Badge tone="success">Core 策略</Badge></Surface></div></section>
-    <section className="settings-section"><div className="settings-side-label"><h2>通知</h2><p>查看后台任务与审批状态。</p></div><div className="settings-section-main"><Surface className="privacy-summary"><span className="grow"><strong>桌面状态提醒</strong><small>任务、连接和审批状态由本机 Core 实时提供。</small></span><Badge>随系统事件更新</Badge></Surface></div></section>
+  const settingPages = [
+    { id: 'general', label: '常规' }, { id: 'models', label: '模型' }, { id: 'agents', label: 'Agent' },
+    { id: 'extensions', label: '插件与 MCP' }, { id: 'memory', label: '记忆' }, { id: 'workspace', label: '工作区' }, { id: 'devices', label: '设备' },
+    { id: 'appearance', label: '外观' }, { id: 'security', label: '隐私与安全' }, { id: 'updates', label: '更新' }, { id: 'advanced', label: '高级' }, { id: 'about', label: '关于' }
+  ];
+  if (activeSection === 'about') return <AboutPage />;
+  function renderSettingsContent() {
+    if (activeSection === 'appearance') return <div className="theme-options">{(['system', 'light', 'dark'] as const).map(value => <button key={value} className={`theme-choice ${theme === value ? 'selected' : ''}`} aria-pressed={theme === value} onClick={() => void onThemeChange(value)}><span className={`theme-preview theme-${value}`}><i /><i /><i /></span><span>{value === 'system' ? '跟随系统' : value === 'light' ? '浅色' : '深色'}</span>{theme === value && <Icon name="check" size={16} />}</button>)}</div>;
+    const groups = activeSection === 'general' ? descriptions.filter(section => section.section === 'general')
+      : activeSection === 'extensions' ? sections.filter(section => section.section === 'extensions')
+        : sections.filter(section => section.section === activeSection);
+    return <>
+      {activeSection === 'extensions' && <Surface className="privacy-summary"><span className="grow"><strong>扩展、插件与 MCP 连接</strong><small>启用开发者模式后可从本地导入扩展。导入包会先进入 Core 权限审查，并以未验证状态安装为停用。</small></span><Button compact onClick={onOpenPlugins}>打开插件中心</Button></Surface>}
+      {groups.map(section => <div className="settings-group" key={section.section}><h2>{activeSection === 'general' ? '常规行为' : SETTING_SECTION_LABELS[section.section] ?? section.label}</h2>
+        {section.section === 'models' && <ModelConnectionSettings provider={String(draft.models?.provider ?? '')} model={String(draft.models?.defaultModel ?? '')} values={draft.models ?? {}} onChange={(key, value) => change('models', key, value)} />}
+        {section.fields.filter(field => !(section.section === 'general' && field.key === 'theme') && (section.section !== 'models' || !['provider', 'defaultModel', 'reasoningEffort'].includes(field.key))).map(field => renderField(section.section, field))}
+        {section.fields.some(field => !(section.section === 'general' && field.key === 'theme') && (section.section !== 'models' || !['provider', 'defaultModel', 'reasoningEffort'].includes(field.key))) && <div className="settings-save"><Button compact variant="primary" disabled={saving === section.section} onClick={() => void save(section.section)}>保存{SETTING_SECTION_LABELS[section.section] ?? section.label}</Button></div>}
+      </div>)}
+      {activeSection === 'security' && <Surface className="privacy-summary"><span className="policy-icon"><Icon name="approval" size={19} /></span><span className="grow"><strong>本地数据与权限</strong><small>会话和配置保存在本机。敏感操作遵循逐次审批。</small></span><Badge tone="success">Core 策略</Badge></Surface>}
+      {activeSection === 'devices' && !groups.length && <EmptyNotice icon="plug" title="设备网格设置由 Core 提供" detail="当前没有可调整的设备字段。设备配对和在线状态仍可在 Agents 页面查看。" />}
+      {activeSection !== 'appearance' && !groups.length && activeSection !== 'extensions' && activeSection !== 'devices' && <EmptyNotice title="当前没有可调整的设置" detail="可用字段由本机 Core 的设置描述提供。" />}
+    </>;
+  }
+  return <div className="content-page settings-page"><Heading eyebrow="PREFERENCES" title="Settings" description="按类别调整界面偏好和本地工作行为。" />{error && <ErrorNotice error={error} onRetry={() => void refresh()} />}{notice && <p className="inline-success" role="status">{notice}</p>}{loading ? <LoadingState label="正在读取本机设置…" /> : <>
+    <Tabs label="设置类别" selected={activeSection} onChange={setActiveSection} items={settingPages} />
+    <section className="settings-section"><div className="settings-section-main">{renderSettingsContent()}</div></section>
   </>}</div>;
 }
 

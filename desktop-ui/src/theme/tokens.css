@@ -31,8 +31,11 @@
   --spacing-6: 24px;
   --spacing-8: 32px;
   --spacing-10: 40px;
-  --motion-fast: 150ms;
-  --motion-page: 260ms;
+  --motion-fast: 120ms;
+  --motion-normal: 180ms;
+  --motion-panel: 220ms;
+  --motion-page: 240ms;
+  --motion-ease: cubic-bezier(.2,.75,.25,1);
   --focus: 0 0 0 3px rgba(117, 147, 123, .32);
 }
 

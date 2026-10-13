@@ -126,6 +126,13 @@ const turnEnd = (id, kind, error) => ({ type: 'turn/end', data: { reason: { kind
   assert.equal(history.messages[1].role, 'assistant');
   assert.equal(history.messages[1].text, '你好，正在思考', 'message 定稿段 + 后续 chunk 段连接');
   assert.deepEqual(history.messages[1].usage, { inputTokens: 12, outputTokens: 3 }, '真实 usage 透传');
+  const clientId = 'client-send-001';
+  const correlated = await service.execute({ method: 'chat.send', params: { id: session.id, text: '客户端关联消息', clientMessageId: clientId } });
+  assert.equal(correlated.userMessageId, clientId, 'Core adopts the stable renderer message ID');
+  const repeated = await service.execute({ method: 'chat.send', params: { id: session.id, text: '客户端关联消息', clientMessageId: clientId } });
+  assert.equal(repeated.userMessageId, clientId, 'network retry with the same ID is idempotent');
+  const correlatedHistory = await service.execute({ method: 'chat.history', params: { id: session.id } });
+  assert.equal(correlatedHistory.messages.filter(message => message.id === clientId).length, 1, 'the correlated user message is stored once');
   // selectModel：新会话创建后绑定默认模型
   assert.ok(api.calls.some((c) => c.endpoint === 'session/selectModel' && c.args.request.model === 'deepseek-flash'));
   ok('发送 + streaming（chunk 增量 / message 校准）+ usage 透传 + 模型绑定');
@@ -432,7 +439,7 @@ function abortableSseFetch() {
 }
 
 /** 组装带 Model Runtime / Router / Agent 的完整 chat-service（全 fixture，不联网不碰 DSH）。 */
-function makeFullService({ withKey = true, fetchImpl, baseUrl = 'https://api.deepseek.test', router = true, api = dshDownApi(), agent = false, stateDir: overrideDir, buildProductContext, defaultModelConfig, onEvent } = {}) {
+function makeFullService({ withKey = true, fetchImpl, baseUrl = 'https://api.deepseek.test', router = true, api = dshDownApi(), agent = false, agentBoundary = 'unsupported', stateDir: overrideDir, buildProductContext, defaultModelConfig, onEvent } = {}) {
   const dir = overrideDir ?? path.join(stateDir, 's1-' + (++caseSeq));
   fs.mkdirSync(dir, { recursive: true });
   const secrets = createProviderSecrets({ root: dir });
@@ -460,13 +467,14 @@ function makeFullService({ withKey = true, fetchImpl, baseUrl = 'https://api.dee
     ? async ({ method, params }) => {
       agentCalls.push({ method, params });
       if (method === 'agent.createSession') return { sessionId: `agent-${agentCalls.length}` };
+      if (method === 'agent.list') return { providers: [{ id: 'dsh', label: 'DSH Agent', displayName: 'DSH', available: true, workspaceBoundary: agentBoundary, health: { available: true } }] };
       return { ok: true };
     }
     : null;
   const service = createChatService({
     api,
     controlExecute: fixtureControl('throw'), // DSH 模型目录不可用：Model Runtime 目录不受影响
-    agentProviders: agent ? [{ id: 'dsh', label: 'DSH Agent', eventProtocol: 'dsh-session-events' }] : [],
+    agentProviders: agent ? [{ id: 'dsh', label: 'DSH Agent', eventProtocol: 'dsh-session-events', workspaceBoundary: agentBoundary }] : [],
     agentExecute,
     modelRuntime,
     router: routerService,
@@ -542,10 +550,14 @@ function makeFullService({ withKey = true, fetchImpl, baseUrl = 'https://api.dee
 // ── 14. Agent=DSH 显式选择：整回合走 Agent Provider，不走 Model Runtime ────────
 {
   const f = sseFetch();
-  const { service, agentCalls } = makeFullService({ fetchImpl: f, agent: true });
+  const uiEvents = [];
+  const { service, agentCalls } = makeFullService({ fetchImpl: f, agent: true, onEvent: event => uiEvents.push(event) });
   const session = await service.execute({ method: 'chat.sessions.create', params: {} });
   await service.execute({ method: 'chat.config.set', params: { id: session.id, config: { agentProvider: 'dsh' } } });
   await service.execute({ method: 'chat.send', params: { id: session.id, text: '走 DSH Agent' } });
+  const running = await service.execute({ method: 'chat.status', params: { id: session.id } });
+  assert.deepEqual(running.turn.agentActivity, { providerId: 'dsh', label: 'DSH Agent', status: 'running' }, 'the selected Agent is visible immediately while its turn runs');
+  assert.ok(uiEvents.some(event => event.event === 'chat.streaming' && event.data.agentActivity?.providerId === 'dsh'), 'stream events carry the running Agent card');
   // DSH Agent 事件经 _injectEvent 注入（与真实 follow 流等价）。
   service._injectEvent(session.id, { type: 'turn/start', data: {} });
   service._injectEvent(session.id, { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'DSH Agent 回答' }] } } });
@@ -560,6 +572,18 @@ function makeFullService({ withKey = true, fetchImpl, baseUrl = 'https://api.dee
     (error) => error.code === 'INVALID_PARAMS'
   );
   ok('Agent=DSH：显式选择 → Agent 契约路径（Model Runtime 零请求）+ 未知 Agent 拒绝');
+  service.close();
+}
+
+// ── 14b. Chat 与 Agents 使用同一健康状态，并保留未验证边界原因 ───────────────
+{
+  const { service } = makeFullService({ agent: true, agentBoundary: 'unverified' });
+  const ui = createDesktopUiService({ services: { chatService: service } });
+  const catalog = await ui.execute({ method: 'ui.chat.catalog', params: {} });
+  const dsh = catalog.agentProviders.find(provider => provider.id === 'dsh');
+  assert.equal(dsh.available, true, 'DSH health remains visible as available');
+  assert.equal(dsh.eligible, false, 'unverified workspace boundary blocks execution');
+  assert.equal(dsh.reason, 'descriptor-incomplete', 'Composer receives the same actionable state as Agents');
   service.close();
 }
 

@@ -391,7 +391,7 @@ export function createPluginCenterService({
     const current = (await installedEntries()).find(entry => entry.id === item.manifest.id) ?? null;
     const approval = { approved: true, token: item.review.review.token };
     const previousTrust = localUnverified.get(item.manifest.id) ?? null;
-    if (item.kind === 'local') {
+    if (item.kind === 'local' || item.kind === 'local-package') {
       localUnverified.set(item.manifest.id, { version: item.manifest.version, firstEnableReviewed: false });
       try {
         persistTrustState();
@@ -417,7 +417,7 @@ export function createPluginCenterService({
       throw error;
     } finally {
       staged.delete(item.stageId);
-      if (item.kind === 'catalog') cleanupPluginStage(item.directory);
+      if (item.kind === 'catalog' || item.kind === 'local-package') cleanupPluginStage(item.stagingDirectory ?? item.directory);
     }
     if (item.kind === 'catalog' && previousTrust) {
       localUnverified.delete(item.manifest.id);
@@ -440,6 +440,40 @@ export function createPluginCenterService({
 
   async function stageLocal(params = {}) {
     if (!developerModeFromStore(settingsStore)) throw pluginCenterError('DEVELOPER_MODE_REQUIRED', 'enable Developer Mode before loading a local plugin');
+    if (params.file !== undefined) {
+      const packagePath = path.resolve(string(params.file));
+      if (!['.zip', '.cmpkg'].includes(path.extname(packagePath).toLowerCase())) throw pluginCenterError('PACKAGE_INVALID', 'local extension package must use .zip or .cmpkg');
+      let stat;
+      try { stat = fs.statSync(packagePath); }
+      catch { throw pluginCenterError('PACKAGE_NOT_FOUND', 'local extension package could not be read'); }
+      if (!stat.isFile() || stat.size < 1 || stat.size > PLUGIN_CATALOG_LIMITS.maxPackageBytes) throw pluginCenterError('PACKAGE_TOO_LARGE', 'local extension package exceeds the allowed size');
+      const unpacked = extractPluginPackage(fs.readFileSync(packagePath), { stagingRoot: path.join(stateRoot, 'staging') });
+      let directory = unpacked.directory;
+      try {
+        const rootEntries = fs.readdirSync(directory, { withFileTypes: true });
+        if (!fs.existsSync(path.join(directory, 'extension.json')) && !fs.existsSync(path.join(directory, 'manifest.json'))
+          && rootEntries.length === 1 && rootEntries[0].isDirectory()) directory = path.join(directory, rootEntries[0].name);
+        const validation = validatePluginDirectory(directory, { currentVersion });
+        if (!validation.ok) throw pluginCenterError(validation.issues[0].code, validation.issues[0].message);
+        const reviewed = await extensionRuntime?.review?.({ sourceDir: directory });
+        if (!reviewed) throw pluginCenterError('EXTENSION_RUNTIME_UNAVAILABLE', 'Extension Runtime is unavailable');
+        const stageId = crypto.randomUUID();
+        staged.set(stageId, {
+          stageId, directory, stagingDirectory: unpacked.directory, plugin: null, manifest: validation.manifest,
+          review: reviewed, permissionDelta: reviewed.permissionDelta ?? { added: [], removed: [] },
+          trust: 'local-unverified', kind: 'local-package'
+        });
+        return {
+          stageId, entry: validation.manifest,
+          review: { manifest: validation.manifest, review: reviewed.review, scan: reviewed.scan, permissionDelta: reviewed.permissionDelta, summary: reviewed.summary ?? [] },
+          trust: { level: 'local-unverified', publisherSignature: 'none' },
+          requiresReview: true, enableAfterInstall: false
+        };
+      } catch (error) {
+        cleanupPluginStage(unpacked.directory);
+        throw error;
+      }
+    }
     const directory = path.resolve(string(params.directory));
     const validation = validatePluginDirectory(directory, { currentVersion });
     if (!validation.ok) throw pluginCenterError(validation.issues[0].code, validation.issues[0].message);
@@ -603,7 +637,7 @@ export function createPluginCenterService({
       }));
       const loaded = await fetchCatalog();
       const rows = loaded.catalog ? await buildCatalogRows(loaded) : [];
-      return { installed, catalogAvailable: Boolean(loaded.catalog), configured: loaded.configured, offline: loaded.offline, plugins: rows };
+      return { installed, catalogAvailable: Boolean(loaded.catalog), configured: loaded.configured, offline: loaded.offline, developerMode: developerModeFromStore(settingsStore), plugins: rows };
     },
     'plugin-center.health': async () => ({ ...lastCatalogState, extensionRuntimeAvailable: Boolean(extensionRuntime) }),
     'plugin-center.configure': async params => {

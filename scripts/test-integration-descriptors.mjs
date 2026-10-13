@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createIntegrationService } from '../src/integrations/service.js';
+import { buildCapabilityContext } from '../src/context/capability-context.js';
 import { createDesktopIpcRuntime } from '../src/app/ipc-runtime.js';
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-integration-descriptors-'));
@@ -13,13 +14,18 @@ const ok = label => { step += 1; console.log('✅ [' + step + '] ' + label); };
 
 try {
   // ── 1. SnowLuma = Channel Provider Integration；DSH = Agent Provider Integration ──
+  const localServices = () => ({
+    snowluma: { status: 'ready', running: true, ready: true, lastError: '' },
+    dsh: { status: 'ready', running: true, ready: true, lastError: '' }
+  });
+  localServices.actions = { snowluma: {
+    detect: async () => ({}), start: async () => ({}), stop: async () => ({}),
+    install: async () => ({}), connect: async () => ({})
+  } };
   const service = createIntegrationService({
     stateDir: tmp,
     providerSnapshot: () => ({ channel: ['qq'], agent: ['dsh'] }),
-    localServices: () => ({
-      snowluma: { status: 'ready', running: true, ready: true, lastError: '' },
-      dsh: { status: 'ready', running: true, ready: true, lastError: '' }
-    })
+    localServices
   });
   const list = await service.execute({ method: 'integrations.list' });
   assert.equal(list.integrations.length, 3);
@@ -135,6 +141,17 @@ try {
   for (const id of ['integration.tool.read', 'integration.tool.write', 'integration.tool.admin', 'integration.mcp.manage', 'integration.plugin.manage']) {
     assert.ok(services.capabilityService.broker.registry.has(id), '能力面缺少 ' + id);
   }
+  const capabilityRows = services.capabilityService.broker.registry.list();
+  const toolCapabilities = capabilityRows.filter(row => ['integration.tool.read', 'integration.tool.write', 'integration.tool.admin'].includes(row.id));
+  assert.equal(toolCapabilities.length, 3);
+  assert.ok(toolCapabilities.every(row => row.modelCallable && row.description && row.inputSchema?.type === 'object'), 'tool executors need complete callable descriptors');
+  for (const id of ['integration.mcp.manage', 'integration.plugin.manage']) {
+    const row = capabilityRows.find(item => item.id === id);
+    assert.equal(row.modelCallable, false, id + ' must remain an Owner-only management operation');
+  }
+  const projected = buildCapabilityContext({ registered: capabilityRows, executionPath: 'chat' });
+  assert.deepEqual(projected.manifest.filter(row => row.id.startsWith('integration.tool.')).map(row => row.id).sort(), toolCapabilities.map(row => row.id).sort());
+  assert.equal(projected.statusSummary.find(row => row.id === 'integration.mcp.manage')?.reason, 'not-model-callable');
   const containerList = await services.integrationService.execute({ method: 'integrations.list' });
   const containerSnow = containerList.integrations.find(item => item.id === 'cetamesh-snowluma');
   assert.equal(containerSnow.provider.available, true, '容器里的 Channel Provider（qq）必须被识别');

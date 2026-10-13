@@ -11,7 +11,7 @@ const EVENT_NAMES = Object.freeze([
 
 const EVENT_DATA_KEYS = Object.freeze([
   'sessionId', 'taskId', 'workspaceId', 'agentId', 'pluginId', 'serverId', 'approvalId',
-  'provider', 'status', 'progress', 'ready', 'needsAttention'
+  'provider', 'status', 'progress', 'ready', 'needsAttention', 'delta', 'replaceText', 'reset', 'toolActivity', 'agentActivity'
 ]);
 
 const SETTING_KEYS = Object.freeze({
@@ -86,13 +86,18 @@ function projectMessage(value) {
     const tool = record(item);
     return {
       id: string(tool.id, 128), label: string(tool.label ?? tool.name, 200),
-      status: ['pending', 'running', 'completed', 'failed'].includes(tool.status) ? tool.status : 'completed',
+      status: ['pending', 'running', 'waiting-approval', 'completed', 'failed'].includes(tool.status) ? tool.status : 'completed',
       summary: string(tool.summary, 1000), durationMs: Number.isFinite(tool.durationMs) ? Math.max(0, tool.durationMs) : null
     };
   }) : [];
+  const rawAgentActivity = record(row.agentActivity);
+  const agentActivity = typeof rawAgentActivity.providerId === 'string' ? {
+    providerId: string(rawAgentActivity.providerId, 80), label: string(rawAgentActivity.label, 180),
+    status: ['running', 'completed', 'cancelled', 'failed'].includes(rawAgentActivity.status) ? rawAgentActivity.status : 'running'
+  } : null;
   return {
     id: string(row.id, 128), role, text: string(row.text, MAX_TEXT), at: scalar(row.at),
-    attachments, toolActivity, error: row.error ? string(row.error, 1000) : null,
+    attachments, toolActivity, agentActivity, error: row.error ? string(row.error, 1000) : null,
     cancelled: row.cancelled === true
   };
 }
@@ -161,12 +166,17 @@ function projectAgent(value) {
   const row = record(value);
   const health = record(row.health);
   const desktop = record(row.desktopApp);
-  const reason = string(row.reason ?? health.reason ?? row.status, 100);
+  const reason = string(row.reason ?? health.reason, 160);
+  const lastError = string(row.lastError ?? health.lastError ?? health.message, 500) || null;
   const healthStatus = string(health.status, 50).toLowerCase();
-  const readiness = `${reason} ${healthStatus}`;
+  const readiness = `${reason} ${healthStatus} ${string(row.status, 50)}`;
   const id = string(row.id ?? row.provider, 80);
   const available = row.available === true && health.available !== false;
-  const status = /unsupported|not[_-]supported/i.test(readiness) ? 'not-supported'
+  const workspaceBoundary = string(row.workspaceBoundary ?? health.workspaceBoundary, 80) || null;
+  const requiresTask = ['capability-broker', 'staged-capability-broker'].includes(workspaceBoundary);
+  const boundaryUnverified = workspaceBoundary === 'unverified';
+  const status = boundaryUnverified && available ? 'descriptor-incomplete'
+    : /unsupported|not[_-]supported/i.test(readiness) ? 'not-supported'
     : /not[_-]installed|missing[_-]binary/i.test(readiness) ? 'not-installed'
       : /setup|auth|credential|needs[_-]config/i.test(readiness) ? 'needs-setup'
         : row.available === false || health.available === false ? 'unavailable'
@@ -175,7 +185,9 @@ function projectAgent(value) {
     id, name: string(row.displayName ?? row.label ?? id, 120),
     role: id === 'codex' ? '代码与项目' : id === 'dsh' ? '通用研究与协作' : '开发辅助',
     description: id === 'codex' ? '理解项目、修改代码并检查结果。' : id === 'dsh' ? '处理资料、规划和跨工具工作流。' : '在可用时连接本地开发能力。',
-    available, status, version: string(row.version, 80) || null,
+    available, eligible: available && !requiresTask && !boundaryUnverified,
+    configured: row.configured === true || health.configured === true,
+    reason: reason || (boundaryUnverified ? 'descriptor-incomplete' : available && requiresTask ? 'task-required' : null), lastError, workspaceBoundary, status, version: string(row.version, 80) || null,
     desktopApp: id === 'dsh' ? {
       installed: desktop.installed === true, running: desktop.running === true,
       status: string(desktop.status, 50) || 'unknown', version: string(desktop.version, 80) || null
@@ -207,6 +219,11 @@ function projectPlugin(value) {
     description: string(row.description, 8000), developer: string(row.publisher ?? row.developer ?? 'CetaMesh', 160),
     version: string(row.version ?? extension.version, 80), status: status === 'Update Available' ? 'update' : status,
     category: string(row.category, 80), kind: string(row.kind ?? row.type, 60),
+    available: typeof row.available === 'boolean' ? row.available : Boolean(row.installedEntry || row.installed === true),
+    configured: row.configured === true,
+    eligible: typeof row.eligible === 'boolean' ? row.eligible : Boolean((row.installedEntry || row.installed === true) && row.enabled !== false),
+    reason: string(row.reason ?? row.warning, 500) || null,
+    lastError: string(row.lastError, 500) || null,
     featured: row.featured === true, installed: Boolean(row.installedEntry || row.installed === true),
     enabled: extension.status === 'enabled' || row.enabled === true,
     icon: ['sparkles', 'plug', 'music', 'code', 'globe', 'image', 'bot', 'layers'].includes(row.icon) ? row.icon : 'layers',
@@ -220,9 +237,34 @@ function projectMcpServer(value) {
   const row = record(value);
   return {
     id: string(row.id ?? row.serverId, 160), name: string(row.name ?? row.displayName ?? row.id, 200),
-    status: string(row.status, 60), enabled: row.enabled === true, available: row.available === true,
+    status: string(row.status, 60), enabled: row.enabled === true,
+    available: row.available === true || (row.enabled === true && row.status === 'running'),
     toolCount: Number.isFinite(row.toolCount) ? Math.max(0, row.toolCount) : null,
-    transport: string(row.transport, 40), reason: null
+    transport: string(row.transport, 40),
+    source: string(row.source, 40) || 'external',
+    configured: record(row.config).hasArgs === true || record(row.config).hasEnvironment === true,
+    eligible: row.enabled === true && (row.status === 'running' || row.available === true),
+    reason: string(row.lastError, 500) || (!row.enabled ? 'server-disabled' : row.status === 'running' ? null : 'server-stopped'),
+    lastError: string(row.lastError, 500) || null
+  };
+}
+
+function projectIntegration(value) {
+  const row = record(value);
+  const local = record(row.localService);
+  const provider = record(row.provider);
+  const integration = record(row.integrationStatus);
+  const agent = record(row.agentIntegration);
+  const status = string(row.status ?? local.status ?? integration.status ?? agent.status, 60);
+  const enabled = row.enabled === true || integration.enabled === true;
+  const available = row.available === true || integration.available === true || row.agentAvailable === true;
+  const reason = local.status
+    ? !local.installed ? 'not-installed' : !local.configured ? 'needs-setup' : local.ready ? null : local.running ? 'start-timeout' : 'stopped'
+    : string(row.reason ?? agent.reason ?? provider.lastError ?? integration.lastError, 500) || (enabled && !available ? 'provider-unavailable' : null);
+  return {
+    id: string(row.id, 120), name: string(row.displayName ?? row.name ?? row.id, 160), status, enabled, available,
+    eligible: enabled && available, configured: local.configured === true || provider.configured === true,
+    reason, lastError: string(local.lastError ?? provider.lastError ?? integration.lastError, 500) || null
   };
 }
 
@@ -311,9 +353,25 @@ export function createDesktopUiEventBus({ now = () => Date.now(), maxEvents = 50
     for (const key of EVENT_DATA_KEYS) {
       if (!Object.hasOwn(input, key)) continue;
       const value = input[key];
-      if (typeof value === 'string') safe[key] = value.slice(0, 200);
+      if (typeof value === 'string') safe[key] = value.slice(0, key === 'replaceText' ? MAX_TEXT : key === 'delta' ? 32_000 : 200);
       else if (typeof value === 'number' && Number.isFinite(value)) safe[key] = value;
       else if (typeof value === 'boolean') safe[key] = value;
+      else if (key === 'toolActivity' && Array.isArray(value)) safe[key] = value.slice(-32).map(activity => {
+        const row = record(activity);
+        return {
+          id: string(row.id, 200), label: string(row.label ?? row.capability, 180),
+          status: string(row.status, 50), summary: string(row.summary, 500),
+          durationMs: Number.isFinite(row.durationMs) ? Math.max(0, row.durationMs) : null
+        };
+      });
+      else if (key === 'agentActivity' && value === null) safe[key] = null;
+      else if (key === 'agentActivity' && value && typeof value === 'object' && !Array.isArray(value)) {
+        const row = record(value);
+        if (typeof row.providerId === 'string') safe[key] = {
+          providerId: string(row.providerId, 80), label: string(row.label, 180),
+          status: ['running', 'completed', 'cancelled', 'failed'].includes(row.status) ? row.status : 'running'
+        };
+      }
     }
     const item = { cursor: ++cursor, event, data: safe, at: now() };
     events.push(item);
@@ -405,6 +463,15 @@ export function createDesktopUiService({ services = {}, system = services.system
       return {
         id: string(result.id, 128), state: string(turn.state ?? result.lastState, 40),
         displayText: string(turn.displayText, MAX_TEXT), error: string(turn.error ?? result.lastError, 1000) || null,
+        agentActivity: turn.agentActivity && typeof turn.agentActivity === 'object' ? {
+          providerId: string(turn.agentActivity.providerId, 80), label: string(turn.agentActivity.label, 180),
+          status: ['running', 'completed', 'cancelled', 'failed'].includes(turn.agentActivity.status) ? turn.agentActivity.status : 'running'
+        } : null,
+        toolActivity: (Array.isArray(turn.toolActivity) ? turn.toolActivity : []).slice(-32).map(item => ({
+          id: string(item.id, 200), label: string(item.label ?? item.capability, 180),
+          status: string(item.status, 50), summary: string(item.summary, 500),
+          durationMs: Number.isFinite(item.durationMs) ? Math.max(0, item.durationMs) : null
+        })),
         approvalId: string(turn.approvalId, 128) || null, approvalExpiresAt: scalar(turn.approvalExpiresAt),
         routing: selected(turn.routing, ['modelProvider', 'requestedModel', 'resolvedModel', 'toolCalling', 'taskId'])
       };
@@ -415,7 +482,8 @@ export function createDesktopUiService({ services = {}, system = services.system
         const attachment = record(item);
         return { name: boundedText(attachment.name, `attachments[${index}].name`, 200), content: boundedText(attachment.content, `attachments[${index}].content`, 256_000), ...(attachment.mimeType ? { mimeType: string(attachment.mimeType, 80) } : {}) };
       }) : [];
-      const result = await chat('chat.send', { id: idParam(p), text, attachments });
+      const clientMessageId = p.clientMessageId === undefined ? undefined : boundedText(p.clientMessageId, 'clientMessageId', 128);
+      const result = await chat('chat.send', { id: idParam(p), text, attachments, ...(clientMessageId ? { clientMessageId } : {}) });
       emit('chat.updated', { sessionId: p.id });
       return selected(result, ['userMessageId']);
     },
@@ -561,8 +629,12 @@ export function createDesktopUiService({ services = {}, system = services.system
       return { available: result.available === true, configured: result.configured === true, offline: result.offline === true, reason: string(result.reason ?? result.error, 300) || null, plugins: (result.plugins ?? []).map(projectPlugin) };
     },
     'ui.plugins.status': async () => {
-      const result = await plugins('plugin-center.status', {});
-      return { catalogAvailable: result.catalogAvailable === true, configured: result.configured === true, offline: result.offline === true, plugins: (result.plugins ?? []).map(projectPlugin), installed: (result.installed ?? []).map(projectPlugin) };
+      const [result, integrationResult, mcpResult] = await Promise.all([
+        plugins('plugin-center.status', {}), integrations('integrations.list', {}), integrations('mcp.list', {})
+      ]);
+      return { catalogAvailable: result.catalogAvailable === true, configured: result.configured === true, offline: result.offline === true, developerMode: result.developerMode === true,
+        plugins: (result.plugins ?? []).map(projectPlugin), installed: (result.installed ?? []).map(projectPlugin),
+        integrations: (integrationResult.integrations ?? []).map(projectIntegration), mcp: (mcpResult.servers ?? []).map(projectMcpServer) };
     },
     'ui.plugins.detail': async p => {
       const result = await plugins('plugin-center.catalog.detail', { id: idParam(p) });
@@ -575,6 +647,13 @@ export function createDesktopUiService({ services = {}, system = services.system
     },
     'ui.plugins.stage': async p => {
       const result = await plugins('plugin-center.package.stage', { id: idParam(p) });
+      return { stageId: string(result.stageId, 128), plugin: projectPlugin(result.entry), requiresReview: result.requiresReview === true,
+        installable: record(result.review?.review).installable === true,
+        permissions: boundedStrings(result.review?.permissions ?? result.review?.review?.permissions, 40, 250),
+        summary: boundedStrings(result.review?.summary, 30, 400), trust: string(result.trust?.level, 60) };
+    },
+    'ui.plugins.stage-local': async p => {
+      const result = await plugins('plugin-center.developer.stageLocal', { file: boundedText(p.file, 'file', 4096) });
       return { stageId: string(result.stageId, 128), plugin: projectPlugin(result.entry), requiresReview: result.requiresReview === true,
         installable: record(result.review?.review).installable === true,
         permissions: boundedStrings(result.review?.permissions ?? result.review?.review?.permissions, 40, 250),
@@ -628,7 +707,7 @@ export function createDesktopUiService({ services = {}, system = services.system
       emit('plugin.updated', { pluginId: p.id });
       return selected(result, ['id', 'status', 'uninstalled']);
     },
-    'ui.plugins.integration.list': async () => ({ integrations: (await integrations('integrations.list', {})).integrations.map(row => ({ id: string(row.id, 120), name: string(row.displayName ?? row.name ?? row.id, 160), status: string(row.status, 60), enabled: row.enabled === true, available: row.available === true })) }),
+    'ui.plugins.integration.list': async () => ({ integrations: ((await integrations('integrations.list', {})).integrations ?? []).map(projectIntegration) }),
     'ui.plugins.integration.settings': async p => {
       const id = idParam(p);
       const result = await integrations('plugins.settings', { id });
@@ -666,8 +745,36 @@ export function createDesktopUiService({ services = {}, system = services.system
       return {
         id: string(result.id ?? id, 120), name: string(result.name, 160),
         enabled: result.enabled === true, available: result.available !== false, tools, inventory, legacyRetired,
+        localService: result.localService ? (() => {
+          const local = record(result.localService);
+          return {
+            status: string(local.status, 60) || 'not-checked',
+            installed: local.installed === true, running: local.running === true, ready: local.ready === true,
+            configured: local.configured === true, version: string(local.version, 100) || null,
+            httpUrl: string(local.httpUrl, 500) || null, wsUrl: string(local.wsUrl, 500) || null,
+            accessTokenConfigured: local.accessTokenConfigured === true,
+            lastError: string(local.lastError, 500) || null,
+            actions: boundedStrings(result.actions, 10, 40)
+          };
+        })() : null,
         settings: Object.fromEntries(Object.entries(settingsView).filter(([key]) => !SECRET_KEY.test(key) && !/(path|directory|root|cwd|folder|file)/i.test(key)).map(([key, value]) => [key.slice(0, 100), scalar(value)]))
       };
+    },
+    'ui.plugins.integration.action': async p => {
+      const service = idParam(p, 'localService');
+      const action = ['detect', 'start', 'stop', 'install', 'configure'].find(value => p.action === value);
+      if (!/^[a-z0-9._-]{1,80}$/i.test(service) || !action) throw uiError('INVALID_PARAMS', '未知集成本地服务操作');
+      const raw = record(p.params);
+      const params = action === 'configure' ? {
+        httpUrl: boundedText(raw.httpUrl, 'OneBot HTTP 地址', 500),
+        wsUrl: boundedText(raw.wsUrl, 'OneBot WebSocket 地址', 500),
+        ...(typeof raw.accessToken === 'string' ? { accessToken: raw.accessToken.slice(0, 512) } : {}),
+        ...(raw.clearAccessToken === true ? { clearAccessToken: true } : {})
+      } : {};
+      const result = await integrations('integrations.action', { localService: service, action, params, approved: false });
+      emit('plugin.updated', { pluginId: service });
+      const local = record(result);
+      return selected(local, ['status', 'installed', 'running', 'ready', 'configured', 'version', 'lastError', 'approvalId', 'pending']);
     },
     'ui.plugins.integration.manage': async p => {
       const id = idParam(p);

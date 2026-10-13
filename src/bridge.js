@@ -8,6 +8,7 @@ import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { APP_PATHS, listRoleNames, resolveRoleFile } from './app-paths.js';
 import { readRawConfig } from './config/loader.js';
+import { createConfigService } from './config/service.js';
 import { DEFAULT_MODEL, migrateLegacyConfig, normalizeOwnerQQ } from './config/migrate.js';
 import { isMainModule, reportEntrypointError } from './entrypoint.js';
 import { NodeApiClient, unwrap, createTurnCollector } from './dsh-client.js';
@@ -608,6 +609,69 @@ async function main() {
   });
   // 登记给退出路径用：完全退出时保留 SnowLuma，避免 worker 的 stdio / 进程树中断 QQ 注入。
   managedServices = localServices;
+  const runtimeConfigService = createConfigService({ configFile: CONFIG_FILE });
+  const desktopLocalServices = () => {
+    const snapshot = localServices.snapshot();
+    const snowlumaConfig = cfg.snowluma ?? {};
+    snapshot.snowluma = {
+      ...snapshot.snowluma,
+      configured: typeof snowlumaConfig.httpUrl === 'string' && snowlumaConfig.httpUrl.trim().length > 0,
+      httpUrl: snowlumaConfig.httpUrl || 'http://127.0.0.1:3000',
+      wsUrl: snowlumaConfig.wsUrl || 'ws://127.0.0.1:3001',
+      accessTokenConfigured: typeof snowlumaConfig.accessToken === 'string' && snowlumaConfig.accessToken.length > 0
+    };
+    return snapshot;
+  };
+  desktopLocalServices.actions = {
+    snowluma: {
+      detect: async () => {
+        await localServices.detectAll({ force: true });
+        return desktopLocalServices().snowluma;
+      },
+      install: async () => {
+        await localServices.installSnowLuma();
+        return desktopLocalServices().snowluma;
+      },
+      start: async () => {
+        const result = await localServices.startSnowLuma();
+        if (result.ready) {
+          await connectSnowLumaReady;
+          await connectSnowLuma();
+        }
+        return desktopLocalServices().snowluma;
+      },
+      stop: async () => {
+        await localServices.stopSnowLuma();
+        return desktopLocalServices().snowluma;
+      },
+      configure: ({ httpUrl, wsUrl, accessToken, clearAccessToken } = {}) => {
+        const endpoint = (value, name, protocols) => {
+          const text = String(value ?? '').trim();
+          let parsed;
+          try { parsed = new URL(text); } catch { throw Object.assign(new Error(`${name} 必须是合法 URL`), { code: 'INVALID_PARAMS' }); }
+          if (!protocols.includes(parsed.protocol) || parsed.username || parsed.password || parsed.search || parsed.hash) {
+            throw Object.assign(new Error(`${name} 必须使用 ${protocols.join('/')} 地址，且不能包含凭据、查询或片段`), { code: 'INVALID_PARAMS' });
+          }
+          return text.replace(/\/+$/, '');
+        };
+        const patch = {
+          httpUrl: endpoint(httpUrl, 'OneBot HTTP 地址', ['http:', 'https:']),
+          wsUrl: endpoint(wsUrl, 'OneBot WebSocket 地址', ['ws:', 'wss:'])
+        };
+        if (clearAccessToken === true) patch.accessToken = '';
+        else if (accessToken !== undefined && String(accessToken).length > 0) {
+          const token = String(accessToken);
+          if (token.length > 512 || /[\u0000-\u001f]/.test(token)) {
+            throw Object.assign(new Error('Access Token 不能超过 512 个字符或包含控制字符'), { code: 'INVALID_PARAMS' });
+          }
+          patch.accessToken = token;
+        }
+        runtimeConfigService.updateSection('snowluma', patch);
+        cfg.snowluma = { ...(cfg.snowluma ?? {}), ...patch };
+        return desktopLocalServices().snowluma;
+      }
+    }
+  };
 
   // ── 群聊黑话/网络用语学习（slang） ──────────────────────────────────────
   let slangEntries = loadSlang(SLANG_FILE);
@@ -1915,6 +1979,7 @@ async function main() {
       stateDir: STATE_DIR,
       sourceRoot: APP_PATHS.sourceRoot,
       socialV2File: SOCIAL_V2_FILE,
+      localServices: desktopLocalServices,
       api,
       controlService,
       log

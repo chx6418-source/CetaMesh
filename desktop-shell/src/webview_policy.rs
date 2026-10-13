@@ -17,7 +17,7 @@ const UI_METHODS: &[&str] = &[
     "ui.workspace.list", "ui.workspace.open", "ui.workspace.create",
     "ui.memory.overview", "ui.memory.get", "ui.memory.create", "ui.memory.update", "ui.memory.pin", "ui.memory.delete",
     "ui.agent.list", "ui.agent.health",
-    "ui.plugins.catalog", "ui.plugins.status", "ui.plugins.detail", "ui.plugins.refresh", "ui.plugins.stage", "ui.plugins.enable.review",
+    "ui.plugins.catalog", "ui.plugins.status", "ui.plugins.detail", "ui.plugins.refresh", "ui.plugins.stage", "ui.plugins.stage-local", "ui.plugins.enable.review",
     "ui.plugins.install", "ui.plugins.enable", "ui.plugins.disable", "ui.plugins.uninstall",
     "ui.plugins.integration.list", "ui.plugins.integration.settings", "ui.plugins.integration.manage", "ui.plugins.integration.tool.toggle",
     "ui.mcp.list", "ui.mcp.tools", "ui.mcp.manage", "ui.mcp.config.get", "ui.mcp.config.update",
@@ -29,7 +29,7 @@ const UI_METHODS: &[&str] = &[
 ];
 
 fn is_allowed_method(method: &str) -> bool {
-    matches!(method, "app.ping" | "app.about" | "app.status" | "app.openExternal" | "app.openArtifact" | "app.pickFolder" | "app.pickFiles" | "app.setWindowBehavior")
+    matches!(method, "app.ping" | "app.about" | "app.status" | "app.openExternal" | "app.openArtifact" | "app.pickFolder" | "app.pickFiles" | "app.pickExtensionPackage" | "app.setWindowBehavior")
         || UI_METHODS.contains(&method)
 }
 
