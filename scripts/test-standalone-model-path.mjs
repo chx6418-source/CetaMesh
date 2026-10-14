@@ -256,7 +256,7 @@ function makeChatService(stateDir, port, { buildProductContext, defaultModel = '
     '无效 Key 必须结构化失败'
   );
   const status = await service.execute({ method: 'chat.status', params: { id: created.id } });
-  assert.equal(status.lastState, 'idle', '失败 Provider 状态由落盘的 assistant 错误消息表达');
+  assert.equal(status.lastState, 'error', '失败 Provider 保留 error 终态并落盘 assistant 错误消息');
   const history = await service.execute({ method: 'chat.history', params: { id: created.id } });
   assert.ok(history.messages.at(-1).error, '无文本 Provider 失败仍应投影结构化错误消息');
   assert.ok(!history.messages.at(-1).error.includes(BAD_KEY), '错误消息不泄漏 Key');

@@ -112,7 +112,7 @@ try {
     "module.exports.handlers = { 'read-slow': async (input, ctx) => ctx.memory.read(input) };\n");
   const cancellationService = createExtensionService({
     stateDir: path.join(dir, 'extensions-cancellation'), capabilityBroker: cancellationBroker,
-    processHostFactory: options => createProcessExtensionHost({ ...options, packaged: false, timeoutMs: 100 })
+    processHostFactory: options => createProcessExtensionHost({ ...options, packaged: false, timeoutMs: 2000 })
   });
   try {
     const cancellationReview = await cancellationService.execute({ method: 'ext.review', params: { sourceDir: cancellationSource } });

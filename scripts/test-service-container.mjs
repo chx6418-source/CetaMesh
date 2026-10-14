@@ -2,13 +2,22 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createDesktopUiEventBus } from '../src/desktop/ui-service.js';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-service-container-'));
+async function waitFor(predicate, label, timeoutMs = 1000) {
+  const startedAt = Date.now();
+  while (!predicate()) {
+    if (Date.now() - startedAt >= timeoutMs) throw new Error(`Timed out waiting for ${label}`);
+    await new Promise(resolve => setTimeout(resolve, 1));
+  }
+}
 const originalDataDir = process.env.WHALEBRIDGE_DATA_DIR;
 const originalFetch = globalThis.fetch;
 let networkAttempts = 0;
 let onExit = null;
 let services = null;
+let fallbackServices = null;
 
 try {
   process.env.WHALEBRIDGE_DATA_DIR = root;
@@ -65,10 +74,152 @@ try {
   assert.ok(providers.includes('dsh'), 'DSH provider remains registered without a transport');
   assert.ok(providers.includes('codex'), 'Codex provider remains registered when unavailable');
   assert.ok(providers.includes('zcode'), 'ZCode provider remains registered when unavailable');
+  assert.equal(services.modelRegistry.require('deepseek-official').defaultModel, 'deepseek-flash',
+    'DeepSeek Runtime default uses the currently supported model id');
+  const genericModelProvider = services.modelRegistry.require('openai-compatible');
+  assert.equal(genericModelProvider.supportsTools, false, 'generic compatibility does not claim tool support before opt-in');
+  assert.equal(services.modelRuntime.listProviders().find(provider => provider.id === 'openai-compatible').toolCalling, false);
+  services.settingsService.store.update('models', { openaiCompatibleToolCalling: true, openaiCompatibleReasoningEffort: true });
+  assert.equal(genericModelProvider.supportsTools, true, 'the live provider capability follows the explicit user setting');
+  assert.equal(services.modelRuntime.listProviders().find(provider => provider.id === 'openai-compatible').toolCalling, true);
+  assert.equal(genericModelProvider.supportsReasoning('o3'), true);
+  assert.equal(genericModelProvider.supportsReasoning('gpt-4o-mini'), false);
   const dshHealth = await services.agentService.execute({ method: 'agent.health', params: { provider: 'dsh' } });
   assert.equal(dshHealth.available, false);
   assert.equal(dshHealth.reason, 'not_connected');
   assert.equal(networkAttempts, 0, 'constructing Core services does not make network requests');
+
+  const dshCalls = [];
+  const fallbackApi = {
+    calls: dshCalls,
+    async callEndpoint(endpoint, args = {}) {
+      dshCalls.push({ endpoint, args });
+      if (endpoint === 'session/create') return { sessionId: 'dsh-fallback-fixture' };
+      if (endpoint === 'session/selectModel') return {};
+      if (endpoint === 'session/prompt') return { accepted: true };
+      throw new Error(`unexpected DSH endpoint ${endpoint}`);
+    },
+    async *openRemoteStream(_endpoint, _args, { signal } = {}) {
+      await new Promise(resolve => signal?.addEventListener('abort', resolve, { once: true }));
+    }
+  };
+  fallbackServices = createCetaMeshServices({ config, api: fallbackApi,
+    stateDir: path.join(root, 'fallback-state'), dataRoot: path.join(root, 'fallback-data'),
+    localServices: desktopLocalServices });
+  assert.equal(fallbackServices.modelRuntime.defaultProviderId(), null, 'no configured Model key is represented as unavailable');
+  const fallbackSession = await fallbackServices.chatService.execute({ method: 'chat.sessions.create', params: {} });
+  await fallbackServices.chatService.execute({ method: 'chat.config.set', params: { id: fallbackSession.id, config: { modelProvider: null } } });
+  const dshAck = await fallbackServices.chatService.execute({ method: 'chat.send', params: { id: fallbackSession.id, text: 'use the configured DSH route' } });
+  assert.match(dshAck.requestId, /^cetamesh-chat-/,
+    'production Chat assembly acknowledges the DSH operation with a requestId');
+  await waitFor(() => dshCalls.some(call => call.endpoint === 'session/prompt'), 'production Chat DSH prompt');
+  assert.ok(dshCalls.some(call => call.endpoint === 'session/prompt'),
+    'the production Chat assembly reaches DSH when automatic Model Runtime has no configured key');
+  assert.equal(fallbackServices.modelRuntime.listProviders().some(provider => provider.hasKey), false,
+    'fallback does not invent or leak a Model Provider credential');
+  const fallbackWorkspaceRoot = path.join(root, 'provider-binding-workspace');
+  fs.mkdirSync(fallbackWorkspaceRoot);
+  const { workspace: fallbackWorkspace } = await fallbackServices.workspaceService.execute({
+    method: 'workspace.create', params: { name: 'Provider binding fixture', root: fallbackWorkspaceRoot }
+  });
+  const brokerSessionTask = fallbackServices.taskService.runtime.create({
+    goal: 'Provider-bound session fixture', workspaceId: fallbackWorkspace.id
+  });
+  const originalCreateAgentSession = fallbackServices.agentBroker.createSession;
+  const originalSendAgent = fallbackServices.agentBroker.send;
+  const originalAgentStatus = fallbackServices.agentBroker.status;
+  const originalCancelAgent = fallbackServices.agentBroker.cancel;
+  const originalCloseAgent = fallbackServices.agentBroker.closeSession;
+  let providerSessionIndex = 0;
+  const sentAgentInstructions = [];
+  fallbackServices.agentBroker.createSession = async (provider) => ({ sessionId: `${provider}-fixture-${++providerSessionIndex}` });
+  fallbackServices.agentBroker.send = async request => { sentAgentInstructions.push(request); return { accepted: true }; };
+  fallbackServices.agentBroker.status = async request => ({ sessionId: request.sessionId, running: false });
+  try {
+    for (const provider of ['dsh', 'codex']) {
+      assert.ok(['capability-broker', 'staged-capability-broker'].includes(
+        fallbackServices.agentBroker.capabilities(provider).workspaceBoundary), `${provider} is Task/Workspace-bound`);
+      const result = await fallbackServices.capabilityService.broker.execute({
+        actor: { kind: 'owner', id: 'desktop' }, taskId: brokerSessionTask.id, workspaceId: fallbackWorkspace.id,
+        capability: 'agent.run', input: { agentProvider: provider, content: `run with ${provider}` }, reason: 'session isolation fixture'
+      });
+      assert.equal(result.status, 'completed', `${provider} session should not be passed to the Managed Agent binder`);
+      assert.equal(result.result.provider, provider);
+      fallbackServices.taskService.runtime.detachAgent({ id: brokerSessionTask.id,
+        expectedRev: fallbackServices.taskService.runtime.get({ id: brokerSessionTask.id }).task.rev,
+        note: `Reset fixture after ${provider}` });
+    }
+    fallbackServices.taskService.runtime.attachAgent({ id: brokerSessionTask.id,
+      expectedRev: fallbackServices.taskService.runtime.get({ id: brokerSessionTask.id }).task.rev,
+      provider: 'dsh', sessionId: 'existing-dsh-session' });
+    const previousSendCount = sentAgentInstructions.length;
+    const reused = await fallbackServices.capabilityService.broker.execute({
+      actor: { kind: 'owner', id: 'desktop' }, taskId: brokerSessionTask.id, workspaceId: fallbackWorkspace.id,
+      capability: 'agent.run', input: { agentProvider: 'dsh', content: 'continue this existing session' }, reason: 'reuse send fixture'
+    });
+    assert.equal(reused.result.reused, true);
+    assert.equal(sentAgentInstructions.length, previousSendCount + 1, 'agent.run sends the new instructions even when Session is reused');
+    assert.equal(sentAgentInstructions.at(-1).content, 'continue this existing session');
+    fallbackServices.taskService.runtime.detachAgent({ id: brokerSessionTask.id,
+      expectedRev: fallbackServices.taskService.runtime.get({ id: brokerSessionTask.id }).task.rev, note: 'reset reuse fixture' });
+
+    fallbackServices.taskService.runtime.attachAgent({ id: brokerSessionTask.id,
+      expectedRev: fallbackServices.taskService.runtime.get({ id: brokerSessionTask.id }).task.rev,
+      provider: 'dsh', sessionId: 'cancel-failure-session' });
+    const cancelSignal = { aborted: false };
+    fallbackServices.agentBroker.send = async () => {
+      cancelSignal.aborted = true;
+      return { accepted: true };
+    };
+    fallbackServices.agentBroker.cancel = async () => {
+      throw Object.assign(new Error('Agent cancellation failed'), { code: 'AGENT_CANCEL_FAILED' });
+    };
+    const agentRunCapability = fallbackServices.capabilityService.broker.registry.require('agent.run');
+    await assert.rejects(() => agentRunCapability.execute({
+      requestId: 'cancel-failure-fixture', actor: { kind: 'owner', id: 'desktop' },
+      taskId: brokerSessionTask.id, workspaceId: fallbackWorkspace.id,
+      input: { agentProvider: 'dsh', content: 'report remote cancellation failure' }, signal: cancelSignal
+    }), error => error.code === 'AGENT_CANCEL_FAILED', 'failed cancellation of a reused Agent Session must remain observable');
+    fallbackServices.agentBroker.send = originalSendAgent;
+    fallbackServices.agentBroker.cancel = originalCancelAgent;
+    fallbackServices.taskService.runtime.detachAgent({ id: brokerSessionTask.id,
+      expectedRev: fallbackServices.taskService.runtime.get({ id: brokerSessionTask.id }).task.rev,
+      note: 'reset cancellation fixture' });
+
+    const rollbackTask = fallbackServices.taskService.runtime.create({ goal: 'rollback on agent failure', workspaceId: fallbackWorkspace.id });
+    const originalSend = fallbackServices.agentBroker.send;
+    let closedFailedSession = false;
+    fallbackServices.agentBroker.send = async () => { throw Object.assign(new Error('send failed'), { code: 'PROVIDER_ERROR' }); };
+    fallbackServices.agentBroker.closeSession = async () => { closedFailedSession = true; return { closed: true }; };
+    await assert.rejects(() => fallbackServices.capabilityService.broker.execute({
+      actor: { kind: 'owner', id: 'desktop' }, taskId: rollbackTask.id, workspaceId: fallbackWorkspace.id,
+      capability: 'agent.run', input: { agentProvider: 'dsh', content: 'fail after create' }, reason: 'rollback fixture'
+    }), /send failed/);
+    const rolledBackTask = fallbackServices.taskService.runtime.get({ id: rollbackTask.id }).task;
+    assert.equal(rolledBackTask.currentAgent, null, 'failed Agent initialization detaches its Task assignment');
+    assert.equal(rolledBackTask.status, 'failed', 'failed initialization cannot leave a running Task');
+    assert.equal(closedFailedSession, true, 'failed Agent initialization closes the new Session/staging');
+    fallbackServices.agentBroker.send = originalSend;
+  } finally {
+    fallbackServices.agentBroker.createSession = originalCreateAgentSession;
+    fallbackServices.agentBroker.send = originalSendAgent;
+    fallbackServices.agentBroker.status = originalAgentStatus;
+    fallbackServices.agentBroker.cancel = originalCancelAgent;
+    fallbackServices.agentBroker.closeSession = originalCloseAgent;
+  }
+
+  const taskRuntimeForLookup = fallbackServices.taskService.runtime;
+  const originalTaskGet = taskRuntimeForLookup.get;
+  taskRuntimeForLookup.get = () => { throw Object.assign(new Error('Task store read failed'), { code: 'TASK_STORE_IO' }); };
+  try {
+    await assert.rejects(() => fallbackServices.capabilityService.broker.execute({
+      actor: { kind: 'owner', id: 'desktop' }, taskId: brokerSessionTask.id, workspaceId: fallbackWorkspace.id,
+      capability: 'agent.run', input: { agentProvider: 'dsh', content: 'surface Task store failure' },
+      reason: 'Task resolver error propagation fixture'
+    }), error => error.code === 'TASK_STORE_IO', 'Capability policy must preserve Task storage failures');
+  } finally {
+    taskRuntimeForLookup.get = originalTaskGet;
+  }
   const pluginCatalog = await services.pluginCenterService.execute({ method: 'plugin-center.catalog.list', params: {} });
   assert.equal(pluginCatalog.available, false);
   assert.equal(pluginCatalog.reason, 'service_not_configured', 'missing Plugin Service configuration is graceful');
@@ -105,7 +256,13 @@ try {
   assert.equal(openedWorkspace.activeId, uiWorkspace.id);
   assert.equal(activeWorkspace.activeId, uiWorkspace.id, 'active Workspace is projected from the Core registry');
   const workspaceEvents = await ui('ui.events.next', { after: 0, waitMs: 0 });
+  assert.equal(workspaceEvents.instanceId, services.uiEventBus.instanceId, 'event cursor is scoped to a Core instance');
   assert.ok(workspaceEvents.events.some(event => event.event === 'workspace.updated' && event.data.workspaceId === uiWorkspace.id));
+  const restartedBus = createDesktopUiEventBus();
+  restartedBus.publish('chat.updated', { sessionId: uiSession.id });
+  const firstAfterRestart = await restartedBus.next({ after: 0, waitMs: 0 });
+  assert.notEqual(firstAfterRestart.instanceId, workspaceEvents.instanceId);
+  assert.equal(firstAfterRestart.events[0].cursor, 1, 'new Core starts a fresh event cursor generation');
   const uiTask = await ui('ui.task.create', { goal: 'Harbor task DTO', requirements: [], workspaceId: uiWorkspace.id });
   assert.equal((await ui('ui.task.get', { id: uiTask.task.id })).task.id, uiTask.task.id);
   const taskEvents = await ui('ui.events.next', { after: workspaceEvents.cursor, waitMs: 0 });
@@ -113,6 +270,15 @@ try {
   const uiMemory = await ui('ui.memory.create', { type: 'knowledge', scope: 'global', content: 'Harbor memory DTO' });
   const updatedUiMemory = await ui('ui.memory.update', { id: uiMemory.id, expectedRev: uiMemory.rev, content: 'Updated Harbor memory DTO', tags: [], pinned: false });
   assert.equal(updatedUiMemory.content, 'Updated Harbor memory DTO');
+  const settingsSnapshot = await ui('ui.settings.get');
+  assert.equal(settingsSnapshot.revision, services.settingsService.store.get().revision);
+  const changedSettings = await ui('ui.settings.update', {
+    section: 'general', values: { theme: 'dark' }, expectedRevision: settingsSnapshot.revision
+  });
+  assert.equal(changedSettings.revision, settingsSnapshot.revision + 1);
+  await assert.rejects(() => ui('ui.settings.update', {
+    section: 'general', values: { theme: 'light' }, expectedRevision: settingsSnapshot.revision
+  }), error => error.code === 'SETTINGS_CONFLICT', 'stale revision is rejected through the formal UI route');
   assert.deepEqual((await ui('ui.approvals.list')).approvals, [], 'the live Core approval list has a real empty state');
 
   const simpleContext = JSON.parse(await services.productContextService.buildForChat({
@@ -167,6 +333,7 @@ try {
   }));
   assert.equal(taskOnly.task.id, task.id);
   assert.equal(taskOnly.workspace, null, 'Task workspace is not substituted for the Chat’s missing explicit Workspace link');
+
   const staleLinks = JSON.parse(await services.productContextService.buildForChat({
     record: { id: 'stale-chat', taskId: 'missing-task', config: { mode: 'chat', workspaceId: 'missing-workspace' } },
     routing: null,
@@ -275,6 +442,10 @@ try {
 
   console.log('PASS Core container registers all Agent Providers without DSH or QQ network requests');
 } finally {
+  if (fallbackServices) {
+    await Promise.all([fallbackServices.chatService.close(), fallbackServices.agentService.close(),
+      fallbackServices.pluginCenterService.close(), fallbackServices.extensionService.close()]);
+  }
   if (services) {
     await Promise.all([
       services.extensionService.close(),

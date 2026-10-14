@@ -99,7 +99,7 @@ export function createDshAgentProvider({ api, defaults = {}, log = () => {} } = 
         const sessionId = String(value?.sessionId ?? '');
         if (!sessionId) throw agentProviderError('PROVIDER_ERROR', 'DSH 未返回 sessionId');
         // 模型绑定：显式入参优先，其次 bridge 默认模型（与 QQ 桥接 ensureSessionModel 行为一致）。
-        // 绑定失败不丢弃会话：返回 modelBindingError，调用方可 resume 后重试或换模型。
+        // 未绑定成功的会话不能对外返回 Ready；尽力归档失败的半初始化 session 后报错。
         const wantModel = model !== undefined && model !== null ? String(model) : dshDefaults.model;
         let bound = null;
         let modelBindingError = null;
@@ -113,16 +113,15 @@ export function createDshAgentProvider({ api, defaults = {}, log = () => {} } = 
             }, { timeoutMs: CALL_TIMEOUT_MS, log });
             bound = result?.selected ?? null;
           } catch (error) {
-            modelBindingError = String(error?.message ?? error);
-            log(`DSH Agent Provider 模型绑定失败（会话已创建 ${sessionId}）：${modelBindingError}`);
+            try {
+              await api.callEndpoint('workspace/archiveSession', { request: { sessionId } }, AbortSignal.timeout(LIST_TIMEOUT_MS));
+            } catch (cleanupError) {
+              log(`DSH 模型绑定失败后的临时会话清理失败（${sessionId}）：${cleanupError?.code ?? 'cleanup-error'}`);
+            }
+            throw agentProviderError('MODEL_BIND_FAILED', `DSH Agent 模型绑定失败，未创建可用会话：${String(error?.message ?? error)}`, { cause: error });
           }
         }
-        return {
-          sessionId,
-          provider: 'dsh',
-          model: bound?.model ?? wantModel,
-          modelBindingError
-        };
+        return { sessionId, provider: 'dsh', model: bound?.model ?? wantModel, modelBindingError: null };
       },
 
       async send({ sessionId, content, mode = 'queue' } = {}) {
@@ -240,9 +239,17 @@ export function createDshAgentProvider({ api, defaults = {}, log = () => {} } = 
       async health() {
         try {
           await api.callEndpoint('settings/describe', {}, AbortSignal.timeout(HEALTH_TIMEOUT_MS));
-          return { available: true, provider: 'dsh' };
+          await api.callEndpoint('session/list', { _request: {} }, AbortSignal.timeout(HEALTH_TIMEOUT_MS));
+          return { status: 'available', available: true, provider: 'dsh', processAlive: null,
+            reachable: true, authenticated: true, sessionCapable: true, reason: null };
         } catch (error) {
-          return { available: false, provider: 'dsh', reason: String(error?.message ?? error) };
+          const code = String(error?.code ?? '');
+          const authenticated = code === 'DSH_AUTHENTICATION_FAILED' ? false : null;
+          const reachable = code === 'DSH_UNREACHABLE' ? false
+            : code === 'DSH_AUTH_MATERIAL_MISSING' ? null : (authenticated === false || code !== 'DSH_UNREACHABLE');
+          return { status: authenticated === false ? 'needs-setup' : 'error', available: false, provider: 'dsh',
+            processAlive: null, reachable, authenticated, sessionCapable: false,
+            reason: authenticated === false ? 'authentication-required' : code === 'DSH_UNREACHABLE' ? 'not_connected' : 'session-api-unavailable' };
         }
       }
     }

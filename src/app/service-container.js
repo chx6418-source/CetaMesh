@@ -81,12 +81,15 @@ export function createCetaMeshServices(options = {}) {
     },
     listWorkspaceRoots: async () => (await workspaceService.execute({ method: 'workspace.list' })).workspaces,
     applyChanges: request => capabilityService.applyAgentWorkspaceChanges(request),
-    approvalStatus: approvalId => capabilityService.workspaceImportStatus(approvalId)
+    approvalStatus: approvalId => capabilityService.workspaceImportStatus(approvalId),
+    cancelApproval: approvalId => capabilityService.cancelWorkspaceImportApproval(approvalId)
   };
 
   const providerSecrets = createProviderSecrets({ root: dataRoot });
   const agentService = createDefaultAgentService({ api, defaults: dshDefaults, log,
-    dshOptions: agentTaskOptions, codexOptions: agentTaskOptions,
+    dshOptions: agentTaskOptions,
+    codexOptions: { ...agentTaskOptions,
+      authorizeOpenAiEnvironment: () => settingsService.store.get().settings.agents.codexOpenAiEnvironmentAuthorized === true },
     desktopStatus: () => dshDesktop.status() });
   const agentBroker = agentService.broker;
 
@@ -96,7 +99,7 @@ export function createCetaMeshServices(options = {}) {
         id: 'deepseek-official',
         label: 'DeepSeek 官方',
         baseUrl: 'https://api.deepseek.com',
-        defaultModel: 'deepseek-chat',
+        defaultModel: 'deepseek-flash',
         supportsTools: true,
         secrets: providerSecrets,
         supportsStreamOptions: true,
@@ -110,6 +113,7 @@ export function createCetaMeshServices(options = {}) {
         supportsTools: true,
         secrets: providerSecrets,
         reasoningParam: 'reasoning_effort',
+        supportsReasoning: true,
         supportsStreamOptions: true,
         log
       }),
@@ -119,6 +123,8 @@ export function createCetaMeshServices(options = {}) {
         baseUrl: '',
         secrets: providerSecrets,
         reasoningParam: 'reasoning_effort',
+        supportsTools: () => settingsService.store.get().settings.models.openaiCompatibleToolCalling === true,
+        supportsReasoning: model => settingsService.store.get().settings.models.openaiCompatibleReasoningEffort === true,
         log
       })
     ]
@@ -141,7 +147,8 @@ export function createCetaMeshServices(options = {}) {
       if (!toolExecutionCoordinator) throw new Error('Model tool execution is unavailable');
       return toolExecutionCoordinator.resumeApproval(request);
     },
-    pendingTarget: approvalId => toolExecutionCoordinator?.pendingTarget(approvalId) ?? null
+    pendingTarget: approvalId => toolExecutionCoordinator?.pendingTarget(approvalId) ?? null,
+    cancelSession: (sessionId, reason) => toolExecutionCoordinator?.cancelSession(sessionId, reason) ?? { cancelled: 0 }
   };
   managedAgent = createManagedAgentProvider({
     modelRuntime,
@@ -156,6 +163,7 @@ export function createCetaMeshServices(options = {}) {
         actor: capabilityService.principalForTask(task.id) } : null;
     },
     onTurnEnd: payload => agentBroker.reportTurnEnd(payload),
+    resolveWorkspace: workspaceId => workspaceService.describeWorkspace(workspaceId),
     onEvent: event => uiEventBus.publish(event.event, event.data)
   });
   agentBroker.register(managedAgent.provider);

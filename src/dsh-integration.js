@@ -993,7 +993,27 @@ function restoreSnapshot(snapshot) {
   fs.cpSync(snapshot.backup, snapshot.path, { recursive: true, force: true });
 }
 
-function applyEffect(effect) {
+const RENAME_RETRY_CODES = new Set(['EPERM', 'EACCES', 'EBUSY']);
+const RENAME_RETRY_WAIT = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+
+function renameWithRetrySync(from, to, {
+  renameSync = fs.renameSync,
+  platform = process.platform,
+  retryDelayMs = 40,
+  maxRetries = 4
+} = {}) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return renameSync(from, to);
+    } catch (error) {
+      if (platform !== 'win32' || !RENAME_RETRY_CODES.has(error?.code) || attempt >= maxRetries) throw error;
+      const delayMs = Math.max(0, Number(retryDelayMs) || 0) * (2 ** attempt);
+      if (delayMs > 0) Atomics.wait(RENAME_RETRY_WAIT, 0, 0, delayMs);
+    }
+  }
+}
+
+function applyEffect(effect, hooks = {}) {
   switch (effect.type) {
     case 'write-file':
       fs.mkdirSync(path.dirname(effect.path), { recursive: true });
@@ -1001,12 +1021,27 @@ function applyEffect(effect) {
       return;
     case 'replace-dir': {
       // 先复制到同目录暂存名再原子替换，避免中途失败留下半个目录。
-      const staging = `${effect.path}.whalebridge-tmp-${process.pid}`;
-      fs.rmSync(staging, { recursive: true, force: true });
+      const staging = `${effect.path}.whalebridge-tmp-${process.pid}-${crypto.randomBytes(6).toString('hex')}`;
       fs.mkdirSync(path.dirname(effect.path), { recursive: true });
-      fs.cpSync(effect.source, staging, { recursive: true, force: true });
-      removePath(effect.path);
-      fs.renameSync(staging, effect.path);
+      try {
+        fs.cpSync(effect.source, staging, { recursive: true, force: true });
+        removePath(effect.path);
+        renameWithRetrySync(staging, effect.path, {
+          renameSync: hooks.renameSync ?? fs.renameSync,
+          platform: hooks.platform ?? process.platform,
+          retryDelayMs: hooks.renameRetryDelayMs ?? 40
+        });
+      } catch (error) {
+        try {
+          fs.rmSync(staging, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+        } catch (cleanupError) {
+          throw new Error(
+            `${error?.message ?? error}; staged directory cleanup failed: ${cleanupError?.message ?? cleanupError}`,
+            { cause: error }
+          );
+        }
+        throw error;
+      }
       return;
     }
     case 'ensure-link-or-copy': {
@@ -1056,7 +1091,7 @@ export function applyPlan(plan, { hooks = {}, log = () => {}, backupRoot } = {})
     for (let i = 0; i < plan.effects.length; i += 1) {
       const effect = plan.effects[i];
       if (hooks.beforeEffect) hooks.beforeEffect(effect, i);
-      applyEffect(effect);
+      applyEffect(effect, hooks);
       if (effect.degraded) log(`警告：${effect.degraded}（${effect.path}）`);
     }
   } catch (error) {

@@ -88,6 +88,21 @@ try {
     assert.throws(() => secrets.set({ provider: 'openai', apiKey: rawKey, baseUrl: 'http://insecure.example' }), (error) => error.code === 'PROVIDER_SECRET_INVALID');
   });
 
+  await check('key rotation preserves an omitted Base URL and explicit empty clears it', () => {
+    secrets.set({ provider: 'openai', apiKey: 'sk-openai-before-abcdefgh', baseUrl: 'https://gateway.example/v1' });
+    assert.equal(secrets.set({ provider: 'openai', apiKey: 'sk-openai-after-abcdefgh' }).baseUrl, 'https://gateway.example/v1');
+    assert.equal(secrets.set({ provider: 'openai', apiKey: 'sk-openai-cleared-abcdefgh', baseUrl: '' }).baseUrl, '');
+  });
+
+  await check('plain HTTP is accepted only for exact loopback hosts', () => {
+    for (const baseUrl of ['http://127.0.0.1:3210/v1', 'http://localhost:3210/v1', 'http://[::1]:3210/v1']) {
+      assert.equal(secrets.set({ provider: 'local-gateway', apiKey: rawKey, baseUrl }).baseUrl, baseUrl);
+    }
+    for (const baseUrl of ['http://192.168.1.10:3210/v1', 'http://localtest.me:3210/v1', 'http://127.0.0.2:3210/v1']) {
+      assert.throws(() => secrets.set({ provider: 'remote-gateway', apiKey: rawKey, baseUrl }), error => error.code === 'PROVIDER_SECRET_INVALID');
+    }
+  });
+
   await check('atomic write leaves no temp files and keeps 0600 semantics', () => {
     const leftovers = fs.readdirSync(path.join(temp, 'state')).filter((name) => name.endsWith('.tmp'));
     assert.deepEqual(leftovers, []);
@@ -102,7 +117,9 @@ try {
         return { ok: true, status: 200 };
       }
     });
-    assert.deepEqual(ok, { provider: 'deepseek-official', ok: true, status: 200, message: 'API Key 可用' });
+    assert.equal(ok.ok, true);
+    assert.equal(ok.phase, 'catalog');
+    assert.equal(ok.inferencing, null);
     const denied = await secrets.test({
       provider: 'deepseek-official',
       fetchImpl: async () => ({ ok: false, status: 401 })
@@ -119,9 +136,8 @@ try {
     });
     try {
       const result = await secrets.test({ provider: 'deepseek-official', fetchImpl: fixture.fetchImpl });
-      assert.deepEqual(result, {
-        provider: 'deepseek-official', ok: true, status: 200, message: 'API Key 可用'
-      });
+      assert.equal(result.ok, true);
+      assert.equal(result.phase, 'catalog');
       assert.equal(fixture.requests[0].url, `${OPENAI_COMPATIBLE_FIXTURE_BASE_URL}/models`);
       assert.equal(fixture.requests[0].authorizationConfigured, true);
       assert.ok(!JSON.stringify({ result, requests: fixture.requests }).includes(rawKey));
@@ -133,6 +149,42 @@ try {
     } finally {
       fixture.close();
     }
+  });
+
+  await check('candidate credentials and Base URL are tested without replacing valid saved credentials', async () => {
+    const originalBase = OPENAI_COMPATIBLE_FIXTURE_BASE_URL;
+    secrets.set({ provider: 'deepseek-official', apiKey: 'sk-original-abcdefgh', baseUrl: originalBase });
+    let seen = null;
+    const failed = await secrets.test({
+      provider: 'deepseek-official', apiKey: 'sk-candidate-abcdefgh', baseUrl: 'https://candidate.example/v1',
+      fetchImpl: async (url, options) => {
+        seen = { url: String(url), authorization: options.headers.authorization };
+        return { ok: false, status: 401 };
+      }
+    });
+    assert.equal(failed.ok, false);
+    assert.deepEqual(seen, { url: 'https://candidate.example/v1/models', authorization: 'Bearer sk-candidate-abcdefgh' });
+    assert.equal(secrets.raw('deepseek-official').apiKey, 'sk-original-abcdefgh');
+    assert.equal(secrets.raw('deepseek-official').baseUrl, originalBase);
+  });
+
+  await check('optional inference probe reports a separate phase and uses one-token request', async () => {
+    secrets.set({ provider: 'deepseek-official', apiKey: rawKey, baseUrl: OPENAI_COMPATIBLE_FIXTURE_BASE_URL });
+    const fixture = createOpenAiCompatibleFixture({ responses: [
+      { kind: 'json', body: { data: [{ id: 'deepseek-flash' }] } },
+      { kind: 'json', body: { choices: [{ message: { role: 'assistant', content: 'ok' } }] } }
+    ] });
+    try {
+      const result = await secrets.test({ provider: 'deepseek-official', model: 'deepseek-flash', fetchImpl: fixture.fetchImpl });
+      assert.equal(result.ok, true);
+      assert.equal(result.phase, 'inference');
+      assert.equal(result.inferencing, true);
+      assert.equal(fixture.requests[0].url, `${OPENAI_COMPATIBLE_FIXTURE_BASE_URL}/models`);
+      assert.equal(fixture.requests[1].url, `${OPENAI_COMPATIBLE_FIXTURE_BASE_URL}/chat/completions`);
+      assert.equal(fixture.requests[1].body.max_tokens, 1);
+      assert.equal(fixture.requests[1].body.model, 'deepseek-flash');
+      assert.ok(!JSON.stringify({ result, requests: fixture.requests }).includes(rawKey));
+    } finally { fixture.close(); }
   });
 
   await check('remove deletes the entry; corrupt file fails closed without echoing values', () => {

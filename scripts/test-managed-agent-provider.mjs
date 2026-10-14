@@ -96,5 +96,29 @@ revocation.bindSession(old.sessionId, principal);
 revoked = true;
 check((await turn(revocation.provider, old.sessionId)).at(-1).data.reason.error.code, 'AGENT_ASSIGNMENT_REQUIRED');
 check(revokedCalls, 0);
+
+let managedTurn = 0;
+const nullableHistory = createManagedAgentProvider({
+  modelRuntime: { async chat() { return { text: 'unused' }; } },
+  toolExecutionCoordinator: { async run({ messages }) {
+    managedTurn += 1;
+    if (managedTurn === 1) return {
+      status: 'completed', text: 'Tool result retained.',
+      messages: [
+        { role: 'user', content: 'first turn' },
+        { role: 'assistant', content: null, tool_calls: [{ id: 'call-1', type: 'function' }] }
+      ]
+    };
+    assert.ok(messages.some(message => message.role === 'assistant' && message.content === null && message.tool_calls),
+      'the second turn receives the assistant tool-call record');
+    return { status: 'completed', text: 'Second turn works.', messages };
+  } },
+  taskPrincipalResolver: () => principal
+});
+const nullableSession = await nullableHistory.provider.createSession({});
+check((await turn(nullableHistory.provider, nullableSession.sessionId, 'first turn')).at(-1).data.reason.kind, 'completed');
+check((await turn(nullableHistory.provider, nullableSession.sessionId, 'second turn')).at(-1).data.reason.kind, 'completed',
+  'a null assistant content with tool_calls does not crash history accounting on the next turn');
+await nullableHistory.close();
 for (const item of [revocation, runtime, noIdentity, forged, cancel, bounded, pending, dynamic]) await item.close();
 console.log('Managed Agent provider: ' + count + ' assertions passed');

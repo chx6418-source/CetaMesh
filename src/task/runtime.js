@@ -317,6 +317,18 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     });
   }
 
+  /** Restore an exact prior checkpoint during an internal multi-step rollback. */
+  function restoreCheckpoint({ id, expectedRev, checkpoint } = {}) {
+    if (checkpoint !== null && (!checkpoint || typeof checkpoint !== 'object' || Array.isArray(checkpoint))) {
+      throw taskError('INVALID_PARAMS', 'checkpoint must be an object or null');
+    }
+    const snapshot = checkpoint === null ? null : structuredClone(checkpoint);
+    return mutate(id, expectedRev, (task) => {
+      task.checkpoint = snapshot;
+      return task;
+    });
+  }
+
   /** Explicitly resolves a Task/execution Workspace conflict with optimistic concurrency. */
   function reconcileWorkspace({ id, expectedRev, expectedWorkspaceId, observedWorkspaceId, resolution } = {}) {
     const current = requireTask(id);
@@ -491,6 +503,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     attachAgent,
     detachAgent,
     setCheckpoint,
+    restoreCheckpoint,
     reconcileWorkspace,
     addWork,
     addArtifact,

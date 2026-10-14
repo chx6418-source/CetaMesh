@@ -65,10 +65,10 @@ export function modelStreamEvent(type, data = {}) {
 /**
  * 定义一个 Model Provider：
  * - id/label 必填；listModels/chat/stream 必须真实实现（缺失直接抛错，不造假桩）；
- * - health 可选，默认视为可用；
+ * - health 可选；未探测的 Provider 必须返回 unknown/unverified，不能伪报 available；
  * - 实例不可变（Object.freeze），Key 只能经注入的 secrets 在调用时解析，绝不缓存。
  */
-export function defineModelProvider({ id, label, defaultModel = null, supportsTools = false, settingsFields = [], methods }) {
+export function defineModelProvider({ id, label, defaultModel = null, supportsTools = false, supportsReasoning = false, settingsFields = [], methods }) {
   if (typeof id !== 'string' || !id.trim()) throw new Error('defineModelProvider 需要 id');
   if (typeof label !== 'string' || !label.trim()) throw new Error('defineModelProvider 需要 label');
   if (!methods || typeof methods !== 'object') throw new Error('defineModelProvider 需要 methods');
@@ -78,11 +78,12 @@ export function defineModelProvider({ id, label, defaultModel = null, supportsTo
     }
   }
   const normalizedSettingsFields = normalizeSettingsFields(settingsFields);
+  const toolCapability = typeof supportsTools === 'function' ? supportsTools : () => supportsTools === true;
+  const reasoningCapability = typeof supportsReasoning === 'function' ? supportsReasoning : () => supportsReasoning === true;
   const provider = {
     id: id.trim(),
     label: label.trim(),
     defaultModel: typeof defaultModel === 'string' && defaultModel ? defaultModel : null,
-    supportsTools: supportsTools === true,
     settingsFields: () => normalizedSettingsFields,
     streamProtocol: MODEL_STREAM_PROTOCOL,
     listModels: methods.listModels,
@@ -90,7 +91,14 @@ export function defineModelProvider({ id, label, defaultModel = null, supportsTo
     stream: methods.stream,
     health: typeof methods.health === 'function'
       ? methods.health
-      : async () => ({ available: true, provider: id.trim() })
+      : async () => ({
+        provider: id.trim(), status: 'unverified', available: null,
+        configured: null, reachable: null, authenticated: null, inferencing: null
+      })
   };
+  Object.defineProperties(provider, {
+    supportsTools: { enumerable: true, get: () => toolCapability() === true },
+    supportsReasoning: { enumerable: true, value: model => reasoningCapability(model) === true }
+  });
   return Object.freeze(provider);
 }

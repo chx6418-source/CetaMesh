@@ -14,6 +14,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import net from 'node:net';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { assertNoWebUiBinaryMarkers, assertNoWebUiHtmlArtifacts } from './no-web-release-policy.mjs';
@@ -25,9 +26,35 @@ const RC_DIR = process.env.WHALEBRIDGE_RC_DIR
   ? path.resolve(process.env.WHALEBRIDGE_RC_DIR)
   : releaseArtifactDirectory({ rootDir: ROOT, ...loadReleaseVersion({ rootDir: ROOT }) });
 const CONSOLE_TOKEN = 'rc-test-console-token-0123456789';
+const registryKey = `HKCU\\Software\\WhaleBridgeTest\\rc-${process.pid}-${crypto.randomUUID()}`;
 
 function step(message) {
   process.stdout.write(`${message}\n`);
+}
+
+function probeIsolatedRegistryWrite(key) {
+  const write = spawnSync('reg.exe', ['add', key, '/v', 'Probe', '/t', 'REG_SZ', '/d', 'isolated-test', '/f'], {
+    encoding: 'utf8', timeout: 10000
+  });
+  const queryBeforeCleanup = spawnSync('reg.exe', ['query', key, '/v', 'Probe'], { encoding: 'utf8', timeout: 10000 });
+  const cleanup = spawnSync('reg.exe', ['delete', key, '/f'], { encoding: 'utf8', timeout: 10000 });
+  const queryAfterCleanup = spawnSync('reg.exe', ['query', key], { encoding: 'utf8', timeout: 10000 });
+  if (queryAfterCleanup.error || queryAfterCleanup.status === 0) {
+    throw new Error(`isolated HKCU probe cleanup could not be confirmed: ${queryAfterCleanup.error?.message ?? queryAfterCleanup.stdout ?? queryAfterCleanup.stderr}`);
+  }
+  if (write.error) {
+    throw new Error(`could not run reg.exe for isolated HKCU probe (${write.error.code ?? write.error.message})`, { cause: write.error });
+  }
+  if (write.status !== 0) {
+    const diagnostic = `${write.stdout ?? ''} ${write.stderr ?? ''}`.trim().replace(/\s+/g, ' ').slice(0, 240);
+    if (!/access denied|拒绝访问|\uFFFD/i.test(diagnostic)) {
+      throw new Error(`isolated HKCU probe failed for a reason other than access denied (reg.exe exit ${write.status}${diagnostic ? `: ${diagnostic}` : ''})`);
+    }
+    return { writable: false, detail: `isolated HKCU write denied (reg.exe exit ${write.status}${diagnostic ? `: ${diagnostic}` : ''})` };
+  }
+  assert.equal(queryBeforeCleanup.status, 0, `isolated HKCU value could not be read back: ${queryBeforeCleanup.stdout ?? queryBeforeCleanup.stderr}`);
+  assert.equal(cleanup.status, 0, `isolated HKCU key cleanup failed: ${cleanup.stdout ?? cleanup.stderr}`);
+  return { writable: true, detail: 'isolated HKCU write/read/cleanup succeeded' };
 }
 
 function listFiles(dir, base = dir, out = []) {
@@ -259,6 +286,15 @@ const whereNode = spawnSync('cmd.exe', ['/d', '/s', '/c', 'where node'], {
 assert.notEqual(whereNode.status, 0, 'PATH 隔离失败：仍能解析到 node.exe');
 step('✅ 前置：发行包含单文件安装器；隔离 PATH 中 where node 解析失败（全程无系统 Node.js）');
 
+const registryProbe = probeIsolatedRegistryWrite(registryKey);
+if (!registryProbe.writable) {
+  await new Promise((resolve) => process.stdout.write(
+    `NOT_RUN_ENVIRONMENT: Release Candidate install/uninstall requires writable HKCU; ${registryProbe.detail}. The isolated key cleanup was attempted and absence verified.\n`,
+    resolve
+  ));
+  process.exit(77);
+}
+
 // 沙箱路径刻意带中文与空格
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'whalebridge-rc-'));
 const sandboxRoot = path.join(tempRoot, '鲸桥 发布 候选 测试');
@@ -266,7 +302,6 @@ const installDir = path.join(sandboxRoot, '程序 安装 目录', 'WhaleBridge')
 const dataDir = path.join(sandboxRoot, '用户 数据 目录', 'WhaleBridge');
 const startMenuDir = path.join(sandboxRoot, '开始 菜单');
 const desktopDir = path.join(sandboxRoot, '桌面');
-const registryKey = `HKCU\\Software\\WhaleBridgeTest\\rc-${process.pid}`;
 fs.mkdirSync(sandboxRoot, { recursive: true });
 
 function sandboxArgs() {
@@ -289,11 +324,19 @@ function runInstaller(args, env = {}) {
   return { status: result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? '', output: `${result.stdout ?? ''}${result.stderr ?? ''}` };
 }
 
-function cleanupRegistry() {
-  spawnSync('reg.exe', ['delete', registryKey, '/f'], { encoding: 'utf8' });
+function isInstallerRegistryAccessDenied(output, key) {
+  return output.includes(`[写注册表 ${key}]`)
+    && output.includes(`写入注册表失败：${key}\\DisplayName`)
+    && /access denied|拒绝访问|\uFFFD/i.test(output);
 }
 
-cleanupRegistry();
+function cleanupRegistry() {
+  const cleanup = spawnSync('reg.exe', ['delete', registryKey, '/f'], { encoding: 'utf8', timeout: 10000 });
+  const afterCleanup = spawnSync('reg.exe', ['query', registryKey], { encoding: 'utf8', timeout: 10000 });
+  assert.equal(afterCleanup.error, undefined, `registry cleanup verification failed: ${afterCleanup.error?.message}`);
+  assert.notEqual(afterCleanup.status, 0, `isolated RC registry key remains after cleanup: ${registryKey}`);
+  if (cleanup.error && !['EPERM', 'EACCES'].includes(cleanup.error.code)) throw cleanup.error;
+}
 
 try {
   // ------------------------------------------------------------- 1. 安装
@@ -303,6 +346,13 @@ try {
   assert.ok(!fs.existsSync(installDir), '--dry-run 不得创建安装目录');
 
   const installed = runInstaller(['--install', ...sandboxArgs()]);
+  if (installed.status !== 0 && isInstallerRegistryAccessDenied(installed.output, registryKey)) {
+    const error = new Error(
+      `packaged installer process was denied while writing its isolated HKCU key; direct registry preflight passed, but this restricted execution token cannot perform the installer write: ${installed.output.slice(-1200)}`
+    );
+    error.code = 'RC_REGISTRY_ACCESS_DENIED';
+    throw error;
+  }
   assert.equal(installed.status, 0, installed.output);
   assert.ok(fs.existsSync(path.join(installDir, 'WhaleBridge.exe')));
   assert.ok(fs.existsSync(path.join(installDir, 'WhaleBridgeCore.exe')));
@@ -464,9 +514,21 @@ try {
   assert.ok(fs.existsSync(path.join(dataDir, 'config.json')), '卸载必须保留用户数据');
   assert.equal(coreProcessesAt(sandboxCore).length, 0, '不得残留沙箱 Core 进程');
   step('✅ 卸载：程序清除、用户数据保留、无残留进程');
+} catch (error) {
+  if (error?.code === 'RC_REGISTRY_ACCESS_DENIED') {
+    step(`NOT_RUN_ENVIRONMENT: ${error.message}`);
+    process.exitCode = 77;
+  } else {
+    throw error;
+  }
 } finally {
-  cleanupRegistry();
-  fs.rmSync(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
+  try {
+    cleanupRegistry();
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
+  }
 }
 
-step('🎉 发布候选在真实配置下通过：中文+空格路径 / 无系统 Node / 只读安装目录 / 崩溃恢复 / 单实例 / 孤儿守卫 / 卸载保留数据');
+if (process.exitCode !== 77) {
+  step('🎉 发布候选在真实配置下通过：中文+空格路径 / 无系统 Node / 只读安装目录 / 崩溃恢复 / 单实例 / 孤儿守卫 / 卸载保留数据');
+}

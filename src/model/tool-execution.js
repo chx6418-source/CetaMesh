@@ -180,11 +180,59 @@ export function createToolExecutionCoordinator({
 
     for (let cycle = state.cycle ?? 0; cycle <= maxCycles; cycle++) {
       if (signal?.aborted) fail('INVOKE_CANCELLED', 'Tool execution was cancelled');
-      const response = await modelRuntime.chat({
+      if (cycle > 0 && typeof state.onStreamReset === 'function') {
+        await state.onStreamReset({ cycle });
+      }
+      const resumingToolBatch = Array.isArray(state.pendingCalls);
+      const request = {
         providerId, model, reasoning, messages: state.messages, signal,
         tools: cycle < maxCycles && totalCalls < maxCalls ? state.manifest.map((item) => ({ id: item.id, description: item.description, inputSchema: item.inputSchema })) : [],
         toolChoice: cycle < maxCycles && totalCalls < maxCalls ? 'auto' : 'none'
-      });
+      };
+      let response;
+      if (resumingToolBatch) {
+        response = { text: '', toolCalls: state.pendingCalls, usage, resolvedModel };
+      } else if (typeof modelRuntime.stream === 'function') {
+        let streamedText = '';
+        let streamedToolCalls = [];
+        let streamUsage = null;
+        let streamResolvedModel = null;
+        let streamReason = null;
+        for await (const event of modelRuntime.stream(request)) {
+          if (event?.type === 'assistant/chunk') {
+            const delta = event.data?.chunk?.type === 'text-delta' ? event.data.chunk.text : '';
+            if (typeof delta === 'string' && delta) {
+              streamedText += delta;
+              if (typeof state.onTextDelta === 'function') await state.onTextDelta(delta, { cycle });
+            }
+          } else if (event?.type === 'assistant/tool-calls') {
+            streamedToolCalls = Array.isArray(event.data?.toolCalls) ? event.data.toolCalls : [];
+          } else if (event?.type === 'assistant/message' && !streamedText) {
+            const content = event.data?.message?.content;
+            if (typeof content === 'string') streamedText = content;
+            else if (Array.isArray(content)) streamedText = content.map(item => String(item?.text ?? '')).join('');
+          } else if (event?.type === 'turn/end') {
+            streamUsage = event.data?.reason?.usage ?? event.data?.usage ?? streamUsage;
+            streamReason = event.data?.reason?.kind ?? streamReason;
+            streamResolvedModel = typeof event.data?.resolvedModel === 'string'
+              ? event.data.resolvedModel : streamResolvedModel;
+          }
+        }
+        if (signal?.aborted || streamReason === 'aborted' || streamReason === 'cancelled') {
+          fail('INVOKE_CANCELLED', 'Tool execution was cancelled');
+        }
+        if (streamReason && streamReason !== 'completed') {
+          fail('MODEL_STREAM_FAILED', `Model stream ended with ${String(streamReason).slice(0, 80)}`);
+        }
+        response = {
+          text: streamedText,
+          toolCalls: streamedToolCalls,
+          usage: streamUsage,
+          resolvedModel: streamResolvedModel
+        };
+      } else {
+        response = await modelRuntime.chat(request);
+      }
       if (typeof response?.text === 'string') text = response.text;
       if (response?.usage && typeof response.usage === 'object') usage = response.usage;
       if (typeof response?.resolvedModel === 'string' && response.resolvedModel.trim()) resolvedModel = response.resolvedModel.trim();
@@ -193,17 +241,22 @@ export function createToolExecutionCoordinator({
       if (!calls.length) return { status: 'completed', toolCalling: 'supported', text, usage, resolvedModel, totalCalls, messages: state.messages };
       const known = new Set(state.manifest.map((item) => item.id));
 
-      state.messages.push({
-        role: 'assistant',
-        content: typeof response.text === 'string' && response.text ? response.text : null,
-        tool_calls: calls.map((call, index) => ({
-          id: String(call?.id || `call-${cycle}-${index}`).slice(0, 200),
-          type: 'function',
-          function: { name: String(call?.name || (call?.capabilityId ? providerToolName(call.capabilityId) : 'unknown')), arguments: typeof call?.arguments === 'string' ? call.arguments : safeJson(call?.arguments ?? {}) }
-        }))
-      });
+      const firstCallIndex = resumingToolBatch ? Math.max(0, Number(state.pendingCallIndex) || 0) : 0;
+      if (!resumingToolBatch) {
+        state.messages.push({
+          role: 'assistant',
+          content: typeof response.text === 'string' && response.text ? response.text : null,
+          tool_calls: calls.map((call, index) => ({
+            id: String(call?.id || `call-${cycle}-${index}`).slice(0, 200),
+            type: 'function',
+            function: { name: String(call?.name || (call?.capabilityId ? providerToolName(call.capabilityId) : 'unknown')), arguments: typeof call?.arguments === 'string' ? call.arguments : safeJson(call?.arguments ?? {}) }
+          }))
+        });
+      }
+      delete state.pendingCalls;
+      delete state.pendingCallIndex;
 
-      for (let index = 0; index < calls.length; index++) {
+      for (let index = firstCallIndex; index < calls.length; index++) {
         const call = calls[index];
         const callId = String(call?.id || `call-${cycle}-${index}`).slice(0, 200);
         if (signal?.aborted) fail('INVOKE_CANCELLED', 'Tool execution was cancelled');
@@ -270,10 +323,12 @@ export function createToolExecutionCoordinator({
               providerId, model: model ?? null, reasoning: reasoning ?? null,
               manifest: structuredClone(state.manifest), actor: { kind: actor.kind, id: actor.id },
               sessionId, turnId, scope: { taskId: scope?.taskId ?? null, workspaceId: scope?.workspaceId ?? null },
-              messages: storedState.messages, cycle: cycle + 1,
+              messages: storedState.messages, cycle,
               totalCalls, usage, resolvedModel,
               seenCallIds: state.seenCallIds,
-              pendingToolCallId: callId
+              pendingToolCallId: callId,
+              pendingCalls: calls,
+              pendingCallIndex: index + 1
             },
             createdAt: Date.now()
           };
@@ -319,7 +374,7 @@ export function createToolExecutionCoordinator({
     return { status: 'completed', toolCalling: 'supported', text: text || 'Tool execution limit reached.', usage, resolvedModel, totalCalls };
   }
 
-  async function run({ providerId, model, reasoning, messages = [], manifest = [], actor, sessionId, turnId, targetKind = 'chat', scope = {}, signal, refreshContext, onCapabilityResult, onActivity } = {}) {
+  async function run({ providerId, model, reasoning, messages = [], manifest = [], actor, sessionId, turnId, targetKind = 'chat', scope = {}, signal, refreshContext, onCapabilityResult, onActivity, onTextDelta, onStreamReset } = {}) {
     if (!actor || !['owner', 'agent'].includes(actor.kind) || typeof actor.id !== 'string') fail('UNAUTHORIZED', 'Trusted Model actor required');
     const supports = typeof modelRuntime.supportsToolCalling === 'function'
       ? await modelRuntime.supportsToolCalling(providerId)
@@ -341,6 +396,8 @@ export function createToolExecutionCoordinator({
         scope: { taskId: scope.taskId ?? null, workspaceId: scope.workspaceId ?? null },
         messages: structuredClone(messages), cycle: 0, totalCalls: 0,
         ...(typeof onActivity === 'function' ? { onActivity } : {}),
+        ...(typeof onTextDelta === 'function' ? { onTextDelta } : {}),
+        ...(typeof onStreamReset === 'function' ? { onStreamReset } : {}),
         ...(typeof refreshContext === 'function' ? { refreshContext } : {}),
         ...(typeof onCapabilityResult === 'function' ? { onCapabilityResult } : {})
       }, controller.signal);
@@ -350,7 +407,7 @@ export function createToolExecutionCoordinator({
     }
   }
 
-  async function resumeApproval({ approvalId, requestFingerprint, decisionResult, signal, refreshContext, onCapabilityResult } = {}) {
+  async function resumeApproval({ approvalId, requestFingerprint, decisionResult, signal, refreshContext, onCapabilityResult, onTextDelta, onStreamReset } = {}) {
     const continuation = continuations[String(approvalId ?? '')];
     if (!continuation) fail('APPROVAL_CONTINUATION_NOT_FOUND', 'No Model turn is waiting for this approval');
     if (continuation.requestFingerprint !== requestFingerprint) fail('APPROVAL_MISMATCH', 'Approval continuation fingerprint mismatch');
@@ -363,6 +420,8 @@ export function createToolExecutionCoordinator({
     };
     if (typeof refreshContext === 'function') state.refreshContext = refreshContext;
     if (typeof onCapabilityResult === 'function') state.onCapabilityResult = onCapabilityResult;
+    if (typeof onTextDelta === 'function') state.onTextDelta = onTextDelta;
+    if (typeof onStreamReset === 'function') state.onStreamReset = onStreamReset;
     const result = decisionResult?.status === 'completed'
       ? { status: 'completed', result: safeValue(decisionResult.result) }
       : { status: 'rejected', error: { code: 'APPROVAL_REJECTED' } };
@@ -370,6 +429,8 @@ export function createToolExecutionCoordinator({
       role: 'tool', tool_call_id: state.pendingToolCallId,
       content: safeJson(result)
     });
+    state.pendingCalls = structuredClone(continuation.state.pendingCalls ?? []);
+    state.pendingCallIndex = Math.max(0, Number(continuation.state.pendingCallIndex) || 0);
     if (typeof state.refreshContext === 'function') {
       const refreshed = await state.refreshContext({ capability: null, result: decisionResult,
         sessionId: continuation.target.sessionId, turnId: continuation.target.turnId, scope: state.scope, approvalResumed: true });
@@ -404,10 +465,31 @@ export function createToolExecutionCoordinator({
     finally { clearTimeout(timer); signal?.removeEventListener('abort', abort); }
   }
 
+  function cancelSession(sessionId, reason = 'chat-deleted') {
+    const wanted = String(sessionId ?? '');
+    if (!wanted) return { cancelled: 0 };
+    let cancelled = 0;
+    let changed = false;
+    for (const [approvalId, continuation] of Object.entries(continuations)) {
+      if (continuation.target?.sessionId !== wanted) continue;
+      try {
+        const row = capabilityBroker.approvals?.get(approvalId);
+        if (row?.status === 'pending') capabilityBroker.approvals.cancel(approvalId, reason);
+      } catch (error) {
+        if (!['APPROVAL_NOT_FOUND', 'APPROVAL_EXPIRED'].includes(error?.code)) throw error;
+      }
+      delete continuations[approvalId];
+      cancelled += 1;
+      changed = true;
+    }
+    if (changed) save();
+    return { cancelled };
+  }
+
   function pendingTarget(approvalId) {
     const entry = continuations[String(approvalId ?? '')];
     return entry ? { ...entry.target, kind: entry.targetKind ?? 'chat' } : null;
   }
 
-  return { run, resumeApproval, pendingTarget };
+  return { run, resumeApproval, pendingTarget, cancelSession };
 }

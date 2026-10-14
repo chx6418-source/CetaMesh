@@ -4,6 +4,17 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
+import { classifySuiteOutcome } from '../src/testing/suite-result.js';
+
+assert.deepEqual(classifySuiteOutcome({ code: 77, signal: null, output: 'NOT_RUN_ENVIRONMENT: isolated registry access denied' }), {
+  status: 'NOT_RUN_ENVIRONMENT', failed: false
+}, 'only an explicit environment marker with exit 77 is an environment skip');
+assert.deepEqual(classifySuiteOutcome({ code: 77, signal: null, output: 'registry test failed' }), {
+  status: 'FAIL', failed: true
+}, 'an unmarked exit 77 remains a failure');
+assert.deepEqual(classifySuiteOutcome({ code: 77, signal: null, timedOut: true, output: 'NOT_RUN_ENVIRONMENT: timeout' }), {
+  status: 'FAIL', failed: true
+}, 'timeouts cannot be disguised as environment skips');
 
 let terminateSuiteProcessTree;
 try {

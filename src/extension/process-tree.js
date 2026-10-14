@@ -18,6 +18,27 @@ export function waitForChildExit(child, timeoutMs = 1000) {
   });
 }
 
+/** Wait until the child and all three stdio streams have emitted the final close event. */
+export function waitForChildClose(child, timeoutMs = 2000) {
+  if (!child) return Promise.resolve(true);
+  const streamsClosed = [child.stdin, child.stdout, child.stderr]
+    .every((stream) => !stream || stream.closed === true);
+  if ((child.exitCode !== null || child.signalCode !== null) && streamsClosed) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (closed) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.removeListener('close', onClose);
+      resolve(closed);
+    };
+    const onClose = () => finish(true);
+    const timer = setTimeout(() => finish(false), Math.max(0, timeoutMs));
+    child.once('close', onClose);
+  });
+}
+
 function runTaskkill(pid, systemRoot, timeoutMs) {
   const root = String(systemRoot || 'C:\\Windows');
   const executable = path.join(root, 'System32', 'taskkill.exe');

@@ -10,43 +10,67 @@
 import WebSocket from 'ws';
 import { resolveDshAuthCookie } from './dsh-auth.js';
 
+const DEFAULT_RPC_TIMEOUT_MS = 30_000;
+
 export class NodeApiClient {
-  constructor(baseUrl, { authCookie } = {}) {
+  constructor(baseUrl, { authCookie, dshHome, timeoutMs = DEFAULT_RPC_TIMEOUT_MS } = {}) {
     this.baseUrl = String(baseUrl ?? 'http://127.0.0.1:3080').replace(/\/+$/, '');
     this.authCookieOption = authCookie;
+    this.dshHome = dshHome;
+    this.timeoutMs = Math.max(100, Math.min(120_000, Number(timeoutMs) || DEFAULT_RPC_TIMEOUT_MS));
     this.rpcSeq = 0;
     this.streamSeq = 0;
   }
 
   authCookie() {
-    return resolveDshAuthCookie(this.baseUrl, this.authCookieOption);
+    return resolveDshAuthCookie(this.baseUrl, this.authCookieOption, this.dshHome);
   }
 
   /** 新版 unary RPC：payload 固定包一层 {args}；业务错误与传输错误都抛 Error（含端点名）。 */
   async callEndpoint(endpoint, args = {}, signal) {
     const rpcId = `whalebridge-${Date.now().toString(36)}-${(++this.rpcSeq).toString(36)}`;
+    const deadline = AbortSignal.timeout(this.timeoutMs);
+    const effectiveSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
+    let cookie;
+    try { cookie = this.authCookie(); }
+    catch (error) {
+      throw Object.assign(new Error(`${endpoint}: DSH auth credentials are unavailable`), { code: 'DSH_AUTH_MATERIAL_MISSING', cause: error });
+    }
     let res;
     try {
       res = await fetch(`${this.baseUrl}/api/${endpoint}`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json', cookie: this.authCookie() },
+        headers: { 'content-type': 'application/json', cookie },
         body: JSON.stringify({ type: 'client-request', rpcId, method: endpoint, payload: { args } }),
-        signal
+        signal: effectiveSignal
       });
     } catch (error) {
-      throw new Error(`${endpoint}: 传输失败（${error?.cause?.code ?? error?.message ?? error}）`);
+      const timedOut = deadline.aborted && !signal?.aborted;
+      throw Object.assign(new Error(`${endpoint}: ${timedOut ? '请求超时' : '传输失败'}（${error?.cause?.code ?? error?.message ?? error}）`, { cause: error }), {
+        code: timedOut ? 'DSH_REQUEST_TIMEOUT' : signal?.aborted ? 'ABORTED' : 'DSH_UNREACHABLE'
+      });
     }
-    const text = await res.text();
+    let text;
+    try { text = await res.text(); }
+    catch (error) {
+      const timedOut = deadline.aborted && !signal?.aborted;
+      throw Object.assign(new Error(`${endpoint}: ${timedOut ? '请求超时' : '响应读取失败'}`), {
+        code: timedOut ? 'DSH_REQUEST_TIMEOUT' : signal?.aborted ? 'ABORTED' : 'DSH_UNREACHABLE', cause: error
+      });
+    }
     let full = null;
     try { full = JSON.parse(text); } catch { /* 非 JSON（如纯文本 4xx） */ }
     if (!res.ok || !full || full.type !== 'server-response' || full.rpcId !== rpcId) {
       const hint = res.status === 401 ? '（鉴权被拒：检查 DSH 是否为 0.1.5+ 且 .dsh/.credentials.yaml 可读）'
         : res.status === 403 ? '（Host/Origin 栅栏拒绝）' : '';
-      throw new Error(`${endpoint}: HTTP ${res.status}${hint}${full ? '' : ` ${text.slice(0, 120)}`}`);
+      throw Object.assign(new Error(`${endpoint}: HTTP ${res.status}${hint}${full ? '' : ` ${text.slice(0, 120)}`}`), {
+        code: res.status === 401 ? 'DSH_AUTHENTICATION_FAILED'
+          : res.status === 403 ? 'DSH_HOST_ORIGIN_REJECTED' : 'DSH_HTTP_ERROR', status: res.status
+      });
     }
     if (!full.result.ok) {
       const { code, message } = full.result.error ?? {};
-      throw new Error(`${endpoint} failed: ${code}: ${message}`);
+      throw Object.assign(new Error(`${endpoint} failed: ${code}: ${message}`), { code: String(code || 'DSH_API_ERROR') });
     }
     return full.result.value;
   }

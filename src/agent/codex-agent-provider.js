@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { CliAgentProcess } from './cli-agent-process.js';
@@ -13,41 +14,153 @@ import {
 export const AGENT_EVENT_PROTOCOL_TURN_V1 = 'agent-turn-events-v1';
 const PROFILE = 'cetamesh-task';
 const CAPTURE_MAX = 2000;
+const HEALTH_TTL_MS = 30_000;
+const INHERITED_PROVIDER_FIELDS = Object.freeze(['name', 'base_url', 'wire_api', 'env_key', 'requires_openai_auth']);
 
 function quoteToml(value) {
   return JSON.stringify(String(value));
 }
 
-function profileOverrides(stageRoot) {
+function profileOverrides() {
   const key = `permissions.${PROFILE}`;
-  const stage = path.resolve(stageRoot).replaceAll('\\', '/');
+  const workspaceFileRules = [
+    ['.', 'write'],
+    ['**/.env', 'deny'],
+    ['**/.env.*', 'deny']
+  ].map(([pattern, access]) => `${quoteToml(pattern)}=${quoteToml(access)}`).join(',');
+  const filesystemRules = [
+    [':root', 'deny'],
+    [':minimal', 'read'],
+    [':tmpdir', 'deny'],
+    [':slash_tmp', 'deny']
+  ].map(([root, access]) => `${quoteToml(root)}=${quoteToml(access)}`);
+  filesystemRules.push(`${quoteToml(':workspace_roots')}={${workspaceFileRules}}`);
   return [
     `default_permissions=${quoteToml(PROFILE)}`,
     `${key}.extends=":workspace"`,
-    `${key}.workspace_roots.${quoteToml(stage)}=true`,
-    `${key}.filesystem.":root"="deny"`,
-    `${key}.filesystem.":minimal"="read"`,
-    `${key}.filesystem.":tmpdir"="deny"`,
-    `${key}.filesystem.":slash_tmp"="deny"`,
-    `${key}.filesystem.":workspace_roots"."."="write"`,
-    `${key}.filesystem.":workspace_roots"."**/.env"="deny"`,
-    `${key}.filesystem.":workspace_roots"."**/.env.*"="deny"`,
+    `${key}.filesystem={${filesystemRules.join(',')}}`,
     `${key}.network.enabled=false`
   ];
 }
 
 /** Provider-owned flags are derived from codex --help / exec --help / exec resume --help. */
-export function buildCodexExecArgs({ stageRoot, promptMode = 'fresh', threadId = null, model, reasoningEffort } = {}) {
+export function buildCodexExecArgs({ stageRoot, promptMode = 'fresh', threadId = null, model, reasoningEffort, modelConfiguration } = {}) {
   const args = [
     '--ask-for-approval', 'never',
     '-C', path.resolve(stageRoot)
   ];
-  for (const override of profileOverrides(stageRoot)) args.push('--config', override);
   if (model) args.push('--model', String(model));
   if (reasoningEffort) args.push('--config', `model_reasoning_effort=${quoteToml(reasoningEffort)}`);
-  args.push('exec', '--ignore-user-config', '--ignore-rules', '--strict-config');
+  args.push(...inheritedProviderArgs(modelConfiguration));
+  // Security-sensitive settings follow inherited model configuration so they always win.
+  // The isolated staging root is already the command's -C workspace. Keep the
+  // profile scoped to that root without encoding a Windows path as a config key.
+  for (const override of profileOverrides()) args.push('--config', override);
+  args.push('exec', '--ignore-user-config', '--ignore-rules', '--strict-config', '--skip-git-repo-check');
   if (promptMode === 'resume' && threadId) args.push('resume', String(threadId));
   args.push('--json', '-');
+  return args;
+}
+
+function withoutTomlComment(line) {
+  let quote = null;
+  let escaped = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index];
+    if (escaped) { escaped = false; continue; }
+    if (char === '\\' && quote === '"') { escaped = true; continue; }
+    if ((char === '"' || char === "'") && (!quote || quote === char)) { quote = quote ? null : char; continue; }
+    if (char === '#' && !quote) return line.slice(0, index);
+  }
+  return line;
+}
+
+function parseSimpleTomlValue(raw) {
+  const value = String(raw ?? '').trim();
+  if (value.startsWith('"')) {
+    try { const parsed = JSON.parse(value); return typeof parsed === 'string' ? parsed : null; }
+    catch { return null; }
+  }
+  if (value.startsWith("'")) return value.endsWith("'") && value.length >= 2 ? value.slice(1, -1) : null;
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  return null;
+}
+
+/**
+ * Inherit only the user's selected model and one explicit model provider. MCP,
+ * hooks, plugins, sandbox, approval, and arbitrary user TOML never enter a Task.
+ */
+function readCodexModelConfiguration(codexHome) {
+  if (!codexHome) return { model: null, modelProvider: null, provider: {} };
+  const file = path.join(codexHome, 'config.toml');
+  let text;
+  try {
+    const stat = fs.statSync(file);
+    if (!stat.isFile() || stat.size > 256 * 1024) return { model: null, modelProvider: null, provider: {} };
+    text = fs.readFileSync(file, 'utf8');
+  } catch { return { model: null, modelProvider: null, provider: {} }; }
+
+  let section = '';
+  let model = null;
+  let modelProvider = null;
+  const providers = new Map();
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = withoutTomlComment(rawLine).trim();
+    if (!line) continue;
+    const table = line.match(/^\[\s*model_providers\.(?:"([A-Za-z0-9_-]{1,64})"|'([A-Za-z0-9_-]{1,64})'|([A-Za-z0-9_-]{1,64}))\s*\]$/);
+    if (table) {
+      section = table[1] ?? table[2] ?? table[3];
+      if (!providers.has(section)) providers.set(section, {});
+      continue;
+    }
+    if (line.startsWith('[')) { section = ''; continue; }
+    const match = line.match(/^([A-Za-z0-9_-]+)\s*=\s*(.+)$/);
+    if (!match) continue;
+    const [, key, rawValue] = match;
+    const parsed = parseSimpleTomlValue(rawValue);
+    if (!section) {
+      if (key === 'model' && typeof parsed === 'string' && parsed.length <= 120) model = parsed;
+      if (key === 'model_provider' && typeof parsed === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(parsed)) modelProvider = parsed;
+      continue;
+    }
+    if (!INHERITED_PROVIDER_FIELDS.includes(key)) continue;
+    if (key === 'name' || key === 'base_url' || key === 'wire_api' || key === 'env_key') {
+      if (typeof parsed !== 'string' || parsed.length > 2048) continue;
+      if (key === 'base_url') {
+        try {
+          const url = new URL(parsed);
+          const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+          const loopback = host === 'localhost' || host === '::1' || /^127(?:\.\d{1,3}){3}$/.test(host);
+          if (url.protocol !== 'https:' && !(url.protocol === 'http:' && loopback)) continue;
+          if (url.username || url.password || url.search || url.hash) continue;
+        } catch { continue; }
+      }
+      if (key === 'env_key' && parsed !== 'OPENAI_API_KEY') continue;
+      providers.get(section)[key] = parsed;
+    } else if (key === 'requires_openai_auth' && typeof parsed === 'boolean') {
+      providers.get(section)[key] = parsed;
+    }
+  }
+  const provider = modelProvider ? providers.get(modelProvider) ?? {} : {};
+  return {
+    model,
+    modelProvider,
+    provider: Object.fromEntries(Object.entries(provider).filter(([key]) => INHERITED_PROVIDER_FIELDS.includes(key)))
+  };
+}
+
+function inheritedProviderArgs(configuration) {
+  const selected = configuration?.modelProvider;
+  if (!selected || !/^[A-Za-z0-9_-]{1,64}$/.test(selected)) return [];
+  const args = ['--config', `model_provider=${quoteToml(selected)}`];
+  const provider = configuration.provider ?? {};
+  for (const key of INHERITED_PROVIDER_FIELDS) {
+    const value = provider[key];
+    if (typeof value !== 'string' && typeof value !== 'boolean') continue;
+    const literal = typeof value === 'boolean' ? String(value) : quoteToml(value);
+    args.push('--config', `model_providers.${quoteToml(selected)}.${key}=${literal}`);
+  }
   return args;
 }
 
@@ -63,7 +176,8 @@ function inspectCodexCli(cli) {
   const supported = top.available && exec.available && /--config/.test(topHelp)
     && /--ask-for-approval/.test(topHelp) && /--cd/.test(topHelp)
     && /--json/.test(execHelp) && /--ignore-user-config/.test(execHelp)
-    && /--ignore-rules/.test(execHelp) && /--strict-config/.test(execHelp);
+    && /--ignore-rules/.test(execHelp) && /--strict-config/.test(execHelp)
+    && /--skip-git-repo-check/.test(execHelp);
   const resumeSupported = resume.available && /--json/.test(resumeHelp) && /\[SESSION_ID\]/i.test(resumeHelp);
   return {
     available: supported,
@@ -107,12 +221,22 @@ function wait(ms) {
 export function createCodexAgentProvider({ executable, cliProcess = null, resolveTaskWorkspace = null,
   listWorkspaceRoots = () => [], excludedRoots = [], stagingRoot = null, createStage = createStagingWorkspace,
   applyChanges = async () => { throw agentProviderError('AGENT_BOUNDARY_UNSUPPORTED', 'Capability Broker import adapter is unavailable'); },
-  approvalStatus = () => null, timeoutMs = 10 * 60 * 1000, log = () => {} } = {}) {
-  const cli = cliProcess ?? new CliAgentProcess({ name: 'codex', executable });
-  const inspection = inspectCodexCli(cli);
-  const authenticated = inspection.available ? loginState(cli) : false;
+  environment = process.env, codexHome = null, authorizeOpenAiEnvironment = () => false,
+  approvalStatus = () => null, cancelApproval = () => ({ cancelled: false }), timeoutMs = 10 * 60 * 1000, log = () => {} } = {}) {
+  const cli = cliProcess ?? new CliAgentProcess({ name: 'codex', executable, envSource: environment });
+  const resolvedCodexHome = codexHome || environment.CODEX_HOME || path.join(environment.USERPROFILE || os.homedir(), '.codex');
+  let inspection = inspectCodexCli(cli);
+  let authenticated = inspection.available ? loginState(cli) : false;
+  let lastProbeAt = Date.now();
   const sessions = new Map();
   const providerConfig = { model: null, reasoningEffort: null };
+
+  function refreshInspection(force = false) {
+    if (!force && Date.now() - lastProbeAt < HEALTH_TTL_MS) return;
+    inspection = inspectCodexCli(cli);
+    authenticated = inspection.available ? loginState(cli) : false;
+    lastProbeAt = Date.now();
+  }
 
   function requireSession(sessionId) {
     const session = sessions.get(String(sessionId ?? ''));
@@ -129,18 +253,35 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
 
   function emitTurnEnd(session, turn, kind, error = null, usage = null) {
     if (session.activeRun?.turnId !== turn) return;
+    const structuredError = error === null ? null : typeof error === 'string'
+      ? { code: kind === 'error' ? session.lastError?.code ?? 'PROVIDER_ERROR' : 'PROVIDER_ERROR', message: error }
+      : { code: String(error.code || 'PROVIDER_ERROR'), message: String(error.message || 'Codex execution failed') };
     emit(session, makeEvent('turn/end', turn, {
-      reason: { kind, ...(error ? { error } : {}), ...(usage ? { usage } : {}) }
+      reason: { kind, ...(structuredError ? { error: structuredError } : {}), ...(usage ? { usage } : {}) }
     }));
     session.activeRun = null;
   }
 
+  function classifyProcessFailure(result, run) {
+    if (run.failed) return { code: 'CODEX_TURN_FAILED', message: 'Codex execution failed' };
+    const stderr = String(result.stderr ?? '').toLowerCase();
+    if (stderr.includes('windows unelevated restricted-token sandbox cannot enforce split filesystem read restrictions')
+      && stderr.includes('refusing to run unsandboxed')) {
+      return {
+        code: 'CODEX_SANDBOX_UNAVAILABLE',
+        message: 'Codex Windows sandbox cannot enforce the configured workspace read restrictions'
+      };
+    }
+    return { code: 'PROVIDER_ERROR', message: 'Codex execution failed' };
+  }
+
   async function finalizeRun(session, run, result) {
     if (session.closed || session.activeRun !== run) return;
+    flushOutput(session, run);
     if (result.timedOut) {
       session.lastRunStatus = 'timeout';
       session.lastError = { code: 'AGENT_TIMEOUT' };
-      emitTurnEnd(session, run.turnId, 'error', 'Codex execution timed out');
+      emitTurnEnd(session, run.turnId, 'error', { code: 'AGENT_TIMEOUT', message: 'Codex execution timed out' });
       return;
     }
     if (result.cancelled) {
@@ -149,9 +290,10 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
       return;
     }
     if (result.exitCode !== 0 || run.failed || !run.turnCompleted) {
+      const failure = classifyProcessFailure(result, run);
       session.lastRunStatus = 'failed';
-      session.lastError = { code: run.failed ? 'CODEX_TURN_FAILED' : 'PROVIDER_ERROR', exitCode: result.exitCode };
-      emitTurnEnd(session, run.turnId, 'error', 'Codex execution failed');
+      session.lastError = { code: failure.code, exitCode: result.exitCode };
+      emitTurnEnd(session, run.turnId, 'error', failure);
       return;
     }
     let changeSet;
@@ -160,7 +302,7 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
     } catch (error) {
       session.lastRunStatus = 'reconciliation-required';
       session.lastError = { code: error?.code ?? 'WORKSPACE_RECONCILIATION_REQUIRED' };
-      emitTurnEnd(session, run.turnId, 'error', 'Workspace changed during Codex execution; reconcile before importing');
+      emitTurnEnd(session, run.turnId, 'error', { code: session.lastError.code, message: 'Workspace changed during Codex execution; reconcile before importing' });
       return;
     }
     let usage = run.usage ?? null;
@@ -178,7 +320,7 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
       } catch (error) {
         session.lastRunStatus = 'import-failed';
         session.lastError = { code: error?.code ?? 'WORKSPACE_IMPORT_FAILED' };
-        emitTurnEnd(session, run.turnId, 'error', 'Capability Broker could not import the Codex result');
+        emitTurnEnd(session, run.turnId, 'error', { code: session.lastError.code, message: 'Capability Broker could not import the Codex result' });
         return;
       }
       if (imported?.status === 'pending') {
@@ -189,20 +331,21 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
         if (outcome.status !== 'completed') {
           session.lastRunStatus = outcome.status;
           session.lastError = outcome.code ? { code: outcome.code } : null;
-          emitTurnEnd(session, run.turnId, 'error', outcome.status === 'rejected'
-            ? 'Owner rejected the Workspace import' : 'Workspace import did not complete');
+          if (outcome.status === 'cancelled') emitTurnEnd(session, run.turnId, 'aborted');
+          else emitTurnEnd(session, run.turnId, 'error', { code: outcome.code ?? 'WORKSPACE_IMPORT_NOT_COMPLETED', message: outcome.status === 'rejected'
+            ? 'Owner rejected the Workspace import' : 'Workspace import did not complete' });
           return;
         }
       } else if (imported?.status !== 'completed') {
         session.lastRunStatus = 'import-denied';
-        emitTurnEnd(session, run.turnId, 'error', 'Capability Broker did not complete the Workspace import');
+        emitTurnEnd(session, run.turnId, 'error', { code: 'WORKSPACE_IMPORT_NOT_COMPLETED', message: 'Capability Broker did not complete the Workspace import' });
         return;
       }
       try { refreshStagingBaseline(session.stage); }
       catch (error) {
         session.lastRunStatus = 'reconciliation-required';
         session.lastError = { code: error?.code ?? 'WORKSPACE_RECONCILIATION_REQUIRED' };
-        emitTurnEnd(session, run.turnId, 'error', 'Workspace reconciliation failed after import');
+        emitTurnEnd(session, run.turnId, 'error', { code: session.lastError.code, message: 'Workspace reconciliation failed after import' });
         return;
       }
     }
@@ -218,29 +361,44 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
 
   async function waitForImportApproval(session, approvalId) {
     const deadline = Date.now() + 10 * 60 * 1000;
-    while (!session.closed && Date.now() < deadline) {
+    while (!session.closed && !session.cancelledApprovals.has(approvalId) && Date.now() < deadline) {
       const status = approvalStatus(approvalId);
       if (status?.status && status.status !== 'pending') return status;
-      await wait(250);
+      await new Promise(resolve => {
+        const timer = setTimeout(() => { session.approvalWaitWake = null; resolve(); }, 250);
+        session.approvalWaitWake = () => { clearTimeout(timer); session.approvalWaitWake = null; resolve(); };
+      });
     }
-    return { status: session.closed ? 'cancelled' : 'expired', code: 'APPROVAL_EXPIRED' };
+    const cancelled = session.closed || session.cancelledApprovals.has(approvalId);
+    return { status: cancelled ? 'cancelled' : 'expired', code: cancelled ? 'INVOKE_CANCELLED' : 'APPROVAL_EXPIRED' };
   }
 
   function parseOutput(session, run, text) {
     run.pendingText += text;
     const lines = run.pendingText.split(/\r?\n/);
     run.pendingText = lines.pop() ?? '';
-    for (const line of lines) {
-      if (!line.trim()) continue;
+    for (const line of lines) parseLine(session, run, line);
+  }
+
+  function flushOutput(session, run) {
+    const remaining = run.pendingText;
+    run.pendingText = '';
+    parseLine(session, run, remaining);
+  }
+
+  function parseLine(session, run, line) {
+      if (!line.trim()) return;
       let event;
-      try { event = JSON.parse(line); } catch { /* Ignore non-JSON CLI diagnostics between protocol records. */ continue; }
+      try { event = JSON.parse(line); } catch { /* Ignore non-JSON CLI diagnostics between protocol records. */ return; }
       if (event.type === 'thread.started') {
         if (typeof event.thread_id === 'string') session.threadId = event.thread_id;
       } else if (event.type === 'item.completed') {
         const value = extractText(event);
         if (value) {
           run.text = value.slice(0, 200_000);
-          emit(session, makeEvent('assistant/chunk', run.turnId, { text: value.slice(0, 32_000) }));
+          emit(session, makeEvent('assistant/chunk', run.turnId, {
+            chunk: { type: 'text-delta', text: value.slice(0, 32_000) }
+          }));
         }
       } else if (event.type === 'turn.completed') {
         run.turnCompleted = true;
@@ -248,7 +406,6 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
       } else if (event.type === 'turn.failed') {
         run.failed = true;
       }
-    }
   }
 
   const contract = defineAgentProvider({
@@ -267,7 +424,8 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
       executionMode: 'task-staging'
     },
     methods: {
-      async createSession({ taskId, workspaceId } = {}) {
+      async createSession({ taskId, workspaceId, model, reasoningEffort } = {}) {
+        refreshInspection();
         if (!inspection.available) throw agentProviderError('PROVIDER_UNAVAILABLE', 'Codex CLI is not installed or lacks the inspected exec interface');
         if (!authenticated) throw agentProviderError('PROVIDER_UNAVAILABLE', 'Codex needs authentication in its own secure configuration');
         if (!taskId || !workspaceId) throw agentProviderError('TASK_REQUIRED', 'Codex requires a Task and its bound Workspace');
@@ -286,16 +444,23 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
           additionalWorkspaceRoots: (Array.isArray(registeredRoots) ? registeredRoots : []).map((row) => typeof row === 'string' ? row : row.root),
           excludedRoots
         });
+        const inheritedModelConfiguration = readCodexModelConfiguration(resolvedCodexHome);
         const id = crypto.randomUUID();
         sessions.set(id, {
           id,
           taskId: binding.task.id,
           workspaceId: binding.workspace.id,
           task: binding.task,
+          model: typeof model === 'string' && model.trim() ? model.trim() : providerConfig.model ?? inheritedModelConfiguration.model,
+          reasoningEffort: typeof reasoningEffort === 'string' && reasoningEffort.trim()
+            ? reasoningEffort.trim() : providerConfig.reasoningEffort,
+          modelConfiguration: inheritedModelConfiguration,
           stage,
           threadId: null,
           activeRun: null,
           waitingForApproval: null,
+          cancelledApprovals: new Set(),
+          approvalWaitWake: null,
           lastRunStatus: 'idle',
           lastError: null,
           lastUsage: null,
@@ -327,28 +492,38 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
           stageRoot: session.stage.root,
           promptMode: session.threadId && inspection.supportsResume ? 'resume' : 'fresh',
           threadId: session.threadId,
-          model: providerConfig.model,
-          reasoningEffort: providerConfig.reasoningEffort
+          model: session.model,
+          reasoningEffort: session.reasoningEffort,
+          modelConfiguration: session.modelConfiguration
         });
         try {
+          const authorized = authorizeOpenAiEnvironment() === true;
+          const env = { CODEX_HOME: resolvedCodexHome };
+          const authorizedEnvKeys = [];
+          if (authorized) {
+            for (const key of ['OPENAI_API_KEY', 'OPENAI_BASE_URL']) {
+              if (environment[key] !== undefined) { env[key] = environment[key]; authorizedEnvKeys.push(key); }
+            }
+          }
           run.handle = cli.startSession({
             sessionId: `${session.id}:${turnId}`,
             cwd: session.stage.root,
             args,
             input: prompt,
             timeoutMs,
-            env: { CODEX_HOME: process.env.CODEX_HOME ?? path.join(process.env.USERPROFILE ?? os.homedir(), '.codex') },
+            env,
+            authorizedEnvKeys,
             onStdout: (chunk) => parseOutput(session, run, chunk)
           });
         } catch (error) {
           session.activeRun = null;
           throw agentProviderError(error?.code === 'PROVIDER_UNAVAILABLE' ? 'PROVIDER_UNAVAILABLE' : 'PROCESS_START_FAILED', 'Unable to start the Codex CLI process', { cause: error });
         }
-        run.handle.done.then((result) => finalizeRun(session, run, result)).catch((error) => {
+        run.finalized = run.handle.done.then((result) => finalizeRun(session, run, result)).catch((error) => {
           if (session.activeRun === run) {
             session.lastRunStatus = 'failed';
             session.lastError = { code: error?.code ?? 'PROVIDER_ERROR' };
-            emitTurnEnd(session, turnId, 'error', 'Codex process failed');
+            emitTurnEnd(session, turnId, 'error', { code: session.lastError.code, message: 'Codex process failed' });
           }
         });
         return { accepted: true, provider: 'codex', sessionId, taskId: session.taskId, workspaceId: session.workspaceId, turnId };
@@ -356,6 +531,24 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
 
       async cancel({ sessionId } = {}) {
         const session = requireSession(sessionId);
+        if (session.waitingForApproval) {
+          const approvalId = session.waitingForApproval;
+          const run = session.activeRun;
+          session.cancelledApprovals.add(approvalId);
+          try { await cancelApproval(approvalId); }
+          catch (error) { log(`Codex approval cancellation failed: ${error?.code ?? 'APPROVAL_CANCEL_FAILED'}`); }
+          session.approvalWaitWake?.();
+          if (run?.finalized) await run.finalized;
+          let cleanupError = null;
+          try { cleanupStagingWorkspace(session.stage); }
+          catch (error) { cleanupError = error; }
+          session.closed = true;
+          session.lastRunStatus = 'cancelled';
+          sessions.delete(session.id);
+          for (const wake of session.waiters.splice(0)) wake();
+          if (cleanupError) throw agentProviderError('STAGING_CLEANUP_FAILED', 'Cancelled Codex staging data could not be cleaned up', { cause: cleanupError });
+          return { cancelled: true, sessionId, approvalId, state: 'cancelled' };
+        }
         if (!session.activeRun?.handle) return { cancelled: false, reason: 'not-running', sessionId };
         return session.activeRun.handle.cancel();
       },
@@ -385,32 +578,44 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
 
       async closeSession({ sessionId } = {}) {
         const session = requireSession(sessionId);
+        session.closed = true;
+        if (session.waitingForApproval) {
+          session.cancelledApprovals.add(session.waitingForApproval);
+          try { await cancelApproval(session.waitingForApproval); }
+          catch (error) { log(`Codex approval cancellation failed: ${error?.code ?? 'APPROVAL_CANCEL_FAILED'}`); }
+          session.approvalWaitWake?.();
+        }
         if (session.activeRun?.handle) {
           session.activeRun.handle.cancel();
           await session.activeRun.handle.done.catch(() => {});
         }
+        if (session.activeRun?.finalized) await session.activeRun.finalized;
         cleanupStagingWorkspace(session.stage);
-        session.closed = true;
         for (const wake of session.waiters.splice(0)) wake();
         sessions.delete(session.id);
         return { closed: true, provider: 'codex', sessionId };
       },
 
       async selectModel({ sessionId, model, reasoningEffort } = {}) {
-        requireSession(sessionId);
-        if (model !== undefined) providerConfig.model = String(model || '') || null;
-        if (reasoningEffort !== undefined) providerConfig.reasoningEffort = String(reasoningEffort || '') || null;
-        return { sessionId, provider: 'codex', selected: { ...providerConfig } };
+        const session = requireSession(sessionId);
+        if (model !== undefined) session.model = String(model || '') || null;
+        if (reasoningEffort !== undefined) session.reasoningEffort = String(reasoningEffort || '') || null;
+        return { sessionId, provider: 'codex', selected: { model: session.model, reasoningEffort: session.reasoningEffort } };
       },
 
-      async health() {
+      async health({ refresh = false } = {}) {
+        refreshInspection(refresh === true);
         return {
           available: inspection.available,
           provider: 'codex',
           version: inspection.version,
           authenticated,
           status: authenticated ? 'ready' : inspection.available ? 'needs_auth' : 'unavailable',
-          reason: inspection.reason ?? (authenticated ? null : 'needs_auth')
+          reason: inspection.reason ?? (authenticated ? null : 'needs_auth'),
+          configured: inspection.available,
+          reachable: null,
+          sessionCapable: inspection.available,
+          reprobedAt: lastProbeAt
         };
       },
 

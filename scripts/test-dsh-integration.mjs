@@ -670,6 +670,51 @@ step('✅ 纯函数：cordis 分类、MCP 块生成/解析往返、开发与打�
 
 // ============================== 7. 卸载：只移除本应用拥有的内容（阶段 7 依赖）
 
+// A transient Windows sharing violation while replacing the versioned DSH plugin is retried;
+// successful replacement leaves no staging directory, and the complete fixture root is removed.
+{
+  const tempRoot = makeTempRoot('rename-retry');
+  const dshHome = path.join(tempRoot, 'dsh');
+  const source = path.join(tempRoot, 'source-plugin');
+  const destination = path.join(tempRoot, 'data', 'runtime', VERSION, PLUGIN_NAME);
+  fs.mkdirSync(path.join(source, 'lib'), { recursive: true });
+  fs.writeFileSync(path.join(source, 'lib', 'new.txt'), 'new plugin payload');
+  fs.mkdirSync(destination, { recursive: true });
+  fs.writeFileSync(path.join(destination, 'old.txt'), 'old plugin payload');
+  let renameAttempts = 0;
+
+  try {
+    applyPlan({ dshHome, effects: [{ type: 'replace-dir', path: destination, source }] }, {
+      log: () => {},
+      hooks: {
+        platform: 'win32',
+        renameRetryDelayMs: 0,
+        renameSync(from, to) {
+          renameAttempts += 1;
+          if (renameAttempts === 1) {
+            const error = new Error('transient sharing violation');
+            error.code = 'EPERM';
+            throw error;
+          }
+          fs.renameSync(from, to);
+        }
+      }
+    });
+    assert.equal(renameAttempts, 2, 'transient EPERM must receive one bounded retry');
+    assert.equal(fs.readFileSync(path.join(destination, 'lib', 'new.txt'), 'utf8'), 'new plugin payload');
+    assert.equal(fs.existsSync(path.join(destination, 'old.txt')), false, 'the old plugin tree is replaced');
+    assert.deepEqual(
+      fs.readdirSync(path.dirname(destination)).filter(name => name.includes('.whalebridge-tmp-')),
+      [],
+      'successful replacement must consume its staging directory'
+    );
+    step('✅ Windows rename recovery: one transient EPERM is retried and no staged directory remains');
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    assert.equal(fs.existsSync(tempRoot), false, 'rename retry fixture root must be completely cleaned');
+  }
+}
+
 {
   const tempRoot = makeTempRoot('removal');
   const dshHome = path.join(tempRoot, 'dsh');

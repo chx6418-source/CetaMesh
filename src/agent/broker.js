@@ -162,10 +162,11 @@ export function createAgentBroker({ registry, log = () => {} } = {}) {
       return provider.follow({ sessionId: requireSessionId({ sessionId }), signal });
     },
 
-    async health(providerId) {
+    async health(providerId, options = {}) {
       const provider = requireProvider(providerId);
-      if (typeof provider.health !== 'function') return { available: true, provider: provider.id };
-      return provider.health();
+      if (typeof provider.health !== 'function') return { available: null, provider: provider.id, status: 'unverified',
+        configured: null, reachable: null, authenticated: null, sessionCapable: null };
+      return provider.health(options);
     },
 
     // ── 可选能力（诚实包装） ─────────────────────────────────────────────────

@@ -224,6 +224,12 @@ try {
     try {
       const readyLine = await shell.waitFor((line) => line === 'reached_ready=true' || line === 'reached_ready=false');
       assert.equal(readyLine, 'reached_ready=true', `Core IPC readiness failed\n${shell.lines.join('\n')}\n${shell.stderr()}`);
+      const pidLine = await shell.waitFor((line) => line.startsWith('worker_pid='));
+      firstPid = Number.parseInt(pidLine.split('=')[1], 10);
+      assert.ok(Number.isInteger(firstPid) && firstPid > 0, `worker pid 异常：${pidLine}`);
+      const lockFile = path.join(dataDir, 'state', 'bridge.lock');
+      assert.ok(fs.existsSync(lockFile), 'ready worker 应已持有锁文件');
+      assert.equal(fs.readFileSync(lockFile, 'utf8').trim(), String(firstPid), '锁文件 owner 应与 ready worker PID 一致');
       await shell.waitFor((line) => line === 'ipc_control_request=ok');
       await shell.waitFor((line) => line === 'ipc_policy_read=ok');
       await shell.waitFor((line) => line === 'ipc_activity_read=ok');
@@ -231,9 +237,6 @@ try {
       await shell.waitFor((line) => line === 'ipc_model_defaults=ok');
       await shell.waitFor((line) => line === 'ipc_pending_list=ok');
       await shell.waitFor((line) => line === 'ipc_policy_write=ok');
-      const pidLine = await shell.waitFor((line) => line.startsWith('worker_pid='));
-      firstPid = Number.parseInt(pidLine.split('=')[1], 10);
-      assert.ok(Number.isInteger(firstPid) && firstPid > 0, `worker pid 异常：${pidLine}`);
       // D1 契约：native 模式下 loopback HTTP 面根本不存在 —— consolePort 必须拒连。
       // （原先这里是 403 断言：HTTP 在但管理请求被拒；现在 server 不再创建。）
       // 注意必须快速完成：--test-restart-once 随时可能重启 worker，不能在这里等。
@@ -254,7 +257,6 @@ try {
       assert.equal(['ECONNREFUSED', 'ETIMEDOUT', 'EACCES'].includes(httpRefused.code), true, `端口应拒连，实际 ${httpRefused.code}`);
       // 管理命令只能经本机 IPC 的语义不变：worker 日志应声明原生 UI IPC 就绪。
       assert.ok(isRunning(firstPid), 'worker 进程应当存活');
-      assert.ok(fs.existsSync(path.join(dataDir, 'state', 'bridge.lock')), 'worker 应持有锁文件');
       assert.ok(fs.existsSync(path.join(dataDir, 'logs', 'worker.log')), '应写入 worker 日志');
       assert.ok(fs.existsSync(path.join(dataDir, 'logs', 'desktop-shell.log')), '应写入壳日志');
       const workerLog = fs.readFileSync(path.join(dataDir, 'logs', 'worker.log'), 'utf8');

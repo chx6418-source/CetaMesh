@@ -15,7 +15,31 @@ function pngSize(file) {
   const bytes = fs.readFileSync(file);
   assert.deepEqual(bytes.subarray(0, 8), pngSignature, `${file} 不是 PNG`);
   assert.equal(bytes.toString('ascii', 12, 16), 'IHDR', `${file} 缺少 IHDR`);
+  assert.equal(bytes[24], 8, `${file} 必须为 8-bit PNG`);
+  assert.equal(bytes[25], 6, `${file} 必须为 RGBA PNG`);
   return [bytes.readUInt32BE(16), bytes.readUInt32BE(20)];
+}
+
+function icoDimensions(ico, label) {
+  assert.equal(ico.readUInt16LE(0), 0, `${label} ICO reserved 字段错误`);
+  assert.equal(ico.readUInt16LE(2), 1, `${label} 应为 ICO 类型`);
+  const count = ico.readUInt16LE(4);
+  assert.equal(count, 9, `${label} ICO 应包含 9 个尺寸`);
+  const dimensions = [];
+  for (let index = 0; index < count; index += 1) {
+    const entry = 6 + index * 16;
+    const width = ico[entry] || 256;
+    const height = ico[entry + 1] || 256;
+    const bytes = ico.readUInt32LE(entry + 8);
+    const offset = ico.readUInt32LE(entry + 12);
+    assert.equal(width, height, `${label} ICO 图层必须为正方形`);
+    assert.equal(ico.readUInt16LE(entry + 6), 32, `${label} ICO 图层必须为 32bpp`);
+    assert.ok(offset + bytes <= ico.length, `${label} ICO 图层越界`);
+    assert.deepEqual(ico.subarray(offset, offset + 8), pngSignature, `${label} ICO 图层必须为 PNG 编码`);
+    dimensions.push(width);
+  }
+  assert.deepEqual(dimensions, [16, 20, 24, 32, 40, 48, 64, 128, 256], `${label} ICO 图层尺寸错误`);
+  return dimensions;
 }
 
 for (const [name, size] of [
@@ -28,24 +52,7 @@ for (const [name, size] of [
 }
 
 const ico = fs.readFileSync(path.join(icons, 'icon.ico'));
-assert.equal(ico.readUInt16LE(0), 0, 'ICO reserved 字段错误');
-assert.equal(ico.readUInt16LE(2), 1, '应为 ICO 类型');
-const count = ico.readUInt16LE(4);
-assert.equal(count, 9, 'ICO 应包含 9 个尺寸');
-const dimensions = [];
-for (let index = 0; index < count; index += 1) {
-  const entry = 6 + index * 16;
-  const width = ico[entry] || 256;
-  const height = ico[entry + 1] || 256;
-  const bytes = ico.readUInt32LE(entry + 8);
-  const offset = ico.readUInt32LE(entry + 12);
-  assert.equal(width, height, 'ICO 图层必须为正方形');
-  assert.equal(ico.readUInt16LE(entry + 6), 32, 'ICO 图层必须为 32bpp');
-  assert.ok(offset + bytes <= ico.length, 'ICO 图层越界');
-  assert.deepEqual(ico.subarray(offset, offset + 8), pngSignature, 'ICO 图层必须为 PNG 编码');
-  dimensions.push(width);
-}
-assert.deepEqual(dimensions, [16, 20, 24, 32, 40, 48, 64, 128, 256]);
+icoDimensions(ico, '提交的');
 
 // Keep the legacy C4 provenance check reproducible in a clean checkout, too.
 const legacy = fs.readFileSync(path.join(icons, 'source-c4.png'));
@@ -73,9 +80,16 @@ if (process.platform === 'win32') {
     fs.copyFileSync(path.join(icons, 'source-logo-05.png'), path.join(temporary, 'desktop-shell', 'icons', 'source-logo-05.png'));
     const result = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', generator], { encoding: 'utf8' });
     assert.equal(result.status, 0, result.stderr || result.stdout);
-    for (const name of ['32x32.png', '128x128.png', '128x128@2x.png', 'icon.png', 'icon.ico']) {
-      assert.deepEqual(fs.readFileSync(path.join(temporary, 'desktop-shell', 'icons', name)), fs.readFileSync(path.join(icons, name)), `${name} 必须由默认主图生成`);
+    const generatedIcons = path.join(temporary, 'desktop-shell', 'icons');
+    for (const [name, size] of [['32x32.png', 32], ['128x128.png', 128], ['128x128@2x.png', 256], ['icon.png', 512]]) {
+      const generated = path.join(generatedIcons, name);
+      assert.deepEqual(pngSize(generated), [size, size], `${name} 必须由默认 Logo-05 主图生成`);
+      assert.ok(fs.statSync(generated).size > 100, `${name} 不能是空白 PNG`);
     }
+    icoDimensions(fs.readFileSync(path.join(generatedIcons, 'icon.ico')), '生成的');
+    const generatedPublicIcon = path.join(temporary, 'public', 'whalebridge-icon.png');
+    assert.deepEqual(pngSize(generatedPublicIcon), [256, 256], 'UI 图标必须由默认主图生成');
+    assert.ok(fs.statSync(generatedPublicIcon).size > 100, 'UI 图标不能是空白 PNG');
   } finally {
     assert.equal(path.dirname(path.resolve(temporary)), path.resolve(os.tmpdir()));
     assert.ok(path.basename(temporary).startsWith('cetamesh-icon-test-'));

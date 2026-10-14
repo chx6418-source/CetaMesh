@@ -19,7 +19,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
@@ -62,6 +62,12 @@ function registryExists(key) {
   return spawnSync('reg.exe', ['query', key], { encoding: 'utf8' }).status === 0;
 }
 
+function isInstallerRegistryAccessDenied(output, key) {
+  return output.includes(`[写注册表 ${key}]`)
+    && output.includes(`写入注册表失败：${key}\\DisplayName`)
+    && /access denied|拒绝访问|\uFFFD/i.test(output);
+}
+
 function shortcutExists(file) {
   return fs.existsSync(file) && fs.statSync(file).size > 0;
 }
@@ -76,7 +82,7 @@ const sandbox = {
   dataDir: path.join(tempRoot, 'LocalAppData', 'WhaleBridge'),
   startMenuDir: path.join(tempRoot, 'StartMenu', 'Programs'),
   desktopDir: path.join(tempRoot, 'Desktop'),
-  registryKey: `HKCU\\Software\\WhaleBridgeTest\\cli-${process.pid}`
+  registryKey: `HKCU\\Software\\WhaleBridgeTest\\cli-${process.pid}-${randomUUID()}`
 };
 
 // payload 放在"安装器所在目录"的 payload\ 下，模拟安装包解压布局
@@ -109,10 +115,12 @@ function runInstaller(args, extraEnv = {}) {
 }
 
 function cleanupRegistry() {
-  spawnSync('reg.exe', ['delete', sandbox.registryKey, '/f'], { encoding: 'utf8' });
+  const cleanup = spawnSync('reg.exe', ['delete', sandbox.registryKey, '/f'], { encoding: 'utf8', timeout: 10000 });
+  const afterCleanup = spawnSync('reg.exe', ['query', sandbox.registryKey], { encoding: 'utf8', timeout: 10000 });
+  assert.equal(afterCleanup.error, undefined, `registry cleanup verification failed: ${afterCleanup.error?.message}`);
+  assert.notEqual(afterCleanup.status, 0, `isolated installer registry key remains after cleanup: ${sandbox.registryKey}`);
+  if (cleanup.error && !['EPERM', 'EACCES'].includes(cleanup.error.code)) throw cleanup.error;
 }
-
-cleanupRegistry(); // 防御：清掉同名残留
 
 // 升级用的 payload 目录（在升级用例里赋值，修复用例复用它）
 let payloadV2 = payloadV1;
@@ -126,6 +134,13 @@ try {
     assert.ok(!fs.existsSync(sandbox.installDir), '--dry-run 不得创建安装目录');
 
     const installed = runInstaller(['--install']);
+    if (installed.status !== 0 && isInstallerRegistryAccessDenied(installed.output, sandbox.registryKey)) {
+      const error = new Error(
+        `packaged installer process was denied while writing its isolated HKCU key; this execution token cannot perform the installer write: ${installed.output.slice(-1200)}`
+      );
+      error.code = 'RC_REGISTRY_ACCESS_DENIED';
+      throw error;
+    }
     assert.equal(installed.status, 0, installed.output);
     assert.ok(fs.existsSync(path.join(sandbox.installDir, 'WhaleBridge.exe')), '应安装桌面壳');
     assert.ok(fs.existsSync(path.join(sandbox.installDir, 'WhaleBridgeCore.exe')), '应安装 Core');
@@ -374,13 +389,25 @@ try {
     assert.deepEqual(helperLeftovers, [], `%TEMP% 里残留了卸载助手副本：${helperLeftovers.join(', ')}`);
     step('✅ 无残留：没有卸载助手/桌面壳进程、没有残留注册表项、%TEMP% 里没有助手副本');
   }
-} finally {
-  cleanupRegistry();
-  if (process.env.WHALEBRIDGE_TEST_KEEP_TEMP === '1') {
-    step(`TEST_TEMP_ROOT=${tempRoot}`);
+} catch (error) {
+  if (error?.code === 'RC_REGISTRY_ACCESS_DENIED') {
+    step(`NOT_RUN_ENVIRONMENT: ${error.message}`);
+    process.exitCode = 77;
   } else {
-    fs.rmSync(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
+    throw error;
+  }
+} finally {
+  try {
+    cleanupRegistry();
+  } finally {
+    if (process.env.WHALEBRIDGE_TEST_KEEP_TEMP === '1') {
+      step(`TEST_TEMP_ROOT=${tempRoot}`);
+    } else {
+      fs.rmSync(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
+    }
   }
 }
 
-step('🎉 安装 / 升级 / 修复 / 迁移 / 卸载 / 重装 全生命周期通过（全部在沙箱目录内）');
+if (process.exitCode !== 77) {
+  step('🎉 安装 / 升级 / 修复 / 迁移 / 卸载 / 重装 全生命周期通过（全部在沙箱目录内）');
+}

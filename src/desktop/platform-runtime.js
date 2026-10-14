@@ -2,19 +2,39 @@ import { OWNER_ACTOR, capabilityError } from '../capability/types.js';
 
 /** Smart decisions are consumed here; authority is always the trusted Desktop Owner. */
 export function createDesktopPlatformRuntime({ capabilityService, workspaceService, taskRuntime, agentBroker, continuityRuntime, legacyModel }) {
-  async function route({ decision, record, text }) {
+  async function cancelAgentAfterAbort(session) {
+    try { await agentBroker.cancel(session); }
+    catch (error) {
+      if (error?.code !== 'SESSION_NOT_FOUND') throw error;
+    }
+  }
+
+  async function route({ decision, record, text, signal }) {
     if (decision.agentIntent) {
+      if (signal?.aborted) throw Object.assign(new Error('Chat operation cancelled'), { code: 'ABORTED' });
       const workspaceId = record.config.workspaceId || (await workspaceService.execute({ method: 'workspace.list' })).activeId;
       if (!workspaceId) throw capabilityError('WORKSPACE_REQUIRED', '请先在 Workspaces 选择工作区，再启动项目任务');
+      if (signal?.aborted) throw Object.assign(new Error('Chat operation cancelled'), { code: 'ABORTED' });
       let task = null;
       if (record.taskId) {
-        try { task = taskRuntime.get({ id: record.taskId }).task; } catch { /* stale task reference */ }
+        try { task = taskRuntime.get({ id: record.taskId }).task; }
+        catch (error) {
+          if (error?.code !== 'TASK_NOT_FOUND') throw error;
+        }
       }
       if (task && task.workspaceId !== workspaceId) task = null;
       if (task && ['completed', 'cancelled', 'failed'].includes(task.status)) task = null;
+      let createdTask = false;
       if (!task) {
         task = taskRuntime.create({ goal: text.slice(0, 2000), workspaceId, note: 'Smart Chat project task' });
         record.taskId = task.id;
+        createdTask = true;
+      }
+      if (signal?.aborted) {
+        if (createdTask) {
+          taskRuntime.cancel({ id: task.id, expectedRev: task.rev, reason: 'Chat request was deleted before Agent startup' });
+        }
+        throw Object.assign(new Error('Chat operation cancelled'), { code: 'ABORTED' });
       }
       const provider = record.config.agentProvider && record.config.agentProvider !== 'none' ? record.config.agentProvider : 'cetamesh';
       if (task.currentAgent && task.currentAgent.provider !== provider) {
@@ -30,7 +50,15 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
         if (!nextAgent?.sessionId || nextAgent.provider !== provider) {
           throw capabilityError('PROVIDER_ERROR', 'Continuity did not create the selected Agent Provider session');
         }
+        if (signal?.aborted) {
+          await cancelAgentAfterAbort({ provider, sessionId: nextAgent.sessionId });
+          throw Object.assign(new Error('Chat operation cancelled'), { code: 'ABORTED' });
+        }
         await agentBroker.send({ provider, sessionId: nextAgent.sessionId, content: text });
+        if (signal?.aborted) {
+          await cancelAgentAfterAbort({ provider, sessionId: nextAgent.sessionId });
+          throw Object.assign(new Error('Chat operation cancelled'), { code: 'ABORTED' });
+        }
         return { kind: 'agent', taskId: task.id, workspaceId, provider, sessionId: nextAgent.sessionId, accepted: true, continued: true };
       }
       // Smart Project 的 test.run 语义（v2 final security）：
@@ -42,10 +70,7 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
         capability: 'agent.run', input: { provider, content: text, modelProvider: record.config.modelProvider,
           model: record.config.model !== legacyModel ? record.config.model : undefined, reasoningEffort: record.config.reasoning,
           grants: { capabilities: ['filesystem.read', 'filesystem.write', 'filesystem.search', 'git.status', 'git.diff', 'memory.read', 'test.run'] } },
-        reason: 'Smart project task' });
-      if (result.result.reused) {
-        await agentBroker.send({ provider: result.result.provider, sessionId: result.result.sessionId, content: text });
-      }
+        reason: 'Smart project task' }, { signal });
       return { kind: 'agent', ...result.result };
     }
     if (decision.capabilityIntent) {

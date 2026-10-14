@@ -34,6 +34,8 @@ try {
   const dshHome = path.join(temp, '.dsh');
   fs.mkdirSync(dshPackage, { recursive: true });
   fs.mkdirSync(dshHome, { recursive: true });
+  fs.writeFileSync(path.join(dshHome, '.credentials.yaml'),
+    `client-connection/browser-session:\n  secret: ${Buffer.alloc(32, 7).toString('base64url')}\n`);
   fs.writeFileSync(path.join(dshPackage, 'package.json'), '{"name":"@deepseek-ai/dsh","version":"3.2.1","bin":{"dsh":"cli.js"}}\n');
   fs.writeFileSync(path.join(dshPackage, 'cli.js'), '#!/usr/bin/env node\n');
   const dshExecutable = path.join(npmBin, process.platform === 'win32' ? 'dsh.cmd' : 'dsh');
@@ -106,8 +108,20 @@ try {
   const http = await import('node:http');
   const listen = (server) => new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const closeServer = (server) => new Promise((resolve) => server.close(() => resolve()));
-  // 模拟 dsh web：根路径返回 401（真实 dsh 需要控制台令牌，也算“已监听”）
-  const fakeDsh = http.createServer((req, res) => { res.writeHead(401, { 'content-type': 'text/plain' }); res.end('unauthorized'); });
+  // 模拟 DSH：根路径 401；真实 ready 探针必须走带鉴权的设置和 session API。
+  const fakeDsh = http.createServer((req, res) => {
+    if (req.url === '/') { res.writeHead(401, { 'content-type': 'text/plain' }); res.end('unauthorized'); return; }
+    let body = '';
+    req.setEncoding('utf8');
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', () => {
+      if (!String(req.headers.cookie ?? '').startsWith('dsh-auth-')) { res.writeHead(401); res.end('unauthorized'); return; }
+      const request = JSON.parse(body);
+      const value = request.method === 'session/list' ? { items: [] } : {};
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ type: 'server-response', rpcId: request.rpcId, result: { ok: true, value } }));
+    });
+  });
   await listen(fakeDsh);
   // 模拟 SnowLuma OneBot HTTP API
   const fakeSnow = http.createServer((req, res) => { res.writeHead(404, { 'content-type': 'text/plain' }); res.end('no api'); });
@@ -115,14 +129,14 @@ try {
   const readyManager = createLocalServiceManager({
     root: path.join(temp, 'ready-root'),
     config: {
-      dsh: { baseUrl: 'http://127.0.0.1:' + fakeDsh.address().port },
+      dsh: { baseUrl: 'http://127.0.0.1:' + fakeDsh.address().port, homeDir: dshHome },
       snowluma: { httpUrl: 'http://127.0.0.1:' + fakeSnow.address().port, homeDir: snowDir, launcherPath: path.join(snowDir, 'launcher.bat') }
     },
     detectionOptions: { userHome: temp, fullScanRoots: [], environment: { PATH: '', APPDATA: path.join(temp, 'no-appdata'), LOCALAPPDATA: '' } }
   });
   await readyManager.detectAll();
   const readySnapshot = readyManager.snapshot();
-  check('外部已运行的 dsh 被判为 ready（401 也算已监听）', readySnapshot.dsh.ready === true && readySnapshot.dsh.running === true, 'status=' + readySnapshot.dsh.status);
+  check('DSH Ready 由已鉴权的 settings 与 session API 决定（根路径 401 不参与）', readySnapshot.dsh.ready === true && readySnapshot.dsh.running === true && readySnapshot.dsh.authenticated === true && readySnapshot.dsh.sessionCapable === true, 'status=' + readySnapshot.dsh.status);
   check('外部已运行的 SnowLuma 被判为 ready', readySnapshot.snowluma.ready === true && readySnapshot.snowluma.running === true, 'status=' + readySnapshot.snowluma.status);
   check('外部实例标记为非托管（不重复拉起、不显示停止按钮）', readySnapshot.dsh.managed === false && readySnapshot.snowluma.managed === false);
   await closeServer(fakeDsh);
@@ -130,6 +144,18 @@ try {
   await readyManager.reconcileReadiness({ force: true });
   const downSnapshot = readyManager.snapshot();
   check('外部服务停止后状态回落为未运行', downSnapshot.dsh.ready === false && downSnapshot.dsh.running === false && downSnapshot.snowluma.ready === false);
+
+  const rootOnly = http.createServer((req, res) => {
+    if (req.url === '/') { res.writeHead(200); res.end('up'); return; }
+    res.writeHead(404); res.end('not an authenticated DSH API');
+  });
+  await listen(rootOnly);
+  const rootOnlyManager = createLocalServiceManager({ root: path.join(temp, 'root-only-root'),
+    config: { dsh: { baseUrl: 'http://127.0.0.1:' + rootOnly.address().port, homeDir: dshHome } },
+    detectionOptions: { userHome: temp, fullScanRoots: [], environment: { PATH: '', APPDATA: path.join(temp, 'no-appdata'), LOCALAPPDATA: '' } } });
+  const rootOnlySnapshot = await rootOnlyManager.detectAll();
+  check('只有 HTTP 根路径可达时 DSH Agent Session 仍为未就绪', rootOnlySnapshot.dsh.ready === false && rootOnlySnapshot.dsh.reachable === true && rootOnlySnapshot.dsh.sessionCapable === false);
+  await closeServer(rootOnly);
 
   // ── .dsh 是数据目录而非安装目录：没有可用可执行文件时也不应误报“不完整安装” ──
   const homeOnly = path.join(temp, 'home-only');

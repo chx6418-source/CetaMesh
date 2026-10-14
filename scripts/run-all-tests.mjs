@@ -25,6 +25,7 @@ import { isLegacyBridgeTestOptedIn } from './environment-policy.mjs';
 import { loadReleaseVersion, releaseArtifactDirectory } from '../src/release/version.js';
 import { createSuiteSandbox, finalizeSuiteSandbox } from '../src/testing/suite-sandbox.js';
 import { terminateSuiteProcessTree } from '../src/testing/suite-process.js';
+import { classifySuiteOutcome } from '../src/testing/suite-result.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SCRIPTS = path.join(ROOT, 'scripts');
@@ -288,7 +289,8 @@ function runSuite(suite, { verbose }) {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
-      const failed = Boolean(error) || Boolean(treeError) || timedOut || code !== 0;
+      const outcome = classifySuiteOutcome({ code, signal, error, treeError, timedOut, output });
+      const failed = outcome.failed;
       let sandboxNote = '';
       let cleanupFailed = false;
       if (treeError) {
@@ -310,7 +312,7 @@ function runSuite(suite, { verbose }) {
         : timedOut
           ? `${output}\n[suite timeout (> ${Math.round(suite.timeoutMs / 1000)}s), terminated]`
           : output;
-      resolve({ suite, status: failed || cleanupFailed ? 'FAIL' : 'PASS', durationMs: Date.now() - started, detail: `${detail}${sandboxNote}` });
+      resolve({ suite, status: cleanupFailed ? 'FAIL' : outcome.status, durationMs: Date.now() - started, detail: `${detail}${sandboxNote}` });
     };
     const completeAfterClose = () => {
       if (!closeResult || (timedOut && !terminationSettled)) return;
