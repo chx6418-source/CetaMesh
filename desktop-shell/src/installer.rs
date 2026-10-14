@@ -1624,6 +1624,11 @@ pub fn write_first_run_notice(data_dir: &Path, log: &dyn Fn(&str)) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::OnceLock;
+
+    static REGISTRY_WRITE_AVAILABLE: OnceLock<bool> = OnceLock::new();
+    static REGISTRY_PROBE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn temp_dir(label: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -1669,13 +1674,17 @@ mod tests {
     }
 
     fn layout(root: &Path) -> InstallLayout {
+        let test_key = root
+            .file_name()
+            .map(|name| name.to_string_lossy().replace('\\', "_"))
+            .unwrap_or_else(|| "installer-test".to_owned());
         InstallLayout {
             install_dir: root.join("ProgramFiles").join("WhaleBridge"),
             data_dir: root.join("LocalAppData").join("WhaleBridge"),
             start_menu_dir: root.join("StartMenu").join("Programs"),
             desktop_dir: root.join("Desktop"),
-            // 测试用稳定键名 + 用例结束时清理，避免把测试残留留在用户注册表里
-            registry_key: "HKCU\\Software\\WhaleBridgeTest\\installer-lifecycle".to_owned(),
+            // 每个并行用例使用独立 HKCU key，避免彼此清理或覆盖。
+            registry_key: format!("HKCU\\Software\\WhaleBridgeTest\\{test_key}"),
             create_desktop_shortcut: true,
         }
     }
@@ -1692,18 +1701,82 @@ mod tests {
 
     fn quiet(_: &str) {}
 
-    /// 清理测试用的注册表键（用例失败也不留残留）。
+    /// 清理本用例自己的注册表键；不触碰共享的 WhaleBridgeTest 父键。
     fn cleanup_registry(key: &str) {
         let _ = hidden("reg.exe")
             .args(["delete", key, "/f"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
-        let _ = hidden("reg.exe")
-            .args(["delete", "HKCU\\Software\\WhaleBridgeTest", "/f"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+    }
+
+    struct FixtureCleanup {
+        root: PathBuf,
+        registry_key: String,
+    }
+
+    impl FixtureCleanup {
+        fn new(root: &Path, registry_key: &str) -> Self {
+            Self { root: root.to_path_buf(), registry_key: registry_key.to_owned() }
+        }
+    }
+
+    impl Drop for FixtureCleanup {
+        fn drop(&mut self) {
+            cleanup_registry(&self.registry_key);
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn registry_write_available() -> bool {
+        *REGISTRY_WRITE_AVAILABLE.get_or_init(|| {
+            let counter = REGISTRY_PROBE_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let key = format!(
+                "HKCU\\Software\\WhaleBridgeTest\\installer-probe-{}-{counter}",
+                std::process::id()
+            );
+            let write = hidden("reg.exe")
+                .args(["add", &key, "/v", "Probe", "/t", "REG_SZ", "/d", "isolated-test", "/f"])
+                .output();
+            let query_before = hidden("reg.exe").args(["query", &key, "/v", "Probe"]).output();
+            let cleanup = hidden("reg.exe").args(["delete", &key, "/f"]).output();
+            let query_after = hidden("reg.exe").args(["query", &key]).output();
+
+            let write_succeeded = write.as_ref().map(|output| output.status.success()).unwrap_or(false);
+            let was_present = query_before.as_ref().map(|output| output.status.success()).unwrap_or(false);
+            let remains = query_after.as_ref().map(|output| output.status.success()).unwrap_or(false);
+            if remains {
+                panic!("isolated HKCU registry probe key was not cleaned: {key}");
+            }
+            if write_succeeded {
+                assert!(was_present, "isolated HKCU value could not be read back: {key}");
+                assert!(cleanup.as_ref().map(|output| output.status.success()).unwrap_or(false),
+                    "isolated HKCU probe cleanup failed: {key}");
+                true
+            } else {
+                let output = write.expect("reg.exe must be executable for the installer registry probe");
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+                let access_denied = stderr.contains("Access is denied")
+                    || stderr.contains("拒绝访问")
+                    || stderr.contains('\u{FFFD}');
+                assert!(
+                    access_denied,
+                    "isolated HKCU registry probe failed for a reason other than access denied: reg.exe exit {:?}: {stderr}",
+                    output.status.code()
+                );
+                let detail = format!("reg.exe exit {:?}: {stderr}", output.status.code());
+                eprintln!("NOT_RUN_ENVIRONMENT: installer HKCU integration cannot write an isolated key ({detail}); test key cleanup was attempted");
+                false
+            }
+        })
+    }
+
+    fn apply_fixture_plan(plan: &mut Plan, log: &dyn Fn(&str), backup_dir: &Path) -> Result<Applied, String> {
+        if !registry_write_available() {
+            plan.effects.retain(|effect| !matches!(effect,
+                Effect::RegistryKey { .. } | Effect::RemoveRegistryKey { .. }));
+        }
+        apply_plan_with_backup(plan, log, backup_dir)
     }
 
     #[test]
@@ -1724,6 +1797,7 @@ mod tests {
         let root = temp_dir("lifecycle");
         let payload = fake_payload(&root);
         let layout = layout(&root);
+        let _cleanup = FixtureCleanup::new(&root, &layout.registry_key);
         let options = options();
 
         for legacy in [
@@ -1735,8 +1809,9 @@ mod tests {
             fs::write(legacy, b"legacy shortcut").unwrap();
         }
 
-        let plan = plan_install(&layout, &payload, &options, false).unwrap();
-        apply_plan_with_backup(&plan, &quiet, &root.join("backup")).unwrap();
+        let mut plan = plan_install(&layout, &payload, &options, false).unwrap();
+        assert!(plan.effects.iter().any(|effect| matches!(effect, Effect::RegistryKey { key, .. } if key == &layout.registry_key)));
+        apply_fixture_plan(&mut plan, &quiet, &root.join("backup")).unwrap();
         assert!(layout.start_menu_dir.join(START_MENU_SHORTCUT).is_file());
         assert!(layout.start_menu_dir.join(UNINSTALL_SHORTCUT).is_file());
         assert!(layout.desktop_dir.join(DESKTOP_SHORTCUT).is_file());
@@ -1777,13 +1852,13 @@ mod tests {
 
         // 修复：删掉一个文件后应被补回
         fs::remove_file(layout.install_dir.join(CORE_EXE_NAME)).unwrap();
-        let repair = plan_repair(&layout, &payload, &options).unwrap();
+        let mut repair = plan_repair(&layout, &payload, &options).unwrap();
         assert!(repair.notes.iter().any(|note| note.contains(CORE_EXE_NAME)));
-        apply_plan_with_backup(&repair, &quiet, &root.join("backup")).unwrap();
+        apply_fixture_plan(&mut repair, &quiet, &root.join("backup")).unwrap();
         assert!(layout.install_dir.join(CORE_EXE_NAME).is_file());
 
         // 卸载：保留数据目录
-        let uninstall = plan_uninstall(
+        let mut uninstall = plan_uninstall(
             &layout,
             &UninstallOptions {
                 remove_data: false,
@@ -1791,7 +1866,7 @@ mod tests {
                 dsh_profile: "web".to_owned(),
             },
         );
-        apply_plan_with_backup(&uninstall, &quiet, &root.join("backup")).unwrap();
+        apply_fixture_plan(&mut uninstall, &quiet, &root.join("backup")).unwrap();
         assert!(!layout.install_dir.join(CORE_EXE_NAME).is_file());
         assert!(!layout.install_dir.join(SHELL_EXE_NAME).is_file());
         assert!(!layout.install_dir.join(INSTALL_MANIFEST).is_file());
@@ -1807,8 +1882,8 @@ mod tests {
             b"{\"consolePort\":4321}",
         )
         .unwrap();
-        let reinstall = plan_install(&layout, &payload, &options, false).unwrap();
-        apply_plan_with_backup(&reinstall, &quiet, &root.join("backup")).unwrap();
+        let mut reinstall = plan_install(&layout, &payload, &options, false).unwrap();
+        apply_fixture_plan(&mut reinstall, &quiet, &root.join("backup")).unwrap();
         assert_eq!(
             fs::read_to_string(layout.data_dir.join("config.json")).unwrap(),
             "{\"consolePort\":4321}",
@@ -1816,7 +1891,7 @@ mod tests {
         );
 
         // 卸载并删除数据
-        let purge = plan_uninstall(
+        let mut purge = plan_uninstall(
             &layout,
             &UninstallOptions {
                 remove_data: true,
@@ -1824,17 +1899,16 @@ mod tests {
                 dsh_profile: "web".to_owned(),
             },
         );
-        apply_plan_with_backup(&purge, &quiet, &root.join("backup")).unwrap();
+        apply_fixture_plan(&mut purge, &quiet, &root.join("backup")).unwrap();
         assert!(!layout.data_dir.exists(), "--remove-data 应删除数据目录");
 
-        cleanup_registry(&layout.registry_key);
-        fs::remove_dir_all(&root).ok();
     }
 
     #[test]
     fn remove_data_uses_external_backup_and_cleans_transaction() {
         let root = temp_dir("remove-data-transaction");
         let layout = layout(&root);
+        let _cleanup = FixtureCleanup::new(&root, &layout.registry_key);
         fs::create_dir_all(layout.data_dir.join("state")).unwrap();
         fs::write(layout.data_dir.join("state").join("sessions.json"), b"[]").unwrap();
 
@@ -1855,8 +1929,6 @@ mod tests {
             "the temporary data snapshot should be deleted after a successful purge"
         );
 
-        cleanup_registry(&layout.registry_key);
-        fs::remove_dir_all(&root).ok();
     }
 
     #[test]
@@ -1864,8 +1936,9 @@ mod tests {
         let root = temp_dir("modified");
         let payload = fake_payload(&root);
         let layout = layout(&root);
-        let plan = plan_install(&layout, &payload, &options(), false).unwrap();
-        apply_plan_with_backup(&plan, &quiet, &root.join("backup")).unwrap();
+        let _cleanup = FixtureCleanup::new(&root, &layout.registry_key);
+        let mut plan = plan_install(&layout, &payload, &options(), false).unwrap();
+        apply_fixture_plan(&mut plan, &quiet, &root.join("backup")).unwrap();
 
         fs::write(
             layout.install_dir.join(CORE_EXE_NAME),
@@ -1874,7 +1947,7 @@ mod tests {
         .unwrap();
         fs::write(layout.install_dir.join("my-notes.txt"), b"mine").unwrap();
 
-        let uninstall = plan_uninstall(
+        let mut uninstall = plan_uninstall(
             &layout,
             &UninstallOptions {
                 remove_data: false,
@@ -1894,7 +1967,7 @@ mod tests {
                 .iter()
                 .any(|warning| warning.contains("my-notes.txt"))
         );
-        apply_plan_with_backup(&uninstall, &quiet, &root.join("backup")).unwrap();
+        apply_fixture_plan(&mut uninstall, &quiet, &root.join("backup")).unwrap();
         assert!(
             layout.install_dir.join(CORE_EXE_NAME).is_file(),
             "被改过的文件必须保留"
@@ -1903,8 +1976,6 @@ mod tests {
             layout.install_dir.join("my-notes.txt").is_file(),
             "非本应用的文件必须保留"
         );
-        cleanup_registry(&layout.registry_key);
-        fs::remove_dir_all(&root).ok();
     }
 
     #[test]
@@ -1912,6 +1983,7 @@ mod tests {
         let root = temp_dir("rollback");
         let payload = fake_payload(&root);
         let layout = layout(&root);
+        let _cleanup = FixtureCleanup::new(&root, &layout.registry_key);
         fs::create_dir_all(&layout.install_dir).unwrap();
         fs::write(layout.install_dir.join(SHELL_EXE_NAME), b"old-shell").unwrap();
 
@@ -1936,8 +2008,12 @@ mod tests {
             !layout.data_dir.join("config.json").exists(),
             "回滚后不应留下新建的文件"
         );
-        cleanup_registry(&layout.registry_key);
-        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn installer_registry_probe_uses_and_cleans_an_isolated_key() {
+        // If this host is restricted, the exact registry integration is explicitly reported as NRE.
+        let _ = registry_write_available();
     }
 
     #[test]

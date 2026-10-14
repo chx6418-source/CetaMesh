@@ -96,6 +96,13 @@ function listFiles(dir, base = dir, out = []) {
   return out;
 }
 
+function directoryContents(dir) {
+  return listFiles(dir).map((relative) => [
+    relative,
+    fs.readFileSync(path.join(dir, relative)).toString('base64')
+  ]);
+}
+
 // 只保留 Windows 自身目录：cmd / powershell / taskkill 仍可用，但 PATH 中没有任何 Node.js。
 // 比清空 PATH 更接近“目标机器没装 Node.js”的真实环境。
 function windowsOnlyPath() {
@@ -602,10 +609,24 @@ try {
     assert.deepEqual(presets.sort(), ['whale-chat', 'whale-chat-v2']);
     const released = path.join(dataDir, 'runtime', manifest.version, 'whale-mode-console');
     assert.ok(fs.existsSync(path.join(released, 'package.json')), '插件应按版本释放到数据目录');
-    assert.equal(
-      fs.realpathSync(path.join(dshHome, 'plugins', 'whale-mode-console')).toLowerCase(),
-      fs.realpathSync(released).toLowerCase()
-    );
+    const pluginPath = path.join(dshHome, 'plugins', 'whale-mode-console');
+    const pluginStat = fs.lstatSync(pluginPath);
+    const dshManifest = JSON.parse(fs.readFileSync(path.join(dshHome, '.whalebridge-integration.json'), 'utf8'));
+    const resolvedPluginPath = fs.realpathSync(pluginPath).toLowerCase();
+    const resolvedReleasePath = fs.realpathSync(released).toLowerCase();
+    assert.equal(path.resolve(dshManifest.plugin.link).toLowerCase(), path.resolve(pluginPath).toLowerCase());
+    assert.equal(path.resolve(dshManifest.plugin.target).toLowerCase(), path.resolve(released).toLowerCase(),
+      'manifest continues to identify the versioned data-directory distribution target');
+    if (pluginStat.isSymbolicLink() || resolvedPluginPath === resolvedReleasePath) {
+      assert.equal(resolvedPluginPath, resolvedReleasePath,
+        'a DSH junction must resolve to the versioned plugin directory');
+    } else {
+      // The shipped integration deliberately supports a copy fallback when Windows cannot create the junction.
+      // Manifest identity plus byte-for-byte equality is the distribution contract for that path.
+      assert.equal(pluginStat.isDirectory(), true, 'link fallback must materialize a plugin directory');
+      assert.deepEqual(directoryContents(pluginPath), directoryContents(released),
+        'the documented copy fallback must match the versioned plugin distribution byte-for-byte');
+    }
     assert.ok(fs.existsSync(path.join(dshHome, '.whalebridge-integration.json')), '应写入集成 manifest');
 
     const again = spawnSync(EXE, ['--setup-dsh', 'web'], { encoding: 'utf8', env: setupEnv, timeout: 180000 });

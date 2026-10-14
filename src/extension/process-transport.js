@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { extensionError } from './types.js';
-import { terminateProcessTree, waitForChildExit } from './process-tree.js';
+import { terminateProcessTree, waitForChildClose, waitForChildExit } from './process-tree.js';
 import { buildExtensionWorkerEnv } from './worker-env.js';
 import { fingerprintExtensionPackage } from './package-fingerprint.js';
 export { buildExtensionWorkerEnv } from './worker-env.js';
@@ -75,7 +75,8 @@ export function createProcessTransport({
   parentEnv = process.env,
   metadata = {},
   maxFrameBytes = DEFAULT_MAX_FRAME_BYTES,
-  graceMs = 1000
+  graceMs = 1000,
+  spawnProcess = spawn
 } = {}) {
   const cwd = resolvePackageRoot({ packageRoot, storeRoot, extensionId, version });
   if (!launch || typeof launch.executable !== 'string' || !launch.executable
@@ -91,7 +92,7 @@ export function createProcessTransport({
       storageFile: metadata.storageFile
     }
   });
-  const child = spawn(launch.executable, launch.args, {
+  const child = spawnProcess(launch.executable, launch.args, {
     shell: false,
     cwd,
     env,
@@ -169,6 +170,16 @@ export function createProcessTransport({
     if (diagnosticHandler) diagnosticHandler(diagnostic);
     else if (diagnostics.length < 16) diagnostics.push(diagnostic);
   });
+  const handlePipeError = (name) => (error) => {
+    // Pipe shutdown can race the process exit event on Windows. Once teardown has begun,
+    // the process has exited, or the child has fully closed, this is expected stream cleanup.
+    if (closing || exited) return;
+    notifyError(extensionError('PROVIDER_UNAVAILABLE', `Extension Worker ${name} pipe failed: ${String(error?.message ?? error)}`));
+    void killTree();
+  };
+  child.stdin?.on('error', handlePipeError('stdin'));
+  child.stdout?.on('error', handlePipeError('stdout'));
+  child.stderr?.on('error', handlePipeError('stderr'));
   child.once('error', (error) => {
     notifyError(extensionError('PROVIDER_UNAVAILABLE', 'Unable to spawn Extension Worker: ' + String(error?.message ?? error)));
     notifyExit({ code: null, signal: null, error });
@@ -198,6 +209,14 @@ export function createProcessTransport({
         }
         await waitForChildExit(child, Math.max(0, requestedGraceMs));
         await killTree();
+        if (!await waitForChildClose(child, 2000)) {
+          child.stdin?.destroy();
+          child.stdout?.destroy();
+          child.stderr?.destroy();
+          if (!await waitForChildClose(child, 500)) {
+            throw extensionError('PROVIDER_UNAVAILABLE', 'Extension Worker stdio did not close after process-tree shutdown');
+          }
+        }
       })();
     }
     return closePromise;

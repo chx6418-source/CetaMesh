@@ -2,9 +2,11 @@
 // Source-level tests use fixtures; the formal Core SEA worker E2E is in test-process-extension-sea.mjs.
 // ProcessHost is not Windows Sandbox or AppContainer.
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { PassThrough } from 'node:stream';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createProcessExtensionHost, createInProcessTransportPair } from '../src/extension/process-host.js';
@@ -334,6 +336,60 @@ async function waitUntil(predicate, timeoutMs = 5000) {
     ok('real transport uses fixed package cwd, minimal child env, and whole-tree shutdown');
   } finally {
     if (transport) await transport.killTree();
+    fixture.cleanup();
+  }
+}
+
+// A reverse Worker invoke reaches only the Host capability executor; frame-supplied identity is ignored.
+// Windows can deliver a pipe read error after the process 'exit' event but before its 'close' event.
+// Teardown must consume that error and await close so the next Worker does not inherit a stale pipe race.
+{
+  const fixture = makeInstalledPackage();
+  const child = new EventEmitter();
+  Object.assign(child, {
+    pid: null,
+    exitCode: null,
+    signalCode: null,
+    stdin: new PassThrough(),
+    stdout: new PassThrough(),
+    stderr: new PassThrough()
+  });
+  let childClosed = false;
+  child.once('close', () => { childClosed = true; });
+  child.stdin.once('finish', () => {
+    setTimeout(() => {
+      child.exitCode = 0;
+      child.emit('exit', 0, null);
+      const pipeError = Object.assign(new Error('read ENOTCONN'), { code: 'ENOTCONN' });
+      child.stdout.emit('error', pipeError);
+      child.stderr.emit('error', pipeError);
+      setTimeout(() => {
+        child.stdout.end();
+        child.stderr.end();
+        child.emit('close', 0, null);
+      }, 15);
+    }, 0);
+  });
+
+  let transport;
+  const transportErrors = [];
+  try {
+    transport = createProcessTransport({
+      packageRoot: fixture.packageRoot,
+      storeRoot: fixture.storeRoot,
+      extensionId: fixture.manifest.id,
+      version: fixture.manifest.version,
+      launch: { executable: process.execPath, args: [] },
+      metadata: { extensionId: fixture.manifest.id, version: fixture.manifest.version, fingerprint: 'sha256:fixture' },
+      spawnProcess: () => child
+    });
+    transport.onError(error => transportErrors.push(error));
+    await transport.close({ graceMs: 100 });
+    assert.equal(childClosed, true, 'transport close resolves only after child stdio close');
+    assert.deepEqual(transportErrors, [], 'expected pipe shutdown errors are contained during teardown');
+    ok('transport teardown contains ENOTCONN pipe-close race and awaits the child close event');
+  } finally {
+    await transport?.close({ graceMs: 0 });
     fixture.cleanup();
   }
 }

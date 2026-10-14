@@ -19,6 +19,7 @@ import { spawnSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -148,7 +149,7 @@ const sandbox = {
   dataDir: path.join(tempRoot, 'LocalAppData', 'CetaMesh'),
   startMenuDir: path.join(tempRoot, 'StartMenu', 'Programs'),
   desktopDir: path.join(tempRoot, 'Desktop'),
-  registryKey: `HKCU\\Software\\CetaMeshInstallerTest\\suite-${process.pid}`
+  registryKey: `HKCU\\Software\\CetaMeshInstallerTest\\suite-${process.pid}-${randomUUID()}`
 };
 
 const stagingDir = path.join(tempRoot, 'staging');
@@ -173,14 +174,23 @@ function runInstaller(args, extraEnv = {}) {
   return run(installer, [...args, ...sandboxArgs()], extraEnv);
 }
 
-function cleanupRegistry(key = sandbox.registryKey) {
-  spawnSync('reg.exe', ['delete', key, '/f'], { encoding: 'utf8' });
+function isInstallerRegistryAccessDenied(output, key) {
+  return output.includes(`[写注册表 ${key}]`)
+    && output.includes(`写入注册表失败：${key}\\DisplayName`)
+    && /access denied|拒绝访问|\uFFFD/i.test(output);
 }
 
-cleanupRegistry();
+function cleanupRegistry(key = sandbox.registryKey) {
+  const cleanup = spawnSync('reg.exe', ['delete', key, '/f'], { encoding: 'utf8', timeout: 10000 });
+  const afterCleanup = spawnSync('reg.exe', ['query', key], { encoding: 'utf8', timeout: 10000 });
+  assert.equal(afterCleanup.error, undefined, `registry cleanup verification failed: ${afterCleanup.error?.message}`);
+  assert.notEqual(afterCleanup.status, 0, `isolated installer registry key remains after cleanup: ${key}`);
+  if (cleanup.error && !['EPERM', 'EACCES'].includes(cleanup.error.code)) throw cleanup.error;
+}
 
 const spawnLog = path.join(tempRoot, 'spawn-audit.jsonl');
 const baselineConsoles = consoleWindows();
+const freshKey = `HKCU\\Software\\CetaMeshInstallerTest\\fresh-${process.pid}-${randomUUID()}`;
 
 try {
   // ---------------------------------------------------------------- 1+3. 安装 + 子进程审计
@@ -188,6 +198,13 @@ try {
   const installed = runInstaller(['--install'], { WHALEBRIDGE_INSTALLER_SPAWN_LOG: spawnLog });
   const seenConsoles = await watcher.stop();
 
+  if (installed.status !== 0 && isInstallerRegistryAccessDenied(installed.output, sandbox.registryKey)) {
+    const error = new Error(
+      `packaged installer process was denied while writing its isolated HKCU key; this execution token cannot perform the installer write: ${installed.output.slice(-1200)}`
+    );
+    error.code = 'RC_REGISTRY_ACCESS_DENIED';
+    throw error;
+  }
   assert.equal(installed.status, 0, installed.output);
   step('✅ 沙箱安装完成');
 
@@ -232,7 +249,6 @@ try {
   step(`✅ 升级位置复用：detect-install → ${detected.installDir}（v${detected.version}）`);
 
   // ---------------------------------------------------------------- 5. 全新机器如实报告
-  const freshKey = `HKCU\\Software\\CetaMeshInstallerTest\\fresh-${process.pid}`;
   cleanupRegistry(freshKey);
   const freshDetect = run(installer, [
     '--detect-install',
@@ -310,10 +326,25 @@ public class CetaClose { [DllImport("user32.dll")] public static extern IntPtr S
   if (!exited) ui.kill();
   assert.ok(exited, '安装向导关闭后应在 15 秒内退出');
   step('✅ 安装向导 GUI 冒烟：窗口启动并可正常关闭');
+} catch (error) {
+  if (error?.code === 'RC_REGISTRY_ACCESS_DENIED') {
+    step(`NOT_RUN_ENVIRONMENT: ${error.message}`);
+    process.exitCode = 77;
+  } else {
+    throw error;
+  }
 } finally {
-  cleanupRegistry();
-  cleanupRegistry(`HKCU\\Software\\CetaMeshInstallerTest\\fresh-${process.pid}`);
-  fs.rmSync(tempRoot, { recursive: true, force: true });
+  try {
+    cleanupRegistry();
+  } finally {
+    try {
+      cleanupRegistry(freshKey);
+    } finally {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  }
 }
 
-step('✅ test-installer-productization: 全部检查通过');
+if (process.exitCode !== 77) {
+  step('✅ test-installer-productization: 全部检查通过');
+}
