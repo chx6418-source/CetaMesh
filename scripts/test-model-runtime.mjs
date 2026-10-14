@@ -78,6 +78,7 @@ function makeService({ withKey = true, fetchImpl, baseUrl = 'https://api.deepsee
     defaultModel: 'deepseek-chat',
     secrets,
     fetchImpl: typeof fetchImpl === 'function' ? fetchImpl : fetchImpl?.fetch ?? fetch,
+    supportsTools: true,
     supportsStreamOptions: true,
     log: () => {}
   });
@@ -88,6 +89,7 @@ function makeService({ withKey = true, fetchImpl, baseUrl = 'https://api.deepsee
     defaultModel: 'gpt-4o-mini',
     secrets,
     fetchImpl: typeof fetchImpl === 'function' ? fetchImpl : fetchImpl?.fetch ?? fetch,
+    supportsTools: true,
     reasoningParam: 'reasoning_effort',
     supportsStreamOptions: true,
     log: () => {}
@@ -387,6 +389,37 @@ function makeService({ withKey = true, fetchImpl, baseUrl = 'https://api.deepsee
   assert.equal(f2.requests[0].url, 'https://relay.test/v1/chat/completions', 'baseUrl 来自凭据条目');
   assert.ok(!('stream_options' in f2.requests[0].body), '自定义兼容端点默认不带 stream_options（兼容面最大）');
   ok('OpenAI 兼容：baseUrl fail-closed / 凭据 baseUrl 生效 / 不带 stream_options');
+}
+
+// ── 10b. 支持工具的 Provider 仍以 SSE 流返回文本和聚合后的 tool_calls ───────
+{
+  const toolPayloads = [
+    { model: 'fixture-tools', choices: [{ delta: { content: 'Checking. ', tool_calls: [
+      { index: 0, id: 'call-fixture', type: 'function', function: { name: 'cap_clock_now', arguments: '{"zone":' } }
+    ] } }] },
+    { model: 'fixture-tools', choices: [{ delta: { tool_calls: [
+      { index: 0, function: { arguments: '"local"}' } }
+    ] }, finish_reason: 'tool_calls' }] },
+    { model: 'fixture-tools', choices: [], usage: { prompt_tokens: 4, completion_tokens: 2 } }
+  ];
+  const f = fixtureFetch(() => sseResponse(
+    toolPayloads.map(payload => `data: ${JSON.stringify(payload)}\n\n`).join('') + 'data: [DONE]\n\n'
+  ));
+  const { service } = makeService({ fetchImpl: f });
+  const events = [];
+  for await (const event of service.stream({ providerId: 'deepseek-official', model: 'fixture-tools',
+    messages: [{ role: 'user', content: 'What time?' }],
+    tools: [{ id: 'clock.now', description: 'Return the current local time.', inputSchema: {
+      type: 'object', properties: { zone: { type: 'string' } }, required: ['zone'], additionalProperties: false
+    } }], toolChoice: 'auto' })) events.push(event);
+  assert.equal(f.requests[0].body.stream, true);
+  assert.equal(f.requests[0].body.tool_choice, 'auto');
+  assert.equal(f.requests[0].body.tools[0].function.name, 'cap_clock_now');
+  assert.ok(events.some(event => event.type === 'assistant/chunk' && event.data.chunk.text === 'Checking. '));
+  assert.deepEqual(events.find(event => event.type === 'assistant/tool-calls')?.data.toolCalls, [{
+    id: 'call-fixture', type: 'function', name: 'cap_clock_now', capabilityId: 'clock.now', arguments: '{"zone":"local"}'
+  }]);
+  ok('Tool-capable OpenAI-compatible SSE preserves streamed text and complete structured calls');
 }
 
 // ── 11. SSE 行解析器：跨 chunk 缓冲 / \r\n / flush ───────────────────────────

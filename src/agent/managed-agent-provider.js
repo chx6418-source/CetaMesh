@@ -70,9 +70,17 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
     for (const wake of [...s.waiters]) wake();
   }
   function notify(s) { for (const wake of [...s.waiters]) wake(); }
+  function messageSize(item) {
+    const content = item?.content;
+    const contentSize = typeof content === 'string' ? content.length
+      : content === null || content === undefined ? 0
+        : JSON.stringify(content)?.length ?? 0;
+    const toolCallSize = Array.isArray(item?.tool_calls) ? JSON.stringify(item.tool_calls).length : 0;
+    return contentSize + toolCallSize;
+  }
   function append(s, value) {
     s.messages.push(value);
-    if (s.messages.reduce((n, item) => n + item.content.length, 0) > MAX_HISTORY) {
+    if (s.messages.reduce((n, item) => n + messageSize(item), 0) > MAX_HISTORY) {
       s.messages.pop(); fail('AGENT_CONTEXT_LIMIT', 'Managed Agent context limit reached; a fresh session is required');
     }
   }

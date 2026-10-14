@@ -356,6 +356,11 @@ function ChatPage({ session, onSessionUpdate, onNew, onOpenMemory }: { session: 
   const pendingSendsRef = useRef(new Map<string, { text: string; attachments: { name: string; content: string; mimeType?: string }[] }>());
   const previousStreamRef = useRef({ state: 'idle', text: '' });
 
+  const refreshCatalog = useCallback(async () => {
+    try { setCatalog(await chatClient.catalog()); }
+    catch { /* A slow or failed directory must not block local Chat history refresh. */ }
+  }, []);
+
   const load = useCallback(async () => {
     if (!session) {
       historySessionIdRef.current = null;
@@ -368,8 +373,8 @@ function ChatPage({ session, onSessionUpdate, onNew, onOpenMemory }: { session: 
     }
     setLoading(true);
     try {
-      const [history, nextStatus, nextCatalog, memoryData, approvalData] = await Promise.all([
-        chatClient.history(session.id, 100), chatClient.status(session.id), chatClient.catalog(),
+      const [history, nextStatus, memoryData, approvalData] = await Promise.all([
+        chatClient.history(session.id, 100), chatClient.status(session.id),
         memoryClient.overview(session.title || '', ''), approvalClient.list()
       ]);
       if (historySessionIdRef.current !== session.id) {
@@ -385,7 +390,6 @@ function ChatPage({ session, onSessionUpdate, onNew, onOpenMemory }: { session: 
         setMessages(current => mergeLatestChatMessages(current, history.messages));
       }
       setStatus(nextStatus);
-      setCatalog(nextCatalog);
       const taskId = typeof nextStatus.routing.taskId === 'string' ? nextStatus.routing.taskId : '';
       setLinkedTask(taskId ? await taskClient.get(taskId).then(result => result.task).catch(() => null) : null);
       setMemories(memoryData.memories.slice(0, 5));
@@ -395,6 +399,7 @@ function ChatPage({ session, onSessionUpdate, onNew, onOpenMemory }: { session: 
     finally { setLoading(false); }
   }, [session?.id, session?.title]);
 
+  useEffect(() => { void refreshCatalog(); }, [refreshCatalog]);
   useEffect(() => { void load(); }, [load]);
   useEffect(() => {
     if (!session) return;
@@ -450,6 +455,9 @@ function ChatPage({ session, onSessionUpdate, onNew, onOpenMemory }: { session: 
     });
     const offApproval = bridge.subscribe('approval.pending', () => { void refreshContext(); });
     const offResolved = bridge.subscribe('approval.resolved', refreshContext);
+    const offWarning = bridge.subscribe('chat.warning', data => {
+      if (!data.sessionId || data.sessionId === session.id) setError(String(data.message ?? '旧 Agent 会话清理失败。'));
+    });
     const offTasks = bridge.subscribe('task.updated', () => { void refreshContext(); });
     const offMemory = bridge.subscribe('memory.updated', () => { void refreshContext(); });
     const timer = window.setInterval(() => { void refreshContext(); }, 2500);
@@ -460,7 +468,7 @@ function ChatPage({ session, onSessionUpdate, onNew, onOpenMemory }: { session: 
         streamStatusFrameRef.current = null;
       }
       streamUpdateRef.current = null;
-      offUpdated(); offStreaming(); offApproval(); offResolved(); offTasks(); offMemory();
+      offUpdated(); offStreaming(); offApproval(); offResolved(); offWarning(); offTasks(); offMemory();
     };
   }, [session?.id, load, refreshContext]);
   const loadOlderHistory = useCallback(async () => {
@@ -563,7 +571,11 @@ function ChatPage({ session, onSessionUpdate, onNew, onOpenMemory }: { session: 
   }
   async function updateAgent(provider: string) {
     if (!session) return;
-    try { onSessionUpdate(await chatClient.setConfig(session.id, { ...session.config, agentProvider: provider || null })); await load(); }
+    try {
+      const updated = await chatClient.setConfig(session.id, { ...session.config, agentProvider: provider || null });
+      onSessionUpdate(updated);
+      await load();
+    }
     catch (cause) { setError(messageOf(cause)); }
   }
   async function updateModel(provider: string, model: string) {

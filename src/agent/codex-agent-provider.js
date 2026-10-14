@@ -240,7 +240,9 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
         const value = extractText(event);
         if (value) {
           run.text = value.slice(0, 200_000);
-          emit(session, makeEvent('assistant/chunk', run.turnId, { text: value.slice(0, 32_000) }));
+          emit(session, makeEvent('assistant/chunk', run.turnId, {
+            chunk: { type: 'text-delta', text: value.slice(0, 32_000) }
+          }));
         }
       } else if (event.type === 'turn.completed') {
         run.turnCompleted = true;
@@ -267,7 +269,7 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
       executionMode: 'task-staging'
     },
     methods: {
-      async createSession({ taskId, workspaceId } = {}) {
+      async createSession({ taskId, workspaceId, model, reasoningEffort } = {}) {
         if (!inspection.available) throw agentProviderError('PROVIDER_UNAVAILABLE', 'Codex CLI is not installed or lacks the inspected exec interface');
         if (!authenticated) throw agentProviderError('PROVIDER_UNAVAILABLE', 'Codex needs authentication in its own secure configuration');
         if (!taskId || !workspaceId) throw agentProviderError('TASK_REQUIRED', 'Codex requires a Task and its bound Workspace');
@@ -292,6 +294,9 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
           taskId: binding.task.id,
           workspaceId: binding.workspace.id,
           task: binding.task,
+          model: typeof model === 'string' && model.trim() ? model.trim() : providerConfig.model,
+          reasoningEffort: typeof reasoningEffort === 'string' && reasoningEffort.trim()
+            ? reasoningEffort.trim() : providerConfig.reasoningEffort,
           stage,
           threadId: null,
           activeRun: null,
@@ -327,8 +332,8 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
           stageRoot: session.stage.root,
           promptMode: session.threadId && inspection.supportsResume ? 'resume' : 'fresh',
           threadId: session.threadId,
-          model: providerConfig.model,
-          reasoningEffort: providerConfig.reasoningEffort
+          model: session.model,
+          reasoningEffort: session.reasoningEffort
         });
         try {
           run.handle = cli.startSession({
@@ -397,10 +402,10 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
       },
 
       async selectModel({ sessionId, model, reasoningEffort } = {}) {
-        requireSession(sessionId);
-        if (model !== undefined) providerConfig.model = String(model || '') || null;
-        if (reasoningEffort !== undefined) providerConfig.reasoningEffort = String(reasoningEffort || '') || null;
-        return { sessionId, provider: 'codex', selected: { ...providerConfig } };
+        const session = requireSession(sessionId);
+        if (model !== undefined) session.model = String(model || '') || null;
+        if (reasoningEffort !== undefined) session.reasoningEffort = String(reasoningEffort || '') || null;
+        return { sessionId, provider: 'codex', selected: { model: session.model, reasoningEffort: session.reasoningEffort } };
       },
 
       async health() {

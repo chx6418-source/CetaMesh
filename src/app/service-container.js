@@ -96,7 +96,7 @@ export function createCetaMeshServices(options = {}) {
         id: 'deepseek-official',
         label: 'DeepSeek 官方',
         baseUrl: 'https://api.deepseek.com',
-        defaultModel: 'deepseek-chat',
+        defaultModel: 'deepseek-flash',
         supportsTools: true,
         secrets: providerSecrets,
         supportsStreamOptions: true,

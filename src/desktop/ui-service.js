@@ -5,13 +5,13 @@ import { LEGACY_RETIRED_TOOLS } from '../integrations/catalog.js';
 
 const EVENT_NAMES = Object.freeze([
   'core.status', 'chat.updated', 'chat.streaming', 'task.updated', 'task.deleted',
-  'agent.updated', 'workspace.updated', 'plugin.updated', 'plugin.downloadProgress', 'approval.pending',
+  'chat.warning', 'agent.updated', 'workspace.updated', 'plugin.updated', 'plugin.downloadProgress', 'approval.pending',
   'approval.resolved', 'model.updated', 'memory.updated', 'update.status', 'device.updated'
 ]);
 
 const EVENT_DATA_KEYS = Object.freeze([
   'sessionId', 'taskId', 'workspaceId', 'agentId', 'pluginId', 'serverId', 'approvalId',
-  'provider', 'status', 'progress', 'ready', 'needsAttention', 'delta', 'replaceText', 'reset', 'toolActivity', 'agentActivity'
+  'provider', 'status', 'progress', 'ready', 'needsAttention', 'delta', 'replaceText', 'message', 'reset', 'toolActivity', 'agentActivity'
 ]);
 
 const SETTING_KEYS = Object.freeze({

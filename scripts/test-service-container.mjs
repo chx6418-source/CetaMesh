@@ -9,6 +9,7 @@ const originalFetch = globalThis.fetch;
 let networkAttempts = 0;
 let onExit = null;
 let services = null;
+let fallbackServices = null;
 
 try {
   process.env.WHALEBRIDGE_DATA_DIR = root;
@@ -65,10 +66,69 @@ try {
   assert.ok(providers.includes('dsh'), 'DSH provider remains registered without a transport');
   assert.ok(providers.includes('codex'), 'Codex provider remains registered when unavailable');
   assert.ok(providers.includes('zcode'), 'ZCode provider remains registered when unavailable');
+  assert.equal(services.modelRegistry.require('deepseek-official').defaultModel, 'deepseek-flash',
+    'DeepSeek Runtime default uses the currently supported model id');
   const dshHealth = await services.agentService.execute({ method: 'agent.health', params: { provider: 'dsh' } });
   assert.equal(dshHealth.available, false);
   assert.equal(dshHealth.reason, 'not_connected');
   assert.equal(networkAttempts, 0, 'constructing Core services does not make network requests');
+
+  const dshCalls = [];
+  const fallbackApi = {
+    calls: dshCalls,
+    async callEndpoint(endpoint, args = {}) {
+      dshCalls.push({ endpoint, args });
+      if (endpoint === 'session/create') return { sessionId: 'dsh-fallback-fixture' };
+      if (endpoint === 'session/selectModel') return {};
+      if (endpoint === 'session/prompt') return { accepted: true };
+      throw new Error(`unexpected DSH endpoint ${endpoint}`);
+    },
+    async *openRemoteStream(_endpoint, _args, { signal } = {}) {
+      await new Promise(resolve => signal?.addEventListener('abort', resolve, { once: true }));
+    }
+  };
+  fallbackServices = createCetaMeshServices({ config, api: fallbackApi,
+    stateDir: path.join(root, 'fallback-state'), dataRoot: path.join(root, 'fallback-data'),
+    localServices: desktopLocalServices });
+  assert.equal(fallbackServices.modelRuntime.defaultProviderId(), null, 'no configured Model key is represented as unavailable');
+  const fallbackSession = await fallbackServices.chatService.execute({ method: 'chat.sessions.create', params: {} });
+  await fallbackServices.chatService.execute({ method: 'chat.config.set', params: { id: fallbackSession.id, config: { modelProvider: null } } });
+  await fallbackServices.chatService.execute({ method: 'chat.send', params: { id: fallbackSession.id, text: 'use the configured DSH route' } });
+  assert.ok(dshCalls.some(call => call.endpoint === 'session/prompt'),
+    'the production Chat assembly reaches DSH when automatic Model Runtime has no configured key');
+  assert.equal(fallbackServices.modelRuntime.listProviders().some(provider => provider.hasKey), false,
+    'fallback does not invent or leak a Model Provider credential');
+  const fallbackWorkspaceRoot = path.join(root, 'provider-binding-workspace');
+  fs.mkdirSync(fallbackWorkspaceRoot);
+  const { workspace: fallbackWorkspace } = await fallbackServices.workspaceService.execute({
+    method: 'workspace.create', params: { name: 'Provider binding fixture', root: fallbackWorkspaceRoot }
+  });
+  const brokerSessionTask = fallbackServices.taskService.runtime.create({
+    goal: 'Provider-bound session fixture', workspaceId: fallbackWorkspace.id
+  });
+  const originalCreateAgentSession = fallbackServices.agentBroker.createSession;
+  const originalSendAgent = fallbackServices.agentBroker.send;
+  let providerSessionIndex = 0;
+  fallbackServices.agentBroker.createSession = async (provider) => ({ sessionId: `${provider}-fixture-${++providerSessionIndex}` });
+  fallbackServices.agentBroker.send = async () => ({ accepted: true });
+  try {
+    for (const provider of ['dsh', 'codex']) {
+      assert.ok(['capability-broker', 'staged-capability-broker'].includes(
+        fallbackServices.agentBroker.capabilities(provider).workspaceBoundary), `${provider} is Task/Workspace-bound`);
+      const result = await fallbackServices.capabilityService.broker.execute({
+        actor: { kind: 'owner', id: 'desktop' }, taskId: brokerSessionTask.id, workspaceId: fallbackWorkspace.id,
+        capability: 'agent.run', input: { agentProvider: provider, content: `run with ${provider}` }, reason: 'session isolation fixture'
+      });
+      assert.equal(result.status, 'completed', `${provider} session should not be passed to the Managed Agent binder`);
+      assert.equal(result.result.provider, provider);
+      fallbackServices.taskService.runtime.detachAgent({ id: brokerSessionTask.id,
+        expectedRev: fallbackServices.taskService.runtime.get({ id: brokerSessionTask.id }).task.rev,
+        note: `Reset fixture after ${provider}` });
+    }
+  } finally {
+    fallbackServices.agentBroker.createSession = originalCreateAgentSession;
+    fallbackServices.agentBroker.send = originalSendAgent;
+  }
   const pluginCatalog = await services.pluginCenterService.execute({ method: 'plugin-center.catalog.list', params: {} });
   assert.equal(pluginCatalog.available, false);
   assert.equal(pluginCatalog.reason, 'service_not_configured', 'missing Plugin Service configuration is graceful');
@@ -167,6 +227,7 @@ try {
   }));
   assert.equal(taskOnly.task.id, task.id);
   assert.equal(taskOnly.workspace, null, 'Task workspace is not substituted for the Chat’s missing explicit Workspace link');
+
   const staleLinks = JSON.parse(await services.productContextService.buildForChat({
     record: { id: 'stale-chat', taskId: 'missing-task', config: { mode: 'chat', workspaceId: 'missing-workspace' } },
     routing: null,
@@ -275,6 +336,10 @@ try {
 
   console.log('PASS Core container registers all Agent Providers without DSH or QQ network requests');
 } finally {
+  if (fallbackServices) {
+    await Promise.all([fallbackServices.chatService.close(), fallbackServices.agentService.close(),
+      fallbackServices.pluginCenterService.close(), fallbackServices.extensionService.close()]);
+  }
   if (services) {
     await Promise.all([
       services.extensionService.close(),

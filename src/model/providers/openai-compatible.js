@@ -278,6 +278,7 @@ export function createOpenAiCompatibleModelProvider({
       /** 流式回合：async generator，产出 model-stream-v1 事件；取消以 turn/end(aborted) 收尾。 */
       async *stream(options) {
         const body = buildBody({ ...options, stream: true });
+        const { byName } = buildToolSchemas(options?.tools);
         const signal = options?.signal;
         const { response } = await request('/chat/completions', { body, signal, timeoutMs: CHAT_TIMEOUT_MS });
         const parser = createSseLineParser();
@@ -287,6 +288,7 @@ export function createOpenAiCompatibleModelProvider({
         let usage = null;
         let finished = false;
         let streamModel = null;
+        const toolCalls = new Map();
         /** 处理一行 SSE：返回 true 表示遇到 [DONE]，流结束。 */
         const consumeLine = (line) => {
           if (!line.startsWith('data:')) return false;
@@ -307,6 +309,15 @@ export function createOpenAiCompatibleModelProvider({
           if (payload?.usage && typeof payload.usage === 'object') usage = payload.usage;
           const choice = Array.isArray(payload?.choices) ? payload.choices[0] : null;
           const delta = choice?.delta;
+          for (const toolDelta of Array.isArray(delta?.tool_calls) ? delta.tool_calls : []) {
+            const index = Number.isInteger(toolDelta?.index) ? toolDelta.index : toolCalls.size;
+            const previous = toolCalls.get(index) ?? { id: '', type: 'function', name: '', arguments: '' };
+            if (typeof toolDelta?.id === 'string' && toolDelta.id) previous.id = toolDelta.id;
+            if (typeof toolDelta?.type === 'string' && toolDelta.type) previous.type = toolDelta.type;
+            if (typeof toolDelta?.function?.name === 'string') previous.name += toolDelta.function.name;
+            if (typeof toolDelta?.function?.arguments === 'string') previous.arguments += toolDelta.function.arguments;
+            toolCalls.set(index, previous);
+          }
           const piece = typeof delta?.content === 'string'
             ? delta.content
             : Array.isArray(delta?.content)
@@ -367,6 +378,16 @@ export function createOpenAiCompatibleModelProvider({
           try { reader.releaseLock(); } catch { /* 流已关闭 */ }
         }
         log(`Model Provider「${label}」回合完成（model=${streamModel}，chars=${fullText.length}）`);
+        if (toolCalls.size) {
+          const completedCalls = [...toolCalls.entries()].sort(([a], [b]) => a - b).map(([, call]) => ({
+            id: call.id,
+            type: call.type,
+            name: call.name,
+            ...(byName.has(call.name) ? { capabilityId: byName.get(call.name) } : {}),
+            arguments: call.arguments
+          }));
+          yield modelStreamEvent('assistant/tool-calls', { toolCalls: completedCalls });
+        }
         yield modelStreamEvent('assistant/message', {
           message: { content: [{ type: 'text', text: fullText }], ...(usage ? { usage } : {}) }
         });

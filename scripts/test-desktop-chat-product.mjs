@@ -21,10 +21,12 @@ function ok(label) { step += 1; console.log(`✅ [${step}] ${label}`); }
 /** 可控 DSH fixture：callEndpoint 记录调用；follow 流由 _injectEvent 驱动。 */
 function fixtureApi() {
   const calls = [];
+  const followSignals = [];
   let promptHandler = null;
   let failEndpoints = null; // Set<endpoint>：命中即抛 ECONNREFUSED
   return {
     calls,
+    followSignals,
     setPromptHandler: (fn) => { promptHandler = fn; },
     fail: (endpoints) => { failEndpoints = new Set(endpoints); },
     async callEndpoint(endpoint, args = {}) {
@@ -41,10 +43,14 @@ function fixtureApi() {
         return { accepted: true };
       }
       if (endpoint === 'session/cancel') return {};
+      if (endpoint === 'workspace/archiveSession') return { closed: true };
       throw new Error(`unexpected endpoint: ${endpoint}`);
     },
-    // follow 流永不产出；事件统一经 _injectEvent 注入（abort 后进程退出即清理）。
-    async *openRemoteStream() { await new Promise(() => {}); }
+    // follow 流永不产出；事件统一经 _injectEvent 注入，并遵守 signal 结束。
+    async *openRemoteStream(_endpoint, _args, { signal } = {}) {
+      followSignals.push(signal);
+      await new Promise(resolve => signal?.addEventListener('abort', resolve, { once: true }));
+    }
   };
 }
 
@@ -193,7 +199,7 @@ const turnEnd = (id, kind, error) => ({ type: 'turn/end', data: { reason: { kind
   const session = await service.execute({ method: 'chat.sessions.create', params: {} });
   await assert.rejects(
     service.execute({ method: 'chat.send', params: { id: session.id, text: 'DSH 关了' } }),
-    (error) => error.code === 'PROVIDER_ERROR' && /ECONNREFUSED/.test(error.message)
+    (error) => error.code === 'DSH_UNAVAILABLE' && /DSH 未连接或不可达/.test(error.message)
   );
   const history = await service.execute({ method: 'chat.history', params: { id: session.id } });
   assert.equal(history.messages.length, 1);
@@ -439,7 +445,7 @@ function abortableSseFetch() {
 }
 
 /** 组装带 Model Runtime / Router / Agent 的完整 chat-service（全 fixture，不联网不碰 DSH）。 */
-function makeFullService({ withKey = true, fetchImpl, baseUrl = 'https://api.deepseek.test', router = true, api = dshDownApi(), agent = false, agentBoundary = 'unsupported', stateDir: overrideDir, buildProductContext, defaultModelConfig, onEvent } = {}) {
+function makeFullService({ withKey = true, fetchImpl, baseUrl = 'https://api.deepseek.test', router = true, api = dshDownApi(), agent = false, agentProviderId = 'dsh', agentBoundary = 'unsupported', stateDir: overrideDir, buildProductContext, defaultModelConfig, onEvent } = {}) {
   const dir = overrideDir ?? path.join(stateDir, 's1-' + (++caseSeq));
   fs.mkdirSync(dir, { recursive: true });
   const secrets = createProviderSecrets({ root: dir });
@@ -463,18 +469,19 @@ function makeFullService({ withKey = true, fetchImpl, baseUrl = 'https://api.dee
   });
   const routerService = router ? createRouterService({ stateDir: dir, log: () => {} }) : null;
   const agentCalls = [];
+  const agentLabel = agentProviderId === 'dsh' ? 'DSH Agent' : `${agentProviderId} Agent`;
   const agentExecute = agent
     ? async ({ method, params }) => {
       agentCalls.push({ method, params });
       if (method === 'agent.createSession') return { sessionId: `agent-${agentCalls.length}` };
-      if (method === 'agent.list') return { providers: [{ id: 'dsh', label: 'DSH Agent', displayName: 'DSH', available: true, workspaceBoundary: agentBoundary, health: { available: true } }] };
+      if (method === 'agent.list') return { providers: [{ id: agentProviderId, label: agentLabel, displayName: agentProviderId === 'dsh' ? 'DSH' : agentProviderId, available: true, workspaceBoundary: agentBoundary, health: { available: true } }] };
       return { ok: true };
     }
     : null;
   const service = createChatService({
     api,
     controlExecute: fixtureControl('throw'), // DSH 模型目录不可用：Model Runtime 目录不受影响
-    agentProviders: agent ? [{ id: 'dsh', label: 'DSH Agent', eventProtocol: 'dsh-session-events', workspaceBoundary: agentBoundary }] : [],
+    agentProviders: agent ? [{ id: agentProviderId, label: agentLabel, eventProtocol: 'dsh-session-events', workspaceBoundary: agentBoundary }] : [],
     agentExecute,
     modelRuntime,
     router: routerService,
@@ -484,7 +491,7 @@ function makeFullService({ withKey = true, fetchImpl, baseUrl = 'https://api.dee
     stateDir: dir,
     onEvent
   });
-  return { service, api, fetchImpl, agentCalls, dir };
+  return { service, api, fetchImpl, agentCalls, dir, secrets };
 }
 
 // ── 12. Standalone Chat：DSH 完全不可达，仅凭 Model Provider Key 完成整回合 ────
@@ -575,6 +582,132 @@ function makeFullService({ withKey = true, fetchImpl, baseUrl = 'https://api.dee
   service.close();
 }
 
+// ── 14c. Agent 切换关闭旧 Session、停止旧 Follow，并新建目标 Provider Session ─
+{
+  const calls = [];
+  const createdAgentSessionIds = [];
+  const followRows = [];
+  const service = createChatService({
+    agentProviders: [
+      { id: 'dsh', label: 'DSH Agent', eventProtocol: 'dsh-session-events', workspaceBoundary: 'unsupported' },
+      { id: 'codex', label: 'Codex Agent', eventProtocol: 'agent-turn-events-v1', workspaceBoundary: 'unsupported' }
+    ],
+    agentExecute: async ({ method, params }) => {
+      calls.push({ method, params });
+      if (method === 'agent.createSession') {
+        const sessionId = `${params.provider}-session-${calls.length}`;
+        createdAgentSessionIds.push({ provider: params.provider, sessionId });
+        return { sessionId };
+      }
+      return { closed: true, accepted: true };
+    },
+    agentFollow: async function* (request) {
+      followRows.push(request);
+      await new Promise(resolve => request.signal.addEventListener('abort', resolve, { once: true }));
+    },
+    defaults: {}, stateDir: path.join(stateDir, `agent-switch-${++caseSeq}`)
+  });
+  const session = await service.execute({ method: 'chat.sessions.create', params: {} });
+  await service.execute({ method: 'chat.config.set', params: { id: session.id, config: { agentProvider: 'dsh' } } });
+  await service.execute({ method: 'chat.send', params: { id: session.id, text: 'first provider' } });
+  service._injectEvent(session.id, { type: 'turn/start', data: {} });
+  service._injectEvent(session.id, turnEnd(session.id, 'completed'));
+  for (let i = 0; i < 20 && !followRows.length; i += 1) await new Promise(resolve => setTimeout(resolve, 5));
+  const oldSessionId = createdAgentSessionIds[0].sessionId;
+  const switched = await service.execute({ method: 'chat.config.set', params: { id: session.id, config: { agentProvider: 'codex' } } });
+  assert.equal(switched.config.agentProvider, 'codex');
+  assert.equal(switched.dshSessionId, null, 'switching Agent clears the old provider session identity');
+  assert.equal(followRows[0].signal.aborted, true, 'switching Agent aborts the old follow stream');
+  for (let attempt = 0; attempt < 20 && !calls.some(call => call.method === 'agent.closeSession'); attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  assert.ok(calls.some(call => call.method === 'agent.closeSession' && call.params.sessionId === oldSessionId && call.params.provider === 'dsh'),
+    `the previous Agent session is closed through its own provider: ${JSON.stringify({ oldSessionId, calls })}`);
+  await service.execute({ method: 'chat.send', params: { id: session.id, text: 'second provider' } });
+  assert.ok(calls.some(call => call.method === 'agent.createSession' && call.params.provider === 'codex'),
+    'the next message immediately creates a Codex session');
+  assert.ok(calls.some(call => call.method === 'agent.send' && call.params.provider === 'codex'));
+  service.close();
+  ok('切换 Agent：旧 Follow 中止、旧 Session 关闭、下一条消息新建目标 Provider Session');
+}
+
+// ── 14a. 自动 DSH Session 切换 Agent：无显式 Agent 选择也必须关闭旧会话 ─────
+{
+  const api = fixtureApi();
+  const calls = [];
+  let service = null;
+  let session = null;
+  api.setPromptHandler(async () => {
+    service._injectEvent(session.id, { type: 'turn/start', data: {} });
+    service._injectEvent(session.id, turnEnd(session.id, 'completed'));
+  });
+  service = makeService({ api, options: {
+    agentProviders: [
+      { id: 'dsh', label: 'DSH Agent', eventProtocol: 'dsh-session-events', workspaceBoundary: 'unsupported' },
+      { id: 'codex', label: 'Codex Agent', eventProtocol: 'agent-turn-events-v1', workspaceBoundary: 'unsupported' }
+    ],
+    agentExecute: async ({ method, params }) => {
+      calls.push({ method, params });
+      if (method === 'agent.createSession') return { sessionId: `${params.provider}-next-session` };
+      return { accepted: true, closed: true };
+    }
+  } });
+  session = await service.execute({ method: 'chat.sessions.create', params: {} });
+  await service.execute({ method: 'chat.send', params: { id: session.id, text: 'automatic DSH route' } });
+  for (let attempt = 0; attempt < 20 && !api.followSignals.length; attempt += 1) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal((await service.execute({ method: 'chat.status', params: { id: session.id } })).lastState, 'idle');
+  const oldDshId = 'dsh-1';
+  const switched = await service.execute({ method: 'chat.config.set', params: { id: session.id, config: { agentProvider: 'codex' } } });
+  assert.equal(switched.dshSessionId, null);
+  assert.equal(api.followSignals[0]?.aborted, true, 'switch aborts the automatic DSH Follow');
+  for (let attempt = 0; attempt < 20 && !calls.some(call => call.method === 'agent.closeSession'); attempt += 1) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.ok(calls.some(call => call.method === 'agent.closeSession' && call.params.provider === 'dsh' && call.params.sessionId === oldDshId),
+    'an automatic DSH session is closed using its actual DSH provider identity');
+  await service.execute({ method: 'chat.send', params: { id: session.id, text: 'switch target is Codex' } });
+  assert.ok(calls.some(call => call.method === 'agent.createSession' && call.params.provider === 'codex'));
+  service.close();
+  ok('自动 DSH → Agent：旧 Follow 中止、旧 DSH Session 关闭、下一条消息使用目标 Agent');
+}
+
+// ── 14b. Managed Agent 的 Provider 选择绑定到会话并在下一回合生效 ────────────
+{
+  const { service, agentCalls } = makeFullService({ fetchImpl: sseFetch(), agent: true, agentProviderId: 'cetamesh' });
+  const session = await service.execute({ method: 'chat.sessions.create', params: {} });
+  await service.execute({ method: 'chat.config.set', params: { id: session.id, config: {
+    agentProvider: 'cetamesh', modelProvider: 'deepseek-official', model: 'deepseek-flash'
+  } } });
+  await service.execute({ method: 'chat.send', params: { id: session.id, text: 'first Managed Agent turn' } });
+  const created = agentCalls.find(call => call.method === 'agent.createSession');
+  const agentSessionId = `agent-${agentCalls.indexOf(created) + 1}`;
+  assert.equal(created.params.modelProvider, 'deepseek-official', 'Managed Agent session creation receives its selected Provider');
+  service._injectEvent(session.id, turnEnd(session.id, 'completed'));
+  await service.execute({ method: 'chat.config.set', params: { id: session.id, config: { modelProvider: 'openai', model: 'gpt-4o-mini' } } });
+  const selected = agentCalls.find(call => call.method === 'agent.selectModel');
+  assert.equal(selected.params.sessionId, agentSessionId);
+  assert.equal(selected.params.provider, 'cetamesh');
+  assert.equal(selected.params.modelProvider, 'openai', 'Provider switch is applied to the existing Managed Agent session');
+  assert.equal(selected.params.model, 'gpt-4o-mini');
+  await service.execute({ method: 'chat.send', params: { id: session.id, text: 'next turn after Provider switch' } });
+  assert.ok(agentCalls.some(call => call.method === 'agent.send' && call.params.sessionId === agentSessionId),
+    'the next turn reuses the session whose Provider was just changed');
+  service.close();
+  ok('Managed Agent：创建时传 Provider，切换后立即更新现有 Session');
+}
+
+// ── 14c. Harbor UI event bus 投影 chat.warning 和 bounded message ─────────────
+{
+  const eventBus = createDesktopUiEventBus();
+  const ui = createDesktopUiService({ eventBus });
+  const warning = '旧 Agent 会话未能关闭；请检查原 Agent 连接。'.repeat(20);
+  assert.equal(eventBus.publish('chat.warning', { sessionId: 'chat-warning-fixture', message: warning }), true);
+  const result = await ui.execute({ method: 'ui.events.next', params: { after: 0, waitMs: 0 } });
+  const delivered = result.events.find(event => event.event === 'chat.warning');
+  assert.ok(delivered, 'Harbor receives the session warning event');
+  assert.equal(delivered.data.sessionId, 'chat-warning-fixture');
+  assert.equal(delivered.data.message, warning.slice(0, 200), 'warning message is projected with the standard bounded string limit');
+  ok('Harbor UI event bus：chat.warning 与 bounded message 可订阅');
+}
+
 // ── 14b. Chat 与 Agents 使用同一健康状态，并保留未验证边界原因 ───────────────
 {
   const { service } = makeFullService({ agent: true, agentBoundary: 'unverified' });
@@ -651,15 +784,15 @@ function makeFullService({ withKey = true, fetchImpl, baseUrl = 'https://api.dee
   service.close();
 }
 
-// ── 16. Model Provider 配置：显式指定 / Key 缺失明确报错 / 配好后恢复 ──────────
+// ── 16. Model Provider 配置：无 Key 的自动路径明确使用 DSH，显式缺 Key 报错 ──
 {
   const f = sseFetch();
-  const { service, fetchImpl } = makeFullService({ withKey: false, fetchImpl: f });
+  const { service } = makeFullService({ withKey: false, fetchImpl: f });
   const session = await service.execute({ method: 'chat.sessions.create', params: {} });
-  // Automatic model resolution never starts DSH when no Key is configured.
+  // Automatic selection falls back to the existing DSH route only when no Model Provider is configured.
   await assert.rejects(
     service.execute({ method: 'chat.send', params: { id: session.id, text: '没有 Key' } }),
-    (error) => error.code === 'MODEL_PROVIDER_KEY_MISSING' && /设置 → 模型/.test(error.message)
+    (error) => error.code === 'DSH_UNAVAILABLE' && /DSH/.test(error.message)
   );
   // 显式指定 openai（未配 Key）→ KEY_MISSING 明确指向设置页
   await service.execute({ method: 'chat.config.set', params: { id: session.id, config: { modelProvider: 'openai' } } });
@@ -672,8 +805,98 @@ function makeFullService({ withKey = true, fetchImpl, baseUrl = 'https://api.dee
     service.execute({ method: 'chat.config.set', params: { id: session.id, config: { modelProvider: 'nope' } } }),
     (error) => error.code === 'INVALID_PARAMS'
   );
-  ok('Provider 配置：无 Key 明确报错且不启动 DSH / 显式缺 Key 报错 / 非法 Provider 拒绝');
+  ok('Provider 配置：自动路径仅在无 Model Key 时尝试 DSH / 显式缺 Key 报错 / 非法 Provider 拒绝');
   service.close();
+}
+
+// ── 16b. Model Provider 切换：下一条消息立即使用新的 Provider 和 Model ────────
+{
+  const f = sseFetch();
+  const { service, secrets } = makeFullService({ fetchImpl: f });
+  secrets.set({ provider: 'openai', apiKey: API_KEY });
+  const session = await service.execute({ method: 'chat.sessions.create', params: {} });
+  await service.execute({ method: 'chat.config.set', params: {
+    id: session.id, config: { modelProvider: 'openai', model: 'gpt-4.1-mini' }
+  } });
+  await service.execute({ method: 'chat.send', params: { id: session.id, text: 'use the selected OpenAI model now' } });
+  const waitForIdle = async () => {
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      if (!(await service.execute({ method: 'chat.status', params: { id: session.id } })).turn) return;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    assert.fail('selected OpenAI turn did not finish');
+  };
+  await waitForIdle();
+  assert.equal(f.requests[0].url, 'https://api.openai.test/v1/chat/completions');
+  assert.equal(f.requests[0].body.model, 'gpt-4.1-mini');
+  assert.equal((await service.execute({ method: 'chat.sessions.list', params: {} })).sessions[0].config.modelProvider, 'openai');
+  ok('Provider/Model 选择立即进入下一回合的真实请求');
+  service.close();
+}
+
+// ── 16c. DSH → Model Runtime Provider handover：停止 Follow、关闭 Session、隔离迟到事件 ─
+{
+  const apiCalls = [];
+  let onPrompt = null;
+  let oldFollowSignal = null;
+  let releaseOldFollow = null;
+  let markFollowStarted = null;
+  const followStarted = new Promise(resolve => { markFollowStarted = resolve; });
+  const api = {
+    calls: apiCalls,
+    async callEndpoint(endpoint, args = {}) {
+      apiCalls.push({ endpoint, args });
+      if (endpoint === 'session/create') return { sessionId: 'dsh-handoff-session' };
+      if (endpoint === 'session/selectModel') return {};
+      if (endpoint === 'session/prompt') { await onPrompt?.(); return { accepted: true }; }
+      if (endpoint === 'workspace/archiveSession') return { closed: true };
+      throw new Error(`unexpected endpoint: ${endpoint}`);
+    },
+    async *openRemoteStream(_endpoint, _args, { signal } = {}) {
+      oldFollowSignal = signal;
+      markFollowStarted();
+      await new Promise(resolve => { releaseOldFollow = resolve; });
+      // 代表 stop/abort 竞争窗口中已排队的旧 DSH 事件。
+      yield { type: 'event', event: { type: 'assistant/chunk', data: { chunk: { type: 'text-delta', text: 'STALE DSH' } } } };
+    }
+  };
+  let modelStreamController = null;
+  const modelFetch = async () => new Response(new ReadableStream({
+    start(controller) {
+      modelStreamController = controller;
+      controller.enqueue(new TextEncoder().encode('data: {"model":"gpt-4o-mini","choices":[{"delta":{"content":"MODEL"}}]}\n\n'));
+    }
+  }), { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  const { service, secrets } = makeFullService({ withKey: false, fetchImpl: modelFetch, api });
+  const session = await service.execute({ method: 'chat.sessions.create', params: {} });
+  onPrompt = async () => {
+    service._injectEvent(session.id, { type: 'turn/start', data: {} });
+    service._injectEvent(session.id, message(session.id, 'DSH first answer'));
+    service._injectEvent(session.id, turnEnd(session.id, 'completed'));
+  };
+  await service.execute({ method: 'chat.send', params: { id: session.id, text: 'start on DSH' } });
+  await followStarted;
+  secrets.set({ provider: 'openai', apiKey: API_KEY });
+  const switched = await service.execute({ method: 'chat.config.set', params: {
+    id: session.id, config: { modelProvider: 'openai', model: 'gpt-4o-mini' }
+  } });
+  assert.equal(switched.dshSessionId, null, 'provider-only channel change clears the prior DSH session');
+  assert.equal(oldFollowSignal.aborted, true, 'provider handover stops the previous DSH Follow');
+  for (let attempt = 0; attempt < 20 && !apiCalls.some(call => call.endpoint === 'workspace/archiveSession'); attempt += 1) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.ok(apiCalls.some(call => call.endpoint === 'workspace/archiveSession' && call.args.request.sessionId === 'dsh-handoff-session'),
+    'handover closes the abandoned DSH session');
+  await service.execute({ method: 'chat.send', params: { id: session.id, text: 'use the selected Model Provider' } });
+  releaseOldFollow();
+  await new Promise(resolve => setTimeout(resolve, 20));
+  const streaming = await service.execute({ method: 'chat.status', params: { id: session.id } });
+  assert.equal(streaming.turn.displayText, 'MODEL', 'late DSH events cannot be appended to the new Model Runtime turn');
+  modelStreamController.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+  modelStreamController.close();
+  for (let attempt = 0; attempt < 100 && (await service.execute({ method: 'chat.status', params: { id: session.id } })).turn; attempt += 1) await new Promise(resolve => setTimeout(resolve, 10));
+  const history = await service.execute({ method: 'chat.history', params: { id: session.id } });
+  assert.equal(history.messages.at(-1).text, 'MODEL');
+  service.close();
+  ok('DSH → Model Runtime：Provider-only handover 关闭旧 Session/Follow，迟到事件不污染新回合');
 }
 
 // ── 17. catalog：Model Runtime 目录与 DSH 目录并存，无 Key 材料 ────────────────

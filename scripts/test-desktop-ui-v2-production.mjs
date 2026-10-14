@@ -214,6 +214,20 @@ check('Harbor reconciles optimistic sends, selections, activities, and retry by 
   assert.match(chat, /MESSAGE_ID_CONFLICT/);
   assert.match(chat, /toolActivity: Array\.isArray\(turn\.toolActivity\)/);
 });
+check('Harbor Chat history refresh does not wait for the remote Model Catalog', () => {
+  const app = read('desktop-ui/src/app/HarborApp.tsx');
+  const page = app.slice(app.indexOf('function ChatPage'), app.indexOf('function MessageBubble'));
+  const loadAt = page.indexOf('const load = useCallback');
+  const loadEnd = page.indexOf('}, [session?.id, session?.title]);', loadAt);
+  assert.ok(loadAt >= 0 && loadEnd > loadAt, 'ChatPage load callback is present');
+  const load = page.slice(loadAt, loadEnd);
+  assert.match(load, /chatClient\.history\(session\.id, 100\)/);
+  assert.match(load, /chatClient\.status\(session\.id\)/);
+  assert.doesNotMatch(load, /chatClient\.catalog\(\)/, 'catalog latency cannot hold history and status refresh');
+  assert.match(page, /const refreshCatalog = useCallback/);
+  assert.match(page, /useEffect\(\(\) => \{ void refreshCatalog\(\); \}, \[refreshCatalog\]\)/,
+    'the model catalog refreshes independently after Chat mounts');
+});
 check('Harbor accessibility and real-world controls avoid clipping and preserve selected content', () => {
   const app = read('desktop-ui/src/app/HarborApp.tsx');
   const inputs = read('desktop-ui/src/components/primitives/inputs.tsx');

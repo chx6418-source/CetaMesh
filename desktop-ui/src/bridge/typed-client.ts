@@ -78,11 +78,12 @@ export interface IntegrationSettings {
   legacyRetired: RetiredIntegrationTool[]; settings: Record<string, unknown>; localService: LocalServiceSettings | null;
 }
 
-export type DesktopEvent = 'core.status' | 'chat.updated' | 'chat.streaming' | 'task.updated' | 'task.deleted'
+export type DesktopEvent = 'core.status' | 'chat.updated' | 'chat.streaming' | 'chat.warning' | 'task.updated' | 'task.deleted'
   | 'agent.updated' | 'workspace.updated' | 'plugin.updated' | 'plugin.downloadProgress' | 'approval.pending' | 'approval.resolved'
   | 'model.updated' | 'memory.updated' | 'update.status' | 'device.updated';
 export interface DesktopEventData {
   sessionId?: string; taskId?: string; agentId?: string; pluginId?: string; serverId?: string; approvalId?: string;
+  message?: string;
   provider?: string; status?: string; progress?: number; ready?: boolean; needsAttention?: boolean;
   delta?: string; replaceText?: string; reset?: boolean; toolActivity?: ChatMessage['toolActivity']; agentActivity?: ChatMessage['agentActivity'];
 }

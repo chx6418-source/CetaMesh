@@ -281,6 +281,9 @@ try {
   const completedStatus = await waitFor(() => agentBroker.status({ provider: 'codex', sessionId: codexSessionId }),
     status => status.lastRunStatus === 'completed');
   assert.equal(completedStatus.running, false);
+  const firstCodexChunk = codexProvider._sessions.get(codexSessionId).events.find(event => event.type === 'assistant/chunk');
+  assert.deepEqual(firstCodexChunk?.data.chunk, { type: 'text-delta', text: 'fixture response 1' },
+    'Codex assistant chunks use the same text-delta protocol as Harbor Chat');
   assert.equal(fs.readFileSync(path.join(authoritativeRoot, 'codex-result-1.txt'), 'utf8'), 'fake edit 1');
   const firstArgs = fakeRuns[0].args;
   assert.ok(firstArgs.includes('--json'));
@@ -346,6 +349,76 @@ try {
   assert.notEqual(recoveredAssignment.result.sessionId, previousTaskAgent.sessionId);
   await waitFor(() => restartedBroker.status({ provider: 'codex', sessionId: recoveredAssignment.result.sessionId }),
     status => !status.running && status.lastRunStatus === 'completed');
+
+  const harborAgentSession = await restartedBroker.createSession('codex', {
+    taskId: task.id, workspaceId: authoritative.id
+  });
+  const harborEvents = [];
+  const harborAgentConfigCalls = [];
+  const harborChat = createChatService({
+    agentProviders: [{ id: 'codex', label: 'Codex', eventProtocol: 'agent-turn-events-v1', workspaceBoundary: 'staged-capability-broker' }],
+    agentExecute: async request => {
+      harborAgentConfigCalls.push(request);
+      if (request.method === 'agent.selectModel') return restartedBroker.selectModel({
+        provider: request.params.provider, sessionId: request.params.sessionId,
+        model: request.params.model, reasoningEffort: request.params.reasoningEffort
+      });
+      throw new Error(`unexpected Agent method: ${request.method}`);
+    },
+    agentFollow: request => restartedBroker.follow({ provider: 'codex', sessionId: request.sessionId, signal: request.signal }),
+    platformRoute: async ({ record, text }) => {
+      await restartedBroker.send({ provider: 'codex', sessionId: harborAgentSession.sessionId, content: text });
+      return { kind: 'agent', provider: 'codex', sessionId: harborAgentSession.sessionId,
+        taskId: task.id, workspaceId: authoritative.id };
+    },
+    defaults: {}, stateDir: path.join(stateDir, 'harbor-codex-stream'), onEvent: event => harborEvents.push(event)
+  });
+  const harborSession = await harborChat.execute({ method: 'chat.sessions.create', params: {} });
+  await harborChat.execute({ method: 'chat.config.set', params: { id: harborSession.id, config: { agentProvider: 'codex' } } });
+  const expectedHarborRun = fakeRuns.length + 1;
+  await harborChat.execute({ method: 'chat.send', params: { id: harborSession.id, text: 'stream a Codex answer into Harbor' } });
+  await waitFor(async () => harborChat.execute({ method: 'chat.status', params: { id: harborSession.id } }), status => status.turn === null);
+  assert.ok(harborEvents.some(event => event.event === 'chat.streaming' && event.data.delta === `fixture response ${expectedHarborRun}`),
+    'Codex provider output enters the Harbor Chat streaming event protocol');
+  assert.equal((await harborChat.execute({ method: 'chat.history', params: { id: harborSession.id } })).messages.at(-1).text,
+    `fixture response ${expectedHarborRun}`);
+  await harborChat.execute({ method: 'chat.config.set', params: { id: harborSession.id,
+    config: { model: 'harbor-codex-model', reasoning: 'high' } } });
+  assert.ok(harborAgentConfigCalls.some(call => call.method === 'agent.selectModel'
+    && call.params.provider === 'codex' && call.params.sessionId === harborAgentSession.sessionId),
+  'Chat applies Model and reasoning changes through the active Codex session contract');
+  const beforeSecondHarborRun = fakeRuns.length;
+  await harborChat.execute({ method: 'chat.send', params: { id: harborSession.id, text: 'use my new Codex settings' } });
+  await waitFor(async () => harborChat.execute({ method: 'chat.status', params: { id: harborSession.id } }), status => status.turn === null);
+  const secondHarborRun = fakeRuns.slice(beforeSecondHarborRun).find(run => run.sessionId.startsWith(harborAgentSession.sessionId + ':'));
+  assert.ok(secondHarborRun.args.includes('--model')
+    && secondHarborRun.args[secondHarborRun.args.indexOf('--model') + 1] === 'harbor-codex-model');
+  assert.ok(secondHarborRun.args.some(arg => arg.includes('model_reasoning_effort="high"')));
+  harborChat.close();
+
+  const isolatedA = await restartedProvider.createSession({ taskId: task.id, workspaceId: authoritative.id,
+    model: 'requested-model-a', reasoningEffort: 'low' });
+  const isolatedB = await restartedProvider.createSession({ taskId: task.id, workspaceId: authoritative.id,
+    model: 'requested-model-b', reasoningEffort: 'high' });
+  await restartedProvider.selectModel({ sessionId: isolatedA.sessionId, model: 'selected-model-a', reasoningEffort: 'medium' });
+  await restartedBroker.send({ provider: 'codex', sessionId: isolatedA.sessionId, content: 'session A config' });
+  await waitFor(() => restartedBroker.status({ provider: 'codex', sessionId: isolatedA.sessionId }),
+    status => !status.running && status.lastRunStatus === 'completed');
+  await restartedBroker.send({ provider: 'codex', sessionId: isolatedB.sessionId, content: 'session B config' });
+  await waitFor(() => restartedBroker.status({ provider: 'codex', sessionId: isolatedB.sessionId }),
+    status => !status.running && status.lastRunStatus === 'completed');
+  const runA = fakeRuns.find(run => run.sessionId.startsWith(isolatedA.sessionId + ':'));
+  const runB = fakeRuns.find(run => run.sessionId.startsWith(isolatedB.sessionId + ':'));
+  assert.ok(runA.args.includes('--model') && runA.args[runA.args.indexOf('--model') + 1] === 'selected-model-a');
+  assert.ok(runA.args.some(arg => arg.includes('model_reasoning_effort="medium"')));
+  assert.ok(runB.args.includes('--model') && runB.args[runB.args.indexOf('--model') + 1] === 'requested-model-b');
+  assert.ok(runB.args.some(arg => arg.includes('model_reasoning_effort="high"')));
+  assert.ok(!runB.args.includes('selected-model-a'), 'model selection in session A does not alter session B');
+  assert.ok(!runB.args.some(arg => arg.includes('model_reasoning_effort="medium"')),
+    'reasoning selection in session A does not alter session B');
+  await restartedProvider.closeSession({ sessionId: isolatedA.sessionId });
+  await restartedProvider.closeSession({ sessionId: isolatedB.sessionId });
+  await restartedProvider.shutdown();
   await restartedProvider.shutdown();
 
   const unavailable = await createCodexAgentProvider({ executable: null });

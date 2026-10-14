@@ -97,7 +97,7 @@ export function createModelRuntimeService({ registry, secrets, preferredProvider
   }
 
   /** 回合流入口：chat-service 传 providerId（已解析）或 null（自动）。 */
-  function stream({ providerId, model, messages, reasoning, signal }) {
+  function stream({ providerId, model, messages, reasoning, signal, tools, toolChoice }) {
     const provider = resolveProvider(providerId);
     const effectiveModel = typeof model === 'string' && model.trim()
       ? model.trim()
@@ -116,6 +116,8 @@ export function createModelRuntimeService({ registry, secrets, preferredProvider
       requestedModel: typeof model === 'string' && model.trim() ? model.trim() : 'provider-default',
       messages,
       reasoning,
+      tools,
+      toolChoice,
       signal
     });
   }

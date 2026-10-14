@@ -416,7 +416,9 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
           model: r.input.model, modelProvider: r.input.modelProvider, reasoningEffort: r.input.reasoningEffort });
         if (!created?.sessionId) throw capabilityError('PROVIDER_ERROR', 'Agent returned no session');
         const attached = taskRuntime.attachAgent({ id: task.id, expectedRev: task.rev, provider, sessionId: created.sessionId });
-        bindAgentSession?.(created.sessionId, { taskId: task.id, workspaceId: ws.id, actor });
+        if (provider === 'cetamesh') {
+          bindAgentSession?.(created.sessionId, { taskId: task.id, workspaceId: ws.id, actor });
+        }
         if (attached.task.status === 'queued') taskRuntime.start({ id: task.id, expectedRev: attached.task.rev });
         const sent = await agentBroker.send({ provider, sessionId: created.sessionId, content: String(r.input.content || task.goal) });
         return { taskId: task.id, workspaceId: ws.id, provider, sessionId: created.sessionId, accepted: sent?.accepted === true, actor };

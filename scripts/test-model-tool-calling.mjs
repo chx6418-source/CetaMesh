@@ -351,6 +351,9 @@ const emptyObjectSchema = {
     const approvedCoreHistory = await approved.chatService.execute({ method: 'chat.history', params: { id: approved.session.id } });
     assert.equal(approvedCoreHistory.messages.at(-1).turnId, originalTurnId, 'approval continuation keeps the original Chat turn id');
     const afterDecision = await approved.eventBus.next({ after: 0, waitMs: 0 });
+    assert.ok(afterDecision.events.some(event => event.event === 'chat.streaming'
+      && event.data.sessionId === approved.session.id && event.data.status === 'streaming' && event.data.reset === true),
+    'approving a tool resumes the same Harbor turn in streaming state');
     assert.ok(afterDecision.events.some(event => event.event === 'chat.updated' && event.data.sessionId === approved.session.id),
       'Harbor reloads the completed assistant reply after an approval is handled elsewhere');
   } finally { approved.chatService.close(); }
@@ -459,6 +462,48 @@ const emptyObjectSchema = {
     error => error.code === 'PRODUCT_CONTEXT_UNAVAILABLE');
   chat.close();
   pass('production Chat fails closed when CetaMesh Product Context is unavailable');
+}
+
+{
+  const broker = createCapabilityBroker({ policy: createCapabilityPolicy() });
+  broker.register({ id: 'clock.now', permission: 'log', description: 'Return the current local time.',
+    inputSchema: emptyObjectSchema, risk: 'low', execute: () => ({ iso: 'fixture-time' }) });
+  const requests = [], deltas = [], toolActivities = [];
+  let cycle = 0;
+  const runtime = {
+    supportsToolCalling: () => true,
+    async chat() { assert.fail('tool-capable Chat must use the streaming Model Runtime path'); },
+    async *stream(request) {
+      requests.push(request);
+      cycle += 1;
+      if (cycle === 1) {
+        yield { type: 'assistant/chunk', data: { chunk: { type: 'text-delta', text: 'Checking. ' } } };
+        yield { type: 'assistant/tool-calls', data: { toolCalls: [
+          { id: 'stream-clock', capabilityId: 'clock.now', name: 'clock.now', arguments: '{}' }
+        ] } };
+        yield { type: 'turn/end', data: { reason: { kind: 'completed', usage: { prompt_tokens: 5, completion_tokens: 2 } }, resolvedModel: 'fixture-model' } };
+      } else {
+        yield { type: 'assistant/chunk', data: { chunk: { type: 'text-delta', text: 'It is fixture-time.' } } };
+        yield { type: 'turn/end', data: { reason: { kind: 'completed', usage: { prompt_tokens: 8, completion_tokens: 4 } }, resolvedModel: 'fixture-model' } };
+      }
+    }
+  };
+  const coordinator = createToolExecutionCoordinator({ modelRuntime: runtime, capabilityBroker: broker,
+    stateDir: path.join(temp, 'streaming-tool-loop') });
+  const result = await coordinator.run({ providerId: 'fixture', model: 'fixture-model', messages: [{ role: 'user', content: 'What time?' }],
+    manifest: [{ id: 'clock.now', description: 'Return the current local time.', inputSchema: emptyObjectSchema }],
+    actor: OWNER_ACTOR, sessionId: 'streaming-chat', turnId: 'streaming-turn', targetKind: 'chat',
+    onTextDelta: delta => deltas.push(delta), onStreamReset: () => deltas.push('[reset]'),
+    onActivity: activity => toolActivities.push(activity) });
+  assert.equal(result.text, 'It is fixture-time.');
+  assert.deepEqual(deltas, ['Checking. ', '[reset]', 'It is fixture-time.'], 'text deltas are available before and after tool execution');
+  assert.equal(requests.length, 2, 'each tool loop turn streams');
+  assert.equal(requests[0].tools.length, 1);
+  assert.ok(toolActivities.some(activity => activity.capability === 'clock.now' && activity.status === 'completed'));
+  assert.ok(requests[1].messages.some(message => message.role === 'assistant'
+    && message.content === 'Checking. ' && message.tool_calls),
+  'streaming preserves assistant text and the OpenAI tool-call continuation record');
+  pass('tool-capable Chat streams text through each Model turn while preserving Capability execution');
 }
 
 fs.rmSync(temp, { recursive: true, force: true });
