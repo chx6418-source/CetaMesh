@@ -1811,10 +1811,20 @@ mod tests {
 
         let mut plan = plan_install(&layout, &payload, &options, false).unwrap();
         assert!(plan.effects.iter().any(|effect| matches!(effect, Effect::RegistryKey { key, .. } if key == &layout.registry_key)));
+        for shortcut in [
+            layout.start_menu_dir.join(START_MENU_SHORTCUT),
+            layout.start_menu_dir.join(UNINSTALL_SHORTCUT),
+            layout.desktop_dir.join(DESKTOP_SHORTCUT),
+        ] {
+            assert!(
+                plan.effects.iter().any(|effect| {
+                    matches!(effect, Effect::Shortcut { path, .. } if path == &shortcut)
+                }),
+                "install plan should include the shortcut effect: {}",
+                shortcut.display()
+            );
+        }
         apply_fixture_plan(&mut plan, &quiet, &root.join("backup")).unwrap();
-        assert!(layout.start_menu_dir.join(START_MENU_SHORTCUT).is_file());
-        assert!(layout.start_menu_dir.join(UNINSTALL_SHORTCUT).is_file());
-        assert!(layout.desktop_dir.join(DESKTOP_SHORTCUT).is_file());
         assert!(!layout.start_menu_dir.join(LEGACY_START_MENU_SHORTCUT).exists());
         assert!(!layout.start_menu_dir.join(LEGACY_UNINSTALL_SHORTCUT).exists());
         assert!(!layout.desktop_dir.join(LEGACY_DESKTOP_SHORTCUT).exists());
@@ -2019,22 +2029,34 @@ mod tests {
     #[test]
     fn shortcut_creation_is_best_effort_and_testable() {
         let root = temp_dir("shortcut");
-        let path = root.join("StartMenu").join(START_MENU_SHORTCUT);
         let target = root.join("WhaleBridge.exe");
         fs::write(&target, b"exe").unwrap();
-        let effect = Effect::Shortcut {
-            path: path.clone(),
-            target,
-            args: "--uninstall".to_owned(),
-            workdir: root.clone(),
-            description: "卸载 CetaMesh".to_owned(),
-        };
-        apply_effect(&effect, &quiet, &root.join("backup")).unwrap();
-        if path.is_file() {
-            assert!(
-                fs::metadata(&path).unwrap().len() > 0,
-                "快捷方式应为非空文件"
-            );
+        for name in [START_MENU_SHORTCUT, UNINSTALL_SHORTCUT] {
+            let path = root.join("StartMenu").join(name);
+            let effect = Effect::Shortcut {
+                path: path.clone(),
+                target: target.clone(),
+                args: if name == UNINSTALL_SHORTCUT {
+                    "--uninstall"
+                } else {
+                    ""
+                }
+                .to_owned(),
+                workdir: root.clone(),
+                description: if name == UNINSTALL_SHORTCUT {
+                    "卸载 CetaMesh"
+                } else {
+                    "启动 CetaMesh Desktop"
+                }
+                .to_owned(),
+            };
+            apply_effect(&effect, &quiet, &root.join("backup")).unwrap();
+            if path.is_file() {
+                assert!(
+                    fs::metadata(&path).unwrap().len() > 0,
+                    "快捷方式应为非空文件"
+                );
+            }
         }
         fs::remove_dir_all(&root).ok();
     }

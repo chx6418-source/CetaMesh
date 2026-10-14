@@ -66,6 +66,8 @@ PR Windows CI 首轮发现 4 个测试可移植性问题，已修正并在本机
 
 第三轮 CI 暴露两个 runner fixture 边界：Extension cancellation fixture 的 100ms deadline 会在 Windows 冷启动 worker 尚未到达 Broker 前过期，已放宽为 2s；Mesh service fixture 预置随机持久端口可能命中 Windows excluded port range，现用 Storage Primitive 把该 fixture 端口设为 0（系统分配临时端口）。两项覆盖在 security/runtime 分类 **47 PASS / 0 FAIL**，完整 `npm test` **93 PASS / 0 FAIL / 6 NOT_RUN_ENVIRONMENT**；最新远端 CI 待验证。
 
+第四轮 CI 指出 Rust 安装生命周期测试把 best-effort 快捷方式误当成必定落盘。测试现在验证计划包含启动菜单、卸载和桌面快捷方式 effects；独立创建测试覆盖普通与中文卸载名称，并继续允许平台按合同跳过创建。产品安装逻辑未变；统一入口的 desktop 分类（含 Cargo check/test）**5 PASS / 0 FAIL**，最终远端 CI 待验证。
+
 ## 真实 Provider / Agent 验证
 
 - **DeepSeek：真实 E2E PASS。** 使用生产 `createCetaMeshServices()` 装配、隔离状态目录和本机凭据，`deepseek-flash` 实际返回 `OK`；凭据没有输出到日志或报告。
