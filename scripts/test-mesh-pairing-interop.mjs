@@ -40,6 +40,7 @@ import {
   verifyPayload,
   x963ToPublicKeyPem
 } from '../src/mesh/index.js';
+import { readJsonFile, writeJsonAtomic } from '../src/storage/json-file.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const FIXTURES = path.join(ROOT, 'fixtures', 'pairing');
@@ -466,7 +467,11 @@ async function sectionRestartAndRevoke() {
 // E. 服务层 + 全局 TLS 守卫
 // ────────────────────────────────────────────────────────────────────────────
 async function sectionServiceAndGuards() {
-  const service = createMeshService({ stateDir: path.join(root, 'service'), name: 'CetaMesh Desktop (svc)', role: 'desktop' });
+  const serviceStateDir = path.join(root, 'service');
+  const pairingTls = await loadOrCreatePairingTls({ stateDir: serviceStateDir, name: 'CetaMesh Desktop (svc)' });
+  const pairingTlsRecord = readJsonFile(pairingTls.file);
+  writeJsonAtomic(pairingTls.file, { ...pairingTlsRecord, port: 0 });
+  const service = createMeshService({ stateDir: serviceStateDir, name: 'CetaMesh Desktop (svc)', role: 'desktop' });
   const snapshot = await service.execute({ method: 'mesh.snapshot', params: {} });
   check('mesh.snapshot 包含 pairing 状态', snapshot.pairing && snapshot.pairing.active === false);
   const start = await service.execute({ method: 'mesh.pairing.start', params: {} });

@@ -64,6 +64,8 @@ PR Windows CI 首轮发现 4 个测试可移植性问题，已修正并在本机
 
 第二轮 CI 进一步指出 Codex 运行目录是隔离 staging root 下的 Task 子目录，测试已改为 canonical path containment 校验；security 分类 **13 PASS / 0 FAIL**，随后完整 `npm test` **93 PASS / 0 FAIL / 6 NOT_RUN_ENVIRONMENT**。最终远端 CI 仍待本次提交触发后确认。
 
+第三轮 CI 暴露两个 runner fixture 边界：Extension cancellation fixture 的 100ms deadline 会在 Windows 冷启动 worker 尚未到达 Broker 前过期，已放宽为 2s；Mesh service fixture 预置随机持久端口可能命中 Windows excluded port range，现用 Storage Primitive 把该 fixture 端口设为 0（系统分配临时端口）。两项覆盖在 security/runtime 分类 **47 PASS / 0 FAIL**，完整 `npm test` **93 PASS / 0 FAIL / 6 NOT_RUN_ENVIRONMENT**；最新远端 CI 待验证。
+
 ## 真实 Provider / Agent 验证
 
 - **DeepSeek：真实 E2E PASS。** 使用生产 `createCetaMeshServices()` 装配、隔离状态目录和本机凭据，`deepseek-flash` 实际返回 `OK`；凭据没有输出到日志或报告。
