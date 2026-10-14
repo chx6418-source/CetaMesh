@@ -181,7 +181,7 @@ async function waitFor(predicate, label, timeoutMs = 1000) {
   ok('C2 DSH 不可达时 health 优雅降级（不抛异常）');
 
   // C3 真实死端口（模拟"DSH 未启动"）：所有方法必须结构化失败且不崩进程。
-  const deadPort = new NodeApiClient('http://127.0.0.1:9');
+  const deadPort = new NodeApiClient('http://127.0.0.1:9', { authCookie: 'session=fixture' });
   const deadService = createDefaultAgentService({ api: deadPort, defaults: {}, log: () => {} });
   const deadCall = (method, params) => deadService.execute({ method, params });
   const health2 = await deadCall('agent.health', { provider: 'dsh' });

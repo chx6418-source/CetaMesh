@@ -52,7 +52,7 @@ async function expectCode(name, promise, code) {
 try {
   const workspaceArtifact = { id: 'artifact-valid', kind: 'file', label: 'report.md', ref: 'report.md' };
   const resolved = resolveTaskArtifactOpen({ artifact: workspaceArtifact, workspaceRoot, ownedArtifactRoot });
-  assert.equal(resolved.canonicalPath, fs.realpathSync(path.join(workspaceRoot, 'report.md')));
+  assert.equal(resolved.canonicalPath, fs.realpathSync.native(path.join(workspaceRoot, 'report.md')));
   assert.equal(resolved.extension, '.md');
   console.log('PASS resolves existing Workspace artifact to canonical local path');
 
@@ -61,7 +61,7 @@ try {
     workspaceRoot,
     ownedArtifactRoot
   });
-  assert.equal(owned.canonicalPath, fs.realpathSync(path.join(ownedArtifactRoot, 'report.csv')));
+  assert.equal(owned.canonicalPath, fs.realpathSync.native(path.join(ownedArtifactRoot, 'report.csv')));
   assert.equal(owned.extension, '.csv');
   console.log('PASS resolves explicitly owned artifact only under dedicated root');
 
@@ -70,7 +70,7 @@ try {
     method: 'task.artifact.resolveOpen',
     params: { taskId: task.id, artifactId: artifact.id }
   });
-  assert.equal(result.canonicalPath, fs.realpathSync(path.join(workspaceRoot, 'report.md')));
+  assert.equal(result.canonicalPath, fs.realpathSync.native(path.join(workspaceRoot, 'report.md')));
   assert.equal(result.extension, '.md');
   console.log('PASS Core resolves by Task and Artifact identity');
 

@@ -152,7 +152,12 @@ try {
   await capabilities.execute({ method: 'capability.approval.decide', params: { id: dshWaiting.approvalId, approve: true } });
   await waitFor(() => dshEvents, events => events.some(event => event.type === 'turn/end'));
   assert.equal(fs.readFileSync(path.join(authoritativeRoot, 'dsh-result.txt'), 'utf8'), 'dsh fake edit');
-  assert.ok(path.resolve(dshStageRoot).startsWith(path.resolve(root, 'dsh-staging')));
+  const expectedDshStageRoot = fs.realpathSync.native(path.join(root, 'dsh-staging'));
+  const canonicalDshStageRoot = fs.realpathSync.native(dshStageRoot);
+  const dshStageRelative = path.relative(expectedDshStageRoot, canonicalDshStageRoot);
+  assert.ok(dshStageRelative && dshStageRelative !== '..'
+    && !dshStageRelative.startsWith(`..${path.sep}`) && !path.isAbsolute(dshStageRelative),
+  'DSH Task staging must stay below the canonical configured staging root');
   await dshService.broker.closeSession({ provider: 'dsh', sessionId: dshSession.sessionId });
   assert.equal(fs.existsSync(dshStageRoot), false, 'DSH staging is cleaned after the Task session closes');
   await dshFollow;

@@ -60,6 +60,8 @@
 
 `npm test` 的 6 个环境跳过项：旧 bridge、MCP exec、OneBot gateway、网络搜索，以及聚合入口默认未启用的 Cargo 两项；Cargo 已单独完整运行并通过。Build Number 为 **1065**。
 
+PR Windows CI 首轮发现 4 个测试可移植性问题，已修正并在本机重新运行 `npm test`：路径断言统一比较 canonical path、死端口 DSH fixture 显式提供认证 cookie、图标生成测试断言格式/尺寸而不比较不同 Windows GDI+ 版本产生的 PNG 字节、artifact 路径断言使用 `realpathSync.native`。本地结果仍为 **93 PASS / 0 FAIL / 6 NOT_RUN_ENVIRONMENT**；修正后的远端 CI 需以本次分支更新后的 Actions 结果为准。
+
 ## 真实 Provider / Agent 验证
 
 - **DeepSeek：真实 E2E PASS。** 使用生产 `createCetaMeshServices()` 装配、隔离状态目录和本机凭据，`deepseek-flash` 实际返回 `OK`；凭据没有输出到日志或报告。
