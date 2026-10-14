@@ -128,6 +128,7 @@ try {
   const originalCreateAgentSession = fallbackServices.agentBroker.createSession;
   const originalSendAgent = fallbackServices.agentBroker.send;
   const originalAgentStatus = fallbackServices.agentBroker.status;
+  const originalCancelAgent = fallbackServices.agentBroker.cancel;
   const originalCloseAgent = fallbackServices.agentBroker.closeSession;
   let providerSessionIndex = 0;
   const sentAgentInstructions = [];
@@ -162,6 +163,29 @@ try {
     fallbackServices.taskService.runtime.detachAgent({ id: brokerSessionTask.id,
       expectedRev: fallbackServices.taskService.runtime.get({ id: brokerSessionTask.id }).task.rev, note: 'reset reuse fixture' });
 
+    fallbackServices.taskService.runtime.attachAgent({ id: brokerSessionTask.id,
+      expectedRev: fallbackServices.taskService.runtime.get({ id: brokerSessionTask.id }).task.rev,
+      provider: 'dsh', sessionId: 'cancel-failure-session' });
+    const cancelSignal = { aborted: false };
+    fallbackServices.agentBroker.send = async () => {
+      cancelSignal.aborted = true;
+      return { accepted: true };
+    };
+    fallbackServices.agentBroker.cancel = async () => {
+      throw Object.assign(new Error('Agent cancellation failed'), { code: 'AGENT_CANCEL_FAILED' });
+    };
+    const agentRunCapability = fallbackServices.capabilityService.broker.registry.require('agent.run');
+    await assert.rejects(() => agentRunCapability.execute({
+      requestId: 'cancel-failure-fixture', actor: { kind: 'owner', id: 'desktop' },
+      taskId: brokerSessionTask.id, workspaceId: fallbackWorkspace.id,
+      input: { agentProvider: 'dsh', content: 'report remote cancellation failure' }, signal: cancelSignal
+    }), error => error.code === 'AGENT_CANCEL_FAILED', 'failed cancellation of a reused Agent Session must remain observable');
+    fallbackServices.agentBroker.send = originalSendAgent;
+    fallbackServices.agentBroker.cancel = originalCancelAgent;
+    fallbackServices.taskService.runtime.detachAgent({ id: brokerSessionTask.id,
+      expectedRev: fallbackServices.taskService.runtime.get({ id: brokerSessionTask.id }).task.rev,
+      note: 'reset cancellation fixture' });
+
     const rollbackTask = fallbackServices.taskService.runtime.create({ goal: 'rollback on agent failure', workspaceId: fallbackWorkspace.id });
     const originalSend = fallbackServices.agentBroker.send;
     let closedFailedSession = false;
@@ -180,7 +204,21 @@ try {
     fallbackServices.agentBroker.createSession = originalCreateAgentSession;
     fallbackServices.agentBroker.send = originalSendAgent;
     fallbackServices.agentBroker.status = originalAgentStatus;
+    fallbackServices.agentBroker.cancel = originalCancelAgent;
     fallbackServices.agentBroker.closeSession = originalCloseAgent;
+  }
+
+  const taskRuntimeForLookup = fallbackServices.taskService.runtime;
+  const originalTaskGet = taskRuntimeForLookup.get;
+  taskRuntimeForLookup.get = () => { throw Object.assign(new Error('Task store read failed'), { code: 'TASK_STORE_IO' }); };
+  try {
+    await assert.rejects(() => fallbackServices.capabilityService.broker.execute({
+      actor: { kind: 'owner', id: 'desktop' }, taskId: brokerSessionTask.id, workspaceId: fallbackWorkspace.id,
+      capability: 'agent.run', input: { agentProvider: 'dsh', content: 'surface Task store failure' },
+      reason: 'Task resolver error propagation fixture'
+    }), error => error.code === 'TASK_STORE_IO', 'Capability policy must preserve Task storage failures');
+  } finally {
+    taskRuntimeForLookup.get = originalTaskGet;
   }
   const pluginCatalog = await services.pluginCenterService.execute({ method: 'plugin-center.catalog.list', params: {} });
   assert.equal(pluginCatalog.available, false);

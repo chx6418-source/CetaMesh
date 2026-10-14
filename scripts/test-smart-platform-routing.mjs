@@ -95,6 +95,50 @@ try {
   assert.equal(tasks[0].currentAgent.sessionId, 'managed-1');
   assert.deepEqual(agentCalls.filter(call => call.kind === 'send').map(call => call.content), ['fix a bug in this project']);
   assert.equal(modelRequests.length, 2, 'Project intent runs through Task and Agent, not the Model turn');
+
+  const taskLookupFailureRuntime = new Proxy(taskRuntime, {
+    get(target, property) {
+      if (property === 'get') return () => { throw Object.assign(new Error('task store read failed'), { code: 'TASK_STORE_IO' }); };
+      const value = Reflect.get(target, property);
+      return typeof value === 'function' ? value.bind(target) : value;
+    }
+  });
+  const guardedPlatformRuntime = createDesktopPlatformRuntime({ capabilityService, workspaceService,
+    taskRuntime: taskLookupFailureRuntime, agentBroker });
+  await assert.rejects(() => guardedPlatformRuntime.route({ decision: { agentIntent: true },
+    record: { taskId: 'task-store-unavailable', config: { workspaceId, agentProvider: 'cetamesh' } },
+    text: 'do not hide Task storage failures' }), error => error.code === 'TASK_STORE_IO',
+  'only a missing stale Task reference may be treated as absent; storage errors must surface');
+
+  let cancelTaskReads = 0;
+  const failingCancelTaskRuntime = new Proxy(taskRuntime, {
+    get(target, property) {
+      if (property === 'cancel') return () => { throw Object.assign(new Error('Task cancellation conflict'), { code: 'TASK_CONFLICT' }); };
+      const value = Reflect.get(target, property);
+      return typeof value === 'function' ? value.bind(target) : value;
+    }
+  });
+  const taskCancelRuntime = createDesktopPlatformRuntime({ capabilityService, workspaceService,
+    taskRuntime: failingCancelTaskRuntime, agentBroker });
+  await assert.rejects(() => taskCancelRuntime.route({ decision: { agentIntent: true },
+    record: { taskId: null, config: { workspaceId, agentProvider: 'cetamesh' } },
+    text: 'surface failed Task cleanup', signal: { get aborted() { cancelTaskReads += 1; return cancelTaskReads >= 3; } } }),
+  error => error.code === 'TASK_CONFLICT', 'a failed newly-created Task cancellation must remain observable');
+
+  const rolloverTask = taskRuntime.create({ goal: 'Rollover cancellation fixture', workspaceId });
+  taskRuntime.attachAgent({ id: rolloverTask.id, expectedRev: rolloverTask.rev, provider: 'dsh', sessionId: 'dsh-old' });
+  let rolloverSignalReads = 0;
+  const failingRolloverCancelBroker = { ...agentBroker,
+    async cancel() { throw Object.assign(new Error('Agent cancellation failed'), { code: 'AGENT_CANCEL_FAILED' }); }
+  };
+  const rolloverRuntime = createDesktopPlatformRuntime({ capabilityService, workspaceService, taskRuntime,
+    agentBroker: failingRolloverCancelBroker, continuityRuntime: { async rollover() {
+      return { to: { provider: 'codex', sessionId: 'codex-next' } };
+    } } });
+  await assert.rejects(() => rolloverRuntime.route({ decision: { agentIntent: true },
+    record: { taskId: rolloverTask.id, config: { workspaceId, agentProvider: 'codex' } },
+    text: 'surface failed rollover cancellation', signal: { get aborted() { rolloverSignalReads += 1; return rolloverSignalReads >= 4; } } }),
+  error => error.code === 'AGENT_CANCEL_FAILED', 'a failed remote cancellation after rollover must remain observable');
   console.log('Smart platform routing: Chat -> Model, Smart tool -> Capability -> Model context, Smart project -> Task -> Agent; no DSH client supplied');
 } finally {
   chat?.close();

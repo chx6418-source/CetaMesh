@@ -2,6 +2,13 @@ import { OWNER_ACTOR, capabilityError } from '../capability/types.js';
 
 /** Smart decisions are consumed here; authority is always the trusted Desktop Owner. */
 export function createDesktopPlatformRuntime({ capabilityService, workspaceService, taskRuntime, agentBroker, continuityRuntime, legacyModel }) {
+  async function cancelAgentAfterAbort(session) {
+    try { await agentBroker.cancel(session); }
+    catch (error) {
+      if (error?.code !== 'SESSION_NOT_FOUND') throw error;
+    }
+  }
+
   async function route({ decision, record, text, signal }) {
     if (decision.agentIntent) {
       if (signal?.aborted) throw Object.assign(new Error('Chat operation cancelled'), { code: 'ABORTED' });
@@ -10,7 +17,10 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
       if (signal?.aborted) throw Object.assign(new Error('Chat operation cancelled'), { code: 'ABORTED' });
       let task = null;
       if (record.taskId) {
-        try { task = taskRuntime.get({ id: record.taskId }).task; } catch { /* stale task reference */ }
+        try { task = taskRuntime.get({ id: record.taskId }).task; }
+        catch (error) {
+          if (error?.code !== 'TASK_NOT_FOUND') throw error;
+        }
       }
       if (task && task.workspaceId !== workspaceId) task = null;
       if (task && ['completed', 'cancelled', 'failed'].includes(task.status)) task = null;
@@ -22,8 +32,7 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
       }
       if (signal?.aborted) {
         if (createdTask) {
-          try { taskRuntime.cancel({ id: task.id, expectedRev: task.rev, reason: 'Chat request was deleted before Agent startup' }); }
-          catch { /* A concurrently updated Task stays available for Owner recovery. */ }
+          taskRuntime.cancel({ id: task.id, expectedRev: task.rev, reason: 'Chat request was deleted before Agent startup' });
         }
         throw Object.assign(new Error('Chat operation cancelled'), { code: 'ABORTED' });
       }
@@ -42,12 +51,12 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
           throw capabilityError('PROVIDER_ERROR', 'Continuity did not create the selected Agent Provider session');
         }
         if (signal?.aborted) {
-          try { await agentBroker.cancel({ provider, sessionId: nextAgent.sessionId }); } catch { /* Rollover cancellation is best effort after Owner deletion. */ }
+          await cancelAgentAfterAbort({ provider, sessionId: nextAgent.sessionId });
           throw Object.assign(new Error('Chat operation cancelled'), { code: 'ABORTED' });
         }
         await agentBroker.send({ provider, sessionId: nextAgent.sessionId, content: text });
         if (signal?.aborted) {
-          try { await agentBroker.cancel({ provider, sessionId: nextAgent.sessionId }); } catch { /* Rollover cancellation is best effort after Owner deletion. */ }
+          await cancelAgentAfterAbort({ provider, sessionId: nextAgent.sessionId });
           throw Object.assign(new Error('Chat operation cancelled'), { code: 'ABORTED' });
         }
         return { kind: 'agent', taskId: task.id, workspaceId, provider, sessionId: nextAgent.sessionId, accepted: true, continued: true };

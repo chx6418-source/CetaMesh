@@ -84,7 +84,14 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     catch (error) { journal[request.requestId] = { hash, status: 'failed', code: error.code }; saveJournal(); throw error; }
     finally { requests.delete(request.requestId); }
   }
-  const taskFor = id => { try { return taskRuntime?.get({ id }).task ?? null; } catch { return null; } };
+  const taskFor = id => {
+    if (!taskRuntime) return null;
+    try { return taskRuntime.get({ id }).task ?? null; }
+    catch (error) {
+      if (error?.code === 'TASK_NOT_FOUND') return null;
+      throw error;
+    }
+  };
   const resolveWorkspace = id => workspaceService?.describeWorkspace(id);
   const broker = createCapabilityBroker({
     policy: createCapabilityPolicy({ resolveWorkspace, resolveTask: taskFor }),
@@ -409,7 +416,10 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
             if (r.signal?.aborted) throw capabilityError('INVOKE_CANCELLED', 'Agent assignment cancelled');
             const sent = await agentBroker.send({ ...task.currentAgent, content: String(r.input.content || task.goal) });
             if (r.signal?.aborted) {
-              try { await agentBroker.cancel(task.currentAgent); } catch { /* Cancellation cleanup is best effort after the send acknowledgement. */ }
+              try { await agentBroker.cancel(task.currentAgent); }
+              catch (cancelError) {
+                if (cancelError?.code !== 'SESSION_NOT_FOUND') throw cancelError;
+              }
               throw capabilityError('INVOKE_CANCELLED', 'Agent assignment cancelled');
             }
             return { taskId: task.id, workspaceId: task.workspaceId, ...task.currentAgent,
