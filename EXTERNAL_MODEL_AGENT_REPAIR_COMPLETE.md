@@ -62,6 +62,8 @@
 
 PR Windows CI 首轮发现 4 个测试可移植性问题，已修正并在本机重新运行 `npm test`：路径断言统一比较 canonical path、死端口 DSH fixture 显式提供认证 cookie、图标生成测试断言格式/尺寸而不比较不同 Windows GDI+ 版本产生的 PNG 字节、artifact 路径断言使用 `realpathSync.native`。本地结果仍为 **93 PASS / 0 FAIL / 6 NOT_RUN_ENVIRONMENT**；修正后的远端 CI 需以本次分支更新后的 Actions 结果为准。
 
+第二轮 CI 进一步指出 Codex 运行目录是隔离 staging root 下的 Task 子目录，测试已改为 canonical path containment 校验；security 分类 **13 PASS / 0 FAIL**，随后完整 `npm test` **93 PASS / 0 FAIL / 6 NOT_RUN_ENVIRONMENT**。最终远端 CI 仍待本次提交触发后确认。
+
 ## 真实 Provider / Agent 验证
 
 - **DeepSeek：真实 E2E PASS。** 使用生产 `createCetaMeshServices()` 装配、隔离状态目录和本机凭据，`deepseek-flash` 实际返回 `OK`；凭据没有输出到日志或报告。

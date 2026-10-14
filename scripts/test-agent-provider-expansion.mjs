@@ -376,7 +376,12 @@ try {
   assert.ok(firstArgs.indexOf('--ignore-user-config') > firstExecIndex, 'exec flags follow the exec command');
   assert.ok(firstArgs.indexOf('--ignore-rules') > firstExecIndex, 'exec flags follow the exec command');
   assert.equal(firstArgs.at(-1), '-', 'Codex reads the prompt from stdin');
-  assert.equal(fakeRuns[0].cwd.startsWith(codexStagingRoot), true);
+  const canonicalCodexStageRoot = fs.realpathSync.native(codexStagingRoot);
+  const canonicalCodexRunRoot = fs.realpathSync.native(fakeRuns[0].cwd);
+  const codexRunRelative = path.relative(canonicalCodexStageRoot, canonicalCodexRunRoot);
+  assert.ok(codexRunRelative && codexRunRelative !== '..'
+    && !codexRunRelative.startsWith(`..${path.sep}`) && !path.isAbsolute(codexRunRelative),
+  'Codex runs inside the canonical isolated Task staging root');
   await agentBroker.send({ provider: 'codex', sessionId: codexSessionId, content: 'Continue with the retained provider session' });
   await waitFor(() => agentBroker.status({ provider: 'codex', sessionId: codexSessionId }),
     status => !status.running && status.lastRunStatus === 'completed');
