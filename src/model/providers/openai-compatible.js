@@ -21,7 +21,12 @@ import { defineModelProvider, modelStreamEvent } from '../model-provider.js';
 
 const LIST_TIMEOUT_MS = 10_000;
 const CHAT_TIMEOUT_MS = 300_000;
+const SSE_IDLE_TIMEOUT_MS = 45_000;
 const REASONING_EFFORT_CHOICES = Object.freeze(['off', 'low', 'high', 'max']);
+
+function isReasoningModel(model) {
+  return /^(?:o[134](?:-|$)|gpt-5(?:-|$))/i.test(String(model ?? '').trim());
+}
 
 function extractProviderMessage(bodyText) {
   if (!bodyText) return null;
@@ -46,6 +51,9 @@ export function createOpenAiCompatibleModelProvider({
   reasoningParam = null,
   supportsStreamOptions = false,
   supportsTools = false,
+  supportsReasoning = null,
+  requestTimeoutMs = CHAT_TIMEOUT_MS,
+  sseIdleTimeoutMs = SSE_IDLE_TIMEOUT_MS,
   log = () => {}
 } = {}) {
   if (!secrets || typeof secrets.raw !== 'function') {
@@ -85,6 +93,15 @@ export function createOpenAiCompatibleModelProvider({
       message,
       { cause: error }
     );
+  }
+
+  function toolCallingEnabled() {
+    return typeof supportsTools === 'function' ? supportsTools() === true : supportsTools === true;
+  }
+
+  function reasoningEnabled(model) {
+    if (!reasoningParam || !isReasoningModel(model)) return false;
+    return typeof supportsReasoning === 'function' ? supportsReasoning(model) === true : supportsReasoning !== false;
   }
 
   function mapHttpError(status, bodyText, apiKey) {
@@ -154,15 +171,13 @@ export function createOpenAiCompatibleModelProvider({
     }
     const body = { model: model.trim(), messages, stream: Boolean(stream) };
     if (Array.isArray(tools) && tools.length) {
-      if (!supportsTools) {
+      if (!toolCallingEnabled()) {
         throw modelRuntimeError('MODEL_TOOL_CALLING_UNSUPPORTED', 'This Model Provider does not support structured tool calling');
       }
       body.tools = buildToolSchemas(tools).schemas;
       body.tool_choice = toolChoice === 'none' ? 'none' : 'auto';
-    } else if (toolChoice === 'none' && supportsTools) {
-      body.tool_choice = 'none';
     }
-    const effort = reasoningParam ? mapReasoningEffort(reasoning) : null;
+    const effort = reasoningEnabled(model) ? mapReasoningEffort(reasoning) : null;
     if (effort) body[reasoningParam] = effort;
     if (stream && supportsStreamOptions) body.stream_options = { include_usage: true };
     return body;
@@ -170,7 +185,8 @@ export function createOpenAiCompatibleModelProvider({
 
   async function request(path, { body, signal, timeoutMs }) {
     const { apiKey, base } = resolveCredentials();
-    const effectiveSignal = signal ?? AbortSignal.timeout(timeoutMs);
+    const deadline = AbortSignal.timeout(timeoutMs);
+    const effectiveSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
     let response;
     try {
       response = await fetchImpl(`${base}${path}`, {
@@ -184,20 +200,24 @@ export function createOpenAiCompatibleModelProvider({
         signal: effectiveSignal
       });
     } catch (error) {
+      if (deadline.aborted && !signal?.aborted) {
+        throw modelRuntimeError('MODEL_REQUEST_TIMEOUT', `「${label}」请求超时`, { cause: error });
+      }
       throw mapFetchError(error, apiKey);
     }
     if (!response.ok) {
       const bodyText = await response.text().catch(() => '');
       throw mapHttpError(response.status, bodyText, apiKey);
     }
-    return { response, apiKey };
+    return { response, apiKey, signal: effectiveSignal, deadline };
   }
 
   return defineModelProvider({
     id,
     label,
     defaultModel,
-    supportsTools,
+    supportsTools: toolCallingEnabled,
+    supportsReasoning: reasoningEnabled,
     settingsFields: [
       { key: 'baseUrl', label: 'Base URL', type: 'string' },
       ...(reasoningParam ? [{
@@ -207,7 +227,8 @@ export function createOpenAiCompatibleModelProvider({
     methods: {
       async listModels({ signal } = {}) {
         const { apiKey, base } = resolveCredentials();
-        const effectiveSignal = signal ?? AbortSignal.timeout(LIST_TIMEOUT_MS);
+        const deadline = AbortSignal.timeout(LIST_TIMEOUT_MS);
+        const effectiveSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
         let response;
         try {
           response = await fetchImpl(`${base}/models`, {
@@ -240,15 +261,18 @@ export function createOpenAiCompatibleModelProvider({
       async chat(options) {
         const body = buildBody({ ...options, stream: false });
         const { byName } = buildToolSchemas(options?.tools);
-        const { response } = await request('/chat/completions', {
+        const { response, signal: requestSignal } = await request('/chat/completions', {
           body,
           signal: options?.signal,
-          timeoutMs: CHAT_TIMEOUT_MS
+          timeoutMs: requestTimeoutMs
         });
         let payload;
         try {
           payload = await response.json();
         } catch (error) {
+          if (requestSignal.aborted && requestSignal.reason?.name === 'TimeoutError') {
+            throw modelRuntimeError('MODEL_REQUEST_TIMEOUT', `「${label}」请求超时`, { cause: error });
+          }
           throw modelRuntimeError(MODEL_ERROR_CODES.MODEL_PROVIDER_ERROR, `「${label}」响应不是合法 JSON`, { cause: error });
         }
         const choice = Array.isArray(payload?.choices) ? payload.choices[0] : null;
@@ -279,8 +303,8 @@ export function createOpenAiCompatibleModelProvider({
       async *stream(options) {
         const body = buildBody({ ...options, stream: true });
         const { byName } = buildToolSchemas(options?.tools);
+        const { response, signal: requestSignal, deadline } = await request('/chat/completions', { body, signal: options?.signal, timeoutMs: requestTimeoutMs });
         const signal = options?.signal;
-        const { response } = await request('/chat/completions', { body, signal, timeoutMs: CHAT_TIMEOUT_MS });
         const parser = createSseLineParser();
         const reader = response.body.getReader();
         const decoder = new TextDecoder('utf-8');
@@ -338,17 +362,37 @@ export function createOpenAiCompatibleModelProvider({
         // abort 竞争：undici 的 signal 只保证到响应头为止；响应体 reader.read() 在
         // 挂流（服务端停发数据）上会永久阻塞且不感知 abort。这里显式把 abort 注入
         // 读取循环：竞争命中即 cancel reader（关闭 socket）并按 aborted 收尾。
-        const abortWait = signal
+        const abortWait = requestSignal
           ? new Promise((_, reject) => {
-              if (signal.aborted) reject(Object.assign(new Error('请求已取消'), { name: 'AbortError' }));
-              else signal.addEventListener('abort', () => reject(Object.assign(new Error('请求已取消'), { name: 'AbortError' })), { once: true });
+              if (requestSignal.aborted) reject(Object.assign(new Error('请求已取消'), { name: 'AbortError' }));
+              else requestSignal.addEventListener('abort', () => reject(Object.assign(new Error('请求已取消'), { name: 'AbortError' })), { once: true });
             })
           : null;
         try {
           while (true) {
-            const { done, value } = await (abortWait
-              ? Promise.race([reader.read(), abortWait])
-              : reader.read());
+            let idleTimer;
+            const idleWait = new Promise((_, reject) => {
+              idleTimer = setTimeout(() => reject(modelRuntimeError('MODEL_STREAM_IDLE_TIMEOUT', `「${label}」流式响应长时间无数据`, {})), sseIdleTimeoutMs);
+            });
+            let readResult;
+            try {
+              readResult = await Promise.race([reader.read(), idleWait, ...(abortWait ? [abortWait] : [])]);
+            } catch (error) {
+              if (error?.code === 'MODEL_STREAM_IDLE_TIMEOUT') {
+                try { await reader.cancel('idle timeout'); }
+                catch (cancelError) { log(`Model Provider「${label}」SSE idle cleanup failed (${cancelError?.code ?? cancelError?.name ?? 'stream-error'})`); }
+                throw error;
+              }
+              if (requestSignal.aborted && deadline.aborted && !signal?.aborted) {
+                try { await reader.cancel('request timeout'); }
+                catch (cancelError) { log(`Model Provider「${label}」SSE timeout cleanup failed (${cancelError?.code ?? cancelError?.name ?? 'stream-error'})`); }
+                throw modelRuntimeError('MODEL_REQUEST_TIMEOUT', `「${label}」流式请求超时`, { cause: error });
+              }
+              throw error;
+            } finally {
+              clearTimeout(idleTimer);
+            }
+            const { done, value } = readResult;
             if (done) break;
             pendingEvents = [];
             let streamEnded = false;
@@ -369,13 +413,15 @@ export function createOpenAiCompatibleModelProvider({
         } catch (error) {
           const aborted = signal?.aborted || error?.name === 'AbortError';
           if (aborted) {
-            try { await reader.cancel('aborted'); } catch { /* 流已关闭 */ }
+            try { await reader.cancel('aborted'); }
+            catch (cancelError) { log(`Model Provider「${label}」SSE abort cleanup failed (${cancelError?.code ?? cancelError?.name ?? 'stream-error'})`); }
             yield modelStreamEvent('turn/end', { reason: { kind: 'aborted', usage } });
             return;
           }
           throw error;
         } finally {
-          try { reader.releaseLock(); } catch { /* 流已关闭 */ }
+          try { reader.releaseLock(); }
+          catch (releaseError) { log(`Model Provider「${label}」SSE reader release failed (${releaseError?.code ?? releaseError?.name ?? 'stream-error'})`); }
         }
         log(`Model Provider「${label}」回合完成（model=${streamModel}，chars=${fullText.length}）`);
         if (toolCalls.size) {

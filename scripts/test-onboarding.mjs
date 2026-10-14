@@ -122,6 +122,24 @@ try {
   });
   equal('连接成功返回可用结果', [success.ok, success.message.includes('成功')], [true, true]);
 
+  const replacementDir = tmp('cetamesh-onb-candidate-');
+  const replacementSecrets = createProviderSecrets({ root: replacementDir });
+  replacementSecrets.set({ provider: 'deepseek-official', apiKey: 'sk-valid-before-abcdefgh', baseUrl: 'https://old-gateway.example/v1' });
+  const replacement = createOnboardingService({ stateDir: replacementDir, providerSecrets: replacementSecrets });
+  let candidateRequest = null;
+  const rejectedCandidate = await replacement.execute({ method: 'onboarding.testProvider', params: {
+    provider: 'deepseek-official', apiKey: 'sk-invalid-new-abcdefgh', baseUrl: 'https://candidate.example/v1',
+    fetchImpl: async (url, options) => { candidateRequest = { url: String(url), authorization: options.headers.authorization }; return { ok: false, status: 401 }; }
+  } });
+  equal('候选 Key 与 URL 在认证失败后不覆盖旧凭据', [rejectedCandidate.ok, candidateRequest, replacementSecrets.raw('deepseek-official')], [false,
+    { url: 'https://candidate.example/v1/models', authorization: 'Bearer sk-invalid-new-abcdefgh' },
+    { provider: 'deepseek-official', apiKey: 'sk-valid-before-abcdefgh', baseUrl: 'https://old-gateway.example/v1' }]);
+  const acceptedCandidate = await replacement.execute({ method: 'onboarding.testProvider', params: {
+    provider: 'deepseek-official', apiKey: 'sk-valid-after-abcdefgh', baseUrl: 'https://new-gateway.example/v1', fetchImpl: okFetch
+  } });
+  equal('候选凭据仅在连接测试成功后提交', [acceptedCandidate.ok, replacementSecrets.raw('deepseek-official')], [true,
+    { provider: 'deepseek-official', apiKey: 'sk-valid-after-abcdefgh', baseUrl: 'https://new-gateway.example/v1' }]);
+
   // 测试成功后自动标记 connection 步骤（顺序前提满足时）
   const autoDir = tmp('cetamesh-onb-auto-');
   const auto = createOnboardingService({ stateDir: autoDir, providerSecrets: createProviderSecrets({ root: autoDir }) });
@@ -140,6 +158,14 @@ try {
   for (const stepId of ['welcome', 'provider']) await existing.execute({ method: 'onboarding.completeStep', params: { stepId } });
   const existingTest = await existing.execute({ method: 'onboarding.testProvider', params: { provider: 'deepseek-official', fetchImpl: okFetch } });
   check('已有 API Key 无需重输即可测试并保留 Provider 步骤', existingTest.ok === true && stepState(existing.status(), 'connection') === 'completed' && stepState(existing.status(), 'provider') === 'completed');
+  const candidateUrlRequests = [];
+  const candidateUrlTest = await existing.execute({ method: 'onboarding.testProvider', params: {
+    provider: 'deepseek-official', baseUrl: 'https://candidate-only.example/v1',
+    fetchImpl: async url => { candidateUrlRequests.push(String(url)); return { ok: true, status: 200 }; }
+  } });
+  equal('只改候选 Base URL 时用已有 Key 探测并保存候选地址',
+    [candidateUrlTest.ok, candidateUrlRequests, existingSecrets.raw('deepseek-official').baseUrl],
+    [true, ['https://candidate-only.example/v1/models'], 'https://candidate-only.example/v1']);
 
   // ── 6. 默认模型写入设置 ──────────────────────────────────────────────
   const modelDir = tmp('cetamesh-onb-model-');
@@ -161,6 +187,8 @@ try {
   equal('重复保存不会重置引导进度', stepState(modelService.status(), 'model'), 'completed');
   const restartedModel = createOnboardingService({ stateDir: modelDir, settingsService, modelRuntime });
   equal('重启后默认模型和进度保留', [settingsService.store.get().settings.models.defaultModel, stepState(restartedModel.status(), 'model')], ['deepseek-chat', 'completed']);
+  const manualGatewayModel = await modelService.execute({ method: 'onboarding.setModel', params: { provider: 'deepseek-official', model: 'vendor/private-model-v7' } });
+  equal('模型目录缺失时仍允许手动保存模型 ID', [manualGatewayModel.persisted, settingsService.store.get().settings.models.defaultModel], [true, 'vendor/private-model-v7']);
   const failedDir = tmp('cetamesh-onb-model-failed-');
   const failedSettings = { store: { update() { throw new Error('disk full'); } } };
   const failedModel = createOnboardingService({ stateDir: failedDir, settingsService: failedSettings, modelRuntime });

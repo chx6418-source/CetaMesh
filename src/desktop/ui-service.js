@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { LEGACY_RETIRED_TOOLS } from '../integrations/catalog.js';
 
 // Narrow, renderer-safe DTO adapter for the privileged Desktop WebView.
@@ -10,14 +11,14 @@ const EVENT_NAMES = Object.freeze([
 ]);
 
 const EVENT_DATA_KEYS = Object.freeze([
-  'sessionId', 'taskId', 'workspaceId', 'agentId', 'pluginId', 'serverId', 'approvalId',
+  'sessionId', 'taskId', 'workspaceId', 'agentId', 'pluginId', 'serverId', 'approvalId', 'requestId', 'retryCount',
   'provider', 'status', 'progress', 'ready', 'needsAttention', 'delta', 'replaceText', 'message', 'reset', 'toolActivity', 'agentActivity'
 ]);
 
 const SETTING_KEYS = Object.freeze({
   general: ['language', 'theme', 'startMinimized', 'confirmOnExit'],
-  models: ['provider', 'defaultModel', 'reasoningEffort', 'streaming'],
-  agents: ['defaultAgentPreset', 'defaultAgentProvider', 'allowBackgroundTurns'],
+  models: ['provider', 'defaultModel', 'reasoningEffort', 'openaiCompatibleToolCalling', 'openaiCompatibleReasoningEffort', 'streaming'],
+  agents: ['defaultAgentPreset', 'defaultAgentProvider', 'allowBackgroundTurns', 'codexOpenAiEnvironmentAuthorized'],
   memory: ['enabled', 'requireConfirmationForLongTerm', 'defaultScope', 'retrievalLimit'],
   workspace: ['defaultWorkspaceId', 'boundaryEnforcement'],
   devices: ['meshEnabled', 'requireApprovalForRemoteCapabilities', 'presenceTtlMs'],
@@ -73,7 +74,8 @@ function projectSession(value) {
     updatedAt: scalar(row.updatedAt), archived: row.archived === true,
     config: {
       mode: string(config.mode, 40), modelProvider: string(config.modelProvider, 80) || null,
-      model: string(config.model, 200), agentProvider: string(config.agentProvider, 80) || null
+      model: string(config.model, 200), agentProvider: string(config.agentProvider, 80) || null,
+      workspaceId: string(config.workspaceId, 128) || null
     }
   };
 }
@@ -335,15 +337,16 @@ function idParam(params, key = 'id') {
 }
 
 export function createDesktopUiEventBus({ now = () => Date.now(), maxEvents = 500 } = {}) {
+  const instanceId = crypto.randomUUID();
   let cursor = 0;
   const events = [];
   const waiters = new Set();
 
   function after(afterCursor) {
     const rows = events.filter(event => event.cursor > afterCursor);
-    if (!rows.length) return { events: [], cursor };
+    if (!rows.length) return { instanceId, events: [], cursor };
     const selectedRows = rows.slice(0, 100);
-    return { events: selectedRows, cursor: selectedRows[selectedRows.length - 1].cursor };
+    return { instanceId, events: selectedRows, cursor: selectedRows[selectedRows.length - 1].cursor };
   }
 
   function publish(event, data = {}) {
@@ -413,17 +416,17 @@ export function createDesktopUiEventBus({ now = () => Date.now(), maxEvents = 50
     });
   }
 
-  return Object.freeze({ publish, next, eventNames: EVENT_NAMES });
+  return Object.freeze({ instanceId, publish, next, eventNames: EVENT_NAMES });
 }
 
 export function createDesktopUiService({ services = {}, system = services.systemServices ?? services.system ?? {}, eventBus } = {}) {
   const owner = Object.freeze({ kind: 'owner', id: 'desktop' });
-  const call = async (service, method, params = {}, withActor = false) => {
+  const call = async (service, method, params = {}, withActor = false, signal = undefined) => {
     if (!service || typeof service.execute !== 'function') throw uiError('SERVICE_UNAVAILABLE', '此项能力当前不可用');
-    return service.execute({ method, params, ...(withActor ? { actor: owner } : {}) });
+    return service.execute({ method, params, ...(withActor ? { actor: owner } : {}), ...(signal ? { signal } : {}) });
   };
   const emit = (event, data) => eventBus?.publish(event, data);
-  const chat = (method, params) => call(services.chatService, method, params);
+  const chat = (method, params, signal) => call(services.chatService, method, params, false, signal);
   const task = (method, params) => call(services.taskService, method, params);
   const memory = (method, params) => call(services.memoryService, method, params);
   const agent = (method, params) => call(services.agentService, method, params);
@@ -462,7 +465,12 @@ export function createDesktopUiService({ services = {}, system = services.system
       const turn = record(result.turn);
       return {
         id: string(result.id, 128), state: string(turn.state ?? result.lastState, 40),
+        requestId: string(turn.requestId, 200) || null,
+        followState: string(result.followState, 40) || 'idle', followError: string(result.followError, 100) || null,
+        retryCount: Number.isFinite(turn.retryCount) ? Math.max(0, turn.retryCount) : 0,
+        statusMessage: string(turn.statusMessage, 300) || null,
         displayText: string(turn.displayText, MAX_TEXT), error: string(turn.error ?? result.lastError, 1000) || null,
+        errorCode: string(turn.errorCode, 100) || null,
         agentActivity: turn.agentActivity && typeof turn.agentActivity === 'object' ? {
           providerId: string(turn.agentActivity.providerId, 80), label: string(turn.agentActivity.label, 180),
           status: ['running', 'completed', 'cancelled', 'failed'].includes(turn.agentActivity.status) ? turn.agentActivity.status : 'running'
@@ -476,26 +484,30 @@ export function createDesktopUiService({ services = {}, system = services.system
         routing: selected(turn.routing, ['modelProvider', 'requestedModel', 'resolvedModel', 'toolCalling', 'taskId'])
       };
     },
-    'ui.chat.send': async p => {
+    'ui.chat.send': async (p, { signal } = {}) => {
       const text = boundedText(p.text, 'text', 32_000);
       const attachments = Array.isArray(p.attachments) ? p.attachments.slice(0, 8).map((item, index) => {
         const attachment = record(item);
         return { name: boundedText(attachment.name, `attachments[${index}].name`, 200), content: boundedText(attachment.content, `attachments[${index}].content`, 256_000), ...(attachment.mimeType ? { mimeType: string(attachment.mimeType, 80) } : {}) };
       }) : [];
       const clientMessageId = p.clientMessageId === undefined ? undefined : boundedText(p.clientMessageId, 'clientMessageId', 128);
-      const result = await chat('chat.send', { id: idParam(p), text, attachments, ...(clientMessageId ? { clientMessageId } : {}) });
+      const result = await chat('chat.send', { id: idParam(p), text, attachments, ...(clientMessageId ? { clientMessageId } : {}) }, signal);
       emit('chat.updated', { sessionId: p.id });
-      return selected(result, ['userMessageId']);
+      return selected(result, ['userMessageId', 'requestId']);
     },
     'ui.chat.stop': async p => selected(await chat('chat.stop', { id: idParam(p) }), ['stopped', 'state', 'reason']),
-    'ui.chat.retry': async p => selected(await chat('chat.retry', { id: idParam(p) }), ['userMessageId']),
-    'ui.chat.continue': async p => selected(await chat('chat.continue', { id: idParam(p) }), ['continued']),
-    'ui.chat.catalog': async () => {
-      const result = await chat('chat.catalog', {});
+    'ui.chat.retry': async p => selected(await chat('chat.retry', { id: idParam(p) }), ['userMessageId', 'requestId']),
+    'ui.chat.continue': async p => selected(await chat('chat.continue', { id: idParam(p) }), ['continued', 'requestId']),
+    'ui.chat.catalog': async p => {
+      const result = await chat('chat.catalog', { refresh: p.refresh === true });
       return {
         models: (result.models ?? []).map(item => selected(item, ['id', 'label', 'provider'])),
         modelProviders: (result.modelProviders ?? []).map(item => ({
-          id: string(item.id, 80), label: string(item.label, 120), configured: item.hasKey === true,
+          id: string(item.id, 80), label: string(item.label, 120), configured: item.configured === true || item.hasKey === true,
+          catalogState: string(item.catalogState, 40) || 'unknown', reachable: typeof item.reachable === 'boolean' ? item.reachable : null,
+          authenticated: typeof item.authenticated === 'boolean' ? item.authenticated : null,
+          inferencing: typeof item.inferencing === 'boolean' ? item.inferencing : null,
+          toolCalling: item.toolCalling === true, error: string(item.error, 300) || null,
           settingsFields: (item.settingsFields ?? []).slice(0, 50).map(field => ({
             key: string(field.key, 80), label: string(field.label, 120), type: string(field.type, 20),
             ...(Array.isArray(field.choices) ? { choices: boundedStrings(field.choices, 50, 120) } : {}),
@@ -512,7 +524,7 @@ export function createDesktopUiService({ services = {}, system = services.system
     'ui.chat.config.set': async p => {
       const input = record(p.config);
       const config = {};
-      for (const key of ['mode', 'modelProvider', 'model', 'agentProvider', 'reasoning']) {
+      for (const key of ['mode', 'modelProvider', 'model', 'agentProvider', 'reasoning', 'workspaceId']) {
         if (Object.hasOwn(input, key)) config[key] = input[key];
       }
       const result = await chat('chat.config.set', { id: idParam(p), config });
@@ -590,7 +602,7 @@ export function createDesktopUiService({ services = {}, system = services.system
       return selected(result, ['id', 'deleted']);
     },
     'ui.agent.list': async () => ({ agents: (await agent('agent.list', {})).providers.map(projectAgent) }),
-    'ui.agent.health': async p => projectAgent(await agent('agent.health', { provider: string(p.provider, 80) })),
+    'ui.agent.health': async p => projectAgent(await agent('agent.health', { provider: string(p.provider, 80), refresh: p.refresh === true })),
     'ui.extensions.settings.describe': async p => {
       const result = record(await extensions('ext.settings.describe', { id: idParam(p) }));
       const fields = (Array.isArray(result.fields) ? result.fields : []).slice(0, 32).map(field => {
@@ -833,7 +845,7 @@ export function createDesktopUiService({ services = {}, system = services.system
     'ui.settings.get': async () => {
       const result = services.settingsService?.store?.get?.();
       if (!result) throw uiError('SERVICE_UNAVAILABLE', '设置服务当前不可用');
-      return { settings: projectSettings(result.settings), revision: Number.isSafeInteger(result.rev) ? result.rev : null };
+      return { settings: projectSettings(result.settings), revision: Number.isSafeInteger(result.revision) ? result.revision : null };
     },
     'ui.settings.update': async p => {
       const section = string(p.section, 60);
@@ -841,9 +853,10 @@ export function createDesktopUiService({ services = {}, system = services.system
       const values = record(p.values);
       const allowed = new Set(SETTING_KEYS[section]);
       const safeValues = Object.fromEntries(Object.entries(values).filter(([key]) => allowed.has(key) && !SECRET_KEY.test(key)));
-      const result = await settings('settings.update', { section, values: safeValues, expectedRev: p.expectedRev });
+      const expectedRevision = p.expectedRevision ?? p.expectedRev;
+      const result = await settings('settings.update', { section, values: safeValues, expectedRev: expectedRevision });
       emit('model.updated', { provider: section === 'models' ? string(result.settings?.models?.provider, 80) : undefined });
-      return { settings: projectSettings(result.settings), revision: Number.isSafeInteger(result.rev) ? result.rev : null };
+      return { settings: projectSettings(result.settings), revision: Number.isSafeInteger(result.revision) ? result.revision : null };
     },
     'ui.about.info': async () => projectAbout(await about('about.info', {})),
     'ui.feedback.links': async () => {
@@ -893,8 +906,8 @@ export function createDesktopUiService({ services = {}, system = services.system
     'ui.onboarding.finish': async () => projectOnboarding(await onboarding('onboarding.finish', {})),
     'ui.onboarding.testProvider': async p => {
       const input = record(p);
-      const result = await onboarding('onboarding.testProvider', { provider: boundedText(input.provider, 'provider', 80), apiKey: boundedText(input.apiKey, 'apiKey', 500), baseUrl: string(input.baseUrl, 500) });
-      return selected(result, ['ok', 'provider', 'status', 'code', 'message', 'connectionStepCompleted']);
+      const result = await onboarding('onboarding.testProvider', { provider: boundedText(input.provider, 'provider', 80), apiKey: boundedText(input.apiKey, 'apiKey', 500), baseUrl: string(input.baseUrl, 500), model: string(input.model, 120) });
+      return selected(result, ['ok', 'provider', 'status', 'code', 'phase', 'configured', 'reachable', 'authenticated', 'inferencing', 'message', 'connectionStepCompleted']);
     },
     'ui.onboarding.setModel': async p => selected(await onboarding('onboarding.setModel', { provider: boundedText(p.provider, 'provider', 80), model: boundedText(p.model, 'model', 200) }), ['provider', 'model', 'persisted']),
     'ui.approvals.list': async () => ({ approvals: ((await capability('capability.approval.list', {})).approvals ?? []).map(projectApproval) }),

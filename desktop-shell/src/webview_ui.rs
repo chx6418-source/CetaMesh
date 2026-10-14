@@ -27,7 +27,7 @@ enum UiEvent {
     Wake,
     CoreStatus(Status),
     WindowBehavior { confirm_on_exit: bool },
-    Reply { id: String, result: Result<Value, &'static str> },
+    Reply { id: String, result: Result<Value, String> },
 }
 
 fn resolve_bundle() -> Result<PathBuf, String> {
@@ -91,10 +91,44 @@ fn response(status: u16, content_type: &str, body: Vec<u8>) -> Response<Cow<'sta
         .expect("fixed local asset response headers are valid")
 }
 
-fn send_reply(webview: &WebView, id: String, result: Result<Value, &'static str>) {
+fn core_error_payload(error: &str) -> (String, String) {
+    let (code, message) = error.strip_prefix("Core IPC ")
+        .and_then(|value| value.split_once(": "))
+        .filter(|(code, _)| !code.is_empty() && code.len() <= 64
+            && code.bytes().all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_'))
+        .map(|(code, message)| (code.to_owned(), message))
+        .unwrap_or_else(|| ("CORE_IPC_ERROR".to_owned(), error));
+    (code, sanitize_error_message(message))
+}
+
+fn sanitize_error_message(message: &str) -> String {
+    let mut sanitized = String::new();
+    for (index, token) in message.split_whitespace().enumerate() {
+        if index > 0 { sanitized.push(' '); }
+        let lower = token.to_ascii_lowercase();
+        if lower.contains("sk-") || lower.starts_with("bearer")
+            || lower.contains("api_key=") || lower.contains("apikey=") {
+            sanitized.push_str("[REDACTED]");
+        } else {
+            sanitized.push_str(token);
+        }
+        if sanitized.len() >= 1000 {
+            let mut boundary = 1000.min(sanitized.len());
+            while !sanitized.is_char_boundary(boundary) { boundary -= 1; }
+            sanitized.truncate(boundary);
+            break;
+        }
+    }
+    sanitized
+}
+
+fn send_reply(webview: &WebView, id: String, result: Result<Value, String>) {
     let payload = match result {
         Ok(value) => json!({ "id": id, "ok": true, "result": value }),
-        Err(message) => json!({ "id": id, "ok": false, "error": { "code": "HOST_ERROR", "message": message } }),
+        Err(message) => {
+            let (code, message) = core_error_payload(&message);
+            json!({ "id": id, "ok": false, "error": { "code": code, "message": message } })
+        }
     };
     if let Ok(encoded) = serde_json::to_string(&payload) {
         let _ = webview.evaluate_script(&format!("window.__cetameshReceive?.({encoded})"));
@@ -128,7 +162,7 @@ fn dispatch_bridge(
             let url = request.params["url"].as_str().unwrap_or_default();
             let result = crate::external_link::open_in_default_browser(url)
                 .map(|_| json!({ "opened": true }))
-                .map_err(|_| "无法打开外部链接，请稍后再试。");
+                .map_err(|_| "无法打开外部链接，请稍后再试。".to_owned());
             let _ = proxy.send_event(UiEvent::Reply { id, result });
         }
         "app.openArtifact" => {
@@ -140,15 +174,15 @@ fn dispatch_bridge(
                 let result = api.request("task.artifact.resolveOpen", json!({
                     "taskId": task_id,
                     "artifactId": artifact_id
-                })).map_err(|_| "此交付物当前不可用。")
+                })).map_err(|_| "此交付物当前不可用。".to_owned())
                     .and_then(|authorized| {
                         let canonical_path = authorized["canonicalPath"].as_str()
-                            .ok_or("Core 未返回有效的本地 Artifact 路径。")?;
+                            .ok_or_else(|| "Core 未返回有效的本地 Artifact 路径。".to_owned())?;
                         let extension = authorized["extension"].as_str()
-                            .ok_or("Core 未返回有效的 Artifact 类型。")?;
+                            .ok_or_else(|| "Core 未返回有效的 Artifact 类型。".to_owned())?;
                         crate::external_link::open_artifact(canonical_path, extension)
                             .map(|_| json!({ "opened": true }))
-                            .map_err(|_| "无法安全打开此交付物。")
+                            .map_err(|_| "无法安全打开此交付物。".to_owned())
                     });
                 let _ = proxy.send_event(UiEvent::Reply { id, result });
             });
@@ -158,7 +192,7 @@ fn dispatch_bridge(
             let proxy = proxy.clone();
             std::thread::spawn(move || {
                 let result = api.request("ui.about.info", json!({}))
-                    .map_err(|_| "暂时无法读取 CetaMesh 版本信息。");
+                    .map_err(|error| error);
                 let _ = proxy.send_event(UiEvent::Reply { id, result });
             });
         }
@@ -174,7 +208,7 @@ fn dispatch_bridge(
             std::thread::spawn(move || {
                 let result = pick_text_attachments()
                     .map(|attachments| json!({ "attachments": attachments }))
-                    .map_err(|_| "所选附件无法读取，请选择不超过 256 KiB 的文本或源码文件。");
+                    .map_err(|_| "所选附件无法读取，请选择不超过 256 KiB 的文本或源码文件。".to_owned());
                 let _ = proxy.send_event(UiEvent::Reply { id, result });
             });
         }
@@ -193,8 +227,8 @@ fn dispatch_bridge(
             let result = match request.params["confirmOnExit"].as_bool() {
                 Some(confirm_on_exit) => proxy.send_event(UiEvent::WindowBehavior { confirm_on_exit })
                     .map(|_| json!({ "updated": true }))
-                    .map_err(|_| "无法更新桌面窗口偏好。"),
-                None => Err("窗口偏好格式无效。"),
+                    .map_err(|_| "无法更新桌面窗口偏好。".to_owned()),
+                None => Err("窗口偏好格式无效。".to_owned()),
             };
             let _ = proxy.send_event(UiEvent::Reply { id, result });
         }
@@ -205,7 +239,7 @@ fn dispatch_bridge(
             let proxy = proxy.clone();
             std::thread::spawn(move || {
                 let result = api.request(&method, params)
-                    .map_err(|_| "此操作暂时无法完成，请检查 CetaMesh Core 连接后重试。");
+                    .map_err(|error| error);
                 let _ = proxy.send_event(UiEvent::Reply { id, result });
             });
         }
@@ -477,4 +511,29 @@ pub fn run_webview_ui(paths: DesktopPaths, dev_url: Option<String>) -> Result<()
             _ => {}
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::core_error_payload;
+
+    #[test]
+    fn core_reply_keeps_stable_error_code_and_redacts_secret_material() {
+        assert_eq!(
+            core_error_payload("Core IPC SETTINGS_CONFLICT: stale revision sk-live-example-token"),
+            ("SETTINGS_CONFLICT".to_owned(), "stale revision [REDACTED]".to_owned())
+        );
+        assert_eq!(
+            core_error_payload("connect to Core pipe: unavailable"),
+            ("CORE_IPC_ERROR".to_owned(), "connect to Core pipe: unavailable".to_owned())
+        );
+    }
+
+    #[test]
+    fn long_unicode_errors_are_truncated_at_a_utf8_boundary() {
+        let message = "界".repeat(1001);
+        let (_, sanitized) = core_error_payload(&format!("Core IPC PROVIDER_ERROR: {message}"));
+        assert!(sanitized.len() <= 1000);
+        assert!(sanitized.chars().all(|character| character == '界'));
+    }
 }

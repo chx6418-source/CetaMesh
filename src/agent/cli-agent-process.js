@@ -12,13 +12,46 @@ const ENV_ALLOWLIST = Object.freeze([
   'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'HOME', 'CODEX_HOME',
   'APPDATA', 'LOCALAPPDATA', 'TMPDIR', 'LANG', 'LC_ALL', 'TZ'
 ]);
+const PROXY_ENV_ALLOWLIST = Object.freeze(['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY']);
+const AUTH_ENV_ALLOWLIST = Object.freeze(['OPENAI_API_KEY', 'OPENAI_BASE_URL']);
 
 function envKey(name) {
   return process.platform === 'win32' ? String(name).toUpperCase() : String(name);
 }
 
 /** Keep only OS/runtime variables needed to locate and start a local CLI. */
-export function createMinimalAgentEnv(source = process.env, overrides = {}) {
+function safeProxyValue(name, raw) {
+  const value = String(raw ?? '').trim();
+  if (!value || value.length > 2048) return null;
+  if (name === 'NO_PROXY') {
+    return value.split(',').every((entry) => /^[A-Za-z0-9.*_:\-[\]]+$/.test(entry.trim())) ? value : null;
+  }
+  try {
+    const url = new URL(value);
+    if (!['http:', 'https:'].includes(url.protocol) || !url.hostname || url.username || url.password || url.search || url.hash) return null;
+    return value;
+  } catch { return null; }
+}
+
+function safeOpenAiValue(name, raw) {
+  const value = String(raw ?? '').trim();
+  if (!value || value.length > 2000 || /[\r\n\0]/.test(value)) return null;
+  if (name === 'OPENAI_API_KEY') return value.length >= 16 ? value : null;
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+    const loopback = host === 'localhost' || host === '::1' || /^127(?:\.\d{1,3}){3}$/.test(host);
+    if (url.protocol !== 'https:' && !(url.protocol === 'http:' && loopback)) return null;
+    if (url.username || url.password || url.search || url.hash) return null;
+    return value.replace(/\/+$/, '');
+  } catch { return null; }
+}
+
+/**
+ * Copy only runtime essentials and validated proxy settings. API credentials are
+ * accepted only from explicit overrides whose keys the caller authorized.
+ */
+export function createMinimalAgentEnv(source = process.env, overrides = {}, { authorizedEnvKeys = [] } = {}) {
   const allowed = new Set(ENV_ALLOWLIST.map(envKey));
   const result = {};
   for (const [key, value] of Object.entries(source ?? {})) {
@@ -27,7 +60,35 @@ export function createMinimalAgentEnv(source = process.env, overrides = {}) {
   for (const [key, value] of Object.entries(overrides ?? {})) {
     if (allowed.has(envKey(key)) && value !== undefined && value !== null) result[key] = String(value);
   }
+  for (const name of PROXY_ENV_ALLOWLIST) {
+    const actual = Object.entries({ ...(source ?? {}), ...(overrides ?? {}) }).find(([key]) => envKey(key) === envKey(name));
+    if (!actual) continue;
+    const safe = safeProxyValue(name, actual[1]);
+    if (safe) result[name] = safe;
+  }
+  const authorized = new Set((Array.isArray(authorizedEnvKeys) ? authorizedEnvKeys : []).map(envKey));
+  for (const name of AUTH_ENV_ALLOWLIST) {
+    if (!authorized.has(envKey(name))) continue;
+    const actual = Object.entries(overrides ?? {}).find(([key]) => envKey(key) === envKey(name));
+    if (!actual) continue;
+    const safe = safeOpenAiValue(name, actual[1]);
+    if (safe) result[name] = safe;
+  }
   return result;
+}
+
+function resolveNpmShimScript(executable, exists = fs.existsSync) {
+  const directory = path.dirname(executable);
+  const candidates = [
+    path.join(directory, 'node_modules', '@openai', 'codex', 'bin', 'codex.js'),
+    path.resolve(directory, '..', '@openai', 'codex', 'bin', 'codex.js'),
+    path.resolve(directory, '..', '..', '@openai', 'codex', 'bin', 'codex.js')
+  ];
+  for (const candidate of candidates) {
+    try { if (exists(candidate)) return path.resolve(candidate); }
+    catch { continue; /* Unreadable candidates are skipped and the remaining explicit paths are checked. */ }
+  }
+  return null;
 }
 
 /** Resolve executable files directly from PATH without invoking a shell. */
@@ -95,14 +156,28 @@ function killProcessTree(child) {
 
 /** Shared lifecycle for local CLI-backed Agent Providers. Provider flags/protocol stay outside. */
 export class CliAgentProcess {
-  constructor({ name, executable, argsPrefix = [], envSource = process.env, spawnImpl = spawn, probeImpl = spawnSync } = {}) {
+  constructor({ name, executable, argsPrefix = [], envSource = process.env, spawnImpl = spawn, probeImpl = spawnSync,
+    platform = process.platform, nodeExecutable = process.execPath } = {}) {
     this.name = String(name ?? 'cli-agent');
     this.executableOverride = executable;
     this.argsPrefix = [...argsPrefix].map(String);
     this.envSource = envSource;
     this.spawnImpl = spawnImpl;
     this.probeImpl = probeImpl;
+    this.platform = platform;
+    this.nodeExecutable = nodeExecutable;
     this.sessions = new Map();
+  }
+
+  launchTarget() {
+    const executable = this.executable();
+    if (!executable) return null;
+    if (this.platform !== 'win32' || !/\.(?:cmd|bat)$/i.test(executable)) {
+      return { executable, argsPrefix: this.argsPrefix };
+    }
+    const script = resolveNpmShimScript(executable);
+    if (!script) throw Object.assign(new Error('Windows Codex command shim does not resolve to the installed npm CLI package'), { code: 'UNSUPPORTED_WINDOWS_SHIM' });
+    return { executable: this.nodeExecutable, argsPrefix: [script, ...this.argsPrefix] };
   }
 
   executable() {
@@ -135,9 +210,12 @@ export class CliAgentProcess {
   probe(args, { timeoutMs = 5000 } = {}) {
     const executable = this.executable();
     if (!executable) return { available: false, executable: null, code: 'not_installed' };
+    let target;
+    try { target = this.launchTarget(); }
+    catch (error) { return { available: false, executable, code: error?.code ?? 'unsupported_shim' }; }
     let result;
     try {
-      result = this.probeImpl(executable, [...this.argsPrefix, ...args.map(String)], {
+      result = this.probeImpl(target.executable, [...target.argsPrefix, ...args.map(String)], {
         encoding: 'utf8', timeout: timeoutMs, windowsHide: true, maxBuffer: 1024 * 1024,
         env: createMinimalAgentEnv(this.envSource)
       });
@@ -155,19 +233,20 @@ export class CliAgentProcess {
   }
 
   startSession({ sessionId = crypto.randomUUID(), cwd, args = [], input = '', env = {}, timeoutMs = 10 * 60 * 1000,
-    inputMode = 'end', onStdout = () => {}, onStderr = () => {} } = {}) {
+    inputMode = 'end', authorizedEnvKeys = [], onStdout = () => {}, onStderr = () => {} } = {}) {
     const executable = this.executable();
     if (!executable) throw Object.assign(new Error(`${this.name} is not installed`), { code: 'PROVIDER_UNAVAILABLE' });
+    const target = this.launchTarget();
     if (typeof cwd !== 'string' || !path.isAbsolute(cwd)) {
       throw Object.assign(new Error('CLI session needs an absolute CetaMesh-owned working directory'), { code: 'INVALID_PARAMS' });
     }
     if (!['end', 'open'].includes(inputMode)) throw Object.assign(new Error('CLI inputMode must be end or open'), { code: 'INVALID_PARAMS' });
     if (this.sessions.has(sessionId)) throw Object.assign(new Error('CLI session id is already active'), { code: 'INVALID_PARAMS' });
-    const child = this.spawnImpl(executable, [...this.argsPrefix, ...args.map(String)], {
+    const child = this.spawnImpl(target.executable, [...target.argsPrefix, ...args.map(String)], {
       cwd,
-      env: createMinimalAgentEnv(this.envSource, env),
+      env: createMinimalAgentEnv(this.envSource, env, { authorizedEnvKeys }),
       windowsHide: true,
-      detached: process.platform !== 'win32',
+      detached: this.platform !== 'win32',
       stdio: ['pipe', 'pipe', 'pipe']
     });
     let stdout = '';

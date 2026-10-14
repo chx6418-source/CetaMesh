@@ -63,9 +63,10 @@ export function prunePacketFiles(dir, keep = PACKET_FILES_KEEP) {
   let names;
   try {
     names = fs.readdirSync(dir);
-  } catch {
+  } catch (error) {
     // 目录还不存在（从未落过 packet）是正常状态，无需清理。
-    return;
+    if (error?.code === 'ENOENT') return;
+    throw error;
   }
   const sequenceOf = (name) => {
     const match = /^(?:packet|reconciliation)-(\d+)\.json$/.exec(name);
@@ -146,7 +147,9 @@ export function createContinuityRuntime({
         preferred = String(declared.preferred);
         source = 'provider';
       }
-    } catch { /* 未知 Provider：用默认策略 */ }
+    } catch (error) {
+      if (error?.code !== 'AGENT_PROVIDER_UNKNOWN') throw error;
+    }
     return {
       preferred: preferred ?? IMPLEMENTED_ROLLOVER_STRATEGY,
       implemented: IMPLEMENTED_ROLLOVER_STRATEGY,
@@ -424,53 +427,94 @@ export function createContinuityRuntime({
       // Task Store 是乐观锁（expectedRev）：每步前取最新 rev，保证与其它写者兼容。
       const currentRev = () => taskRuntime.get({ id: task.id }).task.rev;
 
-      // 1) Task Checkpoint 落库（Task Runtime 持有）
+      // Keep the live binding and old Session intact until the target is created,
+      // attached, and has accepted its bootstrap prompt.
+      const previousCheckpoint = task.checkpoint ?? null;
       taskRuntime.setCheckpoint({
         id: task.id,
         expectedRev: currentRev(),
         summary: packet.checkpoint.summary || packet.goal,
         nextAction: packet.checkpoint.nextAction || packet.pendingWork[0] || ''
       });
-
-      // 2) 结束旧 Session（取消在途回合尽力而为 + 归档能力如实报告）
       const fromProvider = agentBroker.require(previousAgent.provider);
-      try {
-        await agentBroker.cancel({ provider: fromProvider.id, sessionId: previousAgent.sessionId });
-      } catch { /* 旧会话可能已无在途回合 */ }
-      const archive = await agentBroker.archiveSession({ provider: fromProvider.id, sessionId: previousAgent.sessionId });
-
-      // 3) 解绑旧 Agent（agentHistory 追加，Task id 不变）
-      taskRuntime.detachAgent({ id: task.id, expectedRev: currentRev(), note: `rollover #${sequence}（${packet.reasonForHandoff}）` });
-
-      // 4) 经 Broker 创建新 Session 并发送结构化 bootstrap（不是聊天历史）
       const target = targetProvider ? agentBroker.require(targetProvider) : fromProvider;
       const targetBoundary = target.capabilities().workspaceBoundary;
       if (!taskBoundaries.has(targetBoundary)) {
         throw continuityError('ROLLOVER_NOT_SAFE', 'A Task cannot switch to a Provider without an enforced Workspace boundary');
       }
-      const created = await agentBroker.createSession(target.id, {
-        taskId: task.id,
-        workspaceId: task.workspaceId,
-        model: model ?? target.defaults?.model,
-        reasoningEffort: reasoningEffort ?? target.defaults?.reasoningEffort
-      });
-      if (!created?.sessionId) {
-        throw continuityError('PROVIDER_ERROR', `Agent Provider「${target.id}」未返回 sessionId`);
+      let created = null;
+      let attached = null;
+      let reconciliation = null;
+      try {
+        created = await agentBroker.createSession(target.id, {
+          taskId: task.id,
+          workspaceId: task.workspaceId,
+          model: model ?? target.defaults?.model,
+          reasoningEffort: reasoningEffort ?? target.defaults?.reasoningEffort
+        });
+        if (!created?.sessionId) {
+          throw continuityError('PROVIDER_ERROR', `Agent Provider「${target.id}」未返回 sessionId`);
+        }
+        // Bind before bootstrap: broker-only providers resolve authorization from the
+        // current Task binding. If bootstrap fails, the old binding is restored below.
+        attached = taskRuntime.attachAgent({
+          id: task.id,
+          expectedRev: currentRev(),
+          provider: target.id,
+          sessionId: created.sessionId,
+          note: `rollover #${sequence} 自 ${previousAgent.provider}:${previousAgent.sessionId}`
+        });
+        await agentBroker.send({ provider: target.id, sessionId: created.sessionId, content: renderResumePrompt(packet) });
+
+        if (reconciler && task.workspaceId) {
+          const freshFacts = facts ?? await collectWorkspaceFacts({ workspaceId: task.workspaceId, relevantFiles });
+          if (freshFacts) {
+            reconciliation = reconciler.reconcile({ packet, facts: freshFacts });
+            packet.reconciliation = reconciliation;
+            writeJsonAtomic(path.join(packetDir, String(task.id), `reconciliation-${String(sequence).padStart(4, '0')}.json`), {
+              taskId: task.id, sequence, reconciliation, facts: freshFacts
+            });
+            prunePacketFiles(path.join(packetDir, String(task.id)));
+            if (reconciliation.consistent === false) {
+              log(`Continuity reconciliation：任务 ${task.id} 发现 ${reconciliation.discrepancies.length} 处 checkpoint/工作区不一致（已记录）`);
+            }
+          }
+        }
+      } catch (error) {
+        const current = taskRuntime.get({ id: task.id }).task;
+        if (created?.sessionId && current.currentAgent?.provider === target.id && current.currentAgent?.sessionId === created.sessionId) {
+          try {
+            taskRuntime.detachAgent({ id: task.id, expectedRev: current.rev, note: `rollover #${sequence} failed; restore prior Agent` });
+            taskRuntime.attachAgent({ id: task.id, expectedRev: currentRev(), provider: previousAgent.provider,
+              sessionId: previousAgent.sessionId, note: `rollover #${sequence} rolled back` });
+          } catch (rollbackError) {
+            log(`Continuity Task binding rollback failed: ${rollbackError?.code ?? 'TASK_ROLLBACK_FAILED'}`);
+          }
+        }
+        try { await taskRuntime.restoreCheckpoint({ id: task.id, expectedRev: currentRev(), checkpoint: previousCheckpoint }); }
+        catch (rollbackError) {
+          log(`Continuity checkpoint rollback failed: ${rollbackError?.code ?? 'CHECKPOINT_ROLLBACK_FAILED'}`);
+        }
+        if (created?.sessionId) {
+          try { await agentBroker.closeSession({ provider: target.id, sessionId: created.sessionId }); }
+          catch (cleanupError) {
+            log(`Continuity target Session cleanup failed: ${cleanupError?.code ?? 'SESSION_CLEANUP_FAILED'}`);
+          }
+        }
+        throw error;
       }
-      // Bind before bootstrap: broker-only providers resolve authorization from the
-      // current Task binding. Sending before attachment left fresh sessions unassigned.
-      const attached = taskRuntime.attachAgent({
-        id: task.id,
-        expectedRev: currentRev(),
-        provider: target.id,
-        sessionId: created.sessionId,
-        note: `rollover #${sequence} 自 ${previousAgent.provider}:${previousAgent.sessionId}${archive.supported === true && archive.archived ? '（旧会话已归档）' : ''}`
-      });
-      await agentBroker.send({
-        provider: target.id,
-        sessionId: created.sessionId,
-        content: renderResumePrompt(packet)
-      });
+
+      // The target is now usable. Stop/archive the old Session only after the new
+      // binding and bootstrap succeeded, so Provider initialization failure can roll back.
+      try { await agentBroker.cancel({ provider: fromProvider.id, sessionId: previousAgent.sessionId }); }
+      catch (cancelError) {
+        if (!['SESSION_NOT_FOUND', 'TURN_NOT_RUNNING'].includes(cancelError?.code)) {
+          log(`Continuity old Session cancel failed: ${cancelError?.code ?? 'PROVIDER_ERROR'}`);
+        }
+      }
+      let archive = { supported: false, archived: false };
+      try { archive = await agentBroker.archiveSession({ provider: fromProvider.id, sessionId: previousAgent.sessionId }); }
+      catch (error) { log(`Continuity old Session archive failed: ${error?.code ?? 'PROVIDER_ERROR'}`); }
 
       if (previousBoundary === 'staged-capability-broker' || previousCapabilities?.requiresSessionCleanup === true) {
         try { await agentBroker.closeSession({ provider: fromProvider.id, sessionId: previousAgent.sessionId }); }
@@ -479,25 +523,7 @@ export function createContinuityRuntime({
         }
       }
 
-      // 6) Workspace Reconciliation：用真实工作区核验 checkpoint（TASK-S2-007）。
-      //    不一致只记录 discrepancy，绝不静默改写 Task State。
-      let reconciliation = null;
-      if (reconciler && task.workspaceId) {
-        const freshFacts = facts ?? await collectWorkspaceFacts({ workspaceId: task.workspaceId, relevantFiles });
-        if (freshFacts) {
-          reconciliation = reconciler.reconcile({ packet, facts: freshFacts });
-          packet.reconciliation = reconciliation;
-          writeJsonAtomic(path.join(packetDir, String(task.id), `reconciliation-${String(sequence).padStart(4, '0')}.json`), {
-            taskId: task.id, sequence, reconciliation, facts: freshFacts
-          });
-          prunePacketFiles(path.join(packetDir, String(task.id)));
-          if (reconciliation.consistent === false) {
-            log(`Continuity reconciliation：任务 ${task.id} 发现 ${reconciliation.discrepancies.length} 处 checkpoint/工作区不一致（已记录）`);
-          }
-        }
-      }
-
-      // 7) 落盘历史 + 重置 monitor（新 session 从零计数）
+      // 6) 落盘历史 + 重置 monitor（新 session 从零计数）
       const store = readHistory();
       store.rollovers.push({
         taskId: task.id,

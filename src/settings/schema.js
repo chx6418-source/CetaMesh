@@ -49,12 +49,15 @@ export const FIELDS = Object.freeze({
     provider: text('deepseek-official', { description: '模型 provider' }),
     defaultModel: text('deepseek-flash', { description: '新会话默认模型' }),
     reasoningEffort: text('max', { choices: ['off', 'low', 'high', 'max'], description: '推理强度' }),
+    openaiCompatibleToolCalling: bool(false, { description: '允许 OpenAI 兼容 Provider 使用结构化工具调用（仅对该协议 Provider 生效）' }),
+    openaiCompatibleReasoningEffort: bool(false, { description: '允许 OpenAI 兼容 Provider 发送推理强度参数（仅已知支持的推理模型生效）' }),
     streaming: bool(true, { description: '流式输出' })
   }),
   agents: Object.freeze({
     defaultAgentPreset: text('whale-chat-v2', { description: '默认 Agent Preset' }),
     defaultAgentProvider: text('auto', { choices: ['auto', 'dsh', 'codex', 'zcode'], description: '新建会话默认 Agent Provider' }),
-    allowBackgroundTurns: bool(true, { description: '允许后台回合' })
+    allowBackgroundTurns: bool(true, { description: '允许后台回合' }),
+    codexOpenAiEnvironmentAuthorized: bool(false, { description: '明确授权 Codex CLI 使用本机 OPENAI_API_KEY 与 OPENAI_BASE_URL；只传递这两个变量，不导入其它凭据' })
   }),
   memory: Object.freeze({
     enabled: bool(true, { description: '启用统一 Memory' }),

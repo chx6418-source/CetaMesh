@@ -143,9 +143,15 @@ export function HarborApp() {
     }).catch(() => { /* Settings load errors are surfaced on the Settings page. */ });
     const offSessions = bridge.subscribe('chat.updated', () => { void refreshSessions(); });
     const offCore = bridge.subscribe('core.status', ({ ready }) => setHostStatus(ready ? 'ready' : 'offline'));
+    const offRestart = bridge.subscribe('core.restarted', () => {
+      void refreshSessions();
+      void refreshWorkspaces();
+      void refreshTaskCount();
+      void hostClient.status().then(status => setHostStatus(status.ready ? 'ready' : 'offline')).catch(() => setHostStatus('offline'));
+    });
     const offTasks = bridge.subscribe('task.updated', () => { void refreshTaskCount(); });
     const offWorkspaces = bridge.subscribe('workspace.updated', () => { void refreshWorkspaces(); });
-    return () => { offSessions(); offCore(); offTasks(); offWorkspaces(); };
+    return () => { offSessions(); offCore(); offRestart(); offTasks(); offWorkspaces(); };
   }, [refreshSessions, refreshWorkspaces, refreshTaskCount, setTheme]);
 
   useEffect(() => {
@@ -241,7 +247,7 @@ export function HarborApp() {
         {globalSearch && <div className="search-popover" role="region" aria-label="搜索结果">{searchError ? <ErrorNotice error={searchError} /> : searchResults ? <SearchResults results={searchResults} onSelectSession={id => navigate('chat', id)} onSelectPage={navigate} /> : <LoadingState label="正在搜索…" />}</div>}
       </header>
       <main className={`page-frame page-${page}`}>
-        {page === 'chat' && <ChatPage session={activeSession} onSessionUpdate={updated => setSessions(current => current.map(item => item.id === updated.id ? updated : item))} onNew={createSession} onOpenMemory={() => navigate('memory')} />}
+        {page === 'chat' && <ChatPage session={activeSession} workspaces={workspaces} activeWorkspaceId={activeWorkspaceId} onSessionUpdate={updated => setSessions(current => current.map(item => item.id === updated.id ? updated : item))} onNew={createSession} onOpenMemory={() => navigate('memory')} />}
         {page === 'work' && <WorkPage workspaces={workspaces} onRefreshWorkspaces={refreshWorkspaces} />}
         {page === 'memory' && <MemoryPage />}
         {page === 'agents' && <AgentsPage />}
@@ -330,11 +336,11 @@ type ChatTimelineItem =
 const chatTimelineKey = (item: ChatTimelineItem) => item.id;
 const isChatMessageAnchor = (item: ChatTimelineItem) => item.kind === 'message';
 
-function ChatPage({ session, onSessionUpdate, onNew, onOpenMemory }: { session: ChatSession | null; onSessionUpdate(session: ChatSession): void; onNew(): Promise<void>; onOpenMemory(): void }) {
+function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onNew, onOpenMemory }: { session: ChatSession | null; workspaces: { id: string; name: string; status: string }[]; activeWorkspaceId: string | null; onSessionUpdate(session: ChatSession): void; onNew(): Promise<void>; onOpenMemory(): void }) {
   const [messages, setMessages] = useState<ChatMessageDto[]>([]);
   const [hasMoreHistory, setHasMoreHistory] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
-  const [status, setStatus] = useState<{ state: string; displayText: string; toolActivity: ChatMessageDto['toolActivity']; agentActivity: ChatMessageDto['agentActivity']; error: string | null; approvalId: string | null; routing: Record<string, unknown> }>({ state: 'idle', displayText: '', toolActivity: [], agentActivity: null, error: null, approvalId: null, routing: {} });
+  const [status, setStatus] = useState<{ state: string; displayText: string; statusMessage: string | null; requestId: string | null; retryCount: number; followState: string; followError: string | null; toolActivity: ChatMessageDto['toolActivity']; agentActivity: ChatMessageDto['agentActivity']; error: string | null; errorCode: string | null; approvalId: string | null; routing: Record<string, unknown> }>({ state: 'idle', displayText: '', statusMessage: null, requestId: null, retryCount: 0, followState: 'idle', followError: null, toolActivity: [], agentActivity: null, error: null, errorCode: null, approvalId: null, routing: {} });
   const [catalog, setCatalog] = useState<Awaited<ReturnType<typeof chatClient.catalog>> | null>(null);
   const [linkedTask, setLinkedTask] = useState<Task | null>(null);
   const [memories, setMemories] = useState<Memory[]>([]);
@@ -351,7 +357,7 @@ function ChatPage({ session, onSessionUpdate, onNew, onOpenMemory }: { session: 
   const olderPageRequestRef = useRef(false);
   const virtualListRef = useRef<VirtualListController | null>(null);
   const streamStatusFrameRef = useRef<number | null>(null);
-  const streamUpdateRef = useRef<{ sessionId?: string; status?: string; delta?: string; replaceText?: string; reset?: boolean; toolActivity?: ChatMessageDto['toolActivity']; agentActivity?: ChatMessageDto['agentActivity'] } | null>(null);
+  const streamUpdateRef = useRef<{ sessionId?: string; status?: string; requestId?: string; retryCount?: number; message?: string; delta?: string; replaceText?: string; reset?: boolean; toolActivity?: ChatMessageDto['toolActivity']; agentActivity?: ChatMessageDto['agentActivity'] } | null>(null);
   const seenMessageIdsRef = useRef<Set<string>>(new Set());
   const pendingSendsRef = useRef(new Map<string, { text: string; attachments: { name: string; content: string; mimeType?: string }[] }>());
   const previousStreamRef = useRef({ state: 'idle', text: '' });
@@ -430,6 +436,7 @@ function ChatPage({ session, onSessionUpdate, onNew, onOpenMemory }: { session: 
   useEffect(() => {
     if (!session) return;
     const refreshConversation = () => { void load(); };
+    const offRestart = bridge.subscribe('core.restarted', () => { refreshConversation(); void refreshContext(); });
     const offUpdated = bridge.subscribe('chat.updated', data => { if (!data.sessionId || data.sessionId === session.id) refreshConversation(); });
     const offStreaming = bridge.subscribe('chat.streaming', data => {
       if (data.sessionId !== session.id) return;
@@ -446,6 +453,9 @@ function ChatPage({ session, onSessionUpdate, onNew, onOpenMemory }: { session: 
           return {
             ...current,
             state: update.status ?? current.state,
+            requestId: update.requestId ?? current.requestId,
+            retryCount: update.retryCount ?? current.retryCount,
+            statusMessage: update.message ?? current.statusMessage,
             displayText,
             toolActivity: update.toolActivity ?? current.toolActivity,
             agentActivity: update.agentActivity === undefined ? current.agentActivity : update.agentActivity
@@ -468,7 +478,7 @@ function ChatPage({ session, onSessionUpdate, onNew, onOpenMemory }: { session: 
         streamStatusFrameRef.current = null;
       }
       streamUpdateRef.current = null;
-      offUpdated(); offStreaming(); offApproval(); offResolved(); offWarning(); offTasks(); offMemory();
+      offUpdated(); offStreaming(); offApproval(); offResolved(); offWarning(); offTasks(); offMemory(); offRestart();
     };
   }, [session?.id, load, refreshContext]);
   const loadOlderHistory = useCallback(async () => {
@@ -492,7 +502,7 @@ function ChatPage({ session, onSessionUpdate, onNew, onOpenMemory }: { session: 
     finally { olderPageRequestRef.current = false; setLoadingOlder(false); }
   }, [session?.id, hasMoreHistory, loadingOlder, messages]);
 
-  const streaming = ['streaming', 'cancelling'].includes(status.state);
+  const streaming = ['starting', 'streaming', 'recovering', 'cancelling'].includes(status.state);
   const timelineItems = useMemo<ChatTimelineItem[]>(() => {
     const rows: ChatTimelineItem[] = [];
     if (hasMoreHistory && messages.length) rows.push({ id: 'load-earlier', kind: 'load-earlier' });
@@ -502,7 +512,7 @@ function ChatPage({ session, onSessionUpdate, onNew, onOpenMemory }: { session: 
     rows.push(...messages.map(message => ({ id: `message:${message.id}`, kind: 'message' as const, message })));
     if (streaming) rows.push({
       id: 'streaming', kind: 'streaming',
-      message: { id: 'streaming', role: 'assistant', text: status.displayText || (status.agentActivity ? `${status.agentActivity.label} 正在执行…` : status.toolActivity.length ? '正在处理工具调用…' : '正在思考…'), at: null, attachments: [], toolActivity: status.toolActivity, agentActivity: status.agentActivity, error: null, cancelled: false }
+      message: { id: 'streaming', role: 'assistant', text: status.displayText || status.statusMessage || (status.agentActivity ? `${status.agentActivity.label} 正在执行…` : status.toolActivity.length ? '正在处理工具调用…' : '正在思考…'), at: null, attachments: [], toolActivity: status.toolActivity, agentActivity: status.agentActivity, error: null, cancelled: false }
     });
     if (status.error && !streaming) rows.push({ id: 'turn-error', kind: 'turn-error', message: status.error });
     rows.push(...approvals.map(approval => ({ id: `approval:${approval.id}`, kind: 'approval' as const, approval })));
@@ -583,6 +593,13 @@ function ChatPage({ session, onSessionUpdate, onNew, onOpenMemory }: { session: 
     try { onSessionUpdate(await chatClient.setConfig(session.id, { ...session.config, modelProvider: provider, model })); await load(); }
     catch (cause) { setError(messageOf(cause)); }
   }
+  async function updateWorkspace(workspaceId: string) {
+    if (!session) return;
+    try {
+      onSessionUpdate(await chatClient.setConfig(session.id, { ...session.config, workspaceId: workspaceId || null }));
+      setError('');
+    } catch (cause) { setError(messageOf(cause)); }
+  }
   async function decideApproval(id: string, approve: boolean) {
     try {
       const result = await approvalClient.decide(id, approve);
@@ -617,7 +634,7 @@ function ChatPage({ session, onSessionUpdate, onNew, onOpenMemory }: { session: 
         }}>有新消息 · 跳到最新</Button> : null}
         render={renderTimelineItem}
       />
-      <div className="composer-dock"><ChatComposer busy={streaming} models={providers} selectedModelKey={selectedModelKey} agentProviders={catalog?.agentProviders ?? []} selectedAgent={session.config.agentProvider ?? ''} onModelChange={value => { try { const [provider, model] = JSON.parse(value) as [string, string]; void updateModel(provider, model); } catch { setError('无法识别所选模型。'); } }} onAgentChange={updateAgent} onSend={send} onStop={() => void chatClient.stop(session.id).then(load).catch(cause => setError(messageOf(cause)))} /></div>
+      <div className="composer-dock"><ChatComposer busy={streaming} models={providers} selectedModelKey={selectedModelKey} agentProviders={catalog?.agentProviders ?? []} selectedAgent={session.config.agentProvider ?? ''} workspaces={workspaces} workspaceId={session.config.workspaceId ?? ''} activeWorkspaceId={activeWorkspaceId} onWorkspaceChange={updateWorkspace} onModelChange={value => { try { const [provider, model] = JSON.parse(value) as [string, string]; void updateModel(provider, model); } catch { setError('无法识别所选模型。'); } }} onAgentChange={updateAgent} onSend={send} onStop={() => void chatClient.stop(session.id).then(load).catch(cause => setError(messageOf(cause)))} /></div>
     </section>
     {!contextCollapsed && <ChatContextPanel task={linkedTask} memories={memories} approvals={approvals} onOpenMemory={onOpenMemory} />}
   </div>;
@@ -633,10 +650,11 @@ function ApprovalCard({ approval, onDecide }: { approval: Approval; onDecide(id:
   return <Card className="approval-card"><div className="approval-icon"><Icon name="approval" size={20} /></div><div className="grow"><div className="row between"><strong>{approval.title}</strong><Badge tone="warning">需要处理</Badge></div><p>{approval.summary}</p><div className="approval-meta"><span>{approval.capability}</span><span>风险：{approval.risk}</span>{approval.expiresAt && <span>有效至 {dateLabel(approval.expiresAt)}</span>}</div><div className="row approval-actions"><Button compact variant="ghost" onClick={() => onDecide(approval.id, false)}>拒绝</Button><Button compact variant="primary" onClick={() => onDecide(approval.id, true)}>批准一次</Button></div></div></Card>;
 }
 
-function ChatComposer({ busy, models, selectedModelKey, agentProviders, selectedAgent, onModelChange, onAgentChange, onSend, onStop }: {
+function ChatComposer({ busy, models, selectedModelKey, agentProviders, selectedAgent, workspaces, workspaceId, activeWorkspaceId, onWorkspaceChange, onModelChange, onAgentChange, onSend, onStop }: {
   busy: boolean; models: { id: string; label: string; configured: boolean; models: { id?: string; name?: string; label?: string }[] }[];
   selectedModelKey: string; agentProviders: Agent[]; selectedAgent: string;
-  onModelChange(value: string): void; onAgentChange(provider: string): void;
+  workspaces: { id: string; name: string; status: string }[]; workspaceId: string; activeWorkspaceId: string | null;
+  onWorkspaceChange(workspaceId: string): void; onModelChange(value: string): void; onAgentChange(provider: string): void;
   onSend(text: string, attachments: { name: string; content: string; mimeType?: string }[], clientMessageId: string): void; onStop(): void;
 }) {
   const [draft, setDraft] = useState('');
@@ -661,7 +679,7 @@ function ChatComposer({ busy, models, selectedModelKey, agentProviders, selected
     onSend(text, attachments, crypto.randomUUID());
     setDraft(''); setAttachments([]);
   }
-  return <div className="chat-composer"><div className="composer-field"><textarea ref={textarea} aria-label="输入消息" placeholder="告诉 CetaMesh 你想做什么。" value={draft} rows={2} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); submit(); } }} /><div className="composer-bottom"><div className="row composer-controls"><IconButton label="添加文本或源码附件" icon="attach" onClick={() => void addFiles()} disabled={picking || busy} /><Select label="选择 Agent" value={selectedAgent} onChange={event => onAgentChange(event.target.value)}><option value="">能力</option><option value="none">不使用 Agent</option>{agentProviders.map(agent => { const needsScope = ['task-required', 'workspace-required'].includes(agent.reason ?? ''); const disabled = !agent.available || (!agent.eligible && !needsScope); const state = agent.eligible ? '' : availabilityReasonLabel(agent.reason) || availabilityReasonLabel(agent.status) || (agent.available ? '当前不可使用' : '不可用'); return <option key={agent.id} value={agent.id} disabled={disabled}>{agent.name}{state ? ` · ${state}` : ''}</option>; })}</Select><Select label="选择模型" value={selectedModelKey} onChange={event => onModelChange(event.target.value)} disabled={!modelChoices.length}>{modelChoices.length ? modelChoices.map(choice => <option key={choice.value} value={choice.value}>{choice.label}</option>) : <option value="">暂无已配置模型</option>}</Select></div>{busy ? <Button variant="danger" icon="square" onClick={onStop}>停止</Button> : <Button variant="primary" icon="send" onClick={submit} disabled={!draft.trim()}>发送</Button>}</div>{attachments.length > 0 && <div className="attachment-list">{attachments.map((file, index) => <span key={`${file.name}-${index}`}><Icon name="file" size={13} />{file.name}<button aria-label={`移除 ${file.name}`} onClick={() => setAttachments(current => current.filter((_, item) => item !== index))}><Icon name="close" size={13} /></button></span>)}</div>}{attachmentError && <p className="inline-error" role="alert">{attachmentError}</p>}</div><div className="composer-footnote">消息与附件通过本机 Core 处理，附件总大小上限 128 KiB。</div></div>;
+  return <div className="chat-composer"><div className="composer-field"><textarea ref={textarea} aria-label="输入消息" placeholder="告诉 CetaMesh 你想做什么。" value={draft} rows={2} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); submit(); } }} /><div className="composer-bottom"><div className="row composer-controls"><IconButton label="添加文本或源码附件" icon="attach" onClick={() => void addFiles()} disabled={picking || busy} /><Select label="任务工作区" value={workspaceId} onChange={event => onWorkspaceChange(event.target.value)}><option value="">自动（当前工作区{activeWorkspaceId ? '' : '，未指定'}）</option>{workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}</Select><Select label="选择 Agent" value={selectedAgent} onChange={event => onAgentChange(event.target.value)}><option value="">能力</option><option value="none">不使用 Agent</option>{agentProviders.map(agent => { const needsScope = ['task-required', 'workspace-required'].includes(agent.reason ?? ''); const disabled = !agent.available || (!agent.eligible && !needsScope); const state = agent.eligible ? '' : availabilityReasonLabel(agent.reason) || availabilityReasonLabel(agent.status) || (agent.available ? '当前不可使用' : '不可用'); return <option key={agent.id} value={agent.id} disabled={disabled}>{agent.name}{state ? ` · ${state}` : ''}</option>; })}</Select><Select label="选择模型" value={selectedModelKey} onChange={event => onModelChange(event.target.value)} disabled={!modelChoices.length}>{modelChoices.length ? modelChoices.map(choice => <option key={choice.value} value={choice.value}>{choice.label}</option>) : <option value="">暂无已配置模型</option>}</Select></div>{busy ? <Button variant="danger" icon="square" onClick={onStop}>停止</Button> : <Button variant="primary" icon="send" onClick={submit} disabled={!draft.trim()}>发送</Button>}</div>{attachments.length > 0 && <div className="attachment-list">{attachments.map((file, index) => <span key={`${file.name}-${index}`}><Icon name="file" size={13} />{file.name}<button aria-label={`移除 ${file.name}`} onClick={() => setAttachments(current => current.filter((_, item) => item !== index))}><Icon name="close" size={13} /></button></span>)}</div>}{attachmentError && <p className="inline-error" role="alert">{attachmentError}</p>}</div><div className="composer-footnote">消息与附件通过本机 Core 处理，附件总大小上限 128 KiB。</div></div>;
 }
 
 function ChatContextPanel({ task, memories, approvals, onOpenMemory }: { task: Task | null; memories: Memory[]; approvals: Approval[]; onOpenMemory(): void }) {
@@ -1287,7 +1305,8 @@ const SETTING_SECTION_LABELS: Record<string, string> = {
 const SETTING_FIELD_LABELS: Record<string, string> = {
   language: '界面语言', startMinimized: '启动时最小化', confirmOnExit: '退出前确认', provider: '默认服务商',
   defaultModel: '默认模型', reasoningEffort: '推理强度', streaming: '流式响应', defaultAgentPreset: '默认 Agent 预设',
-  defaultAgentProvider: '默认 Agent', allowBackgroundTurns: '允许后台任务', enabled: '启用记忆',
+  defaultAgentProvider: '默认 Agent', allowBackgroundTurns: '允许后台任务',
+  codexOpenAiEnvironmentAuthorized: '允许 Codex 使用 OpenAI 环境变量', enabled: '启用记忆',
   requireConfirmationForLongTerm: '长期记忆需要确认', defaultScope: '默认记忆范围', retrievalLimit: '检索数量',
   defaultWorkspaceId: '默认工作区', boundaryEnforcement: '强制工作区边界', meshEnabled: '启用设备网格',
   requireApprovalForRemoteCapabilities: '远程能力需要审批', presenceTtlMs: '在线状态有效期',
@@ -1328,7 +1347,7 @@ function ModelConnectionSettings({ provider, model, values, onChange }: { provid
     if (apiKeyRef.current) apiKeyRef.current.value = '';
     setApiKeyPresent(false); setBusy(true); setMessage(''); setError('');
     try {
-      const result = await onboardingClient.testProvider(provider, apiKey, baseUrl);
+      const result = await onboardingClient.testProvider(provider, apiKey, baseUrl, model);
       if (!result.ok) { setError(result.message ?? '连接测试失败。'); return; }
       setMessage(result.message ?? '连接测试成功，凭据已保存在本机。');
       await refresh();
@@ -1509,7 +1528,7 @@ function OnboardingPage({ onComplete }: { onComplete(): Promise<void> }) {
     if (apiKeyRef.current) apiKeyRef.current.value = '';
     setApiKeyEntered(false);
     try {
-      const result = await onboardingClient.testProvider(provider, key, baseUrl);
+      const result = await onboardingClient.testProvider(provider, key, baseUrl, model);
       if (!result.ok) { setConnectionResult(String(result.message ?? '连接测试失败。')); return; }
       if (saveProvider && status?.steps.some(step => step.id === 'provider' && step.status !== 'completed')) await onboardingClient.completeStep('provider', { provider });
       if (status?.steps.some(step => step.id === 'connection' && step.status !== 'completed')) await onboardingClient.completeStep('connection', { provider });

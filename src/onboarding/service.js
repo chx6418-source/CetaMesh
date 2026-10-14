@@ -210,7 +210,7 @@ export function createOnboardingService({
    * 真实连接测试：成功时顺带把 connection 步骤标记完成（用户在界面上做的就是"点一下测试"）。
    * 失败绝不抛错 —— 引导里"测试失败"是正常路径，用户会改 Key 再来。
    */
-  async function testProvider({ provider, apiKey, baseUrl, fetchImpl } = {}) {
+  async function testProvider({ provider, apiKey, baseUrl, model, fetchImpl } = {}) {
     const providerId = text(provider, 64);
     if (!providerId) {
       throw onboardingError(ONBOARDING_ERROR_CODES.INVALID_PARAMS, '必须提供 provider');
@@ -219,29 +219,36 @@ export function createOnboardingService({
       return { ok: false, provider: providerId, code: 'PROVIDER_TEST_UNAVAILABLE', message: '当前运行环境不支持连接测试', detail: null };
     }
     const key = text(apiKey, 512);
-    try {
-      if (key) providerSecrets.set({ provider: providerId, apiKey: key, baseUrl: text(baseUrl, 600) ?? undefined });
-    } catch (error) {
-      // 凭据格式不合法属于用户输入问题：给出可执行的中文提示，而不是透传内部错误码。
-      return {
-        ok: false,
-        provider: providerId,
-        code: 'PROVIDER_TEST_KEY_INVALID',
-        message: 'API Key 格式不合法（长度不足或含控制字符），请检查后重试',
-        detail: String(error?.code ?? error?.message ?? error)
-      };
-    }
+    const candidateUrl = text(baseUrl, 600);
+    const modelId = text(model, 120);
 
     let result;
     try {
-      result = await providerSecrets.test({ provider: providerId, ...(fetchImpl ? { fetchImpl } : {}) });
+      result = await providerSecrets.test({
+        provider: providerId,
+        ...(key ? { apiKey: key } : {}),
+        ...(candidateUrl ? { baseUrl: candidateUrl } : {}),
+        ...(modelId ? { model: modelId } : {}),
+        ...(fetchImpl ? { fetchImpl } : {})
+      });
     } catch (error) {
       const code = String(error?.code ?? '');
       const described = describeProviderTestFailure({ code: code || 'PROVIDER_TEST_KEY_MISSING' });
-      return { ok: false, provider: providerId, status: 0, code: described.code, message: described.message, detail: String(error?.message ?? error) };
+      return { ok: false, provider: providerId, status: 0, code: described.code, phase: 'configuration', message: described.message, detail: String(error?.message ?? error) };
     }
 
     if (result?.ok === true) {
+      // Candidate credentials commit only after the candidate endpoint has accepted them.
+      // A failed replacement must leave the currently working key and Base URL untouched.
+      if (key || candidateUrl) {
+        try {
+          const existing = key ? null : providerSecrets.raw(providerId);
+          providerSecrets.set({ provider: providerId, apiKey: key || existing.apiKey,
+            ...(candidateUrl ? { baseUrl: candidateUrl } : {}) });
+        } catch (error) {
+          return { ok: false, provider: providerId, status: 0, code: 'PROVIDER_TEST_KEY_INVALID', phase: 'configuration', message: '凭据无法安全保存，请检查输入后重试', detail: String(error?.code ?? error?.message ?? error) };
+        }
+      }
       let completed = false;
       try {
         const state = currentState();
@@ -253,7 +260,14 @@ export function createOnboardingService({
         // 自动标记失败不影响"测试成功"这个事实：UI 仍可手动完成该步骤。
         log('Onboarding 连接测试成功但自动完成步骤失败：' + String(error?.message ?? error));
       }
-      return { ok: true, provider: providerId, status: result.status ?? 0, code: null, message: '连接成功，API Key 可用', detail: null, connectionStepCompleted: completed };
+      return {
+        ok: true, provider: providerId, status: result.status ?? 0, code: null,
+        phase: result.phase ?? 'catalog', configured: result.configured ?? true,
+        reachable: result.reachable ?? true, authenticated: result.authenticated ?? true,
+        inferencing: result.inferencing ?? null,
+        message: result.inferencing === true ? '模型推理验证成功' : '连接成功，API Key 与模型目录可用',
+        detail: null, connectionStepCompleted: completed
+      };
     }
 
     const described = describeProviderTestFailure(result ?? {});
@@ -262,6 +276,11 @@ export function createOnboardingService({
       provider: providerId,
       status: Number(result?.status ?? 0),
       code: described.code,
+      phase: result?.phase ?? 'catalog',
+      configured: result?.configured ?? null,
+      reachable: result?.reachable ?? null,
+      authenticated: result?.authenticated ?? null,
+      inferencing: result?.inferencing ?? null,
       message: described.message,
       detail: described.detail ?? (result?.message ?? null)
     };

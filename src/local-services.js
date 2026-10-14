@@ -14,6 +14,7 @@ import { createWriteStream } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import { readJsonFile, writeJsonAtomic as writeJsonFileAtomic } from './storage/json-file.js';
+import { NodeApiClient } from './dsh-client.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -570,6 +571,7 @@ export function createLocalServiceManager({ root, config = {}, onLog = () => {},
     },
     dsh: {
       name: 'dsh', status: 'checking', installed: false, running: false, ready: false,
+      processAlive: null, reachable: null, authenticated: null, sessionCapable: null,
       homeDir: '', executable: process.platform === 'win32' ? 'dsh.cmd' : 'dsh',
       lastError: '', installHint: DSH_INSTALL_HINT, version: '', installations: [], selectedId: '', managed: false,
       detection: { status: 'pending', layer: 'none', durationMs: 0, completedAt: '', fromCache: false },
@@ -905,12 +907,29 @@ export function createLocalServiceManager({ root, config = {}, onLog = () => {},
     return String(config?.dsh?.baseUrl || 'http://127.0.0.1:3080').replace(/\/+$/, '');
   }
 
-  // dsh web 探活走根路径：401/403 同样说明服务已监听（/api/status 需要控制台令牌）。
+  let dshProbeState = { processAlive: null, reachable: false, authenticated: false, sessionCapable: false };
+  // DSH Ready 必须通过已鉴权 API 并确认 session API 可用；根路径/任意 4xx 只代表 HTTP 存在。
   async function probeDshUrl() {
+    const dshHome = state.dsh.homeDir || environment.DSH_HOME || path.join(userHome, '.dsh');
+    const dshApi = detectionOptions.dshApi || new NodeApiClient(dshWebUrl(), { dshHome });
     try {
-      const response = await fetch(dshWebUrl(), { signal: AbortSignal.timeout(2000) });
-      return response.status < 500;
+      await dshApi.callEndpoint('settings/describe', {}, AbortSignal.timeout(3000));
+    } catch (error) {
+      const processAlive = processes.dsh && processes.dsh.exitCode == null && !processes.dsh.killed ? true : null;
+      dshProbeState = { processAlive,
+        reachable: error?.code === 'DSH_UNREACHABLE' ? false : error?.status ? true : null,
+        authenticated: error?.code === 'DSH_AUTHENTICATION_FAILED' || error?.code === 'DSH_AUTH_MATERIAL_MISSING' ? false : null,
+        sessionCapable: false };
+      return false;
+    }
+    try {
+      await dshApi.callEndpoint('session/list', { _request: {} }, AbortSignal.timeout(3000));
+      dshProbeState = { processAlive: processes.dsh && processes.dsh.exitCode == null && !processes.dsh.killed ? true : null,
+        reachable: true, authenticated: true, sessionCapable: true };
+      return true;
     } catch {
+      dshProbeState = { processAlive: processes.dsh && processes.dsh.exitCode == null && !processes.dsh.killed ? true : null,
+        reachable: true, authenticated: true, sessionCapable: false };
       return false;
     }
   }
@@ -955,9 +974,11 @@ export function createLocalServiceManager({ root, config = {}, onLog = () => {},
         if (['starting', 'installing'].includes(current.status)) continue;
         const child = processes[service];
         const managed = !!child && child.exitCode == null && !child.killed;
+      if (service === 'dsh') setState('dsh', { ...dshProbeState, processAlive: managed ? true : dshProbeState.processAlive });
         // 托管进程还活着、只是 HTTP 尚未就绪：交给启动流程的等待逻辑，别判成失败。
         if (!alive && managed) continue;
         applyReadiness(service, alive, managed);
+        if (service === 'dsh') setState('dsh', dshProbeState);
       }
       return snapshot();
     })().finally(() => { reconcilePromise = null; });
@@ -1328,7 +1349,7 @@ export function createLocalServiceManager({ root, config = {}, onLog = () => {},
     const probeDsh = probeDshUrl;
     // 已由用户、系统服务或另一控制台实例启动时只接管监控，不重复拉起进程。
     if (await probeDsh()) {
-      setState('dsh', { status: 'ready', running: true, ready: true, managed: false, lastError: '' });
+      setState('dsh', { ...dshProbeState, status: 'ready', running: true, ready: true, managed: false, lastError: '' });
       return publicSnapshot(current);
     }
     if (!current.installed) {
@@ -1356,7 +1377,7 @@ export function createLocalServiceManager({ root, config = {}, onLog = () => {},
       );
       const alive = !!processes.dsh && processes.dsh.exitCode == null && !processes.dsh.killed;
       const failed = !ready && !alive;
-      setState('dsh', { status: ready ? 'ready' : failed ? 'failed' : 'start-timeout', running: ready || alive, ready, lastError: ready ? '' : failed ? (state.dsh.lastError || 'dsh 进程已退出') : 'dsh 进程仍在运行，但启动超时且 Web API 未响应' });
+      setState('dsh', { ...dshProbeState, processAlive: alive, status: ready ? 'ready' : failed ? 'failed' : 'start-timeout', running: ready || alive, ready, lastError: ready ? '' : failed ? (state.dsh.lastError || 'dsh 进程已退出') : 'dsh 进程仍在运行，但 Agent Session API 尚未就绪' });
       push('dsh', ready ? 'dsh web 服务已就绪。' : failed ? 'dsh 进程已退出，请查看监控终端。' : 'dsh 已启动但尚未探测到 Web API，请查看监控终端。', ready ? 'info' : 'warn');
       return publicSnapshot(current);
     } catch (error) {

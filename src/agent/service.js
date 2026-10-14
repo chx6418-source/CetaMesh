@@ -37,11 +37,8 @@ function summarizeProvider(provider, health = null) {
   const capabilities = provider.capabilities();
   const registryAvailable = typeof capabilities.available === 'boolean' ? capabilities.available : null;
   const healthAvailable = typeof health?.available === 'boolean' ? health.available : null;
-  const available = registryAvailable === false || healthAvailable === false ? false
-    : registryAvailable === true || healthAvailable === true ? true : null;
-  const reason = registryAvailable === false
-    ? capabilities.reason ?? health?.reason ?? null
-    : health?.reason ?? capabilities.reason ?? null;
+  const available = healthAvailable ?? registryAvailable;
+  const reason = health?.reason ?? capabilities.reason ?? null;
   return {
     id: provider.id,
     displayName: capabilities.displayName ?? (provider.id === 'dsh' ? 'DSH' : provider.label),
@@ -114,7 +111,7 @@ export function createAgentService({ broker, log = () => {}, desktopStatus = nul
       }))
     }),
     'agent.capabilities': (params) => ({ capabilities: broker.capabilities(params?.provider) }),
-    'agent.health': (params) => broker.health(params?.provider),
+    'agent.health': (params) => broker.health(params?.provider, { refresh: params?.refresh === true }),
     'agent.createSession': (params) => {
       const boundary = broker.capabilities(params?.provider)?.workspaceBoundary;
       if (boundary === 'capability-broker' || boundary === 'staged-capability-broker') {

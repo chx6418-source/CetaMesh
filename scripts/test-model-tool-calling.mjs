@@ -137,7 +137,6 @@ const emptyObjectSchema = {
       inputSchema: emptyObjectSchema
     }]
   });
-
   assert.equal(provider.supportsTools, true);
   assert.equal(sentBody.tools[0].type, 'function');
   assert.equal(sentBody.tools[0].function.name, 'cap_clock_now');
@@ -146,7 +145,18 @@ const emptyObjectSchema = {
   assert.equal(sentBody.tool_choice, 'auto');
   assert.equal(result.toolCalls[0].capabilityId, 'clock.now');
   assert.equal(result.model, 'fixture-resolved');
-  pass('OpenAI-compatible provider maps descriptors to function tools and returns structured tool calls');
+  const toolCallBody = sentBody;
+  await runtime.chat({
+    providerId: 'fixture',
+    model: 'fixture-model',
+    messages: [{ role: 'user', content: 'Continue without tools.' }],
+    tools: [],
+    toolChoice: 'none'
+  });
+  assert.equal(toolCallBody.tool_choice, 'auto', 'tool-enabled requests keep auto selection when descriptors are present');
+  assert.equal(Object.hasOwn(sentBody, 'tools'), false, 'empty tools are omitted for compatible providers');
+  assert.equal(Object.hasOwn(sentBody, 'tool_choice'), false, 'tool_choice none is omitted when no tools are sent');
+  pass('OpenAI-compatible provider preserves tool schemas and omits tool_choice for empty tools');
 }
 
 {
@@ -272,6 +282,50 @@ const emptyObjectSchema = {
   assert.equal(resumed.text, 'The release was approved and published.');
   assert.equal(calls.length, 3);
   pass('approval suspends, survives a transient Model continuation failure, and resumes after approval');
+}
+
+{
+  const executed = [];
+  const broker = createCapabilityBroker({
+    policy: createCapabilityPolicy(),
+    approval: createCapabilityApproval({ stateDir: path.join(temp, 'approval-multi-call'), ttlMs: 60_000 })
+  });
+  for (const capability of ['fixture.first', 'fixture.second']) {
+    broker.register({
+      id: capability, permission: 'publish', description: `Run ${capability}.`,
+      inputSchema: { type: 'object', properties: {}, required: [], additionalProperties: false },
+      provider: 'fixture', risk: 'high', execute: () => { executed.push(capability); return { capability }; }
+    });
+  }
+  const { runtime, calls } = modelRuntimeWith([
+    { text: '', toolCalls: [
+      { id: 'first', capabilityId: 'fixture.first', arguments: '{}' },
+      { id: 'second', capabilityId: 'fixture.second', arguments: '{}' }
+    ] },
+    { text: 'Both approved actions completed.', toolCalls: [] }
+  ]);
+  const coordinator = createToolExecutionCoordinator({ modelRuntime: runtime, capabilityBroker: broker,
+    stateDir: path.join(temp, 'continuation-multi-call') });
+  const manifest = ['fixture.first', 'fixture.second'].map(id => ({ id, description: id,
+    inputSchema: { type: 'object', properties: {}, required: [], additionalProperties: false }, available: true, requiresApproval: true }));
+  let pending = await coordinator.run({ providerId: 'fixture', messages: [{ role: 'user', content: 'Run both.' }], manifest,
+    actor: OWNER_ACTOR, sessionId: 'chat-multi-approval', turnId: 'turn-multi-approval' });
+  assert.equal(pending.status, 'pending');
+  const firstId = pending.approvalId;
+  const firstRow = broker.approvals.get(firstId);
+  const firstDecision = await broker.decide({ id: firstId, approve: true, actor: OWNER_ACTOR });
+  pending = await coordinator.resumeApproval({ approvalId: firstId, requestFingerprint: firstRow.fingerprint, decisionResult: firstDecision });
+  assert.equal(pending.status, 'pending', 'the second tool call must pause for its own approval');
+  assert.equal(executed.join(','), 'fixture.first');
+  const secondId = pending.approvalId;
+  const secondRow = broker.approvals.get(secondId);
+  const secondDecision = await broker.decide({ id: secondId, approve: true, actor: OWNER_ACTOR });
+  const completed = await coordinator.resumeApproval({ approvalId: secondId, requestFingerprint: secondRow.fingerprint, decisionResult: secondDecision });
+  assert.equal(completed.status, 'completed');
+  assert.deepEqual(executed, ['fixture.first', 'fixture.second']);
+  assert.equal(calls.length, 2, 'the model is called again only after every call in the batch has a tool result');
+  assert.deepEqual(calls[1].messages.filter(message => message.role === 'tool').map(message => message.tool_call_id), ['first', 'second']);
+  pass('multiple tool calls pause and resume one approval at a time without losing the remaining calls');
 }
 
 {
@@ -504,6 +558,48 @@ const emptyObjectSchema = {
     && message.content === 'Checking. ' && message.tool_calls),
   'streaming preserves assistant text and the OpenAI tool-call continuation record');
   pass('tool-capable Chat streams text through each Model turn while preserving Capability execution');
+}
+
+{
+  const broker = createCapabilityBroker({ policy: createCapabilityPolicy(),
+    approval: createCapabilityApproval({ stateDir: path.join(temp, 'approval-delete-chat'), ttlMs: 60_000 }) });
+  broker.register({ id: 'fixture.delete', permission: 'publish', description: 'A pending delete fixture.',
+    inputSchema: emptyObjectSchema, risk: 'high', execute: () => ({}) });
+  const { runtime } = modelRuntimeWith([{ text: '', toolCalls: [{ id: 'delete-pending', capabilityId: 'fixture.delete', arguments: '{}' }] }]);
+  const coordinator = createToolExecutionCoordinator({ modelRuntime: runtime, capabilityBroker: broker,
+    stateDir: path.join(temp, 'continuation-delete-chat') });
+  const pending = await coordinator.run({ providerId: 'fixture', messages: [{ role: 'user', content: 'Wait.' }],
+    manifest: [{ id: 'fixture.delete', description: 'A pending delete fixture.', inputSchema: emptyObjectSchema }],
+    actor: OWNER_ACTOR, sessionId: 'deleted-chat', turnId: 'deleted-turn' });
+  assert.equal(pending.status, 'pending');
+  const cancelled = coordinator.cancelSession('deleted-chat');
+  assert.deepEqual(cancelled, { cancelled: 1 });
+  assert.equal(broker.approvals.get(pending.approvalId).status, 'cancelled');
+  assert.equal(coordinator.pendingTarget(pending.approvalId), null);
+  pass('deleting a Chat invalidates its pending approval continuation');
+}
+
+{
+  let observedSignal = null;
+  const modelRuntime = {
+    defaultProviderId: () => 'fixture', resolveProvider: () => ({ id: 'fixture' }), supportsToolCalling: () => false,
+    async *stream({ signal }) {
+      observedSignal = signal;
+      yield { type: 'turn/start', data: { providerId: 'fixture', requestedModel: 'fixture-model' } };
+      await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }));
+      yield { type: 'turn/end', data: { reason: { kind: 'aborted' } } };
+    }
+  };
+  const chat = createChatService({ modelRuntime, defaults: { model: 'fixture-model' },
+    stateDir: path.join(temp, 'delete-chat-active-model') });
+  const session = await chat.execute({ method: 'chat.sessions.create', params: {} });
+  await chat.execute({ method: 'chat.send', params: { id: session.id, text: 'Cancel when deleted.' } });
+  const deleted = await chat.execute({ method: 'chat.sessions.delete', params: { id: session.id } });
+  assert.equal(deleted.deleted, true);
+  assert.equal(observedSignal.aborted, true, 'deleting a Chat aborts the active Model request');
+  assert.equal((await chat.execute({ method: 'chat.sessions.list', params: {} })).sessions.length, 0);
+  chat.close();
+  pass('deleting a Chat aborts and joins its active Model turn before removing local history');
 }
 
 fs.rmSync(temp, { recursive: true, force: true });

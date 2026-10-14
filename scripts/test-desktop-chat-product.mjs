@@ -9,6 +9,7 @@ import { createDesktopUiEventBus, createDesktopUiService } from '../src/desktop/
 import { writeJsonAtomic } from '../src/storage/json-file.js';
 
 const root = path.resolve(import.meta.dirname, '..');
+const typedBridge = fs.readFileSync(path.join(root, 'desktop-ui/src/bridge/typed-client.ts'), 'utf8');
 const tempRoot = process.env.WHALEBRIDGE_TEST_TMPDIR || os.tmpdir();
 fs.mkdirSync(tempRoot, { recursive: true });
 const temp = fs.mkdtempSync(path.join(tempRoot, 'chat-product-test-'));
@@ -17,6 +18,20 @@ fs.mkdirSync(stateDir, { recursive: true });
 
 let step = 0;
 function ok(label) { step += 1; console.log(`✅ [${step}] ${label}`); }
+async function waitFor(read, predicate, label, timeoutMs = 2000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const value = await read();
+    if (predicate(value)) return value;
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  throw new Error(`Timed out waiting for ${label}`);
+}
+
+assert.match(typedBridge, /coreInstanceId !== response\.instanceId/);
+assert.match(typedBridge, /cursor = 0;[\s\S]*core\.restarted/);
+assert.match(typedBridge, /continue;[\s\S]*cursor = Math\.max/);
+ok('Core restart changes event epoch, resets cursor, then replays the first new event');
 
 /** 可控 DSH fixture：callEndpoint 记录调用；follow 流由 _injectEvent 驱动。 */
 function fixtureApi() {
@@ -145,6 +160,26 @@ const turnEnd = (id, kind, error) => ({ type: 'turn/end', data: { reason: { kind
   service.close();
 }
 
+// ── 4b. 创建/Prompt 尚未返回时，Stop 也必须请求取消真实 DSH 回合 ─────────────
+{
+  const api = fixtureApi();
+  let releasePrompt;
+  const gate = new Promise(resolve => { releasePrompt = resolve; });
+  api.setPromptHandler(async () => gate);
+  const service = makeService({ api });
+  const session = await service.execute({ method: 'chat.sessions.create', params: {} });
+  const ack = await service.execute({ method: 'chat.send', params: { id: session.id, text: '慢启动 DSH 回合' } });
+  assert.match(ack.requestId, /^cetamesh-chat-/);
+  await waitFor(() => api.calls, calls => calls.some(call => call.endpoint === 'session/prompt'), 'pending DSH prompt');
+  const stopped = await service.execute({ method: 'chat.stop', params: { id: session.id } });
+  assert.equal(stopped.stopped, true);
+  assert.equal(api.calls.filter(call => call.endpoint === 'session/cancel').length, 1,
+    'Stop aborts the local pending request and explicitly cancels the DSH session');
+  releasePrompt();
+  service.close();
+  ok('DSH operation cancellation reaches the remote session while prompt acknowledgement is pending');
+}
+
 // ── 3. 无 usage：显示未知，禁止伪造 ──────────────────────────────────────────
 {
   const api = fixtureApi();
@@ -165,7 +200,8 @@ const turnEnd = (id, kind, error) => ({ type: 'turn/end', data: { reason: { kind
 // ── 4. 停止：cancel → cancelled → partial 保留 + DSH 会话丢弃 ────────────────
 {
   const api = fixtureApi();
-  const service = makeService({ api });
+  const serviceStateDir = path.join(stateDir, 'stop-partial-session');
+  const service = makeService({ api, stateDir: serviceStateDir });
   const session = await service.execute({ method: 'chat.sessions.create', params: {} });
   api.setPromptHandler(async () => {
     service._injectEvent(session.id, { type: 'turn/start', data: {} });
@@ -185,7 +221,7 @@ const turnEnd = (id, kind, error) => ({ type: 'turn/end', data: { reason: { kind
   assert.equal(history.messages[1].text, '长回答的前半段');
   assert.equal(api.calls.filter((c) => c.endpoint === 'session/cancel').length, 1, 'cancel 已调用');
   // 取消成功后 DSH 会话被丢弃，下次发送创建新会话（隔离迟到事件）
-  const record = JSON.parse(fs.readFileSync(path.join(stateDir, 'case-4', 'desktop-chat', 'sessions.json'), 'utf8'));
+  const record = JSON.parse(fs.readFileSync(path.join(serviceStateDir, 'desktop-chat', 'sessions.json'), 'utf8'));
   assert.equal(record.sessions.find((s) => s.id === session.id).dshSessionId, null);
   ok('停止：cancel → cancelled → partial 落盘 + DSH 会话重置');
   service.close();
@@ -197,14 +233,16 @@ const turnEnd = (id, kind, error) => ({ type: 'turn/end', data: { reason: { kind
   api.fail(['session/create']);
   const service = makeService({ api });
   const session = await service.execute({ method: 'chat.sessions.create', params: {} });
-  await assert.rejects(
-    service.execute({ method: 'chat.send', params: { id: session.id, text: 'DSH 关了' } }),
-    (error) => error.code === 'DSH_UNAVAILABLE' && /DSH 未连接或不可达/.test(error.message)
-  );
+  const ack = await service.execute({ method: 'chat.send', params: { id: session.id, text: 'DSH 关了' } });
+  assert.match(ack.requestId, /^cetamesh-chat-/);
+  const failed = await waitFor(() => service.execute({ method: 'chat.status', params: { id: session.id } }),
+    status => status.turn === null && status.lastErrorCode === 'DSH_UNAVAILABLE', 'DSH failure projection');
+  assert.match(failed.lastError, /DSH 未连接或不可达/);
   const history = await service.execute({ method: 'chat.history', params: { id: session.id } });
-  assert.equal(history.messages.length, 1);
+  assert.equal(history.messages.length, 2);
   assert.equal(history.messages[0].role, 'user');
-  assert.equal((await service.execute({ method: 'chat.status', params: { id: session.id } })).lastState, 'awaiting-reply', '尾部 user 消息 → awaiting-reply（可重试）');
+  assert.equal(history.messages[1].errorCode, 'DSH_UNAVAILABLE');
+  assert.equal(failed.lastState, 'error', 'failed assistant record keeps the error state observable');
   // DSH 恢复后 retry 成功：不重复 user 消息
   api.fail(null);
   api.setPromptHandler(async () => {
@@ -212,10 +250,13 @@ const turnEnd = (id, kind, error) => ({ type: 'turn/end', data: { reason: { kind
     service._injectEvent(session.id, message(session.id, '恢复后的回答'));
     service._injectEvent(session.id, turnEnd(session.id, 'completed'));
   });
-  await service.execute({ method: 'chat.retry', params: { id: session.id } });
+  const retryAck = await service.execute({ method: 'chat.retry', params: { id: session.id } });
+  assert.match(retryAck.requestId, /^cetamesh-chat-/);
+  await waitFor(() => service.execute({ method: 'chat.status', params: { id: session.id } }),
+    status => status.turn === null && status.lastState === 'idle', 'DSH retry completion');
   const history2 = await service.execute({ method: 'chat.history', params: { id: session.id } });
-  assert.equal(history2.messages.length, 2, 'retry 不重复 user 消息');
-  assert.equal(history2.messages[1].text, '恢复后的回答');
+  assert.equal(history2.messages.filter(message => message.role === 'user').length, 1, 'retry 不重复 user 消息');
+  assert.equal(history2.messages.at(-1).text, '恢复后的回答');
   ok('异常 Provider：明确错误 + awaiting-reply + retry 恢复（不重复 user）');
   service.close();
 }
@@ -295,6 +336,8 @@ const turnEnd = (id, kind, error) => ({ type: 'turn/end', data: { reason: { kind
     service._injectEvent(session.id, turnEnd(session.id, 'completed'));
   });
   await service.execute({ method: 'chat.send', params: { id: session.id, text: '记住我' } });
+  await waitFor(() => service.execute({ method: 'chat.history', params: { id: session.id } }),
+    history => history.messages.at(-1)?.text === '重启前的回答', 'DSH response persisted before restart');
   service.close();
 
   const revived = makeService({ api: fixtureApi(), stateDir: sharedDir });
@@ -362,7 +405,7 @@ const turnEnd = (id, kind, error) => ({ type: 'turn/end', data: { reason: { kind
   const history = await service.execute({ method: 'chat.history', params: { id: session.id } });
   assert.equal(history.messages[1].error, '模型服务中断');
   assert.equal(history.messages[1].text, '部分输出', 'error 回合的 partial 保留');
-  assert.equal((await service.execute({ method: 'chat.status', params: { id: session.id } })).lastState, 'idle', 'error 已终态化');
+  assert.equal((await service.execute({ method: 'chat.status', params: { id: session.id } })).lastState, 'error', 'error 终态保留为可观测状态');
   api.setPromptHandler(async () => {
     service._injectEvent(session.id, { type: 'turn/start', data: {} });
     service._injectEvent(session.id, message(session.id, '重试后的回答'));
@@ -445,7 +488,7 @@ function abortableSseFetch() {
 }
 
 /** 组装带 Model Runtime / Router / Agent 的完整 chat-service（全 fixture，不联网不碰 DSH）。 */
-function makeFullService({ withKey = true, fetchImpl, baseUrl = 'https://api.deepseek.test', router = true, api = dshDownApi(), agent = false, agentProviderId = 'dsh', agentBoundary = 'unsupported', stateDir: overrideDir, buildProductContext, defaultModelConfig, onEvent } = {}) {
+function makeFullService({ withKey = true, fetchImpl, baseUrl = 'https://api.deepseek.test', router = true, api = dshDownApi(), agent = false, agentProviderId = 'dsh', agentBoundary = 'unsupported', stateDir: overrideDir, buildProductContext, defaultModelConfig, onEvent, platformRoute } = {}) {
   const dir = overrideDir ?? path.join(stateDir, 's1-' + (++caseSeq));
   fs.mkdirSync(dir, { recursive: true });
   const secrets = createProviderSecrets({ root: dir });
@@ -489,9 +532,48 @@ function makeFullService({ withKey = true, fetchImpl, baseUrl = 'https://api.dee
     defaults: { provider: 'deepseek-official', model: 'deepseek-flash', reasoningEffort: 'max' },
     defaultModelConfig,
     stateDir: dir,
+    platformRoute,
     onEvent
   });
   return { service, api, fetchImpl, agentCalls, dir, secrets };
+}
+
+// ── 14d. Smart Managed Agent 长操作快速 ACK，取消 signal 贯穿 Provider 创建路径 ─
+{
+  let completeRoute;
+  let routeSignal = null;
+  const routeGate = new Promise(resolve => { completeRoute = resolve; });
+  const { service, agentCalls } = makeFullService({
+    fetchImpl: sseFetch(), agent: true, agentProviderId: 'cetamesh',
+    platformRoute: request => { routeSignal = request.signal; return routeGate; }
+  });
+  const session = await service.execute({ method: 'chat.sessions.create', params: {} });
+  await service.execute({ method: 'chat.config.set', params: { id: session.id, config: { agentProvider: 'cetamesh' } } });
+  const sending = service.execute({ method: 'chat.send', params: { id: session.id, text: 'slow managed route' } });
+  let settleTimer;
+  const ackResult = await Promise.race([
+    sending.then(value => ({ value })),
+    new Promise(resolve => { settleTimer = setTimeout(() => resolve({ timeout: true }), 150); })
+  ]);
+  clearTimeout(settleTimer);
+  if (ackResult.timeout) {
+    completeRoute({ kind: 'agent', provider: 'cetamesh', sessionId: 'late-managed-session', taskId: 'task-late' });
+    await sending;
+    await service.execute({ method: 'chat.sessions.delete', params: { id: session.id } });
+    service.close();
+    assert.fail('long Managed Agent startup returned no quick acknowledgement');
+  }
+  assert.equal(ackResult.timeout, undefined, 'long Managed Agent startup returns before the provider finishes');
+  assert.match(ackResult.value.requestId, /^cetamesh-chat-/);
+  assert.ok(routeSignal instanceof AbortSignal, 'the active route receives a cancellation signal');
+  const deleted = await service.execute({ method: 'chat.sessions.delete', params: { id: session.id } });
+  assert.equal(deleted.deleted, true);
+  assert.equal(routeSignal.aborted, true, 'deleting the Chat aborts the pending managed operation');
+  completeRoute({ kind: 'agent', provider: 'cetamesh', sessionId: 'late-managed-session', taskId: 'task-late' });
+  await waitFor(() => agentCalls, calls => calls.some(call => call.method === 'agent.cancel'
+    && call.params.sessionId === 'late-managed-session'), 'late managed session cancellation');
+  service.close();
+  ok('Managed Agent route returns a requestId immediately and delete cancels late-created sessions');
 }
 
 // ── 12. Standalone Chat：DSH 完全不可达，仅凭 Model Provider Key 完成整回合 ────
@@ -790,10 +872,14 @@ function makeFullService({ withKey = true, fetchImpl, baseUrl = 'https://api.dee
   const { service } = makeFullService({ withKey: false, fetchImpl: f });
   const session = await service.execute({ method: 'chat.sessions.create', params: {} });
   // Automatic selection falls back to the existing DSH route only when no Model Provider is configured.
-  await assert.rejects(
-    service.execute({ method: 'chat.send', params: { id: session.id, text: '没有 Key' } }),
-    (error) => error.code === 'DSH_UNAVAILABLE' && /DSH/.test(error.message)
+  const fallbackAck = await service.execute({ method: 'chat.send', params: { id: session.id, text: '没有 Key' } });
+  assert.ok(fallbackAck.requestId, 'long DSH fallback acknowledges promptly with a requestId');
+  const fallbackStatus = await waitFor(
+    () => service.execute({ method: 'chat.status', params: { id: session.id } }),
+    value => !value.turn && value.lastState === 'error', 'DSH fallback terminal error'
   );
+  assert.equal(fallbackStatus.lastErrorCode, 'DSH_UNAVAILABLE');
+  assert.match(fallbackStatus.lastError, /DSH/, 'missing-key fallback failure stays visible after the fast ACK');
   // 显式指定 openai（未配 Key）→ KEY_MISSING 明确指向设置页
   await service.execute({ method: 'chat.config.set', params: { id: session.id, config: { modelProvider: 'openai' } } });
   await assert.rejects(
@@ -910,12 +996,47 @@ function makeFullService({ withKey = true, fetchImpl, baseUrl = 'https://api.dee
   const deepseek = catalog.modelProviders.find((p) => p.id === 'deepseek-official');
   const openai = catalog.modelProviders.find((p) => p.id === 'openai');
   assert.equal(deepseek.hasKey, true);
+  assert.equal(deepseek.catalogState, 'loaded');
+  assert.equal(deepseek.inferencing, null, 'a successful catalog request does not claim the selected model has generated a response');
   assert.deepEqual(deepseek.models.map((m) => m.id), ['deepseek-chat', 'deepseek-reasoner']);
   assert.equal(openai.hasKey, false, '未配 Key 的 Provider 如实标记');
   assert.deepEqual(openai.models, []);
   assert.ok(!JSON.stringify(catalog).includes(API_KEY), 'catalog 不含 Key 材料');
   ok('catalog：DSH 目录错误不阻塞 Model 目录 / hasKey 标记 / 无 Key 泄漏');
   service.close();
+}
+
+// ── 17a. 外部模型目录独立于 DSH 状态，并缓存且并行刷新 ─────────────────────
+{
+  const calls = [];
+  let active = 0;
+  let maxActive = 0;
+  const fetchImpl = async url => {
+    calls.push(String(url));
+    active += 1;
+    maxActive = Math.max(maxActive, active);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    active -= 1;
+    const model = String(url).includes('api.openai.test') ? 'gpt-4o-mini' : 'deepseek-flash';
+    return new Response(JSON.stringify({ data: [{ id: model }] }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  const { service, secrets } = makeFullService({ fetchImpl });
+  secrets.set({ provider: 'openai', apiKey: 'sk-openai-12345678' });
+  const first = await service.execute({ method: 'chat.catalog', params: {} });
+  assert.equal(maxActive, 2, 'configured provider catalogs are requested concurrently');
+  assert.deepEqual(first.modelProviders.map(provider => provider.catalogState), ['loaded', 'loaded']);
+  assert.ok(first.error, 'DSH catalog error remains observable independently');
+  const projected = await createDesktopUiService({ services: { chatService: service } }).execute({ method: 'ui.chat.catalog', params: {} });
+  assert.equal(projected.available, false, 'the legacy available field describes DSH catalog only');
+  assert.equal(projected.modelProviders[0].catalogState, 'loaded', 'DSH failure does not mark the independent Model catalog unavailable');
+  assert.equal(projected.modelProviders[0].inferencing, null);
+  const afterFirst = calls.length;
+  await service.execute({ method: 'chat.catalog', params: {} });
+  assert.equal(calls.length, afterFirst, 'normal catalog reads use the short-lived cache');
+  await service.execute({ method: 'chat.catalog', params: { refresh: true } });
+  assert.equal(calls.length, afterFirst + 2, 'explicit refresh bypasses the cache');
+  service.close();
+  ok('Model catalog state is separate from DSH; cached reads and explicit refresh use bounded parallel providers');
 }
 
 // ── 18. Provider 失败经 UI 投影可恢复，重试复用同一条 user 消息 ────────────────

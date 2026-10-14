@@ -98,13 +98,22 @@ try {
   await managed.close();
   agentBroker.close();
   let requestReview = false, approvedActions = 0;
+  let reviewAwaitingOwnerDecision = false;
   const restartObservations = [];
+  const approvalResumePromptEvidence = [];
   managed = createManagedAgentProvider({
     modelRuntime: { async chat(request) {
-      const last = request.messages.at(-1).content;
-      const command = requestReview && !last.includes('[Owner capability decision reference data]')
-        ? { capability: 'fixture.review', input: { note: 'Owner must decide' } }
-        : { final: 'Same Task continues after restart or Owner decision' };
+      const hasOwnerDecision = request.messages.some(message => message.role === 'user'
+        && typeof message.content === 'string' && message.content.includes('[Owner capability decision reference data]'));
+      let command;
+      if (requestReview && !reviewAwaitingOwnerDecision) {
+        reviewAwaitingOwnerDecision = true;
+        command = { capability: 'fixture.review', input: { note: 'Owner must decide' } };
+      } else {
+        if (reviewAwaitingOwnerDecision) approvalResumePromptEvidence.push(hasOwnerDecision);
+        reviewAwaitingOwnerDecision = false;
+        command = { final: 'Same Task continues after restart or Owner decision' };
+      }
       return { text: JSON.stringify(command), usage: { inputTokens: 2, outputTokens: 1 } };
     } },
     capabilityExecutor: (request) => capabilities.broker.execute(request),
@@ -135,6 +144,9 @@ try {
   const rerun = (await workshop.executeOwner({ method: 'workshop.proposal.retry', params: { id: proposal.id } })).proposal;
   check(rerun.assignment.sessionId, resumedSession);
   check(taskRuntime.get({ id: task.id }).task.agentHistory.length, 3);
+  for (let i = 0; i < 400 && restartObservations.length < 2; i++) await delay(5);
+  check(restartObservations.length, 2);
+  check((await agentBroker.status({ provider: 'cetamesh', sessionId: resumedSession })).running, false);
 
   // The real approval engine executes a harmless injected high-risk operation.
   capabilities.broker.register({ id: 'fixture.review', permission: 'git.commit', workspace: true, risk: 'high',
@@ -154,9 +166,16 @@ try {
     check(decision.taskResumed, true);
     for (let i = 0; i < 400 && restartObservations.length <= observedBeforeRequest + 1; i++) await delay(5);
     check(restartObservations.length, observedBeforeRequest + 2);
-    const continued = await agentBroker.status({ provider: 'cetamesh', sessionId: resumedSession });
+    let continued;
+    for (let i = 0; i < 400; i++) {
+      continued = await agentBroker.status({ provider: 'cetamesh', sessionId: resumedSession });
+      if (!continued.waitingForApproval && continued.lastReason?.kind === 'completed') break;
+      await delay(5);
+    }
     check(continued.waitingForApproval, null);
     check(continued.lastReason.kind, 'completed');
+    check(approvalResumePromptEvidence.length, approve ? 2 : 1);
+    check(approvalResumePromptEvidence.at(-1), true);
     check(taskRuntime.get({ id: task.id }).task.currentAgent?.sessionId ?? null, resumedSession);
     check(approvedActions, approve ? 1 : 0);
   }

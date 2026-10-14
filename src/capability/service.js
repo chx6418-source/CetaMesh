@@ -389,6 +389,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     }),
     async execute(r) {
       if (r.actor.kind !== 'owner') throw capabilityError('PERMISSION_DENIED', 'Only Owner may assign Agents');
+      if (r.signal?.aborted) throw capabilityError('INVOKE_CANCELLED', 'Agent assignment cancelled');
       let task = taskFor(r.taskId);
       if (!task || task.workspaceId !== r.workspaceId) throw capabilityError('TASK_NOT_AUTHORIZED', 'Task workspace required');
       const provider = String(r.input.agentProvider || r.input.provider || 'cetamesh');
@@ -405,23 +406,66 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
         if (task.currentAgent) {
           try {
             await agentBroker.status(task.currentAgent);
-            return { taskId: task.id, ...task.currentAgent, reused: true, actor };
+            if (r.signal?.aborted) throw capabilityError('INVOKE_CANCELLED', 'Agent assignment cancelled');
+            const sent = await agentBroker.send({ ...task.currentAgent, content: String(r.input.content || task.goal) });
+            if (r.signal?.aborted) {
+              try { await agentBroker.cancel(task.currentAgent); } catch { /* Cancellation cleanup is best effort after the send acknowledgement. */ }
+              throw capabilityError('INVOKE_CANCELLED', 'Agent assignment cancelled');
+            }
+            return { taskId: task.id, workspaceId: task.workspaceId, ...task.currentAgent,
+              accepted: sent?.accepted === true, reused: true, actor };
           } catch (error) {
             if (error.code !== 'SESSION_NOT_FOUND') throw error;
             task = taskRuntime.detachAgent({ id: task.id, expectedRev: task.rev, note: 'Managed session unavailable after restart; fresh authorized session' }).task;
           }
         }
         const ws = resolveWorkspace(r.workspaceId);
-        const created = await agentBroker.createSession(provider, { cwd: ws.root, taskId: task.id, workspaceId: ws.id,
-          model: r.input.model, modelProvider: r.input.modelProvider, reasoningEffort: r.input.reasoningEffort });
-        if (!created?.sessionId) throw capabilityError('PROVIDER_ERROR', 'Agent returned no session');
-        const attached = taskRuntime.attachAgent({ id: task.id, expectedRev: task.rev, provider, sessionId: created.sessionId });
-        if (provider === 'cetamesh') {
-          bindAgentSession?.(created.sessionId, { taskId: task.id, workspaceId: ws.id, actor });
+        let created = null;
+        let attached = false;
+        let startedByRequest = false;
+        try {
+          created = await agentBroker.createSession(provider, { cwd: ws.root, taskId: task.id, workspaceId: ws.id,
+            model: r.input.model, modelProvider: r.input.modelProvider, reasoningEffort: r.input.reasoningEffort });
+          if (!created?.sessionId) throw capabilityError('PROVIDER_ERROR', 'Agent returned no session');
+          if (r.signal?.aborted) throw capabilityError('INVOKE_CANCELLED', 'Agent assignment cancelled');
+          const assignment = taskRuntime.attachAgent({ id: task.id, expectedRev: task.rev, provider, sessionId: created.sessionId });
+          attached = true;
+          if (provider === 'cetamesh') {
+            bindAgentSession?.(created.sessionId, { taskId: task.id, workspaceId: ws.id, actor });
+          }
+          if (assignment.task.status === 'queued') {
+            taskRuntime.start({ id: task.id, expectedRev: assignment.task.rev });
+            startedByRequest = true;
+          }
+          if (r.signal?.aborted) throw capabilityError('INVOKE_CANCELLED', 'Agent assignment cancelled');
+          const sent = await agentBroker.send({ provider, sessionId: created.sessionId, content: String(r.input.content || task.goal) });
+          if (r.signal?.aborted) throw capabilityError('INVOKE_CANCELLED', 'Agent assignment cancelled');
+          return { taskId: task.id, workspaceId: ws.id, provider, sessionId: created.sessionId, accepted: sent?.accepted === true, actor };
+        } catch (error) {
+          let current = taskFor(task.id);
+          if (attached && current?.currentAgent?.sessionId === created?.sessionId) {
+            try { current = taskRuntime.detachAgent({ id: task.id, expectedRev: current.rev, note: 'Agent initialization rolled back' }).task; }
+            catch (rollbackError) {
+              audit({ requestId: r.requestId, capability: 'agent.run', status: 'rollback-warning', stage: 'detach-task',
+                code: rollbackError?.code ?? 'TASK_ROLLBACK_FAILED' });
+            }
+          }
+          if (created?.sessionId) {
+            try { await agentBroker.closeSession({ provider, sessionId: created.sessionId }); }
+            catch (cleanupError) {
+              audit({ requestId: r.requestId, capability: 'agent.run', status: 'rollback-warning', stage: 'close-session',
+                code: cleanupError?.code ?? 'SESSION_CLEANUP_FAILED' });
+            }
+          }
+          if (startedByRequest && current?.status === 'running') {
+            try { taskRuntime.fail({ id: task.id, expectedRev: current.rev, reason: 'Agent initialization failed and was rolled back' }); }
+            catch (rollbackError) {
+              audit({ requestId: r.requestId, capability: 'agent.run', status: 'rollback-warning', stage: 'fail-task',
+                code: rollbackError?.code ?? 'TASK_ROLLBACK_FAILED' });
+            }
+          }
+          throw error;
         }
-        if (attached.task.status === 'queued') taskRuntime.start({ id: task.id, expectedRev: attached.task.rev });
-        const sent = await agentBroker.send({ provider, sessionId: created.sessionId, content: String(r.input.content || task.goal) });
-        return { taskId: task.id, workspaceId: ws.id, provider, sessionId: created.sessionId, accepted: sent?.accepted === true, actor };
       })();
       provisioning.set(task.id, pending);
       try { return await pending; } finally { provisioning.delete(task.id); }
@@ -499,8 +543,15 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
   function workspaceImportStatus(approvalId) {
     return workspaceImportStates.get(String(approvalId ?? '')) ?? null;
   }
+  function cancelWorkspaceImportApproval(approvalId) {
+    const row = broker.approvals.get(String(approvalId ?? ''));
+    if (row.request?.capability !== 'workspace.apply') return { cancelled: false, status: row.status };
+    const result = broker.approvals.cancel(row.id, 'agent-cancelled');
+    if (result.cancelled) rememberWorkspaceImport(row.id, { status: 'cancelled', code: 'INVOKE_CANCELLED' });
+    return result;
+  }
   return { execute, executeWorkspace, executeMemory, broker, grantTask, principalForTask, refreshTaskWorkspaceGrant, memoryPrincipal,
-    applyAgentWorkspaceChanges, workspaceImportStatus,
+    applyAgentWorkspaceChanges, workspaceImportStatus, cancelWorkspaceImportApproval,
     setApprovalDecisionListener(listener) {
       if (listener !== null && typeof listener !== 'function') throw capabilityError('INVALID_PARAMS', 'Approval decision listener must be a function');
       approvalDecisionListener = listener;

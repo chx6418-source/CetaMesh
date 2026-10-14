@@ -183,13 +183,16 @@ export function createToolExecutionCoordinator({
       if (cycle > 0 && typeof state.onStreamReset === 'function') {
         await state.onStreamReset({ cycle });
       }
+      const resumingToolBatch = Array.isArray(state.pendingCalls);
       const request = {
         providerId, model, reasoning, messages: state.messages, signal,
         tools: cycle < maxCycles && totalCalls < maxCalls ? state.manifest.map((item) => ({ id: item.id, description: item.description, inputSchema: item.inputSchema })) : [],
         toolChoice: cycle < maxCycles && totalCalls < maxCalls ? 'auto' : 'none'
       };
       let response;
-      if (typeof modelRuntime.stream === 'function') {
+      if (resumingToolBatch) {
+        response = { text: '', toolCalls: state.pendingCalls, usage, resolvedModel };
+      } else if (typeof modelRuntime.stream === 'function') {
         let streamedText = '';
         let streamedToolCalls = [];
         let streamUsage = null;
@@ -238,17 +241,22 @@ export function createToolExecutionCoordinator({
       if (!calls.length) return { status: 'completed', toolCalling: 'supported', text, usage, resolvedModel, totalCalls, messages: state.messages };
       const known = new Set(state.manifest.map((item) => item.id));
 
-      state.messages.push({
-        role: 'assistant',
-        content: typeof response.text === 'string' && response.text ? response.text : null,
-        tool_calls: calls.map((call, index) => ({
-          id: String(call?.id || `call-${cycle}-${index}`).slice(0, 200),
-          type: 'function',
-          function: { name: String(call?.name || (call?.capabilityId ? providerToolName(call.capabilityId) : 'unknown')), arguments: typeof call?.arguments === 'string' ? call.arguments : safeJson(call?.arguments ?? {}) }
-        }))
-      });
+      const firstCallIndex = resumingToolBatch ? Math.max(0, Number(state.pendingCallIndex) || 0) : 0;
+      if (!resumingToolBatch) {
+        state.messages.push({
+          role: 'assistant',
+          content: typeof response.text === 'string' && response.text ? response.text : null,
+          tool_calls: calls.map((call, index) => ({
+            id: String(call?.id || `call-${cycle}-${index}`).slice(0, 200),
+            type: 'function',
+            function: { name: String(call?.name || (call?.capabilityId ? providerToolName(call.capabilityId) : 'unknown')), arguments: typeof call?.arguments === 'string' ? call.arguments : safeJson(call?.arguments ?? {}) }
+          }))
+        });
+      }
+      delete state.pendingCalls;
+      delete state.pendingCallIndex;
 
-      for (let index = 0; index < calls.length; index++) {
+      for (let index = firstCallIndex; index < calls.length; index++) {
         const call = calls[index];
         const callId = String(call?.id || `call-${cycle}-${index}`).slice(0, 200);
         if (signal?.aborted) fail('INVOKE_CANCELLED', 'Tool execution was cancelled');
@@ -315,10 +323,12 @@ export function createToolExecutionCoordinator({
               providerId, model: model ?? null, reasoning: reasoning ?? null,
               manifest: structuredClone(state.manifest), actor: { kind: actor.kind, id: actor.id },
               sessionId, turnId, scope: { taskId: scope?.taskId ?? null, workspaceId: scope?.workspaceId ?? null },
-              messages: storedState.messages, cycle: cycle + 1,
+              messages: storedState.messages, cycle,
               totalCalls, usage, resolvedModel,
               seenCallIds: state.seenCallIds,
-              pendingToolCallId: callId
+              pendingToolCallId: callId,
+              pendingCalls: calls,
+              pendingCallIndex: index + 1
             },
             createdAt: Date.now()
           };
@@ -419,6 +429,8 @@ export function createToolExecutionCoordinator({
       role: 'tool', tool_call_id: state.pendingToolCallId,
       content: safeJson(result)
     });
+    state.pendingCalls = structuredClone(continuation.state.pendingCalls ?? []);
+    state.pendingCallIndex = Math.max(0, Number(continuation.state.pendingCallIndex) || 0);
     if (typeof state.refreshContext === 'function') {
       const refreshed = await state.refreshContext({ capability: null, result: decisionResult,
         sessionId: continuation.target.sessionId, turnId: continuation.target.turnId, scope: state.scope, approvalResumed: true });
@@ -453,10 +465,31 @@ export function createToolExecutionCoordinator({
     finally { clearTimeout(timer); signal?.removeEventListener('abort', abort); }
   }
 
+  function cancelSession(sessionId, reason = 'chat-deleted') {
+    const wanted = String(sessionId ?? '');
+    if (!wanted) return { cancelled: 0 };
+    let cancelled = 0;
+    let changed = false;
+    for (const [approvalId, continuation] of Object.entries(continuations)) {
+      if (continuation.target?.sessionId !== wanted) continue;
+      try {
+        const row = capabilityBroker.approvals?.get(approvalId);
+        if (row?.status === 'pending') capabilityBroker.approvals.cancel(approvalId, reason);
+      } catch (error) {
+        if (!['APPROVAL_NOT_FOUND', 'APPROVAL_EXPIRED'].includes(error?.code)) throw error;
+      }
+      delete continuations[approvalId];
+      cancelled += 1;
+      changed = true;
+    }
+    if (changed) save();
+    return { cancelled };
+  }
+
   function pendingTarget(approvalId) {
     const entry = continuations[String(approvalId ?? '')];
     return entry ? { ...entry.target, kind: entry.targetKind ?? 'chat' } : null;
   }
 
-  return { run, resumeApproval, pendingTarget };
+  return { run, resumeApproval, pendingTarget, cancelSession };
 }

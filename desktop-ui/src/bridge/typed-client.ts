@@ -2,7 +2,7 @@ import type { AboutView } from '../types/views';
 
 export interface ChatSession {
   id: string; title: string; createdAt: string | number | null; updatedAt: string | number | null;
-  archived: boolean; config: { mode: string; modelProvider: string | null; model: string; agentProvider: string | null };
+  archived: boolean; config: { mode: string; modelProvider: string | null; model: string; agentProvider: string | null; workspaceId: string | null };
 }
 export interface ChatMessage {
   id: string; role: 'user' | 'assistant' | 'system'; text: string; at: string | number | null;
@@ -79,10 +79,11 @@ export interface IntegrationSettings {
 }
 
 export type DesktopEvent = 'core.status' | 'chat.updated' | 'chat.streaming' | 'chat.warning' | 'task.updated' | 'task.deleted'
+  | 'core.restarted'
   | 'agent.updated' | 'workspace.updated' | 'plugin.updated' | 'plugin.downloadProgress' | 'approval.pending' | 'approval.resolved'
   | 'model.updated' | 'memory.updated' | 'update.status' | 'device.updated';
 export interface DesktopEventData {
-  sessionId?: string; taskId?: string; agentId?: string; pluginId?: string; serverId?: string; approvalId?: string;
+  sessionId?: string; taskId?: string; agentId?: string; pluginId?: string; serverId?: string; approvalId?: string; requestId?: string; retryCount?: number;
   message?: string;
   provider?: string; status?: string; progress?: number; ready?: boolean; needsAttention?: boolean;
   delta?: string; replaceText?: string; reset?: boolean; toolActivity?: ChatMessage['toolActivity']; agentActivity?: ChatMessage['agentActivity'];
@@ -137,6 +138,7 @@ const pending = new Map<string, { resolve(value: unknown): void; reject(error: E
 const listeners = new Map<DesktopEvent, Set<(data: DesktopEventData) => void>>();
 let nextId = 0;
 let cursor = 0;
+let coreInstanceId: string | null = null;
 let eventPump: Promise<void> | null = null;
 const MAX_BRIDGE_REQUEST_BYTES = 900 * 1024;
 
@@ -173,9 +175,18 @@ window.__cetameshEvent = ({ event, data }) => {
 async function runEventPump(): Promise<void> {
   while (listeners.size > 0 && window.ipc) {
     try {
-      const response = await uiCall<{ events: { cursor: number; event: DesktopEvent; data: DesktopEventData }[]; cursor: number }>(
+      const response = await uiCall<{ instanceId: string; events: { cursor: number; event: DesktopEvent; data: DesktopEventData }[]; cursor: number }>(
         'ui.events.next', { after: cursor, waitMs: 20_000 }
       );
+      if (coreInstanceId !== response.instanceId) {
+        const restarted = coreInstanceId !== null;
+        coreInstanceId = response.instanceId;
+        cursor = 0;
+        if (restarted) {
+          window.__cetameshEvent?.({ event: 'core.restarted', data: {} });
+          continue;
+        }
+      }
       cursor = Math.max(cursor, response.cursor);
       for (const event of response.events) window.__cetameshEvent?.(event);
     } catch {
@@ -209,12 +220,12 @@ export const chatClient = {
   history: (id: string, limit = 100, beforeMessageId: string | null = null) => uiCall<{
     id: string; total: number; messages: ChatMessage[]; nextBeforeMessageId: string | null; hasMore: boolean
   }>('ui.chat.history', { id, limit, beforeMessageId }),
-  status: (id: string) => uiCall<{ id: string; state: string; displayText: string; toolActivity: ChatMessage['toolActivity']; agentActivity: ChatMessage['agentActivity']; error: string | null; approvalId: string | null; approvalExpiresAt: string | number | null; routing: Record<string, unknown> }>('ui.chat.status', { id }),
-  send: (id: string, text: string, attachments: Attachment[] = [], clientMessageId?: string) => uiCall<{ userMessageId?: string }>('ui.chat.send', { id, text, attachments, ...(clientMessageId ? { clientMessageId } : {}) }),
+  status: (id: string) => uiCall<{ id: string; dshSessionAlive: boolean; state: string; requestId: string | null; statusMessage: string | null; retryCount: number; followState: string; followError: string | null; displayText: string; toolActivity: ChatMessage['toolActivity']; agentActivity: ChatMessage['agentActivity']; error: string | null; errorCode: string | null; approvalId: string | null; approvalExpiresAt: string | number | null; routing: Record<string, unknown> }>('ui.chat.status', { id }),
+  send: (id: string, text: string, attachments: Attachment[] = [], clientMessageId?: string) => uiCall<{ userMessageId?: string; requestId?: string }>('ui.chat.send', { id, text, attachments, ...(clientMessageId ? { clientMessageId } : {}) }),
   stop: (id: string) => uiCall<{ stopped?: boolean; state?: string; reason?: string }>('ui.chat.stop', { id }),
   retry: (id: string) => uiCall<{ userMessageId?: string }>('ui.chat.retry', { id }),
   continue: (id: string) => uiCall<{ continued?: boolean }>('ui.chat.continue', { id }),
-  catalog: () => uiCall<{ models: unknown[]; modelProviders: { id: string; label: string; configured: boolean; settingsFields: ProviderSettingField[]; models: { id?: string; name?: string; label?: string }[] }[]; agentProviders: Agent[]; modes: string[]; defaultModelProvider: string | null; available: boolean; reason: string | null }>('ui.chat.catalog', {}),
+  catalog: (refresh = false) => uiCall<{ models: unknown[]; modelProviders: { id: string; label: string; configured: boolean; catalogState: string; reachable: boolean | null; authenticated: boolean | null; inferencing: boolean | null; toolCalling: boolean; error: string | null; settingsFields: ProviderSettingField[]; models: { id?: string; name?: string; label?: string }[] }[]; agentProviders: Agent[]; modes: string[]; defaultModelProvider: string | null; available: boolean; reason: string | null }>('ui.chat.catalog', { refresh }),
   setConfig: (id: string, config: Record<string, unknown>) => uiCall<ChatSession>('ui.chat.config.set', { id, config })
 };
 export const taskClient = {
@@ -235,7 +246,7 @@ export const memoryClient = {
 };
 export const agentClient = {
   list: () => uiCall<{ agents: Agent[] }>('ui.agent.list', {}),
-  health: (provider: string) => uiCall<Agent>('ui.agent.health', { provider })
+  health: (provider: string, refresh = false) => uiCall<Agent>('ui.agent.health', { provider, refresh })
 };
 export const extensionSettingsClient = {
   describe: (id: string) => uiCall<ExtensionSettingsDescription>('ui.extensions.settings.describe', { id }),
@@ -268,7 +279,7 @@ export const extensionSettingsClient = {
 export const settingsClient = {
   describe: () => uiCall<{ sections: { section: string; label: string }[]; fields: SettingSection[] }>('ui.settings.describe', {}),
   get: () => uiCall<{ settings: Settings; revision: number | null }>('ui.settings.get', {}),
-  update: (section: string, values: Record<string, unknown>, expectedRev?: number | null) => uiCall<{ settings: Settings; revision: number | null }>('ui.settings.update', { section, values, expectedRev })
+  update: (section: string, values: Record<string, unknown>, expectedRevision?: number | null) => uiCall<{ settings: Settings; revision: number | null }>('ui.settings.update', { section, values, expectedRevision })
 };
 export interface SettingField {
   key: string; label: string; type: string; description: string; default: string | number | boolean | null;
@@ -303,7 +314,7 @@ export const onboardingClient = {
   completeStep: (stepId: string, data: Record<string, unknown> = {}) => uiCall<unknown>('ui.onboarding.completeStep', { stepId, data }),
   skipStep: (stepId: string) => uiCall<unknown>('ui.onboarding.skipStep', { stepId }),
   finish: () => uiCall<unknown>('ui.onboarding.finish', {}),
-  testProvider: (provider: string, apiKey: string, baseUrl = '') => uiCall<{ ok: boolean; provider: string; message?: string; code?: string; connectionStepCompleted?: boolean }>('ui.onboarding.testProvider', { provider, apiKey, baseUrl }),
+  testProvider: (provider: string, apiKey: string, baseUrl = '', model = '') => uiCall<{ ok: boolean; provider: string; message?: string; code?: string; phase?: string; configured?: boolean | null; reachable?: boolean | null; authenticated?: boolean | null; inferencing?: boolean | null; connectionStepCompleted?: boolean }>('ui.onboarding.testProvider', { provider, apiKey, baseUrl, model }),
   setModel: (provider: string, model: string) => uiCall<Record<string, unknown>>('ui.onboarding.setModel', { provider, model })
 };
 export const searchClient = { search: (query: string) => uiCall<{ sessions: ChatSession[]; tasks: Task[]; plugins: Plugin[] }>('ui.search', { query }) };

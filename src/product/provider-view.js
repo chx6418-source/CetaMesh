@@ -206,6 +206,10 @@ const TEST_FAILURE_COPY = Object.freeze({
   PROVIDER_TEST_KEY_MISSING: Object.freeze({
     title: '尚未配置 API Key',
     message: '尚未配置 API Key：请先在 设置 → 模型 中填入并保存。'
+  }),
+  PROVIDER_TEST_KEY_INVALID: Object.freeze({
+    title: '凭据格式无效',
+    message: 'API Key 或 Base URL 格式不合法，请检查输入后重试。'
   })
 });
 
@@ -238,6 +242,7 @@ export function describeProviderTestFailure(failure) {
   if (status === 401 || status === 403) code = 'PROVIDER_TEST_AUTH_FAILED';
   else if (status === 0) code = 'PROVIDER_TEST_NETWORK';
   else if (rawCode === 'PROVIDER_SECRET_NOT_FOUND' || rawCode === 'PROVIDER_TEST_KEY_MISSING') code = 'PROVIDER_TEST_KEY_MISSING';
+  else if (rawCode === 'PROVIDER_SECRET_INVALID' || rawCode === 'PROVIDER_TEST_KEY_INVALID') code = 'PROVIDER_TEST_KEY_INVALID';
   else if (/ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EAI_AGAIN|AbortError|TimeoutError|NETWORK|TIMEOUT|FETCH/i.test(`${rawCode} ${rawMessage}`)) code = 'PROVIDER_TEST_NETWORK';
   else if (Number.isFinite(status) && status >= 400) code = 'PROVIDER_TEST_HTTP_ERROR';
   else if (/尚未配置|not configured|no api key|missing key/i.test(`${rawCode} ${rawMessage}`)) code = 'PROVIDER_TEST_KEY_MISSING';

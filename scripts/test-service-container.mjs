@@ -2,8 +2,16 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createDesktopUiEventBus } from '../src/desktop/ui-service.js';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-service-container-'));
+async function waitFor(predicate, label, timeoutMs = 1000) {
+  const startedAt = Date.now();
+  while (!predicate()) {
+    if (Date.now() - startedAt >= timeoutMs) throw new Error(`Timed out waiting for ${label}`);
+    await new Promise(resolve => setTimeout(resolve, 1));
+  }
+}
 const originalDataDir = process.env.WHALEBRIDGE_DATA_DIR;
 const originalFetch = globalThis.fetch;
 let networkAttempts = 0;
@@ -68,6 +76,14 @@ try {
   assert.ok(providers.includes('zcode'), 'ZCode provider remains registered when unavailable');
   assert.equal(services.modelRegistry.require('deepseek-official').defaultModel, 'deepseek-flash',
     'DeepSeek Runtime default uses the currently supported model id');
+  const genericModelProvider = services.modelRegistry.require('openai-compatible');
+  assert.equal(genericModelProvider.supportsTools, false, 'generic compatibility does not claim tool support before opt-in');
+  assert.equal(services.modelRuntime.listProviders().find(provider => provider.id === 'openai-compatible').toolCalling, false);
+  services.settingsService.store.update('models', { openaiCompatibleToolCalling: true, openaiCompatibleReasoningEffort: true });
+  assert.equal(genericModelProvider.supportsTools, true, 'the live provider capability follows the explicit user setting');
+  assert.equal(services.modelRuntime.listProviders().find(provider => provider.id === 'openai-compatible').toolCalling, true);
+  assert.equal(genericModelProvider.supportsReasoning('o3'), true);
+  assert.equal(genericModelProvider.supportsReasoning('gpt-4o-mini'), false);
   const dshHealth = await services.agentService.execute({ method: 'agent.health', params: { provider: 'dsh' } });
   assert.equal(dshHealth.available, false);
   assert.equal(dshHealth.reason, 'not_connected');
@@ -93,7 +109,10 @@ try {
   assert.equal(fallbackServices.modelRuntime.defaultProviderId(), null, 'no configured Model key is represented as unavailable');
   const fallbackSession = await fallbackServices.chatService.execute({ method: 'chat.sessions.create', params: {} });
   await fallbackServices.chatService.execute({ method: 'chat.config.set', params: { id: fallbackSession.id, config: { modelProvider: null } } });
-  await fallbackServices.chatService.execute({ method: 'chat.send', params: { id: fallbackSession.id, text: 'use the configured DSH route' } });
+  const dshAck = await fallbackServices.chatService.execute({ method: 'chat.send', params: { id: fallbackSession.id, text: 'use the configured DSH route' } });
+  assert.match(dshAck.requestId, /^cetamesh-chat-/,
+    'production Chat assembly acknowledges the DSH operation with a requestId');
+  await waitFor(() => dshCalls.some(call => call.endpoint === 'session/prompt'), 'production Chat DSH prompt');
   assert.ok(dshCalls.some(call => call.endpoint === 'session/prompt'),
     'the production Chat assembly reaches DSH when automatic Model Runtime has no configured key');
   assert.equal(fallbackServices.modelRuntime.listProviders().some(provider => provider.hasKey), false,
@@ -108,9 +127,13 @@ try {
   });
   const originalCreateAgentSession = fallbackServices.agentBroker.createSession;
   const originalSendAgent = fallbackServices.agentBroker.send;
+  const originalAgentStatus = fallbackServices.agentBroker.status;
+  const originalCloseAgent = fallbackServices.agentBroker.closeSession;
   let providerSessionIndex = 0;
+  const sentAgentInstructions = [];
   fallbackServices.agentBroker.createSession = async (provider) => ({ sessionId: `${provider}-fixture-${++providerSessionIndex}` });
-  fallbackServices.agentBroker.send = async () => ({ accepted: true });
+  fallbackServices.agentBroker.send = async request => { sentAgentInstructions.push(request); return { accepted: true }; };
+  fallbackServices.agentBroker.status = async request => ({ sessionId: request.sessionId, running: false });
   try {
     for (const provider of ['dsh', 'codex']) {
       assert.ok(['capability-broker', 'staged-capability-broker'].includes(
@@ -125,9 +148,39 @@ try {
         expectedRev: fallbackServices.taskService.runtime.get({ id: brokerSessionTask.id }).task.rev,
         note: `Reset fixture after ${provider}` });
     }
+    fallbackServices.taskService.runtime.attachAgent({ id: brokerSessionTask.id,
+      expectedRev: fallbackServices.taskService.runtime.get({ id: brokerSessionTask.id }).task.rev,
+      provider: 'dsh', sessionId: 'existing-dsh-session' });
+    const previousSendCount = sentAgentInstructions.length;
+    const reused = await fallbackServices.capabilityService.broker.execute({
+      actor: { kind: 'owner', id: 'desktop' }, taskId: brokerSessionTask.id, workspaceId: fallbackWorkspace.id,
+      capability: 'agent.run', input: { agentProvider: 'dsh', content: 'continue this existing session' }, reason: 'reuse send fixture'
+    });
+    assert.equal(reused.result.reused, true);
+    assert.equal(sentAgentInstructions.length, previousSendCount + 1, 'agent.run sends the new instructions even when Session is reused');
+    assert.equal(sentAgentInstructions.at(-1).content, 'continue this existing session');
+    fallbackServices.taskService.runtime.detachAgent({ id: brokerSessionTask.id,
+      expectedRev: fallbackServices.taskService.runtime.get({ id: brokerSessionTask.id }).task.rev, note: 'reset reuse fixture' });
+
+    const rollbackTask = fallbackServices.taskService.runtime.create({ goal: 'rollback on agent failure', workspaceId: fallbackWorkspace.id });
+    const originalSend = fallbackServices.agentBroker.send;
+    let closedFailedSession = false;
+    fallbackServices.agentBroker.send = async () => { throw Object.assign(new Error('send failed'), { code: 'PROVIDER_ERROR' }); };
+    fallbackServices.agentBroker.closeSession = async () => { closedFailedSession = true; return { closed: true }; };
+    await assert.rejects(() => fallbackServices.capabilityService.broker.execute({
+      actor: { kind: 'owner', id: 'desktop' }, taskId: rollbackTask.id, workspaceId: fallbackWorkspace.id,
+      capability: 'agent.run', input: { agentProvider: 'dsh', content: 'fail after create' }, reason: 'rollback fixture'
+    }), /send failed/);
+    const rolledBackTask = fallbackServices.taskService.runtime.get({ id: rollbackTask.id }).task;
+    assert.equal(rolledBackTask.currentAgent, null, 'failed Agent initialization detaches its Task assignment');
+    assert.equal(rolledBackTask.status, 'failed', 'failed initialization cannot leave a running Task');
+    assert.equal(closedFailedSession, true, 'failed Agent initialization closes the new Session/staging');
+    fallbackServices.agentBroker.send = originalSend;
   } finally {
     fallbackServices.agentBroker.createSession = originalCreateAgentSession;
     fallbackServices.agentBroker.send = originalSendAgent;
+    fallbackServices.agentBroker.status = originalAgentStatus;
+    fallbackServices.agentBroker.closeSession = originalCloseAgent;
   }
   const pluginCatalog = await services.pluginCenterService.execute({ method: 'plugin-center.catalog.list', params: {} });
   assert.equal(pluginCatalog.available, false);
@@ -165,7 +218,13 @@ try {
   assert.equal(openedWorkspace.activeId, uiWorkspace.id);
   assert.equal(activeWorkspace.activeId, uiWorkspace.id, 'active Workspace is projected from the Core registry');
   const workspaceEvents = await ui('ui.events.next', { after: 0, waitMs: 0 });
+  assert.equal(workspaceEvents.instanceId, services.uiEventBus.instanceId, 'event cursor is scoped to a Core instance');
   assert.ok(workspaceEvents.events.some(event => event.event === 'workspace.updated' && event.data.workspaceId === uiWorkspace.id));
+  const restartedBus = createDesktopUiEventBus();
+  restartedBus.publish('chat.updated', { sessionId: uiSession.id });
+  const firstAfterRestart = await restartedBus.next({ after: 0, waitMs: 0 });
+  assert.notEqual(firstAfterRestart.instanceId, workspaceEvents.instanceId);
+  assert.equal(firstAfterRestart.events[0].cursor, 1, 'new Core starts a fresh event cursor generation');
   const uiTask = await ui('ui.task.create', { goal: 'Harbor task DTO', requirements: [], workspaceId: uiWorkspace.id });
   assert.equal((await ui('ui.task.get', { id: uiTask.task.id })).task.id, uiTask.task.id);
   const taskEvents = await ui('ui.events.next', { after: workspaceEvents.cursor, waitMs: 0 });
@@ -173,6 +232,15 @@ try {
   const uiMemory = await ui('ui.memory.create', { type: 'knowledge', scope: 'global', content: 'Harbor memory DTO' });
   const updatedUiMemory = await ui('ui.memory.update', { id: uiMemory.id, expectedRev: uiMemory.rev, content: 'Updated Harbor memory DTO', tags: [], pinned: false });
   assert.equal(updatedUiMemory.content, 'Updated Harbor memory DTO');
+  const settingsSnapshot = await ui('ui.settings.get');
+  assert.equal(settingsSnapshot.revision, services.settingsService.store.get().revision);
+  const changedSettings = await ui('ui.settings.update', {
+    section: 'general', values: { theme: 'dark' }, expectedRevision: settingsSnapshot.revision
+  });
+  assert.equal(changedSettings.revision, settingsSnapshot.revision + 1);
+  await assert.rejects(() => ui('ui.settings.update', {
+    section: 'general', values: { theme: 'light' }, expectedRevision: settingsSnapshot.revision
+  }), error => error.code === 'SETTINGS_CONFLICT', 'stale revision is rejected through the formal UI route');
   assert.deepEqual((await ui('ui.approvals.list')).approvals, [], 'the live Core approval list has a real empty state');
 
   const simpleContext = JSON.parse(await services.productContextService.buildForChat({

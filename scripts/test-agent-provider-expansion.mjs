@@ -9,7 +9,7 @@ import { createAgentBroker } from '../src/agent/broker.js';
 import { createAgentProviderRegistry } from '../src/agent/registry.js';
 import { createAgentService } from '../src/agent/service.js';
 import { defineAgentProvider } from '../src/agent/agent-provider.js';
-import { CliAgentProcess } from '../src/agent/cli-agent-process.js';
+import { CliAgentProcess, createMinimalAgentEnv } from '../src/agent/cli-agent-process.js';
 import { createCodexAgentProvider } from '../src/agent/codex-agent-provider.js';
 import { createZCodeAgentProvider } from '../src/agent/zcode-agent-provider.js';
 import { createCapabilityService } from '../src/capability/service.js';
@@ -216,39 +216,102 @@ try {
   assert.equal((await timeoutRun.done).timedOut, true);
   await cliProcess.shutdown();
 
+  const allowedEnv = createMinimalAgentEnv({
+    PATH: process.env.PATH, HTTP_PROXY: 'http://proxy.example:8080', HTTPS_PROXY: 'https://user:password@proxy.example:8443',
+    NO_PROXY: 'localhost,127.0.0.1,.example.test', OPENAI_API_KEY: 'source-secret-openai-key', CETAMESH_SECRET: 'never-copy'
+  });
+  assert.equal(allowedEnv.HTTP_PROXY, 'http://proxy.example:8080');
+  assert.equal(allowedEnv.NO_PROXY, 'localhost,127.0.0.1,.example.test');
+  assert.equal(Object.hasOwn(allowedEnv, 'HTTPS_PROXY'), false, 'proxy credentials embedded in a URL are rejected');
+  assert.equal(Object.hasOwn(allowedEnv, 'OPENAI_API_KEY'), false, 'API credentials are never copied from the full source environment');
+  assert.equal(Object.hasOwn(allowedEnv, 'CETAMESH_SECRET'), false);
+  const authorizedEnv = createMinimalAgentEnv({}, {
+    OPENAI_API_KEY: 'explicitly-authorized-openai-key', OPENAI_BASE_URL: 'http://127.0.0.1:8181/v1'
+  }, { authorizedEnvKeys: ['OPENAI_API_KEY', 'OPENAI_BASE_URL'] });
+  assert.equal(authorizedEnv.OPENAI_API_KEY, 'explicitly-authorized-openai-key');
+  assert.equal(authorizedEnv.OPENAI_BASE_URL, 'http://127.0.0.1:8181/v1');
+  assert.equal(Object.hasOwn(createMinimalAgentEnv({}, { OPENAI_BASE_URL: 'http://remote.example/v1' }, { authorizedEnvKeys: ['OPENAI_BASE_URL'] }), 'OPENAI_BASE_URL'), false);
+
+  const shimRoot = path.join(root, 'npm codex shim & fixture');
+  const shimExecutable = path.join(shimRoot, 'codex.cmd');
+  const shimScript = path.join(shimRoot, 'node_modules', '@openai', 'codex', 'bin', 'codex.js');
+  fs.mkdirSync(path.dirname(shimScript), { recursive: true });
+  fs.writeFileSync(shimExecutable, '@echo off\r\n');
+  fs.writeFileSync(shimScript, [
+    "if (process.argv.includes('--version')) { console.log('codex-cli 9.9.9-shim-fixture'); process.exit(0); }",
+    "process.stdout.write('shim-started\\n');",
+    'setInterval(() => {}, 1000);'
+  ].join('\n'));
+  const windowsShimCli = new CliAgentProcess({ name: 'codex', executable: shimExecutable, platform: 'win32' });
+  assert.equal(windowsShimCli.health().available, true);
+  assert.equal(windowsShimCli.version().version, 'codex-cli 9.9.9-shim-fixture');
+  const shimOutput = [];
+  const shimRun = windowsShimCli.startSession({ sessionId: 'windows-shim-cancel', cwd: root, args: ['exec'], input: 'fixture prompt',
+    timeoutMs: 5000, onStdout: chunk => shimOutput.push(chunk) });
+  await waitFor(() => shimOutput.join(''), output => output.includes('shim-started'));
+  assert.equal(shimRun.cancel().cancelled, true);
+  assert.equal((await shimRun.done).cancelled, true, 'npm codex.cmd launches the resolved JS target directly and remains cancellable');
+  await windowsShimCli.shutdown();
+
   const fakeRuns = [];
   let fakeExitCode = 0;
+  let fakeStderr = '';
   let fakeTurnFailed = false;
+  let omitFinalNewline = false;
   let taskCapabilities;
   const fakeCli = {
     executable: () => 'codex-fixture',
     probe(args) {
       if (args[0] === '--version') return { available: true, stdout: 'codex-cli 9.9.9-fixture', stderr: '' };
       if (args[0] === '--help') return { available: true, stdout: '--config --ask-for-approval --cd', stderr: '' };
-      if (args[0] === 'exec' && args[1] === '--help') return { available: true, stdout: '--json --ignore-user-config --ignore-rules --strict-config', stderr: '' };
+      if (args[0] === 'exec' && args[1] === '--help') return { available: true, stdout: '--json --ignore-user-config --ignore-rules --strict-config --skip-git-repo-check', stderr: '' };
       if (args[0] === 'exec' && args[1] === 'resume') return { available: true, stdout: 'exec resume [SESSION_ID] --json', stderr: '' };
       if (args[0] === 'login' && args[1] === 'status') return { available: true, stdout: 'Logged in with Codex fixture account', stderr: '' };
       return { available: false, stdout: '', stderr: '' };
     },
-    startSession({ sessionId, cwd, args, input, onStdout }) {
+    startSession({ sessionId, cwd, args, input, env, authorizedEnvKeys, onStdout }) {
       const number = fakeRuns.length + 1;
-      fakeRuns.push({ sessionId, cwd, args: [...args], input });
+      fakeRuns.push({ sessionId, cwd, args: [...args], input, env: { ...(env ?? {}) }, authorizedEnvKeys: [...(authorizedEnvKeys ?? [])] });
       if (number === 1) fs.writeFileSync(path.join(cwd, `codex-result-${number}.txt`), `fake edit ${number}`);
-      if (number === 4) fs.writeFileSync(path.join(cwd, 'codex-failed-result.txt'), 'must not import after turn.failed');
+      if (fakeTurnFailed) fs.writeFileSync(path.join(cwd, 'codex-failed-result.txt'), 'must not import after turn.failed');
       const records = [
         { type: 'thread.started', thread_id: `thread-${number}` },
         { type: 'item.completed', item: { type: 'agent_message', text: `fixture response ${number}` } },
         ...(fakeTurnFailed ? [{ type: 'turn.failed', error: { message: 'fixture turn failed' } }] : []),
         ...(fakeExitCode === 0 ? [{ type: 'turn.completed', usage: { input_tokens: 12, output_tokens: 4 } }] : [])
       ];
-      onStdout(records.map(record => JSON.stringify(record)).join('\n') + '\n');
-      return { done: Promise.resolve({ sessionId, exitCode: fakeExitCode, timedOut: false, cancelled: false, stdout: '', stderr: '' }),
+      const serialized = records.map(record => JSON.stringify(record)).join('\n');
+      onStdout(serialized + (omitFinalNewline ? '' : '\n'));
+      omitFinalNewline = false;
+      return { done: Promise.resolve({ sessionId, exitCode: fakeExitCode, timedOut: false, cancelled: false, stdout: '', stderr: fakeStderr }),
         cancel: () => ({ cancelled: true, sessionId }), shutdown() {} };
     },
     async shutdown() {}
   };
   const codexStagingRoot = path.join(root, 'codex-staging');
+  const codexHome = path.join(root, 'codex-home');
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.writeFileSync(path.join(codexHome, 'config.toml'), [
+    'model = "fixture-inherited-model"',
+    'model_provider = "fixture-local"',
+    '',
+    '[model_providers.fixture-local]',
+    'name = "Fixture Local Gateway"',
+    'base_url = "https://gateway.example.test/v1"',
+    'wire_api = "responses"',
+    'env_key = "OPENAI_API_KEY"',
+    'requires_openai_auth = true',
+    '',
+    '[mcp_servers.untrusted_user_mcp]',
+    'command = "must-not-be-inherited"',
+    '',
+    '[permissions.untrusted-user-profile]',
+    'sandbox_mode = "danger-full-access"'
+  ].join('\n'));
+  const codexEnvironment = { ...process.env, CODEX_HOME: codexHome,
+    OPENAI_API_KEY: 'codex-environment-secret-fixture', OPENAI_BASE_URL: 'https://authorized-gateway.example.test/v1' };
   const codexProvider = createCodexAgentProvider({ cliProcess: fakeCli, stagingRoot: codexStagingRoot,
+    codexHome, environment: codexEnvironment, authorizeOpenAiEnvironment: () => false,
     excludedRoots: [stateDir],
     resolveTaskWorkspace: ({ taskId, workspaceId }) => {
       const boundTask = taskRuntime.get({ id: taskId }).task;
@@ -288,6 +351,20 @@ try {
   const firstArgs = fakeRuns[0].args;
   assert.ok(firstArgs.includes('--json'));
   assert.ok(firstArgs.includes('--strict-config'));
+  assert.ok(firstArgs.includes('--skip-git-repo-check'), 'controlled non-Git staging explicitly skips only Codex git-root trust detection');
+  assert.ok(firstArgs.includes('--ignore-user-config'), 'untrusted MCP and shell configuration remain excluded');
+  assert.ok(firstArgs.some(arg => arg === 'model_provider="fixture-local"'), 'the selected user model provider is inherited explicitly');
+  assert.ok(firstArgs.some(arg => arg.includes('model_providers."fixture-local".base_url="https://gateway.example.test/v1"')));
+  assert.ok(firstArgs.some(arg => arg === '--model') && firstArgs[firstArgs.indexOf('--model') + 1] === 'fixture-inherited-model');
+  assert.equal(firstArgs.some(arg => arg.startsWith('permissions.cetamesh-task.workspace_roots.')), false,
+    'Codex does not encode an absolute Windows workspace root as a CLI config path');
+  const filesystemOverrides = firstArgs.filter(arg => arg.startsWith('permissions.cetamesh-task.filesystem'));
+  assert.equal(filesystemOverrides.length, 1, 'Codex filesystem permissions are passed as one inline table for CLI parser compatibility');
+  assert.match(filesystemOverrides[0] ?? '', /^permissions\.cetamesh-task\.filesystem=\{/);
+  assert.ok(filesystemOverrides[0]?.includes('":workspace_roots"={"."="write"'),
+    'the active -C staging workspace remains the only writable workspace root');
+  assert.ok(!firstArgs.some(arg => arg.includes('mcp_servers') || arg.includes('danger-full-access') || arg.includes('must-not-be-inherited')));
+  assert.equal(Object.hasOwn(fakeRuns[0].env, 'OPENAI_API_KEY'), false, 'a provider key is not inherited until the Owner enables the setting');
   assert.ok(!firstArgs.includes('danger-full-access'));
   const firstExecIndex = firstArgs.indexOf('exec');
   assert.ok(firstExecIndex > firstArgs.indexOf('--ask-for-approval'), 'top-level approval policy precedes exec');
@@ -312,21 +389,40 @@ try {
   await waitFor(() => agentBroker.status({ provider: 'codex', sessionId: freshSessionId }),
     status => !status.running && status.lastRunStatus === 'completed');
 
+  omitFinalNewline = true;
+  await agentBroker.send({ provider: 'codex', sessionId: freshSessionId, content: 'Flush a final JSONL record without a newline' });
+  const flushedFinalRecord = await waitFor(() => agentBroker.status({ provider: 'codex', sessionId: freshSessionId }),
+    status => !status.running && status.lastRunStatus === 'completed');
+  assert.equal(flushedFinalRecord.errorCode, null, 'unterminated final turn.completed JSONL is flushed before finalization');
+
   fakeTurnFailed = true;
   await agentBroker.send({ provider: 'codex', sessionId: freshSessionId, content: 'Emit a failed Codex turn record' });
   const failedTurnStatus = await waitFor(() => agentBroker.status({ provider: 'codex', sessionId: freshSessionId }),
     status => !status.running && status.lastRunStatus === 'failed');
   assert.equal(failedTurnStatus.errorCode, 'CODEX_TURN_FAILED');
+  const failedTurnEvent = codexProvider._sessions.get(freshSessionId).events.filter(event => event.type === 'turn/end').at(-1);
+  assert.deepEqual(failedTurnEvent.data.reason.error, { code: 'CODEX_TURN_FAILED', message: 'Codex execution failed' });
   assert.equal(fs.existsSync(path.join(authoritativeRoot, 'codex-failed-result.txt')), false,
     'Codex turn.failed never imports stage changes even if the CLI exits zero');
   fakeTurnFailed = false;
 
   fakeExitCode = 1;
+  fakeStderr = 'ERROR failed to prepare fs sandbox: windows unelevated restricted-token sandbox cannot enforce split filesystem read restrictions directly; refusing to run unsandboxed at C:\\Users\\private\\workspace (secret marker)';
   await agentBroker.send({ provider: 'codex', sessionId: freshSessionId, content: 'Simulate a crashed CLI process' });
-  await waitFor(() => agentBroker.status({ provider: 'codex', sessionId: freshSessionId }), status => status.lastRunStatus === 'failed');
+  const sandboxFailureStatus = await waitFor(() => agentBroker.status({ provider: 'codex', sessionId: freshSessionId }),
+    status => status.lastRunStatus === 'failed');
+  assert.equal(sandboxFailureStatus.errorCode, 'CODEX_SANDBOX_UNAVAILABLE');
+  const sandboxFailureEvent = codexProvider._sessions.get(freshSessionId).events.filter(event => event.type === 'turn/end').at(-1);
+  assert.deepEqual(sandboxFailureEvent.data.reason.error, {
+    code: 'CODEX_SANDBOX_UNAVAILABLE',
+    message: 'Codex Windows sandbox cannot enforce the configured workspace read restrictions'
+  });
+  assert.equal(JSON.stringify(sandboxFailureEvent).includes('C:\\Users\\private'), false,
+    'Codex sandbox failure details never expose a user path or raw stderr');
   const previousTaskAgent = taskRuntime.get({ id: task.id }).task.currentAgent;
   await codexProvider.shutdown();
   fakeExitCode = 0;
+  fakeStderr = '';
 
   const restartedProvider = createCodexAgentProvider({ cliProcess: fakeCli, stagingRoot: codexStagingRoot,
     excludedRoots: [stateDir],
@@ -394,6 +490,13 @@ try {
   assert.ok(secondHarborRun.args.includes('--model')
     && secondHarborRun.args[secondHarborRun.args.indexOf('--model') + 1] === 'harbor-codex-model');
   assert.ok(secondHarborRun.args.some(arg => arg.includes('model_reasoning_effort="high"')));
+  fakeExitCode = 1;
+  await harborChat.execute({ method: 'chat.send', params: { id: harborSession.id, text: 'surface a structured Codex error' } });
+  const harborError = await waitFor(async () => harborChat.execute({ method: 'chat.status', params: { id: harborSession.id } }),
+    status => status.turn === null && status.lastErrorCode);
+  assert.equal(harborError.lastErrorCode, 'PROVIDER_ERROR');
+  assert.equal(harborError.lastError, 'Codex execution failed');
+  fakeExitCode = 0;
   harborChat.close();
 
   const isolatedA = await restartedProvider.createSession({ taskId: task.id, workspaceId: authoritative.id,
@@ -420,6 +523,92 @@ try {
   await restartedProvider.closeSession({ sessionId: isolatedB.sessionId });
   await restartedProvider.shutdown();
   await restartedProvider.shutdown();
+
+  const cancelledApprovals = [];
+  let pendingApplyCalls = 0;
+  const cancelApprovalProvider = createCodexAgentProvider({
+    cliProcess: fakeCli,
+    stagingRoot: path.join(root, 'codex-cancel-staging'),
+    createStage: async options => {
+      const stage = await createStagingWorkspace(options);
+      fs.writeFileSync(path.join(stage.root, 'pending-import.txt'), 'must-clean-on-cancel');
+      return stage;
+    },
+    resolveTaskWorkspace: ({ taskId, workspaceId }) => {
+      const boundTask = taskRuntime.get({ id: taskId }).task;
+      return boundTask.workspaceId === workspaceId ? { task: boundTask, workspace: workspaceService.describeWorkspace(workspaceId) } : null;
+    },
+    listWorkspaceRoots: async () => [authoritativeRoot],
+    applyChanges: async request => {
+      pendingApplyCalls += 1;
+      return taskCapabilities.applyAgentWorkspaceChanges(request);
+    },
+    approvalStatus: approvalId => taskCapabilities.workspaceImportStatus(approvalId),
+    cancelApproval: async id => {
+      cancelledApprovals.push(id);
+      return taskCapabilities.cancelWorkspaceImportApproval(id);
+    }
+  });
+  const cancelSession = await cancelApprovalProvider.createSession({ taskId: task.id, workspaceId: authoritative.id });
+  await cancelApprovalProvider.send({ sessionId: cancelSession.sessionId, content: 'wait for Workspace import approval' });
+  await waitFor(() => cancelApprovalProvider.status({ sessionId: cancelSession.sessionId }), status => status.waitingForApproval);
+  const cancelStagePath = cancelApprovalProvider._sessions.get(cancelSession.sessionId).stage.root;
+  const approvalCancelResult = await cancelApprovalProvider.cancel({ sessionId: cancelSession.sessionId });
+  assert.equal(approvalCancelResult.state, 'cancelled');
+  assert.deepEqual(cancelledApprovals, [approvalCancelResult.approvalId]);
+  assert.equal(pendingApplyCalls, 1);
+  assert.equal(fs.existsSync(cancelStagePath), false, 'cancel during import approval removes the staged Workspace');
+  assert.equal(cancelApprovalProvider._sessions.has(cancelSession.sessionId), false, 'cancelled staging Session cannot be reused');
+  assert.equal(taskCapabilities.workspaceImportStatus(approvalCancelResult.approvalId).status, 'cancelled');
+  await assert.rejects(() => taskCapabilities.execute({ method: 'capability.approval.decide', params: {
+    id: approvalCancelResult.approvalId, approve: true
+  } }), error => error.code === 'APPROVAL_ALREADY_DECIDED',
+  'a cancelled real Workspace import approval cannot be approved later');
+  assert.equal(fs.existsSync(path.join(authoritativeRoot, 'pending-import.txt')), false,
+    'approval cancellation prevents delayed import into the authoritative Workspace');
+
+  let codexInstalled = false;
+  let codexLoggedIn = false;
+  const reprobeCli = {
+    executable: () => codexInstalled ? 'codex-fixture' : null,
+    probe(args) {
+      if (!codexInstalled) return { available: false, stdout: '', stderr: '' };
+      if (args[0] === '--version') return { available: true, stdout: 'codex-cli 9.9.9-reprobe', stderr: '' };
+      if (args[0] === '--help') return { available: true, stdout: '--config --ask-for-approval --cd', stderr: '' };
+      if (args[0] === 'exec' && args[1] === '--help') return { available: true, stdout: '--json --ignore-user-config --ignore-rules --strict-config --skip-git-repo-check', stderr: '' };
+      if (args[0] === 'exec' && args[1] === 'resume') return { available: true, stdout: 'exec resume [SESSION_ID] --json', stderr: '' };
+      if (args[0] === 'login' && args[1] === 'status') return { available: codexLoggedIn, stdout: codexLoggedIn ? 'Logged in' : 'Not logged in', stderr: '' };
+      return { available: false, stdout: '', stderr: '' };
+    }
+  };
+  const reprobeProvider = createCodexAgentProvider({ cliProcess: reprobeCli });
+  assert.equal((await reprobeProvider.health()).available, false);
+  codexInstalled = true;
+  codexLoggedIn = true;
+  const reprobeService = createAgentService({ broker: createAgentBroker({ registry: createAgentProviderRegistry({ providers: [reprobeProvider] }) }) });
+  const reprobedHealth = await reprobeService.execute({ method: 'agent.health', params: { provider: 'codex', refresh: true } });
+  assert.equal(reprobedHealth.available, true);
+  assert.equal(reprobedHealth.authenticated, true, 'install and login after Core startup become visible through explicit reprobe');
+
+  const authorizedProvider = createCodexAgentProvider({
+    cliProcess: fakeCli, stagingRoot: path.join(root, 'codex-authorized-staging'), codexHome,
+    environment: codexEnvironment, authorizeOpenAiEnvironment: () => true,
+    resolveTaskWorkspace: ({ taskId, workspaceId }) => {
+      const boundTask = taskRuntime.get({ id: taskId }).task;
+      return boundTask.workspaceId === workspaceId ? { task: boundTask, workspace: workspaceService.describeWorkspace(workspaceId) } : null;
+    },
+    listWorkspaceRoots: async () => [authoritativeRoot],
+    applyChanges: async () => ({ status: 'completed' })
+  });
+  const authorizedSession = await authorizedProvider.createSession({ taskId: task.id, workspaceId: authoritative.id });
+  await authorizedProvider.send({ sessionId: authorizedSession.sessionId, content: 'use explicitly authorized environment credentials' });
+  await waitFor(() => authorizedProvider.status({ sessionId: authorizedSession.sessionId }), status => !status.running);
+  const authorizedRun = fakeRuns.find(run => run.sessionId.startsWith(authorizedSession.sessionId + ':'));
+  assert.equal(authorizedRun.env.OPENAI_API_KEY, 'codex-environment-secret-fixture');
+  assert.equal(authorizedRun.env.OPENAI_BASE_URL, 'https://authorized-gateway.example.test/v1');
+  assert.deepEqual(authorizedRun.authorizedEnvKeys, ['OPENAI_API_KEY', 'OPENAI_BASE_URL']);
+  await authorizedProvider.closeSession({ sessionId: authorizedSession.sessionId });
+  await authorizedProvider.shutdown();
 
   const unavailable = await createCodexAgentProvider({ executable: null });
   assert.equal(unavailable.capabilities().available, false);

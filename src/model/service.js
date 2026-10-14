@@ -72,6 +72,7 @@ export function createModelRuntimeService({ registry, secrets, preferredProvider
       id: provider.id,
       label: provider.label,
       hasKey: hasKey(provider.id),
+      toolCalling: provider.supportsTools === true,
       settingsFields: typeof provider.settingsFields === 'function' ? provider.settingsFields() : []
     }));
   }
@@ -88,11 +89,16 @@ export function createModelRuntimeService({ registry, secrets, preferredProvider
   }
 
   async function health(providerId) {
-    const provider = resolveProvider(providerId);
+    const provider = registry.require(providerId);
+    const configured = hasKey(provider.id);
+    if (!configured) return {
+      provider: provider.id, status: 'needs-setup', available: null,
+      configured: false, reachable: null, authenticated: null, inferencing: null
+    };
     try {
-      return await provider.health({});
+      return { ...(await provider.health({})), provider: provider.id, configured: true };
     } catch (error) {
-      return { available: false, provider: provider.id, reason: String(error?.message ?? error) };
+      return { available: null, provider: provider.id, configured: true, status: 'error', reason: String(error?.message ?? error) };
     }
   }
 
@@ -159,7 +165,7 @@ export function createModelRuntimeService({ registry, secrets, preferredProvider
     listProviders,
     hasKey,
     supportsToolCalling(providerId) {
-      return resolveProvider(providerId).supportsTools === true;
+      return registry.require(providerId).supportsTools === true;
     },
     listModels,
     health,

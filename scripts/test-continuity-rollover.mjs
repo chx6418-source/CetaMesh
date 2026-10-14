@@ -24,7 +24,8 @@ let step = 0;
 function ok(label) { step += 1; console.log(`✅ [${step}] ${label}`); }
 
 function mockProvider(id, log, options = {}) {
-  let seq = 0;
+  // The rollover fixture begins from `${id}-s1`; generate a distinct target id.
+  let seq = 1;
   return defineAgentProvider({
     id,
     label: `Mock ${id}`,
@@ -40,6 +41,7 @@ function mockProvider(id, log, options = {}) {
       },
       async send({ sessionId, content }) {
         log.push({ kind: 'prompt', sessionId, text: content });
+        if (options.failSend) throw Object.assign(new Error('fixture bootstrap rejected'), { code: 'PROVIDER_ERROR' });
         return { accepted: true };
       },
       async cancel(sessionId) {
@@ -73,14 +75,14 @@ function mockProvider(id, log, options = {}) {
 }
 
 /** 每组独立 stateDir；task 写操作统一带最新 rev（store 乐观锁）。 */
-function setup({ policy, gate } = {}) {
+function setup({ policy, gate, failSendProvider } = {}) {
   const log = [];
   const dir = fs.mkdtempSync(path.join(stateRoot, 'case-'));
   const taskRuntime = createTaskRuntime({ stateDir: dir });
   const rev = (id) => taskRuntime.get({ id }).task.rev;
   const registry = createAgentProviderRegistry();
-  const alpha = mockProvider('alpha', log, { gate });
-  const beta = mockProvider('beta', log);
+  const alpha = mockProvider('alpha', log, { gate, failSend: failSendProvider === 'alpha' });
+  const beta = mockProvider('beta', log, { failSend: failSendProvider === 'beta' });
   registry.register(alpha);
   registry.register(beta);
   const broker = createAgentBroker({ registry });
@@ -229,7 +231,30 @@ function setup({ policy, gate } = {}) {
   ok('跨 Provider Handoff：同 packet、Task ID 不变、未注册 Provider 明确拒绝');
 }
 
-// ── 5. 无 Agent / 不安全点 / packet 校验 ─────────────────────────────────────
+// ── 5. Provider 初始化失败：恢复旧 Agent 与原始 Checkpoint 并清理目标 Session ──
+{
+  const { runtime, taskRuntime, log, rev } = setup({ failSendProvider: 'beta' });
+  const task = taskRuntime.create({ goal: '初始化失败后回滚', workspaceId: 'ws-rollback' });
+  taskRuntime.attachAgent({ id: task.id, expectedRev: rev(task.id), provider: 'alpha', sessionId: 'alpha-s1' });
+  const previousCheckpoint = taskRuntime.get({ id: task.id }).task.checkpoint;
+
+  await assert.rejects(
+    runtime.rollover({ taskId: task.id, reason: 'provider-switch', targetProvider: 'beta' }),
+    error => error.code === 'PROVIDER_ERROR' && /fixture bootstrap rejected/.test(error.message)
+  );
+
+  const rolledBack = taskRuntime.get({ id: task.id }).task;
+  assert.deepEqual(rolledBack.currentAgent, { provider: 'alpha', sessionId: 'alpha-s1' },
+    'failed bootstrap restores the previous Task Agent binding');
+  assert.deepEqual(rolledBack.checkpoint, previousCheckpoint,
+    'failed bootstrap restores the exact prior checkpoint, including null');
+  assert.ok(log.some(entry => entry.kind === 'archive' && entry.sessionId === 'beta-s2'),
+    'failed target Session is closed and staged resources are cleaned');
+  assert.equal(runtime.history({ taskId: task.id }).total, 0, 'failed rollover is not recorded as completed');
+  ok('Provider bootstrap failure rolls back Task binding and Checkpoint and closes target Session');
+}
+
+// ── 6. 无 Agent / 不安全点 / packet 校验 ─────────────────────────────────────
 {
   const { runtime, taskRuntime, rev } = setup();
   const task = taskRuntime.create({ goal: '未绑定会话', workspaceId: 'ws-no-session' });
@@ -264,7 +289,7 @@ function setup({ policy, gate } = {}) {
   ok('无 Agent / 不安全点拒绝 / packet 校验收敛');
 }
 
-// ── 6. IPC 服务白名单与默认阈值 ──────────────────────────────────────────────
+// ── 7. IPC 服务白名单与默认阈值 ──────────────────────────────────────────────
 {
   const { taskRuntime, rev } = setup();
   const service = createContinuityService({

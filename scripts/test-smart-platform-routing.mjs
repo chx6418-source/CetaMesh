@@ -15,6 +15,15 @@ const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-smart-route-'));
 const modelRequests = [], agentCalls = [], audit = [];
 let agentSeq = 0;
 let chat;
+async function waitFor(read, predicate, label, timeoutMs = 2000) {
+  const end = Date.now() + timeoutMs;
+  while (Date.now() < end) {
+    const value = await read();
+    if (predicate(value)) return value;
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  throw new Error(`Timed out waiting for ${label}`);
+}
 try {
   const stateDir = path.join(dir, 'state');
   const workspaceService = createWorkspaceService({ stateDir });
@@ -53,6 +62,7 @@ try {
     modelRuntime,
     router,
     platformRoute: request => platformRuntime.route(request),
+    resolveWorkspace: workspaceId => workspaceService.describeWorkspace(workspaceId),
     agentFollow: async function* ({ signal }) {
       await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }));
     },
@@ -64,6 +74,7 @@ try {
   await chat.execute({ method: 'chat.config.set', params: { id: session.id, config: { mode: 'smart', workspaceId } } });
 
   await chat.execute({ method: 'chat.send', params: { id: session.id, text: 'what time is it?' } });
+  await waitFor(() => chat.execute({ method: 'chat.status', params: { id: session.id } }), status => status.turn === null, 'capability-backed Chat turn');
   let history = await chat.execute({ method: 'chat.history', params: { id: session.id } });
   assert.equal(history.messages.at(-1).routing.resolvedRoute, 'capability');
   assert.ok(modelRequests.at(-1).messages.at(-1).content.includes('Capability reference data'));
@@ -76,6 +87,7 @@ try {
   assert.equal(modelRequests.length, 2);
 
   await chat.execute({ method: 'chat.send', params: { id: session.id, text: 'fix a bug in this project' } });
+  await waitFor(() => taskRuntime.list().tasks, tasks => tasks.some(task => task.currentAgent?.sessionId === 'managed-1'), 'managed Agent acceptance');
   const tasks = taskRuntime.list().tasks;
   assert.equal(tasks.length, 1);
   assert.equal(tasks[0].workspaceId, workspaceId);

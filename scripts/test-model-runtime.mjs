@@ -69,7 +69,7 @@ function makeSecrets(withKey = true) {
   return secrets;
 }
 
-function makeService({ withKey = true, fetchImpl, baseUrl = 'https://api.deepseek.test' } = {}) {
+function makeService({ withKey = true, fetchImpl, baseUrl = 'https://api.deepseek.test', deepseekOptions = {}, openaiOptions = {} } = {}) {
   const secrets = makeSecrets(withKey);
   const deepseek = createOpenAiCompatibleModelProvider({
     id: 'deepseek-official',
@@ -80,6 +80,7 @@ function makeService({ withKey = true, fetchImpl, baseUrl = 'https://api.deepsee
     fetchImpl: typeof fetchImpl === 'function' ? fetchImpl : fetchImpl?.fetch ?? fetch,
     supportsTools: true,
     supportsStreamOptions: true,
+    ...deepseekOptions,
     log: () => {}
   });
   const openai = createOpenAiCompatibleModelProvider({
@@ -92,6 +93,7 @@ function makeService({ withKey = true, fetchImpl, baseUrl = 'https://api.deepsee
     supportsTools: true,
     reasoningParam: 'reasoning_effort',
     supportsStreamOptions: true,
+    ...openaiOptions,
     log: () => {}
   });
   const registry = createModelProviderRegistry({ providers: [deepseek, openai] });
@@ -324,10 +326,12 @@ function makeService({ withKey = true, fetchImpl, baseUrl = 'https://api.deepsee
   assert.deepEqual(providers, [
     {
       id: 'deepseek-official', label: 'DeepSeek 官方', hasKey: true,
+      toolCalling: true,
       settingsFields: [{ key: 'baseUrl', label: 'Base URL', type: 'string' }]
     },
     {
       id: 'openai', label: 'OpenAI', hasKey: true,
+      toolCalling: true,
       settingsFields: [
         { key: 'baseUrl', label: 'Base URL', type: 'string' },
         { key: 'reasoningEffort', label: '推理强度', type: 'string', choices: ['off', 'low', 'high', 'max'] }
@@ -335,7 +339,9 @@ function makeService({ withKey = true, fetchImpl, baseUrl = 'https://api.deepsee
     }
   ]);
   const health = await service.health('deepseek-official');
-  assert.equal(health.available, true);
+  assert.equal(health.available, null, '未执行探测时不得伪报模型可用');
+  assert.equal(health.configured, true);
+  assert.equal(health.inferencing, null);
   const serialized = JSON.stringify({ providers, health });
   assert.ok(!serialized.includes(API_KEY), 'service 输出不含 Key 材料');
   ok('Secret 纪律：list/health 只含 hasKey 布尔，无 Key 材料');
@@ -345,20 +351,73 @@ function makeService({ withKey = true, fetchImpl, baseUrl = 'https://api.deepsee
 {
   const f = fixtureFetch(() => sseResponse(SSE));
   const { service } = makeService({ fetchImpl: f });
-  const collect = async (reasoning, providerId) => {
+  const collect = async (reasoning, providerId, model) => {
     const before = f.requests.length;
-    for await (const _ of service.stream({ providerId, messages: [{ role: 'user', content: 'x' }], reasoning, signal: new AbortController().signal })) { void _; }
+    for await (const _ of service.stream({ providerId, model, messages: [{ role: 'user', content: 'x' }], reasoning, signal: new AbortController().signal })) { void _; }
     return f.requests[before].body;
   };
-  const offBody = await collect('off', 'openai');
+  const offBody = await collect('off', 'openai', 'gpt-4o-mini');
   assert.ok(!('reasoning_effort' in offBody), 'off → 不携带 reasoning 参数');
-  const maxBody = await collect('max', 'openai');
+  const ordinaryBody = await collect('max', 'openai', 'gpt-4o-mini');
+  assert.ok(!('reasoning_effort' in ordinaryBody), '普通 GPT 模型不接收推理参数');
+  const maxBody = await collect('max', 'openai', 'o3');
   assert.equal(maxBody.reasoning_effort, 'high', 'max → OpenAI 语义上限 high');
-  const lowBody = await collect('low', 'openai');
+  const lowBody = await collect('low', 'openai', 'gpt-5-mini');
   assert.equal(lowBody.reasoning_effort, 'low');
-  const deepseekBody = await collect('high', 'deepseek-official');
+  const deepseekBody = await collect('high', 'deepseek-official', 'deepseek-reasoner');
   assert.ok(!('reasoning_effort' in deepseekBody), 'DeepSeek 以模型区分 reasoning，不携带 effort 参数');
   ok('Reasoning 映射：off 省略 / max→high / DeepSeek 无该参数');
+}
+
+// ── 9a. 请求总时限与 SSE idle timeout 独立于调用方取消信号 ────────────────
+{
+  const hangsUntilAbort = async (_url, init) => new Promise((_resolve, reject) => {
+    if (init.signal.aborted) {
+      reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+      return;
+    }
+    init.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })), { once: true });
+  });
+  const requestCase = makeService({ fetchImpl: hangsUntilAbort, deepseekOptions: { requestTimeoutMs: 25, sseIdleTimeoutMs: 25 } });
+  // AbortSignal.timeout uses an unref'd timer in Node. Keep this fixture process
+  // alive so the timeout can fire even though the mocked fetch has no socket.
+  const timeoutKeepAlive = setTimeout(() => {}, 1000);
+  try {
+    await assert.rejects(
+      requestCase.service.chat({ providerId: 'deepseek-official', messages: [{ role: 'user', content: 'wait' }], signal: new AbortController().signal }),
+      error => error.code === 'MODEL_REQUEST_TIMEOUT'
+    );
+  } finally {
+    clearTimeout(timeoutKeepAlive);
+  }
+
+  const cancelController = new AbortController();
+  const cancelledRequest = requestCase.service.chat({
+    providerId: 'deepseek-official', messages: [{ role: 'user', content: 'cancel' }], signal: cancelController.signal
+  });
+  cancelController.abort();
+  await assert.rejects(cancelledRequest, error => error.code === 'ABORTED');
+
+  let cancelled = false;
+  const stalledBody = new ReadableStream({
+    start(controller) { controller.enqueue(new Uint8Array([32])); },
+    cancel() { cancelled = true; }
+  });
+  const streamCase = makeService({ fetchImpl: async () => new Response(stalledBody, { status: 200 }), deepseekOptions: { requestTimeoutMs: 1000, sseIdleTimeoutMs: 25 } });
+  await assert.rejects(async () => {
+    for await (const _event of streamCase.service.stream({ providerId: 'deepseek-official', messages: [{ role: 'user', content: 'stall' }], signal: new AbortController().signal })) { void _event; }
+  }, error => error.code === 'MODEL_STREAM_IDLE_TIMEOUT');
+  assert.equal(cancelled, true, 'idle timeout must cancel the hanging reader');
+  ok('Request deadline remains active with caller signal; SSE idle timeout cancels the reader');
+}
+
+// ── 9b. 空工具列表不发送兼容性敏感的 tool_choice ─────────────────────────
+{
+  const f = fixtureFetch(() => sseResponse(SSE));
+  const { service } = makeService({ fetchImpl: f });
+  for await (const _event of service.stream({ providerId: 'deepseek-official', model: 'fixture-model', messages: [{ role: 'user', content: 'done' }], tools: [], toolChoice: 'none' })) { void _event; }
+  assert.ok(!Object.hasOwn(f.requests[0].body, 'tool_choice'));
+  ok('空 tools 请求省略 tool_choice');
 }
 
 // ── 10. OpenAI 兼容自定义端点：无 baseUrl 拒绝；默认不带 stream_options ───────

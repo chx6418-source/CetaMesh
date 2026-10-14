@@ -35,7 +35,10 @@ function ok(label) { step += 1; console.log(`✅ [${step}] ${label}`); }
 
 /** 正式契约 fixture Agent Provider（经 Broker 注册）；支持可选 archiveSession。 */
 function fixtureProvider(id, { gate = null, failCreate = false } = {}) {
-  let seq = 0;
+  // The Task fixture is attached to `${id}-s1`; start generated Sessions at s2
+  // so rollover exercises a real identity change instead of the provider fixture
+  // accidentally returning the old session id again.
+  let seq = 1;
   const log = [];
   return {
     provider: defineAgentProvider({

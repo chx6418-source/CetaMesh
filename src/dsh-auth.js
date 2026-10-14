@@ -16,20 +16,22 @@ const SECRET_RECACHE_MS = 60 * 1000;
 
 let cachedSecret = null;
 let cachedSecretAt = 0;
+let cachedSecretFile = null;
 
 function encodeBase64Url(value) {
   return Buffer.from(value).toString('base64').replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, '');
 }
 
-export function dshCredentialsFile() {
-  const home = (process.env.DSH_HOME && process.env.DSH_HOME.trim()) || path.join(os.homedir(), '.dsh');
+export function dshCredentialsFile(dshHome = null) {
+  const home = (typeof dshHome === 'string' && dshHome.trim())
+    || (process.env.DSH_HOME && process.env.DSH_HOME.trim()) || path.join(os.homedir(), '.dsh');
   return path.join(home, '.credentials.yaml');
 }
 
 /** 从 .credentials.yaml 提取 client-connection/browser-session 的 base64url secret（返回原始字节）。 */
-export function readDshSessionSecret() {
-  if (cachedSecret && Date.now() - cachedSecretAt < SECRET_RECACHE_MS) return cachedSecret;
-  const file = dshCredentialsFile();
+export function readDshSessionSecret(dshHome = null) {
+  const file = dshCredentialsFile(dshHome);
+  if (cachedSecret && cachedSecretFile === file && Date.now() - cachedSecretAt < SECRET_RECACHE_MS) return cachedSecret;
   const text = fs.readFileSync(file, 'utf8');
   const at = text.indexOf('client-connection/browser-session:');
   if (at === -1) throw new Error(`${file} 里没有 client-connection/browser-session 记录（DSH web 尚未首次启动过？）`);
@@ -39,15 +41,16 @@ export function readDshSessionSecret() {
   if (secret.byteLength !== 32) throw new Error(`${file} 的 secret 长度异常（${secret.byteLength} 字节，应为 32）`);
   cachedSecret = secret;
   cachedSecretAt = Date.now();
+  cachedSecretFile = file;
   return secret;
 }
 
 /** 按 dsh-client-connection 规则锻造指定 authority 的会话 Cookie（形如 "dsh-auth-xxx=v1.…"）。 */
-export function forgeDshAuthCookie(authority, now = Date.now()) {
+export function forgeDshAuthCookie(authority, now = Date.now(), dshHome = null) {
   const name = COOKIE_PREFIX + encodeBase64Url(crypto.createHash('sha256').update(authority).digest());
   const payload = { version: 1, authority, issuedAt: now, expiresAt: now + COOKIE_TTL_MS };
   const body = encodeBase64Url(Buffer.from(JSON.stringify(payload), 'utf8'));
-  const sig = encodeBase64Url(crypto.createHmac('sha256', readDshSessionSecret()).update(body).digest());
+  const sig = encodeBase64Url(crypto.createHmac('sha256', readDshSessionSecret(dshHome)).update(body).digest());
   return `${name}=v1.${body}.${sig}`;
 }
 
@@ -61,11 +64,11 @@ export function authorityOf(baseUrl) {
  * 优先用配置里手动指定的 authCookie（完整 "dsh-auth-…=v1.…" 或裸 "v1.…" 值），
  * 否则用本机 DSH secret 离线锻造。返回形如 "name=value" 的完整 Cookie 头值。
  */
-export function resolveDshAuthCookie(baseUrl, authCookie) {
+export function resolveDshAuthCookie(baseUrl, authCookie, dshHome = null) {
   if (authCookie && String(authCookie).trim()) {
     const raw = String(authCookie).trim();
     // 裸值（以 v1. 开头）补上按 authority 派生的 Cookie 名；否则视为完整 "name=value" 对
     return raw.startsWith('v1.') ? `${COOKIE_PREFIX + encodeBase64Url(crypto.createHash('sha256').update(authorityOf(baseUrl)).digest())}=${raw}` : raw;
   }
-  return forgeDshAuthCookie(authorityOf(baseUrl));
+  return forgeDshAuthCookie(authorityOf(baseUrl), Date.now(), dshHome);
 }

@@ -26,6 +26,13 @@ const DSH_BASE_URL = process.env.DSH_BASE_URL ?? 'http://127.0.0.1:3080';
 const results = { pass: 0, fail: 0, live: null };
 
 function ok(name) { results.pass += 1; console.log(`PASS ${name}`); }
+async function waitFor(predicate, label, timeoutMs = 1000) {
+  const startedAt = Date.now();
+  while (!predicate()) {
+    if (Date.now() - startedAt >= timeoutMs) throw new Error(`Timed out waiting for ${label}`);
+    await new Promise(resolve => setTimeout(resolve, 1));
+  }
+}
 
 // ── A. 契约 ──────────────────────────────────────────────────────────────────
 {
@@ -186,6 +193,16 @@ function ok(name) { results.pass += 1; console.log(`PASS ${name}`); }
   await assert.rejects(() => deadCall('agent.contextUsage', { provider: 'dsh', sessionId: 'x' }), (e) => e.code === 'PROVIDER_UNAVAILABLE');
   await assert.rejects(() => deadCall('agent.resume', { provider: 'dsh', sessionId: 'x' }), (e) => e.code === 'PROVIDER_UNAVAILABLE');
   ok('C3 DSH 未启动（真实死端口）：全部方法结构化降级 PROVIDER_UNAVAILABLE');
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response('Host/Origin rejected', { status: 403 });
+  try {
+    const fenced = new NodeApiClient('http://127.0.0.1:3080', { authCookie: 'session=fixture' });
+    await assert.rejects(() => fenced.callEndpoint('settings/describe'), error => error.code === 'DSH_HOST_ORIGIN_REJECTED');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  ok('DSH 403 Host/Origin fence is distinct from invalid authentication');
 }
 
 // ── E. Chat 集成：Normal Model 与 Agent Provider 两条执行路径 ─────────────────
@@ -193,7 +210,9 @@ function ok(name) { results.pass += 1; console.log(`PASS ${name}`); }
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-agent-chat-'));
   try {
     const agentCalls = [];
+    const closedAgentSessions = [];
     const directCalls = [];
+    let failDshModelSelection = false;
     const chat = createChatService({
       api: {
         async callEndpoint(endpoint, args) { directCalls.push({ endpoint, args }); return { sessionId: 'dsh-direct-1' }; },
@@ -206,6 +225,14 @@ function ok(name) { results.pass += 1; console.log(`PASS ${name}`); }
         if (method === 'agent.createSession') return { sessionId: 'dsh-agent-1', provider: 'dsh', model: params.model ?? null, modelBindingError: null };
         if (method === 'agent.send') return { accepted: true };
         if (method === 'agent.cancel') return { cancelled: true };
+        if (method === 'agent.selectModel') {
+          if (failDshModelSelection) throw Object.assign(new Error('model selection denied'), { code: 'MODEL_BIND_FAILED' });
+          return { selected: { model: params.model } };
+        }
+        if (method === 'agent.closeSession') {
+          closedAgentSessions.push(params.sessionId);
+          return { closed: true };
+        }
         throw new Error(`未预期的 Agent 方法：${method}`);
       },
       agentProviders: [{ id: 'dsh', label: 'DSH Agent', eventProtocol: 'dsh-session-events' }],
@@ -237,10 +264,23 @@ function ok(name) { results.pass += 1; console.log(`PASS ${name}`); }
     assert.equal(directCalls.filter((c) => c.endpoint === 'session/prompt').length, 0, 'Agent 路径不得直连 DSH prompt');
     ok('E2 Agent Provider 路径经 agent.createSession/agent.send（不直连 DSH）');
 
+    failDshModelSelection = true;
+    await assert.rejects(() => exec('chat.config.set', { id: sessionA.id, config: { model: 'deepseek-r2' } }),
+      error => error.code === 'MODEL_BIND_FAILED');
+    const invalidatedDshSession = await exec('chat.status', { id: sessionA.id });
+    assert.equal(invalidatedDshSession.dshSessionAlive, false,
+      'a failed DSH model selection cannot leave the old session projected as ready');
+    assert.deepEqual(closedAgentSessions, ['dsh-agent-1'], 'the failed DSH session is archived best-effort');
+    ok('A07 failed DSH selectModel invalidates the stale session and archives it');
+    failDshModelSelection = false;
+
     // E3 Normal Model 路径：不设 agentProvider 时行为与阶段 03 完全一致（直连 DSH）
     const sessionB = await exec('chat.sessions.create', { title: '普通模型' });
-    await exec('chat.send', { id: sessionB.id, text: 'hi' });
+    const normalSend = await exec('chat.send', { id: sessionB.id, text: 'hi' });
+    assert.match(normalSend.requestId, /^cetamesh-chat-/,
+      'the DSH route acknowledges the background operation with a stable requestId');
     assert.ok(directCalls.some((c) => c.endpoint === 'session/create'));
+    await waitFor(() => directCalls.some((c) => c.endpoint === 'session/prompt'), 'DSH prompt after quick ACK');
     assert.ok(directCalls.some((c) => c.endpoint === 'session/prompt'));
     ok('E3 Normal Model 路径保持直连 DSH（回归不变）');
 
