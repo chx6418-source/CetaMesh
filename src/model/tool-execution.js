@@ -237,7 +237,7 @@ export function createToolExecutionCoordinator({
       if (response?.usage && typeof response.usage === 'object') usage = response.usage;
       if (typeof response?.resolvedModel === 'string' && response.resolvedModel.trim()) resolvedModel = response.resolvedModel.trim();
       else if (typeof response?.model === 'string' && response.model.trim()) resolvedModel = response.model.trim();
-      const calls = Array.isArray(response?.toolCalls) ? response.toolCalls.slice(0, maxBatchCalls) : [];
+      const calls = Array.isArray(response?.toolCalls) ? response.toolCalls : [];
       if (!calls.length) return { status: 'completed', toolCalling: 'supported', text, usage, resolvedModel, totalCalls, messages: state.messages };
       const known = new Set(state.manifest.map((item) => item.id));
 

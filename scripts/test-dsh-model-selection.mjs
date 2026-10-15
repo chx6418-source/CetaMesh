@@ -218,6 +218,12 @@ function fakeApi(handler) {
     service._injectEvent(session.id, { type: 'turn/end', data: { reason: { kind: 'completed' } } });
   });
   await service.execute({ method: 'chat.send', params: { id: session.id, text: '你好' } });
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    const status = await service.execute({ method: 'chat.status', params: { id: session.id } });
+    if (status.state === 'completed' || status.state === 'idle') break;
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
   // 截图操作：会话配置里把自定义模型改成 deepseek-v4-flash 并应用。
   const updated = await service.execute({ method: 'chat.config.set', params: { id: session.id, config: { model: 'deepseek-v4-flash' } } });
   assert.equal(updated.config.model, 'deepseek-v4-flash');

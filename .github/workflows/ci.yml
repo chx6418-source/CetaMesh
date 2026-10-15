@@ -92,10 +92,9 @@ jobs:
         with:
           name: whalebridge-rc
           path: |
-            dist/app/WhaleBridge.exe
-            dist/app/WhaleBridge-Setup-x64.exe
-            dist/app/release-manifest.json
-            dist/app/SHA256SUMS.txt
-            dist/app/sbom.json
+            artifacts/*/*/build-*/*.exe
+            artifacts/*/*/build-*/release-manifest.json
+            artifacts/*/*/build-*/SHA256SUMS.txt
+            artifacts/*/*/build-*/sbom.json
           if-no-files-found: error
           retention-days: 14

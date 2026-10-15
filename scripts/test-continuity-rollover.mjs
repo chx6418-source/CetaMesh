@@ -49,6 +49,7 @@ function mockProvider(id, log, options = {}) {
         return { cancelled: true };
       },
       async status() {
+        if (options.statusError) throw Object.assign(new Error('fixture session is missing'), { code: options.statusError });
         return { running: false };
       },
       async contextUsage() {
@@ -75,19 +76,37 @@ function mockProvider(id, log, options = {}) {
 }
 
 /** 每组独立 stateDir；task 写操作统一带最新 rev（store 乐观锁）。 */
-function setup({ policy, gate, failSendProvider } = {}) {
+function setup({ policy, gate, failSendProvider, alphaStatusError } = {}) {
   const log = [];
   const dir = fs.mkdtempSync(path.join(stateRoot, 'case-'));
   const taskRuntime = createTaskRuntime({ stateDir: dir });
   const rev = (id) => taskRuntime.get({ id }).task.rev;
   const registry = createAgentProviderRegistry();
-  const alpha = mockProvider('alpha', log, { gate, failSend: failSendProvider === 'alpha' });
+  const alpha = mockProvider('alpha', log, { gate, failSend: failSendProvider === 'alpha', statusError: alphaStatusError });
   const beta = mockProvider('beta', log, { failSend: failSendProvider === 'beta' });
   registry.register(alpha);
   registry.register(beta);
   const broker = createAgentBroker({ registry });
   const service = createContinuityService({ taskRuntime, stateDir: dir, agentBroker: broker, policy });
   return { service, runtime: service.runtime, broker, taskRuntime, log, rev, dir };
+}
+
+// ── 4a. Core restart: only SESSION_NOT_FOUND triggers a safe fresh-session handoff ──
+{
+  const { runtime, taskRuntime, rev, log } = setup({ alphaStatusError: 'SESSION_NOT_FOUND' });
+  const task = taskRuntime.create({ goal: 'Core restart after Agent session loss', workspaceId: 'ws-restart-recovery' });
+  taskRuntime.attachAgent({ id: task.id, expectedRev: rev(task.id), provider: 'alpha', sessionId: 'alpha-old-after-restart' });
+  taskRuntime.setProgress({ id: task.id, expectedRev: rev(task.id), percent: 37, note: 'checkpoint survives restart' });
+  const before = taskRuntime.get({ id: task.id }).task;
+  const result = await runtime.rollover({ taskId: task.id, reason: 'provider-switch', targetProvider: 'beta' });
+  const after = taskRuntime.get({ id: task.id }).task;
+  assert.equal(result.from.sessionId, 'alpha-old-after-restart');
+  assert.equal(after.id, before.id);
+  assert.equal(after.workspaceId, before.workspaceId);
+  assert.equal(after.progress.note, before.progress.note);
+  assert.deepEqual(after.currentAgent, { provider: 'beta', sessionId: 'beta-s2' });
+  assert.ok(log.some(entry => entry.kind === 'prompt' && entry.sessionId === 'beta-s2'), 'new Provider accepts the structured resume prompt');
+  ok('Core restart stale Session: SESSION_NOT_FOUND rolls over safely while preserving Task, Workspace, and progress');
 }
 
 // ── 1. 阈值带与 evaluate：70% 只建议 checkpoint 不切换（workplan D6-014 要求） ──

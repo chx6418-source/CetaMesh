@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import { useSearchParams } from 'react-router';
 import { createPortal } from 'react-dom';
 import { mergeLatestChatMessages, prependOlderChatMessages } from './chat-history';
+import { applyChatStreamUpdates, ChatRequestEpoch, type ChatStreamUpdate } from './chat-async-state';
 import { aboutClient, agentClient, approvalClient, bridge, chatClient, extensionSettingsClient, feedbackClient, hostClient, memoryClient, onboardingClient, openExternal, pluginClient, searchClient, settingsClient, taskClient, updateClient, workspaceClient, type Agent, type Approval, type ChatMessage as ChatMessageDto, type ChatSession, type ExtensionSettingsDescription, type ExtensionSettingsSnapshot, type IntegrationSettings, type Memory, type Plugin, type ProviderSettingField, type SettingField, type Settings, type Task } from '../bridge/typed-client';
 import { Icon, type IconName } from '../components/icons';
 import { ArtifactCard } from '../components/product/cards';
@@ -247,7 +248,7 @@ export function HarborApp() {
         {globalSearch && <div className="search-popover" role="region" aria-label="搜索结果">{searchError ? <ErrorNotice error={searchError} /> : searchResults ? <SearchResults results={searchResults} onSelectSession={id => navigate('chat', id)} onSelectPage={navigate} /> : <LoadingState label="正在搜索…" />}</div>}
       </header>
       <main className={`page-frame page-${page}`}>
-        {page === 'chat' && <ChatPage session={activeSession} workspaces={workspaces} activeWorkspaceId={activeWorkspaceId} onSessionUpdate={updated => setSessions(current => current.map(item => item.id === updated.id ? updated : item))} onNew={createSession} onOpenMemory={() => navigate('memory')} />}
+        {page === 'chat' && <ChatPage key={activeSession?.id ?? 'no-session'} session={activeSession} workspaces={workspaces} activeWorkspaceId={activeWorkspaceId} onSessionUpdate={updated => setSessions(current => current.map(item => item.id === updated.id ? updated : item))} onNew={createSession} onOpenMemory={() => navigate('memory')} />}
         {page === 'work' && <WorkPage workspaces={workspaces} onRefreshWorkspaces={refreshWorkspaces} />}
         {page === 'memory' && <MemoryPage />}
         {page === 'agents' && <AgentsPage />}
@@ -352,12 +353,17 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
   const [contextCollapsed, setContextCollapsed] = useState(false);
 
   const historySessionIdRef = useRef<string | null>(null);
+  const requestEpochRef = useRef(new ChatRequestEpoch());
+  const activeSessionIdRef = useRef<string | null>(session?.id ?? null);
+  activeSessionIdRef.current = session?.id ?? null;
+  requestEpochRef.current.activate(activeSessionIdRef.current);
+  const activeStreamRequestIdRef = useRef<string | null>(null);
   const isAtBottomRef = useRef(true);
   const skipAutomaticScrollRef = useRef(false);
   const olderPageRequestRef = useRef(false);
   const virtualListRef = useRef<VirtualListController | null>(null);
   const streamStatusFrameRef = useRef<number | null>(null);
-  const streamUpdateRef = useRef<{ sessionId?: string; status?: string; requestId?: string; retryCount?: number; message?: string; delta?: string; replaceText?: string; reset?: boolean; toolActivity?: ChatMessageDto['toolActivity']; agentActivity?: ChatMessageDto['agentActivity'] } | null>(null);
+  const streamUpdateRef = useRef<ChatStreamUpdate[]>([]);
   const seenMessageIdsRef = useRef<Set<string>>(new Set());
   const pendingSendsRef = useRef(new Map<string, { text: string; attachments: { name: string; content: string; mimeType?: string }[] }>());
   const previousStreamRef = useRef({ state: 'idle', text: '' });
@@ -368,13 +374,22 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
   }, []);
 
   const load = useCallback(async () => {
+    const sessionId = session?.id ?? null;
+    const request = requestEpochRef.current.begin('load', sessionId);
     if (!session) {
+      if (!requestEpochRef.current.isCurrent(request, activeSessionIdRef.current)) return;
       historySessionIdRef.current = null;
       seenMessageIdsRef.current.clear();
       previousStreamRef.current = { state: 'idle', text: '' };
+      activeStreamRequestIdRef.current = null;
       setMessages([]);
       setHasMoreHistory(false);
       setHasNewMessages(false);
+      setLoading(false);
+      setStatus({ state: 'idle', displayText: '', statusMessage: null, requestId: null, retryCount: 0, followState: 'idle', followError: null, toolActivity: [], agentActivity: null, error: null, errorCode: null, approvalId: null, routing: {} });
+      setLinkedTask(null);
+      setMemories([]);
+      setApprovals([]);
       return;
     }
     setLoading(true);
@@ -383,6 +398,7 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
         chatClient.history(session.id, 100), chatClient.status(session.id),
         memoryClient.overview(session.title || '', ''), approvalClient.list()
       ]);
+      if (!requestEpochRef.current.isCurrent(request, activeSessionIdRef.current)) return;
       if (historySessionIdRef.current !== session.id) {
         historySessionIdRef.current = session.id;
         seenMessageIdsRef.current = new Set(history.messages.map(message => message.id));
@@ -396,13 +412,19 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
         setMessages(current => mergeLatestChatMessages(current, history.messages));
       }
       setStatus(nextStatus);
+      activeStreamRequestIdRef.current = nextStatus.requestId ?? null;
       const taskId = typeof nextStatus.routing.taskId === 'string' ? nextStatus.routing.taskId : '';
-      setLinkedTask(taskId ? await taskClient.get(taskId).then(result => result.task).catch(() => null) : null);
+      const nextTask = taskId ? await taskClient.get(taskId).then(result => result.task).catch(() => null) : null;
+      if (!requestEpochRef.current.isCurrent(request, activeSessionIdRef.current)) return;
+      setLinkedTask(nextTask);
       setMemories(memoryData.memories.slice(0, 5));
       setApprovals(approvalData.approvals.filter(item => item.status === 'pending'));
       setError('');
-    } catch (cause) { setError(messageOf(cause)); }
-    finally { setLoading(false); }
+    } catch (cause) {
+      if (requestEpochRef.current.isCurrent(request, activeSessionIdRef.current)) setError(messageOf(cause));
+    } finally {
+      if (requestEpochRef.current.isCurrent(request, activeSessionIdRef.current)) setLoading(false);
+    }
   }, [session?.id, session?.title]);
 
   useEffect(() => { void refreshCatalog(); }, [refreshCatalog]);
@@ -411,6 +433,10 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
     if (!session) return;
     try { setContextCollapsed(window.localStorage.getItem(`harbor:chat-context:${session.id}`) === 'collapsed'); }
     catch { setContextCollapsed(false); }
+  }, [session?.id]);
+  useEffect(() => {
+    olderPageRequestRef.current = false;
+    setLoadingOlder(false);
   }, [session?.id]);
   function toggleContext() {
     if (!session) return;
@@ -421,17 +447,24 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
   }
   const refreshContext = useCallback(async () => {
     if (!session) return;
+    const request = requestEpochRef.current.begin('context', session.id);
     try {
       const [nextStatus, memoryData, approvalData] = await Promise.all([
         chatClient.status(session.id), memoryClient.overview(session.title || '', ''), approvalClient.list()
       ]);
+      if (!requestEpochRef.current.isCurrent(request, activeSessionIdRef.current)) return;
       setStatus(nextStatus);
+      activeStreamRequestIdRef.current = nextStatus.requestId ?? null;
       const taskId = typeof nextStatus.routing.taskId === 'string' ? nextStatus.routing.taskId : '';
-      setLinkedTask(taskId ? await taskClient.get(taskId).then(result => result.task).catch(() => null) : null);
+      const nextTask = taskId ? await taskClient.get(taskId).then(result => result.task).catch(() => null) : null;
+      if (!requestEpochRef.current.isCurrent(request, activeSessionIdRef.current)) return;
+      setLinkedTask(nextTask);
       setMemories(memoryData.memories.slice(0, 5));
       setApprovals(approvalData.approvals.filter(item => item.status === 'pending'));
       setError('');
-    } catch (cause) { setError(messageOf(cause)); }
+    } catch (cause) {
+      if (requestEpochRef.current.isCurrent(request, activeSessionIdRef.current)) setError(messageOf(cause));
+    }
   }, [session?.id, session?.title]);
   useEffect(() => {
     if (!session) return;
@@ -439,28 +472,17 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
     const offRestart = bridge.subscribe('core.restarted', () => { refreshConversation(); void refreshContext(); });
     const offUpdated = bridge.subscribe('chat.updated', data => { if (!data.sessionId || data.sessionId === session.id) refreshConversation(); });
     const offStreaming = bridge.subscribe('chat.streaming', data => {
-      if (data.sessionId !== session.id) return;
-      streamUpdateRef.current = data;
+      if (data.sessionId !== session.id || activeSessionIdRef.current !== session.id) return;
+      streamUpdateRef.current.push(data);
       if (streamStatusFrameRef.current !== null) return;
       streamStatusFrameRef.current = window.requestAnimationFrame(() => {
         streamStatusFrameRef.current = null;
-        const update = streamUpdateRef.current;
-        if (!update || update.sessionId !== session.id) return;
-        setStatus(current => {
-          let displayText = update.reset ? '' : current.displayText;
-          if (typeof update.replaceText === 'string') displayText = update.replaceText;
-          else if (update.delta) displayText += update.delta;
-          return {
-            ...current,
-            state: update.status ?? current.state,
-            requestId: update.requestId ?? current.requestId,
-            retryCount: update.retryCount ?? current.retryCount,
-            statusMessage: update.message ?? current.statusMessage,
-            displayText,
-            toolActivity: update.toolActivity ?? current.toolActivity,
-            agentActivity: update.agentActivity === undefined ? current.agentActivity : update.agentActivity
-          };
-        });
+        const updates = streamUpdateRef.current;
+        streamUpdateRef.current = [];
+        if (!updates.length || activeSessionIdRef.current !== session.id) return;
+        setStatus(current => applyChatStreamUpdates(current, updates, session.id, activeStreamRequestIdRef.current));
+        const lastReset = [...updates].reverse().find(update => update.reset && update.requestId);
+        if (lastReset?.requestId) activeStreamRequestIdRef.current = lastReset.requestId;
       });
     });
     const offApproval = bridge.subscribe('approval.pending', () => { void refreshContext(); });
@@ -477,18 +499,20 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
         window.cancelAnimationFrame(streamStatusFrameRef.current);
         streamStatusFrameRef.current = null;
       }
-      streamUpdateRef.current = null;
+      streamUpdateRef.current = [];
       offUpdated(); offStreaming(); offApproval(); offResolved(); offWarning(); offTasks(); offMemory(); offRestart();
     };
   }, [session?.id, load, refreshContext]);
   const loadOlderHistory = useCallback(async () => {
     if (!session || !hasMoreHistory || loadingOlder || olderPageRequestRef.current || !messages.length) return;
+    const request = requestEpochRef.current.begin('older', session.id);
     const cursor = messages[0].id;
     const anchor: VirtualListAnchor | null = virtualListRef.current?.captureAnchor() ?? null;
     olderPageRequestRef.current = true;
     setLoadingOlder(true);
     try {
       const page = await chatClient.history(session.id, 100, cursor);
+      if (!requestEpochRef.current.isCurrent(request, activeSessionIdRef.current)) return;
       const existingBeforeRequest = new Set(messages.map(message => message.id));
       if (page.messages.some(message => !existingBeforeRequest.has(message.id))) {
         if (anchor) {
@@ -498,8 +522,14 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
         setMessages(current => prependOlderChatMessages(current, page.messages));
       }
       setHasMoreHistory(page.hasMore);
-    } catch (cause) { setError(messageOf(cause)); }
-    finally { olderPageRequestRef.current = false; setLoadingOlder(false); }
+    } catch (cause) {
+      if (requestEpochRef.current.isCurrent(request, activeSessionIdRef.current)) setError(messageOf(cause));
+    } finally {
+      if (requestEpochRef.current.isCurrent(request, activeSessionIdRef.current)) {
+        olderPageRequestRef.current = false;
+        setLoadingOlder(false);
+      }
+    }
   }, [session?.id, hasMoreHistory, loadingOlder, messages]);
 
   const streaming = ['starting', 'streaming', 'recovering', 'cancelling'].includes(status.state);

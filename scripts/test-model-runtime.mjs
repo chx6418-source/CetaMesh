@@ -420,6 +420,30 @@ function makeService({ withKey = true, fetchImpl, baseUrl = 'https://api.deepsee
   ok('空 tools 请求省略 tool_choice');
 }
 
+// ── 9c. SSE 只能在显式完成标记或 finish_reason 后作为成功结束 ─────────────
+{
+  const incomplete = makeService({ fetchImpl: () => sseResponse(
+    'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
+  ) });
+  const incompleteEvents = [];
+  await assert.rejects(async () => {
+    for await (const event of incomplete.service.stream({ providerId: 'deepseek-official', model: 'fixture-model',
+      messages: [{ role: 'user', content: 'truncated' }] })) incompleteEvents.push(event);
+  }, error => error.code === 'MODEL_STREAM_INCOMPLETE');
+  assert.ok(!incompleteEvents.some(event => event.type === 'assistant/message'), 'truncated text is never emitted as a completed assistant message');
+
+  for (const finishReason of ['stop', 'tool_calls']) {
+    const validVariant = makeService({ fetchImpl: () => sseResponse(
+      `data: ${JSON.stringify({ choices: [{ delta: { content: finishReason === 'stop' ? 'complete' : '' }, finish_reason: finishReason }] })}\n\n`
+    ) });
+    const events = [];
+    for await (const event of validVariant.service.stream({ providerId: 'deepseek-official', model: 'fixture-model',
+      messages: [{ role: 'user', content: 'valid EOF variant' }] })) events.push(event);
+    assert.equal(events.at(-1).data.reason.kind, 'completed', `finish_reason=${finishReason} permits compatible EOF completion`);
+  }
+  ok('SSE rejects premature EOF and accepts explicit finish_reason completion variants');
+}
+
 // ── 10. OpenAI 兼容自定义端点：无 baseUrl 拒绝；默认不带 stream_options ───────
 {
   const secrets = makeSecrets({});

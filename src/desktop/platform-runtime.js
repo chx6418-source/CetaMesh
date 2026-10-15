@@ -66,11 +66,26 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
       //   执行 = 仍需 Owner Approve Once（test.run risk=high → 审批必经）。
       // 流程：Agent request test.run → pending → Owner 批准/拒绝 → 执行一次 →
       // 结果经决策参考数据回到 Agent。绝不因 grant 静默自动执行。
-      const result = await capabilityService.broker.execute({ actor: OWNER_ACTOR, taskId: task.id, workspaceId,
-        capability: 'agent.run', input: { provider, content: text, modelProvider: record.config.modelProvider,
-          model: record.config.model !== legacyModel ? record.config.model : undefined, reasoningEffort: record.config.reasoning,
-          grants: { capabilities: ['filesystem.read', 'filesystem.write', 'filesystem.search', 'git.status', 'git.diff', 'memory.read', 'test.run'] } },
-        reason: 'Smart project task' }, { signal });
+      let result;
+      try {
+        result = await capabilityService.broker.execute({ actor: OWNER_ACTOR, taskId: task.id, workspaceId,
+          capability: 'agent.run', input: { provider, content: text, modelProvider: record.config.modelProvider,
+            model: record.config.model !== legacyModel ? record.config.model : undefined, reasoningEffort: record.config.reasoning,
+            grants: { capabilities: ['filesystem.read', 'filesystem.write', 'filesystem.search', 'git.status', 'git.diff', 'memory.read', 'test.run'] } },
+          reason: 'Smart project task' }, { signal });
+      } catch (error) {
+        // Chat owns only a Task it created for this startup attempt. If that request
+        // is cancelled before Agent assignment, retain the Task record but close its
+        // queued lifecycle so it cannot appear runnable without an owning Chat.
+        if (createdTask && signal?.aborted) {
+          const current = taskRuntime.get({ id: task.id }).task;
+          if (current.status === 'queued' && !current.currentAgent) {
+            taskRuntime.cancel({ id: task.id, expectedRev: current.rev,
+              reason: 'Chat request was cancelled during Agent startup' });
+          }
+        }
+        throw error;
+      }
       return { kind: 'agent', ...result.result };
     }
     if (decision.capabilityIntent) {

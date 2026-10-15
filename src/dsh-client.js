@@ -11,19 +11,32 @@ import WebSocket from 'ws';
 import { resolveDshAuthCookie } from './dsh-auth.js';
 
 const DEFAULT_RPC_TIMEOUT_MS = 30_000;
+const DEFAULT_STREAM_HANDSHAKE_TIMEOUT_MS = 10_000;
+const DEFAULT_STREAM_HEARTBEAT_INTERVAL_MS = 25_000;
+const DEFAULT_STREAM_HEARTBEAT_TIMEOUT_MS = 10_000;
 
 export class NodeApiClient {
-  constructor(baseUrl, { authCookie, dshHome, timeoutMs = DEFAULT_RPC_TIMEOUT_MS } = {}) {
+  constructor(baseUrl, { authCookie, dshHome, timeoutMs = DEFAULT_RPC_TIMEOUT_MS,
+    streamHandshakeTimeoutMs = DEFAULT_STREAM_HANDSHAKE_TIMEOUT_MS,
+    streamHeartbeatIntervalMs = DEFAULT_STREAM_HEARTBEAT_INTERVAL_MS,
+    streamHeartbeatTimeoutMs = DEFAULT_STREAM_HEARTBEAT_TIMEOUT_MS } = {}) {
     this.baseUrl = String(baseUrl ?? 'http://127.0.0.1:3080').replace(/\/+$/, '');
     this.authCookieOption = authCookie;
     this.dshHome = dshHome;
     this.timeoutMs = Math.max(100, Math.min(120_000, Number(timeoutMs) || DEFAULT_RPC_TIMEOUT_MS));
+    this.streamHandshakeTimeoutMs = Math.max(100, Math.min(60_000, Number(streamHandshakeTimeoutMs) || DEFAULT_STREAM_HANDSHAKE_TIMEOUT_MS));
+    const heartbeatInterval = Number(streamHeartbeatIntervalMs);
+    this.streamHeartbeatIntervalMs = Math.max(0, Math.min(120_000,
+      Number.isFinite(heartbeatInterval) ? heartbeatInterval : DEFAULT_STREAM_HEARTBEAT_INTERVAL_MS));
+    this.streamHeartbeatTimeoutMs = Math.max(100, Math.min(60_000, Number(streamHeartbeatTimeoutMs) || DEFAULT_STREAM_HEARTBEAT_TIMEOUT_MS));
     this.rpcSeq = 0;
     this.streamSeq = 0;
   }
 
   authCookie() {
-    return resolveDshAuthCookie(this.baseUrl, this.authCookieOption, this.dshHome);
+    const authCookie = typeof this.authCookieOption === 'function' ? this.authCookieOption() : this.authCookieOption;
+    const dshHome = typeof this.dshHome === 'function' ? this.dshHome() : this.dshHome;
+    return resolveDshAuthCookie(this.baseUrl, authCookie, dshHome);
   }
 
   /** 新版 unary RPC：payload 固定包一层 {args}；业务错误与传输错误都抛 Error（含端点名）。 */
@@ -90,10 +103,36 @@ export class NodeApiClient {
   async *openRemoteStream(endpoint, args = {}, options = {}) {
     const streamId = `whalebridge-s${(++this.streamSeq).toString(36)}`;
     const url = this.baseUrl.replace(/^http/, 'ws') + '/api/remote.mux';
-    const socket = new WebSocket(url, { headers: { cookie: this.authCookie() } });
+    const socket = new WebSocket(url, { headers: { cookie: this.authCookie() }, handshakeTimeout: this.streamHandshakeTimeoutMs });
     const inbox = [];
     let wake;
     let settled = false;
+    let heartbeatTimer = null;
+    let heartbeatTimeout = null;
+    let awaitingPong = false;
+    const scheduleHeartbeat = () => {
+      if (this.streamHeartbeatIntervalMs <= 0 || settled) return;
+      heartbeatTimer = setTimeout(() => {
+        heartbeatTimer = null;
+        if (socket.readyState !== WebSocket.OPEN) { scheduleHeartbeat(); return; }
+        if (awaitingPong) {
+          enqueue({ kind: 'socket-error', code: 'DSH_STREAM_IDLE_TIMEOUT', message: 'WebSocket heartbeat did not receive a pong' });
+          try { socket.terminate(); }
+          catch (error) { enqueue({ kind: 'socket-error', code: 'DSH_STREAM_IDLE_TIMEOUT', message: error?.message ?? 'heartbeat timeout' }); }
+          return;
+        }
+        awaitingPong = true;
+        heartbeatTimeout = setTimeout(() => {
+          if (!awaitingPong) return;
+          enqueue({ kind: 'socket-error', code: 'DSH_STREAM_IDLE_TIMEOUT', message: 'WebSocket heartbeat timed out' });
+          try { socket.terminate(); }
+          catch (error) { enqueue({ kind: 'socket-error', code: 'DSH_STREAM_IDLE_TIMEOUT', message: error?.message ?? 'heartbeat timeout' }); }
+        }, this.streamHeartbeatTimeoutMs);
+        try { socket.ping(); }
+        catch (error) { enqueue({ kind: 'socket-error', code: 'DSH_STREAM_IDLE_TIMEOUT', message: error?.message ?? 'heartbeat failed' }); }
+        scheduleHeartbeat();
+      }, this.streamHeartbeatIntervalMs);
+    };
     const enqueue = (item) => {
       inbox.push(item);
       wake?.();
@@ -102,9 +141,15 @@ export class NodeApiClient {
     socket.on('open', () => {
       try {
         socket.send(JSON.stringify({ type: 'open', streamId, endpoint, payload: { args } }));
+        scheduleHeartbeat();
       } catch (error) {
         enqueue({ kind: 'socket-error', message: `打开流失败：${error?.message ?? error}` });
       }
+    });
+    socket.on('pong', () => {
+      awaitingPong = false;
+      clearTimeout(heartbeatTimeout);
+      heartbeatTimeout = null;
     });
     socket.on('message', (data) => {
       let msg;
@@ -123,9 +168,12 @@ export class NodeApiClient {
       if (!settled) enqueue({ kind: 'socket-close', code, reason: String(reason ?? '') });
     });
     socket.on('error', (error) => {
-      enqueue({ kind: 'socket-error', message: error?.message ?? String(error) });
+      const message = error?.message ?? String(error);
+      const code = /opening handshake (?:has )?timed out/i.test(message) ? 'DSH_STREAM_HANDSHAKE_TIMEOUT' : error?.code;
+      enqueue({ kind: 'socket-error', code, message });
     });
     const abort = () => {
+      enqueue({ kind: 'aborted' });
       try { socket.close(); } catch { /* 已关闭 */ }
     };
     options.signal?.addEventListener('abort', abort, { once: true });
@@ -145,7 +193,10 @@ export class NodeApiClient {
             throw new Error(`${endpoint} 流错误: ${item.error?.code}: ${item.error?.message}`);
           } else if (item.kind === 'socket-error') {
             settled = true;
-            throw new Error(`${endpoint} WebSocket 错误: ${item.message}`);
+            throw Object.assign(new Error(`${endpoint} WebSocket 错误: ${item.message}`), { code: item.code ?? 'DSH_STREAM_ERROR' });
+          } else if (item.kind === 'aborted') {
+            settled = true;
+            throw Object.assign(new Error(`${endpoint} 流已取消`), { code: 'ABORTED' });
           } else if (item.kind === 'socket-close') {
             settled = true;
             return;
@@ -156,6 +207,8 @@ export class NodeApiClient {
     } finally {
       settled = true;
       options.signal?.removeEventListener('abort', abort);
+      clearTimeout(heartbeatTimer);
+      clearTimeout(heartbeatTimeout);
       try { socket.close(); } catch { /* 已关闭 */ }
     }
   }

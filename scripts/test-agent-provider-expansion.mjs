@@ -15,6 +15,7 @@ import { createZCodeAgentProvider } from '../src/agent/zcode-agent-provider.js';
 import { createCapabilityService } from '../src/capability/service.js';
 import { createChatService } from '../src/desktop/chat-service.js';
 import { createTaskRuntime } from '../src/task/runtime.js';
+import { createMemoryService } from '../src/memory/service.js';
 import { createWorkspaceService } from '../src/workspace/service.js';
 import { createStagingWorkspace } from '../src/workspace/staging.js';
 import { createContinuityService } from '../src/continuity/index.js';
@@ -111,35 +112,90 @@ try {
       if (endpoint === 'session/create') {
         dshStageRoot = args.request.cwd;
         const sessionId = `dsh-task-fixture-${++dshSequence}`;
-        dshSessions.set(sessionId, { cwd: args.request.cwd, running: false });
+        dshSessions.set(sessionId, { cwd: args.request.cwd, running: false, followSubscriptions: 0 });
         return { sessionId };
       }
       if (endpoint === 'session/list') return { items: [...dshSessions].map(([sessionId, session]) => ({
         sessionId, running: session.running, projections: { values: {} }
       })) };
-      if (endpoint === 'session/prompt') { dshSessions.get(args.request.sessionId).running = true; return {}; }
+      if (endpoint === 'session/prompt') {
+        const session = dshSessions.get(args.request.sessionId);
+        session.running = true;
+        const prompt = JSON.stringify(args.request.content ?? []);
+        if (prompt.includes('Task-level follow')) {
+          session.outputName = 'task-follow-result.txt';
+          session.duplicateTurnEnd = true;
+        }
+        return {};
+      }
       if (endpoint === 'session/cancel') { dshSessions.get(args.request.sessionId).running = false; return {}; }
       return {};
     },
-    async *openRemoteStream(_endpoint, args) {
+    async *openRemoteStream(_endpoint, args, { signal } = {}) {
       const sessionId = args.request.address.sessionId;
       const session = dshSessions.get(sessionId);
-      fs.writeFileSync(path.join(session.cwd, 'dsh-result.txt'), 'dsh fake edit');
+      while (!session.running && !signal?.aborted) await new Promise(resolve => setTimeout(resolve, 2));
+      if (signal?.aborted) return;
+      session.followSubscriptions += 1;
+      fs.writeFileSync(path.join(session.cwd, session.outputName ?? 'dsh-result.txt'), `dsh fake edit ${sessionId}`);
       yield { type: 'turn/start', data: { turn: 'dsh-turn-1' } };
       yield { type: 'assistant/message', data: { turn: 'dsh-turn-1', message: { content: [{ type: 'text', text: 'DSH fixture response' }] } } };
       yield { type: 'turn/end', data: { turn: 'dsh-turn-1', reason: { kind: 'completed' } } };
+      if (session.duplicateTurnEnd) yield { type: 'turn/end', data: { turn: 'dsh-turn-1', reason: { kind: 'completed' } } };
       session.running = false;
     }
   };
+  const taskFollowStateDir = path.join(root, 'task-follow-capabilities');
+  const followAudit = [];
+  let taskFollowCapabilityService = null;
   const dshService = createDefaultAgentService({ api: dshApi, dshOptions: {
     stagingRoot: path.join(root, 'dsh-staging'),
-    resolveTaskWorkspace: async () => ({ task, workspace: authoritative }),
+    resolveTaskWorkspace: async ({ taskId } = {}) => ({ task: taskRuntime.get({ id: taskId ?? task.id }).task, workspace: authoritative }),
     listWorkspaceRoots: async () => [authoritativeRoot],
-    applyChanges: request => capabilities.applyAgentWorkspaceChanges(request),
-    approvalStatus: approvalId => capabilities.workspaceImportStatus(approvalId)
+    applyChanges: request => taskFollowCapabilityService.applyAgentWorkspaceChanges(request),
+    approvalStatus: approvalId => taskFollowCapabilityService.workspaceImportStatus(approvalId),
+    cancelApproval: approvalId => taskFollowCapabilityService.cancelWorkspaceImportApproval(approvalId)
   } });
   assert.equal(dshService.broker.capabilities('dsh').workspaceBoundary, 'capability-broker',
     'the product DSH provider advertises a Broker boundary only when the staging/import adapter is installed');
+
+  const followTask = taskRuntime.create({ goal: 'Task-level Agent completion must import its Workspace changes', workspaceId: authoritative.id });
+  taskFollowCapabilityService = createCapabilityService({ stateDir: taskFollowStateDir, workspaceService,
+    memoryService: createMemoryService({ stateDir: taskFollowStateDir }), taskRuntime, agentBroker: dshService.broker,
+    audit: event => followAudit.push(event) });
+  taskFollowCapabilityService.grantTask(task.id, { capabilities: ['filesystem.read', 'filesystem.write'] });
+  assert.equal(dshService.broker.capabilities('dsh').requiresSessionCleanup, true);
+  const followRun = await taskFollowCapabilityService.execute({ method: 'capability.execute', params: {
+    requestId: 'task-follow-agent-run', capability: 'agent.run', taskId: followTask.id, workspaceId: authoritative.id,
+    input: { agentProvider: 'dsh', content: 'Task-level follow fixture edit' }, reason: 'Task-scoped DSH fixture'
+  } });
+  assert.equal(followRun.status, 'completed');
+  assert.equal(followRun.result.accepted, true);
+  const followPendingState = await waitFor(() => ({
+    rows: taskFollowCapabilityService.broker.approvals.list(),
+    subscriptions: dshSessions.get(followRun.result.sessionId)?.followSubscriptions,
+    audit: followAudit,
+    stageRoot: dshService.broker.require('dsh')._sessions.get(followRun.result.sessionId)?.stage.root,
+    stagedFile: (() => {
+      const stageRoot = dshService.broker.require('dsh')._sessions.get(followRun.result.sessionId)?.stage.root;
+      return stageRoot ? fs.existsSync(path.join(stageRoot, 'task-follow-result.txt')) : false;
+    })()
+  }), state => state.rows.find(row => row.request?.capability === 'workspace.apply' && row.request?.taskId === followTask.id));
+  const followPending = followPendingState.rows.find(row => row.request?.capability === 'workspace.apply' && row.request?.taskId === followTask.id);
+  const followSession = dshSessions.get(followRun.result.sessionId);
+  assert.equal(followSession.followSubscriptions, 1, 'agent.run starts exactly one task-level Follow with no Chat UI subscriber');
+  assert.equal(fs.existsSync(path.join(authoritativeRoot, 'task-follow-result.txt')), false,
+    'task-level Follow still routes staged changes through Owner approval');
+  const approvalDecision = await taskFollowCapabilityService.execute({ method: 'capability.approval.decide', params: {
+    id: followPending.id, approve: true
+  } });
+  assert.equal(approvalDecision.status, 'completed');
+  await waitFor(() => fs.existsSync(path.join(authoritativeRoot, 'task-follow-result.txt')), exists => exists);
+  assert.equal(fs.readFileSync(path.join(authoritativeRoot, 'task-follow-result.txt'), 'utf8'), `dsh fake edit ${followRun.result.sessionId}`);
+  assert.equal(followSession.followSubscriptions, 1, 'a duplicate turn/end cannot trigger a second Follow or duplicate import');
+  await dshService.broker.closeSession({ provider: 'dsh', sessionId: followRun.result.sessionId });
+  console.log('PASS model agent.run consumes task-level DSH Follow without Chat UI and preserves approval + one-import semantics');
+
   await assert.rejects(() => dshService.broker.createSession('dsh', { workspaceId: authoritative.id }), error => error.code === 'TASK_REQUIRED');
   const dshSession = await dshService.broker.createSession('dsh', { taskId: task.id, workspaceId: authoritative.id });
   const dshEvents = [];
@@ -149,18 +205,38 @@ try {
   await dshService.broker.send({ provider: 'dsh', sessionId: dshSession.sessionId, content: 'Edit staged workspace' });
   const dshWaiting = await waitFor(() => dshService.broker.status({ provider: 'dsh', sessionId: dshSession.sessionId }), status => status.waitingForApproval);
   assert.equal(fs.existsSync(path.join(authoritativeRoot, 'dsh-result.txt')), false, 'DSH writes staging until Broker approval');
-  await capabilities.execute({ method: 'capability.approval.decide', params: { id: dshWaiting.approvalId, approve: true } });
+  await taskFollowCapabilityService.execute({ method: 'capability.approval.decide', params: { id: dshWaiting.approvalId, approve: true } });
   await waitFor(() => dshEvents, events => events.some(event => event.type === 'turn/end'));
-  assert.equal(fs.readFileSync(path.join(authoritativeRoot, 'dsh-result.txt'), 'utf8'), 'dsh fake edit');
+  assert.equal(fs.readFileSync(path.join(authoritativeRoot, 'dsh-result.txt'), 'utf8'), `dsh fake edit ${dshSession.sessionId}`);
+  await dshFollow;
+  const approvedDshStageRoot = dshStageRoot;
+  const cancelledDshSession = await dshService.broker.createSession('dsh', { taskId: task.id, workspaceId: authoritative.id });
+  const cancelledDshEvents = [];
+  const cancelledDshFollow = (async () => {
+    for await (const event of dshService.broker.follow({ provider: 'dsh', sessionId: cancelledDshSession.sessionId })) cancelledDshEvents.push(event);
+  })();
+  const cancelledDshStagePath = dshService.broker.require('dsh')._sessions.get(cancelledDshSession.sessionId).stage.root;
+  await dshService.broker.send({ provider: 'dsh', sessionId: cancelledDshSession.sessionId, content: 'Cancel pending Workspace import' });
+  const cancelledDshWaiting = await waitFor(() => dshService.broker.status({ provider: 'dsh', sessionId: cancelledDshSession.sessionId }), status => status.waitingForApproval);
+  await dshService.broker.cancel({ provider: 'dsh', sessionId: cancelledDshSession.sessionId });
+  assert.equal(taskFollowCapabilityService.workspaceImportStatus(cancelledDshWaiting.approvalId)?.status, 'cancelled',
+    'cancelling DSH while an import is pending revokes the Owner approval');
+  await assert.rejects(() => taskFollowCapabilityService.execute({ method: 'capability.approval.decide', params: {
+    id: cancelledDshWaiting.approvalId, approve: true
+  } }), error => error.code === 'APPROVAL_ALREADY_DECIDED', 'a cancelled DSH import cannot be approved later');
+  assert.equal(fs.readFileSync(path.join(authoritativeRoot, 'dsh-result.txt'), 'utf8'), `dsh fake edit ${dshSession.sessionId}`,
+    'cancelling DSH leaves the authoritative Workspace unchanged');
+  await cancelledDshFollow;
+  await dshService.broker.closeSession({ provider: 'dsh', sessionId: cancelledDshSession.sessionId });
+  assert.equal(fs.existsSync(cancelledDshStagePath), false, 'closing the cancelled DSH session cleans its staged Workspace');
   const expectedDshStageRoot = fs.realpathSync.native(path.join(root, 'dsh-staging'));
-  const canonicalDshStageRoot = fs.realpathSync.native(dshStageRoot);
+  const canonicalDshStageRoot = fs.realpathSync.native(approvedDshStageRoot);
   const dshStageRelative = path.relative(expectedDshStageRoot, canonicalDshStageRoot);
   assert.ok(dshStageRelative && dshStageRelative !== '..'
     && !dshStageRelative.startsWith(`..${path.sep}`) && !path.isAbsolute(dshStageRelative),
   'DSH Task staging must stay below the canonical configured staging root');
   await dshService.broker.closeSession({ provider: 'dsh', sessionId: dshSession.sessionId });
-  assert.equal(fs.existsSync(dshStageRoot), false, 'DSH staging is cleaned after the Task session closes');
-  await dshFollow;
+  assert.equal(fs.existsSync(approvedDshStageRoot), false, 'DSH staging is cleaned after the Task session closes');
 
   const rolloverSession = await dshService.broker.createSession('dsh', { taskId: task.id, workspaceId: authoritative.id });
   const rolloverStage = rolloverSession.cwd;
@@ -175,6 +251,7 @@ try {
   dshContinuity.close();
   const dshTaskAfterRollover = taskRuntime.get({ id: task.id }).task;
   taskRuntime.detachAgent({ id: task.id, expectedRev: dshTaskAfterRollover.rev, note: 'DSH fixture cleanup' });
+  await taskFollowCapabilityService.close();
   dshService.close();
 
   const cliFixture = path.join(root, 'fake-cli.mjs');
