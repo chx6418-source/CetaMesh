@@ -35,7 +35,8 @@ function makeTransportFactory({ fail = false } = {}) {
 
 try {
   const { factory, connections } = makeTransportFactory();
-  const service = createIntegrationService({ stateDir: tmp, transportFactory: factory });
+  const runtimeLogs = [];
+  const service = createIntegrationService({ stateDir: tmp, transportFactory: factory, log: message => runtimeLogs.push(message) });
 
   // ── 1. 注册表：server id/name/transport/status/tools/permissions/source/last error ──
   const list = await service.execute({ method: 'mcp.list' });
@@ -120,7 +121,8 @@ try {
   connections.at(-1).closeHandler(new Error('snowluma gateway lost'));
   const crashed = await service.execute({ method: 'mcp.get', params: { id: 'snowluma' } });
   assert.equal(crashed.status, 'crashed');
-  assert.equal(crashed.lastError, 'snowluma gateway lost');
+  assert.equal(crashed.lastError, 'MCP Server 连接意外关闭，请查看本机脱敏诊断日志。');
+  assert.match(runtimeLogs.join('\n'), /snowluma gateway lost/, 'detailed child diagnostics stay in the local log');
   assert.equal(crashed.crashes, 1);
   const unavailable = await service.execute({ method: 'tools.list', params: { serverId: 'snowluma', available: true } });
   assert.equal(unavailable.tools.length, 0, '崩溃后工具必须如实不可用');
@@ -136,12 +138,15 @@ try {
   ok('MCP restart/stop：重启计数 + 干净停止（pid 清空）');
 
   // ── 10. 启动失败：如实 crashed + MCP_START_FAILED（不伪造 running） ────────
-  const broken = createIntegrationService({ stateDir: fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-mcp-broken-')), transportFactory: makeTransportFactory({ fail: true }).factory });
+  const brokenLogs = [];
+  const broken = createIntegrationService({ stateDir: fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-mcp-broken-')),
+    transportFactory: makeTransportFactory({ fail: true }).factory, log: message => brokenLogs.push(message) });
   await assert.rejects(() => broken.execute({ method: 'mcp.start', params: { id: 'bilibili', approved: true } }),
     error => error.code === 'MCP_START_FAILED');
   const brokenStatus = await broken.execute({ method: 'mcp.get', params: { id: 'bilibili' } });
   assert.equal(brokenStatus.status, 'crashed');
-  assert.match(brokenStatus.lastError, /ENOENT/);
+  assert.equal(brokenStatus.lastError, 'MCP Server 启动失败，请查看本机脱敏诊断日志。');
+  assert.match(brokenLogs.join('\n'), /ENOENT/, 'spawn failures remain diagnosable through local logs');
   await broken.close();
   ok('MCP start 失败：MCP_START_FAILED + status=crashed + lastError，绝不假装 running');
 

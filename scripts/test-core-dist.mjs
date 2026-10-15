@@ -25,6 +25,7 @@ import { once } from 'node:events';
 import { spawn, spawnSync } from 'node:child_process';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { createStdioMcpConnection } from '../src/integrations/mcp-runtime.js';
 import { assertNoWebUiHtmlArtifacts } from './no-web-release-policy.mjs';
 import { resolveDataPipeName, dataCall } from '../src/control/data-ipc.js';
 
@@ -357,6 +358,10 @@ try {
   }
   assert.equal(help.stderr, '');
   step('✅ --help：退出码 0，输出到 stdout，stderr 为空');
+  const officialLinks = JSON.parse(fs.readFileSync(path.join(RESOURCES, 'release-config.json'), 'utf8')).productLinks;
+  assert.equal(officialLinks.officialUrls.website, 'https://cetamesh.com', 'release resources carry the canonical official website');
+  assert.equal(officialLinks.paths.docs, null, 'unconfirmed official pages stay centrally unconfigured');
+  step('✅ release-config.json 随 Core resources 分发并保留唯一官网根地址');
 
   const invalid = spawnSync(EXE, ['--mcp', 'unknown'], { encoding: 'utf8', env: isolatedEnv(tempRoot, { dataDir }) });
   assert.equal(invalid.status, 1);
@@ -384,24 +389,28 @@ try {
   const mcpCases = [
     {
       mode: 'snowluma',
+      entry: 'src/mcp-snowluma-safe.js',
       tool: 'qq_get_card_msg',
       call: { name: 'qq_get_card_msg', arguments: { key: 'group:1', token: 'test', messageId: '1' } },
       expected: /403|已禁用/
     },
     {
       mode: 'snowluma-host',
+      entry: 'src/mcp-host-server.js',
       tool: 'snowluma_status',
       call: { name: 'snowluma_status', arguments: {} },
       expected: /reachable|online|unreachable|offline/
     },
     {
       mode: 'web-search-safe',
+      entry: 'src/mcp-web-search-safe.js',
       tool: 'web_fetch',
       call: { name: 'web_fetch', arguments: { url: 'http://127.0.0.1/' } },
       expected: /禁止|内网|本机|抓取失败/
     },
     {
       mode: 'qq-file-send',
+      entry: 'src/mcp-qq-file-send.js',
       tool: 'qq_send_file',
       call: {
         name: 'qq_send_file',
@@ -411,34 +420,36 @@ try {
     },
     {
       mode: 'bilibili',
+      entry: 'src/mcp-bilibili.js',
       tool: 'bili_search_video',
       call: { name: 'bili_search_video', arguments: { query: '测试' } },
       expected: /403|已禁用/
     }
   ];
 
+  const installedRoot = path.join(tempRoot, 'CetaMesh Installed');
+  const installedResources = path.join(installedRoot, 'resources');
+  const installedExe = path.join(installedRoot, 'WhaleBridgeCore.exe');
+  fs.mkdirSync(installedRoot, { recursive: true });
+  fs.copyFileSync(EXE, installedExe);
+  fs.cpSync(RESOURCES, installedResources, { recursive: true });
   for (const item of mcpCases) {
-    const transport = new StdioClientTransport({
-      command: EXE,
-      args: ['--mcp', item.mode],
-      cwd: tempRoot,
-      env: isolatedEnv(tempRoot, { dataDir, resourceDir: RESOURCES }),
-      stderr: 'pipe'
-    });
-    const client = new Client({ name: 'whalebridge-dist-test', version: '0.1.0' });
+    const isolated = isolatedEnv(tempRoot, { dataDir, resourceDir: installedResources });
+    const diagnostics = [];
+    const connection = await createStdioMcpConnection({ id: item.mode, entry: item.entry },
+      { cwd: installedRoot, env: isolated },
+      { packaged: true, execPath: installedExe, sourceRoot: ROOT, env: isolated, log: line => diagnostics.push(line) });
     try {
-      await client.connect(transport);
-      const listed = await client.listTools();
-      assert.ok(
-        listed.tools.some((tool) => tool.name === item.tool),
-        `${item.mode}: 未暴露工具 ${item.tool}`
-      );
-      const called = await client.callTool(item.call);
-      const text = called.content?.map((block) => block?.text ?? '').join('\n') ?? '';
+      const listed = await connection.listTools();
+      assert.ok(listed.some(tool => tool.name === item.tool), `${item.mode}: 未暴露工具 ${item.tool}`);
+      const called = await connection.callTool(item.call.name, item.call.arguments);
+      const text = called.content?.map(block => block?.text ?? '').join('\n') ?? '';
       assert.match(text, item.expected, `${item.mode}: callTool 结果不符合预期：${text.slice(0, 200)}`);
-      step(`✅ --mcp ${item.mode}：initialize / tools/list / tools/call（${listed.tools.length} 个工具）`);
+      assert.ok(diagnostics.some(line => line.includes('"phase":"initialized"')));
+      assert.ok(diagnostics.some(line => line.includes('"phase":"tools/list"')));
+      step(`✅ 安装目录下 --mcp ${item.mode}：Host initialize / tools/list / tools/call（${listed.length} 个工具）`);
     } finally {
-      await client.close().catch(() => {});
+      await connection.close();
     }
   }
   assert.ok(

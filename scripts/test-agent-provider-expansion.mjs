@@ -9,7 +9,7 @@ import { createAgentBroker } from '../src/agent/broker.js';
 import { createAgentProviderRegistry } from '../src/agent/registry.js';
 import { createAgentService } from '../src/agent/service.js';
 import { defineAgentProvider } from '../src/agent/agent-provider.js';
-import { CliAgentProcess, createMinimalAgentEnv } from '../src/agent/cli-agent-process.js';
+import { CliAgentProcess, createMinimalAgentEnv, findCliExecutable } from '../src/agent/cli-agent-process.js';
 import { createCodexAgentProvider } from '../src/agent/codex-agent-provider.js';
 import { createZCodeAgentProvider } from '../src/agent/zcode-agent-provider.js';
 import { createCapabilityService } from '../src/capability/service.js';
@@ -314,11 +314,16 @@ try {
   assert.equal(authorizedEnv.OPENAI_BASE_URL, 'http://127.0.0.1:8181/v1');
   assert.equal(Object.hasOwn(createMinimalAgentEnv({}, { OPENAI_BASE_URL: 'http://remote.example/v1' }, { authorizedEnvKeys: ['OPENAI_BASE_URL'] }), 'OPENAI_BASE_URL'), false);
 
-  const shimRoot = path.join(root, 'npm codex shim & fixture');
+  const appDataRoot = path.join(root, 'User Profile With Spaces');
+  const shimRoot = path.join(appDataRoot, 'npm');
   const shimExecutable = path.join(shimRoot, 'codex.cmd');
   const shimScript = path.join(shimRoot, 'node_modules', '@openai', 'codex', 'bin', 'codex.js');
   fs.mkdirSync(path.dirname(shimScript), { recursive: true });
   fs.writeFileSync(shimExecutable, '@echo off\r\n');
+  assert.equal(findCliExecutable('codex', {
+    platform: 'win32', env: { PATH: '', PATHEXT: '.EXE', APPDATA: appDataRoot },
+    whereImpl: () => ({ status: 1, stdout: '', stderr: '' })
+  }), path.resolve(shimExecutable), 'Windows CLI discovery includes %APPDATA%\\npm\\codex.cmd even when GUI PATH and PATHEXT omit it');
   fs.writeFileSync(shimScript, [
     "if (process.argv.includes('--version')) { console.log('codex-cli 9.9.9-shim-fixture'); process.exit(0); }",
     "process.stdout.write('shim-started\\n');",
@@ -675,6 +680,7 @@ try {
   const reprobeService = createAgentService({ broker: createAgentBroker({ registry: createAgentProviderRegistry({ providers: [reprobeProvider] }) }) });
   const reprobedHealth = await reprobeService.execute({ method: 'agent.health', params: { provider: 'codex', refresh: true } });
   assert.equal(reprobedHealth.available, true);
+  assert.equal(reprobedHealth.installed, true, 'explicit refresh reports installed independently from authentication');
   assert.equal(reprobedHealth.authenticated, true, 'install and login after Core startup become visible through explicit reprobe');
 
   const authorizedProvider = createCodexAgentProvider({

@@ -22,15 +22,17 @@ const MAX_URL = 600;
 const MAX_PATH = 200;
 
 /**
- * 反馈入口的默认页面路径（概念路径，来自产品设计）：
- *   /feedback（整体反馈 / Bug / 功能建议）、/security
- * 域名/站点根由 `feedback.baseUrl`（或 `website`）提供，**不在代码或页面里散落硬编码**。
+ * 未在官方配置中确认的页面路径一律为 null；现有 release-config.json 中的既有路径继续生效。
  */
 export const DEFAULT_FEEDBACK_PATHS = Object.freeze({
-  general: '/feedback',
-  bug: '/feedback',
-  feature: '/feedback',
-  security: '/security'
+  general: null,
+  bug: null,
+  feature: null,
+  security: null,
+  docs: null,
+  privacy: null,
+  terms: null,
+  pluginDocs: null
 });
 
 /** 未提供配置时的事实默认值：产品身份来自仓库既有事实，链接留空表示「未配置」。 */
@@ -40,15 +42,19 @@ export const DEFAULT_RELEASE_CONFIG = Object.freeze({
   edition: 'Desktop',
   developer: null,
   website: null,
+  productLinks: Object.freeze({
+    officialUrls: Object.freeze({ website: null, websiteRepository: null, gitcode: null, github: null, license: null }),
+    paths: DEFAULT_FEEDBACK_PATHS
+  }),
   repositories: Object.freeze({
-    gitcode: 'https://gitcode.com/ygdnn/CetaMesh',
-    github: 'https://github.com/chx6418-source/whalebridge',
-    primary: 'https://github.com/chx6418-source/whalebridge'
+    gitcode: null,
+    github: null,
+    primary: null
   }),
   license: Object.freeze({
     name: 'GPL-3.0-only',
     file: 'LICENSE',
-    url: 'https://www.gnu.org/licenses/gpl-3.0.html'
+    url: null
   }),
   privacy: Object.freeze({ doc: 'docs/product/PRIVACY.md', summary: '' }),
   security: Object.freeze({ doc: 'docs/product/SECURITY.md', contact: null, advisoryUrl: null }),
@@ -94,35 +100,20 @@ function feedbackPaths(rawPaths, fallbackPaths) {
   const source = rawPaths && typeof rawPaths === 'object' && !Array.isArray(rawPaths) ? rawPaths : {};
   const out = {};
   for (const key of Object.keys(DEFAULT_FEEDBACK_PATHS)) {
-    out[key] = sitePath(source[key], fallbackPaths[key] ?? DEFAULT_FEEDBACK_PATHS[key]);
+    out[key] = sitePath(source[key], fallbackPaths[key] ?? null);
   }
   return out;
 }
 
-/**
- * 从 GitHub 仓库地址推导「私密漏洞报告」入口。
- * 这是唯一一个可以从既有事实（仓库地址）确定性推导出来的官方安全入口，
- * 因此没有显式配置 contact 时用它兜底；推导不出来就返回 null（不编造邮箱）。
- */
-export function deriveAdvisoryUrl(repositoryUrl) {
-  const repo = httpsOrNull(repositoryUrl);
-  if (!repo) return null;
-  const match = /^https:\/\/github\.com\/([^/]+)\/([^/]+)$/.exec(repo);
-  if (!match) return null;
-  return `https://github.com/${match[1]}/${match[2]}/security/advisories/new`;
-}
-
-/** 安全联系入口：显式配置优先，其次 GitHub 私密报告，最后如实报 null。 */
+/** 安全联系入口只接受明确配置的地址，不从仓库地址猜测页面路径。 */
 export function resolveSecurityContact(config) {
   const explicit = httpsOrNull(config?.security?.contact);
   if (explicit) return { url: explicit, source: 'configured' };
-  const derived = deriveAdvisoryUrl(config?.repositories?.github);
-  if (derived) return { url: derived, source: 'github-advisories' };
   return { url: null, source: 'unconfigured' };
 }
 
 /**
- * 反馈/安全入口的站点根：`feedback.baseUrl` 优先，其次 `website`。
+ * 反馈/安全入口的站点根：显式 legacy `feedback.baseUrl` 优先，其次集中配置的 `website`。
  * 两者都没配置就返回 null —— UI 如实提示「官方页面尚未配置，请稍后访问」，绝不猜域名。
  */
 export function resolveFeedbackBaseUrl(config) {
@@ -131,6 +122,9 @@ export function resolveFeedbackBaseUrl(config) {
 
 function normalize(raw, fallback) {
   const repo = raw && typeof raw.repositories === 'object' && raw.repositories ? raw.repositories : {};
+  const productLinks = raw && typeof raw.productLinks === 'object' && raw.productLinks ? raw.productLinks : {};
+  const officialUrls = productLinks.officialUrls && typeof productLinks.officialUrls === 'object' ? productLinks.officialUrls : {};
+  const configuredPaths = productLinks.paths && typeof productLinks.paths === 'object' ? productLinks.paths : null;
   const license = raw && typeof raw.license === 'object' && raw.license ? raw.license : {};
   const privacy = raw && typeof raw.privacy === 'object' && raw.privacy ? raw.privacy : {};
   const security = raw && typeof raw.security === 'object' && raw.security ? raw.security : {};
@@ -144,21 +138,30 @@ function normalize(raw, fallback) {
   const catalogHost = catalogUrl ? new URL(catalogUrl).hostname.toLowerCase() : null;
   const pluginHosts = [...new Set([...configuredHosts, ...(catalogHost ? [catalogHost] : [])])];
 
-  const gitcode = httpsOrNull(repo.gitcode) || fallback.repositories.gitcode;
-  const github = httpsOrNull(repo.github) || fallback.repositories.github;
+  const website = httpsOrNull(officialUrls.website) || httpsOrNull(raw?.website) || fallback.productLinks.officialUrls.website;
+  const websiteRepository = httpsOrNull(officialUrls.websiteRepository) || fallback.productLinks.officialUrls.websiteRepository;
+  const gitcode = httpsOrNull(officialUrls.gitcode) || httpsOrNull(repo.gitcode) || fallback.productLinks.officialUrls.gitcode;
+  const github = httpsOrNull(officialUrls.github) || httpsOrNull(repo.github) || fallback.productLinks.officialUrls.github;
   const primary = httpsOrNull(repo.primary) || github || gitcode || fallback.repositories.primary;
+  const paths = feedbackPaths(configuredPaths ?? feedback.paths, fallback.productLinks.paths);
+  const licenseUrl = httpsOrNull(officialUrls.license) || httpsOrNull(license.url) || fallback.productLinks.officialUrls.license || fallback.license.url || null;
+  const feedbackBaseUrl = httpsOrNull(feedback.baseUrl) || website;
 
   return {
     schemaVersion: RELEASE_CONFIG_VERSION,
     product: textOrNull(raw?.product, 40) || fallback.product,
     edition: textOrNull(raw?.edition, 40) || fallback.edition,
     developer: textOrNull(raw?.developer, 120),
-    website: httpsOrNull(raw?.website),
+    website,
+    productLinks: {
+      officialUrls: { website, websiteRepository, gitcode, github, license: licenseUrl },
+      paths
+    },
     repositories: { gitcode, github, primary },
     license: {
       name: textOrNull(license.name, 60) || fallback.license.name,
       file: textOrNull(license.file, 200) || fallback.license.file,
-      url: httpsOrNull(license.url) || fallback.license.url
+      url: licenseUrl
     },
     privacy: {
       doc: textOrNull(privacy.doc, 200) || fallback.privacy.doc,
@@ -170,8 +173,8 @@ function normalize(raw, fallback) {
       advisoryUrl: httpsOrNull(security.advisoryUrl)
     },
     feedback: {
-      baseUrl: httpsOrNull(feedback.baseUrl),
-      paths: feedbackPaths(feedback.paths, fallback.feedback.paths)
+      baseUrl: feedbackBaseUrl,
+      paths
     },
     pluginService: { catalogUrl, allowedHosts: pluginHosts }
   };

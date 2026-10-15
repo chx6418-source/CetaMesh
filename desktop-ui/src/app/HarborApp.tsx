@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router';
 import { createPortal } from 'react-dom';
-import { mergeLatestChatMessages, prependOlderChatMessages } from './chat-history';
-import { applyChatStreamUpdates, ChatRequestEpoch, type ChatStreamUpdate } from './chat-async-state';
+import { mergeChatHistorySnapshot, mergeLatestChatMessages, prependOlderChatMessages } from './chat-history';
+import { applyChatStreamUpdates, ChatRequestEpoch, ChatStreamRevision, type ChatStreamUpdate } from './chat-async-state';
 import { aboutClient, agentClient, approvalClient, bridge, chatClient, extensionSettingsClient, feedbackClient, hostClient, memoryClient, onboardingClient, openExternal, pluginClient, searchClient, settingsClient, taskClient, updateClient, workspaceClient, type Agent, type Approval, type ChatMessage as ChatMessageDto, type ChatSession, type ExtensionSettingsDescription, type ExtensionSettingsSnapshot, type IntegrationSettings, type Memory, type Plugin, type ProviderSettingField, type SettingField, type Settings, type Task } from '../bridge/typed-client';
 import { Icon, type IconName } from '../components/icons';
 import { ArtifactCard } from '../components/product/cards';
-import { Button, IconButton, Input, SearchInput, Select, Tabs } from '../components/primitives/inputs';
+import { Button, IconButton, Input, normalizeSelectOptionLabel, SearchInput, Select, Tabs } from '../components/primitives/inputs';
 import { Sheet } from '../components/primitives/overlays';
 import { Badge, Banner, Card, Divider, LoadingState, Surface } from '../components/primitives/surfaces';
 import { Markdown, VirtualList, type VirtualListAnchor, type VirtualListController } from '../components/primitives/content';
@@ -353,11 +353,15 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
   const [contextCollapsed, setContextCollapsed] = useState(false);
 
   const historySessionIdRef = useRef<string | null>(null);
+  const lastHistoryMessageIdRef = useRef<string | null>(null);
   const requestEpochRef = useRef(new ChatRequestEpoch());
   const activeSessionIdRef = useRef<string | null>(session?.id ?? null);
   activeSessionIdRef.current = session?.id ?? null;
   requestEpochRef.current.activate(activeSessionIdRef.current);
   const activeStreamRequestIdRef = useRef<string | null>(null);
+  const streamRevisionRef = useRef(new ChatStreamRevision());
+  const statusRef = useRef(status);
+  statusRef.current = status;
   const isAtBottomRef = useRef(true);
   const skipAutomaticScrollRef = useRef(false);
   const olderPageRequestRef = useRef(false);
@@ -379,6 +383,7 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
     if (!session) {
       if (!requestEpochRef.current.isCurrent(request, activeSessionIdRef.current)) return;
       historySessionIdRef.current = null;
+      lastHistoryMessageIdRef.current = null;
       seenMessageIdsRef.current.clear();
       previousStreamRef.current = { state: 'idle', text: '' };
       activeStreamRequestIdRef.current = null;
@@ -386,46 +391,78 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
       setHasMoreHistory(false);
       setHasNewMessages(false);
       setLoading(false);
-      setStatus({ state: 'idle', displayText: '', statusMessage: null, requestId: null, retryCount: 0, followState: 'idle', followError: null, toolActivity: [], agentActivity: null, error: null, errorCode: null, approvalId: null, routing: {} });
+      const idleStatus = { state: 'idle', displayText: '', statusMessage: null, requestId: null, retryCount: 0, followState: 'idle', followError: null, toolActivity: [], agentActivity: null, error: null, errorCode: null, approvalId: null, routing: {} };
+      statusRef.current = idleStatus;
+      setStatus(idleStatus);
       setLinkedTask(null);
       setMemories([]);
       setApprovals([]);
       return;
     }
-    setLoading(true);
+    if (historySessionIdRef.current !== session.id) setLoading(true);
     try {
-      const [history, nextStatus, memoryData, approvalData] = await Promise.all([
-        chatClient.history(session.id, 100), chatClient.status(session.id),
-        memoryClient.overview(session.title || '', ''), approvalClient.list()
-      ]);
+      const history = await chatClient.history(session.id, 100);
       if (!requestEpochRef.current.isCurrent(request, activeSessionIdRef.current)) return;
       if (historySessionIdRef.current !== session.id) {
         historySessionIdRef.current = session.id;
+        lastHistoryMessageIdRef.current = history.messages.at(-1)?.id ?? null;
         seenMessageIdsRef.current = new Set(history.messages.map(message => message.id));
-        previousStreamRef.current = { state: nextStatus.state, text: nextStatus.displayText };
         setHasNewMessages(false);
         isAtBottomRef.current = true;
-        setMessages(mergeLatestChatMessages([], history.messages));
+        setMessages(current => requestEpochRef.current.isCurrent(request, activeSessionIdRef.current)
+          ? mergeChatHistorySnapshot(current, history.messages, false)
+          : current);
         setHasMoreHistory(history.hasMore);
       } else {
         setHasMoreHistory(history.hasMore);
-        setMessages(current => mergeLatestChatMessages(current, history.messages));
+        lastHistoryMessageIdRef.current = history.messages.at(-1)?.id ?? lastHistoryMessageIdRef.current;
+        const protectedIds = new Set(pendingSendsRef.current.keys());
+        setMessages(current => requestEpochRef.current.isCurrent(request, activeSessionIdRef.current)
+          ? mergeLatestChatMessages(current, history.messages, protectedIds)
+          : current);
       }
-      setStatus(nextStatus);
-      activeStreamRequestIdRef.current = nextStatus.requestId ?? null;
-      const taskId = typeof nextStatus.routing.taskId === 'string' ? nextStatus.routing.taskId : '';
-      const nextTask = taskId ? await taskClient.get(taskId).then(result => result.task).catch(() => null) : null;
-      if (!requestEpochRef.current.isCurrent(request, activeSessionIdRef.current)) return;
-      setLinkedTask(nextTask);
-      setMemories(memoryData.memories.slice(0, 5));
-      setApprovals(approvalData.approvals.filter(item => item.status === 'pending'));
       setError('');
     } catch (cause) {
       if (requestEpochRef.current.isCurrent(request, activeSessionIdRef.current)) setError(messageOf(cause));
     } finally {
       if (requestEpochRef.current.isCurrent(request, activeSessionIdRef.current)) setLoading(false);
     }
-  }, [session?.id, session?.title]);
+  }, [session?.id]);
+
+  const refreshHistory = useCallback(async (afterMessageId?: string | null) => {
+    if (!session) return;
+    const request = requestEpochRef.current.begin('load', session.id);
+    const sameSession = historySessionIdRef.current === session.id;
+    const cursor = afterMessageId !== undefined
+      ? afterMessageId
+      : sameSession ? lastHistoryMessageIdRef.current : null;
+    try {
+      const history = await chatClient.history(session.id, 100, null, cursor);
+      if (!requestEpochRef.current.isCurrent(request, activeSessionIdRef.current)) return;
+      if (!sameSession || !cursor) {
+        historySessionIdRef.current = session.id;
+        lastHistoryMessageIdRef.current = history.messages.at(-1)?.id ?? null;
+        setHasMoreHistory(history.hasMore);
+        const protectedIds = new Set(pendingSendsRef.current.keys());
+        setMessages(current => requestEpochRef.current.isCurrent(request, activeSessionIdRef.current)
+          ? mergeChatHistorySnapshot(current, history.messages, sameSession, protectedIds)
+          : current);
+      } else if (history.messages.length) {
+        lastHistoryMessageIdRef.current = history.messages.at(-1)?.id ?? cursor;
+        setMessages(current => requestEpochRef.current.isCurrent(request, activeSessionIdRef.current)
+          ? mergeLatestChatMessages(current, history.messages, new Set(pendingSendsRef.current.keys()))
+          : current);
+      }
+      setError('');
+    } catch (cause) {
+      if (!requestEpochRef.current.isCurrent(request, activeSessionIdRef.current)) return;
+      if (messageOf(cause).includes('游标')) {
+        void load();
+        return;
+      }
+      setError(messageOf(cause));
+    }
+  }, [session?.id, load]);
 
   useEffect(() => { void refreshCatalog(); }, [refreshCatalog]);
   useEffect(() => { void load(); }, [load]);
@@ -448,31 +485,39 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
   const refreshContext = useCallback(async () => {
     if (!session) return;
     const request = requestEpochRef.current.begin('context', session.id);
-    try {
-      const [nextStatus, memoryData, approvalData] = await Promise.all([
-        chatClient.status(session.id), memoryClient.overview(session.title || '', ''), approvalClient.list()
-      ]);
-      if (!requestEpochRef.current.isCurrent(request, activeSessionIdRef.current)) return;
+    const snapshotRevision = streamRevisionRef.current.beginSnapshot();
+    void chatClient.status(session.id).then(async nextStatus => {
+      if (!requestEpochRef.current.isCurrent(request, activeSessionIdRef.current)
+        || !streamRevisionRef.current.shouldApply(snapshotRevision, statusRef.current, nextStatus)) return;
+      statusRef.current = nextStatus;
       setStatus(nextStatus);
       activeStreamRequestIdRef.current = nextStatus.requestId ?? null;
       const taskId = typeof nextStatus.routing.taskId === 'string' ? nextStatus.routing.taskId : '';
       const nextTask = taskId ? await taskClient.get(taskId).then(result => result.task).catch(() => null) : null;
-      if (!requestEpochRef.current.isCurrent(request, activeSessionIdRef.current)) return;
-      setLinkedTask(nextTask);
-      setMemories(memoryData.memories.slice(0, 5));
-      setApprovals(approvalData.approvals.filter(item => item.status === 'pending'));
-      setError('');
-    } catch (cause) {
+      if (requestEpochRef.current.isCurrent(request, activeSessionIdRef.current)) setLinkedTask(nextTask);
+    }).catch(cause => {
       if (requestEpochRef.current.isCurrent(request, activeSessionIdRef.current)) setError(messageOf(cause));
-    }
+    });
+    void memoryClient.overview(session.title || '', '').then(memoryData => {
+      if (requestEpochRef.current.isCurrent(request, activeSessionIdRef.current)) setMemories(memoryData.memories.slice(0, 5));
+    }).catch(cause => {
+      if (requestEpochRef.current.isCurrent(request, activeSessionIdRef.current)) setError(messageOf(cause));
+    });
+    void approvalClient.list().then(approvalData => {
+      if (requestEpochRef.current.isCurrent(request, activeSessionIdRef.current)) setApprovals(approvalData.approvals.filter(item => item.status === 'pending'));
+    }).catch(cause => {
+      if (requestEpochRef.current.isCurrent(request, activeSessionIdRef.current)) setError(messageOf(cause));
+    });
   }, [session?.id, session?.title]);
+  useEffect(() => { void refreshContext(); }, [refreshContext]);
   useEffect(() => {
     if (!session) return;
-    const refreshConversation = () => { void load(); };
+    const refreshConversation = () => { void refreshHistory(); };
     const offRestart = bridge.subscribe('core.restarted', () => { refreshConversation(); void refreshContext(); });
     const offUpdated = bridge.subscribe('chat.updated', data => { if (!data.sessionId || data.sessionId === session.id) refreshConversation(); });
     const offStreaming = bridge.subscribe('chat.streaming', data => {
       if (data.sessionId !== session.id || activeSessionIdRef.current !== session.id) return;
+      streamRevisionRef.current.noteEvent();
       streamUpdateRef.current.push(data);
       if (streamStatusFrameRef.current !== null) return;
       streamStatusFrameRef.current = window.requestAnimationFrame(() => {
@@ -480,7 +525,11 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
         const updates = streamUpdateRef.current;
         streamUpdateRef.current = [];
         if (!updates.length || activeSessionIdRef.current !== session.id) return;
-        setStatus(current => applyChatStreamUpdates(current, updates, session.id, activeStreamRequestIdRef.current));
+        setStatus(current => {
+          const next = applyChatStreamUpdates(current, updates, session.id, activeStreamRequestIdRef.current);
+          statusRef.current = next;
+          return next;
+        });
         const lastReset = [...updates].reverse().find(update => update.reset && update.requestId);
         if (lastReset?.requestId) activeStreamRequestIdRef.current = lastReset.requestId;
       });
@@ -502,7 +551,7 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
       streamUpdateRef.current = [];
       offUpdated(); offStreaming(); offApproval(); offResolved(); offWarning(); offTasks(); offMemory(); offRestart();
     };
-  }, [session?.id, load, refreshContext]);
+  }, [session?.id, refreshHistory, load, refreshContext]);
   const loadOlderHistory = useCallback(async () => {
     if (!session || !hasMoreHistory || loadingOlder || olderPageRequestRef.current || !messages.length) return;
     const request = requestEpochRef.current.begin('older', session.id);
@@ -585,6 +634,7 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
 
   async function send(text: string, attachments: { name: string; content: string; mimeType?: string }[], clientMessageId: string) {
     if (!session) return;
+    const historyCursorBeforeSend = lastHistoryMessageIdRef.current;
     setError('');
     pendingSendsRef.current.set(clientMessageId, { text, attachments });
     setMessages(current => current.some(message => message.id === clientMessageId) ? current : mergeLatestChatMessages(current, [{
@@ -594,7 +644,7 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
       await chatClient.send(session.id, text, attachments, clientMessageId);
       pendingSendsRef.current.delete(clientMessageId);
       setSendErrors(current => { const next = { ...current }; delete next[clientMessageId]; return next; });
-      void load();
+      void refreshHistory(historyCursorBeforeSend);
     } catch (cause) {
       const message = messageOf(cause);
       setSendErrors(current => ({ ...current, [clientMessageId]: message }));
@@ -681,7 +731,7 @@ function ApprovalCard({ approval, onDecide }: { approval: Approval; onDecide(id:
 }
 
 function ChatComposer({ busy, models, selectedModelKey, agentProviders, selectedAgent, workspaces, workspaceId, activeWorkspaceId, onWorkspaceChange, onModelChange, onAgentChange, onSend, onStop }: {
-  busy: boolean; models: { id: string; label: string; configured: boolean; models: { id?: string; name?: string; label?: string }[] }[];
+  busy: boolean; models: { id: string; label: string; configured: boolean; models: { id?: string; name?: string; label?: string; displayName?: string; modelName?: string }[] }[];
   selectedModelKey: string; agentProviders: Agent[]; selectedAgent: string;
   workspaces: { id: string; name: string; status: string }[]; workspaceId: string; activeWorkspaceId: string | null;
   onWorkspaceChange(workspaceId: string): void; onModelChange(value: string): void; onAgentChange(provider: string): void;
@@ -692,11 +742,26 @@ function ChatComposer({ busy, models, selectedModelKey, agentProviders, selected
   const [attachmentError, setAttachmentError] = useState('');
   const [picking, setPicking] = useState(false);
   const textarea = useRef<HTMLTextAreaElement>(null);
-  const modelChoices = models.flatMap(provider => {
+  const modelChoices: { value: string; label: string; disabled?: boolean }[] = models.flatMap(provider => {
     if (!provider.configured) return [];
     const list = provider.models.length ? provider.models : [{ id: '', name: provider.label, label: provider.label }];
-    return list.map(model => ({ value: JSON.stringify([provider.id, model.id ?? model.name ?? '']), label: model.label ?? model.name ?? provider.label }));
+    return list.map(model => ({
+      value: JSON.stringify([provider.id, normalizeSelectOptionLabel(model.id, model.name, model.modelName, provider.id)]),
+      label: normalizeSelectOptionLabel(model.displayName, model.label, model.name, model.modelName, model.id, provider.label, provider.id)
+    }));
   });
+  if (selectedModelKey && !modelChoices.some(choice => choice.value === selectedModelKey)) {
+    let selectedLabel = selectedModelKey;
+    let availability = '不可用';
+    try {
+      const [providerId, modelId] = JSON.parse(selectedModelKey) as [string, string];
+      const provider = models.find(item => item.id === providerId);
+      const selected = provider?.models.find(item => item.id === modelId);
+      selectedLabel = normalizeSelectOptionLabel(selected?.displayName, selected?.label, selected?.name, selected?.modelName, modelId, provider?.label, providerId);
+      if (provider && !provider.configured) availability = '未配置';
+    } catch { /* Keep the serialized selection visible as a safe fallback label. */ }
+    modelChoices.push({ value: selectedModelKey, label: `${selectedLabel} · ${availability}`, disabled: true });
+  }
   async function addFiles() {
     setAttachmentError(''); setPicking(true);
     try { const result = await hostClient.pickFiles(); setAttachments(current => [...current, ...result.attachments].slice(0, 8)); }
@@ -709,7 +774,7 @@ function ChatComposer({ busy, models, selectedModelKey, agentProviders, selected
     onSend(text, attachments, crypto.randomUUID());
     setDraft(''); setAttachments([]);
   }
-  return <div className="chat-composer"><div className="composer-field"><textarea ref={textarea} aria-label="输入消息" placeholder="告诉 CetaMesh 你想做什么。" value={draft} rows={2} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); submit(); } }} /><div className="composer-bottom"><div className="row composer-controls"><IconButton label="添加文本或源码附件" icon="attach" onClick={() => void addFiles()} disabled={picking || busy} /><Select label="任务工作区" value={workspaceId} onChange={event => onWorkspaceChange(event.target.value)}><option value="">自动（当前工作区{activeWorkspaceId ? '' : '，未指定'}）</option>{workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}</Select><Select label="选择 Agent" value={selectedAgent} onChange={event => onAgentChange(event.target.value)}><option value="">能力</option><option value="none">不使用 Agent</option>{agentProviders.map(agent => { const needsScope = ['task-required', 'workspace-required'].includes(agent.reason ?? ''); const disabled = !agent.available || (!agent.eligible && !needsScope); const state = agent.eligible ? '' : availabilityReasonLabel(agent.reason) || availabilityReasonLabel(agent.status) || (agent.available ? '当前不可使用' : '不可用'); return <option key={agent.id} value={agent.id} disabled={disabled}>{agent.name}{state ? ` · ${state}` : ''}</option>; })}</Select><Select label="选择模型" value={selectedModelKey} onChange={event => onModelChange(event.target.value)} disabled={!modelChoices.length}>{modelChoices.length ? modelChoices.map(choice => <option key={choice.value} value={choice.value}>{choice.label}</option>) : <option value="">暂无已配置模型</option>}</Select></div>{busy ? <Button variant="danger" icon="square" onClick={onStop}>停止</Button> : <Button variant="primary" icon="send" onClick={submit} disabled={!draft.trim()}>发送</Button>}</div>{attachments.length > 0 && <div className="attachment-list">{attachments.map((file, index) => <span key={`${file.name}-${index}`}><Icon name="file" size={13} />{file.name}<button aria-label={`移除 ${file.name}`} onClick={() => setAttachments(current => current.filter((_, item) => item !== index))}><Icon name="close" size={13} /></button></span>)}</div>}{attachmentError && <p className="inline-error" role="alert">{attachmentError}</p>}</div><div className="composer-footnote">消息与附件通过本机 Core 处理，附件总大小上限 128 KiB。</div></div>;
+  return <div className="chat-composer"><div className="composer-field"><textarea ref={textarea} aria-label="输入消息" placeholder="告诉 CetaMesh 你想做什么。" value={draft} rows={2} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); submit(); } }} /><div className="composer-bottom"><div className="row composer-controls"><IconButton label="添加文本或源码附件" icon="attach" onClick={() => void addFiles()} disabled={picking || busy} /><Select label="任务工作区" value={workspaceId} onChange={event => onWorkspaceChange(event.target.value)}><option value="">自动（当前工作区{activeWorkspaceId ? '' : '，未指定'}）</option>{workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{normalizeSelectOptionLabel(workspace.name, workspace.id)}</option>)}</Select><Select label="选择 Agent" value={selectedAgent} onChange={event => onAgentChange(event.target.value)}><option value="">能力</option><option value="none">不使用 Agent</option>{agentProviders.map(agent => { const needsScope = ['task-required', 'workspace-required'].includes(agent.reason ?? ''); const disabled = !agent.available || (!agent.eligible && !needsScope); const state = agent.eligible ? '' : availabilityReasonLabel(agent.reason) || availabilityReasonLabel(agent.status) || (agent.available ? '当前不可使用' : '不可用'); return <option key={agent.id} value={agent.id} disabled={disabled}>{normalizeSelectOptionLabel(agent.name, agent.id)}{state ? ` · ${state}` : ''}</option>; })}{selectedAgent && !agentProviders.some(agent => agent.id === selectedAgent) && <option value={selectedAgent} disabled>{normalizeSelectOptionLabel(selectedAgent)} · 不可用</option>}</Select><Select label="选择模型" value={selectedModelKey} onChange={event => onModelChange(event.target.value)} disabled={!modelChoices.length}>{modelChoices.length ? modelChoices.map(choice => <option key={choice.value} value={choice.value} disabled={choice.disabled}>{choice.label}</option>) : <option value="">暂无已配置模型</option>}</Select></div>{busy ? <Button variant="danger" icon="square" onClick={onStop}>停止</Button> : <Button variant="primary" icon="send" onClick={submit} disabled={!draft.trim()}>发送</Button>}</div>{attachments.length > 0 && <div className="attachment-list">{attachments.map((file, index) => <span key={`${file.name}-${index}`}><Icon name="file" size={13} />{file.name}<button aria-label={`移除 ${file.name}`} onClick={() => setAttachments(current => current.filter((_, item) => item !== index))}><Icon name="close" size={13} /></button></span>)}</div>}{attachmentError && <p className="inline-error" role="alert">{attachmentError}</p>}</div><div className="composer-footnote">消息与附件通过本机 Core 处理，附件总大小上限 128 KiB。</div></div>;
 }
 
 function ChatContextPanel({ task, memories, approvals, onOpenMemory }: { task: Task | null; memories: Memory[]; approvals: Approval[]; onOpenMemory(): void }) {
@@ -764,7 +829,7 @@ function MemoryPage() {
     <Heading eyebrow="MEMORY" title="记忆" description="管理偏好、项目记忆、已保存知识与最近引用。" action={<Button icon="update" onClick={() => void refresh()}>刷新</Button>} />
     {error && <ErrorNotice error={error} onRetry={() => void refresh()} />}
     <Tabs items={[{ id: 'preferences', label: '偏好' }, { id: 'project', label: '项目记忆' }, { id: 'knowledge', label: '已保存知识' }, { id: 'recent', label: '最近' }]} selected={category} onChange={setCategory} label="记忆分类" />
-    {category === 'project' && <label className="memory-workspace-picker">项目工作区<select className="cm-input" value={workspaceId} onChange={event => setWorkspaceId(event.target.value)}><option value="">选择工作区</option>{workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}</select></label>}
+    {category === 'project' && <label className="memory-workspace-picker">项目工作区<select className="cm-input" value={workspaceId} onChange={event => setWorkspaceId(event.target.value)}><option value="">选择工作区</option>{workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{normalizeSelectOptionLabel(workspace.name, workspace.id)}</option>)}</select></label>}
     {category === 'project' && !workspaces.length && <p className="muted">先创建工作区，再保存项目记忆。</p>}
     {loading ? <LoadingState label="正在读取本机记忆…" /> : <MemoryManager initial={filtered} createType={createType} createScope={createScope} createDisabled={category === 'project' && !workspaceId} onChanged={refresh} />}
   </div>;
@@ -932,14 +997,15 @@ function AgentsPage() {
   async function check(agent: Agent) {
     setChecking(agent.id);
     try {
-      const health = await agentClient.health(agent.id);
+      const health = await agentClient.health(agent.id, true);
       setAgents(current => current.map(item => {
         if (item.id !== agent.id) return item;
         const available = health.available === true;
         const requiresTask = ['capability-broker', 'staged-capability-broker'].includes(item.workspaceBoundary ?? '');
         const boundaryUnverified = item.workspaceBoundary === 'unverified';
         return {
-          ...item, available, eligible: available && !requiresTask && !boundaryUnverified,
+          ...item, available, installed: health.installed, authenticated: health.authenticated,
+          eligible: available && !requiresTask && !boundaryUnverified,
           status: boundaryUnverified && available ? 'descriptor-incomplete' : health.status,
           reason: health.reason ?? (boundaryUnverified ? 'descriptor-incomplete' : requiresTask ? 'task-required' : null),
           version: health.version ?? item.version, desktopApp: health.desktopApp ?? item.desktopApp

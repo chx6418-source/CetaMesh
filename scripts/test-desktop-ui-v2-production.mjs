@@ -350,11 +350,11 @@ check('Harbor pages older chat history through measured virtual rows and preserv
   const primitive = read('desktop-ui/src/components/primitives/content.tsx');
   const styles = read('desktop-ui/src/app/harbor.css');
   const chat = app.slice(app.indexOf('function ChatPage('), app.indexOf('function MessageBubble('));
-  assert.match(client, /history:\s*\(id: string, limit = 100, beforeMessageId: string \| null = null\)[\s\S]{0,220}nextBeforeMessageId: string \| null; hasMore: boolean/);
+  assert.match(client, /history:\s*\(id: string, limit = 100, beforeMessageId: string \| null = null, afterMessageId: string \| null = null\)[\s\S]{0,220}nextBeforeMessageId: string \| null; hasMore: boolean/);
   assert.match(chat, /const \[hasMoreHistory, setHasMoreHistory\] = useState\(false\)/);
   assert.match(chat, /const loadOlderHistory = useCallback\(async \(\) =>/);
   assert.match(chat, /const cursor = messages\[0\]\.id[\s\S]{0,240}chatClient\.history\(session\.id,\s*100,\s*cursor\)/);
-  assert.match(chat, /mergeLatestChatMessages\(current, history\.messages\)/);
+  assert.match(chat, /mergeChatHistorySnapshot\(current, history\.messages/);
   assert.match(chat, /prependOlderChatMessages\(current, page\.messages\)/);
   assert.match(chat, /<VirtualList[\s\S]{0,900}items=\{timelineItems\}/);
   assert.doesNotMatch(chat, /messages\.map\(message => <MessageBubble/);

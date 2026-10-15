@@ -436,7 +436,7 @@ export function createChatService({
     return { id: record.id, deleted: true };
   }
 
-  function history({ id, limit = DEFAULT_HISTORY_PAGE_SIZE, beforeMessageId = null } = {}) {
+  function history({ id, limit = DEFAULT_HISTORY_PAGE_SIZE, beforeMessageId = null, afterMessageId = null } = {}) {
     const record = sessionOrThrow(id);
     const all = readHistory(record.id);
     const requestedLimit = Number(limit);
@@ -445,14 +445,27 @@ export function createChatService({
       Number.isFinite(requestedLimit) ? Math.trunc(requestedLimit) : DEFAULT_HISTORY_PAGE_SIZE
     ));
     let endIndex = all.length;
+    let startIndex = Math.max(0, endIndex - count);
+    if (afterMessageId !== null && afterMessageId !== undefined) {
+      if (beforeMessageId !== null && beforeMessageId !== undefined) {
+        throw chatError('INVALID_CURSOR', '历史消息游标不能同时向前和向后');
+      }
+      if (typeof afterMessageId !== 'string' || !afterMessageId) {
+        throw chatError('INVALID_CURSOR', '历史消息游标无效');
+      }
+      const cursorIndex = all.findIndex(message => message?.id === afterMessageId);
+      if (cursorIndex < 0) throw chatError('INVALID_CURSOR', '历史消息游标不存在');
+      startIndex = cursorIndex + 1;
+      endIndex = Math.min(all.length, startIndex + count);
+    }
     if (beforeMessageId !== null && beforeMessageId !== undefined) {
       if (typeof beforeMessageId !== 'string' || !beforeMessageId) {
         throw chatError('INVALID_CURSOR', '历史消息游标无效');
       }
       endIndex = all.findIndex((message) => message?.id === beforeMessageId);
       if (endIndex < 0) throw chatError('INVALID_CURSOR', '历史消息游标不存在');
+      startIndex = Math.max(0, endIndex - count);
     }
-    const startIndex = Math.max(0, endIndex - count);
     const page = all.slice(startIndex, endIndex).map((message) => ({
       ...message,
       text: typeof message.text === 'string' && message.text.length > MAX_MESSAGE_CHARS_RETURNED

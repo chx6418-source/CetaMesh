@@ -123,6 +123,11 @@ try {
   releaseA(); await pendingA;
   releaseC(); await pendingC;
   assert.deepEqual(completions, ['C'], 'delayed A/B responses finishing out of order cannot replace the current C conversation');
+  const sameSessionEpoch = new asyncChatState.ChatRequestEpoch();
+  const sameSessionA = sameSessionEpoch.begin('load', 'session-c');
+  const sameSessionB = sameSessionEpoch.begin('load', 'session-c');
+  assert.equal(sameSessionEpoch.isCurrent(sameSessionB, 'session-c'), true, 'the later refresh for the same session is current');
+  assert.equal(sameSessionEpoch.isCurrent(sameSessionA, 'session-c'), false, 'an earlier same-session refresh cannot overwrite a newer response');
   const repeated = epochs.begin('context', 'session-c');
   assert.equal(epochs.isCurrent(requestC, 'session-c'), true, 'refreshing context does not invalidate the independent current history request');
   assert.equal(epochs.isCurrent(epochs.begin('context', 'session-c'), 'session-c'), true, 'the latest context refresh remains current');
@@ -151,6 +156,30 @@ try {
   assert.deepEqual(latestMerge, [
     { id: 'm1', text: 'one' }, { id: 'm2', text: 'updated' }, { id: 'm3', text: 'reconnected final' }
   ], 'reconnect and continuation duplicates merge by stable ID while preserving chronological order');
+  assert.deepEqual(historyModel.mergeChatHistorySnapshot(
+    [{ id: 'old-session-message', text: 'previous conversation' }],
+    [{ id: 'new-session-message', text: 'selected conversation' }], false
+  ), [{ id: 'new-session-message', text: 'selected conversation' }],
+  'a history response for a newly selected session cannot retain rows from the prior session');
+  const optimisticMerge = historyModel.mergeLatestChatMessages(
+    [{ id: 'optimistic-user', text: 'already visible' }, { id: 'assistant-stream', text: 'streamed text' }],
+    [{ id: 'optimistic-user', text: 'stale snapshot' }, { id: 'server-message', text: 'new persisted message' }],
+    new Set(['optimistic-user', 'assistant-stream'])
+  );
+  assert.deepEqual(optimisticMerge, [
+    { id: 'optimistic-user', text: 'already visible' }, { id: 'assistant-stream', text: 'streamed text' },
+    { id: 'server-message', text: 'new persisted message' }
+  ], 'older snapshots preserve optimistic and streaming message rows while merging new IDs');
+  const streamRevision = new asyncChatState.ChatStreamRevision();
+  const statusReadBeforeStream = streamRevision.beginSnapshot();
+  streamRevision.noteEvent();
+  assert.equal(streamRevision.canApply(statusReadBeforeStream), false, 'chat.updated/status refresh cannot replace text after a streaming event');
+  const streamingSnapshot = streamRevision.beginSnapshot();
+  assert.equal(streamRevision.canApply(streamingSnapshot), true, 'a fresh status snapshot applies when no stream event races it');
+  assert.equal(streamRevision.shouldApply(streamingSnapshot,
+    { state: 'streaming', displayText: 'visible assistant text', requestId: 'request-1' },
+    { state: 'streaming', displayText: '', requestId: 'request-1' }), false,
+  'a chat.updated snapshot cannot blank already-visible text in the same streaming turn');
   const olderMerge = historyModel.prependOlderChatMessages(
     [{ id: 'm1', text: 'fresh current' }, { id: 'm2', text: 'current' }],
     [{ id: 'm-2', text: 'older first' }, { id: 'm-1', text: 'older' }, { id: 'm1', text: 'stale overlap' }, { id: 'm-2', text: 'older updated' }]
@@ -160,6 +189,13 @@ try {
     { id: 'm1', text: 'fresh current' }, { id: 'm2', text: 'current' }
   ], 'older pages prepend in order, dedupe their own overlaps, and retain the fresher current message');
   const components = await vite.ssrLoadModule('/src/components/primitives/content.tsx');
+  const inputPrimitives = await vite.ssrLoadModule('/src/components/primitives/inputs.tsx');
+  assert.equal(inputPrimitives.normalizeSelectOptionLabel('', '   ', 'codex'), 'codex', 'blank labels fall back to a stable option value');
+  assert.equal(inputPrimitives.normalizeSelectOptionLabel('  '), '未命名选项', 'no Select option may have a blank accessible/display label');
+  const blankOptionMarkup = renderToStaticMarkup(React.createElement(inputPrimitives.Select, {
+    label: 'Agent', value: 'codex', children: React.createElement('option', { value: 'codex' }, '')
+  }));
+  assert.match(blankOptionMarkup, />codex<\/span>/, 'a selected option without text displays its non-empty id');
   assert.equal(typeof components.findVisibleVirtualAnchor, 'function', 'VirtualList exposes the anchor selection behavior used by Chat');
   assert.equal(typeof components.scrollTopForAnchor, 'function', 'VirtualList exposes the anchor restoration calculation used by Chat');
   assert.equal(typeof components.isVirtualScrollAtBottom, 'function', 'VirtualList exposes the bottom-stick threshold used by Chat');

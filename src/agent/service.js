@@ -45,6 +45,9 @@ function summarizeProvider(provider, health = null) {
     label: provider.label,
     eventProtocol: provider.eventProtocol,
     available,
+    installed: typeof health?.installed === 'boolean' ? health.installed
+      : typeof capabilities.installed === 'boolean' ? capabilities.installed : available === true,
+    authenticated: typeof health?.authenticated === 'boolean' ? health.authenticated : null,
     version: capabilities.version ?? health?.version ?? null,
     reason,
     workspaceBoundary: capabilities.workspaceBoundary ?? 'unsupported',

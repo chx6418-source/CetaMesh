@@ -607,6 +607,7 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
         refreshInspection(refresh === true);
         return {
           available: inspection.available,
+          installed: inspection.available,
           provider: 'codex',
           version: inspection.version,
           authenticated,

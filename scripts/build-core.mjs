@@ -295,6 +295,8 @@ function stageResources(outDir, { noWebUi = false } = {}) {
   }
   fs.copyFileSync(path.join(ROOT, 'config.example.json'), path.join(resourcesDir, 'config.example.json'));
   copied += 1;
+  fs.copyFileSync(path.join(ROOT, 'release-config.json'), path.join(resourcesDir, 'release-config.json'));
+  copied += 1;
   // resources/product.json 让打包后的 Core 在 --setup-dsh 时能读到自己的版本号
   // （安装目录里没有 package.json）。
   fs.writeFileSync(

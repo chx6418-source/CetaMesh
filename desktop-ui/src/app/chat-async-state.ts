@@ -1,6 +1,31 @@
 export type ChatRequestKind = 'load' | 'context' | 'older';
 export type ChatRequestToken = { kind: ChatRequestKind; sessionId: string | null; generation: number };
 
+/** Prevents a server status snapshot from replacing deltas received after that read began. */
+export class ChatStreamRevision {
+  private revision = 0;
+
+  beginSnapshot() { return this.revision; }
+
+  noteEvent() { this.revision += 1; }
+
+  canApply(snapshotRevision: number) { return snapshotRevision === this.revision; }
+
+  shouldApply(snapshotRevision: number, current: { state: string; displayText: string; requestId: string | null },
+    next: { state: string; displayText: string; requestId: string | null }) {
+    return shouldApplyChatStatusSnapshot(snapshotRevision, this.revision, current, next);
+  }
+}
+
+export function shouldApplyChatStatusSnapshot(snapshotRevision: number, currentRevision: number, current: {
+  state: string; displayText: string; requestId: string | null;
+}, next: { state: string; displayText: string; requestId: string | null }): boolean {
+  if (snapshotRevision !== currentRevision) return false;
+  const currentStreaming = ['starting', 'streaming', 'recovering', 'cancelling'].includes(current.state);
+  return !(currentStreaming && current.displayText && current.requestId === next.requestId
+    && next.displayText.length < current.displayText.length);
+}
+
 /** Invalidates late Chat reads when the selected session changes or a newer read starts. */
 export class ChatRequestEpoch {
   private activeSessionId: string | null = null;

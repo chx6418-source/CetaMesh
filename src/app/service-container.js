@@ -51,6 +51,7 @@ export function createCetaMeshServices(options = {}) {
   const stateDir = options.stateDir ?? APP_PATHS.stateDir;
   const dataRoot = options.dataRoot ?? APP_PATHS.dataRoot;
   const sourceRoot = options.sourceRoot ?? APP_PATHS.sourceRoot;
+  const resourceRoot = options.resourceRoot ?? APP_PATHS.resourceRoot;
   const socialV2File = options.socialV2File;
   const api = options.api ?? null;
   const controlService = options.controlService ?? null;
@@ -336,7 +337,7 @@ export function createCetaMeshServices(options = {}) {
 
   // ── 产品化任务 D：产品面服务（About / 更新公告 / 反馈入口 / Onboarding / 产品文案） ──
   // 发行配置 release-config.json 与"最近错误码"是 About 与产品服务共用的事实源，各建一份。
-  const releaseConfig = loadReleaseConfig({ rootDir: sourceRoot });
+  const releaseConfig = loadReleaseConfig({ rootDir: resourceRoot });
   const errorRegistry = createErrorRegistry();
   productContextService = createProductContextService({
     taskRuntime: taskService.runtime,

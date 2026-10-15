@@ -668,11 +668,11 @@ mod tests {
             "build": { "buildId": "ci-42", "commit": "deadbee", "buildTime": "2026-10-09T00:00:00Z" },
             "platform": { "label": "Windows · x64", "arch": "x64" },
             "developer": { "name": null, "configured": false },
-            "links": { "website": null, "gitcode": "https://gitcode.com/ygdnn/CetaMesh", "github": "https://github.com/chx6418-source/whalebridge" },
+            "links": { "website": "https://configured.example.com", "gitcode": "https://gitcode.example.com/project", "github": "https://github.example.com/project" },
             "legal": {
-                "license": { "name": "GPL-3.0-only", "url": "https://www.gnu.org/licenses/gpl-3.0.html" },
+                "license": { "name": "GPL-3.0-only", "url": "https://license.example.com" },
                 "privacy": { "summary": "本地优先" },
-                "security": { "summary": "请不要公开披露", "contact": "https://github.com/x/y/security/advisories/new", "contactSource": "github-advisories" }
+                "security": { "summary": "请不要公开披露", "contact": null, "contactSource": "unconfigured" }
             },
             "release": { "available": true, "version": "1.0.0-rc.2" },
             "releaseConfigSource": "injected"
@@ -683,12 +683,12 @@ mod tests {
         assert_eq!(view.platform, "Windows · x64");
         assert!(view.version_consistent);
         assert!(view.developer.is_none());
-        assert!(view.website.is_none());
-        assert_eq!(view.unconfigured, vec!["开发者", "官方网站"]);
-        assert!(view.gitcode.as_deref().unwrap().contains("gitcode.com"));
+        assert_eq!(view.website.as_deref(), Some("https://configured.example.com"));
+        assert_eq!(view.unconfigured, vec!["开发者"]);
+        assert!(view.gitcode.as_deref().unwrap().contains("gitcode.example.com"));
         assert_eq!(view.license, "GPL-3.0-only");
         assert!(view.release_manifest_available);
-        assert!(view.security_contact.as_deref().unwrap().starts_with("https://"));
+        assert!(view.security_contact.is_none());
     }
 
     #[test]

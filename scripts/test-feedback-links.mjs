@@ -25,7 +25,7 @@ import {
   safeQueryValue,
   sanitizeQueryValue
 } from '../src/product/feedback-links.js';
-import { loadReleaseConfig, resolveFeedbackBaseUrl, DEFAULT_FEEDBACK_PATHS } from '../src/product/release-config.js';
+import { loadReleaseConfig, resolveFeedbackBaseUrl } from '../src/product/release-config.js';
 import { createProductService } from '../src/product/service.js';
 import { createAboutInfo } from '../src/about/index.js';
 import { createDesktopUiService } from '../src/desktop/ui-service.js';
@@ -50,12 +50,14 @@ const workDirs = [];
 const originalDataDir = process.env.WHALEBRIDGE_DATA_DIR;
 const track = (dir) => { workDirs.push(dir); return dir; };
 
+const FIXTURE_PATHS = Object.freeze({ general: '/feedback', bug: '/feedback', feature: '/feedback', security: '/security', docs: null, privacy: null, terms: null, pluginDocs: null });
+
 const CONFIG = Object.freeze({
   schemaVersion: 1,
   product: 'CetaMesh',
   edition: 'Desktop',
   website: 'https://cetamesh.example.com',
-  feedback: { baseUrl: '', paths: { ...DEFAULT_FEEDBACK_PATHS } }
+  feedback: { baseUrl: '', paths: { ...FIXTURE_PATHS } }
 });
 
 const ABOUT = Object.freeze({
@@ -67,7 +69,7 @@ const ABOUT = Object.freeze({
 
 try {
   // ── 1. 四个入口与官方 URL ──────────────────────────────────────────────
-  const links = buildFeedbackLinks({ config: { ...CONFIG, feedback: { baseUrl: 'https://cetamesh.example.com', paths: { ...DEFAULT_FEEDBACK_PATHS } } }, aboutInfo: ABOUT });
+  const links = buildFeedbackLinks({ config: { ...CONFIG, feedback: { baseUrl: 'https://cetamesh.example.com', paths: { ...FIXTURE_PATHS } } }, aboutInfo: ABOUT });
   equal('入口顺序：反馈与建议 / Bug 反馈 / 功能建议 / 安全漏洞',
     links.entries.map((entry) => entry.label), ['反馈与建议', 'Bug 反馈', '功能建议', '安全漏洞']);
   check('入口已配置且都是 https 官网地址',
@@ -108,7 +110,7 @@ try {
     logBody: 'FATAL: something happened'
   };
   const hostileLinks = buildFeedbackLinks({
-    config: { ...CONFIG, feedback: { baseUrl: 'https://cetamesh.example.com', paths: { ...DEFAULT_FEEDBACK_PATHS } } },
+    config: { ...CONFIG, feedback: { baseUrl: 'https://cetamesh.example.com', paths: { ...FIXTURE_PATHS } } },
     aboutInfo: hostile
   });
   const hostileText = hostileLinks.entries.map((entry) => entry.url).join('\n');
@@ -124,13 +126,15 @@ try {
   equal('platform 映射', [platformTag('win32'), platformTag('darwin'), platformTag('linux')], ['windows', 'macos', 'linux']);
 
   // ── 4. 站点根只有一个来源；路径不可越界 ────────────────────────────────
-  const viaWebsite = buildFeedbackLinks({ config: { ...CONFIG, feedback: { baseUrl: '', paths: { ...DEFAULT_FEEDBACK_PATHS } } }, aboutInfo: ABOUT });
+  const viaWebsite = buildFeedbackLinks({ config: { ...CONFIG, feedback: { baseUrl: '', paths: { ...FIXTURE_PATHS } } }, aboutInfo: ABOUT });
   check('feedback.baseUrl 缺省时回落 website', viaWebsite.entries[0].url.startsWith('https://cetamesh.example.com/'));
   equal('两者的站点根一致', resolveFeedbackBaseUrl({ ...CONFIG, feedback: { baseUrl: '' } }), 'https://cetamesh.example.com');
   equal('显式 baseUrl 优先于 website', resolveFeedbackBaseUrl({ ...CONFIG, feedback: { baseUrl: 'https://feedback.example.com' } }), 'https://feedback.example.com');
   const packagedConfig = loadReleaseConfig({ rootDir: repoRoot });
-  equal('仓库打包配置未提供官方站点且反馈路由无 query', [resolveFeedbackBaseUrl(packagedConfig.config),
-    packagedConfig.config.feedback.paths.bug, packagedConfig.config.feedback.paths.feature], [null, '/feedback', '/feedback']);
+  equal('官网与现存入口路径都只来自集中 productLinks 配置', [resolveFeedbackBaseUrl(packagedConfig.config),
+    packagedConfig.config.productLinks.officialUrls.website, packagedConfig.config.productLinks.officialUrls.websiteRepository,
+    packagedConfig.config.feedback.paths.bug, packagedConfig.config.feedback.paths.docs],
+  ['https://cetamesh.com', 'https://cetamesh.com', 'https://github.com/chx6418-source/cetamesh-web', '/feedback', null]);
 
   const hijacked = loadReleaseConfig({
     rootDir: repoRoot,
@@ -139,9 +143,9 @@ try {
       feedback: { paths: { bug: '//evil.example/steal', security: 'https://evil.example/security', general: '/feedback?token=leak' } }
     })
   });
-  equal('协议相对路径被拒绝（回落到默认 /feedback）', hijacked.config.feedback.paths.bug, DEFAULT_FEEDBACK_PATHS.bug);
-  equal('绝对 URL 被拒绝（回落到默认 /security）', hijacked.config.feedback.paths.security, DEFAULT_FEEDBACK_PATHS.security);
-  equal('路径中附带任意 query 被拒绝', hijacked.config.feedback.paths.general, DEFAULT_FEEDBACK_PATHS.general);
+  equal('协议相对路径被拒绝且未配置路径保持空值', hijacked.config.feedback.paths.bug, null);
+  equal('绝对 URL 被拒绝且未配置路径保持空值', hijacked.config.feedback.paths.security, null);
+  equal('路径中附带任意 query 被拒绝', hijacked.config.feedback.paths.general, null);
   check('buildEntryUrl 只接受 https 站点', buildEntryUrl('http://cetamesh.example.com', '/feedback', {}) === null);
   check('buildEntryUrl 对空站点返回 null', buildEntryUrl(null, '/feedback', {}) === null);
   check('buildEntryUrl 拒绝带 query/fragment 的路径和含凭据的 HTTPS 地址',
@@ -155,10 +159,10 @@ try {
     })
   });
   equal('发行配置拒绝含凭据 URL 和带 query 页面路径', [malformedConfig.config.website, malformedConfig.config.feedback.baseUrl,
-    malformedConfig.config.feedback.paths.general], [null, null, DEFAULT_FEEDBACK_PATHS.general]);
+    malformedConfig.config.feedback.paths.general], [null, null, null]);
 
   // ── 5. 未配置 / Core 未就绪时的兜底 ────────────────────────────────────
-  const unconfigured = buildFeedbackLinks({ config: { ...CONFIG, website: '', feedback: { baseUrl: '', paths: { ...DEFAULT_FEEDBACK_PATHS } } }, aboutInfo: ABOUT });
+  const unconfigured = buildFeedbackLinks({ config: { ...CONFIG, website: '', feedback: { baseUrl: '', paths: { ...FIXTURE_PATHS } } }, aboutInfo: ABOUT });
   equal('未配置站点：configured=false 且没有 URL', [unconfigured.configured, unconfigured.entries.every((entry) => entry.url === null)], [false, true]);
   equal('未配置提示原文', unconfigured.messages.notConfigured, FEEDBACK_NOT_CONFIGURED_MESSAGE);
   check('未配置提示不猜域名', !FEEDBACK_NOT_CONFIGURED_MESSAGE.includes('http'));
@@ -180,13 +184,13 @@ try {
   const aboutInfo = createAboutInfo({ rootDir: repoRoot, execGit: () => 'abc1234' }).info();
   const product = createProductService({
     aboutInfo: () => aboutInfo,
-    releaseConfig: { ...CONFIG, feedback: { baseUrl: 'https://cetamesh.example.com', paths: { ...DEFAULT_FEEDBACK_PATHS } } }
+    releaseConfig: { ...CONFIG, feedback: { baseUrl: 'https://cetamesh.example.com', paths: { ...FIXTURE_PATHS } } }
   });
   const response = await product.execute({ method: 'product.feedbackLinks', params: {} });
   equal('product.feedbackLinks 返回四个入口', response.links.entries.map((entry) => entry.id), ['general', 'bug', 'feature', 'security']);
   check('返回值带 query 摘要与允许键', response.links.query.platform === 'windows' && response.links.allowedQueryKeys.length === 3);
   const unavailableProduct = createProductService({
-    releaseConfig: { ...CONFIG, website: null, feedback: { baseUrl: null, paths: { ...DEFAULT_FEEDBACK_PATHS } } }
+    releaseConfig: { ...CONFIG, website: null, feedback: { baseUrl: null, paths: { ...FIXTURE_PATHS } } }
   });
   const unavailableUi = createDesktopUiService({ system: { product: unavailableProduct } });
   const unavailableLinks = await unavailableUi.execute({ method: 'ui.feedback.links', params: {} });
@@ -210,8 +214,13 @@ try {
   const viaIpc = await ipc.dispatch({ method: 'product.feedbackLinks', params: {} });
   equal('IPC product.feedbackLinks 可达', viaIpc.links.entries.length, 4);
   const viaTypedUi = await services.desktopUiService.execute({ method: 'ui.feedback.links', params: {} });
-  equal('仓库未配置官方 URL 时，typed UI 仍返回四个 disabled 入口', [viaTypedUi.configured, viaTypedUi.entries.length,
-    viaTypedUi.entries.every(entry => entry.url === null), viaTypedUi.message], [false, 4, true, FEEDBACK_NOT_CONFIGURED_MESSAGE]);
+  equal('Core 从集中 productLinks 为 About 与反馈入口提供官网根域', [services.releaseConfig.config.website,
+    services.releaseConfig.config.feedback.baseUrl, viaTypedUi.configured, viaTypedUi.entries.length],
+  ['https://cetamesh.com', 'https://cetamesh.com', true, 4]);
+  check('未确认的官网路径仍为空值', services.releaseConfig.config.productLinks.paths.docs === null
+    && services.releaseConfig.config.productLinks.paths.privacy === null
+    && services.releaseConfig.config.productLinks.paths.terms === null
+    && services.releaseConfig.config.productLinks.paths.pluginDocs === null);
   const legacy = await capture(() => ipc.dispatch({ method: 'feedback.submit', params: { type: 'bug' } }));
   check('旧的 feedback.* 命名空间不再可用（无收集通道）', legacy.threw === true, String(legacy.code));
 } finally {

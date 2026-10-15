@@ -62,13 +62,12 @@ try {
   equal('About 平台含系统与架构', [info.platform.os, info.platform.arch], [process.platform, process.arch]);
   check('About 平台描述可直接展示', typeof info.platform.label === 'string' && info.platform.label.length > 0, info.platform.label);
   equal('开发者未配置时不编造', info.developer, { name: null, configured: false });
-  equal('官网未配置时不编造', [info.links.website, info.links.websiteConfigured], [null, false]);
+  equal('About 官网来自唯一 productLinks 配置', [info.links.website, info.links.websiteConfigured], ['https://cetamesh.com', true]);
   check('About 给出 GitCode 与 GitHub', info.links.gitcode.includes('gitcode.com') && info.links.github.includes('github.com'));
   equal('About 许可证名称', info.legal.license.name, 'GPL-3.0-only');
   check('About 隐私说明读自文档', info.legal.privacy.available === true && String(info.legal.privacy.summary).length > 0);
   check('About 安全说明读自文档', info.legal.security.available === true && String(info.legal.security.summary).length > 0);
-  equal('安全联系入口由 GitHub 私密报告推导', info.legal.security.contactSource, 'github-advisories');
-  check('安全联系入口是 https', String(info.legal.security.contact).startsWith('https://'));
+  equal('未配置的安全页面不从仓库地址推导', [info.legal.security.contactSource, info.legal.security.contact], ['unconfigured', null]);
   equal('无发布清单时如实报不可用', [info.release.available, info.release.version], [false, null]);
 
   const buildDir = track(tmpDir('cetamesh-d-build-'));
@@ -92,12 +91,14 @@ try {
     read: () => ({
       schemaVersion: 1,
       developer: '示例开发者',
-      website: 'https://cetamesh.example.com',
+      productLinks: { officialUrls: { website: 'https://cetamesh.example.com', websiteRepository: 'https://github.example.com/ceta-site' }, paths: { docs: null } },
       security: { contact: 'https://security.example.com/report' },
       feedback: { baseUrl: 'https://feedback.example.com' }
     })
   });
   equal('发行配置可提供开发者与官网', [configured.config.developer, configured.config.website], ['示例开发者', 'https://cetamesh.example.com']);
+  equal('productLinks.officialUrls 集中提供官网与官网构建仓库', [configured.config.productLinks.officialUrls.website,
+    configured.config.productLinks.officialUrls.websiteRepository], ['https://cetamesh.example.com', 'https://github.example.com/ceta-site']);
   equal('readiness 反映配置完整度', configured.readiness, {
     developerConfigured: true,
     websiteConfigured: true,

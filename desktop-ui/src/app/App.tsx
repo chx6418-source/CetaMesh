@@ -43,7 +43,7 @@ export function App() {
   const setTheme = useUi((state) => state.setTheme);
   const [activeSessionId, setActiveSessionId] = useState(sessions[0].id);
   const [hostStatus, setHostStatus] = useState<'preview' | 'checking' | 'ready' | 'offline'>(window.ipc ? 'checking' : 'preview');
-  const [about, setAbout] = useState<AboutView>({ version: '1.0.0-rc.2', buildId: 'UX-v2-exploration', developer: 'CetaMesh Team', website: null, gitcode: 'https://gitcode.com/ygdnn/CetaMesh', github: 'https://github.com/chx6418-source/whalebridge' });
+  const [about, setAbout] = useState<AboutView>({ version: '1.0.0-rc.2', buildId: 'UX-v2-exploration', developer: null, website: null, gitcode: null, github: null });
 
   useEffect(() => { document.documentElement.dataset.theme = theme; }, [theme]);
   useEffect(() => {

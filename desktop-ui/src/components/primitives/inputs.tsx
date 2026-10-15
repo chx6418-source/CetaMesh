@@ -19,13 +19,25 @@ export function SearchInput({ label, ...props }: ComponentProps<'input'> & { lab
   return <label className="cm-search"><span className="sr-only">{label}</span><Icon name="search" size={16} /><Input type="search" aria-label={label} {...props} /></label>;
 }
 type SelectOptionProps = { value?: string; disabled?: boolean; children?: ReactNode };
+export function normalizeSelectOptionLabel(...candidates: unknown[]): string {
+  for (const candidate of candidates) {
+    if (typeof candidate !== 'string' && typeof candidate !== 'number') continue;
+    const label = String(candidate).trim();
+    if (label) return label;
+  }
+  return '未命名选项';
+}
 export function Select({ label, children, value, disabled = false, className = '', id, onChange }: Omit<ComponentProps<'select'>, 'children' | 'onChange'> & { label: string; children: ReactNode; onChange?: ComponentProps<'select'>['onChange'] }) {
   const generatedId = useId();
   const controlId = id ?? generatedId;
   const listId = `${controlId}-options`;
   const options = useMemo(() => Children.toArray(children)
     .filter((item): item is ReactElement<SelectOptionProps> => isValidElement<SelectOptionProps>(item) && item.type === 'option')
-    .map(item => ({ value: String(item.props.value ?? item.props.children ?? ''), label: typeof item.props.children === 'string' || typeof item.props.children === 'number' ? String(item.props.children) : '', disabled: item.props.disabled === true })), [children]);
+    .map(item => ({
+        value: String(item.props.value ?? (typeof item.props.children === 'string' || typeof item.props.children === 'number' ? item.props.children : '')),
+      label: normalizeSelectOptionLabel(item.props.children, item.props.value),
+      disabled: item.props.disabled === true
+    })), [children]);
   const currentValue = String(value ?? '');
   const selectedIndex = Math.max(0, options.findIndex(option => option.value === currentValue));
   const [open, setOpen] = useState(false);

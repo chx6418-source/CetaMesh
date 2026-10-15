@@ -91,28 +91,59 @@ function resolveNpmShimScript(executable, exists = fs.existsSync) {
   return null;
 }
 
-/** Resolve executable files directly from PATH without invoking a shell. */
-export function findCliExecutable(name, { env = process.env, platform = process.platform, exists = fs.existsSync } = {}) {
+function environmentValue(env, key) {
+  return Object.entries(env ?? {}).find(([name]) => name.toUpperCase() === key.toUpperCase())?.[1] ?? '';
+}
+
+function isFile(candidate) {
+  try { return fs.statSync(candidate).isFile(); }
+  catch (error) {
+    if (!['ENOENT', 'ENOTDIR', 'EACCES'].includes(error?.code)) throw error;
+    return false;
+  }
+}
+
+/** Resolve executable files directly without shell invocation, including Windows GUI npm shims. */
+export function findCliExecutable(name, {
+  env = process.env, platform = process.platform, exists = fs.existsSync, whereImpl = spawnSync
+} = {}) {
   const requested = String(name ?? '').trim();
   if (!requested) return null;
   if (path.isAbsolute(requested) || requested.includes(path.sep) || requested.includes('/')) {
     try { return exists(requested) ? path.resolve(requested) : null; } catch { /* An invalid explicit path is treated as not installed. */ return null; }
   }
-  const pathValue = Object.entries(env ?? {}).find(([key]) => key.toUpperCase() === 'PATH')?.[1] ?? '';
+  const pathValue = environmentValue(env, 'PATH');
   const extensions = platform === 'win32'
-    ? (String(Object.entries(env ?? {}).find(([key]) => key.toUpperCase() === 'PATHEXT')?.[1] ?? '.EXE;.COM')
-      .split(';').filter(Boolean).map((ext) => ext.toLowerCase()))
+    ? [...new Set([
+      ...String(environmentValue(env, 'PATHEXT') || '.EXE;.COM').split(';').filter(Boolean).map(ext => ext.toLowerCase()),
+      '.exe', '.com', '.bat', '.cmd'
+    ])]
     : [''];
   const candidates = path.extname(requested) ? [requested] : [requested, ...extensions.map((ext) => `${requested}${ext}`)];
-  for (const directory of String(pathValue).split(path.delimiter).filter(Boolean)) {
+  const directories = String(pathValue).split(path.delimiter).filter(Boolean);
+  if (platform === 'win32') {
+    const appData = environmentValue(env, 'APPDATA');
+    const localAppData = environmentValue(env, 'LOCALAPPDATA');
+    const userProfile = environmentValue(env, 'USERPROFILE');
+    directories.push(
+      appData && path.join(appData, 'npm'),
+      localAppData && path.join(localAppData, 'npm'),
+      appData && path.join(appData, 'pnpm'),
+      localAppData && path.join(localAppData, 'pnpm'),
+      environmentValue(env, 'PNPM_HOME'),
+      userProfile && path.join(userProfile, 'AppData', 'Local', 'pnpm')
+    );
+    const where = whereImpl('where.exe', [requested], { encoding: 'utf8', windowsHide: true, env });
+    if (where?.status === 0) {
+      for (const result of String(where.stdout ?? '').split(/\r?\n/).map(line => line.trim()).filter(Boolean)) {
+        if (isFile(result)) return path.resolve(result);
+      }
+    }
+  }
+  for (const directory of [...new Set(directories.filter(Boolean))]) {
     for (const candidate of candidates) {
       const full = path.resolve(directory, candidate);
-      try {
-        const stat = fs.statSync(full);
-        if (stat.isFile()) return full;
-      } catch (error) {
-        if (!['ENOENT', 'ENOTDIR', 'EACCES'].includes(error?.code)) throw error;
-      }
+      if (isFile(full)) return full;
     }
   }
   return null;

@@ -3,15 +3,28 @@
   "product": "CetaMesh",
   "edition": "Desktop",
   "developer": "",
-  "website": "",
-  "repositories": {
-    "gitcode": "https://gitcode.com/ygdnn/CetaMesh",
-    "github": "https://github.com/chx6418-source/whalebridge"
+  "productLinks": {
+    "officialUrls": {
+      "website": "https://cetamesh.com",
+      "websiteRepository": "https://github.com/chx6418-source/cetamesh-web",
+      "gitcode": "https://gitcode.com/ygdnn/CetaMesh",
+      "github": "https://github.com/chx6418-source/whalebridge",
+      "license": "https://www.gnu.org/licenses/gpl-3.0.html"
+    },
+    "paths": {
+      "general": "/feedback",
+      "bug": "/feedback",
+      "feature": "/feedback",
+      "security": "/security",
+      "docs": null,
+      "privacy": null,
+      "terms": null,
+      "pluginDocs": null
+    }
   },
   "license": {
     "name": "GPL-3.0-only",
-    "file": "LICENSE",
-    "url": "https://www.gnu.org/licenses/gpl-3.0.html"
+    "file": "LICENSE"
   },
   "privacy": {
     "doc": "docs/product/PRIVACY.md"
@@ -19,14 +32,5 @@
   "security": {
     "doc": "docs/product/SECURITY.md",
     "contact": ""
-  },
-  "feedback": {
-    "baseUrl": "",
-    "paths": {
-      "general": "/feedback",
-      "bug": "/feedback",
-      "feature": "/feedback",
-      "security": "/security"
-    }
   }
 }

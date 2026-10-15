@@ -27,7 +27,7 @@ export interface Memory {
 }
 export type AgentStatus = 'ready' | 'needs-setup' | 'descriptor-incomplete' | 'not-installed' | 'unavailable' | 'not-supported' | 'not-checked';
 export interface Agent {
-  id: string; name: string; role: string; description: string; available: boolean; status: AgentStatus;
+  id: string; name: string; role: string; description: string; available: boolean; installed: boolean; authenticated: boolean | null; status: AgentStatus;
   eligible: boolean; configured: boolean; reason: string | null; lastError: string | null; workspaceBoundary: string | null;
   version: string | null; desktopApp: { installed: boolean; running: boolean; status: string; version: string | null } | null;
 }
@@ -217,9 +217,9 @@ export const chatClient = {
     archive: (id: string, archived = true) => uiCall<ChatSession>('ui.chat.sessions.archive', { id, archived }),
     remove: (id: string) => uiCall<{ id: string; deleted: boolean }>('ui.chat.sessions.delete', { id })
   },
-  history: (id: string, limit = 100, beforeMessageId: string | null = null) => uiCall<{
+  history: (id: string, limit = 100, beforeMessageId: string | null = null, afterMessageId: string | null = null) => uiCall<{
     id: string; total: number; messages: ChatMessage[]; nextBeforeMessageId: string | null; hasMore: boolean
-  }>('ui.chat.history', { id, limit, beforeMessageId }),
+  }>('ui.chat.history', { id, limit, beforeMessageId, afterMessageId }),
   status: (id: string) => uiCall<{ id: string; dshSessionAlive: boolean; state: string; requestId: string | null; statusMessage: string | null; retryCount: number; followState: string; followError: string | null; displayText: string; toolActivity: ChatMessage['toolActivity']; agentActivity: ChatMessage['agentActivity']; error: string | null; errorCode: string | null; approvalId: string | null; approvalExpiresAt: string | number | null; routing: Record<string, unknown> }>('ui.chat.status', { id }),
   send: (id: string, text: string, attachments: Attachment[] = [], clientMessageId?: string) => uiCall<{ userMessageId?: string; requestId?: string }>('ui.chat.send', { id, text, attachments, ...(clientMessageId ? { clientMessageId } : {}) }),
   stop: (id: string) => uiCall<{ stopped?: boolean; state?: string; reason?: string }>('ui.chat.stop', { id }),

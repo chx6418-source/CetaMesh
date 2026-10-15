@@ -6,7 +6,6 @@ export {
   RELEASE_CONFIG_FILENAME,
   RELEASE_CONFIG_VERSION,
   configReadiness,
-  deriveAdvisoryUrl,
   loadReleaseConfig,
   resolveFeedbackBaseUrl,
   resolveSecurityContact

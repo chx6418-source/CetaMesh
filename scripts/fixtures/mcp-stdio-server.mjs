@@ -18,7 +18,10 @@ if (mode === 'malformed') {
         args: process.argv.slice(2),
         cwd: process.cwd()
       };
-      if (crash === true) setTimeout(() => process.exit(73), 200);
+      if (crash === true) setTimeout(() => {
+        process.stderr.write('api_key=mcp-fixture-crash-secret\n');
+        process.exit(73);
+      }, 200);
       return { content: [{ type: 'text', text: JSON.stringify(payload) }] };
     }
   );

@@ -10,11 +10,21 @@ function indexMessages<T extends IdentifiedMessage>(messages: readonly T[]): { i
   return { ids, byId };
 }
 
-export function mergeLatestChatMessages<T extends IdentifiedMessage>(current: readonly T[], latest: readonly T[]): T[] {
+export function mergeLatestChatMessages<T extends IdentifiedMessage>(
+  current: readonly T[], latest: readonly T[], preserveCurrentIds: ReadonlySet<string> = new Set()
+): T[] {
   const currentIndex = indexMessages(current);
   const latestIndex = indexMessages(latest);
   const ids = [...currentIndex.ids, ...latestIndex.ids.filter(id => !currentIndex.byId.has(id))];
-  return ids.map(id => latestIndex.byId.get(id) ?? currentIndex.byId.get(id)!);
+  return ids.map(id => preserveCurrentIds.has(id)
+    ? currentIndex.byId.get(id)!
+    : latestIndex.byId.get(id) ?? currentIndex.byId.get(id)!);
+}
+
+export function mergeChatHistorySnapshot<T extends IdentifiedMessage>(
+  current: readonly T[], latest: readonly T[], sameSession: boolean, preserveCurrentIds: ReadonlySet<string> = new Set()
+): T[] {
+  return mergeLatestChatMessages(sameSession ? current : [], latest, preserveCurrentIds);
 }
 
 export function prependOlderChatMessages<T extends IdentifiedMessage>(current: readonly T[], older: readonly T[]): T[] {

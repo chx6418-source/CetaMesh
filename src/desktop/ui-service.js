@@ -174,6 +174,9 @@ function projectAgent(value) {
   const readiness = `${reason} ${healthStatus} ${string(row.status, 50)}`;
   const id = string(row.id ?? row.provider, 80);
   const available = row.available === true && health.available !== false;
+  const installed = typeof health.installed === 'boolean' ? health.installed
+    : typeof row.installed === 'boolean' ? row.installed : available;
+  const authenticated = typeof health.authenticated === 'boolean' ? health.authenticated : null;
   const workspaceBoundary = string(row.workspaceBoundary ?? health.workspaceBoundary, 80) || null;
   const requiresTask = ['capability-broker', 'staged-capability-broker'].includes(workspaceBoundary);
   const boundaryUnverified = workspaceBoundary === 'unverified';
@@ -187,7 +190,7 @@ function projectAgent(value) {
     id, name: string(row.displayName ?? row.label ?? id, 120),
     role: id === 'codex' ? '代码与项目' : id === 'dsh' ? '通用研究与协作' : '开发辅助',
     description: id === 'codex' ? '理解项目、修改代码并检查结果。' : id === 'dsh' ? '处理资料、规划和跨工具工作流。' : '在可用时连接本地开发能力。',
-    available, eligible: available && !requiresTask && !boundaryUnverified,
+    available, installed, authenticated, eligible: available && !requiresTask && !boundaryUnverified,
     configured: row.configured === true || health.configured === true,
     reason: reason || (boundaryUnverified ? 'descriptor-incomplete' : available && requiresTask ? 'task-required' : null), lastError, workspaceBoundary, status, version: string(row.version, 80) || null,
     desktopApp: id === 'dsh' ? {
@@ -452,7 +455,9 @@ export function createDesktopUiService({ services = {}, system = services.system
     'ui.chat.sessions.archive': async p => projectSession(await chat('chat.sessions.archive', { id: idParam(p), archived: p.archived !== false })),
     'ui.chat.sessions.delete': async p => selected(await chat('chat.sessions.delete', { id: idParam(p) }), ['id', 'deleted']),
     'ui.chat.history': async p => {
-      const result = await chat('chat.history', { id: idParam(p), limit: p.limit, beforeMessageId: p.beforeMessageId });
+      const result = await chat('chat.history', {
+        id: idParam(p), limit: p.limit, beforeMessageId: p.beforeMessageId, afterMessageId: p.afterMessageId
+      });
       return {
         id: string(result.id, 128), total: Number(result.total) || 0,
         messages: (result.messages ?? []).map(projectMessage),
