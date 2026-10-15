@@ -1480,7 +1480,7 @@ fn execute_install(
             std::thread::sleep(Duration::from_millis(400));
         }
         let _ = events.send(WorkerEvent::Output(
-            "已关闭运行中的 CetaMesh（安装完成后可重新打开）。".to_owned(),
+            "已请求关闭运行中的 CetaMesh，正在确认安装文件可替换…".to_owned(),
         ));
     }
 

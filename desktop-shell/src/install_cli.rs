@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use crate::installer::{
     CORE_EXE_NAME, InstallLayout, InstallManifest, InstallOptions, Payload, Plan, SHELL_EXE_NAME,
-    UninstallOptions, apply_plan, find_existing_install, plan_install, plan_repair, plan_uninstall,
+    UninstallOptions, apply_plan, check_not_in_use, find_existing_install, plan_install,
+    plan_repair, plan_uninstall,
 };
 use crate::migrate::{
     MigrateOptions, default_source_candidates, discover_candidates, plan_migrate,
@@ -167,6 +168,12 @@ pub fn parse(args: &[String]) -> Result<Option<InstallCli>, String> {
     let payload_core = arg_value(args, "--payload-core")
         .map(PathBuf::from)
         .unwrap_or_else(|| default_payload_core(&exe_dir));
+    let payload_version = product_version(&payload_core);
+    let version = if payload_version == "0.0.0" {
+        product_version(&exe_dir)
+    } else {
+        payload_version
+    };
 
     Ok(Some(InstallCli {
         command,
@@ -188,7 +195,7 @@ pub fn parse(args: &[String]) -> Result<Option<InstallCli>, String> {
         stop_core: has_flag(args, "--stop-core"),
         wait_pid: arg_value(args, "--wait-pid").and_then(|value| value.parse::<u32>().ok()),
         from: arg_value(args, "--from").map(PathBuf::from),
-        version: product_version(&exe_dir),
+        version,
     }))
 }
 
@@ -290,11 +297,15 @@ fn run_install(cli: &InstallCli, log: impl Fn(&str)) -> i32 {
     };
     // --stop-core：先结束占用安装目录的进程（只按本安装目录下的可执行路径匹配），
     // 典型场景是 DSH 通过 MCP 拉起的 5 个 WhaleBridgeCore.exe 子进程。
-    if cli.stop_core {
+    if cli.stop_core && !cli.dry_run {
         let stopped = stop_install_dir_processes(&cli.layout.install_dir, &log);
         log(&format!(
-            "--stop-core：已结束 {stopped} 个占用进程（装完请重启 DSH）"
+            "--stop-core：已确认退出 {stopped} 个占用进程（装完请重启 DSH）"
         ));
+        if let Err(error) = wait_for_install_files_released(&cli.layout, Duration::from_secs(8)) {
+            eprintln!("[whalebridge-installer] 目标文件仍被占用，安装尚未修改任何文件。请完全退出 DSH 后重试。{error}");
+            return 1;
+        }
     }
     let options = InstallOptions {
         version: cli.version.clone(),
@@ -338,26 +349,33 @@ fn run_install(cli: &InstallCli, log: impl Fn(&str)) -> i32 {
 /// 结束"可执行文件位于本安装目录内"的进程。只按路径精确匹配，绝不按进程名模糊查杀，
 /// 因此不会误伤用户用 BAT/VBS 跑的同名程序或其它目录的副本。
 fn stop_install_dir_processes(install_dir: &Path, log: &impl Fn(&str)) -> usize {
-    let target = install_dir.to_string_lossy().to_lowercase();
+    let target = install_dir.to_string_lossy().to_lowercase().replace('/', "\\");
+    let prefix = format!("{}\\", target.trim_end_matches('\\'));
     let script = format!(
-        "$p = Get-CimInstance Win32_Process | Where-Object {{ $_.ExecutablePath -and \
-         $_.ExecutablePath.ToLower().StartsWith('{}') }}; \
+        "$ErrorActionPreference = 'Stop'; \
+         $p = @(Get-CimInstance Win32_Process | Where-Object {{ $_.ExecutablePath -and \
+         $_.ExecutablePath.ToLower().StartsWith('{}') }}); \
          $p | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}; \
-         @($p).Count",
-        target.replace('\'', "''")
+         Start-Sleep -Milliseconds 200; \
+         @($p | Where-Object {{ -not (Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue) }}).Count",
+        prefix.replace('\'', "''")
     );
     let output = hidden("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .output();
     match output {
         Ok(result) => {
+            if !result.status.success() {
+                log("  无法检查占用进程；安装器将直接检查目标文件锁");
+                return 0;
+            }
             let count = String::from_utf8_lossy(&result.stdout)
                 .trim()
                 .parse::<usize>()
                 .unwrap_or(0);
             if count > 0 {
                 log(&format!(
-                    "  已结束 {count} 个来自 {} 的进程",
+                    "  已确认退出 {count} 个来自 {} 的进程",
                     install_dir.display()
                 ));
             }
@@ -369,6 +387,32 @@ fn stop_install_dir_processes(install_dir: &Path, log: &impl Fn(&str)) -> usize 
             ));
             0
         }
+    }
+}
+
+/// Windows may keep an image section locked briefly after process exit; DSH can also relaunch
+/// an MCP child. Require consecutive unlocked observations before any install snapshot is taken.
+fn wait_for_install_files_released(layout: &InstallLayout, timeout: Duration) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut quiet_observations = 0;
+    let mut last_error = String::new();
+    loop {
+        match check_not_in_use(layout) {
+            Ok(()) => {
+                quiet_observations += 1;
+                if quiet_observations >= 2 {
+                    return Ok(());
+                }
+            }
+            Err(error) => {
+                quiet_observations = 0;
+                last_error = error;
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(last_error);
+        }
+        std::thread::sleep(Duration::from_millis(250));
     }
 }
 
@@ -666,6 +710,83 @@ mod tests {
             PathBuf::from("C:\\Program Files\\CetaMesh"),
             "无法确定 LOCALAPPDATA 时退回 Program Files\\CetaMesh"
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn install_file_gate_waits_for_a_released_core_lock() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let root = temp_dir("core-lock-release");
+        let install_dir = root.join("Programs").join("CetaMesh");
+        fs::create_dir_all(&install_dir).unwrap();
+        let core = install_dir.join(CORE_EXE_NAME);
+        fs::write(&core, b"existing-core").unwrap();
+        let lock = fs::OpenOptions::new().read(true).share_mode(0).open(&core).unwrap();
+        let layout = InstallLayout {
+            install_dir,
+            data_dir: root.join("data"),
+            start_menu_dir: root.join("start-menu"),
+            desktop_dir: root.join("desktop"),
+            registry_key: format!("HKCU\\Software\\WhaleBridgeTest\\{}", std::process::id()),
+            create_desktop_shortcut: false,
+        };
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(350));
+            drop(lock);
+        });
+
+        assert!(wait_for_install_files_released(&layout, Duration::from_secs(2)).is_ok());
+        release.join().unwrap();
+        assert_eq!(fs::read(&core).unwrap(), b"existing-core");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn install_file_gate_times_out_without_changing_locked_core() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let root = temp_dir("core-lock-timeout");
+        let install_dir = root.join("Programs").join("CetaMesh");
+        fs::create_dir_all(&install_dir).unwrap();
+        let core = install_dir.join(CORE_EXE_NAME);
+        fs::write(&core, b"existing-core").unwrap();
+        let lock = fs::OpenOptions::new().read(true).share_mode(0).open(&core).unwrap();
+        let layout = InstallLayout {
+            install_dir,
+            data_dir: root.join("data"),
+            start_menu_dir: root.join("start-menu"),
+            desktop_dir: root.join("desktop"),
+            registry_key: format!("HKCU\\Software\\WhaleBridgeTest\\{}", std::process::id()),
+            create_desktop_shortcut: false,
+        };
+
+        let error = wait_for_install_files_released(&layout, Duration::from_millis(300)).unwrap_err();
+        assert!(error.contains(CORE_EXE_NAME));
+        drop(lock);
+        assert_eq!(fs::read(&core).unwrap(), b"existing-core");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn installer_cli_uses_the_staged_payload_version() {
+        let root = temp_dir("staged-version");
+        let payload = root.join("expanded-payload");
+        fs::create_dir_all(payload.join("resources")).unwrap();
+        fs::write(
+            payload.join("resources").join("product.json"),
+            r#"{"version":"1.0.0-rc.2"}"#,
+        ).unwrap();
+        let cli = parse(&[
+            "--install".to_owned(),
+            "--payload-core".to_owned(),
+            payload.display().to_string(),
+            "--install-dir".to_owned(),
+            root.join("install").display().to_string(),
+        ]).unwrap().unwrap();
+        assert_eq!(cli.version, "1.0.0-rc.2");
         fs::remove_dir_all(root).unwrap();
     }
 

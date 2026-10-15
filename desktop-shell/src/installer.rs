@@ -8,7 +8,7 @@
 //! 安装物清单写在 `<安装目录>\install-manifest.json`：卸载时只移除清单里记录的、且内容未被
 //! 用户改过的文件，这与 DSH 集成的归属模型（ADR-008/ADR-012）保持一致。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -489,9 +489,13 @@ pub fn plan_install(
 ) -> Result<Plan, String> {
     let mut plan = Plan::new(if is_upgrade { "升级" } else { "安装" }, layout);
     // 先检查目标文件是否被占用：不通过就直接给出可操作的指引，不要走到复制阶段才报文件锁。
-    if !options.stop_core {
-        check_not_in_use(layout)?;
-    }
+    check_not_in_use(layout).map_err(|error| {
+        if options.stop_core {
+            format!("已尝试结束占用进程，但安装文件仍无法替换。请完全退出 DSH 后重试。\n{error}")
+        } else {
+            error
+        }
+    })?;
     let pairs = payload_files(payload)?;
 
     let mut installed_files = BTreeMap::new();
@@ -992,30 +996,54 @@ pub fn apply_plan_with_backup(
     backup_dir: &Path,
 ) -> Result<Applied, String> {
     let mut snapshots: Vec<Snapshot> = Vec::new();
+    let mut snapshot_indices = BTreeMap::new();
+    let mut touched = BTreeSet::new();
     let mut registry_keys: Vec<String> = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
 
     let result = (|| -> Result<(), String> {
         for effect in &plan.effects {
-            if let Effect::RegistryKey { key, .. } | Effect::RemoveRegistryKey { key } = effect {
-                registry_keys.push(key.clone());
-            }
             for path in effect_paths(effect) {
                 let key = path.display().to_string();
                 if !seen.insert(key) {
                     continue;
                 }
+                let index = snapshots.len();
                 snapshots.push(
-                    snapshot_path(&path, backup_dir, snapshots.len())
+                    snapshot_path(&path, backup_dir, index)
                         .map_err(|error| format!("快照 {} 失败：{error}", path.display()))?,
                 );
+                snapshot_indices.insert(path, index);
             }
         }
         for effect in &plan.effects {
             // 阶段标记：安装器 UI 用它把进度映射到用户可读的安装阶段；命令行输出一并可见。
             log(&format!("[stage] {}", describe(effect)));
+            if let Effect::RegistryKey { key, .. } | Effect::RemoveRegistryKey { key } = effect {
+                if !registry_keys.contains(key) {
+                    backup_registry(key, backup_dir)?;
+                    registry_keys.push(key.clone());
+                }
+            }
+            let paths = effect_paths(effect);
+            // CopyFile stages then atomically replaces its target. A failed replacement has
+            // not changed the target, so it must not be restored while another process locks it.
+            if !matches!(effect, Effect::CopyFile { .. }) {
+                for path in &paths {
+                    if let Some(index) = snapshot_indices.get(path) {
+                        touched.insert(*index);
+                    }
+                }
+            }
             apply_effect(effect, log, backup_dir)
                 .map_err(|error| format!("[{}] {error}", describe(effect)))?;
+            if matches!(effect, Effect::CopyFile { .. }) {
+                for path in &paths {
+                    if let Some(index) = snapshot_indices.get(path) {
+                        touched.insert(*index);
+                    }
+                }
+            }
         }
         Ok(())
     })();
@@ -1028,7 +1056,10 @@ pub fn apply_plan_with_backup(
         Err(error) => {
             log(&format!("执行失败，正在回滚：{error}"));
             let mut rollback_errors = Vec::new();
-            for snapshot in snapshots.iter().rev() {
+            for (index, snapshot) in snapshots.iter().enumerate().rev() {
+                if !touched.contains(&index) {
+                    continue;
+                }
                 if let Err(rollback_error) = restore_snapshot(snapshot) {
                     rollback_errors.push(rollback_error);
                 }
@@ -1259,7 +1290,51 @@ fn same_path(a: &Path, b: &Path) -> bool {
     }
 }
 
-fn apply_effect(effect: &Effect, log: &dyn Fn(&str), backup_dir: &Path) -> Result<(), String> {
+/// Stage in the destination directory, then replace in one filesystem operation. If Core
+/// becomes busy after the install preflight, the old executable remains byte-for-byte intact.
+fn copy_file_atomically(from: &Path, to: &Path) -> std::io::Result<()> {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| value.as_nanos())
+        .unwrap_or(0);
+    let name = to.file_name().map(|value| value.to_string_lossy()).unwrap_or_default();
+    let staging = to.with_file_name(format!(".{name}.wb-stage-{}-{nonce}", std::process::id()));
+    let result = (|| {
+        fs::copy(from, &staging)?;
+        if fs::symlink_metadata(to).is_ok() {
+            replace_existing_file(to, &staging)
+        } else {
+            fs::rename(&staging, to)
+        }
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&staging);
+    }
+    result
+}
+
+#[cfg(windows)]
+fn replace_existing_file(to: &Path, staging: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::ReplaceFileW;
+
+    let wide = |path: &Path| path.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<_>>();
+    let target = wide(to);
+    let replacement = wide(staging);
+    // SAFETY: both paths are NUL-terminated UTF-16, and no handles or pointers escape this call.
+    let ok = unsafe {
+        ReplaceFileW(target.as_ptr(), replacement.as_ptr(), std::ptr::null(), 0,
+            std::ptr::null(), std::ptr::null())
+    };
+    if ok == 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) }
+}
+
+#[cfg(not(windows))]
+fn replace_existing_file(to: &Path, staging: &Path) -> std::io::Result<()> {
+    fs::rename(staging, to)
+}
+
+fn apply_effect(effect: &Effect, log: &dyn Fn(&str), _backup_dir: &Path) -> Result<(), String> {
     match effect {
         Effect::CopyFile { from, to } => {
             if let Some(parent) = to.parent() {
@@ -1271,7 +1346,7 @@ fn apply_effect(effect: &Effect, log: &dyn Fn(&str), backup_dir: &Path) -> Resul
                     )
                 })?;
             }
-            fs::copy(from, to).map_err(|error| {
+            copy_file_atomically(from, to).map_err(|error| {
                 format!(
                     "复制失败 {} → {}：{error}{}",
                     from.display(),
@@ -1315,7 +1390,6 @@ fn apply_effect(effect: &Effect, log: &dyn Fn(&str), backup_dir: &Path) -> Resul
             description,
         } => create_shortcut(path, target, args, workdir, description, log),
         Effect::RegistryKey { key, values } => {
-            backup_registry(key, backup_dir)?;
             for (name, value) in values {
                 // 注册表写入偶发瞬时失败（例如刚删除过同名键、句柄尚未释放），
                 // 实测出现过一次 ERROR_ACCESS_DENIED；这里做有限重试再判失败。
@@ -1344,7 +1418,6 @@ fn apply_effect(effect: &Effect, log: &dyn Fn(&str), backup_dir: &Path) -> Resul
             Ok(())
         }
         Effect::RemoveRegistryKey { key } => {
-            backup_registry(key, backup_dir)?;
             let status = hidden("reg.exe")
                 .args(["delete", key, "/f"])
                 .stdout(Stdio::null())
@@ -2024,6 +2097,88 @@ mod tests {
     fn installer_registry_probe_uses_and_cleans_an_isolated_key() {
         // If this host is restricted, the exact registry integration is explicitly reported as NRE.
         let _ = registry_write_available();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stop_core_upgrade_still_rejects_a_locked_installed_core() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let root = temp_dir("locked-upgrade-preflight");
+        let payload = fake_payload(&root);
+        let layout = layout(&root);
+        let _cleanup = FixtureCleanup::new(&root, &layout.registry_key);
+        fs::create_dir_all(&layout.install_dir).unwrap();
+        let installed_core = layout.install_dir.join(CORE_EXE_NAME);
+        fs::write(&installed_core, b"installed-core").unwrap();
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&installed_core)
+            .unwrap();
+
+        let mut upgrade_options = options();
+        upgrade_options.stop_core = true;
+        let result = plan_install(&layout, &payload, &upgrade_options, true);
+        assert!(result.unwrap_err().contains(CORE_EXE_NAME));
+        drop(lock);
+        assert_eq!(fs::read(&installed_core).unwrap(), b"installed-core");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn copy_lock_race_rolls_back_only_changed_files_and_keeps_registry() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let root = temp_dir("locked-upgrade-rollback");
+        let layout = layout(&root);
+        let _cleanup = FixtureCleanup::new(&root, &layout.registry_key);
+        fs::create_dir_all(&layout.install_dir).unwrap();
+        let shell = layout.install_dir.join(SHELL_EXE_NAME);
+        let core = layout.install_dir.join(CORE_EXE_NAME);
+        fs::write(&shell, b"old-shell").unwrap();
+        fs::write(&core, b"old-core").unwrap();
+        let new_shell = root.join("new-shell.exe");
+        let new_core = root.join("new-core.exe");
+        fs::write(&new_shell, b"new-shell").unwrap();
+        fs::write(&new_core, b"new-core").unwrap();
+        let mut plan = Plan::new("升级", &layout);
+        plan.effects.push(Effect::CopyFile { from: new_shell, to: shell.clone() });
+        plan.effects.push(Effect::CopyFile { from: new_core, to: core.clone() });
+        let registry_can_write = registry_write_available();
+        if registry_can_write {
+            let status = hidden("reg.exe")
+                .args(["add", &layout.registry_key, "/v", "Sentinel", "/t", "REG_SZ", "/d", "preserve", "/f"])
+                .status().unwrap();
+            assert!(status.success());
+            plan.effects.push(Effect::RegistryKey {
+                key: layout.registry_key.clone(),
+                values: vec![("Future".to_owned(), "never-applied".to_owned())],
+            });
+        }
+        // Recreate the production race: snapshot succeeds, then an external process
+        // reopens Core just before the install effect attempts to replace it.
+        let lock = std::sync::Mutex::new(None);
+        let log = |message: &str| {
+            if message.starts_with("[stage] 复制 ") && message.contains(CORE_EXE_NAME) {
+                *lock.lock().unwrap() = Some(fs::OpenOptions::new()
+                    .read(true)
+                    .share_mode(0)
+                    .open(&core)
+                    .unwrap());
+            }
+        };
+        let error = apply_plan_with_backup(&plan, &log, &root.join("backup")).unwrap_err();
+        assert!(error.contains("已回滚"), "{error}");
+        drop(lock.lock().unwrap().take());
+        assert_eq!(fs::read(&shell).unwrap(), b"old-shell");
+        assert_eq!(fs::read(&core).unwrap(), b"old-core");
+        if registry_can_write {
+            let query = hidden("reg.exe")
+                .args(["query", &layout.registry_key, "/v", "Sentinel"])
+                .output().unwrap();
+            assert!(query.status.success(), "unreached registry effect removed the existing key");
+        }
     }
 
     #[test]

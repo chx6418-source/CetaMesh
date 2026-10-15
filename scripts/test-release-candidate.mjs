@@ -364,6 +364,18 @@ try {
     /^[0-9a-f]{7,40}$/i.test(String(installedBuildInfo.commit ?? '')),
     `build-info 必须记录 commit SHA：${installedBuildInfo.commit}`
   );
+  // The IExpress wizard runs a shell copied to an extraction directory and passes the
+  // payload separately. The CLI must read that payload's version, not report 0.0.0.
+  const extractionDir = path.join(sandboxRoot, '安装包 临时展开');
+  fs.mkdirSync(extractionDir, { recursive: true });
+  const extractedShell = path.join(extractionDir, 'WhaleBridge.exe');
+  fs.copyFileSync(path.join(RC_DIR, 'WhaleBridge.exe'), extractedShell);
+  const stagedUpgrade = spawnSync(extractedShell, [
+    '--install', '--payload-core', path.join(RC_DIR, 'payload'), ...sandboxArgs()
+  ], { encoding: 'utf8', env: process.env, timeout: 300000 });
+  assert.equal(stagedUpgrade.status, 0, `${stagedUpgrade.stdout ?? ''}${stagedUpgrade.stderr ?? ''}`);
+  const stagedManifest = JSON.parse(fs.readFileSync(path.join(installDir, 'install-manifest.json'), 'utf8'));
+  assert.equal(stagedManifest.version, releaseManifest.version, '解压目录运行的安装器必须写入 payload 的真实版本');
   step(
     `✅ 安装（中文+空格路径）：程序与资源就位；build-info ${installedBuildInfo.version} @ ${String(installedBuildInfo.commitShort ?? installedBuildInfo.commit).slice(0, 12)} → ${installDir}`
   );
