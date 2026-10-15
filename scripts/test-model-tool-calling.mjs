@@ -373,6 +373,13 @@ const emptyObjectSchema = {
     const session = await ui.execute({ method: 'ui.chat.sessions.create', params: { title: `Approval ${label}` } });
     await ui.execute({ method: 'ui.chat.config.set', params: { id: session.id, config: { modelProvider: 'fixture' } } });
     await ui.execute({ method: 'ui.chat.send', params: { id: session.id, text: 'Use the safe fixture once.' } });
+    const deadline = Date.now() + 2_000;
+    let sendStatus = null;
+    while (Date.now() < deadline) {
+      sendStatus = await ui.execute({ method: 'ui.chat.status', params: { id: session.id } });
+      if (sendStatus.state === 'waiting-approval' || sendStatus.error) break;
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
     return { calls, capabilityService, chatService, coordinator, eventBus, executed: () => executed, session, ui };
   }
 
@@ -512,8 +519,16 @@ const emptyObjectSchema = {
   const chat = createChatService({ modelRuntime, defaults: { model: 'fixture-default' },
     stateDir: path.join(temp, 'product-context-required'), requireProductContext: true });
   const session = await chat.execute({ method: 'chat.sessions.create', params: {} });
-  await assert.rejects(() => chat.execute({ method: 'chat.send', params: { id: session.id, text: 'Hello' } }),
-    error => error.code === 'PRODUCT_CONTEXT_UNAVAILABLE');
+  const ack = await chat.execute({ method: 'chat.send', params: { id: session.id, text: 'Hello' } });
+  assert.ok(ack.requestId, 'tool-capable send returns a request identity before the provider task finishes');
+  const deadline = Date.now() + 2_000;
+  let terminal = null;
+  while (Date.now() < deadline) {
+    terminal = await chat.execute({ method: 'chat.status', params: { id: session.id } });
+    if (terminal.turn?.state === 'error' || terminal.lastErrorCode) break;
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  assert.equal(terminal.lastErrorCode, 'PRODUCT_CONTEXT_UNAVAILABLE', 'late startup failures remain explicit in Chat status');
   chat.close();
   pass('production Chat fails closed when CetaMesh Product Context is unavailable');
 }
@@ -558,6 +573,33 @@ const emptyObjectSchema = {
     && message.content === 'Checking. ' && message.tool_calls),
   'streaming preserves assistant text and the OpenAI tool-call continuation record');
   pass('tool-capable Chat streams text through each Model turn while preserving Capability execution');
+}
+
+{
+  const counts = [1, 8, 9, 16];
+  for (const count of counts) {
+    let sideEffects = 0;
+    const broker = createCapabilityBroker({ policy: createCapabilityPolicy() });
+    broker.register({ id: 'fixture.counted', permission: 'log', description: 'Count bounded fixture calls.',
+      inputSchema: emptyObjectSchema, risk: 'low', execute: () => { sideEffects += 1; return { ok: true }; } });
+    const calls = Array.from({ length: count }, (_, index) => ({
+      id: `count-${count}-${index}`, capabilityId: 'fixture.counted', arguments: '{}'
+    }));
+    const { runtime } = modelRuntimeWith([{ text: '', toolCalls: calls }, { text: 'done', toolCalls: [] }]);
+    const coordinator = createToolExecutionCoordinator({ modelRuntime: runtime, capabilityBroker: broker,
+      stateDir: path.join(temp, `tool-batch-${count}`) });
+    const result = await coordinator.run({ providerId: 'fixture', messages: [{ role: 'user', content: 'bounded batch' }],
+      manifest: [{ id: 'fixture.counted', description: 'Count bounded fixture calls.', inputSchema: emptyObjectSchema }],
+      actor: OWNER_ACTOR, sessionId: `tool-batch-${count}`, turnId: `turn-${count}`, maxBatchCalls: 8 });
+    const assistantCalls = result.messages.find(message => message.role === 'assistant' && Array.isArray(message.tool_calls))?.tool_calls ?? [];
+    const toolResults = result.messages.filter(message => message.role === 'tool');
+    assert.equal(assistantCalls.length, count, `${count} model calls remain represented in the assistant continuation`);
+    assert.equal(toolResults.length, count, `${count} model calls each receive an explicit tool result`);
+    assert.equal(sideEffects, Math.min(count, 8), `${count} calls execute only within the 8-call batch limit`);
+    assert.equal(toolResults.filter(message => JSON.parse(message.content)?.error?.code === 'TOOL_CALL_LIMIT').length,
+      Math.max(0, count - 8), `${count} over-limit calls receive explicit errors without side effects`);
+  }
+  pass('1, 8, 9, and 16 Tool Calls all receive results while side effects stay within the batch limit');
 }
 
 {

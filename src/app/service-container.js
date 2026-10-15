@@ -183,6 +183,7 @@ export function createCetaMeshServices(options = {}) {
     requireProductContext: true,
     router: routerService,
     buildProductContext: request => productContextService?.buildForChat(request),
+    resolveWorkspace: workspaceId => workspaceService.describeWorkspace(workspaceId),
     platformRoute: request => platformRuntime.route(request),
     agentFollow: request => agentBroker.follow(request),
     defaults: dshDefaults,
@@ -221,11 +222,25 @@ export function createCetaMeshServices(options = {}) {
     modelRuntime,
     capabilityBroker: capabilityService.broker,
     stateDir,
-    actorResolver: ({ actorKind, actorId, scope }) => {
+    actorResolver: ({ actorKind, actorId, sessionId, scope }) => {
       if (actorKind === 'owner') return OWNER_ACTOR;
       if (actorKind === 'agent') {
-        const actor = capabilityService.principalForTask(scope?.taskId)?.actor;
-        return actor?.id === actorId ? actor : null;
+        const taskId = String(scope?.taskId ?? '');
+        const workspaceId = String(scope?.workspaceId ?? '');
+        const task = taskId && sessionId
+          ? taskService.runtime.findByAgent({ provider: 'cetamesh', sessionId })
+          : null;
+        if (!task || task.id !== taskId || task.workspaceId !== workspaceId) return null;
+        let actor;
+        try { actor = capabilityService.principalForTask(taskId); }
+        catch (error) {
+          if (['TASK_NOT_AUTHORIZED', 'TASK_NOT_FOUND'].includes(error?.code)) return null;
+          throw error;
+        }
+        if (actor.kind !== 'agent' || actor.id !== actorId
+          || !actor.grants?.taskIds?.includes(taskId)
+          || !actor.grants?.workspaceIds?.includes(workspaceId)) return null;
+        return actor;
       }
       return null;
     }

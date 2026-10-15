@@ -311,6 +311,7 @@ export function createOpenAiCompatibleModelProvider({
         let fullText = '';
         let usage = null;
         let finished = false;
+        let finishReasonSeen = false;
         let streamModel = null;
         const toolCalls = new Map();
         /** 处理一行 SSE：返回 true 表示遇到 [DONE]，流结束。 */
@@ -332,6 +333,7 @@ export function createOpenAiCompatibleModelProvider({
           if (payload?.model) streamModel = String(payload.model);
           if (payload?.usage && typeof payload.usage === 'object') usage = payload.usage;
           const choice = Array.isArray(payload?.choices) ? payload.choices[0] : null;
+          if (choice?.finish_reason !== null && choice?.finish_reason !== undefined) finishReasonSeen = true;
           const delta = choice?.delta;
           for (const toolDelta of Array.isArray(delta?.tool_calls) ? delta.tool_calls : []) {
             const index = Number.isInteger(toolDelta?.index) ? toolDelta.index : toolCalls.size;
@@ -409,6 +411,9 @@ export function createOpenAiCompatibleModelProvider({
             pendingEvents = [];
             for (const line of parser.flush()) consumeLine(line);
             for (const event of pendingEvents) yield event;
+          }
+          if (!finished && !finishReasonSeen) {
+            throw modelRuntimeError('MODEL_STREAM_INCOMPLETE', `「${label}」流式响应提前结束，缺少完成标记`, {});
           }
         } catch (error) {
           const aborted = signal?.aborted || error?.name === 'AbortError';

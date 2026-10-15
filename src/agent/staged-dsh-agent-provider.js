@@ -17,7 +17,7 @@ function withTurnFailure(item, event, message, code = 'WORKSPACE_IMPORT_FAILED')
 /** Preserve the DSH protocol while staging all Task writes for Capability Broker import. */
 export function createStagedDshAgentProvider({ provider, resolveTaskWorkspace, listWorkspaceRoots = () => [],
   excludedRoots = [], stagingRoot = null, createStage = createStagingWorkspace,
-  applyChanges, approvalStatus = () => null, log = () => {} } = {}) {
+  applyChanges, approvalStatus = () => null, cancelApproval = async () => ({ cancelled: false }), log = () => {} } = {}) {
   if (!provider || typeof provider.createSession !== 'function' || typeof provider.follow !== 'function') {
     throw agentProviderError('INVALID_PARAMS', 'A DSH Agent Provider is required for Task staging');
   }
@@ -69,6 +69,9 @@ export function createStagedDshAgentProvider({ provider, resolveTaskWorkspace, l
       const decision = await waitForApproval(session, result.approvalId, signal);
       session.waitingForApproval = null;
       if (decision.status !== 'completed') {
+        if (decision.status === 'cancelled' || session.cancelRequested || session.closed || signal?.aborted) {
+          await cancelApproval(result.approvalId);
+        }
         return { ok: false, error: decision.status === 'rejected' ? 'Owner rejected the Workspace import' : 'Workspace import did not complete',
           code: decision.code ?? 'WORKSPACE_IMPORT_FAILED' };
       }
@@ -81,6 +84,23 @@ export function createStagedDshAgentProvider({ provider, resolveTaskWorkspace, l
     }
     session.lastImportedTurn = turn ?? null;
     return { ok: true };
+  }
+
+  function reconcileTurnOnce(session, turn, signal) {
+    const key = String(turn?.turnId ?? turn?.id ?? turn ?? '').slice(0, 200);
+    if (!key) return reconcileTurn(session, turn, signal);
+    if (session.reconciledTurns.has(key)) return Promise.resolve({ ok: true, duplicate: true });
+    const existing = session.reconciliationInFlight.get(key);
+    if (existing) return existing;
+    const pending = reconcileTurn(session, turn, signal).then(outcome => {
+      if (outcome.ok) {
+        session.reconciledTurns.add(key);
+        while (session.reconciledTurns.size > 256) session.reconciledTurns.delete(session.reconciledTurns.values().next().value);
+      }
+      return outcome;
+    }).finally(() => session.reconciliationInFlight.delete(key));
+    session.reconciliationInFlight.set(key, pending);
+    return pending;
   }
 
   return Object.freeze({
@@ -128,7 +148,9 @@ export function createStagedDshAgentProvider({ provider, resolveTaskWorkspace, l
               waitingForApproval: null,
               cancelRequested: false,
               closed: false,
-              lastImportedTurn: null
+              lastImportedTurn: null,
+              reconciledTurns: new Set(),
+              reconciliationInFlight: new Map()
             });
             return { ...created, taskId: binding.task.id, workspaceId: binding.workspace.id, cwd: stage.root };
           } catch (error) {
@@ -144,7 +166,13 @@ export function createStagedDshAgentProvider({ provider, resolveTaskWorkspace, l
         async cancel({ sessionId } = {}) {
           const session = requireSession(sessionId);
           session.cancelRequested = true;
-          return provider.cancel({ sessionId });
+          const result = await provider.cancel({ sessionId });
+          const approvalId = session.waitingForApproval;
+          if (approvalId) {
+            await cancelApproval(approvalId);
+            return { ...(result ?? {}), approvalId, state: 'cancelled' };
+          }
+          return result;
         },
         async status({ sessionId } = {}) {
           const session = requireSession(sessionId);
@@ -163,11 +191,17 @@ export function createStagedDshAgentProvider({ provider, resolveTaskWorkspace, l
           const session = requireSession(sessionId);
           session.closed = true;
           session.cancelRequested = true;
+          let approvalError = null;
+          if (session.waitingForApproval) {
+            try { await cancelApproval(session.waitingForApproval); }
+            catch (error) { approvalError = error; }
+          }
           try { await provider.closeSession({ sessionId }); }
           finally {
             cleanupStagingWorkspace(session.stage);
             sessions.delete(session.id);
           }
+          if (approvalError) throw agentProviderError('WORKSPACE_IMPORT_CANCEL_FAILED', 'Pending Workspace import approval could not be revoked');
           return { closed: true, provider: provider.id, sessionId };
         },
         async selectModel(params = {}) {
@@ -183,7 +217,7 @@ export function createStagedDshAgentProvider({ provider, resolveTaskWorkspace, l
           for await (const item of provider.follow({ sessionId, signal })) {
             const event = item?.type === 'event' ? item.event : item;
             if (event?.type === 'turn/end' && event.data?.reason?.kind === 'completed') {
-              const outcome = await reconcileTurn(session, event.data?.turn, signal);
+              const outcome = await reconcileTurnOnce(session, event.data?.turn, signal);
               if (!outcome.ok) {
                 yield withTurnFailure(item, event, outcome.error, outcome.code);
                 continue;
@@ -198,6 +232,10 @@ export function createStagedDshAgentProvider({ provider, resolveTaskWorkspace, l
       for (const session of sessions.values()) {
         session.closed = true;
         session.cancelRequested = true;
+        if (session.waitingForApproval) {
+          try { await cancelApproval(session.waitingForApproval); }
+          catch (error) { log(`DSH Workspace import approval cancellation failed: ${error?.code ?? 'APPROVAL_CANCEL_FAILED'}`); }
+        }
         try { await provider.closeSession({ sessionId: session.id }); }
         catch (error) { log(`DSH session close failed: ${error?.code ?? 'PROVIDER_ERROR'}`); }
         try { cleanupStagingWorkspace(session.stage); }

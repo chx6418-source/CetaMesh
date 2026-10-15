@@ -99,6 +99,51 @@ try {
   const historyModelPath = path.join(UI_ROOT, 'src/app/chat-history.ts');
   assert.ok(fs.existsSync(historyModelPath), 'Chat deduplication uses a testable stable-ID history merge');
   const historyModel = await vite.ssrLoadModule('/src/app/chat-history.ts');
+  const asyncChatState = await vite.ssrLoadModule('/src/app/chat-async-state.ts');
+  const epochs = new asyncChatState.ChatRequestEpoch();
+  const requestA = epochs.begin('load', 'session-a');
+  const requestB = epochs.begin('load', 'session-b');
+  const requestC = epochs.begin('load', 'session-c');
+  assert.equal(epochs.isCurrent(requestA, 'session-c'), false, 'late history/state/memory from A is rejected after switching to C');
+  assert.equal(epochs.isCurrent(requestB, 'session-c'), false, 'late history/state/memory from B is rejected after switching to C');
+  assert.equal(epochs.isCurrent(requestC, 'session-c'), true, 'the most recent selected session request remains current');
+  const completions = [];
+  const finishLateRead = async (token, value, signal) => {
+    await signal;
+    if (epochs.isCurrent(token, 'session-c')) completions.push(value);
+  };
+  let releaseA; let releaseB; let releaseC;
+  const gateA = new Promise(resolve => { releaseA = resolve; });
+  const gateB = new Promise(resolve => { releaseB = resolve; });
+  const gateC = new Promise(resolve => { releaseC = resolve; });
+  const pendingA = finishLateRead(requestA, 'A', gateA);
+  const pendingB = finishLateRead(requestB, 'B', gateB);
+  const pendingC = finishLateRead(requestC, 'C', gateC);
+  releaseB(); await pendingB;
+  releaseA(); await pendingA;
+  releaseC(); await pendingC;
+  assert.deepEqual(completions, ['C'], 'delayed A/B responses finishing out of order cannot replace the current C conversation');
+  const repeated = epochs.begin('context', 'session-c');
+  assert.equal(epochs.isCurrent(requestC, 'session-c'), true, 'refreshing context does not invalidate the independent current history request');
+  assert.equal(epochs.isCurrent(epochs.begin('context', 'session-c'), 'session-c'), true, 'the latest context refresh remains current');
+  assert.equal(epochs.isCurrent(repeated, 'session-c'), false, 'an older context refresh cannot overwrite newer context data');
+  const streamBase = { displayText: '', requestId: 'request-old', state: 'streaming', retryCount: 0, statusMessage: null, toolActivity: [], agentActivity: null };
+  const streamed = asyncChatState.applyChatStreamUpdates(streamBase, [
+    { sessionId: 'session-c', requestId: 'request-old', delta: 'stale-before-reset' },
+    { sessionId: 'session-c', requestId: 'request-new', reset: true, status: 'starting' },
+    ...Array.from({ length: 512 }, (_, index) => ({ sessionId: 'session-c', requestId: 'request-new', delta: String.fromCharCode(65 + index % 26) })),
+    { sessionId: 'session-c', requestId: 'request-old', delta: 'stale-after-reset' },
+    { sessionId: 'session-b', requestId: 'request-new', delta: 'cross-session' }
+  ], 'session-c', 'request-old');
+  const expectedStream = Array.from({ length: 512 }, (_, index) => String.fromCharCode(65 + index % 26)).join('');
+  assert.equal(streamed.displayText, expectedStream, 'frame batching preserves every ordered delta and rejects stale session/request events');
+  const orderedStream = asyncChatState.applyChatStreamUpdates({ ...streamBase, displayText: 'old' }, [
+    { sessionId: 'session-c', requestId: 'request-new', reset: true },
+    { sessionId: 'session-c', requestId: 'request-new', delta: 'first' },
+    { sessionId: 'session-c', requestId: 'request-new', replaceText: 'snapshot' },
+    { sessionId: 'session-c', requestId: 'request-new', delta: '+tail' }
+  ], 'session-c', 'request-old');
+  assert.equal(orderedStream.displayText, 'snapshot+tail', 'reset, replaceText, and delta are applied in event order');
   const latestMerge = historyModel.mergeLatestChatMessages(
     [{ id: 'm1', text: 'one' }, { id: 'm2', text: 'old' }],
     [{ id: 'm2', text: 'updated' }, { id: 'm3', text: 'first event' }, { id: 'm3', text: 'reconnected final' }]

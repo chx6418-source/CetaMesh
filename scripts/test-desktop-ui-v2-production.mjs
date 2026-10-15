@@ -380,8 +380,9 @@ check('Chat streaming is frame-batched and non-bottom reading exposes a latest-m
   assert.match(chat, /window\.requestAnimationFrame/);
   assert.match(chat, /window\.cancelAnimationFrame/);
   const streamSubscription = chat.slice(chat.indexOf("const offStreaming ="), chat.indexOf("const offApproval ="));
-  assert.match(streamSubscription, /update\.delta/);
-  assert.match(streamSubscription, /update\.replaceText/);
+  assert.match(streamSubscription, /streamUpdateRef\.current\.push\(data\)/);
+  assert.match(streamSubscription, /applyChatStreamUpdates\(current, updates, session\.id/);
+  assert.doesNotMatch(streamSubscription, /streamUpdateRef\.current = data/);
   assert.doesNotMatch(streamSubscription, /chatClient\.status/);
   assert.match(chat, /status\.agentActivity/);
   assert.match(messageBubble, /agent-activity/);

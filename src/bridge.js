@@ -1163,7 +1163,11 @@ async function main() {
   }
 
   // DSH 侧
-  const api = new NodeApiClient(cfg.dsh.baseUrl, { authCookie: cfg.dsh.authCookie, dshHome: cfg.dsh.homeDir || null, timeoutMs: 120_000 });
+  const api = new NodeApiClient(cfg.dsh.baseUrl, {
+    authCookie: () => cfg.dsh.authCookie,
+    dshHome: () => cfg.dsh.homeDir || null,
+    timeoutMs: 120_000
+  });
   let promptSeq = 0;
   // session/prompt 需要必填 requestId 与 mode；统一在这里补齐，失败时抛错（含端点信息）。
   async function promptSession(sessionId, content, mode = 'queue') {

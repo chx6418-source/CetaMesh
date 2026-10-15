@@ -11,6 +11,7 @@ export function bootstrapCetaMesh(options = {}) {
   // Shutdown runs in reverse registration order: stop Chat consumers before their
   // Agent provider, then release the Agent Broker after provider cleanup.
   lifecycle.register(() => services.agentService.close());
+  lifecycle.register(() => services.capabilityService.close());
   lifecycle.register(() => services.pluginCenterService.close());
   lifecycle.register(() => services.extensionService.close());
   lifecycle.register(() => services.managedAgent.close());

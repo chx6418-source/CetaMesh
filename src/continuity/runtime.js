@@ -395,7 +395,16 @@ export function createContinuityRuntime({
         : 'The current Provider has an unsupported Workspace boundary');
     }
     if (taskBoundaries.has(previousBoundary)) {
-      const status = await agentBroker.status(previousAgent);
+      let status;
+      try {
+        status = await agentBroker.status(previousAgent);
+      } catch (error) {
+        if (error?.code !== 'SESSION_NOT_FOUND') throw error;
+        // Core restart can leave a durable Task pointing at a Provider's lost
+        // in-memory session. Treat only that precise stale-reference result as
+        // inactive; all other status/auth/transport failures still fail closed.
+        status = { running: false, queued: 0, waitingForApproval: false, stale: true };
+      }
       if (status.running || status.queued > 0 || status.waitingForApproval) {
         throw continuityError('ROLLOVER_NOT_SAFE', 'Agent has active work or an unresolved Owner approval');
       }

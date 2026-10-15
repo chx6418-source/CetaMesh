@@ -60,11 +60,73 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
   const file = stateDir ? path.join(stateDir, 'capability', 'task-grants.json') : null;
   let grants = file && fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : {};
   const provisioning = new Map();
+  const taskFollowConsumers = new Map();
+  const TASK_FOLLOW_MAX_SESSIONS = 64;
   const workspaceImportStates = new Map();
   let approvalDecisionListener = null;
   const journalFile = stateDir ? path.join(stateDir, 'capability', 'requests.json') : null;
   const journal = journalFile && fs.existsSync(journalFile) ? JSON.parse(fs.readFileSync(journalFile, 'utf8')) : {};
   const requests = new Map();
+  function taskFollowKey(provider, sessionId) { return `${String(provider)}\u0000${String(sessionId)}`; }
+  function waitForTaskFollowRetry(ms, signal) {
+    return new Promise(resolve => {
+      const finish = () => { clearTimeout(timer); signal.removeEventListener('abort', finish); resolve(); };
+      const timer = setTimeout(finish, ms);
+      signal.addEventListener('abort', finish, { once: true });
+      if (signal.aborted) finish();
+    });
+  }
+  function ensureTaskFollow(provider, sessionId) {
+    const capabilities = agentBroker?.capabilities?.(provider);
+    if (capabilities?.workspaceBoundary !== 'capability-broker' || capabilities?.requiresSessionCleanup !== true) return null;
+    const key = taskFollowKey(provider, sessionId);
+    const current = taskFollowConsumers.get(key);
+    if (current && !current.controller.signal.aborted) return current;
+    if (current) taskFollowConsumers.delete(key);
+    if (taskFollowConsumers.size >= TASK_FOLLOW_MAX_SESSIONS) {
+      throw capabilityError('AGENT_FOLLOW_CAPACITY', 'Task Agent event consumers are at the configured capacity');
+    }
+    const controller = new AbortController();
+    const consumer = { provider, sessionId, controller, promise: null };
+    taskFollowConsumers.set(key, consumer);
+    consumer.promise = (async () => {
+      let failures = 0;
+      while (!controller.signal.aborted && failures < 5) {
+        let sawTurnEnd = false;
+        try {
+          for await (const item of agentBroker.follow({ provider, sessionId, signal: controller.signal })) {
+            if (controller.signal.aborted) break;
+            const event = item?.type === 'event' ? item.event : item;
+            if (event?.type === 'turn/end') sawTurnEnd = true;
+          }
+          if (controller.signal.aborted || sawTurnEnd) return;
+          throw capabilityError('AGENT_FOLLOW_DISCONNECTED', 'Task Agent event stream ended before turn completion');
+        } catch (error) {
+          if (controller.signal.aborted || error?.code === 'SESSION_NOT_FOUND') return;
+          failures += 1;
+          audit({ capability: 'agent.run', status: 'follow-retrying', code: error?.code ?? 'AGENT_FOLLOW_FAILED' });
+          if (failures >= 5) {
+            audit({ capability: 'agent.run', status: 'follow-error', code: error?.code ?? 'AGENT_FOLLOW_FAILED' });
+            return;
+          }
+          await waitForTaskFollowRetry(Math.min(250 * (2 ** (failures - 1)), 4000), controller.signal);
+        }
+      }
+    })().catch(error => {
+      audit({ capability: 'agent.run', status: 'follow-error', code: error?.code ?? 'AGENT_FOLLOW_FAILED' });
+    }).finally(() => {
+      if (taskFollowConsumers.get(key) === consumer) taskFollowConsumers.delete(key);
+    });
+    return consumer;
+  }
+  function stopTaskFollow(provider, sessionId) {
+    const key = taskFollowKey(provider, sessionId);
+    const consumer = taskFollowConsumers.get(key);
+    if (!consumer) return false;
+    consumer.controller.abort();
+    taskFollowConsumers.delete(key);
+    return true;
+  }
   function saveJournal() {
     if (!journalFile) return;
     fs.mkdirSync(path.dirname(journalFile), { recursive: true });
@@ -414,6 +476,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
           try {
             await agentBroker.status(task.currentAgent);
             if (r.signal?.aborted) throw capabilityError('INVOKE_CANCELLED', 'Agent assignment cancelled');
+            ensureTaskFollow(task.currentAgent.provider, task.currentAgent.sessionId);
             const sent = await agentBroker.send({ ...task.currentAgent, content: String(r.input.content || task.goal) });
             if (r.signal?.aborted) {
               try { await agentBroker.cancel(task.currentAgent); }
@@ -448,10 +511,12 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
             startedByRequest = true;
           }
           if (r.signal?.aborted) throw capabilityError('INVOKE_CANCELLED', 'Agent assignment cancelled');
+          ensureTaskFollow(provider, created.sessionId);
           const sent = await agentBroker.send({ provider, sessionId: created.sessionId, content: String(r.input.content || task.goal) });
           if (r.signal?.aborted) throw capabilityError('INVOKE_CANCELLED', 'Agent assignment cancelled');
           return { taskId: task.id, workspaceId: ws.id, provider, sessionId: created.sessionId, accepted: sent?.accepted === true, actor };
         } catch (error) {
+          if (created?.sessionId) stopTaskFollow(provider, created.sessionId);
           let current = taskFor(task.id);
           if (attached && current?.currentAgent?.sessionId === created?.sessionId) {
             try { current = taskRuntime.detachAgent({ id: task.id, expectedRev: current.rev, note: 'Agent initialization rolled back' }).task; }
@@ -562,6 +627,12 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
   }
   return { execute, executeWorkspace, executeMemory, broker, grantTask, principalForTask, refreshTaskWorkspaceGrant, memoryPrincipal,
     applyAgentWorkspaceChanges, workspaceImportStatus, cancelWorkspaceImportApproval,
+    async close() {
+      const consumers = [...taskFollowConsumers.values()];
+      for (const consumer of consumers) consumer.controller.abort();
+      await Promise.allSettled(consumers.map(consumer => consumer.promise));
+      taskFollowConsumers.clear();
+    },
     setApprovalDecisionListener(listener) {
       if (listener !== null && typeof listener !== 'function') throw capabilityError('INVALID_PARAMS', 'Approval decision listener must be a function');
       approvalDecisionListener = listener;

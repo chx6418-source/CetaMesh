@@ -45,6 +45,8 @@ const MAX_TITLE_CHARS = 200;
 const MAX_PROMPT_CHARS = 32 * 1024;
 const MAX_ATTACHMENTS = 8;
 const MAX_ATTACHMENT_CHARS = 256 * 1024;
+const MAX_ATTACHMENT_TOTAL_CHARS = 1024 * 1024;
+const MAX_SESSION_ATTACHMENT_CHARS = 16 * 1024 * 1024;
 const DEFAULT_HISTORY_PAGE_SIZE = 100;
 const MODEL_CATALOG_CACHE_MS = 30_000;
 const MAX_MESSAGES_RETURNED = 200;
@@ -234,6 +236,79 @@ export function createChatService({
     return Array.isArray(store?.messages) ? store.messages : [];
   }
 
+  function attachmentSessionDirectory(id) {
+    const key = crypto.createHash('sha256').update(String(id)).digest('hex');
+    return path.join(dir, 'attachment-payloads', key);
+  }
+
+  function attachmentPayloadFile(sessionId, messageId) {
+    const messageKey = crypto.createHash('sha256').update(String(messageId)).digest('hex');
+    return path.join(attachmentSessionDirectory(sessionId), `${messageKey}.json`);
+  }
+
+  function contentFingerprint(content) {
+    return crypto.createHash('sha256').update(String(content), 'utf8').digest('hex');
+  }
+
+  function attachmentFingerprint(attachments) {
+    const details = attachments.map(item => ({ name: item.name, mimeType: item.mimeType ?? null,
+      contentFingerprint: contentFingerprint(item.content) }));
+    return crypto.createHash('sha256').update(JSON.stringify(details), 'utf8').digest('hex');
+  }
+
+  function normalizeAttachments(value) {
+    const rows = Array.isArray(value) ? value.slice(0, MAX_ATTACHMENTS) : [];
+    let totalChars = 0;
+    const attachments = rows.map((attachment, index) => {
+      const name = requireText(String(attachment?.name ?? 'attachment'), `附件 ${index + 1} 名称`, 200);
+      const content = requireText(String(attachment?.content ?? ''), `附件「${name}」内容`, MAX_ATTACHMENT_CHARS);
+      totalChars += content.length;
+      const mimeType = attachment?.mimeType === undefined || attachment?.mimeType === null
+        ? null : requireText(String(attachment.mimeType), `附件「${name}」类型`, 80);
+      return { name, content, ...(mimeType ? { mimeType } : {}) };
+    });
+    if (totalChars > MAX_ATTACHMENT_TOTAL_CHARS) throw chatError('ATTACHMENT_SIZE_LIMIT', '单条消息附件总大小超过 1 MiB');
+    return attachments;
+  }
+
+  function persistAttachmentPayload(sessionId, messageId, attachments, fingerprint) {
+    if (!attachments.length) return;
+    const file = attachmentPayloadFile(sessionId, messageId);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    writeJsonAtomic(file, { schemaVersion: 1, fingerprint,
+      attachments: attachments.map(item => ({ ...item, contentFingerprint: contentFingerprint(item.content) })) });
+  }
+
+  function readAttachmentPayload(sessionId, message) {
+    const names = Array.isArray(message?.attachments) ? message.attachments : [];
+    if (!names.length) return [];
+    if (typeof message.attachmentFingerprint !== 'string' || !message.attachmentFingerprint) {
+      throw chatError('ATTACHMENTS_UNAVAILABLE', '这条历史消息没有可重试的附件正文');
+    }
+    const payload = readJsonFile(attachmentPayloadFile(sessionId, message.id), { missing: null, maxBytes: MAX_ATTACHMENT_TOTAL_CHARS * 4 });
+    if (!Array.isArray(payload?.attachments)) throw chatError('ATTACHMENTS_UNAVAILABLE', '本地附件正文缺失，无法安全重试');
+    const attachments = payload.attachments.map(item => ({ name: String(item?.name ?? ''),
+      content: String(item?.content ?? ''), ...(item?.mimeType ? { mimeType: String(item.mimeType) } : {}) }));
+    const fingerprints = payload.attachments.map(item => String(item?.contentFingerprint ?? ''));
+    if (attachments.length !== names.length
+      || attachments.some((item, index) => item.name !== names[index] || fingerprints[index] !== contentFingerprint(item.content))
+      || attachmentFingerprint(attachments) !== message.attachmentFingerprint
+      || payload.fingerprint !== message.attachmentFingerprint) {
+      throw chatError('ATTACHMENT_STORE_CORRUPT', '本地附件正文校验失败，无法安全重试');
+    }
+    return attachments;
+  }
+
+  function removeAttachmentPayloadSession(sessionId) {
+    const target = attachmentSessionDirectory(sessionId);
+    const attachmentRoot = path.join(dir, 'attachment-payloads');
+    const relative = path.relative(attachmentRoot, target);
+    if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
+      throw chatError('ATTACHMENT_CLEANUP_BOUNDARY', '附件清理路径超出本地 Chat 数据目录');
+    }
+    fs.rmSync(target, { recursive: true, force: true });
+  }
+
   function appendMessage(id, message) {
     const messages = readHistory(id);
     messages.push(message);
@@ -352,6 +427,11 @@ export function createChatService({
       onEvent?.({ event: 'chat.warning', data: { sessionId, code: error?.code ?? 'CHAT_HISTORY_CLEANUP_FAILED',
         message: '会话已删除，但本地历史文件未能清理。' } });
     }
+    try { removeAttachmentPayloadSession(record.id); }
+    catch (error) {
+      onEvent?.({ event: 'chat.warning', data: { sessionId, code: error?.code ?? 'ATTACHMENT_CLEANUP_FAILED',
+        message: '会话已删除，但本地附件正文未能清理。' } });
+    }
     runtime.delete(sessionId);
     return { id: record.id, deleted: true };
   }
@@ -445,46 +525,55 @@ export function createChatService({
         config.workspaceId = workspace.id;
       }
     }
-    const previousAgentProvider = record.config.agentProvider;
-    const agentProviderChanged = config.agentProvider !== undefined
-      && config.agentProvider !== previousAgentProvider;
     const state = runtimeOf(record.id);
-    if (agentProviderChanged && state.turn) throw chatError('TURN_BUSY', '当前会话有回合进行中，结束后再切换 Agent');
+    if (state.configChangeInFlight) throw chatError('CONFIG_BUSY', '当前会话正在应用配置变更');
+    const previousConfig = record.config;
+    const nextConfig = { ...previousConfig };
+    for (const key of ['provider', 'model', 'reasoning', 'mode', 'modelProvider', 'agentProvider', 'workspaceId']) {
+      if (config[key] !== undefined) nextConfig[key] = config[key];
+    }
+    const previousAgentProvider = previousConfig.agentProvider;
+    const agentProviderChanged = nextConfig.agentProvider !== previousAgentProvider;
+    const modelConfigChanged = nextConfig.model !== previousConfig.model
+      || nextConfig.reasoning !== previousConfig.reasoning
+      || nextConfig.modelProvider !== previousConfig.modelProvider;
+    if (state.turn && (agentProviderChanged || modelConfigChanged)) {
+      throw chatError('TURN_BUSY', '当前会话有回合进行中，结束后再切换 Agent 或模型');
+    }
     const previousAgentSession = agentProviderChanged ? previousProviderSession(record, previousAgentProvider) : null;
-    if (config.provider !== undefined) record.config.provider = config.provider;
-    if (config.model !== undefined) record.config.model = config.model;
-    if (config.reasoning !== undefined) record.config.reasoning = config.reasoning;
-    if (config.mode !== undefined) record.config.mode = config.mode;
-    if (config.modelProvider !== undefined) record.config.modelProvider = config.modelProvider;
-    if (config.agentProvider !== undefined) record.config.agentProvider = config.agentProvider;
-    if (config.workspaceId !== undefined) record.config.workspaceId = config.workspaceId;
     if (agentProviderChanged) {
+      record.config = nextConfig;
       stopFollow(record.id);
       record.dshSessionId = null;
       record.runtimeProvider = null;
-    }
-    touch(record);
-    if (agentProviderChanged) {
+      touch(record);
       saveStore();
       closePreviousProviderSession(record, previousAgentSession, '已切换到新 Agent');
       return publicSession(record);
     }
     // 模型/reasoning 变更即时生效：仍在 DSH 通道上的会话立即重新绑定（切换模型验收项）；
     // 已走 Model Runtime 的会话没有 DSH 绑定可刷——丢弃遗留 DSH 会话，模型下次回合生效。
-    if (record.dshSessionId && (config.model !== undefined || config.reasoning !== undefined || config.modelProvider !== undefined)) {
-      const agentActive = record.config.agentProvider && record.config.agentProvider !== AGENT_PROVIDER_DISABLED;
+    if (record.dshSessionId && modelConfigChanged) {
+      state.configChangeInFlight = true;
+      const agentActive = previousConfig.agentProvider && previousConfig.agentProvider !== AGENT_PROVIDER_DISABLED;
       if (agentActive) {
-        const provider = record.runtimeProvider || record.config.agentProvider;
+        const provider = record.runtimeProvider || previousConfig.agentProvider;
         if (typeof agentExecute !== 'function') {
+          state.configChangeInFlight = false;
           throw chatError('PROVIDER_ERROR', `Agent 运行时不可用，无法应用 ${provider} 的模型/推理设置。`);
         }
-        return Promise.resolve(agentExecute({ method: 'agent.selectModel', params: {
-          provider,
-          sessionId: record.dshSessionId,
-          model: record.config.model,
-          modelProvider: record.config.modelProvider,
-          reasoningEffort: record.config.reasoning
-        } })).then(() => publicSession(record), async (error) => {
+        try {
+          await agentExecute({ method: 'agent.selectModel', params: {
+            provider,
+            sessionId: record.dshSessionId,
+            model: nextConfig.model,
+            modelProvider: nextConfig.modelProvider,
+            reasoningEffort: nextConfig.reasoning
+          } });
+          record.config = nextConfig;
+          touch(record);
+          return publicSession(record);
+        } catch (error) {
           if (provider === 'dsh') {
             const failedSessionId = record.dshSessionId;
             stopFollow(record.id);
@@ -502,34 +591,48 @@ export function createChatService({
             }
           }
           throw chatError('MODEL_BIND_FAILED', `Agent 模型切换失败（${provider}）：${error?.message ?? error}`);
-        });
+        } finally {
+          state.configChangeInFlight = false;
+        }
       }
-      const modelPathAvailable = Boolean(modelRuntime && (record.config.modelProvider || modelRuntime.defaultProviderId()));
+      const modelPathAvailable = Boolean(modelRuntime && (nextConfig.modelProvider || modelRuntime.defaultProviderId()));
       if (!modelPathAvailable) {
-        return selectModel(record).then(() => publicSession(record), (error) => {
+        try {
+          await selectModel(record, undefined, nextConfig);
+          record.config = nextConfig;
+          touch(record);
+          return publicSession(record);
+        } catch (error) {
           throw chatError('MODEL_BIND_FAILED', `模型切换失败：${error?.message ?? error}`);
-        });
+        } finally {
+          state.configChangeInFlight = false;
+        }
       }
       const previousModelSession = previousProviderSession(record, previousAgentProvider);
+      record.config = nextConfig;
       stopFollow(record.id);
       record.dshSessionId = null;
       record.runtimeProvider = null;
-      saveStore();
+      touch(record);
       closePreviousProviderSession(record, previousModelSession, '已切换到 Model Runtime');
+      state.configChangeInFlight = false;
+      return publicSession(record);
     }
+    record.config = nextConfig;
+    touch(record);
     return publicSession(record);
   }
 
-  async function selectModel(record, signal) {
+  async function selectModel(record, signal, config = record.config) {
     requireDshApi(api, 'session model selection');
     // provider 归一化：config.json 的 dsh.provider 可能是历史值（llm-deepseek / dsh
     // 等）而非 DSH 可路由 provider；selectDshSessionModel 会在 NO_ADAPTER 时按官方
     // 模型目录解析并重试一次，其余错误（模型不存在等）原样上抛。
     const { value } = await selectDshSessionModel(api, {
       sessionId: record.dshSessionId,
-      provider: record.config.provider === 'dsh' ? (defaults?.provider ?? 'deepseek-official') : record.config.provider,
-      model: record.config.model,
-      reasoningEffort: record.config.reasoning
+      provider: config.provider === 'dsh' ? (defaults?.provider ?? 'deepseek-official') : config.provider,
+      model: config.model,
+      reasoningEffort: config.reasoning
     }, { signal });
     return value;
   }
@@ -689,13 +792,13 @@ export function createChatService({
       lastUiStreamAt.set(record.id, now());
       const delta = pendingUiDeltas.get(record.id) ?? '';
       pendingUiDeltas.delete(record.id);
-      onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: state.turn?.state ?? 'streaming', delta, toolActivity: state.turn?.toolActivity ?? [], agentActivity: state.turn?.agentActivity ?? null } });
+      onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: state.turn?.state ?? 'streaming', requestId: state.turn?.requestId, delta, toolActivity: state.turn?.toolActivity ?? [], agentActivity: state.turn?.agentActivity ?? null } });
     } else if (type === 'turn/start') {
       pendingUiDeltas.delete(record.id);
-      onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: 'streaming', reset: true, toolActivity: state.turn?.toolActivity ?? [], agentActivity: state.turn?.agentActivity ?? null } });
+      onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: 'streaming', requestId: state.turn?.requestId, reset: true, toolActivity: state.turn?.toolActivity ?? [], agentActivity: state.turn?.agentActivity ?? null } });
     } else if (type === 'assistant/message') {
       pendingUiDeltas.delete(record.id);
-      onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: state.turn?.state ?? 'streaming', replaceText: state.turn?.displayText ?? '', toolActivity: state.turn?.toolActivity ?? [], agentActivity: state.turn?.agentActivity ?? null } });
+      onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: state.turn?.state ?? 'streaming', requestId: state.turn?.requestId, replaceText: state.turn?.displayText ?? '', toolActivity: state.turn?.toolActivity ?? [], agentActivity: state.turn?.agentActivity ?? null } });
     } else if (type === 'turn/end') {
       pendingUiDeltas.delete(record.id);
       lastUiStreamAt.delete(record.id);
@@ -886,7 +989,7 @@ export function createChatService({
         }
         state.follow.status = 'recovering';
           if (state.turn) state.turn.statusMessage = `DSH event stream reconnecting (${retries}/${FOLLOW_MAX_RETRIES}).`;
-        onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: 'recovering', retryCount: retries } });
+        onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: 'recovering', requestId: state.turn?.requestId, retryCount: retries } });
         await sleep(Math.min(FOLLOW_RECONNECT_MS * (2 ** (retries - 1)), 8000));
       }
     })();
@@ -948,7 +1051,7 @@ export function createChatService({
     if (!activity) return null;
     state.turn.agentActivity = activity;
     onEvent?.({ event: 'chat.streaming', data: {
-      sessionId: record.id, status: state.turn.state,
+      sessionId: record.id, status: state.turn.state, requestId: state.turn.requestId,
       agentActivity: activity, toolActivity: state.turn.toolActivity ?? []
     } });
     return activity;
@@ -1036,7 +1139,7 @@ export function createChatService({
               const next = { ...activity, label: activity.capability, summary: '' };
               if (existing >= 0) rows[existing] = next; else rows.push(next);
               turn.toolActivity = rows.slice(-32);
-              onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: turn.state, toolActivity: rows.slice(-32), agentActivity: turn.agentActivity ?? null } });
+              onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: turn.state, requestId: turn.requestId, toolActivity: rows.slice(-32), agentActivity: turn.agentActivity ?? null } });
             },
             onTextDelta: delta => {
               const turn = state.turn;
@@ -1044,7 +1147,7 @@ export function createChatService({
               settleOk();
               state.chunkBuffer += delta;
               turn.displayText = displayTextOf(state);
-              onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: turn.state,
+              onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: turn.state, requestId: turn.requestId,
                 delta, toolActivity: turn.toolActivity ?? [], agentActivity: turn.agentActivity ?? null } });
             },
             onStreamReset: () => {
@@ -1053,7 +1156,7 @@ export function createChatService({
               state.messageTexts = [];
               state.chunkBuffer = '';
               turn.displayText = '';
-              onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: turn.state,
+              onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: turn.state, requestId: turn.requestId,
                 reset: true, toolActivity: turn.toolActivity ?? [], agentActivity: turn.agentActivity ?? null } });
             },
             onCapabilityResult: ({ capability, result: toolResult }) => {
@@ -1120,6 +1223,7 @@ export function createChatService({
           } else {
             turn.state = 'error';
             turn.error = String(error?.message ?? error).slice(0, 1000);
+            turn.errorCode = typeof error?.code === 'string' ? error.code.slice(0, 100) : 'PROVIDER_ERROR';
           }
           finalizeTurn(record, state);
           onEvent?.({ event: 'chat.updated', data: { sessionId: record.id, status: turn.state } });
@@ -1301,7 +1405,10 @@ export function createChatService({
       const { handshake, done } = startModelTurn(record, state, promptText, routing ? { ...routing,
         resolvedRoute: platformRoute && routing.resolvedRoute === 'capability' ? 'capability' : 'model', fallbackReason } : null, resolved, retryMessageId);
       done.catch(() => { /* 后台终态已经 finalizeTurn；兜底防未处理 rejection */ });
-      await handshake;
+      if (modelRuntime.supportsToolCalling?.(resolved.id) === true) {
+        handshake.catch(() => { /* Tool-capable requests are acknowledged immediately; failures update Chat status. */ });
+      }
+      else await handshake;
       return;
     }
     if (state.turn) state.turn.routing = routing
@@ -1313,17 +1420,18 @@ export function createChatService({
   }
 
   // ── 回合操作 ─────────────────────────────────────────────────────────────
-  async function send({ id, text, attachments, clientMessageId } = {}) {
+  async function send({ id, text, attachments, clientMessageId } = {}, signal = undefined) {
     const record = sessionOrThrow(id);
+    if (signal?.aborted) throw chatError('INVOKE_CANCELLED', 'Chat 请求在受理前已取消');
     const content = requireText(text, '消息内容', MAX_PROMPT_CHARS);
     const state = runtimeOf(record.id);
+    if (state.configChangeInFlight) throw chatError('CONFIG_BUSY', '当前会话正在应用配置变更');
     let promptText = content;
-    const list = Array.isArray(attachments) ? attachments.slice(0, MAX_ATTACHMENTS) : [];
+    const list = normalizeAttachments(attachments);
     for (const attachment of list) {
-      const name = requireText(String(attachment?.name ?? 'attachment'), '附件名', 200);
-      const body = requireText(String(attachment?.content ?? ''), `附件「${name}」内容`, MAX_ATTACHMENT_CHARS);
-      promptText += `\n\n[附件 ${name}]\n${body}`;
+      promptText += `\n\n[附件 ${attachment.name}]\n${attachment.content}`;
     }
+    const attachmentHash = attachmentFingerprint(list);
     const messageId = clientMessageId === undefined || clientMessageId === null || clientMessageId === ''
       ? crypto.randomUUID()
       : String(clientMessageId).trim();
@@ -1333,7 +1441,9 @@ export function createChatService({
     if (existingIndex >= 0) {
       const existing = history[existingIndex];
       if (existing.role !== 'user' || existing.text !== content
-        || JSON.stringify(existing.attachments ?? []) !== JSON.stringify(list.map(item => String(item?.name ?? 'attachment')))) {
+        || JSON.stringify(existing.attachments ?? []) !== JSON.stringify(list.map(item => item.name))
+        || (existing.attachmentFingerprint && existing.attachmentFingerprint !== attachmentHash)
+        || (!existing.attachmentFingerprint && list.length > 0)) {
         throw chatError('MESSAGE_ID_CONFLICT', '客户端消息 ID 已被其他消息使用');
       }
       if (state.turn) return { userMessageId: messageId, ...(state.turn.requestId ? { requestId: state.turn.requestId } : {}) };
@@ -1346,15 +1456,37 @@ export function createChatService({
         attachments: existing.attachments ?? [], sourceText: content,
         ...(attempt ? { retryMessageId: messageId } : {})
       });
+      if (signal?.aborted) {
+        if (state.turn?.requestId === accepted?.requestId) await stop({ id: record.id });
+        throw chatError('INVOKE_CANCELLED', 'Chat 请求在受理前已取消');
+      }
       return { userMessageId: messageId, ...(accepted?.requestId ? { requestId: accepted.requestId } : {}) };
     }
     if (state.turn) throw chatError('TURN_BUSY', '当前会话有回合进行中，请先停止或等待完成');
-    const userMessage = { id: messageId, role: 'user', text: content, at: now(), attachments: list.map((item) => String(item?.name ?? 'attachment')) };
-    appendMessage(record.id, userMessage);
+    const sessionAttachmentChars = history.reduce((total, message) => total + Math.max(0, Number(message.attachmentSizeChars) || 0), 0);
+    const attachmentSizeChars = list.reduce((total, item) => total + item.content.length, 0);
+    if (sessionAttachmentChars + attachmentSizeChars > MAX_SESSION_ATTACHMENT_CHARS) {
+      throw chatError('ATTACHMENT_STORAGE_LIMIT', '此会话的本地附件已达到 16 MiB 上限，请删除旧会话后继续');
+    }
+    const userMessage = { id: messageId, role: 'user', text: content, at: now(), attachments: list.map(item => item.name),
+      attachmentFingerprint: attachmentHash, attachmentFingerprints: list.map(item => contentFingerprint(item.content)), attachmentSizeChars };
+    try {
+      persistAttachmentPayload(record.id, messageId, list, attachmentHash);
+      appendMessage(record.id, userMessage);
+    } catch (error) {
+      try { fs.rmSync(attachmentPayloadFile(record.id, messageId), { force: true }); }
+      catch (cleanupError) { onEvent?.({ event: 'chat.warning', data: { sessionId: record.id,
+        code: cleanupError?.code ?? 'ATTACHMENT_CLEANUP_FAILED', message: '附件写入失败后临时正文未能清理。' } }); }
+      throw error;
+    }
     const accepted = await startTurn(record, state, promptText, {
       attachments: userMessage.attachments,
       sourceText: content
     });
+    if (signal?.aborted) {
+      if (state.turn?.requestId === accepted?.requestId) await stop({ id: record.id });
+      throw chatError('INVOKE_CANCELLED', 'Chat 请求在受理前已取消');
+    }
     return { userMessageId: userMessage.id, ...(accepted?.requestId ? { requestId: accepted.requestId } : {}) };
   }
 
@@ -1378,11 +1510,11 @@ export function createChatService({
       }
     }
     if (!last || last.role !== 'user') throw chatError('NOTHING_TO_RETRY', '没有可重试的用户消息（最后一回合已正常完成）');
-    const attachments = Array.isArray(last.attachments) ? last.attachments : [];
+    const attachments = readAttachmentPayload(record.id, last);
     let promptText = last.text;
     // retry 只重发内容，不重复落盘 user 消息（同一条用户消息的新一次尝试）。
-    for (const name of attachments) promptText += `\n\n[附件 ${name}]（内容见上一条消息）`;
-    const accepted = await startTurn(record, state, promptText, { attachments, sourceText: last.text, retryMessageId: last.id });
+    for (const attachment of attachments) promptText += `\n\n[附件 ${attachment.name}]\n${attachment.content}`;
+    const accepted = await startTurn(record, state, promptText, { attachments: last.attachments ?? [], sourceText: last.text, retryMessageId: last.id });
     return { userMessageId: last.id, ...(accepted?.requestId ? { requestId: accepted.requestId } : {}) };
   }
 
@@ -1556,7 +1688,7 @@ export function createChatService({
     delete state.turn.approvalExpiresAt;
     state.messageTexts = [];
     state.chunkBuffer = '';
-    onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: 'streaming', reset: true,
+    onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: 'streaming', requestId: state.turn.requestId, reset: true,
       toolActivity: state.turn.toolActivity ?? [], agentActivity: state.turn.agentActivity ?? null } });
     const controller = new AbortController();
     const resolved = modelRuntime.resolveProvider(record.config.modelProvider);
@@ -1569,7 +1701,7 @@ export function createChatService({
           if (!turn || typeof delta !== 'string' || !delta) return;
           state.chunkBuffer += delta;
           turn.displayText = displayTextOf(state);
-          onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: turn.state, delta,
+          onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: turn.state, requestId: turn.requestId, delta,
             toolActivity: turn.toolActivity ?? [], agentActivity: turn.agentActivity ?? null } });
         },
         onStreamReset: () => {
@@ -1578,7 +1710,7 @@ export function createChatService({
           state.messageTexts = [];
           state.chunkBuffer = '';
           turn.displayText = '';
-          onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: turn.state, reset: true,
+          onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: turn.state, requestId: turn.requestId, reset: true,
             toolActivity: turn.toolActivity ?? [], agentActivity: turn.agentActivity ?? null } });
         },
         onCapabilityResult: ({ capability, result: toolResult }) => {
@@ -1688,7 +1820,7 @@ export function createChatService({
     'chat.sessions.archive': (params) => archiveSession(params ?? {}),
     'chat.sessions.delete': (params) => deleteSession(params ?? {}),
     'chat.history': (params) => history(params ?? {}),
-    'chat.send': (params) => send(params ?? {}),
+    'chat.send': (params, context) => send(params ?? {}, context?.signal),
     'chat.status': (params) => status(params ?? {}),
     'chat.stop': (params) => stop(params ?? {}),
     'chat.retry': (params) => retry(params ?? {}),
@@ -1699,11 +1831,11 @@ export function createChatService({
 
   return {
     resumeApproval,
-    execute({ method, params }) {
+    execute({ method, params, signal }) {
       const handler = handlers[method];
       if (!handler) return Promise.reject(chatError('METHOD_NOT_FOUND', `未知 Chat 方法：${method}`));
       // 统一异步语义：同步 handler 的 throw 也转为 rejected Promise。
-      return Promise.resolve().then(() => handler(params));
+      return Promise.resolve().then(() => handler(params, { signal }));
     },
     /** 测试钩子：直接投递一条 follow 事件（等价于 DSH 流下发）。 */
     _injectEvent(id, event) {

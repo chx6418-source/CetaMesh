@@ -8,10 +8,14 @@
 //   D. 真机验收（DSH 在 127.0.0.1:3080 时执行）：createSession → send → follow 进度 →
 //      cancel → resume → closeSession；DSH 不在时该段如实记为 NOT_RUN_ENVIRONMENT。
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
+import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { WebSocketServer } from 'ws';
 import { NodeApiClient } from '../src/dsh-client.js';
+import { readDshSessionSecret } from '../src/dsh-auth.js';
 import { createChatService } from '../src/desktop/chat-service.js';
 import {
   AGENT_PROVIDER_METHODS,
@@ -32,6 +36,79 @@ async function waitFor(predicate, label, timeoutMs = 1000) {
     if (Date.now() - startedAt >= timeoutMs) throw new Error(`Timed out waiting for ${label}`);
     await new Promise(resolve => setTimeout(resolve, 1));
   }
+}
+
+// ── C3a. DSH_HOME 切换与 Follow 半开保护 ───────────────────────────────────
+{
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-dsh-stream-'));
+  const firstHome = path.join(root, 'first');
+  const secondHome = path.join(root, 'second');
+  const seedHome = (home, byte) => {
+    fs.mkdirSync(home, { recursive: true });
+    const secret = Buffer.alloc(32, byte).toString('base64url');
+    fs.writeFileSync(path.join(home, '.credentials.yaml'), `client-connection/browser-session:\n  secret: ${secret}\n`, 'utf8');
+  };
+  seedHome(firstHome, 1);
+  seedHome(secondHome, 2);
+  let selectedHome = firstHome;
+  const cookies = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, init) => {
+    cookies.push(init.headers.cookie);
+    const rpc = JSON.parse(init.body);
+    return new Response(JSON.stringify({ type: 'server-response', rpcId: rpc.rpcId, result: { ok: true, value: {} } }));
+  };
+  try {
+    const dynamicClient = new NodeApiClient('http://127.0.0.1:3080', { dshHome: () => selectedHome });
+    await dynamicClient.callEndpoint('settings/describe');
+    selectedHome = secondHome;
+    await dynamicClient.callEndpoint('settings/describe');
+    const signatureValidFor = (cookie, home) => {
+      const value = cookie.slice(cookie.indexOf('=') + 1);
+      const [, body, signature] = value.split('.');
+      const expected = crypto.createHmac('sha256', readDshSessionSecret(home)).update(body).digest('base64url');
+      return signature === expected;
+    };
+    assert.equal(signatureValidFor(cookies[0], firstHome), true, 'first request cookie is signed with the first DSH installation secret');
+    assert.equal(signatureValidFor(cookies[1], secondHome), true, 'second request cookie is signed with the newly selected DSH installation secret');
+    assert.notEqual(cookies[0], cookies[1], 'switching DSH_HOME never reuses the previous installation secret');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  fs.rmSync(root, { recursive: true, force: true });
+  ok('DSH_HOME is resolved per request and switches auth material without logging credentials');
+
+  const stalledServer = http.createServer();
+  const stalledSockets = new Set();
+  stalledServer.on('upgrade', (_request, socket) => {
+    stalledSockets.add(socket);
+    socket.on('close', () => stalledSockets.delete(socket));
+  });
+  await new Promise(resolve => stalledServer.listen(0, '127.0.0.1', resolve));
+  const stalledPort = stalledServer.address().port;
+  const handshakeClient = new NodeApiClient(`http://127.0.0.1:${stalledPort}`, {
+    authCookie: 'fixture=only', streamHandshakeTimeoutMs: 100, streamHeartbeatIntervalMs: 0
+  });
+  await assert.rejects(async () => {
+    for await (const _item of handshakeClient.openRemoteStream('session/follow')) { void _item; }
+  }, error => error.code === 'DSH_STREAM_HANDSHAKE_TIMEOUT');
+  for (const socket of stalledSockets) socket.destroy();
+  await new Promise(resolve => stalledServer.close(resolve));
+
+  const heartbeatServer = http.createServer();
+  const webSocketServer = new WebSocketServer({ server: heartbeatServer });
+  webSocketServer.on('connection', socket => { socket.pong = () => {}; });
+  await new Promise(resolve => heartbeatServer.listen(0, '127.0.0.1', resolve));
+  const heartbeatPort = heartbeatServer.address().port;
+  const heartbeatClient = new NodeApiClient(`http://127.0.0.1:${heartbeatPort}`, {
+    authCookie: 'fixture=only', streamHandshakeTimeoutMs: 500, streamHeartbeatIntervalMs: 100, streamHeartbeatTimeoutMs: 100
+  });
+  await assert.rejects(async () => {
+    for await (const _item of heartbeatClient.openRemoteStream('session/follow')) { void _item; }
+  }, error => error.code === 'DSH_STREAM_IDLE_TIMEOUT');
+  await new Promise(resolve => webSocketServer.close(resolve));
+  await new Promise(resolve => heartbeatServer.close(resolve));
+  ok('DSH Follow handshake stalls and half-open WebSockets fail with bounded, cleaned-up timeouts');
 }
 
 // ── A. 契约 ──────────────────────────────────────────────────────────────────
@@ -213,6 +290,7 @@ async function waitFor(predicate, label, timeoutMs = 1000) {
     const closedAgentSessions = [];
     const directCalls = [];
     let failDshModelSelection = false;
+    let agentTurnSent = false;
     const chat = createChatService({
       api: {
         async callEndpoint(endpoint, args) { directCalls.push({ endpoint, args }); return { sessionId: 'dsh-direct-1' }; },
@@ -223,7 +301,7 @@ async function waitFor(predicate, label, timeoutMs = 1000) {
         if (method === 'agent.list') return { providers: [] };
         agentCalls.push({ method, params });
         if (method === 'agent.createSession') return { sessionId: 'dsh-agent-1', provider: 'dsh', model: params.model ?? null, modelBindingError: null };
-        if (method === 'agent.send') return { accepted: true };
+        if (method === 'agent.send') { agentTurnSent = true; return { accepted: true }; }
         if (method === 'agent.cancel') return { cancelled: true };
         if (method === 'agent.selectModel') {
           if (failDshModelSelection) throw Object.assign(new Error('model selection denied'), { code: 'MODEL_BIND_FAILED' });
@@ -236,6 +314,13 @@ async function waitFor(predicate, label, timeoutMs = 1000) {
         throw new Error(`未预期的 Agent 方法：${method}`);
       },
       agentProviders: [{ id: 'dsh', label: 'DSH Agent', eventProtocol: 'dsh-session-events' }],
+      agentFollow: async function* ({ signal } = {}) {
+        while (!agentTurnSent && !signal?.aborted) await new Promise(resolve => setTimeout(resolve, 1));
+        if (signal?.aborted) return;
+        yield { type: 'turn/start', data: { turn: 'agent-fixture-turn' } };
+        yield { type: 'assistant/message', data: { turn: 'agent-fixture-turn', message: { content: [{ type: 'text', text: 'ready' }] } } };
+        yield { type: 'turn/end', data: { turn: 'agent-fixture-turn', reason: { kind: 'completed' } } };
+      },
       defaults: { provider: 'deepseek-official', model: 'deepseek-flash', reasoningEffort: 'max' },
       stateDir: tmp,
       sleep: async () => {}
@@ -261,6 +346,12 @@ async function waitFor(predicate, label, timeoutMs = 1000) {
     assert.equal(agentCalls[1]?.method, 'agent.send');
     assert.equal(agentCalls[1]?.params.sessionId, 'dsh-agent-1');
     assert.equal(agentCalls[1]?.params.content, '你好');
+    const agentDoneDeadline = Date.now() + 2_000;
+    while (Date.now() < agentDoneDeadline) {
+      const status = await exec('chat.status', { id: sessionA.id });
+      if (!status.turn) break;
+      await new Promise(resolve => setTimeout(resolve, 2));
+    }
     assert.equal(directCalls.filter((c) => c.endpoint === 'session/prompt').length, 0, 'Agent 路径不得直连 DSH prompt');
     ok('E2 Agent Provider 路径经 agent.createSession/agent.send（不直连 DSH）');
 

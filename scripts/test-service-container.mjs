@@ -208,6 +208,52 @@ try {
     fallbackServices.agentBroker.closeSession = originalCloseAgent;
   }
 
+  const w02TaskRuntime = fallbackServices.taskService.runtime;
+  const w02WorkspaceRoot = path.join(root, 'chat-delete-agent-startup-workspace');
+  fs.mkdirSync(w02WorkspaceRoot);
+  const { workspace: w02Workspace } = await fallbackServices.workspaceService.execute({
+    method: 'workspace.create', params: { name: 'Chat delete startup race', root: w02WorkspaceRoot }
+  });
+  const existingW02Tasks = new Set(w02TaskRuntime.list({ workspaceId: w02Workspace.id }).tasks.map(task => task.id));
+  const w02Chat = await fallbackServices.chatService.execute({ method: 'chat.sessions.create', params: {} });
+  await fallbackServices.chatService.execute({ method: 'chat.config.set', params: {
+    id: w02Chat.id, config: { agentProvider: 'cetamesh', workspaceId: w02Workspace.id }
+  } });
+  let releaseW02Create;
+  let w02CreateStarted = false;
+  let w02ClosedSession = null;
+  const w02CreateGate = new Promise(resolve => { releaseW02Create = resolve; });
+  const originalW02Create = fallbackServices.agentBroker.createSession;
+  const originalW02Close = fallbackServices.agentBroker.closeSession;
+  fallbackServices.agentBroker.createSession = async () => {
+    w02CreateStarted = true;
+    await w02CreateGate;
+    return { sessionId: 'w02-late-agent-session' };
+  };
+  fallbackServices.agentBroker.closeSession = async ({ provider, sessionId }) => {
+    w02ClosedSession = { provider, sessionId };
+    return { closed: true };
+  };
+  try {
+    const ack = await fallbackServices.chatService.execute({ method: 'chat.send', params: {
+      id: w02Chat.id, text: 'Create and then cancel a task before its Agent session starts'
+    } });
+    assert.match(ack.requestId, /^cetamesh-chat-/);
+    await waitFor(() => w02CreateStarted, 'W02 delayed Agent session creation');
+    assert.equal((await fallbackServices.chatService.execute({ method: 'chat.sessions.delete', params: { id: w02Chat.id } })).deleted, true);
+    releaseW02Create();
+    await waitFor(() => w02ClosedSession?.sessionId === 'w02-late-agent-session', 'W02 late Agent session cleanup');
+    const w02Tasks = w02TaskRuntime.list({ workspaceId: w02Workspace.id }).tasks.filter(task => !existingW02Tasks.has(task.id));
+    assert.equal(w02Tasks.length, 1, 'Chat deletion must retain the independently owned Task record');
+    assert.equal(w02Tasks[0].status, 'cancelled', 'a Chat-created queued Task is cancelled when Agent startup is aborted');
+    assert.equal(w02Tasks[0].currentAgent, null, 'late Agent startup must not leave a Task bound to a dead Session');
+    assert.deepEqual(w02ClosedSession, { provider: 'cetamesh', sessionId: 'w02-late-agent-session' });
+  } finally {
+    releaseW02Create();
+    fallbackServices.agentBroker.createSession = originalW02Create;
+    fallbackServices.agentBroker.closeSession = originalW02Close;
+  }
+
   const taskRuntimeForLookup = fallbackServices.taskService.runtime;
   const originalTaskGet = taskRuntimeForLookup.get;
   taskRuntimeForLookup.get = () => { throw Object.assign(new Error('Task store read failed'), { code: 'TASK_STORE_IO' }); };
@@ -420,6 +466,59 @@ try {
   const cetameshProvider = agentContext.agentProviders.find((provider) => provider.id === 'cetamesh');
   assert.equal(cetameshProvider.availability, 'registered');
   assert.equal(cetameshProvider.health, 'unknown', 'context construction does not probe provider health');
+
+  // Exercise the production Managed Agent -> Tool Execution -> Capability Broker
+  // identity resolver with a task-scoped workspace read.
+  const managedWorkspaceRoot = path.join(root, 'managed-agent-tool-workspace');
+  fs.mkdirSync(managedWorkspaceRoot);
+  fs.writeFileSync(path.join(managedWorkspaceRoot, 'proof.txt'), 'managed task scoped read');
+  const { workspace: managedWorkspace } = await services.workspaceService.execute({
+    method: 'workspace.create', params: { name: 'Managed Agent tool fixture', root: managedWorkspaceRoot }
+  });
+  const managedTask = services.taskService.runtime.create({ goal: 'Read the authorized file', workspaceId: managedWorkspace.id });
+  const managedPrincipal = services.capabilityService.grantTask(managedTask.id, { capabilities: ['filesystem.read'] });
+  const managedProvider = services.managedAgent.provider;
+  const managedSession = await managedProvider.createSession({ cwd: managedWorkspace.root, modelProvider: 'deepseek-official' });
+  const currentManagedTask = services.taskService.runtime.get({ id: managedTask.id }).task;
+  services.taskService.runtime.attachAgent({ id: managedTask.id, expectedRev: currentManagedTask.rev,
+    provider: 'cetamesh', sessionId: managedSession.sessionId });
+  services.managedAgent.bindSession(managedSession.sessionId, {
+    taskId: managedTask.id, workspaceId: managedWorkspace.id, actor: managedPrincipal
+  });
+  const originalRuntimeStream = services.modelRuntime.stream;
+  let managedStreamCount = 0;
+  let managedToolResult = null;
+  services.modelRuntime.stream = async function* (request) {
+    managedStreamCount += 1;
+    if (managedStreamCount === 1) {
+      yield { type: 'assistant/tool-calls', data: { toolCalls: [{ id: 'managed-read-1', name: 'cap_filesystem_read',
+        capabilityId: 'filesystem.read', arguments: JSON.stringify({ path: 'proof.txt' }) }] } };
+    } else {
+      const toolMessage = request.messages.find(message => message.role === 'tool' && message.tool_call_id === 'managed-read-1');
+      managedToolResult = toolMessage ? JSON.parse(toolMessage.content) : null;
+      yield { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'Read complete.' }] } } };
+    }
+    yield { type: 'turn/end', data: { reason: { kind: 'completed' } } };
+  };
+  try {
+    const managedEvents = [];
+    const managedFollow = (async () => {
+      for await (const event of services.agentBroker.follow({ provider: 'cetamesh', sessionId: managedSession.sessionId })) {
+        managedEvents.push(event);
+        if (event.type === 'turn/end') break;
+      }
+    })();
+    await services.agentBroker.send({ provider: 'cetamesh', sessionId: managedSession.sessionId, content: 'Read proof.txt' });
+    await waitFor(() => managedEvents.some(event => event.type === 'turn/end'), 'Managed Agent tool turn');
+    await managedFollow;
+    assert.equal(managedStreamCount, 2, `the tool result must be returned to the model: ${JSON.stringify({ managedEvents, managedToolResult })}`);
+    assert.equal(managedToolResult?.status, 'completed', `production actor resolution must authorize the current Task grant: ${JSON.stringify(managedToolResult)}`);
+    assert.match(JSON.stringify(managedToolResult), /managed task scoped read/);
+  } finally {
+    services.modelRuntime.stream = originalRuntimeStream;
+    await managedProvider.closeSession({ sessionId: managedSession.sessionId });
+  }
+  console.log('PASS production Managed Agent Tool Execution resolves the live Task principal');
 
   const { createApplicationLifecycle } = await import('../src/app/lifecycle.js');
   const lifecycle = createApplicationLifecycle({

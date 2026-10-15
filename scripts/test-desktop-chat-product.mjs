@@ -1,6 +1,7 @@
 // 阶段 03 验收：产品级 Desktop Chat 运行时（src/desktop/chat-service.js）。
 // fixture DSH（可控注入 follow 事件）+ 隔离临时 stateDir，不触碰真实 DSH / 用户数据。
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -38,11 +39,13 @@ function fixtureApi() {
   const calls = [];
   const followSignals = [];
   let promptHandler = null;
+  let selectModelHandler = null;
   let failEndpoints = null; // Set<endpoint>：命中即抛 ECONNREFUSED
   return {
     calls,
     followSignals,
     setPromptHandler: (fn) => { promptHandler = fn; },
+    setSelectModelHandler: fn => { selectModelHandler = fn; },
     fail: (endpoints) => { failEndpoints = new Set(endpoints); },
     async callEndpoint(endpoint, args = {}) {
       calls.push({ endpoint, args });
@@ -52,7 +55,7 @@ function fixtureApi() {
       if (endpoint === 'session/create') {
         return { sessionId: `dsh-${calls.filter((c) => c.endpoint === 'session/create').length}` };
       }
-      if (endpoint === 'session/selectModel') return {};
+      if (endpoint === 'session/selectModel') { await selectModelHandler?.(args); return {}; }
       if (endpoint === 'session/prompt') {
         await promptHandler?.(args.request.sessionId, args.request.content);
         return { accepted: true };
@@ -138,7 +141,11 @@ const turnEnd = (id, kind, error) => ({ type: 'turn/end', data: { reason: { kind
     service._injectEvent(session.id, turnEnd(session.id, 'completed'));
   });
   await service.execute({ method: 'chat.send', params: { id: session.id, text: '测试流式' } });
-  const final = await service.execute({ method: 'chat.status', params: { id: session.id } });
+  const final = await waitFor(
+    () => service.execute({ method: 'chat.status', params: { id: session.id } }),
+    status => status.turn === null,
+    'completed DSH streaming turn'
+  );
   assert.equal(final.turn, null, 'turn/end 后回合归档');
   assert.equal(final.lastState, 'idle');
   const history = await service.execute({ method: 'chat.history', params: { id: session.id } });
@@ -191,6 +198,11 @@ const turnEnd = (id, kind, error) => ({ type: 'turn/end', data: { reason: { kind
     service._injectEvent(session.id, turnEnd(session.id, 'completed'));
   });
   await service.execute({ method: 'chat.send', params: { id: session.id, text: 'hi' } });
+  await waitFor(
+    () => service.execute({ method: 'chat.status', params: { id: session.id } }),
+    status => status.turn === null,
+    'completed no-usage DSH turn'
+  );
   const history = await service.execute({ method: 'chat.history', params: { id: session.id } });
   assert.equal(history.messages[1].usage, null, '无 usage 数据时必须为 null（未知），不得伪造');
   ok('usage 未知时为 null（不伪造）');
@@ -208,7 +220,11 @@ const turnEnd = (id, kind, error) => ({ type: 'turn/end', data: { reason: { kind
     service._injectEvent(session.id, chunk(session.id, '长回答的前半段'));
   });
   await service.execute({ method: 'chat.send', params: { id: session.id, text: '写一篇长文' } });
-  const streaming = await service.execute({ method: 'chat.status', params: { id: session.id } });
+  const streaming = await waitFor(
+    () => service.execute({ method: 'chat.status', params: { id: session.id } }),
+    status => status.turn?.state === 'streaming' && status.turn.displayText === '长回答的前半段',
+    'streaming partial DSH answer'
+  );
   assert.equal(streaming.turn.state, 'streaming');
   assert.equal(streaming.turn.displayText, '长回答的前半段');
   const stopped = await service.execute({ method: 'chat.stop', params: { id: session.id } });
@@ -294,12 +310,120 @@ const turnEnd = (id, kind, error) => ({ type: 'turn/end', data: { reason: { kind
   const updated = await service.execute({ method: 'chat.sessions.list', params: {} });
   assert.equal(updated.sessions[0].config.model, 'deepseek-reasoner');
   assert.equal(updated.sessions[0].config.mode, 'smart');
+
+  let releaseSelection;
+  let selectionStarted = false;
+  const selectionGate = new Promise(resolve => { releaseSelection = resolve; });
+  api.setSelectModelHandler(async () => { selectionStarted = true; await selectionGate; });
+  const concurrentConfig = service.execute({ method: 'chat.config.set', params: {
+    id: session.id, config: { model: 'deepseek-coder' }
+  } });
+  await waitFor(() => selectionStarted, value => value, 'first model configuration bind');
+  const whileBinding = await service.execute({ method: 'chat.sessions.list', params: {} });
+  assert.equal(whileBinding.sessions.find(item => item.id === session.id).config.model, 'deepseek-reasoner',
+    'uncommitted configuration is not exposed while Provider binding is in flight');
+  await assert.rejects(() => service.execute({ method: 'chat.config.set', params: {
+    id: session.id, config: { model: 'deepseek-v4' }
+  } }), error => error.code === 'CONFIG_BUSY', 'concurrent model changes cannot race the active Provider bind');
+  releaseSelection();
+  await concurrentConfig;
+  api.setSelectModelHandler(null);
+  const afterConcurrentBind = await service.execute({ method: 'chat.sessions.list', params: {} });
+  assert.equal(afterConcurrentBind.sessions.find(item => item.id === session.id).config.model, 'deepseek-coder');
+
+  api.fail(['session/selectModel']);
+  await assert.rejects(() => service.execute({ method: 'chat.config.set', params: {
+    id: session.id, config: { model: 'model-that-could-not-bind' }
+  } }), error => error.code === 'MODEL_BIND_FAILED');
+  const afterBindFailure = await service.execute({ method: 'chat.sessions.list', params: {} });
+  assert.equal(afterBindFailure.sessions.find(item => item.id === session.id).config.model, 'deepseek-coder',
+    'a failed provider binding leaves the persisted model configuration unchanged');
+  api.fail([]);
   await assert.rejects(
     service.execute({ method: 'chat.config.set', params: { id: session.id, config: { reasoning: 'ultra' } } }),
     (error) => error.code === 'INVALID_PARAMS'
   );
   ok('切换模型/reasoning/mode：即时 selectModel + 持久化 + 参数校验');
   service.close();
+}
+
+// ── 7b. Tool Calling 快速 ACK + IPC 取消边界 ────────────────────────────────
+{
+  const dir = path.join(stateDir, 'fast-ack');
+  fs.mkdirSync(dir, { recursive: true });
+  let toolSignal = null;
+  const modelRuntime = {
+    defaultProviderId: () => 'fixture-model',
+    resolveProvider: id => ({ id }),
+    supportsToolCalling: () => true
+  };
+  const service = makeService({ stateDir: dir, options: { modelRuntime,
+    toolExecutionCoordinator: { run: ({ signal }) => {
+      toolSignal = signal;
+      return new Promise((resolve, reject) => {
+        signal.addEventListener('abort', () => reject(Object.assign(new Error('cancelled'), { code: 'INVOKE_CANCELLED' })), { once: true });
+      });
+    }, cancelSession: () => ({ cancelled: 0 }) }
+  } });
+  const session = await service.execute({ method: 'chat.sessions.create', params: {} });
+  let sendPromise;
+  try {
+    sendPromise = service.execute({ method: 'chat.send', params: { id: session.id, text: 'Use a slow tool' } });
+    const ack = await Promise.race([
+      sendPromise.then(value => ({ value })),
+      new Promise(resolve => setTimeout(() => resolve({ timedOut: true }), 100))
+    ]);
+    if (ack.timedOut) {
+      await service.execute({ method: 'chat.stop', params: { id: session.id } });
+      await sendPromise;
+    }
+    assert.ok(ack.value?.requestId, 'a slow Tool Calling turn returns a stable requestId before the tool completes');
+    assert.ok(toolSignal && !toolSignal.aborted, 'the accepted operation continues after its fast IPC acknowledgement');
+    await service.execute({ method: 'chat.stop', params: { id: session.id } });
+    assert.equal(toolSignal.aborted, true, 'explicit Stop cancels the accepted Tool Calling operation');
+    await waitFor(() => service.execute({ method: 'chat.status', params: { id: session.id } }), status => status.turn === null, 'fast-ack stop');
+
+    const ui = createDesktopUiService({ services: { chatService: service } });
+    const preCancelled = new AbortController();
+    preCancelled.abort();
+    const historyBefore = await service.execute({ method: 'chat.history', params: { id: session.id } });
+    await assert.rejects(() => ui.execute({ method: 'ui.chat.send', params: { id: session.id, text: 'must not start' }, signal: preCancelled.signal }),
+      error => error.code === 'INVOKE_CANCELLED', 'an IPC cancelled before acceptance does not start a Chat turn');
+    const historyAfter = await service.execute({ method: 'chat.history', params: { id: session.id } });
+    assert.equal(historyAfter.messages.length, historyBefore.messages.length, 'pre-acceptance cancellation persists no duplicate user message');
+  } finally { service.close(); }
+  ok('Tool Calling returns fast ACK; explicit Stop aborts the accepted turn and pre-acceptance IPC cancel is honored');
+}
+
+// ── 7c. 附件正文、指纹与重启后重试 ─────────────────────────────────────────
+{
+  const api = fixtureApi();
+  const dir = path.join(stateDir, 'attachment-retry');
+  fs.mkdirSync(dir, { recursive: true });
+  const prompts = [];
+  api.setPromptHandler(async (_sessionId, content) => prompts.push(content));
+  let service = makeService({ api, stateDir: dir });
+  const session = await service.execute({ method: 'chat.sessions.create', params: {} });
+  const attachment = { name: 'notes.txt', mimeType: 'text/plain', content: 'the original attachment body' };
+  await service.execute({ method: 'chat.send', params: { id: session.id, text: 'Summarize this', attachments: [attachment], clientMessageId: 'attachment-message-1' } });
+  service._injectEvent(session.id, turnEnd(session.id, 'error', 'fixture failure'));
+  await assert.rejects(() => service.execute({ method: 'chat.send', params: { id: session.id, text: 'Summarize this',
+    attachments: [{ ...attachment, content: 'different body with same name' }], clientMessageId: 'attachment-message-1' } }),
+  error => error.code === 'MESSAGE_ID_CONFLICT', 'same-name attachments with different content are not idempotent duplicates');
+  service.close();
+  service = makeService({ api, stateDir: dir });
+  await service.execute({ method: 'chat.retry', params: { id: session.id } });
+  await waitFor(() => prompts, rows => rows.length === 2, 'attachment retry prompt');
+  assert.equal(prompts.length, 2);
+  assert.ok(prompts.every(prompt => prompt[0]?.text?.includes(attachment.content)), 'retry after restart reuses the original attachment body');
+  const storedHistory = await service.execute({ method: 'chat.history', params: { id: session.id } });
+  assert.equal(JSON.stringify(storedHistory).includes(attachment.content), false, 'attachment bodies stay in their dedicated local payload file');
+  const attachmentDirectory = path.join(service._store.dir, 'attachment-payloads', crypto.createHash('sha256').update(session.id).digest('hex'));
+  assert.equal(fs.existsSync(attachmentDirectory), true);
+  await service.execute({ method: 'chat.sessions.delete', params: { id: session.id } });
+  assert.equal(fs.existsSync(attachmentDirectory), false, 'deleting a Chat removes its local attachment payloads');
+  service.close();
+  ok('Chat attachment bodies and fingerprints survive restart and retry without accepting changed content');
 }
 
 // ── 8. 长输出：大量 chunk 流式 + 完整定稿 ────────────────────────────────────
@@ -318,6 +442,11 @@ const turnEnd = (id, kind, error) => ({ type: 'turn/end', data: { reason: { kind
     service._injectEvent(session.id, turnEnd(session.id, 'completed'));
   });
   await service.execute({ method: 'chat.send', params: { id: session.id, text: '长输出' } });
+  await waitFor(
+    () => service.execute({ method: 'chat.status', params: { id: session.id } }),
+    status => status.turn === null,
+    'completed long DSH response'
+  );
   const history = await service.execute({ method: 'chat.history', params: { id: session.id } });
   assert.equal(history.messages[1].text, segments.join(''), '20 段 × 500 字全部保留，无翻倍无丢失');
   ok('长输出：分段流式完整定稿（无翻倍/丢失）');
@@ -402,6 +531,11 @@ const turnEnd = (id, kind, error) => ({ type: 'turn/end', data: { reason: { kind
     service._injectEvent(session.id, turnEnd(session.id, 'error', '模型服务中断'));
   });
   await service.execute({ method: 'chat.send', params: { id: session.id, text: '会失败的问题' } });
+  await waitFor(
+    () => service.execute({ method: 'chat.status', params: { id: session.id } }),
+    status => status.lastState === 'error' && status.turn === null,
+    'failed DSH turn'
+  );
   const history = await service.execute({ method: 'chat.history', params: { id: session.id } });
   assert.equal(history.messages[1].error, '模型服务中断');
   assert.equal(history.messages[1].text, '部分输出', 'error 回合的 partial 保留');
@@ -413,6 +547,11 @@ const turnEnd = (id, kind, error) => ({ type: 'turn/end', data: { reason: { kind
   });
   const retry = await service.execute({ method: 'chat.retry', params: { id: session.id } });
   assert.equal(retry.userMessageId, history.messages[0].id, '失败回合重试复用原 user 消息');
+  await waitFor(
+    () => service.execute({ method: 'chat.history', params: { id: session.id } }),
+    value => value.messages.at(-1)?.text === '重试后的回答',
+    'successful DSH retry'
+  );
   const historyAfterRetry = await service.execute({ method: 'chat.history', params: { id: session.id } });
   assert.equal(historyAfterRetry.messages.filter(item => item.role === 'user').length, 1);
   assert.equal(historyAfterRetry.messages.at(-1).text, '重试后的回答');
