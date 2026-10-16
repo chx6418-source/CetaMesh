@@ -42,6 +42,8 @@ function assertTaskSchema(raw, file) {
       || seen.has(row.id) || typeof row.goal !== 'string' || !TASK_STATUSES.includes(row.status)
       || !Number.isSafeInteger(row.rev) || row.rev < 1 || !Array.isArray(row.requirements)
       || !Array.isArray(row.agentHistory) || !Array.isArray(row.artifacts)
+      || (row.createRequest != null && (typeof row.createRequest !== 'object'
+        || typeof row.createRequest.id !== 'string' || typeof row.createRequest.fingerprint !== 'string'))
       || (row.workspaceId !== undefined && row.workspaceId !== null && typeof row.workspaceId !== 'string')) {
       throw taskError('STORE_CORRUPT', '任务记录结构无效：' + file);
     }
@@ -69,6 +71,8 @@ function normalizeLoaded(raw) {
     completedWork: asArray(raw.completedWork),
     pendingWork: asArray(raw.pendingWork),
     workspaceId: raw.workspaceId === undefined ? null : raw.workspaceId,
+    createRequest: raw.createRequest && typeof raw.createRequest.id === 'string'
+      && typeof raw.createRequest.fingerprint === 'string' ? raw.createRequest : null,
     artifacts: asArray(raw.artifacts),
     executionEvidence: asArray(raw.executionEvidence),
     decisions: asArray(raw.decisions),

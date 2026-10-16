@@ -206,6 +206,8 @@ function projectAgent(value) {
     role: id === 'codex' ? '代码与项目' : id === 'dsh' ? '通用研究与协作' : '开发辅助',
     description: id === 'codex' ? '理解项目、修改代码并检查结果。' : id === 'dsh' ? '处理资料、规划和跨工具工作流。' : '在可用时连接本地开发能力。',
     available, installed, authenticated, eligible: available && !requiresTask && !boundaryUnverified,
+    taskEligible: available && installed && authenticated !== false && requiresTask
+      && health.sessionCapable !== false && (id !== 'codex' || health.sandboxCapable === true),
     configured: row.configured === true || health.configured === true,
     reason: reason || (boundaryUnverified ? 'descriptor-incomplete' : available && requiresTask ? 'task-required' : null), lastError, workspaceBoundary, status, version: string(row.version, 80) || null,
     desktopApp: id === 'dsh' ? {
@@ -459,9 +461,45 @@ export function createDesktopUiService({ services = {}, system = services.system
   const capability = (method, params) => call(services.capabilityService, method, params, true);
   const workspace = (method, params) => call(services.workspaceService, method, params);
   const enableReviewTokens = new Map();
+  const taskCreateDispatches = new Map();
+
+  async function requireTaskProvider(provider, workspaceId) {
+    if (!provider) throw uiError('AGENT_PROVIDER_SELECTION_REQUIRED', '请选择任务执行者');
+    if (!services.workspaceService.describeWorkspace(workspaceId)) {
+      throw uiError('WORKSPACE_NOT_FOUND', '任务工作区不存在或不可访问');
+    }
+    const boundary = services.agentBroker.capabilities(provider)?.workspaceBoundary;
+    if (!['capability-broker', 'staged-capability-broker'].includes(boundary)) {
+      throw uiError('AGENT_BOUNDARY_UNSUPPORTED', '所选 Agent 没有经过验证的工作区权限边界');
+    }
+    const health = await services.agentBroker.health(provider);
+    if (health?.available !== true || health?.installed === false || health?.authenticated === false
+      || health?.sessionCapable === false) {
+      throw uiError('PROVIDER_UNAVAILABLE', `所选 Agent ${provider} 未安装、未认证或无法建立会话`);
+    }
+    if (provider === 'codex' && health.sandboxCapable !== true) {
+      throw uiError('CODEX_SANDBOX_UNAVAILABLE', 'Codex 尚未验证当前 Windows 工作区沙箱可用');
+    }
+    return provider;
+  }
 
   async function runTask(taskRow, { provider, content, requestId, modelProvider, model } = {}) {
     if (!taskRow.workspaceId) throw uiError('TASK_WORKSPACE_REQUIRED', '任务需要绑定工作区才能启动 Agent');
+    if (/approval-pending/i.test(taskRow.progress?.note ?? '')) {
+      const approvalPending = services.capabilityService.broker.approvals.list()
+        .some(row => row.request?.taskId === taskRow.id);
+      if (approvalPending || services.toolExecutionCoordinator?.recoveryForTask(taskRow.id)?.state === 'approval-pending') {
+        throw uiError('APPROVAL_RECOVERY_REQUIRED', '请先在审批中心决定或取消重启前的审批');
+      }
+      taskRow = services.taskService.runtime.setProgress({ id: taskRow.id, expectedRev: taskRow.rev,
+        note: 'Task interrupted after Core restart; verify Workspace and checkpoint before resuming' });
+    }
+    if (/needs-reconciliation|approval-pending/i.test(taskRow.progress?.note ?? '')) {
+      throw uiError('NEEDS_RECONCILIATION', '请先核对重启前的工具副作用或审批；不能自动恢复执行');
+    }
+    if (taskRow.status === 'blocked' && /Owner reviewed interrupted effect/i.test(taskRow.progress?.note ?? '') && !content) {
+      throw uiError('TASK_RECOVERY_INSTRUCTION_REQUIRED', '请给出核对后的新指令，不能重放中断前的工作');
+    }
     let recoveryFacts = '';
     if (taskRow.status === 'blocked' && /interrupted after Core restart/i.test(taskRow.progress?.note ?? '')) {
       const status = await capability('capability.execute', { capability: 'git.status',
@@ -475,7 +513,7 @@ export function createDesktopUiService({ services = {}, system = services.system
     }
     const result = await capability('capability.execute', { capability: 'agent.run',
       taskId: taskRow.id, workspaceId: taskRow.workspaceId, requestId,
-      input: { agentProvider: provider || taskRow.currentAgent?.provider || 'cetamesh',
+      input: { agentProvider: await requireTaskProvider(provider || taskRow.currentAgent?.provider, taskRow.workspaceId),
         content: (content || [taskRow.goal, ...(taskRow.requirements ?? []),
           taskRow.checkpoint?.summary ?? '', taskRow.checkpoint?.nextAction ?? ''].filter(Boolean).join('\n')) + recoveryFacts,
         ...(modelProvider ? { modelProvider } : {}), ...(model ? { model } : {}) },
@@ -531,7 +569,7 @@ export function createDesktopUiService({ services = {}, system = services.system
         retryCount: Number.isFinite(turn.retryCount) ? Math.max(0, turn.retryCount) : 0,
         statusMessage: string(turn.statusMessage, 300) || null,
         displayText: string(turn.displayText, MAX_TEXT), error: string(turn.error ?? result.lastError, 1000) || null,
-        errorCode: string(turn.errorCode, 100) || null,
+        errorCode: string(turn.errorCode ?? result.lastErrorCode, 100) || null,
         agentActivity: turn.agentActivity && typeof turn.agentActivity === 'object' ? {
           providerId: string(turn.agentActivity.providerId, 80), label: string(turn.agentActivity.label, 180),
           status: ['running', 'completed', 'cancelled', 'failed'].includes(turn.agentActivity.status) ? turn.agentActivity.status : 'running'
@@ -600,29 +638,73 @@ export function createDesktopUiService({ services = {}, system = services.system
       const goal = boundedText(p.goal, 'goal', 2000);
       const workspaceId = string(p.workspaceId, 128) || null;
       const requirements = boundedStrings(p.requirements, 50, 1000);
+      const agentProvider = string(p.agentProvider, 80) || null;
+      const requestId = string(p.requestId, 160) || null;
+      const prior = services.taskService.runtime.findByCreateRequestId({ requestId, goal, requirements,
+        workspaceId, requestedAgentProvider: agentProvider });
+      if (prior) {
+        if (prior.status === 'queued' && !prior.currentAgent) {
+          const inFlight = requestId ? taskCreateDispatches.get(requestId) : null;
+          if (inFlight) return { task: projectTask(await inFlight) };
+          throw uiError('TASK_DISPATCH_INCOMPLETE', 'Task 已保存但 Agent 派发未确认；请在任务详情核对后启动');
+        }
+        return { task: projectTask(prior) };
+      }
       const existing = workspaceId ? services.taskService.runtime.findByGoalWorkspace({ goal, workspaceId }) : null;
       if (existing) {
+        if (existing.status === 'queued' && !existing.currentAgent) {
+          throw uiError('TASK_DISPATCH_INCOMPLETE', '同目标 Task 尚未确认派发；请核对后显式启动');
+        }
         if (requirements.length && JSON.stringify(requirements) !== JSON.stringify(existing.requirements)) {
           throw uiError('TASK_REQUIREMENTS_CONFLICT', 'Matching active Task has different requirements');
         }
         if (['paused', 'blocked', 'waiting'].includes(existing.status)) {
           throw uiError('TASK_RECOVERY_REVIEW_REQUIRED', 'Matching Task requires explicit recovery, not a duplicate creation');
         }
+        if (agentProvider && existing.currentAgent && existing.currentAgent.provider !== agentProvider) {
+          throw uiError('AGENT_PROVIDER_SWITCH_REQUIRES_CONTINUITY', 'Existing Task must switch Agent through Handoff');
+        }
         return { task: projectTask(existing) };
       }
       if (workspaceId && services.taskService.runtime.activeWorkspaceOwner({ workspaceId })) {
         throw uiError('TASK_WORKSPACE_BUSY', 'Another Task owns write execution in this Workspace');
       }
-      const created = await task('task.create', { goal, requirements, workspaceId, note: string(p.note, 1000) });
-      const current = created.workspaceId ? await runTask(created, { provider: string(p.agentProvider, 80) || 'cetamesh',
-        requestId: string(p.requestId, 160) || undefined, modelProvider: string(p.modelProvider, 80) || undefined,
-        model: string(p.model, 160) || undefined }) : created;
+      if (workspaceId) await requireTaskProvider(agentProvider, workspaceId);
+      const raced = workspaceId ? services.taskService.runtime.findByGoalWorkspace({ goal, workspaceId }) : null;
+      if (raced) {
+        if (raced.status === 'queued' && !raced.currentAgent) {
+          const inFlight = raced.createRequest?.id ? taskCreateDispatches.get(raced.createRequest.id) : null;
+          if (inFlight && requestId === raced.createRequest.id) return { task: projectTask(await inFlight) };
+          throw uiError('TASK_DISPATCH_INCOMPLETE', '同目标 Task 尚未确认派发；请核对后显式启动');
+        }
+        if (requirements.length && JSON.stringify(requirements) !== JSON.stringify(raced.requirements)) {
+          throw uiError('TASK_REQUIREMENTS_CONFLICT', 'Matching active Task has different requirements');
+        }
+        if (['paused', 'blocked', 'waiting'].includes(raced.status)) throw uiError('TASK_RECOVERY_REVIEW_REQUIRED', 'Matching Task requires explicit recovery');
+        if (agentProvider && raced.currentAgent && raced.currentAgent.provider !== agentProvider) {
+          throw uiError('AGENT_PROVIDER_SWITCH_REQUIRES_CONTINUITY', 'Existing Task must switch Agent through Handoff');
+        }
+        return { task: projectTask(raced) };
+      }
+      if (workspaceId && services.taskService.runtime.activeWorkspaceOwner({ workspaceId })) {
+        throw uiError('TASK_WORKSPACE_BUSY', 'Another Task owns write execution in this Workspace');
+      }
+      const created = services.taskService.runtime.create({ goal, requirements, workspaceId,
+        note: string(p.note, 1000), requestId, requestedAgentProvider: agentProvider });
+      const dispatch = created.workspaceId ? runTask(created, { provider: agentProvider,
+        requestId: requestId || undefined, modelProvider: string(p.modelProvider, 80) || undefined,
+        model: string(p.model, 160) || undefined }) : Promise.resolve(created);
+      if (requestId) taskCreateDispatches.set(requestId, dispatch);
+      let current;
+      try { current = await dispatch; }
+      finally { if (requestId && taskCreateDispatches.get(requestId) === dispatch) taskCreateDispatches.delete(requestId); }
       emit('task.updated', { taskId: current.id, status: current.status });
       return { task: projectTask(current) };
     },
     'ui.task.start': async p => {
       const current = (await task('task.get', { id: idParam(p) })).task;
       if (p.expectedRev !== undefined && current.rev !== p.expectedRev) throw uiError('TASK_CONFLICT', '任务已被其他操作修改');
+      if (current.status !== 'queued') throw uiError('TASK_NOT_QUEUED', '只有待启动任务可以启动；请查看当前任务状态');
       return { task: projectTask(await runTask(current, { provider: string(p.agentProvider, 80) || undefined,
         requestId: string(p.requestId, 160) || undefined })) };
     },
@@ -637,7 +719,49 @@ export function createDesktopUiService({ services = {}, system = services.system
     'ui.task.resume': async p => {
       const current = (await task('task.get', { id: idParam(p) })).task;
       if (p.expectedRev !== undefined && current.rev !== p.expectedRev) throw uiError('TASK_CONFLICT', '任务已被其他操作修改');
+      if (!['paused', 'waiting', 'blocked'].includes(current.status)) throw uiError('TASK_NOT_RESUMABLE', '任务当前不能恢复');
       return { task: projectTask(await runTask(current, { requestId: string(p.requestId, 160) || undefined })) };
+    },
+    'ui.task.reconcile': async p => {
+      const current = (await task('task.get', { id: idParam(p) })).task;
+      if (p.expectedRev !== undefined && current.rev !== p.expectedRev) throw uiError('TASK_CONFLICT', '任务已被其他操作修改');
+      if (!/needs-reconciliation/i.test(current.progress?.note ?? '')) {
+        throw uiError('TASK_RECOVERY_NOT_REQUIRED', '任务当前没有待核对的中断副作用');
+      }
+      if (p.reviewed !== true || !string(p.reviewSummary, 1000).trim()
+        || !string(p.nextInstruction, 32_000).trim() || !string(p.requestId, 160).trim()) {
+        throw uiError('INVALID_PARAMS', '需要明确核对结果、新指令和唯一请求 ID');
+      }
+      if (!services.workspaceService.describeWorkspace(current.workspaceId)) {
+        throw uiError('WORKSPACE_NOT_FOUND', '任务工作区不存在或不可访问');
+      }
+      const status = await capability('capability.execute', { capability: 'git.status',
+        taskId: current.id, workspaceId: current.workspaceId, input: {}, reason: 'Owner reconciliation Workspace check' });
+      if (status.status !== 'completed') throw uiError('WORKSPACE_RECONCILIATION_REQUIRED', '无法核对工作区状态');
+      if (status.result?.isRepo === true) {
+        const diff = await capability('capability.execute', { capability: 'git.diff',
+          taskId: current.id, workspaceId: current.workspaceId, input: { statOnly: true }, reason: 'Owner reconciliation diff check' });
+        if (diff.status !== 'completed') throw uiError('WORKSPACE_RECONCILIATION_REQUIRED', '无法核对工作区改动');
+      }
+      if (current.currentAgent) {
+        try { await services.agentBroker.cancel(current.currentAgent); }
+        catch (error) { if (error?.code !== 'SESSION_NOT_FOUND') throw error; }
+        try {
+          const oldStatus = await services.agentBroker.status(current.currentAgent);
+          if (oldStatus?.running !== false) {
+            throw uiError('TASK_RECOVERY_REVIEW_REQUIRED', '旧 Agent 未确认停止，不能启动新指令');
+          }
+        } catch (error) { if (error?.code !== 'SESSION_NOT_FOUND') throw error; }
+      }
+      services.toolExecutionCoordinator?.acknowledgeTaskRecovery(current.id);
+      services.capabilityService.acknowledgeTaskRecovery(current.id);
+      const decision = services.taskService.runtime.addDecision({ id: current.id, expectedRev: current.rev,
+        decision: 'Owner reviewed interrupted effect', rationale: string(p.reviewSummary, 1000).trim() });
+      const reviewed = services.taskService.runtime.setProgress({ id: current.id, expectedRev: decision.rev,
+        note: `Owner reviewed interrupted effect: ${string(p.reviewSummary, 1000).trim()}` });
+      const resumed = await runTask(reviewed, { content: string(p.nextInstruction, 32_000).trim(),
+        requestId: string(p.requestId, 160).trim() });
+      return { task: projectTask(resumed) };
     },
     'ui.task.cancel': async p => {
       const current = (await task('task.get', { id: idParam(p) })).task;

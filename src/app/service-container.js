@@ -149,6 +149,7 @@ export function createCetaMeshServices(options = {}) {
       return toolExecutionCoordinator.resumeApproval(request);
     },
     pendingTarget: approvalId => toolExecutionCoordinator?.pendingTarget(approvalId) ?? null,
+    recoveryForSession: sessionId => toolExecutionCoordinator?.recoveryForSession(sessionId) ?? null,
     cancelSession: (sessionId, reason) => toolExecutionCoordinator?.cancelSession(sessionId, reason) ?? { cancelled: 0 }
   };
   managedAgent = createManagedAgentProvider({
@@ -248,6 +249,13 @@ export function createCetaMeshServices(options = {}) {
       return null;
     }
   });
+  for (const row of taskService.runtime.recoveryCandidates()) {
+    const recovery = toolExecutionCoordinator.recoveryForTask(row.id)
+      ?? capabilityService.recoveryForTask(row.id);
+    if (!recovery) continue;
+    taskService.runtime.setProgress({ id: row.id, expectedRev: row.rev,
+      note: `${recovery.state}: ${recovery.capability ?? recovery.approvalId}; Owner must review Workspace and prior effects before retrying` });
+  }
   const platformRuntime = createDesktopPlatformRuntime({
     capabilityService,
     workspaceService,
@@ -436,7 +444,8 @@ export function createCetaMeshServices(options = {}) {
   const desktopUiService = createDesktopUiService({
     services: {
       chatService, taskService, workspaceService, memoryService, capabilityService, agentBroker, continuityService,
-      agentService, pluginCenterService, integrationService, extensionService, settingsService, systemServices
+      agentService, pluginCenterService, integrationService, extensionService, settingsService, systemServices,
+      toolExecutionCoordinator
     },
     system: systemServices,
     eventBus: uiEventBus

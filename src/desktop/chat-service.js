@@ -197,6 +197,10 @@ export function createChatService({
         restored.runtimeProvider = null;
         invalidated = true;
       }
+      if (!restored.interruptedAt && readHistory(record.id).at(-1)?.role === 'user') {
+        restored.interruptedAt = now();
+        invalidated = true;
+      }
       sessions.set(record.id, restored);
     }
     if (invalidated) saveStore();
@@ -1399,6 +1403,7 @@ export function createChatService({
     const done = (async () => {
       try {
         const routePromise = Promise.resolve().then(() => platformRoute({ decision: routing, record, text: promptText,
+          requestId: operation.requestId,
           signal: controller.signal }));
         // A provider may finish creating a Session after the Chat has been cancelled.
         routePromise.then(result => controller.signal.aborted ? cancelReturnedSession(result) : undefined).catch(() => {});
@@ -1575,6 +1580,10 @@ export function createChatService({
       attachments: userMessage.attachments,
       sourceText: content
     });
+    if (record.interruptedAt) {
+      record.interruptedAt = null;
+      saveStore();
+    }
     if (signal?.aborted) {
       if (state.turn?.requestId === accepted?.requestId) await stop({ id: record.id });
       throw chatError('INVOKE_CANCELLED', 'Chat 请求在受理前已取消');
@@ -1614,10 +1623,17 @@ export function createChatService({
     const record = sessionOrThrow(id);
     const state = runtimeOf(record.id);
     if (state.turn) throw chatError('TURN_BUSY', '当前会话有回合进行中');
+    const recovery = toolExecutionCoordinator?.recoveryForSession?.(record.id);
+    if (recovery) throw chatError(recovery.state === 'needs-reconciliation'
+      ? 'NEEDS_RECONCILIATION' : 'APPROVAL_RECOVERY_REQUIRED',
+    'Core 重启前的工具操作或审批仍需人工核对，不能自动重试');
     let prompt = '继续';
     if (record.taskId) {
       const task = typeof resolveTask === 'function' ? await resolveTask(record.taskId) : null;
       if (!task) throw chatError('TASK_NOT_FOUND', 'Chat attached Task is unavailable');
+      if (record.interruptedAt && task.decisions?.some(item => item.decision === 'Owner reviewed interrupted effect')) {
+        throw chatError('RECOVERY_USE_NEW_INSTRUCTION', '旧回合的副作用已人工核对；请发送新的明确指令，不能自动重放旧回合');
+      }
       if (task.workspaceId !== record.config.workspaceId) throw chatError('WORKSPACE_RECONCILIATION_REQUIRED', 'Chat and Task Workspace differ');
       if (['blocked', 'paused', 'waiting'].includes(task.status)) {
         throw chatError('TASK_RECOVERY_REVIEW_REQUIRED', 'Task requires Workspace review and explicit resume before Chat continuation');
@@ -1781,15 +1797,18 @@ export function createChatService({
     const state = runtimeOf(record.id);
     const turn = state.turn;
     if (!turn) {
+      const recovery = toolExecutionCoordinator?.recoveryForSession?.(record.id);
       const messages = readHistory(record.id);
       const last = messages[messages.length - 1];
       return {
         id: record.id,
         taskId: record.taskId ?? null,
         turn: null,
-        lastState: last?.role === 'user' ? (record.interruptedAt ? 'interrupted' : 'awaiting-reply') : last?.error ? 'error' : 'idle',
-        lastError: last?.role === 'assistant' && typeof last.error === 'string' ? last.error : null,
-        lastErrorCode: last?.role === 'assistant' && typeof last.errorCode === 'string' ? last.errorCode : null,
+        lastState: recovery?.state ?? (last?.role === 'user' ? (record.interruptedAt ? 'interrupted' : 'awaiting-reply') : last?.error ? 'error' : 'idle'),
+        lastError: recovery ? 'Core 重启前的工具操作或审批需要人工核对'
+          : last?.role === 'assistant' && typeof last.error === 'string' ? last.error : null,
+        lastErrorCode: recovery ? recovery.state.toUpperCase().replace(/-/g, '_')
+          : last?.role === 'assistant' && typeof last.errorCode === 'string' ? last.errorCode : null,
         dshSessionAlive: Boolean(record.dshSessionId),
         followState: runtimeOf(record.id).follow?.status ?? (record.followError ? 'error' : 'idle'),
         followError: record.followError?.code ?? null,

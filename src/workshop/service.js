@@ -92,10 +92,22 @@ export function createWorkshopService({ stateDir, workspaceService, taskRuntime,
     if (result?.status === 'pending') fail('WORKSHOP_APPROVAL_PENDING', 'Provisioning requires confirmed Owner approval');
     return result?.status === 'completed' && Object.hasOwn(result, 'result') ? result.result : result;
   }
+  const provisioning = new Map();
   async function provision(p, actor) {
+    const active = provisioning.get(p.id);
+    if (active) return active;
+    const pending = provisionOnce(p, actor);
+    provisioning.set(p.id, pending);
+    try { return await pending; }
+    finally { if (provisioning.get(p.id) === pending) provisioning.delete(p.id); }
+  }
+  async function provisionOnce(p, actor) {
     owner(actor);
     if (!p.plan || p.review?.decision !== 'approved') fail('WORKSHOP_REVIEW_REQUIRED', 'Owner must approve a plan first');
     if (p.status === 'delivered') return { proposal: projection(p, actor) };
+    const previousAssignment = p.assignment;
+    const alreadyActive = p.status === 'active';
+    if (alreadyActive) p.provision.agentRequestId = null;
     p.status = 'provisioning'; p.provision.attempts++; p.provision.error = null; changed(p);
     try {
       if (!p.workspaceId) {
@@ -108,7 +120,9 @@ export function createWorkshopService({ stateDir, workspaceService, taskRuntime,
       if (!p.taskId) {
         const marker = 'workshop-proposal:' + p.id;
         const existing = taskRuntime.list({ workspaceId: p.workspaceId, limit: 5000 }).tasks.find((task) => task.progress?.note === marker);
-        const task = existing ?? taskRuntime.create({ goal: p.description, requirements: [...p.requirements, ...p.supplements.map((item) => item.text)], workspaceId: p.workspaceId, note: marker });
+        const task = existing ?? taskRuntime.create({ goal: p.description,
+          requirements: [...p.requirements, ...p.supplements.map((item) => item.text)], workspaceId: p.workspaceId,
+          note: marker, requestId: 'workshop:' + p.id + ':task', requestedAgentProvider: p.plan.provider });
         p.taskId = task.id; p.provision.step = 'task-created'; changed(p);
       }
       const grants = { workspaceIds: [p.workspaceId], taskIds: [p.taskId], capabilities: [...p.plan.capabilities] };
@@ -118,12 +132,21 @@ export function createWorkshopService({ stateDir, workspaceService, taskRuntime,
       if (task.workspaceId !== p.workspaceId) fail('WORKSHOP_ASSIGNMENT_CONFLICT', 'Task workspace changed after approval');
       if (!['completed', 'failed', 'cancelled'].includes(task.status)) {
         if (task.currentAgent && task.currentAgent.provider !== p.plan.provider) fail('WORKSHOP_ASSIGNMENT_CONFLICT', 'Task provider changed after approval');
-        const result = unwrap(await capabilityBroker.execute({ requestId: 'workshop:' + p.id + ':agent:' + p.provision.attempts, actor, taskId: p.taskId, workspaceId: p.workspaceId,
+        if (alreadyActive && previousAssignment?.sessionId && previousAssignment.sessionId === task.currentAgent?.sessionId) {
+          p.assignment.sessionId = previousAssignment.sessionId;
+          p.status = 'active'; p.provision.step = 'assigned'; changed(p);
+          return { proposal: projection(p, actor) };
+        }
+        const dispatchRequestId = p.provision.agentRequestId
+          ?? 'workshop:' + p.id + ':agent:' + (task.currentAgent?.sessionId ?? 'initial');
+        p.provision.agentRequestId = dispatchRequestId; changed(p);
+        const result = unwrap(await capabilityBroker.execute({ requestId: dispatchRequestId, actor, taskId: p.taskId, workspaceId: p.workspaceId,
           capability: 'agent.run', input: { provider: p.plan.provider, content: p.description + '\n' + [...p.requirements, ...p.supplements.map((item) => item.text)].join('\n'),
             grants, model: p.plan.model || undefined, modelProvider: p.plan.modelProvider || undefined, reasoningEffort: p.plan.reasoningEffort || undefined }, approved: true,
           reason: 'Owner approved Workshop Task assignment ' + p.id }));
         p.assignment.sessionId = result?.sessionId ?? result?.agent?.sessionId ?? null;
         if (result?.actor) { p.assignment.actor = copy(result.actor); p.assignment.grants = copy(result.actor.grants); }
+        p.provision.agentRequestId = null;
       } else {
         p.assignment.sessionId = task.currentAgent?.sessionId ?? null;
       }

@@ -309,7 +309,8 @@ try {
   const firstAfterRestart = await restartedBus.next({ after: 0, waitMs: 0 });
   assert.notEqual(firstAfterRestart.instanceId, workspaceEvents.instanceId);
   assert.equal(firstAfterRestart.events[0].cursor, 1, 'new Core starts a fresh event cursor generation');
-  const uiTask = await ui('ui.task.create', { goal: 'Harbor task DTO', requirements: [], workspaceId: uiWorkspace.id });
+  const uiTask = await ui('ui.task.create', { goal: 'Harbor task DTO', requirements: [],
+    workspaceId: uiWorkspace.id, agentProvider: 'cetamesh' });
   assert.equal((await ui('ui.task.get', { id: uiTask.task.id })).task.id, uiTask.task.id);
   const taskEvents = await ui('ui.events.next', { after: workspaceEvents.cursor, waitMs: 0 });
   assert.ok(taskEvents.events.some(event => event.event === 'task.updated' && event.data.taskId === uiTask.task.id));

@@ -100,7 +100,7 @@ try {
   const repeated = await run('workshop.proposal.review', { id: p.id, approve: true, plan }, owner);
   check(repeated.proposal.taskId, approved.proposal.taskId);
   check(createdSessions, 1);
-  check(calls.filter((request) => request.capability === 'agent.run').length, 3);
+  check(calls.filter((request) => request.capability === 'agent.run').length, 2);
   const internal = (await run('workshop.proposal.get', { id: p.id }, owner)).proposal;
   check(internal.assignment.grants.workspaceIds, [internal.workspaceId]);
   check(internal.assignment.grants.taskIds, [internal.taskId]);

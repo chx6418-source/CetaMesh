@@ -167,6 +167,20 @@ export function createToolExecutionCoordinator({
   if (!modelRuntime?.chat || !capabilityBroker?.execute) throw new TypeError('Tool execution needs Model Runtime and Capability Broker');
   const continuationFile = typeof stateDir === 'string' && stateDir.trim()
     ? path.join(stateDir, 'model', 'tool-continuations.json') : null;
+  const executionFile = typeof stateDir === 'string' && stateDir.trim()
+    ? path.join(stateDir, 'model', 'tool-executions.json') : null;
+  let executions = {};
+  if (executionFile) {
+    try { executions = readJsonFile(executionFile, { missing: {} }); }
+    catch (error) {
+      if (error instanceof StorageError) fail('TOOL_EXECUTION_STORE_CORRUPT', 'Unable to read Model tool execution state');
+      throw error;
+    }
+  }
+  if (!executions || typeof executions !== 'object' || Array.isArray(executions)) {
+    fail('TOOL_EXECUTION_STORE_CORRUPT', 'Tool execution store is invalid');
+  }
+  const interruptedExecutions = Object.values(executions).filter(row => row?.status === 'started');
   let continuations = {};
   if (continuationFile) {
     try { continuations = readJsonFile(continuationFile, { missing: {} }); }
@@ -186,6 +200,79 @@ export function createToolExecutionCoordinator({
       if (error instanceof StorageError) fail('TOOL_CONTINUATION_PERSIST_FAILED', 'Unable to persist Model tool continuation state');
       throw error;
     }
+  }
+
+  let orphanedOnRestart = false;
+  for (const [approvalId, continuation] of Object.entries(continuations)) {
+    if (continuation?.status === 'reconciled') continue;
+    let approval;
+    try { approval = capabilityBroker.approvals?.get(approvalId); }
+    catch (error) {
+      // A stale continuation may outlive approval retention; it is still unsafe to resume.
+      if (error?.code !== 'APPROVAL_NOT_FOUND') throw error;
+    }
+    // Agent turns are process-local. Chat continuations remain resumable only
+    // while their original approval is still pending and unexpired.
+    if (continuation?.targetKind !== 'agent' && approval?.status === 'pending'
+      && approval.expiresAt > Date.now()) continue;
+    if (approval?.status === 'pending' || approval?.status === 'approved') {
+      capabilityBroker.approvals.revoke(approvalId, 'core-restart-orphaned-agent');
+    }
+    continuation.status = 'orphaned';
+    orphanedOnRestart = true;
+  }
+  if (orphanedOnRestart) save();
+
+  function recordExecution(requestId, data) {
+    if (!executionFile) return;
+    executions[requestId] = { ...executions[requestId], ...data };
+    try { writeJsonAtomic(executionFile, executions); }
+    catch (error) {
+      if (error instanceof StorageError) fail('TOOL_EXECUTION_PERSIST_FAILED', 'Unable to persist Model tool execution state');
+      throw error;
+    }
+  }
+
+  function recoveryForSession(sessionId) {
+    const uncertain = interruptedExecutions.find(row => row.status === 'started' && row.sessionId === sessionId);
+    if (uncertain) return { state: 'needs-reconciliation', capability: uncertain.capability, turnId: uncertain.turnId };
+    const orphaned = Object.values(continuations).find(row => row.status === 'orphaned' && row.target?.sessionId === sessionId);
+    if (orphaned) return { state: 'needs-reconciliation', capability: 'approval', turnId: orphaned.target.turnId };
+    const pending = Object.values(continuations).find(row => row.status !== 'reconciled' && row.target?.sessionId === sessionId);
+    return pending ? { state: 'approval-pending', approvalId: pending.approvalId, turnId: pending.target.turnId } : null;
+  }
+
+  function recoveryForTask(taskId) {
+    const uncertain = interruptedExecutions.find(row => row.status === 'started' && row.taskId === taskId);
+    if (uncertain) return { state: 'needs-reconciliation', capability: uncertain.capability, turnId: uncertain.turnId };
+    const orphaned = Object.values(continuations).find(row => row.status === 'orphaned' && row.state?.scope?.taskId === taskId);
+    if (orphaned) return { state: 'needs-reconciliation', capability: 'approval', turnId: orphaned.target.turnId };
+    const pending = Object.values(continuations).find(row => row.status !== 'reconciled' && row.state?.scope?.taskId === taskId);
+    return pending ? { state: 'approval-pending', approvalId: pending.approvalId, turnId: pending.target.turnId } : null;
+  }
+
+  function acknowledgeTaskRecovery(taskId) {
+    const rows = interruptedExecutions.filter(row => row.status === 'started' && row.taskId === taskId);
+    const orphaned = Object.values(continuations).filter(row => row.status === 'orphaned' && row.state?.scope?.taskId === taskId);
+    for (const row of rows) row.status = 'reconciled';
+    for (const row of orphaned) row.status = 'reconciled';
+    if (rows.length && executionFile) {
+      try { writeJsonAtomic(executionFile, executions); }
+      catch (error) {
+        for (const row of rows) row.status = 'started';
+        for (const row of orphaned) row.status = 'orphaned';
+        if (error instanceof StorageError) fail('TOOL_EXECUTION_PERSIST_FAILED', 'Unable to persist Model tool reconciliation');
+        throw error;
+      }
+    }
+    if (orphaned.length) {
+      try { save(); }
+      catch (error) {
+        for (const row of orphaned) row.status = 'orphaned';
+        throw error;
+      }
+    }
+    return { reconciled: rows.length + orphaned.length };
   }
 
   async function runLoop(state, signal) {
@@ -300,6 +387,7 @@ export function createToolExecutionCoordinator({
         }
         let result;
         let input;
+        const toolRequestId = `model:${sessionId}:${turnId}:${cycle}:${index}`.slice(0, 240);
         try {
           input = parseArguments(call?.arguments);
           const descriptor = state.manifest.find((item) => item.id === capability);
@@ -311,8 +399,10 @@ export function createToolExecutionCoordinator({
           if (!liveActor || liveActor.kind !== actor.kind || liveActor.id !== actor.id) {
             fail('TOOL_ACTOR_UNAVAILABLE', 'The trusted CetaMesh actor is no longer available');
           }
+          recordExecution(toolRequestId, { status: 'started', sessionId, turnId,
+            taskId: state.scope?.taskId ?? null, capability, at: Date.now() });
           result = await capabilityBroker.execute({
-            requestId: `model:${sessionId}:${turnId}:${cycle}:${index}`.slice(0, 240),
+            requestId: toolRequestId,
             actor: liveActor,
             taskId: state.scope?.taskId ?? null,
             workspaceId: state.scope?.workspaceId ?? null,
@@ -322,6 +412,10 @@ export function createToolExecutionCoordinator({
             ...(scope?.signal ? { signal: scope.signal } : {})
           }, { signal });
         } catch (error) {
+          if (executions[toolRequestId]?.status === 'started' && !capabilityBroker.dispatchStatus?.(toolRequestId)
+            && error?.code !== 'INVOKE_CANCEL_UNCONFIRMED' && error?.code !== 'TOOL_EXECUTION_PERSIST_FAILED') {
+            recordExecution(toolRequestId, { status: 'failed', code: String(error?.code ?? 'CAPABILITY_DENIED').slice(0, 100) });
+          }
           result = { status: 'denied', ...errorResult(error) };
         }
 
@@ -361,6 +455,7 @@ export function createToolExecutionCoordinator({
           };
           continuations[approvalId] = continuation;
           save();
+          recordExecution(toolRequestId, { status: 'approval-pending', approvalId });
           return { status: 'pending', toolCalling: 'supported', approvalId, expiresAt: result.expiresAt, text: '', continuationId: id };
         }
 
@@ -396,6 +491,9 @@ export function createToolExecutionCoordinator({
               state.scope = { taskId: refreshed.scope.taskId ?? null, workspaceId: refreshed.scope.workspaceId ?? null };
             }
           }
+        }
+        if (executions[toolRequestId]?.status === 'started') {
+          recordExecution(toolRequestId, { status: result?.status === 'completed' ? 'completed' : 'failed' });
         }
       }
     }
@@ -438,6 +536,9 @@ export function createToolExecutionCoordinator({
   async function resumeApproval({ approvalId, requestFingerprint, decisionResult, signal, refreshContext, onCapabilityResult, onTextDelta, onStreamReset } = {}) {
     const continuation = continuations[String(approvalId ?? '')];
     if (!continuation) fail('APPROVAL_CONTINUATION_NOT_FOUND', 'No Model turn is waiting for this approval');
+    if (continuation.status === 'orphaned' || continuation.status === 'reconciled') {
+      fail('APPROVAL_CONTINUATION_ORPHANED', 'Interrupted Agent approval requires Owner reconciliation');
+    }
     if (continuation.requestFingerprint !== requestFingerprint) fail('APPROVAL_MISMATCH', 'Approval continuation fingerprint mismatch');
     if (decisionResult?.status === 'pending') fail('APPROVAL_NOT_DECIDED', 'Approval decision is still pending');
     const state = {
@@ -522,8 +623,10 @@ export function createToolExecutionCoordinator({
 
   function pendingTarget(approvalId) {
     const entry = continuations[String(approvalId ?? '')];
-    return entry ? { ...entry.target, kind: entry.targetKind ?? 'chat' } : null;
+    return entry && entry.status !== 'orphaned' && entry.status !== 'reconciled'
+      ? { ...entry.target, kind: entry.targetKind ?? 'chat' } : null;
   }
 
-  return { run, resumeApproval, pendingTarget, cancelSession };
+  return { run, resumeApproval, pendingTarget, cancelSession, recoveryForSession, recoveryForTask,
+    acknowledgeTaskRecovery };
 }

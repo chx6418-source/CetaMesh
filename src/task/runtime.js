@@ -70,13 +70,16 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
 
   // ── 创建 / 读取 / 修改 ─────────────────────────────────────────────────
   function create({
-    goal, requirements, workspaceId, currentPhase, acceptanceCriteria, status, note
+    goal, requirements, workspaceId, currentPhase, acceptanceCriteria, status, note, requestId, requestedAgentProvider
   } = {}) {
     const initialStatus = status === undefined || status === null ? 'queued' : normalizeStatus(status);
     const timestamp = now();
     const normalizedGoal = normalizeText(goal, 'goal', TASK_LIMITS.goalChars, { required: true });
     const normalizedRequirements = normalizeStringList(requirements, 'requirements', TASK_LIMITS.requirements);
     const normalizedWorkspace = normalizeWorkspaceId(workspaceId);
+    const priorRequest = findByCreateRequestId({ requestId, goal: normalizedGoal,
+      requirements: normalizedRequirements, workspaceId: normalizedWorkspace, requestedAgentProvider });
+    if (priorRequest) return priorRequest;
     if (normalizedWorkspace) {
       const existing = findByGoalWorkspace({ goal: normalizedGoal, workspaceId: normalizedWorkspace });
       if (existing) {
@@ -96,6 +99,9 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
       completedWork: [],
       pendingWork: [],
       workspaceId: normalizedWorkspace,
+      createRequest: requestId ? { id: normalizeText(requestId, 'requestId', 160, { required: true }),
+        fingerprint: createFingerprint({ goal: normalizedGoal, requirements: normalizedRequirements,
+          workspaceId: normalizedWorkspace, requestedAgentProvider }) } : null,
       artifacts: [],
       executionEvidence: [],
       decisions: [],
@@ -228,6 +234,26 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     return matches[0] ?? null;
   }
 
+  function createFingerprint({ goal, requirements, workspaceId, requestedAgentProvider } = {}) {
+    return crypto.createHash('sha256').update(JSON.stringify({
+      goal: String(goal ?? '').normalize('NFKC').trim().replace(/\s+/gu, ' ').toLocaleLowerCase(),
+      requirements: normalizeStringList(requirements, 'requirements', TASK_LIMITS.requirements),
+      workspaceId: normalizeWorkspaceId(workspaceId),
+      requestedAgentProvider: normalizeProvider(requestedAgentProvider) || null
+    })).digest('hex');
+  }
+
+  function findByCreateRequestId({ requestId, goal, requirements, workspaceId, requestedAgentProvider } = {}) {
+    if (!requestId) return null;
+    const id = normalizeText(requestId, 'requestId', 160, { required: true });
+    const match = store.listAll().find(row => row.createRequest?.id === id);
+    if (!match) return null;
+    if (match.createRequest.fingerprint !== createFingerprint({ goal, requirements, workspaceId, requestedAgentProvider })) {
+      throw taskError('REQUEST_ID_CONFLICT', 'Task creation request ID was reused with different data');
+    }
+    return match;
+  }
+
   function activeWorkspaceOwner({ workspaceId, exceptTaskId } = {}) {
     const wantedWorkspace = normalizeWorkspaceId(workspaceId);
     if (!wantedWorkspace) return null;
@@ -330,6 +356,10 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
       recovered.push(result.task.id);
     }
     return recovered;
+  }
+
+  function recoveryCandidates() {
+    return store.listAll().filter(row => row.status === 'blocked');
   }
 
   function complete({ id, expectedRev, summary } = {}) {
@@ -577,6 +607,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     list,
     findByAgent,
     findByGoalWorkspace,
+    findByCreateRequestId,
     activeWorkspaceOwner,
     update,
     remove,
@@ -588,6 +619,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     wait,
     block,
     recoverInterrupted,
+    recoveryCandidates,
     complete,
     fail,
     cancel,

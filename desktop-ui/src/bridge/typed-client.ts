@@ -33,7 +33,7 @@ export interface Memory {
 export type AgentStatus = 'ready' | 'needs-setup' | 'descriptor-incomplete' | 'not-installed' | 'unavailable' | 'not-supported' | 'not-checked';
 export interface Agent {
   id: string; name: string; role: string; description: string; available: boolean; installed: boolean; authenticated: boolean | null; status: AgentStatus;
-  eligible: boolean; configured: boolean; reason: string | null; lastError: string | null; workspaceBoundary: string | null;
+  eligible: boolean; taskEligible: boolean; configured: boolean; reason: string | null; lastError: string | null; workspaceBoundary: string | null;
   version: string | null; desktopApp: { installed: boolean; running: boolean; status: string; version: string | null } | null;
 }
 export interface Plugin {
@@ -97,7 +97,7 @@ type UiMethod =
   | 'ui.events.next'
   | 'ui.chat.sessions.list' | 'ui.chat.sessions.create' | 'ui.chat.sessions.rename' | 'ui.chat.sessions.archive' | 'ui.chat.sessions.delete'
   | 'ui.chat.history' | 'ui.chat.status' | 'ui.chat.send' | 'ui.chat.stop' | 'ui.chat.retry' | 'ui.chat.continue' | 'ui.chat.catalog' | 'ui.chat.config.set'
-  | 'ui.task.overview' | 'ui.task.get' | 'ui.task.create' | 'ui.task.start' | 'ui.task.pause' | 'ui.task.resume' | 'ui.task.cancel' | 'ui.task.handoff'
+  | 'ui.task.overview' | 'ui.task.get' | 'ui.task.create' | 'ui.task.start' | 'ui.task.pause' | 'ui.task.resume' | 'ui.task.reconcile' | 'ui.task.cancel' | 'ui.task.handoff'
   | 'ui.workspace.list' | 'ui.workspace.open' | 'ui.workspace.create'
   | 'ui.memory.overview' | 'ui.memory.get' | 'ui.memory.create' | 'ui.memory.update' | 'ui.memory.pin' | 'ui.memory.delete'
   | 'ui.agent.list' | 'ui.agent.health'
@@ -244,10 +244,12 @@ export const chatClient = {
 export const taskClient = {
   overview: (query = '', status = '') => uiCall<{ tasks: Task[]; total: number; counts: Record<string, number>; needsAttention: string[] }>('ui.task.overview', { query, status, limit: 100 }),
   get: (id: string) => uiCall<{ task: Task }>('ui.task.get', { id }),
-  create: (input: { goal: string; requirements?: string[]; workspaceId?: string | null; agentProvider?: string; note?: string }) => uiCall<{ task: Task }>('ui.task.create', input),
-  start: (id: string, expectedRev?: number) => uiCall<{ task: Task }>('ui.task.start', { id, expectedRev }),
+  create: (input: { goal: string; requirements?: string[]; workspaceId?: string | null; agentProvider?: string; requestId?: string; note?: string }) => uiCall<{ task: Task }>('ui.task.create', input),
+  start: (id: string, expectedRev?: number, agentProvider?: string) => uiCall<{ task: Task }>('ui.task.start', { id, expectedRev, agentProvider }),
   pause: (id: string, expectedRev?: number) => uiCall<{ task: Task }>('ui.task.pause', { id, expectedRev }),
   resume: (id: string, expectedRev?: number) => uiCall<{ task: Task }>('ui.task.resume', { id, expectedRev }),
+  reconcile: (id: string, expectedRev: number | undefined, reviewSummary: string, nextInstruction: string, requestId: string) =>
+    uiCall<{ task: Task }>('ui.task.reconcile', { id, expectedRev, reviewed: true, reviewSummary, nextInstruction, requestId }),
   cancel: (id: string, expectedRev?: number) => uiCall<{ task: Task }>('ui.task.cancel', { id, expectedRev }),
   handoff: (id: string, targetProvider: string, expectedRev?: number) => uiCall<{ task: Task; handoff: { success: boolean; from: unknown; to: unknown } }>('ui.task.handoff', { id, targetProvider, expectedRev })
 };

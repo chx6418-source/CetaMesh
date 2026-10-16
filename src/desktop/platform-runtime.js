@@ -54,7 +54,7 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
     }
   }
 
-  async function route({ decision, record, text, signal }) {
+  async function route({ decision, record, text, requestId, signal }) {
     if (decision.agentIntent) {
       if (signal?.aborted) throw Object.assign(new Error('Chat operation cancelled'), { code: 'ABORTED' });
       const workspaceId = record.config.workspaceId || (await workspaceService.execute({ method: 'workspace.list' })).activeId;
@@ -73,9 +73,11 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
       const provider = await selectProvider(record, task);
       let createdTask = false;
       if (!task) {
-        task = taskRuntime.create({ goal: text.slice(0, 2000), workspaceId, note: 'Smart Chat project task' });
+        const concurrent = taskRuntime.findByGoalWorkspace({ goal: text.slice(0, 2000), workspaceId });
+        task = concurrent ?? taskRuntime.create({ goal: text.slice(0, 2000), workspaceId,
+          note: 'Smart Chat project task', requestId, requestedAgentProvider: provider });
         record.taskId = task.id;
-        createdTask = true;
+        createdTask = !concurrent;
       } else {
         record.taskId = task.id;
         if (['paused', 'blocked', 'waiting'].includes(task.status)) {
@@ -105,7 +107,12 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
           await cancelAgentAfterAbort({ provider, sessionId: nextAgent.sessionId });
           throw Object.assign(new Error('Chat operation cancelled'), { code: 'ABORTED' });
         }
-        await agentBroker.send({ provider, sessionId: nextAgent.sessionId, content: text });
+        const sent = await capabilityService.broker.execute({ requestId, actor: OWNER_ACTOR,
+          taskId: task.id, workspaceId, capability: 'agent.run',
+          input: { agentProvider: provider, content: text }, reason: 'Smart project task after Handoff' }, { signal });
+        if (sent.status !== 'completed' || sent.result?.accepted !== true) {
+          throw capabilityError('AGENT_SEND_REJECTED', 'Agent did not accept the new Task instruction');
+        }
         if (signal?.aborted) {
           await cancelAgentAfterAbort({ provider, sessionId: nextAgent.sessionId });
           throw Object.assign(new Error('Chat operation cancelled'), { code: 'ABORTED' });
@@ -119,7 +126,7 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
       // 结果经决策参考数据回到 Agent。绝不因 grant 静默自动执行。
       let result;
       try {
-        result = await capabilityService.broker.execute({ actor: OWNER_ACTOR, taskId: task.id, workspaceId,
+        result = await capabilityService.broker.execute({ requestId, actor: OWNER_ACTOR, taskId: task.id, workspaceId,
           capability: 'agent.run', input: { provider, content: text, modelProvider: record.config.modelProvider,
             model: record.config.model !== legacyModel ? record.config.model : undefined, reasoningEffort: record.config.reasoning,
             grants: { capabilities: ['filesystem.read', 'filesystem.write', 'filesystem.search', 'git.status', 'git.diff', 'memory.read', 'test.run'] } },

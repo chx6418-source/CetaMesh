@@ -813,7 +813,11 @@ try {
 
   const switchCalls = [];
   const providerSwitchRuntime = createDesktopPlatformRuntime({
-    capabilityService: { broker: { execute: async () => assert.fail('Provider switch must use Continuity') } },
+    capabilityService: { broker: { execute: async request => {
+      assert.equal(request.capability, 'agent.run', 'the post-Handoff instruction must use the Task Broker');
+      switchCalls.push({ kind: 'send', request: { provider: request.input.agentProvider, content: request.input.content } });
+      return { status: 'completed', result: { accepted: true } };
+    } } },
     workspaceService: { execute: async () => ({ activeId: 'workspace-switch' }) },
     taskRuntime: { get: () => ({ task: { id: 'task-switch', workspaceId: 'workspace-switch', status: 'running',
       currentAgent: { provider: 'dsh', sessionId: 'dsh-old-session' } } }) },

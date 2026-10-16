@@ -14,6 +14,32 @@ try {
   fs.writeFileSync(path.join(workspaceRoot, 'proof.txt'), 'Task data stays intact');
   const { workspace } = await services.workspaceService.execute({ method: 'workspace.create',
     params: { name: 'Phase 3 task', root: workspaceRoot } });
+  const listedAgents = await services.desktopUiService.execute({ method: 'ui.agent.list', params: {} });
+  assert.equal(listedAgents.agents.find(row => row.id === 'cetamesh')?.taskEligible, true,
+    'Work must show an actually Task-capable Managed Agent');
+  assert.equal(listedAgents.agents.find(row => row.id === 'dsh')?.taskEligible, false,
+    'Work must not offer an unconnected DSH Agent');
+  await assert.rejects(services.desktopUiService.execute({ method: 'ui.task.create', params: {
+    goal: 'Do not silently choose an executor', workspaceId: workspace.id
+  } }), error => error.code === 'AGENT_PROVIDER_SELECTION_REQUIRED');
+  assert.equal(services.taskService.runtime.countAll(), 0, 'missing executor must not create a Task');
+  await assert.rejects(services.desktopUiService.execute({ method: 'ui.task.create', params: {
+    goal: 'Do not silently fall back to Managed', workspaceId: workspace.id, agentProvider: 'dsh'
+  } }), error => ['PROVIDER_UNAVAILABLE', 'AGENT_BOUNDARY_UNSUPPORTED'].includes(error.code));
+  assert.equal(services.taskService.runtime.countAll(), 0, 'unavailable executor must not create a Task');
+  const incompleteCreate = services.taskService.runtime.create({ goal: 'Incomplete Work dispatch',
+    workspaceId: workspace.id, requestId: 'phase3-incomplete-create', requestedAgentProvider: 'cetamesh' });
+  await assert.rejects(services.desktopUiService.execute({ method: 'ui.task.create', params: {
+    goal: 'Incomplete Work dispatch', workspaceId: workspace.id, agentProvider: 'cetamesh',
+    requestId: 'phase3-incomplete-create'
+  } }), error => error.code === 'TASK_DISPATCH_INCOMPLETE',
+  'same request ID must not report a queued Task as a successful Agent dispatch');
+  await assert.rejects(services.desktopUiService.execute({ method: 'ui.task.create', params: {
+    goal: 'Incomplete Work dispatch', workspaceId: workspace.id, agentProvider: 'cetamesh',
+    requestId: 'phase3-different-request-for-queued-task'
+  } }), error => error.code === 'TASK_DISPATCH_INCOMPLETE',
+  'a distinct request must not treat the unassigned Task as successfully dispatched');
+  services.taskService.runtime.cancel({ id: incompleteCreate.id, expectedRev: incompleteCreate.rev });
   const task = services.taskService.runtime.create({ goal: 'Complete two instructions', workspaceId: workspace.id });
   const sent = [];
   const originalCreateSession = services.agentBroker.createSession;
@@ -74,6 +100,24 @@ try {
   const winnerId = rivalResults[0].status === 'fulfilled' ? competingTask.id : rivalTask.id;
   const winner = services.taskService.runtime.get({ id: winnerId }).task;
   await services.desktopUiService.execute({ method: 'ui.task.cancel', params: { id: winner.id, expectedRev: winner.rev } });
+
+  const sentBeforeConcurrentCreate = sent.length;
+  const concurrentCreates = await Promise.all([1, 2].map(() => services.desktopUiService.execute({
+    method: 'ui.task.create', params: { goal: 'One coordinated Work Task', workspaceId: workspace.id,
+      agentProvider: 'cetamesh', requestId: 'phase3-work-create-once' }
+  })));
+  assert.equal(concurrentCreates[0].task.id, concurrentCreates[1].task.id);
+  assert.equal(sent.length, sentBeforeConcurrentCreate + 1, 'same Work create request cannot start two Agent instructions');
+  const countBeforeRequestConflict = services.taskService.runtime.countAll();
+  await assert.rejects(services.desktopUiService.execute({ method: 'ui.task.create', params: {
+    goal: 'Changed request payload', workspaceId: workspace.id, agentProvider: 'cetamesh',
+    requestId: 'phase3-work-create-once'
+  } }), error => error.code === 'REQUEST_ID_CONFLICT');
+  assert.equal(services.taskService.runtime.countAll(), countBeforeRequestConflict,
+    'request ID conflict must not leave a duplicate Task');
+  await services.desktopUiService.execute({ method: 'ui.task.cancel', params: {
+    id: concurrentCreates[0].task.id, expectedRev: services.taskService.runtime.get({ id: concurrentCreates[0].task.id }).task.rev
+  } });
 
   const assigned = await services.desktopUiService.execute({ method: 'ui.task.create', params: {
     goal: 'Produce a result in the Workspace', workspaceId: workspace.id, agentProvider: 'cetamesh'
@@ -202,6 +246,9 @@ try {
     } });
   try {
     const recovered = restarted.taskService.runtime.get({ id: actual.task.id }).task;
+    assert.equal(restarted.taskService.runtime.findByCreateRequestId({ requestId: 'phase3-work-create-once',
+      goal: 'One coordinated Work Task', workspaceId: workspace.id, requestedAgentProvider: 'cetamesh' })?.id,
+    concurrentCreates[0].task.id, 'Task creation request IDs must remain idempotent after Core restart');
     assert.equal(recovered.status, 'blocked', 'Core restart must identify interrupted running Tasks');
     assert.equal(recovered.modelConfig?.modelProvider, 'phase3-fixture');
     assert.match(recovered.progress.note, /interrupted|重启|中断/i);
@@ -237,6 +284,123 @@ try {
     assert.match(continuation, /Unfinished before restart/, 'a fresh Task Agent must receive bounded Chat constraints from the same Session');
     assert.equal(chatPrompts.length, 0, 'Task recovery must use the authoritative Task Agent instead of an independent DSH Chat session');
   } finally { restarted.chatService.close(); await restarted.capabilityService.close(); }
+  const riskStateDir = path.join(root, 'risk-state');
+  const riskServices = createCetaMeshServices({ stateDir: riskStateDir, dataRoot: path.join(root, 'risk-data') });
+  const { workspace: riskWorkspace } = await riskServices.workspaceService.execute({ method: 'workspace.create',
+    params: { name: 'Uncertain tool Workspace', root: workspaceRoot } });
+  const riskTask = riskServices.taskService.runtime.create({ goal: 'Continue only after effect review', workspaceId: riskWorkspace.id });
+  const attachedRisk = riskServices.taskService.runtime.attachAgent({ id: riskTask.id, expectedRev: riskTask.rev,
+    provider: 'cetamesh', sessionId: 'uncertain-agent-session' }).task;
+  riskServices.taskService.runtime.start({ id: riskTask.id, expectedRev: attachedRisk.rev });
+  const riskChat = await riskServices.chatService.execute({ method: 'chat.sessions.create', params: {} });
+  const riskChatFile = path.join(riskStateDir, 'desktop-chat', 'sessions.json');
+  const riskChatStore = readJsonFile(riskChatFile);
+  riskChatStore.sessions.find(row => row.id === riskChat.id).taskId = riskTask.id;
+  riskChatStore.sessions.find(row => row.id === riskChat.id).config.workspaceId = riskWorkspace.id;
+  writeJsonAtomic(riskChatFile, riskChatStore);
+  writeJsonAtomic(path.join(riskStateDir, 'desktop-chat', 'history', `${riskChat.id}.json`), {
+    schemaVersion: 1, messages: [{ id: 'uncertain-user', role: 'user', text: 'Write a report', at: Date.now() }]
+  });
+  writeJsonAtomic(path.join(riskStateDir, 'model', 'tool-executions.json'), {
+    'model:uncertain:turn:0:0': { status: 'started', sessionId: riskChat.id, turnId: 'turn',
+      taskId: riskTask.id, capability: 'filesystem.write', at: Date.now() }
+  });
+  writeJsonAtomic(path.join(riskStateDir, 'capability', 'requests.json'), {
+    'uncertain-agent-request': { hash: 'durable-original-fingerprint', status: 'in-flight', taskId: riskTask.id }
+  });
+  const orphanedApproval = riskServices.capabilityService.broker.approvals.pending({
+    requestId: 'old-write-approval', taskId: riskTask.id, workspaceId: riskWorkspace.id,
+    actor: { kind: 'agent', id: 'uncertain-agent-session' }, capability: 'filesystem.write',
+    input: { path: 'old-report.txt', content: 'Do not replay this write' }
+  });
+  const approvedBeforeCrash = riskServices.capabilityService.broker.approvals.pending({
+    requestId: 'old-approved-write', taskId: riskTask.id, workspaceId: riskWorkspace.id,
+    actor: { kind: 'agent', id: 'uncertain-agent-session' }, capability: 'filesystem.write',
+    input: { path: 'approved-report.txt', content: 'Still must not replay' }
+  });
+  riskServices.capabilityService.broker.approvals.decide(approvedBeforeCrash.id, true, OWNER_ACTOR);
+  const expiredChatApproval = riskServices.capabilityService.broker.approvals.pending({
+    requestId: 'expired-chat-write', taskId: riskTask.id, workspaceId: riskWorkspace.id,
+    actor: { kind: 'agent', id: 'uncertain-agent-session' }, capability: 'filesystem.write',
+    input: { path: 'expired-report.txt', content: 'Never replay after expiry' }
+  });
+  const approvalsFile = path.join(riskStateDir, 'capability', 'approvals.json');
+  const approvals = readJsonFile(approvalsFile);
+  approvals.find(row => row.id === expiredChatApproval.id).expiresAt = Date.now() - 1;
+  writeJsonAtomic(approvalsFile, approvals);
+  writeJsonAtomic(path.join(riskStateDir, 'model', 'tool-continuations.json'), {
+    [orphanedApproval.id]: { approvalId: orphanedApproval.id, targetKind: 'agent',
+      target: { sessionId: 'uncertain-agent-session', turnId: 'approval-turn' },
+      state: { scope: { taskId: riskTask.id } } },
+    [approvedBeforeCrash.id]: { approvalId: approvedBeforeCrash.id, targetKind: 'agent',
+      target: { sessionId: 'uncertain-agent-session', turnId: 'approved-turn' },
+      state: { scope: { taskId: riskTask.id } } },
+    [expiredChatApproval.id]: { approvalId: expiredChatApproval.id, targetKind: 'chat',
+      target: { sessionId: riskChat.id, turnId: 'expired-turn' },
+      state: { scope: { taskId: riskTask.id } } }
+  });
+  riskServices.chatService.close();
+  await riskServices.capabilityService.close();
+  const riskRestart = createCetaMeshServices({ stateDir: riskStateDir, dataRoot: path.join(root, 'risk-data') });
+  try {
+    assert.equal(riskRestart.capabilityService.broker.approvals.get(orphanedApproval.id).status, 'revoked',
+      'a pre-restart Managed Agent approval cannot execute after its process-local turn was lost');
+    assert.equal(riskRestart.capabilityService.broker.approvals.get(approvedBeforeCrash.id).status, 'revoked',
+      'even an approved but unconsumed effect must be revoked when its Agent turn is lost');
+    assert.equal(riskRestart.capabilityService.broker.approvals.get(expiredChatApproval.id).status, 'revoked',
+      'an expired Chat approval cannot remain resumable after restart');
+    assert.throws(() => riskRestart.capabilityService.broker.approvals.decide(
+      orphanedApproval.id, true, { kind: 'owner', id: 'owner' }
+    ), error => error.code === 'APPROVAL_ALREADY_DECIDED',
+    'the orphaned approval must not permit an old effect');
+    assert.equal(fs.existsSync(path.join(workspaceRoot, 'old-report.txt')), false);
+    const riskRecovered = riskRestart.taskService.runtime.get({ id: riskTask.id }).task;
+    assert.equal(riskRecovered.status, 'blocked');
+    assert.match(riskRecovered.progress.note, /needs-reconciliation/);
+    const riskHarbor = await riskRestart.desktopUiService.execute({ method: 'ui.task.get', params: { id: riskTask.id } });
+    assert.match(riskHarbor.task.progress.note, /needs-reconciliation/);
+    await assert.rejects(riskRestart.desktopUiService.execute({ method: 'ui.task.resume',
+      params: { id: riskTask.id, expectedRev: riskRecovered.rev } }), error => error.code === 'NEEDS_RECONCILIATION');
+    const riskStatus = await riskRestart.desktopUiService.execute({ method: 'ui.chat.status', params: { id: riskChat.id } });
+    assert.equal(riskStatus.state, 'needs-reconciliation');
+    await assert.rejects(riskRestart.chatService.execute({ method: 'chat.continue', params: { id: riskChat.id } }),
+      error => error.code === 'NEEDS_RECONCILIATION');
+    await assert.rejects(riskRestart.desktopUiService.execute({ method: 'ui.task.reconcile', params: {
+      id: riskTask.id, expectedRev: riskRecovered.rev, reviewed: true, reviewSummary: 'Checked the Workspace'
+    } }), error => error.code === 'INVALID_PARAMS', 'manual reconciliation requires a new explicit instruction');
+    const sentAfterReview = [];
+    riskRestart.agentBroker.status = async () => { const error = new Error('Old session ended'); error.code = 'SESSION_NOT_FOUND'; throw error; };
+    riskRestart.agentBroker.send = async ({ content }) => { sentAfterReview.push(content); return { accepted: true }; };
+    const reconciled = await riskRestart.desktopUiService.execute({ method: 'ui.task.reconcile', params: {
+      id: riskTask.id, expectedRev: riskRecovered.rev, reviewed: true,
+      reviewSummary: 'Checked Workspace files and confirmed the prior write outcome',
+      nextInstruction: 'Only inspect the existing report; do not repeat the prior write',
+      requestId: 'phase3-reconcile-new-instruction'
+    } });
+    assert.equal(reconciled.task.status, 'running');
+    assert.deepEqual(sentAfterReview, ['Only inspect the existing report; do not repeat the prior write']);
+    assert.match(reconciled.task.progress.note, /Owner reviewed interrupted effect/);
+    assert.equal(readJsonFile(path.join(riskStateDir, 'capability', 'requests.json'))['uncertain-agent-request'].status,
+      'reconciled', 'Owner review must durably clear the uncertain Agent dispatch marker');
+    assert.equal(readJsonFile(path.join(riskStateDir, 'model', 'tool-continuations.json'))[orphanedApproval.id].status,
+      'reconciled', 'Owner review must durably clear the orphaned approval continuation');
+    assert.equal(readJsonFile(path.join(riskStateDir, 'model', 'tool-continuations.json'))[approvedBeforeCrash.id].status,
+      'reconciled');
+    assert.equal(readJsonFile(path.join(riskStateDir, 'model', 'tool-continuations.json'))[expiredChatApproval.id].status,
+      'reconciled');
+    assert.notEqual((await riskRestart.desktopUiService.execute({ method: 'ui.chat.status',
+      params: { id: riskChat.id } })).state, 'needs-reconciliation',
+    'Owner reconciliation must clear the old uncertain tool marker without replaying it');
+    await assert.rejects(riskRestart.chatService.execute({ method: 'chat.continue', params: { id: riskChat.id } }),
+      error => error.code === 'RECOVERY_USE_NEW_INSTRUCTION',
+    'the interrupted Chat turn cannot replay after the Owner supplied a new reviewed instruction');
+  } finally { riskRestart.chatService.close(); await riskRestart.capabilityService.close(); }
+  const riskAfterReviewRestart = createCetaMeshServices({ stateDir: riskStateDir,
+    dataRoot: path.join(root, 'risk-data') });
+  try {
+    assert.doesNotMatch(riskAfterReviewRestart.taskService.runtime.get({ id: riskTask.id }).task.progress.note,
+      /needs-reconciliation/, 'an already reconciled effect must not reappear as uncertain after another restart');
+  } finally { riskAfterReviewRestart.chatService.close(); await riskAfterReviewRestart.capabilityService.close(); }
 } finally {
   await services.capabilityService.close();
   fs.rmSync(root, { recursive: true, force: true });

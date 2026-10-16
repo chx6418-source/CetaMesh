@@ -21,6 +21,8 @@ export function createTaskService({ stateDir, now, resolveWorkspace, ownedArtifa
       goal: p.goal,
       requirements: p.requirements,
       workspaceId: p.workspaceId,
+      requestId: p.requestId,
+      requestedAgentProvider: p.requestedAgentProvider,
       currentPhase: p.currentPhase,
       acceptanceCriteria: p.acceptanceCriteria,
       status: p.status,

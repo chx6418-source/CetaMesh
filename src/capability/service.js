@@ -199,11 +199,11 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     if (request.capability === 'agent.run' && old && old.status !== 'completed') {
       throw capabilityError('REQUEST_RECOVERY_REQUIRED', 'Previous Agent dispatch outcome is uncertain; review Task before retrying');
     }
-    journal[request.requestId] = { hash, status: 'in-flight' }; saveJournal();
+    journal[request.requestId] = { hash, status: 'in-flight', taskId: request.taskId ?? null }; saveJournal();
     const pending = Promise.resolve().then(run);
     requests.set(request.requestId, pending);
-    try { const result = await pending; journal[request.requestId] = { hash, status: 'completed', result }; saveJournal(); return result; }
-    catch (error) { journal[request.requestId] = { hash, status: 'failed', code: error.code }; saveJournal(); throw error; }
+    try { const result = await pending; journal[request.requestId] = { hash, status: 'completed', taskId: request.taskId ?? null, result }; saveJournal(); return result; }
+    catch (error) { journal[request.requestId] = { hash, status: 'failed', taskId: request.taskId ?? null, code: error.code }; saveJournal(); throw error; }
     finally { requests.delete(request.requestId); }
   }
   const taskFor = id => {
@@ -526,6 +526,9 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       if (r.signal?.aborted) throw capabilityError('INVOKE_CANCELLED', 'Agent assignment cancelled');
       let task = taskFor(r.taskId);
       if (!task || task.workspaceId !== r.workspaceId) throw capabilityError('TASK_NOT_AUTHORIZED', 'Task workspace required');
+      if (/needs-reconciliation|approval-pending/i.test(task.progress?.note ?? '')) {
+        throw capabilityError('NEEDS_RECONCILIATION', 'Task has an unreviewed interrupted effect or approval');
+      }
       if (taskHandoffGuard(task.id)) throw capabilityError('TASK_HANDOFF_IN_FLIGHT', 'Task Handoff owns this execution boundary');
       const provider = String(r.input.agentProvider || r.input.provider || 'cetamesh');
       const boundary = agentBroker?.capabilities(provider)?.workspaceBoundary;
@@ -536,11 +539,11 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
         throw capabilityError('AGENT_PROVIDER_SWITCH_REQUIRES_CONTINUITY', 'An existing Task must change Agent Providers through Continuity Fresh Session');
       }
       const otherOwner = taskRuntime.activeWorkspaceOwner({ workspaceId: task.workspaceId, exceptTaskId: task.id });
-      const reservedFor = workspaceProvisioning.get(task.workspaceId);
-      if (otherOwner || (reservedFor && reservedFor !== task.id)) {
+      const reservation = workspaceProvisioning.get(task.workspaceId);
+      if (otherOwner || (reservation && reservation.taskId !== task.id)) {
         throw capabilityError('TASK_WORKSPACE_BUSY', 'Another Task holds write execution for this Workspace');
       }
-      workspaceProvisioning.set(task.workspaceId, task.id);
+      workspaceProvisioning.set(task.workspaceId, { taskId: task.id, count: (reservation?.count ?? 0) + 1 });
       const previous = provisioning.get(task.id);
       const pending = (async () => {
         if (previous) {
@@ -556,6 +559,12 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
           if (task.currentAgent && task.currentAgent.provider !== provider) {
             throw capabilityError('AGENT_PROVIDER_SWITCH_REQUIRES_CONTINUITY', 'Task Agent changed while instruction was queued');
           }
+        }
+        if (!['queued', 'running', 'paused', 'waiting', 'blocked'].includes(task.status)) {
+          throw capabilityError('TASK_NOT_AUTHORIZED', 'Task ended while instruction was queued');
+        }
+        if (taskRuntime.activeWorkspaceOwner({ workspaceId: task.workspaceId, exceptTaskId: task.id })) {
+          throw capabilityError('TASK_WORKSPACE_BUSY', 'Workspace writer changed while instruction was queued');
         }
         if (r.signal?.aborted) throw capabilityError('INVOKE_CANCELLED', 'Agent assignment cancelled');
         if (taskHandoffGuard(task.id)) throw capabilityError('TASK_HANDOFF_IN_FLIGHT', 'Task Handoff owns this execution boundary');
@@ -646,7 +655,11 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       provisioning.set(task.id, pending);
       try { return await pending; } finally {
         if (provisioning.get(task.id) === pending) provisioning.delete(task.id);
-        if (workspaceProvisioning.get(task.workspaceId) === task.id) workspaceProvisioning.delete(task.workspaceId);
+        const held = workspaceProvisioning.get(task.workspaceId);
+        if (held?.taskId === task.id) {
+          if (held.count > 1) workspaceProvisioning.set(task.workspaceId, { taskId: task.id, count: held.count - 1 });
+          else workspaceProvisioning.delete(task.workspaceId);
+        }
       }
       });
     }
@@ -733,6 +746,22 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     return result;
   }
   return { execute, executeWorkspace, executeMemory, broker, grantTask, principalForTask, refreshTaskWorkspaceGrant, memoryPrincipal,
+    recoveryForTask(taskId) {
+      return Object.values(journal).some(row => row?.taskId === taskId && row.status === 'in-flight')
+        ? { state: 'needs-reconciliation', capability: 'agent.run' } : null;
+    },
+    acknowledgeTaskRecovery(taskId) {
+      const rows = Object.values(journal).filter(row => row?.taskId === taskId && row.status === 'in-flight');
+      for (const row of rows) row.status = 'reconciled';
+      if (rows.length) {
+        try { saveJournal(); }
+        catch (error) {
+          for (const row of rows) row.status = 'in-flight';
+          throw error;
+        }
+      }
+      return { reconciled: rows.length };
+    },
     isTaskProvisioning(taskId) { return provisioning.has(String(taskId ?? '')); },
     setTaskHandoffGuard(guard) {
       if (typeof guard !== 'function') throw capabilityError('INVALID_PARAMS', 'Task Handoff guard must be a function');
