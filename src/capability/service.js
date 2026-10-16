@@ -109,6 +109,22 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
               consumer.sequence = event.seq;
             }
             const turnId = String(event?.data?.requestId ?? event?.data?.turn ?? '');
+            if (event?.type === 'tool/activity') {
+              const activity = event.data?.activity;
+              const current = taskFor(taskId);
+              if (current?.status === 'running' && current.currentAgent?.provider === provider
+                && current.currentAgent?.sessionId === sessionId && typeof activity?.capability === 'string') {
+                const capability = activity.capability.slice(0, 100);
+                const phase = activity.status === 'waiting-approval' ? 'Waiting for Owner approval' : `Agent tool: ${capability}`;
+                taskRuntime.update({ id: taskId, expectedRev: current.rev, currentPhase: phase,
+                  note: `${capability}: ${String(activity.status ?? 'running').slice(0, 40)}` });
+                if (activity.status === 'completed') {
+                  const latest = taskFor(taskId);
+                  taskRuntime.addWork({ id: taskId, expectedRev: latest.rev, kind: 'completed',
+                    text: `Agent tool ${capability} completed (${String(activity.id ?? turnId).slice(0, 160)})` });
+                }
+              }
+            }
             if (event?.type === 'assistant/message' && turnId) {
               const content = event.data?.message?.content;
               const answer = Array.isArray(content) ? content.filter(part => part?.type === 'text')

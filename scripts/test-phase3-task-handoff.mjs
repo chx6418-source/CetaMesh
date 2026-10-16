@@ -103,11 +103,17 @@ try {
   services.agentBroker.send = originalSend;
   services.agentBroker.status = originalStatus;
   services.agentBroker.cancel = originalCancel;
+  let modelCycles = 0;
   services.modelRegistry.register({ id: 'phase3-fixture', label: 'Phase 3 Fixture', defaultModel: 'fixture-model',
-    supportsTools: false, listModels: async () => [{ id: 'fixture-model' }], health: async () => ({}),
+    supportsTools: true, listModels: async () => [{ id: 'fixture-model' }], health: async () => ({}),
     chat: async () => ({ text: 'Workspace analysis finished' }),
     stream: async function* () {
-      yield { type: 'assistant/chunk', data: { chunk: { type: 'text-delta', text: 'Workspace analysis finished' } } };
+      if (modelCycles++ === 0) {
+        yield { type: 'assistant/tool-calls', data: { toolCalls: [{ id: 'phase3-read',
+          capabilityId: 'filesystem.read', arguments: '{"path":"proof.txt"}' }] } };
+      } else {
+        yield { type: 'assistant/chunk', data: { chunk: { type: 'text-delta', text: 'Workspace analysis finished' } } };
+      }
       yield { type: 'turn/end', data: { reason: { kind: 'completed' } } };
     } });
   services.providerSecrets.set({ provider: 'phase3-fixture', apiKey: 'fixture-secret-key' });
@@ -128,6 +134,8 @@ try {
       status: observed.status, progress: observed.progress,
       agent: await services.agentBroker.status(observed.currentAgent)
     })}`);
+  assert.ok(observed.completedWork.some(item => /filesystem\.read/.test(item.text)),
+    'actual completed Agent tool activity must update the Task work record');
   const chatSession = await services.chatService.execute({ method: 'chat.sessions.create', params: {} });
   const chatStoreFile = path.join(root, 'state', 'desktop-chat', 'sessions.json');
   const chatStore = readJsonFile(chatStoreFile);
