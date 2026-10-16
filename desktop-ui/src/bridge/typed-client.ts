@@ -21,6 +21,8 @@ export interface Task {
   createdAt: string | number | null; updatedAt: string | number | null; rev: number | null;
   checkpoint: { summary: string; nextAction: string } | null; result: { summary: string } | null;
   artifacts: { id: string; kind: string; label: string; createdAt: string | number | null }[];
+  executionEvidence: { eventId: string; capability: string; status: string; tool: string | null;
+    exitCode: number | null; filePath: string | null; taskRev: number | null; at: string | number | null }[];
   agentHistory: { provider: string; sessionId: string; attachedAt: string | number | null; detachedAt: string | number | null; note: string }[];
   failure: { reason: string } | null;
 }

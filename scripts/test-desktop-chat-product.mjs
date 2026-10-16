@@ -1365,5 +1365,33 @@ function makeFullService({ withKey = true, fetchImpl, baseUrl = 'https://api.dee
   ok('Task-bound Chat Agent switch preserves old state on failure and uses Continuity on success');
 }
 
+{
+  const recoveryDir = path.join(stateDir, 'non-task-recovery');
+  const api = fixtureApi();
+  const original = makeService({ stateDir: recoveryDir, api });
+  const session = await original.execute({ method: 'chat.sessions.create', params: {} });
+  original.close();
+  const sessionsPath = original._store.sessionsFile;
+  const saved = readJsonFile(sessionsPath);
+  saved.sessions[0].dshSessionId = 'stale-after-core-restart';
+  writeJsonAtomic(sessionsPath, saved);
+  writeJsonAtomic(path.join(original._store.historyDir, `${session.id}.json`), {
+    schemaVersion: 1,
+    messages: [{ id: 'previous-owner-request', role: 'user', text: 'Analyze the saved project state', at: Date.now() }]
+  });
+  const recovered = makeService({ stateDir: recoveryDir, api });
+  const status = await recovered.execute({ method: 'chat.status', params: { id: session.id } });
+  assert.equal(status.lastState, 'interrupted');
+  assert.equal(status.dshSessionAlive, false);
+  await recovered.execute({ method: 'chat.continue', params: { id: session.id } });
+  const prompt = await waitFor(() => api.calls.find(call => call.endpoint === 'session/prompt')?.args.request.content[0].text,
+    value => typeof value === 'string', 'non-Task restart recovery prompt');
+  assert.match(prompt, /Analyze the saved project state/);
+  assert.match(prompt, /verify|核对/i);
+  assert.notEqual(prompt, '继续');
+  recovered.close();
+  ok('non-Task Chat restart recovery sends bounded prior context rather than a bare continue');
+}
+
 fs.rmSync(temp, { recursive: true, force: true });
 console.log(`\n🎉 阶段 03 Chat 运行时全部通过（${step} 组）`);

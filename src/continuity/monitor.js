@@ -24,7 +24,8 @@ export function createContextMonitor({ policy, initialSessions = {}, onChange = 
     const normalized = normalizeKey(key);
     let state = sessions.get(normalized);
     if (!state) {
-      state = { inputTokens: 0, outputTokens: 0, promptChars: 0, outputChars: 0, windowTokens: null, real: false };
+      state = { inputTokens: 0, outputTokens: 0, estimatedTokens: 0,
+        promptChars: 0, outputChars: 0, windowTokens: null, real: false };
       sessions.set(normalized, state);
     }
     return state;
@@ -43,10 +44,19 @@ export function createContextMonitor({ policy, initialSessions = {}, onChange = 
         const n = Number(value);
         return Number.isFinite(n) && n > 0 ? n : 0;
       };
-      if (inputTokens !== undefined || outputTokens !== undefined) {
-        state.inputTokens += safePositive(inputTokens);
-        state.outputTokens += safePositive(outputTokens);
-        state.real = state.real || (safePositive(inputTokens) + safePositive(outputTokens) > 0);
+      const realInput = safePositive(inputTokens), realOutput = safePositive(outputTokens);
+      if (realInput + realOutput > 0) {
+        state.inputTokens += realInput;
+        state.outputTokens += realOutput;
+        state.real = true;
+        if (active.charsPerToken > 0) {
+          const missingChars = (inputTokens === undefined || inputTokens === null ? safePositive(promptChars) : 0)
+            + (outputTokens === undefined || outputTokens === null ? safePositive(outputChars) : 0);
+          state.estimatedTokens = (state.estimatedTokens ?? 0) + Math.ceil(missingChars / active.charsPerToken);
+        }
+      } else if (active.charsPerToken > 0) {
+        state.estimatedTokens = (state.estimatedTokens ?? 0)
+          + Math.ceil((safePositive(promptChars) + safePositive(outputChars)) / active.charsPerToken);
       }
       state.promptChars += safePositive(promptChars);
       state.outputChars += safePositive(outputChars);
@@ -60,10 +70,9 @@ export function createContextMonitor({ policy, initialSessions = {}, onChange = 
     /** 当前使用率与阈值带。tokens 真实值优先，否则字符估算（estimated:true）。 */
     level(sessionKey) {
       const state = stateOf(sessionKey);
-      const estimatedTokens = active.charsPerToken > 0
-        ? Math.ceil((state.promptChars + state.outputChars) / active.charsPerToken)
-        : 0;
-      const usedTokens = state.real ? state.inputTokens + state.outputTokens : estimatedTokens;
+      const estimatedTokens = state.estimatedTokens ?? (state.real ? 0 : active.charsPerToken > 0
+        ? Math.ceil((state.promptChars + state.outputChars) / active.charsPerToken) : 0);
+      const usedTokens = state.inputTokens + state.outputTokens + estimatedTokens;
       const windowTokens = state.windowTokens ?? active.defaultWindowTokens;
       const percent = windowTokens > 0 ? Math.min(100, Math.round((usedTokens / windowTokens) * 100)) : 0;
       return {
@@ -71,8 +80,8 @@ export function createContextMonitor({ policy, initialSessions = {}, onChange = 
         windowTokens,
         percent,
         band: bandFor(percent),
-        source: state.real ? 'usage' : 'estimated',
-        estimated: !state.real
+        source: state.real ? (estimatedTokens > 0 ? 'mixed' : 'usage') : 'estimated',
+        estimated: !state.real || estimatedTokens > 0
       };
     },
 

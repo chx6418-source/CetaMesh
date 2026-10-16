@@ -1635,6 +1635,18 @@ export function createChatService({
         'Verify current Workspace state before making any change; continue from the checkpoint.'].join('\n');
       const ownerConstraints = boundedTaskChatConstraints(record);
       if (ownerConstraints) prompt += `\n[Chat constraints from this Task Session; verify against the current request]\n- ${ownerConstraints}`;
+    } else if (record.interruptedAt) {
+      const history = readHistory(record.id);
+      if (history.at(-1)?.role === 'user') {
+        const context = history.filter(message => (message.role === 'user' || message.role === 'assistant')
+          && typeof message.text === 'string' && !message.error && !message.cancelled)
+          .slice(-12).map(message => `${message.role}: ${message.text.slice(0, 500)}`).join('\n').slice(-4000);
+        prompt = ['[CetaMesh Chat recovery]', `Session ID: ${record.id}`,
+          record.config.workspaceId ? `Workspace ID: ${record.config.workspaceId}` : '',
+          `Prior context:\n${context}`,
+          'The previous Core session was interrupted. Verify current state before any side effect; do not repeat completed operations. Resume the unfinished request using this context.']
+          .filter(Boolean).join('\n');
+      }
     }
     const accepted = await startTurn(record, state, prompt, { attachments: [], sourceText: prompt });
     return { continued: true, ...(accepted?.requestId ? { requestId: accepted.requestId } : {}) };

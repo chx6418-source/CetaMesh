@@ -70,6 +70,7 @@ function normalizeLoaded(raw) {
     pendingWork: asArray(raw.pendingWork),
     workspaceId: raw.workspaceId === undefined ? null : raw.workspaceId,
     artifacts: asArray(raw.artifacts),
+    executionEvidence: asArray(raw.executionEvidence),
     decisions: asArray(raw.decisions),
     memoryRefs: asArray(raw.memoryRefs),
     checkpoint: checkpoint

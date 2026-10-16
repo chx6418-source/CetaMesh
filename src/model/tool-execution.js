@@ -299,8 +299,9 @@ export function createToolExecutionCoordinator({
           await state.onActivity({ id: activityId, capability, status: 'running', durationMs: null });
         }
         let result;
+        let input;
         try {
-          const input = parseArguments(call?.arguments);
+          input = parseArguments(call?.arguments);
           const descriptor = state.manifest.find((item) => item.id === capability);
           if (!descriptor) fail('UNKNOWN_TOOL_IN_TURN', 'Tool was not authorized in this turn');
           validateSchema(descriptor.inputSchema, input);
@@ -350,6 +351,9 @@ export function createToolExecutionCoordinator({
               limitReached,
               seenCallIds: state.seenCallIds,
               pendingToolCallId: callId,
+              pendingCapability: capability,
+              pendingInput: { path: typeof input.path === 'string' ? input.path : null,
+                tool: typeof input.tool === 'string' ? input.tool : null },
               pendingCalls: calls,
               pendingCallIndex: index + 1
             },
@@ -374,7 +378,8 @@ export function createToolExecutionCoordinator({
           });
         }
         if (typeof state.onCapabilityResult === 'function') {
-          await state.onCapabilityResult({ capability, result, sessionId, turnId, scope: state.scope });
+          await state.onCapabilityResult({ capability, result, input, eventId: activityId,
+            sessionId, turnId, scope: state.scope });
         }
         if (typeof state.refreshContext === 'function') {
           const refreshed = await state.refreshContext({ capability, result, sessionId, turnId, scope: state.scope });
@@ -452,6 +457,12 @@ export function createToolExecutionCoordinator({
       role: 'tool', tool_call_id: state.pendingToolCallId,
       content: safeJson(result)
     });
+    if (typeof state.onCapabilityResult === 'function' && state.pendingCapability) {
+      await state.onCapabilityResult({ capability: state.pendingCapability, result,
+        input: state.pendingInput ?? {},
+        eventId: `${continuation.target.turnId}:${state.pendingToolCallId}`.slice(0, 240),
+        sessionId: continuation.target.sessionId, turnId: continuation.target.turnId, scope: state.scope });
+    }
     state.pendingCalls = structuredClone(continuation.state.pendingCalls ?? []);
     state.pendingCallIndex = Math.max(0, Number(continuation.state.pendingCallIndex) || 0);
     if (typeof state.refreshContext === 'function') {

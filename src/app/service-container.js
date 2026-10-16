@@ -253,6 +253,7 @@ export function createCetaMeshServices(options = {}) {
     workspaceService,
     taskRuntime: taskService.runtime,
     agentBroker,
+    modelRuntime,
     continuityRuntime: { rollover: params => {
       if (!continuityService) throw Object.assign(new Error('Continuity Runtime is unavailable'), { code: 'PROVIDER_UNAVAILABLE' });
       return continuityService.runtime.rollover(params);

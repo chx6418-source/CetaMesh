@@ -345,6 +345,8 @@ check('Artifact opening keeps renderer requests identity-only and validates the 
   const projectTask = taskProjection.slice(taskProjection.indexOf('function projectTask('), taskProjection.indexOf('function projectWorkspace('));
   assert.match(projectTask, /id: string\(artifact\.id/);
   assert.doesNotMatch(projectTask, /artifact\.(ref|canonicalPath|path|url)/);
+  assert.match(projectTask, /executionEvidence/, 'Core must project bounded Task execution evidence to Harbor');
+  assert.match(app, /执行证据/, 'Harbor Task detail must display actual tool and test outcomes');
 });
 check('Harbor pages older chat history through measured virtual rows and preserves scroll anchors', () => {
   const app = read('desktop-ui/src/app/HarborApp.tsx');

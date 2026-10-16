@@ -422,6 +422,10 @@ try {
     error => error.code === 'TASK_REQUIRED');
   await assert.rejects(() => agentBroker.createSession('codex', { taskId: task.id, workspaceId: 'wrong-workspace' }),
     error => error.code === 'TASK_WORKSPACE_MISMATCH');
+  await assert.rejects(() => agentBroker.createSession('codex', {
+    taskId: task.id, workspaceId: authoritative.id, modelProvider: 'different-authorized-provider'
+  }), error => error.code === 'MODEL_PROVIDER_UNSUPPORTED',
+  'Codex must not silently replace a Task authorized model provider with its inherited default');
   taskCapabilities = createCapabilityService({ stateDir, workspaceService, taskRuntime, agentBroker });
   const assignment = await taskCapabilities.broker.execute({
     actor: { kind: 'owner', id: 'desktop' }, taskId: task.id, workspaceId: authoritative.id,
@@ -436,6 +440,8 @@ try {
   const completedStatus = await waitFor(() => agentBroker.status({ provider: 'codex', sessionId: codexSessionId }),
     status => status.lastRunStatus === 'completed');
   assert.equal(completedStatus.running, false);
+  assert.equal((await agentBroker.health('codex')).sandboxCapable, true,
+    'Codex is eligible for automatic routing only after its required sandbox has actually executed');
   const codexCheckpoint = await waitFor(() => taskRuntime.get({ id: task.id }).task.checkpoint,
     checkpoint => checkpoint?.summary?.includes('fixture response 1'));
   assert.match(codexCheckpoint.summary, /fixture response 1/,
@@ -811,7 +817,8 @@ try {
     workspaceService: { execute: async () => ({ activeId: 'workspace-switch' }) },
     taskRuntime: { get: () => ({ task: { id: 'task-switch', workspaceId: 'workspace-switch', status: 'running',
       currentAgent: { provider: 'dsh', sessionId: 'dsh-old-session' } } }) },
-    agentBroker: { send: async request => { switchCalls.push({ kind: 'send', request }); return { accepted: true }; } },
+    agentBroker: { capabilities: () => ({ workspaceBoundary: 'staged-capability-broker' }),
+      send: async request => { switchCalls.push({ kind: 'send', request }); return { accepted: true }; } },
     continuityRuntime: { rollover: async request => {
       switchCalls.push({ kind: 'rollover', request });
       return { to: { provider: 'codex', sessionId: 'codex-fresh-session' } };

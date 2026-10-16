@@ -37,6 +37,8 @@ try {
     await new Promise(resolve => setTimeout(resolve, 250));
   } while (Date.now() < deadline);
   if (task.status === 'blocked' && task.progress?.note === 'CODEX_SANDBOX_UNAVAILABLE') {
+    assert.equal((await services.agentBroker.health('codex')).sandboxCapable, false,
+      'a real Windows sandbox refusal must be visible to the Smart Router health check');
     unavailableReason = 'Windows Codex CLI sandbox refused the isolated Task execution';
   } else {
     assert.match(task.checkpoint?.summary ?? '', /PHASE3_REAL_CODEX_OK_4217/,

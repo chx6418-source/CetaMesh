@@ -1,7 +1,52 @@
 import { OWNER_ACTOR, capabilityError } from '../capability/types.js';
 
 /** Smart decisions are consumed here; authority is always the trusted Desktop Owner. */
-export function createDesktopPlatformRuntime({ capabilityService, workspaceService, taskRuntime, agentBroker, continuityRuntime, legacyModel }) {
+export function createDesktopPlatformRuntime({ capabilityService, workspaceService, taskRuntime, agentBroker, continuityRuntime, modelRuntime, legacyModel }) {
+  async function selectProvider(record, task) {
+    const selected = record.config.agentProvider;
+    const explicit = selected && selected !== 'none' ? selected : null;
+    if (!explicit && task?.currentAgent?.provider) return task.currentAgent.provider;
+    const boundaryAllowed = id => ['capability-broker', 'staged-capability-broker']
+      .includes(agentBroker.capabilities(id)?.workspaceBoundary);
+    if (explicit) {
+      if (!boundaryAllowed(explicit)) throw capabilityError('AGENT_BOUNDARY_UNSUPPORTED', 'Selected Agent has no verified Task Workspace boundary');
+      if (typeof agentBroker.health === 'function') {
+        const health = await agentBroker.health(explicit);
+        if (health?.available === false || health?.authenticated === false || health?.sessionCapable === false) {
+          throw capabilityError('PROVIDER_UNAVAILABLE', `Selected Agent ${explicit} is not installed, authenticated, or session-capable`);
+        }
+        if (explicit === 'codex' && health?.sandboxCapable === false) {
+          throw capabilityError('CODEX_SANDBOX_UNAVAILABLE', 'Codex Windows sandbox refused the required Workspace boundary');
+        }
+      }
+      return explicit;
+    }
+    // Legacy callers without a Model Runtime retain the existing Managed default;
+    // the production assembly supplies one and must prove both tool and provider readiness.
+    if (!modelRuntime || typeof agentBroker.health !== 'function') return 'cetamesh';
+    const candidates = typeof agentBroker.ids === 'function' ? new Set(agentBroker.ids()) : new Set(['cetamesh']);
+    if (candidates.has('cetamesh') && boundaryAllowed('cetamesh')) {
+      try {
+        const modelTools = modelRuntime.supportsToolCalling(record.config.modelProvider ?? null,
+          record.config.model !== legacyModel ? record.config.model : null) === true;
+        const [modelHealth, agentHealth] = await Promise.all([
+          modelRuntime.health(record.config.modelProvider ?? modelRuntime.defaultProviderId?.()),
+          agentBroker.health('cetamesh')
+        ]);
+        if (modelTools && modelHealth?.configured === true && modelHealth?.available !== false
+          && agentHealth?.available === true && agentHealth?.sessionCapable !== false) return 'cetamesh';
+      } catch { /* A missing or unhealthy Model Provider is not eligible for automatic task routing. */ }
+    }
+    for (const id of ['codex', 'dsh']) {
+      if (!candidates.has(id) || !boundaryAllowed(id)) continue;
+      let health;
+      try { health = await agentBroker.health(id); }
+      catch { continue; /* A failing health probe cannot authorize an automatic executor. */ }
+      if (health?.available === true && health?.authenticated === true && health?.sessionCapable === true
+        && (id === 'codex' ? health.sandboxCapable === true : health.toolsAvailable === true)) return id;
+    }
+    throw capabilityError('AGENT_PROVIDER_SELECTION_REQUIRED', 'No verified tool-capable Agent is ready for this Workspace; choose and configure an Agent in Settings');
+  }
   async function cancelAgentAfterAbort(session) {
     try { await agentBroker.cancel(session); }
     catch (error) {
@@ -25,6 +70,7 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
       if (task && task.workspaceId !== workspaceId) task = null;
       if (task && ['completed', 'cancelled', 'failed'].includes(task.status)) task = null;
       if (!task) task = taskRuntime.findByGoalWorkspace({ goal: text.slice(0, 2000), workspaceId });
+      const provider = await selectProvider(record, task);
       let createdTask = false;
       if (!task) {
         task = taskRuntime.create({ goal: text.slice(0, 2000), workspaceId, note: 'Smart Chat project task' });
@@ -42,8 +88,6 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
         }
         throw Object.assign(new Error('Chat operation cancelled'), { code: 'ABORTED' });
       }
-      const provider = record.config.agentProvider && record.config.agentProvider !== 'none'
-        ? record.config.agentProvider : task.currentAgent?.provider || 'cetamesh';
       if (task.currentAgent && task.currentAgent.provider !== provider) {
         if (typeof continuityRuntime?.rollover !== 'function') {
           throw capabilityError('AGENT_PROVIDER_SWITCH_REQUIRES_CONTINUITY', 'Changing Agent Provider on an existing Task requires Continuity Fresh Session');

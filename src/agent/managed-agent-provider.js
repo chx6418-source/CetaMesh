@@ -140,6 +140,13 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
           signal: controller.signal,
           onTextDelta: delta => { streamedText += delta; emit(s, 'assistant/chunk', { requestId: turn.id, chunk: { type: 'text-delta', text: delta } }); },
           onActivity: activity => emit(s, 'tool/activity', { requestId: turn.id, activity }),
+          onCapabilityResult: ({ capability, result, input, eventId }) => emit(s, 'tool/result', {
+            requestId: turn.id, eventId, capability, status: result?.status ?? 'failed',
+            filePath: capability === 'filesystem.write' && typeof input?.path === 'string' ? input.path : null,
+            tool: capability === 'test.run' && typeof input?.tool === 'string' ? input.tool : null,
+            exitCode: capability === 'test.run' && Number.isSafeInteger(result?.result?.exitCode)
+              ? result.result.exitCode : null
+          }),
           onStreamReset: () => { streamedText = ''; emit(s, 'assistant/reset', { requestId: turn.id }); }
         }), controller.signal);
         if (result.status === 'unsupported') {
@@ -391,6 +398,13 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
         const result = await toolExecutionCoordinator.resumeApproval({ approvalId, requestFingerprint, decisionResult,
           signal: controller.signal,
           onTextDelta: delta => emit(s, 'assistant/chunk', { requestId: turn.id, chunk: { type: 'text-delta', text: delta } }),
+          onCapabilityResult: ({ capability, result, input, eventId }) => emit(s, 'tool/result', {
+            requestId: turn.id, eventId, capability, status: result?.status ?? 'failed',
+            filePath: capability === 'filesystem.write' && typeof input?.path === 'string' ? input.path : null,
+            tool: capability === 'test.run' && typeof input?.tool === 'string' ? input.tool : null,
+            exitCode: capability === 'test.run' && Number.isSafeInteger(result?.result?.exitCode)
+              ? result.result.exitCode : null
+          }),
           onStreamReset: () => emit(s, 'assistant/reset', { requestId: turn.id }),
           refreshContext: async () => {
             if (typeof buildProductTurnContext !== 'function') return null;

@@ -1,7 +1,7 @@
 // CetaMesh Persistent Task v1 —— 任务运行时（阶段 07）。
 //
 // 定位：Task 是 CetaMesh 自己持有的长期工作对象，**不是** Agent Session 的投影。
-//   一个 Task 可以先后/同时被多个 Agent Provider 的 Session 推进；
+//   一个 Task 可以先后由多个 Agent Provider 的 Session 推进；
 //   attachAgent 只追加 agentHistory 并更新 currentAgent，任务 id 永不改变。
 //
 // 生命周期：queued → running → (waiting|blocked|paused) → running → completed|failed|cancelled
@@ -74,17 +74,30 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
   } = {}) {
     const initialStatus = status === undefined || status === null ? 'queued' : normalizeStatus(status);
     const timestamp = now();
+    const normalizedGoal = normalizeText(goal, 'goal', TASK_LIMITS.goalChars, { required: true });
+    const normalizedRequirements = normalizeStringList(requirements, 'requirements', TASK_LIMITS.requirements);
+    const normalizedWorkspace = normalizeWorkspaceId(workspaceId);
+    if (normalizedWorkspace) {
+      const existing = findByGoalWorkspace({ goal: normalizedGoal, workspaceId: normalizedWorkspace });
+      if (existing) {
+        if (normalizedRequirements.length && JSON.stringify(normalizedRequirements) !== JSON.stringify(existing.requirements)) {
+          throw taskError('TASK_REQUIREMENTS_CONFLICT', 'Matching active Task has different requirements');
+        }
+        return existing;
+      }
+    }
     const task = {
       id: store.newId(),
-      goal: normalizeText(goal, 'goal', TASK_LIMITS.goalChars, { required: true }),
-      requirements: normalizeStringList(requirements, 'requirements', TASK_LIMITS.requirements),
+      goal: normalizedGoal,
+      requirements: normalizedRequirements,
       status: initialStatus,
       currentPhase: normalizeText(currentPhase, 'currentPhase', TASK_LIMITS.phaseChars),
       progress: { percent: 0, note: normalizeText(note, 'note', TASK_LIMITS.noteChars) },
       completedWork: [],
       pendingWork: [],
-      workspaceId: normalizeWorkspaceId(workspaceId),
+      workspaceId: normalizedWorkspace,
       artifacts: [],
+      executionEvidence: [],
       decisions: [],
       memoryRefs: [],
       checkpoint: null,
@@ -205,11 +218,12 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
   }
 
   function findByGoalWorkspace({ goal, workspaceId } = {}) {
-    const wantedGoal = String(goal ?? '').trim();
+    const canonicalGoal = value => String(value ?? '').normalize('NFKC').trim().replace(/\s+/gu, ' ').toLocaleLowerCase();
+    const wantedGoal = canonicalGoal(goal);
     const wantedWorkspace = normalizeWorkspaceId(workspaceId);
     if (!wantedGoal || !wantedWorkspace) return null;
     const matches = store.listAll().filter(row => row.workspaceId === wantedWorkspace
-      && row.goal.trim() === wantedGoal && !isTerminalStatus(row.status));
+      && canonicalGoal(row.goal) === wantedGoal && !isTerminalStatus(row.status));
     if (matches.length > 1) throw taskError('TASK_AMBIGUOUS', 'Multiple active Tasks share this Workspace goal');
     return matches[0] ?? null;
   }
@@ -433,6 +447,38 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     });
   }
 
+  /** Persist one observed Broker tool result against the current Task owner. */
+  function recordToolOutcome({ id, provider, sessionId, eventId, capability, status, filePath, tool, exitCode } = {}) {
+    const current = requireTask(id);
+    const sourceId = normalizeText(eventId, 'eventId', 240, { required: true });
+    if (current.executionEvidence?.some(item => item.eventId === sourceId)) return { task: current, changed: false };
+    if (current.status !== 'running' || current.currentAgent?.provider !== provider
+      || current.currentAgent?.sessionId !== sessionId) {
+      throw taskError('AGENT_ASSIGNMENT_EXPIRED', 'Tool outcome came from a stale Task Agent');
+    }
+    const name = normalizeText(capability, 'capability', 100, { required: true });
+    const resultStatus = normalizeText(status, 'status', 40, { required: true });
+    const relative = typeof filePath === 'string' ? filePath.replaceAll('\\', '/').trim() : '';
+    const artifactPath = resultStatus === 'completed' && name === 'filesystem.write'
+      && relative && !relative.startsWith('/') && !/^[A-Za-z]:/.test(relative)
+      && relative.split('/').every(segment => segment && segment !== '.' && segment !== '..') ? relative : null;
+    const observedExitCode = Number.isSafeInteger(exitCode) ? exitCode : null;
+    const task = mutate(id, current.rev, draft => {
+      draft.executionEvidence ??= [];
+      draft.executionEvidence.push({ eventId: sourceId, provider, sessionId, capability: name,
+        status: resultStatus, tool: typeof tool === 'string' ? tool.slice(0, 100) : null,
+        exitCode: observedExitCode, filePath: artifactPath, at: now(), taskRev: draft.rev + 1 });
+      if (draft.executionEvidence.length > 200) draft.executionEvidence.splice(0, draft.executionEvidence.length - 200);
+      if (artifactPath && !draft.artifacts.some(item => item.ref === artifactPath)) {
+        draft.artifacts.push({ id: subId('art'), kind: 'file', label: artifactPath,
+          ref: artifactPath, createdAt: now(), sourceEventId: sourceId });
+        if (draft.artifacts.length > TASK_LIMITS.artifacts) draft.artifacts.splice(0, draft.artifacts.length - TASK_LIMITS.artifacts);
+      }
+      return draft;
+    });
+    return { task, changed: true };
+  }
+
   async function resolveArtifactOpen({ taskId, artifactId } = {}) {
     const safeTaskId = normalizeText(taskId, 'taskId', TASK_LIMITS.idChars, { required: true });
     const safeArtifactId = normalizeText(artifactId, 'artifactId', TASK_LIMITS.idChars, { required: true });
@@ -552,6 +598,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     reconcileWorkspace,
     addWork,
     addArtifact,
+    recordToolOutcome,
     resolveArtifactOpen,
     addDecision,
     linkMemory,

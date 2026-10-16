@@ -190,6 +190,22 @@ function seedTask(taskRuntime, rev, { provider = 'alpha', sessionId = 'alpha-s1'
   ok('估算路径：字符估算明确 estimated=true，不冒充真实 usage，可驱动阈值判定');
 }
 
+{
+  const { runtime, taskRuntime, rev } = setup({ policy: { autoRollover: false } });
+  seedTask(taskRuntime, rev);
+  runtime.monitor.record('alpha:alpha-s1', { inputTokens: 100, outputTokens: 20,
+    promptChars: 400, outputChars: 80, windowTokens: 1000 });
+  const mixed = runtime.monitor.record('alpha:alpha-s1', { promptChars: 400, outputChars: 80 });
+  assert.equal(mixed.usedTokens, 240, 'missing second-turn usage must add an explicitly estimated 120 tokens');
+  assert.equal(mixed.source, 'mixed');
+  assert.equal(mixed.estimated, true);
+  const partial = runtime.monitor.record('alpha:alpha-s1', { inputTokens: 50,
+    promptChars: 200, outputChars: 400 });
+  assert.equal(partial.usedTokens, 390,
+    'partial Provider usage must estimate the missing output side without double-counting real input tokens');
+  ok('mixed real and estimated usage remains monotonic when a Provider omits one turn of token counts');
+}
+
 // ── 3. 自动 Fresh Session Rollover（同 Provider）：Session B + Task ID 不变 ──
 {
   const { runtime, taskRuntime, logs, rev } = setup();

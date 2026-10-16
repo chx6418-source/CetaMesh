@@ -109,6 +109,17 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
               consumer.sequence = event.seq;
             }
             const turnId = String(event?.data?.requestId ?? event?.data?.turn ?? '');
+            if (event?.type === 'tool/result') {
+              const current = taskFor(taskId);
+              if (current?.status === 'running' && current.currentAgent?.provider === provider
+                && current.currentAgent?.sessionId === sessionId) {
+                taskRuntime.recordToolOutcome({ id: taskId, provider, sessionId,
+                  eventId: String(event.data?.eventId ?? `${turnId}:${event.seq}`),
+                  capability: event.data?.capability, status: event.data?.status,
+                  filePath: event.data?.filePath, tool: event.data?.tool,
+                  exitCode: event.data?.exitCode });
+              }
+            }
             if (event?.type === 'tool/activity') {
               const activity = event.data?.activity;
               const current = taskFor(taskId);

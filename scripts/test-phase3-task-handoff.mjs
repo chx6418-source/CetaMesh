@@ -120,6 +120,25 @@ try {
   const actual = await services.desktopUiService.execute({ method: 'ui.task.create', params: {
     goal: 'Analyze the Workspace', workspaceId: workspace.id, agentProvider: 'cetamesh', modelProvider: 'phase3-fixture'
   } });
+  const directRetry = services.taskService.runtime.create({ goal: 'Analyze the Workspace', workspaceId: workspace.id });
+  assert.equal(directRetry.id, actual.task.id, 'Task Core must deduplicate a simultaneous create from another surface');
+  assert.throws(() => services.taskService.runtime.create({ goal: 'Analyze the Workspace', workspaceId: workspace.id,
+    requirements: ['Different authorized scope'] }), error => error.code === 'TASK_REQUIREMENTS_CONFLICT',
+  'Task Core must reject a same-goal create that changes requirements');
+  const duplicate = await services.desktopUiService.execute({ method: 'ui.task.create', params: {
+    goal: '  Analyze   the Workspace  ', workspaceId: workspace.id, agentProvider: 'cetamesh'
+  } });
+  assert.equal(duplicate.task.id, actual.task.id, 'Work must attach the existing Chat/Work Task for the same Workspace goal');
+  await assert.rejects(services.desktopUiService.execute({ method: 'ui.task.create', params: {
+    goal: 'Analyze the Workspace', workspaceId: workspace.id, requirements: ['Different authorized scope']
+  } }), error => error.code === 'TASK_REQUIREMENTS_CONFLICT',
+  'Harbor cannot silently discard new requirements when reusing an active Task');
+  const taskCountBeforeConflict = services.taskService.runtime.countAll();
+  await assert.rejects(services.desktopUiService.execute({ method: 'ui.task.create', params: {
+    goal: 'Different concurrent Workspace task', workspaceId: workspace.id, agentProvider: 'cetamesh'
+  } }), error => error.code === 'TASK_WORKSPACE_BUSY');
+  assert.equal(services.taskService.runtime.countAll(), taskCountBeforeConflict,
+    'Workspace conflict must not leave a queued Task that was never dispatched');
   assert.equal(services.taskService.runtime.get({ id: actual.task.id }).task.modelConfig?.modelProvider, 'phase3-fixture',
     'Task must persist the selected Model Provider independently of an Agent Session');
   const deadline = Date.now() + 2000;
@@ -136,6 +155,26 @@ try {
     })}`);
   assert.ok(observed.completedWork.some(item => /filesystem\.read/.test(item.text)),
     'actual completed Agent tool activity must update the Task work record');
+  assert.ok(observed.executionEvidence?.some(item => item.capability === 'filesystem.read'
+    && item.status === 'completed' && item.taskRev <= observed.rev),
+  'actual Agent tool results must be linked to a persisted Task revision');
+  const assignment = observed.currentAgent;
+  fs.writeFileSync(path.join(workspaceRoot, 'generated.md'), 'Agent artifact fixture');
+  const artifactOutcome = services.taskService.runtime.recordToolOutcome({ id: actual.task.id,
+    ...assignment, eventId: 'phase3-file-result', capability: 'filesystem.write', status: 'completed',
+    filePath: 'generated.md' });
+  assert.ok(artifactOutcome.task.artifacts.some(item => item.ref === 'generated.md'
+    && item.sourceEventId === 'phase3-file-result'));
+  const repeatOutcome = services.taskService.runtime.recordToolOutcome({ id: actual.task.id,
+    ...assignment, eventId: 'phase3-file-result', capability: 'filesystem.write', status: 'completed',
+    filePath: 'generated.md' });
+  assert.equal(repeatOutcome.changed, false, 'replayed tool result cannot duplicate an Artifact');
+  const testOutcome = services.taskService.runtime.recordToolOutcome({ id: actual.task.id,
+    ...assignment, eventId: 'phase3-test-result', capability: 'test.run', status: 'completed',
+    tool: 'npm', exitCode: 1 });
+  assert.ok(testOutcome.task.executionEvidence.some(item => item.capability === 'test.run'
+    && item.tool === 'npm' && item.exitCode === 1 && item.taskRev === testOutcome.task.rev),
+  'a completed test invocation with a nonzero exit code must retain the real result, not become a false PASS');
   const chatSession = await services.chatService.execute({ method: 'chat.sessions.create', params: {} });
   const chatStoreFile = path.join(root, 'state', 'desktop-chat', 'sessions.json');
   const chatStore = readJsonFile(chatStoreFile);

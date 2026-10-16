@@ -228,6 +228,7 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
   let inspection = inspectCodexCli(cli);
   let authenticated = inspection.available ? loginState(cli) : false;
   let lastProbeAt = Date.now();
+  let sandboxCapable = null;
   const sessions = new Map();
   const providerConfig = { model: null, reasoningEffort: null };
 
@@ -291,11 +292,13 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
     }
     if (result.exitCode !== 0 || run.failed || !run.turnCompleted) {
       const failure = classifyProcessFailure(result, run);
+      if (failure.code === 'CODEX_SANDBOX_UNAVAILABLE') sandboxCapable = false;
       session.lastRunStatus = 'failed';
       session.lastError = { code: failure.code, exitCode: result.exitCode };
       emitTurnEnd(session, run.turnId, 'error', failure);
       return;
     }
+    sandboxCapable = true;
     let changeSet;
     try {
       changeSet = collectStagedChanges(session.stage);
@@ -425,11 +428,15 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
       executionMode: 'task-staging'
     },
     methods: {
-      async createSession({ taskId, workspaceId, model, reasoningEffort } = {}) {
+      async createSession({ taskId, workspaceId, modelProvider, model, reasoningEffort } = {}) {
         refreshInspection();
         if (!inspection.available) throw agentProviderError('PROVIDER_UNAVAILABLE', 'Codex CLI is not installed or lacks the inspected exec interface');
         if (!authenticated) throw agentProviderError('PROVIDER_UNAVAILABLE', 'Codex needs authentication in its own secure configuration');
         if (!taskId || !workspaceId) throw agentProviderError('TASK_REQUIRED', 'Codex requires a Task and its bound Workspace');
+        const inheritedModelConfiguration = readCodexModelConfiguration(resolvedCodexHome);
+        if (modelProvider && modelProvider !== inheritedModelConfiguration.modelProvider) {
+          throw agentProviderError('MODEL_PROVIDER_UNSUPPORTED', 'Codex CLI configuration does not match the Task authorized model provider');
+        }
         if (typeof resolveTaskWorkspace !== 'function') throw agentProviderError('AGENT_BOUNDARY_UNSUPPORTED', 'Task Workspace resolver is unavailable');
         const binding = await resolveTaskWorkspace({ taskId: String(taskId), workspaceId: String(workspaceId) });
         if (!binding?.task || binding.task.id !== String(taskId) || binding.task.workspaceId !== String(workspaceId)
@@ -445,7 +452,6 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
           additionalWorkspaceRoots: (Array.isArray(registeredRoots) ? registeredRoots : []).map((row) => typeof row === 'string' ? row : row.root),
           excludedRoots
         });
-        const inheritedModelConfiguration = readCodexModelConfiguration(resolvedCodexHome);
         const id = crypto.randomUUID();
         sessions.set(id, {
           id,
@@ -617,6 +623,7 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
           configured: inspection.available,
           reachable: null,
           sessionCapable: inspection.available,
+          sandboxCapable,
           reprobedAt: lastProbeAt
         };
       },

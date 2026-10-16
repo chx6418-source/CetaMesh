@@ -146,6 +146,49 @@ try {
     record: { taskId: rolloverTask.id, config: { workspaceId, agentProvider: 'codex' } },
     text: 'surface failed rollover cancellation', signal: { get aborted() { rolloverSignalReads += 1; return rolloverSignalReads >= 4; } } }),
   error => error.code === 'AGENT_CANCEL_FAILED', 'a failed remote cancellation after rollover must remain observable');
+
+  // Phase 3: automatic project routing must use observed capabilities and health.
+  const selectedProviders = [];
+  let managedTools = true;
+  let codexReady = false;
+  let codexSandboxCapable = false;
+  const routingBroker = { ...agentBroker,
+    ids: () => ['cetamesh', 'codex'],
+    capabilities: id => ({ workspaceBoundary: id === 'codex' ? 'staged-capability-broker' : 'capability-broker' }),
+    health: async id => id === 'codex'
+      ? { available: codexReady, authenticated: codexReady, sessionCapable: codexReady,
+          sandboxCapable: codexSandboxCapable }
+      : { available: true, sessionCapable: true }
+  };
+  const routingRuntime = createDesktopPlatformRuntime({
+    capabilityService: { broker: { execute: async request => {
+      selectedProviders.push(request.input.agentProvider ?? request.input.provider);
+      return { result: { accepted: true, provider: request.input.agentProvider ?? request.input.provider } };
+    } } }, workspaceService, taskRuntime, agentBroker: routingBroker,
+    modelRuntime: { supportsToolCalling: () => managedTools,
+      health: async () => ({ configured: true, available: true }) }
+  });
+  await routingRuntime.route({ decision: { agentIntent: true, class: 'project' },
+    record: { config: { workspaceId, modelProvider: 'fixture-model' } }, text: 'fix one TypeScript module' });
+  assert.equal(selectedProviders.at(-1), 'cetamesh');
+  managedTools = false;
+  codexReady = true;
+  codexSandboxCapable = true;
+  await routingRuntime.route({ decision: { agentIntent: true, class: 'project' },
+    record: { config: { workspaceId, modelProvider: 'fixture-model' } }, text: 'fix another TypeScript module' });
+  assert.equal(selectedProviders.at(-1), 'codex', 'a verified code Agent must win when Managed lacks tools');
+  codexSandboxCapable = false;
+  const beforeSandboxRefusal = taskRuntime.countAll();
+  await assert.rejects(routingRuntime.route({ decision: { agentIntent: true, class: 'project' },
+    record: { config: { workspaceId, agentProvider: 'codex' } }, text: 'retry a Codex sandbox refusal' }),
+  error => error.code === 'CODEX_SANDBOX_UNAVAILABLE');
+  assert.equal(taskRuntime.countAll(), beforeSandboxRefusal, 'a known sandbox refusal cannot create a fake Task');
+  codexReady = false;
+  const beforeUnavailable = taskRuntime.countAll();
+  await assert.rejects(routingRuntime.route({ decision: { agentIntent: true, class: 'project' },
+    record: { config: { workspaceId, modelProvider: 'fixture-model' } }, text: 'fix a third TypeScript module' }),
+  error => error.code === 'AGENT_PROVIDER_SELECTION_REQUIRED');
+  assert.equal(taskRuntime.countAll(), beforeUnavailable, 'unavailable providers cannot leave a queued fake Task');
   console.log('Smart platform routing: Chat -> Model, Smart tool -> Capability -> Model context, Smart project -> Task -> Agent; no DSH client supplied');
 } finally {
   chat?.close();

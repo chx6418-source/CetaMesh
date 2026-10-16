@@ -119,6 +119,14 @@ function projectTask(value) {
     return { provider: string(agent.provider, 100), sessionId: string(agent.sessionId, 160),
       attachedAt: scalar(agent.attachedAt), detachedAt: scalar(agent.detachedAt), note: string(agent.note, 1000) };
   }) : [];
+  const executionEvidence = Array.isArray(row.executionEvidence) ? row.executionEvidence.slice(-100).map(item => {
+    const evidence = record(item);
+    return { eventId: string(evidence.eventId, 240), capability: string(evidence.capability, 100),
+      status: string(evidence.status, 40), tool: string(evidence.tool, 100) || null,
+      exitCode: Number.isSafeInteger(evidence.exitCode) ? evidence.exitCode : null,
+      filePath: string(evidence.filePath, 500) || null, taskRev: Number.isSafeInteger(evidence.taskRev) ? evidence.taskRev : null,
+      at: scalar(evidence.at) };
+  }) : [];
   return {
     id: string(row.id, 128), title: string(row.goal, 500), goal: string(row.goal, 2000),
     status: string(row.status, 40), currentPhase: string(row.currentPhase, 500),
@@ -129,7 +137,7 @@ function projectTask(value) {
     createdAt: scalar(row.createdAt), updatedAt: scalar(row.updatedAt), rev: Number.isSafeInteger(row.rev) ? row.rev : null,
     checkpoint: checkpoint.summary ? { summary: string(checkpoint.summary, 2000), nextAction: string(checkpoint.nextAction, 500) } : null,
     result: result.summary ? { summary: string(result.summary, 4000) } : null,
-    artifacts, agentHistory,
+    artifacts, agentHistory, executionEvidence,
     failure: row.failure ? { reason: string(record(row.failure).reason, 1000) } : null
   };
 }
@@ -589,7 +597,23 @@ export function createDesktopUiService({ services = {}, system = services.system
     },
     'ui.task.get': async p => ({ task: projectTask((await task('task.get', { id: idParam(p) })).task) }),
     'ui.task.create': async p => {
-      const created = await task('task.create', { goal: boundedText(p.goal, 'goal', 2000), requirements: boundedStrings(p.requirements, 50, 1000), workspaceId: string(p.workspaceId, 128) || null, note: string(p.note, 1000) });
+      const goal = boundedText(p.goal, 'goal', 2000);
+      const workspaceId = string(p.workspaceId, 128) || null;
+      const requirements = boundedStrings(p.requirements, 50, 1000);
+      const existing = workspaceId ? services.taskService.runtime.findByGoalWorkspace({ goal, workspaceId }) : null;
+      if (existing) {
+        if (requirements.length && JSON.stringify(requirements) !== JSON.stringify(existing.requirements)) {
+          throw uiError('TASK_REQUIREMENTS_CONFLICT', 'Matching active Task has different requirements');
+        }
+        if (['paused', 'blocked', 'waiting'].includes(existing.status)) {
+          throw uiError('TASK_RECOVERY_REVIEW_REQUIRED', 'Matching Task requires explicit recovery, not a duplicate creation');
+        }
+        return { task: projectTask(existing) };
+      }
+      if (workspaceId && services.taskService.runtime.activeWorkspaceOwner({ workspaceId })) {
+        throw uiError('TASK_WORKSPACE_BUSY', 'Another Task owns write execution in this Workspace');
+      }
+      const created = await task('task.create', { goal, requirements, workspaceId, note: string(p.note, 1000) });
       const current = created.workspaceId ? await runTask(created, { provider: string(p.agentProvider, 80) || 'cetamesh',
         requestId: string(p.requestId, 160) || undefined, modelProvider: string(p.modelProvider, 80) || undefined,
         model: string(p.model, 160) || undefined }) : created;
