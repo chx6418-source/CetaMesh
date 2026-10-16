@@ -57,6 +57,7 @@ export function createStagedDshAgentProvider({ provider, resolveTaskWorkspace, l
         taskId: session.taskId,
         workspaceId: session.workspaceId,
         sessionId: session.id,
+        provider: provider.id,
         requestId: `dsh-import-${crypto.randomUUID()}`,
         changes: changeSet.changes,
         summary: changeSet.summary

@@ -11,6 +11,13 @@ export function createCapabilityPolicy({resolveWorkspace,resolveTask}={}){
    const task=resolveTask?.(request.taskId);
    if(!task)throw capabilityError('TASK_NOT_AUTHORIZED','Assigned Task required');
    if((task.workspaceId??null)!==(request.workspaceId??null))throw capabilityError('WORKSPACE_RECONCILIATION_REQUIRED','Task and execution Workspace do not match');
+   if(['completed','failed','cancelled'].includes(task.status))throw capabilityError('TASK_NOT_AUTHORIZED','Terminal Task cannot execute capabilities');
+   if(request.assignment && (task.currentAgent?.provider!==request.assignment.provider || task.currentAgent?.sessionId!==request.assignment.sessionId))
+    throw capabilityError('AGENT_ASSIGNMENT_EXPIRED','Agent Session no longer owns this Task');
+   if(request.approvalBinding && (task.rev!==request.approvalBinding.rev
+     || task.currentAgent?.provider!==request.approvalBinding.provider
+     || task.currentAgent?.sessionId!==request.approvalBinding.sessionId))
+    throw capabilityError('APPROVAL_EXPIRED','Task or Agent assignment changed while approval was pending');
   }
   if(actor.kind==='agent'){
    if(!request.taskId || !actor.grants?.taskIds?.includes(request.taskId))throw capabilityError('TASK_NOT_AUTHORIZED','Assigned task required');
@@ -37,6 +44,8 @@ export function createCapabilityPolicy({resolveWorkspace,resolveTask}={}){
   // Extension review grants are supplied by the installed registry, never by its code.
   // Exact declared scopes are still checked above on every call.
   const reviewed = actor.kind==='extension' && actor.grants?.approvedCapabilities?.includes(entry.id);
-  return {allowed:true,risk,approvalRequired:RISK_RANK[risk]>=RISK_RANK.high&&!reviewed};
+  const task=request.taskId?resolveTask?.(request.taskId):null;
+  return {allowed:true,risk,approvalRequired:RISK_RANK[risk]>=RISK_RANK.high&&!reviewed,
+   approvalBinding:task?{rev:task.rev,provider:task.currentAgent?.provider,sessionId:task.currentAgent?.sessionId}:null};
  }};
 }

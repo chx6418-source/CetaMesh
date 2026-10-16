@@ -57,6 +57,7 @@ export function createMeshNode({
   role = 'desktop',
   available = null,
   executeCapability = null,
+  isEnabled = () => true,
   now = () => Date.now()
 } = {}) {
   if (!stateDir || typeof stateDir !== 'string') throw new Error('createMeshNode 需要 stateDir');
@@ -73,6 +74,9 @@ export function createMeshNode({
   let pairingTls = null;         // 配对 TLS 身份（懒加载，持久化于 state/mesh/pairing-tls.json）
   let pairingServer = null;      // 配对服务器（首次会话时启动；重启后端口/证书稳定）
   let pendingPairing = null;     // exchange 已完成、等待 confirm 的配对
+  function requireEnabled() {
+    if (isEnabled() !== true) throw meshError('MESH_DISABLED', 'Device Mesh is disabled in Settings');
+  }
 
   // 配对完成后的默认授权（Trusted != Authorized：仅这两个低风险能力默认放行）。
   const PAIRING_DEFAULT_GRANTS = Object.freeze(['mesh.presence', 'mesh.manifest']);
@@ -107,6 +111,7 @@ export function createMeshNode({
 
   /** 处理一条来自对端的信封。返回结构化结果，绝不抛给调用方（协议边界不能让异常穿透）。 */
   function handleEnvelope(raw) {
+    requireEnabled();
     const nowMs = now();
     pruneNonces(nowMs);
 
@@ -264,6 +269,7 @@ export function createMeshNode({
 
   /** POST /cetamesh/v1/pairing/exchange：校验 token/签名/时效并原子消费，返回 challenge。 */
   function handlePairingExchange(rawText) {
+    requireEnabled();
     const nowMs = now();
     pruneNonces(nowMs);
     const envelope = parseCetameshRequest(rawText, { maxChars: PAIRING_LIMITS.requestChars, expectedType: 'pairing.exchange' });
@@ -321,6 +327,7 @@ export function createMeshNode({
 
   /** POST /cetamesh/v1/pairing/confirm：校验 confirm 签名；提交信任（幂等）后返回 accepted。 */
   function handlePairingConfirm(rawText) {
+    requireEnabled();
     const nowMs = now();
     const envelope = parseCetameshRequest(rawText, { maxChars: PAIRING_LIMITS.requestChars, expectedType: 'pairing.confirm' });
     const pending = pendingPairing;
@@ -423,6 +430,7 @@ export function createMeshNode({
 
   /** POST /cetamesh/v1/mesh/envelope：配对后的 presence / manifest / capability 通道。 */
   function handlePairingMesh(rawText) {
+    requireEnabled();
     const nowMs = now();
     pruneNonces(nowMs);
     let parsed;
@@ -484,6 +492,7 @@ export function createMeshNode({
   // ── 公开操作：配对会话 / 反向能力请求 / 关闭 ────────────────────────────────
 
   async function startPairingSession({ ttlMs } = {}) {
+    requireEnabled();
     const lan = pickLanAddress();
     if (!lan) throw meshError('PAIRING_NO_LAN', '未检测到局域网 IPv4 地址，无法生成手机可访问的配对邀请');
     if (!pairingTls) pairingTls = await loadOrCreatePairingTls({ stateDir, name: identity.name, now });
@@ -495,6 +504,7 @@ export function createMeshNode({
       });
     }
     const started = await pairingServer.start({ port: pairingTls.port, fallbackPort: 0 });
+    if (isEnabled() !== true) { await pairingServer.stop(); requireEnabled(); }
     const endpoint = 'https://' + lan + ':' + started.port;
     const session = invitations.createSession({
       endpoint,
@@ -539,6 +549,7 @@ export function createMeshNode({
 
   /** 向已配对对端发起真实远程能力请求（如 notification.send）：pin 外联 + Mesh 通道签名请求。 */
   async function requestPeerCapability({ nodeId, capability, input = null } = {}) {    const peer = trust.raw(nodeId);
+    requireEnabled();
     if (!peer) throw meshError('PEER_NOT_FOUND', '对端不存在：' + String(nodeId));
     if (peer.trust !== 'trusted') throw meshError('PEER_UNTRUSTED', '对端未被信任（当前 ' + peer.trust + '）');
     const name = String(capability || '').trim();
@@ -558,12 +569,19 @@ export function createMeshNode({
     return { nodeId: peer.nodeId, response: response.payload };
   }
 
-  async function close() {
+  async function close({ revokePairing = false } = {}) {
+    if (revokePairing) {
+      pendingPairing = null;
+      invitations.cancel();
+      invites.clear();
+      for (const approval of approvals.values()) if (approval.state === 'pending') approval.state = 'revoked';
+    }
     if (pairingServer) await pairingServer.stop();
   }
 
   /** 读取已配对对端的能力清单（pin 外联，对端需提供 endpoint+tlsPin）。 */
   async function requestPeerManifest({ nodeId } = {}) {
+    requireEnabled();
     const peer = trust.raw(nodeId);
     if (!peer) throw meshError('PEER_NOT_FOUND', '对端不存在：' + String(nodeId));
     if (peer.trust !== 'trusted') throw meshError('PEER_UNTRUSTED', '对端未被信任（当前 ' + peer.trust + '）');
@@ -597,6 +615,7 @@ export function createMeshNode({
     sign: (payload) => signPayload(identity.privateKeyPem, payload),
 
     createInvite({ ttlMs = 10 * 60 * 1000 } = {}) {
+      requireEnabled();
       const code = crypto.randomBytes(16).toString('hex');
       const at = now();
       invites.set(code, { createdAt: at, expiresAt: at + Math.max(60_000, Math.min(ttlMs, 60 * 60 * 1000)), usedAt: null });
@@ -606,6 +625,7 @@ export function createMeshNode({
 
     /** 配对：消费一次性邀请码，登记对端为 pending（配对成功 != 已信任）。 */
     pair({ inviteCode, peerPublicKeyPem, peerName, peerRole = 'mobile', transport = 'loopback', advertised = [] } = {}) {
+      requireEnabled();
       const code = String(inviteCode || '');
       const invite = invites.get(code);
       if (!invite) throw meshError('INVITE_NOT_FOUND', '邀请码不存在或已被使用');
@@ -630,6 +650,7 @@ export function createMeshNode({
     },
 
     trustNode: ({ nodeId } = {}) => {
+      requireEnabled();
       const view = trust.setTrust(nodeId, 'trusted');
       record({ direction: 'local', code: 'TRUST_GRANTED', stage: 'trust', from: view.nodeId });
       return { peer: view };
@@ -638,6 +659,7 @@ export function createMeshNode({
     blockNode: ({ nodeId } = {}) => ({ peer: trust.setTrust(nodeId, 'blocked') }),
 
     grant: ({ nodeId, capabilities } = {}) => {
+      requireEnabled();
       const view = trust.grant(nodeId, normalizeCapabilityList(capabilities));
       record({ direction: 'local', code: 'CAPABILITY_GRANTED', stage: 'policy', from: view.nodeId, capabilities: normalizeCapabilityList(capabilities) });
       return { peer: view };
@@ -671,6 +693,7 @@ export function createMeshNode({
     },
 
     decideApproval({ requestId, decision } = {}) {
+      requireEnabled();
       const approval = approvals.get(String(requestId));
       if (!approval) throw meshError('APPROVAL_NOT_FOUND', '审批请求不存在：' + String(requestId));
       if (decision !== 'approve' && decision !== 'reject') {

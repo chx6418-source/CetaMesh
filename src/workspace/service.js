@@ -29,6 +29,7 @@ import {
   writeFile,
   applyWorkspaceChanges
 } from './tools.js';
+import { recoverWorkspaceImports } from './transaction.js';
 
 const GIT_INFO_TTL_MS = 5000;
 
@@ -37,6 +38,7 @@ export function createWorkspaceService({ stateDir, now = () => Date.now(), audit
     throw new Error('createWorkspaceService 需要 stateDir');
   }
   const registry = createWorkspaceRegistry({ file: workspaceRegistryFile(stateDir), now });
+  for (const workspace of registry.list()) recoverWorkspaceImports(workspace.root);
   const gitInfoCache = new Map();
 
   function fail(code, message) {
@@ -167,7 +169,8 @@ export function createWorkspaceService({ stateDir, now = () => Date.now(), audit
     'workspace.write': async (p) => {
       const entry = requireWorkspace(p);
       const relPath = normalizeRelPath(p);
-      const result = writeFile(entry.root, relPath, p?.content, { createDirs: p?.createDirs !== false });
+      const result = writeFile(entry.root, relPath, p?.content, { createDirs: p?.createDirs !== false,
+        append: p?.append === true, expectedHash: p?.expectedHash });
       registry.recordFileAccess(entry.id, { relPath, action: 'write' });
       if (p?.artifact === true) registry.recordArtifact(entry.id, { relPath, note: p?.artifactNote });
       record(entry, String(p?.actor ?? 'user'), 'write', relPath);

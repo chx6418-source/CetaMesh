@@ -1480,11 +1480,14 @@ function SettingsPage({ theme, onThemeChange, onOpenPlugins }: { theme: 'system'
   const [saving, setSaving] = useState('');
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const [recoveryRequired, setRecoveryRequired] = useState(false);
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
       const [current, schema] = await Promise.all([settingsClient.get(), settingsClient.describe()]);
-      setDraft(current.settings); setChanges({}); setRevision(current.revision); setDescriptions(schema.fields); setError('');
+      setDraft(current.settings); setChanges({}); setRevision(current.revision); setDescriptions(schema.fields);
+      setRecoveryRequired(current.recoveryRequired);
+      setError(current.recoveryRequired ? `${current.lastError ?? '设置文件结构异常'}。原文件已备份：${current.backupPath ?? '备份路径不可用'}。请检查备份后恢复设置。` : '');
     } catch (cause) { setError(messageOf(cause)); }
     finally { setLoading(false); }
   }, []);
@@ -1494,6 +1497,7 @@ function SettingsPage({ theme, onThemeChange, onOpenPlugins }: { theme: 'system'
     setChanges(current => ({ ...current, [section]: { ...(current[section] ?? {}), [key]: value } }));
   }
   async function save(section: string) {
+    if (recoveryRequired) return;
     setSaving(section); setError(''); setNotice('');
     try {
       const values = changes[section] ?? {};
@@ -1527,7 +1531,7 @@ function SettingsPage({ theme, onThemeChange, onOpenPlugins }: { theme: 'system'
       {groups.map(section => <div className="settings-group" key={section.section}><h2>{activeSection === 'general' ? '常规行为' : SETTING_SECTION_LABELS[section.section] ?? section.label}</h2>
         {section.section === 'models' && <ModelConnectionSettings provider={String(draft.models?.provider ?? '')} model={String(draft.models?.defaultModel ?? '')} values={draft.models ?? {}} onChange={(key, value) => change('models', key, value)} />}
         {section.fields.filter(field => !(section.section === 'general' && field.key === 'theme') && (section.section !== 'models' || !['provider', 'defaultModel', 'reasoningEffort'].includes(field.key))).map(field => renderField(section.section, field))}
-        {section.fields.some(field => !(section.section === 'general' && field.key === 'theme') && (section.section !== 'models' || !['provider', 'defaultModel', 'reasoningEffort'].includes(field.key))) && <div className="settings-save"><Button compact variant="primary" disabled={saving === section.section} onClick={() => void save(section.section)}>保存{SETTING_SECTION_LABELS[section.section] ?? section.label}</Button></div>}
+        {section.fields.some(field => !(section.section === 'general' && field.key === 'theme') && (section.section !== 'models' || !['provider', 'defaultModel', 'reasoningEffort'].includes(field.key))) && <div className="settings-save"><Button compact variant="primary" disabled={recoveryRequired || saving === section.section} onClick={() => void save(section.section)}>保存{SETTING_SECTION_LABELS[section.section] ?? section.label}</Button></div>}
       </div>)}
       {activeSection === 'security' && <Surface className="privacy-summary"><span className="policy-icon"><Icon name="approval" size={19} /></span><span className="grow"><strong>本地数据与权限</strong><small>会话和配置保存在本机。敏感操作遵循逐次审批。</small></span><Badge tone="success">Core 策略</Badge></Surface>}
       {activeSection === 'devices' && !groups.length && <EmptyNotice icon="plug" title="设备网格设置由 Core 提供" detail="当前没有可调整的设备字段。设备配对和在线状态仍可在 Agents 页面查看。" />}

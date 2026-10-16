@@ -176,17 +176,32 @@ export function coerceField(section, key, value) {
 }
 
 /** 把任意（可能损坏 / 缺字段 / 多字段）输入归一化为完整设置；未知键被丢弃而不是写入。 */
-export function normalizeSettings(raw) {
+export function normalizeSettings(raw, { strict = false } = {}) {
   const out = defaultSettings();
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    if (strict) throw settingsError('SETTINGS_INVALID', '设置根节点必须是对象');
+    return out;
+  }
+  if (strict && Object.keys(raw).some(section => !SETTING_SECTIONS.includes(section))) {
+    throw settingsError('SETTINGS_INVALID', '设置含未知分区');
+  }
   for (const section of SETTING_SECTIONS) {
     const input = raw[section];
-    if (!input || typeof input !== 'object' || Array.isArray(input)) continue;
+    if (input === undefined) continue;
+    if (!input || typeof input !== 'object' || Array.isArray(input)) {
+      if (strict) throw settingsError('SETTINGS_INVALID', section + ' 分区结构无效');
+      continue;
+    }
+    if (strict && Object.keys(input).some(key => !Object.hasOwn(FIELDS[section], key))) {
+      throw settingsError('SETTINGS_INVALID', section + ' 含未知设置项');
+    }
     for (const key of Object.keys(FIELDS[section])) {
       if (!Object.hasOwn(input, key)) continue;
       try {
+        if (strict && typeof input[key] !== FIELDS[section][key].type) throw settingsError('SETTINGS_INVALID', section + '.' + key + ' 类型无效');
         out[section][key] = coerceField(section, key, input[key]);
-      } catch {
+      } catch (error) {
+        if (strict) throw error;
         // 损坏或非法的单项回退到默认值，其余设置仍然可用（不因为一项坏掉就整份失效）。
         out[section][key] = FIELDS[section][key].default;
       }

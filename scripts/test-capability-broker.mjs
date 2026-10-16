@@ -31,7 +31,9 @@ try {
  svc.grantTask(task.id,{capabilities:['filesystem.read','filesystem.write','git.status','git.diff','test.run'],workspaceIds:[ws]});
  const actor=svc.principalForTask(task.id);
  const r=await svc.broker.execute({actor,taskId:task.id,workspaceId:ws,capability:'filesystem.write',input:{path:'a.js',content:'hello'}});
- assert.equal(r.status,'completed');
+ assert.equal(r.status,'pending');
+ assert.equal(fs.existsSync(path.join(dir,'project','a.js')),false);
+ assert.equal((await svc.execute({method:'capability.approval.decide',params:{id:r.approvalId,approve:true}})).status,'completed');
  assert.equal(fs.readFileSync(path.join(dir,'project','a.js'),'utf8'),'hello');
  fs.mkdirSync(path.join(dir,'project','docs'));
  const extension={kind:'extension',id:'scoped',grants:{capabilities:['filesystem.read'],workspaceIds:[ws],paths:['docs']}};

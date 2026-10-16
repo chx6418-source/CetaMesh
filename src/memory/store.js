@@ -9,8 +9,9 @@
 
 import path from 'node:path';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import { StorageError, readJsonFile, writeJsonAtomic } from '../storage/json-file.js';
-import { memoryError, scopeKey } from './types.js';
+import { memoryError, scopeKey, isMemoryType, normalizeScope, MEMORY_SOURCES } from './types.js';
 
 export const MEMORY_SCHEMA_VERSION = 1;
 const MAX_RECORDS = 20000;
@@ -55,6 +56,28 @@ function normalizeLoadedRecord(raw) {
   };
 }
 
+function assertMemorySchema(raw, file) {
+  if (raw?.schemaVersion !== MEMORY_SCHEMA_VERSION || !Number.isSafeInteger(raw.revision) || raw.revision < 1
+    || !Array.isArray(raw.memories) || raw.memories.length > MAX_RECORDS) {
+    throw memoryError('STORE_CORRUPT', '记忆文件版本、修订号或列表无效：' + file);
+  }
+  const ids = new Set();
+  for (const row of raw.memories) {
+    let normalizedScope;
+    try { normalizedScope = normalizeScope(row?.scope); }
+    catch { throw memoryError('STORE_CORRUPT', '记忆 Scope 无效：' + file); }
+    if (!row || typeof row !== 'object' || Array.isArray(row) || typeof row.id !== 'string' || !row.id
+      || ids.has(row.id) || !isMemoryType(row.type)
+      || (row.scopeKey !== scopeKey(normalizedScope) && !(normalizedScope.kind === 'global' && row.scopeKey === 'global:'))
+      || typeof row.content !== 'string' || !row.content || !Array.isArray(row.tags)
+      || row.tags.some(tag => typeof tag !== 'string') || (row.source !== undefined && !MEMORY_SOURCES.includes(row.source))
+      || !Number.isSafeInteger(row.rev) || row.rev < 1) {
+      throw memoryError('STORE_CORRUPT', '记忆记录结构无效：' + file);
+    }
+    ids.add(row.id);
+  }
+}
+
 export function createMemoryStore({ stateDir, now = () => Date.now(), idFactory } = {}) {
   if (!stateDir || typeof stateDir !== 'string') throw new Error('createMemoryStore 需要 stateDir');
   const dir = path.join(stateDir, 'memory');
@@ -67,6 +90,12 @@ export function createMemoryStore({ stateDir, now = () => Date.now(), idFactory 
   const byScope = new Map();   // scopeKey -> Set<id>（授权分区索引）
   let fileRevision = 0;        // 文件级修订号：每次成功落盘 +1
   let loaded = false;
+
+  function backupInvalidSource() {
+    const backup = path.join(dir, `memories.corrupt.${now()}.${crypto.randomBytes(4).toString('hex')}.json`);
+    try { fs.copyFileSync(file, backup, fs.constants.COPYFILE_EXCL); }
+    catch (error) { throw memoryError('STORE_RECOVERY_FAILED', '记忆文件损坏且无法备份：' + error.message); }
+  }
 
   // 仅用于测试 / 诊断：证明授权检索没有扫描未授权分区。
   const stats = { scanned: 0, lastScanned: 0, lastScopeKeys: [] };
@@ -92,16 +121,21 @@ export function createMemoryStore({ stateDir, now = () => Date.now(), idFactory 
 
   function load() {
     if (loaded) return;
-    const raw = loadMemoryFile(file, null);
+    let raw;
+    try { raw = loadMemoryFile(file, null); }
+    catch (error) { if (error.code === 'STORE_CORRUPT') backupInvalidSource(); throw error; }
     if (!raw) { loaded = true; return; }
     if (typeof raw !== 'object' || Array.isArray(raw)) {
+      backupInvalidSource();
       throw memoryError('STORE_CORRUPT', '记忆数据根节点必须是对象：' + file);
     }
-    const list = Array.isArray(raw.memories) ? raw.memories : [];
+    try { assertMemorySchema(raw, file); }
+    catch (error) { backupInvalidSource(); throw error; }
+    const list = raw.memories;
     const nextRecords = [];
     for (const item of list) {
       const record = normalizeLoadedRecord(item);
-      if (record) nextRecords.push(record);
+      nextRecords.push(record);
     }
     for (const record of nextRecords) indexRecord(record);
     fileRevision = Number.isSafeInteger(raw.revision) && raw.revision > 0 ? raw.revision : 0;

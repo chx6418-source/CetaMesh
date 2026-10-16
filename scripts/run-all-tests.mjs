@@ -79,6 +79,7 @@ const REGISTRY = {
   // ── security：权限 / 能力 / 攻击负面 ──────────────────────────────────────
   'test-agent-test-run-security.mjs': { category: 'security' },
   'test-capability-broker.mjs': { category: 'security' },
+  'test-phase1-security.mjs': { category: 'security' },
   'test-isolated-runner.mjs': { category: 'security' },
   'test-security-negatives.mjs': { category: 'security' },
   'test-extension-capability.mjs': { category: 'security' },

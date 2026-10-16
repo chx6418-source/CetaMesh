@@ -7,6 +7,7 @@ import { createCapabilityBroker } from './broker.js';
 import { createCapabilityPolicy } from './policy.js';
 import { createCapabilityApproval, requestFingerprint } from './approval.js';
 import { OWNER_ACTOR, capabilityError } from './types.js';
+import { readJsonFile, writeJsonAtomic } from '../storage/json-file.js';
 
 export const WORKSPACE_CAPABILITIES = Object.freeze({
   'workspace.read': 'filesystem.read', 'workspace.write': 'filesystem.write',
@@ -31,7 +32,7 @@ const objectInput = (properties = {}, required = []) => ({
 });
 const WORKSPACE_TOOL_DESCRIPTORS = Object.freeze({
   'filesystem.read': ['Read a file inside the authorized Workspace.', objectInput({ path: stringField('Workspace-relative file path.'), maxChars: { type: 'integer', minimum: 1, maximum: 50000 } }, ['path'])],
-  'filesystem.write': ['Write text to a file inside the authorized Workspace. Owner approval is required.', objectInput({ path: stringField('Workspace-relative file path.'), content: stringField('Text to write.'), append: { type: 'boolean' } }, ['path', 'content'])],
+  'filesystem.write': ['Write text to a file inside the authorized Workspace. Owner approval is required.', objectInput({ path: stringField('Workspace-relative file path.'), content: stringField('Text to write.'), append: { type: 'boolean' }, expectedHash: stringField('SHA-256 of the existing file; null for a new file.') }, ['path', 'content'])],
   'filesystem.search': ['Search file names or contents inside the authorized Workspace.', objectInput({ query: stringField('Search text or file-name query.'), path: stringField('Optional Workspace-relative directory.'), maxResults: { type: 'integer', minimum: 1, maximum: 100 } }, ['query'])],
   'git.status': ['Read the current Git status for the authorized Workspace.', objectInput()],
   'git.diff': ['Read a bounded Git diff summary inside the authorized Workspace.', objectInput({ path: stringField('Optional Workspace-relative file path.'), statOnly: { type: 'boolean' } })],
@@ -58,14 +59,14 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
   taskRuntime, agentBroker, bindAgentSession, resumeAgentApproval = null, searchImpl = null, audit = () => {}, now,
   isolatedRunner = null } = {}) {
   const file = stateDir ? path.join(stateDir, 'capability', 'task-grants.json') : null;
-  let grants = file && fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : {};
+  let grants = file ? readJsonFile(file, { missing: {} }) : {};
   const provisioning = new Map();
   const taskFollowConsumers = new Map();
   const TASK_FOLLOW_MAX_SESSIONS = 64;
   const workspaceImportStates = new Map();
   let approvalDecisionListener = null;
   const journalFile = stateDir ? path.join(stateDir, 'capability', 'requests.json') : null;
-  const journal = journalFile && fs.existsSync(journalFile) ? JSON.parse(fs.readFileSync(journalFile, 'utf8')) : {};
+  const journal = journalFile ? readJsonFile(journalFile, { missing: {} }) : {};
   const requests = new Map();
   function taskFollowKey(provider, sessionId) { return `${String(provider)}\u0000${String(sessionId)}`; }
   function waitForTaskFollowRetry(ms, signal) {
@@ -129,10 +130,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
   }
   function saveJournal() {
     if (!journalFile) return;
-    fs.mkdirSync(path.dirname(journalFile), { recursive: true });
-    const temp = journalFile + '.' + process.pid + '.' + crypto.randomBytes(6).toString('hex') + '.tmp';
-    fs.writeFileSync(temp, JSON.stringify(journal, null, 2), { mode: 0o600 });
-    fs.renameSync(temp, journalFile);
+    writeJsonAtomic(journalFile, journal);
   }
   async function idempotent(request, run) {
     const hash = requestFingerprint(request), old = journal[request.requestId];
@@ -157,14 +155,11 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
   const resolveWorkspace = id => workspaceService?.describeWorkspace(id);
   const broker = createCapabilityBroker({
     policy: createCapabilityPolicy({ resolveWorkspace, resolveTask: taskFor }),
-    approval: createCapabilityApproval({ stateDir, now }), audit
+    approval: createCapabilityApproval({ stateDir, now }), audit, stateDir
   });
   function saveGrants() {
     if (!file) return;
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    const temp = file + '.' + process.pid + '.' + crypto.randomBytes(6).toString('hex') + '.tmp';
-    fs.writeFileSync(temp, JSON.stringify(grants, null, 2), { mode: 0o600 });
-    fs.renameSync(temp, file);
+    writeJsonAtomic(file, grants);
   }
   function rememberWorkspaceImport(id, state) {
     if (!id) return;
@@ -279,7 +274,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
         // test.run = 执行 Workspace 中可被 Agent 修改的代码：high（审批必经），
         // 不是普通 medium。Owner 直接点击"运行测试"走 executeWorkspace 的
         // approved:true（Owner 的点击本身就是显式决定，语义与既往一致）。
-        risk: ['workspace.create', 'git.commit', 'test.run', 'workspace.apply'].includes(id) ? 'high' : id === 'filesystem.write' ? 'medium' : 'low',
+        risk: ['workspace.create', 'git.commit', 'test.run', 'workspace.apply', 'filesystem.write'].includes(id) ? 'high' : 'low',
         validate(request) {
           if (id === 'workspace.apply') {
             validateWorkspaceImport(request);
@@ -314,6 +309,10 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
             }
             try {
               const resolved = resolveInside(ws.root, request.input.path, { forWrite: id === 'filesystem.write' });
+              if (id === 'filesystem.write' && request.actor.kind !== 'owner' && fs.existsSync(resolved.absolute)
+                && typeof request.input.expectedHash !== 'string') {
+                throw capabilityError('EXPECTED_HASH_REQUIRED', 'Agent write to an existing file requires expectedHash');
+              }
               if (request.actor.kind !== 'owner' && path.relative(ws.root, resolved.real).split(/[\\/]/)
                 .some(s => /^(?:\.git|\.ssh|\.aws|\.env(?:\..*)?|credentials(?:\..*)?|secrets?(?:\..*)?|id_rsa|id_ed25519)$/i.test(s))) {
                 throw capabilityError('SENSITIVE_RESOURCE_DENIED', 'Resolved target is a protected resource');
@@ -590,7 +589,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     // test.run 保持 Owner 直接操作语义：Owner 在 Workspace UI 点击"运行测试"就是
     // 显式决定（approved:true，跳过审批队列）；Managed Agent 的 test.run 不走此
     // 路径，risk=high 使其必然进入 Approve Once。
-    const ownerDirect = ['workspace.create', 'test.run', 'workspace.apply'].includes(capability);
+    const ownerDirect = ['workspace.create', 'filesystem.write', 'test.run', 'workspace.apply'].includes(capability);
     const result = await broker.execute({ capability, actor: OWNER_ACTOR, input: params,
       ...(capability !== 'workspace.create' ? { workspaceId } : {}), approved: ownerDirect, reason: 'Desktop Owner action' });
     return result.status === 'completed' ? result.result : result;
@@ -604,14 +603,16 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       actor: OWNER_ACTOR, input: command, reason: 'Desktop Owner Memory action' });
     return result.result;
   }
-  async function applyAgentWorkspaceChanges({ taskId, workspaceId, requestId, changes, summary } = {}) {
+  async function applyAgentWorkspaceChanges({ taskId, workspaceId, provider, sessionId, requestId, changes, summary } = {}) {
     const task = taskFor(String(taskId ?? ''));
-    if (!task || task.workspaceId !== String(workspaceId ?? '')) {
+    if (!task || task.workspaceId !== String(workspaceId ?? '')
+      || !provider || !sessionId || task.currentAgent?.provider !== provider || task.currentAgent?.sessionId !== sessionId) {
       throw capabilityError('TASK_NOT_AUTHORIZED', 'Agent Workspace import requires its Task binding');
     }
     const actor = principalForTask(task.id);
     const result = await broker.execute({ actor, taskId: task.id, workspaceId: task.workspaceId,
-      capability: 'workspace.apply', requestId, input: { changes, summary }, reason: 'Agent staging Workspace reconciliation' });
+      capability: 'workspace.apply', requestId, assignment: { provider, sessionId },
+      input: { changes, summary }, reason: 'Agent staging Workspace reconciliation' });
     if (result.status === 'pending') rememberWorkspaceImport(result.approvalId, { status: 'pending' });
     return result;
   }

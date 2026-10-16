@@ -850,7 +850,9 @@ export function createDesktopUiService({ services = {}, system = services.system
     'ui.settings.get': async () => {
       const result = services.settingsService?.store?.get?.();
       if (!result) throw uiError('SERVICE_UNAVAILABLE', '设置服务当前不可用');
-      return { settings: projectSettings(result.settings), revision: Number.isSafeInteger(result.revision) ? result.revision : null };
+      return { settings: projectSettings(result.settings), revision: Number.isSafeInteger(result.revision) ? result.revision : null,
+        recoveryRequired: result.recoveryRequired === true, lastError: result.lastError ? string(result.lastError, 500) : null,
+        backupPath: result.backupPath ? string(result.backupPath, 1000) : null };
     },
     'ui.settings.update': async p => {
       const section = string(p.section, 60);

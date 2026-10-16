@@ -14,6 +14,7 @@
 
 import path from 'node:path';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import { StorageError, readJsonFile, writeJsonAtomic } from '../storage/json-file.js';
 import {
   LONG_TERM_TYPES,
@@ -102,32 +103,59 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
   const candidates = new Map(); // id -> candidate
   const confirmingCandidates = new Set(); // only the trusted confirmation path may consume a candidate
   let candidatesLoaded = false;
+  let candidatesBackupPath = null;
+
+  function backupCandidates() {
+    if (candidatesBackupPath || !fs.existsSync(candidatesFile)) return;
+    const backup = path.join(path.dirname(candidatesFile), `candidates.corrupt.${now()}.${crypto.randomBytes(4).toString('hex')}.json`);
+    try { fs.copyFileSync(candidatesFile, backup, fs.constants.COPYFILE_EXCL); }
+    catch (error) { throw memoryError('STORE_RECOVERY_FAILED', '候选文件损坏且无法备份：' + error.message); }
+    candidatesBackupPath = backup;
+  }
 
   function loadCandidates() {
     if (candidatesLoaded) return;
-    candidatesLoaded = true;
-    const raw = loadCandidateFile(candidatesFile, null);
-    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return;
-    const list = Array.isArray(raw.candidates) ? raw.candidates : [];
+    let raw;
+    try { raw = loadCandidateFile(candidatesFile, null); }
+    catch (error) { backupCandidates(); throw error; }
+    if (raw === null) { candidatesLoaded = true; return; }
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw) || raw.schemaVersion !== CANDIDATE_SCHEMA_VERSION
+      || !Array.isArray(raw.candidates)) { backupCandidates(); throw memoryError('STORE_CORRUPT', '候选文件结构或版本无效：' + candidatesFile); }
+    const list = raw.candidates;
+    const next = new Map();
     for (const item of list) {
-      if (item && typeof item.id === 'string' && item.id) candidates.set(item.id, item);
+      if (!item || typeof item.id !== 'string' || !item.id || !['pending', 'accepted', 'rejected'].includes(item.status)
+        || typeof item.scope?.key !== 'string' || typeof item.content !== 'string' || next.has(item.id)) {
+        backupCandidates();
+        throw memoryError('STORE_CORRUPT', '候选记录结构无效：' + candidatesFile);
+      }
+      next.set(item.id, item);
     }
+    candidates.clear();
+    for (const [id, item] of next) candidates.set(id, item);
+    candidatesLoaded = true;
   }
 
   function persistCandidates() {
-    // Retention 与内存态同步淘汰：文件里不留，Map 里也不留，list/confirm 行为一致。
+    // Persist first. A failed write must leave the loaded candidate map unchanged.
     const pruned = pruneDecidedCandidates([...candidates.values()]);
-    if (pruned.length !== candidates.size) {
-      const keep = new Set(pruned.map((candidate) => candidate.id));
-      for (const id of [...candidates.keys()]) {
-        if (!keep.has(id)) candidates.delete(id);
-      }
-    }
     writeJsonAtomic(candidatesFile, {
       schemaVersion: CANDIDATE_SCHEMA_VERSION,
       updatedAt: now(),
       candidates: pruned
     });
+    if (pruned.length !== candidates.size) {
+      const keep = new Set(pruned.map((candidate) => candidate.id));
+      for (const id of [...candidates.keys()]) if (!keep.has(id)) candidates.delete(id);
+    }
+  }
+
+  function replaceCandidateAndPersist(id, next) {
+    const previous = candidates.get(id);
+    candidates.set(id, next);
+    try { persistCandidates(); }
+    catch (error) { candidates.set(id, previous); throw error; }
+    return next;
   }
 
   function candidateView(candidate) {
@@ -370,7 +398,8 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
       entityIds: entities
     };
     candidates.set(candidate.id, candidate);
-    persistCandidates();
+    try { persistCandidates(); }
+    catch (error) { candidates.delete(candidate.id); throw error; }
     return { candidate: candidateView(candidate) };
   }
 
@@ -400,21 +429,16 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
       throw memoryError('INVALID_PARAMS', 'confirm 只接受 accept / reject');
     }
     if (verdict === 'reject') {
-      candidate.status = 'rejected';
-      candidate.decidedAt = now();
-      candidate.decidedBy = principal.kind + ':' + principal.id;
-      persistCandidates();
-      return { candidate: candidateView(candidate), memory: null };
+      const rejected = replaceCandidateAndPersist(candidate.id, { ...candidate,
+        status: 'rejected', decidedAt: now(), decidedBy: principal.kind + ':' + principal.id });
+      return { candidate: candidateView(rejected), memory: null };
     }
 
     const confirmedContent = normalizeContent(content === undefined ? candidate.content : content);
     // Revalidate provenance before marking accepted so invalid confirmation remains pending.
     links.authorizeRefs({ principal, sourceScope: candidate.scope, refs: candidate.sourceRefs || [] });
-    candidate.confirmedContent = confirmedContent;
-    candidate.status = 'accepted';
-    candidate.decidedAt = now();
-    candidate.decidedBy = principal.kind + ':' + principal.id;
-    persistCandidates();
+    const accepted = replaceCandidateAndPersist(candidate.id, { ...candidate, confirmedContent,
+      status: 'accepted', decidedAt: now(), decidedBy: principal.kind + ':' + principal.id });
 
     let memory;
     confirmingCandidates.add(candidate.id);
@@ -425,18 +449,13 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
         sourceRefs: candidate.sourceRefs || [], entityIds: candidate.entityIds || []
       });
     } catch (error) {
-      candidate.status = 'pending';
-      candidate.decidedAt = null;
-      candidate.decidedBy = null;
-      delete candidate.confirmedContent;
-      persistCandidates();
+      replaceCandidateAndPersist(candidate.id, candidate);
       throw error;
     } finally {
       confirmingCandidates.delete(candidate.id);
     }
-    candidate.memoryId = memory.id;
-    persistCandidates();
-    return { candidate: candidateView(candidate), memory };
+    const completed = replaceCandidateAndPersist(candidate.id, { ...accepted, memoryId: memory.id });
+    return { candidate: candidateView(completed), memory };
   }
 
   /** 已导入的外部来源 ref 列表：供 adapter 做幂等判定（同样走授权 + 分区扫描）。 */

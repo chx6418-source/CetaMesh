@@ -313,6 +313,7 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
           taskId: session.taskId,
           workspaceId: session.workspaceId,
           sessionId: session.id,
+          provider: 'codex',
           requestId: `codex-import-${crypto.randomUUID()}`,
           changes: changeSet.changes,
           summary: changeSet.summary

@@ -65,9 +65,18 @@ try {
   check(approved.status, 'active');
   check(approved.assignment.actor.id, 'task:' + approved.taskId);
   const initialSession = approved.assignment.sessionId;
-  for (let i = 0; i < 400 && (continuity.runtime.history({ taskId: approved.taskId }).total !== 1 || observations.length < 2); i++) await delay(5);
+  let pendingWrite = null;
+  for (let i = 0; i < 400 && !pendingWrite; i++) {
+    pendingWrite = capabilities.broker.approvals.list().find(row => row.request?.capability === 'filesystem.write');
+    if (!pendingWrite) await delay(5);
+  }
+  assert.ok(pendingWrite, 'Agent Workspace write must wait for Owner approval'); assertions++;
+  check(fs.existsSync(path.join(projectRoot, 'export.csv')), false);
+  check((await capabilities.execute({ method: 'capability.approval.decide', params: { id: pendingWrite.id, approve: true } })).status, 'completed');
+  for (let i = 0; i < 400 && (continuity.runtime.history({ taskId: approved.taskId }).total !== 1
+    || observations.length < 2 || toolRequests.length < 2 || modelRequests.length < 4); i++) await delay(5);
   check(continuity.runtime.history({ taskId: approved.taskId }).total, 1);
-  check(observations.length, 2);
+  assert.ok(observations.length >= 2, 'Agent turn-end observation follows the approved write'); assertions++;
   let task = taskRuntime.get({ id: approved.taskId }).task;
   check(task.id, approved.taskId);
   check(task.workspaceId, approved.workspaceId);

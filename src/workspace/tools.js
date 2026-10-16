@@ -8,8 +8,10 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { exec, execFile } from 'node:child_process';
 import { resolveInside } from './boundary.js';
+import { applyWorkspaceTransaction } from './transaction.js';
 
 export class WorkspaceToolError extends Error {
   constructor(code, message, { cause } = {}) {
@@ -61,12 +63,12 @@ export function readFile(rootReal, relPath, { maxBytes = 1024 * 1024 } = {}) {
   }
 }
 
-export function writeFile(rootReal, relPath, content, { createDirs = true } = {}) {
+export function writeFile(rootReal, relPath, content, { createDirs = true, append = false, expectedHash } = {}) {
   if (typeof content !== 'string') fail('CONTENT_INVALID', 'write 需要 string 内容');
   if (content.length > WRITE_MAX_CHARS_HARD_CAP) {
     fail('CONTENT_TOO_LARGE', `内容过大（>${WRITE_MAX_CHARS_HARD_CAP} 字符）`);
   }
-  const { real, absolute } = resolveInside(rootReal, relPath, { forWrite: true });
+  const { absolute } = resolveInside(rootReal, relPath, { forWrite: true });
   const parentLexical = path.dirname(absolute);
   if (createDirs && parentLexical !== path.resolve(rootReal)) {
     try {
@@ -78,10 +80,33 @@ export function writeFile(rootReal, relPath, content, { createDirs = true } = {}
   // 目录建好后重新 realpath 校验一次父目录，收窄 mkdir 与 open 之间的链接替换窗口。
   const { real: realParent } = resolveInside(rootReal, path.dirname(relPath) || '.', { forWrite: false });
   const target = path.join(realParent, path.basename(absolute));
+  let original = null;
   try {
-    fs.writeFileSync(target, content, { encoding: 'utf8', mode: 0o600 });
+    const stat = fs.lstatSync(target);
+    if (!stat.isFile() || stat.isSymbolicLink()) fail('WRITE_TARGET_INVALID', 'Workspace write requires a regular file');
+    original = fs.readFileSync(target);
   } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+  }
+  const originalHash = original === null ? null : crypto.createHash('sha256').update(original).digest('hex');
+  if (expectedHash !== undefined && expectedHash !== originalHash) fail('WORKSPACE_CONFLICT', 'Workspace file changed since it was read');
+  const output = append && original !== null ? Buffer.concat([original, Buffer.from(content, 'utf8')]) : Buffer.from(content, 'utf8');
+  const temp = path.join(realParent, `.${path.basename(target)}.${crypto.randomBytes(8).toString('hex')}.tmp`);
+  try {
+    const fd = fs.openSync(temp, 'wx', 0o600);
+    try { fs.writeFileSync(fd, output); fs.fsyncSync(fd); }
+    finally { fs.closeSync(fd); }
+    // Recheck before replacement. A linked target or changed preimage must never be followed or overwritten.
+    const current = fs.existsSync(target) ? fs.lstatSync(target) : null;
+    if (current && (!current.isFile() || current.isSymbolicLink())) fail('WRITE_TARGET_INVALID', 'Workspace target changed to a non-file');
+    const liveHash = current ? crypto.createHash('sha256').update(fs.readFileSync(target)).digest('hex') : null;
+    if (liveHash !== originalHash) fail('WORKSPACE_CONFLICT', 'Workspace file changed during write');
+    fs.renameSync(temp, target);
+  } catch (error) {
+    if (error instanceof WorkspaceToolError) throw error;
     fail('WRITE_FAILED', `写入失败：${error?.message ?? error}`);
+  } finally {
+    try { fs.unlinkSync(temp); } catch (error) { if (error?.code !== 'ENOENT') throw error; }
   }
   let size = 0;
   try {
@@ -91,25 +116,8 @@ export function writeFile(rootReal, relPath, content, { createDirs = true } = {}
 }
 
 /** Apply a prevalidated staging import. Callers must authorize the complete batch first. */
-export function applyWorkspaceChanges(rootReal, changes) {
-  if (!Array.isArray(changes) || changes.length > 500) fail('INVALID_CHANGES', 'Workspace import needs a bounded changes array');
-  const results = [];
-  for (const change of changes) {
-    if (change?.action === 'write') {
-      results.push({ action: 'write', ...writeFile(rootReal, change.path, change.content) });
-      continue;
-    }
-    if (change?.action !== 'delete') fail('INVALID_CHANGES', 'Workspace import action must be write or delete');
-    const resolved = resolveInside(rootReal, change.path, { forWrite: true });
-    let stat;
-    try { stat = fs.lstatSync(resolved.absolute); }
-    catch (error) { fail('FILE_NOT_FOUND', `Delete target does not exist: ${change.path} (${error?.code ?? error})`); }
-    if (!stat.isFile() || stat.isSymbolicLink()) fail('DELETE_TARGET_INVALID', 'Workspace import can delete regular files only');
-    try { fs.unlinkSync(resolved.absolute); }
-    catch (error) { fail('DELETE_FAILED', `Unable to delete Workspace file: ${change.path} (${error?.code ?? error})`); }
-    results.push({ action: 'delete', path: change.path });
-  }
-  return { changes: results };
+export function applyWorkspaceChanges(rootReal, changes, options = {}) {
+  return applyWorkspaceTransaction(rootReal, changes, { ...options, writeFile });
 }
 
 // ── 文件搜索 ────────────────────────────────────────────────────────────────

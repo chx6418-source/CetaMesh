@@ -8,8 +8,9 @@
 
 import path from 'node:path';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import { StorageError, readJsonFile, writeJsonAtomic } from '../storage/json-file.js';
-import { taskError } from './types.js';
+import { taskError, TASK_STATUSES } from './types.js';
 
 export const TASK_SCHEMA_VERSION = 1;
 const MAX_TASKS = 5000;
@@ -28,6 +29,24 @@ function loadTaskFile(file, fallback) {
 
 function asArray(value) {
   return Array.isArray(value) ? value : [];
+}
+
+function assertTaskSchema(raw, file) {
+  if (raw?.schemaVersion !== TASK_SCHEMA_VERSION || !Number.isSafeInteger(raw.revision) || raw.revision < 1
+    || !Array.isArray(raw.tasks) || raw.tasks.length > MAX_TASKS) {
+    throw taskError('STORE_CORRUPT', '任务文件版本、修订号或列表无效：' + file);
+  }
+  const seen = new Set();
+  for (const row of raw.tasks) {
+    if (!row || typeof row !== 'object' || Array.isArray(row) || typeof row.id !== 'string' || !row.id
+      || seen.has(row.id) || typeof row.goal !== 'string' || !TASK_STATUSES.includes(row.status)
+      || !Number.isSafeInteger(row.rev) || row.rev < 1 || !Array.isArray(row.requirements)
+      || !Array.isArray(row.agentHistory) || !Array.isArray(row.artifacts)
+      || (row.workspaceId !== undefined && row.workspaceId !== null && typeof row.workspaceId !== 'string')) {
+      throw taskError('STORE_CORRUPT', '任务记录结构无效：' + file);
+    }
+    seen.add(row.id);
+  }
 }
 
 /** 反序列化时补齐缺失字段，避免旧文件或手改文件把运行期炸掉。 */
@@ -86,17 +105,28 @@ export function createTaskStore({ stateDir, now = () => Date.now(), idFactory } 
   let fileRevision = 0;
   let loaded = false;
 
+  function backupInvalidSource() {
+    const backup = path.join(dir, `tasks.corrupt.${now()}.${crypto.randomBytes(4).toString('hex')}.json`);
+    try { fs.copyFileSync(file, backup, fs.constants.COPYFILE_EXCL); }
+    catch (error) { throw taskError('STORE_RECOVERY_FAILED', '任务文件损坏且无法备份：' + error.message); }
+  }
+
   function load() {
     if (loaded) return;
-    const raw = loadTaskFile(file, null);
+    let raw;
+    try { raw = loadTaskFile(file, null); }
+    catch (error) { if (error.code === 'STORE_CORRUPT') backupInvalidSource(); throw error; }
     if (!raw) { loaded = true; return; }
     if (typeof raw !== 'object' || Array.isArray(raw)) {
+      backupInvalidSource();
       throw taskError('STORE_CORRUPT', '任务数据根节点必须是对象：' + file);
     }
+    try { assertTaskSchema(raw, file); }
+    catch (error) { backupInvalidSource(); throw error; }
     const nextTasks = new Map();
-    for (const item of asArray(raw.tasks)) {
+    for (const item of raw.tasks) {
       const task = normalizeLoaded(item);
-      if (task) nextTasks.set(task.id, task);
+      nextTasks.set(task.id, task);
     }
     tasks.clear();
     for (const [id, task] of nextTasks) tasks.set(id, task);

@@ -278,7 +278,7 @@ export const extensionSettingsClient = {
 };
 export const settingsClient = {
   describe: () => uiCall<{ sections: { section: string; label: string }[]; fields: SettingSection[] }>('ui.settings.describe', {}),
-  get: () => uiCall<{ settings: Settings; revision: number | null }>('ui.settings.get', {}),
+  get: () => uiCall<{ settings: Settings; revision: number | null; recoveryRequired: boolean; lastError: string | null; backupPath: string | null }>('ui.settings.get', {}),
   update: (section: string, values: Record<string, unknown>, expectedRevision?: number | null) => uiCall<{ settings: Settings; revision: number | null }>('ui.settings.update', { section, values, expectedRevision })
 };
 export interface SettingField {

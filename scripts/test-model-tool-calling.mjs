@@ -445,7 +445,7 @@ const emptyObjectSchema = {
     execute: () => { executed += 1; return {}; }
   });
   const { runtime, calls } = modelRuntimeWith([
-    { text: '', toolCalls: [{ id: 'unknown-call', capabilityId: 'unknown.capability', arguments: '{}' }] },
+    { text: '', toolCalls: [{ id: 'unknown-call', capabilityId: 'clock.now', arguments: '{}' }] },
     { text: 'That capability is unavailable.', toolCalls: [] }
   ]);
   const coordinator = createToolExecutionCoordinator({ modelRuntime: runtime, capabilityBroker: broker });
@@ -460,8 +460,21 @@ const emptyObjectSchema = {
   });
   assert.equal(result.status, 'completed');
   assert.equal(executed, 0);
-  assert.match(calls[1].messages.at(-1).content, /UNKNOWN_CAPABILITY/);
-  pass('unknown provider tool calls are denied by the Capability Broker and returned as structured errors');
+  assert.match(calls[1].messages.at(-1).content, /UNKNOWN_TOOL_IN_TURN/);
+  pass('a registered but undisclosed provider tool cannot execute outside the current turn manifest');
+
+  let agentDispatches = 0;
+  const agentModel = modelRuntimeWith([
+    { text: '', toolCalls: [{ id: 'agent-hidden', capabilityId: 'clock.now', arguments: '{}' }] },
+    { text: 'The hidden tool was refused.', toolCalls: [] }
+  ]);
+  const agentCoordinator = createToolExecutionCoordinator({ modelRuntime: agentModel.runtime,
+    capabilityBroker: { execute() { agentDispatches += 1; throw Error('hidden tool reached Broker'); } } });
+  await agentCoordinator.run({ providerId: 'fixture', messages: [{ role: 'user', content: 'Try hidden tool.' }],
+    manifest: [], actor: { kind: 'agent', id: 'task:fixture' }, sessionId: 'agent-hidden', turnId: 'agent-hidden',
+    scope: { taskId: 'fixture', workspaceId: 'fixture-workspace' } });
+  assert.equal(agentDispatches, 0, 'MODEL-02: Agent hidden tool never reaches Broker');
+  assert.match(agentModel.calls[1].messages.at(-1).content, /UNKNOWN_TOOL_IN_TURN/);
 }
 
 {

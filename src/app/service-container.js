@@ -297,7 +297,8 @@ export function createCetaMeshServices(options = {}) {
 
   const extensionService = createExtensionService({ stateDir, capabilityBroker: capabilityService.broker,
     isTrustedVmExtension: options.isTrustedVmExtension });
-  const meshService = createMeshService({ stateDir });
+  const meshService = createMeshService({ stateDir, settingsStore: settingsService.store,
+    isEnabled: () => settingsService.store.get().settings.devices.meshEnabled === true });
   const channelService = createChannelService();
   registerChannelMeshCapabilities({
     broker: capabilityService.broker,

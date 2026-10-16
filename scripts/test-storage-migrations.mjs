@@ -137,9 +137,14 @@ const caughtCode = (fn) => {
   corruptStore.load();
   assert(corruptStore.get().lastError?.includes('解析失败') === true, 'Settings：损坏 → 回落默认 + lastError 上报（不静默、不阻断启动）');
   assert(corruptStore.get().settings !== null, 'Settings：损坏后仍返回可用默认值');
-  corruptStore.update('general', { theme: 'dark' });
+  let recoveryRequired = false;
+  try { corruptStore.update('general', { theme: 'dark' }); }
+  catch (error) { recoveryRequired = error.code === 'SETTINGS_RECOVERY_REQUIRED'; }
+  assert(recoveryRequired, 'Settings 损坏后普通保存不得覆盖原数据');
   const backup = fs.readdirSync(path.join(corruptDir, 'settings')).find((name) => name.startsWith('settings.corrupt.'));
   assert(backup && fs.readFileSync(path.join(corruptDir, 'settings', backup), 'utf8') === '{{{', 'Settings 保存前原样备份损坏文件');
+  corruptStore.resetAll();
+  corruptStore.update('general', { theme: 'dark' });
 }
 
 // ── 4. Extension Registry：损坏 → REGISTRY_CORRUPT（码不变） ─────────────────

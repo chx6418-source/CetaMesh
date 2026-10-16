@@ -1,12 +1,18 @@
 import { createCetaMeshServices } from './service-container.js';
 import { createApplicationLifecycle } from './lifecycle.js';
+import { APP_PATHS } from '../app-paths.js';
+import { acquireStateOwner } from './state-owner.js';
 
 export function bootstrapCetaMesh(options = {}) {
-  const services = createCetaMeshServices(options);
+  const owner = acquireStateOwner(options.stateDir ?? APP_PATHS.stateDir);
+  let services;
+  try { services = createCetaMeshServices(options); }
+  catch (error) { owner.release(); throw error; }
   const lifecycle = createApplicationLifecycle({
     processRef: options.processRef ?? process,
     log: options.log ?? (() => {})
   });
+  lifecycle.register(() => owner.release());
 
   // Shutdown runs in reverse registration order: stop Chat consumers before their
   // Agent provider, then release the Agent Broker after provider cleanup.

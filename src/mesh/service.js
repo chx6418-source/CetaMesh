@@ -9,9 +9,15 @@ import { invitationQr } from './pairing/qr.js';
 
 const PAIRING_SECURITY_NOTE = '配对邀请一次性、5 分钟内有效，请勿转发。手机只接受证书指纹与邀请一致的 Desktop；请在手机屏幕上核对设备名称后再确认。配对完成后默认仅放行 mesh.presence / mesh.manifest，其他能力需逐项授权与本地批准。';
 
-export function createMeshService({ stateDir, name, role, available = null, executeCapability = null, now } = {}) {
+export function createMeshService({ stateDir, name, role, available = null, executeCapability = null, now,
+  isEnabled = () => true, settingsStore = null } = {}) {
   if (!stateDir || typeof stateDir !== 'string') throw new Error('createMeshService 需要 stateDir');
-  const node = createMeshNode({ stateDir, name, role, available, executeCapability, now });
+  const node = createMeshNode({ stateDir, name, role, available, executeCapability, now, isEnabled });
+  const unsubscribe = settingsStore?.onChange?.(settings => {
+    if (settings.devices.meshEnabled === false) {
+      void node.close({ revokePairing: true }).catch(error => console.error('Mesh listener shutdown failed:', error));
+    }
+  });
 
   const handlers = {
     'mesh.status': () => node.status(),
@@ -67,8 +73,11 @@ export function createMeshService({ stateDir, name, role, available = null, exec
     execute({ method, params } = {}) {
       const handler = handlers[method];
       if (!handler) return Promise.reject(meshError('METHOD_NOT_FOUND', '未知 Mesh 方法：' + String(method)));
+      if (isEnabled() !== true && !['mesh.status', 'mesh.snapshot'].includes(method)) {
+        return Promise.reject(meshError('MESH_DISABLED', 'Device Mesh is disabled in Settings'));
+      }
       return Promise.resolve().then(() => handler(params || {}));
     },
-    close() { return node.close(); }
+    close() { unsubscribe?.(); return node.close(); }
   };
 }

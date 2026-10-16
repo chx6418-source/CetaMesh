@@ -69,6 +69,7 @@ try {
   } })).workspace;
   const taskRuntime = createTaskRuntime({ stateDir });
   const task = taskRuntime.create({ goal: 'Provider workspace import', workspaceId: authoritative.id });
+  taskRuntime.attachAgent({ id: task.id, expectedRev: task.rev, provider: 'codex', sessionId: 'fixture-session' });
   const capabilities = createCapabilityService({ stateDir, workspaceService, taskRuntime });
   const agent = capabilities.grantTask(task.id, { capabilities: ['filesystem.read', 'filesystem.write'] });
   fs.writeFileSync(path.join(authoritativeRoot, 'existing.txt'), 'before');
@@ -77,6 +78,7 @@ try {
   const importResult = await capabilities.applyAgentWorkspaceChanges({
     taskId: task.id,
     workspaceId: authoritative.id,
+    provider: 'codex', sessionId: 'fixture-session',
     requestId: 'provider-import-1',
     summary: { added: 0, modified: 1, deleted: 1 },
     changes: [
@@ -96,11 +98,11 @@ try {
   assert.equal(fs.existsSync(path.join(authoritativeRoot, 'remove.txt')), false);
   assert.equal(capabilities.workspaceImportStatus(importResult.approvalId).status, 'completed');
   await assert.rejects(() => capabilities.applyAgentWorkspaceChanges({
-    taskId: task.id, workspaceId: authoritative.id, requestId: 'provider-import-stale',
+    taskId: task.id, workspaceId: authoritative.id, provider: 'codex', sessionId: 'fixture-session', requestId: 'provider-import-stale',
     changes: [{ action: 'write', path: 'existing.txt', content: 'stale', expectedHash: beforeHash('before'), hash: beforeHash('stale') }]
   }), error => error.code === 'WORKSPACE_CONFLICT');
   await assert.rejects(() => capabilities.applyAgentWorkspaceChanges({
-    taskId: task.id, workspaceId: authoritative.id, requestId: 'provider-import-secret',
+    taskId: task.id, workspaceId: authoritative.id, provider: 'codex', sessionId: 'fixture-session', requestId: 'provider-import-secret',
     changes: [{ action: 'write', path: '.env', content: 'SECRET=x', expectedHash: null, hash: beforeHash('SECRET=x') }]
   }), error => error.code === 'SENSITIVE_RESOURCE_DENIED');
 
@@ -198,6 +200,7 @@ try {
 
   await assert.rejects(() => dshService.broker.createSession('dsh', { workspaceId: authoritative.id }), error => error.code === 'TASK_REQUIRED');
   const dshSession = await dshService.broker.createSession('dsh', { taskId: task.id, workspaceId: authoritative.id });
+  taskRuntime.attachAgent({ id: task.id, expectedRev: taskRuntime.get({ id: task.id }).task.rev, provider: 'dsh', sessionId: dshSession.sessionId });
   const dshEvents = [];
   const dshFollow = (async () => {
     for await (const event of dshService.broker.follow({ provider: 'dsh', sessionId: dshSession.sessionId })) dshEvents.push(event);
@@ -211,6 +214,7 @@ try {
   await dshFollow;
   const approvedDshStageRoot = dshStageRoot;
   const cancelledDshSession = await dshService.broker.createSession('dsh', { taskId: task.id, workspaceId: authoritative.id });
+  taskRuntime.attachAgent({ id: task.id, expectedRev: taskRuntime.get({ id: task.id }).task.rev, provider: 'dsh', sessionId: cancelledDshSession.sessionId });
   const cancelledDshEvents = [];
   const cancelledDshFollow = (async () => {
     for await (const event of dshService.broker.follow({ provider: 'dsh', sessionId: cancelledDshSession.sessionId })) cancelledDshEvents.push(event);
@@ -642,6 +646,8 @@ try {
     }
   });
   const cancelSession = await cancelApprovalProvider.createSession({ taskId: task.id, workspaceId: authoritative.id });
+  taskRuntime.attachAgent({ id: task.id, expectedRev: taskRuntime.get({ id: task.id }).task.rev,
+    provider: 'codex', sessionId: cancelSession.sessionId });
   await cancelApprovalProvider.send({ sessionId: cancelSession.sessionId, content: 'wait for Workspace import approval' });
   await waitFor(() => cancelApprovalProvider.status({ sessionId: cancelSession.sessionId }), status => status.waitingForApproval);
   const cancelStagePath = cancelApprovalProvider._sessions.get(cancelSession.sessionId).stage.root;

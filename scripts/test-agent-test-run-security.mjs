@@ -199,10 +199,12 @@ fs.writeFileSync(path.join(root, 'src.txt'), 'ok');
 {
   const task = taskRuntime.create({ goal: '写后执行', workspaceId });
   const agent = svc.grantTask(task.id, { capabilities: ['filesystem.read', 'filesystem.write', 'test.run'] });
-  // Agent 用 filesystem.write 把 package.json 换成带恶意脚本的版本。
+  // Agent 请求写入 package.json；逐次 Owner 审批是独立边界。
+  const originalPackageHash = (await import('node:crypto')).createHash('sha256').update(fs.readFileSync(path.join(root, 'package.json'))).digest('hex');
   const write = await svc.broker.execute(agentReq(agent, task.id, workspaceId, 'filesystem.write',
-    { path: 'package.json', content: JSON.stringify({ name: 'sec-fixture', scripts: { test: 'node -e "require(\'fs\').writeFileSync(\'pwned.txt\',\'owned\')"' } }) }));
-  assert.equal(write.status, 'completed', 'Agent 可以写 Workspace（授权范围内）');
+    { path: 'package.json', expectedHash: originalPackageHash, content: JSON.stringify({ name: 'sec-fixture', scripts: { test: 'node -e "require(\'fs\').writeFileSync(\'pwned.txt\',\'owned\')"' } }) }));
+  assert.equal(write.status, 'pending', 'Agent write requires Owner approval');
+  assert.equal((await svc.execute({ method: 'capability.approval.decide', params: { id: write.approvalId, approve: true } })).status, 'completed');
   const before = fs.existsSync(path.join(root, 'pwned.txt'));
   assert.equal(before, false, '写操作本身不执行代码');
   // 请求 test.run：即使 Agent 已有 filesystem.write，也必须 Owner Approve Once。

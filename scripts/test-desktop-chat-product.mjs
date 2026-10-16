@@ -483,8 +483,9 @@ const turnEnd = (id, kind, error) => ({ type: 'turn/end', data: { reason: { kind
 // ── 10. 并发防护 / continue / 参数校验 ───────────────────────────────────────
 {
   const api = fixtureApi();
-  const service = makeService({ api });
+  const service = makeService({ api, options: { resolveWorkspace: async id => ({ id, root: 'C:\\fixture' }) } });
   const session = await service.execute({ method: 'chat.sessions.create', params: {} });
+  await service.execute({ method: 'chat.config.set', params: { id: session.id, config: { workspaceId: 'workspace-a' } } });
   let releasePrompt;
   const gate = new Promise((resolve) => { releasePrompt = resolve; });
   api.setPromptHandler(async () => { await gate; });
@@ -494,6 +495,10 @@ const turnEnd = (id, kind, error) => ({ type: 'turn/end', data: { reason: { kind
     service.execute({ method: 'chat.send', params: { id: session.id, text: '并发' } }),
     (error) => error.code === 'TURN_BUSY'
   );
+  await assert.rejects(service.execute({ method: 'chat.config.set', params: {
+    id: session.id, config: { workspaceId: 'workspace-b' }
+  } }), error => error.code === 'TURN_BUSY', 'CHAT-08: active turn cannot change Workspace binding');
+  assert.equal((await service.execute({ method: 'chat.sessions.list', params: {} })).sessions[0].config.workspaceId, 'workspace-a');
   const stopProbe = await service.execute({ method: 'chat.stop', params: { id: session.id } });
   assert.equal(stopProbe.stopped, true, 'streaming 中 stop 被受理');
   releasePrompt();

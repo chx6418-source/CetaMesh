@@ -550,8 +550,9 @@ export function createChatService({
     const modelConfigChanged = nextConfig.model !== previousConfig.model
       || nextConfig.reasoning !== previousConfig.reasoning
       || nextConfig.modelProvider !== previousConfig.modelProvider;
-    if (state.turn && (agentProviderChanged || modelConfigChanged)) {
-      throw chatError('TURN_BUSY', '当前会话有回合进行中，结束后再切换 Agent 或模型');
+    const workspaceChanged = nextConfig.workspaceId !== previousConfig.workspaceId;
+    if (state.turn && (agentProviderChanged || modelConfigChanged || workspaceChanged)) {
+      throw chatError('TURN_BUSY', '当前会话有回合进行中，结束后再切换 Agent、模型或工作区');
     }
     const previousAgentSession = agentProviderChanged ? previousProviderSession(record, previousAgentProvider) : null;
     if (agentProviderChanged) {

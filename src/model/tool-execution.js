@@ -281,7 +281,8 @@ export function createToolExecutionCoordinator({
         try {
           const input = parseArguments(call?.arguments);
           const descriptor = state.manifest.find((item) => item.id === capability);
-          if (descriptor) validateSchema(descriptor.inputSchema, input);
+          if (!descriptor) fail('UNKNOWN_TOOL_IN_TURN', 'Tool was not authorized in this turn');
+          validateSchema(descriptor.inputSchema, input);
           const liveActor = typeof actorResolver === 'function'
             ? await actorResolver({ actorKind: actor.kind, actorId: actor.id, sessionId, turnId, scope: state.scope })
             : actor;
