@@ -82,8 +82,8 @@ function fixtureProvider(id, { gate = null, failCreate = false } = {}) {
         async health() {
           return { available: true, provider: id };
         },
-        follow() {
-          throw Object.assign(new Error('fixture 无事件流'), { code: 'AGENT_UNSUPPORTED' });
+        async *follow({ sessionId }) {
+          yield { type: 'turn/end', seq: 1, data: { sessionId, reason: { kind: 'completed' } } };
         },
         async archiveSession({ sessionId }) {
           log.push({ kind: 'archive', provider: id, sessionId });

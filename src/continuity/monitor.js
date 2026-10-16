@@ -8,9 +8,11 @@
 
 import { DEFAULT_CONTEXT_POLICY, bandFor, continuityError } from './types.js';
 
-export function createContextMonitor({ policy } = {}) {
+export function createContextMonitor({ policy, initialSessions = {}, onChange = null } = {}) {
   const active = policy ?? DEFAULT_CONTEXT_POLICY;
-  const sessions = new Map(); // key -> { inputTokens, outputTokens, promptChars, outputChars, windowTokens, real }
+  const sessions = new Map(Object.entries(initialSessions && typeof initialSessions === 'object' ? initialSessions : {})
+    .filter(([key, value]) => key && value && typeof value === 'object' && !Array.isArray(value)));
+  function persist() { onChange?.(Object.fromEntries(sessions)); }
 
   function normalizeKey(key) {
     const text = String(key ?? '').trim();
@@ -51,6 +53,7 @@ export function createContextMonitor({ policy } = {}) {
       if (Number.isFinite(Number(windowTokens)) && Number(windowTokens) > 0) {
         state.windowTokens = Math.round(Number(windowTokens));
       }
+      persist();
       return this.level(sessionKey);
     },
 
@@ -75,6 +78,7 @@ export function createContextMonitor({ policy } = {}) {
 
     reset(sessionKey) {
       sessions.delete(normalizeKey(sessionKey));
+      persist();
     },
 
     forget(sessionKey) {

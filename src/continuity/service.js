@@ -53,6 +53,7 @@ export function createContinuityService({
       coding: p.coding,
       relevantFiles: p.relevantFiles,
       workspaceFacts: p.workspaceFacts,
+      modelProvider: p.modelProvider,
       model: p.model,
       reasoningEffort: p.reasoningEffort
     }),

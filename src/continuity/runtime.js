@@ -104,9 +104,13 @@ export function createContinuityRuntime({
   }
   if (!stateDir || typeof stateDir !== 'string') throw continuityError('INVALID_PARAMS', 'createContinuityRuntime 需要 stateDir');
 
-  const activePolicy = normalizePolicy(policy ?? DEFAULT_CONTEXT_POLICY);
-  const monitor = createContextMonitor({ policy: activePolicy });
   const dir = path.join(stateDir, 'continuity');
+  const policyFile = path.join(dir, 'policy.json');
+  const monitorFile = path.join(dir, 'monitor.json');
+  const activePolicy = normalizePolicy(loadContinuityFile(policyFile, policy ?? DEFAULT_CONTEXT_POLICY));
+  const savedMonitor = loadContinuityFile(monitorFile, { sessions: {} });
+  const monitor = createContextMonitor({ policy: activePolicy, initialSessions: savedMonitor.sessions,
+    onChange: sessions => writeJsonAtomic(monitorFile, { sessions }) });
   const historyFile = path.join(dir, 'rollovers.json');
   const packetDir = path.join(dir, 'handoff');
   const inFlight = new Set(); // taskId：rollover 串行互斥
@@ -194,9 +198,18 @@ export function createContinuityRuntime({
 
   function savePacket(taskId, packet) {
     writeJsonAtomic(packetFile(taskId, packet.sequence), packet);
-    writeJsonAtomic(latestPacketFile(taskId), packet);
-    prunePacketFiles(path.join(packetDir, String(taskId)));
     return packetFile(taskId, packet.sequence);
+  }
+
+  function committedPacket(taskId) {
+    const rows = readHistory().rollovers.filter(entry => entry.taskId === taskId);
+    const latest = rows.at(-1);
+    if (latest) {
+      const packet = loadContinuityFile(packetFile(taskId, latest.sequence), null);
+      if (!packet) throw continuityError('STORE_CORRUPT', 'Committed Handoff Packet is missing');
+      return packet;
+    }
+    return loadContinuityFile(latestPacketFile(taskId), null);
   }
 
   /** 收集真实 Workspace 事实（reconciler 未注入 / 未绑定工作区 / 收集失败 → null，不编造）。 */
@@ -268,7 +281,39 @@ export function createContinuityRuntime({
 
   function nextSequence(taskId) {
     const store = readHistory();
-    return store.rollovers.filter((entry) => entry.taskId === taskId).length + 1;
+    const latest = loadContinuityFile(latestPacketFile(taskId), null);
+    const prior = Math.max(0, Number(store.sequences?.[taskId]) || 0,
+      Number(latest?.sequence) || 0,
+      ...store.rollovers.filter(entry => entry.taskId === taskId).map(entry => Number(entry.sequence) || 0));
+    const sequence = prior + 1;
+    store.sequences = { ...(store.sequences ?? {}), [taskId]: sequence };
+    writeJsonAtomic(historyFile, store);
+    return sequence;
+  }
+
+  async function awaitBootstrapTurn({ provider, sessionId, requestId }) {
+    const controller = new AbortController();
+    let timeoutId;
+    const timeout = new Promise((_, reject) => {
+      timeoutId = setTimeout(() => {
+        controller.abort();
+        reject(continuityError('BOOTSTRAP_TIMEOUT', 'Target Agent bootstrap turn did not finish'));
+      }, 60_000);
+    });
+    const completion = (async () => {
+      for await (const item of agentBroker.follow({ provider, sessionId, signal: controller.signal })) {
+        const event = item?.type === 'event' ? item.event : item;
+        if (event?.type !== 'turn/end') continue;
+        if (requestId && event.data?.requestId !== requestId) continue;
+        if (event.data?.reason?.kind !== 'completed') {
+          throw continuityError('BOOTSTRAP_FAILED', 'Target Agent bootstrap turn did not complete successfully');
+        }
+        return event;
+      }
+      throw continuityError('BOOTSTRAP_INCOMPLETE', 'Target Agent event stream ended before bootstrap completion');
+    })();
+    try { return await Promise.race([completion, timeout]); }
+    finally { clearTimeout(timeoutId); controller.abort(); }
   }
 
   /** 评估当前上下文水位 → 动作建议。band 语义：none/checkpoint/ready/rollover/forced/emergency。 */
@@ -373,7 +418,7 @@ export function createContinuityRuntime({
    * targetProvider 缺省 = 同 Provider Fresh Session（TASK-S2-009 第一优先）；
    * 指定其它 Provider 即 Cross Provider Handoff（TASK-S2-010）。
    */
-  async function rollover({ taskId, reason, targetProvider, coding, relevantFiles, workspaceFacts, model, reasoningEffort } = {}) {
+  async function rollover({ taskId, reason, targetProvider, coding, relevantFiles, workspaceFacts, modelProvider, model, reasoningEffort } = {}) {
     const task = requireTask(taskId);
     if (!task.workspaceId) throw continuityError('WORKSPACE_REQUIRED', 'Continuity requires a Task-bound Workspace');
     if (inFlight.has(task.id)) {
@@ -382,11 +427,14 @@ export function createContinuityRuntime({
     if (typeof canRollover === 'function' && !canRollover({ taskId: task.id })) {
       throw continuityError('ROLLOVER_NOT_SAFE', '当前不是安全 rollover 点（存在在途回合或未完成的原子操作）');
     }
+    inFlight.add(task.id);
+    try {
     const previousAgent = task.currentAgent;
     if (!previousAgent) {
       throw continuityError('ROLLOVER_NO_AGENT', '任务没有绑定的 Agent Session，无需 rollover（直接 attachAgent 即可）');
     }
     const previousCapabilities = agentBroker.capabilities(previousAgent.provider);
+    let previousStatus = null;
     const previousBoundary = previousCapabilities?.workspaceBoundary;
     const taskBoundaries = new Set(['capability-broker', 'staged-capability-broker']);
     if (!taskBoundaries.has(previousBoundary)) {
@@ -408,13 +456,12 @@ export function createContinuityRuntime({
       if (status.running || status.queued > 0 || status.waitingForApproval) {
         throw continuityError('ROLLOVER_NOT_SAFE', 'Agent has active work or an unresolved Owner approval');
       }
+      previousStatus = status;
       const target = targetProvider ? agentBroker.require(targetProvider) : agentBroker.require(previousAgent.provider);
       if (!taskBoundaries.has(target.capabilities().workspaceBoundary)) {
         throw continuityError('ROLLOVER_NOT_SAFE', 'A Task cannot switch to a Provider without an enforced Workspace boundary');
       }
     }
-    inFlight.add(task.id);
-    try {
       const sequence = nextSequence(task.id);
       // Workspace 事实：调用方显式传入的优先；否则在工作区绑定且 reconciler 可用时现场采集。
       let facts = workspaceFacts ?? null;
@@ -458,11 +505,25 @@ export function createContinuityRuntime({
         created = await agentBroker.createSession(target.id, {
           taskId: task.id,
           workspaceId: task.workspaceId,
-          model: model ?? target.defaults?.model,
-          reasoningEffort: reasoningEffort ?? target.defaults?.reasoningEffort
+          modelProvider: modelProvider ?? (target.id === previousAgent.provider ? previousStatus?.modelProvider : null) ?? target.defaults?.modelProvider,
+          model: model ?? (target.id === previousAgent.provider ? previousStatus?.model : null) ?? target.defaults?.model,
+          reasoningEffort: reasoningEffort ?? (target.id === previousAgent.provider ? previousStatus?.reasoningEffort : null) ?? target.defaults?.reasoningEffort
         });
         if (!created?.sessionId) {
           throw continuityError('PROVIDER_ERROR', `Agent Provider「${target.id}」未返回 sessionId`);
+        }
+        try {
+          await agentBroker.cancel({ provider: fromProvider.id, sessionId: previousAgent.sessionId });
+        } catch (stopError) {
+          if (!['SESSION_NOT_FOUND', 'TURN_NOT_RUNNING'].includes(stopError?.code)) throw stopError;
+        }
+        try {
+          const afterStop = await agentBroker.status(previousAgent);
+          if (afterStop.running || afterStop.queued > 0 || afterStop.waitingForApproval) {
+            throw continuityError('ROLLOVER_NOT_SAFE', '旧 Agent 仍有活跃执行，拒绝转移 Task 执行权');
+          }
+        } catch (statusError) {
+          if (statusError?.code !== 'SESSION_NOT_FOUND') throw statusError;
         }
         // Bind before bootstrap: broker-only providers resolve authorization from the
         // current Task binding. If bootstrap fails, the old binding is restored below.
@@ -473,10 +534,14 @@ export function createContinuityRuntime({
           sessionId: created.sessionId,
           note: `rollover #${sequence} 自 ${previousAgent.provider}:${previousAgent.sessionId}`
         });
-        await agentBroker.send({ provider: target.id, sessionId: created.sessionId, content: renderResumePrompt(packet) });
+        const bootstrap = await agentBroker.send({ provider: target.id, sessionId: created.sessionId, content: renderResumePrompt(packet) });
+        if (bootstrap?.accepted !== true) {
+          throw continuityError('BOOTSTRAP_REJECTED', 'Target Agent did not accept its recovery turn');
+        }
+        await awaitBootstrapTurn({ provider: target.id, sessionId: created.sessionId, requestId: bootstrap.requestId });
 
         if (reconciler && task.workspaceId) {
-          const freshFacts = facts ?? await collectWorkspaceFacts({ workspaceId: task.workspaceId, relevantFiles });
+          const freshFacts = await collectWorkspaceFacts({ workspaceId: task.workspaceId, relevantFiles });
           if (freshFacts) {
             reconciliation = reconciler.reconcile({ packet, facts: freshFacts });
             packet.reconciliation = reconciliation;
@@ -484,14 +549,38 @@ export function createContinuityRuntime({
               taskId: task.id, sequence, reconciliation, facts: freshFacts
             });
             prunePacketFiles(path.join(packetDir, String(task.id)));
-            if (reconciliation.consistent === false) {
-              log(`Continuity reconciliation：任务 ${task.id} 发现 ${reconciliation.discrepancies.length} 处 checkpoint/工作区不一致（已记录）`);
+            if (reconciliation.consistent !== true) {
+              throw continuityError(reconciliation.consistent === false ? 'WORKSPACE_CHANGED' : 'WORKSPACE_UNVERIFIED',
+                'Workspace changed or cannot be verified during Agent handoff');
             }
+          } else {
+            throw continuityError('WORKSPACE_UNVERIFIED', 'Workspace facts could not be collected during Agent handoff');
           }
         }
       } catch (error) {
+        let targetStopped = true;
+        if (created?.sessionId) {
+          try { await agentBroker.cancel({ provider: target.id, sessionId: created.sessionId }); }
+          catch (cancelError) {
+            if (cancelError?.code !== 'SESSION_NOT_FOUND' && cancelError?.code !== 'TURN_NOT_RUNNING') {
+              log(`Continuity target Session cancel failed: ${cancelError?.code ?? 'PROVIDER_ERROR'}`);
+            }
+          }
+          try { await agentBroker.closeSession({ provider: target.id, sessionId: created.sessionId }); }
+          catch (cleanupError) {
+            targetStopped = cleanupError?.code === 'SESSION_NOT_FOUND';
+            log(`Continuity target Session cleanup failed: ${cleanupError?.code ?? 'SESSION_CLEANUP_FAILED'}`);
+          }
+        }
         const current = taskRuntime.get({ id: task.id }).task;
-        if (created?.sessionId && current.currentAgent?.provider === target.id && current.currentAgent?.sessionId === created.sessionId) {
+        const targetAttached = Boolean(created?.sessionId && current.currentAgent?.provider === target.id
+          && current.currentAgent?.sessionId === created.sessionId);
+        if (targetAttached && !targetStopped) {
+          taskRuntime.fail({ id: task.id, expectedRev: current.rev,
+            reason: 'Handoff target could not be stopped; Task authority revoked for recovery review' });
+          throw error;
+        }
+        if (targetAttached) {
           try {
             taskRuntime.detachAgent({ id: task.id, expectedRev: current.rev, note: `rollover #${sequence} failed; restore prior Agent` });
             taskRuntime.attachAgent({ id: task.id, expectedRev: currentRev(), provider: previousAgent.provider,
@@ -504,23 +593,10 @@ export function createContinuityRuntime({
         catch (rollbackError) {
           log(`Continuity checkpoint rollback failed: ${rollbackError?.code ?? 'CHECKPOINT_ROLLBACK_FAILED'}`);
         }
-        if (created?.sessionId) {
-          try { await agentBroker.closeSession({ provider: target.id, sessionId: created.sessionId }); }
-          catch (cleanupError) {
-            log(`Continuity target Session cleanup failed: ${cleanupError?.code ?? 'SESSION_CLEANUP_FAILED'}`);
-          }
-        }
         throw error;
       }
 
-      // The target is now usable. Stop/archive the old Session only after the new
-      // binding and bootstrap succeeded, so Provider initialization failure can roll back.
-      try { await agentBroker.cancel({ provider: fromProvider.id, sessionId: previousAgent.sessionId }); }
-      catch (cancelError) {
-        if (!['SESSION_NOT_FOUND', 'TURN_NOT_RUNNING'].includes(cancelError?.code)) {
-          log(`Continuity old Session cancel failed: ${cancelError?.code ?? 'PROVIDER_ERROR'}`);
-        }
-      }
+      // The old execution was stopped before target binding; archive is cleanup only.
       let archive = { supported: false, archived: false };
       try { archive = await agentBroker.archiveSession({ provider: fromProvider.id, sessionId: previousAgent.sessionId }); }
       catch (error) { log(`Continuity old Session archive failed: ${error?.code ?? 'PROVIDER_ERROR'}`); }
@@ -549,6 +625,9 @@ export function createContinuityRuntime({
         at: now()
       });
       writeHistory(store);
+      try { writeJsonAtomic(latestPacketFile(task.id), packet); }
+      catch (error) { log(`Continuity latest Packet cache update failed: ${error?.code ?? 'WRITE_FAILED'}`); }
+      prunePacketFiles(path.join(packetDir, String(task.id)));
       monitor.reset(`${previousAgent.provider}:${previousAgent.sessionId}`);
 
       return {
@@ -569,7 +648,7 @@ export function createContinuityRuntime({
   /** 按需核验：对任务最近一次 Handoff Packet 重新收集工作区事实并比对。 */
   async function reconcile({ taskId } = {}) {
     const task = requireTask(taskId);
-    const packet = loadContinuityFile(latestPacketFile(task.id), null);
+    const packet = committedPacket(task.id);
     if (!packet) throw continuityError('PACKET_NOT_FOUND', '该任务尚无 Handoff Packet');
     if (!reconciler) throw continuityError('INVALID_PARAMS', '未注入 Workspace Reconciler，无法核验');
     if (!task.workspaceId) {
@@ -585,7 +664,7 @@ export function createContinuityRuntime({
 
   function latestPacket({ taskId } = {}) {
     requireTask(taskId);
-    const packet = loadContinuityFile(latestPacketFile(taskId), null);
+    const packet = committedPacket(taskId);
     if (!packet) throw continuityError('PACKET_NOT_FOUND', '该任务尚无 Handoff Packet');
     return { packet };
   }
@@ -623,6 +702,7 @@ export function createContinuityRuntime({
       merged.forcedPercent = Math.max(merged.forcedPercent, merged.rolloverPercent);
     }
     Object.assign(activePolicy, normalizePolicy(merged));
+    writeJsonAtomic(policyFile, activePolicy);
     return getPolicy();
   }
 

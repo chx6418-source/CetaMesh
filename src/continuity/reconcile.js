@@ -113,6 +113,26 @@ export function createWorkspaceReconciler({
     }
     const discrepancies = [];
     const coding = packet?.coding ?? {};
+    const before = packet?.workspaceFacts;
+    if (before?.available) {
+      if (before.workspaceId !== facts.workspaceId) {
+        discrepancies.push({ kind: 'workspace', checkpoint: before.workspaceId, workspace: facts.workspaceId,
+          note: 'Task Workspace changed during handoff' });
+      }
+      for (const field of ['isRepo', 'branch', 'headSha', 'dirty', 'diffSummary']) {
+        const expected = before.git?.[field] ?? null;
+        const observed = facts.git?.[field] ?? null;
+        if (expected !== observed) discrepancies.push({ kind: field, checkpoint: expected, workspace: observed,
+          note: `Workspace ${field} changed during handoff` });
+      }
+      const oldFiles = new Map((before.files ?? []).map(file => [file.path, file.exists]));
+      for (const file of facts.files ?? []) {
+        if (oldFiles.has(file.path) && oldFiles.get(file.path) !== file.exists) {
+          discrepancies.push({ kind: 'file', checkpoint: oldFiles.get(file.path), workspace: file.exists,
+            note: `Workspace file changed during handoff: ${file.path}` });
+        }
+      }
+    }
     if (facts.git.isRepo) {
       if (coding.branch && facts.git.branch && coding.branch !== facts.git.branch) {
         discrepancies.push({

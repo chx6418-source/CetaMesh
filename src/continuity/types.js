@@ -6,7 +6,7 @@
 // 核心原则：Task 属于 CetaMesh；Agent Session 可换，Task ID 不变；
 // rollover 传递的是结构化 Task state / Workspace truth / Checkpoint，而不是聊天历史。
 
-import { taskError } from '../task/types.js';
+import { TASK_LIMITS, taskError } from '../task/types.js';
 
 export const continuityError = taskError;
 
@@ -127,14 +127,14 @@ export function normalizePacket(packet) {
       .filter((item) => item.trim())
       .slice(0, maxItems);
   };
-  const stringList = (value, maxItems) => {
+  const stringList = (value, maxItems, maxChars = PACKET_LIMITS.idChars) => {
     if (!Array.isArray(value)) return [];
-    return value.map((item) => String(item ?? '').slice(0, PACKET_LIMITS.idChars)).filter((item) => item.trim()).slice(0, maxItems);
+    return value.map((item) => String(item ?? '').slice(0, maxChars)).filter((item) => item.trim()).slice(0, maxItems);
   };
   return {
     taskId: text(packet.taskId, PACKET_LIMITS.idChars),
     goal: text(packet.goal, PACKET_LIMITS.summaryChars),
-    requirements: stringList(packet.requirements, PACKET_LIMITS.listItems),
+    requirements: stringList(packet.requirements, PACKET_LIMITS.listItems, TASK_LIMITS.requirementChars),
     currentPhase: text(packet.currentPhase, 120),
     completedWork: list(packet.completedWork, PACKET_LIMITS.listItems),
     pendingWork: list(packet.pendingWork, PACKET_LIMITS.listItems),

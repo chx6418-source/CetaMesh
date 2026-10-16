@@ -180,7 +180,8 @@ function makeReconciler({ entries = {} } = {}) {
     async send() { return { accepted: true }; },
     async status() { return { running: false, queued: 0, waitingForApproval: false }; },
     async cancel() { return { cancelled: true }; },
-    async archiveSession() { return { archived: true, supported: true }; }
+    async archiveSession() { return { archived: true, supported: true }; },
+    async *follow({ sessionId }) { yield { type: 'turn/end', seq: 1, data: { sessionId, reason: { kind: 'completed' } } }; }
   };
   registry.register(alpha);
   const broker = createAgentBroker({ registry });

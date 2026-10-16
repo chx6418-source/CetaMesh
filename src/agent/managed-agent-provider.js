@@ -317,6 +317,7 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
       async status({ sessionId } = {}) {
         const s = session(sessionId);
         return { sessionId, provider: 'cetamesh', running: s.running, queued: s.queue.length, blank: s.messages.length === 0, archived: s.archived,
+          modelProvider: s.modelProvider || null, model: s.model || null, reasoningEffort: s.reasoningEffort || null,
           waitingForApproval: s.waitingForApproval, updatedAt: s.updatedAt, cwd: s.cwd, lastReason: copy(s.lastReason) };
       },
       async contextUsage({ sessionId } = {}) {
