@@ -115,11 +115,12 @@ function projectTask(value) {
     return { id: string(artifact.id, 128), kind: string(artifact.kind, 80), label: string(artifact.label, 300), createdAt: scalar(artifact.createdAt) };
   }) : [];
   return {
-    id: string(row.id, 128), title: string(row.goal, 500), goal: string(row.goal, 4000),
+    id: string(row.id, 128), title: string(row.goal, 500), goal: string(row.goal, 2000),
     status: string(row.status, 40), currentPhase: string(row.currentPhase, 500),
     progress: { percent: Number.isFinite(progress.percent) ? Math.max(0, Math.min(100, progress.percent)) : 0, note: string(progress.note, 1000) },
     workspaceId: string(row.workspaceId, 128) || null,
     agent: currentAgent.provider ? string(currentAgent.provider, 100) : null,
+    currentAgent: currentAgent.provider ? { provider: string(currentAgent.provider, 100), sessionId: string(currentAgent.sessionId, 160) } : null,
     createdAt: scalar(row.createdAt), updatedAt: scalar(row.updatedAt), rev: Number.isSafeInteger(row.rev) ? row.rev : null,
     checkpoint: checkpoint.summary ? { summary: string(checkpoint.summary, 2000), nextAction: string(checkpoint.nextAction, 500) } : null,
     result: result.summary ? { summary: string(result.summary, 4000) } : null,
@@ -444,6 +445,31 @@ export function createDesktopUiService({ services = {}, system = services.system
   const workspace = (method, params) => call(services.workspaceService, method, params);
   const enableReviewTokens = new Map();
 
+  async function runTask(taskRow, { provider, content, requestId, modelProvider, model } = {}) {
+    if (!taskRow.workspaceId) throw uiError('TASK_WORKSPACE_REQUIRED', '任务需要绑定工作区才能启动 Agent');
+    const result = await capability('capability.execute', { capability: 'agent.run',
+      taskId: taskRow.id, workspaceId: taskRow.workspaceId, requestId,
+      input: { agentProvider: provider || taskRow.currentAgent?.provider || 'cetamesh',
+        content: content || [taskRow.goal, ...(taskRow.requirements ?? []),
+          taskRow.checkpoint?.summary ?? '', taskRow.checkpoint?.nextAction ?? ''].filter(Boolean).join('\n'),
+        ...(modelProvider ? { modelProvider } : {}), ...(model ? { model } : {}) },
+      reason: 'Desktop Owner Task execution' });
+    if (result.status !== 'completed' || result.result?.accepted !== true) {
+      throw uiError('AGENT_SEND_REJECTED', 'Agent 未接受任务指令');
+    }
+    let current = (await task('task.get', { id: taskRow.id })).task;
+    if (current.status === 'paused' || current.status === 'waiting' || current.status === 'blocked') {
+      current = (await task('task.resume', { id: current.id, expectedRev: current.rev })).task;
+    }
+    emit('task.updated', { taskId: current.id, status: current.status });
+    return current;
+  }
+
+  async function stopTask(taskRow) {
+    if (!taskRow.currentAgent) return;
+    await services.agentBroker.cancel(taskRow.currentAgent);
+  }
+
   const handlers = {
     'ui.events.next': async (p, context) => eventBus?.next({ after: p.after, waitMs: p.waitMs, signal: context?.signal }) ?? { events: [], cursor: 0 },
     'ui.chat.sessions.list': async p => {
@@ -541,22 +567,37 @@ export function createDesktopUiService({ services = {}, system = services.system
     },
     'ui.task.get': async p => ({ task: projectTask((await task('task.get', { id: idParam(p) })).task) }),
     'ui.task.create': async p => {
-      const created = await task('task.create', { goal: boundedText(p.goal, 'goal', 4000), requirements: boundedStrings(p.requirements, 50, 1000), workspaceId: string(p.workspaceId, 128) || null, note: string(p.note, 1000) });
-      emit('task.updated', { taskId: created?.id, status: created?.status });
-      return { task: projectTask(created) };
+      const created = await task('task.create', { goal: boundedText(p.goal, 'goal', 2000), requirements: boundedStrings(p.requirements, 50, 1000), workspaceId: string(p.workspaceId, 128) || null, note: string(p.note, 1000) });
+      const current = created.workspaceId ? await runTask(created, { provider: string(p.agentProvider, 80) || 'cetamesh',
+        requestId: string(p.requestId, 160) || undefined, modelProvider: string(p.modelProvider, 80) || undefined,
+        model: string(p.model, 160) || undefined }) : created;
+      emit('task.updated', { taskId: current.id, status: current.status });
+      return { task: projectTask(current) };
+    },
+    'ui.task.start': async p => {
+      const current = (await task('task.get', { id: idParam(p) })).task;
+      if (p.expectedRev !== undefined && current.rev !== p.expectedRev) throw uiError('TASK_CONFLICT', '任务已被其他操作修改');
+      return { task: projectTask(await runTask(current, { provider: string(p.agentProvider, 80) || undefined,
+        requestId: string(p.requestId, 160) || undefined })) };
     },
     'ui.task.pause': async p => {
-      const result = await task('task.pause', { id: idParam(p), expectedRev: p.expectedRev, reason: string(p.reason, 1000) });
+      const current = (await task('task.get', { id: idParam(p) })).task;
+      if (p.expectedRev !== undefined && current.rev !== p.expectedRev) throw uiError('TASK_CONFLICT', '任务已被其他操作修改');
+      await stopTask(current);
+      const result = await task('task.pause', { id: current.id, expectedRev: current.rev, reason: string(p.reason, 1000) });
       emit('task.updated', { taskId: result.task?.id, status: result.task?.status });
       return { task: projectTask(result.task) };
     },
     'ui.task.resume': async p => {
-      const result = await task('task.resume', { id: idParam(p), expectedRev: p.expectedRev, provider: string(p.provider, 80), sessionId: string(p.sessionId, 160) });
-      emit('task.updated', { taskId: result.task?.id, status: result.task?.status });
-      return { task: projectTask(result.task) };
+      const current = (await task('task.get', { id: idParam(p) })).task;
+      if (p.expectedRev !== undefined && current.rev !== p.expectedRev) throw uiError('TASK_CONFLICT', '任务已被其他操作修改');
+      return { task: projectTask(await runTask(current, { requestId: string(p.requestId, 160) || undefined })) };
     },
     'ui.task.cancel': async p => {
-      const result = await task('task.cancel', { id: idParam(p), expectedRev: p.expectedRev, reason: string(p.reason, 1000) });
+      const current = (await task('task.get', { id: idParam(p) })).task;
+      if (p.expectedRev !== undefined && current.rev !== p.expectedRev) throw uiError('TASK_CONFLICT', '任务已被其他操作修改');
+      await stopTask(current);
+      const result = await task('task.cancel', { id: current.id, expectedRev: current.rev, reason: string(p.reason, 1000) });
       emit('task.updated', { taskId: result.task?.id, status: result.task?.status });
       return { task: projectTask(result.task) };
     },

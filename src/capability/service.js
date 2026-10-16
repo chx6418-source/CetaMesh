@@ -80,9 +80,9 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       if (signal.aborted) finish();
     });
   }
-  function ensureTaskFollow(provider, sessionId) {
+  function ensureTaskFollow(provider, sessionId, taskId) {
     const capabilities = agentBroker?.capabilities?.(provider);
-    if (capabilities?.workspaceBoundary !== 'capability-broker' || capabilities?.requiresSessionCleanup !== true) return null;
+    if (!['capability-broker', 'staged-capability-broker'].includes(capabilities?.workspaceBoundary)) return null;
     const key = taskFollowKey(provider, sessionId);
     const current = taskFollowConsumers.get(key);
     if (current && !current.controller.signal.aborted) return current;
@@ -91,22 +91,49 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       throw capabilityError('AGENT_FOLLOW_CAPACITY', 'Task Agent event consumers are at the configured capacity');
     }
     const controller = new AbortController();
-    const consumer = { provider, sessionId, controller, promise: null };
+    const consumer = { provider, sessionId, taskId, controller, promise: null, sequence: 0 };
+    const answers = new Map();
     taskFollowConsumers.set(key, consumer);
     consumer.promise = (async () => {
       let failures = 0;
       while (!controller.signal.aborted && failures < 5) {
         let sawTurnEnd = false;
         try {
-          for await (const item of agentBroker.follow({ provider, sessionId, signal: controller.signal })) {
+          for await (const item of agentBroker.follow({ provider, sessionId, signal: controller.signal, sinceSequence: consumer.sequence })) {
             if (controller.signal.aborted) break;
             const event = item?.type === 'event' ? item.event : item;
-            if (event?.type === 'turn/end') sawTurnEnd = true;
+            if (Number.isSafeInteger(event?.seq)) {
+              if (event.seq <= consumer.sequence) continue;
+              consumer.sequence = event.seq;
+            }
+            const turnId = String(event?.data?.requestId ?? '');
+            if (event?.type === 'assistant/message' && turnId) {
+              const content = event.data?.message?.content;
+              const answer = Array.isArray(content) ? content.filter(part => part?.type === 'text')
+                .map(part => String(part.text ?? '')).join('') : '';
+              if (answer) answers.set(turnId, answer.slice(0, 8000));
+            }
+            if (event?.type === 'turn/end') {
+              sawTurnEnd = true;
+              const answer = answers.get(turnId);
+              answers.delete(turnId);
+              const current = taskFor(taskId);
+              if (!current || current.currentAgent?.provider !== provider || current.currentAgent?.sessionId !== sessionId
+                || current.status !== 'running') continue;
+              if (event.data?.reason?.kind === 'completed' && answer) {
+                taskRuntime.setCheckpoint({ id: taskId, expectedRev: current.rev, summary: answer, nextAction: '' });
+                const updated = taskFor(taskId);
+                taskRuntime.addWork({ id: taskId, expectedRev: updated.rev, kind: 'completed', text: answer.slice(0, 2000) });
+              } else if (event.data?.reason?.kind === 'failed') {
+                taskRuntime.block({ id: taskId, expectedRev: current.rev,
+                  reason: String(event.data?.reason?.error?.code ?? 'Agent turn failed').slice(0, 1000) });
+              }
+            }
           }
           if (controller.signal.aborted || sawTurnEnd) return;
           throw capabilityError('AGENT_FOLLOW_DISCONNECTED', 'Task Agent event stream ended before turn completion');
         } catch (error) {
-          if (controller.signal.aborted || error?.code === 'SESSION_NOT_FOUND') return;
+          if (controller.signal.aborted || ['SESSION_NOT_FOUND', 'AGENT_UNSUPPORTED'].includes(error?.code)) return;
           failures += 1;
           audit({ capability: 'agent.run', status: 'follow-retrying', code: error?.code ?? 'AGENT_FOLLOW_FAILED' });
           if (failures >= 5) {
@@ -140,6 +167,9 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     if (old && old.hash !== hash) throw capabilityError('REQUEST_ID_CONFLICT', 'Request ID reused with different data');
     if (old?.status === 'completed') return structuredClone(old.result);
     if (requests.has(request.requestId)) return requests.get(request.requestId);
+    if (request.capability === 'agent.run' && old && old.status !== 'completed') {
+      throw capabilityError('REQUEST_RECOVERY_REQUIRED', 'Previous Agent dispatch outcome is uncertain; review Task before retrying');
+    }
     journal[request.requestId] = { hash, status: 'in-flight' }; saveJournal();
     const pending = Promise.resolve().then(run);
     requests.set(request.requestId, pending);
@@ -461,6 +491,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       reasoningEffort: { type: 'string', enum: ['low', 'medium', 'high', 'max'] },
     }),
     async execute(r) {
+      return idempotent(r, async () => {
       if (r.actor.kind !== 'owner') throw capabilityError('PERMISSION_DENIED', 'Only Owner may assign Agents');
       if (r.signal?.aborted) throw capabilityError('INVOKE_CANCELLED', 'Agent assignment cancelled');
       let task = taskFor(r.taskId);
@@ -473,15 +504,31 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       if (task.currentAgent && task.currentAgent.provider !== provider) {
         throw capabilityError('AGENT_PROVIDER_SWITCH_REQUIRES_CONTINUITY', 'An existing Task must change Agent Providers through Continuity Fresh Session');
       }
-      if (provisioning.has(task.id)) return provisioning.get(task.id);
+      const previous = provisioning.get(task.id);
       const pending = (async () => {
+        if (previous) {
+          try { await previous; }
+          catch (previousError) {
+            audit({ requestId: r.requestId, capability: 'agent.run', status: 'prior-instruction-failed',
+              code: previousError?.code ?? 'PROVIDER_ERROR' });
+          }
+          task = taskFor(r.taskId);
+          if (!task || task.workspaceId !== r.workspaceId) {
+            throw capabilityError('TASK_NOT_AUTHORIZED', 'Task workspace changed while instruction was queued');
+          }
+          if (task.currentAgent && task.currentAgent.provider !== provider) {
+            throw capabilityError('AGENT_PROVIDER_SWITCH_REQUIRES_CONTINUITY', 'Task Agent changed while instruction was queued');
+          }
+        }
+        if (r.signal?.aborted) throw capabilityError('INVOKE_CANCELLED', 'Agent assignment cancelled');
         const actor = grants[task.id] ? principalForTask(task.id) : grantTask(task.id, r.input.grants);
         if (task.currentAgent) {
           try {
             await agentBroker.status(task.currentAgent);
             if (r.signal?.aborted) throw capabilityError('INVOKE_CANCELLED', 'Agent assignment cancelled');
-            ensureTaskFollow(task.currentAgent.provider, task.currentAgent.sessionId);
+            ensureTaskFollow(task.currentAgent.provider, task.currentAgent.sessionId, task.id);
             const sent = await agentBroker.send({ ...task.currentAgent, content: String(r.input.content || task.goal) });
+            if (sent?.accepted !== true) throw capabilityError('AGENT_SEND_REJECTED', 'Agent did not accept Task instruction');
             if (r.signal?.aborted) {
               try { await agentBroker.cancel(task.currentAgent); }
               catch (cancelError) {
@@ -515,8 +562,9 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
             startedByRequest = true;
           }
           if (r.signal?.aborted) throw capabilityError('INVOKE_CANCELLED', 'Agent assignment cancelled');
-          ensureTaskFollow(provider, created.sessionId);
+          ensureTaskFollow(provider, created.sessionId, task.id);
           const sent = await agentBroker.send({ provider, sessionId: created.sessionId, content: String(r.input.content || task.goal) });
+          if (sent?.accepted !== true) throw capabilityError('AGENT_SEND_REJECTED', 'Agent did not accept Task instruction');
           if (r.signal?.aborted) throw capabilityError('INVOKE_CANCELLED', 'Agent assignment cancelled');
           return { taskId: task.id, workspaceId: ws.id, provider, sessionId: created.sessionId, accepted: sent?.accepted === true, actor };
         } catch (error) {
@@ -547,7 +595,8 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
         }
       })();
       provisioning.set(task.id, pending);
-      try { return await pending; } finally { provisioning.delete(task.id); }
+      try { return await pending; } finally { if (provisioning.get(task.id) === pending) provisioning.delete(task.id); }
+      });
     }
   });
   async function execute({ method, params = {} } = {}) {
