@@ -2,14 +2,6 @@ import { DESKTOP_USER_PRINCIPAL } from '../memory/service.js';
 import { buildCapabilityContext } from './capability-context.js';
 import { projectProductContext } from './product-context.js';
 
-const OMIT_MEMORY_ERRORS = new Set([
-  'CROSS_SCOPE_LINK_REQUIRED',
-  'MEMORY_NOT_FOUND',
-  'SCOPE_NOT_AUTHORIZED',
-  'TYPE_NOT_AUTHORIZED',
-  'INVALID_REFERENCE'
-]);
-
 function taskFromRuntime(taskRuntime, taskId) {
   if (typeof taskId !== 'string' || !taskId.trim()) return null;
   try {
@@ -21,33 +13,84 @@ function taskFromRuntime(taskRuntime, taskId) {
   }
 }
 
-function resolveMemoryReferences(memoryService, task, principal) {
-  if (!task || !Array.isArray(task.memoryRefs) || !memoryService?.runtime?.resolveReferences) return [];
+function resolveMemoryReferences(memoryService, task, principal, onMemoryError = null) {
+  if (!task || !Array.isArray(task.memoryRefs) || !memoryService?.runtime?.get) return [];
   const sourceScope = `task:${task.id}`;
   const resolved = [];
-  for (const reference of task.memoryRefs.slice(0, 8)) {
+  for (const reference of task.memoryRefs.slice(0, 200)) {
     const memoryId = typeof reference?.memoryId === 'string' ? reference.memoryId : '';
     if (!memoryId) continue;
     try {
-      const result = memoryService.runtime.resolveReferences({
-        principal,
-        sourceScope,
-        refs: [{ kind: 'memory', id: memoryId, scope: sourceScope }]
-      });
-      for (const item of result?.references ?? []) {
-        if (item.status !== 'resolved') continue;
-        resolved.push({
-          memoryId: item.reference?.id ?? memoryId,
-          title: reference.note || item.type || 'Task Memory reference',
-          excerpt: item.summary ?? ''
-        });
-      }
+      const item = memoryService.runtime.get({ principal, id: memoryId }).memory;
+      const expectedScope = reference.scope || sourceScope;
+      if (item.scope !== expectedScope) continue;
+      if (expectedScope !== sourceScope && reference.authorizedBy !== 'user:desktop') continue;
+      resolved.push({ memoryId, title: reference.note || item.type || 'Task Memory reference', excerpt: item.content });
     } catch (error) {
-      if (OMIT_MEMORY_ERRORS.has(error?.code)) continue;
-      throw error;
+      onMemoryError?.(error);
+      continue;
     }
   }
   return resolved;
+}
+
+function automaticMemoryReferences(memoryService, settings, principal, scopes, query = '', onMemoryError = null) {
+  if (settings?.enabled === false || !memoryService?.runtime) return [];
+  const limit = Math.max(1, Math.min(200, Number(settings?.retrievalLimit) || 50));
+  const rows = [];
+  for (const scope of scopes) {
+    try {
+      const page = memoryService.runtime.retrieve({ principal, scope, query: String(query).slice(0, 200), limit });
+      rows.push(...page.memories);
+    } catch (error) {
+      // A denied or unavailable partition is omitted, never replaced by a wider scope.
+      onMemoryError?.(error);
+      continue;
+    }
+  }
+  const ranked = rows.map(row => ({ row }));
+  const output = [];
+  // Charge one token per UTF-8 byte plus record overhead: a conservative bound without
+  // depending on the selected provider's tokenizer.
+  let remaining = 1200;
+  for (const { row } of ranked) {
+    const title = row.type + ' · ' + row.scope;
+    const overhead = Buffer.byteLength(title, 'utf8') + 16;
+    if (output.length >= limit || remaining <= overhead) break;
+    let excerpt = '';
+    let cost = 0;
+    for (const char of row.content) {
+      const bytes = Buffer.byteLength(char, 'utf8');
+      if (excerpt.length + char.length > 500 || cost + bytes + overhead > remaining) break;
+      excerpt += char;
+      cost += bytes;
+    }
+    if (!excerpt) continue;
+    remaining -= cost + overhead;
+    output.push({ memoryId: row.id, title, excerpt });
+  }
+  return output;
+}
+
+function boundMemoryReferences(references, settings) {
+  const limit = Math.max(1, Math.min(200, Number(settings?.retrievalLimit) || 50));
+  let remaining = 1200;
+  const result = [];
+  for (const item of references) {
+    if (result.length >= limit) break;
+    const title = String(item.title ?? 'Memory');
+    const overhead = Buffer.byteLength(title + String(item.memoryId ?? ''), 'utf8') + 16;
+    if (remaining <= overhead) break;
+    let excerpt = '';
+    for (const char of String(item.excerpt ?? '')) {
+      const bytes = Buffer.byteLength(char, 'utf8');
+      if (Buffer.byteLength(excerpt, 'utf8') + bytes + overhead > remaining) break;
+      excerpt += char;
+    }
+    remaining -= Buffer.byteLength(excerpt, 'utf8') + overhead;
+    result.push({ ...item, excerpt });
+  }
+  return result;
 }
 
 function extensionSummaries(extensionService) {
@@ -178,9 +221,11 @@ export function createProductContextService({
   capabilityService,
   extensionService,
   agentBroker,
-  modelRuntime = null
+  modelRuntime = null,
+  memorySettings = () => ({ enabled: true, retrievalLimit: 50 }),
+  onMemoryError = null
 } = {}) {
-  async function buildForChatTurn({ record, routing, modelProvider, model, requestedModel, resolvedModel, toolCalling } = {}) {
+  async function buildForChatTurn({ record, routing, modelProvider, model, requestedModel, resolvedModel, toolCalling, memoryQuery } = {}) {
     const source = record && typeof record === 'object' ? record : {};
     const task = taskFromRuntime(taskRuntime, source.taskId);
     const workspaceId = source.config?.workspaceId;
@@ -194,9 +239,11 @@ export function createProductContextService({
         code: 'WORKSPACE_RECONCILIATION_REQUIRED' }
       : task ? { required: false, status: 'resolved', expectedWorkspaceId, observedWorkspaceId }
         : null;
-    const memoryReferences = task
-      ? resolveMemoryReferences(memoryService, task, DESKTOP_USER_PRINCIPAL)
-      : [];
+    const settings = memorySettings();
+    const memoryReferences = settings.enabled === false ? [] : boundMemoryReferences([
+      ...(task ? resolveMemoryReferences(memoryService, task, DESKTOP_USER_PRINCIPAL, onMemoryError) : []),
+      ...automaticMemoryReferences(memoryService, settings, DESKTOP_USER_PRINCIPAL, ['user:desktop'], memoryQuery, onMemoryError)
+    ], settings);
 
     return serializeContext({
       mode: source.config?.mode ?? 'chat',
@@ -240,7 +287,12 @@ export function createProductContextService({
         code: 'WORKSPACE_RECONCILIATION_REQUIRED' }
       : { required: false, status: 'resolved', expectedWorkspaceId: task.workspaceId, observedWorkspaceId };
     const memoryPrincipal = capabilityService.memoryPrincipal(liveActor);
-    const memoryReferences = resolveMemoryReferences(memoryService, task, memoryPrincipal);
+    const settings = memorySettings();
+    const memoryReferences = settings.enabled === false ? [] : boundMemoryReferences([
+      ...resolveMemoryReferences(memoryService, task, memoryPrincipal, onMemoryError),
+      ...automaticMemoryReferences(memoryService, settings, memoryPrincipal,
+        [`task:${task.id}`, `workspace:${task.workspaceId}`], task.goal, onMemoryError)
+    ], settings);
     const grantedIds = Array.isArray(liveActor.grants?.capabilities) ? liveActor.grants.capabilities : [];
     return serializeContext({
       mode: 'managed-agent',

@@ -98,6 +98,7 @@ const REGISTRY = {
   'test-phase3-real-codex.mjs': { category: 'environment', requires: ['real-codex'], timeoutMs: 180_000,
     note: 'Owner-authorized real Codex CLI Task E2E in an isolated disposable Workspace' },
   'test-memory-runtime.mjs': { category: 'runtime' },
+  'test-phase4-memory.mjs': { category: 'runtime' },
   'test-memory-link.mjs': { category: 'runtime' },
   'test-state-retention.mjs': { category: 'runtime' },
   'test-task-runtime.mjs': { category: 'runtime' },

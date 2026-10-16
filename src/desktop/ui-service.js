@@ -172,11 +172,18 @@ function projectMemory(value) {
   const memory = record(row.memory ?? row);
   return {
     id: string(memory.id, 128), type: string(memory.type, 80), scope: string(memory.scope, 120),
-    title: string(memory.title ?? memory.content, 300), content: string(memory.content ?? memory.summary, 8000),
+    title: string(memory.title ?? memory.content, 300), content: typeof memory.content === 'string' ? memory.content : string(memory.summary, 4000),
     summary: string(memory.summary ?? memory.content, 1200), tags: boundedStrings(memory.tags, 30, 100),
     pinned: memory.pinned === true, rev: Number.isSafeInteger(memory.rev) ? memory.rev : null,
     createdAt: scalar(memory.createdAt), updatedAt: scalar(memory.updatedAt)
   };
+}
+
+function projectMemoryCandidate(value) {
+  const row = record(value);
+  return { id: string(row.id, 128), status: string(row.status, 32), type: string(row.type, 80),
+    scope: string(row.scope, 120), content: string(row.content, 4000), reason: string(row.reason, 500),
+    proposedAt: scalar(row.proposedAt), memoryId: string(row.memoryId, 128) || null };
 }
 
 function projectAgent(value) {
@@ -801,20 +808,36 @@ export function createDesktopUiService({ services = {}, system = services.system
       return view;
     },
     'ui.memory.overview': async p => {
-      const result = await memory('memory.overview', { query: string(p.query, 500), scope: string(p.scope, 120) || undefined, limit: Math.max(1, Math.min(200, Number(p.limit) || 100)) });
-      return { memories: (result.memories ?? []).map(projectMemory), total: Number(result.meta?.total ?? result.memories?.length) || 0, candidates: (result.candidates ?? []).map(projectMemory) };
+      const result = await memory('memory.overview', { query: string(p.query, 200), scope: string(p.scope, 120) || undefined,
+        types: Array.isArray(p.types) ? p.types.slice(0, 8) : undefined,
+        offset: Math.max(0, Math.min(20000, Number(p.offset) || 0)),
+        limit: Math.max(1, Math.min(200, Number(p.limit) || 100)) });
+      return { memories: (result.memories ?? []).map(projectMemory), total: Number(result.meta?.total ?? result.memories?.length) || 0,
+        candidates: (result.candidates ?? []).map(projectMemoryCandidate), candidateMeta: result.candidateMeta, recovery: result.recovery };
+    },
+    'ui.memory.candidates.confirm': async p => {
+      const result = await memory('memory.candidates.confirm', { id: idParam(p), decision: string(p.decision, 16),
+        ...(p.content === undefined ? {} : { content: boundedText(p.content, 'content', 4000) }) });
+      emit('memory.updated', { status: string(p.decision, 16) });
+      return { candidate: projectMemoryCandidate(result.candidate), memory: result.memory ? projectMemory(result.memory) : null };
+    },
+    'ui.memory.candidates.confirmBatch': async p => {
+      const result = await memory('memory.candidates.confirmBatch', { ids: boundedStrings(p.ids, 50, 128), decision: string(p.decision, 16) });
+      emit('memory.updated', { status: 'batch-decided' });
+      return { results: result.results.map(row => ({ id: string(row.id, 128),
+        ...(row.error ? { error: { code: string(row.error.code, 80), message: string(row.error.message, 300) } } : {}) })) };
     },
     'ui.memory.get': async p => projectMemory(await memory('memory.get', { id: idParam(p) })),
     'ui.memory.create': async p => {
       const result = await memory('memory.create', {
         type: boundedText(p.type, 'type', 80), scope: boundedText(p.scope, 'scope', 120),
-        content: boundedText(p.content, 'content', 8000), tags: boundedStrings(p.tags, 30, 100), pinned: p.pinned === true
+        content: boundedText(p.content, 'content', 4000), tags: boundedStrings(p.tags, 30, 100), pinned: p.pinned === true
       });
       emit('memory.updated', { status: 'created' });
       return projectMemory(result);
     },
     'ui.memory.update': async p => {
-      const result = await memory('memory.update', { id: idParam(p), expectedRev: p.expectedRev, content: boundedText(p.content, 'content', 8000), tags: boundedStrings(p.tags, 30, 100), pinned: p.pinned === true });
+      const result = await memory('memory.update', { id: idParam(p), expectedRev: p.expectedRev, content: boundedText(p.content, 'content', 4000), tags: boundedStrings(p.tags, 30, 100), pinned: p.pinned === true });
       emit('memory.updated', { status: 'updated' });
       return projectMemory(result);
     },

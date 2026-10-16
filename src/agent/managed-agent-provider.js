@@ -273,7 +273,9 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
       s.lastUsage = usage; s.lastReason = reason; s.running = false; s.controller = null; s.currentTurn = null;
       emit(s, 'turn/end', { requestId: turn.id, reason: { ...reason, usage }, usage, promptChars: turn.content.length, outputChars });
       if (typeof onTurnEnd === 'function') {
-        try { await onTurnEnd({ provider: 'cetamesh', sessionId: s.id, usage, promptChars: turn.content.length, outputChars, source: 'managed-model-runtime' }); } catch {}
+        try { await onTurnEnd({ provider: 'cetamesh', sessionId: s.id, usage, promptChars: turn.content.length,
+          outputChars, source: 'managed-model-runtime', outcome: reason.kind }); }
+        catch { /* Turn accounting and optional Memory proposal must not prevent turn termination. */ }
       }
     }
   }
@@ -434,7 +436,7 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
         emit(s, 'turn/end', { requestId: turn.id, reason: s.lastReason, usage: s.lastUsage,
           promptChars: turn.content.length, outputChars: text.length });
         if (typeof onTurnEnd === 'function') await onTurnEnd({ provider: 'cetamesh', sessionId: s.id, usage: s.lastUsage,
-          promptChars: turn.content.length, outputChars: text.length, source: 'managed-model-runtime' });
+          promptChars: turn.content.length, outputChars: text.length, source: 'managed-model-runtime', outcome: s.lastReason.kind });
         return { resumed: true, pending: false };
       } catch (error) {
         waitingTurns.delete(String(approvalId));

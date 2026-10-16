@@ -30,6 +30,10 @@ export interface Memory {
   id: string; type: string; scope: string; title: string; content: string; summary: string;
   tags: string[]; pinned: boolean; rev: number | null; createdAt: string | number | null; updatedAt: string | number | null;
 }
+export interface MemoryCandidate {
+  id: string; status: string; type: string; scope: string; content: string; reason: string;
+  proposedAt: string | number | null; memoryId: string | null;
+}
 export type AgentStatus = 'ready' | 'needs-setup' | 'descriptor-incomplete' | 'not-installed' | 'unavailable' | 'not-supported' | 'not-checked';
 export interface Agent {
   id: string; name: string; role: string; description: string; available: boolean; installed: boolean; authenticated: boolean | null; status: AgentStatus;
@@ -100,6 +104,7 @@ type UiMethod =
   | 'ui.task.overview' | 'ui.task.get' | 'ui.task.create' | 'ui.task.start' | 'ui.task.pause' | 'ui.task.resume' | 'ui.task.reconcile' | 'ui.task.cancel' | 'ui.task.handoff'
   | 'ui.workspace.list' | 'ui.workspace.open' | 'ui.workspace.create'
   | 'ui.memory.overview' | 'ui.memory.get' | 'ui.memory.create' | 'ui.memory.update' | 'ui.memory.pin' | 'ui.memory.delete'
+  | 'ui.memory.candidates.confirm' | 'ui.memory.candidates.confirmBatch'
   | 'ui.agent.list' | 'ui.agent.health'
   | 'ui.extensions.settings.describe' | 'ui.extensions.settings.get' | 'ui.extensions.settings.update'
   | 'ui.plugins.catalog' | 'ui.plugins.status' | 'ui.plugins.detail' | 'ui.plugins.refresh' | 'ui.plugins.stage' | 'ui.plugins.stage-local' | 'ui.plugins.install'
@@ -254,7 +259,13 @@ export const taskClient = {
   handoff: (id: string, targetProvider: string, expectedRev?: number) => uiCall<{ task: Task; handoff: { success: boolean; from: unknown; to: unknown } }>('ui.task.handoff', { id, targetProvider, expectedRev })
 };
 export const memoryClient = {
-  overview: (query = '', scope = '', limit = 100) => uiCall<{ memories: Memory[]; total: number; candidates: unknown[] }>('ui.memory.overview', { query, scope, limit }),
+  overview: (query = '', scope = '', limit = 100, offset = 0, types?: string[]) =>
+    uiCall<{ memories: Memory[]; total: number; candidates: MemoryCandidate[];
+      candidateMeta?: { pending: number; capacity: number; remaining: number }; recovery?: { failed: { code: string }[] } }>('ui.memory.overview', { query, scope, limit, offset, types }),
+  confirmCandidate: (id: string, decision: 'accept' | 'reject') =>
+    uiCall<{ candidate: MemoryCandidate; memory: Memory | null }>('ui.memory.candidates.confirm', { id, decision }),
+  confirmBatch: (ids: string[], decision: 'accept' | 'reject') =>
+    uiCall<{ results: { id: string; error?: { code: string; message: string } }[] }>('ui.memory.candidates.confirmBatch', { ids, decision }),
   get: (id: string) => uiCall<Memory>('ui.memory.get', { id}),
   create: (input: { type: string; scope: string; content: string; tags?: string[]; pinned?: boolean }) => uiCall<Memory>('ui.memory.create', input),
   update: (input: { id: string; expectedRev?: number; content: string; tags?: string[]; pinned?: boolean }) => uiCall<Memory>('ui.memory.update', input),

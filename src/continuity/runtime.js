@@ -180,7 +180,8 @@ export function createContinuityRuntime({
       relevantFiles: Array.isArray(relevantFiles) ? relevantFiles : [],
       artifacts: task.artifacts.map((item) => item.label ?? item),
       // Checkpoint v2：只存 memoryId 引用，Memory 原文留在 Memory Runtime 按需加载。
-      memoryRefs: task.memoryRefs.map((ref) => ({ memoryId: ref.memoryId, note: ref.note ?? null })),
+      memoryRefs: task.memoryRefs.map((ref) => ({ memoryId: ref.memoryId, scope: ref.scope ?? `task:${task.id}`,
+        type: ref.type ?? null, authorizedBy: ref.authorizedBy ?? null, note: ref.note ?? null })),
       checkpoint: {
         summary: task.checkpoint?.summary ?? '',
         nextAction: task.checkpoint?.nextAction ?? ''

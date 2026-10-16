@@ -20,13 +20,19 @@ export function createMemoryService({ stateDir, socialV2File, now, audit } = {})
     now
   });
   const user = DESKTOP_USER_PRINCIPAL;
+  let recovery = { recovered: [], failed: [] };
+  try { recovery = runtime.recoverConfirmations({ principal: user }); }
+  catch (error) {
+    // Memory failure is reported on the Memory surface; it must not take down Chat startup.
+    recovery = { recovered: [], failed: [{ id: null, code: error?.code ?? 'STORE_READ_FAILED' }] };
+  }
 
   const handlers = {
     'memory.list': (p) => runtime.list({
-      principal: user, scope: p.scope, types: p.types, pinned: p.pinned, query: p.query, limit: p.limit
+      principal: user, scope: p.scope, types: p.types, pinned: p.pinned, query: p.query, limit: p.limit, offset: p.offset
     }),
     'memory.search': (p) => runtime.search({
-      principal: user, scope: p.scope, types: p.types, pinned: p.pinned, query: p.query, limit: p.limit
+      principal: user, scope: p.scope, types: p.types, pinned: p.pinned, query: p.query, limit: p.limit, offset: p.offset
     }),
     'memory.get': (p) => runtime.get({ principal: user, id: p.id }),
     'memory.create': (p) => runtime.create({
@@ -43,10 +49,11 @@ export function createMemoryService({ stateDir, socialV2File, now, audit } = {})
     // 页面级聚合查询：一次 IPC 往返拿到列表 + 候选（UI 只挂一个 Area，避免并发 issue 互斥）。
     'memory.overview': (p) => {
       const list = runtime.list({
-        principal: user, scope: p.scope, types: p.types, pinned: p.pinned, query: p.query, limit: p.limit
+        principal: user, scope: p.scope, types: p.types, pinned: p.pinned, query: p.query, limit: p.limit, offset: p.offset
       });
       const candidates = runtime.listCandidates({ principal: user, status: p.candidateStatus });
-      return { memories: list.memories, meta: list.meta, candidates: candidates.candidates };
+      return { memories: list.memories, meta: list.meta, candidates: candidates.candidates,
+        candidateMeta: candidates.meta, recovery };
     },
     'memory.stats': () => runtime.stats({ principal: user }),
     'memory.candidates.list': (p) => runtime.listCandidates({ principal: user, status: p.status }),
@@ -63,6 +70,17 @@ export function createMemoryService({ stateDir, socialV2File, now, audit } = {})
     'memory.candidates.confirm': (p) => runtime.confirmCandidate({
       principal: user, id: p.id, decision: p.decision, content: p.content, pinned: p.pinned
     }),
+    'memory.candidates.confirmBatch': (p) => {
+      if (!Array.isArray(p.ids) || p.ids.length === 0 || p.ids.length > 50 || p.ids.some(id => typeof id !== 'string')) {
+        throw memoryError('INVALID_PARAMS', 'Batch requires 1 to 50 candidate IDs');
+      }
+      const results = [];
+      for (const id of new Set(p.ids)) {
+        try { results.push({ id, ...runtime.confirmCandidate({ principal: user, id, decision: p.decision }) }); }
+        catch (error) { results.push({ id, error: { code: error?.code ?? 'CONFIRM_FAILED', message: error.message } }); }
+      }
+      return { results };
+    },
     'memory.links.create': (p) => runtime.createLink({ principal: user, source: p.source, target: p.target, relation: p.relation, explicit: p.explicit, context: p.context }),
     'memory.links.list': (p) => runtime.listLinks({ principal: user, scope: p.scope, entityId: p.entityId, explicitCrossScope: p.explicitCrossScope }),
     'memory.references.resolve': (p) => runtime.resolveReferences({ principal: user, refs: p.refs, sourceScope: p.sourceScope, explicitCrossScope: p.explicitCrossScope }),
@@ -75,6 +93,7 @@ export function createMemoryService({ stateDir, socialV2File, now, audit } = {})
   return {
     stateDir,
     runtime,
+    recovery,
     adapter,
     execute({ method, params } = {}) {
       const handler = handlers[method];

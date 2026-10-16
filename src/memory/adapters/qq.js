@@ -9,8 +9,8 @@
 // - 导入幂等：每条记录带稳定 origin.ref，已导入的跳过；
 // - 旧 QQ Memory 的功能与数据都保留，Adapter 只是多一条进入统一 Memory 的通道。
 
-import fs from 'node:fs';
 import crypto from 'node:crypto';
+import { readJsonFile, StorageError } from '../../storage/json-file.js';
 import { memoryError } from '../types.js';
 
 export const QQ_CATEGORY_TO_TYPE = Object.freeze({
@@ -33,18 +33,11 @@ function refFor(conversationKey, category, identity) {
 }
 
 function readJson(file) {
-  let text;
   try {
-    text = fs.readFileSync(file, 'utf8');
+    return readJsonFile(file, { missing: null });
   } catch (error) {
-    if (error && error.code === 'ENOENT') return null;
-    throw memoryError('ADAPTER_READ_FAILED', 'QQ 记忆读取失败：' + file);
-  }
-  if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
-  try {
-    return JSON.parse(text);
-  } catch (error) {
-    throw memoryError('ADAPTER_READ_FAILED', 'QQ 记忆解析失败：' + file);
+    if (error instanceof StorageError) throw memoryError('ADAPTER_READ_FAILED', 'QQ 记忆读取失败：' + file);
+    throw error;
   }
 }
 
@@ -54,9 +47,12 @@ function readJson(file) {
  */
 export function readQqMemory(socialV2File, { now = () => Date.now() } = {}) {
   const raw = readJson(socialV2File);
-  const conversations = raw && typeof raw === 'object' && raw.conversations && typeof raw.conversations === 'object'
-    ? raw.conversations
-    : {};
+  if (raw === null) return { source: socialV2File, entries: [], missing: true };
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw) || !raw.conversations
+    || typeof raw.conversations !== 'object' || Array.isArray(raw.conversations)) {
+    throw memoryError('ADAPTER_READ_FAILED', 'QQ 记忆结构无效：' + socialV2File);
+  }
+  const conversations = raw.conversations;
   const entries = [];
   const nowMs = now();
 
@@ -73,7 +69,7 @@ export function readQqMemory(socialV2File, { now = () => Date.now() } = {}) {
         ref: refFor(conversationKey, 'activeTopic', text),
         type: QQ_CATEGORY_TO_TYPE.activeTopic,
         scope,
-        content: text.slice(0, 200),
+        content: text,
         tags: ['qq', 'activeTopic', ...participants],
         details: {
           conversation: conversationKey,
@@ -96,7 +92,7 @@ export function readQqMemory(socialV2File, { now = () => Date.now() } = {}) {
         ref: refFor(conversationKey, 'pendingThought', text),
         type: QQ_CATEGORY_TO_TYPE.pendingThought,
         scope,
-        content: text.slice(0, 200),
+        content: text,
         tags: ['qq', 'pendingThought', ...(motivation ? [motivation] : [])],
         details: {
           conversation: conversationKey,
@@ -119,7 +115,7 @@ export function readQqMemory(socialV2File, { now = () => Date.now() } = {}) {
         ref: refFor(conversationKey, 'memberImpression', name),
         type: QQ_CATEGORY_TO_TYPE.memberImpression,
         scope,
-        content: (traits.length ? traits.join('、') : '暂无记录').slice(0, 400),
+        content: traits.length ? traits.join('、') : '暂无记录',
         tags: ['qq', 'memberImpression', name],
         details: {
           conversation: conversationKey,
@@ -152,13 +148,27 @@ export function createQqMemoryAdapter({ socialV2File, now = () => Date.now() } =
       if (!runtime || typeof runtime.create !== 'function') {
         throw new Error('importInto 需要 Memory Runtime');
       }
-      const { entries } = readQqMemory(socialV2File, { now });
-      const known = new Set(runtime.listOriginRefs({ principal, adapter: 'qq' }).refs);
+      const source = readQqMemory(socialV2File, { now });
+      if (source.missing) throw memoryError('ADAPTER_SOURCE_MISSING', 'QQ 记忆源文件不存在，未执行删除同步');
+      const { entries } = source;
+      const known = new Map(runtime.listOriginRefs({ principal, adapter: 'qq' }).entries.map(row => [row.ref, row]));
       const imported = [];
       const skipped = [];
+      const updated = [];
+      const deleted = [];
+      const conflicts = [];
+      const seen = new Set();
       for (const entry of entries) {
+        seen.add(entry.ref);
         if (known.has(entry.ref)) {
-          skipped.push(entry.ref);
+          try {
+            const result = runtime.syncQqEntry({ principal, id: known.get(entry.ref).id, ref: entry.ref, entry, dryRun });
+            if (result.action === 'update') updated.push(entry.ref);
+            else skipped.push(entry.ref);
+          } catch (error) {
+            if (error?.code !== 'SYNC_CONFLICT') throw error;
+            conflicts.push({ ref: entry.ref, reason: error.code });
+          }
           continue;
         }
         if (dryRun) {
@@ -174,16 +184,29 @@ export function createQqMemoryAdapter({ socialV2File, now = () => Date.now() } =
           source: 'qq-adapter',
           originRef: entry.ref
         });
-        known.add(entry.ref);
+        known.set(entry.ref, { id: memory.id });
         imported.push({ ref: entry.ref, id: memory.id });
+      }
+      for (const [ref, row] of known) {
+        if (seen.has(ref)) continue;
+        try {
+          runtime.syncQqEntry({ principal, id: row.id, ref, dryRun });
+          deleted.push(ref);
+        } catch (error) {
+          if (error?.code !== 'SYNC_CONFLICT') throw error;
+          conflicts.push({ ref, reason: error.code });
+        }
       }
       return {
         source: socialV2File,
         scanned: entries.length,
         imported: imported.length,
         skipped: skipped.length,
+        updated: updated.length,
+        deleted: deleted.length,
+        conflicts: conflicts.length,
         dryRun,
-        details: { imported, skipped }
+        details: { imported, skipped, updated, deleted, conflicts }
       };
     }
   };

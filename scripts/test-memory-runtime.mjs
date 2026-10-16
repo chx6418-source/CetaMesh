@@ -205,7 +205,8 @@ try {
   equal('确认后记忆总数 +1', runtime.countAll(), countBeforeCandidate + 1);
 
   const twice = capture(() => runtime.confirmCandidate({ principal: user, id: proposed.candidate.id, decision: 'accept' }));
-  check('候选不能被重复确认', twice.threw && twice.code === 'CANDIDATE_DECIDED', String(twice.code));
+  check('候选重复确认幂等且不重复写入', !twice.threw && twice.value.memory.id === accepted.memory.id
+    && runtime.countAll() === countBeforeCandidate + 1, String(twice.code));
 
   // ── 7. restart persistence ─────────────────────────────────────────────
   const beforeRestart = runtime.list({ principal: user, limit: 200 }).memories;

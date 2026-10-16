@@ -545,14 +545,19 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     });
   }
 
-  function linkMemory({ id, expectedRev, memoryId, note } = {}) {
+  function linkMemory({ id, expectedRev, memoryId, scope, type, authorizedBy, note } = {}) {
     const item = {
       at: now(),
       memoryId: normalizeText(memoryId, 'memoryId', TASK_LIMITS.idChars, { required: true }),
+      ...(scope ? { scope: normalizeText(scope, 'scope', 160, { required: true }) } : {}),
+      ...(type ? { type: normalizeText(type, 'type', 40, { required: true }) } : {}),
+      ...(authorizedBy ? { authorizedBy: normalizeText(authorizedBy, 'authorizedBy', 160, { required: true }) } : {}),
       note: normalizeText(note, 'note', TASK_LIMITS.noteChars)
     };
     return mutate(id, expectedRev, (task) => {
-      if (!task.memoryRefs.some((ref) => ref.memoryId === item.memoryId)) task.memoryRefs.push(item);
+      const existing = task.memoryRefs.findIndex(ref => ref.memoryId === item.memoryId);
+      if (existing >= 0) task.memoryRefs[existing] = item;
+      else task.memoryRefs.push(item);
       return task;
     });
   }

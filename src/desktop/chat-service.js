@@ -117,6 +117,7 @@ export function createChatService({
   // Model Runtime 通道（非 Agent 会话）不上报。上报失败绝不影响回合机。
   defaultModelConfig = null,
   onTurnEnd = null,
+  proposeMemoryCandidate = null,
   onEvent = null,
   resolveWorkspace = null,
   resolveTask = null,
@@ -167,6 +168,7 @@ export function createChatService({
     let snapshot = null;
     if (typeof buildProductTurnContext === 'function') {
       snapshot = await buildProductTurnContext({ record, routing, modelProvider: resolved.id, model,
+        memoryQuery: readHistory(record.id).filter(message => message.role === 'user').at(-1)?.text ?? '',
         requestedModel: model ?? 'provider-default',
         resolvedModel: record.lastModelResolution?.providerId === resolved.id ? record.lastModelResolution.resolvedModel : null,
         toolCalling: modelRuntime?.supportsToolCalling?.(resolved.id) ? 'supported' : 'unsupported' });
@@ -988,6 +990,20 @@ export function createChatService({
         ...(turn.state === 'error' ? { error: turn.error ?? '回合异常', errorCode: turn.errorCode ?? 'PROVIDER_ERROR' } : {}),
         ...(turn.state === 'cancelled' ? { cancelled: true } : {})
       });
+    }
+    if (turn.state === 'done' && typeof proposeMemoryCandidate === 'function') {
+      const userMessage = readHistory(record.id).filter(message => message.role === 'user').at(-1);
+      if (userMessage?.text) {
+        try {
+          Promise.resolve(proposeMemoryCandidate({ sessionId: record.id, text: userMessage.text }))
+            .then(result => { if (result?.candidate) onEvent?.({ event: 'memory.updated', data: { status: 'proposed' } }); })
+            .catch(error => onEvent?.({ event: 'chat.warning', data: { sessionId: record.id,
+              code: error?.code ?? 'MEMORY_PROPOSAL_FAILED', message: '记忆候选未能保存。' } }));
+        } catch (error) {
+          onEvent?.({ event: 'chat.warning', data: { sessionId: record.id,
+            code: error?.code ?? 'MEMORY_PROPOSAL_FAILED', message: '记忆候选未能保存。' } });
+        }
+      }
     }
     // 自动 Context Monitoring（会话 2）：Agent/DSH 会话回合结束 → 真实 usage 优先
     // （事件携带），否则字符估算（Continuity 明确标记 estimated）。火后不管。

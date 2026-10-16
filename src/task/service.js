@@ -7,7 +7,7 @@
 import { createTaskRuntime } from './runtime.js';
 import { taskError } from './types.js';
 
-export function createTaskService({ stateDir, now, resolveWorkspace, ownedArtifactRoot } = {}) {
+export function createTaskService({ stateDir, now, resolveWorkspace, resolveMemory, ownedArtifactRoot } = {}) {
   if (!stateDir || typeof stateDir !== 'string') throw new Error('createTaskService 需要 stateDir');
   const runtime = createTaskRuntime({ stateDir, now, resolveWorkspace, ownedArtifactRoot });
   runtime.recoverInterrupted();
@@ -81,9 +81,13 @@ export function createTaskService({ stateDir, now, resolveWorkspace, ownedArtifa
     'task.decision.add': (p) => runtime.addDecision({
       id: p.id, expectedRev: p.expectedRev, decision: p.decision, rationale: p.rationale
     }),
-    'task.memory.link': (p) => runtime.linkMemory({
-      id: p.id, expectedRev: p.expectedRev, memoryId: p.memoryId, note: p.note
-    }),
+    'task.memory.link': (p) => {
+      if (typeof resolveMemory !== 'function') throw taskError('MEMORY_UNAVAILABLE', 'Memory resolver unavailable');
+      const memory = resolveMemory(p.memoryId);
+      if (!memory) throw taskError('MEMORY_NOT_FOUND', 'Memory not found');
+      return runtime.linkMemory({ id: p.id, expectedRev: p.expectedRev, memoryId: memory.id,
+        scope: memory.scope, type: memory.type, authorizedBy: 'user:desktop', note: p.note });
+    },
     'task.acceptance.add': (p) => runtime.addAcceptance({
       id: p.id, expectedRev: p.expectedRev, text: p.text
     }),

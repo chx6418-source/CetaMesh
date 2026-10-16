@@ -325,8 +325,17 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     return { kind: 'agent', id: `task:${taskId}`, grants: structuredClone(grants[taskId]) };
   }
   function memoryPrincipal(actor) {
-    return actor.kind === 'owner' ? { kind: 'user', id: actor.id }
-      : { kind: 'agent', id: actor.id, grants: { scopes: actor.grants?.scopes ?? [], types: actor.grants?.types } };
+    if (actor.kind === 'owner') return { kind: 'user', id: actor.id };
+    const task = actor.grants?.taskIds?.length === 1 ? taskFor(actor.grants.taskIds[0]) : null;
+    const readOnlyRefs = {};
+    for (const ref of task?.memoryRefs ?? []) {
+      if (ref.authorizedBy !== 'user:desktop' || !ref.scope || !ref.type || !ref.memoryId) continue;
+      if ((actor.grants?.scopes ?? []).includes(ref.scope)) continue;
+      (readOnlyRefs[ref.scope] ??= []).push(ref.memoryId);
+    }
+    return { kind: 'agent', id: actor.id, grants: { scopes: [...(actor.grants?.scopes ?? []), ...Object.keys(readOnlyRefs)],
+      types: [...new Set([...(actor.grants?.types ?? []), ...(task?.memoryRefs ?? [])
+        .filter(ref => readOnlyRefs[ref.scope]?.includes(ref.memoryId)).map(ref => ref.type)])], readOnlyRefs } };
   }
   if (workspaceService) {
     for (const [method, id] of Object.entries(WORKSPACE_CAPABILITIES)) {

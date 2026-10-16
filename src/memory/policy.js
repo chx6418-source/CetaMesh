@@ -48,6 +48,9 @@ export function createMemoryPolicy({ audit = null } = {}) {
     let longTermWrite = false;
 
     if (principal.kind === 'user') {
+      if (requestedScopes?.some(scope => scope.kind === 'user' && scope.id !== principal.id)) {
+        throw memoryError('SCOPE_NOT_AUTHORIZED', 'User Memory scope does not match the signed-in identity');
+      }
       scopeKeys = requestedScopes ? uniqueStrings(requestedScopes.map(scopeKey)) : ['*'];
       types = requestedTypes && requestedTypes.length ? uniqueStrings(requestedTypes) : null;
       longTermWrite = action === 'write';
@@ -56,6 +59,8 @@ export function createMemoryPolicy({ audit = null } = {}) {
         ? principal.grants.scopes.map(String)
         : [];
       const grantedKeys = uniqueStrings(granted);
+      const readOnlyRefs = principal.grants?.readOnlyRefs && typeof principal.grants.readOnlyRefs === 'object'
+        ? principal.grants.readOnlyRefs : {};
       if (grantedKeys.length === 0) {
         throw memoryError('SCOPE_NOT_AUTHORIZED', 'Agent 主体未授予任何 Scope');
       }
@@ -68,6 +73,9 @@ export function createMemoryPolicy({ audit = null } = {}) {
         scopeKeys = wanted;
       } else {
         scopeKeys = grantedKeys;
+      }
+      if (action !== 'read' && scopeKeys.some(key => Object.hasOwn(readOnlyRefs, key))) {
+        throw memoryError('SCOPE_NOT_AUTHORIZED', 'Referenced Memory scope is read-only');
       }
 
       if (action === 'confirm' || action === 'admin') {
@@ -104,7 +112,9 @@ export function createMemoryPolicy({ audit = null } = {}) {
       action,
       scopeKeys,
       types,
-      longTermWrite
+      longTermWrite,
+      userScopeId: principal.kind === 'user' ? principal.id : null,
+      readOnlyRefs: principal.kind === 'agent' ? (principal.grants?.readOnlyRefs ?? {}) : {}
     };
     if (typeof audit === 'function') audit(decision);
     return decision;

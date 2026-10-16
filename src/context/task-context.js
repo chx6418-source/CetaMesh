@@ -1,6 +1,6 @@
 import { redactText } from '../logging/redact.js';
 
-const MAX_MEMORY_REFERENCES = 8;
+const MAX_MEMORY_REFERENCES = 200;
 
 function safeText(value, maxLength = 600) {
   if (typeof value !== 'string') return undefined;
@@ -73,11 +73,11 @@ function projectMemoryReferences(references, include) {
 
 /** Returns allowlisted, linked Task and Workspace facts, or null when neither exists. */
 export function buildTaskContext({ task = null, workspace = null, memoryReferences = [] } = {}) {
-  if (!task && !workspace) return null;
+  if (!task && !workspace && (!Array.isArray(memoryReferences) || memoryReferences.length === 0)) return null;
   const projectedTask = projectTask(task);
   return {
     task: projectedTask,
     workspace: projectWorkspace(workspace),
-    memoryReferences: projectMemoryReferences(memoryReferences, Boolean(projectedTask))
+    memoryReferences: projectMemoryReferences(memoryReferences, true)
   };
 }

@@ -13,7 +13,8 @@ import { searchWeb } from '../mcp-web-search-safe.js';
 import { createProviderSecrets } from '../providers/secrets.js';
 import { createModelProviderRegistry, createModelRuntimeService, createOpenAiCompatibleModelProvider, createToolExecutionCoordinator } from '../model/index.js';
 import { createRouterService } from '../router/index.js';
-import { createMemoryService } from '../memory/service.js';
+import { createMemoryService, DESKTOP_USER_PRINCIPAL } from '../memory/service.js';
+import { explicitMemoryCandidate } from '../memory/auto-candidate.js';
 import { createWorkspaceService } from '../workspace/index.js';
 import { createIsolatedTestRunner } from '../workspace/isolated-runner.js';
 import { createTaskService } from '../task/service.js';
@@ -64,10 +65,12 @@ export function createCetaMeshServices(options = {}) {
     stateDir,
     audit: event => log('Workspace ' + event.action + '（' + (event.workspaceId ?? 'none') + '）')
   });
+  let memoryService = null;
   const taskService = createTaskService({
     stateDir,
     ownedArtifactRoot: path.join(dataRoot, 'artifacts'),
-    resolveWorkspace: workspaceId => workspaceService.describeWorkspace(workspaceId)
+    resolveWorkspace: workspaceId => workspaceService.describeWorkspace(workspaceId),
+    resolveMemory: memoryId => memoryService?.runtime.get({ principal: DESKTOP_USER_PRINCIPAL, id: memoryId }).memory
   });
   let capabilityService = null;
   let continuityService = null;
@@ -164,7 +167,22 @@ export function createCetaMeshServices(options = {}) {
         workspaceId: managedAgent.executionWorkspaceId(sessionId) ?? task.workspaceId,
         actor: capabilityService.principalForTask(task.id) } : null;
     },
-    onTurnEnd: payload => agentBroker.reportTurnEnd(payload),
+    onTurnEnd: async payload => {
+      const reported = await agentBroker.reportTurnEnd(payload);
+      if (payload.outcome === 'completed' && settingsService.store.get().settings.memory.enabled === true) {
+        const task = taskService.runtime.findByAgent({ provider: 'cetamesh', sessionId: payload.sessionId });
+        const proposal = explicitMemoryCandidate(task?.goal);
+        if (proposal) {
+          try {
+            const result = memoryService.runtime.proposeCandidate({
+              principal: { kind: 'agent', id: `task:${task.id}`, grants: { scopes: ['user:desktop'] } }, ...proposal
+            });
+            if (result?.candidate) uiEventBus.publish('memory.updated', { status: 'proposed' });
+          } catch (error) { log('Managed Memory proposal failed: ' + String(error?.code ?? error?.message)); }
+        }
+      }
+      return reported;
+    },
     resolveWorkspace: workspaceId => workspaceService.describeWorkspace(workspaceId),
     onEvent: event => uiEventBus.publish(event.event, event.data)
   });
@@ -193,12 +211,19 @@ export function createCetaMeshServices(options = {}) {
     defaults: dshDefaults,
     defaultModelConfig: () => settingsService.store.get().settings.models,
     defaultAgentProvider: () => settingsService.store.get().settings.agents.defaultAgentProvider,
+    proposeMemoryCandidate: ({ text }) => {
+      if (settingsService.store.get().settings.memory.enabled !== true) return null;
+      const proposal = explicitMemoryCandidate(text);
+      return proposal ? memoryService.runtime.proposeCandidate({
+        principal: { kind: 'agent', id: 'chat', grants: { scopes: ['user:desktop'] } }, ...proposal
+      }) : null;
+    },
     stateDir,
     onTurnEnd: payload => agentBroker.reportTurnEnd(payload),
     onEvent: event => uiEventBus.publish(event.event, event.data)
   });
 
-  const memoryService = createMemoryService({
+  memoryService = createMemoryService({
     stateDir,
     ...(socialV2File ? { socialV2File } : {}),
     audit: decision => {
@@ -361,7 +386,10 @@ export function createCetaMeshServices(options = {}) {
     capabilityService,
     extensionService,
     agentBroker,
-    modelRuntime
+    modelRuntime,
+    memorySettings: () => settingsService.store.get().settings.memory,
+    onMemoryError: error => uiEventBus.publish('memory.updated', { status: 'unavailable',
+      code: error?.code ?? 'MEMORY_UNAVAILABLE' })
   });
 
   capabilityService.setApprovalDecisionListener(async decision => {

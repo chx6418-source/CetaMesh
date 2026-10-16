@@ -789,6 +789,11 @@ function ChatContextPanel({ task, memories, approvals, onOpenMemory }: { task: T
 
 function MemoryPage() {
   const [memories, setMemories] = useState<Memory[]>([]);
+  const [candidates, setCandidates] = useState<import('../bridge/typed-client').MemoryCandidate[]>([]);
+  const [selectedCandidates, setSelectedCandidates] = useState<string[]>([]);
+  const [total, setTotal] = useState(0);
+  const [candidateCapacity, setCandidateCapacity] = useState<number | null>(null);
+  const [query, setQuery] = useState('');
   const [workspaces, setWorkspaces] = useState<{ id: string; name: string; status: string; lastActivity: string | number | null }[]>([]);
   const [workspaceId, setWorkspaceId] = useState('');
   const [category, setCategory] = useState('recent');
@@ -798,24 +803,27 @@ function MemoryPage() {
     setLoading(true);
     try {
       const [memoryResult, workspaceResult] = await Promise.all([
-        memoryClient.overview('', '', 200),
+        memoryClient.overview(query, '', 200, 0, category === 'preferences' ? ['user'] : category === 'project' ? ['workspace'] : category === 'knowledge' ? ['knowledge', 'skill'] : undefined),
         workspaceClient.list().catch(() => ({ workspaces: [], activeId: null }))
       ]);
       setMemories(memoryResult.memories);
+      setCandidates(memoryResult.candidates);
+      setTotal(memoryResult.total);
+      setCandidateCapacity(memoryResult.candidateMeta?.remaining ?? null);
       setWorkspaces(workspaceResult.workspaces);
       setWorkspaceId(current => current || workspaceResult.activeId || workspaceResult.workspaces[0]?.id || '');
-      setError('');
+      setError(memoryResult.recovery?.failed?.length ? '部分记忆确认仍在恢复中，请检查存储后刷新。' : '');
     } catch (cause) { setError(messageOf(cause)); }
     finally { setLoading(false); }
-  }, []);
+  }, [category, query]);
   useEffect(() => {
     void refresh();
     return bridge.subscribe('memory.updated', () => { void refresh(); });
   }, [refresh]);
   const filtered = useMemo(() => {
     const recent = [...memories].sort((left, right) => {
-      const rightTime = Date.parse(String(right.updatedAt ?? right.createdAt ?? '')) || 0;
-      const leftTime = Date.parse(String(left.updatedAt ?? left.createdAt ?? '')) || 0;
+      const rightTime = new Date(right.updatedAt ?? right.createdAt ?? 0).getTime() || 0;
+      const leftTime = new Date(left.updatedAt ?? left.createdAt ?? 0).getTime() || 0;
       return rightTime - leftTime;
     });
     if (category === 'preferences') return recent.filter(item => item.type === 'user');
@@ -824,14 +832,40 @@ function MemoryPage() {
     return recent;
   }, [memories, category]);
   const createType = category === 'preferences' ? 'user' : category === 'project' ? 'workspace' : 'knowledge';
-  const createScope = category === 'preferences' ? 'user' : category === 'project' ? (workspaceId ? 'workspace:' + workspaceId : '') : 'global';
+  const createScope = category === 'preferences' ? 'user:desktop' : category === 'project' ? (workspaceId ? 'workspace:' + workspaceId : '') : 'global';
+  async function decideCandidates(decision: 'accept' | 'reject', ids: string[]) {
+    try {
+      const result = await memoryClient.confirmBatch(ids, decision);
+      const errors = result.results.filter(row => row.error);
+      setSelectedCandidates([]);
+      await refresh();
+      if (errors.length) setError(`${errors.length} 条候选未处理：${errors[0].error?.message}`);
+    } catch (cause) { setError(messageOf(cause)); }
+  }
+  async function loadMore() {
+    try {
+      const result = await memoryClient.overview(query, '', 200, memories.length,
+        category === 'preferences' ? ['user'] : category === 'project' ? ['workspace'] : category === 'knowledge' ? ['knowledge', 'skill'] : undefined);
+      setMemories(current => [...current, ...result.memories]);
+      setTotal(result.total);
+    } catch (cause) { setError(messageOf(cause)); }
+  }
   return <div className="content-page memory-page">
     <Heading eyebrow="MEMORY" title="记忆" description="管理偏好、项目记忆、已保存知识与最近引用。" action={<Button icon="update" onClick={() => void refresh()}>刷新</Button>} />
     {error && <ErrorNotice error={error} onRetry={() => void refresh()} />}
+    <SearchInput label="搜索全部记忆" placeholder="搜索历史记忆" value={query} onChange={event => setQuery(event.target.value)} />
+    {candidates.some(row => row.status === 'pending' || row.status === 'confirming') && <section className="memory-candidates"><h3>待确认记忆（{candidates.filter(row => row.status === 'pending').length}）</h3>
+      <p className="muted">候选尚未保存为长期记忆；批准后才会在新会话中使用。</p>
+      {candidateCapacity === 0 && <p className="muted">候选容量已满。请先处理待确认项；新的提议会明确报错，不会静默丢弃。</p>}
+      <div className="row"><Button compact disabled={!selectedCandidates.length} onClick={() => void decideCandidates('accept', selectedCandidates)}>批准选中</Button><Button compact disabled={!selectedCandidates.length} onClick={() => void decideCandidates('reject', selectedCandidates)}>拒绝选中</Button></div>
+      {candidates.filter(candidate => candidate.status === 'pending' || candidate.status === 'confirming').map(candidate => <article className="memory-item" key={candidate.id}><label><input type="checkbox" disabled={candidate.status !== 'pending'} checked={selectedCandidates.includes(candidate.id)} onChange={event => setSelectedCandidates(current => event.target.checked ? [...current, candidate.id] : current.filter(id => id !== candidate.id))} /> {candidate.content}</label><small>{candidate.scope} · {candidate.reason} · {candidate.status}</small>{candidate.status === 'pending' && <div className="row"><Button compact onClick={() => void decideCandidates('accept', [candidate.id])}>批准</Button><Button compact onClick={() => void decideCandidates('reject', [candidate.id])}>拒绝</Button></div>}</article>)}
+    </section>}
+    {candidates.some(row => row.status === 'accepted' || row.status === 'rejected') && <section className="memory-candidates"><h3>最近处理的候选</h3>{candidates.filter(row => row.status === 'accepted' || row.status === 'rejected').slice(0, 20).map(candidate => <article className="memory-item" key={candidate.id}><p>{candidate.content}</p><small>{candidate.scope} · {candidate.status === 'accepted' ? '已批准' : '已拒绝'} · {candidate.reason}</small></article>)}</section>}
     <Tabs items={[{ id: 'preferences', label: '偏好' }, { id: 'project', label: '项目记忆' }, { id: 'knowledge', label: '已保存知识' }, { id: 'recent', label: '最近' }]} selected={category} onChange={setCategory} label="记忆分类" />
     {category === 'project' && <label className="memory-workspace-picker">项目工作区<select className="cm-input" value={workspaceId} onChange={event => setWorkspaceId(event.target.value)}><option value="">选择工作区</option>{workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{normalizeSelectOptionLabel(workspace.name, workspace.id)}</option>)}</select></label>}
     {category === 'project' && !workspaces.length && <p className="muted">先创建工作区，再保存项目记忆。</p>}
     {loading ? <LoadingState label="正在读取本机记忆…" /> : <MemoryManager initial={filtered} createType={createType} createScope={createScope} createDisabled={category === 'project' && !workspaceId} onChanged={refresh} />}
+    {memories.length < total && <Button onClick={() => void loadMore()}>加载更多（{memories.length}/{total}）</Button>}
   </div>;
 }
 
@@ -876,7 +910,7 @@ function MemoryManager({ initial, onChanged, createType = 'knowledge', createSco
     } catch (cause) { setError(messageOf(cause)); }
     finally { setBusy(false); }
   }
-  return <div className="memory-manager"><p className="muted">记忆由本机 Memory 服务管理，可搜索、编辑、固定或删除。</p><SearchInput label="搜索记忆" placeholder="搜索记忆内容" value={query} onChange={event => setQuery(event.target.value)} /><div className="memory-create"><textarea aria-label="新建记忆内容" placeholder="添加一条需要长期保留的记忆" value={draft} onChange={event => setDraft(event.target.value)} rows={3} /><Button compact variant="primary" onClick={() => void create()} disabled={busy || !draft.trim() || createDisabled}>保存记忆</Button></div>{error && <ErrorNotice error={error} onRetry={() => void refresh()} />}{busy && <LoadingState />}{shown.length ? <div className="memory-list">{shown.map(memory => <article className="memory-item" key={memory.id}><div className="row between"><strong>{memory.title}</strong><div className="row"><Button compact variant="ghost" onClick={() => { setEditingId(memory.id); setEditDraft(memory.content); }}>编辑记忆</Button><IconButton label={memory.pinned ? '取消固定记忆' : '固定记忆'} icon="approval" compact onClick={() => void change(memory, 'pin')} /><IconButton label="删除记忆" icon="close" compact onClick={() => void change(memory, 'delete')} /></div></div>{editingId === memory.id ? <div className="memory-edit"><textarea className="cm-textarea" aria-label="编辑记忆内容" value={editDraft} onChange={event => setEditDraft(event.target.value)} rows={4} maxLength={8000} /><div className="row"><Button compact onClick={() => { setEditingId(''); setEditDraft(''); }}>取消</Button><Button compact variant="primary" disabled={busy || !editDraft.trim()} onClick={() => void saveEdit(memory)}>保存更改</Button></div></div> : <p>{memory.content}</p>}<small>{memory.scope} · {relativeLabel(memory.updatedAt)}</small></article>)}</div> : !busy && <EmptyNotice icon="memory" title={allLoaded ? '没有匹配的记忆' : '没有相关记忆'} detail="记忆只会在本地 Memory 服务中创建并保存。" />}</div>;
+  return <div className="memory-manager"><p className="muted">记忆由本机 Memory 服务管理，可搜索、编辑、固定或删除。</p><SearchInput label="搜索记忆" placeholder="搜索记忆内容" value={query} onChange={event => setQuery(event.target.value)} /><div className="memory-create"><textarea aria-label="新建记忆内容" placeholder="添加一条需要长期保留的记忆" value={draft} onChange={event => setDraft(event.target.value)} rows={3} maxLength={4000} /><Button compact variant="primary" onClick={() => void create()} disabled={busy || !draft.trim() || createDisabled}>保存记忆</Button></div>{error && <ErrorNotice error={error} onRetry={() => void refresh()} />}{busy && <LoadingState />}{shown.length ? <div className="memory-list">{shown.map(memory => <article className="memory-item" key={memory.id}><div className="row between"><strong>{memory.title}</strong><div className="row"><Button compact variant="ghost" onClick={() => { setEditingId(memory.id); setEditDraft(memory.content); }}>编辑记忆</Button><IconButton label={memory.pinned ? '取消固定记忆' : '固定记忆'} icon="approval" compact onClick={() => void change(memory, 'pin')} /><IconButton label="删除记忆" icon="close" compact onClick={() => void change(memory, 'delete')} /></div></div>{editingId === memory.id ? <div className="memory-edit"><textarea className="cm-textarea" aria-label="编辑记忆内容" value={editDraft} onChange={event => setEditDraft(event.target.value)} rows={4} maxLength={4000} /><div className="row"><Button compact onClick={() => { setEditingId(''); setEditDraft(''); }}>取消</Button><Button compact variant="primary" disabled={busy || !editDraft.trim()} onClick={() => void saveEdit(memory)}>保存更改</Button></div></div> : <p>{memory.content}</p>}<small>{memory.scope} · {relativeLabel(memory.updatedAt)}</small></article>)}</div> : !busy && <EmptyNotice icon="memory" title={allLoaded ? '没有匹配的记忆' : '没有相关记忆'} detail="记忆只会在本地 Memory 服务中创建并保存。" />}</div>;
 }
 
 function WorkPage({ workspaces, onRefreshWorkspaces }: { workspaces: { id: string; name: string; status: string; lastActivity: string | number | null }[]; onRefreshWorkspaces(): Promise<void> }) {

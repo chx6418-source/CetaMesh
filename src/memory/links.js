@@ -38,7 +38,10 @@ export function createMemoryLinks({ stateDir, policy, store, now, list }) {
   }
   function retrieve(decision, ref) {
     if (ref.kind !== 'memory') return { reference: ref, status: 'bound' };
-    const rows = store.scanAuthorized(decision.scopeKeys, (record) => record.id === ref.id && (!decision.types || decision.types.includes(record.type)));
+    const rows = store.scanAuthorized(decision.scopeKeys, (record) => record.id === ref.id
+      && (!decision.types || decision.types.includes(record.type))
+      && (!Object.hasOwn(decision.readOnlyRefs ?? {}, record.scopeKey)
+        || decision.readOnlyRefs[record.scopeKey].includes(record.id)));
     if (!rows.length) throw memoryError('MEMORY_NOT_FOUND', 'Referenced memory is unavailable');
     return { reference: ref, status: 'resolved', memory: rows[0] };
   }

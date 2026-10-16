@@ -149,7 +149,9 @@ export function normalizePacket(packet) {
       for (const ref of source) {
         const id = typeof ref === 'string' ? ref.trim() : String(ref?.memoryId ?? '').trim();
         if (!id) continue;
-        refs.push({ memoryId: id.slice(0, PACKET_LIMITS.idChars), note: text(ref?.note, 200) || null });
+        refs.push({ memoryId: id.slice(0, PACKET_LIMITS.idChars),
+          scope: text(ref?.scope, 160) || null, type: text(ref?.type, 40) || null,
+          authorizedBy: text(ref?.authorizedBy, 160) || null, note: text(ref?.note, 200) || null });
         if (refs.length >= PACKET_LIMITS.listItems) break;
       }
       return refs;

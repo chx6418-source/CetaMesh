@@ -106,7 +106,7 @@ run('Task and Workspace projections independently omit missing links and unsafe 
   assert.equal(buildTaskContext({
     task: { id: 'task-3' },
     memoryReferences: Array.from({ length: 12 }, (_, index) => ({ memoryId: `memory-${index}` }))
-  }).memoryReferences.length, 8);
+  }).memoryReferences.length, 12);
 });
 
 run('product context is deterministic and stays within the requested character limit', () => {
