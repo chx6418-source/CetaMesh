@@ -31,9 +31,12 @@ const objectInput = (properties = {}, required = []) => ({
   type: 'object', properties, required, additionalProperties: false
 });
 const WORKSPACE_TOOL_DESCRIPTORS = Object.freeze({
-  'filesystem.read': ['Read a file inside the authorized Workspace.', objectInput({ path: stringField('Workspace-relative file path.'), maxChars: { type: 'integer', minimum: 1, maximum: 50000 } }, ['path'])],
+  'filesystem.read': ['Read a page of a file inside the authorized Workspace.', objectInput({ path: stringField('Workspace-relative file path.'),
+    offset: { type: 'integer', minimum: 0 }, maxBytes: { type: 'integer', minimum: 1, maximum: 50000 },
+    maxChars: { type: 'integer', minimum: 1, maximum: 50000 } }, ['path'])],
   'filesystem.write': ['Write text to a file inside the authorized Workspace. Owner approval is required.', objectInput({ path: stringField('Workspace-relative file path.'), content: stringField('Text to write.'), append: { type: 'boolean' }, expectedHash: stringField('SHA-256 of the existing file; null for a new file.') }, ['path', 'content'])],
-  'filesystem.search': ['Search file names or contents inside the authorized Workspace.', objectInput({ query: stringField('Search text or file-name query.'), path: stringField('Optional Workspace-relative directory.'), maxResults: { type: 'integer', minimum: 1, maximum: 100 } }, ['query'])],
+  'filesystem.search': ['Search file names or contents inside the authorized Workspace.', objectInput({ query: stringField('Search text or file-name query.'), path: stringField('Optional Workspace-relative directory.'),
+    offset: { type: 'integer', minimum: 0 }, maxResults: { type: 'integer', minimum: 1, maximum: 100 } }, ['query'])],
   'git.status': ['Read the current Git status for the authorized Workspace.', objectInput()],
   'git.diff': ['Read a bounded Git diff summary inside the authorized Workspace.', objectInput({ path: stringField('Optional Workspace-relative file path.'), statOnly: { type: 'boolean' } })],
   'git.commit': ['Create a Git commit in the authorized Workspace.', objectInput({ message: stringField('Commit message.') }, ['message'])],
@@ -346,6 +349,8 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
               return workspaceService.applyChanges({ id: request.workspaceId, changes: request.input.changes, actor: request.actor.id });
             }
             return workspaceService.execute({ method, params: { ...request.input,
+              ...(id === 'filesystem.read' ? { maxBytes: request.input.maxBytes ?? request.input.maxChars ?? 8192 } : {}),
+              ...(id === 'filesystem.search' ? { searchRestricted: request.actor.kind !== 'owner' } : {}),
               ...(id === 'git.diff' ? { excludeSensitive: request.actor.kind !== 'owner' } : {}),
               ...(request.workspaceId ? { id: request.workspaceId } : {}), actor: request.actor.id } });
           };

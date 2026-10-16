@@ -479,6 +479,7 @@ try {
   const managedPrincipal = services.capabilityService.grantTask(managedTask.id, { capabilities: ['filesystem.read'] });
   const managedProvider = services.managedAgent.provider;
   const managedSession = await managedProvider.createSession({ cwd: managedWorkspace.root, modelProvider: 'deepseek-official' });
+  services.providerSecrets.set({ provider: 'deepseek-official', apiKey: 'phase2-fixture-secret' });
   const currentManagedTask = services.taskService.runtime.get({ id: managedTask.id }).task;
   services.taskService.runtime.attachAgent({ id: managedTask.id, expectedRev: currentManagedTask.rev,
     provider: 'cetamesh', sessionId: managedSession.sessionId });

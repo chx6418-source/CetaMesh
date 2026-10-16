@@ -596,7 +596,7 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
     if (status.error && !streaming) rows.push({ id: 'turn-error', kind: 'turn-error', message: status.error });
     rows.push(...approvals.map(approval => ({ id: `approval:${approval.id}`, kind: 'approval' as const, approval })));
     return rows;
-  }, [hasMoreHistory, messages, loading, error, streaming, status.displayText, status.toolActivity, status.error, approvals]);
+  }, [hasMoreHistory, messages, loading, error, streaming, status.displayText, status.statusMessage, status.agentActivity, status.toolActivity, status.error, approvals]);
 
   useLayoutEffect(() => {
     const hasNewConversationContent =

@@ -108,7 +108,7 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
         let productTurn = typeof buildProductTurnContext === 'function'
           ? await buildProductTurnContext({ sessionId: s.id, provider: 'cetamesh', principal: stepPrincipal,
             modelProvider: s.modelProvider || null, model: s.model || undefined,
-            toolCalling: modelRuntime.supportsToolCalling?.(s.modelProvider || null) ? 'supported' : 'unsupported' })
+            toolCalling: modelRuntime.supportsToolCalling?.(s.modelProvider || null, s.model || null) ? 'supported' : 'unsupported' })
           : null;
         if (!productTurn && typeof buildProductContext === 'function') {
           const value = await buildProductContext({ sessionId: s.id, provider: 'cetamesh', principal: stepPrincipal,
@@ -125,6 +125,7 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
           ...(contextText ? [{ role: 'system', content: 'CetaMesh dynamic context (JSON reference data):\n' + contextText }] : []),
           ...copy(s.messages)
         ];
+        let streamedText = '';
         let result = await abortable(toolExecutionCoordinator.run({
           providerId: s.modelProvider || null,
           model: s.model || undefined,
@@ -136,12 +137,36 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
           turnId: turn.id,
           targetKind: 'agent',
           scope: { taskId: stepPrincipal.taskId, workspaceId: stepPrincipal.workspaceId },
-          signal: controller.signal
+          signal: controller.signal,
+          onTextDelta: delta => { streamedText += delta; emit(s, 'assistant/chunk', { requestId: turn.id, chunk: { type: 'text-delta', text: delta } }); },
+          onActivity: activity => emit(s, 'tool/activity', { requestId: turn.id, activity }),
+          onStreamReset: () => { streamedText = ''; emit(s, 'assistant/reset', { requestId: turn.id }); }
         }), controller.signal);
         if (result.status === 'unsupported') {
-          const fallback = await abortable(modelRuntime.chat({ providerId: s.modelProvider || null,
+          const request = { providerId: s.modelProvider || null,
             model: s.model || undefined, reasoning: s.reasoningEffort || undefined,
-            messages, toolChoice: 'none', signal: controller.signal }), controller.signal);
+            messages, toolChoice: 'none', signal: controller.signal };
+          let fallback;
+          if (typeof modelRuntime.stream === 'function') {
+            let text = ''; let streamUsage = null; let streamModel = null; let streamReason = null;
+            for await (const event of modelRuntime.stream(request)) {
+              assertNotAborted(controller.signal);
+              if (event?.type === 'assistant/chunk' && event.data?.chunk?.type === 'text-delta') {
+                const delta = String(event.data.chunk.text ?? '');
+                text += delta; streamedText += delta;
+                if (delta) emit(s, 'assistant/chunk', { requestId: turn.id, chunk: { type: 'text-delta', text: delta } });
+              } else if (event?.type === 'assistant/message' && !text) {
+                const content = event.data?.message?.content;
+                text = typeof content === 'string' ? content : Array.isArray(content) ? content.map(part => String(part?.text ?? '')).join('') : '';
+              } else if (event?.type === 'turn/end') {
+                streamReason = event.data?.reason?.kind ?? null;
+                streamUsage = event.data?.usage ?? event.data?.reason?.usage ?? null;
+                streamModel = event.data?.resolvedModel ?? null;
+              }
+            }
+            if (streamReason && streamReason !== 'completed') fail('MODEL_STREAM_FAILED', `Model stream ended with ${streamReason}`);
+            fallback = { text, usage: streamUsage, resolvedModel: streamModel };
+          } else fallback = await abortable(modelRuntime.chat(request), controller.signal);
           result = { ...result, text: typeof fallback?.text === 'string' ? fallback.text : '',
             usage: fallback?.usage ?? null, resolvedModel: fallback?.resolvedModel ?? fallback?.model ?? null };
         }
@@ -161,10 +186,12 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
         const finalText = typeof result.text === 'string' ? result.text : '';
         if (finalText) s.messages.push({ role: 'assistant', content: finalText });
         outputChars += finalText.length;
-        emit(s, 'assistant/chunk', { requestId: turn.id, chunk: { type: 'text-delta', text: finalText } });
+        if (finalText && finalText !== streamedText) emit(s, 'assistant/chunk', { requestId: turn.id, chunk: { type: 'text-delta', text: finalText } });
         emit(s, 'assistant/message', { requestId: turn.id, message: { content: [{ type: 'text', text: finalText }] }, usage,
           toolCalling: result.toolCalling, resolvedModel: result.resolvedModel ?? null });
-        reason = { kind: 'completed', toolCalling: result.toolCalling, resolvedModel: result.resolvedModel ?? null };
+        reason = { kind: result.status === 'partial' ? 'failed' : 'completed',
+          ...(result.status === 'partial' ? { error: { code: result.code ?? 'TOOL_CALL_LIMIT' } } : {}),
+          toolCalling: result.toolCalling, resolvedModel: result.resolvedModel ?? null };
         return;
       }
       for (let step = 0; step < steps; step++) {
@@ -274,8 +301,16 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
         return { accepted: true, requestId: id, sessionId, provider: 'cetamesh' };
       },
       async cancel({ sessionId } = {}) {
-        const s = session(sessionId); const active = s.running || s.queue.length > 0;
+        const s = session(sessionId); const active = s.running || s.queue.length > 0 || Boolean(s.waitingForApproval);
         s.controller?.abort();
+        if (s.waitingForApproval) {
+          toolExecutionCoordinator?.cancelSession?.(s.id, 'agent-cancelled');
+          waitingTurns.delete(String(s.waitingForApproval));
+          s.lastReason = { kind: 'aborted' };
+          emit(s, 'turn/end', { requestId: s.waitingTurn?.id, reason: { kind: 'aborted' } });
+          s.waitingForApproval = null;
+          s.waitingTurn = null;
+        }
         for (const turn of s.queue.splice(0)) emit(s, 'turn/end', { requestId: turn.id, reason: { kind: 'aborted', usage: null } });
         return { cancelled: active, sessionId };
       },
@@ -308,8 +343,8 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
         return { sessionId, selected: { model: s.model, provider: s.modelProvider, reasoningEffort: s.reasoningEffort } };
       },
       async health() { return { available: !closed, provider: 'cetamesh' }; },
-      async *follow({ sessionId, signal } = {}) {
-        const s = session(sessionId); let sequence = 0;
+      async *follow({ sessionId, signal, sinceSequence = 0 } = {}) {
+        const s = session(sessionId); let sequence = Number.isSafeInteger(sinceSequence) && sinceSequence >= 0 ? sinceSequence : 0;
         while (!signal?.aborted) {
           const pending = s.events.filter((event) => event.seq > sequence);
           for (const event of pending) { sequence = event.seq; yield copy(event); if (signal?.aborted) return; }
@@ -346,22 +381,29 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
       const turn = s.waitingTurn;
       if (!turn || turn.id !== target.turnId) return null;
       if (s.running || s.archived) return { resumed: false, error: 'AGENT_BUSY' };
+      const controller = new AbortController();
+      s.controller = controller;
+      s.currentTurn = turn;
       s.running = true;
       emit(s, 'turn/start', { requestId: turn.id, resumed: true });
       try {
         const result = await toolExecutionCoordinator.resumeApproval({ approvalId, requestFingerprint, decisionResult,
+          signal: controller.signal,
+          onTextDelta: delta => emit(s, 'assistant/chunk', { requestId: turn.id, chunk: { type: 'text-delta', text: delta } }),
+          onStreamReset: () => emit(s, 'assistant/reset', { requestId: turn.id }),
           refreshContext: async () => {
             if (typeof buildProductTurnContext !== 'function') return null;
             const principal = await principalFor(s);
             return buildProductTurnContext({ sessionId: s.id, provider: 'cetamesh', principal,
               modelProvider: s.modelProvider || null, model: s.model || undefined,
-              toolCalling: modelRuntime.supportsToolCalling?.(s.modelProvider || null) ? 'supported' : 'unsupported' });
+              toolCalling: modelRuntime.supportsToolCalling?.(s.modelProvider || null, s.model || null) ? 'supported' : 'unsupported' });
           }
         });
         if (Array.isArray(result.messages)) s.messages = result.messages.filter((message) => message?.role !== 'system');
         if (result.status === 'pending') {
           s.waitingForApproval = result.approvalId ?? null;
           waitingTurns.set(String(result.approvalId), s.id);
+          s.lastReason = { kind: 'waiting', approvalId: s.waitingForApproval };
           return { resumed: true, pending: true, approvalId: result.approvalId };
         }
         const text = typeof result.text === 'string' ? result.text : '';
@@ -369,16 +411,25 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
         s.waitingForApproval = null;
         s.waitingTurn = null;
         s.lastUsage = result.usage ?? s.lastUsage;
-        emit(s, 'assistant/chunk', { requestId: turn.id, chunk: { type: 'text-delta', text } });
         emit(s, 'assistant/message', { requestId: turn.id, message: { content: [{ type: 'text', text }] }, usage: s.lastUsage,
           toolCalling: result.toolCalling, resolvedModel: result.resolvedModel ?? null });
-        emit(s, 'turn/end', { requestId: turn.id, reason: { kind: 'completed', approvalResumed: true,
-          toolCalling: result.toolCalling, resolvedModel: result.resolvedModel ?? null, usage: s.lastUsage }, usage: s.lastUsage,
+        s.lastReason = { kind: result.status === 'partial' ? 'failed' : 'completed', approvalResumed: true,
+          ...(result.status === 'partial' ? { error: { code: result.code ?? 'TOOL_CALL_LIMIT' } } : {}),
+          toolCalling: result.toolCalling, resolvedModel: result.resolvedModel ?? null, usage: s.lastUsage };
+        emit(s, 'turn/end', { requestId: turn.id, reason: s.lastReason, usage: s.lastUsage,
           promptChars: turn.content.length, outputChars: text.length });
         if (typeof onTurnEnd === 'function') await onTurnEnd({ provider: 'cetamesh', sessionId: s.id, usage: s.lastUsage,
           promptChars: turn.content.length, outputChars: text.length, source: 'managed-model-runtime' });
         return { resumed: true, pending: false };
-      } finally { s.running = false; notify(s); }
+      } catch (error) {
+        waitingTurns.delete(String(approvalId));
+        s.waitingForApproval = null;
+        s.waitingTurn = null;
+        s.lastReason = controller.signal.aborted
+          ? { kind: 'aborted' } : { kind: 'failed', error: { code: error?.code ?? 'PROVIDER_ERROR' } };
+        emit(s, 'turn/end', { requestId: turn.id, reason: s.lastReason });
+        return { resumed: false, error: error?.code ?? 'PROVIDER_ERROR' };
+      } finally { s.running = false; s.controller = null; s.currentTurn = null; notify(s); }
     },
     bindSession(sessionId, principal) {
       const s = session(sessionId);

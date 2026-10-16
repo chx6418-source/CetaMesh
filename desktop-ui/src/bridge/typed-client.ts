@@ -221,11 +221,19 @@ export const chatClient = {
     id: string; total: number; messages: ChatMessage[]; nextBeforeMessageId: string | null; hasMore: boolean
   }>('ui.chat.history', { id, limit, beforeMessageId, afterMessageId }),
   status: (id: string) => uiCall<{ id: string; dshSessionAlive: boolean; state: string; requestId: string | null; statusMessage: string | null; retryCount: number; followState: string; followError: string | null; displayText: string; toolActivity: ChatMessage['toolActivity']; agentActivity: ChatMessage['agentActivity']; error: string | null; errorCode: string | null; approvalId: string | null; approvalExpiresAt: string | number | null; routing: Record<string, unknown> }>('ui.chat.status', { id }),
-  send: (id: string, text: string, attachments: Attachment[] = [], clientMessageId?: string) => uiCall<{ userMessageId?: string; requestId?: string }>('ui.chat.send', { id, text, attachments, ...(clientMessageId ? { clientMessageId } : {}) }),
+  send: (id: string, text: string, attachments: Attachment[] = [], clientMessageId?: string) => {
+    const params = { id, text, attachments, ...(clientMessageId ? { clientMessageId } : {}) };
+    return uiCall<{ userMessageId?: string; requestId?: string }>('ui.chat.send', params).catch(error => {
+      // The Core may have accepted the request while its ACK was lost. Retry only
+      // with a stable message ID; Chat's persisted ID makes this idempotent.
+      if (!clientMessageId || !(error instanceof Error) || error.message !== '桌面主机响应超时。') throw error;
+      return uiCall<{ userMessageId?: string; requestId?: string }>('ui.chat.send', params);
+    });
+  },
   stop: (id: string) => uiCall<{ stopped?: boolean; state?: string; reason?: string }>('ui.chat.stop', { id }),
   retry: (id: string) => uiCall<{ userMessageId?: string }>('ui.chat.retry', { id }),
   continue: (id: string) => uiCall<{ continued?: boolean }>('ui.chat.continue', { id }),
-  catalog: (refresh = false) => uiCall<{ models: unknown[]; modelProviders: { id: string; label: string; configured: boolean; catalogState: string; reachable: boolean | null; authenticated: boolean | null; inferencing: boolean | null; toolCalling: boolean; error: string | null; settingsFields: ProviderSettingField[]; models: { id?: string; name?: string; label?: string }[] }[]; agentProviders: Agent[]; modes: string[]; defaultModelProvider: string | null; available: boolean; reason: string | null }>('ui.chat.catalog', { refresh }),
+  catalog: (refresh = false) => uiCall<{ models: unknown[]; modelProviders: { id: string; label: string; configured: boolean; catalogState: string; reachable: boolean | null; authenticated: boolean | null; inferencing: boolean | null; toolCalling: boolean; error: string | null; settingsFields: ProviderSettingField[]; models: { id?: string; name?: string; label?: string; toolCalling?: string; streaming?: string; reasoning?: string }[] }[]; agentProviders: Agent[]; modes: string[]; defaultModelProvider: string | null; available: boolean; reason: string | null }>('ui.chat.catalog', { refresh }),
   setConfig: (id: string, config: Record<string, unknown>) => uiCall<ChatSession>('ui.chat.config.set', { id, config })
 };
 export const taskClient = {

@@ -93,6 +93,7 @@ const REGISTRY = {
   'test-agent-provider-expansion.mjs': { category: 'security' },
   'test-workspace-staging-boundary.mjs': { category: 'security' },
   'test-managed-agent-provider.mjs': { category: 'runtime' },
+  'test-phase2-chat-model.mjs': { category: 'runtime' },
   'test-memory-runtime.mjs': { category: 'runtime' },
   'test-memory-link.mjs': { category: 'runtime' },
   'test-state-retention.mjs': { category: 'runtime' },

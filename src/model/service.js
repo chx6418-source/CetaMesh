@@ -137,7 +137,8 @@ export function createModelRuntimeService({ registry, secrets, preferredProvider
         `Model Provider「${provider.label}」未指定模型且没有默认模型`
       );
     }
-    if (Array.isArray(tools) && tools.length && provider.supportsTools !== true) {
+    if (Array.isArray(tools) && tools.length && (typeof provider.supportsToolsForModel === 'function'
+      ? provider.supportsToolsForModel(effectiveModel) !== true : provider.supportsTools !== true)) {
       throw modelRuntimeError('MODEL_TOOL_CALLING_UNSUPPORTED', 'This Model Provider does not support structured tool calling');
     }
     const response = await provider.chat({ model: effectiveModel, messages, reasoning, signal, tools, toolChoice });
@@ -146,7 +147,8 @@ export function createModelRuntimeService({ registry, secrets, preferredProvider
       providerId: provider.id,
       requestedModel: typeof model === 'string' && model.trim() ? model.trim() : 'provider-default',
       resolvedModel: typeof response?.model === 'string' && response.model.trim() ? response.model.trim() : null,
-      toolCalling: provider.supportsTools === true ? 'supported' : 'unsupported'
+      toolCalling: (typeof provider.supportsToolsForModel === 'function'
+        ? provider.supportsToolsForModel(effectiveModel) : provider.supportsTools) === true ? 'supported' : 'unsupported'
     };
   }
 
@@ -164,8 +166,11 @@ export function createModelRuntimeService({ registry, secrets, preferredProvider
     defaultProviderId,
     listProviders,
     hasKey,
-    supportsToolCalling(providerId) {
-      return registry.require(providerId).supportsTools === true;
+    supportsToolCalling(providerId, model = null) {
+      const provider = resolveProvider(providerId);
+      return typeof provider.supportsToolsForModel === 'function'
+        ? provider.supportsToolsForModel(model || provider.defaultModel) === true
+        : provider.supportsTools === true;
     },
     listModels,
     health,

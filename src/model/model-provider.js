@@ -68,7 +68,7 @@ export function modelStreamEvent(type, data = {}) {
  * - health 可选；未探测的 Provider 必须返回 unknown/unverified，不能伪报 available；
  * - 实例不可变（Object.freeze），Key 只能经注入的 secrets 在调用时解析，绝不缓存。
  */
-export function defineModelProvider({ id, label, defaultModel = null, supportsTools = false, supportsReasoning = false, settingsFields = [], methods }) {
+export function defineModelProvider({ id, label, defaultModel = null, supportsTools = false, supportsToolsForModel = null, supportsReasoning = false, settingsFields = [], methods }) {
   if (typeof id !== 'string' || !id.trim()) throw new Error('defineModelProvider 需要 id');
   if (typeof label !== 'string' || !label.trim()) throw new Error('defineModelProvider 需要 label');
   if (!methods || typeof methods !== 'object') throw new Error('defineModelProvider 需要 methods');
@@ -98,6 +98,8 @@ export function defineModelProvider({ id, label, defaultModel = null, supportsTo
   };
   Object.defineProperties(provider, {
     supportsTools: { enumerable: true, get: () => toolCapability() === true },
+    supportsToolsForModel: { enumerable: true, value: model => (typeof supportsToolsForModel === 'function'
+      ? supportsToolsForModel(model) : toolCapability(model)) === true },
     supportsReasoning: { enumerable: true, value: model => reasoningCapability(model) === true }
   });
   return Object.freeze(provider);

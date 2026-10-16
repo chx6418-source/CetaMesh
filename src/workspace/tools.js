@@ -31,13 +31,15 @@ const WRITE_MAX_CHARS_HARD_CAP = 5 * 1024 * 1024;
 const SEARCH_LIMIT_CAP = 500;
 const SEARCH_MAX_DEPTH = 12;
 const SEARCH_MAX_ENTRIES = 50000;
+const SEARCH_RESTRICTED_NAME = /^(?:\.git|\.ssh|\.aws|\.env(?:\..*)?|credentials(?:\..*)?|secrets?(?:\..*)?|id_rsa|id_ed25519)$/i;
 const GIT_TIMEOUT_MS = 60_000;
 const GIT_MAX_BUFFER = 8 * 1024 * 1024;
 
 // ── 文件读取 / 写入 ─────────────────────────────────────────────────────────
 
-export function readFile(rootReal, relPath, { maxBytes = 1024 * 1024 } = {}) {
+export function readFile(rootReal, relPath, { maxBytes = 1024 * 1024, offset = 0 } = {}) {
   const cap = Math.max(1, Math.min(READ_MAX_BYTES_HARD_CAP, Number(maxBytes) || 0));
+  if (!Number.isSafeInteger(offset) || offset < 0) fail('READ_OFFSET_INVALID', 'File read offset must be a nonnegative integer');
   const { real } = resolveInside(rootReal, relPath, { forWrite: false });
   let stat;
   try {
@@ -46,21 +48,65 @@ export function readFile(rootReal, relPath, { maxBytes = 1024 * 1024 } = {}) {
     fail('FILE_NOT_FOUND', `文件不存在：${relPath}（${error?.code ?? error}）`);
   }
   if (stat.isDirectory()) fail('FILE_IS_DIRECTORY', `目标是目录，不是文件：${relPath}`);
-  const truncated = stat.size > cap;
+  if (offset > stat.size) fail('READ_OFFSET_INVALID', 'File read offset exceeds file size');
+  const truncated = stat.size > offset + cap;
   const handle = fs.openSync(real, 'r');
   try {
-    const buffer = Buffer.alloc(Math.min(cap, stat.size));
-    fs.readSync(handle, buffer, 0, buffer.length, 0);
-    if (buffer.includes(0)) {
+    const buffer = Buffer.alloc(Math.min(cap, stat.size - offset));
+    fs.readSync(handle, buffer, 0, buffer.length, offset);
+    const header = Buffer.alloc(Math.min(64, stat.size));
+    if (offset) fs.readSync(handle, header, 0, header.length, 0);
+    const headerText = offset ? decodeWorkspaceText(header, true) : null;
+    const decoded = offset && !headerText ? null : decodeWorkspaceText(buffer, truncated, headerText?.encoding ?? null);
+    if (decoded === null) {
       return {
-        path: relPath, size: stat.size, truncated, binary: true,
+        path: relPath, size: stat.size, offset, nextOffset: truncated ? offset + buffer.length : null, truncated, binary: true,
         base64: buffer.toString('base64')
       };
     }
-    return { path: relPath, size: stat.size, truncated, binary: false, content: buffer.toString('utf8') };
+    const nextOffset = offset + decoded.consumed;
+    return { path: relPath, size: stat.size, offset, nextOffset: nextOffset < stat.size ? nextOffset : null,
+      truncated: nextOffset < stat.size, binary: false, content: decoded.content, encoding: decoded.encoding };
   } finally {
     fs.closeSync(handle);
   }
+}
+
+function decodeWorkspaceText(buffer, truncated = false, encodingHint = null) {
+  if (!buffer.length) return { content: '', encoding: encodingHint ?? 'utf-8', consumed: 0 };
+  let encoding = encodingHint ?? 'utf-8';
+  let bytes = buffer;
+  if (!encodingHint && buffer.length >= 2 && buffer[0] === 0xff && buffer[1] === 0xfe) { encoding = 'utf-16le'; bytes = buffer.subarray(2); }
+  else if (!encodingHint && buffer.length >= 2 && buffer[0] === 0xfe && buffer[1] === 0xff) { encoding = 'utf-16be'; bytes = buffer.subarray(2); }
+  else if (!encodingHint && buffer.length >= 3 && buffer[0] === 0xef && buffer[1] === 0xbb && buffer[2] === 0xbf) bytes = buffer.subarray(3);
+  else if (!encodingHint && buffer.includes(0)) {
+    const pairs = Math.floor(buffer.length / 2);
+    let evenZeros = 0; let oddZeros = 0;
+    for (let index = 0; index < pairs * 2; index += 2) {
+      if (buffer[index] === 0) evenZeros++;
+      if (buffer[index + 1] === 0) oddZeros++;
+    }
+    if (pairs >= 4 && oddZeros > pairs * 0.3 && evenZeros < pairs * 0.1) encoding = 'utf-16le';
+    else if (pairs >= 4 && evenZeros > pairs * 0.3 && oddZeros < pairs * 0.1) encoding = 'utf-16be';
+    else return null;
+  }
+  const prefixBytes = buffer.length - bytes.length;
+  if (encoding.startsWith('utf-16') && bytes.length % 2 && !truncated) return null;
+  if (encoding.startsWith('utf-16')) bytes = bytes.subarray(0, bytes.length - bytes.length % 2);
+  const decode = (candidate, charset) => new TextDecoder(charset, { fatal: true }).decode(candidate);
+  for (const charset of encoding === 'utf-8' ? ['utf-8', 'gb18030'] : [encoding]) {
+    for (let trim = 0; trim <= (truncated ? 3 : 0); trim++) {
+      try {
+        const content = decode(bytes.subarray(0, bytes.length - trim), charset);
+        if (/[\u0000-\u0008\u000e-\u001f]/.test(content)) return null;
+        return { content, encoding: charset, consumed: prefixBytes + bytes.length - trim };
+      } catch {
+        // A truncated multibyte sequence may end inside the final character.
+        continue;
+      }
+    }
+  }
+  return null;
 }
 
 export function writeFile(rootReal, relPath, content, { createDirs = true, append = false, expectedHash } = {}) {
@@ -148,23 +194,31 @@ function toRelPosix(rootReal, absolute) {
   return path.relative(rootReal, absolute).split('\\').join('/');
 }
 
-export function fileSearch(rootReal, { query = '', glob = '', includeHidden = false, skipNames, limit = 200, maxDepth = SEARCH_MAX_DEPTH } = {}) {
+export function fileSearch(rootReal, { query = '', glob = '', searchPath = '.', offset = 0, restricted = false, includeHidden = false, skipNames, limit = 200, maxDepth = SEARCH_MAX_DEPTH } = {}) {
   const cap = Math.max(1, Math.min(SEARCH_LIMIT_CAP, Number(limit) || 0));
   const depthCap = Math.max(1, Math.min(SEARCH_MAX_DEPTH, Number(maxDepth) || 0));
-  const skip = new Set(
-    (Array.isArray(skipNames) && skipNames.length ? skipNames : ['.git', 'node_modules']).map(String)
-  );
+  const skip = new Set(['.git', 'node_modules', ...(Array.isArray(skipNames) ? skipNames.map(String) : [])]);
   const needle = String(query ?? '').trim().toLowerCase();
   const globRe = String(glob ?? '').trim() ? globToRegExp(String(glob).trim()) : null;
   if (!needle && !globRe) fail('SEARCH_EMPTY', 'file.search 需要 query 或 glob');
 
+  const start = resolveInside(rootReal, searchPath, { forWrite: false }).real;
+  if (restricted && path.relative(rootReal, start).split(path.sep).some(segment => SEARCH_RESTRICTED_NAME.test(segment))) {
+    fail('SENSITIVE_RESOURCE_DENIED', 'Search cannot read protected Workspace resources');
+  }
+  if (!fs.statSync(start).isDirectory()) fail('SEARCH_PATH_INVALID', 'file.search path must be a directory');
+  const skipRows = Math.max(0, Math.min(SEARCH_MAX_ENTRIES, Number(offset) || 0));
+
   const results = [];
   let scanned = 0;
+  let matchedRows = 0;
+  let contentTruncated = false;
+  const add = row => { if (matchedRows++ >= skipRows && results.length < cap) results.push(row); };
   const walk = (dir, depth) => {
     if (results.length >= cap || scanned >= SEARCH_MAX_ENTRIES || depth > depthCap) return;
     let entries;
     try {
-      entries = fs.readdirSync(dir, { withFileTypes: true });
+      entries = fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
     } catch {
       return; // 无权限 / 已消失：跳过子树，不让单点失败中断搜索
     }
@@ -174,13 +228,13 @@ export function fileSearch(rootReal, { query = '', glob = '', includeHidden = fa
       const name = entry.name;
       if (!includeHidden && name.startsWith('.')) continue;
       if (skip.has(name)) continue;
+      if (restricted && SEARCH_RESTRICTED_NAME.test(name)) continue;
       const childPath = path.join(dir, name);
       const relPosix = toRelPosix(rootReal, childPath);
-      const matched =
-        (!needle || name.toLowerCase().includes(needle)) &&
-        (!globRe || globRe.test(relPosix) || globRe.test(name));
+      const inGlob = !globRe || globRe.test(relPosix) || globRe.test(name);
+      const matched = inGlob && (!needle || name.toLowerCase().includes(needle));
       if (entry.isDirectory()) {
-        if (matched && !needle && !globRe) results.push(makeRow(entry, childPath, relPosix, true));
+        if (matched && !needle && !globRe) add(makeRow(entry, childPath, relPosix, true));
         // 符号链接 / junction 目录：只跟随 real 路径仍在 root 内的（防止 walk 逃逸）。
         if (entry.isSymbolicLink()) {
           try {
@@ -191,13 +245,31 @@ export function fileSearch(rootReal, { query = '', glob = '', includeHidden = fa
           }
         }
         walk(childPath, depth + 1);
-      } else if (matched) {
-        results.push(makeRow(entry, childPath, relPosix, false));
+      } else if (entry.isFile() && inGlob) {
+        try {
+          resolveInside(rootReal, relPosix, { forWrite: false });
+          if (matched) add(makeRow(entry, childPath, relPosix, false));
+          if (needle) {
+            const data = readFile(rootReal, relPosix, { maxBytes: 1024 * 1024 });
+            if (data.truncated) contentTruncated = true;
+            if (!data.binary) {
+              const lines = data.content.split(/\r?\n/);
+              for (let index = 0; index < lines.length && results.length < cap; index++) {
+                if (lines[index].toLowerCase().includes(needle)) add({ path: relPosix, name, dir: false,
+                  line: index + 1, snippet: lines[index].slice(0, 500), encoding: data.encoding });
+              }
+            }
+          }
+        } catch {
+          // An unreadable or replaced file is omitted from search results.
+          continue;
+        }
       }
     }
   };
-  walk(rootReal, 0);
-  return { results, scanned, truncated: scanned >= SEARCH_MAX_ENTRIES };
+  walk(start, 0);
+  return { results, scanned, truncated: contentTruncated || scanned >= SEARCH_MAX_ENTRIES || results.length >= cap,
+    nextOffset: matchedRows > skipRows + results.length ? skipRows + results.length : results.length >= cap ? skipRows + results.length : null };
 
   function relPosixInside(root, realPath) {
     const rel = path.relative(root, realPath);

@@ -59,6 +59,7 @@ export function createOpenAiCompatibleModelProvider({
   if (!secrets || typeof secrets.raw !== 'function') {
     throw new Error(`createOpenAiCompatibleModelProvider「${id}」需要注入 secrets（src/providers/secrets.js）`);
   }
+  const catalogCapabilities = new Map();
 
   function scrub(text, apiKey) {
     const value = String(text ?? '');
@@ -95,12 +96,15 @@ export function createOpenAiCompatibleModelProvider({
     );
   }
 
-  function toolCallingEnabled() {
-    return typeof supportsTools === 'function' ? supportsTools() === true : supportsTools === true;
+  function toolCallingEnabled(model = null) {
+    const configured = typeof supportsTools === 'function' ? supportsTools(model) === true : supportsTools === true;
+    const advertised = catalogCapabilities.get(String(model ?? ''))?.tools;
+    return configured && advertised !== false;
   }
 
   function reasoningEnabled(model) {
-    if (!reasoningParam || !isReasoningModel(model)) return false;
+    const advertised = catalogCapabilities.get(String(model ?? ''))?.reasoning;
+    if (!reasoningParam || advertised === false || (!isReasoningModel(model) && advertised !== true)) return false;
     return typeof supportsReasoning === 'function' ? supportsReasoning(model) === true : supportsReasoning !== false;
   }
 
@@ -171,7 +175,7 @@ export function createOpenAiCompatibleModelProvider({
     }
     const body = { model: model.trim(), messages, stream: Boolean(stream) };
     if (Array.isArray(tools) && tools.length) {
-      if (!toolCallingEnabled()) {
+      if (!toolCallingEnabled(model)) {
         throw modelRuntimeError('MODEL_TOOL_CALLING_UNSUPPORTED', 'This Model Provider does not support structured tool calling');
       }
       body.tools = buildToolSchemas(tools).schemas;
@@ -217,6 +221,7 @@ export function createOpenAiCompatibleModelProvider({
     label,
     defaultModel,
     supportsTools: toolCallingEnabled,
+    supportsToolsForModel: toolCallingEnabled,
     supportsReasoning: reasoningEnabled,
     settingsFields: [
       { key: 'baseUrl', label: 'Base URL', type: 'string' },
@@ -251,10 +256,21 @@ export function createOpenAiCompatibleModelProvider({
         const entries = Array.isArray(payload?.data) ? payload.data : Array.isArray(payload?.models) ? payload.models : [];
         const models = entries
           .map((entry) => (typeof entry === 'string' ? { id: entry } : entry))
-          .map((entry) => String(entry?.id ?? '').trim())
-          .filter(Boolean)
-          .sort((a, b) => a.localeCompare(b))
-          .map((modelId) => ({ id: modelId, label: modelId }));
+          .filter(entry => typeof entry?.id === 'string' && entry.id.trim())
+          .sort((a, b) => a.id.localeCompare(b.id))
+          .map(entry => {
+            const modelId = entry.id.trim();
+            const capabilities = entry.capabilities && typeof entry.capabilities === 'object' ? entry.capabilities : {};
+            const tools = typeof capabilities.tools === 'boolean' ? capabilities.tools
+              : typeof entry.supports_tools === 'boolean' ? entry.supports_tools : null;
+            const reasoning = typeof capabilities.reasoning === 'boolean' ? capabilities.reasoning : null;
+            const streaming = typeof capabilities.streaming === 'boolean' ? capabilities.streaming : null;
+            catalogCapabilities.set(modelId, { tools, reasoning, streaming });
+            return { id: modelId, label: modelId,
+              toolCalling: tools === null ? 'unverified' : tools ? 'supported' : 'unsupported',
+              streaming: streaming === null ? 'unverified' : streaming ? 'supported' : 'unsupported',
+              reasoning: reasoning === null ? 'unverified' : reasoning ? 'supported' : 'unsupported' };
+          });
         return models;
       },
 

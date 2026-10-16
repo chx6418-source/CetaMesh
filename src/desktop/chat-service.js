@@ -795,7 +795,7 @@ export function createChatService({
   const pendingUiDeltas = new Map();
 
   function handleChatEvent(record, state, event) {
-    applyChatEvent(record, state, event);
+    if (!applyChatEvent(record, state, event)) return;
     const type = event?.type;
     if (type === 'assistant/chunk') {
       const chunk = event?.data?.chunk;
@@ -810,6 +810,12 @@ export function createChatService({
     } else if (type === 'turn/start') {
       pendingUiDeltas.delete(record.id);
       onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: 'streaming', requestId: state.turn?.requestId, reset: true, toolActivity: state.turn?.toolActivity ?? [], agentActivity: state.turn?.agentActivity ?? null } });
+    } else if (type === 'assistant/reset') {
+      pendingUiDeltas.delete(record.id);
+      onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: 'streaming', requestId: state.turn?.requestId, reset: true } });
+    } else if (type === 'tool/activity') {
+      onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: state.turn?.state ?? 'streaming', requestId: state.turn?.requestId,
+        toolActivity: state.turn?.toolActivity ?? [] } });
     } else if (type === 'assistant/message') {
       pendingUiDeltas.delete(record.id);
       onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: state.turn?.state ?? 'streaming', requestId: state.turn?.requestId, replaceText: state.turn?.displayText ?? '', toolActivity: state.turn?.toolActivity ?? [], agentActivity: state.turn?.agentActivity ?? null } });
@@ -822,8 +828,11 @@ export function createChatService({
 
   function applyChatEvent(record, state, event) {
     const data = event?.data ?? {};
+    if (!state.turn || (data.sessionId && data.sessionId !== record.dshSessionId)) return false;
+    if (state.turn.providerRequestId && data.requestId !== state.turn.providerRequestId) return false;
+    if (!state.turn.providerRequestId && data.requestId && record.dshSessionId && data.requestId !== state.turn.requestId) return false;
     if (event.type === 'turn/start') {
-      if (state.chunkBuffer) state.chunkBuffer = '';
+      if (data.resumed || state.turn.state === 'waiting-approval') { state.messageTexts = []; state.chunkBuffer = ''; }
       if (state.turn) { state.turn.state = 'streaming'; state.turn.statusMessage = null; }
       if (state.turn && (data.requestedModel || data.providerId)) state.turn.routing = {
         ...(state.turn.routing ?? {}),
@@ -831,7 +840,19 @@ export function createChatService({
         ...(data.requestedModel ? { requestedModel: data.requestedModel } : {}),
         ...(data.resolvedModel ? { resolvedModel: data.resolvedModel } : {})
       };
-      return;
+      return true;
+    }
+    if (event.type === 'assistant/reset') {
+      state.messageTexts = []; state.chunkBuffer = '';
+      state.turn.displayText = '';
+      return true;
+    }
+    if (event.type === 'tool/activity') {
+      const activity = data.activity;
+      if (!activity?.id) return false;
+      const rows = state.turn.toolActivity ?? [];
+      state.turn.toolActivity = [...rows.filter(row => row.id !== activity.id), activity].slice(-32);
+      return true;
     }
     if (event.type === 'assistant/chunk') {
       const chunk = data.chunk;
@@ -839,7 +860,7 @@ export function createChatService({
         state.chunkBuffer += chunk.text;
         if (state.turn) state.turn.displayText = displayTextOf(state);
       }
-      return;
+      return true;
     }
     if (event.type === 'assistant/message') {
       const part = blocksToText(data.message?.content);
@@ -853,10 +874,10 @@ export function createChatService({
           if (usage) state.turn.usage = usage;
         }
       }
-      return;
+      return true;
     }
     if (event.type === 'turn/end') {
-      if (!state.turn) return;
+      if (!state.turn) return false;
       const text = displayTextOf(state);
       const reasonKind = String(data?.reason?.kind ?? 'unknown');
       const structuredError = data?.reason?.error;
@@ -877,6 +898,12 @@ export function createChatService({
           requestedModel: state.turn.routing.requestedModel ?? 'provider-default', resolvedModel: data.resolvedModel };
         saveStore();
       }
+      if (reasonKind === 'waiting') {
+        state.turn.state = 'waiting-approval';
+        state.turn.approvalId = data?.reason?.approvalId ?? null;
+        state.turn.statusMessage = 'Waiting for Owner approval.';
+        return true;
+      }
       if (reasonKind === 'completed') {
         state.turn.state = 'done';
       } else if (reasonKind === 'cancelled' || reasonKind === 'aborted') {
@@ -893,7 +920,9 @@ export function createChatService({
         };
       }
       finalizeTurn(record, state);
+      return true;
     }
+    return false;
   }
 
   /** 回合终态：有文本就落盘 assistant 消息；取消后丢弃 DSH 会话以隔离迟到事件。 */
@@ -956,7 +985,8 @@ export function createChatService({
     const state = runtimeOf(record.id);
     if (state.follow?.active) return;
     const controller = new AbortController();
-    state.follow = { controller, active: true, status: 'connecting', attempts: 0 };
+    state.follow = { controller, active: true, status: 'connecting', attempts: 0,
+      sequence: state.followSessionId === record.dshSessionId ? state.followSequence ?? 0 : 0 };
     record.followError = null;
     const sessionId = record.dshSessionId;
     (async () => {
@@ -966,12 +996,19 @@ export function createChatService({
         try {
           const provider = record.runtimeProvider || record.config.agentProvider;
           const stream = provider && provider !== AGENT_PROVIDER_DISABLED && typeof agentFollow === 'function'
-            ? agentFollow({ provider, sessionId, signal: controller.signal })
+            ? agentFollow({ provider, sessionId, signal: controller.signal, sinceSequence: state.follow.sequence })
             : requireDshApi(api, 'session follow').openRemoteStream('session/follow', { request: { address: { kind: 'session', sessionId } } }, { signal: controller.signal });
           for await (const item of stream) {
             const event = item.type === 'event' ? item.event : item;
             if (!event) continue;
             if (controller.signal.aborted || !state.follow?.active || state.follow.controller !== controller) break;
+            if (record.dshSessionId !== sessionId) break;
+            if (Number.isSafeInteger(event.seq)) {
+              if (event.seq <= state.follow.sequence) continue;
+              state.follow.sequence = event.seq;
+              state.followSequence = event.seq;
+              state.followSessionId = sessionId;
+            }
             state.follow.status = 'connected';
             if (state.turn) state.turn.statusMessage = null;
             handleChatEvent(record, state, event);
@@ -1130,7 +1167,7 @@ export function createChatService({
       try {
         let productContext = await buildTurnContext(record, routing, resolved, model);
         const messages = buildModelMessages(record.id, promptText, productContext.context, retryMessageId);
-        const supportsTools = modelRuntime.supportsToolCalling?.(resolved.id) === true;
+        const supportsTools = modelRuntime.supportsToolCalling?.(resolved.id, model) === true;
         if (supportsTools && toolExecutionCoordinator?.run) {
           const turnId = state.turn?.id ?? crypto.randomUUID();
           const result = await toolExecutionCoordinator.run({
@@ -1205,7 +1242,11 @@ export function createChatService({
               return;
             }
             turn.displayText = result.text ?? '';
-            turn.state = 'done';
+            turn.state = result.status === 'partial' ? 'error' : 'done';
+            if (result.status === 'partial') {
+              turn.errorCode = result.code ?? 'TOOL_CALL_LIMIT';
+              turn.error = 'Tool execution limit reached before the request completed.';
+            }
             finalizeTurn(record, state);
           }
           return;
@@ -1419,7 +1460,7 @@ export function createChatService({
       const { handshake, done } = startModelTurn(record, state, promptText, routing ? { ...routing,
         resolvedRoute: platformRoute && routing.resolvedRoute === 'capability' ? 'capability' : 'model', fallbackReason } : null, resolved, retryMessageId);
       done.catch(() => { /* 后台终态已经 finalizeTurn；兜底防未处理 rejection */ });
-      if (modelRuntime.supportsToolCalling?.(resolved.id) === true) {
+      if (modelRuntime.supportsToolCalling?.(resolved.id, modelForRuntime(record)) === true) {
         handshake.catch(() => { /* Tool-capable requests are acknowledged immediately; failures update Chat status. */ });
       }
       else await handshake;
@@ -1575,7 +1616,10 @@ export function createChatService({
           if (operation.controller.signal.aborted) abortListener();
           else operation.controller.signal.addEventListener('abort', abortListener, { once: true });
         });
-        try { await Promise.race([sending, aborted]); }
+        try {
+          const accepted = await Promise.race([sending, aborted]);
+          if (state.turn === turn && typeof accepted?.requestId === 'string') turn.providerRequestId = accepted.requestId;
+        }
         finally { operation.controller.signal.removeEventListener('abort', abortListener); }
         if (operation.controller.signal.aborted && !operation.remoteCancelRequested) {
           operation.remoteCancelRequested = true;
@@ -1757,7 +1801,11 @@ export function createChatService({
           requestedModel: state.turn.routing.requestedModel ?? model ?? 'provider-default', resolvedModel: result.resolvedModel };
         saveStore();
       }
-      state.turn.state = 'done';
+      state.turn.state = result.status === 'partial' ? 'error' : 'done';
+      if (result.status === 'partial') {
+        state.turn.errorCode = result.code ?? 'TOOL_CALL_LIMIT';
+        state.turn.error = 'Tool execution limit reached before the request completed.';
+      }
       delete state.turn.approvalId;
       delete state.turn.approvalExpiresAt;
       finalizeTurn(record, state);
@@ -1765,11 +1813,12 @@ export function createChatService({
       return { resumed: true, pending: false };
     } catch (error) {
       if (state.turn) {
-        state.turn.state = 'error';
-        state.turn.error = String(error?.code ?? 'TOOL_RESUME_FAILED');
+        const cancelled = controller.signal.aborted || error?.code === 'INVOKE_CANCELLED';
+        state.turn.state = cancelled ? 'cancelled' : 'error';
+        state.turn.error = cancelled ? null : String(error?.code ?? 'TOOL_RESUME_FAILED');
         finalizeTurn(record, state);
       }
-      onEvent?.({ event: 'chat.updated', data: { sessionId: record.id, status: 'error' } });
+      onEvent?.({ event: 'chat.updated', data: { sessionId: record.id, status: controller.signal.aborted ? 'cancelled' : 'error' } });
       return { resumed: false, error: error?.code ?? 'TOOL_RESUME_FAILED' };
     } finally { state.modelTurn = null; }
   }
@@ -1778,8 +1827,19 @@ export function createChatService({
     const record = sessionOrThrow(id);
     const state = runtimeOf(record.id);
     const turn = state.turn;
-    if (!turn || !['starting', 'streaming', 'recovering', 'cancelling'].includes(turn.state)) {
+    if (!turn || !['starting', 'streaming', 'recovering', 'cancelling', 'waiting-approval'].includes(turn.state)) {
       return { stopped: false, reason: 'no-active-turn' };
+    }
+    if (turn.state === 'waiting-approval') {
+      if (record.dshSessionId && agentExecute) {
+        await agentExecute({ method: 'agent.cancel', params: {
+          provider: record.runtimeProvider || record.config.agentProvider, sessionId: record.dshSessionId
+        } });
+      } else toolExecutionCoordinator?.cancelSession?.(record.id, 'chat-stop');
+      turn.state = 'cancelled';
+      finalizeTurn(record, state);
+      onEvent?.({ event: 'chat.updated', data: { sessionId: record.id, status: 'cancelled', requestId: turn.requestId } });
+      return { stopped: true, state: 'cancelled' };
     }
     const operation = state.modelTurn;
     if (operation?.controller && !operation.controller.signal.aborted) {

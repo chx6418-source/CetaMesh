@@ -88,7 +88,67 @@ check((await turn(pending.provider, waiting.sessionId)).at(-1).data.reason.kind,
 check((await pending.provider.status({ sessionId: waiting.sessionId })).waitingForApproval, 'owner-review');
 const dynamic = createManagedAgentProvider({ modelRuntime: { chat: async () => ({ text: JSON.stringify({ final: 'handoff okay' }) }) }, capabilityExecutor: () => {}, taskPrincipalResolver: () => principal });
 const fresh = await dynamic.provider.createSession({});
-check((await turn(dynamic.provider, fresh.sessionId, 'Continuity bootstrap')).at(-1).data.reason.kind, 'completed');
+const firstFollow = await turn(dynamic.provider, fresh.sessionId, 'Continuity bootstrap');
+check(firstFollow.at(-1).data.reason.kind, 'completed');
+const cursor = firstFollow.at(-1).seq;
+const secondAck = await dynamic.provider.send({ sessionId: fresh.sessionId, content: 'a different question' });
+const resumedEvents = [];
+const resumedController = new AbortController();
+for await (const event of dynamic.provider.follow({ sessionId: fresh.sessionId, sinceSequence: cursor, signal: resumedController.signal })) {
+  resumedEvents.push(event);
+  if (event.type === 'turn/end' && event.data.requestId === secondAck.requestId) { resumedController.abort(); break; }
+}
+check(resumedEvents.every(event => event.seq > cursor), true, 'follow resumes after its cursor without replay');
+check(resumedEvents.filter(event => event.type === 'turn/end').length, 1);
+let approvalTarget;
+const approvalCoordinator = {
+  run: async ({ sessionId, turnId }) => {
+    approvalTarget = { kind: 'agent', sessionId, turnId };
+    return { status: 'pending', approvalId: 'approval-resume-cancel' };
+  },
+  pendingTarget: () => approvalTarget,
+  cancelSession: () => ({ cancelled: 1 }),
+  resumeApproval: ({ signal }) => new Promise((resolve, reject) => {
+    signal.addEventListener('abort', () => reject(Object.assign(new Error('cancelled'), { code: 'INVOKE_CANCELLED' })), { once: true });
+  })
+};
+const approvalAgent = createManagedAgentProvider({ modelRuntime: { chat: async () => ({ text: '' }), supportsToolCalling: () => true },
+  toolExecutionCoordinator: approvalCoordinator, taskPrincipalResolver: () => principal });
+const approvalSession = await approvalAgent.provider.createSession({});
+const waitingEvents = await turn(approvalAgent.provider, approvalSession.sessionId, 'approval then cancel');
+check(waitingEvents.at(-1).data.reason.kind, 'waiting');
+const resumed = approvalAgent.resumeApproval({ approvalId: 'approval-resume-cancel', requestFingerprint: 'fixture', decisionResult: { status: 'completed' } });
+for (let attempt = 0; attempt < 50; attempt++) {
+  if ((await approvalAgent.provider.status({ sessionId: approvalSession.sessionId })).running) break;
+  await new Promise(resolve => setTimeout(resolve, 1));
+}
+check((await approvalAgent.provider.cancel({ sessionId: approvalSession.sessionId })).cancelled, true);
+check((await resumed).resumed, false);
+const ended = [];
+const endedController = new AbortController();
+for await (const event of approvalAgent.provider.follow({ sessionId: approvalSession.sessionId,
+  sinceSequence: waitingEvents.at(-1).seq, signal: endedController.signal })) {
+  ended.push(event);
+  if (event.type === 'turn/end' && event.data.reason.kind === 'aborted') { endedController.abort(); break; }
+}
+check(ended.at(-1).data.reason.kind, 'aborted');
+check((await approvalAgent.provider.status({ sessionId: approvalSession.sessionId })).lastReason.kind, 'aborted');
+await approvalAgent.close();
+const textOnly = createManagedAgentProvider({
+  modelRuntime: { chat: async () => { throw new Error('text-only fallback must use stream'); },
+    stream: async function* () {
+      yield { type: 'assistant/chunk', data: { chunk: { type: 'text-delta', text: '流式' } } };
+      yield { type: 'assistant/chunk', data: { chunk: { type: 'text-delta', text: '回复' } } };
+      yield { type: 'turn/end', data: { reason: { kind: 'completed' } } };
+    } },
+  toolExecutionCoordinator: { run: async () => ({ status: 'unsupported', toolCalling: 'unsupported' }) },
+  taskPrincipalResolver: () => principal
+});
+const textOnlySession = await textOnly.provider.createSession({});
+const textOnlyEvents = await turn(textOnly.provider, textOnlySession.sessionId, 'stream without tools');
+check(textOnlyEvents.filter(event => event.type === 'assistant/chunk').map(event => event.data.chunk.text), ['流式', '回复']);
+check(textOnlyEvents.find(event => event.type === 'assistant/message').data.toolCalling, 'unsupported');
+await textOnly.close();
 let revoked = false, revokedCalls = 0;
 const revocation = createManagedAgentProvider({ modelRuntime: { chat: async () => ({ text: JSON.stringify({ capability: 'filesystem.read', input: { path: 'x' } }) }) }, capabilityExecutor: () => { revokedCalls++; }, taskPrincipalResolver: () => revoked ? null : principal });
 const old = await revocation.provider.createSession({});

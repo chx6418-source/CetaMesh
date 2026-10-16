@@ -519,7 +519,7 @@ export function createDesktopUiService({ services = {}, system = services.system
             ...(Number.isFinite(field.min) ? { min: field.min } : {}),
             ...(Number.isFinite(field.max) ? { max: field.max } : {})
           })),
-          models: (item.models ?? []).map(value => selected(value, ['id', 'name', 'label', 'owned_by']))
+          models: (item.models ?? []).map(value => selected(value, ['id', 'name', 'label', 'owned_by', 'toolCalling', 'streaming', 'reasoning']))
         })),
         agentProviders: (result.agentProviders ?? []).map(projectAgent),
         modes: boundedStrings(result.modes, 10, 40), defaultModelProvider: string(result.defaultModelProvider, 80) || null,

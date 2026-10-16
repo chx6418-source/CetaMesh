@@ -75,9 +75,11 @@ function parseArguments(value) {
 }
 
 function stripLocalPaths(value) {
-  return redactText(value)
+  let text = redactText(value)
     .replace(/(?:[A-Za-z]:\\|\\\\[^\s"']+|\/(?:Users|home|root|mnt|tmp)\/)[^\s"'<>]*/g, '[LOCAL_PATH]')
     .slice(0, MAX_RESULT_CHARS);
+  if (/[\uD800-\uDBFF]$/.test(text)) text = text.slice(0, -1);
+  return text;
 }
 
 function safeValue(value, depth = 0) {
@@ -99,16 +101,32 @@ function safeJson(value) {
   let text;
   try { text = JSON.stringify(safeValue(value)); }
   catch { text = '{"error":{"code":"RESULT_SERIALIZATION_FAILED"}}'; }
-  return text.length > MAX_RESULT_CHARS ? text.slice(0, MAX_RESULT_CHARS) : text;
+  if (text.length <= MAX_RESULT_CHARS) return text;
+  const hash = crypto.createHash('sha256').update(text).digest('hex');
+  let preview = text.slice(0, MAX_RESULT_CHARS - 300);
+  if (/[\uD800-\uDBFF]$/.test(preview)) preview = preview.slice(0, -1);
+  let envelope = JSON.stringify({ truncated: true, originalChars: text.length, sha256: hash, preview });
+  while (envelope.length > MAX_RESULT_CHARS && preview.length) {
+    preview = preview.slice(0, Math.max(0, preview.length - (envelope.length - MAX_RESULT_CHARS) - 1));
+    if (/[\uD800-\uDBFF]$/.test(preview)) preview = preview.slice(0, -1);
+    envelope = JSON.stringify({ truncated: true, originalChars: text.length, sha256: hash, preview });
+  }
+  return envelope;
 }
 
 function safePersistedMessages(messages) {
   return messages.map((message) => {
     const copy = structuredClone(message);
-    if (typeof copy.content === 'string') copy.content = stripLocalPaths(copy.content);
+    if (typeof copy.content === 'string') {
+      try { copy.content = safeJson(JSON.parse(copy.content)); }
+      catch { copy.content = stripLocalPaths(copy.content); }
+    }
     if (Array.isArray(copy.tool_calls)) {
       for (const call of copy.tool_calls) {
-        if (typeof call?.function?.arguments === 'string') call.function.arguments = stripLocalPaths(call.function.arguments);
+        if (typeof call?.function?.arguments === 'string') {
+          try { call.function.arguments = safeJson(JSON.parse(call.function.arguments)); }
+          catch { call.function.arguments = '{}'; }
+        }
       }
     }
     return copy;
@@ -177,6 +195,7 @@ export function createToolExecutionCoordinator({
     let text = '';
     let usage = state.usage ?? null;
     let resolvedModel = state.resolvedModel ?? null;
+    let limitReached = state.limitReached === true;
 
     for (let cycle = state.cycle ?? 0; cycle <= maxCycles; cycle++) {
       if (signal?.aborted) fail('INVOKE_CANCELLED', 'Tool execution was cancelled');
@@ -238,7 +257,7 @@ export function createToolExecutionCoordinator({
       if (typeof response?.resolvedModel === 'string' && response.resolvedModel.trim()) resolvedModel = response.resolvedModel.trim();
       else if (typeof response?.model === 'string' && response.model.trim()) resolvedModel = response.model.trim();
       const calls = Array.isArray(response?.toolCalls) ? response.toolCalls : [];
-      if (!calls.length) return { status: 'completed', toolCalling: 'supported', text, usage, resolvedModel, totalCalls, messages: state.messages };
+      if (!calls.length) return { status: limitReached ? 'partial' : 'completed', ...(limitReached ? { code: 'TOOL_CALL_LIMIT' } : {}), toolCalling: 'supported', text, usage, resolvedModel, totalCalls, messages: state.messages };
       const known = new Set(state.manifest.map((item) => item.id));
 
       const firstCallIndex = resumingToolBatch ? Math.max(0, Number(state.pendingCallIndex) || 0) : 0;
@@ -267,6 +286,8 @@ export function createToolExecutionCoordinator({
         seenCallIds.add(callId);
         state.seenCallIds = [...seenCallIds].slice(-MAX_TOTAL_CALLS);
         if (index >= maxBatchCalls || totalCalls >= maxCalls || cycle >= maxCycles) {
+          limitReached = true;
+          state.limitReached = true;
           state.messages.push({ role: 'tool', tool_call_id: callId, content: safeJson({ error: { code: 'TOOL_CALL_LIMIT' } }) });
           continue;
         }
@@ -326,6 +347,7 @@ export function createToolExecutionCoordinator({
               sessionId, turnId, scope: { taskId: scope?.taskId ?? null, workspaceId: scope?.workspaceId ?? null },
               messages: storedState.messages, cycle,
               totalCalls, usage, resolvedModel,
+              limitReached,
               seenCallIds: state.seenCallIds,
               pendingToolCallId: callId,
               pendingCalls: calls,
@@ -372,15 +394,15 @@ export function createToolExecutionCoordinator({
         }
       }
     }
-    return { status: 'completed', toolCalling: 'supported', text: text || 'Tool execution limit reached.', usage, resolvedModel, totalCalls };
+    return { status: 'partial', code: 'TOOL_CALL_LIMIT', toolCalling: 'supported', text, usage, resolvedModel, totalCalls, messages: state.messages };
   }
 
   async function run({ providerId, model, reasoning, messages = [], manifest = [], actor, sessionId, turnId, targetKind = 'chat', scope = {}, signal, refreshContext, onCapabilityResult, onActivity, onTextDelta, onStreamReset } = {}) {
     if (!actor || !['owner', 'agent'].includes(actor.kind) || typeof actor.id !== 'string') fail('UNAUTHORIZED', 'Trusted Model actor required');
     const supports = typeof modelRuntime.supportsToolCalling === 'function'
-      ? await modelRuntime.supportsToolCalling(providerId)
+      ? await modelRuntime.supportsToolCalling(providerId, model)
       : true;
-    if (!supports && manifest.length) return { status: 'unsupported', toolCalling: 'unsupported', text: '', usage: null, resolvedModel: null };
+    if (!supports) return { status: 'unsupported', toolCalling: 'unsupported', text: '', usage: null, resolvedModel: null };
     const safeManifest = (Array.isArray(manifest) ? manifest : []).filter((item) => item?.available !== false
       && typeof item?.id === 'string' && item.id && typeof item.description === 'string'
       && item.inputSchema && item.inputSchema.type === 'object').slice(0, 128);

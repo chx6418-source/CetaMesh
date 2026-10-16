@@ -160,7 +160,7 @@ export function createWorkspaceService({ stateDir, now = () => Date.now(), audit
     'workspace.read': async (p) => {
       const entry = requireWorkspace(p);
       const relPath = normalizeRelPath(p);
-      const result = readFile(entry.root, relPath, { maxBytes: p?.maxBytes });
+      const result = readFile(entry.root, relPath, { maxBytes: p?.maxBytes ?? p?.maxChars, offset: p?.offset ?? 0 });
       registry.recordFileAccess(entry.id, { relPath, action: 'read' });
       record(entry, String(p?.actor ?? 'user'), 'read', relPath);
       return result;
@@ -182,9 +182,12 @@ export function createWorkspaceService({ stateDir, now = () => Date.now(), audit
       const result = fileSearch(entry.root, {
         query: p?.query,
         glob: p?.glob,
+        searchPath: p?.path ?? '.',
+        offset: p?.offset,
+        restricted: p?.searchRestricted === true,
         includeHidden: p?.includeHidden === true,
         skipNames: entry.settings?.search?.skipNames,
-        limit: p?.limit
+        limit: p?.maxResults ?? p?.limit
       });
       record(entry, String(p?.actor ?? 'user'), 'file.search', String(p?.query ?? p?.glob ?? ''));
       return result;

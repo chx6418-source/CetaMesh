@@ -157,9 +157,9 @@ export function createAgentBroker({ registry, log = () => {} } = {}) {
       });
     },
 
-    follow({ provider: providerId, sessionId, signal } = {}) {
+    follow({ provider: providerId, sessionId, signal, sinceSequence } = {}) {
       const provider = requireProvider(providerId);
-      return provider.follow({ sessionId: requireSessionId({ sessionId }), signal });
+      return provider.follow({ sessionId: requireSessionId({ sessionId }), signal, sinceSequence });
     },
 
     async health(providerId, options = {}) {
