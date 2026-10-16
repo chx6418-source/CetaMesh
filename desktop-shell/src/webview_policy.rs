@@ -13,7 +13,7 @@ const UI_METHODS: &[&str] = &[
     "ui.chat.sessions.list", "ui.chat.sessions.create", "ui.chat.sessions.rename",
     "ui.chat.sessions.archive", "ui.chat.sessions.delete", "ui.chat.history", "ui.chat.status",
     "ui.chat.send", "ui.chat.stop", "ui.chat.retry", "ui.chat.continue", "ui.chat.catalog", "ui.chat.config.set",
-    "ui.task.overview", "ui.task.get", "ui.task.create", "ui.task.pause", "ui.task.resume", "ui.task.cancel",
+    "ui.task.overview", "ui.task.get", "ui.task.create", "ui.task.start", "ui.task.pause", "ui.task.resume", "ui.task.cancel", "ui.task.handoff",
     "ui.workspace.list", "ui.workspace.open", "ui.workspace.create",
     "ui.memory.overview", "ui.memory.get", "ui.memory.create", "ui.memory.update", "ui.memory.pin", "ui.memory.delete",
     "ui.agent.list", "ui.agent.health",

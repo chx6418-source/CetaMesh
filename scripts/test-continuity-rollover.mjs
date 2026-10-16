@@ -86,7 +86,7 @@ function mockProvider(id, log, options = {}) {
 }
 
 /** 每组独立 stateDir；task 写操作统一带最新 rev（store 乐观锁）。 */
-function setup({ policy, gate, failSendProvider, alphaStatusError, reconciler, betaBootstrapGate } = {}) {
+function setup({ policy, gate, failSendProvider, alphaStatusError, reconciler, betaBootstrapGate, onHandoffComplete } = {}) {
   const log = [];
   const dir = fs.mkdtempSync(path.join(stateRoot, 'case-'));
   const taskRuntime = createTaskRuntime({ stateDir: dir });
@@ -97,7 +97,7 @@ function setup({ policy, gate, failSendProvider, alphaStatusError, reconciler, b
   registry.register(alpha);
   registry.register(beta);
   const broker = createAgentBroker({ registry });
-  const service = createContinuityService({ taskRuntime, stateDir: dir, agentBroker: broker, policy, reconciler });
+  const service = createContinuityService({ taskRuntime, stateDir: dir, agentBroker: broker, policy, reconciler, onHandoffComplete });
   return { service, runtime: service.runtime, broker, taskRuntime, log, rev, dir };
 }
 
@@ -273,8 +273,8 @@ function setup({ policy, gate, failSendProvider, alphaStatusError, reconciler, b
   );
 
   const rolledBack = taskRuntime.get({ id: task.id }).task;
-  assert.deepEqual(rolledBack.currentAgent, { provider: 'alpha', sessionId: 'alpha-s1' },
-    'failed bootstrap restores the previous Task Agent binding');
+  assert.equal(rolledBack.status, 'blocked', 'a stopped old Agent cannot be restored as an active writer');
+  assert.equal(rolledBack.currentAgent, null, 'failed bootstrap leaves the Task awaiting recovery');
   assert.deepEqual(rolledBack.checkpoint, previousCheckpoint,
     'failed bootstrap restores the exact prior checkpoint, including null');
   assert.ok(log.some(entry => entry.kind === 'archive' && entry.sessionId === 'beta-s2'),
@@ -426,8 +426,9 @@ ok('Handoff Packet retains complete Task requirements');
   await assert.rejects(runtime.rollover({ taskId: task.id, targetProvider: 'beta' }),
     error => error.code === 'WORKSPACE_CHANGED');
   assert.equal(reads >= 2, true, 'Workspace facts must be recollected after target initialization');
-  assert.deepEqual(taskRuntime.get({ id: task.id }).task.currentAgent, { provider: 'alpha', sessionId: 'alpha-old' });
-  ok('Workspace change during handoff blocks transfer and preserves the prior Task binding');
+  assert.equal(taskRuntime.get({ id: task.id }).task.status, 'blocked');
+  assert.equal(taskRuntime.get({ id: task.id }).task.currentAgent, null);
+  ok('Workspace change during handoff blocks recovery after stopping the prior Agent');
 }
 
 {
@@ -488,6 +489,32 @@ ok('Handoff Packet retains complete Task requirements');
   assert.equal(restarted.runtime.monitor.level('alpha:context-session').source, 'usage');
   assert.equal(taskRuntime.get({ id: task.id }).task.id, task.id);
   ok('Context Monitor usage and policy survive a Core service restart');
+}
+
+{
+  const followed = [];
+  const { runtime, taskRuntime, rev } = setup({ onHandoffComplete: assignment => followed.push(assignment) });
+  const task = taskRuntime.create({ goal: 'Follow the target Agent', workspaceId: 'ws-follow' });
+  taskRuntime.attachAgent({ id: task.id, expectedRev: rev(task.id), provider: 'alpha', sessionId: 'alpha-old' });
+  const result = await runtime.rollover({ taskId: task.id, targetProvider: 'beta' });
+  assert.deepEqual(followed, [{ taskId: task.id, provider: result.to.provider, sessionId: result.to.sessionId }],
+    'successful transfer must register the target Session for Task event follow');
+  ok('target Agent Session is registered for Task follow only after successful handoff');
+}
+
+{
+  const { runtime, taskRuntime, rev, log, dir } = setup();
+  const task = taskRuntime.create({ goal: 'Preserve selected model', workspaceId: 'ws-model' });
+  taskRuntime.attachAgent({ id: task.id, expectedRev: rev(task.id), provider: 'alpha', sessionId: 'alpha-old' });
+  taskRuntime.setModelConfig({ id: task.id, expectedRev: rev(task.id),
+    modelProvider: 'custom-compatible', model: 'selected-model', reasoningEffort: 'high' });
+  const result = await runtime.rollover({ taskId: task.id, targetProvider: 'beta' });
+  const options = log.findLast(entry => entry.kind === 'create' && entry.provider === 'beta')?.options;
+  assert.deepEqual({ modelProvider: options.modelProvider, model: options.model, reasoningEffort: options.reasoningEffort },
+    { modelProvider: 'custom-compatible', model: 'selected-model', reasoningEffort: 'high' });
+  assert.equal(result.task.modelConfig.modelProvider, 'custom-compatible');
+  assert.equal(createTaskRuntime({ stateDir: dir }).get({ id: task.id }).task.modelConfig.model, 'selected-model');
+  ok('cross-Provider Handoff retains and persists the Task-selected model configuration');
 }
 
 fs.rmSync(temp, { recursive: true, force: true });

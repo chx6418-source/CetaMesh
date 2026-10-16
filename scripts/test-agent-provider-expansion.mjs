@@ -124,6 +124,7 @@ try {
         const session = dshSessions.get(args.request.sessionId);
         session.running = true;
         const prompt = JSON.stringify(args.request.content ?? []);
+        session.bootstrapOnly = prompt.includes('此回合只确认恢复事实');
         if (prompt.includes('Task-level follow')) {
           session.outputName = 'task-follow-result.txt';
           session.duplicateTurnEnd = true;
@@ -139,7 +140,7 @@ try {
       while (!session.running && !signal?.aborted) await new Promise(resolve => setTimeout(resolve, 2));
       if (signal?.aborted) return;
       session.followSubscriptions += 1;
-      fs.writeFileSync(path.join(session.cwd, session.outputName ?? 'dsh-result.txt'), `dsh fake edit ${sessionId}`);
+      if (!session.bootstrapOnly) fs.writeFileSync(path.join(session.cwd, session.outputName ?? 'dsh-result.txt'), `dsh fake edit ${sessionId}`);
       yield { type: 'turn/start', data: { turn: 'dsh-turn-1' } };
       yield { type: 'assistant/message', data: { turn: 'dsh-turn-1', message: { content: [{ type: 'text', text: 'DSH fixture response' }] } } };
       yield { type: 'turn/end', data: { turn: 'dsh-turn-1', reason: { kind: 'completed' } } };
@@ -435,9 +436,10 @@ try {
   const completedStatus = await waitFor(() => agentBroker.status({ provider: 'codex', sessionId: codexSessionId }),
     status => status.lastRunStatus === 'completed');
   assert.equal(completedStatus.running, false);
-  const firstCodexChunk = codexProvider._sessions.get(codexSessionId).events.find(event => event.type === 'assistant/chunk');
-  assert.deepEqual(firstCodexChunk?.data.chunk, { type: 'text-delta', text: 'fixture response 1' },
-    'Codex assistant chunks use the same text-delta protocol as Harbor Chat');
+  const codexCheckpoint = await waitFor(() => taskRuntime.get({ id: task.id }).task.checkpoint,
+    checkpoint => checkpoint?.summary?.includes('fixture response 1'));
+  assert.match(codexCheckpoint.summary, /fixture response 1/,
+    'Task Follow consumes Codex events and persists the Agent result even without Chat');
   assert.equal(fs.readFileSync(path.join(authoritativeRoot, 'codex-result-1.txt'), 'utf8'), 'fake edit 1');
   const firstArgs = fakeRuns[0].args;
   assert.ok(firstArgs.includes('--json'));
@@ -484,6 +486,8 @@ try {
   assert.equal(fs.readFileSync(path.join(codexProvider._sessions.get(freshSessionId).stage.root, 'codex-result-1.txt'), 'utf8'), 'fake edit 1');
   await waitFor(() => agentBroker.status({ provider: 'codex', sessionId: freshSessionId }),
     status => !status.running && status.lastRunStatus === 'completed');
+  assert.equal(rolled.to.sessionId, freshSessionId,
+    'the completed read-only bootstrap turn establishes the new authoritative Session');
 
   omitFinalNewline = true;
   await agentBroker.send({ provider: 'codex', sessionId: freshSessionId, content: 'Flush a final JSONL record without a newline' });

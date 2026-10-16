@@ -10,6 +10,7 @@ import { taskError } from './types.js';
 export function createTaskService({ stateDir, now, resolveWorkspace, ownedArtifactRoot } = {}) {
   if (!stateDir || typeof stateDir !== 'string') throw new Error('createTaskService 需要 stateDir');
   const runtime = createTaskRuntime({ stateDir, now, resolveWorkspace, ownedArtifactRoot });
+  runtime.recoverInterrupted();
 
   const handlers = {
     // 页面聚合：一次往返拿到列表 + 计数 + 需要关注

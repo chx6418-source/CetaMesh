@@ -118,7 +118,9 @@ export function createChatService({
   defaultModelConfig = null,
   onTurnEnd = null,
   onEvent = null,
-  resolveWorkspace = null
+  resolveWorkspace = null,
+  resolveTask = null,
+  handoffTask = null
 }) {
   // Agent Provider（阶段 06）：会话显式指定 agentProvider（如 'dsh'）时，其回合经标准
   // AgentProvider 契约（agent.createSession / agent.send / agent.cancel）执行。
@@ -185,9 +187,19 @@ export function createChatService({
   function loadStore() {
     const store = loadChatFile(sessionsFile, null);
     const list = Array.isArray(store?.sessions) ? store.sessions : [];
+    let invalidated = false;
     for (const record of list) {
-      if (record && typeof record.id === 'string') sessions.set(record.id, normalizeRecord(record));
+      if (!record || typeof record.id !== 'string') continue;
+      const restored = normalizeRecord(record);
+      if (restored.dshSessionId) {
+        restored.interruptedAt = now();
+        restored.dshSessionId = null;
+        restored.runtimeProvider = null;
+        invalidated = true;
+      }
+      sessions.set(record.id, restored);
     }
+    if (invalidated) saveStore();
   }
 
   function normalizeRecord(record) {
@@ -200,6 +212,7 @@ export function createChatService({
       dshSessionId: typeof record.dshSessionId === 'string' && record.dshSessionId ? record.dshSessionId : null,
       runtimeProvider: typeof record.runtimeProvider === 'string' ? record.runtimeProvider : null,
       taskId: typeof record.taskId === 'string' ? record.taskId : null,
+      interruptedAt: Number(record.interruptedAt) || null,
       lastModelResolution: record.lastModelResolution && typeof record.lastModelResolution === 'object'
         ? { providerId: String(record.lastModelResolution.providerId ?? ''),
             requestedModel: String(record.lastModelResolution.requestedModel ?? ''),
@@ -340,8 +353,8 @@ export function createChatService({
     return [...sessions.values()]
       .filter((record) => includeArchived || !record.archived)
       .sort((a, b) => b.updatedAt - a.updatedAt)
-      .map(({ id, title, createdAt, updatedAt, archived, config }) => ({
-        id, title, createdAt, updatedAt, archived, config
+      .map(({ id, title, createdAt, updatedAt, archived, config, taskId }) => ({
+        id, title, createdAt, updatedAt, archived, config, taskId: taskId ?? null
       }));
   }
 
@@ -365,7 +378,7 @@ export function createChatService({
 
   function publicSession(record) {
     const { id, title, createdAt, updatedAt, archived, config } = record;
-    return { id, title, createdAt, updatedAt, archived, config, dshSessionId: record.dshSessionId };
+    return { id, title, createdAt, updatedAt, archived, config, taskId: record.taskId ?? null, dshSessionId: record.dshSessionId };
   }
 
   function renameSession({ id, title }) {
@@ -551,11 +564,35 @@ export function createChatService({
       || nextConfig.reasoning !== previousConfig.reasoning
       || nextConfig.modelProvider !== previousConfig.modelProvider;
     const workspaceChanged = nextConfig.workspaceId !== previousConfig.workspaceId;
+    if (record.taskId && workspaceChanged) {
+      const task = typeof resolveTask === 'function' ? await resolveTask(record.taskId) : null;
+      if (!task || task.workspaceId !== nextConfig.workspaceId) {
+        throw chatError('WORKSPACE_RECONCILIATION_REQUIRED', 'Task-bound Chat cannot switch to a different Workspace');
+      }
+    }
     if (state.turn && (agentProviderChanged || modelConfigChanged || workspaceChanged)) {
       throw chatError('TURN_BUSY', '当前会话有回合进行中，结束后再切换 Agent、模型或工作区');
     }
     const previousAgentSession = agentProviderChanged ? previousProviderSession(record, previousAgentProvider) : null;
     if (agentProviderChanged) {
+      if (record.taskId) {
+        const task = typeof resolveTask === 'function' ? await resolveTask(record.taskId) : null;
+        if (!task || !task.currentAgent || task.currentAgent.provider !== previousAgentProvider) {
+          throw chatError('TASK_SESSION_MISMATCH', 'Chat Agent Session does not own the attached Task');
+        }
+        if (!nextConfig.agentProvider || nextConfig.agentProvider === AGENT_PROVIDER_DISABLED || typeof handoffTask !== 'function') {
+          throw chatError('TASK_HANDOFF_REQUIRED', 'Task Agent changes require Continuity handoff');
+        }
+        const transferred = await handoffTask({ taskId: task.id, reason: 'provider-switch', targetProvider: nextConfig.agentProvider,
+          modelProvider: nextConfig.modelProvider, model: nextConfig.model, reasoningEffort: nextConfig.reasoning });
+        stopFollow(record.id);
+        record.config = nextConfig;
+        record.dshSessionId = transferred.to.sessionId;
+        record.runtimeProvider = transferred.to.provider;
+        touch(record);
+        ensureFollow(record);
+        return publicSession(record);
+      }
       record.config = nextConfig;
       stopFollow(record.id);
       record.dshSessionId = null;
@@ -1577,8 +1614,37 @@ export function createChatService({
     const record = sessionOrThrow(id);
     const state = runtimeOf(record.id);
     if (state.turn) throw chatError('TURN_BUSY', '当前会话有回合进行中');
-    const accepted = await startTurn(record, state, '继续', { attachments: [], sourceText: '继续' });
+    let prompt = '继续';
+    if (record.taskId) {
+      const task = typeof resolveTask === 'function' ? await resolveTask(record.taskId) : null;
+      if (!task) throw chatError('TASK_NOT_FOUND', 'Chat attached Task is unavailable');
+      if (task.workspaceId !== record.config.workspaceId) throw chatError('WORKSPACE_RECONCILIATION_REQUIRED', 'Chat and Task Workspace differ');
+      if (['blocked', 'paused', 'waiting'].includes(task.status)) {
+        throw chatError('TASK_RECOVERY_REVIEW_REQUIRED', 'Task requires Workspace review and explicit resume before Chat continuation');
+      }
+      if (['completed', 'failed', 'cancelled'].includes(task.status)) throw chatError('TASK_NOT_RESUMABLE', 'Task is terminal');
+      if (record.dshSessionId && (task.currentAgent?.sessionId !== record.dshSessionId
+        || task.currentAgent?.provider !== (record.runtimeProvider || record.config.agentProvider))) {
+        throw chatError('TASK_SESSION_MISMATCH', 'Chat cannot reuse an old Agent Session for this Task');
+      }
+      prompt = ['[CetaMesh Task recovery]', `Task ID: ${task.id}`, `Workspace ID: ${task.workspaceId}`,
+        `Goal: ${task.goal}`, `Requirements: ${task.requirements.join('; ')}`,
+        `Checkpoint: ${task.checkpoint?.summary ?? ''}`, `Next action: ${task.checkpoint?.nextAction ?? ''}`,
+        `Completed work: ${task.completedWork.map(item => item.text).join('; ')}`,
+        `Pending work: ${task.pendingWork.map(item => item.text).join('; ')}`,
+        'Verify current Workspace state before making any change; continue from the checkpoint.'].join('\n');
+      const ownerConstraints = boundedTaskChatConstraints(record);
+      if (ownerConstraints) prompt += `\n[Chat constraints from this Task Session; verify against the current request]\n- ${ownerConstraints}`;
+    }
+    const accepted = await startTurn(record, state, prompt, { attachments: [], sourceText: prompt });
     return { continued: true, ...(accepted?.requestId ? { requestId: accepted.requestId } : {}) };
+  }
+
+  function boundedTaskChatConstraints(record, currentText = null) {
+    const prompts = readHistory(record.id).filter(message => message.role === 'user' && typeof message.text === 'string')
+      .map(message => message.text);
+    if (currentText !== null && prompts.at(-1) === currentText) prompts.pop();
+    return prompts.slice(-12).map(value => value.slice(0, 500)).join('\n- ').slice(-4000);
   }
 
   function startAgentTurn(record, state, promptText, provider) {
@@ -1656,6 +1722,10 @@ export function createChatService({
   }
 
   async function startTurn(record, state, promptText, { attachments = [], sourceText, retryMessageId = null } = {}) {
+    if (record.taskId && !record.dshSessionId && !promptText.startsWith('[CetaMesh Task recovery]')) {
+      const prior = boundedTaskChatConstraints(record, sourceText ?? promptText);
+      if (prior) promptText = `[Prior Owner constraints in this Task Chat Session; verify against the current request]\n- ${prior}\n[Current request]\n${promptText}`;
+    }
     state.messageTexts = [];
     state.chunkBuffer = '';
     state.promptChars = promptText.length;
@@ -1667,7 +1737,9 @@ export function createChatService({
     pendingUiDeltas.delete(record.id);
     onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: 'starting', requestId, reset: true, toolActivity: [], agentActivity } });
     try {
-      if (agentProviderId === 'cetamesh' && platformRoute) {
+      if (record.taskId && platformRoute) {
+        await startModelOrDshTurn(record, state, promptText, { attachments, sourceText, forceProject: true, retryMessageId });
+      } else if (agentProviderId === 'cetamesh' && platformRoute) {
         await startModelOrDshTurn(record, state, promptText, { attachments, sourceText, forceProject: true, retryMessageId });
       } else if (agentProviderId && agentProviderId !== AGENT_PROVIDER_DISABLED
         && ['capability-broker', 'staged-capability-broker'].includes(selectableAgentProviders.get(agentProviderId)?.workspaceBoundary)) {
@@ -1701,8 +1773,9 @@ export function createChatService({
       const last = messages[messages.length - 1];
       return {
         id: record.id,
+        taskId: record.taskId ?? null,
         turn: null,
-        lastState: last?.role === 'user' ? 'awaiting-reply' : last?.error ? 'error' : 'idle',
+        lastState: last?.role === 'user' ? (record.interruptedAt ? 'interrupted' : 'awaiting-reply') : last?.error ? 'error' : 'idle',
         lastError: last?.role === 'assistant' && typeof last.error === 'string' ? last.error : null,
         lastErrorCode: last?.role === 'assistant' && typeof last.errorCode === 'string' ? last.errorCode : null,
         dshSessionAlive: Boolean(record.dshSessionId),
@@ -1713,6 +1786,7 @@ export function createChatService({
     }
     return {
       id: record.id,
+      taskId: record.taskId ?? null,
       dshSessionAlive: Boolean(record.dshSessionId),
       turn: {
         id: turn.id,

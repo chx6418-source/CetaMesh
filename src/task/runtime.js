@@ -91,6 +91,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
       acceptance: normalizeAcceptance(acceptanceCriteria).map((item) => ({ ...item, id: item.id || subId('acc') })),
       agentHistory: [],
       currentAgent: null,
+      modelConfig: null,
       result: null,
       failure: null,
       createdAt: timestamp,
@@ -177,6 +178,18 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     });
   }
 
+  function setModelConfig({ id, expectedRev, modelProvider, model, reasoningEffort } = {}) {
+    const modelConfig = {
+      modelProvider: normalizeText(modelProvider, 'modelProvider', 80) || null,
+      model: normalizeText(model, 'model', 160) || null,
+      reasoningEffort: normalizeText(reasoningEffort, 'reasoningEffort', 40) || null
+    };
+    return mutate(id, expectedRev, (task) => {
+      task.modelConfig = modelConfig;
+      return task;
+    });
+  }
+
   // ── Agent Provider / Session 绑定（切换 Provider 不新建 Task） ──────────
   /** 只读反查：按当前绑定的 Agent (provider, sessionId) 找任务；找不到返回 null。 */
   function findByAgent({ provider, sessionId } = {}) {
@@ -189,6 +202,23 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
       }
     }
     return null;
+  }
+
+  function findByGoalWorkspace({ goal, workspaceId } = {}) {
+    const wantedGoal = String(goal ?? '').trim();
+    const wantedWorkspace = normalizeWorkspaceId(workspaceId);
+    if (!wantedGoal || !wantedWorkspace) return null;
+    const matches = store.listAll().filter(row => row.workspaceId === wantedWorkspace
+      && row.goal.trim() === wantedGoal && !isTerminalStatus(row.status));
+    if (matches.length > 1) throw taskError('TASK_AMBIGUOUS', 'Multiple active Tasks share this Workspace goal');
+    return matches[0] ?? null;
+  }
+
+  function activeWorkspaceOwner({ workspaceId, exceptTaskId } = {}) {
+    const wantedWorkspace = normalizeWorkspaceId(workspaceId);
+    if (!wantedWorkspace) return null;
+    return store.listAll().find(row => row.workspaceId === wantedWorkspace
+      && row.id !== exceptTaskId && row.status === 'running' && row.currentAgent) ?? null;
   }
 
   function attachAgent({ id, expectedRev, provider, sessionId, note } = {}) {
@@ -275,6 +305,17 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     return applyStatus({ id, expectedRev, target: 'blocked', mutateExtra: (draft) => {
       if (reason !== undefined) draft.progress.note = normalizeText(reason, 'reason', TASK_LIMITS.noteChars);
     } });
+  }
+
+  function recoverInterrupted() {
+    const recovered = [];
+    for (const row of store.listAll()) {
+      if (row.status !== 'running' && row.status !== 'waiting') continue;
+      const result = block({ id: row.id, expectedRev: row.rev,
+        reason: 'Task interrupted after Core restart; verify Workspace and checkpoint before resuming' });
+      recovered.push(result.task.id);
+    }
+    return recovered;
   }
 
   function complete({ id, expectedRev, summary } = {}) {
@@ -489,14 +530,18 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     get,
     list,
     findByAgent,
+    findByGoalWorkspace,
+    activeWorkspaceOwner,
     update,
     remove,
     setProgress,
+    setModelConfig,
     start,
     pause,
     resume,
     wait,
     block,
+    recoverInterrupted,
     complete,
     fail,
     cancel,

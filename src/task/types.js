@@ -19,7 +19,7 @@ export const ATTENTION_STATUSES = Object.freeze(['blocked', 'waiting', 'failed']
 
 // 合法状态迁移表。终态不可再迁移。
 export const TASK_TRANSITIONS = Object.freeze({
-  queued: Object.freeze(['running', 'paused', 'cancelled', 'failed']),
+  queued: Object.freeze(['running', 'blocked', 'paused', 'cancelled', 'failed']),
   running: Object.freeze(['waiting', 'blocked', 'paused', 'completed', 'failed', 'cancelled']),
   waiting: Object.freeze(['running', 'blocked', 'paused', 'cancelled', 'failed']),
   blocked: Object.freeze(['running', 'waiting', 'paused', 'cancelled', 'failed']),

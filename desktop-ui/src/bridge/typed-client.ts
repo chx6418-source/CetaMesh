@@ -2,7 +2,7 @@ import type { AboutView } from '../types/views';
 
 export interface ChatSession {
   id: string; title: string; createdAt: string | number | null; updatedAt: string | number | null;
-  archived: boolean; config: { mode: string; modelProvider: string | null; model: string; agentProvider: string | null; workspaceId: string | null };
+  archived: boolean; taskId: string | null; config: { mode: string; modelProvider: string | null; model: string; agentProvider: string | null; workspaceId: string | null };
 }
 export interface ChatMessage {
   id: string; role: 'user' | 'assistant' | 'system'; text: string; at: string | number | null;
@@ -17,9 +17,12 @@ export interface ProviderSettingField {
 export interface Task {
   id: string; title: string; goal: string; status: string; currentPhase: string;
   progress: { percent: number; note: string }; workspaceId: string | null; agent: string | null;
+  currentAgent: { provider: string; sessionId: string } | null;
   createdAt: string | number | null; updatedAt: string | number | null; rev: number | null;
   checkpoint: { summary: string; nextAction: string } | null; result: { summary: string } | null;
   artifacts: { id: string; kind: string; label: string; createdAt: string | number | null }[];
+  agentHistory: { provider: string; sessionId: string; attachedAt: string | number | null; detachedAt: string | number | null; note: string }[];
+  failure: { reason: string } | null;
 }
 export interface Memory {
   id: string; type: string; scope: string; title: string; content: string; summary: string;
@@ -92,7 +95,7 @@ type UiMethod =
   | 'ui.events.next'
   | 'ui.chat.sessions.list' | 'ui.chat.sessions.create' | 'ui.chat.sessions.rename' | 'ui.chat.sessions.archive' | 'ui.chat.sessions.delete'
   | 'ui.chat.history' | 'ui.chat.status' | 'ui.chat.send' | 'ui.chat.stop' | 'ui.chat.retry' | 'ui.chat.continue' | 'ui.chat.catalog' | 'ui.chat.config.set'
-  | 'ui.task.overview' | 'ui.task.get' | 'ui.task.create' | 'ui.task.start' | 'ui.task.pause' | 'ui.task.resume' | 'ui.task.cancel'
+  | 'ui.task.overview' | 'ui.task.get' | 'ui.task.create' | 'ui.task.start' | 'ui.task.pause' | 'ui.task.resume' | 'ui.task.cancel' | 'ui.task.handoff'
   | 'ui.workspace.list' | 'ui.workspace.open' | 'ui.workspace.create'
   | 'ui.memory.overview' | 'ui.memory.get' | 'ui.memory.create' | 'ui.memory.update' | 'ui.memory.pin' | 'ui.memory.delete'
   | 'ui.agent.list' | 'ui.agent.health'
@@ -220,7 +223,7 @@ export const chatClient = {
   history: (id: string, limit = 100, beforeMessageId: string | null = null, afterMessageId: string | null = null) => uiCall<{
     id: string; total: number; messages: ChatMessage[]; nextBeforeMessageId: string | null; hasMore: boolean
   }>('ui.chat.history', { id, limit, beforeMessageId, afterMessageId }),
-  status: (id: string) => uiCall<{ id: string; dshSessionAlive: boolean; state: string; requestId: string | null; statusMessage: string | null; retryCount: number; followState: string; followError: string | null; displayText: string; toolActivity: ChatMessage['toolActivity']; agentActivity: ChatMessage['agentActivity']; error: string | null; errorCode: string | null; approvalId: string | null; approvalExpiresAt: string | number | null; routing: Record<string, unknown> }>('ui.chat.status', { id }),
+  status: (id: string) => uiCall<{ id: string; taskId: string | null; dshSessionAlive: boolean; state: string; requestId: string | null; statusMessage: string | null; retryCount: number; followState: string; followError: string | null; displayText: string; toolActivity: ChatMessage['toolActivity']; agentActivity: ChatMessage['agentActivity']; error: string | null; errorCode: string | null; approvalId: string | null; approvalExpiresAt: string | number | null; routing: Record<string, unknown> }>('ui.chat.status', { id }),
   send: (id: string, text: string, attachments: Attachment[] = [], clientMessageId?: string) => {
     const params = { id, text, attachments, ...(clientMessageId ? { clientMessageId } : {}) };
     return uiCall<{ userMessageId?: string; requestId?: string }>('ui.chat.send', params).catch(error => {
@@ -243,7 +246,8 @@ export const taskClient = {
   start: (id: string, expectedRev?: number) => uiCall<{ task: Task }>('ui.task.start', { id, expectedRev }),
   pause: (id: string, expectedRev?: number) => uiCall<{ task: Task }>('ui.task.pause', { id, expectedRev }),
   resume: (id: string, expectedRev?: number) => uiCall<{ task: Task }>('ui.task.resume', { id, expectedRev }),
-  cancel: (id: string, expectedRev?: number) => uiCall<{ task: Task }>('ui.task.cancel', { id, expectedRev })
+  cancel: (id: string, expectedRev?: number) => uiCall<{ task: Task }>('ui.task.cancel', { id, expectedRev }),
+  handoff: (id: string, targetProvider: string, expectedRev?: number) => uiCall<{ task: Task; handoff: { success: boolean; from: unknown; to: unknown } }>('ui.task.handoff', { id, targetProvider, expectedRev })
 };
 export const memoryClient = {
   overview: (query = '', scope = '', limit = 100) => uiCall<{ memories: Memory[]; total: number; candidates: unknown[] }>('ui.memory.overview', { query, scope, limit }),

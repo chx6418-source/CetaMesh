@@ -96,6 +96,7 @@ export function createContinuityRuntime({
   canRollover = null,
   reconciler = null,
   listPendingApprovals = null,
+  onHandoffComplete = null,
   log = () => {}
 } = {}) {
   if (!taskRuntime?.get) throw continuityError('INVALID_PARAMS', 'createContinuityRuntime 需要 taskRuntime');
@@ -275,7 +276,7 @@ export function createContinuityRuntime({
       lines.push(`待审批能力请求: ${rows}`);
       lines.push(`审批规则: 审批不随 Session 交接继承——仅当同一请求（相同 requestId/指纹）且审批未过期时方可继续；否则重新发起请求等待 Owner 审批。`);
     }
-    lines.push(`上下文规则: 这是旧任务续接，不要重做已完成工作；先验证以上事实与工作区真实状态再行动；从"下一步"继续；不要要求重新提供本摘要中的信息。`);
+    lines.push(`上下文规则: 这是旧任务续接，不要重做已完成工作。此回合只确认恢复事实，禁止修改文件、运行工具或执行待办；待交接提交后再接受下一条执行指令。`);
     return lines.join('\n');
   }
 
@@ -291,7 +292,7 @@ export function createContinuityRuntime({
     return sequence;
   }
 
-  async function awaitBootstrapTurn({ provider, sessionId, requestId }) {
+  async function awaitBootstrapTurn({ provider, sessionId, requestId, turnId }) {
     const controller = new AbortController();
     let timeoutId;
     const timeout = new Promise((_, reject) => {
@@ -304,7 +305,11 @@ export function createContinuityRuntime({
       for await (const item of agentBroker.follow({ provider, sessionId, signal: controller.signal })) {
         const event = item?.type === 'event' ? item.event : item;
         if (event?.type !== 'turn/end') continue;
-        if (requestId && event.data?.requestId !== requestId) continue;
+        // DSH session/follow may report only a turn token. The target Session was
+        // created for this bootstrap, so an unlabelled terminal event cannot be
+        // from an older Task Session; compare requestId when the stream supplies it.
+        if (requestId && event.data?.requestId && event.data.requestId !== requestId) continue;
+        if (turnId && event.data?.turn !== turnId) continue;
         if (event.data?.reason?.kind !== 'completed') {
           throw continuityError('BOOTSTRAP_FAILED', 'Target Agent bootstrap turn did not complete successfully');
         }
@@ -501,21 +506,27 @@ export function createContinuityRuntime({
       let created = null;
       let attached = null;
       let reconciliation = null;
+      let oldStopped = false;
+      const selectedModelConfig = {
+        modelProvider: modelProvider ?? task.modelConfig?.modelProvider ?? (target.id === previousAgent.provider ? previousStatus?.modelProvider : null) ?? target.defaults?.modelProvider,
+        model: model ?? task.modelConfig?.model ?? (target.id === previousAgent.provider ? previousStatus?.model : null) ?? target.defaults?.model,
+        reasoningEffort: reasoningEffort ?? task.modelConfig?.reasoningEffort ?? (target.id === previousAgent.provider ? previousStatus?.reasoningEffort : null) ?? target.defaults?.reasoningEffort
+      };
       try {
         created = await agentBroker.createSession(target.id, {
           taskId: task.id,
           workspaceId: task.workspaceId,
-          modelProvider: modelProvider ?? (target.id === previousAgent.provider ? previousStatus?.modelProvider : null) ?? target.defaults?.modelProvider,
-          model: model ?? (target.id === previousAgent.provider ? previousStatus?.model : null) ?? target.defaults?.model,
-          reasoningEffort: reasoningEffort ?? (target.id === previousAgent.provider ? previousStatus?.reasoningEffort : null) ?? target.defaults?.reasoningEffort
+          ...selectedModelConfig
         });
         if (!created?.sessionId) {
           throw continuityError('PROVIDER_ERROR', `Agent Provider「${target.id}」未返回 sessionId`);
         }
         try {
           await agentBroker.cancel({ provider: fromProvider.id, sessionId: previousAgent.sessionId });
+          oldStopped = true;
         } catch (stopError) {
           if (!['SESSION_NOT_FOUND', 'TURN_NOT_RUNNING'].includes(stopError?.code)) throw stopError;
+          oldStopped = true;
         }
         try {
           const afterStop = await agentBroker.status(previousAgent);
@@ -538,7 +549,8 @@ export function createContinuityRuntime({
         if (bootstrap?.accepted !== true) {
           throw continuityError('BOOTSTRAP_REJECTED', 'Target Agent did not accept its recovery turn');
         }
-        await awaitBootstrapTurn({ provider: target.id, sessionId: created.sessionId, requestId: bootstrap.requestId });
+        await awaitBootstrapTurn({ provider: target.id, sessionId: created.sessionId,
+          requestId: bootstrap.requestId, turnId: bootstrap.turnId });
 
         if (reconciler && task.workspaceId) {
           const freshFacts = await collectWorkspaceFacts({ workspaceId: task.workspaceId, relevantFiles });
@@ -556,6 +568,12 @@ export function createContinuityRuntime({
           } else {
             throw continuityError('WORKSPACE_UNVERIFIED', 'Workspace facts could not be collected during Agent handoff');
           }
+        }
+        if (typeof onHandoffComplete === 'function') {
+          await onHandoffComplete({ taskId: task.id, provider: target.id, sessionId: created.sessionId });
+        }
+        if (Object.values(selectedModelConfig).some(value => value !== null && value !== undefined && value !== '')) {
+          taskRuntime.setModelConfig({ id: task.id, expectedRev: currentRev(), ...selectedModelConfig });
         }
       } catch (error) {
         let targetStopped = true;
@@ -580,7 +598,15 @@ export function createContinuityRuntime({
             reason: 'Handoff target could not be stopped; Task authority revoked for recovery review' });
           throw error;
         }
-        if (targetAttached) {
+        if (oldStopped) {
+          // A cancelled old Session is no longer a valid execution owner. Retain
+          // the Task and checkpoint, but require explicit Workspace recovery.
+          if (current.currentAgent) taskRuntime.detachAgent({ id: task.id, expectedRev: current.rev,
+            note: `rollover #${sequence} failed after old Agent stopped` });
+          taskRuntime.restoreCheckpoint({ id: task.id, expectedRev: currentRev(), checkpoint: previousCheckpoint });
+          taskRuntime.block({ id: task.id, expectedRev: currentRev(),
+            reason: `Handoff failed after old Agent stopped (${error?.code ?? 'PROVIDER_ERROR'}); verify Workspace before recovery` });
+        } else if (targetAttached) {
           try {
             taskRuntime.detachAgent({ id: task.id, expectedRev: current.rev, note: `rollover #${sequence} failed; restore prior Agent` });
             taskRuntime.attachAgent({ id: task.id, expectedRev: currentRev(), provider: previousAgent.provider,
@@ -589,9 +615,11 @@ export function createContinuityRuntime({
             log(`Continuity Task binding rollback failed: ${rollbackError?.code ?? 'TASK_ROLLBACK_FAILED'}`);
           }
         }
-        try { await taskRuntime.restoreCheckpoint({ id: task.id, expectedRev: currentRev(), checkpoint: previousCheckpoint }); }
-        catch (rollbackError) {
-          log(`Continuity checkpoint rollback failed: ${rollbackError?.code ?? 'CHECKPOINT_ROLLBACK_FAILED'}`);
+        if (!oldStopped) {
+          try { await taskRuntime.restoreCheckpoint({ id: task.id, expectedRev: currentRev(), checkpoint: previousCheckpoint }); }
+          catch (rollbackError) {
+            log(`Continuity checkpoint rollback failed: ${rollbackError?.code ?? 'CHECKPOINT_ROLLBACK_FAILED'}`);
+          }
         }
         throw error;
       }
@@ -638,7 +666,7 @@ export function createContinuityRuntime({
         to: { provider: target.id, sessionId: created.sessionId },
         crossProvider: target.id !== previousAgent.provider,
         reconciliation,
-        task: attached.task
+        task: taskRuntime.get({ id: task.id }).task
       };
     } finally {
       inFlight.delete(task.id);
@@ -707,6 +735,7 @@ export function createContinuityRuntime({
   }
 
   return {
+    isInFlight(taskId) { return inFlight.has(String(taskId ?? '')); },
     evaluate,
     observeAgentTurn,
     rollover,

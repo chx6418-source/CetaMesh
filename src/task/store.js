@@ -85,6 +85,12 @@ function normalizeLoaded(raw) {
     acceptance: asArray(raw.acceptance),
     agentHistory: asArray(raw.agentHistory),
     currentAgent: raw.currentAgent && typeof raw.currentAgent === 'object' ? raw.currentAgent : null,
+    modelConfig: raw.modelConfig && typeof raw.modelConfig === 'object' && !Array.isArray(raw.modelConfig)
+      ? {
+        modelProvider: typeof raw.modelConfig.modelProvider === 'string' ? raw.modelConfig.modelProvider : null,
+        model: typeof raw.modelConfig.model === 'string' ? raw.modelConfig.model : null,
+        reasoningEffort: typeof raw.modelConfig.reasoningEffort === 'string' ? raw.modelConfig.reasoningEffort : null
+      } : null,
     result: raw.result && typeof raw.result === 'object' ? raw.result : null,
     failure: raw.failure && typeof raw.failure === 'object' ? raw.failure : null,
     createdAt: Number(raw.createdAt) || 0,

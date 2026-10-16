@@ -64,6 +64,8 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
   const file = stateDir ? path.join(stateDir, 'capability', 'task-grants.json') : null;
   let grants = file ? readJsonFile(file, { missing: {} }) : {};
   const provisioning = new Map();
+  const workspaceProvisioning = new Map();
+  let taskHandoffGuard = () => false;
   const taskFollowConsumers = new Map();
   const TASK_FOLLOW_MAX_SESSIONS = 64;
   const workspaceImportStates = new Map();
@@ -106,7 +108,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
               if (event.seq <= consumer.sequence) continue;
               consumer.sequence = event.seq;
             }
-            const turnId = String(event?.data?.requestId ?? '');
+            const turnId = String(event?.data?.requestId ?? event?.data?.turn ?? '');
             if (event?.type === 'assistant/message' && turnId) {
               const content = event.data?.message?.content;
               const answer = Array.isArray(content) ? content.filter(part => part?.type === 'text')
@@ -124,7 +126,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
                 taskRuntime.setCheckpoint({ id: taskId, expectedRev: current.rev, summary: answer, nextAction: '' });
                 const updated = taskFor(taskId);
                 taskRuntime.addWork({ id: taskId, expectedRev: updated.rev, kind: 'completed', text: answer.slice(0, 2000) });
-              } else if (event.data?.reason?.kind === 'failed') {
+              } else if (['failed', 'error'].includes(event.data?.reason?.kind)) {
                 taskRuntime.block({ id: taskId, expectedRev: current.rev,
                   reason: String(event.data?.reason?.error?.code ?? 'Agent turn failed').slice(0, 1000) });
               }
@@ -187,7 +189,8 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
   };
   const resolveWorkspace = id => workspaceService?.describeWorkspace(id);
   const broker = createCapabilityBroker({
-    policy: createCapabilityPolicy({ resolveWorkspace, resolveTask: taskFor }),
+    policy: createCapabilityPolicy({ resolveWorkspace, resolveTask: taskFor,
+      isTaskHandoff: taskId => taskHandoffGuard(taskId) }),
     approval: createCapabilityApproval({ stateDir, now }), audit, stateDir
   });
   function saveGrants() {
@@ -496,6 +499,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       if (r.signal?.aborted) throw capabilityError('INVOKE_CANCELLED', 'Agent assignment cancelled');
       let task = taskFor(r.taskId);
       if (!task || task.workspaceId !== r.workspaceId) throw capabilityError('TASK_NOT_AUTHORIZED', 'Task workspace required');
+      if (taskHandoffGuard(task.id)) throw capabilityError('TASK_HANDOFF_IN_FLIGHT', 'Task Handoff owns this execution boundary');
       const provider = String(r.input.agentProvider || r.input.provider || 'cetamesh');
       const boundary = agentBroker?.capabilities(provider)?.workspaceBoundary;
       if (!['capability-broker', 'staged-capability-broker'].includes(boundary)) {
@@ -504,6 +508,12 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       if (task.currentAgent && task.currentAgent.provider !== provider) {
         throw capabilityError('AGENT_PROVIDER_SWITCH_REQUIRES_CONTINUITY', 'An existing Task must change Agent Providers through Continuity Fresh Session');
       }
+      const otherOwner = taskRuntime.activeWorkspaceOwner({ workspaceId: task.workspaceId, exceptTaskId: task.id });
+      const reservedFor = workspaceProvisioning.get(task.workspaceId);
+      if (otherOwner || (reservedFor && reservedFor !== task.id)) {
+        throw capabilityError('TASK_WORKSPACE_BUSY', 'Another Task holds write execution for this Workspace');
+      }
+      workspaceProvisioning.set(task.workspaceId, task.id);
       const previous = provisioning.get(task.id);
       const pending = (async () => {
         if (previous) {
@@ -521,11 +531,13 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
           }
         }
         if (r.signal?.aborted) throw capabilityError('INVOKE_CANCELLED', 'Agent assignment cancelled');
+        if (taskHandoffGuard(task.id)) throw capabilityError('TASK_HANDOFF_IN_FLIGHT', 'Task Handoff owns this execution boundary');
         const actor = grants[task.id] ? principalForTask(task.id) : grantTask(task.id, r.input.grants);
         if (task.currentAgent) {
           try {
             await agentBroker.status(task.currentAgent);
             if (r.signal?.aborted) throw capabilityError('INVOKE_CANCELLED', 'Agent assignment cancelled');
+            if (taskHandoffGuard(task.id)) throw capabilityError('TASK_HANDOFF_IN_FLIGHT', 'Task Handoff owns this execution boundary');
             ensureTaskFollow(task.currentAgent.provider, task.currentAgent.sessionId, task.id);
             const sent = await agentBroker.send({ ...task.currentAgent, content: String(r.input.content || task.goal) });
             if (sent?.accepted !== true) throw capabilityError('AGENT_SEND_REJECTED', 'Agent did not accept Task instruction');
@@ -544,12 +556,18 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
           }
         }
         const ws = resolveWorkspace(r.workspaceId);
+        if (taskHandoffGuard(task.id)) throw capabilityError('TASK_HANDOFF_IN_FLIGHT', 'Task Handoff owns this execution boundary');
         let created = null;
         let attached = false;
         let startedByRequest = false;
         try {
+          const modelConfig = {
+            model: r.input.model ?? task.modelConfig?.model,
+            modelProvider: r.input.modelProvider ?? task.modelConfig?.modelProvider,
+            reasoningEffort: r.input.reasoningEffort ?? task.modelConfig?.reasoningEffort
+          };
           created = await agentBroker.createSession(provider, { cwd: ws.root, taskId: task.id, workspaceId: ws.id,
-            model: r.input.model, modelProvider: r.input.modelProvider, reasoningEffort: r.input.reasoningEffort });
+            ...modelConfig });
           if (!created?.sessionId) throw capabilityError('PROVIDER_ERROR', 'Agent returned no session');
           if (r.signal?.aborted) throw capabilityError('INVOKE_CANCELLED', 'Agent assignment cancelled');
           const assignment = taskRuntime.attachAgent({ id: task.id, expectedRev: task.rev, provider, sessionId: created.sessionId });
@@ -566,6 +584,10 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
           const sent = await agentBroker.send({ provider, sessionId: created.sessionId, content: String(r.input.content || task.goal) });
           if (sent?.accepted !== true) throw capabilityError('AGENT_SEND_REJECTED', 'Agent did not accept Task instruction');
           if (r.signal?.aborted) throw capabilityError('INVOKE_CANCELLED', 'Agent assignment cancelled');
+          if (Object.values(modelConfig).some(value => value !== null && value !== undefined && value !== '')) {
+            const latest = taskFor(task.id);
+            taskRuntime.setModelConfig({ id: task.id, expectedRev: latest.rev, ...modelConfig });
+          }
           return { taskId: task.id, workspaceId: ws.id, provider, sessionId: created.sessionId, accepted: sent?.accepted === true, actor };
         } catch (error) {
           if (created?.sessionId) stopTaskFollow(provider, created.sessionId);
@@ -595,7 +617,10 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
         }
       })();
       provisioning.set(task.id, pending);
-      try { return await pending; } finally { if (provisioning.get(task.id) === pending) provisioning.delete(task.id); }
+      try { return await pending; } finally {
+        if (provisioning.get(task.id) === pending) provisioning.delete(task.id);
+        if (workspaceProvisioning.get(task.workspaceId) === task.id) workspaceProvisioning.delete(task.workspaceId);
+      }
       });
     }
   });
@@ -681,6 +706,18 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     return result;
   }
   return { execute, executeWorkspace, executeMemory, broker, grantTask, principalForTask, refreshTaskWorkspaceGrant, memoryPrincipal,
+    isTaskProvisioning(taskId) { return provisioning.has(String(taskId ?? '')); },
+    setTaskHandoffGuard(guard) {
+      if (typeof guard !== 'function') throw capabilityError('INVALID_PARAMS', 'Task Handoff guard must be a function');
+      taskHandoffGuard = guard;
+    },
+    trackTaskAgent({ taskId, provider, sessionId }) {
+      const task = taskFor(taskId);
+      if (!task || task.currentAgent?.provider !== provider || task.currentAgent?.sessionId !== sessionId) {
+        throw capabilityError('TASK_NOT_AUTHORIZED', 'Task Agent follow requires the current assignment');
+      }
+      return ensureTaskFollow(provider, sessionId, taskId) !== null;
+    },
     applyAgentWorkspaceChanges, workspaceImportStatus, cancelWorkspaceImportApproval,
     async close() {
       const consumers = [...taskFollowConsumers.values()];

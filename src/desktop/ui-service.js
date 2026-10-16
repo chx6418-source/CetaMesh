@@ -71,7 +71,7 @@ function projectSession(value) {
   const config = record(row.config);
   return {
     id: string(row.id, 128), title: string(row.title, 200), createdAt: scalar(row.createdAt),
-    updatedAt: scalar(row.updatedAt), archived: row.archived === true,
+    updatedAt: scalar(row.updatedAt), archived: row.archived === true, taskId: string(row.taskId, 128) || null,
     config: {
       mode: string(config.mode, 40), modelProvider: string(config.modelProvider, 80) || null,
       model: string(config.model, 200), agentProvider: string(config.agentProvider, 80) || null,
@@ -114,6 +114,11 @@ function projectTask(value) {
     const artifact = record(item);
     return { id: string(artifact.id, 128), kind: string(artifact.kind, 80), label: string(artifact.label, 300), createdAt: scalar(artifact.createdAt) };
   }) : [];
+  const agentHistory = Array.isArray(row.agentHistory) ? row.agentHistory.slice(-100).map(item => {
+    const agent = record(item);
+    return { provider: string(agent.provider, 100), sessionId: string(agent.sessionId, 160),
+      attachedAt: scalar(agent.attachedAt), detachedAt: scalar(agent.detachedAt), note: string(agent.note, 1000) };
+  }) : [];
   return {
     id: string(row.id, 128), title: string(row.goal, 500), goal: string(row.goal, 2000),
     status: string(row.status, 40), currentPhase: string(row.currentPhase, 500),
@@ -124,7 +129,8 @@ function projectTask(value) {
     createdAt: scalar(row.createdAt), updatedAt: scalar(row.updatedAt), rev: Number.isSafeInteger(row.rev) ? row.rev : null,
     checkpoint: checkpoint.summary ? { summary: string(checkpoint.summary, 2000), nextAction: string(checkpoint.nextAction, 500) } : null,
     result: result.summary ? { summary: string(result.summary, 4000) } : null,
-    artifacts
+    artifacts, agentHistory,
+    failure: row.failure ? { reason: string(record(row.failure).reason, 1000) } : null
   };
 }
 
@@ -434,6 +440,7 @@ export function createDesktopUiService({ services = {}, system = services.system
   const task = (method, params) => call(services.taskService, method, params);
   const memory = (method, params) => call(services.memoryService, method, params);
   const agent = (method, params) => call(services.agentService, method, params);
+  const continuity = (method, params) => call(services.continuityService, method, params, true);
   const plugins = (method, params) => call(services.pluginCenterService, method, params);
   const extensions = (method, params) => call(services.extensionService, method, params);
   const integrations = (method, params) => call(services.integrationService, method, params);
@@ -447,11 +454,22 @@ export function createDesktopUiService({ services = {}, system = services.system
 
   async function runTask(taskRow, { provider, content, requestId, modelProvider, model } = {}) {
     if (!taskRow.workspaceId) throw uiError('TASK_WORKSPACE_REQUIRED', '任务需要绑定工作区才能启动 Agent');
+    let recoveryFacts = '';
+    if (taskRow.status === 'blocked' && /interrupted after Core restart/i.test(taskRow.progress?.note ?? '')) {
+      const status = await capability('capability.execute', { capability: 'git.status',
+        taskId: taskRow.id, workspaceId: taskRow.workspaceId, input: {}, reason: 'Verify Task Workspace before recovery' });
+      const diff = await capability('capability.execute', { capability: 'git.diff',
+        taskId: taskRow.id, workspaceId: taskRow.workspaceId, input: { statOnly: true }, reason: 'Verify Task diff before recovery' });
+      if (status.status !== 'completed' || status.result?.isRepo !== true || diff.status !== 'completed') {
+        throw uiError('TASK_RECOVERY_REVIEW_REQUIRED', '工作区状态无法核验，请检查后再恢复任务');
+      }
+      recoveryFacts = `\n[Workspace recovery verification]\n${JSON.stringify({ status: status.result, diff: diff.result }).slice(0, 8000)}`;
+    }
     const result = await capability('capability.execute', { capability: 'agent.run',
       taskId: taskRow.id, workspaceId: taskRow.workspaceId, requestId,
       input: { agentProvider: provider || taskRow.currentAgent?.provider || 'cetamesh',
-        content: content || [taskRow.goal, ...(taskRow.requirements ?? []),
-          taskRow.checkpoint?.summary ?? '', taskRow.checkpoint?.nextAction ?? ''].filter(Boolean).join('\n'),
+        content: (content || [taskRow.goal, ...(taskRow.requirements ?? []),
+          taskRow.checkpoint?.summary ?? '', taskRow.checkpoint?.nextAction ?? ''].filter(Boolean).join('\n')) + recoveryFacts,
         ...(modelProvider ? { modelProvider } : {}), ...(model ? { model } : {}) },
       reason: 'Desktop Owner Task execution' });
     if (result.status !== 'completed' || result.result?.accepted !== true) {
@@ -466,6 +484,9 @@ export function createDesktopUiService({ services = {}, system = services.system
   }
 
   async function stopTask(taskRow) {
+    if (services.continuityService?.runtime?.isInFlight(taskRow.id)) {
+      throw uiError('TASK_HANDOFF_IN_FLIGHT', '任务正在交接执行者，暂不能暂停或取消');
+    }
     if (!taskRow.currentAgent) return;
     await services.agentBroker.cancel(taskRow.currentAgent);
   }
@@ -495,7 +516,8 @@ export function createDesktopUiService({ services = {}, system = services.system
       const result = await chat('chat.status', { id: idParam(p) });
       const turn = record(result.turn);
       return {
-        id: string(result.id, 128), state: string(turn.state ?? result.lastState, 40),
+        id: string(result.id, 128), taskId: string(result.taskId, 128) || null,
+        state: string(turn.state ?? result.lastState, 40),
         requestId: string(turn.requestId, 200) || null,
         followState: string(result.followState, 40) || 'idle', followError: string(result.followError, 100) || null,
         retryCount: Number.isFinite(turn.retryCount) ? Math.max(0, turn.retryCount) : 0,
@@ -600,6 +622,17 @@ export function createDesktopUiService({ services = {}, system = services.system
       const result = await task('task.cancel', { id: current.id, expectedRev: current.rev, reason: string(p.reason, 1000) });
       emit('task.updated', { taskId: result.task?.id, status: result.task?.status });
       return { task: projectTask(result.task) };
+    },
+    'ui.task.handoff': async p => {
+      const current = (await task('task.get', { id: idParam(p) })).task;
+      if (p.expectedRev !== undefined && current.rev !== p.expectedRev) throw uiError('TASK_CONFLICT', '任务已被其他操作修改');
+      if (!current.currentAgent) throw uiError('TASK_AGENT_REQUIRED', '任务尚无可交接的执行者');
+      const targetProvider = boundedText(p.targetProvider, 'targetProvider', 80).trim();
+      if (!targetProvider || targetProvider === current.currentAgent.provider) throw uiError('INVALID_PARAMS', '请选择不同的目标 Agent');
+      const result = await continuity('continuity.rollover', { taskId: current.id, targetProvider, reason: 'provider-switch' });
+      const updated = (await task('task.get', { id: current.id })).task;
+      emit('task.updated', { taskId: updated.id, status: updated.status });
+      return { task: projectTask(updated), handoff: { success: Boolean(result.to?.sessionId), from: result.from, to: result.to } };
     },
     'ui.workspace.list': async () => {
       const result = await workspace('workspace.list', {});

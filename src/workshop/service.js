@@ -118,7 +118,7 @@ export function createWorkshopService({ stateDir, workspaceService, taskRuntime,
       if (task.workspaceId !== p.workspaceId) fail('WORKSHOP_ASSIGNMENT_CONFLICT', 'Task workspace changed after approval');
       if (!['completed', 'failed', 'cancelled'].includes(task.status)) {
         if (task.currentAgent && task.currentAgent.provider !== p.plan.provider) fail('WORKSHOP_ASSIGNMENT_CONFLICT', 'Task provider changed after approval');
-        const result = unwrap(await capabilityBroker.execute({ requestId: 'workshop:' + p.id + ':agent', actor, taskId: p.taskId, workspaceId: p.workspaceId,
+        const result = unwrap(await capabilityBroker.execute({ requestId: 'workshop:' + p.id + ':agent:' + p.provision.attempts, actor, taskId: p.taskId, workspaceId: p.workspaceId,
           capability: 'agent.run', input: { provider: p.plan.provider, content: p.description + '\n' + [...p.requirements, ...p.supplements.map((item) => item.text)].join('\n'),
             grants, model: p.plan.model || undefined, modelProvider: p.plan.modelProvider || undefined, reasoningEffort: p.plan.reasoningEffort || undefined }, approved: true,
           reason: 'Owner approved Workshop Task assignment ' + p.id }));

@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createChatService } from '../src/desktop/chat-service.js';
 import { createDesktopUiEventBus, createDesktopUiService } from '../src/desktop/ui-service.js';
-import { writeJsonAtomic } from '../src/storage/json-file.js';
+import { readJsonFile, writeJsonAtomic } from '../src/storage/json-file.js';
 
 const root = path.resolve(import.meta.dirname, '..');
 const typedBridge = fs.readFileSync(path.join(root, 'desktop-ui/src/bridge/typed-client.ts'), 'utf8');
@@ -1312,6 +1312,57 @@ function makeFullService({ withKey = true, fetchImpl, baseUrl = 'https://api.dee
   }
   ok('历史分页：100/200/500 消息、exclusive cursor、顺序/无重叠、未知 cursor 与边界 limit');
   service.close();
+}
+
+// Phase 3: a Task-bound Chat switches its Agent only through a completed Continuity handoff.
+{
+  const dir = path.join(stateDir, 'phase3-chat-handoff');
+  const initial = makeService({ stateDir: dir });
+  const created = await initial.execute({ method: 'chat.sessions.create', params: {} });
+  initial.close();
+  const file = path.join(dir, 'desktop-chat', 'sessions.json');
+  const saved = readJsonFile(file);
+  const row = saved.sessions.find(item => item.id === created.id);
+  row.taskId = 'task-chat-handoff';
+  row.dshSessionId = 'dsh-old';
+  row.runtimeProvider = 'dsh';
+  row.config.agentProvider = 'dsh';
+  row.config.workspaceId = 'ws-chat-handoff';
+  writeJsonAtomic(file, saved);
+  const api = fixtureApi();
+  let shouldFail = true;
+  const handoffs = [];
+  const service = makeService({ stateDir: dir, api, options: {
+    agentProviders: [
+      { id: 'dsh', eventProtocol: 'dsh-session-events', workspaceBoundary: 'capability-broker' },
+      { id: 'codex', eventProtocol: 'dsh-session-events', workspaceBoundary: 'capability-broker' }
+    ],
+    resolveTask: () => ({ id: 'task-chat-handoff', workspaceId: 'ws-chat-handoff',
+      currentAgent: { provider: 'dsh', sessionId: 'dsh-old' } }),
+    handoffTask: async request => {
+      handoffs.push(request);
+      if (shouldFail) throw Object.assign(new Error('target unavailable'), { code: 'PROVIDER_UNAVAILABLE' });
+      return { to: { provider: 'codex', sessionId: 'codex-new' } };
+    },
+    agentFollow: async function* ({ signal }) {
+      await new Promise(resolve => signal?.addEventListener('abort', resolve, { once: true }));
+    }
+  } });
+  await assert.rejects(service.execute({ method: 'chat.config.set', params: { id: created.id,
+    config: { agentProvider: 'codex' } } }), error => error.code === 'PROVIDER_UNAVAILABLE');
+  let retained = (await service.execute({ method: 'chat.sessions.list', params: {} })).sessions[0];
+  assert.equal(retained.config.agentProvider, 'dsh');
+  assert.equal(api.calls.some(call => call.endpoint === 'workspace/archiveSession'), false);
+  shouldFail = false;
+  const switched = await service.execute({ method: 'chat.config.set', params: { id: created.id,
+    config: { agentProvider: 'codex' } } });
+  assert.equal(switched.taskId, 'task-chat-handoff');
+  assert.equal(switched.dshSessionId, 'codex-new');
+  assert.equal(handoffs.length, 2);
+  assert.equal(api.calls.some(call => call.endpoint === 'workspace/archiveSession'), false,
+    'Chat cannot close the old Task Agent before Continuity confirms the transfer');
+  service.close();
+  ok('Task-bound Chat Agent switch preserves old state on failure and uses Continuity on success');
 }
 
 fs.rmSync(temp, { recursive: true, force: true });

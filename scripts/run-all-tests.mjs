@@ -95,6 +95,8 @@ const REGISTRY = {
   'test-managed-agent-provider.mjs': { category: 'runtime' },
   'test-phase2-chat-model.mjs': { category: 'runtime' },
   'test-phase3-task-handoff.mjs': { category: 'runtime' },
+  'test-phase3-real-codex.mjs': { category: 'environment', requires: ['real-codex'], timeoutMs: 180_000,
+    note: 'Owner-authorized real Codex CLI Task E2E in an isolated disposable Workspace' },
   'test-memory-runtime.mjs': { category: 'runtime' },
   'test-memory-link.mjs': { category: 'runtime' },
   'test-state-retention.mjs': { category: 'runtime' },
@@ -219,7 +221,9 @@ async function probeAvailability() {
     // A live TCP listener may be the user’s real desktop bridge; this suite mutates roles/allowlists and sends a test QQ message.
     'legacy-bridge': isLegacyBridgeTestOptedIn() && await probeTcp(consolePort),
     'cargo-opt-in': process.env.WHALEBRIDGE_TEST_CARGO === '1'
-      && spawnSync('cargo', ['--version'], { timeout: 20000 }).status === 0
+      && spawnSync('cargo', ['--version'], { timeout: 20000 }).status === 0,
+    'real-codex': process.env.WHALEBRIDGE_TEST_REAL_CODEX === '1'
+      && spawnSync('codex', ['login', 'status'], { timeout: 20000 }).status === 0
   };
   return availabilityCache;
 }

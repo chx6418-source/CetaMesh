@@ -96,6 +96,13 @@ try {
   assert.deepEqual(agentCalls.filter(call => call.kind === 'send').map(call => call.content), ['fix a bug in this project']);
   assert.equal(modelRequests.length, 2, 'Project intent runs through Task and Agent, not the Model turn');
 
+  const linkedRecord = { taskId: null, config: { workspaceId, agentProvider: 'cetamesh' } };
+  const linked = await platformRuntime.route({ decision: { agentIntent: true }, record: linkedRecord,
+    text: 'fix a bug in this project' });
+  assert.equal(linked.taskId, tasks[0].id, 'Work and Chat must refer to the same existing Task for an exact goal');
+  assert.equal(linkedRecord.taskId, tasks[0].id);
+  assert.equal(taskRuntime.list().total, 1, 'the same Workspace goal must not create a duplicate Task');
+
   const taskLookupFailureRuntime = new Proxy(taskRuntime, {
     get(target, property) {
       if (property === 'get') return () => { throw Object.assign(new Error('task store read failed'), { code: 'TASK_STORE_IO' }); };

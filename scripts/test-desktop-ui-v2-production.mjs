@@ -73,6 +73,8 @@ check('renderer bridge is typed, Core-backed, bounded, and secret-safe', () => {
   assert.match(host, /api\.request\("ui\.settings\.get"/);
   assert.doesNotMatch(host, /api\.request\("settings\.get"/);
   assert.match(policy, /ui\.plugins\.enable\.review/);
+  assert.match(policy, /"ui\.task\.start"/, 'Work Start must be permitted through the desktop bridge');
+  assert.match(policy, /"ui\.task\.handoff"/, 'Work Handoff must be permitted through the desktop bridge');
 });
 
 check('production WebView denies remote navigation, active content, and HTTP transport', () => {

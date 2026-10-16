@@ -1,5 +1,5 @@
 import {PERMISSIONS,FORBIDDEN_PERMISSIONS,RISK_RANK,capabilityError} from './types.js';
-export function createCapabilityPolicy({resolveWorkspace,resolveTask}={}){
+export function createCapabilityPolicy({resolveWorkspace,resolveTask,isTaskHandoff=()=>false}={}){
  return {async authorize(request,entry){
   const permission=entry.permission??entry.id;
   if(FORBIDDEN_PERMISSIONS.includes(permission))throw capabilityError('PERMISSION_FORBIDDEN',permission);
@@ -8,10 +8,12 @@ export function createCapabilityPolicy({resolveWorkspace,resolveTask}={}){
   if(actor.kind==='external'||actor.kind==='device')throw capabilityError('PERMISSION_DENIED','External/device callers require a trusted restricted adapter');
   if(actor.kind!=='owner' && !actor.grants?.capabilities?.includes(entry.id))throw capabilityError('PERMISSION_DENIED',entry.id+' not granted');
   if(request.taskId){
+   if(actor.kind==='agent'&&isTaskHandoff(request.taskId))throw capabilityError('TASK_HANDOFF_IN_FLIGHT','Task Handoff has not committed the target Agent authority');
    const task=resolveTask?.(request.taskId);
    if(!task)throw capabilityError('TASK_NOT_AUTHORIZED','Assigned Task required');
    if((task.workspaceId??null)!==(request.workspaceId??null))throw capabilityError('WORKSPACE_RECONCILIATION_REQUIRED','Task and execution Workspace do not match');
    if(['completed','failed','cancelled'].includes(task.status))throw capabilityError('TASK_NOT_AUTHORIZED','Terminal Task cannot execute capabilities');
+   if(actor.kind==='agent'&&['paused','blocked'].includes(task.status))throw capabilityError('TASK_NOT_AUTHORIZED','Paused or interrupted Task cannot execute Agent capabilities');
    if(request.assignment && (task.currentAgent?.provider!==request.assignment.provider || task.currentAgent?.sessionId!==request.assignment.sessionId))
     throw capabilityError('AGENT_ASSIGNMENT_EXPIRED','Agent Session no longer owns this Task');
    if(request.approvalBinding && (task.rev!==request.approvalBinding.rev

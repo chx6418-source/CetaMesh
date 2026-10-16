@@ -24,11 +24,17 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
       }
       if (task && task.workspaceId !== workspaceId) task = null;
       if (task && ['completed', 'cancelled', 'failed'].includes(task.status)) task = null;
+      if (!task) task = taskRuntime.findByGoalWorkspace({ goal: text.slice(0, 2000), workspaceId });
       let createdTask = false;
       if (!task) {
         task = taskRuntime.create({ goal: text.slice(0, 2000), workspaceId, note: 'Smart Chat project task' });
         record.taskId = task.id;
         createdTask = true;
+      } else {
+        record.taskId = task.id;
+        if (['paused', 'blocked', 'waiting'].includes(task.status)) {
+          throw capabilityError('TASK_RECOVERY_REVIEW_REQUIRED', 'Existing Task requires explicit recovery before new Agent instructions');
+        }
       }
       if (signal?.aborted) {
         if (createdTask) {
@@ -36,7 +42,8 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
         }
         throw Object.assign(new Error('Chat operation cancelled'), { code: 'ABORTED' });
       }
-      const provider = record.config.agentProvider && record.config.agentProvider !== 'none' ? record.config.agentProvider : 'cetamesh';
+      const provider = record.config.agentProvider && record.config.agentProvider !== 'none'
+        ? record.config.agentProvider : task.currentAgent?.provider || 'cetamesh';
       if (task.currentAgent && task.currentAgent.provider !== provider) {
         if (typeof continuityRuntime?.rollover !== 'function') {
           throw capabilityError('AGENT_PROVIDER_SWITCH_REQUIRES_CONTINUITY', 'Changing Agent Provider on an existing Task requires Continuity Fresh Session');

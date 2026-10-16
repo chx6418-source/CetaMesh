@@ -185,6 +185,8 @@ export function createCetaMeshServices(options = {}) {
     router: routerService,
     buildProductContext: request => productContextService?.buildForChat(request),
     resolveWorkspace: workspaceId => workspaceService.describeWorkspace(workspaceId),
+    resolveTask: taskId => taskService.runtime.get({ id: taskId }).task,
+    handoffTask: request => continuityService.runtime.rollover(request),
     platformRoute: request => platformRuntime.route(request),
     agentFollow: request => agentBroker.follow(request),
     defaults: dshDefaults,
@@ -286,12 +288,15 @@ export function createCetaMeshServices(options = {}) {
     reconciler: continuityReconciler,
     workspaceService,
     capabilityService,
+    canRollover: ({ taskId }) => !capabilityService.isTaskProvisioning(taskId),
+    onHandoffComplete: assignment => capabilityService.trackTaskAgent(assignment),
     listPendingApprovals: ({ taskId }) => capabilityService.broker.approvals
       .list()
       .filter(row => row.request?.taskId === taskId)
       .map(row => ({ approvalId: row.id, capability: row.request?.capability ?? null, expiresAt: row.expiresAt })),
     log
   });
+  capabilityService.setTaskHandoffGuard(taskId => continuityService.runtime.isInFlight(taskId));
   agentBroker.onTurnEnd(payload => continuityService.runtime.observeAgentTurn(payload)
     .catch(error => log('Continuity 回合观察失败：' + String(error?.message ?? error))));
 
@@ -429,7 +434,7 @@ export function createCetaMeshServices(options = {}) {
   };
   const desktopUiService = createDesktopUiService({
     services: {
-      chatService, taskService, workspaceService, memoryService, capabilityService, agentBroker,
+      chatService, taskService, workspaceService, memoryService, capabilityService, agentBroker, continuityService,
       agentService, pluginCenterService, integrationService, extensionService, settingsService, systemServices
     },
     system: systemServices,
