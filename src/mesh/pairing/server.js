@@ -86,7 +86,7 @@ export function createMeshPairingServer({ tls, handlers, log = null } = {}) {
     get port() { return boundPort; },
     listening() { return Boolean(server && server.listening); },
 
-    /** 启动监听；持久化端口被占用时回退到临时端口（endpoint 由调用方按实际端口重建）。 */
+    /** 启动监听；持久化端口被占用或被系统保留时回退到临时端口（endpoint 由调用方按实际端口重建）。 */
     start({ host = '0.0.0.0', port = null, fallbackPort = null } = {}) {
       if (server) return Promise.resolve({ port: boundPort });
       server = https.createServer({ key: tls.keyPem, cert: tls.certPem, minVersion: 'TLSv1.2' }, (req, res) => {
@@ -105,7 +105,9 @@ export function createMeshPairingServer({ tls, handlers, log = null } = {}) {
       return attempt(port === null ? (tls.port || 0) : port)
         .then((actual) => { boundPort = actual; return { port: actual }; })
         .catch((error) => {
-          if (error && error.code === 'EADDRINUSE' && fallbackPort !== null) {
+          // Windows reports an excluded/reserved TCP port as EACCES rather than
+          // EADDRINUSE. The caller may opt into a new ephemeral port in either case.
+          if (error && ['EADDRINUSE', 'EACCES'].includes(error.code) && fallbackPort !== null) {
             return attempt(fallbackPort).then((actual) => { boundPort = actual; return { port: actual, fallback: true }; });
           }
           server = null;

@@ -17,6 +17,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import https from 'node:https';
+import { EventEmitter } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import {
   PAIRING_LIMITS,
@@ -70,6 +72,32 @@ const iso = (ms) => new Date(ms).toISOString();
 const randomB64 = () => crypto.randomBytes(32).toString('base64');
 const sha256hex = (text) => crypto.createHash('sha256').update(text, 'utf8').digest('hex');
 let eventSeq = 0;
+
+async function sectionReservedPortFallback() {
+  const originalCreateServer = https.createServer;
+  const fakeServer = new EventEmitter();
+  const attempts = [];
+  fakeServer.listen = (port, host) => {
+    attempts.push({ port, host });
+    queueMicrotask(() => {
+      if (attempts.length === 1) fakeServer.emit('error', Object.assign(new Error('reserved Windows port'), { code: 'EACCES' }));
+      else fakeServer.emit('listening');
+    });
+  };
+  fakeServer.address = () => ({ port: 51234 });
+  fakeServer.close = callback => callback();
+  fakeServer.closeAllConnections = () => {};
+  https.createServer = () => fakeServer;
+  try {
+    const server = createMeshPairingServer({ tls: { keyPem: 'fixture', certPem: 'fixture', port: 50000 }, handlers: {} });
+    const started = await server.start({ host: '127.0.0.1', port: 50000, fallbackPort: 0 });
+    equal('Windows 保留端口 EACCES 回退到临时端口', attempts.map(item => item.port), [50000, 0]);
+    equal('回退后公布实际监听端口', started.port, 51234);
+    await server.stop();
+  } finally {
+    https.createServer = originalCreateServer;
+  }
+}
 
 // ────────────────────────────────────────────────────────────────────────────
 // A. 共享 golden fixtures（协议向量，两端逐字节一致）
@@ -520,6 +548,7 @@ try {
   sectionFixtures();
   console.log('── B. Desktop 身份 v2（P-256）受控迁移 ──');
   sectionIdentityMigration();
+  await sectionReservedPortFallback();
   console.log('── C. 真实局域网 socket 互操作 ──');
   await sectionLiveInterop();
   console.log('── D. 重启 / 撤销 / 一次性 token 持久化 ──');
