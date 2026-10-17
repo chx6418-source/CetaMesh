@@ -93,6 +93,7 @@ export function buildReview(manifest, { packageFingerprint = '' } = {}) {
     network: { hosts },
     scope: { workspace: manifest.scope?.workspace ?? null, paths },
     source: manifest.source,
+    executionBoundary: { osSandbox: false, codeExecution: manifest.type !== 'memory-pack', permissionEnforcement: 'capability-broker' },
     fingerprint,
     packageFingerprint,
     token: reviewToken(fingerprint, declared, riskLevel, packageFingerprint),
@@ -106,6 +107,7 @@ export function reviewSummaryLines(review) {
   const lines = [];
   lines.push(review.name + ' ' + review.version + '（' + review.type + '）');
   if (review.publisher) lines.push('发布者：' + review.publisher);
+  if (review.type !== 'memory-pack') lines.push('执行边界：Worker 进程隔离与 VM/API 限制不提供 OS 沙箱或 Windows AppContainer；仅安装经过人工审查且来源可信的代码扩展。');
   lines.push('风险等级：' + review.riskLevel);
   lines.push('声明能力：' + (review.capabilities.length ? review.capabilities.map((c) => c.id).join('、') : '无'));
   if (review.permissions.length) {

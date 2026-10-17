@@ -159,7 +159,7 @@ export function createPluginCenterService({
     try {
       const saved = readJsonFile(cacheFile, { missing: null, maxBytes: 2 * PLUGIN_CATALOG_LIMITS.maxCatalogBytes });
       if (!saved?.catalog || !Array.isArray(saved.catalog.plugins)) return null;
-      return saved;
+      return { ...saved, catalog: normalizeCatalog(saved.catalog, { catalogUrl, allowedHosts }) };
     } catch (error) {
       log('Plugin Catalog cache could not be read: ' + String(error?.message ?? error));
       return null;
@@ -355,7 +355,7 @@ export function createPluginCenterService({
         review: reviewed.review,
         scan: reviewed.scan,
         permissionDelta,
-        summary: reviewed.summary ?? []
+        summary: ['来源核验：HTTPS 目录与 SHA-256 仅校验包完整性；发布者数字签名尚未实现，作者身份未验证。', ...(reviewed.summary ?? [])]
       };
       staged.set(stageId, {
         stageId, directory: unpacked.directory, plugin, manifest,
@@ -365,7 +365,7 @@ export function createPluginCenterService({
         stageId,
         entry: plugin,
         review,
-        trust: { level: 'catalog-sha256', publisherSignature: 'not-implemented', verifiedPublisher: plugin.verified },
+        trust: { level: 'catalog-sha256', publisherSignature: 'not-implemented', verifiedPublisher: false },
         requiresReview: true,
         enableAfterInstall: false
       };
@@ -433,7 +433,7 @@ export function createPluginCenterService({
       trust: item.trust === 'catalog-sha256'
         ? { level: 'catalog-sha256', publisherSignature: 'not-implemented' }
         : { level: 'local-unverified', publisherSignature: 'none' },
-      enabled: false,
+      enabled: result?.entry?.status === 'enabled',
       permissionDelta: item.permissionDelta
     };
   }
@@ -488,7 +488,7 @@ export function createPluginCenterService({
     return {
       stageId,
       entry: validation.manifest,
-      review: { manifest: validation.manifest, review: reviewed.review, scan: reviewed.scan, permissionDelta: reviewed.permissionDelta },
+      review: { manifest: validation.manifest, review: reviewed.review, scan: reviewed.scan, permissionDelta: reviewed.permissionDelta, summary: reviewed.summary ?? [] },
       trust: { level: 'local-unverified', publisherSignature: 'none' },
       requiresReview: true,
       enableAfterInstall: false
@@ -673,7 +673,7 @@ export function createPluginCenterService({
     },
     close() {
       for (const item of staged.values()) {
-        if (item.kind === 'catalog') cleanupPluginStage(item.directory);
+        if (item.kind === 'catalog' || item.kind === 'local-package') cleanupPluginStage(item.stagingDirectory ?? item.directory);
       }
       staged.clear();
       rollbackReviews.clear();

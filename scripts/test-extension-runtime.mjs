@@ -97,6 +97,8 @@ try {
   equal('Tool 扩展可安装（无 blocker）', helloReview.review.installable, true);
   equal('Tool 扩展声明能力', helloReview.review.capabilities.map((c) => c.id), ['hello.greet']);
   equal('Tool 扩展权限仅 log', helloReview.review.permissions.map((p) => p.name), ['log']);
+  equal('Extension Review explicitly denies OS sandbox isolation', helloReview.review.executionBoundary.osSandbox, false);
+  check('Owner review displays the OS sandbox limitation', helloReview.summary.some(line => /OS/.test(line) && /AppContainer/.test(line)));
   check('Tool 扩展源码预检通过', helloReview.scan.ok === true);
 
   const helloInstalled = runtime.install({ sourceDir: HELLO });

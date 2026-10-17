@@ -8,6 +8,8 @@ import { strToU8, zipSync } from 'fflate';
 import { normalizeCatalog } from '../src/plugin-center/catalog.js';
 import { extractPluginPackage, verifyPluginPackage } from '../src/plugin-center/package.js';
 import { createPluginCenterService } from '../src/plugin-center/service.js';
+import { createExtensionRuntime, createExtensionStore } from '../src/extension/index.js';
+import { writeJsonAtomic } from '../src/storage/json-file.js';
 import { createPluginCatalogFixture } from './test-support/plugin-catalog-fixture.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -45,7 +47,7 @@ function manifest(version = '1.0.0') {
 function packageBytes(version = '1.0.0', overrides = {}) {
   return zipSync({
     'extension.json': new TextEncoder().encode(JSON.stringify({ ...manifest(version), ...overrides })),
-    'index.js': new TextEncoder().encode('export async function invoke(input) { return { greeting: `Hello, ${input.name}` }; }\n'),
+    'index.js': new TextEncoder().encode('module.exports.handlers = { hello: input => ({ greeting: `Hello, ${input.name}` }) };\n'),
     'README.md': new TextEncoder().encode('# Hello Tool\n')
   });
 }
@@ -77,7 +79,8 @@ await check('Catalog contract normalizes fields and rejects malformed or unsafe 
     catalogUrl: 'https://plugins.example.test/api/catalog.json', allowedHosts
   });
   assert.equal(normalized.plugins[0].id, 'cetamesh.hello-tool');
-  assert.equal(normalized.plugins[0].verified, true);
+  assert.equal(normalized.plugins[0].verified, false, 'unsigned catalog metadata cannot verify a publisher');
+  assert.equal(normalized.plugins[0].catalogClaimedVerified, true);
   assert.throws(() => normalizeCatalog({ schemaVersion: 1, plugins: [catalogPlugin({
     packageUrl: 'file:///C:/secret.zip'
   })] }, { catalogUrl: 'https://plugins.example.test/catalog.json', allowedHosts }), { code: 'CATALOG_INVALID' });
@@ -230,6 +233,11 @@ await check('offline cache is explicit and cannot stage installs without network
     unavailable = true;
     const offline = await service.execute({ method: 'plugin-center.catalog.list', params: { view: 'all' } });
     assert.equal(offline.offline, true);
+    writeJsonAtomic(path.join(root, 'plugin-center', 'plugin-catalog-cache.json'), {
+      cachedAt: '2026-10-11T00:00:00Z', catalog: { schemaVersion: 1, plugins: [catalogPlugin()] }
+    });
+    const oldCache = await service.execute({ method: 'plugin-center.catalog.list', params: { view: 'all' } });
+    assert.equal(oldCache.plugins[0].verified, false, 'old cached verified claims must not bypass publisher verification');
     await assert.rejects(service.execute({ method: 'plugin-center.package.stage', params: { id: 'cetamesh.hello-tool' } }), { code: 'PLUGIN_OFFLINE' });
   } finally {
     await service.close();
@@ -268,6 +276,9 @@ await check('installation delegates review/install to Extension Runtime and rema
   try {
     const staged = await service.execute({ method: 'plugin-center.package.stage', params: { id: 'cetamesh.hello-tool' } });
     assert.equal(staged.review.manifest.id, 'cetamesh.hello-tool');
+    assert.equal(staged.trust.verifiedPublisher, false);
+    assert.equal(staged.trust.publisherSignature, 'not-implemented');
+    assert.ok(staged.review.summary.some(line => /SHA-256/.test(line) && /签名/.test(line)));
     await assert.rejects(service.execute({ method: 'plugin-center.package.install', params: { stageId: staged.stageId } }), { code: 'PERMISSION_REVIEW_REQUIRED' });
     const installed = await service.execute({ method: 'plugin-center.package.install', params: { stageId: staged.stageId, reviewed: true } });
     assert.equal(installed.entry.status, 'installed');
@@ -484,7 +495,7 @@ await check('compatibility and revoked-version policy fail closed before downloa
   }
 });
 
-await check('loopback Catalog drives verified install, enable, update, rollback, uninstall, and offline states', async () => {
+await check('loopback Catalog drives digest-checked package delegation and offline states', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-plugin-loopback-'));
   const firstBytes = packageBytes('1.0.0');
   const secondBytes = packageBytes('1.1.0');
@@ -640,6 +651,89 @@ await check('loopback Catalog drives verified install, enable, update, rollback,
     assert.ok(fixture.requests.every(request => request.method === 'GET'));
   } finally {
     await service.close();
+    await fixture.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+await check('abandoned local archive review cleans staging without deleting the selected archive', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-plugin-abandoned-'));
+  const archive = path.join(root, 'local.zip');
+  fs.writeFileSync(archive, packageBytes());
+  const source = path.join(root, 'source');
+  fs.mkdirSync(source);
+  writeJsonAtomic(path.join(source, 'extension.json'), manifest());
+  fs.writeFileSync(path.join(source, 'index.js'), 'module.exports.handlers = { hello: input => input };');
+  const runtime = createExtensionRuntime({ store: createExtensionStore({ stateDir: root }), monitorIntervalMs: 0 });
+  const service = createPluginCenterService({ stateDir: root, extensionRuntime: runtime,
+    settingsStore: { get: () => ({ settings: { extensions: { developerMode: true } } }) } });
+  try {
+    const localReview = await service.execute({ method: 'plugin-center.developer.stageLocal', params: { directory: source } });
+    assert.ok(localReview.review.summary?.some(line => /OS/.test(line) && /AppContainer/.test(line)),
+      'local directory review must preserve the Worker limitation for the UI');
+    await service.execute({ method: 'plugin-center.developer.stageLocal', params: { file: archive } });
+    const staging = path.join(root, 'plugin-center', 'staging');
+    assert.equal(fs.readdirSync(staging).length, 1);
+    service.close();
+    assert.equal(fs.readdirSync(staging).length, 0, 'cancelled archive review must release its extracted package');
+    assert.equal(fs.existsSync(archive), true);
+    assert.equal(fs.existsSync(source), true);
+  } finally {
+    service.close();
+    await runtime.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+await check('Catalog package uses real Extension Store and Worker through invoke, update, rollback, and uninstall', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-plugin-real-worker-'));
+  const bytesV1 = packageBytes();
+  const bytesV2 = packageBytes('1.1.0');
+  const record = (version, bytes) => catalogPlugin({ version,
+    packageUrl: 'https://plugins.example.test/packages/' + version + '.zip',
+    packageSha256: crypto.createHash('sha256').update(bytes).digest('hex'), packageBytes: bytes.byteLength });
+  let plugin = record('1.0.0', bytesV1);
+  const fixture = await createPluginCatalogFixture({ getCatalog: () => ({ schemaVersion: 1, plugins: [plugin] }),
+    packages: new Map([['/packages/1.0.0.zip', bytesV1], ['/packages/1.1.0.zip', bytesV2]]) });
+  const store = createExtensionStore({ stateDir: root });
+  const runtime = createExtensionRuntime({ store, monitorIntervalMs: 0 });
+  const service = createPluginCenterService({ stateDir: root, catalogUrl: fixture.catalogUrl,
+    allowedHosts: fixture.allowedHosts, extensionRuntime: runtime,
+    fetchImpl: (input, init) => {
+      const requested = new URL(input);
+      assert.equal(requested.origin, new URL(fixture.catalogUrl).origin);
+      return fetch(new URL(requested.pathname, fixture.loopbackOrigin), init);
+    } });
+  const id = plugin.id;
+  try {
+    const staged = await service.execute({ method: 'plugin-center.package.stage', params: { id } });
+    assert.equal(staged.trust.verifiedPublisher, false);
+    const installed = await service.execute({ method: 'plugin-center.package.install', params: { stageId: staged.stageId, reviewed: true } });
+    assert.equal(installed.enabled, false);
+    assert.equal(runtime.get({ id }).loaded, false);
+    const managed = store.get(id).sourceRoot;
+    assert.equal(fs.existsSync(path.join(managed, 'index.js')), true, 'managed files survive stage cleanup');
+    await assert.rejects(runtime.invoke({ id, capability: 'hello', input: { name: 'Owner' } }), { code: 'EXTENSION_DISABLED' });
+    await service.execute({ method: 'plugin-center.plugin.enable', params: { id } });
+    assert.equal(runtime.get({ id }).health.provider, 'process-child');
+    assert.deepEqual((await runtime.invoke({ id, capability: 'hello', input: { name: 'Owner' } })).result, { greeting: 'Hello, Owner' });
+    plugin = record('1.1.0', bytesV2);
+    const update = await service.execute({ method: 'plugin-center.package.stage', params: { id } });
+    const updated = await service.execute({ method: 'plugin-center.package.install', params: { stageId: update.stageId, reviewed: true } });
+    assert.equal(updated.entry.version, '1.1.0');
+    assert.equal(updated.enabled, true, 'update response must reflect the active Worker state');
+    await service.execute({ method: 'plugin-center.package.rollback.review', params: { id } });
+    await service.execute({ method: 'plugin-center.package.rollback', params: { id, reviewed: true } });
+    assert.equal(store.get(id).version, '1.0.0');
+    assert.deepEqual((await runtime.invoke({ id, capability: 'hello', input: { name: 'Rollback' } })).result, { greeting: 'Hello, Rollback' });
+    await service.execute({ method: 'plugin-center.plugin.disable', params: { id } });
+    await assert.rejects(runtime.invoke({ id, capability: 'hello', input: {} }), { code: 'EXTENSION_DISABLED' });
+    await service.execute({ method: 'plugin-center.plugin.uninstall', params: { id } });
+    assert.equal(store.get(id), null);
+    assert.equal(fs.existsSync(managed), false);
+  } finally {
+    service.close();
+    await runtime.close();
     await fixture.close();
     fs.rmSync(root, { recursive: true, force: true });
   }

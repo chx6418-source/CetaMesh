@@ -103,7 +103,10 @@ function normalizePlugin(raw, allowedHosts) {
     capabilities: stringList(raw.capabilities, 'capabilities', 50, 80),
     updatedAt: text(raw.updatedAt, 'updatedAt', 40),
     featured: raw.featured === true,
-    verified: raw.verified === true,
+    // Catalog claims are metadata; no publisher signature verifier exists yet.
+    verified: false,
+    catalogClaimedVerified: raw.catalogClaimedVerified === true || raw.verified === true,
+    publisherSignature: 'not-implemented',
     revoked: raw.revoked === true,
     blockedVersions
   };

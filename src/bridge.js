@@ -73,6 +73,7 @@ import { createDesktopIpcRuntime } from './app/ipc-runtime.js';
 import { createDshLifecycle } from './providers/dsh/lifecycle.js';
 import { createQqRuntime } from './channel/qq/runtime.js';
 import { createQqTransport } from './channel/qq/transport.js';
+import { assertQqDataToolEnabled, qqSocialFlagPolicyEnabled, qqToolPolicyEnabled } from './channel/qq/tool-policy.js';
 import { selectDshSessionModel } from './dsh-model-selection.js';
 import { CONTROL_METHODS, ControlServiceError, createControlService } from './control/control-service.js';
 import { startDataIpcServer, resolveDataPipeName } from './control/data-ipc.js';
@@ -1588,9 +1589,9 @@ async function main() {
     const v2SessionAllowed = isSessionAllowedInCurrentMode;
     // 卡片按钮点击会代表当前 QQ 账号向外部机器人提交回调，属于高风险写操作：
     // 只有明确配置为 true 才启用；旧配置缺少该字段时必须保持关闭。
-    const v2ToolEnabled = (flag) => flag === 'clickCardButton'
+    const v2ToolEnabled = (flag) => qqSocialFlagPolicyEnabled(flag) && (flag === 'clickCardButton'
       ? cfg.socialV2?.tools?.clickCardButton === true
-      : cfg.socialV2?.tools?.[flag] !== false;
+      : cfg.socialV2?.tools?.[flag] !== false);
     const controlService = createControlService({
       listRoles,
       roleExists: (name) => Boolean(resolveRoleFile(name, APP_PATHS)),
@@ -2175,6 +2176,12 @@ async function main() {
         }
       };
       try {
+        try {
+          assertQqDataToolEnabled(url.pathname);
+        } catch (error) {
+          sendJson({ ok: false, code: error.code, error: error.message }, 403);
+          return;
+        }
         // 空 agent token 一律拒绝，防止 MCP 传入空字符串时被当作“管理端/无 token”绕过校验
         if (req.headers['x-agent-token'] === '') {
           sendJson({ ok: false, error: 'agent token 不能为空' }, 403);
@@ -3368,7 +3375,10 @@ async function main() {
           const stickerToolFlags = new Set(['listStickers', 'getStickerImage', 'sendSticker', 'setStickerRemark', 'stickerNote', 'collectSticker']);
           const enabledTools = [];
           for (const [flag, name] of Object.entries(toolMap)) {
-            if (v2ToolEnabled(flag) && !(stickerToolFlags.has(flag) && !stickerEnabled())) enabledTools.push(name);
+            if (v2ToolEnabled(flag) && !(stickerToolFlags.has(flag) && !stickerEnabled())) {
+              const activeNames = (name.match(/qq_[a-z_]+/g) ?? []).filter(toolName => qqToolPolicyEnabled(toolName));
+              if (activeNames.length) enabledTools.push(activeNames.join(' / '));
+            }
           }
           sendJson({
             ok: true,
@@ -6347,7 +6357,7 @@ async function main() {
     if (currentMode !== 'social') return cardButtonFailure(403, '卡片按钮点击仅 social 模式可用');
     if (cfg.socialV2?.enabled === false) return cardButtonFailure(403, '二代模式已关闭，拒绝执行卡片点击');
     if (socialV2.paused) return cardButtonFailure(403, '二代 AI 已暂停，拒绝执行卡片点击');
-    if (cfg.socialV2?.tools?.clickCardButton !== true) {
+    if (cfg.socialV2?.tools?.clickCardButton !== true || !qqToolPolicyEnabled('qq_click_card_button')) {
       return cardButtonFailure(403, '高风险工具未启用：qq_click_card_button（请在桥接控制台确认风险后开启）');
     }
     const groupId = Number(keyMatch[1]);

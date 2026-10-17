@@ -1,7 +1,19 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { createQqRuntime } from '../src/channel/qq/runtime.js';
 import { createQqTransport } from '../src/channel/qq/transport.js';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { createIntegrationService } from '../src/integrations/service.js';
+import { assertQqDataToolEnabled, qqSocialFlagPolicyEnabled, qqToolPolicyEnabled } from '../src/channel/qq/tool-policy.js';
+import { writeJsonAtomic } from '../src/storage/json-file.js';
+import { dataCall, resolveDataPipeName } from '../src/control/data-ipc.js';
+import { terminateSuiteProcessTree } from '../src/testing/suite-process.js';
 
 class FakeClient extends EventEmitter {
   constructor() {
@@ -70,4 +82,98 @@ assert.deepEqual(client.sent, [
   ['group', 43, { type: 'text', data: { text: 'hi' } }]
 ]);
 
-console.log('PASS QQ runtime connection lifecycle and basic transport adapter');
+const mcpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-qq-policy-mcp-'));
+const policyOptions = { stateDir: path.join(mcpRoot, 'state') };
+const integration = createIntegrationService(policyOptions);
+const clientTransport = new StdioClientTransport({ command: process.execPath,
+  args: [path.resolve(import.meta.dirname, '../src/mcp-snowluma-safe.js')],
+  env: { ...process.env, WHALEBRIDGE_DATA_DIR: mcpRoot }, stderr: 'pipe' });
+const mcpClient = new Client({ name: 'qq-policy-fixture', version: '1.0.0' });
+try {
+  await mcpClient.connect(clientTransport);
+  await integration.execute({ method: 'plugins.tool.toggle', params: {
+    pluginId: 'cetamesh-bionic-chat', toolId: 'mcp__snowluma__qq_status', enabled: false
+  } });
+  const disabled = await mcpClient.callTool({ name: 'qq_status', arguments: {} });
+  assert.equal(disabled.isError, true);
+  assert.match(disabled.content[0].text, /TOOL_DISABLED/, 'MCP callback must enforce a hot persisted plugin tool switch before network IO');
+  await integration.execute({ method: 'plugins.tool.toggle', params: {
+    pluginId: 'cetamesh-bionic-chat', toolId: 'mcp__snowluma__qq_get_card_msg', enabled: false
+  } });
+  assert.equal(qqSocialFlagPolicyEnabled('getCardMsg', policyOptions), false, 'Bridge prompt and cfg flag must reflect the same tool switch');
+  assert.throws(() => assertQqDataToolEnabled('/api/socialV2/card-message', policyOptions), { code: 'TOOL_DISABLED' });
+  assert.equal(qqToolPolicyEnabled('qq_click_card_button', policyOptions), false, 'registry cannot override default-off card policy');
+  await integration.execute({ method: 'plugins.tool.toggle', params: {
+    pluginId: 'cetamesh-bionic-chat', toolId: 'mcp__snowluma__qq_get_card_msg', enabled: true
+  } });
+  assert.equal(qqSocialFlagPolicyEnabled('getCardMsg', policyOptions), true, 'enable takes effect without restarting the MCP process');
+  assert.doesNotThrow(() => assertQqDataToolEnabled('/api/socialV2/card-message', policyOptions), 'policy does not require a Core-managed MCP process');
+  await integration.execute({ method: 'plugins.disable', params: { id: 'cetamesh-bionic-chat' } });
+  const parentDisabled = await mcpClient.callTool({ name: 'qq_get_recent_messages', arguments: { key: 'group:1', token: 'fixture' } });
+  assert.equal(parentDisabled.isError, true);
+  assert.match(parentDisabled.content[0].text, /TOOL_DISABLED/);
+  assert.equal(qqSocialFlagPolicyEnabled('getRecent', policyOptions), false);
+  assert.throws(() => assertQqDataToolEnabled('/api/socialV2/recent', policyOptions), { code: 'TOOL_DISABLED' });
+} finally {
+  await mcpClient.close();
+  await integration.close();
+  fs.rmSync(mcpRoot, { recursive: true, force: true });
+}
+
+console.log('PASS QQ runtime connection lifecycle, transport, and persisted MCP tool policy');
+
+// Real isolated Core IPC verifies that direct data calls cannot bypass the MCP guard.
+const workerRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-qq-policy-worker-'));
+const repoRoot = path.resolve(import.meta.dirname, '..');
+const discoveryRoot = path.join(workerRoot, 'discovery');
+fs.mkdirSync(discoveryRoot);
+writeJsonAtomic(path.join(workerRoot, 'config.json'), {
+  consolePort: 9, consoleToken: 'qq-policy-fixture-console-token',
+  allow: { groups: [], private: [] }, deny: { groups: [], private: [] }, allowAllWhenEmpty: false,
+  snowluma: { httpUrl: 'http://127.0.0.1:9', wsUrl: 'ws://127.0.0.1:9', allowProcessControl: false },
+  dsh: { baseUrl: 'http://127.0.0.1:9' }
+});
+const workerIntegration = createIntegrationService({ stateDir: path.join(workerRoot, 'state') });
+const worker = spawn(process.execPath, [path.join(repoRoot, 'src', 'core-entry.js'), '--worker'], {
+  cwd: repoRoot, windowsHide: true, detached: process.platform !== 'win32', stdio: 'ignore',
+  env: { ...process.env, WHALEBRIDGE_DATA_DIR: workerRoot, WHALEBRIDGE_RESOURCE_DIR: repoRoot,
+    PATH: discoveryRoot, USERPROFILE: discoveryRoot, LOCALAPPDATA: discoveryRoot, APPDATA: discoveryRoot,
+    ProgramFiles: discoveryRoot, 'ProgramFiles(x86)': discoveryRoot }
+});
+try {
+  const pipeName = resolveDataPipeName({ dataRoot: workerRoot });
+  let token;
+  let ready = false;
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline && !ready) {
+    try {
+      token = fs.readFileSync(path.join(workerRoot, 'state', 'agent-token'), 'utf8').trim();
+      ready = (await dataCall({ path: '/api/status', token, pipeName, timeoutMs: 500 })).ok;
+    } catch (error) {
+      if (worker.exitCode !== null) throw new Error('QQ fixture Core exited before IPC readiness');
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+  }
+  assert.equal(ready, true, 'isolated Core must expose its real data IPC');
+  const recent = () => dataCall({ path: '/api/socialV2/recent', query: { key: 'group:1' }, sessionToken: 'invalid-fixture', token, pipeName });
+  assert.notEqual((await recent()).json?.code, 'TOOL_DISABLED');
+  await workerIntegration.execute({ method: 'plugins.tool.toggle', params: {
+    pluginId: 'cetamesh-bionic-chat', toolId: 'mcp__snowluma__qq_get_recent_messages', enabled: false
+  } });
+  const deniedRoute = await recent();
+  assert.equal(deniedRoute.status, 403);
+  assert.equal(deniedRoute.json.code, 'TOOL_DISABLED', 'already-running Core must enforce a hot tool switch before session execution');
+  await workerIntegration.execute({ method: 'plugins.disable', params: { id: 'cetamesh-bionic-chat' } });
+  const deniedSend = await dataCall({ method: 'POST', path: '/api/send/group', body: { groupId: 1, message: 'blocked fixture' }, token, pipeName });
+  assert.equal(deniedSend.status, 403);
+  assert.equal(deniedSend.json.code, 'TOOL_DISABLED', 'direct data IPC cannot bypass the pack switch');
+  console.log('PASS real isolated Core data IPC enforces hot tool and pack switches without QQ sends');
+} finally {
+  if (worker.exitCode === null) {
+    const closed = once(worker, 'close');
+    await terminateSuiteProcessTree(worker);
+    await closed;
+  }
+  await workerIntegration.close();
+  fs.rmSync(workerRoot, { recursive: true, force: true });
+}
