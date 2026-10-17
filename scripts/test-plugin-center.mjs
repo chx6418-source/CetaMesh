@@ -49,7 +49,7 @@ function packageBytes(version = '1.0.0', overrides = {}) {
     'extension.json': new TextEncoder().encode(JSON.stringify({ ...manifest(version), ...overrides })),
     'index.js': new TextEncoder().encode('module.exports.handlers = { hello: input => ({ greeting: `Hello, ${input.name}` }) };\n'),
     'README.md': new TextEncoder().encode('# Hello Tool\n')
-  });
+  }, { mtime: new Date('2026-10-11T00:00:00.000Z') });
 }
 
 function catalogPlugin(overrides = {}) {
@@ -73,6 +73,15 @@ function catalogPlugin(overrides = {}) {
 }
 
 const allowedHosts = ['plugins.example.test'];
+
+await check('fixture package digest remains stable across ZIP timestamp boundaries', async () => {
+  const first = catalogPlugin();
+  await new Promise(resolve => setTimeout(resolve, 2200));
+  const second = catalogPlugin();
+  assert.equal(second.packageSha256, first.packageSha256,
+    'the same fixture package must not change Catalog trust as wall clock time advances');
+  assert.equal(second.packageBytes, first.packageBytes);
+});
 
 await check('Catalog contract normalizes fields and rejects malformed or unsafe URLs', async () => {
   const normalized = normalizeCatalog({ schemaVersion: 1, generatedAt: '2026-10-11T00:00:00Z', plugins: [catalogPlugin()] }, {
