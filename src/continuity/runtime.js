@@ -114,7 +114,50 @@ export function createContinuityRuntime({
     onChange: sessions => writeJsonAtomic(monitorFile, { sessions }) });
   const historyFile = path.join(dir, 'rollovers.json');
   const packetDir = path.join(dir, 'handoff');
+  const transactionDir = path.join(dir, 'transactions');
   const inFlight = new Set(); // taskId：rollover 串行互斥
+  const pendingTransactions = new Set();
+
+  function transactionFile(taskId) {
+    return path.join(transactionDir, `${String(taskId)}.json`);
+  }
+
+  function writeTransaction(record) {
+    writeJsonAtomic(transactionFile(record.taskId), record);
+    if (record.state === 'prepared') pendingTransactions.add(record.taskId);
+    else pendingTransactions.delete(record.taskId);
+  }
+
+  // A crash after the old Agent stops can leave a durable Task assignment that
+  // cannot be called committed. Keep it blocked until Owner reconciliation.
+  if (fs.existsSync(transactionDir)) {
+    for (const name of fs.readdirSync(transactionDir)) {
+      if (!name.endsWith('.json')) continue;
+      const record = loadContinuityFile(path.join(transactionDir, name), null);
+      if (!record || record.state !== 'prepared' || typeof record.taskId !== 'string') continue;
+      if (readHistory().rollovers.some(row => row.taskId === record.taskId && row.sequence === record.sequence)) {
+        // History plus the sequence packet are the committed source of truth;
+        // a crash before changing the journal marker does not undo that commit.
+        const committedPacketFile = packetFile(record.taskId, record.sequence);
+        if (!loadContinuityFile(committedPacketFile, null)) {
+          throw continuityError('STORE_CORRUPT', 'Committed Handoff Packet is missing');
+        }
+        try { writeTransaction({ ...record, state: 'committed', committedAt: now() }); }
+        catch (error) { log(`Continuity committed journal marker repair failed: ${error?.code ?? 'WRITE_FAILED'}`); }
+        continue;
+      }
+      pendingTransactions.add(record.taskId);
+      try {
+        const task = taskRuntime.get({ id: record.taskId }).task;
+        if (['queued', 'running', 'paused', 'waiting'].includes(task.status)) {
+          taskRuntime.block({ id: task.id, expectedRev: task.rev,
+            reason: 'needs-reconciliation: interrupted Handoff transaction; verify Workspace and execution owner' });
+        }
+      } catch (error) {
+        if (error?.code !== 'TASK_NOT_FOUND') throw error;
+      }
+    }
+  }
 
   function readHistory() {
     const store = loadContinuityFile(historyFile, { schemaVersion: 2, rollovers: [] });
@@ -283,7 +326,10 @@ export function createContinuityRuntime({
 
   function nextSequence(taskId) {
     const store = readHistory();
-    const latest = loadContinuityFile(latestPacketFile(taskId), null);
+    // Once history owns a committed packet, latest.json is only a cache. A
+    // failed cache replacement must not make the next sequence unreadable.
+    const hasCommitted = store.rollovers.some(entry => entry.taskId === taskId);
+    const latest = hasCommitted ? null : loadContinuityFile(latestPacketFile(taskId), null);
     const prior = Math.max(0, Number(store.sequences?.[taskId]) || 0,
       Number(latest?.sequence) || 0,
       ...store.rollovers.filter(entry => entry.taskId === taskId).map(entry => Number(entry.sequence) || 0));
@@ -430,6 +476,9 @@ export function createContinuityRuntime({
     if (inFlight.has(task.id)) {
       throw continuityError('ROLLOVER_IN_FLIGHT', '该任务已有一次 rollover 正在进行，拒绝重复执行');
     }
+    if (pendingTransactions.has(task.id)) {
+      throw continuityError('HANDOFF_RECOVERY_REQUIRED', 'Prior Handoff transaction needs Owner reconciliation');
+    }
     if (typeof canRollover === 'function' && !canRollover({ taskId: task.id })) {
       throw continuityError('ROLLOVER_NOT_SAFE', '当前不是安全 rollover 点（存在在途回合或未完成的原子操作）');
     }
@@ -485,6 +534,10 @@ export function createContinuityRuntime({
         pendingApprovals: Array.isArray(pendingApprovals) ? pendingApprovals : null
       });
       const packetPath = savePacket(task.id, packet);
+      const transaction = { taskId: task.id, sequence, state: 'prepared',
+        from: previousAgent, to: { provider: targetProvider ?? previousAgent.provider, sessionId: null },
+        packetPath, preparedAt: now() };
+      writeTransaction(transaction);
 
       // Task Store 是乐观锁（expectedRev）：每步前取最新 rev，保证与其它写者兼容。
       const currentRev = () => taskRuntime.get({ id: task.id }).task.rev;
@@ -522,6 +575,7 @@ export function createContinuityRuntime({
         if (!created?.sessionId) {
           throw continuityError('PROVIDER_ERROR', `Agent Provider「${target.id}」未返回 sessionId`);
         }
+        writeTransaction({ ...transaction, to: { provider: target.id, sessionId: created.sessionId } });
         try {
           await agentBroker.cancel({ provider: fromProvider.id, sessionId: previousAgent.sessionId });
           oldStopped = true;
@@ -606,7 +660,7 @@ export function createContinuityRuntime({
             note: `rollover #${sequence} failed after old Agent stopped` });
           taskRuntime.restoreCheckpoint({ id: task.id, expectedRev: currentRev(), checkpoint: previousCheckpoint });
           taskRuntime.block({ id: task.id, expectedRev: currentRev(),
-            reason: `Handoff failed after old Agent stopped (${error?.code ?? 'PROVIDER_ERROR'}); verify Workspace before recovery` });
+            reason: `needs-reconciliation: Handoff failed after old Agent stopped (${error?.code ?? 'PROVIDER_ERROR'}); verify Workspace before recovery` });
         } else if (targetAttached) {
           try {
             taskRuntime.detachAgent({ id: task.id, expectedRev: current.rev, note: `rollover #${sequence} failed; restore prior Agent` });
@@ -620,6 +674,17 @@ export function createContinuityRuntime({
           try { await taskRuntime.restoreCheckpoint({ id: task.id, expectedRev: currentRev(), checkpoint: previousCheckpoint }); }
           catch (rollbackError) {
             log(`Continuity checkpoint rollback failed: ${rollbackError?.code ?? 'CHECKPOINT_ROLLBACK_FAILED'}`);
+          }
+        }
+        if (!oldStopped && targetStopped) {
+          try { writeTransaction({ ...transaction, state: 'rolled-back', resolvedAt: now() }); }
+          catch (journalError) {
+            log(`Continuity rollback journal failed: ${journalError?.code ?? 'WRITE_FAILED'}`);
+            const latest = taskRuntime.get({ id: task.id }).task;
+            if (['running', 'paused', 'waiting'].includes(latest.status)) {
+              taskRuntime.block({ id: latest.id, expectedRev: latest.rev,
+                reason: 'needs-reconciliation: Handoff rollback journal was not saved' });
+            }
           }
         }
         throw error;
@@ -638,8 +703,9 @@ export function createContinuityRuntime({
       }
 
       // 6) 落盘历史 + 重置 monitor（新 session 从零计数）
-      const store = readHistory();
-      store.rollovers.push({
+      try {
+        const store = readHistory();
+        store.rollovers.push({
         taskId: task.id,
         sequence,
         packetId: path.basename(packetPath, '.json'),
@@ -652,8 +718,34 @@ export function createContinuityRuntime({
         workspaceReconciled: reconciliation ? reconciliation.consistent : null,
         reconciliation: reconciliation ?? null,
         at: now()
-      });
-      writeHistory(store);
+        });
+        writeHistory(store);
+      } catch (error) {
+        // The old Session is already stopped and the target is bound. Never
+        // report a failed Handoff while leaving that target as an active writer.
+        try { await agentBroker.cancel({ provider: target.id, sessionId: created.sessionId }); }
+        catch (stopError) { log(`Continuity uncommitted target cancel failed: ${stopError?.code ?? 'PROVIDER_ERROR'}`); }
+        try { await agentBroker.closeSession({ provider: target.id, sessionId: created.sessionId }); }
+        catch (stopError) { log(`Continuity uncommitted target close failed: ${stopError?.code ?? 'PROVIDER_ERROR'}`); }
+        const latest = taskRuntime.get({ id: task.id }).task;
+        if (latest.currentAgent?.sessionId === created.sessionId) {
+          taskRuntime.detachAgent({ id: task.id, expectedRev: latest.rev,
+            note: 'Handoff commit failed; target authority revoked' });
+        }
+        const blocked = taskRuntime.get({ id: task.id }).task;
+        if (['running', 'paused', 'waiting'].includes(blocked.status)) {
+          taskRuntime.block({ id: task.id, expectedRev: blocked.rev,
+            reason: 'needs-reconciliation: Handoff history or commit journal could not be saved' });
+        }
+        throw continuityError('HANDOFF_COMMIT_FAILED', 'Handoff commit was not durable; Owner must reconcile before retrying');
+      }
+      try { writeTransaction({ ...transaction, state: 'committed', committedAt: now() }); }
+      catch (error) {
+        // The history and packet are already durable. Do not falsely report a
+        // failed Handoff; startup repairs this derived journal marker.
+        pendingTransactions.delete(task.id);
+        log(`Continuity committed journal marker update failed: ${error?.code ?? 'WRITE_FAILED'}`);
+      }
       try { writeJsonAtomic(latestPacketFile(task.id), packet); }
       catch (error) { log(`Continuity latest Packet cache update failed: ${error?.code ?? 'WRITE_FAILED'}`); }
       prunePacketFiles(path.join(packetDir, String(task.id)));
@@ -736,7 +828,15 @@ export function createContinuityRuntime({
   }
 
   return {
-    isInFlight(taskId) { return inFlight.has(String(taskId ?? '')); },
+    isInFlight(taskId) { return inFlight.has(String(taskId ?? '')) || pendingTransactions.has(String(taskId ?? '')); },
+    acknowledgeTransactionRecovery(taskId) {
+      const id = String(taskId ?? '');
+      if (!pendingTransactions.has(id)) return { acknowledged: false };
+      const record = loadContinuityFile(transactionFile(id), null);
+      if (!record || record.state !== 'prepared') throw continuityError('STORE_CORRUPT', 'Pending Handoff journal is missing');
+      writeTransaction({ ...record, state: 'reconciled', reconciledAt: now() });
+      return { acknowledged: true, sequence: record.sequence };
+    },
     evaluate,
     observeAgentTurn,
     rollover,

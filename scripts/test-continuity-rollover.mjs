@@ -521,5 +521,63 @@ ok('Handoff Packet retains complete Task requirements');
   ok('cross-Provider Handoff retains and persists the Task-selected model configuration');
 }
 
+{
+  const { runtime, taskRuntime, broker, rev, dir, log } = setup();
+  const task = taskRuntime.create({ goal: 'History failure must revoke target authority', workspaceId: 'ws-history-failure' });
+  taskRuntime.attachAgent({ id: task.id, expectedRev: rev(task.id), provider: 'alpha', sessionId: 'alpha-old' });
+  taskRuntime.start({ id: task.id, expectedRev: rev(task.id) });
+  const historyFile = path.join(dir, 'continuity', 'rollovers.json');
+  const backupFile = path.join(dir, 'continuity', 'rollovers.before-failure.json');
+  const originalArchive = broker.archiveSession.bind(broker);
+  broker.archiveSession = async request => {
+    const result = await originalArchive(request);
+    fs.renameSync(historyFile, backupFile);
+    fs.mkdirSync(historyFile);
+    return result;
+  };
+  await assert.rejects(runtime.rollover({ taskId: task.id, targetProvider: 'beta' }),
+    error => error.code === 'HANDOFF_COMMIT_FAILED');
+  const blocked = taskRuntime.get({ id: task.id }).task;
+  assert.equal(blocked.status, 'blocked', 'history failure must block the Task');
+  assert.equal(blocked.currentAgent, null, 'history failure must revoke the uncommitted target');
+  assert.match(blocked.progress.note, /needs-reconciliation/);
+  assert.ok(log.some(entry => entry.kind === 'cancel' && entry.sessionId === 'beta-s2'),
+    'uncommitted target Session must be stopped');
+  const journalFile = path.join(dir, 'continuity', 'transactions', `${task.id}.json`);
+  assert.equal(JSON.parse(fs.readFileSync(journalFile, 'utf8')).state, 'prepared');
+  fs.rmdirSync(historyFile);
+  fs.renameSync(backupFile, historyFile);
+  const restarted = createContinuityService({ taskRuntime, stateDir: dir, agentBroker: broker });
+  assert.equal(restarted.runtime.isInFlight(task.id), true,
+    'Core restart must continue to block a prepared but uncommitted Handoff');
+  assert.deepEqual(restarted.runtime.history({ taskId: task.id }).rollovers, []);
+  assert.equal(restarted.runtime.acknowledgeTransactionRecovery(task.id).acknowledged, true);
+  assert.equal(restarted.runtime.isInFlight(task.id), false);
+  ok('Handoff history failure leaves a durable review journal and no active target writer');
+}
+
+{
+  const { runtime, taskRuntime, broker, rev, dir } = setup();
+  const task = taskRuntime.create({ goal: 'Latest packet cache may fail independently', workspaceId: 'ws-latest-cache' });
+  taskRuntime.attachAgent({ id: task.id, expectedRev: rev(task.id), provider: 'alpha', sessionId: 'alpha-old' });
+  const latestFile = path.join(dir, 'continuity', 'handoff', task.id, 'latest.json');
+  const originalArchive = broker.archiveSession.bind(broker);
+  broker.archiveSession = async request => {
+    const result = await originalArchive(request);
+    fs.mkdirSync(latestFile);
+    broker.archiveSession = originalArchive;
+    return result;
+  };
+  const first = await runtime.rollover({ taskId: task.id, targetProvider: 'beta' });
+  assert.equal(first.sequence, 1);
+  assert.equal(runtime.history({ taskId: task.id }).total, 1);
+  assert.equal(runtime.latestPacket({ taskId: task.id }).packet.sequence, 1,
+    'committed packet must be read from history when derived latest cache write fails');
+  const restarted = createContinuityService({ taskRuntime, stateDir: dir, agentBroker: broker });
+  const second = await restarted.runtime.rollover({ taskId: task.id, targetProvider: 'alpha' });
+  assert.equal(second.sequence, 2, 'failed latest cache cannot prevent monotonic later handoff');
+  ok('derived latest cache write failure does not corrupt committed Handoff history or sequence');
+}
+
 fs.rmSync(temp, { recursive: true, force: true });
 console.log(`\n🎉 阶段 09 Continuity 全部通过（${step} 组）`);

@@ -50,7 +50,12 @@ try {
   const ready = new Promise(resolve => { releases = resolve; });
   const createSession = services.agentBroker.createSession.bind(services.agentBroker);
   services.agentBroker.createSession = async (...args) => { const session = await createSession(...args); await ready; return session; };
-  services.agentBroker.send = async request => { sent.push(request.content); return { accepted: true }; };
+  services.agentBroker.send = async request => {
+    const ownerTask = services.taskService.runtime.findByAgent({ provider: request.provider, sessionId: request.sessionId });
+    assert.equal(ownerTask?.status, 'running', 'Agent execution must not start while its Task is paused');
+    sent.push(request.content);
+    return { accepted: true };
+  };
   services.agentBroker.status = async () => ({ running: false });
   const run = (requestId, content) => services.capabilityService.broker.execute({ requestId,
     actor: OWNER_ACTOR, taskId: task.id, workspaceId: workspace.id, capability: 'agent.run',
@@ -401,6 +406,108 @@ try {
     assert.doesNotMatch(riskAfterReviewRestart.taskService.runtime.get({ id: riskTask.id }).task.progress.note,
       /needs-reconciliation/, 'an already reconciled effect must not reappear as uncertain after another restart');
   } finally { riskAfterReviewRestart.chatService.close(); await riskAfterReviewRestart.capabilityService.close(); }
+
+  const nonGitState = path.join(root, 'non-git-state');
+  const nonGitData = path.join(root, 'non-git-data');
+  const nonGitBefore = createCetaMeshServices({ stateDir: nonGitState, dataRoot: nonGitData });
+  const nonGitRoot = path.join(root, 'non-git-workspace');
+  fs.mkdirSync(nonGitRoot);
+  fs.writeFileSync(path.join(nonGitRoot, 'report.txt'), 'Existing result must not be replayed');
+  const { workspace: nonGitWorkspace } = await nonGitBefore.workspaceService.execute({ method: 'workspace.create',
+    params: { name: 'Non Git recovery', root: nonGitRoot } });
+  let nonGitTask = nonGitBefore.taskService.runtime.create({ goal: 'Continue a non Git project', workspaceId: nonGitWorkspace.id });
+  nonGitTask = nonGitBefore.taskService.runtime.attachAgent({ id: nonGitTask.id, expectedRev: nonGitTask.rev,
+    provider: 'cetamesh', sessionId: 'stale-managed-session' }).task;
+  nonGitTask = nonGitBefore.taskService.runtime.start({ id: nonGitTask.id, expectedRev: nonGitTask.rev }).task;
+  nonGitBefore.chatService.close();
+  await nonGitBefore.capabilityService.close();
+  const nonGitRestart = createCetaMeshServices({ stateDir: nonGitState, dataRoot: nonGitData });
+  try {
+    const interrupted = nonGitRestart.taskService.runtime.get({ id: nonGitTask.id }).task;
+    assert.equal(interrupted.status, 'blocked');
+    await assert.rejects(nonGitRestart.desktopUiService.execute({ method: 'ui.task.resume',
+      params: { id: interrupted.id, expectedRev: interrupted.rev } }),
+    error => error.code === 'TASK_RECOVERY_REVIEW_REQUIRED',
+    'non Git restart must require Owner review instead of retrying unknown effects');
+    const reviewed = await nonGitRestart.desktopUiService.execute({ method: 'ui.task.reconcile', params: {
+      id: interrupted.id, expectedRev: interrupted.rev, reviewed: true,
+      reviewSummary: 'Checked report.txt and confirmed the prior operation is complete',
+      nextInstruction: 'Read report.txt only; do not repeat the prior write',
+      requestId: 'non-git-reviewed-new-instruction'
+    } });
+    assert.equal(reviewed.task.status, 'running', 'Owner-reviewed non Git Task can continue with a new instruction');
+    assert.match(fs.readFileSync(path.join(nonGitRoot, 'report.txt'), 'utf8'), /Existing result/);
+    const latestBeforePause = nonGitRestart.taskService.runtime.get({ id: interrupted.id }).task;
+    const pausedAgain = await nonGitRestart.desktopUiService.execute({ method: 'ui.task.pause',
+      params: { id: interrupted.id, expectedRev: latestBeforePause.rev } });
+    const originalNonGitSend = nonGitRestart.agentBroker.send;
+    nonGitRestart.agentBroker.send = async () => {
+      throw Object.assign(new Error('fixture send failed after Task resume'), { code: 'PROVIDER_ERROR' });
+    };
+    try {
+      await assert.rejects(nonGitRestart.desktopUiService.execute({ method: 'ui.task.resume',
+        params: { id: interrupted.id, expectedRev: pausedAgain.task.rev } }),
+      error => error.code === 'PROVIDER_ERROR');
+    } finally { nonGitRestart.agentBroker.send = originalNonGitSend; }
+    const failedResume = nonGitRestart.taskService.runtime.get({ id: interrupted.id }).task;
+    assert.equal(failedResume.status, 'blocked', 'failed Resume cannot leave a false running Task');
+    assert.match(failedResume.progress.note, /needs-reconciliation/);
+
+    const raceRoot = path.join(root, 'pause-dispatch-workspace');
+    fs.mkdirSync(raceRoot);
+    const { workspace: raceWorkspace } = await nonGitRestart.workspaceService.execute({ method: 'workspace.create',
+      params: { name: 'Pause dispatch race', root: raceRoot } });
+    let releaseDispatch;
+    const dispatchGate = new Promise(resolve => { releaseDispatch = resolve; });
+    let signalDispatch;
+    const dispatchEntered = new Promise(resolve => { signalDispatch = resolve; });
+    nonGitRestart.agentBroker.send = async () => {
+      signalDispatch();
+      await dispatchGate;
+      return { accepted: true, requestId: 'late-accepted-provider-turn' };
+    };
+    const racingCreate = nonGitRestart.desktopUiService.execute({ method: 'ui.task.create', params: {
+      goal: 'Pause during Agent send', workspaceId: raceWorkspace.id, agentProvider: 'cetamesh'
+    } });
+    await dispatchEntered;
+    const racingTask = nonGitRestart.taskService.runtime.findByGoalWorkspace({
+      goal: 'Pause during Agent send', workspaceId: raceWorkspace.id });
+    assert.equal(racingTask.status, 'running');
+    await nonGitRestart.desktopUiService.execute({ method: 'ui.task.pause', params: {
+      id: racingTask.id, expectedRev: racingTask.rev
+    } });
+    releaseDispatch();
+    await assert.rejects(racingCreate, error => error.code === 'TASK_NOT_RUNNING',
+      'a late Agent ACK cannot revive a Task paused during dispatch');
+    assert.equal(nonGitRestart.taskService.runtime.get({ id: racingTask.id }).task.status, 'paused');
+
+    const cancelRoot = path.join(root, 'cancel-dispatch-workspace');
+    fs.mkdirSync(cancelRoot);
+    const { workspace: cancelWorkspace } = await nonGitRestart.workspaceService.execute({ method: 'workspace.create',
+      params: { name: 'Cancel dispatch race', root: cancelRoot } });
+    let releaseCancel;
+    const cancelGate = new Promise(resolve => { releaseCancel = resolve; });
+    let signalCancel;
+    const cancelEntered = new Promise(resolve => { signalCancel = resolve; });
+    nonGitRestart.agentBroker.send = async () => {
+      signalCancel();
+      await cancelGate;
+      return { accepted: true, requestId: 'cancelled-late-provider-turn' };
+    };
+    const cancellingCreate = nonGitRestart.desktopUiService.execute({ method: 'ui.task.create', params: {
+      goal: 'Cancel during Agent send', workspaceId: cancelWorkspace.id, agentProvider: 'cetamesh'
+    } });
+    await cancelEntered;
+    const cancellingTask = nonGitRestart.taskService.runtime.findByGoalWorkspace({
+      goal: 'Cancel during Agent send', workspaceId: cancelWorkspace.id });
+    await nonGitRestart.desktopUiService.execute({ method: 'ui.task.cancel', params: {
+      id: cancellingTask.id, expectedRev: cancellingTask.rev
+    } });
+    releaseCancel();
+    await assert.rejects(cancellingCreate, error => error.code === 'TASK_NOT_RUNNING',
+      'a late Agent ACK cannot revive a cancelled Task');
+    assert.equal(nonGitRestart.taskService.runtime.get({ id: cancellingTask.id }).task.status, 'cancelled');
+  } finally { nonGitRestart.chatService.close(); await nonGitRestart.capabilityService.close(); }
 } finally {
   await services.capabilityService.close();
   fs.rmSync(root, { recursive: true, force: true });

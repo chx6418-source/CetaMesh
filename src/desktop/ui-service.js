@@ -564,26 +564,54 @@ export function createDesktopUiService({ services = {}, system = services.system
     if (taskRow.status === 'blocked' && /interrupted after Core restart/i.test(taskRow.progress?.note ?? '')) {
       const status = await capability('capability.execute', { capability: 'git.status',
         taskId: taskRow.id, workspaceId: taskRow.workspaceId, input: {}, reason: 'Verify Task Workspace before recovery' });
+      if (status.status !== 'completed') {
+        throw uiError('TASK_RECOVERY_REVIEW_REQUIRED', '工作区状态无法核验，请检查后再恢复任务');
+      }
+      if (status.result?.isRepo !== true) {
+        throw uiError('TASK_RECOVERY_REVIEW_REQUIRED',
+          '非 Git 工作区需要 Owner 核对文件和先前操作，在任务详情填写核对结果及新指令后恢复');
+      }
       const diff = await capability('capability.execute', { capability: 'git.diff',
         taskId: taskRow.id, workspaceId: taskRow.workspaceId, input: { statOnly: true }, reason: 'Verify Task diff before recovery' });
-      if (status.status !== 'completed' || status.result?.isRepo !== true || diff.status !== 'completed') {
-        throw uiError('TASK_RECOVERY_REVIEW_REQUIRED', '工作区状态无法核验，请检查后再恢复任务');
+      if (diff.status !== 'completed') {
+        throw uiError('TASK_RECOVERY_REVIEW_REQUIRED', 'Git 改动无法核验，请检查后再恢复任务');
       }
       recoveryFacts = `\n[Workspace recovery verification]\n${JSON.stringify({ status: status.result, diff: diff.result }).slice(0, 8000)}`;
     }
-    const result = await capability('capability.execute', { capability: 'agent.run',
-      taskId: taskRow.id, workspaceId: taskRow.workspaceId, requestId,
-      input: { agentProvider: await requireTaskProvider(provider || taskRow.currentAgent?.provider, taskRow.workspaceId),
-        content: (content || [taskRow.goal, ...(taskRow.requirements ?? []),
-          taskRow.checkpoint?.summary ?? '', taskRow.checkpoint?.nextAction ?? ''].filter(Boolean).join('\n')) + recoveryFacts,
-        ...(modelProvider ? { modelProvider } : {}), ...(model ? { model } : {}) },
-      reason: 'Desktop Owner Task execution' });
-    if (result.status !== 'completed' || result.result?.accepted !== true) {
-      throw uiError('AGENT_SEND_REJECTED', 'Agent 未接受任务指令');
+    const selectedProvider = await requireTaskProvider(provider || taskRow.currentAgent?.provider, taskRow.workspaceId);
+    const wasPaused = ['paused', 'waiting', 'blocked'].includes(taskRow.status);
+    if (wasPaused) {
+      // A resumed Agent can execute tools immediately. Persist the running Task
+      // state before dispatch so the Task-bound Capability Broker sees one owner.
+      taskRow = (await task('task.resume', { id: taskRow.id, expectedRev: taskRow.rev })).task;
     }
-    let current = (await task('task.get', { id: taskRow.id })).task;
-    if (current.status === 'paused' || current.status === 'waiting' || current.status === 'blocked') {
-      current = (await task('task.resume', { id: current.id, expectedRev: current.rev })).task;
+    let current;
+    try {
+      const result = await capability('capability.execute', { capability: 'agent.run',
+        taskId: taskRow.id, workspaceId: taskRow.workspaceId, requestId,
+        input: { agentProvider: selectedProvider,
+          content: (content || [taskRow.goal, ...(taskRow.requirements ?? []),
+            taskRow.checkpoint?.summary ?? '', taskRow.checkpoint?.nextAction ?? ''].filter(Boolean).join('\n')) + recoveryFacts,
+          ...(modelProvider ? { modelProvider } : {}), ...(model ? { model } : {}) },
+        reason: 'Desktop Owner Task execution' });
+      if (result.status !== 'completed' || result.result?.accepted !== true) {
+        throw uiError('AGENT_SEND_REJECTED', 'Agent 未接受任务指令');
+      }
+      current = (await task('task.get', { id: taskRow.id })).task;
+    } catch (error) {
+      if (wasPaused) {
+        try {
+          const latest = (await task('task.get', { id: taskRow.id })).task;
+          if (latest.status === 'running') {
+            const blocked = await task('task.block', { id: latest.id, expectedRev: latest.rev,
+              reason: 'needs-reconciliation: Agent dispatch failed during Resume; verify prior effects before retrying' });
+            emit('task.updated', { taskId: blocked.task.id, status: blocked.task.status });
+          }
+        } catch (recoveryError) {
+          emit('task.warning', { taskId: taskRow.id, code: recoveryError?.code ?? 'TASK_ROLLBACK_FAILED' });
+        }
+      }
+      throw error;
     }
     emit('task.updated', { taskId: current.id, status: current.status });
     return current;
@@ -810,7 +838,7 @@ export function createDesktopUiService({ services = {}, system = services.system
     'ui.task.reconcile': async p => {
       const current = (await task('task.get', { id: idParam(p) })).task;
       if (p.expectedRev !== undefined && current.rev !== p.expectedRev) throw uiError('TASK_CONFLICT', '任务已被其他操作修改');
-      if (!/needs-reconciliation/i.test(current.progress?.note ?? '')) {
+      if (!/needs-reconciliation|interrupted after Core restart/i.test(current.progress?.note ?? '')) {
         throw uiError('TASK_RECOVERY_NOT_REQUIRED', '任务当前没有待核对的中断副作用');
       }
       if (p.reviewed !== true || !string(p.reviewSummary, 1000).trim()
@@ -838,6 +866,7 @@ export function createDesktopUiService({ services = {}, system = services.system
           }
         } catch (error) { if (error?.code !== 'SESSION_NOT_FOUND') throw error; }
       }
+      services.continuityService?.runtime?.acknowledgeTransactionRecovery?.(current.id);
       services.toolExecutionCoordinator?.acknowledgeTaskRecovery(current.id);
       services.capabilityService.acknowledgeTaskRecovery(current.id);
       const decision = services.taskService.runtime.addDecision({ id: current.id, expectedRev: current.rev,

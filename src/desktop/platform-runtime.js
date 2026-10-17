@@ -117,7 +117,9 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
           await cancelAgentAfterAbort({ provider, sessionId: nextAgent.sessionId });
           throw Object.assign(new Error('Chat operation cancelled'), { code: 'ABORTED' });
         }
-        return { kind: 'agent', taskId: task.id, workspaceId, provider, sessionId: nextAgent.sessionId, accepted: true, continued: true };
+        return { kind: 'agent', taskId: task.id, workspaceId, provider, sessionId: nextAgent.sessionId,
+          accepted: true, requestId: sent.result?.requestId ?? null, turnId: sent.result?.turnId ?? null,
+          continued: true };
       }
       // Smart Project 的 test.run 语义（v2 final security）：
       //   Grant（此处显式传入，含 test.run）= Agent 可以"请求"测试；

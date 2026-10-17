@@ -843,6 +843,17 @@ export function createChatService({
   const pendingUiDeltas = new Map();
 
   function handleChatEvent(record, state, event) {
+    if (state.turn && state.modelTurn?.kind === 'agent' && state.turn.state === 'starting' && !state.turn.agentAcked
+      && !state.turn.providerRequestId && !state.turn.providerTurnId) {
+      const pending = state.turn.pendingAgentEvents ??= [];
+      if (pending.length >= 512) {
+        state.turn.state = 'error';
+        state.turn.errorCode = 'AGENT_EVENT_BUFFER_OVERFLOW';
+        state.turn.error = 'Agent events exceeded the pre-ACK correlation buffer.';
+        finalizeTurn(record, state);
+      } else pending.push(event);
+      return;
+    }
     if (!applyChatEvent(record, state, event)) return;
     const type = event?.type;
     if (type === 'assistant/chunk') {
@@ -877,7 +888,18 @@ export function createChatService({
   function applyChatEvent(record, state, event) {
     const data = event?.data ?? {};
     if (!state.turn || (data.sessionId && data.sessionId !== record.dshSessionId)) return false;
-    if (state.turn.providerRequestId && data.requestId !== state.turn.providerRequestId) return false;
+    if (state.turn.providerRequestId && data.requestId && data.requestId !== state.turn.providerRequestId) return false;
+    if (state.turn.providerTurnId && data.turn && data.turn !== state.turn.providerTurnId) return false;
+    if (state.turn.providerRequestId && !data.requestId && !data.turn && record.runtimeProvider === 'cetamesh') return false;
+    if (record.runtimeProvider === 'codex' && state.turn.providerTurnId && !data.turn) return false;
+    if (record.runtimeProvider === 'dsh' && data.turn) {
+      // DSH's native turn identifier is distinct from the prompt requestId.
+      // Bind it only on this turn's start; subsequent events must carry the same native id.
+      if (!state.turn.providerTurnId) {
+        if (event.type !== 'turn/start') return false;
+        state.turn.providerTurnId = data.turn;
+      } else if (data.turn !== state.turn.providerTurnId) return false;
+    }
     if (!state.turn.providerRequestId && data.requestId && record.dshSessionId && data.requestId !== state.turn.requestId) return false;
     if (event.type === 'turn/start') {
       if (data.resumed || state.turn.state === 'waiting-approval') { state.messageTexts = []; state.chunkBuffer = ''; }
@@ -1447,6 +1469,8 @@ export function createChatService({
           if (result.taskId) record.taskId = String(result.taskId);
           saveStore();
           if (state.turn === turn) {
+            state.turn.providerRequestId = typeof result.requestId === 'string' ? result.requestId : null;
+            state.turn.providerTurnId = typeof result.turnId === 'string' ? result.turnId : null;
             state.turn.routing = { ...routing, resolvedRoute: 'agent', taskId: result.taskId ?? null, provider: result.provider };
             state.turn.state = 'streaming';
             state.turn.statusMessage = `${result.provider} accepted the turn; waiting for Agent events.`;
@@ -1733,7 +1757,17 @@ export function createChatService({
         });
         try {
           const accepted = await Promise.race([sending, aborted]);
-          if (state.turn === turn && typeof accepted?.requestId === 'string') turn.providerRequestId = accepted.requestId;
+          if (state.turn === turn) {
+            turn.agentAcked = true;
+            turn.providerRequestId = typeof accepted?.requestId === 'string' ? accepted.requestId : null;
+            turn.providerTurnId = typeof accepted?.turnId === 'string' ? accepted.turnId : null;
+            const pendingEvents = turn.pendingAgentEvents ?? [];
+            delete turn.pendingAgentEvents;
+            for (const event of pendingEvents) {
+              if (state.turn !== turn) break;
+              handleChatEvent(record, state, event);
+            }
+          }
         }
         finally { operation.controller.signal.removeEventListener('abort', abortListener); }
         if (operation.controller.signal.aborted && !operation.remoteCancelRequested) {

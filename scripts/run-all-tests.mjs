@@ -54,6 +54,7 @@ const REGISTRY = {
   'test-owner-agent-mode.mjs': { category: 'core' },
   'test-core-entry.mjs': { category: 'core' },
   'test-service-container.mjs': { category: 'core' },
+  'test-latest-audit-agent-identity.mjs': { category: 'core', note: 'Production Agent request identity and Chat turn correlation' },
   'test-ipc-runtime.mjs': { category: 'core' },
   'test-dsh-lifecycle.mjs': { category: 'core' },
   'test-qq-runtime.mjs': { category: 'core' },

@@ -632,7 +632,7 @@ function abortableSseFetch() {
 }
 
 /** 组装带 Model Runtime / Router / Agent 的完整 chat-service（全 fixture，不联网不碰 DSH）。 */
-function makeFullService({ withKey = true, fetchImpl, baseUrl = 'https://api.deepseek.test', router = true, api = dshDownApi(), agent = false, agentProviderId = 'dsh', agentBoundary = 'unsupported', stateDir: overrideDir, buildProductContext, defaultModelConfig, onEvent, platformRoute } = {}) {
+function makeFullService({ withKey = true, fetchImpl, baseUrl = 'https://api.deepseek.test', router = true, api = dshDownApi(), agent = false, agentProviderId = 'dsh', agentBoundary = 'unsupported', stateDir: overrideDir, buildProductContext, defaultModelConfig, onEvent, platformRoute, agentSendResult = null } = {}) {
   const dir = overrideDir ?? path.join(stateDir, 's1-' + (++caseSeq));
   fs.mkdirSync(dir, { recursive: true });
   const secrets = createProviderSecrets({ root: dir });
@@ -661,6 +661,8 @@ function makeFullService({ withKey = true, fetchImpl, baseUrl = 'https://api.dee
     ? async ({ method, params }) => {
       agentCalls.push({ method, params });
       if (method === 'agent.createSession') return { sessionId: `agent-${agentCalls.length}` };
+      if (method === 'agent.send' && agentSendResult) return typeof agentSendResult === 'function'
+        ? agentSendResult(params) : agentSendResult;
       if (method === 'agent.list') return { providers: [{ id: agentProviderId, label: agentLabel, displayName: agentProviderId === 'dsh' ? 'DSH' : agentProviderId, available: true, workspaceBoundary: agentBoundary, health: { available: true } }] };
       return { ok: true };
     }
@@ -838,6 +840,8 @@ function makeFullService({ withKey = true, fetchImpl, baseUrl = 'https://api.dee
   await service.execute({ method: 'chat.send', params: { id: session.id, text: 'first provider' } });
   service._injectEvent(session.id, { type: 'turn/start', data: {} });
   service._injectEvent(session.id, turnEnd(session.id, 'completed'));
+  await waitFor(() => service.execute({ method: 'chat.status', params: { id: session.id } }),
+    value => !value.turn, 'first Agent ACK and buffered end');
   for (let i = 0; i < 20 && !followRows.length; i += 1) await new Promise(resolve => setTimeout(resolve, 5));
   const oldSessionId = createdAgentSessionIds[0].sessionId;
   const switched = await service.execute({ method: 'chat.config.set', params: { id: session.id, config: { agentProvider: 'codex' } } });
@@ -907,6 +911,8 @@ function makeFullService({ withKey = true, fetchImpl, baseUrl = 'https://api.dee
   const agentSessionId = `agent-${agentCalls.indexOf(created) + 1}`;
   assert.equal(created.params.modelProvider, 'deepseek-official', 'Managed Agent session creation receives its selected Provider');
   service._injectEvent(session.id, turnEnd(session.id, 'completed'));
+  await waitFor(() => service.execute({ method: 'chat.status', params: { id: session.id } }),
+    value => !value.turn, 'Managed Agent ACK and buffered end');
   await service.execute({ method: 'chat.config.set', params: { id: session.id, config: { modelProvider: 'openai', model: 'gpt-4o-mini' } } });
   const selected = agentCalls.find(call => call.method === 'agent.selectModel');
   assert.equal(selected.params.sessionId, agentSessionId);
@@ -1392,6 +1398,58 @@ function makeFullService({ withKey = true, fetchImpl, baseUrl = 'https://api.dee
   recovered.close();
   ok('non-Task Chat restart recovery sends bounded prior context rather than a bare continue');
 }
+
+// Native Codex/DSH turn IDs are distinct from Chat's UI request ID. The
+// accepted provider identity must select one turn and reject stale output.
+for (const provider of ['codex', 'dsh']) {
+  const nativeTurn = `${provider}-current-native-turn`;
+  const { service, agentCalls } = makeFullService({ agent: true, agentProviderId: provider,
+    agentSendResult: provider === 'codex'
+      ? { accepted: true, turnId: nativeTurn }
+      : { accepted: true, requestId: `${provider}-provider-request` } });
+  const session = await service.execute({ method: 'chat.sessions.create', params: {} });
+  await service.execute({ method: 'chat.config.set', params: { id: session.id, config: { agentProvider: provider } } });
+  await service.execute({ method: 'chat.send', params: { id: session.id, text: 'analyze this task' } });
+  await waitFor(() => agentCalls.some(call => call.method === 'agent.send'), value => value, `${provider} send`);
+  for (let attempt = 0; attempt < 20; attempt += 1) await new Promise(resolve => setTimeout(resolve, 1));
+  const inject = (type, turn, data = {}) => service._injectEvent(session.id, { type, data: { turn, ...data } });
+  inject('assistant/message', `${provider}-old-turn`, { message: { content: [{ type: 'text', text: 'STALE' }] } });
+  inject('turn/end', `${provider}-old-turn`, { reason: { kind: 'completed' } });
+  assert.ok((await service.execute({ method: 'chat.status', params: { id: session.id } })).turn,
+    `${provider} old turn must not finish the active Chat turn`);
+  inject('turn/start', nativeTurn);
+  inject('assistant/message', nativeTurn, { message: { content: [{ type: 'text', text: 'CURRENT' }] } });
+  inject('turn/end', nativeTurn, { reason: { kind: 'completed' } });
+  const history = await service.execute({ method: 'chat.history', params: { id: session.id } });
+  assert.equal(history.messages.at(-1).text, 'CURRENT', `${provider} native turn must be correlated without stale output`);
+  service.close();
+}
+ok('Codex and DSH native turn identities reject stale events and finish the accepted turn');
+
+{
+  let accept;
+  const pendingAck = new Promise(resolve => { accept = resolve; });
+  const turnId = 'codex-fast-native-turn';
+  const { service, agentCalls } = makeFullService({ agent: true, agentProviderId: 'codex',
+    agentSendResult: () => pendingAck });
+  const session = await service.execute({ method: 'chat.sessions.create', params: {} });
+  await service.execute({ method: 'chat.config.set', params: { id: session.id, config: { agentProvider: 'codex' } } });
+  await service.execute({ method: 'chat.send', params: { id: session.id, text: 'fast native response' } });
+  await waitFor(() => agentCalls.some(call => call.method === 'agent.send'), value => value, 'Codex pending ACK');
+  service._injectEvent(session.id, { type: 'turn/start', data: { turn: 'codex-old-native-turn' } });
+  service._injectEvent(session.id, { type: 'turn/end', data: { turn: 'codex-old-native-turn', reason: { kind: 'completed' } } });
+  assert.ok((await service.execute({ method: 'chat.status', params: { id: session.id } })).turn,
+    'old native turn must not finish Chat before the accepted ACK identifies the new turn');
+  service._injectEvent(session.id, { type: 'turn/start', data: { turn: turnId } });
+  service._injectEvent(session.id, { type: 'assistant/message', data: { turn: turnId,
+    message: { content: [{ type: 'text', text: 'FAST CURRENT' }] } } });
+  service._injectEvent(session.id, { type: 'turn/end', data: { turn: turnId, reason: { kind: 'completed' } } });
+  accept({ accepted: true, turnId });
+  await waitFor(() => service.execute({ method: 'chat.history', params: { id: session.id } }),
+    value => value.messages.at(-1)?.text === 'FAST CURRENT', 'Codex ACK-before-event replay');
+  service.close();
+}
+ok('Agent events arriving before send ACK are replayed only after provider identity is known');
 
 fs.rmSync(temp, { recursive: true, force: true });
 console.log(`\n🎉 阶段 03 Chat 运行时全部通过（${step} 组）`);

@@ -442,8 +442,10 @@ try {
   assert.equal(linkedContext.task.id, task.id);
   assert.equal(linkedContext.workspace.name, 'Linked Project');
   assert.equal(linkedContext.workspace.root, undefined);
-  assert.equal(linkedContext.memoryReferences.length, 1, 'unresolvable cross-scope Memory references are omitted');
-  assert.match(linkedContext.memoryReferences[0].excerpt, /Authorized task memory reference/);
+  assert.equal(linkedContext.memoryReferences.length, 2,
+    'authorized linked Task and global Knowledge are present while unresolvable cross-scope links are omitted');
+  assert.ok(linkedContext.memoryReferences.some(item => /Authorized task memory reference/.test(item.excerpt)));
+  assert.ok(linkedContext.memoryReferences.some(item => /Updated Harbor memory DTO/.test(item.excerpt)));
   assert.equal(JSON.stringify(linkedContext).includes(foreignMemory.id), false);
 
   const taskOnly = JSON.parse(await services.productContextService.buildForChat({

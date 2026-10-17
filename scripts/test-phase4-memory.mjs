@@ -205,6 +205,14 @@ try {
     const other = await services.memoryService.execute({ method: 'memory.create', params: {
       type: 'user', scope: 'user:desktop', content: 'Task A 未授权的另一条偏好' } });
     await services.settingsService.execute({ method: 'settings.update', params: { section: 'memory', values: { retrievalLimit: 1 } } });
+    const globalKnowledge = await services.memoryService.execute({ method: 'memory.create', params: {
+      type: 'knowledge', scope: 'global', content: '全局已确认知识：CetaMesh 使用 Owner 审批' } });
+    const globalChatContext = await services.productContextService.buildForChatTurn({
+      record: { id: 'global-chat', config: {} }, memoryQuery: 'CetaMesh' });
+    assert.ok(globalChatContext.context.includes(globalKnowledge.content),
+      'ordinary Chat must rank relevant approved global Knowledge across scopes under the retrieval limit');
+    await services.memoryService.execute({ method: 'memory.delete', params: {
+      id: globalKnowledge.id, expectedRev: globalKnowledge.rev } });
     const capped = await services.productContextService.buildForChatTurn({ record: { id: 'capped-chat', config: {} } });
     assert.equal(JSON.parse(capped.context).memoryReferences.length, 1, 'retrievalLimit controls assembled context');
     await services.settingsService.execute({ method: 'settings.update', params: { section: 'memory', values: { retrievalLimit: 50 } } });

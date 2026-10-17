@@ -569,8 +569,8 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
             throw capabilityError('AGENT_PROVIDER_SWITCH_REQUIRES_CONTINUITY', 'Task Agent changed while instruction was queued');
           }
         }
-        if (!['queued', 'running', 'paused', 'waiting', 'blocked'].includes(task.status)) {
-          throw capabilityError('TASK_NOT_AUTHORIZED', 'Task ended while instruction was queued');
+        if (!['queued', 'running'].includes(task.status)) {
+          throw capabilityError('TASK_NOT_RUNNING', 'Task is paused or ended; resume it before dispatching Agent work');
         }
         if (taskRuntime.activeWorkspaceOwner({ workspaceId: task.workspaceId, exceptTaskId: task.id })) {
           throw capabilityError('TASK_WORKSPACE_BUSY', 'Workspace writer changed while instruction was queued');
@@ -584,8 +584,18 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
             if (r.signal?.aborted) throw capabilityError('INVOKE_CANCELLED', 'Agent assignment cancelled');
             if (taskHandoffGuard(task.id)) throw capabilityError('TASK_HANDOFF_IN_FLIGHT', 'Task Handoff owns this execution boundary');
             ensureTaskFollow(task.currentAgent.provider, task.currentAgent.sessionId, task.id);
+            const beforeSend = taskFor(task.id);
+            if (beforeSend?.status !== 'running' || beforeSend.currentAgent?.sessionId !== task.currentAgent.sessionId) {
+              throw capabilityError('TASK_NOT_RUNNING', 'Task changed before Agent instruction dispatch');
+            }
             const sent = await agentBroker.send({ ...task.currentAgent, content: String(r.input.content || task.goal) });
             if (sent?.accepted !== true) throw capabilityError('AGENT_SEND_REJECTED', 'Agent did not accept Task instruction');
+            const afterSend = taskFor(task.id);
+            if (!afterSend || ['queued', 'paused', 'waiting', 'blocked', 'cancelled'].includes(afterSend.status)
+              || (afterSend.status === 'running' && afterSend.currentAgent?.sessionId !== task.currentAgent.sessionId)) {
+              await agentBroker.cancel(task.currentAgent);
+              throw capabilityError('TASK_NOT_RUNNING', 'Task changed while Agent accepted the instruction');
+            }
             if (r.signal?.aborted) {
               try { await agentBroker.cancel(task.currentAgent); }
               catch (cancelError) {
@@ -594,7 +604,8 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
               throw capabilityError('INVOKE_CANCELLED', 'Agent assignment cancelled');
             }
             return { taskId: task.id, workspaceId: task.workspaceId, ...task.currentAgent,
-              accepted: sent?.accepted === true, reused: true, actor };
+              accepted: sent?.accepted === true, requestId: sent?.requestId ?? sent?.turnId ?? null,
+              turnId: sent?.turnId ?? null, reused: true, actor };
           } catch (error) {
             if (error.code !== 'SESSION_NOT_FOUND') throw error;
             task = taskRuntime.detachAgent({ id: task.id, expectedRev: task.rev, note: 'Managed session unavailable after restart; fresh authorized session' }).task;
@@ -626,14 +637,26 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
           }
           if (r.signal?.aborted) throw capabilityError('INVOKE_CANCELLED', 'Agent assignment cancelled');
           ensureTaskFollow(provider, created.sessionId, task.id);
+          const beforeSend = taskFor(task.id);
+          if (beforeSend?.status !== 'running' || beforeSend.currentAgent?.sessionId !== created.sessionId) {
+            throw capabilityError('TASK_NOT_RUNNING', 'Task changed before Agent instruction dispatch');
+          }
           const sent = await agentBroker.send({ provider, sessionId: created.sessionId, content: String(r.input.content || task.goal) });
           if (sent?.accepted !== true) throw capabilityError('AGENT_SEND_REJECTED', 'Agent did not accept Task instruction');
+          const afterSend = taskFor(task.id);
+          if (!afterSend || ['queued', 'paused', 'waiting', 'blocked', 'cancelled'].includes(afterSend.status)
+            || (afterSend.status === 'running' && afterSend.currentAgent?.sessionId !== created.sessionId)) {
+            await agentBroker.cancel({ provider, sessionId: created.sessionId });
+            throw capabilityError('TASK_NOT_RUNNING', 'Task changed while Agent accepted the instruction');
+          }
           if (r.signal?.aborted) throw capabilityError('INVOKE_CANCELLED', 'Agent assignment cancelled');
           if (Object.values(modelConfig).some(value => value !== null && value !== undefined && value !== '')) {
             const latest = taskFor(task.id);
             taskRuntime.setModelConfig({ id: task.id, expectedRev: latest.rev, ...modelConfig });
           }
-          return { taskId: task.id, workspaceId: ws.id, provider, sessionId: created.sessionId, accepted: sent?.accepted === true, actor };
+          return { taskId: task.id, workspaceId: ws.id, provider, sessionId: created.sessionId,
+            accepted: sent?.accepted === true, requestId: sent?.requestId ?? sent?.turnId ?? null,
+            turnId: sent?.turnId ?? null, actor };
         } catch (error) {
           if (created?.sessionId) stopTaskFollow(provider, created.sessionId);
           let current = taskFor(task.id);
