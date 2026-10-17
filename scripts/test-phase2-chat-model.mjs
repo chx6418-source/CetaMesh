@@ -8,10 +8,13 @@ import { createModelRuntimeService } from '../src/model/service.js';
 import { createOpenAiCompatibleModelProvider } from '../src/model/providers/openai-compatible.js';
 import { createToolExecutionCoordinator } from '../src/model/tool-execution.js';
 import { readFile, fileSearch } from '../src/workspace/tools.js';
+import { canonicalizeRoot } from '../src/workspace/boundary.js';
 import { createCetaMeshServices } from '../src/app/service-container.js';
 import { OWNER_ACTOR } from '../src/capability/index.js';
 
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-phase2-'));
+// These low-level tool calls have the production precondition: a real, registered root.
+// Keep realpath boundary enforcement intact when Windows TEMP is an alias/junction.
+const root = canonicalizeRoot(fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-phase2-')));
 try {
   const provider = { id: 'fixture', label: 'Fixture', defaultModel: 'fixture-model', supportsTools: true,
     listModels: async () => [], health: async () => ({}), stream: async function* () {},

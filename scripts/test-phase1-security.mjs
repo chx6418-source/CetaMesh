@@ -20,10 +20,13 @@ import { writeJsonAtomic } from '../src/storage/json-file.js';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-phase1-'));
 const stateDir = path.join(root, 'state');
-const workspaceRoot = path.join(root, 'workspace');
-fs.mkdirSync(workspaceRoot);
+const workspaceRootInput = path.join(root, 'workspace');
+fs.mkdirSync(workspaceRootInput);
 const workspaceService = createWorkspaceService({ stateDir });
-const ws = (await workspaceService.execute({ method: 'workspace.create', params: { name: 'phase1', root: workspaceRoot } })).workspace;
+const ws = (await workspaceService.execute({ method: 'workspace.create', params: { name: 'phase1', root: workspaceRootInput } })).workspace;
+// Direct tool fixtures must use the same canonical root that production Registry supplies.
+// Windows temp paths may contain a junction/8.3 alias, which resolveInside rejects by design.
+const workspaceRoot = ws.root;
 const taskRuntime = createTaskRuntime({ stateDir });
 const svc = createCapabilityService({ stateDir, workspaceService, taskRuntime });
 const hash = text => crypto.createHash('sha256').update(text).digest('hex');
