@@ -165,8 +165,9 @@ function inheritedProviderArgs(configuration) {
 }
 
 function inspectCodexCli(cli) {
+  const installed = Boolean(cli.executable());
   const version = cli.probe(['--version']);
-  if (!version.available) return { available: false, reason: cli.executable() ? 'unsupported_cli' : 'not_installed', version: null };
+  if (!version.available) return { installed, available: false, reason: installed ? 'unsupported_cli' : 'not_installed', version: null };
   const top = cli.probe(['--help']);
   const exec = cli.probe(['exec', '--help']);
   const resume = cli.probe(['exec', 'resume', '--help']);
@@ -180,6 +181,7 @@ function inspectCodexCli(cli) {
     && /--skip-git-repo-check/.test(execHelp);
   const resumeSupported = resume.available && /--json/.test(resumeHelp) && /\[SESSION_ID\]/i.test(resumeHelp);
   return {
+    installed,
     available: supported,
     reason: supported ? null : 'unsupported_cli',
     version: version.stdout.trim().slice(0, 100),
@@ -223,8 +225,9 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
   applyChanges = async () => { throw agentProviderError('AGENT_BOUNDARY_UNSUPPORTED', 'Capability Broker import adapter is unavailable'); },
   environment = process.env, codexHome = null, authorizeOpenAiEnvironment = () => false,
   approvalStatus = () => null, cancelApproval = () => ({ cancelled: false }), timeoutMs = 10 * 60 * 1000, log = () => {} } = {}) {
-  const cli = cliProcess ?? new CliAgentProcess({ name: 'codex', executable, envSource: environment });
   const resolvedCodexHome = codexHome || environment.CODEX_HOME || path.join(environment.USERPROFILE || os.homedir(), '.codex');
+  const cli = cliProcess ?? new CliAgentProcess({ name: 'codex', executable,
+    envSource: { ...environment, CODEX_HOME: resolvedCodexHome } });
   let inspection = inspectCodexCli(cli);
   let authenticated = inspection.available ? loginState(cli) : false;
   let lastProbeAt = Date.now();
@@ -417,9 +420,11 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
     label: 'Codex',
     eventProtocol: AGENT_EVENT_PROTOCOL_TURN_V1,
     capabilityExtras: {
-      available: inspection.available,
+      installed: inspection.installed,
+      compatible: inspection.available,
+      available: inspection.available && authenticated,
       version: inspection.version,
-      reason: inspection.reason ?? null,
+      reason: inspection.reason ?? (authenticated ? null : 'needs_auth'),
       health: authenticated ? 'ready' : inspection.available ? 'needs_auth' : 'unavailable',
       workspaceBoundary: 'staged-capability-broker',
       supportsFreshSession: true,
@@ -612,17 +617,20 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
 
       async health({ refresh = false } = {}) {
         refreshInspection(refresh === true);
+        const available = inspection.available && authenticated;
         return {
-          available: inspection.available,
-          installed: inspection.available,
+          available,
+          installed: inspection.installed,
+          compatible: inspection.available,
+          taskEligible: available && sandboxCapable !== false && typeof resolveTaskWorkspace === 'function',
           provider: 'codex',
           version: inspection.version,
           authenticated,
-          status: authenticated ? 'ready' : inspection.available ? 'needs_auth' : 'unavailable',
-          reason: inspection.reason ?? (authenticated ? null : 'needs_auth'),
+          status: sandboxCapable === false ? 'sandbox_unavailable' : authenticated ? 'ready' : inspection.available ? 'needs_auth' : 'unavailable',
+          reason: inspection.reason ?? (!authenticated ? 'needs_auth' : sandboxCapable === false ? 'sandbox_unavailable' : null),
           configured: inspection.available,
           reachable: null,
-          sessionCapable: inspection.available,
+          sessionCapable: available,
           sandboxCapable,
           reprobedAt: lastProbeAt
         };

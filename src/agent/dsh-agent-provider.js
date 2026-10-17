@@ -237,19 +237,27 @@ export function createDshAgentProvider({ api, defaults = {}, log = () => {} } = 
       },
 
       async health() {
+        let settingsVerified = false;
         try {
           await api.callEndpoint('settings/describe', {}, AbortSignal.timeout(HEALTH_TIMEOUT_MS));
+          settingsVerified = true;
           await api.callEndpoint('session/list', { _request: {} }, AbortSignal.timeout(HEALTH_TIMEOUT_MS));
           return { status: 'available', available: true, provider: 'dsh', processAlive: null,
-            reachable: true, authenticated: true, sessionCapable: true, reason: null };
+            reachable: true, authenticated: true, compatible: true, sessionCapable: true, ready: true,
+            taskEligible: false, reason: null };
         } catch (error) {
           const code = String(error?.code ?? '');
-          const authenticated = code === 'DSH_AUTHENTICATION_FAILED' ? false : null;
-          const reachable = code === 'DSH_UNREACHABLE' ? false
-            : code === 'DSH_AUTH_MATERIAL_MISSING' ? null : (authenticated === false || code !== 'DSH_UNREACHABLE');
-          return { status: authenticated === false ? 'needs-setup' : 'error', available: false, provider: 'dsh',
-            processAlive: null, reachable, authenticated, sessionCapable: false,
-            reason: authenticated === false ? 'authentication-required' : code === 'DSH_UNREACHABLE' ? 'not_connected' : 'session-api-unavailable' };
+          const transportFailed = ['DSH_UNREACHABLE', 'DSH_REQUEST_TIMEOUT', 'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT'].includes(code)
+            || /ECONNREFUSED|ECONNRESET|fetch failed|传输失败/i.test(String(error?.message ?? ''));
+          const missingAuth = code === 'DSH_AUTH_MATERIAL_MISSING';
+          const authenticated = code === 'DSH_AUTHENTICATION_FAILED' ? false : settingsVerified ? true : null;
+          const reachable = transportFailed ? false : missingAuth ? null
+            : settingsVerified || authenticated === false || code === 'DSH_HOST_ORIGIN_REJECTED' ? true : null;
+          return { status: authenticated === false || missingAuth ? 'needs-setup' : 'error', available: false, provider: 'dsh',
+            processAlive: null, reachable, authenticated, compatible: settingsVerified ? true : null,
+            sessionCapable: false, ready: false, taskEligible: false,
+            reason: authenticated === false ? 'authentication-required' : missingAuth ? 'authentication-material-missing'
+              : transportFailed ? 'not_connected' : code === 'DSH_HOST_ORIGIN_REJECTED' ? 'host-origin-rejected' : 'session-api-unavailable' };
         }
       }
     }

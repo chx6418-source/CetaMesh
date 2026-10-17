@@ -209,9 +209,10 @@ export function createStagedDshAgentProvider({ provider, resolveTaskWorkspace, l
           requireSession(params.sessionId);
           return provider.selectModel(params);
         },
-        async health() {
-          const health = await provider.health();
-          return { ...health, provider: provider.id, workspaceBoundary: 'capability-broker' };
+        async health(options = {}) {
+          const health = await provider.health(options);
+          return { ...health, provider: provider.id, taskEligible: health.available === true && health.sessionCapable === true,
+            workspaceBoundary: 'capability-broker' };
         },
         async *follow({ sessionId, signal } = {}) {
           const session = requireSession(sessionId);

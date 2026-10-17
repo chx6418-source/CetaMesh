@@ -2,6 +2,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { isSea } from 'node:sea';
 
 const MAX_CAPTURE_BYTES = 4 * 1024 * 1024;
 const MIN_TIMEOUT_MS = 1000;
@@ -119,7 +120,9 @@ export function findCliExecutable(name, {
       '.exe', '.com', '.bat', '.cmd'
     ])]
     : [''];
-  const candidates = path.extname(requested) ? [requested] : [requested, ...extensions.map((ext) => `${requested}${ext}`)];
+  const candidates = path.extname(requested) ? [requested] : platform === 'win32'
+    ? ['.exe', '.com', '.cmd', '.bat'].map(ext => `${requested}${ext}`)
+    : [requested, ...extensions.map((ext) => `${requested}${ext}`)];
   const directories = String(pathValue).split(path.delimiter).filter(Boolean);
   if (platform === 'win32') {
     const appData = environmentValue(env, 'APPDATA');
@@ -135,7 +138,10 @@ export function findCliExecutable(name, {
     );
     const where = whereImpl('where.exe', [requested], { encoding: 'utf8', windowsHide: true, env });
     if (where?.status === 0) {
-      for (const result of String(where.stdout ?? '').split(/\r?\n/).map(line => line.trim()).filter(Boolean)) {
+      const results = String(where.stdout ?? '').split(/\r?\n/).map(line => line.trim())
+        .filter(result => /\.(?:exe|com|cmd|bat)$/i.test(result))
+        .sort((a, b) => Number(/\.(?:cmd|bat)$/i.test(a)) - Number(/\.(?:cmd|bat)$/i.test(b)));
+      for (const result of results) {
         if (isFile(result)) return path.resolve(result);
       }
     }
@@ -196,7 +202,9 @@ export class CliAgentProcess {
     this.spawnImpl = spawnImpl;
     this.probeImpl = probeImpl;
     this.platform = platform;
-    this.nodeExecutable = nodeExecutable;
+    // process.execPath is the packaged Core in a SEA release, not a Node CLI.
+    this.nodeExecutable = !isSea() && /^node(?:\.exe)?$/i.test(path.basename(nodeExecutable ?? '')) && isFile(nodeExecutable)
+      ? nodeExecutable : null;
     this.sessions = new Map();
   }
 
@@ -208,7 +216,9 @@ export class CliAgentProcess {
     }
     const script = resolveNpmShimScript(executable);
     if (!script) throw Object.assign(new Error('Windows Codex command shim does not resolve to the installed npm CLI package'), { code: 'UNSUPPORTED_WINDOWS_SHIM' });
-    return { executable: this.nodeExecutable, argsPrefix: [script, ...this.argsPrefix] };
+    const nodeExecutable = this.nodeExecutable ?? findCliExecutable(this.platform === 'win32' ? 'node.exe' : 'node', { env: this.envSource, platform: this.platform });
+    if (!nodeExecutable) throw Object.assign(new Error('Windows Codex npm shim requires an installed standalone Node runtime'), { code: 'NODE_RUNTIME_UNAVAILABLE' });
+    return { executable: nodeExecutable, argsPrefix: [script, ...this.argsPrefix] };
   }
 
   executable() {
@@ -299,6 +309,9 @@ export class CliAgentProcess {
       this.sessions.delete(sessionId);
       resolveDone(result);
     };
+    // Decode incrementally: a JSONL record can split in the middle of a UTF-8 character.
+    child.stdout?.setEncoding('utf8');
+    child.stderr?.setEncoding('utf8');
     child.stdout?.on('data', (chunk) => {
       stdout = cappedAppend(stdout, chunk);
       try { onStdout(String(chunk)); }

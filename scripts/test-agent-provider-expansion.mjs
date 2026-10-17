@@ -12,6 +12,7 @@ import { defineAgentProvider } from '../src/agent/agent-provider.js';
 import { CliAgentProcess, createMinimalAgentEnv, findCliExecutable } from '../src/agent/cli-agent-process.js';
 import { createCodexAgentProvider } from '../src/agent/codex-agent-provider.js';
 import { createZCodeAgentProvider } from '../src/agent/zcode-agent-provider.js';
+import { createDshAgentProvider } from '../src/agent/dsh-agent-provider.js';
 import { createCapabilityService } from '../src/capability/service.js';
 import { createChatService } from '../src/desktop/chat-service.js';
 import { createTaskRuntime } from '../src/task/runtime.js';
@@ -344,6 +345,54 @@ try {
   assert.equal(shimRun.cancel().cancelled, true);
   assert.equal((await shimRun.done).cancelled, true, 'npm codex.cmd launches the resolved JS target directly and remains cancellable');
   await windowsShimCli.shutdown();
+
+  const seaShimCli = new CliAgentProcess({ name: 'codex', executable: shimExecutable, platform: 'win32',
+    nodeExecutable: path.join(root, 'WhaleBridgeCore.exe'), envSource: { PATH: path.dirname(process.execPath) } });
+  assert.equal(seaShimCli.launchTarget().executable, process.execPath,
+    'a packaged Core executable must never execute the npm JavaScript shim as if it were Node');
+  const unavailableNodeCli = new CliAgentProcess({ name: 'codex', executable: shimExecutable, platform: 'win32',
+    nodeExecutable: path.join(root, 'WhaleBridgeCore.exe'), envSource: { PATH: '' } });
+  assert.equal(unavailableNodeCli.probe(['--version']).code, 'NODE_RUNTIME_UNAVAILABLE',
+    'npm Codex without a standalone Node runtime fails discovery without relaunching Core');
+
+  const extensionless = path.join(shimRoot, 'codex');
+  const nativeCodex = path.join(shimRoot, 'codex.exe');
+  fs.writeFileSync(extensionless, '#!/bin/sh\n');
+  fs.writeFileSync(nativeCodex, 'native-file-discovery-fixture');
+  assert.equal(findCliExecutable('codex', { platform: 'win32', env: { PATH: shimRoot },
+    whereImpl: () => ({ status: 0, stdout: `${extensionless}\r\n${nativeCodex}` }) }), nativeCodex,
+  'Windows discovery chooses the runnable native exe before an extensionless npm shell shim');
+
+  const utfFixture = path.join(root, 'utf8-jsonl.mjs');
+  fs.writeFileSync(utfFixture, [
+    "const bytes = Buffer.from(JSON.stringify({ text: '鲸桥' }) + '\\n');",
+    "const cut = bytes.indexOf(Buffer.from('鲸')) + 1;",
+    'process.stdout.write(bytes.subarray(0, cut));',
+    'setTimeout(() => process.stdout.write(bytes.subarray(cut)), 50);'
+  ].join('\n'));
+  let utfOutput = '';
+  const utfRun = cliProcess.startSession({ cwd: staged.root, args: [utfFixture], onStdout: chunk => { utfOutput += chunk; } });
+  await utfRun.done;
+  assert.equal(JSON.parse(utfOutput).text, '鲸桥', 'JSONL survives UTF-8 characters split between OS stdout chunks');
+
+  const explicitCodexHome = path.join(root, 'selected-codex-home');
+  fs.mkdirSync(explicitCodexHome);
+  fs.writeFileSync(shimScript, [
+    "const args = process.argv.slice(2);",
+    "if (args[0] === '--version') console.log('codex-cli selected-home-fixture');",
+    "else if (args[0] === 'login') {",
+    `  if (process.env.CODEX_HOME === ${JSON.stringify(explicitCodexHome)}) console.log('Logged in');`,
+    "  else { console.log('Not logged in'); process.exitCode = 1; }",
+    "} else console.log('--config --ask-for-approval --cd --json --ignore-user-config --ignore-rules --strict-config --skip-git-repo-check [SESSION_ID]');"
+  ].join('\n'));
+  const selectedHomeProvider = createCodexAgentProvider({ executable: shimExecutable, codexHome: explicitCodexHome,
+    environment: { ...process.env, CODEX_HOME: path.join(root, 'different-home') } });
+  assert.equal((await selectedHomeProvider.health()).authenticated, true,
+    'login discovery probes the same explicit CODEX_HOME that execution will use');
+  fs.writeFileSync(shimScript, fs.readFileSync(shimScript, 'utf8').replace('codex-cli selected-home-fixture', 'codex-cli refreshed-home-fixture'));
+  const selectedHomeService = createAgentService({ broker: createAgentBroker({ registry: createAgentProviderRegistry({ providers: [selectedHomeProvider] }) }) });
+  assert.equal((await selectedHomeService.execute({ method: 'agent.list', params: { refresh: true } })).providers[0].version,
+    'codex-cli refreshed-home-fixture', 'refreshed CLI version overrides startup capability snapshots');
 
   const fakeRuns = [];
   let fakeExitCode = 0;
@@ -692,12 +741,64 @@ try {
   const reprobeProvider = createCodexAgentProvider({ cliProcess: reprobeCli });
   assert.equal((await reprobeProvider.health()).available, false);
   codexInstalled = true;
+  const installedUnauthenticated = await reprobeProvider.health({ refresh: true });
+  assert.equal(installedUnauthenticated.installed, true);
+  assert.equal(installedUnauthenticated.compatible, true);
+  assert.equal(installedUnauthenticated.authenticated, false);
+  assert.equal(installedUnauthenticated.available, false, 'an unauthenticated CLI cannot accept execution');
+  assert.equal(installedUnauthenticated.taskEligible, false);
   codexLoggedIn = true;
   const reprobeService = createAgentService({ broker: createAgentBroker({ registry: createAgentProviderRegistry({ providers: [reprobeProvider] }) }) });
   const reprobedHealth = await reprobeService.execute({ method: 'agent.health', params: { provider: 'codex', refresh: true } });
   assert.equal(reprobedHealth.available, true);
   assert.equal(reprobedHealth.installed, true, 'explicit refresh reports installed independently from authentication');
   assert.equal(reprobedHealth.authenticated, true, 'install and login after Core startup become visible through explicit reprobe');
+  assert.equal((await reprobeService.execute({ method: 'agent.list' })).providers[0].reason, null,
+    'a healthy CLI must clear the startup not_installed reason after refresh');
+  codexLoggedIn = false;
+  const loggedOutList = await reprobeService.execute({ method: 'agent.list', params: { refresh: true } });
+  assert.equal(loggedOutList.providers[0].available, false, 'directory refresh must reprobe login changes');
+  assert.equal(loggedOutList.providers[0].installed, true);
+  assert.equal(loggedOutList.providers[0].compatible, true);
+  assert.equal(loggedOutList.providers[0].taskEligible, false);
+
+  const incompatibleCli = { executable: () => 'installed-old-codex', probe: () => ({ available: false, stdout: '', stderr: '' }) };
+  const incompatibleHealth = await createCodexAgentProvider({ cliProcess: incompatibleCli }).health();
+  assert.equal(incompatibleHealth.installed, true, 'an unsupported installed binary still counts as installed');
+  assert.equal(incompatibleHealth.compatible, false);
+  assert.equal(incompatibleHealth.available, false);
+
+  const dshPartialHealth = await createDshAgentProvider({ api: {
+    async callEndpoint(endpoint) {
+      if (endpoint === 'settings/describe') return {};
+      throw Object.assign(new Error('Session API unsupported'), { code: 'METHOD_NOT_FOUND' });
+    }, async *openRemoteStream() {}
+  } }).health();
+  assert.equal(dshPartialHealth.reachable, true);
+  assert.equal(dshPartialHealth.authenticated, true, 'successful authenticated settings probe remains evidence when session API fails');
+  assert.equal(dshPartialHealth.sessionCapable, false);
+  assert.equal(dshPartialHealth.ready, false);
+  assert.equal(dshPartialHealth.taskEligible, false);
+  const dshMissingAuthHealth = await createDshAgentProvider({ api: {
+    async callEndpoint() { throw Object.assign(new Error('Missing auth material'), { code: 'DSH_AUTH_MATERIAL_MISSING' }); },
+    async *openRemoteStream() {}
+  } }).health();
+  assert.equal(dshMissingAuthHealth.reachable, null);
+  assert.equal(dshMissingAuthHealth.authenticated, null);
+  assert.equal(dshMissingAuthHealth.reason, 'authentication-material-missing');
+  assert.equal(dshMissingAuthHealth.ready, false);
+  let desktopRefreshed = false;
+  const separatedDshService = createDefaultAgentService({ codexExecutable: null, desktopStatus: async (options) => {
+    desktopRefreshed = options?.refresh === true;
+    return { installed: true, running: true, version: '0.2.0-test', cli: { available: true, version: '0.1.5-test', executablePath: 'private-cli-path' } };
+  } });
+  const separatedDsh = (await separatedDshService.execute({ method: 'agent.list', params: { refresh: true } })).providers.find(row => row.id === 'dsh');
+  assert.equal(desktopRefreshed, true);
+  assert.equal(separatedDsh.desktopApp.running, true);
+  assert.equal(separatedDsh.cli.available, true);
+  assert.equal(separatedDsh.available, false, 'desktop and CLI installation never prove authenticated Agent readiness');
+  assert.equal(separatedDsh.taskEligible, false);
+  assert.doesNotMatch(JSON.stringify(separatedDsh), /private-cli-path/);
 
   const authorizedProvider = createCodexAgentProvider({
     cliProcess: fakeCli, stagingRoot: path.join(root, 'codex-authorized-staging'), codexHome,

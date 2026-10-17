@@ -112,7 +112,7 @@ async function buildBundle(buildDir) {
   return { bundleFile, metafile: result.metafile };
 }
 
-const NODE_BUILTIN_RE = /^(?:node:)?(?:assert|async_hooks|buffer|child_process|cluster|console|constants|crypto|dgram|diagnostics_channel|dns|domain|events|fs|http|http2|https|inspector|module|net|os|path|perf_hooks|process|punycode|querystring|readline|repl|stream|string_decoder|sys|timers|tls|trace_events|tty|url|util|v8|vm|wasi|worker_threads|zlib)(?:\/.*)?$/;
+const NODE_BUILTIN_RE = /^(?:node:)?(?:assert|async_hooks|buffer|child_process|cluster|console|constants|crypto|dgram|diagnostics_channel|dns|domain|events|fs|http|http2|https|inspector|module|net|os|path|perf_hooks|process|punycode|querystring|readline|repl|sea|stream|string_decoder|sys|timers|tls|trace_events|tty|url|util|v8|vm|wasi|worker_threads|zlib)(?:\/.*)?$/;
 
 // 审计 bundle：报告被打包的第三方包，并对原生模块和未解析依赖直接失败。
 function auditBundle(buildDir, metafile) {

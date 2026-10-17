@@ -27,7 +27,8 @@ function createUnavailableDshProvider() {
     methods: {
       createSession: unavailable, send: unavailable, cancel: unavailable, status: unavailable,
       contextUsage: unavailable, resume: unavailable, closeSession: unavailable, selectModel: unavailable,
-      health: async () => ({ provider: 'dsh', available: false, reason: 'not_connected' }),
+      health: async () => ({ provider: 'dsh', available: false, ready: false, compatible: null,
+        authenticated: null, reachable: null, sessionCapable: false, taskEligible: false, reason: 'not_connected' }),
       async *follow() { unavailable(); }
     }
   });
@@ -38,7 +39,7 @@ function summarizeProvider(provider, health = null) {
   const registryAvailable = typeof capabilities.available === 'boolean' ? capabilities.available : null;
   const healthAvailable = typeof health?.available === 'boolean' ? health.available : null;
   const available = healthAvailable ?? registryAvailable;
-  const reason = health?.reason ?? capabilities.reason ?? null;
+  const reason = health && Object.hasOwn(health, 'reason') ? health.reason : capabilities.reason ?? null;
   return {
     id: provider.id,
     displayName: capabilities.displayName ?? (provider.id === 'dsh' ? 'DSH' : provider.label),
@@ -46,9 +47,11 @@ function summarizeProvider(provider, health = null) {
     eventProtocol: provider.eventProtocol,
     available,
     installed: typeof health?.installed === 'boolean' ? health.installed
-      : typeof capabilities.installed === 'boolean' ? capabilities.installed : available === true,
+      : typeof capabilities.installed === 'boolean' ? capabilities.installed : null,
     authenticated: typeof health?.authenticated === 'boolean' ? health.authenticated : null,
-    version: capabilities.version ?? health?.version ?? null,
+    compatible: typeof health?.compatible === 'boolean' ? health.compatible : null,
+    taskEligible: health?.taskEligible === true,
+    version: health?.version ?? capabilities.version ?? null,
     reason,
     workspaceBoundary: capabilities.workspaceBoundary ?? 'unsupported',
     supportsFreshSession: capabilities.supportsFreshSession === true,
@@ -89,15 +92,15 @@ export function createAgentService({ broker, log = () => {}, desktopStatus = nul
   const registry = broker.registry;
 
   const handlers = {
-    'agent.list': async () => ({
+    'agent.list': async (params = {}) => ({
       providers: await Promise.all(registry.list().map(async (provider) => {
         let health = null;
-        try { health = await broker.health(provider.id); }
+        try { health = await broker.health(provider.id, { refresh: params?.refresh === true }); }
         catch (error) { health = { provider: provider.id, available: false, reason: error?.code ?? 'health_failed' }; }
         const summary = summarizeProvider(provider, health);
         if (provider.id === 'dsh' && typeof desktopStatus === 'function') {
           try {
-            const desktop = await desktopStatus();
+            const desktop = await desktopStatus({ refresh: params?.refresh === true });
             if (desktop) summary.desktopApp = {
               status: desktop.status ?? 'unknown',
               installed: desktop.installed === true,
@@ -105,6 +108,7 @@ export function createAgentService({ broker, log = () => {}, desktopStatus = nul
               version: desktop.version ?? null,
               lastCheckedAt: desktop.lastCheckedAt ?? null
             };
+            if (desktop?.cli) summary.cli = { available: desktop.cli.available === true, version: desktop.cli.version ?? null };
           } catch (error) {
             // Optional Desktop detection must never make the Agent directory unavailable.
             summary.desktopApp = { status: 'unknown', installed: false, running: false, version: null, reason: error?.code ?? 'detection_failed' };
