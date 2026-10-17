@@ -17,6 +17,7 @@ import https from 'node:https';
 import { StringDecoder } from 'node:string_decoder';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { mcpToolPolicyDenial } from './integrations/tool-policy.js';
 import { z } from 'zod';
 import { isMainModule, reportEntrypointError } from './entrypoint.js';
 
@@ -376,6 +377,8 @@ server.tool(
   '只读联网搜索（主 Google，失败自动备用 Sogou，无 Bing）。返回 {engine, query, results:[{title,url}]}。仅用于查资料/网络用语/事实确认，不执行任何本地操作。建议对最相关结果再用 web_fetch 打开正文阅读。',
   { query: z.string().describe('要搜索的关键词/问题，如「A Moment Apart Odesza soundtrack」') },
   async ({ query }) => {
+    const denied = mcpToolPolicyDenial('web-search-safe', 'web_search');
+    if (denied) return denied;
     const clean = sanitizeSearchQuery(query);
     if (!clean) return { content: [{ type: 'text', text: '查询词为空，已拒绝。' }], isError: true };
     let result = null;
@@ -401,6 +404,8 @@ server.tool(
   '只读抓取 HTTP(S) 网页正文，返回纯文本/HTML 前 50000 字符。禁止访问内网/本机地址，不执行任何本地操作。',
   { url: z.string().describe('要抓取的 http(s) URL') },
   async ({ url }) => {
+    const denied = mcpToolPolicyDenial('web-search-safe', 'web_fetch');
+    if (denied) return denied;
     try {
       const result = await safeFetch(url);
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };

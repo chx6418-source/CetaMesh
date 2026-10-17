@@ -392,7 +392,7 @@ try {
       entry: 'src/mcp-snowluma-safe.js',
       tool: 'qq_get_card_msg',
       call: { name: 'qq_get_card_msg', arguments: { key: 'group:1', token: 'test', messageId: '1' } },
-      expected: /403|已禁用/
+      expected: /403|已禁用|TOOL_DISABLED|已被关闭/
     },
     {
       mode: 'snowluma-host',
@@ -416,14 +416,14 @@ try {
         name: 'qq_send_file',
         arguments: { target: 'private:1', filePath: path.join(tempRoot, 'missing.txt') }
       },
-      expected: /403|已禁用|不存在/
+      expected: /403|已禁用|不存在|TOOL_DISABLED|已被关闭/
     },
     {
       mode: 'bilibili',
       entry: 'src/mcp-bilibili.js',
       tool: 'bili_search_video',
       call: { name: 'bili_search_video', arguments: { query: '测试' } },
-      expected: /403|已禁用/
+      expected: /403|已禁用|TOOL_DISABLED|已被关闭/
     }
   ];
 

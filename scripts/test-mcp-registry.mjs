@@ -5,7 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { createIntegrationService } from '../src/integrations/service.js';
 import { createDesktopUiService } from '../src/desktop/ui-service.js';
-import { createIntegrationRegistry, createIntegrationStore, createMcpRuntime, MCP_SERVER_CATALOG } from '../src/integrations/index.js';
+import { createIntegrationRegistry, createIntegrationStore, createMcpRuntime, createStdioMcpConnection, MCP_SERVER_CATALOG } from '../src/integrations/index.js';
+import { writeJsonAtomic, writeTextAtomic } from '../src/storage/json-file.js';
 import { fileURLToPath } from 'node:url';
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-mcp-runtime-'));
@@ -33,7 +34,197 @@ function makeTransportFactory({ fail = false } = {}) {
   return { factory, connections };
 }
 
+// Phase 5 regressions: discovery is authority for callability, and disabling must win
+// over asynchronous startup/shutdown. Deferred transports expose each race deterministically.
+async function phase5Regressions() {
+  const failures = [];
+  async function check(label, run) {
+    try { await run(); ok(label); }
+    catch (error) { failures.push(error); console.error('FAIL ' + label + ': ' + error.message); }
+  }
+  await check('external MCP policy hot-reads parent/tool/server switches without runtime availability', async () => {
+    const { assertIntegrationToolEnabled, assertMcpToolEnabled, isIntegrationToolEnabled } = await import('../src/integrations/index.js');
+    assert.equal(typeof assertIntegrationToolEnabled, 'function', 'shared execution-time policy must exist');
+    const stateDir = path.join(tmp, 'external-policy');
+    const options = { stateDir };
+    const store = createIntegrationStore(options);
+    const registry = createIntegrationRegistry({ store });
+    const toolId = 'mcp__snowluma__qq_get_card_msg';
+    assert.equal(registry.toolState(registry.resolveTool(toolId)).available, false);
+    assert.equal(assertIntegrationToolEnabled(toolId, options).enabled, true, 'DSH-owned stdio may be live outside managed runtime');
+    assert.equal(assertMcpToolEnabled('snowluma', 'qq_get_card_msg', options).id, toolId);
+    registry.setToolEnabled('cetamesh-bionic-chat', toolId, false);
+    assert.throws(() => assertIntegrationToolEnabled(toolId, options), error => error.code === 'TOOL_DISABLED');
+    registry.setToolEnabled('cetamesh-bionic-chat', toolId, true);
+    assert.equal(isIntegrationToolEnabled(toolId, options), true, 'policy must observe enable without recreating the child');
+    registry.setPluginEnabled('cetamesh-bionic-chat', false);
+    assert.equal(isIntegrationToolEnabled(toolId, options), false);
+    registry.setPluginEnabled('cetamesh-bionic-chat', true);
+    registry.setMcpEnabled('snowluma', false);
+    assert.equal(isIntegrationToolEnabled(toolId, options), false);
+    registry.setMcpEnabled('snowluma', true);
+    assert.equal(isIntegrationToolEnabled(toolId, options), true);
+    assert.equal(isIntegrationToolEnabled('mcp__snowluma__qq_click_card_button', options), false, 'partial stays default-off');
+    assert.equal(isIntegrationToolEnabled('mcp__snowluma-host__start_snowluma', options), false, 'unsupported process control stays denied');
+    assert.equal(isIntegrationToolEnabled('mcp__snowluma__unknown', options), false);
+    writeTextAtomic(store.file, '{corrupt');
+    assert.equal(isIntegrationToolEnabled(toolId, options), false, 'corrupt persisted policy fails closed');
+    assert.throws(() => assertIntegrationToolEnabled(toolId, options), error => error.code === 'INTEGRATION_POLICY_UNAVAILABLE');
+  });
+  await check('running server only exposes actually discovered tools and their real schema', async () => {
+    const { factory } = makeTransportFactory();
+    const runtime = createMcpRuntime({ transportFactory: server => {
+      const connection = factory(server);
+      connection.listTools = async () => [{ name: 'qq_status', inputSchema: { type: 'object', properties: { crash: { type: 'boolean' } } } }];
+      return connection;
+    } });
+    const local = createIntegrationService({ stateDir: path.join(tmp, 'discovery'), mcpRuntime: runtime });
+    try {
+      await local.execute({ method: 'mcp.start', params: { id: 'snowluma', approved: true } });
+      const available = await local.execute({ method: 'tools.list', params: { serverId: 'snowluma', available: true } });
+      assert.equal(available.tools.length, 1, 'catalog-only tools cannot be callable');
+      assert.equal(available.tools[0].schema.properties.crash.type, 'boolean', 'tools.list must carry negotiated schema');
+      assert.equal(local.registry.serverState('snowluma').callable, true);
+      const missing = local.registry.listTools({ serverId: 'snowluma' }).find(tool => tool.name === 'qq_list_groups');
+      assert.equal(missing.enabled, true);
+      assert.equal(missing.available, false);
+      await assert.rejects(() => local.execute({ method: 'tools.invoke', params: { id: missing.id } }), error => error.code === 'TOOL_UNAVAILABLE');
+      local.registry.setPluginEnabled('cetamesh-bionic-chat', false);
+      assert.equal(local.registry.serverState('snowluma').running, true);
+      assert.equal(local.registry.serverState('snowluma').callable, false, 'server is running but its owning tool pack is disabled');
+    } finally { await local.close(); }
+  });
+  await check('empty tools/list stays empty and rejects every catalog call', async () => {
+    const { factory } = makeTransportFactory();
+    const runtime = createMcpRuntime({ transportFactory: server => {
+      const connection = factory(server); connection.listTools = async () => []; return connection;
+    } });
+    try {
+      await runtime.start('snowluma');
+      assert.deepEqual(runtime.discover('snowluma'), [], 'an empty live inventory must not fall back to catalog');
+      await assert.rejects(() => runtime.call('snowluma', 'qq_status'), error => error.code === 'UNKNOWN_MCP_TOOL');
+    } finally { await runtime.closeAll(); }
+  });
+  await check('disable rejects tool calls while child shutdown is still pending', async () => {
+    let releaseClose;
+    let enteredClose;
+    const closing = new Promise(resolve => { enteredClose = resolve; });
+    const blockedClose = new Promise(resolve => { releaseClose = resolve; });
+    const { factory } = makeTransportFactory();
+    const local = createIntegrationService({ stateDir: path.join(tmp, 'disable'), transportFactory: server => {
+      const connection = factory(server);
+      connection.close = async () => { enteredClose(); await blockedClose; connection.closeHandler?.(null); };
+      return connection;
+    } });
+    let disable;
+    try {
+      await local.execute({ method: 'mcp.start', params: { id: 'snowluma', approved: true } });
+      disable = local.execute({ method: 'mcp.disable', params: { id: 'snowluma', approved: true } });
+      await closing;
+      assert.equal(local.registry.serverEnabled('snowluma'), false, 'persist disabled before awaiting process cleanup');
+      await assert.rejects(() => local.execute({ method: 'tools.invoke', params: { id: 'mcp__snowluma__qq_status' } }), error => error.code === 'TOOL_DISABLED');
+      await assert.rejects(() => local.execute({ method: 'tools.invoke', params: { id: 'mcp__snowluma__qq_send_group_message' } }), error => error.code === 'TOOL_DISABLED', 'disabled high-risk calls cannot create new pending approvals');
+    } finally { releaseClose(); await disable; await local.close(); }
+  });
+  await check('stop during startup closes late connection and cannot resurrect server', async () => {
+    let releaseStart;
+    const pending = new Promise(resolve => { releaseStart = resolve; });
+    let closes = 0;
+    const { factory } = makeTransportFactory();
+    const connection = factory(MCP_SERVER_CATALOG[0]);
+    connection.close = async () => { closes += 1; connection.closeHandler?.(null); };
+    const runtime = createMcpRuntime({ transportFactory: () => pending });
+    const start = runtime.start('snowluma');
+    // Attach a rejection observer before releasing the raced operation.
+    const result = start.then(value => ({ value }), error => ({ error }));
+    await runtime.stop('snowluma');
+    releaseStart(connection);
+    const outcome = await result;
+    try {
+      assert.equal(outcome.error?.code, 'MCP_START_CANCELLED');
+      assert.equal(runtime.status('snowluma').status, 'stopped');
+      assert.equal(closes, 1);
+    } finally { await runtime.closeAll(); }
+  });
+  await check('late shutdown and callbacks cannot overwrite a newer running connection', async () => {
+    const { factory, connections } = makeTransportFactory();
+    const runtime = createMcpRuntime({ transportFactory: factory });
+    let releaseClose;
+    try {
+      await runtime.start('snowluma');
+      connections[0].close = () => new Promise(resolve => { releaseClose = resolve; });
+      const stop = runtime.stop('snowluma');
+      await runtime.start('snowluma');
+      releaseClose();
+      await stop;
+      connections[0].closeHandler?.(new Error('stale child exit'));
+      assert.equal(runtime.status('snowluma').status, 'running');
+      assert.equal(runtime.status('snowluma').crashes, 0);
+      assert.equal(JSON.parse((await runtime.call('snowluma', 'qq_status')).content[0].text).name, 'qq_status');
+    } finally { releaseClose?.(); await runtime.closeAll(); }
+  });
+  if (failures.length) throw new AggregateError(failures, 'Phase 5 MCP regressions failed');
+}
+
+async function builtinProtocolChecks() {
+  const dataRoot = path.join(tmp, 'builtin-data');
+  fs.mkdirSync(dataRoot, { recursive: true });
+  // Every call is a local denial or an unreachable test-owned endpoint; no QQ backend is contacted.
+  writeJsonAtomic(path.join(dataRoot, 'config.json'), {
+    snowluma: { httpUrl: 'http://127.0.0.1:1', allowProcessControl: false },
+    allow: { groups: [], private: [] },
+    socialV2: { tools: { bilibili: false, fileSend: false } }
+  });
+  const policyRegistry = createIntegrationRegistry({ store: createIntegrationStore({ stateDir: path.join(dataRoot, 'state') }) });
+  policyRegistry.setToolEnabled('cetamesh-bionic-chat', 'mcp__qq-file-send__qq_send_file', true);
+  const failures = [];
+  const calls = {
+    snowluma: { name: 'qq_get_group_members', args: { groupId: '0' }, match: /白名单/ },
+    'qq-file-send': { name: 'qq_send_file', args: { target: 'group:0', filePath: path.join(dataRoot, 'nonexistent') }, match: /禁用/ },
+    'web-search-safe': { name: 'web_fetch', args: { url: 'file:///phase5-denied' }, match: /http|协议/i },
+    bilibili: { name: 'bili_search_video', args: { query: 'phase5-local-denial' }, match: /禁用/ },
+    'snowluma-host': { name: 'snowluma_status', args: {}, match: /"reachable":\s*false/ }
+  };
+  for (const packaged of process.env.WHALEBRIDGE_TEST_MCP_EXE ? [false, true] : [false]) {
+    for (const server of MCP_SERVER_CATALOG) {
+      let connection;
+      try {
+        connection = await createStdioMcpConnection(server, { cwd: dataRoot, env: { WHALEBRIDGE_DATA_DIR: dataRoot } }, {
+          packaged,
+          ...(packaged ? { execPath: path.resolve(process.env.WHALEBRIDGE_TEST_MCP_EXE) } : {})
+        });
+        const tools = await connection.listTools();
+        assert.ok(tools.length > 0, server.id + ' must initialize and discover live tools');
+        const call = calls[server.id];
+        const tool = tools.find(item => item.name === call.name);
+        assert.ok(tool, server.id + ' must expose its safe smoke call');
+        assert.equal(tool.inputSchema.type, 'object');
+        if (server.id === 'snowluma-host') {
+          assert.deepEqual(tools.map(item => item.name), ['snowluma_status'], 'process control remains absent by default');
+        } else {
+          assert.ok(Object.keys(tool.inputSchema.properties ?? {}).length > 0, server.id + ' must negotiate its actual parameter schema');
+        }
+        const result = await connection.callTool(call.name, call.args);
+        assert.match(result.content.map(item => item.text ?? '').join('\n'), call.match);
+        if (server.id !== 'snowluma-host') assert.equal(result.isError, true);
+        const toolId = server.namespace + call.name;
+        policyRegistry.setToolEnabled('cetamesh-bionic-chat', toolId, false);
+        const disabled = await connection.callTool(call.name, call.args);
+        assert.equal(disabled.isError, true, 'disabled tool must fail inside external stdio child');
+        assert.match(disabled.content.map(item => item.text ?? '').join('\n'), /TOOL_DISABLED/, 'live child must hot-read the Desktop switch');
+        policyRegistry.setToolEnabled('cetamesh-bionic-chat', toolId, true);
+        ok((packaged ? 'SEA --mcp ' : 'source MCP ') + server.id + ': initialize / tools/list / safe tools/call');
+      } catch (error) {
+        failures.push(error); console.error('FAIL builtin policy ' + server.id + ': ' + error.message);
+      } finally { await connection?.close(); }
+    }
+  }
+  if (failures.length) throw new AggregateError(failures, 'Built-in MCP protocol/policy checks failed');
+}
+
 try {
+  await phase5Regressions();
+  await builtinProtocolChecks();
   const { factory, connections } = makeTransportFactory();
   const runtimeLogs = [];
   const service = createIntegrationService({ stateDir: tmp, transportFactory: factory, log: message => runtimeLogs.push(message) });

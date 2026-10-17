@@ -22,6 +22,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { mcpToolPolicyDenial } from './integrations/tool-policy.js';
 import { z } from 'zod';
 import { safeFetchAudioBuffer, looksLikeAudioBuffer } from './safe-fetch.js';
 import { PINYIN } from './pinyin-data.js';
@@ -349,6 +350,8 @@ server.tool(
     gain: z.number().min(0.5).max(8).optional().describe('音量增益倍数（0.5~8，默认取 config.json fileSend.volumeGain，当前 1.5）')
   },
   async ({ target, filePath, gain, original }) => {
+    const denied = mcpToolPolicyDenial('qq-file-send', 'qq_send_file');
+    if (denied) return denied;
     const cfg = loadConfig();
     // 1) 开关检查（桥接控制台“文件发送工具”面板可开关）
     if ((cfg.socialV2?.tools ?? {}).fileSend === false) {
@@ -486,6 +489,8 @@ server.tool(
     read: z.boolean().optional().describe('true=额外用本地TTS把搜索结果摘要合成语音（返回 audioFile）')
   },
   async ({ query, limit, read }) => {
+    const denied = mcpToolPolicyDenial('qq-file-send', 'qq_search_audio');
+    if (denied) return denied;
     const cfg = loadConfig();
     if ((cfg.socialV2?.tools ?? {}).audioSearch === false) {
       return { content: [{ type: 'text', text: JSON.stringify({ statusCode: 403, message: '工具已禁用：请先在桥接控制台开启「音频搜索发送」开关' }) }], isError: true };
@@ -574,6 +579,8 @@ server.tool(
     text: z.string().optional().describe('要合成的文本（与 url 二选一）：用本地TTS合成语音发送')
   },
   async ({ target, url, text }) => {
+    const denied = mcpToolPolicyDenial('qq-file-send', 'qq_send_audio_from_url');
+    if (denied) return denied;
     const cfg = loadConfig();
     if ((cfg.socialV2?.tools ?? {}).audioSearch === false) {
       return { content: [{ type: 'text', text: JSON.stringify({ statusCode: 403, message: '工具已禁用：请先在桥接控制台开启「音频搜索发送」开关' }) }], isError: true };
@@ -646,6 +653,8 @@ server.tool(
     limit: z.number().int().min(1).max(50).optional().describe('最多返回条数，默认 10')
   },
   async ({ query, limit }) => {
+    const denied = mcpToolPolicyDenial('qq-file-send', 'qq_search_local_audio');
+    if (denied) return denied;
     const cfg = loadConfig();
     if ((cfg.socialV2?.tools ?? {}).fileSend === false) {
       return { content: [{ type: 'text', text: JSON.stringify({ statusCode: 403, message: '工具已禁用：请先在桥接控制台开启「文件发送工具」开关' }) }], isError: true };
@@ -708,6 +717,8 @@ server.tool(
     filePath: z.string().describe('待读取音频文件的绝对路径（须位于本地读取目录内，可用 qq_search_local_audio 搜索）')
   },
   async ({ filePath }) => {
+    const denied = mcpToolPolicyDenial('qq-file-send', 'qq_read_local_audio');
+    if (denied) return denied;
     const cfg = loadConfig();
     if ((cfg.socialV2?.tools ?? {}).fileSend === false) {
       return { content: [{ type: 'text', text: JSON.stringify({ statusCode: 403, message: '工具已禁用：请先在桥接控制台开启「文件发送工具」开关' }) }], isError: true };

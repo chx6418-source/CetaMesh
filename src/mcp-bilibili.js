@@ -11,6 +11,7 @@ import { z } from 'zod';
 import { APP_PATHS } from './app-paths.js';
 import { isMainModule, reportEntrypointError } from './entrypoint.js';
 import { readRawConfigOrEmpty } from './config/loader.js';
+import { mcpToolPolicyDenial } from './integrations/tool-policy.js';
 
 const BILI_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
 const SEARCH_URL = 'https://api.bilibili.com/x/web-interface/search/type';
@@ -190,6 +191,8 @@ server.tool(
     page: z.number().int().min(1).max(50).optional().describe('页码，默认 1')
   },
   async ({ query, limit, page }) => {
+    const denied = mcpToolPolicyDenial('bilibili', 'bili_search_video');
+    if (denied) return denied;
     const cfg = loadConfig();
     if (bilibiliDisabled(cfg)) {
       return { content: [{ type: 'text', text: JSON.stringify({ statusCode: 403, message: '工具已禁用：请先在桥接控制台开启「B站视频工具」开关', source: 'bilibili' }) }], isError: true };
@@ -224,6 +227,8 @@ server.tool(
     limit: z.number().int().min(1).max(10).optional().describe('最多返回条数，默认 5')
   },
   async ({ limit }) => {
+    const denied = mcpToolPolicyDenial('bilibili', 'bili_hot_videos');
+    if (denied) return denied;
     const cfg = loadConfig();
     if (bilibiliDisabled(cfg)) {
       return { content: [{ type: 'text', text: JSON.stringify({ statusCode: 403, message: '工具已禁用：请先在桥接控制台开启「B站视频工具」开关', source: 'bilibili' }) }], isError: true };

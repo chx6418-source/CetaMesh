@@ -35,7 +35,9 @@ try {
   const running = new Set();
   const registry = createIntegrationRegistry({
     store,
-    mcpStatus: id => (running.has(id) ? { status: 'running' } : { status: 'stopped' }),
+    mcpStatus: id => (running.has(id) ? {
+      status: 'running', tools: tools.filter(tool => tool.serverId === id).map(tool => ({ name: tool.name, inputSchema: tool.schema }))
+    } : { status: 'stopped', tools: [] }),
     integrationStatus: () => ({ enabled: true, available: true, status: 'ready' })
   });
 

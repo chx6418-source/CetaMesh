@@ -17,6 +17,7 @@ import { APP_PATHS } from './app-paths.js';
 import { isMainModule, reportEntrypointError } from './entrypoint.js';
 import { readRawConfigOrEmpty } from './config/loader.js';
 import { dataCall } from './control/data-ipc.js';
+import { mcpToolPolicyDenial } from './integrations/tool-policy.js';
 
 // 统一配置读取（TASK-D1-001）：BOM 容错与 fail-closed 语义集中在 src/config/loader.js。
 // 读不到 / 损坏按“未配置”空对象处理，allowProcessControl 在使用点以 !== true 自行关闭。
@@ -147,6 +148,8 @@ server.tool(
   '检查 SnowLuma OneBot 网关是否在线（HTTP 探活 get_login_info）。返回网关可达性、QQ 在线状态与账号信息。',
   {},
   async () => {
+    const denied = mcpToolPolicyDenial('snowluma-host', 'snowluma_status');
+    if (denied) return denied;
     const hc = getHostConfig();
     const info = await gatewayInfo();
     // 只有显式开启进程控制且当前为 owner-agent 时，才暴露本机路径/PID 这类敏感信息。
@@ -164,6 +167,8 @@ if (getHostConfig().allowProcessControl) {
     '启动 SnowLuma（launcher.bat，独立窗口）并等待 OneBot 网关就绪，最长 90 秒。已在运行时直接返回当前状态。',
     {},
     async () => {
+      const denied = mcpToolPolicyDenial('snowluma-host', 'start_snowluma');
+      if (denied) return denied;
       const hc = getHostConfig();
       if (!hc.launcher) {
         return { content: [{ type: 'text', text: '拒绝：未配置 snowluma.launcherPath。' }], isError: true };
@@ -202,6 +207,8 @@ if (getHostConfig().allowProcessControl) {
     '停止 SnowLuma 进程（按安装目录匹配 node 进程后 taskkill）。谨慎使用：会断开当前 QQ 连接。',
     {},
     async () => {
+      const denied = mcpToolPolicyDenial('snowluma-host', 'stop_snowluma');
+      if (denied) return denied;
       const hc = getHostConfig();
       if (!hc.allowProcessControl) {
         return { content: [{ type: 'text', text: '拒绝：进程控制未开启（config.json 需设置 snowluma.allowProcessControl=true）。' }], isError: true };

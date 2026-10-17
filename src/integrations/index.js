@@ -5,6 +5,7 @@ export { createDshDesktopIntegration, discoverDshDesktop, isDshDesktopRunning, p
 export { createIntegrationRegistry } from './registry.js';
 export { createIntegrationStore, INTEGRATION_STORE_VERSION } from './store.js';
 export { createMcpRuntime, createStdioMcpConnection } from './mcp-runtime.js';
+export { assertIntegrationToolEnabled, assertMcpToolEnabled, isIntegrationToolEnabled } from './tool-policy.js';
 export {
   MCP_SERVER_CATALOG,
   AGENT_TOOL_CATALOG,

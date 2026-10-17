@@ -146,7 +146,12 @@ export function createIntegrationService({
   async function applyManagement(command) {
     switch (command.action) {
       case 'plugin.enable': return resolvedRegistry.setPluginEnabled(command.pluginId, true);
-      case 'plugin.disable': return resolvedRegistry.setPluginEnabled(command.pluginId, false);
+      case 'plugin.disable': {
+        const plugin = resolvedRegistry.requirePlugin(command.pluginId);
+        const view = resolvedRegistry.setPluginEnabled(command.pluginId, false);
+        if (plugin.kind === 'mcp-server') await runtime.stop(plugin.mcpServerId);
+        return view;
+      }
       case 'tool.toggle': return resolvedRegistry.setToolEnabled(command.pluginId, command.toolId, command.enabled === true);
       case 'tool.toggleAll': {
         const plugin = resolvedRegistry.requirePlugin(command.pluginId);
@@ -167,9 +172,10 @@ export function createIntegrationService({
       }
       case 'mcp.enable': return resolvedRegistry.setMcpEnabled(command.serverId, true);
       case 'mcp.disable': {
-        const current = resolvedRegistry.serverState(command.serverId);
-        if (current.status === 'running' || current.status === 'starting') await runtime.stop(command.serverId);
-        return resolvedRegistry.setMcpEnabled(command.serverId, false);
+        // Commit the call gate before awaiting child cleanup; in-flight starts are cancelled too.
+        resolvedRegistry.setMcpEnabled(command.serverId, false);
+        await runtime.stop(command.serverId);
+        return resolvedRegistry.serverState(command.serverId);
       }
       case 'mcp.start': {
         if (!resolvedRegistry.serverEnabled(command.serverId)) {
@@ -265,7 +271,8 @@ export function createIntegrationService({
   const manageMcp = command => manage(command, TOOL_CAPABILITIES.mcpManage);
 
   async function invokeTool(params) {
-    const tool = resolvedRegistry.resolveTool(params.id);
+    // Reject disabled/unavailable sources before creating an approval; runTool rechecks after approval.
+    const { tool } = resolvedRegistry.invokeGuard(params.id);
     const result = await broker.execute({
       capability: tool.capability,
       actor: OWNER_ACTOR,
@@ -446,8 +453,14 @@ export function createIntegrationService({
     'mcp.get': params => resolvedRegistry.getMcpServer(params.id ?? params.serverId),
     'mcp.tools': params => {
       const id = params.id ?? params.serverId;
-      resolvedRegistry.requireServer(id);
-      return { serverId: id, tools: runtime.discover(id) };
+      const server = resolvedRegistry.requireServer(id);
+      return { serverId: id, tools: runtime.discover(id).map(found => {
+        const tool = resolvedRegistry.toolById.get(server.namespace + found.name);
+        if (!tool) return { ...found, id: null, enabled: false, callable: false };
+        const state = resolvedRegistry.toolView(tool);
+        return { ...found, id: tool.id, enabled: state.enabled, callable: state.callable,
+          schema: state.schema };
+      }) };
     },
     'mcp.enable': params => manageMcp({ action: 'mcp.enable', serverId: params.id ?? params.serverId, approved: params.approved === true }),
     'mcp.disable': params => manageMcp({ action: 'mcp.disable', serverId: params.id ?? params.serverId, approved: params.approved === true }),

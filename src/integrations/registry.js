@@ -104,13 +104,27 @@ export function createIntegrationRegistry({
     return typeof record.enabled === 'boolean' ? record.enabled : server.defaultEnabled !== false;
   }
 
+  function toolEnabled(tool, pack = packOwning(tool.id)) {
+    const toggle = pack ? pluginRecord(pack.id).tools?.[tool.id] : undefined;
+    return isRestorable(tool.restore) && (!pack || pluginEnabled(pack.id))
+      && (typeof toggle === 'boolean' ? toggle : tool.enabledByDefault !== false)
+      && (!serverByIdForTool(tool) || serverEnabled(tool.serverId));
+  }
+
   function serverState(id) {
     const server = requireServer(id);
     const enabled = serverEnabled(id);
     const runtime = mcpStatus(id) ?? {};
+    const running = runtime.status === 'running';
+    const discoveredTools = Array.isArray(runtime.tools) ? runtime.tools : [];
     const status = enabled ? (runtime.status ?? 'stopped') : 'disabled';
     return {
-      id: server.id, name: server.name, enabled,
+      id: server.id, name: server.name, enabled, running,
+      callable: enabled && running && discoveredTools.some(found => {
+        const tool = toolById.get(server.namespace + found.name);
+        return tool && toolEnabled(tool);
+      }),
+      discoveredToolCount: running ? discoveredTools.length : 0,
       transport: server.transport, entry: server.entry, managedBy: server.managedBy,
       namespace: server.namespace, source: server.source, permissions: [...(server.permissions ?? [])],
       description: server.description, status,
@@ -128,12 +142,9 @@ export function createIntegrationRegistry({
   /** 工具"是否被允许调用 / 是否真的可用"的唯一推导点。 */
   function toolState(tool, { pluginId = null } = {}) {
     const pack = pluginId ? requirePlugin(pluginId) : packOwning(tool.id);
-    const parentEnabled = pack ? pluginEnabled(pack.id) : true;
-    const record = pack ? pluginRecord(pack.id) : {};
-    const toggle = (record.tools ?? {})[tool.id];
-    const toggled = typeof toggle === 'boolean' ? toggle : tool.enabledByDefault !== false;
     const restorable = isRestorable(tool.restore);
-    const enabled = restorable && parentEnabled && toggled;
+    const mcpServer = serverByIdForTool(tool);
+    const enabled = toolEnabled(tool, pack);
 
     let sourceStatus = 'ready';
     let lastError = null;
@@ -145,10 +156,11 @@ export function createIntegrationRegistry({
       sourceStatus = active ? (integration.status ?? 'ready') : 'disabled';
       available = enabled && active && integration.available !== false;
       lastError = integration.lastError ?? null;
-    } else if (serverByIdForTool(tool)) {
+    } else if (mcpServer) {
       const server = serverState(tool.serverId);
       sourceStatus = server.status;
-      available = enabled && server.status === 'running';
+      const discovered = (mcpStatus(tool.serverId)?.tools ?? []).some(found => found.name === tool.name);
+      available = enabled && server.running && discovered;
       lastError = server.lastError;
     }
     return {
@@ -159,12 +171,18 @@ export function createIntegrationRegistry({
   }
 
   function toolView(tool, options = {}) {
+    const runtime = serverByIdForTool(tool) ? mcpStatus(tool.serverId) : null;
+    const discovered = runtime?.status === 'running'
+      ? (runtime.tools ?? []).find(found => found.name === tool.name) : null;
+    const state = toolState(tool, options);
     return {
       id: tool.id, name: tool.name, label: tool.label, description: tool.description,
-      source: tool.source, origin: tool.origin, serverId: tool.serverId, group: tool.group, schema: tool.schema,
+      source: tool.source, origin: tool.origin, serverId: tool.serverId, group: tool.group,
+      schema: discovered?.inputSchema ? structuredClone(discovered.inputSchema) : tool.schema,
+      discovered: Boolean(discovered), running: runtime?.status === 'running', callable: state.available,
       risk: tool.risk, capability: tool.capability, permissions: [...tool.permissions],
       restore: tool.restore, reason: tool.reason,
-      ...toolState(tool, options)
+      ...state
     };
   }
 
@@ -175,13 +193,18 @@ export function createIntegrationRegistry({
   }
 
   /** 调用前的统一闸门：未知 / 未恢复 / 未开启 / 来源不可用 一律拒绝。 */
-  function invokeGuard(id, options = {}) {
+  function assertToolEnabled(id, options = {}) {
     const tool = resolveTool(id);
     if (!isRestorable(tool.restore)) {
       throw integrationError('LEGACY_UNSUPPORTED', '工具 ' + tool.id + ' 不可恢复：' + (tool.reason ?? tool.restore));
     }
     const state = toolState(tool, options);
     if (!state.enabled) throw integrationError('TOOL_DISABLED', '工具 ' + tool.id + ' 已被关闭');
+    return { tool, state };
+  }
+
+  function invokeGuard(id, options = {}) {
+    const { tool, state } = assertToolEnabled(id, options);
     if (!state.available) {
       throw integrationError('TOOL_UNAVAILABLE', '工具 ' + tool.id + ' 当前不可用（' + state.sourceStatus + '）'
         + (state.lastError ? '：' + state.lastError : ''));
@@ -327,6 +350,7 @@ export function createIntegrationRegistry({
     serverState,
     toolState,
     toolView,
+    assertToolEnabled,
     invokeGuard,
     listPlugins,
     pluginView,

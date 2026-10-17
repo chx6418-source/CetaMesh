@@ -91,7 +91,7 @@ try {
       mode: 'snowluma',
       expectedTool: 'qq_get_card_msg',
       call: { name: 'qq_get_card_msg', arguments: { key: 'group:1', token: 'test', messageId: '1' } },
-      result: /403|已禁用/
+      result: /403|已禁用|TOOL_DISABLED|已被关闭/
     },
     {
       mode: 'snowluma-host',
@@ -109,7 +109,7 @@ try {
       mode: 'qq-file-send',
       expectedTool: 'qq_send_file',
       call: { name: 'qq_send_file', arguments: { target: 'private:1', filePath: path.join(tempRoot, 'missing.txt') } },
-      result: /403|已禁用/
+      result: /403|已禁用|TOOL_DISABLED|已被关闭/
     },
     {
       mode: 'bilibili',
