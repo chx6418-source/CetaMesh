@@ -10,6 +10,7 @@ import { APP_PATHS, listRoleNames, resolveRoleFile } from './app-paths.js';
 import { readRawConfig } from './config/loader.js';
 import { createConfigService } from './config/service.js';
 import { DEFAULT_MODEL, migrateLegacyConfig, normalizeOwnerQQ } from './config/migrate.js';
+import { workshopQqIngress } from './workshop/qq-transport.js';
 import { isMainModule, reportEntrypointError } from './entrypoint.js';
 import { NodeApiClient, unwrap, createTurnCollector } from './dsh-client.js';
 import { createStatusPanel } from './status-panel.js';
@@ -1410,9 +1411,10 @@ async function main() {
   /** 当前模式是否允许该会话进入 */
   function modeAllowed(key, kind, id, cfg, mode) {
     if (mode === 'owner-agent') {
-      // 封闭 agent / workshop：仅 owner 私聊
+      // 封闭 Owner Agent：仅 Owner 私聊。
       return key === `private:${String(cfg.ownerQQ ?? '')}`;
     }
+    if (mode === 'workshop') return kind === 'private' && allowed(kind, id, cfg);
     // chat / social（暂同 chat 白名单）
     return allowed(kind, id, cfg);
   }
@@ -8686,6 +8688,12 @@ async function main() {
   // QQ 消息 → DSH prompt
   async function handleIncoming(kind, id, event, cfg) {
     const key = convKey(kind, id);
+    if (currentMode === 'workshop' && kind === 'group') {
+      // Never echo proposal ids, status, or artifacts to a shared group. A
+      // private route must be separately authorized by the QQ allowlist.
+      if (allowed(kind, id, cfg)) await sendToQQ(key, 'Workshop 提议仅支持已授权的私聊；请联系 Owner 开通私聊后再提交。');
+      return;
+    }
     if (!modeAllowed(key, kind, id, cfg, currentMode)) {
       log(`忽略未授权会话 ${key}（当前模式 ${currentMode}，来自 ${event.user_id}）`);
       return;
@@ -8702,7 +8710,9 @@ async function main() {
     const plainContent = await segmentsToText(event.message ?? [], { resolveAtName, includeReply: false });
     if (currentMode === 'workshop') {
       if (!workshopRuntimeService) { await sendToQQ(key, 'Workshop Runtime 尚未启动。'); return; }
-      const actor = { kind: 'external', id: `qq:${String(event.user_id)}` };
+      const ingress = workshopQqIngress({ kind, id, senderId: event.user_id });
+      if (!ingress.accepted) { log(`Workshop 拒绝无效私聊身份：${ingress.code}`); return; }
+      const actor = ingress.actor;
       try {
         const status = /^\/proposal-status\s+(\S+)$/i.exec(plainContent.trim());
         const supplement = /^\/proposal-add\s+(\S+)\s+([\s\S]+)$/i.exec(plainContent.trim());

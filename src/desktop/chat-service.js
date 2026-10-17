@@ -284,6 +284,10 @@ export function createChatService({
       totalChars += content.length;
       const mimeType = attachment?.mimeType === undefined || attachment?.mimeType === null
         ? null : requireText(String(attachment.mimeType), `附件「${name}」类型`, 80);
+      if (/\.(?:png|jpe?g|gif|webp|bmp|ico|svg|pdf|mp[34]|wav|ogg|zip)$/i.test(name)
+        || (mimeType && !/^text\/(?:plain|markdown|csv|html|css|javascript|typescript|xml|x-python|x-shellscript)$/i.test(mimeType))) {
+        throw chatError('UNSUPPORTED_ATTACHMENT', '当前仅支持文本和源码附件；图片与富媒体尚不可发送给模型');
+      }
       return { name, content, ...(mimeType ? { mimeType } : {}) };
     });
     if (totalChars > MAX_ATTACHMENT_TOTAL_CHARS) throw chatError('ATTACHMENT_SIZE_LIMIT', '单条消息附件总大小超过 1 MiB');
@@ -374,7 +378,8 @@ export function createChatService({
       title: title === undefined || title === null || title === '' ? '新会话' : requireText(String(title), '会话标题', MAX_TITLE_CHARS),
       createdAt: now(),
       updatedAt: now(),
-      config: { ...baseConfig, model: configuredDefaultProvider ? modelDefaults.defaultModel || baseConfig.model : baseConfig.model,
+      config: { ...baseConfig, reasoning: modelDefaults?.reasoningEffort || baseConfig.reasoning,
+        model: configuredDefaultProvider ? modelDefaults.defaultModel || baseConfig.model : baseConfig.model,
         modelProvider: configuredDefaultProvider, agentProvider: resolveDefaultAgentProvider() }
     });
     sessions.set(record.id, record);

@@ -93,18 +93,26 @@ export function createWorkshopService({ stateDir, workspaceService, taskRuntime,
     return result?.status === 'completed' && Object.hasOwn(result, 'result') ? result.result : result;
   }
   const provisioning = new Map();
-  async function provision(p, actor) {
+  async function provision(p, actor, retry = false) {
     const active = provisioning.get(p.id);
     if (active) return active;
-    const pending = provisionOnce(p, actor);
+    const pending = provisionOnce(p, actor, retry);
     provisioning.set(p.id, pending);
     try { return await pending; }
     finally { if (provisioning.get(p.id) === pending) provisioning.delete(p.id); }
   }
-  async function provisionOnce(p, actor) {
+  async function provisionOnce(p, actor, retry) {
     owner(actor);
     if (!p.plan || p.review?.decision !== 'approved') fail('WORKSHOP_REVIEW_REQUIRED', 'Owner must approve a plan first');
     if (p.status === 'delivered') return { proposal: projection(p, actor) };
+    if (p.taskId) {
+      const priorTask = taskRuntime.get({ id: p.taskId }).task;
+      if (['failed', 'cancelled'].includes(priorTask.status)) {
+        if (!retry) fail('WORKSHOP_REVIEW_REQUIRED', 'Failed Task requires explicit Owner retry');
+        // Keep the failed Task as audit evidence; an explicit retry starts a new Task.
+        p.taskId = null; p.assignment = null; p.provision.agentRequestId = null; changed(p);
+      }
+    }
     const previousAssignment = p.assignment;
     const alreadyActive = p.status === 'active';
     if (alreadyActive) p.provision.agentRequestId = null;
@@ -119,10 +127,16 @@ export function createWorkshopService({ stateDir, workspaceService, taskRuntime,
       }
       if (!p.taskId) {
         const marker = 'workshop-proposal:' + p.id;
-        const existing = taskRuntime.list({ workspaceId: p.workspaceId, limit: 5000 }).tasks.find((task) => task.progress?.note === marker);
+        const existing = taskRuntime.list({ workspaceId: p.workspaceId, limit: 5000 }).tasks.find((task) =>
+          task.progress?.note === marker && !['completed', 'failed', 'cancelled'].includes(task.status));
+        const occupied = taskRuntime.findByGoalWorkspace({ goal: p.description, workspaceId: p.workspaceId });
+        if (occupied && occupied.progress?.note !== marker) {
+          fail('WORKSHOP_ASSIGNMENT_CONFLICT', 'An unrelated Task already owns this Workspace goal');
+        }
         const task = existing ?? taskRuntime.create({ goal: p.description,
           requirements: [...p.requirements, ...p.supplements.map((item) => item.text)], workspaceId: p.workspaceId,
-          note: marker, requestId: 'workshop:' + p.id + ':task', requestedAgentProvider: p.plan.provider });
+          note: marker, requestId: 'workshop:' + p.id + ':task:' + p.provision.attempts, requestedAgentProvider: p.plan.provider });
+        if (task.progress?.note !== marker) fail('WORKSHOP_ASSIGNMENT_CONFLICT', 'Task is not owned by this proposal');
         p.taskId = task.id; p.provision.step = 'task-created'; changed(p);
       }
       const grants = { workspaceIds: [p.workspaceId], taskIds: [p.taskId], capabilities: [...p.plan.capabilities] };
@@ -138,7 +152,7 @@ export function createWorkshopService({ stateDir, workspaceService, taskRuntime,
           return { proposal: projection(p, actor) };
         }
         const dispatchRequestId = p.provision.agentRequestId
-          ?? 'workshop:' + p.id + ':agent:' + (task.currentAgent?.sessionId ?? 'initial');
+          ?? 'workshop:' + p.id + ':agent:' + p.taskId + ':' + p.provision.attempts;
         p.provision.agentRequestId = dispatchRequestId; changed(p);
         const result = unwrap(await capabilityBroker.execute({ requestId: dispatchRequestId, actor, taskId: p.taskId, workspaceId: p.workspaceId,
           capability: 'agent.run', input: { provider: p.plan.provider, content: p.description + '\n' + [...p.requirements, ...p.supplements.map((item) => item.text)].join('\n'),
@@ -205,7 +219,7 @@ export function createWorkshopService({ stateDir, workspaceService, taskRuntime,
       p.reviews.push(copy(p.review)); p.plan = plan; p.status = params.approve ? 'approved' : 'rejected'; changed(p);
       return params.approve ? provision(p, actor) : { proposal: projection(p, actor) };
     },
-    'workshop.proposal.retry': (params, actor) => { owner(actor); return provision(requireProposal(params.id, actor), actor); },
+    'workshop.proposal.retry': (params, actor) => { owner(actor); return provision(requireProposal(params.id, actor), actor, true); },
     'workshop.task.status': (params, actor) => {
       const p = requireProposal(params.id, actor);
       if (!p.taskId) return { proposalId: p.id, status: p.status, task: null };

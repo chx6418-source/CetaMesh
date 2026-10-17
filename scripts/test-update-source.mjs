@@ -122,6 +122,14 @@ const baseCheck = (extra = {}) => ({
   ...extra
 });
 
+// A release without an Owner-controlled signing key must remain blocked before network trust.
+{
+  let fetches = 0;
+  const unsignedDeployment = await checkerWith(async () => { fetches += 1; throw new Error('must not fetch'); })
+    .check(baseCheck({ pinnedPublicKey: '' }));
+  equal('无正式公钥时更新检查安全拒绝', [unsignedDeployment.ok, unsignedDeployment.code, fetches], [false, 'NO_PINNED_KEY', 0]);
+}
+
 // Same product SemVer may still advance by monotonic build number. Stable feeds never surface prerelease channels.
 {
   const newerBuild = manifest({ buildNumber: 1054 });

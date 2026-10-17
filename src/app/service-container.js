@@ -471,7 +471,7 @@ export function createCetaMeshServices(options = {}) {
   };
   const desktopUiService = createDesktopUiService({
     services: {
-      chatService, taskService, workspaceService, memoryService, capabilityService, agentBroker, continuityService,
+      chatService, taskService, workshopService, workspaceService, memoryService, capabilityService, agentBroker, continuityService,
       agentService, pluginCenterService, integrationService, extensionService, settingsService, systemServices,
       toolExecutionCoordinator
     },

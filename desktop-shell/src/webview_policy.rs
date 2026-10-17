@@ -14,6 +14,7 @@ const UI_METHODS: &[&str] = &[
     "ui.chat.sessions.archive", "ui.chat.sessions.delete", "ui.chat.history", "ui.chat.status",
     "ui.chat.send", "ui.chat.stop", "ui.chat.retry", "ui.chat.continue", "ui.chat.catalog", "ui.chat.config.set",
     "ui.task.overview", "ui.task.get", "ui.task.create", "ui.task.start", "ui.task.pause", "ui.task.resume", "ui.task.cancel", "ui.task.handoff",
+    "ui.workshop.proposals", "ui.workshop.proposal", "ui.workshop.review", "ui.workshop.retry", "ui.workshop.task.status", "ui.workshop.deliver",
     "ui.workspace.list", "ui.workspace.open", "ui.workspace.create",
     "ui.memory.overview", "ui.memory.get", "ui.memory.create", "ui.memory.update", "ui.memory.pin", "ui.memory.delete",
     "ui.agent.list", "ui.agent.health",
@@ -254,6 +255,19 @@ mod tests {
             r#"{"id":"r-snow","method":"ui.plugins.integration.action","params":{"id":"snowluma","action":"start"}}"#,
         ).unwrap();
         assert_eq!(request.method, "ui.plugins.integration.action");
+    }
+
+    #[test]
+    fn workshop_owner_review_is_allowlisted_without_raw_domain_or_actor_routes() {
+        for method in ["ui.workshop.proposals", "ui.workshop.proposal", "ui.workshop.review",
+            "ui.workshop.retry", "ui.workshop.task.status", "ui.workshop.deliver"] {
+            let raw = format!(r#"{{"id":"r-workshop","method":"{method}","params":{{}}}}"#);
+            assert!(parse_bridge_request(&raw).is_ok(), "missing Owner UI method: {method}");
+        }
+        for method in ["workshop.proposal.review", "workshop.proposal.submit", "ui.workshop.external.submit"] {
+            let raw = format!(r#"{{"id":"r-workshop","method":"{method}","params":{{"actor":{{"kind":"owner"}}}}}}"#);
+            assert!(parse_bridge_request(&raw).is_err(), "unsafe route accepted: {method}");
+        }
     }
 
     #[test]

@@ -246,6 +246,8 @@ function setup({ policy, gate, failSendProvider, alphaStatusError, reconciler, b
   taskRuntime.attachAgent({ id: task.id, expectedRev: rev(task.id), provider: 'alpha', sessionId: 'alpha-s9' });
   const result = await runtime.rollover({ taskId: task.id, reason: 'provider-switch', targetProvider: 'beta' });
   assert.equal(result.crossProvider, true);
+  assert.equal(runtime.latestPacket({ taskId: task.id }).packet.reasonForHandoff, 'provider-switch');
+  assert.equal(runtime.history({ taskId: task.id }).rollovers[0].reason, 'provider-switch');
   assert.equal(result.to.provider, 'beta');
   const after = taskRuntime.get({ id: task.id }).task;
   assert.equal(after.currentAgent.provider, 'beta', 'Task 挂到新 Provider，ID 不变');
@@ -313,6 +315,8 @@ function setup({ policy, gate, failSendProvider, alphaStatusError, reconciler, b
   // packet 归一化：未知原因收敛 other、coding 缺省为空、不伪造
   const packet = normalizePacket({ taskId: 't1', goal: 'g', reasonForHandoff: 'mystery', previousAgent: { provider: 'dsh', sessionId: 's' } });
   assert.equal(packet.reasonForHandoff, 'other');
+  const legacySwitch = normalizePacket({ taskId: 't1', goal: 'g', reasonForHandoff: 'agent-provider-switch', previousAgent: { provider: 'dsh', sessionId: 's' } });
+  assert.equal(legacySwitch.reasonForHandoff, 'provider-switch', 'legacy provider switch retains its audit reason');
   assert.equal(packet.coding.branch, null);
   assert.deepEqual(packet.relevantFiles, []);
   assert.equal(packet.workspace, null);

@@ -26,6 +26,15 @@ export interface Task {
   agentHistory: { provider: string; sessionId: string; attachedAt: string | number | null; detachedAt: string | number | null; note: string }[];
   failure: { reason: string } | null;
 }
+export interface WorkshopProposal {
+  id: string; title: string; description: string; requirements: string[];
+  supplements: { id: string; text: string }[]; submitter: { kind: string; id: string };
+  status: string; review: { decision: string; reason: string; at: string | number | null } | null;
+  plan: { workspace: { name: string; root: string }; provider: string; capabilities: string[] } | null;
+  workspaceId: string | null; taskId: string | null; errorCode: string | null;
+  artifacts: { id: string; label: string; mediaType: string; deliveredAt: string | number | null }[];
+  createdAt: string | number | null; updatedAt: string | number | null;
+}
 export interface Memory {
   id: string; type: string; scope: string; title: string; content: string; summary: string;
   tags: string[]; pinned: boolean; rev: number | null; createdAt: string | number | null; updatedAt: string | number | null;
@@ -102,6 +111,7 @@ type UiMethod =
   | 'ui.chat.sessions.list' | 'ui.chat.sessions.create' | 'ui.chat.sessions.rename' | 'ui.chat.sessions.archive' | 'ui.chat.sessions.delete'
   | 'ui.chat.history' | 'ui.chat.status' | 'ui.chat.send' | 'ui.chat.stop' | 'ui.chat.retry' | 'ui.chat.continue' | 'ui.chat.catalog' | 'ui.chat.config.set'
   | 'ui.task.overview' | 'ui.task.get' | 'ui.task.create' | 'ui.task.start' | 'ui.task.pause' | 'ui.task.resume' | 'ui.task.reconcile' | 'ui.task.cancel' | 'ui.task.handoff'
+  | 'ui.workshop.proposals' | 'ui.workshop.proposal' | 'ui.workshop.review' | 'ui.workshop.retry' | 'ui.workshop.task.status' | 'ui.workshop.deliver'
   | 'ui.workspace.list' | 'ui.workspace.open' | 'ui.workspace.create'
   | 'ui.memory.overview' | 'ui.memory.get' | 'ui.memory.create' | 'ui.memory.update' | 'ui.memory.pin' | 'ui.memory.delete'
   | 'ui.memory.candidates.confirm' | 'ui.memory.candidates.confirmBatch'
@@ -257,6 +267,16 @@ export const taskClient = {
     uiCall<{ task: Task }>('ui.task.reconcile', { id, expectedRev, reviewed: true, reviewSummary, nextInstruction, requestId }),
   cancel: (id: string, expectedRev?: number) => uiCall<{ task: Task }>('ui.task.cancel', { id, expectedRev }),
   handoff: (id: string, targetProvider: string, expectedRev?: number) => uiCall<{ task: Task; handoff: { success: boolean; from: unknown; to: unknown } }>('ui.task.handoff', { id, targetProvider, expectedRev })
+};
+export const workshopClient = {
+  proposals: () => uiCall<{ proposals: WorkshopProposal[]; total: number }>('ui.workshop.proposals', {}),
+  proposal: (id: string) => uiCall<{ proposal: WorkshopProposal }>('ui.workshop.proposal', { id }),
+  review: (id: string, approve: boolean, reason: string, plan?: { workspace: { name: string; root: string; createIfMissing: boolean }; provider: string; capabilities: string[] }) =>
+    uiCall<{ proposal: WorkshopProposal }>('ui.workshop.review', { id, approve, reason, plan }),
+  retry: (id: string) => uiCall<{ proposal: WorkshopProposal }>('ui.workshop.retry', { id }),
+  taskStatus: (id: string) => uiCall<{ proposalId: string; status: string; task: Task | null }>('ui.workshop.task.status', { id }),
+  deliver: (id: string, label: string, content: string, requestId: string) =>
+    uiCall<{ proposal: WorkshopProposal; artifact: { id: string; label: string } }>('ui.workshop.deliver', { id, label, content, requestId, approve: true })
 };
 export const memoryClient = {
   overview: (query = '', scope = '', limit = 100, offset = 0, types?: string[]) =>

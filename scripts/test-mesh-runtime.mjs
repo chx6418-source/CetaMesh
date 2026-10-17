@@ -26,8 +26,11 @@ import {
   CAPABILITY_NAMES,
   NODE_CAPABILITIES
 } from '../src/mesh/index.js';
+import { presenceOf } from '../src/mesh/types.js';
 import { createChannelRegistry, createChannelService, CHANNEL_ADAPTERS } from '../src/channel/index.js';
 import { startIpcProtocol, IPC_PROTOCOL_VERSION } from '../src/control/ipc-protocol.js';
+import { createSettingsStore } from '../src/settings/store.js';
+import { coerceField } from '../src/settings/schema.js';
 
 let passed = 0;
 let failed = 0;
@@ -65,7 +68,9 @@ function send(fromNode, toNode, type, payload, options = {}) {
 }
 
 try {
-  const nodeA = createMeshNode({ stateDir: path.join(root, 'node-a'), name: 'Desktop A', role: 'desktop', now });
+  const nodeA = createMeshNode({ stateDir: path.join(root, 'node-a'), name: 'Desktop A', role: 'desktop', now,
+    available: ['mesh.presence', 'mesh.manifest', 'memory.query', 'task.manage'],
+    executeCapability: ({ capability }) => ({ executed: true, capability }) });
   const nodeB = createMeshNode({ stateDir: path.join(root, 'node-b'), name: 'Peer B', role: 'mobile', now });
   const idA = nodeA.identity().nodeId;
   const idB = nodeB.identity().nodeId;
@@ -146,7 +151,7 @@ try {
   clock += 1000;
   const allowed = send(nodeB, nodeA, 'capability.request', { capability: 'memory.query', requestId: 'r2' });
   check('批准后同一请求被放行', allowed.ok === true && allowed.decision === 'allow', JSON.stringify(allowed));
-  equal('本节点未接线执行器时如实返回', allowed.result.reason, 'executor_not_wired');
+  equal('已接线执行器返回真实执行结果', allowed.result, { executed: true, capability: 'memory.query' });
 
   const doubleDecide = capture(() => nodeA.decideApproval({ requestId: 'r2', decision: 'reject' }));
   check('审批不可重复决定', doubleDecide.threw && doubleDecide.code === 'APPROVAL_DECIDED', String(doubleDecide.code));
@@ -199,6 +204,43 @@ try {
   limited.grant({ nodeId: idB, capabilities: ['memory.query'] });
   const unavailable = send(nodeB, limited, 'capability.request', { capability: 'memory.query', requestId: 'r11' });
   check('能力当前不可用 -> availability', unavailable.stage === 'availability' && unavailable.code === 'CAPABILITY_UNAVAILABLE', String(unavailable.code));
+
+  const unwired = createMeshNode({ stateDir: path.join(root, 'node-unwired'), name: 'Unwired', role: 'desktop', now });
+  equal('未接线的远程能力在 Manifest 中不可用', unwired.manifest().capabilities.find(c => c.id === 'memory.query').available, false);
+  const unwiredInvite = unwired.createInvite({});
+  unwired.pair({ inviteCode: unwiredInvite.code, peerPublicKeyPem: nodeB.publicKeyPem(), peerName: 'B' });
+  unwired.trustNode({ nodeId: idB });
+  unwired.grant({ nodeId: idB, capabilities: ['memory.query'] });
+  const unwiredResult = send(nodeB, unwired, 'capability.request', { capability: 'memory.query', requestId: 'unwired' });
+  equal('未接线能力授权后仍拒绝且不进入审批', [unwiredResult.ok, unwiredResult.stage, unwiredResult.code],
+    [false, 'availability', 'CAPABILITY_UNAVAILABLE']);
+  equal('未接线能力不会创建待审批请求', unwired.approvals().length, 0);
+
+  const ttlStateDir = path.join(root, 'ttl-service');
+  const ttlSettings = createSettingsStore({ stateDir: ttlStateDir });
+  ttlSettings.update('devices', { presenceTtlMs: 10000 });
+  const ttlService = createMeshService({ stateDir: ttlStateDir, settingsStore: ttlSettings, now });
+  const ttlInvite = ttlService.node.createInvite({});
+  ttlService.node.pair({ inviteCode: ttlInvite.code, peerPublicKeyPem: nodeB.publicKeyPem(), peerName: 'B' });
+  ttlService.node.trustNode({ nodeId: idB });
+  ttlService.node.touch({ nodeId: idB });
+  clock += 15000;
+  equal('设置 TTL 10s 后 15s 的 peer 离线', ttlService.node.peer({ nodeId: idB }).presence, 'offline');
+  ttlSettings.update('devices', { presenceTtlMs: 20000 });
+  equal('TTL 更新后在线投影立即重算', ttlService.node.peer({ nodeId: idB }).presence, 'online');
+  equal('未来时间戳不会伪装为在线', presenceOf({ lastSeenAt: now() + 1000 }, now(), 10000), 'unknown');
+  equal('非法 TTL 不会伪装为在线', presenceOf({ lastSeenAt: now() }, now(), NaN), 'unknown');
+  equal('设置拒绝小数 TTL', capture(() => coerceField('devices', 'presenceTtlMs', 10000.5)).code, 'SETTINGS_INVALID');
+  equal('设置拒绝字符串 TTL', capture(() => coerceField('devices', 'presenceTtlMs', '10000')).code, 'SETTINGS_INVALID');
+  await ttlService.close();
+  const disabledService = createMeshService({ stateDir: path.join(root, 'disabled-service'), now,
+    isEnabled: () => false });
+  const disabledStatus = await disabledService.execute({ method: 'mesh.status', params: {} });
+  equal('Mesh 关闭时状态明确显示关闭而 Core 仍 ready', [disabledStatus.meshEnabled, disabledStatus.coreReady], [false, true]);
+  equal('Mesh 关闭时 Manifest 不宣称能力可用', disabledService.node.manifest().capabilities.filter(c => c.available).length, 0);
+  const disabledInvite = await asyncCapture(() => disabledService.execute({ method: 'mesh.invite.create', params: {} }));
+  equal('Mesh 关闭时拒绝新配对', disabledInvite.code, 'MESH_DISABLED');
+  await disabledService.close();
 
   // blocked 对端
   nodeA.blockNode({ nodeId: idB });
@@ -274,6 +316,14 @@ try {
     envelope: pureEnv, peer: null, localManifest: nodeA.manifest(), verify: () => true, nowMs: now()
   });
   equal('纯函数：无对端 -> trust 拒绝', [pureTrust.decision, pureTrust.stage], ['deny', 'trust']);
+  const pureUnwiredEnv = createEnvelope({ type: 'capability.request', from: idB, to: idA,
+    payload: { capability: 'memory.query', requestId: 'pure-unwired' }, sign: (t) => nodeB.sign(t), nowMs: now() });
+  const pureUnwired = authorizeCapabilityRequest({
+    envelope: pureUnwiredEnv, peer: { trust: 'trusted', grants: ['memory.query'] },
+    publicKeyPem: nodeB.publicKeyPem(), localManifest: unwired.manifest(), verify: () => true, nowMs: now()
+  });
+  equal('纯函数：Manifest 标记不可用则拒绝', [pureUnwired.decision, pureUnwired.stage, pureUnwired.code],
+    ['deny', 'availability', 'CAPABILITY_UNAVAILABLE']);
 
   // ── 12. Service + IPC 往返 ────────────────────────────────────────────
   const svcDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-mesh-svc-'));

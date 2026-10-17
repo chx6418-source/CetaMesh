@@ -259,6 +259,10 @@ fn pick_text_attachments() -> Result<Vec<Value>, String> {
     let mut attachments = Vec::with_capacity(paths.len());
     let mut total_bytes = 0_u64;
     for path in paths {
+        let selected_extension = path.extension().and_then(|value| value.to_str()).unwrap_or("").to_ascii_lowercase();
+        if !extensions.contains(&selected_extension.as_str()) {
+            return Err("仅支持文本和源码附件；图片与富媒体尚不可发送给模型".to_owned());
+        }
         let metadata = fs::metadata(&path).map_err(|error| error.to_string())?;
         if metadata.len() > MAX_FILE_BYTES { return Err("attachment exceeds file size limit".to_owned()); }
         total_bytes = total_bytes.saturating_add(metadata.len());

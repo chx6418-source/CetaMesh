@@ -48,7 +48,7 @@ export const FIELDS = Object.freeze({
   models: Object.freeze({
     provider: text('deepseek-official', { description: '模型 provider' }),
     defaultModel: text('deepseek-flash', { description: '新会话默认模型' }),
-    reasoningEffort: text('max', { choices: ['off', 'low', 'high', 'max'], description: '推理强度' }),
+    reasoningEffort: text('max', { choices: ['off', 'low', 'high', 'max'], description: '新会话默认推理强度；现有会话保持各自选择' }),
     openaiCompatibleToolCalling: bool(false, { description: '允许 OpenAI 兼容 Provider 使用结构化工具调用（仅对该协议 Provider 生效）' }),
     openaiCompatibleReasoningEffort: bool(false, { description: '允许 OpenAI 兼容 Provider 发送推理强度参数（仅已知支持的推理模型生效）' }),
     streaming: bool(true, { description: '流式输出' })
@@ -160,6 +160,9 @@ export function coerceField(section, key, value) {
     return value;
   }
   if (spec.type === 'number') {
+    if (section === 'devices' && key === 'presenceTtlMs' && !Number.isSafeInteger(value)) {
+      throw settingsError('SETTINGS_INVALID', section + '.' + key + ' 必须是整数毫秒');
+    }
     const n = Number(value);
     if (!Number.isFinite(n)) throw settingsError('SETTINGS_INVALID', section + '.' + key + ' 必须是数字');
     if (n < spec.min || n > spec.max) {

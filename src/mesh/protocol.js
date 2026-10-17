@@ -147,6 +147,9 @@ export function authorizeCapabilityRequest({
   if (!declared) {
     return deny('availability', 'CAPABILITY_NOT_DECLARED', '本节点未声明该能力：' + capability);
   }
+  if (declared.available !== true) {
+    return deny('availability', 'CAPABILITY_UNAVAILABLE', '能力当前不可用：' + capability);
+  }
   const usable = availableCapabilities === null || availableCapabilities === undefined
     ? null
     : new Set(availableCapabilities);

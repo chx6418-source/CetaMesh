@@ -12,7 +12,8 @@ const PAIRING_SECURITY_NOTE = '配对邀请一次性、5 分钟内有效，请�
 export function createMeshService({ stateDir, name, role, available = null, executeCapability = null, now,
   isEnabled = () => true, settingsStore = null } = {}) {
   if (!stateDir || typeof stateDir !== 'string') throw new Error('createMeshService 需要 stateDir');
-  const node = createMeshNode({ stateDir, name, role, available, executeCapability, now, isEnabled });
+  const node = createMeshNode({ stateDir, name, role, available, executeCapability, now, isEnabled,
+    presenceTtlMs: () => settingsStore?.get().settings.devices.presenceTtlMs ?? 90000 });
   const unsubscribe = settingsStore?.onChange?.(settings => {
     if (settings.devices.meshEnabled === false) {
       void node.close({ revokePairing: true }).catch(error => console.error('Mesh listener shutdown failed:', error));

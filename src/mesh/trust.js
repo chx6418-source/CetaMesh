@@ -34,7 +34,7 @@ function loadTrustFile(file, fallback) {
   }
 }
 
-export function createTrustStore({ stateDir, now = () => Date.now() } = {}) {
+export function createTrustStore({ stateDir, now = () => Date.now(), presenceTtlMs = () => MESH_LIMITS.presenceTtlMs } = {}) {
   if (!stateDir || typeof stateDir !== 'string') throw new Error('createTrustStore 需要 stateDir');
   const dir = path.join(stateDir, 'mesh');
   const file = path.join(dir, 'trust.json');
@@ -65,7 +65,7 @@ export function createTrustStore({ stateDir, now = () => Date.now() } = {}) {
 
   /** 对外投影：UI 需要 Device / Role / Trust / Transport / Last seen / Capabilities / Status / Last error。 */
   function view(peer) {
-    const presence = presenceOf(peer, now());
+    const presence = presenceOf(peer, now(), presenceTtlMs());
     return {
       nodeId: peer.nodeId,
       name: peer.name,

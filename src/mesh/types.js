@@ -112,7 +112,10 @@ export function normalizeCapabilityList(value, label = 'capabilities') {
 }
 
 /** 在线判定：基于 lastSeenAt 与 TTL。 */
-export function presenceOf(peer, nowMs) {
-  if (!peer || !peer.lastSeenAt) return 'unknown';
-  return nowMs - Number(peer.lastSeenAt) <= MESH_LIMITS.presenceTtlMs ? 'online' : 'offline';
+export function presenceOf(peer, nowMs, ttlMs = MESH_LIMITS.presenceTtlMs) {
+  if (!peer || peer.lastSeenAt === null || peer.lastSeenAt === undefined) return 'unknown';
+  const lastSeen = Number(peer.lastSeenAt);
+  if (!Number.isSafeInteger(lastSeen) || lastSeen < 0 || !Number.isSafeInteger(nowMs) || nowMs < lastSeen
+    || !Number.isSafeInteger(ttlMs) || ttlMs < 10000 || ttlMs > 600000) return 'unknown';
+  return nowMs - lastSeen <= ttlMs ? 'online' : 'offline';
 }

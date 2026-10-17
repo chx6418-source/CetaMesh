@@ -97,6 +97,7 @@ export const HANDOFF_REASONS = Object.freeze([
 /** rollover 原因归一化：未知原因按 'other' 收敛，不抛错（记录原始值）。 */
 export function normalizeReason(value) {
   const text = String(value ?? '').trim();
+  if (text === 'agent-provider-switch') return 'provider-switch';
   return HANDOFF_REASONS.includes(text) ? text : 'other';
 }
 

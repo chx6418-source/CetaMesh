@@ -7,7 +7,7 @@
 //   没有任何 peer、所有 peer 离线、channel adapter 出错 —— 本节点仍然是 ready。
 
 import crypto from 'node:crypto';
-import { capabilityManifest, allCapabilities } from './capabilities.js';
+import { capabilityManifest } from './capabilities.js';
 import {
   deriveNodeId,
   loadOrCreateIdentity,
@@ -57,12 +57,15 @@ export function createMeshNode({
   role = 'desktop',
   available = null,
   executeCapability = null,
+  presenceTtlMs = () => MESH_LIMITS.presenceTtlMs,
   isEnabled = () => true,
   now = () => Date.now()
 } = {}) {
   if (!stateDir || typeof stateDir !== 'string') throw new Error('createMeshNode 需要 stateDir');
   const identity = loadOrCreateIdentity({ stateDir, name, role, now });
-  const trust = createTrustStore({ stateDir, now });
+  const trust = createTrustStore({ stateDir, now, presenceTtlMs });
+  const availableCapabilities = [...new Set(['mesh.presence', 'mesh.manifest',
+    ...(typeof executeCapability === 'function' ? normalizeCapabilityList(available ?? []) : [])])];
 
   const nonces = new Map();      // nonce -> ts（重放防护）
   const approvals = new Map();   // requestId -> { state, ... }
@@ -106,7 +109,7 @@ export function createMeshNode({
   }
 
   function manifest() {
-    return capabilityManifest({ identity, available, extra: { now } });
+    return capabilityManifest({ identity, available: isEnabled() === true ? availableCapabilities : [], extra: { now } });
   }
 
   /** 处理一条来自对端的信封。返回结构化结果，绝不抛给调用方（协议边界不能让异常穿透）。 */
@@ -142,7 +145,7 @@ export function createMeshNode({
         peer,
         publicKeyPem: peer ? peer.publicKeyPem : null,
         localManifest: manifest(),
-        availableCapabilities: available === null || available === undefined ? allCapabilities() : available,
+        availableCapabilities,
         duplicateNonce: false,
         verify: (_pem, payload, sig) => verifyPayload(peer ? peer.publicKeyPem : null, payload, sig),
         approvalState: state,
@@ -194,7 +197,7 @@ export function createMeshNode({
           return { ok: false, decision: 'allow', stage: 'execution', code, message: String(error && error.message) };
         }
       }
-      return { ok: true, decision: 'allow', stage: 'done', code: 'ALLOWED', result: { executed: false, reason: 'executor_not_wired' } };
+      return { ok: false, decision: 'deny', stage: 'availability', code: 'CAPABILITY_UNAVAILABLE' };
     }
 
     if (raw.type === 'presence.ping') {
@@ -385,6 +388,7 @@ export function createMeshNode({
     const name = String(capability || '');
     const declared = manifest().capabilities.find((item) => item.id === name);
     if (!declared) return { decision: 'deny', code: 'CAPABILITY_NOT_DECLARED' };
+    if (declared.available !== true) return { decision: 'deny', code: 'CAPABILITY_UNAVAILABLE' };
     const grants = Array.isArray(peer.grants) ? peer.grants : [];
     if (!grants.includes(name)) return { decision: 'deny', code: 'CAPABILITY_NOT_AUTHORIZED' };
     const state = approvalStateFor(requestId);
@@ -425,7 +429,7 @@ export function createMeshNode({
         return { decision: 'allow', code: (error && error.code) || 'EXECUTION_FAILED' };
       }
     }
-    return { decision: 'allow', code: 'ALLOWED', result: { executed: false, reason: 'executor_not_wired' } };
+    return { decision: 'deny', code: 'CAPABILITY_UNAVAILABLE' };
   }
 
   /** POST /cetamesh/v1/mesh/envelope：配对后的 presence / manifest / capability 通道。 */
@@ -731,6 +735,7 @@ export function createMeshNode({
         name: identity.name,
         role: identity.role,
         protocolVersion: MESH_PROTOCOL_VERSION,
+        meshEnabled: isEnabled() === true,
         coreReady: true,
         coreReadinessDependsOn: [],
         peerCount: peers.length,

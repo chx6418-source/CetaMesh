@@ -97,7 +97,7 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
         const rollover = await continuityRuntime.rollover({
           taskId: task.id,
           targetProvider: provider,
-          reason: 'agent-provider-switch'
+          reason: 'provider-switch'
         });
         const nextAgent = rollover?.to;
         if (!nextAgent?.sessionId || nextAgent.provider !== provider) {

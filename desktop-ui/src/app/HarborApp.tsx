@@ -3,7 +3,7 @@ import { useSearchParams } from 'react-router';
 import { createPortal } from 'react-dom';
 import { mergeChatHistorySnapshot, mergeLatestChatMessages, prependOlderChatMessages } from './chat-history';
 import { applyChatStreamUpdates, ChatRequestEpoch, ChatStreamRevision, type ChatStreamUpdate } from './chat-async-state';
-import { aboutClient, agentClient, approvalClient, bridge, chatClient, extensionSettingsClient, feedbackClient, hostClient, memoryClient, onboardingClient, openExternal, pluginClient, searchClient, settingsClient, taskClient, updateClient, workspaceClient, type Agent, type Approval, type ChatMessage as ChatMessageDto, type ChatSession, type ExtensionSettingsDescription, type ExtensionSettingsSnapshot, type IntegrationSettings, type Memory, type Plugin, type ProviderSettingField, type SettingField, type Settings, type Task } from '../bridge/typed-client';
+import { aboutClient, agentClient, approvalClient, bridge, chatClient, extensionSettingsClient, feedbackClient, hostClient, memoryClient, onboardingClient, openExternal, pluginClient, searchClient, settingsClient, taskClient, updateClient, workspaceClient, workshopClient, type Agent, type Approval, type ChatMessage as ChatMessageDto, type ChatSession, type ExtensionSettingsDescription, type ExtensionSettingsSnapshot, type IntegrationSettings, type Memory, type Plugin, type ProviderSettingField, type SettingField, type Settings, type Task, type WorkshopProposal } from '../bridge/typed-client';
 import { Icon, type IconName } from '../components/icons';
 import { ArtifactCard } from '../components/product/cards';
 import { Button, IconButton, Input, normalizeSelectOptionLabel, SearchInput, Select, Tabs } from '../components/primitives/inputs';
@@ -995,11 +995,95 @@ function WorkPage({ workspaces, onRefreshWorkspaces }: { workspaces: { id: strin
     {error && <ErrorNotice error={error} onRetry={() => void refresh()} />}
     <div className="row between work-controls"><Tabs items={[{ id: '', label: `全部 ${counts.all}` }, { id: 'running', label: `运行中 ${counts.working}` }, { id: 'waiting', label: `待处理 ${counts.waiting}` }, { id: 'completed', label: `已完成 ${counts.completed}` }]} selected={filter} onChange={setFilter} label="按任务状态筛选" /><SearchInput label="搜索任务" placeholder="搜索任务" value={query} onChange={event => setQuery(event.target.value)} /></div>
     {loading && !tasks.length ? <LoadingState label="正在读取任务…" /> : tasks.length ? <div className="task-grid">{tasks.map(task => <TaskCard key={task.id} task={task} onOpen={() => void openTask(task)} onAction={action => void taskAction(task, action)} />)}</div> : !error && <EmptyNotice icon="work" title={query || filter ? '没有匹配的任务' : '还没有任务'} detail="你可以在这里创建任务并查看 Core 与 Agent 的执行进度。" action={<Button variant="primary" icon="add" onClick={() => setTaskSheet(true)}>新建任务</Button>} />}
+    <WorkshopInbox providers={handoffProviders} />
     <div className="section-heading page-section-heading"><h2>最近工作区</h2><div className="row"><Input aria-label="工作区名称" placeholder="工作区名称（可选）" value={workspaceName} onChange={event => setWorkspaceName(event.target.value)} /><Button compact icon="add" onClick={() => void addWorkspace()} disabled={workspaceBusy}>{workspaceBusy ? '添加中…' : '添加工作区'}</Button></div></div>
     {workspaceError && <ErrorNotice error={workspaceError} />}{workspaces.length ? <div className="workspace-grid">{workspaces.map(workspace => <Card className="workspace-card" key={workspace.id}><div className="workspace-badge">CM</div><div className="workspace-card-body"><strong>{workspace.name}</strong><p>{workspace.status} · 最近活动 {relativeLabel(workspace.lastActivity)}</p></div><StatusBadge value={workspace.status} /></Card>)}</div> : <Surface className="workspace-empty"><p className="muted">尚未登记工作区。添加工作区时会使用 Windows 原生文件夹选择器。</p></Surface>}
     <Sheet open={taskSheet} title="新建任务" onClose={() => setTaskSheet(false)}><TaskCreateForm workspaces={workspaces} providers={handoffProviders} onCreated={async () => { setTaskSheet(false); await refresh(); }} /></Sheet>
     <Sheet open={Boolean(selectedTask)} title={selectedTask?.title ?? '任务详情'} onClose={() => setSelectedTask(null)}>{selectedTask && <TaskDetails task={selectedTask} providers={handoffProviders} onHandoff={provider => void handoffTask(selectedTask, provider)} onAction={action => void taskAction(selectedTask, action)} onStart={provider => void taskAction(selectedTask, 'start', provider)} onReconcile={(summary, instruction) => void reconcileTask(selectedTask, summary, instruction)} />}</Sheet>
   </div>;
+}
+
+function WorkshopInbox({ providers }: { providers: { id: string; name: string; eligible: boolean; reason: string | null }[] }) {
+  const [proposals, setProposals] = useState<WorkshopProposal[]>([]);
+  const [selected, setSelected] = useState<WorkshopProposal | null>(null);
+  const [workspaceName, setWorkspaceName] = useState('');
+  const [workspaceRoot, setWorkspaceRoot] = useState('');
+  const [provider, setProvider] = useState('');
+  const [capabilities, setCapabilities] = useState<string[]>([]);
+  const [reason, setReason] = useState('');
+  const [deliveryLabel, setDeliveryLabel] = useState('');
+  const [deliveryContent, setDeliveryContent] = useState('');
+  const [taskStatus, setTaskStatus] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const deliveryRequest = useRef<{ content: string; id: string } | null>(null);
+  const refresh = useCallback(async () => {
+    try { setProposals((await workshopClient.proposals()).proposals); setError(''); }
+    catch (cause) { setError(messageOf(cause)); }
+  }, []);
+  useEffect(() => { void refresh(); const timer = window.setInterval(() => { void refresh(); }, 5000); return () => window.clearInterval(timer); }, [refresh]);
+  async function open(id: string) {
+    try {
+      const proposal = (await workshopClient.proposal(id)).proposal;
+      setSelected(proposal); setWorkspaceName(proposal.plan?.workspace.name ?? proposal.title);
+      setWorkspaceRoot(proposal.plan?.workspace.root ?? ''); setProvider(proposal.plan?.provider ?? '');
+      setCapabilities(proposal.plan?.capabilities ?? []); setReason(''); setDeliveryLabel(''); setDeliveryContent('');
+      setTaskStatus(proposal.taskId ? (await workshopClient.taskStatus(id)).task?.status ?? '' : ''); setError('');
+    } catch (cause) { setError(messageOf(cause)); }
+  }
+  async function act(action: 'approve' | 'reject' | 'retry' | 'deliver') {
+    if (!selected) return;
+    if (action === 'approve' && !window.confirm(`批准“${selected.title}”并创建工作区及任务？`)) return;
+    if (action === 'deliver' && !window.confirm(`向 ${selected.submitter.id} 交付“${deliveryLabel}”？`)) return;
+    setBusy(true); setError('');
+    try {
+      let result: { proposal: WorkshopProposal };
+      if (action === 'approve') result = await workshopClient.review(selected.id, true, reason, {
+        workspace: { name: workspaceName.trim(), root: workspaceRoot, createIfMissing: true }, provider, capabilities });
+      else if (action === 'reject') result = await workshopClient.review(selected.id, false, reason);
+      else if (action === 'retry') result = await workshopClient.retry(selected.id);
+      else {
+        const fingerprint = JSON.stringify([selected.id, deliveryLabel, deliveryContent]);
+        if (deliveryRequest.current?.content !== fingerprint) deliveryRequest.current = { content: fingerprint, id: crypto.randomUUID() };
+        result = await workshopClient.deliver(selected.id, deliveryLabel.trim(), deliveryContent, deliveryRequest.current.id);
+        deliveryRequest.current = null;
+      }
+      setSelected(result.proposal);
+      setTaskStatus(result.proposal.taskId ? (await workshopClient.taskStatus(result.proposal.id)).task?.status ?? '' : '');
+      await refresh();
+    } catch (cause) { setError(messageOf(cause)); }
+    finally { setBusy(false); }
+  }
+  const toggleCapability = (capability: string) => setCapabilities(current => current.includes(capability)
+    ? current.filter(item => item !== capability) : [...current, capability]);
+  return <section aria-label="Workshop 提议"><div className="section-heading page-section-heading"><h2>Workshop 提议</h2><Button compact variant="ghost" onClick={() => void refresh()}>刷新</Button></div>
+    <p className="muted">外部提议先由 Owner 审查；批准时明确选择工作区、执行者和能力。</p>
+    {error && <ErrorNotice error={error} />}
+    {proposals.length ? <div className="task-grid">{proposals.map(item => <Card className="task-card" key={item.id}><div className="row between"><strong>{item.title}</strong><StatusBadge value={item.status} /></div><p>{item.description}</p><small>{item.submitter.id} · {dateLabel(item.updatedAt)}</small><div><Button compact variant="ghost" onClick={() => void open(item.id)}>审查与交付</Button></div></Card>)}</div>
+      : <Surface className="workspace-empty"><p className="muted">暂无外部提议。</p></Surface>}
+    <Sheet open={Boolean(selected)} title={selected?.title ?? 'Workshop 提议'} onClose={() => setSelected(null)}>{selected && <div className="task-details">
+      <div className="row between"><StatusBadge value={selected.status} /><small>提交者 {selected.submitter.id}</small></div>
+      <p>{selected.description}</p>{selected.requirements.map((item, index) => <p key={index}>· {item}</p>)}
+      {selected.supplements.map(item => <p key={item.id}>补充：{item.text}</p>)}
+      {selected.review && <p>审查：{selected.review.decision} {selected.review.reason}</p>}
+      {selected.status === 'submitted' && <section><h3>Owner 审查</h3>
+        <label>工作区名称<Input value={workspaceName} onChange={event => setWorkspaceName(event.target.value)} /></label>
+        <label>工作区目录<Input value={workspaceRoot} onChange={event => setWorkspaceRoot(event.target.value)} /></label>
+        <Button compact variant="ghost" onClick={() => void hostClient.pickFolder().then(value => { if (value.path) setWorkspaceRoot(value.path); }).catch(cause => setError(messageOf(cause)))}>选择目录</Button>
+        <Select label="执行者" value={provider} onChange={event => setProvider(event.target.value)}><option value="">选择可用 Agent</option>{providers.filter(item => item.eligible).map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</Select>
+        <p>批准的能力（仅作用于本任务）</p>{[['filesystem.read', '读取文件'], ['filesystem.write', '写入文件'], ['filesystem.search', '搜索文件'], ['git.status', 'Git 状态'], ['git.diff', 'Git 差异'], ['git.commit', 'Git 提交'], ['test.run', '运行测试']].map(([cap, label]) => <label key={cap}><input type="checkbox" checked={capabilities.includes(cap)} onChange={() => toggleCapability(cap)} /> {label}</label>)}
+        <label>审查说明<textarea className="cm-textarea" value={reason} onChange={event => setReason(event.target.value)} rows={3} maxLength={2000} /></label>
+        <div className="row"><Button variant="primary" disabled={busy || !workspaceName.trim() || !workspaceRoot.trim() || !provider} onClick={() => void act('approve')}>批准并执行</Button><Button variant="danger" disabled={busy || !reason.trim()} onClick={() => void act('reject')}>拒绝</Button></div>
+      </section>}
+      {selected.plan && <section><h3>已批准范围</h3><p>{selected.plan.workspace.root} · {selected.plan.provider}</p><p>{selected.plan.capabilities.join('、') || '无工具能力'}</p></section>}
+      {selected.errorCode && <p>执行失败：{selected.errorCode}</p>}
+      {selected.status === 'provision_failed' && <Button disabled={busy} onClick={() => void act('retry')}>重试执行</Button>}
+      {selected.taskId && <section><h3>任务与交付</h3><p>Task {selected.taskId} · {taskStatus || '读取中'}</p><Button compact variant="ghost" onClick={() => void open(selected.id)}>刷新状态</Button>
+        {taskStatus === 'completed' && selected.status !== 'delivered' && <><label>交付标签<Input value={deliveryLabel} onChange={event => setDeliveryLabel(event.target.value)} /></label><label>交付内容<textarea className="cm-textarea" value={deliveryContent} onChange={event => setDeliveryContent(event.target.value)} rows={5} maxLength={256000} /></label><Button variant="primary" disabled={busy || !deliveryLabel.trim() || !deliveryContent.trim()} onClick={() => void act('deliver')}>批准交付</Button></>}
+        {selected.artifacts.map(item => <p key={item.id}>已交付：{item.label} · {dateLabel(item.deliveredAt)}</p>)}
+      </section>}
+    </div>}</Sheet>
+  </section>;
 }
 
 function TaskCard({ task, onOpen, onAction }: { task: Task; onOpen(): void; onAction(action: 'start' | 'pause' | 'resume' | 'cancel'): void }) {
@@ -1573,7 +1657,7 @@ function SettingsPage({ theme, onThemeChange, onOpenPlugins }: { theme: 'system'
     } catch (cause) { setError(messageOf(cause)); }
     finally { setSaving(''); }
   }
-  const sections = descriptions.filter(item => item.section !== 'general');
+  const sections = descriptions.filter(item => item.section !== 'general' && item.fields.length > 0);
   function renderField(section: string, field: SettingField) {
     if (/(api.?key|secret|token|password|credential|private.?key|pinnedpublickey)/i.test(field.key)) return null;
     const value = draft[section]?.[field.key] ?? field.default;
@@ -1595,8 +1679,8 @@ function SettingsPage({ theme, onThemeChange, onOpenPlugins }: { theme: 'system'
       {activeSection === 'extensions' && <Surface className="privacy-summary"><span className="grow"><strong>扩展、插件与 MCP 连接</strong><small>启用开发者模式后可从本地导入扩展。导入包会先进入 Core 权限审查，并以未验证状态安装为停用。</small></span><Button compact onClick={onOpenPlugins}>打开插件中心</Button></Surface>}
       {groups.map(section => <div className="settings-group" key={section.section}><h2>{activeSection === 'general' ? '常规行为' : SETTING_SECTION_LABELS[section.section] ?? section.label}</h2>
         {section.section === 'models' && <ModelConnectionSettings provider={String(draft.models?.provider ?? '')} model={String(draft.models?.defaultModel ?? '')} values={draft.models ?? {}} onChange={(key, value) => change('models', key, value)} />}
-        {section.fields.filter(field => !(section.section === 'general' && field.key === 'theme') && (section.section !== 'models' || !['provider', 'defaultModel', 'reasoningEffort'].includes(field.key))).map(field => renderField(section.section, field))}
-        {section.fields.some(field => !(section.section === 'general' && field.key === 'theme') && (section.section !== 'models' || !['provider', 'defaultModel', 'reasoningEffort'].includes(field.key))) && <div className="settings-save"><Button compact variant="primary" disabled={recoveryRequired || saving === section.section} onClick={() => void save(section.section)}>保存{SETTING_SECTION_LABELS[section.section] ?? section.label}</Button></div>}
+        {section.fields.filter(field => !(section.section === 'general' && field.key === 'theme') && (section.section !== 'models' || !['provider', 'defaultModel'].includes(field.key))).map(field => renderField(section.section, field))}
+        {section.fields.some(field => !(section.section === 'general' && field.key === 'theme') && (section.section !== 'models' || !['provider', 'defaultModel'].includes(field.key))) && <div className="settings-save"><Button compact variant="primary" disabled={recoveryRequired || saving === section.section} onClick={() => void save(section.section)}>保存{SETTING_SECTION_LABELS[section.section] ?? section.label}</Button></div>}
       </div>)}
       {activeSection === 'security' && <Surface className="privacy-summary"><span className="policy-icon"><Icon name="approval" size={19} /></span><span className="grow"><strong>本地数据与权限</strong><small>会话和配置保存在本机。敏感操作遵循逐次审批。</small></span><Badge tone="success">Core 策略</Badge></Surface>}
       {activeSection === 'devices' && !groups.length && <EmptyNotice icon="plug" title="设备网格设置由 Core 提供" detail="当前没有可调整的设备字段。设备配对和在线状态仍可在 Agents 页面查看。" />}

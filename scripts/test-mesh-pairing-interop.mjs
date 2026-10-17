@@ -231,6 +231,7 @@ async function sectionLiveInterop() {
     stateDir,
     name: 'CetaMesh Desktop (live)',
     role: 'desktop',
+    available: ['task.manage'],
     executeCapability: ({ capability, input }) => { executed.push({ capability, input }); return { ok: true, capability }; },
     now: () => Date.now() + clock.skew
   });
@@ -308,6 +309,14 @@ async function sectionLiveInterop() {
   const manifestResponse = await mobile.mesh({ endpoint: session.endpoint, tlsPin: session.tlsPin, type: 'mesh.manifest.request', to: desktopId });
   const manifest = JSON.parse(manifestResponse.body).payload;
   check('manifest 真实往返且含 mesh.presence', Array.isArray(manifest.capabilities) && manifest.capabilities.some((item) => item.id === 'mesh.presence'));
+  equal('未接线的 Memory 能力在配对后 Manifest 中不可用', manifest.capabilities.find((item) => item.id === 'memory.query').available, false);
+
+  node.grant({ nodeId: peerNodeId, capabilities: ['memory.query'] });
+  const unwired = await mobile.mesh({ endpoint: session.endpoint, tlsPin: session.tlsPin, type: 'mesh.capability.request', to: desktopId,
+    payload: { capability: 'memory.query', input: {}, requestId: 'req-unwired' } });
+  equal('配对通道已授权但未接线的能力被拒', [JSON.parse(unwired.body).payload.decision, JSON.parse(unwired.body).payload.code],
+    ['deny', 'CAPABILITY_UNAVAILABLE']);
+  check('未接线能力不会创建待审批请求', !node.approvals().some((item) => item.requestId === 'req-unwired'));
 
   const denied = await mobile.mesh({ endpoint: session.endpoint, tlsPin: session.tlsPin, type: 'mesh.capability.request', to: desktopId, payload: { capability: 'task.manage', input: {}, requestId: 'req-live-1' } });
   equal('未授予的能力被拒（deny / CAPABILITY_NOT_AUTHORIZED）', [JSON.parse(denied.body).payload.decision, JSON.parse(denied.body).payload.code], ['deny', 'CAPABILITY_NOT_AUTHORIZED']);

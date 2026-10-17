@@ -5,14 +5,14 @@
 
 import { CAPABILITY_NAMES, MESH_PROTOCOL_VERSION, NODE_CAPABILITIES } from './types.js';
 
-/** 本进程当前实际可用的能力集合（默认全部可用；可注入子集以模拟降级）。 */
+/** 能力词表；是否可用由 Node 的实际执行器接线决定。 */
 export function allCapabilities() {
   return [...CAPABILITY_NAMES];
 }
 
 export function capabilityManifest({ identity, available = null, extra = {} } = {}) {
   if (!identity || !identity.nodeId) throw new Error('capabilityManifest 需要 identity');
-  const usable = new Set(available === null || available === undefined ? allCapabilities() : available);
+  const usable = new Set(available === null || available === undefined ? ['mesh.presence', 'mesh.manifest'] : available);
   return {
     protocolVersion: MESH_PROTOCOL_VERSION,
     nodeId: identity.nodeId,

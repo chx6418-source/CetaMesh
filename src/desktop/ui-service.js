@@ -28,6 +28,21 @@ const SETTING_KEYS = Object.freeze({
   advanced: ['showEngineeringPages', 'logLevel', 'diagnosticsVerbosity']
 });
 
+// Only expose settings whose behavior is implemented in the Desktop runtime. Keep the
+// persisted schema intact so an upgrade never discards an existing user's values.
+const EDITABLE_SETTING_KEYS = Object.freeze({
+  general: ['theme', 'startMinimized', 'confirmOnExit'],
+  models: ['provider', 'defaultModel', 'reasoningEffort', 'openaiCompatibleToolCalling', 'openaiCompatibleReasoningEffort'],
+  agents: ['defaultAgentProvider', 'codexOpenAiEnvironmentAuthorized'],
+  memory: ['enabled', 'retrievalLimit'],
+  workspace: [],
+  devices: ['meshEnabled', 'presenceTtlMs'],
+  extensions: ['developerMode'],
+  security: ['allowedUpdateHosts'],
+  updates: ['channel', 'manifestUrl', 'fallbackManifestUrl'],
+  advanced: []
+});
+
 const SECRET_KEY = /(api.?key|secret|token|password|credential|private.?key|pinnedPublicKey)/i;
 const MAX_TEXT = 256_000;
 
@@ -359,6 +374,31 @@ function projectApproval(value) {
   };
 }
 
+function projectWorkshopProposal(value) {
+  const row = record(value);
+  const plan = record(row.plan);
+  const workspace = record(plan.workspace);
+  const review = record(row.review);
+  const provision = record(row.provision);
+  return {
+    id: string(row.id, 128), title: string(row.title, 200), description: string(row.description, 2000),
+    requirements: boundedStrings(row.requirements, 50, 1000),
+    supplements: Array.isArray(row.supplements) ? row.supplements.slice(0, 50).map(item => ({
+      id: string(item.id, 128), text: string(item.text, 1000) })) : [],
+    submitter: { kind: string(row.submitter?.kind, 30), id: string(row.submitter?.id, 200) },
+    status: string(row.status, 40), review: row.review ? { decision: string(review.decision, 30),
+      reason: string(review.reason, 2000), at: scalar(review.at) } : null,
+    plan: row.plan ? { workspace: { name: string(workspace.name, 100), root: string(workspace.root, 1024) },
+      provider: string(plan.provider, 100), capabilities: boundedStrings(plan.capabilities, 30, 100) } : null,
+    workspaceId: string(row.workspaceId, 128) || null, taskId: string(row.taskId, 128) || null,
+    errorCode: string(provision.error?.code, 100) || null,
+    artifacts: Array.isArray(row.artifacts) ? row.artifacts.slice(0, 100).map(item => ({
+      id: string(item.id, 128), label: string(item.label, 200), mediaType: string(item.mediaType, 100),
+      deliveredAt: scalar(item.deliveredAt) })) : [],
+    createdAt: scalar(row.createdAt), updatedAt: scalar(row.updatedAt)
+  };
+}
+
 function objectParams(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw uiError('INVALID_PARAMS', 'UI 参数必须是对象');
   return value;
@@ -467,6 +507,7 @@ export function createDesktopUiService({ services = {}, system = services.system
   const emit = (event, data) => eventBus?.publish(event, data);
   const chat = (method, params, signal) => call(services.chatService, method, params, false, signal);
   const task = (method, params) => call(services.taskService, method, params);
+  const workshop = (method, params) => call(services.workshopService, method, params, true);
   const memory = (method, params) => call(services.memoryService, method, params);
   const agent = (method, params) => call(services.agentService, method, params);
   const continuity = (method, params) => call(services.continuityService, method, params, true);
@@ -557,6 +598,27 @@ export function createDesktopUiService({ services = {}, system = services.system
   }
 
   const handlers = {
+    'ui.workshop.proposals': async p => {
+      const result = await workshop('workshop.proposal.list', { limit: Math.max(1, Math.min(200, Number(p.limit) || 100)) });
+      return { proposals: (result.proposals ?? []).map(projectWorkshopProposal), total: Number(result.total) || 0 };
+    },
+    'ui.workshop.proposal': async p => ({ proposal: projectWorkshopProposal((await workshop('workshop.proposal.get', { id: idParam(p) })).proposal) }),
+    'ui.workshop.review': async p => {
+      if (typeof p.approve !== 'boolean') throw uiError('INVALID_PARAMS', '需要明确的审查决定');
+      const result = await workshop('workshop.proposal.review', { id: idParam(p), approve: p.approve,
+        reason: string(p.reason, 2000), ...(p.approve ? { plan: record(p.plan) } : {}) });
+      return { proposal: projectWorkshopProposal(result.proposal) };
+    },
+    'ui.workshop.retry': async p => ({ proposal: projectWorkshopProposal((await workshop('workshop.proposal.retry', { id: idParam(p) })).proposal) }),
+    'ui.workshop.task.status': async p => workshop('workshop.task.status', { id: idParam(p) }),
+    'ui.workshop.deliver': async p => {
+      if (p.approve !== true) throw uiError('INVALID_PARAMS', '交付需要 Owner 明确批准');
+      const result = await workshop('workshop.artifact.deliver', { id: idParam(p), approve: true,
+        label: boundedText(p.label, 'label', 200), mediaType: boundedText(p.mediaType ?? 'text/plain', 'mediaType', 100),
+        content: boundedText(p.content, 'content', 1024 * 1024), requestId: string(p.requestId, 200) });
+      return { proposal: projectWorkshopProposal(result.proposal), artifact: { id: string(result.artifact?.id, 128),
+        label: string(result.artifact?.label, 200) } };
+    },
     'ui.events.next': async (p, context) => eventBus?.next({ after: p.after, waitMs: p.waitMs, signal: context?.signal }) ?? { events: [], cursor: 0 },
     'ui.chat.sessions.list': async p => {
       const result = await chat('chat.sessions.list', { includeArchived: p.includeArchived === true });
@@ -606,6 +668,10 @@ export function createDesktopUiService({ services = {}, system = services.system
       const text = boundedText(p.text, 'text', 32_000);
       const attachments = Array.isArray(p.attachments) ? p.attachments.slice(0, 8).map((item, index) => {
         const attachment = record(item);
+        if (/\.(?:png|jpe?g|gif|webp|bmp|ico|svg|pdf|mp[34]|wav|ogg|zip)$/i.test(string(attachment.name, 200))
+          || (attachment.mimeType && !/^text\/(?:plain|markdown|csv|html|css|javascript|typescript|xml|x-python|x-shellscript)$/i.test(string(attachment.mimeType, 80)))) {
+          throw uiError('UNSUPPORTED_ATTACHMENT', '当前仅支持文本和源码附件；图片与富媒体尚不可发送给模型');
+        }
         return { name: boundedText(attachment.name, `attachments[${index}].name`, 200), content: boundedText(attachment.content, `attachments[${index}].content`, 256_000), ...(attachment.mimeType ? { mimeType: string(attachment.mimeType, 80) } : {}) };
       }) : [];
       const clientMessageId = p.clientMessageId === undefined ? undefined : boundedText(p.clientMessageId, 'clientMessageId', 128);
@@ -1098,7 +1164,8 @@ export function createDesktopUiService({ services = {}, system = services.system
     'ui.settings.describe': async () => {
       const result = await settings('settings.describe', {});
       return { sections: (result.sections ?? []).map(item => selected(item, ['section', 'label'])), fields: (result.fields ?? []).map(section => ({
-        section: string(section.section, 60), label: string(section.label, 120), fields: (section.fields ?? []).map(field => ({
+        section: string(section.section, 60), label: string(section.label, 120), fields: (section.fields ?? [])
+          .filter(field => EDITABLE_SETTING_KEYS[section.section]?.includes(field.key)).map(field => ({
           key: string(field.key, 120), type: string(field.type, 40), default: SECRET_KEY.test(field.key) ? (field.default ? '[configured]' : '') : scalar(field.default),
           locked: field.locked === true, choices: boundedStrings(field.choices, 50, 100), min: scalar(field.min), max: scalar(field.max), description: string(field.description, 500)
         }))
@@ -1115,7 +1182,8 @@ export function createDesktopUiService({ services = {}, system = services.system
       const section = string(p.section, 60);
       if (!Object.hasOwn(SETTING_KEYS, section)) throw uiError('INVALID_PARAMS', '未知设置分区');
       const values = record(p.values);
-      const allowed = new Set(SETTING_KEYS[section]);
+      const allowed = new Set(EDITABLE_SETTING_KEYS[section]);
+      if (Object.keys(values).some(key => !allowed.has(key))) throw uiError('SETTING_NOT_IMPLEMENTED', '此设置尚无运行时效果');
       const safeValues = Object.fromEntries(Object.entries(values).filter(([key]) => allowed.has(key) && !SECRET_KEY.test(key)));
       const expectedRevision = p.expectedRevision ?? p.expectedRev;
       const result = await settings('settings.update', { section, values: safeValues, expectedRev: expectedRevision });
