@@ -12,6 +12,7 @@
 // 用法：
 //   npm test                          # 全量（环境不具备的 suite 记 NOT_RUN_ENVIRONMENT）
 //   npm run test:core                 # 只跑 core 分类
+//   npm test -- --suite test-mcp-registry # 只跑指定已登记 suite，仍执行孤儿检测
 //   node scripts/run-all-tests.mjs --list
 //   node scripts/run-all-tests.mjs --jobs 4 --category security --category core
 import fs from 'node:fs';
@@ -342,7 +343,9 @@ function runSuite(suite, { verbose }) {
     const collect = (chunk) => {
       const text = String(chunk);
       if (verbose) process.stdout.write(text);
-      else output += text;
+      // Keep the outcome marker even in verbose mode; exit 77 alone is not enough to
+      // distinguish an expected missing environment from a failed real E2E.
+      output += text;
       if (output.length > 200_000) output = output.slice(-200_000);
     };
     child.stdout?.on('data', collect);
@@ -372,16 +375,18 @@ function runSuite(suite, { verbose }) {
 async function main() {
   const args = process.argv.slice(2);
   const wantedCategories = [];
+  const wantedSuites = [];
   let jobs = 1;
   let verbose = false;
   let listOnly = false;
   for (let i = 0; i < args.length; i += 1) {
     if (args[i] === '--category' || args[i] === '-c') wantedCategories.push(args[++i]);
+    else if (args[i] === '--suite' || args[i] === '-s') wantedSuites.push(args[++i]);
     else if (args[i] === '--jobs' || args[i] === '-j') jobs = Math.max(1, Number(args[++i]) || 1);
     else if (args[i] === '--verbose' || args[i] === '-v') verbose = true;
     else if (args[i] === '--list') listOnly = true;
     else if (args[i] === '--help' || args[i] === '-h') {
-      process.stdout.write(`用法：node scripts/run-all-tests.mjs [--category <名称>]... [--jobs N] [--verbose] [--list]\n分类：${CATEGORIES.join(', ')}\n`);
+      process.stdout.write(`用法：node scripts/run-all-tests.mjs [--category <名称>]... [--suite <已登记 ID>]... [--jobs N] [--verbose] [--list]\n分类：${CATEGORIES.join(', ')}\n`);
       return;
     }
   }
@@ -402,9 +407,18 @@ async function main() {
     return;
   }
 
-  const selected = wantedCategories.length
-    ? suites.filter((suite) => wantedCategories.includes(suite.category))
-    : suites;
+  const knownSuites = new Set(suites.map(suite => suite.id));
+  for (const suite of wantedSuites) {
+    if (!knownSuites.has(suite)) {
+      console.error(`未知 suite：${suite}（使用 --list 查看已登记 suite）`);
+      process.exitCode = 1;
+      return;
+    }
+  }
+
+  const selected = suites.filter(suite =>
+    (!wantedCategories.length || wantedCategories.includes(suite.category))
+    && (!wantedSuites.length || wantedSuites.includes(suite.id)));
   if (listOnly) {
     for (const suite of selected) {
       const npm = suite.file ? npmNameFor(suite.file) : null;

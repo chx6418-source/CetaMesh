@@ -195,14 +195,22 @@ function projectAgent(value) {
   const healthStatus = string(health.status, 50).toLowerCase();
   const readiness = `${reason} ${healthStatus} ${string(row.status, 50)}`;
   const id = string(row.id ?? row.provider, 80);
-  const available = row.available === true && health.available !== false;
   const installed = typeof health.installed === 'boolean' ? health.installed
-    : typeof row.installed === 'boolean' ? row.installed : available;
+    : typeof row.installed === 'boolean' ? row.installed
+      : /not[_-]installed|missing[_-]binary/i.test(readiness) ? false
+        : row.available === true || /needs[_-]auth|credential|needs[_-]config/i.test(readiness) ? true : null;
   const authenticated = typeof health.authenticated === 'boolean' ? health.authenticated : null;
+  const compatible = typeof health.compatible === 'boolean' ? health.compatible
+    : typeof row.compatible === 'boolean' ? row.compatible : null;
+  const available = row.available === true && health.available !== false && installed !== false
+    && authenticated !== false && compatible !== false;
   const workspaceBoundary = string(row.workspaceBoundary ?? health.workspaceBoundary, 80) || null;
   const requiresTask = ['capability-broker', 'staged-capability-broker'].includes(workspaceBoundary);
   const boundaryUnverified = workspaceBoundary === 'unverified';
-  const status = boundaryUnverified && available ? 'descriptor-incomplete'
+  const status = installed === false ? 'not-installed'
+    : compatible === false ? 'not-supported'
+    : authenticated === false ? 'needs-setup'
+    : boundaryUnverified && available ? 'descriptor-incomplete'
     : /unsupported|not[_-]supported/i.test(readiness) ? 'not-supported'
     : /not[_-]installed|missing[_-]binary/i.test(readiness) ? 'not-installed'
       : /setup|auth|credential|needs[_-]config/i.test(readiness) ? 'needs-setup'
@@ -212,9 +220,9 @@ function projectAgent(value) {
     id, name: string(row.displayName ?? row.label ?? id, 120),
     role: id === 'codex' ? '代码与项目' : id === 'dsh' ? '通用研究与协作' : '开发辅助',
     description: id === 'codex' ? '理解项目、修改代码并检查结果。' : id === 'dsh' ? '处理资料、规划和跨工具工作流。' : '在可用时连接本地开发能力。',
-    available, installed, authenticated, eligible: available && !requiresTask && !boundaryUnverified,
-    taskEligible: available && installed && authenticated !== false && requiresTask
-      && health.sessionCapable !== false && (id !== 'codex' || health.sandboxCapable === true),
+    available, installed, authenticated, compatible, eligible: available && !requiresTask && !boundaryUnverified,
+    taskEligible: available && installed !== false && authenticated !== false && requiresTask
+      && health.sessionCapable !== false && (id !== 'codex' || health.sandboxCapable !== false),
     configured: row.configured === true || health.configured === true,
     reason: reason || (boundaryUnverified ? 'descriptor-incomplete' : available && requiresTask ? 'task-required' : null), lastError, workspaceBoundary, status, version: string(row.version, 80) || null,
     desktopApp: id === 'dsh' ? {
@@ -264,16 +272,20 @@ function projectPlugin(value) {
 
 function projectMcpServer(value) {
   const row = record(value);
+  const enabled = row.enabled === true;
+  const running = row.status === 'running';
+  const toolCount = Number.isFinite(row.toolCount) ? Math.max(0, row.toolCount) : null;
+  const discoveredToolCount = Number.isFinite(row.discoveredToolCount) ? Math.max(0, row.discoveredToolCount) : 0;
+  const available = enabled && running && row.callable === true && discoveredToolCount > 0;
   return {
     id: string(row.id ?? row.serverId, 160), name: string(row.name ?? row.displayName ?? row.id, 200),
-    status: string(row.status, 60), enabled: row.enabled === true,
-    available: row.available === true || (row.enabled === true && row.status === 'running'),
-    toolCount: Number.isFinite(row.toolCount) ? Math.max(0, row.toolCount) : null,
+    status: string(row.status, 60), enabled, running, available, toolCallable: available,
+    toolCount, discoveredToolCount,
     transport: string(row.transport, 40),
     source: string(row.source, 40) || 'external',
     configured: record(row.config).hasArgs === true || record(row.config).hasEnvironment === true,
-    eligible: row.enabled === true && (row.status === 'running' || row.available === true),
-    reason: string(row.lastError, 500) || (!row.enabled ? 'server-disabled' : row.status === 'running' ? null : 'server-stopped'),
+    eligible: available,
+    reason: string(row.lastError, 500) || (!enabled ? 'server-disabled' : !running ? 'server-stopped' : !available ? 'no-callable-tools' : null),
     lastError: string(row.lastError, 500) || null
   };
 }
@@ -484,8 +496,8 @@ export function createDesktopUiService({ services = {}, system = services.system
       || health?.sessionCapable === false) {
       throw uiError('PROVIDER_UNAVAILABLE', `所选 Agent ${provider} 未安装、未认证或无法建立会话`);
     }
-    if (provider === 'codex' && health.sandboxCapable !== true) {
-      throw uiError('CODEX_SANDBOX_UNAVAILABLE', 'Codex 尚未验证当前 Windows 工作区沙箱可用');
+    if (provider === 'codex' && health.sandboxCapable === false) {
+      throw uiError('CODEX_SANDBOX_UNAVAILABLE', 'Codex Windows 工作区沙箱已拒绝执行');
     }
     return provider;
   }
@@ -947,7 +959,7 @@ export function createDesktopUiService({ services = {}, system = services.system
           summary: boundedStrings(review.summary, 30, 400), trust: string(result.trust, 60)
         };
       } catch (error) {
-        if (error?.code === 'PLUGIN_NOT_LOCAL_UNVERIFIED') return { id, stageId: '', requiresReview: false, installable: true, permissions: [], summary: [], trust: 'catalog-verified' };
+        if (error?.code === 'PLUGIN_NOT_LOCAL_UNVERIFIED') return { id, stageId: '', requiresReview: false, installable: true, permissions: [], summary: [], trust: 'catalog-sha256-only' };
         throw error;
       }
     },
@@ -1052,7 +1064,7 @@ export function createDesktopUiService({ services = {}, system = services.system
       return selected(result, ['pluginId', 'toolId', 'enabled', 'status', 'approvalId']);
     },
     'ui.mcp.list': async () => ({ servers: (await integrations('mcp.list', {})).servers.map(projectMcpServer) }),
-    'ui.mcp.tools': async p => ({ serverId: idParam(p), tools: ((await integrations('mcp.tools', { id: p.id })).tools ?? []).slice(0, 200).map(tool => ({ id: string(tool.id, 180), name: string(tool.name ?? tool.id, 180), description: string(tool.description, 500), enabled: tool.enabled === true })) }),
+    'ui.mcp.tools': async p => ({ serverId: idParam(p), tools: ((await integrations('mcp.tools', { id: p.id })).tools ?? []).slice(0, 200).map(tool => ({ id: string(tool.id, 180), name: string(tool.name ?? tool.id, 180), description: string(tool.description, 500), enabled: tool.enabled === true, discovered: tool.discovered === true, callable: tool.callable === true })) }),
     'ui.mcp.manage': async p => {
       const action = ['enable', 'disable', 'start', 'stop', 'restart'].find(value => p.action === value);
       if (!action) throw uiError('INVALID_PARAMS', '未知 MCP 操作');

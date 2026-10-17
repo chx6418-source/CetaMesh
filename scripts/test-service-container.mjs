@@ -278,6 +278,79 @@ try {
   const productPluginCenter = await ui('ui.plugins.status');
   assert.ok(productPluginCenter.integrations.some(item => item.id === 'cetamesh-snowluma'), 'the unified Plugin Center DTO includes built-in integrations');
   assert.ok(productPluginCenter.mcp.some(item => item.id === 'snowluma' && item.source === 'builtin'), 'the unified Plugin Center DTO identifies built-in MCP descriptors');
+  // Exercise a real built-in child through the production service composition, UI
+  // projection, actual tools/list schema and Brokered call. The invalid scheme is
+  // rejected locally, so this fixture cannot contact an external endpoint.
+  await services.integrationService.execute({ method: 'mcp.start', params: { id: 'web-search-safe', approved: true } });
+  try {
+    const runningServer = (await ui('ui.mcp.list')).servers.find(server => server.id === 'web-search-safe');
+    assert.equal(runningServer.running, true);
+    assert.equal(runningServer.toolCallable, true, 'real discovery makes the running server callable');
+    assert.ok(runningServer.discoveredToolCount > 0);
+    const discovered = (await ui('ui.mcp.tools', { id: 'web-search-safe' })).tools.find(tool => tool.name === 'web_fetch');
+    assert.equal(discovered.discovered, true);
+    assert.equal(discovered.callable, true, JSON.stringify({ runningServer, discovered }));
+    const deniedScheme = await services.integrationService.execute({ method: 'tools.invoke', params: {
+      id: 'mcp__web-search-safe__web_fetch', input: { url: 'file:///phase5-denied' }, approved: true
+    } });
+    assert.equal(deniedScheme.status, 'completed');
+    assert.equal(deniedScheme.result.isError, true, 'the real child must reject non-HTTP requests');
+  } finally {
+    await services.integrationService.execute({ method: 'mcp.stop', params: { id: 'web-search-safe', approved: true } });
+  }
+  // UI-02: a running process with no discovered callable tools cannot be shown as Ready.
+  const originalIntegrationExecute = services.integrationService.execute;
+  services.integrationService.execute = async request => request.method === 'mcp.list'
+    ? { servers: [{ id: 'empty-runtime', name: 'Empty Runtime', enabled: true, status: 'running',
+      available: false, toolCount: 0, lastError: 'tools/list returned no callable tools' }] }
+    : originalIntegrationExecute(request);
+  try {
+    const emptyRuntime = (await ui('ui.mcp.list')).servers[0];
+    assert.equal(emptyRuntime.available, false, 'running alone does not make MCP tools available');
+    assert.equal(emptyRuntime.eligible, false, 'running alone does not make MCP tools callable');
+    assert.equal(emptyRuntime.reason, 'tools/list returned no callable tools');
+  } finally {
+    services.integrationService.execute = originalIntegrationExecute;
+  }
+  const originalAgentExecute = services.agentService.execute;
+  services.agentService.execute = async request => request.method === 'agent.list'
+    ? { providers: [{ id: 'auth-needed', available: true, health: { installed: true, authenticated: false,
+      available: true, reason: 'authentication_required' } }] }
+    : originalAgentExecute(request);
+  try {
+    const authNeeded = (await ui('ui.agent.list')).agents[0];
+    assert.equal(authNeeded.available, false, 'an unauthenticated Agent is not available for execution');
+    assert.equal(authNeeded.eligible, false);
+    assert.equal(authNeeded.taskEligible, false);
+    assert.equal(authNeeded.installed, true, 'missing authentication does not mean missing installation');
+    assert.equal(authNeeded.status, 'needs-setup');
+  } finally {
+    services.agentService.execute = originalAgentExecute;
+  }
+  services.agentService.execute = async request => request.method === 'agent.list'
+    ? { providers: [{ id: 'codex', available: true, workspaceBoundary: 'staged-capability-broker',
+      health: { installed: true, compatible: true, authenticated: true, available: true,
+        sessionCapable: true, sandboxCapable: null } }] }
+    : originalAgentExecute(request);
+  try {
+    const codexPendingFirstRun = (await ui('ui.agent.list')).agents[0];
+    assert.equal(codexPendingFirstRun.taskEligible, true,
+      'unknown sandbox health permits a first sandboxed run; a confirmed sandbox refusal blocks later runs');
+  } finally {
+    services.agentService.execute = originalAgentExecute;
+  }
+  services.agentService.execute = async request => request.method === 'agent.list'
+    ? { providers: [{ id: 'incompatible-cli', available: false,
+      health: { installed: true, compatible: false, authenticated: true, reason: 'unsupported_cli' } }] }
+    : originalAgentExecute(request);
+  try {
+    const incompatible = (await ui('ui.agent.list')).agents[0];
+    assert.equal(incompatible.installed, true);
+    assert.equal(incompatible.available, false);
+    assert.equal(incompatible.status, 'not-supported', 'version incompatibility must not read as not installed');
+  } finally {
+    services.agentService.execute = originalAgentExecute;
+  }
   const snowLumaSettings = await ui('ui.plugins.integration.settings', { id: 'cetamesh-snowluma' });
   assert.equal(snowLumaSettings.localService.status, 'stopped');
   assert.equal(snowLumaSettings.localService.accessTokenConfigured, true);
