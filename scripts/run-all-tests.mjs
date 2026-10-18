@@ -92,6 +92,7 @@ const REGISTRY = {
   'test-stage6-settings-media.mjs': { category: 'architecture', note: 'Settings runtime-backed fields and text-only attachment boundary' },
   'test-desktop-ui-v2-production.mjs': { category: 'architecture', note: 'Owner-selected Harbor WebView2 UI, typed bridge, secure bundle, and production no-HTTP contract' },
   'test-desktop-chat-virtualization.mjs': { category: 'architecture', note: 'Harbor Chat React virtual-window, dynamic-height, and long-content fixtures' },
+  'test-harbor-host-dialog.mjs': { category: 'runtime', note: 'Native human-input dialog deadlines and unchanged ordinary Host RPC timeout' },
   'test-process-extension-host.mjs': { category: 'architecture' },
   'test-workspace-ipc.mjs': { category: 'architecture' },
   'test-smart-platform-routing.mjs': { category: 'architecture' },

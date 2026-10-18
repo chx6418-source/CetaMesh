@@ -163,6 +163,9 @@ let cursor = 0;
 let coreInstanceId: string | null = null;
 let eventPump: Promise<void> | null = null;
 const MAX_BRIDGE_REQUEST_BYTES = 900 * 1024;
+// Native selectors wait for human input. Keep their wait bounded without
+// expiring them at the ordinary RPC deadline while the dialog is still open.
+const NATIVE_SELECTOR_METHODS = new Set(['app.pickFolder', 'app.pickFiles', 'app.pickExtensionPackage']);
 
 function send<T>(method: HostMethod | UiMethod, params: object): Promise<T> {
   if (!window.ipc) return Promise.reject(new Error('桌面主机连接不可用。请从 CetaMesh Desktop 打开此界面。'));
@@ -175,7 +178,7 @@ function send<T>(method: HostMethod | UiMethod, params: object): Promise<T> {
     const timer = window.setTimeout(() => {
       pending.delete(id);
       reject(new Error('桌面主机响应超时。'));
-    }, 32_000);
+    }, NATIVE_SELECTOR_METHODS.has(method) ? 300_000 : 32_000);
     pending.set(id, { resolve: value => resolve(value as T), reject, timer });
     window.ipc!.postMessage(JSON.stringify({ id, method, params }));
   });
