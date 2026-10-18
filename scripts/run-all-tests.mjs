@@ -70,6 +70,7 @@ const REGISTRY = {
   'test-core-channel-assembly.mjs': { category: 'integration', timeoutMs: 120000 },
   'test-qq-connector-process.mjs': { category: 'integration' },
   'test-channel-sea.mjs': { category: 'release', requires: ['core-dist'], timeoutMs: 120000 },
+  'test-m6-pure-core-sea.mjs': { category: 'release', requires: ['core-dist'], timeoutMs: 120000 },
   'test-bionic-runtime-lifecycle.mjs': { category: 'integration' },
   'test-qq-auto-request.mjs': { category: 'core' },
   'test-qq-send-ledger.mjs': { category: 'core' },
