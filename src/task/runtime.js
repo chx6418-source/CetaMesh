@@ -258,7 +258,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     const wantedWorkspace = normalizeWorkspaceId(workspaceId);
     if (!wantedWorkspace) return null;
     return store.listAll().find(row => row.workspaceId === wantedWorkspace
-      && row.id !== exceptTaskId && row.status === 'running' && row.currentAgent) ?? null;
+      && row.id !== exceptTaskId && ['running', 'waiting', 'blocked'].includes(row.status) && row.currentAgent) ?? null;
   }
 
   function attachAgent({ id, expectedRev, provider, sessionId, note } = {}) {

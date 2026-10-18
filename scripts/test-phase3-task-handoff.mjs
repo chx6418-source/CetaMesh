@@ -370,6 +370,14 @@ try {
     assert.equal(riskStatus.state, 'needs-reconciliation');
     await assert.rejects(riskRestart.chatService.execute({ method: 'chat.continue', params: { id: riskChat.id } }),
       error => error.code === 'NEEDS_RECONCILIATION');
+    const rivalAfterRestart = riskRestart.taskService.runtime.create({
+      goal: 'Second writer while first effect is uncertain', workspaceId: riskWorkspace.id });
+    await assert.rejects(riskRestart.capabilityService.broker.execute({
+      requestId: 'phase3-uncertain-second-writer', actor: OWNER_ACTOR,
+      taskId: rivalAfterRestart.id, workspaceId: riskWorkspace.id, capability: 'agent.run',
+      input: { agentProvider: 'cetamesh', content: 'must not write before reconciliation' }
+    }), error => error.code === 'TASK_WORKSPACE_BUSY',
+    'a recovered blocked Task retains the single Workspace writer until Owner reconciliation');
     await assert.rejects(riskRestart.desktopUiService.execute({ method: 'ui.task.reconcile', params: {
       id: riskTask.id, expectedRev: riskRecovered.rev, reviewed: true, reviewSummary: 'Checked the Workspace'
     } }), error => error.code === 'INVALID_PARAMS', 'manual reconciliation requires a new explicit instruction');

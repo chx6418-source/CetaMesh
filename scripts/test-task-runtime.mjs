@@ -243,6 +243,18 @@ try {
   equal('service task.pause 可用', svcPaused.task.status, 'paused');
   const svcOverview = await service.execute({ method: 'task.overview', params: {} });
   check('service task.overview 可用', Array.isArray(svcOverview.tasks) && typeof svcOverview.counts === 'object');
+  const uncertainRuntime = createTaskRuntime({ stateDir: path.join(root, 'uncertain-writer'), now });
+  const uncertainTask = uncertainRuntime.create({ goal: '未核对的旧写入', workspaceId: 'ws-uncertain' });
+  const uncertainStarted = uncertainRuntime.start({ id: uncertainTask.id, expectedRev: uncertainTask.rev,
+    provider: 'codex', sessionId: 'lost-session' });
+  const uncertainWaiting = uncertainRuntime.wait({ id: uncertainTask.id, expectedRev: uncertainStarted.task.rev,
+    reason: 'approval-pending: write outcome unknown' });
+  equal('等待审批的 Task 仍占用 Workspace 写入权',
+    uncertainRuntime.activeWorkspaceOwner({ workspaceId: 'ws-uncertain' })?.id, uncertainTask.id);
+  uncertainRuntime.block({ id: uncertainTask.id, expectedRev: uncertainWaiting.task.rev,
+    reason: 'needs-reconciliation: interrupted effect' });
+  equal('失联 Blocked Task 在人工核验前仍占用 Workspace 写入权',
+    uncertainRuntime.activeWorkspaceOwner({ workspaceId: 'ws-uncertain' })?.id, uncertainTask.id);
   const unknown = await asyncCapture(() => service.execute({ method: 'task.nope', params: {} }));
   check('未知方法报 METHOD_NOT_FOUND', unknown.threw && unknown.code === 'METHOD_NOT_FOUND', String(unknown.code));
 

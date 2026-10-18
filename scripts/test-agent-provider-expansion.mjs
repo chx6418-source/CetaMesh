@@ -198,6 +198,9 @@ try {
   assert.equal(fs.readFileSync(path.join(authoritativeRoot, 'task-follow-result.txt'), 'utf8'), `dsh fake edit ${followRun.result.sessionId}`);
   assert.equal(followSession.followSubscriptions, 1, 'a duplicate turn/end cannot trigger a second Follow or duplicate import');
   await dshService.broker.closeSession({ provider: 'dsh', sessionId: followRun.result.sessionId });
+  const finishedFollowTask = taskRuntime.get({ id: followTask.id }).task;
+  taskRuntime.cancel({ id: followTask.id, expectedRev: finishedFollowTask.rev,
+    reason: 'Completed isolated Task Follow fixture before other Workspace writers' });
   console.log('PASS model agent.run consumes task-level DSH Follow without Chat UI and preserves approval + one-import semantics');
 
   await assert.rejects(() => dshService.broker.createSession('dsh', { workspaceId: authoritative.id }), error => error.code === 'TASK_REQUIRED');
