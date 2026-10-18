@@ -9,6 +9,7 @@ export function createDshCoreConnector({ config = {}, env = process.env } = {}) 
     dshHome: () => dsh.homeDir || env?.DSH_HOME || null,
     timeoutMs: 120_000
   });
-  return { api, presetConfig: { coding: dsh.codingPreset || null, social: dsh.socialPreset || null,
+  return { api, presetConfig: { coding: typeof dsh.codingPreset === 'string' ? dsh.codingPreset : null,
+    social: typeof dsh.socialPreset === 'string' ? dsh.socialPreset : null,
     dshHome: dsh.homeDir || env?.DSH_HOME || null } };
 }

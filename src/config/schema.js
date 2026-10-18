@@ -32,6 +32,8 @@ const dshSchema = z.looseObject({
   reasoningEffort: z.string().optional(),
   authCookie: z.string().optional(),
   homeDir: z.string().optional(),
+  codingPreset: z.string().optional(),
+  socialPreset: z.string().optional(),
   executable: z.string().optional(),
   customPaths: z.array(z.string()).optional()
 });

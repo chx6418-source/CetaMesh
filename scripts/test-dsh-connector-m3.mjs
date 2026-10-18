@@ -36,6 +36,8 @@ async function nextWithTimeout(iterator) {
 const connector = createDshCoreConnector({ config: { dsh: { baseUrl: 'http://127.0.0.1:3080' } }, env: {} });
 assert.equal(typeof connector.api.callEndpoint, 'function');
 assert.equal(typeof connector.api.openRemoteStream, 'function');
+assert.equal(createDshCoreConnector({ config: { dsh: { codingPreset: 42 } } }).presetConfig.coding, null,
+  'malformed optional preset configuration must not crash Core construction');
 
 const isolatedRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-m3-core-'));
 const crashingApi = {
