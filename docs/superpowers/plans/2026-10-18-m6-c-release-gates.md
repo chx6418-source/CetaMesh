@@ -48,3 +48,7 @@
 - Manifest redirect checks preserve signature verification and fail closed on HTTPS downgrade, unapproved hosts, missing Location and loops.
 - Real migration is not automatically required for release; unresolved compatibility/access or writer safety remains a separate gate.
 - Final delivery: CETAMESH_FINAL_RELEASE_GATE_REPORT.md, CETAMESH_FINAL_RELEASE_BLOCKERS.md, CETAMESH_OWNER_FINAL_ACCEPTANCE.md, the unique blocker ledger and final 64-case E/AC matrix.
+
+## Owner stop and Git authorization (2026-10-19 local)
+
+Owner explicitly requested merge/push and shutdown, then clarified shutdown even if acceptance is incomplete. Stop acceptance now. Build1091 source9b25f3b is committed and focused UI/Chat regression passed; final packaging/full npm/RC not run. Intermediate1090 aggregate128PASS/1FAIL/5NOT_RUN retained (release suite expected1091 package after version advanced). Final gate RELEASE_BLOCKED; no fake completion. Merge/push origin main only after clean/ancestry checks; no Stable/tag/deploy. Preserve artifact worktree and unrelated design changes.
