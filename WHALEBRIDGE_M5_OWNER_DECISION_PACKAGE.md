@@ -1,4 +1,6 @@
-# WhaleBridge M5-A.1 — Owner 决策包
+# WhaleBridge M5-A.2 — Owner 决策包
+
+> 第 1–6 节保留 A1 的逐文件 Hash 和核验记录；**第 7 节是本轮 A2 的当前决策表和授权边界**，不继承任何未作出的 Owner 决定。A2 基线 c04ad381916147eca10eddac2edf5f8f23d0060e。
 
 ## 1. 本次需要决定什么
 
@@ -91,3 +93,53 @@ QQ receipts/send-ledger 在两个旧来源根未发现，因此不是一个可�
 只读证据文件 SHA-256（当前工作树原字节）：`7008891d9344777a8ff7aab43b13c6cd3eae5932bcdf726c8c0d1232782b24f4`；新 Dry Run JSON：`81184498adf3e76d6851289ea8471d3ef50fa502c5e1b76fc835c520010d6120`。这些是证据文件 Hash，不是安装包 Hash；本轮没有生成新安装包。最终回查真实 planId/八项 Social Hash 均未变化，Fixture 工作树残留为 0。
 
 本轮仅 5 个定向 npm suites：5 PASS / 0 FAIL / 0 NOT_RUN_ENVIRONMENT。真实环境的 NOT_RUN_ENVIRONMENT 是单独的验收状态，不混入这 5 个自动化统计。证据快照提交 `13f1dfc347fef81236a5e9d66613c50957f49109`；最终报告 HEAD 取 `git log -1 --format=%H -- WHALEBRIDGE_M5_OWNER_DECISION_PACKAGE.md`，确切值随最终答复交付，避免在提交内容内自引用其尚未生成的 SHA。
+
+
+## 7. M5-A.2 当前决策表（所有选择均未作出）
+
+真实写入、备份、停止进程、切换 writer 和启用 Epoch 的批准均为 0。READY_FOR_APPROVAL 只表示材料可供决定，不是 AUTHORIZED。原第 3 节给出 S01–S08 的完整来源 Hash；新证据 WHALEBRIDGE_M5_A2_EVIDENCE.json 已重新验证八项均未变化，没有新可靠机器人账号证据。候选账号均为 UNKNOWN（非空默认账号）。
+
+### 7.1 八项 Social 分别决定
+
+| 编号/数据类别 | 来源→拟目标 | 归属/脱敏摘要及关联 | 必须迁移？/只读兼容 | 游标/旧 writer/风险 | 备份恢复 | 当前状态 / Owner 动作 |
+| --- | --- | --- | --- | --- | --- | --- |
+| S01 Social 会话 | 340…/state/social-v2.json → 已确认账号的 Bionic 分区（当前目标未绑定） | UNKNOWN；3 会话；与两项 Session、卡片及黑话来源键部分关联 | 未定；可选择只读，须门禁 | CURSOR_UNRECOVERABLE；Legacy-exclusive 停止未确认；凭据/重复副作用/Scope 风险 | B1/S01；原字节/ACL/ID/Scope；目标更新阻止自动回滚 | OWNER_REVIEW_REQUIRED；四选一，未选择 |
+| S02 聊天 Session | 340…/state/sessions.json → 已确认账号的 Bionic 分区（当前目标未绑定） | UNKNOWN；2 个 Session 映射；不自动恢复认证/Follow | 未定；可只读保留原 ID | CURSOR_UNRECOVERABLE；Legacy-exclusive 停止未确认；凭据/重复副作用/Scope 风险 | B1/S02；原字节/ACL/ID/Scope；目标更新阻止自动回滚 | OWNER_REVIEW_REQUIRED；四选一，未选择 |
+| S03 人设状态 | 340…/state/current-role.json → 已确认账号的 Bionic 分区（当前目标未绑定） | UNKNOWN；1 文档；角色资产引用存在，不证明账号 | 未定；可只读引用 | CURSOR_UNRECOVERABLE；Legacy-exclusive 停止未确认；凭据/重复副作用/Scope 风险 | B1/S03；原字节/ACL/ID/Scope；目标更新阻止自动回滚 | OWNER_REVIEW_REQUIRED；四选一，未选择 |
+| S04 黑话 | 340…/state/slang.json → 已确认账号的 Bionic 分区（当前目标未绑定） | UNKNOWN；63 稳定 ID；一个来源会话别名与 Social 匹配 | 未定；不默认跨账号共享 | CURSOR_UNRECOVERABLE；Legacy-exclusive 停止未确认；凭据/重复副作用/Scope 风险 | B1/S04；原字节/ACL/ID/Scope；目标更新阻止自动回滚 | OWNER_REVIEW_REQUIRED；四选一，未选择 |
+| S05 学习 Session | 340…/state/slang-session.json → 已确认账号的 Bionic 分区（当前目标未绑定） | UNKNOWN；1 文档；独立学习 Session，不证明聊天账号 | 未定；只读时不自动运行学习任务 | CURSOR_UNRECOVERABLE；Legacy-exclusive 停止未确认；凭据/重复副作用/Scope 风险 | B1/S05；原字节/ACL/ID/Scope；目标更新阻止自动回滚 | OWNER_REVIEW_REQUIRED；四选一，未选择 |
+| S06 贴纸 | 340…/state/stickers.json → 已确认账号的 Bionic 分区（当前目标未绑定） | UNKNOWN；40 稳定 ID；时间元数据不证明账号 | 未定；可只读保留，不按内容合并 | CURSOR_UNRECOVERABLE；Legacy-exclusive 停止未确认；凭据/重复副作用/Scope 风险 | B1/S06；原字节/ACL/ID/Scope；目标更新阻止自动回滚 | OWNER_REVIEW_REQUIRED；四选一，未选择 |
+| S07 卡片缓存 | 340…/state/social-v2-cards.json → 已确认账号的 Bionic 分区（当前目标未绑定） | UNKNOWN；1 会话；会话键部分关联，非 ACK/回执 | 可决定无需迁移；不自行删除 | CURSOR_UNRECOVERABLE；Legacy-exclusive 停止未确认；凭据/重复副作用/Scope 风险 | B1/S07；原字节/ACL/ID/Scope；目标更新阻止自动回滚 | OWNER_REVIEW_REQUIRED；四选一，未选择 |
+| S08 空 Session 容器 | c12…/state/sessions.json → 已确认账号的 Bionic 分区（当前目标未绑定） | UNKNOWN；0 映射；无身份，不证明废弃 | 可决定无需迁移；空文件保持 | CURSOR_UNRECOVERABLE；Legacy-exclusive 停止未确认；凭据/重复副作用/Scope 风险 | B1/S08；原字节/ACL/ID/Scope；目标更新阻止自动回滚 | OWNER_REVIEW_REQUIRED；四选一，未选择 |
+
+每项四选一：**确认可靠账号证据后计划迁移 / KEEP_LEGACY_READ_ONLY / 暂缓迁移 / MIGRATION_NOT_REQUIRED**。确认后计划也不是执行许可。选择只读需保证旧新写入者门禁后才生效；当前未切换 writer，因此 KEEP_LEGACY_READ_ONLY 已生效项为 0。无法逐记录证明账号/群归属时不可拆并为多个账号，也不能变为全局 Memory。
+
+B1 为未创建的备份规划 `<Owner-approved-backup-root>/<migration-id>/<rootId>/original/<source>`；先单独批准备份位置/权限/加密/保留期并演练恢复。回滚需原来源/备份/目标 Hash、权限、ID/Scope 和停止/租约证明；新目标有新增数据或未知外发时停止自动回滚。
+
+### 7.2 其他组与五类归档
+
+| 数据/范围 | 来源和目标/归属 | 必须迁移/只读 | writer/游标/风险 | 备份恢复及 Owner 动作 | 当前分类 |
+| --- | --- | --- | --- | --- | --- |
+| Core 26 文件 | 原根原 Store；Core 权威 | 不迁移；保留正常现有服务 | Core；不受 QQ Epoch pointer 控制 | 未来迁移只做保护性校验；任何真实备份另批 | MIGRATION_NOT_REQUIRED |
+| 配置 2 / Secret 引用 5 | 原位置；用户/Core，外部配置最终归用户 | 不迁移、不复制凭据 | Core/User；不能用 ownerQQ 推断机器人账号 | 不改写；备份中若纳入凭据须独立明确授权 | MIGRATION_NOT_REQUIRED |
+| 诊断元数据 7 | 原 runtime；正文未读 | 不迁移/删除 | 原 writer；不能代替游标证据 | 如需正文追溯另定受限范围，不能批量暴露私人数据 | MIGRATION_NOT_REQUIRED |
+| 角色资产 6 | 源码 roles，Repository/User | 是否账号复制未定，可保留引用 | 非 Social 账号证明 | 逐资产选择共享只读或之后批准账号复制，Hash 见原库存 | OWNER_REVIEW_REQUIRED |
+| 兼容/未知 32 | 原位置；owner/目标 UNVERIFIED | 不批量迁移，保留原地 | 未知 writer/Schema/Scope 不接管 | 明确每个 fileId 所有权后再决定，不 force 合并 | OWNER_REVIEW_REQUIRED |
+| DSH preset 3 树 | 用户原 DSH_HOME；Hash 见库存 | 不搬迁/覆盖 | 用户/DSH；原生 coding 兼容仍未验收 | 保持；如需变更另批，不与资料许可捆绑 | MIGRATION_NOT_REQUIRED |
+| 两根 cursor / 新 Epoch 执行 | 340… / c12…；不补造旧记录 | 真实接续未授权 | 旧消费者/副作用/真实边界尚不确定 | 参见 Epoch 设计；设计批准和启用分开 | MIGRATION_BLOCKED |
+| 真实 writer 切换 | 旧根→批准账号分区，resolver 尚未安装 | 真实迁移不能开始 | 无停止 ACK/跨用户租约完整证据 | 先生产兼容设计批准、独立停止证明、恢复证明 | MIGRATION_BLOCKED |
+| Epoch/备份/最小 resolver 设计材料 | 文档及隔离模型，不操作真实文件 | 仅审阅设计 | 不授予 writer，不恢复外发 | Owner 可分别批准设计范围；必须另行批准真实动作 | READY_FOR_APPROVAL |
+| 只读兼容处置 | 尚无 Owner 选择 | 可选，不默认生效 | 不把现有文件只读观察等同于停用 writer | Owner 按 S 编号选择并批准相应门禁；当前 0 项 | KEEP_LEGACY_READ_ONLY（可选处置，已选 0） |
+
+86 项库存文件的当前处置计数：OWNER_REVIEW_REQUIRED 46（Social 8+角色 6+未知 32），MIGRATION_NOT_REQUIRED 40（Core 26+配置 2+Secret 5+诊断 7）。READY_FOR_APPROVAL 可执行数据 0，KEEP_LEGACY_READ_ONLY 已生效 0。MIGRATION_BLOCKED 是接续/切换门禁及候选执行状态，不额外增加文件计数；DSH 3 树另计。无需迁移不允许删除。
+
+### 7.3 批准记录字段与停止
+
+Owner 应逐项记录：决策编号、数据 fileId/rootId、选择、可靠账号证明、源 Hash/planId、拟目标、具体允许动作、备份/停止/迁移/Epoch 分别授权、审批者/时间/有效窗口、拒绝或暂缓原因。来源/目标/权限/租约或真实连接身份变化使旧批准失效。未填写的记录一律 UNDECIDED，不代选。
+
+本轮 13 个不同自动化 suites 最终通过（含 Rust 2、Core/SEA 2），Core 构建通过且 SHA/Build 1081 未变；详细执行与局限见 WHALEBRIDGE_M5_APPROVAL_READY_REPORT.md。当前没有真实 QQ E2E、新生产 Epoch 激活或数据切换验收。
+
+M5-A.2 在此收口；不自动新增 M5-A.x。只有 Owner 明确批准的数据组和动作才可进入后续 M5-B。其他组继续等待；不 push、合并 main 或发布 Stable。
+
+
+本轮工具/测试/证据提交：`c10145fff3c3fa7bbf4768a777deba7b6220268f`。脱敏证据文件 SHA-256（当前工作树原字节）：`e00e328c4ce71c6f8939fe3a8baf8232a94875b04d5fbe5372c9059b4d2ec5eb`。最终文档提交由 Git 文件历史及交付答复记录。真实数据、Epoch、写入者未切换，等待 Owner 分组决定。

@@ -94,6 +94,8 @@
 
 ## Active Work (Owner confirmation pending)
 
+- **M5-A.2 已收口，停止等待 Owner 分组决定**：基线 `c04ad381916147eca10eddac2edf5f8f23d0060e`，分支 `codex/whalebridge-m5-a-dry-run`。新增只读 runtime preflight、Epoch 设计与 3 个已登记隔离套件，复用现有 Channel Journal/迁移 Fixture，不改引擎或正式运行链；新增 EPOCH_RECOVERY_DESIGN / RUNTIME_PREFLIGHT / APPROVAL_READY_REPORT，更新 Owner Decision Package。八项 Social Hash 不变，映射/四选一决定均未作出；两根游标仍不可恢复，真实停止/IPC/跨用户租约不完整，实际迁移 MIGRATION_BLOCKED / REAL_DATA_NOT_AUTHORIZED。13 个不同定向 suites 最终 PASS（含 Rust check/test、Core/SEA），Core 构建 Hash 与基线相同，Build 1081；无新安装包。M2/M3 PARTIAL、M4 E2E_PENDING、RELEASE_BLOCKED 保持。M6 仅隔离验收规划，不自动派生 M5-A.x；只有 Owner 明确批准的组和动作才进入 M5-B。
+
 - **M5-A.1 审批准备已交付，真实迁移仍禁止**：沿用 `codex/whalebridge-m5-a-dry-run`，基线 `fda079e`；新增 PRE_MIGRATION_BLOCKERS / OWNER_DECISION_PACKAGE 及两个脱敏证据快照，更新四份 M5-A 文档。8 项 Social Hash 不变、账号证据仍不足；两根旧游标在已检查来源内 CURSOR_UNRECOVERABLE；安装版 Core 锁匹配存活 worker，旧 Bridge PID 消失仍非停止 ACK，跨用户/历史 portable 未完全确认。相同计划三次核验稳定；本轮 5 个定向 npm suites PASS / 0 FAIL，含六阶段 Fixture 崩溃、重复迁移、失效计划及回滚。无产品代码/Build 修改（1081），无真实迁移/停进程/锁接管/凭据覆盖。READY_FOR_OWNER_APPROVAL 仅指设计待审，真实范围全部等待具体批准；M2/M3 PARTIAL、M4 E2E_PENDING、RELEASE_BLOCKED 保持。
 
 - **M5-A 已交付，等待独立 M5-B 批准**：`codex/whalebridge-m5-a-dry-run`，沿用 `D:\GIT- CetaMesh\audit-critical-repair` 工作树，基线 M4.4 `e70a3de`；工具提交 `4eb5887734d237a49e78e525e9947466ed678d10`。真实只读盘点 86 项/3 个 preset，8 项账号归属、2 个缺游标根、2 个停止证据未确认，实际计划 BLOCKED。只读工具 DRY_RUN_PASS、隔离迁移 FIXTURE_MIGRATION_PASS、隔离回滚 ROLLBACK_PASS；真实执行 REAL_DATA_NOT_AUTHORIZED，次数 0。最终 npm 114 PASS / 0 FAIL / 7 未运行，Rust 198 PASS，Core/UI 构建及 SEA/Core 2 suites 通过。Build 1081 产品代码/SEA 保持不变；没有生产迁移 resolver 或 apply 入口，四份 M5 报告和脱敏 JSON 台账为当前事实。M2/M3 PARTIAL、M4 E2E_PENDING 和 RELEASE_BLOCKED 保留。M4 原分支与安装包未改；未 push、合并、迁移或覆盖用户配置。
