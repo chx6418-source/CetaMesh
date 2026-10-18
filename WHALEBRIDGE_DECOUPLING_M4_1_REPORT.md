@@ -105,4 +105,8 @@
 
 `VERIFIED_FIXTURE`：`npm run desktop:check` 通过；`npm run desktop:test` **198 PASS / 0 FAIL**；`npm run build:ui` 与 `npm run desktop:build` 通过。`npm run build:core` 重跑通过，SEA 资源审计通过。正式 RC 构建与安装器核验在干净代码提交后记录，不得用上述编译结果冒充独立 QQ Connector 的 Release Integration。
 
-版本 `1.0.0-rc.2`，Build **1078**。本轮源代码提交、最终 HEAD、RC 统计、安装包大小与 SHA-256 在干净构建后补录。没有 push、合并 main、正式标签或 Stable 发布。
+`VERIFIED_RELEASE_INTEGRATION`：`npm run build:release -- --use-current-build-number` 从干净代码提交 `eddd401d7df10f663eb71bfb90ed0b229fa3d585` 组装 Build **1078**，清单 `sourceCommit` 与提交完全一致，`dirtySourceTree: false`。`npm test -- --category release` **8 PASS / 0 FAIL / 0 NOT_RUN_ENVIRONMENT**，覆盖发行包安装、SEA Core 启动和 IPC 等既有 RC 套件；正式 SEA 仍无独立 QQ Connector 的 start/stop/health 入口，故此项不能标记 QQ Connector Release Integration 通过。
+
+安装包 [CetaMesh-Setup-1.0.0-rc.2-build1078-x64.exe](artifacts/rc/1.0.0-rc.2/build-1078/CetaMesh-Setup-1.0.0-rc.2-build1078-x64.exe)：**42,999,808 字节**，SHA-256 `255F65ED4466E158A71FD8734BC3BA70CCC1BF0BF5437C73AEFD5807F9026D4E`，`Get-AuthenticodeSignature` 为 `NotSigned`。SEA Core SHA-256 `3BBDAABF69AC9EEA470E52366F0395B54F15A3A70BEF80132EEEED3041F7ECDD`。版本 `1.0.0-rc.2`，Build **1078**。真实 QQ/OneBot 流量未执行，`VERIFIED_REAL_E2E` 为零；未把本地安装器通过视为真实社交验收。
+
+代码提交：`eddd401d7df10f663eb71bfb90ed0b229fa3d585`。本段为构建后补录，只改报告；最终分支 HEAD 包含后续文档提交，以 `git rev-parse HEAD` 为准。工作树在构建前干净；报告补录提交后复核工作树。没有 push、合并 main、正式标签或 Stable 发布。
