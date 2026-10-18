@@ -145,6 +145,22 @@ try {
   assert.equal(dispatched.length, 3, 'denial must precede gateway IO');
   assert.equal(fs.existsSync(path.join(sendLedgerRoot, 'denied.json')), false, 'denied send must not create an attempted-send record');
   await deniedRuntime.stop();
+  const sdkClient = new FakeClient();
+  sdkClient.connect = async () => { sdkClient.emit('open'); };
+  const sdkRuntime = createQqRuntime({ config: { snowluma: { wsUrl: 'ws://127.0.0.1:6713' } },
+    clientFactory: () => sdkClient, outboundFile: path.join(sendLedgerRoot, 'sdk.json') });
+  await sdkRuntime.connect();
+  const sdkUnknown = await sdkRuntime.sendGroupMessage(42, { type: 'text', data: { text: 'hello' } }, { requestId: 'sdk-turn:1' });
+  assert.equal(sdkUnknown.status, 'outcome-unknown', 'SDK without a gateway receipt must not be reported as sent');
+  const sdkReplay = await sdkRuntime.sendGroupMessage(42, { type: 'text', data: { text: 'hello' } }, { requestId: 'sdk-turn:1' });
+  assert.equal(sdkReplay.status, 'outcome-unknown');
+  assert.equal(sdkClient.sent.length, 1, 'same logical SDK request must not reach the gateway twice');
+  sdkClient.accountId = 10002;
+  await assert.rejects(sdkRuntime.sendGroupMessage(42, { type: 'text', data: { text: 'later' } }, { requestId: 'sdk-turn:2' }),
+    { code: 'QQ_ACCOUNT_CHANGED' }, 'a silent SDK account switch must be rejected before sending');
+  assert.equal(sdkClient.sent.length, 1);
+  assert.equal(sdkRuntime.health().ready, false, 'health must not remain ready after the account identity changes');
+  await sdkRuntime.stop();
   const bridgeSource = fs.readFileSync(path.resolve(import.meta.dirname, '../src/bridge.js'), 'utf8');
   assert.match(bridgeSource, /outboundFile:\s*path\.join\(STATE_DIR, 'qq-send-ledger\.json'\)/,
     'Legacy product host must configure a persistent QQ send ledger');
@@ -219,8 +235,18 @@ try {
     lockChild.kill();
     await closed;
   }
+  const recovered = acquireQqOwnership('account', '90001', ownershipRoot);
+  assert.ok(recovered, 'verified dead PID may be safely recovered without a second live consumer');
   assert.throws(() => acquireQqOwnership('account', '90001', ownershipRoot), { code: 'QQ_ACCOUNT_BUSY' },
-    'an unverified crash must fail closed instead of taking over a potentially active account');
+    'recovered account lease must immediately exclude another live sender');
+  recovered.release();
+  const unknownLock = acquireQqOwnership('account', '90002', ownershipRoot);
+  const unknownPath = fs.readdirSync(ownershipRoot).find(name => name.startsWith('account-') && name.endsWith('.lock'));
+  fs.writeFileSync(path.join(ownershipRoot, unknownPath), 'unverified-owner', 'utf8');
+  assert.throws(() => acquireQqOwnership('account', '90002', ownershipRoot), { code: 'QQ_ACCOUNT_BUSY' },
+    'unparseable lock evidence must fail closed');
+  fs.rmSync(path.join(ownershipRoot, unknownPath));
+  unknownLock.release();
   const processed = [];
   const makeRuntime = (accountId, wsUrl = 'ws://127.0.0.1:6700') => {
     const fixtureClient = new FakeClient();
@@ -387,6 +413,9 @@ diagnostic.stderr.on('data', chunk => { diagnosticOutput += String(chunk); });
 const [diagnosticExit] = await once(diagnostic, 'close');
 assert.equal(diagnosticExit, 2, 'manual diagnostic must require explicit real-send opt-in before loading gateway credentials');
 assert.match(diagnosticOutput, /diagnostic.*disabled|诊断.*禁用/i);
+const diagnosticSource = fs.readFileSync(path.join(repoRoot, 'scripts', 'send-test-group.mjs'), 'utf8');
+assert.match(diagnosticSource, /createQqRuntime\(/, 'developer diagnostic must use the same QQ send executor');
+assert.doesNotMatch(diagnosticSource, /bot\.sendGroupMessage\(/, 'diagnostic may not call the SDK send action directly');
 const discoveryRoot = path.join(workerRoot, 'discovery');
 fs.mkdirSync(discoveryRoot);
 writeJsonAtomic(path.join(workerRoot, 'config.json'), {

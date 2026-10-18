@@ -76,6 +76,8 @@ import { createDesktopIpcRuntime } from './app/ipc-runtime.js';
 import { createDshLifecycle } from './providers/dsh/lifecycle.js';
 import { createQqRuntime } from './channel/qq/runtime.js';
 import { assertQqSendPolicy } from './channel/qq/send-policy.js';
+import { autoReplyRequestId } from './channel/qq/auto-request.js';
+import { requireKnownQqSendResult } from './channel/qq/send-result.js';
 import { createQqTransport } from './channel/qq/transport.js';
 import { assertMcpToolEnabled, isBionicChatEnabled, isQqConnectorEnabled } from './integrations/tool-policy.js';
 import { assertQqDataToolEnabled, qqSocialFlagPolicyEnabled, qqToolPolicyEnabled } from './channel/qq/tool-policy.js';
@@ -5524,21 +5526,24 @@ async function main() {
     return s;
   }
 
-  function sendToQQ(key, msg) {
+  function sendToQQ(key, msg, requestContext = null) {
     const safeMsg = redactKnownTokensOnly(msg);
     const [kind, id] = key.split(':');
     const parts = splitForQQ(safeMsg);
-    for (const part of parts) {
-      sendChain = sendChain
-        .then(async () => {
+    let batch = Promise.resolve();
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i];
+      batch = batch.then(() => enqueueQqAction(async () => {
           if (!isQqConnectorEnabled({ stateDir: STATE_DIR })) throw Object.assign(new Error('QQ Connector 已禁用'), { code: 'QQ_DISABLED' });
-          if (kind === 'private') await withTimeout(qqTransport.send('private', id, escapeCqText(part)), SEND_TIMEOUT_MS, `QQ发送 ${kind}:${id}`);
-          else await withTimeout(qqTransport.send('group', id, escapeCqText(part)), SEND_TIMEOUT_MS, `QQ发送 ${kind}:${id}`);
-        })
-        .catch((error) => log(`QQ 发送失败 (${key}):`, error?.message ?? error))
-        .then(() => sleep(cfg.sendDelayMs));
+          const options = requestContext ? { requestId: autoReplyRequestId({ ...requestContext, target: key, partIndex: i }) } : {};
+          const result = kind === 'private'
+            ? await withTimeout(qqTransport.send('private', id, escapeCqText(part), options), SEND_TIMEOUT_MS, `QQ发送 ${kind}:${id}`)
+            : await withTimeout(qqTransport.send('group', id, escapeCqText(part), options), SEND_TIMEOUT_MS, `QQ发送 ${kind}:${id}`);
+          requireKnownQqSendResult(result);
+          await sleep(cfg.sendDelayMs);
+        }));
     }
-    return sendChain;
+    return batch;
   }
 
   // ── 真人式分条发送 ──────────────────────────────────────────────────────
@@ -5655,7 +5660,7 @@ async function main() {
 
   // 分条发送：与 sendToQQ 共用同一 sendChain，严格顺序；条间随机间隔，
   // 有概率使用长间隔（错落感）；最后一条后不再 sleep。
-  function sendBurstToQQ(key, messages, socialCfgOrMin, maybeMax) {
+  function sendBurstToQQ(key, messages, socialCfgOrMin, maybeMax, requestContext = null) {
     const [kind, id] = key.split(':');
     let min, max, longProb = 0, longMin = 0, longMax = 0;
     if (typeof socialCfgOrMin === 'object' && socialCfgOrMin !== null) {
@@ -5671,23 +5676,25 @@ async function main() {
     }
 
     const sent = [];
+    let batch = Promise.resolve();
     for (let i = 0; i < messages.length; i++) {
       const msg = redactKnownTokensOnly(messages[i]);
       const isLast = i === messages.length - 1;
-      sendChain = sendChain
-        .then(async () => {
-          if (kind === 'private') await withTimeout(qqTransport.send('private', id, escapeCqText(msg)), SEND_TIMEOUT_MS, `QQ发送 ${kind}:${id}`);
-          else await withTimeout(qqTransport.send('group', id, escapeCqText(msg)), SEND_TIMEOUT_MS, `QQ发送 ${kind}:${id}`);
+      batch = batch.then(() => enqueueQqAction(async () => {
+          const options = requestContext ? { requestId: autoReplyRequestId({ ...requestContext, target: key, partIndex: i }) } : {};
+          const result = kind === 'private'
+            ? await withTimeout(qqTransport.send('private', id, escapeCqText(msg), options), SEND_TIMEOUT_MS, `QQ发送 ${kind}:${id}`)
+            : await withTimeout(qqTransport.send('group', id, escapeCqText(msg), options), SEND_TIMEOUT_MS, `QQ发送 ${kind}:${id}`);
+          requireKnownQqSendResult(result);
           sent.push(msg);
-        })
-        .catch((error) => log(`QQ 发送失败 (${key}):`, error?.message ?? error));
+        }));
       if (!isLast) {
         const useLong = longProb > 0 && Math.random() < longProb;
         const delay = useLong ? randInt(longMin, longMax) : randInt(min, max);
-        sendChain = sendChain.then(() => sleep(delay));
+        batch = batch.then(() => sleep(delay));
       }
     }
-    return sendChain.then(() => sent);
+    return batch.then(() => sent);
   }
 
 
@@ -9637,12 +9644,13 @@ async function main() {
           }
           const timeline = planSocialTimeline(plain, cfg.social);
           const messages = timeline.main;
+          const autoRequest = { sessionId, terminalSequence: event.seq };
           log(`agent 回复 (${key}) ${plain.length} 字 → ${messages.length} 条`);
           appendActivity(`${key} agent 回复：${messages[0].slice(0, 80)}${messages.length > 1 ? '（分' + messages.length + '条）' : ''}${messages[0].length > 80 ? '…' : ''}`);
           if (messages.length > 1) {
-            await sendBurstToQQ(key, messages, cfg.social);
+            await sendBurstToQQ(key, messages, cfg.social, undefined, autoRequest);
           } else {
-            await sendToQQ(key, messages[0]);
+            await sendToQQ(key, messages[0], autoRequest);
           }
           // 发言后刷新活跃时间，并调度可能的二次补刀
           const st = socialState(key);
@@ -9671,7 +9679,7 @@ async function main() {
           }
           log(`agent 回复 (${key}) ${plain.length} 字`);
           appendActivity(`${key} agent 回复：${plain.slice(0, 80)}${plain.length > 80 ? '…' : ''}`);
-          await sendToQQ(key, plain);
+          await sendToQQ(key, plain, { sessionId, terminalSequence: event.seq });
         }
       } else if (ended.reason.kind === 'error') {
         const msg = ended.reason.error?.message ?? '未知错误';

@@ -12,6 +12,8 @@ const policy = (request, overrides = {}) => assertQqSendPolicy(request, {
 });
 const base = { accountId: '10001', target: 'group:42', action: 'send_group_msg', kind: 'text' };
 assert.doesNotThrow(() => policy(base));
+assert.doesNotThrow(() => policy(base, { bionicEnabled: false }),
+  'disabling Bionic social policy must leave basic QQ text transport available');
 assert.throws(() => policy({ ...base, accountId: null }), { code: 'QQ_ACCOUNT_UNVERIFIED' });
 assert.throws(() => policy({ ...base, target: 'group:43' }), { code: 'QQ_TARGET_DENIED' });
 assert.throws(() => policy(base, { qqEnabled: false }), { code: 'QQ_DISABLED' });

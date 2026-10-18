@@ -127,6 +127,19 @@ export function createQqRuntime({
 
   function executeSend(action, params, options, dispatch) {
     return enqueueSend(async () => {
+      let observedAccount;
+      try {
+        const login = await client.getLoginInfo();
+        observedAccount = login?.user_id ?? login?.data?.user_id;
+      } catch (error) {
+        state = 'unavailable';
+        throw Object.assign(new Error('QQ account cannot be verified before sending'),
+          { code: 'QQ_ACCOUNT_UNVERIFIED', cause: error });
+      }
+      if (!observedAccount || String(observedAccount) !== accountId) {
+        state = 'unavailable';
+        throw Object.assign(new Error('QQ account changed before sending'), { code: 'QQ_ACCOUNT_CHANGED' });
+      }
       const requestId = options?.requestId ?? crypto.randomUUID();
       const kind = inferKind(action, params, options);
       const target = inferTarget(params);

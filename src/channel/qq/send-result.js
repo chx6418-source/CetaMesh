@@ -18,3 +18,11 @@ export function interpretQqDataSendResponse(response) {
   }
   return data;
 }
+
+export function requireKnownQqSendResult(result) {
+  if (result?.status === 'outcome-unknown') {
+    throw Object.assign(new Error('QQ send outcome unknown; verify the original request before retrying'),
+      { code: 'QQ_OUTCOME_UNKNOWN', requestId: result.requestId });
+  }
+  return result;
+}

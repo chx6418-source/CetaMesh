@@ -110,3 +110,7 @@
 安装包 [CetaMesh-Setup-1.0.0-rc.2-build1078-x64.exe](artifacts/rc/1.0.0-rc.2/build-1078/CetaMesh-Setup-1.0.0-rc.2-build1078-x64.exe)：**42,999,808 字节**，SHA-256 `255F65ED4466E158A71FD8734BC3BA70CCC1BF0BF5437C73AEFD5807F9026D4E`，`Get-AuthenticodeSignature` 为 `NotSigned`。SEA Core SHA-256 `3BBDAABF69AC9EEA470E52366F0395B54F15A3A70BEF80132EEEED3041F7ECDD`。版本 `1.0.0-rc.2`，Build **1078**。真实 QQ/OneBot 流量未执行，`VERIFIED_REAL_E2E` 为零；未把本地安装器通过视为真实社交验收。
 
 代码提交：`eddd401d7df10f663eb71bfb90ed0b229fa3d585`。本段为构建后补录，只改报告；最终分支 HEAD 包含后续文档提交，以 `git rev-parse HEAD` 为准。工作树在构建前干净；报告补录提交后复核工作树。没有 push、合并 main、正式标签或 Stable 发布。
+
+## M4.2 后续记录
+
+M4.1 的发行基线仍是 Build 1078 和源码提交 `eddd401d7df10f663eb71bfb90ed0b229fa3d585`。本轮 M4.2 的新增事实和 Build 1079 验证见 [WHALEBRIDGE_DECOUPLING_M4_2_REPORT.md](WHALEBRIDGE_DECOUPLING_M4_2_REPORT.md)。自动回复身份、账号锁的确认死亡恢复及开发诊断入口已追加修复；Legacy QQ/Social 运行职责、Core Capability Broker QQ 授权和正式 SEA 独立 Connector 入口仍是阻塞，**M4_PARTIAL / RELEASE_BLOCKED** 不变。

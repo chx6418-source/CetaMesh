@@ -61,6 +61,7 @@ const REGISTRY = {
   'test-ipc-runtime.mjs': { category: 'core' },
   'test-dsh-lifecycle.mjs': { category: 'core' },
   'test-qq-runtime.mjs': { category: 'core' },
+  'test-qq-auto-request.mjs': { category: 'core' },
   'test-qq-send-ledger.mjs': { category: 'core' },
   'test-qq-send-policy.mjs': { category: 'security' },
   'test-runner-environment.mjs': { category: 'core' },
