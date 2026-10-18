@@ -1508,5 +1508,23 @@ ok('Codex and DSH native turn identities reject stale events and finish the acce
 }
 ok('Agent events arriving before send ACK are replayed only after provider identity is known');
 
+// Remote cancellation acknowledgement is not proof that its approval stopped.
+{
+  const { service, agentCalls } = makeFullService({ agent: true, agentProviderId: 'dsh' });
+  const session = await service.execute({ method: 'chat.sessions.create', params: {} });
+  await service.execute({ method: 'chat.config.set', params: { id: session.id, config: { agentProvider: 'dsh' } } });
+  await service.execute({ method: 'chat.send', params: { id: session.id, text: 'controlled remote approval' } });
+  await waitFor(() => agentCalls.some(call => call.method === 'agent.send'), Boolean, 'remote send acknowledgement');
+  await new Promise(resolve => setTimeout(resolve, 20));
+  service._injectEvent(session.id, { type: 'tool/activity', data: { activity: { id: 'remote-write', status: 'waiting-approval', label: 'remote write' } } });
+  service._injectEvent(session.id, { type: 'turn/end', data: { reason: { kind: 'waiting', approvalId: 'remote-approval' } } });
+  await service.execute({ method: 'chat.stop', params: { id: session.id } });
+  const history = await service.execute({ method: 'chat.history', params: { id: session.id } });
+  assert.equal(history.messages.at(-1).toolActivity[0].status, 'waiting-approval', 'remote cancel ACK must not fabricate confirmed tool cancellation');
+  assert.ok(agentCalls.some(call => call.method === 'agent.cancel'));
+  service.close();
+  ok('Remote cancel request preserves unconfirmed tool state');
+}
+
 fs.rmSync(temp, { recursive: true, force: true });
 console.log(`\n🎉 阶段 03 Chat 运行时全部通过（${step} 组）`);

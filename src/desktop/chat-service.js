@@ -2000,11 +2000,13 @@ export function createChatService({
         await agentExecute({ method: 'agent.cancel', params: {
           provider: record.runtimeProvider || record.config.agentProvider, sessionId: record.dshSessionId
         } });
-      } else toolExecutionCoordinator?.cancelSession?.(record.id, 'chat-stop');
-      // Only an unexecuted, cancelled approval is confirmed stopped here.
-      // Running external tools retain their separate stop/unknown semantics.
-      turn.toolActivity = (turn.toolActivity ?? []).map(tool => tool.status === 'waiting-approval'
-        ? { ...tool, status: 'cancelled' } : tool);
+      } else {
+        toolExecutionCoordinator?.cancelSession?.(record.id, 'chat-stop');
+        // Only the local, unexecuted approval is confirmed cancelled here.
+        // A remote cancel ACK does not prove the external action stopped.
+        turn.toolActivity = (turn.toolActivity ?? []).map(tool => tool.status === 'waiting-approval'
+          ? { ...tool, status: 'cancelled' } : tool);
+      }
       turn.state = 'cancelled';
       finalizeTurn(record, state);
       onEvent?.({ event: 'chat.updated', data: { sessionId: record.id, status: 'cancelled', requestId: turn.requestId } });
