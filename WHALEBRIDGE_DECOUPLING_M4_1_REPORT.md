@@ -49,12 +49,12 @@
 | --- | --- | --- |
 | `PARTIAL` | Legacy 仍持有 QQ 回调、Social 主循环和社交状态写入；`runBridge()` 仍是兼容宿主。 | 先建立 Connector → Channel Contract 单消费者投递，再移交 Bionic 唯一社交写者；切换前证明旧消费者退出。 |
 | `PARTIAL` | 正式 SEA `core-dispatch` 尚无独立 QQ Connector 模式；不能在安装版中独立发现、启停或报告健康状态。 | 定义正式子进程入口与 supervisor 生命周期，保留 Core `.core-owner.lock`，做实际安装版隔离验收。 |
-| `OPEN_PRODUCT_DEFECT` | 没有持久 requestId、发送意图、回执和 `outcome-unknown` 状态。OneBot 超时或断线可能已有副作用，重试可能重复发送；单队列与内容去重均无法解决。 | 先确定 OneBot 查询能力与回执身份，建立账号级有界账本；未知结果仅可人工/受控查询核验，不能盲目重放。 |
-| `OPEN_PRODUCT_DEFECT` | Runtime 未统一执行 allowlist、Capability、审批、媒体类型权限。Bridge 当前多个调用点各自校验，直接 SDK 写动作与文件路径使用不同策略。 | 定义发送请求的业务身份、能力和审批证明，统一验证后方可写；保留按媒体类型的独立权限。 |
+| `PARTIAL` | 未关闭产品缺陷：没有持久 requestId、发送意图、回执和 `outcome-unknown` 状态。OneBot 超时或断线可能已有副作用，重试可能重复发送；单队列与内容去重均无法解决。 | 先确定 OneBot 查询能力与回执身份，建立账号级有界账本；未知结果仅可人工/受控查询核验，不能盲目重放。 |
+| `PARTIAL` | 未关闭产品缺陷：Runtime 未统一执行 allowlist、Capability、审批、媒体类型权限。Bridge 当前多个调用点各自校验，直接 SDK 写动作与文件路径使用不同策略。 | 定义发送请求的业务身份、能力和审批证明，统一验证后方可写；保留按媒体类型的独立权限。 |
 | `PARTIAL` | QQ 接收回执文件仍为单路径，切换账号后的隔离和旧账号历史核对未完成；账号身份突变现已拒绝继续发送。 | 按账号隔离游标、回执和社交状态，验证旧状态只读迁移/回滚，不清空原文件。 |
 | `NOT_RUN_ENVIRONMENT` | 没有真实受控 QQ/OneBot 账号，文件、音乐、卡片、贴纸的真实副作用和 E2E 均未执行。 | 使用隔离账号和白名单，禁止对真实用户群自动发送。 |
 
-因此本轮不能宣告 M4.1 代码验收完成。M5 用户数据迁移须等待以上运行契约、唯一写者切换方案和 Owner 审批；本轮没有改动真实用户数据。
+因此本轮不能宣告 M4.1 代码验收完成。`DEFERRED_TO_M5`：旧 QQ/Social 数据的备份、逐账号/逐群核对、Dry Run、唯一写者切换与回滚须等待以上运行契约及 Owner 审批；本轮没有改动真实用户数据。
 
 旧 `bridge.js`、QQ/Bionic 功能、用户数据和 DSH preset 均保留。本轮未启动真实 QQ，不迁移用户 StateDir，不 push、不合并 main、不发布 Stable。
 
