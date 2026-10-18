@@ -12,7 +12,15 @@ const ui = createDesktopUiService({ services: { chatService: { execute: async ()
 globalThis.window = { setTimeout, clearTimeout };
 const vite = await createServer({ configFile: false, root: uiRoot, optimizeDeps: { noDiscovery: true }, server: { middlewareMode: true }, appType: 'custom', logLevel: 'error' });
 try {
-  const { MessageBubble } = await vite.ssrLoadModule('/src/app/HarborApp.tsx');
+  const { MessageBubble, isChatTurnCancellable, ChatComposer } = await vite.ssrLoadModule('/src/app/HarborApp.tsx');
+  assert.equal(isChatTurnCancellable('waiting-approval'), true, 'pending local approval still exposes the real stop action');
+  assert.equal(isChatTurnCancellable('idle'), false);
+  const composer = renderToStaticMarkup(React.createElement(ChatComposer, {
+    busy: isChatTurnCancellable('waiting-approval'), models: [], agentProviders: [], workspaces: [],
+    selectedModelKey: '', selectedAgent: 'none', workspaceId: '', activeWorkspaceId: '',
+    onWorkspaceChange() {}, onModelChange() {}, onAgentChange() {}, onSend() {}, onStop() {}
+  }));
+  assert.match(composer, /停止/, 'actual production composer renders stop while waiting for approval');
   const projected = (await ui.execute({ method: 'ui.chat.history', params: { id: 'controlled-session' } })).messages[0];
   assert.equal(projected.toolActivity[0].status, 'cancelled', 'cancelled must survive the production Harbor projection');
   const html = renderToStaticMarkup(React.createElement(MessageBubble, { message: projected }));
