@@ -9855,11 +9855,11 @@ async function main() {
     log,
     onPrivateMessage: async (event) => {
       if (event.user_id === event.self_id) return;
-      try { await handleIncoming('private', event.user_id, event, cfg); } catch (error) { log('处理私聊消息出错:', error?.message ?? error); }
+      await handleIncoming('private', event.user_id, event, cfg);
     },
     onGroupMessage: async (event) => {
       if (event.sender?.user_id === event.self_id || event.user_id === event.self_id) return;
-      try { await handleIncoming('group', event.group_id, event, cfg); } catch (error) { log('处理群消息出错:', error?.message ?? error); }
+      await handleIncoming('group', event.group_id, event, cfg);
     },
     onNotice: async (event) => {
       try { await handlePokeNotice(event); } catch (error) { log('处理拍一拍事件出错:', error?.message ?? error); }

@@ -190,14 +190,21 @@ export function createQqRuntime({
 
   function invoke(handler, label, event) {
     if (stopped || typeof handler !== 'function') return;
+    let receiptKey = null;
     try {
       if (receipts && (label === '处理私聊消息出错' || label === '处理群消息出错')) {
-        if (state !== 'ready' || !receipts.claim(label === '处理群消息出错' ? 'group' : 'private', event)) return;
+        if (state !== 'ready' || String(event?.self_id ?? '') !== accountId) return;
+        receiptKey = receipts.begin(label === '处理群消息出错' ? 'group' : 'private', event);
+        if (!receiptKey) return;
       }
       const result = handler(event);
-      if (result && typeof result.catch === 'function') {
-        result.catch(error => reportCallbackError(log, label, error));
-      }
+      if (result && typeof result.then === 'function') return Promise.resolve(result)
+        .then(() => { if (receiptKey) receipts.ack(receiptKey); })
+        .catch(error => {
+          reportCallbackError(log, label, error);
+        });
+      if (receiptKey) receipts.ack(receiptKey);
+      return result;
     } catch (error) {
       reportCallbackError(log, label, error);
     }
@@ -285,6 +292,7 @@ export function createQqRuntime({
 
   return { client, connect, start: connect, reconnect: connect, stop, status, health: status,
     sendOneBot, sendPrivateMessage, sendGroupMessage, rawWrite, requestWrite,
+    unresolvedInbound: () => receipts?.unresolved() ?? [],
     sendReceipt: (requestId, requestedAccountId = accountId) =>
       requestedAccountId ? outbound?.get(requestedAccountId, requestId) ?? null : null };
 }

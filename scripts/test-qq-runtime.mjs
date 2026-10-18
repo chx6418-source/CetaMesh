@@ -278,6 +278,45 @@ try {
   await first.fixtureClient.groupHandlers[0](packet);
   await first.fixtureClient.groupHandlers[0](packet);
   assert.deepEqual(processed, [99], 'one message ID causes one handler call');
+  const failedFile = path.join(ownershipRoot, 'failed-delivery.json');
+  const failedClient = new FakeClient();
+  failedClient.connect = async () => { failedClient.emit('open'); };
+  let deliveryAttempts = 0;
+  const failedRuntime = createQqRuntime({
+    config: { snowluma: { wsUrl: 'ws://127.0.0.1:6799' } },
+    clientFactory: () => failedClient,
+    dedupFile: failedFile,
+    onGroupMessage: async () => {
+      deliveryAttempts += 1;
+      if (deliveryAttempts === 1) throw new Error('downstream persistence failed');
+    },
+    log: () => {}
+  });
+  assert.equal((await failedRuntime.connect()).connected, true);
+  await failedClient.groupHandlers[0]({ ...packet, message_id: 100 });
+  await failedClient.groupHandlers[0]({ ...packet, message_id: 100 });
+  assert.equal(deliveryAttempts, 1, 'uncertain downstream side effects must not be replayed blindly');
+  const failedReceipt = JSON.parse(fs.readFileSync(failedFile, 'utf8'));
+  assert.equal(failedReceipt.ids.includes('10001:group:3:100'), false,
+    'failed delivery must not be marked as confirmed');
+  assert.equal(failedReceipt.pending.includes('10001:group:3:100'), true,
+    'failed delivery must retain durable reconciliation evidence');
+  await failedRuntime.stop();
+  const recoveryClient = new FakeClient();
+  recoveryClient.connect = async () => { recoveryClient.emit('open'); };
+  const recoveryRuntime = createQqRuntime({
+    config: { snowluma: { wsUrl: 'ws://127.0.0.1:6799' } },
+    clientFactory: () => recoveryClient,
+    dedupFile: failedFile,
+    onGroupMessage: () => { deliveryAttempts += 1; },
+    log: () => {}
+  });
+  assert.equal((await recoveryRuntime.connect()).connected, true);
+  assert.deepEqual(recoveryRuntime.unresolvedInbound(), ['10001:group:3:100'],
+    'restart must expose the unresolved message for Owner reconciliation');
+  await recoveryClient.groupHandlers[0]({ ...packet, message_id: 100 });
+  assert.equal(deliveryAttempts, 1, 'restart must not repeat an uncertain downstream side effect');
+  await recoveryRuntime.stop();
   await first.fixtureClient.groupHandlers[0]({ ...packet, message_id: undefined });
   assert.deepEqual(processed, [99], 'missing external identity must not trigger a reply');
   first.fixtureClient.emit('close', { code: 1006 });
