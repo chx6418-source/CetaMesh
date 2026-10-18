@@ -94,6 +94,8 @@
 
 ## Active Work (Owner confirmation pending)
 
+- M4.4 最终验收记录：产品提交 `bb6343483d04c65cd88104c9e9c76d23df656afb`，Build 1081；**M4_CODE_COMPLETE / M4_E2E_PENDING / RELEASE_BLOCKED**。最终 npm 112 PASS / 0 FAIL / 7 未运行（含两项默认 Cargo opt-in，已另行运行通过）；Rust 198 PASS / 0 FAIL；Release 9 PASS / 0 FAIL；打包 SEA Connector 集成 1 PASS。旧社交数据切换须 M5 库存/Dry Run 与 Owner 批准，本轮未迁移。详见 `WHALEBRIDGE_DECOUPLING_M4_4_REPORT.md`，停止等待 Owner 验收。
+
 - **WhaleBridge M4.4**：`codex/whalebridge-decoupling-m4`，工作树 `D:\GIT- CetaMesh\audit-critical-repair`，基线 `30ab2d32c37c2381d75ab8d4435949deaee7fd50`，Build 1081。Core Channel Service 管理可选 QQ/Bionic 子进程、持久入站投递/独立消费者确认，以及统一 Broker 外发授权。正式 SEA 的 `--qq-connector` / `--bionic-runtime` 不构建 Core 或 Owner IPC。旧社交数据存在时阻止自动切换写入者，等待 M5 库存/Dry Run 和 Owner 批准。最终测试、源码提交与安装包证据见 `WHALEBRIDGE_DECOUPLING_M4_4_REPORT.md`。M2/M3 仍 PARTIAL；发布仍 RELEASE_BLOCKED；真实 QQ E2E 未验收。未 push、合并或执行用户数据迁移。
 
 - CetaMesh Desktop UX v2 production closure — Owner-selected **01 Harbor**; work remains isolated on branch `feature/desktop-ui-v2-production`, worktree `C:\Users\Administrator\.codex\worktrees\desktop-ui-v2-production\GIT-QQ-BRIDGE`, base `2b2e0d98cea97b979290417d9fc3fe4623cd780c`. Task 1 history paging is commit `75f549f1ee90943362de27e93c49fe1f83cdbb12`; Task 2 Chat virtualization is commit `d1b114834b8f88ace439b1f4aff0e0353bcdc56e`. The production Chat timeline uses `VirtualList`, stable message IDs, paged older-history loading, scroll-anchor restoration, bottom-follow behavior and a new-message indicator. The 100/200/500 React virtual-window fixtures pass; each initial viewport mounts 10 rows including its streaming row, while long-content measurement updates are exercised without mounting full history.

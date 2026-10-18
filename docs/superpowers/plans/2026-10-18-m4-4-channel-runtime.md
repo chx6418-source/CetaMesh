@@ -16,7 +16,7 @@ No real user data migration, configuration overwrite, new Core/Task/Memory/Broke
 - [x] Add Connector protocol and lifecycle tests before implementation. Use inherited stdio with bounded frames, command whitelist, single child, actual health, orderly stop and EOF cleanup. Add SEA mode and test it without system Node or repository resources.
 - [x] Bind all QQ media actions to a Core Capability entry. Retain final Runtime policy, account identity and send ledger checks. Verify unauthorized/approval/allowlist/lease failures before gateway IO.
 - [x] Transfer Social execution to a Bionic lifecycle using a Channel facade and existing policy; retain one social writer and legacy data formats. If actual ownership requires migration, implement the safe gate and document the exact boundary.
-- [ ] Run npm test, Core/UI builds, desktop check/test/build, release packaging and RC verification. Increment Build, commit source before packaging, then commit evidence report.
+- [x] Run npm test, Core/UI builds, desktop check/test/build, release packaging and RC verification. Increment Build, commit source before packaging, then commit evidence report. Final npm: 112 PASS / 0 FAIL / 7 environment skips; Rust: 198 PASS; Release: 9 PASS; packaged SEA Channel: 1 PASS. Build 1081 sourceCommit bb6343483d04c65cd88104c9e9c76d23df656afb. Real QQ E2E remains pending.
 
 ## Review focus
 
