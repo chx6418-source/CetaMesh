@@ -114,15 +114,15 @@ try {
 
   // ── 6. 更换 Agent Provider ─────────────────────────────────────────────
   clock += 1000;
-  const switched = runtime.attachAgent({ id: task.id, expectedRev: resumed.task.rev, provider: 'codex', sessionId: 'sess-B', note: '换 Provider 继续' });
+  const switched = runtime.attachAgent({ id: task.id, expectedRev: resumed.task.rev, provider: 'cetamesh', sessionId: 'sess-B', note: 'DSH 切换到 Managed Agent' });
   equal('更换 Provider 后 task id 不变', switched.task.id, task.id);
-  equal('更换 Provider 后 currentAgent 更新', switched.task.currentAgent, { provider: 'codex', sessionId: 'sess-B' });
+  equal('更换 Provider 后 currentAgent 更新', switched.task.currentAgent, { provider: 'cetamesh', sessionId: 'sess-B' });
   equal('Agent History 追加为 2 条', switched.task.agentHistory.length, 2);
   equal('Agent History 保留原 Provider', switched.task.agentHistory[0].provider, 'dsh');
   check('上一个 Session 被标记 detached', switched.task.agentHistory[0].detachedAt > 0);
   equal('Task 总数仍为 1（未新建）', runtime.countAll(), 1);
 
-  const third = runtime.attachAgent({ id: task.id, expectedRev: switched.task.rev, provider: 'claude-code', sessionId: 'sess-C' });
+  const third = runtime.attachAgent({ id: task.id, expectedRev: switched.task.rev, provider: 'codex', sessionId: 'sess-C' });
   equal('第三次 Provider 切换仍不新建 Task', third.task.agentHistory.length, 3);
   equal('切换后任务数不变', runtime.countAll(), 1);
 
@@ -166,7 +166,7 @@ try {
   equal('重启后 Progress 保留', afterRestart.progress.percent, 60);
   equal('重启后 Checkpoint 保留', afterRestart.checkpoint.nextAction, '接入 Tasks UI');
   equal('重启后 Agent History 保留', afterRestart.agentHistory.length, 3);
-  equal('重启后 Agent Provider 序列保留', afterRestart.agentHistory.map((h) => h.provider), ['dsh', 'codex', 'claude-code']);
+  equal('重启后 Agent Provider 序列保留', afterRestart.agentHistory.map((h) => h.provider), ['dsh', 'cetamesh', 'codex']);
   equal('重启后 Workspace 关联保留', afterRestart.workspaceId, 'ws-cetamesh');
   equal('重启后 rev 保留', afterRestart.rev, beforeRestart.rev);
   equal('重启后 Completed Work 保留', afterRestart.completedWork.length, 1);
