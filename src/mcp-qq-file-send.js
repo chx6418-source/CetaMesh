@@ -3,7 +3,8 @@
 // 设计要点：
 // - 单工具 qq_send_file：入参仅两个必填项 —— target（目标接收地址，private:QQ号 / group:群号）
 //   与 filePath（待发送文件绝对路径），可直接嵌入任意 Agent 的工具调用列表。
-// - 原子能力按文件扩展名自动选择：
+// - 原子能力按文件扩展名自动选择；外发经当前 QQ 宿主的数据 IPC，
+//   本 stdio 子进程不再直接持有 OneBot 发送通道：
 //     * 音频（mp3/wav/flac/ogg/m4a/aac/amr/silk/opus/wma）→ OneBot record 段（语音消息）
 //     * 其他文件 → OneBot upload_private_file / upload_group_file（文件消息）
 // - 强制白名单校验：目标必须命中 config.json 的 allow.private / allow.groups（allowAllWhenEmpty
@@ -23,6 +24,7 @@ import { spawnSync } from 'node:child_process';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { mcpToolPolicyDenial } from './integrations/tool-policy.js';
+import { dataCall } from './control/data-ipc.js';
 import { z } from 'zod';
 import { safeFetchAudioBuffer, looksLikeAudioBuffer } from './safe-fetch.js';
 import { PINYIN } from './pinyin-data.js';
@@ -50,30 +52,17 @@ function isAllowed(allowList, denyList, id, allowAllWhenEmpty) {
   return allowAllWhenEmpty;
 }
 
-function getOneBotConfig(cfg) {
-  return {
-    httpUrl: (cfg.snowluma?.httpUrl ?? 'http://127.0.0.1:3000').replace(/\/+$/, ''),
-    token: cfg.snowluma?.accessToken ?? ''
-  };
-}
-
-async function onebot(cfg, action, params) {
-  const { httpUrl, token } = getOneBotConfig(cfg);
-  const res = await fetch(`${httpUrl}/${action}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
-    body: JSON.stringify(params),
-    signal: AbortSignal.timeout(60000)
+async function onebot(_cfg, action, params, toolName = 'qq_send_file') {
+  // The stdio MCP child never owns the QQ account or its OneBot credentials.
+  // Route every send through the active QQ host on the existing data pipe.
+  const token = fs.readFileSync(path.join(APP_PATHS.stateDir, 'agent-token'), 'utf8').trim();
+  if (!token) throw new Error('QQ 发送宿主服务令牌不可用');
+  const response = await dataCall({
+    method: 'POST', path: '/api/send/file-action', body: { action, params, toolName }, token,
+    timeoutMs: 75_000
   });
-  if (!res.ok) {
-    const hint = res.status === 426 ? '（HTTP 426：httpUrl 可能指向了 WebSocket 端口）' : '';
-    throw new Error(`HTTP ${res.status}${hint}`);
-  }
-  const body = await res.json();
-  if (body.status !== 'ok' || body.retcode !== 0) {
-    throw new Error(`OneBot ${action} 失败: retcode=${body.retcode} ${body.wording ?? ''}`);
-  }
-  return body.data;
+  if (!response.ok) throw new Error(response.json?.error || `QQ 发送宿主拒绝执行 (${response.status})`);
+  return response.json?.data;
 }
 
 // ── 本地 TTS 合成（GPT-SoVITS ayane，启动入口 start_api_ayane.bat，韵律自适应）/ 缓存 / 语音发送 ──
@@ -144,7 +133,7 @@ async function sendVoiceRecord(cfg, kind, id, filePath) {
   return onebot(cfg, action, {
     [kind === 'private' ? 'user_id' : 'group_id']: id,
     message: [{ type: 'record', data: { file: filePath.replace(/\\/g, '/') } }]
-  });
+  }, 'qq_send_audio_from_url');
 }
 
 // target 解析 + 白名单校验；失败返回 {error:{statusCode,message}}

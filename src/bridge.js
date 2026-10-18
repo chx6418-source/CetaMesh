@@ -76,7 +76,7 @@ import { createDesktopIpcRuntime } from './app/ipc-runtime.js';
 import { createDshLifecycle } from './providers/dsh/lifecycle.js';
 import { createQqRuntime } from './channel/qq/runtime.js';
 import { createQqTransport } from './channel/qq/transport.js';
-import { isBionicChatEnabled, isQqConnectorEnabled } from './integrations/tool-policy.js';
+import { assertMcpToolEnabled, isBionicChatEnabled, isQqConnectorEnabled } from './integrations/tool-policy.js';
 import { assertQqDataToolEnabled, qqSocialFlagPolicyEnabled, qqToolPolicyEnabled } from './channel/qq/tool-policy.js';
 import { selectDshSessionModel } from './dsh-model-selection.js';
 import { CONTROL_METHODS, ControlServiceError, createControlService } from './control/control-service.js';
@@ -791,7 +791,6 @@ async function main() {
     segments.push({ type: 'image', data: { file: url } });
     const action = kind === 'private' ? 'send_private_msg' : 'send_group_msg';
     const params = kind === 'private' ? { user_id: Number(id), message: segments } : { group_id: Number(id), message: segments };
-    const httpUrl = String(cfg.snowluma?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
     // 与文本发送共用 sendChain，保证“先文字后表情”的真人顺序不被并发工具调用打乱。
     let sendResolve;
     let sendReject;
@@ -803,21 +802,7 @@ async function main() {
       try {
         // 真人发表情前通常会有短暂停顿，避免“文字刚发完表情立刻跟上”的机械感。
         await sleep(randInt(800, 2000));
-        const res = await fetch(`${httpUrl}/${action}`, {
-          method: 'POST',
-          headers: {
-            'content-type': 'application/json',
-            ...(cfg.snowluma?.accessToken ? { authorization: `Bearer ${cfg.snowluma.accessToken}` } : {})
-          },
-          body: JSON.stringify(params),
-          signal: AbortSignal.timeout(15000)
-        });
-        const body = await res.json().catch(() => ({}));
-        if (!res.ok || body.status !== 'ok' || body.retcode !== 0) {
-          const hint = res.status === 426 ? '（HTTP 426：snowluma.httpUrl 可能指向了 WebSocket 端口，请检查 config.json 的 snowluma.httpUrl 是否为 OneBot HTTP API 地址）' : '';
-          throw new Error(`OneBot ${action} 失败: ${body.wording || body.retcode || res.status}${hint}`);
-        }
-        sendResolve(body.data);
+        sendResolve(await postOneBotAction(action, params));
       } catch (error) {
         sendReject(error);
       }
@@ -849,7 +834,7 @@ async function main() {
     const entry = findSticker(synced?.entries ?? stickerEntries, stickerId);
     if (!entry) throw new Error(`找不到表情 ${stickerId}，请先用 qq_list_stickers 获取有效 id`);
     const cleanRemark = String(remark ?? '').trim().slice(0, 50);
-    const response = await bot.request('modify_custom_face', { emoji_id: entry.id, desc: cleanRemark });
+    const response = await enqueueQqAction(() => qqRuntime.requestWrite('modify_custom_face', { emoji_id: entry.id, desc: cleanRemark }));
     if (!response || response.status !== 'ok' || response.retcode !== 0) {
       throw new Error(`modify_custom_face 失败: ${response?.wording || response?.retcode || 'unknown'}`);
     }
@@ -888,7 +873,7 @@ async function main() {
       if (face?.buffer) file = 'base64://' + face.buffer.toString('base64');
     }
     if (!file) throw new Error('无法获取该表情的图片源');
-    const addRes = await bot.request('add_custom_face', { file });
+    const addRes = await enqueueQqAction(() => qqRuntime.requestWrite('add_custom_face', { file }));
     if (!addRes || addRes.status !== 'ok' || addRes.retcode !== 0) {
       throw new Error(`add_custom_face 失败: ${addRes?.wording || addRes?.retcode || 'unknown'}`);
     }
@@ -897,7 +882,7 @@ async function main() {
     const maxRemarkChars = Math.max(1, Number(cfg.socialV2?.sticker?.collect?.maxRemarkChars) || 20);
     const cleanRemark = String(remark ?? '').trim().slice(0, maxRemarkChars);
     if (cleanRemark) {
-      const modRes = await bot.request('modify_custom_face', { emoji_id: emojiId, desc: cleanRemark });
+      const modRes = await enqueueQqAction(() => qqRuntime.requestWrite('modify_custom_face', { emoji_id: emojiId, desc: cleanRemark }));
       if (!modRes || modRes.status !== 'ok' || modRes.retcode !== 0) {
         log(`[sticker] 收藏成功但备注失败 ${emojiId}: ${modRes?.wording || modRes?.retcode || 'unknown'}`);
       }
@@ -3982,10 +3967,10 @@ async function main() {
           if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
           try {
             if (kind === 'group') {
-              await bot.raw('group_poke', { group_id: id, user_id: Number(targetUserId) });
+              await enqueueQqAction(() => qqRuntime.rawWrite('group_poke', { group_id: id, user_id: Number(targetUserId) }));
             } else {
               // 私聊拍一拍：send_poke 自动路由到当前私聊对象
-              await bot.raw('send_poke', { user_id: id });
+              await enqueueQqAction(() => qqRuntime.rawWrite('send_poke', { user_id: id }));
             }
             st.lastActionAt = now;
             st.lastAiReplyAt = now;
@@ -5177,6 +5162,76 @@ async function main() {
           return;
         }
 
+        // File-send MCP is a separate stdio process. It may prepare local
+        // audio, but only this QQ owner can execute its OneBot side effect.
+        if (req.method === 'POST' && url.pathname === '/api/send/file-action') {
+          const body = await readBody();
+          const action = String(body.action ?? '');
+          const toolName = String(body.toolName ?? '');
+          const params = body.params;
+          const kind = action.endsWith('_private_file') || action === 'send_private_msg' ? 'private' :
+            action.endsWith('_group_file') || action === 'send_group_msg' ? 'group' : null;
+          if (!kind || !['upload_private_file', 'upload_group_file', 'send_private_msg', 'send_group_msg'].includes(action) ||
+              !['qq_send_file', 'qq_send_audio_from_url'].includes(toolName) ||
+              (toolName === 'qq_send_audio_from_url' && action.startsWith('upload_')) ||
+              !params || typeof params !== 'object' || Array.isArray(params)) {
+            sendJson({ ok: false, error: 'QQ 文件发送动作不受支持' }, 400);
+            return;
+          }
+          const targetKey = kind === 'private' ? 'user_id' : 'group_id';
+          const id = Number(params[targetKey]);
+          if (!Number.isSafeInteger(id) || id <= 0 || !allowed(kind, id, cfg)) {
+            sendJson({ ok: false, error: 'QQ 文件发送目标不在白名单内' }, 403);
+            return;
+          }
+          let file;
+          if (action.startsWith('upload_')) {
+            if (Object.keys(params).some(key => ![targetKey, 'file', 'name'].includes(key)) ||
+                typeof params.name !== 'string' || !params.name || params.name !== path.basename(params.name)) {
+              sendJson({ ok: false, error: 'QQ 文件发送参数无效' }, 400);
+              return;
+            }
+            file = params.file;
+          } else {
+            if (Object.keys(params).some(key => ![targetKey, 'message'].includes(key)) ||
+                !Array.isArray(params.message) || params.message.length !== 1 ||
+                params.message[0]?.type !== 'record') {
+              sendJson({ ok: false, error: 'QQ 语音发送参数无效' }, 400);
+              return;
+            }
+            file = params.message[0]?.data?.file;
+          }
+          if (typeof file !== 'string' || !path.isAbsolute(file)) {
+            sendJson({ ok: false, error: 'QQ 文件路径必须是绝对路径' }, 400);
+            return;
+          }
+          try {
+            assertMcpToolEnabled('qq-file-send', toolName, { stateDir: STATE_DIR });
+            if (toolName === 'qq_send_file' && cfg.socialV2?.tools?.fileSend === false) throw new Error('QQ 文件发送工具已禁用');
+            if (toolName === 'qq_send_audio_from_url' && cfg.socialV2?.tools?.audioSearch === false) throw new Error('QQ 音频发送工具已禁用');
+            const realFile = fs.realpathSync(file);
+            const stat = fs.statSync(realFile);
+            const maxMb = Number(cfg.fileSend?.maxSizeMb) > 0 ? Number(cfg.fileSend.maxSizeMb) : 25;
+            if (!stat.isFile() || stat.size > maxMb * 1024 * 1024) throw new Error('QQ 文件无效或超过大小上限');
+            const configuredDirs = Array.isArray(cfg.fileSend?.localDirs) ? cfg.fileSend.localDirs.filter(Boolean) : [];
+            const permittedDirs = configuredDirs.length ? [...configuredDirs, APP_PATHS.fileSendCacheDir] : [];
+            if (permittedDirs.length && !permittedDirs.some(directory => {
+              let realDir;
+              try { realDir = fs.realpathSync(directory); } catch { return false; }
+              const normalizedFile = process.platform === 'win32' ? realFile.toLowerCase() : realFile;
+              const normalizedDir = process.platform === 'win32' ? realDir.toLowerCase() : realDir;
+              return normalizedFile.startsWith(normalizedDir + path.sep);
+            })) throw new Error('QQ 文件不在允许的本地读取目录内');
+            const safeParams = action.startsWith('upload_')
+              ? { [targetKey]: id, file: realFile.replace(/\\/g, '/'), name: params.name }
+              : { [targetKey]: id, message: [{ type: 'record', data: { file: realFile.replace(/\\/g, '/') } }] };
+            sendJson({ ok: true, data: await enqueueQqAction(() => postOneBotAction(action, safeParams)) });
+          } catch (error) {
+            sendJson({ ok: false, error: error?.message ?? String(error) }, 403);
+          }
+          return;
+        }
+
         // ── 统一发送端点（MCP 旧发送工具也走这里） ───────────────────────────
         if (req.method === 'POST' && (url.pathname === '/api/send/group' || url.pathname === '/api/send/private' || url.pathname === '/api/send/reply')) {
           const body = await readBody();
@@ -5422,6 +5477,11 @@ async function main() {
 
   // QQ 发送队列（顺序发送 + 间隔，避免触发频率限制）
   let sendChain = Promise.resolve();
+  function enqueueQqAction(action) {
+    const result = sendChain.catch(error => { void error; /* A prior send failure must not hold the queue. */ }).then(action);
+    sendChain = result.catch(error => { void error; /* The caller receives the error; later sends may proceed. */ });
+    return result;
+  }
   function redactKnownTokensOnly(text) {
     let s = String(text ?? '');
     for (const token of KNOWN_AGENT_TOKENS) {
@@ -5597,6 +5657,13 @@ async function main() {
   }
 
 
+  async function postOneBotAction(action, params) {
+    if (!isQqConnectorEnabled({ stateDir: STATE_DIR })) {
+      throw Object.assign(new Error('QQ Connector 已禁用'), { code: 'QQ_DISABLED' });
+    }
+    return qqRuntime.sendOneBot(action, params);
+  }
+
   async function onebotSend(kind, id, message, replyToMessageId, atUserId = null) {
     const segments = [];
     if (replyToMessageId !== undefined && replyToMessageId !== null && String(replyToMessageId).trim() !== '') {
@@ -5619,22 +5686,7 @@ async function main() {
     segments.push({ type: 'text', data: { text: escapeCqText(rawMessage) } });
     const action = kind === 'private' ? 'send_private_msg' : 'send_group_msg';
     const params = kind === 'private' ? { user_id: Number(id), message: segments } : { group_id: Number(id), message: segments };
-    const httpUrl = String(cfg.snowluma?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
-    const res = await fetch(`${httpUrl}/${action}`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        ...(cfg.snowluma?.accessToken ? { authorization: `Bearer ${cfg.snowluma.accessToken}` } : {})
-      },
-      body: JSON.stringify(params),
-      signal: AbortSignal.timeout(15000)
-    });
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok || body.status !== 'ok' || body.retcode !== 0) {
-      const hint = res.status === 426 ? '（HTTP 426：snowluma.httpUrl 可能指向了 WebSocket 端口，请检查 config.json 的 snowluma.httpUrl 是否为 OneBot HTTP API 地址）' : '';
-      throw new Error(`OneBot ${action} 失败: ${body.wording || body.retcode || res.status}${hint}`);
-    }
-    return body.data;
+    return postOneBotAction(action, params);
   }
 
   // ── 图片/表情字节解析（供一代自动内联与二代按需工具） ────────────────────
@@ -6460,13 +6512,13 @@ async function main() {
 
     let gatewayResult;
     try {
-      gatewayResult = await withTimeout(bot.raw('click_inline_keyboard_button', {
+      gatewayResult = await enqueueQqAction(() => withTimeout(qqRuntime.rawWrite('click_inline_keyboard_button', {
         group_id: target.groupId,
         bot_appid: target.selection.botAppId,
         msg_seq: target.messageSeq,
         button_id: target.selection.buttonId,
         callback_data: target.selection.callbackData
-      }), SEND_TIMEOUT_MS, 'QQ 卡片按钮点击');
+      }), SEND_TIMEOUT_MS, 'QQ 卡片按钮点击'));
     } catch (error) {
       return cardButtonFailure(502, `卡片按钮点击失败：${error?.message ?? error}`);
     }
@@ -9769,7 +9821,7 @@ async function main() {
     onError: (error) => log('SnowLuma 错误:', error)
   });
   const bot = qqRuntime.client;
-  const qqTransport = createQqTransport({ client: bot, authorize: () => {
+  const qqTransport = createQqTransport({ client: qqRuntime, authorize: () => {
     if (!isQqConnectorEnabled({ stateDir: STATE_DIR })) {
       throw Object.assign(new Error('QQ Connector 已禁用'), { code: 'QQ_DISABLED' });
     }

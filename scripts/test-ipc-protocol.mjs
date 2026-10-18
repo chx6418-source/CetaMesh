@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { PassThrough } from 'node:stream';
+import { executeDataCall } from '../src/control/data-ipc.js';
 import {
   startIpcProtocol,
   IPC_PROTOCOL_VERSION,
@@ -190,4 +191,17 @@ function request(id, method, params) {
   await harness.ipc.done;
 }
 assert.equal(IPC_PROTOCOL_MAX_FRAME_BYTES, 1024 * 1024);
+{
+  const response = await Promise.race([executeDataCall({ method: 'POST', path: '/api/fixture', body: { value: 42 } }, {
+    handleApiRequest: async (req, res) => {
+      await new Promise(resolve => setImmediate(resolve));
+      let body = '';
+      req.on('data', chunk => { body += String(chunk); });
+      await new Promise(resolve => req.on('end', resolve));
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(body);
+    }
+  }), new Promise((_, reject) => setTimeout(() => reject(new Error('async POST body was lost')), 300))]);
+  assert.equal(JSON.parse(response.body).value, 42, 'data IPC buffers POST body until an async handler reads it');
+}
 console.log('ipc-protocol tests: PASS');

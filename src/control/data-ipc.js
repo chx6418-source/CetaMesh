@@ -19,6 +19,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { EventEmitter } from 'node:events';
+import { Readable } from 'node:stream';
 import { APP_PATHS } from '../app-paths.js';
 import { startIpcProtocol } from './ipc-protocol.js';
 
@@ -109,7 +110,10 @@ export async function executeDataCall(params, { handleApiRequest, signal } = {})
     headers['x-agent-token'] = params.sessionToken;
   }
 
-  const req = new EventEmitter();
+  // A Readable keeps request bytes buffered even when a route attaches its
+  // body listeners after an await. autoDestroy=false reserves 'close' for an
+  // actual IPC cancellation rather than an ordinary end-of-body event.
+  const req = new Readable({ read() {}, autoDestroy: false });
   req.method = httpMethod;
   req.url = url;
   req.headers = headers;
@@ -151,14 +155,18 @@ export async function executeDataCall(params, { handleApiRequest, signal } = {})
     const bodyBuffer = body === undefined || body === null
       ? Buffer.alloc(0)
       : Buffer.from(JSON.stringify(body), 'utf8');
+    // Start the handler before emitting the virtual request body. Otherwise
+    // its readBody() listeners miss both data and end and POST hangs forever.
+    let handling;
+    try { handling = handleApiRequest(req, res); }
+    catch (error) { settle(reject, error); return; }
     queueMicrotask(() => {
       if (settled) return;
-      if (bodyBuffer.length) req.emit('data', bodyBuffer);
-      req.emit('end');
+      if (bodyBuffer.length) req.push(bodyBuffer);
+      req.push(null);
     });
 
-    Promise.resolve()
-      .then(() => handleApiRequest(req, res))
+    Promise.resolve(handling)
       .then(() => settle(resolve, finishCapture(capture)))
       .catch((error) => settle(reject, error));
   });

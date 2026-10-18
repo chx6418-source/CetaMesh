@@ -290,7 +290,7 @@ check('config 工具开关默认含 getCardMsg', /getCardMsg:\s*true/.test(confi
 check('config 卡片点击工具严格默认关闭', /clickCardButton:\s*false/.test(configSources) && /clickCardButton\s*===\s*true/.test(bridgeSrc));
 check('bridge.js toolFlags 含 getCardMsg', /'getCardMsg'/.test(bridgeSrc));
 check('bridge.js toolMap 映射 qq_get_card_msg', bridgeSrc.includes("getCardMsg: 'qq_get_card_msg'"));
-check('bridge.js 提供卡片按钮点击端点与 OneBot 动作', bridgeSrc.includes("url.pathname === '/api/socialV2/card-button-click'") && bridgeSrc.includes("bot.raw('click_inline_keyboard_button'"));
+check('bridge.js 提供卡片按钮点击端点并经 QQ Runtime 执行动作', bridgeSrc.includes("url.pathname === '/api/socialV2/card-button-click'") && bridgeSrc.includes("qqRuntime.rawWrite('click_inline_keyboard_button'"));
 check('bridge.js toolMap 映射 qq_click_card_button', bridgeSrc.includes("clickCardButton: 'qq_click_card_button"));
 check('bridge.js 卡片点击逐次确认与防连点', /body\.confirm\s*!==\s*true/.test(bridgeSrc) && /CARD_BUTTON_CLICK_COOLDOWN_MS/.test(bridgeSrc));
 check('bridge.js 风险按钮进入隔离审批队列', /pending_approval/.test(bridgeSrc) && /cardButtonApprovals/.test(bridgeSrc) && /CARD_BUTTON_APPROVAL_TTL_MS/.test(bridgeSrc));

@@ -253,6 +253,15 @@ try {
   try {
     const status = await waitForDataIpc(tempRoot);
     assert.equal(status.ok, true, 'Legacy-exclusive should retain its compatibility data IPC');
+    const legacyToken = fs.readFileSync(path.join(tempRoot, 'state', 'agent-token'), 'utf8').trim();
+    const fileAction = await dataCall({
+      method: 'POST', path: '/api/send/file-action', token: legacyToken,
+      body: { action: 'upload_group_file', toolName: 'qq_send_file', params: {
+        group_id: 42, file: path.join(tempRoot, 'absent.txt'), name: 'absent.txt'
+      } }, pipeName: resolveDataPipeName({ dataRoot: tempRoot })
+    });
+    assert.equal(fileAction.status, 403, 'Legacy QQ owner rejects an unapproved target before any OneBot send');
+    assert.match(fileAction.json.error, /白名单/);
     assert.ok(fs.existsSync(path.join(tempRoot, 'state', 'bridge.lock')), 'Legacy holds the sole QQ consumer lock');
     const coreConflict = spawnSync(process.execPath, [ENTRY, '--worker'], {
       cwd: ROOT, encoding: 'utf8', timeout: 5000,

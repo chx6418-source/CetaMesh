@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import http from 'node:http';
 import { createQqRuntime } from '../src/channel/qq/runtime.js';
 import { createQqTransport } from '../src/channel/qq/transport.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -61,9 +62,72 @@ assert.equal(secondConnect.pending, true, 'concurrent connect is single-flight')
 assert.equal(client.connectCalls, 1);
 client.emit('open');
 await Promise.resolve();
-assert.equal(runtime.status().state, 'ready');
+assert.equal(runtime.status().state, 'unknown', 'socket open alone cannot establish verified account readiness');
 client.connection();
 assert.equal((await firstConnect).connected, true);
+assert.equal(runtime.status().state, 'ready');
+let releaseFirstSend;
+const executedSends = [];
+const queuedClient = new FakeClient();
+queuedClient.connect = async () => { queuedClient.emit('open'); };
+const sendingRuntime = createQqRuntime({
+  config: { snowluma: { wsUrl: 'ws://127.0.0.1:6709' } },
+  clientFactory: () => queuedClient,
+  postAction: async action => {
+    executedSends.push(action);
+    if (action === 'send_group_msg') await new Promise(resolve => { releaseFirstSend = resolve; });
+    return { message_id: executedSends.length };
+  }
+});
+await sendingRuntime.connect();
+const sendOne = sendingRuntime.sendOneBot('send_group_msg', { group_id: 42, message: [] });
+await Promise.resolve();
+const sendTwo = sendingRuntime.sendOneBot('upload_group_file', { group_id: 42, file: 'fixture' });
+await Promise.resolve();
+assert.deepEqual(executedSends, ['send_group_msg'], 'QQ owner must serialize distinct send actions');
+releaseFirstSend();
+await Promise.all([sendOne, sendTwo]);
+assert.deepEqual(executedSends, ['send_group_msg', 'upload_group_file']);
+await assert.rejects(sendingRuntime.sendOneBot('delete_msg', { message_id: 1 }), { code: 'QQ_ACTION_UNSUPPORTED' });
+assert.deepEqual(executedSends, ['send_group_msg', 'upload_group_file'], 'unsupported action never reaches OneBot');
+await sendingRuntime.stop();
+let postedAction = null;
+let httpAccountId = 10001;
+let httpSendCount = 0;
+const writeGateway = http.createServer(async (req, res) => {
+  let body = '';
+  for await (const chunk of req) body += String(chunk);
+  if (req.url === '/get_login_info') {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ status: 'ok', retcode: 0, data: { user_id: httpAccountId } }));
+    return;
+  }
+  httpSendCount += 1;
+  postedAction = { path: req.url, authorization: req.headers.authorization, body: JSON.parse(body) };
+  res.writeHead(200, { 'content-type': 'application/json' });
+  res.end(JSON.stringify({ status: 'ok', retcode: 0, data: { message_id: 73 } }));
+});
+await new Promise(resolve => writeGateway.listen(0, '127.0.0.1', resolve));
+try {
+  const httpClient = new FakeClient();
+  httpClient.connect = async () => { httpClient.emit('open'); };
+  const httpRuntime = createQqRuntime({
+    config: { snowluma: { wsUrl: 'ws://127.0.0.1:6710',
+      httpUrl: `http://127.0.0.1:${writeGateway.address().port}`, accessToken: 'fixture-token' } },
+    clientFactory: () => httpClient
+  });
+  await httpRuntime.connect();
+  assert.deepEqual(await httpRuntime.sendOneBot('send_group_msg', { group_id: 42, message: [] }), { message_id: 73 });
+  assert.deepEqual(postedAction, { path: '/send_group_msg', authorization: 'Bearer fixture-token',
+    body: { group_id: 42, message: [] } });
+  httpAccountId = 10002;
+  await assert.rejects(httpRuntime.sendOneBot('send_group_msg', { group_id: 42, message: [] }),
+    { code: 'QQ_ACCOUNT_CHANGED' });
+  assert.equal(httpSendCount, 1, 'HTTP gateway account mismatch must be caught before the send action');
+  await httpRuntime.stop();
+} finally {
+  await new Promise(resolve => writeGateway.close(resolve));
+}
 await client.privateHandlers[0]({ user_id: 4 });
 await client.groupHandlers[0]({ group_id: 5 });
 await client.noticeHandlers[0].handler({ user_id: 8 });
@@ -112,6 +176,12 @@ try {
   await first.fixtureClient.groupHandlers[0]({ ...packet, message_id: undefined });
   assert.deepEqual(processed, [99], 'missing external identity must not trigger a reply');
   first.fixtureClient.emit('close', { code: 1006 });
+  first.fixtureClient.accountId = 10002;
+  const changed = await first.runtime.reconnect();
+  assert.equal(changed.ok, false, 'reconnect must not silently switch the QQ account');
+  assert.equal(changed.code, 'QQ_ACCOUNT_CHANGED');
+  assert.equal(first.runtime.status().ready, false);
+  first.fixtureClient.accountId = 10001;
   assert.equal((await first.runtime.reconnect()).connected, true);
   await first.fixtureClient.groupHandlers[0](packet);
   assert.deepEqual(processed, [99], 'reconnect must not replay a handled message');
@@ -258,4 +328,42 @@ try {
   }
   await workerIntegration.close();
   fs.rmSync(workerRoot, { recursive: true, force: true });
+}
+
+// A separate MCP process must never bypass the QQ owner by posting directly
+// to OneBot, even when the gateway would accept its token.
+const sendRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-qq-send-owner-'));
+let directSends = 0;
+const onebot = http.createServer((_req, res) => {
+  directSends += 1;
+  res.writeHead(200, { 'content-type': 'application/json' });
+  res.end(JSON.stringify({ status: 'ok', retcode: 0, data: { file_id: 'fixture' } }));
+});
+await new Promise(resolve => onebot.listen(0, '127.0.0.1', resolve));
+const sendIntegration = createIntegrationService({ stateDir: path.join(sendRoot, 'state') });
+const fileTransport = new StdioClientTransport({ command: process.execPath,
+  args: [path.join(repoRoot, 'src', 'mcp-qq-file-send.js')],
+  env: { ...process.env, WHALEBRIDGE_DATA_DIR: sendRoot }, stderr: 'pipe' });
+const fileClient = new Client({ name: 'qq-send-owner-fixture', version: '1.0.0' });
+try {
+  writeJsonAtomic(path.join(sendRoot, 'config.json'), {
+    snowluma: { httpUrl: `http://127.0.0.1:${onebot.address().port}`, accessToken: 'fixture' },
+    allow: { groups: ['42'], private: [] }, deny: { groups: [], private: [] },
+    allowAllWhenEmpty: false, socialV2: { tools: { fileSend: true } }
+  });
+  const fixtureFile = path.join(sendRoot, 'fixture.txt');
+  fs.writeFileSync(fixtureFile, 'fixture', 'utf8');
+  await sendIntegration.execute({ method: 'plugins.enable', params: { id: 'cetamesh-snowluma' } });
+  await sendIntegration.execute({ method: 'plugins.tool.toggle', params: {
+    pluginId: 'cetamesh-bionic-chat', toolId: 'mcp__qq-file-send__qq_send_file', enabled: true
+  } });
+  await fileClient.connect(fileTransport);
+  const result = await fileClient.callTool({ name: 'qq_send_file', arguments: { target: 'group:42', filePath: fixtureFile } });
+  assert.equal(result.isError, true, 'without the QQ owner an MCP send must fail closed');
+  assert.equal(directSends, 0, 'MCP must not call OneBot HTTP directly');
+} finally {
+  await fileClient.close();
+  await sendIntegration.close();
+  await new Promise(resolve => onebot.close(resolve));
+  fs.rmSync(sendRoot, { recursive: true, force: true });
 }
