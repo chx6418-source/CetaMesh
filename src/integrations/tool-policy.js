@@ -22,12 +22,33 @@ export function assertIntegrationToolEnabled(toolId, { stateDir = APP_PATHS.stat
 export function assertMcpToolEnabled(serverId, toolName, options = {}) {
   const server = MCP_SERVER_CATALOG.find(item => item.id === serverId);
   if (!server) throw integrationError('UNKNOWN_MCP_SERVER', '未知 MCP Server。');
+  if (['snowluma', 'qq-file-send'].includes(serverId) && !isQqConnectorEnabled(options)) {
+    throw integrationError('QQ_DISABLED', 'QQ Connector 已禁用。');
+  }
   return assertIntegrationToolEnabled(server.namespace + toolName, options);
 }
 
 export function isIntegrationToolEnabled(toolId, options = {}) {
   try { assertIntegrationToolEnabled(toolId, options); return true; }
   catch (error) { void error; return false; /* Every policy lookup failure denies execution. */ }
+}
+
+function isPluginEnabled(id, { stateDir = APP_PATHS.stateDir } = {}) {
+  try {
+    const registry = createIntegrationRegistry({ store: createIntegrationStore({ stateDir }) });
+    return registry.pluginEnabled(id);
+  } catch (error) {
+    void error; // A damaged plugin policy fails closed for Bionic behavior.
+    return false;
+  }
+}
+
+export function isBionicChatEnabled(options = {}) {
+  return isPluginEnabled('cetamesh-bionic-chat', options);
+}
+
+export function isQqConnectorEnabled(options = {}) {
+  return isPluginEnabled('cetamesh-snowluma', options);
 }
 
 /** Convert a denied execution gate into the MCP protocol's structured tool error. */

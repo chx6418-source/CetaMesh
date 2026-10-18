@@ -7,6 +7,7 @@ import { createIntegrationService } from '../src/integrations/service.js';
 import { OWNER_ACTOR } from '../src/capability/types.js';
 import { buildToolCatalog, LEGACY_RETIRED_TOOLS } from '../src/integrations/catalog.js';
 import { createDesktopUiService } from '../src/desktop/ui-service.js';
+import { isBionicChatEnabled, isQqConnectorEnabled } from '../src/integrations/tool-policy.js';
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-bionic-chat-'));
 let step = 0;
@@ -27,6 +28,18 @@ function makeTransportFactory() {
 try {
   const service = createIntegrationService({ stateDir: tmp, transportFactory: makeTransportFactory() });
   const PACK = 'cetamesh-bionic-chat';
+  assert.equal(isBionicChatEnabled({ stateDir: tmp }), true);
+  await service.execute({ method: 'plugins.disable', params: { id: PACK } });
+  assert.equal(isBionicChatEnabled({ stateDir: tmp }), false, 'disabled Bionic must not receive QQ events');
+  await service.execute({ method: 'plugins.enable', params: { id: PACK } });
+  assert.equal(isQqConnectorEnabled({ stateDir: tmp }), true);
+  await service.execute({ method: 'plugins.disable', params: { id: 'cetamesh-snowluma' } });
+  assert.equal(isQqConnectorEnabled({ stateDir: tmp }), false, 'QQ disabled while Bionic remains configured');
+  assert.equal(isBionicChatEnabled({ stateDir: tmp }), true, 'Bionic toggle remains independent of QQ transport');
+  await assert.rejects(() => service.execute({ method: 'tools.invoke', params: {
+    id: 'mcp__snowluma__qq_send_group_message', input: { group_id: 1, text: 'blocked' }
+  } }), { code: 'QQ_DISABLED' });
+  await service.execute({ method: 'plugins.enable', params: { id: 'cetamesh-snowluma' } });
   const sourceTools = buildToolCatalog();
   assert.equal(sourceTools.filter(tool => tool.restore === 'restored').length, 46);
   assert.equal(sourceTools.filter(tool => tool.restore === 'partial').length, 5);

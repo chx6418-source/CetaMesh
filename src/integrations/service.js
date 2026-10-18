@@ -131,8 +131,17 @@ export function createIntegrationService({
   }
 
   // ── 工具执行适配（真正"恢复"的落点） ────────────────────────────────────────
+  function assertQqToolConnectorEnabled(toolId) {
+    const tool = resolvedRegistry.toolById.get(String(toolId));
+    if (['snowluma', 'qq-file-send'].includes(tool?.serverId)
+      && !resolvedRegistry.pluginEnabled('cetamesh-snowluma')) {
+      throw integrationError('QQ_DISABLED', 'QQ Connector 已禁用。');
+    }
+  }
+
   async function runTool(toolId, input) {
     // 在能力执行点**重新**校验一次：审批期间开关可能已变化（TOCTOU）。
+    assertQqToolConnectorEnabled(toolId);
     const { tool } = resolvedRegistry.invokeGuard(toolId);
     if (tool.source === 'mcp') return runtime.call(tool.serverId, tool.name, input ?? {});
     if (tool.source === 'agent') {
@@ -272,6 +281,7 @@ export function createIntegrationService({
 
   async function invokeTool(params) {
     // Reject disabled/unavailable sources before creating an approval; runTool rechecks after approval.
+    assertQqToolConnectorEnabled(params.id);
     const { tool } = resolvedRegistry.invokeGuard(params.id);
     const result = await broker.execute({
       capability: tool.capability,

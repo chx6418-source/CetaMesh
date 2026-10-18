@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { APP_PATHS, listRoleNames, resolveRoleFile } from './app-paths.js';
 import { readRawConfig } from './config/loader.js';
@@ -75,6 +76,7 @@ import { createDesktopIpcRuntime } from './app/ipc-runtime.js';
 import { createDshLifecycle } from './providers/dsh/lifecycle.js';
 import { createQqRuntime } from './channel/qq/runtime.js';
 import { createQqTransport } from './channel/qq/transport.js';
+import { isBionicChatEnabled, isQqConnectorEnabled } from './integrations/tool-policy.js';
 import { assertQqDataToolEnabled, qqSocialFlagPolicyEnabled, qqToolPolicyEnabled } from './channel/qq/tool-policy.js';
 import { selectDshSessionModel } from './dsh-model-selection.js';
 import { CONTROL_METHODS, ControlServiceError, createControlService } from './control/control-service.js';
@@ -5435,6 +5437,7 @@ async function main() {
     for (const part of parts) {
       sendChain = sendChain
         .then(async () => {
+          if (!isQqConnectorEnabled({ stateDir: STATE_DIR })) throw Object.assign(new Error('QQ Connector 已禁用'), { code: 'QQ_DISABLED' });
           if (kind === 'private') await withTimeout(qqTransport.send('private', id, escapeCqText(part)), SEND_TIMEOUT_MS, `QQ发送 ${kind}:${id}`);
           else await withTimeout(qqTransport.send('group', id, escapeCqText(part)), SEND_TIMEOUT_MS, `QQ发送 ${kind}:${id}`);
         })
@@ -8691,6 +8694,11 @@ async function main() {
   // QQ 消息 → DSH prompt
   async function handleIncoming(kind, id, event, cfg) {
     const key = convKey(kind, id);
+    if (!isQqConnectorEnabled({ stateDir: STATE_DIR })) return;
+    if (currentMode === 'social' && !isBionicChatEnabled({ stateDir: STATE_DIR })) {
+      log(`Bionic Chat 已禁用，QQ 传输保持运行但不处理社交消息：${key}`);
+      return;
+    }
     if (currentMode === 'workshop' && kind === 'group') {
       // Never echo proposal ids, status, or artifacts to a shared group. A
       // private route must be separately authorized by the QQ allowlist.
@@ -9739,6 +9747,8 @@ async function main() {
   }
   const qqRuntime = createQqRuntime({
     config: cfg,
+    ownershipDir: path.join(os.tmpdir(), 'cetamesh-qq-ownership'),
+    dedupFile: path.join(STATE_DIR, 'qq-message-receipts.json'),
     log,
     onPrivateMessage: async (event) => {
       if (event.user_id === event.self_id) return;
@@ -9759,14 +9769,22 @@ async function main() {
     onError: (error) => log('SnowLuma 错误:', error)
   });
   const bot = qqRuntime.client;
-  const qqTransport = createQqTransport({ client: bot });
-  connectSnowLuma = () => qqRuntime.connect();
+  const qqTransport = createQqTransport({ client: bot, authorize: () => {
+    if (!isQqConnectorEnabled({ stateDir: STATE_DIR })) {
+      throw Object.assign(new Error('QQ Connector 已禁用'), { code: 'QQ_DISABLED' });
+    }
+    if (!qqRuntime.status().ready) {
+      throw Object.assign(new Error('QQ Connector 未连接'), { code: 'QQ_UNAVAILABLE' });
+    }
+  } });
+  connectSnowLuma = () => isQqConnectorEnabled({ stateDir: STATE_DIR })
+    ? qqRuntime.connect() : Promise.resolve({ ok: false, code: 'QQ_DISABLED' });
   resolveConnectSnowLumaReady();
 
   startProductSurfaces();
   // 启动探测在后台进行：QQ WebSocket 只有 SnowLuma ready 后才会连接，
   // 但控制台、DSH 探活与日志终端不会被最多 35 秒的服务启动等待卡住。
-  localServices.startSnowLuma({ waitMs: 35000 }).then(async (snowStartup) => {
+  if (isQqConnectorEnabled({ stateDir: STATE_DIR })) localServices.startSnowLuma({ waitMs: 35000 }).then(async (snowStartup) => {
     if (snowStartup.ready) {
       await connectSnowLuma();
     } else {

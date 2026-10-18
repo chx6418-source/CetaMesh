@@ -11,6 +11,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { createIntegrationService } from '../src/integrations/service.js';
 import { assertQqDataToolEnabled, qqSocialFlagPolicyEnabled, qqToolPolicyEnabled } from '../src/channel/qq/tool-policy.js';
+import { assertMcpToolEnabled } from '../src/integrations/tool-policy.js';
 import { writeJsonAtomic } from '../src/storage/json-file.js';
 import { dataCall, resolveDataPipeName } from '../src/control/data-ipc.js';
 import { terminateSuiteProcessTree } from '../src/testing/suite-process.js';
@@ -34,6 +35,8 @@ class FakeClient extends EventEmitter {
   }
   sendPrivateMessage(id, payload) { this.sent.push(['private', id, payload]); }
   sendGroupMessage(id, payload) { this.sent.push(['group', id, payload]); }
+  async getLoginInfo() { return { user_id: this.accountId ?? 10001, nickname: 'fixture' }; }
+  close() { this.emit('close', { code: 1000 }); }
 }
 
 const client = new FakeClient();
@@ -71,6 +74,72 @@ client.emit('close', { code: 1006 });
 assert.equal(runtime.status().state, 'unavailable');
 assert.equal(notices.at(-1), 'close');
 
+// M4: an account must have one consumer and repeated gateway events must not
+// produce a second side effect, including after a reconnect or process restart.
+const ownershipRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-qq-ownership-'));
+try {
+  const processed = [];
+  const makeRuntime = (accountId, wsUrl = 'ws://127.0.0.1:6700') => {
+    const fixtureClient = new FakeClient();
+    fixtureClient.accountId = accountId;
+    fixtureClient.connect = async () => { fixtureClient.connectCalls += 1; fixtureClient.emit('open'); };
+    return {
+      fixtureClient,
+      runtime: createQqRuntime({
+        config: { snowluma: { wsUrl } },
+        clientFactory: () => fixtureClient,
+        ownershipDir: ownershipRoot,
+        dedupFile: path.join(ownershipRoot, `dedup-${accountId}.json`),
+        onGroupMessage: event => processed.push(event.message_id)
+      })
+    };
+  };
+  const first = makeRuntime(10001);
+  assert.equal((await first.runtime.connect()).connected, true);
+  const competing = makeRuntime(10001);
+  const blocked = await competing.runtime.connect();
+  assert.equal(blocked.ok, false, 'second QQ consumer must be refused');
+  assert.equal(blocked.code, 'QQ_ACCOUNT_BUSY');
+  assert.equal(competing.fixtureClient.connectCalls, 0, 'do not even open a second socket to the same gateway');
+  const alternateGateway = makeRuntime(10001, 'ws://127.0.0.1:6701');
+  const accountBlocked = await alternateGateway.runtime.connect();
+  assert.equal(accountBlocked.code, 'QQ_ACCOUNT_BUSY', 'same QQ account on another gateway is still exclusive');
+  await alternateGateway.runtime.stop();
+  const packet = { self_id: 10001, group_id: 3, user_id: 7, message_id: 99 };
+  await first.fixtureClient.groupHandlers[0](packet);
+  await first.fixtureClient.groupHandlers[0](packet);
+  assert.deepEqual(processed, [99], 'one message ID causes one handler call');
+  await first.fixtureClient.groupHandlers[0]({ ...packet, message_id: undefined });
+  assert.deepEqual(processed, [99], 'missing external identity must not trigger a reply');
+  first.fixtureClient.emit('close', { code: 1006 });
+  assert.equal((await first.runtime.reconnect()).connected, true);
+  await first.fixtureClient.groupHandlers[0](packet);
+  assert.deepEqual(processed, [99], 'reconnect must not replay a handled message');
+  await first.runtime.stop();
+  const restarted = makeRuntime(10001);
+  assert.equal((await restarted.runtime.connect()).connected, true);
+  await restarted.fixtureClient.groupHandlers[0](packet);
+  assert.deepEqual(processed, [99], 'durable receipt prevents a restart duplicate');
+  await restarted.runtime.stop();
+  const corruptFile = path.join(ownershipRoot, 'corrupt-receipts.json');
+  fs.writeFileSync(corruptFile, '{broken', 'utf8');
+  const corruptClient = new FakeClient();
+  corruptClient.connect = async () => { corruptClient.emit('open'); };
+  const corruptRuntime = createQqRuntime({
+    config: { snowluma: { wsUrl: 'ws://127.0.0.1:6702' } },
+    clientFactory: () => corruptClient,
+    ownershipDir: ownershipRoot,
+    dedupFile: corruptFile,
+    onGroupMessage: event => processed.push(event.message_id)
+  });
+  const corruptResult = await corruptRuntime.connect();
+  assert.equal(corruptResult.ok, false, 'damaged receipts must keep QQ unavailable');
+  assert.equal(fs.readFileSync(corruptFile, 'utf8'), '{broken', 'damaged evidence must not be overwritten');
+  await corruptRuntime.stop();
+} finally {
+  fs.rmSync(ownershipRoot, { recursive: true, force: true });
+}
+
 const transport = createQqTransport({
   client,
   textSegment: value => ({ type: 'text', data: { text: value } })
@@ -81,6 +150,9 @@ assert.deepEqual(client.sent, [
   ['private', 42, { type: 'text', data: { text: 'hello' } }],
   ['group', 43, { type: 'text', data: { text: 'hi' } }]
 ]);
+const deniedTransport = createQqTransport({ client, authorize: () => { throw Object.assign(new Error('disabled'), { code: 'QQ_DISABLED' }); } });
+assert.throws(() => deniedTransport.send('group', '43', 'must not send'), { code: 'QQ_DISABLED' });
+assert.equal(client.sent.length, 2, 'transport denial must precede the external send');
 
 const mcpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-qq-policy-mcp-'));
 const policyOptions = { stateDir: path.join(mcpRoot, 'state') };
@@ -91,6 +163,15 @@ const clientTransport = new StdioClientTransport({ command: process.execPath,
 const mcpClient = new Client({ name: 'qq-policy-fixture', version: '1.0.0' });
 try {
   await mcpClient.connect(clientTransport);
+  await integration.execute({ method: 'plugins.tool.toggle', params: {
+    pluginId: 'cetamesh-bionic-chat', toolId: 'mcp__qq-file-send__qq_send_file', enabled: true
+  } });
+  await integration.execute({ method: 'plugins.disable', params: { id: 'cetamesh-snowluma' } });
+  assert.throws(() => assertMcpToolEnabled('qq-file-send', 'qq_send_file', policyOptions), { code: 'QQ_DISABLED' });
+  const disabledQq = await mcpClient.callTool({ name: 'qq_status', arguments: {} });
+  assert.equal(disabledQq.isError, true);
+  assert.match(disabledQq.content[0].text, /QQ_DISABLED/, 'QQ parent switch must deny MCP execution');
+  await integration.execute({ method: 'plugins.enable', params: { id: 'cetamesh-snowluma' } });
   await integration.execute({ method: 'plugins.tool.toggle', params: {
     pluginId: 'cetamesh-bionic-chat', toolId: 'mcp__snowluma__qq_status', enabled: false
   } });
