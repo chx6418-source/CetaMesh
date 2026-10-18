@@ -68,6 +68,9 @@
 | `npm run build:core` | PASS | Windows SEA Core、资源与禁止项审计；独立 QQ Connector 未包含。 |
 | `npm run build:ui` | PASS | 首次在受限执行环境 `spawn EPERM`，允许 esbuild 子进程后重跑通过。 |
 | `npm run desktop:build` | PASS | Windows 桌面壳 release profile。 |
-| `npm run build:release` / RC verification | 构建阶段待填写 | 需要干净提交后运行，sourceCommit 必须与打包源码一致。 |
+| `npm run build:release -- --use-current-build-number` | PASS | 从干净的代码提交 `6edd502a2367fc02a634a761108c72706a0245d7` 打包 Build 1077；发行审计通过。 |
+| `npm test -- --category release` | 8 PASS / 0 FAIL / 0 NOT_RUN_ENVIRONMENT | 正式 RC 安装器、SEA Core/IPC、发行清单与打包保护；**未**验证独立 QQ Connector。 |
 
-修改文件：`src/channel/qq/runtime.js`、`src/bridge.js`、`src/mcp-qq-file-send.js`、`src/control/data-ipc.js`、`scripts/test-qq-runtime.mjs`、`scripts/test-core-entry.mjs`、`scripts/test-ipc-protocol.mjs`、`scripts/test-card.mjs`、`release/version.json` 及本报告。版本 `1.0.0-rc.2`，Build `1077`。构建源码 Commit、最终分支 HEAD、安装包大小/SHA-256、签名状态在发行验证后补录。发行包即使通过，也只能标记 `VERIFIED_RELEASE_INTEGRATION` 的纯 Core/IPC/安装器能力，不能标记独立 QQ Connector 或真实 QQ 的 `VERIFIED_REAL_E2E`。
+修改文件：`src/channel/qq/runtime.js`、`src/bridge.js`、`src/mcp-qq-file-send.js`、`src/control/data-ipc.js`、`scripts/test-qq-runtime.mjs`、`scripts/test-core-entry.mjs`、`scripts/test-ipc-protocol.mjs`、`scripts/test-card.mjs`、`release/version.json` 及本报告。版本 `1.0.0-rc.2`，Build `1077`。代码提交与构建源码 Commit 为 `6edd502a2367fc02a634a761108c72706a0245d7`；本报告发行结果补录将另有文档提交，因此最终分支 HEAD 以该提交后的 `git rev-parse HEAD` 为准。构建前工作树干净，清单 `dirtySourceTree: false`，`sourceCommit` 与代码提交一致。
+
+`VERIFIED_RELEASE_INTEGRATION`：本地 RC 路径通过，安装包 [CetaMesh-Setup-1.0.0-rc.2-build1077-x64.exe](artifacts/rc/1.0.0-rc.2/build-1077/CetaMesh-Setup-1.0.0-rc.2-build1077-x64.exe) 为 **42,999,808 字节**，SHA-256 `3637655767CCB2A669147E825A588FD7960B9C9D7B2CF4BE843D922DFD063AED`，`Get-AuthenticodeSignature` 为 `NotSigned`。Core SEA SHA-256 `3C0FB2F774A011E3440969EC428C19FB8414D040C578D39464ABE00BB2BC337D`。发行包没有独立 QQ Connector 入口，故该状态只覆盖 Core/IPC/安装器；QQ 发送、接收、社交循环和账号切换仍为 `NOT_RUN_ENVIRONMENT` / `PARTIAL`，`VERIFIED_REAL_E2E` 为零。
