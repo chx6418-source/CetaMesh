@@ -28,6 +28,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { createStdioMcpConnection } from '../src/integrations/mcp-runtime.js';
 import { assertNoWebUiHtmlArtifacts } from './no-web-release-policy.mjs';
 import { resolveDataPipeName, dataCall } from '../src/control/data-ipc.js';
+import { writeTextAtomic } from '../src/storage/json-file.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DIST = process.env.WHALEBRIDGE_DIST_DIR
@@ -60,7 +61,9 @@ async function waitForDataIpc(dataRoot, { timeoutMs = 30000 } = {}) {
   while (Date.now() < deadline) {
     try {
       const token = fs.readFileSync(path.join(dataRoot, 'state', 'agent-token'), 'utf8').trim();
+      if (!token) throw new Error('Data IPC credential is not initialized yet');
       const res = await dataCall({ path: '/api/status', token, timeoutMs: 3000, pipeName });
+      if (!res.ok) throw new Error(`Data IPC is not authenticated/ready (status ${res.status})`);
       return { pipeName, token, res };
     } catch (error) {
       lastError = error;
@@ -465,6 +468,24 @@ try {
     dataDir,
     resourceDir: RESOURCES
   });
+  // Only the disposable test's token file is changed. The running worker keeps
+  // its original token; readiness must wait for the reader's credential to settle.
+  const fixtureTokenFile = path.join(dataDir, 'state', 'agent-token');
+  const fixtureToken = fs.readFileSync(fixtureTokenFile, 'utf8');
+  for (const transient of ['', 'fixture-wrong-service-token']) {
+    writeTextAtomic(fixtureTokenFile, transient);
+    const restored = new Promise(resolve => setTimeout(() => { writeTextAtomic(fixtureTokenFile, fixtureToken); resolve(); }, 100));
+    try {
+      const { res } = await waitForDataIpc(dataDir);
+      assert.equal(res.ok, true, `readiness must await authenticated success, not HTTP ${res.status}`);
+    } finally { await restored; }
+  }
+  writeTextAtomic(fixtureTokenFile, 'fixture-persistently-wrong-token');
+  try {
+    await assert.rejects(waitForDataIpc(dataDir, { timeoutMs: 500 }), /not authenticated\/ready/,
+      'persistent authentication failure must still fail readiness within its bound');
+  } finally { writeTextAtomic(fixtureTokenFile, fixtureToken); }
+  step('✅ 数据面就绪等待：空令牌/暂时401不能误作ready，成功后仍须通过原鉴权断言');
   await stopProcess(explicit, 'worker（显式资源目录）');
 
   const auto = await runWorker({ label: 'worker（自动发现 exe 同目录 resources/）', dataDir, resourceDir: null });
