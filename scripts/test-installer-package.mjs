@@ -16,7 +16,9 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'whalebridge-installer-test-'));
 const outDir = path.join(tempRoot, '发布输出');
 const payloadDir = path.join(tempRoot, '应用数据', 'payload');
-const packagerTemp = path.join(tempRoot, 'packager temp with spaces');
+// The suite runner already supplies a long temporary parent. Keep this added
+// component short while still forcing a space in IExpress's SED argument path.
+const packagerTemp = path.join(tempRoot, 'p s');
 fs.mkdirSync(packagerTemp, { recursive: true });
 const packagerEnv = { ...process.env, TEMP: packagerTemp, TMP: packagerTemp, TMPDIR: packagerTemp };
 fs.mkdirSync(path.join(payloadDir, 'resources', 'public'), { recursive: true });
