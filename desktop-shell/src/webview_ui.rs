@@ -326,7 +326,7 @@ fn log_applied_zoom(data_dir: &Path, zoom: f32) {
 
 pub fn run_webview_ui(paths: DesktopPaths, dev_url: Option<String>) -> Result<(), String> {
     wry::webview_version().map_err(|_| {
-        "缺少 Microsoft Edge WebView2 Runtime。请安装 WebView2 Runtime，或以 --ui=legacy 启动。".to_owned()
+        "缺少 Microsoft Edge WebView2 Runtime。请从 Microsoft 官方页面手动安装：https://developer.microsoft.com/en-us/microsoft-edge/webview2/ 。或以 --ui=legacy 启动。".to_owned()
     })?;
     let asset_root = if dev_url.is_some() { None } else { Some(resolve_bundle()?) };
     let event_loop = EventLoopBuilder::<UiEvent>::with_user_event().build();

@@ -12,6 +12,16 @@ const exists = (relative) => fs.existsSync(path.join(ROOT, relative));
 let passed = 0;
 const check = (name, fn) => { fn(); passed += 1; process.stdout.write(`PASS ${name}\n`); };
 
+check('every typed Owner UI method is explicitly admitted by the native presentation boundary', () => {
+  const client = read('desktop-ui/src/bridge/typed-client.ts');
+  const methods = [...client.match(/type UiMethod =([\s\S]*?);/)[1].matchAll(/'(ui\.[^']+)'/g)].map(match => match[1]);
+  const policy = read('desktop-shell/src/webview_policy.rs').match(/const UI_METHODS:[\s\S]*?= &\[([\s\S]*?)\];/)[1];
+  const allowed = new Set([...policy.matchAll(/"(ui\.[^"]+)"/g)].map(match => match[1]));
+  assert.deepEqual(methods.filter(method => !allowed.has(method)), [], 'legitimate Owner UI calls must not disappear into a native timeout');
+  assert.equal(new Set(methods).size, methods.length);
+  assert.match(read('desktop-shell/src/webview_policy.rs'), /UI_METHODS\.contains\(&method\)/, 'keep an exact allowlist, not a generic ui.* bypass');
+});
+
 check('Rust WebView2 host and security policy are present', () => {
   assert.ok(exists('desktop-shell/src/webview_policy.rs'));
   assert.ok(exists('desktop-shell/src/webview_ui.rs'));

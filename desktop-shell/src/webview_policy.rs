@@ -13,11 +13,13 @@ const UI_METHODS: &[&str] = &[
     "ui.chat.sessions.list", "ui.chat.sessions.create", "ui.chat.sessions.rename",
     "ui.chat.sessions.archive", "ui.chat.sessions.delete", "ui.chat.history", "ui.chat.status",
     "ui.chat.send", "ui.chat.stop", "ui.chat.retry", "ui.chat.continue", "ui.chat.catalog", "ui.chat.config.set",
-    "ui.task.overview", "ui.task.get", "ui.task.create", "ui.task.start", "ui.task.pause", "ui.task.resume", "ui.task.cancel", "ui.task.handoff",
+    "ui.task.overview", "ui.task.get", "ui.task.create", "ui.task.start", "ui.task.pause", "ui.task.resume", "ui.task.reconcile", "ui.task.cancel", "ui.task.handoff",
     "ui.workshop.proposals", "ui.workshop.proposal", "ui.workshop.review", "ui.workshop.retry", "ui.workshop.task.status", "ui.workshop.deliver",
     "ui.workspace.list", "ui.workspace.open", "ui.workspace.create",
     "ui.memory.overview", "ui.memory.get", "ui.memory.create", "ui.memory.update", "ui.memory.pin", "ui.memory.delete",
+    "ui.memory.candidates.confirm", "ui.memory.candidates.confirmBatch",
     "ui.agent.list", "ui.agent.health",
+    "ui.extensions.settings.describe", "ui.extensions.settings.get", "ui.extensions.settings.update",
     "ui.plugins.catalog", "ui.plugins.status", "ui.plugins.detail", "ui.plugins.refresh", "ui.plugins.stage", "ui.plugins.stage-local", "ui.plugins.enable.review",
     "ui.plugins.install", "ui.plugins.enable", "ui.plugins.disable", "ui.plugins.uninstall",
     "ui.plugins.integration.list", "ui.plugins.integration.settings", "ui.plugins.integration.manage", "ui.plugins.integration.action", "ui.plugins.integration.tool.toggle",
@@ -194,6 +196,19 @@ pub fn parse_bridge_request(raw: &str) -> Result<BridgeRequest, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owner_review_methods_are_explicit_and_unknown_privileged_methods_stay_denied() {
+        for method in ["ui.task.reconcile", "ui.memory.candidates.confirm", "ui.memory.candidates.confirmBatch",
+            "ui.extensions.settings.describe", "ui.extensions.settings.get", "ui.extensions.settings.update"] {
+            let body = serde_json::json!({"id":"owner-review-1","method":method,"params":{}}).to_string();
+            assert!(parse_bridge_request(&body).is_ok(), "registered Owner UI method: {method}");
+        }
+        for method in ["memory.candidates.confirmBatch", "ui.task.releaseLock", "ui.memory.exportAll"] {
+            let body = serde_json::json!({"id":"denied-1","method":method,"params":{}}).to_string();
+            assert!(parse_bridge_request(&body).is_err(), "unregistered authority must remain denied: {method}");
+        }
+    }
 
     #[test]
     fn packaged_origin_allows_its_routes_and_blocks_lookalikes() {
