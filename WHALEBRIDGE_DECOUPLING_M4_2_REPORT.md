@@ -40,7 +40,11 @@
 | `npm test` | **105 PASS / 0 FAIL / 8 NOT_RUN_ENVIRONMENT**（113 suites） | 新 `test-qq-auto-request` 已登记在 `scripts/run-all-tests.mjs`；真实 QQ、网关和部分外部环境仍跳过。 |
 | `npm run build:core` / `npm run build:ui` | PASS / PASS | Core SEA 资源与 Harbor 构建；不等于独立 Connector。 |
 | `npm run desktop:check` / `desktop:test` / `desktop:build` | PASS / 198 PASS / PASS | Rust Shell 检查、单测、release profile。 |
-| `npm run build:release` / RC verification | 待最终记录 | 须从干净代码提交构建并核对 `sourceCommit`。 |
+| `npm run build:release -- --use-current-build-number` / RC verification | PASS / **8 PASS, 0 FAIL** | 从干净源码提交构建并核对 `sourceCommit`；安装器及现有 Core SEA/IPC 测试通过，独立 QQ Connector 生命周期未测试，因为入口尚不存在。 |
 | `VERIFIED_REAL_E2E` | 0 | 真实受控 QQ/OneBot 账号未运行。 |
 
-版本 `1.0.0-rc.2`，Build **1079**。代码提交、构建源码 SHA、最终 HEAD、安装包大小/SHA-256/签名状态在发行验证后补录。**M4_PARTIAL / RELEASE_BLOCKED** 保持，等待 Owner 对运行职责及授权契约验收；不得开始 M5 数据迁移。
+代码与构建源码提交：`637799f65b1122279b8c8f52abb4340d9017fe14`，发行清单 `sourceCommit` 与之完全一致，`dirtySourceTree: false`。修改文件：`src/bridge.js`、`src/channel/qq/{auto-request,ownership,runtime,send-result,transport}.js`、`scripts/send-test-group.mjs`、`scripts/test-qq-auto-request.mjs`、`scripts/test-qq-runtime.mjs`、`scripts/test-qq-send-policy.mjs`、`scripts/run-all-tests.mjs`、`release/version.json` 和 M4.1/M4.2 两份报告。新增测试只通过 `npm test` 聚合器运行。
+
+版本 `1.0.0-rc.2`，Build **1079**。安装包 [CetaMesh-Setup-1.0.0-rc.2-build1079-x64.exe](artifacts/rc/1.0.0-rc.2/build-1079/CetaMesh-Setup-1.0.0-rc.2-build1079-x64.exe)：**42,999,808 字节**，SHA-256 `B2DDE9AD919E61B9AA1EB116D1C9E4E97AADF4F560704BFA4BCA353D6B7AE71E`，`Get-AuthenticodeSignature` 为 **NotSigned**。SEA Core SHA-256 `3BBDAABF69AC9EEA470E52366F0395B54F15A3A70BEF80132EEEED3041F7ECDD`；该 Core 产物不包含独立 QQ Connector 模式。最终分支 HEAD 包含本段报告补录提交，以交付时 `git rev-parse HEAD` 为准。
+
+**M4_PARTIAL / RELEASE_BLOCKED** 保持。`VERIFIED_FIXTURE` 只适用于上述自动回复、权限、账本和锁测试；`VERIFIED_RELEASE_INTEGRATION` 只适用于现有 Core/安装器路径；QQ Connector 的正式 SEA start/stop/health 为 `PARTIAL`，真实 QQ/OneBot 消息及副作用为 `NOT_RUN_ENVIRONMENT`，`VERIFIED_REAL_E2E` 为零。等待 Owner 对运行职责和授权契约验收，不开始 M5 数据迁移；未 push、合并 main 或发布 Stable。
