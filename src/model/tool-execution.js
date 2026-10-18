@@ -327,6 +327,9 @@ export function createToolExecutionCoordinator({
         if (signal?.aborted || streamReason === 'aborted' || streamReason === 'cancelled') {
           fail('INVOKE_CANCELLED', 'Tool execution was cancelled');
         }
+        if (streamReason === null) {
+          fail('MODEL_STREAM_TERMINAL_MISSING', 'Model stream ended without an explicit terminal event');
+        }
         if (streamReason && streamReason !== 'completed') {
           fail('MODEL_STREAM_FAILED', `Model stream ended with ${String(streamReason).slice(0, 80)}`);
         }

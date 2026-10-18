@@ -41,6 +41,7 @@ export const CATEGORIES = ['core', 'architecture', 'security', 'runtime', 'integ
 const REGISTRY = {
   // ── core：基础服务 / 纯函数 / 传输协议 ─────────────────────────────────────
   'test-agent-provider.mjs': { category: 'core' },
+  'test-new-audit-critical.mjs': { category: 'runtime' },
   'test-app-paths.mjs': { category: 'core' },
   'test-config-service.mjs': { category: 'core' },
   'test-json-storage.mjs': { category: 'core' },

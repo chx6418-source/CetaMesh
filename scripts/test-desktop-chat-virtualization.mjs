@@ -8,6 +8,11 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const UI_ROOT = path.join(ROOT, 'desktop-ui');
+const harborCss = fs.readFileSync(path.join(UI_ROOT, 'src/app/harbor.css'), 'utf8');
+assert.match(harborCss, /\.virtual-inner\s*\{[^}]*position:\s*relative/s,
+  'production Harbor stylesheet positions the virtual canvas');
+assert.match(harborCss, /\.virtual-row\s*\{[^}]*position:\s*absolute/s,
+  'production Harbor stylesheet positions each virtual row');
 const uiRequire = createRequire(path.join(UI_ROOT, 'package.json'));
 const React = uiRequire('react');
 const { renderToStaticMarkup } = uiRequire('react-dom/server');
@@ -189,6 +194,15 @@ try {
     { id: 'm1', text: 'fresh current' }, { id: 'm2', text: 'current' }
   ], 'older pages prepend in order, dedupe their own overlaps, and retain the fresher current message');
   const components = await vite.ssrLoadModule('/src/components/primitives/content.tsx');
+  const asyncState = await vite.ssrLoadModule('/src/app/chat-async-state.ts');
+  assert.equal(asyncState.pendingReplyVisible({ requestId: 'turn-1', text: 'full answer' }, []), true,
+    'the streamed answer stays visible while committed history has not arrived');
+  assert.equal(asyncState.pendingReplyVisible({ requestId: 'turn-1', text: 'full answer' },
+    [{ role: 'assistant', requestId: 'older-turn' }]), true,
+    'an older formal answer cannot dismiss this turn');
+  assert.equal(asyncState.pendingReplyVisible({ requestId: 'turn-1', text: 'full answer' },
+    [{ role: 'assistant', requestId: 'turn-1' }]), false,
+    'matching formal history settles the temporary answer');
   const inputPrimitives = await vite.ssrLoadModule('/src/components/primitives/inputs.tsx');
   assert.equal(inputPrimitives.normalizeSelectOptionLabel('', '   ', 'codex'), 'codex', 'blank labels fall back to a stable option value');
   assert.equal(inputPrimitives.normalizeSelectOptionLabel('  '), '未命名选项', 'no Select option may have a blank accessible/display label');

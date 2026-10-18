@@ -151,12 +151,13 @@ export function defineAgentProvider({ id, label, eventProtocol = null, methods, 
       filled[name] = implementation;
       supported[name] = true;
     } else {
-      filled[name] = async () => {
+      const rejectUnsupported = () => {
         throw agentProviderError(
           'AGENT_UNSUPPORTED',
           `Agent Provider「${label}」不支持 ${name}：该 Provider 没有对应能力`
         );
       };
+      filled[name] = name === 'follow' ? async function* () { rejectUnsupported(); } : async () => rejectUnsupported();
       supported[name] = false;
       unsupported.push(name);
     }

@@ -66,6 +66,13 @@ export type ChatStreamUpdate = {
   agentActivity?: unknown;
 };
 
+/** Keep the last streamed answer until the matching durable message reaches history. */
+export function pendingReplyVisible(reply: { requestId: string | null; text: string } | null,
+  messages: readonly { role: string; requestId?: string | null }[]): boolean {
+  return Boolean(reply?.text && reply.requestId && !messages.some(message =>
+    message.role === 'assistant' && message.requestId === reply.requestId));
+}
+
 /** Apply a frame's events in order, keeping every delta and discarding stale identities. */
 export function applyChatStreamUpdates<T extends {
   displayText: string;

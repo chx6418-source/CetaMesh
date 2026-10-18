@@ -114,6 +114,7 @@ function projectMessage(value) {
   } : null;
   return {
     id: string(row.id, 128), role, text: string(row.text, MAX_TEXT), at: scalar(row.at),
+    requestId: string(row.requestId, 200) || null,
     attachments, toolActivity, agentActivity, error: row.error ? string(row.error, 1000) : null,
     cancelled: row.cancelled === true
   };

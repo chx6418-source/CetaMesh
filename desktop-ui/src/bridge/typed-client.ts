@@ -6,6 +6,7 @@ export interface ChatSession {
 }
 export interface ChatMessage {
   id: string; role: 'user' | 'assistant' | 'system'; text: string; at: string | number | null;
+  requestId?: string | null;
   attachments: string[]; toolActivity: { id: string; label: string; status: string; summary: string; durationMs: number | null }[];
   agentActivity?: { providerId: string; label: string; status: 'running' | 'completed' | 'cancelled' | 'failed' } | null;
   error: string | null; cancelled: boolean;
@@ -102,6 +103,7 @@ export type DesktopEvent = 'core.status' | 'chat.updated' | 'chat.streaming' | '
   | 'model.updated' | 'memory.updated' | 'update.status' | 'device.updated';
 export interface DesktopEventData {
   sessionId?: string; taskId?: string; agentId?: string; pluginId?: string; serverId?: string; approvalId?: string; requestId?: string; retryCount?: number;
+  turnId?: string; messageId?: string; historyRevision?: number;
   message?: string;
   provider?: string; status?: string; progress?: number; ready?: boolean; needsAttention?: boolean;
   delta?: string; replaceText?: string; reset?: boolean; toolActivity?: ChatMessage['toolActivity']; agentActivity?: ChatMessage['agentActivity'];

@@ -23,6 +23,26 @@ const LIST_TIMEOUT_MS = 10_000;
 const CHAT_TIMEOUT_MS = 300_000;
 const SSE_IDLE_TIMEOUT_MS = 45_000;
 const REASONING_EFFORT_CHOICES = Object.freeze(['off', 'low', 'high', 'max']);
+const DSML_MARKERS = Object.freeze(['<｜DSML｜', '<|DSML|']);
+
+function guardInternalToolSyntax(text, enabled) {
+  if (!enabled) return 0;
+  if (DSML_MARKERS.some(marker => text.includes(marker))) {
+    throw modelRuntimeError('MODEL_TOOL_PROTOCOL_MISMATCH', 'Model returned internal tool syntax as assistant text');
+  }
+  let held = 0;
+  for (const marker of DSML_MARKERS) {
+    for (let size = 1; size < marker.length; size += 1) {
+      if (text.endsWith(marker.slice(0, size))) held = Math.max(held, size);
+    }
+  }
+  return held;
+}
+
+function hasDeepSeekToolContext(id, options) {
+  return id.startsWith('deepseek') && (Array.isArray(options?.tools) && options.tools.length > 0
+    || Array.isArray(options?.messages) && options.messages.some(message => Array.isArray(message?.tool_calls) && message.tool_calls.length > 0));
+}
 
 function isReasoningModel(model) {
   return /^(?:o[134](?:-|$)|gpt-5(?:-|$))/i.test(String(model ?? '').trim());
@@ -298,6 +318,7 @@ export function createOpenAiCompatibleModelProvider({
           : Array.isArray(rawContent)
             ? rawContent.map((part) => (typeof part?.text === 'string' ? part.text : '')).join('')
             : '';
+        guardInternalToolSyntax(text, hasDeepSeekToolContext(id, options));
         return {
           text,
           toolCalls: (Array.isArray(choice?.message?.tool_calls) ? choice.message.tool_calls : []).map((call) => {
@@ -325,6 +346,8 @@ export function createOpenAiCompatibleModelProvider({
         const reader = response.body.getReader();
         const decoder = new TextDecoder('utf-8');
         let fullText = '';
+        let emittedTextLength = 0;
+        const guardDsml = hasDeepSeekToolContext(id, options);
         let usage = null;
         let finished = false;
         let finishReasonSeen = false;
@@ -367,7 +390,12 @@ export function createOpenAiCompatibleModelProvider({
               : '';
           if (piece) {
             fullText += piece;
-            pendingEvents.push(modelStreamEvent('assistant/chunk', { chunk: { type: 'text-delta', text: piece } }));
+            const held = guardInternalToolSyntax(fullText, guardDsml);
+            const safeEnd = fullText.length - held;
+            if (safeEnd > emittedTextLength) {
+              pendingEvents.push(modelStreamEvent('assistant/chunk', { chunk: { type: 'text-delta', text: fullText.slice(emittedTextLength, safeEnd) } }));
+              emittedTextLength = safeEnd;
+            }
           }
           return false;
         };
@@ -430,6 +458,9 @@ export function createOpenAiCompatibleModelProvider({
           }
           if (!finished && !finishReasonSeen) {
             throw modelRuntimeError('MODEL_STREAM_INCOMPLETE', `「${label}」流式响应提前结束，缺少完成标记`, {});
+          }
+          if (emittedTextLength < fullText.length) {
+            yield modelStreamEvent('assistant/chunk', { chunk: { type: 'text-delta', text: fullText.slice(emittedTextLength) } });
           }
         } catch (error) {
           const aborted = signal?.aborted || error?.name === 'AbortError';

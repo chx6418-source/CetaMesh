@@ -249,7 +249,8 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
   }
 
   function emit(session, event) {
-    session.events.push(event);
+    const seq = ++session.nextSequence;
+    session.events.push({ ...event, seq, eventId: `${session.id}:${seq}` });
     if (session.events.length > CAPTURE_MAX) session.events.splice(0, session.events.length - CAPTURE_MAX);
     const waiters = session.waiters.splice(0);
     for (const wake of waiters) wake();
@@ -477,6 +478,7 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
           lastError: null,
           lastUsage: null,
           events: [],
+          nextSequence: 0,
           waiters: [],
           closed: false
         });
@@ -636,11 +638,23 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
         };
       },
 
-      async *follow({ sessionId, signal } = {}) {
+      async *follow({ sessionId, signal, sinceSequence = 0 } = {}) {
         const session = requireSession(sessionId);
+        if (!Number.isSafeInteger(sinceSequence) || sinceSequence < 0) {
+          throw agentProviderError('INVALID_PARAMS', 'Codex Follow cursor must be a non-negative safe integer');
+        }
+        if (sinceSequence > session.nextSequence) {
+          throw agentProviderError('AGENT_EVENT_GAP', 'Codex Follow cursor is ahead of this Session event stream');
+        }
+        let sequence = sinceSequence;
         while (!session.closed && !signal?.aborted) {
-          if (session.events.length) {
-            yield session.events.shift();
+          if (session.events.length && sequence < session.events[0].seq - 1) {
+            throw agentProviderError('AGENT_EVENT_GAP', 'Codex Follow cursor is older than the retained event window');
+          }
+          const next = session.events.find(event => event.seq > sequence);
+          if (next) {
+            sequence = next.seq;
+            yield next;
             continue;
           }
           await new Promise((resolve) => {

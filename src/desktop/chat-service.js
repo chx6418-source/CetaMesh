@@ -336,6 +336,7 @@ export function createChatService({
     const messages = readHistory(id);
     messages.push(message);
     writeJsonAtomic(historyFile(id), { schemaVersion: SCHEMA_VERSION, messages });
+    return messages.length;
   }
 
   function touch(record) {
@@ -1004,12 +1005,14 @@ export function createChatService({
     const sessionId = record.dshSessionId;
     const text = turn.displayText ?? '';
     if (text.trim() || turn.state === 'done' || turn.state === 'error') {
-      appendMessage(record.id, {
-        id: crypto.randomUUID(),
+      const messageId = crypto.randomUUID();
+      const historyRevision = appendMessage(record.id, {
+        id: messageId,
         role: 'assistant',
         text,
         at: now(),
         turnId: turn.id,
+        requestId: turn.requestId,
         usage: turn.usage ?? null,
         toolActivity: Array.isArray(turn.toolActivity) ? turn.toolActivity.slice(-32) : [],
         ...(turn.agentActivity ? { agentActivity: { ...turn.agentActivity } } : {}),
@@ -1017,6 +1020,8 @@ export function createChatService({
         ...(turn.state === 'error' ? { error: turn.error ?? '回合异常', errorCode: turn.errorCode ?? 'PROVIDER_ERROR' } : {}),
         ...(turn.state === 'cancelled' ? { cancelled: true } : {})
       });
+      onEvent?.({ event: 'chat.updated', data: { sessionId: record.id, turnId: turn.id,
+        requestId: turn.requestId, messageId, historyRevision, status: turn.state } });
     }
     if (turn.state === 'done' && typeof proposeMemoryCandidate === 'function') {
       const userMessage = readHistory(record.id).filter(message => message.role === 'user').at(-1);
@@ -1820,7 +1825,7 @@ export function createChatService({
     pendingUiDeltas.delete(record.id);
     onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: 'starting', requestId, reset: true, toolActivity: [], agentActivity } });
     try {
-      if (record.taskId && platformRoute) {
+      if (record.taskId && platformRoute && agentProviderId !== AGENT_PROVIDER_DISABLED) {
         await startModelOrDshTurn(record, state, promptText, { attachments, sourceText, forceProject: true, retryMessageId });
       } else if (agentProviderId === 'cetamesh' && platformRoute) {
         await startModelOrDshTurn(record, state, promptText, { attachments, sourceText, forceProject: true, retryMessageId });

@@ -495,6 +495,24 @@ try {
     checkpoint => checkpoint?.summary?.includes('fixture response 1'));
   assert.match(codexCheckpoint.summary, /fixture response 1/,
     'Task Follow consumes Codex events and persists the Agent result even without Chat');
+  const emittedTurn = codexProvider._sessions.get(codexSessionId).events.slice();
+  const replayFor = async (label, sinceSequence = 0) => {
+    const controller = new AbortController();
+    const rows = [];
+    try {
+      for await (const row of agentBroker.follow({ provider: 'codex', sessionId: codexSessionId,
+        signal: controller.signal, sinceSequence })) {
+        rows.push(row);
+        if (rows.at(-1).seq === emittedTurn.at(-1).seq) break;
+      }
+    } finally { controller.abort(); }
+    assert.deepEqual(rows.map(row => row.eventId), emittedTurn.filter(row => row.seq > sinceSequence).map(row => row.eventId),
+      `${label} receives the complete native turn with stable ordered event IDs`);
+    return rows;
+  };
+  await Promise.all([replayFor('Chat'), replayFor('Continuity'), replayFor('late observer')]);
+  await replayFor('reconnected Chat', emittedTurn[0].seq);
+  assert.equal(emittedTurn.at(-1).type, 'turn/end');
   assert.equal(fs.readFileSync(path.join(authoritativeRoot, 'codex-result-1.txt'), 'utf8'), 'fake edit 1');
   const firstArgs = fakeRuns[0].args;
   assert.ok(firstArgs.includes('--json'));
@@ -645,6 +663,12 @@ try {
   assert.ok(secondHarborRun.args.includes('--model')
     && secondHarborRun.args[secondHarborRun.args.indexOf('--model') + 1] === 'harbor-codex-model');
   assert.ok(secondHarborRun.args.some(arg => arg.includes('model_reasoning_effort="high"')));
+  const beforeThirdHarborRun = fakeRuns.length;
+  await harborChat.execute({ method: 'chat.send', params: { id: harborSession.id, text: 'continue this Codex conversation a third time' } });
+  await waitFor(async () => harborChat.execute({ method: 'chat.status', params: { id: harborSession.id } }), status => status.turn === null);
+  assert.equal(fakeRuns.length, beforeThirdHarborRun + 1, 'third consecutive Agent turn uses the same session');
+  assert.equal((await harborChat.execute({ method: 'chat.history', params: { id: harborSession.id } })).messages.at(-1).text,
+    `fixture response ${fakeRuns.length}`, 'the third answer is committed to Harbor history');
   fakeExitCode = 1;
   await harborChat.execute({ method: 'chat.send', params: { id: harborSession.id, text: 'surface a structured Codex error' } });
   const harborError = await waitFor(async () => harborChat.execute({ method: 'chat.status', params: { id: harborSession.id } }),

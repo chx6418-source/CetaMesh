@@ -349,6 +349,63 @@ const turnEnd = (id, kind, error) => ({ type: 'turn/end', data: { reason: { kind
 
 // ── 7b. Tool Calling 快速 ACK + IPC 取消边界 ────────────────────────────────
 {
+  const dir = path.join(stateDir, 'agent-none-linked-task');
+  fs.mkdirSync(dir, { recursive: true });
+  const first = makeService({ stateDir: dir });
+  const session = await first.execute({ method: 'chat.sessions.create', params: {} });
+  await first.execute({ method: 'chat.config.set', params: { id: session.id, config: { agentProvider: 'none' } } });
+  first.close();
+  const sessionsPath = path.join(dir, 'desktop-chat', 'sessions.json');
+  const stored = readJsonFile(sessionsPath);
+  stored.sessions.find(row => row.id === session.id).taskId = 'already-linked-task';
+  writeJsonAtomic(sessionsPath, stored);
+  let dispatched = 0;
+  const service = makeService({ stateDir: dir, options: {
+    platformRoute: async () => { dispatched += 1; throw new Error('Agent none dispatched'); },
+    modelRuntime: {
+      defaultProviderId: () => 'fixture-model', resolveProvider: id => ({ id }),
+      supportsToolCalling: () => false,
+      async *stream() {
+        yield { type: 'assistant/chunk', data: { chunk: { type: 'text-delta', text: 'Model only.' } } };
+        yield { type: 'turn/end', data: { reason: { kind: 'completed' } } };
+      }
+    }
+  } });
+  try {
+    await service.execute({ method: 'chat.send', params: { id: session.id, text: 'Explain this task without Agent' } });
+    await waitFor(() => service.execute({ method: 'chat.status', params: { id: session.id } }),
+      status => status.turn === null, 'Agent none linked Task model turn');
+    assert.equal(dispatched, 0, 'Agent none forbids dispatch even when Chat is linked to a Task');
+  } finally { service.close(); }
+  ok('Agent none with an existing Task remains on the Model path');
+}
+
+{
+  const events = [];
+  const modelRuntime = {
+    defaultProviderId: () => 'fixture-model', resolveProvider: id => ({ id }),
+    supportsToolCalling: () => true
+  };
+  const service = makeService({ options: { modelRuntime,
+    onEvent: event => events.push(event),
+    toolExecutionCoordinator: { run: async () => ({ status: 'completed', toolCalling: 'supported', text: 'Tool result is ready.' }),
+      cancelSession: () => ({ cancelled: 0 }) }
+  } });
+  try {
+    const session = await service.execute({ method: 'chat.sessions.create', params: {} });
+    await service.execute({ method: 'chat.send', params: { id: session.id, text: 'Complete tool turn' } });
+    await waitFor(() => service.execute({ method: 'chat.status', params: { id: session.id } }),
+      status => status.turn === null, 'Tool Calling formal commit');
+    const history = await service.execute({ method: 'chat.history', params: { id: session.id } });
+    const answer = history.messages.at(-1);
+    assert.equal(answer.text, 'Tool result is ready.');
+    assert.ok(events.some(row => row.event === 'chat.updated' && row.data?.sessionId === session.id
+      && row.data?.messageId === answer.id), 'formal Tool Calling message commit notifies Harbor with message identity');
+  } finally { service.close(); }
+  ok('Tool Calling formal message commit emits chat.updated with message identity');
+}
+
+{
   const dir = path.join(stateDir, 'fast-ack');
   fs.mkdirSync(dir, { recursive: true });
   let toolSignal = null;

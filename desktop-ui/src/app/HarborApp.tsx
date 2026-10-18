@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import { useSearchParams } from 'react-router';
 import { createPortal } from 'react-dom';
 import { mergeChatHistorySnapshot, mergeLatestChatMessages, prependOlderChatMessages } from './chat-history';
-import { applyChatStreamUpdates, ChatRequestEpoch, ChatStreamRevision, type ChatStreamUpdate } from './chat-async-state';
+import { applyChatStreamUpdates, ChatRequestEpoch, ChatStreamRevision, pendingReplyVisible, type ChatStreamUpdate } from './chat-async-state';
 import { aboutClient, agentClient, approvalClient, bridge, chatClient, extensionSettingsClient, feedbackClient, hostClient, memoryClient, onboardingClient, openExternal, pluginClient, searchClient, settingsClient, taskClient, updateClient, workspaceClient, workshopClient, type Agent, type Approval, type ChatMessage as ChatMessageDto, type ChatSession, type ExtensionSettingsDescription, type ExtensionSettingsSnapshot, type IntegrationSettings, type Memory, type Plugin, type ProviderSettingField, type SettingField, type Settings, type Task, type WorkshopProposal } from '../bridge/typed-client';
 import { Icon, type IconName } from '../components/icons';
 import { ArtifactCard } from '../components/product/cards';
@@ -77,6 +77,7 @@ export function HarborApp() {
   const [allSessionsScope, setAllSessionsScope] = useState<'all' | 'active' | 'archived'>('all');
   const [allSessionsError, setAllSessionsError] = useState('');
   const [taskCount, setTaskCount] = useState(0);
+  const [reviewTaskId, setReviewTaskId] = useState<string | null>(null);
   const [workspaces, setWorkspaces] = useState<{ id: string; name: string; status: string; lastActivity: string | number | null }[]>([]);
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(null);
   const [workspaceError, setWorkspaceError] = useState('');
@@ -248,8 +249,8 @@ export function HarborApp() {
         {globalSearch && <div className="search-popover" role="region" aria-label="搜索结果">{searchError ? <ErrorNotice error={searchError} /> : searchResults ? <SearchResults results={searchResults} onSelectSession={id => navigate('chat', id)} onSelectPage={navigate} /> : <LoadingState label="正在搜索…" />}</div>}
       </header>
       <main className={`page-frame page-${page}`}>
-        {page === 'chat' && <ChatPage key={activeSession?.id ?? 'no-session'} session={activeSession} workspaces={workspaces} activeWorkspaceId={activeWorkspaceId} onSessionUpdate={updated => setSessions(current => current.map(item => item.id === updated.id ? updated : item))} onNew={createSession} onOpenMemory={() => navigate('memory')} />}
-        {page === 'work' && <WorkPage workspaces={workspaces} onRefreshWorkspaces={refreshWorkspaces} />}
+        {page === 'chat' && <ChatPage key={activeSession?.id ?? 'no-session'} session={activeSession} workspaces={workspaces} activeWorkspaceId={activeWorkspaceId} onSessionUpdate={updated => setSessions(current => current.map(item => item.id === updated.id ? updated : item))} onNew={createSession} onOpenMemory={() => navigate('memory')} onReviewTask={id => { setReviewTaskId(id); navigate('work'); }} />}
+        {page === 'work' && <WorkPage workspaces={workspaces} onRefreshWorkspaces={refreshWorkspaces} reviewTaskId={reviewTaskId} onReviewTaskOpened={() => setReviewTaskId(null)} />}
         {page === 'memory' && <MemoryPage />}
         {page === 'agents' && <AgentsPage />}
         {page === 'plugins' && <PluginsPage />}
@@ -337,7 +338,7 @@ type ChatTimelineItem =
 const chatTimelineKey = (item: ChatTimelineItem) => item.id;
 const isChatMessageAnchor = (item: ChatTimelineItem) => item.kind === 'message';
 
-function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onNew, onOpenMemory }: { session: ChatSession | null; workspaces: { id: string; name: string; status: string }[]; activeWorkspaceId: string | null; onSessionUpdate(session: ChatSession): void; onNew(): Promise<void>; onOpenMemory(): void }) {
+function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onNew, onOpenMemory, onReviewTask }: { session: ChatSession | null; workspaces: { id: string; name: string; status: string }[]; activeWorkspaceId: string | null; onSessionUpdate(session: ChatSession): void; onNew(): Promise<void>; onOpenMemory(): void; onReviewTask(id: string): void }) {
   const [messages, setMessages] = useState<ChatMessageDto[]>([]);
   const [hasMoreHistory, setHasMoreHistory] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
@@ -351,6 +352,7 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
   const [hasNewMessages, setHasNewMessages] = useState(false);
   const [sendErrors, setSendErrors] = useState<Record<string, string>>({});
   const [contextCollapsed, setContextCollapsed] = useState(false);
+  const [settlingReply, setSettlingReply] = useState<{ requestId: string | null; text: string } | null>(null);
 
   const historySessionIdRef = useRef<string | null>(null);
   const lastHistoryMessageIdRef = useRef<string | null>(null);
@@ -388,6 +390,7 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
       previousStreamRef.current = { state: 'idle', text: '' };
       activeStreamRequestIdRef.current = null;
       setMessages([]);
+      setSettlingReply(null);
       setHasMoreHistory(false);
       setHasNewMessages(false);
       setLoading(false);
@@ -466,6 +469,7 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
 
   useEffect(() => { void refreshCatalog(); }, [refreshCatalog]);
   useEffect(() => { void load(); }, [load]);
+  useEffect(() => { setSettlingReply(null); }, [session?.id]);
   useEffect(() => {
     if (!session) return;
     try { setContextCollapsed(window.localStorage.getItem(`harbor:chat-context:${session.id}`) === 'collapsed'); }
@@ -582,6 +586,21 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
   }, [session?.id, hasMoreHistory, loadingOlder, messages]);
 
   const streaming = ['starting', 'streaming', 'recovering', 'cancelling'].includes(status.state);
+  useLayoutEffect(() => {
+    if (streaming && status.displayText && status.requestId) {
+      setSettlingReply(current => current?.requestId === status.requestId && current.text === status.displayText
+        ? current : { requestId: status.requestId, text: status.displayText });
+    } else if (settlingReply && !pendingReplyVisible(settlingReply, messages)) {
+      setSettlingReply(null);
+    }
+  }, [streaming, status.displayText, status.requestId, settlingReply, messages]);
+  useEffect(() => {
+    if (!session || streaming || !pendingReplyVisible(settlingReply, messages)) return;
+    void refreshHistory();
+    const retry = window.setInterval(() => { void refreshHistory(); }, 2500);
+    return () => window.clearInterval(retry);
+  }, [session?.id, streaming, settlingReply, messages, refreshHistory]);
+  const keepSettlingReply = !streaming && pendingReplyVisible(settlingReply, messages);
   const timelineItems = useMemo<ChatTimelineItem[]>(() => {
     const rows: ChatTimelineItem[] = [];
     if (hasMoreHistory && messages.length) rows.push({ id: 'load-earlier', kind: 'load-earlier' });
@@ -593,10 +612,13 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
       id: 'streaming', kind: 'streaming',
       message: { id: 'streaming', role: 'assistant', text: status.displayText || status.statusMessage || (status.agentActivity ? `${status.agentActivity.label} 正在执行…` : status.toolActivity.length ? '正在处理工具调用…' : '正在思考…'), at: null, attachments: [], toolActivity: status.toolActivity, agentActivity: status.agentActivity, error: null, cancelled: false }
     });
+    if (keepSettlingReply && settlingReply) rows.push({ id: 'streaming', kind: 'streaming',
+      message: { id: 'streaming', role: 'assistant', text: settlingReply.text, at: null,
+        attachments: [], toolActivity: [], agentActivity: null, error: null, cancelled: false } });
     if (status.error && !streaming) rows.push({ id: 'turn-error', kind: 'turn-error', message: status.error });
     rows.push(...approvals.map(approval => ({ id: `approval:${approval.id}`, kind: 'approval' as const, approval })));
     return rows;
-  }, [hasMoreHistory, messages, loading, error, streaming, status.displayText, status.statusMessage, status.agentActivity, status.toolActivity, status.error, approvals]);
+  }, [hasMoreHistory, messages, loading, error, streaming, keepSettlingReply, settlingReply, status.displayText, status.statusMessage, status.agentActivity, status.toolActivity, status.error, approvals]);
 
   useLayoutEffect(() => {
     const hasNewConversationContent =
@@ -627,7 +649,7 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
       case 'empty': return <EmptyNotice icon="chat" title="还没有消息" detail="写下你要处理的事情。模型和 Agent 会按会话设置运行。" />;
       case 'message': return <MessageBubble message={item.message} sendError={sendErrors[item.message.id]} onRetry={sendErrors[item.message.id] ? () => void retrySend(item.message.id) : undefined} />;
       case 'streaming': return <MessageBubble message={item.message} streaming />;
-      case 'turn-error': return <div className="turn-error" role="alert">{item.message}<div className="row"><Button compact variant="ghost" onClick={() => void chatClient.retry(session!.id).then(load).catch(cause => setError(messageOf(cause)))}>重试</Button><Button compact variant="ghost" onClick={() => void chatClient.continue(session!.id).then(load).catch(cause => setError(messageOf(cause)))}>继续</Button></div></div>;
+      case 'turn-error': return <div className="turn-error" role="alert">{item.message}<div className="row">{linkedTask && (/needs-reconciliation|interrupted after Core restart/i.test(linkedTask.progress.note) || ['NEEDS_RECONCILIATION', 'TASK_RECOVERY_REVIEW_REQUIRED'].includes(status.errorCode ?? '')) ? <Button compact variant="ghost" onClick={() => onReviewTask(linkedTask.id)}>核对任务后恢复</Button> : <><Button compact variant="ghost" onClick={() => void chatClient.retry(session!.id).then(load).catch(cause => setError(messageOf(cause)))}>重试</Button><Button compact variant="ghost" onClick={() => void chatClient.continue(session!.id).then(load).catch(cause => setError(messageOf(cause)))}>继续</Button></>}</div></div>;
       case 'approval': return <ApprovalCard approval={item.approval} onDecide={decideApproval} />;
     }
   };
@@ -913,7 +935,7 @@ function MemoryManager({ initial, onChanged, createType = 'knowledge', createSco
   return <div className="memory-manager"><p className="muted">记忆由本机 Memory 服务管理，可搜索、编辑、固定或删除。</p><SearchInput label="搜索记忆" placeholder="搜索记忆内容" value={query} onChange={event => setQuery(event.target.value)} /><div className="memory-create"><textarea aria-label="新建记忆内容" placeholder="添加一条需要长期保留的记忆" value={draft} onChange={event => setDraft(event.target.value)} rows={3} maxLength={4000} /><Button compact variant="primary" onClick={() => void create()} disabled={busy || !draft.trim() || createDisabled}>保存记忆</Button></div>{error && <ErrorNotice error={error} onRetry={() => void refresh()} />}{busy && <LoadingState />}{shown.length ? <div className="memory-list">{shown.map(memory => <article className="memory-item" key={memory.id}><div className="row between"><strong>{memory.title}</strong><div className="row"><Button compact variant="ghost" onClick={() => { setEditingId(memory.id); setEditDraft(memory.content); }}>编辑记忆</Button><IconButton label={memory.pinned ? '取消固定记忆' : '固定记忆'} icon="approval" compact onClick={() => void change(memory, 'pin')} /><IconButton label="删除记忆" icon="close" compact onClick={() => void change(memory, 'delete')} /></div></div>{editingId === memory.id ? <div className="memory-edit"><textarea className="cm-textarea" aria-label="编辑记忆内容" value={editDraft} onChange={event => setEditDraft(event.target.value)} rows={4} maxLength={4000} /><div className="row"><Button compact onClick={() => { setEditingId(''); setEditDraft(''); }}>取消</Button><Button compact variant="primary" disabled={busy || !editDraft.trim()} onClick={() => void saveEdit(memory)}>保存更改</Button></div></div> : <p>{memory.content}</p>}<small>{memory.scope} · {relativeLabel(memory.updatedAt)}</small></article>)}</div> : !busy && <EmptyNotice icon="memory" title={allLoaded ? '没有匹配的记忆' : '没有相关记忆'} detail="记忆只会在本地 Memory 服务中创建并保存。" />}</div>;
 }
 
-function WorkPage({ workspaces, onRefreshWorkspaces }: { workspaces: { id: string; name: string; status: string; lastActivity: string | number | null }[]; onRefreshWorkspaces(): Promise<void> }) {
+function WorkPage({ workspaces, onRefreshWorkspaces, reviewTaskId, onReviewTaskOpened }: { workspaces: { id: string; name: string; status: string; lastActivity: string | number | null }[]; onRefreshWorkspaces(): Promise<void>; reviewTaskId: string | null; onReviewTaskOpened(): void }) {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState('');
@@ -940,6 +962,10 @@ function WorkPage({ workspaces, onRefreshWorkspaces }: { workspaces: { id: strin
     finally { if (!quiet) setLoading(false); }
   }, [query, filter]);
   useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => {
+    if (!reviewTaskId) return;
+    void taskClient.get(reviewTaskId).then(value => { setSelectedTask(value.task); onReviewTaskOpened(); }).catch(cause => setError(messageOf(cause)));
+  }, [reviewTaskId, onReviewTaskOpened]);
   useEffect(() => { void agentClient.list().then(value => setHandoffProviders(value.agents.map(agent => ({ id: agent.id, name: agent.name, eligible: agent.taskEligible, reason: agent.reason ?? agent.lastError })))).catch(() => setHandoffProviders([])); }, []);
   useEffect(() => {
     const off = bridge.subscribe('task.updated', () => { void refresh(true); });
