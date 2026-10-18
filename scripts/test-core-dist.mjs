@@ -249,6 +249,8 @@ async function killQuietly(child) {
 assert.ok(fs.existsSync(EXE), `未找到 ${path.relative(ROOT, EXE)}，请先执行 npm run build:core`);
 assert.ok(fs.existsSync(path.join(DIST, 'runtime-manifest.json')), '缺少 runtime-manifest.json');
 assert.ok(fs.statSync(path.join(DIST, 'build', 'core.bundle.cjs')).isFile(), '缺少中间产物 bundle');
+assert.equal(listFiles(RESOURCES).some(file => file.endsWith('send-test-group.mjs')), false,
+  'development-only QQ direct-send diagnostic must never enter SEA resources');
 for (const dir of ['public', 'roles', 'assets', 'dsh', 'plugins']) {
   assert.ok(fs.existsSync(path.join(RESOURCES, dir)), `resources/${dir} 缺失`);
 }

@@ -262,6 +262,11 @@ try {
     });
     assert.equal(fileAction.status, 403, 'Legacy QQ owner rejects an unapproved target before any OneBot send');
     assert.match(fileAction.json.error, /白名单/);
+    const receiptLookup = await dataCall({ path: '/api/send/receipt',
+      query: { accountId: '10001', requestId: 'fixture-missing' }, token: legacyToken,
+      pipeName: resolveDataPipeName({ dataRoot: tempRoot }) });
+    assert.equal(receiptLookup.status, 404, 'authenticated Legacy host exposes a safe lookup for a missing outbound receipt');
+    assert.equal(receiptLookup.json.code, 'QQ_SEND_NOT_FOUND');
     assert.ok(fs.existsSync(path.join(tempRoot, 'state', 'bridge.lock')), 'Legacy holds the sole QQ consumer lock');
     const coreConflict = spawnSync(process.execPath, [ENTRY, '--worker'], {
       cwd: ROOT, encoding: 'utf8', timeout: 5000,

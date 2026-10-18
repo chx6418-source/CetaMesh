@@ -75,6 +75,7 @@ import { acquireStateOwner } from './app/state-owner.js';
 import { createDesktopIpcRuntime } from './app/ipc-runtime.js';
 import { createDshLifecycle } from './providers/dsh/lifecycle.js';
 import { createQqRuntime } from './channel/qq/runtime.js';
+import { assertQqSendPolicy } from './channel/qq/send-policy.js';
 import { createQqTransport } from './channel/qq/transport.js';
 import { assertMcpToolEnabled, isBionicChatEnabled, isQqConnectorEnabled } from './integrations/tool-policy.js';
 import { assertQqDataToolEnabled, qqSocialFlagPolicyEnabled, qqToolPolicyEnabled } from './channel/qq/tool-policy.js';
@@ -802,7 +803,7 @@ async function main() {
       try {
         // 真人发表情前通常会有短暂停顿，避免“文字刚发完表情立刻跟上”的机械感。
         await sleep(randInt(800, 2000));
-        sendResolve(await postOneBotAction(action, params));
+        sendResolve(await postOneBotAction(action, params, { kind: 'sticker', mediaAuthorized: true, toolName: 'qq_send_sticker' }));
       } catch (error) {
         sendReject(error);
       }
@@ -834,7 +835,8 @@ async function main() {
     const entry = findSticker(synced?.entries ?? stickerEntries, stickerId);
     if (!entry) throw new Error(`找不到表情 ${stickerId}，请先用 qq_list_stickers 获取有效 id`);
     const cleanRemark = String(remark ?? '').trim().slice(0, 50);
-    const response = await enqueueQqAction(() => qqRuntime.requestWrite('modify_custom_face', { emoji_id: entry.id, desc: cleanRemark }));
+    const response = await enqueueQqAction(() => qqRuntime.requestWrite('modify_custom_face', { emoji_id: entry.id, desc: cleanRemark },
+      { mediaAuthorized: true, toolName: 'qq_set_sticker_remark' }));
     if (!response || response.status !== 'ok' || response.retcode !== 0) {
       throw new Error(`modify_custom_face 失败: ${response?.wording || response?.retcode || 'unknown'}`);
     }
@@ -873,7 +875,8 @@ async function main() {
       if (face?.buffer) file = 'base64://' + face.buffer.toString('base64');
     }
     if (!file) throw new Error('无法获取该表情的图片源');
-    const addRes = await enqueueQqAction(() => qqRuntime.requestWrite('add_custom_face', { file }));
+    const addRes = await enqueueQqAction(() => qqRuntime.requestWrite('add_custom_face', { file },
+      { mediaAuthorized: true, toolName: 'qq_collect_sticker' }));
     if (!addRes || addRes.status !== 'ok' || addRes.retcode !== 0) {
       throw new Error(`add_custom_face 失败: ${addRes?.wording || addRes?.retcode || 'unknown'}`);
     }
@@ -882,7 +885,8 @@ async function main() {
     const maxRemarkChars = Math.max(1, Number(cfg.socialV2?.sticker?.collect?.maxRemarkChars) || 20);
     const cleanRemark = String(remark ?? '').trim().slice(0, maxRemarkChars);
     if (cleanRemark) {
-      const modRes = await enqueueQqAction(() => qqRuntime.requestWrite('modify_custom_face', { emoji_id: emojiId, desc: cleanRemark }));
+      const modRes = await enqueueQqAction(() => qqRuntime.requestWrite('modify_custom_face', { emoji_id: emojiId, desc: cleanRemark },
+        { mediaAuthorized: true, toolName: 'qq_collect_sticker' }));
       if (!modRes || modRes.status !== 'ok' || modRes.retcode !== 0) {
         log(`[sticker] 收藏成功但备注失败 ${emojiId}: ${modRes?.wording || modRes?.retcode || 'unknown'}`);
       }
@@ -3967,10 +3971,11 @@ async function main() {
           if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
           try {
             if (kind === 'group') {
-              await enqueueQqAction(() => qqRuntime.rawWrite('group_poke', { group_id: id, user_id: Number(targetUserId) }));
+              await enqueueQqAction(() => qqRuntime.rawWrite('group_poke', { group_id: id, user_id: Number(targetUserId) },
+                { toolName: 'qq_send_poke' }));
             } else {
               // 私聊拍一拍：send_poke 自动路由到当前私聊对象
-              await enqueueQqAction(() => qqRuntime.rawWrite('send_poke', { user_id: id }));
+              await enqueueQqAction(() => qqRuntime.rawWrite('send_poke', { user_id: id }, { toolName: 'qq_send_poke' }));
             }
             st.lastActionAt = now;
             st.lastAiReplyAt = now;
@@ -5162,6 +5167,26 @@ async function main() {
           return;
         }
 
+        // Local receipt lookup is evidence only: unknown results are never
+        // converted to success or replayed by this endpoint.
+        if (req.method === 'GET' && url.pathname === '/api/send/receipt') {
+          const accountId = String(url.searchParams.get('accountId') ?? '');
+          const requestId = String(url.searchParams.get('requestId') ?? '');
+          if (!/^\d{1,20}$/.test(accountId) || !/^[A-Za-z0-9:._/-]{1,160}$/.test(requestId)) {
+            sendJson({ ok: false, code: 'QQ_SEND_ID_INVALID', error: '需要有效 QQ 账号和 requestId' }, 400);
+            return;
+          }
+          try {
+            const record = qqRuntime.sendReceipt(requestId, accountId);
+            if (!record) sendJson({ ok: false, code: 'QQ_SEND_NOT_FOUND', error: '本地无该发送记录' }, 404);
+            else sendJson({ ok: true, record: { requestId, accountId, kind: record.kind, target: record.target,
+              status: record.status, createdAt: record.createdAt, updatedAt: record.updatedAt, receipt: record.receipt } });
+          } catch (error) {
+            sendJson({ ok: false, code: error?.code ?? 'QQ_SEND_LEDGER_UNAVAILABLE', error: error?.message ?? String(error) }, 503);
+          }
+          return;
+        }
+
         // File-send MCP is a separate stdio process. It may prepare local
         // audio, but only this QQ owner can execute its OneBot side effect.
         if (req.method === 'POST' && url.pathname === '/api/send/file-action') {
@@ -5225,9 +5250,18 @@ async function main() {
             const safeParams = action.startsWith('upload_')
               ? { [targetKey]: id, file: realFile.replace(/\\/g, '/'), name: params.name }
               : { [targetKey]: id, message: [{ type: 'record', data: { file: realFile.replace(/\\/g, '/') } }] };
-            sendJson({ ok: true, data: await enqueueQqAction(() => postOneBotAction(action, safeParams)) });
+            const result = await enqueueQqAction(() => postOneBotAction(action, safeParams,
+              { toolName, requestId: body.requestId }));
+            if (result?.status === 'outcome-unknown') {
+              sendJson({ ok: false, code: 'QQ_OUTCOME_UNKNOWN', requestId: result.requestId,
+                error: 'QQ 发送结果未知；核验原请求后才能重试' }, 202);
+            } else {
+              sendJson({ ok: true, data: result });
+            }
           } catch (error) {
-            sendJson({ ok: false, error: error?.message ?? String(error) }, 403);
+            const unknown = error?.code === 'QQ_OUTCOME_UNKNOWN';
+            sendJson({ ok: false, code: error?.code ?? 'QQ_SEND_REJECTED',
+              ...(unknown ? { requestId: error.requestId } : {}), error: error?.message ?? String(error) }, unknown ? 202 : 403);
           }
           return;
         }
@@ -5657,11 +5691,11 @@ async function main() {
   }
 
 
-  async function postOneBotAction(action, params) {
+  async function postOneBotAction(action, params, options = {}) {
     if (!isQqConnectorEnabled({ stateDir: STATE_DIR })) {
       throw Object.assign(new Error('QQ Connector 已禁用'), { code: 'QQ_DISABLED' });
     }
-    return qqRuntime.sendOneBot(action, params);
+    return qqRuntime.sendOneBot(action, params, options);
   }
 
   async function onebotSend(kind, id, message, replyToMessageId, atUserId = null) {
@@ -6518,7 +6552,7 @@ async function main() {
         msg_seq: target.messageSeq,
         button_id: target.selection.buttonId,
         callback_data: target.selection.callbackData
-      }), SEND_TIMEOUT_MS, 'QQ 卡片按钮点击'));
+      }, { approvalVerified: true }), SEND_TIMEOUT_MS, 'QQ 卡片按钮点击'));
     } catch (error) {
       return cardButtonFailure(502, `卡片按钮点击失败：${error?.message ?? error}`);
     }
@@ -9801,6 +9835,15 @@ async function main() {
     config: cfg,
     ownershipDir: path.join(os.tmpdir(), 'cetamesh-qq-ownership'),
     dedupFile: path.join(STATE_DIR, 'qq-message-receipts.json'),
+    outboundFile: path.join(STATE_DIR, 'qq-send-ledger.json'),
+    authorizeSend: (request) => assertQqSendPolicy(request, {
+      config: cfg,
+      qqEnabled: isQqConnectorEnabled({ stateDir: STATE_DIR }),
+      bionicEnabled: isBionicChatEnabled({ stateDir: STATE_DIR }),
+      toolEnabled: toolName => assertMcpToolEnabled(
+        ['qq_send_file', 'qq_send_audio_from_url'].includes(toolName) ? 'qq-file-send' : 'snowluma',
+        toolName, { stateDir: STATE_DIR })
+    }),
     log,
     onPrivateMessage: async (event) => {
       if (event.user_id === event.self_id) return;

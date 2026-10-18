@@ -1,6 +1,8 @@
 import { SnowLumaWebSocketClient } from '@snowluma/sdk';
+import crypto from 'node:crypto';
 import { acquireQqOwnership } from './ownership.js';
 import { createQqReceipts } from './receipts.js';
+import { createQqSendLedger } from './send-ledger.js';
 
 const HTTP_SEND_ACTIONS = new Set(['send_private_msg', 'send_group_msg', 'upload_private_file', 'upload_group_file']);
 const RAW_WRITE_ACTIONS = new Set(['group_poke', 'send_poke', 'click_inline_keyboard_button']);
@@ -29,7 +31,9 @@ export function createQqRuntime({
   connectionTimeoutMs = 15000,
   ownershipDir,
   dedupFile,
-  postAction
+  outboundFile,
+  postAction,
+  authorizeSend
 } = {}) {
   const client = clientFactory({
     url: config.snowluma?.wsUrl,
@@ -46,6 +50,7 @@ export function createQqRuntime({
   let pendingSends = 0;
   const MAX_PENDING_SENDS = 256;
   const receipts = dedupFile ? createQqReceipts(dedupFile) : null;
+  const outbound = outboundFile ? createQqSendLedger(outboundFile) : null;
 
   function status() {
     return { state, ready: state === 'ready', connected: state === 'ready', accountId };
@@ -94,20 +99,81 @@ export function createQqRuntime({
     return callHttpAction(action, params);
   }
 
-  const sendOneBot = (action, params) => enqueueSend(() => {
-    assertWriteAction(action, HTTP_SEND_ACTIONS);
-    return (postAction ?? defaultPostAction)(action, params);
-  });
-  const sendPrivateMessage = (id, payload) => enqueueSend(() => client.sendPrivateMessage(id, payload));
-  const sendGroupMessage = (id, payload) => enqueueSend(() => client.sendGroupMessage(id, payload));
-  const rawWrite = (action, params) => enqueueSend(() => {
-    assertWriteAction(action, RAW_WRITE_ACTIONS);
-    return client.raw(action, params);
-  });
-  const requestWrite = (action, params) => enqueueSend(() => {
-    assertWriteAction(action, REQUEST_WRITE_ACTIONS);
-    return client.request(action, params);
-  });
+  function inferKind(action, params, options) {
+    let kind;
+    if (action.startsWith('upload_')) kind = 'file';
+    else if (action.includes('poke')) kind = 'poke';
+    else if (action.includes('custom_face')) kind = 'custom-face';
+    else if (action === 'click_inline_keyboard_button') kind = 'card';
+    const segments = Array.isArray(params?.message) ? params.message : [params?.message];
+    if (!kind && segments.some(segment => segment?.type === 'record')) kind = 'audio';
+    if (!kind && segments.some(segment => segment?.type === 'music')) kind = 'music';
+    if (!kind && segments.some(segment => segment?.type === 'image')) kind = 'sticker';
+    if (!kind && segments.some(segment => ['json', 'xml', 'share'].includes(segment?.type))) kind = 'card';
+    kind ??= 'text';
+    if (options?.kind && options.kind !== kind) {
+      throw Object.assign(new Error('QQ send kind does not match the OneBot action or payload'), { code: 'QQ_MEDIA_KIND_MISMATCH' });
+    }
+    return kind;
+  }
+
+  function inferTarget(params) {
+    const groupId = params?.group_id;
+    const userId = params?.user_id;
+    if (groupId !== undefined) return `group:${groupId}`;
+    if (userId !== undefined) return `private:${userId}`;
+    return `private:${accountId}`; // account-scoped custom-face actions
+  }
+
+  function executeSend(action, params, options, dispatch) {
+    return enqueueSend(async () => {
+      const requestId = options?.requestId ?? crypto.randomUUID();
+      const kind = inferKind(action, params, options);
+      const target = inferTarget(params);
+      await authorizeSend?.({ requestId, accountId, kind, target, action, params, ...options });
+      const claimed = outbound?.claim({ requestId, accountId, kind, target, action, payload: params });
+      if (claimed?.duplicate) return { duplicate: true, status: claimed.record.status,
+        receipt: claimed.record.receipt, requestId };
+      try {
+        const data = await dispatch();
+        if (outbound) {
+          const receipt = data?.data ?? data;
+          if (receipt?.message_id !== undefined || receipt?.file_id !== undefined ||
+              (data?.status === 'ok' && data?.retcode === 0)) {
+            outbound.ack(accountId, requestId,
+              receipt?.message_id !== undefined || receipt?.file_id !== undefined ? receipt : data);
+          } else {
+            return { status: 'outcome-unknown', requestId };
+          }
+        }
+        return data;
+      } catch (error) {
+        if (!outbound) throw error;
+        throw Object.assign(new Error(`QQ send outcome unknown for ${requestId}: ${error?.message ?? error}`),
+          { code: 'QQ_OUTCOME_UNKNOWN', requestId, cause: error });
+      }
+    });
+  }
+
+  const sendOneBot = (action, params, options = {}) => {
+    try { assertWriteAction(action, HTTP_SEND_ACTIONS); }
+    catch (error) { return Promise.reject(error); }
+    return executeSend(action, params, options, () => (postAction ?? defaultPostAction)(action, params));
+  };
+  const sendPrivateMessage = (id, payload, options = {}) =>
+    executeSend('send_private_msg', { user_id: id, message: payload }, options, () => client.sendPrivateMessage(id, payload));
+  const sendGroupMessage = (id, payload, options = {}) =>
+    executeSend('send_group_msg', { group_id: id, message: payload }, options, () => client.sendGroupMessage(id, payload));
+  const rawWrite = (action, params, options = {}) => {
+    try { assertWriteAction(action, RAW_WRITE_ACTIONS); }
+    catch (error) { return Promise.reject(error); }
+    return executeSend(action, params, options, () => client.raw(action, params));
+  };
+  const requestWrite = (action, params, options = {}) => {
+    try { assertWriteAction(action, REQUEST_WRITE_ACTIONS); }
+    catch (error) { return Promise.reject(error); }
+    return executeSend(action, params, options, () => client.request(action, params));
+  };
 
   function invoke(handler, label, event) {
     if (stopped || typeof handler !== 'function') return;
@@ -188,6 +254,16 @@ export function createQqRuntime({
     state = 'unavailable';
     client.close?.();
     if (connectPromise) await connectPromise;
+    let drainTimer;
+    const drained = await Promise.race([
+      sendTail.then(() => true),
+      new Promise(resolve => { drainTimer = setTimeout(() => resolve(false), 65000); })
+    ]);
+    clearTimeout(drainTimer);
+    if (!drained) {
+      return { ok: false, code: 'QQ_SEND_DRAIN_TIMEOUT',
+        error: 'QQ send remains in flight; ownership is retained until process exit or verified completion' };
+    }
     if (accountLease) { accountLease.release(); accountLease = null; }
     if (gatewayLease) { gatewayLease.release(); gatewayLease = null; }
     accountId = null;
@@ -195,5 +271,7 @@ export function createQqRuntime({
   }
 
   return { client, connect, start: connect, reconnect: connect, stop, status, health: status,
-    sendOneBot, sendPrivateMessage, sendGroupMessage, rawWrite, requestWrite };
+    sendOneBot, sendPrivateMessage, sendGroupMessage, rawWrite, requestWrite,
+    sendReceipt: (requestId, requestedAccountId = accountId) =>
+      requestedAccountId ? outbound?.get(requestedAccountId, requestId) ?? null : null };
 }

@@ -25,6 +25,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { mcpToolPolicyDenial } from './integrations/tool-policy.js';
 import { dataCall } from './control/data-ipc.js';
+import { interpretQqDataSendResponse } from './channel/qq/send-result.js';
 import { z } from 'zod';
 import { safeFetchAudioBuffer, looksLikeAudioBuffer } from './safe-fetch.js';
 import { PINYIN } from './pinyin-data.js';
@@ -52,17 +53,16 @@ function isAllowed(allowList, denyList, id, allowAllWhenEmpty) {
   return allowAllWhenEmpty;
 }
 
-async function onebot(_cfg, action, params, toolName = 'qq_send_file') {
+async function onebot(_cfg, action, params, toolName = 'qq_send_file', requestId) {
   // The stdio MCP child never owns the QQ account or its OneBot credentials.
   // Route every send through the active QQ host on the existing data pipe.
   const token = fs.readFileSync(path.join(APP_PATHS.stateDir, 'agent-token'), 'utf8').trim();
   if (!token) throw new Error('QQ 发送宿主服务令牌不可用');
   const response = await dataCall({
-    method: 'POST', path: '/api/send/file-action', body: { action, params, toolName }, token,
+    method: 'POST', path: '/api/send/file-action', body: { action, params, toolName, requestId }, token,
     timeoutMs: 75_000
   });
-  if (!response.ok) throw new Error(response.json?.error || `QQ 发送宿主拒绝执行 (${response.status})`);
-  return response.json?.data;
+  return interpretQqDataSendResponse(response);
 }
 
 // ── 本地 TTS 合成（GPT-SoVITS ayane，启动入口 start_api_ayane.bat，韵律自适应）/ 缓存 / 语音发送 ──
@@ -128,12 +128,12 @@ function extFromUrl(raw) {
 }
 
 // 发送语音消息（OneBot record 段）
-async function sendVoiceRecord(cfg, kind, id, filePath) {
+async function sendVoiceRecord(cfg, kind, id, filePath, requestId) {
   const action = kind === 'private' ? 'send_private_msg' : 'send_group_msg';
   return onebot(cfg, action, {
     [kind === 'private' ? 'user_id' : 'group_id']: id,
     message: [{ type: 'record', data: { file: filePath.replace(/\\/g, '/') } }]
-  }, 'qq_send_audio_from_url');
+  }, 'qq_send_audio_from_url', requestId);
 }
 
 // target 解析 + 白名单校验；失败返回 {error:{statusCode,message}}
@@ -336,9 +336,10 @@ server.tool(
     target: z.string().describe('目标接收地址，格式 private:QQ号 或 group:群号（必须命中白名单）'),
     filePath: z.string().describe('待发送文件的绝对路径（必须存在且位于本地读取目录内；音频扩展名默认走语音消息）'),
     original: z.boolean().optional().describe('true=用户要求音频原文件时传此参数：直接发送原始音频文件（不转码/不增益/不压缩，走文件消息）；缺省按语音消息发送'),
-    gain: z.number().min(0.5).max(8).optional().describe('音量增益倍数（0.5~8，默认取 config.json fileSend.volumeGain，当前 1.5）')
+    gain: z.number().min(0.5).max(8).optional().describe('音量增益倍数（0.5~8，默认取 config.json fileSend.volumeGain，当前 1.5）'),
+    requestId: z.string().regex(/^[A-Za-z0-9:._/-]{1,160}$/).optional().describe('稳定请求 ID；核验后重试同一次发送必须复用')
   },
-  async ({ target, filePath, gain, original }) => {
+  async ({ target, filePath, gain, original, requestId }) => {
     const denied = mcpToolPolicyDenial('qq-file-send', 'qq_send_file');
     if (denied) return denied;
     const cfg = loadConfig();
@@ -413,7 +414,7 @@ server.tool(
             [idKey]: id,
             file: normPath,
             name: path.basename(fp)
-          });
+          }, 'qq_send_file', requestId);
           return {
             content: [{ type: 'text', text: JSON.stringify({
               statusCode: 0,
@@ -449,7 +450,7 @@ server.tool(
         data = await onebot(cfg, action, {
           [idKey]: id,
           message: [{ type: 'record', data: { file: sendFile.replace(/\\/g, '/') } }]
-        });
+        }, 'qq_send_file', requestId);
         return {
           content: [{ type: 'text', text: JSON.stringify({ statusCode: 0, message: `语音消息发送成功（${kind}:${id}）`, messageId: data?.message_id, file: path.basename(fp), type: 'audio', gain: gainApplied, gainNote }, null, 2) }]
         };
@@ -459,7 +460,7 @@ server.tool(
         [idKey]: id,
         file: normPath,
         name: path.basename(fp)
-      });
+      }, 'qq_send_file', requestId);
       return {
         content: [{ type: 'text', text: JSON.stringify({ statusCode: 0, message: `文件发送成功（${kind}:${id}）`, fileId: data?.file_id, file: path.basename(fp), type: 'file' }, null, 2) }]
       };
@@ -565,9 +566,10 @@ server.tool(
   {
     target: z.string().describe('目标接收地址，格式 private:QQ号 或 group:群号（必须命中白名单）'),
     url: z.string().optional().describe('音频文件的 http(s) 直链，如 https://example.com/xx.mp3（与 text 二选一）'),
-    text: z.string().optional().describe('要合成的文本（与 url 二选一）：用本地TTS合成语音发送')
+    text: z.string().optional().describe('要合成的文本（与 url 二选一）：用本地TTS合成语音发送'),
+    requestId: z.string().regex(/^[A-Za-z0-9:._/-]{1,160}$/).optional().describe('稳定请求 ID；核验后重试同一次发送必须复用')
   },
-  async ({ target, url, text }) => {
+  async ({ target, url, text, requestId }) => {
     const denied = mcpToolPolicyDenial('qq-file-send', 'qq_send_audio_from_url');
     if (denied) return denied;
     const cfg = loadConfig();
@@ -614,7 +616,7 @@ server.tool(
           gainApplied = gainVal;
         }
       }
-      const data = await sendVoiceRecord(cfg, rt.kind, rt.id, file);
+      const data = await sendVoiceRecord(cfg, rt.kind, rt.id, file, requestId);
       return {
         content: [{ type: 'text', text: JSON.stringify({
           statusCode: 0,

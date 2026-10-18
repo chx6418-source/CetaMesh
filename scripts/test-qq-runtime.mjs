@@ -7,6 +7,7 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import http from 'node:http';
 import { createQqRuntime } from '../src/channel/qq/runtime.js';
+import { acquireQqOwnership } from '../src/channel/qq/ownership.js';
 import { createQqTransport } from '../src/channel/qq/transport.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -16,6 +17,7 @@ import { assertMcpToolEnabled } from '../src/integrations/tool-policy.js';
 import { writeJsonAtomic } from '../src/storage/json-file.js';
 import { dataCall, resolveDataPipeName } from '../src/control/data-ipc.js';
 import { terminateSuiteProcessTree } from '../src/testing/suite-process.js';
+import { pathToFileURL } from 'node:url';
 
 class FakeClient extends EventEmitter {
   constructor() {
@@ -83,7 +85,7 @@ await sendingRuntime.connect();
 const sendOne = sendingRuntime.sendOneBot('send_group_msg', { group_id: 42, message: [] });
 await Promise.resolve();
 const sendTwo = sendingRuntime.sendOneBot('upload_group_file', { group_id: 42, file: 'fixture' });
-await Promise.resolve();
+for (let i = 0; i < 10 && executedSends.length === 0; i += 1) await new Promise(resolve => setImmediate(resolve));
 assert.deepEqual(executedSends, ['send_group_msg'], 'QQ owner must serialize distinct send actions');
 releaseFirstSend();
 await Promise.all([sendOne, sendTwo]);
@@ -91,6 +93,66 @@ assert.deepEqual(executedSends, ['send_group_msg', 'upload_group_file']);
 await assert.rejects(sendingRuntime.sendOneBot('delete_msg', { message_id: 1 }), { code: 'QQ_ACTION_UNSUPPORTED' });
 assert.deepEqual(executedSends, ['send_group_msg', 'upload_group_file'], 'unsupported action never reaches OneBot');
 await sendingRuntime.stop();
+const sendLedgerRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-qq-runtime-outbound-'));
+try {
+  const ledgerFile = path.join(sendLedgerRoot, 'outbound.json');
+  const dispatched = [];
+  const makeLedgerRuntime = postAction => {
+    const fixtureClient = new FakeClient();
+    fixtureClient.connect = async () => { fixtureClient.emit('open'); };
+    return createQqRuntime({ config: { snowluma: { wsUrl: 'ws://127.0.0.1:6711' } },
+      clientFactory: () => fixtureClient, outboundFile: ledgerFile, postAction });
+  };
+  const firstLedgerRuntime = makeLedgerRuntime(async action => {
+    dispatched.push(action);
+    if (dispatched.length === 2) throw new Error('timeout after possible send');
+    return { message_id: dispatched.length };
+  });
+  await firstLedgerRuntime.connect();
+  const first = await firstLedgerRuntime.sendOneBot('send_group_msg', { group_id: 42, message: [] }, { requestId: 'turn-1:0' });
+  assert.equal(first.message_id, 1);
+  const repeated = await firstLedgerRuntime.sendOneBot('send_group_msg', { group_id: 42, message: [] }, { requestId: 'turn-1:0' });
+  assert.equal(repeated.duplicate, true);
+  assert.equal(repeated.status, 'sent');
+  await assert.rejects(firstLedgerRuntime.sendOneBot('send_group_msg', { group_id: 42, message: [] }, { requestId: 'turn-2:0' }),
+    { code: 'QQ_OUTCOME_UNKNOWN', requestId: 'turn-2:0' });
+  assert.deepEqual(dispatched, ['send_group_msg', 'send_group_msg']);
+  await firstLedgerRuntime.stop();
+  const restartedLedgerRuntime = makeLedgerRuntime(async action => { dispatched.push(action); return { message_id: 3 }; });
+  await restartedLedgerRuntime.connect();
+  const unknown = await restartedLedgerRuntime.sendOneBot('send_group_msg', { group_id: 42, message: [] }, { requestId: 'turn-2:0' });
+  assert.equal(unknown.status, 'outcome-unknown', 'restart must not repeat an uncertain side effect');
+  assert.equal(dispatched.length, 2);
+  await restartedLedgerRuntime.sendOneBot('send_group_msg', { group_id: 42, message: [] }, { requestId: 'turn-3:0' });
+  assert.equal(dispatched.length, 3, 'distinct requestId is not deduplicated by content');
+  await restartedLedgerRuntime.stop();
+  assert.equal(restartedLedgerRuntime.sendReceipt('turn-2:0', '10001')?.status, 'outcome-unknown',
+    'offline receipt inspection must preserve the unknown outcome after connector stop');
+  const deniedClient = new FakeClient();
+  deniedClient.connect = async () => { deniedClient.emit('open'); };
+  const deniedRuntime = createQqRuntime({ config: { snowluma: { wsUrl: 'ws://127.0.0.1:6712' } },
+    clientFactory: () => deniedClient, outboundFile: path.join(sendLedgerRoot, 'denied.json'),
+    authorizeSend: ({ target, kind }) => {
+      if (target !== 'group:42' || kind !== 'text') throw Object.assign(new Error('QQ target or media denied'), { code: 'QQ_SEND_DENIED' });
+    }, postAction: async action => { dispatched.push(action); return { message_id: 4 }; } });
+  await deniedRuntime.connect();
+  await assert.rejects(deniedRuntime.sendOneBot('send_group_msg', { group_id: 43, message: [] }, { requestId: 'deny-target' }), { code: 'QQ_SEND_DENIED' });
+  await assert.rejects(deniedRuntime.sendOneBot('send_group_msg', { group_id: 42,
+    message: [{ type: 'record', data: { file: 'fixture' } }] }, { requestId: 'deny-audio' }), { code: 'QQ_SEND_DENIED' });
+  await assert.rejects(deniedRuntime.sendOneBot('send_group_msg', { group_id: 42,
+    message: [{ type: 'record', data: { file: 'fixture' } }] }, { requestId: 'lie-audio', kind: 'text' }),
+  { code: 'QQ_MEDIA_KIND_MISMATCH' }, 'a caller cannot label an audio payload as text to bypass media permission');
+  assert.equal(dispatched.length, 3, 'denial must precede gateway IO');
+  assert.equal(fs.existsSync(path.join(sendLedgerRoot, 'denied.json')), false, 'denied send must not create an attempted-send record');
+  await deniedRuntime.stop();
+  const bridgeSource = fs.readFileSync(path.resolve(import.meta.dirname, '../src/bridge.js'), 'utf8');
+  assert.match(bridgeSource, /outboundFile:\s*path\.join\(STATE_DIR, 'qq-send-ledger\.json'\)/,
+    'Legacy product host must configure a persistent QQ send ledger');
+  assert.match(bridgeSource, /authorizeSend:\s*\(/,
+    'Legacy product host must give the Runtime a final authorization hook');
+} finally {
+  fs.rmSync(sendLedgerRoot, { recursive: true, force: true });
+}
 let postedAction = null;
 let httpAccountId = 10001;
 let httpSendCount = 0;
@@ -142,6 +204,23 @@ assert.equal(notices.at(-1), 'close');
 // produce a second side effect, including after a reconnect or process restart.
 const ownershipRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-qq-ownership-'));
 try {
+  const lockChild = spawn(process.execPath, ['--input-type=module', '-e',
+    "const { acquireQqOwnership } = await import(process.env.QQ_LOCK_MODULE); acquireQqOwnership('account', '90001', process.env.QQ_LOCK_DIR); process.stdout.write('READY\\n'); process.stdin.resume();"],
+  { cwd: path.resolve(import.meta.dirname, '..'), windowsHide: true,
+    env: { ...process.env, QQ_LOCK_MODULE: pathToFileURL(path.resolve(import.meta.dirname, '../src/channel/qq/ownership.js')).href,
+      QQ_LOCK_DIR: ownershipRoot }, stdio: ['pipe', 'pipe', 'pipe'] });
+  try {
+    const [readyChunk] = await once(lockChild.stdout, 'data');
+    assert.match(String(readyChunk), /READY/);
+    assert.throws(() => acquireQqOwnership('account', '90001', ownershipRoot), { code: 'QQ_ACCOUNT_BUSY' },
+      'another process must not become a second sender or consumer');
+  } finally {
+    const closed = once(lockChild, 'close');
+    lockChild.kill();
+    await closed;
+  }
+  assert.throws(() => acquireQqOwnership('account', '90001', ownershipRoot), { code: 'QQ_ACCOUNT_BUSY' },
+    'an unverified crash must fail closed instead of taking over a potentially active account');
   const processed = [];
   const makeRuntime = (accountId, wsUrl = 'ws://127.0.0.1:6700') => {
     const fixtureClient = new FakeClient();
@@ -186,6 +265,28 @@ try {
   await first.fixtureClient.groupHandlers[0](packet);
   assert.deepEqual(processed, [99], 'reconnect must not replay a handled message');
   await first.runtime.stop();
+  let finishInFlight;
+  let enteredInFlight;
+  const inFlightEntered = new Promise(resolve => { enteredInFlight = resolve; });
+  const inFlightClient = new FakeClient();
+  inFlightClient.connect = async () => { inFlightClient.emit('open'); };
+  const inFlight = createQqRuntime({ config: { snowluma: { wsUrl: 'ws://127.0.0.1:6700' } },
+    clientFactory: () => inFlightClient, ownershipDir: ownershipRoot,
+    postAction: async () => {
+      enteredInFlight();
+      await new Promise(resolve => { finishInFlight = resolve; });
+      return { message_id: 100 };
+    } });
+  assert.equal((await inFlight.connect()).connected, true);
+  const pendingSend = inFlight.sendOneBot('send_group_msg', { group_id: 3, message: [] });
+  await inFlightEntered;
+  const stopping = inFlight.stop();
+  const duringStop = makeRuntime(10001);
+  const deniedDuringStop = await duringStop.runtime.connect();
+  assert.equal(deniedDuringStop.code, 'QQ_ACCOUNT_BUSY', 'in-flight send retains the account lease until it resolves');
+  finishInFlight();
+  await pendingSend;
+  await stopping;
   const restarted = makeRuntime(10001);
   assert.equal((await restarted.runtime.connect()).connected, true);
   await restarted.fixtureClient.groupHandlers[0](packet);
@@ -277,6 +378,15 @@ console.log('PASS QQ runtime connection lifecycle, transport, and persisted MCP 
 // policy checks exercised above when it is explicitly started.
 const workerRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-qq-policy-worker-'));
 const repoRoot = path.resolve(import.meta.dirname, '..');
+const diagnostic = spawn(process.execPath, [path.join(repoRoot, 'scripts', 'send-test-group.mjs'), 'fixture', 'must-not-send'], {
+  cwd: repoRoot, windowsHide: true, env: { ...process.env, CETAMESH_QQ_DIAGNOSTIC_SEND: '' }, stdio: ['ignore', 'pipe', 'pipe']
+});
+let diagnosticOutput = '';
+diagnostic.stdout.on('data', chunk => { diagnosticOutput += String(chunk); });
+diagnostic.stderr.on('data', chunk => { diagnosticOutput += String(chunk); });
+const [diagnosticExit] = await once(diagnostic, 'close');
+assert.equal(diagnosticExit, 2, 'manual diagnostic must require explicit real-send opt-in before loading gateway credentials');
+assert.match(diagnosticOutput, /diagnostic.*disabled|诊断.*禁用/i);
 const discoveryRoot = path.join(workerRoot, 'discovery');
 fs.mkdirSync(discoveryRoot);
 writeJsonAtomic(path.join(workerRoot, 'config.json'), {
@@ -358,8 +468,16 @@ try {
     pluginId: 'cetamesh-bionic-chat', toolId: 'mcp__qq-file-send__qq_send_file', enabled: true
   } });
   await fileClient.connect(fileTransport);
-  const result = await fileClient.callTool({ name: 'qq_send_file', arguments: { target: 'group:42', filePath: fixtureFile } });
+  const fileTools = await fileClient.listTools();
+  assert.ok(fileTools.tools.find(tool => tool.name === 'qq_send_file')?.inputSchema?.properties?.requestId,
+    'file-send MCP schema must expose stable requestId for safe retry');
+  assert.ok(fileTools.tools.find(tool => tool.name === 'qq_send_audio_from_url')?.inputSchema?.properties?.requestId,
+    'audio-send MCP schema must expose stable requestId for safe retry');
+  const result = await fileClient.callTool({ name: 'qq_send_file', arguments: {
+    target: 'group:42', filePath: fixtureFile, requestId: 'fixture-file-send-1' } });
   assert.equal(result.isError, true, 'without the QQ owner an MCP send must fail closed');
+  assert.doesNotMatch(result.content[0].text, /invalid_type|Unrecognized key|invalid input/i,
+    'a stable requestId must be accepted by the MCP send schema');
   assert.equal(directSends, 0, 'MCP must not call OneBot HTTP directly');
 } finally {
   await fileClient.close();

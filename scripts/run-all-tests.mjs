@@ -61,6 +61,8 @@ const REGISTRY = {
   'test-ipc-runtime.mjs': { category: 'core' },
   'test-dsh-lifecycle.mjs': { category: 'core' },
   'test-qq-runtime.mjs': { category: 'core' },
+  'test-qq-send-ledger.mjs': { category: 'core' },
+  'test-qq-send-policy.mjs': { category: 'security' },
   'test-runner-environment.mjs': { category: 'core' },
   'test-integration-tool-registry.mjs': { category: 'core', note: '产品化任务 B：Tools Registry 目录/开关/持久化' },
   'test-release-versioning.mjs': { category: 'release', note: 'Plugin Center: canonical release version and build numbering' },
