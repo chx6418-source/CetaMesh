@@ -45,8 +45,9 @@
 | `npm run desktop:check` | PASS | Rust 编译检查，有原有 unused 警告 |
 | `npm run desktop:test` | PASS | 198 passed、0 failed |
 | `npm run desktop:build:debug`、`npm run desktop:build` | PASS | 实际 Shell debug/release 构建；Shell smoke 实测 Owner IPC、重启、EOF 清理 |
-| `npm run build:release`、RC verification | **待运行** | 需要干净代码提交后执行 |
-| 真实 QQ/DSH/模型服务、真实安装版人工 Harbor E2E | NOT_RUN_ENVIRONMENT | 外部组件、Provider Key、正式签名与人工环境未配置；自动化通过不能代替此验收 |
+| `npm run build:release -- --use-current-build-number` | PASS | 干净代码提交 `1bbee5e2db47bfea7e7712115c66dd3b3c5f6b20`，`dirtySourceTree=false`；Build 1072、138 组件、发行禁止项/凭据审计通过 |
+| `npm test -- --category release` | PASS 8 / FAIL 0 | 注册的 RC 验证包含真实安装器在中文及空格路径隔离安装、运行、卸载；初轮旧 `dual` 断言失败后已按纯 Core `service-only` 契约更新并复测 |
+| 真实 QQ/DSH/模型服务、真实安装版人工 Harbor E2E | NOT_RUN_ENVIRONMENT | 外部组件、Provider Key、正式签名与人工环境未配置；自动化通过不能代替此验收。发行清单还明确列出 Windows 10 x64、DSH/SnowLuma 重启恢复与真实四模式未验证 |
 
 ## 尚未解除的依赖与风险
 
@@ -58,9 +59,11 @@
 
 ## 修改与提交
 
-产品：`src/app/core-worker.js`、`src/core-dispatch.js`、`src/app/ipc-runtime.js`、`src/control/data-ipc.js`、`src/entrypoint.js`、`src/workspace/registry.js`、`desktop-shell/src/native_main.rs`。测试：`scripts/test-core-entry.mjs`、`test-core-dist.mjs`、`test-no-web-release.mjs`、`test-workspace-runtime.mjs`、`test-qq-runtime.mjs`、`test-desktop-supervisor.mjs`、`test-desktop-shell.mjs`。版本：`release/version.json`、`package.json`、`package-lock.json`。
+产品：`src/app/core-worker.js`、`src/core-dispatch.js`、`src/app/ipc-runtime.js`、`src/control/data-ipc.js`、`src/entrypoint.js`、`src/workspace/registry.js`、`desktop-shell/src/native_main.rs`。测试：`scripts/test-core-entry.mjs`、`test-core-dist.mjs`、`test-no-web-release.mjs`、`test-workspace-runtime.mjs`、`test-qq-runtime.mjs`、`test-desktop-supervisor.mjs`、`test-desktop-shell.mjs`、`test-release-candidate.mjs`。版本：`release/version.json`。
 
-代码 Commit、Final HEAD、RC Build 路径和 SHA256：**待干净提交与 RC 验证后补录**。
+代码及 RC 来源 Commit：`1bbee5e2db47bfea7e7712115c66dd3b3c5f6b20`（该提交为本轮可执行产物的 **Build HEAD**；报告与 RC 断言修正随后单独提交，交付时 Final HEAD 见 `git rev-parse HEAD`）。
+
+RC Build：`artifacts/rc/1.0.0-rc.2/build-1072`；安装器 `CetaMesh-Setup-1.0.0-rc.2-build1072-x64.exe`，42,995,712 字节，SHA256 `94620906A2053765E2F6B8F634ACC7A556F30DE17FBA99112733CED2CFBA4DA7`。载荷 SEA `payload/WhaleBridgeCore.exe`，SHA256 `CE115D54C73851EC96D72F51BC2C96678E3E305D2BC7A38CF089811B2781CD24`。产物未签名，未发布。
 
 ## M3 前置条件
 

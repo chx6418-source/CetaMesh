@@ -115,7 +115,7 @@ async function assertNativeApiSurface(port, dataDir) {
   const { res } = await waitForDataIpc(dataDir);
   assert.equal(res.ok, true, `数据面 IPC /api/status 应可用（status ${res.status}）`);
   const payload = res.json ?? {};
-  assert.equal(payload.tokenModel, 'dual', 'Core 状态 API 应返回有效状态载荷');
+  assert.equal(payload.tokenModel, 'service-only', 'Core 状态 API 应声明最小服务令牌模型');
   assert.ok(Object.hasOwn(payload, 'mode'), '状态载荷缺少 mode');
 
   await assertConsolePortRefused(port);
