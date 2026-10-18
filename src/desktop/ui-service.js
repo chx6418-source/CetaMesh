@@ -581,6 +581,14 @@ export function createDesktopUiService({ services = {}, system = services.system
       recoveryFacts = `\n[Workspace recovery verification]\n${JSON.stringify({ status: status.result, diff: diff.result }).slice(0, 8000)}`;
     }
     const selectedProvider = await requireTaskProvider(provider || taskRow.currentAgent?.provider, taskRow.workspaceId);
+    // Work has no model picker. Snapshot Owner defaults only for an unbound
+    // Managed Task; explicit/native and persisted per-Task models keep priority.
+    if (selectedProvider === 'cetamesh' && !modelProvider && !model
+      && !taskRow.modelConfig?.modelProvider && !taskRow.modelConfig?.model) {
+      const defaults = services.settingsService?.store.get().settings.models;
+      modelProvider = string(defaults?.provider, 80) || undefined;
+      model = string(defaults?.defaultModel, 160) || undefined;
+    }
     const wasPaused = ['paused', 'waiting', 'blocked'].includes(taskRow.status);
     if (wasPaused) {
       // A resumed Agent can execute tools immediately. Persist the running Task
