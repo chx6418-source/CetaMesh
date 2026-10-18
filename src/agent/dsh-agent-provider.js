@@ -1,7 +1,7 @@
 // DSH Agent Provider（阶段 06；会话 2 起作为 Agent Broker 的第一个真实 Provider）：
-// 把 DSH 0.1.5 Typert 网关映射到标准 AgentProvider 契约。
+// 把已核对的 DSH 0.1.5-rc.1 Typert 网关映射到标准 AgentProvider 契约。
 //
-// 复用现有 src/dsh-client.js 的 NodeApiClient（由 Desktop composition root 注入共享实例，不重写、不另建连接）。
+// 复用现有 src/dsh-client.js 的 NodeApiClient（由 Core composition root 注入，不启动 DSH 进程）。
 // 端点映射（均以本仓库真实调用与 2026-10-04 对运行中 DSH 的探测为准）：
 //   createSession  → session/create（+ 可选 session/selectModel 绑定模型）
 //   send           → session/prompt（requestId/mode/content 内容块数组）
@@ -21,6 +21,7 @@
 import crypto from 'node:crypto';
 import { agentProviderError, defineAgentProvider, normalizePromptContent, AGENT_EVENT_PROTOCOL_DSH } from './agent-provider.js';
 import { selectDshSessionModel } from '../dsh-model-selection.js';
+import { createDshFollowHub } from './dsh-follow-hub.js';
 
 const CALL_TIMEOUT_MS = 15_000;
 const LIST_TIMEOUT_MS = 10_000;
@@ -37,7 +38,7 @@ function wrapDshError(error, label) {
   return agentProviderError(transport ? 'PROVIDER_UNAVAILABLE' : 'PROVIDER_ERROR', `${label}：${message}`, { cause: error });
 }
 
-export function createDshAgentProvider({ api, defaults = {}, log = () => {} } = {}) {
+export function createDshAgentProvider({ api, defaults = {}, log = () => {}, presetPolicy = null } = {}) {
   if (!api || typeof api.callEndpoint !== 'function' || typeof api.openRemoteStream !== 'function') {
     throw new Error('createDshAgentProvider 需要注入 dsh-client.js 的 NodeApiClient 实例');
   }
@@ -46,6 +47,7 @@ export function createDshAgentProvider({ api, defaults = {}, log = () => {} } = 
     model: defaults.model ? String(defaults.model) : null,
     reasoningEffort: defaults.reasoningEffort ? String(defaults.reasoningEffort) : null
   };
+  const followHub = createDshFollowHub({ api });
 
   /** session/list 单条投影；找不到返回 null（不抛错，由调用方决定语义）。 */
   async function findSessionItem(sessionId) {
@@ -66,7 +68,7 @@ export function createDshAgentProvider({ api, defaults = {}, log = () => {} } = 
     return sessionId.trim();
   }
 
-  return defineAgentProvider({
+  const contract = defineAgentProvider({
     id: 'dsh',
     label: 'DSH Agent',
     eventProtocol: AGENT_EVENT_PROTOCOL_DSH,
@@ -87,9 +89,11 @@ export function createDshAgentProvider({ api, defaults = {}, log = () => {} } = 
       }
     },
     methods: {
-      async createSession({ cwd, model, reasoningEffort, modelProvider } = {}) {
+      async createSession({ cwd, model, reasoningEffort, modelProvider, purpose } = {}) {
         const request = {};
         if (cwd !== undefined && cwd !== null && String(cwd).trim()) request.cwd = String(cwd);
+        if (presetPolicy && !purpose) throw agentProviderError('INVALID_PARAMS', 'DSH Session purpose must be coding or social');
+        if (presetPolicy) request.agentPreset = presetPolicy.require(purpose);
         let value;
         try {
           value = await api.callEndpoint('session/create', { request }, AbortSignal.timeout(CALL_TIMEOUT_MS));
@@ -143,7 +147,7 @@ export function createDshAgentProvider({ api, defaults = {}, log = () => {} } = 
         const sid = requireSessionId(sessionId);
         try {
           await api.callEndpoint('session/cancel', { request: { sessionId: sid } }, AbortSignal.timeout(LIST_TIMEOUT_MS));
-          return { cancelled: true, sessionId: sid };
+          return { cancelRequested: true, stopped: false, sessionId: sid };
         } catch (error) {
           if (String(error?.message ?? error).includes('session/not-found')) {
             throw agentProviderError('SESSION_NOT_FOUND', `会话不存在：${sid}`, { cause: error });
@@ -203,6 +207,7 @@ export function createDshAgentProvider({ api, defaults = {}, log = () => {} } = 
         const sid = requireSessionId(sessionId);
         try {
           await api.callEndpoint('workspace/archiveSession', { request: { sessionId: sid } }, AbortSignal.timeout(LIST_TIMEOUT_MS));
+          followHub.closeSession(sid);
           return { closed: true, sessionId: sid };
         } catch (error) {
           if (String(error?.message ?? error).includes('session/not-found')) {
@@ -214,9 +219,9 @@ export function createDshAgentProvider({ api, defaults = {}, log = () => {} } = 
 
       // 直接返回 async iterable（不包 async 包装，消费方 for await 即可）：
       // 事件流是有状态资源，调用方负责用 signal 中止。
-      follow({ sessionId, signal } = {}) {
+      follow({ sessionId, signal, sinceSequence } = {}) {
         const sid = requireSessionId(sessionId);
-        return api.openRemoteStream('session/follow', { request: { address: { kind: 'session', sessionId: sid } } }, { signal });
+        return followHub.follow({ sessionId: sid, signal, sinceSequence });
       },
 
       async selectModel({ sessionId, model, reasoningEffort, modelProvider } = {}) {
@@ -242,9 +247,24 @@ export function createDshAgentProvider({ api, defaults = {}, log = () => {} } = 
           await api.callEndpoint('settings/describe', {}, AbortSignal.timeout(HEALTH_TIMEOUT_MS));
           settingsVerified = true;
           await api.callEndpoint('session/list', { _request: {} }, AbortSignal.timeout(HEALTH_TIMEOUT_MS));
-          return { status: 'available', available: true, provider: 'dsh', processAlive: null,
-            reachable: true, authenticated: true, compatible: true, sessionCapable: true, ready: true,
-            taskEligible: false, reason: null };
+          const preset = presetPolicy?.inspect('coding') ?? null;
+          let presetLoaded = null;
+          if (preset?.compatible) {
+            try {
+              const listed = await api.callEndpoint('agentPresets/list', {}, AbortSignal.timeout(HEALTH_TIMEOUT_MS));
+              presetLoaded = Array.isArray(listed?.presets) && listed.presets.some(row => row?.id === preset.id);
+            } catch (error) {
+              log(`DSH preset discovery failed: ${error?.code ?? 'PROVIDER_ERROR'}`);
+              presetLoaded = false;
+            }
+          }
+          const presetReady = !preset || (preset.compatible && presetLoaded === true);
+          const presetReason = preset && !preset.compatible ? preset.reason : preset && !presetLoaded ? 'preset-not-loaded' : null;
+          return { status: presetReady ? 'available' : 'needs-setup', available: true, provider: 'dsh', processAlive: null,
+            reachable: true, authenticated: true, compatible: true, sessionCapable: true,
+            ready: presetReady, taskEligible: false,
+            preset: preset ? { purpose: 'coding', id: preset.id, compatible: preset.compatible, loaded: presetLoaded, reason: presetReason } : null,
+            reason: presetReason };
         } catch (error) {
           const code = String(error?.code ?? '');
           const transportFailed = ['DSH_UNREACHABLE', 'DSH_REQUEST_TIMEOUT', 'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT'].includes(code)
@@ -262,4 +282,5 @@ export function createDshAgentProvider({ api, defaults = {}, log = () => {} } = 
       }
     }
   });
+  return Object.freeze({ ...contract, shutdown: () => followHub.shutdown() });
 }

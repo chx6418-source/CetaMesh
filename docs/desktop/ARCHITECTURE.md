@@ -23,13 +23,15 @@ The desktop shell starts one Node worker with `--worker`. `src/core-dispatch.js`
 mode directly to `src/app/core-worker.js`, which calls `src/app/bootstrap.js` and owns the
 Core services, Owner IPC and data IPC. `src/app/service-container.js` owns service wiring,
 `src/app/ipc-runtime.js` owns the existing UI IPC method routing, and the application lifecycle
-closes registered services. Core construction succeeds without QQ or a ready DSH provider.
+closes registered services. Core constructs an optional DSH API client without starting DSH;
+construction succeeds without QQ or a ready DSH provider. The DSH Agent Provider owns its
+Session Follow reader and Core cursor cache. Task staging still imports through Capability Broker.
 
 `src/bridge.js` remains a separate, exclusive Legacy QQ/Social compatibility entry. It takes
 the same StateDir owner lease before starting its old services, so it cannot run concurrently
 with the desktop Core on one data directory. It still composes Core services internally and
-must not be described as an independent Connector until the M3/M4 migration is approved and
-verified.
+must not be described as an independent QQ Connector until M4 ownership transfer is approved
+and verified. The legacy DSH path remains exclusive to this compatibility host.
 
 ```text
 Desktop shell → `--worker` → `src/app/core-worker.js`
@@ -97,7 +99,7 @@ Native / Infrastructure                     Node SEA Core, Rust supervisor/insta
 | Agent must not access the disk arbitrarily | Workspace tools resolve user paths through `src/workspace/boundary.js` (lexical + realpath containment, forbidden roots); runtime tests: `npm run test-workspace`. |
 | Trust must not become Permission | Agent/extension capabilities require declared permissions plus explicit grants/approval (`src/extension/review.js`, `src/extension/host.js`, task/agent approval paths); tests: `test-extension`, `test-task`, `test-mesh`. |
 | Task must not depend on an Agent Session | `src/task/runtime.js` keeps `currentAgent` as an optional attachment; detach sets it to `null` without touching task identity. Tests: `npm run test-task`. |
-| QQ must not be a Core dependency | The service-container import closure excludes SnowLuma SDK, QQ runtime and Social adapters; Core constructs with no QQ/DSH injection. Tests: `test-composition-boundary`, `test-service-container`. |
+| QQ must not be a Core dependency | The service-container import closure excludes SnowLuma SDK, QQ runtime and Social adapters; Core injects only an optional DSH API client and starts no DSH process. Tests: `test-composition-boundary`, `test-service-container`, `test-dsh-connector-m3`. |
 | Secrets must not reach logs | `src/logging/redact.js` (mandatory `createRedactingSink`, text + field rules). Test: `npm run test-system` (includes bearer-token regression). |
 | Extensions must not execute downloaded code freely | Static scan forbids `child_process`/`fs`/dynamic import/`new Function`; the host runs code in `vm.createContext` with no host `require`/`process`/`Buffer`/fs/net; high-risk permissions need explicit review approval. Tests: `npm run test-extension`. |
 | Legacy reserved modes stay out of the product flow | No `reserved`/`reserved2` references in `src/desktop`, `src/agent`, `src/memory`, `src/task`, `src/workspace`, `src/continuity`; they remain only in the legacy QQ adapter surfaces (Advanced). Test: `test-architecture`. |

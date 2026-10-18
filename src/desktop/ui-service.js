@@ -229,7 +229,7 @@ function projectAgent(value) {
     : boundaryUnverified && available ? 'descriptor-incomplete'
     : /unsupported|not[_-]supported/i.test(readiness) ? 'not-supported'
     : /not[_-]installed|missing[_-]binary/i.test(readiness) ? 'not-installed'
-      : /setup|auth|credential|needs[_-]config/i.test(readiness) ? 'needs-setup'
+    : /setup|auth|credential|needs[_-]config/i.test(readiness) || (id === 'dsh' && health.ready === false && available) ? 'needs-setup'
         : row.available === false || health.available === false ? 'unavailable'
           : available ? 'ready' : 'not-checked';
   return {
@@ -238,7 +238,8 @@ function projectAgent(value) {
     description: id === 'codex' ? '理解项目、修改代码并检查结果。' : id === 'dsh' ? '处理资料、规划和跨工具工作流。' : '在可用时连接本地开发能力。',
     available, installed, authenticated, compatible, eligible: available && !requiresTask && !boundaryUnverified,
     taskEligible: available && installed !== false && authenticated !== false && requiresTask
-      && health.sessionCapable !== false && (id !== 'codex' || health.sandboxCapable !== false),
+      && health.sessionCapable !== false && (id !== 'codex' || health.sandboxCapable !== false)
+      && (id !== 'dsh' || health.taskEligible === true),
     configured: row.configured === true || health.configured === true,
     reason: reason || (boundaryUnverified ? 'descriptor-incomplete' : available && requiresTask ? 'task-required' : null), lastError, workspaceBoundary, status, version: string(row.version, 80) || null,
     desktopApp: id === 'dsh' ? {

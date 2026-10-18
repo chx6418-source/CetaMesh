@@ -139,7 +139,7 @@ export function createStagedDshAgentProvider({ provider, resolveTaskWorkspace, l
             excludedRoots
           });
           try {
-            const created = await provider.createSession({ cwd: stage.root, model, reasoningEffort, modelProvider });
+            const created = await provider.createSession({ cwd: stage.root, model, reasoningEffort, modelProvider, purpose: 'coding' });
             if (!created?.sessionId) throw agentProviderError('PROVIDER_ERROR', 'DSH did not return a sessionId');
             sessions.set(created.sessionId, {
               id: created.sessionId,
@@ -211,12 +211,12 @@ export function createStagedDshAgentProvider({ provider, resolveTaskWorkspace, l
         },
         async health(options = {}) {
           const health = await provider.health(options);
-          return { ...health, provider: provider.id, taskEligible: health.available === true && health.sessionCapable === true,
+          return { ...health, provider: provider.id, taskEligible: health.ready === true && health.sessionCapable === true,
             workspaceBoundary: 'capability-broker' };
         },
-        async *follow({ sessionId, signal } = {}) {
+        async *follow({ sessionId, signal, sinceSequence } = {}) {
           const session = requireSession(sessionId);
-          for await (const item of provider.follow({ sessionId, signal })) {
+          for await (const item of provider.follow({ sessionId, signal, sinceSequence })) {
             const event = item?.type === 'event' ? item.event : item;
             if (event?.type === 'turn/end' && event.data?.reason?.kind === 'completed') {
               const outcome = await reconcileTurnOnce(session, event.data?.turn, signal);
@@ -244,6 +244,7 @@ export function createStagedDshAgentProvider({ provider, resolveTaskWorkspace, l
         catch (error) { log(`DSH staging cleanup failed: ${error?.code ?? 'STAGING_CLEANUP_FAILED'}`); }
       }
       sessions.clear();
+      await provider.shutdown?.();
     },
     _sessions: sessions
   });

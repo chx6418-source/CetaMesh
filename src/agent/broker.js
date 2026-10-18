@@ -113,7 +113,8 @@ export function createAgentBroker({ registry, log = () => {} } = {}) {
         workspaceId: params?.workspaceId,
         model: params?.model,
         reasoningEffort: params?.reasoningEffort,
-        modelProvider: params?.modelProvider
+        modelProvider: params?.modelProvider,
+        purpose: params?.purpose
       });
     },
 

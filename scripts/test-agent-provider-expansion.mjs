@@ -142,10 +142,11 @@ try {
       if (signal?.aborted) return;
       session.followSubscriptions += 1;
       if (!session.bootstrapOnly) fs.writeFileSync(path.join(session.cwd, session.outputName ?? 'dsh-result.txt'), `dsh fake edit ${sessionId}`);
-      yield { type: 'turn/start', data: { turn: 'dsh-turn-1' } };
-      yield { type: 'assistant/message', data: { turn: 'dsh-turn-1', message: { content: [{ type: 'text', text: 'DSH fixture response' }] } } };
-      yield { type: 'turn/end', data: { turn: 'dsh-turn-1', reason: { kind: 'completed' } } };
-      if (session.duplicateTurnEnd) yield { type: 'turn/end', data: { turn: 'dsh-turn-1', reason: { kind: 'completed' } } };
+      yield { type: 'snapshot', cursor: 0, records: [], hasMore: false };
+      yield { type: 'event', event: { seq: 1, type: 'turn/start', data: { turn: 'dsh-turn-1' } } };
+      yield { type: 'event', event: { seq: 2, type: 'assistant/message', data: { turn: 'dsh-turn-1', message: { content: [{ type: 'text', text: 'DSH fixture response' }] } } } };
+      yield { type: 'event', event: { seq: 3, type: 'turn/end', data: { turn: 'dsh-turn-1', reason: { kind: 'completed' } } } };
+      if (session.duplicateTurnEnd) yield { type: 'event', event: { seq: 3, type: 'turn/end', data: { turn: 'dsh-turn-1', reason: { kind: 'completed' } } } };
       session.running = false;
     }
   };
@@ -214,7 +215,7 @@ try {
   const dshWaiting = await waitFor(() => dshService.broker.status({ provider: 'dsh', sessionId: dshSession.sessionId }), status => status.waitingForApproval);
   assert.equal(fs.existsSync(path.join(authoritativeRoot, 'dsh-result.txt')), false, 'DSH writes staging until Broker approval');
   await taskFollowCapabilityService.execute({ method: 'capability.approval.decide', params: { id: dshWaiting.approvalId, approve: true } });
-  await waitFor(() => dshEvents, events => events.some(event => event.type === 'turn/end'));
+  await waitFor(() => dshEvents, events => events.some(event => (event.event?.type ?? event.type) === 'turn/end'));
   assert.equal(fs.readFileSync(path.join(authoritativeRoot, 'dsh-result.txt'), 'utf8'), `dsh fake edit ${dshSession.sessionId}`);
   await dshFollow;
   const approvedDshStageRoot = dshStageRoot;

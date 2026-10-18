@@ -91,7 +91,7 @@ export function createCetaMeshServices(options = {}) {
 
   const providerSecrets = createProviderSecrets({ root: dataRoot });
   const agentService = createDefaultAgentService({ api, defaults: dshDefaults, log,
-    dshOptions: agentTaskOptions,
+    dshOptions: agentTaskOptions, dshPresetConfig: options.dshPresetConfig,
     codexOptions: { ...agentTaskOptions,
       authorizeOpenAiEnvironment: () => settingsService.store.get().settings.agents.codexOpenAiEnvironmentAuthorized === true },
     desktopStatus: () => dshDesktop.status() });

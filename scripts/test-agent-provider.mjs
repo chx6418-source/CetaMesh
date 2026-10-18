@@ -225,7 +225,8 @@ async function waitFor(predicate, label, timeoutMs = 1000) {
   ok('B7 closeSession → workspace/archiveSession');
 
   const stream = provider.follow({ sessionId: 'session-mock-1' });
-  await stream.next();
+  await assert.rejects(stream.next(), (e) => e.code === 'PROVIDER_UNAVAILABLE',
+    'an empty native Follow must not masquerade as successful completion');
   assert.ok(calls.some((c) => c.endpoint === 'session/follow' && c.stream));
   ok('B8 follow → session/follow 流');
 }

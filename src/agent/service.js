@@ -9,6 +9,7 @@ import { agentProviderError, defineAgentProvider } from './agent-provider.js';
 import { createAgentProviderRegistry } from './registry.js';
 import { createAgentBroker } from './broker.js';
 import { createDshAgentProvider } from './dsh-agent-provider.js';
+import { createDshPresetPolicy } from './dsh-preset-policy.js';
 import { createStagedDshAgentProvider } from './staged-dsh-agent-provider.js';
 import { createCodexAgentProvider } from './codex-agent-provider.js';
 import { createZCodeAgentProvider } from './zcode-agent-provider.js';
@@ -67,9 +68,10 @@ function summarizeProvider(provider, health = null) {
  * NodeApiClient when the legacy runtime is present; Core may omit DSH entirely.
  * The returned .broker supports process-local turn-end wiring for Chat and Continuity.
  */
-export function createDefaultAgentService({ api, defaults, log, dshOptions = {}, codexOptions = {}, codexExecutable,
+export function createDefaultAgentService({ api, defaults, log, dshOptions = {}, dshPresetConfig = null, codexOptions = {}, codexExecutable,
   zcodeOptions = {}, zcodeExecutable, desktopStatus = null } = {}) {
-  const dshProvider = api ? createDshAgentProvider({ api, defaults, log }) : createUnavailableDshProvider();
+  const dshProvider = api ? createDshAgentProvider({ api, defaults, log,
+    presetPolicy: dshPresetConfig ? createDshPresetPolicy(dshPresetConfig) : null }) : createUnavailableDshProvider();
   const taskBoundDsh = api && typeof dshOptions.resolveTaskWorkspace === 'function' && typeof dshOptions.applyChanges === 'function'
     ? createStagedDshAgentProvider({ ...dshOptions, provider: dshProvider, log })
     : dshProvider;
@@ -130,7 +132,7 @@ export function createAgentService({ broker, log = () => {}, desktopStatus = nul
       return broker.createSession(params?.provider, {
         cwd: params?.cwd, model: params?.model,
         reasoningEffort: params?.reasoningEffort, modelProvider: params?.modelProvider,
-        taskId: params?.taskId, workspaceId: params?.workspaceId
+        taskId: params?.taskId, workspaceId: params?.workspaceId, purpose: params?.purpose
       });
     },
     'agent.send': (params) => broker.send({
@@ -208,8 +210,7 @@ export function createAgentService({ broker, log = () => {}, desktopStatus = nul
     },
 
     close() {
-      // DshAgentProvider 无常驻资源（follow 流由消费方持有并自行 abort）；
-      // Broker.close 清空回合结束监听器。
+      // Stop Broker listeners, then each Provider's owned streams and staging.
       broker.close();
       for (const provider of registry.list()) {
         try {

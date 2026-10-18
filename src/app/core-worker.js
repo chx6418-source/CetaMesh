@@ -8,6 +8,7 @@ import { readRawConfigOrEmpty } from '../config/loader.js';
 import { startDataIpcServer, resolveDataPipeName } from '../control/data-ipc.js';
 import { bootstrapCetaMesh } from './bootstrap.js';
 import { createDesktopIpcRuntime } from './ipc-runtime.js';
+import { createDshCoreConnector } from '../agent/dsh-core-connector.js';
 
 function serviceToken(stateDir) {
   fs.mkdirSync(stateDir, { recursive: true });
@@ -53,10 +54,11 @@ function coreDataHandler(token) {
 export function runCoreWorker({ paths = APP_PATHS, processRef = process, log = message => process.stdout.write(`${message}\n`) } = {}) {
   // A damaged QQ/Legacy config is optional to Core. Never write it back here.
   const config = readRawConfigOrEmpty(paths.configFile);
+  const dsh = createDshCoreConnector({ config, env: processRef.env });
   const application = bootstrapCetaMesh({
     config, dataRoot: paths.dataRoot, stateDir: paths.stateDir,
     sourceRoot: paths.sourceRoot, resourceRoot: paths.resourceRoot,
-    processRef, log
+    api: dsh.api, dshPresetConfig: dsh.presetConfig, processRef, log
   });
   try {
     const token = serviceToken(paths.stateDir);
