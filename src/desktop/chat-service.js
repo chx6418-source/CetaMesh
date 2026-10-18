@@ -1004,7 +1004,7 @@ export function createChatService({
     const isModelChannel = state.modelTurn != null;
     const sessionId = record.dshSessionId;
     const text = turn.displayText ?? '';
-    if (text.trim() || turn.state === 'done' || turn.state === 'error') {
+    if (text.trim() || turn.state === 'done' || turn.state === 'error' || turn.toolActivity?.length) {
       const messageId = crypto.randomUUID();
       const historyRevision = appendMessage(record.id, {
         id: messageId,
@@ -2001,6 +2001,10 @@ export function createChatService({
           provider: record.runtimeProvider || record.config.agentProvider, sessionId: record.dshSessionId
         } });
       } else toolExecutionCoordinator?.cancelSession?.(record.id, 'chat-stop');
+      // Only an unexecuted, cancelled approval is confirmed stopped here.
+      // Running external tools retain their separate stop/unknown semantics.
+      turn.toolActivity = (turn.toolActivity ?? []).map(tool => tool.status === 'waiting-approval'
+        ? { ...tool, status: 'cancelled' } : tool);
       turn.state = 'cancelled';
       finalizeTurn(record, state);
       onEvent?.({ event: 'chat.updated', data: { sessionId: record.id, status: 'cancelled', requestId: turn.requestId } });

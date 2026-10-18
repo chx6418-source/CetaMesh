@@ -338,6 +338,13 @@ type ChatTimelineItem =
 const chatTimelineKey = (item: ChatTimelineItem) => item.id;
 const isChatMessageAnchor = (item: ChatTimelineItem) => item.kind === 'message';
 
+export function ChatCatalogStatus({ catalog }: { catalog: Awaited<ReturnType<typeof chatClient.catalog>> | null }) {
+  // `available` describes the optional legacy DSH catalog. Model discovery
+  // has its own state; a loaded directory is not proof of inference readiness.
+  const hasDirectCatalog = catalog?.modelProviders.some(provider => provider.catalogState === 'loaded' && provider.models.length > 0);
+  return <span>{catalog?.available === false && !hasDirectCatalog ? catalog.reason || '模型状态不可用' : 'CetaMesh Desktop'}</span>;
+}
+
 function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onNew, onOpenMemory, onReviewTask }: { session: ChatSession | null; workspaces: { id: string; name: string; status: string }[]; activeWorkspaceId: string | null; onSessionUpdate(session: ChatSession): void; onNew(): Promise<void>; onOpenMemory(): void; onReviewTask(id: string): void }) {
   const [messages, setMessages] = useState<ChatMessageDto[]>([]);
   const [hasMoreHistory, setHasMoreHistory] = useState(false);
@@ -717,7 +724,7 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
   const selectedModelKey = JSON.stringify([session.config.modelProvider ?? selectedProvider?.id ?? '', session.config.model || '']);
   return <div className={`chat-workspace ${contextCollapsed ? 'context-collapsed' : ''}`}>
     <section className="conversation-pane">
-      <div className="conversation-toolbar"><div><p className="eyebrow">CETAMESH · CHAT</p><h1>{session.title || '新会话'}</h1><div className="conversation-meta"><StatusBadge value={status.state || 'idle'} /><span>更新于 {relativeLabel(session.updatedAt)}</span><span>·</span><span>{catalog?.available === false ? catalog.reason || '模型状态不可用' : 'CetaMesh Desktop'}</span></div></div><div className="row"><IconButton label={contextCollapsed ? '显示运行上下文' : '隐藏运行上下文'} icon="work" onClick={toggleContext} /><IconButton label="刷新会话" icon="update" onClick={() => void load()} /><IconButton label="新建会话" icon="add" onClick={() => void onNew()} /></div></div>
+      <div className="conversation-toolbar"><div><p className="eyebrow">CETAMESH · CHAT</p><h1>{session.title || '新会话'}</h1><div className="conversation-meta"><StatusBadge value={status.state || 'idle'} /><span>更新于 {relativeLabel(session.updatedAt)}</span><span>·</span><ChatCatalogStatus catalog={catalog} /></div></div><div className="row"><IconButton label={contextCollapsed ? '显示运行上下文' : '隐藏运行上下文'} icon="work" onClick={toggleContext} /><IconButton label="刷新会话" icon="update" onClick={() => void load()} /><IconButton label="新建会话" icon="add" onClick={() => void onNew()} /></div></div>
       <VirtualList
         items={timelineItems}
         estimateSize={112}
@@ -742,10 +749,10 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
   </div>;
 }
 
-function MessageBubble({ message, streaming = false, sendError, onRetry }: { message: ChatMessageDto; streaming?: boolean; sendError?: string; onRetry?(): void }) {
+export function MessageBubble({ message, streaming = false, sendError, onRetry }: { message: ChatMessageDto; streaming?: boolean; sendError?: string; onRetry?(): void }) {
   const role = message.role === 'user' ? 'user' : 'assistant';
   const agentActivity = message.agentActivity;
-  return <article className={`chat-message ${role} ${streaming ? 'streaming' : ''}`}><div className="message-avatar">{role === 'assistant' ? <Icon name="sparkles" size={16} /> : '你'}</div><div className="message-body"><div className="message-meta"><strong>{role === 'assistant' ? 'CetaMesh' : '你'}</strong><span>{dateLabel(message.at)}</span>{streaming && <Badge tone="accent">生成中</Badge>}</div>{agentActivity && <div className={`agent-activity ${agentActivity.status}`} role="status"><Icon name={agentActivity.status === 'running' ? 'sparkles' : agentActivity.status === 'completed' ? 'check' : 'help'} size={15} /><span>{agentActivity.label}</span><strong>{agentActivityStatusLabel(agentActivity.status)}</strong></div>}{message.text ? <Markdown>{message.text}</Markdown> : <span className="muted">（没有文本内容）</span>}{message.attachments.length > 0 && <div className="message-attachments">{message.attachments.map(name => <span key={name}><Icon name="attach" size={13} />{name}</span>)}</div>}{message.toolActivity.map(tool => <details key={tool.id} className="tool-call"><summary><Icon name={tool.status === 'failed' ? 'help' : tool.status === 'running' ? 'update' : 'check'} size={15} /><span>{tool.label || tool.id}</span><span className="tool-duration">{tool.durationMs === null ? taskStatusLabel(tool.status) : `${(tool.durationMs / 1000).toFixed(1)} 秒`}</span><Icon name="down" size={14} /></summary>{tool.summary && <p>{tool.summary}</p>}</details>)}{sendError && <div className="message-error" role="alert">{sendError}<Button compact variant="ghost" onClick={onRetry}>重试发送</Button></div>}{message.error && <p className="message-error" role="alert">{message.error}</p>}{message.cancelled && <small>本轮已停止</small>}</div></article>;
+  return <article className={`chat-message ${role} ${streaming ? 'streaming' : ''}`}><div className="message-avatar">{role === 'assistant' ? <Icon name="sparkles" size={16} /> : '你'}</div><div className="message-body"><div className="message-meta"><strong>{role === 'assistant' ? 'CetaMesh' : '你'}</strong><span>{dateLabel(message.at)}</span>{streaming && <Badge tone="accent">生成中</Badge>}</div>{agentActivity && <div className={`agent-activity ${agentActivity.status}`} role="status"><Icon name={agentActivity.status === 'running' ? 'sparkles' : agentActivity.status === 'completed' ? 'check' : 'help'} size={15} /><span>{agentActivity.label}</span><strong>{agentActivityStatusLabel(agentActivity.status)}</strong></div>}{message.text ? <Markdown>{message.text}</Markdown> : <span className="muted">（没有文本内容）</span>}{message.attachments.length > 0 && <div className="message-attachments">{message.attachments.map(name => <span key={name}><Icon name="attach" size={13} />{name}</span>)}</div>}{message.toolActivity.map(tool => <details key={tool.id} className="tool-call"><summary><Icon name={tool.status === 'cancelled' ? 'close' : tool.status === 'failed' ? 'help' : tool.status === 'running' ? 'update' : 'check'} size={15} /><span>{tool.label || tool.id}</span><span className="tool-duration">{tool.status === 'cancelled' ? '已取消' : tool.durationMs === null ? taskStatusLabel(tool.status) : `${(tool.durationMs / 1000).toFixed(1)} 秒`}</span><Icon name="down" size={14} /></summary>{tool.summary && <p>{tool.summary}</p>}</details>)}{sendError && <div className="message-error" role="alert">{sendError}<Button compact variant="ghost" onClick={onRetry}>重试发送</Button></div>}{message.error && <p className="message-error" role="alert">{message.error}</p>}{message.cancelled && <small>本轮已停止</small>}</div></article>;
 }
 
 function ApprovalCard({ approval, onDecide }: { approval: Approval; onDecide(id: string, approve: boolean): void }) {

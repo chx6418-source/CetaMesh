@@ -46,7 +46,7 @@ export function createUpdateChecker({
   const doFetch = fetchImpl || (typeof globalThis.fetch === 'function' ? globalThis.fetch : null);
 
   /** 单个源：取回并解析 JSON。不判断内容语义；失败返回结构化 code（不抛出）。 */
-  async function fetchSourceManifest(source, timeout) {
+  async function fetchSourceManifest(source, timeout, allowedHosts) {
     let parsedUrl;
     try {
       parsedUrl = new URL(String(source.manifestUrl));
@@ -60,11 +60,27 @@ export function createUpdateChecker({
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), Math.max(500, timeout));
       try {
-        const response = await doFetch(parsedUrl.toString(), {
-          method: 'GET',
-          headers: { accept: 'application/json' },
-          signal: controller.signal
-        });
+        let response;
+        for (let redirects = 0; ; redirects += 1) {
+          response = await doFetch(parsedUrl.toString(), {
+            method: 'GET', headers: { accept: 'application/json' },
+            signal: controller.signal, redirect: 'manual'
+          });
+          if (![301, 302, 303, 307, 308].includes(response?.status)) break;
+          await response.body?.cancel();
+          if (redirects >= 5) return { ok: false, code: 'TOO_MANY_REDIRECTS', message: source.id + ' 更新清单重定向超过上限' };
+          const location = response.headers?.get?.('location');
+          if (!location) return { ok: false, code: 'REDIRECT_INVALID', message: source.id + ' 更新清单重定向缺少地址' };
+          let target;
+          try { target = new URL(location, parsedUrl); }
+          catch { return { ok: false, code: 'REDIRECT_INVALID', message: source.id + ' 更新清单重定向地址非法' }; }
+          if (target.protocol !== 'https:') return { ok: false, code: 'REDIRECT_INSECURE', message: source.id + ' 更新清单禁止降级 HTTPS' };
+          if (target.username || target.password) return { ok: false, code: 'REDIRECT_INVALID', message: source.id + ' 更新清单重定向不得携带凭据' };
+          if (target.host !== parsedUrl.host && !hostAllowedForDownload(target.href, allowedHosts)) {
+            return { ok: false, code: 'REDIRECT_HOST_NOT_ALLOWED', message: source.id + ' 更新清单重定向来源未授权' };
+          }
+          parsedUrl = target;
+        }
         if (!response || response.status < 200 || response.status >= 300) {
           return {
             ok: false,
@@ -120,7 +136,7 @@ export function createUpdateChecker({
 
     const failures = [];
     for (const source of list) {
-      const fetched = await fetchSourceManifest(source, timeout);
+      const fetched = await fetchSourceManifest(source, timeout, allowedHosts);
       if (!fetched.ok) {
         failures.push({ id: source.id, code: fetched.code, message: fetched.message });
         continue;

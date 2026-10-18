@@ -103,7 +103,7 @@ function projectMessage(value) {
     const tool = record(item);
     return {
       id: string(tool.id, 128), label: string(tool.label ?? tool.name, 200),
-      status: ['pending', 'running', 'waiting-approval', 'completed', 'failed'].includes(tool.status) ? tool.status : 'completed',
+      status: ['pending', 'running', 'waiting-approval', 'completed', 'failed', 'cancelled'].includes(tool.status) ? tool.status : 'failed',
       summary: string(tool.summary, 1000), durationMs: Number.isFinite(tool.durationMs) ? Math.max(0, tool.durationMs) : null
     };
   }) : [];
