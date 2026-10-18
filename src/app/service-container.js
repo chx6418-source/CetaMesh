@@ -55,6 +55,8 @@ export function createCetaMeshServices(options = {}) {
   const dataRoot = options.dataRoot ?? APP_PATHS.dataRoot;
   const sourceRoot = options.sourceRoot ?? APP_PATHS.sourceRoot;
   const resourceRoot = options.resourceRoot ?? APP_PATHS.resourceRoot;
+  const packaged = options.packaged ?? APP_PATHS.packaged;
+  const executableDir = options.executableDir ?? APP_PATHS.executableDir;
   const socialV2File = options.socialV2File;
   const api = options.api ?? null;
   const controlService = options.controlService ?? null;
@@ -437,7 +439,14 @@ export function createCetaMeshServices(options = {}) {
   }
 
   const aboutService = createAboutService({
-    rootDir: sourceRoot,
+    // SEA runs with a user-data CWD. Build identity belongs to the installed
+    // payload and must never be taken from mutable user-data lookalikes.
+    rootDir: packaged ? resourceRoot : sourceRoot,
+    packaged,
+    ...(packaged ? {
+      buildInfoFile: path.join(executableDir, 'build-info.json'),
+      releaseManifestFile: path.join(executableDir, 'release-manifest.json')
+    } : {}),
     releaseConfig: releaseConfig.config,
     notesCache,
     diagnosticsProvider: diagnosticsSnapshot

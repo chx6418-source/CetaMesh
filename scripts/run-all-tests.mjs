@@ -94,6 +94,7 @@ const REGISTRY = {
   'test-desktop-chat-virtualization.mjs': { category: 'architecture', note: 'Harbor Chat React virtual-window, dynamic-height, and long-content fixtures' },
   'test-harbor-host-dialog.mjs': { category: 'runtime', note: 'Native human-input dialog deadlines and unchanged ordinary Host RPC timeout' },
   'test-ui-task-model-defaults.mjs': { category: 'runtime', note: 'Real Core service assembly uses Owner model defaults only for an unconfigured Managed Task' },
+  'test-packaged-about-assembly.mjs': { category: 'integration', note: 'Packaged Core About reads installed executable metadata, never data/CWD lookalikes' },
   'test-process-extension-host.mjs': { category: 'architecture' },
   'test-workspace-ipc.mjs': { category: 'architecture' },
   'test-smart-platform-routing.mjs': { category: 'architecture' },
