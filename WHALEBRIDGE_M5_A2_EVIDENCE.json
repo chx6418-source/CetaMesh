@@ -1,0 +1,571 @@
+{
+  "baseCommit": "c04ad381916147eca10eddac2edf5f8f23d0060e",
+  "observedAt": "2026-10-18T11:34:36.991Z",
+  "realDataExecution": "REAL_DATA_NOT_AUTHORIZED",
+  "planId": "7e71a291dffc4359c3b7dc0e8dbf2c7db2fb6c155904e618fd171a96f6e98b3e",
+  "priorPlanId": "7e71a291dffc4359c3b7dc0e8dbf2c7db2fb6c155904e618fd171a96f6e98b3e",
+  "deterministic": true,
+  "entries": 86,
+  "blockers": [
+    {
+      "code": "ACCOUNT_ATTRIBUTION_REQUIRED",
+      "sourceId": "22b323cdfeefaf34aace7a22bef550d17a77cc7177b7971caac70b945adb7886"
+    },
+    {
+      "code": "ACCOUNT_ATTRIBUTION_REQUIRED",
+      "sourceId": "4dc0d7635a7ddf9a4189be644ec4d289d8cc5c67bbe321667a6f66dcd86ff4da"
+    },
+    {
+      "code": "ACCOUNT_ATTRIBUTION_REQUIRED",
+      "sourceId": "8ff121d4e02ecfe45fa5953e3b100ac0455b65bcbebbcb5ffb1d6d498bc3ca71"
+    },
+    {
+      "code": "ACCOUNT_ATTRIBUTION_REQUIRED",
+      "sourceId": "91dcad06d77ad8738210d34742bbe046d0dd7ecac87bef04ecefcc8152b707b2"
+    },
+    {
+      "code": "ACCOUNT_ATTRIBUTION_REQUIRED",
+      "sourceId": "a99879b65706e8731bc4299d686cfbe2ee2538e338cb015797bff1bb0db2055d"
+    },
+    {
+      "code": "ACCOUNT_ATTRIBUTION_REQUIRED",
+      "sourceId": "b81bbcdbbdd0a908b087c1281d213b4af5c954a4490890db5c7e325528863eb5"
+    },
+    {
+      "code": "ACCOUNT_ATTRIBUTION_REQUIRED",
+      "sourceId": "b9ce213fb8cc3d9eb50f1c4a11906fe2968f55aa9a7b1c78e2cc91b9c21f60e6"
+    },
+    {
+      "code": "ACCOUNT_ATTRIBUTION_REQUIRED",
+      "sourceId": "c9d2df4fb048cc3346a35c4c0c2176fedecaeab12ba36673877829fd15db5796"
+    },
+    {
+      "code": "CURSOR_MISSING",
+      "sourceId": "3402041dd63077f1"
+    },
+    {
+      "code": "CURSOR_MISSING",
+      "sourceId": "c12a489fa781c9d2"
+    },
+    {
+      "code": "WRITER_STOP_UNCONFIRMED",
+      "sourceId": "3402041dd63077f1"
+    },
+    {
+      "code": "WRITER_STOP_UNCONFIRMED",
+      "sourceId": "c12a489fa781c9d2"
+    }
+  ],
+  "social": [
+    {
+      "rootId": "c12a489fa781c9d2",
+      "source": "state/sessions.json",
+      "hash": "f833453cf2b1962c1a4bd1b0e8ae42cbe594446ec6ab233d14428c6d6e8a4313",
+      "records": 0,
+      "version": "UNVERSIONED",
+      "unchangedFromM5A": true,
+      "recognizedFields": {
+        "sessions": 1
+      },
+      "accountAliases": [],
+      "scopeAliases": [],
+      "sessionAliases": [],
+      "messageIdCount": 0,
+      "migrationMarkerCount": 0,
+      "decision": "OWNER_REVIEW_REQUIRED",
+      "scopeValueAliases": [],
+      "additionalMetadataKeyFingerprints": {},
+      "hashRechecked": true,
+      "ownershipEvidence": "A1_ASSOCIATIONS_ONLY_NO_NEW_NATIVE_ACCOUNT_PROOF",
+      "candidateAccounts": [],
+      "ownerDecision": "UNDECIDED",
+      "allowedChoices": [
+        "CONFIRM_WITH_EVIDENCE_THEN_PLAN",
+        "KEEP_LEGACY_READ_ONLY",
+        "DEFER",
+        "MIGRATION_NOT_REQUIRED"
+      ]
+    },
+    {
+      "rootId": "3402041dd63077f1",
+      "source": "state/social-v2.json",
+      "hash": "5bc0b08880862498ecdd171b7202ab4c1f88b88f5ae3a07d1f6f64dad3c064e8",
+      "records": 3,
+      "version": "UNVERSIONED",
+      "unchangedFromM5A": true,
+      "recognizedFields": {
+        "conversations": 1,
+        "mode": 3,
+        "recentMessages": 3,
+        "seq": 88,
+        "messageId": 93,
+        "userId": 88,
+        "time": 200,
+        "groupId": 2,
+        "unread": 3,
+        "lastUnreadSeq": 3
+      },
+      "accountAliases": [],
+      "scopeAliases": [
+        "864d109d76e0406d",
+        "b96f12dfa3ba6dc8",
+        "edf9c61589c2ad72"
+      ],
+      "sessionAliases": [],
+      "messageIdCount": 93,
+      "migrationMarkerCount": 0,
+      "decision": "OWNER_REVIEW_REQUIRED",
+      "scopeValueAliases": [],
+      "additionalMetadataKeyFingerprints": {},
+      "hashRechecked": true,
+      "ownershipEvidence": "A1_ASSOCIATIONS_ONLY_NO_NEW_NATIVE_ACCOUNT_PROOF",
+      "candidateAccounts": [],
+      "ownerDecision": "UNDECIDED",
+      "allowedChoices": [
+        "CONFIRM_WITH_EVIDENCE_THEN_PLAN",
+        "KEEP_LEGACY_READ_ONLY",
+        "DEFER",
+        "MIGRATION_NOT_REQUIRED"
+      ]
+    },
+    {
+      "rootId": "3402041dd63077f1",
+      "source": "state/sessions.json",
+      "hash": "e7e2a1134353f3ff7cd0dc4e6fcf9e3fb699f48e20b144be9823e44ce80ca465",
+      "records": 2,
+      "version": "UNVERSIONED",
+      "unchangedFromM5A": true,
+      "recognizedFields": {
+        "sessions": 1
+      },
+      "accountAliases": [],
+      "scopeAliases": [
+        "864d109d76e0406d",
+        "edf9c61589c2ad72"
+      ],
+      "sessionAliases": [
+        "94e373d22d4195bb",
+        "98c70e1d6c1f6026"
+      ],
+      "messageIdCount": 0,
+      "migrationMarkerCount": 0,
+      "decision": "OWNER_REVIEW_REQUIRED",
+      "scopeValueAliases": [],
+      "additionalMetadataKeyFingerprints": {},
+      "hashRechecked": true,
+      "ownershipEvidence": "A1_ASSOCIATIONS_ONLY_NO_NEW_NATIVE_ACCOUNT_PROOF",
+      "candidateAccounts": [],
+      "ownerDecision": "UNDECIDED",
+      "allowedChoices": [
+        "CONFIRM_WITH_EVIDENCE_THEN_PLAN",
+        "KEEP_LEGACY_READ_ONLY",
+        "DEFER",
+        "MIGRATION_NOT_REQUIRED"
+      ]
+    },
+    {
+      "rootId": "3402041dd63077f1",
+      "source": "state/current-role.json",
+      "hash": "9267509a51e2f83a543a228a211fffbb7ec484787534c882a6082975291798e1",
+      "records": 1,
+      "version": "UNVERSIONED",
+      "unchangedFromM5A": true,
+      "recognizedFields": {
+        "role": 1,
+        "mode": 1
+      },
+      "accountAliases": [],
+      "scopeAliases": [],
+      "sessionAliases": [],
+      "messageIdCount": 0,
+      "migrationMarkerCount": 0,
+      "decision": "OWNER_REVIEW_REQUIRED",
+      "scopeValueAliases": [],
+      "additionalMetadataKeyFingerprints": {},
+      "roleReference": {
+        "configured": true,
+        "sourceAssetExists": true,
+        "provesAccount": false
+      },
+      "hashRechecked": true,
+      "ownershipEvidence": "A1_ASSOCIATIONS_ONLY_NO_NEW_NATIVE_ACCOUNT_PROOF",
+      "candidateAccounts": [],
+      "ownerDecision": "UNDECIDED",
+      "allowedChoices": [
+        "CONFIRM_WITH_EVIDENCE_THEN_PLAN",
+        "KEEP_LEGACY_READ_ONLY",
+        "DEFER",
+        "MIGRATION_NOT_REQUIRED"
+      ]
+    },
+    {
+      "rootId": "3402041dd63077f1",
+      "source": "state/slang.json",
+      "hash": "0eb65b6c8fe5d177d79385c83e6c82d85e485b54e28614bf16f248a0ee54bf54",
+      "records": 63,
+      "version": "UNVERSIONED",
+      "unchangedFromM5A": true,
+      "recognizedFields": {
+        "time": 70,
+        "createdAt": 63,
+        "updatedAt": 63
+      },
+      "accountAliases": [],
+      "scopeAliases": [],
+      "sessionAliases": [],
+      "messageIdCount": 0,
+      "migrationMarkerCount": 0,
+      "decision": "OWNER_REVIEW_REQUIRED",
+      "scopeValueAliases": [
+        "864d109d76e0406d"
+      ],
+      "additionalMetadataKeyFingerprints": {},
+      "hashRechecked": true,
+      "ownershipEvidence": "A1_ASSOCIATIONS_ONLY_NO_NEW_NATIVE_ACCOUNT_PROOF",
+      "candidateAccounts": [],
+      "ownerDecision": "UNDECIDED",
+      "allowedChoices": [
+        "CONFIRM_WITH_EVIDENCE_THEN_PLAN",
+        "KEEP_LEGACY_READ_ONLY",
+        "DEFER",
+        "MIGRATION_NOT_REQUIRED"
+      ]
+    },
+    {
+      "rootId": "3402041dd63077f1",
+      "source": "state/slang-session.json",
+      "hash": "add8da1b7d7703d10198aa1edea02c590465cbb0611751257525591196b75309",
+      "records": 1,
+      "version": "UNVERSIONED",
+      "unchangedFromM5A": true,
+      "recognizedFields": {
+        "sessionId": 1
+      },
+      "accountAliases": [],
+      "scopeAliases": [],
+      "sessionAliases": [
+        "414333e520bc55b6"
+      ],
+      "messageIdCount": 0,
+      "migrationMarkerCount": 0,
+      "decision": "OWNER_REVIEW_REQUIRED",
+      "scopeValueAliases": [],
+      "additionalMetadataKeyFingerprints": {},
+      "hashRechecked": true,
+      "ownershipEvidence": "A1_ASSOCIATIONS_ONLY_NO_NEW_NATIVE_ACCOUNT_PROOF",
+      "candidateAccounts": [],
+      "ownerDecision": "UNDECIDED",
+      "allowedChoices": [
+        "CONFIRM_WITH_EVIDENCE_THEN_PLAN",
+        "KEEP_LEGACY_READ_ONLY",
+        "DEFER",
+        "MIGRATION_NOT_REQUIRED"
+      ]
+    },
+    {
+      "rootId": "3402041dd63077f1",
+      "source": "state/stickers.json",
+      "hash": "bc3ea2dc5556fcb4d80a86921f0a78a29e11463a32d94f1484449e31be50106a",
+      "records": 40,
+      "version": "UNVERSIONED",
+      "unchangedFromM5A": true,
+      "recognizedFields": {
+        "createdAt": 40,
+        "updatedAt": 40
+      },
+      "accountAliases": [],
+      "scopeAliases": [],
+      "sessionAliases": [],
+      "messageIdCount": 0,
+      "migrationMarkerCount": 0,
+      "decision": "OWNER_REVIEW_REQUIRED",
+      "scopeValueAliases": [],
+      "additionalMetadataKeyFingerprints": {},
+      "hashRechecked": true,
+      "ownershipEvidence": "A1_ASSOCIATIONS_ONLY_NO_NEW_NATIVE_ACCOUNT_PROOF",
+      "candidateAccounts": [],
+      "ownerDecision": "UNDECIDED",
+      "allowedChoices": [
+        "CONFIRM_WITH_EVIDENCE_THEN_PLAN",
+        "KEEP_LEGACY_READ_ONLY",
+        "DEFER",
+        "MIGRATION_NOT_REQUIRED"
+      ]
+    },
+    {
+      "rootId": "3402041dd63077f1",
+      "source": "state/social-v2-cards.json",
+      "hash": "d19987a64832fa63c0674e5141ae49eff4865b4542486b2e4ac85d685b2e2a9c",
+      "records": 1,
+      "version": "UNVERSIONED",
+      "unchangedFromM5A": true,
+      "recognizedFields": {
+        "conversations": 1,
+        "userId": 99
+      },
+      "accountAliases": [],
+      "scopeAliases": [
+        "864d109d76e0406d"
+      ],
+      "sessionAliases": [],
+      "messageIdCount": 0,
+      "migrationMarkerCount": 0,
+      "decision": "OWNER_REVIEW_REQUIRED",
+      "scopeValueAliases": [],
+      "additionalMetadataKeyFingerprints": {},
+      "hashRechecked": true,
+      "ownershipEvidence": "A1_ASSOCIATIONS_ONLY_NO_NEW_NATIVE_ACCOUNT_PROOF",
+      "candidateAccounts": [],
+      "ownerDecision": "UNDECIDED",
+      "allowedChoices": [
+        "CONFIRM_WITH_EVIDENCE_THEN_PLAN",
+        "KEEP_LEGACY_READ_ONLY",
+        "DEFER",
+        "MIGRATION_NOT_REQUIRED"
+      ]
+    }
+  ],
+  "preflight": [
+    {
+      "version": 1,
+      "mode": "READ_ONLY",
+      "rootId": "c12a489fa781c9d2",
+      "status": "MIGRATION_BLOCKED",
+      "realDataExecution": "REAL_DATA_NOT_AUTHORIZED",
+      "stopConfirmed": false,
+      "effectiveProcessStateDir": "UNVERIFIED_CANDIDATE_ROOT_ONLY",
+      "ipc": "NOT_RUN_ENVIRONMENT_AUTHENTICATED_READ_ONLY_PROBE_REQUIRED",
+      "activeQqConsumers": "UNVERIFIED_NOT_INFERRED_FROM_PID",
+      "authoritativeWriter": "UNVERIFIED",
+      "inMemoryApprovalsAndExternalImports": "UNVERIFIED",
+      "locks": [
+        {
+          "name": ".core-owner.lock",
+          "state": "PRESENT",
+          "hash": "46bba76d76611579abcb3a0a259aa2c730a3eae3a4746a436ac4f90ef10853c3",
+          "pidAlias": "cbf0ed7fa4b7f3f27b9a91b22aaec7a888056a1a4b4eb00de318eeab39d01a03",
+          "pidStatus": "EXISTS",
+          "processStartIdentity": "UNVERIFIED",
+          "stopAcknowledged": false
+        },
+        {
+          "name": ".core-owner.lock.reclaim",
+          "state": "NOT_FOUND_NOT_STOP_PROOF"
+        },
+        {
+          "name": "bridge.lock",
+          "state": "NOT_FOUND_NOT_STOP_PROOF"
+        }
+      ],
+      "stores": {
+        "send": {
+          "state": "NOT_FOUND_NOT_PROOF_OF_EMPTY"
+        },
+        "delivery": {
+          "state": "NOT_FOUND_NOT_PROOF_OF_EMPTY"
+        },
+        "approval": {
+          "state": "OBSERVED_NOT_COMPLETENESS_PROOF",
+          "hash": "52c7dba005cd13448d7af0bd5ac23c44583736850452d7bf80dc6f0a9acc5b74",
+          "unresolved": 0
+        },
+        "requests": {
+          "state": "OBSERVED_NOT_COMPLETENESS_PROOF",
+          "hash": "3c84dbbdd9651a0dd940d8ae358c0fc66a0f77bbcc2e1e2c4fb73fc7a98ff680",
+          "unresolved": 0
+        },
+        "migration": {
+          "state": "NOT_FOUND_NOT_PROOF_OF_EMPTY"
+        }
+      },
+      "leases": [],
+      "leaseScope": "NOT_FOUND_IN_THIS_TEMP_ONLY"
+    },
+    {
+      "version": 1,
+      "mode": "READ_ONLY",
+      "rootId": "f595b99b0c257a0b",
+      "status": "MIGRATION_BLOCKED",
+      "realDataExecution": "REAL_DATA_NOT_AUTHORIZED",
+      "stopConfirmed": false,
+      "effectiveProcessStateDir": "UNVERIFIED_CANDIDATE_ROOT_ONLY",
+      "ipc": "NOT_RUN_ENVIRONMENT_AUTHENTICATED_READ_ONLY_PROBE_REQUIRED",
+      "activeQqConsumers": "UNVERIFIED_NOT_INFERRED_FROM_PID",
+      "authoritativeWriter": "UNVERIFIED",
+      "inMemoryApprovalsAndExternalImports": "UNVERIFIED",
+      "locks": [
+        {
+          "name": ".core-owner.lock",
+          "state": "NOT_FOUND_NOT_STOP_PROOF"
+        },
+        {
+          "name": ".core-owner.lock.reclaim",
+          "state": "NOT_FOUND_NOT_STOP_PROOF"
+        },
+        {
+          "name": "bridge.lock",
+          "state": "NOT_FOUND_NOT_STOP_PROOF"
+        }
+      ],
+      "stores": {
+        "send": {
+          "state": "NOT_FOUND_NOT_PROOF_OF_EMPTY"
+        },
+        "delivery": {
+          "state": "NOT_FOUND_NOT_PROOF_OF_EMPTY"
+        },
+        "approval": {
+          "state": "NOT_FOUND_NOT_PROOF_OF_EMPTY"
+        },
+        "requests": {
+          "state": "NOT_FOUND_NOT_PROOF_OF_EMPTY"
+        },
+        "migration": {
+          "state": "NOT_FOUND_NOT_PROOF_OF_EMPTY"
+        }
+      },
+      "leases": [],
+      "leaseScope": "NOT_FOUND_IN_THIS_TEMP_ONLY"
+    },
+    {
+      "version": 1,
+      "mode": "READ_ONLY",
+      "rootId": "3402041dd63077f1",
+      "status": "MIGRATION_BLOCKED",
+      "realDataExecution": "REAL_DATA_NOT_AUTHORIZED",
+      "stopConfirmed": false,
+      "effectiveProcessStateDir": "UNVERIFIED_CANDIDATE_ROOT_ONLY",
+      "ipc": "NOT_RUN_ENVIRONMENT_AUTHENTICATED_READ_ONLY_PROBE_REQUIRED",
+      "activeQqConsumers": "UNVERIFIED_NOT_INFERRED_FROM_PID",
+      "authoritativeWriter": "UNVERIFIED",
+      "inMemoryApprovalsAndExternalImports": "UNVERIFIED",
+      "locks": [
+        {
+          "name": ".core-owner.lock",
+          "state": "NOT_FOUND_NOT_STOP_PROOF"
+        },
+        {
+          "name": ".core-owner.lock.reclaim",
+          "state": "NOT_FOUND_NOT_STOP_PROOF"
+        },
+        {
+          "name": "bridge.lock",
+          "state": "PRESENT",
+          "hash": "1ebcc2674db06ca71e71b94c14cb9c785d3e175740737c8154dd5d3bb4bbacb3",
+          "pidAlias": "1ebcc2674db06ca71e71b94c14cb9c785d3e175740737c8154dd5d3bb4bbacb3",
+          "pidStatus": "ABSENT",
+          "processStartIdentity": "UNVERIFIED",
+          "stopAcknowledged": false
+        }
+      ],
+      "stores": {
+        "send": {
+          "state": "NOT_FOUND_NOT_PROOF_OF_EMPTY"
+        },
+        "delivery": {
+          "state": "NOT_FOUND_NOT_PROOF_OF_EMPTY"
+        },
+        "approval": {
+          "state": "NOT_FOUND_NOT_PROOF_OF_EMPTY"
+        },
+        "requests": {
+          "state": "NOT_FOUND_NOT_PROOF_OF_EMPTY"
+        },
+        "migration": {
+          "state": "NOT_FOUND_NOT_PROOF_OF_EMPTY"
+        }
+      },
+      "leases": [],
+      "leaseScope": "NOT_FOUND_IN_THIS_TEMP_ONLY"
+    }
+  ],
+  "runtime": {
+    "state": "OBSERVED_NOT_STOP_ACK",
+    "processes": [
+      {
+        "pidAlias": "bf22fe29e6db1c60b3b3d99920c8a14c05be88c7595bc366cf188cd60dde2daf",
+        "parentAlias": "b19eaa4c809510725e30852809aceb36c1069d7cb30c6124749212274b72b22a",
+        "exeHash": "357b761d163dcfa2116d52b9e5299289727d8391306694ec36e64ff683c84dce",
+        "started": "2026-10-18T08:58:51.0787970Z",
+        "mode": "UNVERIFIED"
+      },
+      {
+        "pidAlias": "74fc677624f3d53b381b2ef507813e9d0360e278c94166d39d257cd816c87862",
+        "parentAlias": "264abd655a95614665e046dba448240fc84983ce1d0995845f6d8cfe61ca1c17",
+        "exeHash": "894d0f54cae00698a35e5cef15dc5a12725e6f2bb6657352120db2a4708eced9",
+        "started": "2026-10-18T09:00:09.6976860Z",
+        "mode": "MCP_CANDIDATE"
+      },
+      {
+        "pidAlias": "d1f7ffbb412446d097f740d941378b8c34a1b42d75e2389fbd1124d9ee4299a5",
+        "parentAlias": "264abd655a95614665e046dba448240fc84983ce1d0995845f6d8cfe61ca1c17",
+        "exeHash": "894d0f54cae00698a35e5cef15dc5a12725e6f2bb6657352120db2a4708eced9",
+        "started": "2026-10-18T09:00:09.7045310Z",
+        "mode": "MCP_CANDIDATE"
+      },
+      {
+        "pidAlias": "d4ad4739759eb69e87967b344d87be120650eb8dde9e9c96e046f5c3c8537c58",
+        "parentAlias": "264abd655a95614665e046dba448240fc84983ce1d0995845f6d8cfe61ca1c17",
+        "exeHash": "894d0f54cae00698a35e5cef15dc5a12725e6f2bb6657352120db2a4708eced9",
+        "started": "2026-10-18T09:00:09.7091910Z",
+        "mode": "MCP_CANDIDATE"
+      },
+      {
+        "pidAlias": "9be7e8bebe26d1e8b453a301956cd1e4731fed6ba9b5a8610104213f832c0b14",
+        "parentAlias": "264abd655a95614665e046dba448240fc84983ce1d0995845f6d8cfe61ca1c17",
+        "exeHash": "894d0f54cae00698a35e5cef15dc5a12725e6f2bb6657352120db2a4708eced9",
+        "started": "2026-10-18T09:00:09.7142070Z",
+        "mode": "MCP_CANDIDATE"
+      },
+      {
+        "pidAlias": "f5186b8eaee2e79eacbd0d3d3d37a57e3c749d053d20541f7e37007491a154d7",
+        "parentAlias": "264abd655a95614665e046dba448240fc84983ce1d0995845f6d8cfe61ca1c17",
+        "exeHash": "894d0f54cae00698a35e5cef15dc5a12725e6f2bb6657352120db2a4708eced9",
+        "started": "2026-10-18T09:00:09.7194020Z",
+        "mode": "MCP_CANDIDATE"
+      },
+      {
+        "pidAlias": "cbf0ed7fa4b7f3f27b9a91b22aaec7a888056a1a4b4eb00de318eeab39d01a03",
+        "parentAlias": "bf22fe29e6db1c60b3b3d99920c8a14c05be88c7595bc366cf188cd60dde2daf",
+        "exeHash": "894d0f54cae00698a35e5cef15dc5a12725e6f2bb6657352120db2a4708eced9",
+        "started": "2026-10-18T09:00:45.3193630Z",
+        "mode": "CORE_WORKER"
+      }
+    ]
+  },
+  "pipeObservation": {
+    "state": "NAMESPACE_OBSERVED_NOT_AUTHENTICATED",
+    "ownerPipeCount": 1
+  },
+  "productionEpochEnabled": false,
+  "finalVerification": {
+    "at": "2026-10-18T11:42:19.260Z",
+    "planId": "7e71a291dffc4359c3b7dc0e8dbf2c7db2fb6c155904e618fd171a96f6e98b3e",
+    "unchangedFromInitial": true,
+    "socialHashesUnchanged": true,
+    "workspaceFixtureResiduals": [],
+    "currentProbeHasOwnerIpcToken": false
+  },
+  "verification": {
+    "distinctSuitesPassed": 13,
+    "failedFinal": 0,
+    "notRunInSelectedSuites": 0,
+    "productionEpochEnabled": false,
+    "coreBuild": "PASS",
+    "coreSha256": "333266f7f27c7544fb4d99aac81e1f59f97f76cf518881f6672b3116f95c0ba0",
+    "buildNumber": 1081,
+    "initialRed": [
+      "missing preflight module",
+      "sealed epoch admission",
+      "invalid Core lock without nonce"
+    ],
+    "fixtureStates": [
+      "DRY_RUN_PASS",
+      "FIXTURE_EPOCH_PASS",
+      "FIXTURE_MIGRATION_PASS",
+      "ROLLBACK_PASS"
+    ],
+    "realMigration": "REAL_DATA_NOT_AUTHORIZED",
+    "realQqEpoch": "NOT_RUN_ENVIRONMENT"
+  }
+}
