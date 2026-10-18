@@ -1,6 +1,49 @@
 # WhaleBridge M2：Core 启动反向依赖解除
 
-状态：**RELEASE_BLOCKED**。本报告记录本地 `codex/whalebridge-decoupling-m2` 的实现与验证；不表示 Stable 放行，也不授权 M3～M6、数据迁移、推送或合并。
+状态：**M2_PARTIAL / RELEASE_BLOCKED**。本报告记录本地 `codex/whalebridge-decoupling-m2` 的实现与验证；不表示 Stable 放行，也不授权 M3～M6、数据迁移、推送或合并。
+
+## Build 1073：Legacy 入口剩余治理（当前结论）
+
+本节更新至本地代码提交 `5049dceaec509828bb11e5cdb3ba37c03cf7bd78`；下文 Build 1072 的记录保留为前一轮历史证据，不应当作当前产物哈希。最终报告提交后的 HEAD 另列于本节末尾。此次从干净的 Build 1072 工作树开始，只处理剩余的 Legacy 边界，没有重做 `--worker` Core Bootstrap。
+
+### 调用图与运行模式
+
+```text
+Rust Desktop Shell → Core --worker → core-dispatch → core-worker
+  → bootstrapCetaMesh → 唯一 .core-owner.lock → Core services → Owner/Data IPC
+
+显式 node src/bridge.js（该入口始终以 legacy-exclusive 模式运行）
+  → 同一 .core-owner.lock → config / bridge.lock → Legacy QQ/DSH/Social
+  → bootstrapCetaMesh(复用已取得的 owner) → Legacy Owner/Data IPC
+```
+
+`FIXED_CODE`：Legacy 在读取配置、创建日志、QQ runtime、旧 `bridge.lock`、Core 服务或任何 IPC 前先取得**同一** `.core-owner.lock`。已运行的 Core 与 Legacy 互相拒绝，冲突退出码 2，后启动者不触碰在运行进程的 IPC。Bridge 的进程退出路径释放自己持有的 owner lease；其旧 `bridge.lock` 仍额外约束单 QQ 消费者。没有创建第二套广播器或 Task/Memory/Workspace 写入者。`bootstrapCetaMesh({ owner })` 只把已获取的 lease 交给现有组合根，未建立第二个 IPC Server。
+
+`FIXED_CODE`：`src/local-services.js` 启动 SnowLuma/DSH 本机子进程时过滤 `WHALEBRIDGE_UI_*` 环境变量，Owner IPC pipe 与认证令牌不传给外部组件。普通 PATH/DSH_HOME 保留；子进程环境仍需在 M3/M4 逐项审计其他敏感变量。
+
+`PARTIAL`：旧 Bridge **仍在独占兼容模式中调用** `bootstrapCetaMesh()`、创建自己的 Owner/Data IPC，并在 Legacy 启动路径尝试启动 SnowLuma；它不是独立 Connector。该行为不能与正式 Core 同 StateDir 并存，兼容窗口内只能先停当前宿主、核验 lease/QQ 连接释放、再启动另一入口。默认 `node src/bridge.js` 的别名保留旧启动脚本，但运行时明确打印 `legacy-exclusive`；正式 Shell 的 `--worker` 没有通向 Bridge/SnowLuma 的调用。完整移交旧 DSH/QQ/Social 与旧 IPC 方法必须等待 M3/M4 的兼容协议及 Owner 审批。没有声称消除 Legacy 自身的 SnowLuma 自动启动。
+
+### 先复现、再修复、再验收
+
+| 状态 | 场景 | 结果及边界 |
+| --- | --- | --- |
+| `FIXED_CODE` | Core 运行期间启动 Legacy | 修复前注册测试失败：旧 Bridge 在 owner 冲突前已写 `bridge.log`；修复后先拒绝，退出 2，无新 `bridge.lock`/旧服务日志，首个 Core 数据 IPC 保持可用 |
+| `VERIFIED_FIXTURE` | Legacy 运行期间启动 Core | 后启动 Core 退出 2，Legacy 数据 IPC 保持可用；同一 StateDir 无第二 Task/Memory/Workspace owner |
+| `VERIFIED_FIXTURE` | Legacy 异常退出、Core 接管 | 隔离子进程被终止后，Core 通过 PID 校验回收过期 `.core-owner.lock` 并恢复 IPC；旧 QQ 锁保留待 Legacy 重入回收，未在测试中清空 StateDir |
+| `VERIFIED_FIXTURE` | Core 单独启动、stdin EOF/重启 | `test-core-entry` 和 Shell smoke 覆盖原生 IPC、owner lease 释放与重启；损坏可选 QQ 配置不影响 Core |
+| `VERIFIED_FIXTURE` | 外部 Connector 凭据边界 | `test-local-services` 断言 SnowLuma/DSH 子进程环境过滤 Owner IPC 变量 |
+| `PARTIAL` | 关闭 Core 不误杀用户独立服务 | Core worker 只清理自身资源；隔离进程测试不含真实独立 SnowLuma/QQ 服务 |
+| `DEFERRED_TO_M3` | DSH 从 Legacy 宿主独立 | 需真实版本/认证/preset 与 Session purpose 契约、启动和错误恢复设计 |
+| `DEFERRED_TO_M4` | QQ/Bionic 从 Legacy 宿主独立 | 需单消费者切换、OneBot 去重/ACK、旧 Social 数据写者移交和无双重外发验收 |
+| `NOT_RUN_ENVIRONMENT` | 真实 QQ/DSH/人工 Harbor E2E | 无真实网关、认证 Provider、正式签名与人工环境；不得标 PASS |
+
+Node 全量 `npm test`：109 suite，**PASS 101 / FAIL 0 / NOT_RUN_ENVIRONMENT 8**。`npm run build:core`、`npm run build:ui`、`npm run desktop:check`、`npm run desktop:build` 均 PASS；`npm run desktop:test` **198 passed / 0 failed**。最终 `npm test -- --suite test-core-entry` 与 `test-local-services` 均 PASS。`npm run build:release -- --use-current-build-number` 从干净代码提交成功，`dirtySourceTree=false`；Build 1073 的 RC 校验 `npm test -- --category release` **PASS 8 / FAIL 0 / NOT_RUN_ENVIRONMENT 0**，包含隔离安装器运行/卸载与实际 SEA 数据 IPC。执行报告提交后的最终 HEAD 以本分支 `git rev-parse HEAD` 为准；发行包的可执行代码来源 HEAD 固定为下述 `5049dce`。
+
+Build 1073 本地 RC：`artifacts/rc/1.0.0-rc.2/build-1073`。安装器 `CetaMesh-Setup-1.0.0-rc.2-build1073-x64.exe`，42,995,712 字节，SHA256 `D872C2B3D3D0AEB04FDD9F7DFA1732D36FFAB3AB45E4FDE1493D494DB6880B05`；载荷 SEA SHA256 `66E6B4C7D371113F7E72BF7077E37076C489886FD34657DF9A396FD4A9BACD82`。均未签名、未发布。
+
+当前修改：`src/bridge.js`、`src/app/bootstrap.js`、`src/local-services.js`；测试 `scripts/test-core-entry.mjs`、`scripts/test-local-services.mjs`；`docs/desktop/ARCHITECTURE.md` 和 `release/version.json`。产品代码提交 `5049dceaec509828bb11e5cdb3ba37c03cf7bd78`。真实用户数据、DSH preset、QQ/Bionic 数据库未修改。**M2 代码验收仍为 PARTIAL**：虽然独占和失联恢复的代码/fixture 边界通过，旧 Bridge 仍反向构造现代 Core。M3 前须明确 DSH Connector 的认证、能力、Session/preset 和旧调用兼容；M4 前须明确 QQ 唯一消费者、旧 Social 写者、回滚窗口及真实 OneBot E2E。不得把本轮互斥修复解释为 M3/M4 已实施。
+
+## Build 1072：前一轮 Core 独立启动证据（历史）
 
 ## 基线与边界
 
