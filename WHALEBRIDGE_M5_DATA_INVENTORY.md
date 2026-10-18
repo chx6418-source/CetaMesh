@@ -139,3 +139,17 @@
 没有枚举整块磁盘或读取进程环境内存；未知历史根、未声明的外部网关数据、外部数据库及实际 DSH 原生 Session 关系必须由 Owner 补充。扫描有 10,000 文件、深度 32、单文件 128 MiB/总读取 512 MiB 上限；越界、链接、无权限或并发变化会明确阻塞。真实 NTFS ACL 和完整备份空间/恢复演练尚未采集，必须在 M5-B 新批准后完成；不能把 Fixture 的 ACL 证据用于真实目录。
 
 工具提交：`4eb5887734d237a49e78e525e9947466ed678d10`。最终测试和剩余门禁见另外三份 M5 报告。
+
+
+## M5-A.1 当前补充（2026-10-18）
+
+基线 `fda079e08ba65a2855d9706cbc2f68a4c6496ee8`；本段补充原 M5-A 历史记录，不替换其测试日期/统计。新鲜只读核查见 `WHALEBRIDGE_M5_PRE_MIGRATION_BLOCKERS.md`，分组待决动作见 `WHALEBRIDGE_M5_OWNER_DECISION_PACKAGE.md`；新快照为 `WHALEBRIDGE_M5_A1_READ_ONLY_EVIDENCE.json` 和 `WHALEBRIDGE_M5_A1_DRY_RUN_EVIDENCE.json`。
+
+- 8 项 Social Hash 全部与 M5-A 一致；群/Session/人设关联不足以证明机器人账号，可靠账号映射新增 0 项，全部 OWNER_REVIEW_REQUIRED。不得转全局 Memory。
+- 两个缺游标根在声明来源的 state/channel/backups/backup/data 检查内无可恢复 QQ 回执/发送账本，标 CURSOR_UNRECOVERABLE（限定于已检查范围），真实迁移 MIGRATION_BLOCKED。Social 局部序号/消息 ID 不替代消费 ACK。历史隔离、新实时 epoch 只是待批设计，不补造旧 cursor 或自动重放。
+- 安装版 StateDir 锁 PID 与存活 Core Worker 对应；原源码 Bridge 锁 PID 当前不存在，但无停止 ACK/完整消费者证明。真实锁未回收。历史 portable 根未定位，普通/提升/其他用户运行环境及目标进程环境未完整验证；不得据当前 shell 或无锁推定安全接管。
+- 连续两次 Dry Run 及测试结束后再次核验 planId 均为 `7e71a291dffc4359c3b7dc0e8dbf2c7db2fb6c155904e618fd171a96f6e98b3e`，原 86 项/3 个 preset 和 12 项阻塞不变。没有改真实文件来制造失效反例；旧计划失效在 Fixture 验证。
+- 本轮实际 `npm test -- --suite test-whalebridge-m5-dry-run --suite test-whalebridge-m5-fixture`：2 PASS / 0 FAIL；`npm test -- --suite test-app-paths --suite test-core-entry --suite test-qq-runtime`：3 PASS / 0 FAIL。共 5 个定向 suites，DRY_RUN_PASS / FIXTURE_MIGRATION_PASS / ROLLBACK_PASS。原全量 npm/Rust/构建统计为历史证据，本轮无产品修改，不重新构建；Build 1081 保持。
+- 当前没有可直接执行真实迁移的数据组。真实备份位置、账号归属、writer 停止、生产 resolver/Legacy 只读门禁及具体计划批准仍缺；设计待审不等于批准执行。REAL_DATA_NOT_AUTHORIZED / RELEASE_BLOCKED 保持；完成材料后停止等待 Owner 分范围决定。
+
+M5-A.1 只读证据提交：`13f1dfc347fef81236a5e9d66613c50957f49109`；最终文档 HEAD 随交付答复记录。
