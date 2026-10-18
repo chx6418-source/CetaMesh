@@ -25,6 +25,11 @@
 
 `src/workspace/registry.js` 只在文件确实不存在（`ENOENT`）时创建空清单。已存在而损坏或不可读的清单抛 `REGISTRY_CORRUPT`，保留原文件字节，不写入默认空状态。该错误状态优先保护用户清单；人工恢复/只读浏览 UX 尚未实现。
 
+## 进程与数据完整性证据
+
+- 生产 Worker：隔离路径中无系统 QQ/DSH/SnowLuma；损坏旧配置原字节保留；无旧 `bridge.lock`、无旧 HTTP 监听。双 Core 启动时第二个退出 2，首个数据 pipe 保持可用。Rust Shell smoke 通过原生认证 IPC 读 Chat/Task/Memory/Workspace/Settings/Agent 与事件，并验证重启与 stdin EOF 后进程/锁释放。SEA suite 在无系统 Node PATH 下检查后代进程，不见第二个 Node Core。未接真实 QQ 网关，因此 QQ 消费者并发的真实 E2E 仍未验证。
+- Task/Memory：`test-whalebridge-core-isolation` 使用真实 `createCetaMeshServices()` 在无 DSH、损坏可选插件状态下创建并读取 Task/Memory/Workspace；`test-task-runtime` 与 `test-phase4-memory` 分别验证相同 StateDir 上 Runtime 重建后 ID 和内容保留。**这些是隔离 fixture 与服务层重建证据**；本轮没有对真实用户 StateDir 做进程级 Task/Memory 迁移或读写对账。故真实安装版的跨 Worker 重启数据完整性仍是发布验收项。
+
 ## 先复现后修复
 
 | 反例 | 首次复现 | 修复与回归 |
