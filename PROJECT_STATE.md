@@ -94,6 +94,8 @@
 
 ## Active Work (Owner confirmation pending)
 
+- **M5-A 已交付，等待独立 M5-B 批准**：`codex/whalebridge-m5-a-dry-run`，沿用 `D:\GIT- CetaMesh\audit-critical-repair` 工作树，基线 M4.4 `e70a3de`；工具提交 `4eb5887734d237a49e78e525e9947466ed678d10`。真实只读盘点 86 项/3 个 preset，8 项账号归属、2 个缺游标根、2 个停止证据未确认，实际计划 BLOCKED。只读工具 DRY_RUN_PASS、隔离迁移 FIXTURE_MIGRATION_PASS、隔离回滚 ROLLBACK_PASS；真实执行 REAL_DATA_NOT_AUTHORIZED，次数 0。最终 npm 114 PASS / 0 FAIL / 7 未运行，Rust 198 PASS，Core/UI 构建及 SEA/Core 2 suites 通过。Build 1081 产品代码/SEA 保持不变；没有生产迁移 resolver 或 apply 入口，四份 M5 报告和脱敏 JSON 台账为当前事实。M2/M3 PARTIAL、M4 E2E_PENDING 和 RELEASE_BLOCKED 保留。M4 原分支与安装包未改；未 push、合并、迁移或覆盖用户配置。
+
 - M4.4 最终验收记录：产品提交 `bb6343483d04c65cd88104c9e9c76d23df656afb`，Build 1081；**M4_CODE_COMPLETE / M4_E2E_PENDING / RELEASE_BLOCKED**。最终 npm 112 PASS / 0 FAIL / 7 未运行（含两项默认 Cargo opt-in，已另行运行通过）；Rust 198 PASS / 0 FAIL；Release 9 PASS / 0 FAIL；打包 SEA Connector 集成 1 PASS。旧社交数据切换须 M5 库存/Dry Run 与 Owner 批准，本轮未迁移。详见 `WHALEBRIDGE_DECOUPLING_M4_4_REPORT.md`，停止等待 Owner 验收。
 
 - **WhaleBridge M4.4**：`codex/whalebridge-decoupling-m4`，工作树 `D:\GIT- CetaMesh\audit-critical-repair`，基线 `30ab2d32c37c2381d75ab8d4435949deaee7fd50`，Build 1081。Core Channel Service 管理可选 QQ/Bionic 子进程、持久入站投递/独立消费者确认，以及统一 Broker 外发授权。正式 SEA 的 `--qq-connector` / `--bionic-runtime` 不构建 Core 或 Owner IPC。旧社交数据存在时阻止自动切换写入者，等待 M5 库存/Dry Run 和 Owner 批准。最终测试、源码提交与安装包证据见 `WHALEBRIDGE_DECOUPLING_M4_4_REPORT.md`。M2/M3 仍 PARTIAL；发布仍 RELEASE_BLOCKED；真实 QQ E2E 未验收。未 push、合并或执行用户数据迁移。
