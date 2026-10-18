@@ -21,7 +21,10 @@ const release = process.argv.includes('--release');
 const extra = process.argv.slice(2).filter((arg) => arg !== '--release');
 
 // TOML 字面字符串（单引号）不需要转义 Windows 反斜杠。
-const rustflags = `build.rustflags=["--remap-path-prefix",'${ROOT}=.']`;
+// The installer itself must start on a clean Windows machine before any optional
+// runtime installer can run. Do not assume a developer Visual C++ redistributable.
+const staticCrt = process.platform === 'win32' ? ',"-C","target-feature=+crt-static"' : '';
+const rustflags = `build.rustflags=["--remap-path-prefix",'${ROOT}=.'${staticCrt}]`;
 
 const args = [
   'build',

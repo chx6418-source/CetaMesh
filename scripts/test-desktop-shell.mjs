@@ -129,12 +129,12 @@ async function closeChildPipes(child, delayMs = 500) {
 
 function isRunning(pid) {
   if (!pid) return false;
-  const result = spawnSync(
-    'powershell.exe',
-    ['-NoProfile', '-NonInteractive', '-Command', `@(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").Count`],
-    { encoding: 'utf8', timeout: 60000 }
-  );
-  return (Number.parseInt((result.stdout ?? '0').trim(), 10) || 0) > 0;
+  // This smoke test deliberately restarts the first worker after one second.
+  // Starting PowerShell/CIM here can outlive that deadline and inspect the old
+  // PID after its intended restart. Signal 0 preserves the same liveness check
+  // without scheduling a separate process; access errors must not mean exited.
+  try { process.kill(pid, 0); return true; }
+  catch (error) { if (error.code === 'ESRCH') return false; throw error; }
 }
 
 /** 递归列出某进程的全部后代（用于确认没有 conhost 之类的控制台宿主）。 */

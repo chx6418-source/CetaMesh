@@ -71,6 +71,7 @@ const REGISTRY = {
   'test-qq-connector-process.mjs': { category: 'integration' },
   'test-channel-sea.mjs': { category: 'release', requires: ['core-dist'], timeoutMs: 120000 },
   'test-m6-pure-core-sea.mjs': { category: 'release', requires: ['core-dist'], timeoutMs: 120000 },
+  'test-desktop-runtime-dependencies.mjs': { category: 'release', requires: ['release-dist'] },
   'test-bionic-runtime-lifecycle.mjs': { category: 'integration' },
   'test-qq-auto-request.mjs': { category: 'core' },
   'test-qq-send-ledger.mjs': { category: 'core' },
