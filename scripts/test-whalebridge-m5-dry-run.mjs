@@ -1,0 +1,73 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { createAppPaths } from '../src/app-paths.js';
+import { writeJsonAtomic } from '../src/storage/json-file.js';
+import { dryRunMigration, discoverMigrationRoots } from '../src/migration/inventory.js';
+
+const root = fs.mkdtempSync(path.join(os.tmpdir(), '鲸桥 M5 只读 '));
+try {
+  const state = path.join(root, 'state'); fs.mkdirSync(state);
+  writeJsonAtomic(path.join(root, 'config.json'), { ownerQQ: '999999', snowluma: { accessToken: 'PRIVATE_TOKEN_DO_NOT_PRINT', wsUrl: 'ws://127.0.0.1:9' } });
+  writeJsonAtomic(path.join(state, 'social-v2.json'), { conversations: { 'group:42': { unread: ['PRIVATE_CHAT_DO_NOT_PRINT'], memberImpressions: { '7': { text: 'PRIVATE_PREFERENCE' } } } } });
+  writeJsonAtomic(path.join(state, 'qq-message-receipts.json'), { version: 1, ids: [], pending: [] });
+  const bindings = { [root]: '10001' };
+  const options = { roots: [{ dataRoot: root, provenance: 'explicit-test' }], bindings, dshHomes: [] };
+  const before = fs.readFileSync(path.join(state, 'social-v2.json'));
+  const first = dryRunMigration(options);
+  assert.equal(first.report.status, 'DRY_RUN_PASS');
+  assert.deepEqual(first.report, dryRunMigration(options).report, 'unchanged read-only plans must be deterministic');
+  assert.doesNotMatch(JSON.stringify(first), /PRIVATE_|999999|group:42|10001/);
+  assert.deepEqual(fs.readFileSync(path.join(state, 'social-v2.json')), before);
+  assert.equal(fs.existsSync(path.join(root, 'channel')), false, 'dry run cannot create targets');
+  writeJsonAtomic(path.join(state, 'desktop-chat', 'sessions.json'), { schemaVersion: 1, sessions: [] });
+  assert.equal(dryRunMigration(options).report.blockers.some(row => row.code === 'SCHEMA_INCOMPATIBLE'), false,
+    'Core Chat sessions v1 must not be mistaken for unversioned Legacy QQ sessions');
+  assert.ok(dryRunMigration({ ...options, bindings: {} }).report.blockers.some(row => row.code === 'ACCOUNT_ATTRIBUTION_REQUIRED'));
+  fs.writeFileSync(path.join(state, 'social-v2.json'), '{broken');
+  const broken = dryRunMigration(options);
+  assert.ok(broken.report.blockers.some(row => row.code === 'SCHEMA_INCOMPATIBLE'));
+  assert.equal(fs.readFileSync(path.join(state, 'social-v2.json'), 'utf8'), '{broken');
+  fs.writeFileSync(path.join(state, 'social-v2.json'), before);
+  writeJsonAtomic(path.join(state, 'qq-send-ledger.json'), { version: 1, records: [{ accountId: '10001', requestId: 'pending-1', status: 'outcome-unknown' }] });
+  assert.ok(dryRunMigration(options).report.blockers.some(row => row.code === 'OUTCOME_UNKNOWN'));
+  fs.unlinkSync(path.join(state, 'qq-send-ledger.json'));
+  fs.unlinkSync(path.join(state, 'qq-message-receipts.json'));
+  assert.ok(dryRunMigration(options).report.blockers.some(row => row.code === 'CURSOR_MISSING'));
+  const paths = createAppPaths({ WHALEBRIDGE_DATA_DIR: 'other' }, { sourceRoot: root, cwd: root, packaged: false, argv: ['node', 'tool', '--data-dir', root] });
+  assert.equal(paths.dataRoot, root);
+  assert.equal(discoverMigrationRoots({ paths, extraRoots: [root] }).length, 1);
+  const portable = path.join(root, 'portable 非C盘'); fs.mkdirSync(portable); fs.writeFileSync(path.join(portable, 'portable.flag'), '');
+  assert.equal(createAppPaths({}, { packaged: true, execPath: path.join(portable, 'core.exe'), argv: [], cwd: root }).dataRoot, path.join(portable, 'data'));
+  const linked = path.join(state, 'linked'); fs.symlinkSync(root, linked, 'junction');
+  assert.ok(dryRunMigration(options).report.blockers.some(row => row.code === 'UNSAFE_LINK'));
+  fs.unlinkSync(linked);
+  const readonly = path.join(state, 'social-v2.json'); fs.chmodSync(readonly, 0o444);
+  assert.ok(dryRunMigration(options).report.blockers.some(row => row.code === 'READ_ONLY_SOURCE_REQUIRES_REVIEW'));
+  fs.chmodSync(readonly, 0o666);
+  const dsh = path.join(root, 'DSH 用户');
+  fs.mkdirSync(path.join(dsh, '.agent-presets', 'user-edited'), { recursive: true });
+  const preset = path.join(dsh, '.agent-presets', 'user-edited', 'agent.cordis.yml');
+  const presetText = '- id: persona\n  config:\n    prefix: user-owned prompt\n'; fs.writeFileSync(preset, presetText);
+  writeJsonAtomic(path.join(dsh, '.whalebridge-integration.json'), { presets: { 'user-edited': { owned: true, hash: 'previous-installed-hash' } } });
+  const ds = dryRunMigration({ ...options, dshHomes: [dsh] });
+  assert.equal(ds.report.presets[0].attribution, 'USER_MODIFIED');
+  assert.equal(ds.report.presets[0].action, 'NEVER_OVERWRITE');
+  assert.equal(ds.report.presets[0].personaPrefixCompatible, true);
+  assert.equal(fs.readFileSync(preset, 'utf8'), presetText);
+  fs.writeFileSync(preset, '- id: persona\n  config: {}\n');
+  assert.equal(dryRunMigration({ ...options, dshHomes: [dsh] }).report.presets[0].personaPrefixCompatible, false);
+  writeJsonAtomic(path.join(state, 'qq-message-receipts.json'), { version: 7, ids: [] });
+  assert.ok(dryRunMigration(options).report.blockers.some(row => row.code === 'SCHEMA_INCOMPATIBLE'));
+  writeJsonAtomic(path.join(state, 'qq-message-receipts.json'), { version: 1, ids: ['10002:group:42:9'], pending: [] });
+  assert.ok(dryRunMigration(options).report.blockers.some(row => row.code === 'ACCOUNT_MAPPING_CONFLICT'));
+  const noApply = spawnSync(process.execPath, [path.resolve(import.meta.dirname, 'whalebridge-migration-dry-run.mjs'), '--apply', '--root', root], { encoding: 'utf8', windowsHide: true });
+  assert.equal(noApply.status, 2);
+  assert.equal(fs.existsSync(path.join(root, 'active-version.json')), false);
+  for (const source of ['src/core-dispatch.js', 'src/app/bootstrap.js', 'src/app/service-container.js']) {
+    assert.doesNotMatch(fs.readFileSync(path.resolve(import.meta.dirname, '..', source), 'utf8'), /legacy-migration-fixture|migration\/inventory/);
+  }
+  console.log('DRY_RUN_PASS deterministic metadata, privacy, paths, damaged data and uncertainty gates');
+} finally { fs.rmSync(root, { recursive: true, force: true }); }

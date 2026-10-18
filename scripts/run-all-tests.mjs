@@ -39,6 +39,8 @@ export const CATEGORIES = ['core', 'architecture', 'security', 'runtime', 'integ
 // ── 登记表：scripts/test-*.mjs 的每一个文件都必须出现在这里（或能从 package.json 映射）。
 // requires 的取值见 probeAvailability()；category 取值见 CATEGORIES。
 const REGISTRY = {
+  'test-whalebridge-m5-dry-run.mjs': { category: 'security' },
+  'test-whalebridge-m5-fixture.mjs': { category: 'integration' },
   // ── core：基础服务 / 纯函数 / 传输协议 ─────────────────────────────────────
   'test-agent-provider.mjs': { category: 'core' },
   'test-dsh-connector-m3.mjs': { category: 'core' },
