@@ -7,8 +7,8 @@
 //       { method: 'GET'|'POST', path: '/api/...', query?, body?, token?, sessionToken? }
 //     其中 token 是服务令牌（state/agent-token，等价旧 HTTP x-console-token），
 //     sessionToken 等价旧 HTTP x-agent-token（会话级令牌）；
-//   · 服务端把 data.call 还原成一个虚拟 HTTP 请求，走 bridge.js 的同一套
-//     handleApiRequest 鉴权闸门与数据面路由——数据面语义与旧 HTTP 完全一致；
+//   · 服务端把 data.call 还原成一个虚拟 HTTP 请求，交给当前进程拥有的
+//     handleApiRequest；纯 Core 只提供最小健康接口，显式 Legacy 入口保留旧路由；
 //   · 控制面方法（control.execute / capability.* 等）在 data pipe 上一律
 //     METHOD_NOT_FOUND：Control Plane != Data Plane（D1-004）。
 //
@@ -166,7 +166,7 @@ export async function executeDataCall(params, { handleApiRequest, signal } = {})
 
 /**
  * 启动数据面 pipe 服务。返回未 listen 的 net.Server，由调用方 listen 并处理错误
- * （与 UI IPC 同样的生命周期归属：bridge.js 决定进程退出语义）。
+ * （与 UI IPC 同样的生命周期归属：启动该进程的 Core/Legacy 入口负责关闭）。
  */
 export function startDataIpcServer({ handleApiRequest, log = () => {}, pipeName = resolveDataPipeName() } = {}) {
   if (typeof handleApiRequest !== 'function') throw new TypeError('handleApiRequest is required');

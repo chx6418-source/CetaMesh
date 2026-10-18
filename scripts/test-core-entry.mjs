@@ -173,7 +173,8 @@ try {
   const workerPort = await freePort();
   isolatedConfig.consolePort = workerPort;
   isolatedConfig.dsh = { baseUrl: 'http://127.0.0.1:9' };
-  fs.writeFileSync(path.join(tempRoot, 'config.json'), JSON.stringify(isolatedConfig, null, 2));
+  const damagedLegacyConfig = '{"qq":';
+  fs.writeFileSync(path.join(tempRoot, 'config.json'), damagedLegacyConfig);
   const isolatedDiscoveryRoot = path.join(tempRoot, 'discovery');
   fs.mkdirSync(isolatedDiscoveryRoot, { recursive: true });
   const worker = spawn(process.execPath, [ENTRY, '--worker'], {
@@ -197,7 +198,16 @@ try {
     const status = await waitForDataIpc(tempRoot);
     assert.equal(status.ok, true, `数据面 IPC /api/status 应可用（status ${status.status}）`);
     assert.ok(fs.existsSync(path.join(tempRoot, 'state', 'agent-token')));
-    assert.ok(fs.existsSync(path.join(tempRoot, 'state', 'bridge.lock')));
+    assert.ok(fs.existsSync(path.join(tempRoot, 'state', '.core-owner.lock')), 'Core owns its state lease');
+    assert.equal(fs.existsSync(path.join(tempRoot, 'state', 'bridge.lock')), false, 'Core must not initialize legacy Bridge');
+    assert.equal(fs.readFileSync(path.join(tempRoot, 'config.json'), 'utf8'), damagedLegacyConfig, 'Core must preserve damaged optional QQ config');
+    const duplicate = spawnSync(process.execPath, [ENTRY, '--worker'], {
+      cwd: ROOT, encoding: 'utf8', timeout: 5000,
+      env: { ...process.env, WHALEBRIDGE_DATA_DIR: tempRoot }
+    });
+    assert.equal(duplicate.status, 2, 'a second Core must not become a Task/Memory writer');
+    assert.match(duplicate.stderr, /Another Core owns this StateDir|STATE_DIR_BUSY/);
+    assert.equal((await waitForDataIpc(tempRoot)).ok, true, 'first Core must retain its IPC pipe');
     console.log('✅ worker: 隔离数据目录启动成功（数据面 IPC 健康，无 HTTP listener）');
   } finally {
     if (worker.exitCode === null) worker.kill();
@@ -206,6 +216,21 @@ try {
       new Promise((resolve) => setTimeout(() => resolve(false), 5000))
     ]);
     assert.equal(exited, true, 'isolated worker did not exit within 5 seconds');
+  }
+
+  const supervised = spawn(process.execPath, [ENTRY, '--worker'], {
+    cwd: ROOT, windowsHide: true, stdio: ['pipe', 'ignore', 'ignore'],
+    env: { ...process.env, WHALEBRIDGE_DATA_DIR: tempRoot, WHALEBRIDGE_SUPERVISED: '1' }
+  });
+  try {
+    await waitForDataIpc(tempRoot);
+    const exit = once(supervised, 'exit');
+    supervised.stdin.end();
+    const result = await Promise.race([exit, new Promise(resolve => setTimeout(() => resolve(null), 3000))]);
+    assert.ok(result, 'supervised Core must exit after shell stdin EOF');
+    assert.equal(fs.existsSync(path.join(tempRoot, 'state', '.core-owner.lock')), false, 'Core must release its owner lock');
+  } finally {
+    if (supervised.exitCode === null) supervised.kill();
   }
 
   // 阶段 5 起，MCP 配置的生成逻辑在 src/dsh-integration.js；setup-dsh.mjs 只是它的命令行外壳。

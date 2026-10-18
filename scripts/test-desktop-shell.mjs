@@ -227,16 +227,16 @@ try {
       const pidLine = await shell.waitFor((line) => line.startsWith('worker_pid='));
       firstPid = Number.parseInt(pidLine.split('=')[1], 10);
       assert.ok(Number.isInteger(firstPid) && firstPid > 0, `worker pid 异常：${pidLine}`);
-      const lockFile = path.join(dataDir, 'state', 'bridge.lock');
+      const lockFile = path.join(dataDir, 'state', '.core-owner.lock');
       assert.ok(fs.existsSync(lockFile), 'ready worker 应已持有锁文件');
-      assert.equal(fs.readFileSync(lockFile, 'utf8').trim(), String(firstPid), '锁文件 owner 应与 ready worker PID 一致');
-      await shell.waitFor((line) => line === 'ipc_control_request=ok');
-      await shell.waitFor((line) => line === 'ipc_policy_read=ok');
-      await shell.waitFor((line) => line === 'ipc_activity_read=ok');
-      await shell.waitFor((line) => line === 'ipc_logs_read=ok');
-      await shell.waitFor((line) => line === 'ipc_model_defaults=ok');
-      await shell.waitFor((line) => line === 'ipc_pending_list=ok');
-      await shell.waitFor((line) => line === 'ipc_policy_write=ok');
+      assert.equal(fs.readFileSync(lockFile, 'utf8').trim().split(':')[0], String(firstPid), '锁文件 owner 应与 ready worker PID 一致');
+      await shell.waitFor((line) => line === 'ipc_chat_list=ok');
+      await shell.waitFor((line) => line === 'ipc_task_overview=ok');
+      await shell.waitFor((line) => line === 'ipc_memory_overview=ok');
+      await shell.waitFor((line) => line === 'ipc_workspace_list=ok');
+      await shell.waitFor((line) => line === 'ipc_settings_get=ok');
+      await shell.waitFor((line) => line === 'ipc_agent_list=ok');
+      await shell.waitFor((line) => line === 'ipc_event_poll=ok');
       // D1 契约：native 模式下 loopback HTTP 面根本不存在 —— consolePort 必须拒连。
       // （原先这里是 403 断言：HTTP 在但管理请求被拒；现在 server 不再创建。）
       // 注意必须快速完成：--test-restart-once 随时可能重启 worker，不能在这里等。
@@ -263,7 +263,7 @@ try {
       assert.match(workerLog, /Native UI IPC server is ready\./, 'worker 应启动原生 UI IPC 服务');
       const shellLog = fs.readFileSync(path.join(dataDir, 'logs', 'desktop-shell.log'), 'utf8');
       assert.match(shellLog, /ipc_pipe=.*WhaleBridge-UI-\d+/, '壳日志应记录私有 IPC pipe，ready 不再依赖 HTTP 页面');
-      step(`✅ --smoke-test：IPC 握手、role.list、策略/活动/日志/默认模型/挂起列表读取与策略写入成功，worker(pid ${firstPid}) 与日志/锁文件就位`);
+      step(`✅ --smoke-test：IPC 握手及 Chat/Task/Memory/Workspace/Settings/Agent/Event 方法成功，worker(pid ${firstPid}) 与日志/锁文件就位`);
 
       await shell.waitFor((line) => line === 'test_restart_requested=true');
       const requestedAt = Date.now();
@@ -313,7 +313,7 @@ try {
     await new Promise((resolve) => setTimeout(resolve, 500));
     assert.equal(isRunning(finalPid), false, `worker(pid ${finalPid}) 应随壳退出而被停止`);
     assert.equal(
-      fs.existsSync(path.join(dataDir, 'state', 'bridge.lock')),
+      fs.existsSync(path.join(dataDir, 'state', '.core-owner.lock')),
       false,
       'worker 优雅退出后应释放锁'
     );
@@ -329,7 +329,7 @@ try {
     // 锁文件里的活跃 PID 才是判据（acquireLock → exit 2）。这里写入测试进程自己的
     // PID —— 它在 worker 启动时必然还活着。
     fs.mkdirSync(path.join(dataDir, 'state'), { recursive: true });
-    fs.writeFileSync(path.join(dataDir, 'state', 'bridge.lock'), String(process.pid));
+    fs.writeFileSync(path.join(dataDir, 'state', '.core-owner.lock'), `${process.pid}:${'a'.repeat(32)}`);
     try {
       const result = runShell(['--smoke-test'], { ...shellEnv(tempRoot, dataDir), WHALEBRIDGE_CORE_MODE: 'development', WHALEBRIDGE_REPO_ROOT: ROOT });
       assert.equal(result.status, 4, `单实例冲突时自检应报未就绪（实际 ${result.status}）\n${result.output}`);
@@ -338,7 +338,7 @@ try {
       assert.match(result.stdout, /spawn_count_after_supervise=1/, '单实例冲突不应触发重启');
       step('✅ 单实例冲突：锁文件活跃 PID → worker exit 2 → 壳判定"已有实例"、不自动重启、需要人工处理');
     } finally {
-      fs.rmSync(path.join(dataDir, 'state', 'bridge.lock'), { force: true });
+      fs.rmSync(path.join(dataDir, 'state', '.core-owner.lock'), { force: true });
     }
   }
 
@@ -453,7 +453,7 @@ try {
       const orphanWorkerLog = fs.readFileSync(path.join(dataDir, 'logs', 'worker.log'), 'utf8');
       assert.match(orphanWorkerLog, /启动器已退出（stdin 关闭）/, 'worker 应记录孤儿守卫的退出原因');
       assert.equal(
-        fs.existsSync(path.join(dataDir, 'state', 'bridge.lock')),
+        fs.existsSync(path.join(dataDir, 'state', '.core-owner.lock')),
         false,
         '孤儿守卫走的是优雅退出，锁文件应被释放（硬杀才会残留）'
       );

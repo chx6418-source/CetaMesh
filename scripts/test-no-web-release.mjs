@@ -157,8 +157,9 @@ function isolatedWorkerEnv(tempRoot, dataDir, extra = {}) {
   };
 }
 
-function startWorker(tempRoot, dataDir, extraEnv = {}) {
-  const child = spawn(process.execPath, [path.join(ROOT, 'src', 'core-entry.js'), '--worker'], {
+function startWorker(tempRoot, dataDir, extraEnv = {}, { legacy = false } = {}) {
+  const args = legacy ? [path.join(ROOT, 'src', 'bridge.js')] : [path.join(ROOT, 'src', 'core-entry.js'), '--worker'];
+  const child = spawn(process.execPath, args, {
     cwd: ROOT,
     windowsHide: true,
     stdio: ['pipe', 'ignore', 'pipe'],
@@ -263,7 +264,7 @@ try {
       // MCP 数据面 IPC：真实 fixture 请求 /api/status（agent-token 鉴权 + 完整 JSON 响应）
       const { res } = await waitForDataPlane(dataDir, { pipeName: dataPipeOverride });
       assert.equal(res.ok, true, `data IPC /api/status must be ok: ${res.status} ${res.text?.slice(0, 200)}`);
-      assert.equal(res.json?.tokenModel, 'dual');
+      assert.equal(res.json?.tokenModel, 'service-only');
       assert.equal(typeof res.json?.mode, 'string');
       assert.equal(res.json?.agentSurface?.agentAllowedExact?.includes('/api/status'), true);
 
@@ -307,7 +308,7 @@ try {
   {
     const dataDir = path.join(behaviorTempRoot, 'legacy', 'data');
     writeWorkerConfig(dataDir);
-    const worker = startWorker(path.join(behaviorTempRoot, 'legacy'), dataDir, { WHALEBRIDGE_LEGACY_HTTP: '1' });
+    const worker = startWorker(path.join(behaviorTempRoot, 'legacy'), dataDir, { WHALEBRIDGE_LEGACY_HTTP: '1' }, { legacy: true });
     try {
       await waitForDataPlane(dataDir);
       const connected = await (async () => {

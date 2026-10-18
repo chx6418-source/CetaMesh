@@ -290,134 +290,27 @@ fn smoke_test(supervise: Duration, test_restart_once: bool) -> i32 {
     }
     println!("reached_ready={reached_ready}");
     if reached_ready {
-        match IpcClient::new(pipe.clone()).request(
-            "control.execute",
-            serde_json::json!({ "method": "role.list", "params": {} }),
-        ) {
-            Ok(_) => println!("ipc_control_request=ok"),
-            Err(error) => {
-                eprintln!("ipc_control_request=failed: {error}");
-                println!("ipc_control_request=failed");
-            }
-        }
-        match IpcClient::new(pipe.clone()).request(
-            "control.execute",
-            serde_json::json!({ "method": "policy.get", "params": {} }),
-        ) {
-            Ok(value) if value.get("policy").is_some() => println!("ipc_policy_read=ok"),
-            Ok(value) => {
-                eprintln!("ipc_policy_read=invalid: {value}");
-                println!("ipc_policy_read=failed");
-            }
-            Err(error) => {
-                eprintln!("ipc_policy_read=failed: {error}");
-                println!("ipc_policy_read=failed");
-            }
-        }
-        match IpcClient::new(pipe.clone()).request(
-            "control.execute",
-            serde_json::json!({ "method": "activity.list", "params": { "limit": 10 } }),
-        ) {
-            Ok(value)
-                if value
-                    .get("entries")
-                    .and_then(serde_json::Value::as_array)
-                    .is_some() =>
-            {
-                println!("ipc_activity_read=ok");
-            }
-            Ok(value) => {
-                eprintln!("ipc_activity_read=invalid: {value}");
-                println!("ipc_activity_read=failed");
-            }
-            Err(error) => {
-                eprintln!("ipc_activity_read=failed: {error}");
-                println!("ipc_activity_read=failed");
-            }
-        }
-        match IpcClient::new(pipe.clone()).request(
-            "control.execute",
-            serde_json::json!({
-                "method": "logs.read",
-                "params": { "source": "bridge", "limit": 10 }
-            }),
-        ) {
-            Ok(value)
-                if value
-                    .get("lines")
-                    .and_then(serde_json::Value::as_array)
-                    .is_some() =>
-            {
-                println!("ipc_logs_read=ok");
-            }
-            Ok(value) => {
-                eprintln!("ipc_logs_read=invalid: {value}");
-                println!("ipc_logs_read=failed");
-            }
-            Err(error) => {
-                eprintln!("ipc_logs_read=failed: {error}");
-                println!("ipc_logs_read=failed");
-            }
-        }
-        match IpcClient::new(pipe.clone()).request(
-            "control.execute",
-            serde_json::json!({ "method": "model.defaults.get", "params": {} }),
-        ) {
-            Ok(value)
-                if value
-                    .get("defaults")
-                    .and_then(serde_json::Value::as_object)
-                    .is_some() =>
-            {
-                println!("ipc_model_defaults=ok");
-            }
-            Ok(value) => {
-                eprintln!("ipc_model_defaults=invalid: {value}");
-                println!("ipc_model_defaults=failed");
-            }
-            Err(error) => {
-                eprintln!("ipc_model_defaults=failed: {error}");
-                println!("ipc_model_defaults=failed");
-            }
-        }
-        match IpcClient::new(pipe.clone()).request(
-            "control.execute",
-            serde_json::json!({ "method": "pending.list", "params": {} }),
-        ) {
-            Ok(value)
-                if value
-                    .get("pending")
-                    .and_then(serde_json::Value::as_array)
-                    .is_some() =>
-            {
-                println!("ipc_pending_list=ok");
-            }
-            Ok(value) => {
-                eprintln!("ipc_pending_list=invalid: {value}");
-                println!("ipc_pending_list=failed");
-            }
-            Err(error) => {
-                eprintln!("ipc_pending_list=failed: {error}");
-                println!("ipc_pending_list=failed");
-            }
-        }
-        match IpcClient::new(pipe.clone()).request(
-            "control.execute",
-            serde_json::json!({
-                "method": "policy.update",
-                "params": { "allow": { "private": [], "groups": [] } }
-            }),
-        ) {
-            Ok(value) if value.get("ok").and_then(serde_json::Value::as_bool) == Some(true) => {
-                println!("ipc_policy_write=ok");
-            }
-            Ok(value) => {
-                eprintln!("ipc_policy_write=invalid: {value}");
-                println!("ipc_policy_write=failed");
-            }
-            Err(error) => {
-                eprintln!("ipc_policy_write=failed: {error}");
-                println!("ipc_policy_write=failed");
+        // Exercise the shipped Harbor/Core methods. QQ policy and old Bridge
+        // control commands belong to the explicit Legacy connector entry.
+        for (label, method, field) in [
+            ("ipc_chat_list", "ui.chat.sessions.list", "sessions"),
+            ("ipc_task_overview", "ui.task.overview", "tasks"),
+            ("ipc_memory_overview", "ui.memory.overview", "memories"),
+            ("ipc_workspace_list", "ui.workspace.list", "workspaces"),
+            ("ipc_settings_get", "ui.settings.get", "settings"),
+            ("ipc_agent_list", "ui.agent.list", "agents"),
+            ("ipc_event_poll", "ui.events.next", "events"),
+        ] {
+            match IpcClient::new(pipe.clone()).request(method, serde_json::json!({})) {
+                Ok(value) if value.get(field).is_some() => println!("{label}=ok"),
+                Ok(value) => {
+                    eprintln!("{label}=invalid: {value}");
+                    println!("{label}=failed");
+                }
+                Err(error) => {
+                    eprintln!("{label}=failed: {error}");
+                    println!("{label}=failed");
+                }
             }
         }
     }

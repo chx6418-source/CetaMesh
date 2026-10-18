@@ -5,7 +5,7 @@
 //   1. --help / 无参数 / 非法参数的退出码与输出通道；
 //   2. 五个 MCP 模式真实 stdio：initialize → tools/list → 安全 tools/call；
 //   3. --worker 在临时端口 + 临时数据目录启动，显式资源目录与自动发现资源目录均生效；
-//   4. 临时数据目录内生成 console-token / agent-token / bridge.lock；
+//   4. 临时数据目录内生成 agent-token / .core-owner.lock；
 //   5. HTTP loopback 仅提供 API：根路径要求鉴权，且不再提供产品网页控制台；
 //   6. 全程 PATH 中不存在 node.exe，且 worker 进程树中没有 node.exe；
 //   7. 数据目录优先级：WHALEBRIDGE_DATA_DIR > --data-dir > portable.flag > %LOCALAPPDATA%；
@@ -293,7 +293,6 @@ async function runWorker({ label, dataDir: workerDataDir, resourceDir, useDefaul
     path.join(effectiveDataDir, 'config.json'),
     JSON.stringify(isolatedConfig(port), null, 2)
   );
-  fs.rmSync(path.join(effectiveDataDir, 'state', 'bridge.lock'), { force: true });
 
   const child = track(spawn(EXE, ['--worker'], {
     cwd: tempRoot,
@@ -315,12 +314,12 @@ async function runWorker({ label, dataDir: workerDataDir, resourceDir, useDefaul
     const { res } = await waitForDataIpc(effectiveDataDir);
     assert.equal(res.ok, true, `${label}: 数据面 IPC /api/status 应可用`);
     assert.equal(typeof res.json?.mode, 'string', `${label}: /api/status 应返回运行模式`);
-    assert.equal(res.json?.tokenModel, 'dual', `${label}: 双令牌模型自描述`);
+    assert.equal(res.json?.tokenModel, 'service-only', `${label}: Core 数据面仅持有服务令牌`);
 
     await assertTcpAlwaysRefused(port, label);
 
-    // console-token 只在未配置 consoleToken 时生成；agent-token 与 bridge.lock 每次启动都会落盘。
-    for (const file of ['agent-token', 'bridge.lock']) {
+    // Core 不生成 Legacy console-token；只创建自身的服务令牌与所有权锁。
+    for (const file of ['agent-token', '.core-owner.lock']) {
       assert.ok(
         fs.existsSync(path.join(effectiveDataDir, 'state', file)),
         `${label}: 数据目录缺少 state/${file}`
@@ -338,7 +337,7 @@ async function runWorker({ label, dataDir: workerDataDir, resourceDir, useDefaul
     const nodeChildren = descendants.filter((item) => /^node(\.exe)?$/i.test(item.Name ?? ''));
     assert.deepEqual(nodeChildren, [], `${label}: worker 拉起了 node.exe 子进程：${JSON.stringify(nodeChildren)}`);
     step(
-      `✅ ${label}：数据面 IPC /api/status 200、consolePort 拒连（无 HTTP server）、agent-token/bridge.lock 落盘、` +
+      `✅ ${label}：数据面 IPC /api/status 200、consolePort 拒连（无 HTTP server）、agent-token/.core-owner.lock 落盘、` +
         `资源目录生效、后代进程 ${descendants.length} 个（${descendants.map((item) => item.Name).join(', ') || '无'}）且无 node.exe`
     );
   } catch (error) {
@@ -505,14 +504,14 @@ try {
   try {
     // 就绪与鉴权验证都走数据面 IPC（发行 worker 没有 HTTP 面可探测）。
     await waitForDataIpc(argDataDir);
-    const tokenFile = path.join(argDataDir, 'state', 'console-token');
-    assert.ok(fs.existsSync(tokenFile), '--data-dir 未被采用：未在指定目录生成 state/console-token');
+    const tokenFile = path.join(argDataDir, 'state', 'agent-token');
+    assert.ok(fs.existsSync(tokenFile), '--data-dir 未被采用：未在指定目录生成 state/agent-token');
     const generated = fs.readFileSync(tokenFile, 'utf8').trim();
-    assert.ok(generated.length >= 32, '生成的 console-token 长度异常');
+    assert.ok(generated.length >= 32, '生成的 agent-token 长度异常');
     const status = await dataCall({ path: '/api/status', token: generated, timeoutMs: 5000, pipeName: resolveDataPipeName({ dataRoot: argDataDir }) });
-    assert.equal(status.ok, true, '生成的 console-token 应能访问控制 API');
+    assert.equal(status.ok, true, '生成的 agent-token 应能访问 Core 健康接口');
     await assertTcpAlwaysRefused(argPort, 'worker（--data-dir）');
-    step('✅ --data-dir：覆盖默认数据目录，生成 console-token 并经数据面 IPC 通过鉴权');
+    step('✅ --data-dir：覆盖默认数据目录，生成 agent-token 并经数据面 IPC 通过鉴权');
   } catch (error) {
     await killQuietly(argWorker);
     error.message = `${error.message}\n--- worker stderr ---\n${argStderr}`;
@@ -545,7 +544,7 @@ try {
   try {
     await waitForDataIpc(portableDataDir);
     assert.ok(
-      fs.existsSync(path.join(portableDataDir, 'state', 'console-token')),
+      fs.existsSync(path.join(portableDataDir, 'state', 'agent-token')),
       'portable.flag 未被采用：数据未写入 exe 同目录 data/'
     );
     await assertTcpAlwaysRefused(portablePort, 'worker（便携模式）');

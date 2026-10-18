@@ -3,7 +3,7 @@
 // 本模块只做分派，不判断“是否为主模块”。源码入口 src/core-entry.js 负责 Node 直接运行，
 // 打包入口 src/core-sea.js 负责 SEA exe；两者都只 import 本模块，避免其中一方的
 // 主模块守卫在另一方运行时被意外触发（SEA 中 import.meta.url 会等于 exe 自身路径）。
-import { runBridge } from './bridge.js';
+import { runCoreWorker } from './app/core-worker.js';
 import { runMcpSnowLuma } from './mcp-snowluma-safe.js';
 import { runMcpSnowLumaHost } from './mcp-host-server.js';
 import { runMcpWebSearchSafe } from './mcp-web-search-safe.js';
@@ -125,7 +125,7 @@ export async function runCore(argv = process.argv.slice(2)) {
     process.stdout.write(`${CORE_USAGE}\n`);
     return;
   }
-  if (command.mode === 'worker') return runBridge();
+  if (command.mode === 'worker') return runCoreWorker();
   if (command.mode === 'extension-worker') return runExtensionWorker();
   if (command.mode === 'setup-dsh') {
     return runSetupDshFromApp({

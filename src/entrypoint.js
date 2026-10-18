@@ -19,5 +19,5 @@ export function isMainModule(metaUrl, argv = process.argv) {
 
 export function reportEntrypointError(label, error) {
   console.error(`[${label}] 启动失败:`, error?.stack ?? error?.message ?? error);
-  process.exitCode = 1;
+  process.exitCode = error?.code === 'STATE_DIR_BUSY' ? 2 : 1;
 }

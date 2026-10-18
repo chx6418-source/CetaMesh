@@ -7,7 +7,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { atomicWriteConfig, parseConfigText, readRawConfig } from '../config/loader.js';
+import { atomicWriteConfig, readRawConfig } from '../config/loader.js';
 import { assertSafeRootForm, canonicalizeRoot } from './boundary.js';
 
 const SCHEMA_VERSION = 1;
@@ -68,10 +68,11 @@ export function createWorkspaceRegistry({ file, now = () => Date.now() } = {}) {
         pending: Array.isArray(raw.pending) ? raw.pending : [],
         activity: Array.isArray(raw.activity) ? raw.activity : []
       };
-    } catch {
-      // 清单缺失 / 损坏：从空清单开始（清单只是登记，不是安全边界本身；
-      // 边界在 boundary.js，任何访问仍受 root 约束）。
-      return emptyState();
+    } catch (error) {
+      // Only a truly absent registry is a new installation. Preserve corrupt or
+      // unreadable existing state instead of allowing the next write to erase it.
+      if (error?.code === 'CONFIG_MISSING' && error?.cause?.code === 'ENOENT') return emptyState();
+      throw new WorkspaceRegistryError('REGISTRY_CORRUPT', `工作区清单无法读取；原文件已保留：${file}（${error?.message ?? error}）`);
     }
   }
 

@@ -122,7 +122,8 @@ try {
 
 console.log('PASS QQ runtime connection lifecycle, transport, and persisted MCP tool policy');
 
-// Real isolated Core IPC verifies that direct data calls cannot bypass the MCP guard.
+// Pure Core must refuse QQ data calls; the Legacy connector retains the QQ
+// policy checks exercised above when it is explicitly started.
 const workerRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-qq-policy-worker-'));
 const repoRoot = path.resolve(import.meta.dirname, '..');
 const discoveryRoot = path.join(workerRoot, 'discovery');
@@ -156,18 +157,18 @@ try {
   }
   assert.equal(ready, true, 'isolated Core must expose its real data IPC');
   const recent = () => dataCall({ path: '/api/socialV2/recent', query: { key: 'group:1' }, sessionToken: 'invalid-fixture', token, pipeName });
-  assert.notEqual((await recent()).json?.code, 'TOOL_DISABLED');
+  assert.equal((await recent()).status, 403);
   await workerIntegration.execute({ method: 'plugins.tool.toggle', params: {
     pluginId: 'cetamesh-bionic-chat', toolId: 'mcp__snowluma__qq_get_recent_messages', enabled: false
   } });
   const deniedRoute = await recent();
   assert.equal(deniedRoute.status, 403);
-  assert.equal(deniedRoute.json.code, 'TOOL_DISABLED', 'already-running Core must enforce a hot tool switch before session execution');
+  assert.match(deniedRoute.json.error, /Core 数据面不接受 Legacy 会话令牌/);
   await workerIntegration.execute({ method: 'plugins.disable', params: { id: 'cetamesh-bionic-chat' } });
   const deniedSend = await dataCall({ method: 'POST', path: '/api/send/group', body: { groupId: 1, message: 'blocked fixture' }, token, pipeName });
   assert.equal(deniedSend.status, 403);
-  assert.equal(deniedSend.json.code, 'TOOL_DISABLED', 'direct data IPC cannot bypass the pack switch');
-  console.log('PASS real isolated Core data IPC enforces hot tool and pack switches without QQ sends');
+  assert.match(deniedSend.json.error, /Core 数据面不提供此 Legacy 接口/);
+  console.log('PASS real isolated Core data IPC refuses QQ routes without QQ sends');
 } finally {
   if (worker.exitCode === null) {
     const closed = once(worker, 'close');

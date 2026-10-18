@@ -17,6 +17,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createWorkspaceService } from '../src/workspace/index.js';
+import { createWorkspaceRegistry } from '../src/workspace/registry.js';
 import { canonicalizeRoot, resolveInside } from '../src/workspace/boundary.js';
 
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/(\w:)/, '$1')), '..');
@@ -310,6 +311,14 @@ await check('boundary: canonicalizeRoot 对不存在目录报 ROOT_NOT_FOUND', a
 });
 
 // ── 4. 清单生命周期 ─────────────────────────────────────────────────────────
+await check('registry: 损坏清单必须保留且拒绝空清单写入', async () => {
+  const stateDir = fs.mkdtempSync(path.join(TEMP, 'corrupt-registry-'));
+  const file = path.join(stateDir, 'workspaces.json');
+  const damaged = '{"version":1,"workspaces":[';
+  fs.writeFileSync(file, damaged);
+  assert.throws(() => createWorkspaceRegistry({ file }), { code: 'REGISTRY_CORRUPT' });
+  assert.equal(fs.readFileSync(file, 'utf8'), damaged);
+});
 await check('registry: create 去重（同一 root 二次登记拒绝）', async () => {
   await expectError(
     'dup root',

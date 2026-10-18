@@ -105,7 +105,8 @@ function writeConfig(dataDir, consolePort) {
 }
 
 function startWorker(dataDir, env, { pipeStdin = true } = {}) {
-  const child = spawn(process.execPath, [ENTRY, '--worker'], {
+  // This suite covers the retained Legacy HTTP and Bridge shutdown contract.
+  const child = spawn(process.execPath, [path.join(ROOT, 'src', 'bridge.js')], {
     cwd: ROOT,
     windowsHide: true,
     stdio: [pipeStdin ? 'pipe' : 'ignore', 'ignore', 'pipe'],

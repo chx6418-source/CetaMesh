@@ -71,6 +71,9 @@ export function createDesktopIpcRuntime({
       const trustedActor = name.startsWith('continuity.') ? { kind: 'owner', id: 'desktop' } : undefined;
       return invoke(() => owner[methodName]({ method: name, params, ...(trustedActor ? { actor: trustedActor } : {}), ...(name.startsWith('ui.') ? { signal: context.signal } : {}) }), name);
     }
+    if (!services.controlService) {
+      throw Object.assign(new Error(`Unknown Core IPC method: ${name}`), { code: 'METHOD_NOT_FOUND' });
+    }
     return invoke(() => services.controlService.execute({
       method: name,
       params,
