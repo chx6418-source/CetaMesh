@@ -16,6 +16,9 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'whalebridge-installer-test-'));
 const outDir = path.join(tempRoot, '发布输出');
 const payloadDir = path.join(tempRoot, '应用数据', 'payload');
+const packagerTemp = path.join(tempRoot, 'packager temp with spaces');
+fs.mkdirSync(packagerTemp, { recursive: true });
+const packagerEnv = { ...process.env, TEMP: packagerTemp, TMP: packagerTemp, TMPDIR: packagerTemp };
 fs.mkdirSync(path.join(payloadDir, 'resources', 'public'), { recursive: true });
 fs.mkdirSync(outDir, { recursive: true });
 fs.writeFileSync(path.join(outDir, 'WhaleBridge.exe'), Buffer.from([0x4d, 0x5a, 0, 0]));
@@ -24,7 +27,7 @@ fs.writeFileSync(path.join(payloadDir, 'WhaleBridgeCore.exe'), 'fixture core');
 try {
   const result = spawnSync(process.execPath, [
     path.join(root, 'scripts', 'package-installer.mjs'), outDir, payloadDir
-  ], { cwd: root, encoding: 'utf8', timeout: 600000 });
+  ], { cwd: root, encoding: 'utf8', timeout: 600000, env: packagerEnv });
   assert.equal(result.status, 0, `${result.stdout ?? ''}\n${result.stderr ?? ''}`);
   const setupExe = path.join(outDir, 'WhaleBridge-Setup-x64.exe');
   assert.ok(fs.existsSync(setupExe), 'IExpress 应生成单文件安装器');
@@ -56,7 +59,7 @@ try {
   fs.writeFileSync(path.join(rejectedOutDir, 'WhaleBridge.exe'), Buffer.from([0x4d, 0x5a, 0, 0]));
   const rejected = spawnSync(process.execPath, [
     path.join(root, 'scripts', 'package-installer.mjs'), rejectedOutDir, payloadDir
-  ], { cwd: root, encoding: 'utf8', timeout: 600000 });
+  ], { cwd: root, encoding: 'utf8', timeout: 600000, env: packagerEnv });
   assert.equal(rejected.status, 1, '含产品 HTML 的 payload 必须在封包前被拒绝');
   assert.match(rejected.stderr ?? '', /contains product HTML UI assets/i);
   assert.equal(fs.existsSync(path.join(rejectedOutDir, 'WhaleBridge-Setup-x64.exe')), false);

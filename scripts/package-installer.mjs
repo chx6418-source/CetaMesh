@@ -168,7 +168,10 @@ try {
   ].join('\r\n');
   fs.writeFileSync(sedPath, sed, 'utf8');
 
-  const buildResult = spawnSync(iexpress, ['/N', sedPath], {
+  // IExpress parses its SED argument itself. Pass a basename from its working
+  // directory instead of relying on its handling of quoted long TEMP paths.
+  const buildResult = spawnSync(iexpress, ['/N', path.basename(sedPath)], {
+    cwd: workDir,
     encoding: 'utf8',
     timeout: 600000,
     windowsHide: true
