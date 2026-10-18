@@ -1,5 +1,5 @@
 // The desktop worker owns Core composition and both native pipes. Optional
-// WhaleBridge connectors are started only through their explicit legacy entry.
+// QQ/Bionic children start only through the explicit Core Channel lifecycle.
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -9,6 +9,8 @@ import { startDataIpcServer, resolveDataPipeName } from '../control/data-ipc.js'
 import { bootstrapCetaMesh } from './bootstrap.js';
 import { createDesktopIpcRuntime } from './ipc-runtime.js';
 import { createDshCoreConnector } from '../agent/dsh-core-connector.js';
+import { agentPrivilegeAllows } from '../bridge-privilege.js';
+import { parseJsonText } from '../storage/json-file.js';
 
 function serviceToken(stateDir) {
   fs.mkdirSync(stateDir, { recursive: true });
@@ -28,8 +30,8 @@ function serviceToken(stateDir) {
   return token;
 }
 
-function coreDataHandler(token) {
-  return (req, res) => {
+function coreDataHandler(token, services) {
+  return async (req, res) => {
     const pathname = new URL(req.url, 'http://localhost').pathname;
     const reply = (status, body) => {
       res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
@@ -37,6 +39,28 @@ function coreDataHandler(token) {
     };
     if (!token || req.headers['x-console-token'] !== token) {
       reply(401, { ok: false, error: '未授权：请提供服务令牌' });
+      return;
+    }
+    if (pathname !== '/api/status' && agentPrivilegeAllows(req.method, pathname)) {
+      try {
+        if (!(await services.bionicService.health()).running) {
+          reply(403, { ok: false, code: 'BIONIC_UNAVAILABLE', error: req.headers['x-agent-token'] !== undefined
+            ? 'Core 数据面不接受 Legacy 会话令牌' : 'Core 数据面不提供此 Legacy 接口' }); return;
+        }
+        const chunks = [];
+        let size = 0;
+        for await (const chunk of req) {
+          size += chunk.length;
+          if (size > 1024 * 1024) { reply(413, { ok: false, code: 'REQUEST_TOO_LARGE' }); return; }
+          chunks.push(Buffer.from(chunk));
+        }
+        const url = new URL(req.url, 'http://localhost');
+        const result = await services.bionicService.dataCall({ method: req.method, path: pathname,
+          query: Object.fromEntries(url.searchParams), token, sessionToken: req.headers['x-agent-token'],
+          body: size ? parseJsonText(Buffer.concat(chunks).toString('utf8')) : undefined });
+        res.writeHead(result.status, result.headers);
+        res.end(result.bodyBase64 ? Buffer.from(result.bodyBase64, 'base64') : result.body);
+      } catch (error) { reply(503, { ok: false, code: error.code ?? 'BIONIC_UNAVAILABLE', error: 'Bionic request unavailable; verify pending effects before retrying' }); }
       return;
     }
     if (req.headers['x-agent-token'] !== undefined) {
@@ -58,7 +82,8 @@ export function runCoreWorker({ paths = APP_PATHS, processRef = process, log = m
   const application = bootstrapCetaMesh({
     config, dataRoot: paths.dataRoot, stateDir: paths.stateDir,
     sourceRoot: paths.sourceRoot, resourceRoot: paths.resourceRoot,
-    api: dsh.api, dshPresetConfig: dsh.presetConfig, processRef, log
+    api: dsh.api, dshPresetConfig: dsh.presetConfig, processRef, log,
+    channelServiceToken: () => serviceToken(paths.stateDir)
   });
   try {
     const token = serviceToken(paths.stateDir);
@@ -67,7 +92,7 @@ export function runCoreWorker({ paths = APP_PATHS, processRef = process, log = m
     ipcRuntime.start();
 
     const pipeName = resolveDataPipeName({ dataRoot: paths.dataRoot, env: processRef.env });
-    const dataServer = startDataIpcServer({ handleApiRequest: coreDataHandler(token), pipeName, log });
+    const dataServer = startDataIpcServer({ handleApiRequest: coreDataHandler(token, application.services), pipeName, log });
     dataServer.on('error', error => {
       log(`Core data IPC failed: ${error?.message ?? error}`);
       processRef.exit(error?.code === 'EADDRINUSE' ? 2 : 1);

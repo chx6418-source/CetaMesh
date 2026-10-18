@@ -17,14 +17,19 @@ function allowTarget(target, config) {
 export function assertQqSendPolicy(request, { config = {}, qqEnabled = false, bionicEnabled = false,
   toolEnabled = () => { deny('QQ_TOOL_UNVERIFIED', 'QQ tool authorization unavailable'); } } = {}) {
   if (!qqEnabled) deny('QQ_DISABLED', 'QQ Connector disabled');
-  const { accountId, target, kind, toolName, mediaAuthorized, approvalVerified } = request ?? {};
+  const { accountId, target, kind, toolName, mediaAuthorized, approvalVerified, source } = request ?? {};
+  if (source === 'bionic' && !bionicEnabled) deny('QQ_BIONIC_DISABLED', 'Bionic Chat disabled');
+  if (toolName) toolEnabled(toolName);
   if (!/^\d{1,20}$/.test(String(accountId ?? ''))) deny('QQ_ACCOUNT_UNVERIFIED', 'QQ account identity unavailable');
   if (kind === 'custom-face') {
     if (target !== `private:${accountId}`) deny('QQ_TARGET_DENIED', 'custom-face action must target the current account');
   } else if (!allowTarget(target, config)) {
     deny('QQ_TARGET_DENIED', 'QQ send target is not allowlisted');
   }
-  if (kind === 'text') return true;
+  if (kind === 'text') {
+    toolEnabled(String(target).startsWith('group:') ? 'qq_send_group_message' : 'qq_send_private_message');
+    return true;
+  }
   if (['file', 'audio', 'music'].includes(kind)) {
     const expected = kind === 'file' ? 'qq_send_file' : 'qq_send_audio_from_url';
     if (toolName !== expected && !(kind === 'audio' && toolName === 'qq_send_file')) {
@@ -43,6 +48,7 @@ export function assertQqSendPolicy(request, { config = {}, qqEnabled = false, bi
   }
   if (kind === 'card') {
     if (!bionicEnabled) deny('QQ_BIONIC_DISABLED', 'Bionic Chat disabled');
+    if (request.action === 'click_inline_keyboard_button') toolEnabled('qq_click_card_button');
     if (!approvalVerified) deny('QQ_APPROVAL_REQUIRED', 'QQ card action requires verified approval or low-risk decision');
     return true;
   }

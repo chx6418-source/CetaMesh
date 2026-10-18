@@ -20,7 +20,7 @@
 
 ## Architecture（稳定面）
 
-- **产品形态**：原生 Rust/egui 桌面壳（`desktop-shell/`）+ 单个 Node worker（`src/bridge.js` 兼容入口）。
+- **产品形态**：原生 Rust/egui 桌面壳（`desktop-shell/`）+ 正式 `--worker` Core Bootstrap；可选 QQ Connector/Bionic 为 Core 管理的隔离子进程，`src/bridge.js` 保留 Legacy-exclusive 及 Social 策略复用入口。
   Release 无 HTTP：数据面走 `\\.\pipe\WhaleBridge-Data-*`（MCP → `src/control/data-ipc.js` → handleApiRequest），
   管理面走 `\\.\pipe\WhaleBridge-UI-*`；legacy HTTP 仅 dev 显式 opt-in（SEA 内无效）。
 - **运行模式**（`src/runtime-surface.js`）：`native-release / native-dev / headless-dev / legacy-web-dev`。
@@ -93,6 +93,8 @@
 - NOT_RUN_ENVIRONMENT（无真实环境时如实不跑）：真实 provider-key 回合 / 真实 QQ / 跨设备 Mesh / 签名 / 真实发行产物。
 
 ## Active Work (Owner confirmation pending)
+
+- **WhaleBridge M4.4**：`codex/whalebridge-decoupling-m4`，工作树 `D:\GIT- CetaMesh\audit-critical-repair`，基线 `30ab2d32c37c2381d75ab8d4435949deaee7fd50`，Build 1081。Core Channel Service 管理可选 QQ/Bionic 子进程、持久入站投递/独立消费者确认，以及统一 Broker 外发授权。正式 SEA 的 `--qq-connector` / `--bionic-runtime` 不构建 Core 或 Owner IPC。旧社交数据存在时阻止自动切换写入者，等待 M5 库存/Dry Run 和 Owner 批准。最终测试、源码提交与安装包证据见 `WHALEBRIDGE_DECOUPLING_M4_4_REPORT.md`。M2/M3 仍 PARTIAL；发布仍 RELEASE_BLOCKED；真实 QQ E2E 未验收。未 push、合并或执行用户数据迁移。
 
 - CetaMesh Desktop UX v2 production closure — Owner-selected **01 Harbor**; work remains isolated on branch `feature/desktop-ui-v2-production`, worktree `C:\Users\Administrator\.codex\worktrees\desktop-ui-v2-production\GIT-QQ-BRIDGE`, base `2b2e0d98cea97b979290417d9fc3fe4623cd780c`. Task 1 history paging is commit `75f549f1ee90943362de27e93c49fe1f83cdbb12`; Task 2 Chat virtualization is commit `d1b114834b8f88ace439b1f4aff0e0353bcdc56e`. The production Chat timeline uses `VirtualList`, stable message IDs, paged older-history loading, scroll-anchor restoration, bottom-follow behavior and a new-message indicator. The 100/200/500 React virtual-window fixtures pass; each initial viewport mounts 10 rows including its streaming row, while long-content measurement updates are exercised without mounting full history.
 

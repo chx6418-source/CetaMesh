@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import { acquireQqOwnership } from './ownership.js';
 import { createQqReceipts } from './receipts.js';
 import { createQqSendLedger } from './send-ledger.js';
+import { inferQqMessageKind, inferQqTarget } from './request.js';
 
 const HTTP_SEND_ACTIONS = new Set(['send_private_msg', 'send_group_msg', 'upload_private_file', 'upload_group_file']);
 const RAW_WRITE_ACTIONS = new Set(['group_poke', 'send_poke', 'click_inline_keyboard_button']);
@@ -53,7 +54,14 @@ export function createQqRuntime({
   const outbound = outboundFile ? createQqSendLedger(outboundFile) : null;
 
   function status() {
+    if (state === 'ready' && ownershipDir && (!gatewayLease?.valid() || !accountLease?.valid())) state = 'unavailable';
     return { state, ready: state === 'ready', connected: state === 'ready', accountId };
+  }
+  function assertLease() {
+    if (ownershipDir && (!gatewayLease?.valid() || !accountLease?.valid())) {
+      state = 'unavailable';
+      throw Object.assign(new Error('QQ account or gateway lease expired; verify previous owner before reconnecting'), { code: 'QQ_LEASE_EXPIRED' });
+    }
   }
 
   function enqueueSend(action) {
@@ -96,37 +104,17 @@ export function createQqRuntime({
     if (!httpAccount || String(httpAccount) !== accountId) {
       throw Object.assign(new Error('OneBot HTTP account does not match the active QQ Connector account'), { code: 'QQ_ACCOUNT_CHANGED' });
     }
+    assertLease();
     return callHttpAction(action, params);
   }
 
   function inferKind(action, params, options) {
-    let kind;
-    if (action.startsWith('upload_')) kind = 'file';
-    else if (action.includes('poke')) kind = 'poke';
-    else if (action.includes('custom_face')) kind = 'custom-face';
-    else if (action === 'click_inline_keyboard_button') kind = 'card';
-    const segments = Array.isArray(params?.message) ? params.message : [params?.message];
-    if (!kind && segments.some(segment => segment?.type === 'record')) kind = 'audio';
-    if (!kind && segments.some(segment => segment?.type === 'music')) kind = 'music';
-    if (!kind && segments.some(segment => segment?.type === 'image')) kind = 'sticker';
-    if (!kind && segments.some(segment => ['json', 'xml', 'share'].includes(segment?.type))) kind = 'card';
-    kind ??= 'text';
-    if (options?.kind && options.kind !== kind) {
-      throw Object.assign(new Error('QQ send kind does not match the OneBot action or payload'), { code: 'QQ_MEDIA_KIND_MISMATCH' });
-    }
-    return kind;
-  }
-
-  function inferTarget(params) {
-    const groupId = params?.group_id;
-    const userId = params?.user_id;
-    if (groupId !== undefined) return `group:${groupId}`;
-    if (userId !== undefined) return `private:${userId}`;
-    return `private:${accountId}`; // account-scoped custom-face actions
+    return inferQqMessageKind(action, params, options);
   }
 
   function executeSend(action, params, options, dispatch) {
     return enqueueSend(async () => {
+      assertLease();
       let observedAccount;
       try {
         const login = await client.getLoginInfo();
@@ -142,12 +130,13 @@ export function createQqRuntime({
       }
       const requestId = options?.requestId ?? crypto.randomUUID();
       const kind = inferKind(action, params, options);
-      const target = inferTarget(params);
-      await authorizeSend?.({ requestId, accountId, kind, target, action, params, ...options });
+      const target = inferQqTarget(action, params, accountId);
+      await authorizeSend?.({ ...options, requestId, accountId, kind, target, action, params });
       const claimed = outbound?.claim({ requestId, accountId, kind, target, action, payload: params });
       if (claimed?.duplicate) return { duplicate: true, status: claimed.record.status,
         receipt: claimed.record.receipt, requestId };
       try {
+        assertLease();
         const data = await dispatch();
         if (outbound) {
           const receipt = data?.data ?? data;
@@ -180,7 +169,7 @@ export function createQqRuntime({
   const rawWrite = (action, params, options = {}) => {
     try { assertWriteAction(action, RAW_WRITE_ACTIONS); }
     catch (error) { return Promise.reject(error); }
-    return executeSend(action, params, options, () => client.raw(action, params));
+    return executeSend(action, params, options, () => client.request(action, params));
   };
   const requestWrite = (action, params, options = {}) => {
     try { assertWriteAction(action, REQUEST_WRITE_ACTIONS); }

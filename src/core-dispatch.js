@@ -12,6 +12,7 @@ import { runMcpBilibili } from './mcp-bilibili.js';
 import { runSelfTest } from './self-test.js';
 import { runSetupDshFromApp, runDshRemovalFromApp } from './dsh-integration.js';
 import { runExtensionWorker } from './extension/process-worker.js';
+import { runQqConnectorWorker } from './channel/qq/connector-worker.js';
 
 export const MCP_MODES = Object.freeze({
   snowluma: runMcpSnowLuma,
@@ -50,6 +51,8 @@ export const CORE_USAGE = `鲸桥 WhaleBridge Core
 用法：
   WhaleBridgeCore.exe --worker [--data-dir <目录>]
   WhaleBridgeCore.exe --extension-worker
+  WhaleBridgeCore.exe --qq-connector [--data-dir <目录>]
+  WhaleBridgeCore.exe --bionic-runtime [--data-dir <目录>]
   WhaleBridgeCore.exe --mcp <${Object.keys(MCP_MODES).join('|')}> [--data-dir <目录>]
   WhaleBridgeCore.exe --setup-dsh [profile] [--dry-run] [--force-presets]
   WhaleBridgeCore.exe --uninstall-dsh [profile] [--dry-run]
@@ -69,6 +72,14 @@ export function parseCoreArgs(argv = process.argv.slice(2)) {
   if (args[0] === '--worker') {
     if (args.length !== 1) throw new Error(`--worker 不接受额外参数\n\n${CORE_USAGE}`);
     return { mode: 'worker' };
+  }
+  if (args[0] === '--qq-connector') {
+    if (args.length !== 1) throw new Error('--qq-connector does not accept additional arguments');
+    return { mode: 'qq-connector' };
+  }
+  if (args[0] === '--bionic-runtime') {
+    if (args.length !== 1) throw new Error('--bionic-runtime does not accept additional arguments');
+    return { mode: 'bionic-runtime' };
   }
   if (args[0] === '--extension-worker') {
     if (args.length !== 1) throw new Error(`--extension-worker 不接受额外参数\n\n${CORE_USAGE}`);
@@ -126,6 +137,8 @@ export async function runCore(argv = process.argv.slice(2)) {
     return;
   }
   if (command.mode === 'worker') return runCoreWorker();
+  if (command.mode === 'qq-connector') return runQqConnectorWorker();
+  if (command.mode === 'bionic-runtime') return (await import('./bionic/worker.js')).runBionicWorker();
   if (command.mode === 'extension-worker') return runExtensionWorker();
   if (command.mode === 'setup-dsh') {
     return runSetupDshFromApp({

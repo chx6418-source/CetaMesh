@@ -2,6 +2,9 @@
 // Core service construction lives in src/app; this file retains the legacy QQ/Social behavior.
 // 用法：node src/bridge.js
 import fs from 'node:fs';
+import { writeJsonAtomic } from './storage/json-file.js';
+import { createSocialLoop } from './bionic/social-loop.js';
+import { createBrokeredQqRuntime } from './channel/qq/broker-facade.js';
 import http from 'node:http';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -167,10 +170,7 @@ function readJsonSafe(file, fallback, required = false) {
 
 // 原子写 JSON 文件：先写唯一临时文件再 rename，避免进程中断写坏配置，也避免固定临时名被并发/符号链接攻击利用。
 function atomicWriteJson(file, obj) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(obj, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 });
-  fs.renameSync(tmp, file);
+  writeJsonAtomic(file, obj);
 }
 
 // 原子写文本文件。
@@ -433,10 +433,12 @@ function runtimeLogPush(line) {
   for (const res of runtimeLogHub.clients) { try { res.write(`data: ${JSON.stringify({ line })}\n\n`); } catch {} }
 }
 // 日志同时输出到 stdout 与 state/bridge.log（守护窗口不可见时也能排查）。时间用本地时区，与状态面板/activity 日志一致。
+let policyLogger = null;
 function log(...args) {
   const now = new Date();
   const clock = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
   const line = `${clock} [bridge] ${args.map((a) => redactSensitiveText(typeof a === 'string' ? a : JSON.stringify(a))).join(' ')}`.replace(/[\r\n]+/g, ' ');
+  if (policyLogger) { policyLogger(line); return; }
   runtimeLogPush(line);
   statusPanel.logAbove(line);
   try {
@@ -589,10 +591,11 @@ const APPROVE_WORDS = new Set(['通过', '同意', '允许', '批准', 'yes', 'y
 const REJECT_WORDS = new Set(['拒绝', '不同意', '不允许', '驳回', 'no', 'n', 'reject', 'deny']);
 
 // ── 主流程 ──────────────────────────────────────────────────────────────────
-async function main() {
+async function main(runtimeOptions = {}) {
+  let legacyChannelService = null;
   let cfg;
   try {
-    cfg = loadConfig();
+    cfg = runtimeOptions.config ? migrateLegacyConfig(runtimeOptions.config) : loadConfig();
   } catch (error) {
     // 配置缺失/格式错误时记入 Core 日志后退出；原生桌面壳通过 Supervisor 状态呈现故障。
     const title = '配置加载失败';
@@ -609,7 +612,7 @@ async function main() {
   // 可选本地子服务：SnowLuma/dsh 的检测、启动、安装和日志流都由控制台共享。
   // 构造时只在后台并行检测本地文件，不启动任何进程、也不阻塞控制台上线；
   // 随后再按“SnowLuma 优先、失败降级”的顺序推进桥接启动。
-  const localServices = createLocalServiceManager({
+  const localServices = runtimeOptions.channel ? { snapshot: () => ({ snowluma: {}, dsh: {} }) } : createLocalServiceManager({
     root: DATA_ROOT,
     config: cfg,
     captureSnowLumaOutput: false,
@@ -1310,7 +1313,7 @@ async function main() {
 
   // DSH 可用性探活 + 重启容错队列：
   // DSH 重启期间收到的 QQ 消息先入队（不丢），DSH 恢复后按序补投。
-  let currentMode = 'chat'; // chat | owner-agent | social | workshop（由 DSH settings / state/mode.json 驱动）
+  let currentMode = runtimeOptions.channel ? 'social' : 'chat'; // Formal Bionic never gains legacy owner-agent mode.
   let lastMode = currentMode;
   const isDshReady = () => dshLifecycle.status().ready;
   let closedAgentPreset = 'router-standard'; // owner-agent 模式使用的 DSH agent preset
@@ -1371,6 +1374,7 @@ async function main() {
   }
 
   async function refreshMode() {
+    if (runtimeOptions.channel) { currentMode = 'social'; return; }
     const local = readJsonSafe(path.join(STATE_DIR, 'mode.json'), null);
     const localModeValue = local?.mode === undefined ? '' : migrateModeValue(local.mode);
     const localMode = localModeValue && VALID_MODES.includes(localModeValue) ? localModeValue : null;
@@ -1571,7 +1575,7 @@ async function main() {
     if (!tokenValid && configuredToken) log(`控制台 config.consoleToken 长度/字符不合法，已忽略并回退到自动生成令牌`);
     if (!configuredToken) log(`控制台未配置 consoleToken，已自动生成：${String(consoleToken).slice(0, 6)}…（完整值保存在 state/console-token）`);
     // 服务令牌（MCP / agent 侧数据面）：与控制台令牌分离，随进程启动确保存在。
-    let agentToken = loadOrCreateAgentToken();
+    let agentToken = runtimeOptions.serviceToken || loadOrCreateAgentToken();
     log('已加载服务令牌（MCP/agent 数据面，权限低于控制台令牌；见 state/agent-token）');
     // Native UI IPC is the shipped product management surface. The loopback listener keeps
     // programmatic Agent/DSH data APIs; legacy console-token control routes are dev-only.
@@ -1975,6 +1979,10 @@ async function main() {
       },
       log
     });
+    if (runtimeOptions.channel) {
+      runtimeOptions.setApiHandler(handleApiRequest);
+      return;
+    }
     const application = bootstrapCetaMesh({
       owner: legacyOwner,
       config: cfg,
@@ -1988,6 +1996,8 @@ async function main() {
       log
     });
     const services = application.services;
+    legacyChannelService = services.channelService;
+    legacyChannelService.adoptLegacy(nativeQqRuntime);
     workshopRuntimeService = services.workshopService;
 
     const ipcRuntime = createDesktopIpcRuntime({ services, system: services.systemServices, log });
@@ -5179,7 +5189,7 @@ async function main() {
             return;
           }
           try {
-            const record = qqRuntime.sendReceipt(requestId, accountId);
+            const record = await qqRuntime.sendReceipt(requestId, accountId);
             if (!record) sendJson({ ok: false, code: 'QQ_SEND_NOT_FOUND', error: '本地无该发送记录' }, 404);
             else sendJson({ ok: true, record: { requestId, accountId, kind: record.kind, target: record.target,
               status: record.status, createdAt: record.createdAt, updatedAt: record.updatedAt, receipt: record.receipt } });
@@ -7133,6 +7143,7 @@ async function main() {
       atomicWriteJson(SOCIAL_V2_FILE, obj);
     } catch (error) {
       log('保存 socialV2 状态失败:', error?.message ?? error);
+      if (runtimeOptions.channel) throw Object.assign(new Error('Bionic state was not persisted; inbound delivery remains unconfirmed'), { code: 'BIONIC_STATE_WRITE_FAILED', cause: error });
     }
   }
 
@@ -7702,11 +7713,8 @@ async function main() {
     }
   }
 
-  function startSocialLoop() {
-    if (social.loopTimer) clearInterval(social.loopTimer);
-    social.loopTimer = setInterval(socialLoopTick, 5000);
-    social.loopTimer.unref?.();
-  }
+  const socialLoop = createSocialLoop({ tick: socialLoopTick });
+  function startSocialLoop() { social.loopTimer = socialLoop.start(); }
 
   async function flushSummaries(key = null) {
     const targets = key ? (social.pendingSummaries.has(key) ? [[key, social.pendingSummaries.get(key)]] : []) : [...social.pendingSummaries.entries()];
@@ -9839,12 +9847,13 @@ async function main() {
       }
     } catch {}
   }
-  const qqRuntime = createQqRuntime({
+  const nativeQqRuntime = runtimeOptions.channel ? null : createQqRuntime({
     config: cfg,
     ownershipDir: path.join(os.tmpdir(), 'cetamesh-qq-ownership'),
     dedupFile: path.join(STATE_DIR, 'qq-message-receipts.json'),
     outboundFile: path.join(STATE_DIR, 'qq-send-ledger.json'),
-    authorizeSend: (request) => assertQqSendPolicy(request, {
+    authorizeSend: (request) => assertQqSendPolicy({ ...request,
+      source: currentMode === 'social' ? 'bionic' : request.source }, {
       config: cfg,
       qqEnabled: isQqConnectorEnabled({ stateDir: STATE_DIR }),
       bionicEnabled: isBionicChatEnabled({ stateDir: STATE_DIR }),
@@ -9871,6 +9880,8 @@ async function main() {
     onClose: (info) => log('SnowLuma 连接断开（code=' + (info?.code ?? '?') + '），重连中…'),
     onError: (error) => log('SnowLuma 错误:', error)
   });
+  const qqRuntime = runtimeOptions.channel ?? createBrokeredQqRuntime({ runtime: nativeQqRuntime,
+    resolveService: () => legacyChannelService });
   const bot = qqRuntime.client;
   const qqTransport = createQqTransport({ client: qqRuntime, authorize: () => {
     if (!isQqConnectorEnabled({ stateDir: STATE_DIR })) {
@@ -9885,6 +9896,18 @@ async function main() {
   resolveConnectSnowLumaReady();
 
   startProductSurfaces();
+  if (runtimeOptions.channel) {
+    startDshWatch();
+    return {
+      receive: event => handleIncoming(event.group_id !== undefined ? 'group' : 'private', event.group_id ?? event.user_id, event, cfg),
+      status: () => ({ running: true, ready: true, socialLoopRunning: socialLoop.running(), conversations: [...socialV2.conversations.keys()] }),
+      stop: () => {
+        socialLoop.stop(); clearAllSocialV2Timers(); clearAllPendingWakeLeases();
+        for (const entry of followStreams.values()) { entry.active = false; entry.signal.abort(); }
+        dshLifecycle.stop(); saveSocialV2State(); saveState(); releaseLock();
+      }
+    };
+  }
   // 启动探测在后台进行：QQ WebSocket 只有 SnowLuma ready 后才会连接，
   // 但控制台、DSH 探活与日志终端不会被最多 35 秒的服务启动等待卡住。
   if (isQqConnectorEnabled({ stateDir: STATE_DIR })) localServices.startSnowLuma({ waitMs: 35000 }).then(async (snowStartup) => {
@@ -10024,6 +10047,14 @@ export async function runBridge() {
   installLifecycleHandlers();
   installOrphanGuard();
   return main();
+}
+
+// Policy reuse only: no Core bootstrap, IPC listener, gateway or external service start.
+export async function createBionicPolicyHost(options) {
+  policyLogger = options.log;
+  let handleApiRequest;
+  const policy = await main({ ...options, setApiHandler: handler => { handleApiRequest = handler; } });
+  return { ...policy, handleApiRequest };
 }
 
 if (isMainModule(import.meta.url)) {

@@ -3,7 +3,7 @@ import { assertQqSendPolicy } from '../src/channel/qq/send-policy.js';
 
 const config = { allow: { groups: ['42'], private: ['7'] }, deny: { groups: [], private: [] },
   allowAllWhenEmpty: false, socialV2: { sticker: { enabled: true } } };
-const enabled = new Set(['qq_send_file', 'qq_send_audio_from_url', 'qq_send_poke',
+const enabled = new Set(['qq_send_group_message', 'qq_send_private_message', 'qq_send_file', 'qq_send_audio_from_url', 'qq_send_poke',
   'qq_set_sticker_remark', 'qq_collect_sticker']);
 const policy = (request, overrides = {}) => assertQqSendPolicy(request, {
   config, qqEnabled: true, bionicEnabled: true,
@@ -12,6 +12,11 @@ const policy = (request, overrides = {}) => assertQqSendPolicy(request, {
 });
 const base = { accountId: '10001', target: 'group:42', action: 'send_group_msg', kind: 'text' };
 assert.doesNotThrow(() => policy(base));
+assert.throws(() => policy(base, { toolEnabled: () => { throw Object.assign(new Error('disabled'), { code: 'TOOL_DISABLED' }); } }),
+  { code: 'TOOL_DISABLED' }, 'omitting a tool name must not bypass the final text tool gate');
+assert.throws(() => policy({ ...base, toolName: 'qq_send_group_message' },
+  { toolEnabled: () => { throw Object.assign(new Error('disabled'), { code: 'TOOL_DISABLED' }); } }),
+{ code: 'TOOL_DISABLED' }, 'text tools must be rechecked by the final executor after queueing');
 assert.doesNotThrow(() => policy(base, { bionicEnabled: false }),
   'disabling Bionic social policy must leave basic QQ text transport available');
 assert.throws(() => policy({ ...base, accountId: null }), { code: 'QQ_ACCOUNT_UNVERIFIED' });

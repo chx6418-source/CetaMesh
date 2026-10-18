@@ -19,6 +19,9 @@ try {
   fs.writeFileSync(corruptPluginState, '{broken plugin state');
   const originalSocial = fs.readFileSync(corruptBionicState);
   const originalPlugin = fs.readFileSync(corruptPluginState);
+  const corruptChannel = path.join(stateDir, 'channel', 'delivery.json');
+  fs.mkdirSync(path.dirname(corruptChannel), { recursive: true });
+  fs.writeFileSync(corruptChannel, '{broken channel journal');
   globalThis.fetch = async () => { networkAttempts += 1; throw new Error('unexpected network request'); };
 
   const { bootstrapCetaMesh } = await import('../src/app/bootstrap.js');
@@ -42,6 +45,8 @@ try {
   await assert.rejects(services.integrationService.execute({ method: 'plugins.overview' }),
     { code: 'INTEGRATION_STORE_CORRUPT' });
   assert.equal(networkAttempts, 0);
+  await assert.rejects(services.channelService.execute({ method: 'channel.delivery.status' }), { code: 'CHANNEL_JOURNAL_UNAVAILABLE' });
+  assert.equal(fs.readFileSync(corruptChannel, 'utf8'), '{broken channel journal');
   assert.deepEqual(fs.readFileSync(corruptBionicState), originalSocial);
   assert.deepEqual(fs.readFileSync(corruptPluginState), originalPlugin);
   console.log('PASS isolated Core Task/Memory/Workspace survive absent DSH and corrupt optional social/plugin state');

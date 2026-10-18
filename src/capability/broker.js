@@ -60,12 +60,12 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
    claimDispatch(request,entry);
    const providerRequest=signal?{...request,signal}:request;
    const providerPromise=Promise.resolve().then(()=>entry.execute(providerRequest));
-   providerPromise.then(()=>settleDispatch(request,'completed'),()=>settleDispatch(request,'failed'));
+   providerPromise.then(()=>settleDispatch(request,'completed'),error=>settleDispatch(request,error.effectStatus==='unknown'?'outcome-unknown':'failed'));
    const result=await awaitWithAbort(providerPromise,signal);
    audit({requestId:request.requestId,capability:entry.id,status:'completed',actor:request.actor.id});
    return {requestId:request.requestId,status:'completed',capability:entry.id,result};
   }catch(error){audit({requestId:request.requestId,capability:request.capability,
-   status:error.code==='INVOKE_CANCEL_UNCONFIRMED'?'cancel-requested':'denied',code:error.code??'PROVIDER_ERROR'});throw error;}
+   status:error.code==='INVOKE_CANCEL_UNCONFIRMED'?'cancel-requested':error.effectStatus==='unknown'?'outcome-unknown':'denied',code:error.code??'PROVIDER_ERROR'});throw error;}
  }
  return {execute,register:registry.register,list:registry.list,registry,approvals:approval,
   dispatchStatus:id=>Object.hasOwn(dispatches,String(id))?{capability:dispatches[String(id)].capability,status:dispatches[String(id)].status,at:dispatches[String(id)].at}:null,

@@ -15,10 +15,10 @@ export const CHANNEL_ADAPTERS = Object.freeze([
     id: 'qq',
     name: 'QQ（OneBot v11 / SnowLuma）',
     kind: 'channel-adapter',
-    implementation: 'src/channel/qq/runtime.js + src/bridge.js + src/mcp-snowluma-safe.js',
+    implementation: 'Core Channel Service → QQ Connector child → src/channel/qq/runtime.js; Legacy-exclusive retained separately',
     provides: ['qq.message.receive', 'qq.message.send', 'qq.card.read', 'qq.file.send'],
     coreDependency: false,
-    notes: '外部通道接入层；不可用时只降级 QQ 链路，Desktop Core 继续运行。'
+    notes: 'Owner IPC channel.qq.start/stop/health/reconnect 管理可选 Connector；Bionic 独立生命周期；Legacy-exclusive 互斥兼容。'
   }
 ]);
 

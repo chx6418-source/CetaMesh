@@ -137,8 +137,17 @@ try {
     }, postAction: async action => { dispatched.push(action); return { message_id: 4 }; } });
   await deniedRuntime.connect();
   await assert.rejects(deniedRuntime.sendOneBot('send_group_msg', { group_id: 43, message: [] }, { requestId: 'deny-target' }), { code: 'QQ_SEND_DENIED' });
+  await assert.rejects(deniedRuntime.sendOneBot('send_group_msg', { group_id: 43, message: [] },
+    { requestId: 'spoof-target', target: 'group:42', accountId: '99999' }), { code: 'QQ_SEND_DENIED' },
+  'caller options cannot overwrite the actual dispatch account or target');
+  await assert.rejects(deniedRuntime.sendOneBot('send_private_msg', { group_id: 42, user_id: 999, message: 'fixture' },
+    { requestId: 'conflicting-recipient' }), { code: 'QQ_TARGET_INVALID' },
+  'OneBot action cannot hide an unallowlisted private recipient behind an allowed group');
   await assert.rejects(deniedRuntime.sendOneBot('send_group_msg', { group_id: 42,
     message: [{ type: 'record', data: { file: 'fixture' } }] }, { requestId: 'deny-audio' }), { code: 'QQ_SEND_DENIED' });
+  await assert.rejects(deniedRuntime.sendOneBot('send_group_msg', { group_id: 42,
+    message: [{ type: 'ark', data: { content: 'fixture' } }] }, { requestId: 'deny-ark' }), { code: 'QQ_SEND_DENIED' },
+  'typed cards cannot be misclassified as plain text');
   await assert.rejects(deniedRuntime.sendOneBot('send_group_msg', { group_id: 42,
     message: [{ type: 'record', data: { file: 'fixture' } }] }, { requestId: 'lie-audio', kind: 'text' }),
   { code: 'QQ_MEDIA_KIND_MISMATCH' }, 'a caller cannot label an audio payload as text to bypass media permission');
@@ -150,6 +159,11 @@ try {
   const sdkRuntime = createQqRuntime({ config: { snowluma: { wsUrl: 'ws://127.0.0.1:6713' } },
     clientFactory: () => sdkClient, outboundFile: path.join(sendLedgerRoot, 'sdk.json') });
   await sdkRuntime.connect();
+  sdkClient.raw = async () => null;
+  sdkClient.request = async () => ({ status: 'ok', retcode: 0, data: null });
+  assert.deepEqual(await sdkRuntime.rawWrite('group_poke', { group_id: 42, user_id: 7 }, { requestId: 'sdk-poke:1' }),
+    { status: 'ok', retcode: 0, data: null }, 'non-message writes require the verified gateway envelope');
+  assert.equal(sdkRuntime.sendReceipt('sdk-poke:1')?.status, 'acknowledged');
   const sdkUnknown = await sdkRuntime.sendGroupMessage(42, { type: 'text', data: { text: 'hello' } }, { requestId: 'sdk-turn:1' });
   assert.equal(sdkUnknown.status, 'outcome-unknown', 'SDK without a gateway receipt must not be reported as sent');
   const sdkReplay = await sdkRuntime.sendGroupMessage(42, { type: 'text', data: { text: 'hello' } }, { requestId: 'sdk-turn:1' });
@@ -357,6 +371,19 @@ try {
   await restarted.fixtureClient.groupHandlers[0](packet);
   assert.deepEqual(processed, [99], 'durable receipt prevents a restart duplicate');
   await restarted.runtime.stop();
+  const lostLeaseClient = new FakeClient();
+  lostLeaseClient.connect = async () => { lostLeaseClient.emit('open'); };
+  const lostLeaseRoot = path.join(ownershipRoot, 'lost-lease');
+  let lostLeaseSends = 0;
+  const lostLeaseRuntime = createQqRuntime({ config: { snowluma: { wsUrl: 'ws://127.0.0.1:6798' } },
+    ownershipDir: lostLeaseRoot, clientFactory: () => lostLeaseClient,
+    postAction: async () => { lostLeaseSends++; return { message_id: 1 }; } });
+  assert.equal((await lostLeaseRuntime.connect()).connected, true);
+  const accountLock = fs.readdirSync(lostLeaseRoot).find(name => name.startsWith('account-') && name.endsWith('.lock'));
+  fs.unlinkSync(path.join(lostLeaseRoot, accountLock));
+  await assert.rejects(lostLeaseRuntime.sendOneBot('send_group_msg', { group_id: 42, message: 'fixture' }), { code: 'QQ_LEASE_EXPIRED' });
+  assert.equal(lostLeaseSends, 0, 'expired lease must deny actual transport');
+  await lostLeaseRuntime.stop();
   const corruptFile = path.join(ownershipRoot, 'corrupt-receipts.json');
   fs.writeFileSync(corruptFile, '{broken', 'utf8');
   const corruptClient = new FakeClient();

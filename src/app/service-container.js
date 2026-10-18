@@ -24,6 +24,8 @@ import { createDefaultAgentService } from '../agent/index.js';
 import { createExtensionService } from '../extension/service.js';
 import { createMeshService } from '../mesh/service.js';
 import { createChannelService } from '../channel/service.js';
+import { createQqConnectorHost } from '../channel/qq/connector-host.js';
+import { createBionicService } from '../bionic/service.js';
 import { createSettingsService } from '../settings/service.js';
 import { createIntegrationService } from '../integrations/index.js';
 import { createDshDesktopIntegration } from '../integrations/dsh-desktop.js';
@@ -338,11 +340,23 @@ export function createCetaMeshServices(options = {}) {
     isTrustedVmExtension: options.isTrustedVmExtension });
   const meshService = createMeshService({ stateDir, settingsStore: settingsService.store,
     isEnabled: () => settingsService.store.get().settings.devices.meshEnabled === true });
-  const channelService = createChannelService();
+  const channelService = createChannelService({ stateDir, dataRoot, config, broker: capabilityService.broker,
+    onEvent: (event, data) => uiEventBus.publish(event, data),
+    connectorFactory: options.qqConnectorFactory ?? (callbacks => createQqConnectorHost({
+      config, dataRoot, stateDir, ...callbacks, log })) });
+  const bionicService = createBionicService({ config, dataRoot, stateDir, channelService,
+    serviceToken: options.channelServiceToken });
+  channelService.attachBionic(bionicService);
   registerChannelMeshCapabilities({
     broker: capabilityService.broker,
     channelService,
     meshService,
+    sendImpl: async ({ kind, id, text, actor, requestId }) => {
+      const status = await channelService.execute({ method: 'channel.qq.health' });
+      return channelService.dispatchApproved({ actor, requestId, input: { accountId: status.accountId, kind: 'text',
+        action: kind === 'group' ? 'send_group_msg' : 'send_private_msg',
+        params: { [kind === 'group' ? 'group_id' : 'user_id']: id, message: [{ type: 'text', data: { text } }] } } });
+    },
     isTargetAllowed: (kind, id) => {
       const list = kind === 'group' ? config.allow?.groups : config.allow?.private;
       return Array.isArray(list) && list.map(String).includes(String(id));
@@ -502,6 +516,7 @@ export function createCetaMeshServices(options = {}) {
     pluginCenterService,
     meshService,
     channelService,
+    bionicService,
     integrationService,
     aboutService,
     settingsService,

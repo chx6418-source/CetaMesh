@@ -107,6 +107,7 @@ export function registerChannelMeshCapabilities({
           kind: String(input.kind),
           id: String(input.id),
           text: String(input.text),
+          requestId: request.requestId,
           actor: request.actor
         });
         return { sent: true, channelId: String(input.channelId ?? 'qq'), kind: String(input.kind), id: String(input.id), ...(result ?? {}) };

@@ -68,7 +68,7 @@ export function createDesktopIpcRuntime({
       const [owner, methodName] = route[1](services, system);
       // Every prefixed desktop route is served on the native Owner UI pipe. Bind
       // identity here; never accept an actor claim from IPC parameters.
-      const trustedActor = name.startsWith('continuity.') ? { kind: 'owner', id: 'desktop' } : undefined;
+      const trustedActor = name.startsWith('continuity.') || name.startsWith('channel.') ? { kind: 'owner', id: 'desktop' } : undefined;
       return invoke(() => owner[methodName]({ method: name, params, ...(trustedActor ? { actor: trustedActor } : {}), ...(name.startsWith('ui.') ? { signal: context.signal } : {}) }), name);
     }
     if (!services.controlService) {

@@ -118,3 +118,24 @@ Native / Infrastructure                     Node SEA Core, Rust supervisor/insta
   explicit quit path stops Core.
 - Window preferences and theme/zoom are persisted in `state/desktop-ui.json` (atomic replace);
   a corrupt preference file falls back to defaults without blocking startup.
+# M4.4 Core Channel runtime boundary (2026-10-18)
+
+The formal `--worker` composes Core without importing or running Legacy Bridge.
+Core Channel Service explicitly starts the optional `--qq-connector` child from
+the same SEA executable. Inherited bounded stdio carries only Channel commands;
+the child never receives Owner IPC credentials or constructs Core stores.
+
+Ingress is account-bound and allowlisted, then durably accepted into the Channel
+delivery records using the existing Storage Primitive. Each trusted Core
+consumer has an independent cursor and acknowledgement. In-flight work becomes
+outcome-unknown after restart; only Owner evidence can authorize replay. These
+records are domain delivery/receipt state, not a second subscription bus: existing
+Core UI events notify observers and existing Agent Event Journal remains intact.
+
+All product QQ writes use Core Capability Broker, Approval and the sole QQ
+Runtime sender. Runtime retains the existing account lease and durable send
+ledger. Bionic is a separately managed policy child using Channel read/send
+facades; its existing Social implementation is reused from bridge.js without
+creating transport, Core or IPC listeners. Legacy-exclusive remains a compatible,
+mutually exclusive host. Existing unscoped Social data blocks Bionic ownership
+switching until Owner-reviewed M5 inventory and Dry Run; no migration is automatic.

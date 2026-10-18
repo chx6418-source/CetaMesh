@@ -8,7 +8,7 @@ import { APP_PATHS } from '../src/app-paths.js';
 import { readJsonFile } from '../src/storage/json-file.js';
 import { createQqRuntime } from '../src/channel/qq/runtime.js';
 import { assertQqSendPolicy } from '../src/channel/qq/send-policy.js';
-import { isQqConnectorEnabled } from '../src/integrations/tool-policy.js';
+import { isQqConnectorEnabled, assertMcpToolEnabled } from '../src/integrations/tool-policy.js';
 
 if (process.env.CETAMESH_QQ_DIAGNOSTIC_SEND !== 'I_UNDERSTAND_THIS_SENDS_A_REAL_MESSAGE') {
   console.error('QQ diagnostic send disabled: explicit development opt-in required');
@@ -27,7 +27,8 @@ const runtime = createQqRuntime({
   ownershipDir: path.join(os.tmpdir(), 'cetamesh-qq-ownership'),
   outboundFile: path.join(APP_PATHS.stateDir, 'qq-send-ledger.json'),
   authorizeSend: request => assertQqSendPolicy(request, {
-    config: cfg, qqEnabled: isQqConnectorEnabled({ stateDir: APP_PATHS.stateDir }), bionicEnabled: false
+    config: cfg, qqEnabled: isQqConnectorEnabled({ stateDir: APP_PATHS.stateDir }), bionicEnabled: false,
+    toolEnabled: name => assertMcpToolEnabled('snowluma', name, { stateDir: APP_PATHS.stateDir })
   })
 });
 

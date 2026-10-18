@@ -23,6 +23,8 @@ export function bootstrapCetaMesh(options = {}) {
   lifecycle.register(() => services.managedAgent.close());
   lifecycle.register(() => services.chatService.close());
   lifecycle.register(() => services.integrationService.close());
+  lifecycle.register(() => services.channelService.close());
+  lifecycle.register(() => services.bionicService.close());
 
   return { services, lifecycle };
 }

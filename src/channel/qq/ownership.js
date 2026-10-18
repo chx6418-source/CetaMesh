@@ -72,6 +72,11 @@ export function acquireQqOwnership(kind, identity, directory = path.join(os.tmpd
   }
   let released = false;
   const lease = {
+    valid() {
+      if (released || fs.existsSync(recoveryFile)) return false;
+      try { return fs.readFileSync(file, 'utf8') === contents; }
+      catch (error) { void error; return false; /* Unreadable ownership evidence cannot authorize a send. */ }
+    },
     release() {
       if (released) return;
       released = true;
