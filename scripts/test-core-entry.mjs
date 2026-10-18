@@ -208,6 +208,19 @@ try {
     assert.equal(duplicate.status, 2, 'a second Core must not become a Task/Memory writer');
     assert.match(duplicate.stderr, /Another Core owns this StateDir|STATE_DIR_BUSY/);
     assert.equal((await waitForDataIpc(tempRoot)).ok, true, 'first Core must retain its IPC pipe');
+    fs.writeFileSync(path.join(tempRoot, 'config.json'), JSON.stringify({
+      consoleToken: 'isolated-test-token',
+      dsh: { baseUrl: 'http://127.0.0.1:9' },
+      snowluma: { httpUrl: 'http://127.0.0.1:9', wsUrl: 'ws://127.0.0.1:9', allowProcessControl: false }
+    }));
+    const legacyConflict = spawnSync(process.execPath, [path.join(ROOT, 'src', 'bridge.js'), '--legacy-exclusive'], {
+      cwd: ROOT, encoding: 'utf8', timeout: 10000,
+      env: { ...process.env, WHALEBRIDGE_DATA_DIR: tempRoot, WHALEBRIDGE_RESOURCE_DIR: ROOT }
+    });
+    assert.equal(legacyConflict.status, 2, 'Legacy must reject an active Core owner before initializing QQ or Core services');
+    assert.equal(fs.existsSync(path.join(tempRoot, 'state', 'bridge.lock')), false, 'rejected Legacy must not acquire its QQ consumer lock');
+    assert.equal(fs.existsSync(path.join(tempRoot, 'state', 'bridge.log')), false, 'rejected Legacy must not initialize legacy services');
+    assert.equal((await waitForDataIpc(tempRoot)).ok, true, 'rejected Legacy must not disturb Core IPC');
     console.log('✅ worker: 隔离数据目录启动成功（数据面 IPC 健康，无 HTTP listener）');
   } finally {
     if (worker.exitCode === null) worker.kill();
@@ -231,6 +244,36 @@ try {
     assert.equal(fs.existsSync(path.join(tempRoot, 'state', '.core-owner.lock')), false, 'Core must release its owner lock');
   } finally {
     if (supervised.exitCode === null) supervised.kill();
+  }
+
+  const legacy = spawn(process.execPath, [path.join(ROOT, 'src', 'bridge.js'), '--legacy-exclusive'], {
+    cwd: ROOT, windowsHide: true, stdio: ['ignore', 'ignore', 'ignore'],
+    env: { ...process.env, WHALEBRIDGE_DATA_DIR: tempRoot, WHALEBRIDGE_RESOURCE_DIR: ROOT }
+  });
+  try {
+    const status = await waitForDataIpc(tempRoot);
+    assert.equal(status.ok, true, 'Legacy-exclusive should retain its compatibility data IPC');
+    assert.ok(fs.existsSync(path.join(tempRoot, 'state', 'bridge.lock')), 'Legacy holds the sole QQ consumer lock');
+    const coreConflict = spawnSync(process.execPath, [ENTRY, '--worker'], {
+      cwd: ROOT, encoding: 'utf8', timeout: 5000,
+      env: { ...process.env, WHALEBRIDGE_DATA_DIR: tempRoot }
+    });
+    assert.equal(coreConflict.status, 2, 'Core must reject an active Legacy owner');
+    assert.equal((await waitForDataIpc(tempRoot)).ok, true, 'rejected Core must not disturb Legacy IPC');
+  } finally {
+    if (legacy.exitCode === null) legacy.kill();
+    if (legacy.exitCode === null) await once(legacy, 'exit');
+  }
+  const restartedCore = spawn(process.execPath, [ENTRY, '--worker'], {
+    cwd: ROOT, windowsHide: true, stdio: ['ignore', 'ignore', 'ignore'],
+    env: { ...process.env, WHALEBRIDGE_DATA_DIR: tempRoot }
+  });
+  try {
+    assert.equal((await waitForDataIpc(tempRoot)).ok, true, 'Core must recover the stale owner lease after Legacy crash');
+    assert.equal(fs.existsSync(path.join(tempRoot, 'state', 'bridge.lock')), true, 'stale QQ lock remains until Legacy re-entry');
+  } finally {
+    if (restartedCore.exitCode === null) restartedCore.kill();
+    if (restartedCore.exitCode === null) await once(restartedCore, 'exit');
   }
 
   // 阶段 5 起，MCP 配置的生成逻辑在 src/dsh-integration.js；setup-dsh.mjs 只是它的命令行外壳。

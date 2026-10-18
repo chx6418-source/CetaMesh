@@ -70,6 +70,7 @@ import {
 import { loginInfo, extractKugouAuth, createQrLogin, pollQrLogin } from './kugou-api.js';
 import { createLocalServiceManager, SNOWLUMA_RELEASE_PAGE, DSH_INSTALL_HINT } from './local-services.js';
 import { bootstrapCetaMesh } from './app/bootstrap.js';
+import { acquireStateOwner } from './app/state-owner.js';
 import { createDesktopIpcRuntime } from './app/ipc-runtime.js';
 import { createDshLifecycle } from './providers/dsh/lifecycle.js';
 import { createQqRuntime } from './channel/qq/runtime.js';
@@ -359,6 +360,7 @@ function saveState() {
 // 锁文件存 PID；启动时若该 PID 仍存活则退出（exit 2 = 已有实例），
 // 否则接管。进程退出/崩溃后锁自动失效（PID 校验）。
 const LOCK_FILE = path.join(STATE_DIR, 'bridge.lock');
+let legacyOwner = null;
 function acquireLock() {
   fs.mkdirSync(STATE_DIR, { recursive: true });
   // 原子创建锁文件：把 PID 一次性写入（flag 'wx'），避免“先建空文件再写 PID”的窗口被第二个进程当作过期锁偷走。
@@ -1981,6 +1983,7 @@ async function main() {
       log
     });
     const application = bootstrapCetaMesh({
+      owner: legacyOwner,
       config: cfg,
       dataRoot: DATA_ROOT,
       stateDir: STATE_DIR,
@@ -9890,6 +9893,13 @@ function installOrphanGuard({ exit = (code) => process.exit(code), log: write = 
 }
 
 export async function runBridge() {
+  // Legacy-exclusive compatibility mode owns the same StateDir lease as the
+  // desktop Core. Acquire it before config reads, QQ setup, logs or IPC startup.
+  // This mode remains a combined legacy host until M3/M4 connector migration.
+  const owner = acquireStateOwner(STATE_DIR);
+  legacyOwner = owner;
+  process.once('exit', () => owner.release());
+  console.error('[bridge] legacy-exclusive compatibility mode; Core and Legacy cannot share a StateDir.');
   installLifecycleHandlers();
   installOrphanGuard();
   return main();

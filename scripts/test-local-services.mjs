@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import iconv from 'iconv-lite';
-import { createLocalServiceManager, pickSnowLumaReleaseAsset, DSH_INSTALL_HINT, SNOWLUMA_RELEASE_PAGE, createAdaptiveProcessDecoder } from '../src/local-services.js';
+import { createLocalServiceManager, pickSnowLumaReleaseAsset, DSH_INSTALL_HINT, SNOWLUMA_RELEASE_PAGE, createAdaptiveProcessDecoder, connectorProcessEnv } from '../src/local-services.js';
 
 let passed = 0;
 let failed = 0;
@@ -16,6 +16,8 @@ function check(name, condition, extra = '') {
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'whalebridge-local-services-'));
 try {
+  const connectorEnv = connectorProcessEnv({ PATH: 'fixture-bin', WHALEBRIDGE_UI_AUTH_TOKEN: 'owner-secret', WHALEBRIDGE_UI_PIPE: 'owner-pipe', DSH_HOME: 'fixture-home' });
+  check('外部 Connector 子进程不继承 Owner IPC 凭据', connectorEnv.PATH === 'fixture-bin' && connectorEnv.DSH_HOME === 'fixture-home' && !Object.hasOwn(connectorEnv, 'WHALEBRIDGE_UI_AUTH_TOKEN') && !Object.hasOwn(connectorEnv, 'WHALEBRIDGE_UI_PIPE'));
   const snowDir = path.join(temp, 'SnowLuma');
   fs.mkdirSync(snowDir, { recursive: true });
   fs.writeFileSync(path.join(snowDir, 'launcher.bat'), '@echo off\necho SnowLuma test\n');

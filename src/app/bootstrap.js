@@ -4,7 +4,7 @@ import { APP_PATHS } from '../app-paths.js';
 import { acquireStateOwner } from './state-owner.js';
 
 export function bootstrapCetaMesh(options = {}) {
-  const owner = acquireStateOwner(options.stateDir ?? APP_PATHS.stateDir);
+  const owner = options.owner ?? acquireStateOwner(options.stateDir ?? APP_PATHS.stateDir);
   let services;
   try { services = createCetaMeshServices(options); }
   catch (error) { owner.release(); throw error; }

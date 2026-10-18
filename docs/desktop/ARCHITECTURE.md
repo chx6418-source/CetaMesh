@@ -19,17 +19,24 @@
 
 ## Process composition
 
-The desktop shell starts one Node worker at `src/bridge.js`. That worker is the compatibility
-entry for legacy QQ/Social behavior and calls `src/app/bootstrap.js` to construct modern Core
-services. `src/app/service-container.js` owns service wiring, `src/app/ipc-runtime.js` owns the
-existing UI IPC method routing, and the application lifecycle closes registered services.
-The bridge retains QQ/Social policy and injects its DSH client into Core when present; Core
-construction itself succeeds without a QQ client or a ready DSH provider.
+The desktop shell starts one Node worker with `--worker`. `src/core-dispatch.js` sends that
+mode directly to `src/app/core-worker.js`, which calls `src/app/bootstrap.js` and owns the
+Core services, Owner IPC and data IPC. `src/app/service-container.js` owns service wiring,
+`src/app/ipc-runtime.js` owns the existing UI IPC method routing, and the application lifecycle
+closes registered services. Core construction succeeds without QQ or a ready DSH provider.
+
+`src/bridge.js` remains a separate, exclusive Legacy QQ/Social compatibility entry. It takes
+the same StateDir owner lease before starting its old services, so it cannot run concurrently
+with the desktop Core on one data directory. It still composes Core services internally and
+must not be described as an independent Connector until the M3/M4 migration is approved and
+verified.
 
 ```text
-Desktop shell → one Node worker (`src/bridge.js`)
-                    ├─ `src/app/bootstrap.js` → service container → IPC runtime
-                    └─ legacy QQ/Social integration → `src/channel/qq/` adapter
+Desktop shell → `--worker` → `src/app/core-worker.js`
+                              └─ `src/app/bootstrap.js` → service container → IPC runtime
+Explicit Legacy entry → `src/bridge.js` (exclusive StateDir lease)
+                              ├─ compatibility Core bootstrap and IPC
+                              └─ legacy QQ/Social integration → `src/channel/qq/` adapter
 ```
 
 ## Layers

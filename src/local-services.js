@@ -547,6 +547,10 @@ function publicSnapshot(state) {
   return result;
 }
 
+export function connectorProcessEnv(source = process.env) {
+  return Object.fromEntries(Object.entries(source).filter(([name]) => !/^WHALEBRIDGE_UI_/i.test(name)));
+}
+
 export function createLocalServiceManager({ root, config = {}, onLog = () => {}, onConfigPatch = () => {}, detectionOptions = {}, captureSnowLumaOutput = true } = {}) {
   const repoRoot = path.resolve(root || process.cwd());
   const configFile = path.join(repoRoot, 'config.json');
@@ -1065,6 +1069,7 @@ export function createLocalServiceManager({ root, config = {}, onLog = () => {},
   }
 
   function spawnServiceProcess(executable, args, { cwd, env, captureOutput = true } = {}) {
+    env = connectorProcessEnv(env ?? process.env);
     const stdio = captureOutput ? ['ignore', 'pipe', 'pipe'] : ['ignore', 'ignore', 'ignore'];
     if (process.platform !== 'win32') {
       return spawn(executable, args, { cwd, env, windowsHide: true, stdio });
