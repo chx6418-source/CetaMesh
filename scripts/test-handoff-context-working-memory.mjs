@@ -101,7 +101,7 @@ await check('first unverified Agent response is recorded without a stale Task re
     'the Agent report must be recorded without upgrading it to verified work');
   const checkpoint=await waitFor(()=>f.services.taskService.runtime.get({id:task.id}).task.checkpoint,
     value=>value?.summary?.includes('Synthetic answer'),'unverified fallback checkpoint');
-  assert.match(checkpoint.summary,/^\\[Unverified Agent report\\]/,
+  assert.ok(checkpoint.summary.startsWith('[Unverified Agent report]'),
     'unverified checkpoint must state its evidence class');
   assert.ok(!f.services.taskService.runtime.get({id:task.id}).task.completedWork
     .some(row=>row.text.includes('Synthetic answer')),'unverified report is not completed work');
