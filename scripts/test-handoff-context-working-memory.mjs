@@ -106,6 +106,22 @@ await check('first unverified Agent response is recorded without a stale Task re
   assert.ok(!f.services.taskService.runtime.get({id:task.id}).task.completedWork
     .some(row=>row.text.includes('Synthetic answer')),'unverified report is not completed work');
 }));
+await check('standalone provider first turn records a checkpoint without stale revision conflict',()=>fixture(async f=>{
+  const task=f.services.taskService.runtime.create({goal:'Standalone first Agent report',workspaceId:f.ws.id});
+  const sent=await f.services.capabilityService.broker.execute({
+    actor:{kind:'owner',id:'desktop'},requestId:'standalone-report-revision',capability:'agent.run',
+    taskId:task.id,workspaceId:f.ws.id,
+    input:{agentProvider:'repair-fixture',content:'Analyze and report without changing files'},
+    reason:'isolated Agent report revision regression'
+  });
+  assert.equal(sent.status,'completed');
+  const report=await waitFor(()=>f.services.taskService.runtime.get({id:task.id}).task,
+    row=>row.agentReports?.some(x=>x.verified===false),'standalone Agent report');
+  assert.ok(report.agentReports.some(row=>row.verified===false),'report must retain unverified status');
+  const checkpoint=await waitFor(()=>f.services.taskService.runtime.get({id:task.id}).task.checkpoint,
+    row=>row?.summary?.includes('Bootstrap or user acknowledgement'),'standalone initial checkpoint');
+  assert.ok(checkpoint.summary.startsWith('[Unverified Agent report]'));
+}));
 await check('automatic policy may switch the actual assigned Agent',()=>fixture(async f=>{
   await f.chat.execute({method:'chat.config.set',params:{id:f.session.id,config:{mode:'smart'}}});
   await f.send('Analyze this project.');const before=await f.getTask();
