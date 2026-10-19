@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { defineAgentProvider } from '../src/agent/agent-provider.js';
 import { createCodexAgentProvider } from '../src/agent/codex-agent-provider.js';
 import { createToolExecutionCoordinator } from '../src/model/tool-execution.js';
@@ -24,10 +27,14 @@ const fakeCli = {
   },
   async shutdown() {}
 };
+const auditRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-audit-replay-'));
+const auditWorkspace = path.join(auditRoot, 'workspace');
+fs.mkdirSync(auditWorkspace);
+fs.writeFileSync(path.join(auditWorkspace, 'keep.txt'), 'source workspace must survive provider shutdown');
 const provider = createCodexAgentProvider({ cliProcess: fakeCli,
+  stagingRoot: path.join(auditRoot, 'stages'),
   resolveTaskWorkspace: async () => ({ task: { id: 'task-1', workspaceId: 'workspace-1', goal: 'audit' },
-    workspace: { id: 'workspace-1', root: process.cwd() } }),
-  createStage: async () => ({ root: process.cwd() })
+    workspace: { id: 'workspace-1', root: auditWorkspace } })
 });
 const { sessionId } = await provider.createSession({ taskId: 'task-1', workspaceId: 'workspace-1' });
 const session = provider._sessions.get(sessionId);
@@ -68,7 +75,11 @@ try {
 } finally {
   controllers.forEach(controller => controller.abort());
   await Promise.all(iterators.map(iterator => iterator.return?.()));
-  await provider.shutdown();
+  try {
+    await provider.shutdown();
+    assert.equal(fs.existsSync(session.stage.root), false, 'shutdown removes only its owned stage');
+    assert.equal(fs.readFileSync(path.join(auditWorkspace, 'keep.txt'), 'utf8'), 'source workspace must survive provider shutdown');
+  } finally { fs.rmSync(auditRoot, { recursive: true, force: true }); }
 }
 
 const noTerminal = createToolExecutionCoordinator({
@@ -100,3 +111,4 @@ await assert.rejects(async () => {
 assert.equal(streamed.some(event => JSON.stringify(event).includes('DSML')), false,
   'split internal DSML syntax never reaches UI stream events');
 console.log('PASS DeepSeek DSML protocol mismatch is rejected before displaying internal syntax');
+

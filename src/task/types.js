@@ -42,7 +42,8 @@ export const TASK_LIMITS = Object.freeze({
   decisions: 200,
   memoryRefs: 200,
   acceptance: 50,
-  agentHistory: 100
+  agentHistory: 100,
+  agentReports: 80
 });
 
 export function taskError(code, message) {

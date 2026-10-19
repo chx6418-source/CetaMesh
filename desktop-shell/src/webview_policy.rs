@@ -18,7 +18,7 @@ const UI_METHODS: &[&str] = &[
     "ui.workspace.list", "ui.workspace.open", "ui.workspace.create",
     "ui.memory.overview", "ui.memory.get", "ui.memory.create", "ui.memory.update", "ui.memory.pin", "ui.memory.delete",
     "ui.memory.candidates.confirm", "ui.memory.candidates.confirmBatch",
-    "ui.agent.list", "ui.agent.health",
+    "ui.agent.list", "ui.agent.health", "ui.agent.configure",
     "ui.extensions.settings.describe", "ui.extensions.settings.get", "ui.extensions.settings.update",
     "ui.plugins.catalog", "ui.plugins.status", "ui.plugins.detail", "ui.plugins.refresh", "ui.plugins.stage", "ui.plugins.stage-local", "ui.plugins.enable.review",
     "ui.plugins.install", "ui.plugins.enable", "ui.plugins.disable", "ui.plugins.uninstall",
@@ -336,3 +336,4 @@ mod tests {
         assert!(!PRODUCTION_CSP.contains("unsafe-inline"));
     }
 }
+

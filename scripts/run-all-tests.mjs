@@ -39,11 +39,15 @@ export const CATEGORIES = ['core', 'architecture', 'security', 'runtime', 'integ
 // ── 登记表：scripts/test-*.mjs 的每一个文件都必须出现在这里（或能从 package.json 映射）。
 // requires 的取值见 probeAvailability()；category 取值见 CATEGORIES。
 const REGISTRY = {
+  'test-dsh-setup.mjs': { category: 'core' },
+  'test-model-continuation.mjs': { category: 'runtime' },
+  'test-harbor-agent-setup.mjs': { category: 'runtime' },
+  'test-handoff-context-working-memory.mjs': { category: 'runtime', timeoutMs: 120000, note: 'Agent Handoff context and task-scoped working Memory regressions' },
   'test-whalebridge-m5-preflight.mjs': { category: 'security' },
   'test-whalebridge-m5-epoch.mjs': { category: 'integration' },
   'test-whalebridge-m5-backup.mjs': { category: 'integration' },
   'test-whalebridge-m5-dry-run.mjs': { category: 'security' },
-  'test-whalebridge-m5-fixture.mjs': { category: 'integration' },
+  'test-whalebridge-m5-fixture.mjs': { category: 'integration', timeoutMs: 600_000, note: 'Synthetic Windows ACL and child-process crash/recovery scenarios; fail if verification or phase watchdog expires' },
   // ── core：基础服务 / 纯函数 / 传输协议 ─────────────────────────────────────
   'test-agent-provider.mjs': { category: 'core' },
   'test-dsh-connector-m3.mjs': { category: 'core' },
@@ -497,3 +501,4 @@ main().catch((error) => {
   console.error('[run-all-tests] 聚合器自身失败:', error?.stack ?? error);
   process.exitCode = 1;
 });
+

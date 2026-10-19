@@ -118,13 +118,29 @@ export function openFixtureForChild({ root, nonce }) {
     for (const row of journal.files ?? []) {
       if (!journal.expectedTargets.some(expected => expected.source === row.source && expected.hash === row.hash && expected.target === row.target && expected.records === row.records && expected.identityHash === row.identityHash)) throw migrationError('JOURNAL_UNVERIFIED');
       const backup = safe(path.join(absolute, row.backup));
-      if (digest(fs.readFileSync(backup)) !== row.hash || digest(permission(backup)) !== digest(row.backupPermissions)) throw migrationError('BACKUP_UNVERIFIED');
+      const backupHash = digest(fs.readFileSync(backup));
+      const observed = permission(backup);
+      const expected = row.backupPermissions;
+      if (backupHash !== row.hash || digest(observed) !== digest(expected)) {
+        // Only report booleans and hashes: never echo Windows SDDL, paths or content.
+        const mismatch = {
+          content: backupHash !== row.hash,
+          mode: observed.mode !== expected?.mode,
+          acl: observed.sddl !== expected?.sddl,
+          observedAclDigest: observed.sddl ? digest(observed.sddl).slice(0, 12) : null,
+          expectedAclDigest: expected?.sddl ? digest(expected.sddl).slice(0, 12) : null
+        };
+        throw Object.assign(migrationError('BACKUP_UNVERIFIED'), { message: 'BACKUP_UNVERIFIED: ' + JSON.stringify(mismatch) });
+      }
     }
   };
   const verifyTarget = journal => {
     for (const row of journal.files) {
       const file = safe(path.join(absolute, journal.versionDirectory, row.target));
-      if (digest(fs.readFileSync(file)) !== row.hash || digest(permission(file)) !== digest(row.permissions)) throw migrationError('TARGET_UNVERIFIED');
+      const expected = row.targetPermissions ?? row.permissions; // Legacy journal: retain fail-closed verification.
+      if (digest(fs.readFileSync(file)) !== row.hash || digest(permission(file)) !== digest(expected)) {
+        throw migrationError('TARGET_UNVERIFIED');
+      }
       if (row.target.endsWith('.json')) {
         const schema = inspectSchema(row.target.replace(/^accounts\/[1-9]\d*\//, ''), readJsonFile(file));
         if (!schema.valid || schema.records !== row.records || schema.identityHash !== row.identityHash) throw migrationError('TARGET_IDENTITIES_UNVERIFIED');
@@ -169,8 +185,13 @@ export function openFixtureForChild({ root, nonce }) {
           if (fs.existsSync(destination)) throw migrationError('BACKUP_EXISTS');
           writeTextAtomic(destination, fs.readFileSync(original, 'utf8')); restorePermission(destination, permissions);
           fs.chmodSync(destination, permissions.mode & ~0o222);
+          // Record the observed backup ACL after the read-only transition, not
+          // the source SDDL: Windows can normalize inherited ACE metadata.
+          // Original source permissions remain separately recorded for recovery.
+          const backupPermissions = permission(destination);
+          if ((backupPermissions.mode & 0o222) !== 0) throw migrationError('PERMISSION_RESTORE_FAILED');
           journal.files.push({ source: path.relative(absolute, original), backup, hash: row.row.hash, records: row.row.records,
-            identityHash: row.row.identityHash, permissions, backupPermissions: { ...permissions, mode: fs.statSync(destination).mode & 0o777 }, target: `accounts/${row.accountId}/${row.relative}` });
+            identityHash: row.row.identityHash, permissions, backupPermissions, target: `accounts/${row.accountId}/${row.relative}` });
           writeJsonAtomic(safe(journalFile), journal);
         }
         validateStored(journal); phase('BACKED_UP');
@@ -179,6 +200,10 @@ export function openFixtureForChild({ root, nonce }) {
           const target = safe(path.join(absolute, versionDirectory, row.target));
           writeTextAtomic(target, fs.readFileSync(safe(path.join(absolute, row.backup)), 'utf8'));
           restorePermission(target, row.permissions);
+          // Capture the observed target ACL after restoration. Keep the original
+          // source ACL separately; Windows normalizes inherited ACE metadata.
+          row.targetPermissions = permission(target);
+          if (row.targetPermissions.mode !== row.permissions.mode) throw migrationError('PERMISSION_RESTORE_FAILED');
           if (failure === 'WRITE_FAILED') throw migrationError('WRITE_FAILED');
         }
         phase('STAGED'); beforeVerify?.(); verifyTarget(journal); validateStored(journal);

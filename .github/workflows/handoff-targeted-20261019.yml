@@ -1,0 +1,29 @@
+name: handoff-targeted-20261019
+on:
+  push:
+    branches: [fix/handoff-context-working-memory-20261019]
+    paths:
+      - .github/workflows/handoff-targeted-20261019.yml
+      - scripts/test-handoff-context-working-memory.mjs
+      - src/capability/service.js
+      - src/task/runtime.js
+      - src/testing/legacy-migration-fixture.js
+      - scripts/test-whalebridge-m5-backup.mjs
+permissions:
+  contents: read
+jobs:
+  targeted:
+    if: github.repository == 'chx6418-source/whalebridge'
+    runs-on: windows-latest
+    timeout-minutes: 15
+    env:
+      WHALEBRIDGE_TEST_NETWORK: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Focused regression suite
+        run: npm test -- --suite test-handoff-context-working-memory --suite test-agent-provider-expansion --suite test-whalebridge-m5-backup --suite test-whalebridge-m5-fixture

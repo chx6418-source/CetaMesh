@@ -243,39 +243,54 @@ export function createDshAgentProvider({ api, defaults = {}, log = () => {}, pre
 
       async health() {
         let settingsVerified = false;
+        let stage = 'transport';
+        const checkedAt = new Date().toISOString();
+        const safeCode = error => /^[A-Z][A-Z0-9_]{0,79}$/.test(String(error?.code ?? '')) ? error.code : 'DSH_API_ERROR';
+        const diagnostic = (error, at = stage) => ({ stage: at, code: safeCode(error),
+          retryable: ['DSH_REQUEST_TIMEOUT', 'DSH_UNREACHABLE', 'ECONNRESET', 'ETIMEDOUT'].includes(error?.code), checkedAt });
         try {
           await api.callEndpoint('settings/describe', {}, AbortSignal.timeout(HEALTH_TIMEOUT_MS));
           settingsVerified = true;
+          stage = 'session-api';
           await api.callEndpoint('session/list', { _request: {} }, AbortSignal.timeout(HEALTH_TIMEOUT_MS));
           const preset = presetPolicy?.inspect('coding') ?? null;
           let presetLoaded = null;
+          let discoveryError = null;
+          stage = 'native-loading';
           if (preset?.compatible) {
             try {
               const listed = await api.callEndpoint('agentPresets/list', {}, AbortSignal.timeout(HEALTH_TIMEOUT_MS));
-              presetLoaded = Array.isArray(listed?.presets) && listed.presets.some(row => row?.id === preset.id);
+              if (Array.isArray(listed?.presets)) presetLoaded = listed.presets.some(row => row?.id === preset.id);
+              else discoveryError = diagnostic({ code: 'DSH_PRESET_LIST_UNVERIFIED' });
             } catch (error) {
-              log(`DSH preset discovery failed: ${error?.code ?? 'PROVIDER_ERROR'}`);
-              presetLoaded = false;
+              log(`DSH preset discovery failed: ${safeCode(error)}`);
+              discoveryError = diagnostic(error);
             }
           }
           const presetReady = !preset || (preset.compatible && presetLoaded === true);
-          const presetReason = preset && !preset.compatible ? preset.reason : preset && !presetLoaded ? 'preset-not-loaded' : null;
-          return { status: presetReady ? 'available' : 'needs-setup', available: true, provider: 'dsh', processAlive: null,
-            reachable: true, authenticated: true, compatible: true, sessionCapable: true,
-            ready: presetReady, taskEligible: false,
-            preset: preset ? { purpose: 'coding', id: preset.id, compatible: preset.compatible, loaded: presetLoaded, reason: presetReason } : null,
-            reason: presetReason };
+          const presetReason = preset && !preset.compatible ? preset.reason
+            : preset && presetLoaded === false ? 'preset-not-loaded' : preset && presetLoaded === null ? 'preset-load-unknown' : null;
+          const authRejected = discoveryError?.code === 'DSH_AUTHENTICATION_FAILED';
+          return { status: presetReady ? 'available' : 'needs-setup', available: !authRejected, provider: 'dsh', processAlive: null,
+            reachable: true, authenticated: authRejected ? false : discoveryError ? null : true, compatible: true, sessionCapable: !authRejected,
+            configured: preset ? Boolean(preset.id) : null, ready: presetReady, taskEligible: false,
+            diagnostic: discoveryError ?? { stage: presetReason === 'preset-not-configured' ? 'preset-selection' : presetReason === 'preset-not-loaded' ? 'native-loading' : presetReason ? 'preset-schema' : 'ready', code: null, retryable: false, checkedAt },
+            preset: preset ? { purpose: 'coding', id: preset.id, compatible: preset.compatible, loaded: presetLoaded,
+              loadState: presetLoaded === true ? 'loaded' : presetLoaded === false ? 'not-loaded' : 'unknown', reason: presetReason,
+              verification: 'local-persona-only' } : null,
+            reason: authRejected ? 'authentication-required' : discoveryError?.code === 'DSH_AUTH_MATERIAL_MISSING' ? 'authentication-material-missing' : presetReason };
         } catch (error) {
           const code = String(error?.code ?? '');
           const transportFailed = ['DSH_UNREACHABLE', 'DSH_REQUEST_TIMEOUT', 'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT'].includes(code)
             || /ECONNREFUSED|ECONNRESET|fetch failed|传输失败/i.test(String(error?.message ?? ''));
           const missingAuth = code === 'DSH_AUTH_MATERIAL_MISSING';
-          const authenticated = code === 'DSH_AUTHENTICATION_FAILED' ? false : settingsVerified ? true : null;
+          const authenticated = code === 'DSH_AUTHENTICATION_FAILED' ? false : null;
           const reachable = transportFailed ? false : missingAuth ? null
             : settingsVerified || authenticated === false || code === 'DSH_HOST_ORIGIN_REJECTED' ? true : null;
           return { status: authenticated === false || missingAuth ? 'needs-setup' : 'error', available: false, provider: 'dsh',
             processAlive: null, reachable, authenticated, compatible: settingsVerified ? true : null,
-            sessionCapable: false, ready: false, taskEligible: false,
+            configured: presetPolicy ? Boolean(presetPolicy.inspect('coding').id) : null,
+            sessionCapable: false, ready: false, taskEligible: false, diagnostic: diagnostic(error),
             reason: authenticated === false ? 'authentication-required' : missingAuth ? 'authentication-material-missing'
               : transportFailed ? 'not_connected' : code === 'DSH_HOST_ORIGIN_REJECTED' ? 'host-origin-rejected' : 'session-api-unavailable' };
         }

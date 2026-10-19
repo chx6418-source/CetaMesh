@@ -11,6 +11,7 @@
 //      未来的 Task 执行器）上报真实 usage / 字符估算，Continuity 据此驱动
 //      Context Monitor 与自动 rollover。Broker 不知道 Continuity 的存在，
 //      依赖方向仍然是 Continuity → Broker。
+import crypto from 'node:crypto';
 import { AGENT_PROVIDER_OPTIONAL_METHODS, agentProviderError } from './agent-provider.js';
 
 const TASK_WORKSPACE_BOUNDARIES = new Set(['capability-broker', 'staged-capability-broker']);
@@ -20,6 +21,16 @@ export function createAgentBroker({ registry, log = () => {} } = {}) {
     throw agentProviderError('INVALID_PARAMS', 'createAgentBroker 需要 Agent Provider 注册表');
   }
   const turnEndListeners = new Set();
+  // Native request IDs are local to a Session; retain bounded Core provenance.
+  const runMetadata = new Map();
+  const runKey = (provider, sessionId, kind, id) => JSON.stringify([provider, sessionId, kind, String(id)]);
+  function rememberRun(provider, sessionId, result, metadata) {
+    for (const [kind, id] of [['request', result?.requestId], ['turn', result?.turnId]]) {
+      if (id === undefined || id === null) continue;
+      runMetadata.set(runKey(provider, sessionId, kind, id), metadata);
+    }
+    while (runMetadata.size > 4096) runMetadata.delete(runMetadata.keys().next().value);
+  }
 
   function requireProvider(providerId) {
     try {
@@ -118,9 +129,16 @@ export function createAgentBroker({ registry, log = () => {} } = {}) {
       });
     },
 
-    async send({ provider: providerId, sessionId, content, mode } = {}) {
+    async send({ provider: providerId, sessionId, content, mode, phase = 'user', runId = crypto.randomUUID() } = {}) {
       const provider = requireProvider(providerId);
-      return provider.send({ sessionId: requireSessionId({ sessionId }), content, mode });
+      requireSessionId({ sessionId });
+      if (!['user', 'bootstrap', 'system', 'approval'].includes(phase)
+        || typeof runId !== 'string' || !runId || runId.length > 240) {
+        throw agentProviderError('INVALID_PARAMS', 'Agent run requires a bounded Core identity and phase');
+      }
+      const result = await provider.send({ sessionId, content, mode, phase, runId });
+      if (result?.accepted === true) rememberRun(providerId, sessionId, result, { phase, runId });
+      return result;
     },
 
     async cancel({ provider: providerId, sessionId } = {}) {
@@ -160,7 +178,18 @@ export function createAgentBroker({ registry, log = () => {} } = {}) {
 
     follow({ provider: providerId, sessionId, signal, sinceSequence } = {}) {
       const provider = requireProvider(providerId);
-      return provider.follow({ sessionId: requireSessionId({ sessionId }), signal, sinceSequence });
+      const source = provider.follow({ sessionId: requireSessionId({ sessionId }), signal, sinceSequence });
+      return (async function* () {
+        for await (const item of source) {
+          const event = item?.type === 'event' ? item.event : item;
+          const data = event?.data;
+          const metadata = data && (runMetadata.get(runKey(providerId, sessionId, 'request', data.requestId))
+            ?? runMetadata.get(runKey(providerId, sessionId, 'turn', data.turn)));
+          if (!metadata) { yield item; continue; }
+          const enriched = { ...event, data: { ...data, ...metadata } };
+          yield item?.type === 'event' ? { ...item, event: enriched } : enriched;
+        }
+      })();
     },
 
     async health(providerId, options = {}) {
@@ -231,7 +260,9 @@ export function createAgentBroker({ registry, log = () => {} } = {}) {
 
     close() {
       turnEndListeners.clear();
+      runMetadata.clear();
       log('Agent Broker 已关闭（监听器清空；Provider 无常驻资源）');
     }
   };
 }
+

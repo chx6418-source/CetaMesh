@@ -46,9 +46,19 @@ export interface MemoryCandidate {
 }
 export type AgentStatus = 'ready' | 'needs-setup' | 'descriptor-incomplete' | 'not-installed' | 'unavailable' | 'not-supported' | 'not-checked';
 export interface Agent {
-  id: string; name: string; role: string; description: string; available: boolean; installed: boolean | null; authenticated: boolean | null; compatible: boolean | null; status: AgentStatus;
-  eligible: boolean; taskEligible: boolean; configured: boolean; reason: string | null; lastError: string | null; workspaceBoundary: string | null;
+  id: string; name: string; role: string; description: string; available: boolean | null; installed: boolean | null; authenticated: boolean | null; compatible: boolean | null; status: AgentStatus;
+  eligible: boolean | null; taskEligible: boolean | null; configured: boolean | null; reason: string | null; lastError: string | null; workspaceBoundary: string | null;
+  reachable?: boolean | null; ready?: boolean | null; sessionCapable?: boolean | null;
+  configuration?: DshConfiguration | null;
+  preset?: { purpose: string; id: string | null; compatible: boolean | null; loaded: boolean | null; loadState: 'loaded' | 'not-loaded' | 'unknown'; reason: string | null; verification: string | null } | null;
+  diagnostic?: { stage: string; code: string | null; retryable: boolean; checkedAt: string | null } | null;
   version: string | null; desktopApp: { installed: boolean; running: boolean; status: string; version: string | null } | null;
+}
+export interface DshSelection { codingPreset: string | null; socialPreset: string | null; homeDir: string | null; baseUrl: string | null }
+export interface DshConfiguration {
+  version: number; revision: number; activeRevision: number; pendingRevision: number | null; restartRequired: boolean;
+  source: string; loadError: string | null; configFile: string | null; pendingConfigFile?: string | null; dataRoot: string | null; homeSource: string;
+  active: DshSelection; pending: DshSelection | null;
 }
 export interface Plugin {
   id: string; name: string; summary: string; description: string; developer: string; version: string;
@@ -117,7 +127,7 @@ type UiMethod =
   | 'ui.workspace.list' | 'ui.workspace.open' | 'ui.workspace.create'
   | 'ui.memory.overview' | 'ui.memory.get' | 'ui.memory.create' | 'ui.memory.update' | 'ui.memory.pin' | 'ui.memory.delete'
   | 'ui.memory.candidates.confirm' | 'ui.memory.candidates.confirmBatch'
-  | 'ui.agent.list' | 'ui.agent.health'
+  | 'ui.agent.list' | 'ui.agent.health' | 'ui.agent.configure'
   | 'ui.extensions.settings.describe' | 'ui.extensions.settings.get' | 'ui.extensions.settings.update'
   | 'ui.plugins.catalog' | 'ui.plugins.status' | 'ui.plugins.detail' | 'ui.plugins.refresh' | 'ui.plugins.stage' | 'ui.plugins.stage-local' | 'ui.plugins.install'
   | 'ui.plugins.enable.review' | 'ui.plugins.enable' | 'ui.plugins.disable' | 'ui.plugins.uninstall' | 'ui.plugins.integration.list' | 'ui.plugins.integration.settings'
@@ -299,7 +309,8 @@ export const memoryClient = {
 };
 export const agentClient = {
   list: () => uiCall<{ agents: Agent[] }>('ui.agent.list', {}),
-  health: (provider: string, refresh = false) => uiCall<Agent>('ui.agent.health', { provider, refresh })
+  health: (provider: string, refresh = false) => uiCall<Agent>('ui.agent.health', { provider, refresh }),
+  configure: (config: DshSelection) => uiCall<{ provider: 'dsh'; supported: boolean; applied: false; restartRequired: boolean; configuration: DshConfiguration }>('ui.agent.configure', { agentId: 'dsh', config })
 };
 export const extensionSettingsClient = {
   describe: (id: string) => uiCall<ExtensionSettingsDescription>('ui.extensions.settings.describe', { id }),
@@ -383,3 +394,4 @@ export const hostClient = {
 export async function openExternal(url: string): Promise<void> {
   if (url.startsWith('https://')) await bridge.invoke('app.openExternal', { url });
 }
+

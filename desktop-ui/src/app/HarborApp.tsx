@@ -3,7 +3,7 @@ import { useSearchParams } from 'react-router';
 import { createPortal } from 'react-dom';
 import { mergeChatHistorySnapshot, mergeLatestChatMessages, prependOlderChatMessages } from './chat-history';
 import { applyChatStreamUpdates, ChatRequestEpoch, ChatStreamRevision, pendingReplyVisible, type ChatStreamUpdate } from './chat-async-state';
-import { aboutClient, agentClient, approvalClient, bridge, chatClient, extensionSettingsClient, feedbackClient, hostClient, memoryClient, onboardingClient, openExternal, pluginClient, searchClient, settingsClient, taskClient, updateClient, workspaceClient, workshopClient, type Agent, type Approval, type ChatMessage as ChatMessageDto, type ChatSession, type ExtensionSettingsDescription, type ExtensionSettingsSnapshot, type IntegrationSettings, type Memory, type Plugin, type ProviderSettingField, type SettingField, type Settings, type Task, type WorkshopProposal } from '../bridge/typed-client';
+import { aboutClient, agentClient, approvalClient, bridge, chatClient, extensionSettingsClient, feedbackClient, hostClient, memoryClient, onboardingClient, openExternal, pluginClient, searchClient, settingsClient, taskClient, updateClient, workspaceClient, workshopClient, type Agent, type DshConfiguration, type DshSelection, type Approval, type ChatMessage as ChatMessageDto, type ChatSession, type ExtensionSettingsDescription, type ExtensionSettingsSnapshot, type IntegrationSettings, type Memory, type Plugin, type ProviderSettingField, type SettingField, type Settings, type Task, type WorkshopProposal } from '../bridge/typed-client';
 import { Icon, type IconName } from '../components/icons';
 import { ArtifactCard } from '../components/product/cards';
 import { Button, IconButton, Input, normalizeSelectOptionLabel, SearchInput, Select, Tabs } from '../components/primitives/inputs';
@@ -48,7 +48,7 @@ function EmptyNotice({ icon = 'sparkles', title, detail, action }: { icon?: Icon
 function Heading({ eyebrow, title, description, action }: { eyebrow: string; title: string; description: string; action?: ReactNode }) {
   return <div className="page-heading"><div><p className="eyebrow">{eyebrow}</p><h1>{title}</h1><p className="page-description">{description}</p></div>{action && <div className="heading-action">{action}</div>}</div>;
 }
-function StatusBadge({ value, available }: { value: string; available?: boolean }) {
+function StatusBadge({ value, available }: { value: string; available?: boolean | null }) {
   const tone = available === true || ['ready', 'running', 'enabled', 'completed', 'current', 'installed'].includes(value) ? 'success'
     : ['needs-setup', 'descriptor-incomplete', 'pending', 'waiting-approval', 'starting', 'start-timeout', 'checking', 'update'].includes(value) ? 'warning'
       : ['unavailable', 'error', 'failed', 'stopped', 'disabled'].includes(value) ? 'danger' : 'default';
@@ -173,9 +173,10 @@ export function HarborApp() {
     return () => window.clearTimeout(timer);
   }, [globalSearch]);
 
-  async function createSession() {
+  async function createSession(ordinary = false) {
     try {
-      const session = await chatClient.sessions.create();
+      const created = await chatClient.sessions.create();
+      const session = ordinary ? await chatClient.setConfig(created.id, { ...created.config, agentProvider: 'none', mode: 'chat' }) : created;
       setSessions(current => [session, ...current]);
       setActiveSessionId(session.id);
       navigate('chat', session.id);
@@ -250,7 +251,7 @@ export function HarborApp() {
         {globalSearch && <div className="search-popover" role="region" aria-label="搜索结果">{searchError ? <ErrorNotice error={searchError} /> : searchResults ? <SearchResults results={searchResults} onSelectSession={id => navigate('chat', id)} onSelectPage={navigate} /> : <LoadingState label="正在搜索…" />}</div>}
       </header>
       <main className={`page-frame page-${page}`}>
-        {page === 'chat' && <ChatPage key={activeSession?.id ?? 'no-session'} session={activeSession} workspaces={workspaces} activeWorkspaceId={activeWorkspaceId} onSessionUpdate={updated => setSessions(current => current.map(item => item.id === updated.id ? updated : item))} onNew={createSession} onOpenMemory={() => navigate('memory')} onReviewTask={id => { setReviewTaskId(id); navigate('work'); }} />}
+        {page === 'chat' && <ChatPage key={activeSession?.id ?? 'no-session'} session={activeSession} workspaces={workspaces} activeWorkspaceId={activeWorkspaceId} onSessionUpdate={updated => setSessions(current => current.map(item => item.id === updated.id ? updated : item))} onNew={() => createSession()} onNewChat={() => createSession(true)} onOpenMemory={() => navigate('memory')} onReviewTask={id => { setReviewTaskId(id); navigate('work'); }} />}
         {page === 'work' && <WorkPage workspaces={workspaces} onRefreshWorkspaces={refreshWorkspaces} reviewTaskId={reviewTaskId} onReviewTaskOpened={() => setReviewTaskId(null)} />}
         {page === 'memory' && <MemoryPage />}
         {page === 'agents' && <AgentsPage />}
@@ -346,7 +347,7 @@ export function ChatCatalogStatus({ catalog }: { catalog: Awaited<ReturnType<typ
   return <span>{catalog?.available === false && !hasDirectCatalog ? catalog.reason || '模型状态不可用' : 'CetaMesh Desktop'}</span>;
 }
 
-function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onNew, onOpenMemory, onReviewTask }: { session: ChatSession | null; workspaces: { id: string; name: string; status: string }[]; activeWorkspaceId: string | null; onSessionUpdate(session: ChatSession): void; onNew(): Promise<void>; onOpenMemory(): void; onReviewTask(id: string): void }) {
+function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onNew, onNewChat, onOpenMemory, onReviewTask }: { session: ChatSession | null; workspaces: { id: string; name: string; status: string }[]; activeWorkspaceId: string | null; onSessionUpdate(session: ChatSession): void; onNew(): Promise<void>; onNewChat(): Promise<void>; onOpenMemory(): void; onReviewTask(id: string): void }) {
   const [messages, setMessages] = useState<ChatMessageDto[]>([]);
   const [hasMoreHistory, setHasMoreHistory] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
@@ -658,13 +659,15 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
       case 'empty': return <EmptyNotice icon="chat" title="还没有消息" detail="写下你要处理的事情。模型和 Agent 会按会话设置运行。" />;
       case 'message': return <MessageBubble message={item.message} sendError={sendErrors[item.message.id]} onRetry={sendErrors[item.message.id] ? () => void retrySend(item.message.id) : undefined} />;
       case 'streaming': return <MessageBubble message={item.message} streaming />;
-      case 'turn-error': return <div className="turn-error" role="alert">{item.message}<div className="row">{linkedTask && (/needs-reconciliation|interrupted after Core restart/i.test(linkedTask.progress.note) || ['NEEDS_RECONCILIATION', 'TASK_RECOVERY_REVIEW_REQUIRED'].includes(status.errorCode ?? '')) ? <Button compact variant="ghost" onClick={() => onReviewTask(linkedTask.id)}>核对任务后恢复</Button> : <><Button compact variant="ghost" onClick={() => void chatClient.retry(session!.id).then(load).catch(cause => setError(messageOf(cause)))}>重试</Button><Button compact variant="ghost" onClick={() => void chatClient.continue(session!.id).then(load).catch(cause => setError(messageOf(cause)))}>继续</Button></>}</div></div>;
+      case 'turn-error': return <div className="turn-error" role="alert">{item.message}<div className="row">{linkedTask ? <ManagedFailureActions taskId={linkedTask.id} onReviewTask={onReviewTask} onNewChat={() => void onNewChat()} /> : <><Button compact variant="ghost" onClick={() => void chatClient.retry(session!.id).then(load).catch(cause => setError(messageOf(cause)))}>重试</Button><Button compact variant="ghost" onClick={() => void chatClient.continue(session!.id).then(load).catch(cause => setError(messageOf(cause)))}>继续</Button></>}</div></div>;
       case 'approval': return <ApprovalCard approval={item.approval} onDecide={decideApproval} />;
     }
   };
 
   async function send(text: string, attachments: { name: string; content: string; mimeType?: string }[], clientMessageId: string) {
     if (!session) return;
+    const preflight = managedWorkspacePreflight(session.config.agentProvider ?? '', session.config.workspaceId ?? '', activeWorkspaceId);
+    if (preflight) { setError(preflight); return; }
     const historyCursorBeforeSend = lastHistoryMessageIdRef.current;
     setError('');
     pendingSendsRef.current.set(clientMessageId, { text, attachments });
@@ -799,13 +802,14 @@ export function ChatComposer({ busy, models, selectedModelKey, agentProviders, s
     catch (error) { setAttachmentError(messageOf(error)); }
     finally { setPicking(false); textarea.current?.focus(); }
   }
+  const workspaceWarning = managedWorkspacePreflight(selectedAgent, workspaceId, activeWorkspaceId);
   function submit() {
     const text = draft.trim();
-    if (!text || busy) return;
+    if (!text || busy || workspaceWarning) return;
     onSend(text, attachments, crypto.randomUUID());
     setDraft(''); setAttachments([]);
   }
-  return <div className="chat-composer"><div className="composer-field"><textarea ref={textarea} aria-label="输入消息" placeholder="告诉 CetaMesh 你想做什么。" value={draft} rows={2} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); submit(); } }} /><div className="composer-bottom"><div className="row composer-controls"><IconButton label="添加文本或源码附件" icon="attach" onClick={() => void addFiles()} disabled={picking || busy} /><Select label="任务工作区" value={workspaceId} onChange={event => onWorkspaceChange(event.target.value)}><option value="">自动（当前工作区{activeWorkspaceId ? '' : '，未指定'}）</option>{workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{normalizeSelectOptionLabel(workspace.name, workspace.id)}</option>)}</Select><Select label="选择 Agent" value={selectedAgent} onChange={event => onAgentChange(event.target.value)}><option value="">能力</option><option value="none">不使用 Agent</option>{agentProviders.map(agent => { const needsScope = ['task-required', 'workspace-required'].includes(agent.reason ?? ''); const disabled = !agent.available || (!agent.eligible && !needsScope); const state = agent.eligible ? '' : availabilityReasonLabel(agent.reason) || availabilityReasonLabel(agent.status) || (agent.available ? '当前不可使用' : '不可用'); return <option key={agent.id} value={agent.id} disabled={disabled}>{normalizeSelectOptionLabel(agent.name, agent.id)}{state ? ` · ${state}` : ''}</option>; })}{selectedAgent && !agentProviders.some(agent => agent.id === selectedAgent) && <option value={selectedAgent} disabled>{normalizeSelectOptionLabel(selectedAgent)} · 不可用</option>}</Select><Select label="选择模型" value={selectedModelKey} onChange={event => onModelChange(event.target.value)} disabled={!modelChoices.length}>{modelChoices.length ? modelChoices.map(choice => <option key={choice.value} value={choice.value} disabled={choice.disabled}>{choice.label}</option>) : <option value="">暂无已配置模型</option>}</Select></div>{busy ? <Button variant="danger" icon="square" onClick={onStop}>停止</Button> : <Button variant="primary" icon="send" onClick={submit} disabled={!draft.trim()}>发送</Button>}</div>{attachments.length > 0 && <div className="attachment-list">{attachments.map((file, index) => <span key={`${file.name}-${index}`}><Icon name="file" size={13} />{file.name}<button aria-label={`移除 ${file.name}`} onClick={() => setAttachments(current => current.filter((_, item) => item !== index))}><Icon name="close" size={13} /></button></span>)}</div>}{attachmentError && <p className="inline-error" role="alert">{attachmentError}</p>}</div><div className="composer-footnote">消息与附件通过本机 Core 处理，附件总大小上限 128 KiB。</div></div>;
+  return <div className="chat-composer"><div className="composer-field"><textarea ref={textarea} aria-label="输入消息" placeholder="告诉 CetaMesh 你想做什么。" value={draft} rows={2} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); submit(); } }} /><div className="composer-bottom"><div className="row composer-controls"><IconButton label="添加文本或源码附件" icon="attach" onClick={() => void addFiles()} disabled={picking || busy} /><Select label="任务工作区" value={workspaceId} onChange={event => onWorkspaceChange(event.target.value)}><option value="">自动（当前工作区{activeWorkspaceId ? '' : '，未指定'}）</option>{workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{normalizeSelectOptionLabel(workspace.name, workspace.id)}</option>)}</Select><Select label="选择 Agent" value={selectedAgent} onChange={event => onAgentChange(event.target.value)}><option value="">能力</option><option value="none">不使用 Agent</option>{agentProviders.map(agent => { const needsScope = ['task-required', 'workspace-required'].includes(agent.reason ?? ''); const disabled = !agent.available || (!agent.eligible && !needsScope); const state = agent.eligible ? '' : availabilityReasonLabel(agent.reason) || availabilityReasonLabel(agent.status) || (agent.available ? '当前不可使用' : '不可用'); return <option key={agent.id} value={agent.id} disabled={disabled}>{normalizeSelectOptionLabel(agent.name, agent.id)}{state ? ` · ${state}` : ''}</option>; })}{selectedAgent && !agentProviders.some(agent => agent.id === selectedAgent) && <option value={selectedAgent} disabled>{normalizeSelectOptionLabel(selectedAgent)} · 不可用</option>}</Select><Select label="选择模型" value={selectedModelKey} onChange={event => onModelChange(event.target.value)} disabled={!modelChoices.length}>{modelChoices.length ? modelChoices.map(choice => <option key={choice.value} value={choice.value} disabled={choice.disabled}>{choice.label}</option>) : <option value="">暂无已配置模型</option>}</Select></div>{busy ? <Button variant="danger" icon="square" onClick={onStop}>停止</Button> : <Button variant="primary" icon="send" onClick={submit} disabled={!draft.trim() || Boolean(workspaceWarning)}>发送</Button>}</div>{attachments.length > 0 && <div className="attachment-list">{attachments.map((file, index) => <span key={`${file.name}-${index}`}><Icon name="file" size={13} />{file.name}<button aria-label={`移除 ${file.name}`} onClick={() => setAttachments(current => current.filter((_, item) => item !== index))}><Icon name="close" size={13} /></button></span>)}</div>}{workspaceWarning && <p className="inline-error" role="status">{workspaceWarning}</p>}{attachmentError && <p className="inline-error" role="alert">{attachmentError}</p>}</div><div className="composer-footnote">消息与附件通过本机 Core 处理，附件总大小上限 128 KiB。</div></div>;
 }
 
 function ChatContextPanel({ task, memories, approvals, onOpenMemory }: { task: Task | null; memories: Memory[]; approvals: Approval[]; onOpenMemory(): void }) {
@@ -975,7 +979,7 @@ function WorkPage({ workspaces, onRefreshWorkspaces, reviewTaskId, onReviewTaskO
     if (!reviewTaskId) return;
     void taskClient.get(reviewTaskId).then(value => { setSelectedTask(value.task); onReviewTaskOpened(); }).catch(cause => setError(messageOf(cause)));
   }, [reviewTaskId, onReviewTaskOpened]);
-  useEffect(() => { void agentClient.list().then(value => setHandoffProviders(value.agents.map(agent => ({ id: agent.id, name: agent.name, eligible: agent.taskEligible, reason: agent.reason ?? agent.lastError })))).catch(() => setHandoffProviders([])); }, []);
+  useEffect(() => { void agentClient.list().then(value => setHandoffProviders(value.agents.map(agent => ({ id: agent.id, name: agent.name, eligible: agent.taskEligible === true, reason: agent.reason ?? agent.lastError })))).catch(() => setHandoffProviders([])); }, []);
   useEffect(() => {
     const off = bridge.subscribe('task.updated', () => { void refresh(true); });
     const timer = window.setInterval(() => { void refresh(true); }, 3000);
@@ -1159,6 +1163,87 @@ function TaskDetails({ task, providers, onHandoff, onAction, onStart, onReconcil
   return <div className="task-details">{task.status === "queued" && task.workspaceId && <section><h3>启动任务</h3><div className="row"><Select label="执行者" value={startProvider} onChange={event => setStartProvider(event.target.value)}><option value="">选择可用 Agent</option>{providers.filter(item => item.eligible).map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</Select><Button disabled={!startProvider} onClick={() => onStart(startProvider)}>启动</Button></div></section>}<div className="row between"><StatusBadge value={task.status} /><small>更新于 {dateLabel(task.updatedAt)}</small></div><p>{task.goal}</p>{task.currentPhase && <section><h3>当前阶段</h3><p>{task.currentPhase}</p></section>}{task.progress.note && <section><h3>进度说明</h3><p>{task.progress.note}</p></section>}{task.checkpoint && <section><h3>检查点</h3><p>{task.checkpoint.summary}</p>{task.checkpoint.nextAction && <small>下一步：{task.checkpoint.nextAction}</small>}</section>}{task.result && <section><h3>执行结果</h3><p>{task.result.summary}</p></section>}<section><h3>交付物</h3>{task.artifacts.length ? task.artifacts.map(item => <ArtifactCard key={item.id} taskId={task.id} artifact={item} />) : <p className="muted">暂无交付物。</p>}</section>{task.failure?.reason && <section><h3>中断或失败原因</h3><p>{task.failure.reason}</p></section>}<section><h3>执行证据</h3>{task.executionEvidence.length ? task.executionEvidence.slice(-20).reverse().map(item => <p key={item.eventId}><strong>{item.capability}</strong> · {item.status}{item.tool ? ` · ${item.tool}` : ""}{item.exitCode !== null ? ` · exit ${item.exitCode}` : ""}{item.filePath ? ` · ${item.filePath}` : ""} · Task rev {item.taskRev}</p>) : <p className="muted">暂无工具或测试执行记录。</p>}</section><section><h3>执行者与交接记录</h3>{task.agentHistory.length ? task.agentHistory.map((item, index) => <p key={`${item.sessionId}-${index}`}><strong>{item.provider}</strong> · {dateLabel(item.attachedAt)}{item.detachedAt ? ` → ${dateLabel(item.detachedAt)}` : " · 当前执行者"}{item.note ? ` · ${item.note}` : ""}</p>) : <p className="muted">暂无执行者记录。</p>}</section>{task.currentAgent && ["queued", "running", "waiting", "blocked", "paused"].includes(task.status) && <section><h3>转交执行者</h3><div className="row"><Select label="目标 Agent" value={handoffProvider} onChange={event => setHandoffProvider(event.target.value)}><option value="">选择 Agent</option>{providers.filter(item => item.eligible && item.id !== task.currentAgent?.provider).map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</Select><Button disabled={!handoffProvider} onClick={() => onHandoff(handoffProvider)}>交接任务</Button></div></section>}{/needs-reconciliation|interrupted after Core restart/i.test(task.progress.note) && <section><h3>人工核对后恢复</h3><p>先核对工作区和上次操作的实际结果，再给出新的执行指令；不会重放中断前的工具调用。</p><label>核对结果<textarea className="cm-textarea" value={reviewSummary} onChange={event => setReviewSummary(event.target.value)} rows={3} maxLength={1000} /></label><label>新的执行指令<textarea className="cm-textarea" value={nextInstruction} onChange={event => setNextInstruction(event.target.value)} rows={4} maxLength={32000} /></label><Button disabled={!reviewSummary.trim() || !nextInstruction.trim()} onClick={() => onReconcile(reviewSummary, nextInstruction)}>确认核对并执行新指令</Button></section>}<div className="row task-detail-actions">{['working', 'running'].includes(task.status) ? <Button onClick={() => onAction('pause')}>暂停任务</Button> : ['paused', 'waiting', 'blocked'].includes(task.status) && !/needs-reconciliation|Owner reviewed interrupted effect/i.test(task.progress.note) ? <Button onClick={() => onAction('resume')}>继续任务</Button> : null}{!['completed', 'cancelled', 'failed'].includes(task.status) && <Button variant="danger" onClick={() => onAction('cancel')}>取消任务</Button>}</div></div>;
 }
 
+export function mergeAgentHealth(previous: Agent, health: Agent): Agent {
+  return { ...previous, ...health };
+}
+
+export function AgentSetupDiagnostic({ agent }: { agent: Agent }) {
+  const reason = agent.reason || agent.preset?.reason;
+  const messages: Record<string, string> = {
+    'preset-not-configured': '尚未选择编程预设，请在下方配置。',
+    'preset-file-not-found': '找不到预设文件，请检查 DSH 目录和预设名称。',
+    'preset-file-unreadable': '无法读取预设文件，请检查本地文件权限。',
+    'preset-file-too-large': '预设文件过大，请缩小文件后重新检查。',
+    'path-outside-root': '预设路径超出 DSH 预设目录，请检查名称和目录。',
+    'preset-yaml-invalid': '预设 YAML 格式无效，请修正文件后重新检查。',
+    'preset-yaml-limits-exceeded': '预设 YAML 超出安全读取限制，请简化文件。',
+    'preset-schema-unverified': '无法验证此预设格式，请使用兼容的 DSH persona 预设。',
+    'persona-missing': '预设缺少 persona 内容，请补全预设。',
+    'persona-prefix-required': '预设 persona 格式不兼容，请检查 persona 前缀。',
+    'preset-not-loaded': '预设未被 DSH 原生加载，请在 DSH 中加载该预设后检查连接。',
+    'preset-load-unknown': '无法确认 DSH 原生加载状态，请检查 DSH 服务后重新检查连接。',
+    'authentication-required': 'DSH 需要本地登录，请在 DSH 中登录后检查连接。',
+    'authentication-material-missing': '缺少 DSH 本地认证信息，请先完成 DSH 登录。',
+    'not_connected': '无法连接 DSH，请检查服务地址和运行状态。',
+    'host-origin-rejected': 'DSH 拒绝了本机来源，请检查 DSH 的来源访问设置。',
+    'session-api-unavailable': 'DSH 会话接口不可用，请检查 DSH 版本与服务状态。',
+    'DSH_CONFIG_INVALID': 'DSH 连接配置无效，请检查并重新保存配置。'
+  };
+  return <div className="agent-diagnostic">{reason && <small>{messages[reason] ?? availabilityReasonLabel(reason)}</small>}{agent.preset && <small>编程预设 {agent.preset.id || '未选择'} · {agent.preset.loadState === 'loaded' ? '原生已加载' : agent.preset.loadState === 'not-loaded' ? '原生未加载' : '加载状态未知'} · {agent.preset.compatible === true ? '本地 persona 已验证' : agent.preset.compatible === false ? '本地 persona 不兼容' : '本地 persona 未验证'}</small>}{agent.diagnostic && <details><summary>诊断详情</summary><small>阶段：{agent.diagnostic.stage || '未知'} · 错误码：{agent.diagnostic.code || '无'} · {agent.diagnostic.retryable ? '允许重新检查连接' : '请先处理配置'}{agent.diagnostic.checkedAt ? ` · ${dateLabel(agent.diagnostic.checkedAt)}` : ''}</small></details>}</div>;
+}
+
+export function DshSetupForm({ configuration, draft, saving, onDraftChange, onSave }: {
+  configuration: DshConfiguration; draft: DshSelection; saving: boolean;
+  onDraftChange(value: DshSelection): void; onSave(): void;
+}) {
+  const field = (key: keyof DshSelection, label: string, placeholder: string) => <label>{label}<Input aria-label={label} value={draft[key] ?? ''} placeholder={placeholder} disabled={saving} onChange={event => onDraftChange({ ...draft, [key]: event.target.value || null })} /></label>;
+  return <form className="dsh-setup-form" onSubmit={event => { event.preventDefault(); if (!saving) onSave(); }}>
+    <h4>DSH 设置</h4><p>编程预设用于工作区任务；社交预设用于 QQ 社交，两者独立保存。</p>
+    <small>当前生效版本 {configuration.activeRevision} · 编程：{configuration.active.codingPreset || '未选择'} · 社交：{configuration.active.socialPreset || '未选择'}</small>
+    {configuration.restartRequired && <small role="status">待生效版本 {configuration.pendingRevision} · 编程：{configuration.pending?.codingPreset || '未选择'} · 社交：{configuration.pending?.socialPreset || '未选择'}。重启 Core 后生效；当前连接仍使用当前生效版本。</small>}
+    {configuration.loadError && <p role="alert">连接配置读取失败（{configuration.loadError}），请检查并重新保存。</p>}
+    {field('codingPreset', '编程预设', '例如 coder-standard')}{field('socialPreset', '社交预设', '例如 whale-chat-v2')}
+    {field('homeDir', 'DSH 数据目录', '本地绝对路径')}{field('baseUrl', 'DSH 服务地址', 'http://127.0.0.1:3080')}
+    <details><summary>配置来源</summary><small>来源：{configuration.source} · 目录来源：{configuration.homeSource}</small><small>配置文件：{configuration.configFile || '未知'}</small>{configuration.pendingConfigFile && <small>待生效配置文件：{configuration.pendingConfigFile}</small>}<small>数据根：{configuration.dataRoot || '未知'}</small></details>
+    <Button compact type="submit" disabled={saving}>{saving ? '保存中…' : '保存配置'}</Button>
+  </form>;
+}
+
+export function dshSetupErrorMessage(cause: unknown): string {
+  const code = cause && typeof cause === 'object' && 'code' in cause ? String(cause.code) : '';
+  const message = ({
+    DSH_AUTH_SCOPE_CHANGE_REQUIRES_REVIEW: '服务地址或目录变更涉及已有认证范围，请先核对 DSH 凭据归属，再单独处理连接范围。',
+    DSH_PRESET_INCOMPATIBLE: '预设校验未通过，请检查编程与社交预设的文件、格式和 persona 内容后保存。',
+    CONFIGURATION_UNSUPPORTED: '当前 Core 无法保存 DSH 配置，请检查本机数据目录。',
+    INVALID_PARAMS: '配置字段无效，请检查预设名称、绝对目录路径与服务地址。',
+    WRITE_FAILED: '无法写入连接配置，请检查数据目录的写入权限。'
+  } as Record<string, string>)[code];
+  return message ? `${message}${code ? `（${code}）` : ''}` : messageOf(cause);
+}
+
+function DshSetupPanel({ agent, onConfigured }: { agent: Agent; onConfigured(configuration: DshConfiguration): void }) {
+  const configuration = agent.configuration;
+  const [draft, setDraft] = useState<DshSelection>(() => configuration?.pending ?? configuration?.active ?? { codingPreset: null, socialPreset: null, homeDir: null, baseUrl: null });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  useEffect(() => { if (configuration) setDraft(configuration.pending ?? configuration.active); }, [configuration?.revision, configuration?.activeRevision]);
+  async function save() {
+    setSaving(true); setError('');
+    try { const result = await agentClient.configure(draft); onConfigured(result.configuration); }
+    catch (cause) { setError(dshSetupErrorMessage(cause)); }
+    finally { setSaving(false); }
+  }
+  return configuration ? <><DshSetupForm configuration={configuration} draft={draft} saving={saving} onDraftChange={setDraft} onSave={() => void save()} />{error && <ErrorNotice error={error} />}</> : <small>尚未取得连接配置，请检查连接。</small>;
+}
+
+export function managedWorkspacePreflight(provider: string, workspaceId: string, activeWorkspaceId: string | null): string {
+  return provider === 'cetamesh' && !workspaceId && !activeWorkspaceId ? 'CetaMesh 托管任务需要工作区，请先选择工作区后发送。' : '';
+}
+
+export function ManagedFailureActions({ taskId, onReviewTask, onNewChat }: { taskId: string; onReviewTask(id: string): void; onNewChat(): void }) {
+  return <div className="row"><Button compact variant="ghost" onClick={() => onReviewTask(taskId)}>查看任务</Button><Button compact variant="ghost" onClick={onNewChat}>新建普通聊天</Button></div>;
+}
+
 function AgentsPage() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -1175,6 +1260,7 @@ function AgentsPage() {
   }, []);
   useEffect(() => { void refresh(); }, [refresh]);
   const ready = agents.filter(agent => agent.eligible).length;
+  const taskReady = agents.filter(agent => agent.taskEligible === true).length;
   const needsSetup = agents.filter(agent => agent.status === 'needs-setup').length;
   const activeTasks = tasks.filter(task => ['working', 'running'].includes(task.status)).length;
   const visible = agents.filter(agent => (filter === 'all' || (filter === 'ready' ? agent.eligible : !agent.eligible)) && `${agent.name} ${agent.role} ${agent.description}`.toLowerCase().includes(query.toLowerCase()));
@@ -1182,28 +1268,16 @@ function AgentsPage() {
     setChecking(agent.id);
     try {
       const health = await agentClient.health(agent.id, true);
-      setAgents(current => current.map(item => {
-        if (item.id !== agent.id) return item;
-        const available = health.available === true;
-        const requiresTask = ['capability-broker', 'staged-capability-broker'].includes(item.workspaceBoundary ?? '');
-        const boundaryUnverified = item.workspaceBoundary === 'unverified';
-        return {
-          ...item, available, installed: health.installed, authenticated: health.authenticated,
-          eligible: available && !requiresTask && !boundaryUnverified,
-          status: boundaryUnverified && available ? 'descriptor-incomplete' : health.status,
-          reason: health.reason ?? (boundaryUnverified ? 'descriptor-incomplete' : requiresTask ? 'task-required' : null),
-          version: health.version ?? item.version, desktopApp: health.desktopApp ?? item.desktopApp
-        };
-      }));
+      setAgents(current => current.map(item => item.id === agent.id ? mergeAgentHealth(item, health) : item));
       setError('');
     }
     catch (cause) { setError(messageOf(cause)); }
     finally { setChecking(''); }
   }
   return <div className="content-page"><Heading eyebrow="AGENT DIRECTORY" title="Agents" description="查看可用 Agent、连接状态与职责。" action={<Button icon="update" onClick={() => void refresh()}>刷新状态</Button>} />{error && <ErrorNotice error={error} onRetry={() => void refresh()} />}
-    <div className="agent-summary-row"><Surface><strong>{agents.length}</strong><span>已配置 Agent</span></Surface><Surface><strong>{ready}</strong><span>当前可用</span></Surface><Surface><strong>{needsSetup}</strong><span>需要设置</span></Surface><Surface><strong>{activeTasks}</strong><span>活跃任务</span></Surface></div>
-    <div className="row between work-controls"><Tabs items={[{ id: 'all', label: `全部 Agent ${agents.length}` }, { id: 'ready', label: `可用 ${ready}` }, { id: 'setup', label: `需设置 ${needsSetup}` }]} selected={filter} onChange={setFilter} label="Agent 状态筛选" /><SearchInput label="搜索 Agent" placeholder="搜索名称或职责" value={query} onChange={event => setQuery(event.target.value)} /></div>
-    {loading && !agents.length ? <LoadingState label="正在读取 Agent 状态…" /> : visible.length ? <div className="agent-grid">{visible.map(agent => <Card className="agent-card" key={agent.id}><div className="row between"><div className="agent-avatar">{agentInitials(agent.id)}</div><StatusBadge value={agent.status} available={agent.eligible} /></div><h3>{agent.name}</h3><strong className="agent-role">{agent.role}</strong><p>{agent.description}</p>{agent.status === 'needs-setup' && <small>请先完成本地登录或凭据配置。</small>}{agent.reason === 'task-required' && <small>Agent 已就绪；此能力需要先分配工作区任务。</small>}{agent.reason && agent.reason !== 'task-required' && <small>{availabilityReasonLabel(agent.reason)}</small>}{agent.lastError && <small role="status">{agent.lastError}</small>}{agent.version && <small>版本 {agent.version}</small>}{agent.desktopApp && <div className="agent-desktop-state"><strong>DeepSeek Harness Desktop</strong><span>桌面应用：{agent.desktopApp.installed ? '已安装' : '未安装'} · {agent.desktopApp.running ? '运行中' : agent.desktopApp.status}</span><span>DSH Agent Provider：{agent.available ? '已连接' : agent.status}</span></div>}<Button compact variant="ghost" disabled={checking === agent.id} onClick={() => void check(agent)}>{checking === agent.id ? '检查中…' : '检查连接'} <Icon name="right" size={14} /></Button></Card>)}</div> : !error && <EmptyNotice icon="agents" title="没有匹配的 Agent" detail="当前安装和注册的 Agent 会在这里显示。" />}
+    <div className="agent-summary-row"><Surface><strong>{agents.length}</strong><span>已配置 Agent</span></Surface><Surface><strong>{ready}</strong><span>聊天可用</span></Surface><Surface><strong>{taskReady}</strong><span>任务可用</span></Surface><Surface><strong>{needsSetup}</strong><span>需要设置</span></Surface><Surface><strong>{activeTasks}</strong><span>活跃任务</span></Surface></div>
+    <div className="row between work-controls"><Tabs items={[{ id: 'all', label: `全部 Agent ${agents.length}` }, { id: 'ready', label: `聊天可用 ${ready}` }, { id: 'setup', label: `需设置 ${needsSetup}` }]} selected={filter} onChange={setFilter} label="Agent 状态筛选" /><SearchInput label="搜索 Agent" placeholder="搜索名称或职责" value={query} onChange={event => setQuery(event.target.value)} /></div>
+    {loading && !agents.length ? <LoadingState label="正在读取 Agent 状态…" /> : visible.length ? <div className="agent-grid">{visible.map(agent => <Card className="agent-card" key={agent.id}><div className="row between"><div className="agent-avatar">{agentInitials(agent.id)}</div><StatusBadge value={agent.status} available={agent.eligible} /></div><h3>{agent.name}</h3><strong className="agent-role">{agent.role}</strong><p>{agent.description}</p>{agent.id === 'dsh' && <AgentSetupDiagnostic agent={agent} />}{agent.reason === 'task-required' && <small>Agent 已就绪；此能力需要先分配工作区任务。</small>}{agent.id !== 'dsh' && agent.reason && agent.reason !== 'task-required' && <small>{availabilityReasonLabel(agent.reason)}</small>}{agent.lastError && <small role="status">{agent.lastError}</small>}{agent.version && <small>版本 {agent.version}</small>}{agent.desktopApp && <div className="agent-desktop-state"><strong>DeepSeek Harness Desktop</strong><span>桌面应用：{agent.desktopApp.installed ? '已安装' : '未安装'} · {agent.desktopApp.running ? '运行中' : agent.desktopApp.status}</span><span>DSH Agent Provider：{agent.available ? '已连接' : agent.status}</span></div>}<Button compact variant="ghost" disabled={checking === agent.id} onClick={() => void check(agent)}>{checking === agent.id ? '检查中…' : '检查连接'} <Icon name="right" size={14} /></Button>{agent.id === 'dsh' && <DshSetupPanel agent={agent} onConfigured={configuration => setAgents(current => current.map(item => item.id === agent.id ? { ...item, configuration } : item))} />}</Card>)}</div> : !error && <EmptyNotice icon="agents" title="没有匹配的 Agent" detail="当前安装和注册的 Agent 会在这里显示。" />}
     <div className="section-heading page-section-heading"><h2>运行策略</h2></div><Surface className="policy-row"><span className="policy-icon"><Icon name="approval" /></span><span className="grow"><strong>敏感操作需要确认</strong><small>文件写入、网络访问和外部副作用由 Capability Broker 逐次管理。</small></span><Badge tone="success">由 Core 强制执行</Badge></Surface>
   </div>;
 }
@@ -1847,3 +1921,4 @@ function OnboardingPage({ onComplete }: { onComplete(): Promise<void> }) {
     {activeStep?.id === 'done' && <Surface className="onboarding-done"><Icon name="check" size={22} /><strong>必需设置已完成</strong><p>你可以进入 CetaMesh 并开始新的会话。</p><Button variant="primary" disabled={busy} onClick={() => void completeSetup()}>{busy ? '正在完成…' : '完成并进入 Chat'}</Button></Surface>}
   </div></div>;
 }
+

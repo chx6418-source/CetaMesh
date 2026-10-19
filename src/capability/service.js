@@ -60,14 +60,29 @@ const WORKSPACE_TOOL_DESCRIPTORS = Object.freeze({
  * which bind the Owner identity; Agent/Extension grants never come from IPC. */
 export function createCapabilityService({ stateDir, workspaceService, memoryService,
   taskRuntime, agentBroker, bindAgentSession, resumeAgentApproval = null, searchImpl = null, audit = () => {}, now,
-  isolatedRunner = null } = {}) {
+  isolatedRunner = null, onTaskObservation = null } = {}) {
   const file = stateDir ? path.join(stateDir, 'capability', 'task-grants.json') : null;
   let grants = file ? readJsonFile(file, { missing: {} }) : {};
   const provisioning = new Map();
   const workspaceProvisioning = new Map();
   let taskHandoffGuard = () => false;
   const taskFollowConsumers = new Map();
+  // Native DSH Follow can end after every completed turn. Retain a bounded
+  // per-Task/Session terminal cursor so the next instruction never consumes the
+  // previous turn/end as if it belonged to its own new turn.
+  const taskFollowPositions = new Map();
   const TASK_FOLLOW_MAX_SESSIONS = 64;
+  function rememberTaskFollowPosition(key, taskId, sequence) {
+    if (!Number.isSafeInteger(sequence) || sequence < 1) return;
+    const previous = taskFollowPositions.get(key);
+    const highest = previous?.taskId === taskId ? Math.max(previous.sequence, sequence) : sequence;
+    taskFollowPositions.delete(key);
+    taskFollowPositions.set(key, { taskId, sequence: highest });
+    // These are in-process resumptions only; do not silently claim durability.
+    while (taskFollowPositions.size > TASK_FOLLOW_MAX_SESSIONS * 4) {
+      taskFollowPositions.delete(taskFollowPositions.keys().next().value);
+    }
+  }
   const workspaceImportStates = new Map();
   let approvalDecisionListener = null;
   const journalFile = stateDir ? path.join(stateDir, 'capability', 'requests.json') : null;
@@ -82,18 +97,44 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       if (signal.aborted) finish();
     });
   }
-  function ensureTaskFollow(provider, sessionId, taskId) {
+  function recordWorkingState(taskId) {
+    if (typeof onTaskObservation !== 'function') return;
+    try { onTaskObservation({ taskId }); }
+    catch (error) { audit({ capability: 'memory.working', status: 'projection-failed', code: error?.code ?? 'MEMORY_WRITE_FAILED' }); }
+  }
+  function blockLostTaskFollow(provider, sessionId, taskId, errorCode) {
+    const current = taskFor(taskId);
+    if (!current || current.status !== 'running'
+      || current.currentAgent?.provider !== provider || current.currentAgent?.sessionId !== sessionId) return;
+    try {
+      taskRuntime.block({ id: taskId, expectedRev: current.rev,
+        reason: 'needs-reconciliation: Agent Follow ended without verified completion (' +
+          String(errorCode ?? 'AGENT_FOLLOW_DISCONNECTED').slice(0, 90) + '); verify external execution and Workspace before resuming' });
+    } catch (error) {
+      audit({ capability: 'agent.run', status: 'follow-recovery-block-failed',
+        code: error?.code ?? 'TASK_CONFLICT' });
+    }
+  }
+  function ensureTaskFollow(provider, sessionId, taskId, options = {}) {
     const capabilities = agentBroker?.capabilities?.(provider);
     if (!['capability-broker', 'staged-capability-broker'].includes(capabilities?.workspaceBoundary)) return null;
     const key = taskFollowKey(provider, sessionId);
     const current = taskFollowConsumers.get(key);
-    if (current && !current.controller.signal.aborted) return current;
+    if (current && !current.controller.signal.aborted && current.finished !== true) {
+      if (options.expectTurn === true) current.expectedTurns += 1;
+      return current;
+    }
     if (current) taskFollowConsumers.delete(key);
     if (taskFollowConsumers.size >= TASK_FOLLOW_MAX_SESSIONS) {
       throw capabilityError('AGENT_FOLLOW_CAPACITY', 'Task Agent event consumers are at the configured capacity');
     }
     const controller = new AbortController();
-    const consumer = { provider, sessionId, taskId, controller, promise: null, sequence: 0 };
+    const savedPosition = taskFollowPositions.get(key);
+    const previousSequence = savedPosition?.taskId === taskId ? savedPosition.sequence : 0;
+    const requestedSequence = Number.isSafeInteger(options.sinceSequence) && options.sinceSequence >= 0 ? options.sinceSequence : 0;
+    const consumer = { provider, sessionId, taskId, controller, promise: null, finished: false,
+      expectedTurns: options.expectTurn === true ? 1 : 0,
+      sequence: Math.max(requestedSequence, previousSequence) };
     const answers = new Map();
     taskFollowConsumers.set(key, consumer);
     consumer.promise = (async () => {
@@ -109,15 +150,21 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
               consumer.sequence = event.seq;
             }
             const turnId = String(event?.data?.requestId ?? event?.data?.turn ?? '');
+            // Core phase metadata is authoritative; internal turns never project user work.
+            if (event?.data?.phase && event.data.phase !== 'user') continue;
+            if ((options.bootstrapRequestId && event?.data?.requestId === options.bootstrapRequestId)
+              || (options.bootstrapTurnId != null && event?.data?.turn === options.bootstrapTurnId)) continue;
             if (event?.type === 'tool/result') {
               const current = taskFor(taskId);
               if (current?.status === 'running' && current.currentAgent?.provider === provider
                 && current.currentAgent?.sessionId === sessionId) {
                 taskRuntime.recordToolOutcome({ id: taskId, provider, sessionId,
+                  runId: event.data?.runId, phase: event.data?.phase,
                   eventId: String(event.data?.eventId ?? `${turnId}:${event.seq}`),
                   capability: event.data?.capability, status: event.data?.status,
                   filePath: event.data?.filePath, tool: event.data?.tool,
                   exitCode: event.data?.exitCode });
+                recordWorkingState(taskId);
               }
             }
             if (event?.type === 'tool/activity') {
@@ -148,18 +195,36 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
               answers.delete(turnId);
               const current = taskFor(taskId);
               if (!current || current.currentAgent?.provider !== provider || current.currentAgent?.sessionId !== sessionId
-                || current.status !== 'running') continue;
+                || current.status !== 'running') {
+                rememberTaskFollowPosition(key, taskId, consumer.sequence);
+                continue;
+              }
               if (event.data?.reason?.kind === 'completed' && answer) {
-                taskRuntime.setCheckpoint({ id: taskId, expectedRev: current.rev, summary: answer, nextAction: '' });
-                const updated = taskFor(taskId);
-                taskRuntime.addWork({ id: taskId, expectedRev: updated.rev, kind: 'completed', text: answer.slice(0, 2000) });
+                // Retain the original answer with explicit evidence class. Never overwrite
+                // an established checkpoint or treat the answer as verified completed work.
+                taskRuntime.recordAgentReport({ id: taskId, expectedRev: current.rev,
+                  provider, sessionId, runId: event.data?.runId, phase: event.data?.phase,
+                  eventId: `agent-report:${turnId || event.seq}`,
+                  text: answer.slice(0, 1600) });
+                const latest = taskFor(taskId);
+                if (!latest.checkpoint?.summary) taskRuntime.setCheckpoint({ id: taskId, expectedRev: latest.rev,
+                  summary: '[Unverified Agent report]\n' + answer.slice(0, 7900),
+                  nextAction: latest.checkpoint?.nextAction ?? '' });
+                recordWorkingState(taskId);
               } else if (['failed', 'error'].includes(event.data?.reason?.kind)) {
                 taskRuntime.block({ id: taskId, expectedRev: current.rev,
                   reason: String(event.data?.reason?.error?.code ?? 'Agent turn failed').slice(0, 1000) });
               }
+              // DSH Follow may end once per turn while another request is queued.
+              // Keep its independent cursor until all scheduled turns are projected.
+              if (consumer.expectedTurns > 0) consumer.expectedTurns -= 1;
+              rememberTaskFollowPosition(key, taskId, consumer.sequence);
+              if (consumer.expectedTurns === 0) { consumer.finished = true; return; }
             }
           }
-          if (controller.signal.aborted || sawTurnEnd) return;
+          if (controller.signal.aborted) { consumer.finished = true; return; }
+          if (sawTurnEnd && consumer.expectedTurns > 0) continue;
+          if (sawTurnEnd) { consumer.finished = true; return; }
           throw capabilityError('AGENT_FOLLOW_DISCONNECTED', 'Task Agent event stream ended before turn completion');
         } catch (error) {
           if (controller.signal.aborted || ['SESSION_NOT_FOUND', 'AGENT_UNSUPPORTED'].includes(error?.code)) return;
@@ -167,6 +232,9 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
           audit({ capability: 'agent.run', status: 'follow-retrying', code: error?.code ?? 'AGENT_FOLLOW_FAILED' });
           if (failures >= 5) {
             audit({ capability: 'agent.run', status: 'follow-error', code: error?.code ?? 'AGENT_FOLLOW_FAILED' });
+            if (consumer.expectedTurns > 0) {
+              blockLostTaskFollow(provider, sessionId, taskId, error?.code ?? 'AGENT_FOLLOW_FAILED');
+            }
             return;
           }
           await waitForTaskFollowRetry(Math.min(250 * (2 ** (failures - 1)), 4000), controller.signal);
@@ -175,6 +243,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     })().catch(error => {
       audit({ capability: 'agent.run', status: 'follow-error', code: error?.code ?? 'AGENT_FOLLOW_FAILED' });
     }).finally(() => {
+      consumer.finished = true;
       if (taskFollowConsumers.get(key) === consumer) taskFollowConsumers.delete(key);
     });
     return consumer;
@@ -182,6 +251,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
   function stopTaskFollow(provider, sessionId) {
     const key = taskFollowKey(provider, sessionId);
     const consumer = taskFollowConsumers.get(key);
+    taskFollowPositions.delete(key);
     if (!consumer) return false;
     consumer.controller.abort();
     taskFollowConsumers.delete(key);
@@ -583,7 +653,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
             await agentBroker.status(task.currentAgent);
             if (r.signal?.aborted) throw capabilityError('INVOKE_CANCELLED', 'Agent assignment cancelled');
             if (taskHandoffGuard(task.id)) throw capabilityError('TASK_HANDOFF_IN_FLIGHT', 'Task Handoff owns this execution boundary');
-            ensureTaskFollow(task.currentAgent.provider, task.currentAgent.sessionId, task.id);
+            ensureTaskFollow(task.currentAgent.provider, task.currentAgent.sessionId, task.id, { expectTurn: true });
             const beforeSend = taskFor(task.id);
             if (beforeSend?.status !== 'running' || beforeSend.currentAgent?.sessionId !== task.currentAgent.sessionId) {
               throw capabilityError('TASK_NOT_RUNNING', 'Task changed before Agent instruction dispatch');
@@ -636,7 +706,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
             startedByRequest = true;
           }
           if (r.signal?.aborted) throw capabilityError('INVOKE_CANCELLED', 'Agent assignment cancelled');
-          ensureTaskFollow(provider, created.sessionId, task.id);
+          ensureTaskFollow(provider, created.sessionId, task.id, { expectTurn: true });
           const beforeSend = taskFor(task.id);
           if (beforeSend?.status !== 'running' || beforeSend.currentAgent?.sessionId !== created.sessionId) {
             throw capabilityError('TASK_NOT_RUNNING', 'Task changed before Agent instruction dispatch');
@@ -799,12 +869,12 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       if (typeof guard !== 'function') throw capabilityError('INVALID_PARAMS', 'Task Handoff guard must be a function');
       taskHandoffGuard = guard;
     },
-    trackTaskAgent({ taskId, provider, sessionId }) {
+    trackTaskAgent({ taskId, provider, sessionId, sinceSequence, bootstrapRequestId, bootstrapTurnId }) {
       const task = taskFor(taskId);
       if (!task || task.currentAgent?.provider !== provider || task.currentAgent?.sessionId !== sessionId) {
         throw capabilityError('TASK_NOT_AUTHORIZED', 'Task Agent follow requires the current assignment');
       }
-      return ensureTaskFollow(provider, sessionId, taskId) !== null;
+      return ensureTaskFollow(provider, sessionId, taskId, { sinceSequence, bootstrapRequestId, bootstrapTurnId }) !== null;
     },
     applyAgentWorkspaceChanges, workspaceImportStatus, cancelWorkspaceImportApproval,
     async close() {
@@ -812,6 +882,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       for (const consumer of consumers) consumer.controller.abort();
       await Promise.allSettled(consumers.map(consumer => consumer.promise));
       taskFollowConsumers.clear();
+      taskFollowPositions.clear();
     },
     setApprovalDecisionListener(listener) {
       if (listener !== null && typeof listener !== 'function') throw capabilityError('INVALID_PARAMS', 'Approval decision listener must be a function');
@@ -820,3 +891,4 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     }
   };
 }
+

@@ -202,9 +202,37 @@ function projectMemoryCandidate(value) {
     proposedAt: scalar(row.proposedAt), memoryId: string(row.memoryId, 128) || null };
 }
 
+function projectDshPreset(value) {
+  if (!value) return null;
+  const row = record(value);
+  return { purpose: string(row.purpose, 30), id: string(row.id, 100) || null,
+    compatible: typeof row.compatible === 'boolean' ? row.compatible : null,
+    loaded: typeof row.loaded === 'boolean' ? row.loaded : null,
+    loadState: string(row.loadState, 30) || 'unknown', reason: string(row.reason, 160) || null,
+    verification: string(row.verification, 80) || null };
+}
+function projectDshDiagnostic(value) {
+  if (!value) return null;
+  const row = record(value);
+  return { stage: string(row.stage, 80), code: string(row.code, 80) || null,
+    retryable: row.retryable === true, checkedAt: string(row.checkedAt, 80) || null };
+}
+function projectDshConfiguration(value) {
+  if (!value) return null;
+  const row = record(value);
+  const selection = value => { const item = record(value); return { codingPreset: string(item.codingPreset, 100) || null,
+    socialPreset: string(item.socialPreset, 100) || null, homeDir: string(item.homeDir, 4096) || null, baseUrl: string(item.baseUrl, 2048) || null }; };
+  // This DTO is reachable only through Owner UI IPC, never the service-token data plane.
+  return { version: row.version, revision: row.revision, activeRevision: row.activeRevision,
+    pendingRevision: row.pendingRevision ?? null, restartRequired: row.restartRequired === true,
+    source: string(row.source, 80), loadError: string(row.loadError, 80) || null,
+    configFile: string(row.configFile, 4096) || null, pendingConfigFile: string(row.pendingConfigFile, 4096) || null, dataRoot: string(row.dataRoot, 4096) || null,
+    homeSource: string(row.homeSource, 80), active: selection(row.active), pending: row.pending ? selection(row.pending) : null };
+}
+
 function projectAgent(value) {
   const row = record(value);
-  const health = record(row.health);
+  const health = { ...row, ...record(row.health) };
   const desktop = record(row.desktopApp);
   const reason = string(row.reason ?? health.reason, 160);
   const lastError = string(row.lastError ?? health.lastError ?? health.message, 500) || null;
@@ -213,12 +241,14 @@ function projectAgent(value) {
   const id = string(row.id ?? row.provider, 80);
   const installed = typeof health.installed === 'boolean' ? health.installed
     : typeof row.installed === 'boolean' ? row.installed
+      : id === 'dsh' ? null
       : /not[_-]installed|missing[_-]binary/i.test(readiness) ? false
         : row.available === true || /needs[_-]auth|credential|needs[_-]config/i.test(readiness) ? true : null;
   const authenticated = typeof health.authenticated === 'boolean' ? health.authenticated : null;
   const compatible = typeof health.compatible === 'boolean' ? health.compatible
     : typeof row.compatible === 'boolean' ? row.compatible : null;
-  const available = row.available === true && health.available !== false && installed !== false
+  const available = typeof health.available !== 'boolean' && typeof row.available !== 'boolean' ? null
+    : (row.available ?? health.available) === true && health.available !== false && installed !== false
     && authenticated !== false && compatible !== false;
   const workspaceBoundary = string(row.workspaceBoundary ?? health.workspaceBoundary, 80) || null;
   const requiresTask = ['capability-broker', 'staged-capability-broker'].includes(workspaceBoundary);
@@ -236,11 +266,17 @@ function projectAgent(value) {
     id, name: string(row.displayName ?? row.label ?? id, 120),
     role: id === 'codex' ? '代码与项目' : id === 'dsh' ? '通用研究与协作' : '开发辅助',
     description: id === 'codex' ? '理解项目、修改代码并检查结果。' : id === 'dsh' ? '处理资料、规划和跨工具工作流。' : '在可用时连接本地开发能力。',
-    available, installed, authenticated, compatible, eligible: available && !requiresTask && !boundaryUnverified,
-    taskEligible: available && installed !== false && authenticated !== false && requiresTask
+    available, installed, authenticated, compatible, eligible: available === null ? null : available && !requiresTask && !boundaryUnverified,
+    taskEligible: available === false ? false : available === null || (id === 'dsh' && typeof health.taskEligible !== 'boolean') ? null : available && installed !== false && authenticated !== false && requiresTask
       && health.sessionCapable !== false && (id !== 'codex' || health.sandboxCapable !== false)
       && (id !== 'dsh' || health.taskEligible === true),
-    configured: row.configured === true || health.configured === true,
+    configured: typeof health.configured === 'boolean' ? health.configured : null,
+    reachable: typeof health.reachable === 'boolean' ? health.reachable : null,
+    ready: typeof health.ready === 'boolean' ? health.ready : null,
+    sessionCapable: typeof health.sessionCapable === 'boolean' ? health.sessionCapable : null,
+    preset: projectDshPreset(health.preset),
+    diagnostic: projectDshDiagnostic(health.diagnostic),
+    configuration: projectDshConfiguration(row.configuration ?? health.configuration),
     reason: reason || (boundaryUnverified ? 'descriptor-incomplete' : available && requiresTask ? 'task-required' : null), lastError, workspaceBoundary, status, version: string(row.version, 80) || null,
     desktopApp: id === 'dsh' ? {
       installed: desktop.installed === true, running: desktop.running === true,
@@ -970,6 +1006,12 @@ export function createDesktopUiService({ services = {}, system = services.system
     },
     'ui.agent.list': async () => ({ agents: (await agent('agent.list', {})).providers.map(projectAgent) }),
     'ui.agent.health': async p => projectAgent(await agent('agent.health', { provider: string(p.provider, 80), refresh: p.refresh === true })),
+    'ui.agent.configure': async p => {
+      if (string(p.agentId ?? p.provider, 80) !== 'dsh') throw Object.assign(new Error('Unsupported connector'), { code: 'INVALID_PARAMS' });
+      if (!p.config || typeof p.config !== 'object' || Array.isArray(p.config)) throw uiError('INVALID_PARAMS', 'DSH configuration must be an object');
+      const result = await agent('agent.configure', { provider: 'dsh', settings: p.config });
+      return { provider: 'dsh', supported: result.supported === true, applied: false, restartRequired: result.restartRequired === true, configuration: projectDshConfiguration(result.configuration) };
+    },
     'ui.extensions.settings.describe': async p => {
       const result = record(await extensions('ext.settings.describe', { id: idParam(p) }));
       const fields = (Array.isArray(result.fields) ? result.fields : []).slice(0, 32).map(field => {
@@ -1311,3 +1353,4 @@ export function createDesktopUiService({ services = {}, system = services.system
     }
   });
 }
+

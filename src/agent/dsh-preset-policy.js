@@ -1,31 +1,61 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { parseDocument, isAlias, isCollection, isPair } from 'yaml';
 import { agentProviderError } from './agent-provider.js';
 
-// Read-only check against the installed DSH 0.1.5 persona requirement:
-// @deepseek-ai/dsh-persona config.prefix is required. No user file is repaired here.
+const MAX_PRESET_BYTES = 256 * 1024;
+export const validDshPresetId = id => typeof id === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$/.test(id);
+
+// This verifies only the supported local persona schema. Native loading, model,
+// tools and Workspace authorization remain independent execution gates.
 export function inspectDshPreset({ id, dshHome } = {}) {
-  if (!id || !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$/.test(id)) {
-    return { compatible: false, reason: 'preset-not-configured' };
-  }
-  const root = dshHome || process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
-  const file = path.join(root, '.agent-presets', id, 'agent.cordis.yml');
+  if (!validDshPresetId(id)) return { compatible: false, reason: 'preset-not-configured' };
+  const root = path.resolve(dshHome || process.env.DSH_HOME || path.join(os.homedir(), '.dsh'));
+  const presetRoot = path.join(root, '.agent-presets');
+  const file = path.join(presetRoot, id, 'agent.cordis.yml');
   let source;
-  try { source = fs.readFileSync(file, 'utf8'); }
-  catch (error) {
-    return { compatible: false, reason: error?.code === 'ENOENT' ? 'preset-file-not-found' : 'preset-file-unreadable', file };
+  let fd;
+  try {
+    const canonicalHome = fs.realpathSync(root);
+    const canonicalRoot = fs.realpathSync(presetRoot);
+    if (!canonicalRoot.startsWith(canonicalHome + path.sep)) return { compatible: false, reason: 'preset-path-outside-root' };
+    const canonical = fs.realpathSync(file);
+    if (!canonical.startsWith(canonicalRoot + path.sep)) return { compatible: false, reason: 'preset-path-outside-root' };
+    fd = fs.openSync(canonical, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.size > MAX_PRESET_BYTES) return { compatible: false, reason: 'preset-file-too-large' };
+    const bytes = Buffer.alloc(MAX_PRESET_BYTES + 1);
+    const size = fs.readSync(fd, bytes, 0, bytes.length, 0);
+    if (size > MAX_PRESET_BYTES) return { compatible: false, reason: 'preset-file-too-large' };
+    source = bytes.subarray(0, size).toString('utf8').replace(/^\uFEFF/, '');
+  } catch (error) {
+    return { compatible: false, reason: error?.code === 'ENOENT' ? 'preset-file-not-found' : 'preset-file-unreadable' };
+  } finally { if (fd !== undefined) fs.closeSync(fd); }
+  try {
+    const doc = parseDocument(source, { schema: 'core', uniqueKeys: true, strict: true });
+    if (doc.errors.length) return { compatible: false, reason: 'preset-yaml-invalid' };
+    let nodes = 0;
+    const inspect = (node, depth = 0) => {
+      if (!node) return;
+      if (++nodes > 10000 || depth > 32 || isAlias(node)) throw new Error('bounded-schema');
+      if (isPair(node)) { inspect(node.key, depth + 1); inspect(node.value, depth + 1); }
+      else if (isCollection(node)) for (const item of node.items) inspect(item, depth + 1);
+    };
+    inspect(doc.contents);
+    const plugins = doc.toJS({ maxAliasCount: 0 });
+    if (!Array.isArray(plugins) || plugins.some(p => !p || typeof p !== 'object' || Array.isArray(p))) {
+      return { compatible: false, reason: 'preset-schema-unverified' };
+    }
+    const persona = plugins.filter(p => p.id === 'persona');
+    if (!persona.length) return { compatible: false, reason: 'persona-missing' };
+    if (persona.length !== 1 || persona[0].name !== '@deepseek-ai/dsh-persona') return { compatible: false, reason: 'preset-schema-unverified' };
+    const prefix = persona[0].config?.prefix;
+    const compatible = typeof prefix === 'string' && prefix.trim().length > 0;
+    return { compatible, reason: compatible ? null : 'persona-prefix-required', verification: 'local-persona-only' };
+  } catch (error) {
+    return { compatible: false, reason: 'preset-yaml-limits-exceeded' };
   }
-  // Validate the persona stanza only. Full DSH validation remains with the native
-  // session/create endpoint, which can reject additional package-specific fields.
-  const lines = source.split(/\r?\n/);
-  const personaAt = lines.findIndex(line => /^\s*-\s*id:\s*persona\s*(?:#.*)?$/.test(line));
-  if (personaAt < 0) return { compatible: false, reason: 'persona-missing', file };
-  const next = lines.findIndex((line, index) => index > personaAt && /^\s*-\s*id:/.test(line));
-  const section = lines.slice(personaAt, next < 0 ? undefined : next).join('\n');
-  const prefix = section.match(/^ {4,}prefix:[ \t]*(.*)$/m)?.[1]?.trim();
-  const compatible = Boolean(prefix && prefix !== "''" && prefix !== '""' && prefix !== 'null' && prefix !== '~');
-  return { compatible, reason: compatible ? null : 'persona-prefix-required', file };
 }
 
 export function createDshPresetPolicy(config = {}) {
@@ -34,17 +64,13 @@ export function createDshPresetPolicy(config = {}) {
   const dshHome = config.dshHome ?? null;
   return {
     inspect(purpose = 'coding') {
-      if (purpose !== 'coding' && purpose !== 'social') {
-        throw agentProviderError('INVALID_PARAMS', `Unsupported DSH Session purpose: ${purpose}`);
-      }
+      if (purpose !== 'coding' && purpose !== 'social') throw agentProviderError('INVALID_PARAMS', `Unsupported DSH Session purpose: ${purpose}`);
       const id = purpose === 'coding' ? coding : social;
       return { purpose, id, ...inspectDshPreset({ id, dshHome }) };
     },
     require(purpose = 'coding') {
       const result = this.inspect(purpose);
-      if (!result.compatible) {
-        throw agentProviderError('DSH_PRESET_INCOMPATIBLE', `DSH ${purpose} preset is not verified: ${result.reason}`);
-      }
+      if (!result.compatible) throw agentProviderError('DSH_PRESET_INCOMPATIBLE', `DSH ${purpose} preset is not verified: ${result.reason}`);
       return result.id;
     }
   };

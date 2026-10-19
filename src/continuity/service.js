@@ -14,14 +14,14 @@ export { createContextMonitor } from './monitor.js';
 export { createWorkspaceReconciler } from './reconcile.js';
 
 export function createContinuityService({
-  taskRuntime, stateDir, agentBroker, reconciler, workspaceService, capabilityService, policy, now, canRollover, listPendingApprovals, onHandoffComplete, log
+  taskRuntime, stateDir, agentBroker, reconciler, workspaceService, capabilityService, policy, now, canRollover, listPendingApprovals, onHandoffComplete, prepareHandoff, readWorkingMemory, log
 } = {}) {
   if (!taskRuntime) throw continuityError('INVALID_PARAMS', 'createContinuityService 需要 taskRuntime');
   if (!stateDir || typeof stateDir !== 'string') throw continuityError('INVALID_PARAMS', 'createContinuityService 需要 stateDir');
   if (!agentBroker) throw continuityError('INVALID_PARAMS', 'createContinuityService 需要 Agent Broker');
 
   const runtime = createContinuityRuntime({
-    taskRuntime, agentBroker, stateDir, policy, now, canRollover, reconciler, listPendingApprovals, onHandoffComplete, log
+    taskRuntime, agentBroker, stateDir, policy, now, canRollover, reconciler, listPendingApprovals, onHandoffComplete, prepareHandoff, readWorkingMemory, log
   });
 
   const handlers = {

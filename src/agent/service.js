@@ -42,6 +42,7 @@ function summarizeProvider(provider, health = null) {
   const available = healthAvailable ?? registryAvailable;
   const reason = health && Object.hasOwn(health, 'reason') ? health.reason : capabilities.reason ?? null;
   return {
+    ...(health ?? {}),
     id: provider.id,
     displayName: capabilities.displayName ?? (provider.id === 'dsh' ? 'DSH' : provider.label),
     label: provider.label,
@@ -51,7 +52,7 @@ function summarizeProvider(provider, health = null) {
       : typeof capabilities.installed === 'boolean' ? capabilities.installed : null,
     authenticated: typeof health?.authenticated === 'boolean' ? health.authenticated : null,
     compatible: typeof health?.compatible === 'boolean' ? health.compatible : null,
-    taskEligible: health?.taskEligible === true,
+    taskEligible: typeof health?.taskEligible === 'boolean' ? health.taskEligible : null,
     version: health?.version ?? capabilities.version ?? null,
     reason,
     workspaceBoundary: capabilities.workspaceBoundary ?? 'unsupported',
@@ -69,7 +70,7 @@ function summarizeProvider(provider, health = null) {
  * The returned .broker supports process-local turn-end wiring for Chat and Continuity.
  */
 export function createDefaultAgentService({ api, defaults, log, dshOptions = {}, dshPresetConfig = null, codexOptions = {}, codexExecutable,
-  zcodeOptions = {}, zcodeExecutable, desktopStatus = null } = {}) {
+  zcodeOptions = {}, zcodeExecutable, desktopStatus = null, dshConfiguration = null } = {}) {
   const dshProvider = api ? createDshAgentProvider({ api, defaults, log,
     presetPolicy: dshPresetConfig ? createDshPresetPolicy(dshPresetConfig) : null }) : createUnavailableDshProvider();
   const taskBoundDsh = api && typeof dshOptions.resolveTaskWorkspace === 'function' && typeof dshOptions.applyChanges === 'function'
@@ -83,44 +84,48 @@ export function createDefaultAgentService({ api, defaults, log, dshOptions = {},
     ]
   });
   const broker = createAgentBroker({ registry, log });
-  const service = createAgentService({ broker, log, desktopStatus });
+  const service = createAgentService({ broker, log, desktopStatus, dshConfiguration });
   return Object.assign(service, { broker, registry });
 }
 
-export function createAgentService({ broker, log = () => {}, desktopStatus = null } = {}) {
+export function createAgentService({ broker, log = () => {}, desktopStatus = null, dshConfiguration = null } = {}) {
   if (!broker || typeof broker.require !== 'function' || typeof broker.registry !== 'object') {
     throw agentProviderError('INVALID_PARAMS', 'createAgentService 需要 Agent Broker');
   }
   const registry = broker.registry;
 
+  const decorate = async (provider, health, params = {}) => {
+    const summary = summarizeProvider(provider, health);
+    if (provider.id === 'dsh' && dshConfiguration) summary.configuration = dshConfiguration.describe();
+    if (provider.id === 'dsh' && typeof desktopStatus === 'function') {
+      try {
+        const desktop = await desktopStatus({ refresh: params?.refresh === true });
+        if (desktop) summary.desktopApp = {
+          status: desktop.status ?? 'unknown',
+          installed: desktop.installed === true,
+          running: desktop.running === true,
+          version: desktop.version ?? null,
+          lastCheckedAt: desktop.lastCheckedAt ?? null
+        };
+        if (desktop?.cli) summary.cli = { available: desktop.cli.available === true, version: desktop.cli.version ?? null };
+      } catch (error) {
+        // Optional Desktop detection must never make the Agent directory unavailable.
+        summary.desktopApp = { status: 'unknown', installed: false, running: false, version: null, reason: error?.code ?? 'detection_failed' };
+      }
+    }
+    return summary;
+  };
   const handlers = {
     'agent.list': async (params = {}) => ({
       providers: await Promise.all(registry.list().map(async (provider) => {
         let health = null;
         try { health = await broker.health(provider.id, { refresh: params?.refresh === true }); }
         catch (error) { health = { provider: provider.id, available: false, reason: error?.code ?? 'health_failed' }; }
-        const summary = summarizeProvider(provider, health);
-        if (provider.id === 'dsh' && typeof desktopStatus === 'function') {
-          try {
-            const desktop = await desktopStatus({ refresh: params?.refresh === true });
-            if (desktop) summary.desktopApp = {
-              status: desktop.status ?? 'unknown',
-              installed: desktop.installed === true,
-              running: desktop.running === true,
-              version: desktop.version ?? null,
-              lastCheckedAt: desktop.lastCheckedAt ?? null
-            };
-            if (desktop?.cli) summary.cli = { available: desktop.cli.available === true, version: desktop.cli.version ?? null };
-          } catch (error) {
-            // Optional Desktop detection must never make the Agent directory unavailable.
-            summary.desktopApp = { status: 'unknown', installed: false, running: false, version: null, reason: error?.code ?? 'detection_failed' };
-          }
-        }
-        return summary;
+        return decorate(provider, health, params);
       }))
     }),
     'agent.capabilities': (params) => ({ capabilities: broker.capabilities(params?.provider) }),
-    'agent.health': (params) => broker.health(params?.provider, { refresh: params?.refresh === true }),
+    'agent.health': async (params) => decorate(broker.require(params?.provider), await broker.health(params?.provider, { refresh: params?.refresh === true }), params),
     'agent.createSession': (params) => {
       const boundary = broker.capabilities(params?.provider)?.workspaceBoundary;
       if (boundary === 'capability-broker' || boundary === 'staged-capability-broker') {
@@ -161,6 +166,7 @@ export function createAgentService({ broker, log = () => {}, desktopStatus = nul
     'agent.nativeHandoff': (params) => broker.nativeHandoff({ provider: params?.provider, ...(params ?? {}) }),
     'agent.configure': (params) => {
       const provider = broker.require(params?.provider);
+      if (provider.id === 'dsh' && dshConfiguration) return dshConfiguration.configure(params?.settings ?? {});
       if (typeof provider.configure !== 'function') {
         return { provider: provider.id, supported: false, reason: 'CONFIGURATION_UNSUPPORTED' };
       }

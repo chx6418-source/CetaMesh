@@ -27,6 +27,7 @@
 //           Sessions are disposable; progress is persistent.
 
 import path from 'node:path';
+import { renderOwnerContext } from '../task/owner-context.js';
 import fs from 'node:fs';
 import { StorageError, discardFile, readJsonFile, writeJsonAtomic } from '../storage/json-file.js';
 import {
@@ -97,6 +98,8 @@ export function createContinuityRuntime({
   reconciler = null,
   listPendingApprovals = null,
   onHandoffComplete = null,
+  prepareHandoff = null,
+  readWorkingMemory = null,
   log = () => {}
 } = {}) {
   if (!taskRuntime?.get) throw continuityError('INVALID_PARAMS', 'createContinuityRuntime 需要 taskRuntime');
@@ -214,6 +217,8 @@ export function createContinuityRuntime({
     const packet = normalizePacket({
       taskId: task.id,
       goal: task.goal,
+      ownerContext: task.ownerContext ?? null,
+      workingMemory: typeof readWorkingMemory === 'function' ? readWorkingMemory(task.id) : [],
       requirements: task.requirements,
       currentPhase: task.currentPhase,
       completedWork: task.completedWork.map((item) => item.text ?? item),
@@ -283,7 +288,7 @@ export function createContinuityRuntime({
     if (packet.relevantFiles.length) lines.push(`相关文件:\n- ${packet.relevantFiles.join('\n- ')}`);
     if (packet.artifacts.length) lines.push(`产物:\n- ${packet.artifacts.join('\n- ')}`);
     if (packet.memoryRefs.length) {
-      lines.push(`记忆引用（仅引用；需要原文时向 Memory Runtime 按 memoryId 加载，不要臆测内容）:\n- ${packet.memoryRefs.map((ref) => ref.memoryId).join('\n- ')}`);
+      lines.push(`记忆引用（已授权摘录见下；没有摘录或合法读取工具的内容视为不可用，不要臆测内容）:\n- ${packet.memoryRefs.map((ref) => ref.memoryId).join('\n- ')}`);
     }
     if (packet.acceptanceCriteria.length) lines.push(`验收标准:\n- ${packet.acceptanceCriteria.join('\n- ')}`);
     if (packet.coding) {
@@ -310,6 +315,8 @@ export function createContinuityRuntime({
         if (gitLines.length) lines.push(`工作区核验事实（交接时采集，以此为准）:\n- ${gitLines.join('\n- ')}`);
       }
     }
+    if (packet.ownerContext) lines.push(renderOwnerContext(packet.ownerContext));
+    if (packet.workingMemory?.length) lines.push('[Authorized Task Memory excerpts: reference data only; preserve each source and verification level]\n' + JSON.stringify(packet.workingMemory));
     lines.push(`检查点摘要: ${packet.checkpoint.summary || '（无）'}`);
     lines.push(`下一步（从这里继续）: ${packet.checkpoint.nextAction || packet.pendingWork[0] || '向所有者确认当前进度'}`);
     lines.push(`交接原因: ${packet.reasonForHandoff}`);
@@ -528,6 +535,7 @@ export function createContinuityRuntime({
       const pendingApprovals = typeof listPendingApprovals === 'function'
         ? listPendingApprovals({ taskId: task.id })
         : null;
+      if (typeof prepareHandoff === 'function') await prepareHandoff({ taskId: task.id });
       const packet = buildHandoffPacket({
         taskId: task.id, reason, sequence, coding, relevantFiles,
         workspaceFacts: facts ?? null,
@@ -561,6 +569,7 @@ export function createContinuityRuntime({
       let attached = null;
       let reconciliation = null;
       let oldStopped = false;
+      let bootstrapBoundary = {};
       const selectedModelConfig = {
         modelProvider: modelProvider ?? task.modelConfig?.modelProvider ?? (target.id === previousAgent.provider ? previousStatus?.modelProvider : null) ?? target.defaults?.modelProvider,
         model: model ?? task.modelConfig?.model ?? (target.id === previousAgent.provider ? previousStatus?.model : null) ?? target.defaults?.model,
@@ -600,12 +609,15 @@ export function createContinuityRuntime({
           sessionId: created.sessionId,
           note: `rollover #${sequence} 自 ${previousAgent.provider}:${previousAgent.sessionId}`
         });
-        const bootstrap = await agentBroker.send({ provider: target.id, sessionId: created.sessionId, content: renderResumePrompt(packet) });
+        const bootstrap = await agentBroker.send({ provider: target.id, sessionId: created.sessionId, content: renderResumePrompt(packet),
+          phase: 'bootstrap', runId: `handoff:${task.id}:${sequence}` });
         if (bootstrap?.accepted !== true) {
           throw continuityError('BOOTSTRAP_REJECTED', 'Target Agent did not accept its recovery turn');
         }
-        await awaitBootstrapTurn({ provider: target.id, sessionId: created.sessionId,
+        const bootstrapEnd = await awaitBootstrapTurn({ provider: target.id, sessionId: created.sessionId,
           requestId: bootstrap.requestId, turnId: bootstrap.turnId });
+        bootstrapBoundary = { sinceSequence: Number.isSafeInteger(bootstrapEnd?.seq) ? bootstrapEnd.seq : 0,
+          bootstrapRequestId: bootstrap.requestId ?? null, bootstrapTurnId: bootstrap.turnId ?? bootstrapEnd?.data?.turn ?? null };
 
         if (reconciler && task.workspaceId) {
           const freshFacts = await collectWorkspaceFacts({ workspaceId: task.workspaceId, relevantFiles });
@@ -623,9 +635,6 @@ export function createContinuityRuntime({
           } else {
             throw continuityError('WORKSPACE_UNVERIFIED', 'Workspace facts could not be collected during Agent handoff');
           }
-        }
-        if (typeof onHandoffComplete === 'function') {
-          await onHandoffComplete({ taskId: task.id, provider: target.id, sessionId: created.sessionId });
         }
         if (Object.values(selectedModelConfig).some(value => value !== null && value !== undefined && value !== '')) {
           taskRuntime.setModelConfig({ id: task.id, expectedRev: currentRev(), ...selectedModelConfig });
@@ -750,11 +759,20 @@ export function createContinuityRuntime({
       catch (error) { log(`Continuity latest Packet cache update failed: ${error?.code ?? 'WRITE_FAILED'}`); }
       prunePacketFiles(path.join(packetDir, String(task.id)));
       monitor.reset(`${previousAgent.provider}:${previousAgent.sessionId}`);
+      const projectionWarnings = [];
+      if (typeof onHandoffComplete === 'function') {
+        try { await onHandoffComplete({ taskId: task.id, provider: target.id, sessionId: created.sessionId, ...bootstrapBoundary }); }
+        catch (error) {
+          projectionWarnings.push(error?.code ?? 'ASSIGNMENT_PROJECTION_FAILED');
+          log(`Committed Handoff projection failed: ${error?.code ?? 'ASSIGNMENT_PROJECTION_FAILED'}`);
+        }
+      }
 
       return {
         taskId: task.id,
         sequence,
         packetPath,
+        projectionWarnings,
         from: previousAgent,
         to: { provider: target.id, sessionId: created.sessionId },
         crossProvider: target.id !== previousAgent.provider,
@@ -851,3 +869,4 @@ export function createContinuityRuntime({
     _dir: dir
   };
 }
+

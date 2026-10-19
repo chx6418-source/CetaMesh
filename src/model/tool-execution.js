@@ -292,9 +292,10 @@ export function createToolExecutionCoordinator({
       const resumingToolBatch = Array.isArray(state.pendingCalls);
       const request = {
         providerId, model, reasoning, messages: state.messages, signal,
-        tools: cycle < maxCycles && totalCalls < maxCalls ? state.manifest.map((item) => ({ id: item.id, description: item.description, inputSchema: item.inputSchema })) : [],
+        tools: state.manifest.map((item) => ({ id: item.id, description: item.description, inputSchema: item.inputSchema })),
         toolChoice: cycle < maxCycles && totalCalls < maxCalls ? 'auto' : 'none'
       };
+      if (!resumingToolBatch && (cycle >= maxCycles || totalCalls >= maxCalls)) limitReached = true;
       let response;
       if (resumingToolBatch) {
         response = { text: '', toolCalls: state.pendingCalls, usage, resolvedModel };
@@ -304,6 +305,7 @@ export function createToolExecutionCoordinator({
         let streamUsage = null;
         let streamResolvedModel = null;
         let streamReason = null;
+        let modelContinuation = null;
         for await (const event of modelRuntime.stream(request)) {
           if (event?.type === 'assistant/chunk') {
             const delta = event.data?.chunk?.type === 'text-delta' ? event.data.chunk.text : '';
@@ -318,6 +320,7 @@ export function createToolExecutionCoordinator({
             if (typeof content === 'string') streamedText = content;
             else if (Array.isArray(content)) streamedText = content.map(item => String(item?.text ?? '')).join('');
           } else if (event?.type === 'turn/end') {
+            modelContinuation = event.data?.modelContinuation ?? null;
             streamUsage = event.data?.reason?.usage ?? event.data?.usage ?? streamUsage;
             streamReason = event.data?.reason?.kind ?? streamReason;
             streamResolvedModel = typeof event.data?.resolvedModel === 'string'
@@ -335,6 +338,7 @@ export function createToolExecutionCoordinator({
         }
         response = {
           text: streamedText,
+          ...(modelContinuation ? { modelContinuation } : {}),
           toolCalls: streamedToolCalls,
           usage: streamUsage,
           resolvedModel: streamResolvedModel
@@ -347,13 +351,14 @@ export function createToolExecutionCoordinator({
       if (typeof response?.resolvedModel === 'string' && response.resolvedModel.trim()) resolvedModel = response.resolvedModel.trim();
       else if (typeof response?.model === 'string' && response.model.trim()) resolvedModel = response.model.trim();
       const calls = Array.isArray(response?.toolCalls) ? response.toolCalls : [];
-      if (!calls.length) return { status: limitReached ? 'partial' : 'completed', ...(limitReached ? { code: 'TOOL_CALL_LIMIT' } : {}), toolCalling: 'supported', text, usage, resolvedModel, totalCalls, messages: state.messages };
+      if (!calls.length) return { status: limitReached ? 'partial' : 'completed', ...(limitReached ? { code: 'TOOL_CALL_LIMIT' } : {}), toolCalling: 'supported', text, usage, resolvedModel, totalCalls, messages: state.messages, ...(response?.modelContinuation ? { modelContinuation: response.modelContinuation } : {}) };
       const known = new Set(state.manifest.map((item) => item.id));
 
       const firstCallIndex = resumingToolBatch ? Math.max(0, Number(state.pendingCallIndex) || 0) : 0;
       if (!resumingToolBatch) {
         state.messages.push({
           role: 'assistant',
+          ...(response?.modelContinuation ? { modelContinuation: structuredClone(response.modelContinuation) } : {}),
           content: typeof response.text === 'string' && response.text ? response.text : null,
           tool_calls: calls.map((call, index) => ({
             id: String(call?.id || `call-${cycle}-${index}`).slice(0, 200),
@@ -633,3 +638,4 @@ export function createToolExecutionCoordinator({
   return { run, resumeApproval, pendingTarget, cancelSession, recoveryForSession, recoveryForTask,
     acknowledgeTaskRecovery };
 }
+

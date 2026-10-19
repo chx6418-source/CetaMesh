@@ -1,7 +1,7 @@
 import { OWNER_ACTOR, capabilityError } from '../capability/types.js';
 
 /** Smart decisions are consumed here; authority is always the trusted Desktop Owner. */
-export function createDesktopPlatformRuntime({ capabilityService, workspaceService, taskRuntime, agentBroker, continuityRuntime, modelRuntime, legacyModel }) {
+export function createDesktopPlatformRuntime({ capabilityService, workspaceService, taskRuntime, agentBroker, continuityRuntime, modelRuntime, legacyModel, prepareTaskContext = null }) {
   async function selectProvider(record, task) {
     const selected = record.config.agentProvider;
     const explicit = selected && selected !== 'none' ? selected : null;
@@ -90,6 +90,11 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
         }
         throw Object.assign(new Error('Chat operation cancelled'), { code: 'ABORTED' });
       }
+      const inheritedContext = typeof prepareTaskContext === 'function'
+        ? await prepareTaskContext({ record, taskId: task.id,
+          requireComplete: !task.currentAgent || task.currentAgent.provider !== provider }) : null;
+      const dispatchText = !task.currentAgent && inheritedContext
+        ? inheritedContext + '\n[Current request]\n' + text : text;
       if (task.currentAgent && task.currentAgent.provider !== provider) {
         if (typeof continuityRuntime?.rollover !== 'function') {
           throw capabilityError('AGENT_PROVIDER_SWITCH_REQUIRES_CONTINUITY', 'Changing Agent Provider on an existing Task requires Continuity Fresh Session');
@@ -129,7 +134,7 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
       let result;
       try {
         result = await capabilityService.broker.execute({ requestId, actor: OWNER_ACTOR, taskId: task.id, workspaceId,
-          capability: 'agent.run', input: { provider, content: text, modelProvider: record.config.modelProvider,
+          capability: 'agent.run', input: { provider, content: dispatchText, modelProvider: record.config.modelProvider,
             model: record.config.model !== legacyModel ? record.config.model : undefined, reasoningEffort: record.config.reasoning,
             grants: { capabilities: ['filesystem.read', 'filesystem.write', 'filesystem.search', 'git.status', 'git.diff', 'memory.read', 'test.run'] } },
           reason: 'Smart project task' }, { signal });
@@ -163,3 +168,4 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
   }
   return { route };
 }
+
