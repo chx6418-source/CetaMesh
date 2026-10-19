@@ -26,7 +26,9 @@ async function fixture(run) {
     const result = spawnSync('git', args, {encoding:'utf8'});
     assert.equal(result.status, 0, 'isolated Git fixture: ' + result.stderr);
   }
-  const services = createCetaMeshServices({stateDir:path.join(root,'state'), dataRoot:path.join(root,'data')});
+  const diagnosticEvents = [];
+  const services = createCetaMeshServices({stateDir:path.join(root,'state'), dataRoot:path.join(root,'data'),
+    log: entry => diagnosticEvents.push(String(entry))});
   const requests = [], remoteRequests = [], remote = new Map();
   let readOnce = false, readEmitted = false, holdCreate = null;
   services.modelRegistry.register({id:'fix-fixture',label:'Synthetic model',defaultModel:'fixture-model',supportsTools:true,
@@ -74,7 +76,7 @@ async function fixture(run) {
   const send=async text=>{await chat.execute({method:'chat.send',params:{id:session.id,text}});const result=await waitFor(status,s=>!s.turn,'Chat terminal');assert.notEqual(result.lastState,'error',result.lastError);return result;};
   const config=agentProvider=>chat.execute({method:'chat.config.set',params:{id:session.id,config:{agentProvider}}});
   const getTask=async()=>services.taskService.runtime.get({id:(await status()).taskId}).task;
-  try {await run({services,chat,session,ws,root,requests,remoteRequests,send,config,getTask,status,
+  try {await run({services,chat,session,ws,root,requests,remoteRequests,diagnosticEvents,send,config,getTask,status,
     enableRead:()=>{readOnce=true;readEmitted=false;},hold:promise=>{holdCreate=promise;}});}
   finally {chat.close();for(const s of remote.values()){s.closed=true;for(const w of [...s.waiters])w();}await services.close?.();fs.rmSync(root,{recursive:true,force:true});}
 }
@@ -121,6 +123,8 @@ await check('standalone provider first turn records a checkpoint without stale r
   const checkpoint=await waitFor(()=>f.services.taskService.runtime.get({id:task.id}).task.checkpoint,
     row=>row?.summary?.includes('Bootstrap or user acknowledgement'),'standalone initial checkpoint');
   assert.ok(checkpoint.summary.startsWith('[Unverified Agent report]'));
+  assert.ok(!f.diagnosticEvents.some(event=>event.includes('Capability agent.run follow-retrying')),
+    'a successful initial Agent completion must not cause a hidden Task revision retry');
 }));
 await check('automatic policy may switch the actual assigned Agent',()=>fixture(async f=>{
   await f.chat.execute({method:'chat.config.set',params:{id:f.session.id,config:{mode:'smart'}}});
