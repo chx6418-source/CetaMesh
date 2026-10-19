@@ -38,3 +38,10 @@ scripts/run-all-tests.mjs       |  1 +
  src/task/runtime.js             | 10 ++++++
  src/task/store.js               |  2 ++
  10 files changed, 152 insertions(+), 19 deletions(-)
+## Follow-up 2026-10-19: queued DSH turns and migration CI blockers
+
+- `8926b2edfe2986ec446da0f320050d40f748234c`: Task Follow now tracks accepted or pending queued turn terminals instead of exiting at the first `turn/end` when a subsequent request is already dispatched. The existing failing regression `DSH-style Follow retains both quickly queued Task turns` is the acceptance target. This code patch is **NOT VERIFIED** by a fresh test execution.
+- `b5e8814784fcf511a6fee8ae41dd8c163c9b83bf`: added time-stamped test-only phase markers to M5 synthetic migration fixture. It does not weaken ACL, backup hashes, leases, or real-data restrictions; it is diagnostic instrumentation, **not an M5 performance fix**.
+- GitHub Actions runs `39211468137` and `39211468103` completed failure in about four seconds with `runner_id=0`, `steps=[]` and unavailable job logs. They did not run the new tests. Run `39211918914` shows the same early failure. No success or product-regression conclusion can be inferred from these runs.
+- Last CI that actually reached tests: `39207856230` at `cc062b5` returned **116 PASS / 2 FAIL / 17 NOT_RUN_ENVIRONMENT**: queued DSH Task Follow regression and `test-whalebridge-m5-fixture` timeout at 300 seconds. The latter is a distinct synthetic migration fixture performance/runtime blocker, not proof of a real data migration failure.
+- **Required re-verification:** `npm test -- --suite test-handoff-context-working-memory --suite test-agent-provider-expansion --suite test-continuity-rollover --suite test-desktop-chat-product`, then `npm test -- --suite test-whalebridge-m5-fixture` (inspect `M5_FIXTURE_STEP` markers and isolate slow phase), then full `npm test`, `npm run build:ui`, `npm run desktop:check`, `npm run desktop:test`. Preserve environment skips. Do not merge main, publish Stable, or run migrations on user data until pass and Owner approval.
