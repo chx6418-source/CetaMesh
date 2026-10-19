@@ -160,6 +160,18 @@ await check('Task working Memory is recorded, scoped, idempotent and restart-rea
   const reopened=createMemoryService({stateDir:path.join(f.root,'state')});
   assert.equal(reopened.runtime.get({principal,id:page.memories[0].id}).memory.scope,'task:'+task.id);
 }));
+await check('reused Task Agent Session retains distinct reports for each completed turn',()=>fixture(async f=>{
+  await f.config('cetamesh');
+  await f.send('Analyze the first defect.');
+  const first=await waitFor(f.getTask,t=>t.agentReports?.length===1,'first Task Agent report');
+  const sourceSession=first.currentAgent.sessionId;
+  await new Promise(resolve=>setTimeout(resolve,30));
+  await f.send('Continue and analyze a different defect.');
+  const second=await waitFor(f.getTask,t=>t.agentReports?.length===2,'second Task Agent report');
+  assert.equal(second.currentAgent.sessionId,sourceSession,'the second turn must reuse the same Agent Session');
+  assert.equal(new Set(second.agentReports.map(row=>row.eventId)).size,2,'each turn must have a unique report identity');
+  assert.equal(second.status,'running','successfully completed turns must not block the Task');
+}));
 await check('disabled Memory never auto-records working rows',()=>fixture(async f=>{
   await f.services.settingsService.execute({method:'settings.update',params:{section:'memory',values:{enabled:false}}});
   f.enableRead();await f.config('cetamesh');await f.send('Read proof.txt.');const task=await f.getTask();
