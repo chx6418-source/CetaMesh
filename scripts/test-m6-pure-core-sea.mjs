@@ -58,6 +58,7 @@ async function start() {
   core = spawn(exe, ['--worker', '--data-dir', root], { cwd: root, windowsHide: true,
     stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env,
       PATH: path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32'),
+      CODEX_CLI_PATH: '', CODEX_INSTALL_DIR: '', CODEX_HOME: path.join(root, 'isolated-codex'),
       HOME: root, USERPROFILE: root, LOCALAPPDATA: root, APPDATA: root, DSH_HOME: path.join(root, 'absent-dsh'),
       WHALEBRIDGE_UI_PIPE: pipe, WHALEBRIDGE_UI_AUTH_TOKEN: token, WHALEBRIDGE_SUPERVISED: '1' } });
   core.stdout.resume(); core.stderr.resume(); await eventually(() => rpc('core.ping'));
@@ -70,6 +71,17 @@ async function stop() {
 }
 try {
   await start();
+  const codexBefore = await rpc('ui.agent.health', { provider: 'codex', refresh: true });
+  assert.equal(codexBefore.installed, false, 'no host CLI leaks into isolated SEA');
+  const codexFixture = path.join(root, 'Programs/OpenAI/Codex/bin/codex.exe');
+  fs.mkdirSync(path.dirname(codexFixture), { recursive: true }); fs.copyFileSync(process.execPath, codexFixture);
+  const codexAfter = await rpc('ui.agent.health', { provider: 'codex', refresh: true });
+  assert.equal(codexAfter.installed, true, 'same packaged Core discovers a new executable without restart');
+  assert.equal(codexAfter.compatible, false, 'Node binary is not a compatible Codex CLI');
+  assert.equal(codexAfter.status, 'not-supported'); assert.equal(codexAfter.installKind, 'standalone');
+  assert.equal(codexAfter.taskEligible, false); assert.equal(codexAfter.probeCode, 'CLI_PROTOCOL_UNSUPPORTED');
+  fs.unlinkSync(codexFixture);
+  assert.equal((await rpc('ui.agent.health', { provider: 'codex', refresh: true })).installed, false);
   assert.equal((await rpc('channel.qq.health')).ready, false);
   await assert.rejects(rpc('task.list', {}, '0'.repeat(64)), 'wrong Owner token must be denied');
   await rpc('providers.secrets.set', { provider: 'openai-compatible', apiKey: 'synthetic-m6-fixture-key', baseUrl: `http://127.0.0.1:${provider.address().port}` });

@@ -10,6 +10,15 @@ globalThis.window = { setTimeout, clearTimeout };
 const vite = await createServer({ configFile: false, root: uiRoot, optimizeDeps: { noDiscovery: true }, server: { middlewareMode: true }, appType: 'custom', logLevel: 'error' });
 try {
   const ui = await vite.ssrLoadModule('/src/app/HarborApp.tsx');
+  const agentsMarkup = renderToStaticMarkup(React.createElement(ui.AgentsPage));
+  assert.doesNotMatch(agentsMarkup, /聊天可用/); assert.match(agentsMarkup, /可用 Agent/);
+  assert.equal(typeof ui.CodexSetupDiagnostic, 'function');
+  assert.equal(ui.isAgentReady({ eligible: false, taskEligible: true }), true, 'Task-only ready providers count as usable');
+  assert.equal(ui.isAgentReady({ eligible: false, taskEligible: false }), false);
+  const codexMarkup = renderToStaticMarkup(React.createElement(ui.CodexSetupDiagnostic, { agent: { installed: false, compatible: false, authenticated: false, taskEligible: false, sandboxCapable: null, probeCode: 'CLI_NOT_FOUND', probePhase: 'discovery' } }));
+  assert.match(codexMarkup, /Codex CLI/); assert.match(codexMarkup, /Desktop/); assert.match(codexMarkup, /CLI_NOT_FOUND/);
+  const shimMarkup = renderToStaticMarkup(React.createElement(ui.CodexSetupDiagnostic, { agent: { installed: true, compatible: false, probeCode: 'NODE_RUNTIME_UNAVAILABLE' } }));
+  assert.match(shimMarkup, /独立 Node/);
   assert.equal(typeof ui.DshSetupForm, 'function', 'production DSH setup form must exist');
   assert.equal(typeof ui.dshSetupErrorMessage, 'function', 'configuration failures need actionable Chinese messages');
   assert.match(ui.dshSetupErrorMessage({ code: 'DSH_AUTH_SCOPE_CHANGE_REQUIRES_REVIEW' }), /认证范围/);

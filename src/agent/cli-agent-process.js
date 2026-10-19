@@ -105,14 +105,19 @@ function isFile(candidate) {
 }
 
 /** Resolve executable files directly without shell invocation, including Windows GUI npm shims. */
-export function findCliExecutable(name, {
+export function findCliCandidates(name, {
   env = process.env, platform = process.platform, exists = fs.existsSync, whereImpl = spawnSync
 } = {}) {
   const requested = String(name ?? '').trim();
-  if (!requested) return null;
+  if (!requested) return [];
   if (path.isAbsolute(requested) || requested.includes(path.sep) || requested.includes('/')) {
-    try { return exists(requested) ? path.resolve(requested) : null; } catch { /* An invalid explicit path is treated as not installed. */ return null; }
+    try { return isFile(requested) ? [path.resolve(requested)] : []; } catch { /* Invalid explicit paths never fall back. */ return []; }
   }
+  const found = [];
+  const explicit = requested === 'codex' ? environmentValue(env, 'CODEX_CLI_PATH') : '';
+  if (explicit) return path.isAbsolute(explicit) && isFile(explicit) && (platform !== 'win32' || /\.exe$/i.test(explicit)) ? [path.resolve(explicit)] : [];
+  const installDir = requested === 'codex' ? environmentValue(env, 'CODEX_INSTALL_DIR') : '';
+  if (installDir && path.isAbsolute(installDir)) found.push(path.join(installDir, platform === 'win32' ? 'codex.exe' : 'codex'));
   const pathValue = environmentValue(env, 'PATH');
   const extensions = platform === 'win32'
     ? [...new Set([
@@ -123,7 +128,7 @@ export function findCliExecutable(name, {
   const candidates = path.extname(requested) ? [requested] : platform === 'win32'
     ? ['.exe', '.com', '.cmd', '.bat'].map(ext => `${requested}${ext}`)
     : [requested, ...extensions.map((ext) => `${requested}${ext}`)];
-  const directories = String(pathValue).split(path.delimiter).filter(Boolean);
+  const directories = String(pathValue).split(platform === 'win32' ? ';' : path.delimiter).filter(entry => path.isAbsolute(entry));
   if (platform === 'win32') {
     const appData = environmentValue(env, 'APPDATA');
     const localAppData = environmentValue(env, 'LOCALAPPDATA');
@@ -136,24 +141,33 @@ export function findCliExecutable(name, {
       environmentValue(env, 'PNPM_HOME'),
       userProfile && path.join(userProfile, 'AppData', 'Local', 'pnpm')
     );
-    const where = whereImpl('where.exe', [requested], { encoding: 'utf8', windowsHide: true, env });
+    if (requested === 'codex' && localAppData) directories.push(path.join(localAppData, 'Programs', 'OpenAI', 'Codex', 'bin'));
+    const systemRoot = environmentValue(env, 'SYSTEMROOT') || environmentValue(env, 'WINDIR');
+    let where;
+    try {
+      where = whereImpl(systemRoot ? path.join(systemRoot, 'System32', 'where.exe') : 'where.exe', [requested], {
+        encoding: 'utf8', windowsHide: true, timeout: 3000, maxBuffer: 64 * 1024, env: createMinimalAgentEnv(env)
+      });
+    } catch { /* Discovery failure still permits the bounded known-directory candidates. */ }
     if (where?.status === 0) {
       const results = String(where.stdout ?? '').split(/\r?\n/).map(line => line.trim())
         .filter(result => /\.(?:exe|com|cmd|bat)$/i.test(result))
         .sort((a, b) => Number(/\.(?:cmd|bat)$/i.test(a)) - Number(/\.(?:cmd|bat)$/i.test(b)));
       for (const result of results) {
-        if (isFile(result)) return path.resolve(result);
+        if (isFile(result)) found.push(path.resolve(result));
       }
     }
   }
-  for (const directory of [...new Set(directories.filter(Boolean))]) {
+  for (const directory of [...new Set(directories.filter(entry => entry && path.isAbsolute(entry)))]) {
     for (const candidate of candidates) {
       const full = path.resolve(directory, candidate);
-      if (isFile(full)) return full;
+      if (isFile(full)) found.push(full);
     }
   }
-  return null;
+  return [...new Set(found.filter(isFile))].sort((a, b) => Number(/\.(?:cmd|bat)$/i.test(a)) - Number(/\.(?:cmd|bat)$/i.test(b)));
 }
+
+export function findCliExecutable(name, options = {}) { return findCliCandidates(name, options)[0] ?? null; }
 
 function cappedAppend(current, chunk) {
   const next = current + String(chunk ?? '');
@@ -197,6 +211,7 @@ export class CliAgentProcess {
     platform = process.platform, nodeExecutable = process.execPath } = {}) {
     this.name = String(name ?? 'cli-agent');
     this.executableOverride = executable;
+    this.selectedExecutable = null;
     this.argsPrefix = [...argsPrefix].map(String);
     this.envSource = envSource;
     this.spawnImpl = spawnImpl;
@@ -208,6 +223,28 @@ export class CliAgentProcess {
     this.sessions = new Map();
   }
 
+  environment() { return typeof this.envSource === 'function' ? this.envSource() : this.envSource; }
+
+  candidates() {
+    this.selectedExecutable = null;
+    if (this.executableOverride === null) return [];
+    const env = this.environment();
+    const explicit = environmentValue(env, 'CODEX_CLI_PATH');
+    this.discoveryCode = explicit && (!path.isAbsolute(explicit) || !isFile(explicit) || (this.platform === 'win32' && !/\.exe$/i.test(explicit))) ? 'CODEX_CLI_PATH_INVALID' : null;
+    return this.executableOverride !== undefined
+      ? findCliCandidates(String(this.executableOverride), { env, platform: this.platform })
+      : findCliCandidates(this.name, { env, platform: this.platform });
+  }
+
+  selectExecutable(executable) { this.selectedExecutable = executable; }
+
+  installKind() {
+    const exe = this.executable();
+    if (environmentValue(this.environment(), 'CODEX_CLI_PATH') || this.executableOverride !== undefined) return 'explicit';
+    if (/\.(cmd|bat)$/i.test(exe ?? '')) return 'npm-shim';
+    return /[\\/]Programs[\\/]OpenAI[\\/]Codex[\\/]bin[\\/]/i.test(exe ?? '') ? 'standalone' : exe ? 'path' : 'not-detected';
+  }
+
   launchTarget() {
     const executable = this.executable();
     if (!executable) return null;
@@ -216,20 +253,14 @@ export class CliAgentProcess {
     }
     const script = resolveNpmShimScript(executable);
     if (!script) throw Object.assign(new Error('Windows Codex command shim does not resolve to the installed npm CLI package'), { code: 'UNSUPPORTED_WINDOWS_SHIM' });
-    const nodeExecutable = this.nodeExecutable ?? findCliExecutable(this.platform === 'win32' ? 'node.exe' : 'node', { env: this.envSource, platform: this.platform });
+    const nodeExecutable = this.nodeExecutable ?? findCliExecutable(this.platform === 'win32' ? 'node.exe' : 'node', { env: this.environment(), platform: this.platform });
     if (!nodeExecutable) throw Object.assign(new Error('Windows Codex npm shim requires an installed standalone Node runtime'), { code: 'NODE_RUNTIME_UNAVAILABLE' });
     return { executable: nodeExecutable, argsPrefix: [script, ...this.argsPrefix] };
   }
 
   executable() {
-    if (this.executableOverride === null) return null;
-    if (this.executableOverride !== undefined) {
-      const text = String(this.executableOverride).trim();
-      if (!text) return null;
-      try { return fs.statSync(text).isFile() ? path.resolve(text) : findCliExecutable(text, { env: this.envSource }); }
-      catch { /* Non-absolute executable names may still resolve from PATH. */ return findCliExecutable(text, { env: this.envSource }); }
-    }
-    return findCliExecutable(this.name, { env: this.envSource });
+    if (this.selectedExecutable) return this.selectedExecutable;
+    return this.candidates()[0] ?? null;
   }
 
   health() {
@@ -258,11 +289,11 @@ export class CliAgentProcess {
     try {
       result = this.probeImpl(target.executable, [...target.argsPrefix, ...args.map(String)], {
         encoding: 'utf8', timeout: timeoutMs, windowsHide: true, maxBuffer: 1024 * 1024,
-        env: createMinimalAgentEnv(this.envSource)
+        env: createMinimalAgentEnv(this.environment())
       });
-    } catch {
+    } catch (error) {
       // A failed OS process launch is returned as provider health, not thrown from discovery.
-      return { available: false, executable, code: 'probe_failed' };
+      return { available: false, executable, code: error?.code ?? 'probe_failed' };
     }
     return {
       available: result.status === 0,
@@ -285,7 +316,7 @@ export class CliAgentProcess {
     if (this.sessions.has(sessionId)) throw Object.assign(new Error('CLI session id is already active'), { code: 'INVALID_PARAMS' });
     const child = this.spawnImpl(target.executable, [...target.argsPrefix, ...args.map(String)], {
       cwd,
-      env: createMinimalAgentEnv(this.envSource, env, { authorizedEnvKeys }),
+      env: createMinimalAgentEnv(this.environment(), env, { authorizedEnvKeys }),
       windowsHide: true,
       detached: this.platform !== 'win32',
       stdio: ['pipe', 'pipe', 'pipe']

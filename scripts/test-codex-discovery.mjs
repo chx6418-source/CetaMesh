@@ -1,0 +1,98 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { CliAgentProcess, findCliExecutable } from '../src/agent/cli-agent-process.js';
+import { createCetaMeshServices } from '../src/app/service-container.js';
+import { createCodexAgentProvider } from '../src/agent/codex-agent-provider.js';
+const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-discovery-'));
+const failures = [];
+async function check(name, run) { try { await run(); console.log('PASS', name); } catch (error) { failures.push(name); console.error('FAIL', name, error.message); } }
+const env = { PATH: '', LOCALAPPDATA: path.join(root, 'Local App Data'), APPDATA: path.join(root, 'Roaming'), USERPROFILE: root };
+const native = path.join(env.LOCALAPPDATA, 'Programs', 'OpenAI', 'Codex', 'bin', 'codex.exe');
+function probe(exe, args) {
+ if (exe.includes('broken')) return { status: 1, stdout: '', stderr: '' };
+ const text = args[0] === '--version' ? 'codex-cli 9.9.9-fixture' : args[0] === 'login' ? 'Logged in' : '--config --ask-for-approval --cd --json --ignore-user-config --ignore-rules --strict-config --skip-git-repo-check [SESSION_ID]';
+ return { status: 0, stdout: text, stderr: '' };
+}
+try {
+ const cli = new CliAgentProcess({ name: 'codex', envSource: env, platform: 'win32', probeImpl: probe });
+ const provider = createCodexAgentProvider({ cliProcess: cli, resolveTaskWorkspace: () => null });
+ assert.equal((await provider.health()).installed, false);
+ fs.mkdirSync(path.dirname(native), { recursive: true }); fs.writeFileSync(native, 'controlled fake binary; probe injected');
+ await check('official standalone absent from PATH', () => assert.equal(findCliExecutable('codex', { platform: 'win32', env, whereImpl: () => ({ status: 1 }) }), native));
+ await check('install after provider construction with forced refresh', async () => {
+  assert.equal((await provider.health()).installed, false, 'TTL remains cached before explicit refresh');
+  const health = await provider.health({ refresh: true });
+  assert.equal(health.installed, true); assert.equal(health.compatible, true); assert.equal(health.authenticated, true);
+  assert.equal(health.sandboxCapable, null); assert.equal(health.taskEligible, true);
+  assert.equal(health.installKind, 'standalone'); assert.equal(health.probePhase, 'ready');
+  assert.equal(health.requiresStandaloneNode, false);
+  assert.equal(provider.capabilities().installed, true, 'compatibility capabilities must use refreshed inspection rather than a startup snapshot');
+ });
+ await check('explicit user exe wins', () => assert.equal(new CliAgentProcess({ name: 'codex', envSource: { ...env, CODEX_CLI_PATH: native }, platform: 'win32', probeImpl: probe }).executable(), native));
+ await check('invalid explicit path never silently falls back', () => {
+  const health = createCodexAgentProvider({ environment: { ...env, CODEX_CLI_PATH: path.join(root, 'missing.exe') } });
+  return health.health().then(value => { assert.equal(value.available, false); assert.equal(value.probeCode, 'CODEX_CLI_PATH_INVALID'); });
+ });
+ await check('broken PATH candidate cannot mask runnable standalone', async () => {
+  const broken = path.join(root, 'broken'); fs.mkdirSync(broken); fs.writeFileSync(path.join(broken, 'codex.exe'), 'invalid');
+  const fallback = createCodexAgentProvider({ cliProcess: new CliAgentProcess({ name: 'codex', envSource: { ...env, PATH: broken }, platform: 'win32', probeImpl: probe }) });
+  assert.equal((await fallback.health()).available, true);
+ });
+ await check('missing Node reports shim diagnostic instead of not installed', async () => {
+  const bin = path.join(root, 'shim'); const script = path.join(bin, 'node_modules/@openai/codex/bin/codex.js');
+  fs.mkdirSync(path.dirname(script), { recursive: true }); fs.writeFileSync(script, ''); const shim = path.join(bin, 'codex.cmd'); fs.writeFileSync(shim, '@echo off');
+  const shimCli = new CliAgentProcess({ name: 'codex', executable: shim, envSource: { PATH: '' }, nodeExecutable: path.join(root, 'Core.exe'), platform: 'win32' });
+  const health = await createCodexAgentProvider({ cliProcess: shimCli }).health();
+  assert.equal(health.installed, true); assert.equal(health.compatible, false); assert.equal(health.probeCode, 'NODE_RUNTIME_UNAVAILABLE'); assert.equal(health.probePhase, 'version');
+ });
+ await check('CODEX_INSTALL_DIR is an explicit standalone bin location', () => {
+  const selected = new CliAgentProcess({ name: 'codex', envSource: { PATH: '', CODEX_INSTALL_DIR: path.dirname(native) }, platform: 'win32', probeImpl: probe });
+  assert.equal(selected.executable(), native);
+ });
+ await check('live environment snapshot is rebuilt during refresh', async () => {
+  const current = { PATH: '', LOCALAPPDATA: path.join(root, 'not-installed') };
+  const live = createCodexAgentProvider({ environment: current });
+  assert.equal((await live.health()).installed, false);
+  current.CODEX_CLI_PATH = native;
+  assert.equal((await live.health({ refresh: true })).installed, true);
+  assert.equal((await live.health()).compatible, false, 'invalid binary never becomes compatible');
+ });
+ await check('failed explicit CLI never selects another candidate', async () => {
+  const broken = path.join(root, 'broken/codex.exe');
+  const h = await createCodexAgentProvider({ cliProcess: new CliAgentProcess({ name: 'codex', envSource: { ...env, CODEX_CLI_PATH: broken }, platform: 'win32', probeImpl: probe }) }).health();
+  assert.equal(h.installed, true); assert.equal(h.available, false); assert.equal(h.probePhase, 'version');
+ });
+ await check('real service assembly discovers installation without Core restart', async () => {
+  const keys = ['PATH', 'LOCALAPPDATA', 'APPDATA', 'USERPROFILE', 'CODEX_CLI_PATH', 'CODEX_INSTALL_DIR'];
+  const previous = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+  let services;
+  try {
+   process.env.PATH = ''; process.env.LOCALAPPDATA = path.join(root, 'production-local'); process.env.APPDATA = path.join(root, 'production-roaming');
+   process.env.USERPROFILE = path.join(root, 'isolated-profile'); delete process.env.CODEX_CLI_PATH; delete process.env.CODEX_INSTALL_DIR;
+   services = createCetaMeshServices({ stateDir: path.join(root, 'production-state'), dataRoot: path.join(root, 'production-data') });
+   assert.equal((await services.desktopUiService.execute({ method: 'ui.agent.health', params: { provider: 'codex', refresh: true } })).installed, false);
+   const binary = path.join(process.env.LOCALAPPDATA, 'Programs/OpenAI/Codex/bin/codex.exe'); fs.mkdirSync(path.dirname(binary), { recursive: true });
+   fs.copyFileSync(process.execPath, binary);
+   const h = await services.desktopUiService.execute({ method: 'ui.agent.health', params: { provider: 'codex', refresh: true } });
+   assert.equal(h.installed, true); assert.equal(h.compatible, false); assert.equal(h.status, 'not-supported');
+   assert.equal(h.installKind, 'standalone'); assert.equal(h.probePhase, 'help');
+   assert.equal(h.taskEligible, false, 'an executable without Codex protocol must not run tasks');
+   assert.ok(!JSON.stringify(h).includes(root), 'Harbor diagnostics do not expose raw local paths');
+  } finally {
+   for (const key of keys) { if (previous[key] === undefined) delete process.env[key]; else process.env[key] = previous[key]; }
+   if (services) { await services.agentService.getProvider('codex').shutdown(); await services.capabilityService.close(); }
+  }
+ });
+ await check('missing top-level protocol flag identifies help phase', async () => {
+  const cli = { executable: () => 'fixture', probe: args => ({ available: true, stdout: args[0] === '--version' ? 'codex-cli 9.9.9' : args[0] === '--help' ? '--config --cd' : '--json --ignore-user-config --ignore-rules --strict-config --skip-git-repo-check [SESSION_ID]', stderr: '' }) };
+  const h = await createCodexAgentProvider({ cliProcess: cli }).health(); assert.equal(h.compatible, false); assert.equal(h.probePhase, 'help');
+ });
+ await check('unsupported shim remains installed with actionable code', async () => {
+  const shim = path.join(root, 'unknown.cmd'); fs.writeFileSync(shim, 'untrusted command');
+  const health = await createCodexAgentProvider({ cliProcess: new CliAgentProcess({ name: 'codex', executable: shim, envSource: { PATH: '' }, platform: 'win32' }) }).health();
+  assert.equal(health.installed, true); assert.equal(health.probeCode, 'UNSUPPORTED_WINDOWS_SHIM');
+ });
+} finally { fs.rmSync(root, { recursive: true, force: true }); }
+assert.equal(failures.length, 0, failures.join(', '));

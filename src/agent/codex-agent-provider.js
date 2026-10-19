@@ -164,29 +164,47 @@ function inheritedProviderArgs(configuration) {
   return args;
 }
 
-function inspectCodexCli(cli) {
+function inspectSelectedCodexCli(cli) {
   const installed = Boolean(cli.executable());
   const version = cli.probe(['--version']);
-  if (!version.available) return { installed, available: false, reason: installed ? 'unsupported_cli' : 'not_installed', version: null };
+  if (!version.available) return { installed, available: false, reason: installed ? 'unsupported_cli' : 'not_installed', version: null, probePhase: 'version', probeCode: cli.discoveryCode ?? version.code ?? 'PROBE_FAILED' };
   const top = cli.probe(['--help']);
   const exec = cli.probe(['exec', '--help']);
   const resume = cli.probe(['exec', 'resume', '--help']);
   const topHelp = `${top.stdout}\n${top.stderr}`;
   const execHelp = `${exec.stdout}\n${exec.stderr}`;
   const resumeHelp = `${resume.stdout}\n${resume.stderr}`;
-  const supported = top.available && exec.available && /--config/.test(topHelp)
-    && /--ask-for-approval/.test(topHelp) && /--cd/.test(topHelp)
-    && /--json/.test(execHelp) && /--ignore-user-config/.test(execHelp)
+  const topSupported = top.available && /--config/.test(topHelp)
+    && /--ask-for-approval/.test(topHelp) && /--cd/.test(topHelp);
+  const execSupported = exec.available && /--json/.test(execHelp) && /--ignore-user-config/.test(execHelp)
     && /--ignore-rules/.test(execHelp) && /--strict-config/.test(execHelp)
     && /--skip-git-repo-check/.test(execHelp);
+  const supported = topSupported && execSupported;
   const resumeSupported = resume.available && /--json/.test(resumeHelp) && /\[SESSION_ID\]/i.test(resumeHelp);
   return {
     installed,
     available: supported,
     reason: supported ? null : 'unsupported_cli',
     version: version.stdout.trim().slice(0, 100),
+    probePhase: supported ? 'ready' : !topSupported ? 'help' : 'exec-help',
+    probeCode: supported ? null : !topSupported ? top.code ?? 'CLI_PROTOCOL_UNSUPPORTED' : exec.code ?? 'CLI_PROTOCOL_UNSUPPORTED',
     supportsResume: resumeSupported
   };
+}
+
+function inspectCodexCli(cli) {
+  if (typeof cli.candidates !== 'function') return inspectSelectedCodexCli(cli);
+  const candidates = cli.candidates();
+  let first = null;
+  for (const executable of candidates.slice(0, 16)) {
+    cli.selectExecutable(executable);
+    const result = inspectSelectedCodexCli(cli);
+    if (result.available) return result;
+    first ??= { executable, result };
+  }
+  if (first) { cli.selectExecutable(first.executable); return first.result; }
+  return { installed: false, available: false, reason: cli.discoveryCode ? 'invalid_cli_path' : 'not_installed', version: null,
+    probePhase: 'discovery', probeCode: cli.discoveryCode ?? 'CLI_NOT_FOUND' };
 }
 
 function loginState(cli) {
@@ -227,7 +245,7 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
   approvalStatus = () => null, cancelApproval = () => ({ cancelled: false }), timeoutMs = 10 * 60 * 1000, log = () => {} } = {}) {
   const resolvedCodexHome = codexHome || environment.CODEX_HOME || path.join(environment.USERPROFILE || os.homedir(), '.codex');
   const cli = cliProcess ?? new CliAgentProcess({ name: 'codex', executable,
-    envSource: { ...environment, CODEX_HOME: resolvedCodexHome } });
+    envSource: () => ({ ...environment, CODEX_HOME: resolvedCodexHome }) });
   let inspection = inspectCodexCli(cli);
   let authenticated = inspection.available ? loginState(cli) : false;
   let lastProbeAt = Date.now();
@@ -421,12 +439,6 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
     label: 'Codex',
     eventProtocol: AGENT_EVENT_PROTOCOL_TURN_V1,
     capabilityExtras: {
-      installed: inspection.installed,
-      compatible: inspection.available,
-      available: inspection.available && authenticated,
-      version: inspection.version,
-      reason: inspection.reason ?? (authenticated ? null : 'needs_auth'),
-      health: authenticated ? 'ready' : inspection.available ? 'needs_auth' : 'unavailable',
       workspaceBoundary: 'staged-capability-broker',
       supportsFreshSession: true,
       supportsResume: inspection.supportsResume === true,
@@ -634,6 +646,12 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
           reachable: null,
           sessionCapable: available,
           sandboxCapable,
+          installKind: cli.installKind?.() ?? 'unknown',
+          probePhase: inspection.available && !authenticated ? 'authentication' : inspection.probePhase,
+          probeCode: inspection.available && !authenticated ? 'CODEX_AUTH_REQUIRED' : inspection.probeCode,
+          detectedVersion: inspection.version,
+          checkedAt: new Date(lastProbeAt).toISOString(),
+          requiresStandaloneNode: /\.(cmd|bat)$/i.test(cli.executable() ?? ''),
           reprobedAt: lastProbeAt
         };
       },
@@ -673,6 +691,13 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
   });
   return Object.freeze({
     ...contract,
+    // Compatibility projection reads the same current inspection as health; never a startup snapshot.
+    capabilities() {
+      return Object.freeze({ ...contract.capabilities(), installed: inspection.installed, compatible: inspection.available,
+        available: inspection.available && authenticated, version: inspection.version,
+        reason: inspection.reason ?? (authenticated ? null : 'needs_auth'),
+        health: authenticated ? 'ready' : inspection.available ? 'needs_auth' : 'unavailable', supportsResume: inspection.supportsResume === true });
+    },
     configure(settings = {}) {
       const allowed = new Set(['model', 'reasoningEffort']);
       for (const key of Object.keys(settings ?? {})) {

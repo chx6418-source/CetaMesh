@@ -39,6 +39,7 @@ export const CATEGORIES = ['core', 'architecture', 'security', 'runtime', 'integ
 // ── 登记表：scripts/test-*.mjs 的每一个文件都必须出现在这里（或能从 package.json 映射）。
 // requires 的取值见 probeAvailability()；category 取值见 CATEGORIES。
 const REGISTRY = {
+  'test-codex-discovery.mjs': { category: 'runtime' },
   'test-dsh-setup.mjs': { category: 'core' },
   'test-model-continuation.mjs': { category: 'runtime' },
   'test-harbor-agent-setup.mjs': { category: 'runtime' },

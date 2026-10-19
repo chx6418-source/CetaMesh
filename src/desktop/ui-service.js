@@ -234,7 +234,7 @@ function projectAgent(value) {
   const row = record(value);
   const health = { ...row, ...record(row.health) };
   const desktop = record(row.desktopApp);
-  const reason = string(row.reason ?? health.reason, 160);
+  const reason = string(health.reason ?? row.reason, 160);
   const lastError = string(row.lastError ?? health.lastError ?? health.message, 500) || null;
   const healthStatus = string(health.status, 50).toLowerCase();
   const readiness = `${reason} ${healthStatus} ${string(row.status, 50)}`;
@@ -268,16 +268,20 @@ function projectAgent(value) {
     description: id === 'codex' ? '理解项目、修改代码并检查结果。' : id === 'dsh' ? '处理资料、规划和跨工具工作流。' : '在可用时连接本地开发能力。',
     available, installed, authenticated, compatible, eligible: available === null ? null : available && !requiresTask && !boundaryUnverified,
     taskEligible: available === false ? false : available === null || (id === 'dsh' && typeof health.taskEligible !== 'boolean') ? null : available && installed !== false && authenticated !== false && requiresTask
-      && health.sessionCapable !== false && (id !== 'codex' || health.sandboxCapable !== false)
+      && health.taskEligible !== false && health.sessionCapable !== false && (id !== 'codex' || health.sandboxCapable !== false)
       && (id !== 'dsh' || health.taskEligible === true),
     configured: typeof health.configured === 'boolean' ? health.configured : null,
     reachable: typeof health.reachable === 'boolean' ? health.reachable : null,
     ready: typeof health.ready === 'boolean' ? health.ready : null,
     sessionCapable: typeof health.sessionCapable === 'boolean' ? health.sessionCapable : null,
+    sandboxCapable: typeof health.sandboxCapable === 'boolean' ? health.sandboxCapable : null,
+    installKind: string(health.installKind, 40) || null, probePhase: string(health.probePhase, 40) || null,
+    probeCode: string(health.probeCode, 80) || null, checkedAt: string(health.checkedAt, 80) || null,
+    requiresStandaloneNode: health.requiresStandaloneNode === true,
     preset: projectDshPreset(health.preset),
     diagnostic: projectDshDiagnostic(health.diagnostic),
     configuration: projectDshConfiguration(row.configuration ?? health.configuration),
-    reason: reason || (boundaryUnverified ? 'descriptor-incomplete' : available && requiresTask ? 'task-required' : null), lastError, workspaceBoundary, status, version: string(row.version, 80) || null,
+    reason: reason || (boundaryUnverified ? 'descriptor-incomplete' : available && requiresTask ? 'task-required' : null), lastError, workspaceBoundary, status, version: string(health.version ?? row.version, 80) || null,
     desktopApp: id === 'dsh' ? {
       installed: desktop.installed === true, running: desktop.running === true,
       status: string(desktop.status, 50) || 'unknown', version: string(desktop.version, 80) || null

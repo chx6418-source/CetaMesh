@@ -49,6 +49,7 @@ export interface Agent {
   id: string; name: string; role: string; description: string; available: boolean | null; installed: boolean | null; authenticated: boolean | null; compatible: boolean | null; status: AgentStatus;
   eligible: boolean | null; taskEligible: boolean | null; configured: boolean | null; reason: string | null; lastError: string | null; workspaceBoundary: string | null;
   reachable?: boolean | null; ready?: boolean | null; sessionCapable?: boolean | null;
+  sandboxCapable?: boolean | null; installKind?: string | null; probePhase?: string | null; probeCode?: string | null; checkedAt?: string | null; requiresStandaloneNode?: boolean;
   configuration?: DshConfiguration | null;
   preset?: { purpose: string; id: string | null; compatible: boolean | null; loaded: boolean | null; loadState: 'loaded' | 'not-loaded' | 'unknown'; reason: string | null; verification: string | null } | null;
   diagnostic?: { stage: string; code: string | null; retryable: boolean; checkedAt: string | null } | null;
