@@ -14,6 +14,7 @@
 // 边界（按阶段要求有意不做）：不做 cron 调度、不做云端任务编排、不做多 Agent 自动编排。
 
 import crypto from 'node:crypto';
+import { buildOwnerContext } from './owner-context.js';
 import {
   ATTENTION_STATUSES,
   TASK_LIMITS,
@@ -545,6 +546,14 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     });
   }
 
+  function recordOwnerContext({ id, expectedRev, sessionId, messages } = {}) {
+    const current = requireTask(id);
+    const sid = normalizeText(sessionId, 'sessionId', TASK_LIMITS.idChars, { required: true });
+    const ownerContext = buildOwnerContext({ sessionId: sid, messages });
+    if (JSON.stringify(current.ownerContext ?? null) === JSON.stringify(ownerContext)) return current;
+    return mutate(id, expectedRev, draft => { draft.ownerContext = ownerContext; return draft; });
+  }
+
   function linkMemory({ id, expectedRev, memoryId, scope, type, authorizedBy, note } = {}) {
     const item = {
       at: now(),
@@ -607,6 +616,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
   }
 
   return {
+    recordOwnerContext,
     create,
     get,
     list,

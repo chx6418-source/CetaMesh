@@ -60,7 +60,7 @@ const WORKSPACE_TOOL_DESCRIPTORS = Object.freeze({
  * which bind the Owner identity; Agent/Extension grants never come from IPC. */
 export function createCapabilityService({ stateDir, workspaceService, memoryService,
   taskRuntime, agentBroker, bindAgentSession, resumeAgentApproval = null, searchImpl = null, audit = () => {}, now,
-  isolatedRunner = null } = {}) {
+  isolatedRunner = null, onTaskObservation = null } = {}) {
   const file = stateDir ? path.join(stateDir, 'capability', 'task-grants.json') : null;
   let grants = file ? readJsonFile(file, { missing: {} }) : {};
   const provisioning = new Map();
@@ -82,7 +82,12 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       if (signal.aborted) finish();
     });
   }
-  function ensureTaskFollow(provider, sessionId, taskId) {
+  function recordWorkingState(taskId) {
+    if (typeof onTaskObservation !== 'function') return;
+    try { onTaskObservation({ taskId }); }
+    catch (error) { audit({ capability: 'memory.working', status: 'projection-failed', code: error?.code ?? 'MEMORY_WRITE_FAILED' }); }
+  }
+  function ensureTaskFollow(provider, sessionId, taskId, options = {}) {
     const capabilities = agentBroker?.capabilities?.(provider);
     if (!['capability-broker', 'staged-capability-broker'].includes(capabilities?.workspaceBoundary)) return null;
     const key = taskFollowKey(provider, sessionId);
@@ -93,7 +98,8 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       throw capabilityError('AGENT_FOLLOW_CAPACITY', 'Task Agent event consumers are at the configured capacity');
     }
     const controller = new AbortController();
-    const consumer = { provider, sessionId, taskId, controller, promise: null, sequence: 0 };
+    const consumer = { provider, sessionId, taskId, controller, promise: null,
+      sequence: Number.isSafeInteger(options.sinceSequence) && options.sinceSequence >= 0 ? options.sinceSequence : 0 };
     const answers = new Map();
     taskFollowConsumers.set(key, consumer);
     consumer.promise = (async () => {
@@ -109,6 +115,8 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
               consumer.sequence = event.seq;
             }
             const turnId = String(event?.data?.requestId ?? event?.data?.turn ?? '');
+            if ((options.bootstrapRequestId && event?.data?.requestId === options.bootstrapRequestId)
+              || (options.bootstrapTurnId != null && event?.data?.turn === options.bootstrapTurnId)) continue;
             if (event?.type === 'tool/result') {
               const current = taskFor(taskId);
               if (current?.status === 'running' && current.currentAgent?.provider === provider
@@ -118,6 +126,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
                   capability: event.data?.capability, status: event.data?.status,
                   filePath: event.data?.filePath, tool: event.data?.tool,
                   exitCode: event.data?.exitCode });
+                recordWorkingState(taskId);
               }
             }
             if (event?.type === 'tool/activity') {
@@ -150,9 +159,11 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
               if (!current || current.currentAgent?.provider !== provider || current.currentAgent?.sessionId !== sessionId
                 || current.status !== 'running') continue;
               if (event.data?.reason?.kind === 'completed' && answer) {
-                taskRuntime.setCheckpoint({ id: taskId, expectedRev: current.rev, summary: answer, nextAction: '' });
-                const updated = taskFor(taskId);
-                taskRuntime.addWork({ id: taskId, expectedRev: updated.rev, kind: 'completed', text: answer.slice(0, 2000) });
+                // A reply is not verified completed work. Preserve an established checkpoint.
+                if (!current.checkpoint?.summary) taskRuntime.setCheckpoint({ id: taskId, expectedRev: current.rev,
+                  summary: '[Unverified Agent report]\n' + answer.slice(0, 7900),
+                  nextAction: current.checkpoint?.nextAction ?? '' });
+                recordWorkingState(taskId);
               } else if (['failed', 'error'].includes(event.data?.reason?.kind)) {
                 taskRuntime.block({ id: taskId, expectedRev: current.rev,
                   reason: String(event.data?.reason?.error?.code ?? 'Agent turn failed').slice(0, 1000) });
@@ -799,12 +810,12 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       if (typeof guard !== 'function') throw capabilityError('INVALID_PARAMS', 'Task Handoff guard must be a function');
       taskHandoffGuard = guard;
     },
-    trackTaskAgent({ taskId, provider, sessionId }) {
+    trackTaskAgent({ taskId, provider, sessionId, sinceSequence, bootstrapRequestId, bootstrapTurnId }) {
       const task = taskFor(taskId);
       if (!task || task.currentAgent?.provider !== provider || task.currentAgent?.sessionId !== sessionId) {
         throw capabilityError('TASK_NOT_AUTHORIZED', 'Task Agent follow requires the current assignment');
       }
-      return ensureTaskFollow(provider, sessionId, taskId) !== null;
+      return ensureTaskFollow(provider, sessionId, taskId, { sinceSequence, bootstrapRequestId, bootstrapTurnId }) !== null;
     },
     applyAgentWorkspaceChanges, workspaceImportStatus, cancelWorkspaceImportApproval,
     async close() {

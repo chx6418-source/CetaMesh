@@ -39,6 +39,7 @@ export const CATEGORIES = ['core', 'architecture', 'security', 'runtime', 'integ
 // ── 登记表：scripts/test-*.mjs 的每一个文件都必须出现在这里（或能从 package.json 映射）。
 // requires 的取值见 probeAvailability()；category 取值见 CATEGORIES。
 const REGISTRY = {
+  'test-handoff-context-working-memory.mjs': { category: 'runtime', timeoutMs: 120000, note: 'Agent Handoff context and task-scoped working Memory regressions' },
   'test-whalebridge-m5-preflight.mjs': { category: 'security' },
   'test-whalebridge-m5-epoch.mjs': { category: 'integration' },
   'test-whalebridge-m5-backup.mjs': { category: 'integration' },

@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { createTaskWorkingMemoryRecorder } from '../memory/task-working-memory.js';
 import os from 'node:os';
 import path from 'node:path';
 import { APP_PATHS } from '../app-paths.js';
@@ -210,6 +211,7 @@ export function createCetaMeshServices(options = {}) {
     resolveWorkspace: workspaceId => workspaceService.describeWorkspace(workspaceId),
     resolveTask: taskId => taskService.runtime.get({ id: taskId }).task,
     handoffTask: request => continuityService.runtime.rollover(request),
+    recordOwnerContext: request => taskService.runtime.recordOwnerContext(request),
     platformRoute: request => platformRuntime.route(request),
     agentFollow: request => agentBroker.follow(request),
     defaults: dshDefaults,
@@ -236,6 +238,9 @@ export function createCetaMeshServices(options = {}) {
       }
     }
   });
+  const workingMemory = createTaskWorkingMemoryRecorder({ memoryRuntime: memoryService.runtime,
+    taskRuntime: taskService.runtime, enabled: () => settingsService.store.get().settings.memory.enabled === true,
+    onChanged: data => uiEventBus.publish('memory.updated', { ...data, status: 'working-updated' }) });
   capabilityService = createCapabilityService({
     stateDir,
     workspaceService,
@@ -243,6 +248,7 @@ export function createCetaMeshServices(options = {}) {
     taskRuntime: taskService.runtime,
     agentBroker,
     bindAgentSession: managedAgent.bindSession,
+    onTaskObservation: ({ taskId }) => workingMemory.record(taskId),
     resumeAgentApproval: managedAgent.resumeLegacyApproval,
     searchImpl: searchWeb,
     audit: event => log('Capability ' + event.capability + ' ' + event.status),
@@ -295,6 +301,7 @@ export function createCetaMeshServices(options = {}) {
       if (!continuityService) throw Object.assign(new Error('Continuity Runtime is unavailable'), { code: 'PROVIDER_UNAVAILABLE' });
       return continuityService.runtime.rollover(params);
     } },
+    prepareTaskContext: async args => { const context = await chatService.prepareTaskContext(args); workingMemory.record(args.taskId); return context; },
     legacyModel: dshDefaults.model
   });
   const workshopService = createWorkshopService({
@@ -327,7 +334,13 @@ export function createCetaMeshServices(options = {}) {
     workspaceService,
     capabilityService,
     canRollover: ({ taskId }) => !capabilityService.isTaskProvisioning(taskId),
-    onHandoffComplete: assignment => capabilityService.trackTaskAgent(assignment),
+    prepareHandoff: async ({ taskId }) => { await chatService.prepareTaskHandoff({ taskId }); workingMemory.record(taskId); },
+    readWorkingMemory: taskId => workingMemory.references(taskId),
+    onHandoffComplete: async assignment => {
+      capabilityService.trackTaskAgent(assignment);
+      await chatService.synchronizeTaskAssignment(assignment);
+      uiEventBus.publish('task.updated', { taskId: assignment.taskId, status: 'assignment-changed' });
+    },
     listPendingApprovals: ({ taskId }) => capabilityService.broker.approvals
       .list()
       .filter(row => row.request?.taskId === taskId)

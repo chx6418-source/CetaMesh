@@ -75,6 +75,8 @@ function normalizeLoaded(raw) {
       && typeof raw.createRequest.fingerprint === 'string' ? raw.createRequest : null,
     artifacts: asArray(raw.artifacts),
     executionEvidence: asArray(raw.executionEvidence),
+    ownerContext: raw.ownerContext && typeof raw.ownerContext === 'object' && Array.isArray(raw.ownerContext.entries)
+      ? raw.ownerContext : null,
     decisions: asArray(raw.decisions),
     memoryRefs: asArray(raw.memoryRefs),
     checkpoint: checkpoint

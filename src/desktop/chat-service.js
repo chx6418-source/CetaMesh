@@ -33,6 +33,7 @@ import { blocksToText } from '../dsh-client.js';
 import { selectDshSessionModel } from '../dsh-model-selection.js';
 import { PRODUCT_IDENTITY_PROMPT } from '../context/product-context.js';
 import { OWNER_ACTOR } from '../capability/types.js';
+import { buildOwnerContext, renderOwnerContext } from '../task/owner-context.js';
 
 const SCHEMA_VERSION = 1;
 const REASONING_EFFORTS = Object.freeze(['off', 'low', 'high', 'max']);
@@ -121,7 +122,8 @@ export function createChatService({
   onEvent = null,
   resolveWorkspace = null,
   resolveTask = null,
-  handoffTask = null
+  handoffTask = null,
+  recordOwnerContext = null
 }) {
   // Agent Provider（阶段 06）：会话显式指定 agentProvider（如 'dsh'）时，其回合经标准
   // AgentProvider 契约（agent.createSession / agent.send / agent.cancel）执行。
@@ -588,13 +590,18 @@ export function createChatService({
     const previousAgentSession = agentProviderChanged ? previousProviderSession(record, previousAgentProvider) : null;
     if (agentProviderChanged) {
       if (record.taskId) {
+        state.configChangeInFlight = true;
+        try {
         const task = typeof resolveTask === 'function' ? await resolveTask(record.taskId) : null;
-        if (!task || !task.currentAgent || task.currentAgent.provider !== previousAgentProvider) {
+        if (!task || !task.currentAgent
+          || task.currentAgent.provider !== (record.runtimeProvider || previousAgentProvider)
+          || task.currentAgent.sessionId !== record.dshSessionId) {
           throw chatError('TASK_SESSION_MISMATCH', 'Chat Agent Session does not own the attached Task');
         }
         if (!nextConfig.agentProvider || nextConfig.agentProvider === AGENT_PROVIDER_DISABLED || typeof handoffTask !== 'function') {
           throw chatError('TASK_HANDOFF_REQUIRED', 'Task Agent changes require Continuity handoff');
         }
+        await prepareTaskContext({ record, taskId: task.id });
         const transferred = await handoffTask({ taskId: task.id, reason: 'provider-switch', targetProvider: nextConfig.agentProvider,
           modelProvider: nextConfig.modelProvider, model: nextConfig.model, reasoningEffort: nextConfig.reasoning });
         stopFollow(record.id);
@@ -604,6 +611,7 @@ export function createChatService({
         touch(record);
         ensureFollow(record);
         return publicSession(record);
+        } finally { state.configChangeInFlight = false; }
       }
       record.config = nextConfig;
       stopFollow(record.id);
@@ -1718,6 +1726,59 @@ export function createChatService({
     return { continued: true, ...(accepted?.requestId ? { requestId: accepted.requestId } : {}) };
   }
 
+  async function prepareTaskContext({ record: requested, taskId } = {}) {
+    const record = sessions.get(String(requested?.id ?? ''));
+    if (!record || record.taskId !== taskId) throw chatError('TASK_SESSION_MISMATCH', 'Owner context requires the linked Chat');
+    const task = typeof resolveTask === 'function' ? await resolveTask(taskId) : null;
+    if (!task || (record.config.workspaceId && task.workspaceId !== record.config.workspaceId)) {
+      throw chatError('WORKSPACE_RECONCILIATION_REQUIRED', 'Owner context cannot cross Workspaces');
+    }
+    const messages = readHistory(record.id).filter(row => row.role === 'user');
+    const snapshot = buildOwnerContext({ sessionId: record.id, messages });
+    if (typeof recordOwnerContext === 'function') await recordOwnerContext({ id: task.id, expectedRev: task.rev,
+      sessionId: record.id, messages });
+    return renderOwnerContext(snapshot);
+  }
+
+  async function prepareTaskHandoff({ taskId } = {}) {
+    const source = [...sessions.values()].filter(row => row.taskId === taskId && !row.archived)
+      .sort((a, b) => b.updatedAt - a.updatedAt)[0];
+    return source ? prepareTaskContext({ record: source, taskId }) : null;
+  }
+
+  async function synchronizeTaskAssignment({ taskId, provider, sessionId } = {}) {
+    const task = typeof resolveTask === 'function' ? await resolveTask(taskId) : null;
+    if (!task?.currentAgent || task.currentAgent.provider !== provider || task.currentAgent.sessionId !== sessionId) {
+      throw chatError('TASK_SESSION_MISMATCH', 'Only the committed Task assignment may update Chat');
+    }
+    const changed = [];
+    for (const record of sessions.values()) {
+      if (record.taskId !== taskId || record.config.agentProvider === AGENT_PROVIDER_DISABLED) continue;
+      const state = runtimeOf(record.id);
+      // The initiating config transaction applies its own result after Handoff returns.
+      if (state.configChangeInFlight) continue;
+      if (record.runtimeProvider === provider && record.dshSessionId === sessionId) continue;
+      if (state.turn) throw chatError('TURN_BUSY', 'Finish the current Chat turn before synchronizing execution ownership');
+      changed.push({ record, config: record.config, runtimeProvider: record.runtimeProvider, dshSessionId: record.dshSessionId });
+    }
+    try {
+      for (const old of changed) {
+        stopFollow(old.record.id);
+        old.record.runtimeProvider = provider;
+        old.record.dshSessionId = sessionId;
+        old.record.config = { ...old.config, agentProvider: old.config.agentProvider ? provider : null };
+      }
+      if (changed.length) saveStore();
+    } catch (error) {
+      for (const old of changed) Object.assign(old.record, { config: old.config,
+        runtimeProvider: old.runtimeProvider, dshSessionId: old.dshSessionId });
+      throw error;
+    }
+    for (const old of changed) onEvent?.({ event: 'chat.updated', data: {
+      sessionId: old.record.id, taskId, status: 'assignment-changed', provider } });
+    return { updated: changed.length };
+  }
+
   function boundedTaskChatConstraints(record, currentText = null) {
     const prompts = readHistory(record.id).filter(message => message.role === 'user' && typeof message.text === 'string')
       .map(message => message.text);
@@ -1810,6 +1871,12 @@ export function createChatService({
   }
 
   async function startTurn(record, state, promptText, { attachments = [], sourceText, retryMessageId = null } = {}) {
+    // Repair a missed Work/automatic-Handoff projection from authoritative Task state.
+    if (record.taskId && (record.runtimeProvider || record.dshSessionId) && typeof resolveTask === 'function'
+      && record.config.agentProvider !== AGENT_PROVIDER_DISABLED) {
+      const live = await resolveTask(record.taskId);
+      if (live?.currentAgent) await synchronizeTaskAssignment({ taskId: live.id, ...live.currentAgent });
+    }
     if (record.taskId && !record.dshSessionId && !promptText.startsWith('[CetaMesh Task recovery]')) {
       const prior = boundedTaskChatConstraints(record, sourceText ?? promptText);
       if (prior) promptText = `[Prior Owner constraints in this Task Chat Session; verify against the current request]\n- ${prior}\n[Current request]\n${promptText}`;
@@ -2075,6 +2142,7 @@ export function createChatService({
   };
 
   return {
+    prepareTaskContext, prepareTaskHandoff, synchronizeTaskAssignment,
     resumeApproval,
     execute({ method, params, signal }) {
       const handler = handlers[method];
