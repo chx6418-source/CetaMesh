@@ -67,7 +67,22 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
   const workspaceProvisioning = new Map();
   let taskHandoffGuard = () => false;
   const taskFollowConsumers = new Map();
+  // Native DSH Follow can end after every completed turn. Retain a bounded
+  // per-Task/Session terminal cursor so the next instruction never consumes the
+  // previous turn/end as if it belonged to its own new turn.
+  const taskFollowPositions = new Map();
   const TASK_FOLLOW_MAX_SESSIONS = 64;
+  function rememberTaskFollowPosition(key, taskId, sequence) {
+    if (!Number.isSafeInteger(sequence) || sequence < 1) return;
+    const previous = taskFollowPositions.get(key);
+    const highest = previous?.taskId === taskId ? Math.max(previous.sequence, sequence) : sequence;
+    taskFollowPositions.delete(key);
+    taskFollowPositions.set(key, { taskId, sequence: highest });
+    // These are in-process resumptions only; do not silently claim durability.
+    while (taskFollowPositions.size > TASK_FOLLOW_MAX_SESSIONS * 4) {
+      taskFollowPositions.delete(taskFollowPositions.keys().next().value);
+    }
+  }
   const workspaceImportStates = new Map();
   let approvalDecisionListener = null;
   const journalFile = stateDir ? path.join(stateDir, 'capability', 'requests.json') : null;
@@ -92,14 +107,17 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     if (!['capability-broker', 'staged-capability-broker'].includes(capabilities?.workspaceBoundary)) return null;
     const key = taskFollowKey(provider, sessionId);
     const current = taskFollowConsumers.get(key);
-    if (current && !current.controller.signal.aborted) return current;
+    if (current && !current.controller.signal.aborted && current.finished !== true) return current;
     if (current) taskFollowConsumers.delete(key);
     if (taskFollowConsumers.size >= TASK_FOLLOW_MAX_SESSIONS) {
       throw capabilityError('AGENT_FOLLOW_CAPACITY', 'Task Agent event consumers are at the configured capacity');
     }
     const controller = new AbortController();
-    const consumer = { provider, sessionId, taskId, controller, promise: null,
-      sequence: Number.isSafeInteger(options.sinceSequence) && options.sinceSequence >= 0 ? options.sinceSequence : 0 };
+    const savedPosition = taskFollowPositions.get(key);
+    const previousSequence = savedPosition?.taskId === taskId ? savedPosition.sequence : 0;
+    const requestedSequence = Number.isSafeInteger(options.sinceSequence) && options.sinceSequence >= 0 ? options.sinceSequence : 0;
+    const consumer = { provider, sessionId, taskId, controller, promise: null, finished: false,
+      sequence: Math.max(requestedSequence, previousSequence) };
     const answers = new Map();
     taskFollowConsumers.set(key, consumer);
     consumer.promise = (async () => {
@@ -157,7 +175,10 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
               answers.delete(turnId);
               const current = taskFor(taskId);
               if (!current || current.currentAgent?.provider !== provider || current.currentAgent?.sessionId !== sessionId
-                || current.status !== 'running') continue;
+                || current.status !== 'running') {
+                rememberTaskFollowPosition(key, taskId, consumer.sequence);
+                continue;
+              }
               if (event.data?.reason?.kind === 'completed' && answer) {
                 // Retain the original answer with explicit evidence class. Never overwrite
                 // an established checkpoint or treat the answer as verified completed work.
@@ -173,9 +194,11 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
                 taskRuntime.block({ id: taskId, expectedRev: current.rev,
                   reason: String(event.data?.reason?.error?.code ?? 'Agent turn failed').slice(0, 1000) });
               }
+              // Commit this cursor only after projecting the terminal outcome.
+              rememberTaskFollowPosition(key, taskId, consumer.sequence);
             }
           }
-          if (controller.signal.aborted || sawTurnEnd) return;
+          if (controller.signal.aborted || sawTurnEnd) { consumer.finished = true; return; }
           throw capabilityError('AGENT_FOLLOW_DISCONNECTED', 'Task Agent event stream ended before turn completion');
         } catch (error) {
           if (controller.signal.aborted || ['SESSION_NOT_FOUND', 'AGENT_UNSUPPORTED'].includes(error?.code)) return;
@@ -191,6 +214,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     })().catch(error => {
       audit({ capability: 'agent.run', status: 'follow-error', code: error?.code ?? 'AGENT_FOLLOW_FAILED' });
     }).finally(() => {
+      consumer.finished = true;
       if (taskFollowConsumers.get(key) === consumer) taskFollowConsumers.delete(key);
     });
     return consumer;
@@ -198,6 +222,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
   function stopTaskFollow(provider, sessionId) {
     const key = taskFollowKey(provider, sessionId);
     const consumer = taskFollowConsumers.get(key);
+    taskFollowPositions.delete(key);
     if (!consumer) return false;
     consumer.controller.abort();
     taskFollowConsumers.delete(key);
@@ -828,6 +853,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       for (const consumer of consumers) consumer.controller.abort();
       await Promise.allSettled(consumers.map(consumer => consumer.promise));
       taskFollowConsumers.clear();
+      taskFollowPositions.clear();
     },
     setApprovalDecisionListener(listener) {
       if (listener !== null && typeof listener !== 'function') throw capabilityError('INVALID_PARAMS', 'Approval decision listener must be a function');
