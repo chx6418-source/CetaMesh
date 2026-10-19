@@ -254,7 +254,7 @@ function projectAgent(value) {
   const requiresTask = ['capability-broker', 'staged-capability-broker'].includes(workspaceBoundary);
   const boundaryUnverified = workspaceBoundary === 'unverified';
   const status = installed === false ? 'not-installed'
-    : compatible === false ? 'not-supported'
+    : compatible === false || (id === 'codex' && health.sandboxCapable === false) ? 'not-supported'
     : authenticated === false ? 'needs-setup'
     : boundaryUnverified && available ? 'descriptor-incomplete'
     : /unsupported|not[_-]supported/i.test(readiness) ? 'not-supported'

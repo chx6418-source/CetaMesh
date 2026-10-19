@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { CliAgentProcess, findCliExecutable } from '../src/agent/cli-agent-process.js';
+import { createDesktopUiService } from '../src/desktop/ui-service.js';
 import { createCetaMeshServices } from '../src/app/service-container.js';
 import { createCodexAgentProvider } from '../src/agent/codex-agent-provider.js';
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-discovery-'));
@@ -109,6 +110,11 @@ try {
    assert.equal((await p.status({sessionId:session.sessionId})).lastRunStatus,'completed');
    assert.equal((await p.health()).sandboxCapable,null,'completion belongs to the old inspection generation');
   } finally { await p.shutdown(); }
+ });
+ await check('known Sandbox refusal is not projected as a ready Agent badge', async () => {
+  const ui=createDesktopUiService({services:{agentService:{execute:async()=>({id:'codex',available:true,installed:true,compatible:true,authenticated:true,sessionCapable:true,taskEligible:false,sandboxCapable:false,status:'sandbox_unavailable',reason:'sandbox_unavailable',workspaceBoundary:'staged-capability-broker'})}}});
+  const h=await ui.execute({method:'ui.agent.health',params:{provider:'codex'}});
+  assert.equal(h.taskEligible,false);assert.equal(h.status,'not-supported');assert.equal(h.sandboxCapable,false);
  });
  await check('unsupported shim remains installed with actionable code', async () => {
   const shim = path.join(root, 'unknown.cmd'); fs.writeFileSync(shim, 'untrusted command');
