@@ -2,7 +2,7 @@
 
 工作分支：`fix/handoff-context-working-memory-20261019`。
 远端基础：`5c1f1312c31bbe58e59423f5417ad4f32d87dbd1`（原已领先 main 27 提交）。
-本轮保留已有修复，不合并 main，不发布安装包，不修改真实 Task/Memory/DSH 配置。
+本轮保留已有修复。Owner 已于 2026-10-19 授权在完成修复及验证后合并 main；当前尚待合并检查。不发布安装包，不修改真实 Task/Memory/DSH 配置。
 
 ## 交付内容
 
