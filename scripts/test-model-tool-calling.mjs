@@ -661,7 +661,7 @@ fs.rmSync(temp, { recursive: true, force: true });
 
 {
  const {runtime,calls}=modelRuntimeWith([{text:'',toolCalls:[{id:'read-once',capabilityId:'fixture.read',arguments:'{}'}]},{text:'Analysis based on the inspected file.',toolCalls:[]}]);
- let executions=0;const c=createToolExecutionCoordinator({modelRuntime:runtime,capabilityBroker:{execute:async()=>{executions++;return {status:'completed',result:'fixture content'};}},maxCycles:1});
+ let executions=0;const c=createToolExecutionCoordinator({finalSynthesisAtLimit:true,modelRuntime:runtime,capabilityBroker:{execute:async()=>{executions++;return {status:'completed',result:'fixture content'};}},maxCycles:1});
  const result=await c.run({providerId:'fixture',messages:[{role:'user',content:'analyze'}],manifest:[{id:'fixture.read',description:'read',inputSchema:emptyObjectSchema}],actor:OWNER_ACTOR,sessionId:'budget-summary',turnId:'budget-summary'});
  assert.equal(result.status,'completed','a valid final answer is not a tool-limit failure');
  assert.equal(executions,1);assert.equal(calls.at(-1).tools.length,0,'final synthesis cannot invoke further tools');

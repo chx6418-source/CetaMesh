@@ -259,6 +259,7 @@ export function createCetaMeshServices(options = {}) {
     })
   });
   toolExecutionCoordinator = createToolExecutionCoordinator({
+    finalSynthesisAtLimit: true,
     modelRuntime,
     capabilityBroker: capabilityService.broker,
     stateDir,

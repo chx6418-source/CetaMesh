@@ -158,6 +158,7 @@ export function createToolExecutionCoordinator({
   modelRuntime,
   capabilityBroker,
   stateDir,
+  finalSynthesisAtLimit = false,
   maxCycles = MAX_TOOL_CYCLES,
   maxCalls = MAX_TOTAL_CALLS,
   maxBatchCalls = MAX_BATCH_CALLS,
@@ -292,10 +293,11 @@ export function createToolExecutionCoordinator({
       const resumingToolBatch = Array.isArray(state.pendingCalls);
       const toolsAllowed = cycle < maxCycles && totalCalls < maxCalls;
       const request = {
-        providerId, model, reasoning, messages: toolsAllowed ? state.messages : [...state.messages, { role: 'system', content: 'The bounded tool budget is exhausted. Do not request or simulate more tools. Summarize the verified results already available, explain any missing evidence, and answer the user now. Do not claim unperformed work is complete.' }], signal,
-        tools: toolsAllowed ? state.manifest.map((item) => ({ id: item.id, description: item.description, inputSchema: item.inputSchema })) : [],
+        providerId, model, reasoning, messages: toolsAllowed || finalSynthesisAtLimit !== true ? state.messages : [...state.messages, { role: 'system', content: 'The bounded tool budget is exhausted. Do not request or simulate more tools. Summarize the verified results already available, explain any missing evidence, and answer the user now. Do not claim unperformed work is complete.' }], signal,
+        tools: toolsAllowed || finalSynthesisAtLimit !== true ? state.manifest.map((item) => ({ id: item.id, description: item.description, inputSchema: item.inputSchema })) : [],
         toolChoice: cycle < maxCycles && totalCalls < maxCalls ? 'auto' : 'none'
       };
+      if (!resumingToolBatch && !toolsAllowed && finalSynthesisAtLimit !== true) limitReached = true;
       let response;
       if (resumingToolBatch) {
         response = { text: '', toolCalls: state.pendingCalls, usage, resolvedModel };
