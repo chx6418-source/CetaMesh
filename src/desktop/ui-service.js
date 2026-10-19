@@ -110,7 +110,8 @@ function projectMessage(value) {
   const rawAgentActivity = record(row.agentActivity);
   const agentActivity = typeof rawAgentActivity.providerId === 'string' ? {
     providerId: string(rawAgentActivity.providerId, 80), label: string(rawAgentActivity.label, 180),
-    status: ['running', 'completed', 'cancelled', 'failed'].includes(rawAgentActivity.status) ? rawAgentActivity.status : 'running'
+    status: row.error ? 'failed' : row.cancelled === true ? 'cancelled'
+      : ['running', 'completed', 'cancelled', 'failed'].includes(rawAgentActivity.status) ? rawAgentActivity.status : 'running'
   } : null;
   return {
     id: string(row.id, 128), role, text: string(row.text, MAX_TEXT), at: scalar(row.at),

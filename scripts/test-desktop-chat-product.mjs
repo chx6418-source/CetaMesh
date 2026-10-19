@@ -1542,5 +1542,16 @@ ok('Agent events arriving before send ACK are replayed only after provider ident
  service.close();ok('Workspace rejection finalizes Agent card and preserves blocking Task review target');
 }
 
+
+// Read compatibility for failed history already saved by an older build.
+{
+ const stale={id:'old-failed',role:'assistant',text:'',error:'Workspace writer requires review',agentActivity:{providerId:'codex',label:'Codex',status:'running'}};
+ const ui=createDesktopUiService({services:{chatService:{execute:async()=>({id:'legacy-fixture',messages:[stale]})}}});
+ const projected=await ui.execute({method:'ui.chat.history',params:{id:'legacy-fixture'}});
+ assert.equal(projected.messages[0].agentActivity.status,'failed','old terminal error must never project a running badge');
+ assert.equal(stale.agentActivity.status,'running','projection must not mutate legacy persisted data');
+ ok('Legacy failed Agent history is displayed as terminal without rewriting data');
+}
+
 fs.rmSync(temp, { recursive: true, force: true });
 console.log(`\n🎉 阶段 03 Chat 运行时全部通过（${step} 组）`);
