@@ -1553,5 +1553,33 @@ ok('Agent events arriving before send ACK are replayed only after provider ident
  ok('Legacy failed Agent history is displayed as terminal without rewriting data');
 }
 
+// Owner cancellation after Core restart must not strand a local-only Managed Session.
+{
+ const {createTaskService}=await import('../src/task/service.js');
+ const {createManagedAgentProvider}=await import('../src/agent/managed-agent-provider.js');
+ const taskService=createTaskService({stateDir:path.join(temp,'cancel-restart')});
+ let old=taskService.runtime.create({goal:'read-only restart fixture',workspaceId:'ws-restart'});
+ old=taskService.runtime.start({id:old.id,expectedRev:old.rev,provider:'cetamesh',sessionId:'managed-from-previous-core'}).task;
+ old=taskService.runtime.block({id:old.id,expectedRev:old.rev,reason:'TOOL_CALL_LIMIT'}).task;
+ const managed=createManagedAgentProvider({modelRuntime:{chat:async()=>{throw Error('must not infer');}},capabilityExecutor:async()=>{throw Error('must not execute');}});
+ const ui=createDesktopUiService({services:{taskService,agentBroker:{cancel:args=>managed.provider.cancel(args)}}});
+ const cancelled=await ui.execute({method:'ui.task.cancel',params:{id:old.id,expectedRev:old.rev,reason:'Owner explicitly cancelled old task'}});
+ assert.equal(cancelled.task.status,'cancelled');
+ assert.equal(taskService.runtime.get({id:old.id}).task.currentAgent,null);
+ assert.equal(taskService.runtime.activeWorkspaceOwner({workspaceId:'ws-restart'}),null);
+ assert.equal(taskService.runtime.list().tasks.length,1,'keep original Task record');
+ for (const [provider,code] of [['codex','SESSION_NOT_FOUND'],['cetamesh','ETIMEDOUT']]) {
+  let pending=taskService.runtime.create({goal:`must keep ${provider} ${code}`,workspaceId:`ws-${code}-${provider}`});
+  pending=taskService.runtime.start({id:pending.id,expectedRev:pending.rev,provider,sessionId:'uncertain-session'}).task;
+  pending=taskService.runtime.block({id:pending.id,expectedRev:pending.rev,reason:'requires stop confirmation'}).task;
+  const uncertainUi=createDesktopUiService({services:{taskService,agentBroker:{cancel:async()=>{throw Object.assign(Error('stop unconfirmed'),{code});}}}});
+  await assert.rejects(uncertainUi.execute({method:'ui.task.cancel',params:{id:pending.id,expectedRev:pending.rev}}),e=>e.code===code);
+  assert.equal(taskService.runtime.get({id:pending.id}).task.currentAgent.sessionId,'uncertain-session');
+  assert.equal(taskService.runtime.get({id:pending.id}).task.status,'blocked');
+ }
+ await managed.close();
+ ok('Owner cancellation releases a missing local Managed Session after restart without executing or deleting history');
+}
+
 fs.rmSync(temp, { recursive: true, force: true });
 console.log(`\n🎉 阶段 03 Chat 运行时全部通过（${step} 组）`);

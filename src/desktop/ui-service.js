@@ -668,12 +668,20 @@ export function createDesktopUiService({ services = {}, system = services.system
     return current;
   }
 
-  async function stopTask(taskRow) {
+  async function stopTask(taskRow, { cancelMissingManagedSession = false } = {}) {
     if (services.continuityService?.runtime?.isInFlight(taskRow.id)) {
       throw uiError('TASK_HANDOFF_IN_FLIGHT', '任务正在交接执行者，暂不能暂停或取消');
     }
     if (!taskRow.currentAgent) return;
-    await services.agentBroker.cancel(taskRow.currentAgent);
+    try {
+      await services.agentBroker.cancel(taskRow.currentAgent);
+    } catch (error) {
+      // Managed Sessions exist only in this Core's memory. After restart, an explicit
+      // Owner cancellation may end the persisted Task even when its old Session is gone.
+      // External providers and uncertain transport failures still require a stop ACK.
+      if (!cancelMissingManagedSession || taskRow.currentAgent.provider !== 'cetamesh'
+          || error?.code !== 'SESSION_NOT_FOUND') throw error;
+    }
   }
 
   const handlers = {
@@ -931,7 +939,7 @@ export function createDesktopUiService({ services = {}, system = services.system
     'ui.task.cancel': async p => {
       const current = (await task('task.get', { id: idParam(p) })).task;
       if (p.expectedRev !== undefined && current.rev !== p.expectedRev) throw uiError('TASK_CONFLICT', '任务已被其他操作修改');
-      await stopTask(current);
+      await stopTask(current, { cancelMissingManagedSession: true });
       const result = await task('task.cancel', { id: current.id, expectedRev: current.rev, reason: string(p.reason, 1000) });
       emit('task.updated', { taskId: result.task?.id, status: result.task?.status });
       return { task: projectTask(result.task) };
