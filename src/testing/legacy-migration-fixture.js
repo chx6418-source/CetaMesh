@@ -118,7 +118,20 @@ export function openFixtureForChild({ root, nonce }) {
     for (const row of journal.files ?? []) {
       if (!journal.expectedTargets.some(expected => expected.source === row.source && expected.hash === row.hash && expected.target === row.target && expected.records === row.records && expected.identityHash === row.identityHash)) throw migrationError('JOURNAL_UNVERIFIED');
       const backup = safe(path.join(absolute, row.backup));
-      if (digest(fs.readFileSync(backup)) !== row.hash || digest(permission(backup)) !== digest(row.backupPermissions)) throw migrationError('BACKUP_UNVERIFIED');
+      const backupHash = digest(fs.readFileSync(backup));
+      const observed = permission(backup);
+      const expected = row.backupPermissions;
+      if (backupHash !== row.hash || digest(observed) !== digest(expected)) {
+        // Only report booleans and hashes: never echo Windows SDDL, paths or content.
+        const mismatch = {
+          content: backupHash !== row.hash,
+          mode: observed.mode !== expected?.mode,
+          acl: observed.sddl !== expected?.sddl,
+          observedAclDigest: observed.sddl ? digest(observed.sddl).slice(0, 12) : null,
+          expectedAclDigest: expected?.sddl ? digest(expected.sddl).slice(0, 12) : null
+        };
+        throw Object.assign(migrationError('BACKUP_UNVERIFIED'), { message: 'BACKUP_UNVERIFIED: ' + JSON.stringify(mismatch) });
+      }
     }
   };
   const verifyTarget = journal => {
