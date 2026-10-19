@@ -137,7 +137,10 @@ export function openFixtureForChild({ root, nonce }) {
   const verifyTarget = journal => {
     for (const row of journal.files) {
       const file = safe(path.join(absolute, journal.versionDirectory, row.target));
-      if (digest(fs.readFileSync(file)) !== row.hash || digest(permission(file)) !== digest(row.permissions)) throw migrationError('TARGET_UNVERIFIED');
+      const expected = row.targetPermissions ?? row.permissions; // Legacy journal: retain fail-closed verification.
+      if (digest(fs.readFileSync(file)) !== row.hash || digest(permission(file)) !== digest(expected)) {
+        throw migrationError('TARGET_UNVERIFIED');
+      }
       if (row.target.endsWith('.json')) {
         const schema = inspectSchema(row.target.replace(/^accounts\/[1-9]\d*\//, ''), readJsonFile(file));
         if (!schema.valid || schema.records !== row.records || schema.identityHash !== row.identityHash) throw migrationError('TARGET_IDENTITIES_UNVERIFIED');
@@ -197,6 +200,10 @@ export function openFixtureForChild({ root, nonce }) {
           const target = safe(path.join(absolute, versionDirectory, row.target));
           writeTextAtomic(target, fs.readFileSync(safe(path.join(absolute, row.backup)), 'utf8'));
           restorePermission(target, row.permissions);
+          // Capture the observed target ACL after restoration. Keep the original
+          // source ACL separately; Windows normalizes inherited ACE metadata.
+          row.targetPermissions = permission(target);
+          if (row.targetPermissions.mode !== row.permissions.mode) throw migrationError('PERMISSION_RESTORE_FAILED');
           if (failure === 'WRITE_FAILED') throw migrationError('WRITE_FAILED');
         }
         phase('STAGED'); beforeVerify?.(); verifyTarget(journal); validateStored(journal);

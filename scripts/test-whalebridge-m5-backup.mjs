@@ -47,5 +47,15 @@ try {
     'changing only a backup file permission must invalidate its verification');
   assert.deepEqual(aclGuard.authority(), beforePointer,
     'a tampered backup may not silently change migration ownership');
+  const targetGuard = make(), targetPlan = targetGuard.plan();
+  targetGuard.apply(targetPlan, { approval: targetGuard.approve(targetPlan) });
+  const targetJournal = readJsonFile(path.join(targetGuard.root, 'migration-journal.json'));
+  const targetFile = path.join(targetGuard.root, targetJournal.versionDirectory, targetJournal.files[0].target);
+  const oldMode = fs.statSync(targetFile).mode & 0o777;
+  fs.chmodSync(targetFile, (oldMode & 0o200) ? (oldMode & ~0o222) : (oldMode | 0o200));
+  const originalAuthority = targetGuard.authority();
+  assert.throws(() => targetGuard.rollback({ approval: targetGuard.approve(targetPlan) }), { code: 'TARGET_UNVERIFIED' },
+    'target file permission tampering must prevent rollback without switching authority');
+  assert.deepEqual(targetGuard.authority(), originalAuthority);
   console.log('FIXTURE_MIGRATION_PASS / ROLLBACK_PASS backup-path failure, durable journal and permission-only tamper rejection');
 } finally { for (const fixture of fixtures) fixture.dispose(); }
