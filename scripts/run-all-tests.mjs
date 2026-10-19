@@ -44,7 +44,7 @@ const REGISTRY = {
   'test-whalebridge-m5-epoch.mjs': { category: 'integration' },
   'test-whalebridge-m5-backup.mjs': { category: 'integration' },
   'test-whalebridge-m5-dry-run.mjs': { category: 'security' },
-  'test-whalebridge-m5-fixture.mjs': { category: 'integration' },
+  'test-whalebridge-m5-fixture.mjs': { category: 'integration', timeoutMs: 600_000, note: 'Synthetic Windows ACL and child-process crash/recovery scenarios; fail if verification or phase watchdog expires' },
   // ── core：基础服务 / 纯函数 / 传输协议 ─────────────────────────────────────
   'test-agent-provider.mjs': { category: 'core' },
   'test-dsh-connector-m3.mjs': { category: 'core' },
