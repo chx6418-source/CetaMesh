@@ -1,0 +1,34 @@
+name: handoff-repair-20261019
+on:
+  push:
+    branches: [fix/handoff-context-working-memory-20261019]
+    paths: [scripts/maintenance/apply-handoff-repair-20261019.mjs]
+permissions:
+  contents: write
+jobs:
+  repair:
+    if: github.repository == 'chx6418-source/whalebridge' && github.ref == 'refs/heads/fix/handoff-context-working-memory-20261019'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      WHALEBRIDGE_TEST_NETWORK: '0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/handoff-context-working-memory-20261019
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install locked project dependencies
+        run: npm ci
+      - name: Apply exact-base repair, verify red and green, and commit on repair branch only
+        run: node scripts/maintenance/apply-handoff-repair-20261019.mjs
+      - name: Upload red-green evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: handoff-repair-evidence-20261019
+          path: output/handoff-repair-20261019/
+          if-no-files-found: warn
+          retention-days: 7
