@@ -93,6 +93,23 @@ try {
   const cwd = path.join(root, 'untrusted-cwd'); fs.mkdirSync(cwd); const exe = path.join(cwd, 'codex.exe');fs.writeFileSync(exe, 'not-authorized');
   assert.equal(findCliExecutable('codex', { platform: 'win32', env: { PATH: '' }, whereImpl: () => ({status: 0, stdout: exe}) }), null);
  });
+ await check('old in-flight CLI cannot revalidate a replacement or A-B-A generation', async () => {
+  const source = path.join(root, 'identity-workspace'); fs.mkdirSync(source); fs.writeFileSync(path.join(source, 'sample.txt'), 'unchanged');
+  let current = 'codex-A', finish;
+  const cli = { executable: () => current, probe(args) { const r=probe(current,args);return {available:r.status===0,stdout:r.stdout,stderr:r.stderr}; },
+   startSession({onStdout}) { onStdout(JSON.stringify({type:'thread.started',thread_id:'identity-thread'})+'\n'+JSON.stringify({type:'turn.completed'})+'\n');return {done:new Promise(resolve=>{finish=resolve;}),cancel:()=>({cancelled:true}),shutdown(){}}; }, async shutdown(){} };
+  const p=createCodexAgentProvider({cliProcess:cli,stagingRoot:path.join(root,'identity-staging'),resolveTaskWorkspace:()=>({task:{id:'identity-task',workspaceId:'identity-workspace'},workspace:{id:'identity-workspace',root:source}})});
+  try {
+   const session=await p.createSession({taskId:'identity-task',workspaceId:'identity-workspace'});
+   await p.send({sessionId:session.sessionId,content:'read only'});
+   current='codex-B';assert.equal((await p.health({refresh:true})).sandboxCapable,null);
+   current='codex-A';assert.equal((await p.health({refresh:true})).sandboxCapable,null);
+   finish({exitCode:0,stdout:'',stderr:'',cancelled:false,timedOut:false});
+   for(let i=0;i<100;i++){if((await p.status({sessionId:session.sessionId})).lastRunStatus==='completed')break;await new Promise(resolve=>setTimeout(resolve,10));}
+   assert.equal((await p.status({sessionId:session.sessionId})).lastRunStatus,'completed');
+   assert.equal((await p.health()).sandboxCapable,null,'completion belongs to the old inspection generation');
+  } finally { await p.shutdown(); }
+ });
  await check('unsupported shim remains installed with actionable code', async () => {
   const shim = path.join(root, 'unknown.cmd'); fs.writeFileSync(shim, 'untrusted command');
   const health = await createCodexAgentProvider({ cliProcess: new CliAgentProcess({ name: 'codex', executable: shim, envSource: { PATH: '' }, platform: 'win32' }) }).health();

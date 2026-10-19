@@ -250,6 +250,7 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
   let authenticated = inspection.available ? loginState(cli) : false;
   let lastProbeAt = Date.now();
   let sandboxCapable = null;
+  let inspectionGeneration = 0;
   let inspectedIdentity = JSON.stringify([cli.executable(), inspection.version]);
   const sessions = new Map();
   const providerConfig = { model: null, reasoningEffort: null };
@@ -258,7 +259,7 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
     if (!force && Date.now() - lastProbeAt < HEALTH_TTL_MS) return;
     inspection = inspectCodexCli(cli);
     const identity = JSON.stringify([cli.executable(), inspection.version]);
-    if (identity !== inspectedIdentity) sandboxCapable = null;
+    if (identity !== inspectedIdentity) { sandboxCapable = null; inspectionGeneration++; }
     inspectedIdentity = identity;
     authenticated = inspection.available ? loginState(cli) : false;
     lastProbeAt = Date.now();
@@ -318,13 +319,13 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
     }
     if (result.exitCode !== 0 || run.failed || !run.turnCompleted) {
       const failure = classifyProcessFailure(result, run);
-      if (failure.code === 'CODEX_SANDBOX_UNAVAILABLE') sandboxCapable = false;
+      if (failure.code === 'CODEX_SANDBOX_UNAVAILABLE' && run.inspectionGeneration === inspectionGeneration) sandboxCapable = false;
       session.lastRunStatus = 'failed';
       session.lastError = { code: failure.code, exitCode: result.exitCode };
       emitTurnEnd(session, run.turnId, 'error', failure);
       return;
     }
-    sandboxCapable = true;
+    if (run.inspectionGeneration === inspectionGeneration) sandboxCapable = true;
     let changeSet;
     try {
       changeSet = collectStagedChanges(session.stage);
@@ -514,7 +515,7 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
           'Work only in this isolated staging directory. CetaMesh will reconcile and import changes through its Capability Broker.',
           String(content ?? '')
         ].filter(Boolean).join('\n\n');
-        const run = { turnId, pendingText: '', text: '', usage: null, turnCompleted: false, failed: false, handle: null };
+        const run = { turnId, inspectionGeneration, pendingText: '', text: '', usage: null, turnCompleted: false, failed: false, handle: null };
         session.activeRun = run;
         session.lastRunStatus = 'running';
         emit(session, makeEvent('turn/start', turnId));
