@@ -121,3 +121,7 @@ for (const marker of ['<｜｜DSML｜｜','<||DSML||']) {
  assert.equal(events.find(e=>e.type==='assistant/tool-calls').data.toolCalls[0].capabilityId,'filesystem.read','structured tool must remain usable');
 }
 console.log('PASS double-pipe DSML is suppressed while structured tool calls are preserved');
+
+const finalSummaryProvider=createOpenAiCompatibleModelProvider({id:'deepseek-official',label:'fixture',baseUrl:'https://fixture.example/v1',defaultModel:'fixture',protocolProfile:'deepseek-chat-v1',supportsTools:true,secrets:{raw:()=>({apiKey:'fixture-only'})},fetchImpl:async()=>new Response(JSON.stringify({choices:[{message:{content:'summary without required continuation'},finish_reason:'stop'}]}),{headers:{'content-type':'application/json'}})});
+await assert.rejects(()=>finalSummaryProvider.chat({model:'fixture',reasoning:'high',tools:[],messages:[{role:'assistant',content:null,tool_calls:[{id:'prior',type:'function',function:{name:'cap_read',arguments:'{}'}}]},{role:'tool',tool_call_id:'prior',content:'verified result'}]}),error=>error.code==='MODEL_CONTINUATION_REQUIRED','final synthesis must retain native continuation requirements for the next user turn');
+console.log('PASS thinking final synthesis refuses missing native continuation before persistence');

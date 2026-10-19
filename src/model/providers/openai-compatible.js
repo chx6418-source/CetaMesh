@@ -79,7 +79,7 @@ export function createOpenAiCompatibleModelProvider({
   }
 
   function requireResponseContinuation(value, body) {
-    if (deepseekProfile && body.thinking?.type === 'enabled' && body.tools?.length && typeof value !== 'string') {
+    if (deepseekProfile && body.thinking?.type === 'enabled' && hasDeepSeekToolContext(id, body) && typeof value !== 'string') {
       throw modelRuntimeError('MODEL_CONTINUATION_REQUIRED', '模型未返回当前工具回合所需的原生续接数据；已停止继续执行工具，请核验已有结果。');
     }
   }
