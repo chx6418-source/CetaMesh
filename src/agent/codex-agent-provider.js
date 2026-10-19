@@ -250,12 +250,16 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
   let authenticated = inspection.available ? loginState(cli) : false;
   let lastProbeAt = Date.now();
   let sandboxCapable = null;
+  let inspectedIdentity = JSON.stringify([cli.executable(), inspection.version]);
   const sessions = new Map();
   const providerConfig = { model: null, reasoningEffort: null };
 
   function refreshInspection(force = false) {
     if (!force && Date.now() - lastProbeAt < HEALTH_TTL_MS) return;
     inspection = inspectCodexCli(cli);
+    const identity = JSON.stringify([cli.executable(), inspection.version]);
+    if (identity !== inspectedIdentity) sandboxCapable = null;
+    inspectedIdentity = identity;
     authenticated = inspection.available ? loginState(cli) : false;
     lastProbeAt = Date.now();
   }

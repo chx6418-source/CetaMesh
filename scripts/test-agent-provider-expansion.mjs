@@ -501,6 +501,12 @@ try {
     'a model report cannot overwrite an established Task checkpoint');
   assert.ok(codexReports.some(row => row.text.includes('fixture response 1') && row.verified === false),
     'Task Follow persists an unverified Codex report separately even when no Chat is attached');
+  const inspectedExecutable = fakeCli.executable;
+  fakeCli.executable = () => 'new-codex-fixture';
+  assert.equal((await codexProvider.health({ refresh: true })).sandboxCapable, null,
+    'sandbox evidence from a previous executable cannot authorize a different CLI');
+  fakeCli.executable = inspectedExecutable;
+  await codexProvider.health({ refresh: true });
   const emittedTurn = codexProvider._sessions.get(codexSessionId).events.slice();
   const replayFor = async (label, sinceSequence = 0) => {
     const controller = new AbortController();

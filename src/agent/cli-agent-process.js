@@ -154,7 +154,8 @@ export function findCliCandidates(name, {
         .filter(result => /\.(?:exe|com|cmd|bat)$/i.test(result))
         .sort((a, b) => Number(/\.(?:cmd|bat)$/i.test(a)) - Number(/\.(?:cmd|bat)$/i.test(b)));
       for (const result of results) {
-        if (isFile(result)) found.push(path.resolve(result));
+        if (path.isAbsolute(result) && directories.some(directory => directory && path.isAbsolute(directory)
+          && path.resolve(path.dirname(result)).toLowerCase() === path.resolve(directory).toLowerCase()) && isFile(result)) found.push(path.resolve(result));
       }
     }
   }

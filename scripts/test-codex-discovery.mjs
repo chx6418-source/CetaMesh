@@ -89,6 +89,10 @@ try {
   const cli = { executable: () => 'fixture', probe: args => ({ available: true, stdout: args[0] === '--version' ? 'codex-cli 9.9.9' : args[0] === '--help' ? '--config --cd' : '--json --ignore-user-config --ignore-rules --strict-config --skip-git-repo-check [SESSION_ID]', stderr: '' }) };
   const h = await createCodexAgentProvider({ cliProcess: cli }).health(); assert.equal(h.compatible, false); assert.equal(h.probePhase, 'help');
  });
+ await check('where.exe cannot authorize a cwd-only executable outside allowed directories', () => {
+  const cwd = path.join(root, 'untrusted-cwd'); fs.mkdirSync(cwd); const exe = path.join(cwd, 'codex.exe');fs.writeFileSync(exe, 'not-authorized');
+  assert.equal(findCliExecutable('codex', { platform: 'win32', env: { PATH: '' }, whereImpl: () => ({status: 0, stdout: exe}) }), null);
+ });
  await check('unsupported shim remains installed with actionable code', async () => {
   const shim = path.join(root, 'unknown.cmd'); fs.writeFileSync(shim, 'untrusted command');
   const health = await createCodexAgentProvider({ cliProcess: new CliAgentProcess({ name: 'codex', executable: shim, envSource: { PATH: '' }, platform: 'win32' }) }).health();
