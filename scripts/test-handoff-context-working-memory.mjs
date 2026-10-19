@@ -30,7 +30,7 @@ async function fixture(run) {
   const services = createCetaMeshServices({stateDir:path.join(root,'state'), dataRoot:path.join(root,'data'),
     log: entry => diagnosticEvents.push(String(entry))});
   const requests = [], remoteRequests = [], remote = new Map();
-  let readOnce = false, readEmitted = false, holdCreate = null;
+  let readOnce = false, readEmitted = false, holdCreate = null, turnScopedFollow = false;
   services.modelRegistry.register({id:'fix-fixture',label:'Synthetic model',defaultModel:'fixture-model',supportsTools:true,
     listModels:async()=>[{id:'fixture-model'}], health:async()=>({available:true,configured:true}),
     chat:async()=>({text:'synthetic result'}),
@@ -52,7 +52,7 @@ async function fixture(run) {
       async cancel({sessionId}) { const s=remote.get(sessionId); if(s)s.running=false; return {cancelRequested:true,stopped:true}; },
       async closeSession({sessionId}) {const s=remote.get(sessionId);if(s){s.closed=true;for(const w of [...s.waiters])w();}return{closed:true};},
       async health(){return{available:true,authenticated:true,sessionCapable:true};},
-      async *follow({sessionId,signal,sinceSequence=0}) {const s=remote.get(sessionId);let cursor=sinceSequence;while(!signal?.aborted){for(const e of s.events.filter(e=>e.seq>cursor)){cursor=e.seq;yield structuredClone(e);if(signal?.aborted)return;}if(s.closed)return;await new Promise(resolve=>{const wake=()=>{s.waiters.delete(wake);signal?.removeEventListener('abort',wake);resolve();};s.waiters.add(wake);signal?.addEventListener('abort',wake,{once:true});if(signal?.aborted||s.events.some(e=>e.seq>cursor))wake();});}},
+      async *follow({sessionId,signal,sinceSequence=0}) {const s=remote.get(sessionId);let cursor=sinceSequence;while(!signal?.aborted){for(const e of s.events.filter(e=>e.seq>cursor)){cursor=e.seq;yield structuredClone(e);if(signal?.aborted)return;if(turnScopedFollow && e.type==='turn/end')return;}if(s.closed)return;await new Promise(resolve=>{const wake=()=>{s.waiters.delete(wake);signal?.removeEventListener('abort',wake);resolve();};s.waiters.add(wake);signal?.addEventListener('abort',wake,{once:true});if(signal?.aborted||s.events.some(e=>e.seq>cursor))wake();});}},
       async selectModel(){return{selected:true};}
     }});
   services.agentBroker.register(target);
@@ -77,7 +77,7 @@ async function fixture(run) {
   const config=agentProvider=>chat.execute({method:'chat.config.set',params:{id:session.id,config:{agentProvider}}});
   const getTask=async()=>services.taskService.runtime.get({id:(await status()).taskId}).task;
   try {await run({services,chat,session,ws,root,requests,remoteRequests,diagnosticEvents,send,config,getTask,status,
-    enableRead:()=>{readOnce=true;readEmitted=false;},hold:promise=>{holdCreate=promise;}});}
+    enableRead:()=>{readOnce=true;readEmitted=false;},useTurnScopedFollow:()=>{turnScopedFollow=true;},hold:promise=>{holdCreate=promise;}});}
   finally {chat.close();for(const s of remote.values()){s.closed=true;for(const w of [...s.waiters])w();}await services.close?.();fs.rmSync(root,{recursive:true,force:true});}
 }
 await check('first Model-to-Agent dispatch includes bounded Owner context',()=>fixture(async f=>{
@@ -171,6 +171,19 @@ await check('reused Task Agent Session retains distinct reports for each complet
   assert.equal(second.currentAgent.sessionId,sourceSession,'the second turn must reuse the same Agent Session');
   assert.equal(new Set(second.agentReports.map(row=>row.eventId)).size,2,'each turn must have a unique report identity');
   assert.equal(second.status,'running','successfully completed turns must not block the Task');
+}));
+await check('DSH-style turn-scoped Follow never replays first turn when a Session is reused',()=>fixture(async f=>{
+  f.useTurnScopedFollow();
+  await f.config('repair-fixture');
+  await f.send('Analyze first code area.');
+  const first=await waitFor(f.getTask,t=>t.agentReports?.length===1,'first DSH-style Task report');
+  const sessionId=first.currentAgent.sessionId;
+  await new Promise(resolve=>setTimeout(resolve,40));
+  await f.send('Analyze the next code area.');
+  const second=await waitFor(f.getTask,t=>t.agentReports?.length===2,'second DSH-style Task report');
+  assert.equal(second.currentAgent.sessionId,sessionId,'Task must reuse the existing external Session');
+  assert.equal(new Set(second.agentReports.map(row=>row.eventId)).size,2,'both accepted turns need distinct reports');
+  assert.equal(f.remoteRequests.filter(row=>row.sessionId===sessionId).length,2,'both turns must have been sent to one Session');
 }));
 await check('disabled Memory never auto-records working rows',()=>fixture(async f=>{
   await f.services.settingsService.execute({method:'settings.update',params:{section:'memory',values:{enabled:false}}});
