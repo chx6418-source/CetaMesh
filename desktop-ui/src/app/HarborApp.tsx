@@ -659,7 +659,7 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
       case 'empty': return <EmptyNotice icon="chat" title="还没有消息" detail="写下你要处理的事情。模型和 Agent 会按会话设置运行。" />;
       case 'message': return <MessageBubble message={item.message} sendError={sendErrors[item.message.id]} onRetry={sendErrors[item.message.id] ? () => void retrySend(item.message.id) : undefined} />;
       case 'streaming': return <MessageBubble message={item.message} streaming />;
-      case 'turn-error': return <div className="turn-error" role="alert">{item.message}<div className="row">{linkedTask ? <ManagedFailureActions taskId={linkedTask.id} onReviewTask={onReviewTask} onNewChat={() => void onNewChat()} /> : <><Button compact variant="ghost" onClick={() => void chatClient.retry(session!.id).then(load).catch(cause => setError(messageOf(cause)))}>重试</Button><Button compact variant="ghost" onClick={() => void chatClient.continue(session!.id).then(load).catch(cause => setError(messageOf(cause)))}>继续</Button></>}</div></div>;
+      case 'turn-error': return <div className="turn-error" role="alert">{item.message}<div className="row">{linkedTask ? <ManagedFailureActions taskId={workspaceFailureReviewTaskId(status.routing, linkedTask.id)} onReviewTask={onReviewTask} onNewChat={() => void onNewChat()} /> : <><Button compact variant="ghost" onClick={() => void chatClient.retry(session!.id).then(load).catch(cause => setError(messageOf(cause)))}>重试</Button><Button compact variant="ghost" onClick={() => void chatClient.continue(session!.id).then(load).catch(cause => setError(messageOf(cause)))}>继续</Button></>}</div></div>;
       case 'approval': return <ApprovalCard approval={item.approval} onDecide={decideApproval} />;
     }
   };
@@ -1238,6 +1238,10 @@ function DshSetupPanel({ agent, onConfigured }: { agent: Agent; onConfigured(con
 
 export function managedWorkspacePreflight(provider: string, workspaceId: string, activeWorkspaceId: string | null): string {
   return provider === 'cetamesh' && !workspaceId && !activeWorkspaceId ? 'CetaMesh 托管任务需要工作区，请先选择工作区后发送。' : '';
+}
+
+export function workspaceFailureReviewTaskId(routing: Record<string, unknown>, fallback: string): string {
+  return typeof routing.blockingTaskId === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(routing.blockingTaskId) ? routing.blockingTaskId : fallback;
 }
 
 export function ManagedFailureActions({ taskId, onReviewTask, onNewChat }: { taskId: string; onReviewTask(id: string): void; onNewChat(): void }) {

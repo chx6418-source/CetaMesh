@@ -1009,6 +1009,9 @@ export function createChatService({
   /** 回合终态：有文本就落盘 assistant 消息；取消后丢弃 DSH 会话以隔离迟到事件。 */
   function finalizeTurn(record, state) {
     const turn = state.turn;
+    if (turn.agentActivity && ['done', 'error', 'cancelled'].includes(turn.state)) {
+      turn.agentActivity = { ...turn.agentActivity, status: turn.state === 'done' ? 'completed' : turn.state === 'cancelled' ? 'cancelled' : 'failed' };
+    }
     // Agent/DSH 通道判定要在读取 state.modelTurn 之前：Model 通道的 finalize
     // 发生在其 finally 之前（modelTurn 仍非空）。Model 通道不是 Agent 会话，不上报。
     const isModelChannel = state.modelTurn != null;
@@ -1535,6 +1538,9 @@ export function createChatService({
           const cancelled = controller.signal.aborted || error?.code === 'ABORTED';
           turn.state = cancelled ? 'cancelled' : 'error';
           turn.errorCode = cancelled ? 'INVOKE_CANCELLED' : String(error?.code ?? 'PROVIDER_ERROR').slice(0, 100);
+          if (error?.code === 'TASK_WORKSPACE_BUSY' && typeof error.blockingTaskId === 'string') {
+            turn.routing = { ...turn.routing, blockingTaskId: error.blockingTaskId.slice(0, 128) };
+          }
           turn.error = cancelled ? null : String(error?.message ?? 'Authorized Agent operation failed').slice(0, 1000);
           finalizeTurn(record, state);
           onEvent?.({ event: 'chat.updated', data: { sessionId: record.id, status: turn.state, requestId: operation.requestId } });
@@ -1957,6 +1963,7 @@ export function createChatService({
         id: record.id,
         taskId: record.taskId ?? null,
         turn: null,
+        lastRouting: last?.role === 'assistant' && last.errorCode === 'TASK_WORKSPACE_BUSY' ? { blockingTaskId: last.routing?.blockingTaskId } : null,
         lastState: recovery?.state ?? (last?.role === 'user' ? (record.interruptedAt ? 'interrupted' : 'awaiting-reply') : last?.error ? 'error' : 'idle'),
         lastError: recovery ? 'Core 重启前的工具操作或审批需要人工核对'
           : last?.role === 'assistant' && typeof last.error === 'string' ? last.error : null,

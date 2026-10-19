@@ -73,7 +73,29 @@ try {
   await assert.rejects(services.capabilityService.broker.execute({ requestId: 'phase3-workspace-conflict',
     actor: OWNER_ACTOR, taskId: competingTask.id, workspaceId: workspace.id, capability: 'agent.run',
     input: { agentProvider: 'cetamesh', content: 'must not start a second Workspace writer' } }),
-  error => error.code === 'TASK_WORKSPACE_BUSY', 'two Tasks in one Workspace cannot hold concurrent write execution');
+  error => error.code === 'TASK_WORKSPACE_BUSY' && error.blockingTaskId === task.id, 'two Tasks in one Workspace cannot hold concurrent write execution');
+  // Real service composition: a blocked writer remains authoritative and Chat links to it.
+  services.taskService.runtime.block({id:task.id,expectedRev:services.taskService.runtime.get({id:task.id}).task.rev,reason:'Fixture unresolved prior execution'});
+  const priorHealth = services.agentBroker.health.bind(services.agentBroker);
+  services.agentBroker.health = async () => ({ available: true, authenticated: true, sessionCapable: true });
+  const busyChat = await services.chatService.execute({ method: 'chat.sessions.create', params: {} });
+  await services.chatService.execute({ method: 'chat.config.set', params: { id: busyChat.id, config: { agentProvider: 'cetamesh', workspaceId: workspace.id } } });
+  const sentBeforeConflict = sent.length;
+  await services.chatService.execute({ method: 'chat.send', params: { id: busyChat.id, text: 'New request while Workspace has an owner' } });
+  let busyStatus;
+  for (let i=0;i<100;i++) {
+    busyStatus = await services.desktopUiService.execute({ method: 'ui.chat.status', params: { id: busyChat.id } });
+    if (busyStatus.errorCode === 'TASK_WORKSPACE_BUSY') break;
+    await new Promise(resolve => setTimeout(resolve,5));
+  }
+  assert.equal(busyStatus.errorCode,'TASK_WORKSPACE_BUSY');
+  assert.equal(busyStatus.routing.blockingTaskId, task.id, 'Harbor review target must be the writer, not the newly queued Task');
+  const busyHistory = await services.desktopUiService.execute({ method: 'ui.chat.history', params: { id: busyChat.id } });
+  assert.equal(busyHistory.messages.at(-1).agentActivity.status, 'failed');
+  assert.equal(sent.length,sentBeforeConflict,'conflict cannot dispatch a second Agent instruction');
+  assert.equal(services.taskService.runtime.get({id:task.id}).task.status,'blocked','failed new Chat must not release the unresolved writer');
+  services.taskService.runtime.resume({id:task.id,expectedRev:services.taskService.runtime.get({id:task.id}).task.rev,note:'Fixture restore prior running scenario'});
+  services.agentBroker.health = priorHealth;
   services.capabilityService.setTaskHandoffGuard(() => true);
   await assert.rejects(services.capabilityService.broker.execute({ requestId: 'phase3-bootstrap-agent-read',
     actor: services.capabilityService.principalForTask(task.id), taskId: task.id,

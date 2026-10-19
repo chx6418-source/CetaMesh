@@ -1526,5 +1526,21 @@ ok('Agent events arriving before send ACK are replayed only after provider ident
   ok('Remote cancel request preserves unconfirmed tool state');
 }
 
+
+// A rejected Workspace writer must end the Agent card and retain a review target.
+{
+ const {service}=makeFullService({agent:true,agentProviderId:'codex',agentBoundary:'staged-capability-broker',
+  platformRoute:async()=>{throw Object.assign(new Error('Workspace writer requires review'),{code:'TASK_WORKSPACE_BUSY',blockingTaskId:'task-blocking-owner'});}});
+ const session=await service.execute({method:'chat.sessions.create',params:{}});
+ await service.execute({method:'chat.config.set',params:{id:session.id,config:{agentProvider:'codex'}}});
+ await service.execute({method:'chat.send',params:{id:session.id,text:'hello'}});
+ const h=await waitFor(()=>service.execute({method:'chat.history',params:{id:session.id}}),x=>x.messages.at(-1)?.errorCode==='TASK_WORKSPACE_BUSY','Workspace conflict terminal history');
+ assert.equal(h.messages.at(-1).agentActivity.status,'failed','rejected startup must not leave a running Agent card');
+ assert.equal(h.messages.at(-1).routing.blockingTaskId,'task-blocking-owner');
+ const status=await service.execute({method:'chat.status',params:{id:session.id}});
+ assert.equal(status.lastRouting.blockingTaskId,'task-blocking-owner','review target survives idle status refresh');
+ service.close();ok('Workspace rejection finalizes Agent card and preserves blocking Task review target');
+}
+
 fs.rmSync(temp, { recursive: true, force: true });
 console.log(`\n🎉 阶段 03 Chat 运行时全部通过（${step} 组）`);

@@ -10,6 +10,8 @@ globalThis.window = { setTimeout, clearTimeout };
 const vite = await createServer({ configFile: false, root: uiRoot, optimizeDeps: { noDiscovery: true }, server: { middlewareMode: true }, appType: 'custom', logLevel: 'error' });
 try {
   const ui = await vite.ssrLoadModule('/src/app/HarborApp.tsx');
+  assert.equal(ui.workspaceFailureReviewTaskId({blockingTaskId:'task-owner'},'task-new'),'task-owner');
+  assert.equal(ui.workspaceFailureReviewTaskId({},'task-new'),'task-new');
   const agentsMarkup = renderToStaticMarkup(React.createElement(ui.AgentsPage));
   assert.doesNotMatch(agentsMarkup, /聊天可用/); assert.match(agentsMarkup, /可用 Agent/);
   assert.equal(typeof ui.CodexSetupDiagnostic, 'function');

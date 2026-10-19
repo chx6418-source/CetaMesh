@@ -620,7 +620,8 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       const otherOwner = taskRuntime.activeWorkspaceOwner({ workspaceId: task.workspaceId, exceptTaskId: task.id });
       const reservation = workspaceProvisioning.get(task.workspaceId);
       if (otherOwner || (reservation && reservation.taskId !== task.id)) {
-        throw capabilityError('TASK_WORKSPACE_BUSY', 'Another Task holds write execution for this Workspace');
+        throw Object.assign(capabilityError('TASK_WORKSPACE_BUSY', '工作区仍由另一任务持有写入权；请先查看占用任务并核验，或切换工作区。'),
+          { blockingTaskId: otherOwner?.id ?? reservation.taskId });
       }
       workspaceProvisioning.set(task.workspaceId, { taskId: task.id, count: (reservation?.count ?? 0) + 1 });
       const previous = provisioning.get(task.id);
@@ -642,8 +643,10 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
         if (!['queued', 'running'].includes(task.status)) {
           throw capabilityError('TASK_NOT_RUNNING', 'Task is paused or ended; resume it before dispatching Agent work');
         }
-        if (taskRuntime.activeWorkspaceOwner({ workspaceId: task.workspaceId, exceptTaskId: task.id })) {
-          throw capabilityError('TASK_WORKSPACE_BUSY', 'Workspace writer changed while instruction was queued');
+        const queuedOwner = taskRuntime.activeWorkspaceOwner({ workspaceId: task.workspaceId, exceptTaskId: task.id });
+        if (queuedOwner) {
+          throw Object.assign(capabilityError('TASK_WORKSPACE_BUSY', '工作区写入权已由另一任务持有；请查看占用任务后核验。'),
+            { blockingTaskId: queuedOwner.id });
         }
         if (r.signal?.aborted) throw capabilityError('INVOKE_CANCELLED', 'Agent assignment cancelled');
         if (taskHandoffGuard(task.id)) throw capabilityError('TASK_HANDOFF_IN_FLIGHT', 'Task Handoff owns this execution boundary');

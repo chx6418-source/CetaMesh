@@ -739,7 +739,7 @@ export function createDesktopUiService({ services = {}, system = services.system
           durationMs: Number.isFinite(item.durationMs) ? Math.max(0, item.durationMs) : null
         })),
         approvalId: string(turn.approvalId, 128) || null, approvalExpiresAt: scalar(turn.approvalExpiresAt),
-        routing: selected(turn.routing, ['modelProvider', 'requestedModel', 'resolvedModel', 'toolCalling', 'taskId'])
+        routing: selected(turn.routing ?? result.lastRouting, ['modelProvider', 'requestedModel', 'resolvedModel', 'toolCalling', 'taskId', 'blockingTaskId'])
       };
     },
     'ui.chat.send': async (p, { signal } = {}) => {
