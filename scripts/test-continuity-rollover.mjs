@@ -501,8 +501,13 @@ ok('Handoff Packet retains complete Task requirements');
   const task = taskRuntime.create({ goal: 'Follow the target Agent', workspaceId: 'ws-follow' });
   taskRuntime.attachAgent({ id: task.id, expectedRev: rev(task.id), provider: 'alpha', sessionId: 'alpha-old' });
   const result = await runtime.rollover({ taskId: task.id, targetProvider: 'beta' });
-  assert.deepEqual(followed, [{ taskId: task.id, provider: result.to.provider, sessionId: result.to.sessionId }],
+  assert.equal(followed.length, 1, 'committed handoff registers a single Task event follower');
+  const [{ sinceSequence, bootstrapRequestId, bootstrapTurnId, ...assignment }] = followed;
+  assert.deepEqual(assignment, { taskId: task.id, provider: result.to.provider, sessionId: result.to.sessionId },
     'successful transfer must register the target Session for Task event follow');
+  assert.equal(bootstrapRequestId, 'bootstrap-beta-s2', 'Task follow must know the bootstrap request identity');
+  assert.equal(bootstrapTurnId, null, 'fixture without native Turn ID cannot fabricate one');
+  assert.ok(Number.isSafeInteger(sinceSequence) && sinceSequence >= 0, 'handoff passes a valid resume cursor');
   ok('target Agent Session is registered for Task follow only after successful handoff');
 }
 

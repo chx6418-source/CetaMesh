@@ -89,6 +89,8 @@ await check('ordinary short answer preserves checkpoint and next action',()=>fix
   await f.send('Acknowledge only.');task=await f.getTask();
   assert.equal(task.checkpoint.summary,'Confirmed source location; no edits yet.');
   assert.equal(task.checkpoint.nextAction,'Add a failing regression test.');
+  assert.ok(task.agentReports?.some(row => row.text.includes('Synthetic answer') && row.verified === false),
+    'unverified Agent report must be persisted separately from a verified checkpoint');
   assert.ok(!task.completedWork.some(row=>/Synthetic answer/.test(row.text)),'unverified answer was counted as completed work');
 }));
 await check('automatic policy may switch the actual assigned Agent',()=>fixture(async f=>{

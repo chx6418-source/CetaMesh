@@ -495,10 +495,12 @@ try {
   assert.equal(completedStatus.running, false);
   assert.equal((await agentBroker.health('codex')).sandboxCapable, true,
     'Codex is eligible for automatic routing only after its required sandbox has actually executed');
-  const codexCheckpoint = await waitFor(() => taskRuntime.get({ id: task.id }).task.checkpoint,
-    checkpoint => checkpoint?.summary?.includes('fixture response 1'));
-  assert.match(codexCheckpoint.summary, /fixture response 1/,
-    'Task Follow consumes Codex events and persists the Agent result even without Chat');
+  const codexReports = await waitFor(() => taskRuntime.get({ id: task.id }).task.agentReports,
+    rows => Array.isArray(rows) && rows.some(row => row.text.includes('fixture response 1')));
+  assert.equal(taskRuntime.get({ id: task.id }).task.checkpoint.summary, 'Provider workspace import',
+    'a model report cannot overwrite an established Task checkpoint');
+  assert.ok(codexReports.some(row => row.text.includes('fixture response 1') && row.verified === false),
+    'Task Follow persists an unverified Codex report separately even when no Chat is attached');
   const emittedTurn = codexProvider._sessions.get(codexSessionId).events.slice();
   const replayFor = async (label, sinceSequence = 0) => {
     const controller = new AbortController();
