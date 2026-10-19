@@ -13,8 +13,8 @@ async function check(name, run) {
   try { await run(); checks.push({name, passed:true}); console.log('PASS HANDOFF ' + name); }
   catch (error) { checks.push({name, passed:false, code:error.code, message:error.message}); console.error('FAIL HANDOFF ' + name + '\n' + error.stack); }
 }
-async function waitFor(read, predicate, label) {
-  const deadline = Date.now() + 5000;
+async function waitFor(read, predicate, label, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
   do { const value = await read(); if (predicate(value)) return value; await new Promise(r => setTimeout(r, 10)); } while (Date.now() < deadline);
   throw new Error('Timed out: ' + label);
 }
@@ -199,6 +199,28 @@ await check('DSH-style Follow retains both quickly queued Task turns from one Ag
     row=>row.agentReports?.length===2,'two independently recorded queued Agent turns');
   assert.equal(new Set(observed.agentReports.map(row=>row.eventId)).size,2);
   assert.equal(observed.status,'running');
+}));
+await check('lost Agent Follow blocks a running Task for explicit recovery instead of leaking a writer lease',()=>fixture(async f=>{
+  f.services.agentBroker.register(defineAgentProvider({id:'lost-follow-fixture',label:'Disconnected synthetic Agent',
+    eventProtocol:'agent-turn-events-v1',capabilityExtras:{workspaceBoundary:'capability-broker'},
+    methods:{
+      async createSession(){return {sessionId:'lost-follow-session'};},
+      async send(){return {accepted:true,requestId:'lost-follow-request'};},
+      async status(){return {running:false,queued:0,waitingForApproval:false};},
+      async cancel(){return {cancelRequested:true,stopped:true};},
+      async closeSession(){return {closed:true};},
+      async health(){return {available:true,authenticated:true,sessionCapable:true};},
+      async *follow(){ /* Native stream ended without a terminal event. */ }
+    }}));
+  const task=f.services.taskService.runtime.create({goal:'Verify interrupted Agent Follow',workspaceId:f.ws.id});
+  const accepted=await f.services.capabilityService.broker.execute({actor:OWNER_ACTOR,
+    requestId:'lost-follow-run',capability:'agent.run',taskId:task.id,workspaceId:f.ws.id,
+    input:{agentProvider:'lost-follow-fixture',content:'Perform one task'},reason:'Synthetic Follow outage'});
+  assert.equal(accepted.status,'completed');
+  const blocked=await waitFor(()=>f.services.taskService.runtime.get({id:task.id}).task,
+    row=>row.status==='blocked','Follow exhaustion reconciliation',11500);
+  assert.match(blocked.progress.note,/needs-reconciliation/);
+  assert.equal(blocked.currentAgent?.sessionId,'lost-follow-session');
 }));
 await check('disabled Memory never auto-records working rows',()=>fixture(async f=>{
   await f.services.settingsService.execute({method:'settings.update',params:{section:'memory',values:{enabled:false}}});
