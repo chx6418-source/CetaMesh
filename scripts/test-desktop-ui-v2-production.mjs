@@ -177,8 +177,9 @@ check('Agent registry states stay distinct and reflect real provider health', ()
   assert.match(app, /'not-checked': '未检查'/);
   assert.match(app, /StatusBadge value=\{agent\.status\} available=\{agent\.eligible\}/);
   assert.match(app, /agent\.status === 'needs-setup'/);
-  assert.match(app, /eligible: available && !requiresTask && !boundaryUnverified/);
-  assert.match(app, /status: boundaryUnverified && available \? 'descriptor-incomplete'/);
+  assert.match(app, /mergeAgentHealth\(item, health\)/);
+  assert.match(app, /return \{ \.\.\.previous, \.\.\.health \}/);
+  assert.doesNotMatch(app, /eligible: available && !requiresTask/);
   assert.match(app, /agents\.filter\(agent => agent\.eligible\)/);
   assert.match(app, /agent\.desktopApp\.installed/);
   assert.match(app, /agent\.desktopApp\.running/);
@@ -412,3 +413,4 @@ check('Chat streaming is frame-batched and non-bottom reading exposes a latest-m
   assert.match(content, /initialRect:/);
   assert.match(content, /virtual-list-frame/);
 });process.stdout.write(`PASS ${passed} production UI contracts\n`);
+

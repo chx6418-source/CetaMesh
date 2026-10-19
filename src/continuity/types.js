@@ -140,8 +140,11 @@ export function normalizePacket(packet) {
           entries: packet.ownerContext.entries.slice(-12).map(row => ({ id: text(row.id, 128), text: text(row.text, 500),
             at: Number.isFinite(row.at) ? row.at : null, truncated: row.truncated === true })) } : null,
     workingMemory: (Array.isArray(packet.workingMemory) ? packet.workingMemory : [])
-      .filter(row => row.scope === 'task:' + packet.taskId).slice(0, 1)
-      .map(row => ({ memoryId: text(row.memoryId, 128), scope: text(row.scope, 160), content: text(row.content, 4000) })),
+       .filter(row => (packet.memoryRefs ?? []).some(ref => ref.memoryId === row.memoryId && ref.scope === row.scope
+        && (row.scope === 'task:' + packet.taskId || ref.authorizedBy === 'user:desktop'))).slice(0, 4)
+      .map(row => ({ memoryId: text(row.memoryId, 128), scope: text(row.scope, 160),
+        type: text(row.type, 40), revision: Number.isSafeInteger(row.revision) ? row.revision : null,
+        source: text(row.source, 80), content: text(row.content, 4000) })),
     requirements: stringList(packet.requirements, PACKET_LIMITS.listItems, TASK_LIMITS.requirementChars),
     currentPhase: text(packet.currentPhase, 120),
     completedWork: list(packet.completedWork, PACKET_LIMITS.listItems),
@@ -261,3 +264,4 @@ function normalizeCodingFacts(coding) {
     knownFailures: stringList(coding.knownFailures)
   };
 }
+

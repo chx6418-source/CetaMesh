@@ -493,7 +493,7 @@ export function createChatService({
       if (endIndex < 0) throw chatError('INVALID_CURSOR', '历史消息游标不存在');
       startIndex = Math.max(0, endIndex - count);
     }
-    const page = all.slice(startIndex, endIndex).map((message) => ({
+    const page = all.slice(startIndex, endIndex).map(({ modelContinuation, modelMessages, ...message }) => ({
       ...message,
       text: typeof message.text === 'string' && message.text.length > MAX_MESSAGE_CHARS_RETURNED
         ? message.text.slice(0, MAX_MESSAGE_CHARS_RETURNED)
@@ -510,7 +510,17 @@ export function createChatService({
   }
 
   // ── 每会话配置 ───────────────────────────────────────────────────────────
-  async function setConfig({ id, config } = {}) {
+  async function setConfig(params = {}) {
+    const record = sessionOrThrow(params.id);
+    const state = runtimeOf(record.id);
+    if (state.configChangeInFlight) throw chatError('CONFIG_BUSY', '当前会话正在应用配置变更');
+    // Lock before asynchronous validation; one owner releases the transaction.
+    state.configChangeInFlight = true;
+    try { return await applyConfig(params); }
+    finally { state.configChangeInFlight = false; }
+  }
+
+  async function applyConfig({ id, config } = {}) {
     const record = sessionOrThrow(id);
     if (config?.provider !== undefined && !PROVIDERS.includes(config.provider)) {
       throw chatError('INVALID_PARAMS', `未知 Provider：${String(config.provider)}`);
@@ -566,7 +576,6 @@ export function createChatService({
       }
     }
     const state = runtimeOf(record.id);
-    if (state.configChangeInFlight) throw chatError('CONFIG_BUSY', '当前会话正在应用配置变更');
     const previousConfig = record.config;
     const nextConfig = { ...previousConfig };
     for (const key of ['provider', 'model', 'reasoning', 'mode', 'modelProvider', 'agentProvider', 'workspaceId']) {
@@ -590,8 +599,6 @@ export function createChatService({
     const previousAgentSession = agentProviderChanged ? previousProviderSession(record, previousAgentProvider) : null;
     if (agentProviderChanged) {
       if (record.taskId) {
-        state.configChangeInFlight = true;
-        try {
         const task = typeof resolveTask === 'function' ? await resolveTask(record.taskId) : null;
         if (!task || !task.currentAgent
           || task.currentAgent.provider !== (record.runtimeProvider || previousAgentProvider)
@@ -611,7 +618,6 @@ export function createChatService({
         touch(record);
         ensureFollow(record);
         return publicSession(record);
-        } finally { state.configChangeInFlight = false; }
       }
       record.config = nextConfig;
       stopFollow(record.id);
@@ -625,12 +631,10 @@ export function createChatService({
     // 模型/reasoning 变更即时生效：仍在 DSH 通道上的会话立即重新绑定（切换模型验收项）；
     // 已走 Model Runtime 的会话没有 DSH 绑定可刷——丢弃遗留 DSH 会话，模型下次回合生效。
     if (record.dshSessionId && modelConfigChanged) {
-      state.configChangeInFlight = true;
       const agentActive = previousConfig.agentProvider && previousConfig.agentProvider !== AGENT_PROVIDER_DISABLED;
       if (agentActive) {
         const provider = record.runtimeProvider || previousConfig.agentProvider;
         if (typeof agentExecute !== 'function') {
-          state.configChangeInFlight = false;
           throw chatError('PROVIDER_ERROR', `Agent 运行时不可用，无法应用 ${provider} 的模型/推理设置。`);
         }
         try {
@@ -662,8 +666,6 @@ export function createChatService({
             }
           }
           throw chatError('MODEL_BIND_FAILED', `Agent 模型切换失败（${provider}）：${error?.message ?? error}`);
-        } finally {
-          state.configChangeInFlight = false;
         }
       }
       const modelPathAvailable = Boolean(modelRuntime && (nextConfig.modelProvider || modelRuntime.defaultProviderId()));
@@ -675,8 +677,6 @@ export function createChatService({
           return publicSession(record);
         } catch (error) {
           throw chatError('MODEL_BIND_FAILED', `模型切换失败：${error?.message ?? error}`);
-        } finally {
-          state.configChangeInFlight = false;
         }
       }
       const previousModelSession = previousProviderSession(record, previousAgentProvider);
@@ -686,7 +686,6 @@ export function createChatService({
       record.runtimeProvider = null;
       touch(record);
       closePreviousProviderSession(record, previousModelSession, '已切换到 Model Runtime');
-      state.configChangeInFlight = false;
       return publicSession(record);
     }
     record.config = nextConfig;
@@ -965,6 +964,9 @@ export function createChatService({
         : typeof structuredError?.message === 'string' ? structuredError.message.slice(0, 1000) : null;
       const errorCode = typeof structuredError?.code === 'string' ? structuredError.code.slice(0, 100) : null;
       state.turn.displayText = text;
+      if (state.modelTurn?.kind === 'model' && data.modelContinuation) {
+        state.turn.modelContinuation = structuredClone(data.modelContinuation);
+      }
       const usage = extractUsage(event) ?? state.turn.usage ?? null;
       state.turn.usage = usage;
       if (data.resolvedModel || data.requestedModel) state.turn.routing = {
@@ -1022,6 +1024,8 @@ export function createChatService({
         turnId: turn.id,
         requestId: turn.requestId,
         usage: turn.usage ?? null,
+        ...(turn.state === 'done' && turn.modelContinuation ? { modelContinuation: turn.modelContinuation } : {}),
+        ...(turn.state === 'done' && turn.modelMessages?.length ? { modelMessages: turn.modelMessages } : {}),
         toolActivity: Array.isArray(turn.toolActivity) ? turn.toolActivity.slice(-32) : [],
         ...(turn.agentActivity ? { agentActivity: { ...turn.agentActivity } } : {}),
         ...(turn.routing ? { routing: turn.routing } : {}),
@@ -1228,11 +1232,28 @@ export function createChatService({
       if (message.role !== 'user' && message.role !== 'assistant') continue;
       if (message.error || message.cancelled) continue;
       const text = typeof message.text === 'string' ? message.text : '';
-      if (!text.trim()) continue;
-      messages.push({ role: message.role, content: text });
+      const hasProtocol = message.role === 'assistant'
+        && (message.modelContinuation || message.modelMessages?.length);
+      if (!text.trim() && !hasProtocol) continue;
+      // Protocol-private tool pairs/continuation never enter public Chat history.
+      if (message.role === 'assistant' && Array.isArray(message.modelMessages)) {
+        messages.push(...structuredClone(message.modelMessages));
+      }
+      messages.push({ role: message.role, content: text,
+        ...(message.role === 'assistant' && message.modelContinuation
+          ? { modelContinuation: structuredClone(message.modelContinuation) } : {}) });
     }
     messages.push({ role: 'user', content: promptText });
     return messages;
+  }
+
+  function retainModelProtocol(turn, result) {
+    if (result.modelContinuation) turn.modelContinuation = structuredClone(result.modelContinuation);
+    if (!Array.isArray(result.messages)) return;
+    const lastUser = result.messages.findLastIndex(message => message.role === 'user');
+    turn.modelMessages = result.messages.slice(lastUser + 1)
+      .filter(message => message.role === 'assistant' || message.role === 'tool')
+      .map(message => structuredClone(message));
   }
 
   /**
@@ -1338,6 +1359,7 @@ export function createChatService({
               onEvent?.({ event: 'chat.updated', data: { sessionId: record.id, status: turn.state } });
               return;
             }
+            retainModelProtocol(turn, result);
             turn.displayText = result.text ?? '';
             turn.state = result.status === 'partial' ? 'error' : 'done';
             if (result.status === 'partial') {
@@ -1726,7 +1748,7 @@ export function createChatService({
     return { continued: true, ...(accepted?.requestId ? { requestId: accepted.requestId } : {}) };
   }
 
-  async function prepareTaskContext({ record: requested, taskId } = {}) {
+  async function prepareTaskContext({ record: requested, taskId, requireComplete = true } = {}) {
     const record = sessions.get(String(requested?.id ?? ''));
     if (!record || record.taskId !== taskId) throw chatError('TASK_SESSION_MISMATCH', 'Owner context requires the linked Chat');
     const task = typeof resolveTask === 'function' ? await resolveTask(taskId) : null;
@@ -1735,6 +1757,10 @@ export function createChatService({
     }
     const messages = readHistory(record.id).filter(row => row.role === 'user');
     const snapshot = buildOwnerContext({ sessionId: record.id, messages });
+    if (requireComplete && (snapshot.omitted > 0 || snapshot.entries.some(row => row.truncated))) {
+      throw chatError('TASK_CONTEXT_REVIEW_REQUIRED',
+        '聊天中的任务约束超过可安全交接的大小；请先整理一份完整的目标、限制与下一步，再由所有者确认交接上下文。当前 Agent 保持绑定。');
+    }
     if (typeof recordOwnerContext === 'function') await recordOwnerContext({ id: task.id, expectedRev: task.rev,
       sessionId: record.id, messages });
     return renderOwnerContext(snapshot);
@@ -2024,6 +2050,7 @@ export function createChatService({
         onEvent?.({ event: 'chat.updated', data: { sessionId: record.id, status: state.turn.state } });
         return { resumed: true, pending: true, approvalId: result.approvalId };
       }
+      retainModelProtocol(state.turn, result);
       state.turn.displayText = result.text ?? '';
       state.turn.usage = result.usage ?? null;
       state.turn.routing = { ...(state.turn.routing ?? {}), toolCalling: result.toolCalling,
@@ -2159,3 +2186,4 @@ export function createChatService({
     close
   };
 }
+

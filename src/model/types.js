@@ -25,6 +25,19 @@ export function modelRuntimeError(code, message, { cause } = {}) {
   return error;
 }
 
+// Provenance stays process-local: arbitrary errors cannot label raw payloads as safe.
+const safeDiagnostics = new WeakMap();
+export function attachModelDiagnostics(error, details) {
+  const safe = Object.freeze({ ...details });
+  safeDiagnostics.set(error, safe);
+  error.details = safe;
+  return error;
+}
+export function safeModelErrorDetails(error) {
+  const value = error && typeof error === 'object' ? safeDiagnostics.get(error) : null;
+  return value ? { ...value } : null;
+}
+
 /** reasoning 会话值 → OpenAI reasoning_effort；'off' 表示不携带该参数（返回 null）。 */
 export function mapReasoningEffort(effort) {
   switch (String(effort ?? '')) {
@@ -66,3 +79,4 @@ export function createSseLineParser() {
     }
   };
 }
+

@@ -91,7 +91,8 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
         throw Object.assign(new Error('Chat operation cancelled'), { code: 'ABORTED' });
       }
       const inheritedContext = typeof prepareTaskContext === 'function'
-        ? await prepareTaskContext({ record, taskId: task.id }) : null;
+        ? await prepareTaskContext({ record, taskId: task.id,
+          requireComplete: !task.currentAgent || task.currentAgent.provider !== provider }) : null;
       const dispatchText = !task.currentAgent && inheritedContext
         ? inheritedContext + '\n[Current request]\n' + text : text;
       if (task.currentAgent && task.currentAgent.provider !== provider) {
@@ -167,3 +168,4 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
   }
   return { route };
 }
+

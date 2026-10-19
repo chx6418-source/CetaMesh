@@ -31,7 +31,7 @@ async function fixture(run) {
   const services = createCetaMeshServices({stateDir:path.join(root,'state'), dataRoot:path.join(root,'data'),
     log: entry => diagnosticEvents.push(String(entry))});
   const requests = [], remoteRequests = [], remote = new Map();
-  let readOnce = false, readEmitted = false, holdCreate = null, turnScopedFollow = false;
+  let readOnce = false, readEmitted = false, holdCreate = null, turnScopedFollow = false, continuation = false;
   services.modelRegistry.register({id:'fix-fixture',label:'Synthetic model',defaultModel:'fixture-model',supportsTools:true,
     listModels:async()=>[{id:'fixture-model'}], health:async()=>({available:true,configured:true}),
     chat:async()=>({text:'synthetic result'}),
@@ -39,14 +39,14 @@ async function fixture(run) {
       requests.push(structuredClone({...request, signal:undefined}));
       if (readOnce && !readEmitted) { readEmitted=true; yield {type:'assistant/tool-calls',data:{toolCalls:[{id:'read-proof',capabilityId:'filesystem.read',arguments:'{"path":"proof.txt"}'}]}}; }
       else yield {type:'assistant/message',data:{message:{content:[{type:'text',text:'Synthetic answer; no completion claim.'}]}}};
-      yield {type:'turn/end',data:{reason:{kind:'completed'}}};
+      yield {type:'turn/end',data:{reason:{kind:'completed'},...(continuation ? {modelContinuation:{profile:'deepseek-chat-v1',providerId:'fix-fixture',model:'fixture-model',reasoningContent:'private opaque continuation'}} : {})}};
     }});
   services.providerSecrets.set({provider:'fix-fixture',apiKey:'synthetic-not-a-real-key'});
   function emit(s,type,data) { s.events.push({seq:++s.seq,type,data:{sessionId:s.id,...data}}); for(const wake of [...s.waiters]) wake(); }
   const target = defineAgentProvider({id:'repair-fixture',label:'Synthetic Agent',eventProtocol:'dsh-session-events',
     capabilityExtras:{workspaceBoundary:'capability-broker',requiresSessionCleanup:true}, methods:{
       async createSession() { if(holdCreate) await holdCreate; const id='remote-'+(remote.size+1); remote.set(id,{id,events:[],seq:0,waiters:new Set(),running:false,closed:false}); return {sessionId:id}; },
-      async send({sessionId,content}) { const s=remote.get(sessionId); const requestId='remote-request-'+(remoteRequests.length+1); remoteRequests.push({sessionId,content,requestId}); s.running=true;
+      async send({sessionId,content,phase,runId}) { const s=remote.get(sessionId); const requestId='remote-request-'+(remoteRequests.length+1); remoteRequests.push({sessionId,content,requestId,phase,runId}); s.running=true;
         setTimeout(()=>{if(s.closed)return;emit(s,'turn/start',{requestId});emit(s,'assistant/message',{requestId,message:{content:[{type:'text',text:'Bootstrap or user acknowledgement; not completed work.'}]}});s.running=false;emit(s,'turn/end',{requestId,reason:{kind:'completed'}});},0);
         return {accepted:true,requestId}; },
       async status({sessionId}) { const s=remote.get(sessionId); return {running:s?.running===true,queued:0,waitingForApproval:false}; },
@@ -78,7 +78,7 @@ async function fixture(run) {
   const config=agentProvider=>chat.execute({method:'chat.config.set',params:{id:session.id,config:{agentProvider}}});
   const getTask=async()=>services.taskService.runtime.get({id:(await status()).taskId}).task;
   try {await run({services,chat,session,ws,root,requests,remoteRequests,diagnosticEvents,send,config,getTask,status,
-    enableRead:()=>{readOnce=true;readEmitted=false;},useTurnScopedFollow:()=>{turnScopedFollow=true;},hold:promise=>{holdCreate=promise;}});}
+    enableContinuation:()=>{continuation=true;},enableRead:()=>{readOnce=true;readEmitted=false;},useTurnScopedFollow:()=>{turnScopedFollow=true;},hold:promise=>{holdCreate=promise;}});}
   finally {chat.close();for(const s of remote.values()){s.closed=true;for(const w of [...s.waiters])w();}await services.close?.();fs.rmSync(root,{recursive:true,force:true});}
 }
 await check('first Model-to-Agent dispatch includes bounded Owner context',()=>fixture(async f=>{
@@ -144,7 +144,10 @@ await check('committed Work handoff is authoritative on the next Chat send',()=>
 await check('two handoffs preserve checkpoint and pending action',()=>fixture(async f=>{
   await f.config('cetamesh');await f.send('Analyze this project.');let task=await f.getTask();
   f.services.taskService.runtime.setCheckpoint({id:task.id,expectedRev:task.rev,summary:'Verified baseline.',nextAction:'Run isolated tests.'});
-  await f.config('repair-fixture');await f.config('cetamesh');await new Promise(r=>setTimeout(r,40));task=await f.getTask();
+  await f.config('repair-fixture');
+  assert.equal(f.remoteRequests.at(-1).phase,'bootstrap','Core must identify internal recovery runs explicitly');
+  assert.ok(f.remoteRequests.at(-1).runId,'Core recovery must have a stable run identity');
+  await f.config('cetamesh');await new Promise(r=>setTimeout(r,40));task=await f.getTask();
   assert.equal(task.checkpoint.summary,'Verified baseline.');assert.equal(task.checkpoint.nextAction,'Run isolated tests.');
   assert.ok(!task.completedWork.some(row=>/acknowledgement/.test(row.text)));
 }));
@@ -154,6 +157,9 @@ await check('Task working Memory is recorded, scoped, idempotent and restart-rea
   const read=()=>f.services.memoryService.runtime.list({principal,scope:'task:'+task.id,types:['working']});
   const page=await waitFor(read,r=>r.memories.length>0,'working memory');
   assert.equal(page.memories.length,1);assert.ok(page.memories[0].content.includes('filesystem.read'));
+  const workingState=JSON.parse(page.memories[0].content);
+  assert.ok(Number.isInteger(workingState.taskRevision),'working state must identify the source Task version');
+  assert.ok(workingState.evidence.some(row=>row.runId && row.phase==='user'),'tool evidence must preserve Core run provenance');
   assert.ok(!f.services.capabilityService.principalForTask(task.id).grants.capabilities.includes('memory.write'),'write permission must not be broadened');
   assert.ok(f.services.taskService.runtime.get({id:task.id}).task.memoryRefs.some(r=>r.memoryId===page.memories[0].id));
   await f.send('Acknowledge only.');assert.equal(read().memories[0].id,page.memories[0].id);
@@ -238,5 +244,135 @@ await check('Agent handoff excludes concurrent Chat sends',()=>fixture(async f=>
   try {await assert.rejects(f.chat.execute({method:'chat.send',params:{id:f.session.id,text:'Must wait for configuration.'}}),e=>e.code==='CONFIG_BUSY');}
   finally {release();await switching;}
 }));
+await check('checkpoint partial updates retain omitted fields',()=>fixture(async f=>{
+  const runtime=f.services.taskService.runtime;
+  let task=runtime.create({goal:'Keep structured progress',workspaceId:f.ws.id});
+  task=runtime.setCheckpoint({id:task.id,expectedRev:task.rev,summary:'Verified source',nextAction:'Run regression'});
+  task=runtime.setCheckpoint({id:task.id,expectedRev:task.rev,summary:'Verified updated source'});
+  assert.equal(task.checkpoint.nextAction,'Run regression','omission must not erase pending work');
+  task=runtime.setCheckpoint({id:task.id,expectedRev:task.rev,nextAction:'Inspect result'});
+  assert.equal(task.checkpoint.summary,'Verified updated source','partial update must retain summary');
+}));
+await check('native identities reused by another Session retain distinct reports and evidence',()=>fixture(async f=>{
+  const runtime=f.services.taskService.runtime;
+  let task=runtime.create({goal:'Stable Task source identities',workspaceId:f.ws.id});
+  for(const sessionId of ['native-one','native-two']) {
+    task=runtime.start({id:task.id,expectedRev:task.rev,provider:'repair-fixture',sessionId}).task;
+    task=runtime.recordAgentReport({id:task.id,expectedRev:task.rev,provider:'repair-fixture',sessionId,eventId:'report:turn-1',text:'Session-local report'});
+    task=runtime.recordToolOutcome({id:task.id,provider:'repair-fixture',sessionId,eventId:'tool-1',capability:'filesystem.read',status:'completed'}).task;
+  }
+  assert.equal(task.agentReports.length,2,'Session-local turn ID was mistaken for Task-wide duplicate');
+  assert.equal(task.executionEvidence.length,2,'Session-local tool ID was mistaken for Task-wide duplicate');
+  const same=runtime.recordAgentReport({id:task.id,expectedRev:task.rev,provider:'repair-fixture',sessionId:'native-two',eventId:'report:turn-1',text:'Session-local report'});
+  assert.equal(same.rev,task.rev,'same source event must remain idempotent');
+}));
+await check('internal phases never become Task reports, tool evidence or checkpoints',()=>fixture(async f=>{
+  const runtime=f.services.taskService.runtime;
+  let task=runtime.create({goal:'Reject internal phase projections',workspaceId:f.ws.id});
+  task=runtime.start({id:task.id,expectedRev:task.rev,provider:'repair-fixture',sessionId:'phase-source'}).task;
+  const original=f.services.agentBroker.follow;
+  let consumed=false;
+  f.services.agentBroker.follow=async function*() {
+    try {
+      const base={phase:'bootstrap',runId:'internal-run',requestId:'internal-request'};
+      yield {seq:1,type:'assistant/message',data:{...base,message:{content:[{type:'text',text:'Arbitrary internal response without acknowledgement keywords'}]}}};
+      yield {seq:2,type:'tool/result',data:{...base,eventId:'internal-tool',capability:'filesystem.read',status:'completed'}};
+      yield {seq:3,type:'turn/end',data:{...base,reason:{kind:'completed'}}};
+    } finally {consumed=true;}
+  };
+  try {
+    f.services.capabilityService.trackTaskAgent({taskId:task.id,provider:'repair-fixture',sessionId:'phase-source'});
+    await waitFor(()=>consumed,Boolean,'internal phase consumption');
+    const current=runtime.get({id:task.id}).task;
+    assert.equal(current.agentReports?.length??0,0,'internal reply must not become user work evidence');
+    assert.equal(current.executionEvidence?.length??0,0,'internal tool must not become user work evidence');
+    assert.equal(current.checkpoint,null,'internal reply must not initialize a checkpoint');
+  } finally {f.services.agentBroker.follow=original;}
+}));
+await check('Chat reuses private model continuation without exposing it in public history',()=>fixture(async f=>{
+  f.enableContinuation();
+  await f.send('First ordinary model question.');
+  await f.send('A follow-up model question.');
+  const prior=f.requests.at(-1).messages.find(row=>row.role==='assistant');
+  assert.equal(prior?.modelContinuation?.reasoningContent,'private opaque continuation','next model request lost required continuation');
+  const history=await f.chat.execute({method:'chat.history',params:{id:f.session.id}});
+  assert.ok(!JSON.stringify(history).includes('private opaque continuation'),'public Chat history leaked protocol-private metadata');
+}));
+await check('handoff fails before switching when Owner constraints would be omitted',()=>fixture(async f=>{
+  await f.config('cetamesh');
+  await f.send('Initial scoped task.');
+  await f.send('Only edit module A. '+('A'.repeat(700))+' Do not modify module B.');
+  const before=await f.getTask();
+  await assert.rejects(f.config('repair-fixture'),error=>error.code==='TASK_CONTEXT_REVIEW_REQUIRED');
+  const after=await f.getTask();
+  assert.deepEqual(after.currentAgent,before.currentAgent,'context preflight must preserve source execution ownership');
+  assert.equal(f.remoteRequests.length,0,'target must not receive incomplete Owner context');
+}));
+await check('configuration lock covers asynchronous Workspace validation before mutation',()=>fixture(async f=>{
+  const original=f.services.workspaceService.describeWorkspace;
+  let release;
+  const gate=new Promise(resolve=>{release=resolve;});
+  f.services.workspaceService.describeWorkspace=async id=>{await gate;return original(id);};
+  const changing=f.chat.execute({method:'chat.config.set',params:{id:f.session.id,config:{workspaceId:f.ws.id,reasoning:'high'}}});
+  try {
+    await assert.rejects(f.chat.execute({method:'chat.send',params:{id:f.session.id,text:'must wait'}}),error=>error.code==='CONFIG_BUSY');
+    await assert.rejects(f.config('cetamesh'),error=>error.code==='CONFIG_BUSY');
+  } finally {release();await changing;f.services.workspaceService.describeWorkspace=original;}
+}));
+await check('handoff includes linked authorized Memory excerpts and omits unlinked or deleted records',()=>fixture(async f=>{
+  await f.config('cetamesh');await f.send('Analyze the scoped task.');
+  const runtime=f.services.taskService.runtime;
+  const memory=f.services.memoryService.runtime;
+  const principal={kind:'user',id:'desktop'};
+  let task=await f.getTask();
+  const linked=memory.create({principal,type:'working',scope:'task:'+task.id,content:'LINKED-WORKING-FINGERPRINT'});
+  memory.create({principal,type:'working',scope:'task:'+task.id,content:'UNLINKED-SAME-SCOPE-SECRET'});
+  memory.create({principal,type:'working',scope:'task:other-task',content:'UNLINKED-OTHER-TASK-SECRET'});
+  runtime.linkMemory({id:task.id,expectedRev:task.rev,memoryId:linked.id,scope:linked.scope,type:linked.type,authorizedBy:'user:desktop'});
+  task=runtime.get({id:task.id}).task;
+  const approved=memory.create({principal,type:'user',scope:'user:desktop',content:'EXPLICIT-USER-MEMORY-FINGERPRINT'});
+  memory.create({principal,type:'user',scope:'user:desktop',content:'UNLINKED-USER-SCOPE-SECRET'});
+  runtime.linkMemory({id:task.id,expectedRev:task.rev,memoryId:approved.id,scope:approved.scope,type:approved.type,authorizedBy:'user:desktop'});
+  await f.config('repair-fixture');
+  const prompt=f.remoteRequests.at(-1).content;
+  assert.ok(prompt.includes('LINKED-WORKING-FINGERPRINT'),'external Agent received only IDs rather than the linked working fact');
+  assert.ok(prompt.includes('EXPLICIT-USER-MEMORY-FINGERPRINT'),'explicit cross-scope authorization must remain exact-ID readable');
+  assert.ok(!prompt.includes('UNLINKED-USER-SCOPE-SECRET'));
+  assert.ok(!prompt.includes('UNLINKED-SAME-SCOPE-SECRET'));
+  assert.ok(!prompt.includes('UNLINKED-OTHER-TASK-SECRET'));
+  memory.remove({principal,id:linked.id,expectedRev:linked.rev});
+  const packet=f.services.continuityService.runtime.buildHandoffPacket({taskId:task.id,sequence:99});
+  assert.ok(!JSON.stringify(packet.workingMemory).includes('LINKED-WORKING-FINGERPRINT'),'deleted Memory must not be revived from an old summary');
+}));
+await check('Memory excerpt budget preflight preserves the source Agent',()=>fixture(async f=>{
+  await f.config('cetamesh');await f.send('Analyze this scoped task.');
+  const runtime=f.services.taskService.runtime;
+  const memory=f.services.memoryService.runtime;
+  let task=await f.getTask();
+  for(let i=0;i<4;i++) {
+    const row=memory.create({principal:{kind:'user',id:'desktop'},type:'working',scope:'task:'+task.id,content:'Linked state '+i});
+    task=runtime.linkMemory({id:task.id,expectedRev:task.rev,memoryId:row.id,scope:row.scope,type:row.type,authorizedBy:'user:desktop'});
+  }
+  const before=task.currentAgent;
+  await assert.rejects(f.config('repair-fixture'),error=>error.code==='HANDOFF_MEMORY_CONTEXT_REVIEW_REQUIRED');
+  assert.deepEqual((await f.getTask()).currentAgent,before);
+  assert.equal(f.remoteRequests.length,0);
+}));
+await check('oversized individual Memory is refused before packet truncation or source stop',()=>fixture(async f=>{
+  await f.config('cetamesh');await f.send('Analyze bounded memory transfer.');
+  const runtime=f.services.taskService.runtime, memory=f.services.memoryService.runtime;
+  let task=await f.getTask();
+  const row=memory.create({principal:{kind:'user',id:'desktop'},type:'working',scope:'task:'+task.id,content:'bounded source'});
+  runtime.linkMemory({id:task.id,expectedRev:task.rev,memoryId:row.id,scope:row.scope,type:row.type,authorizedBy:'user:desktop'});
+  const original=memory.get;
+  // A legacy/adapter record larger than the packet contract must fail safely.
+  memory.get=args=>{const result=original(args);return args.id===row.id ? {memory:{...result.memory,content:'X'.repeat(5000)}} : result;};
+  try {
+    await assert.rejects(f.config('repair-fixture'),error=>error.code==='HANDOFF_MEMORY_CONTEXT_REVIEW_REQUIRED');
+    assert.deepEqual((await f.getTask()).currentAgent,task.currentAgent);
+    assert.equal(f.remoteRequests.length,0);
+  } finally {memory.get=original;}
+}));
 console.log('HANDOFF_RESULTS '+JSON.stringify(checks));
 assert.equal(checks.filter(c=>!c.passed).length,0,'handoff/context/working-memory regressions failed');
+

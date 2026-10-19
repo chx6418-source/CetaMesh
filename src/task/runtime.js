@@ -398,8 +398,10 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     return mutate(id, expectedRev, (task) => {
       task.checkpoint = {
         at: now(),
-        summary: normalizeText(summary, 'checkpoint.summary', TASK_LIMITS.checkpointChars),
-        nextAction: normalizeText(nextAction, 'checkpoint.nextAction', TASK_LIMITS.checkpointChars)
+        summary: summary === undefined ? (task.checkpoint?.summary ?? '')
+          : normalizeText(summary, 'checkpoint.summary', TASK_LIMITS.checkpointChars),
+        nextAction: nextAction === undefined ? (task.checkpoint?.nextAction ?? '')
+          : normalizeText(nextAction, 'checkpoint.nextAction', TASK_LIMITS.checkpointChars)
       };
       return task;
     });
@@ -481,10 +483,10 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
   }
 
   /** Persist one observed Broker tool result against the current Task owner. */
-  function recordToolOutcome({ id, provider, sessionId, eventId, capability, status, filePath, tool, exitCode } = {}) {
+  function recordToolOutcome({ id, provider, sessionId, eventId, runId, phase, capability, status, filePath, tool, exitCode } = {}) {
     const current = requireTask(id);
     const sourceId = normalizeText(eventId, 'eventId', 240, { required: true });
-    if (current.executionEvidence?.some(item => item.eventId === sourceId)) return { task: current, changed: false };
+    if (current.executionEvidence?.some(item => item.eventId === sourceId && item.provider === provider && item.sessionId === sessionId)) return { task: current, changed: false };
     if (current.status !== 'running' || current.currentAgent?.provider !== provider
       || current.currentAgent?.sessionId !== sessionId) {
       throw taskError('AGENT_ASSIGNMENT_EXPIRED', 'Tool outcome came from a stale Task Agent');
@@ -498,7 +500,9 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     const observedExitCode = Number.isSafeInteger(exitCode) ? exitCode : null;
     const task = mutate(id, current.rev, draft => {
       draft.executionEvidence ??= [];
-      draft.executionEvidence.push({ eventId: sourceId, provider, sessionId, capability: name,
+      draft.executionEvidence.push({ eventId: sourceId, provider, sessionId,
+        runId: normalizeText(runId, 'runId', 240) || null,
+        phase: normalizeText(phase, 'phase', 40) || 'unknown', capability: name,
         status: resultStatus, tool: typeof tool === 'string' ? tool.slice(0, 100) : null,
         exitCode: observedExitCode, filePath: artifactPath, at: now(), taskRev: draft.rev + 1 });
       if (draft.executionEvidence.length > 200) draft.executionEvidence.splice(0, draft.executionEvidence.length - 200);
@@ -549,17 +553,19 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
   }
 
   /** Store a native Agent claim separately; do not upgrade it to a verified Task checkpoint. */
-  function recordAgentReport({ id, expectedRev, provider, sessionId, eventId, text } = {}) {
+  function recordAgentReport({ id, expectedRev, provider, sessionId, eventId, runId, phase, text } = {}) {
     const sourceId = normalizeText(eventId, 'eventId', 240, { required: true });
     const content = normalizeText(redactText(text), 'text', 1600, { required: true });
     const current = requireTask(id);
-    if ((current.agentReports ?? []).some(row => row.eventId === sourceId)) return current;
+    if ((current.agentReports ?? []).some(row => row.eventId === sourceId && row.provider === provider && row.sessionId === sessionId)) return current;
     if (current.currentAgent?.provider !== provider || current.currentAgent?.sessionId !== sessionId) {
       throw taskError('AGENT_ASSIGNMENT_EXPIRED', 'Agent report came from a stale Task assignment');
     }
     return mutate(id, expectedRev, task => {
       task.agentReports ??= [];
-      task.agentReports.push({ eventId: sourceId, provider, sessionId, text: content,
+      task.agentReports.push({ eventId: sourceId, provider, sessionId,
+        runId: normalizeText(runId, 'runId', 240) || null,
+        phase: normalizeText(phase, 'phase', 40) || 'unknown', text: content,
         verified: false, at: now() });
       if (task.agentReports.length > TASK_LIMITS.agentReports) {
         task.agentReports.splice(0, task.agentReports.length - TASK_LIMITS.agentReports);
@@ -679,3 +685,4 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     _store: store
   };
 }
+

@@ -263,3 +263,22 @@ function fixtureProvider(id, { label, eventProtocol = null, withArchive = false,
 }
 
 console.log(`\n🎉 Agent Broker 统一契约全部通过（${step} 组）`);
+
+
+// Core-owned run metadata survives adapters that do not natively echo it.
+{
+  const registry=createAgentProviderRegistry();
+  const provider=fixtureProvider('phase-fixture');
+  let supplied;
+  registry.register({...provider, send:async params=>{supplied=params;return {accepted:true,requestId:'native-phase-request'};},
+    follow:async function*(){yield {seq:1,type:'turn/end',data:{requestId:'native-phase-request',reason:{kind:'completed'}}};}});
+  const broker=createAgentBroker({registry});
+  await broker.send({provider:'phase-fixture',sessionId:'phase-session',content:'recover',phase:'bootstrap',runId:'core-bootstrap-run'});
+  assert.equal(supplied.phase,'bootstrap');
+  assert.equal(supplied.runId,'core-bootstrap-run');
+  const events=[];for await(const event of broker.follow({provider:'phase-fixture',sessionId:'phase-session'})) events.push(event);
+  assert.equal(events[0].data.phase,'bootstrap','native events must retain Core phase ownership');
+  assert.equal(events[0].data.runId,'core-bootstrap-run');
+  broker.close();
+  ok('Broker preserves Core phase and run identity on native terminal events');
+}

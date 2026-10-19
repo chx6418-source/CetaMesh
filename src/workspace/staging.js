@@ -245,10 +245,30 @@ export function refreshStagingBaseline(stage) {
 
 export function cleanupStagingWorkspace(stage) {
   if (!stage || stage.closed) return { removed: false };
-  if (!pathContains(stage.stagingRoot, stage.root) || stage.root === stage.stagingRoot) {
-    fail('STAGING_PATH_INVALID', 'Refusing to remove a path outside the private staging root');
+  // Never let absent or relative metadata resolve against the caller's cwd.
+  if ([stage.root, stage.stagingRoot].some(value =>
+    typeof value !== 'string' || !value.trim() || value.includes('\0') || !path.isAbsolute(value))) {
+    fail('STAGING_PATH_INVALID', 'Staging cleanup requires absolute root and stagingRoot paths');
   }
-  fs.rmSync(stage.root, { recursive: true, force: true });
+  const root = path.resolve(stage.root);
+  const stagingRoot = path.resolve(stage.stagingRoot);
+  // Require a strict descendant both lexically and after resolving filesystem aliases.
+  for (const [base, target] of [[stagingRoot, root], [canonicalRealPath(stagingRoot), canonicalRealPath(root)]]) {
+    const relative = path.relative(base, target);
+    if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+      fail('STAGING_PATH_INVALID', 'Refusing to remove a path outside the private staging root');
+    }
+  }
+  try {
+    if (fs.lstatSync(root).isSymbolicLink()) {
+      fail('STAGING_PATH_INVALID', 'Refusing to remove a symbolic staging root');
+    }
+  } catch (error) {
+    // A previously removed stage is safe; all other lookup failures stay closed.
+    if (error?.code !== 'ENOENT') fail('STAGING_PATH_INVALID', 'Unable to validate staging cleanup path', error);
+  }
+  fs.rmSync(root, { recursive: true, force: true });
   stage.closed = true;
   return { removed: true };
 }
+

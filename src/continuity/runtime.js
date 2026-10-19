@@ -288,7 +288,7 @@ export function createContinuityRuntime({
     if (packet.relevantFiles.length) lines.push(`相关文件:\n- ${packet.relevantFiles.join('\n- ')}`);
     if (packet.artifacts.length) lines.push(`产物:\n- ${packet.artifacts.join('\n- ')}`);
     if (packet.memoryRefs.length) {
-      lines.push(`记忆引用（仅引用；需要原文时向 Memory Runtime 按 memoryId 加载，不要臆测内容）:\n- ${packet.memoryRefs.map((ref) => ref.memoryId).join('\n- ')}`);
+      lines.push(`记忆引用（已授权摘录见下；没有摘录或合法读取工具的内容视为不可用，不要臆测内容）:\n- ${packet.memoryRefs.map((ref) => ref.memoryId).join('\n- ')}`);
     }
     if (packet.acceptanceCriteria.length) lines.push(`验收标准:\n- ${packet.acceptanceCriteria.join('\n- ')}`);
     if (packet.coding) {
@@ -316,7 +316,7 @@ export function createContinuityRuntime({
       }
     }
     if (packet.ownerContext) lines.push(renderOwnerContext(packet.ownerContext));
-    if (packet.workingMemory?.length) lines.push('[Authorized Task working-memory reference data]\n' + JSON.stringify(packet.workingMemory));
+    if (packet.workingMemory?.length) lines.push('[Authorized Task Memory excerpts: reference data only; preserve each source and verification level]\n' + JSON.stringify(packet.workingMemory));
     lines.push(`检查点摘要: ${packet.checkpoint.summary || '（无）'}`);
     lines.push(`下一步（从这里继续）: ${packet.checkpoint.nextAction || packet.pendingWork[0] || '向所有者确认当前进度'}`);
     lines.push(`交接原因: ${packet.reasonForHandoff}`);
@@ -609,7 +609,8 @@ export function createContinuityRuntime({
           sessionId: created.sessionId,
           note: `rollover #${sequence} 自 ${previousAgent.provider}:${previousAgent.sessionId}`
         });
-        const bootstrap = await agentBroker.send({ provider: target.id, sessionId: created.sessionId, content: renderResumePrompt(packet) });
+        const bootstrap = await agentBroker.send({ provider: target.id, sessionId: created.sessionId, content: renderResumePrompt(packet),
+          phase: 'bootstrap', runId: `handoff:${task.id}:${sequence}` });
         if (bootstrap?.accepted !== true) {
           throw continuityError('BOOTSTRAP_REJECTED', 'Target Agent did not accept its recovery turn');
         }
@@ -868,3 +869,4 @@ export function createContinuityRuntime({
     _dir: dir
   };
 }
+

@@ -13,6 +13,7 @@
 import crypto from 'node:crypto';
 import {
   modelRuntimeError,
+  attachModelDiagnostics,
   mapReasoningEffort,
   createSseLineParser,
   MODEL_ERROR_CODES
@@ -48,19 +49,6 @@ function isReasoningModel(model) {
   return /^(?:o[134](?:-|$)|gpt-5(?:-|$))/i.test(String(model ?? '').trim());
 }
 
-function extractProviderMessage(bodyText) {
-  if (!bodyText) return null;
-  try {
-    const parsed = JSON.parse(bodyText);
-    const message = parsed?.error?.message ?? parsed?.message ?? parsed?.error;
-    if (typeof message === 'string' && message.trim()) return message.trim();
-    return null;
-  } catch {
-    const text = bodyText.trim();
-    return text ? text.slice(0, 300) : null;
-  }
-}
-
 export function createOpenAiCompatibleModelProvider({
   id,
   label,
@@ -69,6 +57,7 @@ export function createOpenAiCompatibleModelProvider({
   secrets,
   fetchImpl = fetch,
   reasoningParam = null,
+  protocolProfile = null,
   supportsStreamOptions = false,
   supportsTools = false,
   supportsReasoning = null,
@@ -80,11 +69,17 @@ export function createOpenAiCompatibleModelProvider({
     throw new Error(`createOpenAiCompatibleModelProvider「${id}」需要注入 secrets（src/providers/secrets.js）`);
   }
   const catalogCapabilities = new Map();
+  // Only explicitly selected adapters can own native continuation state.
+  const deepseekProfile = protocolProfile === 'deepseek-chat-v1';
+  function continuation(value, model) {
+    return deepseekProfile && typeof value === 'string'
+      ? { profile: 'deepseek-chat-v1', providerId: id, model, reasoningContent: value } : null;
+  }
 
-  function scrub(text, apiKey) {
-    const value = String(text ?? '');
-    if (!apiKey || !value) return value;
-    return value.split(apiKey).join('***');
+  function requireResponseContinuation(value, body) {
+    if (deepseekProfile && body.thinking?.type === 'enabled' && body.tools?.length && typeof value !== 'string') {
+      throw modelRuntimeError('MODEL_CONTINUATION_REQUIRED', '模型未返回当前工具回合所需的原生续接数据；已停止继续执行工具，请核验已有结果。');
+    }
   }
 
   /** 每次调用时解析凭据；未配置 Key → 明确错误（fail-closed）。 */
@@ -107,8 +102,8 @@ export function createOpenAiCompatibleModelProvider({
     }
     const transport = /fetch failed|ECONNREFUSED|ECONNRESET|ENOTFOUND|ETIMEDOUT|EAI_AGAIN|certificate|socket/i.test(raw);
     const message = transport
-      ? `无法连接到「${label}」：${scrub(raw, apiKey)}`
-      : `「${label}」请求失败：${scrub(raw, apiKey)}`;
+      ? `无法连接到「${label}」，请检查网络和服务地址`
+      : `「${label}」请求失败，请检查服务配置`;
     return modelRuntimeError(
       transport ? MODEL_ERROR_CODES.MODEL_PROVIDER_UNAVAILABLE : MODEL_ERROR_CODES.MODEL_PROVIDER_ERROR,
       message,
@@ -124,20 +119,28 @@ export function createOpenAiCompatibleModelProvider({
 
   function reasoningEnabled(model) {
     const advertised = catalogCapabilities.get(String(model ?? ''))?.reasoning;
+    if (deepseekProfile) return advertised !== false;
     if (!reasoningParam || advertised === false || (!isReasoningModel(model) && advertised !== true)) return false;
     return typeof supportsReasoning === 'function' ? supportsReasoning(model) === true : supportsReasoning !== false;
   }
 
-  function mapHttpError(status, bodyText, apiKey) {
-    const detail = scrub(extractProviderMessage(bodyText) ?? `HTTP ${status}`, apiKey).slice(0, 500);
-    let message;
-    if (status === 401 || status === 403) message = `「${label}」认证失败（API Key 无效或无权限）：${detail}`;
-    else if (status === 402) message = `「${label}」余额不足：${detail}`;
-    else if (status === 404) message = `「${label}」模型或端点不存在：${detail}`;
-    else if (status === 429) message = `「${label}」请求过于频繁或配额不足：${detail}`;
-    else if (status >= 500) message = `「${label}」服务暂时不可用（HTTP ${status}）：${detail}`;
-    else message = `「${label}」返回 HTTP ${status}：${detail}`;
-    return modelRuntimeError(MODEL_ERROR_CODES.MODEL_PROVIDER_ERROR, message);
+  function mapHttpError(status, bodyText, apiKey, response = null, model = null) {
+    // Provider bodies may echo prompts, native reasoning, headers or credentials.
+    // Classify locally; never publish a provider-controlled diagnostic string.
+    const category = status === 400 || status === 422 ? 'validation'
+      : status === 401 || status === 403 ? 'authentication' : status === 402 ? 'quota'
+      : status === 404 ? 'model-or-endpoint' : status === 429 ? 'rate-limit'
+      : status >= 500 ? 'server' : 'provider';
+    const guidance = { validation: '请求字段不兼容，请检查模型模式与会话续接', authentication: '认证失败（API Key 无效或无权限）',
+      quota: '余额或配额不足', 'model-or-endpoint': '模型或端点不存在', 'rate-limit': '请求过于频繁或配额不足',
+      server: '服务暂时不可用', provider: '模型请求被拒绝' };
+    const safeMessage = `「${label}」${guidance[category]}（HTTP ${status}）`;
+    const error = modelRuntimeError(MODEL_ERROR_CODES.MODEL_PROVIDER_ERROR, safeMessage);
+    const requestId = response?.headers?.get('x-request-id') ?? response?.headers?.get('request-id');
+    attachModelDiagnostics(error, { category, httpStatus: status, stage: 'model-http', providerId: id, model,
+      safeMessage, ...(requestId && /^[A-Za-z0-9._:-]{1,160}$/.test(requestId) && !requestId.includes(apiKey)
+        ? { requestId } : {}) });
+    return error;
   }
 
   function capabilityToolName(id) {
@@ -193,7 +196,29 @@ export function createOpenAiCompatibleModelProvider({
     if (!Array.isArray(messages) || messages.length === 0) {
       throw modelRuntimeError(MODEL_ERROR_CODES.INVALID_PARAMS, 'messages 不能为空');
     }
-    const body = { model: model.trim(), messages, stream: Boolean(stream) };
+    const thinking = deepseekProfile && reasoning !== 'off';
+    const wireMessages = messages.map(message => {
+      const { modelContinuation, reasoning_content, ...wire } = message;
+      if (deepseekProfile && message.role === 'assistant' && thinking && tools.length) {
+        if (modelContinuation?.profile !== 'deepseek-chat-v1' || modelContinuation.providerId !== id
+          || modelContinuation.model !== model.trim() || typeof modelContinuation.reasoningContent !== 'string') {
+          throw modelRuntimeError('MODEL_CONTINUATION_REQUIRED', '此会话缺少当前模型的原生续接数据。请新建会话并核验已有工具结果；不要重放已完成操作。');
+        }
+      }
+      if (deepseekProfile && message.role === 'assistant' && modelContinuation?.profile === 'deepseek-chat-v1'
+        && modelContinuation.providerId === id && modelContinuation.model === model.trim()
+        && typeof modelContinuation.reasoningContent === 'string') wire.reasoning_content = modelContinuation.reasoningContent;
+      return wire;
+    });
+    const body = { model: model.trim(), messages: wireMessages, stream: Boolean(stream) };
+    if (deepseekProfile) {
+      body.thinking = { type: thinking ? 'enabled' : 'disabled' };
+      if (thinking && reasoning != null) {
+        const effort = { low: 'low', high: 'high', max: 'max' }[reasoning];
+        if (!effort) throw modelRuntimeError('INVALID_PARAMS', 'Unsupported DeepSeek reasoning effort');
+        body.reasoning_effort = effort;
+      }
+    }
     if (Array.isArray(tools) && tools.length) {
       if (!toolCallingEnabled(model)) {
         throw modelRuntimeError('MODEL_TOOL_CALLING_UNSUPPORTED', 'This Model Provider does not support structured tool calling');
@@ -202,7 +227,7 @@ export function createOpenAiCompatibleModelProvider({
       body.tool_choice = toolChoice === 'none' ? 'none' : 'auto';
     }
     const effort = reasoningEnabled(model) ? mapReasoningEffort(reasoning) : null;
-    if (effort) body[reasoningParam] = effort;
+    if (effort && !deepseekProfile) body[reasoningParam] = effort;
     if (stream && supportsStreamOptions) body.stream_options = { include_usage: true };
     return body;
   }
@@ -231,7 +256,7 @@ export function createOpenAiCompatibleModelProvider({
     }
     if (!response.ok) {
       const bodyText = await response.text().catch(() => '');
-      throw mapHttpError(response.status, bodyText, apiKey);
+      throw mapHttpError(response.status, bodyText, apiKey, response, body.model);
     }
     return { response, apiKey, signal: effectiveSignal, deadline };
   }
@@ -245,7 +270,7 @@ export function createOpenAiCompatibleModelProvider({
     supportsReasoning: reasoningEnabled,
     settingsFields: [
       { key: 'baseUrl', label: 'Base URL', type: 'string' },
-      ...(reasoningParam ? [{
+      ...((reasoningParam || deepseekProfile) ? [{
         key: 'reasoningEffort', label: '推理强度', type: 'string', choices: REASONING_EFFORT_CHOICES
       }] : [])
     ],
@@ -265,7 +290,7 @@ export function createOpenAiCompatibleModelProvider({
         }
         if (!response.ok) {
           const bodyText = await response.text().catch(() => '');
-          throw mapHttpError(response.status, bodyText, apiKey);
+          throw mapHttpError(response.status, bodyText, apiKey, response);
         }
         let payload;
         try {
@@ -319,8 +344,10 @@ export function createOpenAiCompatibleModelProvider({
             ? rawContent.map((part) => (typeof part?.text === 'string' ? part.text : '')).join('')
             : '';
         guardInternalToolSyntax(text, hasDeepSeekToolContext(id, options));
+        requireResponseContinuation(choice?.message?.reasoning_content, body);
         return {
           text,
+          ...(continuation(choice?.message?.reasoning_content, body.model) ? { modelContinuation: continuation(choice.message.reasoning_content, body.model) } : {}),
           toolCalls: (Array.isArray(choice?.message?.tool_calls) ? choice.message.tool_calls : []).map((call) => {
             const name = String(call?.function?.name ?? '');
             return {
@@ -346,6 +373,7 @@ export function createOpenAiCompatibleModelProvider({
         const reader = response.body.getReader();
         const decoder = new TextDecoder('utf-8');
         let fullText = '';
+        let nativeReasoning = null;
         let emittedTextLength = 0;
         const guardDsml = hasDeepSeekToolContext(id, options);
         let usage = null;
@@ -374,6 +402,7 @@ export function createOpenAiCompatibleModelProvider({
           const choice = Array.isArray(payload?.choices) ? payload.choices[0] : null;
           if (choice?.finish_reason !== null && choice?.finish_reason !== undefined) finishReasonSeen = true;
           const delta = choice?.delta;
+          if (deepseekProfile && typeof delta?.reasoning_content === 'string') nativeReasoning = (nativeReasoning ?? '') + delta.reasoning_content;
           for (const toolDelta of Array.isArray(delta?.tool_calls) ? delta.tool_calls : []) {
             const index = Number.isInteger(toolDelta?.index) ? toolDelta.index : toolCalls.size;
             const previous = toolCalls.get(index) ?? { id: '', type: 'function', name: '', arguments: '' };
@@ -476,6 +505,7 @@ export function createOpenAiCompatibleModelProvider({
           catch (releaseError) { log(`Model Provider「${label}」SSE reader release failed (${releaseError?.code ?? releaseError?.name ?? 'stream-error'})`); }
         }
         log(`Model Provider「${label}」回合完成（model=${streamModel}，chars=${fullText.length}）`);
+        requireResponseContinuation(nativeReasoning, body);
         if (toolCalls.size) {
           const completedCalls = [...toolCalls.entries()].sort(([a], [b]) => a - b).map(([, call]) => ({
             id: call.id,
@@ -492,8 +522,10 @@ export function createOpenAiCompatibleModelProvider({
         yield modelStreamEvent('turn/end', { providerId: id,
           requestedModel: options?.requestedModel ?? 'provider-default',
           resolvedModel: streamModel,
+          ...(continuation(nativeReasoning, body.model) ? { modelContinuation: continuation(nativeReasoning, body.model) } : {}),
           reason: { kind: 'completed', usage } });
       }
     }
   });
 }
+

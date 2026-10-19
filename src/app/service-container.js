@@ -96,7 +96,7 @@ export function createCetaMeshServices(options = {}) {
 
   const providerSecrets = createProviderSecrets({ root: dataRoot });
   const agentService = createDefaultAgentService({ api, defaults: dshDefaults, log,
-    dshOptions: agentTaskOptions, dshPresetConfig: options.dshPresetConfig,
+    dshOptions: agentTaskOptions, dshPresetConfig: options.dshPresetConfig, dshConfiguration: options.dshConfiguration,
     codexOptions: { ...agentTaskOptions,
       authorizeOpenAiEnvironment: () => settingsService.store.get().settings.agents.codexOpenAiEnvironmentAuthorized === true },
     desktopStatus: () => dshDesktop.status() });
@@ -106,6 +106,7 @@ export function createCetaMeshServices(options = {}) {
     providers: [
       createOpenAiCompatibleModelProvider({
         id: 'deepseek-official',
+        protocolProfile: 'deepseek-chat-v1',
         label: 'DeepSeek 官方',
         baseUrl: 'https://api.deepseek.com',
         defaultModel: 'deepseek-flash',
@@ -553,3 +554,4 @@ export function createCetaMeshServices(options = {}) {
     uiEventBus
   };
 }
+

@@ -1,6 +1,7 @@
 // Managed Agent: Model inference can request capabilities, but never supplies authority.
 // All file, memory, Git and process access goes through the injected Capability Broker.
 import crypto from 'node:crypto';
+import { safeModelErrorDetails } from '../model/types.js';
 import { defineAgentProvider, agentProviderError, normalizePromptContent, normalizeUsageTokens, AGENT_EVENT_PROTOCOL_DSH } from './agent-provider.js';
 import { PRODUCT_IDENTITY_PROMPT } from '../context/product-context.js';
 
@@ -8,6 +9,13 @@ const MAX_TEXT = 128 * 1024;
 const MAX_HISTORY = 512 * 1024;
 const copy = (value) => structuredClone(value);
 function fail(code, message) { throw agentProviderError(code, message); }
+function safeFailure(error) {
+  const details = safeModelErrorDetails(error);
+  const code = typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{0,79}$/.test(error.code) ? error.code : 'PROVIDER_ERROR';
+  return { code,
+    message: details?.safeMessage ?? ('Managed Agent turn failed: ' + code),
+    ...(details ? { details: copy(details) } : {}) };
+}
 function abortError() { return Object.assign(new Error('Agent turn cancelled'), { name: 'AbortError', code: 'ABORT_ERR' }); }
 function assertNotAborted(signal) { if (signal.aborted) throw abortError(); }
 function abortable(promise, signal) {
@@ -63,7 +71,8 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
     return value;
   }
   function emit(s, type, data) {
-    const event = { type, data: { sessionId: s.id, ...data }, seq: ++s.sequence };
+    const turn = s.currentTurn ?? s.waitingTurn ?? s.queue.find(item => item.id === data?.requestId);
+    const event = { type, data: { sessionId: s.id, phase: turn?.phase ?? 'user', runId: turn?.runId ?? data?.requestId ?? null, ...data }, seq: ++s.sequence };
     s.events.push(event);
     if (s.events.length > 500) s.events.shift();
     s.updatedAt = now();
@@ -76,12 +85,15 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
       : content === null || content === undefined ? 0
         : JSON.stringify(content)?.length ?? 0;
     const toolCallSize = Array.isArray(item?.tool_calls) ? JSON.stringify(item.tool_calls).length : 0;
-    return contentSize + toolCallSize;
+    return contentSize + toolCallSize + (item?.modelContinuation ? JSON.stringify(item.modelContinuation).length : 0);
   }
   function append(s, value) {
+    // A refused append may contain the only native continuation for a completed
+    // response. Never continue inference from the resulting incomplete transcript.
+    if (s.contextLimitReached) fail('AGENT_CONTEXT_LIMIT', 'Managed Agent context limit reached; a fresh session is required');
     s.messages.push(value);
     if (s.messages.reduce((n, item) => n + messageSize(item), 0) > MAX_HISTORY) {
-      s.messages.pop(); fail('AGENT_CONTEXT_LIMIT', 'Managed Agent context limit reached; a fresh session is required');
+      s.messages.pop(); s.contextLimitReached = true; fail('AGENT_CONTEXT_LIMIT', 'Managed Agent context limit reached; a fresh session is required');
     }
   }
   async function principalFor(s) {
@@ -155,7 +167,7 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
             messages, toolChoice: 'none', signal: controller.signal };
           let fallback;
           if (typeof modelRuntime.stream === 'function') {
-            let text = ''; let streamUsage = null; let streamModel = null; let streamReason = null;
+            let text = ''; let streamUsage = null; let streamModel = null; let streamReason = null; let modelContinuation = null;
             for await (const event of modelRuntime.stream(request)) {
               assertNotAborted(controller.signal);
               if (event?.type === 'assistant/chunk' && event.data?.chunk?.type === 'text-delta') {
@@ -166,16 +178,17 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
                 const content = event.data?.message?.content;
                 text = typeof content === 'string' ? content : Array.isArray(content) ? content.map(part => String(part?.text ?? '')).join('') : '';
               } else if (event?.type === 'turn/end') {
+                modelContinuation = event.data?.modelContinuation ?? null;
                 streamReason = event.data?.reason?.kind ?? null;
                 streamUsage = event.data?.usage ?? event.data?.reason?.usage ?? null;
                 streamModel = event.data?.resolvedModel ?? null;
               }
             }
             if (streamReason && streamReason !== 'completed') fail('MODEL_STREAM_FAILED', `Model stream ended with ${streamReason}`);
-            fallback = { text, usage: streamUsage, resolvedModel: streamModel };
+            fallback = { text, usage: streamUsage, resolvedModel: streamModel, modelContinuation };
           } else fallback = await abortable(modelRuntime.chat(request), controller.signal);
           result = { ...result, text: typeof fallback?.text === 'string' ? fallback.text : '',
-            usage: fallback?.usage ?? null, resolvedModel: fallback?.resolvedModel ?? fallback?.model ?? null };
+            usage: fallback?.usage ?? null, resolvedModel: fallback?.resolvedModel ?? fallback?.model ?? null, modelContinuation: fallback?.modelContinuation ?? null };
         }
         assertNotAborted(controller.signal);
         if (result.usage && typeof result.usage === 'object') usage = result.usage;
@@ -191,7 +204,7 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
           return;
         }
         const finalText = typeof result.text === 'string' ? result.text : '';
-        if (finalText) s.messages.push({ role: 'assistant', content: finalText });
+        if (finalText || result.modelContinuation) append(s, { role: 'assistant', content: finalText, ...(result.modelContinuation ? { modelContinuation: copy(result.modelContinuation) } : {}) });
         outputChars += finalText.length;
         if (finalText && finalText !== streamedText) emit(s, 'assistant/chunk', { requestId: turn.id, chunk: { type: 'text-delta', text: finalText } });
         emit(s, 'assistant/message', { requestId: turn.id, message: { content: [{ type: 'text', text: finalText }] }, usage,
@@ -236,7 +249,7 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
           if (tokens.windowTokens) usage.windowTokens = tokens.windowTokens;
         }
         const command = commandFrom(response?.text);
-        append(s, { role: 'assistant', content: response.text });
+        append(s, { role: 'assistant', content: response.text, ...(response.modelContinuation ? { modelContinuation: copy(response.modelContinuation) } : {}) });
         if (Object.hasOwn(command, 'final')) {
           outputChars += command.final.length;
           emit(s, 'assistant/chunk', { requestId: turn.id, chunk: { type: 'text-delta', text: command.final } });
@@ -268,10 +281,11 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
       }
     } catch (error) {
       reason = controller.signal.aborted || error.name === 'AbortError' ? { kind: 'aborted' }
-        : { kind: 'failed', error: { code: error?.code ?? 'PROVIDER_ERROR', message: 'Managed Agent turn failed: ' + String(error?.code ?? 'PROVIDER_ERROR') } };
+        : { kind: 'failed', error: safeFailure(error) };
     } finally {
-      s.lastUsage = usage; s.lastReason = reason; s.running = false; s.controller = null; s.currentTurn = null;
+      s.lastUsage = usage; s.lastReason = reason; s.running = false; s.controller = null;
       emit(s, 'turn/end', { requestId: turn.id, reason: { ...reason, usage }, usage, promptChars: turn.content.length, outputChars });
+      s.currentTurn = null;
       if (typeof onTurnEnd === 'function') {
         try { await onTurnEnd({ provider: 'cetamesh', sessionId: s.id, usage, promptChars: turn.content.length,
           outputChars, source: 'managed-model-runtime', outcome: reason.kind }); }
@@ -297,14 +311,14 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
           createdAt: now(), updatedAt: now(), lastUsage: null, lastReason: null, waitingForApproval: null, waitingTurn: null });
         return { sessionId: id, provider: 'cetamesh', model: model ?? null };
       },
-      async send({ sessionId, content, mode = 'queue' } = {}) {
+      async send({ sessionId, content, mode = 'queue', phase = 'user', runId = null, requestId = null } = {}) {
         const s = session(sessionId);
         if (s.archived || closed) fail('SESSION_ARCHIVED', 'Managed Agent session is archived');
         if (!['queue', 'interrupt'].includes(mode)) fail('INVALID_PARAMS', 'Unsupported managed Agent send mode');
         const body = promptText(content);
         if (s.queue.length >= 10) fail('AGENT_QUEUE_FULL', 'Managed Agent turn queue is full');
         if (mode === 'interrupt') s.controller?.abort();
-        const id = crypto.randomUUID(); s.queue.push({ id, content: body });
+        const id = crypto.randomUUID(); s.queue.push({ id, content: body, phase: ['user', 'bootstrap', 'system', 'approval'].includes(phase) ? phase : 'user', runId: typeof runId === 'string' && runId ? runId : typeof requestId === 'string' && requestId ? requestId : id });
         // Yield the accepted response before resolving Task binding or doing inference.
         setTimeout(() => { void drain(s); }, 0);
         return { accepted: true, requestId: id, sessionId, provider: 'cetamesh' };
@@ -320,7 +334,7 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
           s.waitingForApproval = null;
           s.waitingTurn = null;
         }
-        for (const turn of s.queue.splice(0)) emit(s, 'turn/end', { requestId: turn.id, reason: { kind: 'aborted', usage: null } });
+        for (const turn of s.queue.splice(0)) emit(s, 'turn/end', { requestId: turn.id, phase: turn.phase, runId: turn.runId, reason: { kind: 'aborted', usage: null } });
         return { cancelled: active, sessionId };
       },
       async status({ sessionId } = {}) {
@@ -424,7 +438,7 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
           return { resumed: true, pending: true, approvalId: result.approvalId };
         }
         const text = typeof result.text === 'string' ? result.text : '';
-        if (text) s.messages.push({ role: 'assistant', content: text });
+        if (text || result.modelContinuation) append(s, { role: 'assistant', content: text, ...(result.modelContinuation ? { modelContinuation: copy(result.modelContinuation) } : {}) });
         s.waitingForApproval = null;
         s.waitingTurn = null;
         s.lastUsage = result.usage ?? s.lastUsage;
@@ -443,7 +457,7 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
         s.waitingForApproval = null;
         s.waitingTurn = null;
         s.lastReason = controller.signal.aborted
-          ? { kind: 'aborted' } : { kind: 'failed', error: { code: error?.code ?? 'PROVIDER_ERROR' } };
+          ? { kind: 'aborted' } : { kind: 'failed', error: safeFailure(error) };
         emit(s, 'turn/end', { requestId: turn.id, reason: s.lastReason });
         return { resumed: false, error: error?.code ?? 'PROVIDER_ERROR' };
       } finally { s.running = false; s.controller = null; s.currentTurn = null; notify(s); }
@@ -464,3 +478,4 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
     }
   };
 }
+

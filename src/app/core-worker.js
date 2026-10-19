@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { APP_PATHS } from '../app-paths.js';
-import { readRawConfigOrEmpty } from '../config/loader.js';
+import { readRawConfig } from '../config/loader.js';
 import { startDataIpcServer, resolveDataPipeName } from '../control/data-ipc.js';
 import { bootstrapCetaMesh } from './bootstrap.js';
 import { createDesktopIpcRuntime } from './ipc-runtime.js';
@@ -77,12 +77,18 @@ function coreDataHandler(token, services) {
 
 export function runCoreWorker({ paths = APP_PATHS, processRef = process, log = message => process.stdout.write(`${message}\n`) } = {}) {
   // A damaged QQ/Legacy config is optional to Core. Never write it back here.
-  const config = readRawConfigOrEmpty(paths.configFile);
-  const dsh = createDshCoreConnector({ config, env: processRef.env });
+  let config = {};
+  let configLoadError = null;
+  try { config = readRawConfig(paths.configFile); }
+  catch (error) {
+    // Optional legacy data never blocks Core, but DSH setup retains the failure.
+    configLoadError = error?.code === 'CONFIG_MISSING' ? 'LEGACY_CONFIG_UNAVAILABLE' : 'LEGACY_CONFIG_INVALID';
+  }
+  const dsh = createDshCoreConnector({ config, configLoadError, env: processRef.env, stateDir: paths.stateDir, configFile: paths.configFile, dataRoot: paths.dataRoot });
   const application = bootstrapCetaMesh({
     config, dataRoot: paths.dataRoot, stateDir: paths.stateDir,
     sourceRoot: paths.sourceRoot, resourceRoot: paths.resourceRoot,
-    api: dsh.api, dshPresetConfig: dsh.presetConfig, processRef, log,
+    api: dsh.api, dshPresetConfig: dsh.presetConfig, dshConfiguration: dsh.configuration, processRef, log,
     channelServiceToken: () => serviceToken(paths.stateDir)
   });
   try {
@@ -134,3 +140,4 @@ export function runCoreWorker({ paths = APP_PATHS, processRef = process, log = m
     throw error;
   }
 }
+

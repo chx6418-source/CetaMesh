@@ -150,6 +150,8 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
               consumer.sequence = event.seq;
             }
             const turnId = String(event?.data?.requestId ?? event?.data?.turn ?? '');
+            // Core phase metadata is authoritative; internal turns never project user work.
+            if (event?.data?.phase && event.data.phase !== 'user') continue;
             if ((options.bootstrapRequestId && event?.data?.requestId === options.bootstrapRequestId)
               || (options.bootstrapTurnId != null && event?.data?.turn === options.bootstrapTurnId)) continue;
             if (event?.type === 'tool/result') {
@@ -157,6 +159,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
               if (current?.status === 'running' && current.currentAgent?.provider === provider
                 && current.currentAgent?.sessionId === sessionId) {
                 taskRuntime.recordToolOutcome({ id: taskId, provider, sessionId,
+                  runId: event.data?.runId, phase: event.data?.phase,
                   eventId: String(event.data?.eventId ?? `${turnId}:${event.seq}`),
                   capability: event.data?.capability, status: event.data?.status,
                   filePath: event.data?.filePath, tool: event.data?.tool,
@@ -200,7 +203,8 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
                 // Retain the original answer with explicit evidence class. Never overwrite
                 // an established checkpoint or treat the answer as verified completed work.
                 taskRuntime.recordAgentReport({ id: taskId, expectedRev: current.rev,
-                  provider, sessionId, eventId: `agent-report:${turnId || event.seq}`,
+                  provider, sessionId, runId: event.data?.runId, phase: event.data?.phase,
+                  eventId: `agent-report:${turnId || event.seq}`,
                   text: answer.slice(0, 1600) });
                 const latest = taskFor(taskId);
                 if (!latest.checkpoint?.summary) taskRuntime.setCheckpoint({ id: taskId, expectedRev: latest.rev,
@@ -887,3 +891,4 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     }
   };
 }
+

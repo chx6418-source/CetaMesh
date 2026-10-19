@@ -1,3 +1,4 @@
+import { memoryError } from './types.js';
 import { redactText } from '../logging/redact.js';
 
 const TAG = 'core-task-working-v1';
@@ -13,13 +14,14 @@ export function createTaskWorkingMemoryRecorder({ memoryRuntime, taskRuntime, en
     return { kind: 'agent', id: 'task:' + taskId, grants: { scopes: ['task:' + taskId], types: ['working'] } };
   }
   function contentOf(task) {
-    const value = { schemaVersion: 1, taskId: task.id, scope: 'task:' + task.id,
+    const value = { schemaVersion: 1, taskId: task.id, taskRevision: task.rev, scope: 'task:' + task.id,
       goal: clip(task.goal, 600),
       ownerReference: (task.ownerContext?.entries ?? []).slice(-4).map(row => ({messageId:row.id,text:clip(row.text,220)})),
       checkpoint: { summary: clip(task.checkpoint?.summary, 700), nextAction: clip(task.checkpoint?.nextAction, 500),
         verification: 'Checkpoint reference; model-authored reports are not independently verified.' },
       evidence: (task.executionEvidence ?? []).slice(-8).map(row => ({ eventId: clip(row.eventId,160),
-        provider: clip(row.provider,80), sessionId:clip(row.sessionId,128), capability:clip(row.capability,100),
+        provider: clip(row.provider,80), sessionId:clip(row.sessionId,128),
+        runId:row.runId ? clip(row.runId,240) : null, phase:clip(row.phase ?? 'unknown',40), capability:clip(row.capability,100),
         status:clip(row.status,40), exitCode:row.exitCode ?? null })),
       omittedEvidence: Math.max(0,(task.executionEvidence?.length ?? 0)-8) };
     while(JSON.stringify(value).length>3900 && value.evidence.length) {value.evidence.shift();value.omittedEvidence++;}
@@ -54,14 +56,44 @@ export function createTaskWorkingMemoryRecorder({ memoryRuntime, taskRuntime, en
     return {memoryId:memory.id};
   }
   function references(taskId) {
-    if(enabled()!==true)return [];
-    const task=taskRuntime.get({id:taskId}).task;
-    const ref=(task.memoryRefs??[]).find(row=>row.note===NOTE && row.scope==='task:'+taskId && row.type==='working');
-    if(!ref)return [];
-    try {
-      const memory=memoryRuntime.get({principal:principal(taskId),id:ref.memoryId}).memory;
-      return [{memoryId:memory.id,scope:'task:'+taskId,content:memory.content}];
-    } catch(error) {if(error?.code==='MEMORY_NOT_FOUND')return [];throw error;}
+    if (enabled() !== true) return [];
+    const task = taskRuntime.get({ id: taskId }).task;
+    const taskScope = 'task:' + taskId;
+    const refs = (task.memoryRefs ?? []).filter(ref => ref.memoryId && ref.scope && ref.type
+      && ((ref.scope === taskScope && ref.type === 'working') || ref.authorizedBy === 'user:desktop'));
+    const readOnlyRefs = {};
+    for (const ref of refs) {
+      if (ref.scope !== taskScope) (readOnlyRefs[ref.scope] ??= []).push(ref.memoryId);
+    }
+    const actor = { kind: 'agent', id: taskScope, grants: {
+      scopes: [taskScope, ...Object.keys(readOnlyRefs)],
+      types: [...new Set(['working', ...refs.map(ref => ref.type)])], readOnlyRefs
+    } };
+    const excerpts = [];
+    for (const ref of refs) {
+      if (excerpts.some(row => row.memoryId === ref.memoryId)) continue;
+      let memory;
+      try { memory = memoryRuntime.get({ principal: actor, id: ref.memoryId }).memory; }
+      catch (error) {
+        if (error?.code === 'MEMORY_NOT_FOUND') continue; // Deleted references stay deleted.
+        throw error;
+      }
+      if (memory.scope !== ref.scope || memory.type !== ref.type) {
+        throw memoryError('HANDOFF_MEMORY_CONTEXT_REVIEW_REQUIRED', 'Linked Memory metadata changed; review authorization before Handoff');
+      }
+      // The packet contract retains at most 4000 characters per record. Reject
+      // larger linked facts before source stop rather than silently truncating.
+      if (memory.content.length > 4000) {
+        throw memoryError('HANDOFF_MEMORY_CONTEXT_REVIEW_REQUIRED', 'Linked Memory exceeds the per-record Handoff budget; review before switching Agents');
+      }
+      excerpts.push({ memoryId: memory.id, scope: memory.scope, type: memory.type,
+        revision: memory.rev, source: memory.source, content: memory.content });
+      if (excerpts.length > 4 || JSON.stringify(excerpts).length > 12000) {
+        throw memoryError('HANDOFF_MEMORY_CONTEXT_REVIEW_REQUIRED', 'Linked Memory exceeds the Handoff context budget; review and reduce linked references before switching Agents');
+      }
+    }
+    return excerpts;
   }
   return {record,references};
 }
+

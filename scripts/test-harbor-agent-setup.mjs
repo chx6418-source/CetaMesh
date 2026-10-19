@@ -1,0 +1,70 @@
+import assert from 'node:assert/strict';
+import path from 'node:path';
+import { createRequire } from 'node:module';
+import { pathToFileURL } from 'node:url';
+const uiRoot = path.resolve(import.meta.dirname, '../desktop-ui');
+const require = createRequire(path.join(uiRoot, 'package.json'));
+const React = require('react'), { renderToStaticMarkup } = require('react-dom/server');
+const { createServer } = await import(pathToFileURL(require.resolve('vite')).href);
+globalThis.window = { setTimeout, clearTimeout };
+const vite = await createServer({ configFile: false, root: uiRoot, optimizeDeps: { noDiscovery: true }, server: { middlewareMode: true }, appType: 'custom', logLevel: 'error' });
+try {
+  const ui = await vite.ssrLoadModule('/src/app/HarborApp.tsx');
+  assert.equal(typeof ui.DshSetupForm, 'function', 'production DSH setup form must exist');
+  assert.equal(typeof ui.dshSetupErrorMessage, 'function', 'configuration failures need actionable Chinese messages');
+  assert.match(ui.dshSetupErrorMessage({ code: 'DSH_AUTH_SCOPE_CHANGE_REQUIRES_REVIEW' }), /认证范围/);
+  assert.match(ui.dshSetupErrorMessage({ code: 'DSH_PRESET_INCOMPATIBLE' }), /预设/);
+  assert.doesNotMatch(ui.dshSetupErrorMessage({ code: 'DSH_PRESET_INCOMPATIBLE' }), /登录/);
+  const configuration = { version: 1, revision: 3, activeRevision: 2, pendingRevision: 3, restartRequired: true,
+    source: 'connector-v1', homeSource: 'connector', loadError: null, configFile: '/isolated/config.json', dataRoot: '/isolated',
+    active: { codingPreset: 'coder-old', socialPreset: 'whale-safe', homeDir: '/isolated/dsh', baseUrl: 'http://127.0.0.1:3080' },
+    pending: { codingPreset: 'coder-next', socialPreset: 'whale-safe', homeDir: '/isolated/dsh', baseUrl: 'http://127.0.0.1:3080' } };
+  const props = { configuration, draft: { ...configuration.pending }, saving: false, onDraftChange() {}, onSave() {} };
+  const render = (component, props) => renderToStaticMarkup(React.createElement(component, props));
+  const html = render(ui.DshSetupForm, props);
+  assert.match(html, /编程预设/); assert.match(html, /社交预设/);
+  assert.match(html, /coder-old/); assert.match(html, /coder-next/);
+  assert.match(html, /当前生效版本 2/); assert.match(html, /待生效版本 3/);
+  assert.match(html, /重启 Core 后生效/); assert.match(html, /保存配置/);
+  let draftChange, saves = 0;
+  const controlled = ui.DshSetupForm({ ...props, onDraftChange(value) { draftChange = value; }, onSave() { saves++; } });
+  const fields = React.Children.toArray(controlled.props.children).filter(child => child.type === 'label');
+  React.Children.toArray(fields[0].props.children)[1].props.onChange({ target: { value: 'coder-changed' } });
+  assert.equal(draftChange.codingPreset, 'coder-changed');
+  assert.equal(draftChange.socialPreset, 'whale-safe', 'editing coding does not overwrite social selection');
+  assert.equal(saves, 0, 'editing never implicitly saves');
+  controlled.props.onSubmit({ preventDefault() {} }); assert.equal(saves, 1, 'save requires explicit form submission');
+  const locked = ui.DshSetupForm({ ...props, saving: true, onSave() { saves++; } });
+  locked.props.onSubmit({ preventDefault() {} }); assert.equal(saves, 1, 'in-flight save cannot submit twice');
+  const { agentClient } = await vite.ssrLoadModule('/src/bridge/typed-client.ts');
+  let sent;
+  window.ipc = { postMessage(payload) { sent = JSON.parse(payload); window.__cetameshReceive({ id: sent.id, ok: true, result: { provider: 'dsh', applied: false, restartRequired: true, configuration } }); } };
+  const configured = await agentClient.configure(configuration.pending);
+  assert.deepEqual(sent.params, { agentId: 'dsh', config: configuration.pending });
+  assert.equal(sent.method, 'ui.agent.configure'); assert.equal(configured.configuration.activeRevision, 2);
+  delete window.ipc;
+  const saving = render(ui.DshSetupForm, { ...props, saving: true });
+  assert.match(saving, /disabled=""[^>]*>保存中/);
+  const previous = { id: 'dsh', eligible: false, taskEligible: false, configuration, authenticated: true };
+  const health = { ...previous, available: null, eligible: null, taskEligible: null, configured: null, authenticated: null,
+    diagnostic: { stage: 'native-loading', code: 'DSH_PRESET_LIST_UNVERIFIED', retryable: true, checkedAt: null },
+    preset: { loaded: null, loadState: 'unknown' }, lastError: 'upstream unavailable' };
+  assert.deepEqual(ui.mergeAgentHealth(previous, health), health, 'Core health fields and unknown values must survive refresh');
+  const diagnostic = render(ui.AgentSetupDiagnostic, { agent: { ...health, reason: 'preset-not-loaded' } });
+  assert.match(diagnostic, /预设未被 DSH 原生加载/); assert.doesNotMatch(diagnostic, /登录/);
+  assert.match(diagnostic, /加载状态未知/);
+  assert.match(render(ui.AgentSetupDiagnostic, { agent: { ...health, reason: 'authentication-required' } }), /登录/);
+  assert.match(ui.managedWorkspacePreflight('cetamesh', '', null), /选择工作区/);
+  assert.equal(ui.managedWorkspacePreflight('cetamesh', 'workspace-a', null), '');
+  assert.equal(ui.managedWorkspacePreflight('cetamesh', '', 'active-a'), '');
+  assert.equal(ui.managedWorkspacePreflight('none', '', null), '');
+  const composer = render(ui.ChatComposer, { busy: false, models: [], selectedModelKey: '', agentProviders: [], selectedAgent: 'cetamesh', workspaces: [], workspaceId: '', activeWorkspaceId: null, onWorkspaceChange() {}, onModelChange() {}, onAgentChange() {}, onSend() {}, onStop() {} });
+  assert.match(composer, /CetaMesh 托管任务需要工作区/);
+  const failure = render(ui.ManagedFailureActions, { taskId: 'task-failed', onReviewTask() {}, onNewChat() {} });
+  assert.match(failure, /查看任务/); assert.match(failure, /新建普通聊天/);
+  let reviewed, ordinary = 0;
+  const actions = ui.ManagedFailureActions({ taskId: 'task-failed', onReviewTask(id) { reviewed = id; }, onNewChat() { ordinary++; } });
+  const buttons = React.Children.toArray(actions.props.children); buttons[0].props.onClick(); buttons[1].props.onClick();
+  assert.equal(reviewed, 'task-failed'); assert.equal(ordinary, 1);
+  console.log('PASS production Harbor DSH setup, health fidelity, workspace preflight and managed failure actions');
+} finally { await vite.close(); delete globalThis.window; }
