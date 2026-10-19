@@ -148,7 +148,7 @@ export function findCliCandidates(name, {
       where = whereImpl(systemRoot ? path.join(systemRoot, 'System32', 'where.exe') : 'where.exe', [requested], {
         encoding: 'utf8', windowsHide: true, timeout: 3000, maxBuffer: 64 * 1024, env: createMinimalAgentEnv(env)
       });
-    } catch { /* Discovery failure still permits the bounded known-directory candidates. */ }
+    } catch { where = null; /* Discovery failure still permits the bounded known-directory candidates. */ }
     if (where?.status === 0) {
       const results = String(where.stdout ?? '').split(/\r?\n/).map(line => line.trim())
         .filter(result => /\.(?:exe|com|cmd|bat)$/i.test(result))

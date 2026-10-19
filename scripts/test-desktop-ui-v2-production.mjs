@@ -175,12 +175,12 @@ check('Agent registry states stay distinct and reflect real provider health', ()
   assert.match(app, /'not-installed': '未安装'/);
   assert.match(app, /'not-supported': '不支持'/);
   assert.match(app, /'not-checked': '未检查'/);
-  assert.match(app, /StatusBadge value=\{agent\.status\} available=\{agent\.eligible\}/);
+  assert.match(app, /StatusBadge value=\{agent\.status\} available=\{isAgentReady\(agent\)\}/);
   assert.match(app, /agent\.status === 'needs-setup'/);
   assert.match(app, /mergeAgentHealth\(item, health\)/);
   assert.match(app, /return \{ \.\.\.previous, \.\.\.health \}/);
   assert.doesNotMatch(app, /eligible: available && !requiresTask/);
-  assert.match(app, /agents\.filter\(agent => agent\.eligible\)/);
+  assert.match(app, /agents\.filter\(isAgentReady\)/);
   assert.match(app, /agent\.desktopApp\.installed/);
   assert.match(app, /agent\.desktopApp\.running/);
 });
@@ -404,7 +404,7 @@ check('Chat streaming is frame-batched and non-bottom reading exposes a latest-m
   assert.match(composer, /const needsScope = \['task-required', 'workspace-required'\]/);
   assert.match(composer, /const disabled = !agent\.available \|\| \(!agent\.eligible && !needsScope\)/);
   assert.match(composer, /availabilityReasonLabel\(agent\.reason\)/);
-  assert.match(app, /agents\.filter\(agent => agent\.eligible\)/);
+  assert.match(app, /agents\.filter\(isAgentReady\)/);
   assert.match(chat, /hasNewMessages/);
   assert.match(chat, /overlay=\{hasNewMessages/);
   assert.match(chat, /setHasNewMessages\(true\)/);
