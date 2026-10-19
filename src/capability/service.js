@@ -107,7 +107,10 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     if (!['capability-broker', 'staged-capability-broker'].includes(capabilities?.workspaceBoundary)) return null;
     const key = taskFollowKey(provider, sessionId);
     const current = taskFollowConsumers.get(key);
-    if (current && !current.controller.signal.aborted && current.finished !== true) return current;
+    if (current && !current.controller.signal.aborted && current.finished !== true) {
+      if (options.expectTurn === true) current.expectedTurns += 1;
+      return current;
+    }
     if (current) taskFollowConsumers.delete(key);
     if (taskFollowConsumers.size >= TASK_FOLLOW_MAX_SESSIONS) {
       throw capabilityError('AGENT_FOLLOW_CAPACITY', 'Task Agent event consumers are at the configured capacity');
@@ -117,6 +120,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     const previousSequence = savedPosition?.taskId === taskId ? savedPosition.sequence : 0;
     const requestedSequence = Number.isSafeInteger(options.sinceSequence) && options.sinceSequence >= 0 ? options.sinceSequence : 0;
     const consumer = { provider, sessionId, taskId, controller, promise: null, finished: false,
+      expectedTurns: options.expectTurn === true ? 1 : 0,
       sequence: Math.max(requestedSequence, previousSequence) };
     const answers = new Map();
     taskFollowConsumers.set(key, consumer);
@@ -194,11 +198,16 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
                 taskRuntime.block({ id: taskId, expectedRev: current.rev,
                   reason: String(event.data?.reason?.error?.code ?? 'Agent turn failed').slice(0, 1000) });
               }
-              // Commit this cursor only after projecting the terminal outcome.
+              // DSH Follow may end once per turn while another request is queued.
+              // Keep its independent cursor until all scheduled turns are projected.
+              if (consumer.expectedTurns > 0) consumer.expectedTurns -= 1;
               rememberTaskFollowPosition(key, taskId, consumer.sequence);
+              if (consumer.expectedTurns === 0) { consumer.finished = true; return; }
             }
           }
-          if (controller.signal.aborted || sawTurnEnd) { consumer.finished = true; return; }
+          if (controller.signal.aborted) { consumer.finished = true; return; }
+          if (sawTurnEnd && consumer.expectedTurns > 0) continue;
+          if (sawTurnEnd) { consumer.finished = true; return; }
           throw capabilityError('AGENT_FOLLOW_DISCONNECTED', 'Task Agent event stream ended before turn completion');
         } catch (error) {
           if (controller.signal.aborted || ['SESSION_NOT_FOUND', 'AGENT_UNSUPPORTED'].includes(error?.code)) return;
@@ -624,7 +633,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
             await agentBroker.status(task.currentAgent);
             if (r.signal?.aborted) throw capabilityError('INVOKE_CANCELLED', 'Agent assignment cancelled');
             if (taskHandoffGuard(task.id)) throw capabilityError('TASK_HANDOFF_IN_FLIGHT', 'Task Handoff owns this execution boundary');
-            ensureTaskFollow(task.currentAgent.provider, task.currentAgent.sessionId, task.id);
+            ensureTaskFollow(task.currentAgent.provider, task.currentAgent.sessionId, task.id, { expectTurn: true });
             const beforeSend = taskFor(task.id);
             if (beforeSend?.status !== 'running' || beforeSend.currentAgent?.sessionId !== task.currentAgent.sessionId) {
               throw capabilityError('TASK_NOT_RUNNING', 'Task changed before Agent instruction dispatch');
@@ -677,7 +686,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
             startedByRequest = true;
           }
           if (r.signal?.aborted) throw capabilityError('INVOKE_CANCELLED', 'Agent assignment cancelled');
-          ensureTaskFollow(provider, created.sessionId, task.id);
+          ensureTaskFollow(provider, created.sessionId, task.id, { expectTurn: true });
           const beforeSend = taskFor(task.id);
           if (beforeSend?.status !== 'running' || beforeSend.currentAgent?.sessionId !== created.sessionId) {
             throw capabilityError('TASK_NOT_RUNNING', 'Task changed before Agent instruction dispatch');
