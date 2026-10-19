@@ -182,8 +182,13 @@ export function openFixtureForChild({ root, nonce }) {
           if (fs.existsSync(destination)) throw migrationError('BACKUP_EXISTS');
           writeTextAtomic(destination, fs.readFileSync(original, 'utf8')); restorePermission(destination, permissions);
           fs.chmodSync(destination, permissions.mode & ~0o222);
+          // Record the observed backup ACL after the read-only transition, not
+          // the source SDDL: Windows can normalize inherited ACE metadata.
+          // Original source permissions remain separately recorded for recovery.
+          const backupPermissions = permission(destination);
+          if ((backupPermissions.mode & 0o222) !== 0) throw migrationError('PERMISSION_RESTORE_FAILED');
           journal.files.push({ source: path.relative(absolute, original), backup, hash: row.row.hash, records: row.row.records,
-            identityHash: row.row.identityHash, permissions, backupPermissions: { ...permissions, mode: fs.statSync(destination).mode & 0o777 }, target: `accounts/${row.accountId}/${row.relative}` });
+            identityHash: row.row.identityHash, permissions, backupPermissions, target: `accounts/${row.accountId}/${row.relative}` });
           writeJsonAtomic(safe(journalFile), journal);
         }
         validateStored(journal); phase('BACKED_UP');

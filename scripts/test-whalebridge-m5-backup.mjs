@@ -36,5 +36,16 @@ try {
   fs.rmdirSync(pointer); fs.renameSync(preserved, pointer);
   assert.equal(restore.recover({ approval: restore.approve(rp) }).state, 'COMMITTED');
   assert.equal(restore.rollback({ approval: restore.approve(rp) }).status, 'ROLLBACK_PASS');
-  console.log('FIXTURE_MIGRATION_PASS / ROLLBACK_PASS backup-path failure, failed pointer rollback and durable journal recovery');
+  const aclGuard = make(), aclPlan = aclGuard.plan();
+  aclGuard.apply(aclPlan, { approval: aclGuard.approve(aclPlan) });
+  const aclJournal = readJsonFile(path.join(aclGuard.root, 'migration-journal.json'));
+  const aclBackup = path.join(aclGuard.root, aclJournal.files[0].backup);
+  const beforePointer = aclGuard.authority();
+  assert.equal(aclGuard.verifyBackups(), true, 'the post-copy backup ACL snapshot is verifiable');
+  fs.chmodSync(aclBackup, 0o666);
+  assert.throws(() => aclGuard.verifyBackups(), { code: 'BACKUP_UNVERIFIED' },
+    'changing only a backup file permission must invalidate its verification');
+  assert.deepEqual(aclGuard.authority(), beforePointer,
+    'a tampered backup may not silently change migration ownership');
+  console.log('FIXTURE_MIGRATION_PASS / ROLLBACK_PASS backup-path failure, durable journal and permission-only tamper rejection');
 } finally { for (const fixture of fixtures) fixture.dispose(); }
