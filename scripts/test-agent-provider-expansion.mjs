@@ -817,6 +817,14 @@ try {
   assert.equal(dshMissingAuthHealth.authenticated, null);
   assert.equal(dshMissingAuthHealth.reason, 'authentication-material-missing');
   assert.equal(dshMissingAuthHealth.ready, false);
+  for (const [code, expectedAuth] of [['DSH_AUTHENTICATION_FAILED', false], ['DSH_AUTH_MATERIAL_MISSING', null], ['ECONNRESET', null]]) {
+    const health = await createDshAgentProvider({ api: {
+      async callEndpoint(endpoint) { if (endpoint === 'settings/describe') return {}; throw Object.assign(new Error('controlled probe failure'), { code }); },
+      async *openRemoteStream() {}
+    } }).health();
+    assert.equal(health.authenticated, expectedAuth, code + ' must invalidate prior authentication evidence appropriately');
+    assert.equal(health.sessionCapable, false); assert.equal(health.ready, false);
+  }
   let desktopRefreshed = false;
   const separatedDshService = createDefaultAgentService({ codexExecutable: null, desktopStatus: async (options) => {
     desktopRefreshed = options?.refresh === true;

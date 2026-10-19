@@ -50,14 +50,14 @@ try {
   const dsh = path.join(root, 'DSH 用户');
   fs.mkdirSync(path.join(dsh, '.agent-presets', 'user-edited'), { recursive: true });
   const preset = path.join(dsh, '.agent-presets', 'user-edited', 'agent.cordis.yml');
-  const presetText = '- id: persona\n  config:\n    prefix: user-owned prompt\n'; fs.writeFileSync(preset, presetText);
+  const presetText = '- id: persona\n  name: "@deepseek-ai/dsh-persona"\n  config:\n    prefix: user-owned prompt\n'; fs.writeFileSync(preset, presetText);
   writeJsonAtomic(path.join(dsh, '.whalebridge-integration.json'), { presets: { 'user-edited': { owned: true, hash: 'previous-installed-hash' } } });
   const ds = dryRunMigration({ ...options, dshHomes: [dsh] });
   assert.equal(ds.report.presets[0].attribution, 'USER_MODIFIED');
   assert.equal(ds.report.presets[0].action, 'NEVER_OVERWRITE');
   assert.equal(ds.report.presets[0].personaPrefixCompatible, true);
   assert.equal(fs.readFileSync(preset, 'utf8'), presetText);
-  fs.writeFileSync(preset, '- id: persona\n  config: {}\n');
+  fs.writeFileSync(preset, '- id: persona\n  name: "@deepseek-ai/dsh-persona"\n  config: {}\n');
   assert.equal(dryRunMigration({ ...options, dshHomes: [dsh] }).report.presets[0].personaPrefixCompatible, false);
   writeJsonAtomic(path.join(state, 'qq-message-receipts.json'), { version: 7, ids: [] });
   assert.ok(dryRunMigration(options).report.blockers.some(row => row.code === 'SCHEMA_INCOMPATIBLE'));

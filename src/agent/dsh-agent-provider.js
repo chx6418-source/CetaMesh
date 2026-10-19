@@ -284,7 +284,8 @@ export function createDshAgentProvider({ api, defaults = {}, log = () => {}, pre
           const transportFailed = ['DSH_UNREACHABLE', 'DSH_REQUEST_TIMEOUT', 'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT'].includes(code)
             || /ECONNREFUSED|ECONNRESET|fetch failed|传输失败/i.test(String(error?.message ?? ''));
           const missingAuth = code === 'DSH_AUTH_MATERIAL_MISSING';
-          const authenticated = code === 'DSH_AUTHENTICATION_FAILED' ? false : null;
+          const authenticated = code === 'DSH_AUTHENTICATION_FAILED' ? false
+            : settingsVerified && !missingAuth && !transportFailed ? true : null;
           const reachable = transportFailed ? false : missingAuth ? null
             : settingsVerified || authenticated === false || code === 'DSH_HOST_ORIGIN_REJECTED' ? true : null;
           return { status: authenticated === false || missingAuth ? 'needs-setup' : 'error', available: false, provider: 'dsh',

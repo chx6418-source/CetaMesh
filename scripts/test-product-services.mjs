@@ -227,23 +227,24 @@ try {
   check('容器装配最近错误码环', Boolean(services.errorRegistry));
   const providerSettings = Object.fromEntries(services.modelRuntime.listProviders().map(item => [item.id, item.settingsFields]));
   equal('Provider 元数据只声明实际支持的字段', Object.fromEntries(Object.entries(providerSettings).map(([id, fields]) => [id, fields?.map(field => field.key)])), {
-    'deepseek-official': ['baseUrl'],
+    'deepseek-official': ['baseUrl', 'reasoningEffort'],
     openai: ['baseUrl', 'reasoningEffort'],
     'openai-compatible': ['baseUrl', 'reasoningEffort']
   });
   equal('推理枚举来自 Provider 实际支持的值', providerSettings.openai?.find(field => field.key === 'reasoningEffort')?.choices, ['off', 'low', 'high', 'max']);
+  equal('DeepSeek 推理枚举与真实续接线协议测试一致', providerSettings['deepseek-official']?.find(field => field.key === 'reasoningEffort')?.choices, ['off', 'low', 'high', 'max']);
   const projectedCatalog = await services.desktopUiService.execute({ method: 'ui.chat.catalog', params: {} });
   equal('typed Harbor catalog 投影受支持字段且不含凭据', [
     projectedCatalog.modelProviders.map(item => [item.id, item.settingsFields.map(field => field.key)]),
     JSON.stringify(projectedCatalog).includes('sk-projection-sentinel')
   ], [[
-    ['deepseek-official', ['baseUrl']],
+    ['deepseek-official', ['baseUrl', 'reasoningEffort']],
     ['openai', ['baseUrl', 'reasoningEffort']],
     ['openai-compatible', ['baseUrl', 'reasoningEffort']]
   ], false]);
   const projectedDeepSeek = await services.productService.execute({ method: 'product.providerView', params: { provider: 'deepseek-official', apiKey: 'sk-projection-sentinel' } });
-  equal('DeepSeek Provider projection 保留基础三项并仅显示 Base URL', [projectedDeepSeek.view.basic.map(field => field.key), projectedDeepSeek.view.advanced.map(field => field.key)], [
-    ['provider', 'apiKey', 'model'], ['baseUrl']
+  equal('DeepSeek Provider projection 保留基础三项及已实现的推理选项', [projectedDeepSeek.view.basic.map(field => field.key), projectedDeepSeek.view.advanced.map(field => field.key)], [
+    ['provider', 'apiKey', 'model'], ['baseUrl', 'reasoningEffort']
   ]);
   check('API Key 字段只暴露 secret 类型且 projection 不回显凭据',
     projectedDeepSeek.view.basic.find(field => field.key === 'apiKey')?.type === 'secret'
