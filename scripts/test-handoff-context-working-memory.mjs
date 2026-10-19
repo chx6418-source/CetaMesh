@@ -7,6 +7,7 @@ import { spawnSync } from 'node:child_process';
 import { createCetaMeshServices } from '../src/app/service-container.js';
 import { defineAgentProvider } from '../src/agent/agent-provider.js';
 import { createTaskRuntime } from '../src/task/runtime.js';
+import { OWNER_ACTOR } from '../src/capability/types.js';
 const checks = [];
 async function check(name, run) {
   try { await run(); checks.push({name, passed:true}); console.log('PASS HANDOFF ' + name); }
@@ -184,6 +185,20 @@ await check('DSH-style turn-scoped Follow never replays first turn when a Sessio
   assert.equal(second.currentAgent.sessionId,sessionId,'Task must reuse the existing external Session');
   assert.equal(new Set(second.agentReports.map(row=>row.eventId)).size,2,'both accepted turns need distinct reports');
   assert.equal(f.remoteRequests.filter(row=>row.sessionId===sessionId).length,2,'both turns must have been sent to one Session');
+}));
+await check('DSH-style Follow retains both quickly queued Task turns from one Agent Session',()=>fixture(async f=>{
+  f.useTurnScopedFollow();
+  const task=f.services.taskService.runtime.create({goal:'Run two bounded queued Agent instructions',workspaceId:f.ws.id});
+  const run=(n)=>f.services.capabilityService.broker.execute({
+    requestId:'queued-follow-'+n,actor:OWNER_ACTOR,taskId:task.id,workspaceId:f.ws.id,
+    capability:'agent.run',input:{agentProvider:'repair-fixture',content:'Analyze queued part '+n},reason:'test queued Task Follow'});
+  const [first,second]=await Promise.all([run('first'),run('second')]);
+  assert.equal(first.status,'completed');assert.equal(second.status,'completed');
+  assert.equal(first.result.sessionId,second.result.sessionId,'queued requests must use the same Task Agent Session');
+  const observed=await waitFor(()=>f.services.taskService.runtime.get({id:task.id}).task,
+    row=>row.agentReports?.length===2,'two independently recorded queued Agent turns');
+  assert.equal(new Set(observed.agentReports.map(row=>row.eventId)).size,2);
+  assert.equal(observed.status,'running');
 }));
 await check('disabled Memory never auto-records working rows',()=>fixture(async f=>{
   await f.services.settingsService.execute({method:'settings.update',params:{section:'memory',values:{enabled:false}}});
