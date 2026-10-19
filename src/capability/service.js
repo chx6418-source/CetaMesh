@@ -159,10 +159,15 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
               if (!current || current.currentAgent?.provider !== provider || current.currentAgent?.sessionId !== sessionId
                 || current.status !== 'running') continue;
               if (event.data?.reason?.kind === 'completed' && answer) {
-                // A reply is not verified completed work. Preserve an established checkpoint.
-                if (!current.checkpoint?.summary) taskRuntime.setCheckpoint({ id: taskId, expectedRev: current.rev,
+                // Retain the original answer with explicit evidence class. Never overwrite
+                // an established checkpoint or treat the answer as verified completed work.
+                taskRuntime.recordAgentReport({ id: taskId, expectedRev: current.rev,
+                  provider, sessionId, eventId: `agent-report:${turnId || event.seq}`,
+                  text: answer.slice(0, 1600) });
+                const latest = taskFor(taskId);
+                if (!latest.checkpoint?.summary) taskRuntime.setCheckpoint({ id: taskId, expectedRev: latest.rev,
                   summary: '[Unverified Agent report]\n' + answer.slice(0, 7900),
-                  nextAction: current.checkpoint?.nextAction ?? '' });
+                  nextAction: latest.checkpoint?.nextAction ?? '' });
                 recordWorkingState(taskId);
               } else if (['failed', 'error'].includes(event.data?.reason?.kind)) {
                 taskRuntime.block({ id: taskId, expectedRev: current.rev,

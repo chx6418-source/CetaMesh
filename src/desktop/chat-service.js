@@ -595,7 +595,7 @@ export function createChatService({
         const task = typeof resolveTask === 'function' ? await resolveTask(record.taskId) : null;
         if (!task || !task.currentAgent
           || task.currentAgent.provider !== (record.runtimeProvider || previousAgentProvider)
-          || task.currentAgent.sessionId !== record.dshSessionId) {
+          || (record.dshSessionId && task.currentAgent.sessionId !== record.dshSessionId)) {
           throw chatError('TASK_SESSION_MISMATCH', 'Chat Agent Session does not own the attached Task');
         }
         if (!nextConfig.agentProvider || nextConfig.agentProvider === AGENT_PROVIDER_DISABLED || typeof handoffTask !== 'function') {

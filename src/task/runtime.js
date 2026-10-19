@@ -15,6 +15,7 @@
 
 import crypto from 'node:crypto';
 import { buildOwnerContext } from './owner-context.js';
+import { redactText } from '../logging/redact.js';
 import {
   ATTENTION_STATUSES,
   TASK_LIMITS,
@@ -105,6 +106,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
           workspaceId: normalizedWorkspace, requestedAgentProvider }) } : null,
       artifacts: [],
       executionEvidence: [],
+      agentReports: [],
       decisions: [],
       memoryRefs: [],
       checkpoint: null,
@@ -546,6 +548,26 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     });
   }
 
+  /** Store a native Agent claim separately; do not upgrade it to a verified Task checkpoint. */
+  function recordAgentReport({ id, expectedRev, provider, sessionId, eventId, text } = {}) {
+    const sourceId = normalizeText(eventId, 'eventId', 240, { required: true });
+    const content = normalizeText(redactText(text), 'text', 1600, { required: true });
+    const current = requireTask(id);
+    if ((current.agentReports ?? []).some(row => row.eventId === sourceId)) return current;
+    if (current.currentAgent?.provider !== provider || current.currentAgent?.sessionId !== sessionId) {
+      throw taskError('AGENT_ASSIGNMENT_EXPIRED', 'Agent report came from a stale Task assignment');
+    }
+    return mutate(id, expectedRev, task => {
+      task.agentReports ??= [];
+      task.agentReports.push({ eventId: sourceId, provider, sessionId, text: content,
+        verified: false, at: now() });
+      if (task.agentReports.length > TASK_LIMITS.agentReports) {
+        task.agentReports.splice(0, task.agentReports.length - TASK_LIMITS.agentReports);
+      }
+      return task;
+    });
+  }
+
   function recordOwnerContext({ id, expectedRev, sessionId, messages } = {}) {
     const current = requireTask(id);
     const sid = normalizeText(sessionId, 'sessionId', TASK_LIMITS.idChars, { required: true });
@@ -617,6 +639,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
 
   return {
     recordOwnerContext,
+    recordAgentReport,
     create,
     get,
     list,
