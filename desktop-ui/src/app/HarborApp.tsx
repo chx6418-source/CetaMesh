@@ -696,7 +696,7 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
   async function updateAgent(provider: string) {
     if (!session) return;
     try {
-      const updated = await chatClient.setConfig(session.id, { ...session.config, agentProvider: provider || null });
+      const updated = await chatClient.setConfig(session.id, { ...session.config, agentProvider: provider || null, ...agentModelSelection(session.config, provider) });
       onSessionUpdate(updated);
       await load();
     }
@@ -726,7 +726,7 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
   if (!session) return <div className="content-page chat-empty-page"><EmptyNotice icon="chat" title="开始一段新会话" detail="会话记录保存在本机 Core 中。发送消息后，当前配置的模型与 Agent 将处理请求。" action={<Button variant="primary" icon="add" onClick={() => void onNew()}>新建会话</Button>} /></div>;
   const providers = catalog?.modelProviders ?? [];
   const selectedProvider = providers.find(provider => provider.id === session.config.modelProvider) ?? providers.find(provider => provider.configured) ?? providers[0];
-  const selectedModelKey = JSON.stringify([session.config.modelProvider ?? selectedProvider?.id ?? '', session.config.model || '']);
+  const selectedModelKey = session.config.agentProvider === 'codex' && !session.config.modelProvider && !session.config.model ? JSON.stringify(['', '']) : JSON.stringify([session.config.modelProvider ?? selectedProvider?.id ?? '', session.config.model || '']);
   return <div className={`chat-workspace ${contextCollapsed ? 'context-collapsed' : ''}`}>
     <section className="conversation-pane">
       <div className="conversation-toolbar"><div><p className="eyebrow">CETAMESH · CHAT</p><h1>{session.title || '新会话'}</h1><div className="conversation-meta"><StatusBadge value={status.state || 'idle'} /><span>更新于 {relativeLabel(session.updatedAt)}</span><span>·</span><ChatCatalogStatus catalog={catalog} /></div></div><div className="row"><IconButton label={contextCollapsed ? '显示运行上下文' : '隐藏运行上下文'} icon="work" onClick={toggleContext} /><IconButton label="刷新会话" icon="update" onClick={() => void load()} /><IconButton label="新建会话" icon="add" onClick={() => void onNew()} /></div></div>
@@ -776,7 +776,7 @@ export function ChatComposer({ busy, models, selectedModelKey, agentProviders, s
   const [attachmentError, setAttachmentError] = useState('');
   const [picking, setPicking] = useState(false);
   const textarea = useRef<HTMLTextAreaElement>(null);
-  const modelChoices: { value: string; label: string; disabled?: boolean }[] = models.flatMap(provider => {
+  const modelChoices: { value: string; label: string; disabled?: boolean }[] = selectedAgent === 'codex' ? [{ value: JSON.stringify(['', '']), label: 'Codex 本机模型配置' }] : models.flatMap(provider => {
     if (!provider.configured) return [];
     const list = provider.models.length ? provider.models : [{ id: '', name: provider.label, label: provider.label }];
     return list.map(model => ({
@@ -1238,6 +1238,10 @@ function DshSetupPanel({ agent, onConfigured }: { agent: Agent; onConfigured(con
 
 export function managedWorkspacePreflight(provider: string, workspaceId: string, activeWorkspaceId: string | null): string {
   return provider === 'cetamesh' && !workspaceId && !activeWorkspaceId ? 'CetaMesh 托管任务需要工作区，请先选择工作区后发送。' : '';
+}
+
+export function agentModelSelection(config: { agentProvider?: string | null; modelProvider?: string | null; model?: string }, provider: string) {
+  return provider === 'codex' || config.agentProvider === 'codex' ? { modelProvider: null, model: '' } : { modelProvider: config.modelProvider ?? null, model: config.model ?? '' };
 }
 
 export function workspaceFailureReviewTaskId(routing: Record<string, unknown>, fallback: string): string {

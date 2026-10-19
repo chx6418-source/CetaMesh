@@ -112,3 +112,12 @@ assert.equal(streamed.some(event => JSON.stringify(event).includes('DSML')), fal
   'split internal DSML syntax never reaches UI stream events');
 console.log('PASS DeepSeek DSML protocol mismatch is rejected before displaying internal syntax');
 
+
+for (const marker of ['<｜｜DSML｜｜','<||DSML||']) {
+ const frames=[{choices:[{delta:{content:marker.slice(0,5)},finish_reason:null}]},{choices:[{delta:{content:marker.slice(5)+' calls><internal>PRIVATE</internal>',tool_calls:[{index:0,id:'safe-call',type:'function',function:{name:'cap_filesystem_read',arguments:'{"path":"fixture.txt"}'}}]},finish_reason:'tool_calls'}]}];
+ const p=createOpenAiCompatibleModelProvider({id:'deepseek-official',label:'fixture',baseUrl:'https://fixture.example/v1',defaultModel:'fixture',supportsTools:true,secrets:{raw:()=>({apiKey:'fixture-only'})},fetchImpl:async()=>new Response(frames.map(f=>'data: '+JSON.stringify(f)+'\n\n').join('')+'data: [DONE]\n\n',{headers:{'content-type':'text/event-stream'}})});
+ const events=[];for await(const e of p.stream({model:'fixture',messages:[{role:'user',content:'read'}],tools:[{id:'filesystem.read',description:'read',inputSchema:{type:'object',properties:{path:{type:'string'}}}}]}))events.push(e);
+ assert.equal(events.some(e=>JSON.stringify(e).includes('DSML')||JSON.stringify(e).includes('PRIVATE')),false,'internal syntax must never reach assistant events');
+ assert.equal(events.find(e=>e.type==='assistant/tool-calls').data.toolCalls[0].capabilityId,'filesystem.read','structured tool must remain usable');
+}
+console.log('PASS double-pipe DSML is suppressed while structured tool calls are preserved');

@@ -24,11 +24,13 @@ const LIST_TIMEOUT_MS = 10_000;
 const CHAT_TIMEOUT_MS = 300_000;
 const SSE_IDLE_TIMEOUT_MS = 45_000;
 const REASONING_EFFORT_CHOICES = Object.freeze(['off', 'low', 'high', 'max']);
-const DSML_MARKERS = Object.freeze(['<｜DSML｜', '<|DSML|']);
+const DSML_MARKERS = Object.freeze(['<｜｜DSML｜｜', '<||DSML||', '<｜DSML｜', '<|DSML|']);
 
-function guardInternalToolSyntax(text, enabled) {
+function guardInternalToolSyntax(text, enabled, structured = false) {
   if (!enabled) return 0;
-  if (DSML_MARKERS.some(marker => text.includes(marker))) {
+  const positions = DSML_MARKERS.map(marker => text.indexOf(marker)).filter(index => index >= 0);
+  if (positions.length) {
+    if (structured) return text.length - Math.min(...positions);
     throw modelRuntimeError('MODEL_TOOL_PROTOCOL_MISMATCH', 'Model returned internal tool syntax as assistant text');
   }
   let held = 0;
@@ -41,7 +43,7 @@ function guardInternalToolSyntax(text, enabled) {
 }
 
 function hasDeepSeekToolContext(id, options) {
-  return id.startsWith('deepseek') && (Array.isArray(options?.tools) && options.tools.length > 0
+  return (Array.isArray(options?.tools) && options.tools.length > 0
     || Array.isArray(options?.messages) && options.messages.some(message => Array.isArray(message?.tool_calls) && message.tool_calls.length > 0));
 }
 
@@ -338,12 +340,14 @@ export function createOpenAiCompatibleModelProvider({
         }
         const choice = Array.isArray(payload?.choices) ? payload.choices[0] : null;
         const rawContent = choice?.message?.content;
-        const text = typeof rawContent === 'string'
+        let text = typeof rawContent === 'string'
           ? rawContent
           : Array.isArray(rawContent)
             ? rawContent.map((part) => (typeof part?.text === 'string' ? part.text : '')).join('')
             : '';
-        guardInternalToolSyntax(text, hasDeepSeekToolContext(id, options));
+        const structured = Array.isArray(choice?.message?.tool_calls) && choice.message.tool_calls.length > 0;
+        const hidden = guardInternalToolSyntax(text, hasDeepSeekToolContext(id, options), structured);
+        if (structured && DSML_MARKERS.some(marker => text.includes(marker))) text = text.slice(0, text.length - hidden);
         requireResponseContinuation(choice?.message?.reasoning_content, body);
         return {
           text,
@@ -419,7 +423,7 @@ export function createOpenAiCompatibleModelProvider({
               : '';
           if (piece) {
             fullText += piece;
-            const held = guardInternalToolSyntax(fullText, guardDsml);
+            const held = guardInternalToolSyntax(fullText, guardDsml, true);
             const safeEnd = fullText.length - held;
             if (safeEnd > emittedTextLength) {
               pendingEvents.push(modelStreamEvent('assistant/chunk', { chunk: { type: 'text-delta', text: fullText.slice(emittedTextLength, safeEnd) } }));
@@ -488,6 +492,8 @@ export function createOpenAiCompatibleModelProvider({
           if (!finished && !finishReasonSeen) {
             throw modelRuntimeError('MODEL_STREAM_INCOMPLETE', `「${label}」流式响应提前结束，缺少完成标记`, {});
           }
+          const hidden = guardInternalToolSyntax(fullText, guardDsml, toolCalls.size > 0);
+          if (toolCalls.size && DSML_MARKERS.some(marker => fullText.includes(marker))) fullText = fullText.slice(0, fullText.length - hidden);
           if (emittedTextLength < fullText.length) {
             yield modelStreamEvent('assistant/chunk', { chunk: { type: 'text-delta', text: fullText.slice(emittedTextLength) } });
           }
