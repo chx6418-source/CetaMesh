@@ -16,6 +16,7 @@ const files = (id = 'topic-1') => ({
   , 'roles/测试 人设.md': 'synthetic persona, original bytes and Unicode filename preserved\n'
 });
 const active = [];
+function step(label) { console.log(`M5_FIXTURE_STEP ${label} ${Date.now()}`); }
 function fixture(options = {}) { const f = createMigrationFixture({ accounts: [{ accountId: '10001', files: files() }], ...options }); active.push(f); return f; }
 try {
   assert.throws(() => openFixtureForChild({ root: process.cwd(), nonce: 'forged' }), { code: 'REAL_DATA_NOT_AUTHORIZED' });
@@ -24,6 +25,7 @@ try {
     writeJsonAtomic(path.join(forged, '.m5-fixture.json'), { purpose: 'SYNTHETIC_FIXTURE_ONLY', root: forged, nonce: 'f'.repeat(64) });
     assert.throws(() => openFixtureForChild({ root: forged, nonce: 'f'.repeat(64) }), { code: 'REAL_DATA_NOT_AUTHORIZED' });
   } finally { fs.rmSync(forged, { recursive: true, force: true }); }
+  step('first-apply:start');
   const f = fixture({ volume: 'workspace' });
   const plan = f.plan(); assert.equal(plan.report.status, 'DRY_RUN_PASS');
   assert.throws(() => f.apply(plan), { code: 'OWNER_APPROVAL_REQUIRED' });
@@ -31,6 +33,7 @@ try {
   f.stopWriters();
   const result = f.apply(plan, { approval: f.approve(plan) });
   assert.equal(result.status, 'FIXTURE_MIGRATION_PASS');
+  step('first-apply:complete');
   assert.equal(f.apply(plan, { approval: f.approve(plan) }).duplicate, true);
   f.setForeignLease(true);
   assert.throws(() => f.apply(plan, { approval: f.approve(plan) }), { code: 'ACCOUNT_LEASE_BUSY' });
@@ -76,6 +79,7 @@ try {
   assert.equal(during.authority(), null, 'new source files during staging invalidate the plan');
 
   for (const phase of ['PLANNED', 'BACKED_UP', 'STAGED', 'VERIFIED', 'AFTER_POINTER', 'COMMITTED']) {
+    step('crash-phase:start:' + phase);
     const interrupted = fixture(); const p = interrupted.plan(); interrupted.stopWriters();
     const crash = interrupted.crashInChild(p, phase);
     assert.equal(crash.error, undefined);
@@ -85,13 +89,16 @@ try {
     assert.equal(recovered.state, ['AFTER_POINTER', 'COMMITTED'].includes(phase) ? 'COMMITTED' : 'ROLLED_BACK');
     assert.equal(interrupted.verifyOriginals(p), true);
     if (['AFTER_POINTER', 'COMMITTED'].includes(phase)) assert.equal(interrupted.rollback({ approval: interrupted.approve(p) }).status, 'ROLLBACK_PASS');
+    step('crash-phase:complete:' + phase);
   }
   for (const failure of ['ENOSPC', 'EACCES', 'WRITE_FAILED']) {
+    step('failure-phase:start:' + failure);
     const broken = fixture(); const p = broken.plan(); broken.stopWriters();
     assert.throws(() => broken.apply(p, { approval: broken.approve(p), failure }), { code: failure });
     assert.equal(broken.authority(), null);
     assert.equal(broken.recover({ approval: broken.approve(p) }).state, 'ROLLED_BACK');
     assert.equal(broken.verifyOriginals(p), true);
+    step('failure-phase:complete:' + failure);
   }
   const account = fixture(); const ap = account.plan(); account.stopWriters(); account.setForeignLease(true);
   assert.throws(() => account.apply(ap, { approval: account.approve(ap) }), { code: 'ACCOUNT_LEASE_BUSY' });
@@ -122,5 +129,6 @@ try {
   assert.notDeepEqual(groups['10001'], groups['10002']);
   assert.equal(two.uninstallConnector().dataRetained, true);
   assert.equal(two.rollback({ approval: two.approve(tp) }).status, 'ROLLBACK_PASS');
+  step('completed-before-cleanup');
   console.log('FIXTURE_MIGRATION_PASS / ROLLBACK_PASS owner, hashes, IDs/scopes, leases, crash, disk and account isolation');
 } finally { for (const f of active) f.dispose(); }
