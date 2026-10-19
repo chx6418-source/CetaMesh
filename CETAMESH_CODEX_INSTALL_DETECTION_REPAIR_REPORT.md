@@ -1,3 +1,5 @@
+> 2026-10-19 更正：用户截图证实Build1095普通启动仍误报。此前原生验收继承CODEX_CLI_PATH，不能证明自动发现完整；本报告保留为历史记录。最终Build1096无覆盖复现、修复与原生验收见 [CETAMESH_CODEX_DESKTOP_DISCOVERY_FOLLOWUP.md](CETAMESH_CODEX_DESKTOP_DISCOVERY_FOLLOWUP.md)。
+
 # Codex CLI 安装检测专项复现、修复与回归报告
 
 ## 范围与基线
