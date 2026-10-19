@@ -102,6 +102,19 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     try { onTaskObservation({ taskId }); }
     catch (error) { audit({ capability: 'memory.working', status: 'projection-failed', code: error?.code ?? 'MEMORY_WRITE_FAILED' }); }
   }
+  function blockLostTaskFollow(provider, sessionId, taskId, errorCode) {
+    const current = taskFor(taskId);
+    if (!current || current.status !== 'running'
+      || current.currentAgent?.provider !== provider || current.currentAgent?.sessionId !== sessionId) return;
+    try {
+      taskRuntime.block({ id: taskId, expectedRev: current.rev,
+        reason: 'needs-reconciliation: Agent Follow ended without verified completion (' +
+          String(errorCode ?? 'AGENT_FOLLOW_DISCONNECTED').slice(0, 90) + '); verify external execution and Workspace before resuming' });
+    } catch (error) {
+      audit({ capability: 'agent.run', status: 'follow-recovery-block-failed',
+        code: error?.code ?? 'TASK_CONFLICT' });
+    }
+  }
   function ensureTaskFollow(provider, sessionId, taskId, options = {}) {
     const capabilities = agentBroker?.capabilities?.(provider);
     if (!['capability-broker', 'staged-capability-broker'].includes(capabilities?.workspaceBoundary)) return null;
@@ -215,6 +228,9 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
           audit({ capability: 'agent.run', status: 'follow-retrying', code: error?.code ?? 'AGENT_FOLLOW_FAILED' });
           if (failures >= 5) {
             audit({ capability: 'agent.run', status: 'follow-error', code: error?.code ?? 'AGENT_FOLLOW_FAILED' });
+            if (consumer.expectedTurns > 0) {
+              blockLostTaskFollow(provider, sessionId, taskId, error?.code ?? 'AGENT_FOLLOW_FAILED');
+            }
             return;
           }
           await waitForTaskFollowRetry(Math.min(250 * (2 ** (failures - 1)), 4000), controller.signal);
