@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { CliAgentProcess, findCliExecutable } from '../src/agent/cli-agent-process.js';
+import { CliAgentProcess, findCliExecutable, createMinimalAgentEnv } from '../src/agent/cli-agent-process.js';
 import { createDesktopUiService } from '../src/desktop/ui-service.js';
 import { createCetaMeshServices } from '../src/app/service-container.js';
 import { createCodexAgentProvider } from '../src/agent/codex-agent-provider.js';
@@ -115,6 +115,26 @@ try {
   const ui=createDesktopUiService({services:{agentService:{execute:async()=>({id:'codex',available:true,installed:true,compatible:true,authenticated:true,sessionCapable:true,taskEligible:false,sandboxCapable:false,status:'sandbox_unavailable',reason:'sandbox_unavailable',workspaceBoundary:'staged-capability-broker'})}}});
   const h=await ui.execute({method:'ui.agent.health',params:{provider:'codex'}});
   assert.equal(h.taskEligible,false);assert.equal(h.status,'not-supported');assert.equal(h.sandboxCapable,false);
+ });
+ await check('desktop-managed CLI is discovered without PATH or explicit override after startup', async () => {
+  const isolated={PATH:'',LOCALAPPDATA:path.join(root,'desktop-managed-local')};
+  const p=createCodexAgentProvider({cliProcess:new CliAgentProcess({name:'codex',envSource:isolated,platform:'win32',probeImpl:probe})});
+  assert.equal((await p.health()).installed,false);
+  const bin=path.join(isolated.LOCALAPPDATA,'OpenAI/Codex/bin');
+  const rgOnly=path.join(bin,'aaaaaaaaaaaaaaaa');fs.mkdirSync(rgOnly,{recursive:true});fs.writeFileSync(path.join(rgOnly,'rg.exe'),'not-a-cli');
+  const generation=path.join(bin,'bbbbbbbbbbbbbbbb');fs.mkdirSync(generation);const exe=path.join(generation,'codex.exe');fs.writeFileSync(exe,'controlled native fixture');
+  const h=await p.health({refresh:true});assert.equal(h.installed,true);assert.equal(h.compatible,true);assert.equal(h.installKind,'desktop-managed-cli');
+  assert.equal(findCliExecutable('codex',{platform:'win32',env:isolated,whereImpl:()=>({status:1})}),exe);
+  const outside=path.join(root,'external-generation');fs.mkdirSync(outside);fs.writeFileSync(path.join(outside,'codex.exe'),'must-not-run');
+  fs.unlinkSync(exe);fs.symlinkSync(outside,path.join(bin,'cccccccccccccccc'),process.platform==='win32'?'junction':'dir');
+  assert.equal(findCliExecutable('codex',{platform:'win32',env:isolated,whereImpl:()=>({status:1})}),null,'junction cannot authorize outside code');
+ });
+ await check('Windows PATH aliases cannot retain a stale executor behind an explicit empty PATH', () => {
+  const dir=path.join(root,'stale-path');fs.mkdirSync(dir);fs.writeFileSync(path.join(dir,'codex.exe'),'stale');
+  assert.equal(findCliExecutable('codex',{platform:'win32',env:{Path:dir,PATH:''},whereImpl:()=>({status:1})}),null);
+  if(process.platform==='win32'){
+   const clean=createMinimalAgentEnv({Path:dir},{PATH:'C:/Windows/System32'});assert.equal(clean.PATH,'C:/Windows/System32');assert.equal(Object.hasOwn(clean,'Path'),false);
+  }
  });
  await check('unsupported shim remains installed with actionable code', async () => {
   const shim = path.join(root, 'unknown.cmd'); fs.writeFileSync(shim, 'untrusted command');

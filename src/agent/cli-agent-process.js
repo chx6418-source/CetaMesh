@@ -56,10 +56,10 @@ export function createMinimalAgentEnv(source = process.env, overrides = {}, { au
   const allowed = new Set(ENV_ALLOWLIST.map(envKey));
   const result = {};
   for (const [key, value] of Object.entries(source ?? {})) {
-    if (allowed.has(envKey(key)) && value !== undefined && value !== null) result[key] = String(value);
+    if (allowed.has(envKey(key)) && value !== undefined && value !== null) result[envKey(key)] = String(value);
   }
   for (const [key, value] of Object.entries(overrides ?? {})) {
-    if (allowed.has(envKey(key)) && value !== undefined && value !== null) result[key] = String(value);
+    if (allowed.has(envKey(key)) && value !== undefined && value !== null) result[envKey(key)] = String(value);
   }
   for (const name of PROXY_ENV_ALLOWLIST) {
     const actual = Object.entries({ ...(source ?? {}), ...(overrides ?? {}) }).find(([key]) => envKey(key) === envKey(name));
@@ -93,7 +93,7 @@ function resolveNpmShimScript(executable, exists = fs.existsSync) {
 }
 
 function environmentValue(env, key) {
-  return Object.entries(env ?? {}).find(([name]) => name.toUpperCase() === key.toUpperCase())?.[1] ?? '';
+  return Object.entries(env ?? {}).reverse().find(([name]) => name.toUpperCase() === key.toUpperCase())?.[1] ?? '';
 }
 
 function isFile(candidate) {
@@ -102,6 +102,28 @@ function isFile(candidate) {
     if (!['ENOENT', 'ENOTDIR', 'EACCES'].includes(error?.code)) throw error;
     return false;
   }
+}
+
+// The desktop application materializes a CLI in this observed per-user layout.
+// Inspect only native codex.exe files in bounded generation directories, never
+// scan WindowsApps, follow a generation junction, or execute host/rg binaries.
+function desktopManagedCodexCandidates(localAppData) {
+  if (!localAppData || !path.isAbsolute(localAppData)) return [];
+  const base = path.join(localAppData, 'OpenAI', 'Codex', 'bin');
+  let entries, realBase;
+  try { entries = fs.readdirSync(base, { withFileTypes: true }); realBase = fs.realpathSync(base); }
+  catch { return []; /* Optional Desktop installation is not a Core startup dependency. */ }
+  const found = [];
+  for (const entry of entries.filter(item => item.isDirectory() && !item.isSymbolicLink() && /^[a-f0-9]{16}$/i.test(item.name))
+    .sort((a, b) => a.name.localeCompare(b.name)).slice(0, 32)) {
+    const candidate = path.join(base, entry.name, 'codex.exe');
+    try {
+      if (!isFile(candidate) || fs.lstatSync(candidate).isSymbolicLink()) continue;
+      const relative = path.relative(realBase, fs.realpathSync(candidate));
+      if (!relative.startsWith('..' + path.sep) && relative !== '..' && !path.isAbsolute(relative)) found.push(candidate);
+    } catch { continue; /* Unreadable/stale application generations never authorize an executor. */ }
+  }
+  return found;
 }
 
 /** Resolve executable files directly without shell invocation, including Windows GUI npm shims. */
@@ -165,6 +187,7 @@ export function findCliCandidates(name, {
       if (isFile(full)) found.push(full);
     }
   }
+  if (platform === 'win32' && requested === 'codex') found.push(...desktopManagedCodexCandidates(environmentValue(env, 'LOCALAPPDATA')));
   return [...new Set(found.filter(isFile))].sort((a, b) => Number(/\.(?:cmd|bat)$/i.test(a)) - Number(/\.(?:cmd|bat)$/i.test(b)));
 }
 
@@ -243,6 +266,7 @@ export class CliAgentProcess {
     const exe = this.executable();
     if (environmentValue(this.environment(), 'CODEX_CLI_PATH') || this.executableOverride !== undefined) return 'explicit';
     if (/\.(cmd|bat)$/i.test(exe ?? '')) return 'npm-shim';
+    if (/[\\/]OpenAI[\\/]Codex[\\/]bin[\\/][a-f0-9]{16}[\\/]codex\.exe$/i.test(exe ?? '')) return 'desktop-managed-cli';
     return /[\\/]Programs[\\/]OpenAI[\\/]Codex[\\/]bin[\\/]/i.test(exe ?? '') ? 'standalone' : exe ? 'path' : 'not-detected';
   }
 
