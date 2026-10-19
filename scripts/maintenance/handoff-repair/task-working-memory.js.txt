@@ -64,3 +64,4 @@ export function createTaskWorkingMemoryRecorder({ memoryRuntime, taskRuntime, en
     } catch(error) {if(error?.code==='MEMORY_NOT_FOUND')return [];throw error;}
   }
   return {record,references};
+}

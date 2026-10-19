@@ -2,7 +2,9 @@ name: handoff-repair-20261019
 on:
   push:
     branches: [fix/handoff-context-working-memory-20261019]
-    paths: [scripts/maintenance/apply-handoff-repair-20261019.mjs, scripts/maintenance/handoff-repair-payload-20261019.b64]
+    paths:
+      - scripts/maintenance/apply-handoff-repair-20261019.mjs
+      - scripts/maintenance/handoff-repair/**
 permissions:
   contents: write
 concurrency:
