@@ -93,6 +93,19 @@ await check('ordinary short answer preserves checkpoint and next action',()=>fix
     'unverified Agent report must be persisted separately from a verified checkpoint');
   assert.ok(!task.completedWork.some(row=>/Synthetic answer/.test(row.text)),'unverified answer was counted as completed work');
 }));
+await check('first unverified Agent response is recorded without a stale Task revision',()=>fixture(async f=>{
+  await f.config('cetamesh');
+  await f.send('Analyze this project.');
+  const task=await f.getTask();
+  assert.ok(task.agentReports?.some(row=>row.verified===false && row.text.includes('Synthetic answer')),
+    'the Agent report must be recorded without upgrading it to verified work');
+  const checkpoint=await waitFor(()=>f.services.taskService.runtime.get({id:task.id}).task.checkpoint,
+    value=>value?.summary?.includes('Synthetic answer'),'unverified fallback checkpoint');
+  assert.match(checkpoint.summary,/^\\[Unverified Agent report\\]/,
+    'unverified checkpoint must state its evidence class');
+  assert.ok(!f.services.taskService.runtime.get({id:task.id}).task.completedWork
+    .some(row=>row.text.includes('Synthetic answer')),'unverified report is not completed work');
+}));
 await check('automatic policy may switch the actual assigned Agent',()=>fixture(async f=>{
   await f.chat.execute({method:'chat.config.set',params:{id:f.session.id,config:{mode:'smart'}}});
   await f.send('Analyze this project.');const before=await f.getTask();
