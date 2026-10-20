@@ -45,6 +45,10 @@
   `ThemeSpec`（背景配方/表面/阴影/圆角/按钮/动效）+ 主题插值过渡 + egui 绘制器；页面经
   `native_palette()` 读取插值 token。`--screenshot-dir` 截图验收能力仅存在于 debug 构建（release 排除）。
 
+## Build1107 快照读取定向恢复（2026-10-20）
+
+- 产品提交799169f，Build1107；有界只读扫描重试和脱敏诊断已验证，不能据此声称原用户STAGING_READ_FAILED根因已确认或原Task已恢复。实际安装仍1106。全量131 PASS/0 FAIL/10 NRE；Rust199/0；合成隔离工作区真实Codex三轮的生产装配及SEA均通过，测试显式关闭自动Rollover。默认Handoff清理曾失败，仍需独立定位。详见CODEX_SNAPSHOT_READ_RECOVERY_REPORT.md。RELEASE_BLOCKED。
+
 ## Verified State
 
 - 测试唯一入口：`npm test`（`scripts/run-all-tests.mjs`，孤儿测试脚本未登记会直接 FAIL）；
