@@ -165,6 +165,10 @@ export function createAgentService({ broker, log = () => {}, desktopStatus = nul
     'agent.archiveSession': (params) => broker.archiveSession({ provider: params?.provider, sessionId: params?.sessionId }),
     'agent.nativeCheckpoint': (params) => broker.nativeCheckpoint({ provider: params?.provider, sessionId: params?.sessionId }),
     'agent.nativeHandoff': (params) => broker.nativeHandoff({ provider: params?.provider, ...(params ?? {}) }),
+    'agent.presets.list': (params) => {
+      if (params?.provider !== 'dsh' || !dshConfiguration) throw agentProviderError('INVALID_PARAMS', 'Preset discovery is available for DSH only');
+      return dshConfiguration.listPresets({ homeDir: params?.homeDir });
+    },
     'agent.configure': (params) => {
       const provider = broker.require(params?.provider);
       if (provider.id === 'dsh' && dshConfiguration) return dshConfiguration.configure(params?.settings ?? {});

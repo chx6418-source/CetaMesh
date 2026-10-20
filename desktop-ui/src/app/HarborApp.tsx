@@ -3,7 +3,7 @@ import { useSearchParams } from 'react-router';
 import { createPortal } from 'react-dom';
 import { mergeChatHistorySnapshot, mergeLatestChatMessages, prependOlderChatMessages } from './chat-history';
 import { applyChatStreamUpdates, ChatRequestEpoch, ChatStreamRevision, pendingReplyVisible, type ChatStreamUpdate } from './chat-async-state';
-import { aboutClient, agentClient, approvalClient, bridge, chatClient, extensionSettingsClient, feedbackClient, hostClient, memoryClient, onboardingClient, openExternal, pluginClient, searchClient, settingsClient, taskClient, updateClient, workspaceClient, workshopClient, type Agent, type DshConfiguration, type DshSelection, type Approval, type ChatMessage as ChatMessageDto, type ChatSession, type ExtensionSettingsDescription, type ExtensionSettingsSnapshot, type IntegrationSettings, type Memory, type Plugin, type ProviderSettingField, type SettingField, type Settings, type Task, type WorkshopProposal } from '../bridge/typed-client';
+import { aboutClient, agentClient, approvalClient, bridge, chatClient, extensionSettingsClient, feedbackClient, hostClient, memoryClient, onboardingClient, openExternal, pluginClient, searchClient, settingsClient, taskClient, updateClient, workspaceClient, workshopClient, type Agent, type DshConfiguration, type DshSelection, type DshPresetCatalog, type Approval, type ChatMessage as ChatMessageDto, type ChatSession, type ExtensionSettingsDescription, type ExtensionSettingsSnapshot, type IntegrationSettings, type Memory, type Plugin, type ProviderSettingField, type SettingField, type Settings, type Task, type WorkshopProposal } from '../bridge/typed-client';
 import { Icon, type IconName } from '../components/icons';
 import { ArtifactCard } from '../components/product/cards';
 import { Button, IconButton, Input, normalizeSelectOptionLabel, SearchInput, Select, Tabs } from '../components/primitives/inputs';
@@ -1212,20 +1212,43 @@ export function AgentSetupDiagnostic({ agent }: { agent: Agent }) {
   return <div className="agent-diagnostic">{reason && <small>{messages[reason] ?? availabilityReasonLabel(reason)}</small>}{agent.preset && <small>编程预设 {agent.preset.id || '未选择'} · {agent.preset.loadState === 'loaded' ? '原生已加载' : agent.preset.loadState === 'not-loaded' ? '原生未加载' : '加载状态未知'} · {agent.preset.compatible === true ? '本地 persona 已验证' : agent.preset.compatible === false ? '本地 persona 不兼容' : '本地 persona 未验证'}</small>}{agent.diagnostic && <details><summary>诊断详情</summary><small>阶段：{agent.diagnostic.stage || '未知'} · 错误码：{agent.diagnostic.code || '无'} · {agent.diagnostic.retryable ? '允许重新检查连接' : '请先处理配置'}{agent.diagnostic.checkedAt ? ` · ${dateLabel(agent.diagnostic.checkedAt)}` : ''}</small></details>}</div>;
 }
 
-export function DshSetupForm({ configuration, draft, saving, onDraftChange, onSave }: {
-  configuration: DshConfiguration; draft: DshSelection; saving: boolean;
-  onDraftChange(value: DshSelection): void; onSave(): void;
+export function DshSetupForm({ configuration, draft, presets, saving, onDraftChange, onSave, onRefresh }: {
+  configuration: DshConfiguration; draft: DshSelection; presets?: DshPresetCatalog; saving: boolean;
+  onDraftChange(value: DshSelection): void; onSave(): void; onRefresh?(): void;
 }) {
+  const catalog = presets ?? { state: 'loading', truncated: false, presets: [] };
   const field = (key: keyof DshSelection, label: string, placeholder: string) => <label>{label}<Input aria-label={label} value={draft[key] ?? ''} placeholder={placeholder} disabled={saving} onChange={event => onDraftChange({ ...draft, [key]: event.target.value || null })} /></label>;
+  const preset = (key: 'codingPreset' | 'socialPreset', label: string) => <div className="dsh-preset-field"><span>{label}</span><Select label={label} value={draft[key] ?? ''} disabled={saving || catalog.state === 'loading'} onChange={event => onDraftChange({ ...draft, [key]: event.target.value || null })}>
+    <option value="">请选择预设</option>
+    {draft[key] && !catalog.presets.some(row => row.id === draft[key]) && <option value={draft[key] ?? ''} disabled>{String(draft[key]) + '（未找到或尚未读取）'}</option>}
+    {catalog.presets.map(row => <option key={row.id} value={row.id} disabled={!row.compatible}>{row.id + (row.compatible ? '' : '（不兼容）')}</option>)}
+  </Select></div>;
+  const listingMessage = catalog.state === 'loading' ? '正在读取本机预设…'
+    : catalog.state === 'missing' ? '未找到预设目录，可在高级设置中检查 DSH 数据目录。'
+    : catalog.state !== 'ready' ? '无法读取本机预设，请检查高级设置中的目录与访问权限。'
+    : !catalog.presets.length ? '此目录下没有预设。请先在 DSH 中创建，再刷新列表。'
+    : !catalog.presets.some(row => row.compatible) ? '未发现兼容预设；不会自动修改已有文件。请在 DSH 中核对后刷新。'
+    : null;
   return <form className="dsh-setup-form" onSubmit={event => { event.preventDefault(); if (!saving) onSave(); }}>
-    <h4>DSH 设置</h4><p>编程预设用于工作区任务；社交预设用于 QQ 社交，两者独立保存。</p>
-    <small>当前生效版本 {configuration.activeRevision} · 编程：{configuration.active.codingPreset || '未选择'} · 社交：{configuration.active.socialPreset || '未选择'}</small>
-    {configuration.restartRequired && <small role="status">待生效版本 {configuration.pendingRevision} · 编程：{configuration.pending?.codingPreset || '未选择'} · 社交：{configuration.pending?.socialPreset || '未选择'}。重启 Core 后生效；当前连接仍使用当前生效版本。</small>}
+    <h4>DSH 设置</h4><p>从本机预设中选择，无需手填名称或编辑文件。</p>
+    {preset('codingPreset', '任务预设')}
+    <small>选择后保存；实际可用状态以连接检查为准。</small>
+    {listingMessage && <small role="status">{listingMessage}</small>}
+    {catalog.presets.some(row => !row.compatible) && <small>部分预设不兼容，已禁用；原因见高级设置。</small>}
+    {catalog.truncated && <small>预设数量较多，仅显示本次有界扫描结果。</small>}
+    {configuration.restartRequired && <small role="status">配置已保存，重启 Core 后生效；当前连接保持原配置。</small>}
     {configuration.loadError && <p role="alert">连接配置读取失败（{configuration.loadError}），请检查并重新保存。</p>}
-    {field('codingPreset', '编程预设', '例如 coder-standard')}{field('socialPreset', '社交预设', '例如 whale-chat-v2')}
-    {field('homeDir', 'DSH 数据目录', '本地绝对路径')}{field('baseUrl', 'DSH 服务地址', 'http://127.0.0.1:3080')}
-    <details><summary>配置来源</summary><small>来源：{configuration.source} · 目录来源：{configuration.homeSource}</small><small>配置文件：{configuration.configFile || '未知'}</small>{configuration.pendingConfigFile && <small>待生效配置文件：{configuration.pendingConfigFile}</small>}<small>数据根：{configuration.dataRoot || '未知'}</small></details>
-    <Button compact type="submit" disabled={saving}>{saving ? '保存中…' : '保存配置'}</Button>
+    <div className="row"><Button compact type="submit" disabled={saving}>{saving ? '保存中…' : '保存配置'}</Button><Button compact type="button" variant="ghost" disabled={saving || catalog.state === 'loading'} onClick={onRefresh}>刷新预设</Button></div>
+    <details><summary>高级设置</summary><div className="dsh-advanced-fields">
+      {preset('socialPreset', '社交预设')}
+      <small>仅用于 QQ 社交，与任务预设分别保存。</small>
+      {field('homeDir', 'DSH 数据目录', '留空使用自动检测目录')}{field('baseUrl', 'DSH 服务地址', 'http://127.0.0.1:3080')}
+      <details><summary>诊断信息</summary>{catalog.presets.filter(row => !row.compatible).map(row => <small key={row.id}>{row.id}：{row.reason === 'persona-prefix-required' ? '旧预设缺少 persona prefix' : '本地格式或文件校验未通过'}</small>)}
+        <small>当前生效版本 {configuration.activeRevision} · 编程预设：{configuration.active.codingPreset || '未选择'} · 社交：{configuration.active.socialPreset || '未选择'}</small>
+        {configuration.restartRequired && <small>待生效版本 {configuration.pendingRevision} · 编程：{configuration.pending?.codingPreset || '未选择'} · 社交：{configuration.pending?.socialPreset || '未选择'}。重启 Core 后生效。</small>}
+        <small>配置来源：{configuration.source} · 目录来源：{configuration.homeSource}</small><small>配置文件：{configuration.configFile || '未知'}</small>{configuration.pendingConfigFile && <small>待生效配置文件：{configuration.pendingConfigFile}</small>}<small>数据根：{configuration.dataRoot || '未知'}</small>
+      </details>
+    </div></details>
   </form>;
 }
 
@@ -1244,6 +1267,17 @@ export function dshSetupErrorMessage(cause: unknown): string {
 function DshSetupPanel({ agent, onConfigured }: { agent: Agent; onConfigured(configuration: DshConfiguration): void }) {
   const configuration = agent.configuration;
   const [draft, setDraft] = useState<DshSelection>(() => configuration?.pending ?? configuration?.active ?? { codingPreset: null, socialPreset: null, homeDir: null, baseUrl: null });
+  const [presets, setPresets] = useState<DshPresetCatalog>({state:'loading',truncated:false,presets:[]});
+  const [refresh, setRefresh] = useState(0);
+  useEffect(() => {
+    let active = true;
+    setPresets({state:'loading',truncated:false,presets:[]});
+    const timer=window.setTimeout(() => {
+      void agentClient.presets(draft.homeDir).then(value => { if(active) setPresets(value); })
+        .catch(() => { if(active) setPresets({state:'error',truncated:false,presets:[]}); });
+    },250);
+    return () => { active=false; window.clearTimeout(timer); };
+  },[draft.homeDir,refresh]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   useEffect(() => { if (configuration) setDraft(configuration.pending ?? configuration.active); }, [configuration?.revision, configuration?.activeRevision]);
@@ -1253,7 +1287,7 @@ function DshSetupPanel({ agent, onConfigured }: { agent: Agent; onConfigured(con
     catch (cause) { setError(dshSetupErrorMessage(cause)); }
     finally { setSaving(false); }
   }
-  return configuration ? <><DshSetupForm configuration={configuration} draft={draft} saving={saving} onDraftChange={setDraft} onSave={() => void save()} />{error && <ErrorNotice error={error} />}</> : <small>尚未取得连接配置，请检查连接。</small>;
+  return configuration ? <><DshSetupForm configuration={configuration} draft={draft} presets={presets} onRefresh={() => setRefresh(value => value + 1)} saving={saving} onDraftChange={setDraft} onSave={() => void save()} />{error && <ErrorNotice error={error} />}</> : <small>尚未取得连接配置，请检查连接。</small>;
 }
 
 export function managedWorkspacePreflight(provider: string, workspaceId: string, activeWorkspaceId: string | null): string {

@@ -1052,6 +1052,12 @@ export function createDesktopUiService({ services = {}, system = services.system
     },
     'ui.agent.list': async () => ({ agents: (await agent('agent.list', {})).providers.map(projectAgent) }),
     'ui.agent.health': async p => projectAgent(await agent('agent.health', { provider: string(p.provider, 80), refresh: p.refresh === true })),
+    'ui.agent.presets': async p => {
+      if (p.provider !== 'dsh') throw uiError('INVALID_PARAMS', 'Preset discovery is available for DSH only');
+      const result = await agent('agent.presets.list', { provider: 'dsh', homeDir: p.homeDir });
+      return { state: string(result.state, 30), truncated: result.truncated === true,
+        presets: (result.presets ?? []).slice(0, 200).map(row => ({ id: string(row.id, 100), compatible: row.compatible === true, reason: string(row.reason, 100) || null })) };
+    },
     'ui.agent.configure': async p => {
       if (string(p.agentId ?? p.provider, 80) !== 'dsh') throw Object.assign(new Error('Unsupported connector'), { code: 'INVALID_PARAMS' });
       if (!p.config || typeof p.config !== 'object' || Array.isArray(p.config)) throw uiError('INVALID_PARAMS', 'DSH configuration must be an object');

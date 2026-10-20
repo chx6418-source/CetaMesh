@@ -115,6 +115,23 @@ assert.equal(createdRequests.length, 1, 'an incompatible social preset must not 
 assert.equal((await presetProvider.health()).ready, true, 'a compatible, loaded coding preset may be marked ready');
 assert.deepEqual(fs.readFileSync(socialFile), socialBefore, 'user-authored preset bytes remain untouched');
 assert.equal(fs.existsSync(codingFile), true);
+const presetUi = createCetaMeshServices({api:crashingApi,dshConfiguration:createDshCoreConnector({config:{dsh:{homeDir:home}},stateDir:path.join(home,'test-state')}).configuration,stateDir:path.join(home,'test-state'),dataRoot:path.join(home,'test-data')});
+try {
+ const listed=await presetUi.desktopUiService.execute({method:'ui.agent.presets',params:{provider:'dsh',homeDir:home}});
+ assert.equal(listed.state,'ready');
+ assert.deepEqual(listed.presets.map(p=>[p.id,p.compatible]),[['coding-safe',true],['social-old',false]]);
+ assert.equal(listed.presets[1].reason,'persona-prefix-required');
+ const alias=path.join(home,'alias-home');fs.mkdirSync(alias);
+ fs.symlinkSync(path.join(home,'.agent-presets'),path.join(alias,'.agent-presets'),'junction');
+ assert.equal((await presetUi.desktopUiService.execute({method:'ui.agent.presets',params:{provider:'dsh',homeDir:alias}})).state,'outside-root','junction escaping the selected home is not enumerated');
+ assert.doesNotMatch(JSON.stringify(listed),/You are a coding agent|QQ social persona|authCookie/,'catalog contains no persona or credentials');
+ assert.deepEqual(fs.readFileSync(socialFile),socialBefore,'discovery never repairs or overwrites user presets');
+ assert.equal((await presetUi.desktopUiService.execute({method:'ui.agent.presets',params:{provider:'dsh',homeDir:path.join(home,'missing')}})).state,'missing');
+ await assert.rejects(()=>presetUi.desktopUiService.execute({method:'ui.agent.presets',params:{provider:'codex'}}),e=>e.code==='INVALID_PARAMS');
+ await assert.rejects(()=>presetUi.desktopUiService.execute({method:'ui.agent.presets',params:{provider:'dsh',homeDir:'relative'}}),e=>e.code==='INVALID_PARAMS');
+} finally {
+ presetUi.chatService.close();await presetUi.agentService.close();await presetUi.capabilityService.close();await presetUi.managedAgent.close();
+}
 await presetProvider.shutdown();
 fs.rmSync(home, { recursive: true, force: true });
 

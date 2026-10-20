@@ -55,6 +55,7 @@ export interface Agent {
   diagnostic?: { stage: string; code: string | null; retryable: boolean; checkedAt: string | null } | null;
   version: string | null; desktopApp: { installed: boolean; running: boolean; status: string; version: string | null } | null;
 }
+export interface DshPresetCatalog { state: 'ready' | 'missing' | 'unreadable' | 'outside-root' | 'loading' | 'error'; truncated: boolean; presets: { id: string; compatible: boolean; reason: string | null }[] }
 export interface DshSelection { codingPreset: string | null; socialPreset: string | null; homeDir: string | null; baseUrl: string | null }
 export interface DshConfiguration {
   version: number; revision: number; activeRevision: number; pendingRevision: number | null; restartRequired: boolean;
@@ -128,7 +129,7 @@ type UiMethod =
   | 'ui.workspace.list' | 'ui.workspace.open' | 'ui.workspace.create'
   | 'ui.memory.overview' | 'ui.memory.get' | 'ui.memory.create' | 'ui.memory.update' | 'ui.memory.pin' | 'ui.memory.delete'
   | 'ui.memory.candidates.confirm' | 'ui.memory.candidates.confirmBatch'
-  | 'ui.agent.security' | 'ui.agent.authorize' | 'ui.agent.list' | 'ui.agent.health' | 'ui.agent.configure'
+  | 'ui.agent.security' | 'ui.agent.authorize' | 'ui.agent.list' | 'ui.agent.health' | 'ui.agent.configure' | 'ui.agent.presets'
   | 'ui.extensions.settings.describe' | 'ui.extensions.settings.get' | 'ui.extensions.settings.update'
   | 'ui.plugins.catalog' | 'ui.plugins.status' | 'ui.plugins.detail' | 'ui.plugins.refresh' | 'ui.plugins.stage' | 'ui.plugins.stage-local' | 'ui.plugins.install'
   | 'ui.plugins.enable.review' | 'ui.plugins.enable' | 'ui.plugins.disable' | 'ui.plugins.uninstall' | 'ui.plugins.integration.list' | 'ui.plugins.integration.settings'
@@ -313,6 +314,7 @@ export const agentClient = {
   authorize: (provider: string, workspaceId: string, fingerprint: string) => uiCall<{ status: string; approvalId: string }>('ui.agent.authorize', { provider, workspaceId, fingerprint }),
   list: () => uiCall<{ agents: Agent[] }>('ui.agent.list', {}),
   health: (provider: string, refresh = false) => uiCall<Agent>('ui.agent.health', { provider, refresh }),
+  presets: (homeDir: string | null) => uiCall<DshPresetCatalog>('ui.agent.presets', { provider: 'dsh', homeDir }),
   configure: (config: DshSelection) => uiCall<{ provider: 'dsh'; supported: boolean; applied: false; restartRequired: boolean; configuration: DshConfiguration }>('ui.agent.configure', { agentId: 'dsh', config })
 };
 export const extensionSettingsClient = {

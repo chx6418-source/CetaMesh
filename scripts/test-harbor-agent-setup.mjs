@@ -31,17 +31,23 @@ try {
     source: 'connector-v1', homeSource: 'connector', loadError: null, configFile: '/isolated/config.json', dataRoot: '/isolated',
     active: { codingPreset: 'coder-old', socialPreset: 'whale-safe', homeDir: '/isolated/dsh', baseUrl: 'http://127.0.0.1:3080' },
     pending: { codingPreset: 'coder-next', socialPreset: 'whale-safe', homeDir: '/isolated/dsh', baseUrl: 'http://127.0.0.1:3080' } };
-  const props = { configuration, draft: { ...configuration.pending }, saving: false, onDraftChange() {}, onSave() {} };
+  const presets={state:'ready',truncated:false,presets:[{id:'coder-old',compatible:true,reason:null},{id:'coder-next',compatible:true,reason:null},{id:'whale-safe',compatible:true,reason:null},{id:'old-invalid',compatible:false,reason:'persona-prefix-required'}]};
+  const props = { presets, configuration, draft: { ...configuration.pending }, saving: false, onDraftChange() {}, onSave() {} };
   const render = (component, props) => renderToStaticMarkup(React.createElement(component, props));
   const html = render(ui.DshSetupForm, props);
+  assert.match(html, /任务预设/); assert.match(html, /<summary>高级设置<\/summary>/); assert.doesNotMatch(html, /<details open/); assert.match(html, /从本机预设中选择/);
   assert.match(html, /编程预设/); assert.match(html, /社交预设/);
   assert.match(html, /coder-old/); assert.match(html, /coder-next/);
   assert.match(html, /当前生效版本 2/); assert.match(html, /待生效版本 3/);
   assert.match(html, /重启 Core 后生效/); assert.match(html, /保存配置/);
+  assert.match(render(ui.DshSetupForm,{...props,draft:{...props.draft,codingPreset:'not-found'}}),/not-found（未找到或尚未读取）/,'missing persisted selection remains visible without silently falling back');
   let draftChange, saves = 0;
   const controlled = ui.DshSetupForm({ ...props, onDraftChange(value) { draftChange = value; }, onSave() { saves++; } });
-  const fields = React.Children.toArray(controlled.props.children).filter(child => child.type === 'label');
-  React.Children.toArray(fields[0].props.children)[1].props.onChange({ target: { value: 'coder-changed' } });
+  const descendants=node=>React.Children.toArray(node.props?.children).flatMap(child=>React.isValidElement(child)?[child,...descendants(child)]:[]);
+  const taskSelect=descendants(controlled).find(child=>child.props?.label==='任务预设');
+  assert.ok(taskSelect,'task preset is a selectable list, not a handwritten ID');
+  assert.equal(React.Children.toArray(taskSelect.props.children).find(child=>child.props.value==='old-invalid').props.disabled,true);
+  taskSelect.props.onChange({target:{value:'coder-changed'}});
   assert.equal(draftChange.codingPreset, 'coder-changed');
   assert.equal(draftChange.socialPreset, 'whale-safe', 'editing coding does not overwrite social selection');
   assert.equal(saves, 0, 'editing never implicitly saves');
@@ -54,6 +60,9 @@ try {
   const configured = await agentClient.configure(configuration.pending);
   assert.deepEqual(sent.params, { agentId: 'dsh', config: configuration.pending });
   assert.equal(sent.method, 'ui.agent.configure'); assert.equal(configured.configuration.activeRevision, 2);
+  window.ipc.postMessage=payload=>{sent=JSON.parse(payload);window.__cetameshReceive({id:sent.id,ok:true,result:presets});};
+  assert.deepEqual(await agentClient.presets('/isolated/dsh'),presets);
+  assert.equal(sent.method,'ui.agent.presets');assert.deepEqual(sent.params,{provider:'dsh',homeDir:'/isolated/dsh'});
   delete window.ipc;
   const saving = render(ui.DshSetupForm, { ...props, saving: true });
   assert.match(saving, /disabled=""[^>]*>保存中/);

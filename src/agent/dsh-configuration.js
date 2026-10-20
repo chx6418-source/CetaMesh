@@ -2,7 +2,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { readJsonFile, writeJsonAtomic } from '../storage/json-file.js';
 import { agentProviderError } from './agent-provider.js';
-import { inspectDshPreset, validDshPresetId } from './dsh-preset-policy.js';
+import { inspectDshPreset, validDshPresetId, listDshPresets } from './dsh-preset-policy.js';
 
 function normalize(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw agentProviderError('INVALID_PARAMS', 'DSH configuration must be an object');
@@ -56,6 +56,11 @@ export function createDshConfiguration({ legacy = {}, stateDir, configFile = nul
         pendingConfigFile: pending ? file : null,
         homeSource: active.homeDir ? 'connector' : env?.DSH_HOME ? 'environment' : 'user-default',
         active: { ...active, homeDir: home }, pending: pending ? { ...pending } : null };
+    },
+    listPresets({ homeDir } = {}) {
+      if (homeDir !== undefined && homeDir !== null && (typeof homeDir !== 'string' || !path.isAbsolute(homeDir) || homeDir.length > 4096)) throw agentProviderError('INVALID_PARAMS', 'DSH homeDir must be an absolute local path');
+      const selected = homeDir === undefined ? (pending?.homeDir ?? home) : homeDir || env?.DSH_HOME || path.join(os.homedir(), '.dsh');
+      return listDshPresets({ dshHome: selected });
     },
     configure(input) {
       if (!file) throw agentProviderError('CONFIGURATION_UNSUPPORTED', 'Connector persistence is unavailable');

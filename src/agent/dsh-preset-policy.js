@@ -58,6 +58,26 @@ export function inspectDshPreset({ id, dshHome } = {}) {
   }
 }
 
+export function listDshPresets({ dshHome } = {}) {
+  const home = path.resolve(dshHome || process.env.DSH_HOME || path.join(os.homedir(), '.dsh'));
+  const root = path.join(home, '.agent-presets');
+  let directory;
+  try {
+    const canonicalHome = fs.realpathSync(home), canonicalRoot = fs.realpathSync(root);
+    if (!canonicalRoot.startsWith(canonicalHome + path.sep)) return { state: 'outside-root', presets: [], truncated: false };
+    directory = fs.opendirSync(canonicalRoot);
+    const ids = []; let inspected = 0, truncated = false;
+    for (let entry; (entry = directory.readSync()) !== null;) {
+      if (++inspected > 1000 || ids.length >= 200) { truncated = true; break; }
+      if (entry.isDirectory() && !entry.isSymbolicLink() && validDshPresetId(entry.name)) ids.push(entry.name);
+    }
+    ids.sort();
+    return { state: 'ready', truncated, presets: ids.map(id => ({ id, ...inspectDshPreset({ id, dshHome: home }) })) };
+  } catch (error) {
+    return { state: error?.code === 'ENOENT' ? 'missing' : 'unreadable', presets: [], truncated: false };
+  } finally { if (directory) directory.closeSync(); }
+}
+
 export function createDshPresetPolicy(config = {}) {
   const coding = config.coding ?? null;
   const social = config.social ?? null;
