@@ -403,6 +403,7 @@ try {
   let fakeStderr = '';
   let fakeTurnFailed = false;
   let omitFinalNewline = false;
+  let fakeMessageParts = null;
   let taskCapabilities;
   const fakeCli = {
     executable: () => 'codex-fixture',
@@ -421,7 +422,7 @@ try {
       if (fakeTurnFailed) fs.writeFileSync(path.join(cwd, 'codex-failed-result.txt'), 'must not import after turn.failed');
       const records = [
         { type: 'thread.started', thread_id: `thread-${number}` },
-        { type: 'item.completed', item: { type: 'agent_message', text: `fixture response ${number}` } },
+        ...(fakeMessageParts ?? [`fixture response ${number}`]).map((text, index) => ({ type: 'item.completed', item: { id: `message-${number}-${index}`, type: 'agent_message', text } })),
         ...(fakeTurnFailed ? [{ type: 'turn.failed', error: { message: 'fixture turn failed' } }] : []),
         ...(fakeExitCode === 0 ? [{ type: 'turn.completed', usage: { input_tokens: 12, output_tokens: 4 } }] : [])
       ];
@@ -563,9 +564,19 @@ try {
   assert.ok(codexRunRelative && codexRunRelative !== '..'
     && !codexRunRelative.startsWith(`..${path.sep}`) && !path.isAbsolute(codexRunRelative),
   'Codex runs inside the canonical isolated Task staging root');
+  const multipartText = ['先读取项目结构。\n保留原始换行。', '然后核对入口：\n\n- 读取配置\n- 检查调用链', '分析结论：\n\n```js\nconst ready = true;\n```'];
+  multipartText.push('长段落：' + '字'.repeat(33_000));
+  fakeMessageParts = multipartText;
+  const beforeMultipart = codexProvider._sessions.get(codexSessionId).events.at(-1).seq;
   await agentBroker.send({ provider: 'codex', sessionId: codexSessionId, content: 'Continue with the retained provider session' });
   await waitFor(() => agentBroker.status({ provider: 'codex', sessionId: codexSessionId }),
     status => !status.running && status.lastRunStatus === 'completed');
+  fakeMessageParts = null;
+  const multipartEvents = codexProvider._sessions.get(codexSessionId).events.filter(event => event.seq > beforeMultipart);
+  const expectedMultipart = multipartText.join('\n\n');
+  assert.ok(multipartEvents.filter(event => event.type === 'assistant/chunk').every(event => event.data.chunk.text.length <= 32_000), 'bounded chunks preserve long items without silently dropping their tail');
+  assert.equal(multipartEvents.filter(event => event.type === 'assistant/chunk').map(event => event.data.chunk.text).join(''), expectedMultipart, 'separate native messages keep paragraph boundaries while streaming');
+  assert.equal(multipartEvents.find(event => event.type === 'assistant/message').data.message.content[0].text, expectedMultipart, 'formal message keeps every native paragraph instead of replacing earlier progress');
   assert.ok(fakeRuns[1].args.includes('resume'), 'inspected resume CLI interface is used for a same-session continuation');
   const resumeArgs = fakeRuns[1].args;
   assert.ok(resumeArgs.indexOf('exec') < resumeArgs.indexOf('resume'));

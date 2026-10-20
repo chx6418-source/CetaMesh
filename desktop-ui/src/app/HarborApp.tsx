@@ -760,10 +760,37 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
   </div>;
 }
 
+function ToolActivityRow({ tool }: { tool: ChatMessageDto['toolActivity'][number] }) {
+  const known = ['running', 'completed', 'failed', 'cancelled'].includes(tool.status);
+  const label = ({ running: '运行中', completed: '已完成', failed: '失败', cancelled: '已取消' } as Record<string, string>)[tool.status] ?? '待核验';
+  return <details className={`tool-call ${tool.status === 'running' ? 'active' : tool.status === 'failed' ? 'failed' : !known ? 'unverified' : ''}`}>
+    <summary><Icon name={tool.status === 'completed' ? 'check' : tool.status === 'cancelled' ? 'close' : tool.status === 'running' ? 'update' : 'help'} size={15} /><span>{tool.label || tool.id}</span><span className="tool-state">{label}</span>{tool.durationMs !== null && <span className="tool-duration">{(tool.durationMs / 1000).toFixed(1)} 秒</span>}<Icon name="down" size={14} /></summary>
+    {tool.summary && <p>{tool.summary}</p>}
+  </details>;
+}
+
+export function ToolActivity({ tools }: { tools: ChatMessageDto['toolActivity'] }) {
+  if (!tools.length) return null;
+  const completed = tools.filter(tool => tool.status === 'completed');
+  const attention = tools.filter(tool => tool.status !== 'completed');
+  const counts = [
+    ['已完成', completed.length],
+    ['运行中', tools.filter(tool => tool.status === 'running').length],
+    ['失败', tools.filter(tool => tool.status === 'failed').length],
+    ['已取消', tools.filter(tool => tool.status === 'cancelled').length],
+    ['待核验', tools.filter(tool => !['running', 'completed', 'failed', 'cancelled'].includes(tool.status)).length]
+  ].filter(([, count]) => Number(count) > 0);
+  return <section className="tool-activity" aria-label="工具活动">
+    <div className="tool-activity-heading"><strong>工具活动</strong><span aria-live="polite" aria-atomic="true">{counts.map(([label, count]) => `${label} ${count}`).join(' · ')}</span></div>
+    {attention.map(tool => <ToolActivityRow key={tool.id} tool={tool} />)}
+    {completed.length > 0 && <details className="tool-completed"><summary><Icon name="check" size={14} /><span>已完成 {completed.length} 项</span><small>展开明细</small><Icon name="down" size={14} /></summary><div className="tool-completed-list" tabIndex={0} aria-label="已完成工具调用明细">{completed.map(tool => <ToolActivityRow key={tool.id} tool={tool} />)}</div></details>}
+  </section>;
+}
+
 export function MessageBubble({ message, streaming = false, sendError, onRetry }: { message: ChatMessageDto; streaming?: boolean; sendError?: string; onRetry?(): void }) {
   const role = message.role === 'user' ? 'user' : 'assistant';
   const agentActivity = message.agentActivity;
-  return <article className={`chat-message ${role} ${streaming ? 'streaming' : ''}`}><div className="message-avatar">{role === 'assistant' ? <Icon name="sparkles" size={16} /> : '你'}</div><div className="message-body"><div className="message-meta"><strong>{role === 'assistant' ? 'CetaMesh' : '你'}</strong><span>{dateLabel(message.at)}</span>{streaming && <Badge tone="accent">生成中</Badge>}</div>{agentActivity && <div className={`agent-activity ${agentActivity.status}`} role="status"><Icon name={agentActivity.status === 'running' ? 'sparkles' : agentActivity.status === 'completed' ? 'check' : 'help'} size={15} /><span>{agentActivity.label}</span><strong>{agentActivityStatusLabel(agentActivity.status)}</strong></div>}{message.text ? <Markdown>{message.text}</Markdown> : <span className="muted">（没有文本内容）</span>}{message.attachments.length > 0 && <div className="message-attachments">{message.attachments.map(name => <span key={name}><Icon name="attach" size={13} />{name}</span>)}</div>}{message.toolActivity.map(tool => <details key={tool.id} className="tool-call"><summary><Icon name={tool.status === 'cancelled' ? 'close' : tool.status === 'failed' ? 'help' : tool.status === 'running' ? 'update' : 'check'} size={15} /><span>{tool.label || tool.id}</span><span className="tool-duration">{tool.status === 'cancelled' ? '已取消' : tool.durationMs === null ? taskStatusLabel(tool.status) : `${(tool.durationMs / 1000).toFixed(1)} 秒`}</span><Icon name="down" size={14} /></summary>{tool.summary && <p>{tool.summary}</p>}</details>)}{sendError && <div className="message-error" role="alert">{sendError}<Button compact variant="ghost" onClick={onRetry}>重试发送</Button></div>}{message.error && <p className="message-error" role="alert">{message.error}</p>}{message.cancelled && <small>本轮已停止</small>}</div></article>;
+  return <article className={`chat-message ${role} ${streaming ? 'streaming' : ''}`}><div className="message-avatar">{role === 'assistant' ? <Icon name="sparkles" size={16} /> : '你'}</div><div className="message-body"><div className="message-meta"><strong>{role === 'assistant' ? 'CetaMesh' : '你'}</strong><span>{dateLabel(message.at)}</span>{streaming && <Badge tone="accent">生成中</Badge>}</div>{agentActivity && <div className={`agent-activity ${agentActivity.status}`} role="status"><Icon name={agentActivity.status === 'running' ? 'sparkles' : agentActivity.status === 'completed' ? 'check' : 'help'} size={15} /><span>{agentActivity.label}</span><strong>{agentActivityStatusLabel(agentActivity.status)}</strong></div>}{message.text ? <Markdown>{message.text}</Markdown> : <span className="muted">（没有文本内容）</span>}{message.attachments.length > 0 && <div className="message-attachments">{message.attachments.map(name => <span key={name}><Icon name="attach" size={13} />{name}</span>)}</div>}<ToolActivity tools={message.toolActivity} />{sendError && <div className="message-error" role="alert">{sendError}<Button compact variant="ghost" onClick={onRetry}>重试发送</Button></div>}{message.error && <p className="message-error" role="alert">{message.error}</p>}{message.cancelled && <small>本轮已停止</small>}</div></article>;
 }
 
 async function confirmAgentExecution(provider: string, workspaceId: string) {

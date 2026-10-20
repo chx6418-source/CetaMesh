@@ -427,3 +427,33 @@
 
 .dsh-advanced-fields { display: grid; gap: 10px; padding-top: 10px; }
 .dsh-preset-field { display: grid; gap: 6px; font-size: 12px; }
+
+/* Native Agent messages retain paragraph and soft-line boundaries. */
+.chat-message .cm-markdown { line-height: 1.75; overflow-wrap: anywhere; }
+.chat-message .cm-markdown p { margin: 0 0 .9em; white-space: pre-wrap; }
+.chat-message .cm-markdown ul, .chat-message .cm-markdown ol { margin: .65em 0 .9em; padding-left: 1.6em; }
+.chat-message .cm-markdown li { margin: .35em 0; white-space: pre-wrap; }
+.chat-message .cm-markdown li > p { margin-bottom: .35em; }
+.chat-message .cm-markdown :is(h1, h2, h3, h4, h5, h6) { margin: 1em 0 .5em; line-height: 1.45; }
+.chat-message .cm-markdown pre { max-width: 100%; margin: .8em 0 1em; padding: 14px 16px; overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; background: var(--background-soft); white-space: pre; line-height: 1.6; }
+.chat-message .cm-markdown pre code { padding: 0; background: transparent; white-space: pre; font-size: 12px; }
+.chat-message .cm-markdown > :first-child { margin-top: 0; }
+.chat-message .cm-markdown > :last-child { margin-bottom: 0; }
+
+.tool-activity { margin: 14px 0 6px; min-width: 0; }
+.tool-activity-heading { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 12px; margin-bottom: 8px; font-size: 12px; color: var(--text-muted); }
+.tool-activity-heading strong { color: var(--text-secondary); font-weight: 600; }
+.tool-activity .tool-call { margin: 6px 0; padding: 7px 10px; }
+.tool-activity .tool-call summary { font-size: 12px; }
+.tool-activity .tool-call summary > span:nth-child(2) { min-width: 0; overflow-wrap: anywhere; }
+.tool-state, .tool-duration { flex: none; white-space: nowrap; font-size: 11px; color: var(--text-muted); }
+.tool-call.active { border-color: var(--accent); }
+.tool-call.failed, .tool-call.unverified { border-color: var(--danger); }
+.tool-call.failed .tool-state, .tool-call.unverified .tool-state { color: var(--danger); }
+.tool-completed { border: 1px solid var(--border); border-radius: 9px; background: var(--surface); }
+.tool-completed > summary { display: flex; align-items: center; gap: 8px; padding: 9px 11px; list-style: none; cursor: pointer; color: var(--text-secondary); font-size: 12px; }
+.tool-completed > summary::-webkit-details-marker { display: none; }
+.tool-completed > summary small { margin-left: auto; font-size: 11px; }
+.tool-completed[open] > summary small { display: none; }
+.tool-completed[open] > summary > svg:last-child { margin-left: auto; transform: rotate(180deg); }
+.tool-completed-list { max-height: 260px; overflow-y: auto; padding: 0 8px 8px; border-top: 1px solid var(--border); }

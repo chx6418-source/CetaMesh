@@ -545,10 +545,16 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
       } else if (event.type === 'item.completed') {
         const value = extractText(event);
         if (value) {
-          run.text = value.slice(0, 200_000);
-          emit(session, makeEvent('assistant/chunk', run.turnId, {
-            chunk: { type: 'text-delta', text: value.slice(0, 32_000) }
-          }));
+          // Each completed native item is a whole message, not an adjacent token.
+          // Preserve item boundaries in both the stream and its final replacement.
+          const previousText = run.text;
+          run.text = (previousText + (previousText ? '\n\n' : '') + value).slice(0, 200_000);
+          const appended = run.text.slice(previousText.length);
+          for (let offset = 0; offset < appended.length; offset += 32_000) {
+            emit(session, makeEvent('assistant/chunk', run.turnId, {
+              chunk: { type: 'text-delta', text: appended.slice(offset, offset + 32_000) }
+            }));
+          }
         }
       } else if (event.type === 'turn.completed') {
         run.turnCompleted = true;
