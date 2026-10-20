@@ -97,5 +97,25 @@ try {
   const actions = ui.ManagedFailureActions({ taskId: 'task-failed', onReviewTask(id) { reviewed = id; }, onNewChat() { ordinary++; } });
   const buttons = React.Children.toArray(actions.props.children); buttons[0].props.onClick(); buttons[1].props.onClick();
   assert.equal(reviewed, 'task-failed'); assert.equal(ordinary, 1);
+  assert.equal(typeof ui.WorkTaskList,'function','Work must separate active and compact historical Tasks');
+  const taskBase={id:'old-1',title:'[Prior Owner constraints in this Task Chat Session; verify against the current request] - 你好 [Current request] 你好',goal:'Original unmodified goal',status:'cancelled',workspaceId:'ws-private-internal-id',agent:null,currentAgent:null,agentHistory:[{provider:'codex',sessionId:'old-native'}],progress:{percent:0,note:''},updatedAt:null};
+  const workTasks=[taskBase,{...taskBase,id:'done-1',title:'Completed report',status:'completed'}, {...taskBase,id:'blocked-1',title:'Needs review',status:'blocked'},{...taskBase,id:'failed-1',title:'Failed task',status:'failed'}];
+  const originalTasks=JSON.stringify(workTasks);
+  const taskListProps={tasks:workTasks,workspaces:[{id:'ws-private-internal-id',name:'项目工作区'}],providers:[{id:'codex',name:'Codex'}],onOpen(){},onAction(){}};
+  const historyMarkup=render(ui.WorkTaskList,taskListProps);
+  assert.match(historyMarkup,/<details class="task-history">/);
+  assert.doesNotMatch(historyMarkup,/<details class="task-history" open/);
+  assert.match(historyMarkup,/历史任务/);assert.match(historyMarkup,/已取消/);assert.match(historyMarkup,/已完成/);
+  assert.doesNotMatch(historyMarkup,/ws-private-internal-id|Prior Owner constraints|Current request|cancelled/,'list does not expose internal IDs, prompt envelopes or English status');
+  assert.match(historyMarkup,/项目工作区/);assert.match(historyMarkup,/Codex（已结束）/);
+  const attentionMarkup=historyMarkup.split('<details class="task-history">')[0];
+  assert.match(attentionMarkup,/Needs review/);assert.match(attentionMarkup,/Failed task/,'failed Tasks remain directly visible');
+  const historyOnly=historyMarkup.split('<details class="task-history">')[1];
+  assert.doesNotMatch(historyOnly,/progressbar/,'terminal history rows have no misleading 0 percent progress bar');
+  assert.equal(ui.taskListTitle(taskBase),'你好');
+  assert.equal(ui.taskListTitle({...taskBase,title:taskBase.title.split('[Current request]')[0],goal:taskBase.title}),'你好','a truncated display title falls back to the full original goal');
+  assert.equal(ui.taskListTitle({...taskBase,title:taskBase.title.split('[Current request]')[0],goal:taskBase.title.split('[Current request]')[0]}),'历史任务（原始描述见详情）','never guess missing user text or show an incomplete internal envelope');
+  assert.equal(JSON.stringify(workTasks),originalTasks,'presentation must not rewrite saved Task records');
+  assert.match(render(ui.WorkTaskList,{...taskListProps,historyInitiallyOpen:true}),/<details class="task-history" open=""/,'explicit search or status filtering can expose matching history');
   console.log('PASS production Harbor DSH setup, health fidelity, workspace preflight and managed failure actions');
 } finally { await vite.close(); delete globalThis.window; }

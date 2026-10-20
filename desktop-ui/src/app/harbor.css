@@ -457,3 +457,19 @@
 .tool-completed[open] > summary small { display: none; }
 .tool-completed[open] > summary > svg:last-child { margin-left: auto; transform: rotate(180deg); }
 .tool-completed-list { max-height: 260px; overflow-y: auto; padding: 0 8px 8px; border-top: 1px solid var(--border); }
+
+.work-task-list { display: flex; flex-direction: column; gap: 14px; }
+.task-card h3 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.task-meta { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 7px; font-size: 12px; color: var(--text-muted); }
+.task-history { border: 1px solid var(--border); border-radius: 12px; background: var(--surface); overflow: hidden; }
+.task-history > summary { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 12px 14px; list-style: none; cursor: pointer; font-size: 13px; }
+.task-history > summary::-webkit-details-marker { display: none; }
+.task-history > summary small { margin-left: auto; }
+.task-history[open] > summary > svg:last-child { transform: rotate(180deg); }
+.task-history-list { border-top: 1px solid var(--border); }
+.task-history-row { display: flex; align-items: center; gap: 12px; padding: 12px 14px; }
+.task-history-row + .task-history-row { border-top: 1px solid var(--border); }
+.task-history-main { flex: 1; min-width: 0; }
+.task-history-main h3 { margin: 0 0 5px; font-size: 13px; line-height: 1.5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.task-history-row > .cm-badge, .task-history-row > button { flex: none; }
+@media (max-width: 600px) { .task-history-row { flex-wrap: wrap; gap: 7px; }.task-history-main { flex-basis: 100%; }.task-history > summary small { margin-left: 0; } }
