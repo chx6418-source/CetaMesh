@@ -140,8 +140,23 @@ try {
       assert.fail('read-only turn must complete after source drift: ' + JSON.stringify({ status: value.status, code: value.progress?.note }));
     }
     const readOnly = await readOnlyCheckpoint('READONLY_HELLO_OK');
-    await services.agentBroker.send({ ...readOnly.currentAgent, content: 'Read sample.ts and reply READONLY_NEXT_4217. Do not modify files.' });
-    const nextReadOnly = await readOnlyCheckpoint('READONLY_NEXT_4217');
+    const readOnlyNative = services.agentBroker.require('codex');
+    const sinceReadOnly = readOnlyNative._sessions.get(readOnly.currentAgent.sessionId).nextSequence;
+    const nextEvents = []; const nextAbort = new AbortController();
+    const nextTimer = setTimeout(() => nextAbort.abort(), 120000);
+    try {
+      const reader = (async () => {
+        for await (const event of services.agentBroker.follow({ ...readOnly.currentAgent, sinceSequence: sinceReadOnly, signal: nextAbort.signal })) {
+          nextEvents.push(event); if (event.type === 'turn/end') return;
+        }
+      })();
+      await services.agentBroker.send({ ...readOnly.currentAgent, content: 'Read sample.ts and reply READONLY_NEXT_4217. Do not modify files.' });
+      await reader;
+      assert.equal(nextEvents.at(-1)?.data?.reason?.kind, 'completed');
+      assert.match(nextEvents.filter(event => event.type === 'assistant/message').at(-1)?.data?.message?.content?.[0]?.text ?? '', /READONLY_NEXT_4217/);
+    } finally { clearTimeout(nextTimer); nextAbort.abort(); }
+    const nextReadOnly = services.taskService.runtime.get({ id: taskId }).task;
+    assert.equal(nextReadOnly.status, 'running', 'completed read-only turns do not block the Task');
     assert.equal(fs.readFileSync(path.join(projectRoot, 'runtime-status.txt'), 'utf8'), 'external runtime update');
     await services.desktopUiService.execute({ method: 'ui.task.cancel', params: { id: taskId, expectedRev: nextReadOnly.rev } });
     process.stdout.write('PASS real read-only hello and next analysis turn survive external runtime-file updates without Task recovery\n');
