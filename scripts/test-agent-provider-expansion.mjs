@@ -1001,6 +1001,51 @@ try {
   assert.equal(switched.provider, 'codex');
   assert.equal(switched.sessionId, 'codex-fresh-session');
 
+  // Post-process snapshot reads are read-only and may fail transiently on Windows.
+  {
+    const source=path.join(root,'read-retry-source');fs.mkdirSync(source);fs.writeFileSync(path.join(source,'sample.txt'),'unchanged');
+    for(const scenario of ['transient','persistent','boundary','cancel']){
+      let imports=0,probes=0;const traces=[];
+      const provider=createCodexAgentProvider({cliProcess:fakeCli,codexHome,environment:codexEnvironment,
+        stagingRoot:path.join(root,'read-retry-stages'),log:value=>traces.push(value),
+        resolveTaskWorkspace:()=>({task:{id:'read-retry-task',workspaceId:'read-retry-workspace',goal:'Read-only reply'},workspace:{id:'read-retry-workspace',root:source}}),
+        applyChanges:async()=>{imports++;throw Error('read-only run must not import');}});
+      const created=await provider.createSession({taskId:'read-retry-task',workspaceId:'read-retry-workspace'});
+      const enumerate=fs.readdirSync,real=fs.realpathSync.native;
+      fs.readdirSync=function(dir,...args){
+        if(String(dir)===created.cwd){
+          probes++;
+          if(scenario==='persistent'||((scenario==='transient'||scenario==='cancel')&&probes===1))throw Object.assign(Error('exclusive snapshot lock fixture'),{code:'EBUSY',syscall:'scandir',path:String(dir)});
+        }
+        return enumerate.call(fs,dir,...args);
+      };
+      if(scenario==='boundary')fs.realpathSync.native=function(file,...args){if(String(file)===path.join(created.cwd,'sample.txt'))return path.join(root,'outside.txt');return real.call(fs.realpathSync,file,...args);};
+      try{
+        await provider.send({sessionId:created.sessionId,content:'Reply only; no file changes.'});
+        if(scenario==='cancel')await provider.cancel({sessionId:created.sessionId});
+        const status=await waitFor(()=>provider.status({sessionId:created.sessionId}),row=>row.running===false);
+        const terminal=provider._sessions.get(created.sessionId).events.filter(event=>event.type==='turn/end').at(-1);
+        if(scenario==='transient'){
+          assert.equal(status.lastRunStatus,'completed','one transient read failure must not reject a read-only completed native reply');
+          assert.equal(probes,2,'only snapshot read is retried');
+        }else if(scenario==='persistent'){
+          assert.equal(status.errorCode,'STAGING_READ_FAILED');assert.equal(probes,3,'persistent failures stay bounded');
+          assert.equal(status.snapshotRead?.filesystemCode,'EBUSY');assert.equal(status.snapshotRead?.area,'stage');
+          assert.equal(terminal.data.reason.kind,'error');assert.ok(terminal.data.reason.error.message.includes('EBUSY'));
+          assert.equal(JSON.stringify(status).includes(created.cwd),false,'status must not expose private file paths');
+          assert.equal(traces.some(value=>value.includes(created.cwd)),false,'logs must hash paths');
+        }else if(scenario==='boundary'){
+          assert.equal(status.errorCode,'STAGING_PATH_ESCAPE');assert.equal(probes,1,'path boundary failures must not retry');
+        }else{
+          assert.equal(terminal.data.reason.kind,'aborted','cancel while waiting for a read retry must stop finalization');
+          assert.equal(probes,1,'cancellation must prevent another snapshot scan');
+        }
+        assert.equal(imports,0);assert.equal(fs.readFileSync(path.join(source,'sample.txt'),'utf8'),'unchanged');
+      }finally{fs.readdirSync=enumerate;fs.realpathSync.native=real;await provider.shutdown();}
+    }
+    console.log('PASS bounded snapshot-only retry, persistent read diagnostics, path boundary refusal and cancellation without import');
+  }
+
   console.log('PASS provider catalog registers DSH/Codex/ZCode and gracefully reports unavailable CLIs');
   console.log('PASS Task staging copies only the selected Workspace and excludes credential/Git paths');
   console.log('PASS staged Workspace imports require Owner approval and reject stale or sensitive paths');

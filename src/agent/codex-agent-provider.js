@@ -406,16 +406,45 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
     }
     if (run.inspectionGeneration === inspectionGeneration) sandboxCapable = true;
     let changeSet;
+    // Retry only side-effect-free snapshot reads, never CLI execution, imports or
+    // boundary/conflict failures. Cancel/close must win while waiting to reread.
+    run.collectingSnapshot = true;
     try {
-      changeSet = collectStagedChanges(session.stage);
-    } catch (error) {
-      session.lastRunStatus = 'reconciliation-required';
-      session.lastError = { code: error?.code ?? 'WORKSPACE_RECONCILIATION_REQUIRED' };
-      emitTurnEnd(session, run.turnId, 'error', { code: session.lastError.code, message: session.lastError.code === 'WORKSPACE_RECONCILIATION_REQUIRED'
-        ? '工作区与任务快照存在冲突，修改尚未导入；请核验后恢复任务。'
-        : `无法校验工作区快照（${session.lastError.code}），修改尚未导入；请检查可读性或快照限制后恢复任务。` });
-      return;
-    }
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        if (session.closed || session.activeRun !== run) return;
+        if (run.snapshotCancelled) {
+          session.lastRunStatus = 'cancelled';
+          emitTurnEnd(session, run.turnId, 'aborted');
+          return;
+        }
+        try { changeSet = collectStagedChanges(session.stage); break; }
+        catch (error) {
+          const cause = error?.cause;
+          const filesystemCode = /^[A-Z0-9_]{1,40}$/.test(String(cause?.code ?? '')) ? cause.code : 'UNKNOWN';
+          const snapshotRead = {
+            filesystemCode,
+            operation: /^[A-Za-z0-9_]{1,30}$/.test(String(cause?.syscall ?? '')) ? cause.syscall : 'unknown',
+            area: ['stage', 'source'].includes(error?.snapshotArea) ? error.snapshotArea : 'unknown',
+            attempts: attempt,
+            pathHash: typeof cause?.path === 'string' ? crypto.createHash('sha256').update(cause.path).digest('hex') : null
+          };
+          if (error?.code === 'STAGING_READ_FAILED') log('Codex snapshot read ' + JSON.stringify(snapshotRead));
+          if (error?.code === 'STAGING_READ_FAILED' && ['EBUSY', 'EACCES', 'EPERM', 'ENOENT'].includes(filesystemCode) && attempt < 3) {
+            await new Promise(resolve => setTimeout(resolve, attempt === 1 ? 50 : 150));
+            continue;
+          }
+          session.lastRunStatus = 'reconciliation-required';
+          session.lastError = { code: error?.code ?? 'WORKSPACE_RECONCILIATION_REQUIRED',
+            ...(error?.code === 'STAGING_READ_FAILED' ? { snapshotRead } : {}) };
+          const readDetail = error?.code === 'STAGING_READ_FAILED'
+            ? ' / ' + filesystemCode + ' / ' + snapshotRead.area + ' / ' + attempt + '次' : '';
+          emitTurnEnd(session, run.turnId, 'error', { code: session.lastError.code, message: session.lastError.code === 'WORKSPACE_RECONCILIATION_REQUIRED'
+            ? '工作区与任务快照存在冲突，修改尚未导入；请核验后恢复任务。'
+            : '无法校验工作区快照（' + session.lastError.code + readDetail + '），修改尚未导入；请检查可读性或快照限制后恢复任务。' });
+          return;
+        }
+      }
+    } finally { run.collectingSnapshot = false; }
     let usage = run.usage ?? null;
     if (changeSet.changes.length) {
       let imported;
@@ -655,6 +684,12 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
 
       async cancel({ sessionId } = {}) {
         const session = requireSession(sessionId);
+        if (session.activeRun?.collectingSnapshot) {
+          const run = session.activeRun;
+          run.snapshotCancelled = true;
+          if (run.finalized) await run.finalized;
+          return { cancelled: true, sessionId, state: 'cancelled' };
+        }
         if (session.waitingForApproval) {
           const approvalId = session.waitingForApproval;
           const run = session.activeRun;
@@ -683,7 +718,8 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
           provider: 'codex', sessionId, taskId: session.taskId, workspaceId: session.workspaceId,
           running: Boolean(session.activeRun), waitingForApproval: Boolean(session.waitingForApproval),
           approvalId: session.waitingForApproval, lastRunStatus: session.lastRunStatus,
-          errorCode: session.lastError?.code ?? null
+          errorCode: session.lastError?.code ?? null,
+          snapshotRead: session.lastError?.snapshotRead ? { ...session.lastError.snapshotRead } : null
         };
       },
 

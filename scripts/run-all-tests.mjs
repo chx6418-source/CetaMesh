@@ -130,6 +130,7 @@ const REGISTRY = {
   'test-managed-agent-provider.mjs': { category: 'runtime' },
   'test-phase2-chat-model.mjs': { category: 'runtime' },
   'test-phase3-task-handoff.mjs': { category: 'runtime' },
+  'test-codex-chat-snapshot.mjs': { category: 'environment', requires: ['real-codex'], timeoutMs: 360_000, note: 'Native Codex production Chat in a large synthetic disposable Workspace' },
   'test-phase3-real-codex.mjs': { category: 'environment', requires: ['real-codex'], timeoutMs: 480_000,
     note: 'Owner-authorized real Codex CLI Task E2E in an isolated disposable Workspace' },
   'test-memory-runtime.mjs': { category: 'runtime' },

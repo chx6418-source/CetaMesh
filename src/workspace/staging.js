@@ -85,7 +85,12 @@ function assertStageOutsideWorkspaces(stagingRoot, workspaceRoots) {
   }
 }
 
-function walkFiles(root, { maxFiles = DEFAULT_MAX_FILES, maxBytes = DEFAULT_MAX_BYTES, excludedRoots = [] } = {}) {
+function walkFiles(root, { maxFiles = DEFAULT_MAX_FILES, maxBytes = DEFAULT_MAX_BYTES, excludedRoots = [], area = 'unknown' } = {}) {
+  function readFailure(message, cause) {
+    const error = new StagingWorkspaceError('STAGING_READ_FAILED', message, { cause });
+    error.snapshotArea = area;
+    throw error;
+  }
   const files = new Map();
   let totalBytes = 0;
   const excluded = normalizeRoots(excludedRoots);
@@ -93,7 +98,7 @@ function walkFiles(root, { maxFiles = DEFAULT_MAX_FILES, maxBytes = DEFAULT_MAX_
     if (depth > MAX_DEPTH) fail('STAGING_TOO_DEEP', 'Workspace snapshot exceeds staging depth limit');
     let entries;
     try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
-    catch (error) { fail('STAGING_READ_FAILED', 'Unable to enumerate the Task Workspace snapshot', error); }
+    catch (error) { readFailure('Unable to enumerate the Task Workspace snapshot', error); }
     entries.sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
       if (sensitiveName(entry.name)) continue;
@@ -105,7 +110,7 @@ function walkFiles(root, { maxFiles = DEFAULT_MAX_FILES, maxBytes = DEFAULT_MAX_
       if (stat.isSymbolicLink()) continue;
       let realSource;
       try { realSource = fs.realpathSync.native(source); }
-      catch (error) { fail('STAGING_READ_FAILED', 'Unable to resolve a Task Workspace entry', error); }
+      catch (error) { readFailure('Unable to resolve a Task Workspace entry', error); }
       if (!pathContains(root, realSource)) fail('STAGING_PATH_ESCAPE', 'Task Workspace entry resolves outside its root');
       if (excluded.some((excludedRoot) => pathContains(excludedRoot, realSource))) continue;
       if (stat.isDirectory()) {
@@ -117,7 +122,7 @@ function walkFiles(root, { maxFiles = DEFAULT_MAX_FILES, maxBytes = DEFAULT_MAX_
       totalBytes += stat.size;
       if (totalBytes > maxBytes) fail('STAGING_TOO_LARGE', 'Workspace snapshot exceeds staging size limit');
       let hash;
-      try { hash = hashFile(source); } catch (error) { fail('STAGING_READ_FAILED', 'Unable to read a Task Workspace file', error); }
+      try { hash = hashFile(source); } catch (error) { readFailure('Unable to read a Task Workspace file', error); }
       files.set(rel, { hash, size: stat.size });
     }
   };
@@ -187,7 +192,7 @@ export function collectStagedChanges(stage) {
   if (!stage || stage.closed || !pathContains(stage.stagingRoot, stage.root) || stage.root === stage.stagingRoot) {
     fail('STAGING_SESSION_INVALID', 'Invalid or closed staging Workspace');
   }
-  const stageSnapshot = walkFiles(stage.root, { maxFiles: stage.maxFiles, maxBytes: stage.maxBytes });
+  const stageSnapshot = walkFiles(stage.root, { maxFiles: stage.maxFiles, maxBytes: stage.maxBytes, area: 'stage' });
   const allPaths = new Set([...stage.baseline.keys(), ...stageSnapshot.files.keys()]);
   const changes = [];
   for (const rel of allPaths) {
@@ -209,7 +214,7 @@ export function collectStagedChanges(stage) {
   // Keep the original baseline: this never rebases or approves pending writes.
   if (changes.length) {
     const sourceSnapshot = walkFiles(stage.sourceRoot, {
-      maxFiles: stage.maxFiles, maxBytes: stage.maxBytes, excludedRoots: stage.excludedRoots
+      maxFiles: stage.maxFiles, maxBytes: stage.maxBytes, excludedRoots: stage.excludedRoots, area: 'source'
     });
     for (const rel of allPaths) {
       const original = stage.baseline.get(rel) ?? null;
