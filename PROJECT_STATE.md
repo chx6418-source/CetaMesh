@@ -94,6 +94,9 @@
 
 ## Active Work (Owner confirmation pending)
 
+- **Agent Native Security 待 Owner 验收**：分支 codex/agent-native-security，产品提交 cdc06390a6e7d2f12311cf30fb1779114098be39，Build1104。正式 SEA 的 Windows unelevated/workspace-write 真实 Codex Task 已验证，首次范围确认复用现有 Owner Approval；Staging 不代表主机读取隔离。最终 npm 136 PASS /0 FAIL /4 NRE，Rust199 PASS；未 push、未升级用户安装。详见 AGENT_NATIVE_SECURITY_POLICY.md、CODEX_NATIVE_SECURITY_REPAIR_REPORT.md。严格隔离仍拒绝，整体 RELEASE_BLOCKED。
+
+
 - **M6-B 本地原生验收与定向修复交付，RELEASE_BLOCKED**：`codex/whalebridge-m6-integration`，产品来源 `c3d5657fba5dfcd9a5004b84d0e87cf329aafaea`，Version `1.0.0-rc.2` / Build **1088**。真实Windows11 WebView2+隔离合成模型已操作Chat三轮/Streaming/Stop、Work Managed结果及暂停恢复取消、Memory批准拒绝；1088实际About与历史/Task恢复。修复原生picker32秒超时、Work默认模型未绑定、Rust遗漏六条Owner UI方法、SEA About读取错误根。最终npm **124 PASS /0 FAIL /5 NOT_RUN_ENVIRONMENT**，Rust **199/0**，RC **11/0**；首次误用仓库内TEMP的五失败与正常TEMP五项重跑证据保留。独立普通用户/全向导/真实Provider、QQ及签名仍未完成；M2/M3 PARTIAL、M4 CODE_COMPLETE/E2E_PENDING、M5-B REAL_DATA_NOT_AUTHORIZED/MIGRATION_BLOCKED保持。八Social只读Hash不变，无迁移、真实QQ外发、用户进程停止或锁释放。详见M6_B报告、Owner清单、最终阻塞及128行矩阵。本地候选NotSigned；停止等待Owner验收，不自动推进M5-B/push/merge/Stable。
 
 - **M6-A 本地集成验收已交付，RELEASE_BLOCKED**：分支 `codex/whalebridge-m6-integration`，生产来源 `8dc4159a2a2c18ad3248bd4e7f32c2b1e34e3dfa`，最终测试提交 `bca4c57dff36b957d4652ac4ca6990f8a15ecc3e`，Version `1.0.0-rc.2` / Build **1084**。真实SEA OwnerIPC/纯Core/合成Streaming/Task/Memory/Workspace重启、QQ/Bionic及Extension子进程、无系统Node发行安装已运行；最终 `npm test` **121 PASS / 0 FAIL / 5 NOT_RUN_ENVIRONMENT**（含Cargo），Rust **198/0**，D盘RC **11/0**。修复干净Windows缺VC Runtime、IExpress空格SED；纠正两个测试helper并保留失败追溯。干净Windows Sandbox安装/SEA帮助/卸载通过，但缺WebView2、普通用户完整UI与真实Codex/DSH/QQ仍未验收。M2/M3 PARTIAL、M4 CODE_COMPLETE/E2E_PENDING保持；M5-B REAL_DATA_NOT_AUTHORIZED/MIGRATION_BLOCKED，八项Social Hash不变，无迁移/真实QQ外发/真实Core停止/锁释放。交付M6三份报告、128行E/AC矩阵与脱敏证据；安装包NotSigned，仅本地候选。停止等待Owner验收，不自动进入M5-B、push/merge/Stable。
