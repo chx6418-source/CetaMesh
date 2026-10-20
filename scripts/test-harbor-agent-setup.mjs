@@ -54,7 +54,7 @@ try {
   controlled.props.onSubmit({ preventDefault() {} }); assert.equal(saves, 1, 'save requires explicit form submission');
   const locked = ui.DshSetupForm({ ...props, saving: true, onSave() { saves++; } });
   locked.props.onSubmit({ preventDefault() {} }); assert.equal(saves, 1, 'in-flight save cannot submit twice');
-  const { agentClient } = await vite.ssrLoadModule('/src/bridge/typed-client.ts');
+  const { agentClient, taskClient } = await vite.ssrLoadModule('/src/bridge/typed-client.ts');
   let sent;
   window.ipc = { postMessage(payload) { sent = JSON.parse(payload); window.__cetameshReceive({ id: sent.id, ok: true, result: { provider: 'dsh', applied: false, restartRequired: true, configuration } }); } };
   const configured = await agentClient.configure(configuration.pending);
@@ -63,6 +63,16 @@ try {
   window.ipc.postMessage=payload=>{sent=JSON.parse(payload);window.__cetameshReceive({id:sent.id,ok:true,result:presets});};
   assert.deepEqual(await agentClient.presets('/isolated/dsh'),presets);
   assert.equal(sent.method,'ui.agent.presets');assert.deepEqual(sent.params,{provider:'dsh',homeDir:'/isolated/dsh'});
+  window.ipc.postMessage=payload=>{sent=JSON.parse(payload);window.__cetameshReceive({id:sent.id,ok:true,result:{task:{id:'detached'}}});};
+  await taskClient.reconcile('detached',7,'Fixture reviewed','New read-only instruction','recovery-unique','codex');
+  assert.equal(sent.method,'ui.task.reconcile');
+  assert.deepEqual(sent.params,{id:'detached',expectedRev:7,reviewed:true,reviewSummary:'Fixture reviewed',nextInstruction:'New read-only instruction',requestId:'recovery-unique',provider:'codex'});
+  const recoveryTask={id:'detached',title:'Fixture',goal:'Inspect',status:'blocked',progress:{percent:0,note:'needs-reconciliation: handoff failed'},currentAgent:null,artifacts:[],executionEvidence:[],agentHistory:[]};
+  const recoveryMarkup=render(ui.TaskDetails,{task:recoveryTask,providers:[{id:'codex',name:'Codex fixture',eligible:true},{id:'unavailable',name:'Unavailable fixture',eligible:false}],onReconcile(){},onAction(){},onStart(){},onHandoff(){}});
+  assert.match(recoveryMarkup,/恢复执行者/);
+  assert.match(recoveryMarkup,/选择恢复任务的 Agent/);
+  assert.match(recoveryMarkup,/aria-label="恢复执行者" aria-haspopup="listbox" aria-expanded="false"/,'shared Select mounts its option list only after opening');
+  assert.match(recoveryMarkup,/disabled=""[^>]*>确认核对并执行新指令/,'no default executor or implicit review submission');
   delete window.ipc;
   const saving = render(ui.DshSetupForm, { ...props, saving: true });
   assert.match(saving, /disabled=""[^>]*>保存中/);

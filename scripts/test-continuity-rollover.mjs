@@ -419,7 +419,7 @@ ok('Handoff Packet retains complete Task requirements');
   let reads = 0;
   const reconciler = {
     async collectFacts({ workspaceId }) { return { available: true, workspaceId, git: {
-      isRepo: true, headSha: ++reads === 1 ? 'a'.repeat(40) : 'b'.repeat(40), branch: 'main', dirty: false,
+      isRepo: true, headSha: ++reads <= 2 ? 'a'.repeat(40) : 'b'.repeat(40), branch: 'main', dirty: false,
       diffSummary: null }, files: [] }; },
     reconcile({ packet, facts }) { return { consistent: packet.workspaceFacts?.git?.headSha === facts.git.headSha,
       discrepancies: [{ kind: 'headSha' }] }; }
@@ -429,7 +429,7 @@ ok('Handoff Packet retains complete Task requirements');
   taskRuntime.attachAgent({ id: task.id, expectedRev: rev(task.id), provider: 'alpha', sessionId: 'alpha-old' });
   await assert.rejects(runtime.rollover({ taskId: task.id, targetProvider: 'beta' }),
     error => error.code === 'WORKSPACE_CHANGED');
-  assert.equal(reads >= 2, true, 'Workspace facts must be recollected after target initialization');
+  assert.equal(reads, 3, 'Collect baseline and preflight, then recollect facts after target initialization');
   assert.equal(taskRuntime.get({ id: task.id }).task.status, 'blocked');
   assert.equal(taskRuntime.get({ id: task.id }).task.currentAgent, null);
   ok('Workspace change during handoff blocks recovery after stopping the prior Agent');

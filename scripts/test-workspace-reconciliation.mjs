@@ -185,7 +185,8 @@ function makeReconciler({ entries = {} } = {}) {
   };
   registry.register(alpha);
   const broker = createAgentBroker({ registry });
-  const service = createContinuityService({ taskRuntime, stateDir: dir, agentBroker: broker, reconciler });
+  const service = createContinuityService({ taskRuntime, stateDir: dir, agentBroker: broker, reconciler,
+    prepareHandoff: async () => { taskRuntime.addWork({id: task.id, expectedRev: rev(task.id), kind: 'completed', text: 'Prepared latest handoff context'}); } });
   const result = await service.runtime.rollover({ taskId: task.id, reason: 'context-threshold', relevantFiles: ['exporter.js'] });
 
   assert.equal(result.taskId, task.id, 'rollover 后 Task ID 不变');
@@ -194,6 +195,7 @@ function makeReconciler({ entries = {} } = {}) {
   assert.deepEqual(result.reconciliation.discrepancies, []);
 
   const { packet } = service.runtime.latestPacket({ taskId: task.id });
+  assert.ok(packet.completedWork.includes('Prepared latest handoff context'), 'final packet must include context added by prepareHandoff');
   assert.equal(packet.workspaceFacts.available, true);
   assert.equal(packet.workspaceFacts.git.branch, 'main');
   assert.equal(packet.workspaceFacts.git.headSha, repo.headSha);
@@ -205,6 +207,54 @@ function makeReconciler({ entries = {} } = {}) {
   const sidecar = path.join(service.runtime._dir, 'handoff', task.id, 'reconciliation-0001.json');
   assert.equal(fs.existsSync(sidecar), true, 'reconciliation 侧车文件落盘');
   ok('rollover 全链路：workspace facts 进 packet + reconciliation 落盘 + history 记录');
+}
+
+
+// Regression: absent Git metadata is not evidence of a branch/HEAD change.
+{
+  const reconciler = makeReconciler();
+  const facts = { available: true, workspaceId: 'plain', git: { isRepo: false, branch: null, headSha: null, dirty: false, diffSummary: null }, files: [] };
+  const packet = { workspaceFacts: { ...facts, git: { ...facts.git, branch: '', headSha: '', diffSummary: '' } }, coding: {} };
+  const result = reconciler.reconcile({ packet, facts });
+  assert.deepEqual(result.discrepancies.map(d => d.kind), ['no-git-repo']);
+  assert.equal(result.consistent, false, 'missing Git verification must still require review');
+  const changed = reconciler.reconcile({packet: {workspaceFacts: {...facts, git: {...facts.git, branch: 'main', headSha: 'a'.repeat(40)}}}, facts});
+  assert.ok(changed.discrepancies.some(d => d.kind === 'branch'));
+  assert.ok(changed.discrepancies.some(d => d.kind === 'headSha'));
+  ok('blank Git metadata normalizes without suppressing actual changes or non-Git review');
+}
+
+// Production Continuity must reject unverifiable handoff BEFORE changing ownership.
+for (const scenario of ['plain', 'missing', 'stale-supplied-facts', 'missing-file']) {
+  const dir = fs.mkdtempSync(path.join(temp, 'preflight-'));
+  const plainDir = fs.mkdtempSync(path.join(temp, 'preflight-workspace-'));
+  const repo = scenario === 'missing-file' ? makeRealRepo() : null;
+  const taskRuntime = createTaskRuntime({ stateDir: dir });
+  const task = taskRuntime.create({ goal: 'Inspect only', workspaceId: 'ws-preflight' });
+  taskRuntime.attachAgent({ id: task.id, expectedRev: task.rev, provider: 'preflight', sessionId: 'old-session' });
+  const before = taskRuntime.get({id: task.id}).task;
+  const calls = [];
+  const provider = {
+    id: 'preflight', label: 'Preflight fixture',
+    capabilities: () => ({ workspaceBoundary: 'capability-broker' }),
+    async status() { return {running: false, queued: 0, waitingForApproval: false}; },
+    async createSession() { calls.push('create'); return {sessionId: 'new-session'}; },
+    async cancel() { calls.push('cancel'); return {stopped: true}; },
+    async send() { calls.push('send'); return {accepted: true}; },
+    async closeSession() { calls.push('close'); return {closed: true}; },
+    async *follow() { yield {type: 'turn/end', seq: 1, data: {sessionId: 'new-session', reason: {kind: 'completed'}}}; }
+  };
+  const registry = createAgentProviderRegistry({providers: []}); registry.register(provider);
+  const entries = scenario === 'missing' ? {} : {'ws-preflight': {id: 'ws-preflight', root: repo?.dir ?? plainDir}};
+  const service = createContinuityService({taskRuntime, stateDir: dir, agentBroker: createAgentBroker({registry}), reconciler: makeReconciler({entries}), prepareHandoff: async () => { calls.push('prepare'); }});
+  const supplied = scenario === 'stale-supplied-facts' ? {available: true, workspaceId: 'ws-preflight', git: {isRepo: true, branch: 'main', headSha: 'a'.repeat(40), dirty: false, diffSummary: null}, files: []} : undefined;
+  await assert.rejects(service.runtime.rollover({taskId: task.id, workspaceFacts: supplied,
+    relevantFiles: scenario === 'missing-file' ? ['absent.txt'] : []}), error => ['WORKSPACE_CHANGED', 'WORKSPACE_UNVERIFIED'].includes(error.code));
+  assert.deepEqual(calls, [], scenario + ': do not create, bootstrap, cancel or close an Agent before preflight passes');
+  assert.deepEqual(taskRuntime.get({id: task.id}).task, before, scenario + ': retain Task revision, checkpoint and old execution owner');
+  assert.equal(service.runtime.isInFlight(task.id), false);
+  assert.equal(service.runtime.history({taskId: task.id}).rollovers.length, 0);
+  ok(scenario + ': preflight rejection leaves the old Session and Task unchanged');
 }
 
 fs.rmSync(temp, { recursive: true, force: true });

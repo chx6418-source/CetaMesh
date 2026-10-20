@@ -11,6 +11,13 @@
 
 const MAX_DISCREPANCIES = 50;
 
+// Serialized checkpoints may use empty strings for unavailable Git metadata.
+// Normalize only absent text, preserving nonempty values and boolean evidence.
+function comparableGitValue(field, value) {
+  if (['branch', 'headSha', 'diffSummary'].includes(field) && typeof value === 'string' && !value.trim()) return null;
+  return value ?? null;
+}
+
 export function createWorkspaceReconciler({
   resolveWorkspace,   // async (workspaceId) => { id, name, root } | null
   gitStatus,          // async (root) => { isRepo, branch, dirty, entries? }（tools.gitStatus）
@@ -120,8 +127,8 @@ export function createWorkspaceReconciler({
           note: 'Task Workspace changed during handoff' });
       }
       for (const field of ['isRepo', 'branch', 'headSha', 'dirty', 'diffSummary']) {
-        const expected = before.git?.[field] ?? null;
-        const observed = facts.git?.[field] ?? null;
+        const expected = comparableGitValue(field, before.git?.[field]);
+        const observed = comparableGitValue(field, facts.git?.[field]);
         if (expected !== observed) discrepancies.push({ kind: field, checkpoint: expected, workspace: observed,
           note: `Workspace ${field} changed during handoff` });
       }

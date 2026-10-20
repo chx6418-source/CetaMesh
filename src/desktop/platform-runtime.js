@@ -81,7 +81,7 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
       } else {
         record.taskId = task.id;
         if (['paused', 'blocked', 'waiting'].includes(task.status)) {
-          throw capabilityError('TASK_RECOVERY_REVIEW_REQUIRED', 'Existing Task requires explicit recovery before new Agent instructions');
+          throw capabilityError('TASK_RECOVERY_REVIEW_REQUIRED', '当前任务需要先恢复：请点“查看任务”，在任务详情的“人工核对后恢复”中填写核对结果和新的执行指令；不会自动重放旧操作。');
         }
       }
       if (signal?.aborted) {

@@ -1722,7 +1722,7 @@ export function createChatService({
       }
       if (task.workspaceId !== record.config.workspaceId) throw chatError('WORKSPACE_RECONCILIATION_REQUIRED', 'Chat and Task Workspace differ');
       if (['blocked', 'paused', 'waiting'].includes(task.status)) {
-        throw chatError('TASK_RECOVERY_REVIEW_REQUIRED', 'Task requires Workspace review and explicit resume before Chat continuation');
+        throw chatError('TASK_RECOVERY_REVIEW_REQUIRED', '当前任务需要先恢复：请点“查看任务”，在任务详情的“人工核对后恢复”中填写核对结果和新的执行指令；不会自动重放旧操作。');
       }
       if (['completed', 'failed', 'cancelled'].includes(task.status)) throw chatError('TASK_NOT_RESUMABLE', 'Task is terminal');
       if (record.dshSessionId && (task.currentAgent?.sessionId !== record.dshSessionId

@@ -926,6 +926,12 @@ export function createDesktopUiService({ services = {}, system = services.system
       if (!services.workspaceService.describeWorkspace(current.workspaceId)) {
         throw uiError('WORKSPACE_NOT_FOUND', '任务工作区不存在或不可访问');
       }
+      const recoveryProvider = string(p.provider, 80).trim() || current.currentAgent?.provider;
+      if (current.currentAgent && recoveryProvider !== current.currentAgent.provider) {
+        throw uiError('TASK_HANDOFF_REQUIRED', '仍绑定执行者的任务需要通过正式交接切换 Agent');
+      }
+      await requireTaskProvider(recoveryProvider, current.workspaceId);
+      services.agentBroker.assertExecutionConsent?.(recoveryProvider, { workspaceId: current.workspaceId });
       const status = await capability('capability.execute', { capability: 'git.status',
         taskId: current.id, workspaceId: current.workspaceId, input: {}, reason: 'Owner reconciliation Workspace check' });
       if (status.status !== 'completed') throw uiError('WORKSPACE_RECONCILIATION_REQUIRED', '无法核对工作区状态');
@@ -951,7 +957,7 @@ export function createDesktopUiService({ services = {}, system = services.system
         decision: 'Owner reviewed interrupted effect', rationale: string(p.reviewSummary, 1000).trim() });
       const reviewed = services.taskService.runtime.setProgress({ id: current.id, expectedRev: decision.rev,
         note: `Owner reviewed interrupted effect: ${string(p.reviewSummary, 1000).trim()}` });
-      const resumed = await runTask(reviewed, { content: string(p.nextInstruction, 32_000).trim(),
+      const resumed = await runTask(reviewed, { provider: recoveryProvider, content: string(p.nextInstruction, 32_000).trim(),
         requestId: string(p.requestId, 160).trim() });
       return { task: projectTask(resumed) };
     },

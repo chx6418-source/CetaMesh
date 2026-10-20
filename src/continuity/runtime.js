@@ -536,8 +536,31 @@ export function createContinuityRuntime({
       const pendingApprovals = typeof listPendingApprovals === 'function'
         ? listPendingApprovals({ taskId: task.id })
         : null;
+
+      let packet = buildHandoffPacket({
+        taskId: task.id, reason, sequence, coding, relevantFiles,
+        workspaceFacts: facts ?? null,
+        pendingApprovals: Array.isArray(pendingApprovals) ? pendingApprovals : null
+      });
+      // Verify before creating a target, stopping the old Agent, or persisting a
+      // handoff transaction. Caller-supplied facts are a checkpoint, not proof of
+      // current Workspace state. Keep the post-bootstrap check for later races.
+      if (reconciler && task.workspaceId) {
+        const currentFacts = await collectWorkspaceFacts({ workspaceId: task.workspaceId, relevantFiles });
+        const preflight = reconciler.reconcile({ packet, facts: currentFacts });
+        if (preflight.consistent !== true) {
+          const onlyMissingGit = preflight.discrepancies?.length > 0
+            && preflight.discrepancies.every(item => item.kind === 'no-git-repo');
+          throw continuityError(preflight.consistent === null || onlyMissingGit ? 'WORKSPACE_UNVERIFIED' : 'WORKSPACE_CHANGED',
+            onlyMissingGit
+              ? '非 Git 工作区无法自动核验交接；原执行者尚未停止，请先核对文件和先前操作。'
+              : '工作区交接预检未通过；原执行者尚未停止，请核对工作区后重试。');
+        }
+      }
       if (typeof prepareHandoff === 'function') await prepareHandoff({ taskId: task.id });
-      const packet = buildHandoffPacket({
+      // Preparation refreshes Owner constraints and authorized Working Memory.
+      // Persist and bootstrap the refreshed packet, not the preflight snapshot.
+      packet = buildHandoffPacket({
         taskId: task.id, reason, sequence, coding, relevantFiles,
         workspaceFacts: facts ?? null,
         pendingApprovals: Array.isArray(pendingApprovals) ? pendingApprovals : null

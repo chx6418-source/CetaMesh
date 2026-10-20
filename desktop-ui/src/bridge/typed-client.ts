@@ -280,8 +280,8 @@ export const taskClient = {
   start: (id: string, expectedRev?: number, agentProvider?: string) => uiCall<{ task: Task }>('ui.task.start', { id, expectedRev, agentProvider }),
   pause: (id: string, expectedRev?: number) => uiCall<{ task: Task }>('ui.task.pause', { id, expectedRev }),
   resume: (id: string, expectedRev?: number) => uiCall<{ task: Task }>('ui.task.resume', { id, expectedRev }),
-  reconcile: (id: string, expectedRev: number | undefined, reviewSummary: string, nextInstruction: string, requestId: string) =>
-    uiCall<{ task: Task }>('ui.task.reconcile', { id, expectedRev, reviewed: true, reviewSummary, nextInstruction, requestId }),
+  reconcile: (id: string, expectedRev: number | undefined, reviewSummary: string, nextInstruction: string, requestId: string, provider?: string) =>
+    uiCall<{ task: Task }>('ui.task.reconcile', { id, expectedRev, reviewed: true, reviewSummary, nextInstruction, requestId, provider }),
   cancel: (id: string, expectedRev?: number) => uiCall<{ task: Task }>('ui.task.cancel', { id, expectedRev }),
   handoff: (id: string, targetProvider: string, expectedRev?: number) => uiCall<{ task: Task; handoff: { success: boolean; from: unknown; to: unknown } }>('ui.task.handoff', { id, targetProvider, expectedRev })
 };

@@ -467,6 +467,27 @@ try {
     } });
     assert.equal(reviewed.task.status, 'running', 'Owner-reviewed non Git Task can continue with a new instruction');
     assert.match(fs.readFileSync(path.join(nonGitRoot, 'report.txt'), 'utf8'), /Existing result/);
+    // A failed handoff detaches the stopped Agent: recovery must explicitly
+    // select a new executor, before recording review or acknowledging journals.
+    const runtime = nonGitRestart.taskService.runtime;
+    const detachedRoot = path.join(root, 'detached-handoff-workspace');
+    fs.mkdirSync(detachedRoot); fs.writeFileSync(path.join(detachedRoot, 'report.txt'), 'Detached fixture result');
+    const {workspace: detachedWorkspace} = await nonGitRestart.workspaceService.execute({method: 'workspace.create', params: {name: 'Detached handoff recovery', root: detachedRoot}});
+    let detached = runtime.create({goal: 'Recover detached handoff', workspaceId: detachedWorkspace.id});
+    detached = runtime.attachAgent({id: detached.id, expectedRev: detached.rev, provider: 'cetamesh', sessionId: 'stopped-handoff-session'}).task;
+    detached = runtime.start({id: detached.id, expectedRev: detached.rev}).task;
+    detached = runtime.block({id: detached.id, expectedRev: detached.rev, reason: 'needs-reconciliation: Handoff failed after old Agent stopped (WORKSPACE_CHANGED)'}).task;
+    detached = runtime.detachAgent({id: detached.id, expectedRev: detached.rev, note: 'Confirmed stopped fixture'}).task;
+    const recoveryParams = {id: detached.id, expectedRev: detached.rev, reviewed: true,
+      reviewSummary: 'Fixture files checked; prior Agent stopped; no unknown effect remains',
+      nextInstruction: 'Read report.txt only', requestId: 'detached-handoff-recovery'};
+    await assert.rejects(nonGitRestart.desktopUiService.execute({method: 'ui.task.reconcile', params: recoveryParams}),
+      error => error.code === 'AGENT_PROVIDER_SELECTION_REQUIRED');
+    assert.deepEqual(runtime.get({id: detached.id}).task, detached, 'missing executor must not mutate the review or Task');
+    const detachedRecovered = await nonGitRestart.desktopUiService.execute({method: 'ui.task.reconcile',
+      params: {...recoveryParams, provider: 'cetamesh'}});
+    assert.equal(detachedRecovered.task.status, 'running');
+    assert.equal(runtime.get({id: detached.id}).task.currentAgent.provider, 'cetamesh');
     const latestBeforePause = nonGitRestart.taskService.runtime.get({ id: interrupted.id }).task;
     const pausedAgain = await nonGitRestart.desktopUiService.execute({ method: 'ui.task.pause',
       params: { id: interrupted.id, expectedRev: latestBeforePause.rev } });
