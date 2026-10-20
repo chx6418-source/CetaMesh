@@ -94,7 +94,7 @@
 
 ## Active Work (Owner confirmation pending)
 
-- **Codex 只读回合误阻塞待 Owner 验收**：分支 codex/codex-readonly-workspace-recovery，Build1105。无 Stage 修改时不再重扫源工作区；有修改仍完整校验冲突。定向6/0、真实与相关4/0、发行12/0、Rust199/0、SEA源变化实测通过；真实旧 blocked Task 未修改，用户升级及核验待批准。详见 CODEX_READONLY_WORKSPACE_REPAIR_REPORT.md，RELEASE_BLOCKED。
+- **Codex 旧终态 Session 取消恢复待升级验收**：分支 codex/codex-readonly-workspace-recovery，产品提交119209d，Build1106。保留1105只读修复；仅精确的post-exit/pre-import STAGING_READ_FAILED旧Task可在安全栅栏通过后正式取消，未知状态仍拒绝。全量131 PASS/0 FAIL/9 NRE，补充Rust199/0、发行12/0及新增正式SEA取消/重启通过。用户已安装1105；1106覆盖升级和真实旧任务取消等待批准。报告CODEX_STALE_SESSION_CANCELLATION_REPORT.md；RELEASE_BLOCKED。
 
 
 - **Agent Native Security 待 Owner 验收**：分支 codex/agent-native-security，产品提交 cdc06390a6e7d2f12311cf30fb1779114098be39，Build1104。正式 SEA 的 Windows unelevated/workspace-write 真实 Codex Task 已验证，首次范围确认复用现有 Owner Approval；Staging 不代表主机读取隔离。最终 npm 136 PASS /0 FAIL /4 NRE，Rust199 PASS；未 push、未升级用户安装。详见 AGENT_NATIVE_SECURITY_POLICY.md、CODEX_NATIVE_SECURITY_REPAIR_REPORT.md。严格隔离仍拒绝，整体 RELEASE_BLOCKED。
