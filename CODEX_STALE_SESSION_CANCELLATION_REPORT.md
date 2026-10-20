@@ -48,9 +48,15 @@ Owner 在 Build1105 的正式 Harbor 中确认取消旧任务后，实际收到 
 
 Build1105 已经 Owner 批准并正常退出后完成覆盖安装。1105-authorized-upgrade.json 记录 exit=0，68 份既有 JSON Hash 无变化，仅新增4份安装备份 JSON，没有 DSH 集成写入或强制终止。用户的真实旧任务没有因此自动修改。
 
-1106-real-task-readonly-preflight.json：该旧任务仍 blocked/STAGING_READ_FAILED；Capability in-flight、pending approval、started tool、pending continuation 均为0，未发现 prepared Handoff；本次预检不写真实任务或租约。
+升级前的只读预检实际输出：该旧任务当时仍 blocked/STAGING_READ_FAILED；Capability in-flight、pending approval、started tool、pending continuation 均为0，未发现 prepared Handoff；预检不写真实任务或租约。
 
-Build1106 已准备，升级与通过正式 UI 取消真实旧任务仍等待 Owner 对本次再次退出应用的批准。没有把安装包或 Fixture 通过写成真实任务已取消。
+Owner 随后明确批准升级1106和取消该旧任务。已通过应用自有 QuitRequest 与“退出 CetaMesh”确认正常退出；两次只读进程核对确认安装目录下无存活进程，Owner锁自行释放。未使用强制结束回退。
+
+1106-authorized-upgrade.json：exit=0，安装阶段72份既有JSON Hash全部不变，仅新增4份安装备份JSON，noDshIntegration=true，forcedProcessStop=false。Task状态的后续变化是Owner已批准的正式取消操作，不属于安装覆盖或直接编辑。
+
+重新启动实际安装版后，已在真实Windows Harbor中点击该旧任务的“取消任务”及“确定”。页面显示cancelled，历史执行者显示结束时间；未再返回SESSION_NOT_FOUND。1106-installed-cancellation-result.json只读确认：status=cancelled、currentAgent=null、同工作区活动Agent绑定=0、全部7项历史Task记录仍在。安装目录Host与Core的Hash分别匹配本轮正式发行包；About实际显示1.0.0-rc.2-build1106+119209d。
+
+实际安装版取消链标记VERIFIED_REAL_E2E，仅指本次Windows Harbor→Owner IPC→旧Task取消/持久化，不代表新真实Codex推理或所有产品功能通过。用户应用没有为测试再次重启；取消后重启的行为由隔离SEA回归验证。当前应用已留在无关联Task的空白Chat，没有发送真实项目的新指令，没有代替用户确认原生安全范围。
 
 ## 发行产物与可追溯性
 

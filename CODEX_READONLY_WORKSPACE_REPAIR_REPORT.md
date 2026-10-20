@@ -56,6 +56,6 @@
 - sourceCommit：8d2642e1ee64bec3f8ae37216f3605cd39d6af00；dirtySourceTree=false。
 - Authenticode：NotSigned /SIGNING_PENDING。
 
-Build1105 已经 Owner 批准并保留数据覆盖安装，68份既有 JSON Hash 不变。Owner 在实际 Harbor 确认取消旧任务后收到 SESSION_NOT_FOUND，任务仍 blocked；根因为重启后旧 Codex Session 不在内存。窄范围取消恢复已在 Build1106 修复并完成正式 SEA 回归，真实升级与取消等待本次批准。详见 CODEX_STALE_SESSION_CANCELLATION_REPORT.md。没有直接改任务或删除锁。
+Build1105 已经 Owner 批准并保留数据覆盖安装，68份既有 JSON Hash 不变。Owner 在实际 Harbor 确认取消旧任务后收到 SESSION_NOT_FOUND，任务仍 blocked；根因为重启后旧 Codex Session 不在内存。窄范围取消恢复已在 Build1106 修复并完成正式 SEA 回归，Owner已批准并完成1106正常退出覆盖升级；实际Harbor正式取消该旧任务成功，持久状态cancelled/currentAgent=null，7项历史记录保留。详见 CODEX_STALE_SESSION_CANCELLATION_REPORT.md。没有直接改任务或删除锁。
 
 本轮无 push、合并、Stable、真实迁移或强制终止用户进程。整体保持 RELEASE_BLOCKED。
