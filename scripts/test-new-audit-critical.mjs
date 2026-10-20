@@ -20,7 +20,7 @@ const fakeCli = {
   executable: () => 'codex-fixture',
   probe(args) {
     if (args[0] === '--version') return { available: true, stdout: 'codex-cli 9.9.9-fixture', stderr: '' };
-    if (args[0] === '--help') return { available: true, stdout: '--config --ask-for-approval --cd', stderr: '' };
+    if (args[0] === '--help') return { available: true, stdout: '--config --ask-for-approval --cd --sandbox workspace-write', stderr: '' };
     if (args[0] === 'exec' && args[1] === '--help') return { available: true, stdout: '--json --ignore-user-config --ignore-rules --strict-config --skip-git-repo-check', stderr: '' };
     if (args[0] === 'login' && args[1] === 'status') return { available: true, stdout: 'Logged in', stderr: '' };
     return { available: false, stdout: '', stderr: '' };
