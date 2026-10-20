@@ -125,6 +125,7 @@ try {
   const brokerSessionTask = fallbackServices.taskService.runtime.create({
     goal: 'Provider-bound session fixture', workspaceId: fallbackWorkspace.id
   });
+  const originalExecutionConsent = fallbackServices.agentBroker.assertExecutionConsent;
   const originalCreateAgentSession = fallbackServices.agentBroker.createSession;
   const originalSendAgent = fallbackServices.agentBroker.send;
   const originalAgentStatus = fallbackServices.agentBroker.status;
@@ -137,8 +138,20 @@ try {
   fallbackServices.agentBroker.status = async request => ({ sessionId: request.sessionId, running: false });
   try {
     for (const provider of ['dsh', 'codex']) {
-      assert.ok(['capability-broker', 'staged-capability-broker'].includes(
-        fallbackServices.agentBroker.capabilities(provider).workspaceBoundary), `${provider} is Task/Workspace-bound`);
+      const boundary = fallbackServices.agentBroker.capabilities(provider).workspaceBoundary;
+      if (provider === 'codex') {
+        assert.equal(boundary, 'native-staged', 'Codex declares the honest Native Staging boundary');
+        await assert.rejects(() => fallbackServices.capabilityService.broker.execute({
+          actor: { kind: 'owner', id: 'desktop' }, taskId: brokerSessionTask.id, workspaceId: fallbackWorkspace.id,
+          capability: 'agent.run', input: { agentProvider: provider, content: 'unconfirmed dispatch' }, reason: 'unconfirmed fixture'
+        }), error => error.code === 'AGENT_SECURITY_CONFIRMATION_REQUIRED');
+        // This dispatch-only fixture already stubs createSession/send; simulate the approved scope
+        // without depending on an installed CLI. Real approval/dispatch is covered by Native suites.
+        fallbackServices.agentBroker.assertExecutionConsent = (id, scope) => {
+          if (id !== 'codex') return originalExecutionConsent(id, scope);
+          assert.equal(scope.workspaceId, fallbackWorkspace.id);
+        };
+      } else assert.ok(['capability-broker', 'staged-capability-broker'].includes(boundary), provider + ' is Task/Workspace-bound');
       const result = await fallbackServices.capabilityService.broker.execute({
         actor: { kind: 'owner', id: 'desktop' }, taskId: brokerSessionTask.id, workspaceId: fallbackWorkspace.id,
         capability: 'agent.run', input: { agentProvider: provider, content: `run with ${provider}` }, reason: 'session isolation fixture'
@@ -201,6 +214,7 @@ try {
     assert.equal(closedFailedSession, true, 'failed Agent initialization closes the new Session/staging');
     fallbackServices.agentBroker.send = originalSend;
   } finally {
+    fallbackServices.agentBroker.assertExecutionConsent = originalExecutionConsent;
     fallbackServices.agentBroker.createSession = originalCreateAgentSession;
     fallbackServices.agentBroker.send = originalSendAgent;
     fallbackServices.agentBroker.status = originalAgentStatus;
