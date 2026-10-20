@@ -1581,5 +1581,57 @@ ok('Agent events arriving before send ACK are replayed only after provider ident
  ok('Owner cancellation releases a missing local Managed Session after restart without executing or deleting history');
 }
 
+// Codex post-exit cancellation recovery through the real service container.
+{
+ const {createCetaMeshServices}=await import('../src/app/service-container.js');
+ const home=path.join(temp,'codex-cancel-recovery');
+ const core=createCetaMeshServices({stateDir:path.join(home,'state'),dataRoot:path.join(home,'data')});
+ const wsRoot=path.join(home,'workspace');fs.mkdirSync(wsRoot,{recursive:true});
+ fs.writeFileSync(path.join(wsRoot,'proof.txt'),'unchanged');
+ const {workspace}=await core.workspaceService.execute({method:'workspace.create',params:{root:wsRoot,name:'cancel fixture'}});
+ const make=(reason='STAGING_READ_FAILED')=>{
+  let row=core.taskService.runtime.create({goal:'Codex stopped before import',workspaceId:workspace.id});
+  row=core.taskService.runtime.start({id:row.id,expectedRev:row.rev,provider:'codex',sessionId:'lost-'+row.id}).task;
+  return core.taskService.runtime.block({id:row.id,expectedRev:row.rev,reason}).task;
+ };
+ try {
+  const old=make();
+  const result=await core.desktopUiService.execute({method:'ui.task.cancel',params:{id:old.id,expectedRev:old.rev}});
+  assert.equal(result.task.status,'cancelled');
+  assert.equal(core.taskService.runtime.get({id:old.id}).task.currentAgent,null);
+  assert.equal(core.taskService.runtime.activeWorkspaceOwner({workspaceId:workspace.id}),null);
+  assert.equal(core.taskService.runtime.list().tasks.length,1,'history retained');
+  assert.equal(fs.readFileSync(path.join(wsRoot,'proof.txt'),'utf8'),'unchanged');
+  const restored=createCetaMeshServices({stateDir:path.join(home,'state'),dataRoot:path.join(home,'data')});
+  assert.equal(restored.taskService.runtime.get({id:old.id}).task.status,'cancelled','cancel survives restart');
+  restored.chatService.close();await restored.capabilityService.close();
+  for(const reason of ['needs-reconciliation: unknown execution','AGENT_TIMEOUT','STAGING_READ_FAILED extra']) {
+   const row=make(reason);
+   await assert.rejects(core.desktopUiService.execute({method:'ui.task.cancel',params:{id:row.id,expectedRev:row.rev}}),e=>e.code==='SESSION_NOT_FOUND');
+   assert.equal(core.taskService.runtime.get({id:row.id}).task.status,'blocked');
+   core.taskService.runtime.cancel({id:row.id,expectedRev:row.rev,reason:'isolated fixture cleanup'});
+  }
+  for(const gate of ['capability','tool','approval','handoff']) {
+   const row=make();
+   const originalCapability=core.capabilityService.recoveryForTask;
+   const toolGuard={recoveryForTask:()=>null};
+   const gateUi=createDesktopUiService({services:{...core,toolExecutionCoordinator:toolGuard}});
+   const originalApprovals=core.capabilityService.broker.approvals.list;
+   const originalHandoff=core.continuityService.runtime.isInFlight;
+   if(gate==='capability')core.capabilityService.recoveryForTask=()=>({state:'needs-reconciliation'});
+   if(gate==='tool')toolGuard.recoveryForTask=()=>({state:'needs-reconciliation'});
+   if(gate==='approval')core.capabilityService.broker.approvals.list=()=>[{request:{taskId:row.id}}];
+   if(gate==='handoff')core.continuityService.runtime.isInFlight=()=>true;
+   await assert.rejects(gateUi.execute({method:'ui.task.cancel',params:{id:row.id,expectedRev:row.rev}}));
+   assert.equal(core.taskService.runtime.get({id:row.id}).task.status,'blocked',gate+' must retain execution owner');
+   core.capabilityService.recoveryForTask=originalCapability;
+   core.capabilityService.broker.approvals.list=originalApprovals;
+   core.continuityService.runtime.isInFlight=originalHandoff;
+   core.taskService.runtime.cancel({id:row.id,expectedRev:row.rev,reason:'isolated fixture cleanup'});
+  }
+  ok('Codex known post-exit failure cancels after restart; unknown execution, approval and recovery stay blocked');
+ }finally{core.chatService.close();await core.capabilityService.close();}
+}
+
 fs.rmSync(temp, { recursive: true, force: true });
 console.log(`\n🎉 阶段 03 Chat 运行时全部通过（${step} 组）`);

@@ -681,9 +681,25 @@ export function createDesktopUiService({ services = {}, system = services.system
     } catch (error) {
       // Managed Sessions exist only in this Core's memory. After restart, an explicit
       // Owner cancellation may end the persisted Task even when its old Session is gone.
-      // External providers and uncertain transport failures still require a stop ACK.
-      if (!cancelMissingManagedSession || taskRow.currentAgent.provider !== 'cetamesh'
-          || error?.code !== 'SESSION_NOT_FOUND') throw error;
+      // External providers and uncertain transport failures still require a stop proof.
+      if (!cancelMissingManagedSession || error?.code !== 'SESSION_NOT_FOUND') throw error;
+      if (taskRow.currentAgent.provider === 'cetamesh') return;
+      // Missing external Sessions alone are not stop ACKs. The built-in Codex
+      // adapter can verify only its persisted, post-process/pre-import failure.
+      // All unknown effects, approvals and incomplete Handoffs remain fenced.
+      const recovery = services.capabilityService?.recoveryForTask;
+      const approvals = services.capabilityService?.broker?.approvals;
+      const toolRecovery = services.toolExecutionCoordinator?.recoveryForTask;
+      const provider = services.agentBroker.require?.(taskRow.currentAgent.provider);
+      if (typeof recovery !== 'function' || typeof approvals?.list !== 'function'
+          || typeof toolRecovery !== 'function' || typeof provider?.verifyStoppedTask !== 'function'
+          || recovery(taskRow.id) || toolRecovery(taskRow.id)
+          || approvals.list().some(row => row.request?.taskId === taskRow.id)) throw error;
+      const proof = await provider.verifyStoppedTask({ taskId: taskRow.id,
+        workspaceId: taskRow.workspaceId, sessionId: taskRow.currentAgent.sessionId });
+      if (proof?.stopped !== true || proof.taskId !== taskRow.id
+          || proof.workspaceId !== taskRow.workspaceId || proof.provider !== taskRow.currentAgent.provider
+          || proof.sessionId !== taskRow.currentAgent.sessionId) throw error;
     }
   }
 

@@ -799,6 +799,21 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
         reason: inspection.reason ?? (authenticated ? null : 'needs_auth'),
         health: authenticated ? 'ready' : inspection.available ? 'needs_auth' : 'unavailable', supportsResume: inspection.supportsResume === true });
     },
+    // Trusted Core recovery only; never exposed as an Agent/renderer stop claim.
+    // STAGING_READ_FAILED is emitted by finalizeRun after handle.done (process close),
+    // before applyChanges. A blocked Task cannot dispatch another native turn.
+    // Other terminal/error codes do not establish this particular stop boundary.
+    async verifyStoppedTask({ taskId, workspaceId, sessionId } = {}) {
+      if (!taskId || !workspaceId || !sessionId || sessions.has(sessionId)
+          || typeof resolveTaskWorkspace !== 'function') return { stopped: false };
+      const binding = await resolveTaskWorkspace({ taskId, workspaceId });
+      const task = binding?.task;
+      if (!binding?.workspace || task?.id !== taskId || task.workspaceId !== workspaceId
+          || task.currentAgent?.provider !== 'codex' || task.currentAgent.sessionId !== sessionId
+          || task.status !== 'blocked' || task.progress?.note !== 'STAGING_READ_FAILED') return { stopped: false };
+      return { stopped: true, provider: 'codex', taskId, workspaceId, sessionId,
+        evidence: 'codex-post-exit-before-import-read-failure' };
+    },
     configure(settings = {}) {
       const allowed = new Set(['model', 'reasoningEffort']);
       for (const key of Object.keys(settings ?? {})) {
