@@ -22,6 +22,16 @@ try {
   const workspace = (await services.workspaceService.execute({ method: 'workspace.create', params: {
     name: 'Phase 3 real Codex acceptance', root: projectRoot
   } })).workspace;
+  const nativeScope = await services.desktopUiService.execute({ method: 'ui.agent.security', params: { provider: 'codex', workspaceId: workspace.id } });
+  assert.equal(nativeScope.security.mode, 'native');
+  assert.equal(nativeScope.security.strictIsolationVerified, false);
+  assert.equal(nativeScope.authorized, false);
+  const confirmation = await services.desktopUiService.execute({ method: 'ui.agent.authorize', params: {
+    provider: 'codex', workspaceId: workspace.id, fingerprint: nativeScope.fingerprint
+  } });
+  assert.equal(confirmation.status, 'pending');
+  // Owner explicitly authorized this real synthetic-workspace acceptance in this task.
+  await services.capabilityService.execute({ method: 'capability.approval.decide', params: { id: confirmation.approvalId, approve: true } });
   const started = await services.desktopUiService.execute({ method: 'ui.task.create', params: {
     goal: 'Read sample.ts in this Workspace. Reply with the exported answer and PHASE3_REAL_CODEX_OK_4217. Do not modify files.',
     workspaceId: workspace.id, agentProvider: 'codex'
@@ -47,6 +57,72 @@ try {
     assert.equal(fs.readFileSync(path.join(projectRoot, 'sample.ts'), 'utf8'), 'export const answer = 4217;\n');
     assert.equal(task.agentHistory.at(-1)?.provider, 'codex');
     process.stdout.write('PASS real Codex CLI Task execution, Task Follow checkpoint, and unchanged authoritative Workspace\n');
+    const native = services.agentBroker.require('codex');
+    const assignment = services.taskService.runtime.get({ id: taskId }).task.currentAgent;
+    async function waitStatus(predicate, label) {
+      const until = Date.now() + 120000;
+      let value;
+      do { value = await services.agentBroker.status(assignment); if (predicate(value)) return value;
+        await new Promise(resolve => setTimeout(resolve, 100)); } while (Date.now() < until);
+      assert.fail(label + ': ' + JSON.stringify(value));
+    }
+    await waitStatus(value => !value.running, 'first native turn completion');
+    async function realRound(prompt, expected) {
+      const since = native._sessions.get(assignment.sessionId).nextSequence;
+      const abort = new AbortController(); const events = [];
+      const reader = (async () => { for await (const event of services.agentBroker.follow({ ...assignment, sinceSequence: since, signal: abort.signal })) {
+        events.push(event); if (event.type === 'turn/end') return;
+      } })();
+      const deadline = setTimeout(() => abort.abort(), 120000);
+      try {
+        await services.agentBroker.send({ ...assignment, content: prompt });
+        await reader;
+        assert.equal(events.at(-1)?.data?.reason?.kind, 'completed', JSON.stringify(events.at(-1)));
+        assert.ok(events.some(event => event.type === 'assistant/chunk'), 'Native JSONL response must pass the streaming event contract');
+        assert.match(events.filter(event => event.type === 'assistant/message').at(-1)?.data?.message?.content?.[0]?.text ?? '', expected);
+        assert.equal(fs.readFileSync(path.join(projectRoot, 'sample.ts'), 'utf8'), 'export const answer = 4217;\n');
+        return events;
+      } finally { clearTimeout(deadline); abort.abort(); }
+    }
+    const second = await realRound('Second turn: use a native command to read sample.ts; add one to its exported number and reply NATIVE_ROUND2_4218. Do not change files.', /NATIVE_ROUND2_4218/);
+    assert.ok(second.some(event => event.type === 'tool/activity' && event.data.activity.capability === 'codex.native.command'));
+    const third = await realRound('Third turn: test command error recovery. Execute a harmless native command that exits with code 7, then read sample.ts and reply NATIVE_ROUND3_RECOVERED_4217. No writes or other paths.', /NATIVE_ROUND3_RECOVERED_4217/);
+    assert.ok(third.some(event => event.type === 'tool/activity' && event.data.activity.status === 'failed'), 'actual native tool failure must be observed');
+    process.stdout.write('PASS real Native Session three turns, JSONL streaming, native tool activity and failed-command recovery\n');
+
+    await services.agentBroker.send({ ...assignment, content: 'Only in this staging working directory, create native-output.txt with text NATIVE_IMPORT_OK. Do not write to other paths. Reply NATIVE_WRITE_STAGED.' });
+    const awaiting = await waitStatus(value => value.waitingForApproval === true, 'native write must await Core import approval');
+    assert.equal(fs.existsSync(path.join(projectRoot, 'native-output.txt')), false, 'authoritative Workspace unchanged before import approval');
+    const importApproval = services.capabilityService.broker.approvals.get(awaiting.approvalId);
+    assert.equal(importApproval.request.capability, 'workspace.apply');
+    await services.capabilityService.execute({ method: 'capability.approval.decide', params: { id: awaiting.approvalId, approve: true } });
+    await waitStatus(value => !value.running && value.lastRunStatus === 'completed', 'approved import completion');
+    assert.equal(fs.readFileSync(path.join(projectRoot, 'native-output.txt'), 'utf8').replace(/^\uFEFF/, '').trim(), 'NATIVE_IMPORT_OK');
+    process.stdout.write('PASS real native staging write held for existing Capability Broker Owner import approval\n');
+
+    await services.agentBroker.send({ ...assignment, content: 'Run a harmless 20-second sleep command in this staging directory. Do not write any files. Then reply NATIVE_CANCEL_TARGET.' });
+    let current = services.taskService.runtime.get({ id: taskId }).task;
+    const paused = await services.desktopUiService.execute({ method: 'ui.task.pause', params: { id: taskId, expectedRev: current.rev } });
+    assert.equal(paused.task.status, 'paused');
+    await waitStatus(value => !value.running, 'paused native execution must actually stop');
+    current = services.taskService.runtime.get({ id: taskId }).task;
+    try { await services.desktopUiService.execute({ method: 'ui.task.resume', params: { id: taskId, expectedRev: current.rev } }); }
+    catch (error) {
+      assert.equal(error.code, 'TASK_RECOVERY_REVIEW_REQUIRED');
+      assert.equal(fs.readFileSync(path.join(projectRoot, 'sample.ts'), 'utf8'), 'export const answer = 4217;\n');
+      assert.equal(fs.readFileSync(path.join(projectRoot, 'native-output.txt'), 'utf8').replace(/^\uFEFF/, '').trim(), 'NATIVE_IMPORT_OK');
+      current = services.taskService.runtime.get({ id: taskId }).task;
+      await services.desktopUiService.execute({ method: 'ui.task.reconcile', params: { id: taskId, expectedRev: current.rev, reviewed: true,
+        reviewSummary: 'Owner verified this synthetic fixture: only approved native-output.txt exists; cancelled sleep stopped; no unknown effects.',
+        nextInstruction: 'Read sample.ts and reply NATIVE_RESUMED_4217. Do not write.', requestId: 'native-real-resume-reviewed' } });
+    }
+    await waitStatus(value => !value.running, 'resumed native turn must finish');
+    current = services.taskService.runtime.get({ id: taskId }).task;
+    await services.desktopUiService.execute({ method: 'ui.task.cancel', params: { id: taskId, expectedRev: current.rev } });
+    assert.equal(services.taskService.runtime.get({ id: taskId }).task.status, 'cancelled');
+    assert.equal(services.taskService.runtime.activeWorkspaceOwner({ workspaceId: workspace.id }), null);
+    process.stdout.write('PASS real Native Task pause, actual cancellation, reviewed resume and released execution authority\n');
+
   }
 } finally {
   if (services && taskId) {

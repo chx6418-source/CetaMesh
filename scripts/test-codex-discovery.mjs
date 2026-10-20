@@ -13,7 +13,7 @@ const env = { PATH: '', LOCALAPPDATA: path.join(root, 'Local App Data'), APPDATA
 const native = path.join(env.LOCALAPPDATA, 'Programs', 'OpenAI', 'Codex', 'bin', 'codex.exe');
 function probe(exe, args) {
  if (exe.includes('broken')) return { status: 1, stdout: '', stderr: '' };
- const text = args[0] === '--version' ? 'codex-cli 9.9.9-fixture' : args[0] === 'login' ? 'Logged in' : '--config --ask-for-approval --cd --json --ignore-user-config --ignore-rules --strict-config --skip-git-repo-check [SESSION_ID]';
+ const text = args[0] === '--version' ? 'codex-cli 9.9.9-fixture' : args[0] === 'login' ? 'Logged in' : '--config --ask-for-approval --cd --sandbox workspace-write --json --ignore-user-config --ignore-rules --strict-config --skip-git-repo-check [SESSION_ID]';
  return { status: 0, stdout: text, stderr: '' };
 }
 try {

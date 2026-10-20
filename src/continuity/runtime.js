@@ -498,7 +498,7 @@ export function createContinuityRuntime({
     const previousCapabilities = agentBroker.capabilities(previousAgent.provider);
     let previousStatus = null;
     const previousBoundary = previousCapabilities?.workspaceBoundary;
-    const taskBoundaries = new Set(['capability-broker', 'staged-capability-broker']);
+    const taskBoundaries = new Set(['capability-broker', 'staged-capability-broker', 'native-staged']);
     if (!taskBoundaries.has(previousBoundary)) {
       throw continuityError('ROLLOVER_NOT_SAFE', previousBoundary === 'unverified'
         ? 'The current Provider has no verified Task Workspace boundary'
@@ -523,6 +523,7 @@ export function createContinuityRuntime({
       if (!taskBoundaries.has(target.capabilities().workspaceBoundary)) {
         throw continuityError('ROLLOVER_NOT_SAFE', 'A Task cannot switch to a Provider without an enforced Workspace boundary');
       }
+      agentBroker.assertExecutionConsent?.(target.id, { workspaceId: task.workspaceId });
     }
       const sequence = nextSequence(task.id);
       // Workspace 事实：调用方显式传入的优先；否则在工作区绑定且 reconciler 可用时现场采集。

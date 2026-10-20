@@ -252,10 +252,11 @@ function projectAgent(value) {
     : (row.available ?? health.available) === true && health.available !== false && installed !== false
     && authenticated !== false && compatible !== false;
   const workspaceBoundary = string(row.workspaceBoundary ?? health.workspaceBoundary, 80) || null;
-  const requiresTask = ['capability-broker', 'staged-capability-broker'].includes(workspaceBoundary);
+  const requiresTask = ['capability-broker', 'staged-capability-broker', 'native-staged'].includes(workspaceBoundary);
   const boundaryUnverified = workspaceBoundary === 'unverified';
   const status = installed === false ? 'not-installed'
     : compatible === false || (id === 'codex' && health.sandboxCapable === false) ? 'not-supported'
+    : id === 'codex' && health.sandboxCapable === null ? 'not-checked'
     : authenticated === false ? 'needs-setup'
     : boundaryUnverified && available ? 'descriptor-incomplete'
     : /unsupported|not[_-]supported/i.test(readiness) ? 'not-supported'
@@ -275,6 +276,8 @@ function projectAgent(value) {
     reachable: typeof health.reachable === 'boolean' ? health.reachable : null,
     ready: typeof health.ready === 'boolean' ? health.ready : null,
     sessionCapable: typeof health.sessionCapable === 'boolean' ? health.sessionCapable : null,
+    security: record(row.security ?? health.security ?? record(row.capabilities).security),
+    readyForTask: health.readyForTask === true,
     sandboxCapable: typeof health.sandboxCapable === 'boolean' ? health.sandboxCapable : null,
     installKind: string(health.installKind, 40) || null, probePhase: string(health.probePhase, 40) || null,
     probeCode: string(health.probeCode, 80) || null, checkedAt: string(health.checkedAt, 80) || null,
@@ -572,7 +575,7 @@ export function createDesktopUiService({ services = {}, system = services.system
       throw uiError('WORKSPACE_NOT_FOUND', '任务工作区不存在或不可访问');
     }
     const boundary = services.agentBroker.capabilities(provider)?.workspaceBoundary;
-    if (!['capability-broker', 'staged-capability-broker'].includes(boundary)) {
+    if (!['capability-broker', 'staged-capability-broker', 'native-staged'].includes(boundary)) {
       throw uiError('AGENT_BOUNDARY_UNSUPPORTED', '所选 Agent 没有经过验证的工作区权限边界');
     }
     const health = await services.agentBroker.health(provider);
@@ -1016,6 +1019,20 @@ export function createDesktopUiService({ services = {}, system = services.system
       const result = await memory('memory.delete', { id: idParam(p), expectedRev: p.expectedRev });
       emit('memory.updated', { status: 'deleted' });
       return selected(result, ['id', 'deleted']);
+    },
+    'ui.agent.security': async p => {
+      const workspaceId = string(p.workspaceId, 160);
+      if (!services.workspaceService.describeWorkspace(workspaceId)) throw uiError('WORKSPACE_NOT_FOUND', 'Registered Workspace required');
+      return services.agentBroker.describeExecutionSecurity(string(p.provider, 80), workspaceId);
+    },
+    'ui.agent.authorize': async p => {
+      const workspaceId = string(p.workspaceId, 160), provider = string(p.provider, 80);
+      const scope = services.agentBroker.describeExecutionSecurity(provider, workspaceId);
+      if (string(p.fingerprint, 128) !== scope.fingerprint) throw uiError('AGENT_SECURITY_POLICY_CHANGED', 'Agent policy changed; review again');
+      const result = await capability('capability.execute', { capability: 'agent.execution.authorize', workspaceId,
+        input: { provider, fingerprint: scope.fingerprint }, reason: scope.disclosure.slice(0, 1000) });
+      emit('approval.pending', { approvalId: result.approvalId });
+      return selected(result, ['status', 'approvalId', 'expiresAt']);
     },
     'ui.agent.list': async () => ({ agents: (await agent('agent.list', {})).providers.map(projectAgent) }),
     'ui.agent.health': async p => projectAgent(await agent('agent.health', { provider: string(p.provider, 80), refresh: p.refresh === true })),

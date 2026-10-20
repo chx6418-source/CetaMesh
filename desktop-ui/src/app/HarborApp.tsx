@@ -659,7 +659,7 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
       case 'empty': return <EmptyNotice icon="chat" title="还没有消息" detail="写下你要处理的事情。模型和 Agent 会按会话设置运行。" />;
       case 'message': return <MessageBubble message={item.message} sendError={sendErrors[item.message.id]} onRetry={sendErrors[item.message.id] ? () => void retrySend(item.message.id) : undefined} />;
       case 'streaming': return <MessageBubble message={item.message} streaming />;
-      case 'turn-error': return <div className="turn-error" role="alert">{item.message}<div className="row">{linkedTask ? <ManagedFailureActions taskId={workspaceFailureReviewTaskId(status.routing, linkedTask.id)} onReviewTask={onReviewTask} onNewChat={() => void onNewChat()} /> : <><Button compact variant="ghost" onClick={() => void chatClient.retry(session!.id).then(load).catch(cause => setError(messageOf(cause)))}>重试</Button><Button compact variant="ghost" onClick={() => void chatClient.continue(session!.id).then(load).catch(cause => setError(messageOf(cause)))}>继续</Button></>}</div></div>;
+      case 'turn-error': return <div className="turn-error" role="alert">{item.message}<div className="row">{linkedTask ? <ManagedFailureActions taskId={workspaceFailureReviewTaskId(status.routing, linkedTask.id)} onReviewTask={onReviewTask} onNewChat={() => void onNewChat()} /> : <><Button compact variant="ghost" onClick={() => void resumeChat('retry').then(load).catch(cause => setError(messageOf(cause)))}>重试</Button><Button compact variant="ghost" onClick={() => void resumeChat('continue').then(load).catch(cause => setError(messageOf(cause)))}>继续</Button></>}</div></div>;
       case 'approval': return <ApprovalCard approval={item.approval} onDecide={decideApproval} />;
     }
   };
@@ -675,6 +675,7 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
       id: clientMessageId, role: 'user', text, at: Date.now(), attachments: attachments.map(item => item.name), toolActivity: [], error: null, cancelled: false
     }]));
     try {
+      await confirmAgentExecution(session.config.agentProvider ?? '', session.config.workspaceId ?? activeWorkspaceId ?? '');
       await chatClient.send(session.id, text, attachments, clientMessageId);
       pendingSendsRef.current.delete(clientMessageId);
       setSendErrors(current => { const next = { ...current }; delete next[clientMessageId]; return next; });
@@ -685,11 +686,16 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
       setError(message);
     }
   }
+  async function resumeChat(action: 'retry' | 'continue') {
+    if (!session) return;
+    await confirmAgentExecution(session.config.agentProvider ?? '', session.config.workspaceId ?? activeWorkspaceId ?? '');
+    return action === 'retry' ? chatClient.retry(session.id) : chatClient.continue(session.id);
+  }
   async function retrySend(messageId: string) {
     const pending = pendingSendsRef.current.get(messageId);
     if (pending) await send(pending.text, pending.attachments, messageId);
     else if (session) {
-      try { await chatClient.retry(session.id); setSendErrors(current => { const next = { ...current }; delete next[messageId]; return next; }); void load(); }
+      try { await resumeChat('retry'); setSendErrors(current => { const next = { ...current }; delete next[messageId]; return next; }); void load(); }
       catch (cause) { setError(messageOf(cause)); }
     }
   }
@@ -758,6 +764,17 @@ export function MessageBubble({ message, streaming = false, sendError, onRetry }
   const role = message.role === 'user' ? 'user' : 'assistant';
   const agentActivity = message.agentActivity;
   return <article className={`chat-message ${role} ${streaming ? 'streaming' : ''}`}><div className="message-avatar">{role === 'assistant' ? <Icon name="sparkles" size={16} /> : '你'}</div><div className="message-body"><div className="message-meta"><strong>{role === 'assistant' ? 'CetaMesh' : '你'}</strong><span>{dateLabel(message.at)}</span>{streaming && <Badge tone="accent">生成中</Badge>}</div>{agentActivity && <div className={`agent-activity ${agentActivity.status}`} role="status"><Icon name={agentActivity.status === 'running' ? 'sparkles' : agentActivity.status === 'completed' ? 'check' : 'help'} size={15} /><span>{agentActivity.label}</span><strong>{agentActivityStatusLabel(agentActivity.status)}</strong></div>}{message.text ? <Markdown>{message.text}</Markdown> : <span className="muted">（没有文本内容）</span>}{message.attachments.length > 0 && <div className="message-attachments">{message.attachments.map(name => <span key={name}><Icon name="attach" size={13} />{name}</span>)}</div>}{message.toolActivity.map(tool => <details key={tool.id} className="tool-call"><summary><Icon name={tool.status === 'cancelled' ? 'close' : tool.status === 'failed' ? 'help' : tool.status === 'running' ? 'update' : 'check'} size={15} /><span>{tool.label || tool.id}</span><span className="tool-duration">{tool.status === 'cancelled' ? '已取消' : tool.durationMs === null ? taskStatusLabel(tool.status) : `${(tool.durationMs / 1000).toFixed(1)} 秒`}</span><Icon name="down" size={14} /></summary>{tool.summary && <p>{tool.summary}</p>}</details>)}{sendError && <div className="message-error" role="alert">{sendError}<Button compact variant="ghost" onClick={onRetry}>重试发送</Button></div>}{message.error && <p className="message-error" role="alert">{message.error}</p>}{message.cancelled && <small>本轮已停止</small>}</div></article>;
+}
+
+async function confirmAgentExecution(provider: string, workspaceId: string) {
+  if (!provider || provider === 'none' || !workspaceId) return;
+  const scope = await agentClient.security(provider, workspaceId);
+  if (!scope.required || scope.authorized) return;
+  if (!window.confirm(scope.disclosure + '\n\n是否确认此原生执行范围？')) throw new Error('已取消 Agent 原生安全范围确认');
+  const pending = await agentClient.authorize(provider, workspaceId, scope.fingerprint);
+  if (pending.status !== 'pending' || !pending.approvalId) throw new Error('未取得有效的 Owner 审批请求');
+  await approvalClient.decide(pending.approvalId, true);
+  if (!(await agentClient.security(provider, workspaceId)).authorized) throw new Error('原生执行范围尚未确认');
 }
 
 function ApprovalCard({ approval, onDecide }: { approval: Approval; onDecide(id: string, approve: boolean): void }) {
@@ -992,6 +1009,7 @@ function WorkPage({ workspaces, onRefreshWorkspaces, reviewTaskId, onReviewTaskO
   async function taskAction(task: Task, action: 'start' | 'pause' | 'resume' | 'cancel', agentProvider?: string) {
     if (action === 'cancel' && !window.confirm(`取消任务“${task.title}”？`)) return;
     try {
+      if (action === 'start' || action === 'resume') await confirmAgentExecution(agentProvider || task.currentAgent?.provider || '', task.workspaceId || '');
       const result = action === 'start' ? await taskClient.start(task.id, task.rev ?? undefined, agentProvider)
         : action === 'pause' ? await taskClient.pause(task.id, task.rev ?? undefined)
         : action === 'resume' ? await taskClient.resume(task.id, task.rev ?? undefined)
@@ -1002,6 +1020,7 @@ function WorkPage({ workspaces, onRefreshWorkspaces, reviewTaskId, onReviewTaskO
   }
   async function handoffTask(task: Task, provider: string) {
     try {
+      await confirmAgentExecution(provider, task.workspaceId || '');
       const result = await taskClient.handoff(task.id, provider, task.rev ?? undefined);
       setSelectedTask(result.task);
       await refresh();
@@ -1142,6 +1161,7 @@ function TaskCreateForm({ workspaces, providers, onCreated }: { workspaces: { id
     event.preventDefault(); if (!goal.trim()) return;
     setBusy(true); setError('');
     try {
+      await confirmAgentExecution(agentProvider, workspaceId);
       const fingerprint = JSON.stringify([goal.trim(), workspaceId, agentProvider]);
       if (createRequest.current?.fingerprint !== fingerprint) createRequest.current = { fingerprint, id: crypto.randomUUID() };
       await taskClient.create({ goal: goal.trim(), workspaceId: workspaceId || null, agentProvider,

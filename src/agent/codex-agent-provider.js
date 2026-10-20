@@ -44,7 +44,8 @@ function profileOverrides() {
 }
 
 /** Provider-owned flags are derived from codex --help / exec --help / exec resume --help. */
-export function buildCodexExecArgs({ stageRoot, promptMode = 'fresh', threadId = null, model, reasoningEffort, modelConfiguration } = {}) {
+export function buildCodexExecArgs({ stageRoot, promptMode = 'fresh', threadId = null, model, reasoningEffort, modelConfiguration, securityMode = 'native', windowsSandboxMode = 'unelevated' } = {}) {
+  if (!['native', 'isolated'].includes(securityMode)) throw agentProviderError('INVALID_PARAMS', 'Unknown Agent security mode');
   const args = [
     '--ask-for-approval', 'never',
     '-C', path.resolve(stageRoot)
@@ -53,10 +54,17 @@ export function buildCodexExecArgs({ stageRoot, promptMode = 'fresh', threadId =
   if (reasoningEffort) args.push('--config', `model_reasoning_effort=${quoteToml(reasoningEffort)}`);
   args.push(...inheritedProviderArgs(modelConfiguration));
   // Security-sensitive settings follow inherited model configuration so they always win.
-  // The isolated staging root is already the command's -C workspace. Keep the
+  // The staging copy is a working directory, not host-file read isolation. It is already the command's -C workspace. Keep the
   // profile scoped to that root without encoding a Windows path as a config key.
-  for (const override of profileOverrides()) args.push('--config', override);
-  args.push('exec', '--ignore-user-config', '--ignore-rules', '--strict-config', '--skip-git-repo-check');
+  if (securityMode === 'isolated') {
+    for (const override of profileOverrides()) args.push('--config', override);
+  } else {
+    args.push('--sandbox', 'workspace-write');
+    if (process.platform === 'win32') args.push('--config', 'windows.sandbox=' + quoteToml(windowsSandboxMode));
+  }
+  args.push('exec', '--ignore-user-config');
+  if (securityMode === 'isolated') args.push('--ignore-rules');
+  args.push('--strict-config', '--skip-git-repo-check');
   if (promptMode === 'resume' && threadId) args.push('resume', String(threadId));
   args.push('--json', '-');
   return args;
@@ -85,6 +93,54 @@ function parseSimpleTomlValue(raw) {
   if (value === 'true') return true;
   if (value === 'false') return false;
   return null;
+}
+
+function selectedWindowsSandbox(codexHome) {
+  if (process.platform !== 'win32') return null;
+  let text;
+  try { text = fs.readFileSync(path.join(codexHome, 'config.toml'), 'utf8'); }
+  catch (error) { if (error.code === 'ENOENT') return 'unelevated'; throw agentProviderError('CODEX_NATIVE_CONFIG_UNREADABLE', 'Cannot inspect selected native security policy'); }
+  return parseWindowsNativeSandboxPolicy(text);
+}
+
+// Accept the inspected table form; ambiguous TOML security settings never select a fallback.
+export function parseWindowsNativeSandboxPolicy(text) {
+  let windows = false, selected = null;
+  for (const raw of String(text).split(/\r?\n/)) {
+    const line = withoutTomlComment(raw).trim();
+    if (line.startsWith('[')) {
+      if (/windows/i.test(line) && line !== '[windows]') throw agentProviderError('CODEX_NATIVE_POLICY_UNVERIFIED', 'Windows security table requires explicit verification');
+      windows = line === '[windows]';
+      continue;
+    }
+    const key = line.split('=')[0]?.trim();
+    if (/windows/i.test(key || '')) throw agentProviderError('CODEX_NATIVE_POLICY_UNVERIFIED', 'Dotted or inline Windows security policy requires explicit verification');
+    if (windows && /sandbox/i.test(key || '')) {
+      if (!/^sandbox\s*=/.test(line) || selected !== null) throw agentProviderError('CODEX_NATIVE_POLICY_UNVERIFIED', 'Ambiguous Windows sandbox policy');
+      selected = parseSimpleTomlValue(line.slice(line.indexOf('=') + 1));
+      if (!['unelevated', 'elevated', 'mxc'].includes(selected)) throw agentProviderError('CODEX_NATIVE_POLICY_UNSUPPORTED', 'Selected Windows sandbox is unknown');
+    }
+  }
+  return selected ?? 'unelevated';
+}
+
+function nativeRulesIdentity(codexHome) {
+  const hash = crypto.createHash('sha256'); let files = 0, bytes = 0;
+  const directory = path.join(codexHome, 'rules');
+  function walk(dir) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true }).sort((a,b) => a.name.localeCompare(b.name))) {
+      const file = path.join(dir, entry.name);
+      if (entry.isSymbolicLink()) throw agentProviderError('CODEX_NATIVE_POLICY_UNVERIFIED', 'Native rules contain a symbolic link');
+      if (entry.isDirectory()) { if (++files > 128) throw agentProviderError('CODEX_NATIVE_POLICY_UNVERIFIED', 'Native rule tree is too large'); walk(file); }
+      else if (entry.isFile() && entry.name.endsWith('.rules')) {
+        const stat = fs.statSync(file); bytes += stat.size;
+        if (++files > 128 || bytes > 512000) throw agentProviderError('CODEX_NATIVE_POLICY_UNVERIFIED', 'Native rules exceed inspection bounds');
+        hash.update(path.relative(directory, file)); hash.update(fs.readFileSync(file));
+      }
+    }
+  }
+  if (fs.existsSync(directory)) walk(directory);
+  return hash.digest('hex');
 }
 
 /**
@@ -188,7 +244,8 @@ function inspectSelectedCodexCli(cli) {
     version: version.stdout.trim().slice(0, 100),
     probePhase: supported ? 'ready' : !topSupported ? 'help' : 'exec-help',
     probeCode: supported ? null : !topSupported ? top.code ?? 'CLI_PROTOCOL_UNSUPPORTED' : exec.code ?? 'CLI_PROTOCOL_UNSUPPORTED',
-    supportsResume: resumeSupported
+    supportsResume: resumeSupported,
+    nativeSandboxSupported: /--sandbox/.test(topHelp) && /workspace-write/.test(topHelp)
   };
 }
 
@@ -241,7 +298,7 @@ function wait(ms) {
 export function createCodexAgentProvider({ executable, cliProcess = null, resolveTaskWorkspace = null,
   listWorkspaceRoots = () => [], excludedRoots = [], stagingRoot = null, createStage = createStagingWorkspace,
   applyChanges = async () => { throw agentProviderError('AGENT_BOUNDARY_UNSUPPORTED', 'Capability Broker import adapter is unavailable'); },
-  environment = process.env, codexHome = null, authorizeOpenAiEnvironment = () => false,
+  environment = process.env, codexHome = null, securityMode = 'native', authorizeOpenAiEnvironment = () => false,
   approvalStatus = () => null, cancelApproval = () => ({ cancelled: false }), timeoutMs = 10 * 60 * 1000, log = () => {} } = {}) {
   const resolvedCodexHome = codexHome || environment.CODEX_HOME || path.join(environment.USERPROFILE || os.homedir(), '.codex');
   const cli = cliProcess ?? new CliAgentProcess({ name: 'codex', executable,
@@ -250,6 +307,7 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
   let authenticated = inspection.available ? loginState(cli) : false;
   let lastProbeAt = Date.now();
   let sandboxCapable = null;
+  let lastSecurityIdentity = null;
   let inspectionGeneration = 0;
   let inspectedIdentity = JSON.stringify([cli.executable(), inspection.version]);
   const sessions = new Map();
@@ -263,6 +321,27 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
     inspectedIdentity = identity;
     authenticated = inspection.available ? loginState(cli) : false;
     lastProbeAt = Date.now();
+  }
+
+  function executionSecurity() {
+    let executableStat = null;
+    try { const stat = fs.statSync(cli.executable()); executableStat = [stat.size, stat.mtimeMs]; }
+    catch { executableStat = 'unavailable'; /* Fixtures and failed file probes retain a distinct policy identity. */ }
+    const selectedSandbox = selectedWindowsSandbox(resolvedCodexHome);
+    const identity = crypto.createHash('sha256').update(JSON.stringify([inspectedIdentity, executableStat, securityMode, selectedSandbox, nativeRulesIdentity(resolvedCodexHome)])).digest('hex');
+    if (lastSecurityIdentity !== null && lastSecurityIdentity !== identity) { sandboxCapable = null; inspectionGeneration++; }
+    lastSecurityIdentity = identity;
+    return { mode: securityMode, nativeSandboxSupported: inspection.nativeSandboxSupported === true
+        && (process.platform !== 'win32' || selectedSandbox === 'unelevated'),
+      nativeSandboxMode: process.platform === 'win32' ? 'windows-' + selectedSandbox + '/workspace-write' : 'workspace-write',
+      nativeApprovalSupported: true, nativeApprovalPolicy: 'never (deny escalation; noninteractive)',
+      executionBoundary: 'agent-native', workspaceAccess: 'staging cwd; native OS policy', directFilesystemAccess: true,
+      platformToolPermissions: 'capability-broker', strictIsolationVerified: false, requiresConfirmation: true,
+      identity,
+      securityLimitations: ['Native Security may read host files outside Staging. Native OS access is not mediated by CetaMesh tools.',
+        'Native writes outside the declared workspace are governed by Codex; temporary writable paths follow its policy.',
+        'Windows unelevated network isolation is environment-based, not a dedicated firewall boundary.',
+        'Do not access CetaMesh credentials or private IPC. Staging is not an OS sandbox.'] };
   }
 
   function requireSession(sessionId) {
@@ -297,7 +376,7 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
       && stderr.includes('refusing to run unsandboxed')) {
       return {
         code: 'CODEX_SANDBOX_UNAVAILABLE',
-        message: 'Codex Windows sandbox cannot enforce the configured workspace read restrictions'
+        message: 'Codex selected native sandbox is unavailable; no unsafe fallback was attempted'
       };
     }
     return { code: 'PROVIDER_ERROR', message: 'Codex execution failed' };
@@ -421,6 +500,15 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
       if (!line.trim()) return;
       let event;
       try { event = JSON.parse(line); } catch { /* Ignore non-JSON CLI diagnostics between protocol records. */ return; }
+      if (['item.started', 'item.updated', 'item.completed'].includes(event.type) && event.item?.type === 'command_execution') {
+        const item = event.item;
+        emit(session, makeEvent('tool/activity', run.turnId, { activity: {
+          id: String(item.id ?? run.turnId).slice(0, 160), capability: 'codex.native.command',
+          name: 'Codex 原生命令（由原生策略控制）', executionBoundary: 'agent-native',
+          status: event.type === 'item.completed' ? (item.exit_code === 0 ? 'completed' : 'failed') : 'running',
+          exitCode: Number.isInteger(item.exit_code) ? item.exit_code : null
+        } }));
+      }
       if (event.type === 'thread.started') {
         if (typeof event.thread_id === 'string') session.threadId = event.thread_id;
       } else if (event.type === 'item.completed') {
@@ -444,15 +532,18 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
     label: 'Codex',
     eventProtocol: AGENT_EVENT_PROTOCOL_TURN_V1,
     capabilityExtras: {
-      workspaceBoundary: 'staged-capability-broker',
+      workspaceBoundary: 'native-staged',
       supportsFreshSession: true,
       supportsResume: inspection.supportsResume === true,
       contextUsage: { available: true, source: 'Codex exec JSONL usage events when emitted' },
-      executionMode: 'task-staging'
+      executionMode: 'native-security-staging', requiresSessionCleanup: true
     },
     methods: {
       async createSession({ taskId, workspaceId, modelProvider, model, reasoningEffort } = {}) {
         refreshInspection();
+        if (securityMode !== 'native') throw agentProviderError('ISOLATED_ENVIRONMENT_UNVERIFIED', 'Isolated Workspace has no verified execution environment');
+        if (process.platform === 'win32' && selectedWindowsSandbox(resolvedCodexHome) !== 'unelevated') throw agentProviderError('CODEX_NATIVE_POLICY_UNVERIFIED', 'Selected Windows backend requires independent verification; no fallback is allowed');
+        if (!inspection.nativeSandboxSupported) throw agentProviderError('CODEX_NATIVE_POLICY_UNSUPPORTED', 'Installed Codex does not advertise workspace-write sandbox support');
         if (!inspection.available) throw agentProviderError('PROVIDER_UNAVAILABLE', 'Codex CLI is not installed or lacks the inspected exec interface');
         if (!authenticated) throw agentProviderError('PROVIDER_UNAVAILABLE', 'Codex needs authentication in its own secure configuration');
         if (!taskId || !workspaceId) throw agentProviderError('TASK_REQUIRED', 'Codex requires a Task and its bound Workspace');
@@ -512,7 +603,7 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
           `Task goal: ${session.task.goal}`,
           session.task.checkpoint?.summary ? `Checkpoint: ${session.task.checkpoint.summary}` : '',
           session.task.checkpoint?.nextAction ? `Next action: ${session.task.checkpoint.nextAction}` : '',
-          'Work only in this isolated staging directory. CetaMesh will reconcile and import changes through its Capability Broker.',
+          'Use this staging copy for Task work. It is not host-file read isolation. Native OS operations follow Codex security policy; CetaMesh only approves imports and platform tools. Never access CetaMesh credentials, private IPC, or unrelated host files.',
           String(content ?? '')
         ].filter(Boolean).join('\n\n');
         const run = { turnId, inspectionGeneration, pendingText: '', text: '', usage: null, turnCompleted: false, failed: false, handle: null };
@@ -525,7 +616,7 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
           threadId: session.threadId,
           model: session.model,
           reasoningEffort: session.reasoningEffort,
-          modelConfiguration: session.modelConfiguration
+          modelConfiguration: session.modelConfiguration, securityMode, windowsSandboxMode: selectedWindowsSandbox(resolvedCodexHome)
         });
         try {
           const authorized = authorizeOpenAiEnvironment() === true;
@@ -636,21 +727,24 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
 
       async health({ refresh = false } = {}) {
         refreshInspection(refresh === true);
+        const security = executionSecurity();
         const available = inspection.available && authenticated;
         return {
           available,
           installed: inspection.installed,
           compatible: inspection.available,
-          taskEligible: available && sandboxCapable !== false && typeof resolveTaskWorkspace === 'function',
+          taskEligible: available && security.nativeSandboxSupported === true && securityMode === 'native' && sandboxCapable !== false && typeof resolveTaskWorkspace === 'function',
           provider: 'codex',
           version: inspection.version,
           authenticated,
-          status: sandboxCapable === false ? 'sandbox_unavailable' : authenticated ? 'ready' : inspection.available ? 'needs_auth' : 'unavailable',
-          reason: inspection.reason ?? (!authenticated ? 'needs_auth' : sandboxCapable === false ? 'sandbox_unavailable' : null),
+          status: security.nativeSandboxSupported !== true ? 'sandbox_unavailable' : sandboxCapable === false ? 'sandbox_unavailable' : authenticated ? 'ready' : inspection.available ? 'needs_auth' : 'unavailable',
+          reason: inspection.reason ?? (security.nativeSandboxSupported !== true ? 'native_policy_unverified' : !authenticated ? 'needs_auth' : sandboxCapable === false ? 'sandbox_unavailable' : null),
           configured: inspection.available,
           reachable: null,
           sessionCapable: available,
           sandboxCapable,
+          security,
+          readyForTask: available && security.nativeSandboxSupported === true && sandboxCapable === true && securityMode === 'native',
           installKind: cli.installKind?.() ?? 'unknown',
           probePhase: inspection.available && !authenticated ? 'authentication' : inspection.probePhase,
           probeCode: inspection.available && !authenticated ? 'CODEX_AUTH_REQUIRED' : inspection.probeCode,
@@ -698,7 +792,7 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
     ...contract,
     // Compatibility projection reads the same current inspection as health; never a startup snapshot.
     capabilities() {
-      return Object.freeze({ ...contract.capabilities(), installed: inspection.installed, compatible: inspection.available,
+      return Object.freeze({ ...contract.capabilities(), security: executionSecurity(), installed: inspection.installed, compatible: inspection.available,
         available: inspection.available && authenticated, version: inspection.version,
         reason: inspection.reason ?? (authenticated ? null : 'needs_auth'),
         health: authenticated ? 'ready' : inspection.available ? 'needs_auth' : 'unavailable', supportsResume: inspection.supportsResume === true });

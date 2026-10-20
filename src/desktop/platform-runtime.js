@@ -6,7 +6,7 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
     const selected = record.config.agentProvider;
     const explicit = selected && selected !== 'none' ? selected : null;
     if (!explicit && task?.currentAgent?.provider) return task.currentAgent.provider;
-    const boundaryAllowed = id => ['capability-broker', 'staged-capability-broker']
+    const boundaryAllowed = id => ['capability-broker', 'staged-capability-broker', 'native-staged']
       .includes(agentBroker.capabilities(id)?.workspaceBoundary);
     if (explicit) {
       if (!boundaryAllowed(explicit)) throw capabilityError('AGENT_BOUNDARY_UNSUPPORTED', 'Selected Agent has no verified Task Workspace boundary');

@@ -117,7 +117,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
   }
   function ensureTaskFollow(provider, sessionId, taskId, options = {}) {
     const capabilities = agentBroker?.capabilities?.(provider);
-    if (!['capability-broker', 'staged-capability-broker'].includes(capabilities?.workspaceBoundary)) return null;
+    if (!['capability-broker', 'staged-capability-broker', 'native-staged'].includes(capabilities?.workspaceBoundary)) return null;
     const key = taskFollowKey(provider, sessionId);
     const current = taskFollowConsumers.get(key);
     if (current && !current.controller.signal.aborted && current.finished !== true) {
@@ -589,6 +589,20 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     description: 'Return the current local time and timezone.',
     inputSchema: objectInput(),
     execute: () => ({ iso: new Date().toISOString(), timezone: Intl.DateTimeFormat().resolvedOptions().timeZone }) });
+  broker.register({ id: 'agent.execution.authorize', permission: 'agent.run', provider: 'agent-broker',
+    workspace: true, risk: 'high', modelCallable: false,
+    description: 'Confirm the disclosed native execution scope for one Workspace and Agent policy.',
+    inputSchema: objectInput({ provider: stringField('Agent Provider.'), fingerprint: stringField('Current execution policy fingerprint.') }, ['provider', 'fingerprint']),
+    validate(request) {
+      if (request.actor.kind !== 'owner') throw capabilityError('PERMISSION_DENIED', 'Only Owner may confirm native execution');
+      if (!resolveWorkspace(request.workspaceId)) throw capabilityError('WORKSPACE_NOT_FOUND', 'Registered Workspace required');
+      const scope = agentBroker.describeExecutionSecurity(request.input.provider, request.workspaceId);
+      if (!scope.required || request.input.fingerprint !== scope.fingerprint) throw capabilityError('AGENT_SECURITY_POLICY_CHANGED', 'Agent policy changed; review again');
+      // The authoritative disclosure is fingerprint-bound; never trust caller-provided copy.
+      if (request.reason !== scope.disclosure.slice(0, 1000)) throw capabilityError('AGENT_SECURITY_DISCLOSURE_MISMATCH', 'Execution disclosure must match the current policy');
+    },
+    execute: request => agentBroker.authorizeExecution(request.input.provider, request.workspaceId, request.input.fingerprint)
+  });
   broker.register({ id: 'agent.run', permission: 'agent.run', provider: 'agent-broker', workspace: true, requiresTask: true, risk: 'medium',
     available: Boolean(agentBroker?.ids?.().length),
     description: 'Assign the current CetaMesh Task to a registered Agent Provider.',
@@ -611,9 +625,10 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       if (taskHandoffGuard(task.id)) throw capabilityError('TASK_HANDOFF_IN_FLIGHT', 'Task Handoff owns this execution boundary');
       const provider = String(r.input.agentProvider || r.input.provider || 'cetamesh');
       const boundary = agentBroker?.capabilities(provider)?.workspaceBoundary;
-      if (!['capability-broker', 'staged-capability-broker'].includes(boundary)) {
+      if (!['capability-broker', 'staged-capability-broker', 'native-staged'].includes(boundary)) {
         throw capabilityError('AGENT_BOUNDARY_UNSUPPORTED', 'Provider has no enforced Capability Broker workspace boundary');
       }
+      agentBroker.assertExecutionConsent?.(provider, { workspaceId: r.workspaceId });
       if (task.currentAgent && task.currentAgent.provider !== provider) {
         throw capabilityError('AGENT_PROVIDER_SWITCH_REQUIRES_CONTINUITY', 'An existing Task must change Agent Providers through Continuity Fresh Session');
       }

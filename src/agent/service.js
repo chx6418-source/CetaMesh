@@ -55,6 +55,7 @@ function summarizeProvider(provider, health = null) {
     taskEligible: typeof health?.taskEligible === 'boolean' ? health.taskEligible : null,
     version: health?.version ?? capabilities.version ?? null,
     reason,
+    security: capabilities.security ?? null,
     workspaceBoundary: capabilities.workspaceBoundary ?? 'unsupported',
     supportsFreshSession: capabilities.supportsFreshSession === true,
     supportsResume: capabilities.supportsResume === true,
@@ -70,7 +71,7 @@ function summarizeProvider(provider, health = null) {
  * The returned .broker supports process-local turn-end wiring for Chat and Continuity.
  */
 export function createDefaultAgentService({ api, defaults, log, dshOptions = {}, dshPresetConfig = null, codexOptions = {}, codexExecutable,
-  zcodeOptions = {}, zcodeExecutable, desktopStatus = null, dshConfiguration = null } = {}) {
+  zcodeOptions = {}, zcodeExecutable, desktopStatus = null, dshConfiguration = null, resolveWorkspaceIdentity, resolveExecutionTask, isTaskHandoffInFlight } = {}) {
   const dshProvider = api ? createDshAgentProvider({ api, defaults, log,
     presetPolicy: dshPresetConfig ? createDshPresetPolicy(dshPresetConfig) : null }) : createUnavailableDshProvider();
   const taskBoundDsh = api && typeof dshOptions.resolveTaskWorkspace === 'function' && typeof dshOptions.applyChanges === 'function'
@@ -83,7 +84,7 @@ export function createDefaultAgentService({ api, defaults, log, dshOptions = {},
       createZCodeAgentProvider({ ...zcodeOptions, ...(zcodeOptions.executable === undefined && zcodeExecutable !== undefined ? { executable: zcodeExecutable } : {}) })
     ]
   });
-  const broker = createAgentBroker({ registry, log });
+  const broker = createAgentBroker({ registry, log, resolveWorkspaceIdentity, resolveExecutionTask, isTaskHandoffInFlight });
   const service = createAgentService({ broker, log, desktopStatus, dshConfiguration });
   return Object.assign(service, { broker, registry });
 }
@@ -128,7 +129,7 @@ export function createAgentService({ broker, log = () => {}, desktopStatus = nul
     'agent.health': async (params) => decorate(broker.require(params?.provider), await broker.health(params?.provider, { refresh: params?.refresh === true }), params),
     'agent.createSession': (params) => {
       const boundary = broker.capabilities(params?.provider)?.workspaceBoundary;
-      if (boundary === 'capability-broker' || boundary === 'staged-capability-broker') {
+      if (boundary === 'capability-broker' || boundary === 'staged-capability-broker' || boundary === 'native-staged') {
         throw agentProviderError('TASK_REQUIRED', 'Workspace-bound Agents must start through Task assignment');
       }
       if (boundary !== 'unsupported') {

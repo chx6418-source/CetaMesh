@@ -39,6 +39,7 @@ export const CATEGORIES = ['core', 'architecture', 'security', 'runtime', 'integ
 // ── 登记表：scripts/test-*.mjs 的每一个文件都必须出现在这里（或能从 package.json 映射）。
 // requires 的取值见 probeAvailability()；category 取值见 CATEGORIES。
 const REGISTRY = {
+  'test-agent-native-security.mjs': { category: 'security' },
   'test-codex-discovery.mjs': { category: 'runtime' },
   'test-dsh-setup.mjs': { category: 'core' },
   'test-model-continuation.mjs': { category: 'runtime' },
@@ -129,7 +130,7 @@ const REGISTRY = {
   'test-managed-agent-provider.mjs': { category: 'runtime' },
   'test-phase2-chat-model.mjs': { category: 'runtime' },
   'test-phase3-task-handoff.mjs': { category: 'runtime' },
-  'test-phase3-real-codex.mjs': { category: 'environment', requires: ['real-codex'], timeoutMs: 180_000,
+  'test-phase3-real-codex.mjs': { category: 'environment', requires: ['real-codex'], timeoutMs: 480_000,
     note: 'Owner-authorized real Codex CLI Task E2E in an isolated disposable Workspace' },
   'test-memory-runtime.mjs': { category: 'runtime' },
   'test-phase4-memory.mjs': { category: 'runtime' },

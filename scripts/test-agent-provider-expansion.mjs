@@ -10,7 +10,7 @@ import { createAgentProviderRegistry } from '../src/agent/registry.js';
 import { createAgentService } from '../src/agent/service.js';
 import { defineAgentProvider } from '../src/agent/agent-provider.js';
 import { CliAgentProcess, createMinimalAgentEnv, findCliExecutable } from '../src/agent/cli-agent-process.js';
-import { createCodexAgentProvider } from '../src/agent/codex-agent-provider.js';
+import { createCodexAgentProvider, buildCodexExecArgs } from '../src/agent/codex-agent-provider.js';
 import { createZCodeAgentProvider } from '../src/agent/zcode-agent-provider.js';
 import { createDshAgentProvider } from '../src/agent/dsh-agent-provider.js';
 import { createCapabilityService } from '../src/capability/service.js';
@@ -387,7 +387,7 @@ try {
     "else if (args[0] === 'login') {",
     `  if (process.env.CODEX_HOME === ${JSON.stringify(explicitCodexHome)}) console.log('Logged in');`,
     "  else { console.log('Not logged in'); process.exitCode = 1; }",
-    "} else console.log('--config --ask-for-approval --cd --json --ignore-user-config --ignore-rules --strict-config --skip-git-repo-check [SESSION_ID]');"
+    "} else console.log('--config --ask-for-approval --cd --sandbox workspace-write --json --ignore-user-config --ignore-rules --strict-config --skip-git-repo-check [SESSION_ID]');"
   ].join('\n'));
   const selectedHomeProvider = createCodexAgentProvider({ executable: shimExecutable, codexHome: explicitCodexHome,
     environment: { ...process.env, CODEX_HOME: path.join(root, 'different-home') } });
@@ -408,7 +408,7 @@ try {
     executable: () => 'codex-fixture',
     probe(args) {
       if (args[0] === '--version') return { available: true, stdout: 'codex-cli 9.9.9-fixture', stderr: '' };
-      if (args[0] === '--help') return { available: true, stdout: '--config --ask-for-approval --cd', stderr: '' };
+      if (args[0] === '--help') return { available: true, stdout: '--config --ask-for-approval --cd --sandbox workspace-write', stderr: '' };
       if (args[0] === 'exec' && args[1] === '--help') return { available: true, stdout: '--json --ignore-user-config --ignore-rules --strict-config --skip-git-repo-check', stderr: '' };
       if (args[0] === 'exec' && args[1] === 'resume') return { available: true, stdout: 'exec resume [SESSION_ID] --json', stderr: '' };
       if (args[0] === 'login' && args[1] === 'status') return { available: true, stdout: 'Logged in with Codex fixture account', stderr: '' };
@@ -473,6 +473,10 @@ try {
   const taskAgentService = createAgentService({ broker: agentBroker });
   await assert.rejects(() => taskAgentService.execute({ method: 'agent.createSession', params: { provider: 'codex', cwd: workspace } }),
     error => error.code === 'TASK_REQUIRED');
+  const nativeScope = agentBroker.describeExecutionSecurity('codex', authoritative.id);
+  agentBroker.authorizeExecution('codex', authoritative.id, nativeScope.fingerprint); // Trusted Fixture setup; platform approval is covered in test-agent-native-security.
+  const mismatchedScope = agentBroker.describeExecutionSecurity('codex', 'wrong-workspace');
+  agentBroker.authorizeExecution('codex', 'wrong-workspace', mismatchedScope.fingerprint); // Exercise the original Task binding rejection after the new scope gate.
   await assert.rejects(() => agentBroker.createSession('codex', { taskId: task.id, workspaceId: 'wrong-workspace' }),
     error => error.code === 'TASK_WORKSPACE_MISMATCH');
   await assert.rejects(() => agentBroker.createSession('codex', {
@@ -536,7 +540,10 @@ try {
   assert.ok(firstArgs.some(arg => arg === '--model') && firstArgs[firstArgs.indexOf('--model') + 1] === 'fixture-inherited-model');
   assert.equal(firstArgs.some(arg => arg.startsWith('permissions.cetamesh-task.workspace_roots.')), false,
     'Codex does not encode an absolute Windows workspace root as a CLI config path');
-  const filesystemOverrides = firstArgs.filter(arg => arg.startsWith('permissions.cetamesh-task.filesystem'));
+  assert.ok(firstArgs.includes('--sandbox'));
+  assert.ok(!firstArgs.some(arg => arg.includes('":root"="deny"')), 'Native does not claim strict read isolation');
+  const isolatedArgs = buildCodexExecArgs({ stageRoot: codexStagingRoot, securityMode: 'isolated' });
+  const filesystemOverrides = isolatedArgs.filter(arg => arg.startsWith('permissions.cetamesh-task.filesystem'));
   assert.equal(filesystemOverrides.length, 1, 'Codex filesystem permissions are passed as one inline table for CLI parser compatibility');
   assert.match(filesystemOverrides[0] ?? '', /^permissions\.cetamesh-task\.filesystem=\{/);
   assert.ok(filesystemOverrides[0]?.includes('":workspace_roots"={"."="write"'),
@@ -547,7 +554,8 @@ try {
   const firstExecIndex = firstArgs.indexOf('exec');
   assert.ok(firstExecIndex > firstArgs.indexOf('--ask-for-approval'), 'top-level approval policy precedes exec');
   assert.ok(firstArgs.indexOf('--ignore-user-config') > firstExecIndex, 'exec flags follow the exec command');
-  assert.ok(firstArgs.indexOf('--ignore-rules') > firstExecIndex, 'exec flags follow the exec command');
+  assert.equal(firstArgs.includes('--ignore-rules'), false, 'Native honors user execpolicy restrictions');
+  assert.ok(isolatedArgs.includes('--ignore-rules'), 'legacy isolated-profile argument contract stays explicit');
   assert.equal(firstArgs.at(-1), '-', 'Codex reads the prompt from stdin');
   const canonicalCodexStageRoot = fs.realpathSync.native(codexStagingRoot);
   const canonicalCodexRunRoot = fs.realpathSync.native(fakeRuns[0].cwd);
@@ -600,7 +608,7 @@ try {
   const sandboxFailureEvent = codexProvider._sessions.get(freshSessionId).events.filter(event => event.type === 'turn/end').at(-1);
   assert.deepEqual(sandboxFailureEvent.data.reason.error, {
     code: 'CODEX_SANDBOX_UNAVAILABLE',
-    message: 'Codex Windows sandbox cannot enforce the configured workspace read restrictions'
+    message: 'Codex selected native sandbox is unavailable; no unsafe fallback was attempted'
   });
   assert.equal(JSON.stringify(sandboxFailureEvent).includes('C:\\Users\\private'), false,
     'Codex sandbox failure details never expose a user path or raw stderr');
@@ -622,6 +630,13 @@ try {
   });
   const restartedBroker = createAgentBroker({ registry: createAgentProviderRegistry({ providers: [restartedProvider] }) });
   const restartedCapabilities = createCapabilityService({ stateDir, workspaceService, taskRuntime, agentBroker: restartedBroker });
+  const recoveredScope = restartedBroker.describeExecutionSecurity('codex', authoritative.id);
+  assert.equal(recoveredScope.authorized, false, 'Core restart must not silently inherit prior native scope confirmation');
+  const recoveryConfirmation = await restartedCapabilities.execute({ method: 'capability.execute', params: {
+    capability: 'agent.execution.authorize', workspaceId: authoritative.id,
+    input: { provider: 'codex', fingerprint: recoveredScope.fingerprint }, reason: recoveredScope.disclosure
+  } });
+  await restartedCapabilities.execute({ method: 'capability.approval.decide', params: { id: recoveryConfirmation.approvalId, approve: true } });
   const recoveredAssignment = await restartedCapabilities.broker.execute({
     actor: { kind: 'owner', id: 'desktop' }, taskId: task.id, workspaceId: authoritative.id,
     capability: 'agent.run', input: { provider: 'codex', content: 'Recover from the lost CLI process' }, reason: 'crash recovery test'
@@ -690,9 +705,9 @@ try {
   fakeExitCode = 0;
   harborChat.close();
 
-  const isolatedA = await restartedProvider.createSession({ taskId: task.id, workspaceId: authoritative.id,
+  const isolatedA = await restartedBroker.createSession('codex', { taskId: task.id, workspaceId: authoritative.id,
     model: 'requested-model-a', reasoningEffort: 'low' });
-  const isolatedB = await restartedProvider.createSession({ taskId: task.id, workspaceId: authoritative.id,
+  const isolatedB = await restartedBroker.createSession('codex', { taskId: task.id, workspaceId: authoritative.id,
     model: 'requested-model-b', reasoningEffort: 'high' });
   await restartedProvider.selectModel({ sessionId: isolatedA.sessionId, model: 'selected-model-a', reasoningEffort: 'medium' });
   await restartedBroker.send({ provider: 'codex', sessionId: isolatedA.sessionId, content: 'session A config' });
@@ -767,7 +782,7 @@ try {
     probe(args) {
       if (!codexInstalled) return { available: false, stdout: '', stderr: '' };
       if (args[0] === '--version') return { available: true, stdout: 'codex-cli 9.9.9-reprobe', stderr: '' };
-      if (args[0] === '--help') return { available: true, stdout: '--config --ask-for-approval --cd', stderr: '' };
+      if (args[0] === '--help') return { available: true, stdout: '--config --ask-for-approval --cd --sandbox workspace-write', stderr: '' };
       if (args[0] === 'exec' && args[1] === '--help') return { available: true, stdout: '--json --ignore-user-config --ignore-rules --strict-config --skip-git-repo-check', stderr: '' };
       if (args[0] === 'exec' && args[1] === 'resume') return { available: true, stdout: 'exec resume [SESSION_ID] --json', stderr: '' };
       if (args[0] === 'login' && args[1] === 'status') return { available: codexLoggedIn, stdout: codexLoggedIn ? 'Logged in' : 'Not logged in', stderr: '' };

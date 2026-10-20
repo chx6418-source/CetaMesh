@@ -128,7 +128,7 @@ type UiMethod =
   | 'ui.workspace.list' | 'ui.workspace.open' | 'ui.workspace.create'
   | 'ui.memory.overview' | 'ui.memory.get' | 'ui.memory.create' | 'ui.memory.update' | 'ui.memory.pin' | 'ui.memory.delete'
   | 'ui.memory.candidates.confirm' | 'ui.memory.candidates.confirmBatch'
-  | 'ui.agent.list' | 'ui.agent.health' | 'ui.agent.configure'
+  | 'ui.agent.security' | 'ui.agent.authorize' | 'ui.agent.list' | 'ui.agent.health' | 'ui.agent.configure'
   | 'ui.extensions.settings.describe' | 'ui.extensions.settings.get' | 'ui.extensions.settings.update'
   | 'ui.plugins.catalog' | 'ui.plugins.status' | 'ui.plugins.detail' | 'ui.plugins.refresh' | 'ui.plugins.stage' | 'ui.plugins.stage-local' | 'ui.plugins.install'
   | 'ui.plugins.enable.review' | 'ui.plugins.enable' | 'ui.plugins.disable' | 'ui.plugins.uninstall' | 'ui.plugins.integration.list' | 'ui.plugins.integration.settings'
@@ -309,6 +309,8 @@ export const memoryClient = {
   remove: (id: string, expectedRev?: number) => uiCall<{ id: string; deleted: boolean }>('ui.memory.delete', { id, expectedRev })
 };
 export const agentClient = {
+  security: (provider: string, workspaceId: string) => uiCall<{ required: boolean; authorized: boolean; fingerprint: string; disclosure: string }>('ui.agent.security', { provider, workspaceId }),
+  authorize: (provider: string, workspaceId: string, fingerprint: string) => uiCall<{ status: string; approvalId: string }>('ui.agent.authorize', { provider, workspaceId, fingerprint }),
   list: () => uiCall<{ agents: Agent[] }>('ui.agent.list', {}),
   health: (provider: string, refresh = false) => uiCall<Agent>('ui.agent.health', { provider, refresh }),
   configure: (config: DshSelection) => uiCall<{ provider: 'dsh'; supported: boolean; applied: false; restartRequired: boolean; configuration: DshConfiguration }>('ui.agent.configure', { agentId: 'dsh', config })
