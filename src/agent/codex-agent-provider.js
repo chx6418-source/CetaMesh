@@ -411,7 +411,9 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
     } catch (error) {
       session.lastRunStatus = 'reconciliation-required';
       session.lastError = { code: error?.code ?? 'WORKSPACE_RECONCILIATION_REQUIRED' };
-      emitTurnEnd(session, run.turnId, 'error', { code: session.lastError.code, message: 'Workspace changed during Codex execution; reconcile before importing' });
+      emitTurnEnd(session, run.turnId, 'error', { code: session.lastError.code, message: session.lastError.code === 'WORKSPACE_RECONCILIATION_REQUIRED'
+        ? '工作区与任务快照存在冲突，修改尚未导入；请核验后恢复任务。'
+        : `无法校验工作区快照（${session.lastError.code}），修改尚未导入；请检查可读性或快照限制后恢复任务。` });
       return;
     }
     let usage = run.usage ?? null;

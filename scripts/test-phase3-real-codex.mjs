@@ -122,6 +122,30 @@ try {
     assert.equal(services.taskService.runtime.get({ id: taskId }).task.status, 'cancelled');
     assert.equal(services.taskService.runtime.activeWorkspaceOwner({ workspaceId: workspace.id }), null);
     process.stdout.write('PASS real Native Task pause, actual cancellation, reviewed resume and released execution authority\n');
+    fs.writeFileSync(path.join(projectRoot, 'runtime-status.txt'), 'before');
+    const readOnlyStarted = await services.desktopUiService.execute({ method: 'ui.task.create', params: {
+      goal: 'Reply READONLY_HELLO_OK. Do not use tools or modify any files.', workspaceId: workspace.id, agentProvider: 'codex'
+    } });
+    taskId = readOnlyStarted.task.id;
+    fs.writeFileSync(path.join(projectRoot, 'runtime-status.txt'), 'external runtime update');
+    async function readOnlyCheckpoint(expected) {
+      const until = Date.now() + 120000;
+      let value;
+      do {
+        value = services.taskService.runtime.get({ id: taskId }).task;
+        if (value.checkpoint?.summary?.includes(expected)) return value;
+        if (['blocked', 'failed', 'cancelled'].includes(value.status)) break;
+        await new Promise(resolve => setTimeout(resolve, 100));
+      } while (Date.now() < until);
+      assert.fail('read-only turn must complete after source drift: ' + JSON.stringify({ status: value.status, code: value.progress?.note }));
+    }
+    const readOnly = await readOnlyCheckpoint('READONLY_HELLO_OK');
+    await services.agentBroker.send({ ...readOnly.currentAgent, content: 'Read sample.ts and reply READONLY_NEXT_4217. Do not modify files.' });
+    const nextReadOnly = await readOnlyCheckpoint('READONLY_NEXT_4217');
+    assert.equal(fs.readFileSync(path.join(projectRoot, 'runtime-status.txt'), 'utf8'), 'external runtime update');
+    await services.desktopUiService.execute({ method: 'ui.task.cancel', params: { id: taskId, expectedRev: nextReadOnly.rev } });
+    process.stdout.write('PASS real read-only hello and next analysis turn survive external runtime-file updates without Task recovery\n');
+
 
   }
 } finally {

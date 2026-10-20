@@ -188,17 +188,10 @@ export function collectStagedChanges(stage) {
     fail('STAGING_SESSION_INVALID', 'Invalid or closed staging Workspace');
   }
   const stageSnapshot = walkFiles(stage.root, { maxFiles: stage.maxFiles, maxBytes: stage.maxBytes });
-  const sourceSnapshot = walkFiles(stage.sourceRoot, {
-    maxFiles: stage.maxFiles, maxBytes: stage.maxBytes, excludedRoots: stage.excludedRoots
-  });
   const allPaths = new Set([...stage.baseline.keys(), ...stageSnapshot.files.keys()]);
   const changes = [];
   for (const rel of allPaths) {
     const original = stage.baseline.get(rel) ?? null;
-    const live = sourceSnapshot.files.get(rel) ?? null;
-    if ((original?.hash ?? null) !== (live?.hash ?? null)) {
-      fail('WORKSPACE_RECONCILIATION_REQUIRED', `Task Workspace changed after this staging snapshot: ${rel}`);
-    }
     const staged = stageSnapshot.files.get(rel) ?? null;
     if ((original?.hash ?? null) === (staged?.hash ?? null)) continue;
     if (staged) {
@@ -209,6 +202,21 @@ export function collectStagedChanges(stage) {
       changes.push({ action: 'write', path: rel, content, expectedHash: original?.hash ?? null, hash: hashContent(content) });
     } else if (original) {
       changes.push({ action: 'delete', path: rel, expectedHash: original.hash, hash: null });
+    }
+  }
+  // A no-op/read-only turn has no import side effect. Do not let unrelated live
+  // writes or transient read failures invalidate its completed response.
+  // Keep the original baseline: this never rebases or approves pending writes.
+  if (changes.length) {
+    const sourceSnapshot = walkFiles(stage.sourceRoot, {
+      maxFiles: stage.maxFiles, maxBytes: stage.maxBytes, excludedRoots: stage.excludedRoots
+    });
+    for (const rel of allPaths) {
+      const original = stage.baseline.get(rel) ?? null;
+      const live = sourceSnapshot.files.get(rel) ?? null;
+      if ((original?.hash ?? null) !== (live?.hash ?? null)) {
+        fail('WORKSPACE_RECONCILIATION_REQUIRED', `Task Workspace changed after this staging snapshot: ${rel}`);
+      }
     }
   }
   changes.sort((a, b) => a.path.localeCompare(b.path));

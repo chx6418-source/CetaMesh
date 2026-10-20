@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createStagingWorkspace, cleanupStagingWorkspace } from '../src/workspace/staging.js';
+import { createStagingWorkspace, collectStagedChanges, cleanupStagingWorkspace } from '../src/workspace/staging.js';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-stage-boundary-'));
 const source = path.join(root, 'parent', 'source');
@@ -27,6 +27,28 @@ try {
   assert.equal(fs.existsSync(path.join(normal.root, 'nested')), false);
   cleanupStagingWorkspace(normal);
   console.log('PASS normal staging excludes another nested Workspace');
+
+  const liveSource = path.join(root, 'live-source'); fs.mkdirSync(liveSource);
+  fs.writeFileSync(path.join(liveSource, 'runtime.txt'), 'before');
+  const readOnlyStage = await createStagingWorkspace({ taskId: 'read-only', workspaceId: 'live', sourceRoot: liveSource, stagingRoot: stageRoot });
+  fs.writeFileSync(path.join(liveSource, 'runtime.txt'), 'external update');
+  assert.deepEqual(collectStagedChanges(readOnlyStage).changes, [], 'read-only turn has nothing to import and must not fail on source drift');
+  fs.writeFileSync(path.join(readOnlyStage.root, 'runtime.txt'), 'agent update');
+  assert.throws(() => collectStagedChanges(readOnlyStage), error => error.code === 'WORKSPACE_RECONCILIATION_REQUIRED', 'real staged writes still reject source conflicts');
+  cleanupStagingWorkspace(readOnlyStage);
+  const scanStage = await createStagingWorkspace({ taskId: 'read-only-scan', workspaceId: 'live', sourceRoot: liveSource, stagingRoot: stageRoot });
+  const originalReadDir = fs.readdirSync;
+  try {
+    fs.readdirSync = function(target, ...args) {
+      if (path.resolve(String(target)) === path.resolve(liveSource)) throw Object.assign(new Error('synthetic live directory unavailable'), { code: 'EACCES' });
+      return originalReadDir.call(this, target, ...args);
+    };
+    assert.deepEqual(collectStagedChanges(scanStage).changes, [], 'no-op turn must not rescan live source or be blocked by transient source reads');
+    fs.writeFileSync(path.join(scanStage.root, 'new.txt'), 'needs import');
+    assert.throws(() => collectStagedChanges(scanStage), error => error.code === 'STAGING_READ_FAILED', 'actual imports still fail closed when source cannot be checked');
+  } finally { fs.readdirSync = originalReadDir; cleanupStagingWorkspace(scanStage); }
+  console.log('PASS read-only turns survive live source drift/read failures while real imports retain conflict/read guards');
+
 
   // Missing stagingRoot formerly resolved to cwd inside isInsideRoot(), allowing
   // provider shutdown to recursively delete the caller's current directory.
