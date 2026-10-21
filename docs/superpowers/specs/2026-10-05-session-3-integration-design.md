@@ -1,0 +1,11 @@
+# Session 3 architecture integration specification
+
+Date: 2026-10-05. Base: main 6903dd0. Branch: feature/desktop-platform-integration-v2.
+
+The user's Session 3 execution specification is the authoritative design: unify capability policy over existing Workspace, Memory, Extension and Agent providers; permit external Workshop proposals without development permissions; migrate closed-agent to owner-agent compatibly; expand Memory categories, scoped links and reference-only packs; connect Smart tool/project paths; reconcile current architecture and run the requested regression/release chain. Preserve existing Workspace boundary algorithms and long-term memory confirmation. No Cloud, Marketplace, Mobile, arbitrary dynamic plugins, push or merge without owner confirmation.
+
+Requests contain requestId, actor, taskId/workspaceId when relevant, capability, input, scope, risk and reason. Trusted adapters bind principals; caller payloads never create grants. Registry unknown names and permission unknown names deny. Order: registry, permission, scope/boundary, approval, provider. Owner decisions bind immutable requests with expiry and single use. Agents require task and assigned workspace; external users only proposal/status/artifact endpoints. Ordinary granted source edits/tests/status/diff are automatic; project creation, escalation, publication and artifact delivery require Owner decisions.
+
+Memory authorize/retrieve/rank stays intact. Explicit cross-scope context requires source authorization AND target authorization, and contains bounded summary/decisions/references/time/confidence rather than entire history. Packs are immutable reference JSON with separate user overlays, never executable or system instructions. Existing VM host is retained behind a host factory contract; privileged host methods enter Broker and preserve Extension permission risks and forbidden permissions.
+
+Integration reuses Model, Agent Broker, Task and Continuity contracts, with automatic turn observation for project execution. Desktop navigation keeps product concepts and separates chat modes from runtime policy. All architecture statuses use PASS/PARTIAL/BLOCKED, environment omissions use NOT_RUN_ENVIRONMENT.

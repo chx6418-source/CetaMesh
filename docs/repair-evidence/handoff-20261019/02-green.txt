@@ -1,0 +1,10 @@
+
+> whalebridge@1.0.0-rc.2 test
+> node scripts/run-all-tests.mjs --suite test-handoff-context-working-memory
+
+
+════════════════════════════════════════════════════════════════════════
+汇总（1 suites）
+✅ PASS     runtime      test-handoff-context-working-memory  16.3s
+PASS 1 · FAIL 0 · NOT_RUN_ENVIRONMENT 0
+

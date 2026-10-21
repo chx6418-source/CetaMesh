@@ -2,9 +2,23 @@
 
 Thanks for helping improve CetaMesh.
 
+## Desktop and Mobile scope
+
+The official development repository is `chx6418-source/CetaMesh`. Desktop owns
+the root `src`, `desktop-shell`, `desktop-ui`, `plugins`, `extensions` and
+`scripts`. The complete independent React Native app lives in `apps/mobile`.
+Shared contract changes require both platforms' checks. Read the nearest
+`AGENTS.md` and `PROJECT_STATE.md` before editing.
+
+From the repository root, install with `npm ci`, `npm --prefix desktop-ui ci`
+and `npm --prefix apps/mobile ci`. Run Desktop `npm test` at the root and Mobile
+`npm --prefix apps/mobile test`. Windows and Android remain separate builds.
+The Mobile-specific guidance below now applies from `apps/mobile`; `npm test`
+includes its existing `check` verification chain. See `docs/MONOREPO.md`.
+
 ## Before you start
 
-Please read README.md, PROJECT_STATE.md, AGENTS.md, and OPEN_SOURCE.md. For architecture-sensitive work, also inspect the relevant files under docs/architecture, docs/protocol, and docs/security.
+Please read README.md, PROJECT_STATE.md, AGENTS.md, and OPEN_SOURCE.md. For architecture-sensitive work, inspect Desktop docs/desktop, shared docs/protocol, or Mobile apps/mobile/docs/architecture and apps/mobile/docs/security as appropriate.
 
 ## Development setup
 

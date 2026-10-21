@@ -1,0 +1,206 @@
+// per-provider API key store tests: masking, atomic writes, fail-closed corruption, outbound test.
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { createProviderSecrets, ProviderSecretError } from '../src/providers/secrets.js';
+import { defineModelProvider } from '../src/model/model-provider.js';
+import { coerceField } from '../src/settings/schema.js';
+import {
+  createOpenAiCompatibleFixture,
+  OPENAI_COMPATIBLE_FIXTURE_BASE_URL
+} from './test-support/openai-compatible-fixture.mjs';
+
+let passed = 0;
+let failed = 0;
+const check = async (name, fn) => {
+  try {
+    await fn();
+    passed += 1;
+    console.log(`PASS ${name}`);
+  } catch (error) {
+    failed += 1;
+    console.error(`FAIL ${name} - ${error?.message ?? error}`);
+  }
+};
+
+const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-provider-secrets-'));
+const secrets = createProviderSecrets({ root: temp });
+const rawKey = 'sk-test-deepseek-1234567890';
+const providerMethods = {
+  listModels: async () => [],
+  chat: async () => ({ text: '' }),
+  stream: async function* () {}
+};
+
+try {
+  await check('Provider 声明的枚举和范围字段保留安全元数据', () => {
+    const provider = defineModelProvider({
+      id: 'test-settings',
+      label: 'Test Settings',
+      methods: providerMethods,
+      settingsFields: [
+        { key: 'reasoningEffort', label: '推理强度', type: 'string', choices: ['off', 'low', 'high'] },
+        { key: 'timeoutMs', label: '超时', type: 'number', min: 100, max: 5000 }
+      ]
+    });
+    assert.deepEqual(provider.settingsFields(), [
+      { key: 'reasoningEffort', label: '推理强度', type: 'string', choices: ['off', 'low', 'high'] },
+      { key: 'timeoutMs', label: '超时', type: 'number', min: 100, max: 5000 }
+    ]);
+    assert.throws(() => coerceField('models', 'reasoningEffort', 'unsupported'), error => error.code === 'SETTINGS_INVALID');
+    assert.throws(() => coerceField('memory', 'retrievalLimit', 201), error => error.code === 'SETTINGS_INVALID');
+    assert.throws(() => defineModelProvider({
+      id: 'invalid-enum', label: 'Invalid Enum', methods: providerMethods,
+      settingsFields: [{ key: 'reasoning', label: 'Reasoning', type: 'string', choices: [] }]
+    }), /settingsFields|choices/);
+    assert.throws(() => defineModelProvider({
+      id: 'invalid-range', label: 'Invalid Range', methods: providerMethods,
+      settingsFields: [{ key: 'timeoutMs', label: 'Timeout', type: 'number', min: 500, max: 100 }]
+    }), /settingsFields|range/);
+    assert.throws(() => defineModelProvider({
+      id: 'secret-field', label: 'Secret Field', methods: providerMethods,
+      settingsFields: [{ key: 'apiKey', label: 'API Key', type: 'string' }]
+    }), /settingsFields/);
+  });
+
+  await check('list is empty before configuration', () => {
+    assert.deepEqual(secrets.list(), []);
+  });
+
+  await check('set stores a masked entry and never returns the raw key', () => {
+    const entry = secrets.set({ provider: 'deepseek-official', apiKey: rawKey });
+    assert.equal(entry.provider, 'deepseek-official');
+    assert.equal(entry.configured, true);
+    assert.match(entry.hint, /^••••/);
+    assert.ok(!entry.hint.includes(rawKey));
+    const listed = secrets.list();
+    assert.equal(listed.length, 1);
+    assert.ok(!JSON.stringify(listed).includes(rawKey), 'list output must not contain the key');
+  });
+
+  await check('re-set overwrites the same provider and rejects invalid input', () => {
+    const updated = secrets.set({ provider: 'openai', apiKey: 'sk-openai-abcdefgh', baseUrl: 'https://api.openai.com/v1/' });
+    assert.equal(updated.baseUrl, 'https://api.openai.com/v1');
+    assert.equal(secrets.list().length, 2);
+    assert.throws(() => secrets.set({ provider: 'Bad Provider', apiKey: rawKey }), (error) => error.code === 'PROVIDER_SECRET_INVALID');
+    assert.throws(() => secrets.set({ provider: 'openai', apiKey: 'short' }), (error) => error.code === 'PROVIDER_SECRET_INVALID');
+    assert.throws(() => secrets.set({ provider: 'openai', apiKey: rawKey, baseUrl: 'http://insecure.example' }), (error) => error.code === 'PROVIDER_SECRET_INVALID');
+  });
+
+  await check('key rotation preserves an omitted Base URL and explicit empty clears it', () => {
+    secrets.set({ provider: 'openai', apiKey: 'sk-openai-before-abcdefgh', baseUrl: 'https://gateway.example/v1' });
+    assert.equal(secrets.set({ provider: 'openai', apiKey: 'sk-openai-after-abcdefgh' }).baseUrl, 'https://gateway.example/v1');
+    assert.equal(secrets.set({ provider: 'openai', apiKey: 'sk-openai-cleared-abcdefgh', baseUrl: '' }).baseUrl, '');
+  });
+
+  await check('plain HTTP is accepted only for exact loopback hosts', () => {
+    for (const baseUrl of ['http://127.0.0.1:3210/v1', 'http://localhost:3210/v1', 'http://[::1]:3210/v1']) {
+      assert.equal(secrets.set({ provider: 'local-gateway', apiKey: rawKey, baseUrl }).baseUrl, baseUrl);
+    }
+    for (const baseUrl of ['http://192.168.1.10:3210/v1', 'http://localtest.me:3210/v1', 'http://127.0.0.2:3210/v1']) {
+      assert.throws(() => secrets.set({ provider: 'remote-gateway', apiKey: rawKey, baseUrl }), error => error.code === 'PROVIDER_SECRET_INVALID');
+    }
+  });
+
+  await check('atomic write leaves no temp files and keeps 0600 semantics', () => {
+    const leftovers = fs.readdirSync(path.join(temp, 'state')).filter((name) => name.endsWith('.tmp'));
+    assert.deepEqual(leftovers, []);
+  });
+
+  await check('outbound test uses the key but reports only status', async () => {
+    const ok = await secrets.test({
+      provider: 'deepseek-official',
+      fetchImpl: async (url, options) => {
+        assert.match(String(url), /^https:\/\/api\.deepseek\.com\/models$/);
+        assert.equal(options.headers.authorization, `Bearer ${rawKey}`);
+        return { ok: true, status: 200 };
+      }
+    });
+    assert.equal(ok.ok, true);
+    assert.equal(ok.phase, 'catalog');
+    assert.equal(ok.inferencing, null);
+    const denied = await secrets.test({
+      provider: 'deepseek-official',
+      fetchImpl: async () => ({ ok: false, status: 401 })
+    });
+    assert.equal(denied.ok, false);
+    assert.match(denied.message, /认证失败/);
+    assert.ok(!JSON.stringify(denied).includes(rawKey));
+  });
+
+  await check('provider secret test runs against the injected loopback fixture only', async () => {
+    secrets.set({ provider: 'deepseek-official', apiKey: rawKey, baseUrl: OPENAI_COMPATIBLE_FIXTURE_BASE_URL });
+    const fixture = createOpenAiCompatibleFixture({
+      responses: [{ kind: 'json', body: { data: [{ id: 'deepseek-chat' }] } }]
+    });
+    try {
+      const result = await secrets.test({ provider: 'deepseek-official', fetchImpl: fixture.fetchImpl });
+      assert.equal(result.ok, true);
+      assert.equal(result.phase, 'catalog');
+      assert.equal(fixture.requests[0].url, `${OPENAI_COMPATIBLE_FIXTURE_BASE_URL}/models`);
+      assert.equal(fixture.requests[0].authorizationConfigured, true);
+      assert.ok(!JSON.stringify({ result, requests: fixture.requests }).includes(rawKey));
+      await assert.rejects(
+        fixture.fetchImpl('https://api.deepseek.com/models'),
+        /rejected a URL outside its loopback endpoint/
+      );
+      assert.equal(fixture.requests.length, 1, 'fixture 只记录已允许的 loopback 调用');
+    } finally {
+      fixture.close();
+    }
+  });
+
+  await check('candidate credentials and Base URL are tested without replacing valid saved credentials', async () => {
+    const originalBase = OPENAI_COMPATIBLE_FIXTURE_BASE_URL;
+    secrets.set({ provider: 'deepseek-official', apiKey: 'sk-original-abcdefgh', baseUrl: originalBase });
+    let seen = null;
+    const failed = await secrets.test({
+      provider: 'deepseek-official', apiKey: 'sk-candidate-abcdefgh', baseUrl: 'https://candidate.example/v1',
+      fetchImpl: async (url, options) => {
+        seen = { url: String(url), authorization: options.headers.authorization };
+        return { ok: false, status: 401 };
+      }
+    });
+    assert.equal(failed.ok, false);
+    assert.deepEqual(seen, { url: 'https://candidate.example/v1/models', authorization: 'Bearer sk-candidate-abcdefgh' });
+    assert.equal(secrets.raw('deepseek-official').apiKey, 'sk-original-abcdefgh');
+    assert.equal(secrets.raw('deepseek-official').baseUrl, originalBase);
+  });
+
+  await check('optional inference probe reports a separate phase and uses one-token request', async () => {
+    secrets.set({ provider: 'deepseek-official', apiKey: rawKey, baseUrl: OPENAI_COMPATIBLE_FIXTURE_BASE_URL });
+    const fixture = createOpenAiCompatibleFixture({ responses: [
+      { kind: 'json', body: { data: [{ id: 'deepseek-flash' }] } },
+      { kind: 'json', body: { choices: [{ message: { role: 'assistant', content: 'ok' } }] } }
+    ] });
+    try {
+      const result = await secrets.test({ provider: 'deepseek-official', model: 'deepseek-flash', fetchImpl: fixture.fetchImpl });
+      assert.equal(result.ok, true);
+      assert.equal(result.phase, 'inference');
+      assert.equal(result.inferencing, true);
+      assert.equal(fixture.requests[0].url, `${OPENAI_COMPATIBLE_FIXTURE_BASE_URL}/models`);
+      assert.equal(fixture.requests[1].url, `${OPENAI_COMPATIBLE_FIXTURE_BASE_URL}/chat/completions`);
+      assert.equal(fixture.requests[1].body.max_tokens, 1);
+      assert.equal(fixture.requests[1].body.model, 'deepseek-flash');
+      assert.ok(!JSON.stringify({ result, requests: fixture.requests }).includes(rawKey));
+    } finally { fixture.close(); }
+  });
+
+  await check('remove deletes the entry; corrupt file fails closed without echoing values', () => {
+    assert.equal(secrets.remove({ provider: 'openai' }).removed, true);
+    assert.equal(secrets.remove({ provider: 'openai' }).removed, false);
+    fs.writeFileSync(path.join(temp, 'state', 'provider-keys.json'), '{not json with sk-sentinel-987654');
+    assert.throws(() => secrets.list(), (error) => {
+      assert.ok(error instanceof ProviderSecretError);
+      assert.equal(error.code, 'PROVIDER_SECRET_INVALID');
+      assert.ok(!String(error.message).includes('sk-sentinel-987654'));
+      return true;
+    });
+  });
+} finally {
+  fs.rmSync(temp, { recursive: true, force: true });
+}
+
+console.log(`\nResult: ${passed} passed, ${failed} failed`);
+if (failed) process.exitCode = 1;

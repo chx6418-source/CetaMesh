@@ -1,0 +1,42 @@
+{
+  "manifestVersion": 1,
+  "id": "cetamesh.hello-tool",
+  "name": "Hello Tool",
+  "version": "1.0.0",
+  "type": "tool",
+  "entry": "index.js",
+  "publisher": "CetaMesh Labs",
+  "description": "最小示例扩展：只有一个纯计算能力，不需要任何敏感权限。",
+  "capabilities": [
+    {
+      "id": "hello.greet",
+      "kind": "tool",
+      "title": "打招呼",
+      "description": "根据输入的名字生成一句问候，不访问磁盘、网络或宿主进程。",
+      "requires": [],
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  ],
+  "permissions": [
+    "log"
+  ],
+  "network": {
+    "hosts": []
+  },
+  "scope": {
+    "workspace": null,
+    "paths": []
+  },
+  "source": {
+    "kind": "local",
+    "publisher": "CetaMesh Labs",
+    "reference": "extensions/cetamesh-hello-tool"
+  }
+}

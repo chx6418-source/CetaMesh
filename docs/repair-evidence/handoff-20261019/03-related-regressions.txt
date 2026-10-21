@@ -1,0 +1,101 @@
+
+> whalebridge@1.0.0-rc.2 test
+> node scripts/run-all-tests.mjs --suite test-latest-audit-agent-identity --suite test-phase3-task-handoff --suite test-smart-platform-routing --suite test-task-runtime --suite test-memory-runtime --suite test-phase4-memory --suite test-continuity-rollover --suite test-continuity-auto-rollover --suite test-desktop-chat-product --suite test-error-hygiene
+
+
+════════════════════════════════════════════════════════════════════════
+汇总（10 suites）
+✅ PASS     runtime      test-continuity-auto-rollover        1.4s
+❌ FAIL     runtime      test-continuity-rollover             1.5s
+    ── 输出末尾 ──
+    
+    AssertionError [ERR_ASSERTION]: successful transfer must register the target Session for Task event follow
+    + actual - expected
+    
+      [
+        {
+    +     bootstrapRequestId: 'bootstrap-beta-s2',
+    +     bootstrapTurnId: null,
+          provider: 'beta',
+          sessionId: 'beta-s2',
+    +     sinceSequence: 1,
+          taskId: 'task_mveqml8z_aa66956795'
+        }
+      ]
+    
+        at file:///D:/a/whalebridge/whalebridge/scripts/test-continuity-rollover.mjs:504:10 {
+      generatedMessage: false,
+      code: 'ERR_ASSERTION',
+      actual: [
+        {
+          taskId: 'task_mveqml8z_aa66956795',
+          provider: 'beta',
+          sessionId: 'beta-s2',
+          sinceSequence: 1,
+          bootstrapRequestId: 'bootstrap-beta-s2',
+          bootstrapTurnId: null
+        }
+      ],
+      expected: [
+        {
+          taskId: 'task_mveqml8z_aa66956795',
+          provider: 'beta',
+          sessionId: 'beta-s2'
+        }
+      ],
+      operator: 'deepStrictEqual',
+      diff: 'simple'
+    }
+    
+    Node.js v22.23.3
+❌ FAIL     architecture test-desktop-chat-product            2.0s
+    ── 输出末尾 ──
+    ✅ [18] Managed Agent route returns a requestId immediately and delete cancels late-created sessions
+    ✅ [19] 新会话继承首次设置保存的默认 Provider 和 Model
+    ✅ [20] Standalone Chat：无 DSH → 配 Key → 发送 → 流式 → usage → 历史（DSH 零调用，Key 不落历史）
+    ✅ [21] Model 通道停止：abort → cancelled → partial 落盘
+    ✅ [22] Agent=DSH：显式选择 → Agent 契约路径（Model Runtime 零请求）+ 未知 Agent 拒绝
+    ✅ [23] 切换 Agent：旧 Follow 中止、旧 Session 关闭、下一条消息新建目标 Provider Session
+    ✅ [24] 自动 DSH → Agent：旧 Follow 中止、旧 DSH Session 关闭、下一条消息使用目标 Agent
+    ✅ [25] Managed Agent：创建时传 Provider，切换后立即更新现有 Session
+    ✅ [26] Harbor UI event bus：chat.warning 与 bounded message 可订阅
+    ✅ [27] Smart 路由：project→agent-intent 记录/你好→simple/Disabled 不产生意图
+    ✅ [28] Provider 配置：自动路径仅在无 Model Key 时尝试 DSH / 显式缺 Key 报错 / 非法 Provider 拒绝
+    ✅ [29] Provider/Model 选择立即进入下一回合的真实请求
+    ✅ [30] DSH → Model Runtime：Provider-only handover 关闭旧 Session/Follow，迟到事件不污染新回合
+    ✅ [31] catalog：DSH 目录错误不阻塞 Model 目录 / hasKey 标记 / 无 Key 泄漏
+    ✅ [32] Model catalog state is separate from DSH; cached reads and explicit refresh use bounded parallel providers
+    ✅ [33] Provider error → UI event/history projection → retry → one user message + streamed answer
+    ✅ [34] 历史分页：100/200/500 消息、exclusive cursor、顺序/无重叠、未知 cursor 与边界 limit
+    node:internal/modules/run_main:123
+        triggerUncaughtException(
+        ^
+    
+    AssertionError [ERR_ASSERTION]: The validation function is expected to return "true". Received false
+    
+    Caught error:
+    
+    Error: Chat Agent Session does not own the attached Task
+        at async file:///D:/a/whalebridge/whalebridge/scripts/test-desktop-chat-product.mjs:1414:3 {
+      generatedMessage: true,
+      code: 'ERR_ASSERTION',
+      actual: Error: Chat Agent Session does not own the attached Task
+          at chatError (file:///D:/a/whalebridge/whalebridge/src/desktop/chat-service.js:61:24)
+          at setConfig (file:///D:/a/whalebridge/whalebridge/src/desktop/chat-service.js:599:17) {
+        code: 'TASK_SESSION_MISMATCH'
+      },
+      expected: [Function (anonymous)],
+      operator: 'rejects',
+      diff: 'simple'
+    }
+    
+    Node.js v22.23.3
+✅ PASS     security     test-error-hygiene                   0.2s
+✅ PASS     core         test-latest-audit-agent-identity     1.9s
+✅ PASS     runtime      test-memory-runtime                  0.3s
+✅ PASS     runtime      test-phase3-task-handoff             6.1s
+✅ PASS     runtime      test-phase4-memory                   12.2s
+✅ PASS     architecture test-smart-platform-routing          4.4s
+✅ PASS     runtime      test-task-runtime                    0.4s
+PASS 8 · FAIL 2 · NOT_RUN_ENVIRONMENT 0
+

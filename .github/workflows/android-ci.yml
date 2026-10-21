@@ -2,18 +2,25 @@ name: Android CI
 
 on:
   push:
-    branches:
-      - main
-      - "develop/**"
-      - "feature/**"
-      - "recovery/**"
-    paths-ignore:
-      - "**/*.md"
-      - "docs/**"
+    branches: ['**']
+    paths:
+      - 'apps/mobile/**'
+      - 'packages/**'
+      - 'fixtures/pairing/**'
+      - 'docs/protocol/**'
+      - '.github/workflows/android-ci.yml'
   pull_request:
-    branches:
-      - main
+    paths:
+      - 'apps/mobile/**'
+      - 'packages/**'
+      - 'fixtures/pairing/**'
+      - 'docs/protocol/**'
+      - '.github/workflows/android-ci.yml'
   workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: apps/mobile
 
 permissions:
   contents: read
@@ -45,7 +52,7 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
-          cache-dependency-path: package-lock.json
+          cache-dependency-path: apps/mobile/package-lock.json
 
       - name: Set up JDK
         uses: actions/setup-java@v6
@@ -84,13 +91,13 @@ jobs:
         run: npm ci
 
       - name: TypeScript, lint, architecture and unit checks
-        run: npm run check
+        run: npm test
 
       - name: Make Gradle wrapper executable
         run: chmod +x android/gradlew
 
       - name: Validate Gradle wrapper
-        working-directory: android
+        working-directory: apps/mobile/android
         run: ./gradlew --version --no-daemon
 
       - name: Generate disposable beta signing key
@@ -101,7 +108,7 @@ jobs:
             -dname "CN=Android Debug,O=Android,C=US"
 
       - name: Build Android Standalone APK
-        working-directory: android
+        working-directory: apps/mobile/android
         run: ./gradlew assembleRelease --no-daemon --stacktrace
 
       - name: Verify Android Standalone APK
@@ -113,7 +120,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: cetamesh-mobile-android-standalone-${{ github.sha }}
-          path: android/app/build/outputs/apk/release/app-release.apk
+          path: apps/mobile/android/app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
           retention-days: 14
 
@@ -123,7 +130,7 @@ jobs:
         with:
           name: android-build-reports-${{ github.sha }}
           path: |
-            android/app/build/reports/**
-            android/build/reports/**
+            apps/mobile/android/app/build/reports/**
+            apps/mobile/android/build/reports/**
           if-no-files-found: ignore
           retention-days: 7

@@ -1,0 +1,28 @@
+{
+  "manifestVersion": 1,
+  "id": "cetamesh.plugin-template",
+  "name": "Hello Tool",
+  "version": "1.0.0",
+  "type": "tool",
+  "entry": "index.js",
+  "publisher": "CetaMesh Example",
+  "description": "A small data-only example for the CetaMesh Extension Runtime.",
+  "minCetaMeshVersion": "1.0.0-rc.1",
+  "capabilities": [
+    {
+      "id": "hello",
+      "kind": "tool",
+      "title": "Hello",
+      "description": "Returns a greeting for the provided name.",
+      "requires": [],
+      "inputSchema": {
+        "type": "object",
+        "properties": { "name": { "type": "string", "maxLength": 80 } },
+        "required": ["name"],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "permissions": [],
+  "source": { "kind": "local" }
+}

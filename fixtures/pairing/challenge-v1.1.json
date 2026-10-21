@@ -1,0 +1,24 @@
+{
+  "description": "Desktop → Mobile 的合法 challenge 响应（v1.1 transcript 的固定签名向量）。",
+  "now": "2026-10-08T12:00:00.000Z",
+  "expect": "accept",
+  "envelope": {
+    "protocol": "cetamesh",
+    "version": 1,
+    "id": "desktop-pairing-0001",
+    "type": "pairing.challenge",
+    "timestamp": "2026-10-08T12:00:00.000Z",
+    "payload": {
+      "invitationId": "inv_7f3a91c2d4e5b6a8",
+      "nonce": "1FjvZHds0sO8Ze9HXRskvXgwlq4NoqgnXXabHXtulMM=",
+      "peer": {
+        "deviceId": "node_ec23aac43cd6bfe4c3b03ab0a377a8cb",
+        "deviceName": "CetaMesh Desktop",
+        "publicKey": "BGGmeGWR3mgwIX4VbcOr28I8mangF8juut289DLWNC3vRFL0N/viUzi7WmSAci+u5up3M+csK/6Y/qpZI0+24Wo=",
+        "keyAlgorithm": "p256"
+      },
+      "expiresAt": "2026-10-08T12:04:30.000Z",
+      "signature": "MEUCIFjt69chTR374VvVYc/Ydg2BN+K1cht3ez1Gst9skPXQAiEAgQGl3wxEGMhAfbRYaSBh6q+IT6WNa0Axokt1HGdWIeA="
+    }
+  }
+}

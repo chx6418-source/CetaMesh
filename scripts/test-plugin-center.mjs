@@ -1,0 +1,751 @@
+import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { strToU8, zipSync } from 'fflate';
+import { normalizeCatalog } from '../src/plugin-center/catalog.js';
+import { extractPluginPackage, verifyPluginPackage } from '../src/plugin-center/package.js';
+import { createPluginCenterService } from '../src/plugin-center/service.js';
+import { createExtensionRuntime, createExtensionStore } from '../src/extension/index.js';
+import { writeJsonAtomic } from '../src/storage/json-file.js';
+import { createPluginCatalogFixture } from './test-support/plugin-catalog-fixture.mjs';
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+let passed = 0;
+async function check(name, callback) {
+  try {
+    await callback();
+    passed += 1;
+    process.stdout.write(`✅ ${name}\n`);
+  } catch (error) {
+    process.stderr.write(`❌ ${name}: ${error.message}\n`);
+    throw error;
+  }
+}
+
+function manifest(version = '1.0.0') {
+  return {
+    manifestVersion: 1,
+    id: 'cetamesh.hello-tool',
+    name: 'Hello Tool',
+    version,
+    type: 'tool',
+    entry: 'index.js',
+    publisher: 'CetaMesh Example',
+    description: 'A bounded example tool.',
+    capabilities: [{
+      id: 'hello', kind: 'tool', title: 'Hello', description: 'Say hello.', requires: [],
+      inputSchema: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] }
+    }],
+    permissions: [],
+    source: { kind: 'local' }
+  };
+}
+
+function packageBytes(version = '1.0.0', overrides = {}) {
+  return zipSync({
+    'extension.json': new TextEncoder().encode(JSON.stringify({ ...manifest(version), ...overrides })),
+    'index.js': new TextEncoder().encode('module.exports.handlers = { hello: input => ({ greeting: `Hello, ${input.name}` }) };\n'),
+    'README.md': new TextEncoder().encode('# Hello Tool\n')
+  }, { mtime: new Date('2026-10-11T00:00:00.000Z') });
+}
+
+function catalogPlugin(overrides = {}) {
+  const bytes = packageBytes();
+  return {
+    id: 'cetamesh.hello-tool', name: 'Hello Tool', summary: 'A bounded example tool.',
+    description: 'An example plugin for CetaMesh.', publisher: 'CetaMesh Example',
+    publisherId: 'cetamesh.example', version: '1.0.0', category: 'Tools', icon: 'https://plugins.example.test/images/hello-icon.png',
+    screenshots: [{ url: 'https://plugins.example.test/images/hello.png', alt: 'Hello Tool' }],
+    homepage: 'https://plugins.example.test/hello-tool',
+    documentation: 'https://plugins.example.test/docs/hello-tool',
+    manifestUrl: 'https://plugins.example.test/packages/hello/extension.json',
+    packageUrl: 'https://plugins.example.test/packages/hello/1.0.0.cetamesh-plugin',
+    packageSha256: crypto.createHash('sha256').update(bytes).digest('hex'),
+    packageBytes: bytes.byteLength,
+    minCetaMeshVersion: '1.0.0', maxCetaMeshVersion: null,
+    permissions: [], capabilities: ['hello'], updatedAt: '2026-10-11T00:00:00.000Z',
+    featured: true, verified: true, revoked: false,
+    ...overrides
+  };
+}
+
+const allowedHosts = ['plugins.example.test'];
+
+await check('fixture package digest remains stable across ZIP timestamp boundaries', async () => {
+  const first = catalogPlugin();
+  await new Promise(resolve => setTimeout(resolve, 2200));
+  const second = catalogPlugin();
+  assert.equal(second.packageSha256, first.packageSha256,
+    'the same fixture package must not change Catalog trust as wall clock time advances');
+  assert.equal(second.packageBytes, first.packageBytes);
+});
+
+await check('Catalog contract normalizes fields and rejects malformed or unsafe URLs', async () => {
+  const normalized = normalizeCatalog({ schemaVersion: 1, generatedAt: '2026-10-11T00:00:00Z', plugins: [catalogPlugin()] }, {
+    catalogUrl: 'https://plugins.example.test/api/catalog.json', allowedHosts
+  });
+  assert.equal(normalized.plugins[0].id, 'cetamesh.hello-tool');
+  assert.equal(normalized.plugins[0].verified, false, 'unsigned catalog metadata cannot verify a publisher');
+  assert.equal(normalized.plugins[0].catalogClaimedVerified, true);
+  assert.throws(() => normalizeCatalog({ schemaVersion: 1, plugins: [catalogPlugin({
+    packageUrl: 'file:///C:/secret.zip'
+  })] }, { catalogUrl: 'https://plugins.example.test/catalog.json', allowedHosts }), { code: 'CATALOG_INVALID' });
+  assert.throws(() => normalizeCatalog({ schemaVersion: 1, plugins: [catalogPlugin({
+    packageUrl: 'https://evil.example.test/pkg.zip'
+  })] }, { catalogUrl: 'https://plugins.example.test/catalog.json', allowedHosts }), { code: 'CATALOG_URL_HOST_NOT_ALLOWED' });
+});
+
+await check('screenshot list enforces HTTPS official host and count/size limits', async () => {
+  assert.throws(() => normalizeCatalog({ schemaVersion: 1, plugins: [catalogPlugin({
+    screenshots: [{ url: 'http://plugins.example.test/x.png' }]
+  })] }, { catalogUrl: 'https://plugins.example.test/catalog.json', allowedHosts }), { code: 'CATALOG_INVALID' });
+  assert.throws(() => normalizeCatalog({ schemaVersion: 1, plugins: [catalogPlugin({
+    screenshots: Array.from({ length: 6 }, (_, index) => ({ url: `https://plugins.example.test/${index}.png`, bytes: 1 }))
+  })] }, { catalogUrl: 'https://plugins.example.test/catalog.json', allowedHosts }), { code: 'CATALOG_INVALID' });
+});
+
+await check('package verifies SHA-256 and declared byte count before extraction', async () => {
+  const bytes = packageBytes();
+  const sha256 = crypto.createHash('sha256').update(bytes).digest('hex');
+  assert.equal(verifyPluginPackage(bytes, { sha256, bytes: bytes.byteLength }).ok, true);
+  assert.equal(verifyPluginPackage(bytes, { sha256: '0'.repeat(64), bytes: bytes.byteLength }).code, 'PACKAGE_SHA256_MISMATCH');
+  assert.equal(verifyPluginPackage(bytes, { sha256, bytes: bytes.byteLength + 1 }).code, 'PACKAGE_SIZE_MISMATCH');
+});
+
+await check('package extraction rejects path traversal, forbidden credential files, and oversized archives', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-plugin-package-'));
+  try {
+    assert.throws(() => extractPluginPackage(zipSync({ '../escape.js': new Uint8Array([1]) }), { stagingRoot: root }), { code: 'PACKAGE_PATH_INVALID' });
+    assert.throws(() => extractPluginPackage(zipSync({ '.env': new Uint8Array([1]) }), { stagingRoot: root }), { code: 'PACKAGE_FORBIDDEN_FILE' });
+    const huge = zipSync({ 'large.bin': new Uint8Array(1024 * 1024 + 1) });
+    assert.throws(() => extractPluginPackage(huge, { stagingRoot: root, maxUncompressedBytes: 1024 * 1024 }), { code: 'PACKAGE_TOO_LARGE' });
+    const compressedBomb = zipSync({ 'repeat.bin': [new Uint8Array(4 * 1024 * 1024).fill(0x5a), { level: 9 }] });
+    assert.ok(compressedBomb.byteLength < 64 * 1024, 'fixture must be highly compressed');
+    assert.throws(() => extractPluginPackage(compressedBomb, { stagingRoot: root, maxUncompressedBytes: 1024 * 1024 }), { code: 'PACKAGE_TOO_LARGE' });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+await check('catalog views support search, category, installed, update, and revoked states', async () => {
+  const bytes = packageBytes();
+  const fetchImpl = async url => url.endsWith('catalog.json')
+    ? new Response(JSON.stringify({ schemaVersion: 1, generatedAt: '2026-10-11T00:00:00Z', plugins: [catalogPlugin(), catalogPlugin({
+      id: 'cetamesh.revoked', name: 'Revoked', packageUrl: 'https://plugins.example.test/revoked.zip', revoked: true
+    })] }), { status: 200 })
+    : new Response(bytes, { status: 200, headers: { 'content-length': String(bytes.byteLength) } });
+  const service = createPluginCenterService({
+    stateDir: fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-plugin-center-')),
+    catalogUrl: 'https://plugins.example.test/catalog.json', allowedHosts,
+    currentVersion: '1.0.0', fetchImpl
+  });
+  try {
+    const all = await service.execute({ method: 'plugin-center.catalog.list', params: { view: 'all' } });
+    assert.equal(all.plugins.length, 2, JSON.stringify(all));
+    assert.equal(all.plugins.find(plugin => plugin.id === 'cetamesh.revoked').status, 'Revoked');
+    const search = await service.execute({ method: 'plugin-center.catalog.list', params: { query: 'hello', category: 'Tools' } });
+    assert.equal(search.plugins.length, 1);
+    assert.equal(search.plugins[0].id, 'cetamesh.hello-tool');
+  } finally {
+    await service.close();
+    fs.rmSync(service.stateDir, { recursive: true, force: true });
+  }
+});
+
+await check('detail and screenshot preview fetch is bounded and cached', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-plugin-image-'));
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a3ioAAAAASUVORK5CYII=', 'base64');
+  let imageRequests = 0;
+  const service = createPluginCenterService({
+    stateDir: root, catalogUrl: 'https://plugins.example.test/catalog.json', allowedHosts, currentVersion: '1.0.0',
+    fetchImpl: async url => {
+      if (url.endsWith('catalog.json')) return new Response(JSON.stringify({ schemaVersion: 1, generatedAt: '2026-10-11T00:00:00Z', plugins: [catalogPlugin()] }), { status: 200 });
+      imageRequests += 1;
+      return new Response(png, { status: 200, headers: { 'content-type': 'image/png', 'content-length': String(png.byteLength) } });
+    }
+  });
+  try {
+    const detail = await service.execute({ method: 'plugin-center.catalog.detail', params: { id: 'cetamesh.hello-tool' } });
+    assert.equal(detail.plugin.id, 'cetamesh.hello-tool');
+    const iconFirst = await service.execute({ method: 'plugin-center.icon.get', params: { id: 'cetamesh.hello-tool' } });
+    const iconSecond = await service.execute({ method: 'plugin-center.icon.get', params: { id: 'cetamesh.hello-tool' } });
+    assert.equal(iconFirst.id, 'cetamesh.hello-tool');
+    assert.equal(iconFirst.mimeType, 'image/png');
+    assert.equal(iconFirst.cached, false);
+    assert.equal(iconSecond.cached, true);
+    const first = await service.execute({ method: 'plugin-center.screenshot.get', params: { id: 'cetamesh.hello-tool', index: 0 } });
+    const second = await service.execute({ method: 'plugin-center.screenshot.get', params: { id: 'cetamesh.hello-tool', index: 0 } });
+    assert.equal(first.mimeType, 'image/png');
+    assert.equal(first.cached, false);
+    assert.equal(second.cached, true);
+    assert.equal(imageRequests, 2);
+  } finally {
+    service.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+await check('oversized package responses and embedded manifest mismatches are rejected', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-plugin-reject-'));
+  const bytes = packageBytes('1.0.0', { name: 'Tampered Name' });
+  const badPlugin = catalogPlugin({ packageBytes: bytes.byteLength, packageSha256: crypto.createHash('sha256').update(bytes).digest('hex') });
+  const service = createPluginCenterService({
+    stateDir: root, catalogUrl: 'https://plugins.example.test/catalog.json', allowedHosts, currentVersion: '1.0.0',
+    fetchImpl: async url => url.endsWith('catalog.json')
+      ? new Response(JSON.stringify({ schemaVersion: 1, plugins: [badPlugin] }), { status: 200 })
+      : new Response(bytes, { status: 200, headers: { 'content-length': String(bytes.byteLength) } })
+  });
+  try {
+    await assert.rejects(service.execute({ method: 'plugin-center.package.stage', params: { id: badPlugin.id } }), { code: 'PACKAGE_MANIFEST_MISMATCH' });
+  } finally {
+    service.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+
+  const oversizedRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-plugin-oversized-'));
+  const valid = packageBytes();
+  const plugin = catalogPlugin();
+  const oversized = Buffer.alloc(valid.byteLength + 1);
+  const oversizedService = createPluginCenterService({
+    stateDir: oversizedRoot, catalogUrl: 'https://plugins.example.test/catalog.json', allowedHosts, currentVersion: '1.0.0',
+    fetchImpl: async url => url.endsWith('catalog.json')
+      ? new Response(JSON.stringify({ schemaVersion: 1, plugins: [plugin] }), { status: 200 })
+      : new Response(oversized, { status: 200, headers: { 'content-length': String(oversized.byteLength) } })
+  });
+  try {
+    await assert.rejects(oversizedService.execute({ method: 'plugin-center.package.stage', params: { id: plugin.id } }), { code: 'PACKAGE_TOO_LARGE' });
+  } finally {
+    oversizedService.close();
+    fs.rmSync(oversizedRoot, { recursive: true, force: true });
+  }
+});
+
+await check('offline cache is explicit and cannot stage installs without network', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-plugin-offline-'));
+  const bytes = packageBytes();
+  let unavailable = false;
+  const service = createPluginCenterService({
+    stateDir: root, catalogUrl: 'https://plugins.example.test/catalog.json', allowedHosts,
+    currentVersion: '1.0.0', fetchImpl: async url => {
+      if (unavailable) throw Object.assign(new Error('offline'), { code: 'ECONNREFUSED' });
+      return url.endsWith('catalog.json')
+        ? new Response(JSON.stringify({ schemaVersion: 1, generatedAt: '2026-10-11T00:00:00Z', plugins: [catalogPlugin()] }), { status: 200 })
+        : new Response(bytes, { status: 200 });
+    }
+  });
+  try {
+    const online = await service.execute({ method: 'plugin-center.catalog.refresh' });
+    assert.equal(online.offline, false);
+    unavailable = true;
+    const offline = await service.execute({ method: 'plugin-center.catalog.list', params: { view: 'all' } });
+    assert.equal(offline.offline, true);
+    writeJsonAtomic(path.join(root, 'plugin-center', 'plugin-catalog-cache.json'), {
+      cachedAt: '2026-10-11T00:00:00Z', catalog: { schemaVersion: 1, plugins: [catalogPlugin()] }
+    });
+    const oldCache = await service.execute({ method: 'plugin-center.catalog.list', params: { view: 'all' } });
+    assert.equal(oldCache.plugins[0].verified, false, 'old cached verified claims must not bypass publisher verification');
+    await assert.rejects(service.execute({ method: 'plugin-center.package.stage', params: { id: 'cetamesh.hello-tool' } }), { code: 'PLUGIN_OFFLINE' });
+  } finally {
+    await service.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+await check('installation delegates review/install to Extension Runtime and remains disabled', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-plugin-install-'));
+  const bytes = packageBytes();
+  const calls = [];
+  const extensionRuntime = {
+    async review({ sourceDir }) {
+      const found = JSON.parse(fs.readFileSync(path.join(sourceDir, 'extension.json'), 'utf8'));
+      return { manifest: found, review: { id: found.id, token: 'review-token', requiresExplicitApproval: true, installable: true, blockers: [] }, scan: { ok: true, findings: [] } };
+    },
+    async install(request) { calls.push(['install', request]); return { entry: { status: 'installed', ...manifest() } }; },
+    async update(request) { calls.push(['update', request]); return { entry: { status: 'disabled', ...manifest() } }; },
+    async list() { return []; },
+    async get({ id }) { return { extension: { id, status: 'disabled' } }; },
+    async enable({ id }) { calls.push(['enable', id]); return { extension: { id, status: 'enabled' } }; },
+    async disable({ id }) { return { extension: { id, status: 'disabled' } }; },
+    async rollback({ id }) { return { extension: { id, status: 'disabled' } }; },
+    async uninstall({ id }) { return { id, removed: true }; },
+    async restart({ id }) { return { id, runtimeState: 'running' }; },
+    async logs({ id }) { return { logs: [{ level: 'info', message: id }] }; }
+  };
+  const service = createPluginCenterService({
+    stateDir: root, catalogUrl: 'https://plugins.example.test/catalog.json', allowedHosts, currentVersion: '1.0.0',
+    extensionRuntime,
+    settingsStore: { get: () => ({ settings: { extensions: { developerMode: false } } }) },
+    fetchImpl: async url => url.endsWith('catalog.json')
+      ? new Response(JSON.stringify({ schemaVersion: 1, generatedAt: '2026-10-11T00:00:00Z', plugins: [catalogPlugin()] }), { status: 200 })
+      : new Response(bytes, { status: 200, headers: { 'content-length': String(bytes.byteLength) } })
+  });
+  try {
+    const staged = await service.execute({ method: 'plugin-center.package.stage', params: { id: 'cetamesh.hello-tool' } });
+    assert.equal(staged.review.manifest.id, 'cetamesh.hello-tool');
+    assert.equal(staged.trust.verifiedPublisher, false);
+    assert.equal(staged.trust.publisherSignature, 'not-implemented');
+    assert.ok(staged.review.summary.some(line => /SHA-256/.test(line) && /签名/.test(line)));
+    await assert.rejects(service.execute({ method: 'plugin-center.package.install', params: { stageId: staged.stageId } }), { code: 'PERMISSION_REVIEW_REQUIRED' });
+    const installed = await service.execute({ method: 'plugin-center.package.install', params: { stageId: staged.stageId, reviewed: true } });
+    assert.equal(installed.entry.status, 'installed');
+    assert.equal(calls[0][0], 'install');
+    assert.equal(calls[0][1].approval.approved, true);
+    assert.equal(calls.some(call => call[0] === 'enable'), false);
+  } finally {
+    await service.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+await check('update permission expansion is reviewed and Runtime rollback is reused', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-plugin-update-'));
+  const expandedManifest = {
+    permissions: ['network'],
+    network: { hosts: ['api.example.test'] }
+  };
+  const bytes = packageBytes('1.1.0', expandedManifest);
+  const plugin = catalogPlugin({
+    version: '1.1.0', permissions: ['network'],
+    packageSha256: crypto.createHash('sha256').update(bytes).digest('hex'), packageBytes: bytes.byteLength
+  });
+  const calls = [];
+  const extensionRuntime = {
+    list() { return [{ id: plugin.id, version: '1.0.0', status: 'disabled', permissions: [] }]; },
+    async review() { return {
+      review: { token: 'update-token', installable: true, blockers: [], permissions: [{ name: 'network', risk: 'high', summary: 'declared host access' }] },
+      scan: { ok: true, findings: [] }, permissionDelta: { added: ['network'], removed: [] }
+    }; },
+    async update(request) { calls.push(['update', request]); return { entry: { id: plugin.id, version: '1.1.0', status: 'disabled' } }; },
+    async reviewRollback() { return { review: { token: 'rollback-token', installable: true, blockers: [] } }; },
+    async rollback(request) { calls.push(['rollback', request]); return { entry: { id: plugin.id, version: '1.0.0', status: 'disabled' } }; }
+  };
+  const service = createPluginCenterService({
+    stateDir: root, catalogUrl: 'https://plugins.example.test/catalog.json', allowedHosts, currentVersion: '1.0.0', extensionRuntime,
+    fetchImpl: async url => url.endsWith('catalog.json')
+      ? new Response(JSON.stringify({ schemaVersion: 1, plugins: [plugin] }), { status: 200 })
+      : new Response(bytes, { status: 200, headers: { 'content-length': String(bytes.byteLength) } })
+  });
+  try {
+    const stage = await service.execute({ method: 'plugin-center.package.stage', params: { id: plugin.id } });
+    assert.deepEqual(stage.review.permissionDelta.added, ['network']);
+    await assert.rejects(service.execute({ method: 'plugin-center.package.install', params: { stageId: stage.stageId } }), { code: 'PERMISSION_REVIEW_REQUIRED' });
+    const updated = await service.execute({ method: 'plugin-center.package.install', params: { stageId: stage.stageId, reviewed: true } });
+    assert.equal(updated.entry.version, '1.1.0');
+    assert.equal(calls[0][0], 'update');
+    assert.equal(calls[0][1].approval.token, 'update-token');
+    const rollbackReview = await service.execute({ method: 'plugin-center.package.rollback.review', params: { id: plugin.id } });
+    assert.equal(rollbackReview.action, 'rollback-review');
+    assert.equal(rollbackReview.review.manifest.id, plugin.id);
+    await service.execute({ method: 'plugin-center.package.rollback', params: { id: plugin.id, reviewed: true } });
+    assert.equal(calls[1][0], 'rollback');
+    assert.equal(calls[1][1].approval.token, 'rollback-token');
+  } finally {
+    service.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+await check('Developer Mode gates local plugins and never deletes the source directory', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-plugin-local-'));
+  const source = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-plugin-local-source-'));
+  fs.writeFileSync(path.join(source, 'extension.json'), JSON.stringify(manifest()), 'utf8');
+  fs.writeFileSync(path.join(source, 'index.js'), 'export async function invoke(input) { return { greeting: input.name }; }\n', 'utf8');
+  let developerMode = false;
+  const calls = [];
+  const settingsStore = {
+    get() { return { settings: { extensions: { developerMode } } }; },
+    update(_section, values) { developerMode = values.developerMode; return { settings: { extensions: { developerMode } } }; }
+  };
+  const extensionRuntime = {
+    async review({ sourceDir }) {
+      const raw = JSON.parse(fs.readFileSync(path.join(sourceDir, 'extension.json'), 'utf8'));
+      return { manifest: raw, review: { token: 'local-token', installable: true, blockers: [], permissions: [] }, scan: { ok: true, findings: [] } };
+    },
+    list() { return []; },
+    async install(request) { calls.push(request); return { entry: { id: 'cetamesh.hello-tool', status: 'disabled' } }; }
+  };
+  const service = createPluginCenterService({ stateDir: root, extensionRuntime, settingsStore, currentVersion: '1.0.0' });
+  try {
+    await assert.rejects(service.execute({ method: 'plugin-center.developer.stageLocal', params: { directory: source } }), { code: 'DEVELOPER_MODE_REQUIRED' });
+    const configured = await service.execute({ method: 'plugin-center.configure', params: { developerMode: true } });
+    assert.equal(configured.developerMode, true);
+    const stage = await service.execute({ method: 'plugin-center.developer.stageLocal', params: { directory: source } });
+    assert.equal(stage.trust.level, 'local-unverified');
+    const installed = await service.execute({ method: 'plugin-center.developer.installLocal', params: { stageId: stage.stageId, reviewed: true } });
+    assert.equal(installed.enabled, false);
+    assert.equal(calls[0].approval.token, 'local-token');
+    assert.equal(fs.existsSync(path.join(source, 'extension.json')), true);
+  } finally {
+    service.close();
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(source, { recursive: true, force: true });
+  }
+});
+
+await check('Native-selected local plugin archives enter Developer Mode review and remain unverified', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-plugin-local-package-'));
+  const packagePath = path.join(root, 'local-plugin.zip');
+  const manifestValue = manifest();
+  fs.writeFileSync(packagePath, zipSync({
+    'extension.json': strToU8(JSON.stringify(manifestValue)),
+    'index.js': strToU8('export async function invoke(input) { return { greeting: input.name }; }\n')
+  }));
+  const reviewSources = [];
+  let installedSource = '';
+  const extensionRuntime = {
+    async review({ sourceDir }) {
+      reviewSources.push(sourceDir);
+      const raw = JSON.parse(fs.readFileSync(path.join(sourceDir, 'extension.json'), 'utf8'));
+      return { manifest: raw, review: { token: 'archive-review', installable: true, blockers: [], permissions: [] }, scan: { ok: true, findings: [] }, summary: ['Local archive content reviewed'] };
+    },
+    list() { return []; },
+    async install(request) { installedSource = request.sourceDir; return { entry: { id: manifestValue.id, status: 'disabled' } }; }
+  };
+  const service = createPluginCenterService({
+    stateDir: root, extensionRuntime, currentVersion: '1.0.0',
+    settingsStore: { get: () => ({ settings: { extensions: { developerMode: true } } }) }
+  });
+  try {
+    const staged = await service.execute({ method: 'plugin-center.developer.stageLocal', params: { file: packagePath } });
+    assert.equal(staged.trust.level, 'local-unverified');
+    assert.equal(staged.requiresReview, true);
+    assert.equal(staged.review.review.installable, true);
+    assert.equal(reviewSources.length, 1);
+    assert.notEqual(reviewSources[0], packagePath, 'Core extracts the archive before review');
+    const installed = await service.execute({ method: 'plugin-center.package.install', params: { stageId: staged.stageId, reviewed: true } });
+    assert.equal(installed.enabled, false, 'local import is installed disabled');
+    assert.equal(installed.trust.level, 'local-unverified');
+    assert.equal(fs.existsSync(packagePath), true, 'the selected source archive is never changed or deleted');
+    assert.equal(fs.existsSync(installedSource), false, 'temporary extracted source is cleaned after installation');
+    await assert.rejects(service.execute({ method: 'plugin-center.developer.stageLocal', params: { file: path.join(root, 'bad.exe') } }), { code: 'PACKAGE_INVALID' });
+  } finally {
+    service.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+await check('Unverified local plugins require first-enable review and Developer Mode gates reload/logs', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-plugin-local-review-'));
+  const source = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-plugin-local-review-source-'));
+  fs.writeFileSync(path.join(source, 'extension.json'), JSON.stringify(manifest()), 'utf8');
+  fs.writeFileSync(path.join(source, 'index.js'), 'export async function invoke(input) { return { greeting: input.name }; }\n', 'utf8');
+  let developerMode = true;
+  let installed = false;
+  const entry = { ...manifest(), sourceRoot: source, status: 'disabled' };
+  const calls = [];
+  const extensionRuntime = {
+    async review() { return { review: { token: 'first-enable-token', installable: true, blockers: [], permissions: [] }, scan: { ok: true, findings: [] }, permissionDelta: { added: [], removed: [] } }; },
+    async install() { calls.push('install'); installed = true; return { entry }; },
+    list() { return installed ? [entry] : []; },
+    async get() { return { extension: entry }; },
+    async enable() { calls.push('enable'); entry.status = 'enabled'; return { extension: entry }; },
+    async restart() { calls.push('reload'); return { runtimeState: 'running' }; },
+    async logs() { calls.push('logs'); return { logs: [] }; }
+  };
+  const settingsStore = {
+    get() { return { settings: { extensions: { developerMode } } }; },
+    update(_section, values) { developerMode = values.developerMode; return { settings: { extensions: { developerMode } } }; }
+  };
+  const service = createPluginCenterService({ stateDir: root, extensionRuntime, settingsStore, currentVersion: '1.0.0' });
+  try {
+    const stage = await service.execute({ method: 'plugin-center.developer.stageLocal', params: { directory: source } });
+    await service.execute({ method: 'plugin-center.developer.installLocal', params: { stageId: stage.stageId, reviewed: true } });
+    const installedView = await service.execute({ method: 'plugin-center.catalog.list', params: { view: 'installed' } });
+    assert.equal(installedView.available, false);
+    assert.equal(installedView.plugins[0].trust, 'local-unverified');
+    await assert.rejects(service.execute({ method: 'plugin-center.plugin.enable', params: { id: entry.id } }), { code: 'PERMISSION_REVIEW_REQUIRED' });
+    const review = await service.execute({ method: 'plugin-center.plugin.enable.review', params: { id: entry.id } });
+    assert.equal(review.action, 'enable-review');
+    assert.equal(review.review.manifest.id, entry.id);
+    await assert.rejects(service.execute({ method: 'plugin-center.plugin.enable', params: { id: entry.id, stageId: review.stageId, reviewed: true, reviewToken: 'wrong' } }), { code: 'REVIEW_MISMATCH' });
+    await service.execute({ method: 'plugin-center.plugin.enable', params: { id: entry.id, stageId: review.stageId, reviewed: true, reviewToken: 'first-enable-token' } });
+    assert.deepEqual(calls, ['install', 'enable']);
+    const status = await service.execute({ method: 'plugin-center.status' });
+    assert.equal(status.installed[0].trust, 'local-unverified');
+    assert.equal(status.installed[0].firstEnableReviewed, true);
+
+    await service.execute({ method: 'plugin-center.configure', params: { developerMode: false } });
+    await assert.rejects(service.execute({ method: 'plugin-center.developer.reload', params: { id: entry.id } }), { code: 'DEVELOPER_MODE_REQUIRED' });
+    await assert.rejects(service.execute({ method: 'plugin-center.plugin.logs', params: { id: entry.id } }), { code: 'DEVELOPER_MODE_REQUIRED' });
+    await service.execute({ method: 'plugin-center.configure', params: { developerMode: true } });
+    await service.execute({ method: 'plugin-center.developer.reload', params: { id: entry.id } });
+    await service.execute({ method: 'plugin-center.plugin.logs', params: { id: entry.id } });
+    assert.deepEqual(calls.slice(-2), ['reload', 'logs']);
+  } finally {
+    service.close();
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(source, { recursive: true, force: true });
+  }
+});
+
+await check('compatibility and revoked-version policy fail closed before download', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-plugin-compat-'));
+  const bytes = packageBytes();
+  let packageRequests = 0;
+  const service = createPluginCenterService({
+    stateDir: root, catalogUrl: 'https://plugins.example.test/catalog.json', allowedHosts, currentVersion: '1.0.0',
+    fetchImpl: async url => {
+      if (!url.endsWith('catalog.json')) packageRequests += 1;
+      return new Response(JSON.stringify({ schemaVersion: 1, generatedAt: '2026-10-11T00:00:00Z', plugins: [
+        catalogPlugin({ minCetaMeshVersion: '1.1.0' }),
+        catalogPlugin({ id: 'cetamesh.hello-tool-revoked', version: '1.0.0', revoked: true })
+      ] }), { status: 200 });
+    }
+  });
+  try {
+    await assert.rejects(service.execute({ method: 'plugin-center.package.stage', params: { id: 'cetamesh.hello-tool' } }), { code: 'PLUGIN_INCOMPATIBLE' });
+    assert.equal(packageRequests, 0);
+  } finally {
+    await service.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+await check('loopback Catalog drives digest-checked package delegation and offline states', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-plugin-loopback-'));
+  const firstBytes = packageBytes('1.0.0');
+  const secondBytes = packageBytes('1.1.0');
+  const mismatchBytes = packageBytes('1.0.0', { id: 'cetamesh.other-plugin' });
+  const packagePath = version => '/packages/hello/' + version + '.cetamesh-plugin';
+  const catalogEntry = (version, bytes, extra = {}) => catalogPlugin({
+    version,
+    packageUrl: 'https://plugins.example.test' + packagePath(version),
+    manifestUrl: 'https://plugins.example.test/packages/hello/' + version + '/extension.json',
+    packageSha256: crypto.createHash('sha256').update(bytes).digest('hex'),
+    packageBytes: bytes.byteLength,
+    updatedAt: '2026-10-12T00:00:00.000Z',
+    ...extra
+  });
+  const firstPlugin = catalogEntry('1.0.0', firstBytes);
+  const secondPlugin = catalogEntry('1.1.0', secondBytes);
+  const mismatchPlugin = catalogEntry('1.0.0', mismatchBytes, {
+    packageUrl: 'https://plugins.example.test/packages/hello/manifest-mismatch.cetamesh-plugin'
+  });
+  let catalogPlugins = [firstPlugin];
+  let offline = false;
+  const fixture = await createPluginCatalogFixture({
+    getCatalog: () => ({ schemaVersion: 1, generatedAt: '2026-10-12T00:00:00Z', plugins: catalogPlugins }),
+    packages: new Map([
+      [packagePath('1.0.0'), firstBytes],
+      [packagePath('1.1.0'), secondBytes],
+      ['/packages/hello/manifest-mismatch.cetamesh-plugin', mismatchBytes]
+    ])
+  });
+  const fixtureOrigin = new URL(fixture.catalogUrl).origin;
+  const fetchImpl = async (input, init = {}) => {
+    const requested = new URL(typeof input === 'string' ? input : input.url);
+    if (requested.origin !== fixtureOrigin) throw new Error('Plugin test adapter rejected a destination outside its fixture origin');
+    if (offline) throw new Error('loopback Plugin Catalog is offline');
+    const localUrl = new URL(requested.pathname + requested.search, fixture.loopbackOrigin);
+    return fetch(localUrl, init);
+  };
+  let current = null;
+  let previous = null;
+  const extensionRuntime = {
+    async review({ sourceDir }) {
+      const found = JSON.parse(fs.readFileSync(path.join(sourceDir, 'extension.json'), 'utf8'));
+      return {
+        manifest: found,
+        review: { id: found.id, token: 'review-' + found.version, requiresExplicitApproval: true, installable: true, blockers: [] },
+        scan: { ok: true, findings: [] },
+        permissionDelta: { added: [], removed: [] }
+      };
+    },
+    async install({ sourceDir, approval }) {
+      assert.equal(approval.approved, true);
+      const found = JSON.parse(fs.readFileSync(path.join(sourceDir, 'extension.json'), 'utf8'));
+      current = { ...found, sourceRoot: sourceDir, status: 'disabled' };
+      return { entry: structuredClone(current) };
+    },
+    async update({ sourceDir, approval }) {
+      assert.equal(approval.approved, true);
+      previous = structuredClone(current);
+      const found = JSON.parse(fs.readFileSync(path.join(sourceDir, 'extension.json'), 'utf8'));
+      current = { ...found, sourceRoot: sourceDir, status: 'disabled' };
+      return { entry: structuredClone(current) };
+    },
+    list() { return current ? [structuredClone(current)] : []; },
+    async get({ id }) {
+      return current?.id === id ? { extension: structuredClone(current), runtimeState: 'stopped' } : null;
+    },
+    async enable({ id }) {
+      assert.equal(current?.id, id);
+      current.status = 'enabled';
+      return { extension: structuredClone(current) };
+    },
+    async disable({ id }) {
+      assert.equal(current?.id, id);
+      current.status = 'disabled';
+      return { extension: structuredClone(current) };
+    },
+    async reviewRollback({ id }) {
+      assert.equal(current?.id, id);
+      assert.ok(previous);
+      return { review: { token: 'rollback-token', installable: true, blockers: [], name: current.name, version: previous.version }, scan: { ok: true, findings: [] } };
+    },
+    async rollback({ id, approval }) {
+      assert.equal(current?.id, id);
+      assert.equal(approval.token, 'rollback-token');
+      current = structuredClone(previous);
+      return { entry: structuredClone(current) };
+    },
+    async uninstall({ id }) {
+      assert.equal(current?.id, id);
+      current = null;
+      return { id, removed: true };
+    }
+  };
+  const service = createPluginCenterService({
+    stateDir: root,
+    catalogUrl: fixture.catalogUrl,
+    allowedHosts: fixture.allowedHosts,
+    currentVersion: '1.0.0',
+    extensionRuntime,
+    fetchImpl
+  });
+  try {
+    await assert.rejects(fetchImpl('https://outside.example.test/catalog.json'), /outside its fixture origin/);
+    const catalog = await service.execute({ method: 'plugin-center.catalog.list', params: { view: 'all' } });
+    assert.equal(catalog.available, true);
+    assert.equal(catalog.offline, false);
+    assert.equal(catalog.plugins[0].id, firstPlugin.id);
+    const detail = await service.execute({ method: 'plugin-center.catalog.detail', params: { id: firstPlugin.id } });
+    assert.equal(detail.plugin.version, '1.0.0');
+
+    catalogPlugins = [catalogEntry('1.0.0', firstBytes, { packageSha256: '0'.repeat(64) })];
+    await assert.rejects(service.execute({ method: 'plugin-center.package.stage', params: { id: firstPlugin.id } }), { code: 'PACKAGE_SHA256_MISMATCH' });
+    catalogPlugins = [mismatchPlugin];
+    await assert.rejects(service.execute({ method: 'plugin-center.package.stage', params: { id: firstPlugin.id } }), { code: 'PACKAGE_MANIFEST_MISMATCH' });
+    catalogPlugins = [firstPlugin];
+
+    const initialStage = await service.execute({ method: 'plugin-center.package.stage', params: { id: firstPlugin.id } });
+    assert.equal(initialStage.review.manifest.version, '1.0.0');
+    assert.equal(initialStage.requiresReview, true);
+    await assert.rejects(service.execute({ method: 'plugin-center.package.install', params: { stageId: initialStage.stageId } }), { code: 'PERMISSION_REVIEW_REQUIRED' });
+    const initialInstall = await service.execute({ method: 'plugin-center.package.install', params: { stageId: initialStage.stageId, reviewed: true } });
+    assert.equal(initialInstall.enabled, false);
+    assert.equal(current.status, 'disabled');
+    const enabled = await service.execute({ method: 'plugin-center.plugin.enable', params: { id: firstPlugin.id } });
+    assert.equal(enabled.extension.status, 'enabled');
+
+    catalogPlugins = [secondPlugin];
+    const updateRows = await service.execute({ method: 'plugin-center.catalog.list', params: { view: 'all' } });
+    assert.equal(updateRows.plugins[0].status, 'Update Available');
+    const updateStage = await service.execute({ method: 'plugin-center.package.stage', params: { id: secondPlugin.id } });
+    assert.equal(updateStage.review.manifest.version, '1.1.0');
+    const updated = await service.execute({ method: 'plugin-center.package.install', params: { stageId: updateStage.stageId, reviewed: true } });
+    assert.equal(updated.entry.version, '1.1.0');
+    assert.equal(updated.enabled, false);
+
+    const rollbackReview = await service.execute({ method: 'plugin-center.package.rollback.review', params: { id: firstPlugin.id } });
+    assert.equal(rollbackReview.action, 'rollback-review');
+    await assert.rejects(service.execute({ method: 'plugin-center.package.rollback', params: { id: firstPlugin.id } }), { code: 'PERMISSION_REVIEW_REQUIRED' });
+    const rolledBack = await service.execute({ method: 'plugin-center.package.rollback', params: { id: firstPlugin.id, reviewed: true } });
+    assert.equal(rolledBack.entry.version, '1.0.0');
+    const removed = await service.execute({ method: 'plugin-center.plugin.uninstall', params: { id: firstPlugin.id } });
+    assert.equal(removed.removed, true);
+    assert.equal((await service.execute({ method: 'plugin-center.status' })).installed.length, 0);
+
+    offline = true;
+    const cached = await service.execute({ method: 'plugin-center.catalog.refresh' });
+    assert.equal(cached.available, true);
+    assert.equal(cached.offline, true);
+    await assert.rejects(service.execute({ method: 'plugin-center.package.stage', params: { id: secondPlugin.id } }), { code: 'PLUGIN_OFFLINE' });
+    assert.ok(fixture.requests.some(request => request.path === '/catalog.json'));
+    assert.ok(fixture.requests.some(request => request.path === packagePath('1.0.0')));
+    assert.ok(fixture.requests.some(request => request.path === packagePath('1.1.0')));
+    assert.ok(fixture.requests.every(request => request.method === 'GET'));
+  } finally {
+    await service.close();
+    await fixture.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+await check('abandoned local archive review cleans staging without deleting the selected archive', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-plugin-abandoned-'));
+  const archive = path.join(root, 'local.zip');
+  fs.writeFileSync(archive, packageBytes());
+  const source = path.join(root, 'source');
+  fs.mkdirSync(source);
+  writeJsonAtomic(path.join(source, 'extension.json'), manifest());
+  fs.writeFileSync(path.join(source, 'index.js'), 'module.exports.handlers = { hello: input => input };');
+  const runtime = createExtensionRuntime({ store: createExtensionStore({ stateDir: root }), monitorIntervalMs: 0 });
+  const service = createPluginCenterService({ stateDir: root, extensionRuntime: runtime,
+    settingsStore: { get: () => ({ settings: { extensions: { developerMode: true } } }) } });
+  try {
+    const localReview = await service.execute({ method: 'plugin-center.developer.stageLocal', params: { directory: source } });
+    assert.ok(localReview.review.summary?.some(line => /OS/.test(line) && /AppContainer/.test(line)),
+      'local directory review must preserve the Worker limitation for the UI');
+    await service.execute({ method: 'plugin-center.developer.stageLocal', params: { file: archive } });
+    const staging = path.join(root, 'plugin-center', 'staging');
+    assert.equal(fs.readdirSync(staging).length, 1);
+    service.close();
+    assert.equal(fs.readdirSync(staging).length, 0, 'cancelled archive review must release its extracted package');
+    assert.equal(fs.existsSync(archive), true);
+    assert.equal(fs.existsSync(source), true);
+  } finally {
+    service.close();
+    await runtime.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+await check('Catalog package uses real Extension Store and Worker through invoke, update, rollback, and uninstall', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-plugin-real-worker-'));
+  const bytesV1 = packageBytes();
+  const bytesV2 = packageBytes('1.1.0');
+  const record = (version, bytes) => catalogPlugin({ version,
+    packageUrl: 'https://plugins.example.test/packages/' + version + '.zip',
+    packageSha256: crypto.createHash('sha256').update(bytes).digest('hex'), packageBytes: bytes.byteLength });
+  let plugin = record('1.0.0', bytesV1);
+  const fixture = await createPluginCatalogFixture({ getCatalog: () => ({ schemaVersion: 1, plugins: [plugin] }),
+    packages: new Map([['/packages/1.0.0.zip', bytesV1], ['/packages/1.1.0.zip', bytesV2]]) });
+  const store = createExtensionStore({ stateDir: root });
+  const runtime = createExtensionRuntime({ store, monitorIntervalMs: 0 });
+  const service = createPluginCenterService({ stateDir: root, catalogUrl: fixture.catalogUrl,
+    allowedHosts: fixture.allowedHosts, extensionRuntime: runtime,
+    fetchImpl: (input, init) => {
+      const requested = new URL(input);
+      assert.equal(requested.origin, new URL(fixture.catalogUrl).origin);
+      return fetch(new URL(requested.pathname, fixture.loopbackOrigin), init);
+    } });
+  const id = plugin.id;
+  try {
+    const staged = await service.execute({ method: 'plugin-center.package.stage', params: { id } });
+    assert.equal(staged.trust.verifiedPublisher, false);
+    const installed = await service.execute({ method: 'plugin-center.package.install', params: { stageId: staged.stageId, reviewed: true } });
+    assert.equal(installed.enabled, false);
+    assert.equal(runtime.get({ id }).loaded, false);
+    const managed = store.get(id).sourceRoot;
+    assert.equal(fs.existsSync(path.join(managed, 'index.js')), true, 'managed files survive stage cleanup');
+    await assert.rejects(runtime.invoke({ id, capability: 'hello', input: { name: 'Owner' } }), { code: 'EXTENSION_DISABLED' });
+    await service.execute({ method: 'plugin-center.plugin.enable', params: { id } });
+    assert.equal(runtime.get({ id }).health.provider, 'process-child');
+    assert.deepEqual((await runtime.invoke({ id, capability: 'hello', input: { name: 'Owner' } })).result, { greeting: 'Hello, Owner' });
+    plugin = record('1.1.0', bytesV2);
+    const update = await service.execute({ method: 'plugin-center.package.stage', params: { id } });
+    const updated = await service.execute({ method: 'plugin-center.package.install', params: { stageId: update.stageId, reviewed: true } });
+    assert.equal(updated.entry.version, '1.1.0');
+    assert.equal(updated.enabled, true, 'update response must reflect the active Worker state');
+    await service.execute({ method: 'plugin-center.package.rollback.review', params: { id } });
+    await service.execute({ method: 'plugin-center.package.rollback', params: { id, reviewed: true } });
+    assert.equal(store.get(id).version, '1.0.0');
+    assert.deepEqual((await runtime.invoke({ id, capability: 'hello', input: { name: 'Rollback' } })).result, { greeting: 'Hello, Rollback' });
+    await service.execute({ method: 'plugin-center.plugin.disable', params: { id } });
+    await assert.rejects(runtime.invoke({ id, capability: 'hello', input: {} }), { code: 'EXTENSION_DISABLED' });
+    await service.execute({ method: 'plugin-center.plugin.uninstall', params: { id } });
+    assert.equal(store.get(id), null);
+    assert.equal(fs.existsSync(managed), false);
+  } finally {
+    service.close();
+    await runtime.close();
+    await fixture.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+process.stdout.write(`PASS ${passed} Plugin Center checks\n`);

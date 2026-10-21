@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>主题背景渐变 · 湖面涟漪（定版 V1「涟漪原波」）</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; overflow: hidden; }
+  body { background: #e9eefb; font-family: "Segoe UI", system-ui, "Microsoft YaHei", sans-serif; font-size: 13px;
+    color: #333d5c; }
+  /* 画布未出首帧前先垫一层兜底色，避免任何闪白 */
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; background: #eef2fc; }
+  .hud { position: fixed; left: 18px; bottom: 18px; z-index: 5; width: min(660px, 94vw);
+    padding: 13px 16px 14px; border-radius: 18px; line-height: 1.7; color: #3c4767;
+    background: rgba(255,255,255,.88); backdrop-filter: blur(14px) saturate(1.4);
+    box-shadow: 0 10px 30px rgba(60,80,160,.22); transition: opacity .25s; }
+  .hud.hide { opacity: 0; pointer-events: none; }
+  .hud h1 { margin: 0 0 2px; font-size: 15px; color: #333d5c; }
+  .hud .tag { color: #8e97b3; font-size: 12px; }
+  .tabs { display: flex; gap: 6px; margin: 10px 0 2px; flex-wrap: wrap; }
+  .tabs button.on { color: #fff; background: linear-gradient(140deg, #5b7cfa, #7cc7f2); border-color: transparent; }
+  .sw { display: flex; gap: 6px; margin: 9px 0 8px; }
+  .sw span { height: 20px; flex: 1; border-radius: 7px; border: 1px solid rgba(90,110,180,.16); }
+  .sw .b { background: linear-gradient(150deg,#eef2fc,#e6ebfa); }
+  .sw .a { background: linear-gradient(130deg,#d5e3ff,#ded7ff 48%,#ccf1ef); }
+  .sw .c { background: linear-gradient(130deg,#182347,#1c1d42 48%,#12262e); }
+  .sw .d { background: linear-gradient(130deg,#eaeddd,#e7ebe4 48%,#e4eee8); }
+  .sw .flat { background: #eef2fc; }
+  .sw .flat.dk { background: #131a2e; }
+  .sw .flat.wm { background: #eaede0; }
+  .row { display: flex; align-items: center; gap: 9px; margin-top: 7px; flex-wrap: wrap; }
+  .bar { flex: 1; min-width: 110px; height: 6px; border-radius: 999px; background: rgba(91,124,250,.18); overflow: hidden; }
+  .bar i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, #5b7cfa, #7cc7f2); }
+  button { font: inherit; font-size: 12px; font-weight: 600; color: #4a5578; cursor: pointer; padding: 5px 10px;
+    border: 1px solid rgba(91,124,250,.24); border-radius: 10px; background: rgba(91,124,250,.1); }
+  button:hover { background: rgba(91,124,250,.18); }
+  button:active { transform: scale(.95); }
+  a { color: #5b7cfa; }
+  kbd { font: inherit; font-size: 11.5px; background: rgba(91,124,250,.12); border-radius: 6px; padding: 1px 6px; }
+  .mono { font-family: ui-monospace, Consolas, monospace; font-size: 12px; color: #5a6482; }
+  details { margin-top: 9px; }
+  summary { cursor: pointer; color: #5a6482; font-size: 12.5px; }
+  table { border-collapse: collapse; margin-top: 6px; font-size: 12px; }
+  td { padding: 2px 12px 2px 0; color: #5a6482; vertical-align: top; }
+  td b { color: #333d5c; font-weight: 600; white-space: nowrap; }
+  .err { position: fixed; inset: 0; display: none; place-items: center; color: #d95f85; }
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+<div class="hud" id="hud">
+  <h1>主题背景渐变 · 湖面涟漪 <span class="tag">定版 V1「涟漪原波」· 同心圆 · 右下起波</span></h1>
+  <div class="tabs">
+    <button data-mode="arrive" class="on">① 进入主页面（实际用法）</button>
+    <button data-mode="loop3">② 三组渐变循环（设计演示）</button>
+  </div>
+  <div class="row" id="themeRow">
+    <span>当前主题</span>
+    <button data-theme="light" class="on">苏打 light</button>
+    <button data-theme="dark">深海 dark</button>
+    <button data-theme="warm">护眼 warm</button>
+  </div>
+  <div class="sw" id="swArrive">
+    <span class="flat" title="起始：登录页转场铺下的主题底色 --bg"></span>
+    <span class="a" title="目标：苏打主题画布 .bg-decor"></span>
+  </div>
+  <div class="sw" id="swLoop" style="display:none">
+    <span class="b" title="起始基座（参考图 1）"></span>
+    <span class="a" title="目标 A 苏打 light（参考图 2）"></span>
+    <span class="c" title="目标 B 深海 dark（参考图 3）"></span>
+    <span class="d" title="目标 C 护眼 warm（参考图 4）"></span>
+  </div>
+  <div class="row">
+    <span id="ph" class="mono">—</span>
+    <span class="bar"><i id="pb"></i></span>
+    <span id="tv" class="mono">0.00s</span>
+  </div>
+  <div class="row">
+    <button id="pp">暂停</button>
+    <button id="rp">重播</button>
+    <span id="jumpRow">
+      <button data-j="soda">定格 A 苏打</button>
+      <button data-j="deep">定格 B 深海</button>
+      <button data-j="warm">定格 C 护眼</button>
+    </span>
+    <a href="/public/token-login.html">登录页 ↗</a>
+    <a href="/public/console.html">控制台（落场）↗</a>
+  </div>
+  <details>
+    <summary>参数与说明</summary>
+    <table>
+      <tr><td><b>① 进入主页面</b>起始 = 登录页转场铺下的主题底色（<code>--bg</code>，跨页零色差）→ 目标 = <b>当前主题的画布</b>（<code>.bg-decor</code>）。主题是哪个就扩散到哪个，播一次即落定，落定后这一层被撤掉、交还给控制台自己的画布。主题切换按钮就是用来验证联动的。</td></tr>
+      <tr><td><b>② 三组循环</b>起始基座（参考图 1）↔ 三套主题画布循环，用来演示最初那三组「起始图 → 第 N 张目标图」。</td></tr>
+      <tr><td><b>起波点</b>uv(1.02, 1.02) 右下角略出屏，与登录页退场 .morph 同向</td></tr>
+      <tr><td><b>波列速度</b>波前速度 × 0.85（同源同速，涟漪跟着波前一起跑）</td></tr>
+      <tr><td><b>波峰 / 涟漪环</b>7 个波峰 · 11 道同心涟漪环</td></tr>
+      <tr><td><b>振幅 / 耗散 / 频散</b>0.042 · 1.05 · 边界与亮线随距离变糊变宽</td></tr>
+      <tr><td><b>有机扰动 / 折射</b>0.016 @1.6 · 0.0045</td></tr>
+      <tr><td><b>节奏</b>① 扩散 1.50s（落场窗口与卡片浮升同档）· ② 扩散 1.55s → 停留 1.10s → 回落 1.35s → 静息 0.80s</td></tr>
+    </table>
+    <div style="margin-top:6px">
+      <kbd>空格</kbd> 播放/暂停 · <kbd>1</kbd>/<kbd>2</kbd>/<kbd>3</kbd> 定格 · <kbd>R</kbd> 重播 · <kbd>H</kbd> 收起面板 ·
+      <code>?t=800</code> 冻结毫秒 · <code>?hud=0</code> 隐藏面板 · <code>?mode=loop3</code> 直接进循环模式
+    </div>
+  </details>
+</div>
+<div class="err" id="err">WebGL 不可用</div>
+<script src="ripple-bg.js"></script>
+<script>
+  var qs = new URLSearchParams(location.search);
+  var freeze = qs.get('t') != null ? Number(qs.get('t')) : null;
+  if (qs.get('hud') === '0') document.getElementById('hud').classList.add('hide');
+  var THEMES = window.RippleBg.THEME_MAP;
+  var state = { mode: qs.get('mode') === 'loop3' ? 'loop3' : 'arrive', theme: qs.get('theme') || 'light', frozen: freeze != null ? freeze : null };
+  var bg, ph = document.getElementById('ph'), pb = document.getElementById('pb'), tv = document.getElementById('tv');
+
+  function build() {
+    if (bg) bg.destroy();
+    var opts = {
+      canvas: '#cv', longSide: 900, autoplay: false,
+      intensity: qs.get('mix') ? Number(qs.get('mix')) : 1,
+      onPhase: function (i) {
+        ph.textContent = i.label;
+        tv.textContent = (i.t / 1000).toFixed(2) + 's' + (bg.mode === 'once' ? '' : ' / ' + (i.total / 1000).toFixed(2) + 's');
+        pb.style.width = (i.p * 100).toFixed(1) + '%';
+        document.getElementById('pp').textContent = bg.playing ? '暂停' : (bg.doneFired ? '重播' : '播放');
+      }
+    };
+    if (state.mode === 'arrive') {
+      var t = THEMES[state.theme] || THEMES.light;
+      opts.mode = 'once'; opts.from = { solid: t.bg }; opts.to = t.canvas;
+    } else {
+      opts.mode = 'loop3'; opts.from = 'base'; opts.targets = ['soda', 'deep', 'warm'];
+    }
+    bg = new window.RippleBg(opts);
+    window.__bg = bg;
+    document.getElementById('swArrive').style.display = state.mode === 'arrive' ? '' : 'none';
+    document.getElementById('swLoop').style.display = state.mode === 'arrive' ? 'none' : '';
+    document.getElementById('themeRow').style.display = state.mode === 'arrive' ? '' : 'none';
+    document.getElementById('jumpRow').style.display = state.mode === 'arrive' ? 'none' : '';
+    if (state.mode === 'arrive') {
+      var sw = document.querySelector('#swArrive .flat');
+      sw.className = 'flat' + (state.theme === 'dark' ? ' dk' : state.theme === 'warm' ? ' wm' : '');
+      document.querySelector('#swArrive .a').title = '目标：' + t.canvas + ' 主题画布 .bg-decor';
+      document.querySelectorAll('[data-theme]').forEach(function (b) { b.classList.toggle('on', b.dataset.theme === state.theme); });
+    }
+    document.querySelectorAll('[data-mode]').forEach(function (b) { b.classList.toggle('on', b.dataset.mode === state.mode); });
+    if (state.frozen != null) bg.setTime(state.frozen); else bg.play();
+  }
+
+  try { build(); } catch (e) {
+    document.getElementById('err').style.display = 'grid';
+    document.getElementById('err').textContent = 'WebGL 不可用：' + e.message;
+    throw e;
+  }
+  document.getElementById('pp').addEventListener('click', function () { bg.playing ? bg.pause() : bg.replay(); });
+  document.getElementById('rp').addEventListener('click', function () { bg.replay(); });
+  document.querySelectorAll('[data-mode]').forEach(function (b) {
+    b.addEventListener('click', function () { state.mode = this.dataset.mode; state.frozen = null; build(); });
+  });
+  document.querySelectorAll('[data-theme]').forEach(function (b) {
+    b.addEventListener('click', function () { state.theme = this.dataset.theme; state.frozen = null; build(); });
+  });
+  document.querySelectorAll('[data-j]').forEach(function (b) {
+    b.addEventListener('click', function () { bg.pause(); bg.jumpTo(this.dataset.j, 0.5); });
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === ' ') { e.preventDefault(); bg.playing ? bg.pause() : bg.replay(); }
+    else if (e.key === 'r' || e.key === 'R') bg.replay();
+    else if (e.key === 'h' || e.key === 'H') document.getElementById('hud').classList.toggle('hide');
+    else if (state.mode === 'loop3' && '123'.includes(e.key)) { bg.pause(); bg.jumpTo(['soda', 'deep', 'warm'][+e.key - 1], 0.5); }
+    else if (e.key === 'ArrowRight') { bg.pause(); bg.setTime(bg.elapsed + 120); }
+    else if (e.key === 'ArrowLeft') { bg.pause(); bg.setTime(bg.elapsed - 120); }
+  });
+</script>
+</body>
+</html>

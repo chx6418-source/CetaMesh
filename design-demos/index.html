@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>鲸桥控制台 · 已选型方案预览</title>
+<style>
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; color: #333d5c;
+    font-family: "Segoe UI", system-ui, "Microsoft YaHei", sans-serif;
+    background: linear-gradient(130deg, #d5e3ff, #ded7ff 50%, #ccf1ef); background-attachment: fixed; }
+  .box { text-align: center; background: rgba(255,255,255,.6); border: 1px solid rgba(255,255,255,.9);
+    border-radius: 26px; padding: 40px 52px; box-shadow: 16px 18px 42px rgba(135,150,215,.35), -10px -13px 32px rgba(255,255,255,.95); backdrop-filter: blur(18px) saturate(1.4); }
+  h1 { margin: 0 0 8px; font-size: 24px; }
+  p { color: #5a6482; margin: 0 0 20px; font-size: 13px; }
+  a { display: inline-block; text-decoration: none; color: #fff; font-weight: 600; padding: 11px 26px; border-radius: 16px;
+    background: linear-gradient(140deg, #5b7cfa, #7cc7f2); box-shadow: 6px 8px 18px rgba(110,130,230,.45); }
+  a.ghost { color: #5b7cfa; background: rgba(91,124,250,.12); border: 1px solid rgba(91,124,250,.3); box-shadow: none; margin-top: 10px; }
+  small { display: block; margin-top: 8px; color: #8e97b3; font-size: 11.5px; }
+</style>
+</head>
+<body>
+  <div class="box">
+    <h1>海盐苏打 · Soda Gummy</h1>
+    <p>已选型落地方案预览（苏打蓝 4 · 薰衣草 3 · 冰薄荷 3）<br>正式控制台：<code>http://127.0.0.1:3100</code> · 未选中方案见 <code>archive/</code>（不入库）</p>
+    <a href="fusion-4-soda.html">打开交互预览（Mock 数据）</a>
+    <div><a class="ghost" href="login-proposals/index.html">令牌登录页视觉方案样品（10 案 + 涟漪变体）</a></div>
+    <div><a class="ghost" href="bg-ripple/index.html">主题背景渐变 · 湖面涟漪（进入主页面时落场）</a></div>
+    <small>登录页已落地「柔光浮雕 + 静水浮升」到 <code>public/token-login.html</code>（登录页本身<b>不含</b>渐变动画）；<br>
+      湖面涟漪渐变在<b>进入主页面时播一次</b>，并与当前主题联动（苏打/深海/护眼各扩散到自己的画布）：<br>
+      <code>node design-demos/bg-ripple/serve.mjs</code> → http://127.0.0.1:4175/（同端口可直接看两个生产页面）<br>
+      上面 login-proposals 的样品仅作本机参考资料保留，不入库（见 .gitignore）。</small>
+  </div>
+</body>
+</html>
