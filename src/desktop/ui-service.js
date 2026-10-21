@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
-import { LEGACY_RETIRED_TOOLS } from '../integrations/catalog.js';
+import { fitsIpcResponse, requireIpcItem } from '../control/response-budget.js';
+import { LEGACY_RETIRED_TOOLS, isDesktopLocalService } from '../integrations/catalog.js';
 
 // Narrow, renderer-safe DTO adapter for the privileged Desktop WebView.
 // Business state stays in existing Core services; this module owns no persistent data.
@@ -7,12 +8,14 @@ import { LEGACY_RETIRED_TOOLS } from '../integrations/catalog.js';
 const EVENT_NAMES = Object.freeze([
   'core.status', 'chat.updated', 'chat.streaming', 'task.updated', 'task.deleted',
   'chat.warning', 'agent.updated', 'workspace.updated', 'plugin.updated', 'plugin.downloadProgress', 'approval.pending',
-  'approval.resolved', 'model.updated', 'memory.updated', 'update.status', 'device.updated'
+  'approval.resolved', 'approval.operation', 'channel.message', 'channel.delivery', 'model.updated', 'memory.updated', 'update.status', 'device.updated'
 ]);
 
 const EVENT_DATA_KEYS = Object.freeze([
   'sessionId', 'taskId', 'workspaceId', 'agentId', 'pluginId', 'serverId', 'approvalId', 'requestId', 'retryCount',
   'provider', 'status', 'progress', 'ready', 'needsAttention', 'delta', 'replaceText', 'message', 'reset', 'toolActivity', 'agentActivity'
+  , 'turnId', 'messageId', 'historyRevision', 'operationId', 'decision', 'code',
+  'accountId', 'channelId', 'eventId', 'sequence', 'consumerId'
 ]);
 
 const SETTING_KEYS = Object.freeze({
@@ -361,12 +364,12 @@ function projectIntegration(value) {
   const enabled = row.enabled === true || integration.enabled === true;
   const available = row.available === true || integration.available === true || row.agentAvailable === true;
   const reason = local.status
-    ? !local.installed ? 'not-installed' : !local.configured ? 'needs-setup' : local.ready ? null : local.running ? 'start-timeout' : 'stopped'
+    ? local.installed === false ? 'not-installed' : local.configured === false ? 'needs-setup' : local.ready ? null : local.running ? 'not-ready' : 'stopped'
     : string(row.reason ?? agent.reason ?? provider.lastError ?? integration.lastError, 500) || (enabled && !available ? 'provider-unavailable' : null);
   return {
     id: string(row.id, 120), name: string(row.displayName ?? row.name ?? row.id, 160), status, enabled, available,
     eligible: enabled && available, configured: local.configured === true || provider.configured === true,
-    reason, lastError: string(local.lastError ?? provider.lastError ?? integration.lastError, 500) || null
+    reason, lastError: string(local.lastError?.message ?? local.lastError ?? provider.lastError ?? integration.lastError, 500) || null
   };
 }
 
@@ -468,15 +471,38 @@ export function createDesktopUiEventBus({ now = () => Date.now(), maxEvents = 50
   const waiters = new Set();
 
   function after(afterCursor) {
+    if (afterCursor > cursor || (events.length && afterCursor < events[0].cursor - 1)) {
+      return { instanceId, events: [], cursor, reset: true,
+        gap: { from: afterCursor + 1, to: events[0]?.cursor - 1 } };
+    }
     const rows = events.filter(event => event.cursor > afterCursor);
     if (!rows.length) return { instanceId, events: [], cursor };
-    const selectedRows = rows.slice(0, 100);
+    const selectedRows = [];
+    for (const row of rows.slice(0, 100)) {
+      const candidate = { instanceId, events: [...selectedRows, row], cursor: row.cursor };
+      if (!fitsIpcResponse(candidate)) { if (!selectedRows.length) requireIpcItem(candidate); break; }
+      selectedRows.push(row);
+    }
     return { instanceId, events: selectedRows, cursor: selectedRows[selectedRows.length - 1].cursor };
   }
 
   function publish(event, data = {}) {
     if (!EVENT_NAMES.includes(event)) return false;
     const input = record(data);
+    // Preserve large legal stream updates as ordered pieces, never silently slice.
+    const streamKey = typeof input.replaceText === 'string' ? 'replaceText' : 'delta';
+    if (typeof input[streamKey] === 'string' && input[streamKey].length > 32_000) {
+      if (input[streamKey].length > MAX_TEXT) throw uiError('IPC_ITEM_TOO_LARGE', 'Stream update exceeds bounded content limit');
+      let remaining = input[streamKey], first = true;
+      while (remaining.length) {
+        let size = Math.min(32_000, remaining.length);
+        if (/[\uD800-\uDBFF]$/.test(remaining.slice(0,size))) size--;
+        const piece = { ...input, [streamKey]: undefined, delta: undefined, reset: first ? input.reset : false };
+        piece[first ? streamKey : 'delta'] = remaining.slice(0,size);
+        publish(event, piece); remaining = remaining.slice(size); first = false;
+      }
+      return true;
+    }
     const safe = {};
     for (const key of EVENT_DATA_KEYS) {
       if (!Object.hasOwn(input, key)) continue;
@@ -501,7 +527,9 @@ export function createDesktopUiEventBus({ now = () => Date.now(), maxEvents = 50
         };
       }
     }
-    const item = { cursor: ++cursor, event, data: safe, at: now() };
+    const item = { cursor: cursor + 1, event, data: safe, at: now() };
+    requireIpcItem({ instanceId, events: [item], cursor: item.cursor });
+    cursor++;
     events.push(item);
     while (events.length > maxEvents) events.shift();
     for (const wake of [...waiters]) wake();
@@ -511,7 +539,7 @@ export function createDesktopUiEventBus({ now = () => Date.now(), maxEvents = 50
   function next({ after: afterCursor = 0, waitMs = 20_000, signal } = {}) {
     const normalizedCursor = Number.isSafeInteger(afterCursor) && afterCursor >= 0 ? afterCursor : 0;
     const current = after(normalizedCursor);
-    if (current.events.length || waitMs <= 0) return Promise.resolve(current);
+    if (current.events.length || current.reset || waitMs <= 0) return Promise.resolve(current);
     const boundedWait = Math.max(1, Math.min(Number(waitMs) || 20_000, 25_000));
     return new Promise((resolve, reject) => {
       let settled = false;
@@ -529,7 +557,7 @@ export function createDesktopUiEventBus({ now = () => Date.now(), maxEvents = 50
       };
       const wake = () => {
         const result = after(normalizedCursor);
-        if (result.events.length) finish(resolve, result);
+        if (result.events.length || result.reset) finish(resolve, result);
       };
       const abort = () => finish(reject, signal.reason ?? uiError('ABORTED', '事件订阅已结束'));
       waiters.add(wake);
@@ -738,12 +766,24 @@ export function createDesktopUiService({ services = {}, system = services.system
       const result = await chat('chat.history', {
         id: idParam(p), limit: p.limit, beforeMessageId: p.beforeMessageId, afterMessageId: p.afterMessageId
       });
-      return {
+      const output = {
         id: string(result.id, 128), total: Number(result.total) || 0,
         messages: (result.messages ?? []).map(projectMessage),
         nextBeforeMessageId: string(result.nextBeforeMessageId, 128) || null,
-        hasMore: result.hasMore === true
+        nextAfterMessageId: string(result.nextAfterMessageId, 128) || null,
+        hasMoreAfter: result.hasMoreAfter === true, hasMore: result.hasMore === true
       };
+      while (!fitsIpcResponse(output)) {
+        if (output.messages.length <= 1) requireIpcItem(output);
+        if (p.afterMessageId) {
+          output.messages.pop(); output.hasMoreAfter = true;
+          output.nextAfterMessageId = output.messages.at(-1).id;
+        } else {
+          output.messages.shift(); output.hasMore = true;
+          output.nextBeforeMessageId = output.messages[0].id;
+        }
+      }
+      return output;
     },
     'ui.chat.status': async p => {
       const result = await chat('chat.status', { id: idParam(p) });
@@ -785,7 +825,13 @@ export function createDesktopUiService({ services = {}, system = services.system
       emit('chat.updated', { sessionId: p.id });
       return selected(result, ['userMessageId', 'requestId']);
     },
-    'ui.chat.stop': async p => selected(await chat('chat.stop', { id: idParam(p) }), ['stopped', 'state', 'reason']),
+    'ui.chat.stop': async p => {
+      const id = idParam(p);
+      const status = await chat('chat.status', { id });
+      const stopped = await services.capabilityService?.cancelTaskOperations?.({ sessionId: id, taskId: status.taskId });
+      if (stopped?.some(row => row.status === 'unknown')) throw uiError('INVOKE_CANCEL_UNCONFIRMED', '停止已请求，原操作结果未知，需核验');
+      return selected(await chat('chat.stop', { id }), ['stopped', 'state', 'reason']);
+    },
     'ui.chat.retry': async p => selected(await chat('chat.retry', { id: idParam(p) }), ['userMessageId', 'requestId']),
     'ui.chat.continue': async p => selected(await chat('chat.continue', { id: idParam(p) }), ['continued', 'requestId']),
     'ui.chat.catalog': async p => {
@@ -900,6 +946,8 @@ export function createDesktopUiService({ services = {}, system = services.system
         requestId: string(p.requestId, 160) || undefined })) };
     },
     'ui.task.pause': async p => {
+      const operations = await services.capabilityService?.cancelTaskOperations?.({ taskId: idParam(p) });
+      if (operations?.some(row => row.status === 'unknown')) throw uiError('INVOKE_CANCEL_UNCONFIRMED', '操作结果未知，需核验后暂停任务');
       const current = (await task('task.get', { id: idParam(p) })).task;
       if (p.expectedRev !== undefined && current.rev !== p.expectedRev) throw uiError('TASK_CONFLICT', '任务已被其他操作修改');
       await stopTask(current);
@@ -962,6 +1010,8 @@ export function createDesktopUiService({ services = {}, system = services.system
       return { task: projectTask(resumed) };
     },
     'ui.task.cancel': async p => {
+      const stoppedOperations = await services.capabilityService?.cancelTaskOperations?.({ taskId: idParam(p) });
+      if (stoppedOperations?.some(row => row.status === 'unknown')) throw uiError('INVOKE_CANCEL_UNCONFIRMED', '操作结果未知，需核验后取消任务');
       const current = (await task('task.get', { id: idParam(p) })).task;
       if (p.expectedRev !== undefined && current.rev !== p.expectedRev) throw uiError('TASK_CONFLICT', '任务已被其他操作修改');
       await stopTask(current, { cancelMissingManagedSession: true });
@@ -1228,11 +1278,12 @@ export function createDesktopUiService({ services = {}, system = services.system
           const local = record(result.localService);
           return {
             status: string(local.status, 60) || 'not-checked',
-            installed: local.installed === true, running: local.running === true, ready: local.ready === true,
-            configured: local.configured === true, version: string(local.version, 100) || null,
+            installed: typeof local.installed === 'boolean' ? local.installed : null, running: local.running === true, ready: local.ready === true,
+            authenticated: local.authenticated === true, canSend: local.canSend === true, configured: typeof local.configured === 'boolean' ? local.configured : null, version: string(local.version, 100) || null,
+            accountId: string(local.accountId, 80) || null,
             httpUrl: string(local.httpUrl, 500) || null, wsUrl: string(local.wsUrl, 500) || null,
             accessTokenConfigured: local.accessTokenConfigured === true,
-            lastError: string(local.lastError, 500) || null,
+            lastError: string(local.lastError?.message ?? local.lastError, 500) || null,
             actions: boundedStrings(result.actions, 10, 40)
           };
         })() : null,
@@ -1241,8 +1292,8 @@ export function createDesktopUiService({ services = {}, system = services.system
     },
     'ui.plugins.integration.action': async p => {
       const service = idParam(p, 'localService');
-      const action = ['detect', 'start', 'stop', 'install', 'configure'].find(value => p.action === value);
-      if (!/^[a-z0-9._-]{1,80}$/i.test(service) || !action) throw uiError('INVALID_PARAMS', '未知集成本地服务操作');
+      const action = ['health', 'detect', 'start', 'stop', 'reconnect', 'install', 'configure'].find(value => p.action === value);
+      if (!isDesktopLocalService(service) || !action) throw uiError('INVALID_PARAMS', '未知集成本地服务操作');
       const raw = record(p.params);
       const params = action === 'configure' ? {
         httpUrl: boundedText(raw.httpUrl, 'OneBot HTTP 地址', 500),
@@ -1253,7 +1304,9 @@ export function createDesktopUiService({ services = {}, system = services.system
       const result = await integrations('integrations.action', { localService: service, action, params, approved: false });
       emit('plugin.updated', { pluginId: service });
       const local = record(result);
-      return selected(local, ['status', 'installed', 'running', 'ready', 'configured', 'version', 'lastError', 'approvalId', 'pending']);
+      return { ...selected(local, ['status', 'installed', 'running', 'ready', 'authenticated', 'canSend', 'configured', 'version', 'approvalId', 'pending']),
+        lastError: typeof local.lastError === 'string' ? local.lastError.slice(0, 1000)
+          : typeof local.lastError?.message === 'string' ? local.lastError.message.slice(0, 1000) : null };
     },
     'ui.plugins.integration.manage': async p => {
       const id = idParam(p);
@@ -1381,12 +1434,15 @@ export function createDesktopUiService({ services = {}, system = services.system
       return selected(result, ['ok', 'provider', 'status', 'code', 'phase', 'configured', 'reachable', 'authenticated', 'inferencing', 'message', 'connectionStepCompleted']);
     },
     'ui.onboarding.setModel': async p => selected(await onboarding('onboarding.setModel', { provider: boundedText(p.provider, 'provider', 80), model: boundedText(p.model, 'model', 200) }), ['provider', 'model', 'persisted']),
-    'ui.approvals.list': async () => ({ approvals: ((await capability('capability.approval.list', {})).approvals ?? []).map(projectApproval) }),
+    'ui.approvals.list': async () => ({ approvals: ((await capability('capability.approval.list', {})).approvals ?? []).map(projectApproval),
+      operations: ((await capability('capability.operation.list', {})).operations ?? []).map(row => selected(row, ['operationId','approvalId','status','decision','code','turnResumed','resumePending','resumeError'])) }),
     'ui.approvals.decide': async p => {
-      const result = await capability('capability.approval.decide', { id: idParam(p), approve: p.approve === true });
+      const result = await capability('capability.approval.decide', { id: idParam(p), approve: p.approve === true, defer: true });
       emit('approval.resolved', { approvalId: p.id, status: p.approve === true ? 'approved' : 'rejected' });
-      return selected(result, ['status', 'approvalId', 'requestId', 'turnResumed', 'resumePending', 'resumeError', 'taskResumed']);
+      return selected(result, ['status', 'operationId', 'decision', 'approvalId', 'requestId', 'turnResumed', 'resumePending', 'resumeError', 'taskResumed']);
     },
+    'ui.approvals.operation': async p => selected(await capability('capability.operation.get', { id: idParam(p) }), ['operationId','approvalId','status','decision','code','turnResumed','resumePending','resumeError']),
+    'ui.approvals.cancel': async p => selected(await capability('capability.operation.cancel', { id: idParam(p) }), ['operationId','approvalId','status','cancelRequested','code']),
     'ui.search': async p => {
       const query = boundedText(p.query, 'query', 200).trim();
       if (!query) return { sessions: [], tasks: [], plugins: [] };

@@ -1328,7 +1328,8 @@ function makeFullService({ withKey = true, fetchImpl, baseUrl = 'https://api.dee
 
   const emptySession = await service.execute({ method: 'chat.sessions.create', params: { title: 'empty-history' } });
   assert.deepEqual(await service.execute({ method: 'chat.history', params: { id: emptySession.id } }), {
-    id: emptySession.id, total: 0, messages: [], nextBeforeMessageId: null, hasMore: false
+    id: emptySession.id, total: 0, messages: [], nextBeforeMessageId: null, hasMore: false,
+    nextAfterMessageId: null, hasMoreAfter: false
   });
 
   for (const count of [100, 200, 500]) {

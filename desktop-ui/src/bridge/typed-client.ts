@@ -75,7 +75,7 @@ export interface Approval {
   expiresAt: string | number | null; summary: string; risk: string; taskId: string | null;
 }
 export interface ApprovalDecisionResult {
-  status: 'completed' | 'rejected'; approvalId?: string; requestId?: string; turnResumed?: boolean; resumePending?: boolean;
+  status: 'accepted' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled' | 'unknown' | 'rejected'; operationId?: string; decision?: string; code?: string; approvalId?: string; requestId?: string; turnResumed?: boolean; resumePending?: boolean;
   resumeError?: string; taskResumed?: boolean;
 }
 export interface Attachment { name: string; content: string; mimeType?: string }
@@ -99,7 +99,9 @@ export interface RetiredIntegrationTool {
   replacement: { id: string; label: string } | null;
 }
 export interface LocalServiceSettings {
-  status: string; installed: boolean; running: boolean; ready: boolean; configured: boolean;
+  status: string; installed: boolean | null; running: boolean; ready: boolean; configured: boolean | null;
+  authenticated?: boolean; canSend?: boolean;
+  accountId?: string | null;
   version: string | null; httpUrl: string | null; wsUrl: string | null; accessTokenConfigured: boolean;
   lastError: string | null; actions: string[];
 }
@@ -112,10 +114,13 @@ export interface IntegrationSettings {
 export type DesktopEvent = 'core.status' | 'chat.updated' | 'chat.streaming' | 'chat.warning' | 'task.updated' | 'task.deleted'
   | 'core.restarted'
   | 'agent.updated' | 'workspace.updated' | 'plugin.updated' | 'plugin.downloadProgress' | 'approval.pending' | 'approval.resolved'
+  | 'approval.operation' | 'channel.message' | 'channel.delivery'
   | 'model.updated' | 'memory.updated' | 'update.status' | 'device.updated';
 export interface DesktopEventData {
   sessionId?: string; taskId?: string; agentId?: string; pluginId?: string; serverId?: string; approvalId?: string; requestId?: string; retryCount?: number;
   turnId?: string; messageId?: string; historyRevision?: number;
+  accountId?: string; channelId?: string; eventId?: string; sequence?: number; consumerId?: string;
+  operationId?: string; decision?: string; code?: string;
   message?: string;
   provider?: string; status?: string; progress?: number; ready?: boolean; needsAttention?: boolean;
   delta?: string; replaceText?: string; reset?: boolean; toolActivity?: ChatMessage['toolActivity']; agentActivity?: ChatMessage['agentActivity'];
@@ -139,7 +144,7 @@ type UiMethod =
   | 'ui.feedback.links'
   | 'ui.update.capabilities' | 'ui.update.check' | 'ui.update.notes'
   | 'ui.onboarding.status' | 'ui.onboarding.start' | 'ui.onboarding.completeStep' | 'ui.onboarding.skipStep' | 'ui.onboarding.finish' | 'ui.onboarding.testProvider' | 'ui.onboarding.setModel'
-  | 'ui.approvals.list' | 'ui.approvals.decide' | 'ui.search';
+  | 'ui.approvals.list' | 'ui.approvals.decide' | 'ui.approvals.operation' | 'ui.approvals.cancel' | 'ui.search';
 type Empty = Record<string, never>;
 type HostMethod = 'app.ping' | 'app.status' | 'app.about' | 'app.openExternal' | 'app.openArtifact' | 'app.pickFolder' | 'app.pickFiles' | 'app.pickExtensionPackage' | 'app.setWindowBehavior';
 type HostMap = {
@@ -212,7 +217,7 @@ window.__cetameshEvent = ({ event, data }) => {
 async function runEventPump(): Promise<void> {
   while (listeners.size > 0 && window.ipc) {
     try {
-      const response = await uiCall<{ instanceId: string; events: { cursor: number; event: DesktopEvent; data: DesktopEventData }[]; cursor: number }>(
+      const response = await uiCall<{ instanceId: string; events: { cursor: number; event: DesktopEvent; data: DesktopEventData }[]; cursor: number; reset?: boolean }>(
         'ui.events.next', { after: cursor, waitMs: 20_000 }
       );
       if (coreInstanceId !== response.instanceId) {
@@ -225,6 +230,11 @@ async function runEventPump(): Promise<void> {
         }
       }
       cursor = Math.max(cursor, response.cursor);
+      if (response.reset) {
+        cursor = response.cursor;
+        window.__cetameshEvent?.({ event: 'core.restarted', data: { reset: true } });
+        continue;
+      }
       for (const event of response.events) window.__cetameshEvent?.(event);
     } catch {
       await new Promise(resolve => window.setTimeout(resolve, 1200));
@@ -255,7 +265,7 @@ export const chatClient = {
     remove: (id: string) => uiCall<{ id: string; deleted: boolean }>('ui.chat.sessions.delete', { id })
   },
   history: (id: string, limit = 100, beforeMessageId: string | null = null, afterMessageId: string | null = null) => uiCall<{
-    id: string; total: number; messages: ChatMessage[]; nextBeforeMessageId: string | null; hasMore: boolean
+    id: string; total: number; messages: ChatMessage[]; nextBeforeMessageId: string | null; hasMore: boolean; nextAfterMessageId: string | null; hasMoreAfter: boolean
   }>('ui.chat.history', { id, limit, beforeMessageId, afterMessageId }),
   status: (id: string) => uiCall<{ id: string; taskId: string | null; dshSessionAlive: boolean; state: string; requestId: string | null; statusMessage: string | null; retryCount: number; followState: string; followError: string | null; displayText: string; toolActivity: ChatMessage['toolActivity']; agentActivity: ChatMessage['agentActivity']; error: string | null; errorCode: string | null; approvalId: string | null; approvalExpiresAt: string | number | null; routing: Record<string, unknown> }>('ui.chat.status', { id }),
   send: (id: string, text: string, attachments: Attachment[] = [], clientMessageId?: string) => {
@@ -337,7 +347,7 @@ export const extensionSettingsClient = {
   integrations: () => uiCall<{ integrations: { id: string; name: string; status: string; enabled: boolean; available: boolean; eligible: boolean; configured: boolean; reason: string | null; lastError: string | null }[] }>('ui.plugins.integration.list', {}),
   integrationSettings: (id: string) => uiCall<IntegrationSettings>('ui.plugins.integration.settings', { id }),
   manageIntegration: (id: string, action: 'enable' | 'disable') => uiCall<Record<string, unknown>>('ui.plugins.integration.manage', { id, action }),
-  integrationAction: (localService: 'snowluma', action: 'detect' | 'start' | 'stop' | 'install' | 'configure', params: Record<string, unknown> = {}) => uiCall<Record<string, unknown>>('ui.plugins.integration.action', { localService, action, params }),
+  integrationAction: (localService: 'snowluma' | 'qq' | 'bionic', action: 'health' | 'detect' | 'start' | 'stop' | 'reconnect' | 'install' | 'configure', params: Record<string, unknown> = {}) => uiCall<Record<string, unknown>>('ui.plugins.integration.action', { localService, action, params }),
   toggleTool: (pluginId: string, toolId: string, enabled: boolean) => uiCall<Record<string, unknown>>('ui.plugins.integration.tool.toggle', { pluginId, toolId, enabled }),
   mcp: () => uiCall<{ servers: { id: string; name: string; status: string; enabled: boolean; running: boolean; available: boolean; toolCallable: boolean; eligible: boolean; configured: boolean; source: string; toolCount: number | null; discoveredToolCount: number; transport: string; reason: string | null; lastError: string | null }[] }>('ui.mcp.list', {}),
   mcpTools: (id: string) => uiCall<{ serverId: string; tools: { id: string; name: string; description: string; enabled: boolean; discovered: boolean; callable: boolean }[] }>('ui.mcp.tools', { id }),
@@ -373,8 +383,10 @@ export const workspaceClient = {
   create: (name: string, root: string) => uiCall<{ id: string; name: string; status: string }>('ui.workspace.create', { name, root })
 };
 export const approvalClient = {
-  list: () => uiCall<{ approvals: Approval[] }>('ui.approvals.list', {}),
-  decide: (id: string, approve: boolean) => uiCall<ApprovalDecisionResult>('ui.approvals.decide', { id, approve })
+  list: () => uiCall<{ approvals: Approval[]; operations: ApprovalDecisionResult[] }>('ui.approvals.list', {}),
+  decide: (id: string, approve: boolean) => uiCall<ApprovalDecisionResult>('ui.approvals.decide', { id, approve }),
+  operation: (id: string) => uiCall<ApprovalDecisionResult>('ui.approvals.operation', { id }),
+  cancel: (id: string) => uiCall<ApprovalDecisionResult>('ui.approvals.cancel', { id })
 };
 export interface OnboardingStatus { complete: boolean; currentStep: string | null; steps: { id: string; title: string; description: string; status: string; optional: boolean }[] }
 export const onboardingClient = {

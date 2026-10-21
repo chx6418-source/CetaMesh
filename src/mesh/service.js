@@ -14,9 +14,14 @@ export function createMeshService({ stateDir, name, role, available = null, exec
   if (!stateDir || typeof stateDir !== 'string') throw new Error('createMeshService 需要 stateDir');
   const node = createMeshNode({ stateDir, name, role, available, executeCapability, now, isEnabled,
     presenceTtlMs: () => settingsStore?.get().settings.devices.presenceTtlMs ?? 90000 });
+  let ready = node.restoreTransport().catch(() => node.status().transport);
+  let closed = false;
   const unsubscribe = settingsStore?.onChange?.(settings => {
+    if (closed) return;
     if (settings.devices.meshEnabled === false) {
-      void node.close({ revokePairing: true }).catch(error => console.error('Mesh listener shutdown failed:', error));
+      ready = node.suspendTransport({ revokePairing: true }).catch(error => console.error('Mesh listener shutdown failed:', error));
+    } else {
+      ready = node.restoreTransport().catch(() => node.status().transport);
     }
   });
 
@@ -71,7 +76,10 @@ export function createMeshService({ stateDir, name, role, available = null, exec
   return {
     stateDir,
     node,
+    get ready() { return ready; },
+    restoreTransport() { ready = node.restoreTransport(); return ready; },
     execute({ method, params } = {}) {
+      if (closed && !['mesh.status', 'mesh.snapshot'].includes(method)) return Promise.reject(meshError('MESH_CLOSED', 'Device Mesh service is closed'));
       const handler = handlers[method];
       if (!handler) return Promise.reject(meshError('METHOD_NOT_FOUND', '未知 Mesh 方法：' + String(method)));
       if (isEnabled() !== true && !['mesh.status', 'mesh.snapshot'].includes(method)) {
@@ -79,6 +87,6 @@ export function createMeshService({ stateDir, name, role, available = null, exec
       }
       return Promise.resolve().then(() => handler(params || {}));
     },
-    close() { unsubscribe?.(); return node.close(); }
+    close() { closed = true; unsubscribe?.(); return node.close(); }
   };
 }

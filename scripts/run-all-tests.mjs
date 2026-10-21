@@ -39,6 +39,19 @@ export const CATEGORIES = ['core', 'architecture', 'security', 'runtime', 'integ
 // ── 登记表：scripts/test-*.mjs 的每一个文件都必须出现在这里（或能从 package.json 映射）。
 // requires 的取值见 probeAvailability()；category 取值见 CATEGORIES。
 const REGISTRY = {
+  'test-comm-approval.mjs': { category: 'security' },
+  'test-comm-legacy-shutdown.mjs': { category: 'integration' },
+  'test-comm-managed-turns.mjs': { category: 'integration' },
+  'test-comm-approval-operations.mjs': { category: 'security' },
+  'test-comm-flow.mjs': { category: 'integration' },
+  'test-comm-dev-release.mjs': { category: 'release', requires: ['core-dist', 'dev-release-dist'], timeoutMs: 900000 },
+  'test-comm-event-budget.mjs': { category: 'integration' },
+  'test-comm-lifecycle.mjs': { category: 'integration' },
+  'test-comm-integration.mjs': { category: 'integration' },
+  'test-comm-controls.mjs': { category: 'integration' },
+  'test-comm-runner.mjs': { category: 'security' },
+  'test-comm-channel-mesh.mjs': { category: 'integration' },
+  'test-comm-extension.mjs': { category: 'integration' },
   'test-agent-native-security.mjs': { category: 'security' },
   'test-codex-discovery.mjs': { category: 'runtime' },
   'test-dsh-setup.mjs': { category: 'core' },
@@ -244,10 +257,13 @@ async function probeAvailability() {
   const exists = (relative) => fs.existsSync(path.join(ROOT, relative));
   const gatewayConfigPresent = fs.existsSync(path.join(ROOT, 'config.json'));
   let canonicalReleaseAvailable = false;
+  let devReleaseAvailable = false;
   try {
     const release = loadReleaseVersion({ rootDir: ROOT });
     const releaseDir = releaseArtifactDirectory({ rootDir: ROOT, ...release });
     canonicalReleaseAvailable = fs.existsSync(path.join(releaseDir, 'release-manifest.json'));
+    const devDir = releaseArtifactDirectory({ rootDir: ROOT, ...release, channel: 'dev' });
+    devReleaseAvailable = fs.existsSync(path.join(devDir, 'release-manifest.json'));
   } catch {
     // A missing or malformed release source means the RC suite is unavailable, not a runner crash.
   }
@@ -255,6 +271,7 @@ async function probeAvailability() {
     'shell-debug': exists(path.join('desktop-shell', 'target', 'debug', 'whalebridge-desktop.exe')),
     'core-dist': fs.existsSync(path.join(CORE_DIST_DIR, 'WhaleBridgeCore.exe')),
     'release-dist': canonicalReleaseAvailable,
+    'dev-release-dist': devReleaseAvailable,
     network: process.env.WHALEBRIDGE_TEST_NETWORK === '1',
     gateway: gatewayConfigPresent && await probeTcp(gatewayPort),
     // A live TCP listener may be the user’s real desktop bridge; this suite mutates roles/allowlists and sends a test QQ message.

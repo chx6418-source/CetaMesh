@@ -1,4 +1,7 @@
 // CetaMesh Tool / MCP 目录（产品化任务 B）。
+
+// Pure metadata: importing Desktop DTOs must not initialize runtime paths.
+export const isDesktopLocalService = value => ['snowluma', 'qq', 'bionic'].includes(value);
 //
 // 事实来源（本仓库 HEAD，禁止凭空创造工具）：
 //   - src/mcp-snowluma-safe.js（39 个 qq_* 工具）
@@ -287,6 +290,7 @@ export function pluginDescriptors() {
   return [
     {
       id: 'cetamesh-bionic-chat',
+      localService: 'bionic',
       name: 'CetaMesh 仿生聊天',
       kind: 'tool-pack',
       category: 'tools',

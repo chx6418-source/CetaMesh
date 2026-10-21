@@ -39,6 +39,8 @@ try {
     return { status: 'stopped', installed: true, running: false, ready: false, configured: true };
   } } };
   services = createCetaMeshServices({ config, localServices: desktopLocalServices });
+  assert.equal(services.settingsService.store.file.startsWith(root), true,
+    'Desktop DTO imports must not capture runtime paths before isolated environment is set');
 
   const validateChannelSend = id => services.capabilityService.broker.registry.require('channel.send').validate({
     input: { kind: 'group', id: String(id), text: 'message' }
@@ -522,7 +524,11 @@ try {
   }));
   const disabledExtensionDescriptor = disabledExtensionContext.capabilities.statusSummary
     .find(item => item.id === extensionCapabilityId);
-  assert.equal(disabledExtensionDescriptor.availability, 'disabled');
+  assert.equal(disabledExtensionDescriptor, undefined, 'disabled Extension is removed from discoverable capability descriptors');
+  assert.equal(services.capabilityService.broker.registry.has(extensionCapabilityId), false,
+    'disabled Extension leaves no stale executable descriptor in the Broker');
+  assert.equal(disabledExtensionContext.capabilities.manifest.some(item => item.id === extensionCapabilityId), false,
+    'disabled Extension is removed from the model capability manifest');
   assert.equal(disabledExtensionContext.capabilities.requestable.includes(extensionCapabilityId), false,
     'disabled Extension capability is not advertised as requestable');
 
@@ -550,7 +556,9 @@ try {
   }));
   const removedExtensionDescriptor = removedExtensionContext.capabilities.statusSummary
     .find(item => item.id === extensionCapabilityId);
-  assert.equal(removedExtensionDescriptor.availability, 'unavailable');
+  assert.equal(removedExtensionDescriptor, undefined, 'uninstalled Extension has no discoverable capability descriptor');
+  assert.equal(services.capabilityService.broker.registry.has(extensionCapabilityId), false,
+    'uninstalled Extension leaves no executable Broker binding');
   assert.equal(removedExtensionContext.capabilities.requestable.includes(extensionCapabilityId), false,
     'removed Extension capability is not advertised as requestable');
   const cetameshProvider = agentContext.agentProviders.find((provider) => provider.id === 'cetamesh');
@@ -612,22 +620,40 @@ try {
   console.log('PASS production Managed Agent Tool Execution resolves the live Task principal');
 
   const { createApplicationLifecycle } = await import('../src/app/lifecycle.js');
+  let onBeforeExit = null;
   const lifecycle = createApplicationLifecycle({
     processRef: {
       once(event, handler) {
-        assert.equal(event, 'exit');
-        onExit = handler;
+        assert.ok(['beforeExit', 'exit'].includes(event));
+        if (event === 'beforeExit') onBeforeExit = handler;
+        else onExit = handler;
       }
     },
     log: () => {}
   });
   const closed = [];
+  let ownerReleased = false;
+  let finishChild;
+  let childStarted;
+  const childReady = new Promise(resolve => { childStarted = resolve; });
+  const childGate = new Promise(resolve => { finishChild = resolve; });
+  lifecycle.register(() => { ownerReleased = true; }, { name: 'owner', requireCleanShutdown: true });
   lifecycle.register(() => closed.push('first'));
-  lifecycle.register(() => closed.push('second'));
+  lifecycle.register(async () => { childStarted(); await childGate; closed.push('second'); });
   lifecycle.bind();
-  onExit();
+  assert.equal(typeof onBeforeExit, 'function');
+  assert.equal(typeof onExit, 'function');
+  const stopping = onBeforeExit();
+  await childReady;
+  assert.deepEqual(closed, [], 'dependent cleanup cannot overtake the asynchronous child');
+  assert.equal(ownerReleased, false, 'owner remains held while resource cleanup is pending');
+  finishChild();
+  const shutdownReport = await stopping;
+  assert.equal(shutdownReport.ok, true);
   assert.deepEqual(closed, ['second', 'first'], 'application services close in reverse registration order');
-  onExit();
+  assert.equal(ownerReleased, true, 'owner is released only after all resource cleanup completes');
+  assert.equal(onExit(), stopping, 'exit fallback reuses the same shutdown Promise');
+  await onExit();
   assert.deepEqual(closed, ['second', 'first'], 'exit cleanup is idempotent');
 
   console.log('PASS Core container registers all Agent Providers without DSH or QQ network requests');

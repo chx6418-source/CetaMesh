@@ -98,6 +98,10 @@
 
 ## Active Work (Owner confirmation pending)
 
+- **COMM 集成前最终复核**：2026-10-21，DEV Build1114；修正元数据导入提前捕获 APP_PATHS 的重复运行问题，保留权限断言并新增独立数据根断言。最新完整回归 146 PASS / 0 FAIL / 8 NRE，Rust 199/0；Core/Host/DEV 发行构建与安装集成通过，生产输入指纹复核一致。Owner 已授权提交合并推送；RELEASE_BLOCKED 与真实验收/签名/迁移限制不变。详见 COMMUNICATION_REPAIR_REPORT.md 顶部最新复核补充。
+
+- **COMM-01～13 集中修复（2026-10-21）**：隔离分支 `codex/comm-01-13-repair`，基线 `63f6155718e4ef7cbc182bd6b4debcde0f1faeb1`。审批授权代次/续跑、异步操作查询、进程取消与有界退出、UTF-8 IPC/历史分页、默认 QQ/Bionic 控制、Mesh 恢复及插件版本契约已修复；完整本地验证 146 PASS / 0 FAIL / 8 NRE（Rust 199/0），DEV Build1113 发行集成通过。Owner 已明确授权提交、合并和推送；集成结果以 Git main/origin/main 引用为准，不代表发布批准。历史 DEV 包仍记录 dirty=true 和原基线 sourceCommit，不冒充提交后的正式包。真实 Codex/DSH/QQ/手机、普通用户 GUI、签名与更新链待验，RELEASE_BLOCKED；M5-B 未授权，无真实迁移。详见 COMM_REPAIR_STATUS.md、COMMUNICATION_REPAIR_REPORT.md、COMMUNICATION_MODULE_MATRIX.md。
+
 - **Codex 旧终态 Session 取消恢复已实装待 Owner 验收**：分支 codex/codex-readonly-workspace-recovery，产品提交119209d，Build1106。保留1105只读修复；仅精确的post-exit/pre-import STAGING_READ_FAILED旧Task可在安全栅栏通过后正式取消，未知状态仍拒绝。全量131 PASS/0 FAIL/9 NRE，补充Rust199/0、发行12/0及新增正式SEA取消/重启通过。Owner批准后已正常退出覆盖安装1106，72份既有JSON安装前后Hash不变；旧Task已在实际Harbor正式取消，持久currentAgent=null，同工作区无活动Task Agent绑定，历史7条保留。报告CODEX_STALE_SESSION_CANCELLATION_REPORT.md；RELEASE_BLOCKED。
 
 

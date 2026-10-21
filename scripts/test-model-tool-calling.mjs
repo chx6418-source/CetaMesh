@@ -26,6 +26,23 @@ const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-tool-calling-'));
 let step = 0;
 const pass = (name) => console.log('PASS ' + (++step) + ' ' + name);
 
+async function finishApproval(ui, params) {
+  const accepted = await ui.execute({method:'ui.approvals.decide',params});
+  assert.equal(accepted.status,'accepted','UI acknowledges the durable operation before tool completion');
+  assert.equal(typeof accepted.operationId,'string');
+  const deadline=Date.now()+5000;
+  while(Date.now()<deadline) {
+    const operation=await ui.execute({method:'ui.approvals.operation',params:{id:accepted.operationId}});
+    if(['completed','failed','cancelled','unknown'].includes(operation.status)) {
+      assert.equal(operation.status,'completed',JSON.stringify(operation));
+      assert.equal(operation.decision,params.approve?'approved':'rejected');
+      return operation;
+    }
+    await new Promise(resolve=>setTimeout(resolve,5));
+  }
+  assert.fail('Approval operation did not reach a completed terminal state');
+}
+
 function response(value, status = 200) {
   return new Response(JSON.stringify(value), {
     status,
@@ -401,7 +418,7 @@ const emptyObjectSchema = {
     const beforeDecision = await approved.eventBus.next({ after: 0, waitMs: 0 });
     assert.ok(beforeDecision.events.some(event => event.event === 'approval.pending'), 'Harbor receives a pending approval event');
 
-    const decision = await approved.ui.execute({ method: 'ui.approvals.decide', params: { id: pendingStatus.approvalId, approve: true } });
+    const decision = await finishApproval(approved.ui, { id: pendingStatus.approvalId, approve: true });
     assert.equal(decision.status, 'completed');
     assert.equal(decision.turnResumed, true, 'the typed UI projection confirms that the same Chat turn resumed');
     assert.equal(approved.executed(), 1, 'Approve Once dispatches the safe fixture exactly once');
@@ -422,8 +439,9 @@ const emptyObjectSchema = {
   const rejected = await approvalHarness('rejected', 'The fixture was rejected and I will not run it.');
   try {
     const pendingStatus = await rejected.ui.execute({ method: 'ui.chat.status', params: { id: rejected.session.id } });
-    const decision = await rejected.ui.execute({ method: 'ui.approvals.decide', params: { id: pendingStatus.approvalId, approve: false } });
-    assert.equal(decision.status, 'rejected');
+    const decision = await finishApproval(rejected.ui, { id: pendingStatus.approvalId, approve: false });
+    assert.equal(decision.status, 'completed');
+    assert.equal(decision.decision, 'rejected');
     assert.equal(decision.turnResumed, true, 'rejection is returned to the active Model turn');
     assert.equal(rejected.executed(), 0, 'rejection never invokes the fixture executor');
     assert.match(rejected.calls[1].messages.at(-1).content, /APPROVAL_REJECTED/);

@@ -52,7 +52,16 @@ try{
  const scope=await ui('ui.agent.security',{provider:'codex',workspaceId:workspace.id});
  assert.equal(scope.security.mode,'native');assert.equal(scope.security.strictIsolationVerified,false);
  const approval=await ui('ui.agent.authorize',{provider:'codex',workspaceId:workspace.id,fingerprint:scope.fingerprint});
- await ui('ui.approvals.decide',{id:approval.approvalId,approve:true});
+ const accepted=await ui('ui.approvals.decide',{id:approval.approvalId,approve:true});
+ assert.equal(accepted.status,'accepted');assert.equal(typeof accepted.operationId,'string');
+ let authorizationOperation;const authorizationDeadline=Date.now()+15000;
+ do{
+  authorizationOperation=await ui('ui.approvals.operation',{id:accepted.operationId});
+  if(['completed','failed','unknown','cancelled'].includes(authorizationOperation.status))break;
+  await new Promise(resolve=>setTimeout(resolve,20));
+ }while(Date.now()<authorizationDeadline);
+ assert.equal(authorizationOperation.status,'completed',JSON.stringify(authorizationOperation));
+ assert.equal(authorizationOperation.decision,'approved');
  const session=await ui('ui.chat.sessions.create',{title:'large synthetic Chat Native acceptance'});
  await ui('ui.chat.config.set',{id:session.id,config:{mode:'smart',workspaceId:workspace.id,agentProvider:'codex',modelProvider:'',model:''}});
  for(const [index,request] of [

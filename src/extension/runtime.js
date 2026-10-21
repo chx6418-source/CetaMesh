@@ -103,21 +103,55 @@ export function createExtensionRuntime({
       }
     }
   }
+  function hideEntry(id) {
+    actors.delete(String(id));
+    broker.registry.replaceProviderEntries('extension:' + id, []);
+  }
+
+  function validateInstalledEntry(entry) {
+    // Catalog discovery performs the same package review as installation, without
+    // executing its code. Persisted metadata alone must never create authority.
+    const expectedRoot = path.resolve(store.packagesDir, entry.id, entry.version);
+    if (path.resolve(entry.sourceRoot) !== expectedRoot
+      || fs.realpathSync(entry.sourceRoot) !== path.join(fs.realpathSync(store.packagesDir), entry.id, entry.version)) {
+      throw extensionError('REVIEW_MISMATCH', 'Extension package is outside its managed version directory');
+    }
+    const reviewed = installer.reviewFromDirectory({ sourceDir: entry.sourceRoot });
+    const grants = [...(entry.permissions || [])].sort();
+    if (!reviewed.scan.ok || reviewed.review.blockers.length
+      || reviewed.manifest.id !== entry.id || reviewed.manifest.version !== entry.version
+      || reviewed.manifest.type !== entry.type
+      || reviewed.review.fingerprint !== entry.fingerprint
+      || manifestFingerprint(entry.manifest) !== reviewed.review.fingerprint
+      || reviewed.packageFingerprint !== entry.packageFingerprint
+      || reviewed.review.token !== entry.reviewToken
+      || JSON.stringify(grants) !== JSON.stringify([...reviewed.manifest.permissions].sort())) {
+      throw extensionError('REVIEW_MISMATCH', 'Installed Extension package, manifest or grants no longer match its review');
+    }
+    return reviewed.review.token;
+  }
+
   function registerEntry(entry) {
-    actors.set(entry.id, actorFor(entry));
-    for (const cap of entry.manifest.capabilities || []) {
+    if (entry.status !== 'enabled') { hideEntry(entry.id); return; }
+    const descriptorVersion = validateInstalledEntry(entry);
+    const catalogOwner = 'extension:' + entry.id;
+    const definitions = (entry.manifest.capabilities || []).map(cap => {
       const id = 'extension.' + entry.id + '.' + cap.id;
-      if (broker.registry.has(id)) continue;
-      broker.register({ id, permission: 'extension.invoke', provider: 'extension', risk: 'low',
+      return { id, catalogOwner, descriptorVersion, permission: 'extension.invoke', provider: 'extension', risk: 'low',
         description: typeof cap.description === 'string' ? cap.description : 'Invoke the declared Extension capability ' + cap.id + '.',
         inputSchema: cap.inputSchema && typeof cap.inputSchema === 'object' ? cap.inputSchema : null,
         modelCallable: Boolean(cap.inputSchema && typeof cap.inputSchema === 'object'),
         execute: async r => {
-        const { entry: current } = hostOrThrow(entry.id);
-        if (!current.manifest.capabilities.some(c => c.id === cap.id)) throw extensionError('CAPABILITY_NOT_DECLARED', cap.id);
+        const current = entryOrThrow(entry.id);
+        if (current.status !== 'enabled') throw extensionError('EXTENSION_DISABLED', current.id);
+        if (runtimeRecord(current.id).switching || validateInstalledEntry(current) !== descriptorVersion) {
+          throw extensionError('STALE_EXTENSION_HOST', 'Capability descriptor no longer matches the active Extension version');
+        }
         return invokeOnHost(entry.id, cap.id, r.input, { signal: r.signal });
-      }});
-    }
+      }};
+    });
+    broker.registry.replaceProviderEntries(catalogOwner, definitions);
+    actors.set(entry.id, actorFor(entry));
   }
 
   function entryOrThrow(id) {
@@ -173,7 +207,7 @@ export function createExtensionRuntime({
       throw extensionError('ENTRY_MISSING', '受管目录中的入口文件缺失：' + entry.manifest.entry + '（请重新安装）');
     }
     const source = fs.readFileSync(entryPath, 'utf8');
-    registerEntry(entry);
+    validateInstalledEntry(entry);
     const bound = {
       id: entry.id,
       version: entry.version,
@@ -212,6 +246,7 @@ export function createExtensionRuntime({
 
   async function stopHost(id) {
     const key = String(id);
+    hideEntry(key);
     clearMonitor(key);
     const host = hosts.get(key);
     hosts.delete(key);
@@ -323,6 +358,7 @@ export function createExtensionRuntime({
       throw extensionError(failure.code || 'EXTENSION_LOAD_FAILED', 'Extension failed to load: ' + failure.message);
     }
     hosts.set(entry.id, host);
+    registerEntry(entry);
     const record = runtimeRecord(entry.id);
     record.startedAt = now();
     record.healthySince = typeof host.ping === 'function' ? null : now();
@@ -432,6 +468,16 @@ export function createExtensionRuntime({
     }
     if (!host) host = startHost(entry);
     return { entry, host };
+  }
+
+  // Restore discovery synchronously at Core construction. Workers remain lazy.
+  // A damaged installed package is isolated from the rest of the catalog.
+  for (const entry of store.list()) {
+    try { registerEntry(entry); }
+    catch (error) {
+      hideEntry(entry.id);
+      runtimeRecord(entry.id).lastError = String(error?.message ?? error);
+    }
   }
 
   return {
@@ -554,6 +600,7 @@ export function createExtensionRuntime({
       hosts.set(entry.id, host);
       try {
         const updated = store.put({ ...entry, status: 'enabled', enabledAt: now(), updatedAt: now() });
+        registerEntry(updated);
         return { extension: updated, changed: true };
       } catch (error) {
         void stopHost(entry.id).catch((cleanupError) => {
@@ -606,6 +653,7 @@ export function createExtensionRuntime({
     },
 
     close() {
+      for (const entry of store.list()) hideEntry(entry.id);
       return Promise.all([...hosts.keys()].map((id) => stopHost(id))).then(() => undefined);
     }
   };

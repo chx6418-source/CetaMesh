@@ -65,6 +65,19 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
   const sessions = new Map();
   const waitingTurns = new Map();
   let closed = false;
+  let closePromise = null;
+  const pendingOperations = new Set();
+  function trackedAbortable(createWork, signal) {
+    // Fast cancellation may finish the Agent turn before provider cleanup.
+    // Preserve the underlying work so close can join its real completion.
+    const work = Promise.resolve().then(() => {
+      assertNotAborted(signal);
+      return createWork();
+    });
+    pendingOperations.add(work);
+    work.then(() => pendingOperations.delete(work), () => pendingOperations.delete(work));
+    return abortable(work, signal);
+  }
   function session(id) {
     const value = sessions.get(id);
     if (!value) fail('SESSION_NOT_FOUND', 'Managed Agent session is unavailable');
@@ -138,7 +151,7 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
           ...copy(s.messages)
         ];
         let streamedText = '';
-        let result = await abortable(toolExecutionCoordinator.run({
+        let result = await trackedAbortable(() => toolExecutionCoordinator.run({
           providerId: s.modelProvider || null,
           model: s.model || undefined,
           reasoning: s.reasoningEffort || undefined,
@@ -186,7 +199,7 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
             }
             if (streamReason && streamReason !== 'completed') fail('MODEL_STREAM_FAILED', `Model stream ended with ${streamReason}`);
             fallback = { text, usage: streamUsage, resolvedModel: streamModel, modelContinuation };
-          } else fallback = await abortable(modelRuntime.chat(request), controller.signal);
+          } else fallback = await trackedAbortable(() => modelRuntime.chat(request), controller.signal);
           result = { ...result, text: typeof fallback?.text === 'string' ? fallback.text : '',
             usage: fallback?.usage ?? null, resolvedModel: fallback?.resolvedModel ?? fallback?.model ?? null, modelContinuation: fallback?.modelContinuation ?? null };
         }
@@ -239,7 +252,7 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
         if (typeof productContext === 'string' && productContext.trim()) {
           messages.push({ role: 'system', content: 'CetaMesh dynamic context (JSON reference data):\n' + productContext });
         }
-        const response = await abortable(modelRuntime.chat({ providerId: s.modelProvider || null, model: s.model || undefined, reasoning: s.reasoningEffort || undefined,
+        const response = await trackedAbortable(() => modelRuntime.chat({ providerId: s.modelProvider || null, model: s.model || undefined, reasoning: s.reasoningEffort || undefined,
           messages: [...messages, ...copy(s.messages)], signal: controller.signal }), controller.signal);
         assertNotAborted(controller.signal);
         const tokens = normalizeUsageTokens(response?.usage);
@@ -397,15 +410,18 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
       setTimeout(() => { void drain(s); }, 0);
       return { resumed: true, requestId: id, sessionId, provider: 'cetamesh' };
     },
-    async resumeApproval({ approvalId, requestFingerprint, decisionResult } = {}) {
+    async resumeApproval({ approvalId, requestFingerprint, decisionResult, signal } = {}) {
       if (!toolExecutionCoordinator?.resumeApproval) return null;
       const target = toolExecutionCoordinator.pendingTarget?.(approvalId);
       if (!target || target.kind !== 'agent') return null;
       const s = session(waitingTurns.get(String(approvalId)) ?? target.sessionId);
       const turn = s.waitingTurn;
       if (!turn || turn.id !== target.turnId) return null;
-      if (s.running || s.archived) return { resumed: false, error: 'AGENT_BUSY' };
+      if (s.running || s.archived || closed) return { resumed: false, error: 'AGENT_BUSY' };
       const controller = new AbortController();
+      const cancelOperation = () => controller.abort(signal?.reason);
+      signal?.addEventListener('abort', cancelOperation, { once: true });
+      if (signal?.aborted) cancelOperation();
       s.controller = controller;
       s.currentTurn = turn;
       s.running = true;
@@ -460,7 +476,7 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
           ? { kind: 'aborted' } : { kind: 'failed', error: safeFailure(error) };
         emit(s, 'turn/end', { requestId: turn.id, reason: s.lastReason });
         return { resumed: false, error: error?.code ?? 'PROVIDER_ERROR' };
-      } finally { s.running = false; s.controller = null; s.currentTurn = null; notify(s); }
+      } finally { signal?.removeEventListener('abort', cancelOperation); s.running = false; s.controller = null; s.currentTurn = null; notify(s); }
     },
     bindSession(sessionId, principal) {
       const s = session(sessionId);
@@ -472,9 +488,22 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
       s.principal = next;
       s.executionWorkspaceId = next.workspaceId;
     },
-    async close() {
+    close() {
+      if (closePromise) return closePromise;
       closed = true;
-      for (const s of sessions.values()) { await provider.cancel({ sessionId: s.id }); s.archived = true; notify(s); }
+      closePromise = (async () => {
+        const active = [...sessions.values()];
+        for (const s of active) { await provider.cancel({ sessionId: s.id }); s.archived = true; notify(s); }
+        await Promise.all(active.map(s => new Promise(resolve => {
+          const idle = () => {
+            if (!s.running && !s.draining) { s.waiters.delete(idle); resolve(); }
+          };
+          s.waiters.add(idle);
+          idle();
+        })));
+        await Promise.allSettled([...pendingOperations]);
+      })();
+      return closePromise;
     }
   };
 }

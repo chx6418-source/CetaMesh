@@ -75,6 +75,7 @@ import { loginInfo, extractKugouAuth, createQrLogin, pollQrLogin } from './kugou
 import { createLocalServiceManager, SNOWLUMA_RELEASE_PAGE, DSH_INSTALL_HINT } from './local-services.js';
 import { bootstrapCetaMesh } from './app/bootstrap.js';
 import { acquireStateOwner } from './app/state-owner.js';
+import { createLegacyShutdown } from './app/legacy-shutdown.js';
 import { createDesktopIpcRuntime } from './app/ipc-runtime.js';
 import { createDshLifecycle } from './providers/dsh/lifecycle.js';
 import { createQqRuntime } from './channel/qq/runtime.js';
@@ -365,7 +366,7 @@ function saveState() {
 // 锁文件存 PID；启动时若该 PID 仍存活则退出（exit 2 = 已有实例），
 // 否则接管。进程退出/崩溃后锁自动失效（PID 校验）。
 const LOCK_FILE = path.join(STATE_DIR, 'bridge.lock');
-let legacyOwner = null;
+let legacyShutdown = null;
 function acquireLock() {
   fs.mkdirSync(STATE_DIR, { recursive: true });
   // 原子创建锁文件：把 PID 一次性写入（flag 'wx'），避免“先建空文件再写 PID”的窗口被第二个进程当作过期锁偷走。
@@ -608,6 +609,7 @@ async function main(runtimeOptions = {}) {
   fs.mkdirSync(STATE_DIR, { recursive: true });
   acquireLock();
   loadState();
+  legacyShutdown?.register(() => saveState(), { name: 'Legacy session state' });
 
   // 可选本地子服务：SnowLuma/dsh 的检测、启动、安装和日志流都由控制台共享。
   // 构造时只在后台并行检测本地文件，不启动任何进程、也不阻塞控制台上线；
@@ -1984,7 +1986,9 @@ async function main(runtimeOptions = {}) {
       return;
     }
     const application = bootstrapCetaMesh({
-      owner: legacyOwner,
+      // The outer Legacy lifecycle owns the real lease across startup and all
+      // resources. Inner Core composition must not release that lease early.
+      owner: { release() {} },
       config: cfg,
       dataRoot: DATA_ROOT,
       stateDir: STATE_DIR,
@@ -2000,10 +2004,12 @@ async function main(runtimeOptions = {}) {
     legacyChannelService.adoptLegacy(nativeQqRuntime);
     workshopRuntimeService = services.workshopService;
 
-    const ipcRuntime = createDesktopIpcRuntime({ services, system: services.systemServices, log });
+    legacyShutdown.register(() => application.lifecycle.stop(), { name: 'Legacy Core services' });
+    const ipcRuntime = createDesktopIpcRuntime({ services, system: services.systemServices, log,
+      isStopping: legacyShutdown.isStopping,
+      onFatalError: error => legacyShutdown.shutdown(error?.code === 'EADDRINUSE' ? 2 : 1) });
     application.lifecycle.register(() => dshLifecycle.stop());
     application.lifecycle.register(() => ipcRuntime.stop());
-    application.lifecycle.bind();
     ipcRuntime.start();
 
     // MCP 数据面 IPC（D1-003）：恒启动，pipe 名按数据目录派生。
@@ -2012,14 +2018,12 @@ async function main(runtimeOptions = {}) {
     dataServer.on('error', (error) => {
       log(`MCP 数据面 IPC 启动失败: ${error?.message ?? error}`);
       // 数据面不可用 = MCP 工具全坏，fail fast 交由守护方重启，绝不静默降级。
-      process.exit(error?.code === 'EADDRINUSE' ? 2 : 1);
+      void legacyShutdown.shutdown(error?.code === 'EADDRINUSE' ? 2 : 1);
     });
     dataServer.listen(resolveDataPipeName(), () => {
       log(`MCP 数据面 IPC 已就绪（${resolveDataPipeName()}）。`);
     });
-    process.once('exit', () => {
-      try { dataServer.close(); } catch { /* 进程退出路径，尽力关闭 */ }
-    });
+    legacyShutdown.registerServer(dataServer, { name: 'Legacy data IPC' });
 
     if (surfacePolicy.legacyHttp) {
       log('LEGACY DEV SURFACE: 已按 WHALEBRIDGE_LEGACY_HTTP=1 启动 loopback HTTP API（仅源码开发；发行版不含该面）。');
@@ -2046,19 +2050,23 @@ async function main(runtimeOptions = {}) {
         if (error?.code === 'EADDRINUSE') {
           // 端口被占用：大概率已有桥接实例在运行，当前实例退出，避免争抢本地 API。
           log(`控制台端口 ${port} 已被占用（可能已有桥接实例在运行），本实例静默退出。`);
-          process.exit(2);
+          void legacyShutdown.shutdown(2);
+          return;
         }
         log(`控制台服务错误: ${error?.message ?? error}`);
-        process.exit(1);
+        void legacyShutdown.shutdown(1);
       });
-      process.once('exit', () => {
-        try { server.close(); } catch { /* 进程退出路径，尽力关闭 */ }
-      });
+      legacyShutdown.registerServer(server, { name: 'Legacy HTTP' });
       return server;
     }
 
     // 数据面 IPC 与 legacy HTTP 共用的 API 处理体：路由逻辑只此一份，两套传输不会语义漂移。
     async function handleApiRequest(req, res) {
+      if (legacyShutdown?.isStopping()) {
+        res.writeHead(503, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: false, code: 'APPLICATION_STOPPING', error: 'Legacy is stopping' }));
+        return;
+      }
       const url = new URL(req.url ?? '/', `http://127.0.0.1:${port}`);
       const SECURITY_HEADERS = {
         'X-Frame-Options': 'DENY',
@@ -2313,22 +2321,9 @@ async function main(runtimeOptions = {}) {
         if (req.method === 'POST' && url.pathname === '/api/shutdown') {
           log('控制台：收到关闭主程序请求，正在终止全量进程…');
           sendJson({ ok: true, message: '正在关闭主程序…' });
-          setTimeout(async () => {
-            if (SUPERVISED) {
-              // 启动器托管：只退出本进程，由启动器决定后续（不会扫描/终止机器上的其它 cmd 守护循环）。
-              log('启动器托管模式：跳过 start.bat 守护循环清理，仅退出本进程。');
-            } else {
-              try {
-                // 先杀守护循环（start.bat cmd），避免进程退出后被守护重拉
-                execFileSync('powershell.exe', ['-NoProfile', '-Command', "Get-CimInstance Win32_Process -Filter \"Name='cmd.exe'\" | Where-Object { $_.CommandLine -like '*start.bat*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"], { timeout: 8000, windowsHide: true, stdio: 'ignore' });
-              } catch {}
-            }
-            // 完全退出时让 SnowLuma 继续独立运行，再释放锁退出。
-            leaveSnowLumaRunningOnExit();
-            try { releaseLock(); } catch {}
-            log('桥接已完全关闭。');
-            process.exit(0);
-          }, 200);
+          // The response gets a short flush window; shutdown then closes only
+          // resources owned by this Legacy process and awaits their completion.
+          setTimeout(() => { void legacyShutdown.shutdown(0); }, 200);
           return;
         }
         if (req.method === 'GET' && url.pathname === '/api/status') {
@@ -5500,8 +5495,7 @@ async function main(runtimeOptions = {}) {
           sendJson({ ok: true, message: '正在重启桥接（若由守护窗口启动，5 秒后自动恢复）…' });
           setTimeout(() => {
             log(`控制台：重启桥接（exit ${EXIT_RESTART}）`);
-            releaseLock();
-            process.exit(EXIT_RESTART);
+            void legacyShutdown.shutdown(EXIT_RESTART);
           }, 500);
           return;
         }
@@ -8794,6 +8788,7 @@ async function main(runtimeOptions = {}) {
 
   // QQ 消息 → DSH prompt
   async function handleIncoming(kind, id, event, cfg) {
+    if (legacyAbort.signal.aborted || legacyShutdown?.isStopping()) return;
     const key = convKey(kind, id);
     if (!isQqConnectorEnabled({ stateDir: STATE_DIR })) return;
     if (currentMode === 'social' && !isBionicChatEnabled({ stateDir: STATE_DIR })) {
@@ -9805,15 +9800,19 @@ async function main(runtimeOptions = {}) {
     }
   }
 
+  const legacyAbort = new AbortController();
+  let pumpPromise = null;
+  let cardBackfillTimer = null;
   async function pumpMux() {
-    for (;;) {
+    while (!legacyAbort.signal.aborted) {
       try {
         const now = Date.now();
         if (now - lastPumpConnectLogAt > 60000) {
           log('连接 DSH 事件流…');
           lastPumpConnectLogAt = now;
         }
-        for await (const item of api.openRemoteStream('$events', {})) {
+        for await (const item of api.openRemoteStream('$events', {}, { signal: legacyAbort.signal })) {
+          if (legacyAbort.signal.aborted) break;
           if (item.type === 'ready') {
             // 重连后 DSH 会把仍在等待的瀑布事件用新 clientId 重新投递，挂起条目同步刷新。
             if (item.clientId && item.clientId !== eventsClientId) {
@@ -9831,7 +9830,12 @@ async function main(runtimeOptions = {}) {
       } catch (error) {
         log('事件流中断:', error?.message ?? error);
       }
-      await sleep(3000);
+      if (legacyAbort.signal.aborted) break;
+      await new Promise(resolve => {
+        const done = () => { clearTimeout(timer); legacyAbort.signal.removeEventListener('abort', done); resolve(); };
+        const timer = setTimeout(done, 3000);
+        legacyAbort.signal.addEventListener('abort', done, { once: true });
+      });
     }
   }
   // QQ 侧（SnowLuma OneBot WebSocket 客户端）由 Legacy QQ runtime 持有；消息策略仍留在 bridge。
@@ -9863,14 +9867,17 @@ async function main(runtimeOptions = {}) {
     }),
     log,
     onPrivateMessage: async (event) => {
+      if (legacyAbort.signal.aborted) return;
       if (event.user_id === event.self_id) return;
       await handleIncoming('private', event.user_id, event, cfg);
     },
     onGroupMessage: async (event) => {
+      if (legacyAbort.signal.aborted) return;
       if (event.sender?.user_id === event.self_id || event.user_id === event.self_id) return;
       await handleIncoming('group', event.group_id, event, cfg);
     },
     onNotice: async (event) => {
+      if (legacyAbort.signal.aborted) return;
       try { await handlePokeNotice(event); } catch (error) { log('处理拍一拍事件出错:', error?.message ?? error); }
     },
     onOpen: () => {
@@ -9896,15 +9903,25 @@ async function main(runtimeOptions = {}) {
   resolveConnectSnowLumaReady();
 
   startProductSurfaces();
+  const stopSocialRuntime = async () => {
+    legacyAbort.abort();
+    socialLoop.stop(); clearAllSocialV2Timers(); clearAllPendingWakeLeases();
+    clearTimeout(cardBackfillTimer);
+    for (const entry of followStreams.values()) { entry.active = false; entry.signal.abort(); }
+    await dshLifecycle.stop();
+    if (pumpPromise) await pumpPromise;
+    statusPanel.stop();
+    saveSocialV2State();
+  };
+  legacyShutdown?.register(stopSocialRuntime, { name: 'Legacy Social and DSH consumers' });
   if (runtimeOptions.channel) {
     startDshWatch();
     return {
       receive: event => handleIncoming(event.group_id !== undefined ? 'group' : 'private', event.group_id ?? event.user_id, event, cfg),
       status: () => ({ running: true, ready: true, socialLoopRunning: socialLoop.running(), conversations: [...socialV2.conversations.keys()] }),
-      stop: () => {
-        socialLoop.stop(); clearAllSocialV2Timers(); clearAllPendingWakeLeases();
-        for (const entry of followStreams.values()) { entry.active = false; entry.signal.abort(); }
-        dshLifecycle.stop(); saveSocialV2State(); saveState(); releaseLock();
+      stop: async () => {
+        await stopSocialRuntime();
+        saveState(); releaseLock();
       }
     };
   }
@@ -9924,7 +9941,7 @@ async function main(runtimeOptions = {}) {
   }
   startDshWatch();
   // 启动后延迟回填历史卡片元数据（本功能上线前收到的卡片消息），失败不影响启动。
-  setTimeout(() => {
+  cardBackfillTimer = setTimeout(() => {
     backfillRecentCardsV2().catch((error) => log('卡片回填失败:', error?.message ?? error));
   }, 8000);
 
@@ -9976,7 +9993,8 @@ async function main(runtimeOptions = {}) {
   }
   statusPanel.start(gatherStatusLines);
 
-  await pumpMux();
+  pumpPromise = pumpMux();
+  await pumpPromise;
 }
 
 let lifecycleHandlersInstalled = false;
@@ -9985,19 +10003,12 @@ function installLifecycleHandlers() {
   lifecycleHandlersInstalled = true;
   process.on('SIGINT', () => {
     log('退出中…');
-    saveState();
-    leaveSnowLumaRunningOnExit();
-    releaseLock();
-    process.exit(0);
+    void legacyShutdown.shutdown(0);
   });
   process.on('SIGTERM', () => {
-    saveState();
-    leaveSnowLumaRunningOnExit();
-    releaseLock();
-    process.exit(0);
+    void legacyShutdown.shutdown(0);
   });
   process.on('unhandledRejection', (error) => log('未处理异常:', error?.message ?? error));
-  process.on('exit', () => releaseLock());
 }
 
 // 孤儿守卫：启动器托管时把 stdin 当作"父进程存活"的凭据。启动器正常退出会先发关闭请求，
@@ -10005,7 +10016,7 @@ function installLifecycleHandlers() {
 // 双保险：stdin EOF 是即时的，但极端情况下（管道被其它进程继承等）可能收不到，
 // 因此再加一个"父进程是否还活着"的定时检查（process.ppid 在 Windows 上同样可用）。
 let orphanGuardInstalled = false;
-function installOrphanGuard({ exit = (code) => process.exit(code), log: write = log } = {}) {
+function installOrphanGuard({ exit = (code) => legacyShutdown.shutdown(code), log: write = log } = {}) {
   if (!SUPERVISED || orphanGuardInstalled) return false;
   orphanGuardInstalled = true;
   const parentPid = process.ppid;
@@ -10014,15 +10025,14 @@ function installOrphanGuard({ exit = (code) => process.exit(code), log: write = 
     if (leaving) return;
     leaving = true;
     write(`${reason}，桥接随之退出。`);
-    try { saveState(); } catch {}
-    // SnowLuma 有独立生命周期；断开 worker 时让它保持运行，避免破坏 QQ 注入状态。
-    leaveSnowLumaRunningOnExit();
-    try { releaseLock(); } catch {}
-    exit(0);
+    void exit(0);
   };
   process.stdin.resume();
   process.stdin.on('end', () => leave('启动器已退出（stdin 关闭）'));
-  process.stdin.on('error', () => {});
+  process.stdin.on('error', error => {
+    write('启动器 stdin 失败：' + String(error?.message ?? error));
+    void legacyShutdown.shutdown(1);
+  });
   if (parentPid && parentPid > 0) {
     const timer = setInterval(() => {
       try {
@@ -10032,6 +10042,7 @@ function installOrphanGuard({ exit = (code) => process.exit(code), log: write = 
       }
     }, 5000);
     timer.unref?.();
+    legacyShutdown.register(() => clearInterval(timer), { name: 'Legacy supervisor monitor' });
   }
   return true;
 }
@@ -10041,12 +10052,21 @@ export async function runBridge() {
   // desktop Core. Acquire it before config reads, QQ setup, logs or IPC startup.
   // This mode remains a combined legacy host until M3/M4 connector migration.
   const owner = acquireStateOwner(STATE_DIR);
-  legacyOwner = owner;
-  process.once('exit', () => owner.release());
+  legacyShutdown = createLegacyShutdown({ owner, releaseLegacyLock: releaseLock, log });
+  legacyShutdown.register(() => leaveSnowLumaRunningOnExit(), { name: 'Legacy independent service boundary' });
+  legacyShutdown.bind();
   console.error('[bridge] legacy-exclusive compatibility mode; Core and Legacy cannot share a StateDir.');
   installLifecycleHandlers();
   installOrphanGuard();
-  return main();
+  try {
+    const result = await main();
+    if (process.exitCode) await legacyShutdown.shutdown(process.exitCode);
+    return result;
+  } catch (error) {
+    log('Legacy 启动失败，等待已启动资源清理：' + String(error?.message ?? error));
+    await legacyShutdown.shutdown(error?.code === 'STATE_DIR_BUSY' ? 2 : 1);
+    throw error;
+  }
 }
 
 // Policy reuse only: no Core bootstrap, IPC listener, gateway or external service start.

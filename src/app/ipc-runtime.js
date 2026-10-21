@@ -41,9 +41,12 @@ export function createDesktopIpcRuntime({
   pipeName,
   processRef = process,
   netModule = net
+  , isStopping = () => false, onFatalError = null
 } = {}) {
   let server = null;
   let exitBound = false;
+  let stopping = null;
+  const sockets = new Set();
 
   /** 调用 + 记录错误码：失败仍然原样抛给 IPC 协议层（错误语义不变）。 */
   function invoke(invokeFn, method) {
@@ -62,7 +65,10 @@ export function createDesktopIpcRuntime({
   }
 
   function dispatch({ method, params } = {}, context = {}) {
+    if (stopping || isStopping()) throw Object.assign(new Error('Core is shutting down'), { code: 'CORE_STOPPING' });
     const name = String(method ?? '');
+    // Native IPC accepts a decision, never holds a transport request open for work.
+    if (name === 'capability.approval.decide') params = { ...params, defer: true };
     const route = ROUTES.find(([prefix]) => name.startsWith(prefix));
     if (route) {
       const [owner, methodName] = route[1](services, system);
@@ -82,11 +88,15 @@ export function createDesktopIpcRuntime({
   }
 
   function stop() {
-    if (!server) return false;
+    if (stopping) return stopping;
+    if (!server) return Promise.resolve(false);
     const current = server;
     server = null;
-    try { current.close(); } catch (error) { log('Native UI IPC close failed: ' + (error?.message ?? error)); }
-    return true;
+    for (const socket of sockets) socket.destroy();
+    stopping = new Promise((resolve, reject) => {
+      current.close(error => error && error.code !== 'ERR_SERVER_NOT_RUNNING' ? reject(error) : resolve(true));
+    });
+    return stopping;
   }
 
   function start() {
@@ -103,6 +113,8 @@ export function createDesktopIpcRuntime({
     };
 
     const nextServer = netModule.createServer(socket => {
+      sockets.add(socket);
+      socket.once('close', () => sockets.delete(socket));
       socket.setNoDelay(true);
       const connection = startIpcProtocol({ input: socket, output: socket, dispatch, authenticate });
       connection.done.catch(error => {
@@ -112,7 +124,8 @@ export function createDesktopIpcRuntime({
     nextServer.maxConnections = 16;
     nextServer.on('error', error => {
       log('Native UI IPC server failed: ' + (error?.message ?? error));
-      processRef.exit(error?.code === 'EADDRINUSE' ? 2 : 1);
+      if (onFatalError) void onFatalError(error);
+      else processRef.exit(error?.code === 'EADDRINUSE' ? 2 : 1);
     });
     nextServer.listen(resolvedPipeName, () => log('Native UI IPC server is ready.'));
     server = nextServer;

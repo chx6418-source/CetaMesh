@@ -1,5 +1,27 @@
 type IdentifiedMessage = { id: string };
 
+export async function recoverForwardHistory<T extends { messages: IdentifiedMessage[]; hasMoreAfter?: boolean; nextAfterMessageId?: string | null }>(
+  initialCursor: string | null,
+  fetchPage: (cursor: string | null) => Promise<T>,
+  isCurrent: () => boolean,
+  applyPage: (page: T, first: boolean) => void
+): Promise<void> {
+  let cursor = initialCursor;
+  const seen = new Set<string>();
+  for (let pageIndex = 0; pageIndex < 1000; pageIndex++) {
+    if (!isCurrent()) return;
+    const page = await fetchPage(cursor);
+    if (!isCurrent()) return;
+    applyPage(page, pageIndex === 0);
+    if (!page.hasMoreAfter) return;
+    const next = page.nextAfterMessageId;
+    if (!next || next === cursor || seen.has(next)) throw new Error('消息恢复游标未前进，请重新加载会话。');
+    seen.add(next);
+    cursor = next;
+  }
+  throw new Error('消息恢复分页达到安全上限，请继续刷新会话。');
+}
+
 function indexMessages<T extends IdentifiedMessage>(messages: readonly T[]): { ids: string[]; byId: Map<string, T> } {
   const ids: string[] = [];
   const byId = new Map<string, T>();

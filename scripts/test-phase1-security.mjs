@@ -194,6 +194,16 @@ try {
 
   const ownerState = path.join(root, 'core-owner');
   const core = bootstrapCetaMesh({ stateDir: ownerState, dataRoot: path.join(root, 'core-data') });
+  let finishCoreCleanup;
+  let coreCleanupStarted;
+  const coreCleanupReady = new Promise(resolve => { coreCleanupStarted = resolve; });
+  const coreCleanupGate = new Promise(resolve => { finishCoreCleanup = resolve; });
+  const originalMeshClose = core.services.meshService.close;
+  core.services.meshService.close = async () => {
+    coreCleanupStarted();
+    await coreCleanupGate;
+    return originalMeshClose();
+  };
   try {
     assert.throws(() => bootstrapCetaMesh({ stateDir: ownerState, dataRoot: path.join(root, 'core-data') }),
       error => error.code === 'STATE_DIR_BUSY', 'SEC-05: a second Core cannot own the same StateDir');
@@ -203,9 +213,24 @@ try {
        catch (error) { process.exit(error.code === 'STATE_DIR_BUSY' ? 23 : 24); }`],
     { env: { ...process.env, PHASE1_STATE_DIR: ownerState }, timeout: 10000 });
     assert.equal(child.status, 23, 'SEC-05: another process cannot start Core on the owned StateDir');
-  } finally { core.lifecycle.stop(); }
+  } finally {
+    const stopping = core.lifecycle.stop();
+    await coreCleanupReady;
+    try {
+      assert.equal(fs.existsSync(path.join(ownerState, '.core-owner.lock')), true,
+        'SEC-05: owner remains held while asynchronous resource cleanup is pending');
+      assert.throws(() => bootstrapCetaMesh({ stateDir: ownerState, dataRoot: path.join(root, 'core-data') }),
+        error => error.code === 'STATE_DIR_BUSY', 'SEC-05: shutdown cannot transfer ownership before resource cleanup completes');
+    } finally {
+      finishCoreCleanup();
+      const report = await stopping;
+      assert.equal(report.ok, true);
+      assert.equal(report.outcomes.at(-1).name, 'StateDir owner', 'SEC-05: owner release is the final cleanup');
+    }
+    assert.equal(fs.existsSync(path.join(ownerState, '.core-owner.lock')), false);
+  }
   const restartedCore = bootstrapCetaMesh({ stateDir: ownerState, dataRoot: path.join(root, 'core-data') });
-  restartedCore.lifecycle.stop();
+  assert.equal((await restartedCore.lifecycle.stop()).ok, true);
 
   let startEffect;
   const started = new Promise(resolve => { startEffect = resolve; });

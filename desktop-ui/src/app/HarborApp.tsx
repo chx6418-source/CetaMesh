@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router';
 import { createPortal } from 'react-dom';
-import { mergeChatHistorySnapshot, mergeLatestChatMessages, prependOlderChatMessages } from './chat-history';
+import { mergeChatHistorySnapshot, mergeLatestChatMessages, prependOlderChatMessages, recoverForwardHistory } from './chat-history';
 import { applyChatStreamUpdates, ChatRequestEpoch, ChatStreamRevision, pendingReplyVisible, type ChatStreamUpdate } from './chat-async-state';
-import { aboutClient, agentClient, approvalClient, bridge, chatClient, extensionSettingsClient, feedbackClient, hostClient, memoryClient, onboardingClient, openExternal, pluginClient, searchClient, settingsClient, taskClient, updateClient, workspaceClient, workshopClient, type Agent, type DshConfiguration, type DshSelection, type DshPresetCatalog, type Approval, type ChatMessage as ChatMessageDto, type ChatSession, type ExtensionSettingsDescription, type ExtensionSettingsSnapshot, type IntegrationSettings, type Memory, type Plugin, type ProviderSettingField, type SettingField, type Settings, type Task, type WorkshopProposal } from '../bridge/typed-client';
+import { aboutClient, agentClient, approvalClient, bridge, chatClient, extensionSettingsClient, feedbackClient, hostClient, memoryClient, onboardingClient, openExternal, pluginClient, searchClient, settingsClient, taskClient, updateClient, workspaceClient, workshopClient, type Agent, type DshConfiguration, type DshSelection, type DshPresetCatalog, type Approval, type ApprovalDecisionResult, type DesktopEventData, type ChatMessage as ChatMessageDto, type ChatSession, type ExtensionSettingsDescription, type ExtensionSettingsSnapshot, type IntegrationSettings, type Memory, type Plugin, type ProviderSettingField, type SettingField, type Settings, type Task, type WorkshopProposal } from '../bridge/typed-client';
 import { Icon, type IconName } from '../components/icons';
 import { ArtifactCard } from '../components/product/cards';
 import { Button, IconButton, Input, normalizeSelectOptionLabel, SearchInput, Select, Tabs } from '../components/primitives/inputs';
@@ -449,9 +449,11 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
       ? afterMessageId
       : sameSession ? lastHistoryMessageIdRef.current : null;
     try {
-      const history = await chatClient.history(session.id, 100, null, cursor);
-      if (!requestEpochRef.current.isCurrent(request, activeSessionIdRef.current)) return;
-      if (!sameSession || !cursor) {
+      await recoverForwardHistory(cursor,
+        next => chatClient.history(session.id, 100, null, next),
+        () => requestEpochRef.current.isCurrent(request, activeSessionIdRef.current),
+        (history, first) => {
+      if (first && (!sameSession || !cursor)) {
         historySessionIdRef.current = session.id;
         lastHistoryMessageIdRef.current = history.messages.at(-1)?.id ?? null;
         setHasMoreHistory(history.hasMore);
@@ -465,7 +467,8 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
           ? mergeLatestChatMessages(current, history.messages, new Set(pendingSendsRef.current.keys()))
           : current);
       }
-      setError('');
+        });
+      if (requestEpochRef.current.isCurrent(request, activeSessionIdRef.current)) setError('');
     } catch (cause) {
       if (!requestEpochRef.current.isCurrent(request, activeSessionIdRef.current)) return;
       if (messageOf(cause).includes('游标')) {
@@ -800,7 +803,15 @@ async function confirmAgentExecution(provider: string, workspaceId: string) {
   if (!window.confirm(scope.disclosure + '\n\n是否确认此原生执行范围？')) throw new Error('已取消 Agent 原生安全范围确认');
   const pending = await agentClient.authorize(provider, workspaceId, scope.fingerprint);
   if (pending.status !== 'pending' || !pending.approvalId) throw new Error('未取得有效的 Owner 审批请求');
-  await approvalClient.decide(pending.approvalId, true);
+  const decision = await approvalClient.decide(pending.approvalId, true);
+  if (decision.operationId) {
+    for (let n=0;n<100;n++) {
+      const current = await approvalClient.operation(decision.operationId);
+      if (current.status === 'completed') break;
+      if (!['accepted','running'].includes(current.status)) throw new Error(current.code || '授权操作未完成');
+      await new Promise(resolve => window.setTimeout(resolve,100));
+    }
+  }
   if (!(await agentClient.security(provider, workspaceId)).authorized) throw new Error('原生执行范围尚未确认');
 }
 
@@ -1453,6 +1464,8 @@ function PluginsPage() {
   const [integrations, setIntegrations] = useState<IntegrationRow[]>([]);
   const [servers, setServers] = useState<McpRow[]>([]);
   const [pendingApprovals, setPendingApprovals] = useState<Approval[]>([]);
+  const [approvalOperations, setApprovalOperations] = useState<ApprovalDecisionResult[]>([]);
+  const [channelEvents, setChannelEvents] = useState<(DesktopEventData & { kind: string })[]>([]);
   const [selectedPlugin, setSelectedPlugin] = useState<Plugin | null>(null);
   const extensionSettingsRequest = useRef(0);
   const [extensionSettings, setExtensionSettings] = useState<ExtensionSettingsFormState | null>(null);
@@ -1491,7 +1504,7 @@ function PluginsPage() {
     } catch (cause) { setError(messageOf(cause)); }
   }, []);
   const refreshApprovals = useCallback(async () => {
-    try { setPendingApprovals((await approvalClient.list()).approvals.filter(item => item.status === 'pending')); }
+    try { const result = await approvalClient.list(); setPendingApprovals(result.approvals.filter(item => item.status === 'pending')); setApprovalOperations((result.operations ?? []).slice(-8)); }
     catch (cause) { setError(messageOf(cause)); }
   }, []);
   useEffect(() => { if (tab === 'catalog') void refreshCatalog(); }, [tab, refreshCatalog]);
@@ -1500,8 +1513,9 @@ function PluginsPage() {
     void refreshApprovals();
     const offPending = bridge.subscribe('approval.pending', () => { void refreshApprovals(); });
     const offResolved = bridge.subscribe('approval.resolved', () => { void refreshApprovals(); });
+    const offOperation = bridge.subscribe('approval.operation', () => { void refreshApprovals(); void refreshConnections(); });
     const timer = window.setInterval(() => { void refreshApprovals(); }, 4000);
-    return () => { window.clearInterval(timer); offPending(); offResolved(); };
+    return () => { window.clearInterval(timer); offPending(); offResolved(); offOperation(); };
   }, [refreshApprovals]);
   useEffect(() => bridge.subscribe('plugin.updated', () => { if (tab === 'catalog') void refreshCatalog(); else void refreshConnections(); }), [refreshCatalog, refreshConnections, tab]);
 
@@ -1576,7 +1590,18 @@ function PluginsPage() {
     } catch (cause) { setError(messageOf(cause)); }
     finally { setBusy(''); }
   }
-  async function manageSnowLuma(action: 'detect' | 'start' | 'stop' | 'configure') {
+  useEffect(() => {
+    setChannelEvents([]);
+    const accountId = selectedIntegration?.localService?.accountId;
+    const accept = (kind: string) => (data: DesktopEventData) => {
+      if (!accountId || data.accountId !== accountId) return;
+      setChannelEvents(rows => [...rows, { ...data, kind }].slice(-20));
+    };
+    const offMessage = bridge.subscribe('channel.message', accept('入站'));
+    const offDelivery = bridge.subscribe('channel.delivery', accept('投递'));
+    return () => { offMessage(); offDelivery(); };
+  }, [selectedIntegration?.localService?.accountId]);
+  async function manageSnowLuma(action: 'health' | 'reconnect' | 'detect' | 'start' | 'stop' | 'configure') {
     setBusy(`snowluma:${action}`); setError(''); setNotice('');
     try {
       const params = action === 'configure' ? {
@@ -1701,6 +1726,7 @@ function PluginsPage() {
     <Banner><span className="banner-icon"><Icon name="approval" size={20} /></span><span className="grow"><strong>安装前先查看权限</strong><small>插件详情与权限清单会在安装前显示；高风险操作仍由 Core 审批。</small></span><span className="banner-link">仅安装可信来源</span></Banner>
     <div className="plugins-controls row between"><SearchInput label="搜索插件" placeholder="搜索插件、集成或开发者" value={query} onChange={event => setQuery(event.target.value)} /><Tabs label="插件视图" selected={tab} onChange={setTab} items={[{ id: 'catalog', label: '插件中心' }, { id: 'connections', label: `集成 ${integrations.length || ''}` }, { id: 'mcp', label: `MCP ${servers.length || ''}` }]} /></div>
     {error && <ErrorNotice error={error} onRetry={() => tab === 'catalog' ? void refreshCatalog() : void refreshConnections()} />}{notice && <p className="inline-success" role="status">{notice}</p>}
+    {approvalOperations.length > 0 && <section className="plugin-approval-inbox"><h2>操作状态</h2>{approvalOperations.map(operation => <Surface key={operation.operationId} className="row between"><span>{operation.decision === 'rejected' ? '拒绝审批' : '批准操作'} · {({accepted:'已接受',running:'执行中',waiting:'等待后续审批',completed:'已完成',failed:'失败',cancelled:'已确认取消',unknown:'结果未知，需核验',rejected:'已拒绝'}[operation.status])}{operation.code && <small>{operation.code}</small>}</span>{['accepted','running'].includes(operation.status) && operation.operationId && <Button compact onClick={() => void approvalClient.cancel(operation.operationId!).then(() => refreshApprovals()).catch(cause => setError(messageOf(cause)))}>请求停止</Button>}</Surface>)}</section>}
     {pendingApprovals.length > 0 && <section className="plugin-approval-inbox"><div className="section-heading"><h2>待处理审批</h2><Badge tone="warning">{pendingApprovals.length}</Badge></div>{pendingApprovals.map(approval => <ApprovalCard key={approval.id} approval={approval} onDecide={(id, approve) => { void decidePendingApproval(id, approve); }} />)}</section>}
     {tab === 'catalog' && <>
     <div className="catalog-filters"><Tabs label="插件分类" selected={category} onChange={setCategory} items={categories.map(value => ({ id: value, label: value === 'all' ? '全部' : value }))} /><Tabs label="安装状态" selected={view} onChange={setView} items={[{ id: 'all', label: '全部' }, { id: 'recommended', label: '精选' }, { id: 'installed', label: '已安装' }, { id: 'update-available', label: '可更新' }]} />{developerMode && <Button compact onClick={() => void stageLocalPackage()} disabled={busy === 'local-package'}>{busy === 'local-package' ? '读取本地包…' : '导入本地扩展'}</Button>}<Button compact icon="update" onClick={() => void refreshCatalog()} disabled={loading}>刷新目录</Button></div>
@@ -1740,22 +1766,23 @@ function PluginsPage() {
       {selectedIntegration && <div className="plugin-detail">
         <StatusBadge value={selectedIntegration.enabled ? 'enabled' : 'disabled'} available={selectedIntegration.available} />
         {selectedIntegration.id === 'cetamesh-snowluma' && selectedIntegration.localService && <section className="snowluma-settings">
-          <div className="row between"><h3>SnowLuma 网关</h3><StatusBadge value={selectedIntegration.localService.status} available={selectedIntegration.localService.ready} /></div>
-          <p>{!selectedIntegration.localService.installed ? '未检测到本机 SnowLuma 安装。先安装并启动 SnowLuma，再检测连接状态。' : !selectedIntegration.localService.configured ? '需要配置 OneBot HTTP 地址后才能验证连接。' : selectedIntegration.localService.ready ? '网关已就绪，可以连接 QQ 通道。' : selectedIntegration.localService.running ? '进程正在运行；请在 SnowLuma 中完成 QQ 登录和 OneBot 网关配置。' : 'SnowLuma 已安装但当前已停止。'}</p>
+          {channelEvents.length > 0 && <div role="status"><h4>当前账号通道活动</h4>{channelEvents.map((event,index) => <p key={index}>{event.kind} · {event.status || '已持久接收'}{event.code ? ' · '+event.code : ''}</p>)}</div>}
+          <div className="row between"><h3>QQ Connector</h3><StatusBadge value={selectedIntegration.localService.status} available={selectedIntegration.localService.ready} /></div>
+          <p>{selectedIntegration.localService.installed === null ? '尚无安装检测证据，可查询 Connector 健康状态。' : !selectedIntegration.localService.installed ? '未检测到本机 SnowLuma 安装。先安装并启动 SnowLuma，再检测连接状态。' : !selectedIntegration.localService.configured ? '需要配置 OneBot HTTP 地址后才能验证连接。' : selectedIntegration.localService.ready ? '网关已就绪，可以连接 QQ 通道。' : selectedIntegration.localService.running ? '进程正在运行；请在 SnowLuma 中完成 QQ 登录和 OneBot 网关配置。' : 'SnowLuma 已安装但当前已停止。'}</p>
           {selectedIntegration.localService.version && <small>版本 {selectedIntegration.localService.version}</small>}
           {selectedIntegration.localService.lastError && <p className="message-error" role="status">{selectedIntegration.localService.lastError}</p>}
-          <label>OneBot HTTP 地址<Input value={snowLumaConfigDraft.httpUrl} onChange={event => setSnowLumaConfigDraft(current => ({ ...current, httpUrl: event.target.value }))} maxLength={500} /></label>
+          {selectedIntegration.localService.actions.includes('configure') && <><label>OneBot HTTP 地址<Input value={snowLumaConfigDraft.httpUrl} onChange={event => setSnowLumaConfigDraft(current => ({ ...current, httpUrl: event.target.value }))} maxLength={500} /></label>
           <label>OneBot WebSocket 地址<Input value={snowLumaConfigDraft.wsUrl} onChange={event => setSnowLumaConfigDraft(current => ({ ...current, wsUrl: event.target.value }))} maxLength={500} /></label>
           <label>Access Token<Input type="password" autoComplete="new-password" value={snowLumaConfigDraft.accessToken} placeholder={selectedIntegration.localService.accessTokenConfigured ? '已配置；留空保持不变' : '可选'} onChange={event => setSnowLumaConfigDraft(current => ({ ...current, accessToken: event.target.value, clearAccessToken: false }))} maxLength={512} /></label>
           {selectedIntegration.localService.accessTokenConfigured && <Button compact variant="ghost" onClick={() => setSnowLumaConfigDraft(current => ({ ...current, accessToken: '', clearAccessToken: !current.clearAccessToken }))}>{snowLumaConfigDraft.clearAccessToken ? '保留已配置令牌' : '清除已保存令牌'}</Button>}
-          <div className="row detail-actions">
-            <Button compact variant="primary" disabled={busy.startsWith('snowluma:')} onClick={() => void manageSnowLuma('configure')}>保存设置</Button>
-            <Button compact disabled={busy.startsWith('snowluma:')} onClick={() => void manageSnowLuma('detect')}>检测安装</Button>
+          <Button compact variant="primary" disabled={busy.startsWith('snowluma:')} onClick={() => void manageSnowLuma('configure')}>保存设置</Button></>}<div className="row detail-actions">
+            <Button compact disabled={busy.startsWith('snowluma:')} onClick={() => void manageSnowLuma('health')}>健康检查</Button>{selectedIntegration.localService.actions.includes('reconnect') && <Button compact disabled={busy.startsWith('snowluma:')} onClick={() => void manageSnowLuma('reconnect')}>重新连接</Button>}
             {selectedIntegration.localService.running
               ? <Button compact disabled={busy.startsWith('snowluma:')} onClick={() => void manageSnowLuma('stop')}>停止</Button>
-              : <Button compact variant="primary" disabled={busy.startsWith('snowluma:') || !selectedIntegration.localService.installed || !selectedIntegration.localService.configured} title={!selectedIntegration.localService.configured ? '先保存 OneBot 地址' : undefined} onClick={() => void manageSnowLuma('start')}>启动</Button>}
+              : <Button compact variant="primary" disabled={busy.startsWith('snowluma:') || selectedIntegration.localService.installed === false || selectedIntegration.localService.configured === false} title={!selectedIntegration.localService.configured ? '先保存 OneBot 地址' : undefined} onClick={() => void manageSnowLuma('start')}>启动</Button>}
           </div>
         </section>}
+        {selectedIntegration.id === 'cetamesh-bionic-chat' && selectedIntegration.localService && <section><h3>Bionic 社交运行时</h3><p>{selectedIntegration.localService.running ? '运行中' : '已停止'} · QQ 基础传输具有独立生命周期。</p><div className="row detail-actions">{(['health','start','stop'] as const).map(action => <Button compact key={action} onClick={() => void pluginClient.integrationAction('bionic', action).then(async result => { setNotice(result.pending ? '操作等待审批' : '状态已更新'); setSelectedIntegration(await pluginClient.integrationSettings('cetamesh-bionic-chat')); await refreshApprovals(); }).catch(cause => setError(messageOf(cause)))}>{action === 'health' ? '健康检查' : action === 'start' ? '启动' : '停止'}</Button>)}</div></section>}
         {selectedIntegration.inventory && <Surface className="bionic-inventory">
           <div className="section-heading"><h3>仿生聊天工具清单</h3><small>按当前 Integration Registry 状态统计</small></div>
           <div className="bionic-inventory-counts">

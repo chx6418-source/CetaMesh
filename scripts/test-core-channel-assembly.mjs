@@ -96,9 +96,21 @@ try {
   const input = { accountId: '10001', action: 'send_group_msg', kind: 'text', params: { group_id: 42, message: 'approved fixture' } };
   const pending = await rpc('channel.qq.send', { requestId: 'assembly-1', approvalBinding: null, input });
   assert.equal(pending.status, 'pending'); assert.equal(sends, 0);
-  await rpc('capability.approval.decide', { id: pending.approvalId, approve: true });
+  const accepted = await rpc('capability.approval.decide', { id: pending.approvalId, approve: true });
+  assert.equal(accepted.status, 'accepted', 'Owner IPC acknowledges durable work before delivery completes');
+  assert.equal(typeof accepted.operationId, 'string');
+  const operation = await eventually(async () => {
+    const current = await rpc('capability.operation.get', { id: accepted.operationId });
+    return ['completed', 'failed', 'unknown', 'cancelled'].includes(current.status) ? current : null;
+  });
+  assert.equal(operation.status, 'completed', JSON.stringify(operation));
+  assert.equal(operation.decision, 'approved');
   assert.equal(sends, 1);
   assert.equal((await rpc('channel.qq.send.status', { accountId: '10001', requestId: 'assembly-1' })).status, 'sent');
+  const duplicate = await rpc('capability.approval.decide', { id: pending.approvalId, approve: true });
+  assert.equal(duplicate.operationId, accepted.operationId);
+  assert.equal(duplicate.status, 'completed');
+  assert.equal(sends, 1, 'duplicate operation submission cannot repeat a sent message');
   await rpc('channel.bionic.stop');
   assert.equal((await rpc('channel.qq.health')).ready, true, 'Bionic stop must leave QQ transport active');
   const connectorHealth = await rpc('channel.qq.health');

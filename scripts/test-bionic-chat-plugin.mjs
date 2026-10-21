@@ -18,7 +18,10 @@ function makeTransportFactory() {
     pid: 777,
     onClose(handler) { this.closeHandler = handler; },
     async listTools() {
-      return [{ name: 'qq_send_group_message', description: 'x', inputSchema: { type: 'object' } }];
+      return [{ name: 'qq_send_group_message', description: 'x', inputSchema: {
+        type: 'object', properties: {group_id:{type:'integer',minimum:1},text:{type:'string',minLength:1,maxLength:4000}},
+        required:['group_id','text'],additionalProperties:false
+      } }];
     },
     async callTool(name, args) { return { content: [{ type: 'text', text: 'sent:' + name }] }; },
     async close() {}
@@ -156,6 +159,9 @@ try {
 
   // ── 5. 高风险工具必须 Owner 逐次审批（发送类） ────────────────────────────
   await service.execute({ method: 'mcp.start', params: { id: 'snowluma', approved: true } });
+  await assert.rejects(service.execute({method:'tools.invoke',params:{id:'mcp__snowluma__qq_send_group_message',
+    input:{group_id:1,text:'hi',unknown:true}}}),{code:'TOOL_ARGUMENTS_INVALID'});
+  assert.equal(service.broker.approvals.list().length,0,'invalid target input creates no approval');
   const pending = await service.execute({ method: 'tools.invoke', params: { id: 'mcp__snowluma__qq_send_group_message', input: { group_id: 1, text: 'hi' } } });
   assert.equal(pending.status, 'pending', 'high 风险工具未确认 → 进入审批');
   const approvals = service.broker.approvals.list();

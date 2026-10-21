@@ -6,7 +6,7 @@
 //   2. 启动器被强杀 → stdin 关闭 → worker 自行优雅退出（孤儿守卫）；
 //   3. /api/restart 退出码为 10（启动器据此重新拉起；start.bat 也会重启，因为 10≠2）；
 //   4. /api/shutdown 退出码为 0（启动器据此不再重启）；
-//   5. 托管模式下 /api/shutdown 不得执行"杀掉机器上所有 start.bat 守护循环"的全局清理
+//   5. /api/shutdown 只经过统一的 owned awaited shutdown，不得扫描或终止全局 start.bat 守护循环
 //      —— 用隔离 PATH（无 powershell.exe）+ 源码断言双重保证，绝不会误伤用户正在跑的实例；
 //   6. 非托管（BAT/VBS 方式）行为不变：isSupervised() 为 false。
 import assert from 'node:assert/strict';
@@ -136,10 +136,16 @@ const shutdownBlock = patchSource.slice(
   patchSource.indexOf("url.pathname === '/api/status'")
 );
 assert.ok(shutdownBlock.length > 0, '未找到 /api/shutdown 处理块');
-assert.match(shutdownBlock, /if \(SUPERVISED\)/, '/api/shutdown 必须按托管状态分支');
-assert.match(shutdownBlock, /else \{[\s\S]*start\.bat[\s\S]*\}[\s\S]*releaseLock/, '全局 start.bat 清理只能出现在非托管分支');
-assert.match(patchSource, /process\.exit\(EXIT_RESTART\)/, '/api/restart 必须使用重启退出码');
-step('✅ 源码断言：/api/shutdown 的全局守护清理被限制在非托管分支，/api/restart 使用退出码 10');
+assert.match(shutdownBlock, /legacyShutdown\.shutdown\(0\)/, '/api/shutdown 必须经过统一资源清理后以 0 退出');
+assert.doesNotMatch(shutdownBlock, /Get-CimInstance|Stop-Process|start\.bat|execFileSync|process\.exit\(|releaseLock\(/,
+  '/api/shutdown 不得执行全局守护清理，也不得绕过 awaited shutdown 提前释放锁或退出');
+assert.match(patchSource, /legacyShutdown\.shutdown\(EXIT_RESTART\)/, '/api/restart 必须清理完成后使用重启退出码');
+const shutdownSource = fs.readFileSync(path.join(ROOT, 'src', 'app', 'legacy-shutdown.js'), 'utf8');
+assert.match(shutdownSource, /lifecycle\.stop\(\)\.then\(report\s*=>/, '统一 shutdown 必须等待 lifecycle.stop 的完成报告');
+assert.match(shutdownSource, /if\s*\(report\.ok\)\s*processRef\.exit\(exitCode\)/, '只有资源清理确认成功后才允许退出');
+assert.match(shutdownSource, /name:\s*'StateDir owner',\s*requireCleanShutdown:\s*true/, 'StateDir owner 必须以成功清理为释放前提');
+assert.match(patchSource, /legacyShutdown\.registerServer\(dataServer/, '数据面必须由统一 shutdown 持有并等待关闭');
+step('✅ 源码断言：关闭和重启等待 owned shutdown；无全局 start.bat 清理，失败保留 StateDir owner');
 
 // 管理界面由原生桌面端提供；Core 只保留程序化 API 与桌面端 IPC，不再渲染 HTML。
 assert.doesNotMatch(patchSource, /function\s+renderFatalErrorPage\s*\(/, 'Core 不应再渲染 HTML 致命错误页');
@@ -205,6 +211,8 @@ try {
       assert.equal(response.status, 200, '带控制台令牌应可请求重启');
       const code = await waitForExit(child);
       assert.equal(code, 10, `重启必须用退出码 10（实际 ${code}）\n--- stderr ---\n${stderr()}`);
+      assert.equal(fs.existsSync(path.join(dataDir, 'state', '.core-owner.lock')), false,
+        '重启退出前必须完成 owned cleanup 并释放 StateDir owner');
       step('✅ /api/restart：退出码 10（start.bat 因 10≠2 同样会重启，兼容不变）');
     } finally {
       if (child.exitCode === null) child.kill();
@@ -228,8 +236,11 @@ try {
         '退出后必须释放锁'
       );
       const log = fs.readFileSync(path.join(dataDir, 'state', 'bridge.log'), 'utf8');
-      assert.match(log, /启动器托管模式：跳过 start\.bat 守护循环清理/, '日志应记录跳过了全局清理');
-      step('✅ 托管 /api/shutdown：跳过全局 start.bat 清理、退出码 0、释放锁');
+      assert.equal(fs.existsSync(path.join(dataDir, 'state', '.core-owner.lock')), false,
+        '退出后必须释放 StateDir owner，不能仅释放 Legacy 锁');
+      assert.match(log, /Agent Provider 服务已关闭/, '退出前必须完成 owned Agent Provider 清理');
+      assert.match(log, /SnowLuma 保持运行/, '独立 SnowLuma 服务必须保留运行');
+      step('✅ 托管 /api/shutdown：完成 owned cleanup、无全局清理、退出码 0、释放两层锁');
     } finally {
       if (child.exitCode === null) child.kill();
     }

@@ -7,6 +7,8 @@
 //   没有任何 peer、所有 peer 离线、channel adapter 出错 —— 本节点仍然是 ready。
 
 import crypto from 'node:crypto';
+import path from 'node:path';
+import { StorageError, readJsonFile, writeJsonAtomic } from '../storage/json-file.js';
 import { capabilityManifest } from './capabilities.js';
 import {
   deriveNodeId,
@@ -77,7 +79,58 @@ export function createMeshNode({
   let pairingTls = null;         // 配对 TLS 身份（懒加载，持久化于 state/mesh/pairing-tls.json）
   let pairingServer = null;      // 配对服务器（首次会话时启动；重启后端口/证书稳定）
   let pendingPairing = null;     // exchange 已完成、等待 confirm 的配对
+  const transportFile = path.join(stateDir, 'mesh', 'transport.json');
+  let transport = { listening: false, endpoint: null, port: null, error: null };
+  let transportOperation = Promise.resolve();
+  let disposed = false;
+  let closePromise = null;
+  function serializeTransport(operation) {
+    const result = transportOperation.then(operation, operation);
+    transportOperation = result.catch(() => { /* Keep the lifecycle queue usable after a diagnosed failure. */ });
+    return result;
+  }
+  function hasPairedTransport() {
+    return trust.list().some(peer => peer.trust === 'trusted' && peer.transport === 'tcp' && trust.raw(peer.nodeId)?.peerDeviceId);
+  }
+  async function ensureTransport({ invitation = false } = {}) {
+    requireEnabled();
+    if (!invitation && !hasPairedTransport()) return { ...transport };
+    try {
+      const stored = readJsonFile(transportFile, { missing: null });
+      // Restoring a paired listener must reuse its certificate and stable port.
+      if (!invitation && !readJsonFile(path.join(stateDir, 'mesh', 'pairing-tls.json'), { missing: null })) {
+        throw meshError('PAIRING_TRANSPORT_MISSING', 'Paired TLS transport configuration is missing');
+      }
+      if (!pairingTls) pairingTls = await loadOrCreatePairingTls({ stateDir, name: identity.name, now });
+      requireEnabled();
+      if (!pairingServer) pairingServer = createMeshPairingServer({
+        tls: pairingTls,
+        handlers: { exchange: handlePairingExchange, confirm: handlePairingConfirm, mesh: handlePairingMesh },
+        log: entry => record({ direction: 'local', code: 'PAIRING_SERVER_' + entry.code, stage: 'pairing' })
+      });
+      const port = stored?.port ?? pairingTls.port;
+      const started = await pairingServer.start({ port, fallbackPort: hasPairedTransport() ? null : 0 });
+      if (disposed || isEnabled() !== true) { await pairingServer.stop(); requireEnabled(); }
+      const address = stored?.endpoint ? new URL(stored.endpoint).hostname : pickLanAddress();
+      if (!address) { await pairingServer.stop(); throw meshError('PAIRING_NO_LAN', 'No LAN address available for pairing'); }
+      const endpoint = 'https://' + address + ':' + started.port;
+      writeJsonAtomic(transportFile, { schemaVersion: 1, endpoint, port: started.port });
+      transport = { listening: true, endpoint, port: started.port, error: null };
+      return { ...transport, fallback: Boolean(started.fallback) };
+    } catch (error) {
+      if (error instanceof StorageError) error = meshError('PAIRING_TRANSPORT_' + error.code, 'Paired transport configuration could not be loaded or saved');
+      transport = { ...transport, listening: Boolean(pairingServer?.listening()), error: { code: error.code ?? 'PAIRING_TRANSPORT_FAILED', message: String(error.message).slice(0, 300) } };
+      throw error;
+    }
+  }
+  function restoreTransport() {
+    return serializeTransport(() => {
+      if (disposed) throw meshError('MESH_CLOSED', 'Device Mesh service is closed');
+      return isEnabled() === true ? ensureTransport() : { ...transport };
+    });
+  }
   function requireEnabled() {
+    if (disposed) throw meshError('MESH_CLOSED', 'Device Mesh service is closed');
     if (isEnabled() !== true) throw meshError('MESH_DISABLED', 'Device Mesh is disabled in Settings');
   }
 
@@ -497,19 +550,9 @@ export function createMeshNode({
 
   async function startPairingSession({ ttlMs } = {}) {
     requireEnabled();
-    const lan = pickLanAddress();
-    if (!lan) throw meshError('PAIRING_NO_LAN', '未检测到局域网 IPv4 地址，无法生成手机可访问的配对邀请');
-    if (!pairingTls) pairingTls = await loadOrCreatePairingTls({ stateDir, name: identity.name, now });
-    if (!pairingServer) {
-      pairingServer = createMeshPairingServer({
-        tls: pairingTls,
-        handlers: { exchange: handlePairingExchange, confirm: handlePairingConfirm, mesh: handlePairingMesh },
-        log: (entry) => record({ direction: 'local', code: 'PAIRING_SERVER_' + entry.code, stage: 'pairing' })
-      });
-    }
-    const started = await pairingServer.start({ port: pairingTls.port, fallbackPort: 0 });
-    if (isEnabled() !== true) { await pairingServer.stop(); requireEnabled(); }
-    const endpoint = 'https://' + lan + ':' + started.port;
+    const started = await serializeTransport(() => ensureTransport({ invitation: true }));
+    requireEnabled();
+    const endpoint = started.endpoint;
     const session = invitations.createSession({
       endpoint,
       peer: localPeerIdentity(),
@@ -573,14 +616,25 @@ export function createMeshNode({
     return { nodeId: peer.nodeId, response: response.payload };
   }
 
-  async function close({ revokePairing = false } = {}) {
+  function suspendTransport({ revokePairing = true } = {}) {
     if (revokePairing) {
       pendingPairing = null;
       invitations.cancel();
       invites.clear();
       for (const approval of approvals.values()) if (approval.state === 'pending') approval.state = 'revoked';
     }
-    if (pairingServer) await pairingServer.stop();
+    return serializeTransport(async () => {
+      if (pairingServer) await pairingServer.stop();
+      transport = { ...transport, listening: false };
+    });
+  }
+
+  function close() {
+    if (closePromise) return closePromise;
+    // Terminal before yielding: queued restores and pending TLS setup cannot reopen.
+    disposed = true;
+    closePromise = suspendTransport({ revokePairing: true });
+    return closePromise;
   }
 
   /** 读取已配对对端的能力清单（pin 外联，对端需提供 endpoint+tlsPin）。 */
@@ -718,6 +772,8 @@ export function createMeshNode({
 
     // ── 统一配对 v1.1（QR 邀请 / HTTPS 配对 / 配对后 Mesh 通道）────────────────
     startPairingSession,
+    restoreTransport,
+    suspendTransport,
     pairingStatus,
     cancelPairingSession,
     requestPeerCapability,
@@ -737,6 +793,7 @@ export function createMeshNode({
         protocolVersion: MESH_PROTOCOL_VERSION,
         meshEnabled: isEnabled() === true,
         coreReady: true,
+        transport: { ...transport },
         coreReadinessDependsOn: [],
         peerCount: peers.length,
         trustedCount: peers.filter((p) => p.trust === 'trusted').length,

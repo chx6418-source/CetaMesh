@@ -21,7 +21,10 @@ function makeTransportFactory({ fail = false } = {}) {
       pid: 4242,
       onClose(handler) { connection.closeHandler = handler; },
       async listTools() {
-        return [{ name: server.tools[0].name, description: 'discovered', inputSchema: { type: 'object' } }];
+        return [{ name: server.tools[0].name, description: 'discovered', inputSchema: {
+          type: 'object', properties: { ping: { type: 'integer', minimum: 0, maximum: 1024 } },
+          additionalProperties: false
+        } }];
       },
       async callTool(name, args) {
         return { content: [{ type: 'text', text: JSON.stringify({ server: server.id, name, args }) }] };
@@ -279,6 +282,10 @@ try {
   ok('MCP tool discovery：running 用真实 listTools，stopped 用目录声明（discovered=false）');
 
   // ── 5. 经工具面调用 MCP 工具：走 Capability Broker ────────────────────────
+  await assert.rejects(service.execute({method:'tools.invoke',params:{id:'mcp__snowluma__qq_status',input:{ping:'1'}}}),
+    {code:'TOOL_ARGUMENTS_INVALID'},'fixture negotiated schema still rejects the wrong ping type');
+  await assert.rejects(service.execute({method:'tools.invoke',params:{id:'mcp__snowluma__qq_status',input:{ping:1,unknown:true}}}),
+    {code:'TOOL_ARGUMENTS_INVALID'},'fixture negotiated schema still rejects undeclared fields');
   const invoked = await service.execute({ method: 'tools.invoke', params: { id: 'mcp__snowluma__qq_status', input: { ping: 1 } } });
   assert.equal(invoked.status, 'completed');
   const payload = JSON.parse(invoked.result.content[0].text);

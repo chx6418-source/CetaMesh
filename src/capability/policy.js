@@ -1,12 +1,24 @@
 import {PERMISSIONS,FORBIDDEN_PERMISSIONS,RISK_RANK,capabilityError} from './types.js';
-export function createCapabilityPolicy({resolveWorkspace,resolveTask,isTaskHandoff=()=>false}={}){
- return {async authorize(request,entry){
+import {requestFingerprint} from './approval.js';
+export function createCapabilityPolicy({resolveWorkspace,resolveTask,resolveGrants,isTaskHandoff=()=>false}={}){
+ return {authorize(request,entry){
   const permission=entry.permission??entry.id;
+  if(entry.descriptorVersion&&request.approvalId&&request.approvalBinding?.descriptorVersion!==entry.descriptorVersion)
+   throw capabilityError('APPROVAL_EXPIRED','Reconfirm the current capability version before execution');
+  if(request.approvalBinding?.descriptorVersion!==undefined
+    &&request.approvalBinding.descriptorVersion!==entry.descriptorVersion)
+   throw capabilityError('APPROVAL_EXPIRED','Capability version changed while approval was pending');
   if(FORBIDDEN_PERMISSIONS.includes(permission))throw capabilityError('PERMISSION_FORBIDDEN',permission);
   if(!PERMISSIONS.includes(permission))throw capabilityError('UNKNOWN_PERMISSION',permission);
   const actor=request.actor;
   if(actor.kind==='external'||actor.kind==='device')throw capabilityError('PERMISSION_DENIED','External/device callers require a trusted restricted adapter');
   if(actor.kind!=='owner' && !actor.grants?.capabilities?.includes(entry.id))throw capabilityError('PERMISSION_DENIED',entry.id+' not granted');
+  // Reject a foreign Task before consulting its grants or any Task/Workspace state.
+  if(actor.kind==='agent'&&(!request.taskId||!actor.grants?.taskIds?.includes(request.taskId)))
+   throw capabilityError('TASK_NOT_AUTHORIZED','Assigned task required');
+  const currentGrants=actor.kind==='agent'&&resolveGrants?resolveGrants(request.taskId):actor.grants;
+  if(actor.kind==='agent'&&resolveGrants&&requestFingerprint({grants:currentGrants})!==requestFingerprint({grants:actor.grants}))
+   throw capabilityError('PERMISSION_DENIED','Task grants changed; request must be authorized again');
   if(request.taskId){
    if(actor.kind==='agent'&&isTaskHandoff(request.taskId))throw capabilityError('TASK_HANDOFF_IN_FLIGHT','Task Handoff has not committed the target Agent authority');
    const task=resolveTask?.(request.taskId);
@@ -16,7 +28,10 @@ export function createCapabilityPolicy({resolveWorkspace,resolveTask,isTaskHando
    if(actor.kind==='agent'&&['paused','blocked'].includes(task.status))throw capabilityError('TASK_NOT_AUTHORIZED','Paused or interrupted Task cannot execute Agent capabilities');
    if(request.assignment && (task.currentAgent?.provider!==request.assignment.provider || task.currentAgent?.sessionId!==request.assignment.sessionId))
     throw capabilityError('AGENT_ASSIGNMENT_EXPIRED','Agent Session no longer owns this Task');
-   if(request.approvalBinding && (task.rev!==request.approvalBinding.rev
+   if(request.approvalBinding && (request.approvalBinding.version!==2
+     || (task.authorizationRevision??task.rev)!==request.approvalBinding.authorizationRevision
+     || task.workspaceId!==request.approvalBinding.workspaceId
+     || requestFingerprint({grants:currentGrants})!==request.approvalBinding.grantsFingerprint
      || task.currentAgent?.provider!==request.approvalBinding.provider
      || task.currentAgent?.sessionId!==request.approvalBinding.sessionId))
     throw capabilityError('APPROVAL_EXPIRED','Task or Agent assignment changed while approval was pending');
@@ -48,6 +63,9 @@ export function createCapabilityPolicy({resolveWorkspace,resolveTask,isTaskHando
   const reviewed = actor.kind==='extension' && actor.grants?.approvedCapabilities?.includes(entry.id);
   const task=request.taskId?resolveTask?.(request.taskId):null;
   return {allowed:true,risk,approvalRequired:RISK_RANK[risk]>=RISK_RANK.high&&!reviewed,
-   approvalBinding:task?{rev:task.rev,provider:task.currentAgent?.provider,sessionId:task.currentAgent?.sessionId}:null};
+   approvalBinding:task?{version:2,...(entry.descriptorVersion?{descriptorVersion:entry.descriptorVersion}:{}),authorizationRevision:task.authorizationRevision??task.rev,
+    workspaceId:task.workspaceId,grantsFingerprint:requestFingerprint({grants:currentGrants}),
+    provider:task.currentAgent?.provider,sessionId:task.currentAgent?.sessionId}:
+    entry.descriptorVersion?{version:2,descriptorVersion:entry.descriptorVersion}:null};
  }};
 }

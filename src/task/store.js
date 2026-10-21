@@ -103,7 +103,9 @@ function normalizeLoaded(raw) {
     failure: raw.failure && typeof raw.failure === 'object' ? raw.failure : null,
     createdAt: Number(raw.createdAt) || 0,
     updatedAt: Number(raw.updatedAt) || 0,
-    rev: Number.isSafeInteger(raw.rev) && raw.rev > 0 ? raw.rev : 1
+    rev: Number.isSafeInteger(raw.rev) && raw.rev > 0 ? raw.rev : 1,
+    authorizationRevision: Number.isSafeInteger(raw.authorizationRevision) && raw.authorizationRevision > 0
+      ? raw.authorizationRevision : raw.rev
   };
 }
 
@@ -201,6 +203,12 @@ export function createTaskStore({ stateDir, now = () => Date.now(), idFactory } 
       throw taskError('TASK_CONFLICT', '任务已被其它操作修改（期望 rev ' + expectedRev + '，当前 rev ' + task.rev + '）');
     }
     const next = mutate(clone(task));
+    // Progress, reports and checkpoints are observational. Authority changes,
+    // including an away-and-back assignment, invalidate pending approval.
+    const authority = row => JSON.stringify(['goal','requirements','status','workspaceId','currentAgent','modelConfig','ownerContext']
+      .map(key => row[key] ?? null));
+    next.authorizationRevision = (task.authorizationRevision ?? task.rev)
+      + (authority(task) === authority(next) ? 0 : 1);
     next.rev = task.rev + 1;
     next.updatedAt = now();
     tasks.set(key, next);

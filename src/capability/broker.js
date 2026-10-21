@@ -27,7 +27,7 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
   catch(error){audit({requestId:request.requestId,capability:request.capability,status:'dispatch-journal-failed',code:error.code??'WRITE_FAILED'});}
  }
  function abortError(signal,inFlight=false){
-  if(!inFlight)return signal?.reason?.code?signal.reason:capabilityError('INVOKE_CANCELLED','Capability operation cancelled');
+  if(!inFlight)return typeof signal?.reason?.code==='string'?signal.reason:capabilityError('INVOKE_CANCELLED','Capability operation cancelled');
   const error=capabilityError('INVOKE_CANCEL_UNCONFIRMED','Cancellation requested; external side effect is not confirmed cancelled');
   error.effectStatus='unknown';
   return error;
@@ -52,6 +52,8 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
    if(signal?.aborted)throw abortError(signal);
    // Boundary validation occurs before approval and is repeated at dispatch.
    await entry.validate?.(request);
+   await policy.authorize(request,entry);
+   if(signal?.aborted)throw abortError(signal);
    if(request.approvalId){const row=approval.get(request.approvalId);if(row.fingerprint!==requestFingerprint(request))throw capabilityError('APPROVAL_MISMATCH','Request changed');}
    if(decision.approvalRequired && !(request.actor.kind==='owner'&&request.approved===true)){
     if(request.approvalId)approval.consume(request.approvalId,request);
@@ -59,9 +61,16 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
    }
    claimDispatch(request,entry);
    const providerRequest=signal?{...request,signal}:request;
-   const providerPromise=Promise.resolve().then(()=>entry.execute(providerRequest));
+   const providerPromise=Promise.resolve().then(async()=>{
+    if(signal?.aborted)throw abortError(signal);
+    if(registry.require(request.capability)!==entry)throw capabilityError('APPROVAL_EXPIRED','Capability changed before dispatch');
+    const authorized=policy.authorize(request,entry);
+    if(authorized&&typeof authorized.then==='function')await authorized;
+    if(signal?.aborted)throw abortError(signal);
+    return entry.execute(providerRequest);
+   });
    providerPromise.then(()=>settleDispatch(request,'completed'),error=>settleDispatch(request,error.effectStatus==='unknown'?'outcome-unknown':'failed'));
-   const result=await awaitWithAbort(providerPromise,signal);
+   const result=await (entry.cancellationAware===true&&request.actor.kind==='agent'?providerPromise:awaitWithAbort(providerPromise,signal));
    audit({requestId:request.requestId,capability:entry.id,status:'completed',actor:request.actor.id});
    return {requestId:request.requestId,status:'completed',capability:entry.id,result};
   }catch(error){audit({requestId:request.requestId,capability:request.capability,
@@ -69,7 +78,7 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
  }
  return {execute,register:registry.register,list:registry.list,registry,approvals:approval,
   dispatchStatus:id=>Object.hasOwn(dispatches,String(id))?{capability:dispatches[String(id)].capability,status:dispatches[String(id)].status,at:dispatches[String(id)].at}:null,
-  async decide({id,approve,actor}){
+  async decide({id,approve,actor},{signal}={}){
   if(actor?.kind!=='owner')throw capabilityError('PERMISSION_DENIED','Owner approval required');
   if(approve){
    const pending=approval.get(id);
@@ -78,7 +87,7 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
   }
   const row=approval.decide(id,approve,actor);
   if(!approve)return {status:'rejected',approvalId:id};
-  try{return await execute({...row.request,approvalId:id});}
+  try{return await execute({...row.request,approvalId:id},{signal});}
   catch(error){approval.revoke(id,error.code??'execution-failed');throw error;}
  }};
 }

@@ -25,7 +25,7 @@ import {
   reviewSummaryLines,
   manifestFingerprint
 } from '../src/extension/index.js';
-import { readJsonFile } from '../src/storage/json-file.js';
+import { readJsonFile, writeJsonAtomic } from '../src/storage/json-file.js';
 import { createDesktopUiService } from '../src/desktop/ui-service.js';
 import { startIpcProtocol, IPC_PROTOCOL_VERSION } from '../src/control/ipc-protocol.js';
 import { createCapabilityBroker } from '../src/capability/index.js';
@@ -471,12 +471,19 @@ try {
   selectionRuntime.enable({ id: 'test.trusted-vm' });
   const memoryPackRoot = path.join(root, 'selection-memory-pack');
   fs.mkdirSync(memoryPackRoot, { recursive: true });
-  fs.writeFileSync(path.join(memoryPackRoot, 'pack.json'), JSON.stringify({ schemaVersion: 1, kind: 'memory-pack', base: { summary: '', entries: [] } }));
+  writeJsonAtomic(path.join(memoryPackRoot, 'pack.json'), { schemaVersion: 1, kind: 'memory-pack', base: { summary: '', entries: [] } });
   const memoryPackManifest = { ...baseManifest({ id: 'test.memory-pack', type: 'memory-pack', entry: 'pack.json',
     capabilities: [{ id: 'memory.list', kind: 'memory', title: 'List', requires: [] }] }) };
-  selectionStore.put({ id: memoryPackManifest.id, version: memoryPackManifest.version, name: memoryPackManifest.name,
-    type: 'memory-pack', status: 'installed', permissions: [], manifest: memoryPackManifest,
-    sourceRoot: memoryPackRoot, fingerprint: manifestFingerprint(memoryPackManifest) });
+  // Host selection must use the real reviewed installer, including Memory Packs.
+  // A hand-inserted sourceRoot outside packages/id/version has no install authority.
+  writeJsonAtomic(path.join(memoryPackRoot, 'extension.json'), memoryPackManifest);
+  const memoryPackReview = selectionRuntime.review({ sourceDir: memoryPackRoot });
+  const memoryPackInstalled = selectionRuntime.install({ sourceDir: memoryPackRoot,
+    approval: { approved: true, token: memoryPackReview.review.token } });
+  equal('Memory Pack selection fixture uses the managed immutable version directory',
+    memoryPackInstalled.entry.sourceRoot, path.join(selectionStore.packagesDir, memoryPackManifest.id, memoryPackManifest.version));
+  equal('Memory Pack selection fixture retains the exact reviewed package binding',
+    memoryPackInstalled.entry.reviewToken, memoryPackReview.review.token);
   selectionRuntime.enable({ id: memoryPackManifest.id });
   equal('ordinary, trusted VM, and Memory Pack host selection', selectedKinds, ['process', 'vm', 'memory-pack']);
   const selectedOverview = selectionRuntime.overview();

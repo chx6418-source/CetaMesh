@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { createApprovalOperations } from './operations.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { resolveInside, canonicalizeRoot, assertSafeRootForm } from '../workspace/boundary.js';
@@ -60,7 +61,7 @@ const WORKSPACE_TOOL_DESCRIPTORS = Object.freeze({
  * which bind the Owner identity; Agent/Extension grants never come from IPC. */
 export function createCapabilityService({ stateDir, workspaceService, memoryService,
   taskRuntime, agentBroker, bindAgentSession, resumeAgentApproval = null, searchImpl = null, audit = () => {}, now,
-  isolatedRunner = null, onTaskObservation = null } = {}) {
+  isolatedRunner = null, onTaskObservation = null, onOperation = () => {} } = {}) {
   const file = stateDir ? path.join(stateDir, 'capability', 'task-grants.json') : null;
   let grants = file ? readJsonFile(file, { missing: {} }) : {};
   const provisioning = new Map();
@@ -72,12 +73,12 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
   // previous turn/end as if it belonged to its own new turn.
   const taskFollowPositions = new Map();
   const TASK_FOLLOW_MAX_SESSIONS = 64;
-  function rememberTaskFollowPosition(key, taskId, sequence) {
+  function rememberTaskFollowPosition(key, taskId, sequence, terminalTurns) {
     if (!Number.isSafeInteger(sequence) || sequence < 1) return;
     const previous = taskFollowPositions.get(key);
     const highest = previous?.taskId === taskId ? Math.max(previous.sequence, sequence) : sequence;
     taskFollowPositions.delete(key);
-    taskFollowPositions.set(key, { taskId, sequence: highest });
+    taskFollowPositions.set(key, { taskId, sequence: highest, terminalTurns: terminalTurns ? [...terminalTurns] : previous?.terminalTurns ?? [] });
     // These are in-process resumptions only; do not silently claim durability.
     while (taskFollowPositions.size > TASK_FOLLOW_MAX_SESSIONS * 4) {
       taskFollowPositions.delete(taskFollowPositions.keys().next().value);
@@ -136,6 +137,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       expectedTurns: options.expectTurn === true ? 1 : 0,
       sequence: Math.max(requestedSequence, previousSequence) };
     const answers = new Map();
+    const terminalTurns = new Set(savedPosition?.taskId === taskId ? savedPosition.terminalTurns ?? [] : []);
     taskFollowConsumers.set(key, consumer);
     consumer.promise = (async () => {
       let failures = 0;
@@ -187,16 +189,23 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
               const content = event.data?.message?.content;
               const answer = Array.isArray(content) ? content.filter(part => part?.type === 'text')
                 .map(part => String(part.text ?? '')).join('') : '';
-              if (answer) answers.set(turnId, answer.slice(0, 8000));
+              if (answer && !terminalTurns.has(turnId)) { answers.set(turnId, answer.slice(0, 8000)); if (answers.size > 256) answers.delete(answers.keys().next().value); }
             }
             if (event?.type === 'turn/end') {
               sawTurnEnd = true;
+              if (['waiting', 'waiting-approval'].includes(event.data?.reason?.kind)) {
+                consumer.expectedTurns = Math.max(1, consumer.expectedTurns);
+                rememberTaskFollowPosition(key, taskId, consumer.sequence, terminalTurns);
+                continue;
+              }
+              if (turnId && terminalTurns.has(turnId)) continue;
+              if (turnId) { terminalTurns.add(turnId); if (terminalTurns.size > 256) terminalTurns.delete(terminalTurns.values().next().value); }
               const answer = answers.get(turnId);
               answers.delete(turnId);
               const current = taskFor(taskId);
               if (!current || current.currentAgent?.provider !== provider || current.currentAgent?.sessionId !== sessionId
                 || current.status !== 'running') {
-                rememberTaskFollowPosition(key, taskId, consumer.sequence);
+                rememberTaskFollowPosition(key, taskId, consumer.sequence, terminalTurns);
                 continue;
               }
               if (event.data?.reason?.kind === 'completed' && answer) {
@@ -218,7 +227,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
               // DSH Follow may end once per turn while another request is queued.
               // Keep its independent cursor until all scheduled turns are projected.
               if (consumer.expectedTurns > 0) consumer.expectedTurns -= 1;
-              rememberTaskFollowPosition(key, taskId, consumer.sequence);
+              rememberTaskFollowPosition(key, taskId, consumer.sequence, terminalTurns);
               if (consumer.expectedTurns === 0) { consumer.finished = true; return; }
             }
           }
@@ -287,6 +296,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
   const resolveWorkspace = id => workspaceService?.describeWorkspace(id);
   const broker = createCapabilityBroker({
     policy: createCapabilityPolicy({ resolveWorkspace, resolveTask: taskFor,
+      resolveGrants: taskId => grants[taskId],
       isTaskHandoff: taskId => taskHandoffGuard(taskId) }),
     approval: createCapabilityApproval({ stateDir, now }), audit, stateDir
   });
@@ -409,7 +419,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
   }
   if (workspaceService) {
     for (const [method, id] of Object.entries(WORKSPACE_CAPABILITIES)) {
-      broker.register({ id, permission: id === 'workspace.apply' ? 'filesystem.write' : id, provider: 'workspace', workspace: id !== 'workspace.create',
+      broker.register({ id, cancellationAware: id === 'test.run', permission: id === 'workspace.apply' ? 'filesystem.write' : id, provider: 'workspace', workspace: id !== 'workspace.create',
         description: WORKSPACE_TOOL_DESCRIPTORS[id][0],
         inputSchema: WORKSPACE_TOOL_DESCRIPTORS[id][1],
         category: id.startsWith('filesystem.') ? 'filesystem' : id.startsWith('git.') ? 'git' : 'workspace',
@@ -482,7 +492,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
               // Owner 的 testCommand 字符串，也绝不接受调用方 shell）。
               // 到达这里意味着 Owner 已经 Approve Once（risk=high 审批已消费）。
               return isolatedRunner.run({ workspaceId: request.workspaceId,
-                tool: request.input.tool, args: request.input.args, timeoutMs: request.input.timeoutMs });
+                tool: request.input.tool, args: request.input.args, timeoutMs: request.input.timeoutMs, signal: request.signal });
             }
             if (id === 'workspace.apply') {
               return workspaceService.applyChanges({ id: request.workspaceId, changes: request.input.changes, actor: request.actor.id });
@@ -784,19 +794,19 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       });
     }
   });
-  async function execute({ method, params = {} } = {}) {
-    if (method === 'capability.list') return { capabilities: broker.list() };
-    if (method === 'capability.approval.list') return { approvals: broker.approvals.list() };
-    if (method === 'capability.approval.decide') {
+  const operations = createApprovalOperations({ stateDir, getApproval: id => broker.approvals.get(id),
+    cancelApproval: id => broker.approvals.cancel(id, 'owner-cancelled-before-dispatch'),
+    execute: (params, context) => decideApproval(params, context), notify: onOperation });
+  async function decideApproval(params, { signal } = {}) {
       const original = broker.approvals.get(params.id).request;
-      const result = await broker.decide({ id: params.id, approve: params.approve === true, actor: OWNER_ACTOR });
+      const result = await broker.decide({ id: params.id, approve: params.approve === true, actor: OWNER_ACTOR }, { signal });
       if (original.capability === 'workspace.apply') rememberWorkspaceImport(params.id, {
         status: result.status,
         ...(result.status === 'completed' ? { result: result.result } : {})
       });
       if (typeof approvalDecisionListener === 'function') {
         const resumed = await approvalDecisionListener({ approvalId: params.id,
-          requestFingerprint: requestFingerprint(original), decisionResult: result, request: original });
+          requestFingerprint: requestFingerprint(original), decisionResult: result, request: original, signal });
         if (resumed) return { ...result, turnResumed: resumed.resumed === true, resumePending: resumed.pending === true,
           ...(resumed.error ? { resumeError: resumed.error } : {}) };
       }
@@ -817,7 +827,14 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
         }
       }
       return result;
-    }
+  }
+  async function execute({ method, params = {} } = {}) {
+    if (method === 'capability.list') return { capabilities: broker.list() };
+    if (method === 'capability.approval.list') return { approvals: broker.approvals.list() };
+    if (method === 'capability.approval.decide') return params.defer === true ? operations.submit({ id: params.id, approve: params.approve === true }) : decideApproval(params);
+    if (method === 'capability.operation.get') return operations.get(params.id);
+    if (method === 'capability.operation.list') return { operations: operations.list() };
+    if (method === 'capability.operation.cancel') return operations.cancel(params.id);
     if (method === 'capability.execute') return broker.execute({ ...params, actor: OWNER_ACTOR });
     throw capabilityError('METHOD_NOT_FOUND', method);
   }
@@ -866,6 +883,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     return result;
   }
   return { execute, executeWorkspace, executeMemory, broker, grantTask, principalForTask, refreshTaskWorkspaceGrant, memoryPrincipal,
+    cancelTaskOperations: scope => operations.cancelScope(scope),
     recoveryForTask(taskId) {
       return Object.values(journal).some(row => row?.taskId === taskId && row.status === 'in-flight')
         ? { state: 'needs-reconciliation', capability: 'agent.run' } : null;
@@ -896,6 +914,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     },
     applyAgentWorkspaceChanges, workspaceImportStatus, cancelWorkspaceImportApproval,
     async close() {
+      await operations.close();
       const consumers = [...taskFollowConsumers.values()];
       for (const consumer of consumers) consumer.controller.abort();
       await Promise.allSettled(consumers.map(consumer => consumer.promise));

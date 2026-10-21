@@ -69,6 +69,19 @@ async function settled(id) {
   await eventually(async () => (await rpc('chat.status', { id })).turn === null);
   return rpc('ui.chat.history', { id });
 }
+async function finishApproval(id, approve) {
+  const accepted = await rpc('ui.approvals.decide', { id, approve });
+  assert.equal(accepted.status, 'accepted');
+  assert.equal(typeof accepted.operationId, 'string');
+  const operation = await eventually(async () => {
+    const current = await rpc('ui.approvals.operation', { id: accepted.operationId });
+    return ['completed', 'failed', 'unknown', 'cancelled'].includes(current.status) ? current : null;
+  });
+  assert.equal(operation.status, 'completed', JSON.stringify(operation));
+  assert.equal(operation.decision, approve ? 'approved' : 'rejected');
+  assert.equal(operation.turnResumed, true);
+  return operation;
+}
 let ws;
 try {
   await start();
@@ -84,13 +97,13 @@ try {
   const writeSession = await session('M6C_WRITE controlled artifact');
   const pending = await eventually(async () => { const rows = (await rpc('ui.approvals.list')).approvals; return rows?.find(row => row.status === 'pending' && row.capability === 'filesystem.write'); });
   assert.equal(fs.existsSync(path.join(workspace, 'created.txt')), false, 'approval is checked before real write');
-  await rpc('ui.approvals.decide', { id: pending.id, approve: true });
+  await finishApproval(pending.id, true);
   const written = await settled(writeSession);
   assert.equal(fs.readFileSync(path.join(workspace, 'created.txt'), 'utf8'), 'M6C generated file');
   assert.ok(written.messages.some(row => row.role === 'assistant' && row.text.startsWith('M6C final:')));
   const denySession = await session('M6C_DENY controlled write');
   const rejected = await eventually(async () => (await rpc('ui.approvals.list')).approvals?.find(row => row.status === 'pending' && row.capability === 'filesystem.write'));
-  await rpc('ui.approvals.decide', { id: rejected.id, approve: false }); await settled(denySession);
+  await finishApproval(rejected.id, false); await settled(denySession);
   assert.equal(fs.existsSync(path.join(workspace, 'denied.txt')), false);
   const cancelledSession = await session('M6C_CANCEL pending write');
   const cancelledApproval = await eventually(async () => (await rpc('ui.approvals.list')).approvals?.find(row => row.status === 'pending' && row.capability === 'filesystem.write'));

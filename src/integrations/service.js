@@ -16,6 +16,21 @@ import { createIntegrationRegistry } from './registry.js';
 import { createMcpRuntime } from './mcp-runtime.js';
 import { createCapabilityBroker } from '../capability/broker.js';
 import { OWNER_ACTOR } from '../capability/types.js';
+import crypto from 'node:crypto';
+import { validateSchema } from '../model/input-schema.js';
+
+const toolCallSchema = { type: 'object', properties: {
+  toolId: { type: 'string', minLength: 1, maxLength: 200 },
+  input: { type: 'object', additionalProperties: true, maxProperties: 64 }
+}, required: ['toolId'], additionalProperties: false };
+function hashValue(value) {
+  function canonical(item) {
+    if (Array.isArray(item)) return item.map(canonical);
+    if (item && typeof item === 'object') return Object.fromEntries(Object.keys(item).sort().map(key => [key, canonical(item[key])]));
+    return item;
+  }
+  return crypto.createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
+}
 
 export function createIntegrationService({
   stateDir = null,
@@ -119,9 +134,10 @@ export function createIntegrationService({
     const local = (localServices?.() ?? {})[plugin.localService] ?? null;
     if (!local) return null;
     return {
-      status: local.status ?? 'not-checked', installed: local.installed === true,
+      status: local.status ?? 'not-checked', installed: typeof local.installed === 'boolean' ? local.installed : null,
       running: local.running === true, ready: local.ready === true,
-      configured: local.configured === true, version: local.version ?? null,
+      authenticated: local.authenticated === true, canSend: local.canSend === true, configured: typeof local.configured === 'boolean' ? local.configured : null, version: local.version ?? null,
+      accountId: typeof local.accountId === 'string' ? local.accountId : null,
       httpUrl: typeof local.httpUrl === 'string' ? local.httpUrl : null,
       wsUrl: typeof local.wsUrl === 'string' ? local.wsUrl : null,
       accessTokenConfigured: local.accessTokenConfigured === true,
@@ -139,10 +155,30 @@ export function createIntegrationService({
     }
   }
 
-  async function runTool(toolId, input) {
+  function validateTarget(request, { executing = false } = {}) {
+    validateSchema(toolCallSchema, request.input);
+    if (JSON.stringify(request.input).length > 128 * 1024) throw integrationError('TOOL_ARGUMENTS_INVALID', '工具调用输入过大');
+    const {toolId, input = {}} = request.input;
+    assertQqToolConnectorEnabled(toolId);
+    const {tool} = resolvedRegistry.invokeGuard(toolId);
+    if (tool.capability !== request.capability) throw integrationError('TOOL_CAPABILITY_MISMATCH', '目标工具与调用能力不匹配');
+    const schema = resolvedRegistry.toolView(tool).schema;
+    validateSchema(schema, input);
+    const binding = {toolId:tool.id,inputHash:hashValue(input),schemaHash:hashValue(schema)};
+    if (request.integrationBinding) {
+      if (request.integrationBinding.schemaHash !== binding.schemaHash) throw integrationError('TOOL_SCHEMA_CHANGED', '工具输入约束已变化，请重新请求审批');
+      if (hashValue(request.integrationBinding) !== hashValue(binding)) throw integrationError('APPROVAL_MISMATCH', '工具输入与审批不匹配');
+    } else if (executing || request.approvalId) {
+      throw integrationError('APPROVAL_MISMATCH', '工具调用缺少经过验证的绑定');
+    } else request.integrationBinding = binding;
+    return tool;
+  }
+
+  async function runTool(request) {
+    const {toolId, input} = request.input;
     // 在能力执行点**重新**校验一次：审批期间开关可能已变化（TOCTOU）。
     assertQqToolConnectorEnabled(toolId);
-    const { tool } = resolvedRegistry.invokeGuard(toolId);
+    const tool = validateTarget(request, {executing:true});
     if (tool.source === 'mcp') return runtime.call(tool.serverId, tool.name, input ?? {});
     if (tool.source === 'agent') {
       if (!agentToolExecutor) throw integrationError('PROVIDER_UNAVAILABLE', 'Agent Provider 工具执行器未绑定：' + tool.id);
@@ -225,15 +261,15 @@ export function createIntegrationService({
     const descriptors = {
       [TOOL_CAPABILITIES.read]: {
         description: 'Read or invoke an available integration tool through the registered tool broker.',
-        inputSchema: { type: 'object', properties: { toolId: { type: 'string' }, input: { type: 'object' } }, required: ['toolId'], additionalProperties: false }
+        inputSchema: toolCallSchema
       },
       [TOOL_CAPABILITIES.write]: {
         description: 'Invoke an available integration tool that may change local or connected data.',
-        inputSchema: { type: 'object', properties: { toolId: { type: 'string' }, input: { type: 'object' } }, required: ['toolId'], additionalProperties: false }
+        inputSchema: toolCallSchema
       },
       [TOOL_CAPABILITIES.admin]: {
         description: 'Invoke a high-risk registered integration tool after Owner approval.',
-        inputSchema: { type: 'object', properties: { toolId: { type: 'string' }, input: { type: 'object' } }, required: ['toolId'], additionalProperties: false }
+        inputSchema: toolCallSchema
       },
       [TOOL_CAPABILITIES.mcpManage]: { modelCallable: false },
       [TOOL_CAPABILITIES.pluginManage]: { modelCallable: false }
@@ -247,6 +283,10 @@ export function createIntegrationService({
         risk: TOOL_CAPABILITY_RISK[id],
         ...(descriptors[id] ?? {}),
         validate(request) {
+          if ([TOOL_CAPABILITIES.read, TOOL_CAPABILITIES.write, TOOL_CAPABILITIES.admin].includes(id)) {
+            validateTarget(request);
+            return;
+          }
           const action = request.input?.action;
           if (id === TOOL_CAPABILITIES.mcpManage && action === undefined) {
             throw integrationError('INVALID_PARAMS', 'MCP 管理需要 action');
@@ -258,7 +298,7 @@ export function createIntegrationService({
         execute: request => {
           const input = request.input ?? {};
           if (input.action !== undefined) return applyManagement(input);
-          return runTool(input.toolId, input.input);
+          return runTool(request);
         }
       });
     }

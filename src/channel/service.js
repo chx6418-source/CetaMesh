@@ -59,9 +59,13 @@ export function createChannelService({ now, stateDir, dataRoot, config = {}, con
           options: { ...request.input.options, requestId: request.requestId, kind: request.input.kind, approvalVerified: true } });
       } catch (error) {
         if (['QQ_OUTCOME_UNKNOWN', 'CHANNEL_PROCESS_CLOSED', 'CHANNEL_COMMAND_TIMEOUT'].includes(error.code)) error.effectStatus = 'unknown';
+        onEvent('channel.delivery', { channelId: 'qq', accountId: request.input.accountId,
+          requestId: request.requestId, status: error.effectStatus === 'unknown' ? 'outcome-unknown' : 'failed', code: error.code ?? 'QQ_SEND_FAILED' });
         throw error;
       }
       if (result?.status === 'outcome-unknown') throw Object.assign(channelError('QQ_OUTCOME_UNKNOWN', 'QQ delivery requires receipt verification; do not resend'), { effectStatus: 'unknown', requestId: request.requestId });
+      onEvent('channel.delivery', { channelId: 'qq', accountId: request.input.accountId,
+        requestId: request.requestId, messageId: result?.messageId ?? result?.message_id, status: result?.status ?? 'sent' });
       return result;
   }
   function send(request) {
@@ -90,7 +94,7 @@ export function createChannelService({ now, stateDir, dataRoot, config = {}, con
           journal.state(id, event, 'acknowledged');
         } catch (error) {
           journal.state(id, event, 'outcome-unknown');
-          onEvent('channel.delivery', { consumerId: id, eventId: event.eventId, status: 'outcome-unknown', code: error?.code ?? 'CONSUMER_FAILED' });
+          onEvent('channel.delivery', { channelId: 'qq', accountId: event.accountId, consumerId: id, eventId: event.eventId, status: 'outcome-unknown', code: error?.code ?? 'CONSUMER_FAILED' });
           break;
         }
       }
@@ -112,7 +116,8 @@ export function createChannelService({ now, stateDir, dataRoot, config = {}, con
     const result = journal.append({ channelId: 'qq', accountId: String(health.accountId), target: `${kind}:${id}`,
       messageId, externalUserId: userId, sessionId: `qq:${health.accountId}:${kind}:${id}`,
       actor: { kind: 'external', id: `qq:${health.accountId}:${userId}` }, native: structuredClone(native) });
-    onEvent('channel.message', { eventId: result.eventId, sequence: result.sequence });
+    onEvent('channel.message', { channelId: 'qq', accountId: String(health.accountId), messageId,
+      eventId: result.eventId, sequence: result.sequence });
     void drain();
     return result;
   }
@@ -163,7 +168,9 @@ export function createChannelService({ now, stateDir, dataRoot, config = {}, con
         health = { ...await connector.health(), state: health.state };
         registry.setState('qq', health.ready ? 'connected' : 'unavailable');
       }
-      return health;
+      return { ...health, installed: true, configured: typeof config.snowluma?.wsUrl === 'string' && /^wss?:\/\//.test(config.snowluma.wsUrl),
+        running: Boolean(connector) && health.state !== 'crashed', authenticated: health.ready === true && Boolean(health.accountId),
+        canSend: health.ready === true && isQqConnectorEnabled({ stateDir }) };
     },
     'channel.delivery.status': () => journal.snapshot(),
     'channel.qq.send.status': p => sendReceipt(p.requestId, p.accountId)

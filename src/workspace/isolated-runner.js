@@ -94,31 +94,31 @@ function minimalEnv() {
   return env;
 }
 
-function killTree(child, platform) {
-  if (platform === 'win32') {
-    // execFile 的 timeout 只杀直接子进程；npm.cmd 会派生更深的 cmd/node，须杀树。
-    return new Promise((resolve) => {
-      if (!child.pid) {
-        resolve();
-        return;
-      }
+function killTree(child) {
+  if (!child.pid) return Promise.resolve(false);
+  if (process.platform === 'win32') {
+    return new Promise(resolve => {
       try {
-        execFile('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true }, (error) => {
-          if (error) {
-            // taskkill may not start if the direct child exited during timeout handling.
-            try { child.kill('SIGKILL'); } catch { /* timed out process may already have exited */ }
-          }
-          resolve();
-        });
-      } catch (error) {
-        // taskkill may be unavailable; still terminate the direct child before returning.
-        try { child.kill('SIGKILL'); } catch { /* timed out process may already have exited */ }
-        resolve();
+        execFile('taskkill', ['/pid', String(child.pid), '/T', '/F'],
+          { windowsHide: true, timeout: 4000 }, error => resolve(!error));
+      } catch {
+        resolve(false); // Failure to start taskkill cannot confirm tree termination.
       }
     });
   }
-  try { child.kill('SIGKILL'); } catch { /* timed out process may already have exited */ }
-  return Promise.resolve();
+  try {
+    // detached below creates an invocation-owned group; never signal a host group.
+    process.kill(-child.pid, 'SIGKILL');
+    return Promise.resolve(true);
+  } catch {
+    return Promise.resolve(false); // Failed group termination is never confirmed cancellation.
+  }
+}
+
+function cancelled(confirmed = true) {
+  return Object.assign(capabilityError(confirmed ? 'INVOKE_CANCELLED' : 'INVOKE_CANCEL_UNCONFIRMED',
+    confirmed ? '测试执行已取消' : '无法确认测试进程树已经停止'),
+    { effectStatus: confirmed ? 'cancelled' : 'unknown' });
 }
 
 export function createIsolatedTestRunner({ resolveWorkspace, now = () => Date.now(), log = () => {} } = {}) {
@@ -126,18 +126,12 @@ export function createIsolatedTestRunner({ resolveWorkspace, now = () => Date.no
     throw capabilityError('INVALID_PARAMS', 'createIsolatedTestRunner 需要 resolveWorkspace');
   }
   let running = 0;
-
-  /**
-   * 执行一次受控测试。`tool/args` 只接受 allowlist 形态；返回真实退出码与有界输出。
-   * 绝不把调用方输入交给 shell；绝不读取 Owner 配置的 testCommand（那是 Owner 的
-   * workspace.test.run 路径，与本 runner 无关）。
-   */
-  async function run({ workspaceId, tool, args, timeoutMs } = {}) {
+  async function run({ workspaceId, tool, args, timeoutMs, signal } = {}) {
+    if (signal?.aborted) throw cancelled();
     const entry = await resolveWorkspace(workspaceId);
+    if (signal?.aborted) throw cancelled();
     if (!entry?.root) throw capabilityError('WORKSPACE_NOT_FOUND', String(workspaceId ?? ''));
     const { file, args: argv } = resolveCommand(tool, args);
-    // win32：npm 是 .cmd shim，Node 禁止 shell:false 直接 spawn .cmd（CVE-2024-27980），
-    // 用显式 cmd.exe /d /s /c 包装；所有 argv token 已通过 safeToken（无 shell 元字符）。
     let spawnFile = file;
     let spawnArgs = argv;
     if (process.platform === 'win32' && file === 'npm') {
@@ -149,59 +143,67 @@ export function createIsolatedTestRunner({ resolveWorkspace, now = () => Date.no
     running += 1;
     const startedAt = now();
     try {
-      return await new Promise((resolve) => {
-        let timeoutReached = false;
-        let timeoutTimer = null;
-        let terminationPromise = null;
-        const child = execFile(spawnFile, spawnArgs, {
-          cwd: path.resolve(entry.root),
-          env: minimalEnv(),
-          // On Windows, use the watchdog below so taskkill can stop the tree before its parent.
-          timeout: process.platform === 'win32' ? 0 : timeout,
-          maxBuffer: RUNNER_LIMITS.maxOutputBytes,
-          windowsHide: true,
-          killSignal: 'SIGKILL'
-        }, (error, stdout, stderr) => {
-          if (timeoutTimer) clearTimeout(timeoutTimer);
-          const durationMs = now() - startedAt;
-          const timedOut = timeoutReached || (Boolean(error) && (error.killed === true || error.signal === 'SIGKILL'));
-          const finish = () => {
-            const exitCode = error
-              ? (typeof error.code === 'number' ? error.code : timedOut ? 124 : 1)
-              : 0;
-            resolve({
-              exitCode,
-              timedOut,
-              command: `${file} ${argv.join(' ')}`,
-              cwd: path.resolve(entry.root),
-              stdout: String(stdout ?? '').slice(0, RUNNER_LIMITS.stdoutCapChars),
-              stderr: String(stderr ?? '').slice(0, RUNNER_LIMITS.stderrCapChars),
-              truncated: String(stdout ?? '').length > RUNNER_LIMITS.stdoutCapChars
-                || String(stderr ?? '').length > RUNNER_LIMITS.stderrCapChars,
-              durationMs
-            });
-          };
-          if (timedOut) {
-            // Do not report timeout completion until the Windows process tree has exited.
-            void (terminationPromise ?? (terminationPromise = killTree(child, process.platform))).then(finish, finish);
-          } else {
-            finish();
+      return await new Promise((resolve, reject) => {
+        let child;
+        let closed = false;
+        let output = null;
+        let stopReason = null;
+        let treeConfirmed = null;
+        let settled = false;
+        let timeoutTimer;
+        let confirmationTimer;
+        const cleanup = () => {
+          clearTimeout(timeoutTimer);
+          clearTimeout(confirmationTimer);
+          signal?.removeEventListener('abort', abort);
+        };
+        const finish = () => {
+          if (settled) return;
+          if (stopReason && treeConfirmed === false) {
+            settled = true; cleanup(); reject(cancelled(false)); return;
           }
-        });
-        if (process.platform === 'win32') {
-          timeoutTimer = setTimeout(() => {
-            timeoutReached = true;
-            terminationPromise = killTree(child, process.platform);
-          }, timeout);
-        }
-        // stdin 关闭：测试进程拿不到交互输入。
-        try { child.stdin?.destroy(); } catch { /* 已退出 */ }
+          if (!closed || !output || (stopReason && treeConfirmed !== true)) return;
+          settled = true; cleanup();
+          if (stopReason === 'cancel') { reject(cancelled()); return; }
+          const { error, stdout, stderr } = output;
+          const timedOut = stopReason === 'timeout';
+          resolve({
+            exitCode: timedOut ? 124 : error ? (typeof error.code === 'number' ? error.code : 1) : 0,
+            timedOut,
+            command: file + ' ' + argv.join(' '),
+            cwd: path.resolve(entry.root),
+            stdout: String(stdout ?? '').slice(0, RUNNER_LIMITS.stdoutCapChars),
+            stderr: String(stderr ?? '').slice(0, RUNNER_LIMITS.stderrCapChars),
+            truncated: String(stdout ?? '').length > RUNNER_LIMITS.stdoutCapChars
+              || String(stderr ?? '').length > RUNNER_LIMITS.stderrCapChars,
+            durationMs: now() - startedAt
+          });
+        };
+        const stop = reason => {
+          // First termination cause wins; natural close remains final.
+          if (settled || closed || stopReason) return;
+          stopReason = reason;
+          clearTimeout(timeoutTimer);
+          confirmationTimer = setTimeout(() => { treeConfirmed = false; finish(); }, 5000);
+          void killTree(child).then(confirmed => { treeConfirmed = confirmed; finish(); });
+        };
+        const abort = () => stop('cancel');
+        child = execFile(spawnFile, spawnArgs, {
+          cwd: path.resolve(entry.root), env: minimalEnv(),
+          timeout: 0, detached: process.platform !== 'win32',
+          maxBuffer: RUNNER_LIMITS.maxOutputBytes,
+          windowsHide: true, killSignal: 'SIGKILL'
+        }, (error, stdout, stderr) => { output = {error, stdout, stderr}; finish(); });
+        child.once('close', () => { closed = true; finish(); });
+        timeoutTimer = setTimeout(() => stop('timeout'), timeout);
+        signal?.addEventListener('abort', abort, {once:true});
+        if (signal?.aborted) abort();
+        try { child.stdin?.destroy(); } catch { /* Process already closed. */ }
         void log;
       });
     } finally {
       running -= 1;
     }
   }
-
   return { run, limits: RUNNER_LIMITS };
 }

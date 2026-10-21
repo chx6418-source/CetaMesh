@@ -29,6 +29,7 @@ import { createQqConnectorHost } from '../channel/qq/connector-host.js';
 import { createBionicService } from '../bionic/service.js';
 import { createSettingsService } from '../settings/service.js';
 import { createIntegrationService } from '../integrations/index.js';
+import { createChannelDesktopControls } from '../channel/desktop-controls.js';
 import { createDshDesktopIntegration } from '../integrations/dsh-desktop.js';
 import { createAboutService } from '../about/service.js';
 import { createUpdateService } from '../update/service.js';
@@ -253,6 +254,7 @@ export function createCetaMeshServices(options = {}) {
     agentBroker,
     bindAgentSession: managedAgent.bindSession,
     onTaskObservation: ({ taskId }) => workingMemory.record(taskId),
+    onOperation: data => uiEventBus.publish('approval.operation', data),
     resumeAgentApproval: managedAgent.resumeLegacyApproval,
     searchImpl: searchWeb,
     audit: event => log('Capability ' + event.capability + ' ' + event.status),
@@ -367,6 +369,8 @@ export function createCetaMeshServices(options = {}) {
   const bionicService = createBionicService({ config, dataRoot, stateDir, channelService,
     serviceToken: options.channelServiceToken });
   channelService.attachBionic(bionicService);
+  const channelDesktopControls = createChannelDesktopControls({ channelService, bionicService });
+  const channelControlsReady = channelDesktopControls.refresh();
   registerChannelMeshCapabilities({
     broker: capabilityService.broker,
     channelService,
@@ -387,8 +391,9 @@ export function createCetaMeshServices(options = {}) {
   // Extension/ProcessExtensionHost；本服务只做注册表、开关、生命周期与能力边界适配。 ──
   const integrationService = createIntegrationService({
     stateDir,
+    transportFactory: options.integrationTransportFactory,
     capabilityBroker: capabilityService.broker,
-    ...(options.localServices ? { localServices: options.localServices } : {}),
+    localServices: options.localServices ?? channelDesktopControls,
     dshDesktop,
     agentHealth: () => agentBroker.health('dsh'),
     settingsSnapshot: () => settingsService.store.get().settings,
@@ -529,6 +534,7 @@ export function createCetaMeshServices(options = {}) {
     managedAgent,
     modelRegistry,
     modelRuntime,
+    toolExecutionCoordinator,
     productContextService,
     routerService,
     chatService,
@@ -545,6 +551,7 @@ export function createCetaMeshServices(options = {}) {
     channelService,
     bionicService,
     integrationService,
+    channelControlsReady,
     aboutService,
     settingsService,
     updateService,

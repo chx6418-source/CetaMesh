@@ -133,8 +133,8 @@ export function startIpcProtocol({
       writeError(id, 'UNSUPPORTED_VERSION', `Unsupported protocol version: ${String(request.version)}`);
       return;
     }
-    if (typeof request.id !== 'string' || typeof request.method !== 'string') {
-      writeError(id, 'INVALID_REQUEST', 'Request id and method must be strings');
+    if (typeof request.id !== 'string' || request.id.length > 200 || typeof request.method !== 'string') {
+      writeError(null, 'INVALID_REQUEST', 'Request id must be a string of at most 200 characters and method must be a string');
       return;
     }
     if (request.params !== undefined && (!request.params || typeof request.params !== 'object' || Array.isArray(request.params))) {

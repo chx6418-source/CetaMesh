@@ -28,6 +28,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { fitsIpcResponse, requireIpcItem } from '../control/response-budget.js';
 import { StorageError, readJsonFile, writeJsonAtomic } from '../storage/json-file.js';
 import { blocksToText } from '../dsh-client.js';
 import { selectDshSessionModel } from '../dsh-model-selection.js';
@@ -163,6 +164,7 @@ export function createChatService({
 
   const sessions = new Map(); // id -> record（含 config / dshSessionId / archived）
   const runtime = new Map(); // id -> { turn?, follow?, modelTurn? }
+  let closePromise = null;
   let modelCatalogCache = null;
   let modelCatalogPending = null;
 
@@ -499,12 +501,21 @@ export function createChatService({
         ? message.text.slice(0, MAX_MESSAGE_CHARS_RETURNED)
         : message.text
     }));
+    const envelope = () => ({ id: record.id, total: all.length, messages: page,
+      nextBeforeMessageId: page[0]?.id ?? null, nextAfterMessageId: page.at(-1)?.id ?? null, hasMore: true, hasMoreAfter: true });
+    while (!fitsIpcResponse(envelope())) {
+      if (page.length <= 1) requireIpcItem(envelope());
+      if (afterMessageId) { page.pop(); endIndex--; }
+      else { page.shift(); startIndex++; }
+    }
     const hasMore = startIndex > 0;
     return {
       id: record.id,
       total: all.length,
       messages: page,
       nextBeforeMessageId: hasMore ? page[0]?.id ?? null : null,
+      nextAfterMessageId: endIndex < all.length ? page.at(-1)?.id ?? null : null,
+      hasMoreAfter: endIndex < all.length,
       hasMore
     };
   }
@@ -1997,7 +2008,7 @@ export function createChatService({
     };
   }
 
-  async function resumeApproval({ approvalId, requestFingerprint, decisionResult } = {}) {
+  async function resumeApproval({ approvalId, requestFingerprint, decisionResult, signal } = {}) {
     if (!toolExecutionCoordinator?.resumeApproval) return null;
     const target = toolExecutionCoordinator.pendingTarget?.(approvalId);
     if (!target || target.kind !== 'chat') return null;
@@ -2014,6 +2025,9 @@ export function createChatService({
     onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: 'streaming', requestId: state.turn.requestId, reset: true,
       toolActivity: state.turn.toolActivity ?? [], agentActivity: state.turn.agentActivity ?? null } });
     const controller = new AbortController();
+    const cancelOperation = () => controller.abort(signal?.reason);
+    signal?.addEventListener('abort', cancelOperation, { once: true });
+    if (signal?.aborted) cancelOperation();
     const resolved = modelRuntime.resolveProvider(record.config.modelProvider);
     const model = modelForRuntime(record);
     state.modelTurn = { controller, providerId: resolved.id, kind: 'model' };
@@ -2086,7 +2100,7 @@ export function createChatService({
       }
       onEvent?.({ event: 'chat.updated', data: { sessionId: record.id, status: controller.signal.aborted ? 'cancelled' : 'error' } });
       return { resumed: false, error: error?.code ?? 'TOOL_RESUME_FAILED' };
-    } finally { state.modelTurn = null; }
+    } finally { signal?.removeEventListener('abort', cancelOperation); state.modelTurn = null; }
   }
 
   async function stop({ id } = {}) {
@@ -2149,12 +2163,20 @@ export function createChatService({
   }
 
   function close() {
+    if (closePromise) return closePromise;
+    const pending = [];
     for (const [id, state] of runtime) {
+      if (state.modelTurn?.done) pending.push(state.modelTurn.done);
       stopFollow(id);
       if (state.modelTurn?.controller && !state.modelTurn.controller.signal.aborted) {
         state.modelTurn.controller.abort(Object.assign(new Error('Chat service closed'), { code: 'INVOKE_CANCELLED' }));
       }
     }
+    closePromise = Promise.allSettled(pending).then(results => {
+      const failures = results.filter(result => result.status === 'rejected');
+      if (failures.length) throw new AggregateError(failures.map(result => result.reason), 'Chat cleanup failed');
+    });
+    return closePromise;
   }
 
   loadStore();
@@ -2179,10 +2201,14 @@ export function createChatService({
     prepareTaskContext, prepareTaskHandoff, synchronizeTaskAssignment,
     resumeApproval,
     execute({ method, params, signal }) {
+      if (closePromise) return Promise.reject(chatError('SERVICE_CLOSED', 'Chat service is closed'));
       const handler = handlers[method];
       if (!handler) return Promise.reject(chatError('METHOD_NOT_FOUND', `未知 Chat 方法：${method}`));
       // 统一异步语义：同步 handler 的 throw 也转为 rejected Promise。
-      return Promise.resolve().then(() => handler(params, { signal }));
+      return Promise.resolve().then(() => {
+        if (closePromise) throw chatError('SERVICE_CLOSED', 'Chat service is closed');
+        return handler(params, { signal });
+      });
     },
     /** 测试钩子：直接投递一条 follow 事件（等价于 DSH 流下发）。 */
     _injectEvent(id, event) {
