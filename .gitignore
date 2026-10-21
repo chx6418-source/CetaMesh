@@ -1,82 +1,73 @@
-# OSX
-#
-.DS_Store
-
-# Xcode
-#
-build/
-*.pbxuser
-!default.pbxuser
-*.mode1v3
-!default.mode1v3
-*.mode2v3
-!default.mode2v3
-*.perspectivev3
-!default.perspectivev3
-xcuserdata
-*.xccheckout
-*.moved-aside
-DerivedData
-*.hmap
-*.ipa
-*.xcuserstate
-**/.xcode.env.local
-
-# Android/IntelliJ
-#
-build/
-.idea
-.gradle
-local.properties
-*.iml
-*.hprof
-.cxx/
-*.keystore
-!debug.keystore
-.kotlin/
-
-# node.js
-#
+# Dependencies
 node_modules/
-npm-debug.log
-yarn-error.log
+.npm-cache/
 
-# fastlane
-#
-# It is recommended to not store the screenshots in the git repo. Instead, use fastlane to re-generate the
-# screenshots whenever they are needed.
-# For more information about the recommended setup visit:
-# https://docs.fastlane.tools/best-practices/source-control/
+# WhaleBridge desktop shell (Rust/Tauri) build output
+/desktop-shell/target/
+/desktop-shell/gen/
 
-**/fastlane/report.xml
-**/fastlane/Preview.html
-**/fastlane/screenshots
-**/fastlane/test_output
+# Packaged Core distribution (dist/core: WhaleBridgeCore.exe + resources + build cache).
+# 产物可达 90MB+，绝不入库；用 npm run build:core 重新生成。
+/dist/
+# Node SEA 构建中间产物若落在 dist/ 之外（手工实验）也一并忽略
+*.blob
+sea-config.json
 
-# Bundle artifact
-*.jsbundle
+# Bundled local binaries (ffmpeg, portable git, etc.) —— 锚定仓库根目录，
+# 不要写成 `tools/`：那会连带忽略任意层级下的 tools 目录（例如
+# design-demos/bg-ripple/tools/ 的融合工具链与校验夹具，那些是要入库的）
+/tools/
 
-# Ruby / CocoaPods
-**/Pods/
-/vendor/bundle/
+# Optional SnowLuma runtime installed/detected by the local service manager
+/SnowLuma/
+/SnowLuma-v*/
 
-# Temporary files created by Metro to check the health of the file watcher
-.metro-health-check*
+# Runtime state and local config (never publish)
+state/
+config.json
+*.log
+*.bak
+*.bak-*
 
-# testing
-/coverage
+# dsh-vision-router 插件在工作目录下写的运行产物（agent cwd = 仓库根时会出现）
+.dsh-vision-router/
+# ZCode 客户端本地会话/计划目录
+.zcode/
 
-# Yarn
-.yarn/*
-!.yarn/patches
-!.yarn/plugins
-!.yarn/releases
-!.yarn/sdks
-!.yarn/versions
+# 登录页视觉方案样品（10 套整体方案 + 方案 09 的涟漪转场变体 + 演示视频）：
+# 已选定「柔光浮雕 + 静水浮升」落地到 public/token-login.html，其余仅作本机参考资料保留，
+# 不入库（含约 24MB 视频，避免占用仓库空间）。目录仍在磁盘上，用 serve.mjs 预览。
+design-demos/login-proposals/
 
-# Also ignore a locally reused dependency symlink.
-/node_modules
+# Local development / planning / research docs (not part of public project)
+/PROJECT_GUIDE.md
+/ARCH_REVIEW.md
+/DSH_QQ_TOOLS_PLAN.md
+/GEN2_SIMULATION_PLAN.md
+/SOCIAL_MODE_PLAN.md
+/RESEARCH_QQ_MESSAGE_DND.md
+/RESEARCH_SNOWLUMA_EMOJI_STICKER.md
+/SnowLuma功能调研.md
+/真人语感策略.md
 
-# Signing keys are generated locally or in CI, never uploaded.
-*.keystore
-*.jks
+# Local one-off dev/debug/patch scripts (contain machine-specific paths/IDs)
+/scripts/cleanup-test-sessions.mjs
+/scripts/debug-whitelist.mjs
+/scripts/patch-qq-chat-v2-collect-memory.mjs
+/scripts/patch-qq-chat-v2-presleep.mjs
+/scripts/patch-qq-chat-v2-stickers.mjs
+/scripts/patch-web-mcp-timeout.mjs
+
+# UI design demos archive (unselected proposals, local reference only)
+/design-demos/archive/
+
+# Build / experiment byproducts (D10 repo hygiene)。目录当前可能不存在，
+# 显式登记防止历史脚本的错误展开（如 %SystemDrive%）或实验产物再次入库。
+/output/
+/artifacts/
+/desktop-shell/native-spike/
+/%SystemDrive%/
+/desktop-shell/target-released/
+
+# Test runner scratch state
+/scripts/.test-runner/

@@ -1,0 +1,820 @@
+{
+  "observedAt": "2026-10-18T14:56:02.073Z",
+  "branch": "codex/whalebridge-m6-integration",
+  "baseHead": "49cb8b481741c0d8339efcae647a08d874fe7b38",
+  "productionSourceCommit": "c3d5657fba5dfcd9a5004b84d0e87cf329aafaea",
+  "version": "1.0.0-rc.2",
+  "build": 1088,
+  "artifactBuildDirty": false,
+  "manifestAllFilesHashMatch": true,
+  "manifestFileCount": 30,
+  "binaries": [
+    {
+      "path": "CetaMesh-Setup-1.0.0-rc.2-build1088-x64.exe",
+      "bytes": 43356160,
+      "sha256": "cf15d45bd88bdfbec63d6446d6831b147574eff6fd3d412d800aa32c817c1a1c",
+      "actualSha256": "cf15d45bd88bdfbec63d6446d6831b147574eff6fd3d412d800aa32c817c1a1c",
+      "signature": "NotSigned"
+    },
+    {
+      "path": "payload/WhaleBridgeCore.exe",
+      "bytes": 98455040,
+      "sha256": "190379f3dc1132454c4ec4b29e6c123dc2189c797e899af0c725e00c3c4eeff0",
+      "actualSha256": "190379f3dc1132454c4ec4b29e6c123dc2189c797e899af0c725e00c3c4eeff0",
+      "signature": "NotSigned"
+    },
+    {
+      "path": "WhaleBridge.exe",
+      "bytes": 7979008,
+      "sha256": "393a7a3850c14b5a5f9ac17346ba3eb8f68d306629032b79ab8a96a2c4567e7a",
+      "actualSha256": "393a7a3850c14b5a5f9ac17346ba3eb8f68d306629032b79ab8a96a2c4567e7a",
+      "signature": "NotSigned"
+    }
+  ],
+  "tests": {
+    "npm": {
+      "pass": 124,
+      "fail": 0,
+      "notRunEnvironment": 5
+    },
+    "rust": {
+      "pass": 199,
+      "fail": 0
+    },
+    "rc": {
+      "pass": 11,
+      "fail": 0,
+      "notRunEnvironment": 0
+    }
+  },
+  "native": {
+    "environment": "Current Windows host, non-elevated token; isolated synthetic StateDir/registry; NOT an independent standard-user/clean VM acceptance",
+    "webView2": "Actual Harbor rendering and input via Windows @oai/sky; screenshots displayed by tool; saved UIA and screenshot IDs, no claimed local PNG files",
+    "model": "Loopback synthetic SSE/model catalog; no real Provider inference",
+    "observations": [
+      {
+        "build": 1084,
+        "sourceCommit": "8dc4159a2a2c18ad3248bd4e7f32c2b1e34e3dfa",
+        "file": "artifacts/verification/m6-b-build1084/native-ui-observations-01.json",
+        "at": "2026-10-18T13:39:15.442Z",
+        "label": "Harbor connected; loopback model catalog connection succeeded",
+        "screenshotIds": [
+          "screenshot-0"
+        ]
+      },
+      {
+        "build": 1084,
+        "sourceCommit": "8dc4159a2a2c18ad3248bd4e7f32c2b1e34e3dfa",
+        "file": "artifacts/verification/m6-b-build1084/native-ui-observations-01.json",
+        "at": "2026-10-18T13:39:15.606Z",
+        "label": "Default-model setup",
+        "screenshotIds": [
+          "screenshot-0"
+        ]
+      },
+      {
+        "build": 1084,
+        "sourceCommit": "8dc4159a2a2c18ad3248bd4e7f32c2b1e34e3dfa",
+        "file": "artifacts/verification/m6-b-build1084/native-ui-observations-01.json",
+        "at": "2026-10-18T13:39:49.617Z",
+        "label": "Default model save submitted",
+        "screenshotIds": [
+          "screenshot-0"
+        ]
+      },
+      {
+        "build": 1084,
+        "sourceCommit": "8dc4159a2a2c18ad3248bd4e7f32c2b1e34e3dfa",
+        "file": "artifacts/verification/m6-b-build1084/native-ui-observations-01.json",
+        "at": "2026-10-18T13:40:03.049Z",
+        "label": "Agent optional skip submitted",
+        "screenshotIds": [
+          "screenshot-0"
+        ]
+      },
+      {
+        "build": 1084,
+        "sourceCommit": "8dc4159a2a2c18ad3248bd4e7f32c2b1e34e3dfa",
+        "file": "artifacts/verification/m6-b-build1084/native-ui-observations-01.json",
+        "at": "2026-10-18T13:41:29.563Z",
+        "label": "Onboarding completed; Chat visible",
+        "screenshotIds": [
+          "screenshot-0"
+        ]
+      },
+      {
+        "build": 1084,
+        "sourceCommit": "8dc4159a2a2c18ad3248bd4e7f32c2b1e34e3dfa",
+        "file": "artifacts/verification/m6-b-build1084/native-ui-observations-01.json",
+        "at": "2026-10-18T13:41:42.795Z",
+        "label": "New Chat session composer",
+        "screenshotIds": [
+          "screenshot-0"
+        ]
+      },
+      {
+        "build": 1084,
+        "sourceCommit": "8dc4159a2a2c18ad3248bd4e7f32c2b1e34e3dfa",
+        "file": "artifacts/verification/m6-b-build1084/native-ui-observations-02.json",
+        "at": "2026-10-18T13:42:07.912Z",
+        "label": "Explicit Agent none selected",
+        "screenshotIds": [
+          "screenshot-0"
+        ]
+      },
+      {
+        "build": 1084,
+        "sourceCommit": "8dc4159a2a2c18ad3248bd4e7f32c2b1e34e3dfa",
+        "file": "artifacts/verification/m6-b-build1084/native-ui-observations-02.json",
+        "at": "2026-10-18T13:42:28.160Z",
+        "label": "Chat round one send; initial UI state",
+        "screenshotIds": [
+          "screenshot-0"
+        ]
+      },
+      {
+        "build": 1084,
+        "sourceCommit": "8dc4159a2a2c18ad3248bd4e7f32c2b1e34e3dfa",
+        "file": "artifacts/verification/m6-b-build1084/native-ui-observations-03.json",
+        "at": "2026-10-18T13:42:57.507Z",
+        "label": "Round one completed, later screenshot",
+        "screenshotIds": [
+          "screenshot-0"
+        ]
+      },
+      {
+        "build": 1084,
+        "sourceCommit": "8dc4159a2a2c18ad3248bd4e7f32c2b1e34e3dfa",
+        "file": "artifacts/verification/m6-b-build1084/native-ui-observations-03.json",
+        "at": "2026-10-18T13:43:44.123Z",
+        "label": "Second distinct question sent",
+        "screenshotIds": [
+          "screenshot-0"
+        ]
+      },
+      {
+        "build": 1084,
+        "sourceCommit": "8dc4159a2a2c18ad3248bd4e7f32c2b1e34e3dfa",
+        "file": "artifacts/verification/m6-b-build1084/native-ui-observations-04.json",
+        "at": "2026-10-18T13:44:14.912Z",
+        "label": "Second reply completed after streaming",
+        "screenshotIds": []
+      },
+      {
+        "build": 1084,
+        "sourceCommit": "8dc4159a2a2c18ad3248bd4e7f32c2b1e34e3dfa",
+        "file": "artifacts/verification/m6-b-build1084/native-ui-observations-05.json",
+        "at": "2026-10-18T13:44:39.302Z",
+        "label": "Third distinct instruction sent",
+        "screenshotIds": [
+          "screenshot-0"
+        ]
+      },
+      {
+        "build": 1084,
+        "sourceCommit": "8dc4159a2a2c18ad3248bd4e7f32c2b1e34e3dfa",
+        "file": "artifacts/verification/m6-b-build1084/native-ui-observations-06.json",
+        "at": "2026-10-18T13:44:53.879Z",
+        "label": "Three distinct Chat replies completed",
+        "screenshotIds": []
+      },
+      {
+        "build": 1084,
+        "sourceCommit": "8dc4159a2a2c18ad3248bd4e7f32c2b1e34e3dfa",
+        "file": "artifacts/verification/m6-b-build1084/native-ui-observations-06.json",
+        "at": "2026-10-18T13:45:00.251Z",
+        "label": "Work page after navigation",
+        "screenshotIds": [
+          "screenshot-0"
+        ]
+      },
+      {
+        "build": 1084,
+        "sourceCommit": "8dc4159a2a2c18ad3248bd4e7f32c2b1e34e3dfa",
+        "file": "artifacts/verification/m6-b-build1084/native-ui-observations-07.json",
+        "at": "2026-10-18T13:45:27.788Z",
+        "label": "Task form requires Workspace and available Agent; no automatic Task was created",
+        "screenshotIds": [
+          "screenshot-0",
+          "screenshot-1"
+        ]
+      },
+      {
+        "build": 1084,
+        "sourceCommit": "8dc4159a2a2c18ad3248bd4e7f32c2b1e34e3dfa",
+        "file": "artifacts/verification/m6-b-build1084/native-ui-observations-07.json",
+        "at": "2026-10-18T13:46:40.611Z",
+        "label": "Native folder picker selected only the synthetic Workspace",
+        "screenshotIds": [
+          "screenshot-0"
+        ]
+      },
+      {
+        "build": 1084,
+        "sourceCommit": "8dc4159a2a2c18ad3248bd4e7f32c2b1e34e3dfa",
+        "file": "artifacts/verification/m6-b-build1084/native-ui-observations-08.json",
+        "at": "2026-10-18T13:50:06.320Z",
+        "label": "Canceled the expired Build1084 folder request; Workspace was not registered",
+        "screenshotIds": []
+      },
+      {
+        "build": 1085,
+        "sourceCommit": "0b6f74816ec685b67e8a7b6ca82fdbd6fa592998",
+        "file": "artifacts/verification/m6-b-build1085/native-ui-observations-1.json",
+        "at": "2026-10-18T13:53:04.846Z",
+        "label": "Build1085 upgraded installation first UI; same synthetic StateDir",
+        "screenshotIds": [
+          "screenshot-0"
+        ]
+      },
+      {
+        "build": 1085,
+        "sourceCommit": "0b6f74816ec685b67e8a7b6ca82fdbd6fa592998",
+        "file": "artifacts/verification/m6-b-build1085/native-ui-observations-1.json",
+        "at": "2026-10-18T13:54:38.251Z",
+        "label": "Native folder selection confirmed after 62228ms",
+        "screenshotIds": []
+      },
+      {
+        "build": 1085,
+        "sourceCommit": "0b6f74816ec685b67e8a7b6ca82fdbd6fa592998",
+        "file": "artifacts/verification/m6-b-build1085/native-ui-observations-2.json",
+        "at": "2026-10-18T13:54:49.119Z",
+        "label": "Build1085 Workspace registration succeeded after >32s native dialog",
+        "screenshotIds": [
+          "screenshot-0"
+        ]
+      },
+      {
+        "build": 1085,
+        "sourceCommit": "0b6f74816ec685b67e8a7b6ca82fdbd6fa592998",
+        "file": "artifacts/verification/m6-b-build1085/native-ui-observations-2.json",
+        "at": "2026-10-18T13:56:06.883Z",
+        "label": "Managed Task creation submitted with isolated Workspace",
+        "screenshotIds": []
+      },
+      {
+        "build": 1085,
+        "sourceCommit": "0b6f74816ec685b67e8a7b6ca82fdbd6fa592998",
+        "file": "artifacts/verification/m6-b-build1085/native-ui-observations-2.json",
+        "at": "2026-10-18T13:56:15.515Z",
+        "label": "Task created, pending state",
+        "screenshotIds": [
+          "screenshot-0"
+        ]
+      },
+      {
+        "build": 1085,
+        "sourceCommit": "0b6f74816ec685b67e8a7b6ca82fdbd6fa592998",
+        "file": "artifacts/verification/m6-b-build1085/native-ui-observations-3.json",
+        "at": "2026-10-18T13:56:41.598Z",
+        "label": "Managed Task blocked: inspect exact reason",
+        "screenshotIds": [
+          "screenshot-0"
+        ]
+      },
+      {
+        "build": 1085,
+        "sourceCommit": "0b6f74816ec685b67e8a7b6ca82fdbd6fa592998",
+        "file": "artifacts/verification/m6-b-build1085/native-ui-observations-3.json",
+        "at": "2026-10-18T14:02:00.623Z",
+        "label": "Build1085 native Managed Task exact blocking reason MODEL_NO_MODEL",
+        "screenshotIds": []
+      },
+      {
+        "build": 1086,
+        "sourceCommit": "7a15f11fa0d2d342584f7eb9d4d5470ae53f0278",
+        "file": "artifacts/verification/m6-b-build1086/native-ui-observations-1.json",
+        "at": "2026-10-18T14:04:06.131Z",
+        "label": "Final Build1086 upgraded GUI connected",
+        "screenshotIds": [
+          "screenshot-0"
+        ]
+      },
+      {
+        "build": 1086,
+        "sourceCommit": "7a15f11fa0d2d342584f7eb9d4d5470ae53f0278",
+        "file": "artifacts/verification/m6-b-build1086/native-ui-observations-2.json",
+        "at": "2026-10-18T14:04:23.541Z",
+        "label": "Final Build1086 Memory candidate review page",
+        "screenshotIds": [
+          "screenshot-0"
+        ]
+      },
+      {
+        "build": 1086,
+        "sourceCommit": "7a15f11fa0d2d342584f7eb9d4d5470ae53f0278",
+        "file": "artifacts/verification/m6-b-build1086/native-ui-observations-2.json",
+        "at": "2026-10-18T14:04:33.533Z",
+        "label": "Owner approval of synthetic Memory candidate submitted",
+        "screenshotIds": []
+      },
+      {
+        "build": 1086,
+        "sourceCommit": "7a15f11fa0d2d342584f7eb9d4d5470ae53f0278",
+        "file": "artifacts/verification/m6-b-build1086/native-ui-observations-3.json",
+        "at": "2026-10-18T14:04:41.091Z",
+        "label": "Memory confirmation actual result",
+        "screenshotIds": [
+          "screenshot-0"
+        ]
+      },
+      {
+        "build": 1086,
+        "sourceCommit": "7a15f11fa0d2d342584f7eb9d4d5470ae53f0278",
+        "file": "artifacts/verification/m6-b-build1086/native-ui-observations-3.json",
+        "at": "2026-10-18T14:09:47.799Z",
+        "label": "Build1086 Memory approval timed out at native allowlist; candidate remains pending",
+        "screenshotIds": []
+      },
+      {
+        "build": 1087,
+        "sourceCommit": "ba3089c7873e1c6f57a1febda1969db51554ba6b",
+        "file": "artifacts/verification/m6-b-build1087/native-ui-observations-01.json",
+        "at": "2026-10-18T14:14:09.061Z",
+        "label": "Build1087 first native UI connected; history retained",
+        "screenshotIds": [
+          "screenshot-0"
+        ]
+      },
+      {
+        "build": 1087,
+        "sourceCommit": "ba3089c7873e1c6f57a1febda1969db51554ba6b",
+        "file": "artifacts/verification/m6-b-build1087/native-ui-observations-02.json",
+        "at": "2026-10-18T14:14:44.210Z",
+        "label": "Build1087 synthetic Memory accepted and visible, user:desktop",
+        "screenshotIds": [
+          "screenshot-0"
+        ]
+      },
+      {
+        "build": 1087,
+        "sourceCommit": "ba3089c7873e1c6f57a1febda1969db51554ba6b",
+        "file": "artifacts/verification/m6-b-build1087/native-ui-observations-02.json",
+        "at": "2026-10-18T14:15:12.500Z",
+        "label": "Explicit resume of synthetic Task after known pre-inference MODEL_NO_MODEL",
+        "screenshotIds": []
+      },
+      {
+        "build": 1087,
+        "sourceCommit": "ba3089c7873e1c6f57a1febda1969db51554ba6b",
+        "file": "artifacts/verification/m6-b-build1087/native-ui-observations-03.json",
+        "at": "2026-10-18T14:15:23.207Z",
+        "label": "Managed Task result after final model fix",
+        "screenshotIds": [
+          "screenshot-0"
+        ]
+      },
+      {
+        "build": 1087,
+        "sourceCommit": "ba3089c7873e1c6f57a1febda1969db51554ba6b",
+        "file": "artifacts/verification/m6-b-build1087/native-ui-observations-04.json",
+        "at": "2026-10-18T14:16:06.657Z",
+        "label": "Task pause persisted; model and Checkpoint retained",
+        "screenshotIds": [
+          "screenshot-0"
+        ]
+      },
+      {
+        "build": 1087,
+        "sourceCommit": "ba3089c7873e1c6f57a1febda1969db51554ba6b",
+        "file": "artifacts/verification/m6-b-build1087/native-ui-observations-05.json",
+        "at": "2026-10-18T14:16:17.452Z",
+        "label": "Explicit resume after pause submitted",
+        "screenshotIds": []
+      },
+      {
+        "build": 1087,
+        "sourceCommit": "ba3089c7873e1c6f57a1febda1969db51554ba6b",
+        "file": "artifacts/verification/m6-b-build1087/native-ui-observations-06.json",
+        "at": "2026-10-18T14:16:31.990Z",
+        "label": "Task resumed with same model and fresh result",
+        "screenshotIds": [
+          "screenshot-0"
+        ]
+      },
+      {
+        "build": 1087,
+        "sourceCommit": "ba3089c7873e1c6f57a1febda1969db51554ba6b",
+        "file": "artifacts/verification/m6-b-build1087/native-ui-observations-06.json",
+        "at": "2026-10-18T14:16:49.891Z",
+        "label": "Task cancellation actual result",
+        "screenshotIds": [
+          "screenshot-0"
+        ]
+      },
+      {
+        "build": 1087,
+        "sourceCommit": "ba3089c7873e1c6f57a1febda1969db51554ba6b",
+        "file": "artifacts/verification/m6-b-build1087/native-ui-observations-07.json",
+        "at": "2026-10-18T14:17:54.283Z",
+        "label": "Synthetic Task explicit cancellation confirmed",
+        "screenshotIds": [
+          "screenshot-0"
+        ]
+      },
+      {
+        "build": 1087,
+        "sourceCommit": "ba3089c7873e1c6f57a1febda1969db51554ba6b",
+        "file": "artifacts/verification/m6-b-build1087/native-ui-observations-08.json",
+        "at": "2026-10-18T14:19:05.548Z",
+        "label": "Final Build1087 Chat round one streaming",
+        "screenshotIds": [
+          "screenshot-0"
+        ]
+      },
+      {
+        "build": 1087,
+        "sourceCommit": "ba3089c7873e1c6f57a1febda1969db51554ba6b",
+        "file": "artifacts/verification/m6-b-build1087/native-ui-observations-09.json",
+        "at": "2026-10-18T14:19:17.305Z",
+        "label": "Final build first reply complete",
+        "screenshotIds": []
+      },
+      {
+        "build": 1087,
+        "sourceCommit": "ba3089c7873e1c6f57a1febda1969db51554ba6b",
+        "file": "artifacts/verification/m6-b-build1087/native-ui-observations-10.json",
+        "at": "2026-10-18T14:19:28.437Z",
+        "label": "Final build second question sent",
+        "screenshotIds": []
+      },
+      {
+        "build": 1087,
+        "sourceCommit": "ba3089c7873e1c6f57a1febda1969db51554ba6b",
+        "file": "artifacts/verification/m6-b-build1087/native-ui-observations-11.json",
+        "at": "2026-10-18T14:19:34.986Z",
+        "label": "Final build second reply completed",
+        "screenshotIds": []
+      },
+      {
+        "build": 1087,
+        "sourceCommit": "ba3089c7873e1c6f57a1febda1969db51554ba6b",
+        "file": "artifacts/verification/m6-b-build1087/native-ui-observations-12.json",
+        "at": "2026-10-18T14:19:41.261Z",
+        "label": "Final build third distinct Chat instruction sent",
+        "screenshotIds": [
+          "screenshot-0"
+        ]
+      },
+      {
+        "build": 1087,
+        "sourceCommit": "ba3089c7873e1c6f57a1febda1969db51554ba6b",
+        "file": "artifacts/verification/m6-b-build1087/native-ui-observations-13.json",
+        "at": "2026-10-18T14:20:45.725Z",
+        "label": "Final three distinct Chat turns completed and remained visible",
+        "screenshotIds": [
+          "screenshot-0"
+        ]
+      },
+      {
+        "build": 1087,
+        "sourceCommit": "ba3089c7873e1c6f57a1febda1969db51554ba6b",
+        "file": "artifacts/verification/m6-b-build1087/native-ui-observations-14.json",
+        "at": "2026-10-18T14:21:14.976Z",
+        "label": "Slow synthetic stream started",
+        "screenshotIds": [
+          "screenshot-0"
+        ]
+      },
+      {
+        "build": 1087,
+        "sourceCommit": "ba3089c7873e1c6f57a1febda1969db51554ba6b",
+        "file": "artifacts/verification/m6-b-build1087/native-ui-observations-15.json",
+        "at": "2026-10-18T14:21:23.041Z",
+        "label": "Native Chat Stop clicked during active stream",
+        "screenshotIds": [
+          "screenshot-0"
+        ]
+      },
+      {
+        "build": 1087,
+        "sourceCommit": "ba3089c7873e1c6f57a1febda1969db51554ba6b",
+        "file": "artifacts/verification/m6-b-build1087/native-ui-observations-16.json",
+        "at": "2026-10-18T14:21:44.647Z",
+        "label": "Chat Stop completed: idle with partial formal reply and stopped marker",
+        "screenshotIds": []
+      },
+      {
+        "build": 1087,
+        "sourceCommit": "ba3089c7873e1c6f57a1febda1969db51554ba6b",
+        "file": "artifacts/verification/m6-b-build1087/native-ui-observations-16.json",
+        "at": "2026-10-18T14:22:22.655Z",
+        "label": "Memory second pending candidate before rejection",
+        "screenshotIds": [
+          "screenshot-0"
+        ]
+      },
+      {
+        "build": 1087,
+        "sourceCommit": "ba3089c7873e1c6f57a1febda1969db51554ba6b",
+        "file": "artifacts/verification/m6-b-build1087/native-ui-observations-17.json",
+        "at": "2026-10-18T14:22:52.618Z",
+        "label": "Memory approved and rejected outcomes visible, distinct IDs and same user Scope",
+        "screenshotIds": [
+          "screenshot-0"
+        ]
+      },
+      {
+        "build": 1087,
+        "sourceCommit": "ba3089c7873e1c6f57a1febda1969db51554ba6b",
+        "file": "artifacts/verification/m6-b-build1087/native-ui-observations-17.json",
+        "at": "2026-10-18T14:24:18.397Z",
+        "label": "Isolated Agent availability view",
+        "screenshotIds": [
+          "screenshot-0"
+        ]
+      },
+      {
+        "build": 1087,
+        "sourceCommit": "ba3089c7873e1c6f57a1febda1969db51554ba6b",
+        "file": "artifacts/verification/m6-b-build1087/native-ui-observations-18.json",
+        "at": "2026-10-18T14:24:58.660Z",
+        "label": "Native Plugins and MCP inventory, no external integration activated",
+        "screenshotIds": [
+          "screenshot-0"
+        ]
+      },
+      {
+        "build": 1087,
+        "sourceCommit": "ba3089c7873e1c6f57a1febda1969db51554ba6b",
+        "file": "artifacts/verification/m6-b-build1087/native-ui-observations-18.json",
+        "at": "2026-10-18T14:25:08.559Z",
+        "label": "Plugins catalog explicitly service_not_configured",
+        "screenshotIds": []
+      },
+      {
+        "build": 1087,
+        "sourceCommit": "ba3089c7873e1c6f57a1febda1969db51554ba6b",
+        "file": "artifacts/verification/m6-b-build1087/native-ui-observations-19.json",
+        "at": "2026-10-18T14:25:31.443Z",
+        "label": "Final native About metadata",
+        "screenshotIds": [
+          "screenshot-0"
+        ]
+      },
+      {
+        "build": 1087,
+        "sourceCommit": "ba3089c7873e1c6f57a1febda1969db51554ba6b",
+        "file": "artifacts/verification/m6-b-build1087/native-ui-observations-19.json",
+        "at": "2026-10-18T14:25:55.242Z",
+        "label": "Settled native About version verification",
+        "screenshotIds": [
+          "screenshot-0"
+        ]
+      },
+      {
+        "build": 1088,
+        "sourceCommit": "c3d5657fba5dfcd9a5004b84d0e87cf329aafaea",
+        "file": "artifacts/verification/m6-b-build1088/native-ui-observations-01.json",
+        "at": "2026-10-18T14:34:55.999Z",
+        "label": "1088-initial-restored-history",
+        "screenshotIds": [
+          "screenshot-0"
+        ]
+      },
+      {
+        "build": 1088,
+        "sourceCommit": "c3d5657fba5dfcd9a5004b84d0e87cf329aafaea",
+        "file": "artifacts/verification/m6-b-build1088/native-ui-observations-02.json",
+        "at": "2026-10-18T14:35:08.735Z",
+        "label": "1088-about-version-build-source-correct",
+        "screenshotIds": []
+      },
+      {
+        "build": 1088,
+        "sourceCommit": "c3d5657fba5dfcd9a5004b84d0e87cf329aafaea",
+        "file": "artifacts/verification/m6-b-build1088/native-ui-observations-03.json",
+        "at": "2026-10-18T14:35:26.599Z",
+        "label": "1088-work-cancelled-restored",
+        "screenshotIds": [
+          "screenshot-0"
+        ]
+      },
+      {
+        "build": 1088,
+        "sourceCommit": "c3d5657fba5dfcd9a5004b84d0e87cf329aafaea",
+        "file": "artifacts/verification/m6-b-build1088/native-ui-observations-04.json",
+        "at": "2026-10-18T14:35:36.554Z",
+        "label": "1088-work-cancelled-persisted-fresh",
+        "screenshotIds": []
+      },
+      {
+        "build": 1088,
+        "sourceCommit": "c3d5657fba5dfcd9a5004b84d0e87cf329aafaea",
+        "file": "artifacts/verification/m6-b-build1088/native-ui-observations-04.json",
+        "at": "2026-10-18T14:36:38.314Z",
+        "label": "1088-chat-restored-stopped-stream",
+        "screenshotIds": []
+      }
+    ]
+  },
+  "social": {
+    "at": "2026-10-18T14:34:08.600Z",
+    "mode": "HASH_ONLY_READ_ONLY",
+    "social": [
+      {
+        "rootId": "c12a489fa781c9d2",
+        "source": "state/sessions.json",
+        "sha256": "f833453cf2b1962c1a4bd1b0e8ae42cbe594446ec6ab233d14428c6d6e8a4313",
+        "expected": "f833453cf2b1962c1a4bd1b0e8ae42cbe594446ec6ab233d14428c6d6e8a4313",
+        "unchanged": true,
+        "decision": "OWNER_REVIEW_REQUIRED"
+      },
+      {
+        "rootId": "3402041dd63077f1",
+        "source": "state/social-v2.json",
+        "sha256": "5bc0b08880862498ecdd171b7202ab4c1f88b88f5ae3a07d1f6f64dad3c064e8",
+        "expected": "5bc0b08880862498ecdd171b7202ab4c1f88b88f5ae3a07d1f6f64dad3c064e8",
+        "unchanged": true,
+        "decision": "OWNER_REVIEW_REQUIRED"
+      },
+      {
+        "rootId": "3402041dd63077f1",
+        "source": "state/sessions.json",
+        "sha256": "e7e2a1134353f3ff7cd0dc4e6fcf9e3fb699f48e20b144be9823e44ce80ca465",
+        "expected": "e7e2a1134353f3ff7cd0dc4e6fcf9e3fb699f48e20b144be9823e44ce80ca465",
+        "unchanged": true,
+        "decision": "OWNER_REVIEW_REQUIRED"
+      },
+      {
+        "rootId": "3402041dd63077f1",
+        "source": "state/current-role.json",
+        "sha256": "9267509a51e2f83a543a228a211fffbb7ec484787534c882a6082975291798e1",
+        "expected": "9267509a51e2f83a543a228a211fffbb7ec484787534c882a6082975291798e1",
+        "unchanged": true,
+        "decision": "OWNER_REVIEW_REQUIRED"
+      },
+      {
+        "rootId": "3402041dd63077f1",
+        "source": "state/slang.json",
+        "sha256": "0eb65b6c8fe5d177d79385c83e6c82d85e485b54e28614bf16f248a0ee54bf54",
+        "expected": "0eb65b6c8fe5d177d79385c83e6c82d85e485b54e28614bf16f248a0ee54bf54",
+        "unchanged": true,
+        "decision": "OWNER_REVIEW_REQUIRED"
+      },
+      {
+        "rootId": "3402041dd63077f1",
+        "source": "state/slang-session.json",
+        "sha256": "add8da1b7d7703d10198aa1edea02c590465cbb0611751257525591196b75309",
+        "expected": "add8da1b7d7703d10198aa1edea02c590465cbb0611751257525591196b75309",
+        "unchanged": true,
+        "decision": "OWNER_REVIEW_REQUIRED"
+      },
+      {
+        "rootId": "3402041dd63077f1",
+        "source": "state/stickers.json",
+        "sha256": "bc3ea2dc5556fcb4d80a86921f0a78a29e11463a32d94f1484449e31be50106a",
+        "expected": "bc3ea2dc5556fcb4d80a86921f0a78a29e11463a32d94f1484449e31be50106a",
+        "unchanged": true,
+        "decision": "OWNER_REVIEW_REQUIRED"
+      },
+      {
+        "rootId": "3402041dd63077f1",
+        "source": "state/social-v2-cards.json",
+        "sha256": "d19987a64832fa63c0674e5141ae49eff4865b4542486b2e4ac85d685b2e2a9c",
+        "expected": "d19987a64832fa63c0674e5141ae49eff4865b4542486b2e4ac85d685b2e2a9c",
+        "unchanged": true,
+        "decision": "OWNER_REVIEW_REQUIRED"
+      }
+    ]
+  },
+  "runtimePreflight": [
+    {
+      "version": 1,
+      "mode": "READ_ONLY",
+      "rootId": "3402041dd63077f1",
+      "status": "MIGRATION_BLOCKED",
+      "realDataExecution": "REAL_DATA_NOT_AUTHORIZED",
+      "stopConfirmed": false,
+      "effectiveProcessStateDir": "UNVERIFIED_CANDIDATE_ROOT_ONLY",
+      "ipc": "NOT_RUN_ENVIRONMENT_AUTHENTICATED_READ_ONLY_PROBE_REQUIRED",
+      "activeQqConsumers": "UNVERIFIED_NOT_INFERRED_FROM_PID",
+      "authoritativeWriter": "UNVERIFIED",
+      "inMemoryApprovalsAndExternalImports": "UNVERIFIED",
+      "locks": [
+        {
+          "name": ".core-owner.lock",
+          "state": "NOT_FOUND_NOT_STOP_PROOF"
+        },
+        {
+          "name": ".core-owner.lock.reclaim",
+          "state": "NOT_FOUND_NOT_STOP_PROOF"
+        },
+        {
+          "name": "bridge.lock",
+          "state": "PRESENT",
+          "hash": "1ebcc2674db06ca71e71b94c14cb9c785d3e175740737c8154dd5d3bb4bbacb3",
+          "pidAlias": "1ebcc2674db06ca71e71b94c14cb9c785d3e175740737c8154dd5d3bb4bbacb3",
+          "pidStatus": "ABSENT",
+          "processStartIdentity": "UNVERIFIED",
+          "stopAcknowledged": false
+        }
+      ],
+      "stores": {
+        "send": {
+          "state": "NOT_FOUND_NOT_PROOF_OF_EMPTY"
+        },
+        "delivery": {
+          "state": "NOT_FOUND_NOT_PROOF_OF_EMPTY"
+        },
+        "approval": {
+          "state": "NOT_FOUND_NOT_PROOF_OF_EMPTY"
+        },
+        "requests": {
+          "state": "NOT_FOUND_NOT_PROOF_OF_EMPTY"
+        },
+        "migration": {
+          "state": "NOT_FOUND_NOT_PROOF_OF_EMPTY"
+        }
+      },
+      "leases": [],
+      "leaseScope": "NOT_FOUND_IN_THIS_TEMP_ONLY"
+    },
+    {
+      "version": 1,
+      "mode": "READ_ONLY",
+      "rootId": "c12a489fa781c9d2",
+      "status": "MIGRATION_BLOCKED",
+      "realDataExecution": "REAL_DATA_NOT_AUTHORIZED",
+      "stopConfirmed": false,
+      "effectiveProcessStateDir": "UNVERIFIED_CANDIDATE_ROOT_ONLY",
+      "ipc": "NOT_RUN_ENVIRONMENT_AUTHENTICATED_READ_ONLY_PROBE_REQUIRED",
+      "activeQqConsumers": "UNVERIFIED_NOT_INFERRED_FROM_PID",
+      "authoritativeWriter": "UNVERIFIED",
+      "inMemoryApprovalsAndExternalImports": "UNVERIFIED",
+      "locks": [
+        {
+          "name": ".core-owner.lock",
+          "state": "PRESENT",
+          "hash": "0b5d8618e29675f4ddc8b9cdeb6f066882e01aa27d6e25075401b15a98ff1b28",
+          "pidAlias": "4d0394d43c5c04173e8de51f3e4fff9ba8f5a2ee5e229020ea19511f48b43c6b",
+          "pidStatus": "ABSENT",
+          "processStartIdentity": "UNVERIFIED",
+          "stopAcknowledged": false
+        },
+        {
+          "name": ".core-owner.lock.reclaim",
+          "state": "NOT_FOUND_NOT_STOP_PROOF"
+        },
+        {
+          "name": "bridge.lock",
+          "state": "NOT_FOUND_NOT_STOP_PROOF"
+        }
+      ],
+      "stores": {
+        "send": {
+          "state": "NOT_FOUND_NOT_PROOF_OF_EMPTY"
+        },
+        "delivery": {
+          "state": "NOT_FOUND_NOT_PROOF_OF_EMPTY"
+        },
+        "approval": {
+          "state": "OBSERVED_NOT_COMPLETENESS_PROOF",
+          "hash": "80681fdaf6f3c33228e8c0177afad01acfdf6cb695042089664b7874759210a4",
+          "unresolved": 0
+        },
+        "requests": {
+          "state": "OBSERVED_NOT_COMPLETENESS_PROOF",
+          "hash": "b09732af4b6ab8652d42756f61bee964a2102909071f0ec9111909b8fb46f4eb",
+          "unresolved": 0
+        },
+        "migration": {
+          "state": "NOT_FOUND_NOT_PROOF_OF_EMPTY"
+        }
+      },
+      "leases": [],
+      "leaseScope": "NOT_FOUND_IN_THIS_TEMP_ONLY"
+    }
+  ],
+  "updateSources": [
+    {
+      "id": "gitcode",
+      "url": "https://api.gitcode.com/api/v5/repos/ygdnn/CetaMesh/raw/releases/stable.json?ref=main",
+      "httpStatus": 404,
+      "contentType": "application/json",
+      "bytes": 129,
+      "shape": "JSON_OBJECT_OR_ARRAY",
+      "trust": "NOT_VERIFIED_NO_PRODUCTION_PINNED_KEY",
+      "fetchedAt": "2026-10-18T13:40:43.494Z"
+    },
+    {
+      "id": "github",
+      "url": "https://raw.githubusercontent.com/chx6418-source/whalebridge/main/releases/stable.json",
+      "result": "NOT_RUN_ENVIRONMENT",
+      "code": "TypeError",
+      "reason": "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+      "fetchedAt": "2026-10-18T13:40:43.583Z"
+    }
+  ],
+  "stageStatus": {
+    "M2": "PARTIAL",
+    "M3": "PARTIAL",
+    "M4": "CODE_COMPLETE / E2E_PENDING",
+    "M5B": "REAL_DATA_NOT_AUTHORIZED / MIGRATION_BLOCKED",
+    "M6B": "PARTIAL_NATIVE_ACCEPTANCE",
+    "release": "RELEASE_BLOCKED"
+  },
+  "realProviderEvidence": "M6-A versions and sandbox results remain historical; no new real Codex/DSH/QQ task was performed in M6-B",
+  "finalDocumentationHead": "Resolve git rev-parse HEAD at the delivery commit; sourceCommit above is immutable product provenance"
+}

@@ -1,0 +1,18 @@
+{
+  "description": "配对完成后的 mesh.presence.ping（Mobile → Desktop，固定签名向量）。",
+  "now": "2026-10-08T12:00:00.000Z",
+  "expect": "accept",
+  "envelope": {
+    "protocol": "cetamesh",
+    "version": 1,
+    "id": "mesh-msg-0001",
+    "type": "mesh.presence.ping",
+    "timestamp": "2026-10-08T12:00:00.000Z",
+    "from": "a7f3c1e0-9b2d-4e6a-9f11-7c3d5e8b0a42",
+    "to": "node_ec23aac43cd6bfe4c3b03ab0a377a8cb",
+    "nonce": "QBFCFmfJWjvxKSx2MQWsXJQfDCNt+4lp1efAFowiZ2E=",
+    "payload": {},
+    "ph": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+    "signature": "MEUCIG3krn6p1tqHV/Y9zgZi8qMv1aPVqdPIVpvdGO5lSp7lAiEAuwm3jhn93czCw0RIPC552o4f+MPCD3UZRF2UTCS3gIQ="
+  }
+}

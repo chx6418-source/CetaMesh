@@ -18,8 +18,9 @@
 - [ ] No sensitive logs or screenshots.
 
 ## Build and verification
-- [ ] npm ci works in a clean environment.
-- [ ] npm run check passes.
+- [ ] npm ci works independently at root, desktop-ui and apps/mobile.
+- [ ] Root npm test and apps/mobile npm test pass.
+- [ ] Desktop Core/UI/Rust/Windows build and relevant CI pass.
 - [ ] Android CI passes.
 - [ ] Standalone APK verification passes for any published APK.
 - [ ] Native/device checks are documented honestly.
@@ -29,6 +30,8 @@
 - [ ] New dependencies have identifiable licenses.
 - [ ] Required third-party notices are preserved.
 - [ ] No copied source with unknown provenance.
+- [ ] SnowLuma redistribution/modification permission is documented before public publication.
+- [ ] Mineradio-derived Kugou code and runtime signing material have documented provenance and disposition.
 - [ ] Contributions are compatible with GPL-3.0-only.
 - [ ] Separately licensed bundled components are identified when needed.
 

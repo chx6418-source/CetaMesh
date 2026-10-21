@@ -1,0 +1,119 @@
+{
+  "sourceCommit": "745362672f388909c2d1abf5a00743bd97b7ccca",
+  "artifact": {
+    "version": "1.0.0-rc.2",
+    "build": 1095,
+    "sourceCommit": "745362672f388909c2d1abf5a00743bd97b7ccca",
+    "dirtySourceTree": false,
+    "buildId": "1.0.0-rc.2-build1095+7453626",
+    "path": "D:\\GIT- CetaMesh\\codex-detection-verification\\CetaMesh-Setup-1.0.0-rc.2-build1095-x64.exe",
+    "bytes": 43446272,
+    "sha256": "a2f34cd9cef0277e72ffe8577a4a1b0a988251f25668f947be0f8fd0907c5a74",
+    "manifestFilesVerified": 30,
+    "checksumEntriesVerified": 31
+  },
+  "tests": {
+    "pass": 134,
+    "fail": 0,
+    "notRun": 5,
+    "nodePass": 132,
+    "rustPass": 199,
+    "rcPass": 12,
+    "rcSuites": [
+      "✅ PASS     release      test-app-icon                        0.6s",
+      "✅ PASS     release      test-channel-sea                     4.0s",
+      "✅ PASS     release      test-core-dist                       27.0s",
+      "✅ PASS     release      test-desktop-runtime-dependencies    0.1s",
+      "✅ PASS     release      test-installer-package               1.2s",
+      "✅ PASS     release      test-m6-c-business-sea               1.8s",
+      "✅ PASS     release      test-m6-pure-core-sea                12.0s",
+      "✅ PASS     release      test-process-extension-sea           0.4s",
+      "✅ PASS     release      test-release-candidate               21.7s",
+      "✅ PASS     release      test-release-staging-protection      4.9s",
+      "✅ PASS     release      test-release-versioning              0.1s",
+      "✅ PASS     release      test-storage-hygiene                 0.5s"
+    ]
+  },
+  "native": {
+    "at": "2026-10-19T12:11:23.529Z",
+    "build": 1095,
+    "sourceCommit": "745362672f388909c2d1abf5a00743bd97b7ccca",
+    "action": "Codex 检查连接 completed",
+    "text": "CetaMesh\nDesktop · UX v2\nCM\n个人工作区\n本地工作区\n工作空间\nChat\nWork\nAgents\nPlugins\n桌面工作台已连接\n￼\nSettings\nAbout\nCM\n本地用户\n个人空间\nAgents\nAgents\n搜索会话、任务或插件\n⌘ K\n已连接\n当前主题：system\nAGENT DIRECTORY\nAgents\n查看可用 Agent、连接状态与职责。\n刷新状态\n4\n已配置 Agent\n2\n可用 Agent\n2\n任务可用\n1\n需要设置\n0\n活跃任务\n全部 Agent 4\n可用 Agent 2\n需设置 1\n搜索 Agent\n搜索 Agent\nDS\n需要设置\nDSH\n通用研究与协作\n处理资料、规划和跨工具工作流。\n缺少 DSH 本地认证信息，请先完成 DSH 登录。\n诊断详情\nDeepSeek Harness Desktop\n桌面应用：已安装 · installed\nDSH Agent Provider：needs-setup\n检查连接\nDSH 设置\n编程预设用于工作区任务；社交预设用于 QQ 社交，两者独立保存。\n当前生效版本 0 · 编程：未选择 · 社交：未选择\n编程预设\n编程预设\n社交预设\n社交预设\nDSH 数据目录\nD:\\GIT- CetaMesh\\codex-detection-verification\\Codex 1095 验收\\absent-dsh\nDSH 服务地址\nhttp://127.0.0.1:9\n配置来源\n保存配置\nCO\n已就绪\nCodex\n代码与项目\n理解项目、修改代码并检查结果。\nCodex CLI\nCodex CLI 已就绪 · 仅工作区任务。\n安装：已检测 · 协议：兼容 · 登录：已认证 · Sandbox：待首次明确选择的任务验证\nAgent 已就绪；此能力需要先分配工作区任务。\n版本 codex-cli 0.163.0-alpha.10.2\n检查连接\nZC\n未安装\nZCode\n开发辅助\n在可用时连接本地开发能力。\nnot_installed\n检查连接\nCE\n已就绪\nCetaMesh Managed Agent\n开发辅助\n在可用时连接本地开发能力。\nAgent 已就绪；此能力需要先分配工作区任务。\n检查连接\n运行策略\n敏感操作需要确认\n文件写入、网络访问和外部副作用由 Capability Broker 逐次管理。\n由 Core 强制执行\nHarbor\n·\n熟悉的多栏工作台\n本地 Core · WebView2"
+  },
+  "cleanup": {
+    "exitCode": 0,
+    "programRemoved": true,
+    "dataRetained": true,
+    "realUserProcessesStopped": false
+  },
+  "realTask": "NOT_RUN_ENVIRONMENT: Windows Codex CLI sandbox refused the isolated Task execution",
+  "signing": "SIGNING_PENDING / NotSigned",
+  "finalStatus": "RELEASE_BLOCKED",
+  "logs": [
+    {
+      "name": "1095-build-core.log",
+      "sha256": "1a4d3e0d96177d35e408dc4744a428597a19c4bafd3cd9e69c0ce179f9016eb8"
+    },
+    {
+      "name": "1095-build-ui.log",
+      "sha256": "708899d7a8c5927720ed78f1b1ef25896dd2ceb548c2a87dd729c6e1d9187b88"
+    },
+    {
+      "name": "1095-desktop-check.log",
+      "sha256": "26a153e6ea8d9015333afdb153616361a952c757ea6860a33bb6b7d9a0e3ba0f"
+    },
+    {
+      "name": "1095-desktop-test.log",
+      "sha256": "3fa41f2bca168e0a9a4b5c7372177282a72225782be51f332f2db8a2915ec359"
+    },
+    {
+      "name": "1095-desktop-build.log",
+      "sha256": "29a666bd23d54d0db9d2f41090bea796de9c740c4ea5aa99baf75184fe71d538"
+    },
+    {
+      "name": "1095-desktop-build-debug.log",
+      "sha256": "ed34d6b7f20a343358ae119da9b399f3480dbc2a4164fa5619a212510b1bba03"
+    },
+    {
+      "name": "1095-build-release.log",
+      "sha256": "ba7957d0481f51699a42cb5fdf857c15448f6e9a9e3a71a7a4ac41409b5003ae"
+    },
+    {
+      "name": "1095-npm-test.log",
+      "sha256": "0769620b49d0614123ef9b03767d61331094011d897013d33392744af2ad2f77"
+    },
+    {
+      "name": "1095-real-codex-task.log",
+      "sha256": "f93f72552c9ed61e7acabdc80c08aa6255e5d1a34e880097968e82565c82d363"
+    },
+    {
+      "name": "1095-real-sea-health.log",
+      "sha256": "b0dca259424140bec191a959d71db7bd0dd71241e0c23ff51257ff23f6ff3011"
+    },
+    {
+      "name": "candidate-boundary-red.log",
+      "sha256": "5158c6c338ce561810e01aea6d04dcb88156f720f974a005dba73436c8b8d239"
+    },
+    {
+      "name": "candidate-boundary-green.log",
+      "sha256": "8ac03d3aa8955a6c79f293575f0e8614233cd95df6c66c0a24a7855ed8cae7b3"
+    },
+    {
+      "name": "inflight-identity-red.log",
+      "sha256": "d8599125f0b2a5d523b58dd695625c7b54ce29c5d2e5fda29ce79c366a1fdd7c"
+    },
+    {
+      "name": "inflight-identity-green.log",
+      "sha256": "921f303e3b0a9c6ccd072e6bd63a0e217ddb3650467ddd481001f0923443827b"
+    },
+    {
+      "name": "sandbox-badge-red.log",
+      "sha256": "763f27e17367e2d0ca4560f0a58454d2ec54e8df5d015badbee2a935ac43b15c"
+    },
+    {
+      "name": "sandbox-badge-green.log",
+      "sha256": "85f7b521dd23fb586ffbb0b634f812e51472029dc1ef22039d677f716f37dfc7"
+    }
+  ]
+}

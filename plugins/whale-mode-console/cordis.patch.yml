@@ -1,0 +1,4 @@
+- insert:
+    - id: whale-mode-console
+      name: whale-mode-console
+      config: {}

@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>方案 01 · 纸面工作台 — CetaMesh UI 探索</title>
+<style>
+:root{
+  --bg:#f1f0ea; --panel:#e9e8e0; --card:#fbfaf6; --ink:#2e3630; --muted:#818a80;
+  --accent:#7d9b82; --accent-deep:#5f8467; --accent-ink:#f6f9f5; --line:#dcdad0;
+  --chip:#eceae1; --sage-bubble:#c9d8c4; --danger:#b0715d;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{height:100%}
+body{font-family:"Segoe UI","Microsoft YaHei UI",sans-serif;background:var(--bg);color:var(--ink);font-size:14px;overflow:hidden}
+.app{display:flex;height:100vh}
+
+/* ── 侧栏 ─────────────────────────────── */
+.side{width:232px;background:var(--panel);border-right:1px solid var(--line);display:flex;flex-direction:column;padding:20px 14px 14px}
+.logo{font-size:19px;font-weight:700;letter-spacing:.2px;padding:2px 10px 20px}
+.nav{display:flex;flex-direction:column;gap:2px}
+.nav .grp{font-size:11px;color:var(--muted);padding:14px 10px 6px;letter-spacing:.06em}
+.nav a{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:9px;color:var(--ink);text-decoration:none;font-size:13.5px}
+.nav a svg{width:15px;height:15px;stroke:var(--muted)}
+.nav a.on{background:var(--chip);font-weight:600}
+.nav a.on svg{stroke:var(--accent-deep)}
+.nav a:hover{background:#e2e1d8}
+.side .spacer{flex:1}
+.side .foot{border-top:1px solid var(--line);padding-top:10px;display:flex;flex-direction:column;gap:2px}
+.sidecap{font-size:11px;color:var(--muted);padding:12px 10px 0;line-height:1.7}
+
+/* ── 主区 ─────────────────────────────── */
+.main{flex:1;display:flex;flex-direction:column;min-width:0}
+.view{display:none;flex:1;min-height:0;flex-direction:column}
+.view.on{display:flex}
+
+/* 首页（空状态 Chat） */
+.home{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:0 60px}
+.home .kicker{color:var(--muted);font-size:14px;margin-bottom:10px}
+.home h1{font-size:32px;font-weight:700;letter-spacing:.5px;margin-bottom:18px}
+.home .sub{color:var(--muted);font-size:14px;margin-bottom:34px}
+.steps{display:flex;gap:44px;margin:6px 0 40px}
+.steps .s{width:150px}
+.steps .n{font-size:12px;color:var(--accent-deep);font-family:Consolas,monospace;margin-bottom:6px}
+.steps .t{font-size:13px;color:var(--ink);line-height:1.5}
+.cap-chips{display:flex;gap:10px;margin-bottom:34px}
+.cap-chips .c{display:flex;align-items:center;gap:8px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 14px;font-size:12.5px;color:var(--ink)}
+.cap-chips .c b{font-weight:600}
+.cap-chips .c span{color:var(--muted)}
+.cap-chips .dot{width:7px;height:7px;border-radius:50%;background:var(--accent)}
+
+/* Composer */
+.composer{width:100%;max-width:760px;background:var(--card);border:1px solid var(--line);border-radius:16px;padding:14px 16px 10px;box-shadow:0 8px 24px rgba(60,70,58,.06)}
+.composer input{width:100%;border:0;outline:0;background:transparent;font-size:14.5px;color:var(--ink)}
+.composer input::placeholder{color:#a9b0a6}
+.comp-row{display:flex;align-items:center;gap:8px;margin-top:12px}
+.comp-row .btn{display:flex;align-items:center;gap:6px;border:1px solid var(--line);background:transparent;border-radius:8px;padding:5px 11px;font-size:12.5px;color:var(--ink);cursor:default}
+.comp-row .btn svg{width:13px;height:13px;stroke:var(--muted)}
+.comp-row .send{margin-left:auto;width:30px;height:30px;border-radius:50%;background:var(--accent);display:flex;align-items:center;justify-content:center}
+.comp-row .send svg{width:14px;height:14px;stroke:var(--accent-ink)}
+
+/* 会话线程 */
+.thread-head{height:52px;display:flex;align-items:center;gap:10px;padding:0 26px;border-bottom:1px solid var(--line);background:color-mix(in srgb,var(--bg),#ffffff 30%)}
+.thread-head .t{font-weight:600;font-size:14.5px}
+.thread-head .badge{font-size:11px;color:var(--accent-deep);background:#dfe8dc;border-radius:6px;padding:2px 8px}
+.thread{flex:1;overflow:hidden;padding:26px 0;display:flex;flex-direction:column;gap:20px;align-items:center}
+.col{width:100%;max-width:760px;display:flex;flex-direction:column;gap:20px}
+.msg-user{align-self:flex-end;background:var(--sage-bubble);border-radius:14px 14px 4px 14px;padding:11px 16px;max-width:520px;line-height:1.65}
+.attach{display:flex;align-items:center;gap:9px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 12px;margin-top:8px;font-size:12.5px}
+.attach svg{width:14px;height:14px;stroke:var(--muted)}
+.attach .sz{color:var(--muted);margin-left:auto;font-size:11.5px}
+.msg-c{display:flex;gap:12px}
+.avatar{width:30px;height:30px;border-radius:50%;background:var(--accent);color:var(--accent-ink);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;flex-shrink:0}
+.m-body{flex:1;min-width:0}
+.m-body .who{font-size:12px;color:var(--muted);margin-bottom:6px}
+.m-body .txt{line-height:1.75;font-size:14px}
+.proc{margin:10px 0;border:1px solid var(--line);background:var(--card);border-radius:12px;padding:12px 16px}
+.proc .ph{font-size:12px;color:var(--muted);margin-bottom:10px;display:flex;gap:8px;align-items:center}
+.proc .ph .ok{color:var(--accent-deep)}
+.pstep{display:flex;gap:14px;padding:5px 0;font-size:13px}
+.pstep .n{font-family:Consolas,monospace;font-size:11.5px;color:var(--accent-deep);width:18px;padding-top:1px}
+.pstep .st{margin-left:auto;font-size:11.5px;color:var(--muted)}
+.pstep .st.done{color:var(--accent-deep)}
+.inline-row{display:flex;align-items:center;gap:10px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:9px 14px;font-size:13px;margin-top:10px}
+.inline-row svg{width:14px;height:14px;stroke:var(--muted);flex-shrink:0}
+.inline-row .go{margin-left:auto;font-size:12px;color:var(--accent-deep)}
+.inline-row.agent{border-left:3px solid var(--accent)}
+.inline-row.task{border-left:3px solid #b8a468}
+.inline-row .live{width:7px;height:7px;border-radius:50%;background:var(--accent);animation:pulse 1.6s infinite}
+@keyframes pulse{50%{opacity:.35}}
+
+/* 通用页面骨架 */
+.page{flex:1;min-height:0;display:flex}
+.page-side{width:250px;border-right:1px solid var(--line);padding:22px 14px;overflow:hidden;background:color-mix(in srgb,var(--panel),#ffffff 35%)}
+.page-side h3{font-size:15px;margin-bottom:16px;padding:0 8px}
+.page-main{flex:1;min-width:0;overflow:hidden;padding:26px 34px;flex-direction:column}
+.page-main.on{display:flex}
+
+/* Work */
+.tgrp{font-size:11.5px;color:var(--muted);padding:10px 8px 6px;letter-spacing:.05em}
+.titem{border-radius:9px;padding:9px 10px;font-size:13px;margin-bottom:2px}
+.titem:hover{background:#e3e2d9}
+.titem.on{background:var(--card);border:1px solid var(--line)}
+.titem .st{float:right;font-size:11px;color:var(--accent-deep)}
+.task-detail{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:22px 26px;max-width:640px}
+.task-detail h2{font-size:17px;margin-bottom:8px}
+.kv{display:flex;gap:10px;font-size:13px;padding:7px 0;border-bottom:1px dashed var(--line)}
+.kv .k{width:76px;color:var(--muted)}
+.next{margin-top:14px;background:#f3f2ea;border-radius:10px;padding:12px 14px;font-size:13px;line-height:1.6}
+.next b{display:block;font-size:12px;color:var(--muted);margin-bottom:4px}
+
+/* Memory */
+.mem-cards{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;max-width:860px}
+.mem-card{background:var(--card);border:1px solid var(--line);border-radius:13px;padding:16px 18px}
+.mem-card h4{font-size:13.5px;margin-bottom:10px;display:flex;align-items:center;gap:8px}
+.mem-card h4 .dot{width:7px;height:7px;border-radius:50%}
+.mem-item{font-size:12.5px;color:var(--ink);padding:7px 0;border-top:1px dashed var(--line);line-height:1.55}
+.mem-item .when{color:var(--muted);font-size:11px;margin-left:6px}
+
+/* Agents */
+.agent-grid{display:grid;grid-template-columns:repeat(2,260px);gap:16px}
+.acard{background:var(--card);border:1px solid var(--line);border-radius:15px;padding:18px 20px}
+.acard .head{display:flex;align-items:center;gap:12px;margin-bottom:10px}
+.acard .ic{width:38px;height:38px;border-radius:11px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:15px;color:#fff}
+.acard h4{font-size:14.5px}
+.acard .role{font-size:12px;color:var(--muted);margin-top:2px}
+.acard .desc{font-size:12.5px;color:var(--muted);line-height:1.6;margin-bottom:12px;min-height:40px}
+.state{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;border-radius:7px;padding:3px 9px;margin-bottom:12px}
+.state .d{width:6px;height:6px;border-radius:50%}
+.s-ready{background:#e0e9dd;color:#48684f}.s-ready .d{background:#5f8467}
+.s-setup{background:#efe7d3;color:#7c6a33}.s-setup .d{background:#b09a4e}
+.s-not{background:#e7e5dd;color:#71756c}.s-not .d{background:#9aa096}
+.s-un{background:#ecd9d3;color:#8a5545}.s-un .d{background:#b0715d}
+.acard .act{font-size:12.5px;border:1px solid var(--line);border-radius:8px;padding:6px 12px;display:inline-block}
+.acard .act.pri{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+
+/* Plugins */
+.plug-grid{display:grid;grid-template-columns:repeat(3,240px);gap:14px}
+.pcard{background:var(--card);border:1px solid var(--line);border-radius:13px;padding:16px 18px;cursor:default}
+.pcard .head{display:flex;gap:11px;align-items:center;margin-bottom:9px}
+.pcard .ic{width:34px;height:34px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;color:#fff}
+.pcard h4{font-size:13.5px}
+.pcard .sub{font-size:11.5px;color:var(--muted);margin-top:1px}
+.pcard p{font-size:12px;color:var(--muted);line-height:1.6;margin-bottom:10px}
+.pcard .meta{font-size:11px;color:var(--muted);display:flex;gap:10px}
+.pcard .meta b{color:var(--accent-deep);font-weight:600}
+
+/* Plugin 二级 */
+.crumb{font-size:12.5px;color:var(--muted);margin-bottom:14px}
+.crumb b{color:var(--ink)}
+.plug-head{display:flex;gap:14px;align-items:center;margin-bottom:18px}
+.plug-head .ic{width:46px;height:46px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-weight:700;color:#fff;font-size:16px}
+.plug-head h2{font-size:17px}
+.plug-head .sub{font-size:12.5px;color:var(--muted);margin-top:2px}
+.tool-table{background:var(--card);border:1px solid var(--line);border-radius:13px;max-width:720px}
+.tool-row{display:flex;align-items:center;gap:12px;padding:9px 18px;border-top:1px solid var(--line);font-size:13px}
+.tool-row:first-child{border-top:0}
+.tool-row .perm{margin-left:auto;font-size:11px;color:var(--muted);border:1px solid var(--line);border-radius:6px;padding:1px 7px}
+.tgl{width:30px;height:17px;border-radius:9px;background:var(--accent);position:relative;flex-shrink:0}
+.tgl::after{content:"";position:absolute;width:13px;height:13px;border-radius:50%;background:#fff;top:2px;right:2px}
+.tgl.off{background:#c9c7bc}
+.tgl.off::after{left:2px}
+.tool-sec{font-size:11.5px;color:var(--muted);background:#efeee6;padding:5px 18px;letter-spacing:.05em}
+
+/* Settings */
+.set-grid{display:flex;gap:34px;max-width:860px}
+.set-nav{width:190px;display:flex;flex-direction:column;gap:2px}
+.set-nav a{padding:7px 12px;border-radius:8px;font-size:13px;color:var(--ink);text-decoration:none}
+.set-nav a.on{background:var(--chip);font-weight:600}
+.set-nav .adv{margin-top:14px;padding-top:12px;border-top:1px solid var(--line);font-size:11.5px;color:var(--muted);padding-left:12px;letter-spacing:.05em}
+.set-body{flex:1;max-width:560px}
+.set-body h2{font-size:17px;margin-bottom:16px}
+.set-row{display:flex;align-items:center;gap:16px;padding:13px 0;border-bottom:1px solid var(--line)}
+.set-row .l{flex:1}
+.set-row .l b{font-size:13.5px;font-weight:600;display:block;margin-bottom:3px}
+.set-row .l span{font-size:12px;color:var(--muted);line-height:1.5}
+.set-row .ctl{font-size:12.5px;border:1px solid var(--line);border-radius:8px;padding:5px 12px;color:var(--ink);background:var(--card);white-space:nowrap}
+
+/* About */
+.about-wrap{max-width:620px}
+.about-hero{display:flex;align-items:center;gap:16px;margin-bottom:22px}
+.about-hero .mark{width:56px;height:56px;border-radius:16px;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:22px}
+.about-hero h2{font-size:19px}
+.about-hero .v{font-size:12.5px;color:var(--muted);margin-top:3px}
+.about-card{background:var(--card);border:1px solid var(--line);border-radius:13px;padding:6px 20px;margin-bottom:14px}
+.about-row{display:flex;align-items:center;gap:12px;padding:11px 0;border-top:1px solid var(--line);font-size:13px}
+.about-row:first-child{border-top:0}
+.about-row .k{width:110px;color:var(--muted);font-size:12.5px}
+.about-row .go{margin-left:auto;color:var(--accent-deep);font-size:12.5px}
+.about-row .ext{font-size:11px;color:var(--muted);border:1px solid var(--line);border-radius:6px;padding:1px 7px;margin-left:8px}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="side">
+    <div class="logo">CetaMesh</div>
+    <nav class="nav">
+      <a href="#/home" data-v="home"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M9 10h6M9 13.5h4"/></svg>对话</a>
+      <a href="#/work" data-v="work"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M8 9h8M8 13h5"/></svg>工作</a>
+      <a href="#/memory" data-v="memory"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M12 3v4M12 17v4M3 12h4M17 12h4"/></svg>记忆</a>
+      <div class="grp">能力</div>
+      <a href="#/agents" data-v="agents"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><rect x="5" y="7" width="14" height="11" rx="3"/><path d="M12 7V4M9 12h.01M15 12h.01"/></svg>智能体</a>
+      <a href="#/plugins" data-v="plugins"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="M9 4v3M15 4v3M7 7h10v4a5 5 0 0 1-10 0V7zM12 16v4"/></svg>插件</a>
+    </nav>
+    <div class="spacer"></div>
+    <div class="foot nav">
+      <a href="#/settings" data-v="settings"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/></svg>设置</a>
+      <a href="#/about" data-v="about"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 8h.01M12 11v5"/></svg>关于</a>
+    </div>
+    <div class="sidecap">能力方向示意<br>非真实产品截图</div>
+  </aside>
+
+  <main class="main">
+    <!-- 首页 = Chat 空状态 -->
+    <section class="view on" id="v-home">
+      <div class="home">
+        <div class="kicker">A little more connected.</div>
+        <h1>让零散想法，有一个去处。</h1>
+        <div class="sub">直接问我；也可以让我使用工具、创建任务，或交给 Agent。</div>
+        <div class="steps">
+          <div class="s"><div class="n">01</div><div class="t">直接回答你的问题</div></div>
+          <div class="s"><div class="n">02</div><div class="t">需要时使用工具查证</div></div>
+          <div class="s"><div class="n">03</div><div class="t">要动手的事建任务、交 Agent</div></div>
+        </div>
+        <div class="cap-chips">
+          <div class="c"><i class="dot"></i><b>直接回答</b><span>想到就问</span></div>
+          <div class="c"><i class="dot"></i><b>使用工具</b><span>搜索 · 文件 · 日程</span></div>
+          <div class="c"><i class="dot"></i><b>创建任务</b><span>追踪到完成</span></div>
+          <div class="c"><i class="dot"></i><b>交给 Agent</b><span>放手让它做</span></div>
+        </div>
+        <div class="composer">
+          <input placeholder="从一个想法开始…">
+          <div class="comp-row">
+            <span class="btn"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>附件</span>
+            <span class="btn"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="M14.7 6.3a4.5 4.5 0 0 0-6 6L3 18v3h3l5.7-5.7a4.5 4.5 0 0 0 6-6L15 12l-3-3 2.7-2.7z"/></svg>工具</span>
+            <span class="btn"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><rect x="5" y="7" width="14" height="11" rx="3"/><path d="M12 7V4"/></svg>Agent</span>
+            <span class="btn">模式 · 自动</span>
+            <span class="send"><svg viewBox="0 0 24 24" fill="none" stroke-width="2.2"><path d="M12 19V5M5 12l7-7 7 7"/></svg></span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 会话线程 -->
+    <section class="view" id="v-thread">
+      <div class="thread-head"><span class="t">周末计划</span><span class="badge">进行中</span></div>
+      <div class="thread">
+        <div class="col">
+          <div class="msg-user">帮我把周末的灵感整理成一个计划，顺便看看周六的天气。
+            <div class="attach"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>灵感.md<span class="sz">3 KB</span></div>
+          </div>
+          <div class="msg-c">
+            <div class="avatar">C</div>
+            <div class="m-body">
+              <div class="who">CetaMesh · 协作过程</div>
+              <div class="proc">
+                <div class="ph"><span class="ok">✓</span> 3 步完成 · 详情可展开</div>
+                <div class="pstep"><span class="n">01</span>把灵感要点写进记忆<span class="st done">已完成</span></div>
+                <div class="pstep"><span class="n">02</span>使用工具 · 查询周六天气<span class="st done">已完成</span></div>
+                <div class="pstep"><span class="n">03</span>创建任务「周末计划」<span class="st done">已完成</span></div>
+              </div>
+              <div class="txt">周六晴，22°C，适合出门。我把你的灵感整理成了任务<b>「周末计划」</b>，摄影偏好也记进了记忆。要把周六上午交给 DSH 执行吗？</div>
+              <div class="inline-row task"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M8 9h8M8 13h5"/></svg>已创建任务 · 周末计划<span class="go">在工作页查看 →</span></div>
+              <div class="inline-row agent"><span class="live"></span>已交给 Agent · DSH 运行中<span class="go">查看详情 →</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div style="display:flex;justify-content:center;padding:0 40px 24px">
+        <div class="composer">
+          <input placeholder="继续这个话题…">
+          <div class="comp-row">
+            <span class="btn"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg></span>
+            <span class="btn">工具</span><span class="btn">Agent</span><span class="btn">模式 · 自动</span>
+            <span class="send"><svg viewBox="0 0 24 24" fill="none" stroke-width="2.2"><path d="M12 19V5M5 12l7-7 7 7"/></svg></span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Work -->
+    <section class="view" id="v-work">
+      <div class="page">
+        <aside class="page-side">
+          <h3>工作</h3>
+          <div class="tgrp">进行中 · 2</div>
+          <div class="titem on">周末计划<span class="st">进行中</span></div>
+          <div class="titem">黑话库清洗<span class="st">进行中</span></div>
+          <div class="tgrp">等待确认 · 1</div>
+          <div class="titem">发布 1.0 更新公告<span class="st">待确认</span></div>
+          <div class="tgrp">已完成 · 12</div>
+          <div class="titem">手机配对<span class="st">完成</span></div>
+        </aside>
+        <div class="page-main on">
+          <div class="task-detail">
+            <h2>周末计划</h2>
+            <div class="kv"><span class="k">状态</span>进行中</div>
+            <div class="kv"><span class="k">Agent</span>DSH · 已接管执行</div>
+            <div class="kv"><span class="k">来源对话</span>「周末计划」会话</div>
+            <div class="kv"><span class="k">更新</span>2 分钟前</div>
+            <div class="next"><b>下一步</b>DSH 正在按灵感清单排周六上午的日程；完成后会回来向你确认。</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Memory -->
+    <section class="view" id="v-memory">
+      <div class="page">
+        <div class="page-main on">
+          <h2 style="font-size:17px;margin-bottom:6px">记忆</h2>
+          <div style="color:var(--muted);font-size:13px;margin-bottom:20px">CetaMesh 只在你允许时记住，并可随时修改或删除。</div>
+          <div class="mem-cards">
+            <div class="mem-card"><h4><span class="dot" style="background:#7d9b82"></span>灵感与偏好</h4>
+              <div class="mem-item">喜欢在周六上午摄影<span class="when">今天</span></div>
+              <div class="mem-item">偏好简洁的中文回复<span class="when">昨天</span></div>
+            </div>
+            <div class="mem-card"><h4><span class="dot" style="background:#b8a468"></span>事情与约定</h4>
+              <div class="mem-item">周日和家人吃饭<span class="when">今天</span></div>
+              <div class="mem-item">1.0 发布前要写更新公告<span class="when">3 天前</span></div>
+            </div>
+            <div class="mem-card"><h4><span class="dot" style="background:#8d9bb0"></span>事实与背景</h4>
+              <div class="mem-item">常用工作区 GIT-QQ-BRIDGE<span class="when">上周</span></div>
+              <div class="mem-item">手机已与桌面配对<span class="when">上周</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Agents -->
+    <section class="view" id="v-agents">
+      <div class="page">
+        <div class="page-main on">
+          <h2 style="font-size:17px;margin-bottom:6px">智能体</h2>
+          <div style="color:var(--muted);font-size:13px;margin-bottom:20px">把要动手的事交给它们；CetaMesh 会盯着进度。</div>
+          <div class="agent-grid">
+            <div class="acard"><div class="head"><div class="ic" style="background:#5f8467">D</div><div><h4>DSH</h4><div class="role">本机 Agent · 执行日常任务</div></div></div>
+              <div class="state s-ready"><span class="d"></span>就绪</div>
+              <div class="desc">可以查资料、整理文件、跑命令；交给它的事会在这里看到进度。</div>
+              <span class="act pri">交给 DSH</span></div>
+            <div class="acard"><div class="head"><div class="ic" style="background:#8d9bb0">C</div><div><h4>Codex</h4><div class="role">编程 Agent</div></div></div>
+              <div class="state s-setup"><span class="d"></span>需要设置</div>
+              <div class="desc">检测到本机有 Codex，但还没完成接入授权。</div>
+              <span class="act">去设置</span></div>
+            <div class="acard"><div class="head"><div class="ic" style="background:#6f7d94">Z</div><div><h4>ZCode</h4><div class="role">通用 Agent</div></div></div>
+              <div class="state s-not"><span class="d"></span>未安装</div>
+              <div class="desc">安装后即可作为执行者接任务。</div>
+              <span class="act">了解安装</span></div>
+            <div class="acard"><div class="head"><div class="ic" style="background:#b0715d">S</div><div><h4>SnowLuma Host</h4><div class="role">QQ 频道 Agent</div></div></div>
+              <div class="state s-un"><span class="d"></span>暂不可用</div>
+              <div class="desc">运行时离线；恢复后自动回到就绪。</div>
+              <span class="act">查看原因</span></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Plugins -->
+    <section class="view" id="v-plugins">
+      <div class="page">
+        <div class="page-main on">
+          <h2 style="font-size:17px;margin-bottom:6px">插件</h2>
+          <div style="color:var(--muted);font-size:13px;margin-bottom:20px">扩展 CetaMesh 的工具与连接；点开一个插件管理它的工具。</div>
+          <div class="plug-grid">
+            <div class="pcard" onclick="location.hash='#/plugin'"><div class="head"><div class="ic" style="background:#5f8467">S</div><div><h4>SnowLuma</h4><div class="sub">频道连接</div></div></div>
+              <p>连接 QQ 频道，让 CetaMesh 在频道里收发消息。</p>
+              <div class="meta"><b>8 个工具</b><span>已启用</span></div></div>
+            <div class="pcard" onclick="location.hash='#/plugin'"><div class="head"><div class="ic" style="background:#8d9bb0">D</div><div><h4>DSH</h4><div class="sub">Agent Provider</div></div></div>
+              <p>把任务交给本机 DSH 智能体执行。</p>
+              <div class="meta"><b>6 个工具</b><span>已启用</span></div></div>
+            <div class="pcard" onclick="location.hash='#/plugin'"><div class="head"><div class="ic" style="background:#b8a468">B</div><div><h4>Bionic Chat Tools</h4><div class="sub">工具集</div></div></div>
+              <p>一批聊天增强工具：日程、提醒、摘要。</p>
+              <div class="meta"><b>7 个工具</b><span>已启用</span></div></div>
+            <div class="pcard"><div class="head"><div class="ic" style="background:#6f7d94">W</div><div><h4>Web Search Safe</h4><div class="sub">扩展</div></div></div>
+              <p>只读联网搜索，带安全边界。</p>
+              <div class="meta"><b>2 个工具</b><span>已启用</span></div></div>
+            <div class="pcard"><div class="head"><div class="ic" style="background:#9b8db0">M</div><div><h4>Memory Pack</h4><div class="sub">扩展</div></div></div>
+              <p>记忆整理与导入导出。</p>
+              <div class="meta"><b>2 个工具</b><span>已关闭</span></div></div>
+            <div class="pcard"><div class="head"><div class="ic" style="background:#b09a8d">C</div><div><h4>Card Approvals</h4><div class="sub">扩展</div></div></div>
+              <p>频道卡片按钮的审批与安全点击。</p>
+              <div class="meta"><b>2 个工具</b><span>已启用</span></div></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Plugin 二级 -->
+    <section class="view" id="v-plugin">
+      <div class="page">
+        <div class="page-main on">
+          <div class="crumb">插件 / <b>SnowLuma</b></div>
+          <div class="plug-head"><div class="ic" style="background:#5f8467">S</div>
+            <div><h2>SnowLuma</h2><div class="sub">频道连接 · v1.4 · 已启用</div></div></div>
+          <div style="display:flex;gap:10px;margin-bottom:16px">
+            <span class="set-row" style="border:0;padding:0"><span class="ctl">启用</span></span>
+            <span class="ctl">权限：仅白名单会话</span>
+          </div>
+          <div class="tool-table">
+            <div class="tool-sec">收发消息</div>
+            <div class="tool-row">发送群消息<span class="perm">发送</span><i class="tgl"></i></div>
+            <div class="tool-row">发送私聊消息<span class="perm">发送</span><i class="tgl"></i></div>
+            <div class="tool-row">回复消息<span class="perm">发送</span><i class="tgl"></i></div>
+            <div class="tool-row">戳一戳<span class="perm">发送</span><i class="tgl off"></i></div>
+            <div class="tool-sec">读取</div>
+            <div class="tool-row">读取会话消息<span class="perm">读取</span><i class="tgl"></i></div>
+            <div class="tool-row">查看卡片消息<span class="perm">读取</span><i class="tgl"></i></div>
+            <div class="tool-row">获取群成员列表<span class="perm">读取</span><i class="tgl"></i></div>
+            <div class="tool-sec">管理</div>
+            <div class="tool-row">设置唤醒与潜水<span class="perm">写入</span><i class="tgl"></i></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Settings -->
+    <section class="view" id="v-settings">
+      <div class="page">
+        <div class="page-main on">
+          <div class="set-grid">
+            <nav class="set-nav">
+              <a class="on">通用</a><a>外观</a><a>通知</a><a>隐私与安全</a><a>记忆与工作区</a>
+              <div class="adv">高级</div>
+              <a style="color:var(--muted)">模型与提供方</a><a>插件与扩展</a><a>诊断</a>
+            </nav>
+            <div class="set-body">
+              <h2>通用</h2>
+              <div class="set-row"><div class="l"><b>语言</b><span>界面显示语言</span></div><span class="ctl">中文</span></div>
+              <div class="set-row"><div class="l"><b>开机自动启动</b><span>登录 Windows 后在后台运行</span></div><i class="tgl"></i></div>
+              <div class="set-row"><div class="l"><b>关闭窗口时</b><span>隐藏到托盘，任务继续运行</span></div><span class="ctl">隐藏到托盘</span></div>
+              <div class="set-row"><div class="l"><b>主题</b><span>跟随窗口明暗</span></div><span class="ctl">纸面 · 浅色</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- About -->
+    <section class="view" id="v-about">
+      <div class="page">
+        <div class="page-main on">
+          <div class="about-wrap">
+            <div class="about-hero"><div class="mark">C</div>
+              <div><h2>CetaMesh</h2><div class="v">版本 1.0.0-rc.1 · Windows</div></div></div>
+            <div class="about-card">
+              <div class="about-row"><span class="k">检查更新</span>已是最新版本<span class="go">再次检查</span></div>
+              <div class="about-row"><span class="k">更新公告</span>1.0 候选版说明<span class="go">查看</span></div>
+            </div>
+            <div class="about-card">
+              <div class="about-row"><span class="k">反馈与建议</span>在官网告诉我们想法<span class="go">打开网页 ↗</span><span class="ext">浏览器</span></div>
+              <div class="about-row"><span class="k">Bug 反馈</span>遇到问题？帮我们修好<span class="go">打开网页 ↗</span></div>
+              <div class="about-row"><span class="k">安全漏洞</span>负责任披露渠道<span class="go">打开网页 ↗</span></div>
+            </div>
+            <div class="about-card">
+              <div class="about-row"><span class="k">开源许可</span>第三方组件清单<span class="go">查看</span></div>
+              <div class="about-row"><span class="k">诊断信息</span>版本与构建用于反馈<span class="go">复制</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+<script>
+const map={home:'home',thread:'thread',work:'work',memory:'memory',agents:'agents',plugins:'plugins',plugin:'plugin',settings:'settings',about:'about'};
+function route(){
+  const h=(location.hash||'#/home').replace('#/','');
+  const v=map[h]||'home';
+  document.querySelectorAll('.view').forEach(el=>el.classList.toggle('on',el.id==='v-'+v));
+  document.querySelectorAll('.side .nav a,.side .foot a').forEach(a=>{
+    const t=a.dataset.v===v||(v==='plugin'&&a.dataset.v==='plugins')||(v==='thread'&&a.dataset.v==='home');
+    a.classList.toggle('on',t);
+  });
+}
+addEventListener('hashchange',route);route();
+</script>
+</body>
+</html>

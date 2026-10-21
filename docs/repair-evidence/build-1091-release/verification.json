@@ -1,0 +1,491 @@
+{
+  "observedAt": "2026-10-19T10:53:37.430Z",
+  "timezone": "Asia/Shanghai",
+  "releaseStatus": "RELEASE_BLOCKED",
+  "requestedOldHead": "db2b060018d0309052eeea004cdbd14e257aa56d",
+  "verifiedMainBase": "ad1b81b5d872982030b5fa09cef24dce736e302e",
+  "repairBranch": "codex/build-1091-release-verification",
+  "productSourceCommit": "4ba0895b9a66fb1fb0766d2807956ea5da002b55",
+  "version": "1.0.0-rc.2",
+  "build": 1091,
+  "dirtySourceTreeAtBuild": false,
+  "verification": {
+    "initial": {
+      "pass": 130,
+      "fail": 3,
+      "notRun": 5,
+      "file": "npm-test.log",
+      "environmentRows": [
+        "↷ NOT_RUN_ENVIRONMENT  environment  test-console                         0.0s  缺少环境：legacy-bridge",
+        "↷ NOT_RUN_ENVIRONMENT  environment  test-mcp-exec                        0.0s  缺少环境：gateway",
+        "↷ NOT_RUN_ENVIRONMENT  environment  test-mcp-web-search                  0.0s  缺少环境：network",
+        "↷ NOT_RUN_ENVIRONMENT  environment  test-onebot-connection               0.0s  缺少环境：gateway",
+        "↷ NOT_RUN_ENVIRONMENT  environment  test-phase3-real-codex               0.0s  缺少环境：real-codex"
+      ]
+    },
+    "focused": {
+      "pass": 5,
+      "fail": 0,
+      "notRun": 0,
+      "file": "focused-fix.log",
+      "environmentRows": []
+    },
+    "full": {
+      "pass": 133,
+      "fail": 0,
+      "notRun": 5,
+      "file": "npm-test-final.log",
+      "environmentRows": [
+        "↷ NOT_RUN_ENVIRONMENT  environment  test-console                         0.0s  缺少环境：legacy-bridge",
+        "↷ NOT_RUN_ENVIRONMENT  environment  test-mcp-exec                        0.0s  缺少环境：gateway",
+        "↷ NOT_RUN_ENVIRONMENT  environment  test-mcp-web-search                  0.0s  缺少环境：network",
+        "↷ NOT_RUN_ENVIRONMENT  environment  test-onebot-connection               0.0s  缺少环境：gateway",
+        "↷ NOT_RUN_ENVIRONMENT  environment  test-phase3-real-codex               0.0s  缺少环境：real-codex"
+      ]
+    },
+    "rc": {
+      "pass": 12,
+      "fail": 0,
+      "notRun": 0,
+      "file": "rc-final.log",
+      "environmentRows": []
+    },
+    "rust": {
+      "pass": 199,
+      "fail": 0
+    },
+    "nodeJs": {
+      "pass": 131,
+      "fail": 0,
+      "notRun": 5
+    },
+    "artifact": {
+      "observedAt": "2026-10-19T10:39:30.100Z",
+      "sourceCommit": "4ba0895b9a66fb1fb0766d2807956ea5da002b55",
+      "version": "1.0.0-rc.2",
+      "build": 1091,
+      "dirtySourceTree": false,
+      "files": [
+        {
+          "path": "build-info.json",
+          "bytes": 398,
+          "sha256": "f66e6cefb9f0807b6d69f06d32c26489c69659d549ce7e48d7d2bf2e0f2d384c",
+          "expected": "f66e6cefb9f0807b6d69f06d32c26489c69659d549ce7e48d7d2bf2e0f2d384c",
+          "match": true
+        },
+        {
+          "path": "CetaMesh-Setup-1.0.0-rc.2-build1091-x64.exe",
+          "bytes": 43442176,
+          "sha256": "b4cb2fe803bac9a12f3ae7c256d98a47b072a325a3a6455f48d74a82a99bfb70",
+          "expected": "b4cb2fe803bac9a12f3ae7c256d98a47b072a325a3a6455f48d74a82a99bfb70",
+          "match": true
+        },
+        {
+          "path": "INSTALL.txt",
+          "bytes": 1286,
+          "sha256": "80ad7e3832e58b256c81e2639e905201b740d73c477d9afe1b0528ab7804ba83",
+          "expected": "80ad7e3832e58b256c81e2639e905201b740d73c477d9afe1b0528ab7804ba83",
+          "match": true
+        },
+        {
+          "path": "licenses/README.md",
+          "bytes": 330,
+          "sha256": "2ccca0b0ec132393676e55616216198ca45af5c1250c2e1e0ca19a7b844dca73",
+          "expected": "2ccca0b0ec132393676e55616216198ca45af5c1250c2e1e0ca19a7b844dca73",
+          "match": true
+        },
+        {
+          "path": "licenses/THIRD-PARTY.md",
+          "bytes": 7401,
+          "sha256": "f1e17502cc06b6c0f1147c9b722422ccea273140927db806a30b081567ed22a9",
+          "expected": "f1e17502cc06b6c0f1147c9b722422ccea273140927db806a30b081567ed22a9",
+          "match": true
+        },
+        {
+          "path": "payload/build-info.json",
+          "bytes": 398,
+          "sha256": "f66e6cefb9f0807b6d69f06d32c26489c69659d549ce7e48d7d2bf2e0f2d384c",
+          "expected": "f66e6cefb9f0807b6d69f06d32c26489c69659d549ce7e48d7d2bf2e0f2d384c",
+          "match": true
+        },
+        {
+          "path": "payload/resources/assets/deepseek娘.png",
+          "bytes": 467124,
+          "sha256": "4590113f7551abfd25c8cb2a2fb7ccfdc10a217cacb6bf63d32a16fe9d13ac06",
+          "expected": "4590113f7551abfd25c8cb2a2fb7ccfdc10a217cacb6bf63d32a16fe9d13ac06",
+          "match": true
+        },
+        {
+          "path": "payload/resources/config.example.json",
+          "bytes": 6581,
+          "sha256": "afa8179c51d36d16a48a1701bc895005e7fca63eff32abfc9b79bd4563b23e7a",
+          "expected": "afa8179c51d36d16a48a1701bc895005e7fca63eff32abfc9b79bd4563b23e7a",
+          "match": true
+        },
+        {
+          "path": "payload/resources/desktop-ui/assets/index-Cc5aj3rB.css",
+          "bytes": 42979,
+          "sha256": "f355ad1cea02eb3fa9dcd149599f8bbe9c6a2cd8f8072f738a36fc9ab78d2f11",
+          "expected": "f355ad1cea02eb3fa9dcd149599f8bbe9c6a2cd8f8072f738a36fc9ab78d2f11",
+          "match": true
+        },
+        {
+          "path": "payload/resources/desktop-ui/assets/index-CpY0TwKs.js",
+          "bytes": 570715,
+          "sha256": "aa1fd6031ec025700bbe843a9d1f1b6e70cf07b7253b5bf830236cca3b0dcf3f",
+          "expected": "aa1fd6031ec025700bbe843a9d1f1b6e70cf07b7253b5bf830236cca3b0dcf3f",
+          "match": true
+        },
+        {
+          "path": "payload/resources/desktop-ui/index.html",
+          "bytes": 471,
+          "sha256": "79a81bce825f83fca3654ef0f8af4d38be749410ef776e290950de0e7254967d",
+          "expected": "79a81bce825f83fca3654ef0f8af4d38be749410ef776e290950de0e7254967d",
+          "match": true
+        },
+        {
+          "path": "payload/resources/dsh/agent-presets/whale-chat/agent.cordis.yml",
+          "bytes": 7499,
+          "sha256": "988fe3a527ae37c888297e232feedabe786108b6718a46c743baea8c46da41f9",
+          "expected": "988fe3a527ae37c888297e232feedabe786108b6718a46c743baea8c46da41f9",
+          "match": true
+        },
+        {
+          "path": "payload/resources/dsh/agent-presets/whale-chat/preset.yml",
+          "bytes": 156,
+          "sha256": "e89b19bed69b6793932141b76ab82154d1cbd9c14de1b50c0294173c2c7d4d55",
+          "expected": "e89b19bed69b6793932141b76ab82154d1cbd9c14de1b50c0294173c2c7d4d55",
+          "match": true
+        },
+        {
+          "path": "payload/resources/dsh/agent-presets/whale-chat/qq-tool-restrict.mjs",
+          "bytes": 3026,
+          "sha256": "f15f1a00e1ca72746450c45f0ca88ede58648a73c898c29fa69ef007c0bfee9d",
+          "expected": "f15f1a00e1ca72746450c45f0ca88ede58648a73c898c29fa69ef007c0bfee9d",
+          "match": true
+        },
+        {
+          "path": "payload/resources/dsh/agent-presets/whale-chat-v2/agent.cordis.yml",
+          "bytes": 34963,
+          "sha256": "6bc8961b4cc3666ae792885d9b472f913b8bdeee18277570b8b153cce4c7b2da",
+          "expected": "6bc8961b4cc3666ae792885d9b472f913b8bdeee18277570b8b153cce4c7b2da",
+          "match": true
+        },
+        {
+          "path": "payload/resources/dsh/agent-presets/whale-chat-v2/preset.yml",
+          "bytes": 213,
+          "sha256": "2fef6794ed609572ea52ecd5ba2a3f680eb8d89b838ad02f8ebefb32bbcb9a0d",
+          "expected": "2fef6794ed609572ea52ecd5ba2a3f680eb8d89b838ad02f8ebefb32bbcb9a0d",
+          "match": true
+        },
+        {
+          "path": "payload/resources/dsh/agent-presets/whale-chat-v2/qq-tool-restrict.mjs",
+          "bytes": 3026,
+          "sha256": "f15f1a00e1ca72746450c45f0ca88ede58648a73c898c29fa69ef007c0bfee9d",
+          "expected": "f15f1a00e1ca72746450c45f0ca88ede58648a73c898c29fa69ef007c0bfee9d",
+          "match": true
+        },
+        {
+          "path": "payload/resources/plugins/whale-mode-console/cordis.patch.yml",
+          "bytes": 91,
+          "sha256": "9ba35cfd805d228e409fedf302b32194044562160b56355385fa52f5d4fa0e46",
+          "expected": "9ba35cfd805d228e409fedf302b32194044562160b56355385fa52f5d4fa0e46",
+          "match": true
+        },
+        {
+          "path": "payload/resources/plugins/whale-mode-console/lib/index.js",
+          "bytes": 2244,
+          "sha256": "c534b5494065a48197cbd3b59e2333fae43c852c5ddff7422f676b67faa317a8",
+          "expected": "c534b5494065a48197cbd3b59e2333fae43c852c5ddff7422f676b67faa317a8",
+          "match": true
+        },
+        {
+          "path": "payload/resources/plugins/whale-mode-console/package.json",
+          "bytes": 405,
+          "sha256": "cf00abf1e91f24817a85389f88161c4646cefd17a53885480701bfa0a02cd122",
+          "expected": "cf00abf1e91f24817a85389f88161c4646cefd17a53885480701bfa0a02cd122",
+          "match": true
+        },
+        {
+          "path": "payload/resources/product.json",
+          "bytes": 161,
+          "sha256": "66ad654851eeb4f96e19cbf1df0a1154f5eb52fd63b202c23cfb0f70e93262e6",
+          "expected": "66ad654851eeb4f96e19cbf1df0a1154f5eb52fd63b202c23cfb0f70e93262e6",
+          "match": true
+        },
+        {
+          "path": "payload/resources/public/whalebridge-icon.png",
+          "bytes": 80248,
+          "sha256": "a703a34cd622fbff47c45890a1a948e26c7919cc001631ef4ddee7427ba3fc22",
+          "expected": "a703a34cd622fbff47c45890a1a948e26c7919cc001631ef4ddee7427ba3fc22",
+          "match": true
+        },
+        {
+          "path": "payload/resources/release-config.json",
+          "bytes": 914,
+          "sha256": "e31f99875948f6fad4922e1f550dd953e41fccb15b655c4c5cdc08bd7c35bee8",
+          "expected": "e31f99875948f6fad4922e1f550dd953e41fccb15b655c4c5cdc08bd7c35bee8",
+          "match": true
+        },
+        {
+          "path": "payload/resources/roles/傲娇助手.md",
+          "bytes": 504,
+          "sha256": "0139577b299e549d3fa4e04aaa701a87f5b58fad044b437db8969fad2e60b708",
+          "expected": "0139577b299e549d3fa4e04aaa701a87f5b58fad044b437db8969fad2e60b708",
+          "match": true
+        },
+        {
+          "path": "payload/resources/roles/小鲸鱼.md",
+          "bytes": 18343,
+          "sha256": "5a012400077cd89de0d8edb0109c3c447b19a9bfcde016ccc110ee51292e3ee7",
+          "expected": "5a012400077cd89de0d8edb0109c3c447b19a9bfcde016ccc110ee51292e3ee7",
+          "match": true
+        },
+        {
+          "path": "payload/resources/roles/README.md",
+          "bytes": 1146,
+          "sha256": "b415422aa282898eda796e7994b3414f827b2cb63ecc6c4a3b801639dca8a4ae",
+          "expected": "b415422aa282898eda796e7994b3414f827b2cb63ecc6c4a3b801639dca8a4ae",
+          "match": true
+        },
+        {
+          "path": "payload/runtime-manifest.json",
+          "bytes": 2246,
+          "sha256": "193c514e4c86ace412e4363ce76a4cbc1963f50648bb00f96096f5899c798b8d",
+          "expected": "193c514e4c86ace412e4363ce76a4cbc1963f50648bb00f96096f5899c798b8d",
+          "match": true
+        },
+        {
+          "path": "payload/WhaleBridgeCore.exe",
+          "bytes": 98761728,
+          "sha256": "13430fba101c269b056aede00abef65e0b5c5b0e7c46e23653b412c32c12dd79",
+          "expected": "13430fba101c269b056aede00abef65e0b5c5b0e7c46e23653b412c32c12dd79",
+          "match": true
+        },
+        {
+          "path": "sbom.json",
+          "bytes": 29196,
+          "sha256": "cc305922ff2824fce31ff3652152b825115c619e25cc2f4f16c0d37f351ccdff",
+          "expected": "cc305922ff2824fce31ff3652152b825115c619e25cc2f4f16c0d37f351ccdff",
+          "match": true
+        },
+        {
+          "path": "WhaleBridge.exe",
+          "bytes": 7979008,
+          "sha256": "a469f7c1d33947bfc770b8ea2659ea832938f91b91adac3105b6c15b3cb5698d",
+          "expected": "a469f7c1d33947bfc770b8ea2659ea832938f91b91adac3105b6c15b3cb5698d",
+          "match": true
+        }
+      ],
+      "manifestFilesVerified": 30,
+      "checksumEntriesVerified": 31,
+      "binaries": [
+        {
+          "path": "CetaMesh-Setup-1.0.0-rc.2-build1091-x64.exe",
+          "bytes": 43442176,
+          "sha256": "b4cb2fe803bac9a12f3ae7c256d98a47b072a325a3a6455f48d74a82a99bfb70"
+        },
+        {
+          "path": "payload/WhaleBridgeCore.exe",
+          "bytes": 98761728,
+          "sha256": "13430fba101c269b056aede00abef65e0b5c5b0e7c46e23653b412c32c12dd79"
+        },
+        {
+          "path": "WhaleBridge.exe",
+          "bytes": 7979008,
+          "sha256": "a469f7c1d33947bfc770b8ea2659ea832938f91b91adac3105b6c15b3cb5698d"
+        }
+      ],
+      "coreBuildInfo": {
+        "product": "CetaMesh",
+        "version": "1.0.0-rc.2",
+        "channel": "rc",
+        "buildNumber": 1091,
+        "sourceCommit": "4ba0895b9a66fb1fb0766d2807956ea5da002b55",
+        "commit": "4ba0895b9a66fb1fb0766d2807956ea5da002b55",
+        "commitShort": "4ba0895",
+        "dirty": false,
+        "buildTime": "2026-10-19T10:37:40.602Z",
+        "buildId": "1.0.0-rc.2-build1091+4ba0895",
+        "node": "v24.19.0",
+        "platform": "win32-x64"
+      },
+      "hostBuildInfo": {
+        "product": "CetaMesh",
+        "version": "1.0.0-rc.2",
+        "channel": "rc",
+        "buildNumber": 1091,
+        "sourceCommit": "4ba0895b9a66fb1fb0766d2807956ea5da002b55",
+        "commit": "4ba0895b9a66fb1fb0766d2807956ea5da002b55",
+        "commitShort": "4ba0895",
+        "dirty": false,
+        "buildTime": "2026-10-19T10:37:40.602Z",
+        "buildId": "1.0.0-rc.2-build1091+4ba0895",
+        "node": "v24.19.0",
+        "platform": "win32-x64"
+      },
+      "os": "Windows 11 Pro 10.0.22631 x64",
+      "tokenElevated": false,
+      "notVerified": [
+        "未签名（无代码签名证书）",
+        "未在 Windows 10 x64 上验证",
+        "未在真实 QQ / DSH 会话中验证四种模式与全部 MCP 工具",
+        "未验证 DSH/SnowLuma 重启恢复（需要真实服务）",
+        "未签名的安装器会触发 Windows 的来源提示"
+      ]
+    },
+    "delivery": {
+      "version": "1.0.0-rc.2",
+      "build": 1091,
+      "sourceCommit": "4ba0895b9a66fb1fb0766d2807956ea5da002b55",
+      "canonicalDirectory": "C:\\Users\\Administrator\\.codex\\worktrees\\product-context-main-merge\\artifacts\\rc\\1.0.0-rc.2\\build-1091",
+      "installer": "D:\\GIT- CetaMesh\\release-1091-verification\\CetaMesh-Setup-1.0.0-rc.2-build1091-x64.exe",
+      "bytes": 43442176,
+      "sha256": "b4cb2fe803bac9a12f3ae7c256d98a47b072a325a3a6455f48d74a82a99bfb70",
+      "authenticode": "NotSigned",
+      "status": "RELEASE_BLOCKED",
+      "notForStablePublication": true
+    },
+    "sfx": {
+      "exitCode": 0,
+      "error": null,
+      "bytes": 43442176
+    },
+    "native": [
+      {
+        "at": "2026-10-19T10:39:44.297Z",
+        "label": "final-clean-source-installed-harbor",
+        "text": "桌面工作台已连接\n已连接\nidle\nCetaMesh Desktop\n消息与附件通过本机 Core 处理，附件总大小上限 128 KiB。\n审批\n当前没有待处理审批。\n本地 Core · WebView2"
+      },
+      {
+        "at": "2026-10-19T10:40:35.459Z",
+        "label": "pending-local-approval-stop-visible",
+        "text": "8 窗格 CetaMesh Desktop\n10 区域 CetaMesh Desktop - Web 内容\n23 文档 CetaMesh Desktop Value: https://cetamesh.localhost/ ID: RootWebArea\n44 文本 桌面工作台已连接\n56 文本 已连接\n72 文本 等待审批\n76 文本 CetaMesh Desktop\n112 文本 M6C_CANCEL pending write\n122 文本 filesystem.write\n91 按钮 停止\n92 文本 消息与附件通过本机 Core 处理，附件总大小上限 128 KiB。\n98 标题 审批\n131 文本 filesystem.write\n66 文本 本地 Core · WebView2"
+      },
+      {
+        "at": "2026-10-19T10:41:19.857Z",
+        "label": "cancelled-tool-after-10s",
+        "text": "8 窗格 CetaMesh Desktop\n10 区域 CetaMesh Desktop - Web 内容\n23 文档 CetaMesh Desktop Value: https://cetamesh.localhost/ ID: RootWebArea\n44 文本 桌面工作台已连接\n56 文本 已连接\n72 文本 idle\n76 文本 CetaMesh Desktop\n112 文本 M6C_CANCEL pending write\n137 开合三角标记 filesystem.write 已取消\n138 文本 filesystem.write\n139 文本 已取消\n140 文本 本轮已停止\n92 文本 消息与附件通过本机 Core 处理，附件总大小上限 128 KiB。\n98 标题 审批\n141 文本 当前没有待处理审批。\n66 文本 本地 Core · WebView2"
+      },
+      {
+        "at": "2026-10-19T10:42:00.835Z",
+        "label": "cancelled-tool-confirmed-visible-no-pending-approval",
+        "text": "8 窗格 CetaMesh Desktop\n10 区域 CetaMesh Desktop - Web 内容\n23 文档 CetaMesh Desktop Value: https://cetamesh.localhost/ ID: RootWebArea\n44 文本 桌面工作台已连接\n56 文本 已连接\n72 文本 idle\n76 文本 CetaMesh Desktop\n112 文本 M6C_CANCEL pending write\n137 开合三角标记 filesystem.write 已取消\n138 文本 filesystem.write\n139 文本 已取消\n140 文本 本轮已停止\n92 文本 消息与附件通过本机 Core 处理，附件总大小上限 128 KiB。\n98 标题 审批\n141 文本 当前没有待处理审批。\n66 文本 本地 Core · WebView2"
+      },
+      {
+        "at": "2026-10-19T10:42:26.391Z",
+        "label": "about-installed-version-build-source",
+        "text": "8 窗格 CetaMesh Desktop\n10 区域 CetaMesh Desktop - Web 内容\n23 文档 CetaMesh Desktop Value: https://cetamesh.localhost/?page=about ID: RootWebArea\n44 文本 桌面工作台已连接\n56 文本 已连接\n147 文本 CetaMesh Desktop\n151 文本 1.0.0-rc.2\n152 文本 构建号\n153 文本 1091\n156 文本 构建标识\n157 文本 1.0.0-rc.2-build1091+4ba0895\n163 文本 1.0.0-rc.2\n175 按钮 反馈与建议对 CetaMesh 的整体意见与建议。 cetamesh.com/feedback?version=1.0.0-rc.2&build=1.0.0-rc.2-build1091%2B4ba0895&platform=windows\n176 按钮 Bug 反馈功能异常、崩溃、表现与预期不符。 cetamesh.com/feedback?version=1.0.0-rc.2&build=1.0.0-rc.2-build1091%2B4ba0895&platform=windows\n177 按钮 功能建议希望新增或改进的能力。 cetamesh.com/feedback?version=1.0.0-rc.2&build=1.0.0-rc.2-build1091%2B4ba0895&platform=windows\n178 按钮 安全漏洞安全问题请走官方安全通道，不要公开披露。 cetamesh.com/security?version=1.0.0-rc.2&build=1.0.0-rc.2-build1091%2B4ba0895&platform=windows\n180 文本 桌面使用 WebView2 展示界面，Core 服务和命名管道保持本地运行。\n66 文本 本地 Core · WebView2"
+      }
+    ],
+    "cleanup": {
+      "observedAt": "2026-10-19T10:47:26.092Z",
+      "ownedProcessesBeforeUninstall": 0,
+      "rows": [
+        {
+          "name": "Windows 工具 验收",
+          "exitCode": 0,
+          "error": null,
+          "keyAbsent": true,
+          "programRemoved": true,
+          "fixtureDataRetained": true,
+          "cancelledWriteAbsent": true
+        },
+        {
+          "name": "Windows 工具 验收2",
+          "exitCode": 0,
+          "error": null,
+          "keyAbsent": true,
+          "programRemoved": true,
+          "fixtureDataRetained": true,
+          "cancelledWriteAbsent": true
+        }
+      ],
+      "realUserProcessesStopped": false,
+      "realUserDataChanged": false
+    },
+    "logs": [
+      {
+        "file": "npm-ci.log",
+        "sha256": "781bc9c2a3ced864942137f929cd98c2c7eb0c849bc1e4664041f2e0bd4c2500",
+        "bytes": 842
+      },
+      {
+        "file": "ui-ci.log",
+        "sha256": "5101c05d2ecb6fecdb5a147068b928ef0ccc036f9cf3b0dcec81811b3cbacb12",
+        "bytes": 612
+      },
+      {
+        "file": "build-core-final.log",
+        "sha256": "a56daa600b667a933b26c13d810db9a096936286cfcd7ee97ca2d8f565059541",
+        "bytes": 3556
+      },
+      {
+        "file": "build-ui-final.log",
+        "sha256": "1de35afc40f5f9a4b1d1f57635ad28e457f4871255b5689d43e6fa96b2da0062",
+        "bytes": 1474
+      },
+      {
+        "file": "desktop-check-final.log",
+        "sha256": "627f8ffc35dcd37c673fb8c3696c62dcc76c9d498961789da99d56707b6eb84a",
+        "bytes": 4405
+      },
+      {
+        "file": "desktop-test-final.log",
+        "sha256": "3c2bc777e74a3f22f8340600f91ae72f1ccb823b727584f3c57e8fabc26c8e68",
+        "bytes": 18606
+      },
+      {
+        "file": "desktop-build-final.log",
+        "sha256": "ab38f5d6722a4b26eae7a84f072949ff61ec6768d7866357ab1f627e25d64f21",
+        "bytes": 5137
+      },
+      {
+        "file": "desktop-build-debug-final.log",
+        "sha256": "540aa81ce4d5ef08bbd9c7be01a650354087b111bc9992f00e11c2bfc5a4dec7",
+        "bytes": 4389
+      },
+      {
+        "file": "build-release-final.log",
+        "sha256": "b106b19b6f6b0aaacac6b57f169762513d5e5baafe7b066a03512c80b6ba6d0a",
+        "bytes": 2101
+      },
+      {
+        "file": "build-release-final-retry.log",
+        "sha256": "0b7389179b0bb35268398507b34aa714b187e18dee519a11e667e40c10d5c762",
+        "bytes": 2885
+      },
+      {
+        "file": "npm-test.log",
+        "sha256": "34fcc7cdc995a848a9701e29b9dc49de6ff24e95d8fd5a28c85c6f2020718070",
+        "bytes": 165860
+      },
+      {
+        "file": "focused-fix.log",
+        "sha256": "52789a0749ac707897d90b3d0c23699e97ee0c2d668e5f8f610a7d6eb314e2e8",
+        "bytes": 5988
+      },
+      {
+        "file": "npm-test-final.log",
+        "sha256": "e60b240dea9c27a8841a75bd8b87ab7c5dd41b9084879192c1b7f963299aa9d2",
+        "bytes": 208930
+      },
+      {
+        "file": "rc-final.log",
+        "sha256": "e022d0c422be50038d8faa39b246be683ad5ce84428133a31e8879211fa5a69f",
+        "bytes": 7492
+      }
+    ]
+  },
+  "authenticode": {
+    "setup": "NotSigned",
+    "host": "NotSigned",
+    "core": "NotSigned"
+  },
+  "updateTrust": "NOT_VERIFIED",
+  "realCodex": "NOT_RUN_ENVIRONMENT",
+  "realDsh": "NOT_RUN_ENVIRONMENT",
+  "realQq": "NOT_RUN_ENVIRONMENT",
+  "realUserMigration": "NOT_AUTHORIZED_NOT_EXECUTED",
+  "publicRelease": false
+}

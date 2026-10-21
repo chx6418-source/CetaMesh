@@ -1,0 +1,7 @@
+Observed 2026-10-20 Asia/Shanghai in this task, normalized from actual read-only command outputs.
+CurrentUserLxssRegistry=ABSENT
+Get-AppxPackage -Name '*WindowsSubsystemForLinux*': no package returned.
+Get-Service WslService,LxssManager,vmcompute: only vmcompute Running returned.
+Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Windows-Subsystem-Linux: requires elevation; state UNVERIFIED.
+Get-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform: requires elevation; state UNVERIFIED.
+No WSL installation, feature enablement, distro launch, user creation, credentials copy, or product adapter replacement was performed.

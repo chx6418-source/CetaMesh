@@ -1,0 +1,60 @@
+{
+  "manifestVersion": 1,
+  "id": "cetamesh.http-meta",
+  "name": "HTTP Meta Reader",
+  "version": "1.0.0",
+  "type": "external-api",
+  "entry": "index.js",
+  "publisher": "CetaMesh Labs",
+  "description": "示例扩展：需要 network 与 storage 权限，向声明白名单内的主机取网页标题。",
+  "capabilities": [
+    {
+      "id": "meta.fetch-title",
+      "kind": "external-api",
+      "title": "读取网页标题",
+      "description": "只允许访问 manifest 中声明的 hosts；请求经 SSRF 防护与主机白名单双重校验。",
+      "requires": [
+        "network"
+      ],
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ]
+      }
+    },
+    {
+      "id": "meta.last-title",
+      "kind": "tool",
+      "title": "上次读取的标题",
+      "description": "读取本扩展私有存储里保存的最近一次标题。",
+      "requires": [
+        "storage"
+      ]
+    }
+  ],
+  "permissions": [
+    "log",
+    "storage",
+    "network"
+  ],
+  "network": {
+    "hosts": [
+      "example.com"
+    ]
+  },
+  "scope": {
+    "workspace": null,
+    "paths": []
+  },
+  "source": {
+    "kind": "local",
+    "publisher": "CetaMesh Labs",
+    "reference": "extensions/cetamesh-http-meta"
+  }
+}

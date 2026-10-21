@@ -1,0 +1,19 @@
+{
+  "_warning": "TEST ONLY — 这些密钥只用于协议 fixture，绝不可用于任何真实设备或环境。",
+  "desktop": {
+    "publicPem": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEYaZ4ZZHeaDAhfhVtw6vbwjyZqeAX\nyO663bz0MtY0Le9EUvQ3++JTOLtaZIByL67m6ncz5ywr/pj+qlkjT7bhag==\n-----END PUBLIC KEY-----\n",
+    "x963": "BGGmeGWR3mgwIX4VbcOr28I8mangF8juut289DLWNC3vRFL0N/viUzi7WmSAci+u5up3M+csK/6Y/qpZI0+24Wo=",
+    "nodeId": "node_ec23aac43cd6bfe4c3b03ab0a377a8cb",
+    "privatePem": "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgNJNtmCD8FB54i/gi\nu7sShjavQnjs1RVR7w0R1bJSZJ2hRANCAARhpnhlkd5oMCF+FW3Dq9vCPJmp4BfI\n7rrdvPQy1jQt70RS9Df74lM4u1pkgHIvrubqdzPnLCv+mP6qWSNPtuFq\n-----END PRIVATE KEY-----\n"
+  },
+  "mobile": {
+    "publicPem": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE1JpcWHWhVDMvtofAw/iZr/ZERjGt\n7iQ9DHcdA0PBV38yXu8bTssx3FrhuThCgbQCd2X8F1NTHEq9bSWoLYJ9AQ==\n-----END PUBLIC KEY-----\n",
+    "x963": "BNSaXFh1oVQzL7aHwMP4ma/2REYxre4kPQx3HQNDwVd/Ml7vG07LMdxa4bk4QoG0Andl/BdTUxxKvW0lqC2CfQE=",
+    "nodeId": "node_dc61c162c6e416315297154887a1185c",
+    "privatePem": "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgst3UPZflYtkAq5Uc\nlKK6TEJdJYpWsvBSR0vOlxWAfWehRANCAATUmlxYdaFUMy+2h8DD+Jmv9kRGMa3u\nJD0Mdx0DQ8FXfzJe7xtOyzHcWuG5OEKBtAJ3ZfwXU1McSr1tJagtgn0B\n-----END PRIVATE KEY-----\n"
+  },
+  "legacyEd25519": {
+    "publicPem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA3ikxNJfAbN/tLULqesjopnQcNF34r3uLv6Ja/U+sHs0=\n-----END PUBLIC KEY-----\n",
+    "privatePem": "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIB2MZt1lTJuP/kUPMkeANAaEkuVg4n8VUroCAsexFWZR\n-----END PRIVATE KEY-----\n"
+  }
+}

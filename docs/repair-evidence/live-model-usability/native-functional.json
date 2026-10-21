@@ -1,0 +1,57 @@
+{
+  "build": 1101,
+  "sourceCommit": "b2891b0ad87c67e43f541ff2f328018ae003d243",
+  "installedPayloadHashes": {
+    "checked": 24,
+    "mismatches": []
+  },
+  "upgrade": {
+    "installerExit": 0,
+    "retainedJsonCount": 54,
+    "changedJsonCount": 0,
+    "addedInstallerBackupJson": 4,
+    "forcedProcessStop": false,
+    "noDshIntegration": true
+  },
+  "nativeGui": {
+    "environment": "existing Administrator Windows desktop; genuine WebView2; formal single-file installer extracted and installed to isolated Chinese/space/non-C path; PATH System32 only",
+    "chatThreeDifferentRealModelRounds": "PASS",
+    "toolFilesystemRead": "PASS",
+    "finalMessageMoreThan10SecondsVisible": "PASS",
+    "streamingAndStop": "PASS",
+    "taskCreatePauseResumeCancelCheckpoint": "PASS",
+    "memorySaveSearch": "PASS",
+    "restartChatHistoryAndStoppedState": "PASS",
+    "postRestartMemoryAndTaskDiskRetention": "PASS",
+    "mcpUnapprovedStartRemainsStopped": "PASS",
+    "mcpApprovedGuiStart": "NOT_RUN_ENVIRONMENT: approval handoff required",
+    "pluginCatalog": "NOT_RUN_ENVIRONMENT: service_not_configured",
+    "artifactFileGeneration": "NOT_RUN_ENVIRONMENT: readonly task; no file artifact generated",
+    "realCodex": "NOT_RUN_ENVIRONMENT: native Windows sandbox refusal",
+    "realDsh": "NOT_RUN_ENVIRONMENT: coding preset/API real task not verified",
+    "realQq": "NOT_RUN_ENVIRONMENT: no authorized test account/gateway",
+    "ordinaryCleanUserInstall": "NOT_RUN_ENVIRONMENT: no isolated standard-user VM",
+    "testUninstallRetainsTaskMemoryWorkspace": "PASS"
+  },
+  "fixtureStorage": {
+    "memories": 2,
+    "tasks": 1,
+    "taskStatus": "cancelled",
+    "scopeKeys": [
+      "task:task_mvfchv1c_e5504551ce",
+      "global"
+    ],
+    "before": {
+      "memory": "36309f195f84aeae1e702e1cdad93635c17e8200ebe1411c98f38b31c53dae06",
+      "task": "2ad0aab319c7a7d0d1094aff1984041e22e7cdeef10c79118c5167124c5bdbca",
+      "workspace": "b6111fd28c9cee10bb76db3120d115231a1a5aedf7d7ccdd94b0cbd1397f5bbb"
+    },
+    "after": {
+      "memory": "36309f195f84aeae1e702e1cdad93635c17e8200ebe1411c98f38b31c53dae06",
+      "task": "2ad0aab319c7a7d0d1094aff1984041e22e7cdeef10c79118c5167124c5bdbca",
+      "workspace": "b6111fd28c9cee10bb76db3120d115231a1a5aedf7d7ccdd94b0cbd1397f5bbb"
+    },
+    "providerKeyCopyRemoved": true
+  },
+  "releaseStatus": "RELEASE_BLOCKED"
+}

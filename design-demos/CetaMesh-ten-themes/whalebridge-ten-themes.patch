@@ -1,0 +1,456 @@
+--- a/public/console.html
++++ b/public/console.html
+@@ -3,7 +3,7 @@
+ <head>
+ <meta charset="utf-8">
+ <meta name="viewport" content="width=device-width, initial-scale=1">
+-<title>鲸桥控制台 · 海盐苏打</title>
++<title>鲸桥控制台</title>
+ <style>
+ /* ============================================================
+    鲸桥控制台 · 海盐苏打 Soda Gummy（软糖拟物 × 糖果玻璃）
+@@ -71,6 +71,97 @@
+   --glass-blur: 18px;
+ }
+ 
++/* 七款新风格共用语义色，具体表面与配色在各自主题中定义。 */
++:root:is([data-theme="ink"], [data-theme="forest"], [data-theme="rose"], [data-theme="sand"], [data-theme="ice"], [data-theme="dusk"], [data-theme="violet"]) {
++  --ok: #34856b; --ok-bg: rgba(52, 133, 107, .12);
++  --warn: #ae792e; --warn-2: #c8934d; --warn-bg: rgba(174, 121, 46, .14); --warn-ink: #fff;
++  --err: #c45b65; --err-2: #dc8187; --err-bg: rgba(196, 91, 101, .13);
++  --glass-blur: 0px;
++}
++:root:is([data-theme="ink"], [data-theme="forest"], [data-theme="rose"], [data-theme="sand"], [data-theme="ice"]) {
++  --panel: rgba(255, 255, 255, .86); --panel-solid: #fff; --glass-weak: rgba(255, 255, 255, .75);
++  --border: rgba(55, 70, 75, .14); --border-soft: rgba(55, 70, 75, .12);
++  --text-3: #747f83; --chip: rgba(255, 255, 255, .8); --input-bg: rgba(255, 255, 255, .74); --hover: rgba(255, 255, 255, .88);
++  --shadow-c1: rgba(49, 65, 78, .12); --shadow-c2: rgba(255, 255, 255, .8);
++  --edge-hi: rgba(255, 255, 255, .82); --edge-lo: rgba(55, 70, 75, .04);
++  --on-accent: #fff;
++}
++:root[data-theme="ink"] {
++  --candy-a: #f4f3ef; --candy-b: #f1f0ec; --candy-c: #ecebe7;
++  --blob-1: transparent; --blob-2: transparent; --blob-3: transparent;
++  --bg: #f3f2ee; --bg-soft: #fff; --text: #252a2d; --text-2: #515b5e;
++  --accent: #303d42; --accent-2: #50616a; --accent-soft: rgba(48, 61, 66, .1); --accent-shadow: rgba(48, 61, 66, .16);
++  --radius: 10px; --radius-s: 8px; --glass-blur: 0px;
++}
++:root[data-theme="forest"] {
++  --candy-a: #e3eae0; --candy-b: #eff2e8; --candy-c: #dce9df;
++  --blob-1: rgba(109, 151, 121, .15); --blob-2: rgba(182, 202, 155, .14); --blob-3: rgba(120, 174, 153, .13);
++  --bg: #eaf0e7; --bg-soft: #fafcf7; --text: #253c32; --text-2: #526c5f;
++  --accent: #347657; --accent-2: #3d7a5d; --accent-soft: rgba(52, 118, 87, .13); --accent-shadow: rgba(52, 118, 87, .18);
++  --radius: 18px; --radius-s: 11px; --panel: rgba(250, 252, 247, .85);
++}
++:root[data-theme="rose"] {
++  --candy-a: #fce9ec; --candy-b: #fff4f1; --candy-c: #f6e9f2;
++  --blob-1: rgba(236, 150, 169, .2); --blob-2: rgba(244, 195, 178, .22); --blob-3: rgba(199, 171, 216, .17);
++  --bg: #fcf0f1; --bg-soft: #fff9fa; --text: #513b49; --text-2: #826675;
++  --accent: #a84f70; --accent-2: #ad5572; --accent-soft: rgba(168, 79, 112, .13); --accent-shadow: rgba(168, 79, 112, .22);
++  --radius: 26px; --radius-s: 16px; --panel: rgba(255, 252, 253, .69); --glass-weak: rgba(255, 250, 252, .58); --glass-blur: 18px;
++}
++:root[data-theme="sand"] {
++  --candy-a: #f3ecde; --candy-b: #f8f2e9; --candy-c: #eae3d3;
++  --blob-1: rgba(205, 173, 124, .15); --blob-2: transparent; --blob-3: rgba(183, 162, 132, .1);
++  --bg: #f4eee2; --bg-soft: #fffaf0; --text: #40372c; --text-2: #746657;
++  --accent: #94613a; --accent-2: #9c6940; --accent-soft: rgba(148, 97, 58, .12); --accent-shadow: rgba(148, 97, 58, .16);
++  --radius: 8px; --radius-s: 6px; --panel: rgba(255, 251, 242, .9); --panel-solid: #fffaf0;
++}
++:root[data-theme="ice"] {
++  --candy-a: #e9f4f8; --candy-b: #f5fbfc; --candy-c: #e7f2fa;
++  --blob-1: rgba(134, 196, 218, .18); --blob-2: rgba(165, 191, 231, .13); --blob-3: transparent;
++  --bg: #eff8fb; --bg-soft: #fff; --text: #233d4a; --text-2: #57717d;
++  --accent: #23748f; --accent-2: #2b7890; --accent-soft: rgba(35, 116, 143, .12); --accent-shadow: rgba(35, 116, 143, .16);
++  --radius: 12px; --radius-s: 9px; --panel: rgba(255, 255, 255, .77); --glass-weak: rgba(255, 255, 255, .7); --glass-blur: 12px;
++}
++:root:is([data-theme="dusk"], [data-theme="violet"]) {
++  --panel: rgba(38, 43, 56, .84); --panel-solid: #262c39; --glass-weak: rgba(35, 42, 54, .8);
++  --border: rgba(255, 255, 255, .13); --border-soft: rgba(255, 255, 255, .1);
++  --text: #f0f3f6; --text-2: #b9c2cb; --text-3: #9aa6b2;
++  --chip: rgba(255, 255, 255, .1); --input-bg: rgba(12, 17, 25, .38); --hover: rgba(255, 255, 255, .12);
++  --shadow-c1: rgba(0, 0, 0, .29); --shadow-c2: rgba(255, 255, 255, .035);
++  --edge-hi: rgba(255, 255, 255, .14); --edge-lo: rgba(0, 0, 0, .2);
++  --ok: #76c9aa; --ok-bg: rgba(118, 201, 170, .14); --warn: #e3ba76; --warn-2: #efca91; --warn-ink: #292014;
++  --err: #f08d9a; --err-2: #f5aeba; --on-accent: #101a2a;
++}
++:root[data-theme="dusk"] {
++  --candy-a: #1b222b; --candy-b: #222b34; --candy-c: #19232a;
++  --blob-1: rgba(98, 128, 148, .1); --blob-2: transparent; --blob-3: transparent;
++  --bg: #1c252d; --bg-soft: #26313b;
++  --accent: #b1c8d2; --accent-2: #88abbc; --accent-soft: rgba(177, 200, 210, .15); --accent-shadow: rgba(0, 0, 0, .3);
++  --radius: 10px; --radius-s: 8px;
++}
++:root[data-theme="violet"] {
++  --candy-a: #221d3d; --candy-b: #292047; --candy-c: #1c2445;
++  --blob-1: rgba(145, 111, 231, .19); --blob-2: rgba(107, 141, 235, .15); --blob-3: rgba(213, 121, 191, .1);
++  --bg: #211d38; --bg-soft: #302c4a;
++  --accent: #c3a8ff; --accent-2: #9dc9ff; --accent-soft: rgba(195, 168, 255, .16); --accent-shadow: rgba(115, 81, 190, .23);
++  --radius: 20px; --radius-s: 12px; --panel: rgba(43, 38, 70, .69); --panel-solid: #302b4c; --glass-weak: rgba(44, 39, 70, .56); --glass-blur: 16px;
++}
++
++/* 纸感、哑光与清透风格只改变装饰层，不触碰控制台结构。 */
++:root:is([data-theme="ink"], [data-theme="sand"], [data-theme="dusk"]) .bg-decor::before,
++:root:is([data-theme="ink"], [data-theme="sand"], [data-theme="dusk"]) .bg-decor::after { display: none; }
++:root:is([data-theme="ink"], [data-theme="sand"], [data-theme="dusk"], [data-theme="ice"]) article.card {
++  box-shadow: 0 8px 22px var(--shadow-c1); backdrop-filter: none;
++}
++:root:is([data-theme="ink"], [data-theme="sand"], [data-theme="dusk"], [data-theme="ice"]) .btn,
++:root:is([data-theme="ink"], [data-theme="sand"], [data-theme="dusk"], [data-theme="ice"]) .nav-btn:hover {
++  box-shadow: 0 2px 8px var(--shadow-c1);
++}
++:root:is([data-theme="ink"], [data-theme="sand"], [data-theme="dusk"]) .page-head h1 {
++  background: none; -webkit-text-fill-color: currentColor;
++  font-family: Georgia, "Microsoft YaHei", serif;
++}
++:root:is([data-theme="dusk"], [data-theme="violet"]) select option { color: var(--text); background: var(--panel-solid); }
++
+ /* ---------- 基础 ---------- */
+ *, *::before, *::after { box-sizing: border-box; }
+ html, body { height: 100%; }
+@@ -107,6 +198,7 @@
+ }
+ .bg-decor::after { content: ""; position: absolute; inset: 0; background: radial-gradient(130vw 92vh at 50% -12%, rgba(255, 255, 255, .32), transparent 56%); }
+ :root[data-theme="dark"] .bg-decor::after { background: radial-gradient(130vw 92vh at 50% -12%, rgba(255, 255, 255, .08), transparent 56%); }
++:root:is([data-theme="dusk"], [data-theme="violet"]) .bg-decor::after { background: radial-gradient(130vw 92vh at 50% -12%, rgba(255, 255, 255, .07), transparent 56%); }
+ 
+ /* ---------- 布局骨架（侧栏） ---------- */
+ body { grid-template: "brand actions" auto "nav main" 1fr / var(--nav-w) 1fr; }
+@@ -301,7 +393,9 @@
+   transition: transform .18s var(--spring), box-shadow .18s ease, filter .18s ease, background .2s;
+   white-space: nowrap;
+ }
+-:root[data-theme="dark"] .btn { background: linear-gradient(145deg, rgba(255, 255, 255, .14), var(--chip) 60%); }
++:root:is([data-theme="dark"], [data-theme="dusk"], [data-theme="violet"]) .btn:not(.primary):not(.danger):not(.armed) {
++  background: linear-gradient(145deg, rgba(255, 255, 255, .14), var(--chip) 60%);
++}
+ .btn:hover { transform: translateY(-1px); filter: brightness(1.045); }
+ .btn:active {
+   transform: translateY(2px) scale(.96);
+@@ -733,38 +827,46 @@
+ }
+ .toast .undo { border: 0; background: transparent; color: var(--accent); font: inherit; font-size: 12.5px; cursor: pointer; font-weight: 600; padding: 2px 4px; }
+ 
+-/* ---------- 主题切换 ---------- */
+-.theme-switch {
+-  display: inline-flex; border-radius: 999px; padding: 3.5px; gap: 3px; flex: none;
+-  background: var(--input-bg);
+-  box-shadow: inset 2.5px 3px 8px var(--shadow-c1), inset -2px -3px 8px var(--shadow-c2);
+-}
+-.theme-switch button {
+-  position: relative; isolation: isolate;
+-  font: inherit; font-size: 11.5px; border: 0; background: transparent; color: var(--text-3);
+-  padding: 4px 12px; border-radius: 999px; cursor: pointer; white-space: nowrap;
+-  transition: transform .18s var(--spring), background .18s, color .18s, filter .18s ease;
+-}
+-.theme-switch button::before {
+-  content: ""; position: absolute; inset: 0; border-radius: inherit; z-index: -1;
+-  background: linear-gradient(140deg, var(--accent), var(--accent-2));
+-  box-shadow: 2px 3px 8px var(--accent-shadow), inset 0 1px 0 rgba(255, 255, 255, .35);
+-  opacity: 0; transition: opacity .18s ease;
+-}
+-.theme-switch button:hover { transform: translateY(-1px); filter: brightness(1.04); }
+-.theme-switch button:active { transform: translateY(1px) scale(.94); transition-duration: .08s; filter: brightness(.99); }
+-.theme-switch button.active {
+-  background: transparent; color: var(--on-accent); font-weight: 600;
+-}
+-.theme-switch button.active:hover { transform: none; filter: brightness(1.04); }
+-.theme-switch button.active:active {
+-  transform: translateY(1px) scale(.94);
+-  filter: brightness(.99);
+-}
+-.theme-switch button.active::before { opacity: 1; }
+-.theme-switch button.active:active::before {
+-  box-shadow: inset 2px 3px 8px var(--accent-shadow), inset -2px -2px 6px var(--shadow-c2), 1px 2px 5px var(--accent-shadow);
+-  filter: brightness(.98);
++/* ---------- 十款主题：紧凑入口，菜单内预览 ---------- */
++.theme-switch { position: relative; flex: none; }
++.theme-trigger {
++  display: inline-flex; align-items: center; gap: 8px; min-height: 34px;
++  padding: 5px 11px; border: 1px solid var(--border-soft); border-radius: 999px;
++  background: var(--input-bg); color: var(--text); font: inherit; font-size: 12px;
++  cursor: pointer; white-space: nowrap;
++}
++.theme-trigger::after { content: "⌄"; color: var(--text-3); font-size: 15px; line-height: 1; }
++.theme-trigger:hover { background: var(--hover); }
++.theme-trigger:focus-visible, .theme-menu button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
++.theme-menu {
++  position: absolute; top: calc(100% + 9px); right: 0; z-index: 100;
++  display: grid; grid-template-columns: repeat(2, minmax(122px, 1fr)); gap: 5px;
++  width: 282px; max-width: calc(100vw - 20px); max-height: min(420px, 70vh); overflow-y: auto;
++  padding: 9px; border: 1px solid var(--border); border-radius: 16px;
++  background: var(--panel-solid); box-shadow: 0 14px 35px var(--shadow-c1);
++  backdrop-filter: blur(var(--glass-blur));
++}
++.theme-menu[hidden] { display: none; }
++.theme-menu button {
++  display: flex; align-items: center; gap: 9px; min-width: 0; padding: 9px;
++  border: 1px solid transparent; border-radius: 10px; background: transparent;
++  color: var(--text-2); font: inherit; font-size: 12px; text-align: left; cursor: pointer;
++}
++.theme-menu button:hover, .theme-menu button.active { background: var(--accent-soft); color: var(--text); }
++.theme-menu button.active { border-color: var(--accent); font-weight: 600; }
++.theme-swatch { width: 17px; height: 17px; flex: none; border-radius: 50%; background: var(--sw); border: 1px solid rgba(125, 125, 125, .3); }
++
++/* 页面快照过渡：色块扩散、侧向轻推、安静淡入三种动作匹配各款风格。 */
++::view-transition-old(root) { animation: themeOld .32s ease both; }
++::view-transition-new(root) { animation: themeNew .36s cubic-bezier(.22, .8, .25, 1) both; }
++html[data-theme-motion="bloom"]::view-transition-new(root) { animation: themeBloom .42s ease-out both; }
++html[data-theme-motion="slide"]::view-transition-new(root) { animation: themeSlide .38s cubic-bezier(.22, .8, .25, 1) both; }
++@keyframes themeOld { to { opacity: .6; } }
++@keyframes themeNew { from { opacity: 0; } }
++@keyframes themeBloom { from { clip-path: circle(0% at 88% 8%); } to { clip-path: circle(150% at 88% 8%); } }
++@keyframes themeSlide { from { clip-path: inset(0 0 0 100%); } to { clip-path: inset(0); } }
++@media (prefers-reduced-motion: reduce) {
++  ::view-transition-old(root), ::view-transition-new(root) { animation-duration: .01ms !important; }
+ }
+ 
+ /* ---------- 其它 ---------- */
+@@ -836,7 +938,7 @@
+ <!-- == bg-ripple:css:end == -->
+ <script>
+   /* 主题与登录落场都要抢在首帧之前定下来：
+-     ① 主题：控制台原本在主脚本里才读 localStorage.consoleTheme，深色/护眼用户会先看到一瞬浅色底；
++      ① 主题：控制台原本在主脚本里才读 localStorage.consoleTheme，非默认主题会先看到一瞬浅色底；
+         这里提前到 head 里设定。
+      ② 落场标记：登录页跳转前留下 sessionStorage.loginArrive，这里消费掉并打类，
+         卡片从第一帧就是「未浮起」态，不会先闪一下落定画面；
+@@ -845,7 +947,7 @@
+     var el = document.documentElement;
+     try {
+       var saved = localStorage.getItem('consoleTheme');
+-      if (saved === 'light' || saved === 'dark' || saved === 'warm') el.dataset.theme = saved;
++      if (['light', 'dark', 'warm', 'ink', 'forest', 'rose', 'sand', 'ice', 'dusk', 'violet'].includes(saved)) el.dataset.theme = saved;
+     } catch (e) {}
+     try {
+       if (sessionStorage.getItem('loginArrive') === '1') {
+@@ -908,7 +1010,10 @@
+       <span class="pill" id="pillSilent">-</span>
+       <span class="pill" id="pillOwner">-</span>
+     </div>
+-    <div class="theme-switch" id="themeSwitch" role="tablist" aria-label="主题切换"></div>
++    <div class="theme-switch" id="themeSwitch">
++      <button class="theme-trigger" id="themeTrigger" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="themeMenu">主题 · 苏打</button>
++      <div class="theme-menu" id="themeMenu" role="group" aria-label="选择界面主题" hidden></div>
++    </div>
+   </div>
+ </header>
+ 
+@@ -2622,33 +2727,86 @@
+     window.addEventListener('beforeunload', () => serviceSource && serviceSource.close());
+   })();
+ 
+-  /* ================= 主题切换（苏打 / 深海 / 护眼） ================= */
+-  const themeBox = $('#themeSwitch');
+-  [
+-    { id: 'light', label: '苏打' },
+-    { id: 'dark', label: '深海' },
+-    { id: 'warm', label: '护眼' }
+-  ].forEach(t => {
+-    const b = document.createElement('button');
+-    b.textContent = t.label;
+-    b.dataset.theme = t.id;
+-    b.addEventListener('click', () => {
+-      document.documentElement.dataset.theme = t.id;
+-      try { localStorage.setItem('consoleTheme', t.id); } catch (e) {}
+-      syncTheme();
+-      toast('主题已切换：' + t.label);
++  /* == theme-picker:start == */
++  (function () {
++    const themes = [
++      { id: 'light', label: '苏打', sw: '#8fa8fa', motion: 'bloom' },
++      { id: 'dark', label: '深海', sw: '#313d76', motion: 'bloom' },
++      { id: 'warm', label: '护眼', sw: '#b6c7a7', motion: 'fade' },
++      { id: 'ink', label: '纸墨', sw: '#4b5556', motion: 'fade' },
++      { id: 'forest', label: '松林', sw: '#578b67', motion: 'slide' },
++      { id: 'rose', label: '樱白', sw: '#dd9caa', motion: 'bloom' },
++      { id: 'sand', label: '暖砂', sw: '#c5a878', motion: 'slide' },
++      { id: 'ice', label: '冰川', sw: '#83bdce', motion: 'bloom' },
++      { id: 'dusk', label: '暮灰', sw: '#526775', motion: 'fade' },
++      { id: 'violet', label: '星紫', sw: '#aa8cda', motion: 'bloom' }
++    ];
++    const el = document.documentElement;
++    const trigger = document.getElementById('themeTrigger');
++    const menu = document.getElementById('themeMenu');
++    const valid = id => themes.some(t => t.id === id);
++    let saved = '';
++    try { saved = localStorage.getItem('consoleTheme') || ''; } catch (e) {}
++    if (valid(saved)) el.dataset.theme = saved;
++    else if (!valid(el.dataset.theme)) el.dataset.theme = 'light';
++    function close() {
++      menu.hidden = true;
++      trigger.setAttribute('aria-expanded', 'false');
++    }
++    function sync() {
++      const selected = themes.find(t => t.id === el.dataset.theme) || themes[0];
++      trigger.textContent = '主题 · ' + selected.label;
++      menu.querySelectorAll('button').forEach(b => {
++        const active = b.dataset.theme === selected.id;
++        b.classList.toggle('active', active);
++        b.setAttribute('aria-pressed', String(active));
++      });
++    }
++    function choose(t) {
++      close();
++      if (el.dataset.theme === t.id) return;
++      const update = () => {
++        el.dataset.theme = t.id;
++        try { localStorage.setItem('consoleTheme', t.id); } catch (e) {}
++        sync();
++      };
++      let reduce = false;
++      try { reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches; } catch (e) {}
++      if (!reduce && document.startViewTransition) {
++        el.dataset.themeMotion = t.motion;
++        try {
++          const transition = document.startViewTransition(update);
++          transition.finished.then(() => { delete el.dataset.themeMotion; }, () => { delete el.dataset.themeMotion; });
++        } catch (e) { delete el.dataset.themeMotion; update(); }
++      } else {
++        update();
++      }
++    }
++    themes.forEach(t => {
++      const button = document.createElement('button');
++      const dot = document.createElement('span');
++      dot.className = 'theme-swatch';
++      dot.style.setProperty('--sw', t.sw);
++      button.type = 'button';
++      button.dataset.theme = t.id;
++      button.textContent = t.label;
++      button.prepend(dot);
++      button.addEventListener('click', () => choose(t));
++      menu.appendChild(button);
+     });
+-    themeBox.appendChild(b);
+-  });
+-  function syncTheme() {
+-    const cur = document.documentElement.dataset.theme;
+-    $$('button', themeBox).forEach(b => b.classList.toggle('active', b.dataset.theme === cur));
+-  }
+-  try {
+-    const saved = localStorage.getItem('consoleTheme');
+-    if (saved && ['light', 'dark', 'warm'].indexOf(saved) >= 0) document.documentElement.dataset.theme = saved;
+-  } catch (e) {}
+-  syncTheme();
++    trigger.addEventListener('click', () => {
++      menu.hidden = !menu.hidden;
++      trigger.setAttribute('aria-expanded', String(!menu.hidden));
++    });
++    document.addEventListener('click', e => {
++      if (!menu.hidden && !menu.contains(e.target) && !trigger.contains(e.target)) close();
++    });
++    document.addEventListener('keydown', e => {
++      if (e.key === 'Escape' && !menu.hidden) { close(); trigger.focus(); }
++    });
++    sync();
++  })();
++  /* == theme-picker:end == */
+ 
+   /* ================= 自定义下拉框（选项列表与主题统一） =================
+      保留原生 select（隐藏），所有读取 .value / change 监听的逻辑零改动；
+@@ -4703,7 +4861,11 @@
+   var THEME_MAP = {
+     light: { canvas: 'soda', bg: '#eef2fc' },
+     dark: { canvas: 'deep', bg: '#131a2e' },
+-    warm: { canvas: 'warm', bg: '#eaede0' }
++    warm: { canvas: 'warm', bg: '#eaede0' },
++    ink: { bg: '#f3f2ee' }, forest: { bg: '#eaf0e7' },
++    rose: { bg: '#fcf0f1' }, sand: { bg: '#f4eee2' },
++    ice: { bg: '#eff8fb' }, dusk: { bg: '#1c252d' },
++    violet: { bg: '#211d38' }
+   };
+ 
+   /* 把 'soda' / { solid: '#131a2e' } / 完整配方对象 统一成配方 */
+@@ -5262,6 +5424,15 @@
+   var theme = map[themeName] || map.light;
+   var base = '';
+   try { base = getComputedStyle(el).getPropertyValue('--bg').trim(); } catch (e) {}
++  // 新增的简洁主题用当前 CSS 变量生成落场目标，避免硬编码两套不同颜色。
++  if (!theme.canvas) {
++    var computed = getComputedStyle(el);
++    var color = function (name) { return computed.getPropertyValue(name).trim(); };
++    theme.canvas = { id: themeName, layers: [{
++      kind: 'linear', angle: 130,
++      stops: [[0, color('--candy-a')], [0.48, color('--candy-b')], [1, color('--candy-c')]]
++    }] };
++  }
+   var gone = false;
+   function drop() {                       // 立刻撤层（主题被切换时用）
+     if (gone) return; gone = true;
+--- a/public/token-login.html
++++ b/public/token-login.html
+@@ -190,7 +190,11 @@
+ 
+   /* 目标色：主页主题的背景色（控制台 :root[data-theme=*] 的 --bg）。
+      登录页自身配色保持不变，只有这段转场渐变会把主题色带进来。 */
+-  var THEME_BG = { light: '#eef2fc', dark: '#131a2e', warm: '#eaede0' };
++   var THEME_BG = {
++     light: '#eef2fc', dark: '#131a2e', warm: '#eaede0',
++     ink: '#f3f2ee', forest: '#eaf0e7', rose: '#fcf0f1',
++     sand: '#f4eee2', ice: '#eff8fb', dusk: '#1c252d', violet: '#211d38'
++   };
+   var morphBg = THEME_BG.light;
+   try { morphBg = THEME_BG[localStorage.getItem('consoleTheme')] || morphBg; } catch (e) {}
+   document.documentElement.style.setProperty('--morph-bg', morphBg);
+--- /dev/null
++++ b/scripts/test-console-themes.mjs
+@@ -0,0 +1,59 @@
++import assert from 'node:assert/strict';
++import fs from 'node:fs';
++import path from 'node:path';
++import vm from 'node:vm';
++
++const root = path.resolve(import.meta.dirname, '..');
++const html = fs.readFileSync(path.join(root, 'public/console.html'), 'utf8');
++const login = fs.readFileSync(path.join(root, 'public/token-login.html'), 'utf8');
++const start = html.indexOf('/* == theme-picker:start == */');
++const end = html.indexOf('/* == theme-picker:end == */');
++assert(start >= 0 && end > start, 'Theme picker must have an independently runnable controller');
++const controller = html.slice(start, end);
++
++function setup(savedTheme, reducedMotion = false, withViewTransition = true) {
++  const buttons = [];
++  const rootElement = { dataset: { theme: 'light' }, style: { setProperty() {} } };
++  const store = new Map(savedTheme ? [['consoleTheme', savedTheme]] : []);
++  const box = {
++    hidden: true,
++    appendChild(button) { buttons.push(button); },
++    querySelectorAll() { return buttons; },
++    addEventListener() {}
++  };
++  const trigger = { textContent: '', dataset: {}, listeners: {}, setAttribute(k, v) { this[k] = v; }, addEventListener(k, fn) { this.listeners[k] = fn; } };
++  const document = {
++    documentElement: rootElement,
++    getElementById(id) { return id === 'themeMenu' ? box : trigger; },
++    createElement() { return { dataset: {}, style: { setProperty() {} }, classList: { toggle() {} }, listeners: {}, prepend() {}, setAttribute(k, v) { this[k] = v; }, addEventListener(k, fn) { this.listeners[k] = fn; } }; },
++    addEventListener() {},
++    startViewTransition: withViewTransition ? fn => { fn(); return { finished: Promise.resolve() }; } : undefined
++  };
++  const context = { document, localStorage: { getItem(k) { return store.get(k) ?? null; }, setItem(k, v) { store.set(k, v); } }, window: { matchMedia() { return { matches: reducedMotion }; } }, setTimeout, clearTimeout };
++  vm.runInNewContext(controller, context);
++  return { buttons, rootElement, store, trigger, box };
++}
++
++const normal = setup('forest');
++assert.equal(normal.buttons.length, 10, 'Show ten selectable themes');
++assert.equal(normal.rootElement.dataset.theme, 'forest', 'Restore a saved theme');
++assert.match(normal.trigger.textContent, /松林/, 'Show the selected theme in the compact control');
++normal.buttons.find(b => b.dataset.theme === 'ink').listeners.click();
++assert.equal(normal.rootElement.dataset.theme, 'ink', 'Switch theme on click');
++assert.equal(normal.store.get('consoleTheme'), 'ink', 'Persist the selected theme');
++assert.equal(normal.box.hidden, true, 'Close the menu after selection');
++
++const reduced = setup('invalid', true, true);
++assert.equal(reduced.rootElement.dataset.theme, 'light', 'Unknown themes fall back to the existing default');
++reduced.buttons.find(b => b.dataset.theme === 'rose').listeners.click();
++assert.equal(reduced.rootElement.dataset.theme, 'rose', 'Reduced motion still switches themes');
++
++const fallback = setup(null, false, false);
++fallback.buttons.find(b => b.dataset.theme === 'sand').listeners.click();
++assert.equal(fallback.rootElement.dataset.theme, 'sand', 'Switch without the View Transitions API');
++
++for (const button of normal.buttons) {
++  assert(html.includes(`:root[data-theme="${button.dataset.theme}"]`), `Missing palette for ${button.dataset.theme}`);
++  assert(login.includes(`${button.dataset.theme}:`), `Missing login color for ${button.dataset.theme}`);
++}
++console.log('Ten console themes, persistence, fallback, and login colors: OK');
