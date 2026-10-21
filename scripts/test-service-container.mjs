@@ -143,10 +143,15 @@ try {
       const boundary = fallbackServices.agentBroker.capabilities(provider).workspaceBoundary;
       if (provider === 'codex') {
         assert.equal(boundary, 'native-staged', 'Codex declares the honest Native Staging boundary');
+        const security = fallbackServices.agentBroker.describeExecutionSecurity(provider, fallbackWorkspace.id);
+        const expectedRefusal = security.security.nativeSandboxSupported === true
+          ? 'AGENT_SECURITY_CONFIRMATION_REQUIRED' : 'AGENT_NATIVE_SANDBOX_UNSUPPORTED';
+        const sessionsBeforeRefusal = providerSessionIndex;
         await assert.rejects(() => fallbackServices.capabilityService.broker.execute({
           actor: { kind: 'owner', id: 'desktop' }, taskId: brokerSessionTask.id, workspaceId: fallbackWorkspace.id,
           capability: 'agent.run', input: { agentProvider: provider, content: 'unconfirmed dispatch' }, reason: 'unconfirmed fixture'
-        }), error => error.code === 'AGENT_SECURITY_CONFIRMATION_REQUIRED');
+        }), error => error.code === expectedRefusal);
+        assert.equal(providerSessionIndex, sessionsBeforeRefusal, 'unavailable or unconfirmed native execution must not create a session');
         // This dispatch-only fixture already stubs createSession/send; simulate the approved scope
         // without depending on an installed CLI. Real approval/dispatch is covered by Native suites.
         fallbackServices.agentBroker.assertExecutionConsent = (id, scope) => {

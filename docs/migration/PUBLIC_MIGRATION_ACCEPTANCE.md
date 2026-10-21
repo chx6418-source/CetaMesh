@@ -1,6 +1,6 @@
 # CetaMesh 统一公开仓库迁移验收报告
 
-日期：2026-10-21。状态：公开迁移审查分支准备中；main 未合并，Release 未发布。
+日期：2026-10-21。状态：公开审查分支已推送、草稿PR已创建；main 未合并，Release 未发布。
 
 ## 仓库与来源
 
@@ -8,7 +8,7 @@
 - 迁移分支：feature/desktop-mobile-monorepo
 - 公开基线：ec6b07d8abcdea0c66ed8362d36d3c4984462cdf
 - 私有来源：chx6418-source/cetamesh-mobile，codex/desktop-primary-monorepo，4acbb3d1dca1abf0acf53a5b5384f9ee71c6842b。
-- 采用独立公开克隆与源码快照，没有重做历史整合，不 fetch/merge 私有 Git 历史。提交 SHA、PR 与远程 CI 在最终记录中补充。
+- 采用独立公开克隆与源码快照，没有重做历史整合，不 fetch/merge 私有 Git 历史。源码整合提交：85a5a68b0668a9a6fa440ccfb451615886ba0b20；草稿 PR：https://github.com/chx6418-source/CetaMesh/pull/3。后续提交修正CI测试预设并补充证据，不重新导入私有历史。
 
 ## 历史、文档与工程
 
@@ -32,7 +32,7 @@ Desktop 位于根目录（src、desktop-shell、desktop-ui）；Mobile 完整位
 ## 已实际验证
 
 - Mobile：TypeScript、ESLint、5项架构检查通过；71 Jest suites / 288 tests通过；11项产物卫生测试通过。
-- Windows：UI TypeScript/Vite、Core SEA、release/debug Rust壳实际构建通过。此前全量141 PASS /0 FAIL /14环境跳过；SDK替换后全量结果另补。
+- Windows：UI TypeScript/Vite、Core SEA、release/debug Rust壳实际构建通过。此前全量141 PASS /0 FAIL /14环境跳过；SDK替换后全量146 PASS /0 FAIL /10环境跳过；另轮132项核心/架构/安全/运行/集成全部通过。
 - 替代通信回归：鉴权、消息/通知、失败响应、超时、有界队列、断线拒绝且写不重放、自动重连重验、变更账号拒绝就绪通过；现有 QQ runtime/connector process 回归通过。
 - SDK排除后的 Core 打包通过，39个第三方包，无 SnowLuma SDK/MCP。
 - Android：Gradle assembleRelease实际成功，480 actionable tasks，15分17秒。APK签名及Standalone包校验通过：包名com.cetameshmobile、compile37/min24/target36、非debuggable、权限白名单、3384084字节内置Bundle、四种ABI、无秘钥文件。DEX包含七个CetaMesh原生模块和IdentityPackage；各ABI包含NitroModules及RNNitroSQLite。
@@ -49,7 +49,7 @@ Windows与Android独立构建发布；GitCode现有正式更新源及GitHub回�
 
 ## 尚待收尾
 
-提交与安全复扫、推送审查分支、创建PR、记录真实远程CI及最终Windows无SDK安装包证据。第三方完整二进制notices、正式签名、真机配对和旧客户端更新验收在发布前补齐。未经Owner确认不合并main、不发布Release、不删除私有源仓库。
+公开提交、历史复扫、分支推送和草稿PR均完成；远程CI完成情况以链接和最终交付记录为准。第三方完整二进制notices、正式签名、真机配对和旧客户端更新验收在发布前补齐。未经Owner确认不合并main、不发布Release、不删除私有源仓库。
 
 ## SDK 排除后 Windows 产物
 
@@ -62,3 +62,19 @@ Build1115 DEV安装包实际构建与安全审计通过：42999808字节，SHA25
 SDK排除后完整 npm test：156 suites，146 PASS /0 FAIL /10 NOT_RUN_ENVIRONMENT。Cargo check/test在另轮均PASS。产物后分类复验曾14 PASS /2 FAIL /2环境跳过：Core因删除全部未授权素材后资源assets目录未生成失败，已添加公开素材说明并重建；托盘日志等待失败，另一个完整测试轮的同项42.9秒PASS，保留其并发环境不稳定记录。最终产物复验另补，不能抹去先前失败。
 
 最终DEV资源目录修复后Build1116实际构建完成，包含assets说明且无未授权图片：42999808字节（以manifest最终记录为准），SHA256 03706f39cd98473350a20204088a9bf7f17b1e088b0242ff0a8b431163acb247。此前Build1115为过渡证据，不是最终交付安装包。
+
+## 干净源码RC与最终分类复验
+
+本地正式构建模式（不等于发布Release）由干净85a5a68源码生成 Build1116，dirty=false，RC目录 artifacts/rc/1.0.0-rc.2/build-1116。安装包42999808字节，SHA256 1eb029b805db3a49e166bc186fba0f0c74a671e939f781346c5c7f59e6fea5fc。Desktop/Release共18 PASS /0 FAIL /0环境跳过，含真实安装升级卸载、IPC、SEA、依赖和Cargo。未签名；Windows10和真实QQ/DSH端到端未验收。
+
+原私有备份再次git bundle verify有效：desktop-all.bundle 152509237字节，SHA256 8153a5684f12c352d46ff9feb63f6eeeb8bf034ac1e40a3c437ca3ad5a3aa69d；mobile-all.bundle 22474374字节，SHA256 7f6bfa971f9916e571225327a2c5defb9fb8a071096fe061c692d8f9e82c8a79。均位于私有工作树output/migration-baseline，仅本地恢复，不上传公开仓库。私有整合工作树仍为4acbb3d且干净。
+
+## 远程首轮CI暴露问题与修正
+
+公开Windows run39624202649真实执行后135 PASS /2 FAIL /19环境跳过；不是账单限制。test-service-container假定Codex原生沙箱已安装，实际应在不支持环境先返回AGENT_NATIVE_SANDBOX_UNSUPPORTED；现在按能力声明精确检查拒绝码，额外断言拒绝时不创建Session，不改变产品安全逻辑。test-workspace-staging-boundary故障注入使用原始临时路径表示，生产使用规范化路径；现在对两者使用native realpath，避免Windows路径表示不同导致未注入故障，仍断言实际导入必须拒绝。5项相关本地回归全部通过。
+
+首轮公开Android run39624202486已完成JS检查，进入原生编译；公开CI当前可以实际运行。源提交两个平台的首次链接：
+- Windows：https://github.com/chx6418-source/CetaMesh/actions/runs/39624202649
+- Android：https://github.com/chx6418-source/CetaMesh/actions/runs/39624202486
+
+远程最终状态需等待完成；不得将执行中记为PASS。后续仅测试/说明修正不改变已构建的产品源码与依赖。许可证完整文本仍需在二进制发布前补齐，当前生成包的Node运行时notice尚有缺口，不能把SBOM生成当成完整再分发合规通过。

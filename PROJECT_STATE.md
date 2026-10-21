@@ -11,8 +11,8 @@
 
 ## Active Work
 
-- Local source audit, platform build/test verification, public-safe documentation.
-- Resolve third-party permission/provenance before any public source commit or push.
+- Public review branch pushed; draft PR https://github.com/chx6418-source/CetaMesh/pull/3. Main is unchanged.
+- SnowLuma SDK/MCP excluded; Mineradio retained by explicit Owner decision with unverified upstream license disclosed. Source snapshot commit 85a5a68b0668a9a6fa440ccfb451615886ba0b20.
 
 ## Architecture and next steps
 

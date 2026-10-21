@@ -38,9 +38,12 @@ try {
   cleanupStagingWorkspace(readOnlyStage);
   const scanStage = await createStagingWorkspace({ taskId: 'read-only-scan', workspaceId: 'live', sourceRoot: liveSource, stagingRoot: stageRoot });
   const originalReadDir = fs.readdirSync;
+  const checkedSource = fs.realpathSync.native(liveSource);
   try {
     fs.readdirSync = function(target, ...args) {
-      if (path.resolve(String(target)) === path.resolve(liveSource)) throw Object.assign(new Error('synthetic live directory unavailable'), { code: 'EACCES' });
+      // The production walk canonicalizes roots. Windows runners can return a
+      // different drive-letter case or alias than the temp path spelling.
+      if (fs.realpathSync.native(String(target)) === checkedSource) throw Object.assign(new Error('synthetic live directory unavailable'), { code: 'EACCES' });
       return originalReadDir.call(this, target, ...args);
     };
     assert.deepEqual(collectStagedChanges(scanStage).changes, [], 'no-op turn must not rescan live source or be blocked by transient source reads');
