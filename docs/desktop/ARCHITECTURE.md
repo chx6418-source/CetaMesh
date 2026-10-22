@@ -12,9 +12,7 @@
   reference. A DSH (or future) Agent session is an attachable execution reference only.
 - **Agent Provider != Model Provider.** Providers implement a contract; DSH is the first Agent
   Provider. Model selection lives with the chat/provider configuration.
-- **QQ / SnowLuma is a Channel Adapter, never the Core.** The SDK import and connection runtime
-  live under `src/channel/qq/`; Core services construct without importing that adapter or needing
-  DSH readiness.
+- **QQ / OneBot is a Channel Adapter, never the Core.** The independently authored OneBot v11 transport lives in `src/channel/qq/onebot-client.js`; the restricted SnowLuma SDK is not embedded. Compatible external gateways are installed independently, and Core services initialize without requiring that channel or DSH readiness.
 - Desktop and Mobile are independent CetaMesh Nodes; Device Mesh is a separate protocol layer.
 
 ## Process composition

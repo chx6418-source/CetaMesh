@@ -1,14 +1,19 @@
-# CetaMesh change record
+# CetaMesh 变更记录
 
-## 2026-10-21 — Desktop-primary private monorepo migration
+本文件记录影响公开工程与用户的主要变更。早期测试报告和内部开发过程不再作为项目主页内容发布。
 
-- Desktop `main` history imported without rewriting commits; root architecture retained.
-- Mobile production integration history retained; complete project moved to `apps/mobile`.
-- Independent dependencies, versions, update sources, licenses and safety rules retained.
-- Split Desktop/Mobile CI with working-directory and cache/artifact path corrections.
-- Added paired-fixture and workflow isolation checks through Desktop `npm test`.
-- Mobile `npm test` includes all existing verification gates.
+## 2026-10-22 — 公开仓库整理
 
-Desktop and Mobile currently each declare `1.0.0-rc.2`, but these are independent
-release lines. This migration does not increment either product version or declare
-a production release. Existing platform reports remain historical evidence.
+- 公开 PR #4 已合并：将旧 UI 主题探索、内部修复材料和调试证据从当前文件树移出。
+- 正式 Desktop、Mobile 代码、构建脚本和必要文档保留；原始材料在私有存档中保留。
+- 公开 Git 历史未改写，已删除的旧文件仍可能通过历史提交访问。
+
+## 2026-10-21 — Desktop + Mobile 统一公开仓库
+
+- 已审核源码快照导入并合并到 `chx6418-source/CetaMesh`。
+- Desktop 保持根目录主工程，Mobile 移至 `apps/mobile/`，两端独立构建与发布。
+- 保留公开仓库原有贡献历史；私有 Desktop 和 Mobile 仓库的完整历史未导入公开 Git。
+- 保留受控的协议与设备身份边界，未强制共享运行时或用户存储。
+- SnowLuma 受限 SDK/MCP 不作为公开发行包依赖。
+
+Desktop 与 Mobile 当前均声明 `1.0.0-rc.2`，但版本线相互独立。仓库整合、文档整理或 CI 通过都不代表已经正式发布稳定版本。
