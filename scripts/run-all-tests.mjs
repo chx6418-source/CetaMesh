@@ -41,6 +41,7 @@ export const CATEGORIES = ['core', 'architecture', 'security', 'runtime', 'integ
 const REGISTRY = {
   'test-onebot-client.mjs': { category: 'integration' },
   'test-monorepo-contract.mjs': { category: 'architecture' },
+  'test-public-repository-hygiene.mjs': { category: 'security', note: 'Prevent reintroduction of private-only reports, obsolete design mocks and broken README links' },
   'test-comm-approval.mjs': { category: 'security' },
   'test-comm-legacy-shutdown.mjs': { category: 'integration' },
   'test-comm-managed-turns.mjs': { category: 'integration' },
