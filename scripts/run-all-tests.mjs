@@ -39,6 +39,10 @@ export const CATEGORIES = ['core', 'architecture', 'security', 'runtime', 'integ
 // ── 登记表：scripts/test-*.mjs 的每一个文件都必须出现在这里（或能从 package.json 映射）。
 // requires 的取值见 probeAvailability()；category 取值见 CATEGORIES。
 const REGISTRY = {
+  'test-ui-motion.mjs': { category: 'desktop' },
+  'test-chat-composer-layout.mjs': { category: 'desktop' },
+  'test-chat-context-card.mjs': { category: 'desktop' },
+  'test-window-chrome.mjs': { category: 'desktop' },
   'test-comm-approval.mjs': { category: 'security' },
   'test-comm-legacy-shutdown.mjs': { category: 'integration' },
   'test-comm-managed-turns.mjs': { category: 'integration' },

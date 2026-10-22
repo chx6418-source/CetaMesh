@@ -250,7 +250,8 @@ check('Harbor accessibility and real-world controls avoid clipping and preserve 
   const policy = read('desktop-shell/src/webview_policy.rs');
   assert.match(app, /function SessionActionsMenu/);
   assert.match(app, /createPortal\(<div ref=\{menuRef\}/);
-  assert.match(app, /window\.localStorage\.setItem\(`harbor:chat-context:/);
+  assert.match(app, /<details className="chat-context-card">/);
+  assert.match(app, /className="composer-dock"><ChatContextPanel/);
   assert.match(app, /settingPages = \[/);
   assert.match(app, /导入本地扩展/);
   assert.match(app, /stageLocalPackage/);
@@ -261,7 +262,7 @@ check('Harbor accessibility and real-world controls avoid clipping and preserve 
   assert.doesNotMatch(inputs, /<select className="cm-select"/);
   assert.match(styles, /html, body, #root[^\n]*overflow: hidden/);
   assert.match(styles, /\.chat-message, \.chat-message \*, \.cm-markdown/);
-  assert.match(harbor, /\.chat-workspace\.context-collapsed/);
+  assert.match(harbor, /\.chat-workspace\s*\{[^}]*grid-template-columns: minmax\(0, 1fr\)/);
   assert.match(shell, /app\.pickExtensionPackage/);
   assert.match(policy, /"app\.pickExtensionPackage"/);
   assert.doesNotMatch(app, /unzipSync|extractPluginPackage|JSZip/);

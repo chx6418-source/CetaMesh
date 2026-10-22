@@ -1,0 +1,18 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+const read = file => fs.readFileSync(new URL('../desktop-ui/src/' + file, import.meta.url), 'utf8');
+const css = read('theme/motion.css');
+for (const selector of ['.page-frame', '.nav-item', '.composer-submit', '.composer-context-options', '.cm-select-options', '.context-progress', '::details-content', '.loading-dot']) assert.ok(css.includes(selector), selector);
+assert.match(css, /@media\s*\(prefers-reduced-motion:\s*reduce\)/);
+assert.match(css, /animation:\s*none\s*!important/);
+assert.match(css, /transition:\s*none\s*!important/);
+assert.match(css, /\.virtual-row[\s\S]*?animation:\s*none/);
+assert.doesNotMatch(css, /transition:\s*all\b|will-change\s*:/);
+const app = read('app/HarborApp.tsx');
+assert.match(app, /import ['"]\.\.\/theme\/motion.css['"]/);
+assert.match(app, /<main key=\{page\}/);
+const overlays = read('components/primitives/overlays.tsx');
+assert.match(overlays, /AnimatePresence/);
+assert.match(overlays, /useReducedMotion/);
+assert.match(overlays, /inert=\{!present\}/);
+console.log('PASS unified motion coverage, reduced-motion override, stable virtual rows and presence-based inert drawer exit');

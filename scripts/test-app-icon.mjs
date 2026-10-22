@@ -53,6 +53,18 @@ for (const [name, size] of [
 
 const ico = fs.readFileSync(path.join(icons, 'icon.ico'));
 icoDimensions(ico, '提交的');
+if (process.env.CETAMESH_ICON_EXECUTABLE) {
+  const executable = fs.readFileSync(process.env.CETAMESH_ICON_EXECUTABLE);
+  assert.equal(executable.toString('ascii', 0, 2), 'MZ', '图标检查目标必须是 PE 程序');
+  for (let index = 0; index < ico.readUInt16LE(4); index++) {
+    const entry = 6 + index * 16;
+    const length = ico.readUInt32LE(entry + 8);
+    const offset = ico.readUInt32LE(entry + 12);
+    assert.ok(executable.includes(ico.subarray(offset, offset + length)), '实际编译程序必须包含新 ICO 的每个图层');
+  }
+  assert.ok(executable.includes(fs.readFileSync(path.join(icons, '128x128.png'))), '实际程序须含标题栏的新 PNG');
+  console.log('✅ 实际 Windows 程序包含全部新 ICO 图层及标题栏 PNG');
+}
 
 // Keep the legacy C4 provenance check reproducible in a clean checkout, too.
 const legacy = fs.readFileSync(path.join(icons, 'source-c4.png'));
@@ -65,6 +77,17 @@ if (fs.existsSync(selectedPath)) {
 const [masterWidth, masterHeight] = pngSize(path.join(icons, 'source-logo-05.png'));
 assert.equal(masterWidth, masterHeight, 'Logo-05 主图必须为正方形');
 assert.ok(masterWidth >= 1024, 'Logo-05 主图需要足够分辨率');
+const supplied = new Map([
+  [180, 'ebb0d2f55223dc443fcaa94b5e65b1cfb3085121a161ac4de87b08d86c833a13'],
+  [256, '4602ed24608389c88b809deb13c131497788b21a72fa6a448821c955debad5e9'],
+  [512, '2fddef83c6ead38de991c7beb3f603f26cb36b5460406a7ee122d1c7ab6794e9'],
+  [1024, '86ffe07042373741cadc28e1422cf90d4bceb6a8bb6a5cd642261d19d77b445c']
+]);
+for (const [size, hash] of supplied) {
+  const file = path.join(icons, `cetamesh-icon-${size}.png`);
+  assert.deepEqual(pngSize(file), [size, size]);
+  assert.equal(createHash('sha256').update(fs.readFileSync(file)).digest('hex'), hash, 'Owner 图标原图应保持不变');
+}
 const publicIcon = fs.readFileSync(path.join(root, 'public', 'whalebridge-icon.png'));
 assert.deepEqual(publicIcon, fs.readFileSync(path.join(icons, '128x128@2x.png')), '各入口必须使用同一图标');
 
@@ -76,17 +99,21 @@ if (process.platform === 'win32') {
     fs.mkdirSync(path.join(temporary, 'public'));
     const generator = path.join(temporary, 'scripts', 'build-app-icons.ps1');
     fs.copyFileSync(path.join(root, 'scripts', 'build-app-icons.ps1'), generator);
-    // Only the new master is staged: a default still pointing at C4 must fail.
-    fs.copyFileSync(path.join(icons, 'source-logo-05.png'), path.join(temporary, 'desktop-shell', 'icons', 'source-logo-05.png'));
+    // Only the Owner's new images are staged: an old default must fail.
+    for (const size of supplied.keys()) fs.copyFileSync(path.join(icons, `cetamesh-icon-${size}.png`), path.join(temporary, 'desktop-shell', 'icons', `cetamesh-icon-${size}.png`));
     const result = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', generator], { encoding: 'utf8' });
     assert.equal(result.status, 0, result.stderr || result.stdout);
     const generatedIcons = path.join(temporary, 'desktop-shell', 'icons');
     for (const [name, size] of [['32x32.png', 32], ['128x128.png', 128], ['128x128@2x.png', 256], ['icon.png', 512]]) {
       const generated = path.join(generatedIcons, name);
-      assert.deepEqual(pngSize(generated), [size, size], `${name} 必须由默认 Logo-05 主图生成`);
+      assert.deepEqual(pngSize(generated), [size, size], `${name} 必须由 Owner 主图生成`);
       assert.ok(fs.statSync(generated).size > 100, `${name} 不能是空白 PNG`);
+      assert.deepEqual(fs.readFileSync(generated), fs.readFileSync(path.join(icons, name)), '提交资源与默认生成器必须一致');
     }
     icoDimensions(fs.readFileSync(path.join(generatedIcons, 'icon.ico')), '生成的');
+    assert.deepEqual(fs.readFileSync(path.join(generatedIcons, 'icon.ico')), ico, 'ICO 不得残留旧资源');
+    assert.deepEqual(fs.readFileSync(path.join(generatedIcons, '128x128@2x.png')), fs.readFileSync(path.join(icons, 'cetamesh-icon-256.png')), '已有 256 图应原样使用，不额外裁切');
+    assert.deepEqual(fs.readFileSync(path.join(generatedIcons, 'icon.png')), fs.readFileSync(path.join(icons, 'cetamesh-icon-512.png')), '已有 512 图应原样使用，不额外裁切');
     const generatedPublicIcon = path.join(temporary, 'public', 'whalebridge-icon.png');
     assert.deepEqual(pngSize(generatedPublicIcon), [256, 256], 'UI 图标必须由默认主图生成');
     assert.ok(fs.statSync(generatedPublicIcon).size > 100, 'UI 图标不能是空白 PNG');
@@ -114,4 +141,4 @@ for (const relative of [
   assert.match(fs.readFileSync(path.join(root, relative), 'utf8'), /whalebridge-icon\.png/, `${relative} 未接入品牌图`);
 }
 
-process.stdout.write('✅ Logo-05 PNG/ICO 尺寸、默认生成链路与各入口图标一致，原 C4 来源校验保留。\n');
+process.stdout.write('✅ Owner 绿色 CetaMesh PNG/ICO、生成一致性及原图 Hash 通过；历史来源保留。\n');

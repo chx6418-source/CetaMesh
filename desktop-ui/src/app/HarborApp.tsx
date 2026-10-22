@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router';
 import { createPortal } from 'react-dom';
 import { mergeChatHistorySnapshot, mergeLatestChatMessages, prependOlderChatMessages, recoverForwardHistory } from './chat-history';
 import { applyChatStreamUpdates, ChatRequestEpoch, ChatStreamRevision, pendingReplyVisible, type ChatStreamUpdate } from './chat-async-state';
-import { aboutClient, agentClient, approvalClient, bridge, chatClient, extensionSettingsClient, feedbackClient, hostClient, memoryClient, onboardingClient, openExternal, pluginClient, searchClient, settingsClient, taskClient, updateClient, workspaceClient, workshopClient, type Agent, type DshConfiguration, type DshSelection, type DshPresetCatalog, type Approval, type ApprovalDecisionResult, type DesktopEventData, type ChatMessage as ChatMessageDto, type ChatSession, type ExtensionSettingsDescription, type ExtensionSettingsSnapshot, type IntegrationSettings, type Memory, type Plugin, type ProviderSettingField, type SettingField, type Settings, type Task, type WorkshopProposal } from '../bridge/typed-client';
+import { aboutClient, agentClient, approvalClient, bridge, chatClient, extensionSettingsClient, feedbackClient, hostClient, memoryClient, onboardingClient, openExternal, pluginClient, settingsClient, taskClient, updateClient, workspaceClient, workshopClient, type Agent, type DshConfiguration, type DshSelection, type DshPresetCatalog, type Approval, type ApprovalDecisionResult, type DesktopEventData, type ChatMessage as ChatMessageDto, type ChatSession, type ExtensionSettingsDescription, type ExtensionSettingsSnapshot, type IntegrationSettings, type Memory, type Plugin, type ProviderSettingField, type SettingField, type Settings, type Task, type WorkshopProposal } from '../bridge/typed-client';
 import { Icon, type IconName } from '../components/icons';
 import { ArtifactCard } from '../components/product/cards';
 import { Button, IconButton, Input, normalizeSelectOptionLabel, SearchInput, Select, Tabs } from '../components/primitives/inputs';
@@ -11,7 +11,9 @@ import { Sheet } from '../components/primitives/overlays';
 import { Badge, Banner, Card, Divider, LoadingState, Surface } from '../components/primitives/surfaces';
 import { Markdown, VirtualList, type VirtualListAnchor, type VirtualListController } from '../components/primitives/content';
 import { useUi } from '../stores/ui';
+import { WindowChrome } from './WindowChrome';
 import './harbor.css';
+import '../theme/motion.css';
 
 type PageId = 'chat' | 'work' | 'agents' | 'plugins' | 'settings' | 'about' | 'memory' | 'onboarding';
 const NAV: { id: Exclude<PageId, 'onboarding'>; label: string; icon: IconName }[] = [
@@ -34,7 +36,6 @@ const relativeLabel = (value: string | number | null | undefined) => {
   return minutes < 1 ? '刚刚' : minutes < 60 ? `${minutes} 分钟前` : minutes < 1440 ? `${Math.floor(minutes / 60)} 小时前` : `${Math.floor(minutes / 1440)} 天前`;
 };
 export const isChatTurnCancellable = (state: string) => ['starting', 'streaming', 'recovering', 'cancelling', 'waiting-approval'].includes(state);
-const taskStatusLabel = (status: string) => ({ working: '运行中', running: '运行中', waiting: '等待处理', 'waiting-approval': '等待审批', paused: '已暂停', completed: '已完成', cancelled: '已取消', blocked: '待核对', queued: '待开始', failed: '失败', error: '需要处理' }[status] ?? status);
 const agentActivityStatusLabel = (status: string) => ({ running: '正在运行', completed: '已完成', cancelled: '已停止', failed: '未完成' }[status] ?? status);
 const updateStatusLabel = (status: string) => ({ update_available: '有可用更新', up_to_date: '已是最新版本', checked: '已完成检查', error: '检查失败', unknown: '尚未检查' }[status] ?? status);
 const agentInitials = (id: string) => id.slice(0, 2).toUpperCase();
@@ -83,10 +84,6 @@ export function HarborApp() {
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(null);
   const [workspaceError, setWorkspaceError] = useState('');
   const [onboarding, setOnboarding] = useState<{ complete: boolean; currentStep: string | null } | null>(null);
-  const [globalSearch, setGlobalSearch] = useState('');
-  const [searchResults, setSearchResults] = useState<{ sessions: ChatSession[]; tasks: Task[]; plugins: Plugin[] } | null>(null);
-  const [searchError, setSearchError] = useState('');
-  const searchRef = useRef<HTMLInputElement>(null);
   const theme = useUi(state => state.theme);
   const setTheme = useUi(state => state.setTheme);
   const activeSession = sessions.find(session => session.id === activeSessionId) ?? null;
@@ -99,8 +96,6 @@ export function HarborApp() {
     query.set('page', next);
     if (sessionId) setActiveSessionId(sessionId);
     setParams(query);
-    setGlobalSearch('');
-    setSearchResults(null);
   }, [params, setParams]);
 
   const refreshSessions = useCallback(async () => {
@@ -157,21 +152,6 @@ export function HarborApp() {
     return () => { offSessions(); offCore(); offRestart(); offTasks(); offWorkspaces(); };
   }, [refreshSessions, refreshWorkspaces, refreshTaskCount, setTheme]);
 
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); searchRef.current?.focus(); }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, []);
-
-  useEffect(() => {
-    if (!globalSearch.trim()) { setSearchResults(null); setSearchError(''); return; }
-    const timer = window.setTimeout(() => {
-      void searchClient.search(globalSearch.trim()).then(setSearchResults).catch(error => { setSearchError(messageOf(error)); setSearchResults(null); });
-    }, 300);
-    return () => window.clearTimeout(timer);
-  }, [globalSearch]);
 
   async function createSession(ordinary = false) {
     try {
@@ -217,7 +197,6 @@ export function HarborApp() {
     } catch { /* Theme applies in this window even when Core cannot persist it. */ }
   }
 
-  const title = page === 'chat' ? activeSession?.title ?? 'Chat' : page === 'memory' ? 'Memory' : NAV.find(item => item.id === page)?.label ?? '首次设置';
   const recentSessions = sessions.slice(0, 7);
   const shownAllSessions = allSessions.filter(session => {
     const inScope = allSessionsScope === 'all' || (allSessionsScope === 'archived' ? session.archived : !session.archived);
@@ -228,8 +207,9 @@ export function HarborApp() {
     if (target.closest('input, textarea, [contenteditable="true"], .chat-message, .cm-markdown, .cm-code')) return;
     event.preventDefault();
   }}>
+    <WindowChrome />
     <aside className="harbor-sidebar">
-      <div className="brand-lockup"><span className="brand-mark"><Icon name="sparkles" size={20} /></span><span className="brand-copy"><strong>CetaMesh</strong><small>Desktop · UX v2</small></span></div>
+      <div className="sidebar-scroll">
       <details className="workspace-switch"><summary><span className="workspace-avatar">CM</span><span className="workspace-label"><strong>{activeWorkspace?.name ?? '个人工作区'}</strong><small>{activeWorkspace?.status ?? '本地工作区'}</small></span><Icon name="down" size={14} /></summary><div className="workspace-menu">{workspaceError && <p role="alert">{workspaceError}</p>}{workspaces.length ? workspaces.map(workspace => <button key={workspace.id} aria-current={workspace.id === activeWorkspaceId ? 'true' : undefined} onClick={() => void openWorkspace(workspace.id)}><strong>{workspace.name}</strong><small>{workspace.status}</small></button>) : <p>尚未登记工作区</p>}<button className="workspace-add" onClick={() => navigate('work')}>管理工作区</button></div></details>
       <nav aria-label="工作空间" className="primary-nav"><span className="nav-label">工作空间</span>{NAV.slice(0, 4).map(item => <button key={item.id} className={`nav-item ${page === item.id ? 'active' : ''}`} aria-current={page === item.id ? 'page' : undefined} onClick={() => navigate(item.id)}><Icon name={item.icon} size={18} /><span>{item.label}</span>{item.id === 'work' && taskCount > 0 && <small className="nav-count">{taskCount}</small>}</button>)}</nav>
       {page === 'chat' && <section className="session-section" aria-label="最近会话">
@@ -244,13 +224,11 @@ export function HarborApp() {
         {!sessions.length && !sessionError && <p className="sidebar-empty">还没有会话</p>}
         <button className="all-sessions" onClick={() => { setAllSessionsOpen(true); setAllSessionsQuery(''); void loadAllSessions(); }}>查看全部会话 <Icon name="right" size={13} /></button>
       </section>}
+      </div>
       <div className="sidebar-bottom"><div className="host-indicator"><span className={`host-dot ${hostStatus}`} /><span>{hostStatus === 'ready' ? '桌面工作台已连接' : hostStatus === 'checking' ? '连接桌面主机' : '桌面服务离线'}</span><span className="host-more"><Icon name="more" size={16} /></span></div><Divider /><div className="utility-nav">{NAV.slice(4).map(item => <button key={item.id} className={`nav-item ${page === item.id ? 'active' : ''}`} aria-current={page === item.id ? 'page' : undefined} onClick={() => navigate(item.id)}><Icon name={item.icon} size={18} /><span>{item.label}</span></button>)}</div><div className="profile-row"><span className="profile-avatar">CM</span><span><strong>本地用户</strong><small>个人空间</small></span></div></div>
     </aside>
     <div className="harbor-main">
-      <header className="topbar"><div className="breadcrumb"><span>{page === 'chat' ? '会话' : page === 'onboarding' ? '首次设置' : title}</span><Icon name="right" size={13} /><strong>{page === 'chat' ? title : page === 'onboarding' ? '开始使用' : title}</strong></div><div className="topbar-actions"><label className="global-search"><Icon name="search" size={16} /><Input ref={searchRef} aria-label="搜索会话、任务或插件" placeholder="搜索会话、任务或插件" value={globalSearch} onChange={event => setGlobalSearch(event.target.value)} /><kbd>⌘ K</kbd></label><span className={`top-host-status ${hostStatus}`}><i />{hostStatus === 'ready' ? '已连接' : hostStatus === 'checking' ? '连接中' : '未连接'}</span><IconButton label={`当前主题：${theme}`} icon={theme === 'dark' ? 'moon' : 'sun'} onClick={() => void changeTheme(theme === 'system' ? 'light' : theme === 'light' ? 'dark' : 'system')} /></div>
-        {globalSearch && <div className="search-popover" role="region" aria-label="搜索结果">{searchError ? <ErrorNotice error={searchError} /> : searchResults ? <SearchResults results={searchResults} onSelectSession={id => navigate('chat', id)} onSelectPage={navigate} /> : <LoadingState label="正在搜索…" />}</div>}
-      </header>
-      <main className={`page-frame page-${page}`}>
+      <main key={page} className={`page-frame page-${page}`}>
         {page === 'chat' && <ChatPage key={activeSession?.id ?? 'no-session'} session={activeSession} workspaces={workspaces} activeWorkspaceId={activeWorkspaceId} onSessionUpdate={updated => setSessions(current => current.map(item => item.id === updated.id ? updated : item))} onNew={() => createSession()} onNewChat={() => createSession(true)} onOpenMemory={() => navigate('memory')} onReviewTask={id => { setReviewTaskId(id); navigate('work'); }} />}
         {page === 'work' && <WorkPage workspaces={workspaces} onRefreshWorkspaces={refreshWorkspaces} reviewTaskId={reviewTaskId} onReviewTaskOpened={() => setReviewTaskId(null)} />}
         {page === 'memory' && <MemoryPage />}
@@ -275,11 +253,6 @@ export function HarborApp() {
       </div>
     </Sheet>
   </div>;
-}
-
-function SearchResults({ results, onSelectSession, onSelectPage }: { results: { sessions: ChatSession[]; tasks: Task[]; plugins: Plugin[] }; onSelectSession(id: string): void; onSelectPage(page: PageId): void }) {
-  if (!results.sessions.length && !results.tasks.length && !results.plugins.length) return <EmptyNotice icon="search" title="没有找到结果" detail="试试会话标题、任务内容或插件名称。" />;
-  return <div className="search-results">{results.sessions.map(session => <button key={`s-${session.id}`} onClick={() => onSelectSession(session.id)}><Icon name="chat" size={16} /><span><strong>{session.title || '新会话'}</strong><small>会话 · {dateLabel(session.updatedAt)}</small></span></button>)}{results.tasks.map(task => <button key={`t-${task.id}`} onClick={() => onSelectPage('work')}><Icon name="work" size={16} /><span><strong>{task.title}</strong><small>任务 · {taskStatusLabel(task.status)}</small></span></button>)}{results.plugins.map(plugin => <button key={`p-${plugin.id}`} onClick={() => onSelectPage('plugins')}><Icon name="plugins" size={16} /><span><strong>{plugin.name}</strong><small>插件 · {plugin.developer}</small></span></button>)}</div>;
 }
 
 function SessionActionsMenu({ session, onAction }: { session: ChatSession; onAction(action: 'rename' | 'archive' | 'delete'): void }) {
@@ -360,7 +333,6 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
   const [error, setError] = useState('');
   const [hasNewMessages, setHasNewMessages] = useState(false);
   const [sendErrors, setSendErrors] = useState<Record<string, string>>({});
-  const [contextCollapsed, setContextCollapsed] = useState(false);
   const [settlingReply, setSettlingReply] = useState<{ requestId: string | null; text: string } | null>(null);
 
   const historySessionIdRef = useRef<string | null>(null);
@@ -483,21 +455,9 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
   useEffect(() => { void load(); }, [load]);
   useEffect(() => { setSettlingReply(null); }, [session?.id]);
   useEffect(() => {
-    if (!session) return;
-    try { setContextCollapsed(window.localStorage.getItem(`harbor:chat-context:${session.id}`) === 'collapsed'); }
-    catch { setContextCollapsed(false); }
-  }, [session?.id]);
-  useEffect(() => {
     olderPageRequestRef.current = false;
     setLoadingOlder(false);
   }, [session?.id]);
-  function toggleContext() {
-    if (!session) return;
-    const next = !contextCollapsed;
-    setContextCollapsed(next);
-    try { window.localStorage.setItem(`harbor:chat-context:${session.id}`, next ? 'collapsed' : 'expanded'); }
-    catch { /* Context visibility still works for this session when storage is unavailable. */ }
-  }
   const refreshContext = useCallback(async () => {
     if (!session) return;
     const request = requestEpochRef.current.begin('context', session.id);
@@ -736,9 +696,9 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
   const providers = catalog?.modelProviders ?? [];
   const selectedProvider = providers.find(provider => provider.id === session.config.modelProvider) ?? providers.find(provider => provider.configured) ?? providers[0];
   const selectedModelKey = session.config.agentProvider === 'codex' && !session.config.modelProvider && !session.config.model ? JSON.stringify(['', '']) : JSON.stringify([session.config.modelProvider ?? selectedProvider?.id ?? '', session.config.model || '']);
-  return <div className={`chat-workspace ${contextCollapsed ? 'context-collapsed' : ''}`}>
+  return <div className="chat-workspace">
     <section className="conversation-pane">
-      <div className="conversation-toolbar"><div><p className="eyebrow">CETAMESH · CHAT</p><h1>{session.title || '新会话'}</h1><div className="conversation-meta"><StatusBadge value={status.state || 'idle'} /><span>更新于 {relativeLabel(session.updatedAt)}</span><span>·</span><ChatCatalogStatus catalog={catalog} /></div></div><div className="row"><IconButton label={contextCollapsed ? '显示运行上下文' : '隐藏运行上下文'} icon="work" onClick={toggleContext} /><IconButton label="刷新会话" icon="update" onClick={() => void load()} /><IconButton label="新建会话" icon="add" onClick={() => void onNew()} /></div></div>
+      <div className="conversation-toolbar"><div><p className="eyebrow">CETAMESH · CHAT</p><h1>{session.title || '新会话'}</h1><div className="conversation-meta"><StatusBadge value={status.state || 'idle'} /><span>更新于 {relativeLabel(session.updatedAt)}</span><span>·</span><ChatCatalogStatus catalog={catalog} /></div></div><div className="row"><IconButton label="刷新会话" icon="update" onClick={() => void load()} /><IconButton label="新建会话" icon="add" onClick={() => void onNew()} /></div></div>
       <VirtualList
         items={timelineItems}
         estimateSize={112}
@@ -757,9 +717,8 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
         }}>有新消息 · 跳到最新</Button> : null}
         render={renderTimelineItem}
       />
-      <div className="composer-dock"><ChatComposer busy={cancellable} models={providers} selectedModelKey={selectedModelKey} agentProviders={catalog?.agentProviders ?? []} selectedAgent={session.config.agentProvider ?? ''} workspaces={workspaces} workspaceId={session.config.workspaceId ?? ''} activeWorkspaceId={activeWorkspaceId} onWorkspaceChange={updateWorkspace} onModelChange={value => { try { const [provider, model] = JSON.parse(value) as [string, string]; void updateModel(provider, model); } catch { setError('无法识别所选模型。'); } }} onAgentChange={updateAgent} onSend={send} onStop={() => void chatClient.stop(session.id).then(load).catch(cause => setError(messageOf(cause)))} /></div>
+      <div className="composer-dock"><ChatContextPanel key={session.id} task={linkedTask} memories={memories} approvals={approvals} onOpenMemory={onOpenMemory} /><ChatComposer busy={cancellable} models={providers} selectedModelKey={selectedModelKey} agentProviders={catalog?.agentProviders ?? []} selectedAgent={session.config.agentProvider ?? ''} workspaces={workspaces} workspaceId={session.config.workspaceId ?? ''} activeWorkspaceId={activeWorkspaceId} onWorkspaceChange={updateWorkspace} onModelChange={value => { try { const [provider, model] = JSON.parse(value) as [string, string]; void updateModel(provider, model); } catch { setError('无法识别所选模型。'); } }} onAgentChange={updateAgent} onSend={send} onStop={() => void chatClient.stop(session.id).then(load).catch(cause => setError(messageOf(cause)))} /></div>
     </section>
-    {!contextCollapsed && <ChatContextPanel task={linkedTask} memories={memories} approvals={approvals} onOpenMemory={onOpenMemory} />}
   </div>;
 }
 
@@ -831,6 +790,41 @@ export function ChatComposer({ busy, models, selectedModelKey, agentProviders, s
   const [attachmentError, setAttachmentError] = useState('');
   const [picking, setPicking] = useState(false);
   const textarea = useRef<HTMLTextAreaElement>(null);
+  const [contextOpen, setContextOpen] = useState(false);
+  const contextMenuRef = useRef<HTMLDivElement>(null);
+  const contextMenuId = useId();
+  const workspaceLabel = workspaces.find(item => item.id === (workspaceId || activeWorkspaceId))?.name || workspaceId || (activeWorkspaceId ? '当前工作区' : '未指定工作区');
+  const agentLabel = selectedAgent === 'none' ? '普通聊天' : selectedAgent === 'codex' ? 'Codex' : agentProviders.find(item => item.id === selectedAgent)?.name || selectedAgent || '自动选择';
+  useLayoutEffect(() => {
+    const input = textarea.current;
+    if (!input) return;
+    const resize = () => {
+      input.style.height = '0px';
+      const height = input.scrollHeight;
+      input.style.height = Math.min(160, Math.max(64, height)) + 'px';
+      input.style.overflowY = height > 160 ? 'auto' : 'hidden';
+    };
+    resize();
+    let width = input.clientWidth;
+    const observer = new ResizeObserver(() => {
+      if (input.clientWidth !== width) { width = input.clientWidth; resize(); }
+    });
+    observer.observe(input);
+    return () => observer.disconnect();
+  }, [draft]);
+  useEffect(() => {
+    if (!contextOpen) return;
+    const outside = (event: PointerEvent) => {
+      const target = event.target as Element;
+      if (!contextMenuRef.current?.contains(target) && !target.closest('[role="listbox"]')) setContextOpen(false);
+    };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { setContextOpen(false); contextMenuRef.current?.querySelector('button')?.focus(); }
+    };
+    document.addEventListener('pointerdown', outside);
+    document.addEventListener('keydown', escape);
+    return () => { document.removeEventListener('pointerdown', outside); document.removeEventListener('keydown', escape); };
+  }, [contextOpen]);
   const modelChoices: { value: string; label: string; disabled?: boolean }[] = selectedAgent === 'codex' ? [{ value: JSON.stringify(['', '']), label: 'Codex 本机模型配置' }] : models.flatMap(provider => {
     if (!provider.configured) return [];
     const list = provider.models.length ? provider.models : [{ id: '', name: provider.label, label: provider.label }];
@@ -864,17 +858,39 @@ export function ChatComposer({ busy, models, selectedModelKey, agentProviders, s
     onSend(text, attachments, crypto.randomUUID());
     setDraft(''); setAttachments([]);
   }
-  return <div className="chat-composer"><div className="composer-field"><textarea ref={textarea} aria-label="输入消息" placeholder="告诉 CetaMesh 你想做什么。" value={draft} rows={2} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); submit(); } }} /><div className="composer-bottom"><div className="row composer-controls"><IconButton label="添加文本或源码附件" icon="attach" onClick={() => void addFiles()} disabled={picking || busy} /><Select label="任务工作区" value={workspaceId} onChange={event => onWorkspaceChange(event.target.value)}><option value="">自动（当前工作区{activeWorkspaceId ? '' : '，未指定'}）</option>{workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{normalizeSelectOptionLabel(workspace.name, workspace.id)}</option>)}</Select><Select label="选择 Agent" value={selectedAgent} onChange={event => onAgentChange(event.target.value)}><option value="">能力</option><option value="none">不使用 Agent</option>{agentProviders.map(agent => { const needsScope = ['task-required', 'workspace-required'].includes(agent.reason ?? ''); const disabled = !agent.available || (!agent.eligible && !needsScope); const state = agent.eligible ? '' : availabilityReasonLabel(agent.reason) || availabilityReasonLabel(agent.status) || (agent.available ? '当前不可使用' : '不可用'); return <option key={agent.id} value={agent.id} disabled={disabled}>{normalizeSelectOptionLabel(agent.name, agent.id)}{state ? ` · ${state}` : ''}</option>; })}{selectedAgent && !agentProviders.some(agent => agent.id === selectedAgent) && <option value={selectedAgent} disabled>{normalizeSelectOptionLabel(selectedAgent)} · 不可用</option>}</Select><Select label="选择模型" value={selectedModelKey} onChange={event => onModelChange(event.target.value)} disabled={!modelChoices.length}>{modelChoices.length ? modelChoices.map(choice => <option key={choice.value} value={choice.value} disabled={choice.disabled}>{choice.label}</option>) : <option value="">暂无已配置模型</option>}</Select></div>{busy ? <Button variant="danger" icon="square" onClick={onStop}>停止</Button> : <Button variant="primary" icon="send" onClick={submit} disabled={!draft.trim() || Boolean(workspaceWarning)}>发送</Button>}</div>{attachments.length > 0 && <div className="attachment-list">{attachments.map((file, index) => <span key={`${file.name}-${index}`}><Icon name="file" size={13} />{file.name}<button aria-label={`移除 ${file.name}`} onClick={() => setAttachments(current => current.filter((_, item) => item !== index))}><Icon name="close" size={13} /></button></span>)}</div>}{workspaceWarning && <p className="inline-error" role="status">{workspaceWarning}</p>}{attachmentError && <p className="inline-error" role="alert">{attachmentError}</p>}</div><div className="composer-footnote">消息与附件通过本机 Core 处理，附件总大小上限 128 KiB。</div></div>;
+  return <div className="chat-composer"><div className="composer-field">
+    <textarea ref={textarea} aria-label="输入消息" placeholder="告诉 CetaMesh 你想做什么。" value={draft} rows={2} onChange={event => setDraft(event.target.value)} onKeyDown={event => {
+      if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing && event.keyCode !== 229) { event.preventDefault(); submit(); }
+    }} />
+    <div className="composer-bottom">
+      <div className="composer-left">
+        <button type="button" className="composer-add" aria-label="添加文本或源码附件" title="添加文本或源码附件 · 由本机 Core 处理，附件总大小上限 128 KiB" onClick={() => void addFiles()} disabled={picking || busy}><Icon name="add" size={22} /></button>
+        <div className="composer-context" ref={contextMenuRef}>
+          <button type="button" className="composer-context-trigger" aria-label={'工作区和 Agent：' + workspaceLabel + ' · ' + agentLabel} title={workspaceLabel + ' · ' + agentLabel} aria-expanded={contextOpen} aria-controls={contextMenuId} onClick={() => setContextOpen(value => !value)} disabled={busy}><span>{workspaceLabel} · {agentLabel}</span><Icon name="down" size={14} /></button>
+          {contextOpen && <div id={contextMenuId} className="composer-context-options" role="group" aria-label="工作区和 Agent 设置"><div className="composer-setting"><span>工作区</span><Select label="任务工作区" disabled={busy} value={workspaceId} onChange={event => onWorkspaceChange(event.target.value)}><option value="">自动（当前工作区{activeWorkspaceId ? '' : '，未指定'}）</option>{workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{normalizeSelectOptionLabel(workspace.name, workspace.id)}</option>)}</Select></div><div className="composer-setting"><span>Agent</span><Select label="选择 Agent" disabled={busy} value={selectedAgent} onChange={event => onAgentChange(event.target.value)}><option value="">能力</option><option value="none">不使用 Agent</option>{agentProviders.map(agent => { const needsScope = ['task-required', 'workspace-required'].includes(agent.reason ?? ''); const disabled = !agent.available || (!agent.eligible && !needsScope); const state = agent.eligible ? '' : availabilityReasonLabel(agent.reason) || availabilityReasonLabel(agent.status) || (agent.available ? '当前不可使用' : '不可用'); return <option key={agent.id} value={agent.id} disabled={disabled}>{normalizeSelectOptionLabel(agent.name, agent.id)}{state ? ` · ${state}` : ''}</option>; })}{selectedAgent && !agentProviders.some(agent => agent.id === selectedAgent) && <option value={selectedAgent} disabled>{normalizeSelectOptionLabel(selectedAgent)} · 不可用</option>}</Select></div></div>}
+        </div>
+      </div>
+      <div className="composer-right"><div className="composer-model"><Select label="选择模型" value={selectedModelKey} onChange={event => onModelChange(event.target.value)} disabled={busy || !modelChoices.length}>{modelChoices.length ? modelChoices.map(choice => <option key={choice.value} value={choice.value} disabled={choice.disabled}>{choice.label}</option>) : <option value="">暂无已配置模型</option>}</Select></div>
+        <button type="button" className="composer-submit" aria-label={busy ? '停止生成' : '发送消息'} title={busy ? '停止生成' : '发送消息'} onClick={busy ? onStop : submit} disabled={!busy && (!draft.trim() || Boolean(workspaceWarning))}>{busy ? <Icon name="square" size={17} /> : <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6" /></svg>}</button>
+      </div>
+    </div>
+    {attachments.length > 0 && <div className="attachment-list">{attachments.map((file, index) => <span key={file.name + '-' + index}><Icon name="file" size={13} />{file.name}<button type="button" aria-label={'移除 ' + file.name} onClick={() => setAttachments(current => current.filter((_, item) => item !== index))} disabled={busy}><Icon name="close" size={13} /></button></span>)}</div>}
+    {workspaceWarning && <p className="inline-error" role="status">{workspaceWarning}</p>}{attachmentError && <p className="inline-error" role="alert">{attachmentError}</p>}
+  </div></div>;
 }
 
-function ChatContextPanel({ task, memories, approvals, onOpenMemory }: { task: Task | null; memories: Memory[]; approvals: Approval[]; onOpenMemory(): void }) {
-  return <aside className="chat-context"><div className="context-heading"><div><p className="eyebrow">运行上下文</p><h2>任务详情</h2></div></div>
-    {task ? <Card className="context-task"><div className="row between"><StatusBadge value={task.status} /><Icon name="work" size={17} /></div><h3>{task.title}</h3><p>{task.currentPhase || task.progress.note || task.goal}</p><div className="context-progress" role="progressbar" aria-label="任务进度" aria-valuenow={task.progress.percent} aria-valuemin={0} aria-valuemax={100}><span className={`progress-${Math.round(task.progress.percent / 25) * 25}`} /></div><div className="row between"><small>执行进度</small><small>{task.progress.percent}%</small></div><Divider /><div className="context-agent"><span className="agent-avatar">{agentInitials(task.agent ?? 'CM')}</span><span className="grow"><strong>{task.agent ?? '待分配'}</strong><small>{task.workspaceId ? '工作区任务' : '未绑定工作区'}</small></span><StatusBadge value={task.status} /></div></Card> : <Surface className="context-section"><EmptyNotice icon="work" title="没有关联任务" detail="任务会在由会话创建或分配后显示在这里。" /></Surface>}
-    <Surface className="context-section"><div className="section-heading"><h3>审批</h3><Badge>{approvals.length}</Badge></div>{approvals.length ? approvals.slice(0, 2).map(item => <div className="context-approval" key={item.id}><strong>{item.title}</strong><small>{item.summary}</small><small>{item.capability}</small></div>) : <p className="muted context-note">当前没有待处理审批。</p>}</Surface>
-    <Surface className="context-section"><div className="section-heading"><h3>相关记忆</h3><button className="text-link" onClick={onOpenMemory}>查看全部</button></div>{memories.length ? memories.slice(0, 2).map(memory => <button className="memory-ref" key={memory.id} onClick={onOpenMemory}><Icon name="memory" size={16} /><span><strong>{memory.title}</strong><small>{memory.scope} · {relativeLabel(memory.updatedAt)}</small></span></button>) : <p className="muted context-note">没有找到相关记忆。</p>}</Surface>
-    <Surface className="context-section"><div className="section-heading"><h3>交付物</h3><Badge>{task?.artifacts.length ?? 0}</Badge></div>{task?.artifacts.length ? task.artifacts.slice(0, 4).map(artifact => <ArtifactCard key={artifact.id} taskId={task.id} artifact={artifact} />) : <EmptyNotice icon="file" title="暂无交付物" detail={task ? '任务尚未生成交付物。' : '关联任务生成交付物后会显示在这里。'} />}</Surface>
+export function ChatContextPanel({ task, memories, approvals, onOpenMemory }: { task: Task | null; memories: Memory[]; approvals: Approval[]; onOpenMemory(): void }) {
+  if (!task && !memories.length && !approvals.length) return null;
+  return <details className="chat-context-card">
+    <summary className="context-card-summary"><Icon name="work" size={17} /><strong className="context-card-title" title={task?.title || '会话上下文'}>{task?.title || '会话上下文'}</strong>{task && <StatusBadge value={task.status} />}<span className="context-card-counts">{task && <span>{task.agent || '待分配'} · {task.progress.percent}%</span>}<span className={approvals.length ? 'context-needs-attention' : ''}>审批 {approvals.length}</span><span>交付物 {task?.artifacts.length ?? 0}</span></span><span className="context-card-toggle"><span className="when-closed">展开</span><span className="when-open">收起</span><Icon name="down" size={14} /></span></summary>
+    <div className="context-card-body">
+    {task ? <Card className="context-task"><div className="row between"><StatusBadge value={task.status} /><Icon name="work" size={17} /></div><h3>{task.title}</h3><small className="muted">{task.workspaceId ? '工作区任务' : '未绑定工作区'}</small><p>{task.currentPhase || task.progress.note || task.goal}</p><div className="context-progress" role="progressbar" aria-label="任务进度" aria-valuenow={task.progress.percent} aria-valuemin={0} aria-valuemax={100}><span className={`progress-${Math.round(task.progress.percent / 25) * 25}`} /></div><div className="row between"><small>执行进度</small><small>{task.progress.percent}%</small></div></Card> : null}
+    {approvals.length > 0 && <Surface className="context-section"><div className="section-heading"><h3>审批</h3><Badge>{approvals.length}</Badge></div>{approvals.map(item => <div className="context-approval" key={item.id}><strong>{item.title}</strong><small>{item.summary}</small><small>{item.capability}</small></div>)}</Surface>}
+    {memories.length > 0 && <Surface className="context-section"><div className="section-heading"><h3>相关记忆</h3><button className="text-link" onClick={onOpenMemory}>查看全部</button></div>{memories.slice(0, 2).map(memory => <button className="memory-ref" key={memory.id} onClick={onOpenMemory}><Icon name="memory" size={16} /><span><strong>{memory.title}</strong><small>{memory.scope} · {relativeLabel(memory.updatedAt)}</small></span></button>)}</Surface>}
+    {Boolean(task?.artifacts.length) && <Surface className="context-section"><div className="section-heading"><h3>交付物</h3><Badge>{task?.artifacts.length ?? 0}</Badge></div>{task?.artifacts.map(artifact => <ArtifactCard key={artifact.id} taskId={task.id} artifact={artifact} />)}</Surface>}
 
-  </aside>;
+    </div>
+  </details>;
 }
 
 function MemoryPage() {

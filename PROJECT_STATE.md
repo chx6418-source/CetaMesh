@@ -98,6 +98,20 @@
 
 ## Active Work (Owner confirmation pending)
 
+- **RC Build1116 准备（2026-10-22）**：Owner 已明确授权把本轮全部图标/UI修改及Build1116提交到当前功能分支，并在隔离工作树构建正式RC；不合并、不推送、不发布、不覆盖真实安装。源码六类聚合回归139 PASS/0 FAIL/0 NRE，包含Cargo check/test。沿用1.0.0-rc.2，正式产物目标为 `artifacts/rc/1.0.0-rc.2/build-1116`；产物、发行回归和签名状态待本次RC流水完成后记录。RELEASE_BLOCKED保持不变。
+
+- **全局活泼动效（2026-10-22，Owner 选择明显位移/缩放/轻弹性）**：新增 `theme/motion.css` 统一页面、标题、卡片、按钮/导航、菜单、附件/结果提示、进度、加载及主题过渡；抽屉通过已有motion库加入进出场，退出阶段以useIsPresent驱动inert禁止交互。原生details在支持interpolate-size/allow-discrete时平滑开合，旧引擎回退即时高度变化；正文和虚拟行不做入场/缩放。减少动态效果规则关闭CSS动画/过渡，Sheet读取系统偏好。构建通过；定向回归7 PASS/0 FAIL；浏览器合成组件验证了正常抽屉进出/退出inert/最终卸载、原生dialog、任务展开及模拟减少动态效果（加载none、按钮0s、抽屉无位移且可用）。未验证真实Windows系统偏好切换/已安装WebView2；未安装、提交、合并、推送或生成新包。详见 `docs/desktop/UI_MOTION_REPORT.md`。
+
+- **侧栏底部固定（2026-10-22）**：按 Owner 截图固定 Settings／关于／本地用户区域；工作区、导航和最近会话放入独立可滚动的 `sidebar-scroll`，底部区不参与该滚动。前端build及现有UI/标题区2项回归通过；实际前端浏览器中Chat→Work切换前后底部区top494.3/bottom706.0一致（720px视口），上方内容scrollHeight491>clientHeight412时底部仍可见。浏览器未连接真实Core，仅验证布局；未升级安装、提交或推送。
+
+- **输入区简化（2026-10-22，Owner 已确认生成效果图）**：沿用 `codex/app-icon-refresh`；实现28px大圆角、轻边框/阴影、左侧“＋”附件和工作区/Agent文字菜单、右侧无边框模型选择及圆形发送/停止按钮；说明转入附件提示，不添加语音入口。输入框按内容自动增高到160px，超过后内部滚动；Enter发送、Shift+Enter换行，IME组合输入不触发发送。保留原发送/停止回调、Agent可用性、工作区预检和附件选择接口。前端build通过，定向6 suites PASS/0 FAIL。独立合成React交互页验证了工作区/Agent切换、附件、发送/停止、键盘发送/换行、自动增高和深浅主题；不连接真实Core/模型，不等同于安装后E2E。未安装、提交或推送；旧Build1115安装包不包含本轮输入区。详见 `docs/desktop/CHAT_COMPOSER_REPORT.md`。
+
+- **聊天任务卡片（2026-10-22，Owner 已确认“输入框上方、默认折叠”）**：沿用 `codex/app-icon-refresh`，移除 Chat 右侧常驻上下文列及其旧显隐偏好；改为 composer 上方正常文档流中的折叠卡片，摘要展示任务、状态、Agent/进度、审批及交付物数量。展开内容有高度限制并内部滚动；空分区不渲染，无关联数据的普通聊天不显示空卡片。保持原审批事件、Memory 与 Artifact 身份入口，未改 Core/权限/持久化数据。前端构建通过，定向5 suites PASS（卡片生产组件 SSR、聊天虚拟滚动、UI生产契约、标题栏、错误红线）。合成数据浏览器已检查默认折叠/鼠标展开及输入区可见；该静态组件验收不等于真实Core E2E。未安装升级、提交或推送。
+
+- **标题区简化（2026-10-22，Owner 已确认效果稿）**：沿用 `codex/app-icon-refresh`；标题区改为 48px 高、23px 纯文字 CetaMesh，不显示可见图标；移除侧栏重复品牌与包含面包屑的整行全局顶栏，主内容上移。标题、侧栏复用主题变量，主题仍从 Settings 控制；程序/任务栏/托盘绿色图标保留。新增仅限本窗口的严格 Host 动作白名单，关闭仍投递 WM_CLOSE 进入既有托盘/退出确认逻辑。前端 build PASS；定向聚合5 PASS/0 FAIL；显式启用 Cargo 后 Rust200 PASS/0 FAIL；Debug Host 链接 PASS。浏览器检查已构建界面的布局通过，但不等于真实 WebView2 窗口操作验收；真实拖动、双击、托盘和 Snap 尚待原生验收。本轮未升级安装、未生成包含本次 UI 的新安装包、未提交/合并/推送。Build1115 安装包仅包含上一阶段图标改动，不能代表本次标题区。详见 `docs/desktop/WINDOW_CHROME_REPORT.md`。
+
+- **应用图标替换（2026-10-22）**：分支 `codex/app-icon-refresh`，工作树 `D:\GIT- CetaMesh\comm-repair`，基线 bc6a923。采用 Owner 提供的绿色 CetaMesh 四张原图，保留 Hash/透明圆角，256/512 原样使用，小尺寸从1024缩放；窗口/托盘 PNG、PE/安装器 ICO 和兼容品牌图已统一。DEV Build1115 Core/Host/安装包构建通过；定向聚合5 PASS/0 FAIL（Rust199/0），实际 Host 和最终安装包内新ICO图层已核验。尚未覆盖实际安装、未提交或推送；旧C4/Logo05母图保留。安装包在 artifacts/dev/1.0.0-rc.2/build-1115，NotSigned，仍为本地DEV验证产物。
+
 - **COMM 集成前最终复核**：2026-10-21，DEV Build1114；修正元数据导入提前捕获 APP_PATHS 的重复运行问题，保留权限断言并新增独立数据根断言。最新完整回归 146 PASS / 0 FAIL / 8 NRE，Rust 199/0；Core/Host/DEV 发行构建与安装集成通过，生产输入指纹复核一致。Owner 已授权提交合并推送；RELEASE_BLOCKED 与真实验收/签名/迁移限制不变。详见 COMMUNICATION_REPAIR_REPORT.md 顶部最新复核补充。
 
 - **COMM-01～13 集中修复（2026-10-21）**：隔离分支 `codex/comm-01-13-repair`，基线 `63f6155718e4ef7cbc182bd6b4debcde0f1faeb1`。审批授权代次/续跑、异步操作查询、进程取消与有界退出、UTF-8 IPC/历史分页、默认 QQ/Bionic 控制、Mesh 恢复及插件版本契约已修复；完整本地验证 146 PASS / 0 FAIL / 8 NRE（Rust 199/0），DEV Build1113 发行集成通过。Owner 已明确授权提交、合并和推送；集成结果以 Git main/origin/main 引用为准，不代表发布批准。历史 DEV 包仍记录 dirty=true 和原基线 sourceCommit，不冒充提交后的正式包。真实 Codex/DSH/QQ/手机、普通用户 GUI、签名与更新链待验，RELEASE_BLOCKED；M5-B 未授权，无真实迁移。详见 COMM_REPAIR_STATUS.md、COMMUNICATION_REPAIR_REPORT.md、COMMUNICATION_MODULE_MATRIX.md。

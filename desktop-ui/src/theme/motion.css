@@ -1,0 +1,106 @@
+/* Shared lively motion. No per-token animation or measured virtual-row transforms. */
+:root {
+  --motion-fast: 140ms;
+  --motion-normal: 210ms;
+  --motion-panel: 300ms;
+  --motion-page: 320ms;
+  --motion-ease: cubic-bezier(.2,.8,.2,1);
+  --motion-spring: cubic-bezier(.18,.85,.32,1.22);
+}
+
+/* Opacity-only page entrance keeps fixed drawers in the viewport coordinate system. */
+.page-frame { animation: cm-page-enter var(--motion-page) var(--motion-ease); }
+.page-heading, .conversation-toolbar { animation: cm-heading-enter var(--motion-page) var(--motion-spring); }
+.content-page :is(.cm-card, .cm-surface, .settings-section, .about-facts) { animation: cm-card-enter var(--motion-panel) var(--motion-spring) backwards; }
+:is(.agent-grid, .plugin-grid, .task-grid, .memory-grid) > :nth-child(2) { animation-delay: 30ms; }
+:is(.agent-grid, .plugin-grid, .task-grid, .memory-grid) > :nth-child(3) { animation-delay: 60ms; }
+:is(.agent-grid, .plugin-grid, .task-grid, .memory-grid) > :nth-child(n+4) { animation-delay: 90ms; }
+
+:is(.cm-button, .cm-select-trigger, .cm-select-option, .cm-tab, .nav-item, .session-item,
+    .session-menu-trigger, .all-sessions, .text-link, .workspace-menu button,
+    .composer-add, .composer-context-trigger, .composer-submit, .artifact-card,
+    .memory-ref, .theme-option, .setting-switch) {
+  transition: background-color var(--motion-fast) var(--motion-ease),
+    color var(--motion-fast) var(--motion-ease), border-color var(--motion-fast) var(--motion-ease),
+    box-shadow var(--motion-normal) var(--motion-ease), opacity var(--motion-fast) var(--motion-ease),
+    transform var(--motion-normal) var(--motion-spring);
+}
+@media (hover: hover) and (pointer: fine) {
+  :is(.cm-button, .composer-add, .composer-submit):hover:not(:disabled) { transform: translateY(-2px) scale(1.04); }
+  :is(.nav-item, .session-item, .cm-select-option, .workspace-menu button):hover:not(:disabled) { transform: translateX(3px); }
+  :is(.artifact-card, .memory-ref, .theme-option):hover:not(:disabled) { transform: translateY(-2px); }
+  :is(.task-card, .agent-card, .plugin-card):hover { transform: translateY(-3px); border-color: var(--border-strong); }
+  .composer-add:hover:not(:disabled) svg { transform: rotate(90deg); }
+}
+:is(.cm-button, .composer-submit, .composer-add, .artifact-card, .nav-item, .session-item,
+    .cm-select-trigger, .composer-context-trigger, .theme-option):active:not(:disabled) { transform: scale(.95); }
+:is(.task-card, .agent-card, .plugin-card, .cm-input, .cm-textarea, .composer-field) {
+  transition: border-color var(--motion-normal) var(--motion-ease),
+    background-color var(--motion-normal) var(--motion-ease), box-shadow var(--motion-normal) var(--motion-ease),
+    transform var(--motion-panel) var(--motion-spring);
+}
+.composer-field:focus-within { box-shadow: 0 0 0 3px var(--accent-soft), 0 6px 22px rgba(25,35,28,.055); }
+.composer-add svg, .cm-select-trigger > svg, details > summary > svg:last-child,
+.context-card-toggle svg { transition: transform var(--motion-normal) var(--motion-spring); }
+.cm-select-trigger[aria-expanded='true'] > svg { transform: rotate(180deg); }
+
+.cm-select-options, .session-menu-items, .workspace-switch[open] .workspace-menu,
+.composer-context-options, .cm-dropdown[open] .cm-dropdown-menu,
+.cm-popover[open] .cm-popover-content {
+  transform-origin: center top;
+  animation: cm-menu-enter var(--motion-normal) var(--motion-spring);
+}
+.composer-context-options { transform-origin: left bottom; }
+.attachment-list > span, .cm-toast, .cm-banner, .harbor-error, .inline-success,
+.message-error, .sidebar-error { animation: cm-feedback-enter var(--motion-normal) var(--motion-spring); }
+.cm-tooltip:hover::after, .cm-tooltip:focus-within::after { animation: cm-tooltip-enter var(--motion-fast) var(--motion-ease); }
+.context-progress > span, .progress-track > span { transition: width var(--motion-panel) var(--motion-ease); }
+.setting-switch span { transition: transform var(--motion-normal) var(--motion-spring), background-color var(--motion-fast); }
+.loading-dot { display: inline-block; width: 9px; height: 9px; margin-right: 8px; border-radius: 50%; background: var(--accent); animation: cm-loading-pulse 1.2s ease-in-out infinite; }
+.tool-call.active > summary > svg:first-child { animation: cm-loading-pulse 1.4s ease-in-out infinite; }
+.host-dot.checking { animation: cm-loading-pulse 1.2s ease-in-out infinite; }
+.cm-badge, .host-dot, .status-pill { transition: color var(--motion-fast), background-color var(--motion-normal), border-color var(--motion-normal); }
+.harbor-shell, .harbor-sidebar, .page-frame, .composer-dock, .window-chrome { transition: background-color var(--motion-normal), color var(--motion-normal), border-color var(--motion-normal); }
+.window-controls button { transition: background-color var(--motion-fast), color var(--motion-fast); }
+.cm-sheet-layer { display: contents; }
+
+/* Preserve native disclosure semantics; unsupported engines keep immediate height changes. */
+@supports (interpolate-size: allow-keywords) and (transition-behavior: allow-discrete) and selector(details::details-content) {
+  details:not(.workspace-switch):not(.cm-dropdown):not(.cm-popover) { interpolate-size: allow-keywords; }
+  details:not(.workspace-switch):not(.cm-dropdown):not(.cm-popover)::details-content {
+    block-size: 0; opacity: 0; overflow: clip; content-visibility: hidden;
+    transition: block-size var(--motion-panel) var(--motion-ease),
+      opacity var(--motion-normal) var(--motion-ease),
+      content-visibility var(--motion-panel) allow-discrete;
+  }
+  details:not(.workspace-switch):not(.cm-dropdown):not(.cm-popover)[open]::details-content {
+    block-size: auto; opacity: 1; content-visibility: visible;
+  }
+}
+
+.cm-dialog { opacity: 0; transform: translateY(16px) scale(.96); transition: opacity var(--motion-normal), transform var(--motion-panel) var(--motion-spring), display var(--motion-panel) allow-discrete, overlay var(--motion-panel) allow-discrete; }
+.cm-dialog[open] { opacity: 1; transform: none; }
+.cm-dialog::backdrop { opacity: 0; transition: opacity var(--motion-normal), display var(--motion-panel) allow-discrete, overlay var(--motion-panel) allow-discrete; }
+.cm-dialog[open]::backdrop { opacity: 1; }
+@starting-style { .cm-dialog[open] { opacity: 0; transform: translateY(16px) scale(.96); } .cm-dialog[open]::backdrop { opacity: 0; } }
+
+/* Virtualized history can remount while scrolling. Never replay card or text entrances there. */
+.virtual-row, .virtual-row .cm-card, .virtual-row .cm-surface,
+.virtual-row .message-error, .chat-message .cm-card { animation: none; }
+
+@keyframes cm-page-enter { from { opacity: .35; } to { opacity: 1; } }
+@keyframes cm-heading-enter { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
+@keyframes cm-card-enter { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+@keyframes cm-menu-enter { from { opacity: 0; transform: translateY(-6px) scale(.96); } to { opacity: 1; transform: none; } }
+@keyframes cm-feedback-enter { from { opacity: 0; transform: translateY(6px) scale(.98); } to { opacity: 1; transform: none; } }
+@keyframes cm-tooltip-enter { from { opacity: 0; } to { opacity: 1; } }
+@keyframes cm-loading-pulse { 0%,100% { opacity: .35; transform: scale(.85); } 50% { opacity: 1; transform: scale(1.12); } }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation: none !important; transition: none !important; scroll-behavior: auto !important;
+  }
+  @supports selector(details::details-content) {
+    details::details-content { animation: none !important; transition: none !important; }
+  }
+}

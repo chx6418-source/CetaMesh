@@ -32,7 +32,7 @@ const UI_METHODS: &[&str] = &[
 ];
 
 fn is_allowed_method(method: &str) -> bool {
-    matches!(method, "app.ping" | "app.about" | "app.status" | "app.openExternal" | "app.openArtifact" | "app.pickFolder" | "app.pickFiles" | "app.pickExtensionPackage" | "app.setWindowBehavior")
+    matches!(method, "app.windowAction" | "app.ping" | "app.about" | "app.status" | "app.openExternal" | "app.openArtifact" | "app.pickFolder" | "app.pickFiles" | "app.pickExtensionPackage" | "app.setWindowBehavior")
         || UI_METHODS.contains(&method)
 }
 
@@ -51,6 +51,30 @@ fn validate_artifact_open_params(params: &Value) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum WindowAction { State, Drag, Minimize, Maximize, Close, ResizeNorth, ResizeNorthEast, ResizeEast, ResizeSouthEast, ResizeSouth, ResizeSouthWest, ResizeWest, ResizeNorthWest }
+
+pub fn window_action(params: &Value) -> Result<WindowAction, String> {
+    let object = params.as_object().ok_or("window action must be an object")?;
+    if object.len() != 1 { return Err("window action requires only action".to_owned()); }
+    match object.get("action").and_then(Value::as_str) {
+        Some("state") => Ok(WindowAction::State),
+        Some("drag") => Ok(WindowAction::Drag),
+        Some("minimize") => Ok(WindowAction::Minimize),
+        Some("maximize") => Ok(WindowAction::Maximize),
+        Some("close") => Ok(WindowAction::Close),
+        Some("resizeNorth") => Ok(WindowAction::ResizeNorth),
+        Some("resizeNorthEast") => Ok(WindowAction::ResizeNorthEast),
+        Some("resizeEast") => Ok(WindowAction::ResizeEast),
+        Some("resizeSouthEast") => Ok(WindowAction::ResizeSouthEast),
+        Some("resizeSouth") => Ok(WindowAction::ResizeSouth),
+        Some("resizeSouthWest") => Ok(WindowAction::ResizeSouthWest),
+        Some("resizeWest") => Ok(WindowAction::ResizeWest),
+        Some("resizeNorthWest") => Ok(WindowAction::ResizeNorthWest),
+        _ => Err("invalid window action".to_owned()),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -181,7 +205,9 @@ pub fn parse_bridge_request(raw: &str) -> Result<BridgeRequest, String> {
     }
     let params = object.get("params").ok_or("bridge params are required")?;
     let params_object = params.as_object().ok_or("bridge params must be an object")?;
-    if method == "app.openExternal" {
+    if method == "app.windowAction" {
+        window_action(params)?;
+    } else if method == "app.openExternal" {
         if params_object.len() != 1 || params_object.get("url").and_then(Value::as_str).is_none_or(|url| url.len() > 2048) {
             return Err("external link requires one bounded URL".to_owned());
         }
@@ -196,6 +222,18 @@ pub fn parse_bridge_request(raw: &str) -> Result<BridgeRequest, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_actions_accept_only_local_window_operations() {
+        for action in ["state", "drag", "minimize", "maximize", "close", "resizeNorth", "resizeNorthEast", "resizeEast", "resizeSouthEast", "resizeSouth", "resizeSouthWest", "resizeWest", "resizeNorthWest"] {
+            let request = serde_json::json!({"id":"chrome", "method":"app.windowAction", "params":{"action":action}});
+            assert!(parse_bridge_request(&request.to_string()).is_ok(), "{action}");
+        }
+        for params in [serde_json::json!({}), serde_json::json!({"action":"exitProcess"}), serde_json::json!({"action":"close", "pid":123}), serde_json::json!({"action":"drag", "path":"C:/"}), serde_json::json!({"action":true})] {
+            let request = serde_json::json!({"id":"chrome", "method":"app.windowAction", "params":params});
+            assert!(parse_bridge_request(&request.to_string()).is_err());
+        }
+    }
 
     #[test]
     fn owner_review_methods_are_explicit_and_unknown_privileged_methods_stay_denied() {
