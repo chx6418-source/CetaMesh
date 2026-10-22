@@ -48,7 +48,8 @@ for (const required of [
   'LICENSE',
   'THIRD_PARTY_NOTICES.md'
 ]) assert.ok(paths.has(required), 'Essential source or document missing: ' + required);
-for (const filename of ['README.md', 'README.en.md', 'README.zh-CN.md']) {
+for (const filename of ['README.md', 'README.en.md', 'README.zh-CN.md',
+  'apps/mobile/README.md', 'apps/mobile/README.zh-CN.md', 'docs/PROJECT_GUIDE.md']) {
   const source = fs.readFileSync(path.join(root, filename), 'utf8');
   const links = source.matchAll(/\]\(([^)]+)\)/g);
   for (const match of links) {
@@ -56,9 +57,20 @@ for (const filename of ['README.md', 'README.en.md', 'README.zh-CN.md']) {
     if (!raw || /^(https?:|mailto:|#)/i.test(raw)) continue;
     const target = raw.split('#')[0].split('?')[0];
     if (!target) continue;
-    const file = path.resolve(root, decodeURIComponent(target));
+    const file = path.resolve(path.dirname(path.join(root, filename)), decodeURIComponent(target));
     assert.ok(file.startsWith(root + path.sep) || file === root, 'Relative link escapes repo: ' + filename + ' -> ' + raw);
     assert.ok(fs.existsSync(file), 'README link is broken: ' + filename + ' -> ' + raw);
   }
 }
-console.log('PASS: tracked public paths and README links are clean; runtime source preserved.');
+// Protect the most commonly regressed product-introduction claims.
+const cn = fs.readFileSync(path.join(root, 'README.md'), 'utf8');
+const mobileEn = fs.readFileSync(path.join(root, 'apps/mobile/README.md'), 'utf8');
+const mobileCn = fs.readFileSync(path.join(root, 'apps/mobile/README.zh-CN.md'), 'utf8');
+const guide = fs.readFileSync(path.join(root, 'docs/PROJECT_GUIDE.md'), 'utf8');
+assert.match(cn, /开发中|开发与测试/);
+assert.match(cn, /apps\/mobile/);
+assert.doesNotMatch(mobileEn, /private CetaMesh\s+monorepo|Congratulations!|First, you will need to run Metro/);
+assert.doesNotMatch(mobileCn, /公开仓库的根目录是\s*\*\*CetaMesh Mobile\*\*/);
+assert.match(guide, /CetaMesh/);
+assert.match(guide, /无需 DSH|不必先安装 DSH/);
+console.log('PASS: public paths, introductions, and relative Markdown links are clean; runtime source preserved.');

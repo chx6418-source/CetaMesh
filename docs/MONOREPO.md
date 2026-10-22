@@ -74,6 +74,8 @@ pairing, task continuation or authorized memory synchronization acceptance.
 Before merging, inspect `docs/migration/PUBLIC_MIGRATION_ACCEPTANCE.md`, remote CI, pending
 native validation, release-source availability and existing platform release gates.
 
-## Official public development target
+## Official public development repository
 
-The official target is chx6418-source/CetaMesh. This local candidate imports source bytes from private integration 4acbb3d without private Git parents. Public main history and governance documents are retained. Public push is paused by Owner instruction pending SnowLuma permission and source review. GitCode/old client endpoints remain unchanged.
+The official development repository is [chx6418-source/CetaMesh](https://github.com/chx6418-source/CetaMesh). The reviewed Desktop + Mobile source snapshot was merged into public main on 2026-10-21 without importing private Git parents. The original public contribution history and governance documents remain. Earlier obsolete demos and internal evidence were cleaned from the current tree on 2026-10-22; public Git history was not rewritten.
+
+Keep GitCode/previous-client update endpoints compatible until a separate verified release migration is approved. Do not infer release permission or third-party redistributability from a passing CI build.
