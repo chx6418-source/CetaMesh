@@ -1,10 +1,10 @@
 # 鲸桥 WhaleBridge —— DSH × QQ 桥接项目说明书
 
 > 让 DeepSeek Harness（DSH）的 agent 以“仿真群友”身份接入 QQ 群/私聊。
-> 本文是面向公开仓库的精简版说明；本地开发历史、个人配置与运行状态不会包含在仓库中。
+> 本文保留 WhaleBridge/QQ/DSH 旧通道的兼容和配置背景，不是当前 CetaMesh 全产品架构的权威入口；请先阅读仓库根目录 README 和 [Desktop 架构](desktop/ARCHITECTURE.md)。
 >
 > 桌面版（Windows 独立应用、安装器、构建发布与故障排查）见 **[DESKTOP_APP.md](DESKTOP_APP.md)**；
-> DSH 端安装见 **[DSH_SETUP.md](DSH_SETUP.md)**；需要人工完成的验收项见 **[DESKTOP_ACCEPTANCE.md](DESKTOP_ACCEPTANCE.md)**。
+> DSH 端安装见 **[DSH_SETUP.md](DSH_SETUP.md)**；当前功能边界与未验收事项见 **[已知限制](desktop/KNOWN_LIMITATIONS.md)**。
 
 ---
 

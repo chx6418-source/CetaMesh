@@ -7,7 +7,7 @@ Proposed branch: chore/public-repository-cleanup
 
 ## Scope
 
-The cleanup removes **239 tracked files** (5,896,247 original file bytes, not Git pack size):
+The cleanup removes **243 tracked files** (5,967,676 original file bytes, not Git pack size):
 
 | Scope | Files | Handling |
 |---|---:|---|
@@ -18,8 +18,9 @@ The cleanup removes **239 tracked files** (5,896,247 original file bytes, not Gi
 | docs/repairs/ | 1 | Private developer handoff |
 | docs/superpowers/ plans/specs | 27 | Private plans |
 | apps/mobile/docs/superpowers/ | 7 | Private Mobile plans |
+| Outdated Desktop acceptance, v1 plan and duplicate root roadmaps | 4 | Private historical roadmap archive |
 
-All targeted content was checked against the private integration tree: 238 entries had byte-identical blobs available there (including duplicated, misencoded names); one revised compatibility report was explicitly copied to the private archive branch. The private archive includes an exact per-file SHA/path manifest.
+All targeted content was checked against the private integration tree: 242 entries had byte-identical blobs available there (including duplicated, misencoded names); one revised compatibility report was explicitly copied to the private archive branch. The private archive includes an exact per-file SHA/path manifest.
 
 The cleanup does not remove production src/, desktop-ui/, desktop-shell/, apps/mobile/, build scripts, package locks, real protocol fixtures, plugin documentation, GitHub workflows or licensing/governance files. Maintained README, PROJECT_STATE, AGENTS and UI reference documents were updated to reflect the already completed public merge rather than the original preview branch.
 

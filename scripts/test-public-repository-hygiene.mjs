@@ -27,7 +27,14 @@ const approvedRoot = new Set([
   'config.example.json', 'package-lock.json', 'package.json', 'release-config.json',
   'start.bat', 'restart.bat', '启动桥接.vbs', '重启桥接.vbs'
 ]);
+const historicalPlanningDocuments = new Set([
+  'docs/DESKTOP_ACCEPTANCE.md',
+  'docs/desktop/DESKTOP_V1_PLAN.md',
+  'docs/roadmap/CETAMESH_DESKTOP_CODEX_WORKPLAN_v3.0.md',
+  'docs/roadmap/CETAMESH_MOBILE_CODEX_WORKPLAN_v1.0.md'
+]);
 for (const name of tracked) {
+  assert.ok(!historicalPlanningDocuments.has(name), 'Obsolete project planning document is tracked: ' + name);
   assert.ok(!forbidden.some(prefix => name.startsWith(prefix)), 'Private-only historical path is tracked: ' + name);
   if (!name.includes('/')) {
     assert.ok(approvedRoot.has(name), 'New root file requires explicit public-content review: ' + name);

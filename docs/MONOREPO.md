@@ -2,7 +2,7 @@
 
 ## Layout and independent dependencies
 
-The public migration candidate keeps Desktop at the root. Mobile is entirely in `apps/mobile`,
+The public unified repository keeps Desktop at the root. Mobile is entirely in `apps/mobile`,
 including native projects, its license, Agent rules, state, scripts and lockfile.
 Do not install React Native dependencies at the repository root or add implicit
 npm/Cargo workspace behavior.

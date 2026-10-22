@@ -11,7 +11,7 @@
 ## Keep in private development history
 
 - Abandoned themes, static HTML UI mockups, early proposal galleries and screenshot batches.
-- Internal repair/audit/handoff reports, long-form review ledgers, local migration plans and obsolete design specifications.
+- Internal repair/audit/handoff reports, long-form review ledgers, local migration plans, old Desktop acceptance worksheets and obsolete design specifications.
 - Raw environment diagnostics, package validation logs, failure screenshots and test outputs.
 - Personal/local paths, credentials, private state, user data, unreviewed third-party code or other materials not approved for publication.
 
