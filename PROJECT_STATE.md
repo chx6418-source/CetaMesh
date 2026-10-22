@@ -98,6 +98,15 @@
 
 ## Active Work (Owner confirmation pending)
 
+- **Agent 八项源码扩展（2026-10-22）**：Owner已批准规格、计划和委派实施/独立复核；保留Broker/Registry，新增共享RPC/ACP、Claude可选官方SDK资源与受监督runner、Codex App Server条件通道、WorkBuddy有界私有API；注册八项但不伪称正式可用。Codex默认legacy，ZCode仅协议存在未验证，WorkBuddy OAuth/Workspace与新Provider真实联通、原生安全、正式SEA仍未验收，RELEASE_BLOCKED。初始全量169项155 PASS/4 FAIL/10 NRE；四失败修复后9项定向全PASS，最终R1跨重启拒绝错误取消回归及独立审查通过；按每suite最新证据合计159 PASS/0未解决FAIL/10 NRE，未重跑第二次全量。UI构建PASS。详见 docs/desktop/AGENT_EXPANSION_ACCEPTANCE.md。Owner随后授权完成后提交/合并/推送公开GitCode及私人GitHub并关机；保留未验证项和现场，不创建新RC。
+- **插件状态与反馈排版修复（2026-10-22）**：完成/取消/拒绝操作默认折叠；运行/等待/失败/未知直接显示，移除 Renderer 最后8条截断；反馈标题说明分行、域名简显且保留完整 HTTPS 点击目标。6项定向测试及UI构建PASS；真实组件合成数据浏览器验证7条历史展开及280px高度限制。未安装/打包/提交，详见 `docs/desktop/STATUS_PRESENTATION_REPAIR_REPORT.md`。
+
+- **设置竖排与紧凑窗口布局（2026-10-22，Owner已确认效果图）**：设置页新增左侧11项竖向分类、右侧设置内容和卡片式字段，保存文案统一为“保存设置”；保留draft/changes/revision、恢复阻断和Host退出确认同步。设置页强制收起工作区列表且不显示无效展开按钮，离开后恢复此前折叠偏好。删除整条Harbor/Core底栏与31px占位，标题栏48→40px、品牌字23→20px、窗口按钮48→44px。8项定向聚合与UI构建通过；真实SettingsPage+WindowChrome+侧栏在模拟Core客户端下验证11项竖排、分类切换、模拟保存及深浅主题；实测标题40px、主区底部与视口720px一致、footer/workspace-panel数量0。未改真实设置，未安装WebView2验收，未提交/打包/推送，本次不在RC1116中。详见 `docs/desktop/SETTINGS_LAYOUT_REPORT.md`。
+
+- **动效一致性修复（2026-10-22，Owner截图反馈）**：生产CSS复现页面/标题/卡片多层入场、操作状态标题与内容动效分离、搜索反馈不完整和加号旋转/位移。改为页面统一淡入、异步操作状态整区淡入，移除卡片嵌套错峰与导航横移；图标按钮固定本体、仅图标轻缩放，加号不旋转。页签统一字重，浏览器确认切换前后各项宽度不变；搜索图标保留居中transform并提供焦点颜色反馈。7项聚合回归及UI构建通过；浏览器使用生产输入组件+合成页面验证，未改变真实Windows动态效果设置，未验证已安装WebView2。本轮未提交/打包/安装，RC1116不包含修复。详见 `docs/desktop/UI_MOTION_REPORT.md` 最新补充。
+
+- **纯图标导航与工作区列表（2026-10-22，Owner已确认效果图）**：沿用隔离功能分支 `codex/app-icon-refresh`，将侧栏拆为56px图标栏和260px可收起列表；移除工作区大卡片，按会话真实workspaceId分组，未关联/已移除工作区的会话仍可在最近/全部会话访问。设置、关于及用户头像固定在图标栏底部；窄窗口采用可关闭的列表覆盖层。复用现有Core入口及会话操作菜单，无新权限/数据迁移。前端构建及7项定向聚合回归通过；浏览器生产组件+合成数据验证深浅主题、列表折叠/展开、导航、选择会话/工作区和长列表独立滚动，底部位置不变。未验证已安装WebView2/真实Core链路；尚未提交、打包、安装或推送，本次修改不在RC1116中。详见 `docs/desktop/WORKSPACE_SIDEBAR_REPORT.md`。
+
 - **RC Build1116 已创建（2026-10-22）**：Owner 已明确授权本地提交及RC构建；源码提交 `c47253a860a9945e05054d51d06f957f51067f33`，构建时dirty=false。1.0.0-rc.2正式候选产物位于 `artifacts/rc/1.0.0-rc.2/build-1116`，安装包43,253,760字节，SHA-256 `A40522EF39249A7F02CE8FFEC3F62F197D83A711E34115761ED3EC2ABA8B3FB4`。源码六类聚合139 PASS/0 FAIL/0 NRE（包含Cargo check/test），正式RC发行12 PASS/0 FAIL/1 NRE（仅缺少同Build的DEV产物）；31项校验及实际Host/安装器图标验证通过。NotSigned，真实用户GUI及外部服务验收仍有限制，RELEASE_BLOCKED保持不变。下列各UI条目的“未提交/未打包”为各阶段记录，本RC已统一包含；本轮未合并、推送、发布或覆盖真实安装。详见 `docs/desktop/RC1116_BUILD_REPORT.md`。
 
 - **全局活泼动效（2026-10-22，Owner 选择明显位移/缩放/轻弹性）**：新增 `theme/motion.css` 统一页面、标题、卡片、按钮/导航、菜单、附件/结果提示、进度、加载及主题过渡；抽屉通过已有motion库加入进出场，退出阶段以useIsPresent驱动inert禁止交互。原生details在支持interpolate-size/allow-discrete时平滑开合，旧引擎回退即时高度变化；正文和虚拟行不做入场/缩放。减少动态效果规则关闭CSS动画/过渡，Sheet读取系统偏好。构建通过；定向回归7 PASS/0 FAIL；浏览器合成组件验证了正常抽屉进出/退出inert/最终卸载、原生dialog、任务展开及模拟减少动态效果（加载none、按钮0s、抽屉无位移且可用）。未验证真实Windows系统偏好切换/已安装WebView2；未安装、提交、合并、推送或生成新包。详见 `docs/desktop/UI_MOTION_REPORT.md`。

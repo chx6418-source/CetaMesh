@@ -1606,9 +1606,19 @@ ok('Agent events arriving before send ACK are replayed only after provider ident
   const restored=createCetaMeshServices({stateDir:path.join(home,'state'),dataRoot:path.join(home,'data')});
   assert.equal(restored.taskService.runtime.get({id:old.id}).task.status,'cancelled','cancel survives restart');
   restored.chatService.close();await restored.capabilityService.close();
+  const nativeDefaultRow=make();let nativeProofCalled=false;
+  const codexProvider=core.agentBroker.require('codex');
+  const nativeDefaultUi=createDesktopUiService({services:{...core,agentBroker:{...core.agentBroker,
+   require:id=>id==='codex'?{...codexProvider,
+    capabilities:()=>({...codexProvider.capabilities(),appServerRolloutEnabled:true}),
+    verifyStoppedTask:async()=>{nativeProofCalled=true;return {stopped:true};}}:core.agentBroker.require(id)}}});
+  await assert.rejects(nativeDefaultUi.execute({method:'ui.task.cancel',params:{id:nativeDefaultRow.id,expectedRev:nativeDefaultRow.rev}}),e=>e.code==='SESSION_TRANSPORT_UNKNOWN');
+  assert.equal(nativeProofCalled,false,'unknown transport under native default cannot enter legacy recovery');
+  assert.equal(core.taskService.runtime.get({id:nativeDefaultRow.id}).task.status,'blocked');
+  core.taskService.runtime.cancel({id:nativeDefaultRow.id,expectedRev:nativeDefaultRow.rev,reason:'isolated fixture cleanup'});
   for(const reason of ['needs-reconciliation: unknown execution','AGENT_TIMEOUT','STAGING_READ_FAILED extra']) {
    const row=make(reason);
-   await assert.rejects(core.desktopUiService.execute({method:'ui.task.cancel',params:{id:row.id,expectedRev:row.rev}}),e=>e.code==='SESSION_NOT_FOUND');
+   await assert.rejects(core.desktopUiService.execute({method:'ui.task.cancel',params:{id:row.id,expectedRev:row.rev}}),e=>e.code==='SESSION_TRANSPORT_UNKNOWN');
    assert.equal(core.taskService.runtime.get({id:row.id}).task.status,'blocked');
    core.taskService.runtime.cancel({id:row.id,expectedRev:row.rev,reason:'isolated fixture cleanup'});
   }

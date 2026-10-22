@@ -52,8 +52,8 @@ a { color: var(--accent-hover); }
 .cm-surface { padding: 16px; }
 .cm-divider { height: 1px; background: var(--border); border: 0; margin: 14px 0; }
 .cm-tabs { display: inline-flex; align-items: center; gap: 3px; padding: 3px; background: var(--background-soft); border: 1px solid var(--border); border-radius: 11px; }
-.cm-tab { border: 0; border-radius: 8px; background: transparent; color: var(--text-secondary); padding: 6px 10px; white-space: nowrap; }
-.cm-tab[aria-selected='true'] { background: var(--surface-elevated); color: var(--text-primary); box-shadow: 0 2px 8px rgba(0,0,0,.06); font-weight: 650; }
+.cm-tab { border: 0; border-radius: 8px; background: transparent; color: var(--text-secondary); padding: 6px 10px; white-space: nowrap; font-weight: 550; }
+.cm-tab[aria-selected='true'] { background: var(--surface-elevated); color: var(--text-primary); box-shadow: 0 2px 8px rgba(0,0,0,.06); }
 .cm-badge { display: inline-flex; align-items: center; gap: 5px; border-radius: 999px; background: var(--background-soft); color: var(--text-secondary); font-size: 11px; font-weight: 650; padding: 4px 8px; white-space: nowrap; }
 .cm-badge.accent { background: var(--accent-soft); color: var(--accent-hover); }
 .cm-badge.success { background: color-mix(in srgb, var(--success) 14%, transparent); color: var(--success); }

@@ -8,13 +8,11 @@
   --motion-spring: cubic-bezier(.18,.85,.32,1.22);
 }
 
-/* Opacity-only page entrance keeps fixed drawers in the viewport coordinate system. */
+/* A single page entrance moves headings, toolbars and content together.
+   Opacity only: fixed drawers must retain viewport coordinates. */
 .page-frame { animation: cm-page-enter var(--motion-page) var(--motion-ease); }
-.page-heading, .conversation-toolbar { animation: cm-heading-enter var(--motion-page) var(--motion-spring); }
-.content-page :is(.cm-card, .cm-surface, .settings-section, .about-facts) { animation: cm-card-enter var(--motion-panel) var(--motion-spring) backwards; }
-:is(.agent-grid, .plugin-grid, .task-grid, .memory-grid) > :nth-child(2) { animation-delay: 30ms; }
-:is(.agent-grid, .plugin-grid, .task-grid, .memory-grid) > :nth-child(3) { animation-delay: 60ms; }
-:is(.agent-grid, .plugin-grid, .task-grid, .memory-grid) > :nth-child(n+4) { animation-delay: 90ms; }
+/* Async operation status appears as one region, including its heading. */
+.plugin-approval-inbox { animation: cm-region-enter var(--motion-normal) var(--motion-ease); }
 
 :is(.cm-button, .cm-select-trigger, .cm-select-option, .cm-tab, .nav-item, .session-item,
     .session-menu-trigger, .all-sessions, .text-link, .workspace-menu button,
@@ -26,11 +24,11 @@
     transform var(--motion-normal) var(--motion-spring);
 }
 @media (hover: hover) and (pointer: fine) {
-  :is(.cm-button, .composer-add, .composer-submit):hover:not(:disabled) { transform: translateY(-2px) scale(1.04); }
-  :is(.nav-item, .session-item, .cm-select-option, .workspace-menu button):hover:not(:disabled) { transform: translateX(3px); }
+  :is(.cm-button, .composer-submit):hover:not(:disabled) { transform: translateY(-1px); }
+  .cm-icon-button:hover:not(:disabled) { transform: none; }
+  :is(.cm-icon-button, .composer-add):hover:not(:disabled) svg { transform: scale(1.12); }
   :is(.artifact-card, .memory-ref, .theme-option):hover:not(:disabled) { transform: translateY(-2px); }
   :is(.task-card, .agent-card, .plugin-card):hover { transform: translateY(-3px); border-color: var(--border-strong); }
-  .composer-add:hover:not(:disabled) svg { transform: rotate(90deg); }
 }
 :is(.cm-button, .composer-submit, .composer-add, .artifact-card, .nav-item, .session-item,
     .cm-select-trigger, .composer-context-trigger, .theme-option):active:not(:disabled) { transform: scale(.95); }
@@ -40,9 +38,13 @@
     transform var(--motion-panel) var(--motion-spring);
 }
 .composer-field:focus-within { box-shadow: 0 0 0 3px var(--accent-soft), 0 6px 22px rgba(25,35,28,.055); }
-.composer-add svg, .cm-select-trigger > svg, details > summary > svg:last-child,
+.composer-add svg, .cm-icon-button svg, .cm-select-trigger > svg, details > summary > svg:last-child,
 .context-card-toggle svg { transition: transform var(--motion-normal) var(--motion-spring); }
 .cm-select-trigger[aria-expanded='true'] > svg { transform: rotate(180deg); }
+.cm-search svg { transition: color var(--motion-fast) var(--motion-ease); }
+.cm-search:focus-within svg { color: var(--accent); }
+.cm-tab:hover:not([aria-selected='true']) { background: var(--surface-hover); color: var(--text-primary); }
+.cm-tab:active { transform: scale(.98); }
 
 .cm-select-options, .session-menu-items, .workspace-switch[open] .workspace-menu,
 .composer-context-options, .cm-dropdown[open] .cm-dropdown-menu,
@@ -89,8 +91,7 @@
 .virtual-row .message-error, .chat-message .cm-card { animation: none; }
 
 @keyframes cm-page-enter { from { opacity: .35; } to { opacity: 1; } }
-@keyframes cm-heading-enter { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
-@keyframes cm-card-enter { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+@keyframes cm-region-enter { from { opacity: 0; } to { opacity: 1; } }
 @keyframes cm-menu-enter { from { opacity: 0; transform: translateY(-6px) scale(.96); } to { opacity: 1; transform: none; } }
 @keyframes cm-feedback-enter { from { opacity: 0; transform: translateY(6px) scale(.98); } to { opacity: 1; transform: none; } }
 @keyframes cm-tooltip-enter { from { opacity: 0; } to { opacity: 1; } }

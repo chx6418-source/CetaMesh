@@ -103,6 +103,9 @@ export function createCetaMeshServices(options = {}) {
     dshOptions: agentTaskOptions, dshPresetConfig: options.dshPresetConfig, dshConfiguration: options.dshConfiguration,
     codexOptions: { ...agentTaskOptions,
       authorizeOpenAiEnvironment: () => settingsService.store.get().settings.agents.codexOpenAiEnvironmentAuthorized === true },
+    acpOptions: { taskOptions: agentTaskOptions, ...options.agentAcpOptions },
+    claudeOptions: { taskOptions: agentTaskOptions, ...options.agentClaudeOptions },
+    workbuddyOptions: options.agentWorkBuddyOptions, codexRouterOptions: options.agentCodexRouterOptions,
     desktopStatus: () => dshDesktop.status() });
   const agentBroker = agentService.broker;
 

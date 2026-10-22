@@ -41,6 +41,10 @@ async function waitForDataIpc(dataRoot, { timeoutMs = 15000 } = {}) {
 }
 
 assert.deepEqual(parseCoreArgs(['--worker']), { mode: 'worker' });
+assert.deepEqual(parseCoreArgs(['--agent-sdk-runner', 'claude']), { mode: 'agent-sdk-runner', provider: 'claude' });
+for (const args of [['--agent-sdk-runner'], ['--agent-sdk-runner', 'other'], ['--agent-sdk-runner', 'claude', '--data-dir', 'x']]) {
+  assert.throws(() => parseCoreArgs(args), /Invalid private/);
+}
 assert.deepEqual(parseCoreArgs(['--extension-worker']), { mode: 'extension-worker' });
 assert.deepEqual(parseCoreArgs(['--mcp', 'snowluma']), { mode: 'mcp', mcp: 'snowluma' });
 assert.deepEqual(parseCoreArgs(['--mcp=mcp-bilibili']), { mode: 'mcp', mcp: 'bilibili' });

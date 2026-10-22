@@ -24,10 +24,37 @@ import {
   normalizePromptContent
 } from '../src/agent/agent-provider.js';
 import { createDshAgentProvider } from '../src/agent/dsh-agent-provider.js';
+import { createZCodeAgentProvider } from '../src/agent/zcode-agent-provider.js';
 import { createAgentService, createDefaultAgentService } from '../src/agent/service.js';
 
 const DSH_BASE_URL = process.env.DSH_BASE_URL ?? 'http://127.0.0.1:3080';
 const results = { pass: 0, fail: 0, live: null };
+
+// Desktop presence is not evidence of a verified executable protocol contract.
+{
+  const zcode = createZCodeAgentProvider({ desktopDetected: true });
+  const capabilities = zcode.capabilities();
+  assert.equal(capabilities.desktopDetected, true);
+  assert.equal(capabilities.available, false);
+  assert.equal(capabilities.externalControl, false);
+  assert.equal(capabilities.reason, 'external_protocol_unverified');
+  assert.equal(capabilities.protocolPresent, true);
+  assert.match(capabilities.protocolSource, /^https:\/\/github\.com\/zai-org\/ZCode\//);
+  assert.equal(capabilities.supportsFreshSession, false);
+  assert.equal(capabilities.supportsResume, false);
+  for (const method of AGENT_PROVIDER_METHODS) {
+    assert.equal(capabilities.supported[method], ['health', 'capabilities'].includes(method), method);
+    assert.equal(capabilities.unsupported.includes(method), !['health', 'capabilities'].includes(method), method);
+  }
+  assert.equal((await zcode.health()).available, false);
+  for (const method of ['createSession', 'send', 'resume', 'cancel']) {
+    await assert.rejects(async () => zcode[method]({ sessionId: 'fixture' }),
+      error => error.code === 'AGENT_UNSUPPORTED');
+  }
+  await assert.rejects(zcode.follow({ sessionId: 'fixture' }).next(),
+    error => error.code === 'AGENT_UNSUPPORTED');
+  ok('ZCode detected desktop remains unavailable until its runtime contract is verified');
+}
 
 function ok(name) { results.pass += 1; console.log(`PASS ${name}`); }
 async function waitFor(predicate, label, timeoutMs = 1000) {
@@ -237,7 +264,7 @@ async function waitFor(predicate, label, timeoutMs = 1000) {
   const service = createDefaultAgentService({ api: deadApi, defaults: {}, codexExecutable: null,
     zcodeOptions: { desktopDetected: false }, log: () => {} });
   const list = await service.execute({ method: 'agent.list', params: {} });
-  assert.deepEqual(list.providers.map((item) => item.id), ['dsh', 'codex', 'zcode']);
+  assert.deepEqual(list.providers.map((item) => item.id), ['dsh', 'codex', 'claude', 'gemini', 'opencode', 'qwen', 'zcode', 'workbuddy']);
   assert.equal(list.providers[0].id, 'dsh');
   assert.equal(list.providers[0].capabilities.supported.nativeCheckpoint, false);
   assert.equal(list.providers.find((item) => item.id === 'codex').reason, 'not_installed');

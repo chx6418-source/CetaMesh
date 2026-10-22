@@ -25,7 +25,13 @@ const javascriptFiles = directory => {
     return entry.isFile() && target.endsWith('.js') ? [target] : [];
   });
 };
-const bridgeImport = /(?:from\s*|import\s*\(\s*|import\s+)['"][^'"]*bridge\.js['"]/;
+const bridgeImport = /(?:from\s*|import\s*\(\s*|import\s+)['"](?:[^'"]*[/\\])?bridge\.js['"]/;
+for (const source of ["import './bridge.js'", "import x from '../bridge.js'", "import('../../src/bridge.js')", "import('bridge.js')"]) {
+  assert.equal(bridgeImport.test(source), true, 'exact legacy bridge entry remains forbidden: ' + source);
+}
+for (const source of ["import x from './protocol/agent-permission-bridge.js'", "import('./other-bridge.js')", "import './bridge.json'"]) {
+  assert.equal(bridgeImport.test(source), false, 'distinct module basename must not be mistaken for bridge.js: ' + source);
+}
 for (const relativeRoot of coreRoots) {
   for (const file of javascriptFiles(path.join(root, relativeRoot))) {
     const source = fs.readFileSync(file, 'utf8');

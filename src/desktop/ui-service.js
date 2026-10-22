@@ -268,7 +268,7 @@ function projectAgent(value) {
         : row.available === false || health.available === false ? 'unavailable'
           : available ? 'ready' : 'not-checked';
   return {
-    id, name: string(row.displayName ?? row.label ?? id, 120),
+    id, name: id === 'claude' ? 'Claude Agent' : string(row.displayName ?? row.label ?? id, 120),
     role: id === 'codex' ? '代码与项目' : id === 'dsh' ? '通用研究与协作' : '开发辅助',
     description: id === 'codex' ? '理解项目、修改代码并检查结果。' : id === 'dsh' ? '处理资料、规划和跨工具工作流。' : '在可用时连接本地开发能力。',
     available, installed, authenticated, compatible, eligible: available === null ? null : available && !requiresTask && !boundaryUnverified,
@@ -710,7 +710,11 @@ export function createDesktopUiService({ services = {}, system = services.system
       // Managed Sessions exist only in this Core's memory. After restart, an explicit
       // Owner cancellation may end the persisted Task even when its old Session is gone.
       // External providers and uncertain transport failures still require a stop proof.
-      if (!cancelMissingManagedSession || error?.code !== 'SESSION_NOT_FOUND') throw error;
+      const provider = services.agentBroker.require?.(taskRow.currentAgent.provider);
+      const unknownLegacyTransport = taskRow.currentAgent.provider === 'codex'
+        && error?.code === 'SESSION_TRANSPORT_UNKNOWN'
+        && provider?.capabilities?.().appServerRolloutEnabled === false;
+      if (!cancelMissingManagedSession || (error?.code !== 'SESSION_NOT_FOUND' && !unknownLegacyTransport)) throw error;
       if (taskRow.currentAgent.provider === 'cetamesh') return;
       // Missing external Sessions alone are not stop ACKs. The built-in Codex
       // adapter can verify only its persisted, post-process/pre-import failure.
@@ -718,7 +722,6 @@ export function createDesktopUiService({ services = {}, system = services.system
       const recovery = services.capabilityService?.recoveryForTask;
       const approvals = services.capabilityService?.broker?.approvals;
       const toolRecovery = services.toolExecutionCoordinator?.recoveryForTask;
-      const provider = services.agentBroker.require?.(taskRow.currentAgent.provider);
       if (typeof recovery !== 'function' || typeof approvals?.list !== 'function'
           || typeof toolRecovery !== 'function' || typeof provider?.verifyStoppedTask !== 'function'
           || recovery(taskRow.id) || toolRecovery(taskRow.id)

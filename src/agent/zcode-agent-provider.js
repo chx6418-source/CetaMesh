@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { agentProviderError, defineAgentProvider } from './agent-provider.js';
+import { defineAgentProvider } from './agent-provider.js';
 
 function detectOfficialDesktop({ env = process.env, platform = process.platform, exists = fs.existsSync } = {}) {
   if (platform !== 'win32') return false;
@@ -16,12 +16,7 @@ function detectOfficialDesktop({ env = process.env, platform = process.platform,
 }
 
 export function createZCodeAgentProvider({ desktopDetected = detectOfficialDesktop(), detectedInstallPath = null } = {}) {
-  const reason = desktopDetected ? 'unsupported_external_control' : 'not_installed';
-  const unavailable = () => {
-    throw agentProviderError('PROVIDER_UNAVAILABLE', desktopDetected
-      ? 'ZCode is a desktop app without a supported official external Agent control interface'
-      : 'ZCode is not installed');
-  };
+  const reason = desktopDetected ? 'external_protocol_unverified' : 'not_installed';
   const provider = defineAgentProvider({
     id: 'zcode',
     label: 'ZCode',
@@ -30,29 +25,22 @@ export function createZCodeAgentProvider({ desktopDetected = detectOfficialDeskt
       available: false,
       reason,
       version: null,
-      health: 'external-control-not-supported',
+      health: 'external-protocol-unverified',
       workspaceBoundary: 'unsupported',
       supportsFreshSession: false,
       supportsResume: false,
       contextUsage: { available: false },
       externalControl: false,
+      protocolPresent: true,
+      protocolSource: 'https://github.com/zai-org/ZCode/blob/main/apps/zcode-cli/docs/usage/02-cli-reference.md',
       desktopDetected: desktopDetected === true,
       ...(detectedInstallPath ? { detectedInstallPath: String(detectedInstallPath) } : {})
     },
     methods: {
-      createSession: unavailable,
-      send: unavailable,
-      cancel: unavailable,
-      status: unavailable,
-      contextUsage: unavailable,
-      resume: unavailable,
-      closeSession: unavailable,
-      selectModel: unavailable,
       health: async () => ({
         provider: 'zcode', available: false, reason,
-        status: desktopDetected ? 'external-control-not-supported' : 'unavailable', desktopDetected: desktopDetected === true
-      }),
-      follow: async function* () { unavailable(); }
+        status: desktopDetected ? 'external-protocol-unverified' : 'unavailable', desktopDetected: desktopDetected === true
+      })
     }
   });
   return Object.freeze({

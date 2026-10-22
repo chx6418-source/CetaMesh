@@ -8,19 +8,20 @@ import { Icon, type IconName } from '../components/icons';
 import { ArtifactCard } from '../components/product/cards';
 import { Button, IconButton, Input, normalizeSelectOptionLabel, SearchInput, Select, Tabs } from '../components/primitives/inputs';
 import { Sheet } from '../components/primitives/overlays';
-import { Badge, Banner, Card, Divider, LoadingState, Surface } from '../components/primitives/surfaces';
+import { Badge, Banner, Card, LoadingState, Surface } from '../components/primitives/surfaces';
 import { Markdown, VirtualList, type VirtualListAnchor, type VirtualListController } from '../components/primitives/content';
 import { useUi } from '../stores/ui';
 import { WindowChrome } from './WindowChrome';
+import { WorkspaceSidebar } from './WorkspaceSidebar';
+import { SettingsLayout } from './SettingsLayout';
+import { ApprovalOperationSummary, FeedbackLinkRow } from './StatusPresentation';
 import './harbor.css';
+import './status-presentation.css';
+import './workspace-sidebar.css';
+import './settings-layout.css';
 import '../theme/motion.css';
 
 type PageId = 'chat' | 'work' | 'agents' | 'plugins' | 'settings' | 'about' | 'memory' | 'onboarding';
-const NAV: { id: Exclude<PageId, 'onboarding'>; label: string; icon: IconName }[] = [
-  { id: 'chat', label: 'Chat', icon: 'chat' }, { id: 'work', label: 'Work', icon: 'work' },
-  { id: 'agents', label: 'Agents', icon: 'agents' }, { id: 'plugins', label: 'Plugins', icon: 'plugins' },
-  { id: 'settings', label: 'Settings', icon: 'settings' }, { id: 'about', label: '关于', icon: 'help' }
-];
 const isPage = (value: string | null): value is PageId => value === 'chat' || value === 'work' || value === 'agents' || value === 'plugins' || value === 'settings' || value === 'about' || value === 'memory' || value === 'onboarding';
 const messageOf = (error: unknown) => error instanceof Error ? error.message : '操作暂时无法完成，请稍后重试。';
 const dateLabel = (value: string | number | null | undefined) => {
@@ -59,11 +60,17 @@ function StatusBadge({ value, available }: { value: string; available?: boolean 
 function availabilityReasonLabel(reason: string | null) {
   if (!reason) return '';
   return ({
+    not_installed: '未安装', acp_version_unverified: '本机 ACP 版本尚未验证',
+    acp_launch_unverified: '本机 ACP 启动方式尚未验证', native_policy_unverified: '原生权限与执行范围尚未验证',
+    task_binding_unavailable: '工作区任务绑定尚未就绪', runtime_detection_failed: '运行时检查失败，请重新检查',
+    sdk_runtime_unverified: 'Claude SDK 与本机运行时尚未验证', runtime_security_unverified: 'Claude 本机运行时与权限策略尚未验证',
+    external_protocol_unverified: '外部控制协议尚未验证',
+    developer_configuration_missing: '需要开发者应用配置', oauth_exchange_unconfigured: '账号授权交换尚未配置',
     'not-installed': '未安装', 'needs-setup': '需要配置', stopped: '已停止', 'start-timeout': '等待网关就绪',
     'provider-unavailable': '服务未连接', 'server-stopped': '已停止', 'task-required': '创建任务后使用',
     'workspace-required': '需要工作区', 'scope-unavailable': '需要工作区', 'descriptor-incomplete': '能力描述不完整',
     'not-supported': '暂不支持', 'not-checked': '尚未检查', unavailable: '服务未连接'
-  } as Record<string, string>)[reason] ?? reason;
+  } as Record<string, string>)[reason] ?? '当前能力尚未验证，请检查连接与配置';
 }
 
 export function HarborApp() {
@@ -87,7 +94,6 @@ export function HarborApp() {
   const theme = useUi(state => state.theme);
   const setTheme = useUi(state => state.setTheme);
   const activeSession = sessions.find(session => session.id === activeSessionId) ?? null;
-  const activeWorkspace = workspaces.find(workspace => workspace.id === activeWorkspaceId) ?? null;
   const onboardingRequired = onboarding !== null && !onboarding.complete;
   const page: PageId = onboardingRequired ? 'onboarding' : routePage;
 
@@ -197,36 +203,23 @@ export function HarborApp() {
     } catch { /* Theme applies in this window even when Core cannot persist it. */ }
   }
 
-  const recentSessions = sessions.slice(0, 7);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const shownAllSessions = allSessions.filter(session => {
     const inScope = allSessionsScope === 'all' || (allSessionsScope === 'archived' ? session.archived : !session.archived);
     return inScope && `${session.title} ${session.id}`.toLowerCase().includes(allSessionsQuery.toLowerCase());
   });
-  return <div className="harbor-shell" onContextMenu={event => {
+  return <div className={`harbor-shell ${sidebarCollapsed || page === 'settings' ? 'sidebar-collapsed' : ''}`} onContextMenu={event => {
     const target = event.target as Element;
     if (target.closest('input, textarea, [contenteditable="true"], .chat-message, .cm-markdown, .cm-code')) return;
     event.preventDefault();
   }}>
     <WindowChrome />
-    <aside className="harbor-sidebar">
-      <div className="sidebar-scroll">
-      <details className="workspace-switch"><summary><span className="workspace-avatar">CM</span><span className="workspace-label"><strong>{activeWorkspace?.name ?? '个人工作区'}</strong><small>{activeWorkspace?.status ?? '本地工作区'}</small></span><Icon name="down" size={14} /></summary><div className="workspace-menu">{workspaceError && <p role="alert">{workspaceError}</p>}{workspaces.length ? workspaces.map(workspace => <button key={workspace.id} aria-current={workspace.id === activeWorkspaceId ? 'true' : undefined} onClick={() => void openWorkspace(workspace.id)}><strong>{workspace.name}</strong><small>{workspace.status}</small></button>) : <p>尚未登记工作区</p>}<button className="workspace-add" onClick={() => navigate('work')}>管理工作区</button></div></details>
-      <nav aria-label="工作空间" className="primary-nav"><span className="nav-label">工作空间</span>{NAV.slice(0, 4).map(item => <button key={item.id} className={`nav-item ${page === item.id ? 'active' : ''}`} aria-current={page === item.id ? 'page' : undefined} onClick={() => navigate(item.id)}><Icon name={item.icon} size={18} /><span>{item.label}</span>{item.id === 'work' && taskCount > 0 && <small className="nav-count">{taskCount}</small>}</button>)}</nav>
-      {page === 'chat' && <section className="session-section" aria-label="最近会话">
-        <div className="session-heading"><span className="nav-label">最近会话</span><IconButton label="新建会话" icon="add" compact onClick={() => void createSession()} /></div>
-        {sessionError && <div className="sidebar-error" role="alert">{sessionError}</div>}
-        <div className="session-list">{recentSessions.map(session => <div className="session-row" key={session.id}>
-          <button className={`session-item ${activeSessionId === session.id ? 'selected' : ''}`} onClick={() => setActiveSessionId(session.id)} aria-current={activeSessionId === session.id ? 'page' : undefined}>
-            <span className="session-unread" aria-hidden="true">{activeSessionId === session.id ? '•' : ''}</span><span className="session-copy"><strong>{session.title || '新会话'}</strong><small>{relativeLabel(session.updatedAt)}</small></span><time>{dateLabel(session.updatedAt).split(' ').at(-1)}</time>
-          </button>
-          <SessionActionsMenu session={session} onAction={action => { void manageSession(session, action); }} />
-        </div>)}</div>
-        {!sessions.length && !sessionError && <p className="sidebar-empty">还没有会话</p>}
-        <button className="all-sessions" onClick={() => { setAllSessionsOpen(true); setAllSessionsQuery(''); void loadAllSessions(); }}>查看全部会话 <Icon name="right" size={13} /></button>
-      </section>}
-      </div>
-      <div className="sidebar-bottom"><div className="host-indicator"><span className={`host-dot ${hostStatus}`} /><span>{hostStatus === 'ready' ? '桌面工作台已连接' : hostStatus === 'checking' ? '连接桌面主机' : '桌面服务离线'}</span><span className="host-more"><Icon name="more" size={16} /></span></div><Divider /><div className="utility-nav">{NAV.slice(4).map(item => <button key={item.id} className={`nav-item ${page === item.id ? 'active' : ''}`} aria-current={page === item.id ? 'page' : undefined} onClick={() => navigate(item.id)}><Icon name={item.icon} size={18} /><span>{item.label}</span></button>)}</div><div className="profile-row"><span className="profile-avatar">CM</span><span><strong>本地用户</strong><small>个人空间</small></span></div></div>
-    </aside>
+    <WorkspaceSidebar page={page} workspaces={workspaces} sessions={sessions} activeWorkspaceId={activeWorkspaceId}
+      activeSessionId={activeSessionId} taskCount={taskCount} hostStatus={hostStatus} collapsed={sidebarCollapsed || page === 'settings'}
+      workspaceError={workspaceError} sessionError={sessionError} onToggle={() => setSidebarCollapsed(current => !current)}
+      onNavigate={navigate} onOpenWorkspace={id => void openWorkspace(id)} onOpenSession={id => navigate('chat', id)}
+      onNewSession={() => void createSession()} onAllSessions={() => { setAllSessionsOpen(true); setAllSessionsQuery(''); void loadAllSessions(); }}
+      renderSessionActions={session => <SessionActionsMenu session={session} onAction={action => { void manageSession(session, action); }} />} />
     <div className="harbor-main">
       <main key={page} className={`page-frame page-${page}`}>
         {page === 'chat' && <ChatPage key={activeSession?.id ?? 'no-session'} session={activeSession} workspaces={workspaces} activeWorkspaceId={activeWorkspaceId} onSessionUpdate={updated => setSessions(current => current.map(item => item.id === updated.id ? updated : item))} onNew={() => createSession()} onNewChat={() => createSession(true)} onOpenMemory={() => navigate('memory')} onReviewTask={id => { setReviewTaskId(id); navigate('work'); }} />}
@@ -238,7 +231,6 @@ export function HarborApp() {
         {page === 'about' && <AboutPage />}
         {page === 'onboarding' && <OnboardingPage onComplete={async () => { const state = await onboardingClient.status(); setOnboarding(state); navigate('chat'); }} />}
       </main>
-      <footer className="harbor-footer"><span>Harbor</span><span>·</span><span>熟悉的多栏工作台</span><span className="grow" /><span>本地 Core · WebView2</span></footer>
     </div>
     <Sheet open={allSessionsOpen} title="全部会话" onClose={() => setAllSessionsOpen(false)}>
       <div className="all-session-manager">
@@ -1520,7 +1512,7 @@ function PluginsPage() {
     } catch (cause) { setError(messageOf(cause)); }
   }, []);
   const refreshApprovals = useCallback(async () => {
-    try { const result = await approvalClient.list(); setPendingApprovals(result.approvals.filter(item => item.status === 'pending')); setApprovalOperations((result.operations ?? []).slice(-8)); }
+    try { const result = await approvalClient.list(); setPendingApprovals(result.approvals.filter(item => item.status === 'pending')); setApprovalOperations(result.operations ?? []); }
     catch (cause) { setError(messageOf(cause)); }
   }, []);
   useEffect(() => { if (tab === 'catalog') void refreshCatalog(); }, [tab, refreshCatalog]);
@@ -1742,7 +1734,7 @@ function PluginsPage() {
     <Banner><span className="banner-icon"><Icon name="approval" size={20} /></span><span className="grow"><strong>安装前先查看权限</strong><small>插件详情与权限清单会在安装前显示；高风险操作仍由 Core 审批。</small></span><span className="banner-link">仅安装可信来源</span></Banner>
     <div className="plugins-controls row between"><SearchInput label="搜索插件" placeholder="搜索插件、集成或开发者" value={query} onChange={event => setQuery(event.target.value)} /><Tabs label="插件视图" selected={tab} onChange={setTab} items={[{ id: 'catalog', label: '插件中心' }, { id: 'connections', label: `集成 ${integrations.length || ''}` }, { id: 'mcp', label: `MCP ${servers.length || ''}` }]} /></div>
     {error && <ErrorNotice error={error} onRetry={() => tab === 'catalog' ? void refreshCatalog() : void refreshConnections()} />}{notice && <p className="inline-success" role="status">{notice}</p>}
-    {approvalOperations.length > 0 && <section className="plugin-approval-inbox"><h2>操作状态</h2>{approvalOperations.map(operation => <Surface key={operation.operationId} className="row between"><span>{operation.decision === 'rejected' ? '拒绝审批' : '批准操作'} · {({accepted:'已接受',running:'执行中',waiting:'等待后续审批',completed:'已完成',failed:'失败',cancelled:'已确认取消',unknown:'结果未知，需核验',rejected:'已拒绝'}[operation.status])}{operation.code && <small>{operation.code}</small>}</span>{['accepted','running'].includes(operation.status) && operation.operationId && <Button compact onClick={() => void approvalClient.cancel(operation.operationId!).then(() => refreshApprovals()).catch(cause => setError(messageOf(cause)))}>请求停止</Button>}</Surface>)}</section>}
+    <ApprovalOperationSummary operations={approvalOperations} onCancel={id => { void approvalClient.cancel(id).then(() => refreshApprovals()).catch(cause => setError(messageOf(cause))); }} />
     {pendingApprovals.length > 0 && <section className="plugin-approval-inbox"><div className="section-heading"><h2>待处理审批</h2><Badge tone="warning">{pendingApprovals.length}</Badge></div>{pendingApprovals.map(approval => <ApprovalCard key={approval.id} approval={approval} onDecide={(id, approve) => { void decidePendingApproval(id, approve); }} />)}</section>}
     {tab === 'catalog' && <>
     <div className="catalog-filters"><Tabs label="插件分类" selected={category} onChange={setCategory} items={categories.map(value => ({ id: value, label: value === 'all' ? '全部' : value }))} /><Tabs label="安装状态" selected={view} onChange={setView} items={[{ id: 'all', label: '全部' }, { id: 'recommended', label: '精选' }, { id: 'installed', label: '已安装' }, { id: 'update-available', label: '可更新' }]} />{developerMode && <Button compact onClick={() => void stageLocalPackage()} disabled={busy === 'local-package'}>{busy === 'local-package' ? '读取本地包…' : '导入本地扩展'}</Button>}<Button compact icon="update" onClick={() => void refreshCatalog()} disabled={loading}>刷新目录</Button></div>
@@ -1912,7 +1904,7 @@ function ModelConnectionSettings({ provider, model, values, onChange }: { provid
     {!loading && provider && configured === false && <p className="muted">该服务商尚未配置凭据。</p>}
   </div>;
 }
-function SettingsPage({ theme, onThemeChange, onOpenPlugins }: { theme: 'system' | 'light' | 'dark'; onThemeChange(theme: 'system' | 'light' | 'dark'): Promise<void>; onOpenPlugins(): void }) {
+export function SettingsPage({ theme, onThemeChange, onOpenPlugins }: { theme: 'system' | 'light' | 'dark'; onThemeChange(theme: 'system' | 'light' | 'dark'): Promise<void>; onOpenPlugins(): void }) {
   const [activeSection, setActiveSection] = useState('general');
   const [descriptions, setDescriptions] = useState<{ section: string; label: string; fields: SettingField[] }[]>([]);
   const [revision, setRevision] = useState<number | null>(null);
@@ -1972,18 +1964,18 @@ function SettingsPage({ theme, onThemeChange, onOpenPlugins }: { theme: 'system'
       {activeSection === 'extensions' && <Surface className="privacy-summary"><span className="grow"><strong>扩展、插件与 MCP 连接</strong><small>启用开发者模式后可从本地导入扩展。导入包会先进入 Core 权限审查，并以未验证状态安装为停用。</small></span><Button compact onClick={onOpenPlugins}>打开插件中心</Button></Surface>}
       {groups.map(section => <div className="settings-group" key={section.section}><h2>{activeSection === 'general' ? '常规行为' : SETTING_SECTION_LABELS[section.section] ?? section.label}</h2>
         {section.section === 'models' && <ModelConnectionSettings provider={String(draft.models?.provider ?? '')} model={String(draft.models?.defaultModel ?? '')} values={draft.models ?? {}} onChange={(key, value) => change('models', key, value)} />}
-        {section.fields.filter(field => !(section.section === 'general' && field.key === 'theme') && (section.section !== 'models' || !['provider', 'defaultModel'].includes(field.key))).map(field => renderField(section.section, field))}
-        {section.fields.some(field => !(section.section === 'general' && field.key === 'theme') && (section.section !== 'models' || !['provider', 'defaultModel'].includes(field.key))) && <div className="settings-save"><Button compact variant="primary" disabled={recoveryRequired || saving === section.section} onClick={() => void save(section.section)}>保存{SETTING_SECTION_LABELS[section.section] ?? section.label}</Button></div>}
+        <div className="settings-fields">{section.fields.filter(field => !(section.section === 'general' && field.key === 'theme') && (section.section !== 'models' || !['provider', 'defaultModel'].includes(field.key))).map(field => renderField(section.section, field))}</div>
+        {section.fields.some(field => !(section.section === 'general' && field.key === 'theme') && (section.section !== 'models' || !['provider', 'defaultModel'].includes(field.key))) && <div className="settings-save"><small>更改后点击保存生效</small><Button compact variant="primary" disabled={recoveryRequired || saving === section.section} onClick={() => void save(section.section)}>{saving === section.section ? '正在保存…' : '保存设置'}</Button></div>}
       </div>)}
       {activeSection === 'security' && <Surface className="privacy-summary"><span className="policy-icon"><Icon name="approval" size={19} /></span><span className="grow"><strong>本地数据与权限</strong><small>会话和配置保存在本机。敏感操作遵循逐次审批。</small></span><Badge tone="success">Core 策略</Badge></Surface>}
       {activeSection === 'devices' && !groups.length && <EmptyNotice icon="plug" title="设备网格设置由 Core 提供" detail="当前没有可调整的设备字段。设备配对和在线状态仍可在 Agents 页面查看。" />}
       {activeSection !== 'appearance' && !groups.length && activeSection !== 'extensions' && activeSection !== 'devices' && <EmptyNotice title="当前没有可调整的设置" detail="可用字段由本机 Core 的设置描述提供。" />}
     </>;
   }
-  return <div className="content-page settings-page"><Heading eyebrow="PREFERENCES" title="Settings" description="按类别调整界面偏好和本地工作行为。" />{error && <ErrorNotice error={error} onRetry={() => void refresh()} />}{notice && <p className="inline-success" role="status">{notice}</p>}{loading ? <LoadingState label="正在读取本机设置…" /> : <>
-    <Tabs label="设置类别" selected={activeSection} onChange={setActiveSection} items={settingPages} />
-    <section className="settings-section"><div className="settings-section-main">{renderSettingsContent()}</div></section>
-  </>}</div>;
+  return <div className="content-page settings-page"><SettingsLayout items={settingPages} selected={activeSection} onChange={setActiveSection}>
+    {error && <ErrorNotice error={error} onRetry={() => void refresh()} />}{notice && <p className="inline-success" role="status">{notice}</p>}
+    {loading ? <LoadingState label="正在读取本机设置…" /> : <section className="settings-section"><div className="settings-section-main">{renderSettingsContent()}</div></section>}
+  </SettingsLayout></div>;
 }
 
 function AboutPage() {
@@ -2022,7 +2014,7 @@ function AboutPage() {
     <Surface className="about-hero"><span className="about-brand-mark"><Icon name="sparkles" size={34} /></span><span className="grow"><strong>CetaMesh Desktop</strong><small>让本地 Agent 协作保持透明、可控。</small></span><Badge tone="success">UX v2 · Harbor</Badge></Surface>
     <div className="about-facts"><Surface><small>版本</small><strong>{info.version ?? '未知'}</strong><span>构建号 {info.buildNumber ?? '未知'} · {info.channel ?? '未指定'}</span><small>构建标识 {info.buildId ?? '本地构建'}</small></Surface><Surface><small>开发者</small><strong>{info.developer ?? '未配置'}</strong><span>{info.platform ?? 'Windows 桌面应用'}</span></Surface><Surface className="update-card"><div className="row between"><strong>软件更新</strong><Icon name="update" size={18} /></div><span>当前版本 {info.version ?? '未知'}</span><span>最新版本 {latestVersion || '尚未检查'}</span><small>更新状态：{updateStatus}</small><small>{checkedAt ? `最近检查 ${checkedAt}` : '尚未检查更新'}</small><Button compact disabled={checking} onClick={() => void checkUpdate()}>{checking ? '正在检查…' : '检查更新'}</Button></Surface></div>
     <section className="about-links"><h2>项目链接</h2><Surface>{linkRows.map(row => <button className="about-link-row" key={row.id} onClick={() => void visit(row.url ?? null)} disabled={!row.url?.startsWith('https://')}><Icon name="globe" size={18} /><span>{row.label}</span><span className="grow" /><small>{row.url ? row.url.replace(/^https:\/\//, '') : '未配置'}</small><Icon name="right" size={15} /></button>)}</Surface></section>
-    <section className="about-links"><h2>反馈与安全</h2><Surface>{feedback?.entries.map(entry => <button className="about-link-row" key={entry.id} onClick={() => void visit(entry.url)} disabled={!entry.url}><Icon name={entry.kind === 'security' ? 'approval' : 'globe'} size={18} /><span><strong>{entry.label}</strong><small className="feedback-description">{entry.description}</small></span><span className="grow" /><small>{entry.url ? entry.url.replace(/^https:\/\//, '') : feedback.message || '暂未配置'}</small><Icon name="right" size={15} /></button>)}{feedback?.securityNotice && <p className="security-notice">{feedback.securityNotice}</p>}{!feedback && <p className="muted">反馈入口由本机产品配置提供。</p>}</Surface></section>
+    <section className="about-links"><h2>反馈与安全</h2><Surface>{feedback?.entries.map(entry => <FeedbackLinkRow key={entry.id} entry={entry} message={feedback.message} onVisit={url => { void visit(url); }} />)}{feedback?.securityNotice && <p className="security-notice">{feedback.securityNotice}</p>}{!feedback && <p className="muted">反馈入口由本机产品配置提供。</p>}</Surface></section>
     {releaseNotes.length > 0 && <section className="about-links"><h2>更新说明</h2><Surface>{releaseNotes.map((line, index) => <div className="release-note-row" key={index}><p>{line}</p></div>)}</Surface></section>}
     <p className="about-footnote">桌面使用 WebView2 展示界面，Core 服务和命名管道保持本地运行。</p>
   </>}</div>;
