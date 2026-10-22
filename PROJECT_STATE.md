@@ -98,7 +98,7 @@
 
 ## Active Work (Owner confirmation pending)
 
-- **RC Build1116 准备（2026-10-22）**：Owner 已明确授权把本轮全部图标/UI修改及Build1116提交到当前功能分支，并在隔离工作树构建正式RC；不合并、不推送、不发布、不覆盖真实安装。源码六类聚合回归139 PASS/0 FAIL/0 NRE，包含Cargo check/test。沿用1.0.0-rc.2，正式产物目标为 `artifacts/rc/1.0.0-rc.2/build-1116`；产物、发行回归和签名状态待本次RC流水完成后记录。RELEASE_BLOCKED保持不变。
+- **RC Build1116 已创建（2026-10-22）**：Owner 已明确授权本地提交及RC构建；源码提交 `c47253a860a9945e05054d51d06f957f51067f33`，构建时dirty=false。1.0.0-rc.2正式候选产物位于 `artifacts/rc/1.0.0-rc.2/build-1116`，安装包43,253,760字节，SHA-256 `A40522EF39249A7F02CE8FFEC3F62F197D83A711E34115761ED3EC2ABA8B3FB4`。源码六类聚合139 PASS/0 FAIL/0 NRE（包含Cargo check/test），正式RC发行12 PASS/0 FAIL/1 NRE（仅缺少同Build的DEV产物）；31项校验及实际Host/安装器图标验证通过。NotSigned，真实用户GUI及外部服务验收仍有限制，RELEASE_BLOCKED保持不变。下列各UI条目的“未提交/未打包”为各阶段记录，本RC已统一包含；本轮未合并、推送、发布或覆盖真实安装。详见 `docs/desktop/RC1116_BUILD_REPORT.md`。
 
 - **全局活泼动效（2026-10-22，Owner 选择明显位移/缩放/轻弹性）**：新增 `theme/motion.css` 统一页面、标题、卡片、按钮/导航、菜单、附件/结果提示、进度、加载及主题过渡；抽屉通过已有motion库加入进出场，退出阶段以useIsPresent驱动inert禁止交互。原生details在支持interpolate-size/allow-discrete时平滑开合，旧引擎回退即时高度变化；正文和虚拟行不做入场/缩放。减少动态效果规则关闭CSS动画/过渡，Sheet读取系统偏好。构建通过；定向回归7 PASS/0 FAIL；浏览器合成组件验证了正常抽屉进出/退出inert/最终卸载、原生dialog、任务展开及模拟减少动态效果（加载none、按钮0s、抽屉无位移且可用）。未验证真实Windows系统偏好切换/已安装WebView2；未安装、提交、合并、推送或生成新包。详见 `docs/desktop/UI_MOTION_REPORT.md`。
 
