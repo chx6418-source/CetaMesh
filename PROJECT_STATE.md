@@ -230,3 +230,7 @@
 - 开始工作必读：`RULES.md` → 本文件 → 相关架构文档（`docs/desktop/ARCHITECTURE.md` 等）。
 - 仓库操作事实：`README.md`；能力覆盖裁决表：`CAPABILITY_COVERAGE.md`。
 - **历史调查才读**：`docs/archive/`（project-state 历史快照 / handoffs / reports、旧控制台事实源 `AGENT_CONTEXT.md`）。
+
+## Agent source synchronization (2026-10-22)
+
+Owner-authorized Agent/UI source commit2b2339c merged into main at fed3925, preserving GitCode initial5633dd7. Actual merged-main tests20 PASS/0 FAIL/1 NRE and UI buildPASS; both existing GitHub/GitCode main refs were verified at fed3925 after normal pushes. This synchronization report is a subsequent documentation-only commit. New Agent SEA/native/real-account E2E remains unverified, RELEASE_BLOCKED; RC1116 unchanged. Evidence/artifact worktree retained. See docs/desktop/AGENT_EXPANSION_SYNC_REPORT.md. Owner requests shutdown after final sync; preserve state and do not start new packaging/install work.
