@@ -1,6 +1,8 @@
 # 鲸桥 WhaleBridge 桌面版 —— 架构、构建与运维
 
-本文件是桌面版（鲸桥 WhaleBridge for Windows）的**正式文档**：架构、进程与退出码契约、
+**历史兼容文档**：本页记录早期 WhaleBridge 的桌面化过程，其中旧 Web、运行时及安装指令可能已过时；当前工程与发布以 docs/desktop/ARCHITECTURE.md、docs/desktop/BUILD_AND_RELEASE.md 和 README.md 为准。
+
+本文件原用于记录桌面版（鲸桥 WhaleBridge for Windows）的架构、进程与退出码契约、
 安装/迁移/卸载、构建与发布步骤、故障排查、以及桌面化过程中的决策记录（ADR）。
 
 面向使用者/运维者的快速上手在 [README.md](../README.md)；DSH 端安装见 [DSH_SETUP.md](DSH_SETUP.md)；
@@ -289,5 +291,5 @@ QQ 未完全退出（拉到旧实例）、QQ 与 SnowLuma 权限级别不一致�
 
 **待办（前端改动，需走控制台基线流程）**：给控制台加一个「退出指定 QQ 实例并交给 SnowLuma 重新注入」
 的按钮（按进程句柄精确退出，不按进程名查杀）。注意 `public/console.html` 是生成产物，
-必须先改 `design-demos/bg-ripple/tools/fixtures/console.baseline.html` 再跑 `fuse-console.mjs`，
-并接着跑 `check-fusion.mjs` 三条校验，不能手改生产页。
+旧主题生成器、HTML 演示和涟漪背景实验已经移到私有设计归档，不再是正式产品 UI 的构建入口。
+当前界面代码请在 desktop-ui/ 和 desktop-shell/src/theme/ 修改，按现行测试与发布流程验收。

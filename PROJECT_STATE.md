@@ -1,19 +1,27 @@
-# CetaMesh Desktop + Mobile — public migration candidate
+# CetaMesh — current project state
 
-## Current State (2026-10-21)
+Last reviewed: 2026-10-22.
 
-- Official target: chx6418-source/CetaMesh; public main baseline ec6b07d8abcdea0c66ed8362d36d3c4984462cdf.
-- Local branch feature/desktop-mobile-monorepo. Source snapshot: private integration 4acbb3d1dca1abf0acf53a5b5384f9ee71c6842b. No private Git history imported.
-- Desktop owns root src/desktop-shell/desktop-ui; complete Mobile lives in apps/mobile. Dependencies and releases remain independent.
-- Owner authorizes reviewed branch publication with SnowLuma SDK/MCP excluded and Mineradio/Kugou retained. Main merge and Release require separate confirmation.
-- Existing public CONTRIBUTING, SECURITY, OPEN_SOURCE, conduct, GPL license and Chinese Mobile introduction are preserved.
-- Current tests, native environment blockers, licensing and source findings: docs/migration/PUBLIC_MIGRATION_ACCEPTANCE.md. Prior private migration results are historical, not public-candidate acceptance.
+## Repository and layout
 
-## Active Work
+- Official open-source repository: https://github.com/chx6418-source/CetaMesh
+- Desktop and Mobile source snapshots were merged to public main on 2026-10-21 in commit 350c1fc4ec8d21d9ae7ac80285979c588c007e99.
+- Desktop remains the repository root (src/, desktop-shell/, desktop-ui/). Mobile is independent in apps/mobile/.
+- Original private Desktop and Mobile repositories, including their histories and recovery sources, are kept separately. The private histories were not imported into public Git.
+- The public-repository cleanup is prepared in chore/public-repository-cleanup; main has not been modified by that review work.
 
-- Public review branch pushed; draft PR https://github.com/chx6418-source/CetaMesh/pull/3. Main is unchanged.
-- SnowLuma SDK/MCP excluded; Mineradio retained by explicit Owner decision with unverified upstream license disclosed. Source snapshot commit 85a5a68b0668a9a6fa440ccfb451615886ba0b20.
+## Stable boundaries
 
-## Architecture and next steps
+- Desktop: local-first Core, Chat/Task/Memory/Workspace services, Agent/Capability brokers, plugin and Device Mesh facilities.
+- Mobile: React Native app with independent local Chat, Memory, Tasks, native permissions and storage.
+- Pairing and protocols do not grant automatic memory access, tool execution or transcript synchronization.
+- SnowLuma upstream source and restricted SDK/MCP are excluded from the public source/build; optional QQ uses a separate OneBot protocol integration.
+- Windows and Android retain distinct build processes and release artifacts.
 
-Read docs/desktop/ARCHITECTURE.md for Desktop; apps/mobile/AGENTS.md and apps/mobile/PROJECT_STATE.md for Mobile. Preserve deny-by-default capabilities, scoped memory authorization, secure storage and update compatibility. Follow docs/MONOREPO.md for isolated dependency/build commands.
+## Verified work and remaining gates
+
+The migration has recorded successful local Desktop and Mobile automated checks and an Android Standalone APK build (see docs/migration/PUBLIC_MIGRATION_ACCEPTANCE.md). These are historical test results, not new post-cleanup passes.
+
+Before a new release: rerun affected Desktop and Mobile tests and native builds; verify GitHub Actions; complete any required real-device/real-provider end-to-end checks, third-party notices, code signing and update compatibility checks. Do not represent unrun checks as PASS.
+
+Development: docs/MONOREPO.md; Desktop design: UI_SOURCE_OF_TRUTH.md; Mobile handoff: apps/mobile/PROJECT_STATE.md.

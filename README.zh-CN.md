@@ -1,20 +1,16 @@
-# CetaMesh
+# CetaMesh 项目说明
 
-CetaMesh 是本地优先的 Desktop + Mobile 项目，正式开发目标仓库为
-[chx6418-source/CetaMesh](https://github.com/chx6418-source/CetaMesh)。
+CetaMesh 是一个连接不同 AI Agent、任务、记忆、插件与设备的本地优先智能协作网络。桌面端是主项目，移动端位于 apps/mobile/，两端独立运行、构建和发布，并以授权和安全隔离为跨端协作的前提。
 
-桌面端保留根目录工程，移动端完整位于 `apps/mobile/`。两端独立安装依赖、运行、
-管理版本和构建发布；共享协议不会自动授予设备权限或同步私人数据。
+项目目前仍处于开发与测试阶段。部分功能、原生设备验收和外部服务集成仍需进一步完善。
 
-**公开迁移审查分支：**只导入审查后的源码快照，不导入私有 Git 历史。SnowLuma SDK/MCP 不集成。见 [迁移验收报告](docs/migration/PUBLIC_MIGRATION_ACCEPTANCE.md)。
-
-- [统一开发与构建说明](docs/MONOREPO.md)
-- [移动端说明](apps/mobile/README.md)
-- [原公开中文项目介绍（完整保留）](apps/mobile/README.zh-CN.md)
+- [完整中文 README](README.md)
+- [统一仓库开发指南](docs/MONOREPO.md)
+- [Desktop 架构](docs/desktop/ARCHITECTURE.md)
+- [Mobile 说明](apps/mobile/README.zh-CN.md)
+- [插件开发文档](docs/plugin-development/README.md)
 - [贡献指南](CONTRIBUTING.md)
 - [中文开源说明](OPEN_SOURCE.zh-CN.md)
-- [安全说明](SECURITY.md)
+- [安全政策](SECURITY.md)
 
-根目录运行 `npm ci`、`npm --prefix desktop-ui ci` 和 `npm test`。
-移动端运行 `npm --prefix apps/mobile ci` 和 `npm --prefix apps/mobile test`。
-Windows 安装包与 Android Standalone APK 分别构建。GitCode 现有正式更新入口保留。
+本仓库不包含 SnowLuma 主程序或受限 SDK/MCP。早期设计探索、修复过程记录及测试证据已归档至私有开发仓库，不作为正式开源工程的一部分。

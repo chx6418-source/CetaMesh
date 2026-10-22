@@ -274,8 +274,8 @@ check('sanitizeCardRef 拒绝空白与超长', sanitizeCardRef('1 2') === '' && 
 const bridgeSrc = fs.readFileSync(path.join(ROOT, 'src', 'bridge.js'), 'utf8');
 const mcpSrc = fs.readFileSync(path.join(ROOT, 'src', 'mcp-snowluma-safe.js'), 'utf8');
 const consoleHtml = fs.readFileSync(path.join(ROOT, 'public', 'console.html'), 'utf8');
-// 控制台唯一事实源（旧 part1-3 + assemble.mjs 已删除，二者长期分叉且运行会覆盖生产页）
-const consoleBaseline = fs.readFileSync(path.join(ROOT, 'design-demos', 'bg-ripple', 'tools', 'fixtures', 'console.baseline.html'), 'utf8');
+// 历史设计实验已移出公开仓库。直接验证当前维护的控制台实现，
+// 不再把已废弃的设计基线当作安全行为测试的依赖。
 
 check('bridge.js 引入 qq-card 模块', /from '\.\/qq-card\.js'/.test(bridgeSrc));
 check('bridge.js 导入 extractCardsFromSegments', /extractCardsFromSegments/.test(bridgeSrc));
@@ -319,9 +319,9 @@ check('mcp-snowluma-safe.js 卡片点击要求 confirm=true', /confirm:\s*z\.lit
 check('mcp-snowluma-safe.js 注册审批状态查询工具', mcpSrc.includes("'qq_get_card_button_approval'") && mcpSrc.includes('/api/socialV2/card-button-approval'));
 
 check('控制台开关面板含 getCardMsg（public/console.html）', consoleHtml.includes('data-v2-tool="getCardMsg"'));
-check('控制台开关面板含 getCardMsg（基线源）', consoleBaseline.includes('data-v2-tool="getCardMsg"'));
+check('控制台卡片读取工具只验证当前维护的控制台入口', consoleHtml.includes('data-v2-tool="getCardMsg"'));
 check('控制台卡片点击开关默认关闭并标注风险', consoleHtml.includes('data-v2-tool="clickCardButton"') && consoleHtml.includes('data-v2-tool-default="off"') && consoleHtml.includes('高风险 · 默认关闭'));
-check('控制台卡片点击开关同步到基线源', consoleBaseline.includes('data-v2-tool="clickCardButton"') && consoleBaseline.includes('data-risk-tool="card-button"') && consoleBaseline.includes('首次确认后立即保存并持续开启'));
+check('控制台卡片点击风险标记与持久开启告知保持完整', consoleHtml.includes('data-v2-tool="clickCardButton"') && consoleHtml.includes('data-risk-tool="card-button"') && consoleHtml.includes('首次确认后立即保存并持续开启'));
 check('控制台开启卡片点击前弹出风险确认', consoleHtml.includes('知晓风险并开启') && consoleHtml.includes('每次工具调用仍需显式确认'));
 check('控制台风险开关确认后保持开启、再次开启需复核', consoleHtml.includes('确认后工具会持续开启') && consoleHtml.includes('下次从关闭状态重新开启时仍需再次确认'));
 check('控制台风险开关开启/关闭即时持久化', consoleHtml.includes('persistCardButtonTool') && /clickCardButton:\s*enabled/.test(consoleHtml) && consoleHtml.includes('待审批请求已撤销'));
