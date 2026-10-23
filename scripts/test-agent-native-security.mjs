@@ -2,11 +2,18 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { buildCodexExecArgs, parseWindowsNativeSandboxPolicy } from '../src/agent/codex-agent-provider.js';
+import { buildCodexExecArgs, createCodexAgentProvider, parseWindowsNativeSandboxPolicy } from '../src/agent/codex-agent-provider.js';
+import { createDefaultAgentService } from '../src/agent/service.js';
 import { defineAgentProvider } from '../src/agent/agent-provider.js';
 import { createAgentBroker } from '../src/agent/broker.js';
 import { createAgentProviderRegistry } from '../src/agent/registry.js';
 import { createCetaMeshServices } from '../src/app/service-container.js';
+
+assert.equal(parseWindowsNativeSandboxPolicy('opaqueWindows = true\n[windows]\nsandbox = "unelevated"'), 'unelevated',
+  'unrelated keys containing Windows must not be mistaken for a security policy');
+assert.equal(parseWindowsNativeSandboxPolicy('[model_providers.WindowsProxy]\nname = "fixture"\n[windows]\nsandbox = "elevated"'), 'elevated',
+  'unrelated table names must not shadow the selected native sandbox');
+assert.equal(parseWindowsNativeSandboxPolicy('[windows]\nopaqueSandbox = true\nsandbox = "unelevated"'), 'unelevated');
 
 const args = buildCodexExecArgs({ stageRoot: os.tmpdir() });
 assert.equal(args[args.indexOf('--sandbox') + 1], 'workspace-write', 'Native must use an inspected official sandbox');
@@ -93,4 +100,38 @@ assert.equal(parseWindowsNativeSandboxPolicy('[windows]\nsandbox = "unelevated"'
 assert.equal(parseWindowsNativeSandboxPolicy('[windows]\nsandbox = "elevated"'), 'elevated');
 for (const config of ['windows.sandbox = "elevated"', 'windows = { sandbox = "mxc" }', '["windows"]\nsandbox = "mxc"']) {
   assert.throws(() => parseWindowsNativeSandboxPolicy(config), e => e.code === 'CODEX_NATIVE_POLICY_UNVERIFIED');
+}
+
+if (process.platform === 'win32') {
+  const policyRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-policy-projection-'));
+  let starts = 0;
+  const fixtureCli = { executable: () => path.join(policyRoot, 'fixture.exe'),
+    probe: args => ({ available: true, stdout: args[0] === '--version' ? 'codex-cli fixture'
+      : args[0] === 'login' ? 'Logged in'
+      : '--config --ask-for-approval --cd --sandbox workspace-write --json --ignore-user-config --ignore-rules --strict-config --skip-git-repo-check [SESSION_ID]', stderr: '' }),
+    startSession() { starts++; throw new Error('unverified policy must never start a process'); },
+    async shutdown() {} };
+  try {
+    for (const config of ['windows.sandbox = "elevated"', '[windows]\nsandbox = "unknown"', '[windows]\nsandbox = "unelevated"\nsandbox = "elevated"']) {
+      fs.writeFileSync(path.join(policyRoot, 'config.toml'), config);
+      const provider = createCodexAgentProvider({ codexHome: policyRoot, cliProcess: fixtureCli, resolveTaskWorkspace: () => null });
+      const capabilities = provider.capabilities();
+      assert.equal(capabilities.available, false);
+      assert.equal(capabilities.security.nativeSandboxSupported, false);
+      assert.match(capabilities.reason, /^CODEX_NATIVE_POLICY_/);
+      const health = await provider.health();
+      for (const key of ['available', 'sessionCapable', 'taskEligible', 'readyForTask']) assert.equal(health[key], false, key);
+      assert.equal(health.installed, true); assert.equal(health.compatible, true);
+      assert.equal(health.probeCode, capabilities.reason);
+      const guardedPolicy = createAgentBroker({ registry: createAgentProviderRegistry({ providers: [provider] }) });
+      const scope = guardedPolicy.describeExecutionSecurity('codex', 'fixture-workspace');
+      assert.throws(() => guardedPolicy.authorizeExecution('codex', 'fixture-workspace', scope.fingerprint), e => e.code === 'AGENT_NATIVE_SANDBOX_UNSUPPORTED');
+      await assert.rejects(() => provider.createSession({ taskId: 'fixture-task', workspaceId: 'fixture-workspace' }), e => /^CODEX_NATIVE_POLICY_/.test(e.code));
+      const service = createDefaultAgentService({ codexOptions: { codexHome: policyRoot, cliProcess: fixtureCli } });
+      try { assert.equal(service.listProviders().find(item => item.id === 'codex').available, false); }
+      finally { await service.close(); }
+    }
+    assert.equal(starts, 0, 'invalid policy cannot run even when metadata remains readable');
+    console.log('PASS invalid native policy is unavailable without breaking Core provider enumeration or weakening execution checks');
+  } finally { fs.rmSync(policyRoot, { recursive: true, force: true }); }
 }

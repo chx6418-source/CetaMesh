@@ -29,6 +29,8 @@ tray-icon = { version = "=0.23.1", default-features = false }
 windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
 tao = "=0.35.2"
 wry = { version = "=0.55.1", default-features = false, features = ["os-webview", "protocol"] }
+webview2-com = "=0.38.2"
+windows = { version = "=0.61.3", features = ["Win32_Foundation", "Win32_System_Com"] }
 
 [profile.release]
 codegen-units = 1

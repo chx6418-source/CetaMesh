@@ -2,13 +2,13 @@
   "schemaVersion": 1,
   "product": "CetaMesh",
   "edition": "Desktop",
-  "developer": "",
+  "developer": "chx6418-source",
   "productLinks": {
     "officialUrls": {
       "website": "https://cetamesh.com",
       "websiteRepository": "https://github.com/chx6418-source/cetamesh-web",
       "gitcode": "https://gitcode.com/ygdnn/CetaMesh",
-      "github": "https://github.com/chx6418-source/whalebridge",
+      "github": "https://github.com/chx6418-source/CetaMesh",
       "license": "https://www.gnu.org/licenses/gpl-3.0.html"
     },
     "paths": {

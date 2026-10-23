@@ -234,3 +234,13 @@
 ## Agent source synchronization (2026-10-22)
 
 Owner-authorized Agent/UI source commit2b2339c merged into main at fed3925, preserving GitCode initial5633dd7. Actual merged-main tests20 PASS/0 FAIL/1 NRE and UI buildPASS; both existing GitHub/GitCode main refs were verified at fed3925 after normal pushes. This synchronization report is a subsequent documentation-only commit. New Agent SEA/native/real-account E2E remains unverified, RELEASE_BLOCKED; RC1116 unchanged. Evidence/artifact worktree retained. See docs/desktop/AGENT_EXPANSION_SYNC_REPORT.md. Owner requests shutdown after final sync; preserve state and do not start new packaging/install work.
+
+## Desktop 当前修复（2026-10-23）
+
+- 统一侧栏折叠和会话工具按钮，收紧聊天标题、输入区及任务卡片；记忆列表采用可读摘要、横向操作与折叠原文，保留原始存储内容。
+- 新增右侧多标签引用查看面板：工作区／交付物只读文件预览与独立原生网页视图，权限及网络边界见 [Desktop 架构](docs/desktop/ARCHITECTURE.md#docked-reference-viewer)。
+- 修复 DSH Follow 初始化序号、已结束任务的聊天配置解绑及工作区快照对依赖／缓存目录的处理；仍保留工作区写入归属、审批和快照大小限制。
+- 修复 Codex 原生策略检查对无关键名的误报；策略无法验证时仅将该 Provider 标记为不可用，Core 可继续启动，执行与授权检查仍拒绝未经验证的策略。
+- 补齐菜单退出及布局反馈动效，统一时长与缓动，并遵循系统减少动态效果设置。
+- 开发者显示为 chx6418-source，GitHub 入口指向公开 CetaMesh 仓库。更新页明确显示缺少可信公钥或清单的原因；签名校验继续强制执行，尚未配置的更新服务不视为可用。
+- 本轮合并不包含新版安装包或正式发行。真实账号工作流、已安装版本的原生视觉验收及 Mobile 验证仍按各自门禁处理。

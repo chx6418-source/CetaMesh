@@ -12,6 +12,7 @@ const EXCLUDED_NAMES = new Set([
   'credentials', 'secrets', 'secret', 'private_keys'
 ]);
 const SECRET_FILE_EXTENSIONS = new Set(['.pem', '.p12', '.pfx', '.key', '.keystore']);
+const GENERATED_DIRECTORIES = new Set(['node_modules', '.pnpm', '.pnpm-store', '.npm-cache', '.cache', '__pycache__', '.dsh', '.dsh-tools']);
 
 export class StagingWorkspaceError extends Error {
   constructor(code, message, { cause } = {}) {
@@ -85,7 +86,8 @@ function assertStageOutsideWorkspaces(stagingRoot, workspaceRoots) {
   }
 }
 
-function walkFiles(root, { maxFiles = DEFAULT_MAX_FILES, maxBytes = DEFAULT_MAX_BYTES, excludedRoots = [], area = 'unknown' } = {}) {
+function walkFiles(root, { maxFiles = DEFAULT_MAX_FILES, maxBytes = DEFAULT_MAX_BYTES, excludedRoots = [],
+  excludedDirectories = [], discoverBrowserProfiles = false, area = 'unknown' } = {}) {
   function readFailure(message, cause) {
     const error = new StagingWorkspaceError('STAGING_READ_FAILED', message, { cause });
     error.snapshotArea = area;
@@ -94,7 +96,17 @@ function walkFiles(root, { maxFiles = DEFAULT_MAX_FILES, maxBytes = DEFAULT_MAX_
   const files = new Map();
   let totalBytes = 0;
   const excluded = normalizeRoots(excludedRoots);
+  const omitted = new Set(excludedDirectories);
   const visit = (dir, relative, depth) => {
+    if (relative && omitted.has(relative)) return;
+    // Discover private browser profiles only when selecting the initial input.
+    // Freeze these paths for subsequent stage/source comparisons: new marker files
+    // must never make existing baseline files disappear and become deletions.
+    if (discoverBrowserProfiles && fs.existsSync(path.join(dir, 'Local State'))
+      && (fs.existsSync(path.join(dir, 'Default')) || fs.existsSync(path.join(dir, 'component_crx_cache')))) {
+      if (!relative) fail('STAGING_PATH_DENIED', '浏览器配置目录不能作为 Agent 工作区，请选择具体项目目录。');
+      omitted.add(relative); return;
+    }
     if (depth > MAX_DEPTH) fail('STAGING_TOO_DEEP', 'Workspace snapshot exceeds staging depth limit');
     let entries;
     try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
@@ -114,20 +126,21 @@ function walkFiles(root, { maxFiles = DEFAULT_MAX_FILES, maxBytes = DEFAULT_MAX_
       if (!pathContains(root, realSource)) fail('STAGING_PATH_ESCAPE', 'Task Workspace entry resolves outside its root');
       if (excluded.some((excludedRoot) => pathContains(excludedRoot, realSource))) continue;
       if (stat.isDirectory()) {
+        if (GENERATED_DIRECTORIES.has(entry.name.toLowerCase())) continue;
         visit(source, rel, depth + 1);
         continue;
       }
       if (!stat.isFile()) continue;
       if (files.size >= maxFiles) fail('STAGING_TOO_MANY_FILES', 'Workspace snapshot exceeds staging file limit');
       totalBytes += stat.size;
-      if (totalBytes > maxBytes) fail('STAGING_TOO_LARGE', 'Workspace snapshot exceeds staging size limit');
+      if (totalBytes > maxBytes) fail('STAGING_TOO_LARGE', `工作区快照超过 ${Math.ceil(maxBytes / 1024 / 1024)} MiB 上限。请选择具体项目子目录，或改用普通聊天。`);
       let hash;
       try { hash = hashFile(source); } catch (error) { readFailure('Unable to read a Task Workspace file', error); }
       files.set(rel, { hash, size: stat.size });
     }
   };
   visit(root, '', 0);
-  return { files, totalBytes };
+  return { files, totalBytes, excludedDirectories: [...omitted] };
 }
 
 /** Make a bounded, credential-filtered snapshot for one Task, outside all Workspace roots. */
@@ -153,7 +166,7 @@ export async function createStagingWorkspace({ taskId, workspaceId, sourceRoot, 
   fs.mkdirSync(stage, { recursive: false, mode: 0o700 });
   const excluded = normalizeRoots([...excludedRoots, ...nestedWorkspaceRoots]);
   try {
-    const snapshot = walkFiles(source, { maxFiles, maxBytes, excludedRoots: excluded });
+    const snapshot = walkFiles(source, { maxFiles, maxBytes, excludedRoots: excluded, discoverBrowserProfiles: true });
     for (const rel of snapshot.files.keys()) {
       const sourcePath = path.join(source, ...rel.split('/'));
       const targetPath = path.join(stage, ...rel.split('/'));
@@ -178,6 +191,7 @@ export async function createStagingWorkspace({ taskId, workspaceId, sourceRoot, 
       maxFiles,
       maxBytes,
       excludedRoots: excluded,
+      excludedDirectories: snapshot.excludedDirectories,
       closed: false
     };
   } catch (error) {
@@ -192,7 +206,7 @@ export function collectStagedChanges(stage) {
   if (!stage || stage.closed || !pathContains(stage.stagingRoot, stage.root) || stage.root === stage.stagingRoot) {
     fail('STAGING_SESSION_INVALID', 'Invalid or closed staging Workspace');
   }
-  const stageSnapshot = walkFiles(stage.root, { maxFiles: stage.maxFiles, maxBytes: stage.maxBytes, area: 'stage' });
+  const stageSnapshot = walkFiles(stage.root, { maxFiles: stage.maxFiles, maxBytes: stage.maxBytes, excludedDirectories: stage.excludedDirectories, area: 'stage' });
   const allPaths = new Set([...stage.baseline.keys(), ...stageSnapshot.files.keys()]);
   const changes = [];
   for (const rel of allPaths) {
@@ -214,7 +228,7 @@ export function collectStagedChanges(stage) {
   // Keep the original baseline: this never rebases or approves pending writes.
   if (changes.length) {
     const sourceSnapshot = walkFiles(stage.sourceRoot, {
-      maxFiles: stage.maxFiles, maxBytes: stage.maxBytes, excludedRoots: stage.excludedRoots, area: 'source'
+      maxFiles: stage.maxFiles, maxBytes: stage.maxBytes, excludedRoots: stage.excludedRoots, excludedDirectories: stage.excludedDirectories, area: 'source'
     });
     for (const rel of allPaths) {
       const original = stage.baseline.get(rel) ?? null;
@@ -239,9 +253,9 @@ export function collectStagedChanges(stage) {
 /** Refresh the source baseline only after the Capability Broker reports a completed import. */
 export function refreshStagingBaseline(stage) {
   if (!stage || stage.closed) fail('STAGING_SESSION_INVALID', 'Invalid or closed staging Workspace');
-  const stageSnapshot = walkFiles(stage.root, { maxFiles: stage.maxFiles, maxBytes: stage.maxBytes });
+  const stageSnapshot = walkFiles(stage.root, { maxFiles: stage.maxFiles, maxBytes: stage.maxBytes, excludedDirectories: stage.excludedDirectories });
   const sourceSnapshot = walkFiles(stage.sourceRoot, {
-    maxFiles: stage.maxFiles, maxBytes: stage.maxBytes, excludedRoots: stage.excludedRoots
+    maxFiles: stage.maxFiles, maxBytes: stage.maxBytes, excludedRoots: stage.excludedRoots, excludedDirectories: stage.excludedDirectories
   });
   if (stageSnapshot.files.size !== sourceSnapshot.files.size) {
     fail('WORKSPACE_RECONCILIATION_REQUIRED', 'Task Workspace and imported staging output differ');

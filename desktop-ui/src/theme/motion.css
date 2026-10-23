@@ -1,11 +1,11 @@
-/* Shared lively motion. No per-token animation or measured virtual-row transforms. */
+/* Shared motion: quick feedback, soft settling, stable reading and pointer targets. */
 :root {
-  --motion-fast: 140ms;
-  --motion-normal: 210ms;
-  --motion-panel: 300ms;
-  --motion-page: 320ms;
-  --motion-ease: cubic-bezier(.2,.8,.2,1);
-  --motion-spring: cubic-bezier(.18,.85,.32,1.22);
+  --motion-fast: 120ms;
+  --motion-normal: 180ms;
+  --motion-panel: 240ms;
+  --motion-page: 220ms;
+  --motion-ease: cubic-bezier(.2,.75,.25,1);
+  --motion-spring: cubic-bezier(.22,1,.36,1);
 }
 
 /* A single page entrance moves headings, toolbars and content together.
@@ -13,11 +13,17 @@
 .page-frame { animation: cm-page-enter var(--motion-page) var(--motion-ease); }
 /* Async operation status appears as one region, including its heading. */
 .plugin-approval-inbox { animation: cm-region-enter var(--motion-normal) var(--motion-ease); }
+.memory-manager, .memory-candidates, .agent-grid, .plugin-grid, .workspace-panel,
+.reference-tabs, .reference-toolbar { animation: cm-region-enter var(--motion-normal) var(--motion-ease); }
 
 :is(.cm-button, .cm-select-trigger, .cm-select-option, .cm-tab, .nav-item, .session-item,
     .session-menu-trigger, .all-sessions, .text-link, .workspace-menu button,
     .composer-add, .composer-context-trigger, .composer-submit, .artifact-card,
-    .memory-ref, .theme-option, .setting-switch) {
+    .memory-ref, .theme-option, .setting-switch, .memory-create-panel > summary,
+    .memory-item-details > summary, .settings-category-nav button, .reference-tab button,
+    .reference-narrow-switch, .about-link-row, .feedback-link-row, .rail-panel-toggle,
+    .sidebar-new-session, .session-heading > button, .workspace-project > summary,
+    .workspace-switch > summary, .cm-dropdown > summary, .cm-popover > summary) {
   transition: background-color var(--motion-fast) var(--motion-ease),
     color var(--motion-fast) var(--motion-ease), border-color var(--motion-fast) var(--motion-ease),
     box-shadow var(--motion-normal) var(--motion-ease), opacity var(--motion-fast) var(--motion-ease),
@@ -26,13 +32,16 @@
 @media (hover: hover) and (pointer: fine) {
   :is(.cm-button, .composer-submit):hover:not(:disabled) { transform: translateY(-1px); }
   .cm-icon-button:hover:not(:disabled) { transform: none; }
-  :is(.cm-icon-button, .composer-add):hover:not(:disabled) svg { transform: scale(1.12); }
-  :is(.artifact-card, .memory-ref, .theme-option):hover:not(:disabled) { transform: translateY(-2px); }
-  :is(.task-card, .agent-card, .plugin-card):hover { transform: translateY(-3px); border-color: var(--border-strong); }
+  :is(.cm-icon-button, .composer-add):hover:not(:disabled) svg { transform: scale(1.06); }
+  :is(.artifact-card, .memory-ref, .theme-option):hover:not(:disabled) { transform: translateY(-1px); }
+  :is(.task-card, .agent-card, .plugin-card, .memory-item):hover { border-color: var(--border-strong); }
+  :is(.memory-create-panel > summary, .memory-item-details > summary):hover { color: var(--accent); background-color: var(--surface-hover); }
 }
-:is(.cm-button, .composer-submit, .composer-add, .artifact-card, .nav-item, .session-item,
-    .cm-select-trigger, .composer-context-trigger, .theme-option):active:not(:disabled) { transform: scale(.95); }
-:is(.task-card, .agent-card, .plugin-card, .cm-input, .cm-textarea, .composer-field) {
+:is(.cm-button, .composer-submit, .composer-add, .artifact-card,
+    .cm-select-trigger, .composer-context-trigger, .theme-option):active:not(:disabled) { transform: scale(.98); }
+.cm-icon-button:active:not(:disabled) { transform: none; }
+.cm-icon-button:active:not(:disabled) svg { transform: scale(.94); }
+:is(.task-card, .agent-card, .plugin-card, .memory-item, .cm-input, .cm-textarea, .composer-field, .memory-create textarea) {
   transition: border-color var(--motion-normal) var(--motion-ease),
     background-color var(--motion-normal) var(--motion-ease), box-shadow var(--motion-normal) var(--motion-ease),
     transform var(--motion-panel) var(--motion-spring);
@@ -53,6 +62,8 @@
   animation: cm-menu-enter var(--motion-normal) var(--motion-spring);
 }
 .composer-context-options { transform-origin: left bottom; }
+[data-motion-popup] { animation: none; }
+.reference-divider span { transition: background-color var(--motion-fast) var(--motion-ease); }
 .attachment-list > span, .cm-toast, .cm-banner, .harbor-error, .inline-success,
 .message-error, .sidebar-error { animation: cm-feedback-enter var(--motion-normal) var(--motion-spring); }
 .cm-tooltip:hover::after, .cm-tooltip:focus-within::after { animation: cm-tooltip-enter var(--motion-fast) var(--motion-ease); }
@@ -61,13 +72,18 @@
 .loading-dot { display: inline-block; width: 9px; height: 9px; margin-right: 8px; border-radius: 50%; background: var(--accent); animation: cm-loading-pulse 1.2s ease-in-out infinite; }
 .tool-call.active > summary > svg:first-child { animation: cm-loading-pulse 1.4s ease-in-out infinite; }
 .host-dot.checking { animation: cm-loading-pulse 1.2s ease-in-out infinite; }
-.cm-badge, .host-dot, .status-pill { transition: color var(--motion-fast), background-color var(--motion-normal), border-color var(--motion-normal); }
+.cm-badge, .host-dot, .status-pill, .reference-tab { transition: color var(--motion-fast), background-color var(--motion-normal), border-color var(--motion-normal); }
 .harbor-shell, .harbor-sidebar, .page-frame, .composer-dock, .window-chrome { transition: background-color var(--motion-normal), color var(--motion-normal), border-color var(--motion-normal); }
+.harbor-shell { transition: grid-template-columns var(--motion-panel) var(--motion-ease), background-color var(--motion-normal), color var(--motion-normal), border-color var(--motion-normal); }
 .window-controls button { transition: background-color var(--motion-fast), color var(--motion-fast); }
 .cm-sheet-layer { display: contents; }
 
-/* Preserve native disclosure semantics; unsupported engines keep immediate height changes. */
+/* Older engines still fade disclosure contents; modern engines also interpolate height. */
+:where(details:not(.workspace-switch):not(.cm-dropdown):not(.cm-popover)[open]) > :not(summary) {
+  animation: cm-region-enter var(--motion-normal) var(--motion-ease);
+}
 @supports (interpolate-size: allow-keywords) and (transition-behavior: allow-discrete) and selector(details::details-content) {
+  :where(details:not(.workspace-switch):not(.cm-dropdown):not(.cm-popover)[open]) > :not(summary) { animation: none; }
   details:not(.workspace-switch):not(.cm-dropdown):not(.cm-popover) { interpolate-size: allow-keywords; }
   details:not(.workspace-switch):not(.cm-dropdown):not(.cm-popover)::details-content {
     block-size: 0; opacity: 0; overflow: clip; content-visibility: hidden;
@@ -80,22 +96,23 @@
   }
 }
 
-.cm-dialog { opacity: 0; transform: translateY(16px) scale(.96); transition: opacity var(--motion-normal), transform var(--motion-panel) var(--motion-spring), display var(--motion-panel) allow-discrete, overlay var(--motion-panel) allow-discrete; }
+.cm-dialog { opacity: 0; transform: translateY(8px) scale(.99); transition: opacity var(--motion-normal), transform var(--motion-panel) var(--motion-spring), display var(--motion-panel) allow-discrete, overlay var(--motion-panel) allow-discrete; }
 .cm-dialog[open] { opacity: 1; transform: none; }
 .cm-dialog::backdrop { opacity: 0; transition: opacity var(--motion-normal), display var(--motion-panel) allow-discrete, overlay var(--motion-panel) allow-discrete; }
 .cm-dialog[open]::backdrop { opacity: 1; }
-@starting-style { .cm-dialog[open] { opacity: 0; transform: translateY(16px) scale(.96); } .cm-dialog[open]::backdrop { opacity: 0; } }
+@starting-style { .cm-dialog[open] { opacity: 0; transform: translateY(8px) scale(.99); } .cm-dialog[open]::backdrop { opacity: 0; } }
 
 /* Virtualized history can remount while scrolling. Never replay card or text entrances there. */
 .virtual-row, .virtual-row .cm-card, .virtual-row .cm-surface,
-.virtual-row .message-error, .chat-message .cm-card { animation: none; }
+.virtual-row .message-error, .chat-message .cm-card,
+.virtual-row details[open] > :not(summary) { animation: none; }
 
 @keyframes cm-page-enter { from { opacity: .35; } to { opacity: 1; } }
 @keyframes cm-region-enter { from { opacity: 0; } to { opacity: 1; } }
-@keyframes cm-menu-enter { from { opacity: 0; transform: translateY(-6px) scale(.96); } to { opacity: 1; transform: none; } }
-@keyframes cm-feedback-enter { from { opacity: 0; transform: translateY(6px) scale(.98); } to { opacity: 1; transform: none; } }
+@keyframes cm-menu-enter { from { opacity: 0; transform: translateY(-3px) scale(.99); } to { opacity: 1; transform: none; } }
+@keyframes cm-feedback-enter { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
 @keyframes cm-tooltip-enter { from { opacity: 0; } to { opacity: 1; } }
-@keyframes cm-loading-pulse { 0%,100% { opacity: .35; transform: scale(.85); } 50% { opacity: 1; transform: scale(1.12); } }
+@keyframes cm-loading-pulse { 0%,100% { opacity: .45; } 50% { opacity: 1; } }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {

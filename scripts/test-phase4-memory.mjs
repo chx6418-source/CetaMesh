@@ -63,6 +63,21 @@ try {
     const searched = await pagingServices.desktopUiService.execute({ method: 'ui.memory.overview', params: {
       scope: 'user:desktop', query: '独特海獭风格' } });
     assert.equal(searched.memories[0].id, oldRelevant.id, 'Harbor search reaches old records');
+    const rawWorking = JSON.stringify({ schemaVersion: 1, taskId: 'fixture-task', scope: 'task:fixture-task',
+      goal: '整理项目入口', checkpoint: { summary: '找到主要入口，尚待人工核验。', nextAction: '核对目录结构' }, evidence: [] });
+    const working = pagingServices.memoryService.runtime.create({ principal: user, type: 'working', scope: 'task:fixture-task',
+      source: 'system', tags: ['core-task-working-v1'], content: rawWorking });
+    const workingView = await pagingServices.desktopUiService.execute({ method: 'ui.memory.get', params: { id: working.id } });
+    assert.equal(workingView.title, '整理项目入口', 'working Memory title uses its task goal, not serialized state');
+    assert.ok(workingView.summary.includes('找到主要入口') && workingView.summary.includes('待核验'), 'readable preview retains verification boundary');
+    assert.equal(workingView.content, rawWorking, 'raw content remains intact for expand/edit and agent continuity');
+    assert.equal(pagingServices.memoryService.runtime.get({ principal: user, id: working.id }).memory.content, rawWorking);
+    for (const [type, content] of [['knowledge', rawWorking], ['working', '{broken task state']]) {
+      const ordinary = pagingServices.memoryService.runtime.create({ principal: user, type, scope: 'task:fixture-task', content });
+      const view = await pagingServices.desktopUiService.execute({ method: 'ui.memory.get', params: { id: ordinary.id } });
+      assert.equal(view.content, content, 'ordinary JSON and malformed working content are never rewritten or dropped');
+      assert.equal(view.summary, content);
+    }
   } finally { pagingServices.chatService.close(); }
   assert.throws(() => afterIoCrash.create({ principal: user, type: 'user', scope: 'user:someone-else',
     content: 'foreign identity' }), error => error.code === 'SCOPE_NOT_AUTHORIZED');

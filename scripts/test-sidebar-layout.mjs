@@ -27,12 +27,19 @@ try {
     assert.ok(!html.includes(`<span>${label}</span>`), `no visible rail label ${label}`);
   }
   assert.ok(html.includes('aria-expanded="true"'));
+  assert.equal((html.match(/aria-label="收起工作区列表"/g) ?? []).length, 1, 'expanded sidebar exposes one collapse control');
+  assert.match(html, /lucide-panel-left/, 'sidebar control uses the panel icon');
+  assert.doesNotMatch(html, /class="rail-connection"/, 'no standalone connection dot in the icon rail');
+  assert.match(html, /role="status"[^>]*>[\s\S]*?已连接/, 'workspace panel retains connection status');
   const memory = renderToStaticMarkup(React.createElement(WorkspaceSidebar, { ...props, page: 'memory', collapsed: true }));
   assert.match(memory, /<button[^>]*aria-label="记忆"[^>]*aria-current="page"/);
   for (const label of ['分析项目', '普通聊天', '旧工作区会话', 'NexBox-main', '查看全部会话']) assert.ok(html.includes(label));
   assert.equal((html.match(/>分析项目</g) ?? []).length, 1);
   const closed = renderToStaticMarkup(React.createElement(WorkspaceSidebar, { ...props, collapsed: true }));
   assert.ok(closed.includes('aria-label="展开工作区列表"'));
+  assert.equal((closed.match(/aria-label="展开工作区列表"/g) ?? []).length, 1, 'collapsed sidebar keeps a single way to reopen');
+  assert.match(closed, /lucide-panel-left/);
+  assert.doesNotMatch(closed, /class="rail-connection"/);
   assert.ok(!closed.includes('class="workspace-panel"'), 'collapsed panel is unmounted and has no hidden focus targets');
   const settings = renderToStaticMarkup(React.createElement(WorkspaceSidebar, { ...props, page: 'settings', collapsed: true }));
   assert.ok(!settings.includes('rail-panel-toggle'), 'settings page has no ineffective workspace expansion control');

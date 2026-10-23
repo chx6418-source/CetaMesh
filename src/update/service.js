@@ -78,7 +78,7 @@ export function createUpdateService({
       : notesCache.write({
           currentVersion,
           latest: null,
-          status: 'error',
+          status: result?.status === 'not_configured' ? 'not_configured' : 'error',
           checkedAt,
           source: null,
           sources,
