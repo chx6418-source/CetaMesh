@@ -3,6 +3,7 @@ import type { ChangeEvent, ComponentProps, KeyboardEvent as ReactKeyboardEvent, 
 import { createPortal } from 'react-dom';
 import { Icon } from '../icons';
 import type { IconName } from '../icons';
+import { MotionPopup } from './motion-popup';
 
 type ButtonProps = ComponentProps<'button'> & { variant?: 'default' | 'primary' | 'ghost' | 'danger'; compact?: boolean; icon?: IconName };
 export function Button({ variant = 'default', compact = false, icon, className = '', children, ...props }: ButtonProps) {
@@ -127,9 +128,9 @@ export function Select({ label, children, value, disabled = false, className = '
     <button ref={triggerRef} id={controlId} type="button" className="cm-select-trigger" aria-label={label} aria-haspopup="listbox" aria-expanded={open} aria-controls={listId} disabled={disabled} onClick={() => open ? setOpen(false) : openList()} onKeyDown={handleKeyDown}>
       <span>{selected?.label ?? ''}</span><Icon name="down" size={14} />
     </button>
-    {open && createPortal(<div ref={listRef} id={listId} role="listbox" aria-label={label} className="cm-select-options" style={{ position: 'fixed', top: position.top, left: position.left, width: position.width }}>
+    {typeof document !== 'undefined' && createPortal(<MotionPopup open={open} ref={listRef} id={listId} role="listbox" aria-label={label} className="cm-select-options" style={{ position: 'fixed', top: position.top, left: position.left, width: position.width }}>
       {options.map((option, index) => <button key={`${option.value}-${index}`} ref={element => { if (element) optionRefs.current[index] = element; }} type="button" role="option" aria-selected={option.value === currentValue} className="cm-select-option" disabled={option.disabled} tabIndex={index === activeIndex ? 0 : -1} onKeyDown={handleKeyDown} onClick={() => choose(index)}>{option.label}{option.value === currentValue && <Icon name="check" size={14} />}</button>)}
-    </div>, document.body)}
+    </MotionPopup>, document.body)}
   </label>;
 }
 export function Dropdown({ label, children }: { label: string; children: ReactNode }) {

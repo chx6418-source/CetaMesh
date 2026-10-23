@@ -24,6 +24,8 @@ use crate::ui_prefs::{self, CloseBehavior, UiPrefs};
 use crate::webview_policy::{self, APP_ORIGIN, BridgeRequest, PRODUCTION_CSP, WindowAction};
 
 enum UiEvent {
+    ReferenceRequest { id: String, method: String, params: Value },
+    ReferenceEvent(Value),
     Wake,
     WindowAction { id: String, action: WindowAction },
     CoreStatus(Status),
@@ -151,6 +153,10 @@ fn dispatch_bridge(
 ) {
     let id = request.id;
     let method = request.method.clone();
+    if method.starts_with("app.previewBrowser.") {
+        let _ = proxy.send_event(UiEvent::ReferenceRequest { id, method, params: request.params });
+        return;
+    }
     match method.as_str() {
         "app.ping" => {
             let _ = proxy.send_event(UiEvent::Reply { id, result: Ok(json!({ "host": "webview2", "ready": true })) });
@@ -451,10 +457,41 @@ pub fn run_webview_ui(paths: DesktopPaths, dev_url: Option<String>) -> Result<()
 
     let prefs_data_dir = paths.data_dir.clone();
     let mut next_prefs_sync = Instant::now() + Duration::from_secs(2);
+    let mut reference_browser: Option<crate::reference_browser::ReferenceBrowser> = None;
+    let reference_profile = paths.data_dir.join("reference-webview2");
+    let reference_proxy = proxy.clone();
+    let mut reference_generation = 0u64;
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::WaitUntil(next_prefs_sync);
         match event {
+            Event::UserEvent(UiEvent::ReferenceRequest { id, method, params }) => {
+                let target = params["targetId"].as_str().unwrap_or_default();
+                let result = if method.ends_with(".open") {
+                    reference_browser.take();
+                    reference_generation += 1;
+                    let generation = reference_generation;
+                    let callback = reference_proxy.clone();
+                    let notify = std::rc::Rc::new(move |mut data: Value| { data["generation"] = Value::from(generation); let _ = callback.send_event(UiEvent::ReferenceEvent(data)); });
+                    crate::reference_browser::ReferenceBrowser::new(&window, &reference_profile, target.to_owned(), params["url"].as_str().unwrap_or_default().to_owned(), &params["bounds"], notify)
+                        .map(|browser| { reference_browser = Some(browser); json!({"opened":true}) })
+                } else if method.ends_with(".command") && params["action"] == "close" {
+                    if reference_browser.as_ref().is_some_and(|browser| browser.id == target) { reference_browser.take(); }
+                    Ok(json!({"updated":true}))
+                } else if let Some(browser) = reference_browser.as_ref().filter(|browser| browser.id == target) {
+                    if method.ends_with(".layout") { browser.layout(&window, &params["bounds"], params["visible"].as_bool().unwrap_or(false)) }
+                    else { browser.command(params["action"].as_str().unwrap_or_default()) }.map(|()| json!({"updated":true}))
+                } else { Err("此网页标签已关闭。".into()) };
+                send_reply(&webview, id, result);
+            }
+            Event::UserEvent(UiEvent::ReferenceEvent(data)) => {
+                if data["generation"] == reference_generation && reference_browser.as_ref().is_some_and(|browser| data["targetId"] == browser.id) {
+                    if data["initialized"] == true { if let Some(browser) = &reference_browser { browser.reapply_visibility(); } }
+                    if data["focusRequested"] == true { let _ = webview.focus(); }
+                    if let Ok(encoded) = serde_json::to_string(&json!({"event":"preview.browser","data":data})) { let _ = webview.evaluate_script(&format!("window.__cetameshEvent?.({encoded})")); }
+                }
+            }
             Event::UserEvent(UiEvent::WindowAction { id, action }) => {
+                if matches!(action, WindowAction::Minimize | WindowAction::Close) { if let Some(browser) = &reference_browser { browser.hide(); } }
                 let result = match action {
                     WindowAction::State => Ok(()),
                     WindowAction::Drag => window.drag_window().map_err(|error| error.to_string()),
@@ -514,6 +551,7 @@ pub fn run_webview_ui(paths: DesktopPaths, dev_url: Option<String>) -> Result<()
                 }
             }
             Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
+                if let Some(browser) = &reference_browser { browser.hide(); }
                 sync_window_geometry(&window, &mut prefs);
                 save_ui_prefs(&prefs_data_dir, &prefs);
                 if prefs.close_behavior == CloseBehavior::HideToTray {
@@ -535,8 +573,10 @@ pub fn run_webview_ui(paths: DesktopPaths, dev_url: Option<String>) -> Result<()
             }
             Event::WindowEvent { event: WindowEvent::Resized(_) | WindowEvent::Moved(_), .. } => {
                 sync_window_geometry(&window, &mut prefs);
+                let _ = webview.evaluate_script("window.dispatchEvent(new Event('resize'))");
             }
             Event::MainEventsCleared => {
+                if window.is_visible() && !window.is_minimized() { if let Some(browser) = &reference_browser { browser.resume(); } }
                 if Instant::now() >= next_prefs_sync {
                     if sync_window_geometry(&window, &mut prefs) {
                         save_ui_prefs(&prefs_data_dir, &prefs);

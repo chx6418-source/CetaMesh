@@ -16,7 +16,7 @@ function SheetLayer({ title, onClose, children, reduced }: { title: string; onCl
   const present = useIsPresent();
   return <motion.div className="cm-sheet-layer" inert={!present} initial="closed" animate="open" exit="closed">
     <motion.button className="cm-sheet-backdrop" aria-label="关闭侧栏" onClick={onClose} variants={{ closed: { opacity: 0 }, open: { opacity: 1 } }} transition={{ duration: reduced ? 0 : .2 }} />
-    <motion.aside className="cm-sheet" aria-label={title} variants={{ closed: { opacity: 0, x: reduced ? 0 : 48 }, open: { opacity: 1, x: 0 } }} transition={reduced ? { duration: 0 } : { type: 'spring', stiffness: 360, damping: 27 }}><div className="row between"><h2>{title}</h2><IconButton label="关闭" icon="close" onClick={onClose} /></div>{children}</motion.aside>
+    <motion.aside className="cm-sheet" aria-label={title} variants={{ closed: { opacity: 0, x: reduced ? 0 : 24 }, open: { opacity: 1, x: 0 } }} transition={reduced ? { duration: 0 } : { type: 'spring', stiffness: 380, damping: 38, mass: .9 }}><div className="row between"><h2>{title}</h2><IconButton label="关闭" icon="close" onClick={onClose} /></div>{children}</motion.aside>
   </motion.div>;
 }
 export function Popover({ summary, children }: { summary: string; children: ReactNode }) { return <details className="cm-popover"><summary className="cm-button">{summary}</summary><div className="cm-popover-content">{children}</div></details>; }

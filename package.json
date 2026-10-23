@@ -106,6 +106,8 @@
     "@snowluma/sdk": "^1.14.0",
     "fflate": "0.8.3",
     "iconv-lite": "^0.7.3",
+    "mdast-util-from-markdown": "2.1.0",
+    "micromark-util-sanitize-uri": "2.0.1",
     "qrcode": "^1.5.4",
     "selfsigned": "^5.5.0",
     "ws": "^8.21.3",

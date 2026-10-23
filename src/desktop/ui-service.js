@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { createReferencePreview } from './reference-preview.js';
 import { fitsIpcResponse, requireIpcItem } from '../control/response-budget.js';
 import { LEGACY_RETIRED_TOOLS, isDesktopLocalService } from '../integrations/catalog.js';
 
@@ -190,10 +191,24 @@ function projectOnboarding(value) {
 function projectMemory(value) {
   const row = record(value);
   const memory = record(row.memory ?? row);
+  let display = null;
+  if (memory.type === 'working' && Array.isArray(memory.tags) && memory.tags.includes('core-task-working-v1')) {
+    try {
+      const state = JSON.parse(memory.content);
+      if (state?.schemaVersion === 1 && typeof state.taskId === 'string' && memory.scope === 'task:' + state.taskId) {
+        const summary = string(record(state.checkpoint).summary, 1000);
+        display = { title: string(state.goal, 120) || '任务工作记忆',
+          summary: summary ? '检查点摘要（待核验）：' + summary : '已保存任务目标和运行上下文，尚无检查点摘要。' };
+      }
+    } catch {
+      // Legacy or malformed working Memory remains readable as its original text.
+      display = null;
+    }
+  }
   return {
     id: string(memory.id, 128), type: string(memory.type, 80), scope: string(memory.scope, 120),
-    title: string(memory.title ?? memory.content, 300), content: typeof memory.content === 'string' ? memory.content : string(memory.summary, 4000),
-    summary: string(memory.summary ?? memory.content, 1200), tags: boundedStrings(memory.tags, 30, 100),
+    title: display?.title ?? string(memory.title ?? memory.content, 300), content: typeof memory.content === 'string' ? memory.content : string(memory.summary, 4000),
+    summary: display?.summary ?? string(memory.summary ?? memory.content, 1200), tags: boundedStrings(memory.tags, 30, 100),
     pinned: memory.pinned === true, rev: Number.isSafeInteger(memory.rev) ? memory.rev : null,
     createdAt: scalar(memory.createdAt), updatedAt: scalar(memory.updatedAt)
   };
@@ -595,6 +610,11 @@ export function createDesktopUiService({ services = {}, system = services.system
   const capability = (method, params) => call(services.capabilityService, method, params, true);
   const workspace = (method, params) => call(services.workspaceService, method, params);
   const enableReviewTokens = new Map();
+  const previews = createReferencePreview({
+    resolveMessage: source => chat('chat.reference.resolve', { id: source.sessionId, messageId: source.messageId, href: source.href }),
+    resolveArtifact: source => task('task.artifact.resolvePreview', { taskId: source.taskId, artifactId: source.artifactId }),
+    describeWorkspace: id => services.workspaceService?.describeWorkspace(id)
+  });
   const taskCreateDispatches = new Map();
 
   async function requireTaskProvider(provider, workspaceId) {
@@ -735,6 +755,9 @@ export function createDesktopUiService({ services = {}, system = services.system
   }
 
   const handlers = {
+    'ui.preview.open': p => previews.open(p),
+    'ui.preview.read': p => previews.read(p),
+    'ui.preview.close': p => previews.close(p),
     'ui.workshop.proposals': async p => {
       const result = await workshop('workshop.proposal.list', { limit: Math.max(1, Math.min(200, Number(p.limit) || 100)) });
       return { proposals: (result.proposals ?? []).map(projectWorkshopProposal), total: Number(result.total) || 0 };
@@ -1409,6 +1432,7 @@ export function createDesktopUiService({ services = {}, system = services.system
       const view = record(result.update);
       return { currentVersion: string(view.currentVersion, 80) || null, latestVersion: string(view.latest?.version ?? view.latest, 80) || null,
         status: string(view.status, 40) || 'unknown', checkedAt: string(view.checkedAt, 80) || null,
+        failureCode: string(view.failureCode, 64) || null, failureMessage: string(view.failureMessage, 300) || null,
         announcement: view.announcement ? { title: string(view.announcement.title, 300), notes: boundedStrings(view.announcement.notes, 80, 1000), publishedAt: string(view.announcement.publishedAt, 80) || null } : null,
         sources: (view.sources ?? []).slice(0, 4).map(item => selected(item, ['id', 'label', 'url', 'priority'])) };
     },
