@@ -24,7 +24,7 @@ export const DEFAULT_GITCODE_MANIFEST_URL =
 
 /** 备用源：GitHub 仓库内同名清单（raw.githubusercontent.com）。 */
 export const DEFAULT_GITHUB_FALLBACK_MANIFEST_URL =
-  'https://raw.githubusercontent.com/chx6418-source/whalebridge/main/releases/stable.json';
+  'https://raw.githubusercontent.com/chx6418-source/CetaMesh/main/releases/stable.json';
 
 /**
  * 构造有序更新源列表。

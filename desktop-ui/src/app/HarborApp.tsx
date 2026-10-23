@@ -8,11 +8,13 @@ import { Icon, type IconName } from '../components/icons';
 import { ArtifactCard } from '../components/product/cards';
 import { Button, IconButton, Input, normalizeSelectOptionLabel, SearchInput, Select, Tabs } from '../components/primitives/inputs';
 import { Sheet } from '../components/primitives/overlays';
+import { MotionPopup } from '../components/primitives/motion-popup';
 import { Badge, Banner, Card, LoadingState, Surface } from '../components/primitives/surfaces';
 import { Markdown, VirtualList, type VirtualListAnchor, type VirtualListController } from '../components/primitives/content';
 import { useUi } from '../stores/ui';
 import { WindowChrome } from './WindowChrome';
 import { WorkspaceSidebar } from './WorkspaceSidebar';
+import { ReferenceViewerLayout, ReferenceViewerProvider } from './ReferenceViewer';
 import { SettingsLayout } from './SettingsLayout';
 import { ApprovalOperationSummary, FeedbackLinkRow } from './StatusPresentation';
 import './harbor.css';
@@ -38,7 +40,7 @@ const relativeLabel = (value: string | number | null | undefined) => {
 };
 export const isChatTurnCancellable = (state: string) => ['starting', 'streaming', 'recovering', 'cancelling', 'waiting-approval'].includes(state);
 const agentActivityStatusLabel = (status: string) => ({ running: '正在运行', completed: '已完成', cancelled: '已停止', failed: '未完成' }[status] ?? status);
-const updateStatusLabel = (status: string) => ({ update_available: '有可用更新', up_to_date: '已是最新版本', checked: '已完成检查', error: '检查失败', unknown: '尚未检查' }[status] ?? status);
+const updateStatusLabel = (status: string) => ({ update_available: '有可用更新', up_to_date: '已是最新版本', checked: '已完成检查', not_configured: '软件内更新暂不可用', error: '检查失败', unknown: '尚未检查' }[status] ?? status);
 const agentInitials = (id: string) => id.slice(0, 2).toUpperCase();
 
 function ErrorNotice({ error, onRetry }: { error: string; onRetry?: () => void }) {
@@ -208,7 +210,7 @@ export function HarborApp() {
     const inScope = allSessionsScope === 'all' || (allSessionsScope === 'archived' ? session.archived : !session.archived);
     return inScope && `${session.title} ${session.id}`.toLowerCase().includes(allSessionsQuery.toLowerCase());
   });
-  return <div className={`harbor-shell ${sidebarCollapsed || page === 'settings' ? 'sidebar-collapsed' : ''}`} onContextMenu={event => {
+  return <ReferenceViewerProvider page={page}><div className={`harbor-shell ${sidebarCollapsed || page === 'settings' ? 'sidebar-collapsed' : ''}`} onContextMenu={event => {
     const target = event.target as Element;
     if (target.closest('input, textarea, [contenteditable="true"], .chat-message, .cm-markdown, .cm-code')) return;
     event.preventDefault();
@@ -221,6 +223,7 @@ export function HarborApp() {
       onNewSession={() => void createSession()} onAllSessions={() => { setAllSessionsOpen(true); setAllSessionsQuery(''); void loadAllSessions(); }}
       renderSessionActions={session => <SessionActionsMenu session={session} onAction={action => { void manageSession(session, action); }} />} />
     <div className="harbor-main">
+      <ReferenceViewerLayout>
       <main key={page} className={`page-frame page-${page}`}>
         {page === 'chat' && <ChatPage key={activeSession?.id ?? 'no-session'} session={activeSession} workspaces={workspaces} activeWorkspaceId={activeWorkspaceId} onSessionUpdate={updated => setSessions(current => current.map(item => item.id === updated.id ? updated : item))} onNew={() => createSession()} onNewChat={() => createSession(true)} onOpenMemory={() => navigate('memory')} onReviewTask={id => { setReviewTaskId(id); navigate('work'); }} />}
         {page === 'work' && <WorkPage workspaces={workspaces} onRefreshWorkspaces={refreshWorkspaces} reviewTaskId={reviewTaskId} onReviewTaskOpened={() => setReviewTaskId(null)} />}
@@ -231,6 +234,7 @@ export function HarborApp() {
         {page === 'about' && <AboutPage />}
         {page === 'onboarding' && <OnboardingPage onComplete={async () => { const state = await onboardingClient.status(); setOnboarding(state); navigate('chat'); }} />}
       </main>
+      </ReferenceViewerLayout>
     </div>
     <Sheet open={allSessionsOpen} title="全部会话" onClose={() => setAllSessionsOpen(false)}>
       <div className="all-session-manager">
@@ -244,7 +248,7 @@ export function HarborApp() {
         </article>)}</div> : !allSessionsError && <EmptyNotice icon="chat" title="没有匹配的会话" detail="调整搜索内容或新建一个会话。" />}
       </div>
     </Sheet>
-  </div>;
+  </div></ReferenceViewerProvider>;
 }
 
 function SessionActionsMenu({ session, onAction }: { session: ChatSession; onAction(action: 'rename' | 'archive' | 'delete'): void }) {
@@ -285,11 +289,11 @@ function SessionActionsMenu({ session, onAction }: { session: ChatSession; onAct
   const style: CSSProperties = { position: 'fixed', top: position.top, left: position.left };
   return <>
     <button ref={triggerRef} type="button" className="session-menu-trigger" aria-label={`会话操作：${session.title || '新会话'}`} aria-haspopup="menu" aria-expanded={open} onClick={() => open ? setOpen(false) : show()}><Icon name="more" size={15} /></button>
-    {open && createPortal(<div ref={menuRef} className="session-menu-items" role="menu" style={style} aria-label={`会话操作：${session.title || '新会话'}`}>
+    {typeof document !== 'undefined' && createPortal(<MotionPopup open={open} ref={menuRef} className="session-menu-items" role="menu" style={style} aria-label={`会话操作：${session.title || '新会话'}`}>
       <button role="menuitem" onClick={() => action('rename')}>重命名</button>
       <button role="menuitem" onClick={() => action('archive')}>归档</button>
       <button role="menuitem" className="session-delete" onClick={() => action('delete')}>删除会话</button>
-    </div>, document.body)}
+    </MotionPopup>, document.body)}
   </>;
 }
 
@@ -612,7 +616,7 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
       case 'loading': return <LoadingState label="正在读取会话…" />;
       case 'error': return <ErrorNotice error={item.message} onRetry={() => void load()} />;
       case 'empty': return <EmptyNotice icon="chat" title="还没有消息" detail="写下你要处理的事情。模型和 Agent 会按会话设置运行。" />;
-      case 'message': return <MessageBubble message={item.message} sendError={sendErrors[item.message.id]} onRetry={sendErrors[item.message.id] ? () => void retrySend(item.message.id) : undefined} />;
+      case 'message': return <MessageBubble message={item.message} reference={session ? { sessionId: session.id, messageId: item.message.id } : undefined} sendError={sendErrors[item.message.id]} onRetry={sendErrors[item.message.id] ? () => void retrySend(item.message.id) : undefined} />;
       case 'streaming': return <MessageBubble message={item.message} streaming />;
       case 'turn-error': return <div className="turn-error" role="alert">{item.message}<div className="row">{linkedTask ? <ManagedFailureActions taskId={workspaceFailureReviewTaskId(status.routing, linkedTask.id)} onReviewTask={onReviewTask} onNewChat={() => void onNewChat()} /> : <><Button compact variant="ghost" onClick={() => void resumeChat('retry').then(load).catch(cause => setError(messageOf(cause)))}>重试</Button><Button compact variant="ghost" onClick={() => void resumeChat('continue').then(load).catch(cause => setError(messageOf(cause)))}>继续</Button></>}</div></div>;
       case 'approval': return <ApprovalCard approval={item.approval} onDecide={decideApproval} />;
@@ -690,7 +694,7 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
   const selectedModelKey = session.config.agentProvider === 'codex' && !session.config.modelProvider && !session.config.model ? JSON.stringify(['', '']) : JSON.stringify([session.config.modelProvider ?? selectedProvider?.id ?? '', session.config.model || '']);
   return <div className="chat-workspace">
     <section className="conversation-pane">
-      <div className="conversation-toolbar"><div><p className="eyebrow">CETAMESH · CHAT</p><h1>{session.title || '新会话'}</h1><div className="conversation-meta"><StatusBadge value={status.state || 'idle'} /><span>更新于 {relativeLabel(session.updatedAt)}</span><span>·</span><ChatCatalogStatus catalog={catalog} /></div></div><div className="row"><IconButton label="刷新会话" icon="update" onClick={() => void load()} /><IconButton label="新建会话" icon="add" onClick={() => void onNew()} /></div></div>
+      <div className="conversation-toolbar"><div className="conversation-heading"><h1 title={session.title || '新会话'}>{session.title || '新会话'}</h1><div className="conversation-meta"><StatusBadge value={status.state || 'idle'} /><span>更新于 {relativeLabel(session.updatedAt)}</span><span>·</span><ChatCatalogStatus catalog={catalog} /></div></div><div className="conversation-actions"><IconButton label="刷新会话" icon="refresh" onClick={() => void load()} /></div></div>
       <VirtualList
         items={timelineItems}
         estimateSize={112}
@@ -741,10 +745,10 @@ export function ToolActivity({ tools }: { tools: ChatMessageDto['toolActivity'] 
   </section>;
 }
 
-export function MessageBubble({ message, streaming = false, sendError, onRetry }: { message: ChatMessageDto; streaming?: boolean; sendError?: string; onRetry?(): void }) {
+export function MessageBubble({ message, reference, streaming = false, sendError, onRetry }: { message: ChatMessageDto; reference?: { sessionId: string; messageId: string }; streaming?: boolean; sendError?: string; onRetry?(): void }) {
   const role = message.role === 'user' ? 'user' : 'assistant';
   const agentActivity = message.agentActivity;
-  return <article className={`chat-message ${role} ${streaming ? 'streaming' : ''}`}><div className="message-avatar">{role === 'assistant' ? <Icon name="sparkles" size={16} /> : '你'}</div><div className="message-body"><div className="message-meta"><strong>{role === 'assistant' ? 'CetaMesh' : '你'}</strong><span>{dateLabel(message.at)}</span>{streaming && <Badge tone="accent">生成中</Badge>}</div>{agentActivity && <div className={`agent-activity ${agentActivity.status}`} role="status"><Icon name={agentActivity.status === 'running' ? 'sparkles' : agentActivity.status === 'completed' ? 'check' : 'help'} size={15} /><span>{agentActivity.label}</span><strong>{agentActivityStatusLabel(agentActivity.status)}</strong></div>}{message.text ? <Markdown>{message.text}</Markdown> : <span className="muted">（没有文本内容）</span>}{message.attachments.length > 0 && <div className="message-attachments">{message.attachments.map(name => <span key={name}><Icon name="attach" size={13} />{name}</span>)}</div>}<ToolActivity tools={message.toolActivity} />{sendError && <div className="message-error" role="alert">{sendError}<Button compact variant="ghost" onClick={onRetry}>重试发送</Button></div>}{message.error && <p className="message-error" role="alert">{message.error}</p>}{message.cancelled && <small>本轮已停止</small>}</div></article>;
+  return <article className={`chat-message ${role} ${streaming ? 'streaming' : ''}`}><div className="message-avatar">{role === 'assistant' ? <Icon name="sparkles" size={16} /> : '你'}</div><div className="message-body"><div className="message-meta"><strong>{role === 'assistant' ? 'CetaMesh' : '你'}</strong><span>{dateLabel(message.at)}</span>{streaming && <Badge tone="accent">生成中</Badge>}</div>{agentActivity && <div className={`agent-activity ${agentActivity.status}`} role="status"><Icon name={agentActivity.status === 'running' ? 'sparkles' : agentActivity.status === 'completed' ? 'check' : 'help'} size={15} /><span>{agentActivity.label}</span><strong>{agentActivityStatusLabel(agentActivity.status)}</strong></div>}{message.text ? <Markdown reference={reference}>{message.text}</Markdown> : <span className="muted">（没有文本内容）</span>}{message.attachments.length > 0 && <div className="message-attachments">{message.attachments.map(name => <span key={name}><Icon name="attach" size={13} />{name}</span>)}</div>}<ToolActivity tools={message.toolActivity} />{sendError && <div className="message-error" role="alert">{sendError}<Button compact variant="ghost" onClick={onRetry}>重试发送</Button></div>}{message.error && <p className="message-error" role="alert">{message.error}</p>}{message.cancelled && <small>本轮已停止</small>}</div></article>;
 }
 
 async function confirmAgentExecution(provider: string, workspaceId: string) {
@@ -793,8 +797,8 @@ export function ChatComposer({ busy, models, selectedModelKey, agentProviders, s
     const resize = () => {
       input.style.height = '0px';
       const height = input.scrollHeight;
-      input.style.height = Math.min(160, Math.max(64, height)) + 'px';
-      input.style.overflowY = height > 160 ? 'auto' : 'hidden';
+      input.style.height = Math.min(144, Math.max(36, height)) + 'px';
+      input.style.overflowY = height > 144 ? 'auto' : 'hidden';
     };
     resize();
     let width = input.clientWidth;
@@ -851,7 +855,7 @@ export function ChatComposer({ busy, models, selectedModelKey, agentProviders, s
     setDraft(''); setAttachments([]);
   }
   return <div className="chat-composer"><div className="composer-field">
-    <textarea ref={textarea} aria-label="输入消息" placeholder="告诉 CetaMesh 你想做什么。" value={draft} rows={2} onChange={event => setDraft(event.target.value)} onKeyDown={event => {
+    <textarea ref={textarea} aria-label="输入消息" placeholder="告诉 CetaMesh 你想做什么。" value={draft} rows={1} onChange={event => setDraft(event.target.value)} onKeyDown={event => {
       if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing && event.keyCode !== 229) { event.preventDefault(); submit(); }
     }} />
     <div className="composer-bottom">
@@ -859,7 +863,7 @@ export function ChatComposer({ busy, models, selectedModelKey, agentProviders, s
         <button type="button" className="composer-add" aria-label="添加文本或源码附件" title="添加文本或源码附件 · 由本机 Core 处理，附件总大小上限 128 KiB" onClick={() => void addFiles()} disabled={picking || busy}><Icon name="add" size={22} /></button>
         <div className="composer-context" ref={contextMenuRef}>
           <button type="button" className="composer-context-trigger" aria-label={'工作区和 Agent：' + workspaceLabel + ' · ' + agentLabel} title={workspaceLabel + ' · ' + agentLabel} aria-expanded={contextOpen} aria-controls={contextMenuId} onClick={() => setContextOpen(value => !value)} disabled={busy}><span>{workspaceLabel} · {agentLabel}</span><Icon name="down" size={14} /></button>
-          {contextOpen && <div id={contextMenuId} className="composer-context-options" role="group" aria-label="工作区和 Agent 设置"><div className="composer-setting"><span>工作区</span><Select label="任务工作区" disabled={busy} value={workspaceId} onChange={event => onWorkspaceChange(event.target.value)}><option value="">自动（当前工作区{activeWorkspaceId ? '' : '，未指定'}）</option>{workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{normalizeSelectOptionLabel(workspace.name, workspace.id)}</option>)}</Select></div><div className="composer-setting"><span>Agent</span><Select label="选择 Agent" disabled={busy} value={selectedAgent} onChange={event => onAgentChange(event.target.value)}><option value="">能力</option><option value="none">不使用 Agent</option>{agentProviders.map(agent => { const needsScope = ['task-required', 'workspace-required'].includes(agent.reason ?? ''); const disabled = !agent.available || (!agent.eligible && !needsScope); const state = agent.eligible ? '' : availabilityReasonLabel(agent.reason) || availabilityReasonLabel(agent.status) || (agent.available ? '当前不可使用' : '不可用'); return <option key={agent.id} value={agent.id} disabled={disabled}>{normalizeSelectOptionLabel(agent.name, agent.id)}{state ? ` · ${state}` : ''}</option>; })}{selectedAgent && !agentProviders.some(agent => agent.id === selectedAgent) && <option value={selectedAgent} disabled>{normalizeSelectOptionLabel(selectedAgent)} · 不可用</option>}</Select></div></div>}
+          <MotionPopup open={contextOpen} id={contextMenuId} className="composer-context-options" role="group" aria-label="工作区和 Agent 设置"><div className="composer-setting"><span>工作区</span><Select label="任务工作区" disabled={busy} value={workspaceId} onChange={event => onWorkspaceChange(event.target.value)}><option value="">自动（当前工作区{activeWorkspaceId ? '' : '，未指定'}）</option>{workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{normalizeSelectOptionLabel(workspace.name, workspace.id)}</option>)}</Select></div><div className="composer-setting"><span>Agent</span><Select label="选择 Agent" disabled={busy} value={selectedAgent} onChange={event => onAgentChange(event.target.value)}><option value="">能力</option><option value="none">不使用 Agent</option>{agentProviders.map(agent => { const needsScope = ['task-required', 'workspace-required'].includes(agent.reason ?? ''); const disabled = !agent.available || (!agent.eligible && !needsScope); const state = agent.eligible ? '' : availabilityReasonLabel(agent.reason) || availabilityReasonLabel(agent.status) || (agent.available ? '当前不可使用' : '不可用'); return <option key={agent.id} value={agent.id} disabled={disabled}>{normalizeSelectOptionLabel(agent.name, agent.id)}{state ? ` · ${state}` : ''}</option>; })}{selectedAgent && !agentProviders.some(agent => agent.id === selectedAgent) && <option value={selectedAgent} disabled>{normalizeSelectOptionLabel(selectedAgent)} · 不可用</option>}</Select></div></MotionPopup>
         </div>
       </div>
       <div className="composer-right"><div className="composer-model"><Select label="选择模型" value={selectedModelKey} onChange={event => onModelChange(event.target.value)} disabled={busy || !modelChoices.length}>{modelChoices.length ? modelChoices.map(choice => <option key={choice.value} value={choice.value} disabled={choice.disabled}>{choice.label}</option>) : <option value="">暂无已配置模型</option>}</Select></div>
@@ -951,7 +955,10 @@ function MemoryPage() {
   return <div className="content-page memory-page">
     <Heading eyebrow="MEMORY" title="记忆" description="管理偏好、项目记忆、已保存知识与最近引用。" action={<Button icon="update" onClick={() => void refresh()}>刷新</Button>} />
     {error && <ErrorNotice error={error} onRetry={() => void refresh()} />}
-    <SearchInput label="搜索全部记忆" placeholder="搜索历史记忆" value={query} onChange={event => setQuery(event.target.value)} />
+    <div className="memory-toolbar">
+      <Tabs items={[{ id: 'preferences', label: '偏好' }, { id: 'project', label: '项目记忆' }, { id: 'knowledge', label: '已保存知识' }, { id: 'recent', label: '最近' }]} selected={category} onChange={setCategory} label="记忆分类" />
+      <SearchInput label="搜索全部记忆" placeholder="搜索记忆" value={query} onChange={event => setQuery(event.target.value)} />
+    </div>
     {candidates.some(row => row.status === 'pending' || row.status === 'confirming') && <section className="memory-candidates"><h3>待确认记忆（{candidates.filter(row => row.status === 'pending').length}）</h3>
       <p className="muted">候选尚未保存为长期记忆；批准后才会在新会话中使用。</p>
       {candidateCapacity === 0 && <p className="muted">候选容量已满。请先处理待确认项；新的提议会明确报错，不会静默丢弃。</p>}
@@ -959,7 +966,6 @@ function MemoryPage() {
       {candidates.filter(candidate => candidate.status === 'pending' || candidate.status === 'confirming').map(candidate => <article className="memory-item" key={candidate.id}><label><input type="checkbox" disabled={candidate.status !== 'pending'} checked={selectedCandidates.includes(candidate.id)} onChange={event => setSelectedCandidates(current => event.target.checked ? [...current, candidate.id] : current.filter(id => id !== candidate.id))} /> {candidate.content}</label><small>{candidate.scope} · {candidate.reason} · {candidate.status}</small>{candidate.status === 'pending' && <div className="row"><Button compact onClick={() => void decideCandidates('accept', [candidate.id])}>批准</Button><Button compact onClick={() => void decideCandidates('reject', [candidate.id])}>拒绝</Button></div>}</article>)}
     </section>}
     {candidates.some(row => row.status === 'accepted' || row.status === 'rejected') && <section className="memory-candidates"><h3>最近处理的候选</h3>{candidates.filter(row => row.status === 'accepted' || row.status === 'rejected').slice(0, 20).map(candidate => <article className="memory-item" key={candidate.id}><p>{candidate.content}</p><small>{candidate.scope} · {candidate.status === 'accepted' ? '已批准' : '已拒绝'} · {candidate.reason}</small></article>)}</section>}
-    <Tabs items={[{ id: 'preferences', label: '偏好' }, { id: 'project', label: '项目记忆' }, { id: 'knowledge', label: '已保存知识' }, { id: 'recent', label: '最近' }]} selected={category} onChange={setCategory} label="记忆分类" />
     {category === 'project' && <label className="memory-workspace-picker">项目工作区<select className="cm-input" value={workspaceId} onChange={event => setWorkspaceId(event.target.value)}><option value="">选择工作区</option>{workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{normalizeSelectOptionLabel(workspace.name, workspace.id)}</option>)}</select></label>}
     {category === 'project' && !workspaces.length && <p className="muted">先创建工作区，再保存项目记忆。</p>}
     {loading ? <LoadingState label="正在读取本机记忆…" /> : <MemoryManager initial={filtered} createType={createType} createScope={createScope} createDisabled={category === 'project' && !workspaceId} onChanged={refresh} />}
@@ -969,21 +975,19 @@ function MemoryPage() {
 
 function MemoryManager({ initial, onChanged, createType = 'knowledge', createScope = 'global', createDisabled = false }: { initial: Memory[]; onChanged(): Promise<void> | void; createType?: string; createScope?: string; createDisabled?: boolean }) {
   const [memories, setMemories] = useState(initial);
-  const [query, setQuery] = useState('');
   const [error, setError] = useState('');
   const [draft, setDraft] = useState('');
   const [editingId, setEditingId] = useState('');
   const [editDraft, setEditDraft] = useState('');
   const [busy, setBusy] = useState(false);
-  const [allLoaded, setAllLoaded] = useState(false);
-  async function refresh(search = query) {
+  async function refresh() {
     setBusy(true);
-    try { const result = await memoryClient.overview(search); setMemories(result.memories); setError(''); setAllLoaded(true); }
+    try { await onChanged(); setError(''); }
     catch (cause) { setError(messageOf(cause)); }
     finally { setBusy(false); }
   }
   useEffect(() => { setMemories(initial); }, [initial]);
-  const shown = useMemo(() => memories.filter(item => `${item.title} ${item.content} ${item.tags.join(' ')}`.toLowerCase().includes(query.toLowerCase())), [memories, query]);
+  const shown = memories;
   async function create() {
     if (!draft.trim()) return;
     setBusy(true);
@@ -1008,7 +1012,24 @@ function MemoryManager({ initial, onChanged, createType = 'knowledge', createSco
     } catch (cause) { setError(messageOf(cause)); }
     finally { setBusy(false); }
   }
-  return <div className="memory-manager"><p className="muted">记忆由本机 Memory 服务管理，可搜索、编辑、固定或删除。</p><SearchInput label="搜索记忆" placeholder="搜索记忆内容" value={query} onChange={event => setQuery(event.target.value)} /><div className="memory-create"><textarea aria-label="新建记忆内容" placeholder="添加一条需要长期保留的记忆" value={draft} onChange={event => setDraft(event.target.value)} rows={3} maxLength={4000} /><Button compact variant="primary" onClick={() => void create()} disabled={busy || !draft.trim() || createDisabled}>保存记忆</Button></div>{error && <ErrorNotice error={error} onRetry={() => void refresh()} />}{busy && <LoadingState />}{shown.length ? <div className="memory-list">{shown.map(memory => <article className="memory-item" key={memory.id}><div className="row between"><strong>{memory.title}</strong><div className="row"><Button compact variant="ghost" onClick={() => { setEditingId(memory.id); setEditDraft(memory.content); }}>编辑记忆</Button><IconButton label={memory.pinned ? '取消固定记忆' : '固定记忆'} icon="approval" compact onClick={() => void change(memory, 'pin')} /><IconButton label="删除记忆" icon="close" compact onClick={() => void change(memory, 'delete')} /></div></div>{editingId === memory.id ? <div className="memory-edit"><textarea className="cm-textarea" aria-label="编辑记忆内容" value={editDraft} onChange={event => setEditDraft(event.target.value)} rows={4} maxLength={4000} /><div className="row"><Button compact onClick={() => { setEditingId(''); setEditDraft(''); }}>取消</Button><Button compact variant="primary" disabled={busy || !editDraft.trim()} onClick={() => void saveEdit(memory)}>保存更改</Button></div></div> : <p>{memory.content}</p>}<small>{memory.scope} · {relativeLabel(memory.updatedAt)}</small></article>)}</div> : !busy && <EmptyNotice icon="memory" title={allLoaded ? '没有匹配的记忆' : '没有相关记忆'} detail="记忆只会在本地 Memory 服务中创建并保存。" />}</div>;
+  return <div className="memory-manager">
+    <details className="memory-create-panel"><summary><Icon name="add" size={16} />添加记忆</summary>
+      <div className="memory-create"><textarea aria-label="新建记忆内容" placeholder="添加一条需要长期保留的记忆" value={draft} onChange={event => setDraft(event.target.value)} rows={2} maxLength={4000} /><Button compact variant="primary" onClick={() => void create()} disabled={busy || !draft.trim() || createDisabled}>保存记忆</Button></div>
+    </details>
+    {error && <ErrorNotice error={error} onRetry={() => void refresh()} />}{busy && <LoadingState />}
+    {shown.length ? <div className="memory-list">{shown.map(memory => <article className="memory-item" key={memory.id}>
+      <div className="memory-item-header"><strong title={memory.title}>{memory.title}</strong><div className="memory-item-actions">
+        <Button compact variant="ghost" onClick={() => { setEditingId(memory.id); setEditDraft(memory.content); }}>编辑记忆</Button>
+        <IconButton label={memory.pinned ? '取消固定记忆' : '固定记忆'} icon="pin" compact onClick={() => void change(memory, 'pin')} />
+        <IconButton label="删除记忆" icon="close" compact onClick={() => void change(memory, 'delete')} />
+      </div></div>
+      <div className="memory-item-meta"><Badge>{memory.type === 'working' ? '任务工作记忆' : memory.type === 'user' ? '偏好' : memory.type === 'workspace' ? '项目记忆' : '已保存知识'}</Badge><small title={memory.scope}>{memory.scope.startsWith('task:') ? '任务范围' : memory.scope.startsWith('workspace:') ? '工作区范围' : memory.scope.startsWith('user:') ? '个人范围' : memory.scope === 'global' ? '全局' : memory.scope} · {relativeLabel(memory.updatedAt)}</small>{memory.pinned && <small>已固定</small>}</div>
+      {editingId === memory.id ? <div className="memory-edit"><textarea className="cm-textarea" aria-label="编辑记忆内容" value={editDraft} onChange={event => setEditDraft(event.target.value)} rows={4} maxLength={4000} /><div className="row"><Button compact onClick={() => { setEditingId(''); setEditDraft(''); }}>取消</Button><Button compact variant="primary" disabled={busy || !editDraft.trim()} onClick={() => void saveEdit(memory)}>保存更改</Button></div></div> : <>
+        <p className="memory-item-preview">{memory.summary || memory.content}</p>
+        <details className="memory-item-details"><summary>{memory.type === 'working' ? '查看完整记录' : '展开全文'}</summary><pre>{memory.content}</pre></details>
+      </>}
+    </article>)}</div> : !busy && <EmptyNotice icon="memory" title="没有匹配的记忆" detail="记忆只会在本地 Memory 服务中创建并保存。" />}
+  </div>;
 }
 
 function WorkPage({ workspaces, onRefreshWorkspaces, reviewTaskId, onReviewTaskOpened }: { workspaces: { id: string; name: string; status: string; lastActivity: string | number | null }[]; onRefreshWorkspaces(): Promise<void>; reviewTaskId: string | null; onReviewTaskOpened(): void }) {
@@ -2009,10 +2030,31 @@ function AboutPage() {
   const latestVersionValue = update?.latestVersion ?? update?.latest;
   const latestVersion = typeof latestVersionValue === 'string' ? latestVersionValue : latestVersionValue && typeof latestVersionValue === 'object' ? String((latestVersionValue as { version?: unknown }).version ?? '') : '';
   const updateStatus = updateStatusLabel(String(update?.status ?? 'unknown'));
+  const updateUnavailable = update?.status === 'not_configured';
+  const updateFailure = String(update?.failureMessage ?? update?.message ?? '');
+  const releasePage = info?.github?.startsWith('https://') ? `${info.github.replace(/\/+$/, '')}/releases` : null;
+  const previousCheck = typeof update?.checkedAt === 'string' ? new Date(update.checkedAt) : null;
+  const lastCheckedAt = checkedAt || (previousCheck && Number.isFinite(previousCheck.getTime())
+    ? new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit' }).format(previousCheck) : '');
   const record = notes?.record as { announcement?: { title?: string; notes?: string[]; publishedAt?: string | null } } | undefined;
   const releaseNotes = Array.isArray(record?.announcement?.notes) ? record.announcement.notes : [];  return <div className="content-page about-page"><Heading eyebrow="ABOUT CETAMESH" title="关于 CetaMesh" description="一个连接本地工具、Agent 与工作流的桌面空间。" />{error && <ErrorNotice error={error} onRetry={() => void refresh()} />}{loading ? <LoadingState label="正在读取版本信息…" /> : info && <>
     <Surface className="about-hero"><span className="about-brand-mark"><Icon name="sparkles" size={34} /></span><span className="grow"><strong>CetaMesh Desktop</strong><small>让本地 Agent 协作保持透明、可控。</small></span><Badge tone="success">UX v2 · Harbor</Badge></Surface>
-    <div className="about-facts"><Surface><small>版本</small><strong>{info.version ?? '未知'}</strong><span>构建号 {info.buildNumber ?? '未知'} · {info.channel ?? '未指定'}</span><small>构建标识 {info.buildId ?? '本地构建'}</small></Surface><Surface><small>开发者</small><strong>{info.developer ?? '未配置'}</strong><span>{info.platform ?? 'Windows 桌面应用'}</span></Surface><Surface className="update-card"><div className="row between"><strong>软件更新</strong><Icon name="update" size={18} /></div><span>当前版本 {info.version ?? '未知'}</span><span>最新版本 {latestVersion || '尚未检查'}</span><small>更新状态：{updateStatus}</small><small>{checkedAt ? `最近检查 ${checkedAt}` : '尚未检查更新'}</small><Button compact disabled={checking} onClick={() => void checkUpdate()}>{checking ? '正在检查…' : '检查更新'}</Button></Surface></div>
+    <div className="about-facts">
+      <Surface><small>版本</small><strong>{info.version ?? '未知'}</strong><span>构建号 {info.buildNumber ?? '未知'} · {info.channel ?? '未指定'}</span><small>构建标识 {info.buildId ?? '本地构建'}</small></Surface>
+      <Surface><small>开发者</small><strong>{info.developer ?? '未配置'}</strong><span>{info.platform ?? 'Windows 桌面应用'}</span></Surface>
+      <Surface className="update-card">
+        <div className="row between"><strong>软件更新</strong><Icon name="update" size={18} /></div>
+        <span>当前版本 {info.version ?? '未知'}</span>
+        <span>最新版本 {latestVersion || (updateUnavailable ? '暂未获取' : '尚未检查')}</span>
+        <small>更新状态：{updateStatus}</small>
+        {updateFailure && <small role="status">{updateFailure}</small>}
+        <small>{lastCheckedAt ? `最近检查 ${lastCheckedAt}` : '尚未检查更新'}</small>
+        <div className="row">
+          <Button compact disabled={checking || updateUnavailable} onClick={() => void checkUpdate()}>{checking ? '正在检查…' : '检查更新'}</Button>
+          {releasePage && <Button compact onClick={() => void visit(releasePage)}>查看发布版本</Button>}
+        </div>
+      </Surface>
+    </div>
     <section className="about-links"><h2>项目链接</h2><Surface>{linkRows.map(row => <button className="about-link-row" key={row.id} onClick={() => void visit(row.url ?? null)} disabled={!row.url?.startsWith('https://')}><Icon name="globe" size={18} /><span>{row.label}</span><span className="grow" /><small>{row.url ? row.url.replace(/^https:\/\//, '') : '未配置'}</small><Icon name="right" size={15} /></button>)}</Surface></section>
     <section className="about-links"><h2>反馈与安全</h2><Surface>{feedback?.entries.map(entry => <FeedbackLinkRow key={entry.id} entry={entry} message={feedback.message} onVisit={url => { void visit(url); }} />)}{feedback?.securityNotice && <p className="security-notice">{feedback.securityNotice}</p>}{!feedback && <p className="muted">反馈入口由本机产品配置提供。</p>}</Surface></section>
     {releaseNotes.length > 0 && <section className="about-links"><h2>更新说明</h2><Surface>{releaseNotes.map((line, index) => <div className="release-note-row" key={index}><p>{line}</p></div>)}</Surface></section>}

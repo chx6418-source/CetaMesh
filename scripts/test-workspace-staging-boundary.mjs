@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createStagingWorkspace, collectStagedChanges, cleanupStagingWorkspace } from '../src/workspace/staging.js';
+import { createStagingWorkspace, collectStagedChanges, cleanupStagingWorkspace, refreshStagingBaseline } from '../src/workspace/staging.js';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-stage-boundary-'));
 const source = path.join(root, 'parent', 'source');
@@ -22,6 +22,34 @@ const stage = async (options = {}) => createStagingWorkspace({
 });
 
 try {
+  const noisySource = path.join(root, 'noisy-project'); fs.mkdirSync(noisySource);
+  fs.writeFileSync(path.join(noisySource, 'main.ts'), 'source');
+  for (const dir of ['node_modules', '.pnpm-store', '.npm-cache']) {
+    fs.mkdirSync(path.join(noisySource, dir));
+    fs.writeFileSync(path.join(noisySource, dir, 'large.bin'), Buffer.alloc(512));
+  }
+  const browser = path.join(noisySource, '.edge-fixture'); fs.mkdirSync(path.join(browser, 'Default'), { recursive: true });
+  fs.writeFileSync(path.join(browser, 'Local State'), 'browser profile metadata');
+  fs.writeFileSync(path.join(browser, 'Default', 'Cookies'), Buffer.alloc(512));
+  const filtered = await createStagingWorkspace({ taskId: 'filtered', workspaceId: 'noisy', sourceRoot: noisySource, stagingRoot: stageRoot, maxBytes: 64 });
+  assert.deepEqual([...filtered.baseline.keys()], ['main.ts'], 'dependency caches and real browser profiles are not Task input');
+  assert.equal(fs.existsSync(path.join(filtered.root, '.edge-fixture')), false, 'browser profile data never enters Agent staging');
+  assert.deepEqual(collectStagedChanges(filtered).changes, []);
+  fs.writeFileSync(path.join(filtered.root, 'main.ts'), 'updated');
+  assert.equal(collectStagedChanges(filtered).changes[0].path, 'main.ts');
+  fs.writeFileSync(path.join(noisySource, 'main.ts'), 'updated');
+  assert.equal(refreshStagingBaseline(filtered).files, 1, 'import refresh uses the same fixed snapshot exclusions');
+  fs.mkdirSync(path.join(filtered.root, 'Default'));
+  fs.writeFileSync(path.join(filtered.root, 'Local State'), 'new marker must not hide original source files');
+  assert.equal(collectStagedChanges(filtered).changes.some(change => change.action === 'delete'), false);
+  cleanupStagingWorkspace(filtered);
+  await assert.rejects(createStagingWorkspace({ taskId: 'profile', workspaceId: 'profile', sourceRoot: browser, stagingRoot: stageRoot }),
+    error => error.code === 'STAGING_PATH_DENIED', 'a browser profile root must not become Agent input');
+  fs.writeFileSync(path.join(noisySource, 'real-data.bin'), Buffer.alloc(128));
+  await assert.rejects(createStagingWorkspace({ taskId: 'too-big', workspaceId: 'noisy', sourceRoot: noisySource, stagingRoot: stageRoot, maxBytes: 64 }),
+    error => error.code === 'STAGING_TOO_LARGE' && /项目|子目录/.test(error.message), 'real source data still respects the bound and explains recovery');
+  console.log('PASS generated dependencies/browser profiles excluded, real source size limit preserved');
+
   const normal = await stage();
   assert.equal(fs.readFileSync(path.join(normal.root, 'safe.txt'), 'utf8'), 'safe');
   assert.equal(fs.existsSync(path.join(normal.root, 'nested')), false);

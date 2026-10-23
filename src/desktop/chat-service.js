@@ -34,6 +34,7 @@ import { blocksToText } from '../dsh-client.js';
 import { selectDshSessionModel } from '../dsh-model-selection.js';
 import { PRODUCT_IDENTITY_PROMPT } from '../context/product-context.js';
 import { OWNER_ACTOR } from '../capability/types.js';
+import { findMessageReference } from './reference-preview.js';
 import { buildOwnerContext, renderOwnerContext } from '../task/owner-context.js';
 
 const SCHEMA_VERSION = 1;
@@ -338,7 +339,7 @@ export function createChatService({
 
   function appendMessage(id, message) {
     const messages = readHistory(id);
-    messages.push(message);
+    messages.push({ ...message, sourceWorkspaceId: sessions.get(id)?.config?.workspaceId ?? null });
     writeJsonAtomic(historyFile(id), { schemaVersion: SCHEMA_VERSION, messages });
     return messages.length;
   }
@@ -598,8 +599,10 @@ export function createChatService({
       || nextConfig.reasoning !== previousConfig.reasoning
       || nextConfig.modelProvider !== previousConfig.modelProvider;
     const workspaceChanged = nextConfig.workspaceId !== previousConfig.workspaceId;
-    if (record.taskId && workspaceChanged) {
-      const task = typeof resolveTask === 'function' ? await resolveTask(record.taskId) : null;
+    const linkedTask = record.taskId && typeof resolveTask === 'function' ? await resolveTask(record.taskId) : null;
+    const releasedTask = linkedTask && ['completed', 'cancelled', 'failed'].includes(linkedTask.status) && !linkedTask.currentAgent;
+    if (record.taskId && workspaceChanged && !releasedTask) {
+      const task = linkedTask;
       if (!task || task.workspaceId !== nextConfig.workspaceId) {
         throw chatError('WORKSPACE_RECONCILIATION_REQUIRED', 'Task-bound Chat cannot switch to a different Workspace');
       }
@@ -608,6 +611,20 @@ export function createChatService({
       throw chatError('TURN_BUSY', '当前会话有回合进行中，结束后再切换 Agent、模型或工作区');
     }
     const previousAgentSession = agentProviderChanged ? previousProviderSession(record, previousAgentProvider) : null;
+    if (releasedTask && (agentProviderChanged || modelConfigChanged || workspaceChanged)) {
+      // The authoritative Task has ended and released its executor. Keep its history,
+      // but do not require a live Handoff or reuse its obsolete Chat session binding.
+      const candidate = { ...record, taskId: null, dshSessionId: null, runtimeProvider: null,
+        config: nextConfig, updatedAt: now() };
+      // Commit the candidate before changing the live record or cancelling Follow.
+      writeJsonAtomic(sessionsFile, { schemaVersion: SCHEMA_VERSION,
+        sessions: [...sessions.values()].map(item => item === record ? candidate : item) });
+      Object.assign(record, candidate);
+      stopFollow(record.id);
+      // This historical Chat no longer owns the provider session. Another Task may
+      // have acquired it; only its current execution owner may close it.
+      return publicSession(record);
+    }
     if (agentProviderChanged) {
       if (record.taskId) {
         const task = typeof resolveTask === 'function' ? await resolveTask(record.taskId) : null;
@@ -2188,6 +2205,13 @@ export function createChatService({
     'chat.sessions.archive': (params) => archiveSession(params ?? {}),
     'chat.sessions.delete': (params) => deleteSession(params ?? {}),
     'chat.history': (params) => history(params ?? {}),
+    'chat.reference.resolve': ({ id, messageId, href } = {}) => {
+      sessionOrThrow(id);
+      const message = readHistory(id).find(item => item.id === messageId);
+      if (!message || !findMessageReference(message.text, href)) throw chatError('REFERENCE_NOT_FOUND', '此引用不属于指定会话消息。');
+      if (!/^https:\/\//i.test(href) && !message.sourceWorkspaceId) throw chatError('PREVIEW_SCOPE_UNKNOWN', '旧消息缺少原工作区记录，无法安全定位本地引用。');
+      return { workspaceId: message.sourceWorkspaceId ?? null };
+    },
     'chat.send': (params, context) => send(params ?? {}, context?.signal),
     'chat.status': (params) => status(params ?? {}),
     'chat.stop': (params) => stop(params ?? {}),

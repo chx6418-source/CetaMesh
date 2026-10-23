@@ -30,6 +30,17 @@ function fail(code, message, extra = {}) {
   return { ok: false, code, message, ...extra };
 }
 
+// Public configuration readiness only; never expose the key itself to the UI.
+export function updateConfigurationIssue(config = {}) {
+  if (!buildUpdateSources(config).length) {
+    return { code: 'NO_MANIFEST_URL', message: '发行方尚未配置更新清单地址，请前往官方发布页查看版本。' };
+  }
+  if (!config.pinnedPublicKey || !String(config.pinnedPublicKey).trim()) {
+    return { code: 'NO_PINNED_KEY', message: '发行方尚未配置更新签名公钥，软件内更新检查暂不可用。请前往官方发布页查看版本。' };
+  }
+  return null;
+}
+
 export function createUpdateChecker({
   currentVersion,
   currentBuildNumber = 0,
@@ -125,13 +136,8 @@ export function createUpdateChecker({
     platform = DEFAULT_PLATFORM
   } = {}) {
     const list = buildUpdateSources({ manifestUrl, fallbackManifestUrl, sources });
-    if (!list.length) {
-      return fail('NO_MANIFEST_URL', '未配置更新清单地址，已跳过检查');
-    }
-    if (!pinnedPublicKey || !String(pinnedPublicKey).trim()) {
-      // 安全默认：没有固定公钥就不检查、不信任 —— 这属于配置状态，不是错误。
-      return fail('NO_PINNED_KEY', '未配置更新签名公钥，已停用更新检查');
-    }
+    const configurationIssue = updateConfigurationIssue({ manifestUrl, fallbackManifestUrl, sources, pinnedPublicKey });
+    if (configurationIssue) return fail(configurationIssue.code, configurationIssue.message, { status: 'not_configured' });
     if (!doFetch) return fail('NO_FETCH', '当前运行时不支持网络请求');
 
     const failures = [];

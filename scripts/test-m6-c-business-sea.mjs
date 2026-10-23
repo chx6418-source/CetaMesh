@@ -163,7 +163,9 @@ try {
   unknown = (await rpc('task.block', { id: unknown.id, expectedRev: unknown.rev,
     reason: 'needs-reconciliation: native execution unconfirmed' })).task;
   await stop(); await start();
-  await assert.rejects(rpc('ui.task.cancel', { id: unknown.id, expectedRev: unknown.rev }), error => error.code === 'SESSION_NOT_FOUND');
+  // The router cannot reconstruct a transport from a bare historical session ID.
+  // This must stay an unknown execution, rather than proof that its process stopped.
+  await assert.rejects(rpc('ui.task.cancel', { id: unknown.id, expectedRev: unknown.rev }), error => error.code === 'SESSION_TRANSPORT_UNKNOWN');
   const stillOwned = (await rpc('task.get', { id: unknown.id })).task;
   assert.equal(stillOwned.status, 'blocked');
   assert.equal(stillOwned.currentAgent.sessionId, unknown.currentAgent.sessionId);

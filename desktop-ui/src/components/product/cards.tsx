@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useReferenceViewer } from '../../app/reference-viewer-context';
 import type { AgentView, MemoryView, PluginView, TaskView, UpdateView } from '../../types/views';
 import { Icon } from '../icons';
 import { Badge, Card } from '../primitives/surfaces';
@@ -35,6 +36,7 @@ export function ArtifactCard({ title, kind, taskId, artifact }: {
   title?: string; kind?: string; taskId?: string; artifact?: ArtifactIdentity;
 }) {
   const [state, setState] = useState<ArtifactOpenState>({ kind: 'idle' });
+  const viewer = useReferenceViewer();
   const displayTitle = artifact?.label || title || '交付物';
   const displayKind = artifact?.kind || kind || '文件';
   async function open() {
@@ -49,7 +51,7 @@ export function ArtifactCard({ title, kind, taskId, artifact }: {
   }
   const contents = <><Icon name="file" size={17} /><span className="grow"><strong>{displayTitle}</strong><small>{displayKind}</small></span><Icon name="right" size={15} /></>;
   return <div>{taskId && artifact?.id
-    ? <button className="artifact-card" type="button" onClick={() => void open()} disabled={state.kind === 'opening'} aria-busy={state.kind === 'opening'}>{contents}</button>
+    ? <button className="artifact-card" type="button" onClick={event => { if (viewer) viewer.open({ kind: 'artifact', taskId, artifactId: artifact.id }, displayTitle, event.currentTarget); else void open(); }} disabled={state.kind === 'opening'} aria-busy={state.kind === 'opening'}>{contents}</button>
     : <div className="artifact-card">{contents}</div>}
   {state.kind === 'opening' && <small className="muted" role="status">正在打开交付物…</small>}
   {state.kind === 'unavailable' && <small className="inline-error" role="status">{state.message}</small>}

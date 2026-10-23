@@ -1,0 +1,40 @@
+.reference-layout { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; min-height: 0; position: relative; overflow: hidden; }
+.reference-layout.has-viewer { grid-template-columns: minmax(0, 1fr) 6px var(--viewer-width); }
+.reference-chat { display: grid; min-width: 0; min-height: 0; overflow: hidden; }
+.reference-divider { display: grid; place-items: center; cursor: col-resize; touch-action: none; background: var(--background-soft); border-inline: 1px solid var(--border); }
+.reference-divider span { width: 2px; height: 24px; border-radius: 2px; background: var(--border-strong); }
+.reference-divider:hover span, .reference-divider:focus-visible span { background: var(--accent); }
+.reference-viewer { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--surface); }
+.reference-tabs { display: flex; flex: none; gap: 3px; min-width: 0; overflow-x: auto; padding: 5px 5px 0; border-bottom: 1px solid var(--border); background: var(--background-soft); }
+.reference-tab { display: flex; align-items: center; min-width: 115px; max-width: 190px; border: 1px solid transparent; border-bottom: 2px solid transparent; border-radius: 8px 8px 0 0; }
+.reference-tab.active { background: var(--surface); border-color: var(--border); border-bottom-color: var(--accent); }
+.reference-tab button { display: flex; align-items: center; gap: 6px; min-width: 0; padding: 9px 7px; border: 0; background: transparent; color: var(--text-secondary); font-size: 12px; }
+.reference-tab [role='tab'] { flex: 1; }
+.reference-tab [role='tab'] span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.reference-tab svg { flex: none; }
+.reference-tab button:hover { color: var(--accent-hover); }
+.reference-panel { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+.reference-toolbar { display: flex; align-items: center; gap: 3px; flex: none; min-height: 44px; padding: 4px 7px; border-bottom: 1px solid var(--border); }
+.reference-toolbar .cm-icon-button { width: 28px; height: 28px; min-height: 28px; border: 0; border-radius: 7px; color: var(--text-secondary); }
+.reference-location { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 5px 8px; color: var(--text-muted); font-size: 11px; }
+.reference-file { overflow: auto; min-width: 0; min-height: 0; flex: 1; padding: 18px; user-select: text; }
+.reference-file > img { display: block; max-width: 100%; max-height: 100%; object-fit: contain; margin: 0 auto; }
+.reference-file .cm-markdown { font-size: 13px; line-height: 1.8; overflow-wrap: anywhere; }
+.reference-code { margin: 0; font: 12px/1.8 Consolas, ui-monospace, monospace; tab-size: 2; }
+.reference-code > span { display: flex; min-width: max-content; }
+.reference-code small { width: 45px; flex: none; text-align: right; padding-right: 15px; user-select: none; color: var(--text-muted); }
+.reference-code code { white-space: pre; color: var(--text-primary); }
+.reference-code-list { display: flex; flex-direction: column; overflow: hidden; padding: 0; }
+.reference-code-list .virtual-list-frame { flex: 1; min-height: 0; }
+.reference-code-list .message-stream { padding: 12px 0; }
+.reference-code-list .virtual-row { padding: 0 12px; }
+.reference-code-row { display: flex; min-width: max-content; height: 22px; font: 12px/22px Consolas, ui-monospace, monospace; }
+.reference-code-row small { width: 45px; flex: none; padding-right: 14px; text-align: right; color: var(--text-muted); user-select: none; }
+.reference-code-row code { white-space: pre; }
+.reference-code-row.located { background: var(--accent-soft); }
+.reference-web-slot { position: relative; flex: 1; min-height: 0; background: white; }
+.reference-state { margin: 0; padding: 28px 20px; color: var(--text-secondary); font-size: 13px; overflow-wrap: anywhere; }
+.reference-notice { margin: 0; padding: 8px 12px; color: var(--warning); font-size: 12px; }
+.reference-narrow-switch { position: absolute; z-index: 5; bottom: 12px; right: 12px; border: 1px solid var(--border); border-radius: 9px; padding: 8px 12px; background: var(--surface); color: var(--accent-hover); }
+.reference-layout.narrow.has-viewer { grid-template-columns: minmax(0, 1fr); }
+.reference-layout.narrow .reference-divider, .reference-layout.narrow.show-viewer .reference-chat, .reference-layout.narrow.show-chat .reference-viewer { display: none; }

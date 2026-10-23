@@ -14,6 +14,14 @@ assert.doesNotMatch(css, /\.composer-add:hover[^}]*rotate\(90deg\)/, 'attachment
 assert.match(css, /\.cm-icon-button:hover:not\(:disabled\)\s*\{\s*transform:\s*none/, 'icon button hit area stays in place');
 assert.ok(css.includes('.plugin-approval-inbox'), 'new operation status sections animate as a whole');
 assert.ok(css.includes('.cm-search:focus-within'), 'search icon has explicit focus feedback');
+for (const selector of ['.memory-create-panel > summary', '.memory-item-details > summary', '.reference-tab button', '.settings-category-nav button', '.reference-divider span']) {
+  assert.ok(css.includes(selector), `missing interactive feedback: ${selector}`);
+}
+assert.doesNotMatch(css, /scale\(\.95\)|:hover[^{}]*\{[^}]*translateY\(-3px\)/, 'press and hover feedback must not make controls jump');
+assert.match(css, /grid-template-columns var\(--motion-panel\)/, 'sidebar width changes transition with the shell');
+const presence = read('components/primitives/motion-popup.tsx');
+for (const value of ['AnimatePresence', 'useReducedMotion', 'useIsPresent', 'inert={!present}', 'aria-hidden']) assert.ok(presence.includes(value), value);
+assert.match(read('components/primitives/inputs.tsx'), /<MotionPopup open=\{open\}/, 'select closes through bounded exit presence');
 const app = read('app/HarborApp.tsx');
 assert.match(app, /import ['"]\.\.\/theme\/motion.css['"]/);
 assert.match(app, /<main key=\{page\}/);

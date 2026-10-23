@@ -161,7 +161,7 @@ check(
 );
 check(
   '默认备用源指向 GitHub raw 清单',
-  DEFAULT_GITHUB_FALLBACK_MANIFEST_URL.startsWith('https://raw.githubusercontent.com/chx6418-source/whalebridge/'),
+  DEFAULT_GITHUB_FALLBACK_MANIFEST_URL.startsWith('https://raw.githubusercontent.com/chx6418-source/CetaMesh/'),
   DEFAULT_GITHUB_FALLBACK_MANIFEST_URL
 );
 
