@@ -111,12 +111,13 @@ export interface IntegrationSettings {
   legacyRetired: RetiredIntegrationTool[]; settings: Record<string, unknown>; localService: LocalServiceSettings | null;
 }
 
-export type DesktopEvent = 'core.status' | 'chat.updated' | 'chat.streaming' | 'chat.warning' | 'task.updated' | 'task.deleted'
+export type DesktopEvent = 'preview.browser' | 'core.status' | 'chat.updated' | 'chat.streaming' | 'chat.warning' | 'task.updated' | 'task.deleted'
   | 'core.restarted'
   | 'agent.updated' | 'workspace.updated' | 'plugin.updated' | 'plugin.downloadProgress' | 'approval.pending' | 'approval.resolved'
   | 'approval.operation' | 'channel.message' | 'channel.delivery'
   | 'model.updated' | 'memory.updated' | 'update.status' | 'device.updated';
 export interface DesktopEventData {
+  targetId?: string; revision?: number; generation?: number; url?: string; title?: string; loading?: boolean; error?: string; canBack?: boolean; canForward?: boolean; focusRequested?: boolean; historyUrls?: string[]; historyIndex?: number;
   sessionId?: string; taskId?: string; agentId?: string; pluginId?: string; serverId?: string; approvalId?: string; requestId?: string; retryCount?: number;
   turnId?: string; messageId?: string; historyRevision?: number;
   accountId?: string; channelId?: string; eventId?: string; sequence?: number; consumerId?: string;
@@ -126,6 +127,7 @@ export interface DesktopEventData {
   delta?: string; replaceText?: string; reset?: boolean; toolActivity?: ChatMessage['toolActivity']; agentActivity?: ChatMessage['agentActivity'];
 }
 type UiMethod =
+  | 'ui.preview.open' | 'ui.preview.read' | 'ui.preview.close'
   | 'ui.events.next'
   | 'ui.chat.sessions.list' | 'ui.chat.sessions.create' | 'ui.chat.sessions.rename' | 'ui.chat.sessions.archive' | 'ui.chat.sessions.delete'
   | 'ui.chat.history' | 'ui.chat.status' | 'ui.chat.send' | 'ui.chat.stop' | 'ui.chat.retry' | 'ui.chat.continue' | 'ui.chat.catalog' | 'ui.chat.config.set'
@@ -147,8 +149,11 @@ type UiMethod =
   | 'ui.approvals.list' | 'ui.approvals.decide' | 'ui.approvals.operation' | 'ui.approvals.cancel' | 'ui.search';
 type Empty = Record<string, never>;
 export type WindowAction = 'state' | 'drag' | 'minimize' | 'maximize' | 'close' | 'resizeNorth' | 'resizeNorthEast' | 'resizeEast' | 'resizeSouthEast' | 'resizeSouth' | 'resizeSouthWest' | 'resizeWest' | 'resizeNorthWest';
-type HostMethod = 'app.windowAction' | 'app.ping' | 'app.status' | 'app.about' | 'app.openExternal' | 'app.openArtifact' | 'app.pickFolder' | 'app.pickFiles' | 'app.pickExtensionPackage' | 'app.setWindowBehavior';
+type HostMethod = 'app.previewBrowser.open' | 'app.previewBrowser.layout' | 'app.previewBrowser.command' | 'app.windowAction' | 'app.ping' | 'app.status' | 'app.about' | 'app.openExternal' | 'app.openArtifact' | 'app.pickFolder' | 'app.pickFiles' | 'app.pickExtensionPackage' | 'app.setWindowBehavior';
 type HostMap = {
+  'app.previewBrowser.open': { params: { targetId: string; url: string; bounds: PreviewBounds }; result: { opened: boolean } };
+  'app.previewBrowser.layout': { params: { targetId: string; bounds: PreviewBounds; visible: boolean }; result: { updated: boolean } };
+  'app.previewBrowser.command': { params: { targetId: string; action: 'back' | 'forward' | 'reload' | 'close' }; result: { updated: boolean } };
   'app.windowAction': { params: { action: WindowAction }; result: { maximized: boolean } };
   'app.ping': { params: Empty; result: { host: 'webview2'; ready: boolean } };
   'app.status': { params: Empty; result: { ready: boolean; needsAttention: boolean } };
@@ -414,4 +419,16 @@ export const hostClient = {
 export async function openExternal(url: string): Promise<void> {
   if (url.startsWith('https://')) await bridge.invoke('app.openExternal', { url });
 }
+
+export type PreviewSource = { kind: 'message'; sessionId: string; messageId: string; href: string } | { kind: 'artifact'; taskId: string; artifactId: string };
+export type PreviewBounds = { x: number; y: number; width: number; height: number; scale: number };
+export type PreviewMetadata = { kind: 'web'; url: string; name: string } | { kind: 'unsupported'; name: string; message: string } | { kind: 'image' | 'code' | 'markdown' | 'text'; handle: string; name: string; mimeType: string; size: number; line: number | null };
+export const previewClient = {
+  open: (source: PreviewSource) => uiCall<PreviewMetadata>('ui.preview.open', { source }),
+  read: (handle: string, offset: number) => uiCall<{ offset: number; nextOffset: number | null; encoding: 'base64'; data: string }>('ui.preview.read', { handle, offset }),
+  close: (handle: string) => uiCall<{ closed: boolean }>('ui.preview.close', { handle }),
+  browserOpen: (targetId: string, url: string, bounds: PreviewBounds) => bridge.invoke('app.previewBrowser.open', { targetId, url, bounds }),
+  browserLayout: (targetId: string, bounds: PreviewBounds, visible: boolean) => bridge.invoke('app.previewBrowser.layout', { targetId, bounds, visible }),
+  browserCommand: (targetId: string, action: 'back' | 'forward' | 'reload' | 'close') => bridge.invoke('app.previewBrowser.command', { targetId, action })
+};
 

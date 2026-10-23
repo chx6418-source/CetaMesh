@@ -37,9 +37,12 @@ export function createDshFollowHub({ api }) {
     }
     if (item?.type === 'assistant-stream') return; // non-durable presentation frames are not replayable
     const event = item?.type === 'event' ? item.event : item;
-    if (!Number.isSafeInteger(event?.seq) || event.seq < 1) {
+    if (!Number.isSafeInteger(event?.seq) || event.seq < 0) {
       throw agentProviderError('PROVIDER_ERROR', 'DSH Follow event is missing a durable sequence');
     }
+    // Native logs include a valid seq=0 initialization record. It precedes
+    // Core's exclusive initial cursor 0; accept it without rebasing persisted
+    // cursors or rejecting the whole opening snapshot on every reconnect.
     if (event.seq <= state.lastSeq) return;
     if (state.lastSeq > 0 && event.seq !== state.lastSeq + 1) {
       throw agentProviderError('AGENT_EVENT_GAP', `DSH Follow skipped event ${state.lastSeq + 1}`);

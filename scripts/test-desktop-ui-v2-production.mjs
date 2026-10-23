@@ -251,7 +251,7 @@ check('Harbor accessibility and real-world controls avoid clipping and preserve 
   const shell = read('desktop-shell/src/webview_ui.rs');
   const policy = read('desktop-shell/src/webview_policy.rs');
   assert.match(app, /function SessionActionsMenu/);
-  assert.match(app, /createPortal\(<div ref=\{menuRef\}/);
+  assert.match(app, /createPortal\(<MotionPopup open=\{open\} ref=\{menuRef\}/, 'session menus retain the fixed portal while preserving exit animation');
   assert.match(app, /<details className="chat-context-card">/);
   assert.match(app, /className="composer-dock"><ChatContextPanel/);
   assert.match(app, /settingPages = \[/);

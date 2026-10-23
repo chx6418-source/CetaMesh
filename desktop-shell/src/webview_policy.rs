@@ -9,6 +9,7 @@ pub const MAX_BRIDGE_REQUEST_BYTES: usize = 900 * 1024;
 pub const PRODUCTION_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'";
 
 const UI_METHODS: &[&str] = &[
+    "ui.preview.open", "ui.preview.read", "ui.preview.close",
     "ui.events.next",
     "ui.chat.sessions.list", "ui.chat.sessions.create", "ui.chat.sessions.rename",
     "ui.chat.sessions.archive", "ui.chat.sessions.delete", "ui.chat.history", "ui.chat.status",
@@ -32,7 +33,7 @@ const UI_METHODS: &[&str] = &[
 ];
 
 fn is_allowed_method(method: &str) -> bool {
-    matches!(method, "app.windowAction" | "app.ping" | "app.about" | "app.status" | "app.openExternal" | "app.openArtifact" | "app.pickFolder" | "app.pickFiles" | "app.pickExtensionPackage" | "app.setWindowBehavior")
+    matches!(method, "app.previewBrowser.open" | "app.previewBrowser.layout" | "app.previewBrowser.command" | "app.windowAction" | "app.ping" | "app.about" | "app.status" | "app.openExternal" | "app.openArtifact" | "app.pickFolder" | "app.pickFiles" | "app.pickExtensionPackage" | "app.setWindowBehavior")
         || UI_METHODS.contains(&method)
 }
 
@@ -205,7 +206,9 @@ pub fn parse_bridge_request(raw: &str) -> Result<BridgeRequest, String> {
     }
     let params = object.get("params").ok_or("bridge params are required")?;
     let params_object = params.as_object().ok_or("bridge params must be an object")?;
-    if method == "app.windowAction" {
+    if method.starts_with("app.previewBrowser.") {
+        crate::reference_browser_policy::validate(method, params)?;
+    } else if method == "app.windowAction" {
         window_action(params)?;
     } else if method == "app.openExternal" {
         if params_object.len() != 1 || params_object.get("url").and_then(Value::as_str).is_none_or(|url| url.len() > 2048) {
@@ -222,6 +225,13 @@ pub fn parse_bridge_request(raw: &str) -> Result<BridgeRequest, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn reference_browser_bridge_accepts_only_scoped_operations() {
+        let request = serde_json::json!({"id":"preview1","method":"app.previewBrowser.open","params":{"targetId":"preview-1","url":"https://example.com","bounds":{"x":800,"y":100,"width":400,"height":600,"scale":1}}});
+        assert!(parse_bridge_request(&request.to_string()).is_ok());
+        let mut bad = request; bad["params"]["url"] = Value::String("https://127.0.0.1".into());
+        assert!(parse_bridge_request(&bad.to_string()).is_err());
+    }
 
     #[test]
     fn window_actions_accept_only_local_window_operations() {

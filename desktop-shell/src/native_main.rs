@@ -24,6 +24,9 @@ mod supervisor;
 mod tray;
 mod ui_prefs;
 mod webview_policy;
+mod reference_browser_policy;
+#[cfg(windows)]
+mod reference_browser;
 #[cfg(windows)]
 mod webview_ui;
 
@@ -467,6 +470,11 @@ fn run_native_ui(paths: DesktopPaths) -> Result<(), String> {
 }
 
 fn main() {
+    #[cfg(all(windows, debug_assertions))]
+    if let Some(report) = std::env::args().find_map(|arg| arg.strip_prefix("--reference-browser-smoke=").map(PathBuf::from)) {
+        if let Err(error) = reference_browser::smoke(&report) { let _ = std::fs::write(&report, format!("FAIL {error}")); }
+        return;
+    }
     let argv = env::args().skip(1).collect::<Vec<_>>();
     if argv.iter().any(|arg| arg == "--installer-ui") {
         let resolve_arg_path = |name: &str| {

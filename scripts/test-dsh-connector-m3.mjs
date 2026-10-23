@@ -84,6 +84,35 @@ await chat.return();
 await continuity.return();
 await provider.shutdown();
 
+// Native DSH snapshots start at seq=0 (permission/preset), while Core's
+// exclusive initial cursor is 0. This valid initialization record must not
+// poison every subsequent snapshot/reconnect or change existing cursors.
+let nativeRound = 0;
+const nativeProvider = createDshAgentProvider({ api: {
+  async callEndpoint() { return {}; },
+  async *openRemoteStream() {
+    nativeRound += 1;
+    const records = [
+      { type: 'event', event: { seq: 0, type: 'permission/preset', data: {} } },
+      { type: 'event', event: { seq: 1, type: 'turn/start', data: { turn: 1 } } },
+      { type: 'event', event: { seq: 2, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } } }
+    ];
+    yield { type: 'snapshot', cursor: 2, records, hasMore: false };
+    if (nativeRound > 1) {
+      yield { type: 'event', event: { seq: 3, type: 'turn/start', data: { turn: 2 } } };
+      yield { type: 'event', event: { seq: 4, type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } } } };
+    }
+  }
+} });
+try {
+  const initial = [];
+  for await (const row of nativeProvider.follow({ sessionId: 'native-zero' })) initial.push(row.event.seq);
+  assert.deepEqual(initial, [1, 2], 'valid native zero record precedes the exclusive initial Core cursor');
+  const resumed = [];
+  for await (const row of nativeProvider.follow({ sessionId: 'native-zero', sinceSequence: 2 })) resumed.push(row.event.seq);
+  assert.deepEqual(resumed, [3, 4], 'native zero snapshot replay preserves durable Core cursors');
+} finally { await nativeProvider.shutdown(); }
+
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-m3-preset-'));
 function preset(id, body) {
   const dir = path.join(home, '.agent-presets', id);

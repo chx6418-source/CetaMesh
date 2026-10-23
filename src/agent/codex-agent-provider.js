@@ -105,17 +105,21 @@ function selectedWindowsSandbox(codexHome) {
 
 // Accept the inspected table form; ambiguous TOML security settings never select a fallback.
 export function parseWindowsNativeSandboxPolicy(text) {
+  // TOML bare-key components may contain letters, digits, underscores and
+  // hyphens. A name such as opaqueWindows is not the Windows policy component.
+  const windowsComponent = /(?:^|[^A-Za-z0-9_-])windows(?:$|[^A-Za-z0-9_-])/i;
+  const sandboxComponent = /(?:^|[^A-Za-z0-9_-])sandbox(?:$|[^A-Za-z0-9_-])/i;
   let windows = false, selected = null;
   for (const raw of String(text).split(/\r?\n/)) {
     const line = withoutTomlComment(raw).trim();
     if (line.startsWith('[')) {
-      if (/windows/i.test(line) && line !== '[windows]') throw agentProviderError('CODEX_NATIVE_POLICY_UNVERIFIED', 'Windows security table requires explicit verification');
+      if (windowsComponent.test(line) && line !== '[windows]') throw agentProviderError('CODEX_NATIVE_POLICY_UNVERIFIED', 'Windows security table requires explicit verification');
       windows = line === '[windows]';
       continue;
     }
     const key = line.split('=')[0]?.trim();
-    if (/windows/i.test(key || '')) throw agentProviderError('CODEX_NATIVE_POLICY_UNVERIFIED', 'Dotted or inline Windows security policy requires explicit verification');
-    if (windows && /sandbox/i.test(key || '')) {
+    if (windowsComponent.test(key || '')) throw agentProviderError('CODEX_NATIVE_POLICY_UNVERIFIED', 'Dotted or inline Windows security policy requires explicit verification');
+    if (windows && sandboxComponent.test(key || '')) {
       if (!/^sandbox\s*=/.test(line) || selected !== null) throw agentProviderError('CODEX_NATIVE_POLICY_UNVERIFIED', 'Ambiguous Windows sandbox policy');
       selected = parseSimpleTomlValue(line.slice(line.indexOf('=') + 1));
       if (!['unelevated', 'elevated', 'mxc'].includes(selected)) throw agentProviderError('CODEX_NATIVE_POLICY_UNSUPPORTED', 'Selected Windows sandbox is unknown');
@@ -342,6 +346,22 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
         'Native writes outside the declared workspace are governed by Codex; temporary writable paths follow its policy.',
         'Windows unelevated network isolation is environment-based, not a dedicated firewall boundary.',
         'Do not access CetaMesh credentials or private IPC. Staging is not an OS sandbox.'] };
+  }
+
+  function projectedExecutionSecurity() {
+    try { return executionSecurity(); }
+    catch (error) {
+      // A local policy failure disables this provider, not the Core registry.
+      // Keep a denying descriptor so Broker consent can never authorize it.
+      const code = ['CODEX_NATIVE_POLICY_UNVERIFIED', 'CODEX_NATIVE_POLICY_UNSUPPORTED', 'CODEX_NATIVE_CONFIG_UNREADABLE'].includes(error?.code)
+        ? error.code : ['EACCES', 'EPERM', 'ENOENT', 'ENOTDIR', 'EISDIR', 'ELOOP'].includes(error?.code) ? 'CODEX_NATIVE_CONFIG_UNREADABLE' : null;
+      if (!code) throw error;
+      return { mode: securityMode, nativeSandboxSupported: false, nativeSandboxMode: 'unverified',
+        nativeApprovalSupported: false, nativeApprovalPolicy: 'unverified', executionBoundary: 'agent-native',
+        workspaceAccess: 'unverified', directFilesystemAccess: true, platformToolPermissions: 'capability-broker',
+        strictIsolationVerified: false, requiresConfirmation: true, identity: 'unverified:' + code,
+        verificationError: code, securityLimitations: ['Native security policy could not be verified; execution is unavailable.'] };
+    }
   }
 
   function requireSession(sessionId) {
@@ -771,8 +791,8 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
 
       async health({ refresh = false } = {}) {
         refreshInspection(refresh === true);
-        const security = executionSecurity();
-        const available = inspection.available && authenticated;
+        const security = projectedExecutionSecurity();
+        const available = inspection.available && authenticated && !security.verificationError;
         return {
           available,
           installed: inspection.installed,
@@ -782,7 +802,7 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
           version: inspection.version,
           authenticated,
           status: security.nativeSandboxSupported !== true ? 'sandbox_unavailable' : sandboxCapable === false ? 'sandbox_unavailable' : authenticated ? 'ready' : inspection.available ? 'needs_auth' : 'unavailable',
-          reason: inspection.reason ?? (security.nativeSandboxSupported !== true ? 'native_policy_unverified' : !authenticated ? 'needs_auth' : sandboxCapable === false ? 'sandbox_unavailable' : null),
+          reason: security.verificationError ?? inspection.reason ?? (security.nativeSandboxSupported !== true ? 'native_policy_unverified' : !authenticated ? 'needs_auth' : sandboxCapable === false ? 'sandbox_unavailable' : null),
           configured: inspection.available,
           reachable: null,
           sessionCapable: available,
@@ -791,7 +811,7 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
           readyForTask: available && security.nativeSandboxSupported === true && sandboxCapable === true && securityMode === 'native',
           installKind: cli.installKind?.() ?? 'unknown',
           probePhase: inspection.available && !authenticated ? 'authentication' : inspection.probePhase,
-          probeCode: inspection.available && !authenticated ? 'CODEX_AUTH_REQUIRED' : inspection.probeCode,
+          probeCode: security.verificationError ?? (inspection.available && !authenticated ? 'CODEX_AUTH_REQUIRED' : inspection.probeCode),
           detectedVersion: inspection.version,
           checkedAt: new Date(lastProbeAt).toISOString(),
           requiresStandaloneNode: /\.(cmd|bat)$/i.test(cli.executable() ?? ''),
@@ -836,10 +856,12 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
     ...contract,
     // Compatibility projection reads the same current inspection as health; never a startup snapshot.
     capabilities() {
-      return Object.freeze({ ...contract.capabilities(), security: executionSecurity(), installed: inspection.installed, compatible: inspection.available,
-        available: inspection.available && authenticated, version: inspection.version,
-        reason: inspection.reason ?? (authenticated ? null : 'needs_auth'),
-        health: authenticated ? 'ready' : inspection.available ? 'needs_auth' : 'unavailable', supportsResume: inspection.supportsResume === true });
+      const security = projectedExecutionSecurity();
+      return Object.freeze({ ...contract.capabilities(), security, installed: inspection.installed, compatible: inspection.available,
+        available: inspection.available && authenticated && !security.verificationError, version: inspection.version,
+        reason: security.verificationError ?? inspection.reason ?? (authenticated ? null : 'needs_auth'),
+        ...(security.verificationError ? { sessionCapable: false, taskEligible: false, readyForTask: false } : {}),
+        health: security.verificationError ? 'unavailable' : authenticated ? 'ready' : inspection.available ? 'needs_auth' : 'unavailable', supportsResume: inspection.supportsResume === true });
     },
     // Trusted Core recovery only; never exposed as an Agent/renderer stop claim.
     // STAGING_READ_FAILED is emitted by finalizeRun after handle.done (process close),
