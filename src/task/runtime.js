@@ -516,7 +516,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     return { task, changed: true };
   }
 
-  async function resolveArtifactOpen({ taskId, artifactId } = {}) {
+  async function resolveArtifactOpen({ taskId, artifactId, forPreview = false } = {}) {
     const safeTaskId = normalizeText(taskId, 'taskId', TASK_LIMITS.idChars, { required: true });
     const safeArtifactId = normalizeText(artifactId, 'artifactId', TASK_LIMITS.idChars, { required: true });
     const task = requireTask(safeTaskId);
@@ -534,7 +534,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
       workspaceRoot = workspace.root;
     }
 
-    return resolveTaskArtifactOpen({ artifact, workspaceRoot, ownedArtifactRoot });
+    return resolveTaskArtifactOpen({ artifact, workspaceRoot, ownedArtifactRoot, forPreview });
   }
 
   function addDecision({ id, expectedRev, decision, rationale } = {}) {

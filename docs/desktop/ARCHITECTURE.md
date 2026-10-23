@@ -63,6 +63,7 @@ Native / Infrastructure                     Node SEA Core, Rust supervisor/insta
 | --- | --- | --- |
 | Chat | `src/desktop/chat-service.js` | sessions, streaming, stop/retry, attachments; Agent Provider optional |
 | Desktop UI projection | `src/desktop/ui-service.js` | exact `ui.*` route table, bounded safe DTOs and change events; no renderer access to generic Core responses |
+| Reference preview | `src/desktop/reference-preview.js`; `desktop-ui/src/app/ReferenceViewer.tsx` | source-bound readonly files and docked tabs; separate native child for public HTTPS pages |
 | Tasks | `src/task/` | persistent tasks, revisions, attention; agent attach/detach never changes task id |
 | Memory | `src/memory/` | policy-gated memory runtime + store |
 | Workspace | `src/workspace/` | root canonicalization and path containment (`boundary.js`) |
@@ -116,6 +117,28 @@ Native / Infrastructure                     Node SEA Core, Rust supervisor/insta
   explicit quit path stops Core.
 - Window preferences and theme/zoom are persisted in `state/desktop-ui.json` (atomic replace);
   a corrupt preference file falls back to defaults without blocking startup.
+
+### Docked reference viewer
+
+The Harbor renderer owns up to eight ephemeral reference tabs and the resizable dock.
+`ui.preview.open/read/close` resolve a persisted message reference or Task/Artifact identity
+through Core. New messages retain `sourceWorkspaceId`; legacy local references without that
+attribution fail explicitly instead of borrowing the current workspace. Text is limited to
+2 MiB, supported raster images to 10 MiB, and base64 chunks to 64 KiB raw bytes. Handles expire
+after two minutes and revalidate source authority and file identity on each read. HTML and SVG
+are never executed as local web pages; unsupported formats retain the existing system-open policy.
+
+`reference_browser.rs` owns one active, incognito child WebView with no application IPC,
+host objects or internal resource protocol. The main renderer CSP remains unchanged. Native
+URL policy validates navigation and all resource request source kinds, rejecting local literal
+addresses and privileged schemes. Popups, downloads, permissions and file pickers are disabled.
+This policy is not a DNS or operating-system network sandbox. The child hides for renderer
+overlays and host dialogs, and is destroyed on tab/route closure. Generation-scoped source,
+title, error and authoritative navigation-history events update the renderer toolbar.
+
+Regression entry points are `npm test -- --suite test-reference-preview --suite test-reference-viewer`
+and opt-in `test-reference-browser` / `test-reference-browser-smoke` through the same test runner.
+
 # M4.4 Core Channel runtime boundary (2026-10-18)
 
 The formal `--worker` composes Core without importing or running Legacy Bridge.

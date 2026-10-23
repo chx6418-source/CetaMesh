@@ -78,6 +78,9 @@ export function createTaskService({ stateDir, now, resolveWorkspace, resolveMemo
     'task.artifact.resolveOpen': (p) => runtime.resolveArtifactOpen({
       taskId: p.taskId, artifactId: p.artifactId
     }),
+    'task.artifact.resolvePreview': (p) => runtime.resolveArtifactOpen({
+      taskId: p.taskId, artifactId: p.artifactId, forPreview: true
+    }),
     'task.decision.add': (p) => runtime.addDecision({
       id: p.id, expectedRev: p.expectedRev, decision: p.decision, rationale: p.rationale
     }),

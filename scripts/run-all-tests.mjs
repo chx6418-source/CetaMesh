@@ -39,6 +39,13 @@ export const CATEGORIES = ['core', 'architecture', 'security', 'runtime', 'integ
 // ── 登记表：scripts/test-*.mjs 的每一个文件都必须出现在这里（或能从 package.json 映射）。
 // requires 的取值见 probeAvailability()；category 取值见 CATEGORIES。
 const REGISTRY = {
+  'test-ui-motion-live.mjs': { category: 'environment', requires: ['ui-motion-live'], timeoutMs: 60000 },
+  'test-memory-layout.mjs': { category: 'desktop' },
+  'test-dsh-live.mjs': { category: 'environment', requires: ['dsh-live'], timeoutMs: 210000 },
+  'test-reference-preview.mjs': { category: 'security' },
+  'test-reference-viewer.mjs': { category: 'desktop' },
+  'test-reference-browser.mjs': { category: 'desktop', requires: ['cargo-opt-in'], timeoutMs: 300000 },
+  'test-reference-browser-smoke.mjs': { category: 'environment', requires: ['reference-browser-live'], timeoutMs: 90000 },
   'test-onebot-client.mjs': { category: 'integration' },
   'test-monorepo-contract.mjs': { category: 'architecture' },
   'test-public-repository-hygiene.mjs': { category: 'security', note: 'Prevent reintroduction of private-only reports, obsolete design mocks and broken README links' },
@@ -291,6 +298,9 @@ async function probeAvailability() {
     'release-dist': canonicalReleaseAvailable,
     'dev-release-dist': devReleaseAvailable,
     network: process.env.WHALEBRIDGE_TEST_NETWORK === '1',
+    'reference-browser-live': process.platform === 'win32' && process.env.WHALEBRIDGE_TEST_REFERENCE_BROWSER === '1',
+    'dsh-live': process.platform === 'win32' && process.env.WHALEBRIDGE_TEST_REAL_DSH === '1',
+    'ui-motion-live': process.platform === 'win32' && process.env.WHALEBRIDGE_TEST_UI_MOTION === '1',
     gateway: gatewayConfigPresent && await probeTcp(gatewayPort),
     // A live TCP listener may be the user’s real desktop bridge; this suite mutates roles/allowlists and sends a test QQ message.
     'legacy-bridge': isLegacyBridgeTestOptedIn() && await probeTcp(consolePort),

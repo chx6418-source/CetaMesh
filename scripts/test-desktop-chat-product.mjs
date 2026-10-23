@@ -1378,6 +1378,79 @@ function makeFullService({ withKey = true, fetchImpl, baseUrl = 'https://api.dee
   service.close();
 }
 
+// A terminal, detached Task is history, not a live execution requiring Handoff.
+for (const terminal of ['cancelled', 'completed', 'failed']) {
+  const { createTaskService } = await import('../src/task/service.js');
+  const dir = path.join(stateDir, `terminal-config-${terminal}`);
+  const taskService = createTaskService({ stateDir: dir });
+  let task = taskService.runtime.create({ goal: 'retained task history', workspaceId: 'old-workspace' });
+  task = taskService.runtime.start({ id: task.id, expectedRev: task.rev, provider: 'codex', sessionId: 'old-agent' }).task;
+  task = taskService.runtime[terminal === 'cancelled' ? 'cancel' : terminal === 'completed' ? 'complete' : 'fail']({ id: task.id, expectedRev: task.rev, reason: 'fixture terminal', summary: 'fixture complete' }).task;
+  const first = makeService({ stateDir: dir });
+  const session = await first.execute({ method: 'chat.sessions.create', params: {} }); await first.close();
+  const file = path.join(dir, 'desktop-chat', 'sessions.json'); const saved = readJsonFile(file);
+  Object.assign(saved.sessions[0], { taskId: task.id, dshSessionId: 'old-agent', runtimeProvider: 'codex',
+    config: { ...saved.sessions[0].config, agentProvider: 'codex', workspaceId: 'old-workspace' } });
+  writeJsonAtomic(file, saved);
+  const handoffs = [], cleanup = [];
+  const service = makeService({ stateDir: dir, options: {
+    agentProviders: [{ id: 'codex', eventProtocol: 'dsh-session-events' }, { id: 'dsh', eventProtocol: 'dsh-session-events' }],
+    resolveWorkspace: id => ({ id, root: temp }), resolveTask: id => taskService.runtime.get({ id }).task,
+    handoffTask: async args => { handoffs.push(args); throw Error('terminal task must not Handoff'); },
+    agentExecute: async args => { cleanup.push(args); return { closed: true }; }
+  } });
+  const before = (await service.execute({ method: 'chat.sessions.list', params: {} })).sessions[0];
+  const storedBefore = readJsonFile(file);
+  const rename = fs.renameSync;
+  try {
+    fs.renameSync = (from, to) => {
+      if (path.resolve(to) === path.resolve(file)) throw Object.assign(new Error('synthetic full disk'), { code: 'EIO' });
+      return rename(from, to);
+    };
+    await assert.rejects(service.execute({ method: 'chat.config.set', params: { id: session.id, config: { agentProvider: 'dsh' } } }), error => error.code === 'WRITE_FAILED');
+  } finally { fs.renameSync = rename; }
+  assert.deepEqual((await service.execute({ method: 'chat.sessions.list', params: {} })).sessions[0], before, 'rejected configuration retains the in-memory Task/config binding');
+  assert.deepEqual(readJsonFile(file), storedBefore, 'rejected configuration retains persisted binding');
+  await service.execute({ method: 'chat.config.set', params: { id: session.id, config: { agentProvider: 'dsh' } } });
+  const switched = await service.execute({ method: 'chat.config.set', params: { id: session.id, config: { workspaceId: 'new-workspace' } } });
+  assert.equal(switched.taskId, null); assert.equal(switched.dshSessionId, null);
+  assert.equal(switched.config.agentProvider, 'dsh'); assert.equal(handoffs.length, 0);
+  assert.equal(taskService.runtime.get({ id: task.id }).task.status, terminal, 'original Task is preserved');
+  await service.close();
+  const persisted = readJsonFile(file).sessions[0]; assert.equal(persisted.taskId, null); assert.equal(persisted.runtimeProvider, null);
+  ok(`Terminal ${terminal} Task does not strand Chat Agent/Workspace selection`);
+}
+
+{
+  const { createTaskService } = await import('../src/task/service.js');
+  const dir = path.join(stateDir, 'live-terminal-session-owner');
+  const taskService = createTaskService({ stateDir: dir });
+  let original = taskService.runtime.create({ goal: 'original task', workspaceId: 'ws-owned' });
+  original = taskService.runtime.start({ id: original.id, expectedRev: original.rev, provider: 'codex', sessionId: 'reassigned-session' }).task;
+  const closes = [];
+  const service = makeService({ stateDir: dir, options: {
+    agentProviders: [{ id: 'codex', eventProtocol: 'dsh-session-events', workspaceBoundary: 'native-staged' }, { id: 'dsh', eventProtocol: 'dsh-session-events' }],
+    resolveWorkspace: id => ({ id, root: temp }), resolveTask: id => taskService.runtime.get({ id }).task,
+    platformRoute: async () => ({ kind: 'agent', provider: 'codex', taskId: original.id, sessionId: 'reassigned-session', accepted: true, turnId: 'owned-turn' }),
+    agentExecute: async request => { closes.push(request); return {}; },
+    agentFollow: async function* ({ signal }) { await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true })); }
+  } });
+  const session = await service.execute({ method: 'chat.sessions.create', params: {} });
+  await service.execute({ method: 'chat.config.set', params: { id: session.id, config: { agentProvider: 'codex', workspaceId: 'ws-owned' } } });
+  await service.execute({ method: 'chat.send', params: { id: session.id, text: 'read-only fixture' } });
+  await waitFor(() => service.execute({ method: 'chat.status', params: { id: session.id } }), value => value.turn?.state === 'streaming', 'attached live session');
+  service._injectEvent(session.id, { type: 'turn/end', data: { turn: 'owned-turn', reason: { kind: 'completed' } } });
+  taskService.runtime.complete({ id: original.id, expectedRev: original.rev, summary: 'finished' });
+  let other = taskService.runtime.create({ goal: 'other owner', workspaceId: 'ws-owned' });
+  other = taskService.runtime.start({ id: other.id, expectedRev: other.rev, provider: 'codex', sessionId: 'reassigned-session' }).task;
+  await service.execute({ method: 'chat.config.set', params: { id: session.id, config: { agentProvider: 'dsh' } } });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(closes.some(call => call.method === 'agent.closeSession'), false, 'releasing history cannot close a session now assigned to another Task');
+  assert.equal(taskService.runtime.get({ id: other.id }).task.currentAgent.sessionId, 'reassigned-session');
+  await service.close();
+  ok('Terminal Chat release never closes an execution session it no longer owns');
+}
+
 // Phase 3: a Task-bound Chat switches its Agent only through a completed Continuity handoff.
 {
   const dir = path.join(stateDir, 'phase3-chat-handoff');

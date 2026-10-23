@@ -3,10 +3,12 @@ import type { ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { openExternal } from '../../bridge/typed-client';
+import { useReferenceViewer } from '../../app/reference-viewer-context';
 
-export function Markdown({ children }: { children: string }) {
+export function Markdown({ children, reference }: { children: string; reference?: { sessionId: string; messageId: string } }) {
+  const viewer = useReferenceViewer();
   return <div className="cm-markdown"><ReactMarkdown components={{
-    a: ({ href, children: label }) => <button className="text-link" onClick={() => { if (href) void openExternal(href); }}>{label}</button>,
+    a: ({ href, children: label }) => <button type="button" className="text-link" onClick={event => { if (!href) return; if (reference && viewer) viewer.open({ kind: 'message', ...reference, href }, event.currentTarget.textContent || href, event.currentTarget); else void openExternal(href); }}>{label}</button>,
     img: ({ alt }) => <span role="img" aria-label={alt || '图片'}>[图片：{alt || '未命名'}]</span>
   }}>{children}</ReactMarkdown></div>;
 }
@@ -40,11 +42,12 @@ export interface VirtualListController {
   isAtBottom(): boolean;
   scrollToBottom(): void;
 }
-export function VirtualList<T>({ items, estimateSize, render, height, getItemKey, isAnchorable, controllerRef, onScrollStateChange, overlay }: {
+export function VirtualList<T>({ items, estimateSize, render, height, getItemKey, isAnchorable, controllerRef, onScrollStateChange, overlay, initialIndex = 0 }: {
   items: T[];
   estimateSize: number;
   render(item: T, index: number): ReactNode;
   height: number | '100%';
+  initialIndex?: number;
   getItemKey(item: T, index: number): string;
   isAnchorable?(item: T, index: number): boolean;
   controllerRef?: MutableRefObject<VirtualListController | null>;
@@ -57,6 +60,7 @@ export function VirtualList<T>({ items, estimateSize, render, height, getItemKey
     count: items.length,
     getScrollElement: () => parent.current,
     initialRect: { width: 1280, height: typeof height === 'number' ? height : 640 },
+    initialOffset: Math.max(0, initialIndex) * estimateSize,
     estimateSize: () => estimateSize,
     getItemKey: index => getItemKey(items[index], index),
     measureElement: element => element.getBoundingClientRect().height,

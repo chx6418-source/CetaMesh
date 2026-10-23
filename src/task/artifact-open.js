@@ -60,7 +60,7 @@ function parseReference(ref, { workspaceRoot, ownedArtifactRoot }) {
 }
 
 /** Resolve a persisted Task Artifact reference only inside its owning local root. */
-export function resolveTaskArtifactOpen({ artifact, workspaceRoot = null, ownedArtifactRoot = null } = {}) {
+export function resolveTaskArtifactOpen({ artifact, workspaceRoot = null, ownedArtifactRoot = null, forPreview = false } = {}) {
   if (!artifact || typeof artifact !== 'object' || Array.isArray(artifact)) {
     fail('ARTIFACT_NOT_FOUND', 'Artifact 不存在');
   }
@@ -89,7 +89,7 @@ export function resolveTaskArtifactOpen({ artifact, workspaceRoot = null, ownedA
   if (!stat.isFile()) fail('ARTIFACT_NOT_A_FILE', 'Artifact 必须是本地文件');
 
   const extension = path.extname(canonicalPath).toLowerCase();
-  if (!ALLOWED_EXTENSIONS.has(extension)) fail('ARTIFACT_TYPE_UNSUPPORTED', 'Artifact 文件类型不受支持');
+  if (!forPreview && !ALLOWED_EXTENSIONS.has(extension)) fail('ARTIFACT_TYPE_UNSUPPORTED', 'Artifact 文件类型不受支持');
   return { canonicalPath, extension };
 }
 

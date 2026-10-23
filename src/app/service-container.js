@@ -475,6 +475,7 @@ export function createCetaMeshServices(options = {}) {
     } : {}),
     releaseConfig: releaseConfig.config,
     notesCache,
+    updateConfigProvider: () => settingsService.store.get().settings.updates,
     diagnosticsProvider: diagnosticsSnapshot
   });
   const pluginCenterService = createPluginCenterService({

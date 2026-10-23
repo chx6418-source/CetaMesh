@@ -61,7 +61,10 @@ try {
   equal('About 版本来自 package.json（不写死）', info.version, pkg.version);
   equal('About 平台含系统与架构', [info.platform.os, info.platform.arch], [process.platform, process.arch]);
   check('About 平台描述可直接展示', typeof info.platform.label === 'string' && info.platform.label.length > 0, info.platform.label);
-  equal('开发者未配置时不编造', info.developer, { name: null, configured: false });
+  equal('官方发行配置提供 Owner 确认的开发者名称', info.developer, { name: 'chx6418-source', configured: true });
+  equal('缺少发行配置时仍不编造开发者', createAboutInfo({ rootDir: track(tmpDir('cetamesh-no-config-')) }).info().developer,
+    { name: null, configured: false });
+  equal('官方 GitHub 链接指向公开项目', info.links.github, 'https://github.com/chx6418-source/CetaMesh');
   equal('About 官网来自唯一 productLinks 配置', [info.links.website, info.links.websiteConfigured], ['https://cetamesh.com', true]);
   check('About 给出 GitCode 与 GitHub', info.links.gitcode.includes('gitcode.com') && info.links.github.includes('github.com'));
   equal('About 许可证名称', info.legal.license.name, 'GPL-3.0-only');
@@ -189,6 +192,19 @@ try {
   const failedRecord = (await failingService.execute({ method: 'update.notes', params: {} })).record;
   equal('检查失败也如实缓存失败态', [failedRecord.status, failedRecord.failureCode], ['error', 'NETWORK_ERROR']);
 
+  const missingKeyCache = createNotesCache({ stateDir: track(tmpDir('cetamesh-missing-update-key-')) });
+  let missingKeyFetches = 0;
+  const missingKeyService = createUpdateService({ currentVersion: pkg.version, notesCache: missingKeyCache,
+    settingsStore: { get: () => ({ settings: { updates: { ...settingsStore.get().settings.updates, pinnedPublicKey: '' }, security: { allowedUpdateHosts: 'github.com' } } }) },
+    fetchImpl: async () => { missingKeyFetches += 1; throw Error('must not fetch without trust key'); } });
+  const missingKey = await missingKeyService.execute({ method: 'update.check' });
+  equal('缺少验签配置属于未配置而非网络失败', [missingKey.status, missingKey.code, missingKeyFetches], ['not_configured', 'NO_PINNED_KEY', 0]);
+  const missingKeyRecord = (await missingKeyService.execute({ method: 'update.notes' })).record;
+  equal('未配置状态与原因持久化', [missingKeyRecord.status, missingKeyRecord.failureCode], ['not_configured', 'NO_PINNED_KEY']);
+  const repairedConfigAbout = createAboutService({ rootDir: repoRoot, notesCache: missingKeyCache,
+    updateConfigProvider: () => settingsStore.get().settings.updates });
+  equal('配置已补齐时不再沿用历史缺配置状态', [repairedConfigAbout.updateSummary().status, repairedConfigAbout.updateSummary().failureCode], ['unknown', null]);
+
   // ── 4. 诊断快照：白名单 + 脱敏（只在本机展示，不再有任何上传通道） ───────
   const registry = createErrorRegistry();
   registry.record('TOOL_DENIED', { source: 'capability' });
@@ -269,6 +285,13 @@ try {
   check('IPC about.info 可达且版本一致', ipcAbout.about.version === pkg.version);
   const ipcAboutUpdate = await ipc.dispatch({ method: 'about.update', params: {} });
   check('IPC about.update 可达（离线）', ipcAboutUpdate.update.currentVersion === pkg.version);
+  const initialUpdate = await services.desktopUiService.execute({ method: 'ui.about.update' });
+  equal('初次打开 About 即展示当前缺少验签配置', [initialUpdate.status, initialUpdate.failureCode], ['not_configured', 'NO_PINNED_KEY']);
+  check('About 投影保留可读失败原因', String(initialUpdate.failureMessage).includes('签名公钥'));
+  const uiCheck = await services.desktopUiService.execute({ method: 'ui.update.check' });
+  equal('typed 更新检查保持未配置状态', [uiCheck.status, uiCheck.code], ['not_configured', 'NO_PINNED_KEY']);
+  const reopenedUpdate = await services.desktopUiService.execute({ method: 'ui.about.update' });
+  equal('离线重开 About 保留状态和原因', [reopenedUpdate.status, reopenedUpdate.failureCode], ['not_configured', 'NO_PINNED_KEY']);
   const ipcOnboarding = await ipc.dispatch({ method: 'onboarding.status', params: {} });
   equal('IPC onboarding.status 可达', [ipcOnboarding.status, ipcOnboarding.steps.length], ['not_started', 7]);
   const ipcEmpty = await ipc.dispatch({ method: 'product.emptyState', params: { key: 'chat.no-model' } });

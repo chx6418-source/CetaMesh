@@ -12,6 +12,7 @@
 
 import { createAboutInfo } from './build-info.js';
 import { DIAGNOSTICS_POLICY } from '../product/diagnostics.js';
+import { updateConfigurationIssue } from '../update/checker.js';
 
 export function createAboutService(options = {}) {
   const notesCache = options.notesCache ?? null;
@@ -21,35 +22,39 @@ export function createAboutService(options = {}) {
   /** 更新区块：当前版本来自 package.json，公告来自**已验签**的本地缓存。 */
   function updateSummary() {
     const info = about.info();
+    const issue = options.updateConfigProvider ? updateConfigurationIssue(options.updateConfigProvider()) : null;
     if (!notesCache) {
       return {
         currentVersion: info.version,
         cacheAvailable: false,
         announcement: null,
         latest: null,
-        status: 'unknown',
+        status: issue ? 'not_configured' : 'unknown',
         checkedAt: null,
         source: null,
         sources: [],
-        failureCode: null,
-        failureMessage: null,
+        failureCode: issue?.code ?? null,
+        failureMessage: issue?.message ?? null,
         lastError: null
       };
     }
     const cached = notesCache.read();
     const record = cached.record;
+    const cachedConfigFailure = ['NO_PINNED_KEY', 'NO_MANIFEST_URL'].includes(record?.failureCode);
+    const configurationRepaired = Boolean(options.updateConfigProvider && !issue && cachedConfigFailure);
     return {
       currentVersion: info.version,
       cacheAvailable: record !== null,
       announcement: record?.announcement ?? null,
       latest: record?.latest ?? null,
-      status: record?.status ?? 'unknown',
+      status: issue ? 'not_configured' : configurationRepaired ? 'unknown'
+        : cachedConfigFailure ? 'not_configured' : record?.status ?? 'unknown',
       checkedAt: record?.checkedAt ?? null,
       source: record?.source ?? null,
       // 下载源列表：UI 展示「从哪来」（GitCode 优先 / GitHub 备用），不含签名公钥。
       sources: record?.sources ?? [],
-      failureCode: record?.failureCode ?? null,
-      failureMessage: record?.failureMessage ?? null,
+      failureCode: configurationRepaired ? null : issue?.code ?? record?.failureCode ?? null,
+      failureMessage: configurationRepaired ? null : issue?.message ?? record?.failureMessage ?? null,
       lastError: cached.lastError ?? null
     };
   }

@@ -10,9 +10,8 @@
 .navigation-rail .sidebar-bottom { align-items: center; gap: 10px; width: 100%; padding-top: 12px; border-top: 1px solid var(--border); }
 .navigation-rail .utility-nav { display: grid; gap: 4px; width: 100%; }
 .navigation-rail .profile-avatar { width: 32px; height: 32px; background: var(--accent-soft); color: var(--accent-hover); font-size: 11px; }
-.rail-connection { display: grid; place-items: center; min-height: 12px; }
-.rail-panel-toggle, .workspace-collapse, .session-heading > button { display: grid; place-items: center; flex: none; width: 30px; height: 30px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--text-muted); cursor: pointer; }
-.rail-panel-toggle:hover, .workspace-collapse:hover, .session-heading > button:hover { background: var(--surface-hover); color: var(--text-primary); }
+.rail-panel-toggle, .session-heading > button { display: grid; place-items: center; flex: none; width: 30px; height: 30px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--text-muted); cursor: pointer; }
+.rail-panel-toggle:hover, .session-heading > button:hover { background: var(--surface-hover); color: var(--text-primary); }
 .workspace-panel { display: flex; flex-direction: column; gap: 15px; min-height: 0; min-width: 0; padding: 17px 12px 12px; background: var(--background-soft); }
 .workspace-panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
 .workspace-panel .workspace-switch { flex: 1; min-width: 0; }
@@ -21,8 +20,8 @@
 .workspace-menu button[aria-current='true'] { background: var(--accent-soft); }
 .sidebar-new-session { display: flex; align-items: center; gap: 9px; flex: none; width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); color: var(--text-primary); text-align: left; cursor: pointer; }
 .sidebar-new-session:hover { background: var(--surface-hover); }
-.sidebar-new-session, .workspace-collapse, .rail-panel-toggle, .session-heading > button { transition: background-color var(--motion-fast), color var(--motion-fast), transform var(--motion-fast) var(--motion-spring); }
-.sidebar-new-session:active, .workspace-collapse:active, .rail-panel-toggle:active { transform: scale(.95); }
+.sidebar-new-session, .rail-panel-toggle, .session-heading > button { transition: background-color var(--motion-fast), color var(--motion-fast), transform var(--motion-fast) var(--motion-spring); }
+.sidebar-new-session:active, .rail-panel-toggle:active { transform: scale(.98); }
 .workspace-project > summary > svg:first-child { transition: transform var(--motion-normal) var(--motion-spring); }
 .workspace-panel .sidebar-scroll { gap: 25px; }
 .workspace-panel .nav-label { display: block; padding: 4px 5px; font-size: 11px; }
