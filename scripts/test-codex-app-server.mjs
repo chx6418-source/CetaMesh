@@ -141,7 +141,10 @@ try {
   task=nativeCore.taskService.runtime.start({id:task.id,expectedRev:task.rev,provider:'codex',sessionId:nativeSession.sessionId}).task;
   nativeCore.capabilityService.trackTaskAgent({taskId:task.id,provider:'codex',sessionId:nativeSession.sessionId});
   await router.send({...nativeSession,content:'fixture native snapshot failure'});await tick();
-  assert.ok(path.resolve(nativeSession.cwd).startsWith(path.resolve(os.tmpdir())+path.sep));
+  // Staging resolves real paths; Windows TEMP may use an 8.3 alias.
+  const relativeStage=path.relative(fs.realpathSync.native(os.tmpdir()),fs.realpathSync.native(nativeSession.cwd));
+  assert.ok(relativeStage && !path.isAbsolute(relativeStage) && relativeStage !== '..' && !relativeStage.startsWith('..'+path.sep),
+   'native session must remain inside the canonical temporary directory');
   assert.notEqual(path.resolve(nativeSession.cwd),path.resolve(source));
   fs.rmSync(nativeSession.cwd,{recursive:true,force:true});
   nativePeer.send({method:'turn/completed',params:{threadId:'native-thread',turn:{id:'turn-1',status:'completed'}}});

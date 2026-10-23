@@ -103,6 +103,7 @@ const REGISTRY = {
   'test-v2-wait.mjs': { category: 'core' },
   'test-slang-learn.mjs': { category: 'core' },
   'test-owner-agent-mode.mjs': { category: 'core' },
+  'test-data-ipc-readiness.mjs': { category: 'core' },
   'test-core-entry.mjs': { category: 'core' },
   'test-service-container.mjs': { category: 'core' },
   'test-whalebridge-core-isolation.mjs': { category: 'core' },
