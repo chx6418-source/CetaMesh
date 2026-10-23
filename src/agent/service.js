@@ -12,6 +12,10 @@ import { createDshAgentProvider } from './dsh-agent-provider.js';
 import { createDshPresetPolicy } from './dsh-preset-policy.js';
 import { createStagedDshAgentProvider } from './staged-dsh-agent-provider.js';
 import { createCodexAgentProvider } from './codex-agent-provider.js';
+import { createAcpProviders } from './acp-provider-descriptors.js';
+import { createClaudeAgentProvider } from './claude-agent-provider.js';
+import { createWorkBuddyAgentProvider } from './workbuddy-agent-provider.js';
+import { createCodexProviderRouter } from './codex-provider-router.js';
 import { createZCodeAgentProvider } from './zcode-agent-provider.js';
 
 function createUnavailableDshProvider() {
@@ -71,17 +75,25 @@ function summarizeProvider(provider, health = null) {
  * The returned .broker supports process-local turn-end wiring for Chat and Continuity.
  */
 export function createDefaultAgentService({ api, defaults, log, dshOptions = {}, dshPresetConfig = null, codexOptions = {}, codexExecutable,
-  zcodeOptions = {}, zcodeExecutable, desktopStatus = null, dshConfiguration = null, resolveWorkspaceIdentity, resolveExecutionTask, isTaskHandoffInFlight } = {}) {
+  zcodeOptions = {}, zcodeExecutable, acpOptions = {}, claudeOptions = {}, workbuddyOptions = {}, codexRouterOptions = {}, desktopStatus = null, dshConfiguration = null, resolveWorkspaceIdentity, resolveExecutionTask, isTaskHandoffInFlight } = {}) {
   const dshProvider = api ? createDshAgentProvider({ api, defaults, log,
     presetPolicy: dshPresetConfig ? createDshPresetPolicy(dshPresetConfig) : null }) : createUnavailableDshProvider();
   const taskBoundDsh = api && typeof dshOptions.resolveTaskWorkspace === 'function' && typeof dshOptions.applyChanges === 'function'
     ? createStagedDshAgentProvider({ ...dshOptions, provider: dshProvider, log })
     : dshProvider;
+  const legacyCodex = createCodexAgentProvider({ ...codexOptions, ...(codexOptions.executable === undefined && codexExecutable !== undefined ? { executable: codexExecutable } : {}), log });
+  const codex = createCodexProviderRouter({ ...codexRouterOptions, legacyProvider: legacyCodex,
+    resolveTransport: codexRouterOptions.resolveTransport ?? (id => legacyCodex._sessions?.has(id) ? 'exec' : null) });
+  const routedCodex = Object.freeze({ ...codex, verifyStoppedTask: (...args) => codexRouterOptions.rolloutEnabled === true
+    ? Promise.resolve({ stopped: false }) : legacyCodex.verifyStoppedTask(...args) });
   const registry = createAgentProviderRegistry({
     providers: [
       taskBoundDsh,
-      createCodexAgentProvider({ ...codexOptions, ...(codexOptions.executable === undefined && codexExecutable !== undefined ? { executable: codexExecutable } : {}), log }),
-      createZCodeAgentProvider({ ...zcodeOptions, ...(zcodeOptions.executable === undefined && zcodeExecutable !== undefined ? { executable: zcodeExecutable } : {}) })
+      routedCodex,
+      createClaudeAgentProvider({ ...claudeOptions, log }),
+      ...createAcpProviders({ ...acpOptions, log }),
+      createZCodeAgentProvider({ ...zcodeOptions, ...(zcodeOptions.executable === undefined && zcodeExecutable !== undefined ? { executable: zcodeExecutable } : {}) }),
+      createWorkBuddyAgentProvider(workbuddyOptions)
     ]
   });
   const broker = createAgentBroker({ registry, log, resolveWorkspaceIdentity, resolveExecutionTask, isTaskHandoffInFlight });
@@ -220,14 +232,25 @@ export function createAgentService({ broker, log = () => {}, desktopStatus = nul
       return Promise.resolve().then(() => handler(params ?? {}));
     },
 
-    close() {
-      // Stop Broker listeners, then each Provider's owned streams and staging.
+    async close() {
       broker.close();
-      for (const provider of registry.list()) {
+      const results = await Promise.all(registry.list().map(async provider => {
+        let timer;
         try {
-          const shutdown = provider.shutdown?.();
-          if (shutdown?.catch) shutdown.catch((error) => log(`Agent Provider ${provider.id} shutdown failed: ${error?.code ?? 'PROVIDER_ERROR'}`));
-        } catch (error) { log(`Agent Provider ${provider.id} shutdown failed: ${error?.code ?? 'PROVIDER_ERROR'}`); }
+          await Promise.race([
+            Promise.resolve().then(() => provider.shutdown?.()),
+            new Promise((_, reject) => { timer = setTimeout(() => reject(agentProviderError('PROVIDER_CLOSE_UNKNOWN','Provider exit unconfirmed')),35000); })
+          ]);
+          return {provider:provider.id,closed:true};
+        } catch (error) {
+          log(`Agent Provider ${provider.id} shutdown failed: ${error?.code ?? 'PROVIDER_ERROR'}`);
+          return {provider:provider.id,closed:false,state:'unknown',errorCode:error?.code ?? 'PROVIDER_ERROR'};
+        } finally { clearTimeout(timer); }
+      }));
+      if (results.some(result => !result.closed)) {
+        const error = agentProviderError('PROVIDER_CLOSE_UNKNOWN','Some Provider exits remain unconfirmed');
+        error.results = results;
+        throw error;
       }
       log('Agent Provider 服务已关闭');
     }

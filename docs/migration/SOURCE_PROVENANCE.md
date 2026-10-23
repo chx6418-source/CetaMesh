@@ -9,3 +9,9 @@ The private source histories, worktrees and Git bundles were **not** grafted int
 A subsequent cleanup review removes obsolete theme/demo prototypes, repair handoffs and evidence files from the active tree without rewriting public history. Exact preservation of these files is tracked in the separately controlled private archive branch archive/public-cleanup-20261022. Removing paths now does not erase their prior public exposure.
 
 The selected Desktop Harbor UI and Mobile code remain in their maintained source directories. Licensing for third-party dependencies and any binaries must be evaluated independently; no approval to redistribute restricted SnowLuma SDK or its native addon is implied. See [public migration record](PUBLIC_MIGRATION_ACCEPTANCE.md) and [public repository policy](../development/PUBLIC_REPOSITORY_POLICY.md).
+
+## Desktop snapshot update — 2026-10-23
+
+The public main history at 33b10b3 was retained while importing the reviewed Desktop UI/Agent product delta corresponding to private source 2b2339c (included in private integration 7406fe2). This is a source snapshot, without attaching any private Git parent. Existing Mobile, introductions, governance, independent OneBot transport, dependency manifests and restricted-SDK bundle exclusions remain preserved. Internal repair reports and historical plans remain outside this export.
+
+The public snapshot itself passed30 of31 selected registered suites; the remaining new-SEA suite was environment-gated. Desktop UI TypeScript/Vite build passed, and the export-boundary review found no issues. No new binary Release, installation, actual-account workflow or native-security acceptance is established by this update. See [current Agent integration boundaries](../desktop/AGENT_INTEGRATION_STATUS.md).

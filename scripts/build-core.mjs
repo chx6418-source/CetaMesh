@@ -17,6 +17,9 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { assertNoWebUiHtmlArtifacts, isNoWebUiHtmlArtifact } from './no-web-release-policy.mjs';
+import { stageClaudeSdkResource } from './claude-sdk-resource.mjs';
+import { computeAgentExpansionFingerprint, assertAgentExpansionSourceUnchanged } from '../src/agent/expansion-provenance.js';
+import { writeJsonAtomic } from '../src/storage/json-file.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(import.meta.url);
@@ -53,6 +56,10 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--out') options.outDir = path.resolve(argv[++i] ?? '');
+    else if (arg === '--claude-sdk-source') {
+      if (!argv[i + 1] || argv[i + 1].startsWith('--')) fail('--claude-sdk-source requires an explicit official package directory');
+      options.claudeSdkSource = path.resolve(argv[++i]);
+    }
     else if (arg === '--no-verify') options.verify = false;
     else if (arg === '--force') options.force = true;
     else if (arg === '--no-web-ui') options.noWebUi = true;
@@ -339,6 +346,7 @@ async function main() {
   fs.mkdirSync(buildDir, { recursive: true });
 
   log('[1/6] esbuild 生成单文件 CJS bundle');
+  const agentSourceFingerprint = computeAgentExpansionFingerprint(ROOT);
   const { bundleFile, metafile } = await buildBundle(buildDir);
   const bundleSize = fs.statSync(bundleFile).size;
   log(`  ${path.relative(ROOT, bundleFile)}（${(bundleSize / 1024).toFixed(0)} KB）`);
@@ -353,11 +361,19 @@ async function main() {
   const exeFile = injectSea(outDir, buildDir, blobFile);
 
   log('[5/6] 复制只读资源');
-  const { resourcesDir, copied, excluded } = stageResources(outDir, options);
+  const { resourcesDir, excluded } = stageResources(outDir, options);
+  const claudeSdk = await stageClaudeSdkResource(options.claudeSdkSource, resourcesDir);
+  const resourceInventory = fs.readdirSync(resourcesDir, { recursive: true, withFileTypes: true })
+    .filter(item => item.isFile()).map(item => {
+      const file = path.join(item.parentPath, item.name);
+      return { file: path.relative(resourcesDir, file).replaceAll('\\', '/'), bytes: fs.statSync(file).size, sha256: sha256(file) };
+    }).sort((a, b) => a.file.localeCompare(b.file));
+  const copied = resourceInventory.length;
   for (const item of excluded) log(`  排除 ${item.path}（${item.reason}）`);
 
   log('[6/6] 审计发行产物（禁止项 / 构建机路径 / 凭据泄漏）');
   auditArtifacts(outDir, bundleFile, exeFile, options);
+  assertAgentExpansionSourceUnchanged(ROOT, agentSourceFingerprint);
 
   const esbuildVersion = require('esbuild/package.json').version;
   const manifest = {
@@ -370,11 +386,14 @@ async function main() {
     executable: CORE_EXE_NAME,
     executableBytes: fs.statSync(exeFile).size,
     executableSha256: sha256(exeFile),
+    agentExpansion: { contractVersion: 1, sourceFingerprint: agentSourceFingerprint },
     bundleBytes: bundleSize,
     bundledPackages: packages,
     optionalExternals: OPTIONAL_EXTERNALS,
     resourceDirs: RESOURCE_DIRS,
     resourceFiles: copied,
+    resourceInventory,
+    optionalAgentSdk: claudeSdk ? { ...claudeSdk, sha256: sha256(path.join(resourcesDir, claudeSdk.file)) } : null,
     excludedResources: excluded,
     noWebUi: options.noWebUi,
     // 发行运行面红线（D1）：native/release 模式不启动 loopback HTTP（consolePort），
@@ -386,7 +405,7 @@ async function main() {
     // 宿主 node.exe 是 Node.js 官方产物，随产物再分发时需附带其许可证文本。
     licenseNotice: 'includes Node.js (https://nodejs.org/) — MIT license, see resources/licenses/'
   };
-  fs.writeFileSync(path.join(outDir, 'runtime-manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
+  writeJsonAtomic(path.join(outDir, 'runtime-manifest.json'), manifest);
 
   const mb = (bytes) => `${(bytes / 1024 / 1024).toFixed(1)} MB`;
   log('');

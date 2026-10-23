@@ -110,7 +110,7 @@ check('release bundles only the canonical local React assets', () => {
   assert.match(release, /webview2-bundled/);
 });
 
-check('Harbor provides standalone Memory categories without changing primary navigation', () => {
+check('Harbor provides standalone Memory categories and a direct icon navigation entry', () => {
   const app = read('desktop-ui/src/app/HarborApp.tsx');
   assert.match(app, /type PageId = [^;]*'memory'/);
   assert.match(app, /function MemoryPage\(/);
@@ -121,7 +121,9 @@ check('Harbor provides standalone Memory categories without changing primary nav
   assert.match(app, /最近/);
   assert.match(app, /<ChatContextPanel[^>]*memories=\{memories\}/);
   assert.match(app, /function ChatContextPanel\(/);
-  assert.doesNotMatch(app, /const NAV:[\s\S]{0,500}id:\s*['"]memory['"]/);
+  const sidebar = read('desktop-ui/src/app/WorkspaceSidebar.tsx');
+  assert.match(sidebar, /id: 'memory', label: '记忆', icon: 'memory'/);
+  assert.match(app, /page === 'memory' && <MemoryPage/);
 });
 
 check('MCP detail exposes real restart and masked configuration actions', () => {
@@ -250,7 +252,8 @@ check('Harbor accessibility and real-world controls avoid clipping and preserve 
   const policy = read('desktop-shell/src/webview_policy.rs');
   assert.match(app, /function SessionActionsMenu/);
   assert.match(app, /createPortal\(<div ref=\{menuRef\}/);
-  assert.match(app, /window\.localStorage\.setItem\(`harbor:chat-context:/);
+  assert.match(app, /<details className="chat-context-card">/);
+  assert.match(app, /className="composer-dock"><ChatContextPanel/);
   assert.match(app, /settingPages = \[/);
   assert.match(app, /导入本地扩展/);
   assert.match(app, /stageLocalPackage/);
@@ -261,7 +264,7 @@ check('Harbor accessibility and real-world controls avoid clipping and preserve 
   assert.doesNotMatch(inputs, /<select className="cm-select"/);
   assert.match(styles, /html, body, #root[^\n]*overflow: hidden/);
   assert.match(styles, /\.chat-message, \.chat-message \*, \.cm-markdown/);
-  assert.match(harbor, /\.chat-workspace\.context-collapsed/);
+  assert.match(harbor, /\.chat-workspace\s*\{[^}]*grid-template-columns: minmax\(0, 1fr\)/);
   assert.match(shell, /app\.pickExtensionPackage/);
   assert.match(policy, /"app\.pickExtensionPackage"/);
   assert.doesNotMatch(app, /unzipSync|extractPluginPackage|JSZip/);
@@ -317,7 +320,9 @@ check('Update check returns an honest current status', () => {
 check('Production host wording does not call the native app a browser preview', () => {
   const app = read('desktop-ui/src/app/HarborApp.tsx');
   assert.doesNotMatch(app, /浏览器预览/);
-  assert.match(app, /桌面工作台已连接/);
+  const sidebar = read('desktop-ui/src/app/WorkspaceSidebar.tsx');
+  assert.doesNotMatch(sidebar, /浏览器预览/);
+  assert.match(sidebar, /hostStatus === 'ready' \? '已连接'/);
 });
 check('Release SBOM and third-party report include renderer production dependencies', () => {
   const release = read('scripts/build-release.mjs');

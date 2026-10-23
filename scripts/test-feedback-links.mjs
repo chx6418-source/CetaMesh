@@ -197,11 +197,12 @@ try {
   equal('typed UI projection 保留 disabled 无 URL 状态', [unavailableLinks.configured, unavailableLinks.entries.every((entry) => entry.url === null), unavailableLinks.message],
     [false, true, FEEDBACK_NOT_CONFIGURED_MESSAGE]);
   const aboutUi = fs.readFileSync(path.join(repoRoot, 'desktop-ui', 'src', 'app', 'HarborApp.tsx'), 'utf8');
+  const feedbackRowUi = fs.readFileSync(path.join(repoRoot, 'desktop-ui', 'src', 'app', 'StatusPresentation.tsx'), 'utf8');
   const typedClient = fs.readFileSync(path.join(repoRoot, 'desktop-ui', 'src', 'bridge', 'typed-client.ts'), 'utf8');
   const nativeUi = fs.readFileSync(path.join(repoRoot, 'desktop-shell', 'src', 'webview_ui.rs'), 'utf8');
   const nativeLinks = fs.readFileSync(path.join(repoRoot, 'desktop-shell', 'src', 'external_link.rs'), 'utf8');
   check('About 只读取 ui.feedback.links，缺失 URL 禁用按钮并交给 Native HTTPS Host',
-    aboutUi.includes('feedbackClient.links()') && aboutUi.includes('disabled={!entry.url}')
+    aboutUi.includes('feedbackClient.links()') && aboutUi.includes('<FeedbackLinkRow') && feedbackRowUi.includes('disabled={!enabled}') && feedbackRowUi.includes("entry.url?.startsWith('https://')")
       && /url\?\.startsWith\('https:\/\/'\).*openExternal\(url\)/s.test(aboutUi)
       && typedClient.includes("bridge.invoke('app.openExternal', { url })")
       && nativeUi.includes('crate::external_link::open_in_default_browser(url)')

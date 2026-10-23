@@ -67,6 +67,10 @@ export const CORE_USAGE = `鲸桥 WhaleBridge Core
   WHALEBRIDGE_RESOURCE_DIR     只读资源目录；打包运行时默认 exe 同目录的 resources\\`;
 
 export function parseCoreArgs(argv = process.argv.slice(2)) {
+  if (argv[0] === '--agent-sdk-runner') {
+    if (argv.length !== 2 || argv[1] !== 'claude') throw new Error('Invalid private Agent SDK runner arguments');
+    return { mode: 'agent-sdk-runner', provider: 'claude' };
+  }
   const args = stripDataDirArgs([...argv]);
   if (args.length === 0 || args[0] === '--help' || args[0] === '-h') return { mode: 'help' };
   if (args[0] === '--worker') {
@@ -132,6 +136,7 @@ export function parseCoreArgs(argv = process.argv.slice(2)) {
 
 export async function runCore(argv = process.argv.slice(2)) {
   const command = parseCoreArgs(argv);
+  if (command.mode === 'agent-sdk-runner') return (await import('./agent/claude-sdk-runner.js')).runClaudeSdkRunner();
   if (command.mode === 'help') {
     process.stdout.write(`${CORE_USAGE}\n`);
     return;

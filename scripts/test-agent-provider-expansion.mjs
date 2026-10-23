@@ -324,7 +324,7 @@ try {
   assert.equal(authorizedEnv.OPENAI_BASE_URL, 'http://127.0.0.1:8181/v1');
   assert.equal(Object.hasOwn(createMinimalAgentEnv({}, { OPENAI_BASE_URL: 'http://remote.example/v1' }, { authorizedEnvKeys: ['OPENAI_BASE_URL'] }), 'OPENAI_BASE_URL'), false);
 
-  const appDataRoot = path.join(root, 'User Profile With Spaces');
+  const appDataRoot = path.join(root, '用户目录 User Profile With Spaces');
   const shimRoot = path.join(appDataRoot, 'npm');
   const shimExecutable = path.join(shimRoot, 'codex.cmd');
   const shimScript = path.join(shimRoot, 'node_modules', '@openai', 'codex', 'bin', 'codex.js');
@@ -896,7 +896,7 @@ try {
   const zcode = await createZCodeAgentProvider({ executable: null, desktopDetected: true });
   assert.equal(zcode.id, 'zcode');
   assert.equal(zcode.capabilities().available, false);
-  assert.equal(zcode.capabilities().reason, 'unsupported_external_control');
+  assert.equal(zcode.capabilities().reason, 'external_protocol_unverified');
   const zcodeMissing = await createZCodeAgentProvider({ desktopDetected: false });
   assert.equal(zcodeMissing.capabilities().available, false);
   assert.equal(zcodeMissing.capabilities().reason, 'not_installed');
@@ -904,7 +904,7 @@ try {
   const service = createDefaultAgentService({ api: null, codexExecutable: null,
     zcodeOptions: { desktopDetected: false }, zcodeExecutable: null });
   const listed = await service.execute({ method: 'agent.list' });
-  assert.deepEqual(listed.providers.map(({ id }) => id), ['dsh', 'codex', 'zcode']);
+  assert.deepEqual(listed.providers.map(({ id }) => id), ['dsh', 'codex', 'claude', 'gemini', 'opencode', 'qwen', 'zcode', 'workbuddy']);
   assert.equal(listed.providers.find(({ id }) => id === 'dsh').available, false);
   assert.equal(listed.providers.find(({ id }) => id === 'codex').reason, 'not_installed');
   assert.equal(listed.providers.find(({ id }) => id === 'zcode').reason, 'not_installed');

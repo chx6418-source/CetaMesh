@@ -41,7 +41,7 @@ try {
       + '$icon=[System.Drawing.Icon]::ExtractAssociatedIcon($env:WHALEBRIDGE_ICON_PROBE); if($null -eq $icon){exit 2}; '
       + '$bitmap=$icon.ToBitmap(); try { '
       + '$pixels=0; for($x=0;$x -lt $bitmap.Width;$x++){for($y=0;$y -lt $bitmap.Height;$y++){'
-      + '$color=$bitmap.GetPixel($x,$y); if($color.A -gt 0 -and ($color.B-$color.R) -gt 20){$pixels++}}}; '
+      + '$color=$bitmap.GetPixel($x,$y); if($color.A -gt 0 -and ($color.G-$color.R) -gt 8 -and ($color.G-$color.B) -gt 5){$pixels++}}}; '
       + 'if($pixels -lt 20){exit 3} } finally {$bitmap.Dispose(); $icon.Dispose()}',
   ], {
     cwd: root,
@@ -50,9 +50,9 @@ try {
     env: { ...process.env, WHALEBRIDGE_ICON_PROBE: setupExe }
   });
   assert.equal(iconProbe.status, 0,
-    `安装器应带有可由 Windows 提取的蓝青 C4 图标（退出代码 ${iconProbe.status}）：${iconProbe.stderr ?? ''}`);
+    `安装器应带有可由 Windows 提取的绿色 CetaMesh 图标（退出代码 ${iconProbe.status}）：${iconProbe.stderr ?? ''}`);
   assert.deepEqual(fs.readdirSync(outDir).sort(), ['WhaleBridge-Setup-x64.exe', 'WhaleBridge.exe'].sort());
-  process.stdout.write('✅ IExpress 生成了带 C4 图标的单文件 WhaleBridge 安装器，构建中间文件未进入发布目录。\n');
+  process.stdout.write('✅ IExpress 生成了带绿色 CetaMesh 图标的单文件安装器，构建中间文件未进入发布目录。\n');
 
   // The package builder must fail closed if an upstream step accidentally reintroduces HTML UI.
   fs.writeFileSync(path.join(payloadDir, 'resources', 'public', 'console.html'), '<!doctype html>');

@@ -1,5 +1,5 @@
 import type { ComponentProps } from 'react';
-import { Bot, Brain, BriefcaseBusiness, Check, ChevronDown, ChevronLeft, ChevronRight, CircleHelp, Clock3, Code2, Command, Download, FileCode2, FileText, Globe2, Image, Layers3, LayoutGrid, Menu, MessageCircle, Mic, Moon, MoreHorizontal, Music2, Paperclip, Pause, Play, PlugZap, Plus, Search, Send, Settings2, ShieldCheck, SlidersHorizontal, Sparkles, Square, Sun, TerminalSquare, Wrench, X } from 'lucide-react';
+import { Bot, Brain, BriefcaseBusiness, Check, ChevronDown, ChevronLeft, ChevronRight, CircleHelp, Clock3, Code2, Command, Download, FileCode2, FileText, Folder, Globe2, Image, Layers3, LayoutGrid, Menu, MessageCircle, Mic, Moon, MoreHorizontal, Music2, Paperclip, Pause, Play, PlugZap, Plus, Search, Send, Settings2, ShieldCheck, SlidersHorizontal, Sparkles, Square, Sun, TerminalSquare, Wrench, X } from 'lucide-react';
 
 const icons = {
   chat: MessageCircle, work: BriefcaseBusiness, memory: Brain, agents: Bot, plugins: LayoutGrid,
@@ -7,7 +7,7 @@ const icons = {
   approval: ShieldCheck, device: Globe2, update: Download, sparkles: Sparkles, plug: PlugZap,
   music: Music2, code: Code2, globe: Globe2, image: Image, bot: Bot, layers: Layers3,
   check: Check, down: ChevronDown, left: ChevronLeft, right: ChevronRight, help: CircleHelp, shield: ShieldCheck,
-  clock: Clock3, file: FileText, fileCode: FileCode2, command: Command, menu: Menu, mic: Mic,
+  clock: Clock3, folder: Folder, file: FileText, fileCode: FileCode2, command: Command, menu: Menu, mic: Mic,
   moon: Moon, more: MoreHorizontal, pause: Pause, play: Play, sliders: SlidersHorizontal,
   square: Square, sun: Sun, terminal: TerminalSquare, close: X
 } as const;

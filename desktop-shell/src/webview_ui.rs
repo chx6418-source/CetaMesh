@@ -11,7 +11,7 @@ use tao::dpi::{LogicalPosition, LogicalSize};
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tao::platform::windows::WindowExtWindows;
-use tao::window::{Icon, Window, WindowBuilder};
+use tao::window::{Icon, Window, WindowBuilder, ResizeDirection};
 use wry::http::{Request, Response};
 use wry::{NewWindowResponse, WebContext, WebView, WebViewBuilder, WebViewBuilderExtWindows};
 
@@ -21,10 +21,11 @@ use crate::native_ui::CoreApi;
 use crate::supervisor::{Status, StatusListener, Supervisor};
 use crate::tray::{TrayCommand, TrayHandle, TrayStatus};
 use crate::ui_prefs::{self, CloseBehavior, UiPrefs};
-use crate::webview_policy::{self, APP_ORIGIN, BridgeRequest, PRODUCTION_CSP};
+use crate::webview_policy::{self, APP_ORIGIN, BridgeRequest, PRODUCTION_CSP, WindowAction};
 
 enum UiEvent {
     Wake,
+    WindowAction { id: String, action: WindowAction },
     CoreStatus(Status),
     WindowBehavior { confirm_on_exit: bool },
     Reply { id: String, result: Result<Value, String> },
@@ -223,6 +224,12 @@ fn dispatch_bridge(
                 let _ = proxy.send_event(UiEvent::Reply { id, result: Ok(json!({ "path": path })) });
             });
         }
+        "app.windowAction" => {
+            match webview_policy::window_action(&request.params) {
+                Ok(action) => { let _ = proxy.send_event(UiEvent::WindowAction { id, action }); }
+                Err(error) => { let _ = proxy.send_event(UiEvent::Reply { id, result: Err(error) }); }
+            }
+        }
         "app.setWindowBehavior" => {
             let result = match request.params["confirmOnExit"].as_bool() {
                 Some(confirm_on_exit) => proxy.send_event(UiEvent::WindowBehavior { confirm_on_exit })
@@ -352,6 +359,7 @@ pub fn run_webview_ui(paths: DesktopPaths, dev_url: Option<String>) -> Result<()
         .and_then(|data| Icon::from_rgba(data.rgba, data.width, data.height).ok());
     let mut window_builder = WindowBuilder::new()
         .with_title("CetaMesh")
+        .with_decorations(false)
         .with_inner_size(LogicalSize::new(1280.0, 800.0))
         .with_min_inner_size(LogicalSize::new(960.0, 640.0))
         .with_visible(!start_minimized)
@@ -446,6 +454,35 @@ pub fn run_webview_ui(paths: DesktopPaths, dev_url: Option<String>) -> Result<()
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::WaitUntil(next_prefs_sync);
         match event {
+            Event::UserEvent(UiEvent::WindowAction { id, action }) => {
+                let result = match action {
+                    WindowAction::State => Ok(()),
+                    WindowAction::Drag => window.drag_window().map_err(|error| error.to_string()),
+                    WindowAction::Minimize => { window.set_minimized(true); Ok(()) }
+                    WindowAction::Maximize => { window.set_maximized(!window.is_maximized()); Ok(()) }
+                    // WM_CLOSE reuses CloseRequested, including hide-to-tray and Owner exit confirmation.
+                    WindowAction::Close => unsafe {
+                        use windows_sys::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
+                        if PostMessageW(window.hwnd() as _, WM_CLOSE, 0, 0) != 0 { Ok(()) }
+                        else { Err("无法请求关闭窗口。".to_owned()) }
+                    },
+                    edge => {
+                        let direction = match edge {
+                            WindowAction::ResizeNorth => ResizeDirection::North,
+                            WindowAction::ResizeNorthEast => ResizeDirection::NorthEast,
+                            WindowAction::ResizeEast => ResizeDirection::East,
+                            WindowAction::ResizeSouthEast => ResizeDirection::SouthEast,
+                            WindowAction::ResizeSouth => ResizeDirection::South,
+                            WindowAction::ResizeSouthWest => ResizeDirection::SouthWest,
+                            WindowAction::ResizeWest => ResizeDirection::West,
+                            WindowAction::ResizeNorthWest => ResizeDirection::NorthWest,
+                            _ => unreachable!("non-resize actions handled above"),
+                        };
+                        window.drag_resize_window(direction).map_err(|error| error.to_string())
+                    }
+                }.map(|()| json!({ "maximized": window.is_maximized() }));
+                send_reply(&webview, id, result);
+            }
             Event::UserEvent(UiEvent::Reply { id, result }) => send_reply(&webview, id, result),
             Event::UserEvent(UiEvent::WindowBehavior { confirm_on_exit: value }) => confirm_on_exit = value,
             Event::UserEvent(UiEvent::CoreStatus(status)) => {

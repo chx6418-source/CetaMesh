@@ -42,6 +42,20 @@ const REGISTRY = {
   'test-onebot-client.mjs': { category: 'integration' },
   'test-monorepo-contract.mjs': { category: 'architecture' },
   'test-public-repository-hygiene.mjs': { category: 'security', note: 'Prevent reintroduction of private-only reports, obsolete design mocks and broken README links' },
+  'test-agent-expansion-provenance.mjs': { category: 'core' },
+  'test-agent-expansion-sea.mjs': { category: 'release', requires: ['agent-expansion-sea'], timeoutMs: 120000 },
+  'test-agent-protocol-lifecycle.mjs': { category: 'integration' },
+  'test-agent-acp-providers.mjs': { category: 'security' },
+  'test-codex-app-server.mjs': { category: 'security' },
+  'test-agent-claude.mjs': { category: 'security' },
+  'test-agent-acp.mjs': { category: 'security' },
+  'test-agent-workbuddy.mjs': { category: 'runtime' },
+  'test-ui-motion.mjs': { category: 'desktop' },
+  'test-chat-composer-layout.mjs': { category: 'desktop' },
+    'test-chat-context-card.mjs': { category: 'desktop' },
+    'test-sidebar-layout.mjs': { category: 'desktop' },
+    'test-settings-layout.mjs': { category: 'desktop' },
+  'test-window-chrome.mjs': { category: 'desktop' },
   'test-comm-approval.mjs': { category: 'security' },
   'test-comm-legacy-shutdown.mjs': { category: 'integration' },
   'test-comm-managed-turns.mjs': { category: 'integration' },
@@ -141,6 +155,7 @@ const REGISTRY = {
 
   // ── runtime：产品运行时（chat/memory/task/continuity/model/social…） ───────
   'test-agent-broker.mjs': { category: 'runtime' },
+  'test-agent-rpc-transport.mjs': { category: 'security' },
   'test-agent-provider-expansion.mjs': { category: 'security' },
   'test-workspace-staging-boundary.mjs': { category: 'security' },
   'test-managed-agent-provider.mjs': { category: 'runtime' },
@@ -281,6 +296,7 @@ async function probeAvailability() {
     'legacy-bridge': isLegacyBridgeTestOptedIn() && await probeTcp(consolePort),
     'cargo-opt-in': process.env.WHALEBRIDGE_TEST_CARGO === '1'
       && spawnSync('cargo', ['--version'], { timeout: 20000 }).status === 0,
+    'agent-expansion-sea': Boolean(process.env.WHALEBRIDGE_AGENT_EXPANSION_SEA_DIR?.trim()),
     'real-codex': process.env.WHALEBRIDGE_TEST_REAL_CODEX === '1'
       && spawnSync('codex', ['login', 'status'], { timeout: 20000 }).status === 0
   };

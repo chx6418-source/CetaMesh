@@ -8,7 +8,7 @@ Set-StrictMode -Version Latest
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 if ([string]::IsNullOrWhiteSpace($Source)) {
-  $Source = Join-Path $repoRoot 'desktop-shell\icons\source-logo-05.png'
+  $Source = Join-Path $repoRoot 'desktop-shell\icons\cetamesh-icon-1024.png'
 }
 if ([string]::IsNullOrWhiteSpace($OutputDir)) {
   $OutputDir = Join-Path $repoRoot 'desktop-shell\icons'
@@ -22,25 +22,17 @@ if (-not (Test-Path -LiteralPath $Source -PathType Leaf)) {
 Add-Type -AssemblyName System.Drawing
 New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
 
-function New-RoundedTilePath([int]$size) {
-  # Keep the generated master inside a clean, consistent rounded contour at every size.
-  $padding = [single]($size * 0.07)
-  $diameter = [single]($size * 0.38)
-  $right = [single]($size - $padding)
-  $bottom = [single]($size - $padding)
-  $path = New-Object System.Drawing.Drawing2D.GraphicsPath
-  $path.AddArc($padding, $padding, $diameter, $diameter, 180, 90)
-  $path.AddArc($right - $diameter, $padding, $diameter, $diameter, 270, 90)
-  $path.AddArc($right - $diameter, $bottom - $diameter, $diameter, $diameter, 0, 90)
-  $path.AddArc($padding, $bottom - $diameter, $diameter, $diameter, 90, 90)
-  $path.CloseFigure()
-  return $path
-}
-
 function Save-IconPng([System.Drawing.Image]$sourceImage, [int]$size, [string]$destination) {
+  # Prefer the Owner's exact-size files; do not add padding or clip the artwork.
+  if ([IO.Path]::GetFileName($Source) -eq 'cetamesh-icon-1024.png') {
+    $provided = Join-Path ([IO.Path]::GetDirectoryName($Source)) "cetamesh-icon-$size.png"
+    if (Test-Path -LiteralPath $provided -PathType Leaf) {
+      Copy-Item -LiteralPath $provided -Destination $destination -Force
+      return
+    }
+  }
   $bitmap = New-Object System.Drawing.Bitmap($size, $size, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
   $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-  $path = New-RoundedTilePath $size
   try {
     $graphics.Clear([System.Drawing.Color]::Transparent)
     $graphics.CompositingMode = [System.Drawing.Drawing2D.CompositingMode]::SourceCopy
@@ -48,12 +40,9 @@ function Save-IconPng([System.Drawing.Image]$sourceImage, [int]$size, [string]$d
     $graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
     $graphics.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
     $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
-    $graphics.SetClip($path)
     $graphics.DrawImage($sourceImage, 0, 0, $size, $size)
-    $graphics.ResetClip()
     $bitmap.Save($destination, [System.Drawing.Imaging.ImageFormat]::Png)
   } finally {
-    $path.Dispose()
     $graphics.Dispose()
     $bitmap.Dispose()
   }

@@ -1,6 +1,6 @@
 # CetaMesh — 当前项目状态
 
-更新日期：2026-10-22。
+更新日期：2026-10-23。
 
 ## 正式仓库与平台
 
@@ -27,7 +27,14 @@
 
 ## 当前开发工作
 
-- 文档介绍校准在 `docs/product-introduction-alignment` 审查分支上进行；未经审核不会自动合并到 main。
+- 公开介绍校准 PR #5 已合入 main（33b10b3）；本轮保留其内容，并在该公开历史上同步已确认的 Desktop UI 与 Agent 源码快照。
 - 下一阶段应优先解决真实终端验证、外部 Agent 接入稳定性和发行门禁，避免为当前用户造成已全部稳定可用的印象。
 
 [项目主页](README.md) · [统一开发与构建](docs/MONOREPO.md) · [桌面限制](docs/desktop/KNOWN_LIMITATIONS.md) · [移动端指南](apps/mobile/README.zh-CN.md)
+
+## Desktop 源码同步（2026-10-23）
+
+- 补齐上一轮遗漏的 GitHub 公开仓库同步；本轮以公开 main 的 33b10b3 为基线，保持独立公开历史。
+- 包含绿色应用图标、紧凑标题栏、图标侧栏和记忆入口、竖向设置、任务卡片、输入区与动效，以及有条件的八项 Agent 注册/RPC/ACP/SDK/API 适配。各 Provider 仍按真实能力与权限门槛决定可用性。
+- Mobile、公开介绍、文档清理、独立 OneBot、SDK/MCP 排除与现有更新入口保持。详细实现边界见 [Agent 接入状态](docs/desktop/AGENT_INTEGRATION_STATUS.md)。
+- 实际公开快照经统一入口选择31项测试：30 PASS / 0 FAIL / 1 NOT_RUN_ENVIRONMENT；唯一跳过项为缺少新产物的 Agent SEA。前端 TypeScript/Vite 构建通过，独立导出边界审查无 Critical/Important/Minor 发现。未重新运行全部测试、Cargo 或 Mobile 测试；共享协议与 Mobile 源码未变。真实账号、原生安全和正式安装验收仍单独保留。

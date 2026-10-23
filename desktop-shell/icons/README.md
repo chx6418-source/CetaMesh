@@ -1,15 +1,13 @@
 # CetaMesh application icons
 
-`source-logo-05.png` is the active master. It was generated from the user-provided
-`CetaMesh-Logo-05.png` reference with the built-in ImageGen tool on 2026-10-05.
-Only the rounded blue tile and white/cyan whale were retained; the presentation
-border, wordmark and caption are excluded.
+The active artwork is the Owner-provided green CetaMesh mark (2026-10-22).
+The four `cetamesh-icon-{180,256,512,1024}.png` files are preserved byte-for-byte
+from the supplied images. Builds use repository-relative paths and do not depend
+on an external image-source directory.
 
-Generation direction: preserve the flowing whale silhouette, cyan-to-cobalt blue
-tile, blue eye and clear small-size shape; transparent outside corners, no text,
-no external shadow. The generator applies a consistent rounded clipping contour.
-
-Master SHA-256: `40c074d92d640ae785357393f3855e98a589d44d91f59d3a247aa7e8de4ccf8f`.
+The default master is `cetamesh-icon-1024.png`. Exact-size 256 and 512 images are
+copied unchanged; missing sizes are resampled. No padding, extra rounded clipping,
+background or shadow is added. Original transparency and proportions are retained.
 
 Run `npm run build:icons` from the repository root. Outputs:
 
@@ -19,9 +17,16 @@ Run `npm run build:icons` from the repository root. Outputs:
 
 The Rust window and installer window use the 128 px PNG. The Windows executable
 resource and installer packaging use the ICO; the tray loads that resource with
-the 32 px PNG as fallback. Rebuild the executable/package to pick up changed assets.
+the 32 px PNG as fallback. Shortcuts use the executable icon. Rebuild and upgrade
+the installed executable/package to see changed assets; source changes do not
+alter an application that is already running.
 
 `source-c4.png` is preserved unchanged for provenance. Its SHA-256 remains
 `50f4f510502ea0dfee14abdbc4c318cd3d14a352ef24e8ff1e2ad111a89ed98b`.
-`node scripts/test-app-icon.mjs` checks that legacy source and regenerates the active
-outputs in a temporary directory to check reproducibility on Windows.
+`source-logo-05.png` is also retained unchanged as historical provenance.
+Neither historical source is an active default.
+
+`npm test -- --suite test-app-icon --suite test-installer-package` checks original
+hashes, exact-size preservation, reproducible outputs and the installer icon
+extracted by Windows. Set `CETAMESH_ICON_EXECUTABLE` to a rebuilt Host to verify
+every ICO frame and the window PNG are embedded in the actual executable.

@@ -146,8 +146,10 @@ type UiMethod =
   | 'ui.onboarding.status' | 'ui.onboarding.start' | 'ui.onboarding.completeStep' | 'ui.onboarding.skipStep' | 'ui.onboarding.finish' | 'ui.onboarding.testProvider' | 'ui.onboarding.setModel'
   | 'ui.approvals.list' | 'ui.approvals.decide' | 'ui.approvals.operation' | 'ui.approvals.cancel' | 'ui.search';
 type Empty = Record<string, never>;
-type HostMethod = 'app.ping' | 'app.status' | 'app.about' | 'app.openExternal' | 'app.openArtifact' | 'app.pickFolder' | 'app.pickFiles' | 'app.pickExtensionPackage' | 'app.setWindowBehavior';
+export type WindowAction = 'state' | 'drag' | 'minimize' | 'maximize' | 'close' | 'resizeNorth' | 'resizeNorthEast' | 'resizeEast' | 'resizeSouthEast' | 'resizeSouth' | 'resizeSouthWest' | 'resizeWest' | 'resizeNorthWest';
+type HostMethod = 'app.windowAction' | 'app.ping' | 'app.status' | 'app.about' | 'app.openExternal' | 'app.openArtifact' | 'app.pickFolder' | 'app.pickFiles' | 'app.pickExtensionPackage' | 'app.setWindowBehavior';
 type HostMap = {
+  'app.windowAction': { params: { action: WindowAction }; result: { maximized: boolean } };
   'app.ping': { params: Empty; result: { host: 'webview2'; ready: boolean } };
   'app.status': { params: Empty; result: { ready: boolean; needsAttention: boolean } };
   'app.about': { params: Empty; result: AboutView };
@@ -406,6 +408,7 @@ export const hostClient = {
   pickFolder: () => bridge.invoke('app.pickFolder', {}),
   pickFiles: () => bridge.invoke('app.pickFiles', {}),
   pickExtensionPackage: () => bridge.invoke('app.pickExtensionPackage', {}),
+  windowAction: (action: WindowAction) => bridge.invoke('app.windowAction', { action }),
   setWindowBehavior: (confirmOnExit: boolean) => bridge.invoke('app.setWindowBehavior', { confirmOnExit })
 };
 export async function openExternal(url: string): Promise<void> {
