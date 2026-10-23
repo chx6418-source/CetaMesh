@@ -39,6 +39,7 @@ export const CATEGORIES = ['core', 'architecture', 'security', 'runtime', 'integ
 // ── 登记表：scripts/test-*.mjs 的每一个文件都必须出现在这里（或能从 package.json 映射）。
 // requires 的取值见 probeAvailability()；category 取值见 CATEGORIES。
 const REGISTRY = {
+  'test-gitcode-mirror.mjs': { category: 'security', note: 'Mirror public main without losing GitCode history or release tags' },
   'test-onebot-client.mjs': { category: 'integration' },
   'test-monorepo-contract.mjs': { category: 'architecture' },
   'test-public-repository-hygiene.mjs': { category: 'security', note: 'Prevent reintroduction of private-only reports, obsolete design mocks and broken README links' },
