@@ -39,6 +39,10 @@ export const CATEGORIES = ['core', 'architecture', 'security', 'runtime', 'integ
 // ── 登记表：scripts/test-*.mjs 的每一个文件都必须出现在这里（或能从 package.json 映射）。
 // requires 的取值见 probeAvailability()；category 取值见 CATEGORIES。
 const REGISTRY = {
+  'test-task-outcome-verification.mjs': { category: 'security', note: 'Task outcomes require observed tool, diff, test and file evidence' },
+  'test-tool-outcome-unknown.mjs': { category: 'security', note: 'Uncertain side effects stop automatic tool replay' },
+  'test-agent-failure-recovery.mjs': { category: 'security', note: 'Managed Agent failure categories and recovery boundaries' },
+  'test-managed-fallback-outcome-unknown.mjs': { category: 'security', note: 'Legacy Managed Agent path stops and projects unconfirmed effects' },
   'test-cli-termination-unknown.mjs': { category: 'security', note: 'CLI unknown termination retains active ownership and staged Workspace' },
   'test-suite-process-unconfirmed.mjs': { category: 'security', note: 'Fail closed when a live suite has no owned process group' },
   'test-managed-failed-request-usage.mjs': { category: 'runtime' },

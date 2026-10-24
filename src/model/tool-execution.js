@@ -181,7 +181,8 @@ export function createToolExecutionCoordinator({
   if (!executions || typeof executions !== 'object' || Array.isArray(executions)) {
     fail('TOOL_EXECUTION_STORE_CORRUPT', 'Tool execution store is invalid');
   }
-  const interruptedExecutions = Object.values(executions).filter(row => row?.status === 'started');
+  const uncertainExecutions = () => Object.values(executions).filter(row =>
+    row?.status === 'started' || row?.status === 'outcome-unknown');
   let continuations = {};
   if (continuationFile) {
     try { continuations = readJsonFile(continuationFile, { missing: {} }); }
@@ -225,8 +226,8 @@ export function createToolExecutionCoordinator({
   if (orphanedOnRestart) save();
 
   function recordExecution(requestId, data) {
-    if (!executionFile) return;
     executions[requestId] = { ...executions[requestId], ...data };
+    if (!executionFile) return;
     try { writeJsonAtomic(executionFile, executions); }
     catch (error) {
       if (error instanceof StorageError) fail('TOOL_EXECUTION_PERSIST_FAILED', 'Unable to persist Model tool execution state');
@@ -235,7 +236,7 @@ export function createToolExecutionCoordinator({
   }
 
   function recoveryForSession(sessionId) {
-    const uncertain = interruptedExecutions.find(row => row.status === 'started' && row.sessionId === sessionId);
+    const uncertain = uncertainExecutions().find(row => row.sessionId === sessionId);
     if (uncertain) return { state: 'needs-reconciliation', capability: uncertain.capability, turnId: uncertain.turnId };
     const orphaned = Object.values(continuations).find(row => row.status === 'orphaned' && row.target?.sessionId === sessionId);
     if (orphaned) return { state: 'needs-reconciliation', capability: 'approval', turnId: orphaned.target.turnId };
@@ -244,7 +245,7 @@ export function createToolExecutionCoordinator({
   }
 
   function recoveryForTask(taskId) {
-    const uncertain = interruptedExecutions.find(row => row.status === 'started' && row.taskId === taskId);
+    const uncertain = uncertainExecutions().find(row => row.taskId === taskId);
     if (uncertain) return { state: 'needs-reconciliation', capability: uncertain.capability, turnId: uncertain.turnId };
     const orphaned = Object.values(continuations).find(row => row.status === 'orphaned' && row.state?.scope?.taskId === taskId);
     if (orphaned) return { state: 'needs-reconciliation', capability: 'approval', turnId: orphaned.target.turnId };
@@ -253,14 +254,15 @@ export function createToolExecutionCoordinator({
   }
 
   function acknowledgeTaskRecovery(taskId) {
-    const rows = interruptedExecutions.filter(row => row.status === 'started' && row.taskId === taskId);
+    const rows = uncertainExecutions().filter(row => row.taskId === taskId);
+    const previousStatuses = rows.map(row => row.status);
     const orphaned = Object.values(continuations).filter(row => row.status === 'orphaned' && row.state?.scope?.taskId === taskId);
     for (const row of rows) row.status = 'reconciled';
     for (const row of orphaned) row.status = 'reconciled';
     if (rows.length && executionFile) {
       try { writeJsonAtomic(executionFile, executions); }
       catch (error) {
-        for (const row of rows) row.status = 'started';
+        rows.forEach((row, index) => { row.status = previousStatuses[index]; });
         for (const row of orphaned) row.status = 'orphaned';
         if (error instanceof StorageError) fail('TOOL_EXECUTION_PERSIST_FAILED', 'Unable to persist Model tool reconciliation');
         throw error;
@@ -467,7 +469,7 @@ export function createToolExecutionCoordinator({
             && error?.code !== 'INVOKE_CANCEL_UNCONFIRMED' && error?.code !== 'TOOL_EXECUTION_PERSIST_FAILED') {
             recordExecution(toolRequestId, { status: 'failed', code: String(error?.code ?? 'CAPABILITY_DENIED').slice(0, 100) });
           }
-          result = { status: 'denied', ...errorResult(error) };
+          result = { status: error?.effectStatus === 'unknown' ? 'outcome-unknown' : 'denied', ...errorResult(error) };
         }
 
         if (result?.status === 'pending') {
@@ -522,7 +524,8 @@ export function createToolExecutionCoordinator({
           role: 'tool', tool_call_id: callId,
           content: result?.status === 'completed'
             ? completedResultContent(result, state, capability, input)
-            : safeJson(result?.error ?? result ?? { status: 'denied', code: 'CAPABILITY_DENIED' })
+            : safeJson(result?.status === 'outcome-unknown' ? result
+              : result?.error ?? result ?? { status: 'denied', code: 'CAPABILITY_DENIED' })
         });
         if (typeof state.onActivity === 'function') {
           await state.onActivity({
@@ -534,6 +537,13 @@ export function createToolExecutionCoordinator({
         if (typeof state.onCapabilityResult === 'function') {
           await state.onCapabilityResult({ capability, result, input, eventId: activityId,
             sessionId, turnId, scope: state.scope });
+        }
+        if (result?.status === 'outcome-unknown') {
+          // The Broker owns reconciliation of this dispatch. No model recovery turn or
+          // subsequent tool call may replay an effect whose outcome is still unknown.
+          recordExecution(toolRequestId, { status: 'outcome-unknown', code: result.error?.code ?? 'OUTCOME_UNKNOWN' });
+          return { status: 'partial', code: 'OUTCOME_UNKNOWN', toolCalling: 'supported',
+            text: '', usage, resolvedModel, totalCalls };
         }
         if (typeof state.refreshContext === 'function') {
           const refreshed = await state.refreshContext({ capability, result, sessionId, turnId, scope: state.scope });
@@ -574,6 +584,10 @@ export function createToolExecutionCoordinator({
 
   async function run({ providerId, model, reasoning, messages = [], manifest = [], actor, sessionId, turnId, targetKind = 'chat', scope = {}, signal, refreshContext, onCapabilityResult, onActivity, onTextDelta, onStreamReset } = {}) {
     if (!actor || !['owner', 'agent'].includes(actor.kind) || typeof actor.id !== 'string') fail('UNAUTHORIZED', 'Trusted Model actor required');
+    if ((scope.taskId && recoveryForTask(scope.taskId)?.state === 'needs-reconciliation')
+      || recoveryForSession(sessionId)?.state === 'needs-reconciliation') {
+      fail('REQUEST_RECOVERY_REQUIRED', 'Review the uncertain tool result before continuing');
+    }
     const supports = typeof modelRuntime.supportsToolCalling === 'function'
       ? await modelRuntime.supportsToolCalling(providerId, model)
       : true;

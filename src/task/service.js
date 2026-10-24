@@ -17,6 +17,9 @@ export function createTaskService({ stateDir, now, resolveWorkspace, resolveMemo
     'task.overview': (p) => runtime.overview(p),
     'task.list': (p) => runtime.list(p),
     'task.get': (p) => runtime.get({ id: p.id }),
+    'task.outcome.verify': (p) => runtime.verifyOutcome({ id: p.id, kind: p.kind,
+      expectedFile: p.expectedFile, expectedSha256: p.expectedSha256,
+      expectedCapability: p.expectedCapability }),
     'task.create': (p) => runtime.create({
       goal: p.goal,
       requirements: p.requirements,

@@ -939,6 +939,10 @@ export function createDesktopUiService({ services = {}, system = services.system
       return { tasks: (result.tasks ?? []).map(projectTaskWithUsage), total: Number(result.total) || 0, counts: record(result.counts), needsAttention: boundedStrings(result.needsAttention, 200, 128) };
     },
     'ui.task.get': async p => ({ task: projectTaskWithUsage((await task('task.get', { id: idParam(p) })).task) }),
+    'ui.task.outcome.verify': async p => task('task.outcome.verify', {
+      id: idParam(p), kind: string(p.kind, 20), expectedFile: string(p.expectedFile, 1000),
+      expectedSha256: string(p.expectedSha256, 64), expectedCapability: string(p.expectedCapability, 100)
+    }),
     'ui.task.create': async p => {
       const goal = boundedText(p.goal, 'goal', 2000);
       const workspaceId = string(p.workspaceId, 128) || null;

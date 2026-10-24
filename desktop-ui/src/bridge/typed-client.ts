@@ -138,7 +138,7 @@ type UiMethod =
   | 'ui.events.next'
   | 'ui.chat.sessions.list' | 'ui.chat.sessions.create' | 'ui.chat.sessions.rename' | 'ui.chat.sessions.archive' | 'ui.chat.sessions.delete'
   | 'ui.chat.history' | 'ui.chat.status' | 'ui.chat.send' | 'ui.chat.stop' | 'ui.chat.retry' | 'ui.chat.continue' | 'ui.chat.catalog' | 'ui.chat.config.set'
-  | 'ui.task.overview' | 'ui.task.get' | 'ui.task.create' | 'ui.task.start' | 'ui.task.pause' | 'ui.task.resume' | 'ui.task.reconcile' | 'ui.task.cancel' | 'ui.task.handoff'
+  | 'ui.task.overview' | 'ui.task.get' | 'ui.task.outcome.verify' | 'ui.task.create' | 'ui.task.start' | 'ui.task.pause' | 'ui.task.resume' | 'ui.task.reconcile' | 'ui.task.cancel' | 'ui.task.handoff'
   | 'ui.workshop.proposals' | 'ui.workshop.proposal' | 'ui.workshop.review' | 'ui.workshop.retry' | 'ui.workshop.task.status' | 'ui.workshop.deliver'
   | 'ui.workspace.list' | 'ui.workspace.open' | 'ui.workspace.create'
   | 'ui.memory.overview' | 'ui.memory.get' | 'ui.memory.create' | 'ui.memory.update' | 'ui.memory.pin' | 'ui.memory.delete'
@@ -300,6 +300,8 @@ export const chatClient = {
 export const taskClient = {
   overview: (query = '', status = '') => uiCall<{ tasks: Task[]; total: number; counts: Record<string, number>; needsAttention: string[] }>('ui.task.overview', { query, status, limit: 100 }),
   get: (id: string) => uiCall<{ task: Task }>('ui.task.get', { id }),
+  verifyOutcome: (id: string, input: { kind: 'code' | 'file' | 'tool' | 'analysis'; expectedFile?: string; expectedSha256?: string; expectedCapability?: string }) =>
+    uiCall<{ status: 'VERIFIED' | 'NEEDS_REVIEW'; kind: string; evidenceEventIds: string[]; reasons: string[] }>('ui.task.outcome.verify', { id, ...input }),
   create: (input: { goal: string; requirements?: string[]; workspaceId?: string | null; agentProvider?: string; requestId?: string; note?: string }) => uiCall<{ task: Task }>('ui.task.create', input),
   start: (id: string, expectedRev?: number, agentProvider?: string) => uiCall<{ task: Task }>('ui.task.start', { id, expectedRev, agentProvider }),
   pause: (id: string, expectedRev?: number) => uiCall<{ task: Task }>('ui.task.pause', { id, expectedRev }),

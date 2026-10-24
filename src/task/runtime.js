@@ -34,6 +34,7 @@ import {
 } from './types.js';
 import { createTaskStore } from './store.js';
 import { resolveTaskArtifactOpen } from './artifact-open.js';
+import { verifyTaskOutcome } from './outcome-verification.js';
 
 function subId(prefix) {
   return prefix + '_' + crypto.randomBytes(4).toString('hex');
@@ -483,7 +484,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
   }
 
   /** Persist one observed Broker tool result against the current Task owner. */
-  function recordToolOutcome({ id, provider, sessionId, eventId, runId, phase, capability, status, filePath, tool, exitCode } = {}) {
+  function recordToolOutcome({ id, provider, sessionId, eventId, runId, phase, capability, status, filePath, tool, exitCode, hasChanges } = {}) {
     const current = requireTask(id);
     const sourceId = normalizeText(eventId, 'eventId', 240, { required: true });
     if (current.executionEvidence?.some(item => item.eventId === sourceId && item.provider === provider && item.sessionId === sessionId)) return { task: current, changed: false };
@@ -504,7 +505,9 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
         runId: normalizeText(runId, 'runId', 240) || null,
         phase: normalizeText(phase, 'phase', 40) || 'unknown', capability: name,
         status: resultStatus, tool: typeof tool === 'string' ? tool.slice(0, 100) : null,
-        exitCode: observedExitCode, filePath: artifactPath, at: now(), taskRev: draft.rev + 1 });
+        exitCode: observedExitCode, filePath: artifactPath,
+        ...(name === 'git.diff' ? { hasChanges: resultStatus === 'completed' && hasChanges === true } : {}),
+        at: now(), taskRev: draft.rev + 1 });
       if (draft.executionEvidence.length > 200) draft.executionEvidence.splice(0, draft.executionEvidence.length - 200);
       if (artifactPath && !draft.artifacts.some(item => item.ref === artifactPath)) {
         draft.artifacts.push({ id: subId('art'), kind: 'file', label: artifactPath,
@@ -514,6 +517,20 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
       return draft;
     });
     return { task, changed: true };
+  }
+
+  async function verifyOutcome({ id, kind, expectedFile, expectedSha256, expectedCapability } = {}) {
+    const task = requireTask(id);
+    let workspaceRoot = null;
+    if (task.workspaceId) {
+      try {
+        const workspace = await resolveWorkspace(task.workspaceId);
+        if (workspace?.id === task.workspaceId && typeof workspace.root === 'string') workspaceRoot = workspace.root;
+      } catch {
+        return { status: 'NEEDS_REVIEW', kind, evidenceEventIds: [], reasons: ['WORKSPACE_UNAVAILABLE'] };
+      }
+    }
+    return verifyTaskOutcome(task, { kind, expectedFile, expectedSha256, expectedCapability }, { workspaceRoot });
   }
 
   async function resolveArtifactOpen({ taskId, artifactId, forPreview = false } = {}) {
@@ -675,6 +692,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     addWork,
     addArtifact,
     recordToolOutcome,
+    verifyOutcome,
     resolveArtifactOpen,
     addDecision,
     linkMemory,

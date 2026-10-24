@@ -166,7 +166,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
                   eventId: String(event.data?.eventId ?? `${turnId}:${event.seq}`),
                   capability: event.data?.capability, status: event.data?.status,
                   filePath: event.data?.filePath, tool: event.data?.tool,
-                  exitCode: event.data?.exitCode });
+                  exitCode: event.data?.exitCode, hasChanges: event.data?.hasChanges });
                 recordWorkingState(taskId);
               }
             }
@@ -222,8 +222,9 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
                   nextAction: latest.checkpoint?.nextAction ?? '' });
                 recordWorkingState(taskId);
               } else if (['failed', 'error'].includes(event.data?.reason?.kind)) {
+                const failureCode = String(event.data?.reason?.error?.code ?? 'Agent turn failed').slice(0, 1000);
                 taskRuntime.block({ id: taskId, expectedRev: current.rev,
-                  reason: String(event.data?.reason?.error?.code ?? 'Agent turn failed').slice(0, 1000) });
+                  reason: failureCode === 'OUTCOME_UNKNOWN' ? 'needs-reconciliation: OUTCOME_UNKNOWN' : failureCode });
               }
               // DSH Follow may end once per turn while another request is queued.
               // Keep its independent cursor until all scheduled turns are projected.
