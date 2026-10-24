@@ -7,7 +7,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { writeJsonAtomic } from '../src/storage/json-file.js';
 import { createIntegrationStore } from '../src/integrations/store.js';
-import { dataCall, resolveDataPipeName } from '../src/control/data-ipc.js';
+import { waitForDataIpc } from './helpers/wait-for-data-ipc.mjs';
 import { createLegacyShutdown } from '../src/app/legacy-shutdown.js';
 
 let failed = 0;
@@ -101,16 +101,8 @@ await test('COMM06 actual isolated Legacy exits on supervisor EOF after closing 
   let output = '';
   child.stdout.on('data', data => { output += data; }); child.stderr.on('data', data => { output += data; });
   try {
-    let ready = false;
-    for (let attempt = 0; attempt < 100 && child.exitCode === null; attempt++) {
-      try {
-        const token = fs.readFileSync(path.join(stateDir, 'agent-token'), 'utf8').trim();
-        ready = (await dataCall({ path: '/api/status', token, pipeName: resolveDataPipeName({ dataRoot: root, env: {} }), timeoutMs: 100 })).ok;
-      } catch { /* The isolated fixture has not published its data IPC yet. */ }
-      if (ready) break;
-      await new Promise(resolve => setTimeout(resolve, 30));
-    }
-    assert.equal(ready, true, output);
+    try { await waitForDataIpc(root); }
+    catch (error) { error.message += '\nLegacy startup output: ' + output; throw error; }
     assert.equal(fs.existsSync(path.join(stateDir, '.core-owner.lock')), true);
     assert.equal(fs.existsSync(path.join(stateDir, 'bridge.lock')), true);
     const exited = once(child, 'exit');

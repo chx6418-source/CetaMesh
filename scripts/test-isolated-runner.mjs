@@ -132,7 +132,7 @@ function makeWorkspace(name, files) {
 }
 {
   const dir = makeWorkspace('loud', {
-    'package.json': JSON.stringify({ name: 'fixture', scripts: { test: 'node -e "console.log(\'x\'.repeat(4 * 1024 * 1024))"' } })
+    'package.json': JSON.stringify({ name: 'fixture', scripts: { test: 'node -e "console.log(\'x\'.repeat(4 * 1024 * 1024));setTimeout(()=>{},60000)"' } })
   });
   entries.set('ws-loud', { id: 'ws-loud', root: dir });
   const result = await runner.run({ workspaceId: 'ws-loud', tool: 'npm', args: ['test'] });
