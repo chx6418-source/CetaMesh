@@ -104,14 +104,34 @@ if (process.platform === 'win32') {
     const result = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', generator], { encoding: 'utf8' });
     assert.equal(result.status, 0, result.stderr || result.stdout);
     const generatedIcons = path.join(temporary, 'desktop-shell', 'icons');
+    const pixelPairs = [];
     for (const [name, size] of [['32x32.png', 32], ['128x128.png', 128], ['128x128@2x.png', 256], ['icon.png', 512]]) {
       const generated = path.join(generatedIcons, name);
       assert.deepEqual(pngSize(generated), [size, size], `${name} 必须由 Owner 主图生成`);
       assert.ok(fs.statSync(generated).size > 100, `${name} 不能是空白 PNG`);
-      assert.deepEqual(fs.readFileSync(generated), fs.readFileSync(path.join(icons, name)), '提交资源与默认生成器必须一致');
+      pixelPairs.push({ actual: generated, expected: path.join(icons, name), label: name });
     }
-    icoDimensions(fs.readFileSync(path.join(generatedIcons, 'icon.ico')), '生成的');
-    assert.deepEqual(fs.readFileSync(path.join(generatedIcons, 'icon.ico')), ico, 'ICO 不得残留旧资源');
+    const generatedIco = fs.readFileSync(path.join(generatedIcons, 'icon.ico'));
+    icoDimensions(generatedIco, '生成的');
+    // PNG compression/metadata can vary between Windows encoders. Check exact
+    // decoded RGBA instead, including every ICO frame; no visual tolerance.
+    for (let index = 0; index < ico.readUInt16LE(4); index++) {
+      const pair = { label: `ICO frame ${index}` };
+      for (const [kind, bytes] of [['actual', generatedIco], ['expected', ico]]) {
+        const entry = 6 + index * 16;
+        const length = bytes.readUInt32LE(entry + 8);
+        const offset = bytes.readUInt32LE(entry + 12);
+        const frame = path.join(temporary, `${kind}-${index}.png`);
+        fs.writeFileSync(frame, bytes.subarray(offset, offset + length));
+        pair[kind] = frame;
+      }
+      pixelPairs.push(pair);
+    }
+    const manifest = path.join(temporary, 'pixel-pairs.json');
+    fs.writeFileSync(manifest, JSON.stringify(pixelPairs));
+    const pixels = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass',
+      '-File', path.join(root, 'scripts', 'helpers', 'assert-icon-pixels.ps1'), '-Manifest', manifest], { encoding: 'utf8' });
+    assert.equal(pixels.status, 0, pixels.stderr || pixels.stdout);
     assert.deepEqual(fs.readFileSync(path.join(generatedIcons, '128x128@2x.png')), fs.readFileSync(path.join(icons, 'cetamesh-icon-256.png')), '已有 256 图应原样使用，不额外裁切');
     assert.deepEqual(fs.readFileSync(path.join(generatedIcons, 'icon.png')), fs.readFileSync(path.join(icons, 'cetamesh-icon-512.png')), '已有 512 图应原样使用，不额外裁切');
     const generatedPublicIcon = path.join(temporary, 'public', 'whalebridge-icon.png');

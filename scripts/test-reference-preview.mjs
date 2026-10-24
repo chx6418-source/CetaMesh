@@ -9,7 +9,8 @@ import { createChatService } from '../src/desktop/chat-service.js';
 import { createDesktopUiService } from '../src/desktop/ui-service.js';
 import { resolveTaskArtifactOpen } from '../src/task/artifact-open.js';
 
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-preview-'));
+// Workspace service descriptors use canonical roots, including Windows TEMP aliases.
+const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-preview-')));
 try {
   fs.writeFileSync(path.join(root, 'main.ts'), 'const 名称 = "你好";\n'.repeat(8000));
   fs.writeFileSync(path.join(root, '.env'), 'SECRET=must-not-read');
