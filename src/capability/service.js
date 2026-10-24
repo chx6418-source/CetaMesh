@@ -166,7 +166,8 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
                   eventId: String(event.data?.eventId ?? `${turnId}:${event.seq}`),
                   capability: event.data?.capability, status: event.data?.status,
                   filePath: event.data?.filePath, tool: event.data?.tool,
-                  exitCode: event.data?.exitCode, hasChanges: event.data?.hasChanges });
+                  exitCode: event.data?.exitCode, hasChanges: event.data?.hasChanges,
+                  retryCount: event.data?.retryCount });
                 recordWorkingState(taskId);
               }
             }

@@ -484,7 +484,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
   }
 
   /** Persist one observed Broker tool result against the current Task owner. */
-  function recordToolOutcome({ id, provider, sessionId, eventId, runId, phase, capability, status, filePath, tool, exitCode, hasChanges } = {}) {
+  function recordToolOutcome({ id, provider, sessionId, eventId, runId, phase, capability, status, filePath, tool, exitCode, hasChanges, retryCount } = {}) {
     const current = requireTask(id);
     const sourceId = normalizeText(eventId, 'eventId', 240, { required: true });
     if (current.executionEvidence?.some(item => item.eventId === sourceId && item.provider === provider && item.sessionId === sessionId)) return { task: current, changed: false };
@@ -506,6 +506,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
         phase: normalizeText(phase, 'phase', 40) || 'unknown', capability: name,
         status: resultStatus, tool: typeof tool === 'string' ? tool.slice(0, 100) : null,
         exitCode: observedExitCode, filePath: artifactPath,
+        retryCount: Number.isSafeInteger(retryCount) && retryCount >= 0 && retryCount <= 1 ? retryCount : null,
         ...(name === 'git.diff' ? { hasChanges: resultStatus === 'completed' && hasChanges === true } : {}),
         at: now(), taskRev: draft.rev + 1 });
       if (draft.executionEvidence.length > 200) draft.executionEvidence.splice(0, draft.executionEvidence.length - 200);

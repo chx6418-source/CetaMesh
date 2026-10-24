@@ -41,6 +41,7 @@ export const CATEGORIES = ['core', 'architecture', 'security', 'runtime', 'integ
 const REGISTRY = {
   'test-task-outcome-verification.mjs': { category: 'security', note: 'Task outcomes require observed tool, diff, test and file evidence' },
   'test-tool-outcome-unknown.mjs': { category: 'security', note: 'Uncertain side effects stop automatic tool replay' },
+  'test-tool-safe-retry.mjs': { category: 'security', note: 'Bounded transient read retry with live grant and cancellation checks' },
   'test-agent-failure-recovery.mjs': { category: 'security', note: 'Managed Agent failure categories and recovery boundaries' },
   'test-managed-fallback-outcome-unknown.mjs': { category: 'security', note: 'Legacy Managed Agent path stops and projects unconfirmed effects' },
   'test-cli-termination-unknown.mjs': { category: 'security', note: 'CLI unknown termination retains active ownership and staged Workspace' },

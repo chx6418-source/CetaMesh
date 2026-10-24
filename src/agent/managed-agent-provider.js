@@ -199,7 +199,8 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
             exitCode: capability === 'test.run' && Number.isSafeInteger(result?.result?.exitCode)
               ? result.result.exitCode : null,
             hasChanges: capability === 'git.diff' && result?.status === 'completed'
-              && result?.result?.hasChanges === true
+              && result?.result?.hasChanges === true,
+            retryCount: Number.isSafeInteger(result?.retryCount) ? result.retryCount : 0
           }),
           onStreamReset: () => { streamedText = ''; emit(s, 'assistant/reset', { requestId: turn.id }); }
         }), controller.signal);
@@ -339,7 +340,7 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
           exitCode: command.capability === 'test.run' && Number.isSafeInteger(result?.result?.exitCode)
             ? result.result.exitCode : null,
           hasChanges: command.capability === 'git.diff' && result?.status === 'completed'
-            && result?.result?.hasChanges === true });
+            && result?.result?.hasChanges === true, retryCount: 0 });
         if (result?.status === 'outcome-unknown') {
           s.outcomeUnknown = true;
           fail('OUTCOME_UNKNOWN', 'Owner must reconcile the uncertain tool effect');
@@ -522,7 +523,8 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
             exitCode: capability === 'test.run' && Number.isSafeInteger(result?.result?.exitCode)
               ? result.result.exitCode : null,
             hasChanges: capability === 'git.diff' && result?.status === 'completed'
-              && result?.result?.hasChanges === true
+              && result?.result?.hasChanges === true,
+            retryCount: Number.isSafeInteger(result?.retryCount) ? result.retryCount : 0
           }),
           onStreamReset: () => emit(s, 'assistant/reset', { requestId: turn.id }),
           refreshContext: async () => {

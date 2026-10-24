@@ -7,6 +7,8 @@ import path from 'node:path';
 import { readJsonFile, writeJsonAtomic, StorageError } from '../storage/json-file.js';
 import { redactText, isSensitiveKey } from '../logging/redact.js';
 import { capabilityError } from '../capability/types.js';
+import { setTimeout as delay } from 'node:timers/promises';
+import { mayRetrySafeTool, runBoundedRetryAttempt, SAFE_TOOL_RETRY } from './safe-tool-retry.js';
 
 const MAX_BATCH_CALLS = 8;
 const MAX_TOOL_CYCLES = 6;
@@ -439,31 +441,57 @@ export function createToolExecutionCoordinator({
         }
         let result;
         let input;
-        const toolRequestId = `model:${sessionId}:${turnId}:${cycle}:${index}`.slice(0, 240);
+        const baseToolRequestId = `model:${sessionId}:${turnId}:${cycle}:${index}`.slice(0, 232);
+        let toolRequestId = baseToolRequestId;
+        let retryCount = 0;
         try {
           input = parseArguments(call?.arguments);
           const descriptor = state.manifest.find((item) => item.id === capability);
           if (!descriptor) fail('UNKNOWN_TOOL_IN_TURN', 'Tool was not authorized in this turn');
           validateSchema(descriptor.inputSchema, input);
-          const liveActor = typeof actorResolver === 'function'
-            ? await actorResolver({ actorKind: actor.kind, actorId: actor.id, sessionId, turnId, scope: state.scope })
-            : actor;
-          if (!liveActor || liveActor.kind !== actor.kind || liveActor.id !== actor.id) {
-            fail('TOOL_ACTOR_UNAVAILABLE', 'The trusted CetaMesh actor is no longer available');
+          const retryStartedAt = Date.now();
+          let retryError = null;
+          for (let attempt = 0; attempt < SAFE_TOOL_RETRY.maxAttempts; attempt++) {
+            if (signal?.aborted) fail('INVOKE_CANCELLED', 'Tool execution was cancelled');
+            if (attempt && Date.now() - retryStartedAt > SAFE_TOOL_RETRY.deadlineMs) throw retryError;
+            toolRequestId = attempt ? `${baseToolRequestId}:r${attempt}` : baseToolRequestId;
+            // Both the trusted actor and the Broker policy are resolved afresh on each attempt.
+            const liveActor = typeof actorResolver === 'function'
+              ? await actorResolver({ actorKind: actor.kind, actorId: actor.id, sessionId, turnId, scope: state.scope })
+              : actor;
+            if (!liveActor || liveActor.kind !== actor.kind || liveActor.id !== actor.id) {
+              fail('TOOL_ACTOR_UNAVAILABLE', 'The trusted CetaMesh actor is no longer available');
+            }
+            if (attempt && Date.now() - retryStartedAt >= SAFE_TOOL_RETRY.deadlineMs) throw retryError;
+            recordExecution(toolRequestId, { status: 'started', sessionId, turnId,
+              taskId: state.scope?.taskId ?? null, capability, at: Date.now() });
+            try {
+              const executeBroker = attemptSignal => capabilityBroker.execute({
+                requestId: toolRequestId, actor: liveActor,
+                taskId: state.scope?.taskId ?? null,
+                workspaceId: state.scope?.workspaceId ?? null,
+                capability, input, reason: 'Model structured tool call',
+                origin: { sessionId, turnId, targetKind: state.targetKind },
+                ...(attemptSignal ? { signal: attemptSignal } : {})
+              }, { signal: attemptSignal });
+              result = attempt
+                ? await runBoundedRetryAttempt(executeBroker, { signal,
+                  remainingMs: SAFE_TOOL_RETRY.deadlineMs - (Date.now() - retryStartedAt) })
+                : await executeBroker(signal);
+              break;
+            } catch (error) {
+              if (!mayRetrySafeTool({ capability, error, attempt, startedAt: retryStartedAt,
+                signal, dispatchStatus: capabilityBroker.dispatchStatus?.(toolRequestId) })) throw error;
+              retryError = error;
+              recordExecution(toolRequestId, { status: 'failed', code: String(error.code).slice(0, 100) });
+              retryCount = attempt + 1;
+              if (typeof state.onActivity === 'function') {
+                await state.onActivity({ id: activityId, capability, status: 'retrying',
+                  retryCount, durationMs: Date.now() - activityStartedAt });
+              }
+              await delay(SAFE_TOOL_RETRY.delayMs, undefined, { signal });
+            }
           }
-          recordExecution(toolRequestId, { status: 'started', sessionId, turnId,
-            taskId: state.scope?.taskId ?? null, capability, at: Date.now() });
-          result = await capabilityBroker.execute({
-            requestId: toolRequestId,
-            actor: liveActor,
-            taskId: state.scope?.taskId ?? null,
-            workspaceId: state.scope?.workspaceId ?? null,
-            capability,
-            input,
-            reason: 'Model structured tool call',
-            origin: { sessionId, turnId, targetKind: state.targetKind },
-            ...(scope?.signal ? { signal: scope.signal } : {})
-          }, { signal });
         } catch (error) {
           if (executions[toolRequestId]?.status === 'started' && !capabilityBroker.dispatchStatus?.(toolRequestId)
             && error?.code !== 'INVOKE_CANCEL_UNCONFIRMED' && error?.code !== 'TOOL_EXECUTION_PERSIST_FAILED') {
@@ -471,6 +499,7 @@ export function createToolExecutionCoordinator({
           }
           result = { status: error?.effectStatus === 'unknown' ? 'outcome-unknown' : 'denied', ...errorResult(error) };
         }
+        if (result && typeof result === 'object') result = { ...result, retryCount };
 
         if (result?.status === 'pending') {
           if (typeof state.onActivity === 'function') {

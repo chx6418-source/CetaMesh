@@ -21,4 +21,7 @@ assert.deepEqual(classifyAgentFailure({ code: 'INVOKE_CANCELLED' }),
   { category: 'USER_CANCELLED', recovery: 'STOP', automaticRetries: 0 });
 assert.deepEqual(classifyAgentFailure({ code: 'TOOL_FAILED' }),
   { category: 'TOOL_FAILURE', recovery: 'INSPECT_RESULT', automaticRetries: 0 });
+assert.deepEqual(classifyAgentFailure({ code: 'EBUSY' }, { capability: 'filesystem.read' }),
+  { category: 'TOOL_TRANSIENT_READ', recovery: 'RETRY_BOUNDED_READ', automaticRetries: 1 });
+assert.equal(classifyAgentFailure({ code: 'EBUSY' }, { capability: 'filesystem.write' }).automaticRetries, 0);
 console.log('agent failure recovery: classified, bounded, no uncertain replay');

@@ -70,7 +70,9 @@ try {
   runtime.recordToolOutcome({ id: created.id, provider: 'cetamesh', sessionId: 'session-one', eventId: 'diff-real',
     capability: 'git.diff', status: 'completed', hasChanges: true });
   runtime.recordToolOutcome({ id: created.id, provider: 'cetamesh', sessionId: 'session-one', eventId: 'test-real',
-    capability: 'test.run', status: 'completed', exitCode: 0 });
+    capability: 'test.run', status: 'completed', exitCode: 0, retryCount: 1 });
+  assert.equal(runtime.get({ id: created.id }).task.executionEvidence.find(row => row.eventId === 'test-real').retryCount,
+    1, 'bounded retries must remain visible in Task evidence');
   assert.equal((await runtime.verifyOutcome({ id: created.id, kind: 'code' })).status, 'VERIFIED',
     'real Task evidence must feed the read-only verifier');
   assert.equal((await service.execute({ method: 'task.outcome.verify', params: { id: created.id, kind: 'code' } })).status,

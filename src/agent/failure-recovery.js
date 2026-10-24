@@ -1,10 +1,11 @@
 import { safeModelErrorDetails } from '../model/types.js';
+import { mayRetrySafeTool, SAFE_TOOL_RETRY } from '../model/safe-tool-retry.js';
 
 /** A bounded recovery recommendation. Classification never executes or retries an effect. */
-export function classifyAgentFailure(error) {
+export function classifyAgentFailure(error, { capability } = {}) {
   const code = typeof error?.code === 'string' ? error.code : '';
   const details = safeModelErrorDetails(error);
-  const result = (category, recovery) => ({ category, recovery, automaticRetries: 0 });
+  const result = (category, recovery, automaticRetries = 0) => ({ category, recovery, automaticRetries });
   if (error?.effectStatus === 'unknown' || ['INVOKE_CANCEL_UNCONFIRMED', 'OUTCOME_UNKNOWN',
     'REQUEST_RECOVERY_REQUIRED'].includes(code)) return result('OUTCOME_UNKNOWN', 'RECONCILE_EFFECT');
   if (['ABORT_ERR', 'ABORTED', 'INVOKE_CANCELLED'].includes(code) || error?.name === 'AbortError') {
@@ -25,6 +26,9 @@ export function classifyAgentFailure(error) {
   }
   if (code === 'MODEL_PROVIDER_UNAVAILABLE' || details?.category === 'server') {
     return result('PROVIDER_NETWORK', 'CHECK_PROVIDER');
+  }
+  if (mayRetrySafeTool({ capability, error, attempt: 0, startedAt: Date.now() })) {
+    return result('TOOL_TRANSIENT_READ', 'RETRY_BOUNDED_READ', SAFE_TOOL_RETRY.maxAttempts - 1);
   }
   return result('TOOL_FAILURE', 'INSPECT_RESULT');
 }
