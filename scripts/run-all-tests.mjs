@@ -78,6 +78,7 @@ const REGISTRY = {
   'test-reference-viewer.mjs': { category: 'desktop' },
   'test-reference-browser.mjs': { category: 'desktop', requires: ['cargo-opt-in'], timeoutMs: 300000 },
   'test-reference-browser-smoke.mjs': { category: 'environment', requires: ['reference-browser-live'], timeoutMs: 90000 },
+  'test-main-webview-smoke.mjs': { category: 'environment', requires: ['reference-browser-live'], timeoutMs: 60000 },
   'test-onebot-client.mjs': { category: 'integration' },
   'test-monorepo-contract.mjs': { category: 'architecture' },
   'test-public-repository-hygiene.mjs': { category: 'security', note: 'Prevent reintroduction of private-only reports, obsolete design mocks and broken README links' },

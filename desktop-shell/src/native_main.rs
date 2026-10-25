@@ -29,6 +29,8 @@ mod reference_browser_policy;
 mod reference_browser;
 #[cfg(windows)]
 mod webview_ui;
+#[cfg(windows)]
+mod main_webview;
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -470,6 +472,11 @@ fn run_native_ui(paths: DesktopPaths) -> Result<(), String> {
 }
 
 fn main() {
+    #[cfg(all(windows, debug_assertions))]
+    if let Some(report) = std::env::args().find_map(|arg| arg.strip_prefix("--main-webview-smoke=").map(PathBuf::from)) {
+        if let Err(error) = main_webview::smoke(&report) { let _ = std::fs::write(&report, format!("FAIL {error}")); }
+        return;
+    }
     #[cfg(all(windows, debug_assertions))]
     if let Some(report) = std::env::args().find_map(|arg| arg.strip_prefix("--reference-browser-smoke=").map(PathBuf::from)) {
         if let Err(error) = reference_browser::smoke(&report) { let _ = std::fs::write(&report, format!("FAIL {error}")); }

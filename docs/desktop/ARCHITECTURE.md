@@ -117,6 +117,12 @@ Native / Infrastructure                     Node SEA Core, Rust supervisor/insta
   explicit quit path stops Core.
 - Window preferences and theme/zoom are persisted in `state/desktop-ui.json` (atomic replace);
   a corrupt preference file falls back to defaults without blocking startup.
+- `main_webview.rs` owns the main child WebView's physical client bounds. The host resynchronizes
+  them on resize, move and DPI changes, and forwards parent focus. This deliberately avoids Wry
+  0.55.1's shared parent auto-resize subclass, which is removed when a reference child is dropped.
+  The opt-in `test-main-webview-smoke` checks the actual WebView2 controller and container after
+  preview destruction, resize, maximize, restore and a second resize; enable it with
+  `WHALEBRIDGE_TEST_REFERENCE_BROWSER=1` through `npm test`.
 
 ### Docked reference viewer
 
