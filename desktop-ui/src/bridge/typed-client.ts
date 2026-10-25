@@ -4,9 +4,15 @@ export interface ChatSession {
   id: string; title: string; createdAt: string | number | null; updatedAt: string | number | null;
   archived: boolean; taskId: string | null; config: { mode: string; modelProvider: string | null; model: string; agentProvider: string | null; workspaceId: string | null };
 }
+export interface ModelUsage {
+  inputTokens: number | null; outputTokens: number | null; totalTokens: number | null;
+  reasoningTokens: number | null; cacheReadTokens: number | null; cacheWriteTokens: number | null;
+  requestCount: number | null; cacheHitRate: number | null; cost: { status: 'actual' | 'estimated' | 'unknown'; amount: number | null; knownAmount: number | null; currency: string | null; complete: boolean; sources: string[]; versions: string[] } | null; accountingComplete: boolean | null;
+}
 export interface ChatMessage {
   id: string; role: 'user' | 'assistant' | 'system'; text: string; at: string | number | null;
   requestId?: string | null;
+  usage?: ModelUsage | null;
   attachments: string[]; toolActivity: { id: string; label: string; status: string; summary: string; durationMs: number | null }[];
   agentActivity?: { providerId: string; label: string; status: 'running' | 'completed' | 'cancelled' | 'failed' } | null;
   error: string | null; cancelled: boolean;
@@ -16,6 +22,7 @@ export interface ProviderSettingField {
   choices?: string[]; min?: number; max?: number;
 }
 export interface Task {
+  usage?: ModelUsage | null;
   id: string; title: string; goal: string; status: string; currentPhase: string;
   progress: { percent: number; note: string }; workspaceId: string | null; agent: string | null;
   currentAgent: { provider: string; sessionId: string } | null;
@@ -272,7 +279,7 @@ export const chatClient = {
     remove: (id: string) => uiCall<{ id: string; deleted: boolean }>('ui.chat.sessions.delete', { id })
   },
   history: (id: string, limit = 100, beforeMessageId: string | null = null, afterMessageId: string | null = null) => uiCall<{
-    id: string; total: number; messages: ChatMessage[]; nextBeforeMessageId: string | null; hasMore: boolean; nextAfterMessageId: string | null; hasMoreAfter: boolean
+    id: string; total: number; messages: ChatMessage[]; sessionUsage?: ModelUsage | null; nextBeforeMessageId: string | null; hasMore: boolean; nextAfterMessageId: string | null; hasMoreAfter: boolean
   }>('ui.chat.history', { id, limit, beforeMessageId, afterMessageId }),
   status: (id: string) => uiCall<{ id: string; taskId: string | null; dshSessionAlive: boolean; state: string; requestId: string | null; statusMessage: string | null; retryCount: number; followState: string; followError: string | null; displayText: string; toolActivity: ChatMessage['toolActivity']; agentActivity: ChatMessage['agentActivity']; error: string | null; errorCode: string | null; approvalId: string | null; approvalExpiresAt: string | number | null; routing: Record<string, unknown> }>('ui.chat.status', { id }),
   send: (id: string, text: string, attachments: Attachment[] = [], clientMessageId?: string) => {

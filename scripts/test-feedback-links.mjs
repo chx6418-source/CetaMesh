@@ -188,7 +188,10 @@ try {
   });
   const response = await product.execute({ method: 'product.feedbackLinks', params: {} });
   equal('product.feedbackLinks 返回四个入口', response.links.entries.map((entry) => entry.id), ['general', 'bug', 'feature', 'security']);
-  check('返回值带 query 摘要与允许键', response.links.query.platform === 'windows' && response.links.allowedQueryKeys.length === 3);
+  // This integration case uses the real host AboutInfo, unlike the Windows fixture above.
+  const expectedHostPlatform = { win32: 'windows', darwin: 'macos', linux: 'linux' }[process.platform] ?? process.platform;
+  equal('返回值带当前主机的 query 平台摘要', response.links.query.platform, expectedHostPlatform);
+  equal('返回值带精确的 query 允许键', response.links.allowedQueryKeys, ['version', 'build', 'platform']);
   const unavailableProduct = createProductService({
     releaseConfig: { ...CONFIG, website: null, feedback: { baseUrl: null, paths: { ...FIXTURE_PATHS } } }
   });

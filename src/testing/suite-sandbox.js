@@ -3,7 +3,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-const PREFIX = 'cetamesh-test-run-';
+// Keep TMPDIR short: suites create nested Unix sockets (typically 108-byte limit).
+// The full suite ID remains in the ownership marker, not the directory basename.
+const PREFIX = 'cm-test-';
 const MARKER = '.cetamesh-test-run.json';
 
 function safeSuiteId(value) {
@@ -23,7 +25,7 @@ function assertMarkedDirectory(directory, tempRoot, expectedStatus = null) {
   const markerStat = fs.lstatSync(markerPath);
   if (!markerStat.isFile() || markerStat.isSymbolicLink()) throw new Error('test sandbox marker is invalid');
   const marker = JSON.parse(fs.readFileSync(markerPath, 'utf8'));
-  const suffix = path.basename(resolved).slice(`${PREFIX}${marker.suiteId}-`.length);
+  const suffix = path.basename(resolved).slice(PREFIX.length);
   if (!marker.runId || suffix !== marker.runId) throw new Error('test sandbox marker does not match its directory');
   if (expectedStatus && marker.status !== expectedStatus) throw new Error('test sandbox state changed');
   return { resolved, markerPath, marker };
@@ -32,7 +34,7 @@ function assertMarkedDirectory(directory, tempRoot, expectedStatus = null) {
 function assertOwnedSandbox(sandbox) {
   const root = fs.realpathSync(sandbox.tempRoot);
   const resolved = path.resolve(sandbox.root);
-  const expectedName = `${PREFIX}${sandbox.suiteId}-${sandbox.runId}`;
+  const expectedName = `${PREFIX}${sandbox.runId}`;
   if (path.dirname(resolved) !== root || path.basename(resolved) !== expectedName) {
     throw new Error('test sandbox ownership path does not match its run id');
   }
@@ -94,7 +96,7 @@ export function createSuiteSandbox({ suiteId, tempRoot = os.tmpdir(), now = new 
   const safeId = safeSuiteId(suiteId);
   const runId = crypto.randomUUID();
   const root = fs.realpathSync(tempRoot);
-  const directory = path.join(root, `${PREFIX}${safeId}-${runId}`);
+  const directory = path.join(root, `${PREFIX}${runId}`);
   fs.mkdirSync(directory, { recursive: false });
   const marker = { suiteId: safeId, runId, status: 'running', startedAt: now, pid };
   const markerPath = path.join(directory, MARKER);
@@ -127,7 +129,7 @@ export function finalizeSuiteSandbox({ sandbox, failed, keepFailed = false } = {
   };
   fs.writeFileSync(owned.markerPath, `${JSON.stringify(retainedMarker, null, 2)}\n`, 'utf8');
   for (const entry of fs.readdirSync(sandbox.tempRoot, { withFileTypes: true })) {
-    if (!entry.isDirectory() || entry.name === path.basename(sandbox.root) || !entry.name.startsWith(`${PREFIX}${sandbox.suiteId}-`)) continue;
+    if (!entry.isDirectory() || entry.name === path.basename(sandbox.root) || !entry.name.startsWith(PREFIX)) continue;
     const previous = path.join(sandbox.tempRoot, entry.name);
     try {
       const info = assertMarkedDirectory(previous, sandbox.tempRoot);

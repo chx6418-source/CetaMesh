@@ -118,6 +118,19 @@ function makeWorkspace(name, files) {
 
 // ── 6. output 有界 ──────────────────────────────────────────────────────────
 {
+  const dir = makeWorkspace('unicode-failure', {
+    'package.json': JSON.stringify({ name: 'fixture', scripts: { test: 'node output.cjs' } }),
+    'output.cjs': "const b=Buffer.from('鲸桥🙂');process.stdout.write(b.subarray(0,4));setTimeout(()=>{process.stdout.write(b.subarray(4));process.stderr.write('失败🙂');process.exitCode=7;},30);"
+  });
+  entries.set('ws-unicode', { id: 'ws-unicode', root: dir });
+  const result = await runner.run({ workspaceId: 'ws-unicode', tool: 'npm', args: ['test'] });
+  assert.equal(result.exitCode, 7);
+  assert.ok(result.stdout.includes('鲸桥🙂'), 'split UTF-8 chunks preserve output');
+  assert.ok(result.stderr.includes('失败🙂'));
+  assert.equal(result.truncated, false);
+  ok('nonzero exit code and split UTF-8 stdout/stderr preserved');
+}
+{
   const dir = makeWorkspace('loud', {
     'package.json': JSON.stringify({ name: 'fixture', scripts: { test: 'node -e "console.log(\'x\'.repeat(4 * 1024 * 1024))"' } })
   });

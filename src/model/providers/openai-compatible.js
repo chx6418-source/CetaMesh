@@ -47,6 +47,15 @@ function hasDeepSeekToolContext(id, options) {
     || Array.isArray(options?.messages) && options.messages.some(message => Array.isArray(message?.tool_calls) && message.tool_calls.length > 0));
 }
 
+// Canonicalize object keys only: schema array order can carry meaning.
+function canonicalSchema(value) {
+  if (Array.isArray(value)) return value.map(canonicalSchema);
+  if (value && typeof value === 'object') return Object.fromEntries(
+    Object.keys(value).sort().map(key => [key, canonicalSchema(value[key])])
+  );
+  return value;
+}
+
 function isReasoningModel(model) {
   return /^(?:o[134](?:-|$)|gpt-5(?:-|$))/i.test(String(model ?? '').trim());
 }
@@ -63,6 +72,7 @@ export function createOpenAiCompatibleModelProvider({
   supportsStreamOptions = false,
   supportsTools = false,
   supportsReasoning = null,
+  contextProfiles = {},
   requestTimeoutMs = CHAT_TIMEOUT_MS,
   sseIdleTimeoutMs = SSE_IDLE_TIMEOUT_MS,
   log = () => {}
@@ -145,6 +155,26 @@ export function createOpenAiCompatibleModelProvider({
     return error;
   }
 
+  // Conservative known automatic-cache profiles; compatible endpoints and
+  // unrecognized models remain unknown. This never injects API parameters or
+  // promises a hit: only returned usage verifies actual cache reads.
+  function promptCacheCapabilities(model = defaultModel) {
+    const unknown = { status: 'unknown', mode: null, readUsageField: null, writeUsageField: null };
+    let endpoint;
+    try { endpoint = new URL(secrets.raw(id)?.baseUrl || baseUrl); } catch { return unknown; }
+    if (endpoint.protocol !== 'https:' || endpoint.username || endpoint.password || endpoint.port) return unknown;
+    if (id === 'openai' && endpoint.hostname === 'api.openai.com' && endpoint.pathname.replace(/\/$/, '') === '/v1'
+      && ['gpt-4o', 'gpt-4o-2024-08-06', 'gpt-4o-mini', 'gpt-4o-mini-2024-07-18',
+        'o1-preview', 'o1-preview-2024-09-12', 'o1-mini', 'o1-mini-2024-09-12'].includes(String(model ?? ''))) {
+      return { status: 'supported', mode: 'automatic', readUsageField: 'prompt_tokens_details.cached_tokens', writeUsageField: null };
+    }
+    if (id === 'deepseek-official' && endpoint.hostname === 'api.deepseek.com' && ['', '/', '/v1', '/v1/'].includes(endpoint.pathname)
+      && /^deepseek-(?:chat|reasoner)$/.test(String(model ?? ''))) {
+      return { status: 'supported', mode: 'automatic', readUsageField: 'prompt_cache_hit_tokens', writeUsageField: null };
+    }
+    return unknown;
+  }
+
   function capabilityToolName(id) {
     const value = String(id ?? '');
     if (!value || value.length > 128) {
@@ -159,6 +189,7 @@ export function createOpenAiCompatibleModelProvider({
   function buildToolSchemas(tools) {
     const names = new Map();
     const byName = new Map();
+    const descriptors = new Map();
     for (const descriptor of Array.isArray(tools) ? tools : []) {
       const id = typeof descriptor?.id === 'string' ? descriptor.id.trim() : '';
       const description = typeof descriptor?.description === 'string' ? descriptor.description.trim() : '';
@@ -168,27 +199,44 @@ export function createOpenAiCompatibleModelProvider({
       }
       const name = capabilityToolName(id);
       const previous = names.get(name);
-      if (previous && previous !== id) {
-        throw modelRuntimeError('MODEL_INVALID_TOOL_SCHEMA', 'Capability ids collide after Provider tool-name mapping');
+      if (previous) {
+        throw modelRuntimeError('MODEL_INVALID_TOOL_SCHEMA', 'Duplicate or colliding capability ids in Provider tool schema');
       }
       names.set(name, id);
+      descriptors.set(id, { description, inputSchema: parameters });
       byName.set(name, id);
     }
-    const schemas = [...names.entries()].map(([name, id]) => {
-      const descriptor = tools.find((item) => item.id === id);
+    const schemas = [...names.entries()].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([name, id]) => {
+      const descriptor = descriptors.get(id);
       return {
         type: 'function',
         function: {
           name,
           description: descriptor.description,
-          parameters: descriptor.inputSchema
+          parameters: canonicalSchema(descriptor.inputSchema)
         }
       };
     });
     return { schemas, byName };
   }
 
-  function buildBody({ model, messages, reasoning, stream, tools = [], toolChoice }) {
+  function contextCapabilities(model = defaultModel) {
+    let endpoint;
+    try { endpoint = new URL(secrets.raw(id)?.baseUrl || baseUrl); } catch { return { status: 'unknown' }; }
+    // Explicit profiles are pinned to an endpoint as well as exact model ID.
+    const declared = Object.hasOwn(contextProfiles, model) ? contextProfiles[model] : null;
+    if (declared && declared.baseUrl === endpoint.href.replace(/\/$/, '')) return { ...declared, status: 'declared' };
+    if (id === 'openai' && endpoint.href === 'https://api.openai.com/v1'
+      && ['gpt-4o-mini', 'gpt-4o-mini-2024-07-18'].includes(model)) {
+      // Verified 2026-10-24; default reservation is local policy, not model capacity.
+      return { status: 'verified', contextWindowTokens: 128000, maxOutputTokens: 16384,
+        defaultOutputTokens: 4096, outputTokenParameter: 'max_tokens', version: '2026-10-24',
+        source: 'https://developers.openai.com/api/docs/models/gpt-4o-mini' };
+    }
+    return { status: 'unknown' };
+  }
+
+  function buildBody({ model, messages, reasoning, stream, tools = [], toolChoice, maxOutputTokens }) {
     if (typeof model !== 'string' || !model.trim()) {
       throw modelRuntimeError(
         MODEL_ERROR_CODES.MODEL_NO_MODEL,
@@ -213,6 +261,21 @@ export function createOpenAiCompatibleModelProvider({
       return wire;
     });
     const body = { model: model.trim(), messages: wireMessages, stream: Boolean(stream) };
+    if (maxOutputTokens !== undefined) {
+      const capacity = contextCapabilities(model.trim());
+      if (!Number.isSafeInteger(maxOutputTokens) || maxOutputTokens <= 0
+        || capacity.status === 'unknown' || maxOutputTokens > capacity.maxOutputTokens
+        || !['max_tokens', 'max_completion_tokens'].includes(capacity.outputTokenParameter)) {
+        throw modelRuntimeError('MODEL_CONTEXT_BUDGET_INVALID', 'Output token cap is not supported by this model profile');
+      }
+      // Official o-series Chat Completions rejects legacy max_tokens. Custom
+      // deployments own their declared compatibility; do not infer it by name.
+      if (id === 'openai' && resolveCredentials().base === 'https://api.openai.com/v1'
+        && /^o[0-9](?:-|$)/.test(model.trim()) && capacity.outputTokenParameter === 'max_tokens') {
+        throw modelRuntimeError('MODEL_CONTEXT_BUDGET_INVALID', 'Official reasoning model requires max_completion_tokens');
+      }
+      body[capacity.outputTokenParameter] = maxOutputTokens;
+    }
     if (deepseekProfile) {
       body.thinking = { type: thinking ? 'enabled' : 'disabled' };
       if (thinking && reasoning != null) {
@@ -264,6 +327,8 @@ export function createOpenAiCompatibleModelProvider({
   }
 
   return defineModelProvider({
+    promptCacheCapabilities,
+    contextCapabilities,
     id,
     label,
     defaultModel,

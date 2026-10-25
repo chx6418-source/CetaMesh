@@ -74,11 +74,16 @@ try {
    process.env.USERPROFILE = path.join(root, 'isolated-profile'); delete process.env.CODEX_CLI_PATH; delete process.env.CODEX_INSTALL_DIR;
    services = createCetaMeshServices({ stateDir: path.join(root, 'production-state'), dataRoot: path.join(root, 'production-data') });
    assert.equal((await services.desktopUiService.execute({ method: 'ui.agent.health', params: { provider: 'codex', refresh: true } })).installed, false);
-   const binary = path.join(process.env.LOCALAPPDATA, 'Programs/OpenAI/Codex/bin/codex.exe'); fs.mkdirSync(path.dirname(binary), { recursive: true });
+   // Exercise the host's real discovery path, not Windows-only lookup on POSIX.
+   const binary = process.platform === 'win32'
+    ? path.join(process.env.LOCALAPPDATA, 'Programs/OpenAI/Codex/bin/codex.exe')
+    : path.join(root, 'production-bin', 'codex');
+   fs.mkdirSync(path.dirname(binary), { recursive: true });
+   if (process.platform !== 'win32') process.env.PATH = path.dirname(binary);
    fs.copyFileSync(process.execPath, binary);
    const h = await services.desktopUiService.execute({ method: 'ui.agent.health', params: { provider: 'codex', refresh: true } });
    assert.equal(h.installed, true); assert.equal(h.compatible, false); assert.equal(h.status, 'not-supported');
-   assert.equal(h.installKind, 'standalone'); assert.equal(h.probePhase, 'help');
+   assert.equal(h.installKind, process.platform === 'win32' ? 'standalone' : 'path'); assert.equal(h.probePhase, 'help');
    assert.equal(h.taskEligible, false, 'an executable without Codex protocol must not run tasks');
    assert.ok(!JSON.stringify(h).includes(root), 'Harbor diagnostics do not expose raw local paths');
   } finally {

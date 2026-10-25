@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { createMcpRuntime, createStdioMcpConnection, resolveMcpLaunch } from '../src/integrations/mcp-runtime.js';
 
 const fixtureEntry = fileURLToPath(new URL('./fixtures/mcp-stdio-server.mjs', import.meta.url));
-const packagedExe = path.join('C:', 'Program Files', 'CetaMesh Installed', 'WhaleBridgeCore.exe');
+const packagedExe = path.join(path.parse(process.execPath).root, 'Program Files', 'CetaMesh Installed', 'WhaleBridgeCore.exe');
 const packagedLaunch = resolveMcpLaunch({ id: 'snowluma', entry: 'src/mcp-snowluma-safe.js' }, {}, {
   packaged: true, execPath: packagedExe, sourceRoot: path.dirname(fixtureEntry)
 });

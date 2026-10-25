@@ -31,12 +31,12 @@
 //
 // OS 级隔离仍是后续阶段（与 ProcessExtensionHost 同属进程隔离工作）。
 
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import path from 'node:path';
 import { capabilityError } from '../capability/types.js';
 
 const RUNNER_LIMITS = Object.freeze({
-  maxOutputBytes: 2 * 1024 * 1024,   // execFile maxBuffer；超出即杀进程
+  maxOutputBytes: 2 * 1024 * 1024,   // 每个输出流的字节上限；超出即停止进程树
   stdoutCapChars: 512 * 1024,        // 返回前再截断，避免 IPC 载荷过大
   stderrCapChars: 256 * 1024,
   defaultTimeoutMs: 10 * 60 * 1000,
@@ -94,7 +94,7 @@ function minimalEnv() {
   return env;
 }
 
-function killTree(child) {
+async function killTree(child) {
   if (!child.pid) return Promise.resolve(false);
   if (process.platform === 'win32') {
     return new Promise(resolve => {
@@ -109,7 +109,13 @@ function killTree(child) {
   try {
     // detached below creates an invocation-owned group; never signal a host group.
     process.kill(-child.pid, 'SIGKILL');
-    return Promise.resolve(true);
+    const deadline = Date.now() + 4500;
+    do {
+      try { process.kill(-child.pid, 0); }
+      catch (error) { return error?.code === 'ESRCH'; }
+      if (Date.now() >= deadline) return false;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    } while (true);
   } catch {
     return Promise.resolve(false); // Failed group termination is never confirmed cancellation.
   }
@@ -152,6 +158,10 @@ export function createIsolatedTestRunner({ resolveWorkspace, now = () => Date.no
         let settled = false;
         let timeoutTimer;
         let confirmationTimer;
+        let spawnError = null;
+        let exceededOutput = false;
+        const chunks = { stdout: [], stderr: [] };
+        const bytes = { stdout: 0, stderr: 0 };
         const cleanup = () => {
           clearTimeout(timeoutTimer);
           clearTimeout(confirmationTimer);
@@ -168,13 +178,13 @@ export function createIsolatedTestRunner({ resolveWorkspace, now = () => Date.no
           const { error, stdout, stderr } = output;
           const timedOut = stopReason === 'timeout';
           resolve({
-            exitCode: timedOut ? 124 : error ? (typeof error.code === 'number' ? error.code : 1) : 0,
+            exitCode: timedOut ? 124 : stopReason === 'output' ? 1 : error ? (typeof error.code === 'number' ? error.code : 1) : 0,
             timedOut,
             command: file + ' ' + argv.join(' '),
             cwd: path.resolve(entry.root),
             stdout: String(stdout ?? '').slice(0, RUNNER_LIMITS.stdoutCapChars),
             stderr: String(stderr ?? '').slice(0, RUNNER_LIMITS.stderrCapChars),
-            truncated: String(stdout ?? '').length > RUNNER_LIMITS.stdoutCapChars
+            truncated: exceededOutput || String(stdout ?? '').length > RUNNER_LIMITS.stdoutCapChars
               || String(stderr ?? '').length > RUNNER_LIMITS.stderrCapChars,
             durationMs: now() - startedAt
           });
@@ -188,17 +198,33 @@ export function createIsolatedTestRunner({ resolveWorkspace, now = () => Date.no
           void killTree(child).then(confirmed => { treeConfirmed = confirmed; finish(); });
         };
         const abort = () => stop('cancel');
-        child = execFile(spawnFile, spawnArgs, {
+        // execFile does not forward detached to spawn. Use spawn directly so
+        // negative-PID signals address an invocation-owned group, never the host.
+        child = spawn(spawnFile, spawnArgs, {
           cwd: path.resolve(entry.root), env: minimalEnv(),
-          timeout: 0, detached: process.platform !== 'win32',
-          maxBuffer: RUNNER_LIMITS.maxOutputBytes,
-          windowsHide: true, killSignal: 'SIGKILL'
-        }, (error, stdout, stderr) => { output = {error, stdout, stderr}; finish(); });
-        child.once('close', () => { closed = true; finish(); });
+          detached: process.platform !== 'win32', shell: false,
+          windowsHide: true, stdio: ['ignore', 'pipe', 'pipe']
+        });
+        const collect = (name, chunk) => {
+          const room = RUNNER_LIMITS.maxOutputBytes - bytes[name];
+          if (room > 0) chunks[name].push(chunk.subarray(0, room));
+          bytes[name] += Math.min(chunk.length, Math.max(0, room));
+          if (chunk.length > room) { exceededOutput = true; stop('output'); }
+        };
+        child.stdout.on('data', chunk => collect('stdout', chunk));
+        child.stderr.on('data', chunk => collect('stderr', chunk));
+        child.once('error', error => { spawnError = error; });
+        child.once('close', (code, exitSignal) => {
+          output = {
+            error: spawnError ?? (code === 0 && !exitSignal ? null : {code: code ?? 1}),
+            stdout: Buffer.concat(chunks.stdout).toString('utf8'),
+            stderr: Buffer.concat(chunks.stderr).toString('utf8')
+          };
+          closed = true; finish();
+        });
         timeoutTimer = setTimeout(() => stop('timeout'), timeout);
         signal?.addEventListener('abort', abort, {once:true});
         if (signal?.aborted) abort();
-        try { child.stdin?.destroy(); } catch { /* Process already closed. */ }
         void log;
       });
     } finally {

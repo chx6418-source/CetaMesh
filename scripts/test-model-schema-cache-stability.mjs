@@ -1,0 +1,13 @@
+import assert from 'node:assert/strict';
+import { createOpenAiCompatibleModelProvider } from '../src/model/index.js';
+const bodies=[];
+const p=createOpenAiCompatibleModelProvider({id:'fixture',label:'fixture',baseUrl:'https://fixture.invalid',supportsTools:true,secrets:{raw:()=>({apiKey:'fixture'})},fetchImpl:async(url,init)=>{bodies.push(JSON.parse(init.body));return new Response(JSON.stringify({choices:[{message:{content:'ok'}}]}));}});
+const request={model:'fixture',messages:[{role:'user',content:'hi'}]};
+const a={id:'read',description:'read permitted data',inputSchema:{type:'object',properties:{a:{type:'string'}}}};
+const b={...a,description:'conflicting contract',inputSchema:{type:'object',properties:{b:{type:'string'}}}};
+for(const tools of [[a,b],[b,a]]) await assert.rejects(p.chat({...request,tools}),{code:'MODEL_INVALID_TOOL_SCHEMA'});
+assert.equal(bodies.length,0,'ambiguous tool registrations must fail before transport');
+await p.chat({...request,tools:[{...a,id:' read ',description:' read permitted data '}]});
+await p.chat({...request,tools:[a]});
+assert.deepEqual(bodies[0].tools,bodies[1].tools,'normalization must not change equivalent wire schemas');
+console.log('PASS cache schema stability: duplicate IDs fail deterministically, canonical descriptor lookup handles whitespace');

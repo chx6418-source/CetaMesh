@@ -78,8 +78,10 @@ try {
   const concurrentHead = git(targetWork, 'rev-parse', 'HEAD');
   const hooks = path.join(root, 'hooks');
   fs.mkdirSync(hooks);
+  const hookMarker = path.join(hooks, 'race-executed');
   fs.writeFileSync(path.join(hooks, 'pre-push'),
-    `#!/bin/sh\ngit -C "${target}" update-ref refs/heads/main ${concurrentHead}\n`);
+    `#!/bin/sh\ngit -C "${target}" update-ref refs/heads/main ${concurrentHead} && printf 'executed' > "${hookMarker}"\n`,
+    { mode: 0o700 }); // POSIX Git ignores non-executable hooks.
   git(source, 'config', 'core.hooksPath', hooks);
   await assert.rejects(syncGitcodeMain({
     repositoryPath: source,
@@ -87,6 +89,7 @@ try {
     targetUrl: target,
     expectedSourceSha: publicHead,
   }), /git push failed|GitCode main moved/);
+  assert.equal(fs.readFileSync(hookMarker, 'utf8'), 'executed', 'concurrent writer hook must actually run');
   assert.equal(git(target, 'rev-parse', 'refs/heads/main'), concurrentHead);
   console.log('PASS GitCode mirror keeps prior history and tag, matches public tree, and is idempotent');
 } finally {

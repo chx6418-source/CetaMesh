@@ -255,101 +255,44 @@ function projectSnapshot(snapshot) {
   };
 }
 
-function shrinkOptionalDescriptions(context) {
-  const paths = [
-    ['task', 'goal'], ['task', 'checkpoint', 'summary'], ['task', 'progress', 'note'],
-    ['workspace', 'name'], ['routing', 'resolvedRoute']
-  ];
-  for (const path of paths) {
-    let current = context;
-    for (const part of path.slice(0, -1)) current = current?.[part];
-    const key = path.at(-1);
-    if (current && typeof current[key] === 'string') current[key] = current[key].slice(0, 160);
-  }
-  for (const item of context.memoryReferences) {
-    if (typeof item.excerpt === 'string') item.excerpt = item.excerpt.slice(0, 120);
-    if (typeof item.title === 'string') item.title = item.title.slice(0, 100);
-  }
-  for (const item of context.extensions) if (typeof item.name === 'string') item.name = item.name.slice(0, 100);
-  for (const item of context.agentProviders) if (typeof item.label === 'string') item.label = item.label.slice(0, 100);
-}
-
+// Only optional discoverability metadata may be omitted. Task state and approval
+// facts are authoritative input, not prose that can safely be character-clipped.
 function compactContext(context, maxChars) {
   context.truncated = true;
-  shrinkOptionalDescriptions(context);
+  context.omissions = {};
   const fits = () => JSON.stringify(context).length <= maxChars;
-  if (fits()) return context;
-
-  context.extensions = [];
-  context.agentProviders = [];
-  context.routing = context.routing ? { class: context.routing.class } : null;
-  context.memoryReferences = [];
-  if (context.pendingApprovals.items.length > 4) context.pendingApprovals.items = context.pendingApprovals.items.slice(0, 4);
-  if (fits()) return context;
-
-  if (context.task) {
-    context.task = {
-      id: context.task.id,
-      status: context.task.status,
-      ...(context.task.workspaceId ? { workspaceId: context.task.workspaceId } : {})
-    };
+  for (const key of ['extensions', 'agentProviders', 'memoryReferences']) {
+    if (context[key].length) {
+      context.omissions[key] = context[key].length;
+      context[key] = [];
+    }
+    if (fits()) return context;
   }
-  if (context.workspace) context.workspace = { id: context.workspace.id, active: context.workspace.active };
-  if (context.workspaceReconciliation) {
-    context.workspaceReconciliation = {
-      status: context.workspaceReconciliation.status,
-      required: context.workspaceReconciliation.required,
-      ...(context.workspaceReconciliation.expectedWorkspaceId ? { expectedWorkspaceId: context.workspaceReconciliation.expectedWorkspaceId } : {}),
-      ...(context.workspaceReconciliation.observedWorkspaceId ? { observedWorkspaceId: context.workspaceReconciliation.observedWorkspaceId } : {})
-    };
-  }
-  if (fits()) return context;
-
-  for (const item of context.capabilities.manifest) {
-    for (const key of ['risk', 'source', 'grantState', 'category']) delete item[key];
-  }
-  if (fits()) return context;
-
-  const candidates = [...context.capabilities.manifest]
-    .sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
+  const candidates = context.capabilities.manifest;
   context.capabilities.manifest = [];
+  context.capabilities.requestable = [];
+  context.capabilities.mcp = [];
+  context.omissions.capabilityDescriptors = candidates.length;
+  // Preserve deterministic status facts where space permits; omitted descriptors
+  // are not callable. Broker remains the execution authority.
+  while (!fits() && context.capabilities.statusSummary.length) {
+    context.capabilities.statusSummary.pop();
+    context.omissions.capabilityStatuses = (context.omissions.capabilityStatuses ?? 0) + 1;
+  }
   for (const descriptor of candidates) {
     context.capabilities.manifest.push(descriptor);
+    context.capabilities.requestable.push(descriptor.id);
+    context.omissions.capabilityDescriptors--;
     if (!fits()) {
       context.capabilities.manifest.pop();
-      context.capabilities.statusSummary.push({ id: descriptor.id, availability: 'available', reason: 'context-budget' });
+      context.capabilities.requestable.pop();
+      context.omissions.capabilityDescriptors++;
     }
   }
-  context.capabilities.statusSummary.sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
   if (fits()) return context;
-
-  const statuses = context.capabilities.statusSummary;
-  context.capabilities.statusSummary = [];
-  for (const status of statuses) {
-    context.capabilities.statusSummary.push(status);
-    if (!fits()) context.capabilities.statusSummary.pop();
-  }
-  if (fits()) return context;
-
-  context.pendingApprovals.items = [];
-  context.pendingApprovals.count = 0;
-  if (context.workspaceReconciliation?.status !== 'required') context.workspaceReconciliation = null;
-  if (context.task) context.task = { id: context.task.id, status: context.task.status };
-  if (context.workspace) context.workspace = { id: context.workspace.id };
-  if (fits()) return context;
-
-  const minimal = {
-    schemaVersion: 2,
-    product: 'CetaMesh',
-    identityVersion: PRODUCT_IDENTITY_VERSION,
-    ...(context.workspaceReconciliation?.status === 'required'
-      ? { workspaceReconciliation: context.workspaceReconciliation }
-      : {}),
-    capabilities: { manifest: context.capabilities.manifest },
-    truncated: true
-  };
-  if (JSON.stringify(minimal).length <= maxChars) return minimal;
-  return { schemaVersion: 2, truncated: true };
+  throw Object.assign(new Error('Product Context cannot fit without losing task or permission state; reduce optional context or use an explicit verified checkpoint.'), {
+    code: 'CONTEXT_BUDGET_EXCEEDED', maxChars, requiredChars: JSON.stringify(context).length
+  });
 }
 
 /** Configurable character budget for ephemeral model-facing CetaMesh Product Context. */

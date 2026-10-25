@@ -6,6 +6,7 @@
 // 与 agent.* 的 follow 流同理不经一元 IPC 暴露。
 //
 // Key 纪律：本层只返回 hasKey 布尔，任何列表/目录/错误都不携带 Key 材料。
+import { calculateModelContextBudget, enforceModelContextBudget } from '../context/model-budget.js';
 import { modelRuntimeError, MODEL_ERROR_CODES } from './types.js';
 
 export function createModelRuntimeService({ registry, secrets, preferredProviderId = null, log = () => {} } = {}) {
@@ -103,7 +104,7 @@ export function createModelRuntimeService({ registry, secrets, preferredProvider
   }
 
   /** 回合流入口：chat-service 传 providerId（已解析）或 null（自动）。 */
-  function stream({ providerId, model, messages, reasoning, signal, tools, toolChoice }) {
+  function stream({ providerId, model, messages, reasoning, signal, tools, toolChoice, maxOutputTokens }) {
     const provider = resolveProvider(providerId);
     const effectiveModel = typeof model === 'string' && model.trim()
       ? model.trim()
@@ -117,7 +118,13 @@ export function createModelRuntimeService({ registry, secrets, preferredProvider
       })();
     }
     log(`Model Runtime 回合开始（provider=${provider.id} model=${effectiveModel}）`);
+    let budget;
+    try { budget = enforceModelContextBudget({ provider, model: effectiveModel, messages, tools, maxOutputTokens }); }
+    catch (error) { return (async function* () { throw error; })(); }
+    // Preserve the provider stream's established cancellation/finalization path.
+    // An extra async-generator relay adds observable microtask delay to abort.
     return provider.stream({
+      maxOutputTokens: budget.reservedOutputTokens ?? maxOutputTokens,
       model: effectiveModel,
       requestedModel: typeof model === 'string' && model.trim() ? model.trim() : 'provider-default',
       messages,
@@ -128,7 +135,7 @@ export function createModelRuntimeService({ registry, secrets, preferredProvider
     });
   }
 
-  async function chat({ providerId, model, messages, reasoning, signal, tools, toolChoice }) {
+  async function chat({ providerId, model, messages, reasoning, signal, tools, toolChoice, maxOutputTokens }) {
     const provider = resolveProvider(providerId);
     const effectiveModel = typeof model === 'string' && model.trim() ? model.trim() : provider.defaultModel;
     if (!effectiveModel) {
@@ -141,9 +148,11 @@ export function createModelRuntimeService({ registry, secrets, preferredProvider
       ? provider.supportsToolsForModel(effectiveModel) !== true : provider.supportsTools !== true)) {
       throw modelRuntimeError('MODEL_TOOL_CALLING_UNSUPPORTED', 'This Model Provider does not support structured tool calling');
     }
-    const response = await provider.chat({ model: effectiveModel, messages, reasoning, signal, tools, toolChoice });
+    const contextBudget = enforceModelContextBudget({ provider, model: effectiveModel, messages, tools, maxOutputTokens });
+    const response = await provider.chat({ model: effectiveModel, messages, reasoning, signal, tools, toolChoice, maxOutputTokens: contextBudget.reservedOutputTokens ?? maxOutputTokens });
     return {
       ...(response && typeof response === 'object' ? response : { text: String(response ?? '') }),
+      contextBudget,
       providerId: provider.id,
       requestedModel: typeof model === 'string' && model.trim() ? model.trim() : 'provider-default',
       resolvedModel: typeof response?.model === 'string' && response.model.trim() ? response.model.trim() : null,
@@ -166,6 +175,14 @@ export function createModelRuntimeService({ registry, secrets, preferredProvider
     defaultProviderId,
     listProviders,
     hasKey,
+    contextBudget(providerId, model = null, request = {}) {
+      const provider = resolveProvider(providerId);
+      return calculateModelContextBudget({ ...request, provider, model: model || provider.defaultModel });
+    },
+    promptCacheCapabilities(providerId, model = null) {
+      const provider = resolveProvider(providerId);
+      return provider.promptCacheCapabilities(model || provider.defaultModel);
+    },
     supportsToolCalling(providerId, model = null) {
       const provider = resolveProvider(providerId);
       return typeof provider.supportsToolsForModel === 'function'

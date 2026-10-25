@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict';
 // CetaMesh Desktop — 统一配对 v1.1 互操作验收（Desktop ↔ Node fixture 模拟 Mobile）。
 // 用法：node scripts/test-mesh-pairing-interop.mjs
 //
@@ -32,6 +33,7 @@ import {
   invitationQr,
   loadOrCreateIdentity,
   loadOrCreatePairingTls,
+  listLanAddresses,
   parseInvitation,
   pickLanAddress,
   publicKeyPemToX963,
@@ -543,6 +545,23 @@ async function sectionServiceAndGuards() {
 // ────────────────────────────────────────────────────────────────────────────
 // 执行
 // ────────────────────────────────────────────────────────────────────────────
+// Validate real address filtering and fail-closed enumeration without consulting
+// this machine's network interfaces. Live LAN discovery is not this fixture.
+const originalInterfaces = os.networkInterfaces;
+try {
+  os.networkInterfaces = () => ({ fixture: [
+    { family: 'IPv4', address: '203.0.113.9', internal: false },
+    { family: 4, address: '192.168.1.9', internal: false },
+    { family: 'IPv4', address: '127.0.0.1', internal: true },
+    { family: 'IPv4', address: '169.254.1.2', internal: false },
+    { family: 'IPv6', address: '::1', internal: false }
+  ] });
+  assert.deepEqual(listLanAddresses().map(entry => entry.address), ['192.168.1.9', '203.0.113.9']);
+  const denied = Object.assign(new Error('controlled enumeration denial'), { code: 'EPERM' });
+  os.networkInterfaces = () => { throw denied; };
+  assert.throws(() => listLanAddresses(), error => error === denied,
+    'enumeration failure must never fabricate an available LAN address');
+} finally { os.networkInterfaces = originalInterfaces; }
 try {
   console.log('── A. 共享 golden fixtures ──');
   sectionFixtures();

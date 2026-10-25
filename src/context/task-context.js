@@ -18,21 +18,21 @@ function projectTask(task) {
   if (!task || typeof task !== 'object') return null;
   const projected = {};
   textField(projected, 'id', task.id, 160);
-  textField(projected, 'goal', task.goal, 1200);
+  textField(projected, 'goal', task.goal, Infinity);
   textField(projected, 'status', task.status, 80);
-  textField(projected, 'currentPhase', task.currentPhase, 160);
+  textField(projected, 'currentPhase', task.currentPhase, Infinity);
 
   if (task.progress && typeof task.progress === 'object') {
     const progress = {};
     const percent = Number(task.progress.percent);
     if (Number.isFinite(percent)) progress.percent = Math.max(0, Math.min(100, percent));
-    textField(progress, 'note', task.progress.note, 500);
+    textField(progress, 'note', task.progress.note, Infinity);
     if (Object.keys(progress).length) projected.progress = progress;
   }
 
   if (task.checkpoint && typeof task.checkpoint === 'object') {
     const checkpoint = {};
-    textField(checkpoint, 'summary', task.checkpoint.summary, 700);
+    textField(checkpoint, 'summary', task.checkpoint.summary, Infinity);
     if (Object.keys(checkpoint).length) projected.checkpoint = checkpoint;
   }
 
@@ -66,6 +66,7 @@ function projectMemoryReferences(references, include) {
     textField(projected, 'memoryId', reference.memoryId, 160);
     textField(projected, 'title', reference.title, 180);
     textField(projected, 'excerpt', reference.excerpt, 500);
+    if (reference.truncated === true || (typeof reference.excerpt === 'string' && reference.excerpt.length > 500)) projected.truncated = true;
     if (Object.keys(projected).length) output.push(projected);
   }
   return output;

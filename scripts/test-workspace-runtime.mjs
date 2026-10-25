@@ -18,7 +18,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createWorkspaceService } from '../src/workspace/index.js';
 import { createWorkspaceRegistry } from '../src/workspace/registry.js';
-import { canonicalizeRoot, resolveInside } from '../src/workspace/boundary.js';
+import { canonicalizeRoot, resolveInside, isInsideRoot } from '../src/workspace/boundary.js';
 
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/(\w:)/, '$1')), '..');
 const TEMP = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-ws-'));
@@ -154,7 +154,7 @@ await check('escape: 多级 ../ 穿越到盘符外', async () => {
 await check('escape: 绝对路径指向系统文件', async () => {
   await expectError(
     'absolute escape',
-    service.execute({ method: 'workspace.read', params: { id: WS, path: 'C:\\Windows\\win.ini' } }),
+    service.execute({ method: 'workspace.read', params: { id: WS, path: process.platform === 'win32' ? 'C:\\Windows\\win.ini' : '/etc/passwd' } }),
     'BOUNDARY_ESCAPE'
   );
 });
@@ -259,7 +259,15 @@ await check('escape: 盘符相对路径（C:foo）不越界即受控', async () 
 });
 
 // ── 3. Windows 路径行为 ─────────────────────────────────────────────────────
-await check('Windows: 大小写不敏感访问', async () => {
+await check('native filesystem: case-sensitive or case-insensitive access', async () => {
+  if (process.platform !== 'win32') {
+    await expectError('case-sensitive missing file', service.execute({ method: 'workspace.read', params: { id: WS, path: 'SUB/FILE.TXT' } }), 'FILE_NOT_FOUND');
+    assert.equal(isInsideRoot(WS_ROOT + '\\', path.join(WS_ROOT, 'secret.txt')), false, 'a POSIX trailing backslash is a filename character, not a separator');
+    const sibling = WS_ROOT.toUpperCase();
+    assert.equal(resolveInside(WS_ROOT, 'sub/file.txt').real, path.join(WS_ROOT, 'sub', 'file.txt'));
+    await expectError('case-distinct sibling escape', Promise.resolve().then(() => resolveInside(WS_ROOT, path.join(sibling, 'secret.txt'))), 'BOUNDARY_ESCAPE');
+    return;
+  }
   const result = await service.execute({ method: 'workspace.read', params: { id: WS, path: 'SUB/FILE.TXT' } });
   assert.equal(result.content, 'nested content');
 });
@@ -280,17 +288,17 @@ await check('Windows: 8.3 短名经 realpath 归一（不逃逸）', async () =>
   }
 });
 
-await check('Windows: root 危险形态拒绝（盘符根 / Windows / 用户主目录 / 祖先）', async () => {
+await check('native root 危险形态拒绝（系统根 / 系统目录 / 用户主目录 / 祖先）', async () => {
   await expectError(
     'drive root',
-    service.execute({ method: 'workspace.create', params: { name: 'C', root: 'C:\\' } }),
+    service.execute({ method: 'workspace.create', params: { name: 'C', root: path.parse(WS_ROOT).root } }),
     'ROOT_FORBIDDEN'
   );
   await expectError(
     'windows dir',
     service.execute({
       method: 'workspace.create',
-      params: { name: 'Win', root: process.env.SystemRoot || 'C:\\Windows' }
+      params: { name: 'Win', root: process.platform === 'win32' ? (process.env.SystemRoot || 'C:\\Windows') : '/etc' }
     }),
     'ROOT_FORBIDDEN'
   );

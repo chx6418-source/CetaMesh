@@ -219,8 +219,12 @@ export function openFixtureForChild({ root, nonce }) {
       } catch (error) {
         if (error.code === 'SIMULATED_CRASH') throw error;
         checkLease();
-        journal.state = 'NEEDS_REVIEW'; journal.failure = error.code ?? 'WRITE_FAILED'; writeJsonAtomic(safe(journalFile), journal);
-        throw error;
+        // A non-directory backup ancestor is an I/O write failure, not a
+        // permission/link exception. Preserve the original cause for diagnostics.
+        const failure = error.code === 'ENOTDIR'
+          ? Object.assign(migrationError('WRITE_FAILED'), { cause: error }) : error;
+        journal.state = 'NEEDS_REVIEW'; journal.failure = failure.code ?? 'WRITE_FAILED'; writeJsonAtomic(safe(journalFile), journal);
+        throw failure;
       }
     });
   }

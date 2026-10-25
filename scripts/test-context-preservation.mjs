@@ -1,0 +1,14 @@
+import assert from 'node:assert/strict';
+import { buildProductContext } from '../src/context/product-context.js';
+const goal = 'G'.repeat(1600) + 'KEEP THE FINAL CONSTRAINT';
+assert.equal(JSON.parse(buildProductContext({ task: { id: 't', goal } })).task.goal, goal);
+assert.throws(() => buildProductContext({ task: { goal } }, { maxChars: 800 }), { code: 'CONTEXT_BUDGET_EXCEEDED' });
+assert.throws(() => buildProductContext({}, { maxChars: 2 }), { code: 'CONTEXT_BUDGET_EXCEEDED' });
+const snapshot = { task: { id: 't', goal: 'Keep all decisions', checkpoint: { summary: 'Evidence stays' } }, pendingApprovals: { count: 3, items: [{ id: 'a', capability: 'filesystem.write' }] }, extensions: Array.from({length: 50}, (_, i) => ({ id: String(i), name: 'X'.repeat(180) })) };
+const compact = JSON.parse(buildProductContext(snapshot, { maxChars: 1400 }));
+assert.equal(compact.task.goal, snapshot.task.goal);
+assert.equal(compact.task.checkpoint.summary, 'Evidence stays');
+assert.equal(compact.pendingApprovals.count, 3);
+assert.equal(compact.pendingApprovals.items[0].approvalId, 'a');
+assert.ok(compact.omissions.extensions > 0);
+console.log('context preservation passed');

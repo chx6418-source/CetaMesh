@@ -1,3 +1,4 @@
+import { aggregateModelUsage, normalizeModelUsage } from '../model/usage.js';
 // CetaMesh Desktop 产品级 Chat 运行时（阶段 03；会话 1 改造为双通道）。
 //
 // 分层：IPC(chat.*) → 本模块（会话存储 + 回合状态机）→ 两条执行通道：
@@ -32,6 +33,7 @@ import { fitsIpcResponse, requireIpcItem } from '../control/response-budget.js';
 import { StorageError, readJsonFile, writeJsonAtomic } from '../storage/json-file.js';
 import { blocksToText } from '../dsh-client.js';
 import { selectDshSessionModel } from '../dsh-model-selection.js';
+import { projectMessageBudget } from '../context/message-budget.js';
 import { PRODUCT_IDENTITY_PROMPT } from '../context/product-context.js';
 import { OWNER_ACTOR } from '../capability/types.js';
 import { findMessageReference } from './reference-preview.js';
@@ -56,8 +58,6 @@ const MAX_MESSAGES_RETURNED = 200;
 const MAX_MESSAGE_CHARS_RETURNED = 32 * 1024;
 const FOLLOW_RECONNECT_MS = 2000;
 const FOLLOW_MAX_RETRIES = 5;
-/** Model Runtime 每回合携带的历史消息上限（对话历史仍在本地完整保留）。 */
-const MODEL_HISTORY_MAX_MESSAGES = 40;
 
 function chatError(code, message) {
   return Object.assign(new Error(message), { code });
@@ -120,6 +120,7 @@ export function createChatService({
   // Model Runtime 通道（非 Agent 会话）不上报。上报失败绝不影响回合机。
   defaultModelConfig = null,
   onTurnEnd = null,
+  onUsage = null,
   proposeMemoryCandidate = null,
   onEvent = null,
   resolveWorkspace = null,
@@ -469,6 +470,13 @@ export function createChatService({
   function history({ id, limit = DEFAULT_HISTORY_PAGE_SIZE, beforeMessageId = null, afterMessageId = null } = {}) {
     const record = sessionOrThrow(id);
     const all = readHistory(record.id);
+    // Aggregate before pagination; a missing turn receipt means unknown, not zero.
+    const usageRecords = all.filter(message => message.role === 'assistant').map(message => message.usage);
+    const sessionUsage = { ...aggregateModelUsage(usageRecords.map(normalizeModelUsage)),
+      accountingComplete: usageRecords.some(usage => usage?.accountingComplete === false) ? false
+        : usageRecords.length && usageRecords.every(usage => usage?.accountingComplete === true) ? true : null,
+      requestCount: usageRecords.length && usageRecords.every(usage => Number.isSafeInteger(usage?.requestCount) && usage.requestCount >= 0)
+        ? usageRecords.reduce((sum, usage) => sum + usage.requestCount, 0) : null };
     const requestedLimit = Number(limit);
     const count = Math.max(1, Math.min(
       MAX_MESSAGES_RETURNED,
@@ -502,7 +510,12 @@ export function createChatService({
         ? message.text.slice(0, MAX_MESSAGE_CHARS_RETURNED)
         : message.text
     }));
-    const envelope = () => ({ id: record.id, total: all.length, messages: page,
+    const accountingSessionId = record.runtimeProvider === 'cetamesh' && record.dshSessionId ? record.dshSessionId : record.id;
+    const accountingSessionIds = [...new Set([accountingSessionId, ...all.filter(message => message.role === 'assistant').map(message => message.accountingSessionId)].filter(id => typeof id === 'string' && id))];
+    // Preserve the existing empty/legacy history envelope when no alias is needed.
+    const accountingAliases = accountingSessionId !== record.id || all.some(message => message.role === 'assistant' && message.accountingSessionId)
+      ? { accountingSessionId, accountingSessionIds } : {};
+    const envelope = () => ({ id: record.id, total: all.length, messages: page, sessionUsage, ...accountingAliases,
       nextBeforeMessageId: page[0]?.id ?? null, nextAfterMessageId: page.at(-1)?.id ?? null, hasMore: true, hasMoreAfter: true });
     while (!fitsIpcResponse(envelope())) {
       if (page.length <= 1) requireIpcItem(envelope());
@@ -514,6 +527,7 @@ export function createChatService({
       id: record.id,
       total: all.length,
       messages: page,
+      sessionUsage, ...accountingAliases,
       nextBeforeMessageId: hasMore ? page[0]?.id ?? null : null,
       nextAfterMessageId: endIndex < all.length ? page.at(-1)?.id ?? null : null,
       hasMoreAfter: endIndex < all.length,
@@ -997,6 +1011,12 @@ export function createChatService({
       }
       const usage = extractUsage(event) ?? state.turn.usage ?? null;
       state.turn.usage = usage;
+      // Only the active Model Runtime event stream can resolve billing identity.
+      // Agent/DSH events do not overwrite the provider captured at execution.
+      if (state.modelTurn?.kind === 'model' && typeof data.resolvedModel === 'string'
+        && data.resolvedModel.length > 0 && data.resolvedModel.length <= 300 && !/[\x00-\x1f]/.test(data.resolvedModel)) {
+        state.turn.accountingModel = data.resolvedModel;
+      }
       if (data.resolvedModel || data.requestedModel) state.turn.routing = {
         ...(state.turn.routing ?? {}),
         ...(data.requestedModel ? { requestedModel: data.requestedModel } : {}),
@@ -1045,7 +1065,19 @@ export function createChatService({
     const isModelChannel = state.modelTurn != null;
     const sessionId = record.dshSessionId;
     const text = turn.displayText ?? '';
-    if (text.trim() || turn.state === 'done' || turn.state === 'error' || turn.toolActivity?.length) {
+    // Accounting has its own terminal hook: Continuity excludes Model turns.
+    // Bind attribution at execution start, never from a later Task handoff.
+    if (record.runtimeProvider !== 'cetamesh' && typeof onUsage === 'function') {
+      try {
+        onUsage({ sessionId: record.id, taskId: turn.accountingTaskId ?? null,
+          turnId: turn.id, providerId: turn.accountingProviderId ?? null,
+          model: turn.accountingModel ?? null, usage: turn.usage ?? null });
+      } catch (error) {
+        onEvent?.({ event: 'chat.warning', data: { sessionId: record.id,
+          code: error?.code ?? 'USAGE_LEDGER_WRITE_FAILED', message: '回合已结束，但用量账本未能保存。' } });
+      }
+    }
+    if (text.trim() || turn.state === 'done' || turn.state === 'error' || turn.state === 'cancelled' || turn.toolActivity?.length) {
       const messageId = crypto.randomUUID();
       const historyRevision = appendMessage(record.id, {
         id: messageId,
@@ -1055,6 +1087,7 @@ export function createChatService({
         turnId: turn.id,
         requestId: turn.requestId,
         usage: turn.usage ?? null,
+        accountingSessionId: turn.accountingSessionId ?? record.id,
         ...(turn.state === 'done' && turn.modelContinuation ? { modelContinuation: turn.modelContinuation } : {}),
         ...(turn.state === 'done' && turn.modelMessages?.length ? { modelMessages: turn.modelMessages } : {}),
         toolActivity: Array.isArray(turn.toolActivity) ? turn.toolActivity.slice(-32) : [],
@@ -1247,7 +1280,7 @@ export function createChatService({
    * 尾部 user 消息就是当前 prompt，需去重，避免同一消息在载荷里出现两次。
    */
   function buildModelMessages(recordId, promptText, productContext = null, omitHistoryMessageId = null) {
-    const history = readHistory(recordId).slice(-MODEL_HISTORY_MAX_MESSAGES);
+    const history = readHistory(recordId);
     const prior = history.length > 0 && history[history.length - 1]?.role === 'user'
       ? history.slice(0, -1)
       : history;
@@ -1275,7 +1308,7 @@ export function createChatService({
           ? { modelContinuation: structuredClone(message.modelContinuation) } : {}) });
     }
     messages.push({ role: 'user', content: promptText });
-    return messages;
+    return projectMessageBudget(messages).messages;
   }
 
   function retainModelProtocol(turn, result) {
@@ -1302,6 +1335,7 @@ export function createChatService({
   function startModelTurn(record, state, promptText, routing, resolved, retryMessageId = null) {
     if (state.turn) state.turn.routing = routing ?? null;
     const model = modelForRuntime(record);
+    if (state.turn) { state.turn.accountingProviderId = resolved.id; state.turn.accountingModel = model; }
     const controller = new AbortController();
     state.modelTurn = { controller, providerId: resolved.id, kind: 'model' };
     let settleHandshake = null;
@@ -1419,6 +1453,7 @@ export function createChatService({
         settleOk();
       } catch (error) {
         const turn = state.turn;
+        if (turn && error?.usage) turn.usage = error.usage;
         settleErr(error);
         if (turn) {
           const aborted = controller.signal.aborted || error?.code === 'ABORTED' || error?.name === 'AbortError';
@@ -1535,6 +1570,7 @@ export function createChatService({
           if (result.taskId) record.taskId = String(result.taskId);
           saveStore();
           if (state.turn === turn) {
+            state.turn.accountingSessionId = result.provider === 'cetamesh' ? String(result.sessionId) : record.id;
             state.turn.providerRequestId = typeof result.requestId === 'string' ? result.requestId : null;
             state.turn.providerTurnId = typeof result.turnId === 'string' ? result.turnId : null;
             state.turn.routing = { ...routing, resolvedRoute: 'agent', taskId: result.taskId ?? null, provider: result.provider };
@@ -1873,6 +1909,7 @@ export function createChatService({
           }
           throw chatError('ABORTED', 'Agent turn was cancelled.');
         }
+        turn.accountingSessionId = provider === 'cetamesh' ? record.dshSessionId : record.id;
         ensureFollow(record);
         const sending = Promise.resolve().then(() => agentExecute({ method: 'agent.send', params: { provider, sessionId: record.dshSessionId, content: promptText } }));
         let abortListener;
@@ -1948,7 +1985,7 @@ export function createChatService({
     const agentActivity = agentActivityFor(agentProviderId);
     const turnId = crypto.randomUUID();
     const requestId = `cetamesh-chat-${String(record.id).slice(0, 80)}-${turnId}`;
-    state.turn = { id: turnId, requestId, state: 'starting', displayText: '', toolActivity: [], ...(agentActivity ? { agentActivity } : {}), error: null, usage: null, routing: null };
+    state.turn = { id: turnId, requestId, accountingSessionId: record.id, accountingTaskId: record.taskId ?? null, state: 'starting', displayText: '', toolActivity: [], ...(agentActivity ? { agentActivity } : {}), error: null, usage: null, routing: null };
     pendingUiDeltas.delete(record.id);
     onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: 'starting', requestId, reset: true, toolActivity: [], agentActivity } });
     try {
@@ -2079,6 +2116,9 @@ export function createChatService({
           return snapshot;
         }
       });
+      // Coordinator usage is cumulative across approval suspensions. Persist the
+      // latest snapshot even when another approval is required, including cancel.
+      state.turn.usage = result.usage ?? state.turn.usage ?? null;
       if (result.status === 'pending') {
         state.turn.state = 'waiting-approval';
         state.turn.approvalId = result.approvalId;
@@ -2110,6 +2150,7 @@ export function createChatService({
       return { resumed: true, pending: false };
     } catch (error) {
       if (state.turn) {
+        if (error?.usage) state.turn.usage = error.usage;
         const cancelled = controller.signal.aborted || error?.code === 'INVOKE_CANCELLED';
         state.turn.state = cancelled ? 'cancelled' : 'error';
         state.turn.error = cancelled ? null : String(error?.code ?? 'TOOL_RESUME_FAILED');

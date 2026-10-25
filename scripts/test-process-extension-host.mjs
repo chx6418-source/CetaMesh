@@ -110,7 +110,7 @@ async function waitUntil(predicate, timeoutMs = 5000) {
     NODE_OPTIONS: '--require=evil.js', NODE_PATH: 'evil-modules', HOME: 'C:\\Users\\owner'
   };
   const env = buildExtensionWorkerEnv({
-    parentEnv,
+    parentEnv, platform: 'win32',
     metadata: {
       extensionId: 'fixture-ext', version: '1.0.0', fingerprint: 'sha256:fixture',
       packageFingerprint: 'b'.repeat(64)
@@ -121,6 +121,9 @@ async function waitUntil(predicate, timeoutMs = 5000) {
     CETAMESH_EXTENSION_ID: 'fixture-ext', CETAMESH_EXTENSION_VERSION: '1.0.0',
     CETAMESH_EXTENSION_FINGERPRINT: 'sha256:fixture', CETAMESH_EXTENSION_PACKAGE_FINGERPRINT: 'b'.repeat(64)
   });
+  // Platform policy is independent of the machine running this contract test.
+  const posixEnv = buildExtensionWorkerEnv({ parentEnv, platform: 'linux' });
+  assert.deepEqual(posixEnv, { TEMP: parentEnv.TEMP, TMP: parentEnv.TMP, PATH: '/usr/bin:/bin' });
   assert.deepEqual(resolveExtensionWorkerLaunch({ packaged: false, execPath: 'node.exe', workerEntry: 'worker.js' }), {
     executable: 'node.exe', args: ['worker.js']
   });

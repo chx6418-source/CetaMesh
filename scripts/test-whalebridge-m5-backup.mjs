@@ -19,6 +19,7 @@ try {
     // creation of the backup directory; no engine fault hook or real disk filling.
     fs.writeFileSync(path.join(backup.root, 'backups'), 'blocked fixture backup path');
   } }), { code: 'WRITE_FAILED' });
+  assert.equal(readJsonFile(path.join(backup.root, 'migration-journal.json')).failure, 'WRITE_FAILED');
   assert.equal(backup.authority(), null);
   assert.equal(backup.verifyOriginals(bp), true);
   assert.equal(backup.recover({ approval: backup.approve(bp) }).state, 'ROLLED_BACK');

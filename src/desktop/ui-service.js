@@ -1,3 +1,4 @@
+import { normalizeModelUsage } from '../model/usage.js';
 import crypto from 'node:crypto';
 import { createReferencePreview } from './reference-preview.js';
 import { fitsIpcResponse, requireIpcItem } from '../control/response-budget.js';
@@ -99,6 +100,34 @@ function projectSession(value) {
   };
 }
 
+function projectUsage(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  // Usage is a privileged boundary too: never forward raw Provider payloads or ledgers.
+  const normalized = normalizeModelUsage(value);
+  const result = {};
+  for (const key of ['inputTokens', 'outputTokens', 'totalTokens', 'reasoningTokens', 'cacheReadTokens', 'cacheWriteTokens', 'requestCount']) {
+    const metric = key === 'requestCount' ? value[key] : normalized[key];
+    result[key] = Number.isFinite(metric) && metric >= 0 ? metric : null;
+  }
+  result.cacheHitRate = normalized.cacheHitRate;
+  result.accountingComplete = typeof value.accountingComplete === 'boolean' ? value.accountingComplete : null;
+  const cost = record(value.cost);
+  const currency = /^[A-Z]{3}$/.test(cost.currency ?? '') ? cost.currency : null;
+  const amount = Number.isFinite(cost.amount) && cost.amount >= 0 ? cost.amount : null;
+  const complete = cost.complete === true && amount !== null && currency !== null;
+  result.cost = ['actual', 'estimated', 'unknown'].includes(cost.status) ? {
+    status: complete && ['actual', 'estimated'].includes(cost.status) ? cost.status : 'unknown',
+    amount: complete ? amount : null, currency, complete,
+    knownAmount: currency && Number.isFinite(cost.knownAmount) && cost.knownAmount >= 0 ? cost.knownAmount : null,
+    sources: boundedStrings(cost.sources, 20, 300), versions: boundedStrings(cost.versions, 20, 300)
+  } : null;
+  if (value.knownUsage && typeof value.knownUsage === 'object') {
+    result.knownUsage = Object.fromEntries(['inputTokens', 'outputTokens', 'totalTokens', 'reasoningTokens', 'cacheReadTokens', 'cacheWriteTokens']
+      .map(key => [key, Number.isFinite(value.knownUsage[key]) && value.knownUsage[key] >= 0 ? value.knownUsage[key] : null]));
+  }
+  return result;
+}
+
 function projectMessage(value) {
   const row = record(value);
   const role = ['user', 'assistant', 'system'].includes(row.role) ? row.role : 'assistant';
@@ -120,7 +149,7 @@ function projectMessage(value) {
   return {
     id: string(row.id, 128), role, text: string(row.text, MAX_TEXT), at: scalar(row.at),
     requestId: string(row.requestId, 200) || null,
-    attachments, toolActivity, agentActivity, error: row.error ? string(row.error, 1000) : null,
+    attachments, toolActivity, agentActivity, usage: projectUsage(row.usage), error: row.error ? string(row.error, 1000) : null,
     cancelled: row.cancelled === true
   };
 }
@@ -149,7 +178,7 @@ function projectTask(value) {
       at: scalar(evidence.at) };
   }) : [];
   return {
-    id: string(row.id, 128), title: string(row.goal, 500), goal: string(row.goal, 2000),
+    id: string(row.id, 128), title: string(row.goal, 500), goal: string(row.goal, 2000), usage: projectUsage(row.usage),
     status: string(row.status, 40), currentPhase: string(row.currentPhase, 500),
     progress: { percent: Number.isFinite(progress.percent) ? Math.max(0, Math.min(100, progress.percent)) : 0, note: string(progress.note, 1000) },
     workspaceId: string(row.workspaceId, 128) || null,
@@ -588,6 +617,18 @@ export function createDesktopUiEventBus({ now = () => Date.now(), maxEvents = 50
 }
 
 export function createDesktopUiService({ services = {}, system = services.systemServices ?? services.system ?? {}, eventBus } = {}) {
+  const projectTaskWithUsage = row => projectTask({ ...row,
+    usage: services.usageLedger && row?.id ? services.usageLedger.summary({ taskId: row.id }) : row?.usage });
+  function sessionUsageWithLedger(sessionId, historical, sessionIds) {
+    if (!services.usageLedger) return historical;
+    const measured = services.usageLedger.summary(Array.isArray(sessionIds) && sessionIds.length ? { sessionIds } : { sessionId });
+    if (!measured.requestCount) return historical;
+    if (historical && (historical.requestCount === null || historical.requestCount > measured.requestCount)) {
+      return { ...historical, accountingComplete: false,
+        cost: { ...measured.cost, status: 'unknown', amount: null, complete: false } };
+    }
+    return measured;
+  }
   const owner = Object.freeze({ kind: 'owner', id: 'desktop' });
   const call = async (service, method, params = {}, withActor = false, signal = undefined) => {
     if (!service || typeof service.execute !== 'function') throw uiError('SERVICE_UNAVAILABLE', '此项能力当前不可用');
@@ -795,6 +836,7 @@ export function createDesktopUiService({ services = {}, system = services.system
       const output = {
         id: string(result.id, 128), total: Number(result.total) || 0,
         messages: (result.messages ?? []).map(projectMessage),
+        sessionUsage: projectUsage(sessionUsageWithLedger(result.accountingSessionId || idParam(p), result.sessionUsage, result.accountingSessionIds)),
         nextBeforeMessageId: string(result.nextBeforeMessageId, 128) || null,
         nextAfterMessageId: string(result.nextAfterMessageId, 128) || null,
         hasMoreAfter: result.hasMoreAfter === true, hasMore: result.hasMore === true
@@ -894,9 +936,9 @@ export function createDesktopUiService({ services = {}, system = services.system
     },
     'ui.task.overview': async p => {
       const result = await task('task.overview', { query: string(p.query, 200), status: string(p.status, 40) || undefined, limit: Math.max(1, Math.min(200, Number(p.limit) || 100)) });
-      return { tasks: (result.tasks ?? []).map(projectTask), total: Number(result.total) || 0, counts: record(result.counts), needsAttention: boundedStrings(result.needsAttention, 200, 128) };
+      return { tasks: (result.tasks ?? []).map(projectTaskWithUsage), total: Number(result.total) || 0, counts: record(result.counts), needsAttention: boundedStrings(result.needsAttention, 200, 128) };
     },
-    'ui.task.get': async p => ({ task: projectTask((await task('task.get', { id: idParam(p) })).task) }),
+    'ui.task.get': async p => ({ task: projectTaskWithUsage((await task('task.get', { id: idParam(p) })).task) }),
     'ui.task.create': async p => {
       const goal = boundedText(p.goal, 'goal', 2000);
       const workspaceId = string(p.workspaceId, 128) || null;
@@ -908,10 +950,10 @@ export function createDesktopUiService({ services = {}, system = services.system
       if (prior) {
         if (prior.status === 'queued' && !prior.currentAgent) {
           const inFlight = requestId ? taskCreateDispatches.get(requestId) : null;
-          if (inFlight) return { task: projectTask(await inFlight) };
+          if (inFlight) return { task: projectTaskWithUsage(await inFlight) };
           throw uiError('TASK_DISPATCH_INCOMPLETE', 'Task 已保存但 Agent 派发未确认；请在任务详情核对后启动');
         }
-        return { task: projectTask(prior) };
+        return { task: projectTaskWithUsage(prior) };
       }
       const existing = workspaceId ? services.taskService.runtime.findByGoalWorkspace({ goal, workspaceId }) : null;
       if (existing) {
@@ -927,7 +969,7 @@ export function createDesktopUiService({ services = {}, system = services.system
         if (agentProvider && existing.currentAgent && existing.currentAgent.provider !== agentProvider) {
           throw uiError('AGENT_PROVIDER_SWITCH_REQUIRES_CONTINUITY', 'Existing Task must switch Agent through Handoff');
         }
-        return { task: projectTask(existing) };
+        return { task: projectTaskWithUsage(existing) };
       }
       if (workspaceId && services.taskService.runtime.activeWorkspaceOwner({ workspaceId })) {
         throw uiError('TASK_WORKSPACE_BUSY', 'Another Task owns write execution in this Workspace');
@@ -937,7 +979,7 @@ export function createDesktopUiService({ services = {}, system = services.system
       if (raced) {
         if (raced.status === 'queued' && !raced.currentAgent) {
           const inFlight = raced.createRequest?.id ? taskCreateDispatches.get(raced.createRequest.id) : null;
-          if (inFlight && requestId === raced.createRequest.id) return { task: projectTask(await inFlight) };
+          if (inFlight && requestId === raced.createRequest.id) return { task: projectTaskWithUsage(await inFlight) };
           throw uiError('TASK_DISPATCH_INCOMPLETE', '同目标 Task 尚未确认派发；请核对后显式启动');
         }
         if (requirements.length && JSON.stringify(requirements) !== JSON.stringify(raced.requirements)) {
@@ -947,7 +989,7 @@ export function createDesktopUiService({ services = {}, system = services.system
         if (agentProvider && raced.currentAgent && raced.currentAgent.provider !== agentProvider) {
           throw uiError('AGENT_PROVIDER_SWITCH_REQUIRES_CONTINUITY', 'Existing Task must switch Agent through Handoff');
         }
-        return { task: projectTask(raced) };
+        return { task: projectTaskWithUsage(raced) };
       }
       if (workspaceId && services.taskService.runtime.activeWorkspaceOwner({ workspaceId })) {
         throw uiError('TASK_WORKSPACE_BUSY', 'Another Task owns write execution in this Workspace');
@@ -962,13 +1004,13 @@ export function createDesktopUiService({ services = {}, system = services.system
       try { current = await dispatch; }
       finally { if (requestId && taskCreateDispatches.get(requestId) === dispatch) taskCreateDispatches.delete(requestId); }
       emit('task.updated', { taskId: current.id, status: current.status });
-      return { task: projectTask(current) };
+      return { task: projectTaskWithUsage(current) };
     },
     'ui.task.start': async p => {
       const current = (await task('task.get', { id: idParam(p) })).task;
       if (p.expectedRev !== undefined && current.rev !== p.expectedRev) throw uiError('TASK_CONFLICT', '任务已被其他操作修改');
       if (current.status !== 'queued') throw uiError('TASK_NOT_QUEUED', '只有待启动任务可以启动；请查看当前任务状态');
-      return { task: projectTask(await runTask(current, { provider: string(p.agentProvider, 80) || undefined,
+      return { task: projectTaskWithUsage(await runTask(current, { provider: string(p.agentProvider, 80) || undefined,
         requestId: string(p.requestId, 160) || undefined })) };
     },
     'ui.task.pause': async p => {
@@ -979,13 +1021,13 @@ export function createDesktopUiService({ services = {}, system = services.system
       await stopTask(current);
       const result = await task('task.pause', { id: current.id, expectedRev: current.rev, reason: string(p.reason, 1000) });
       emit('task.updated', { taskId: result.task?.id, status: result.task?.status });
-      return { task: projectTask(result.task) };
+      return { task: projectTaskWithUsage(result.task) };
     },
     'ui.task.resume': async p => {
       const current = (await task('task.get', { id: idParam(p) })).task;
       if (p.expectedRev !== undefined && current.rev !== p.expectedRev) throw uiError('TASK_CONFLICT', '任务已被其他操作修改');
       if (!['paused', 'waiting', 'blocked'].includes(current.status)) throw uiError('TASK_NOT_RESUMABLE', '任务当前不能恢复');
-      return { task: projectTask(await runTask(current, { requestId: string(p.requestId, 160) || undefined })) };
+      return { task: projectTaskWithUsage(await runTask(current, { requestId: string(p.requestId, 160) || undefined })) };
     },
     'ui.task.reconcile': async p => {
       const current = (await task('task.get', { id: idParam(p) })).task;
@@ -1033,7 +1075,7 @@ export function createDesktopUiService({ services = {}, system = services.system
         note: `Owner reviewed interrupted effect: ${string(p.reviewSummary, 1000).trim()}` });
       const resumed = await runTask(reviewed, { provider: recoveryProvider, content: string(p.nextInstruction, 32_000).trim(),
         requestId: string(p.requestId, 160).trim() });
-      return { task: projectTask(resumed) };
+      return { task: projectTaskWithUsage(resumed) };
     },
     'ui.task.cancel': async p => {
       const stoppedOperations = await services.capabilityService?.cancelTaskOperations?.({ taskId: idParam(p) });
@@ -1043,7 +1085,7 @@ export function createDesktopUiService({ services = {}, system = services.system
       await stopTask(current, { cancelMissingManagedSession: true });
       const result = await task('task.cancel', { id: current.id, expectedRev: current.rev, reason: string(p.reason, 1000) });
       emit('task.updated', { taskId: result.task?.id, status: result.task?.status });
-      return { task: projectTask(result.task) };
+      return { task: projectTaskWithUsage(result.task) };
     },
     'ui.task.handoff': async p => {
       const current = (await task('task.get', { id: idParam(p) })).task;
@@ -1054,7 +1096,7 @@ export function createDesktopUiService({ services = {}, system = services.system
       const result = await continuity('continuity.rollover', { taskId: current.id, targetProvider, reason: 'provider-switch' });
       const updated = (await task('task.get', { id: current.id })).task;
       emit('task.updated', { taskId: updated.id, status: updated.status });
-      return { task: projectTask(updated), handoff: { success: Boolean(result.to?.sessionId), from: result.from, to: result.to } };
+      return { task: projectTaskWithUsage(updated), handoff: { success: Boolean(result.to?.sessionId), from: result.from, to: result.to } };
     },
     'ui.workspace.list': async () => {
       const result = await workspace('workspace.list', {});
@@ -1478,7 +1520,7 @@ export function createDesktopUiService({ services = {}, system = services.system
       ]);
       return {
         sessions: (sessionRows.sessions ?? []).filter(row => `${row.title}`.toLocaleLowerCase().includes(query.toLocaleLowerCase())).slice(0, 10).map(projectSession),
-        tasks: (taskRows.tasks ?? []).slice(0, 10).map(projectTask),
+        tasks: (taskRows.tasks ?? []).slice(0, 10).map(projectTaskWithUsage),
         plugins: (pluginRows.plugins ?? []).slice(0, 10).map(projectPlugin)
       };
     }

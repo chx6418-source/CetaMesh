@@ -34,6 +34,7 @@ import {
   planDshRemoval,
   planIntegration,
   readManifest,
+  removePath,
   resolveCoreLaunch,
   rewriteEntryCommands
 } from '../src/dsh-integration.js';
@@ -439,6 +440,89 @@ step('✅ 纯函数：cordis 分类、MCP 块生成/解析往返、开发与打�
     step('✅ 回滚：执行中途失败时目录树恢复到执行前状态（含未创建的路径）');
   } finally {
     fs.rmSync(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
+  }
+}
+
+// Deleting an integration link must remove only the link on either platform.
+{
+  const tempRoot = makeTempRoot('unlink');
+  try {
+    const target = path.join(tempRoot, 'target');
+    const link = path.join(tempRoot, 'link');
+    fs.mkdirSync(target);
+    fs.writeFileSync(path.join(target, 'keep.txt'), 'target must survive');
+    fs.symlinkSync(target, link, process.platform === 'win32' ? 'junction' : 'dir');
+    removePath(link);
+    assert.equal(fs.existsSync(link), false);
+    assert.equal(fs.readFileSync(path.join(target, 'keep.txt'), 'utf8'), 'target must survive');
+    fs.symlinkSync(path.join(tempRoot, 'absent'), link, process.platform === 'win32' ? 'junction' : 'dir');
+    removePath(link);
+    assert.throws(() => fs.lstatSync(link), { code: 'ENOENT' });
+    step('✅ 删除目录链接与断链只摘除链接，目标内容保留');
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+}
+
+// Distinct transactions must never share snapshots, even with a frozen clock.
+{
+  const tempRoot = makeTempRoot('backup-collision');
+  const RealDate = globalThis.Date;
+  globalThis.Date = class extends RealDate {
+    constructor(...args) { super(...(args.length ? args : ['2026-01-01T00:00:00.000Z'])); }
+    static now() { return new RealDate('2026-01-01T00:00:00.000Z').getTime(); }
+  };
+  try {
+    const target = path.join(tempRoot, 'file.txt');
+    fs.writeFileSync(target, 'original file');
+    const first = applyPlan({ dshHome: tempRoot, effects: [{ type: 'write-file', path: target, content: 'current file' }] });
+    const directory = path.join(tempRoot, 'directory');
+    const source = path.join(tempRoot, 'source');
+    fs.mkdirSync(directory); fs.mkdirSync(source);
+    fs.writeFileSync(path.join(directory, 'keep.txt'), 'original directory');
+    fs.writeFileSync(path.join(source, 'keep.txt'), 'new directory');
+    const second = applyPlan({ dshHome: tempRoot, effects: [{ type: 'replace-dir', path: directory, source }] });
+    assert.notEqual(second.backupDir, first.backupDir, 'same timestamp must allocate independent backup directories');
+    assert.equal(fs.readFileSync(path.join(first.backupDir, 'snap-0'), 'utf8'), 'original file');
+    assert.equal(fs.readFileSync(path.join(second.backupDir, 'snap-0', 'keep.txt'), 'utf8'), 'original directory');
+    const savedBackups = snapshot(path.dirname(first.backupDir));
+    assert.throws(() => applyPlan({ dshHome: tempRoot, effects: [
+      { type: 'write-file', path: target, content: 'partial write' },
+      { type: 'write-file', path: target, content: 'never written' }
+    ] }, { hooks: { beforeEffect(_effect, index) { if (index === 1) throw new Error('forced transaction failure'); } } }), /已回滚/);
+    assert.equal(fs.readFileSync(target, 'utf8'), 'current file');
+    assert.deepEqual(snapshot(path.dirname(first.backupDir)), savedBackups, 'failed transaction must not delete or overwrite earlier backups');
+    assert.throws(() => applyPlan({ dshHome: tempRoot, effects: [{ type: 'write-file', path: target, content: 'forbidden reuse' }] },
+      { backupRoot: first.backupDir }), /EEXIST/);
+    assert.equal(fs.readFileSync(target, 'utf8'), 'current file');
+    assert.deepEqual(snapshot(path.dirname(first.backupDir)), savedBackups);
+    const explicitRoot = path.join(path.dirname(first.backupDir), 'explicit-fresh');
+    const explicit = applyPlan({ dshHome: tempRoot, effects: [{ type: 'write-file', path: target, content: 'current file' }] }, { backupRoot: explicitRoot });
+    assert.equal(explicit.backupDir, explicitRoot);
+    assert.equal(fs.readFileSync(path.join(explicitRoot, 'snap-0'), 'utf8'), 'current file');
+    const beforeSnapshotFailure = snapshot(path.dirname(first.backupDir));
+    const failedBackupRoot = path.join(path.dirname(first.backupDir), 'snapshot-failure');
+    const realCopy = fs.cpSync;
+    try {
+      fs.cpSync = function(from, to, ...args) {
+        if (from === directory && to === path.join(failedBackupRoot, 'snap-1')) {
+          throw Object.assign(new Error('controlled snapshot copy failure'), { code: 'EIO' });
+        }
+        return realCopy.call(this, from, to, ...args);
+      };
+      assert.throws(() => applyPlan({ dshHome: tempRoot, effects: [
+        { type: 'write-file', path: target, content: 'must not execute' },
+        { type: 'replace-dir', path: directory, source }
+      ] }, { backupRoot: failedBackupRoot }), /已回滚.*controlled snapshot copy failure/);
+    } finally { fs.cpSync = realCopy; }
+    assert.equal(fs.readFileSync(target, 'utf8'), 'current file');
+    assert.equal(fs.readFileSync(path.join(directory, 'keep.txt'), 'utf8'), 'new directory');
+    assert.equal(fs.existsSync(failedBackupRoot), false);
+    assert.deepEqual(snapshot(path.dirname(first.backupDir)), beforeSnapshotFailure, 'snapshot failure must preserve all prior transaction backups');
+    step('✅ 冻结时钟连续事务备份互不覆盖，失败回滚保留已有快照');
+  } finally {
+    globalThis.Date = RealDate;
+    fs.rmSync(tempRoot, { recursive: true, force: true });
   }
 }
 

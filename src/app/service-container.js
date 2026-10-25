@@ -1,4 +1,6 @@
 import fs from 'node:fs';
+import { createUsageLedger } from '../model/usage-ledger.js';
+import { createToolEvidenceStore } from '../context/tool-evidence.js';
 import { createTaskWorkingMemoryRecorder } from '../memory/task-working-memory.js';
 import os from 'node:os';
 import path from 'node:path';
@@ -151,6 +153,9 @@ export function createCetaMeshServices(options = {}) {
     preferredProviderId: () => settingsService.store.get().settings.models.provider,
     log
   });
+  const evidenceStore = createToolEvidenceStore({ stateDir });
+  const usageLedger = createUsageLedger({ file: path.join(stateDir, 'model', 'usage-ledger.json'),
+    pricingResolver: options.usagePricingResolver ?? null });
   // Chat and Managed Agent are composed before all context sources exist; the callback is bound later.
   let productContextService = null;
   let managedAgent = null;
@@ -170,6 +175,7 @@ export function createCetaMeshServices(options = {}) {
   };
   managedAgent = createManagedAgentProvider({
     modelRuntime,
+    evidenceStore,
     toolExecutionCoordinator: toolExecutionProxy,
     buildProductTurnContext: request => productContextService?.buildForAgentTurn(request),
     requireProductContext: true,
@@ -180,6 +186,7 @@ export function createCetaMeshServices(options = {}) {
         workspaceId: managedAgent.executionWorkspaceId(sessionId) ?? task.workspaceId,
         actor: capabilityService.principalForTask(task.id) } : null;
     },
+    onUsage: payload => usageLedger.record(payload),
     onTurnEnd: async payload => {
       const reported = await agentBroker.reportTurnEnd(payload);
       if (payload.outcome === 'completed' && settingsService.store.get().settings.memory.enabled === true) {
@@ -233,6 +240,7 @@ export function createCetaMeshServices(options = {}) {
       }) : null;
     },
     stateDir,
+    onUsage: payload => usageLedger.record(payload),
     onTurnEnd: payload => agentBroker.reportTurnEnd(payload),
     onEvent: event => uiEventBus.publish(event.event, event.data)
   });
@@ -251,6 +259,7 @@ export function createCetaMeshServices(options = {}) {
     onChanged: data => uiEventBus.publish('memory.updated', { ...data, status: 'working-updated' }) });
   capabilityService = createCapabilityService({
     stateDir,
+    evidenceStore,
     workspaceService,
     memoryService,
     taskRuntime: taskService.runtime,
@@ -268,6 +277,8 @@ export function createCetaMeshServices(options = {}) {
   });
   toolExecutionCoordinator = createToolExecutionCoordinator({
     finalSynthesisAtLimit: true,
+    evidenceStore,
+    onUsage: payload => usageLedger.record(payload),
     modelRuntime,
     capabilityBroker: capabilityService.broker,
     stateDir,
@@ -523,7 +534,7 @@ export function createCetaMeshServices(options = {}) {
     services: {
       chatService, taskService, workshopService, workspaceService, memoryService, capabilityService, agentBroker, continuityService,
       agentService, pluginCenterService, integrationService, extensionService, settingsService, systemServices,
-      toolExecutionCoordinator
+      toolExecutionCoordinator, usageLedger
     },
     system: systemServices,
     eventBus: uiEventBus
@@ -538,6 +549,7 @@ export function createCetaMeshServices(options = {}) {
     managedAgent,
     modelRegistry,
     modelRuntime,
+    usageLedger,
     toolExecutionCoordinator,
     productContextService,
     routerService,

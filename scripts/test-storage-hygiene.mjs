@@ -114,6 +114,12 @@ try {
 
   const sandboxRoot = path.join(tempRoot, 'test-sandboxes');
   fs.mkdirSync(sandboxRoot, { recursive: true });
+  // The aggregator exports its sandbox as TMPDIR. Leave room for a nested
+  // fixture directory and socket basename within Unix sockaddr_un limits.
+  const compact = createSuiteSandbox({ suiteId: 'test-comm-lifecycle-with-a-long-descriptive-suite-name', tempRoot: sandboxRoot });
+  assert.ok(Buffer.byteLength(path.basename(compact.root)) <= 44, 'suite sandbox name must leave room for nested Unix socket paths');
+  assert.equal(JSON.parse(fs.readFileSync(compact.markerPath, 'utf8')).suiteId, compact.suiteId);
+  finalizeSuiteSandbox({ sandbox: compact, failed: false });
   const successful = createSuiteSandbox({ suiteId: 'successful', tempRoot: sandboxRoot });
   fs.writeFileSync(path.join(successful.root, 'output.txt'), 'successful diagnostic');
   assert.deepEqual(finalizeSuiteSandbox({ sandbox: successful, failed: false, keepFailed: true }), { retained: false, removed: true });

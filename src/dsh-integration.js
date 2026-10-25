@@ -373,7 +373,7 @@ function samePath(a, b) {
 
 /**
  * 删除路径，但**绝不跟随**符号链接 / junction：
- * junction 与目录符号链接用 rmdir 只摘掉链接本身，否则会连带删掉目标目录的内容。
+ * Windows junction 用 rmdir；POSIX 符号链接用 unlink；两者都只摘掉链接本身。
  */
 export function removePath(target) {
   let stat;
@@ -389,7 +389,7 @@ export function removePath(target) {
     } catch {
       /* 断链：按目录链接处理 */
     }
-    if (pointsToDirectory) fs.rmdirSync(target);
+    if (pointsToDirectory && process.platform === 'win32') fs.rmdirSync(target);
     else fs.unlinkSync(target);
     return;
   }
@@ -1078,7 +1078,15 @@ function applyEffect(effect, hooks = {}) {
  */
 export function applyPlan(plan, { hooks = {}, log = () => {}, backupRoot } = {}) {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const backupDir = backupRoot ?? path.join(plan.dshHome, BACKUP_DIR, stamp);
+  let backupDir = backupRoot ?? path.join(plan.dshHome, BACKUP_DIR, stamp);
+  // Reserve one transaction-owned directory atomically before rollback can
+  // delete it. Timestamps alone collide; existing caller paths are not ours.
+  // A zero-effect plan remains a true filesystem no-op.
+  if (plan.effects.length) {
+    fs.mkdirSync(path.dirname(backupDir), { recursive: true });
+    if (backupRoot != null) fs.mkdirSync(backupDir);
+    else backupDir = fs.mkdtempSync(backupDir + '-');
+  }
   const snapshots = [];
   const seen = new Set();
 

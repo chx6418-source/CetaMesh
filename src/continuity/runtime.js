@@ -408,7 +408,19 @@ export function createContinuityRuntime({
     const sessionKey = `${providerId}:${sid}`;
 
     const realUsage = normalizeUsageTokens(usage);
-    if (realUsage) {
+    if (Array.isArray(usage?.requests)) {
+      for (const receipt of usage.requests) {
+        if (!receipt || typeof receipt.requestId !== 'string' || !receipt.requestId) continue;
+        monitor.record(sessionKey, {
+          requestId: receipt.requestId,
+          accountingComplete: usage.accountingComplete !== false && typeof receipt.inputTokens === 'number' && typeof receipt.outputTokens === 'number',
+          inputTokens: receipt.inputTokens,
+          outputTokens: receipt.outputTokens,
+          windowTokens: Number.isFinite(receipt.windowTokens) && receipt.windowTokens > 0 ? receipt.windowTokens
+            : Number.isFinite(Number(windowTokens)) && Number(windowTokens) > 0 ? Number(windowTokens) : null
+        });
+      }
+    } else if (realUsage) {
       monitor.record(sessionKey, {
         inputTokens: realUsage.inputTokens,
         outputTokens: realUsage.outputTokens,

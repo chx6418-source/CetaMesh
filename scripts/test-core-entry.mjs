@@ -212,12 +212,20 @@ try {
     assert.equal((await waitForDataIpc(tempRoot)).ok, true, 'rejected Legacy must not disturb Core IPC');
     console.log('✅ worker: 隔离数据目录启动成功（数据面 IPC 健康，无 HTTP listener）');
   } finally {
-    if (worker.exitCode === null) worker.kill();
-    const exited = await Promise.race([
-      once(worker, 'exit').then(() => true),
-      new Promise((resolve) => setTimeout(() => resolve(false), 5000))
-    ]);
-    assert.equal(exited, true, 'isolated worker did not exit within 5 seconds');
+    // Startup failure can exit before readiness rejects. Do not await an event
+    // that already fired, or mask the original error with a cleanup timeout.
+    if (worker.exitCode === null && worker.signalCode === null) {
+      let timer;
+      const exit = once(worker, 'exit');
+      worker.kill();
+      try {
+        const exited = await Promise.race([
+          exit.then(() => true),
+          new Promise((resolve) => { timer = setTimeout(() => resolve(false), 5000); })
+        ]);
+        assert.equal(exited, true, 'isolated worker did not exit within 5 seconds');
+      } finally { clearTimeout(timer); }
+    }
   }
 
   const supervised = spawn(process.execPath, [ENTRY, '--worker'], {

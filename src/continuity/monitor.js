@@ -38,13 +38,26 @@ export function createContextMonitor({ policy, initialSessions = {}, onChange = 
      *   promptChars/outputChars  —— 无真实 usage 时的估算输入；
      *   windowTokens             —— provider/model 已知窗口（覆盖 policy 默认）。
      */
-    record(sessionKey, { inputTokens, outputTokens, promptChars, outputChars, windowTokens } = {}) {
+    record(sessionKey, { inputTokens, outputTokens, promptChars, outputChars, windowTokens, requestId, accountingComplete } = {}) {
       const state = stateOf(sessionKey);
       const safePositive = (value) => {
         const n = Number(value);
         return Number.isFinite(n) && n > 0 ? n : 0;
       };
       const realInput = safePositive(inputTokens), realOutput = safePositive(outputTokens);
+      const becameIncomplete = accountingComplete === false && state.unknownUsage !== true;
+      if (accountingComplete === false) state.unknownUsage = true;
+      // Keep IDs only for nonzero increments. Unknown/zero observations cannot
+      // inflate totals, so their coverage flag is sufficient without unbounded
+      // receipt growth from repeated empty provider usage.
+      if (typeof requestId === 'string' && requestId
+        && realInput + realOutput + safePositive(promptChars) + safePositive(outputChars) > 0) {
+        if (state.accountedRequestIds?.includes(requestId)) {
+          if (becameIncomplete) persist();
+          return this.level(sessionKey);
+        }
+        state.accountedRequestIds = [...(state.accountedRequestIds ?? []), requestId];
+      }
       if (realInput + realOutput > 0) {
         state.inputTokens += realInput;
         state.outputTokens += realOutput;
@@ -77,6 +90,7 @@ export function createContextMonitor({ policy, initialSessions = {}, onChange = 
       const percent = windowTokens > 0 ? Math.min(100, Math.round((usedTokens / windowTokens) * 100)) : 0;
       return {
         usedTokens,
+        ...(state.unknownUsage ? { accountingComplete: false } : {}),
         windowTokens,
         percent,
         band: bandFor(percent),

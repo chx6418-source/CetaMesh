@@ -134,15 +134,10 @@ run('product context is deterministic and stays within the requested character l
   assert.equal(first.includes('private'), false);
   assert.equal(JSON.parse(first).schemaVersion, 2);
 
-  const oversized = buildProductContext({
+  assert.throws(() => buildProductContext({
     ...snapshot,
     task: { id: 'task-4', goal: 'G'.repeat(20000), status: 'running', currentPhase: 'inspect', checkpoint: { summary: 'C'.repeat(20000) } }
-  }, { maxChars: 1800 });
-  const parsed = JSON.parse(oversized);
-  assert.ok(oversized.length <= 1800);
-  assert.equal(parsed.task.id, 'task-4');
-  assert.equal(parsed.task.status, 'running');
-  assert.deepEqual(parsed.capabilities.requestable, []);
+  }, { maxChars: 1800 }), { code: 'CONTEXT_BUDGET_EXCEEDED' });
 
   const manyCapabilities = buildProductContext({
     mode: 'chat',

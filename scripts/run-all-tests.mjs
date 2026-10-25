@@ -39,6 +39,28 @@ export const CATEGORIES = ['core', 'architecture', 'security', 'runtime', 'integ
 // ── 登记表：scripts/test-*.mjs 的每一个文件都必须出现在这里（或能从 package.json 映射）。
 // requires 的取值见 probeAvailability()；category 取值见 CATEGORIES。
 const REGISTRY = {
+  'test-cli-termination-unknown.mjs': { category: 'security', note: 'CLI unknown termination retains active ownership and staged Workspace' },
+  'test-suite-process-unconfirmed.mjs': { category: 'security', note: 'Fail closed when a live suite has no owned process group' },
+  'test-managed-failed-request-usage.mjs': { category: 'runtime' },
+  'test-model-schema-cache-stability.mjs': { category: 'runtime' },
+  'test-chat-usage-ledger-hook.mjs': { category: 'runtime' },
+  'test-model-context-budget.mjs': { category: 'runtime' },
+  'test-task-usage-ledger.mjs': { category: 'runtime' },
+  'test-tool-evidence-store.mjs': { category: 'security' },
+  'test-tool-evidence-capability.mjs': { category: 'security' },
+  'test-tool-evidence-execution.mjs': { category: 'security' },
+  'test-evidence-context-budget.mjs': { category: 'runtime' },
+  'test-managed-evidence-rollover.mjs': { category: 'runtime' },
+
+  'test-chat-pending-usage.mjs': { category: 'runtime' },
+  'test-managed-pending-usage.mjs': { category: 'runtime' },
+  'test-chat-history-preservation.mjs': { category: 'runtime' },
+  'test-context-preservation.mjs': { category: 'runtime' },
+  'test-managed-context-preservation.mjs': { category: 'runtime' },
+  'test-memory-relevance.mjs': { category: 'security' },
+  'test-message-context-budget.mjs': { category: 'runtime' },
+  'test-model-usage-cache.mjs': { category: 'runtime' },
+  'test-usage-projection.mjs': { category: 'desktop' },
   'test-gitcode-mirror.mjs': { category: 'security', note: 'Mirror public main without losing GitCode history or release tags' },
   'test-ui-motion-live.mjs': { category: 'environment', requires: ['ui-motion-live'], timeoutMs: 60000 },
   'test-memory-layout.mjs': { category: 'desktop' },

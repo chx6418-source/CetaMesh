@@ -404,6 +404,18 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
 
   async function finalizeRun(session, run, result) {
     if (session.closed || session.activeRun !== run) return;
+    if (result.terminationConfirmed === false || result.effectStatus === 'unknown') {
+      run.terminationUnknown = true;
+      session.lastRunStatus = 'unknown';
+      session.lastError = { code: result.code === 'PROCESS_EXIT_UNCONFIRMED' ? result.code : 'INVOKE_CANCEL_UNCONFIRMED' };
+      // End the public turn with an error, but retain the active process and
+      // staging ownership. emitTurnEnd intentionally clears activeRun, so it
+      // must not be used for an unconfirmed external process.
+      emit(session, makeEvent('turn/end', run.turnId, { reason: { kind: 'error', error: {
+        code: session.lastError.code, message: 'Codex process-tree exit is unconfirmed; staging retained'
+      } } }));
+      return;
+    }
     flushOutput(session, run);
     if (result.timedOut) {
       session.lastRunStatus = 'timeout';
@@ -535,6 +547,7 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
   }
 
   function parseOutput(session, run, text) {
+    if (run.terminationUnknown) return;
     run.pendingText += text;
     const lines = run.pendingText.split(/\r?\n/);
     run.pendingText = lines.pop() ?? '';
@@ -764,7 +777,6 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
 
       async closeSession({ sessionId } = {}) {
         const session = requireSession(sessionId);
-        session.closed = true;
         if (session.waitingForApproval) {
           session.cancelledApprovals.add(session.waitingForApproval);
           try { await cancelApproval(session.waitingForApproval); }
@@ -773,8 +785,18 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
         }
         if (session.activeRun?.handle) {
           session.activeRun.handle.cancel();
-          await session.activeRun.handle.done.catch(() => {});
+          const handle = session.activeRun.handle;
+          const result = await handle.done.catch(error => {
+            if (error?.effectStatus === 'unknown' || error?.code === 'INVOKE_CANCEL_UNCONFIRMED') throw error;
+            return null;
+          });
+          const confirmation = handle.cleanupPermitted?.() ?? handle.terminationConfirmed?.();
+          if (confirmation === false || (confirmation !== true
+            && (result?.terminationConfirmed === false || result?.effectStatus === 'unknown'))) {
+            throw agentProviderError('PROVIDER_CLOSE_UNKNOWN', 'Codex exit is unconfirmed; staging and ownership retained');
+          }
         }
+        session.closed = true;
         if (session.activeRun?.finalized) await session.activeRun.finalized;
         cleanupStagingWorkspace(session.stage);
         for (const wake of session.waiters.splice(0)) wake();

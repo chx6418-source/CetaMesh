@@ -51,17 +51,18 @@ function realpathNative(target) {
   }
 }
 
-/** 归一化用于比较：小写 + 统一分隔符 + 去尾部分隔符（保留盘符根的 'x:' 形态）。 */
+/** 归一化用于比较：Windows 转小写 + 去尾部分隔符（保留盘符根的 'x:' 形态）。 */
 function normalizeForCompare(p) {
-  return path.resolve(String(p ?? '')).toLowerCase().replace(/[\\/]+$/, '');
+  const resolved = path.resolve(String(p ?? ''));
+  return isWindows() ? resolved.toLowerCase().replace(/[\\/]+$/, '') : resolved.replace(/\/+$/, '');
 }
 
-/** candidate 是否为 root 本身或 root 之内（Windows 大小写不敏感语义）。 */
+/** candidate 是否为 root 本身或 root 之内（仅 Windows 使用大小写不敏感语义）。 */
 export function isInsideRoot(root, candidate) {
   const a = normalizeForCompare(root);
   const b = normalizeForCompare(candidate);
   if (a === b) return true;
-  return b.startsWith(a + '\\') || b.startsWith(a + '/');
+  return b.startsWith(a + path.sep);
 }
 
 /** danger 是否等于 root 或位于 root 之下（用于拒绝把危险目录选为工作区）。 */
@@ -151,6 +152,9 @@ export function assertSafeRootForm(rootInput, { env = process.env, home = os.hom
   if (raw.includes('\0')) fail('ROOT_INVALID', '工作区根目录包含 NUL 字节');
   if (/^[\\/]{2}/.test(raw)) fail('ROOT_INVALID', '不接受 UNC / 设备路径作为工作区根目录');
   const resolved = path.resolve(raw);
+  if (!isWindows() && [path.parse(resolved).root, '/etc', '/usr', home].some(danger => isAncestorOrSelf(resolved, danger))) {
+    fail('ROOT_FORBIDDEN', `不允许把系统 / 全局目录（或其祖先）作为工作区：${resolved}`);
+  }
   if (isWindows()) {
     if (/^[a-zA-Z]:\\?$/.test(resolved)) fail('ROOT_FORBIDDEN', `不允许把盘符根作为工作区：${resolved}`);
     const dangers = [
@@ -197,6 +201,7 @@ export function canonicalizeRoot(rootInput, { env = process.env, home = os.homed
     fail('ROOT_NOT_FOUND', `工作区根目录不存在或不可访问：${resolved}`);
   }
 
+  assertSafeRootForm(real, { env, home });
   if (isWindows()) {
     // 盘符根（C:\ 等）：作为工作区等于放弃边界。realpath 后可能改写形态，复检。
     if (/^[a-zA-Z]:\\?$/.test(real)) fail('ROOT_FORBIDDEN', `不允许把盘符根作为工作区：${real}`);

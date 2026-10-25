@@ -9,6 +9,7 @@ import { createCapabilityPolicy } from './policy.js';
 import { createCapabilityApproval, requestFingerprint } from './approval.js';
 import { OWNER_ACTOR, capabilityError } from './types.js';
 import { readJsonFile, writeJsonAtomic } from '../storage/json-file.js';
+import { evidenceBinding, EVIDENCE_SOURCE_CAPABILITIES } from '../context/tool-evidence.js';
 
 export const WORKSPACE_CAPABILITIES = Object.freeze({
   'workspace.read': 'filesystem.read', 'workspace.write': 'filesystem.write',
@@ -61,7 +62,7 @@ const WORKSPACE_TOOL_DESCRIPTORS = Object.freeze({
  * which bind the Owner identity; Agent/Extension grants never come from IPC. */
 export function createCapabilityService({ stateDir, workspaceService, memoryService,
   taskRuntime, agentBroker, bindAgentSession, resumeAgentApproval = null, searchImpl = null, audit = () => {}, now,
-  isolatedRunner = null, onTaskObservation = null, onOperation = () => {} } = {}) {
+  isolatedRunner = null, onTaskObservation = null, onOperation = () => {}, evidenceStore = null } = {}) {
   const file = stateDir ? path.join(stateDir, 'capability', 'task-grants.json') : null;
   let grants = file ? readJsonFile(file, { missing: {} }) : {};
   const provisioning = new Map();
@@ -294,10 +295,11 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     }
   };
   const resolveWorkspace = id => workspaceService?.describeWorkspace(id);
+  const policy = createCapabilityPolicy({ resolveWorkspace, resolveTask: taskFor,
+    resolveGrants: taskId => grants[taskId],
+    isTaskHandoff: taskId => taskHandoffGuard(taskId) });
   const broker = createCapabilityBroker({
-    policy: createCapabilityPolicy({ resolveWorkspace, resolveTask: taskFor,
-      resolveGrants: taskId => grants[taskId],
-      isTaskHandoff: taskId => taskHandoffGuard(taskId) }),
+    policy,
     approval: createCapabilityApproval({ stateDir, now }), audit, stateDir
   });
   function saveGrants() {
@@ -379,7 +381,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     // 脚本 / 测试 / 构建脚本），allowlist 只防命令注入、防不了项目代码本身。
     // 需要 test.run 的任务必须显式传入（Workshop Owner 勾选 / Smart 路径显式
     // request-only grant），且每一次执行仍需 Owner Approve Once（risk=high）。
-    const capabilities = new Set(value?.capabilities ?? ['filesystem.read', 'filesystem.write', 'filesystem.search', 'git.status', 'git.diff', 'memory.read']);
+    const capabilities = new Set(value?.capabilities ?? ['filesystem.read', 'filesystem.write', 'filesystem.search', 'git.status', 'git.diff', 'memory.read', ...(evidenceStore ? ['context.evidence.read'] : [])]);
     if (capabilities.has('filesystem.write')) capabilities.add('workspace.apply');
     for (const id of capabilities) broker.registry.require(id);
     if ((value?.workspaceIds ?? [task.workspaceId]).some(id => id !== task.workspaceId)) {
@@ -573,6 +575,38 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       return memoryService.runtime.buildContextPackage({ ...r.input,
         ...(['owner', 'agent'].includes(r.actor.kind) ? { scope: `task:${r.taskId}` } : {}), principal });
     }});
+  }
+  if (evidenceStore) {
+    broker.register({ id: 'context.evidence.read', permission: 'context.evidence.read', provider: 'context', risk: 'low',
+      description: 'Retrieve a bounded page of preserved tool evidence in this exact Session, Task and Workspace. Current source permissions are required.',
+      inputSchema: objectInput({ id: stringField('Opaque evidence id from a tool result.'),
+        offset: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 6000 } }, ['id']),
+      validate: r => {
+        if (!['owner', 'agent'].includes(r.actor.kind)) throw capabilityError('PERMISSION_DENIED', 'Evidence is restricted to its Owner or assigned Agent');
+        if (typeof r.origin?.sessionId !== 'string' || !r.origin.sessionId) throw capabilityError('TOOL_EVIDENCE_DENIED', 'Trusted Session origin required');
+        const assigned = r.taskId ? taskFor(r.taskId)?.currentAgent : null;
+        if (r.actor.kind === 'agent' && assigned?.sessionId && assigned.sessionId !== r.origin.sessionId)
+          throw capabilityError('TOOL_EVIDENCE_DENIED', 'Agent Session assignment changed');
+      },
+      execute: r => evidenceStore.read({
+        binding: evidenceBinding({ actor: r.actor, sessionId: r.origin.sessionId,
+          scope: { taskId: r.taskId ?? null, workspaceId: r.workspaceId ?? null } }),
+        id: r.input.id, offset: r.input.offset, limit: r.input.limit,
+        authorizeSource: source => {
+          // A read never replays the original effect. Only audited sources with
+          // complete synchronous scope validation are eligible for compaction.
+          if (!EVIDENCE_SOURCE_CAPABILITIES.includes(source?.capability)) return false;
+          try {
+            const entry = broker.registry.require(source.capability);
+            const original = { ...r, capability: source.capability, input: source.input,
+              approvalId: undefined, approvalBinding: undefined, approved: undefined };
+            policy.authorize(original, entry);
+            const validation = entry.validate?.(original);
+            return !validation || typeof validation.then !== 'function';
+          } catch { return false; }
+        }
+      })
+    });
   }
   broker.register({ id: 'network', permission: 'network', provider: 'safe-fetch', risk: 'high', modelCallable: false,
     validate: r => {
