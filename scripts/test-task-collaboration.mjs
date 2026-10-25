@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createTaskService } from '../src/task/service.js';
 import { createCapabilityPolicy } from '../src/capability/policy.js';
+import { resolveInside } from '../src/workspace/boundary.js';
 
 const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-collaboration-'));
 try {
@@ -52,9 +53,20 @@ try {
     workspaceId: 'ws-test', input: { path: 'src/task/runtime.js' } },
   { id: 'filesystem.write', permission: 'filesystem.write', workspace: true })),
   { code: 'TASK_CHILD_READ_ONLY' });
-  assert.equal(policy.authorize({ actor: owner, taskId: child.id, workspaceId: 'ws-test',
-    input: { path: 'src/task/runtime.js' } },
-  { id: 'filesystem.read', permission: 'filesystem.read', workspace: true }).allowed, true);
+  try {
+    assert.equal(policy.authorize({ actor: owner, taskId: child.id, workspaceId: 'ws-test',
+      input: { path: 'src/task/runtime.js' } },
+    { id: 'filesystem.read', permission: 'filesystem.read', workspace: true }).allowed, true);
+  } catch (error) {
+    const target = resolveInside(stateDir, 'src/task/runtime.js').real;
+    const scope = resolveInside(stateDir, 'src/task').real;
+    console.error('child read scope diagnostic', JSON.stringify({
+      stateDir, scope, target, relative: path.relative(scope, target),
+      scopeNative: fs.realpathSync.native(path.join(stateDir, 'src', 'task')),
+      targetNative: fs.realpathSync.native(path.join(stateDir, 'src', 'task', 'runtime.js'))
+    }));
+    throw error;
+  }
   await assert.rejects(Promise.resolve().then(() => policy.authorize({ actor: owner, taskId: child.id,
     workspaceId: 'ws-test', input: { path: 'private.txt' } },
   { id: 'filesystem.read', permission: 'filesystem.read', workspace: true })),
