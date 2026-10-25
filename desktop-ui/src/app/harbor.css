@@ -577,3 +577,9 @@
   .about-hero { flex-wrap: wrap; }
   .about-hero .grow { flex-basis: 180px; }
 }
+
+.task-dependency-notice { padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--accent-soft); }
+.task-dependency-notice p { margin: 8px 0; }
+.task-dependency-notice ul { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.task-dependency-notice li { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+.task-dependency-notice .cm-button { min-width: 0; max-width: 100%; overflow-wrap: anywhere; text-align: left; }
