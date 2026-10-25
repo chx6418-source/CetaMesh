@@ -57,16 +57,16 @@ export interface MemoryCandidate {
   id: string; status: string; type: string; scope: string; content: string; reason: string;
   proposedAt: string | number | null; memoryId: string | null;
 }
-export type AgentStatus = 'ready' | 'needs-setup' | 'descriptor-incomplete' | 'not-installed' | 'unavailable' | 'not-supported' | 'not-checked';
+export type AgentStatus = 'ready' | 'needs-setup' | 'descriptor-incomplete' | 'not-installed' | 'unavailable' | 'not-supported' | 'not-checked' | 'connection-pending';
 export interface Agent {
   id: string; name: string; role: string; description: string; available: boolean | null; installed: boolean | null; authenticated: boolean | null; compatible: boolean | null; status: AgentStatus;
   eligible: boolean | null; taskEligible: boolean | null; configured: boolean | null; reason: string | null; lastError: string | null; workspaceBoundary: string | null;
-  reachable?: boolean | null; ready?: boolean | null; sessionCapable?: boolean | null;
+  reachable?: boolean | null; ready?: boolean | null; sessionCapable?: boolean | null; cliInstalled?: boolean | null;
   sandboxCapable?: boolean | null; installKind?: string | null; probePhase?: string | null; probeCode?: string | null; checkedAt?: string | null; requiresStandaloneNode?: boolean;
   configuration?: DshConfiguration | null;
   preset?: { purpose: string; id: string | null; compatible: boolean | null; loaded: boolean | null; loadState: 'loaded' | 'not-loaded' | 'unknown'; reason: string | null; verification: string | null } | null;
   diagnostic?: { stage: string; code: string | null; retryable: boolean; checkedAt: string | null } | null;
-  version: string | null; desktopApp: { installed: boolean; running: boolean; status: string; version: string | null } | null;
+  version: string | null; desktopApp: { displayName?: string; installed: boolean | null; running: boolean | null; status: string; version: string | null } | null;
 }
 export interface DshPresetCatalog { state: 'ready' | 'missing' | 'unreadable' | 'outside-root' | 'loading' | 'error'; truncated: boolean; presets: { id: string; compatible: boolean; reason: string | null }[] }
 export interface DshSelection { codingPreset: string | null; socialPreset: string | null; homeDir: string | null; baseUrl: string | null }
@@ -355,7 +355,7 @@ export const memoryClient = {
 export const agentClient = {
   security: (provider: string, workspaceId: string) => uiCall<{ required: boolean; authorized: boolean; fingerprint: string; disclosure: string }>('ui.agent.security', { provider, workspaceId }),
   authorize: (provider: string, workspaceId: string, fingerprint: string) => uiCall<{ status: string; approvalId: string }>('ui.agent.authorize', { provider, workspaceId, fingerprint }),
-  list: () => uiCall<{ agents: Agent[] }>('ui.agent.list', {}),
+  list: (refresh = false) => uiCall<{ agents: Agent[] }>('ui.agent.list', { refresh }),
   health: (provider: string, refresh = false) => uiCall<Agent>('ui.agent.health', { provider, refresh }),
   presets: (homeDir: string | null) => uiCall<DshPresetCatalog>('ui.agent.presets', { provider: 'dsh', homeDir }),
   configure: (config: DshSelection) => uiCall<{ provider: 'dsh'; supported: boolean; applied: false; restartRequired: boolean; configuration: DshConfiguration }>('ui.agent.configure', { agentId: 'dsh', config })

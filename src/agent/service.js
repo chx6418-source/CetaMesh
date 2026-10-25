@@ -17,6 +17,7 @@ import { createClaudeAgentProvider } from './claude-agent-provider.js';
 import { createWorkBuddyAgentProvider } from './workbuddy-agent-provider.js';
 import { createCodexProviderRouter } from './codex-provider-router.js';
 import { createZCodeAgentProvider } from './zcode-agent-provider.js';
+import { createAgentInstallationDetector } from './installation-discovery.js';
 
 function createUnavailableDshProvider() {
   const unavailable = async () => {
@@ -75,7 +76,7 @@ function summarizeProvider(provider, health = null) {
  * The returned .broker supports process-local turn-end wiring for Chat and Continuity.
  */
 export function createDefaultAgentService({ api, defaults, log, dshOptions = {}, dshPresetConfig = null, codexOptions = {}, codexExecutable,
-  zcodeOptions = {}, zcodeExecutable, acpOptions = {}, claudeOptions = {}, workbuddyOptions = {}, codexRouterOptions = {}, desktopStatus = null, dshConfiguration = null, resolveWorkspaceIdentity, resolveExecutionTask, isTaskHandoffInFlight } = {}) {
+  zcodeOptions = {}, zcodeExecutable, acpOptions = {}, claudeOptions = {}, workbuddyOptions = {}, codexRouterOptions = {}, desktopStatus = null, installationStatus, dshConfiguration = null, resolveWorkspaceIdentity, resolveExecutionTask, isTaskHandoffInFlight } = {}) {
   const dshProvider = api ? createDshAgentProvider({ api, defaults, log,
     presetPolicy: dshPresetConfig ? createDshPresetPolicy(dshPresetConfig) : null }) : createUnavailableDshProvider();
   const taskBoundDsh = api && typeof dshOptions.resolveTaskWorkspace === 'function' && typeof dshOptions.applyChanges === 'function'
@@ -97,11 +98,11 @@ export function createDefaultAgentService({ api, defaults, log, dshOptions = {},
     ]
   });
   const broker = createAgentBroker({ registry, log, resolveWorkspaceIdentity, resolveExecutionTask, isTaskHandoffInFlight });
-  const service = createAgentService({ broker, log, desktopStatus, dshConfiguration });
+  const service = createAgentService({ broker, log, desktopStatus, installationStatus, dshConfiguration });
   return Object.assign(service, { broker, registry });
 }
 
-export function createAgentService({ broker, log = () => {}, desktopStatus = null, dshConfiguration = null } = {}) {
+export function createAgentService({ broker, log = () => {}, desktopStatus = null, installationStatus = createAgentInstallationDetector(), dshConfiguration = null } = {}) {
   if (!broker || typeof broker.require !== 'function' || typeof broker.registry !== 'object') {
     throw agentProviderError('INVALID_PARAMS', 'createAgentService 需要 Agent Broker');
   }
@@ -124,6 +125,28 @@ export function createAgentService({ broker, log = () => {}, desktopStatus = nul
       } catch (error) {
         // Optional Desktop detection must never make the Agent directory unavailable.
         summary.desktopApp = { status: 'unknown', installed: false, running: false, version: null, reason: error?.code ?? 'detection_failed' };
+      }
+    }
+    if (['claude', 'gemini', 'opencode', 'qwen'].includes(provider.id) && typeof installationStatus === 'function') {
+      try {
+        const detected = await installationStatus(provider.id, { refresh: params?.refresh === true });
+        if (detected) {
+          summary.cliInstalled = summary.installed === true || detected.cliInstalled === true ? true
+            : detected.cliInstalled === false ? false : null;
+          summary.desktopApp = detected.desktopApp;
+          const desktopInstalled = detected.desktopApp?.installed;
+          summary.installed = summary.available === true || summary.cliInstalled === true || desktopInstalled === true ? true
+            : summary.cliInstalled === false && desktopInstalled === false ? false : null;
+          if (summary.reason === 'not_installed') summary.reason = summary.installed === true
+            ? summary.cliInstalled === true ? 'acp_runtime_unverified' : 'desktop_cli_missing'
+            : summary.installed === null ? 'runtime_detection_failed' : summary.reason;
+          summary.health = { ...summary.health, installed: summary.installed, reason: summary.reason };
+        }
+      } catch {
+        summary.cliInstalled = summary.installed === true ? true : null;
+        summary.installed = summary.available === true ? true : summary.cliInstalled;
+        if (summary.reason === 'not_installed') summary.reason = 'runtime_detection_failed';
+        summary.health = { ...summary.health, installed: summary.installed, reason: summary.reason };
       }
     }
     return summary;

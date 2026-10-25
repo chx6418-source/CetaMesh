@@ -16,6 +16,7 @@
 // 用户真实数据目录、~/.dsh、真实端口 3100/3001/3080。刻意不调用 /api/shutdown——该接口会杀掉
 // 机器上任何命令行含 start.bat 的 cmd.exe 守护循环，会误伤用户正在运行的桥接进程。
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -28,7 +29,8 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { createStdioMcpConnection } from '../src/integrations/mcp-runtime.js';
 import { assertNoWebUiHtmlArtifacts } from './no-web-release-policy.mjs';
 import { resolveDataPipeName, dataCall } from '../src/control/data-ipc.js';
-import { writeTextAtomic } from '../src/storage/json-file.js';
+import { readJsonFile, writeJsonAtomic, writeTextAtomic } from '../src/storage/json-file.js';
+import { probeProcessIdentity } from '../src/app/process-identity.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DIST = process.env.WHALEBRIDGE_DIST_DIR
@@ -224,7 +226,8 @@ function processInfo(pid, tempRoot) {
 async function stopProcess(child, label) {
   if (child.exitCode !== null || child.signalCode !== null) return;
   const exit = once(child, 'exit').then(() => true);
-  child.kill();
+  if (child.stdin?.writable) child.stdin.end();
+  else child.kill();
   const exited = await Promise.race([
     exit,
     new Promise((resolve) => setTimeout(resolve, 10000))
@@ -287,7 +290,7 @@ fs.mkdirSync(dataDir, { recursive: true });
 fs.writeFileSync(path.join(dataDir, 'config.json'), JSON.stringify(isolatedConfig(9), null, 2));
 
 /** 启动一个 worker，验证鉴权、状态文件、资源目录与进程树。 */
-async function runWorker({ label, dataDir: workerDataDir, resourceDir, useDefaultDataDir = false }) {
+async function runWorker({ label, dataDir: workerDataDir, resourceDir, useDefaultDataDir = false, supervised = false }) {
   // 默认数据目录模式刻意不设置 WHALEBRIDGE_DATA_DIR，让 exe 自行回退到 %LOCALAPPDATA%\WhaleBridge。
   const effectiveDataDir = useDefaultDataDir
     ? path.join(tempRoot, 'home', 'AppData', 'Local', 'WhaleBridge')
@@ -302,11 +305,14 @@ async function runWorker({ label, dataDir: workerDataDir, resourceDir, useDefaul
   const child = track(spawn(EXE, ['--worker'], {
     cwd: tempRoot,
     windowsHide: true,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: isolatedEnv(tempRoot, {
-      dataDir: useDefaultDataDir ? null : workerDataDir,
-      resourceDir
-    })
+    stdio: [supervised ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+    env: {
+      ...isolatedEnv(tempRoot, {
+        dataDir: useDefaultDataDir ? null : workerDataDir,
+        resourceDir
+      }),
+      ...(supervised ? { WHALEBRIDGE_SUPERVISED: '1' } : {})
+    }
   }));
   child.stdout?.resume();
   let stderr = '';
@@ -463,11 +469,52 @@ try {
   step('✅ MCP 启动标记写入指定数据目录（未写入 exe 目录）');
 
   // ------------------------------------------------------------ worker 模式
-  const explicit = await runWorker({
-    label: 'worker（显式 WHALEBRIDGE_RESOURCE_DIR）',
-    dataDir,
-    resourceDir: RESOURCES
+  // The stale lease names this still-alive test process, so a PID-only SEA
+  // would reject startup. Its bound birth differs by one exact Windows tick.
+  const testBirth = probeProcessIdentity(process.pid);
+  assert.equal(testBirth.state, 'alive', 'PID-reuse fixture requires a verifiable alive test process');
+  assert.equal(testBirth.identity?.kind, 'windows-start-time-utc');
+  const staleBirth = { ...testBirth.identity, value: (BigInt(testBirth.identity.value) - 1n).toString() };
+  assert.notEqual(staleBirth.value, testBirth.identity.value);
+  const ownerFile = path.join(dataDir, 'state', '.core-owner.lock');
+  const identityFile = path.join(dataDir, 'state', '.core-owner.identity.json');
+  const staleLease = `${process.pid}:${'a'.repeat(32)}`;
+  writeTextAtomic(ownerFile, staleLease);
+  writeJsonAtomic(identityFile, {
+    version: 1,
+    pid: process.pid,
+    lockHash: crypto.createHash('sha256').update(staleLease).digest('hex'),
+    processIdentity: staleBirth
   });
+  const explicit = await runWorker({
+    label: 'worker（显式 WHALEBRIDGE_RESOURCE_DIR / PID复用恢复）',
+    dataDir,
+    resourceDir: RESOURCES,
+    supervised: true
+  });
+  const acquiredLease = fs.readFileSync(ownerFile, 'utf8');
+  const acquiredMetadata = fs.readFileSync(identityFile, 'utf8');
+  const acquiredIdentity = readJsonFile(identityFile);
+  assert.match(acquiredLease, new RegExp(`^${explicit.pid}:[a-f0-9]{32}$`), 'SEA must replace the stale PID lease with its own legacy-compatible lock');
+  assert.notEqual(acquiredLease, staleLease);
+  assert.equal(acquiredIdentity.version, 1);
+  assert.equal(acquiredIdentity.pid, explicit.pid);
+  assert.equal(acquiredIdentity.lockHash, crypto.createHash('sha256').update(acquiredLease).digest('hex'));
+  const workerBirth = probeProcessIdentity(explicit.pid);
+  assert.equal(workerBirth.state, 'alive', 'the recovered SEA worker must still be alive');
+  assert.deepEqual(acquiredIdentity.processIdentity, workerBirth.identity, 'SEA must publish its own exact OS birth identity');
+  assert.equal(fs.existsSync(ownerFile + '.reclaim'), false, 'SEA recovery must release its recovery guard');
+  const duplicate = spawnSync(EXE, ['--worker'], {
+    cwd: tempRoot, windowsHide: true, encoding: 'utf8', timeout: 15000,
+    env: isolatedEnv(tempRoot, { dataDir, resourceDir: RESOURCES })
+  });
+  assert.equal(duplicate.error, undefined);
+  assert.equal(duplicate.status, 2, 'a second SEA worker must reject the active owner');
+  assert.match(duplicate.stderr, /Another Core owns this StateDir|STATE_DIR_BUSY/);
+  assert.equal(fs.readFileSync(ownerFile, 'utf8'), acquiredLease, 'rejected duplicate must preserve the live lease');
+  assert.equal(fs.readFileSync(identityFile, 'utf8'), acquiredMetadata, 'rejected duplicate must preserve live identity metadata');
+  assert.equal((await waitForDataIpc(dataDir)).res.ok, true, 'the first SEA worker must retain authenticated IPC');
+  step('✅ SEA PID复用：回收出生身份不符的活PID旧锁、发布自身绑定身份，重复实例拒绝且原IPC保持可用');
   // Only the disposable test's token file is changed. The running worker keeps
   // its original token; readiness must wait for the reader's credential to settle.
   const fixtureTokenFile = path.join(dataDir, 'state', 'agent-token');
@@ -487,6 +534,11 @@ try {
   } finally { writeTextAtomic(fixtureTokenFile, fixtureToken); }
   step('✅ 数据面就绪等待：空令牌/暂时401不能误作ready，成功后仍须通过原鉴权断言');
   await stopProcess(explicit, 'worker（显式资源目录）');
+  assert.equal(explicit.exitCode, 0, 'supervisor EOF must stop the recovered SEA worker cleanly');
+  for (const file of [ownerFile, identityFile, ownerFile + '.reclaim']) {
+    assert.equal(fs.existsSync(file), false, 'controlled SEA shutdown must remove its owned lease and identity metadata');
+  }
+  step('✅ SEA受控退出：supervisor stdin EOF 后正常退出，所有权锁、身份元数据和恢复锁均无遗留');
 
   const auto = await runWorker({ label: 'worker（自动发现 exe 同目录 resources/）', dataDir, resourceDir: null });
   await stopProcess(auto, 'worker（自动发现 resources/）');

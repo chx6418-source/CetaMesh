@@ -39,6 +39,7 @@ export const CATEGORIES = ['core', 'architecture', 'security', 'runtime', 'integ
 // ── 登记表：scripts/test-*.mjs 的每一个文件都必须出现在这里（或能从 package.json 映射）。
 // requires 的取值见 probeAvailability()；category 取值见 CATEGORIES。
 const REGISTRY = {
+  'test-state-owner-identity.mjs': { category: 'security', note: 'Process birth identity, PID reuse, fail-closed recovery and StateDir ownership races' },
   'test-task-collaboration.mjs': { category: 'security', note: 'Task child contract, Attempt, depth and completion ownership' },
   'test-agent-collaboration-dispatch.mjs': { category: 'security', note: 'Production Broker read-only child and Workspace writer ownership' },
   'test-agent-collaboration-recovery.mjs': { category: 'security', note: 'Child Attempt restart and Owner verified recovery through production UI' },

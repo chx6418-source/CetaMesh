@@ -103,6 +103,7 @@
     "@modelcontextprotocol/sdk": "^1.30.0",
     "fflate": "0.8.3",
     "iconv-lite": "^0.7.3",
+    "ignore": "7.0.12",
     "mdast-util-from-markdown": "2.1.0",
     "micromark-util-sanitize-uri": "2.0.1",
     "qrcode": "^1.5.4",

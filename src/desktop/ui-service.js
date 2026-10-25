@@ -317,7 +317,8 @@ function projectAgent(value) {
   const workspaceBoundary = string(row.workspaceBoundary ?? health.workspaceBoundary, 80) || null;
   const requiresTask = ['capability-broker', 'staged-capability-broker', 'native-staged'].includes(workspaceBoundary);
   const boundaryUnverified = workspaceBoundary === 'unverified';
-  const status = installed === false ? 'not-installed'
+  const connectionPending = ['claude', 'gemini', 'opencode', 'qwen'].includes(id) && desktop.installed === true && available === false;
+  const status = connectionPending ? 'connection-pending' : installed === false ? 'not-installed'
     : compatible === false || (id === 'codex' && health.sandboxCapable === false) ? 'not-supported'
     : id === 'codex' && health.sandboxCapable === null ? 'not-checked'
     : authenticated === false ? 'needs-setup'
@@ -331,7 +332,7 @@ function projectAgent(value) {
     id, name: id === 'claude' ? 'Claude Agent' : string(row.displayName ?? row.label ?? id, 120),
     role: id === 'codex' ? '代码与项目' : id === 'dsh' ? '通用研究与协作' : '开发辅助',
     description: id === 'codex' ? '理解项目、修改代码并检查结果。' : id === 'dsh' ? '处理资料、规划和跨工具工作流。' : '在可用时连接本地开发能力。',
-    available, installed, authenticated, compatible, eligible: available === null ? null : available && !requiresTask && !boundaryUnverified,
+    available, installed, cliInstalled: typeof row.cliInstalled === 'boolean' ? row.cliInstalled : null, authenticated, compatible, eligible: available === null ? null : available && !requiresTask && !boundaryUnverified,
     taskEligible: available === false ? false : available === null || (id === 'dsh' && typeof health.taskEligible !== 'boolean') ? null : available && installed !== false && authenticated !== false && requiresTask
       && health.taskEligible !== false && health.sessionCapable !== false && (id !== 'codex' || health.sandboxCapable !== false)
       && (id !== 'dsh' || health.taskEligible === true),
@@ -349,8 +350,9 @@ function projectAgent(value) {
     diagnostic: projectDshDiagnostic(health.diagnostic),
     configuration: projectDshConfiguration(row.configuration ?? health.configuration),
     reason: reason || (boundaryUnverified ? 'descriptor-incomplete' : available && requiresTask ? 'task-required' : null), lastError, workspaceBoundary, status, version: string(health.version ?? row.version, 80) || null,
-    desktopApp: id === 'dsh' ? {
-      installed: desktop.installed === true, running: desktop.running === true,
+    desktopApp: id === 'dsh' || Object.keys(desktop).length ? {
+      displayName: string(desktop.displayName, 100) || (id === 'dsh' ? 'DeepSeek Harness Desktop' : string(row.label ?? id, 100)),
+      installed: typeof desktop.installed === 'boolean' ? desktop.installed : null, running: typeof desktop.running === 'boolean' ? desktop.running : null,
       status: string(desktop.status, 50) || 'unknown', version: string(desktop.version, 80) || null
     } : null
   };
@@ -1346,7 +1348,7 @@ export function createDesktopUiService({ services = {}, system = services.system
       emit('approval.pending', { approvalId: result.approvalId });
       return selected(result, ['status', 'approvalId', 'expiresAt']);
     },
-    'ui.agent.list': async () => ({ agents: (await agent('agent.list', {})).providers.map(projectAgent) }),
+    'ui.agent.list': async p => ({ agents: (await agent('agent.list', { refresh: p.refresh === true })).providers.map(projectAgent) }),
     'ui.agent.health': async p => projectAgent(await agent('agent.health', { provider: string(p.provider, 80), refresh: p.refresh === true })),
     'ui.agent.presets': async p => {
       if (p.provider !== 'dsh') throw uiError('INVALID_PARAMS', 'Preset discovery is available for DSH only');

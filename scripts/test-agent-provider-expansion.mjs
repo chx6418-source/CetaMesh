@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { createDefaultAgentService } from '../src/agent/service.js';
 import { createAgentBroker } from '../src/agent/broker.js';
 import { createAgentProviderRegistry } from '../src/agent/registry.js';
@@ -46,7 +47,9 @@ try {
   fs.writeFileSync(path.join(workspace, 'main.txt'), 'from-task-workspace');
   fs.writeFileSync(path.join(workspace, '.env'), 'WORKSPACE_SECRET=do-not-copy');
   fs.writeFileSync(path.join(workspace, '.env.local'), 'WORKSPACE_SECRET=do-not-copy');
-  fs.writeFileSync(path.join(workspace, '.git'), 'not-a-directory fixture');
+  // A valid repository exercises private metadata filtering without an invalid Git marker.
+  execFileSync('git', ['init', '--quiet', workspace], { stdio: 'pipe', windowsHide: true });
+  fs.writeFileSync(path.join(workspace, '.git', 'private-fixture'), 'do-not-copy');
   fs.writeFileSync(path.join(otherWorkspace, 'private.txt'), 'OTHER_WORKSPACE_SECRET');
   fs.writeFileSync(path.join(nestedWorkspace, 'private.txt'), 'NESTED_WORKSPACE_SECRET');
 

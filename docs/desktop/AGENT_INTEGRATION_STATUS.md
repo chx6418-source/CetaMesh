@@ -1,6 +1,6 @@
 # Agent integration status
 
-Updated: 2026-10-23. This page describes the current Desktop source and verification boundaries. It does not establish general runtime availability or a new signed release.
+Updated: 2026-10-25. This page describes the current Desktop source and verification boundaries. It does not establish general runtime availability or a new signed release.
 
 ## Registered providers
 
@@ -16,6 +16,12 @@ Updated: 2026-10-23. This page describes the current Desktop source and verifica
 | WorkBuddy | Fixed-origin, bounded private API client | Real OAuth/account authorization and local Workspace execution remain unavailable |
 
 Registration is not execution permission. The existing Broker/Registry, Owner approvals, Workspace identity and Capability-mediated imports remain authoritative. Staging is a working copy, not an operating-system sandbox.
+
+Desktop-client installation is reported separately from CLI installation and Agent readiness.
+Bounded local binary checks and the Claude Windows Store package query identify supported
+installation forms; discovery errors remain unknown. Installed clients with unverified
+connectors display an installed/pending state. A desktop executable is never launched as
+an assumed CLI, and installation evidence does not satisfy protocol, SDK or native-policy gates.
 
 ## Protocol and recovery
 

@@ -56,14 +56,15 @@ function Heading({ eyebrow, title, description, action }: { eyebrow: string; tit
 }
 function StatusBadge({ value, available }: { value: string; available?: boolean | null }) {
   const tone = available === true || ['ready', 'running', 'enabled', 'completed', 'current', 'installed'].includes(value) ? 'success'
-    : ['needs-setup', 'descriptor-incomplete', 'pending', 'waiting-approval', 'starting', 'start-timeout', 'checking', 'update'].includes(value) ? 'warning'
+    : ['needs-setup', 'connection-pending', 'descriptor-incomplete', 'pending', 'waiting-approval', 'starting', 'start-timeout', 'checking', 'update'].includes(value) ? 'warning'
       : ['unavailable', 'error', 'failed', 'stopped', 'disabled'].includes(value) ? 'danger' : 'default';
-  const label = ({ ready: '已就绪', running: '运行中', enabled: '已启用', installed: '已安装', update: '可更新', completed: '已完成', current: '当前步骤', 'needs-setup': '需要设置', 'descriptor-incomplete': '配置不完整', 'not-installed': '未安装', 'not-supported': '不支持', 'not-checked': '未检查', checking: '检查中', 'start-timeout': '等待网关就绪', invalid: '安装需修复', unavailable: '暂不可用', disabled: '已停用', stopped: '已停止', pending: '等待处理', 'waiting-approval': '等待审批', starting: '启动中', error: '异常', failed: '失败', cancelled: '已取消', blocked: '待核对', queued: '待开始', paused: '已暂停' } as Record<string, string>)[value] ?? value;
+  const label = ({ ready: '已就绪', running: '运行中', enabled: '已启用', installed: '已安装', update: '可更新', completed: '已完成', current: '当前步骤', 'needs-setup': '需要设置', 'descriptor-incomplete': '配置不完整', 'not-installed': '未安装', 'not-supported': '不支持', 'not-checked': '未检查', 'connection-pending': '已安装 · 待接入', checking: '检查中', 'start-timeout': '等待网关就绪', invalid: '安装需修复', unavailable: '暂不可用', disabled: '已停用', stopped: '已停止', pending: '等待处理', 'waiting-approval': '等待审批', starting: '启动中', error: '异常', failed: '失败', cancelled: '已取消', blocked: '待核对', queued: '待开始', paused: '已暂停' } as Record<string, string>)[value] ?? value;
   return <Badge tone={tone}>{label}</Badge>;
 }
 function availabilityReasonLabel(reason: string | null) {
   if (!reason) return '';
   return ({
+    desktop_cli_missing: '桌面客户端已安装；尚未检测到用于连接的 CLI', acp_runtime_unverified: 'CLI 已检测到；本机连接协议与权限策略尚未验证',
     not_installed: '未安装', acp_version_unverified: '本机 ACP 版本尚未验证',
     acp_launch_unverified: '本机 ACP 启动方式尚未验证', native_policy_unverified: '原生权限与执行范围尚未验证',
     task_binding_unavailable: '工作区任务绑定尚未就绪', runtime_detection_failed: '运行时检查失败，请重新检查',
@@ -1569,6 +1570,13 @@ export function CodexSetupDiagnostic({ agent }: { agent: Agent }) {
   return <div className="agent-setup-diagnostic"><strong>Codex CLI</strong><p>{action}</p><small>安装：{agent.installed ? '已检测' : '未检测'} · 协议：{agent.compatible ? '兼容' : '未验证或不兼容'} · 登录：{agent.authenticated ? '已认证' : '未验证或未登录'} · Sandbox：{agent.sandboxCapable === true ? '已验证' : agent.sandboxCapable === false ? '不可用' : '待首次明确选择的任务验证'}</small>{code && <small role="status">{agent.probePhase} · {code}</small>}</div>;
 }
 
+export function AgentInstallationDiagnostic({ agent }: { agent: Agent }) {
+  if (!agent.desktopApp) return null;
+  if (agent.id === 'dsh') return <div className="agent-desktop-state"><strong>DeepSeek Harness Desktop</strong><span>桌面应用：{agent.desktopApp.installed ? '已安装' : '未安装'} · {agent.desktopApp.running ? '运行中' : agent.desktopApp.status}</span><span>DSH Agent Provider：{agent.available ? '已连接' : agent.status}</span></div>;
+  const installed = agent.desktopApp.installed;
+  return <div className="agent-desktop-state"><strong>{agent.desktopApp.displayName || agent.name} 桌面客户端</strong><span>桌面客户端：{installed === true ? '已安装' : installed === false ? '未检测到' : '检测结果未知'}{agent.desktopApp.version ? ' · ' + agent.desktopApp.version : ''}</span><span>CLI：{agent.cliInstalled === true ? '已检测到' : agent.cliInstalled === false ? '未检测到' : '检测结果未知'} · Agent 连接：{isAgentReady(agent) ? '已就绪' : '待验证'}</span></div>;
+}
+
 export function AgentsPage() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -1577,9 +1585,9 @@ export function AgentsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [checking, setChecking] = useState('');
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (forceRefresh = false) => {
     setLoading(true);
-    try { const [agentResult, taskResult] = await Promise.all([agentClient.list(), taskClient.overview('', '')]); setAgents(agentResult.agents); setTasks(taskResult.tasks); setError(''); }
+    try { const [agentResult, taskResult] = await Promise.all([agentClient.list(forceRefresh), taskClient.overview('', '')]); setAgents(agentResult.agents); setTasks(taskResult.tasks); setError(''); }
     catch (cause) { setError(messageOf(cause)); }
     finally { setLoading(false); }
   }, []);
@@ -1599,10 +1607,10 @@ export function AgentsPage() {
     catch (cause) { setError(messageOf(cause)); }
     finally { setChecking(''); }
   }
-  return <div className="content-page"><Heading eyebrow="AGENT DIRECTORY" title="Agents" description="查看可用 Agent、连接状态与职责。" action={<Button icon="update" onClick={() => void refresh()}>刷新状态</Button>} />{error && <ErrorNotice error={error} onRetry={() => void refresh()} />}
+  return <div className="content-page"><Heading eyebrow="AGENT DIRECTORY" title="Agents" description="查看可用 Agent、连接状态与职责。" action={<Button icon="update" onClick={() => void refresh(true)}>刷新状态</Button>} />{error && <ErrorNotice error={error} onRetry={() => void refresh(true)} />}
     <div className="agent-summary-row"><Surface><strong>{agents.length}</strong><span>已配置 Agent</span></Surface><Surface><strong>{ready}</strong><span>可用 Agent</span></Surface><Surface><strong>{taskReady}</strong><span>任务可用</span></Surface><Surface><strong>{needsSetup}</strong><span>需要设置</span></Surface><Surface><strong>{activeTasks}</strong><span>活跃任务</span></Surface></div>
     <div className="row between work-controls"><Tabs items={[{ id: 'all', label: `全部 Agent ${agents.length}` }, { id: 'ready', label: `可用 Agent ${ready}` }, { id: 'setup', label: `需设置 ${needsSetup}` }]} selected={filter} onChange={setFilter} label="Agent 状态筛选" /><SearchInput label="搜索 Agent" placeholder="搜索名称或职责" value={query} onChange={event => setQuery(event.target.value)} /></div>
-    {loading && !agents.length ? <LoadingState label="正在读取 Agent 状态…" /> : visible.length ? <div className="agent-grid">{visible.map(agent => <Card className="agent-card" key={agent.id}><div className="row between"><div className="agent-avatar">{agentInitials(agent.id)}</div><StatusBadge value={agent.status} available={isAgentReady(agent)} /></div><h3>{agent.name}</h3><strong className="agent-role">{agent.role}</strong><p>{agent.description}</p>{agent.id === 'dsh' && <AgentSetupDiagnostic agent={agent} />}{agent.id === 'codex' && <CodexSetupDiagnostic agent={agent} />}{agent.reason === 'task-required' && <small>Agent 已就绪；此能力需要先分配工作区任务。</small>}{agent.id !== 'dsh' && agent.reason && agent.reason !== 'task-required' && <small>{availabilityReasonLabel(agent.reason)}</small>}{agent.lastError && <small role="status">{agent.lastError}</small>}{agent.version && <small>版本 {agent.version}</small>}{agent.desktopApp && <div className="agent-desktop-state"><strong>DeepSeek Harness Desktop</strong><span>桌面应用：{agent.desktopApp.installed ? '已安装' : '未安装'} · {agent.desktopApp.running ? '运行中' : agent.desktopApp.status}</span><span>DSH Agent Provider：{agent.available ? '已连接' : agent.status}</span></div>}<Button compact variant="ghost" disabled={checking === agent.id} onClick={() => void check(agent)}>{checking === agent.id ? '检查中…' : '检查连接'} <Icon name="right" size={14} /></Button>{agent.id === 'dsh' && <details className="agent-setup-disclosure"><summary>连接设置</summary><DshSetupPanel agent={agent} onConfigured={configuration => setAgents(current => current.map(item => item.id === agent.id ? { ...item, configuration } : item))} /></details>}</Card>)}</div> : !error && <EmptyNotice icon="agents" title="没有匹配的 Agent" detail="当前安装和注册的 Agent 会在这里显示。" />}
+    {loading && !agents.length ? <LoadingState label="正在读取 Agent 状态…" /> : visible.length ? <div className="agent-grid">{visible.map(agent => <Card className="agent-card" key={agent.id}><div className="row between"><div className="agent-avatar">{agentInitials(agent.id)}</div><StatusBadge value={agent.status} available={isAgentReady(agent)} /></div><h3>{agent.name}</h3><strong className="agent-role">{agent.role}</strong><p>{agent.description}</p>{agent.id === 'dsh' && <AgentSetupDiagnostic agent={agent} />}{agent.id === 'codex' && <CodexSetupDiagnostic agent={agent} />}{agent.reason === 'task-required' && <small>Agent 已就绪；此能力需要先分配工作区任务。</small>}{agent.id !== 'dsh' && agent.reason && agent.reason !== 'task-required' && <small>{availabilityReasonLabel(agent.reason)}</small>}{agent.lastError && <small role="status">{agent.lastError}</small>}{agent.version && <small>版本 {agent.version}</small>}<AgentInstallationDiagnostic agent={agent} /><Button compact variant="ghost" disabled={checking === agent.id} onClick={() => void check(agent)}>{checking === agent.id ? '检查中…' : '检查连接'} <Icon name="right" size={14} /></Button>{agent.id === 'dsh' && <details className="agent-setup-disclosure"><summary>连接设置</summary><DshSetupPanel agent={agent} onConfigured={configuration => setAgents(current => current.map(item => item.id === agent.id ? { ...item, configuration } : item))} /></details>}</Card>)}</div> : !error && <EmptyNotice icon="agents" title="没有匹配的 Agent" detail="当前安装和注册的 Agent 会在这里显示。" />}
     <div className="section-heading page-section-heading"><h2>运行策略</h2></div><Surface className="policy-row"><span className="policy-icon"><Icon name="approval" /></span><span className="grow"><strong>敏感操作需要确认</strong><small>文件写入、网络访问和外部副作用由 Capability Broker 逐次管理。</small></span><Badge tone="success">由 Core 强制执行</Badge></Surface>
   </div>;
 }

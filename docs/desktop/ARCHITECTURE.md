@@ -31,6 +31,19 @@ with the desktop Core on one data directory. It still composes Core services int
 must not be described as an independent QQ Connector until M4 ownership transfer is approved
 and verified. The legacy DSH path remains exclusive to this compatibility host.
 
+The StateDir lease retains its legacy PID/nonce bytes. A separate metadata record binds
+its hash to the process birth identity. An alive PID can be reclaimed only when its exact
+OS birth identity is proven different from the bound record; unknown probes and alive
+legacy locks without valid identity remain busy. Recovery rechecks the files and process
+under the existing reclaim guard, and shutdown removes only its own bound metadata and lease.
+
+Task staging retains its 512 MiB, file-count, credential and Workspace boundaries.
+For Git projects, initial input includes tracked and nonignored untracked files. Frozen
+ignore rules cover output produced later, while baseline files stay visible even if
+ignore files change. Nested repositories and gitlinks remain excluded. Plain directories
+keep bounded filesystem snapshots; unavailable or invalid project Git information fails
+closed rather than silently broadening a Git snapshot.
+
 ```text
 Desktop shell → `--worker` → `src/app/core-worker.js`
                               └─ `src/app/bootstrap.js` → service container → IPC runtime

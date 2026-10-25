@@ -16,6 +16,13 @@ try {
   const agentsMarkup = renderToStaticMarkup(React.createElement(ui.AgentsPage));
   assert.doesNotMatch(agentsMarkup, /聊天可用/); assert.match(agentsMarkup, /可用 Agent/);
   assert.equal(typeof ui.CodexSetupDiagnostic, 'function');
+  assert.equal(typeof ui.AgentInstallationDiagnostic,'function');
+  for(const id of ['claude','gemini','opencode','qwen']) {
+    const markup=renderToStaticMarkup(React.createElement(ui.AgentInstallationDiagnostic,{agent:{id,name:id,cliInstalled:false,available:false,desktopApp:{installed:true,displayName:id+' Desktop',running:null,status:'installed',version:null}}}));
+    assert.match(markup,/桌面客户端：已安装/);assert.match(markup,/CLI：未检测到/);assert.match(markup,new RegExp(id+' Desktop'));
+    assert.doesNotMatch(markup,/DeepSeek Harness Desktop|DSH Agent Provider/);
+  }
+
   assert.equal(ui.isAgentReady({ eligible: false, taskEligible: true }), true, 'Task-only ready providers count as usable');
   assert.equal(ui.isAgentReady({ eligible: false, taskEligible: false }), false);
   const codexMarkup = renderToStaticMarkup(React.createElement(ui.CodexSetupDiagnostic, { agent: { installed: false, compatible: false, authenticated: false, taskEligible: false, sandboxCapable: null, probeCode: 'CLI_NOT_FOUND', probePhase: 'discovery' } }));
@@ -60,6 +67,7 @@ try {
   const configured = await agentClient.configure(configuration.pending);
   assert.deepEqual(sent.params, { agentId: 'dsh', config: configuration.pending });
   assert.equal(sent.method, 'ui.agent.configure'); assert.equal(configured.configuration.activeRevision, 2);
+  await agentClient.list(true);assert.equal(sent.method,'ui.agent.list');assert.deepEqual(sent.params,{refresh:true});
   window.ipc.postMessage=payload=>{sent=JSON.parse(payload);window.__cetameshReceive({id:sent.id,ok:true,result:presets});};
   assert.deepEqual(await agentClient.presets('/isolated/dsh'),presets);
   assert.equal(sent.method,'ui.agent.presets');assert.deepEqual(sent.params,{provider:'dsh',homeDir:'/isolated/dsh'});

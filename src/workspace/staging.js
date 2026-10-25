@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { gitPathKey, selectGitSnapshot } from './git-snapshot.js';
 import { isInsideRoot } from './boundary.js';
 
 const DEFAULT_MAX_FILES = 25_000;
@@ -87,7 +88,7 @@ function assertStageOutsideWorkspaces(stagingRoot, workspaceRoots) {
 }
 
 function walkFiles(root, { maxFiles = DEFAULT_MAX_FILES, maxBytes = DEFAULT_MAX_BYTES, excludedRoots = [],
-  excludedDirectories = [], discoverBrowserProfiles = false, area = 'unknown' } = {}) {
+  excludedPaths = [], selection = null, gitPolicy = null, discoverBrowserProfiles = false, area = 'unknown' } = {}) {
   function readFailure(message, cause) {
     const error = new StagingWorkspaceError('STAGING_READ_FAILED', message, { cause });
     error.snapshotArea = area;
@@ -96,7 +97,7 @@ function walkFiles(root, { maxFiles = DEFAULT_MAX_FILES, maxBytes = DEFAULT_MAX_
   const files = new Map();
   let totalBytes = 0;
   const excluded = normalizeRoots(excludedRoots);
-  const omitted = new Set(excludedDirectories);
+  const omitted = new Set(excludedPaths);
   const visit = (dir, relative, depth) => {
     if (relative && omitted.has(relative)) return;
     // Discover private browser profiles only when selecting the initial input.
@@ -108,6 +109,7 @@ function walkFiles(root, { maxFiles = DEFAULT_MAX_FILES, maxBytes = DEFAULT_MAX_
       omitted.add(relative); return;
     }
     if (depth > MAX_DEPTH) fail('STAGING_TOO_DEEP', 'Workspace snapshot exceeds staging depth limit');
+    if (selection) selection.captureDirectory(dir);
     let entries;
     try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
     catch (error) { readFailure('Unable to enumerate the Task Workspace snapshot', error); }
@@ -116,6 +118,7 @@ function walkFiles(root, { maxFiles = DEFAULT_MAX_FILES, maxBytes = DEFAULT_MAX_
       if (sensitiveName(entry.name)) continue;
       const source = path.join(dir, entry.name);
       const rel = relative ? `${relative}/${entry.name}` : entry.name;
+      if (omitted.has(rel)) continue;
       if (excluded.some((excludedRoot) => pathContains(excludedRoot, source))) continue;
       let stat;
       try { stat = fs.lstatSync(source); } catch { /* The entry disappeared during the bounded snapshot walk. */ continue; }
@@ -125,12 +128,20 @@ function walkFiles(root, { maxFiles = DEFAULT_MAX_FILES, maxBytes = DEFAULT_MAX_
       catch (error) { readFailure('Unable to resolve a Task Workspace entry', error); }
       if (!pathContains(root, realSource)) fail('STAGING_PATH_ESCAPE', 'Task Workspace entry resolves outside its root');
       if (excluded.some((excludedRoot) => pathContains(excludedRoot, realSource))) continue;
+      if (gitPolicy?.ignored(rel, stat.isDirectory())) continue;
       if (stat.isDirectory()) {
         if (GENERATED_DIRECTORIES.has(entry.name.toLowerCase())) continue;
+        if (selection && !selection.directories.has(gitPathKey(rel))) {
+          // Git omits empty directories too. Only freeze proven exclusions;
+          // an empty source directory must accept new files on later turns.
+          if (selection.ignored(rel, true) || selection.files.has(gitPathKey(rel)) || fs.existsSync(path.join(source, '.git'))) omitted.add(rel);
+          continue;
+        }
         visit(source, rel, depth + 1);
         continue;
       }
       if (!stat.isFile()) continue;
+      if (selection && !selection.files.has(gitPathKey(rel))) { omitted.add(rel); continue; }
       if (files.size >= maxFiles) fail('STAGING_TOO_MANY_FILES', 'Workspace snapshot exceeds staging file limit');
       totalBytes += stat.size;
       if (totalBytes > maxBytes) fail('STAGING_TOO_LARGE', `工作区快照超过 ${Math.ceil(maxBytes / 1024 / 1024)} MiB 上限。请选择具体项目子目录，或改用普通聊天。`);
@@ -140,7 +151,7 @@ function walkFiles(root, { maxFiles = DEFAULT_MAX_FILES, maxBytes = DEFAULT_MAX_
     }
   };
   visit(root, '', 0);
-  return { files, totalBytes, excludedDirectories: [...omitted] };
+  return { files, totalBytes, excludedPaths: [...omitted] };
 }
 
 /** Make a bounded, credential-filtered snapshot for one Task, outside all Workspace roots. */
@@ -166,7 +177,8 @@ export async function createStagingWorkspace({ taskId, workspaceId, sourceRoot, 
   fs.mkdirSync(stage, { recursive: false, mode: 0o700 });
   const excluded = normalizeRoots([...excludedRoots, ...nestedWorkspaceRoots]);
   try {
-    const snapshot = walkFiles(source, { maxFiles, maxBytes, excludedRoots: excluded, discoverBrowserProfiles: true });
+    const gitPolicy = selectGitSnapshot(source, fail);
+    const snapshot = walkFiles(source, { maxFiles, maxBytes, excludedRoots: excluded, selection: gitPolicy, discoverBrowserProfiles: true });
     for (const rel of snapshot.files.keys()) {
       const sourcePath = path.join(source, ...rel.split('/'));
       const targetPath = path.join(stage, ...rel.split('/'));
@@ -191,7 +203,9 @@ export async function createStagingWorkspace({ taskId, workspaceId, sourceRoot, 
       maxFiles,
       maxBytes,
       excludedRoots: excluded,
-      excludedDirectories: snapshot.excludedDirectories,
+      gitPolicy,
+      excludedPaths: snapshot.excludedPaths,
+      excludedDirectories: snapshot.excludedPaths, // Compatibility alias for callers holding staging metadata.
       closed: false
     };
   } catch (error) {
@@ -206,7 +220,7 @@ export function collectStagedChanges(stage) {
   if (!stage || stage.closed || !pathContains(stage.stagingRoot, stage.root) || stage.root === stage.stagingRoot) {
     fail('STAGING_SESSION_INVALID', 'Invalid or closed staging Workspace');
   }
-  const stageSnapshot = walkFiles(stage.root, { maxFiles: stage.maxFiles, maxBytes: stage.maxBytes, excludedDirectories: stage.excludedDirectories, area: 'stage' });
+  const stageSnapshot = walkFiles(stage.root, { maxFiles: stage.maxFiles, maxBytes: stage.maxBytes, gitPolicy: stage.gitPolicy, excludedPaths: stage.excludedPaths ?? stage.excludedDirectories, area: 'stage' });
   const allPaths = new Set([...stage.baseline.keys(), ...stageSnapshot.files.keys()]);
   const changes = [];
   for (const rel of allPaths) {
@@ -228,7 +242,7 @@ export function collectStagedChanges(stage) {
   // Keep the original baseline: this never rebases or approves pending writes.
   if (changes.length) {
     const sourceSnapshot = walkFiles(stage.sourceRoot, {
-      maxFiles: stage.maxFiles, maxBytes: stage.maxBytes, excludedRoots: stage.excludedRoots, excludedDirectories: stage.excludedDirectories, area: 'source'
+      maxFiles: stage.maxFiles, maxBytes: stage.maxBytes, excludedRoots: stage.excludedRoots, gitPolicy: stage.gitPolicy, excludedPaths: stage.excludedPaths ?? stage.excludedDirectories, area: 'source'
     });
     for (const rel of allPaths) {
       const original = stage.baseline.get(rel) ?? null;
@@ -253,9 +267,9 @@ export function collectStagedChanges(stage) {
 /** Refresh the source baseline only after the Capability Broker reports a completed import. */
 export function refreshStagingBaseline(stage) {
   if (!stage || stage.closed) fail('STAGING_SESSION_INVALID', 'Invalid or closed staging Workspace');
-  const stageSnapshot = walkFiles(stage.root, { maxFiles: stage.maxFiles, maxBytes: stage.maxBytes, excludedDirectories: stage.excludedDirectories });
+  const stageSnapshot = walkFiles(stage.root, { maxFiles: stage.maxFiles, maxBytes: stage.maxBytes, gitPolicy: stage.gitPolicy, excludedPaths: stage.excludedPaths ?? stage.excludedDirectories });
   const sourceSnapshot = walkFiles(stage.sourceRoot, {
-    maxFiles: stage.maxFiles, maxBytes: stage.maxBytes, excludedRoots: stage.excludedRoots, excludedDirectories: stage.excludedDirectories
+    maxFiles: stage.maxFiles, maxBytes: stage.maxBytes, excludedRoots: stage.excludedRoots, gitPolicy: stage.gitPolicy, excludedPaths: stage.excludedPaths ?? stage.excludedDirectories
   });
   if (stageSnapshot.files.size !== sourceSnapshot.files.size) {
     fail('WORKSPACE_RECONCILIATION_REQUIRED', 'Task Workspace and imported staging output differ');
