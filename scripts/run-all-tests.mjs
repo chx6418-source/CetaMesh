@@ -42,6 +42,7 @@ const REGISTRY = {
   'test-task-collaboration.mjs': { category: 'security', note: 'Task child contract, Attempt, depth and completion ownership' },
   'test-agent-collaboration-dispatch.mjs': { category: 'security', note: 'Production Broker read-only child and Workspace writer ownership' },
   'test-agent-collaboration-recovery.mjs': { category: 'security', note: 'Child Attempt restart and Owner verified recovery through production UI' },
+  'test-agent-assignment.mjs': { category: 'security', note: 'Trusted Agent eligibility, task capability, cost and latency ranking' },
   'test-task-outcome-verification.mjs': { category: 'security', note: 'Task outcomes require observed tool, diff, test and file evidence' },
   'test-tool-outcome-unknown.mjs': { category: 'security', note: 'Uncertain side effects stop automatic tool replay' },
   'test-tool-safe-retry.mjs': { category: 'security', note: 'Bounded transient read retry with live grant and cancellation checks' },

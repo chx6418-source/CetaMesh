@@ -1,51 +1,55 @@
 import { OWNER_ACTOR, capabilityError } from '../capability/types.js';
+import crypto from 'node:crypto';
+import { rankTaskAgents } from '../router/agent-assignment.js';
+import { isSafeAgentDispatchPreflight } from '../capability/service.js';
 
 /** Smart decisions are consumed here; authority is always the trusted Desktop Owner. */
 export function createDesktopPlatformRuntime({ capabilityService, workspaceService, taskRuntime, agentBroker, continuityRuntime, modelRuntime, legacyModel, prepareTaskContext = null }) {
-  async function selectProvider(record, task) {
+  async function selectProviders(record, task, decision) {
     const selected = record.config.agentProvider;
-    const explicit = selected && selected !== 'none' ? selected : null;
-    if (!explicit && task?.currentAgent?.provider) return task.currentAgent.provider;
-    const boundaryAllowed = id => ['capability-broker', 'staged-capability-broker', 'native-staged']
-      .includes(agentBroker.capabilities(id)?.workspaceBoundary);
-    if (explicit) {
-      if (!boundaryAllowed(explicit)) throw capabilityError('AGENT_BOUNDARY_UNSUPPORTED', 'Selected Agent has no verified Task Workspace boundary');
-      if (typeof agentBroker.health === 'function') {
-        const health = await agentBroker.health(explicit);
-        if (health?.available === false || health?.authenticated === false || health?.sessionCapable === false) {
-          throw capabilityError('PROVIDER_UNAVAILABLE', `Selected Agent ${explicit} is not installed, authenticated, or session-capable`);
-        }
-        if (explicit === 'codex' && health?.sandboxCapable === false) {
-          throw capabilityError('CODEX_SANDBOX_UNAVAILABLE', 'Codex Windows sandbox refused the required Workspace boundary');
-        }
-      }
-      return explicit;
+    if (selected === 'none' || decision.agentEnabled === false) {
+      throw capabilityError('AGENT_DISABLED', 'Agent execution is disabled for this Chat');
     }
-    // Legacy callers without a Model Runtime retain the existing Managed default;
-    // the production assembly supplies one and must prove both tool and provider readiness.
-    if (!modelRuntime || typeof agentBroker.health !== 'function') return 'cetamesh';
-    const candidates = typeof agentBroker.ids === 'function' ? new Set(agentBroker.ids()) : new Set(['cetamesh']);
-    if (candidates.has('cetamesh') && boundaryAllowed('cetamesh')) {
+    const explicit = selected && selected !== 'none' ? selected : null;
+    const pinned = explicit || task?.currentAgent?.provider;
+    if (pinned) {
+      const health = await agentBroker.health(pinned);
+      if (pinned === 'codex' && health?.sandboxCapable === false) {
+        throw capabilityError('CODEX_SANDBOX_UNAVAILABLE', 'Codex Windows sandbox refused the required Workspace boundary');
+      }
+      return rankTaskAgents({ agentBroker, workspaceId: task?.workspaceId || record.config.workspaceId,
+        explicitProvider: pinned });
+    }
+    // The production assembly must prove Managed tool readiness. An unknown
+    // paid tariff never silently authorizes an additional automatic Agent.
+    let managedReady = false;
+    if (modelRuntime) {
       try {
         const modelTools = modelRuntime.supportsToolCalling(record.config.modelProvider ?? null,
           record.config.model !== legacyModel ? record.config.model : null) === true;
-        const [modelHealth, agentHealth] = await Promise.all([
-          modelRuntime.health(record.config.modelProvider ?? modelRuntime.defaultProviderId?.()),
-          agentBroker.health('cetamesh')
-        ]);
-        if (modelTools && modelHealth?.configured === true && modelHealth?.available !== false
-          && agentHealth?.available === true && agentHealth?.sessionCapable !== false) return 'cetamesh';
+        const modelHealth = await modelRuntime.health(record.config.modelProvider ?? modelRuntime.defaultProviderId?.());
+        managedReady = modelTools && modelHealth?.configured === true && modelHealth?.available !== false;
       } catch { /* A missing or unhealthy Model Provider is not eligible for automatic task routing. */ }
     }
-    for (const id of ['codex', 'dsh']) {
-      if (!candidates.has(id) || !boundaryAllowed(id)) continue;
-      let health;
-      try { health = await agentBroker.health(id); }
-      catch { continue; /* A failing health probe cannot authorize an automatic executor. */ }
-      if (health?.available === true && health?.authenticated === true && health?.sessionCapable === true
-        && (id === 'codex' ? health.sandboxCapable === true : health.toolsAvailable === true)) return id;
+    const projectSignals = decision.signals?.project ?? [];
+    const requiredTools = [...new Set([
+      ...(projectSignals.includes('run-tests') ? ['test.run'] : []),
+      ...(projectSignals.includes('git') ? ['git.status'] : [])
+    ])];
+    const difficulty = projectSignals.some(value => ['multi-file', 'refactor'].includes(value)) ? 3 : 2;
+    const modelProvider = record.config.modelProvider;
+    const model = record.config.model;
+    if (!modelProvider || !model || model === legacyModel) {
+      throw capabilityError('AGENT_PROVIDER_SELECTION_REQUIRED',
+        'Automatic Agent assignment needs a concrete selected Model identity and verified cost');
     }
-    throw capabilityError('AGENT_PROVIDER_SELECTION_REQUIRED', 'No verified tool-capable Agent is ready for this Workspace; choose and configure an Agent in Settings');
+    const eligibleBroker = { ...agentBroker, ids: () => agentBroker.ids().filter(id => id !== 'cetamesh' || managedReady) };
+    const candidates = await rankTaskAgents({ agentBroker: eligibleBroker,
+      workspaceId: task?.workspaceId || record.config.workspaceId, taskKind: 'code', requiredTools, difficulty,
+      modelProvider, model });
+    if (!candidates.length) throw capabilityError('AGENT_PROVIDER_SELECTION_REQUIRED',
+      'No verified tool-capable Agent has a known authorized cost for automatic Task execution');
+    return candidates;
   }
   async function cancelAgentAfterAbort(session) {
     try { await agentBroker.cancel(session); }
@@ -70,12 +74,20 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
       if (task && task.workspaceId !== workspaceId) task = null;
       if (task && ['completed', 'cancelled', 'failed'].includes(task.status)) task = null;
       if (!task) task = taskRuntime.findByGoalWorkspace({ goal: text.slice(0, 2000), workspaceId });
-      const provider = await selectProvider(record, task);
+      if (task?.status === 'queued' && !task.currentAgent) {
+        throw capabilityError('TASK_DISPATCH_INCOMPLETE',
+          'An existing queued Task has no confirmed Agent; review its original Owner selection before dispatch');
+      }
+      const candidates = await selectProviders(record, task, decision);
+      const provider = candidates[0].provider;
       let createdTask = false;
       if (!task) {
         const concurrent = taskRuntime.findByGoalWorkspace({ goal: text.slice(0, 2000), workspaceId });
+        if (concurrent?.status === 'queued' && !concurrent.currentAgent) {
+          throw capabilityError('TASK_DISPATCH_INCOMPLETE', 'Concurrent queued Task requires Owner review before dispatch');
+        }
         task = concurrent ?? taskRuntime.create({ goal: text.slice(0, 2000), workspaceId,
-          note: 'Smart Chat project task', requestId, requestedAgentProvider: provider });
+          note: 'Smart Chat project task', requestId, requestedAgentProvider: record.config.agentProvider || null });
         record.taskId = task.id;
         createdTask = !concurrent;
       } else {
@@ -133,11 +145,37 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
       // 结果经决策参考数据回到 Agent。绝不因 grant 静默自动执行。
       let result;
       try {
-        result = await capabilityService.broker.execute({ requestId, actor: OWNER_ACTOR, taskId: task.id, workspaceId,
-          capability: 'agent.run', input: { provider, content: dispatchText, modelProvider: record.config.modelProvider,
-            model: record.config.model !== legacyModel ? record.config.model : undefined, reasoningEffort: record.config.reasoning,
-            grants: { capabilities: ['filesystem.read', 'filesystem.write', 'filesystem.search', 'git.status', 'git.diff', 'memory.read', 'test.run'] } },
-          reason: 'Smart project task' }, { signal });
+        for (const [index, choice] of candidates.slice(0, 2).entries()) {
+          if (signal?.aborted) throw capabilityError('INVOKE_CANCELLED', 'Task dispatch was cancelled');
+          try {
+            // Recheck after selection and before the real Broker call. The
+            // Broker repeats its own authority check at the send boundary.
+            await rankTaskAgents({ agentBroker, workspaceId, explicitProvider: choice.provider });
+            result = await capabilityService.broker.execute({
+              requestId: index === 0 ? requestId : crypto.randomUUID(), actor: OWNER_ACTOR,
+              taskId: task.id, workspaceId, capability: 'agent.run',
+              input: { provider: choice.provider, content: dispatchText, modelProvider: record.config.modelProvider,
+                model: record.config.model !== legacyModel ? record.config.model : undefined,
+                reasoningEffort: record.config.reasoning,
+                grants: { capabilities: ['filesystem.read', 'filesystem.write', 'filesystem.search',
+                  'git.status', 'git.diff', 'memory.read', 'test.run'] } },
+              reason: index ? 'Smart project task safe reassignment after verified preflight failure' : 'Smart project task'
+            }, { signal });
+            if (result.status !== 'completed' || result.result?.accepted !== true) {
+              throw capabilityError('AGENT_SEND_REJECTED', 'Agent dispatch did not confirm acceptance');
+            }
+            break;
+          } catch (error) {
+            const fresh = taskRuntime.get({ id: task.id }).task;
+            const safe = !record.config.agentProvider && index === 0 && candidates.length > 1
+              && isSafeAgentDispatchPreflight(error) && error.code === 'PROVIDER_UNAVAILABLE'
+              && !signal?.aborted && fresh.status === 'queued' && !fresh.currentAgent
+              && !(fresh.attempts ?? []).length && !(fresh.executionEvidence ?? []).length;
+            if (!safe) throw error;
+            taskRuntime.setProgress({ id: task.id, expectedRev: fresh.rev,
+              note: `Verified preflight failure for ${choice.provider}; one safe reassignment to ${candidates[1].provider}` });
+          }
+        }
       } catch (error) {
         // Chat owns only a Task it created for this startup attempt. If that request
         // is cancelled before Agent assignment, retain the Task record but close its

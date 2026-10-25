@@ -11,6 +11,12 @@ import { OWNER_ACTOR, capabilityError } from './types.js';
 import { readJsonFile, writeJsonAtomic } from '../storage/json-file.js';
 import { evidenceBinding, EVIDENCE_SOURCE_CAPABILITIES } from '../context/tool-evidence.js';
 
+// Only this module can mark a failure as occurring before Agent side effects.
+// Provider supplied error fields must never authorize an automatic replay.
+const safeAgentPreflights = new WeakSet();
+export const isSafeAgentDispatchPreflight = error => error && typeof error === 'object'
+  && safeAgentPreflights.has(error);
+
 export const WORKSPACE_CAPABILITIES = Object.freeze({
   'workspace.read': 'filesystem.read', 'workspace.write': 'filesystem.write',
   'workspace.file.search': 'filesystem.search', 'workspace.git.status': 'git.status',
@@ -719,7 +725,11 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
         || health?.authenticated === false || health?.sessionCapable === false
         || health?.taskEligible === false || health?.compatible === false
         || (provider !== 'cetamesh' && (health?.authenticated !== true || health?.sessionCapable !== true))) {
-        throw capabilityError('PROVIDER_UNAVAILABLE', 'Agent Provider is not currently eligible for Task execution');
+        const error = capabilityError('PROVIDER_UNAVAILABLE', 'Agent Provider is not currently eligible for Task execution');
+        // This check precedes Session creation, Attempt recording and send.
+        // Only this trusted preflight failure can authorize one reassignment.
+        safeAgentPreflights.add(error);
+        throw error;
       }
       const boundary = agentBroker?.capabilities(provider)?.workspaceBoundary;
       if (!['capability-broker', 'staged-capability-broker', 'native-staged'].includes(boundary)) {

@@ -1002,6 +1002,8 @@ try {
     taskRuntime: { get: () => ({ task: { id: 'task-switch', workspaceId: 'workspace-switch', status: 'running',
       currentAgent: { provider: 'dsh', sessionId: 'dsh-old-session' } } }) },
     agentBroker: { capabilities: () => ({ workspaceBoundary: 'staged-capability-broker' }),
+      health: async () => ({ available: true, installed: true, authenticated: true,
+        sessionCapable: true, sandboxCapable: true, taskEligible: true }),
       send: async request => { switchCalls.push({ kind: 'send', request }); return { accepted: true }; } },
     continuityRuntime: { rollover: async request => {
       switchCalls.push({ kind: 'rollover', request });

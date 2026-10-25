@@ -30,7 +30,11 @@ try {
   const taskRuntime = createTaskRuntime({ stateDir });
   const memoryService = createMemoryService({ stateDir });
   const agentBroker = {
-    capabilities: () => ({ workspaceBoundary: 'capability-broker' }),
+    ids: () => ['cetamesh'],
+    capabilities: () => ({ workspaceBoundary: 'capability-broker', assignment: { taskKinds: ['code'],
+      tools: ['filesystem.read', 'git.status', 'test.run'], maxDifficulty: 3,
+      estimatedCost: { amount: 0, currency: 'USD', source: 'fixture',
+        agentProvider: 'cetamesh', modelProvider: 'fixture-model', model: 'fixture-model-id' }, estimatedLatencyMs: 20 } }),
     async health() { return { available: true, installed: true, authenticated: true,
       sessionCapable: true, compatible: true }; },
     async createSession(provider, options) {
@@ -48,8 +52,10 @@ try {
   assert.equal(approval.status, 'pending');
   const created = await capabilityService.execute({ method: 'capability.approval.decide', params: { id: approval.approvalId, approve: true } });
   const workspaceId = created.result.workspace.id;
-  const platformRuntime = createDesktopPlatformRuntime({ capabilityService, workspaceService, taskRuntime, agentBroker });
+  let platformRuntime;
   const modelRuntime = {
+    supportsToolCalling: () => true,
+    health: async () => ({ configured: true, available: true }),
     defaultProviderId: () => 'fixture-model',
     isRegistered: id => id === 'fixture-model',
     resolveProvider: () => ({ id: 'fixture-model' }),
@@ -59,6 +65,7 @@ try {
       yield { type: 'turn/end', data: { reason: { kind: 'completed' } } };
     }
   };
+  platformRuntime = createDesktopPlatformRuntime({ capabilityService, workspaceService, taskRuntime, agentBroker, modelRuntime });
   const router = createRouterService({ stateDir, log: () => {} });
   chat = createChatService({
     modelRuntime,
@@ -73,7 +80,7 @@ try {
   });
 
   const session = await chat.execute({ method: 'chat.sessions.create', params: {} });
-  await chat.execute({ method: 'chat.config.set', params: { id: session.id, config: { mode: 'smart', workspaceId } } });
+  await chat.execute({ method: 'chat.config.set', params: { id: session.id, config: { mode: 'smart', workspaceId, modelProvider: 'fixture-model', model: 'fixture-model-id' } } });
 
   await chat.execute({ method: 'chat.send', params: { id: session.id, text: 'what time is it?' } });
   await waitFor(() => chat.execute({ method: 'chat.status', params: { id: session.id } }), status => status.turn === null, 'capability-backed Chat turn');
@@ -138,6 +145,8 @@ try {
   taskRuntime.attachAgent({ id: rolloverTask.id, expectedRev: rolloverTask.rev, provider: 'dsh', sessionId: 'dsh-old' });
   let rolloverSignalReads = 0;
   const failingRolloverCancelBroker = { ...agentBroker,
+    async health(id) { return { available: true, authenticated: true, sessionCapable: true,
+      sandboxCapable: id === 'codex', toolsAvailable: true }; },
     async cancel() { throw Object.assign(new Error('Agent cancellation failed'), { code: 'AGENT_CANCEL_FAILED' }); }
   };
   const rolloverRuntime = createDesktopPlatformRuntime({ capabilityService, workspaceService, taskRuntime,
@@ -156,28 +165,38 @@ try {
   let codexSandboxCapable = false;
   const routingBroker = { ...agentBroker,
     ids: () => ['cetamesh', 'codex'],
-    capabilities: id => ({ workspaceBoundary: id === 'codex' ? 'staged-capability-broker' : 'capability-broker' }),
+    capabilities: id => ({ workspaceBoundary: id === 'codex' ? 'staged-capability-broker' : 'capability-broker',
+      assignment: { taskKinds: ['code'], tools: ['filesystem.read'], maxDifficulty: 3,
+        estimatedCost: { amount: 0, currency: 'USD', source: 'fixture',
+          agentProvider: id, modelProvider: 'fixture-model', model: 'fixture-model-id' },
+        estimatedLatencyMs: id === 'codex' ? 20 : 100 } }),
     health: async id => id === 'codex'
-      ? { available: codexReady, authenticated: codexReady, sessionCapable: codexReady,
+      ? { available: codexReady, installed: codexReady, authenticated: codexReady, sessionCapable: codexReady,
           sandboxCapable: codexSandboxCapable }
       : { available: true, sessionCapable: true }
   };
   const routingRuntime = createDesktopPlatformRuntime({
     capabilityService: { broker: { execute: async request => {
       selectedProviders.push(request.input.agentProvider ?? request.input.provider);
-      return { result: { accepted: true, provider: request.input.agentProvider ?? request.input.provider } };
+      return { status: 'completed', result: { accepted: true, provider: request.input.agentProvider ?? request.input.provider } };
     } } }, workspaceService, taskRuntime, agentBroker: routingBroker,
     modelRuntime: { supportsToolCalling: () => managedTools,
       health: async () => ({ configured: true, available: true }) }
   });
   await routingRuntime.route({ decision: { agentIntent: true, class: 'project' },
-    record: { config: { workspaceId, modelProvider: 'fixture-model' } }, text: 'fix one TypeScript module' });
+    record: { config: { workspaceId, modelProvider: 'fixture-model', model: 'fixture-model-id' } }, text: 'fix one TypeScript module' });
   assert.equal(selectedProviders.at(-1), 'cetamesh');
   managedTools = false;
   codexReady = true;
   codexSandboxCapable = true;
+  const retryWorkspaceApproval = await capabilityService.broker.execute({ actor: OWNER_ACTOR,
+    capability: 'workspace.create', input: { name: 'Safe reassignment fixture',
+      root: path.join(dir, 'retry-workspace'), createIfMissing: true }, reason: 'Test fixture' });
+  const retryWorkspace = await capabilityService.execute({ method: 'capability.approval.decide',
+    params: { id: retryWorkspaceApproval.approvalId, approve: true } });
+  const retryWorkspaceId = retryWorkspace.result.workspace.id;
   await routingRuntime.route({ decision: { agentIntent: true, class: 'project' },
-    record: { config: { workspaceId, modelProvider: 'fixture-model' } }, text: 'fix another TypeScript module' });
+    record: { config: { workspaceId, modelProvider: 'fixture-model', model: 'fixture-model-id' } }, text: 'fix another TypeScript module' });
   assert.equal(selectedProviders.at(-1), 'codex', 'a verified code Agent must win when Managed lacks tools');
   codexSandboxCapable = false;
   const beforeSandboxRefusal = taskRuntime.countAll();
@@ -188,9 +207,91 @@ try {
   codexReady = false;
   const beforeUnavailable = taskRuntime.countAll();
   await assert.rejects(routingRuntime.route({ decision: { agentIntent: true, class: 'project' },
-    record: { config: { workspaceId, modelProvider: 'fixture-model' } }, text: 'fix a third TypeScript module' }),
+    record: { config: { workspaceId, modelProvider: 'fixture-model', model: 'fixture-model-id' } }, text: 'fix a third TypeScript module' }),
   error => error.code === 'AGENT_PROVIDER_SELECTION_REQUIRED');
   assert.equal(taskRuntime.countAll(), beforeUnavailable, 'unavailable providers cannot leave a queued fake Task');
+  const queuedWork = taskRuntime.create({ goal: 'fix queued Work task', workspaceId,
+    requestId: 'queued-work-choice', requestedAgentProvider: 'codex' });
+  await assert.rejects(routingRuntime.route({ decision: { agentIntent: true, class: 'project' },
+    record: { config: { workspaceId, modelProvider: 'fixture-model', model: 'fixture-model-id' } }, text: queuedWork.goal }),
+  error => error.code === 'TASK_DISPATCH_INCOMPLETE', 'Chat must not override an unconfirmed Work Agent selection');
+  assert.equal(taskRuntime.get({ id: queuedWork.id }).task.currentAgent, null);
+  const unknownCostRuntime = createDesktopPlatformRuntime({ workspaceService, taskRuntime,
+    agentBroker: { ...routingBroker, capabilities: () => ({ workspaceBoundary: 'capability-broker' }) },
+    modelRuntime: { supportsToolCalling: () => true, health: async () => ({ configured: true, available: true }) },
+    capabilityService: { broker: { execute: async () => { throw new Error('unknown-cost dispatch must not run'); } } } });
+  const beforeUnknownCost = taskRuntime.countAll();
+  await assert.rejects(unknownCostRuntime.route({ decision: { agentIntent: true, class: 'project' },
+    record: { config: { workspaceId, modelProvider: 'fixture-model', model: 'fixture-model-id' } }, text: 'fix unknown cost candidate' }),
+  error => error.code === 'AGENT_PROVIDER_SELECTION_REQUIRED');
+  assert.equal(taskRuntime.countAll(), beforeUnknownCost, 'no trusted model-bound cost means no automatic paid Task');
+  const beforeDisabled = taskRuntime.countAll();
+  await assert.rejects(routingRuntime.route({ decision: { agentIntent: true, class: 'project', agentEnabled: false },
+    record: { config: { workspaceId, agentProvider: 'none' } }, text: 'fix disabled project' }),
+  error => error.code === 'AGENT_DISABLED');
+  assert.equal(taskRuntime.countAll(), beforeDisabled, 'disabled Agent must not create a Task or dispatch');
+
+  codexReady = true;
+  codexSandboxCapable = true;
+  let codexHealthCalls = 0;
+  const retryAgentCalls = [];
+  const retryAudit = [];
+  const retryBroker = { ...routingBroker,
+    health: async id => id === 'codex'
+      ? { available: ++codexHealthCalls !== 3, installed: true, authenticated: true,
+          sessionCapable: true, sandboxCapable: true }
+      : { available: true, sessionCapable: true },
+    async createSession(provider, options) {
+      retryAgentCalls.push({ kind: 'create', provider, options });
+      return { sessionId: 'retry-managed-session' };
+    },
+    async send(request) { retryAgentCalls.push({ kind: 'send', ...request }); return { accepted: true }; }
+  };
+  const retryCapability = createCapabilityService({ stateDir: path.join(dir, 'retry-state'),
+    workspaceService, taskRuntime, memoryService, agentBroker: retryBroker,
+    audit: event => retryAudit.push(event) });
+  const safeRetryRuntime = createDesktopPlatformRuntime({ workspaceService, taskRuntime, agentBroker: retryBroker,
+    modelRuntime: { supportsToolCalling: () => true, health: async () => ({ configured: true, available: true }) },
+    capabilityService: retryCapability });
+  const recovered = await safeRetryRuntime.route({ decision: { agentIntent: true, class: 'project' },
+    record: { config: { workspaceId: retryWorkspaceId, modelProvider: 'fixture-model', model: 'fixture-model-id' } }, text: 'fix safe retry fixture', requestId: 'safe-retry-fixture' });
+  assert.equal(recovered.provider, 'cetamesh', 'one preflight failure may select the next verified Provider');
+  assert.deepEqual(retryAgentCalls.map(row => row.provider), ['cetamesh', 'cetamesh'],
+    'Codex preflight rejection creates no native Session or Agent send');
+  const assignmentAudit = retryAudit.filter(row => row.capability === 'agent.run'
+    && ['denied', 'completed'].includes(row.status));
+  assert.deepEqual(assignmentAudit.map(row => row.status), ['denied', 'completed']);
+  assert.notEqual(assignmentAudit[0].requestId, assignmentAudit[1].requestId,
+    'retry uses a distinct original Journal request ID');
+  assert.equal(recovered.taskId, taskRuntime.findByGoalWorkspace({ goal: 'fix safe retry fixture', workspaceId: retryWorkspaceId }).id);
+
+  let unsafeCalls = 0;
+  const unsafeRetryRuntime = createDesktopPlatformRuntime({ workspaceService, taskRuntime, agentBroker: routingBroker,
+    modelRuntime: { supportsToolCalling: () => true, health: async () => ({ configured: true, available: true }) },
+    capabilityService: { broker: { execute: async () => {
+      unsafeCalls += 1;
+      throw Object.assign(new Error('unknown send effect'), { code: 'PROVIDER_UNAVAILABLE', effectStatus: 'unknown' });
+    } } } });
+  await assert.rejects(unsafeRetryRuntime.route({ decision: { agentIntent: true, class: 'project' },
+    record: { config: { workspaceId: retryWorkspaceId, modelProvider: 'fixture-model', model: 'fixture-model-id' } }, text: 'fix unknown effect fixture' }),
+  error => error.effectStatus === 'unknown');
+  assert.equal(unsafeCalls, 1, 'unknown effect cannot be replayed');
+  let forgedCalls = 0;
+  const forgedRuntime = createDesktopPlatformRuntime({ workspaceService, taskRuntime, agentBroker: routingBroker,
+    modelRuntime: { supportsToolCalling: () => true, health: async () => ({ configured: true, available: true }) },
+    capabilityService: { broker: { execute: async () => {
+      forgedCalls += 1;
+      throw Object.assign(new Error('untrusted Provider failure'),
+        { code: 'PROVIDER_UNAVAILABLE', noAgentSideEffect: true });
+    } } } });
+  await assert.rejects(forgedRuntime.route({ decision: { agentIntent: true, class: 'project' },
+    record: { config: { workspaceId: retryWorkspaceId, modelProvider: 'fixture-model', model: 'fixture-model-id' } },
+    text: 'fix forged safe marker fixture' }), error => error.code === 'PROVIDER_UNAVAILABLE');
+  assert.equal(forgedCalls, 1, 'Provider supplied safety marker cannot authorize replay');
+  await assert.rejects(forgedRuntime.route({ decision: { agentIntent: true, class: 'project' },
+    record: { config: { workspaceId: retryWorkspaceId, agentProvider: 'codex' } },
+    text: 'fix explicit no fallback fixture' }), error => error.code === 'PROVIDER_UNAVAILABLE');
+  assert.equal(forgedCalls, 2, 'explicit Agent failure cannot silently fall back');
   console.log('Smart platform routing: Chat -> Model, Smart tool -> Capability -> Model context, Smart project -> Task -> Agent; no DSH client supplied');
 } finally {
   chat?.close();
