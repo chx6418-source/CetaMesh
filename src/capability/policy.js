@@ -1,5 +1,7 @@
 import {PERMISSIONS,FORBIDDEN_PERMISSIONS,RISK_RANK,capabilityError} from './types.js';
 import {requestFingerprint} from './approval.js';
+import path from 'node:path';
+import {resolveInside} from '../workspace/boundary.js';
 export function createCapabilityPolicy({resolveWorkspace,resolveTask,resolveGrants,isTaskHandoff=()=>false}={}){
  return {authorize(request,entry){
   const permission=entry.permission??entry.id;
@@ -23,6 +25,32 @@ export function createCapabilityPolicy({resolveWorkspace,resolveTask,resolveGran
    if(actor.kind==='agent'&&isTaskHandoff(request.taskId))throw capabilityError('TASK_HANDOFF_IN_FLIGHT','Task Handoff has not committed the target Agent authority');
    const task=resolveTask?.(request.taskId);
    if(!task)throw capabilityError('TASK_NOT_AUTHORIZED','Assigned Task required');
+   if(task.parentTaskId && task.childContract?.mode==='read-only'){
+    const childRead=entry.id==='filesystem.read'||entry.id==='filesystem.search';
+    const ownerReviewRead=actor.kind==='owner' && (entry.id==='git.status'||entry.id==='git.diff');
+    if(!childRead && !ownerReviewRead && !(entry.id==='agent.run' && actor.kind==='owner'))
+     throw capabilityError('TASK_CHILD_READ_ONLY','Read-only child cannot use this capability');
+    if(childRead){
+     const rel=String(request.input?.path??'').replaceAll('\\','/');
+     const safe=rel && !rel.startsWith('/') && !rel.includes(':')
+      && rel.split('/').every(part=>part && part!=='.' && part!=='..');
+     if(!safe || !task.childContract.readScope?.some(scope=>{
+      const prefix=String(scope).replaceAll('\\','/').replace(/\/$/,'');
+      return prefix && (rel===prefix || rel.startsWith(prefix+'/'));
+     })) throw capabilityError('TASK_CHILD_SCOPE_DENIED','Read is outside the child contract');
+     try {
+      const root=resolveWorkspace?.(request.workspaceId)?.root;
+      if(typeof root!=='string') throw new Error('Workspace root unavailable');
+      const target=resolveInside(root,rel).real;
+      const inRealScope=task.childContract.readScope.some(scope=>{
+       const allowed=resolveInside(root,scope).real;
+       const relative=path.relative(allowed,target);
+       return relative==='' || (relative!=='..' && !relative.startsWith('..'+path.sep) && !path.isAbsolute(relative));
+      });
+      if(!inRealScope) throw new Error('Resolved path escapes child scope');
+     } catch { throw capabilityError('TASK_CHILD_SCOPE_DENIED','Resolved read is outside the child contract'); }
+    }
+   }
    if((task.workspaceId??null)!==(request.workspaceId??null))throw capabilityError('WORKSPACE_RECONCILIATION_REQUIRED','Task and execution Workspace do not match');
    if(['completed','failed','cancelled'].includes(task.status))throw capabilityError('TASK_NOT_AUTHORIZED','Terminal Task cannot execute capabilities');
    if(actor.kind==='agent'&&['paused','blocked'].includes(task.status))throw capabilityError('TASK_NOT_AUTHORIZED','Paused or interrupted Task cannot execute Agent capabilities');

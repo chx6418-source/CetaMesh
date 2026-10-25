@@ -7,7 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const read = (relative) => fs.readFileSync(path.join(ROOT, relative), 'utf8');
+const read = (relative) => fs.readFileSync(path.join(ROOT, relative), 'utf8').replace(/\r\n/g, '\n');
 const exists = (relative) => fs.existsSync(path.join(ROOT, relative));
 let passed = 0;
 const check = (name, fn) => { fn(); passed += 1; process.stdout.write(`PASS ${name}\n`); };

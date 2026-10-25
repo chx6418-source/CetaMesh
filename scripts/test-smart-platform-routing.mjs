@@ -31,6 +31,8 @@ try {
   const memoryService = createMemoryService({ stateDir });
   const agentBroker = {
     capabilities: () => ({ workspaceBoundary: 'capability-broker' }),
+    async health() { return { available: true, installed: true, authenticated: true,
+      sessionCapable: true, compatible: true }; },
     async createSession(provider, options) {
       const sessionId = 'managed-' + (++agentSeq);
       agentCalls.push({ kind: 'create', provider, sessionId, options });

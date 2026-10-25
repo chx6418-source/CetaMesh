@@ -102,6 +102,10 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
       completedWork: [],
       pendingWork: [],
       workspaceId: normalizedWorkspace,
+      parentTaskId: null,
+      parentFingerprint: null,
+      childContract: null,
+      attempts: [],
       createRequest: requestId ? { id: normalizeText(requestId, 'requestId', 160, { required: true }),
         fingerprint: createFingerprint({ goal: normalizedGoal, requirements: normalizedRequirements,
           workspaceId: normalizedWorkspace, requestedAgentProvider }) } : null,
@@ -126,6 +130,251 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
 
   function get({ id } = {}) {
     return { task: requireTask(id) };
+  }
+
+  function createChild({ parentTaskId, expectedParentRev, requestId, goal, requirements,
+    workspaceId, contract, supersedesChildId } = {}) {
+    const parent = requireTask(parentTaskId);
+    if (parent.parentTaskId) throw taskError('TASK_CHILD_DEPTH_EXCEEDED', 'Child Tasks cannot have children');
+    if (parent.status === 'running') throw taskError('TASK_PARENT_PAUSE_REQUIRED', 'Pause the parent writer before creating read-only children');
+    if (!['queued', 'paused'].includes(parent.status)) throw taskError('TASK_PARENT_TERMINAL', 'Parent Task is not available for new children');
+    const wantedWorkspace = normalizeWorkspaceId(workspaceId);
+    if (!parent.workspaceId || wantedWorkspace !== parent.workspaceId) {
+      throw taskError('TASK_WORKSPACE_CONFLICT', 'Child must remain in the parent Workspace');
+    }
+    const request = normalizeText(requestId, 'requestId', 160, { required: true });
+    const childGoal = normalizeText(goal, 'goal', TASK_LIMITS.goalChars, { required: true });
+    const childRequirements = normalizeStringList(requirements, 'requirements', TASK_LIMITS.requirements);
+    if (!contract || typeof contract !== 'object' || Array.isArray(contract)
+      || contract.mode !== 'read-only'
+      || !['analysis', 'tool'].includes(contract.outputKind)
+      || !Array.isArray(contract.readScope) || !Array.isArray(contract.expectedEvidence)) {
+      throw taskError('INVALID_PARAMS', 'Child requires an output and evidence contract');
+    }
+    const childContract = {
+      mode: 'read-only',
+      outputKind: contract.outputKind,
+      readScope: normalizeStringList(contract.readScope, 'contract.readScope', TASK_LIMITS.requirements),
+      expectedEvidence: normalizeStringList(contract.expectedEvidence, 'contract.expectedEvidence', TASK_LIMITS.requirements)
+    };
+    if (!childContract.readScope.length || !childContract.expectedEvidence.length
+      || childContract.readScope.some(scope => {
+      const rel = scope.replaceAll('\\', '/');
+      return rel.startsWith('/') || rel.includes(':')
+        || rel.split('/').some(part => !part || part === '.' || part === '..');
+    })) throw taskError('TASK_CHILD_SCOPE_DENIED', 'Child read scope must contain safe relative paths');
+    if (childContract.outputKind === 'tool' && (new Set(childContract.expectedEvidence).size !== childContract.expectedEvidence.length
+      || childContract.expectedEvidence.some(item => !['filesystem.read', 'filesystem.search'].includes(item)))) {
+      throw taskError('INVALID_PARAMS', 'Read-only tool child requires distinct read result capabilities');
+    }
+    const fingerprint = crypto.createHash('sha256').update(JSON.stringify({
+      parentTaskId: parent.id, goal: childGoal, requirements: childRequirements,
+      workspaceId: wantedWorkspace, childContract, supersedesChildId: supersedesChildId || null
+    })).digest('hex');
+    const prior = store.listAll().find(row => row.createRequest?.id === request);
+    if (prior) {
+      if (prior.createRequest.fingerprint !== fingerprint || prior.parentTaskId !== parent.id) {
+        throw taskError('REQUEST_ID_CONFLICT', 'Child creation request ID was reused with different data');
+      }
+      return prior;
+    }
+    if (!Number.isSafeInteger(expectedParentRev)) throw taskError('REVISION_REQUIRED', 'expectedParentRev is required');
+    if (parent.rev !== expectedParentRev) throw taskError('TASK_CONFLICT', 'Parent Task revision changed');
+    const children = store.listAll().filter(row => row.parentTaskId === parent.id);
+    const superseded = new Set(children.map(row => row.supersedesChildId).filter(Boolean));
+    const leaves = children.filter(row => !superseded.has(row.id));
+    const replaced = supersedesChildId ? children.find(row => row.id === supersedesChildId) : null;
+    const unverifiedCompleted = replaced?.status === 'completed'
+      && replaced.result?.verification === 'NEEDS_REVIEW'
+      && (replaced.attempts ?? []).length > 0
+      && replaced.attempts.at(-1).state === 'completed';
+    if (supersedesChildId && (!replaced || superseded.has(replaced.id)
+      || (!['failed', 'cancelled'].includes(replaced.status) && !unverifiedCompleted)
+      || (replaced.attempts ?? []).some(item => ['started', 'accepted', 'unknown'].includes(item.state)))) {
+      throw taskError('TASK_CHILD_REPLACEMENT_UNSAFE', 'Only a confirmed terminal child may be replaced once');
+    }
+    if (children.length >= 6 || leaves.length - (replaced ? 1 : 0) >= 2) {
+      throw taskError('TASK_CHILD_LIMIT', 'At most two current child Tasks and six lifetime children are allowed');
+    }
+    const timestamp = now();
+    return store.insert({
+      id: store.newId(), goal: childGoal, requirements: childRequirements,
+      status: 'queued', currentPhase: '', progress: { percent: 0, note: '' },
+      completedWork: [], pendingWork: [], workspaceId: wantedWorkspace,
+      parentTaskId: parent.id,
+      supersedesChildId: replaced?.id ?? null,
+      parentFingerprint: createFingerprint({ goal: parent.goal, requirements: parent.requirements,
+        workspaceId: parent.workspaceId }),
+      childContract, attempts: [],
+      createRequest: { id: request, fingerprint }, artifacts: [], executionEvidence: [],
+      agentReports: [], decisions: [], memoryRefs: [], checkpoint: null,
+      acceptance: childContract.expectedEvidence.map(text => ({ id: subId('acc'), text, met: false, metAt: null })),
+      agentHistory: [], currentAgent: null, modelConfig: null, result: null, failure: null,
+      createdAt: timestamp, updatedAt: timestamp, rev: 1
+    });
+  }
+
+  function listChildren({ parentTaskId } = {}) {
+    const parent = requireTask(parentTaskId);
+    return { children: store.listAll().filter(row => row.parentTaskId === parent.id) };
+  }
+
+  function assertChildParentCurrent({ id, workspaceId } = {}) {
+    const child = requireTask(id);
+    if (!child.parentTaskId) return null;
+    const parent = requireTask(child.parentTaskId);
+    if (parent.workspaceId !== child.workspaceId || parent.workspaceId !== workspaceId
+      || !['queued', 'running', 'paused'].includes(parent.status)) {
+      throw taskError('TASK_PARENT_UNAVAILABLE', 'Parent Task is not active in this Workspace');
+    }
+    if (child.parentFingerprint !== createFingerprint({ goal: parent.goal,
+      requirements: parent.requirements, workspaceId: parent.workspaceId })) {
+      throw taskError('TASK_CHILD_PARENT_CHANGED', 'Parent objective changed after child assignment');
+    }
+    return parent;
+  }
+
+  function recordAttempt({ id, expectedRev, provider, sessionId, state, requestId, reason } = {}) {
+    const current = requireTask(id);
+    const request = normalizeText(requestId, 'requestId', 160, { required: true });
+    const validStates = ['started', 'completed', 'failed', 'cancelled', 'unknown'];
+    if (!validStates.includes(state)) throw taskError('INVALID_PARAMS', 'Invalid Attempt state');
+    const agentProvider = normalizeProvider(provider);
+    if (!agentProvider) throw taskError('INVALID_PROVIDER', 'Attempt requires provider');
+    const nativeSession = normalizeText(sessionId, 'sessionId', TASK_LIMITS.idChars, { required: true });
+    const prior = (current.attempts ?? []).find(row => row.requestId === request);
+    if (prior) {
+      if (prior.provider !== agentProvider || prior.sessionId !== nativeSession || prior.state !== state) {
+        throw taskError('REQUEST_ID_CONFLICT', 'Attempt request ID was reused');
+      }
+      return current;
+    }
+    return mutate(id, expectedRev, draft => {
+      draft.attempts ??= [];
+      if (draft.attempts.length >= 32) throw taskError('TASK_ATTEMPT_LIMIT', 'Attempt limit reached');
+      draft.attempts.push({ id: subId('attempt'), requestId: request, provider: agentProvider,
+        sessionId: nativeSession, state, reason: normalizeText(reason, 'reason', TASK_LIMITS.noteChars),
+        observedEvidenceIds: [], usageRequestIds: [], at: now(), taskRev: draft.rev + 1 });
+      return draft;
+    });
+  }
+
+  async function verifyChild({ id, expectedRev } = {}) {
+    const child = requireTask(id);
+    if (!child.parentTaskId || child.status !== 'completed') {
+      throw taskError('TASK_CHILD_NOT_COMPLETE', 'A completed child Task is required');
+    }
+    if (!Number.isSafeInteger(expectedRev)) throw taskError('REVISION_REQUIRED', 'expectedRev is required');
+    if (child.rev !== expectedRev) throw taskError('TASK_CONFLICT', 'Child Task revision changed');
+    const kind = child.childContract.outputKind;
+    const checks = kind === 'tool'
+      ? await Promise.all(child.childContract.expectedEvidence.map(expectedCapability =>
+        verifyOutcome({ id, kind, expectedCapability, evidenceCandidate: true })))
+      : [await verifyOutcome({ id, kind })];
+    const latestAttempt = child.attempts?.at(-1);
+    const latestEvidence = kind !== 'tool' || (latestAttempt?.state === 'completed'
+      && !(child.attempts ?? []).some(row => ['started', 'accepted', 'unknown'].includes(row.state))
+      && checks.every(check => check.evidenceEventIds.length > 0 && check.evidenceEventIds.every(eventId =>
+        (child.executionEvidence ?? []).some(row => row.eventId === eventId
+          && row.sessionId === latestAttempt.sessionId && row.taskRev >= latestAttempt.taskRev
+          && (!row.runId || row.runId === latestAttempt.requestId)))));
+    const result = { status: latestEvidence && checks.every(row => row.status === 'VERIFIED') ? 'VERIFIED' : 'NEEDS_REVIEW',
+      kind, evidenceEventIds: [...new Set(checks.flatMap(row => row.evidenceEventIds))],
+      reasons: [...checks.flatMap((row, index) => row.reasons.map(reason =>
+        kind === 'tool' ? `${child.childContract.expectedEvidence[index]}:${reason}` : reason)),
+        ...(!latestEvidence ? ['LATEST_ATTEMPT_EVIDENCE_MISSING'] : [])] };
+    mutate(id, expectedRev, draft => {
+      draft.result ??= { summary: '', at: now() };
+      draft.result.verification = result.status;
+      draft.result.verificationReasons = result.reasons;
+      draft.result.evidenceEventIds = result.evidenceEventIds;
+      draft.result.verificationRev = draft.rev + 1;
+      if (kind === 'tool' && result.status === 'VERIFIED') {
+        for (const item of draft.acceptance) { item.met = true; item.metAt = now(); }
+      }
+      return draft;
+    });
+    return result;
+  }
+
+  function reviewChild({ id, expectedRev, approve, reviewSummary, evidenceEventIds } = {}) {
+    const child = requireTask(id);
+    if (!child.parentTaskId || child.childContract?.outputKind !== 'analysis' || child.status !== 'completed') {
+      throw taskError('TASK_CHILD_REVIEW_NOT_ALLOWED', 'Only completed analysis children can receive Owner review');
+    }
+    if (!Number.isSafeInteger(expectedRev)) throw taskError('REVISION_REQUIRED', 'expectedRev is required');
+    if (child.rev !== expectedRev) throw taskError('TASK_CONFLICT', 'Child Task changed before review');
+    if (typeof approve !== 'boolean') throw taskError('INVALID_PARAMS', 'Owner review decision is required');
+    const summary = normalizeText(redactText(reviewSummary), 'reviewSummary', TASK_LIMITS.noteChars, { required: true });
+    const ids = Array.isArray(evidenceEventIds) ? evidenceEventIds : [];
+    const observed = child.executionEvidence ?? [];
+    const latestAttempt = child.attempts?.at(-1);
+    const sameAttempt = row => row?.sessionId === latestAttempt?.sessionId
+      && Number.isSafeInteger(row.taskRev) && row.taskRev >= latestAttempt.taskRev
+      && (!row.runId || row.runId === latestAttempt.requestId);
+    const lastRead = observed.filter(row => ['filesystem.read', 'filesystem.search'].includes(row.capability)).at(-1);
+    if (approve && (!ids.length || ids.length > 100 || new Set(ids).size !== ids.length
+      || latestAttempt?.state !== 'completed' || !lastRead || lastRead.status !== 'completed'
+      || !sameAttempt(lastRead) || !ids.includes(lastRead.eventId)
+      || !ids.every(eventId => typeof eventId === 'string' && observed.some(row => row.eventId === eventId
+        && row.status === 'completed' && ['filesystem.read', 'filesystem.search'].includes(row.capability)
+        && sameAttempt(row)))
+      || !(child.agentReports ?? []).some(row => sameAttempt(row))
+      || observed.some(row => ['unknown', 'outcome-unknown', 'cancel-unconfirmed'].includes(row.status)))) {
+      throw taskError('TASK_CHILD_EVIDENCE_REQUIRED', 'Owner review requires observed source evidence and an analysis result');
+    }
+    return mutate(id, expectedRev, draft => {
+      draft.result ??= { summary: '', at: now() };
+      draft.result.verification = approve ? 'VERIFIED' : 'NEEDS_REVIEW';
+      draft.result.verificationReasons = approve ? [] : ['OWNER_REJECTED'];
+      draft.result.evidenceEventIds = approve ? ids : [];
+      draft.result.verificationRev = draft.rev + 1;
+      draft.decisions.push({ at: now(), decision: approve ? 'Owner analysis review approved' : 'Owner analysis review rejected',
+        rationale: summary });
+      if (draft.decisions.length > TASK_LIMITS.decisions) draft.decisions.splice(0, draft.decisions.length - TASK_LIMITS.decisions);
+      if (approve) for (const item of draft.acceptance) { item.met = true; item.metAt = now(); }
+      return draft;
+    });
+  }
+
+  function settleAttempt({ id, expectedRev, requestId, state, nativeRequestId, reason } = {}) {
+    if (!['accepted', 'completed', 'failed', 'cancelled', 'unknown'].includes(state)) {
+      throw taskError('INVALID_PARAMS', 'Invalid Attempt settlement');
+    }
+    const request = normalizeText(requestId, 'requestId', 160, { required: true });
+    const current = requireTask(id);
+    const existing = current.attempts?.find(row => row.requestId === request);
+    if (existing && !['started', 'accepted'].includes(existing.state) && state === 'accepted') return current;
+    return mutate(id, expectedRev, draft => {
+      const attempt = draft.attempts?.find(row => row.requestId === request);
+      if (!attempt) throw taskError('TASK_ATTEMPT_NOT_FOUND', 'Attempt was not recorded');
+      if (attempt.state !== 'started' && attempt.state !== 'accepted') {
+        throw taskError('TASK_ATTEMPT_TERMINAL', 'Terminal Attempt cannot be rewritten');
+      }
+      attempt.state = state;
+      attempt.nativeRequestId = normalizeText(nativeRequestId, 'nativeRequestId', 240) || attempt.nativeRequestId || null;
+      attempt.reason = normalizeText(reason, 'reason', TASK_LIMITS.noteChars) || attempt.reason;
+      attempt.updatedAt = now();
+      return draft;
+    });
+  }
+
+  function acknowledgeUnknownAttempts({ id, expectedRev, reviewSummary } = {}) {
+    const child = requireTask(id);
+    if (!child.parentTaskId || child.childContract?.mode !== 'read-only' || child.status !== 'blocked') {
+      throw taskError('TASK_ATTEMPT_REVIEW_NOT_ALLOWED', 'Only blocked read-only children can review unknown Attempts');
+    }
+    const summary = normalizeText(redactText(reviewSummary), 'reviewSummary', TASK_LIMITS.noteChars, { required: true });
+    if (!(child.attempts ?? []).some(item => item.state === 'unknown')) return child;
+    return mutate(id, expectedRev, draft => {
+      for (const attempt of draft.attempts) {
+        if (attempt.state !== 'unknown') continue;
+        attempt.state = 'reviewed';
+        attempt.reason = `Owner reviewed unknown read-only effect: ${summary}`.slice(0, TASK_LIMITS.noteChars);
+        attempt.updatedAt = now();
+      }
+      return draft;
+    });
   }
 
   function list({ status, statuses, workspaceId, onlyNeedsAttention, query, limit } = {}) {
@@ -162,6 +411,11 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
   }
 
   function update({ id, expectedRev, goal, requirements, workspaceId, currentPhase, progress, note } = {}) {
+    const linked = requireTask(id);
+    if (workspaceId !== undefined && normalizeWorkspaceId(workspaceId) !== linked.workspaceId
+      && (linked.parentTaskId || store.listAll().some(row => row.parentTaskId === linked.id))) {
+      throw taskError('TASK_CHILD_LINKED', 'Linked Task Workspace cannot be changed');
+    }
     const patch = {};
     if (goal !== undefined) patch.goal = normalizeText(goal, 'goal', TASK_LIMITS.goalChars, { required: true });
     if (requirements !== undefined) patch.requirements = normalizeStringList(requirements, 'requirements', TASK_LIMITS.requirements);
@@ -188,6 +442,10 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
   }
 
   function remove({ id, expectedRev } = {}) {
+    const linked = requireTask(id);
+    if (linked.parentTaskId || store.listAll().some(row => row.parentTaskId === linked.id)) {
+      throw taskError('TASK_CHILD_LINKED', 'Linked Tasks cannot be deleted independently');
+    }
     return store.remove(id, expectedRev);
   }
 
@@ -232,7 +490,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     const wantedGoal = canonicalGoal(goal);
     const wantedWorkspace = normalizeWorkspaceId(workspaceId);
     if (!wantedGoal || !wantedWorkspace) return null;
-    const matches = store.listAll().filter(row => row.workspaceId === wantedWorkspace
+    const matches = store.listAll().filter(row => !row.parentTaskId && row.workspaceId === wantedWorkspace
       && canonicalGoal(row.goal) === wantedGoal && !isTerminalStatus(row.status));
     if (matches.length > 1) throw taskError('TASK_AMBIGUOUS', 'Multiple active Tasks share this Workspace goal');
     return matches[0] ?? null;
@@ -258,11 +516,19 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     return match;
   }
 
-  function activeWorkspaceOwner({ workspaceId, exceptTaskId } = {}) {
+  function activeWorkspaceOwner({ workspaceId, exceptTaskId, forReadOnlyTaskId } = {}) {
     const wantedWorkspace = normalizeWorkspaceId(workspaceId);
     if (!wantedWorkspace) return null;
     return store.listAll().find(row => row.workspaceId === wantedWorkspace
-      && row.id !== exceptTaskId && ['running', 'waiting', 'blocked'].includes(row.status) && row.currentAgent) ?? null;
+      && row.id !== exceptTaskId && ['running', 'waiting', 'blocked'].includes(row.status) && row.currentAgent
+      && !(forReadOnlyTaskId && row.parentTaskId && row.childContract?.mode === 'read-only')) ?? null;
+  }
+
+  function activeWorkspaceReaders({ workspaceId, exceptTaskId } = {}) {
+    const wantedWorkspace = normalizeWorkspaceId(workspaceId);
+    return store.listAll().filter(row => row.workspaceId === wantedWorkspace && row.id !== exceptTaskId
+      && row.parentTaskId && row.childContract?.mode === 'read-only'
+      && ['running', 'waiting', 'blocked'].includes(row.status) && row.currentAgent);
   }
 
   function attachAgent({ id, expectedRev, provider, sessionId, note } = {}) {
@@ -313,6 +579,11 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
 
   // ── 生命周期 ───────────────────────────────────────────────────────────
   function start({ id, expectedRev, provider, sessionId, note } = {}) {
+    const current = requireTask(id);
+    if (!current.parentTaskId && store.listAll().some(row => row.parentTaskId === id
+      && !isTerminalStatus(row.status))) {
+      throw taskError('TASK_CHILD_ACTIVE', 'Child Tasks must finish before the parent writer starts');
+    }
     const result = applyStatus({ id, expectedRev, target: 'running', mutateExtra: (draft) => {
       draft.failure = null;
       if (note !== undefined) draft.progress.note = normalizeText(note, 'note', TASK_LIMITS.noteChars);
@@ -324,12 +595,20 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
   }
 
   function pause({ id, expectedRev, reason } = {}) {
+    if (store.listAll().some(row => row.parentTaskId === id && !isTerminalStatus(row.status))) {
+      throw taskError('TASK_CHILD_ACTIVE', 'Stop and reconcile child Tasks before pausing the parent');
+    }
     return applyStatus({ id, expectedRev, target: 'paused', mutateExtra: (draft) => {
       if (reason !== undefined) draft.progress.note = normalizeText(reason, 'reason', TASK_LIMITS.noteChars);
     } });
   }
 
   function resume({ id, expectedRev, provider, sessionId, note } = {}) {
+    const current = requireTask(id);
+    if (!current.parentTaskId && store.listAll().some(row => row.parentTaskId === id
+      && !isTerminalStatus(row.status))) {
+      throw taskError('TASK_CHILD_ACTIVE', 'Child Tasks must finish before the parent writer resumes');
+    }
     const result = applyStatus({ id, expectedRev, target: 'running', mutateExtra: (draft) => {
       if (note !== undefined) draft.progress.note = normalizeText(note, 'note', TASK_LIMITS.noteChars);
     } });
@@ -355,8 +634,17 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     const recovered = [];
     for (const row of store.listAll()) {
       if (row.status !== 'running' && row.status !== 'waiting') continue;
+      const pendingChild = row.parentTaskId && (row.attempts ?? []).some(item => ['started', 'accepted'].includes(item.state));
       const result = block({ id: row.id, expectedRev: row.rev,
-        reason: 'Task interrupted after Core restart; verify Workspace and checkpoint before resuming' });
+        reason: pendingChild ? 'needs-reconciliation: Child Attempt was accepted before Core restart; verify outcome before recovery'
+          : 'Task interrupted after Core restart; verify Workspace and checkpoint before resuming' });
+      let current = result.task;
+      if (pendingChild) {
+        for (const attempt of current.attempts.filter(item => ['started', 'accepted'].includes(item.state))) {
+          current = settleAttempt({ id: current.id, expectedRev: current.rev,
+            requestId: attempt.requestId, state: 'unknown', reason: 'Core restarted before effect confirmation' });
+        }
+      }
       recovered.push(result.task.id);
     }
     return recovered;
@@ -367,9 +655,31 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
   }
 
   function complete({ id, expectedRev, summary } = {}) {
+    const allChildren = store.listAll().filter(row => row.parentTaskId === id);
+    const superseded = new Set(allChildren.map(row => row.supersedesChildId).filter(Boolean));
+    const children = allChildren.filter(row => !superseded.has(row.id));
+    if (children.some(row => row.status !== 'completed' || row.result?.verification !== 'VERIFIED'
+      || row.result?.verificationRev !== row.rev)) {
+      throw taskError('TASK_CHILD_UNVERIFIED', 'Child Tasks require verified results before parent completion');
+    }
+    if (children.length) {
+      const parent = requireTask(id);
+      const currentFingerprint = createFingerprint({ goal: parent.goal,
+        requirements: parent.requirements, workspaceId: parent.workspaceId });
+      if (children.some(row => row.parentFingerprint !== currentFingerprint)) {
+        throw taskError('TASK_CHILD_PARENT_CHANGED', 'Parent objective changed after child assignment');
+      }
+    }
     return applyStatus({ id, expectedRev, target: 'completed', mutateExtra: (draft) => {
       draft.progress.percent = 100;
-      draft.result = { summary: normalizeText(summary, 'summary', TASK_LIMITS.noteChars), at: now() };
+      draft.result = { summary: normalizeText(summary, 'summary', TASK_LIMITS.noteChars), at: now(),
+        ...(children.length ? { childResultRefs: children.map(child => ({
+          childId: child.id, verificationRev: child.result.verificationRev,
+          evidenceEventIds: child.result.evidenceEventIds ?? [],
+          artifactIds: (child.artifacts ?? []).map(item => item.id)
+        })) } : {}),
+        ...(superseded.size ? { priorFailedChildIds: allChildren.filter(child => superseded.has(child.id)
+          && child.status === 'failed').map(child => child.id) } : {}) };
       const last = draft.agentHistory[draft.agentHistory.length - 1];
       if (last && last.detachedAt === null) last.detachedAt = now();
       draft.currentAgent = null;
@@ -377,6 +687,9 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
   }
 
   function fail({ id, expectedRev, reason } = {}) {
+    if (store.listAll().some(row => row.parentTaskId === id && !isTerminalStatus(row.status))) {
+      throw taskError('TASK_CHILD_ACTIVE', 'Stop and reconcile child Tasks before failing the parent');
+    }
     return applyStatus({ id, expectedRev, target: 'failed', mutateExtra: (draft) => {
       draft.failure = { reason: normalizeText(reason, 'reason', TASK_LIMITS.noteChars, { required: true }), at: now() };
       const last = draft.agentHistory[draft.agentHistory.length - 1];
@@ -386,6 +699,9 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
   }
 
   function cancel({ id, expectedRev, reason } = {}) {
+    if (store.listAll().some(row => row.parentTaskId === id && !isTerminalStatus(row.status))) {
+      throw taskError('TASK_CHILD_ACTIVE', 'Stop and reconcile child Tasks before cancelling the parent');
+    }
     return applyStatus({ id, expectedRev, target: 'cancelled', mutateExtra: (draft) => {
       draft.failure = { reason: normalizeText(reason, 'reason', TASK_LIMITS.noteChars), at: now(), cancelled: true };
       const last = draft.agentHistory[draft.agentHistory.length - 1];
@@ -520,7 +836,8 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     return { task, changed: true };
   }
 
-  async function verifyOutcome({ id, kind, expectedFile, expectedSha256, expectedCapability } = {}) {
+  async function verifyOutcome({ id, kind, expectedFile, expectedSha256, expectedCapability,
+    evidenceCandidate = false } = {}) {
     const task = requireTask(id);
     let workspaceRoot = null;
     if (task.workspaceId) {
@@ -531,7 +848,9 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
         return { status: 'NEEDS_REVIEW', kind, evidenceEventIds: [], reasons: ['WORKSPACE_UNAVAILABLE'] };
       }
     }
-    return verifyTaskOutcome(task, { kind, expectedFile, expectedSha256, expectedCapability }, { workspaceRoot });
+    const candidate = evidenceCandidate && task.parentTaskId && task.childContract?.outputKind === 'tool'
+      ? { ...task, acceptance: task.acceptance.map(item => ({ ...item, met: true })) } : task;
+    return verifyTaskOutcome(candidate, { kind, expectedFile, expectedSha256, expectedCapability }, { workspaceRoot });
   }
 
   async function resolveArtifactOpen({ taskId, artifactId, forPreview = false } = {}) {
@@ -584,7 +903,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
       task.agentReports.push({ eventId: sourceId, provider, sessionId,
         runId: normalizeText(runId, 'runId', 240) || null,
         phase: normalizeText(phase, 'phase', 40) || 'unknown', text: content,
-        verified: false, at: now() });
+        verified: false, at: now(), taskRev: task.rev + 1 });
       if (task.agentReports.length > TASK_LIMITS.agentReports) {
         task.agentReports.splice(0, task.agentReports.length - TASK_LIMITS.agentReports);
       }
@@ -665,12 +984,21 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     recordOwnerContext,
     recordAgentReport,
     create,
+    createChild,
+    listChildren,
+    assertChildParentCurrent,
+    recordAttempt,
+    verifyChild,
+    reviewChild,
+    settleAttempt,
+    acknowledgeUnknownAttempts,
     get,
     list,
     findByAgent,
     findByGoalWorkspace,
     findByCreateRequestId,
     activeWorkspaceOwner,
+    activeWorkspaceReaders,
     update,
     remove,
     setProgress,

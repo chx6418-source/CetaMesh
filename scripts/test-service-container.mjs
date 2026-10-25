@@ -131,6 +131,7 @@ try {
     goal: 'Provider-bound session fixture', workspaceId: fallbackWorkspace.id
   });
   const originalExecutionConsent = fallbackServices.agentBroker.assertExecutionConsent;
+  const originalAgentHealth = fallbackServices.agentBroker.health;
   const originalCreateAgentSession = fallbackServices.agentBroker.createSession;
   const originalSendAgent = fallbackServices.agentBroker.send;
   const originalAgentStatus = fallbackServices.agentBroker.status;
@@ -139,6 +140,8 @@ try {
   let providerSessionIndex = 0;
   const sentAgentInstructions = [];
   fallbackServices.agentBroker.createSession = async (provider) => ({ sessionId: `${provider}-fixture-${++providerSessionIndex}` });
+  fallbackServices.agentBroker.health = async () => ({ available: true, installed: true,
+    authenticated: true, sessionCapable: true, compatible: true });
   fallbackServices.agentBroker.send = async request => { sentAgentInstructions.push(request); return { accepted: true }; };
   fallbackServices.agentBroker.status = async request => ({ sessionId: request.sessionId, running: false });
   try {
@@ -225,6 +228,7 @@ try {
     fallbackServices.agentBroker.send = originalSend;
   } finally {
     fallbackServices.agentBroker.assertExecutionConsent = originalExecutionConsent;
+    fallbackServices.agentBroker.health = originalAgentHealth;
     fallbackServices.agentBroker.createSession = originalCreateAgentSession;
     fallbackServices.agentBroker.send = originalSendAgent;
     fallbackServices.agentBroker.status = originalAgentStatus;

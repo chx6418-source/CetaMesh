@@ -38,6 +38,10 @@ try {
   assert.equal(ledger.summary({ taskId: 'task-b' }).inputTokens, 7);
   assert.equal(ledger.summary({ sessionId: 's1' }).inputTokens, 157);
   assert.equal(ledger.summary({ taskId: 'task-b' }).cost.amount, null, 'missing cache breakdown cannot invent cost');
+  const tree = ledger.summary({ taskIds: ['task-a', 'task-b', 'task-a'] });
+  assert.equal(tree.requestCount, 3, 'parent and child requests are counted once');
+  assert.equal(tree.inputTokens, 157);
+  assert.equal(tree.cost.amount, null, 'unknown child cost keeps parent cost unknown');
   assert.throws(() => ledger.record({ ...first, taskId: 'task-b' }), { code: 'USAGE_ATTRIBUTION_CONFLICT' });
   const failed = accumulateModelUsage(usage, null, { requestId: 'failed', providerId: 'fixture', model: 'fixture-model' });
   ledger.record({ ...first, usage: { ...failed, accountingComplete: false } });

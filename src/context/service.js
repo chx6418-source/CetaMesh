@@ -300,14 +300,16 @@ export function createProductContextService({
       : { required: false, status: 'resolved', expectedWorkspaceId: task.workspaceId, observedWorkspaceId };
     const memoryPrincipal = capabilityService.memoryPrincipal(liveActor);
     const settings = memorySettings();
-    const agentMemoryScopes = [`task:${task.id}`, `workspace:${task.workspaceId}`];
+    const readOnlyChild = Boolean(task.parentTaskId && task.childContract?.mode === 'read-only');
+    const agentMemoryScopes = readOnlyChild ? [`task:${task.id}`]
+      : [`task:${task.id}`, `workspace:${task.workspaceId}`];
     // A Task may link individual global records. The Memory policy still limits
     // this partition to those exact Owner-authorized IDs; no default global grant.
     if (memoryPrincipal.grants?.scopes?.includes('global')) agentMemoryScopes.push('global');
     const memoryReferences = settings.enabled === false ? [] : boundMemoryReferences([
       ...resolveMemoryReferences(memoryService, task, memoryPrincipal, onMemoryError),
-      ...automaticMemoryReferences(memoryService, settings, memoryPrincipal,
-        agentMemoryScopes, task.goal, onMemoryError)
+       ...(readOnlyChild ? [] : automaticMemoryReferences(memoryService, settings, memoryPrincipal,
+         agentMemoryScopes, task.goal, onMemoryError))
     ], settings);
     const grantedIds = Array.isArray(liveActor.grants?.capabilities) ? liveActor.grants.capabilities : [];
     return serializeContext({

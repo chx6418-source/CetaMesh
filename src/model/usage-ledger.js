@@ -69,11 +69,15 @@ export function createUsageLedger({ file, pricingResolver = null, now = () => Da
         || (row.taskId !== null && !label(row.taskId)) || !row.usage || typeof row.usage !== 'object')) throw error('USAGE_STORE_UNAVAILABLE');
     return store;
   }
-  function summary({ sessionId = null, sessionIds = null, taskId = null } = {}) {
+  function summary({ sessionId = null, sessionIds = null, taskId = null, taskIds = null } = {}) {
     if (sessionIds !== null && (!Array.isArray(sessionIds) || !sessionIds.length || sessionIds.length > maxReceipts || !sessionIds.every(label))) throw error('USAGE_SCOPE_REQUIRED');
-    if ((!label(sessionId) && !label(taskId) && sessionIds === null) || (sessionId !== null && !label(sessionId)) || (taskId !== null && !label(taskId))) throw error('USAGE_SCOPE_REQUIRED');
+    if (taskIds !== null && (!Array.isArray(taskIds) || !taskIds.length || taskIds.length > 7 || !taskIds.every(label))) throw error('USAGE_SCOPE_REQUIRED');
+    if ((!label(sessionId) && !label(taskId) && sessionIds === null && taskIds === null)
+      || (sessionId !== null && !label(sessionId)) || (taskId !== null && !label(taskId))) throw error('USAGE_SCOPE_REQUIRED');
     const sessions = sessionIds === null ? null : new Set(sessionIds);
-    const rows = load().receipts.filter(row => (!sessionId || row.sessionId === sessionId) && (!sessions || sessions.has(row.sessionId)) && (!taskId || row.taskId === taskId));
+    const tasks = taskIds === null ? null : new Set(taskIds);
+    const rows = load().receipts.filter(row => (!sessionId || row.sessionId === sessionId) && (!sessions || sessions.has(row.sessionId))
+      && (!taskId || row.taskId === taskId) && (!tasks || tasks.has(row.taskId)));
     const usages = rows.map(row => row.usage);
     const knownUsage = Object.fromEntries(TOKEN_FIELDS.map(key => [key, usages.some(u => finite(u[key])) ? usages.reduce((sum, u) => sum + (finite(u[key]) ? u[key] : 0), 0) : null]));
     const accountingComplete = rows.length > 0 && rows.every(row => row.accountingComplete && finite(row.usage.inputTokens) && finite(row.usage.outputTokens));

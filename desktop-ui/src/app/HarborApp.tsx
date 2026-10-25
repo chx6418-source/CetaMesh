@@ -1117,6 +1117,43 @@ function WorkPage({ workspaces, onRefreshWorkspaces, reviewTaskId, onReviewTaskO
       await refresh();
     } catch (cause) { setError(messageOf(cause)); }
   }
+  async function reviewAnalysisChild(task: Task, approve: boolean, summary: string, evidenceEventIds: string[]) {
+    try {
+      if (task.rev === null) throw new Error('Task revision is unavailable');
+      const result = await taskClient.reviewChild(task.id, task.rev, approve, summary, evidenceEventIds);
+      setSelectedTask(result.task);
+      await refresh();
+    } catch (cause) { setError(messageOf(cause)); }
+  }
+  async function createReadChild(task: Task, goal: string, scope: string, outputKind: 'analysis' | 'tool', supersedesChildId?: string) {
+    try {
+      if (task.rev === null || !task.workspaceId) throw new Error('Parent Task revision or Workspace is unavailable');
+      await taskClient.createChild({ parentTaskId: task.id, expectedParentRev: task.rev,
+        requestId: crypto.randomUUID(), goal, workspaceId: task.workspaceId, supersedesChildId,
+        contract: { mode: 'read-only', outputKind, readScope: [scope],
+          expectedEvidence: outputKind === 'tool' ? ['filesystem.read'] : ['source'] } });
+      setSelectedTask((await taskClient.get(task.id)).task);
+      await refresh();
+    } catch (cause) { setError(messageOf(cause)); }
+  }
+  async function finishTask(task: Task, summary: string) {
+    try {
+      if (task.rev === null) throw new Error('Task revision is unavailable');
+      const result = task.parentTaskId
+        ? await taskClient.completeChild(task.id, task.rev, summary)
+        : await taskClient.complete(task.id, task.rev, summary);
+      setSelectedTask(result.task);
+      await refresh();
+    } catch (cause) { setError(messageOf(cause)); }
+  }
+  async function verifyCompletedChild(task: Task) {
+    try {
+      if (task.rev === null) throw new Error('Task revision is unavailable');
+      const result = await taskClient.verifyChild(task.id, task.rev);
+      setSelectedTask(result.task);
+      await refresh();
+    } catch (cause) { setError(messageOf(cause)); }
+  }
   async function addWorkspace() {
     setWorkspaceError('');
     try {
@@ -1140,7 +1177,7 @@ function WorkPage({ workspaces, onRefreshWorkspaces, reviewTaskId, onReviewTaskO
     <div className="section-heading page-section-heading"><h2>最近工作区</h2><div className="row"><Input aria-label="工作区名称" placeholder="工作区名称（可选）" value={workspaceName} onChange={event => setWorkspaceName(event.target.value)} /><Button compact icon="add" onClick={() => void addWorkspace()} disabled={workspaceBusy}>{workspaceBusy ? '添加中…' : '添加工作区'}</Button></div></div>
     {workspaceError && <ErrorNotice error={workspaceError} />}{workspaces.length ? <div className="workspace-grid">{workspaces.map(workspace => <Card className="workspace-card" key={workspace.id}><div className="workspace-badge">CM</div><div className="workspace-card-body"><strong>{workspace.name}</strong><p>{workspace.status} · 最近活动 {relativeLabel(workspace.lastActivity)}</p></div><StatusBadge value={workspace.status} /></Card>)}</div> : <Surface className="workspace-empty"><p className="muted">尚未登记工作区。添加工作区时会使用 Windows 原生文件夹选择器。</p></Surface>}
     <Sheet open={taskSheet} title="新建任务" onClose={() => setTaskSheet(false)}><TaskCreateForm workspaces={workspaces} providers={handoffProviders} onCreated={async () => { setTaskSheet(false); await refresh(); }} /></Sheet>
-    <Sheet open={Boolean(selectedTask)} title={selectedTask?.title ?? '任务详情'} onClose={() => setSelectedTask(null)}>{selectedTask && <TaskDetails key={selectedTask.id} task={selectedTask} providers={handoffProviders} onHandoff={provider => void handoffTask(selectedTask, provider)} onAction={action => void taskAction(selectedTask, action)} onStart={provider => void taskAction(selectedTask, 'start', provider)} onReconcile={(summary, instruction, provider) => void reconcileTask(selectedTask, summary, instruction, provider)} />}</Sheet>
+    <Sheet open={Boolean(selectedTask)} title={selectedTask?.title ?? '任务详情'} onClose={() => setSelectedTask(null)}>{selectedTask && <TaskDetails key={selectedTask.id} task={selectedTask} providers={handoffProviders} onHandoff={provider => void handoffTask(selectedTask, provider)} onAction={action => void taskAction(selectedTask, action)} onStart={provider => void taskAction(selectedTask, 'start', provider)} onReconcile={(summary, instruction, provider) => void reconcileTask(selectedTask, summary, instruction, provider)} onReview={(approve, summary, ids) => void reviewAnalysisChild(selectedTask, approve, summary, ids)} onCreateChild={(goal, scope, kind, replace) => void createReadChild(selectedTask, goal, scope, kind, replace)} onComplete={summary => void finishTask(selectedTask, summary)} onVerifyChild={() => void verifyCompletedChild(selectedTask)} />}</Sheet>
   </div>;
 }
 
@@ -1293,13 +1330,65 @@ function TaskCreateForm({ workspaces, providers, onCreated }: { workspaces: { id
   return <form className="task-create-form" onSubmit={submit}><label>任务目标<textarea className="cm-textarea" aria-label="任务目标" value={goal} onChange={event => setGoal(event.target.value)} rows={4} maxLength={2000} placeholder="描述需要完成的工作和预期结果" required /></label><Select label="工作区" value={workspaceId} onChange={event => setWorkspaceId(event.target.value)}><option value="">选择工作区</option>{workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}</Select><Select label="执行者" value={agentProvider} onChange={event => setAgentProvider(event.target.value)}><option value="">选择可用 Agent</option>{providers.map(item => <option key={item.id} value={item.id} disabled={!item.eligible}>{item.name}{item.eligible ? '' : ` · 不可用：${item.reason ?? '能力或健康未验证'}`}</option>)}</Select>{error && <ErrorNotice error={error} />}<Button variant="primary" type="submit" disabled={busy || !goal.trim() || !workspaceId || !agentProvider}>{busy ? '创建中…' : '创建任务'}</Button></form>;
 }
 
-export function TaskDetails({ task, providers, onHandoff, onAction, onStart, onReconcile }: { task: Task; providers: { id: string; name: string; eligible: boolean }[]; onHandoff(provider: string): void; onAction(action: 'start' | 'pause' | 'resume' | 'cancel'): void; onStart(provider: string): void; onReconcile(summary: string, instruction: string, provider?: string): void }) {
+function TaskCollaborationSummary({ task, onReview, onCreateChild, onVerifyChild }: { task: Task;
+  onReview(approve: boolean, summary: string, evidenceEventIds: string[]): void;
+  onVerifyChild(): void;
+  onCreateChild(goal: string, scope: string, outputKind: 'analysis' | 'tool', supersedesChildId?: string): void }) {
+  const children = task.children ?? [];
+  const attempts = task.attempts ?? [];
+  const executionEvidence = task.executionEvidence ?? [];
+  const [reviewText, setReviewText] = useState('');
+  const [childGoal, setChildGoal] = useState('');
+  const [childScope, setChildScope] = useState('');
+  const [childKind, setChildKind] = useState<'analysis' | 'tool'>('analysis');
+  const [replacement, setReplacement] = useState('');
+  const lastSourceEvidence = executionEvidence.filter(item =>
+    ['filesystem.read', 'filesystem.search'].includes(item.capability)).at(-1);
+  if (!task.parentTaskId && !children.length && !['queued', 'running', 'paused'].includes(task.status)) return null;
+  return <section aria-label="Task collaboration"><h3>协作与核验</h3>
+    {task.parentTaskId && <p>父任务：{task.parentTaskId} · 核验：{task.verification || 'NEEDS_REVIEW'}</p>}
+    {attempts.length > 0 && <p>执行尝试：{attempts.map(item => `${item.provider} ${item.state}`).join(' · ')}</p>}
+    {!task.parentTaskId && task.status === 'running' && <p>Pause the parent execution before creating read-only children in this Workspace.</p>}
+    {!task.parentTaskId && ['queued', 'paused'].includes(task.status) && <div>
+      <p>最多同时执行两个只读子任务。创建后由 Owner 选择执行者并启动。</p>
+      <label>子任务目标<input value={childGoal} onChange={event => setChildGoal(event.target.value)} maxLength={2000} /></label>
+      <label>相对读取范围<input value={childScope} onChange={event => setChildScope(event.target.value)} maxLength={1000} /></label>
+      <label>结果类型<select value={childKind} onChange={event => setChildKind(event.target.value as 'analysis' | 'tool')}>
+        <option value="analysis">分析，需 Owner 核验</option><option value="tool">文件读取结果</option>
+      </select></label>
+      <label>替代失败子任务<select value={replacement} onChange={event => setReplacement(event.target.value)}>
+        <option value="">不替代</option>{children.filter(child => ['failed', 'cancelled'].includes(child.status)
+          && !children.some(row => row.supersedesChildId === child.id))
+          .map(child => <option key={child.id} value={child.id}>{child.title}</option>)}
+      </select></label>
+      <Button disabled={!childGoal.trim() || !childScope.trim()}
+        onClick={() => onCreateChild(childGoal.trim(), childScope.trim(), childKind, replacement || undefined)}>创建只读子任务</Button>
+    </div>}
+    {task.parentTaskId && task.childOutputKind === 'analysis' && task.status === 'completed'
+      && task.verification !== 'VERIFIED' && <div>
+        <label>Owner 核验说明<textarea className="cm-textarea" value={reviewText}
+          onChange={event => setReviewText(event.target.value)} rows={3} maxLength={2000} /></label>
+        <div className="row"><Button disabled={!reviewText.trim() || lastSourceEvidence?.status !== 'completed'}
+          onClick={() => onReview(true, reviewText, lastSourceEvidence ? [lastSourceEvidence.eventId] : [])}>确认分析证据</Button>
+        <Button disabled={!reviewText.trim()} onClick={() => onReview(false, reviewText, [])}>退回审阅</Button></div>
+      </div>}
+    {task.parentTaskId && task.childOutputKind === 'tool' && task.status === 'completed'
+      && task.verification !== 'VERIFIED' && <Button onClick={onVerifyChild}>Recheck observed evidence</Button>}
+    {children.map(child => <div key={child.id} className="task-child-summary">
+      <p><strong>{child.title}</strong> · {child.status} · {child.agent || '未分配'} · {child.verification}</p>
+      <small>Attempt {child.attemptCount}</small><UsageSummary usage={child.usage} label="子任务用量" />
+    </div>)}
+  </section>;
+}
+
+export function TaskDetails({ task, providers, onHandoff, onAction, onStart, onReconcile, onReview, onCreateChild, onComplete, onVerifyChild }: { task: Task; providers: { id: string; name: string; eligible: boolean }[]; onHandoff(provider: string): void; onAction(action: 'start' | 'pause' | 'resume' | 'cancel'): void; onStart(provider: string): void; onReconcile(summary: string, instruction: string, provider?: string): void; onReview(approve: boolean, summary: string, evidenceEventIds: string[]): void; onCreateChild(goal: string, scope: string, outputKind: 'analysis' | 'tool', supersedesChildId?: string): void; onComplete(summary: string): void; onVerifyChild(): void }) {
   const [handoffProvider, setHandoffProvider] = useState('');
   const [startProvider, setStartProvider] = useState('');
   const [reviewSummary, setReviewSummary] = useState('');
   const [nextInstruction, setNextInstruction] = useState('');
   const [recoveryProvider, setRecoveryProvider] = useState('');
-  return <div className="task-details">{task.status === "queued" && task.workspaceId && <section><h3>启动任务</h3><div className="row"><Select label="执行者" value={startProvider} onChange={event => setStartProvider(event.target.value)}><option value="">选择可用 Agent</option>{providers.filter(item => item.eligible).map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</Select><Button disabled={!startProvider} onClick={() => onStart(startProvider)}>启动</Button></div></section>}<div className="row between"><StatusBadge value={task.status} /><small>更新于 {dateLabel(task.updatedAt)}</small></div><p>{task.goal}</p><UsageSummary usage={task.usage} label="任务累计用量" />{task.currentPhase && <section><h3>当前阶段</h3><p>{task.currentPhase}</p></section>}{task.progress.note && <section><h3>进度说明</h3><p>{task.progress.note}</p></section>}{task.checkpoint && <section><h3>检查点</h3><p>{task.checkpoint.summary}</p>{task.checkpoint.nextAction && <small>下一步：{task.checkpoint.nextAction}</small>}</section>}{task.result && <section><h3>执行结果</h3><p>{task.result.summary}</p></section>}<section><h3>交付物</h3>{task.artifacts.length ? task.artifacts.map(item => <ArtifactCard key={item.id} taskId={task.id} artifact={item} />) : <p className="muted">暂无交付物。</p>}</section>{task.failure?.reason && <section><h3>中断或失败原因</h3><p>{task.failure.reason}</p></section>}<section><h3>执行证据</h3>{task.executionEvidence.length ? task.executionEvidence.slice(-20).reverse().map(item => <p key={item.eventId}><strong>{item.capability}</strong> · {item.status}{item.tool ? ` · ${item.tool}` : ""}{item.exitCode !== null ? ` · exit ${item.exitCode}` : ""}{item.filePath ? ` · ${item.filePath}` : ""} · Task rev {item.taskRev}</p>) : <p className="muted">暂无工具或测试执行记录。</p>}</section><section><h3>执行者与交接记录</h3>{task.agentHistory.length ? task.agentHistory.map((item, index) => <p key={`${item.sessionId}-${index}`}><strong>{item.provider}</strong> · {dateLabel(item.attachedAt)}{item.detachedAt ? ` → ${dateLabel(item.detachedAt)}` : " · 当前执行者"}{item.note ? ` · ${item.note}` : ""}</p>) : <p className="muted">暂无执行者记录。</p>}</section>{task.currentAgent && ["queued", "running", "waiting", "blocked", "paused"].includes(task.status) && <section><h3>转交执行者</h3><div className="row"><Select label="目标 Agent" value={handoffProvider} onChange={event => setHandoffProvider(event.target.value)}><option value="">选择 Agent</option>{providers.filter(item => item.eligible && item.id !== task.currentAgent?.provider).map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</Select><Button disabled={!handoffProvider} onClick={() => onHandoff(handoffProvider)}>交接任务</Button></div></section>}{/needs-reconciliation|interrupted after Core restart/i.test(task.progress.note) && <section><h3>人工核对后恢复</h3><p>先核对工作区和上次操作的实际结果，再给出新的执行指令；不会重放中断前的工具调用。</p>{!task.currentAgent && <Select label="恢复执行者" value={recoveryProvider} onChange={event => setRecoveryProvider(event.target.value)}><option value="">选择恢复任务的 Agent</option>{providers.filter(item => item.eligible).map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</Select>}<label>核对结果<textarea className="cm-textarea" value={reviewSummary} onChange={event => setReviewSummary(event.target.value)} rows={3} maxLength={1000} /></label><label>新的执行指令<textarea className="cm-textarea" value={nextInstruction} onChange={event => setNextInstruction(event.target.value)} rows={4} maxLength={32000} /></label><Button disabled={!reviewSummary.trim() || !nextInstruction.trim() || (!task.currentAgent && !providers.some(item => item.id === recoveryProvider && item.eligible))} onClick={() => onReconcile(reviewSummary, nextInstruction, task.currentAgent?.provider || recoveryProvider)}>确认核对并执行新指令</Button></section>}<div className="row task-detail-actions">{['working', 'running'].includes(task.status) ? <Button onClick={() => onAction('pause')}>暂停任务</Button> : ['paused', 'waiting', 'blocked'].includes(task.status) && !/needs-reconciliation|Owner reviewed interrupted effect/i.test(task.progress.note) ? <Button onClick={() => onAction('resume')}>继续任务</Button> : null}{!['completed', 'cancelled', 'failed'].includes(task.status) && <Button variant="danger" onClick={() => onAction('cancel')}>取消任务</Button>}</div></div>;
+  const [completionSummary, setCompletionSummary] = useState('');
+  return <div className="task-details"><section><h3>Owner result review</h3><label>Verified result summary<textarea className="cm-textarea" value={completionSummary} onChange={event => setCompletionSummary(event.target.value)} rows={3} maxLength={1000} /></label><Button disabled={task.status !== 'running' || !completionSummary.trim() || (task.parentTaskId ? task.attempts?.at(-1)?.state !== 'completed' : (task.children?.length ? task.children.filter(child => !task.children.some(other => other.supersedesChildId === child.id)).some(child => child.status !== 'completed' || child.verification !== 'VERIFIED') : !task.executionEvidence?.some(row => row.status === 'completed')))} onClick={() => onComplete(completionSummary.trim())}>Confirm result</Button></section><TaskCollaborationSummary task={task} onReview={onReview} onCreateChild={onCreateChild} onVerifyChild={onVerifyChild} />{task.status === "queued" && task.workspaceId && <section><h3>启动任务</h3><div className="row"><Select label="执行者" value={startProvider} onChange={event => setStartProvider(event.target.value)}><option value="">选择可用 Agent</option>{providers.filter(item => item.eligible).map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</Select><Button disabled={!startProvider} onClick={() => onStart(startProvider)}>启动</Button></div></section>}<div className="row between"><StatusBadge value={task.status} /><small>更新于 {dateLabel(task.updatedAt)}</small></div><p>{task.goal}</p><UsageSummary usage={task.usage} label="任务累计用量" />{task.currentPhase && <section><h3>当前阶段</h3><p>{task.currentPhase}</p></section>}{task.progress.note && <section><h3>进度说明</h3><p>{task.progress.note}</p></section>}{task.checkpoint && <section><h3>检查点</h3><p>{task.checkpoint.summary}</p>{task.checkpoint.nextAction && <small>下一步：{task.checkpoint.nextAction}</small>}</section>}{task.result && <section><h3>执行结果</h3><p>{task.result.summary}</p></section>}<section><h3>交付物</h3>{task.artifacts.length ? task.artifacts.map(item => <ArtifactCard key={item.id} taskId={task.id} artifact={item} />) : <p className="muted">暂无交付物。</p>}</section>{task.failure?.reason && <section><h3>中断或失败原因</h3><p>{task.failure.reason}</p></section>}<section><h3>执行证据</h3>{task.executionEvidence.length ? task.executionEvidence.slice(-20).reverse().map(item => <p key={item.eventId}><strong>{item.capability}</strong> · {item.status}{item.tool ? ` · ${item.tool}` : ""}{item.exitCode !== null ? ` · exit ${item.exitCode}` : ""}{item.filePath ? ` · ${item.filePath}` : ""} · Task rev {item.taskRev}</p>) : <p className="muted">暂无工具或测试执行记录。</p>}</section><section><h3>执行者与交接记录</h3>{task.agentHistory.length ? task.agentHistory.map((item, index) => <p key={`${item.sessionId}-${index}`}><strong>{item.provider}</strong> · {dateLabel(item.attachedAt)}{item.detachedAt ? ` → ${dateLabel(item.detachedAt)}` : " · 当前执行者"}{item.note ? ` · ${item.note}` : ""}</p>) : <p className="muted">暂无执行者记录。</p>}</section>{task.currentAgent && ["queued", "running", "waiting", "blocked", "paused"].includes(task.status) && <section><h3>转交执行者</h3><div className="row"><Select label="目标 Agent" value={handoffProvider} onChange={event => setHandoffProvider(event.target.value)}><option value="">选择 Agent</option>{providers.filter(item => item.eligible && item.id !== task.currentAgent?.provider).map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</Select><Button disabled={!handoffProvider} onClick={() => onHandoff(handoffProvider)}>交接任务</Button></div></section>}{/needs-reconciliation|interrupted after Core restart/i.test(task.progress.note) && <section><h3>人工核对后恢复</h3><p>先核对工作区和上次操作的实际结果，再给出新的执行指令；不会重放中断前的工具调用。</p>{!task.currentAgent && <Select label="恢复执行者" value={recoveryProvider} onChange={event => setRecoveryProvider(event.target.value)}><option value="">选择恢复任务的 Agent</option>{providers.filter(item => item.eligible).map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</Select>}<label>核对结果<textarea className="cm-textarea" value={reviewSummary} onChange={event => setReviewSummary(event.target.value)} rows={3} maxLength={1000} /></label><label>新的执行指令<textarea className="cm-textarea" value={nextInstruction} onChange={event => setNextInstruction(event.target.value)} rows={4} maxLength={32000} /></label><Button disabled={!reviewSummary.trim() || !nextInstruction.trim() || (!task.currentAgent && !providers.some(item => item.id === recoveryProvider && item.eligible))} onClick={() => onReconcile(reviewSummary, nextInstruction, task.currentAgent?.provider || recoveryProvider)}>确认核对并执行新指令</Button></section>}<div className="row task-detail-actions">{['working', 'running'].includes(task.status) ? <Button onClick={() => onAction('pause')}>暂停任务</Button> : ['paused', 'waiting', 'blocked'].includes(task.status) && !/needs-reconciliation|Owner reviewed interrupted effect/i.test(task.progress.note) ? <Button onClick={() => onAction('resume')}>继续任务</Button> : null}{!['completed', 'cancelled', 'failed'].includes(task.status) && <Button variant="danger" onClick={() => onAction('cancel')}>取消任务</Button>}</div></div>;
 }
 
 export function mergeAgentHealth(previous: Agent, health: Agent): Agent {

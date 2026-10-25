@@ -26,6 +26,12 @@ export interface Task {
   id: string; title: string; goal: string; status: string; currentPhase: string;
   progress: { percent: number; note: string }; workspaceId: string | null; agent: string | null;
   currentAgent: { provider: string; sessionId: string } | null;
+  parentTaskId: string | null; verification: string | null; attemptCount: number;
+  childOutputKind: string | null;
+  attempts: { id: string; provider: string; state: string; at: string | number | null;
+    updatedAt: string | number | null }[];
+  children: { id: string; title: string; status: string; agent: string | null; supersedesChildId: string | null;
+    verification: string; attemptCount: number; usage: ModelUsage | null }[];
   createdAt: string | number | null; updatedAt: string | number | null; rev: number | null;
   checkpoint: { summary: string; nextAction: string } | null; result: { summary: string } | null;
   artifacts: { id: string; kind: string; label: string; createdAt: string | number | null }[];
@@ -138,7 +144,7 @@ type UiMethod =
   | 'ui.events.next'
   | 'ui.chat.sessions.list' | 'ui.chat.sessions.create' | 'ui.chat.sessions.rename' | 'ui.chat.sessions.archive' | 'ui.chat.sessions.delete'
   | 'ui.chat.history' | 'ui.chat.status' | 'ui.chat.send' | 'ui.chat.stop' | 'ui.chat.retry' | 'ui.chat.continue' | 'ui.chat.catalog' | 'ui.chat.config.set'
-  | 'ui.task.overview' | 'ui.task.get' | 'ui.task.outcome.verify' | 'ui.task.create' | 'ui.task.start' | 'ui.task.pause' | 'ui.task.resume' | 'ui.task.reconcile' | 'ui.task.cancel' | 'ui.task.handoff'
+  | 'ui.task.overview' | 'ui.task.get' | 'ui.task.outcome.verify' | 'ui.task.child.create' | 'ui.task.child.review' | 'ui.task.child.complete' | 'ui.task.child.verify' | 'ui.task.complete' | 'ui.task.create' | 'ui.task.start' | 'ui.task.pause' | 'ui.task.resume' | 'ui.task.reconcile' | 'ui.task.cancel' | 'ui.task.handoff'
   | 'ui.workshop.proposals' | 'ui.workshop.proposal' | 'ui.workshop.review' | 'ui.workshop.retry' | 'ui.workshop.task.status' | 'ui.workshop.deliver'
   | 'ui.workspace.list' | 'ui.workspace.open' | 'ui.workspace.create'
   | 'ui.memory.overview' | 'ui.memory.get' | 'ui.memory.create' | 'ui.memory.update' | 'ui.memory.pin' | 'ui.memory.delete'
@@ -300,6 +306,17 @@ export const chatClient = {
 export const taskClient = {
   overview: (query = '', status = '') => uiCall<{ tasks: Task[]; total: number; counts: Record<string, number>; needsAttention: string[] }>('ui.task.overview', { query, status, limit: 100 }),
   get: (id: string) => uiCall<{ task: Task }>('ui.task.get', { id }),
+    createChild: (input: { parentTaskId: string; expectedParentRev: number; goal: string; requestId: string;
+      workspaceId: string; supersedesChildId?: string; contract: { mode: 'read-only'; outputKind: 'analysis' | 'tool';
+        readScope: string[]; expectedEvidence: string[] } }) => uiCall<{ task: Task }>('ui.task.child.create', input),
+    reviewChild: (id: string, expectedRev: number, approve: boolean, reviewSummary: string, evidenceEventIds: string[]) =>
+      uiCall<{ task: Task }>('ui.task.child.review', { id, expectedRev, approve, reviewSummary, evidenceEventIds }),
+    completeChild: (id: string, expectedRev: number, summary: string) =>
+      uiCall<{ task: Task }>('ui.task.child.complete', { id, expectedRev, summary }),
+    verifyChild: (id: string, expectedRev: number) =>
+      uiCall<{ task: Task }>('ui.task.child.verify', { id, expectedRev }),
+    complete: (id: string, expectedRev: number, summary: string) =>
+      uiCall<{ task: Task }>('ui.task.complete', { id, expectedRev, summary, reviewed: true }),
   verifyOutcome: (id: string, input: { kind: 'code' | 'file' | 'tool' | 'analysis'; expectedFile?: string; expectedSha256?: string; expectedCapability?: string }) =>
     uiCall<{ status: 'VERIFIED' | 'NEEDS_REVIEW'; kind: string; evidenceEventIds: string[]; reasons: string[] }>('ui.task.outcome.verify', { id, ...input }),
   create: (input: { goal: string; requirements?: string[]; workspaceId?: string | null; agentProvider?: string; requestId?: string; note?: string }) => uiCall<{ task: Task }>('ui.task.create', input),

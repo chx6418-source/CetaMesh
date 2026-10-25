@@ -67,6 +67,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
   let grants = file ? readJsonFile(file, { missing: {} }) : {};
   const provisioning = new Map();
   const workspaceProvisioning = new Map();
+  const workspaceReadProvisioning = new Map();
   let taskHandoffGuard = () => false;
   const taskFollowConsumers = new Map();
   // Native DSH Follow can end after every completed turn. Retain a bounded
@@ -202,6 +203,21 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
               }
               if (turnId && terminalTurns.has(turnId)) continue;
               if (turnId) { terminalTurns.add(turnId); if (terminalTurns.size > 256) terminalTurns.delete(terminalTurns.values().next().value); }
+              const attemptTask = taskFor(taskId);
+              const childAttempt = attemptTask?.parentTaskId && (attemptTask.attempts ?? []).find(row =>
+                row.provider === provider && row.sessionId === sessionId
+                && ['started', 'accepted'].includes(row.state)
+                && ((event.data?.runId && row.requestId === event.data.runId)
+                  || (turnId && row.nativeRequestId === turnId)));
+              if (childAttempt) {
+                const reasonKind = event.data?.reason?.kind;
+                taskRuntime.settleAttempt({ id: taskId, expectedRev: attemptTask.rev,
+                  requestId: childAttempt.requestId, nativeRequestId: turnId,
+                  state: reasonKind === 'completed' ? 'completed'
+                    : reasonKind === 'aborted' ? 'cancelled'
+                      : ['failed', 'error'].includes(reasonKind) ? 'failed' : 'unknown',
+                  reason: String(event.data?.reason?.error?.code ?? reasonKind ?? 'unknown').slice(0, 200) });
+              }
               const answer = answers.get(turnId);
               answers.delete(turnId);
               const current = taskFor(taskId);
@@ -377,20 +393,26 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
   function grantTask(taskId, value) {
     const task = taskFor(taskId);
     if (!task?.workspaceId) throw capabilityError('WORKSPACE_REQUIRED', 'Task workspace required');
+    const readOnlyChild = task.parentTaskId && task.childContract?.mode === 'read-only';
     // 默认 Agent 能力集（v2 final security）：**不含 test.run**。
     // Agent 可以默认修改 Workspace ≠ Agent 可以默认执行 Workspace 代码——
     // test.run 执行的是 Agent 可经 filesystem.write 修改的项目代码（package.json
     // 脚本 / 测试 / 构建脚本），allowlist 只防命令注入、防不了项目代码本身。
     // 需要 test.run 的任务必须显式传入（Workshop Owner 勾选 / Smart 路径显式
     // request-only grant），且每一次执行仍需 Owner Approve Once（risk=high）。
-    const capabilities = new Set(value?.capabilities ?? ['filesystem.read', 'filesystem.write', 'filesystem.search', 'git.status', 'git.diff', 'memory.read', ...(evidenceStore ? ['context.evidence.read'] : [])]);
+    if (readOnlyChild && value?.capabilities?.some(id => !['filesystem.read', 'filesystem.search'].includes(id))) {
+      throw capabilityError('TASK_CHILD_READ_ONLY', 'Child grant cannot advertise write or unrelated tools');
+    }
+    const capabilities = new Set(readOnlyChild ? ['filesystem.read', 'filesystem.search']
+      : value?.capabilities ?? ['filesystem.read', 'filesystem.write', 'filesystem.search', 'git.status', 'git.diff', 'memory.read', ...(evidenceStore ? ['context.evidence.read'] : [])]);
     if (capabilities.has('filesystem.write')) capabilities.add('workspace.apply');
     for (const id of capabilities) broker.registry.require(id);
     if ((value?.workspaceIds ?? [task.workspaceId]).some(id => id !== task.workspaceId)) {
       throw capabilityError('WORKSPACE_NOT_AUTHORIZED', 'A Task grant cannot include another workspace');
     }
     grants[taskId] = { capabilities: [...capabilities], workspaceIds: [task.workspaceId], taskIds: [taskId],
-      scopes: [`task:${taskId}`, `workspace:${task.workspaceId}`], types: ['working', 'task', 'workspace', 'knowledge', 'skill'] };
+      scopes: readOnlyChild ? [`task:${taskId}`] : [`task:${taskId}`, `workspace:${task.workspaceId}`],
+      types: readOnlyChild ? ['task'] : ['working', 'task', 'workspace', 'knowledge', 'skill'] };
     saveGrants();
     return principalForTask(taskId);
   }
@@ -400,13 +422,22 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     if (!grants[taskId]) return { refreshed: false, actor: null };
     grants[taskId].workspaceIds = [task.workspaceId];
     grants[taskId].taskIds = [taskId];
-    grants[taskId].scopes = [...new Set([...(grants[taskId].scopes ?? []).filter(scope => !String(scope).startsWith('workspace:')), `workspace:${task.workspaceId}`])];
+    grants[taskId].scopes = task.parentTaskId && task.childContract?.mode === 'read-only'
+      ? [`task:${taskId}`]
+      : [...new Set([...(grants[taskId].scopes ?? []).filter(scope => !String(scope).startsWith('workspace:')), `workspace:${task.workspaceId}`])];
     saveGrants();
     return { refreshed: true, actor: principalForTask(taskId) };
   }
   function principalForTask(taskId) {
-    if (!grants[taskId] || !taskFor(taskId)) throw capabilityError('TASK_NOT_AUTHORIZED', taskId);
-    return { kind: 'agent', id: `task:${taskId}`, grants: structuredClone(grants[taskId]) };
+    const task = taskFor(taskId);
+    if (!grants[taskId] || !task) throw capabilityError('TASK_NOT_AUTHORIZED', taskId);
+    const projected = structuredClone(grants[taskId]);
+    if (task.parentTaskId && task.childContract?.mode === 'read-only') {
+      projected.capabilities = projected.capabilities.filter(id => ['filesystem.read', 'filesystem.search'].includes(id));
+      projected.scopes = [`task:${taskId}`];
+      projected.types = ['task'];
+    }
+    return { kind: 'agent', id: `task:${taskId}`, grants: projected };
   }
   function memoryPrincipal(actor) {
     if (actor.kind === 'owner') return { kind: 'user', id: actor.id };
@@ -668,8 +699,28 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       if (/needs-reconciliation|approval-pending/i.test(task.progress?.note ?? '')) {
         throw capabilityError('NEEDS_RECONCILIATION', 'Task has an unreviewed interrupted effect or approval');
       }
+      if ((task.attempts ?? []).some(row => ['started', 'unknown'].includes(row.state) && row.requestId !== r.requestId)) {
+        throw capabilityError('NEEDS_RECONCILIATION', 'Prior Agent Attempt has an unconfirmed effect');
+      }
       if (taskHandoffGuard(task.id)) throw capabilityError('TASK_HANDOFF_IN_FLIGHT', 'Task Handoff owns this execution boundary');
       const provider = String(r.input.agentProvider || r.input.provider || 'cetamesh');
+      const readOnlyChild = Boolean(task.parentTaskId && task.childContract?.mode === 'read-only');
+      const assertChildParentActive = () => {
+        if (!readOnlyChild) return;
+        taskRuntime.assertChildParentCurrent({ id: task.id, workspaceId: r.workspaceId });
+      };
+      if (readOnlyChild && provider !== 'cetamesh') {
+        throw capabilityError('AGENT_READ_ONLY_BOUNDARY_UNVERIFIED', 'Native external Agent has no verified read-only Workspace boundary');
+      }
+      assertChildParentActive();
+      const health = await agentBroker.health(provider);
+      if (health?.available !== true || health?.disabled === true || health?.enabled === false
+        || health?.ready === false || health?.reachable === false || health?.installed === false
+        || health?.authenticated === false || health?.sessionCapable === false
+        || health?.taskEligible === false || health?.compatible === false
+        || (provider !== 'cetamesh' && (health?.authenticated !== true || health?.sessionCapable !== true))) {
+        throw capabilityError('PROVIDER_UNAVAILABLE', 'Agent Provider is not currently eligible for Task execution');
+      }
       const boundary = agentBroker?.capabilities(provider)?.workspaceBoundary;
       if (!['capability-broker', 'staged-capability-broker', 'native-staged'].includes(boundary)) {
         throw capabilityError('AGENT_BOUNDARY_UNSUPPORTED', 'Provider has no enforced Capability Broker workspace boundary');
@@ -678,13 +729,23 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       if (task.currentAgent && task.currentAgent.provider !== provider) {
         throw capabilityError('AGENT_PROVIDER_SWITCH_REQUIRES_CONTINUITY', 'An existing Task must change Agent Providers through Continuity Fresh Session');
       }
-      const otherOwner = taskRuntime.activeWorkspaceOwner({ workspaceId: task.workspaceId, exceptTaskId: task.id });
+      const otherOwner = taskRuntime.activeWorkspaceOwner({ workspaceId: task.workspaceId,
+        exceptTaskId: task.id, forReadOnlyTaskId: readOnlyChild ? task.id : null });
       const reservation = workspaceProvisioning.get(task.workspaceId);
-      if (otherOwner || (reservation && reservation.taskId !== task.id)) {
+      const readReservations = workspaceReadProvisioning.get(task.workspaceId);
+      const activeReaders = taskRuntime.activeWorkspaceReaders({ workspaceId: task.workspaceId, exceptTaskId: task.id });
+      const otherReaders = new Set([...activeReaders.map(row => row.id), ...(readReservations?.keys() ?? [])]);
+      otherReaders.delete(task.id);
+      if (otherOwner || (reservation && reservation.taskId !== task.id)
+        || (!readOnlyChild && readReservations?.size) || (readOnlyChild && otherReaders.size >= 2)) {
         throw Object.assign(capabilityError('TASK_WORKSPACE_BUSY', '工作区仍由另一任务持有写入权；请先查看占用任务并核验，或切换工作区。'),
-          { blockingTaskId: otherOwner?.id ?? reservation.taskId });
+          { blockingTaskId: otherOwner?.id ?? reservation?.taskId ?? otherReaders.values().next().value });
       }
-      workspaceProvisioning.set(task.workspaceId, { taskId: task.id, count: (reservation?.count ?? 0) + 1 });
+      if (readOnlyChild) {
+        const held = readReservations ?? new Map();
+        held.set(task.id, (held.get(task.id) ?? 0) + 1);
+        workspaceReadProvisioning.set(task.workspaceId, held);
+      } else workspaceProvisioning.set(task.workspaceId, { taskId: task.id, count: (reservation?.count ?? 0) + 1 });
       const previous = provisioning.get(task.id);
       const pending = (async () => {
         if (previous) {
@@ -704,7 +765,9 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
         if (!['queued', 'running'].includes(task.status)) {
           throw capabilityError('TASK_NOT_RUNNING', 'Task is paused or ended; resume it before dispatching Agent work');
         }
-        const queuedOwner = taskRuntime.activeWorkspaceOwner({ workspaceId: task.workspaceId, exceptTaskId: task.id });
+        assertChildParentActive();
+        const queuedOwner = taskRuntime.activeWorkspaceOwner({ workspaceId: task.workspaceId,
+          exceptTaskId: task.id, forReadOnlyTaskId: readOnlyChild ? task.id : null });
         if (queuedOwner) {
           throw Object.assign(capabilityError('TASK_WORKSPACE_BUSY', '工作区写入权已由另一任务持有；请查看占用任务后核验。'),
             { blockingTaskId: queuedOwner.id });
@@ -722,8 +785,14 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
             if (beforeSend?.status !== 'running' || beforeSend.currentAgent?.sessionId !== task.currentAgent.sessionId) {
               throw capabilityError('TASK_NOT_RUNNING', 'Task changed before Agent instruction dispatch');
             }
-            const sent = await agentBroker.send({ ...task.currentAgent, content: String(r.input.content || task.goal) });
+            assertChildParentActive();
+            if (readOnlyChild) taskRuntime.recordAttempt({ id: task.id, expectedRev: beforeSend.rev,
+              provider, sessionId: task.currentAgent.sessionId, requestId: r.requestId, state: 'started' });
+            const sent = await agentBroker.send({ ...task.currentAgent, content: String(r.input.content || task.goal),
+              ...(readOnlyChild ? { runId: r.requestId } : {}) });
             if (sent?.accepted !== true) throw capabilityError('AGENT_SEND_REJECTED', 'Agent did not accept Task instruction');
+            if (readOnlyChild) taskRuntime.settleAttempt({ id: task.id, expectedRev: taskFor(task.id).rev,
+              requestId: r.requestId, state: 'accepted', nativeRequestId: sent?.requestId ?? sent?.turnId });
             const afterSend = taskFor(task.id);
             if (!afterSend || ['queued', 'paused', 'waiting', 'blocked', 'cancelled'].includes(afterSend.status)
               || (afterSend.status === 'running' && afterSend.currentAgent?.sessionId !== task.currentAgent.sessionId)) {
@@ -775,8 +844,14 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
           if (beforeSend?.status !== 'running' || beforeSend.currentAgent?.sessionId !== created.sessionId) {
             throw capabilityError('TASK_NOT_RUNNING', 'Task changed before Agent instruction dispatch');
           }
-          const sent = await agentBroker.send({ provider, sessionId: created.sessionId, content: String(r.input.content || task.goal) });
+          assertChildParentActive();
+          if (readOnlyChild) taskRuntime.recordAttempt({ id: task.id, expectedRev: beforeSend.rev,
+            provider, sessionId: created.sessionId, requestId: r.requestId, state: 'started' });
+          const sent = await agentBroker.send({ provider, sessionId: created.sessionId, content: String(r.input.content || task.goal),
+            ...(readOnlyChild ? { runId: r.requestId } : {}) });
           if (sent?.accepted !== true) throw capabilityError('AGENT_SEND_REJECTED', 'Agent did not accept Task instruction');
+          if (readOnlyChild) taskRuntime.settleAttempt({ id: task.id, expectedRev: taskFor(task.id).rev,
+            requestId: r.requestId, state: 'accepted', nativeRequestId: sent?.requestId ?? sent?.turnId });
           const afterSend = taskFor(task.id);
           if (!afterSend || ['queued', 'paused', 'waiting', 'blocked', 'cancelled'].includes(afterSend.status)
             || (afterSend.status === 'running' && afterSend.currentAgent?.sessionId !== created.sessionId)) {
@@ -821,6 +896,15 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       provisioning.set(task.id, pending);
       try { return await pending; } finally {
         if (provisioning.get(task.id) === pending) provisioning.delete(task.id);
+        if (readOnlyChild) {
+          const readers = workspaceReadProvisioning.get(task.workspaceId);
+          if (readers?.has(task.id)) {
+            const count = readers.get(task.id);
+            if (count > 1) readers.set(task.id, count - 1);
+            else readers.delete(task.id);
+            if (!readers.size) workspaceReadProvisioning.delete(task.workspaceId);
+          }
+        }
         const held = workspaceProvisioning.get(task.workspaceId);
         if (held?.taskId === task.id) {
           if (held.count > 1) workspaceProvisioning.set(task.workspaceId, { taskId: task.id, count: held.count - 1 });

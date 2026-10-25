@@ -491,6 +491,15 @@ export function createContinuityRuntime({
    */
   async function rollover({ taskId, reason, targetProvider, coding, relevantFiles, workspaceFacts, modelProvider, model, reasoningEffort } = {}) {
     const task = requireTask(taskId);
+    if (task.parentTaskId && task.childContract?.mode === 'read-only'
+      && targetProvider && targetProvider !== 'cetamesh') {
+      throw continuityError('AGENT_READ_ONLY_BOUNDARY_UNVERIFIED', 'Child Task cannot hand off to an external native Agent without a verified read-only boundary');
+    }
+    if ((!task.parentTaskId && taskRuntime.activeWorkspaceReaders({ workspaceId: task.workspaceId }).length)
+      || (task.parentTaskId && taskRuntime.activeWorkspaceOwner({ workspaceId: task.workspaceId,
+        exceptTaskId: task.id, forReadOnlyTaskId: task.id }))) {
+      throw continuityError('ROLLOVER_NOT_SAFE', 'Workspace execution owner conflicts with Task handoff');
+    }
     if (!task.workspaceId) throw continuityError('WORKSPACE_REQUIRED', 'Continuity requires a Task-bound Workspace');
     if (inFlight.has(task.id)) {
       throw continuityError('ROLLOVER_IN_FLIGHT', '该任务已有一次 rollover 正在进行，拒绝重复执行');
