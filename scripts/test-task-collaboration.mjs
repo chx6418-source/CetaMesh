@@ -4,7 +4,6 @@ import os from 'node:os';
 import path from 'node:path';
 import { createTaskService } from '../src/task/service.js';
 import { createCapabilityPolicy } from '../src/capability/policy.js';
-import { resolveInside } from '../src/workspace/boundary.js';
 
 const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-collaboration-'));
 try {
@@ -46,27 +45,19 @@ try {
   assert.equal(a2.id, child.id);
   fs.mkdirSync(path.join(stateDir, 'src', 'task'), { recursive: true });
   fs.writeFileSync(path.join(stateDir, 'src', 'task', 'runtime.js'), 'fixture');
-  const policy = createCapabilityPolicy({ resolveWorkspace: id => ({ id, root: stateDir }),
+  // Match Workspace registry semantics: CI Temp may be an alias/junction, while
+  // registered roots are canonicalized before capability checks.
+  const workspaceRoot = fs.realpathSync.native(stateDir);
+  const policy = createCapabilityPolicy({ resolveWorkspace: id => ({ id, root: workspaceRoot }),
     resolveTask: id => service.runtime.get({ id }).task });
   const owner = { kind: 'owner', id: 'desktop' };
   await assert.rejects(Promise.resolve().then(() => policy.authorize({ actor: owner, taskId: child.id,
     workspaceId: 'ws-test', input: { path: 'src/task/runtime.js' } },
   { id: 'filesystem.write', permission: 'filesystem.write', workspace: true })),
   { code: 'TASK_CHILD_READ_ONLY' });
-  try {
-    assert.equal(policy.authorize({ actor: owner, taskId: child.id, workspaceId: 'ws-test',
-      input: { path: 'src/task/runtime.js' } },
-    { id: 'filesystem.read', permission: 'filesystem.read', workspace: true }).allowed, true);
-  } catch (error) {
-    const target = resolveInside(stateDir, 'src/task/runtime.js').real;
-    const scope = resolveInside(stateDir, 'src/task').real;
-    console.error('child read scope diagnostic', JSON.stringify({
-      stateDir, scope, target, relative: path.relative(scope, target),
-      scopeNative: fs.realpathSync.native(path.join(stateDir, 'src', 'task')),
-      targetNative: fs.realpathSync.native(path.join(stateDir, 'src', 'task', 'runtime.js'))
-    }));
-    throw error;
-  }
+  assert.equal(policy.authorize({ actor: owner, taskId: child.id, workspaceId: 'ws-test',
+    input: { path: 'src/task/runtime.js' } },
+  { id: 'filesystem.read', permission: 'filesystem.read', workspace: true }).allowed, true);
   await assert.rejects(Promise.resolve().then(() => policy.authorize({ actor: owner, taskId: child.id,
     workspaceId: 'ws-test', input: { path: 'private.txt' } },
   { id: 'filesystem.read', permission: 'filesystem.read', workspace: true })),
