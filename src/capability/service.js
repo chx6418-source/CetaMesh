@@ -10,6 +10,8 @@ import { createCapabilityApproval, requestFingerprint } from './approval.js';
 import { OWNER_ACTOR, capabilityError } from './types.js';
 import { readJsonFile, writeJsonAtomic } from '../storage/json-file.js';
 import { evidenceBinding, EVIDENCE_SOURCE_CAPABILITIES } from '../context/tool-evidence.js';
+import { createNativeApprovalAdapter } from '../agent/native-approval-bridge.js';
+import { canDispatchConfiguredNativeAgent } from '../agent/execution-security.js';
 
 // Only this module can mark a failure as occurring before Agent side effects.
 // Provider supplied error fields must never authorize an automatic replay.
@@ -326,6 +328,8 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     policy,
     approval: createCapabilityApproval({ stateDir, now }), audit, stateDir
   });
+  const nativeApproval = createNativeApprovalAdapter({ broker, resolveWorkspace, agentBroker, now,
+    resolveTask: taskId => taskHandoffGuard(taskId) ? null : taskFor(taskId) });
   function saveGrants() {
     if (!file) return;
     writeJsonAtomic(file, grants);
@@ -720,18 +724,24 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       }
       assertChildParentActive();
       const health = await agentBroker.health(provider);
+      const providerCapabilities = agentBroker.capabilities(provider);
+      // A configured key is not an authenticated account. This explicitly selected
+      // mode may verify its credentials during dispatch, only after protocol and
+      // every-tool permission policy verification. Explicit auth failure still denies.
+      const configuredNativeDispatch = canDispatchConfiguredNativeAgent(health,providerCapabilities?.security);
       if (health?.available !== true || health?.disabled === true || health?.enabled === false
         || health?.ready === false || health?.reachable === false || health?.installed === false
         || health?.authenticated === false || health?.sessionCapable === false
         || health?.taskEligible === false || health?.compatible === false
-        || (provider !== 'cetamesh' && (health?.authenticated !== true || health?.sessionCapable !== true))) {
+        || (provider !== 'cetamesh' && (health?.sessionCapable !== true
+          || (health?.authenticated !== true && !configuredNativeDispatch)))) {
         const error = capabilityError('PROVIDER_UNAVAILABLE', 'Agent Provider is not currently eligible for Task execution');
         // This check precedes Session creation, Attempt recording and send.
         // Only this trusted preflight failure can authorize one reassignment.
         safeAgentPreflights.add(error);
         throw error;
       }
-      const boundary = agentBroker?.capabilities(provider)?.workspaceBoundary;
+      const boundary = providerCapabilities?.workspaceBoundary;
       if (!['capability-broker', 'staged-capability-broker', 'native-staged'].includes(boundary)) {
         throw capabilityError('AGENT_BOUNDARY_UNSUPPORTED', 'Provider has no enforced Capability Broker workspace boundary');
       }
@@ -1013,6 +1023,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     return result;
   }
   return { execute, executeWorkspace, executeMemory, broker, grantTask, principalForTask, refreshTaskWorkspaceGrant, memoryPrincipal,
+    requestAgentNativeApproval: (request, options) => nativeApproval.request(request, options),
     cancelTaskOperations: scope => operations.cancelScope(scope),
     recoveryForTask(taskId) {
       return Object.values(journal).some(row => row?.taskId === taskId && row.status === 'in-flight')
@@ -1044,6 +1055,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     },
     applyAgentWorkspaceChanges, workspaceImportStatus, cancelWorkspaceImportApproval,
     async close() {
+      nativeApproval.close();
       await operations.close();
       const consumers = [...taskFollowConsumers.values()];
       for (const consumer of consumers) consumer.controller.abort();

@@ -61,9 +61,11 @@ try {
  await tick(); assert.equal((await approval.status(waiting)).state,'waiting');
  await approval.shutdown(); releaseApproval({outcome:'approved',optionId:'yes'}); await tick();
  assert.equal(approvalPeer.readable.listenerCount('data'),0);
- let bind;
- const pending=provider({resolveTaskWorkspace:()=>new Promise(resolve=>{bind=resolve;})});
+ let bind, bindingStarted;
+ const bindingSeen=new Promise(resolve=>{bindingStarted=resolve;});
+ const pending=provider({resolveTaskWorkspace:()=>new Promise(resolve=>{bind=resolve;bindingStarted();})});
  const creating=pending.createSession({taskId:'t',workspaceId:'w'});
+ await bindingSeen;
  const rejected=assert.rejects(creating,{code:'PROVIDER_SHUTTING_DOWN'});
  const closing=pending.shutdown(); bind({}); await rejected; await closing;
  let failExit=true;

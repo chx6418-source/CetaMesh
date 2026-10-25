@@ -13,7 +13,7 @@ import { createDshPresetPolicy } from './dsh-preset-policy.js';
 import { createStagedDshAgentProvider } from './staged-dsh-agent-provider.js';
 import { createCodexAgentProvider } from './codex-agent-provider.js';
 import { createAcpProviders } from './acp-provider-descriptors.js';
-import { createClaudeAgentProvider } from './claude-agent-provider.js';
+import { createClaudeAgentProvider, createConfiguredClaudeAgentProvider } from './claude-agent-provider.js';
 import { createWorkBuddyAgentProvider } from './workbuddy-agent-provider.js';
 import { createCodexProviderRouter } from './codex-provider-router.js';
 import { createZCodeAgentProvider } from './zcode-agent-provider.js';
@@ -91,7 +91,7 @@ export function createDefaultAgentService({ api, defaults, log, dshOptions = {},
     providers: [
       taskBoundDsh,
       routedCodex,
-      createClaudeAgentProvider({ ...claudeOptions, log }),
+      (claudeOptions.runtimeConfiguration ? createConfiguredClaudeAgentProvider : createClaudeAgentProvider)({ ...claudeOptions, log }),
       ...createAcpProviders({ ...acpOptions, log }),
       createZCodeAgentProvider({ ...zcodeOptions, ...(zcodeOptions.executable === undefined && zcodeExecutable !== undefined ? { executable: zcodeExecutable } : {}) }),
       createWorkBuddyAgentProvider(workbuddyOptions)

@@ -15,6 +15,29 @@
 - **QQ / OneBot is a Channel Adapter, never the Core.** The independently authored OneBot v11 transport lives in `src/channel/qq/onebot-client.js`; the restricted SnowLuma SDK is not embedded. Compatible external gateways are installed independently, and Core services initialize without requiring that channel or DSH readiness.
 - Desktop and Mobile are independent CetaMesh Nodes; Device Mesh is a separate protocol layer.
 
+## External coding runtimes
+
+The existing Agent Broker and Registry own Task/Session/Workspace identity and execution
+consent. The explicitly selected native-permissions mode provides per-tool Owner approval
+on Windows and declares no operating-system sandbox. Legacy native-sandbox and isolated
+modes keep their original gates. A verified runtime policy cannot be replaced by renderer
+flags or by desktop-client installation evidence.
+
+Runtime configuration stores public connection metadata separately from provider-owned
+credential references. Scoped private profiles exclude unapproved project/user hooks,
+plugins, MCP and subagents. ACP runtimes and the optional Claude SDK runner bind approval
+to exact tool input, Session and runtime identity. All native tools require review,
+including reads. Staging changes require a separate Capability Broker import approval.
+Cancellation or changed configuration invalidates pending authority, and unconfirmed
+process exit retains staging and ownership for recovery. Optional malformed configuration
+is preserved and contained so it cannot prevent Core startup.
+
+Explicit Owner dispatch may use configured but unverified API credentials only after
+runtime, session and every-tool permission policy verification. Such dispatch does not
+claim authentication; automatic assignment still abstains without authentication and
+model-specific cost evidence. Supported versions and actual verification limits are
+recorded in [Agent integration status](AGENT_INTEGRATION_STATUS.md).
+
 ## Process composition
 
 The desktop shell starts one Node worker with `--worker`. `src/core-dispatch.js` sends that

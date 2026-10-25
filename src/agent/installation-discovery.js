@@ -31,7 +31,7 @@ export function createAgentInstallationDetector({ env = process.env, platform = 
   };
   async function inspect(id) {
     let cliInstalled = null;
-    try { cliInstalled = Boolean(findCli(id, { env, platform })); } catch { /* Discovery uncertainty is not absence. */ }
+    try { cliInstalled = Boolean(findCli(id, { env, platform })); } catch { cliInstalled = null; /* Discovery uncertainty is not absence. */ }
     const desktopApp = { displayName: NAMES[id], installed: null, running: null, status: 'unknown', version: null };
     const local = value(env, 'LOCALAPPDATA');
     if (platform === 'win32' && local && path.isAbsolute(local)) {

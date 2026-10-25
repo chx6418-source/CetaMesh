@@ -3,7 +3,7 @@ import { useSearchParams } from 'react-router';
 import { createPortal } from 'react-dom';
 import { mergeChatHistorySnapshot, mergeLatestChatMessages, prependOlderChatMessages, recoverForwardHistory } from './chat-history';
 import { applyChatStreamUpdates, ChatRequestEpoch, ChatStreamRevision, pendingReplyVisible, type ChatStreamUpdate } from './chat-async-state';
-import { aboutClient, agentClient, approvalClient, bridge, chatClient, extensionSettingsClient, feedbackClient, hostClient, memoryClient, onboardingClient, openExternal, pluginClient, settingsClient, taskClient, updateClient, workspaceClient, workshopClient, type Agent, type DshConfiguration, type DshSelection, type DshPresetCatalog, type Approval, type ApprovalDecisionResult, type DesktopEventData, type ChatMessage as ChatMessageDto, type ChatSession, type ExtensionSettingsDescription, type ExtensionSettingsSnapshot, type IntegrationSettings, type Memory, type Plugin, type ProviderSettingField, type SettingField, type Settings, type Task, type WorkshopProposal } from '../bridge/typed-client';
+import { aboutClient, agentClient, approvalClient, bridge, chatClient, extensionSettingsClient, feedbackClient, hostClient, memoryClient, onboardingClient, openExternal, pluginClient, settingsClient, taskClient, updateClient, workspaceClient, workshopClient, type Agent, type AgentRuntimeProvider, type AgentRuntimeConfiguration, type AgentRuntimeInput, type DshConfiguration, type DshSelection, type DshPresetCatalog, type Approval, type ApprovalDecisionResult, type DesktopEventData, type ChatMessage as ChatMessageDto, type ChatSession, type ExtensionSettingsDescription, type ExtensionSettingsSnapshot, type IntegrationSettings, type Memory, type Plugin, type ProviderSettingField, type SettingField, type Settings, type Task, type WorkshopProposal } from '../bridge/typed-client';
 import { Icon, type IconName } from '../components/icons';
 import { ArtifactCard } from '../components/product/cards';
 import { Button, IconButton, Input, normalizeSelectOptionLabel, SearchInput, Select, Tabs } from '../components/primitives/inputs';
@@ -61,9 +61,37 @@ function StatusBadge({ value, available }: { value: string; available?: boolean 
   const label = ({ ready: '已就绪', running: '运行中', enabled: '已启用', installed: '已安装', update: '可更新', completed: '已完成', current: '当前步骤', 'needs-setup': '需要设置', 'descriptor-incomplete': '配置不完整', 'not-installed': '未安装', 'not-supported': '不支持', 'not-checked': '未检查', 'connection-pending': '已安装 · 待接入', checking: '检查中', 'start-timeout': '等待网关就绪', invalid: '安装需修复', unavailable: '暂不可用', disabled: '已停用', stopped: '已停止', pending: '等待处理', 'waiting-approval': '等待审批', starting: '启动中', error: '异常', failed: '失败', cancelled: '已取消', blocked: '待核对', queued: '待开始', paused: '已暂停' } as Record<string, string>)[value] ?? value;
   return <Badge tone={tone}>{label}</Badge>;
 }
-function availabilityReasonLabel(reason: string | null) {
+export function availabilityReasonLabel(reason: string | null) {
   if (!reason) return '';
-  return ({
+  const labels: Record<string, string> = {
+    agent_model_required: '尚未选择模型，请在连接设置中填写模型。',
+    agent_credential_required: '尚未配置此 Agent 的 API Key，请在连接设置中保存凭据。',
+    credential_missing: '尚未配置此 Agent 的 API Key，请在连接设置中保存凭据。',
+    runtime_missing: '未检测到编码运行时，请按官方文档安装并配置路径。',
+    runtime_not_installed: '未检测到编码运行时，请按官方文档安装并配置路径。',
+    runtime_not_checked: '编码运行时尚未检查，请点击检查连接。',
+    runtime_verification_required: '编码运行时需要重新验证，请点击检查连接。',
+    runtime_changed: '编码运行时或配置已变化，请关闭原会话后重新检查连接。',
+    provider_disabled: '此 Agent 连接已停用，可在连接设置中启用。',
+    disabled: '此 Agent 连接已停用，可在连接设置中启用。',
+    runtime_disabled: '此 Agent 连接已停用，可在连接设置中启用。',
+    sdk_resource_missing: '当前应用缺少已验证的 SDK 资源，请更新或修复 CetaMesh。',
+    sdk_missing: '当前应用缺少已验证的 SDK 资源，请更新或修复 CetaMesh。',
+    claude_sdk_resource_unverified: 'Claude SDK 资源缺失或未通过校验，请更新或修复 CetaMesh。',
+    native_input_unverified: '此版本的 Agent 未提供完整工具参数，无法安全审批，暂不开放任务执行。',
+    native_approval_unavailable: '原生工具逐次审批尚未就绪，请重启 Core 或检查应用配置。',
+    agent_runtime_config_corrupt: '运行时配置已损坏或无法读取；原数据已保留，请核对数据目录后恢复配置。',
+    agent_runtime_credential_scope_mismatch: 'API Key 的端点范围已变化，请核对端点并重新保存 API Key。',
+    claude_code_not_found: '未检测到 Claude Code 编码运行时，请按官方文档安装并配置路径。',
+    claude_code_path_unsupported: '此路径不是受支持的 Claude Code 编码运行时，请重新选择。',
+    claude_code_binary_invalid: 'Claude Code 编码运行时文件无效，请检查安装与路径。',
+    claude_code_unreadable: '无法读取 Claude Code 编码运行时，请检查路径与文件权限。',
+    claude_code_binary_changed: 'Claude Code 编码运行时已变化，请关闭原会话后重新检查连接。',
+    claude_code_identity_unverified: 'Claude Code 版本身份尚未验证，请检查安装后重新检查连接。',
+    claude_code_protocol_unverified: 'Claude Code 控制协议尚未验证，请检查兼容版本后重新检查连接。',
+    claude_code_probe_failed: 'Claude Code 运行时检查失败，请检查安装后重试。',
+    claude_code_exit_unconfirmed: 'Claude Code 检查进程尚未确认退出，请先核对运行状态。',
+    acp_initialize_failed: '编码运行时连接握手失败，请检查安装与运行时路径后重试。',
     desktop_cli_missing: '桌面客户端已安装；尚未检测到用于连接的 CLI', acp_runtime_unverified: 'CLI 已检测到；本机连接协议与权限策略尚未验证',
     not_installed: '未安装', acp_version_unverified: '本机 ACP 版本尚未验证',
     acp_launch_unverified: '本机 ACP 启动方式尚未验证', native_policy_unverified: '原生权限与执行范围尚未验证',
@@ -75,7 +103,8 @@ function availabilityReasonLabel(reason: string | null) {
     'provider-unavailable': '服务未连接', 'server-stopped': '已停止', 'task-required': '创建任务后使用',
     'workspace-required': '需要工作区', 'scope-unavailable': '需要工作区', 'descriptor-incomplete': '能力描述不完整',
     'not-supported': '暂不支持', 'not-checked': '尚未检查', unavailable: '服务未连接'
-  } as Record<string, string>)[reason] ?? '当前能力尚未验证，请检查连接与配置';
+  };
+  return labels[reason] ?? labels[reason.trim().toLowerCase()] ?? '当前能力尚未验证，请检查连接与配置';
 }
 
 export function HarborApp() {
@@ -788,8 +817,8 @@ async function confirmAgentExecution(provider: string, workspaceId: string) {
   if (!(await agentClient.security(provider, workspaceId)).authorized) throw new Error('原生执行范围尚未确认');
 }
 
-function ApprovalCard({ approval, onDecide }: { approval: Approval; onDecide(id: string, approve: boolean): void }) {
-  return <Card className="approval-card"><div className="approval-icon"><Icon name="approval" size={20} /></div><div className="grow"><div className="row between"><strong>{approval.title}</strong><Badge tone="warning">需要处理</Badge></div><p>{approval.summary}</p><div className="approval-meta"><span>{approval.capability}</span><span>风险：{approval.risk}</span>{approval.expiresAt && <span>有效至 {dateLabel(approval.expiresAt)}</span>}</div><div className="row approval-actions"><Button compact variant="ghost" onClick={() => onDecide(approval.id, false)}>拒绝</Button><Button compact variant="primary" onClick={() => onDecide(approval.id, true)}>批准一次</Button></div></div></Card>;
+export function ApprovalCard({ approval, onDecide }: { approval: Approval; onDecide(id: string, approve: boolean): void }) {
+  return <Card className="approval-card"><div className="approval-icon"><Icon name="approval" size={20} /></div><div className="grow"><div className="row between"><strong>{approval.title}</strong><Badge tone="warning">需要处理</Badge></div><p>{approval.summary}</p>{approval.capability === 'agent.native.approve' && approval.details && <pre aria-label="原生工具参数" style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: '24rem', overflow: 'auto' }}>{approval.details}</pre>}<div className="approval-meta"><span>{approval.capability}</span><span>风险：{approval.risk}</span>{approval.expiresAt && <span>有效至 {dateLabel(approval.expiresAt)}</span>}</div><div className="row approval-actions"><Button compact variant="ghost" onClick={() => onDecide(approval.id, false)}>拒绝</Button><Button compact variant="primary" onClick={() => onDecide(approval.id, true)}>批准一次</Button></div></div></Card>;
 }
 
 export function ChatComposer({ busy, models, selectedModelKey, agentProviders, selectedAgent, workspaces, workspaceId, activeWorkspaceId, onWorkspaceChange, onModelChange, onAgentChange, onSend, onStop }: {
@@ -1539,6 +1568,63 @@ function DshSetupPanel({ agent, onConfigured }: { agent: Agent; onConfigured(con
   return configuration ? <><DshSetupForm configuration={configuration} draft={draft} presets={presets} onRefresh={() => setRefresh(value => value + 1)} saving={saving} onDraftChange={setDraft} onSave={() => void save()} />{error && <ErrorNotice error={error} />}</> : <small>尚未取得连接配置，请检查连接。</small>;
 }
 
+type AgentRuntimeDraft = Required<Pick<AgentRuntimeInput, 'enabled' | 'runtimePath' | 'nodePath' | 'model' | 'baseUrl' | 'apiKey'>>;
+function isRuntimeProvider(provider: string): provider is AgentRuntimeProvider { return ['gemini', 'opencode', 'qwen', 'claude'].includes(provider); }
+export function agentNeedsSetup(agent: Pick<Agent, 'id' | 'status' | 'reason' | 'eligible' | 'taskEligible' | 'runtimeConfiguration'>): boolean {
+  if (isAgentReady(agent) || agent.runtimeConfiguration?.enabled === false || ['disabled', 'provider_disabled', 'runtime_disabled'].includes(agent.reason?.trim().toLowerCase() ?? '')) return false;
+  return agent.status === 'needs-setup' || agent.status === 'connection-pending' || isRuntimeProvider(agent.id);
+}
+export function AgentRuntimeAuthenticationNotice({ agent }: { agent: Agent }) {
+  if (!isRuntimeProvider(agent.id) || agent.runtimeConfiguration?.credentialConfigured !== true || (agent.authVerified !== false && agent.authentication !== 'configured-unverified')) return null;
+  return <small role="status">运行时就绪后，API 认证将在实际任务中验证。</small>;
+}
+export function AgentRuntimeSetupGuide({ provider, onOpen }: { provider: AgentRuntimeProvider; onOpen(url: string): void }) {
+  const documentation = {
+    gemini: { name: 'Gemini CLI', url: 'https://geminicli.com/docs/get-started/installation/' },
+    qwen: { name: 'Qwen Code', url: 'https://qwenlm.github.io/qwen-code-docs/en/users/quickstart/' },
+    claude: { name: 'Claude Code', url: 'https://code.claude.com/docs/en/setup' }
+  };
+  if (provider === 'opencode') return <small>优先自动发现 OpenCode 安装包中的编码运行时；已包含时无需另装 CLI。</small>;
+  const doc = documentation[provider];
+  return <div className="dsh-setup-form"><small>本连接使用 {doc.name} 编码运行时；桌面客户端已安装不代表编码 CLI 已就绪。</small><Button compact type="button" variant="ghost" title={doc.url} onClick={() => onOpen(doc.url)}>{doc.name} 官方安装文档</Button></div>;
+}
+function runtimeDraft(configuration: AgentRuntimeConfiguration): AgentRuntimeDraft {
+  return { enabled: configuration.enabled, runtimePath: configuration.runtimePath, nodePath: configuration.nodePath, model: configuration.model, baseUrl: configuration.baseUrl, apiKey: '' };
+}
+export function AgentRuntimeSetupForm({ configuration, draft, saving, onDraftChange, onSave, onRefresh }: {
+  provider: AgentRuntimeProvider; configuration: AgentRuntimeConfiguration; draft: AgentRuntimeDraft; saving: boolean;
+  onDraftChange(value: AgentRuntimeDraft): void; onSave(): void; onRefresh(): void;
+}) {
+  const field = (key: 'runtimePath' | 'nodePath' | 'model' | 'baseUrl', label: string, placeholder: string, maxLength: number) => <label>{label}<Input aria-label={label} value={draft[key]} placeholder={placeholder} maxLength={maxLength} disabled={saving} onChange={event => onDraftChange({ ...draft, [key]: event.target.value })} /></label>;
+  return <form className="dsh-setup-form" onSubmit={event => { event.preventDefault(); if (!saving) onSave(); }}>
+    <label><input type="checkbox" checked={draft.enabled} disabled={saving} onChange={event => onDraftChange({ ...draft, enabled: event.target.checked })} /> 启用此连接</label>
+    {field('runtimePath', '运行时路径', '留空自动发现；填写官方编码运行时的绝对路径', 4096)}
+    {field('nodePath', '独立 Node 路径', 'npm 运行时可填写独立 node.exe 的绝对路径', 4096)}
+    {field('model', '模型', '留空使用运行时默认模型', 256)}
+    {field('baseUrl', 'API 端点', 'https://…', 2048)}
+    <label>API Key<Input aria-label="API Key" type="password" value={draft.apiKey} autoComplete="new-password" maxLength={512} placeholder={configuration.credentialConfigured ? '留空保留已保存凭据' : '输入此 Agent 使用的 API Key'} disabled={saving} onChange={event => onDraftChange({ ...draft, apiKey: event.target.value })} /></label>
+    <small>{configuration.credentialConfigured ? '凭据已保存；留空保留已保存凭据。' : '尚未保存此 Agent 的凭据。'} API Key 保存后清空输入框。</small>
+    <small>使用原生权限模式；工作区授权与逐次审批另行确认。保存配置后，以连接检查结果为准。</small>
+    <div className="row"><Button compact type="submit" disabled={saving}>{saving ? '保存中…' : '保存配置'}</Button><Button compact type="button" variant="ghost" disabled={saving} onClick={onRefresh}>刷新连接</Button></div>
+  </form>;
+}
+function AgentRuntimeSetupPanel({ agent, onConfigured, onRefresh }: { agent: Agent; onConfigured(configuration: AgentRuntimeConfiguration): void; onRefresh(): void }) {
+  const configuration = agent.runtimeConfiguration;
+  const [draft, setDraft] = useState<AgentRuntimeDraft>(() => configuration ? runtimeDraft(configuration) : { enabled: true, runtimePath: '', nodePath: '', model: '', baseUrl: '', apiKey: '' });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  useEffect(() => { if (configuration) setDraft(runtimeDraft(configuration)); }, [configuration?.provider, configuration?.revision]);
+  async function save() {
+    if (!isRuntimeProvider(agent.id)) return;
+    setSaving(true); setError(''); setNotice('');
+    try { const result = await agentClient.configureRuntime(agent.id, { ...draft, executionMode: 'native-permissions' }); onConfigured(result); setNotice('配置已保存，请刷新连接查看验证结果。'); }
+    catch (cause) { setError(messageOf(cause)); }
+    finally { setDraft(current => ({ ...current, apiKey: '' })); setSaving(false); }
+  }
+  return isRuntimeProvider(agent.id) ? <><AgentRuntimeSetupGuide provider={agent.id} onOpen={url => { setError(''); void openExternal(url).catch(cause => setError(messageOf(cause))); }} />{configuration ? <AgentRuntimeSetupForm provider={agent.id} configuration={configuration} draft={draft} saving={saving} onDraftChange={setDraft} onSave={() => void save()} onRefresh={onRefresh} /> : <small>尚未取得运行时配置，请刷新连接。</small>}{notice && <small role="status">{notice}</small>}{error && <ErrorNotice error={error} />}</> : null;
+}
+
 export function managedWorkspacePreflight(provider: string, workspaceId: string, activeWorkspaceId: string | null): string {
   return provider === 'cetamesh' && !workspaceId && !activeWorkspaceId ? 'CetaMesh 托管任务需要工作区，请先选择工作区后发送。' : '';
 }
@@ -1594,9 +1680,9 @@ export function AgentsPage() {
   useEffect(() => { void refresh(); }, [refresh]);
   const ready = agents.filter(isAgentReady).length;
   const taskReady = agents.filter(agent => agent.taskEligible === true).length;
-  const needsSetup = agents.filter(agent => agent.status === 'needs-setup').length;
+  const needsSetup = agents.filter(agentNeedsSetup).length;
   const activeTasks = tasks.filter(task => ['working', 'running'].includes(task.status)).length;
-  const visible = agents.filter(agent => (filter === 'all' || (filter === 'ready' ? isAgentReady(agent) : !isAgentReady(agent))) && `${agent.name} ${agent.role} ${agent.description}`.toLowerCase().includes(query.toLowerCase()));
+  const visible = agents.filter(agent => (filter === 'all' || (filter === 'ready' ? isAgentReady(agent) : agentNeedsSetup(agent))) && `${agent.name} ${agent.role} ${agent.description}`.toLowerCase().includes(query.toLowerCase()));
   async function check(agent: Agent) {
     setChecking(agent.id);
     try {
@@ -1607,10 +1693,10 @@ export function AgentsPage() {
     catch (cause) { setError(messageOf(cause)); }
     finally { setChecking(''); }
   }
-  return <div className="content-page"><Heading eyebrow="AGENT DIRECTORY" title="Agents" description="查看可用 Agent、连接状态与职责。" action={<Button icon="update" onClick={() => void refresh(true)}>刷新状态</Button>} />{error && <ErrorNotice error={error} onRetry={() => void refresh(true)} />}
+  return <div className="content-page"><Heading eyebrow="AGENT DIRECTORY" title="Agents" description="查看可用 Agent、连接状态与职责。" action={<Button icon="update" onClick={() => void refresh(true)}>刷新状态</Button>} /><Banner><span className="grow"><strong>Gemini · OpenCode · Qwen · Claude 原生权限模式</strong><small>此模式没有 OS 沙箱；批准的命令可能访问宿主文件与网络。每个工作区仍需 Owner 确认，并逐次审批原生工具。</small></span></Banner>{error && <ErrorNotice error={error} onRetry={() => void refresh(true)} />}
     <div className="agent-summary-row"><Surface><strong>{agents.length}</strong><span>已配置 Agent</span></Surface><Surface><strong>{ready}</strong><span>可用 Agent</span></Surface><Surface><strong>{taskReady}</strong><span>任务可用</span></Surface><Surface><strong>{needsSetup}</strong><span>需要设置</span></Surface><Surface><strong>{activeTasks}</strong><span>活跃任务</span></Surface></div>
     <div className="row between work-controls"><Tabs items={[{ id: 'all', label: `全部 Agent ${agents.length}` }, { id: 'ready', label: `可用 Agent ${ready}` }, { id: 'setup', label: `需设置 ${needsSetup}` }]} selected={filter} onChange={setFilter} label="Agent 状态筛选" /><SearchInput label="搜索 Agent" placeholder="搜索名称或职责" value={query} onChange={event => setQuery(event.target.value)} /></div>
-    {loading && !agents.length ? <LoadingState label="正在读取 Agent 状态…" /> : visible.length ? <div className="agent-grid">{visible.map(agent => <Card className="agent-card" key={agent.id}><div className="row between"><div className="agent-avatar">{agentInitials(agent.id)}</div><StatusBadge value={agent.status} available={isAgentReady(agent)} /></div><h3>{agent.name}</h3><strong className="agent-role">{agent.role}</strong><p>{agent.description}</p>{agent.id === 'dsh' && <AgentSetupDiagnostic agent={agent} />}{agent.id === 'codex' && <CodexSetupDiagnostic agent={agent} />}{agent.reason === 'task-required' && <small>Agent 已就绪；此能力需要先分配工作区任务。</small>}{agent.id !== 'dsh' && agent.reason && agent.reason !== 'task-required' && <small>{availabilityReasonLabel(agent.reason)}</small>}{agent.lastError && <small role="status">{agent.lastError}</small>}{agent.version && <small>版本 {agent.version}</small>}<AgentInstallationDiagnostic agent={agent} /><Button compact variant="ghost" disabled={checking === agent.id} onClick={() => void check(agent)}>{checking === agent.id ? '检查中…' : '检查连接'} <Icon name="right" size={14} /></Button>{agent.id === 'dsh' && <details className="agent-setup-disclosure"><summary>连接设置</summary><DshSetupPanel agent={agent} onConfigured={configuration => setAgents(current => current.map(item => item.id === agent.id ? { ...item, configuration } : item))} /></details>}</Card>)}</div> : !error && <EmptyNotice icon="agents" title="没有匹配的 Agent" detail="当前安装和注册的 Agent 会在这里显示。" />}
+    {loading && !agents.length ? <LoadingState label="正在读取 Agent 状态…" /> : visible.length ? <div className="agent-grid">{visible.map(agent => <Card className="agent-card" key={agent.id}><div className="row between"><div className="agent-avatar">{agentInitials(agent.id)}</div><StatusBadge value={agent.status} available={isAgentReady(agent)} /></div><h3>{agent.name}</h3><strong className="agent-role">{agent.role}</strong><p>{agent.description}</p>{agent.id === 'dsh' && <AgentSetupDiagnostic agent={agent} />}{agent.id === 'codex' && <CodexSetupDiagnostic agent={agent} />}{agent.reason === 'task-required' && <small>Agent 已就绪；此能力需要先分配工作区任务。</small>}{agent.id !== 'dsh' && agent.reason && agent.reason !== 'task-required' && <small>{availabilityReasonLabel(agent.reason)}</small>}<AgentRuntimeAuthenticationNotice agent={agent} />{agent.lastError && <small role="status">{agent.lastError}</small>}{agent.version && <small>版本 {agent.version}</small>}<AgentInstallationDiagnostic agent={agent} /><Button compact variant="ghost" disabled={checking === agent.id} onClick={() => void check(agent)}>{checking === agent.id ? '检查中…' : '检查连接'} <Icon name="right" size={14} /></Button>{agent.id === 'dsh' && <details className="agent-setup-disclosure"><summary>连接设置</summary><DshSetupPanel agent={agent} onConfigured={configuration => setAgents(current => current.map(item => item.id === agent.id ? { ...item, configuration } : item))} /></details>}{isRuntimeProvider(agent.id) && <details className="agent-setup-disclosure"><summary>连接设置</summary><AgentRuntimeSetupPanel agent={agent} onConfigured={runtimeConfiguration => setAgents(current => current.map(item => item.id === agent.id ? { ...item, runtimeConfiguration } : item))} onRefresh={() => void check(agent)} /></details>}</Card>)}</div> : !error && <EmptyNotice icon="agents" title="没有匹配的 Agent" detail="当前安装和注册的 Agent 会在这里显示。" />}
     <div className="section-heading page-section-heading"><h2>运行策略</h2></div><Surface className="policy-row"><span className="policy-icon"><Icon name="approval" /></span><span className="grow"><strong>敏感操作需要确认</strong><small>文件写入、网络访问和外部副作用由 Capability Broker 逐次管理。</small></span><Badge tone="success">由 Core 强制执行</Badge></Surface>
   </div>;
 }

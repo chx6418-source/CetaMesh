@@ -41,7 +41,7 @@ export function probeProcessIdentity(pid) {
         identity = { kind: 'linux-proc-start', value: `${boot}:${fields[19]}` };
       }
     }
-  } catch { /* Disappearance, denied access and unavailable probes are rechecked below. */ }
+  } catch { identity = undefined; /* Recheck liveness without claiming a birth identity. */ }
   if (isProcessIdentity(identity)) return { state: 'alive', identity };
   // A failed/unsupported identity lookup is not evidence that an alive owner
   // disappeared. Only the OS's explicit ESRCH result authorizes dead recovery.

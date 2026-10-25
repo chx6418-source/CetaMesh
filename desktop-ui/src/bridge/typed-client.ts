@@ -64,9 +64,19 @@ export interface Agent {
   reachable?: boolean | null; ready?: boolean | null; sessionCapable?: boolean | null; cliInstalled?: boolean | null;
   sandboxCapable?: boolean | null; installKind?: string | null; probePhase?: string | null; probeCode?: string | null; checkedAt?: string | null; requiresStandaloneNode?: boolean;
   configuration?: DshConfiguration | null;
+  runtimeConfiguration?: AgentRuntimeConfiguration | null;
+  authConfigured?: boolean | null; authVerified?: boolean | null; authentication?: 'configured-unverified' | 'not-configured' | 'verified' | null;
   preset?: { purpose: string; id: string | null; compatible: boolean | null; loaded: boolean | null; loadState: 'loaded' | 'not-loaded' | 'unknown'; reason: string | null; verification: string | null } | null;
   diagnostic?: { stage: string; code: string | null; retryable: boolean; checkedAt: string | null } | null;
   version: string | null; desktopApp: { displayName?: string; installed: boolean | null; running: boolean | null; status: string; version: string | null } | null;
+}
+export type AgentRuntimeProvider = 'gemini' | 'opencode' | 'qwen' | 'claude';
+export interface AgentRuntimeConfiguration {
+  provider: AgentRuntimeProvider; enabled: boolean; runtimePath: string; nodePath: string; model: string; baseUrl: string;
+  credentialConfigured: boolean; executionMode: 'native-permissions'; revision: number;
+}
+export interface AgentRuntimeInput {
+  enabled?: boolean; runtimePath?: string; nodePath?: string; model?: string; baseUrl?: string; apiKey?: string; executionMode?: 'native-permissions';
 }
 export interface DshPresetCatalog { state: 'ready' | 'missing' | 'unreadable' | 'outside-root' | 'loading' | 'error'; truncated: boolean; presets: { id: string; compatible: boolean; reason: string | null }[] }
 export interface DshSelection { codingPreset: string | null; socialPreset: string | null; homeDir: string | null; baseUrl: string | null }
@@ -85,7 +95,7 @@ export interface Plugin {
 export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'expired' | 'consumed';
 export interface Approval {
   id: string; title: string; capability: string; status: ApprovalStatus; createdAt: string | number | null;
-  expiresAt: string | number | null; summary: string; risk: string; taskId: string | null;
+  expiresAt: string | number | null; summary: string; risk: string; taskId: string | null; details?: string;
 }
 export interface ApprovalDecisionResult {
   status: 'accepted' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled' | 'unknown' | 'rejected'; operationId?: string; decision?: string; code?: string; approvalId?: string; requestId?: string; turnResumed?: boolean; resumePending?: boolean;
@@ -358,6 +368,10 @@ export const agentClient = {
   list: (refresh = false) => uiCall<{ agents: Agent[] }>('ui.agent.list', { refresh }),
   health: (provider: string, refresh = false) => uiCall<Agent>('ui.agent.health', { provider, refresh }),
   presets: (homeDir: string | null) => uiCall<DshPresetCatalog>('ui.agent.presets', { provider: 'dsh', homeDir }),
+  configureRuntime: async (provider: AgentRuntimeProvider, config: AgentRuntimeInput) => {
+    const result = await uiCall<{ provider: AgentRuntimeProvider; supported: boolean; applied: boolean; configuration: AgentRuntimeConfiguration }>('ui.agent.configure', { agentId: provider, config });
+    return result.configuration;
+  },
   configure: (config: DshSelection) => uiCall<{ provider: 'dsh'; supported: boolean; applied: false; restartRequired: boolean; configuration: DshConfiguration }>('ui.agent.configure', { agentId: 'dsh', config })
 };
 export const extensionSettingsClient = {

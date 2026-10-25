@@ -11,7 +11,7 @@ function observe(probe, pid) {
     const result = probe(pid);
     if (result?.state === 'dead') return result;
     if (result?.state === 'alive' && isProcessIdentity(result.identity)) return result;
-  } catch { /* Permission errors, timeouts and unsupported probes fail closed. */ }
+  } catch { return { state: 'unknown' }; /* Permission errors and unsupported probes cannot authorize recovery. */ }
   return { state: 'unknown' };
 }
 function lockPid(contents) {
@@ -50,7 +50,7 @@ function readIdentity(file) {
   }
   let record = null;
   try { record = parseJsonText(data.toString('utf8'), { file }); }
-  catch { /* Invalid metadata never proves that an alive PID was reused. */ }
+  catch { record = null; /* Invalid metadata never proves that an alive PID was reused. */ }
   return { fingerprint: digest(data), record };
 }
 function boundRecord(record, contents, pid) {

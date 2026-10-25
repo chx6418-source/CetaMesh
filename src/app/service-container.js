@@ -14,6 +14,7 @@ import { createWorkshopService } from '../workshop/index.js';
 import { createManagedAgentProvider } from '../agent/managed-agent-provider.js';
 import { searchWeb } from '../mcp-web-search-safe.js';
 import { createProviderSecrets } from '../providers/secrets.js';
+import { createAgentRuntimeConfiguration } from '../agent/runtime-configuration.js';
 import { createModelProviderRegistry, createModelRuntimeService, createOpenAiCompatibleModelProvider, createToolExecutionCoordinator } from '../model/index.js';
 import { createRouterService } from '../router/index.js';
 import { createMemoryService, DESKTOP_USER_PRINCIPAL } from '../memory/service.js';
@@ -98,6 +99,11 @@ export function createCetaMeshServices(options = {}) {
   };
 
   const providerSecrets = createProviderSecrets({ root: dataRoot });
+  const agentRuntimeConfiguration = options.agentRuntimeConfiguration ?? createAgentRuntimeConfiguration({ stateDir, providerSecrets });
+  const nativeApprovalBridge = (request, requestOptions) => {
+    if (!capabilityService) throw Object.assign(new Error('Native approval service unavailable'), {code:'AGENT_APPROVAL_UNAVAILABLE'});
+    return capabilityService.requestAgentNativeApproval(request, requestOptions);
+  };
   const agentService = createDefaultAgentService({ api, defaults: dshDefaults, log,
     resolveWorkspaceIdentity: workspaceId => workspaceService.describeWorkspace(workspaceId)?.root ?? null,
     resolveExecutionTask: taskId => taskService.runtime.get({ id: taskId }).task,
@@ -105,8 +111,10 @@ export function createCetaMeshServices(options = {}) {
     dshOptions: agentTaskOptions, dshPresetConfig: options.dshPresetConfig, dshConfiguration: options.dshConfiguration,
     codexOptions: { ...agentTaskOptions,
       authorizeOpenAiEnvironment: () => settingsService.store.get().settings.agents.codexOpenAiEnvironmentAuthorized === true },
-    acpOptions: { taskOptions: agentTaskOptions, ...options.agentAcpOptions },
-    claudeOptions: { taskOptions: agentTaskOptions, ...options.agentClaudeOptions },
+    acpOptions: { taskOptions: agentTaskOptions, nativeApprovalBridge,
+      runtimeConfiguration: options.agentAcpOptions?.runtimeResolver ? undefined : agentRuntimeConfiguration, ...options.agentAcpOptions },
+    claudeOptions: { taskOptions: agentTaskOptions, requestNativeApproval: nativeApprovalBridge,
+      runtimeConfiguration: options.agentClaudeOptions?.taskOptions?.verifiedRuntime ? undefined : agentRuntimeConfiguration, resourceRoot, ...options.agentClaudeOptions },
     workbuddyOptions: options.agentWorkBuddyOptions, codexRouterOptions: options.agentCodexRouterOptions,
     desktopStatus: () => dshDesktop.status() });
   const agentBroker = agentService.broker;
@@ -517,6 +525,7 @@ export function createCetaMeshServices(options = {}) {
   const onboardingService = createOnboardingService({
     stateDir,
     providerSecrets,
+    agentRuntimeConfiguration,
     modelRuntime,
     settingsService,
     extensionService,

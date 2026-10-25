@@ -294,6 +294,18 @@ function projectDshConfiguration(value) {
     homeSource: string(row.homeSource, 80), active: selection(row.active), pending: row.pending ? selection(row.pending) : null };
 }
 
+const AGENT_RUNTIME_IDS = ['gemini', 'opencode', 'qwen', 'claude'];
+const AGENT_RUNTIME_INPUT_KEYS = new Set(['enabled', 'runtimePath', 'nodePath', 'model', 'baseUrl', 'apiKey', 'executionMode']);
+function projectAgentRuntimeConfiguration(value) {
+  if (!value) return null;
+  const row = record(value);
+  if (!AGENT_RUNTIME_IDS.includes(row.provider)) return null;
+  return { provider: row.provider, enabled: row.enabled === true, runtimePath: string(row.runtimePath, 4096),
+    nodePath: string(row.nodePath, 4096), model: string(row.model, 256), baseUrl: string(row.baseUrl, 2048),
+    credentialConfigured: row.credentialConfigured === true, executionMode: 'native-permissions',
+    revision: Number.isSafeInteger(row.revision) && row.revision >= 0 ? row.revision : 0 };
+}
+
 function projectAgent(value) {
   const row = record(value);
   const health = { ...row, ...record(row.health) };
@@ -337,6 +349,9 @@ function projectAgent(value) {
       && health.taskEligible !== false && health.sessionCapable !== false && (id !== 'codex' || health.sandboxCapable !== false)
       && (id !== 'dsh' || health.taskEligible === true),
     configured: typeof health.configured === 'boolean' ? health.configured : null,
+    authConfigured: typeof health.authConfigured === 'boolean' ? health.authConfigured : null,
+    authVerified: typeof health.authVerified === 'boolean' ? health.authVerified : null,
+    authentication: ['configured-unverified', 'not-configured', 'verified'].includes(health.authentication) ? health.authentication : null,
     reachable: typeof health.reachable === 'boolean' ? health.reachable : null,
     ready: typeof health.ready === 'boolean' ? health.ready : null,
     sessionCapable: typeof health.sessionCapable === 'boolean' ? health.sessionCapable : null,
@@ -348,7 +363,8 @@ function projectAgent(value) {
     requiresStandaloneNode: health.requiresStandaloneNode === true,
     preset: projectDshPreset(health.preset),
     diagnostic: projectDshDiagnostic(health.diagnostic),
-    configuration: projectDshConfiguration(row.configuration ?? health.configuration),
+    configuration: id === 'dsh' ? projectDshConfiguration(row.configuration ?? health.configuration) : null,
+    runtimeConfiguration: AGENT_RUNTIME_IDS.includes(id) ? projectAgentRuntimeConfiguration(row.runtimeConfiguration ?? health.runtimeConfiguration ?? health.configuration) : null,
     reason: reason || (boundaryUnverified ? 'descriptor-incomplete' : available && requiresTask ? 'task-required' : null), lastError, workspaceBoundary, status, version: string(health.version ?? row.version, 80) || null,
     desktopApp: id === 'dsh' || Object.keys(desktop).length ? {
       displayName: string(desktop.displayName, 100) || (id === 'dsh' ? 'DeepSeek Harness Desktop' : string(row.label ?? id, 100)),
@@ -481,7 +497,8 @@ function projectApproval(value) {
     id: string(row.id, 128), title, capability,
     status: string(row.status, 40), createdAt: scalar(row.createdAt), expiresAt: scalar(row.expiresAt),
     summary: string(request.reason ?? row.reason, 1000) || '此操作需要你的逐次批准。',
-    risk: string(row.risk ?? request.risk, 30) || 'high', taskId: string(request.taskId, 128) || null
+    risk: string(row.risk ?? request.risk, 30) || 'high', taskId: string(request.taskId, 128) || null,
+    ...(capability === 'agent.native.approve' ? { details: string(record(request.input).nativeDetails, 8192) } : {})
   };
 }
 
@@ -1357,10 +1374,13 @@ export function createDesktopUiService({ services = {}, system = services.system
         presets: (result.presets ?? []).slice(0, 200).map(row => ({ id: string(row.id, 100), compatible: row.compatible === true, reason: string(row.reason, 100) || null })) };
     },
     'ui.agent.configure': async p => {
-      if (string(p.agentId ?? p.provider, 80) !== 'dsh') throw Object.assign(new Error('Unsupported connector'), { code: 'INVALID_PARAMS' });
-      if (!p.config || typeof p.config !== 'object' || Array.isArray(p.config)) throw uiError('INVALID_PARAMS', 'DSH configuration must be an object');
-      const result = await agent('agent.configure', { provider: 'dsh', settings: p.config });
-      return { provider: 'dsh', supported: result.supported === true, applied: false, restartRequired: result.restartRequired === true, configuration: projectDshConfiguration(result.configuration) };
+      const provider = string(p.agentId ?? p.provider, 80);
+      if (provider !== 'dsh' && !AGENT_RUNTIME_IDS.includes(provider)) throw uiError('INVALID_PARAMS', 'Unsupported connector');
+      if (!p.config || typeof p.config !== 'object' || Array.isArray(p.config)) throw uiError('INVALID_PARAMS', 'Agent configuration must be an object');
+      if (provider !== 'dsh' && Object.keys(p.config).some(key => !AGENT_RUNTIME_INPUT_KEYS.has(key))) throw uiError('INVALID_PARAMS', 'Unsupported Agent runtime configuration fields');
+      const result = await agent('agent.configure', { provider, settings: p.config });
+      if (provider === 'dsh') return { provider: 'dsh', supported: result.supported === true, applied: false, restartRequired: result.restartRequired === true, configuration: projectDshConfiguration(result.configuration) };
+      return { provider, supported: result.supported === true, applied: result.applied === true, configuration: projectAgentRuntimeConfiguration(result.configuration) };
     },
     'ui.extensions.settings.describe': async p => {
       const result = record(await extensions('ext.settings.describe', { id: idParam(p) }));

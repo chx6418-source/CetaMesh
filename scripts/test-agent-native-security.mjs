@@ -8,6 +8,7 @@ import { defineAgentProvider } from '../src/agent/agent-provider.js';
 import { createAgentBroker } from '../src/agent/broker.js';
 import { createAgentProviderRegistry } from '../src/agent/registry.js';
 import { createCetaMeshServices } from '../src/app/service-container.js';
+import * as executionSecurity from '../src/agent/execution-security.js';
 
 assert.equal(parseWindowsNativeSandboxPolicy('opaqueWindows = true\n[windows]\nsandbox = "unelevated"'), 'unelevated',
   'unrelated keys containing Windows must not be mistaken for a security policy');
@@ -67,6 +68,136 @@ for (const state of ['paused', 'blocked', 'cancelled']) {
   await assert.rejects(() => guarded.send({ provider: adapter.id, sessionId: guardedSession.sessionId, content: 'forbidden' }), e => e.code === 'TASK_NOT_AUTHORIZED');
 }
 
+// The permission mode must be independently selected and must never claim OS isolation.
+const nativePermissionDescriptor = () => ({ mode: 'native-permissions', nativeSandboxSupported: false,
+  strictIsolationVerified: false, nativeApprovalSupported: true, nativePermissionPolicyVerified: true,
+  allToolsRequireApproval: true, nativeSandboxMode: 'none', nativeApprovalPolicy: 'all-tools-prompt',
+  runtimeIdentity: { executable: 'fixture-code-runtime', version: '1', sha256: 'fixture-v1' },
+  hooksPolicy: 'deny-unapproved', mcpPolicy: 'deny-unapproved' });
+let permissionSecurity = nativePermissionDescriptor(); let permissionStarts = 0; let permissionSends = 0;
+const permissionBase = defineAgentProvider({ id: 'test-native-permissions', label: 'Native permission test adapter',
+  capabilityExtras: { workspaceBoundary: 'native-staged', security: permissionSecurity }, methods: {
+    async createSession() { return { sessionId: 'permission-session-' + ++permissionStarts }; },
+    async send() { permissionSends++; return { accepted: true }; }
+  } });
+const permissionAdapter = { ...permissionBase, capabilities: () => ({ ...permissionBase.capabilities(), security: permissionSecurity }) };
+let permissionTask = { id: 'permission-task', workspaceId: 'permission-workspace', status: 'queued', currentAgent: null };
+let permissionHandoff = false; let permissionWorkspaceIdentity = 'fixture-workspace-root-v1';
+const permissionBroker = createAgentBroker({ registry: createAgentProviderRegistry({ providers: [permissionAdapter] }),
+  resolveExecutionTask: taskId => permissionTask?.id === taskId ? permissionTask : null, isTaskHandoffInFlight: () => permissionHandoff,
+  resolveWorkspaceIdentity: () => permissionWorkspaceIdentity });
+let permissionScope;
+assert.doesNotThrow(() => { permissionScope = permissionBroker.describeExecutionSecurity(permissionAdapter.id, permissionTask.workspaceId); },
+  'an explicitly selected native-permissions policy must be reviewable before Owner approval');
+assert.equal(permissionScope.required, true); assert.equal(permissionScope.authorized, false);
+assert.equal(permissionScope.security.nativeSandboxSupported, false);
+assert.match(permissionScope.disclosure, /原生逐次审批/);
+assert.match(permissionScope.disclosure, /不提供 OS 级沙箱/);
+assert.match(permissionScope.disclosure, /原生工具.*逐次审批/);
+assert.match(permissionScope.disclosure, /成果导入.*平台审批/);
+assert.match(permissionScope.disclosure, /编码运行时.*认证/);
+assert.equal(typeof executionSecurity.isNativePermissionSecurity, 'function');
+assert.equal(executionSecurity.isNativePermissionSecurity(permissionSecurity), true);
+assert.equal(executionSecurity.isNativePermissionSecurity(null), false);
+assert.equal(executionSecurity.isNativePermissionSecurity({ ...permissionSecurity, mode: 'native' }), false);
+await assert.rejects(() => permissionBroker.createSession(permissionAdapter.id, { taskId: permissionTask.id, workspaceId: permissionTask.workspaceId }),
+  e => e.code === 'AGENT_SECURITY_CONFIRMATION_REQUIRED');
+assert.throws(() => permissionBroker.assertExecutionConsent(permissionAdapter.id, { workspaceId: permissionTask.workspaceId }),
+  e => e.code === 'AGENT_SECURITY_CONFIRMATION_REQUIRED');
+assert.equal(permissionStarts, 0, 'verified native permission policy still cannot run before Owner confirmation');
+assert.throws(() => permissionBroker.authorizeExecution(permissionAdapter.id, permissionTask.workspaceId, 'stale'),
+  e => e.code === 'AGENT_SECURITY_POLICY_CHANGED');
+permissionBroker.authorizeExecution(permissionAdapter.id, permissionTask.workspaceId, permissionScope.fingerprint);
+await assert.rejects(() => permissionBroker.createSession(permissionAdapter.id, { workspaceId: permissionTask.workspaceId }), e => e.code === 'TASK_REQUIRED');
+await assert.rejects(() => permissionBroker.createSession(permissionAdapter.id, { taskId: permissionTask.id, workspaceId: 'another-workspace' }),
+  e => e.code === 'AGENT_SECURITY_CONFIRMATION_REQUIRED');
+const permissionSession = await permissionBroker.createSession(permissionAdapter.id, { taskId: permissionTask.id, workspaceId: permissionTask.workspaceId });
+permissionTask = { ...permissionTask, status: 'running', currentAgent: { provider: permissionAdapter.id, sessionId: permissionSession.sessionId } };
+const permissionSend = () => permissionBroker.send({ provider: permissionAdapter.id, sessionId: permissionSession.sessionId, content: 'fixture' });
+await permissionSend();
+assert.equal(permissionSends, 1);
+await assert.rejects(() => permissionBroker.send({ provider: permissionAdapter.id, sessionId: 'unbound-session', content: 'fixture' }),
+  e => e.code === 'AGENT_SECURITY_SESSION_UNBOUND');
+const executablePermissionTask = structuredClone(permissionTask);
+for (const changedTask of [null, { ...executablePermissionTask, id: 'another-task' },
+  { ...executablePermissionTask, workspaceId: 'another-workspace' },
+  { ...executablePermissionTask, currentAgent: { provider: 'other-provider', sessionId: permissionSession.sessionId } },
+  { ...executablePermissionTask, currentAgent: { provider: permissionAdapter.id, sessionId: 'other-session' } },
+  ...['paused', 'blocked', 'completed', 'failed', 'cancelled'].map(status => ({ ...executablePermissionTask, status }))]) {
+  permissionTask = changedTask;
+  await assert.rejects(permissionSend, e => e.code === 'TASK_NOT_AUTHORIZED');
+}
+permissionTask = executablePermissionTask;
+permissionHandoff = true;
+await assert.rejects(permissionSend, e => e.code === 'TASK_HANDOFF_IN_PROGRESS');
+permissionHandoff = false;
+assert.equal(permissionSends, 1, 'Task/Session/Workspace fences block execution before the adapter is called');
+for (const change of [{ runtimeIdentity: { ...permissionSecurity.runtimeIdentity, executable: 'other-runtime' } },
+  { runtimeIdentity: { ...permissionSecurity.runtimeIdentity, version: '2' } },
+  { runtimeIdentity: { ...permissionSecurity.runtimeIdentity, sha256: 'fixture-v2' } },
+  { nativeApprovalPolicy: 'another-approval-policy' }, { hooksPolicy: 'changed-hooks-policy' }, { mcpPolicy: 'changed-mcp-policy' }]) {
+  permissionSecurity = { ...nativePermissionDescriptor(), ...change };
+  assert.notEqual(permissionBroker.describeExecutionSecurity(permissionAdapter.id, permissionTask.workspaceId).fingerprint, permissionScope.fingerprint);
+  await assert.rejects(permissionSend, e => e.code === 'AGENT_SECURITY_CONFIRMATION_REQUIRED');
+  assert.throws(() => permissionBroker.authorizeExecution(permissionAdapter.id, permissionTask.workspaceId, permissionScope.fingerprint),
+    e => e.code === 'AGENT_SECURITY_POLICY_CHANGED');
+}
+permissionSecurity = nativePermissionDescriptor();
+permissionWorkspaceIdentity = 'fixture-workspace-root-v2';
+await assert.rejects(permissionSend, e => e.code === 'AGENT_SECURITY_CONFIRMATION_REQUIRED');
+permissionWorkspaceIdentity = 'fixture-workspace-root-v1';
+for (const removed of [undefined, null]) {
+  permissionSecurity = removed;
+  await assert.rejects(permissionSend, e => e.code === 'AGENT_SECURITY_POLICY_CHANGED',
+    'a Session created under a security policy cannot continue after its descriptor is removed');
+}
+permissionSecurity = { ...nativePermissionDescriptor(), nativeApprovalPolicy: 'replacement-approval-policy' };
+const replacementScope = permissionBroker.describeExecutionSecurity(permissionAdapter.id, permissionTask.workspaceId);
+permissionBroker.authorizeExecution(permissionAdapter.id, permissionTask.workspaceId, replacementScope.fingerprint);
+await assert.rejects(permissionSend, e => e.code === 'AGENT_SECURITY_POLICY_CHANGED',
+  'fresh Owner consent for a changed policy must not transfer the old Session to that policy');
+const replacementSession = await permissionBroker.createSession(permissionAdapter.id, { taskId: permissionTask.id, workspaceId: permissionTask.workspaceId });
+permissionTask = { ...executablePermissionTask, currentAgent: { provider: permissionAdapter.id, sessionId: replacementSession.sessionId } };
+await permissionBroker.send({ provider: permissionAdapter.id, sessionId: replacementSession.sessionId, content: 'replacement policy' });
+assert.equal(permissionSends, 2, 'a fresh Session under the approved replacement policy can execute');
+permissionSecurity = nativePermissionDescriptor();
+permissionBroker.authorizeExecution(permissionAdapter.id, permissionTask.workspaceId, permissionScope.fingerprint);
+permissionTask = executablePermissionTask;
+for (const [key, invalid] of [['nativeSandboxSupported', true], ['strictIsolationVerified', true],
+  ['nativeApprovalSupported', false], ['nativePermissionPolicyVerified', false], ['allToolsRequireApproval', false], ['nativeSandboxMode', 'workspace-write']]) {
+  for (const value of [invalid, undefined, 'true', null]) {
+    permissionSecurity = { ...nativePermissionDescriptor(), [key]: value };
+    assert.equal(executionSecurity.isNativePermissionSecurity(permissionSecurity), false, key + ' must be exact and present');
+    const rejectedScope = permissionBroker.describeExecutionSecurity(permissionAdapter.id, permissionTask.workspaceId);
+    assert.throws(() => permissionBroker.authorizeExecution(permissionAdapter.id, permissionTask.workspaceId, rejectedScope.fingerprint),
+      e => e.code === 'AGENT_NATIVE_PERMISSION_POLICY_UNVERIFIED', key);
+    await assert.rejects(permissionSend, e => e.code === 'AGENT_NATIVE_PERMISSION_POLICY_UNVERIFIED', key);
+  }
+}
+permissionSecurity = { ...nativePermissionDescriptor(), mode: 'native' };
+const legacyUnsandboxed = permissionBroker.describeExecutionSecurity(permissionAdapter.id, permissionTask.workspaceId);
+assert.throws(() => permissionBroker.authorizeExecution(permissionAdapter.id, permissionTask.workspaceId, legacyUnsandboxed.fingerprint),
+  e => e.code === 'AGENT_NATIVE_SANDBOX_UNSUPPORTED');
+await assert.rejects(permissionSend, e => e.code === 'AGENT_NATIVE_SANDBOX_UNSUPPORTED');
+permissionSecurity = { ...nativePermissionDescriptor(), mode: 'isolated', nativeSandboxSupported: true };
+const unverifiedIsolated = permissionBroker.describeExecutionSecurity(permissionAdapter.id, permissionTask.workspaceId);
+assert.throws(() => permissionBroker.authorizeExecution(permissionAdapter.id, permissionTask.workspaceId, unverifiedIsolated.fingerprint),
+  e => e.code === 'ISOLATED_ENVIRONMENT_UNVERIFIED');
+for (const mode of ['unknown', '', null, undefined, true, 0, {}, []]) {
+  permissionSecurity = { ...nativePermissionDescriptor(), mode };
+  assert.throws(() => permissionBroker.describeExecutionSecurity(permissionAdapter.id, permissionTask.workspaceId),
+    e => e.code === 'AGENT_SECURITY_DESCRIPTOR_INVALID');
+  await assert.rejects(permissionSend, e => e.code === 'AGENT_SECURITY_DESCRIPTOR_INVALID');
+}
+for (const malformed of [false, 0, '', true, []]) {
+  permissionSecurity = malformed;
+  assert.throws(() => permissionBroker.describeExecutionSecurity(permissionAdapter.id, permissionTask.workspaceId),
+    e => e.code === 'AGENT_SECURITY_DESCRIPTOR_INVALID');
+  await assert.rejects(permissionSend, e => e.code === 'AGENT_SECURITY_DESCRIPTOR_INVALID');
+}
+permissionSecurity = nativePermissionDescriptor();
+console.log('PASS explicit native permission mode, exact gates, Owner consent, runtime/policy fingerprints, and existing Task/Session/Workspace fences');
+
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-native-security-'));
 let services;
 try {
@@ -86,6 +217,60 @@ try {
   assert.match(approval.request.reason, /Native/);
   await services.capabilityService.execute({ method: 'capability.approval.decide', params: { id: pending.approvalId, approve: true } });
   assert.equal(services.agentBroker.describeExecutionSecurity(adapter.id, workspace.id).authorized, true);
+  services.agentBroker.register(permissionAdapter);
+  const permissionOwnerScope = services.agentBroker.describeExecutionSecurity(permissionAdapter.id, workspace.id);
+  const permissionRequest = { ...request, input: { provider: permissionAdapter.id, fingerprint: permissionOwnerScope.fingerprint }, reason: permissionOwnerScope.disclosure };
+  await assert.rejects(() => services.capabilityService.broker.execute({ ...permissionRequest, actor: { kind: 'agent', id: 'untrusted' } }),
+    e => e.code === 'PERMISSION_DENIED');
+  const permissionPending = await services.capabilityService.execute({ method: 'capability.execute', params: permissionRequest });
+  assert.equal(permissionPending.status, 'pending');
+  assert.equal(services.agentBroker.describeExecutionSecurity(permissionAdapter.id, workspace.id).authorized, false);
+  await services.capabilityService.execute({ method: 'capability.approval.decide', params: { id: permissionPending.approvalId, approve: true } });
+  assert.equal(services.agentBroker.describeExecutionSecurity(permissionAdapter.id, workspace.id).authorized, true);
+  // Configured credentials are not authenticated accounts. The explicit native mode
+  // may dispatch one Task to verify them, but only with its complete verified policy.
+  let dispatchHealth={available:true,installed:true,compatible:true,taskEligible:true,
+    sessionCapable:true,authenticated:null,authConfigured:true,authVerified:false,authentication:'configured-unverified'};
+  let dispatchSecurity={...nativePermissionDescriptor(),verified:true};
+  let dispatchStarts=0,dispatchSends=0;
+  const dispatchBase=defineAgentProvider({id:'configured-native-dispatch',label:'Configured native dispatch fixture',
+    capabilityExtras:{workspaceBoundary:'native-staged'},methods:{
+      async health(){return {...dispatchHealth};},
+      async createSession(){dispatchStarts++;return {sessionId:'configured-dispatch-session'};},
+      async send(){dispatchSends++;return {accepted:true};},
+      async *follow({signal}){await new Promise(resolve=>{if(signal.aborted)resolve();else signal.addEventListener('abort',resolve,{once:true});});}
+    }});
+  services.agentBroker.register({...dispatchBase,capabilities:()=>({...dispatchBase.capabilities(),security:dispatchSecurity})});
+  const dispatchTask=services.taskService.runtime.create({goal:'Synthetic configured runtime preflight',workspaceId:workspace.id});
+  const dispatchScope=services.agentBroker.describeExecutionSecurity(dispatchBase.id,workspace.id);
+  services.agentBroker.authorizeExecution(dispatchBase.id,workspace.id,dispatchScope.fingerprint);
+  const healthyDispatch={...dispatchHealth};
+  const baseDispatchSecurity={...dispatchSecurity};
+  let dispatchRequest=0;
+  const runDispatch=()=>services.capabilityService.execute({method:'capability.execute',params:{capability:'agent.run',
+    requestId:'configured-native-'+ ++dispatchRequest,taskId:dispatchTask.id,workspaceId:workspace.id,
+    input:{agentProvider:dispatchBase.id,content:'Synthetic fixture; no external effects'}}});
+  for(const [label,changes] of [
+    ['explicit authentication failure',{authenticated:false}],['missing credential',{authConfigured:false}],
+    ['missing credential evidence',{authConfigured:undefined}],['unknown credential state',{authentication:'unknown'}],
+    ['unproven session',{sessionCapable:false}],['missing session evidence',{sessionCapable:undefined}],
+    ['unavailable runtime',{available:false}],['ineligible Task runtime',{taskEligible:false}],
+    ['ambiguous API verification',{authVerified:undefined}],['claimed API verification without authentication',{authVerified:true}]
+  ]){dispatchHealth={...healthyDispatch,...changes};await assert.rejects(runDispatch,error=>error.code==='PROVIDER_UNAVAILABLE',label);}
+  dispatchHealth={...healthyDispatch};
+  for(const changes of [{mode:'native',nativeSandboxSupported:true},{mode:'isolated',nativeSandboxSupported:true,strictIsolationVerified:true},
+    {nativePermissionPolicyVerified:false},{allToolsRequireApproval:false},{verified:false}]){
+    dispatchSecurity={...baseDispatchSecurity,...changes};await assert.rejects(runDispatch,error=>error.code==='PROVIDER_UNAVAILABLE');
+  }
+  dispatchSecurity={...baseDispatchSecurity};
+  assert.equal(dispatchStarts,0,'unverified preflight must not create a Session');
+  assert.equal(dispatchSends,0,'unverified preflight must not send a prompt');
+  const dispatched=await runDispatch();
+  assert.equal(dispatched.status,'completed');assert.equal(dispatched.result.accepted,true);
+  assert.equal(dispatchStarts,1);assert.equal(dispatchSends,1);
+  assert.equal(dispatchHealth.authenticated,null,'dispatch must not turn configured credentials into an authenticated account');
+  assert.equal(services.taskService.runtime.get({id:dispatchTask.id}).task.currentAgent.provider,dispatchBase.id);
+  console.log('PASS real Task assignment accepts only exact configured-unverified native policy and rejects explicit auth failure or incomplete evidence');
   const stale = services.agentBroker.describeExecutionSecurity(adapter.id, workspace.id);
   revision = 'fixture-policy-v3';
   await assert.rejects(() => services.capabilityService.execute({ method: 'capability.execute', params: {

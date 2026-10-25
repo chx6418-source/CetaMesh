@@ -18,6 +18,9 @@ try {
     fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
     fs.writeFileSync(path.join(root, file), `fixture:${file}`);
   }
+  for(const file of ['src/agent/native-acp-runtime.js','src/agent/gemini-qwen-runtime.js','src/agent/claude-runtime.js','src/agent/native-approval-bridge.js','src/agent/runtime-configuration.js','src/capability/service.js','src/settings/schema.js']) {
+    assert.ok(AGENT_EXPANSION_SOURCE_FILES.includes(file),file+' must bind new native execution inputs to SEA provenance');
+  }
   const fingerprint = computeAgentExpansionFingerprint(root);
   assert.equal(assertAgentExpansionSourceUnchanged(root, fingerprint), fingerprint);
   assert.match(fingerprint, /^[a-f0-9]{64}$/);

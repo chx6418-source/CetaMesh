@@ -1,12 +1,13 @@
+import { canDispatchConfiguredNativeAgent } from '../agent/execution-security.js';
 import { capabilityError } from '../capability/types.js';
 
 const BOUNDARIES = new Set(['capability-broker', 'staged-capability-broker', 'native-staged']);
 
-function eligibleHealth(health, provider) {
+function eligibleHealth(health, provider, capabilities, explicitProvider) {
   return health?.available === true && health.disabled !== true && health.enabled !== false
     && health.installed !== false && health.ready !== false && health.reachable !== false
     && health.taskEligible !== false && health.compatible !== false
-    && (provider === 'cetamesh' || (health.authenticated === true && health.sessionCapable === true
+    && (provider === 'cetamesh' || (Boolean(explicitProvider) && canDispatchConfiguredNativeAgent(health,capabilities?.security)) || (health.authenticated === true && health.sessionCapable === true
       && (provider === 'codex' ? health.sandboxCapable === true : health.toolsAvailable === true)));
 }
 
@@ -31,12 +32,12 @@ export async function rankTaskAgents({ agentBroker, workspaceId, explicitProvide
   for (const provider of ids) {
     if (exclude.includes(provider)) continue;
     try {
+      const health = await agentBroker.health(provider);
       const capabilities = agentBroker.capabilities(provider);
       if (!BOUNDARIES.has(capabilities?.workspaceBoundary)) {
         throw capabilityError('AGENT_BOUNDARY_UNSUPPORTED', 'Provider has no verified Task Workspace boundary');
       }
-      const health = await agentBroker.health(provider);
-      if (!eligibleHealth(health, provider)) {
+      if (!eligibleHealth(health, provider, capabilities, explicitProvider)) {
         throw capabilityError('PROVIDER_UNAVAILABLE', 'Provider is not currently eligible');
       }
       agentBroker.assertExecutionConsent?.(provider, { workspaceId });

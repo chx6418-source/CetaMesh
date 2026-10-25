@@ -49,3 +49,24 @@ health.unknown.consentRevoked = true;
 await assert.rejects(rankTaskAgents({ ...request, explicitProvider: 'unknown' }), error => error.code === 'AGENT_SECURITY_CONFIRMATION_REQUIRED');
 assert.deepEqual((await rankTaskAgents({ ...request, maxCost: { amount: 3, currency: 'USD' } })).map(row => row.provider), ['paid'], 'revoked candidate cannot be ranked');
 console.log('Agent assignment: explicit/disabled, health, ability, cost and latency guards passed');
+
+const nativeDispatchSecurity={mode:'native-permissions',verified:true,nativeSandboxSupported:false,strictIsolationVerified:false,
+ nativeApprovalSupported:true,nativePermissionPolicyVerified:true,allToolsRequireApproval:true,nativeSandboxMode:'none'};
+const nativeHealth={available:true,installed:true,compatible:true,taskEligible:true,sessionCapable:true,authenticated:null,
+ authConfigured:true,authVerified:false,authentication:'configured-unverified'};
+let currentNativeHealth={...nativeHealth},currentNativeSecurity={...nativeDispatchSecurity};
+const nativeAssignment={...descriptors.fast,security:currentNativeSecurity,assignment:{...descriptors.fast.assignment,
+ estimatedCost:{...descriptors.fast.assignment.estimatedCost,agentProvider:'opencode'}}};
+const nativeBroker={ids:()=>['opencode'],capabilities:()=>({...nativeAssignment,security:currentNativeSecurity}),
+ health:async()=>({...currentNativeHealth}),assertExecutionConsent:()=>{}};
+const nativeRequest={...request,agentBroker:nativeBroker,explicitProvider:'opencode'};
+assert.deepEqual((await rankTaskAgents(nativeRequest)).map(row=>row.provider),['opencode'],'explicit Owner selection may verify configured credentials at dispatch without claiming authentication');
+assert.deepEqual(await rankTaskAgents({...nativeRequest,explicitProvider:null}),[],'unverified account must not qualify for automatic assignment even with a declared free fixture price');
+for(const changes of [{authenticated:false},{authConfigured:false},{authVerified:true},{sessionCapable:false},{compatible:false}]){
+ currentNativeHealth={...nativeHealth,...changes};await assert.rejects(rankTaskAgents(nativeRequest),e=>e.code==='PROVIDER_UNAVAILABLE');
+}
+currentNativeHealth={...nativeHealth};currentNativeSecurity={...nativeDispatchSecurity,verified:false};
+await assert.rejects(rankTaskAgents(nativeRequest),e=>e.code==='PROVIDER_UNAVAILABLE');
+nativeBroker.health=async()=>{currentNativeSecurity={...nativeDispatchSecurity};return {...nativeHealth};};
+assert.equal((await rankTaskAgents(nativeRequest)).length,1,'eligibility reads refreshed capability evidence after asynchronous health');
+console.log('PASS explicit configured native Agent routing, no automatic account assumption, current policy evidence');

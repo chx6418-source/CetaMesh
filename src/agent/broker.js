@@ -12,7 +12,7 @@
 //      Context Monitor 与自动 rollover。Broker 不知道 Continuity 的存在，
 //      依赖方向仍然是 Continuity → Broker。
 import crypto from 'node:crypto';
-import { describeAgentExecutionSecurity } from './execution-security.js';
+import { describeAgentExecutionSecurity, isNativePermissionSecurity } from './execution-security.js';
 import { AGENT_PROVIDER_OPTIONAL_METHODS, agentProviderError } from './agent-provider.js';
 
 const TASK_WORKSPACE_BOUNDARIES = new Set(['capability-broker', 'staged-capability-broker', 'native-staged']);
@@ -30,10 +30,15 @@ export function createAgentBroker({ registry, log = () => {}, resolveWorkspaceId
   }
   function assertExecutionConsent(providerId, { workspaceId } = {}) {
     const scope = securityScope(providerId, workspaceId);
-    if (!scope.required) return;
-    if (scope.security.mode === 'isolated' && scope.security.strictIsolationVerified !== true) throw agentProviderError('ISOLATED_ENVIRONMENT_UNVERIFIED', 'Strict isolation has not been verified');
-    if (scope.security.nativeSandboxSupported !== true) throw agentProviderError('AGENT_NATIVE_SANDBOX_UNSUPPORTED', 'Selected native sandbox is not supported');
+    if (!scope.required) return scope;
+    if (scope.security.mode === 'native-permissions') {
+      if (!isNativePermissionSecurity(scope.security)) throw agentProviderError('AGENT_NATIVE_PERMISSION_POLICY_UNVERIFIED', 'Native per-tool approval policy has not been verified');
+    } else {
+      if (scope.security.mode === 'isolated' && scope.security.strictIsolationVerified !== true) throw agentProviderError('ISOLATED_ENVIRONMENT_UNVERIFIED', 'Strict isolation has not been verified');
+      if (scope.security.nativeSandboxSupported !== true) throw agentProviderError('AGENT_NATIVE_SANDBOX_UNSUPPORTED', 'Selected native sandbox is not supported');
+    }
     if (!workspaceId || !scope.authorized) throw agentProviderError('AGENT_SECURITY_CONFIRMATION_REQUIRED', '请先确认此 Agent 的原生执行范围；确认不会授予新的平台工具权限');
+    return scope;
   }
   const turnEndListeners = new Set();
   // Native request IDs are local to a Session; retain bounded Core provenance.
@@ -96,8 +101,12 @@ export function createAgentBroker({ registry, log = () => {}, resolveWorkspaceId
     authorizeExecution(providerId, workspaceId, fingerprint) {
       const scope = securityScope(providerId, workspaceId);
       if (!workspaceId || !scope.required || fingerprint !== scope.fingerprint) throw agentProviderError('AGENT_SECURITY_POLICY_CHANGED', 'Agent execution policy changed; review again');
-      if (scope.security.mode === 'isolated' && scope.security.strictIsolationVerified !== true) throw agentProviderError('ISOLATED_ENVIRONMENT_UNVERIFIED', 'Strict isolation has not been verified');
-      if (scope.security.nativeSandboxSupported !== true) throw agentProviderError('AGENT_NATIVE_SANDBOX_UNSUPPORTED', 'Selected native sandbox is unsupported');
+      if (scope.security.mode === 'native-permissions') {
+        if (!isNativePermissionSecurity(scope.security)) throw agentProviderError('AGENT_NATIVE_PERMISSION_POLICY_UNVERIFIED', 'Native per-tool approval policy has not been verified');
+      } else {
+        if (scope.security.mode === 'isolated' && scope.security.strictIsolationVerified !== true) throw agentProviderError('ISOLATED_ENVIRONMENT_UNVERIFIED', 'Strict isolation has not been verified');
+        if (scope.security.nativeSandboxSupported !== true) throw agentProviderError('AGENT_NATIVE_SANDBOX_UNSUPPORTED', 'Selected native sandbox is unsupported');
+      }
       executionConsents.set(consentKey(providerId, workspaceId), fingerprint);
       while (executionConsents.size > 256) executionConsents.delete(executionConsents.keys().next().value);
       return { authorized: true, fingerprint };
@@ -147,7 +156,7 @@ export function createAgentBroker({ registry, log = () => {}, resolveWorkspaceId
           throw agentProviderError('TASK_REQUIRED', 'Workspace-bound Agents require a Task and Workspace binding');
         }
       }
-      assertExecutionConsent(providerId, params);
+      const executionSecurity = assertExecutionConsent(providerId, params);
       const created = await provider.createSession({
         ...(['staged-capability-broker', 'native-staged'].includes(boundary) ? {} : { cwd: params?.cwd }),
         taskId: params?.taskId,
@@ -158,7 +167,8 @@ export function createAgentBroker({ registry, log = () => {}, resolveWorkspaceId
         purpose: params?.purpose
       });
       if (created?.sessionId) {
-        executionBindings.set(consentKey(providerId, created.sessionId), { workspaceId: params.workspaceId, taskId: params.taskId });
+        executionBindings.set(consentKey(providerId, created.sessionId), { workspaceId: params.workspaceId, taskId: params.taskId,
+          securityRequired: executionSecurity.required, securityFingerprint: executionSecurity.fingerprint });
         while (executionBindings.size > 4096) executionBindings.delete(executionBindings.keys().next().value);
       }
       return created;
@@ -171,10 +181,14 @@ export function createAgentBroker({ registry, log = () => {}, resolveWorkspaceId
         || typeof runId !== 'string' || !runId || runId.length > 240) {
         throw agentProviderError('INVALID_PARAMS', 'Agent run requires a bounded Core identity and phase');
       }
-      if (provider.capabilities()?.security) {
-        const binding = executionBindings.get(consentKey(providerId, sessionId));
+      const binding = executionBindings.get(consentKey(providerId, sessionId));
+      const declaredSecurity = provider.capabilities()?.security;
+      if (binding?.securityRequired || (declaredSecurity !== undefined && declaredSecurity !== null)) {
         if (!binding) throw agentProviderError('AGENT_SECURITY_SESSION_UNBOUND', 'Native Session must be created through the authorized Broker');
-        assertExecutionConsent(providerId, binding);
+        const scope = assertExecutionConsent(providerId, binding);
+        if (binding.securityRequired && (!scope.required || binding.securityFingerprint !== scope.fingerprint)) {
+          throw agentProviderError('AGENT_SECURITY_POLICY_CHANGED', 'Session execution policy changed; create a fresh authorized Session');
+        }
         if (phase !== 'bootstrap' && isTaskHandoffInFlight(binding.taskId)) {
           throw agentProviderError('TASK_HANDOFF_IN_PROGRESS', 'Task execution is owned by an active Handoff');
         }

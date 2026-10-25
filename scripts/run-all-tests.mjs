@@ -91,6 +91,10 @@ const REGISTRY = {
   'test-codex-app-server.mjs': { category: 'security' },
   'test-agent-claude.mjs': { category: 'security' },
   'test-agent-acp.mjs': { category: 'security' },
+  'test-agent-runtime-composition.mjs': { category: 'security', note: 'Production Agent setup, scoped credential storage and native approval composition' },
+  'test-agent-native-approval.mjs': { category: 'security', note: 'Owner native-tool approval, exact binding, cancel and stale policy rejection' },
+  'test-gemini-qwen-native-policy.mjs': { category: 'environment', requires: ['real-gemini-qwen'], timeoutMs: 240000, note: 'Pinned official Gemini and Qwen CLIs with local synthetic models and native approval policy' },
+  'test-opencode-native-runtime.mjs': { category: 'environment', requires: ['real-opencode'], timeoutMs: 180000, note: 'Installed OpenCode CLI with isolated local synthetic model and native approval lifecycle' },
   'test-agent-workbuddy.mjs': { category: 'runtime' },
   'test-ui-motion.mjs': { category: 'desktop' },
   'test-chat-composer-layout.mjs': { category: 'desktop' },
@@ -343,6 +347,8 @@ async function probeAvailability() {
     'cargo-opt-in': process.env.WHALEBRIDGE_TEST_CARGO === '1'
       && spawnSync('cargo', ['--version'], { timeout: 20000 }).status === 0,
     'agent-expansion-sea': Boolean(process.env.WHALEBRIDGE_AGENT_EXPANSION_SEA_DIR?.trim()),
+    'real-gemini-qwen': process.env.WHALEBRIDGE_TEST_REAL_GEMINI_QWEN === '1',
+    'real-opencode': process.env.WHALEBRIDGE_TEST_REAL_OPENCODE === '1',
     'real-codex': process.env.WHALEBRIDGE_TEST_REAL_CODEX === '1'
       && spawnSync('codex', ['login', 'status'], { timeout: 20000 }).status === 0
   };

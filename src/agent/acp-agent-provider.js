@@ -1,4 +1,6 @@
 import crypto from 'node:crypto';
+import path from 'node:path';
+import { isNativePermissionSecurity } from './execution-security.js';
 import { agentProviderError as fault, defineAgentProvider, normalizePromptContent } from './agent-provider.js';
 import { createJsonRpcTransport } from './protocol/json-rpc-transport.js';
 import { createAgentEventBuffer } from './protocol/agent-event-buffer.js';
@@ -7,7 +9,7 @@ import { createStagingWorkspace, collectStagedChanges, refreshStagingBaseline, c
 
 /** ACP v1 only. launch is a trusted process supervisor, never an RPC supplied command. */
 export function createAcpAgentProvider({descriptor, launch, resolveTaskWorkspace, applyChanges,
-  cleanupStage = cleanupStagingWorkspace,
+  cleanupStage = cleanupStagingWorkspace, stagingRoot, excludedRoots = [], listWorkspaceRoots = async () => [], snapshotExcludedPaths = [], validateRuntime = async () => {},
   approvalStatus = () => null, cancelApproval = async () => {}, requestNativeApproval, log = () => {}} = {}) {
   if (!descriptor?.id || !descriptor?.label) throw new TypeError('ACP descriptor required');
   const policy = structuredClone(descriptor), sessions = new Map();
@@ -35,8 +37,9 @@ export function createAcpAgentProvider({descriptor, launch, resolveTaskWorkspace
     return {closed:true};
   }
   const eligible = () => policy.protocolVersion === 1 && policy.verifiedRuntime === true
-    && policy.security?.verified === true && policy.security.mode === 'native'
-    && policy.security.nativeSandboxSupported === true && policy.security.nativeApprovalSupported === true
+    && policy.security?.verified === true
+    && ((policy.security.mode === 'native' && policy.security.nativeSandboxSupported === true && policy.security.nativeApprovalSupported === true)
+      || (isNativePermissionSecurity(policy.security) && typeof requestNativeApproval === 'function'))
     && typeof launch === 'function' && typeof resolveTaskWorkspace === 'function';
   const requireSession = id => {
     const session = sessions.get(id);
@@ -124,6 +127,9 @@ export function createAcpAgentProvider({descriptor, launch, resolveTaskWorkspace
     if (result?.stopReason === 'cancelled') { end(s,run,'aborted'); return; }
     if (run.cancelled) { s.state = 'unknown'; throw fault('ACP_CANCEL_UNCONFIRMED','Agent did not confirm cancellation'); }
     if (!['end_turn','max_tokens','max_turn_requests','refusal'].includes(result?.stopReason)) throw fault('ACP_STOP_REASON_UNKNOWN','Unrecognized ACP stop reason');
+    await validateRuntime();
+    if (s.run !== run || s.closed || s.closing || s.disconnected) return;
+    if (run.cancelled) { end(s,run,'aborted'); return; }
     const changes = collectStagedChanges(s.stage);
     if (changes.changes.length) {
       if (typeof applyChanges !== 'function') throw fault('AGENT_BOUNDARY_UNSUPPORTED','Import adapter unavailable');
@@ -182,6 +188,7 @@ export function createAcpAgentProvider({descriptor, launch, resolveTaskWorkspace
       async createSession({taskId,workspaceId} = {}) {
         if (shuttingDown) throw fault('PROVIDER_SHUTTING_DOWN','ACP provider is shutting down');
         if (!eligible()) throw fault('PROVIDER_UNAVAILABLE','Verified ACP runtime and native security required');
+        await validateRuntime();
         if (sessions.size + creating >= 16) throw fault('AGENT_SESSION_LIMIT','ACP session limit reached');
         creating++;
         let completed;
@@ -193,14 +200,21 @@ export function createAcpAgentProvider({descriptor, launch, resolveTaskWorkspace
           if (shuttingDown) throw fault('PROVIDER_SHUTTING_DOWN','ACP provider is shutting down');
           if (!taskId || !workspaceId || binding?.task?.id !== taskId || binding.task.workspaceId !== workspaceId
             || binding.workspace?.id !== workspaceId || typeof binding.workspace.root !== 'string') throw fault('TASK_WORKSPACE_MISMATCH','Task Workspace binding invalid');
-          const stage = await createStagingWorkspace({taskId,workspaceId,sourceRoot:binding.workspace.root,
-            additionalWorkspaceRoots:binding.additionalWorkspaceRoots ?? [],excludedRoots:binding.excludedRoots ?? []});
+          const registeredRoots=await listWorkspaceRoots();
+          const runtimeExclusions=snapshotExcludedPaths.map(relative=>{
+            if(typeof relative!=='string'||!relative||path.isAbsolute(relative)||relative.split(/[\\/]/).some(part=>!part||part==='..'||part==='.') ) throw fault('ACP_SNAPSHOT_POLICY_INVALID','Invalid runtime snapshot exclusion');
+            return path.join(binding.workspace.root,relative);
+          });
+          const stage = await createStagingWorkspace({taskId,workspaceId,sourceRoot:binding.workspace.root,stagingRoot,
+            additionalWorkspaceRoots:[...(binding.additionalWorkspaceRoots ?? []),...(Array.isArray(registeredRoots)?registeredRoots.map(item=>typeof item==='string'?item:item?.root).filter(Boolean):[])],
+            excludedRoots:[...(binding.excludedRoots ?? []),...excludedRoots,...runtimeExclusions]});
           s = {id:crypto.randomUUID(),taskId,workspaceId,stage,buffer:createAgentEventBuffer(),sequence:0,state:'new',run:null,closed:false};
           record.session = s;
           const onHandle = handle => {
             if (s.handle && s.handle !== handle) throw fault('ACP_LAUNCH_HANDLE_MISMATCH','Launcher changed the supervised handle');
             s.handle = handle;
           };
+          await validateRuntime();
           const launched = await launch({provider:policy.id,sessionId:s.id,taskId,workspaceId,cwd:stage.root,
             descriptor:structuredClone(policy),onHandle});
           if (s.handle && s.handle !== launched) throw fault('ACP_LAUNCH_HANDLE_MISMATCH','Returned handle differs from captured handle');
@@ -270,6 +284,7 @@ export function createAcpAgentProvider({descriptor, launch, resolveTaskWorkspace
       async send({sessionId,content} = {}) {
         const s = requireSession(sessionId);
         if (s.state !== 'ready' || s.run || s.closing) throw fault('TURN_BUSY','ACP session is not ready; prompt will not be replayed');
+        await validateRuntime();
         const prompt = normalizePromptContent(content);
         if (prompt.some(block=>block.type !== 'text' || typeof block.text !== 'string')) throw fault('AGENT_UNSUPPORTED','Only text prompts supported');
         const run = {id:crypto.randomUUID(),text:'',cancelled:false}; s.run = run; s.state = 'running';
@@ -291,9 +306,14 @@ export function createAcpAgentProvider({descriptor, launch, resolveTaskWorkspace
         s.rpc.notify('session/cancel',{sessionId:s.nativeId});
         return {cancelled:false,cancelRequested:true,sessionId,state:'unknown'};
       },
-      async status({sessionId} = {}) { const s = requireSession(sessionId); return {provider:policy.id,sessionId,
-        taskId:s.taskId,workspaceId:s.workspaceId,state:s.state,running:!!s.run,waitingForApproval:s.state === 'waiting',
-        approvalId:s.approvalId ?? null,lastRunStatus:s.lastRunStatus ?? 'idle',errorCode:s.lastError ?? null}; },
+      async status({sessionId} = {}) {
+        const s = requireSession(sessionId);
+        let runtimeError=null;
+        try { await validateRuntime(); } catch(error) { runtimeError=error?.code ?? 'AGENT_RUNTIME_CHANGED'; }
+        return {provider:policy.id,sessionId,taskId:s.taskId,workspaceId:s.workspaceId,
+          state:runtimeError?'unknown':s.state,running:!!s.run,waitingForApproval:!runtimeError && s.state==='waiting',
+          runtimeValid:!runtimeError,approvalId:s.approvalId??null,lastRunStatus:s.lastRunStatus??'idle',errorCode:runtimeError??s.lastError??null};
+      },
       async contextUsage({sessionId} = {}) { requireSession(sessionId); return {provider:policy.id,sessionId,available:false,usage:null}; },
       async *follow({sessionId,signal,sinceSequence=0} = {}) { const s = requireSession(sessionId); yield* s.buffer.follow({signal,sinceSequence}); },
       closeSession

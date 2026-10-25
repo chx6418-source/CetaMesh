@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { isSea } from 'node:sea';
+import { readJsonFile } from '../storage/json-file.js';
 
 const MAX_CAPTURE_BYTES = 4 * 1024 * 1024;
 const MIN_TIMEOUT_MS = 1000;
@@ -78,16 +79,39 @@ export function createMinimalAgentEnv(source = process.env, overrides = {}, { au
   return result;
 }
 
-function resolveNpmShimScript(executable, exists = fs.existsSync) {
+const NPM_CLI_PACKAGES = Object.freeze({
+  codex: Object.freeze({ packageName: '@openai/codex', binPath: 'bin/codex.js', verifyManifest: false }),
+  gemini: Object.freeze({ packageName: '@google/gemini-cli', binPaths: Object.freeze({ 'dist/index.js': null, 'bundle/gemini.js': '0.65.0' }), verifyManifest: true }),
+  qwen: Object.freeze({ packageName: '@qwen-code/qwen-code', binPaths: Object.freeze({ 'dist/index.js': null, 'cli-entry.js': '0.26.1' }), verifyManifest: true })
+});
+
+function resolveNpmShimScript(name, executable) {
+  const spec = Object.hasOwn(NPM_CLI_PACKAGES, name) ? NPM_CLI_PACKAGES[name] : null;
+  if (!spec || path.basename(executable).toLowerCase() !== name + path.extname(executable).toLowerCase()) return null;
   const directory = path.dirname(executable);
-  const candidates = [
-    path.join(directory, 'node_modules', '@openai', 'codex', 'bin', 'codex.js'),
-    path.resolve(directory, '..', '@openai', 'codex', 'bin', 'codex.js'),
-    path.resolve(directory, '..', '..', '@openai', 'codex', 'bin', 'codex.js')
-  ];
-  for (const candidate of candidates) {
-    try { if (exists(candidate)) return path.resolve(candidate); }
-    catch { continue; /* Unreadable candidates are skipped and the remaining explicit paths are checked. */ }
+  const packageParts = spec.packageName.split('/');
+  const packageRoots = [path.join(directory, 'node_modules', ...packageParts),
+    path.resolve(directory, '..', ...packageParts), path.resolve(directory, '..', '..', ...packageParts)];
+  for (const packageRoot of packageRoots) {
+    try {
+      let binPath = spec.binPath;
+      if (spec.verifyManifest) {
+        // Only independently verified official package/bin layouts are accepted.
+        // Vendor metadata cannot select arbitrary code, even at a known version.
+        const manifest = readJsonFile(path.join(packageRoot, 'package.json'), { maxBytes: 64 * 1024 });
+        if (manifest?.name !== spec.packageName || !manifest.bin || Array.isArray(manifest.bin)
+          || !Object.hasOwn(manifest.bin, name) || typeof manifest.bin[name] !== 'string'
+          || !Object.hasOwn(spec.binPaths, manifest.bin[name])) continue;
+        binPath = manifest.bin[name];
+        if (spec.binPaths[binPath] !== null && manifest.version !== spec.binPaths[binPath]) continue;
+      }
+      const candidate = path.join(packageRoot, binPath);
+      if (!isFile(candidate)) continue;
+      const realPackageRoot = fs.realpathSync(packageRoot);
+      const relative = path.relative(realPackageRoot, fs.realpathSync(candidate));
+      if (!relative || relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative)) continue;
+      return path.resolve(candidate);
+    } catch { continue; /* Missing, malformed or escaping packages never authorize a different provider. */ }
   }
   return null;
 }
@@ -188,6 +212,11 @@ export function findCliCandidates(name, {
     }
   }
   if (platform === 'win32' && requested === 'codex') found.push(...desktopManagedCodexCandidates(environmentValue(env, 'LOCALAPPDATA')));
+  if (platform === 'win32' && requested === 'opencode') {
+    const localAppData = environmentValue(env, 'LOCALAPPDATA');
+    // Observed Desktop-bundled CLI only; the sibling OpenCode.exe is the GUI.
+    if (localAppData && path.isAbsolute(localAppData)) found.push(path.join(localAppData, 'Programs', '@opencodedesktop', 'resources', 'opencode-cli.exe'));
+  }
   return [...new Set(found.filter(isFile))].sort((a, b) => Number(/\.(?:cmd|bat)$/i.test(a)) - Number(/\.(?:cmd|bat)$/i.test(b)));
 }
 
@@ -289,10 +318,10 @@ export class CliAgentProcess {
     if (this.platform !== 'win32' || !/\.(?:cmd|bat)$/i.test(executable)) {
       return { executable, argsPrefix: this.argsPrefix };
     }
-    const script = resolveNpmShimScript(executable);
-    if (!script) throw Object.assign(new Error('Windows Codex command shim does not resolve to the installed npm CLI package'), { code: 'UNSUPPORTED_WINDOWS_SHIM' });
+    const script = resolveNpmShimScript(this.name, executable);
+    if (!script) throw Object.assign(new Error('Windows command shim does not resolve to the requested installed npm CLI package'), { code: 'UNSUPPORTED_WINDOWS_SHIM' });
     const nodeExecutable = this.nodeExecutable ?? findCliExecutable(this.platform === 'win32' ? 'node.exe' : 'node', { env: this.environment(), platform: this.platform });
-    if (!nodeExecutable) throw Object.assign(new Error('Windows Codex npm shim requires an installed standalone Node runtime'), { code: 'NODE_RUNTIME_UNAVAILABLE' });
+    if (!nodeExecutable) throw Object.assign(new Error('Windows npm shim requires an installed standalone Node runtime'), { code: 'NODE_RUNTIME_UNAVAILABLE' });
     return { executable: nodeExecutable, argsPrefix: [script, ...this.argsPrefix] };
   }
 

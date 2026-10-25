@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createAcpProviders, createAcpProcessLauncher, discoverAcpRuntime } from '../src/agent/acp-provider-descriptors.js';
+import { acpArgumentsFromHelp, createNativeAcpProfile, openCodeNativePolicy } from '../src/agent/native-acp-runtime.js';
 import { createAcpAgentProvider } from '../src/agent/acp-agent-provider.js';
 import { createDefaultAgentService } from '../src/agent/service.js';
 import { createDesktopUiService } from '../src/desktop/ui-service.js';
@@ -129,3 +130,97 @@ try {
  const missing=discoverAcpRuntime('cetamesh-nonexistent-acp-fixture');assert.equal(missing,null);
 } finally {fs.rmSync(cwd,{recursive:true,force:true});}
 console.log('ACP descriptors and eight-provider composition PASS');
+// Production configuration must control availability without reading private credentials.
+let credentialReads=0;
+const disabledConfiguration={get:provider=>({provider,enabled:false,runtimePath:'',nodePath:'',model:'',credentialConfigured:false,executionMode:'native-permissions',revision:0}),identity:()=> 'disabled',resolveCredential(){credentialReads++;throw Error('Health may not read credentials');},configure:()=>({supported:true})};
+const disabledConfigured=createAcpProviders({runtimeConfiguration:disabledConfiguration});
+for(const item of disabledConfigured) assert.equal((await item.health()).reason,'runtime_disabled');
+assert.equal(credentialReads,0);
+assert.deepEqual(acpArgumentsFromHelp('gemini','  --experimental-acp  Enable experimental ACP'),['--experimental-acp']);
+assert.deepEqual(acpArgumentsFromHelp('gemini','  --acp   Start ACP'),['--acp']);
+assert.equal(acpArgumentsFromHelp('gemini','  --acp-unsafe Start something else'),null);
+assert.equal(acpArgumentsFromHelp('qwen','  --experimental-acp Start ACP'),null);
+assert.deepEqual(acpArgumentsFromHelp('qwen','  --acp  Start ACP'),['--acp']);
+assert.throws(()=>openCodeNativePolicy({model:'fixture',baseUrl:'http://example.invalid/v1'}),{code:'AGENT_ENDPOINT_INVALID'});
+const profileParent=fs.mkdtempSync(path.join(os.tmpdir(),'native-policy-fixture-'));
+try {
+ const profile=createNativeAcpProfile({id:'opencode',configuration:{model:'fixture',baseUrl:'https://example.invalid/v1'},profileParent});
+ try {
+  profile.validate();
+  const file=path.join(profile.root,'.config','opencode','opencode.json');
+  assert.equal(fs.readFileSync(file,'utf8').includes('{env:CETAMESH_AGENT_API_KEY}'),true);
+  fs.writeFileSync(path.join(profile.root,'.config','opencode','opencode.jsonc'),'{"permissions":[{"action":"*","resource":"*","effect":"allow"}]}');
+  assert.throws(()=>profile.validate(),{code:'AGENT_RUNTIME_CHANGED'},'additional runtime policy cannot override the owned profile');
+  fs.unlinkSync(path.join(profile.root,'.config','opencode','opencode.jsonc'));
+  fs.writeFileSync(file,'{}');assert.throws(()=>profile.validate(),{code:'AGENT_RUNTIME_CHANGED'});
+  fs.unlinkSync(file);assert.throws(()=>profile.validate(),{code:'AGENT_RUNTIME_CHANGED'},'deleted policy is a runtime identity change');
+ } finally {await profile.cleanup();}
+ assert.equal(fs.readdirSync(profileParent).length,0);
+} finally {fs.rmSync(profileParent,{recursive:true,force:true});}
+console.log('PASS configured runtime opt-out, observed ACP flags, private policy profile and tamper rejection');
+
+// Native permission policy is kept in a private disposable profile; it contains
+// no credential bytes and cannot inherit user/project hooks or auto-approval.
+for (const id of ['gemini', 'qwen']) {
+ const parent=fs.mkdtempSync(path.join(os.tmpdir(),'cetamesh-policy-profile-'));
+ let profile;
+ try {
+  profile=createNativeAcpProfile({id,configuration:{model:'fixture',baseUrl:'https://example.test/v1'},profileParent:parent});
+  const home=id==='gemini'?profile.environment.GEMINI_CLI_HOME:profile.environment.QWEN_HOME;
+  assert.equal(typeof home,'string',id+' must explicitly redirect its CLI home');
+  assert.ok(home.startsWith(profile.root+path.sep));
+  const systemFile=id==='gemini'?profile.environment.GEMINI_CLI_SYSTEM_SETTINGS_PATH:profile.environment.QWEN_CODE_SYSTEM_SETTINGS_PATH;
+  const settings=JSON.parse(fs.readFileSync(systemFile,'utf8'));
+  assert.equal(settings.security.auth.selectedType,id==='gemini'?'gemini-api-key':'openai');
+  if(id==='gemini') {
+   assert.equal(settings.admin.secureModeEnabled,true);assert.equal(settings.admin.extensions.enabled,false);
+   assert.equal(settings.admin.mcp.enabled,false);assert.equal(settings.hooksConfig.enabled,false);
+   assert.ok(profile.argv.includes('--admin-policy'));
+   const policy=fs.readFileSync(profile.argv[profile.argv.indexOf('--admin-policy')+1],'utf8');
+   assert.match(policy,/decision = "ask_user"/);assert.match(policy,/toolName = "\*"/);
+  } else {
+   assert.equal(settings.disableAllHooks,true);assert.ok(settings.permissions.ask.includes('read_file'));
+   assert.ok(settings.permissions.ask.includes('run_shell_command'));assert.ok(settings.permissions.ask.includes('write_file'));
+   assert.ok(settings.permissions.deny.includes('agent'));assert.deepEqual(settings.mcp.excluded,['*']);
+   assert.equal(profile.argv.includes('--safe-mode'),false);assert.equal(profile.argv.includes('--bare'),false);
+  }
+  assert.equal(JSON.stringify(settings).includes('apiKey'),false,'private settings refer to environment credentials only');
+  profile.validate();const identity=profile.identity;
+  fs.writeFileSync(systemFile,JSON.stringify({...settings,permissions:{allow:['read_file']}}));
+  assert.throws(()=>profile.validate(),{code:'AGENT_RUNTIME_CHANGED'},id+' detects replaced policy before execution');
+  assert.equal(profile.identity,identity,'policy mutations never mint fresh authority');
+ } finally {await profile?.cleanup();assert.deepEqual(fs.readdirSync(parent),[]);fs.rmdirSync(parent);}
+}
+
+const nativeEnvRoot=fs.mkdtempSync(path.join(os.tmpdir(),'native-env-fixture-'));
+try {
+ const handle=createAcpProcessLauncher({executable:process.execPath,argv:['-e','process.stdout.write(process.env.GEMINI_CLI_HOME+"|"+process.env.QWEN_HOME+"|"+process.env.GEMINI_API_KEY+"|"+process.env.OPENAI_API_KEY)'],
+  envSource:{...process.env,GEMINI_API_KEY:'unowned-must-not-inherit',OPENAI_API_KEY:'unowned-must-not-inherit'},trustedEnvironment:{GEMINI_CLI_HOME:'private-gemini',QWEN_HOME:'private-qwen',GEMINI_API_KEY:'synthetic-gemini',OPENAI_API_KEY:'synthetic-qwen'}})({cwd:nativeEnvRoot});
+ let output='';handle.readable.setEncoding('utf8');handle.readable.on('data',chunk=>output+=chunk);
+ try {assert.equal((await handle.done).exitCode,0);assert.equal(output,'private-gemini|private-qwen|synthetic-gemini|synthetic-qwen');}finally{await handle.close();}
+ assert.throws(()=>createAcpProcessLauncher({executable:process.execPath,argv:[],trustedEnvironment:{NODE_OPTIONS:'--import=unapproved'}})({cwd:nativeEnvRoot}),{code:'ACP_ENVIRONMENT_INVALID'});
+}finally{fs.rmSync(nativeEnvRoot,{recursive:true,force:true});}
+
+for(const [model,credentialConfigured,want] of [['',false,'agent_model_required'],['fixture',false,'agent_credential_required']]) {
+ const providers=createAcpProviders({runtimeConfiguration:{get:provider=>({provider,enabled:provider==='opencode',runtimePath:process.execPath,nodePath:'',model,credentialConfigured,baseUrl:'https://example.test/v1'}),identity:()=>model+credentialConfigured,resolveCredential(){throw Error('Health cannot read a credential');}},
+  launchFactory(){throw Error('An incomplete explicit setup must not launch a runtime');}});
+ try {const health=await providers.find(item=>item.id==='opencode').health();assert.equal(health.reason,want);assert.equal(health.installed,true);assert.equal(health.taskEligible,false);}finally{await Promise.all(providers.map(item=>item.shutdown()));}
+}
+
+const corruptConfigured=createAcpProviders({runtimeConfiguration:{get(){throw Object.assign(Error('Malformed saved runtime configuration'),{code:'AGENT_RUNTIME_CONFIG_CORRUPT'});},identity(){throw Error('Must not reset corrupted configuration');},configure(){throw Error('Must not repair implicitly');}}});
+for(const item of corruptConfigured){assert.doesNotThrow(()=>item.capabilities());const health=await item.health();assert.equal(health.available,false);assert.equal(health.taskEligible,false);assert.equal(health.reason,'AGENT_RUNTIME_CONFIG_CORRUPT');}
+await Promise.all(corruptConfigured.map(item=>item.shutdown()));
+
+assert.deepEqual(acpArgumentsFromHelp('opencode','  --standalone  Run with a private server\n  acp  Start an Agent Client Protocol server'),['acp'],'top-level --standalone is not an ACP flag; actual help skips unknown-flag validation');
+assert.deepEqual(acpArgumentsFromHelp('opencode','  acp  Start an Agent Client Protocol server'),['acp'],'OpenCode v2 ACP starts a private server by construction');
+const {geminiQwenPackageIdentity}=await import('../src/agent/gemini-qwen-runtime.js');
+assert.equal(typeof geminiQwenPackageIdentity,'function','native npm authority must fingerprint loaded chunks and dependencies');
+const packageFixture=fs.mkdtempSync(path.join(os.tmpdir(),'native-package-identity-'));
+try {
+ const moduleRoot=path.join(packageFixture,'node_modules'),packageRoot=path.join(moduleRoot,'@qwen-code','qwen-code'),entry=path.join(packageRoot,'cli-entry.js'),chunk=path.join(packageRoot,'chunks','core.js');
+ fs.mkdirSync(path.dirname(chunk),{recursive:true});fs.writeFileSync(entry,'export {};');fs.writeFileSync(chunk,'export const policy="ask";');
+ fs.writeFileSync(path.join(packageRoot,'package.json'),JSON.stringify({name:'@qwen-code/qwen-code',version:'0.26.1',bin:{qwen:'cli-entry.js'},optionalDependencies:{'native-fixture':'1.0.0'}}));
+ const dependency=path.join(moduleRoot,'native-fixture');fs.mkdirSync(dependency);fs.writeFileSync(path.join(dependency,'package.json'),JSON.stringify({name:'native-fixture',version:'1.0.0',main:'index.js'}));fs.writeFileSync(path.join(dependency,'index.js'),'export {};');
+ const first=geminiQwenPackageIdentity('qwen',entry);fs.writeFileSync(chunk,'export const policy="allow";');const changedChunk=geminiQwenPackageIdentity('qwen',entry);assert.notEqual(changedChunk,first);
+ fs.writeFileSync(path.join(dependency,'index.js'),'export const changed=true;');assert.notEqual(geminiQwenPackageIdentity('qwen',entry),changedChunk,'native dependency changes invalidate consent too');
+}finally{fs.rmSync(packageFixture,{recursive:true,force:true});}

@@ -78,3 +78,11 @@
 
 - Gemini、OpenCode、Qwen 与 Claude 分别报告桌面客户端安装证据、CLI 安装状态及 Agent 连接就绪状态，包含已验证安装布局和 Claude Windows Store 安装。检测结果可刷新，读取失败保留未知。
 - 已安装客户端但连接未验证时显示“已安装 · 待接入”，不再误报未安装；桌面客户端存在不会自动通过 CLI 协议、SDK、原生权限或任务执行验证。
+
+## Desktop 原生 Agent 逐次审批接入（2026-10-25）
+
+- 按 Owner 选择新增显式 native-permissions 模式，声明无 OS 沙箱；原有 native/isolated 门禁不变。原生工具（含读取）逐次审批，成果导入另行审批，运行时及策略变化、取消和未确认退出保留原有执行围栏。
+- OpenCode 随包 CLI 与 Qwen Code 0.26.1 接入生产配置、独立 profile、原生权限及任务装配；新增 Gemini/Qwen 官方 npm Windows shim 映射。Gemini 0.65.0 真实 ACP 请求缺少完整工具参数，保持 native_input_unverified，不开放任务执行。
+- Claude 使用固定 SDK 0.3.308 与独立原生 Claude Code 运行时；增加全部工具 PreToolUse 审批和工具 ID 重放防护。桌面 GUI 不视为编码 CLI，未导入桌面登录；真实 CLI 与账号执行仍需单独验收。
+- 四项连接设置可填写运行时、Node、模型和 HTTPS API；凭据按 Provider 保存在独立 Secret Store。配置凭据不等于认证已验证。损坏的可选配置保留原数据并显示不可用，不再阻止 Core 启动。
+- 本地真实 CLI 验证采用隔离测试目录与合成模型服务；不调用付费模型，也不代表外部账户认证。发行与完整回归结果按本轮实际产物单独报告；具体版本边界见 [Agent 接入状态](docs/desktop/AGENT_INTEGRATION_STATUS.md)。

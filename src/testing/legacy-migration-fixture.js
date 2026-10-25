@@ -5,7 +5,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { readJsonFile, writeJsonAtomic, writeTextAtomic } from '../storage/json-file.js';
+import { parseJsonText, readJsonFile, writeJsonAtomic, writeTextAtomic } from '../storage/json-file.js';
 import { dryRunMigration, migrationInputs, migrationError, assertNoLinks } from '../migration/inventory.js';
 import { digest, inspectSchema } from '../migration/schemas.js';
 import { acquireStateOwner } from '../app/state-owner.js';
@@ -88,8 +88,11 @@ export function openFixtureForChild({ root, nonce }) {
   const expectedPointer = journal => ({ version: 1, planId: journal.planId, directory: journal.versionDirectory, legacyMode: 'READ_ONLY' });
   const requirePointer = journal => { if (digest(authority()) !== digest(expectedPointer(journal))) throw migrationError('AUTHORITY_UNCERTAIN'); };
   const selected = p => migrationInputs(p).files.filter(file => file.row.type === 'bionic-legacy');
-  const verifyInventory = p => {
-    const ownFiles = new Set(sources.map(source => digest(`${source}/state/.core-owner.lock`)));
+  const verifyInventory = (p, leaseFiles) => {
+    const originalFiles = new Set(p.report.entries.map(row => row.fileId));
+    // Only artifacts created by this checked lease acquisition are transient.
+    // A preexisting sidecar remains part of the Owner-reviewed source inventory.
+    const ownFiles = new Set([...leaseFiles].filter(fileId => !originalFiles.has(fileId)));
     const refreshed = plan().report;
     if (digest(refreshed.entries.filter(row => !ownFiles.has(row.fileId))) !== digest(p.report.entries) || digest(refreshed.presets) !== digest(p.report.presets)) throw migrationError('STALE_PLAN');
   };
@@ -103,11 +106,22 @@ export function openFixtureForChild({ root, nonce }) {
       acquired.push(acquireStateOwner(safe(path.join(absolute, 'coordinator'))));
       for (const source of sources) acquired.push(acquireStateOwner(safe(path.join(source, 'state'))));
       for (const item of manifest.accounts) acquired.push(acquireQqOwnership('account', item.accountId, leasesDir));
-      const owners = acquired.filter(lease => !lease.valid).map(lease => ({ file: lease.file, hash: digest(fs.readFileSync(lease.file)) }));
-      return callback(() => {
-        if (acquired.some(lease => lease.valid && !lease.valid())) throw migrationError('ACCOUNT_LEASE_BUSY');
-        if (owners.some(owner => digest(fs.readFileSync(safe(owner.file))) !== owner.hash)) throw migrationError('DATA_LEASE_BUSY');
+      const owners = acquired.filter(lease => !lease.valid).map(lease => {
+        const hash = digest(fs.readFileSync(safe(lease.file)));
+        const identityFile = safe(path.join(path.dirname(lease.file), '.core-owner.identity.json'));
+        const identityBytes = fs.readFileSync(identityFile);
+        const identity = parseJsonText(identityBytes.toString('utf8'));
+        if (identity?.version !== 1 || identity.pid !== process.pid || identity.lockHash !== hash) throw migrationError('DATA_LEASE_BUSY');
+        return { file: lease.file, hash, identityFile, identityHash: digest(identityBytes) };
       });
+      const ownFiles = new Set(sources.flatMap(source => ['.core-owner.lock', '.core-owner.identity.json'].map(name => digest(source + '/state/' + name))));
+      const checkLease = () => {
+        if (acquired.some(lease => lease.valid && !lease.valid())) throw migrationError('ACCOUNT_LEASE_BUSY');
+        if (owners.some(owner => digest(fs.readFileSync(safe(owner.file))) !== owner.hash
+          || digest(fs.readFileSync(safe(owner.identityFile))) !== owner.identityHash)) throw migrationError('DATA_LEASE_BUSY');
+      };
+      checkLease();
+      return callback(checkLease, ownFiles);
     } finally { for (const lease of acquired.reverse()) lease.release(); }
   };
   const validateStored = journal => {
@@ -149,17 +163,17 @@ export function openFixtureForChild({ root, nonce }) {
   };
   function apply(p, { approval, failure, crashAt, beforeVerify, onCrash = () => { throw migrationError('SIMULATED_CRASH'); } } = {}) {
     requireApproval(p.report.planId, approval);
-    return withLeases(checkLease => {
+    return withLeases((checkLease, leaseFiles) => {
       const saved = readJsonFile(safe(journalFile), { missing: null });
       if (saved?.state === 'COMMITTED' && saved.planId === p.report.planId) {
         if (!verifyOriginals(p)) throw migrationError('STALE_PLAN');
-        verifyInventory(p);
+        verifyInventory(p, leaseFiles);
         requirePointer(saved); verifyTarget(saved); validateStored(saved); checkLease();
         return { status: 'FIXTURE_MIGRATION_PASS', duplicate: true };
       }
       if (saved && saved.state !== 'ROLLED_BACK') throw migrationError('RECOVERY_REQUIRED');
       // Exclude only leases this fixture transaction just acquired, never foreign data.
-      verifyInventory(p);
+      verifyInventory(p, leaseFiles);
       if (p.report.status !== 'DRY_RUN_PASS') throw migrationError('PLAN_BLOCKED');
       const rows = selected(p);
       if (!rows.length) throw migrationError('NOTHING_TO_MIGRATE');
@@ -209,7 +223,7 @@ export function openFixtureForChild({ root, nonce }) {
         phase('STAGED'); beforeVerify?.(); verifyTarget(journal); validateStored(journal);
         if (!verifyOriginals(p)) throw migrationError('STALE_PLAN');
         for (const row of journal.files) if (digest(permission(safe(path.join(absolute, row.source)))) !== digest(row.permissions)) throw migrationError('SOURCE_PERMISSION_CHANGED');
-        verifyInventory(p);
+        verifyInventory(p, leaseFiles);
         phase('VERIFIED');
         checkLease();
         writeJsonAtomic(safe(pointerFile), expectedPointer(journal));

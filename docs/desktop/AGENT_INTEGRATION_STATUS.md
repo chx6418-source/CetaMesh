@@ -8,10 +8,10 @@ Updated: 2026-10-25. This page describes the current Desktop source and verifica
 | --- | --- | --- |
 | DSH | Existing staged Provider retained | Requires its configured runtime and task authorization |
 | Codex | Existing exec transport stays default; App Server adapter added | App Server requires a verified version/schema and native policy; old sessions are not blindly migrated |
-| Claude | Optional pinned official SDK resource and supervised Core runner | Real executable/native policy and formal SEA execution remain unverified |
-| Gemini CLI | Shared ACP adapter and independent discovery | Exact installed version, launch contract and native policy must be verified |
-| OpenCode | Shared ACP adapter and independent discovery | Compatible runtime and native policy must be verified |
-| Qwen Code | Shared ACP adapter and independent discovery | Compatible runtime and native policy must be verified |
+| Claude | Configured native Claude Code runtime, pinned SDK 0.3.308, supervised private runner and all-tool approvals | Requires a real console CLI and explicit API configuration; desktop GUI installation is insufficient. Real account execution is not verified |
+| Gemini CLI | Shared ACP, official 0.65.0 discovery/handshake and native policy probes | This version omits exact tool input from ACP permission requests; native_input_unverified keeps Task execution unavailable |
+| OpenCode | Bundled CLI discovery, verified 2.1.4 ACP and private native approval policy | Requires explicit model/API configuration, verified runtime identity and Owner execution consent |
+| Qwen Code | Verified 0.26.1 coding CLI, ACP and explicit builtin-tool permission policy | Requires the coding CLI, standalone Node, explicit model/API configuration and Owner execution consent |
 | ZCode | Protocol presence is recognized; execution unavailable | Exact external control, version, approval and workspace contract unverified |
 | WorkBuddy | Fixed-origin, bounded private API client | Real OAuth/account authorization and local Workspace execution remain unavailable |
 
@@ -22,6 +22,45 @@ Bounded local binary checks and the Claude Windows Store package query identify 
 installation forms; discovery errors remain unknown. Installed clients with unverified
 connectors display an installed/pending state. A desktop executable is never launched as
 an assumed CLI, and installation evidence does not satisfy protocol, SDK or native-policy gates.
+
+## Native permission mode and setup
+
+The Owner-approved Windows mode is native-permissions. It explicitly reports
+nativeSandboxSupported: false and strictIsolationVerified: false. It is not an OS
+sandbox. An approved native tool can access host files and the network. The existing
+native-sandbox and isolated execution requirements remain in force for their respective modes.
+
+The four connection cards accept the coding runtime path, optional standalone Node path,
+model, HTTPS API endpoint and API Key. Credentials use provider-owned secret references;
+public settings and health return only credential presence. Saving a key does not prove
+account authentication. Health distinguishes configured/unverified credentials from
+observed authentication, and a first real Task may still fail authentication. Existing
+Task sessions must be closed before changing their runtime configuration.
+
+Desktop app login is not imported into a coding runtime. No automatic CLI installation,
+user authentication database copying or provider download is part of connection setup.
+Use the official [Gemini CLI installation guide](https://geminicli.com/docs/get-started/installation/),
+[Qwen Code quickstart](https://qwenlm.github.io/qwen-code-docs/en/users/quickstart/) or
+[Claude Code setup](https://code.claude.com/docs/en/setup). The supported OpenCode desktop
+package supplies its own native CLI.
+
+Every native tool, including reads, requires one Owner decision bound to its full input,
+Task, Workspace, Session and runtime/policy fingerprint. Missing input, an oversized
+unreviewable payload, a changed runtime/configuration, a duplicate tool ID or cancellation
+cannot reuse approval. Review data is redacted without silently truncating executable
+arguments. File changes made in staging require a separate Capability-mediated Source
+import approval. Staging itself does not confine approved host commands.
+
+Private profiles disable unapproved project/user integrations and configuration. Runtime
+and policy identities are checked before Session creation, execution, approval and import.
+Malformed optional Agent configuration is preserved and reported as unavailable without
+preventing Core startup or unrelated providers from loading.
+
+Verification uses pinned official CLI processes with disposable local synthetic model
+servers. It exercises protocol and local permission behavior without proving provider
+account authentication, model quality or production API access. Gemini's real ACP request
+omission is retained as a specific execution block; no desktop-installation or handshake
+result overrides it.
 
 ## Protocol and recovery
 
@@ -40,4 +79,4 @@ The maintained Harbor interface includes the supplied green application mark, co
 
 This update is a reviewed Desktop source snapshot on the existing public main history. Mobile source, current introductions and documentation cleanup remain preserved. Private development history, internal repair reports, raw evidence, old design galleries and restricted SnowLuma SDK/MCP are not imported. Existing OneBot interoperability and public bundle exclusion checks remain intact.
 
-Verification on this public snapshot: 31 selected registered suites returned 30 PASS / 0 FAIL / 1 NOT_RUN_ENVIRONMENT (the explicitly gated new SEA). TypeScript/Vite passed; independent export review found no issues. These are targeted checks, not a new full-suite, Cargo, Mobile or installed-runtime acceptance run. Real Agent accounts, native enforcement, formal new SEA and installed product acceptance remain separate evidence gates. No new Release or installation is implied.
+Historical verification for the public snapshot on 2026-10-23: 31 selected registered suites returned 30 PASS / 0 FAIL / 1 NOT_RUN_ENVIRONMENT (the explicitly gated new SEA). TypeScript/Vite passed; independent export review found no issues. These are targeted checks, not a new full-suite, Cargo, Mobile or installed-runtime acceptance run. Real Agent accounts, native enforcement, formal new SEA and installed product acceptance remain separate evidence gates. No new Release or installation is implied.
