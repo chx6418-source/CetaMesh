@@ -1,6 +1,14 @@
 import { createJsonRpcTransport } from './protocol/json-rpc-transport.js';
 import crypto from 'node:crypto';
+import path from 'node:path';
+import { claudeProfileEnvironment } from './claude-runtime.js';
+import { permissionFingerprint } from './protocol/agent-permission-bridge.js';
 import { loadClaudeSdkResource } from './claude-sdk-resource.js';
+function validEndpoint(value) {
+  if (typeof value !== 'string' || !value || value.length > 2048 || /[\u0000-\u0020\u007f]/.test(value)) return false;
+  try { const endpoint = new URL(value); return endpoint.protocol === 'https:' && !endpoint.username && !endpoint.password && !endpoint.search && !endpoint.hash; }
+  catch { return false; }
+}
 const fault = code => Object.assign(new Error(code), { code });
 
 /** Private anonymous stdio RPC. Never write credentials or SDK exception text to output. */
@@ -18,6 +26,7 @@ export async function runClaudeSdkRunner({ input = process.stdin, output = proce
     rpc.close(); finish();
   }
   const rpc = createJsonRpcTransport({ readable: input, writable: output, framing: 'acp-v1-jsonl',
+    onClose: stop,
     onNotification(method, params) {
       if (method === 'session/cancel' && params?.sessionId === nativeId) active?.controller.abort();
     },
@@ -27,11 +36,18 @@ export async function runClaudeSdkRunner({ input = process.stdin, output = proce
         if (configuration && params.protocolVersion === 1) return { protocolVersion: 1, agentCapabilities: {} };
         if (configuration || typeof params.credential !== 'string' || !params.credential ||
             typeof params.cwd !== 'string' || !params.cwd || typeof params.runtimePath !== 'string' || !params.runtimePath ||
-            !Array.isArray(params.tools) || params.tools.some(t => typeof t !== 'string')) throw fault('CLAUDE_INVALID_CONFIG');
+            !Array.isArray(params.tools) || params.tools.some(t => typeof t !== 'string')
+            || (params.baseUrl !== undefined && !validEndpoint(params.baseUrl))
+            || (params.profileRoot !== undefined && (typeof params.profileRoot !== 'string' || !path.isAbsolute(params.profileRoot) || path.dirname(params.profileRoot) === params.profileRoot))
+            || (params.executionMode !== undefined && (params.executionMode !== 'native-permissions' || !params.profileRoot))
+            || (params.model !== undefined && (typeof params.model !== 'string' || !params.model.trim()
+              || params.model !== params.model.trim() || params.model.length > 256 || /[\u0000-\u001f\u007f]/.test(params.model)))) throw fault('CLAUDE_INVALID_CONFIG');
         const loaded = await loadSdk();
         if (closed || typeof loaded?.query !== 'function') throw fault('CLAUDE_SDK_UNAVAILABLE');
         sdk = loaded;
-        configuration = { credential: params.credential, cwd: params.cwd, runtimePath: params.runtimePath, tools: [...params.tools] };
+        configuration = { ...(params.baseUrl === undefined ? {} : { baseUrl: params.baseUrl }),
+          ...(params.profileRoot === undefined ? {} : { profileRoot: params.profileRoot }),
+          ...(params.executionMode === undefined ? {} : { executionMode: params.executionMode }), credential: params.credential, cwd: params.cwd, runtimePath: params.runtimePath, tools: [...params.tools], ...(params.model === undefined ? {} : { model: params.model }) };
         return { initialized: true };
       }
       if (method === 'shutdown') { setImmediate(stop); return { stopped: true }; }
@@ -58,23 +74,80 @@ export async function runClaudeSdkRunner({ input = process.stdin, output = proce
       active = turn;
       const config = configuration;
       const deny = { behavior: 'deny', message: 'Tool use denied by host policy' };
-      const permission = async (tool, toolInput) => {
-        if (turn.controller.signal.aborted || !config.tools.includes(tool)) return deny;
+      // SDK0.3.308: PreToolUseHookInput.tool_use_id and CanUseTool.options.toolUseID
+      // identify the same call. Hooks run before default-policy auto-approval of reads.
+      // https://code.claude.com/docs/en/agent-sdk/permissions
+      // These native tool permissions provide no OS sandbox or filesystem isolation.
+      const decisions = new Map(), seenHooks = new Set();
+      const alive = signal => !closed && active === turn && !turn.controller.signal.aborted && !signal?.aborted;
+      async function approvedInput(tool, toolInput, toolUseID, signal, fromHook = false) {
+        if (!alive(signal) || typeof toolUseID !== 'string' || !toolUseID) return null;
+        let entry = decisions.get(toolUseID);
+        // A hook ID is consumed by its first invocation. A duplicate revokes even
+        // an in-flight decision, and the matching SDK second stage can be used once.
+        if (entry && (fromHook || entry.permissionConsumed)) { entry.controller.abort(); return null; }
+        if (!config.tools.includes(tool) || !toolInput || typeof toolInput !== 'object' || Array.isArray(toolInput)) {
+          entry?.controller.abort(); return null;
+        }
+        let snapshot, fingerprint;
         try {
-          const decision = await rpc.request(acp ? 'session/request_permission' : 'permission', acp ? {
-            sessionId: nativeId, toolCall: { toolCallId: crypto.randomUUID(), title: tool, kind: 'other', rawInput: toolInput },
-            options: [{ optionId: 'allow', kind: 'allow_once', name: 'Allow once' }, { optionId: 'deny', kind: 'reject_once', name: 'Deny' }]
-          } : { tool, input: toolInput }, { signal: turn.controller.signal });
-          const approved = acp ? decision?.outcome?.outcome === 'selected' && decision.outcome.optionId === 'allow' : decision?.approved === true;
-          return approved && !turn.controller.signal.aborted ? { behavior: 'allow', updatedInput: toolInput } : deny;
-        } catch { return deny; /* Cancellation/disconnect/timeouts settle pending permission as deny. */ }
+          snapshot = structuredClone(toolInput);
+          fingerprint = permissionFingerprint({ tool, input: snapshot });
+        } catch { entry?.controller.abort(); return null; }
+        if (entry && entry.fingerprint !== fingerprint) { entry.controller.abort(); return null; }
+        // canUseTool is only a second SDK stage for the hook's exact call. It must
+        // never create another prompt, accept a different input, or persist rules.
+        if (!entry) {
+          if (!fromHook || decisions.size >= 1024) return null;
+          const controller = new AbortController();
+          const combined = AbortSignal.any([turn.controller.signal, controller.signal, ...(signal ? [signal] : [])]);
+          entry = { fingerprint, snapshot, controller, signal: combined, decision: null, permissionConsumed: false };
+          decisions.set(toolUseID, entry);
+          entry.decision = (async () => {
+            try {
+              const decision = await rpc.request(acp ? 'session/request_permission' : 'permission', acp ? {
+                sessionId: nativeId, toolCall: { toolCallId: toolUseID, title: tool, kind: 'other', rawInput: snapshot },
+                options: [{ optionId: 'allow', kind: 'allow_once', name: 'Allow once' }, { optionId: 'deny', kind: 'reject_once', name: 'Deny' }]
+              } : { tool, input: snapshot }, { signal: combined, timeoutMs: 600000 });
+              const approved = acp ? decision?.outcome?.outcome === 'selected' && decision.outcome.optionId === 'allow' : decision?.approved === true;
+              return approved && alive(combined);
+            } catch { return false; /* Disconnect, timeout and cancellation always deny. */ }
+          })();
+        }
+        if (!fromHook) entry.permissionConsumed = true;
+        const abort = () => entry.controller.abort();
+        signal?.addEventListener('abort', abort, { once: true });
+        try {
+          return await entry.decision && alive(signal) && alive(entry.signal) ? structuredClone(entry.snapshot) : null;
+        } finally { signal?.removeEventListener('abort', abort); }
+      }
+      const preToolUse = async (input, toolUseID, context = {}) => {
+        const id = input?.tool_use_id;
+        const freshId = typeof id === 'string' && Boolean(id) && !seenHooks.has(id) && seenHooks.size < 1024;
+        if (freshId) seenHooks.add(id);
+        const validHook = freshId && input?.hook_event_name === 'PreToolUse' && (toolUseID === undefined || toolUseID === id);
+        if (!validHook) decisions.get(id)?.controller.abort();
+        const snapshot = validHook
+          ? await approvedInput(input.tool_name, input.tool_input, id, context.signal, true) : null;
+        return { hookSpecificOutput: { hookEventName: 'PreToolUse',
+          permissionDecision: snapshot ? 'allow' : 'deny',
+          permissionDecisionReason: snapshot ? 'Approved once by host policy' : deny.message,
+          ...(snapshot ? { updatedInput: snapshot } : {}) } };
+      };
+      const permission = async (tool, toolInput, context = {}) => {
+        const snapshot = await approvedInput(tool, toolInput, context.toolUseID, context.signal);
+        return snapshot ? { behavior: 'allow', updatedInput: snapshot } : deny;
       };
       try {
         turn.query = sdk.query({ prompt: params.prompt, options: {
           cwd: config.cwd, pathToClaudeCodeExecutable: config.runtimePath,
-          env: { ANTHROPIC_API_KEY: config.credential }, settingSources: [], mcpServers: {}, plugins: [], strictMcpConfig: true,
-          tools: config.tools, allowedTools: [], permissionMode: 'default',
+          env: { ...(config.profileRoot ? claudeProfileEnvironment(config.profileRoot) : {}), ANTHROPIC_API_KEY: config.credential,
+            ...(config.baseUrl === undefined ? {} : { ANTHROPIC_BASE_URL: config.baseUrl }) },
+          ...(config.executionMode === 'native-permissions' ? { sandbox: { enabled: false } } : {}), settingSources: [], mcpServers: {}, plugins: [], strictMcpConfig: true,
+          tools: [...config.tools], allowedTools: [], permissionMode: 'default',
+          hooks: { PreToolUse: [{ hooks: [preToolUse], timeout: 600 }] },
           abortController: turn.controller, includePartialMessages: true,
+          ...(config.model === undefined ? {} : { model: config.model }),
           ...(params.resume ? { resume: params.resume } : {}), canUseTool: permission,
           stderr: () => { /* Discard vendor stderr: no secrets or unbounded stderr ring retained. */ }
         } });
@@ -97,7 +170,7 @@ export async function runClaudeSdkRunner({ input = process.stdin, output = proce
         return turn.controller.signal.aborted ? { outcome: 'cancelled' } : terminal ?? { outcome: 'failed' };
       } catch { if (acp) { if (turn.controller.signal.aborted) return {stopReason:'cancelled'}; throw fault('CLAUDE_TURN_FAILED'); }
         return { outcome: turn.controller.signal.aborted ? 'cancelled' : 'failed' }; /* Do not expose SDK error details. */ }
-      finally { if (active === turn) active = null; }
+      finally { decisions.clear(); seenHooks.clear(); if (active === turn) active = null; }
     }
   });
   input.once('end', stop); input.once('close', stop); input.once('error', stop); output.once('error', stop);

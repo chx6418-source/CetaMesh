@@ -42,6 +42,9 @@ try {
   assert.equal(services.settingsService.store.file.startsWith(root), true,
     'Desktop DTO imports must not capture runtime paths before isolated environment is set');
 
+  assert.equal(typeof services.usageLedger?.record, 'function', 'Composition owns durable usage ledger');
+  assert.equal(services.usageLedger.summary({ taskId: 'unbilled-task' }).cost.status, 'unknown');
+
   const validateChannelSend = id => services.capabilityService.broker.registry.require('channel.send').validate({
     input: { kind: 'group', id: String(id), text: 'message' }
   });
@@ -128,6 +131,7 @@ try {
     goal: 'Provider-bound session fixture', workspaceId: fallbackWorkspace.id
   });
   const originalExecutionConsent = fallbackServices.agentBroker.assertExecutionConsent;
+  const originalAgentHealth = fallbackServices.agentBroker.health;
   const originalCreateAgentSession = fallbackServices.agentBroker.createSession;
   const originalSendAgent = fallbackServices.agentBroker.send;
   const originalAgentStatus = fallbackServices.agentBroker.status;
@@ -136,6 +140,8 @@ try {
   let providerSessionIndex = 0;
   const sentAgentInstructions = [];
   fallbackServices.agentBroker.createSession = async (provider) => ({ sessionId: `${provider}-fixture-${++providerSessionIndex}` });
+  fallbackServices.agentBroker.health = async () => ({ available: true, installed: true,
+    authenticated: true, sessionCapable: true, compatible: true });
   fallbackServices.agentBroker.send = async request => { sentAgentInstructions.push(request); return { accepted: true }; };
   fallbackServices.agentBroker.status = async request => ({ sessionId: request.sessionId, running: false });
   try {
@@ -143,10 +149,15 @@ try {
       const boundary = fallbackServices.agentBroker.capabilities(provider).workspaceBoundary;
       if (provider === 'codex') {
         assert.equal(boundary, 'native-staged', 'Codex declares the honest Native Staging boundary');
+        const security = fallbackServices.agentBroker.describeExecutionSecurity(provider, fallbackWorkspace.id);
+        const expectedRefusal = security.security.nativeSandboxSupported === true
+          ? 'AGENT_SECURITY_CONFIRMATION_REQUIRED' : 'AGENT_NATIVE_SANDBOX_UNSUPPORTED';
+        const sessionsBeforeRefusal = providerSessionIndex;
         await assert.rejects(() => fallbackServices.capabilityService.broker.execute({
           actor: { kind: 'owner', id: 'desktop' }, taskId: brokerSessionTask.id, workspaceId: fallbackWorkspace.id,
           capability: 'agent.run', input: { agentProvider: provider, content: 'unconfirmed dispatch' }, reason: 'unconfirmed fixture'
-        }), error => error.code === 'AGENT_SECURITY_CONFIRMATION_REQUIRED');
+        }), error => error.code === expectedRefusal);
+        assert.equal(providerSessionIndex, sessionsBeforeRefusal, 'unavailable or unconfirmed native execution must not create a session');
         // This dispatch-only fixture already stubs createSession/send; simulate the approved scope
         // without depending on an installed CLI. Real approval/dispatch is covered by Native suites.
         fallbackServices.agentBroker.assertExecutionConsent = (id, scope) => {
@@ -217,6 +228,7 @@ try {
     fallbackServices.agentBroker.send = originalSend;
   } finally {
     fallbackServices.agentBroker.assertExecutionConsent = originalExecutionConsent;
+    fallbackServices.agentBroker.health = originalAgentHealth;
     fallbackServices.agentBroker.createSession = originalCreateAgentSession;
     fallbackServices.agentBroker.send = originalSendAgent;
     fallbackServices.agentBroker.status = originalAgentStatus;
@@ -593,11 +605,13 @@ try {
       yield { type: 'assistant/tool-calls', data: { toolCalls: [{ id: 'managed-read-1', name: 'cap_filesystem_read',
         capabilityId: 'filesystem.read', arguments: JSON.stringify({ path: 'proof.txt' }) }] } };
     } else {
+      assert.equal(services.usageLedger.summary({ taskId: managedTask.id }).requestCount, 1,
+        'first provider request is durable before the second model call');
       const toolMessage = request.messages.find(message => message.role === 'tool' && message.tool_call_id === 'managed-read-1');
       managedToolResult = toolMessage ? JSON.parse(toolMessage.content) : null;
       yield { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'Read complete.' }] } } };
     }
-    yield { type: 'turn/end', data: { reason: { kind: 'completed' } } };
+    yield { type: 'turn/end', data: { reason: { kind: 'completed', usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 } } } };
   };
   try {
     const managedEvents = [];
@@ -613,6 +627,12 @@ try {
     assert.equal(managedStreamCount, 2, `the tool result must be returned to the model: ${JSON.stringify({ managedEvents, managedToolResult })}`);
     assert.equal(managedToolResult?.status, 'completed', `production actor resolution must authorize the current Task grant: ${JSON.stringify(managedToolResult)}`);
     assert.match(JSON.stringify(managedToolResult), /managed task scoped read/);
+    const taskUsage = services.usageLedger.summary({ taskId: managedTask.id });
+    assert.equal(taskUsage.requestCount, 2, 'terminal callback must not double count request receipts');
+    assert.equal(taskUsage.inputTokens, 20);
+    assert.equal(taskUsage.outputTokens, 4);
+    assert.equal(taskUsage.cost.status, 'unknown', 'no guessed fixture price');
+    assert.equal(services.usageLedger.summary({ sessionId: managedSession.sessionId }).totalTokens, 24);
   } finally {
     services.modelRuntime.stream = originalRuntimeStream;
     await managedProvider.closeSession({ sessionId: managedSession.sessionId });

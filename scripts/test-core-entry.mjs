@@ -11,6 +11,8 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { MCP_MODES, parseCoreArgs } from '../src/core-entry.js';
 import { resolveDataPipeName, dataCall } from '../src/control/data-ipc.js';
 
+import { waitForDataIpc } from './helpers/wait-for-data-ipc.mjs';
+
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ENTRY = path.join(ROOT, 'src', 'core-entry.js');
 
@@ -22,23 +24,6 @@ async function freePort() {
   return port;
 }
 
-async function waitForDataIpc(dataRoot, { timeoutMs = 15000 } = {}) {
-  // D1：worker 不监听 loopback HTTP，就绪与数据面健康走数据面 IPC。
-  const pipeName = resolveDataPipeName({ dataRoot });
-  const deadline = Date.now() + timeoutMs;
-  let lastError = null;
-  while (Date.now() < deadline) {
-    try {
-      const token = fs.readFileSync(path.join(dataRoot, 'state', 'agent-token'), 'utf8').trim();
-      const res = await dataCall({ path: '/api/status', token, timeoutMs: 2000, pipeName });
-      return res;
-    } catch (error) {
-      lastError = error;
-      await new Promise((resolve) => setTimeout(resolve, 150));
-    }
-  }
-  throw lastError ?? new Error(`timeout waiting for data IPC ${pipeName}`);
-}
 
 assert.deepEqual(parseCoreArgs(['--worker']), { mode: 'worker' });
 assert.deepEqual(parseCoreArgs(['--agent-sdk-runner', 'claude']), { mode: 'agent-sdk-runner', provider: 'claude' });
@@ -227,12 +212,20 @@ try {
     assert.equal((await waitForDataIpc(tempRoot)).ok, true, 'rejected Legacy must not disturb Core IPC');
     console.log('✅ worker: 隔离数据目录启动成功（数据面 IPC 健康，无 HTTP listener）');
   } finally {
-    if (worker.exitCode === null) worker.kill();
-    const exited = await Promise.race([
-      once(worker, 'exit').then(() => true),
-      new Promise((resolve) => setTimeout(() => resolve(false), 5000))
-    ]);
-    assert.equal(exited, true, 'isolated worker did not exit within 5 seconds');
+    // Startup failure can exit before readiness rejects. Do not await an event
+    // that already fired, or mask the original error with a cleanup timeout.
+    if (worker.exitCode === null && worker.signalCode === null) {
+      let timer;
+      const exit = once(worker, 'exit');
+      worker.kill();
+      try {
+        const exited = await Promise.race([
+          exit.then(() => true),
+          new Promise((resolve) => { timer = setTimeout(() => resolve(false), 5000); })
+        ]);
+        assert.equal(exited, true, 'isolated worker did not exit within 5 seconds');
+      } finally { clearTimeout(timer); }
+    }
   }
 
   const supervised = spawn(process.execPath, [ENTRY, '--worker'], {

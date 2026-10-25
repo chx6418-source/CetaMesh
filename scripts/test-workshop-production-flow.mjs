@@ -24,6 +24,8 @@ let failSend = true;
 let closes = 0;
 services.agentBroker.register(defineAgentProvider({ id: 'workshop-fixture', label: 'Workshop fixture',
   capabilityExtras: { workspaceBoundary: 'capability-broker' }, methods: {
+    async health() { return { available: true, installed: true, authenticated: true,
+      sessionCapable: true, compatible: true }; },
     async createSession() { return { sessionId: `fixture-${++sessions}` }; },
     async send() {
       if (failSend) throw Object.assign(new Error('Fixture transport failed'), { code: 'PROVIDER_ERROR' });

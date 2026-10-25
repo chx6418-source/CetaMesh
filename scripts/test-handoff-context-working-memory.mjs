@@ -52,11 +52,19 @@ async function fixture(run) {
       async status({sessionId}) { const s=remote.get(sessionId); return {running:s?.running===true,queued:0,waitingForApproval:false}; },
       async cancel({sessionId}) { const s=remote.get(sessionId); if(s)s.running=false; return {cancelRequested:true,stopped:true}; },
       async closeSession({sessionId}) {const s=remote.get(sessionId);if(s){s.closed=true;for(const w of [...s.waiters])w();}return{closed:true};},
-      async health(){return{available:true,authenticated:true,sessionCapable:true};},
+      async health(){return{available:true,authenticated:true,sessionCapable:true,toolsAvailable:true};},
       async *follow({sessionId,signal,sinceSequence=0}) {const s=remote.get(sessionId);let cursor=sinceSequence;while(!signal?.aborted){for(const e of s.events.filter(e=>e.seq>cursor)){cursor=e.seq;yield structuredClone(e);if(signal?.aborted)return;if(turnScopedFollow && e.type==='turn/end')return;}if(s.closed)return;await new Promise(resolve=>{const wake=()=>{s.waiters.delete(wake);signal?.removeEventListener('abort',wake);resolve();};s.waiters.add(wake);signal?.addEventListener('abort',wake,{once:true});if(signal?.aborted||s.events.some(e=>e.seq>cursor))wake();});}},
       async selectModel(){return{selected:true};}
     }});
   services.agentBroker.register(target);
+  // This fixture's synthetic Model is explicitly zero-cost; production has no
+  // such claim and automatic paid selection correctly abstains there.
+  const originalCapabilities = services.agentBroker.capabilities.bind(services.agentBroker);
+  services.agentBroker.capabilities = id => ({ ...originalCapabilities(id),
+    ...(id === 'cetamesh' ? { assignment: { taskKinds: ['code'], tools: [], maxDifficulty: 3,
+      estimatedCost: { amount: 0, currency: 'USD', source: 'synthetic-fixture',
+        agentProvider: 'cetamesh', modelProvider: 'fix-fixture', model: 'fixture-model' },
+      estimatedLatencyMs: 1 } } : {}) });
   const {createChatService} = await import('../src/desktop/chat-service.js');
   const {createDesktopPlatformRuntime} = await import('../src/desktop/platform-runtime.js');
   const ws = (await services.workspaceService.execute({method:'workspace.create',params:{name:'Handoff fixture',root:workspaceRoot}})).workspace;

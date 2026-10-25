@@ -12,10 +12,31 @@
   reference. A DSH (or future) Agent session is an attachable execution reference only.
 - **Agent Provider != Model Provider.** Providers implement a contract; DSH is the first Agent
   Provider. Model selection lives with the chat/provider configuration.
-- **QQ / SnowLuma is a Channel Adapter, never the Core.** The SDK import and connection runtime
-  live under `src/channel/qq/`; Core services construct without importing that adapter or needing
-  DSH readiness.
+- **QQ / OneBot is a Channel Adapter, never the Core.** The independently authored OneBot v11 transport lives in `src/channel/qq/onebot-client.js`; the restricted SnowLuma SDK is not embedded. Compatible external gateways are installed independently, and Core services initialize without requiring that channel or DSH readiness.
 - Desktop and Mobile are independent CetaMesh Nodes; Device Mesh is a separate protocol layer.
+
+## External coding runtimes
+
+The existing Agent Broker and Registry own Task/Session/Workspace identity and execution
+consent. The explicitly selected native-permissions mode provides per-tool Owner approval
+on Windows and declares no operating-system sandbox. Legacy native-sandbox and isolated
+modes keep their original gates. A verified runtime policy cannot be replaced by renderer
+flags or by desktop-client installation evidence.
+
+Runtime configuration stores public connection metadata separately from provider-owned
+credential references. Scoped private profiles exclude unapproved project/user hooks,
+plugins, MCP and subagents. ACP runtimes and the optional Claude SDK runner bind approval
+to exact tool input, Session and runtime identity. All native tools require review,
+including reads. Staging changes require a separate Capability Broker import approval.
+Cancellation or changed configuration invalidates pending authority, and unconfirmed
+process exit retains staging and ownership for recovery. Optional malformed configuration
+is preserved and contained so it cannot prevent Core startup.
+
+Explicit Owner dispatch may use configured but unverified API credentials only after
+runtime, session and every-tool permission policy verification. Such dispatch does not
+claim authentication; automatic assignment still abstains without authentication and
+model-specific cost evidence. Supported versions and actual verification limits are
+recorded in [Agent integration status](AGENT_INTEGRATION_STATUS.md).
 
 ## Process composition
 
@@ -32,6 +53,19 @@ the same StateDir owner lease before starting its old services, so it cannot run
 with the desktop Core on one data directory. It still composes Core services internally and
 must not be described as an independent QQ Connector until M4 ownership transfer is approved
 and verified. The legacy DSH path remains exclusive to this compatibility host.
+
+The StateDir lease retains its legacy PID/nonce bytes. A separate metadata record binds
+its hash to the process birth identity. An alive PID can be reclaimed only when its exact
+OS birth identity is proven different from the bound record; unknown probes and alive
+legacy locks without valid identity remain busy. Recovery rechecks the files and process
+under the existing reclaim guard, and shutdown removes only its own bound metadata and lease.
+
+Task staging retains its 512 MiB, file-count, credential and Workspace boundaries.
+For Git projects, initial input includes tracked and nonignored untracked files. Frozen
+ignore rules cover output produced later, while baseline files stay visible even if
+ignore files change. Nested repositories and gitlinks remain excluded. Plain directories
+keep bounded filesystem snapshots; unavailable or invalid project Git information fails
+closed rather than silently broadening a Git snapshot.
 
 ```text
 Desktop shell → `--worker` → `src/app/core-worker.js`
@@ -119,6 +153,12 @@ Native / Infrastructure                     Node SEA Core, Rust supervisor/insta
   explicit quit path stops Core.
 - Window preferences and theme/zoom are persisted in `state/desktop-ui.json` (atomic replace);
   a corrupt preference file falls back to defaults without blocking startup.
+- `main_webview.rs` owns the main child WebView's physical client bounds. The host resynchronizes
+  them on resize, move and DPI changes, and forwards parent focus. This deliberately avoids Wry
+  0.55.1's shared parent auto-resize subclass, which is removed when a reference child is dropped.
+  The opt-in `test-main-webview-smoke` checks the actual WebView2 controller and container after
+  preview destruction, resize, maximize, restore and a second resize; enable it with
+  `WHALEBRIDGE_TEST_REFERENCE_BROWSER=1` through `npm test`.
 
 ### Docked reference viewer
 
@@ -140,6 +180,12 @@ title, error and authoritative navigation-history events update the renderer too
 
 Regression entry points are `npm test -- --suite test-reference-preview --suite test-reference-viewer`
 and opt-in `test-reference-browser` / `test-reference-browser-smoke` through the same test runner.
+
+The main page is an inline-size query container: cards, settings and plugin controls respond to
+the available content pane, including a docked viewer, rather than only the outer window width.
+Narrow reference switching requires an active tab; closing the final tab always restores the
+page. `test-responsive-layout` measures Chromium geometry and mounts the production sidebar hook;
+enable its local browser fixture with `WHALEBRIDGE_TEST_UI_MOTION=1` through `npm test`.
 
 # M4.4 Core Channel runtime boundary (2026-10-18)
 

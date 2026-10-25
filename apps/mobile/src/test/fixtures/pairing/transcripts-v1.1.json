@@ -1,0 +1,15 @@
+{
+  "description": "v1.1 四个 phase 的 transcript 精确字符串（与协议文档 §3 逐字节一致）。",
+  "invitation": "invitation-v1.1.json",
+  "device": {
+    "deviceId": "a7f3c1e0-9b2d-4e6a-9f11-7c3d5e8b0a42",
+    "publicKey": "BNSaXFh1oVQzL7aHwMP4ma/2REYxre4kPQx3HQNDwVd/Ml7vG07LMdxa4bk4QoG0Andl/BdTUxxKvW0lqC2CfQE="
+  },
+  "nonce": "1FjvZHds0sO8Ze9HXRskvXgwlq4NoqgnXXabHXtulMM=",
+  "phases": {
+    "exchange": "[\"cetamesh-pairing-v1.1\",\"exchange\",\"inv_7f3a91c2d4e5b6a8\",\"https://192.168.1.23:47821\",\"node_ec23aac43cd6bfe4c3b03ab0a377a8cb\",\"BGGmeGWR3mgwIX4VbcOr28I8mangF8juut289DLWNC3vRFL0N/viUzi7WmSAci+u5up3M+csK/6Y/qpZI0+24Wo=\",\"a7f3c1e0-9b2d-4e6a-9f11-7c3d5e8b0a42\",\"BNSaXFh1oVQzL7aHwMP4ma/2REYxre4kPQx3HQNDwVd/Ml7vG07LMdxa4bk4QoG0Andl/BdTUxxKvW0lqC2CfQE=\",\"1FjvZHds0sO8Ze9HXRskvXgwlq4NoqgnXXabHXtulMM=\",\"2026-10-08T12:04:30.000Z\",\"40e4375dd1c37454aee2285c12b01d05c966a317e346554e1088a81e6bd30308\"]",
+    "challenge": "[\"cetamesh-pairing-v1.1\",\"challenge\",\"inv_7f3a91c2d4e5b6a8\",\"https://192.168.1.23:47821\",\"node_ec23aac43cd6bfe4c3b03ab0a377a8cb\",\"BGGmeGWR3mgwIX4VbcOr28I8mangF8juut289DLWNC3vRFL0N/viUzi7WmSAci+u5up3M+csK/6Y/qpZI0+24Wo=\",\"a7f3c1e0-9b2d-4e6a-9f11-7c3d5e8b0a42\",\"BNSaXFh1oVQzL7aHwMP4ma/2REYxre4kPQx3HQNDwVd/Ml7vG07LMdxa4bk4QoG0Andl/BdTUxxKvW0lqC2CfQE=\",\"1FjvZHds0sO8Ze9HXRskvXgwlq4NoqgnXXabHXtulMM=\",\"2026-10-08T12:04:30.000Z\",\"40e4375dd1c37454aee2285c12b01d05c966a317e346554e1088a81e6bd30308\"]",
+    "confirm": "[\"cetamesh-pairing-v1.1\",\"confirm\",\"inv_7f3a91c2d4e5b6a8\",\"https://192.168.1.23:47821\",\"node_ec23aac43cd6bfe4c3b03ab0a377a8cb\",\"BGGmeGWR3mgwIX4VbcOr28I8mangF8juut289DLWNC3vRFL0N/viUzi7WmSAci+u5up3M+csK/6Y/qpZI0+24Wo=\",\"a7f3c1e0-9b2d-4e6a-9f11-7c3d5e8b0a42\",\"BNSaXFh1oVQzL7aHwMP4ma/2REYxre4kPQx3HQNDwVd/Ml7vG07LMdxa4bk4QoG0Andl/BdTUxxKvW0lqC2CfQE=\",\"1FjvZHds0sO8Ze9HXRskvXgwlq4NoqgnXXabHXtulMM=\",\"2026-10-08T12:04:30.000Z\",\"40e4375dd1c37454aee2285c12b01d05c966a317e346554e1088a81e6bd30308\"]",
+    "accepted": "[\"cetamesh-pairing-v1.1\",\"accepted\",\"inv_7f3a91c2d4e5b6a8\",\"https://192.168.1.23:47821\",\"node_ec23aac43cd6bfe4c3b03ab0a377a8cb\",\"BGGmeGWR3mgwIX4VbcOr28I8mangF8juut289DLWNC3vRFL0N/viUzi7WmSAci+u5up3M+csK/6Y/qpZI0+24Wo=\",\"a7f3c1e0-9b2d-4e6a-9f11-7c3d5e8b0a42\",\"BNSaXFh1oVQzL7aHwMP4ma/2REYxre4kPQx3HQNDwVd/Ml7vG07LMdxa4bk4QoG0Andl/BdTUxxKvW0lqC2CfQE=\",\"1FjvZHds0sO8Ze9HXRskvXgwlq4NoqgnXXabHXtulMM=\",\"2026-10-08T12:04:30.000Z\",\"40e4375dd1c37454aee2285c12b01d05c966a317e346554e1088a81e6bd30308\"]"
+  }
+}

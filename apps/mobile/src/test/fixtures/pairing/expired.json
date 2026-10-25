@@ -1,0 +1,25 @@
+{
+  "description": "过期邀请。now（12:05:10Z）晚于 expiresAt（12:04:30Z），必须被拒绝：REFUSED_EXPIRED。",
+  "now": "2026-10-08T12:05:10.000Z",
+  "expect": "reject",
+  "envelope": {
+    "protocol": "cetamesh",
+    "version": 1,
+    "id": "pairing-invite-0002",
+    "type": "pairing.invitation",
+    "timestamp": "2026-10-08T11:58:00.000Z",
+    "payload": {
+      "invitationId": "inv_7f3a91c2d4e5b6a8",
+      "endpoint": "https://192.168.1.23:47821",
+      "token": "WY2u5fd2IV3Yf05Qxq7cQWX+deExWS8U7FHEnIinwaQ=",
+      "expiresAt": "2026-10-08T12:03:00.000Z",
+      "peer": {
+        "deviceId": "node_ec23aac43cd6bfe4c3b03ab0a377a8cb",
+        "deviceName": "CetaMesh Desktop",
+        "publicKey": "BGGmeGWR3mgwIX4VbcOr28I8mangF8juut289DLWNC3vRFL0N/viUzi7WmSAci+u5up3M+csK/6Y/qpZI0+24Wo=",
+        "keyAlgorithm": "p256"
+      },
+      "tlsPin": "40e4375dd1c37454aee2285c12b01d05c966a317e346554e1088a81e6bd30308"
+    }
+  }
+}

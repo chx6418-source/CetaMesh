@@ -37,4 +37,4 @@
 .reference-notice { margin: 0; padding: 8px 12px; color: var(--warning); font-size: 12px; }
 .reference-narrow-switch { position: absolute; z-index: 5; bottom: 12px; right: 12px; border: 1px solid var(--border); border-radius: 9px; padding: 8px 12px; background: var(--surface); color: var(--accent-hover); }
 .reference-layout.narrow.has-viewer { grid-template-columns: minmax(0, 1fr); }
-.reference-layout.narrow .reference-divider, .reference-layout.narrow.show-viewer .reference-chat, .reference-layout.narrow.show-chat .reference-viewer { display: none; }
+.reference-layout.narrow.has-viewer .reference-divider, .reference-layout.narrow.has-viewer.show-viewer .reference-chat, .reference-layout.narrow.has-viewer.show-chat .reference-viewer { display: none; }

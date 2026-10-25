@@ -48,7 +48,7 @@ async function freePort() {
 
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-ws-ipc-'));
 // 与 Rust supervisor 一致：WHALEBRIDGE_UI_PIPE 传完整管道路径（\\.\pipe\<name>）。
-const pipePath = `\\\\.\\pipe\\cetamesh-ws-ipc-${process.pid}-${Math.random().toString(16).slice(2, 8)}`;
+const pipePath = process.platform === 'win32' ? `\\\\.\\pipe\\cetamesh-ws-ipc-${process.pid}-${Math.random().toString(16).slice(2, 8)}` : path.join(tempRoot, 'ui.sock');
 const ipcAuthToken = 'a'.repeat(64);
 let worker = null;
 let client = null;

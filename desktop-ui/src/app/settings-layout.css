@@ -1,5 +1,5 @@
-.settings-page { max-width: 1280px; padding: 28px 32px; }
-.settings-layout { display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: 32px; align-items: start; min-height: 100%; }
+.settings-page { max-width: none; margin: 0; padding: 24px 28px; }
+.settings-layout { display: grid; grid-template-columns: 168px minmax(0, 960px); gap: 28px; align-items: start; min-height: 100%; }
 .settings-category-nav { position: sticky; top: 0; display: flex; flex-direction: column; gap: 5px; min-width: 0; max-height: calc(100vh - 96px); overflow-y: auto; padding-right: 18px; border-right: 1px solid var(--border); }
 .settings-category-nav button { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 40px; padding: 9px 12px; border: 0; border-radius: 10px; background: transparent; color: var(--text-secondary); text-align: left; transition: background-color var(--motion-fast), color var(--motion-fast); }
 .settings-category-nav button svg { flex: none; }
@@ -14,7 +14,7 @@
 .settings-page .settings-save { margin-top: 18px; }
 .settings-save small { color: var(--text-muted); margin-right: auto; }
 .settings-save { gap: 14px; flex-wrap: wrap; }
-@media (max-width: 720px) {
+@container page (max-width: 760px) {
   .settings-page { padding: 18px 12px; }
   .settings-layout { grid-template-columns: 126px minmax(0, 1fr); gap: 14px; }
   .settings-category-nav { padding-right: 9px; max-height: calc(100vh - 76px); }
@@ -22,4 +22,13 @@
   .settings-fields { padding: 2px 10px; }
   .settings-fields .setting-row { align-items: flex-start; flex-wrap: wrap; gap: 12px; }
   .settings-fields .setting-copy { flex-basis: 100%; }
+}
+@container page (max-width: 520px) {
+  .settings-layout { grid-template-columns: 104px minmax(0, 1fr); gap: 12px; }
+  .settings-category-nav { padding-right: 6px; }
+  .settings-category-nav button { gap: 6px; padding: 8px 4px; overflow-wrap: anywhere; }
+  .settings-category-nav button svg { width: 15px; }
+  .settings-content .page-heading { margin-bottom: 20px; }
+  .settings-save { align-items: flex-start; flex-direction: column; }
+  .settings-fields .setting-row > label, .settings-fields .setting-row > .cm-input { width: 100%; }
 }

@@ -127,6 +127,9 @@ function auditBundle(buildDir, metafile) {
   const packages = new Map();
   let nativeFiles = [];
   for (const input of inputs) {
+    if (/(^|\/)node_modules\/@snowluma\//.test(input.replaceAll('\\', '/'))) {
+      fail('SnowLuma SDK/MCP must not be included in the public Core bundle');
+    }
     if (input.includes('node_modules/')) {
       const after = input.slice(input.indexOf('node_modules/') + 'node_modules/'.length);
       const name = after.startsWith('@') ? after.split('/').slice(0, 2).join('/') : after.split('/')[0];
@@ -152,6 +155,9 @@ function auditBundle(buildDir, metafile) {
     fail(`bundle 中混入原生模块：${nativeFiles.join(', ')}`);
   }
 
+  if ([...packages.keys()].some(name => name.startsWith('@snowluma/'))) {
+    fail('SnowLuma SDK/MCP must not be included in the public Core bundle');
+  }
   const sorted = [...packages.entries()].sort((a, b) => b[1] - a[1]);
   log(`  被打包模块文件数：${inputs.length}，第三方包 ${sorted.length} 个`);
   for (const [name, count] of sorted) log(`    - ${name}（${count} 文件）`);

@@ -30,21 +30,22 @@ export function createAgentPermissionBridge({provider, sessionId, workspaceId, t
       const snapshot = structuredClone({toolCall:params.toolCall,options});
       const fingerprint = permissionFingerprint({provider,sessionId,workspaceId,taskId,...snapshot});
       let release, timer;
-      const aborted = new Promise(resolve => { release = () => resolve(null); });
+      const controller = new AbortController();
+      const aborted = new Promise(resolve => { release = () => { controller.abort(); resolve(null); }; });
       pending.set(requestId,{cancel:release,toolCallId:params.toolCall.toolCallId});
       try {
         const result = await Promise.race([aborted,
-          new Promise(resolve => { timer = setTimeout(()=>resolve(null),600000); }),
+          new Promise(resolve => { timer = setTimeout(()=>{ controller.abort(); resolve(null); },600000); }),
           Promise.resolve().then(() => !closed && epoch === generation && pending.has(requestId) ? requestNativeApproval({
           provider,sessionId,workspaceId,taskId,requestId,fingerprint,
           action:snapshot.toolCall.kind ?? 'other',target:snapshot.toolCall,options:snapshot.options
-        }) : null)]);
+        }, { signal: controller.signal }) : null)]);
         if (closed || epoch !== generation || !pending.has(requestId) || result?.outcome !== 'approved'
           || permissionFingerprint({provider,sessionId,workspaceId,taskId,...snapshot}) !== fingerprint) return cancelled();
         const selected = options.find(option => option.optionId === result.optionId && option.kind === 'allow_once');
         return selected ? {outcome:{outcome:'selected',optionId:selected.optionId}} : cancelled();
       } catch { return cancelled(); /* Approval failures always deny native execution. */ }
-      finally { clearTimeout(timer); pending.delete(requestId); }
+      finally { controller.abort(); clearTimeout(timer); pending.delete(requestId); }
     },
     invalidate,
     cancel() { generation++; invalidate(); },

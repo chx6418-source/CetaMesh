@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { createDefaultAgentService } from '../src/agent/service.js';
 import { createAgentBroker } from '../src/agent/broker.js';
 import { createAgentProviderRegistry } from '../src/agent/registry.js';
@@ -46,7 +47,9 @@ try {
   fs.writeFileSync(path.join(workspace, 'main.txt'), 'from-task-workspace');
   fs.writeFileSync(path.join(workspace, '.env'), 'WORKSPACE_SECRET=do-not-copy');
   fs.writeFileSync(path.join(workspace, '.env.local'), 'WORKSPACE_SECRET=do-not-copy');
-  fs.writeFileSync(path.join(workspace, '.git'), 'not-a-directory fixture');
+  // A valid repository exercises private metadata filtering without an invalid Git marker.
+  execFileSync('git', ['init', '--quiet', workspace], { stdio: 'pipe', windowsHide: true });
+  fs.writeFileSync(path.join(workspace, '.git', 'private-fixture'), 'do-not-copy');
   fs.writeFileSync(path.join(otherWorkspace, 'private.txt'), 'OTHER_WORKSPACE_SECRET');
   fs.writeFileSync(path.join(nestedWorkspace, 'private.txt'), 'NESTED_WORKSPACE_SECRET');
 
@@ -302,7 +305,7 @@ try {
   assert.equal(interactiveOutput, 'first-second-done');
   const cancelRun = cliProcess.startSession({ sessionId: 'fixture-cancel', cwd: staged.root, args: [longFixture], timeoutMs: 5000 });
   await new Promise(resolve => cancelRun.child.once('spawn', resolve));
-  assert.equal(cancelRun.cancel().cancelled, true);
+  assert.equal(cancelRun.cancel().requested, true);
   assert.equal((await cancelRun.done).cancelled, true);
   const timeoutRun = cliProcess.startSession({ sessionId: 'fixture-timeout', cwd: staged.root, args: [longFixture], timeoutMs: 1000 });
   assert.equal((await timeoutRun.done).timedOut, true);
@@ -346,13 +349,19 @@ try {
   const shimRun = windowsShimCli.startSession({ sessionId: 'windows-shim-cancel', cwd: root, args: ['exec'], input: 'fixture prompt',
     timeoutMs: 5000, onStdout: chunk => shimOutput.push(chunk) });
   await waitFor(() => shimOutput.join(''), output => output.includes('shim-started'));
-  assert.equal(shimRun.cancel().cancelled, true);
+  assert.equal(shimRun.cancel().requested, true);
   assert.equal((await shimRun.done).cancelled, true, 'npm codex.cmd launches the resolved JS target directly and remains cancellable');
   await windowsShimCli.shutdown();
 
+  // Model a Windows standalone-node installation explicitly; POSIX hosts have
+  // `node`, not `node.exe`. This fixture is discovery-only, never executed.
+  const standaloneNodeRoot = path.join(root, 'standalone-node');
+  fs.mkdirSync(standaloneNodeRoot);
+  const standaloneNode = path.join(standaloneNodeRoot, 'node.exe');
+  fs.writeFileSync(standaloneNode, 'standalone Node discovery fixture');
   const seaShimCli = new CliAgentProcess({ name: 'codex', executable: shimExecutable, platform: 'win32',
-    nodeExecutable: path.join(root, 'WhaleBridgeCore.exe'), envSource: { PATH: path.dirname(process.execPath) } });
-  assert.equal(seaShimCli.launchTarget().executable, process.execPath,
+    nodeExecutable: path.join(root, 'WhaleBridgeCore.exe'), envSource: { PATH: standaloneNodeRoot } });
+  assert.equal(seaShimCli.launchTarget().executable, standaloneNode,
     'a packaged Core executable must never execute the npm JavaScript shim as if it were Node');
   const unavailableNodeCli = new CliAgentProcess({ name: 'codex', executable: shimExecutable, platform: 'win32',
     nodeExecutable: path.join(root, 'WhaleBridgeCore.exe'), envSource: { PATH: '' } });
@@ -382,6 +391,7 @@ try {
   const explicitCodexHome = path.join(root, 'selected-codex-home');
   fs.mkdirSync(explicitCodexHome);
   fs.writeFileSync(shimScript, [
+    '#!' + process.execPath,
     "const args = process.argv.slice(2);",
     "if (args[0] === '--version') console.log('codex-cli selected-home-fixture');",
     "else if (args[0] === 'login') {",
@@ -389,7 +399,9 @@ try {
     "  else { console.log('Not logged in'); process.exitCode = 1; }",
     "} else console.log('--config --ask-for-approval --cd --sandbox workspace-write --json --ignore-user-config --ignore-rules --strict-config --skip-git-repo-check [SESSION_ID]');"
   ].join('\n'));
-  const selectedHomeProvider = createCodexAgentProvider({ executable: shimExecutable, codexHome: explicitCodexHome,
+  if (process.platform !== 'win32') fs.chmodSync(shimScript, 0o700);
+  const selectedHomeExecutable = process.platform === 'win32' ? shimExecutable : shimScript;
+  const selectedHomeProvider = createCodexAgentProvider({ executable: selectedHomeExecutable, codexHome: explicitCodexHome,
     environment: { ...process.env, CODEX_HOME: path.join(root, 'different-home') } });
   assert.equal((await selectedHomeProvider.health()).authenticated, true,
     'login discovery probes the same explicit CODEX_HOME that execution will use');
@@ -993,6 +1005,8 @@ try {
     taskRuntime: { get: () => ({ task: { id: 'task-switch', workspaceId: 'workspace-switch', status: 'running',
       currentAgent: { provider: 'dsh', sessionId: 'dsh-old-session' } } }) },
     agentBroker: { capabilities: () => ({ workspaceBoundary: 'staged-capability-broker' }),
+      health: async () => ({ available: true, installed: true, authenticated: true,
+        sessionCapable: true, sandboxCapable: true, taskEligible: true }),
       send: async request => { switchCalls.push({ kind: 'send', request }); return { accepted: true }; } },
     continuityRuntime: { rollover: async request => {
       switchCalls.push({ kind: 'rollover', request });

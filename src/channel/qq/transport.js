@@ -1,4 +1,4 @@
-import { text } from '@snowluma/sdk';
+import { text } from './onebot-client.js';
 
 export function createQqTransport({ client, textSegment = text, authorize = () => {} } = {}) {
   if (!client || typeof client.sendPrivateMessage !== 'function' || typeof client.sendGroupMessage !== 'function') {

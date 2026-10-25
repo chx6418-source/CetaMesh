@@ -1,9 +1,14 @@
+import { evidenceBinding, evidenceSummary, sanitizeToolEvidence, EVIDENCE_SOURCE_CAPABILITIES, validateEvidenceSourceInput } from '../context/tool-evidence.js';
+import { projectMessageBudget } from '../context/message-budget.js';
+import { accumulateModelUsage } from './usage.js';
 import { validateSchema } from './input-schema.js';
 import crypto from 'node:crypto';
 import path from 'node:path';
 import { readJsonFile, writeJsonAtomic, StorageError } from '../storage/json-file.js';
 import { redactText, isSensitiveKey } from '../logging/redact.js';
 import { capabilityError } from '../capability/types.js';
+import { setTimeout as delay } from 'node:timers/promises';
+import { mayRetrySafeTool, runBoundedRetryAttempt, SAFE_TOOL_RETRY } from './safe-tool-retry.js';
 
 const MAX_BATCH_CALLS = 8;
 const MAX_TOOL_CYCLES = 6;
@@ -40,43 +45,73 @@ function parseArguments(value) {
 }
 
 function stripLocalPaths(value) {
-  let text = redactText(value)
-    .replace(/(?:[A-Za-z]:\\|\\\\[^\s"']+|\/(?:Users|home|root|mnt|tmp)\/)[^\s"'<>]*/g, '[LOCAL_PATH]')
-    .slice(0, MAX_RESULT_CHARS);
-  if (/[\uD800-\uDBFF]$/.test(text)) text = text.slice(0, -1);
-  return text;
+  return redactText(value)
+    .replace(/(?:[A-Za-z]:\\|\\\\[^\s"']+|\/(?:Users|home|root|mnt|tmp)\/)[^\s"'<>]*/g, '[LOCAL_PATH]');
 }
 
-function safeValue(value, depth = 0) {
-  if (depth > 5) return '[DEPTH_LIMIT]';
-  if (typeof value === 'string') return stripLocalPaths(value);
+function recordOmission(omissions, item) {
+  const prior = omissions.find(row => row.reason === item.reason);
+  if (prior) {
+    prior.occurrences = (prior.occurrences ?? 1) + 1;
+    if (item.omitted !== undefined) prior.omitted = (prior.omitted ?? 0) + item.omitted;
+  } else omissions.push(item);
+}
+
+function safeValue(value, omissions, depth = 0) {
+  if (depth > 5) { recordOmission(omissions, { reason: 'depth-limit' }); return '[DEPTH_LIMIT]'; }
+  if (typeof value === 'string') {
+    const text = stripLocalPaths(value);
+    if (text.length <= MAX_RESULT_CHARS) return text;
+    let preview = text.slice(0, MAX_RESULT_CHARS);
+    if (/[\uD800-\uDBFF]$/.test(preview)) preview = preview.slice(0, -1);
+    recordOmission(omissions, { reason: 'string-characters', omitted: text.length - preview.length });
+    return preview;
+  }
   if (typeof value === 'number' || typeof value === 'boolean' || value === null) return value;
-  if (Array.isArray(value)) return value.slice(0, 40).map((item) => safeValue(item, depth + 1));
-  if (!isPlainObject(value)) return String(value).slice(0, 200);
+  if (Array.isArray(value)) {
+    if (value.length > 40) recordOmission(omissions, { reason: 'array-items', omitted: value.length - 40 });
+    return value.slice(0, 40).map(item => safeValue(item, omissions, depth + 1));
+  }
+  if (!isPlainObject(value)) {
+    const text = stripLocalPaths(String(value));
+    if (text.length > 200) recordOmission(omissions, { reason: 'unsupported-value-characters', omitted: text.length - 200 });
+    return text.slice(0, 200);
+  }
   const result = {};
-  for (const [key, child] of Object.entries(value).slice(0, 40)) {
+  const entries = Object.entries(value);
+  if (entries.length > 40) recordOmission(omissions, { reason: 'object-properties', omitted: entries.length - 40 });
+  for (const [key, child] of entries.slice(0, 40)) {
     if (AUTHORITY_KEYS.has(key.toLowerCase())) continue;
+    if (key.length > 100) recordOmission(omissions, { reason: 'property-name-characters', omitted: key.length - 100 });
     if (isSensitiveKey(key)) { result[String(key).slice(0, 100)] = '[REDACTED:sensitive]'; continue; }
-    result[String(key).slice(0, 100)] = safeValue(child, depth + 1);
+    result[String(key).slice(0, 100)] = safeValue(child, omissions, depth + 1);
   }
   return result;
 }
 
 function safeJson(value) {
   let text;
-  try { text = JSON.stringify(safeValue(value)); }
-  catch { text = '{"error":{"code":"RESULT_SERIALIZATION_FAILED"}}'; }
-  if (text.length <= MAX_RESULT_CHARS) return text;
+  const omissions = [];
+  try { text = JSON.stringify(safeValue(value, omissions)); }
+  catch { return '{"status":"incomplete","error":{"code":"RESULT_SERIALIZATION_FAILED"}}'; }
+  if (text.length <= MAX_RESULT_CHARS && !omissions.length) return text;
+  // This digest identifies ONLY the retained sanitized representation, not the
+  // unavailable original. No clipped result may masquerade as complete evidence.
   const hash = crypto.createHash('sha256').update(text).digest('hex');
-  let preview = text.slice(0, MAX_RESULT_CHARS - 300);
-  if (/[\uD800-\uDBFF]$/.test(preview)) preview = preview.slice(0, -1);
-  let envelope = JSON.stringify({ truncated: true, originalChars: text.length, sha256: hash, preview });
-  while (envelope.length > MAX_RESULT_CHARS && preview.length) {
-    preview = preview.slice(0, Math.max(0, preview.length - (envelope.length - MAX_RESULT_CHARS) - 1));
+  let preview = text.slice(0, MAX_RESULT_CHARS - 1500);
+  const envelope = () => JSON.stringify({ status: 'incomplete', truncated: true,
+    error: { code: 'TOOL_RESULT_TRUNCATED', message: 'Evidence omitted. Obtain a smaller targeted result before claiming the task is complete.' },
+    omissions, sanitizedChars: text.length, sha256OfSanitizedRepresentation: hash, preview });
+  if (text.length > preview.length) recordOmission(omissions, { reason: 'serialized-preview-characters', omitted: text.length - preview.length });
+  let result = envelope();
+  while (result.length > MAX_RESULT_CHARS && preview.length) {
+    preview = preview.slice(0, Math.max(0, preview.length - (result.length - MAX_RESULT_CHARS) - 1));
     if (/[\uD800-\uDBFF]$/.test(preview)) preview = preview.slice(0, -1);
-    envelope = JSON.stringify({ truncated: true, originalChars: text.length, sha256: hash, preview });
+    const item = omissions.find(row => row.reason === 'serialized-preview-characters');
+    if (item) item.omitted = text.length - preview.length;
+    result = envelope();
   }
-  return envelope;
+  return result;
 }
 
 function safePersistedMessages(messages) {
@@ -128,7 +163,9 @@ export function createToolExecutionCoordinator({
   maxCalls = MAX_TOTAL_CALLS,
   maxBatchCalls = MAX_BATCH_CALLS,
   timeoutMs = 300000,
-  actorResolver = null
+  actorResolver = null,
+  evidenceStore = null,
+  onUsage = null
 } = {}) {
   if (!modelRuntime?.chat || !capabilityBroker?.execute) throw new TypeError('Tool execution needs Model Runtime and Capability Broker');
   const continuationFile = typeof stateDir === 'string' && stateDir.trim()
@@ -146,7 +183,8 @@ export function createToolExecutionCoordinator({
   if (!executions || typeof executions !== 'object' || Array.isArray(executions)) {
     fail('TOOL_EXECUTION_STORE_CORRUPT', 'Tool execution store is invalid');
   }
-  const interruptedExecutions = Object.values(executions).filter(row => row?.status === 'started');
+  const uncertainExecutions = () => Object.values(executions).filter(row =>
+    row?.status === 'started' || row?.status === 'outcome-unknown');
   let continuations = {};
   if (continuationFile) {
     try { continuations = readJsonFile(continuationFile, { missing: {} }); }
@@ -190,8 +228,8 @@ export function createToolExecutionCoordinator({
   if (orphanedOnRestart) save();
 
   function recordExecution(requestId, data) {
-    if (!executionFile) return;
     executions[requestId] = { ...executions[requestId], ...data };
+    if (!executionFile) return;
     try { writeJsonAtomic(executionFile, executions); }
     catch (error) {
       if (error instanceof StorageError) fail('TOOL_EXECUTION_PERSIST_FAILED', 'Unable to persist Model tool execution state');
@@ -200,7 +238,7 @@ export function createToolExecutionCoordinator({
   }
 
   function recoveryForSession(sessionId) {
-    const uncertain = interruptedExecutions.find(row => row.status === 'started' && row.sessionId === sessionId);
+    const uncertain = uncertainExecutions().find(row => row.sessionId === sessionId);
     if (uncertain) return { state: 'needs-reconciliation', capability: uncertain.capability, turnId: uncertain.turnId };
     const orphaned = Object.values(continuations).find(row => row.status === 'orphaned' && row.target?.sessionId === sessionId);
     if (orphaned) return { state: 'needs-reconciliation', capability: 'approval', turnId: orphaned.target.turnId };
@@ -209,7 +247,7 @@ export function createToolExecutionCoordinator({
   }
 
   function recoveryForTask(taskId) {
-    const uncertain = interruptedExecutions.find(row => row.status === 'started' && row.taskId === taskId);
+    const uncertain = uncertainExecutions().find(row => row.taskId === taskId);
     if (uncertain) return { state: 'needs-reconciliation', capability: uncertain.capability, turnId: uncertain.turnId };
     const orphaned = Object.values(continuations).find(row => row.status === 'orphaned' && row.state?.scope?.taskId === taskId);
     if (orphaned) return { state: 'needs-reconciliation', capability: 'approval', turnId: orphaned.target.turnId };
@@ -218,14 +256,15 @@ export function createToolExecutionCoordinator({
   }
 
   function acknowledgeTaskRecovery(taskId) {
-    const rows = interruptedExecutions.filter(row => row.status === 'started' && row.taskId === taskId);
+    const rows = uncertainExecutions().filter(row => row.taskId === taskId);
+    const previousStatuses = rows.map(row => row.status);
     const orphaned = Object.values(continuations).filter(row => row.status === 'orphaned' && row.state?.scope?.taskId === taskId);
     for (const row of rows) row.status = 'reconciled';
     for (const row of orphaned) row.status = 'reconciled';
     if (rows.length && executionFile) {
       try { writeJsonAtomic(executionFile, executions); }
       catch (error) {
-        for (const row of rows) row.status = 'started';
+        rows.forEach((row, index) => { row.status = previousStatuses[index]; });
         for (const row of orphaned) row.status = 'orphaned';
         if (error instanceof StorageError) fail('TOOL_EXECUTION_PERSIST_FAILED', 'Unable to persist Model tool reconciliation');
         throw error;
@@ -241,6 +280,30 @@ export function createToolExecutionCoordinator({
     return { reconciled: rows.length + orphaned.length };
   }
 
+  function completedResultContent(result, state, capability, input) {
+    const value = { status: 'completed', result: result.result };
+    if (evidenceStore && EVIDENCE_SOURCE_CAPABILITIES.includes(capability) && input
+      && state.manifest.some(item => item.id === 'context.evidence.read' && item.available !== false)) {
+      try {
+        const content = sanitizeToolEvidence(value);
+        if (content.length > MAX_RESULT_CHARS) {
+          const reference = evidenceStore.put({ binding: evidenceBinding(state), content,
+            sourceCapability: capability, sourceInput: input });
+          return evidenceSummary(content, reference);
+        }
+      } catch { return safeJson({ ...value, evidenceUnavailable: { code: 'TOOL_EVIDENCE_UNAVAILABLE', note: 'No stored source is available; request a smaller result.' } }); }
+    }
+    return safeJson(value);
+  }
+
+  async function recordUsage(state, usage) {
+    if (typeof onUsage !== 'function') return;
+    try { await onUsage({ sessionId: state.sessionId, turnId: state.turnId,
+      taskId: state.accountingTaskId ?? null, providerId: state.providerId ?? null,
+      model: state.model ?? null, usage }); }
+    catch { fail('TOOL_USAGE_PERSIST_FAILED', 'Request usage could not be durably recorded'); }
+  }
+
   async function runLoop(state, signal) {
     const { providerId, model, reasoning, actor, sessionId, turnId, scope } = state;
     let totalCalls = state.totalCalls ?? 0;
@@ -249,7 +312,10 @@ export function createToolExecutionCoordinator({
     let usage = state.usage ?? null;
     let resolvedModel = state.resolvedModel ?? null;
     let limitReached = state.limitReached === true;
+    let activeRequestId = null;
+    let activeUsage = null;
 
+    try {
     for (let cycle = state.cycle ?? 0; cycle <= maxCycles; cycle++) {
       if (signal?.aborted) fail('INVOKE_CANCELLED', 'Tool execution was cancelled');
       if (cycle > 0 && typeof state.onStreamReset === 'function') {
@@ -263,10 +329,13 @@ export function createToolExecutionCoordinator({
         toolChoice: cycle < maxCycles && totalCalls < maxCalls ? 'auto' : 'none'
       };
       if (!resumingToolBatch && !toolsAllowed && finalSynthesisAtLimit !== true) limitReached = true;
+      if (!resumingToolBatch) request.messages = projectMessageBudget(request.messages, { evidenceStore, binding: evidenceBinding(state), canRetrieveEvidence: state.manifest.some(item => item.id === 'context.evidence.read' && item.available !== false) }).messages;
       let response;
       if (resumingToolBatch) {
         response = { text: '', toolCalls: state.pendingCalls, usage, resolvedModel };
       } else if (typeof modelRuntime.stream === 'function') {
+        activeRequestId = `${turnId ?? 'turn'}:${cycle}`;
+        activeUsage = null;
         let streamedText = '';
         let streamedToolCalls = [];
         let streamUsage = null;
@@ -274,6 +343,8 @@ export function createToolExecutionCoordinator({
         let streamReason = null;
         let modelContinuation = null;
         for await (const event of modelRuntime.stream(request)) {
+          const snapshot = event?.data?.reason?.usage ?? event?.data?.usage ?? event?.data?.message?.usage;
+          if (snapshot && typeof snapshot === 'object') activeUsage = streamUsage = snapshot;
           if (event?.type === 'assistant/chunk') {
             const delta = event.data?.chunk?.type === 'text-delta' ? event.data.chunk.text : '';
             if (typeof delta === 'string' && delta) {
@@ -294,6 +365,8 @@ export function createToolExecutionCoordinator({
               ? event.data.resolvedModel : streamResolvedModel;
           }
         }
+        usage = accumulateModelUsage(usage, streamUsage, { requestId: activeRequestId, providerId, model: streamResolvedModel ?? model ?? null });
+        activeRequestId = null;
         if (signal?.aborted || streamReason === 'aborted' || streamReason === 'cancelled') {
           fail('INVOKE_CANCELLED', 'Tool execution was cancelled');
         }
@@ -311,10 +384,16 @@ export function createToolExecutionCoordinator({
           resolvedModel: streamResolvedModel
         };
       } else {
+        activeRequestId = `${turnId ?? 'turn'}:${cycle}`;
+        activeUsage = null;
         response = await modelRuntime.chat(request);
+        activeRequestId = null;
       }
       if (typeof response?.text === 'string') text = response.text;
-      if (response?.usage && typeof response.usage === 'object') usage = response.usage;
+      if (!resumingToolBatch) usage = accumulateModelUsage(usage, response?.usage, {
+        requestId: `${turnId ?? 'turn'}:${cycle}`, providerId, model: response?.resolvedModel ?? response?.model ?? model ?? null
+      });
+      if (!resumingToolBatch) await recordUsage(state, usage);
       if (typeof response?.resolvedModel === 'string' && response.resolvedModel.trim()) resolvedModel = response.resolvedModel.trim();
       else if (typeof response?.model === 'string' && response.model.trim()) resolvedModel = response.model.trim();
       const calls = Array.isArray(response?.toolCalls) ? response.toolCalls : [];
@@ -362,38 +441,65 @@ export function createToolExecutionCoordinator({
         }
         let result;
         let input;
-        const toolRequestId = `model:${sessionId}:${turnId}:${cycle}:${index}`.slice(0, 240);
+        const baseToolRequestId = `model:${sessionId}:${turnId}:${cycle}:${index}`.slice(0, 232);
+        let toolRequestId = baseToolRequestId;
+        let retryCount = 0;
         try {
           input = parseArguments(call?.arguments);
           const descriptor = state.manifest.find((item) => item.id === capability);
           if (!descriptor) fail('UNKNOWN_TOOL_IN_TURN', 'Tool was not authorized in this turn');
           validateSchema(descriptor.inputSchema, input);
-          const liveActor = typeof actorResolver === 'function'
-            ? await actorResolver({ actorKind: actor.kind, actorId: actor.id, sessionId, turnId, scope: state.scope })
-            : actor;
-          if (!liveActor || liveActor.kind !== actor.kind || liveActor.id !== actor.id) {
-            fail('TOOL_ACTOR_UNAVAILABLE', 'The trusted CetaMesh actor is no longer available');
+          const retryStartedAt = Date.now();
+          let retryError = null;
+          for (let attempt = 0; attempt < SAFE_TOOL_RETRY.maxAttempts; attempt++) {
+            if (signal?.aborted) fail('INVOKE_CANCELLED', 'Tool execution was cancelled');
+            if (attempt && Date.now() - retryStartedAt > SAFE_TOOL_RETRY.deadlineMs) throw retryError;
+            toolRequestId = attempt ? `${baseToolRequestId}:r${attempt}` : baseToolRequestId;
+            // Both the trusted actor and the Broker policy are resolved afresh on each attempt.
+            const liveActor = typeof actorResolver === 'function'
+              ? await actorResolver({ actorKind: actor.kind, actorId: actor.id, sessionId, turnId, scope: state.scope })
+              : actor;
+            if (!liveActor || liveActor.kind !== actor.kind || liveActor.id !== actor.id) {
+              fail('TOOL_ACTOR_UNAVAILABLE', 'The trusted CetaMesh actor is no longer available');
+            }
+            if (attempt && Date.now() - retryStartedAt >= SAFE_TOOL_RETRY.deadlineMs) throw retryError;
+            recordExecution(toolRequestId, { status: 'started', sessionId, turnId,
+              taskId: state.scope?.taskId ?? null, capability, at: Date.now() });
+            try {
+              const executeBroker = attemptSignal => capabilityBroker.execute({
+                requestId: toolRequestId, actor: liveActor,
+                taskId: state.scope?.taskId ?? null,
+                workspaceId: state.scope?.workspaceId ?? null,
+                capability, input, reason: 'Model structured tool call',
+                origin: { sessionId, turnId, targetKind: state.targetKind },
+                ...(attemptSignal ? { signal: attemptSignal } : {})
+              }, { signal: attemptSignal });
+              result = attempt
+                ? await runBoundedRetryAttempt(executeBroker, { signal,
+                  remainingMs: SAFE_TOOL_RETRY.deadlineMs - (Date.now() - retryStartedAt) })
+                : await executeBroker(signal);
+              break;
+            } catch (error) {
+              if (!mayRetrySafeTool({ capability, error, attempt, startedAt: retryStartedAt,
+                signal, dispatchStatus: capabilityBroker.dispatchStatus?.(toolRequestId) })) throw error;
+              retryError = error;
+              recordExecution(toolRequestId, { status: 'failed', code: String(error.code).slice(0, 100) });
+              retryCount = attempt + 1;
+              if (typeof state.onActivity === 'function') {
+                await state.onActivity({ id: activityId, capability, status: 'retrying',
+                  retryCount, durationMs: Date.now() - activityStartedAt });
+              }
+              await delay(SAFE_TOOL_RETRY.delayMs, undefined, { signal });
+            }
           }
-          recordExecution(toolRequestId, { status: 'started', sessionId, turnId,
-            taskId: state.scope?.taskId ?? null, capability, at: Date.now() });
-          result = await capabilityBroker.execute({
-            requestId: toolRequestId,
-            actor: liveActor,
-            taskId: state.scope?.taskId ?? null,
-            workspaceId: state.scope?.workspaceId ?? null,
-            capability,
-            input,
-            reason: 'Model structured tool call',
-            origin: { sessionId, turnId, targetKind: state.targetKind },
-            ...(scope?.signal ? { signal: scope.signal } : {})
-          }, { signal });
         } catch (error) {
           if (executions[toolRequestId]?.status === 'started' && !capabilityBroker.dispatchStatus?.(toolRequestId)
             && error?.code !== 'INVOKE_CANCEL_UNCONFIRMED' && error?.code !== 'TOOL_EXECUTION_PERSIST_FAILED') {
             recordExecution(toolRequestId, { status: 'failed', code: String(error?.code ?? 'CAPABILITY_DENIED').slice(0, 100) });
           }
-          result = { status: 'denied', ...errorResult(error) };
+          result = { status: error?.effectStatus === 'unknown' ? 'outcome-unknown' : 'denied', ...errorResult(error) };
         }
+        if (result && typeof result === 'object') result = { ...result, retryCount };
 
         if (result?.status === 'pending') {
           if (typeof state.onActivity === 'function') {
@@ -415,7 +521,7 @@ export function createToolExecutionCoordinator({
             state: {
               providerId, model: model ?? null, reasoning: reasoning ?? null,
               manifest: structuredClone(state.manifest), actor: { kind: actor.kind, id: actor.id },
-              sessionId, turnId, scope: { taskId: scope?.taskId ?? null, workspaceId: scope?.workspaceId ?? null },
+              sessionId, turnId, accountingTaskId: state.accountingTaskId ?? null, scope: { taskId: scope?.taskId ?? null, workspaceId: scope?.workspaceId ?? null },
               messages: storedState.messages, cycle,
               totalCalls, usage, resolvedModel,
               limitReached,
@@ -424,6 +530,14 @@ export function createToolExecutionCoordinator({
               pendingCapability: capability,
               pendingInput: { path: typeof input.path === 'string' ? input.path : null,
                 tool: typeof input.tool === 'string' ? input.tool : null },
+              pendingEvidenceInput: (() => {
+                if (!evidenceStore || !EVIDENCE_SOURCE_CAPABILITIES.includes(capability)
+                  || !state.manifest.some(item => item.id === 'context.evidence.read' && item.available !== false)) return null;
+                try {
+                  if (Buffer.byteLength(JSON.stringify(input)) > 65536) return null;
+                  return structuredClone(validateEvidenceSourceInput(input));
+                } catch { return null; }
+              })(),
               pendingCalls: calls,
               pendingCallIndex: index + 1
             },
@@ -432,14 +546,15 @@ export function createToolExecutionCoordinator({
           continuations[approvalId] = continuation;
           save();
           recordExecution(toolRequestId, { status: 'approval-pending', approvalId });
-          return { status: 'pending', toolCalling: 'supported', approvalId, expiresAt: result.expiresAt, text: '', continuationId: id };
+          return { status: 'pending', toolCalling: 'supported', approvalId, expiresAt: result.expiresAt, text: '', usage, resolvedModel, continuationId: id };
         }
 
         state.messages.push({
           role: 'tool', tool_call_id: callId,
           content: result?.status === 'completed'
-            ? safeJson({ status: result.status, result: result.result })
-            : safeJson(result?.error ?? result ?? { status: 'denied', code: 'CAPABILITY_DENIED' })
+            ? completedResultContent(result, state, capability, input)
+            : safeJson(result?.status === 'outcome-unknown' ? result
+              : result?.error ?? result ?? { status: 'denied', code: 'CAPABILITY_DENIED' })
         });
         if (typeof state.onActivity === 'function') {
           await state.onActivity({
@@ -451,6 +566,13 @@ export function createToolExecutionCoordinator({
         if (typeof state.onCapabilityResult === 'function') {
           await state.onCapabilityResult({ capability, result, input, eventId: activityId,
             sessionId, turnId, scope: state.scope });
+        }
+        if (result?.status === 'outcome-unknown') {
+          // The Broker owns reconciliation of this dispatch. No model recovery turn or
+          // subsequent tool call may replay an effect whose outcome is still unknown.
+          recordExecution(toolRequestId, { status: 'outcome-unknown', code: result.error?.code ?? 'OUTCOME_UNKNOWN' });
+          return { status: 'partial', code: 'OUTCOME_UNKNOWN', toolCalling: 'supported',
+            text: '', usage, resolvedModel, totalCalls };
         }
         if (typeof state.refreshContext === 'function') {
           const refreshed = await state.refreshContext({ capability, result, sessionId, turnId, scope: state.scope });
@@ -474,10 +596,27 @@ export function createToolExecutionCoordinator({
       }
     }
     return { status: 'partial', code: 'TOOL_CALL_LIMIT', toolCalling: 'supported', text, usage, resolvedModel, totalCalls, messages: state.messages };
+    } catch (error) {
+      // A failed transport may still be billable, but its usage is unknown. Keep
+      // earlier receipts and a distinct unknown attempt rather than reporting 0.
+      if (activeRequestId) usage = accumulateModelUsage(usage, activeUsage, {
+        requestId: `${activeRequestId}:failed:${crypto.randomUUID()}`, providerId, model: model ?? null
+      });
+      if (activeRequestId) {
+        try { await recordUsage(state, usage); }
+        catch { if (error && typeof error === 'object') error.accountingWarning = 'TOOL_USAGE_PERSIST_FAILED'; }
+      }
+      if (usage && error && typeof error === 'object') error.usage = { ...usage, accountingComplete: false };
+      throw error;
+    }
   }
 
   async function run({ providerId, model, reasoning, messages = [], manifest = [], actor, sessionId, turnId, targetKind = 'chat', scope = {}, signal, refreshContext, onCapabilityResult, onActivity, onTextDelta, onStreamReset } = {}) {
     if (!actor || !['owner', 'agent'].includes(actor.kind) || typeof actor.id !== 'string') fail('UNAUTHORIZED', 'Trusted Model actor required');
+    if ((scope.taskId && recoveryForTask(scope.taskId)?.state === 'needs-reconciliation')
+      || recoveryForSession(sessionId)?.state === 'needs-reconciliation') {
+      fail('REQUEST_RECOVERY_REQUIRED', 'Review the uncertain tool result before continuing');
+    }
     const supports = typeof modelRuntime.supportsToolCalling === 'function'
       ? await modelRuntime.supportsToolCalling(providerId, model)
       : true;
@@ -495,6 +634,7 @@ export function createToolExecutionCoordinator({
         sessionId: String(sessionId ?? 'session').slice(0, 160),
         turnId: String(turnId ?? crypto.randomUUID()).slice(0, 160),
         targetKind: targetKind === 'agent' ? 'agent' : 'chat',
+        accountingTaskId: scope.taskId ?? null,
         scope: { taskId: scope.taskId ?? null, workspaceId: scope.workspaceId ?? null },
         messages: structuredClone(messages), cycle: 0, totalCalls: 0,
         ...(typeof onActivity === 'function' ? { onActivity } : {}),
@@ -529,11 +669,11 @@ export function createToolExecutionCoordinator({
     if (typeof onTextDelta === 'function') state.onTextDelta = onTextDelta;
     if (typeof onStreamReset === 'function') state.onStreamReset = onStreamReset;
     const result = decisionResult?.status === 'completed'
-      ? { status: 'completed', result: safeValue(decisionResult.result) }
+      ? { status: 'completed', result: decisionResult.result }
       : { status: 'rejected', error: { code: 'APPROVAL_REJECTED' } };
     state.messages.push({
       role: 'tool', tool_call_id: state.pendingToolCallId,
-      content: safeJson(result)
+      content: result.status === 'completed' ? completedResultContent(result, state, state.pendingCapability, state.pendingEvidenceInput) : safeJson(result)
     });
     if (typeof state.onCapabilityResult === 'function' && state.pendingCapability) {
       await state.onCapabilityResult({ capability: state.pendingCapability, result,

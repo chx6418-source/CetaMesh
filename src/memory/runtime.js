@@ -258,14 +258,16 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
       return chars.length > 2 ? [...chars.slice(1).map((_, i) => chars.slice(i, i + 2).join('')), word] : [word];
     }))];
     const rows = scanFor(decision);
+    // Automatic retrieval excludes unrelated records; empty queries preserve browsing.
     const ranked = rows.map(row => {
       const haystack = (row.content + ' ' + row.tags.join(' ')).toLowerCase();
       return { row, score: grams.reduce((sum, gram) => sum + (haystack.includes(gram) ? gram.length : 0), 0) };
-    }).sort((a, b) => b.score - a.score || Number(b.row.pinned) - Number(a.row.pinned)
+    }).filter(item => !needle || item.score > 0)
+      .sort((a, b) => b.score - a.score || Number(b.row.pinned) - Number(a.row.pinned)
       || b.row.updatedAt - a.row.updatedAt || a.row.id.localeCompare(b.row.id));
     const max = normalizeLimit(limit, 50);
     return { memories: ranked.slice(0, max).map(item => readView(item.row, principal)),
-      meta: { total: rows.length, scanned: store.stats.lastScanned, returned: Math.min(rows.length, max) } };
+      meta: { total: rows.length, matched: ranked.length, scanned: store.stats.lastScanned, returned: Math.min(ranked.length, max) } };
   }
 
   function rank(rows, needle, rawText) {

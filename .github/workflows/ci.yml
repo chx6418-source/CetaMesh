@@ -11,8 +11,17 @@ name: ci
 on:
   push:
     branches: ['**']
+    paths-ignore:
+      - 'apps/mobile/**'
+      - '.github/workflows/android-ci.yml'
   pull_request:
+    paths-ignore:
+      - 'apps/mobile/**'
+      - '.github/workflows/android-ci.yml'
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   test:
@@ -46,10 +55,10 @@ jobs:
         run: npm run build:ui
       - name: Unified test suite
         run: npm test
-      - name: Desktop shell check
-        run: npm run desktop:check
-      - name: Desktop shell tests
-        run: npm run desktop:test
+      - name: Rust checks and tests through unified runner
+        env:
+          WHALEBRIDGE_TEST_CARGO: '1'
+        run: npm test -- --suite cargo:check --suite cargo:test
 
   release-build:
     name: release build (main / manual)
@@ -83,10 +92,12 @@ jobs:
         run: npm run build:core
       - name: Build desktop shell (release)
         run: npm run desktop:build
+      - name: Build desktop debug shell for acceptance
+        run: npm run desktop:build:debug
       - name: Assemble release candidate
         run: npm run build:release
       - name: Release candidate acceptance
-        run: npm run test-release-candidate
+        run: npm test -- --category release
       - name: Upload RC artifacts
         uses: actions/upload-artifact@v4
         with:

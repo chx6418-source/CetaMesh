@@ -252,8 +252,8 @@ try {
   // ── 场景 1：native worker（UI pipe + 数据面 pipe），HTTP 不得监听 ──────────
   {
     const dataDir = path.join(behaviorTempRoot, 'native', 'data');
-    const uiPipe = `\\\\.\\pipe\\WhaleBridge-Test-UI-${process.pid}-${crypto.randomBytes(3).toString('hex')}`;
-    const dataPipeOverride = `\\\\.\\pipe\\WhaleBridge-Test-Data-${process.pid}-${crypto.randomBytes(3).toString('hex')}`;
+    const uiPipe = process.platform === 'win32' ? `\\\\.\\pipe\\WhaleBridge-Test-UI-${process.pid}-${crypto.randomBytes(3).toString('hex')}` : path.join(behaviorTempRoot, 'ui.sock');
+    const dataPipeOverride = process.platform === 'win32' ? `\\\\.\\pipe\\WhaleBridge-Test-Data-${process.pid}-${crypto.randomBytes(3).toString('hex')}` : path.join(behaviorTempRoot, 'data.sock');
     writeWorkerConfig(dataDir);
     const worker = startWorker(path.join(behaviorTempRoot, 'native'), dataDir, {
       WHALEBRIDGE_UI_PIPE: uiPipe,

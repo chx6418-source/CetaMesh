@@ -3,7 +3,7 @@ import { useSearchParams } from 'react-router';
 import { createPortal } from 'react-dom';
 import { mergeChatHistorySnapshot, mergeLatestChatMessages, prependOlderChatMessages, recoverForwardHistory } from './chat-history';
 import { applyChatStreamUpdates, ChatRequestEpoch, ChatStreamRevision, pendingReplyVisible, type ChatStreamUpdate } from './chat-async-state';
-import { aboutClient, agentClient, approvalClient, bridge, chatClient, extensionSettingsClient, feedbackClient, hostClient, memoryClient, onboardingClient, openExternal, pluginClient, settingsClient, taskClient, updateClient, workspaceClient, workshopClient, type Agent, type DshConfiguration, type DshSelection, type DshPresetCatalog, type Approval, type ApprovalDecisionResult, type DesktopEventData, type ChatMessage as ChatMessageDto, type ChatSession, type ExtensionSettingsDescription, type ExtensionSettingsSnapshot, type IntegrationSettings, type Memory, type Plugin, type ProviderSettingField, type SettingField, type Settings, type Task, type WorkshopProposal } from '../bridge/typed-client';
+import { aboutClient, agentClient, approvalClient, bridge, chatClient, extensionSettingsClient, feedbackClient, hostClient, memoryClient, onboardingClient, openExternal, pluginClient, settingsClient, taskClient, updateClient, workspaceClient, workshopClient, type Agent, type AgentRuntimeProvider, type AgentRuntimeConfiguration, type AgentRuntimeInput, type DshConfiguration, type DshSelection, type DshPresetCatalog, type Approval, type ApprovalDecisionResult, type DesktopEventData, type ChatMessage as ChatMessageDto, type ChatSession, type ExtensionSettingsDescription, type ExtensionSettingsSnapshot, type IntegrationSettings, type Memory, type Plugin, type ProviderSettingField, type SettingField, type Settings, type Task, type WorkshopProposal } from '../bridge/typed-client';
 import { Icon, type IconName } from '../components/icons';
 import { ArtifactCard } from '../components/product/cards';
 import { Button, IconButton, Input, normalizeSelectOptionLabel, SearchInput, Select, Tabs } from '../components/primitives/inputs';
@@ -13,7 +13,9 @@ import { Badge, Banner, Card, LoadingState, Surface } from '../components/primit
 import { Markdown, VirtualList, type VirtualListAnchor, type VirtualListController } from '../components/primitives/content';
 import { useUi } from '../stores/ui';
 import { WindowChrome } from './WindowChrome';
+import { activeTaskChildren, TaskDependencyNotice, taskOperationErrorMessage, validateTaskExecution } from './TaskExecutionFeedback';
 import { WorkspaceSidebar } from './WorkspaceSidebar';
+import { useResponsiveSidebar } from './useResponsiveSidebar';
 import { ReferenceViewerLayout, ReferenceViewerProvider } from './ReferenceViewer';
 import { SettingsLayout } from './SettingsLayout';
 import { ApprovalOperationSummary, FeedbackLinkRow } from './StatusPresentation';
@@ -54,14 +56,43 @@ function Heading({ eyebrow, title, description, action }: { eyebrow: string; tit
 }
 function StatusBadge({ value, available }: { value: string; available?: boolean | null }) {
   const tone = available === true || ['ready', 'running', 'enabled', 'completed', 'current', 'installed'].includes(value) ? 'success'
-    : ['needs-setup', 'descriptor-incomplete', 'pending', 'waiting-approval', 'starting', 'start-timeout', 'checking', 'update'].includes(value) ? 'warning'
+    : ['needs-setup', 'connection-pending', 'descriptor-incomplete', 'pending', 'waiting-approval', 'starting', 'start-timeout', 'checking', 'update'].includes(value) ? 'warning'
       : ['unavailable', 'error', 'failed', 'stopped', 'disabled'].includes(value) ? 'danger' : 'default';
-  const label = ({ ready: '已就绪', running: '运行中', enabled: '已启用', installed: '已安装', update: '可更新', completed: '已完成', current: '当前步骤', 'needs-setup': '需要设置', 'descriptor-incomplete': '配置不完整', 'not-installed': '未安装', 'not-supported': '不支持', 'not-checked': '未检查', checking: '检查中', 'start-timeout': '等待网关就绪', invalid: '安装需修复', unavailable: '暂不可用', disabled: '已停用', stopped: '已停止', pending: '等待处理', 'waiting-approval': '等待审批', starting: '启动中', error: '异常', failed: '失败', cancelled: '已取消', blocked: '待核对', queued: '待开始', paused: '已暂停' } as Record<string, string>)[value] ?? value;
+  const label = ({ ready: '已就绪', running: '运行中', enabled: '已启用', installed: '已安装', update: '可更新', completed: '已完成', current: '当前步骤', 'needs-setup': '需要设置', 'descriptor-incomplete': '配置不完整', 'not-installed': '未安装', 'not-supported': '不支持', 'not-checked': '未检查', 'connection-pending': '已安装 · 待接入', checking: '检查中', 'start-timeout': '等待网关就绪', invalid: '安装需修复', unavailable: '暂不可用', disabled: '已停用', stopped: '已停止', pending: '等待处理', 'waiting-approval': '等待审批', starting: '启动中', error: '异常', failed: '失败', cancelled: '已取消', blocked: '待核对', queued: '待开始', paused: '已暂停' } as Record<string, string>)[value] ?? value;
   return <Badge tone={tone}>{label}</Badge>;
 }
-function availabilityReasonLabel(reason: string | null) {
+export function availabilityReasonLabel(reason: string | null) {
   if (!reason) return '';
-  return ({
+  const labels: Record<string, string> = {
+    agent_model_required: '尚未选择模型，请在连接设置中填写模型。',
+    agent_credential_required: '尚未配置此 Agent 的 API Key，请在连接设置中保存凭据。',
+    credential_missing: '尚未配置此 Agent 的 API Key，请在连接设置中保存凭据。',
+    runtime_missing: '未检测到编码运行时，请按官方文档安装并配置路径。',
+    runtime_not_installed: '未检测到编码运行时，请按官方文档安装并配置路径。',
+    runtime_not_checked: '编码运行时尚未检查，请点击检查连接。',
+    runtime_verification_required: '编码运行时需要重新验证，请点击检查连接。',
+    runtime_changed: '编码运行时或配置已变化，请关闭原会话后重新检查连接。',
+    provider_disabled: '此 Agent 连接已停用，可在连接设置中启用。',
+    disabled: '此 Agent 连接已停用，可在连接设置中启用。',
+    runtime_disabled: '此 Agent 连接已停用，可在连接设置中启用。',
+    sdk_resource_missing: '当前应用缺少已验证的 SDK 资源，请更新或修复 CetaMesh。',
+    sdk_missing: '当前应用缺少已验证的 SDK 资源，请更新或修复 CetaMesh。',
+    claude_sdk_resource_unverified: 'Claude SDK 资源缺失或未通过校验，请更新或修复 CetaMesh。',
+    native_input_unverified: '此版本的 Agent 未提供完整工具参数，无法安全审批，暂不开放任务执行。',
+    native_approval_unavailable: '原生工具逐次审批尚未就绪，请重启 Core 或检查应用配置。',
+    agent_runtime_config_corrupt: '运行时配置已损坏或无法读取；原数据已保留，请核对数据目录后恢复配置。',
+    agent_runtime_credential_scope_mismatch: 'API Key 的端点范围已变化，请核对端点并重新保存 API Key。',
+    claude_code_not_found: '未检测到 Claude Code 编码运行时，请按官方文档安装并配置路径。',
+    claude_code_path_unsupported: '此路径不是受支持的 Claude Code 编码运行时，请重新选择。',
+    claude_code_binary_invalid: 'Claude Code 编码运行时文件无效，请检查安装与路径。',
+    claude_code_unreadable: '无法读取 Claude Code 编码运行时，请检查路径与文件权限。',
+    claude_code_binary_changed: 'Claude Code 编码运行时已变化，请关闭原会话后重新检查连接。',
+    claude_code_identity_unverified: 'Claude Code 版本身份尚未验证，请检查安装后重新检查连接。',
+    claude_code_protocol_unverified: 'Claude Code 控制协议尚未验证，请检查兼容版本后重新检查连接。',
+    claude_code_probe_failed: 'Claude Code 运行时检查失败，请检查安装后重试。',
+    claude_code_exit_unconfirmed: 'Claude Code 检查进程尚未确认退出，请先核对运行状态。',
+    acp_initialize_failed: '编码运行时连接握手失败，请检查安装与运行时路径后重试。',
+    desktop_cli_missing: '桌面客户端已安装；尚未检测到用于连接的 CLI', acp_runtime_unverified: 'CLI 已检测到；本机连接协议与权限策略尚未验证',
     not_installed: '未安装', acp_version_unverified: '本机 ACP 版本尚未验证',
     acp_launch_unverified: '本机 ACP 启动方式尚未验证', native_policy_unverified: '原生权限与执行范围尚未验证',
     task_binding_unavailable: '工作区任务绑定尚未就绪', runtime_detection_failed: '运行时检查失败，请重新检查',
@@ -72,7 +103,8 @@ function availabilityReasonLabel(reason: string | null) {
     'provider-unavailable': '服务未连接', 'server-stopped': '已停止', 'task-required': '创建任务后使用',
     'workspace-required': '需要工作区', 'scope-unavailable': '需要工作区', 'descriptor-incomplete': '能力描述不完整',
     'not-supported': '暂不支持', 'not-checked': '尚未检查', unavailable: '服务未连接'
-  } as Record<string, string>)[reason] ?? '当前能力尚未验证，请检查连接与配置';
+  };
+  return labels[reason] ?? labels[reason.trim().toLowerCase()] ?? '当前能力尚未验证，请检查连接与配置';
 }
 
 export function HarborApp() {
@@ -205,7 +237,7 @@ export function HarborApp() {
     } catch { /* Theme applies in this window even when Core cannot persist it. */ }
   }
 
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const { collapsed: sidebarCollapsed, toggle: toggleSidebar } = useResponsiveSidebar(page);
   const shownAllSessions = allSessions.filter(session => {
     const inScope = allSessionsScope === 'all' || (allSessionsScope === 'archived' ? session.archived : !session.archived);
     return inScope && `${session.title} ${session.id}`.toLowerCase().includes(allSessionsQuery.toLowerCase());
@@ -218,7 +250,7 @@ export function HarborApp() {
     <WindowChrome />
     <WorkspaceSidebar page={page} workspaces={workspaces} sessions={sessions} activeWorkspaceId={activeWorkspaceId}
       activeSessionId={activeSessionId} taskCount={taskCount} hostStatus={hostStatus} collapsed={sidebarCollapsed || page === 'settings'}
-      workspaceError={workspaceError} sessionError={sessionError} onToggle={() => setSidebarCollapsed(current => !current)}
+      workspaceError={workspaceError} sessionError={sessionError} onToggle={toggleSidebar}
       onNavigate={navigate} onOpenWorkspace={id => void openWorkspace(id)} onOpenSession={id => navigate('chat', id)}
       onNewSession={() => void createSession()} onAllSessions={() => { setAllSessionsOpen(true); setAllSessionsQuery(''); void loadAllSessions(); }}
       renderSessionActions={session => <SessionActionsMenu session={session} onAction={action => { void manageSession(session, action); }} />} />
@@ -318,6 +350,7 @@ export function ChatCatalogStatus({ catalog }: { catalog: Awaited<ReturnType<typ
 
 function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onNew, onNewChat, onOpenMemory, onReviewTask }: { session: ChatSession | null; workspaces: { id: string; name: string; status: string }[]; activeWorkspaceId: string | null; onSessionUpdate(session: ChatSession): void; onNew(): Promise<void>; onNewChat(): Promise<void>; onOpenMemory(): void; onReviewTask(id: string): void }) {
   const [messages, setMessages] = useState<ChatMessageDto[]>([]);
+  const [sessionUsage, setSessionUsage] = useState<ChatMessageDto['usage']>(null);
   const [hasMoreHistory, setHasMoreHistory] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [status, setStatus] = useState<{ state: string; displayText: string; statusMessage: string | null; requestId: string | null; retryCount: number; followState: string; followError: string | null; toolActivity: ChatMessageDto['toolActivity']; agentActivity: ChatMessageDto['agentActivity']; error: string | null; errorCode: string | null; approvalId: string | null; routing: Record<string, unknown> }>({ state: 'idle', displayText: '', statusMessage: null, requestId: null, retryCount: 0, followState: 'idle', followError: null, toolActivity: [], agentActivity: null, error: null, errorCode: null, approvalId: null, routing: {} });
@@ -368,6 +401,7 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
       activeStreamRequestIdRef.current = null;
       setMessages([]);
       setSettlingReply(null);
+      setSessionUsage(null);
       setHasMoreHistory(false);
       setHasNewMessages(false);
       setLoading(false);
@@ -383,6 +417,7 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
     try {
       const history = await chatClient.history(session.id, 100);
       if (!requestEpochRef.current.isCurrent(request, activeSessionIdRef.current)) return;
+      setSessionUsage(history.sessionUsage ?? null);
       if (historySessionIdRef.current !== session.id) {
         historySessionIdRef.current = session.id;
         lastHistoryMessageIdRef.current = history.messages.at(-1)?.id ?? null;
@@ -421,6 +456,7 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
         next => chatClient.history(session.id, 100, null, next),
         () => requestEpochRef.current.isCurrent(request, activeSessionIdRef.current),
         (history, first) => {
+      setSessionUsage(history.sessionUsage ?? null);
       if (first && (!sameSession || !cursor)) {
         historySessionIdRef.current = session.id;
         lastHistoryMessageIdRef.current = history.messages.at(-1)?.id ?? null;
@@ -695,6 +731,7 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
   return <div className="chat-workspace">
     <section className="conversation-pane">
       <div className="conversation-toolbar"><div className="conversation-heading"><h1 title={session.title || '新会话'}>{session.title || '新会话'}</h1><div className="conversation-meta"><StatusBadge value={status.state || 'idle'} /><span>更新于 {relativeLabel(session.updatedAt)}</span><span>·</span><ChatCatalogStatus catalog={catalog} /></div></div><div className="conversation-actions"><IconButton label="刷新会话" icon="refresh" onClick={() => void load()} /></div></div>
+      <UsageSummary usage={historySessionIdRef.current === session.id ? sessionUsage : null} label="会话累计用量" />
       <VirtualList
         items={timelineItems}
         estimateSize={112}
@@ -745,10 +782,20 @@ export function ToolActivity({ tools }: { tools: ChatMessageDto['toolActivity'] 
   </section>;
 }
 
+export function UsageSummary({ usage, label = '本轮用量' }: { usage: ChatMessageDto['usage']; label?: string }) {
+  if (!usage) return <small className="muted">{label} 未知</small>;
+  const count = (value: number | null) => value === null ? '未知' : String(value);
+  const cost = usage.cost;
+  const costLabel = cost?.amount != null && cost.currency && cost.complete
+    ? `${cost.status === 'actual' ? '实际费用' : '估算费用'} ${cost.currency} ${cost.amount}`
+    : `费用 未知${cost?.knownAmount != null && cost.currency ? `（已核算 ${cost.currency} ${cost.knownAmount}，不代表总费用）` : ''}`;
+  return <small className="muted" aria-label={label}>{label}{usage.accountingComplete === false ? ' · 已知用量（不完整）' : usage.accountingComplete === true ? '' : ' · 核算完整性未知'} · 输入 {count(usage.inputTokens)} · 输出 {count(usage.outputTokens)} · 推理 {count(usage.reasoningTokens)} · 缓存读取 {count(usage.cacheReadTokens)} · 缓存写入 {count(usage.cacheWriteTokens)} · 缓存命中 {usage.cacheHitRate === null ? '未知' : `${Math.round(usage.cacheHitRate * 10000) / 100}%`} · 请求 {count(usage.requestCount)} · {costLabel}</small>;
+}
+
 export function MessageBubble({ message, reference, streaming = false, sendError, onRetry }: { message: ChatMessageDto; reference?: { sessionId: string; messageId: string }; streaming?: boolean; sendError?: string; onRetry?(): void }) {
   const role = message.role === 'user' ? 'user' : 'assistant';
   const agentActivity = message.agentActivity;
-  return <article className={`chat-message ${role} ${streaming ? 'streaming' : ''}`}><div className="message-avatar">{role === 'assistant' ? <Icon name="sparkles" size={16} /> : '你'}</div><div className="message-body"><div className="message-meta"><strong>{role === 'assistant' ? 'CetaMesh' : '你'}</strong><span>{dateLabel(message.at)}</span>{streaming && <Badge tone="accent">生成中</Badge>}</div>{agentActivity && <div className={`agent-activity ${agentActivity.status}`} role="status"><Icon name={agentActivity.status === 'running' ? 'sparkles' : agentActivity.status === 'completed' ? 'check' : 'help'} size={15} /><span>{agentActivity.label}</span><strong>{agentActivityStatusLabel(agentActivity.status)}</strong></div>}{message.text ? <Markdown reference={reference}>{message.text}</Markdown> : <span className="muted">（没有文本内容）</span>}{message.attachments.length > 0 && <div className="message-attachments">{message.attachments.map(name => <span key={name}><Icon name="attach" size={13} />{name}</span>)}</div>}<ToolActivity tools={message.toolActivity} />{sendError && <div className="message-error" role="alert">{sendError}<Button compact variant="ghost" onClick={onRetry}>重试发送</Button></div>}{message.error && <p className="message-error" role="alert">{message.error}</p>}{message.cancelled && <small>本轮已停止</small>}</div></article>;
+  return <article className={`chat-message ${role} ${streaming ? 'streaming' : ''}`}><div className="message-avatar">{role === 'assistant' ? <Icon name="sparkles" size={16} /> : '你'}</div><div className="message-body"><div className="message-meta"><strong>{role === 'assistant' ? 'CetaMesh' : '你'}</strong><span>{dateLabel(message.at)}</span>{streaming && <Badge tone="accent">生成中</Badge>}</div>{agentActivity && <div className={`agent-activity ${agentActivity.status}`} role="status"><Icon name={agentActivity.status === 'running' ? 'sparkles' : agentActivity.status === 'completed' ? 'check' : 'help'} size={15} /><span>{agentActivity.label}</span><strong>{agentActivityStatusLabel(agentActivity.status)}</strong></div>}{message.text ? <Markdown reference={reference}>{message.text}</Markdown> : <span className="muted">（没有文本内容）</span>}{message.attachments.length > 0 && <div className="message-attachments">{message.attachments.map(name => <span key={name}><Icon name="attach" size={13} />{name}</span>)}</div>}<ToolActivity tools={message.toolActivity} />{role === 'assistant' && !streaming && <UsageSummary usage={message.usage} />}{sendError && <div className="message-error" role="alert">{sendError}<Button compact variant="ghost" onClick={onRetry}>重试发送</Button></div>}{message.error && <p className="message-error" role="alert">{message.error}</p>}{message.cancelled && <small>本轮已停止</small>}</div></article>;
 }
 
 async function confirmAgentExecution(provider: string, workspaceId: string) {
@@ -770,8 +817,8 @@ async function confirmAgentExecution(provider: string, workspaceId: string) {
   if (!(await agentClient.security(provider, workspaceId)).authorized) throw new Error('原生执行范围尚未确认');
 }
 
-function ApprovalCard({ approval, onDecide }: { approval: Approval; onDecide(id: string, approve: boolean): void }) {
-  return <Card className="approval-card"><div className="approval-icon"><Icon name="approval" size={20} /></div><div className="grow"><div className="row between"><strong>{approval.title}</strong><Badge tone="warning">需要处理</Badge></div><p>{approval.summary}</p><div className="approval-meta"><span>{approval.capability}</span><span>风险：{approval.risk}</span>{approval.expiresAt && <span>有效至 {dateLabel(approval.expiresAt)}</span>}</div><div className="row approval-actions"><Button compact variant="ghost" onClick={() => onDecide(approval.id, false)}>拒绝</Button><Button compact variant="primary" onClick={() => onDecide(approval.id, true)}>批准一次</Button></div></div></Card>;
+export function ApprovalCard({ approval, onDecide }: { approval: Approval; onDecide(id: string, approve: boolean): void }) {
+  return <Card className="approval-card"><div className="approval-icon"><Icon name="approval" size={20} /></div><div className="grow"><div className="row between"><strong>{approval.title}</strong><Badge tone="warning">需要处理</Badge></div><p>{approval.summary}</p>{approval.capability === 'agent.native.approve' && approval.details && <pre aria-label="原生工具参数" style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: '24rem', overflow: 'auto' }}>{approval.details}</pre>}<div className="approval-meta"><span>{approval.capability}</span><span>风险：{approval.risk}</span>{approval.expiresAt && <span>有效至 {dateLabel(approval.expiresAt)}</span>}</div><div className="row approval-actions"><Button compact variant="ghost" onClick={() => onDecide(approval.id, false)}>拒绝</Button><Button compact variant="primary" onClick={() => onDecide(approval.id, true)}>批准一次</Button></div></div></Card>;
 }
 
 export function ChatComposer({ busy, models, selectedModelKey, agentProviders, selectedAgent, workspaces, workspaceId, activeWorkspaceId, onWorkspaceChange, onModelChange, onAgentChange, onSend, onStop }: {
@@ -1038,6 +1085,7 @@ function WorkPage({ workspaces, onRefreshWorkspaces, reviewTaskId, onReviewTaskO
   const [filter, setFilter] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [taskOperationError, setTaskOperationError] = useState<{ taskId: string; message: string } | null>(null);
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
   const [taskSheet, setTaskSheet] = useState(false);
   const [workspaceName, setWorkspaceName] = useState('');
@@ -1045,6 +1093,7 @@ function WorkPage({ workspaces, onRefreshWorkspaces, reviewTaskId, onReviewTaskO
   const [workspaceBusy, setWorkspaceBusy] = useState(false);
   const [handoffProviders, setHandoffProviders] = useState<{ id: string; name: string; eligible: boolean; reason: string | null }[]>([]);
   const selectedTaskIdRef = useRef('');
+  const taskNavigationRef = useRef(0);
   selectedTaskIdRef.current = selectedTask?.id ?? '';
   const refresh = useCallback(async (quiet = false) => {
     if (!quiet) setLoading(true);
@@ -1070,37 +1119,110 @@ function WorkPage({ workspaces, onRefreshWorkspaces, reviewTaskId, onReviewTaskO
     return () => { window.clearInterval(timer); off(); };
   }, [refresh]);
   async function openTask(task: Task) {
-    try { setSelectedTask((await taskClient.get(task.id)).task); }
-    catch (cause) { setError(messageOf(cause)); setSelectedTask(task); }
+    const request = ++taskNavigationRef.current;
+    setTaskOperationError(null);
+    try {
+      const result = await taskClient.get(task.id);
+      if (request === taskNavigationRef.current) setSelectedTask(result.task);
+    } catch (cause) {
+      if (request !== taskNavigationRef.current) return;
+      setError(messageOf(cause)); setSelectedTask(task);
+    }
+  }
+  async function openRelatedTask(id: string) {
+    const request = ++taskNavigationRef.current;
+    const sourceId = selectedTaskIdRef.current;
+    try {
+      const result = await taskClient.get(id);
+      if (request !== taskNavigationRef.current) return;
+      setTaskOperationError(null); setSelectedTask(result.task);
+    } catch (cause) {
+      if (request === taskNavigationRef.current) setTaskOperationError({ taskId: sourceId, message: taskOperationErrorMessage(cause) });
+    }
   }
   async function taskAction(task: Task, action: 'start' | 'pause' | 'resume' | 'cancel', agentProvider?: string) {
     if (action === 'cancel' && !window.confirm(`取消任务“${task.title}”？`)) return;
+    taskNavigationRef.current += 1;
+    setSelectedTask(current => current?.id === task.id ? current : task);
     try {
+      setTaskOperationError(null);
+      if (action === 'start' || action === 'resume') {
+        await validateTaskExecution(task, async id => {
+          const value = await taskClient.get(id);
+          setSelectedTask(current => current?.id === task.id ? value.task : current);
+          return value;
+        });
+      }
       if (action === 'start' || action === 'resume') await confirmAgentExecution(agentProvider || task.currentAgent?.provider || '', task.workspaceId || '');
       const result = action === 'start' ? await taskClient.start(task.id, task.rev ?? undefined, agentProvider)
         : action === 'pause' ? await taskClient.pause(task.id, task.rev ?? undefined)
         : action === 'resume' ? await taskClient.resume(task.id, task.rev ?? undefined)
           : await taskClient.cancel(task.id, task.rev ?? undefined);
-      setSelectedTask(result.task);
+      setTaskOperationError(null);
+      setSelectedTask(current => current?.id === task.id ? result.task : current);
       await refresh();
-    } catch (cause) { setError(messageOf(cause)); }
+    } catch (cause) { setTaskOperationError({ taskId: task.id, message: taskOperationErrorMessage(cause) }); }
   }
   async function handoffTask(task: Task, provider: string) {
     try {
       await confirmAgentExecution(provider, task.workspaceId || '');
       const result = await taskClient.handoff(task.id, provider, task.rev ?? undefined);
-      setSelectedTask(result.task);
+      setTaskOperationError(null);
+      setSelectedTask(current => current?.id === task.id ? result.task : current);
       await refresh();
-    } catch (cause) { setError(messageOf(cause)); }
+    } catch (cause) { setTaskOperationError({ taskId: task.id, message: taskOperationErrorMessage(cause) }); }
   }
   async function reconcileTask(task: Task, reviewSummary: string, nextInstruction: string, provider?: string) {
     try {
       await confirmAgentExecution(provider || task.currentAgent?.provider || '', task.workspaceId || '');
       const result = await taskClient.reconcile(task.id, task.rev ?? undefined,
         reviewSummary, nextInstruction, crypto.randomUUID(), provider);
-      setSelectedTask(result.task);
+      setTaskOperationError(null);
+      setSelectedTask(current => current?.id === task.id ? result.task : current);
       await refresh();
-    } catch (cause) { setError(messageOf(cause)); }
+    } catch (cause) { setTaskOperationError({ taskId: task.id, message: taskOperationErrorMessage(cause) }); }
+  }
+  async function reviewAnalysisChild(task: Task, approve: boolean, summary: string, evidenceEventIds: string[]) {
+    try {
+      if (task.rev === null) throw new Error('Task revision is unavailable');
+      const result = await taskClient.reviewChild(task.id, task.rev, approve, summary, evidenceEventIds);
+      setTaskOperationError(null);
+      setSelectedTask(current => current?.id === task.id ? result.task : current);
+      await refresh();
+    } catch (cause) { setTaskOperationError({ taskId: task.id, message: taskOperationErrorMessage(cause) }); }
+  }
+  async function createReadChild(task: Task, goal: string, scope: string, outputKind: 'analysis' | 'tool', supersedesChildId?: string) {
+    try {
+      if (task.rev === null || !task.workspaceId) throw new Error('Parent Task revision or Workspace is unavailable');
+      await taskClient.createChild({ parentTaskId: task.id, expectedParentRev: task.rev,
+        requestId: crypto.randomUUID(), goal, workspaceId: task.workspaceId, supersedesChildId,
+        contract: { mode: 'read-only', outputKind, readScope: [scope],
+          expectedEvidence: outputKind === 'tool' ? ['filesystem.read'] : ['source'] } });
+      setTaskOperationError(null);
+      const current = (await taskClient.get(task.id)).task;
+      setSelectedTask(selected => selected?.id === task.id ? current : selected);
+      await refresh();
+    } catch (cause) { setTaskOperationError({ taskId: task.id, message: taskOperationErrorMessage(cause) }); }
+  }
+  async function finishTask(task: Task, summary: string) {
+    try {
+      if (task.rev === null) throw new Error('Task revision is unavailable');
+      const result = task.parentTaskId
+        ? await taskClient.completeChild(task.id, task.rev, summary)
+        : await taskClient.complete(task.id, task.rev, summary);
+      setTaskOperationError(null);
+      setSelectedTask(current => current?.id === task.id ? result.task : current);
+      await refresh();
+    } catch (cause) { setTaskOperationError({ taskId: task.id, message: taskOperationErrorMessage(cause) }); }
+  }
+  async function verifyCompletedChild(task: Task) {
+    try {
+      if (task.rev === null) throw new Error('Task revision is unavailable');
+      const result = await taskClient.verifyChild(task.id, task.rev);
+      setTaskOperationError(null);
+      setSelectedTask(current => current?.id === task.id ? result.task : current);
+      await refresh();
+    } catch (cause) { setTaskOperationError({ taskId: task.id, message: taskOperationErrorMessage(cause) }); }
   }
   async function addWorkspace() {
     setWorkspaceError('');
@@ -1125,7 +1247,7 @@ function WorkPage({ workspaces, onRefreshWorkspaces, reviewTaskId, onReviewTaskO
     <div className="section-heading page-section-heading"><h2>最近工作区</h2><div className="row"><Input aria-label="工作区名称" placeholder="工作区名称（可选）" value={workspaceName} onChange={event => setWorkspaceName(event.target.value)} /><Button compact icon="add" onClick={() => void addWorkspace()} disabled={workspaceBusy}>{workspaceBusy ? '添加中…' : '添加工作区'}</Button></div></div>
     {workspaceError && <ErrorNotice error={workspaceError} />}{workspaces.length ? <div className="workspace-grid">{workspaces.map(workspace => <Card className="workspace-card" key={workspace.id}><div className="workspace-badge">CM</div><div className="workspace-card-body"><strong>{workspace.name}</strong><p>{workspace.status} · 最近活动 {relativeLabel(workspace.lastActivity)}</p></div><StatusBadge value={workspace.status} /></Card>)}</div> : <Surface className="workspace-empty"><p className="muted">尚未登记工作区。添加工作区时会使用 Windows 原生文件夹选择器。</p></Surface>}
     <Sheet open={taskSheet} title="新建任务" onClose={() => setTaskSheet(false)}><TaskCreateForm workspaces={workspaces} providers={handoffProviders} onCreated={async () => { setTaskSheet(false); await refresh(); }} /></Sheet>
-    <Sheet open={Boolean(selectedTask)} title={selectedTask?.title ?? '任务详情'} onClose={() => setSelectedTask(null)}>{selectedTask && <TaskDetails key={selectedTask.id} task={selectedTask} providers={handoffProviders} onHandoff={provider => void handoffTask(selectedTask, provider)} onAction={action => void taskAction(selectedTask, action)} onStart={provider => void taskAction(selectedTask, 'start', provider)} onReconcile={(summary, instruction, provider) => void reconcileTask(selectedTask, summary, instruction, provider)} />}</Sheet>
+    <Sheet open={Boolean(selectedTask)} title={selectedTask?.title ?? '任务详情'} onClose={() => { taskNavigationRef.current += 1; setSelectedTask(null); }}>{selectedTask && taskOperationError?.taskId === selectedTask.id && <ErrorNotice error={taskOperationError.message} />}{selectedTask && <TaskDetails key={selectedTask.id} task={selectedTask} providers={handoffProviders} onOpenChild={id => void openRelatedTask(id)} onHandoff={provider => void handoffTask(selectedTask, provider)} onAction={action => void taskAction(selectedTask, action)} onStart={provider => void taskAction(selectedTask, 'start', provider)} onReconcile={(summary, instruction, provider) => void reconcileTask(selectedTask, summary, instruction, provider)} onReview={(approve, summary, ids) => void reviewAnalysisChild(selectedTask, approve, summary, ids)} onCreateChild={(goal, scope, kind, replace) => void createReadChild(selectedTask, goal, scope, kind, replace)} onComplete={summary => void finishTask(selectedTask, summary)} onVerifyChild={() => void verifyCompletedChild(selectedTask)} />}</Sheet>
   </div>;
 }
 
@@ -1250,7 +1372,7 @@ export function WorkTaskList({ tasks, workspaces, providers, historyInitiallyOpe
 function TaskCard({ task, workspaceName, executorName, onOpen, onAction }: { task: Task; workspaceName: string; executorName: string; onOpen(): void; onAction(action: 'start' | 'pause' | 'resume' | 'cancel'): void }) {
   const progress = Math.max(0, Math.min(100, task.progress.percent));
   const progressBucket = Math.round(progress / 10) * 10;
-  return <Card className="task-card"><div className="row between"><div className="task-icon"><Icon name="work" size={18} /></div><StatusBadge value={task.status} /></div><h3>{taskListTitle(task)}</h3><div className="task-meta"><span>{executorName}</span><span>·</span><span>{workspaceName}</span></div><div className="progress-track" role="progressbar" aria-label={`${taskListTitle(task)}进度`} aria-valuenow={progress} aria-valuemin={0} aria-valuemax={100}><span className={`progress-value progress-${progressBucket}`} /></div><div className="row between"><small>{progress}% · {relativeLabel(task.updatedAt)}</small><div className="row"><Button compact variant="ghost" onClick={onOpen}>详情 <Icon name="right" size={14} /></Button>{task.status === 'queued' && task.workspaceId ? <Button compact variant="ghost" onClick={onOpen}>选择执行者</Button> : task.status === 'running' ? <Button compact variant="ghost" onClick={() => onAction('pause')}>暂停</Button> : ['paused', 'waiting', 'blocked'].includes(task.status) && !/needs-reconciliation|Owner reviewed interrupted effect/i.test(task.progress.note) ? <Button compact variant="ghost" onClick={() => onAction('resume')}>继续</Button> : null}{!['completed', 'cancelled', 'failed'].includes(task.status) && <IconButton label="取消任务" icon="close" compact onClick={() => onAction('cancel')} />}</div></div></Card>;
+  return <Card className="task-card"><div className="row between"><div className="task-icon"><Icon name="work" size={18} /></div><StatusBadge value={task.status} /></div><h3>{taskListTitle(task)}</h3>{activeTaskChildren(task).length > 0 && <small className="task-dependency-hint">等待 {activeTaskChildren(task).length} 个子任务</small>}<div className="task-meta"><span>{executorName}</span><span>·</span><span>{workspaceName}</span></div><div className="progress-track" role="progressbar" aria-label={`${taskListTitle(task)}进度`} aria-valuenow={progress} aria-valuemin={0} aria-valuemax={100}><span className={`progress-value progress-${progressBucket}`} /></div><div className="row between"><small>{progress}% · {relativeLabel(task.updatedAt)}</small><div className="row"><Button compact variant="ghost" onClick={onOpen}>详情 <Icon name="right" size={14} /></Button>{task.status === 'queued' && task.workspaceId ? <Button compact variant="ghost" onClick={onOpen}>{activeTaskChildren(task).length ? '查看子任务' : '选择执行者'}</Button> : task.status === 'running' ? <Button compact variant="ghost" onClick={() => onAction('pause')}>暂停</Button> : ['paused', 'waiting', 'blocked'].includes(task.status) && !/needs-reconciliation|Owner reviewed interrupted effect/i.test(task.progress.note) ? <Button compact variant="ghost" disabled={activeTaskChildren(task).length > 0} onClick={() => onAction('resume')}>继续</Button> : null}{!['completed', 'cancelled', 'failed'].includes(task.status) && <IconButton label="取消任务" icon="close" compact onClick={() => onAction('cancel')} />}</div></div></Card>;
 }
 
 function TaskCreateForm({ workspaces, providers, onCreated }: { workspaces: { id: string; name: string }[]; providers: { id: string; name: string; eligible: boolean; reason: string | null }[]; onCreated(): Promise<void> }) {
@@ -1278,13 +1400,65 @@ function TaskCreateForm({ workspaces, providers, onCreated }: { workspaces: { id
   return <form className="task-create-form" onSubmit={submit}><label>任务目标<textarea className="cm-textarea" aria-label="任务目标" value={goal} onChange={event => setGoal(event.target.value)} rows={4} maxLength={2000} placeholder="描述需要完成的工作和预期结果" required /></label><Select label="工作区" value={workspaceId} onChange={event => setWorkspaceId(event.target.value)}><option value="">选择工作区</option>{workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}</Select><Select label="执行者" value={agentProvider} onChange={event => setAgentProvider(event.target.value)}><option value="">选择可用 Agent</option>{providers.map(item => <option key={item.id} value={item.id} disabled={!item.eligible}>{item.name}{item.eligible ? '' : ` · 不可用：${item.reason ?? '能力或健康未验证'}`}</option>)}</Select>{error && <ErrorNotice error={error} />}<Button variant="primary" type="submit" disabled={busy || !goal.trim() || !workspaceId || !agentProvider}>{busy ? '创建中…' : '创建任务'}</Button></form>;
 }
 
-export function TaskDetails({ task, providers, onHandoff, onAction, onStart, onReconcile }: { task: Task; providers: { id: string; name: string; eligible: boolean }[]; onHandoff(provider: string): void; onAction(action: 'start' | 'pause' | 'resume' | 'cancel'): void; onStart(provider: string): void; onReconcile(summary: string, instruction: string, provider?: string): void }) {
+function TaskCollaborationSummary({ task, onReview, onCreateChild, onVerifyChild }: { task: Task;
+  onReview(approve: boolean, summary: string, evidenceEventIds: string[]): void;
+  onVerifyChild(): void;
+  onCreateChild(goal: string, scope: string, outputKind: 'analysis' | 'tool', supersedesChildId?: string): void }) {
+  const children = task.children ?? [];
+  const attempts = task.attempts ?? [];
+  const executionEvidence = task.executionEvidence ?? [];
+  const [reviewText, setReviewText] = useState('');
+  const [childGoal, setChildGoal] = useState('');
+  const [childScope, setChildScope] = useState('');
+  const [childKind, setChildKind] = useState<'analysis' | 'tool'>('analysis');
+  const [replacement, setReplacement] = useState('');
+  const lastSourceEvidence = executionEvidence.filter(item =>
+    ['filesystem.read', 'filesystem.search'].includes(item.capability)).at(-1);
+  if (!task.parentTaskId && !children.length && !['queued', 'running', 'paused'].includes(task.status)) return null;
+  return <section aria-label="Task collaboration"><h3>协作与核验</h3>
+    {task.parentTaskId && <p>父任务：{task.parentTaskId} · 核验：{task.verification || 'NEEDS_REVIEW'}</p>}
+    {attempts.length > 0 && <p>执行尝试：{attempts.map(item => `${item.provider} ${item.state}`).join(' · ')}</p>}
+    {!task.parentTaskId && task.status === 'running' && <p>Pause the parent execution before creating read-only children in this Workspace.</p>}
+    {!task.parentTaskId && ['queued', 'paused'].includes(task.status) && <div>
+      <p>最多同时执行两个只读子任务。创建后由 Owner 选择执行者并启动。</p>
+      <label>子任务目标<input value={childGoal} onChange={event => setChildGoal(event.target.value)} maxLength={2000} /></label>
+      <label>相对读取范围<input value={childScope} onChange={event => setChildScope(event.target.value)} maxLength={1000} /></label>
+      <label>结果类型<select value={childKind} onChange={event => setChildKind(event.target.value as 'analysis' | 'tool')}>
+        <option value="analysis">分析，需 Owner 核验</option><option value="tool">文件读取结果</option>
+      </select></label>
+      <label>替代失败子任务<select value={replacement} onChange={event => setReplacement(event.target.value)}>
+        <option value="">不替代</option>{children.filter(child => ['failed', 'cancelled'].includes(child.status)
+          && !children.some(row => row.supersedesChildId === child.id))
+          .map(child => <option key={child.id} value={child.id}>{child.title}</option>)}
+      </select></label>
+      <Button disabled={!childGoal.trim() || !childScope.trim()}
+        onClick={() => onCreateChild(childGoal.trim(), childScope.trim(), childKind, replacement || undefined)}>创建只读子任务</Button>
+    </div>}
+    {task.parentTaskId && task.childOutputKind === 'analysis' && task.status === 'completed'
+      && task.verification !== 'VERIFIED' && <div>
+        <label>Owner 核验说明<textarea className="cm-textarea" value={reviewText}
+          onChange={event => setReviewText(event.target.value)} rows={3} maxLength={2000} /></label>
+        <div className="row"><Button disabled={!reviewText.trim() || lastSourceEvidence?.status !== 'completed'}
+          onClick={() => onReview(true, reviewText, lastSourceEvidence ? [lastSourceEvidence.eventId] : [])}>确认分析证据</Button>
+        <Button disabled={!reviewText.trim()} onClick={() => onReview(false, reviewText, [])}>退回审阅</Button></div>
+      </div>}
+    {task.parentTaskId && task.childOutputKind === 'tool' && task.status === 'completed'
+      && task.verification !== 'VERIFIED' && <Button onClick={onVerifyChild}>Recheck observed evidence</Button>}
+    {children.map(child => <div key={child.id} className="task-child-summary">
+      <p><strong>{child.title}</strong> · {child.status} · {child.agent || '未分配'} · {child.verification}</p>
+      <small>Attempt {child.attemptCount}</small><UsageSummary usage={child.usage} label="子任务用量" />
+    </div>)}
+  </section>;
+}
+
+export function TaskDetails({ task, providers, onHandoff, onAction, onStart, onReconcile, onReview, onCreateChild, onComplete, onVerifyChild, onOpenChild }: { onOpenChild?(id: string): void; task: Task; providers: { id: string; name: string; eligible: boolean }[]; onHandoff(provider: string): void; onAction(action: 'start' | 'pause' | 'resume' | 'cancel'): void; onStart(provider: string): void; onReconcile(summary: string, instruction: string, provider?: string): void; onReview(approve: boolean, summary: string, evidenceEventIds: string[]): void; onCreateChild(goal: string, scope: string, outputKind: 'analysis' | 'tool', supersedesChildId?: string): void; onComplete(summary: string): void; onVerifyChild(): void }) {
   const [handoffProvider, setHandoffProvider] = useState('');
   const [startProvider, setStartProvider] = useState('');
   const [reviewSummary, setReviewSummary] = useState('');
   const [nextInstruction, setNextInstruction] = useState('');
   const [recoveryProvider, setRecoveryProvider] = useState('');
-  return <div className="task-details">{task.status === "queued" && task.workspaceId && <section><h3>启动任务</h3><div className="row"><Select label="执行者" value={startProvider} onChange={event => setStartProvider(event.target.value)}><option value="">选择可用 Agent</option>{providers.filter(item => item.eligible).map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</Select><Button disabled={!startProvider} onClick={() => onStart(startProvider)}>启动</Button></div></section>}<div className="row between"><StatusBadge value={task.status} /><small>更新于 {dateLabel(task.updatedAt)}</small></div><p>{task.goal}</p>{task.currentPhase && <section><h3>当前阶段</h3><p>{task.currentPhase}</p></section>}{task.progress.note && <section><h3>进度说明</h3><p>{task.progress.note}</p></section>}{task.checkpoint && <section><h3>检查点</h3><p>{task.checkpoint.summary}</p>{task.checkpoint.nextAction && <small>下一步：{task.checkpoint.nextAction}</small>}</section>}{task.result && <section><h3>执行结果</h3><p>{task.result.summary}</p></section>}<section><h3>交付物</h3>{task.artifacts.length ? task.artifacts.map(item => <ArtifactCard key={item.id} taskId={task.id} artifact={item} />) : <p className="muted">暂无交付物。</p>}</section>{task.failure?.reason && <section><h3>中断或失败原因</h3><p>{task.failure.reason}</p></section>}<section><h3>执行证据</h3>{task.executionEvidence.length ? task.executionEvidence.slice(-20).reverse().map(item => <p key={item.eventId}><strong>{item.capability}</strong> · {item.status}{item.tool ? ` · ${item.tool}` : ""}{item.exitCode !== null ? ` · exit ${item.exitCode}` : ""}{item.filePath ? ` · ${item.filePath}` : ""} · Task rev {item.taskRev}</p>) : <p className="muted">暂无工具或测试执行记录。</p>}</section><section><h3>执行者与交接记录</h3>{task.agentHistory.length ? task.agentHistory.map((item, index) => <p key={`${item.sessionId}-${index}`}><strong>{item.provider}</strong> · {dateLabel(item.attachedAt)}{item.detachedAt ? ` → ${dateLabel(item.detachedAt)}` : " · 当前执行者"}{item.note ? ` · ${item.note}` : ""}</p>) : <p className="muted">暂无执行者记录。</p>}</section>{task.currentAgent && ["queued", "running", "waiting", "blocked", "paused"].includes(task.status) && <section><h3>转交执行者</h3><div className="row"><Select label="目标 Agent" value={handoffProvider} onChange={event => setHandoffProvider(event.target.value)}><option value="">选择 Agent</option>{providers.filter(item => item.eligible && item.id !== task.currentAgent?.provider).map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</Select><Button disabled={!handoffProvider} onClick={() => onHandoff(handoffProvider)}>交接任务</Button></div></section>}{/needs-reconciliation|interrupted after Core restart/i.test(task.progress.note) && <section><h3>人工核对后恢复</h3><p>先核对工作区和上次操作的实际结果，再给出新的执行指令；不会重放中断前的工具调用。</p>{!task.currentAgent && <Select label="恢复执行者" value={recoveryProvider} onChange={event => setRecoveryProvider(event.target.value)}><option value="">选择恢复任务的 Agent</option>{providers.filter(item => item.eligible).map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</Select>}<label>核对结果<textarea className="cm-textarea" value={reviewSummary} onChange={event => setReviewSummary(event.target.value)} rows={3} maxLength={1000} /></label><label>新的执行指令<textarea className="cm-textarea" value={nextInstruction} onChange={event => setNextInstruction(event.target.value)} rows={4} maxLength={32000} /></label><Button disabled={!reviewSummary.trim() || !nextInstruction.trim() || (!task.currentAgent && !providers.some(item => item.id === recoveryProvider && item.eligible))} onClick={() => onReconcile(reviewSummary, nextInstruction, task.currentAgent?.provider || recoveryProvider)}>确认核对并执行新指令</Button></section>}<div className="row task-detail-actions">{['working', 'running'].includes(task.status) ? <Button onClick={() => onAction('pause')}>暂停任务</Button> : ['paused', 'waiting', 'blocked'].includes(task.status) && !/needs-reconciliation|Owner reviewed interrupted effect/i.test(task.progress.note) ? <Button onClick={() => onAction('resume')}>继续任务</Button> : null}{!['completed', 'cancelled', 'failed'].includes(task.status) && <Button variant="danger" onClick={() => onAction('cancel')}>取消任务</Button>}</div></div>;
+  const [completionSummary, setCompletionSummary] = useState('');
+  return <div className="task-details">{task.parentTaskId && onOpenChild && <Button compact variant="ghost" onClick={() => onOpenChild(task.parentTaskId!)}>返回父任务</Button>}<TaskDependencyNotice task={task} onOpenChild={onOpenChild} /><section><h3>Owner result review</h3><label>Verified result summary<textarea className="cm-textarea" value={completionSummary} onChange={event => setCompletionSummary(event.target.value)} rows={3} maxLength={1000} /></label><Button disabled={task.status !== 'running' || !completionSummary.trim() || (task.parentTaskId ? task.attempts?.at(-1)?.state !== 'completed' : (task.children?.length ? task.children.filter(child => !task.children.some(other => other.supersedesChildId === child.id)).some(child => child.status !== 'completed' || child.verification !== 'VERIFIED') : !task.executionEvidence?.some(row => row.status === 'completed')))} onClick={() => onComplete(completionSummary.trim())}>Confirm result</Button></section><TaskCollaborationSummary task={task} onReview={onReview} onCreateChild={onCreateChild} onVerifyChild={onVerifyChild} />{task.status === "queued" && task.workspaceId && <section><h3>启动任务</h3><div className="row"><Select label="执行者" value={startProvider} onChange={event => setStartProvider(event.target.value)}><option value="">选择可用 Agent</option>{providers.filter(item => item.eligible).map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</Select><Button disabled={!startProvider || activeTaskChildren(task).length > 0} onClick={() => onStart(startProvider)}>启动</Button></div></section>}<div className="row between"><StatusBadge value={task.status} /><small>更新于 {dateLabel(task.updatedAt)}</small></div><p>{task.goal}</p><UsageSummary usage={task.usage} label="任务累计用量" />{task.currentPhase && <section><h3>当前阶段</h3><p>{task.currentPhase}</p></section>}{task.progress.note && <section><h3>进度说明</h3><p>{task.progress.note}</p></section>}{task.checkpoint && <section><h3>检查点</h3><p>{task.checkpoint.summary}</p>{task.checkpoint.nextAction && <small>下一步：{task.checkpoint.nextAction}</small>}</section>}{task.result && <section><h3>执行结果</h3><p>{task.result.summary}</p></section>}<section><h3>交付物</h3>{task.artifacts.length ? task.artifacts.map(item => <ArtifactCard key={item.id} taskId={task.id} artifact={item} />) : <p className="muted">暂无交付物。</p>}</section>{task.failure?.reason && <section><h3>中断或失败原因</h3><p>{task.failure.reason}</p></section>}<section><h3>执行证据</h3>{task.executionEvidence.length ? task.executionEvidence.slice(-20).reverse().map(item => <p key={item.eventId}><strong>{item.capability}</strong> · {item.status}{item.tool ? ` · ${item.tool}` : ""}{item.exitCode !== null ? ` · exit ${item.exitCode}` : ""}{item.filePath ? ` · ${item.filePath}` : ""} · Task rev {item.taskRev}</p>) : <p className="muted">暂无工具或测试执行记录。</p>}</section><section><h3>执行者与交接记录</h3>{task.agentHistory.length ? task.agentHistory.map((item, index) => <p key={`${item.sessionId}-${index}`}><strong>{item.provider}</strong> · {dateLabel(item.attachedAt)}{item.detachedAt ? ` → ${dateLabel(item.detachedAt)}` : " · 当前执行者"}{item.note ? ` · ${item.note}` : ""}</p>) : <p className="muted">暂无执行者记录。</p>}</section>{task.currentAgent && ["queued", "running", "waiting", "blocked", "paused"].includes(task.status) && <section><h3>转交执行者</h3><div className="row"><Select label="目标 Agent" value={handoffProvider} onChange={event => setHandoffProvider(event.target.value)}><option value="">选择 Agent</option>{providers.filter(item => item.eligible && item.id !== task.currentAgent?.provider).map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</Select><Button disabled={!handoffProvider} onClick={() => onHandoff(handoffProvider)}>交接任务</Button></div></section>}{/needs-reconciliation|interrupted after Core restart/i.test(task.progress.note) && <section><h3>人工核对后恢复</h3><p>先核对工作区和上次操作的实际结果，再给出新的执行指令；不会重放中断前的工具调用。</p>{!task.currentAgent && <Select label="恢复执行者" value={recoveryProvider} onChange={event => setRecoveryProvider(event.target.value)}><option value="">选择恢复任务的 Agent</option>{providers.filter(item => item.eligible).map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</Select>}<label>核对结果<textarea className="cm-textarea" value={reviewSummary} onChange={event => setReviewSummary(event.target.value)} rows={3} maxLength={1000} /></label><label>新的执行指令<textarea className="cm-textarea" value={nextInstruction} onChange={event => setNextInstruction(event.target.value)} rows={4} maxLength={32000} /></label><Button disabled={!reviewSummary.trim() || !nextInstruction.trim() || (!task.currentAgent && !providers.some(item => item.id === recoveryProvider && item.eligible))} onClick={() => onReconcile(reviewSummary, nextInstruction, task.currentAgent?.provider || recoveryProvider)}>确认核对并执行新指令</Button></section>}<div className="row task-detail-actions">{['working', 'running'].includes(task.status) ? <Button onClick={() => onAction('pause')}>暂停任务</Button> : ['paused', 'waiting', 'blocked'].includes(task.status) && !/needs-reconciliation|Owner reviewed interrupted effect/i.test(task.progress.note) ? <Button disabled={activeTaskChildren(task).length > 0} onClick={() => onAction('resume')}>继续任务</Button> : null}{!['completed', 'cancelled', 'failed'].includes(task.status) && <Button variant="danger" onClick={() => onAction('cancel')}>取消任务</Button>}</div></div>;
 }
 
 export function mergeAgentHealth(previous: Agent, health: Agent): Agent {
@@ -1394,6 +1568,63 @@ function DshSetupPanel({ agent, onConfigured }: { agent: Agent; onConfigured(con
   return configuration ? <><DshSetupForm configuration={configuration} draft={draft} presets={presets} onRefresh={() => setRefresh(value => value + 1)} saving={saving} onDraftChange={setDraft} onSave={() => void save()} />{error && <ErrorNotice error={error} />}</> : <small>尚未取得连接配置，请检查连接。</small>;
 }
 
+type AgentRuntimeDraft = Required<Pick<AgentRuntimeInput, 'enabled' | 'runtimePath' | 'nodePath' | 'model' | 'baseUrl' | 'apiKey'>>;
+function isRuntimeProvider(provider: string): provider is AgentRuntimeProvider { return ['gemini', 'opencode', 'qwen', 'claude'].includes(provider); }
+export function agentNeedsSetup(agent: Pick<Agent, 'id' | 'status' | 'reason' | 'eligible' | 'taskEligible' | 'runtimeConfiguration'>): boolean {
+  if (isAgentReady(agent) || agent.runtimeConfiguration?.enabled === false || ['disabled', 'provider_disabled', 'runtime_disabled'].includes(agent.reason?.trim().toLowerCase() ?? '')) return false;
+  return agent.status === 'needs-setup' || agent.status === 'connection-pending' || isRuntimeProvider(agent.id);
+}
+export function AgentRuntimeAuthenticationNotice({ agent }: { agent: Agent }) {
+  if (!isRuntimeProvider(agent.id) || agent.runtimeConfiguration?.credentialConfigured !== true || (agent.authVerified !== false && agent.authentication !== 'configured-unverified')) return null;
+  return <small role="status">运行时就绪后，API 认证将在实际任务中验证。</small>;
+}
+export function AgentRuntimeSetupGuide({ provider, onOpen }: { provider: AgentRuntimeProvider; onOpen(url: string): void }) {
+  const documentation = {
+    gemini: { name: 'Gemini CLI', url: 'https://geminicli.com/docs/get-started/installation/' },
+    qwen: { name: 'Qwen Code', url: 'https://qwenlm.github.io/qwen-code-docs/en/users/quickstart/' },
+    claude: { name: 'Claude Code', url: 'https://code.claude.com/docs/en/setup' }
+  };
+  if (provider === 'opencode') return <small>优先自动发现 OpenCode 安装包中的编码运行时；已包含时无需另装 CLI。</small>;
+  const doc = documentation[provider];
+  return <div className="dsh-setup-form"><small>本连接使用 {doc.name} 编码运行时；桌面客户端已安装不代表编码 CLI 已就绪。</small><Button compact type="button" variant="ghost" title={doc.url} onClick={() => onOpen(doc.url)}>{doc.name} 官方安装文档</Button></div>;
+}
+function runtimeDraft(configuration: AgentRuntimeConfiguration): AgentRuntimeDraft {
+  return { enabled: configuration.enabled, runtimePath: configuration.runtimePath, nodePath: configuration.nodePath, model: configuration.model, baseUrl: configuration.baseUrl, apiKey: '' };
+}
+export function AgentRuntimeSetupForm({ configuration, draft, saving, onDraftChange, onSave, onRefresh }: {
+  provider: AgentRuntimeProvider; configuration: AgentRuntimeConfiguration; draft: AgentRuntimeDraft; saving: boolean;
+  onDraftChange(value: AgentRuntimeDraft): void; onSave(): void; onRefresh(): void;
+}) {
+  const field = (key: 'runtimePath' | 'nodePath' | 'model' | 'baseUrl', label: string, placeholder: string, maxLength: number) => <label>{label}<Input aria-label={label} value={draft[key]} placeholder={placeholder} maxLength={maxLength} disabled={saving} onChange={event => onDraftChange({ ...draft, [key]: event.target.value })} /></label>;
+  return <form className="dsh-setup-form" onSubmit={event => { event.preventDefault(); if (!saving) onSave(); }}>
+    <label><input type="checkbox" checked={draft.enabled} disabled={saving} onChange={event => onDraftChange({ ...draft, enabled: event.target.checked })} /> 启用此连接</label>
+    {field('runtimePath', '运行时路径', '留空自动发现；填写官方编码运行时的绝对路径', 4096)}
+    {field('nodePath', '独立 Node 路径', 'npm 运行时可填写独立 node.exe 的绝对路径', 4096)}
+    {field('model', '模型', '留空使用运行时默认模型', 256)}
+    {field('baseUrl', 'API 端点', 'https://…', 2048)}
+    <label>API Key<Input aria-label="API Key" type="password" value={draft.apiKey} autoComplete="new-password" maxLength={512} placeholder={configuration.credentialConfigured ? '留空保留已保存凭据' : '输入此 Agent 使用的 API Key'} disabled={saving} onChange={event => onDraftChange({ ...draft, apiKey: event.target.value })} /></label>
+    <small>{configuration.credentialConfigured ? '凭据已保存；留空保留已保存凭据。' : '尚未保存此 Agent 的凭据。'} API Key 保存后清空输入框。</small>
+    <small>使用原生权限模式；工作区授权与逐次审批另行确认。保存配置后，以连接检查结果为准。</small>
+    <div className="row"><Button compact type="submit" disabled={saving}>{saving ? '保存中…' : '保存配置'}</Button><Button compact type="button" variant="ghost" disabled={saving} onClick={onRefresh}>刷新连接</Button></div>
+  </form>;
+}
+function AgentRuntimeSetupPanel({ agent, onConfigured, onRefresh }: { agent: Agent; onConfigured(configuration: AgentRuntimeConfiguration): void; onRefresh(): void }) {
+  const configuration = agent.runtimeConfiguration;
+  const [draft, setDraft] = useState<AgentRuntimeDraft>(() => configuration ? runtimeDraft(configuration) : { enabled: true, runtimePath: '', nodePath: '', model: '', baseUrl: '', apiKey: '' });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  useEffect(() => { if (configuration) setDraft(runtimeDraft(configuration)); }, [configuration?.provider, configuration?.revision]);
+  async function save() {
+    if (!isRuntimeProvider(agent.id)) return;
+    setSaving(true); setError(''); setNotice('');
+    try { const result = await agentClient.configureRuntime(agent.id, { ...draft, executionMode: 'native-permissions' }); onConfigured(result); setNotice('配置已保存，请刷新连接查看验证结果。'); }
+    catch (cause) { setError(messageOf(cause)); }
+    finally { setDraft(current => ({ ...current, apiKey: '' })); setSaving(false); }
+  }
+  return isRuntimeProvider(agent.id) ? <><AgentRuntimeSetupGuide provider={agent.id} onOpen={url => { setError(''); void openExternal(url).catch(cause => setError(messageOf(cause))); }} />{configuration ? <AgentRuntimeSetupForm provider={agent.id} configuration={configuration} draft={draft} saving={saving} onDraftChange={setDraft} onSave={() => void save()} onRefresh={onRefresh} /> : <small>尚未取得运行时配置，请刷新连接。</small>}{notice && <small role="status">{notice}</small>}{error && <ErrorNotice error={error} />}</> : null;
+}
+
 export function managedWorkspacePreflight(provider: string, workspaceId: string, activeWorkspaceId: string | null): string {
   return provider === 'cetamesh' && !workspaceId && !activeWorkspaceId ? 'CetaMesh 托管任务需要工作区，请先选择工作区后发送。' : '';
 }
@@ -1425,6 +1656,13 @@ export function CodexSetupDiagnostic({ agent }: { agent: Agent }) {
   return <div className="agent-setup-diagnostic"><strong>Codex CLI</strong><p>{action}</p><small>安装：{agent.installed ? '已检测' : '未检测'} · 协议：{agent.compatible ? '兼容' : '未验证或不兼容'} · 登录：{agent.authenticated ? '已认证' : '未验证或未登录'} · Sandbox：{agent.sandboxCapable === true ? '已验证' : agent.sandboxCapable === false ? '不可用' : '待首次明确选择的任务验证'}</small>{code && <small role="status">{agent.probePhase} · {code}</small>}</div>;
 }
 
+export function AgentInstallationDiagnostic({ agent }: { agent: Agent }) {
+  if (!agent.desktopApp) return null;
+  if (agent.id === 'dsh') return <div className="agent-desktop-state"><strong>DeepSeek Harness Desktop</strong><span>桌面应用：{agent.desktopApp.installed ? '已安装' : '未安装'} · {agent.desktopApp.running ? '运行中' : agent.desktopApp.status}</span><span>DSH Agent Provider：{agent.available ? '已连接' : agent.status}</span></div>;
+  const installed = agent.desktopApp.installed;
+  return <div className="agent-desktop-state"><strong>{agent.desktopApp.displayName || agent.name} 桌面客户端</strong><span>桌面客户端：{installed === true ? '已安装' : installed === false ? '未检测到' : '检测结果未知'}{agent.desktopApp.version ? ' · ' + agent.desktopApp.version : ''}</span><span>CLI：{agent.cliInstalled === true ? '已检测到' : agent.cliInstalled === false ? '未检测到' : '检测结果未知'} · Agent 连接：{isAgentReady(agent) ? '已就绪' : '待验证'}</span></div>;
+}
+
 export function AgentsPage() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -1433,18 +1671,18 @@ export function AgentsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [checking, setChecking] = useState('');
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (forceRefresh = false) => {
     setLoading(true);
-    try { const [agentResult, taskResult] = await Promise.all([agentClient.list(), taskClient.overview('', '')]); setAgents(agentResult.agents); setTasks(taskResult.tasks); setError(''); }
+    try { const [agentResult, taskResult] = await Promise.all([agentClient.list(forceRefresh), taskClient.overview('', '')]); setAgents(agentResult.agents); setTasks(taskResult.tasks); setError(''); }
     catch (cause) { setError(messageOf(cause)); }
     finally { setLoading(false); }
   }, []);
   useEffect(() => { void refresh(); }, [refresh]);
   const ready = agents.filter(isAgentReady).length;
   const taskReady = agents.filter(agent => agent.taskEligible === true).length;
-  const needsSetup = agents.filter(agent => agent.status === 'needs-setup').length;
+  const needsSetup = agents.filter(agentNeedsSetup).length;
   const activeTasks = tasks.filter(task => ['working', 'running'].includes(task.status)).length;
-  const visible = agents.filter(agent => (filter === 'all' || (filter === 'ready' ? isAgentReady(agent) : !isAgentReady(agent))) && `${agent.name} ${agent.role} ${agent.description}`.toLowerCase().includes(query.toLowerCase()));
+  const visible = agents.filter(agent => (filter === 'all' || (filter === 'ready' ? isAgentReady(agent) : agentNeedsSetup(agent))) && `${agent.name} ${agent.role} ${agent.description}`.toLowerCase().includes(query.toLowerCase()));
   async function check(agent: Agent) {
     setChecking(agent.id);
     try {
@@ -1455,10 +1693,10 @@ export function AgentsPage() {
     catch (cause) { setError(messageOf(cause)); }
     finally { setChecking(''); }
   }
-  return <div className="content-page"><Heading eyebrow="AGENT DIRECTORY" title="Agents" description="查看可用 Agent、连接状态与职责。" action={<Button icon="update" onClick={() => void refresh()}>刷新状态</Button>} />{error && <ErrorNotice error={error} onRetry={() => void refresh()} />}
+  return <div className="content-page"><Heading eyebrow="AGENT DIRECTORY" title="Agents" description="查看可用 Agent、连接状态与职责。" action={<Button icon="update" onClick={() => void refresh(true)}>刷新状态</Button>} /><Banner><span className="grow"><strong>Gemini · OpenCode · Qwen · Claude 原生权限模式</strong><small>此模式没有 OS 沙箱；批准的命令可能访问宿主文件与网络。每个工作区仍需 Owner 确认，并逐次审批原生工具。</small></span></Banner>{error && <ErrorNotice error={error} onRetry={() => void refresh(true)} />}
     <div className="agent-summary-row"><Surface><strong>{agents.length}</strong><span>已配置 Agent</span></Surface><Surface><strong>{ready}</strong><span>可用 Agent</span></Surface><Surface><strong>{taskReady}</strong><span>任务可用</span></Surface><Surface><strong>{needsSetup}</strong><span>需要设置</span></Surface><Surface><strong>{activeTasks}</strong><span>活跃任务</span></Surface></div>
     <div className="row between work-controls"><Tabs items={[{ id: 'all', label: `全部 Agent ${agents.length}` }, { id: 'ready', label: `可用 Agent ${ready}` }, { id: 'setup', label: `需设置 ${needsSetup}` }]} selected={filter} onChange={setFilter} label="Agent 状态筛选" /><SearchInput label="搜索 Agent" placeholder="搜索名称或职责" value={query} onChange={event => setQuery(event.target.value)} /></div>
-    {loading && !agents.length ? <LoadingState label="正在读取 Agent 状态…" /> : visible.length ? <div className="agent-grid">{visible.map(agent => <Card className="agent-card" key={agent.id}><div className="row between"><div className="agent-avatar">{agentInitials(agent.id)}</div><StatusBadge value={agent.status} available={isAgentReady(agent)} /></div><h3>{agent.name}</h3><strong className="agent-role">{agent.role}</strong><p>{agent.description}</p>{agent.id === 'dsh' && <AgentSetupDiagnostic agent={agent} />}{agent.id === 'codex' && <CodexSetupDiagnostic agent={agent} />}{agent.reason === 'task-required' && <small>Agent 已就绪；此能力需要先分配工作区任务。</small>}{agent.id !== 'dsh' && agent.reason && agent.reason !== 'task-required' && <small>{availabilityReasonLabel(agent.reason)}</small>}{agent.lastError && <small role="status">{agent.lastError}</small>}{agent.version && <small>版本 {agent.version}</small>}{agent.desktopApp && <div className="agent-desktop-state"><strong>DeepSeek Harness Desktop</strong><span>桌面应用：{agent.desktopApp.installed ? '已安装' : '未安装'} · {agent.desktopApp.running ? '运行中' : agent.desktopApp.status}</span><span>DSH Agent Provider：{agent.available ? '已连接' : agent.status}</span></div>}<Button compact variant="ghost" disabled={checking === agent.id} onClick={() => void check(agent)}>{checking === agent.id ? '检查中…' : '检查连接'} <Icon name="right" size={14} /></Button>{agent.id === 'dsh' && <DshSetupPanel agent={agent} onConfigured={configuration => setAgents(current => current.map(item => item.id === agent.id ? { ...item, configuration } : item))} />}</Card>)}</div> : !error && <EmptyNotice icon="agents" title="没有匹配的 Agent" detail="当前安装和注册的 Agent 会在这里显示。" />}
+    {loading && !agents.length ? <LoadingState label="正在读取 Agent 状态…" /> : visible.length ? <div className="agent-grid">{visible.map(agent => <Card className="agent-card" key={agent.id}><div className="row between"><div className="agent-avatar">{agentInitials(agent.id)}</div><StatusBadge value={agent.status} available={isAgentReady(agent)} /></div><h3>{agent.name}</h3><strong className="agent-role">{agent.role}</strong><p>{agent.description}</p>{agent.id === 'dsh' && <AgentSetupDiagnostic agent={agent} />}{agent.id === 'codex' && <CodexSetupDiagnostic agent={agent} />}{agent.reason === 'task-required' && <small>Agent 已就绪；此能力需要先分配工作区任务。</small>}{agent.id !== 'dsh' && agent.reason && agent.reason !== 'task-required' && <small>{availabilityReasonLabel(agent.reason)}</small>}<AgentRuntimeAuthenticationNotice agent={agent} />{agent.lastError && <small role="status">{agent.lastError}</small>}{agent.version && <small>版本 {agent.version}</small>}<AgentInstallationDiagnostic agent={agent} /><Button compact variant="ghost" disabled={checking === agent.id} onClick={() => void check(agent)}>{checking === agent.id ? '检查中…' : '检查连接'} <Icon name="right" size={14} /></Button>{agent.id === 'dsh' && <details className="agent-setup-disclosure"><summary>连接设置</summary><DshSetupPanel agent={agent} onConfigured={configuration => setAgents(current => current.map(item => item.id === agent.id ? { ...item, configuration } : item))} /></details>}{isRuntimeProvider(agent.id) && <details className="agent-setup-disclosure"><summary>连接设置</summary><AgentRuntimeSetupPanel agent={agent} onConfigured={runtimeConfiguration => setAgents(current => current.map(item => item.id === agent.id ? { ...item, runtimeConfiguration } : item))} onRefresh={() => void check(agent)} /></details>}</Card>)}</div> : !error && <EmptyNotice icon="agents" title="没有匹配的 Agent" detail="当前安装和注册的 Agent 会在这里显示。" />}
     <div className="section-heading page-section-heading"><h2>运行策略</h2></div><Surface className="policy-row"><span className="policy-icon"><Icon name="approval" /></span><span className="grow"><strong>敏感操作需要确认</strong><small>文件写入、网络访问和外部副作用由 Capability Broker 逐次管理。</small></span><Badge tone="success">由 Core 强制执行</Badge></Surface>
   </div>;
 }

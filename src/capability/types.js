@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 export const OWNER_ACTOR = Object.freeze({kind:'owner',id:'desktop'});
-export const PERMISSIONS = Object.freeze(['filesystem.read','filesystem.write','filesystem.search','workspace.create','git.status','git.diff','git.commit','test.run','memory.read','memory.write','memory.link','task.create','network','web.search','agent.run','extension.invoke','message.send','publish','log','storage']);
+export const PERMISSIONS = Object.freeze(['context.evidence.read','filesystem.read','filesystem.write','filesystem.search','workspace.create','git.status','git.diff','git.commit','test.run','memory.read','memory.write','memory.link','task.create','network','web.search','agent.run','extension.invoke','message.send','publish','log','storage']);
 export const FORBIDDEN_PERMISSIONS = Object.freeze(['shell','native','download','process']);
 export const RISK_RANK = Object.freeze({low:0,medium:1,high:2,critical:3,forbidden:99});
 export function capabilityError(code,message){return Object.assign(new Error(message),{code});}

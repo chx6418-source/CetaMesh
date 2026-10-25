@@ -1,239 +1,43 @@
-# CetaMesh Desktop — PROJECT_STATE
+# CetaMesh — 当前项目状态
 
-> 本文件只保留**当前事实**（Current State / Active Work / Next Steps）。
-> 历史阶段快照与旧执行报告已归档至 `docs/archive/`，调查历史时才需要读取（见文末「文档地图」）。
-> 读取契约见根目录 `AGENTS.md`；协作红线见 `RULES.md`。
+更新日期：2026-10-25。
 
-## Git facts (2026-10-08)
-- Session 3 base HEAD: `aaff6bf490c95f77e64aed3ebef61f8dbdeb6fba` on local `main`, including Sessions 1 and 2.
-- Session 3 integration commit: `c22257240be86f7c8dfd2badee5b3f862a134cc6`; integrated into `main` and pushed to `origin/main`.
-- `refactor/core-composition-v1` was merged to `main`; its managed worktree was archived and the local branch was deleted.
-- Session 1 / 2 handoffs: `docs/archive/handoffs/HANDOFF_TECHDEBT_SESSION_1.md` and `docs/archive/handoffs/HANDOFF_TECHDEBT_SESSION_2.md`.
-- 上线冲刺任务 B（统一配对）：`feature/unified-device-pairing-v1`（基线 `e8a122a`）已在 Owner 确认后**快进合并**到本地
-  `main`（实现 `18a2d5d` + 文档 `3f28079`），工作分支已删除；两端协议副本与 `fixtures/pairing/` 已核对为 blob 级一致。
-  **未 push**（等 Owner 指示）。协议事实源 `docs/protocol/UNIFIED_PAIRING_V1_1.md`，验收报告 `UNIFIED_PAIRING_INTEROP_REPORT.md`。
-- 上线冲刺任务 D（Web → Native 高保真主题迁移）：`feature/native-theme-fidelity-v1`（基线 `e8a122a`，实现 `13a54d4`）已在 Owner
-  确认后**合并**到本地 `main`（merge commit `ce647b1`；与任务 B 的 `PROJECT_STATE.md` / `mesh_ui.rs` 冲突已按双方保留原则解决）。
-  合并验证时发现并修复一处**先于本分支的既有回归**：`4f6e3e8` 改写了主题应用日志措辞，`test-desktop-shell` 一直等待「主题已应用：深色」
-  （此前无 debug 产物故未暴露）；修复为「深色/浅色 · 主题名」并保留历史契约（`6103199`）。合并后 `npm test` **70 PASS · 0 FAIL**。
-  工作分支已删除。**未 push**（等 Owner 指示）。报告 `NATIVE_THEME_MIGRATION_REPORT.md`。
+## 正式仓库与平台
 
-## Architecture（稳定面）
+- 官方公开仓库：https://github.com/chx6418-source/CetaMesh
+- 2026-10-21：Desktop + Mobile 的已审查源码快照合并到公开 main，提交 `350c1fc4ec8d21d9ae7ac80285979c588c007e99`。
+- 2026-10-22：公开文档与旧设计清理 PR #4 合并到 main，提交 `1235d1526757a503182489d44c32e9dffd6db79b`。
+- Desktop 主工程位于 `src/`、`desktop-shell/`、`desktop-ui/`；Mobile 位于 `apps/mobile/`。两端各自保留运行时、依赖、权限和发布过程。
+- 原桌面端及移动端私有仓库保留独立历史。公开仓库只导入审核过的源码快照，没有合入完整私有 Git 历史。
 
-- **产品形态**：原生 Rust/egui 桌面壳（`desktop-shell/`）+ 正式 `--worker` Core Bootstrap；可选 QQ Connector/Bionic 为 Core 管理的隔离子进程，`src/bridge.js` 保留 Legacy-exclusive 及 Social 策略复用入口。
-  Release 无 HTTP：数据面走 `\\.\pipe\WhaleBridge-Data-*`（MCP → `src/control/data-ipc.js` → handleApiRequest），
-  管理面走 `\\.\pipe\WhaleBridge-UI-*`；legacy HTTP 仅 dev 显式 opt-in（SEA 内无效）。
-- **运行模式**（`src/runtime-surface.js`）：`native-release / native-dev / headless-dev / legacy-web-dev`。
-- **Core 服务装配**：`src/app/bootstrap.js` → `src/app/service-container.js` 构造现代服务 → `src/app/ipc-runtime.js` 接管 UI IPC 路由。`src/bridge.js` 留作 worker 兼容入口和 Legacy QQ/Social runtime；Chat（`desktop/chat-service.js`，Model Runtime + 可选 DSH Agent Provider）→
-  Smart Router（`router/`）→ Task（`task/`）→ Agent Broker（`agent/`）→ Continuity（`continuity/`，rollover/handoff）；
-  Memory（`memory/`，授权分区检索）、Workspace（`workspace/`）、Capability Broker（`capability/`，fail-closed）、
-  Extension（`extension/`）、Mesh（`mesh/`）、Workshop（`workshop/`）、Settings（`settings/`）、Config（`config/`）。
-- **统一设备配对 v1.1（上线冲刺任务 B）**：`src/mesh/pairing/`（protocol / tls / invitations / server / client / qr）。
-  Desktop 「连接手机」→ QR 邀请（同一文本可复制粘贴）；Mobile 扫码或粘贴 → 同一个 `parseInvitation` + PairingRuntime。
-  配对 = HTTPS（每安装唯一自签证书，pin = sha256(DER) 写进邀请）+ 一次性 token（指纹先落盘再回包）+ 双向签名
-  transcript（v1 / v1.1 由邀请是否含 `tlsPin` 决定，见 `docs/protocol/UNIFIED_PAIRING_V1_1.md`）。配对后经
-  `POST /cetamesh/v1/mesh/envelope` 承载 presence / manifest / capability.request；默认 grants 仅
-  `mesh.presence` + `mesh.manifest`（Trusted != Authorized 不变）。Desktop 身份 schema v2 = P-256
-  （v1 Ed25519 受控迁移：备份 + `legacyNodeId`，旧对端需重新确认；旧 Ed25519 对端仍可验签）。
-- **存储（D3 后）**：所有持久化 JSON 读写统一经 `src/storage/json-file.js`
-  （`readJsonFile / writeJsonAtomic / writeTextAtomic / updateJsonFile / parseJsonText`）：
-  crypto 随机临时名 + 0600 + fsync + rename 替换 + 失败清理 + Windows rename 有界重试 + BOM 统一剥离。
-  Storage 层只报 `StorageError`（MISSING/CORRUPT/READ_FAILED/TOO_LARGE/WRITE_FAILED）；
-  Domain 把它映射为自己的错误码（STORE_CORRUPT / CONFIG_CORRUPT / REGISTRY_CORRUPT / ...），UI 侧契约不变。
-  **统一的是 JSON 文件可靠 I/O，不是 Domain Schema**；没有 GenericStore 接管业务语义。
-- **主题系统（Task D 后，分支待批）**：`desktop-shell/src/theme/` 是 Native 壳的唯一视觉事实源——
-  `ThemeSpec`（背景配方/表面/阴影/圆角/按钮/动效）+ 主题插值过渡 + egui 绘制器；页面经
-  `native_palette()` 读取插值 token。`--screenshot-dir` 截图验收能力仅存在于 debug 构建（release 排除）。
+## 已有代码与安全边界
 
-## Build1107 快照读取定向恢复（2026-10-20）
+- Desktop 具备直连 Model Provider 的聊天、任务、工作区、记忆、Agent Broker、Capability Broker、插件与 Device Mesh 基础。
+- Mobile 具备独立的 Chat、Memory、Tasks、设备身份和权限能力，并包含 Android 与 iOS 原生工程。
+- 授权与信任是两回事。配对不自动开放工具、记忆读取或远程执行；跨设备同步还需要专门授权与验证。
+- SnowLuma 主程序和受限 SDK/MCP 不包含在正式公开源代码及其打包输入中；可选 QQ 连接基于独立 OneBot 实现。
+- 现有 GitHub Releases 包含 Windows 候选构建，但不等于稳定发行；历史更新入口仍需兼容。
 
-- 产品提交799169f，Build1107；有界只读扫描重试和脱敏诊断已验证，不能据此声称原用户STAGING_READ_FAILED根因已确认或原Task已恢复。实际安装仍1106。全量131 PASS/0 FAIL/10 NRE；Rust199/0；合成隔离工作区真实Codex三轮的生产装配及SEA均通过，测试显式关闭自动Rollover。默认Handoff清理曾失败，仍需独立定位。详见CODEX_SNAPSHOT_READ_RECOVERY_REPORT.md。RELEASE_BLOCKED。
+## 已验证及未完成的门禁
 
-## Verified State
+- 公开仓库清理 PR #4 在合并前的最终 Windows/Android CI 均通过；该验证只对应当时的源码提交。
+- Android CI 构建并检查包含 JS Bundle 的 Standalone Release APK，使用临时测试签名。
+- 真实 Android/iOS 设备能力、Desktop↔Mobile 配对与任务接续、第三方 Provider 真实工作流、代码签名、更新验签与完整第三方二进制许可仍需按版本和环境独立验收。
+- 不应把源码存在、模拟测试通过或 Android CI 通过当作 iOS 和全功能上线的证据。
 
-- 测试唯一入口：`npm test`（`scripts/run-all-tests.mjs`，孤儿测试脚本未登记会直接 FAIL）；
-  分类入口 `npm run test:core|architecture|security|runtime|integration|desktop|release|environment`；
-  CI：`.github/workflows/ci.yml`（windows-latest：`npm ci → npm test → desktop:check → desktop:test`）。
-- 会话 2 新增套件：`test-json-storage`（原语行为/Windows 语义）、`test-storage-migrations`（各 store 迁移回归）、
-  `test-state-retention`（日志轮转/状态 TTL/候选淘汰）。Session 3 新增 `test-service-container`、
-  `test-composition-boundary`、`test-ipc-runtime`、`test-dsh-lifecycle`、`test-qq-runtime` 和
-  `test-runner-environment`（真实旧控制台测试须显式 opt-in）。
-- 任务 B（统一配对）新增套件：`test-mesh-pairing-interop`（共享 golden fixtures + **真实局域网 TLS/HTTP 互操作**：
-  配对握手 / 一次性 token / 过期 / pin 不符零字节 / presence / manifest / notification.send 审批链 / 重启免扫码 / 撤销）。
-  `test-mesh-runtime` 的传输断言随 LAN（tcp）落地更新为 supported=`[loopback,tcp]`、deferred=`[pipe,relay]`；
-  桌面壳新增配对 UI（QR 由 JS 生成矩阵、egui 画方块；`mesh_ui.rs` 单测 4 个）。
-- Storage 迁移范围（会话 2）：task / memory（store+runtime+links） / extension（registry+manifest 解析+memory-pack） /
-  settings / continuity（含 packet 清理）/ chat session / mesh（trust+identity）/ workshop / router policy /
-  config loader 底层复用。capability 仅加固临时文件命名（crypto 随机），未整体迁移。
+## 当前开发工作
 
-## Retention（D12 运行状态保留）
+- 公开介绍校准 PR #5 已合入 main（33b10b3）；本轮保留其内容，并在该公开历史上同步已确认的 Desktop UI 与 Agent 源码快照。
+- 下一阶段应优先解决真实终端验证、外部 Agent 接入稳定性和发行门禁，避免为当前用户造成已全部稳定可用的印象。
 
-| 状态 | 策略 |
-| --- | --- |
-| `state/bridge.log` | 大小轮转：>1 MiB → `bridge.log.1`（`src/logging/rotate.js`），不再逐条整读文件 |
-| `state/qq-activity.log` | 保留既有 500 行裁剪 |
-| `state/tool-calls.jsonl` | 保留既有 2000 行裁剪 |
-| `state/feedback.json` | 保留既有 500 条上限 |
-| `state/social-v2.json` | 14 天不活跃会话只保留 wakeConfig/标量（清空消息缓冲）；总会话数 ≤500（`src/social-retention.js`） |
-| `state/social-v2-cards.json` | 卡片条目带 `time`；7 天过期 + 会话数 ≤300（卡片可回源，cache 语义） |
-| `state/mesh/pairing-used.json` | 已消费 token 指纹 ≤200 条、24h 过期清理；**只存 sha256 指纹，绝不含 token 原文** |
-| `state/mesh/pairing-tls.json` | 每安装唯一配对 TLS 证书/私钥（持久；私钥不出机、不随日志轮转） |
-| `state/continuity/` | rollovers ≤200（既有）；每 task packet/reconciliation 文件 ≤20，写入时清理 |
-| `memory/candidates.json` | pending ≤500（满则 STORE_FULL，不静默丢）；已决策候选保留最近 200 条 |
-| Task / Memory 本体 | 既有上限（MAX_TASKS=5000 / agentHistory≤100 / MAX_RECORDS=20000）；**长期记忆不适用日志式清理** |
-| `fileSendCacheDir` | 保留既有 7 天 TTL |
+[项目主页](README.md) · [统一开发与构建](docs/MONOREPO.md) · [桌面限制](docs/desktop/KNOWN_LIMITATIONS.md) · [移动端指南](apps/mobile/README.zh-CN.md)
 
-损坏文件策略：Persistent truth（config / task / memory / trust / settings 值 / registry / continuity）fail-closed
-或如实上报 lastError；仅明确标注为 cache 的数据（卡片、router policy、settings 回落）允许降级并留下记录，禁止静默 `→ {}`。
+## Desktop 源码同步（2026-10-23）
 
-## Known Risks / Boundaries（当前仍然成立）
-
-- Controlled Test Runner（`src/workspace/isolated-runner.js`）不是 OS 沙箱；VM Extension Host 不是进程隔离。
-- `channel.send` 有校验面但未绑定真实传输。Mesh LAN（TLS pinning + 一次性 token）链路已实现并有真实 socket 验收；
-  **真机 Android/iOS ↔ Desktop 实际配对未验证（NOT_RUN_ENVIRONMENT：本机无 Android SDK/adb/模拟器，已用 preflight 核实）**；
-  pipe/relay 传输、Memory/Task/Approval 同步（协议 §15 M6）本轮未接。
-- 历史存量裸 `catch {}`（`scripts/error-hygiene-baseline.json`，112 处）只许收紧，禁止新增。
-- 桌面壳 `supervisor.rs` 的 HTTP 探活 fallback 已是死代码（待后续会话删除）。
-- NOT_RUN_ENVIRONMENT（无真实环境时如实不跑）：真实 provider-key 回合 / 真实 QQ / 跨设备 Mesh / 签名 / 真实发行产物。
-
-## Active Work (Owner confirmation pending)
-
-- **Agent 八项源码扩展（2026-10-22）**：Owner已批准规格、计划和委派实施/独立复核；保留Broker/Registry，新增共享RPC/ACP、Claude可选官方SDK资源与受监督runner、Codex App Server条件通道、WorkBuddy有界私有API；注册八项但不伪称正式可用。Codex默认legacy，ZCode仅协议存在未验证，WorkBuddy OAuth/Workspace与新Provider真实联通、原生安全、正式SEA仍未验收，RELEASE_BLOCKED。初始全量169项155 PASS/4 FAIL/10 NRE；四失败修复后9项定向全PASS，最终R1跨重启拒绝错误取消回归及独立审查通过；按每suite最新证据合计159 PASS/0未解决FAIL/10 NRE，未重跑第二次全量。UI构建PASS。详见 docs/desktop/AGENT_EXPANSION_ACCEPTANCE.md。Owner随后授权完成后提交/合并/推送公开GitCode及私人GitHub并关机；保留未验证项和现场，不创建新RC。
-- **插件状态与反馈排版修复（2026-10-22）**：完成/取消/拒绝操作默认折叠；运行/等待/失败/未知直接显示，移除 Renderer 最后8条截断；反馈标题说明分行、域名简显且保留完整 HTTPS 点击目标。6项定向测试及UI构建PASS；真实组件合成数据浏览器验证7条历史展开及280px高度限制。未安装/打包/提交，详见 `docs/desktop/STATUS_PRESENTATION_REPAIR_REPORT.md`。
-
-- **设置竖排与紧凑窗口布局（2026-10-22，Owner已确认效果图）**：设置页新增左侧11项竖向分类、右侧设置内容和卡片式字段，保存文案统一为“保存设置”；保留draft/changes/revision、恢复阻断和Host退出确认同步。设置页强制收起工作区列表且不显示无效展开按钮，离开后恢复此前折叠偏好。删除整条Harbor/Core底栏与31px占位，标题栏48→40px、品牌字23→20px、窗口按钮48→44px。8项定向聚合与UI构建通过；真实SettingsPage+WindowChrome+侧栏在模拟Core客户端下验证11项竖排、分类切换、模拟保存及深浅主题；实测标题40px、主区底部与视口720px一致、footer/workspace-panel数量0。未改真实设置，未安装WebView2验收，未提交/打包/推送，本次不在RC1116中。详见 `docs/desktop/SETTINGS_LAYOUT_REPORT.md`。
-
-- **动效一致性修复（2026-10-22，Owner截图反馈）**：生产CSS复现页面/标题/卡片多层入场、操作状态标题与内容动效分离、搜索反馈不完整和加号旋转/位移。改为页面统一淡入、异步操作状态整区淡入，移除卡片嵌套错峰与导航横移；图标按钮固定本体、仅图标轻缩放，加号不旋转。页签统一字重，浏览器确认切换前后各项宽度不变；搜索图标保留居中transform并提供焦点颜色反馈。7项聚合回归及UI构建通过；浏览器使用生产输入组件+合成页面验证，未改变真实Windows动态效果设置，未验证已安装WebView2。本轮未提交/打包/安装，RC1116不包含修复。详见 `docs/desktop/UI_MOTION_REPORT.md` 最新补充。
-
-- **纯图标导航与工作区列表（2026-10-22，Owner已确认效果图）**：沿用隔离功能分支 `codex/app-icon-refresh`，将侧栏拆为56px图标栏和260px可收起列表；移除工作区大卡片，按会话真实workspaceId分组，未关联/已移除工作区的会话仍可在最近/全部会话访问。设置、关于及用户头像固定在图标栏底部；窄窗口采用可关闭的列表覆盖层。复用现有Core入口及会话操作菜单，无新权限/数据迁移。前端构建及7项定向聚合回归通过；浏览器生产组件+合成数据验证深浅主题、列表折叠/展开、导航、选择会话/工作区和长列表独立滚动，底部位置不变。未验证已安装WebView2/真实Core链路；尚未提交、打包、安装或推送，本次修改不在RC1116中。详见 `docs/desktop/WORKSPACE_SIDEBAR_REPORT.md`。
-
-- **RC Build1116 已创建（2026-10-22）**：Owner 已明确授权本地提交及RC构建；源码提交 `c47253a860a9945e05054d51d06f957f51067f33`，构建时dirty=false。1.0.0-rc.2正式候选产物位于 `artifacts/rc/1.0.0-rc.2/build-1116`，安装包43,253,760字节，SHA-256 `A40522EF39249A7F02CE8FFEC3F62F197D83A711E34115761ED3EC2ABA8B3FB4`。源码六类聚合139 PASS/0 FAIL/0 NRE（包含Cargo check/test），正式RC发行12 PASS/0 FAIL/1 NRE（仅缺少同Build的DEV产物）；31项校验及实际Host/安装器图标验证通过。NotSigned，真实用户GUI及外部服务验收仍有限制，RELEASE_BLOCKED保持不变。下列各UI条目的“未提交/未打包”为各阶段记录，本RC已统一包含；本轮未合并、推送、发布或覆盖真实安装。详见 `docs/desktop/RC1116_BUILD_REPORT.md`。
-
-- **全局活泼动效（2026-10-22，Owner 选择明显位移/缩放/轻弹性）**：新增 `theme/motion.css` 统一页面、标题、卡片、按钮/导航、菜单、附件/结果提示、进度、加载及主题过渡；抽屉通过已有motion库加入进出场，退出阶段以useIsPresent驱动inert禁止交互。原生details在支持interpolate-size/allow-discrete时平滑开合，旧引擎回退即时高度变化；正文和虚拟行不做入场/缩放。减少动态效果规则关闭CSS动画/过渡，Sheet读取系统偏好。构建通过；定向回归7 PASS/0 FAIL；浏览器合成组件验证了正常抽屉进出/退出inert/最终卸载、原生dialog、任务展开及模拟减少动态效果（加载none、按钮0s、抽屉无位移且可用）。未验证真实Windows系统偏好切换/已安装WebView2；未安装、提交、合并、推送或生成新包。详见 `docs/desktop/UI_MOTION_REPORT.md`。
-
-- **侧栏底部固定（2026-10-22）**：按 Owner 截图固定 Settings／关于／本地用户区域；工作区、导航和最近会话放入独立可滚动的 `sidebar-scroll`，底部区不参与该滚动。前端build及现有UI/标题区2项回归通过；实际前端浏览器中Chat→Work切换前后底部区top494.3/bottom706.0一致（720px视口），上方内容scrollHeight491>clientHeight412时底部仍可见。浏览器未连接真实Core，仅验证布局；未升级安装、提交或推送。
-
-- **输入区简化（2026-10-22，Owner 已确认生成效果图）**：沿用 `codex/app-icon-refresh`；实现28px大圆角、轻边框/阴影、左侧“＋”附件和工作区/Agent文字菜单、右侧无边框模型选择及圆形发送/停止按钮；说明转入附件提示，不添加语音入口。输入框按内容自动增高到160px，超过后内部滚动；Enter发送、Shift+Enter换行，IME组合输入不触发发送。保留原发送/停止回调、Agent可用性、工作区预检和附件选择接口。前端build通过，定向6 suites PASS/0 FAIL。独立合成React交互页验证了工作区/Agent切换、附件、发送/停止、键盘发送/换行、自动增高和深浅主题；不连接真实Core/模型，不等同于安装后E2E。未安装、提交或推送；旧Build1115安装包不包含本轮输入区。详见 `docs/desktop/CHAT_COMPOSER_REPORT.md`。
-
-- **聊天任务卡片（2026-10-22，Owner 已确认“输入框上方、默认折叠”）**：沿用 `codex/app-icon-refresh`，移除 Chat 右侧常驻上下文列及其旧显隐偏好；改为 composer 上方正常文档流中的折叠卡片，摘要展示任务、状态、Agent/进度、审批及交付物数量。展开内容有高度限制并内部滚动；空分区不渲染，无关联数据的普通聊天不显示空卡片。保持原审批事件、Memory 与 Artifact 身份入口，未改 Core/权限/持久化数据。前端构建通过，定向5 suites PASS（卡片生产组件 SSR、聊天虚拟滚动、UI生产契约、标题栏、错误红线）。合成数据浏览器已检查默认折叠/鼠标展开及输入区可见；该静态组件验收不等于真实Core E2E。未安装升级、提交或推送。
-
-- **标题区简化（2026-10-22，Owner 已确认效果稿）**：沿用 `codex/app-icon-refresh`；标题区改为 48px 高、23px 纯文字 CetaMesh，不显示可见图标；移除侧栏重复品牌与包含面包屑的整行全局顶栏，主内容上移。标题、侧栏复用主题变量，主题仍从 Settings 控制；程序/任务栏/托盘绿色图标保留。新增仅限本窗口的严格 Host 动作白名单，关闭仍投递 WM_CLOSE 进入既有托盘/退出确认逻辑。前端 build PASS；定向聚合5 PASS/0 FAIL；显式启用 Cargo 后 Rust200 PASS/0 FAIL；Debug Host 链接 PASS。浏览器检查已构建界面的布局通过，但不等于真实 WebView2 窗口操作验收；真实拖动、双击、托盘和 Snap 尚待原生验收。本轮未升级安装、未生成包含本次 UI 的新安装包、未提交/合并/推送。Build1115 安装包仅包含上一阶段图标改动，不能代表本次标题区。详见 `docs/desktop/WINDOW_CHROME_REPORT.md`。
-
-- **应用图标替换（2026-10-22）**：分支 `codex/app-icon-refresh`，工作树 `D:\GIT- CetaMesh\comm-repair`，基线 bc6a923。采用 Owner 提供的绿色 CetaMesh 四张原图，保留 Hash/透明圆角，256/512 原样使用，小尺寸从1024缩放；窗口/托盘 PNG、PE/安装器 ICO 和兼容品牌图已统一。DEV Build1115 Core/Host/安装包构建通过；定向聚合5 PASS/0 FAIL（Rust199/0），实际 Host 和最终安装包内新ICO图层已核验。尚未覆盖实际安装、未提交或推送；旧C4/Logo05母图保留。安装包在 artifacts/dev/1.0.0-rc.2/build-1115，NotSigned，仍为本地DEV验证产物。
-
-- **COMM 集成前最终复核**：2026-10-21，DEV Build1114；修正元数据导入提前捕获 APP_PATHS 的重复运行问题，保留权限断言并新增独立数据根断言。最新完整回归 146 PASS / 0 FAIL / 8 NRE，Rust 199/0；Core/Host/DEV 发行构建与安装集成通过，生产输入指纹复核一致。Owner 已授权提交合并推送；RELEASE_BLOCKED 与真实验收/签名/迁移限制不变。详见 COMMUNICATION_REPAIR_REPORT.md 顶部最新复核补充。
-
-- **COMM-01～13 集中修复（2026-10-21）**：隔离分支 `codex/comm-01-13-repair`，基线 `63f6155718e4ef7cbc182bd6b4debcde0f1faeb1`。审批授权代次/续跑、异步操作查询、进程取消与有界退出、UTF-8 IPC/历史分页、默认 QQ/Bionic 控制、Mesh 恢复及插件版本契约已修复；完整本地验证 146 PASS / 0 FAIL / 8 NRE（Rust 199/0），DEV Build1113 发行集成通过。Owner 已明确授权提交、合并和推送；集成结果以 Git main/origin/main 引用为准，不代表发布批准。历史 DEV 包仍记录 dirty=true 和原基线 sourceCommit，不冒充提交后的正式包。真实 Codex/DSH/QQ/手机、普通用户 GUI、签名与更新链待验，RELEASE_BLOCKED；M5-B 未授权，无真实迁移。详见 COMM_REPAIR_STATUS.md、COMMUNICATION_REPAIR_REPORT.md、COMMUNICATION_MODULE_MATRIX.md。
-
-- **Codex 旧终态 Session 取消恢复已实装待 Owner 验收**：分支 codex/codex-readonly-workspace-recovery，产品提交119209d，Build1106。保留1105只读修复；仅精确的post-exit/pre-import STAGING_READ_FAILED旧Task可在安全栅栏通过后正式取消，未知状态仍拒绝。全量131 PASS/0 FAIL/9 NRE，补充Rust199/0、发行12/0及新增正式SEA取消/重启通过。Owner批准后已正常退出覆盖安装1106，72份既有JSON安装前后Hash不变；旧Task已在实际Harbor正式取消，持久currentAgent=null，同工作区无活动Task Agent绑定，历史7条保留。报告CODEX_STALE_SESSION_CANCELLATION_REPORT.md；RELEASE_BLOCKED。
-
-
-- **Agent Native Security 待 Owner 验收**：分支 codex/agent-native-security，产品提交 cdc06390a6e7d2f12311cf30fb1779114098be39，Build1104。正式 SEA 的 Windows unelevated/workspace-write 真实 Codex Task 已验证，首次范围确认复用现有 Owner Approval；Staging 不代表主机读取隔离。最终 npm 136 PASS /0 FAIL /4 NRE，Rust199 PASS；未 push、未升级用户安装。详见 AGENT_NATIVE_SECURITY_POLICY.md、CODEX_NATIVE_SECURITY_REPAIR_REPORT.md。严格隔离仍拒绝，整体 RELEASE_BLOCKED。
-
-
-- **M6-B 本地原生验收与定向修复交付，RELEASE_BLOCKED**：`codex/whalebridge-m6-integration`，产品来源 `c3d5657fba5dfcd9a5004b84d0e87cf329aafaea`，Version `1.0.0-rc.2` / Build **1088**。真实Windows11 WebView2+隔离合成模型已操作Chat三轮/Streaming/Stop、Work Managed结果及暂停恢复取消、Memory批准拒绝；1088实际About与历史/Task恢复。修复原生picker32秒超时、Work默认模型未绑定、Rust遗漏六条Owner UI方法、SEA About读取错误根。最终npm **124 PASS /0 FAIL /5 NOT_RUN_ENVIRONMENT**，Rust **199/0**，RC **11/0**；首次误用仓库内TEMP的五失败与正常TEMP五项重跑证据保留。独立普通用户/全向导/真实Provider、QQ及签名仍未完成；M2/M3 PARTIAL、M4 CODE_COMPLETE/E2E_PENDING、M5-B REAL_DATA_NOT_AUTHORIZED/MIGRATION_BLOCKED保持。八Social只读Hash不变，无迁移、真实QQ外发、用户进程停止或锁释放。详见M6_B报告、Owner清单、最终阻塞及128行矩阵。本地候选NotSigned；停止等待Owner验收，不自动推进M5-B/push/merge/Stable。
-
-- **M6-A 本地集成验收已交付，RELEASE_BLOCKED**：分支 `codex/whalebridge-m6-integration`，生产来源 `8dc4159a2a2c18ad3248bd4e7f32c2b1e34e3dfa`，最终测试提交 `bca4c57dff36b957d4652ac4ca6990f8a15ecc3e`，Version `1.0.0-rc.2` / Build **1084**。真实SEA OwnerIPC/纯Core/合成Streaming/Task/Memory/Workspace重启、QQ/Bionic及Extension子进程、无系统Node发行安装已运行；最终 `npm test` **121 PASS / 0 FAIL / 5 NOT_RUN_ENVIRONMENT**（含Cargo），Rust **198/0**，D盘RC **11/0**。修复干净Windows缺VC Runtime、IExpress空格SED；纠正两个测试helper并保留失败追溯。干净Windows Sandbox安装/SEA帮助/卸载通过，但缺WebView2、普通用户完整UI与真实Codex/DSH/QQ仍未验收。M2/M3 PARTIAL、M4 CODE_COMPLETE/E2E_PENDING保持；M5-B REAL_DATA_NOT_AUTHORIZED/MIGRATION_BLOCKED，八项Social Hash不变，无迁移/真实QQ外发/真实Core停止/锁释放。交付M6三份报告、128行E/AC矩阵与脱敏证据；安装包NotSigned，仅本地候选。停止等待Owner验收，不自动进入M5-B、push/merge/Stable。
-
-- **M5-A.2 已收口，停止等待 Owner 分组决定**：基线 `c04ad381916147eca10eddac2edf5f8f23d0060e`，分支 `codex/whalebridge-m5-a-dry-run`。新增只读 runtime preflight、Epoch 设计与 3 个已登记隔离套件，复用现有 Channel Journal/迁移 Fixture，不改引擎或正式运行链；新增 EPOCH_RECOVERY_DESIGN / RUNTIME_PREFLIGHT / APPROVAL_READY_REPORT，更新 Owner Decision Package。八项 Social Hash 不变，映射/四选一决定均未作出；两根游标仍不可恢复，真实停止/IPC/跨用户租约不完整，实际迁移 MIGRATION_BLOCKED / REAL_DATA_NOT_AUTHORIZED。13 个不同定向 suites 最终 PASS（含 Rust check/test、Core/SEA），Core 构建 Hash 与基线相同，Build 1081；无新安装包。M2/M3 PARTIAL、M4 E2E_PENDING、RELEASE_BLOCKED 保持。M6 仅隔离验收规划，不自动派生 M5-A.x；只有 Owner 明确批准的组和动作才进入 M5-B。
-
-- **M5-A.1 审批准备已交付，真实迁移仍禁止**：沿用 `codex/whalebridge-m5-a-dry-run`，基线 `fda079e`；新增 PRE_MIGRATION_BLOCKERS / OWNER_DECISION_PACKAGE 及两个脱敏证据快照，更新四份 M5-A 文档。8 项 Social Hash 不变、账号证据仍不足；两根旧游标在已检查来源内 CURSOR_UNRECOVERABLE；安装版 Core 锁匹配存活 worker，旧 Bridge PID 消失仍非停止 ACK，跨用户/历史 portable 未完全确认。相同计划三次核验稳定；本轮 5 个定向 npm suites PASS / 0 FAIL，含六阶段 Fixture 崩溃、重复迁移、失效计划及回滚。无产品代码/Build 修改（1081），无真实迁移/停进程/锁接管/凭据覆盖。READY_FOR_OWNER_APPROVAL 仅指设计待审，真实范围全部等待具体批准；M2/M3 PARTIAL、M4 E2E_PENDING、RELEASE_BLOCKED 保持。
-
-- **M5-A 已交付，等待独立 M5-B 批准**：`codex/whalebridge-m5-a-dry-run`，沿用 `D:\GIT- CetaMesh\audit-critical-repair` 工作树，基线 M4.4 `e70a3de`；工具提交 `4eb5887734d237a49e78e525e9947466ed678d10`。真实只读盘点 86 项/3 个 preset，8 项账号归属、2 个缺游标根、2 个停止证据未确认，实际计划 BLOCKED。只读工具 DRY_RUN_PASS、隔离迁移 FIXTURE_MIGRATION_PASS、隔离回滚 ROLLBACK_PASS；真实执行 REAL_DATA_NOT_AUTHORIZED，次数 0。最终 npm 114 PASS / 0 FAIL / 7 未运行，Rust 198 PASS，Core/UI 构建及 SEA/Core 2 suites 通过。Build 1081 产品代码/SEA 保持不变；没有生产迁移 resolver 或 apply 入口，四份 M5 报告和脱敏 JSON 台账为当前事实。M2/M3 PARTIAL、M4 E2E_PENDING 和 RELEASE_BLOCKED 保留。M4 原分支与安装包未改；未 push、合并、迁移或覆盖用户配置。
-
-- M4.4 最终验收记录：产品提交 `bb6343483d04c65cd88104c9e9c76d23df656afb`，Build 1081；**M4_CODE_COMPLETE / M4_E2E_PENDING / RELEASE_BLOCKED**。最终 npm 112 PASS / 0 FAIL / 7 未运行（含两项默认 Cargo opt-in，已另行运行通过）；Rust 198 PASS / 0 FAIL；Release 9 PASS / 0 FAIL；打包 SEA Connector 集成 1 PASS。旧社交数据切换须 M5 库存/Dry Run 与 Owner 批准，本轮未迁移。详见 `WHALEBRIDGE_DECOUPLING_M4_4_REPORT.md`，停止等待 Owner 验收。
-
-- **WhaleBridge M4.4**：`codex/whalebridge-decoupling-m4`，工作树 `D:\GIT- CetaMesh\audit-critical-repair`，基线 `30ab2d32c37c2381d75ab8d4435949deaee7fd50`，Build 1081。Core Channel Service 管理可选 QQ/Bionic 子进程、持久入站投递/独立消费者确认，以及统一 Broker 外发授权。正式 SEA 的 `--qq-connector` / `--bionic-runtime` 不构建 Core 或 Owner IPC。旧社交数据存在时阻止自动切换写入者，等待 M5 库存/Dry Run 和 Owner 批准。最终测试、源码提交与安装包证据见 `WHALEBRIDGE_DECOUPLING_M4_4_REPORT.md`。M2/M3 仍 PARTIAL；发布仍 RELEASE_BLOCKED；真实 QQ E2E 未验收。未 push、合并或执行用户数据迁移。
-
-- CetaMesh Desktop UX v2 production closure — Owner-selected **01 Harbor**; work remains isolated on branch `feature/desktop-ui-v2-production`, worktree `C:\Users\Administrator\.codex\worktrees\desktop-ui-v2-production\GIT-QQ-BRIDGE`, base `2b2e0d98cea97b979290417d9fc3fe4623cd780c`. Task 1 history paging is commit `75f549f1ee90943362de27e93c49fe1f83cdbb12`; Task 2 Chat virtualization is commit `d1b114834b8f88ace439b1f4aff0e0353bcdc56e`. The production Chat timeline uses `VirtualList`, stable message IDs, paged older-history loading, scroll-anchor restoration, bottom-follow behavior and a new-message indicator. The 100/200/500 React virtual-window fixtures pass; each initial viewport mounts 10 rows including its streaming row, while long-content measurement updates are exercised without mounting full history.
-
-  Current automated evidence: `npm run build:ui` PASS (TypeScript + Vite; 529.28 kB JS / 161.88 kB gzip, existing >500 kB warning is non-blocking); focused architecture/runtime tests PASS 44 / 0 / 0; `WHALEBRIDGE_TEST_CARGO=1 npm test` PASS 94 / 0 / 4 (Cargo included; only legacy bridge, Gateway and network suites unavailable); `cargo check` PASS with existing dead-code warnings; `cargo test` PASS 187 / 0. A standard `npm test` without Cargo opt-in also passed 92 / 0 / 6. The exact final source HEAD, version/build number, artifact SHA256, release audit and RC verification are recorded in the generated `FINAL_PRODUCTION_CLOSURE.md` in the retained detached build checkout. Build-1057 is obsolete and must not be distributed.
-
-  Manual visual acceptance remains **NOT_RUN_ENVIRONMENT**: `interactive browser/window inspection unavailable in current execution environment`. This covers the five reference-page comparison, client-size/DPI matrix, manual scroll/keyboard/accessibility review and real DOM memory measurement; it does not block Task 2. Real Provider credentials, production Gateway/OneBot and external Plugin Service remain environment-gated. `feedback.baseUrl` is empty, so feedback links stay disabled/BLOCKED. No push, merge or branch/worktree deletion; retain them until Owner review and explicit confirmation.
-
-- DSH Desktop Application Integration 完成，隔离分支 `codex/dsh-desktop-integration-v1`，worktree `C:\Users\Administrator\.codex\worktrees\dsh-desktop-integration-v1\GIT-QQ-BRIDGE`。Base HEAD `aec93a04a3b2b418f9345250e7fa190bdabef79c`；实现 HEAD `7a92356d11a6f2f6e01640e121c2a888e534e07e`。全量 `npm test`（启用登记的 Cargo suites）为 85 PASS / 0 FAIL / 10 NOT_RUN_ENVIRONMENT。实际检测到 DSH Desktop `0.2.0-rc.2` 运行中，CLI `0.1.5-rc.1` 可用。详见 `DSH_DESKTOP_INTEGRATION_REPORT.md`。尚未合并、推送或删除分支；等待 Owner 确认。
-
-- UI v1（Owner 选定方案 01/02/04 融合，主题收敛为唯一「纸面」）**已完成并在 Owner 确认后合并**到本地
-  `main`（快进；探索稿分支 design/ui-ia-exploration-2026-10 同批并入以兑现代码注释引用的视觉事实源）；
-  合并完成：main 位于探索稿并入后的合并提交；工作分支 feature/product-ui-v1 与 worktree .worktrees/2026-10-11-product-ui-v1 已删除；安装包与纸面验收截图已拷贝到主检出目录 dist/app 与 output/uiv1-qa9。
-  最终交付：导航 15→5+2；Chat 第一入口（历史列/消息区/Composer、工具·Agent·模型渐进披露）；
-  智能体接 agent.list、插件接 plugins.*/tools.*/mcp.*（pending 不自动批准）；
-  主题=唯一「纸面」（十主题移除、旧偏好值回落）；Core 状态卡在 设置→高级。
-  视觉 bug 修复轨迹：蓝色旧胶囊（旧构建）/白弧（paint_button rim 门控）/悬停白圈/模式 chip/锚点滚动/
-  重复标题/worker.log 人话提示/圆角渐变 mesh（选择框直角根因）/圆形发送键。
-  验证：cargo check 0 error；cargo test 150P/17F（全部 TEMP/HKCU 沙箱同类）；
-  npm test PASS 77；release/debug 构建成功；纸面截图 9/9 人工核验。
-  安装包 1.0.0-rc.2（最新 48408f9）在主检出目录 dist/app/。**未 push**。
-
-- 产品化任务 B（Tools / MCP / Plugin Integration Restoration）**已完成并在 Owner 确认后合并**到本地 `main`
-  （merge commit `04ab303`：first parent `38ff756` = 合并前 main，实现 `ed3331d`）；工作分支
-  `feature/tools-mcp-plugin-restoration-v1` 已删除。**未 push**（等 Owner 指示）。
-  审计先把"工具消失"证伪：QQ MCP 工具全历史**只增不减**（39 个从未删改），不可用是挂载/白名单/默认开关问题——
-  见 `LEGACY_TOOL_INVENTORY.md`（90 条历史条目，逐条 commit/路径取证）。
-  交付：`src/integrations/**`（Plugins/Tools/MCP Registry + MCP Runtime，复用官方 MCP SDK 与既有
-  `src/mcp-*.js`），IPC `plugins.` / `tools.` / `mcp.` / `integrations.` 四族；SnowLuma=Channel Provider、
-  DSH=Agent Provider 以 Integration Plugin 呈现（不改底层架构）；CetaMesh 仿生聊天工具包 53 个工具
-  = 46 restored / 5 partial（默认关，Owner 逐项开）/ 2 legacy-unsupported（进程控制）；
-  所有工具调用与管理动作经 Capability Broker（high 风险 Owner Approve Once）。
-  合并后全量：**PASS 78 · FAIL 0 · NOT_RUN_ENVIRONMENT 9**。报告 `TOOLS_MCP_PLUGIN_RESTORATION_REPORT.md`。
-  Owner 确认后已 **push 到 `origin/main`**（`e8a122a..bd60537`，2026-10-10）；GitCode 远端
-  `gitcode/main`（`5633dd7`）存在 1 个本地没有的提交，**未**强行推送（等 Owner 指示）。
-
-- Product Intelligence Runtime / Product Context tool-calling follow-up is merged into local `main` through feature commit `b8c0cbc`; merged-tree `npm test` reported 73 PASS, 0 FAIL, 9 NOT_RUN_ENVIRONMENT (2026-10-10). Not pushed per Owner instruction.
-
-- 反馈功能修正（2026-10-10）**已完成并在 Owner 确认后快进合并**到本地 `main`（`cc201ee..bf12184`）；
-  工作分支 `codex/session-20261010-feedback-links` 与隔离 worktree `.worktrees/2026-10-10-feedback-links` 已删除。
-  **未 push**（等 Owner 指示）。按产品决定**移除软件内反馈收集**：
-  删除 `src/feedback/**`（FeedbackService / Outbox / 发送通道）、`feedback.*` IPC 与软件内表单；
-  改为**只提供入口**——反馈与建议 / Bug 反馈 / 功能建议 / 安全漏洞，点击用系统默认浏览器打开官网页面
-  （`/feedback`、`/feedback?type=bug`、`/feedback?type=feature`、`/security`），站点根来自 `release-config.json`
-  （`feedback.baseUrl`，缺省回落 `website`），链接只带 `version` / `build` / `platform`（形状白名单）。
-  新增 `src/product/feedback-links.js`、`desktop-shell/src/external_link.rs`（唯一允许调 `explorer.exe`
-  的模块，https-only 校验）与 `test-feedback-links.mjs`（40 项）。
-  验证（合并后在 `main` 上复跑）：`npm test` → PASS 70 · FAIL 3 · NOT_RUN 7（3 个 FAIL 全部是环境：
-  `cargo:test` 的本会话 TEMP 限制 + 本机 3000 端口恰好有网关监听导致两个 environment 套件真实运行并失败）；
-  `cargo test` 161 passed / 2 failed（HKCU 注册表限制）；`test-desktop-shell` 全通过。
-  边界与细节见 `PRODUCT_SERVICES_REPORT.md`（含 §0.1 修订记录）。
-
-- 产品化任务 D（Product Services / Onboarding / Feedback）**已完成并在 Owner 确认后快进合并**到本地 `main`
-  （`ce83264..33ed3ce`：`049129f` 服务层 / `9f7d050` 原生 UI / `33ed3ce` 侧边栏与截图验收）；
-  工作分支 `codex/session-20261009-2145-rules-confirm` 与隔离 worktree `.worktrees/2026-10-09-2145` 已删除。
-  **未 push**（等 Owner 指示）。交付物与验收见 `PRODUCT_SERVICES_REPORT.md`：
-  About 服务（build/release manifest 驱动，不写死版本）、更新公告安全渲染 + 离线缓存、
-  ~~Feedback（本地 Outbox + 重试 + 诊断附件）~~（见上条修正：已改为纯入口）、
-  First Run Onboarding（7 步，**不依赖 QQ/DSH/移动端**）、
-  Provider 基础/高级字段视图与空状态文案；**原生桌面壳新增 About / Feedback / Onboarding 三个页面并接线**
-  （`desktop-shell/src/product_ui.rs` + `native_ui.rs`，首次运行自动进入引导页；全站错误条统一为"用户语言优先 +
-  技术细节折叠"）；新增 `test-product-services` / `test-onboarding` / `test-product-copy` 三个套件（已登记聚合器）。
-  验证：`npm test` → **PASS 69 · FAIL 1 · NOT_RUN_ENVIRONMENT 9**（唯一 FAIL 为 `desktop/cargo:test` 的本会话令牌
-  TEMP 限制）；`cargo test` **157 passed · 2 failed**（+12 新单测；2 项为 HKCU 注册表限制）；
-  `test-desktop-shell`（构建 debug 壳 + `dist/core` 后）**全部通过**；debug 截图验收扩到 14 张
-  （新增 About/Feedback/Onboarding 三页），并据此修掉"15 个导航项在 1280×800 下侧边栏被裁、Settings 点不到"
-  的真实缺陷（侧边栏改为可滚动）。About/Feedback/Onboarding 三张验收截图保留在 `output/product-qa-task-d/`。
-  详见报告 §5/§6.5；UI 需要的 IPC 契约（`about.*` / `update.notes` / `feedback.*` / `onboarding.*` / `product.*`）
-  见报告 §4。
-
-- 上线冲刺任务 B（统一配对）已完成并在 Owner 确认后合并到本地 `main`，工作分支与临时 worktree 已清理；
-  Mobile 仓 `feature/unified-device-pairing-v1` 同样已合并到其本地 `main` 并删除分支。**两个仓库均未 push**（等 Owner 指示）。
-- 上线冲刺任务 D（Web → Native 高保真主题迁移）已完成并在 Owner 确认后合并到本地 `main`；工作分支
-  `feature/native-theme-fidelity-v1` 已删除。**未 push**（等 Owner 指示）。
-  - Native 十主题升级为完整 Theme Engine（`desktop-shell/src/theme/`：spec / themes / painter / motion + debug-only qa 截图驱动）。
-  - 配方逐值转写自 `design-demos/CetaMesh-ten-themes/public/console.html`；Soda 还原旧 Web 三段渐变 + 三光斑 + 白雾 + 软糖玻璃。
-  - 动效：700ms 主题插值 + ripple、30fps blob 漂移、页面淡入、Reduce Motion 持久化（auto 跟随 Windows 动画开关）。
-  - 验证：合并后 `npm test` 70 PASS · 0 FAIL（含 `desktop:check` / `cargo test` 142 项 / `test-desktop-shell`）；
-    1280×800 验收截图在 `output/theme-qa/`（gitignored）。报告：`NATIVE_THEME_MIGRATION_REPORT.md`。
-- 验收记录、遗留清单（M6 Memory/Task 同步未接；真机 Android/iOS = NOT_RUN_ENVIRONMENT）见 `UNIFIED_PAIRING_INTEROP_REPORT.md`。
-- Session 3 技术债收口（`TECH_DEBT_CONSOLIDATION_REPORT.md`）仍有效。
-
-## 文档地图（Agent 默认只读这里列的）
-
-- 开始工作必读：`RULES.md` → 本文件 → 相关架构文档（`docs/desktop/ARCHITECTURE.md` 等）。
-- 仓库操作事实：`README.md`；能力覆盖裁决表：`CAPABILITY_COVERAGE.md`。
-- **历史调查才读**：`docs/archive/`（project-state 历史快照 / handoffs / reports、旧控制台事实源 `AGENT_CONTEXT.md`）。
-
-## Agent source synchronization (2026-10-22)
-
-Owner-authorized Agent/UI source commit2b2339c merged into main at fed3925, preserving GitCode initial5633dd7. Actual merged-main tests20 PASS/0 FAIL/1 NRE and UI buildPASS; both existing GitHub/GitCode main refs were verified at fed3925 after normal pushes. This synchronization report is a subsequent documentation-only commit. New Agent SEA/native/real-account E2E remains unverified, RELEASE_BLOCKED; RC1116 unchanged. Evidence/artifact worktree retained. See docs/desktop/AGENT_EXPANSION_SYNC_REPORT.md. Owner requests shutdown after final sync; preserve state and do not start new packaging/install work.
+- 补齐上一轮遗漏的 GitHub 公开仓库同步；本轮以公开 main 的 33b10b3 为基线，保持独立公开历史。
+- 包含绿色应用图标、紧凑标题栏、图标侧栏和记忆入口、竖向设置、任务卡片、输入区与动效，以及有条件的八项 Agent 注册/RPC/ACP/SDK/API 适配。各 Provider 仍按真实能力与权限门槛决定可用性。
+- Mobile、公开介绍、文档清理、独立 OneBot、SDK/MCP 排除与现有更新入口保持。详细实现边界见 [Agent 接入状态](docs/desktop/AGENT_INTEGRATION_STATUS.md)。
+- 实际公开快照经统一入口选择31项测试：30 PASS / 0 FAIL / 1 NOT_RUN_ENVIRONMENT；唯一跳过项为缺少新产物的 Agent SEA。前端 TypeScript/Vite 构建通过，独立导出边界审查无 Critical/Important/Minor 发现。未重新运行全部测试、Cargo 或 Mobile 测试；共享协议与 Mobile 源码未变。真实账号、原生安全和正式安装验收仍单独保留。
 
 ## Desktop 当前修复（2026-10-23）
 
@@ -244,3 +48,43 @@ Owner-authorized Agent/UI source commit2b2339c merged into main at fed3925, pres
 - 补齐菜单退出及布局反馈动效，统一时长与缓动，并遵循系统减少动态效果设置。
 - 开发者显示为 chx6418-source，GitHub 入口指向公开 CetaMesh 仓库。更新页明确显示缺少可信公钥或清单的原因；签名校验继续强制执行，尚未配置的更新服务不视为可用。
 - 本轮合并不包含新版安装包或正式发行。真实账号工作流、已安装版本的原生视觉验收及 Mobile 验证仍按各自门禁处理。
+
+## Desktop 窗口尺寸修复（2026-10-25）
+
+- 关闭独立网页预览后，Wry 0.55.1 的子视图析构会移除主窗口自动缩放回调，导致后续最大化时主界面停留在旧尺寸。主视图现改为显式维护物理客户区尺寸的子 WebView，响应尺寸、位置和 DPI 变化，并保留焦点转交。
+- 原生回归先复现窗口 1375×900、主视图仍为 1200×800 的失败，再验证预览销毁、缩放、最大化、还原及再次缩放。测试同时检查原生容器、WebView2 控制器和实际窗口状态，避免仅凭前端 resize 事件判断成功。
+- 修复版完整应用的最大化与还原已在当前 Windows 桌面观察通过；独立数据目录中的网页预览、壳生命周期、相关权限／UI 契约及 Rust 单元测试通过。跨显示器 DPI 切换尚未实机验证。
+
+## Desktop 内容区适配修复（2026-10-25）
+
+- Agent 卡片按内容定高、按可用宽度自动分列，DSH 连接设置默认折叠；关于页信息卡保持独立高度并允许长构建标识换行。
+- 设置页取消居中大留白，保留竖向分类；设置和插件控件随内容区宽度调整，包含停靠查看面板压缩页面的情形。窄窗口默认收起工作区列表，保留展开入口，并在切换页面后收起覆盖层。
+- 修复没有活动引用时，窄窗／高缩放误隐藏主页面的问题；只有实际打开引用时才启用引用与正文切换，关闭最后一个引用恢复页面。
+- 浏览器回归覆盖 480–1600px 的 23 组窗口／内容区、真实挂载侧栏及引用关闭可见性。完整原生应用的相关页面在常规及 160% 应用缩放下核对，外部 Agent 联通和跨显示器 DPI 仍独立验收。
+
+## Desktop 父子任务反馈修复（2026-10-25）
+
+- 父任务存在未结束子任务时，卡片与详情明确显示依赖原因，禁用启动／继续，并提供子任务查看和返回父任务入口。执行前只读核对最新版本和依赖，Core 的执行归属与父子任务围栏保持强制。
+- 任务操作错误显示在对应任务详情中，避免成为工作列表的全局加载错误；异步查看任务与动作回复尊重新的选择或关闭操作。
+- 父子任务围栏、版本冲突及界面回归通过；原生演示验证仅查看独立父子任务，核对后两者仍待启动、未附加 Agent、无执行记录。
+
+## Desktop 启动与任务快照修复（2026-10-25）
+
+- StateDir 所有权增加与锁摘要绑定的进程出生身份，避免 PID 被其他程序复用后误阻止启动；保留旧锁格式、重复实例互斥和未知身份时的保守拒绝。
+- Git 工作区快照保留已跟踪与未忽略的新文件，固定任务开始时的忽略规则，排除之后新生成的构建输出与嵌套仓库；忽略规则变化不能掩盖基线文件的删除。512 MiB、凭据过滤、审批和工作区围栏继续生效。
+- 回归覆盖进程锁竞争与身份不明、快照上限、延后构建输出、嵌套忽略／否定规则、空目录新文件与子仓库；源码检查和打包后进程验证按各自阶段运行。
+
+## Desktop Agent 安装状态修复（2026-10-25）
+
+- Gemini、OpenCode、Qwen 与 Claude 分别报告桌面客户端安装证据、CLI 安装状态及 Agent 连接就绪状态，包含已验证安装布局和 Claude Windows Store 安装。检测结果可刷新，读取失败保留未知。
+- 已安装客户端但连接未验证时显示“已安装 · 待接入”，不再误报未安装；桌面客户端存在不会自动通过 CLI 协议、SDK、原生权限或任务执行验证。
+
+## Desktop 原生 Agent 逐次审批接入（2026-10-25）
+
+- 按 Owner 选择新增显式 native-permissions 模式，声明无 OS 沙箱；原有 native/isolated 门禁不变。原生工具（含读取）逐次审批，成果导入另行审批，运行时及策略变化、取消和未确认退出保留原有执行围栏。
+- OpenCode 随包 CLI 与 Qwen Code 0.26.1 接入生产配置、独立 profile、原生权限及任务装配；新增 Gemini/Qwen 官方 npm Windows shim 映射。Gemini 0.65.0 真实 ACP 请求缺少完整工具参数，保持 native_input_unverified，不开放任务执行。
+- Claude 使用固定 SDK 0.3.308 与独立原生 Claude Code 运行时；增加全部工具 PreToolUse 审批和工具 ID 重放防护。桌面 GUI 不视为编码 CLI，未导入桌面登录；真实 CLI 与账号执行仍需单独验收。
+- 四项连接设置可填写运行时、Node、模型和 HTTPS API；凭据按 Provider 保存在独立 Secret Store。配置凭据不等于认证已验证。损坏的可选配置保留原数据并显示不可用，不再阻止 Core 启动。
+- 本地真实 CLI 验证采用隔离测试目录与合成模型服务；不调用付费模型，也不代表外部账户认证。发行与完整回归结果按本轮实际产物单独报告；具体版本边界见 [Agent 接入状态](docs/desktop/AGENT_INTEGRATION_STATUS.md)。
+
+- 新 Agent 冷启动时明确保留 requiresTask 结构契约；首次聊天、目录资格和删除会话均按任务归属处理，不再受启动时未就绪描述影响。

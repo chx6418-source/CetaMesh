@@ -1,3 +1,4 @@
+import { installMeshLoopbackFixture } from './helpers/mesh-loopback-fixture.mjs';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import net from 'node:net';
@@ -18,6 +19,7 @@ function packet(bytes, id) {
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'comm-channel-mesh-'));
 let service;
+const restoreInterfaces = installMeshLoopbackFixture();
 try {
   let enabled = true; let changed; let clock = Date.now();
   const settingsStore = { get: () => ({ settings: { devices: { meshEnabled: enabled } } }), onChange(fn) { changed = fn; return () => {}; } };
@@ -85,8 +87,9 @@ try {
   await new Promise((resolve, reject) => { probe.once('error', reject); probe.listen(session.port, '0.0.0.0', resolve); });
   await new Promise(resolve => probe.close(resolve));
   console.log('PASS COMM09 terminal close rejects restore/pair while temporary disable supports reenable');
-  console.log('PASS COMM09 real TLS pairing, restart, disable, enable and invitation cancellation');
+  console.log('PASS COMM09 loopback-fixture real TLS pairing, restart, disable, enable and invitation cancellation');
 } finally {
+  restoreInterfaces();
   await service?.close();
   fs.rmSync(root, { recursive: true, force: true });
 }

@@ -1,4 +1,6 @@
 import fs from 'node:fs';
+import { createUsageLedger } from '../model/usage-ledger.js';
+import { createToolEvidenceStore } from '../context/tool-evidence.js';
 import { createTaskWorkingMemoryRecorder } from '../memory/task-working-memory.js';
 import os from 'node:os';
 import path from 'node:path';
@@ -12,6 +14,7 @@ import { createWorkshopService } from '../workshop/index.js';
 import { createManagedAgentProvider } from '../agent/managed-agent-provider.js';
 import { searchWeb } from '../mcp-web-search-safe.js';
 import { createProviderSecrets } from '../providers/secrets.js';
+import { createAgentRuntimeConfiguration } from '../agent/runtime-configuration.js';
 import { createModelProviderRegistry, createModelRuntimeService, createOpenAiCompatibleModelProvider, createToolExecutionCoordinator } from '../model/index.js';
 import { createRouterService } from '../router/index.js';
 import { createMemoryService, DESKTOP_USER_PRINCIPAL } from '../memory/service.js';
@@ -96,6 +99,11 @@ export function createCetaMeshServices(options = {}) {
   };
 
   const providerSecrets = createProviderSecrets({ root: dataRoot });
+  const agentRuntimeConfiguration = options.agentRuntimeConfiguration ?? createAgentRuntimeConfiguration({ stateDir, providerSecrets });
+  const nativeApprovalBridge = (request, requestOptions) => {
+    if (!capabilityService) throw Object.assign(new Error('Native approval service unavailable'), {code:'AGENT_APPROVAL_UNAVAILABLE'});
+    return capabilityService.requestAgentNativeApproval(request, requestOptions);
+  };
   const agentService = createDefaultAgentService({ api, defaults: dshDefaults, log,
     resolveWorkspaceIdentity: workspaceId => workspaceService.describeWorkspace(workspaceId)?.root ?? null,
     resolveExecutionTask: taskId => taskService.runtime.get({ id: taskId }).task,
@@ -103,8 +111,10 @@ export function createCetaMeshServices(options = {}) {
     dshOptions: agentTaskOptions, dshPresetConfig: options.dshPresetConfig, dshConfiguration: options.dshConfiguration,
     codexOptions: { ...agentTaskOptions,
       authorizeOpenAiEnvironment: () => settingsService.store.get().settings.agents.codexOpenAiEnvironmentAuthorized === true },
-    acpOptions: { taskOptions: agentTaskOptions, ...options.agentAcpOptions },
-    claudeOptions: { taskOptions: agentTaskOptions, ...options.agentClaudeOptions },
+    acpOptions: { taskOptions: agentTaskOptions, nativeApprovalBridge,
+      runtimeConfiguration: options.agentAcpOptions?.runtimeResolver ? undefined : agentRuntimeConfiguration, ...options.agentAcpOptions },
+    claudeOptions: { taskOptions: agentTaskOptions, requestNativeApproval: nativeApprovalBridge,
+      runtimeConfiguration: options.agentClaudeOptions?.taskOptions?.verifiedRuntime ? undefined : agentRuntimeConfiguration, resourceRoot, ...options.agentClaudeOptions },
     workbuddyOptions: options.agentWorkBuddyOptions, codexRouterOptions: options.agentCodexRouterOptions,
     desktopStatus: () => dshDesktop.status() });
   const agentBroker = agentService.broker;
@@ -151,6 +161,9 @@ export function createCetaMeshServices(options = {}) {
     preferredProviderId: () => settingsService.store.get().settings.models.provider,
     log
   });
+  const evidenceStore = createToolEvidenceStore({ stateDir });
+  const usageLedger = createUsageLedger({ file: path.join(stateDir, 'model', 'usage-ledger.json'),
+    pricingResolver: options.usagePricingResolver ?? null });
   // Chat and Managed Agent are composed before all context sources exist; the callback is bound later.
   let productContextService = null;
   let managedAgent = null;
@@ -170,6 +183,7 @@ export function createCetaMeshServices(options = {}) {
   };
   managedAgent = createManagedAgentProvider({
     modelRuntime,
+    evidenceStore,
     toolExecutionCoordinator: toolExecutionProxy,
     buildProductTurnContext: request => productContextService?.buildForAgentTurn(request),
     requireProductContext: true,
@@ -180,6 +194,7 @@ export function createCetaMeshServices(options = {}) {
         workspaceId: managedAgent.executionWorkspaceId(sessionId) ?? task.workspaceId,
         actor: capabilityService.principalForTask(task.id) } : null;
     },
+    onUsage: payload => usageLedger.record(payload),
     onTurnEnd: async payload => {
       const reported = await agentBroker.reportTurnEnd(payload);
       if (payload.outcome === 'completed' && settingsService.store.get().settings.memory.enabled === true) {
@@ -233,6 +248,7 @@ export function createCetaMeshServices(options = {}) {
       }) : null;
     },
     stateDir,
+    onUsage: payload => usageLedger.record(payload),
     onTurnEnd: payload => agentBroker.reportTurnEnd(payload),
     onEvent: event => uiEventBus.publish(event.event, event.data)
   });
@@ -251,6 +267,7 @@ export function createCetaMeshServices(options = {}) {
     onChanged: data => uiEventBus.publish('memory.updated', { ...data, status: 'working-updated' }) });
   capabilityService = createCapabilityService({
     stateDir,
+    evidenceStore,
     workspaceService,
     memoryService,
     taskRuntime: taskService.runtime,
@@ -268,6 +285,8 @@ export function createCetaMeshServices(options = {}) {
   });
   toolExecutionCoordinator = createToolExecutionCoordinator({
     finalSynthesisAtLimit: true,
+    evidenceStore,
+    onUsage: payload => usageLedger.record(payload),
     modelRuntime,
     capabilityBroker: capabilityService.broker,
     stateDir,
@@ -506,6 +525,7 @@ export function createCetaMeshServices(options = {}) {
   const onboardingService = createOnboardingService({
     stateDir,
     providerSecrets,
+    agentRuntimeConfiguration,
     modelRuntime,
     settingsService,
     extensionService,
@@ -523,7 +543,7 @@ export function createCetaMeshServices(options = {}) {
     services: {
       chatService, taskService, workshopService, workspaceService, memoryService, capabilityService, agentBroker, continuityService,
       agentService, pluginCenterService, integrationService, extensionService, settingsService, systemServices,
-      toolExecutionCoordinator
+      toolExecutionCoordinator, usageLedger
     },
     system: systemServices,
     eventBus: uiEventBus
@@ -538,6 +558,7 @@ export function createCetaMeshServices(options = {}) {
     managedAgent,
     modelRegistry,
     modelRuntime,
+    usageLedger,
     toolExecutionCoordinator,
     productContextService,
     routerService,

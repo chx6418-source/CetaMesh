@@ -5,7 +5,7 @@
   "license": "GPL-3.0-only",
   "repository": {
     "type": "git",
-    "url": "https://github.com/chx6418-source/whalebridge.git"
+    "url": "https://github.com/chx6418-source/CetaMesh.git"
   },
   "description": "CetaMesh Desktop: local-first intelligent work and collaboration runtime with chat, memory, tasks, capabilities, agents, channels and device mesh.",
   "type": "module",
@@ -91,7 +91,6 @@
     "desktop:test": "cargo test --manifest-path desktop-shell/Cargo.toml",
     "desktop:build:debug": "node scripts/build-desktop.mjs",
     "desktop:build": "node scripts/build-desktop.mjs --release",
-    "postinstall": "node scripts/patch-snowluma-sdk.mjs",
     "test-capability": "node scripts/test-capability-broker.mjs",
     "test-workshop": "node scripts/test-workshop-runtime.mjs",
     "test-memory-link": "node scripts/test-memory-link.mjs",
@@ -102,10 +101,9 @@
     "@deepseek-ai/dsh-host-apiproxy": "0.1.1-rc.2",
     "@deepseek-ai/schemastery": "^3.18.1",
     "@modelcontextprotocol/sdk": "^1.30.0",
-    "@snowluma/mcp": "^1.14.10",
-    "@snowluma/sdk": "^1.14.0",
     "fflate": "0.8.3",
     "iconv-lite": "^0.7.3",
+    "ignore": "7.0.12",
     "mdast-util-from-markdown": "2.1.0",
     "micromark-util-sanitize-uri": "2.0.1",
     "qrcode": "^1.5.4",

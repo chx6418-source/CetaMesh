@@ -3,7 +3,7 @@
 // Usage: node scripts/send-test-group.mjs <group keyword> <message> <requestId>
 import path from 'node:path';
 import os from 'node:os';
-import { SnowLumaWebSocketClient, text } from '@snowluma/sdk';
+import { OneBotWebSocketClient, text } from '../src/channel/qq/onebot-client.js';
 import { APP_PATHS } from '../src/app-paths.js';
 import { readJsonFile } from '../src/storage/json-file.js';
 import { createQqRuntime } from '../src/channel/qq/runtime.js';
@@ -23,7 +23,7 @@ if (!keyword || !message || !/^[A-Za-z0-9:._/-]{1,160}$/.test(String(requestId ?
 const cfg = readJsonFile(APP_PATHS.configFile);
 const runtime = createQqRuntime({
   config: cfg,
-  clientFactory: options => new SnowLumaWebSocketClient({ ...options, reconnect: false }),
+  clientFactory: options => new OneBotWebSocketClient({ ...options, reconnect: false }),
   ownershipDir: path.join(os.tmpdir(), 'cetamesh-qq-ownership'),
   outboundFile: path.join(APP_PATHS.stateDir, 'qq-send-ledger.json'),
   authorizeSend: request => assertQqSendPolicy(request, {

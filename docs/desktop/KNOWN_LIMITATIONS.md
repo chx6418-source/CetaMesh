@@ -17,8 +17,7 @@
 
 - **Update channel is fail-closed.** Without a configured Ed25519 public key the Update page reports
   "not configured" and performs no check. The app never downloads or executes installers silently.
-- **Model / agent execution depends on DSH.** Chat and agent execution use the local DSH endpoint
-  (`127.0.0.1:3080` by default); there is no bundled model runtime.
+- **Model and Agent execution require configured providers.** Standalone Chat can call a user-configured DeepSeek, OpenAI, or compatible Model Provider directly, without DSH. Managed Agent workflows need their selected external Agent Provider (such as DSH, Codex or ZCode), compatible versions and explicit authorization. No local large-model weights are bundled.
 - **Provider secrets are local user data.** They are preserved across upgrades, but stored in the
   user data directory as JSON rather than an OS keychain; protect the Windows account accordingly.
 - **Log redaction is best-effort.** Known secret shapes (tokens, authorization headers, cookies,

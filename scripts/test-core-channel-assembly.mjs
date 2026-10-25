@@ -12,7 +12,9 @@ import { writeJsonAtomic } from '../src/storage/json-file.js';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-core-channel-'));
 const token = crypto.randomBytes(32).toString('hex');
-const pipe = `\\\\.\\pipe\\CetaMesh-Channel-Test-${crypto.randomUUID()}`;
+const pipe = process.platform === 'win32'
+  ? `\\\\.\\pipe\\CetaMesh-Channel-Test-${crypto.randomUUID()}`
+  : path.join(root, 'ui.sock');
 let sends = 0;
 const gateway = http.createServer(async (req, res) => {
   for await (const part of req) { void part; }
@@ -31,6 +33,7 @@ writeJsonAtomic(path.join(root, 'config.json'), { allow: { groups: ['42'], priva
   dsh: { baseUrl: 'http://127.0.0.1:9' }, snowluma: { wsUrl: `ws://127.0.0.1:${gateway.address().port}`,
     httpUrl: `http://127.0.0.1:${gateway.address().port}` } });
 let core;
+let coreOutput = '';
 async function rpc(method, params = {}) {
   return new Promise((resolve, reject) => {
     const socket = net.connect(pipe);
@@ -68,15 +71,22 @@ async function startCore() {
   core = spawn(exe ?? process.execPath, [...(exe ? [] : [path.resolve(import.meta.dirname, '../src/core-entry.js')]), '--worker', '--data-dir', root],
     { cwd: root, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env,
       WHALEBRIDGE_UI_PIPE: pipe, WHALEBRIDGE_UI_AUTH_TOKEN: token, WHALEBRIDGE_SUPERVISED: '1' } });
-  core.stdout.resume(); core.stderr.resume();
-  await eventually(() => rpc('core.ping'));
+  coreOutput = '';
+  core.stdout.on('data', chunk => { coreOutput += String(chunk); });
+  core.stderr.on('data', chunk => { coreOutput += String(chunk); });
+  await eventually(() => {
+    if (core.exitCode !== null || core.signalCode !== null) throw new Error(`Core exited before IPC readiness: ${coreOutput}`);
+    return rpc('core.ping');
+  });
 }
 async function stopCore(crash = false) {
   if (!core) return;
   const current = core; core = null;
-  const closed = once(current, 'close');
-  if (crash) current.kill(); else current.stdin.end();
-  await closed;
+  if (current.exitCode === null && current.signalCode === null) {
+    const closed = once(current, 'close');
+    if (crash) current.kill(); else current.stdin.end();
+    await closed;
+  }
   await eventually(() => wss.clients.size === 0);
 }
 try {

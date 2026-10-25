@@ -1,3 +1,4 @@
+import { normalizeModelUsage } from '../model/usage.js';
 import crypto from 'node:crypto';
 import { createReferencePreview } from './reference-preview.js';
 import { fitsIpcResponse, requireIpcItem } from '../control/response-budget.js';
@@ -99,6 +100,34 @@ function projectSession(value) {
   };
 }
 
+function projectUsage(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  // Usage is a privileged boundary too: never forward raw Provider payloads or ledgers.
+  const normalized = normalizeModelUsage(value);
+  const result = {};
+  for (const key of ['inputTokens', 'outputTokens', 'totalTokens', 'reasoningTokens', 'cacheReadTokens', 'cacheWriteTokens', 'requestCount']) {
+    const metric = key === 'requestCount' ? value[key] : normalized[key];
+    result[key] = Number.isFinite(metric) && metric >= 0 ? metric : null;
+  }
+  result.cacheHitRate = normalized.cacheHitRate;
+  result.accountingComplete = typeof value.accountingComplete === 'boolean' ? value.accountingComplete : null;
+  const cost = record(value.cost);
+  const currency = /^[A-Z]{3}$/.test(cost.currency ?? '') ? cost.currency : null;
+  const amount = Number.isFinite(cost.amount) && cost.amount >= 0 ? cost.amount : null;
+  const complete = cost.complete === true && amount !== null && currency !== null;
+  result.cost = ['actual', 'estimated', 'unknown'].includes(cost.status) ? {
+    status: complete && ['actual', 'estimated'].includes(cost.status) ? cost.status : 'unknown',
+    amount: complete ? amount : null, currency, complete,
+    knownAmount: currency && Number.isFinite(cost.knownAmount) && cost.knownAmount >= 0 ? cost.knownAmount : null,
+    sources: boundedStrings(cost.sources, 20, 300), versions: boundedStrings(cost.versions, 20, 300)
+  } : null;
+  if (value.knownUsage && typeof value.knownUsage === 'object') {
+    result.knownUsage = Object.fromEntries(['inputTokens', 'outputTokens', 'totalTokens', 'reasoningTokens', 'cacheReadTokens', 'cacheWriteTokens']
+      .map(key => [key, Number.isFinite(value.knownUsage[key]) && value.knownUsage[key] >= 0 ? value.knownUsage[key] : null]));
+  }
+  return result;
+}
+
 function projectMessage(value) {
   const row = record(value);
   const role = ['user', 'assistant', 'system'].includes(row.role) ? row.role : 'assistant';
@@ -120,7 +149,7 @@ function projectMessage(value) {
   return {
     id: string(row.id, 128), role, text: string(row.text, MAX_TEXT), at: scalar(row.at),
     requestId: string(row.requestId, 200) || null,
-    attachments, toolActivity, agentActivity, error: row.error ? string(row.error, 1000) : null,
+    attachments, toolActivity, agentActivity, usage: projectUsage(row.usage), error: row.error ? string(row.error, 1000) : null,
     cancelled: row.cancelled === true
   };
 }
@@ -149,10 +178,26 @@ function projectTask(value) {
       at: scalar(evidence.at) };
   }) : [];
   return {
-    id: string(row.id, 128), title: string(row.goal, 500), goal: string(row.goal, 2000),
+    id: string(row.id, 128), title: string(row.goal, 500), goal: string(row.goal, 2000), usage: projectUsage(row.usage),
     status: string(row.status, 40), currentPhase: string(row.currentPhase, 500),
     progress: { percent: Number.isFinite(progress.percent) ? Math.max(0, Math.min(100, progress.percent)) : 0, note: string(progress.note, 1000) },
     workspaceId: string(row.workspaceId, 128) || null,
+    parentTaskId: string(row.parentTaskId, 128) || null,
+    childOutputKind: string(row.childContract?.outputKind, 40) || null,
+    verification: string(result.verification, 40) || (row.parentTaskId ? 'NEEDS_REVIEW' : null),
+    attemptCount: Array.isArray(row.attempts) ? row.attempts.length : 0,
+    attempts: Array.isArray(row.attempts) ? row.attempts.slice(-32).map(item => ({
+      id: string(item.id, 128), provider: string(item.provider, 80),
+      state: string(item.state, 40), at: scalar(item.at), updatedAt: scalar(item.updatedAt)
+    })) : [],
+    children: Array.isArray(row.children) ? row.children.slice(0, 6).map(child => ({
+      id: string(child.id, 128), title: string(child.goal, 500), status: string(child.status, 40),
+      supersedesChildId: string(child.supersedesChildId, 128) || null,
+      agent: string(child.currentAgent?.provider, 80) || null,
+      verification: string(child.result?.verification, 40) || 'NEEDS_REVIEW',
+      attemptCount: Array.isArray(child.attempts) ? child.attempts.length : 0,
+      usage: projectUsage(child.usage)
+    })) : [],
     agent: currentAgent.provider ? string(currentAgent.provider, 100) : null,
     currentAgent: currentAgent.provider ? { provider: string(currentAgent.provider, 100), sessionId: string(currentAgent.sessionId, 160) } : null,
     createdAt: scalar(row.createdAt), updatedAt: scalar(row.updatedAt), rev: Number.isSafeInteger(row.rev) ? row.rev : null,
@@ -249,6 +294,18 @@ function projectDshConfiguration(value) {
     homeSource: string(row.homeSource, 80), active: selection(row.active), pending: row.pending ? selection(row.pending) : null };
 }
 
+const AGENT_RUNTIME_IDS = ['gemini', 'opencode', 'qwen', 'claude'];
+const AGENT_RUNTIME_INPUT_KEYS = new Set(['enabled', 'runtimePath', 'nodePath', 'model', 'baseUrl', 'apiKey', 'executionMode']);
+function projectAgentRuntimeConfiguration(value) {
+  if (!value) return null;
+  const row = record(value);
+  if (!AGENT_RUNTIME_IDS.includes(row.provider)) return null;
+  return { provider: row.provider, enabled: row.enabled === true, runtimePath: string(row.runtimePath, 4096),
+    nodePath: string(row.nodePath, 4096), model: string(row.model, 256), baseUrl: string(row.baseUrl, 2048),
+    credentialConfigured: row.credentialConfigured === true, executionMode: 'native-permissions',
+    revision: Number.isSafeInteger(row.revision) && row.revision >= 0 ? row.revision : 0 };
+}
+
 function projectAgent(value) {
   const row = record(value);
   const health = { ...row, ...record(row.health) };
@@ -272,7 +329,8 @@ function projectAgent(value) {
   const workspaceBoundary = string(row.workspaceBoundary ?? health.workspaceBoundary, 80) || null;
   const requiresTask = ['capability-broker', 'staged-capability-broker', 'native-staged'].includes(workspaceBoundary);
   const boundaryUnverified = workspaceBoundary === 'unverified';
-  const status = installed === false ? 'not-installed'
+  const connectionPending = ['claude', 'gemini', 'opencode', 'qwen'].includes(id) && desktop.installed === true && available === false;
+  const status = connectionPending ? 'connection-pending' : installed === false ? 'not-installed'
     : compatible === false || (id === 'codex' && health.sandboxCapable === false) ? 'not-supported'
     : id === 'codex' && health.sandboxCapable === null ? 'not-checked'
     : authenticated === false ? 'needs-setup'
@@ -286,11 +344,14 @@ function projectAgent(value) {
     id, name: id === 'claude' ? 'Claude Agent' : string(row.displayName ?? row.label ?? id, 120),
     role: id === 'codex' ? '代码与项目' : id === 'dsh' ? '通用研究与协作' : '开发辅助',
     description: id === 'codex' ? '理解项目、修改代码并检查结果。' : id === 'dsh' ? '处理资料、规划和跨工具工作流。' : '在可用时连接本地开发能力。',
-    available, installed, authenticated, compatible, eligible: available === null ? null : available && !requiresTask && !boundaryUnverified,
+    available, installed, cliInstalled: typeof row.cliInstalled === 'boolean' ? row.cliInstalled : null, authenticated, compatible, eligible: available === null ? null : available && !requiresTask && !boundaryUnverified,
     taskEligible: available === false ? false : available === null || (id === 'dsh' && typeof health.taskEligible !== 'boolean') ? null : available && installed !== false && authenticated !== false && requiresTask
       && health.taskEligible !== false && health.sessionCapable !== false && (id !== 'codex' || health.sandboxCapable !== false)
       && (id !== 'dsh' || health.taskEligible === true),
     configured: typeof health.configured === 'boolean' ? health.configured : null,
+    authConfigured: typeof health.authConfigured === 'boolean' ? health.authConfigured : null,
+    authVerified: typeof health.authVerified === 'boolean' ? health.authVerified : null,
+    authentication: ['configured-unverified', 'not-configured', 'verified'].includes(health.authentication) ? health.authentication : null,
     reachable: typeof health.reachable === 'boolean' ? health.reachable : null,
     ready: typeof health.ready === 'boolean' ? health.ready : null,
     sessionCapable: typeof health.sessionCapable === 'boolean' ? health.sessionCapable : null,
@@ -302,10 +363,12 @@ function projectAgent(value) {
     requiresStandaloneNode: health.requiresStandaloneNode === true,
     preset: projectDshPreset(health.preset),
     diagnostic: projectDshDiagnostic(health.diagnostic),
-    configuration: projectDshConfiguration(row.configuration ?? health.configuration),
+    configuration: id === 'dsh' ? projectDshConfiguration(row.configuration ?? health.configuration) : null,
+    runtimeConfiguration: AGENT_RUNTIME_IDS.includes(id) ? projectAgentRuntimeConfiguration(row.runtimeConfiguration ?? health.runtimeConfiguration ?? health.configuration) : null,
     reason: reason || (boundaryUnverified ? 'descriptor-incomplete' : available && requiresTask ? 'task-required' : null), lastError, workspaceBoundary, status, version: string(health.version ?? row.version, 80) || null,
-    desktopApp: id === 'dsh' ? {
-      installed: desktop.installed === true, running: desktop.running === true,
+    desktopApp: id === 'dsh' || Object.keys(desktop).length ? {
+      displayName: string(desktop.displayName, 100) || (id === 'dsh' ? 'DeepSeek Harness Desktop' : string(row.label ?? id, 100)),
+      installed: typeof desktop.installed === 'boolean' ? desktop.installed : null, running: typeof desktop.running === 'boolean' ? desktop.running : null,
       status: string(desktop.status, 50) || 'unknown', version: string(desktop.version, 80) || null
     } : null
   };
@@ -434,7 +497,8 @@ function projectApproval(value) {
     id: string(row.id, 128), title, capability,
     status: string(row.status, 40), createdAt: scalar(row.createdAt), expiresAt: scalar(row.expiresAt),
     summary: string(request.reason ?? row.reason, 1000) || '此操作需要你的逐次批准。',
-    risk: string(row.risk ?? request.risk, 30) || 'high', taskId: string(request.taskId, 128) || null
+    risk: string(row.risk ?? request.risk, 30) || 'high', taskId: string(request.taskId, 128) || null,
+    ...(capability === 'agent.native.approve' ? { details: string(record(request.input).nativeDetails, 8192) } : {})
   };
 }
 
@@ -588,6 +652,26 @@ export function createDesktopUiEventBus({ now = () => Date.now(), maxEvents = 50
 }
 
 export function createDesktopUiService({ services = {}, system = services.systemServices ?? services.system ?? {}, eventBus } = {}) {
+  const projectTaskWithUsage = row => {
+    const children = row?.id && !row.parentTaskId && services.taskService?.runtime?.listChildren
+      ? services.taskService.runtime.listChildren({ parentTaskId: row.id }).children : [];
+    const withUsage = children.map(child => ({ ...child,
+      usage: services.usageLedger ? services.usageLedger.summary({ taskId: child.id }) : child.usage }));
+    const usage = services.usageLedger && row?.id
+      ? services.usageLedger.summary(children.length ? { taskIds: [row.id, ...children.map(child => child.id)] }
+        : { taskId: row.id }) : row?.usage;
+    return projectTask({ ...row, usage, children: withUsage });
+  };
+  function sessionUsageWithLedger(sessionId, historical, sessionIds) {
+    if (!services.usageLedger) return historical;
+    const measured = services.usageLedger.summary(Array.isArray(sessionIds) && sessionIds.length ? { sessionIds } : { sessionId });
+    if (!measured.requestCount) return historical;
+    if (historical && (historical.requestCount === null || historical.requestCount > measured.requestCount)) {
+      return { ...historical, accountingComplete: false,
+        cost: { ...measured.cost, status: 'unknown', amount: null, complete: false } };
+    }
+    return measured;
+  }
   const owner = Object.freeze({ kind: 'owner', id: 'desktop' });
   const call = async (service, method, params = {}, withActor = false, signal = undefined) => {
     if (!service || typeof service.execute !== 'function') throw uiError('SERVICE_UNAVAILABLE', '此项能力当前不可用');
@@ -627,8 +711,9 @@ export function createDesktopUiService({ services = {}, system = services.system
       throw uiError('AGENT_BOUNDARY_UNSUPPORTED', '所选 Agent 没有经过验证的工作区权限边界');
     }
     const health = await services.agentBroker.health(provider);
-    if (health?.available !== true || health?.installed === false || health?.authenticated === false
-      || health?.sessionCapable === false) {
+    if (health?.available !== true || health?.disabled === true || health?.enabled === false
+      || health?.ready === false || health?.reachable === false || health?.installed === false
+      || health?.authenticated === false || health?.sessionCapable === false || health?.taskEligible === false) {
       throw uiError('PROVIDER_UNAVAILABLE', `所选 Agent ${provider} 未安装、未认证或无法建立会话`);
     }
     if (provider === 'codex' && health.sandboxCapable === false) {
@@ -687,13 +772,17 @@ export function createDesktopUiService({ services = {}, system = services.system
       // state before dispatch so the Task-bound Capability Broker sees one owner.
       taskRow = (await task('task.resume', { id: taskRow.id, expectedRev: taskRow.rev })).task;
     }
+    const childBriefing = taskRow.parentTaskId && taskRow.childContract?.mode === 'read-only'
+      ? `\n[Child Task contract]\nMode: read-only. Use only Broker-approved read/search tools.\nOutput: ${taskRow.childContract.outputKind}\nAllowed relative read scope: ${JSON.stringify(taskRow.childContract.readScope).slice(0, 2400)}\nExpected evidence: ${JSON.stringify(taskRow.childContract.expectedEvidence).slice(0, 800)}\nThe Broker policy remains authoritative.`
+      : '';
     let current;
     try {
       const result = await capability('capability.execute', { capability: 'agent.run',
         taskId: taskRow.id, workspaceId: taskRow.workspaceId, requestId,
         input: { agentProvider: selectedProvider,
           content: (content || [taskRow.goal, ...(taskRow.requirements ?? []),
-            taskRow.checkpoint?.summary ?? '', taskRow.checkpoint?.nextAction ?? ''].filter(Boolean).join('\n')) + recoveryFacts,
+            taskRow.checkpoint?.summary ?? '', taskRow.checkpoint?.nextAction ?? ''].filter(Boolean).join('\n'))
+            + childBriefing + recoveryFacts,
           ...(modelProvider ? { modelProvider } : {}), ...(model ? { model } : {}) },
         reason: 'Desktop Owner Task execution' });
       if (result.status !== 'completed' || result.result?.accepted !== true) {
@@ -754,6 +843,26 @@ export function createDesktopUiService({ services = {}, system = services.system
     }
   }
 
+  async function confirmStoppedReadChild(taskRow) {
+    if (!taskRow.parentTaskId || taskRow.childContract?.mode !== 'read-only') return;
+    if (taskRow.currentAgent) {
+      try {
+        const status = await services.agentBroker.status(taskRow.currentAgent);
+        if (status?.running !== false || Number(status?.queued ?? 0) > 0 || status?.waitingForApproval) {
+          throw uiError('INVOKE_CANCEL_UNCONFIRMED', 'Child Agent stop is not confirmed');
+        }
+      } catch (error) {
+        if (!(taskRow.currentAgent.provider === 'cetamesh' && error?.code === 'SESSION_NOT_FOUND')) throw error;
+      }
+    }
+    let current = (await task('task.get', { id: taskRow.id })).task;
+    for (const attempt of current.attempts ?? []) {
+      if (!['started', 'accepted'].includes(attempt.state)) continue;
+      current = services.taskService.runtime.settleAttempt({ id: current.id, expectedRev: current.rev,
+        requestId: attempt.requestId, state: 'unknown', reason: 'Owner confirmed stop; final turn effect was not observed' });
+    }
+  }
+
   const handlers = {
     'ui.preview.open': p => previews.open(p),
     'ui.preview.read': p => previews.read(p),
@@ -795,6 +904,7 @@ export function createDesktopUiService({ services = {}, system = services.system
       const output = {
         id: string(result.id, 128), total: Number(result.total) || 0,
         messages: (result.messages ?? []).map(projectMessage),
+        sessionUsage: projectUsage(sessionUsageWithLedger(result.accountingSessionId || idParam(p), result.sessionUsage, result.accountingSessionIds)),
         nextBeforeMessageId: string(result.nextBeforeMessageId, 128) || null,
         nextAfterMessageId: string(result.nextAfterMessageId, 128) || null,
         hasMoreAfter: result.hasMoreAfter === true, hasMore: result.hasMore === true
@@ -894,9 +1004,83 @@ export function createDesktopUiService({ services = {}, system = services.system
     },
     'ui.task.overview': async p => {
       const result = await task('task.overview', { query: string(p.query, 200), status: string(p.status, 40) || undefined, limit: Math.max(1, Math.min(200, Number(p.limit) || 100)) });
-      return { tasks: (result.tasks ?? []).map(projectTask), total: Number(result.total) || 0, counts: record(result.counts), needsAttention: boundedStrings(result.needsAttention, 200, 128) };
+      return { tasks: (result.tasks ?? []).map(projectTaskWithUsage), total: Number(result.total) || 0, counts: record(result.counts), needsAttention: boundedStrings(result.needsAttention, 200, 128) };
     },
-    'ui.task.get': async p => ({ task: projectTask((await task('task.get', { id: idParam(p) })).task) }),
+    'ui.task.get': async p => ({ task: projectTaskWithUsage((await task('task.get', { id: idParam(p) })).task) }),
+    'ui.task.child.create': async p => {
+      const parent = (await task('task.get', { id: string(p.parentTaskId, 128) })).task;
+      const created = await task('task.child.create', { parentTaskId: parent.id,
+        expectedParentRev: p.expectedParentRev, requestId: string(p.requestId, 160),
+        goal: string(p.goal, 2000), requirements: p.requirements,
+        workspaceId: p.workspaceId ?? parent.workspaceId, contract: p.contract,
+        supersedesChildId: p.supersedesChildId });
+      emit('task.updated', { taskId: parent.id, status: parent.status });
+      return { task: projectTaskWithUsage(created) };
+    },
+    'ui.task.child.review': async p => {
+      const reviewed = services.taskService.runtime.reviewChild({ id: idParam(p), expectedRev: p.expectedRev,
+        approve: p.approve, reviewSummary: p.reviewSummary, evidenceEventIds: p.evidenceEventIds });
+      emit('task.updated', { taskId: reviewed.id, status: reviewed.status });
+      return { task: projectTaskWithUsage(reviewed) };
+    },
+    'ui.task.child.complete': async p => {
+      const current = (await task('task.get', { id: idParam(p) })).task;
+      if (current.rev !== p.expectedRev) throw uiError('TASK_CONFLICT', 'Child Task changed before completion');
+      if (!current.parentTaskId || current.status !== 'running') {
+        throw uiError('TASK_CHILD_NOT_ACTIVE', 'Only a running child Task can be completed');
+      }
+      const attempts = current.attempts ?? [];
+      if (!attempts.length || attempts.at(-1).state !== 'completed'
+        || attempts.some(row => ['started', 'accepted', 'unknown'].includes(row.state))) {
+        throw uiError('TASK_ATTEMPT_NOT_CONFIRMED', 'Observed native completion is required');
+      }
+      const unsettled = services.capabilityService?.recoveryForTask?.(current.id);
+      if (unsettled?.state === 'needs-reconciliation') {
+        throw uiError('TASK_EFFECT_UNCONFIRMED', 'Child effects require reconciliation');
+      }
+      const result = await task('task.complete', { id: current.id, expectedRev: current.rev,
+        summary: boundedText(p.summary, 'summary', 1000) });
+      await task('task.child.verify', { id: current.id, expectedRev: result.task.rev });
+      const verified = (await task('task.get', { id: current.id })).task;
+      emit('task.updated', { taskId: verified.id, status: verified.status });
+      return { task: projectTaskWithUsage(verified) };
+    },
+    'ui.task.child.verify': async p => {
+      const current = (await task('task.get', { id: idParam(p) })).task;
+      if (current.rev !== p.expectedRev) throw uiError('TASK_CONFLICT', 'Child Task changed before verification');
+      if (!current.parentTaskId || current.status !== 'completed'
+        || (current.attempts ?? []).some(row => ['started', 'accepted', 'unknown'].includes(row.state))
+        || services.capabilityService?.recoveryForTask?.(current.id)?.state === 'needs-reconciliation') {
+        throw uiError('TASK_EFFECT_UNCONFIRMED', 'Only a settled completed child can be verified');
+      }
+      if (current.result?.verification === 'VERIFIED' && current.result.verificationRev === current.rev) {
+        return { task: projectTaskWithUsage(current) };
+      }
+      await task('task.child.verify', { id: current.id, expectedRev: current.rev });
+      const verified = (await task('task.get', { id: current.id })).task;
+      emit('task.updated', { taskId: verified.id, status: verified.status });
+      return { task: projectTaskWithUsage(verified) };
+    },
+    'ui.task.complete': async p => {
+      const current = (await task('task.get', { id: idParam(p) })).task;
+      if (current.rev !== p.expectedRev) throw uiError('TASK_CONFLICT', 'Task changed before completion');
+      if (current.parentTaskId || p.reviewed !== true) {
+        throw uiError('OWNER_REVIEW_REQUIRED', 'Owner must review the parent Task result');
+      }
+      const children = (await task('task.child.list', { parentTaskId: current.id })).children;
+      if (!children.length && !(current.executionEvidence ?? []).some(row => row.status === 'completed')) {
+        throw uiError('TASK_EVIDENCE_REQUIRED', 'A model statement alone cannot complete a Task');
+      }
+      const summary = boundedText(p.summary, 'summary', 1000);
+      const result = await task('task.complete', { id: current.id, expectedRev: current.rev,
+        summary });
+      emit('task.updated', { taskId: result.task?.id, status: result.task?.status });
+      return { task: projectTaskWithUsage(result.task) };
+    },
+    'ui.task.outcome.verify': async p => task('task.outcome.verify', {
+      id: idParam(p), kind: string(p.kind, 20), expectedFile: string(p.expectedFile, 1000),
+      expectedSha256: string(p.expectedSha256, 64), expectedCapability: string(p.expectedCapability, 100)
+    }),
     'ui.task.create': async p => {
       const goal = boundedText(p.goal, 'goal', 2000);
       const workspaceId = string(p.workspaceId, 128) || null;
@@ -908,10 +1092,10 @@ export function createDesktopUiService({ services = {}, system = services.system
       if (prior) {
         if (prior.status === 'queued' && !prior.currentAgent) {
           const inFlight = requestId ? taskCreateDispatches.get(requestId) : null;
-          if (inFlight) return { task: projectTask(await inFlight) };
+          if (inFlight) return { task: projectTaskWithUsage(await inFlight) };
           throw uiError('TASK_DISPATCH_INCOMPLETE', 'Task 已保存但 Agent 派发未确认；请在任务详情核对后启动');
         }
-        return { task: projectTask(prior) };
+        return { task: projectTaskWithUsage(prior) };
       }
       const existing = workspaceId ? services.taskService.runtime.findByGoalWorkspace({ goal, workspaceId }) : null;
       if (existing) {
@@ -927,7 +1111,7 @@ export function createDesktopUiService({ services = {}, system = services.system
         if (agentProvider && existing.currentAgent && existing.currentAgent.provider !== agentProvider) {
           throw uiError('AGENT_PROVIDER_SWITCH_REQUIRES_CONTINUITY', 'Existing Task must switch Agent through Handoff');
         }
-        return { task: projectTask(existing) };
+        return { task: projectTaskWithUsage(existing) };
       }
       if (workspaceId && services.taskService.runtime.activeWorkspaceOwner({ workspaceId })) {
         throw uiError('TASK_WORKSPACE_BUSY', 'Another Task owns write execution in this Workspace');
@@ -937,7 +1121,7 @@ export function createDesktopUiService({ services = {}, system = services.system
       if (raced) {
         if (raced.status === 'queued' && !raced.currentAgent) {
           const inFlight = raced.createRequest?.id ? taskCreateDispatches.get(raced.createRequest.id) : null;
-          if (inFlight && requestId === raced.createRequest.id) return { task: projectTask(await inFlight) };
+          if (inFlight && requestId === raced.createRequest.id) return { task: projectTaskWithUsage(await inFlight) };
           throw uiError('TASK_DISPATCH_INCOMPLETE', '同目标 Task 尚未确认派发；请核对后显式启动');
         }
         if (requirements.length && JSON.stringify(requirements) !== JSON.stringify(raced.requirements)) {
@@ -947,7 +1131,7 @@ export function createDesktopUiService({ services = {}, system = services.system
         if (agentProvider && raced.currentAgent && raced.currentAgent.provider !== agentProvider) {
           throw uiError('AGENT_PROVIDER_SWITCH_REQUIRES_CONTINUITY', 'Existing Task must switch Agent through Handoff');
         }
-        return { task: projectTask(raced) };
+        return { task: projectTaskWithUsage(raced) };
       }
       if (workspaceId && services.taskService.runtime.activeWorkspaceOwner({ workspaceId })) {
         throw uiError('TASK_WORKSPACE_BUSY', 'Another Task owns write execution in this Workspace');
@@ -962,30 +1146,57 @@ export function createDesktopUiService({ services = {}, system = services.system
       try { current = await dispatch; }
       finally { if (requestId && taskCreateDispatches.get(requestId) === dispatch) taskCreateDispatches.delete(requestId); }
       emit('task.updated', { taskId: current.id, status: current.status });
-      return { task: projectTask(current) };
+      return { task: projectTaskWithUsage(current) };
     },
     'ui.task.start': async p => {
       const current = (await task('task.get', { id: idParam(p) })).task;
+      if (!current.parentTaskId) {
+        const children = (await task('task.child.list', { parentTaskId: current.id })).children;
+        if (children.some(child => !['completed', 'failed', 'cancelled'].includes(child.status))) {
+          throw uiError('TASK_CHILD_ACTIVE', 'Child Tasks must finish before the parent writer starts');
+        }
+      }
       if (p.expectedRev !== undefined && current.rev !== p.expectedRev) throw uiError('TASK_CONFLICT', '任务已被其他操作修改');
       if (current.status !== 'queued') throw uiError('TASK_NOT_QUEUED', '只有待启动任务可以启动；请查看当前任务状态');
-      return { task: projectTask(await runTask(current, { provider: string(p.agentProvider, 80) || undefined,
+      return { task: projectTaskWithUsage(await runTask(current, { provider: string(p.agentProvider, 80) || undefined,
         requestId: string(p.requestId, 160) || undefined })) };
     },
     'ui.task.pause': async p => {
+      const preflight = (await task('task.get', { id: idParam(p) })).task;
+      if (p.expectedRev !== undefined && preflight.rev !== p.expectedRev) throw uiError('TASK_CONFLICT', 'Task changed before pause');
+      let fence = null;
+      if (!preflight.parentTaskId) {
+        const children = (await task('task.child.list', { parentTaskId: preflight.id })).children;
+        if (children.some(child => !['completed', 'failed', 'cancelled'].includes(child.status))) {
+          throw uiError('TASK_CHILD_ACTIVE', 'Stop and reconcile child Tasks before pausing the parent');
+        }
+        fence = (await task('task.block', { id: preflight.id, expectedRev: preflight.rev,
+          reason: 'Owner pause in progress; Agent stop must be confirmed' })).task;
+        const afterFence = (await task('task.child.list', { parentTaskId: preflight.id })).children;
+        if (afterFence.some(child => !['completed', 'failed', 'cancelled'].includes(child.status))) {
+          throw uiError('TASK_CHILD_ACTIVE', 'A child started during pause preparation; parent remains blocked for review');
+        }
+      }
       const operations = await services.capabilityService?.cancelTaskOperations?.({ taskId: idParam(p) });
       if (operations?.some(row => row.status === 'unknown')) throw uiError('INVOKE_CANCEL_UNCONFIRMED', '操作结果未知，需核验后暂停任务');
       const current = (await task('task.get', { id: idParam(p) })).task;
-      if (p.expectedRev !== undefined && current.rev !== p.expectedRev) throw uiError('TASK_CONFLICT', '任务已被其他操作修改');
+      if (current.rev !== (fence?.rev ?? preflight.rev)) throw uiError('TASK_CONFLICT', 'Task changed during pause');
       await stopTask(current);
       const result = await task('task.pause', { id: current.id, expectedRev: current.rev, reason: string(p.reason, 1000) });
       emit('task.updated', { taskId: result.task?.id, status: result.task?.status });
-      return { task: projectTask(result.task) };
+      return { task: projectTaskWithUsage(result.task) };
     },
     'ui.task.resume': async p => {
       const current = (await task('task.get', { id: idParam(p) })).task;
+      if (!current.parentTaskId) {
+        const children = (await task('task.child.list', { parentTaskId: current.id })).children;
+        if (children.some(child => !['completed', 'failed', 'cancelled'].includes(child.status))) {
+          throw uiError('TASK_CHILD_ACTIVE', 'Child Tasks must finish before the parent writer resumes');
+        }
+      }
       if (p.expectedRev !== undefined && current.rev !== p.expectedRev) throw uiError('TASK_CONFLICT', '任务已被其他操作修改');
       if (!['paused', 'waiting', 'blocked'].includes(current.status)) throw uiError('TASK_NOT_RESUMABLE', '任务当前不能恢复');
-      return { task: projectTask(await runTask(current, { requestId: string(p.requestId, 160) || undefined })) };
+      return { task: projectTaskWithUsage(await runTask(current, { requestId: string(p.requestId, 160) || undefined })) };
     },
     'ui.task.reconcile': async p => {
       const current = (await task('task.get', { id: idParam(p) })).task;
@@ -1027,23 +1238,45 @@ export function createDesktopUiService({ services = {}, system = services.system
       services.continuityService?.runtime?.acknowledgeTransactionRecovery?.(current.id);
       services.toolExecutionCoordinator?.acknowledgeTaskRecovery(current.id);
       services.capabilityService.acknowledgeTaskRecovery(current.id);
-      const decision = services.taskService.runtime.addDecision({ id: current.id, expectedRev: current.rev,
+      const reconciled = current.parentTaskId ? services.taskService.runtime.acknowledgeUnknownAttempts({
+        id: current.id, expectedRev: current.rev, reviewSummary: string(p.reviewSummary, 1000).trim()
+      }) : current;
+      const decision = services.taskService.runtime.addDecision({ id: current.id, expectedRev: reconciled.rev,
         decision: 'Owner reviewed interrupted effect', rationale: string(p.reviewSummary, 1000).trim() });
       const reviewed = services.taskService.runtime.setProgress({ id: current.id, expectedRev: decision.rev,
         note: `Owner reviewed interrupted effect: ${string(p.reviewSummary, 1000).trim()}` });
       const resumed = await runTask(reviewed, { provider: recoveryProvider, content: string(p.nextInstruction, 32_000).trim(),
         requestId: string(p.requestId, 160).trim() });
-      return { task: projectTask(resumed) };
+      return { task: projectTaskWithUsage(resumed) };
     },
     'ui.task.cancel': async p => {
+      const first = (await task('task.get', { id: idParam(p) })).task;
+      if (p.expectedRev !== undefined && first.rev !== p.expectedRev) throw uiError('TASK_CONFLICT', 'Task changed before cancellation');
+      const children = !first.parentTaskId ? (await task('task.child.list', { parentTaskId: first.id })).children : [];
+      if (children.some(child => !['completed', 'failed', 'cancelled'].includes(child.status))) {
+        if (!['blocked', 'completed', 'failed', 'cancelled'].includes(first.status)) {
+          await task('task.block', { id: first.id, expectedRev: first.rev, reason: 'Owner cancelling child Tasks' });
+        }
+        for (const child of children) {
+          if (['completed', 'failed', 'cancelled'].includes(child.status)) continue;
+          const childOperations = await services.capabilityService?.cancelTaskOperations?.({ taskId: child.id });
+          if (childOperations?.some(row => row.status === 'unknown')) throw uiError('INVOKE_CANCEL_UNCONFIRMED', 'Child effect requires review before parent cancellation');
+          const currentChild = (await task('task.get', { id: child.id })).task;
+          await stopTask(currentChild, { cancelMissingManagedSession: true });
+          await confirmStoppedReadChild(currentChild);
+          const settledChild = (await task('task.get', { id: child.id })).task;
+          await task('task.cancel', { id: settledChild.id, expectedRev: settledChild.rev, reason: 'Parent cancelled by Owner' });
+        }
+      }
       const stoppedOperations = await services.capabilityService?.cancelTaskOperations?.({ taskId: idParam(p) });
       if (stoppedOperations?.some(row => row.status === 'unknown')) throw uiError('INVOKE_CANCEL_UNCONFIRMED', '操作结果未知，需核验后取消任务');
       const current = (await task('task.get', { id: idParam(p) })).task;
-      if (p.expectedRev !== undefined && current.rev !== p.expectedRev) throw uiError('TASK_CONFLICT', '任务已被其他操作修改');
       await stopTask(current, { cancelMissingManagedSession: true });
-      const result = await task('task.cancel', { id: current.id, expectedRev: current.rev, reason: string(p.reason, 1000) });
+      await confirmStoppedReadChild(current);
+      const settled = (await task('task.get', { id: current.id })).task;
+      const result = await task('task.cancel', { id: settled.id, expectedRev: settled.rev, reason: string(p.reason, 1000) });
       emit('task.updated', { taskId: result.task?.id, status: result.task?.status });
-      return { task: projectTask(result.task) };
+      return { task: projectTaskWithUsage(result.task) };
     },
     'ui.task.handoff': async p => {
       const current = (await task('task.get', { id: idParam(p) })).task;
@@ -1054,7 +1287,7 @@ export function createDesktopUiService({ services = {}, system = services.system
       const result = await continuity('continuity.rollover', { taskId: current.id, targetProvider, reason: 'provider-switch' });
       const updated = (await task('task.get', { id: current.id })).task;
       emit('task.updated', { taskId: updated.id, status: updated.status });
-      return { task: projectTask(updated), handoff: { success: Boolean(result.to?.sessionId), from: result.from, to: result.to } };
+      return { task: projectTaskWithUsage(updated), handoff: { success: Boolean(result.to?.sessionId), from: result.from, to: result.to } };
     },
     'ui.workspace.list': async () => {
       const result = await workspace('workspace.list', {});
@@ -1132,7 +1365,7 @@ export function createDesktopUiService({ services = {}, system = services.system
       emit('approval.pending', { approvalId: result.approvalId });
       return selected(result, ['status', 'approvalId', 'expiresAt']);
     },
-    'ui.agent.list': async () => ({ agents: (await agent('agent.list', {})).providers.map(projectAgent) }),
+    'ui.agent.list': async p => ({ agents: (await agent('agent.list', { refresh: p.refresh === true })).providers.map(projectAgent) }),
     'ui.agent.health': async p => projectAgent(await agent('agent.health', { provider: string(p.provider, 80), refresh: p.refresh === true })),
     'ui.agent.presets': async p => {
       if (p.provider !== 'dsh') throw uiError('INVALID_PARAMS', 'Preset discovery is available for DSH only');
@@ -1141,10 +1374,13 @@ export function createDesktopUiService({ services = {}, system = services.system
         presets: (result.presets ?? []).slice(0, 200).map(row => ({ id: string(row.id, 100), compatible: row.compatible === true, reason: string(row.reason, 100) || null })) };
     },
     'ui.agent.configure': async p => {
-      if (string(p.agentId ?? p.provider, 80) !== 'dsh') throw Object.assign(new Error('Unsupported connector'), { code: 'INVALID_PARAMS' });
-      if (!p.config || typeof p.config !== 'object' || Array.isArray(p.config)) throw uiError('INVALID_PARAMS', 'DSH configuration must be an object');
-      const result = await agent('agent.configure', { provider: 'dsh', settings: p.config });
-      return { provider: 'dsh', supported: result.supported === true, applied: false, restartRequired: result.restartRequired === true, configuration: projectDshConfiguration(result.configuration) };
+      const provider = string(p.agentId ?? p.provider, 80);
+      if (provider !== 'dsh' && !AGENT_RUNTIME_IDS.includes(provider)) throw uiError('INVALID_PARAMS', 'Unsupported connector');
+      if (!p.config || typeof p.config !== 'object' || Array.isArray(p.config)) throw uiError('INVALID_PARAMS', 'Agent configuration must be an object');
+      if (provider !== 'dsh' && Object.keys(p.config).some(key => !AGENT_RUNTIME_INPUT_KEYS.has(key))) throw uiError('INVALID_PARAMS', 'Unsupported Agent runtime configuration fields');
+      const result = await agent('agent.configure', { provider, settings: p.config });
+      if (provider === 'dsh') return { provider: 'dsh', supported: result.supported === true, applied: false, restartRequired: result.restartRequired === true, configuration: projectDshConfiguration(result.configuration) };
+      return { provider, supported: result.supported === true, applied: result.applied === true, configuration: projectAgentRuntimeConfiguration(result.configuration) };
     },
     'ui.extensions.settings.describe': async p => {
       const result = record(await extensions('ext.settings.describe', { id: idParam(p) }));
@@ -1478,7 +1714,7 @@ export function createDesktopUiService({ services = {}, system = services.system
       ]);
       return {
         sessions: (sessionRows.sessions ?? []).filter(row => `${row.title}`.toLocaleLowerCase().includes(query.toLocaleLowerCase())).slice(0, 10).map(projectSession),
-        tasks: (taskRows.tasks ?? []).slice(0, 10).map(projectTask),
+        tasks: (taskRows.tasks ?? []).slice(0, 10).map(projectTaskWithUsage),
         plugins: (pluginRows.plugins ?? []).slice(0, 10).map(projectPlugin)
       };
     }

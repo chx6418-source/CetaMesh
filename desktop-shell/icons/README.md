@@ -3,7 +3,7 @@
 The active artwork is the Owner-provided green CetaMesh mark (2026-10-22).
 The four `cetamesh-icon-{180,256,512,1024}.png` files are preserved byte-for-byte
 from the supplied images. Builds use repository-relative paths and do not depend
-on the external `D:/cetamesh-web/brand/` directory.
+on an external image-source directory.
 
 The default master is `cetamesh-icon-1024.png`. Exact-size 256 and 512 images are
 copied unchanged; missing sizes are resampled. No padding, extra rounded clipping,

@@ -689,6 +689,7 @@ function abortableSseFetch() {
 }
 
 /** 组装带 Model Runtime / Router / Agent 的完整 chat-service（全 fixture，不联网不碰 DSH）。 */
+const rejectUnexpectedNetwork = async () => { throw new Error('Unexpected network access in fixture; inject fetchImpl'); };
 function makeFullService({ withKey = true, fetchImpl, baseUrl = 'https://api.deepseek.test', router = true, api = dshDownApi(), agent = false, agentProviderId = 'dsh', agentBoundary = 'unsupported', stateDir: overrideDir, buildProductContext, defaultModelConfig, onEvent, platformRoute, agentSendResult = null } = {}) {
   const dir = overrideDir ?? path.join(stateDir, 's1-' + (++caseSeq));
   fs.mkdirSync(dir, { recursive: true });
@@ -699,12 +700,12 @@ function makeFullService({ withKey = true, fetchImpl, baseUrl = 'https://api.dee
       providers: [
         createOpenAiCompatibleModelProvider({
           id: 'deepseek-official', label: 'DeepSeek 官方', baseUrl,
-          defaultModel: 'deepseek-chat', secrets, fetchImpl: typeof fetchImpl === 'function' ? fetchImpl : fetchImpl?.fetch ?? fetch,
+          defaultModel: 'deepseek-chat', secrets, fetchImpl: typeof fetchImpl === 'function' ? fetchImpl : fetchImpl?.fetch ?? rejectUnexpectedNetwork,
           supportsStreamOptions: true, log: () => {}
         }),
         createOpenAiCompatibleModelProvider({
           id: 'openai', label: 'OpenAI', baseUrl: 'https://api.openai.test/v1',
-          defaultModel: 'gpt-4o-mini', secrets, fetchImpl: typeof fetchImpl === 'function' ? fetchImpl : fetchImpl?.fetch ?? fetch,
+          defaultModel: 'gpt-4o-mini', secrets, fetchImpl: typeof fetchImpl === 'function' ? fetchImpl : fetchImpl?.fetch ?? rejectUnexpectedNetwork,
           reasoningParam: 'reasoning_effort', log: () => {}
         })
       ]
@@ -1329,6 +1330,8 @@ function makeFullService({ withKey = true, fetchImpl, baseUrl = 'https://api.dee
   const emptySession = await service.execute({ method: 'chat.sessions.create', params: { title: 'empty-history' } });
   assert.deepEqual(await service.execute({ method: 'chat.history', params: { id: emptySession.id } }), {
     id: emptySession.id, total: 0, messages: [], nextBeforeMessageId: null, hasMore: false,
+    sessionUsage: { inputTokens: null, outputTokens: null, totalTokens: null, reasoningTokens: null,
+      cacheReadTokens: null, cacheWriteTokens: null, cacheHitRate: null, requestCount: null, accountingComplete: null },
     nextAfterMessageId: null, hasMoreAfter: false
   });
 

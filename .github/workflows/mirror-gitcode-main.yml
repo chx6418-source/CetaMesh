@@ -1,0 +1,31 @@
+name: Mirror public main to GitCode
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gitcode-main-mirror
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    if: github.repository == 'chx6418-source/CetaMesh' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Mirror main without changing tags or releases
+        env:
+          GITCODE_MIRROR_TOKEN: ${{ secrets.GITCODE_MIRROR_TOKEN }}
+        run: node scripts/mirror-gitcode-main.mjs

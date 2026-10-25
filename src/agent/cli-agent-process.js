@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { isSea } from 'node:sea';
+import { readJsonFile } from '../storage/json-file.js';
 
 const MAX_CAPTURE_BYTES = 4 * 1024 * 1024;
 const MIN_TIMEOUT_MS = 1000;
@@ -78,16 +79,39 @@ export function createMinimalAgentEnv(source = process.env, overrides = {}, { au
   return result;
 }
 
-function resolveNpmShimScript(executable, exists = fs.existsSync) {
+const NPM_CLI_PACKAGES = Object.freeze({
+  codex: Object.freeze({ packageName: '@openai/codex', binPath: 'bin/codex.js', verifyManifest: false }),
+  gemini: Object.freeze({ packageName: '@google/gemini-cli', binPaths: Object.freeze({ 'dist/index.js': null, 'bundle/gemini.js': '0.65.0' }), verifyManifest: true }),
+  qwen: Object.freeze({ packageName: '@qwen-code/qwen-code', binPaths: Object.freeze({ 'dist/index.js': null, 'cli-entry.js': '0.26.1' }), verifyManifest: true })
+});
+
+function resolveNpmShimScript(name, executable) {
+  const spec = Object.hasOwn(NPM_CLI_PACKAGES, name) ? NPM_CLI_PACKAGES[name] : null;
+  if (!spec || path.basename(executable).toLowerCase() !== name + path.extname(executable).toLowerCase()) return null;
   const directory = path.dirname(executable);
-  const candidates = [
-    path.join(directory, 'node_modules', '@openai', 'codex', 'bin', 'codex.js'),
-    path.resolve(directory, '..', '@openai', 'codex', 'bin', 'codex.js'),
-    path.resolve(directory, '..', '..', '@openai', 'codex', 'bin', 'codex.js')
-  ];
-  for (const candidate of candidates) {
-    try { if (exists(candidate)) return path.resolve(candidate); }
-    catch { continue; /* Unreadable candidates are skipped and the remaining explicit paths are checked. */ }
+  const packageParts = spec.packageName.split('/');
+  const packageRoots = [path.join(directory, 'node_modules', ...packageParts),
+    path.resolve(directory, '..', ...packageParts), path.resolve(directory, '..', '..', ...packageParts)];
+  for (const packageRoot of packageRoots) {
+    try {
+      let binPath = spec.binPath;
+      if (spec.verifyManifest) {
+        // Only independently verified official package/bin layouts are accepted.
+        // Vendor metadata cannot select arbitrary code, even at a known version.
+        const manifest = readJsonFile(path.join(packageRoot, 'package.json'), { maxBytes: 64 * 1024 });
+        if (manifest?.name !== spec.packageName || !manifest.bin || Array.isArray(manifest.bin)
+          || !Object.hasOwn(manifest.bin, name) || typeof manifest.bin[name] !== 'string'
+          || !Object.hasOwn(spec.binPaths, manifest.bin[name])) continue;
+        binPath = manifest.bin[name];
+        if (spec.binPaths[binPath] !== null && manifest.version !== spec.binPaths[binPath]) continue;
+      }
+      const candidate = path.join(packageRoot, binPath);
+      if (!isFile(candidate)) continue;
+      const realPackageRoot = fs.realpathSync(packageRoot);
+      const relative = path.relative(realPackageRoot, fs.realpathSync(candidate));
+      if (!relative || relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative)) continue;
+      return path.resolve(candidate);
+    } catch { continue; /* Missing, malformed or escaping packages never authorize a different provider. */ }
   }
   return null;
 }
@@ -188,6 +212,11 @@ export function findCliCandidates(name, {
     }
   }
   if (platform === 'win32' && requested === 'codex') found.push(...desktopManagedCodexCandidates(environmentValue(env, 'LOCALAPPDATA')));
+  if (platform === 'win32' && requested === 'opencode') {
+    const localAppData = environmentValue(env, 'LOCALAPPDATA');
+    // Observed Desktop-bundled CLI only; the sibling OpenCode.exe is the GUI.
+    if (localAppData && path.isAbsolute(localAppData)) found.push(path.join(localAppData, 'Programs', '@opencodedesktop', 'resources', 'opencode-cli.exe'));
+  }
   return [...new Set(found.filter(isFile))].sort((a, b) => Number(/\.(?:cmd|bat)$/i.test(a)) - Number(/\.(?:cmd|bat)$/i.test(b)));
 }
 
@@ -203,42 +232,55 @@ function normalizedTimeout(value, fallback) {
   return Math.max(MIN_TIMEOUT_MS, Math.min(MAX_TIMEOUT_MS, Number.isFinite(number) && number > 0 ? number : fallback));
 }
 
-function killProcessTree(child) {
-  if (!child || child.exitCode !== null || child.killed) return;
-  if (process.platform === 'win32' && Number.isInteger(child.pid)) {
-    // taskkill takes an argument array (no shell interpolation) so cancellation covers
-    // Codex and the local sandbox commands it started.
-    const killer = spawn('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], {
-      windowsHide: true,
-      stdio: 'ignore',
-      env: createMinimalAgentEnv()
+export async function terminateCliProcessTree(child, {
+  platform = process.platform, signalProcess = process.kill.bind(process), confirmationTimeoutMs = 4000
+} = {}) {
+  if (!child || !Number.isInteger(child.pid)) return false;
+  if (platform === 'win32') {
+    return new Promise(resolve => {
+      const killer = spawn('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], {
+        windowsHide: true, stdio: 'ignore', env: createMinimalAgentEnv()
+      });
+      killer.once('error', () => resolve(false));
+      killer.once('close', code => resolve(code === 0));
     });
-    killer.once('error', (error) => {
-      try { child.kill(); }
-      catch (killError) {
-        if (killError?.code !== 'ESRCH') process.emitWarning(`Unable to stop CLI process tree: ${error?.code ?? killError?.code ?? 'unknown'}`);
-      }
-    });
-    return;
   }
-  try {
-    if (Number.isInteger(child.pid) && process.platform !== 'win32') process.kill(-child.pid, 'SIGTERM');
-    else child.kill('SIGTERM');
-  } catch (error) {
-    if (error?.code !== 'ESRCH') process.emitWarning(`Unable to stop CLI process: ${error?.code ?? 'unknown'}`);
-  }
+  // Only the invocation-owned group is signalled. A missing group or denied
+  // signal is not proof that its root/descendants have stopped.
+  try { signalProcess(-child.pid, 'SIGKILL'); }
+  catch { return false; }
+  const deadline = Date.now() + confirmationTimeoutMs;
+  do {
+    try { signalProcess(-child.pid, 0); }
+    catch (error) { return error?.code === 'ESRCH'; }
+    if (Date.now() >= deadline) return false;
+    await new Promise(resolve => setTimeout(resolve, Math.min(20, Math.max(1, deadline - Date.now()))));
+  } while (true);
+}
+
+function inspectNaturalExit(child) {
+  // Natural root exit retains the existing Windows contract; it is not a
+  // tree-termination claim. POSIX groups still observable after root close
+  // must retain ownership (including inaccessible groups).
+  if (process.platform === 'win32') return true;
+  try { process.kill(-child.pid, 0); return false; }
+  catch (error) { return error?.code === 'ESRCH'; }
 }
 
 /** Shared lifecycle for local CLI-backed Agent Providers. Provider flags/protocol stay outside. */
 export class CliAgentProcess {
   constructor({ name, executable, argsPrefix = [], envSource = process.env, spawnImpl = spawn, probeImpl = spawnSync,
-    platform = process.platform, nodeExecutable = process.execPath } = {}) {
+    platform = process.platform, nodeExecutable = process.execPath,
+    terminateImpl = terminateCliProcessTree, terminationTimeoutMs = 5000, inspectNaturalExitImpl = inspectNaturalExit } = {}) {
     this.name = String(name ?? 'cli-agent');
     this.executableOverride = executable;
     this.selectedExecutable = null;
     this.argsPrefix = [...argsPrefix].map(String);
     this.envSource = envSource;
     this.spawnImpl = spawnImpl;
+    this.terminateImpl = terminateImpl;
+    this.inspectNaturalExitImpl = inspectNaturalExitImpl;
+    this.terminationTimeoutMs = Math.max(10, Math.min(10000, Number(terminationTimeoutMs) || 5000));
     this.probeImpl = probeImpl;
     this.platform = platform;
     // process.execPath is the packaged Core in a SEA release, not a Node CLI.
@@ -276,10 +318,10 @@ export class CliAgentProcess {
     if (this.platform !== 'win32' || !/\.(?:cmd|bat)$/i.test(executable)) {
       return { executable, argsPrefix: this.argsPrefix };
     }
-    const script = resolveNpmShimScript(executable);
-    if (!script) throw Object.assign(new Error('Windows Codex command shim does not resolve to the installed npm CLI package'), { code: 'UNSUPPORTED_WINDOWS_SHIM' });
+    const script = resolveNpmShimScript(this.name, executable);
+    if (!script) throw Object.assign(new Error('Windows command shim does not resolve to the requested installed npm CLI package'), { code: 'UNSUPPORTED_WINDOWS_SHIM' });
     const nodeExecutable = this.nodeExecutable ?? findCliExecutable(this.platform === 'win32' ? 'node.exe' : 'node', { env: this.environment(), platform: this.platform });
-    if (!nodeExecutable) throw Object.assign(new Error('Windows Codex npm shim requires an installed standalone Node runtime'), { code: 'NODE_RUNTIME_UNAVAILABLE' });
+    if (!nodeExecutable) throw Object.assign(new Error('Windows npm shim requires an installed standalone Node runtime'), { code: 'NODE_RUNTIME_UNAVAILABLE' });
     return { executable: nodeExecutable, argsPrefix: [script, ...this.argsPrefix] };
   }
 
@@ -343,28 +385,53 @@ export class CliAgentProcess {
       cwd,
       env: createMinimalAgentEnv(this.environment(), env, { authorizedEnvKeys }),
       windowsHide: true,
-      detached: this.platform !== 'win32',
+      detached: process.platform !== 'win32',
       stdio: ['pipe', 'pipe', 'pipe']
     });
     let stdout = '';
     let stderr = '';
     let settled = false;
+    let closed = false;
     let timedOut = false;
-    let cancelled = false;
+    let cancelRequested = false;
+    let runtimeError = false;
+    let stopRequested = false;
+    let treeConfirmed = null;
+    let naturalExitAccepted = false;
+    let closeResult = null;
+    let stopTimer;
     let resolveDone;
     let rejectDone;
     const done = new Promise((resolve, reject) => { resolveDone = resolve; rejectDone = reject; });
-    const timer = setTimeout(() => {
-      timedOut = true;
-      killProcessTree(child);
-    }, normalizedTimeout(timeoutMs, 10 * 60 * 1000));
-    const finish = (result) => {
+    const confirmed = () => closed && (stopRequested ? treeConfirmed === true : naturalExitAccepted);
+    const publish = result => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      this.sessions.delete(sessionId);
+      clearTimeout(stopTimer);
       resolveDone(result);
     };
+    const unknown = () => publish({ sessionId, exitCode: null, signal: null,
+      timedOut, cancelled: false, cancellationRequested: cancelRequested,
+      terminationConfirmed: false, effectStatus: 'unknown', code: runtimeError ? 'PROCESS_EXIT_UNCONFIRMED' : 'INVOKE_CANCEL_UNCONFIRMED', stdout, stderr });
+    const finish = () => {
+      if (!confirmed()) return;
+      this.sessions.delete(sessionId);
+      publish({ sessionId, ...closeResult, timedOut, cancelled: cancelRequested,
+        ...(stopRequested ? { terminationConfirmed: true } : { processExitObserved: true }), stdout, stderr });
+    };
+    const stop = () => {
+      if (confirmed() || stopRequested || closed) return;
+      stopRequested = true;
+      clearTimeout(timer);
+      stopTimer = setTimeout(unknown, this.terminationTimeoutMs);
+      Promise.resolve().then(() => this.terminateImpl(child)).then(result => {
+        treeConfirmed = result === true;
+        if (!treeConfirmed) unknown();
+        else finish();
+      }, () => { treeConfirmed = false; unknown(); });
+    };
+    const timer = setTimeout(() => { timedOut = true; stop(); }, normalizedTimeout(timeoutMs, 10 * 60 * 1000));
     // Decode incrementally: a JSONL record can split in the middle of a UTF-8 character.
     child.stdout?.setEncoding('utf8');
     child.stderr?.setEncoding('utf8');
@@ -379,27 +446,49 @@ export class CliAgentProcess {
       catch (error) { process.emitWarning(`CLI stderr consumer failed: ${error?.code ?? error?.message ?? 'unknown'}`); }
     });
     child.once('error', (error) => {
+      if (Number.isInteger(child.pid)) {
+        runtimeError = true;
+        stop();
+        unknown();
+        return;
+      }
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearTimeout(stopTimer);
       this.sessions.delete(sessionId);
       rejectDone(Object.assign(new Error('Unable to start local CLI process'), { code: error?.code === 'ENOENT' ? 'PROVIDER_UNAVAILABLE' : 'PROCESS_START_FAILED' }));
     });
-    child.once('close', (exitCode, signal) => finish({
-      sessionId, exitCode: Number.isInteger(exitCode) ? exitCode : 1, signal: signal ?? null,
-      timedOut, cancelled, stdout, stderr
-    }));
+    child.once('close', (exitCode, signal) => {
+      closed = true;
+      closeResult = { exitCode: Number.isInteger(exitCode) ? exitCode : 1, signal: signal ?? null };
+      if (stopRequested) { finish(); return; }
+      try { naturalExitAccepted = this.inspectNaturalExitImpl(child) === true; }
+      catch { naturalExitAccepted = false; }
+      if (!naturalExitAccepted) { runtimeError = true; unknown(); }
+      else finish();
+    });
+    const cleanupPermitted = () => {
+      if (closed && !stopRequested && !naturalExitAccepted) {
+        try { naturalExitAccepted = this.inspectNaturalExitImpl(child) === true; }
+        catch { naturalExitAccepted = false; }
+        if (naturalExitAccepted) this.sessions.delete(sessionId);
+      }
+      return confirmed();
+    };
     const handle = {
-      sessionId,
-      child,
-      done,
+      sessionId, child, done,
+      cleanupPermitted,
+      terminationConfirmed: () => stopRequested ? confirmed() : naturalExitAccepted ? undefined : false,
+      acceptsInput: () => !stopRequested && !closed && !settled,
       cancel: () => {
-        if (settled) return { cancelled: false, reason: 'already-finished' };
-        cancelled = true;
-        killProcessTree(child);
-        return { cancelled: true, sessionId };
+        cleanupPermitted();
+        if (closed) return { cancelled: false, reason: confirmed() ? 'already-finished' : 'exit-unconfirmed' };
+        cancelRequested = true;
+        stop();
+        return { cancelled: false, requested: true, state: 'cancel-requested', sessionId };
       },
-      shutdown: () => { if (!settled) { cancelled = true; killProcessTree(child); } }
+      shutdown: () => { cleanupPermitted(); if (!closed && !confirmed()) { cancelRequested = true; stop(); } }
     };
     this.sessions.set(sessionId, handle);
     if (inputMode === 'end') child.stdin?.end(String(input ?? ''));
@@ -410,6 +499,7 @@ export class CliAgentProcess {
   send(sessionId, content, { end = false } = {}) {
     const handle = this.sessions.get(String(sessionId ?? ''));
     if (!handle) throw Object.assign(new Error('CLI process session is not active'), { code: 'SESSION_NOT_FOUND' });
+    if (!handle.acceptsInput()) throw Object.assign(new Error('CLI process is stopping or exit is unconfirmed'), { code: 'SESSION_STOPPING' });
     if (!handle.child.stdin?.writable) throw Object.assign(new Error('CLI process stdin is closed'), { code: 'SESSION_CLOSED' });
     if (end) handle.child.stdin.end(String(content ?? ''));
     else handle.child.stdin.write(String(content ?? ''));
@@ -425,6 +515,8 @@ export class CliAgentProcess {
     const active = [...this.sessions.values()];
     for (const handle of active) handle.shutdown();
     await Promise.allSettled(active.map((handle) => handle.done));
+    if (this.sessions.size) throw Object.assign(new Error('CLI process-tree exit remains unconfirmed; ownership retained'),
+      { code: 'PROVIDER_CLOSE_UNKNOWN', effectStatus: 'unknown' });
     return { stopped: active.length };
   }
 }

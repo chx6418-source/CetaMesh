@@ -66,9 +66,15 @@ export function modelStreamEvent(type, data = {}) {
  * 定义一个 Model Provider：
  * - id/label 必填；listModels/chat/stream 必须真实实现（缺失直接抛错，不造假桩）；
  * - health 可选；未探测的 Provider 必须返回 unknown/unverified，不能伪报 available；
+ * - contextCapabilities(model): provider-owned {status: verified|declared|unknown,
+ *   contextWindowTokens, maxOutputTokens, defaultOutputTokens, source, version}. A known
+ *   profile obligates chat/stream to honor options.maxOutputTokens on the wire.
+ * - countInputTokens({model,messages,tools}) is an optional synchronous exact
+ *   counter including model framing/tools/native continuation; return
+ *   {tokens,exact:true,tokenizer}. No approximate result may claim exactness.
  * - 实例不可变（Object.freeze），Key 只能经注入的 secrets 在调用时解析，绝不缓存。
  */
-export function defineModelProvider({ id, label, defaultModel = null, supportsTools = false, supportsToolsForModel = null, supportsReasoning = false, settingsFields = [], methods }) {
+export function defineModelProvider({ id, label, defaultModel = null, supportsTools = false, supportsToolsForModel = null, supportsReasoning = false, promptCacheCapabilities = null, contextCapabilities = null, countInputTokens = null, settingsFields = [], methods }) {
   if (typeof id !== 'string' || !id.trim()) throw new Error('defineModelProvider 需要 id');
   if (typeof label !== 'string' || !label.trim()) throw new Error('defineModelProvider 需要 label');
   if (!methods || typeof methods !== 'object') throw new Error('defineModelProvider 需要 methods');
@@ -86,6 +92,10 @@ export function defineModelProvider({ id, label, defaultModel = null, supportsTo
     defaultModel: typeof defaultModel === 'string' && defaultModel ? defaultModel : null,
     settingsFields: () => normalizedSettingsFields,
     streamProtocol: MODEL_STREAM_PROTOCOL,
+    promptCacheCapabilities: typeof promptCacheCapabilities === 'function' ? promptCacheCapabilities
+      : () => ({ status: 'unknown', mode: null, readUsageField: null, writeUsageField: null }),
+    contextCapabilities: typeof contextCapabilities === 'function' ? contextCapabilities : () => ({ status: 'unknown' }),
+    countInputTokens: typeof countInputTokens === 'function' ? countInputTokens : null,
     listModels: methods.listModels,
     chat: methods.chat,
     stream: methods.stream,

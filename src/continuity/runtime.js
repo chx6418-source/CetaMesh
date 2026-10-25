@@ -408,7 +408,19 @@ export function createContinuityRuntime({
     const sessionKey = `${providerId}:${sid}`;
 
     const realUsage = normalizeUsageTokens(usage);
-    if (realUsage) {
+    if (Array.isArray(usage?.requests)) {
+      for (const receipt of usage.requests) {
+        if (!receipt || typeof receipt.requestId !== 'string' || !receipt.requestId) continue;
+        monitor.record(sessionKey, {
+          requestId: receipt.requestId,
+          accountingComplete: usage.accountingComplete !== false && typeof receipt.inputTokens === 'number' && typeof receipt.outputTokens === 'number',
+          inputTokens: receipt.inputTokens,
+          outputTokens: receipt.outputTokens,
+          windowTokens: Number.isFinite(receipt.windowTokens) && receipt.windowTokens > 0 ? receipt.windowTokens
+            : Number.isFinite(Number(windowTokens)) && Number(windowTokens) > 0 ? Number(windowTokens) : null
+        });
+      }
+    } else if (realUsage) {
       monitor.record(sessionKey, {
         inputTokens: realUsage.inputTokens,
         outputTokens: realUsage.outputTokens,
@@ -479,6 +491,15 @@ export function createContinuityRuntime({
    */
   async function rollover({ taskId, reason, targetProvider, coding, relevantFiles, workspaceFacts, modelProvider, model, reasoningEffort } = {}) {
     const task = requireTask(taskId);
+    if (task.parentTaskId && task.childContract?.mode === 'read-only'
+      && targetProvider && targetProvider !== 'cetamesh') {
+      throw continuityError('AGENT_READ_ONLY_BOUNDARY_UNVERIFIED', 'Child Task cannot hand off to an external native Agent without a verified read-only boundary');
+    }
+    if ((!task.parentTaskId && taskRuntime.activeWorkspaceReaders({ workspaceId: task.workspaceId }).length)
+      || (task.parentTaskId && taskRuntime.activeWorkspaceOwner({ workspaceId: task.workspaceId,
+        exceptTaskId: task.id, forReadOnlyTaskId: task.id }))) {
+      throw continuityError('ROLLOVER_NOT_SAFE', 'Workspace execution owner conflicts with Task handoff');
+    }
     if (!task.workspaceId) throw continuityError('WORKSPACE_REQUIRED', 'Continuity requires a Task-bound Workspace');
     if (inFlight.has(task.id)) {
       throw continuityError('ROLLOVER_IN_FLIGHT', '该任务已有一次 rollover 正在进行，拒绝重复执行');

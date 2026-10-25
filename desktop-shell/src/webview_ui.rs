@@ -444,7 +444,7 @@ pub fn run_webview_ui(paths: DesktopPaths, dev_url: Option<String>) -> Result<()
     } else {
         builder
     };
-    let webview = builder.build(&window)
+    let webview = crate::main_webview::build(builder, &window)
         .map_err(|error| format!("WebView2 启动失败：{error}。可尝试 --ui=legacy。"))?;
     match webview.zoom(f64::from(prefs.zoom)) {
         Ok(()) => log_applied_zoom(&paths.data_dir, prefs.zoom),
@@ -571,9 +571,15 @@ pub fn run_webview_ui(paths: DesktopPaths, dev_url: Option<String>) -> Result<()
                     *control_flow = ControlFlow::Exit;
                 }
             }
-            Event::WindowEvent { event: WindowEvent::Resized(_) | WindowEvent::Moved(_), .. } => {
+            Event::WindowEvent { event: WindowEvent::Resized(_) | WindowEvent::Moved(_) | WindowEvent::ScaleFactorChanged { .. }, .. } => {
                 sync_window_geometry(&window, &mut prefs);
-                let _ = webview.evaluate_script("window.dispatchEvent(new Event('resize'))");
+                if let Err(error) = crate::main_webview::resized(&webview, &window) {
+                    crate::supervisor::write_shell_log(&paths.data_dir, &format!("[ui-v2] 同步主视图尺寸失败：{error}"));
+                }
+            }
+            Event::WindowEvent { event: WindowEvent::Focused(true), .. } => {
+                // Child views do not install Wry's parent focus forwarding hook.
+                let _ = webview.focus();
             }
             Event::MainEventsCleared => {
                 if window.is_visible() && !window.is_minimized() { if let Some(browser) = &reference_browser { browser.resume(); } }

@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { SnowLumaWebSocketClient } from '@snowluma/sdk';
+import { OneBotWebSocketClient } from '../src/channel/qq/onebot-client.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const cfg = JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', 'config.json'), 'utf8'));
@@ -47,7 +47,7 @@ try {
 
 // 2) WebSocket 连接检查
 console.log('\n--- WebSocket ---');
-const bot = new SnowLumaWebSocketClient({ url: wsUrl, accessToken: accessToken || undefined, reconnect: false });
+const bot = new OneBotWebSocketClient({ url: wsUrl, accessToken: accessToken || undefined, reconnect: false });
 const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('超时')), 10_000));
 try {
   await Promise.race([bot.connect(), timeout]);

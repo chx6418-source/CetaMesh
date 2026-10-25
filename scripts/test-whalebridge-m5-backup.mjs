@@ -13,12 +13,37 @@ const make = () => {
   fixtures.push(fixture); fixture.stopWriters(); return fixture;
 };
 try {
+  const ownedLease = make(), ownedPlan = ownedLease.plan();
+  assert.equal(ownedLease.apply(ownedPlan, { approval: ownedLease.approve(ownedPlan) }).status, 'FIXTURE_MIGRATION_PASS',
+    'the fixture-acquired StateDir lock and bound process-identity sidecar must not stale an unchanged source plan');
+  assert.equal(ownedLease.verifyOriginals(ownedPlan), true);
+  for (const name of ['.core-owner.lock', '.core-owner.identity.json']) assert.equal(fs.existsSync(path.join(ownedLease.sources[0], 'state', name)), false,
+    'successful apply releases both its owned StateDir artifacts');
+
+  const sidecarTamper = make(), sidecarPlan = sidecarTamper.plan();
+  assert.throws(() => sidecarTamper.apply(sidecarPlan, { approval: sidecarTamper.approve(sidecarPlan), beforeVerify() {
+    const file = path.join(sidecarTamper.sources[0], 'state', '.core-owner.identity.json');
+    const metadata = readJsonFile(file);
+    fs.writeFileSync(file, JSON.stringify({ ...metadata, pid: metadata.pid + 1 }));
+  } }), { code: 'DATA_LEASE_BUSY' }, 'changing only the owned StateDir identity sidecar must revoke transaction authority');
+  assert.equal(sidecarTamper.authority(), null);
+  assert.equal(sidecarTamper.verifyOriginals(sidecarPlan), true);
+
+  const unownedSidecar = make();
+  fs.writeFileSync(path.join(unownedSidecar.sources[0], 'state', '.core-owner.identity.json'), JSON.stringify({ version: 1, fixture: 'preexisting-unowned-sidecar' }));
+  const unownedPlan = unownedSidecar.plan();
+  assert.equal(unownedPlan.report.status, 'DRY_RUN_PASS');
+  assert.throws(() => unownedSidecar.apply(unownedPlan, { approval: unownedSidecar.approve(unownedPlan) }), { code: 'STALE_PLAN' },
+    'a sidecar that was already part of the reviewed inventory cannot be excluded as newly acquired metadata');
+  assert.equal(unownedSidecar.authority(), null);
+
   const backup = make(), bp = backup.plan();
   assert.throws(() => backup.apply(bp, { approval: backup.approve(bp), crashAt: 'PLANNED', onCrash: () => {
     // Real filesystem failure confined to an allocated fixture: a file blocks
     // creation of the backup directory; no engine fault hook or real disk filling.
     fs.writeFileSync(path.join(backup.root, 'backups'), 'blocked fixture backup path');
   } }), { code: 'WRITE_FAILED' });
+  assert.equal(readJsonFile(path.join(backup.root, 'migration-journal.json')).failure, 'WRITE_FAILED');
   assert.equal(backup.authority(), null);
   assert.equal(backup.verifyOriginals(bp), true);
   assert.equal(backup.recover({ approval: backup.approve(bp) }).state, 'ROLLED_BACK');

@@ -219,6 +219,8 @@ const emptyObjectSchema = {
   assert.equal(result.status, 'completed');
   assert.equal(result.toolCalling, 'supported');
   assert.equal(result.text, 'It is 00:00 UTC.');
+  assert.equal(result.usage.total_tokens, 8, 'usage includes both provider requests, not only final synthesis');
+  assert.equal(result.usage.requestCount, 2);
   assert.equal(executed, 1);
   assert.deepEqual(activities.map(item => item.status), ['running', 'completed']);
   assert.equal(calls.length, 2);
@@ -318,8 +320,8 @@ const emptyObjectSchema = {
     { text: '', toolCalls: [
       { id: 'first', capabilityId: 'fixture.first', arguments: '{}' },
       { id: 'second', capabilityId: 'fixture.second', arguments: '{}' }
-    ] },
-    { text: 'Both approved actions completed.', toolCalls: [] }
+    ], usage: { total_tokens: 5 } },
+    { text: 'Both approved actions completed.', toolCalls: [], usage: { total_tokens: 3 } }
   ]);
   const coordinator = createToolExecutionCoordinator({ modelRuntime: runtime, capabilityBroker: broker,
     stateDir: path.join(temp, 'continuation-multi-call') });
@@ -339,6 +341,8 @@ const emptyObjectSchema = {
   const secondDecision = await broker.decide({ id: secondId, approve: true, actor: OWNER_ACTOR });
   const completed = await coordinator.resumeApproval({ approvalId: secondId, requestFingerprint: secondRow.fingerprint, decisionResult: secondDecision });
   assert.equal(completed.status, 'completed');
+  assert.equal(completed.usage.totalTokens, 8);
+  assert.equal(completed.usage.requestCount, 2, 'resumed tool batches do not count as provider requests');
   assert.deepEqual(executed, ['fixture.first', 'fixture.second']);
   assert.equal(calls.length, 2, 'the model is called again only after every call in the batch has a tool result');
   assert.deepEqual(calls[1].messages.filter(message => message.role === 'tool').map(message => message.tool_call_id), ['first', 'second']);
@@ -581,6 +585,7 @@ const emptyObjectSchema = {
         yield { type: 'assistant/tool-calls', data: { toolCalls: [
           { id: 'stream-clock', capabilityId: 'clock.now', name: 'clock.now', arguments: '{}' }
         ] } };
+        yield { type: 'assistant/message', data: { message: { content: 'Checking. ', usage: { prompt_tokens: 5, completion_tokens: 2 } } } };
         yield { type: 'turn/end', data: { reason: { kind: 'completed', usage: { prompt_tokens: 5, completion_tokens: 2 } }, resolvedModel: 'fixture-model' } };
       } else {
         yield { type: 'assistant/chunk', data: { chunk: { type: 'text-delta', text: 'It is fixture-time.' } } };
@@ -596,6 +601,10 @@ const emptyObjectSchema = {
     onTextDelta: delta => deltas.push(delta), onStreamReset: () => deltas.push('[reset]'),
     onActivity: activity => toolActivities.push(activity) });
   assert.equal(result.text, 'It is fixture-time.');
+  assert.equal(result.usage.inputTokens, 13);
+  assert.equal(result.usage.outputTokens, 6);
+  assert.equal(result.usage.totalTokens, 19);
+  assert.equal(result.usage.requestCount, 2);
   assert.deepEqual(deltas, ['Checking. ', '[reset]', 'It is fixture-time.'], 'text deltas are available before and after tool execution');
   assert.equal(requests.length, 2, 'each tool loop turn streams');
   assert.equal(requests[0].tools.length, 1);
@@ -685,4 +694,68 @@ fs.rmSync(temp, { recursive: true, force: true });
  assert.equal(executions,1);assert.equal(calls.at(-1).tools.length,0,'final synthesis cannot invoke further tools');
  assert.match(calls.at(-1).messages.at(-1).content,/summari/i);
  pass('bounded tool budget ends with useful final synthesis without extra side effects');
+}
+
+{
+  const broker = createCapabilityBroker({ policy: createCapabilityPolicy() });
+  broker.register({ id: 'fixture.large', permission: 'log', description: 'Large result', inputSchema: emptyObjectSchema,
+    risk: 'low', execute: () => ({ rows: Array.from({ length: 45 }, (_, i) => i), body: 'x'.repeat(15000) }) });
+  const { runtime, calls } = modelRuntimeWith([
+    { toolCalls: [{ id: 'large-call', capabilityId: 'fixture.large', arguments: '{}' }] },
+    { text: 'The result is incomplete; obtain the omitted evidence before concluding.', toolCalls: [] }
+  ]);
+  await createToolExecutionCoordinator({ modelRuntime: runtime, capabilityBroker: broker }).run({
+    providerId: 'fixture', messages: [{ role: 'user', content: 'Inspect all results.' }], actor: OWNER_ACTOR,
+    sessionId: 'large', turnId: 'large', manifest: [{ id: 'fixture.large', description: 'Large', inputSchema: emptyObjectSchema }] });
+  const evidence = JSON.parse(calls[1].messages.find(m => m.role === 'tool').content);
+  assert.equal(evidence.status, 'incomplete');
+  assert.equal(evidence.truncated, true);
+  assert.equal(evidence.error.code, 'TOOL_RESULT_TRUNCATED');
+  assert.ok(evidence.omissions.some(x => x.reason === 'array-items' && x.omitted === 5));
+  assert.ok(evidence.omissions.some(x => x.reason === 'string-characters' && x.omitted === 3000));
+  pass('bounded results explicitly report omitted evidence instead of presenting clipped data as completed');
+}
+
+{
+  for (const name of ['Error', 'AbortError']) {
+    const broker = createCapabilityBroker({ policy: createCapabilityPolicy() });
+    broker.register({ id: 'fixture.read', permission: 'log', description: 'Read', inputSchema: emptyObjectSchema,
+      risk: 'low', execute: () => 'read evidence' });
+    const failure = Object.assign(new Error('second inference interrupted'), { name });
+    const { runtime } = modelRuntimeWith([
+      { toolCalls: [{ id: 'read-call', capabilityId: 'fixture.read', arguments: '{}' }], usage: { prompt_tokens: 10, completion_tokens: 2 } }, failure
+    ]);
+    await assert.rejects(() => createToolExecutionCoordinator({ modelRuntime: runtime, capabilityBroker: broker }).run({
+      providerId: 'fixture', messages: [{ role: 'user', content: 'Read then explain.' }], actor: OWNER_ACTOR,
+      sessionId: 'failure', turnId: 'failure', manifest: [{ id: 'fixture.read', description: 'Read', inputSchema: emptyObjectSchema }]
+    }), error => {
+      assert.equal(error.usage.accountingComplete, false);
+      assert.equal(error.usage.requests[0].inputTokens, 10);
+      assert.equal(error.usage.requests[0].outputTokens, 2);
+      assert.equal(error.usage.inputTokens, null, 'failed request usage is unknown, not zero');
+      assert.equal(error.usage.requestCount, 2);
+      return true;
+    });
+  }
+  pass('later inference failure/cancel retains earlier receipts and marks unknown failed-request usage');
+}
+
+{
+  const broker = createCapabilityBroker({ policy: createCapabilityPolicy() });
+  const runtime = { supportsToolCalling: () => true, async chat() { assert.fail('stream required'); },
+    async *stream() {
+      yield { type: 'assistant/message', data: { message: { content: 'partial', usage: { prompt_tokens: 7, completion_tokens: 3 } } } };
+      throw new Error('stream failed after usage snapshot');
+    } };
+  await assert.rejects(() => createToolExecutionCoordinator({ modelRuntime: runtime, capabilityBroker: broker }).run({
+    providerId: 'fixture', messages: [{ role: 'user', content: 'Read.' }], actor: OWNER_ACTOR,
+    sessionId: 'stream-failure', turnId: 'stream-failure', manifest: []
+  }), error => {
+    assert.equal(error.usage.accountingComplete, false);
+    assert.equal(error.usage.requests[0].rawUsage.prompt_tokens, 7);
+    assert.equal(error.usage.requests[0].rawUsage.completion_tokens, 3);
+    assert.equal(error.usage.requestCount, 1);
+    return true;
+  });
+  pass('usage snapshot received before stream failure survives as an incomplete receipt');
 }

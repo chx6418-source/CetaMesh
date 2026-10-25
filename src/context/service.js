@@ -57,6 +57,7 @@ function automaticMemoryReferences(memoryService, settings, principal, scopes, q
   // applying the shared limit, or an irrelevant User row can hide global Knowledge.
   const ranked = rows.map(row => ({ row, score: grams.reduce((sum, gram) =>
     sum + ((row.content + ' ' + (row.tags ?? []).join(' ')).toLowerCase().includes(gram) ? gram.length : 0), 0) }))
+    .filter(({ score }) => grams.length === 0 || score > 0)
     .sort((a, b) => b.score - a.score || Number(b.row.pinned) - Number(a.row.pinned)
       || b.row.updatedAt - a.row.updatedAt || a.row.id.localeCompare(b.row.id));
   const output = [];
@@ -77,7 +78,7 @@ function automaticMemoryReferences(memoryService, settings, principal, scopes, q
     }
     if (!excerpt) continue;
     remaining -= cost + overhead;
-    output.push({ memoryId: row.id, title, excerpt });
+    output.push({ memoryId: row.id, title, excerpt, truncated: excerpt.length < row.content.length });
   }
   return output;
 }
@@ -98,7 +99,7 @@ function boundMemoryReferences(references, settings) {
       excerpt += char;
     }
     remaining -= Buffer.byteLength(excerpt, 'utf8') + overhead;
-    result.push({ ...item, excerpt });
+    result.push({ ...item, excerpt, truncated: item.truncated === true || excerpt.length < String(item.excerpt ?? '').length });
   }
   return result;
 }
@@ -299,14 +300,16 @@ export function createProductContextService({
       : { required: false, status: 'resolved', expectedWorkspaceId: task.workspaceId, observedWorkspaceId };
     const memoryPrincipal = capabilityService.memoryPrincipal(liveActor);
     const settings = memorySettings();
-    const agentMemoryScopes = [`task:${task.id}`, `workspace:${task.workspaceId}`];
+    const readOnlyChild = Boolean(task.parentTaskId && task.childContract?.mode === 'read-only');
+    const agentMemoryScopes = readOnlyChild ? [`task:${task.id}`]
+      : [`task:${task.id}`, `workspace:${task.workspaceId}`];
     // A Task may link individual global records. The Memory policy still limits
     // this partition to those exact Owner-authorized IDs; no default global grant.
     if (memoryPrincipal.grants?.scopes?.includes('global')) agentMemoryScopes.push('global');
     const memoryReferences = settings.enabled === false ? [] : boundMemoryReferences([
       ...resolveMemoryReferences(memoryService, task, memoryPrincipal, onMemoryError),
-      ...automaticMemoryReferences(memoryService, settings, memoryPrincipal,
-        agentMemoryScopes, task.goal, onMemoryError)
+       ...(readOnlyChild ? [] : automaticMemoryReferences(memoryService, settings, memoryPrincipal,
+         agentMemoryScopes, task.goal, onMemoryError))
     ], settings);
     const grantedIds = Array.isArray(liveActor.grants?.capabilities) ? liveActor.grants.capabilities : [];
     return serializeContext({

@@ -9,6 +9,15 @@ import { createCapabilityPolicy } from './policy.js';
 import { createCapabilityApproval, requestFingerprint } from './approval.js';
 import { OWNER_ACTOR, capabilityError } from './types.js';
 import { readJsonFile, writeJsonAtomic } from '../storage/json-file.js';
+import { evidenceBinding, EVIDENCE_SOURCE_CAPABILITIES } from '../context/tool-evidence.js';
+import { createNativeApprovalAdapter } from '../agent/native-approval-bridge.js';
+import { canDispatchConfiguredNativeAgent } from '../agent/execution-security.js';
+
+// Only this module can mark a failure as occurring before Agent side effects.
+// Provider supplied error fields must never authorize an automatic replay.
+const safeAgentPreflights = new WeakSet();
+export const isSafeAgentDispatchPreflight = error => error && typeof error === 'object'
+  && safeAgentPreflights.has(error);
 
 export const WORKSPACE_CAPABILITIES = Object.freeze({
   'workspace.read': 'filesystem.read', 'workspace.write': 'filesystem.write',
@@ -61,11 +70,12 @@ const WORKSPACE_TOOL_DESCRIPTORS = Object.freeze({
  * which bind the Owner identity; Agent/Extension grants never come from IPC. */
 export function createCapabilityService({ stateDir, workspaceService, memoryService,
   taskRuntime, agentBroker, bindAgentSession, resumeAgentApproval = null, searchImpl = null, audit = () => {}, now,
-  isolatedRunner = null, onTaskObservation = null, onOperation = () => {} } = {}) {
+  isolatedRunner = null, onTaskObservation = null, onOperation = () => {}, evidenceStore = null } = {}) {
   const file = stateDir ? path.join(stateDir, 'capability', 'task-grants.json') : null;
   let grants = file ? readJsonFile(file, { missing: {} }) : {};
   const provisioning = new Map();
   const workspaceProvisioning = new Map();
+  const workspaceReadProvisioning = new Map();
   let taskHandoffGuard = () => false;
   const taskFollowConsumers = new Map();
   // Native DSH Follow can end after every completed turn. Retain a bounded
@@ -165,7 +175,8 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
                   eventId: String(event.data?.eventId ?? `${turnId}:${event.seq}`),
                   capability: event.data?.capability, status: event.data?.status,
                   filePath: event.data?.filePath, tool: event.data?.tool,
-                  exitCode: event.data?.exitCode });
+                  exitCode: event.data?.exitCode, hasChanges: event.data?.hasChanges,
+                  retryCount: event.data?.retryCount });
                 recordWorkingState(taskId);
               }
             }
@@ -200,6 +211,21 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
               }
               if (turnId && terminalTurns.has(turnId)) continue;
               if (turnId) { terminalTurns.add(turnId); if (terminalTurns.size > 256) terminalTurns.delete(terminalTurns.values().next().value); }
+              const attemptTask = taskFor(taskId);
+              const childAttempt = attemptTask?.parentTaskId && (attemptTask.attempts ?? []).find(row =>
+                row.provider === provider && row.sessionId === sessionId
+                && ['started', 'accepted'].includes(row.state)
+                && ((event.data?.runId && row.requestId === event.data.runId)
+                  || (turnId && row.nativeRequestId === turnId)));
+              if (childAttempt) {
+                const reasonKind = event.data?.reason?.kind;
+                taskRuntime.settleAttempt({ id: taskId, expectedRev: attemptTask.rev,
+                  requestId: childAttempt.requestId, nativeRequestId: turnId,
+                  state: reasonKind === 'completed' ? 'completed'
+                    : reasonKind === 'aborted' ? 'cancelled'
+                      : ['failed', 'error'].includes(reasonKind) ? 'failed' : 'unknown',
+                  reason: String(event.data?.reason?.error?.code ?? reasonKind ?? 'unknown').slice(0, 200) });
+              }
               const answer = answers.get(turnId);
               answers.delete(turnId);
               const current = taskFor(taskId);
@@ -221,8 +247,9 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
                   nextAction: latest.checkpoint?.nextAction ?? '' });
                 recordWorkingState(taskId);
               } else if (['failed', 'error'].includes(event.data?.reason?.kind)) {
+                const failureCode = String(event.data?.reason?.error?.code ?? 'Agent turn failed').slice(0, 1000);
                 taskRuntime.block({ id: taskId, expectedRev: current.rev,
-                  reason: String(event.data?.reason?.error?.code ?? 'Agent turn failed').slice(0, 1000) });
+                  reason: failureCode === 'OUTCOME_UNKNOWN' ? 'needs-reconciliation: OUTCOME_UNKNOWN' : failureCode });
               }
               // DSH Follow may end once per turn while another request is queued.
               // Keep its independent cursor until all scheduled turns are projected.
@@ -294,12 +321,15 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     }
   };
   const resolveWorkspace = id => workspaceService?.describeWorkspace(id);
+  const policy = createCapabilityPolicy({ resolveWorkspace, resolveTask: taskFor,
+    resolveGrants: taskId => grants[taskId],
+    isTaskHandoff: taskId => taskHandoffGuard(taskId) });
   const broker = createCapabilityBroker({
-    policy: createCapabilityPolicy({ resolveWorkspace, resolveTask: taskFor,
-      resolveGrants: taskId => grants[taskId],
-      isTaskHandoff: taskId => taskHandoffGuard(taskId) }),
+    policy,
     approval: createCapabilityApproval({ stateDir, now }), audit, stateDir
   });
+  const nativeApproval = createNativeApprovalAdapter({ broker, resolveWorkspace, agentBroker, now,
+    resolveTask: taskId => taskHandoffGuard(taskId) ? null : taskFor(taskId) });
   function saveGrants() {
     if (!file) return;
     writeJsonAtomic(file, grants);
@@ -373,20 +403,26 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
   function grantTask(taskId, value) {
     const task = taskFor(taskId);
     if (!task?.workspaceId) throw capabilityError('WORKSPACE_REQUIRED', 'Task workspace required');
+    const readOnlyChild = task.parentTaskId && task.childContract?.mode === 'read-only';
     // 默认 Agent 能力集（v2 final security）：**不含 test.run**。
     // Agent 可以默认修改 Workspace ≠ Agent 可以默认执行 Workspace 代码——
     // test.run 执行的是 Agent 可经 filesystem.write 修改的项目代码（package.json
     // 脚本 / 测试 / 构建脚本），allowlist 只防命令注入、防不了项目代码本身。
     // 需要 test.run 的任务必须显式传入（Workshop Owner 勾选 / Smart 路径显式
     // request-only grant），且每一次执行仍需 Owner Approve Once（risk=high）。
-    const capabilities = new Set(value?.capabilities ?? ['filesystem.read', 'filesystem.write', 'filesystem.search', 'git.status', 'git.diff', 'memory.read']);
+    if (readOnlyChild && value?.capabilities?.some(id => !['filesystem.read', 'filesystem.search'].includes(id))) {
+      throw capabilityError('TASK_CHILD_READ_ONLY', 'Child grant cannot advertise write or unrelated tools');
+    }
+    const capabilities = new Set(readOnlyChild ? ['filesystem.read', 'filesystem.search']
+      : value?.capabilities ?? ['filesystem.read', 'filesystem.write', 'filesystem.search', 'git.status', 'git.diff', 'memory.read', ...(evidenceStore ? ['context.evidence.read'] : [])]);
     if (capabilities.has('filesystem.write')) capabilities.add('workspace.apply');
     for (const id of capabilities) broker.registry.require(id);
     if ((value?.workspaceIds ?? [task.workspaceId]).some(id => id !== task.workspaceId)) {
       throw capabilityError('WORKSPACE_NOT_AUTHORIZED', 'A Task grant cannot include another workspace');
     }
     grants[taskId] = { capabilities: [...capabilities], workspaceIds: [task.workspaceId], taskIds: [taskId],
-      scopes: [`task:${taskId}`, `workspace:${task.workspaceId}`], types: ['working', 'task', 'workspace', 'knowledge', 'skill'] };
+      scopes: readOnlyChild ? [`task:${taskId}`] : [`task:${taskId}`, `workspace:${task.workspaceId}`],
+      types: readOnlyChild ? ['task'] : ['working', 'task', 'workspace', 'knowledge', 'skill'] };
     saveGrants();
     return principalForTask(taskId);
   }
@@ -396,13 +432,22 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     if (!grants[taskId]) return { refreshed: false, actor: null };
     grants[taskId].workspaceIds = [task.workspaceId];
     grants[taskId].taskIds = [taskId];
-    grants[taskId].scopes = [...new Set([...(grants[taskId].scopes ?? []).filter(scope => !String(scope).startsWith('workspace:')), `workspace:${task.workspaceId}`])];
+    grants[taskId].scopes = task.parentTaskId && task.childContract?.mode === 'read-only'
+      ? [`task:${taskId}`]
+      : [...new Set([...(grants[taskId].scopes ?? []).filter(scope => !String(scope).startsWith('workspace:')), `workspace:${task.workspaceId}`])];
     saveGrants();
     return { refreshed: true, actor: principalForTask(taskId) };
   }
   function principalForTask(taskId) {
-    if (!grants[taskId] || !taskFor(taskId)) throw capabilityError('TASK_NOT_AUTHORIZED', taskId);
-    return { kind: 'agent', id: `task:${taskId}`, grants: structuredClone(grants[taskId]) };
+    const task = taskFor(taskId);
+    if (!grants[taskId] || !task) throw capabilityError('TASK_NOT_AUTHORIZED', taskId);
+    const projected = structuredClone(grants[taskId]);
+    if (task.parentTaskId && task.childContract?.mode === 'read-only') {
+      projected.capabilities = projected.capabilities.filter(id => ['filesystem.read', 'filesystem.search'].includes(id));
+      projected.scopes = [`task:${taskId}`];
+      projected.types = ['task'];
+    }
+    return { kind: 'agent', id: `task:${taskId}`, grants: projected };
   }
   function memoryPrincipal(actor) {
     if (actor.kind === 'owner') return { kind: 'user', id: actor.id };
@@ -574,6 +619,38 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
         ...(['owner', 'agent'].includes(r.actor.kind) ? { scope: `task:${r.taskId}` } : {}), principal });
     }});
   }
+  if (evidenceStore) {
+    broker.register({ id: 'context.evidence.read', permission: 'context.evidence.read', provider: 'context', risk: 'low',
+      description: 'Retrieve a bounded page of preserved tool evidence in this exact Session, Task and Workspace. Current source permissions are required.',
+      inputSchema: objectInput({ id: stringField('Opaque evidence id from a tool result.'),
+        offset: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 6000 } }, ['id']),
+      validate: r => {
+        if (!['owner', 'agent'].includes(r.actor.kind)) throw capabilityError('PERMISSION_DENIED', 'Evidence is restricted to its Owner or assigned Agent');
+        if (typeof r.origin?.sessionId !== 'string' || !r.origin.sessionId) throw capabilityError('TOOL_EVIDENCE_DENIED', 'Trusted Session origin required');
+        const assigned = r.taskId ? taskFor(r.taskId)?.currentAgent : null;
+        if (r.actor.kind === 'agent' && assigned?.sessionId && assigned.sessionId !== r.origin.sessionId)
+          throw capabilityError('TOOL_EVIDENCE_DENIED', 'Agent Session assignment changed');
+      },
+      execute: r => evidenceStore.read({
+        binding: evidenceBinding({ actor: r.actor, sessionId: r.origin.sessionId,
+          scope: { taskId: r.taskId ?? null, workspaceId: r.workspaceId ?? null } }),
+        id: r.input.id, offset: r.input.offset, limit: r.input.limit,
+        authorizeSource: source => {
+          // A read never replays the original effect. Only audited sources with
+          // complete synchronous scope validation are eligible for compaction.
+          if (!EVIDENCE_SOURCE_CAPABILITIES.includes(source?.capability)) return false;
+          try {
+            const entry = broker.registry.require(source.capability);
+            const original = { ...r, capability: source.capability, input: source.input,
+              approvalId: undefined, approvalBinding: undefined, approved: undefined };
+            policy.authorize(original, entry);
+            const validation = entry.validate?.(original);
+            return !validation || typeof validation.then !== 'function';
+          } catch { return false; }
+        }
+      })
+    });
+  }
   broker.register({ id: 'network', permission: 'network', provider: 'safe-fetch', risk: 'high', modelCallable: false,
     validate: r => {
       if (r.input.init?.method && r.input.init.method.toUpperCase() !== 'GET' || r.input.init?.body !== undefined) {
@@ -632,9 +709,39 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       if (/needs-reconciliation|approval-pending/i.test(task.progress?.note ?? '')) {
         throw capabilityError('NEEDS_RECONCILIATION', 'Task has an unreviewed interrupted effect or approval');
       }
+      if ((task.attempts ?? []).some(row => ['started', 'unknown'].includes(row.state) && row.requestId !== r.requestId)) {
+        throw capabilityError('NEEDS_RECONCILIATION', 'Prior Agent Attempt has an unconfirmed effect');
+      }
       if (taskHandoffGuard(task.id)) throw capabilityError('TASK_HANDOFF_IN_FLIGHT', 'Task Handoff owns this execution boundary');
       const provider = String(r.input.agentProvider || r.input.provider || 'cetamesh');
-      const boundary = agentBroker?.capabilities(provider)?.workspaceBoundary;
+      const readOnlyChild = Boolean(task.parentTaskId && task.childContract?.mode === 'read-only');
+      const assertChildParentActive = () => {
+        if (!readOnlyChild) return;
+        taskRuntime.assertChildParentCurrent({ id: task.id, workspaceId: r.workspaceId });
+      };
+      if (readOnlyChild && provider !== 'cetamesh') {
+        throw capabilityError('AGENT_READ_ONLY_BOUNDARY_UNVERIFIED', 'Native external Agent has no verified read-only Workspace boundary');
+      }
+      assertChildParentActive();
+      const health = await agentBroker.health(provider);
+      const providerCapabilities = agentBroker.capabilities(provider);
+      // A configured key is not an authenticated account. This explicitly selected
+      // mode may verify its credentials during dispatch, only after protocol and
+      // every-tool permission policy verification. Explicit auth failure still denies.
+      const configuredNativeDispatch = canDispatchConfiguredNativeAgent(health,providerCapabilities?.security);
+      if (health?.available !== true || health?.disabled === true || health?.enabled === false
+        || health?.ready === false || health?.reachable === false || health?.installed === false
+        || health?.authenticated === false || health?.sessionCapable === false
+        || health?.taskEligible === false || health?.compatible === false
+        || (provider !== 'cetamesh' && (health?.sessionCapable !== true
+          || (health?.authenticated !== true && !configuredNativeDispatch)))) {
+        const error = capabilityError('PROVIDER_UNAVAILABLE', 'Agent Provider is not currently eligible for Task execution');
+        // This check precedes Session creation, Attempt recording and send.
+        // Only this trusted preflight failure can authorize one reassignment.
+        safeAgentPreflights.add(error);
+        throw error;
+      }
+      const boundary = providerCapabilities?.workspaceBoundary;
       if (!['capability-broker', 'staged-capability-broker', 'native-staged'].includes(boundary)) {
         throw capabilityError('AGENT_BOUNDARY_UNSUPPORTED', 'Provider has no enforced Capability Broker workspace boundary');
       }
@@ -642,13 +749,23 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       if (task.currentAgent && task.currentAgent.provider !== provider) {
         throw capabilityError('AGENT_PROVIDER_SWITCH_REQUIRES_CONTINUITY', 'An existing Task must change Agent Providers through Continuity Fresh Session');
       }
-      const otherOwner = taskRuntime.activeWorkspaceOwner({ workspaceId: task.workspaceId, exceptTaskId: task.id });
+      const otherOwner = taskRuntime.activeWorkspaceOwner({ workspaceId: task.workspaceId,
+        exceptTaskId: task.id, forReadOnlyTaskId: readOnlyChild ? task.id : null });
       const reservation = workspaceProvisioning.get(task.workspaceId);
-      if (otherOwner || (reservation && reservation.taskId !== task.id)) {
+      const readReservations = workspaceReadProvisioning.get(task.workspaceId);
+      const activeReaders = taskRuntime.activeWorkspaceReaders({ workspaceId: task.workspaceId, exceptTaskId: task.id });
+      const otherReaders = new Set([...activeReaders.map(row => row.id), ...(readReservations?.keys() ?? [])]);
+      otherReaders.delete(task.id);
+      if (otherOwner || (reservation && reservation.taskId !== task.id)
+        || (!readOnlyChild && readReservations?.size) || (readOnlyChild && otherReaders.size >= 2)) {
         throw Object.assign(capabilityError('TASK_WORKSPACE_BUSY', '工作区仍由另一任务持有写入权；请先查看占用任务并核验，或切换工作区。'),
-          { blockingTaskId: otherOwner?.id ?? reservation.taskId });
+          { blockingTaskId: otherOwner?.id ?? reservation?.taskId ?? otherReaders.values().next().value });
       }
-      workspaceProvisioning.set(task.workspaceId, { taskId: task.id, count: (reservation?.count ?? 0) + 1 });
+      if (readOnlyChild) {
+        const held = readReservations ?? new Map();
+        held.set(task.id, (held.get(task.id) ?? 0) + 1);
+        workspaceReadProvisioning.set(task.workspaceId, held);
+      } else workspaceProvisioning.set(task.workspaceId, { taskId: task.id, count: (reservation?.count ?? 0) + 1 });
       const previous = provisioning.get(task.id);
       const pending = (async () => {
         if (previous) {
@@ -668,7 +785,9 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
         if (!['queued', 'running'].includes(task.status)) {
           throw capabilityError('TASK_NOT_RUNNING', 'Task is paused or ended; resume it before dispatching Agent work');
         }
-        const queuedOwner = taskRuntime.activeWorkspaceOwner({ workspaceId: task.workspaceId, exceptTaskId: task.id });
+        assertChildParentActive();
+        const queuedOwner = taskRuntime.activeWorkspaceOwner({ workspaceId: task.workspaceId,
+          exceptTaskId: task.id, forReadOnlyTaskId: readOnlyChild ? task.id : null });
         if (queuedOwner) {
           throw Object.assign(capabilityError('TASK_WORKSPACE_BUSY', '工作区写入权已由另一任务持有；请查看占用任务后核验。'),
             { blockingTaskId: queuedOwner.id });
@@ -686,8 +805,14 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
             if (beforeSend?.status !== 'running' || beforeSend.currentAgent?.sessionId !== task.currentAgent.sessionId) {
               throw capabilityError('TASK_NOT_RUNNING', 'Task changed before Agent instruction dispatch');
             }
-            const sent = await agentBroker.send({ ...task.currentAgent, content: String(r.input.content || task.goal) });
+            assertChildParentActive();
+            if (readOnlyChild) taskRuntime.recordAttempt({ id: task.id, expectedRev: beforeSend.rev,
+              provider, sessionId: task.currentAgent.sessionId, requestId: r.requestId, state: 'started' });
+            const sent = await agentBroker.send({ ...task.currentAgent, content: String(r.input.content || task.goal),
+              ...(readOnlyChild ? { runId: r.requestId } : {}) });
             if (sent?.accepted !== true) throw capabilityError('AGENT_SEND_REJECTED', 'Agent did not accept Task instruction');
+            if (readOnlyChild) taskRuntime.settleAttempt({ id: task.id, expectedRev: taskFor(task.id).rev,
+              requestId: r.requestId, state: 'accepted', nativeRequestId: sent?.requestId ?? sent?.turnId });
             const afterSend = taskFor(task.id);
             if (!afterSend || ['queued', 'paused', 'waiting', 'blocked', 'cancelled'].includes(afterSend.status)
               || (afterSend.status === 'running' && afterSend.currentAgent?.sessionId !== task.currentAgent.sessionId)) {
@@ -739,8 +864,14 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
           if (beforeSend?.status !== 'running' || beforeSend.currentAgent?.sessionId !== created.sessionId) {
             throw capabilityError('TASK_NOT_RUNNING', 'Task changed before Agent instruction dispatch');
           }
-          const sent = await agentBroker.send({ provider, sessionId: created.sessionId, content: String(r.input.content || task.goal) });
+          assertChildParentActive();
+          if (readOnlyChild) taskRuntime.recordAttempt({ id: task.id, expectedRev: beforeSend.rev,
+            provider, sessionId: created.sessionId, requestId: r.requestId, state: 'started' });
+          const sent = await agentBroker.send({ provider, sessionId: created.sessionId, content: String(r.input.content || task.goal),
+            ...(readOnlyChild ? { runId: r.requestId } : {}) });
           if (sent?.accepted !== true) throw capabilityError('AGENT_SEND_REJECTED', 'Agent did not accept Task instruction');
+          if (readOnlyChild) taskRuntime.settleAttempt({ id: task.id, expectedRev: taskFor(task.id).rev,
+            requestId: r.requestId, state: 'accepted', nativeRequestId: sent?.requestId ?? sent?.turnId });
           const afterSend = taskFor(task.id);
           if (!afterSend || ['queued', 'paused', 'waiting', 'blocked', 'cancelled'].includes(afterSend.status)
             || (afterSend.status === 'running' && afterSend.currentAgent?.sessionId !== created.sessionId)) {
@@ -785,6 +916,15 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       provisioning.set(task.id, pending);
       try { return await pending; } finally {
         if (provisioning.get(task.id) === pending) provisioning.delete(task.id);
+        if (readOnlyChild) {
+          const readers = workspaceReadProvisioning.get(task.workspaceId);
+          if (readers?.has(task.id)) {
+            const count = readers.get(task.id);
+            if (count > 1) readers.set(task.id, count - 1);
+            else readers.delete(task.id);
+            if (!readers.size) workspaceReadProvisioning.delete(task.workspaceId);
+          }
+        }
         const held = workspaceProvisioning.get(task.workspaceId);
         if (held?.taskId === task.id) {
           if (held.count > 1) workspaceProvisioning.set(task.workspaceId, { taskId: task.id, count: held.count - 1 });
@@ -883,6 +1023,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     return result;
   }
   return { execute, executeWorkspace, executeMemory, broker, grantTask, principalForTask, refreshTaskWorkspaceGrant, memoryPrincipal,
+    requestAgentNativeApproval: (request, options) => nativeApproval.request(request, options),
     cancelTaskOperations: scope => operations.cancelScope(scope),
     recoveryForTask(taskId) {
       return Object.values(journal).some(row => row?.taskId === taskId && row.status === 'in-flight')
@@ -914,6 +1055,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     },
     applyAgentWorkspaceChanges, workspaceImportStatus, cancelWorkspaceImportApproval,
     async close() {
+      nativeApproval.close();
       await operations.close();
       const consumers = [...taskFollowConsumers.values()];
       for (const consumer of consumers) consumer.controller.abort();

@@ -1,4 +1,4 @@
-import { SnowLumaWebSocketClient } from '@snowluma/sdk';
+import { OneBotWebSocketClient } from './onebot-client.js';
 import crypto from 'node:crypto';
 import { acquireQqOwnership } from './ownership.js';
 import { createQqReceipts } from './receipts.js';
@@ -21,7 +21,7 @@ function reportCallbackError(log, label, error) {
 
 export function createQqRuntime({
   config = {},
-  clientFactory = options => new SnowLumaWebSocketClient(options),
+  clientFactory = options => new OneBotWebSocketClient(options),
   onPrivateMessage,
   onGroupMessage,
   onNotice,
@@ -204,6 +204,8 @@ export function createQqRuntime({
   client.onNotice('notify', event => invoke(onNotice, '处理 QQ 通知出错', event));
   client.on('open', () => {
     if (stopped) return;
+    // A transport reconnect must revalidate identity and ownership before sends.
+    if (state === 'unavailable' && !connectPromise) void connect();
     invoke(onOpen, 'SnowLuma open callback failed');
   });
   client.on('close', info => {

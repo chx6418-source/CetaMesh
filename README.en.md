@@ -1,185 +1,82 @@
-# 鲸桥 WhaleBridge — QQ ↔ DeepSeek Harness Bridge
+# CetaMesh
 
-> Connect QQ messages to DeepSeek Harness (DSH) agents: QQ friends/groups become DSH conversations, and agent replies (including questions and tool approvals) are sent back to QQ.
+**Making work across AI tools and devices easier to continue.**
 
-> **Native UI migration status (2026-09-23):** the default release path no longer ships WhaleBridge product HTML, and the desktop shell/installer now use native egui windows with named-pipe management IPC. An isolated no-web release candidate passed automated install/recovery checks; the old console is not yet fully migrated, and the existing `dist/app` remains a historical web-based artifact; see [the current migration status](docs/DESKTOP_APP.md#13-去网页化迁移当前状态).
+CetaMesh is a local-first AI collaboration workspace under active development. It brings chats, tasks, memory, agents, tools and devices into one manageable system. The goal is to reduce the cost of reconstructing context whenever a user changes a model, tool or device.
 
-For the detailed Chinese guide, see **[docs/PROJECT_GUIDE.md](docs/PROJECT_GUIDE.md)**.
+It is more than a collection of model chat tabs: **CetaMesh owns the task; an Agent may execute it; access to memory and device capabilities remains permission-scoped.**
 
-## Architecture
+[简体中文](README.md) · [Website](https://cetamesh.com) · [Project guide](docs/PROJECT_GUIDE.md) · [Contributing](CONTRIBUTING.md)
 
-```
-QQ messages ──► SnowLuma (OneBot v11 WS) ──► WhaleBridge ──► DSH Web API (127.0.0.1:3080/api)
-                                                    ▲                      │
-                                                    └── agent replies / questions / approvals ┘
-```
+> **Pre-stable / under development.** Desktop and Mobile codebases, automated tests and working features exist, but real cross-tool continuity, cross-device interoperability, third-party integrations and signed releases are still being validated. Architectural goals are not claims of production-ready end-to-end behavior.
 
-- **QQ side**: `@snowluma/sdk` provides the OneBot v11 WebSocket client.
-- **DSH side**: reuses `@deepseek-ai/dsh-host-apiproxy` and implements the Node transport layer.
-- **Agent tools**: safe MCP servers expose a restricted QQ toolset (`qq_status`, `qq_list_groups`, `qq_get_group_history`, `qq_send_group_message`, `qq_reply`, etc.).
-- **Native management UI (in migration):** the desktop app uses a Rust/egui window and local named-pipe IPC, not a WhaleBridge web page. Current controls cover overview/restart, roles, notification security, global mode/owner/allow-deny policy, SnowLuma/DSH service discovery/selection/install/start/stop, model catalog/defaults, preset listings/bindings, approval/question and risky-card queues, slang settings, sessions/social phase, read-only activity/log views, and allowlisted diagnostics. Send parameters, live event subscription, memory, stickers, file/audio/Kugou, and other legacy-console features remain to be ported.
+## What problem does it address?
 
-## Features
+A user may plan in one AI tool, develop with another and ask a third to review the result. These tools generally do not share task ownership, past decisions or the authorized context needed to continue.
 
-- Bridges QQ group/private messages to DSH agent sessions.
-- Social simulation mode ("simulated group friend") with idle/active/probing/exiting states.
-- Space-based message splitting for more natural multi-message replies.
-- Whitelist/blacklist access control, fail-closed by default.
-- Sensitive text audit prevents paths/credentials from being sent to QQ.
-- MCP tools for reading group history/members, sending messages, replying with quotes, and (in `reserved2`) full simulated-group-friend tooling.
-- Slang/network-expression learning with human confirmation.
-- Lightweight memory system for active topics, pending thoughts and member impressions.
-- Sticker library integration with AI-friendly sticker usage.
+CetaMesh is being built around four ideas:
 
-## Requirements
+- **Chat is the entry point, not the entire product.** Work can become a persistent task.
+- **Tasks outlive a single Agent session.** Their identity, status and workspace should not be tied to one provider.
+- **Memory has explicit boundaries.** Local knowledge, task context and cross-device sharing are distinct.
+- **Devices remain independent.** Pairing or trusting another device never automatically authorizes every action.
 
-- Node.js >= 22.13
-- Running DeepSeek Harness Web (default `http://127.0.0.1:3080`)
-- Running SnowLuma with OneBot v11 WebSocket and HTTP API enabled
+Some of these cross-provider and cross-device flows are still at the contract, implementation or verification stage.
 
-## Quick Start
+## Current code and limitations
 
-```bash
-npm install        # postinstall automatically patches the @snowluma/sdk ESM packaging bug
-```
-
-Copy `config.example.json` to `config.json`, then edit:
-
-```bash
-cp config.example.json config.json
-```
-
-Key settings:
-
-| Field | Description |
+| Area | What exists today |
 | --- | --- |
-| `dsh.baseUrl` | DSH Web API URL, default `http://127.0.0.1:3080` |
-| `snowluma.wsUrl` | SnowLuma OneBot **WebSocket** URL (e.g. `ws://127.0.0.1:3001`) |
-| `snowluma.accessToken` | OneBot access token, leave empty if not configured |
-| `snowluma.httpUrl` | OneBot **HTTP API** URL (e.g. `http://127.0.0.1:3000`); do not point this at the WebSocket port or you will get HTTP 426 |
-| `ownerQQ` | Administrator QQ (highest privilege) |
-| `allow.private` / `allow.groups` | Whitelist of QQ/group IDs |
-| `consolePort` | Local console port, default `3100` |
+| **Chat** | Desktop supports direct Model Provider conversations without requiring DSH; Mobile has independent chats, sessions and attachment foundations. Users configure their own model services. |
+| **Tasks / Workspace** | Desktop includes Task and Workspace runtimes, execution references and continuity mechanisms. Mobile includes local tasks, approvals and Action Center foundations. Complex external-Agent execution requires verified integration and authorization. |
+| **Memory** | Local memory on both platforms; cross-scope access and device sync do not bypass explicit authorization. |
+| **Agents / Tools** | Desktop provides an Agent Broker, tools and capability policies, plus DSH, Codex and ZCode adapter code. Presence in source does not guarantee an installed, supported, functioning external service. |
+| **Plugins** | Extension/permission contracts and validation exist. The plugin marketplace, publishing infrastructure and process-isolation guarantees remain works in progress. |
+| **Device Mesh** | Identity, pairing, trust and protocol foundations exist. Full real-device Desktop↔Mobile workflows have not all passed end-to-end acceptance. |
 
-Start:
+## Platforms and repository layout
 
-```bash
-npm start
+```text
+CetaMesh/
+├── src/                 # Desktop Core
+├── desktop-shell/       # Windows Rust native host
+├── desktop-ui/          # React / WebView2 Desktop UI
+├── plugins/ extensions/ # Desktop extensibility
+├── apps/mobile/         # Independent React Native Android/iOS source
+├── docs/                # Guides, architecture, protocols
+└── .github/workflows/   # Separate Windows and Android CI
 ```
 
-Or double-click `start.bat` on Windows (guard mode with auto-restart).
+**Desktop is the primary project at the repository root; Mobile lives under `apps/mobile/`.** Each platform has its own runtime, dependencies, permissions and release artifacts. iOS source does not imply a completed iOS native build or device acceptance.
 
-## DSH Setup on Another Device
+## Builds and availability
 
-The bridge and console can run without extra DSH setup, but the two DSH chat presets (`whale-chat` and `whale-chat-v2`) and the MCP servers must be installed into DSH once per machine:
+- [GitHub Releases](https://github.com/chx6418-source/CetaMesh/releases): see available build artifacts and their notes. Previous Windows release candidates are **not stable releases**; read the related warnings about signing and compatibility.
+- [GitCode](https://gitcode.com/ygdnn/CetaMesh): another project code/distribution entry; availability and versions may differ.
+- [Website](https://cetamesh.com): product information.
 
-```bash
-node scripts/setup-dsh.mjs
+Not every platform has a publicly downloadable stable build. Android Standalone APKs can be built in CI, but temporary CI signing is not a production release signature.
+
+From the repository root, with Node.js **22.13+**:
+
+```sh
+# Desktop
+npm ci
+npm --prefix desktop-ui ci
+npm test
+npm run build:ui
+
+# Mobile
+npm --prefix apps/mobile ci
+npm --prefix apps/mobile test
 ```
 
-This installs:
+Windows native builds require Rust/Windows tools; Android builds require JDK and Android SDK/NDK; iOS requires macOS/Xcode. See [monorepo instructions](docs/MONOREPO.md), [Desktop build guide](docs/desktop/BUILD_AND_RELEASE.md) and [Mobile guide](apps/mobile/README.md).
 
-- `~/.dsh/.agent-presets/whale-chat` and `~/.dsh/.agent-presets/whale-chat-v2`
-- five MCP entries in `~/.dsh/profiles/web/cordis.patch.yml`, all launched through the unified core
-  entry (`node <repo>/src/core-entry.js --mcp <mode>`)
-- `whale-mode-console` in the profile `package.json`
-- Default DSH mode set to `reserved2` (second-generation simulation), with a local `state/mode.json` fallback
+## Privacy, license and contributions
 
-The installer is idempotent (a second run changes nothing) and never overwrites content you edited:
-ownership is tracked by content hashes in `~/.dsh/.whalebridge-integration.json`. Presets you created
-yourself, your own MCP entries, and non-symlink plugin directories are only reported, never deleted.
-Legacy `src/mcp-*.js` entries are migrated in place, `qq-*` era artifacts are cleaned up, and a failed
-run rolls back to the previous state. Useful flags: `--dry-run`, `--force-presets`,
-`--no-plugin-install`, `--json`.
+CetaMesh source is [GPL-3.0-only](LICENSE), subject to [separate third-party notices](THIRD_PARTY_NOTICES.md). Restricted SnowLuma SDK/MCP and the upstream application are not redistributed; optional QQ interoperation connects to a separately installed and licensed compatible gateway.
 
-> Installs made from the packaged app have no `scripts/` directory — use
-> `WhaleBridgeCore.exe --setup-dsh web` instead. It points the MCP `command` at
-> `WhaleBridgeCore.exe` directly, so the target machine needs no Node.js.
+[Project status](PROJECT_STATE.md) · [Known limitations](docs/desktop/KNOWN_LIMITATIONS.md) · [Plugin development](docs/plugin-development/README.md) · [Contributing](CONTRIBUTING.md) · [Open-source policy](OPEN_SOURCE.md) · [Security](SECURITY.md)
 
-Then restart DSH. See [docs/DSH_SETUP.md](docs/DSH_SETUP.md) for details.
-
-## Security Notes
-
-- `config.json` and `state/` are **never committed**; the repository only ships `config.example.json`.
-- MCP send tools enforce whitelist checks and reject CQ-code injection.
-- Local paths, credentials, tokens and other sensitive patterns are filtered by the audit layer.
-- Process control for SnowLuma (`start_snowluma` / `stop_snowluma`) is disabled by default and only allowed in `closed-agent` mode when explicitly enabled.
-- The console uses a generated token when none is configured.
-
-## Repository Layout
-
-```
-WhaleBridge/
-  config.example.json   # sanitized config template (real config.json is not in repo)
-  docs/
-    PROJECT_GUIDE.md    # detailed Chinese guide
-  dsh/agent-presets/    # whale-chat / whale-chat-v2 DSH agent preset templates
-  plugins/whale-mode-console  # DSH settings whale-mode card plugin
-  src/                  # bridge core and MCP servers
-  public/
-    # WhaleBridge product HTML is excluded from the default release payload
-  roles/                # persona cards
-  assets/               # images and project intro video
-  scripts/              # tests and helper scripts
-  state/                # runtime data (not in repo)
-  dist/core/            # packaged artifacts (not in repo; created by npm run build:core)
-  desktop-shell/        # Windows native desktop shell (Rust/eframe, see desktop-shell/README.md)
-```
-
-## Unified Core Entry and Standalone EXE
-
-Source mode uses a single dispatch entry (`node src/core-entry.js --worker`, `--mcp <mode>`,
-`--self-test`, `--help`) while every original direct entry keeps working. `src/app-paths.js`
-separates read-only resources from writable data via `WHALEBRIDGE_RESOURCE_DIR` and
-`WHALEBRIDGE_DATA_DIR` (or `--data-dir <path>`); with neither set, both remain the repository root.
-
-Build a Windows core that runs without a system Node.js installation:
-
-```bash
-npm run build:core        # dist/core/WhaleBridgeCore.exe + dist/core/resources/
-npm run test-core-dist    # smoke test with an isolated PATH, temp data dir and temp ports
-```
-
-When packaged, the core resolves resources from `resources/` next to the executable and writable
-data from `%LOCALAPPDATA%\WhaleBridge` (or `<exe dir>\data` when an empty `portable.flag` sits next
-to the executable). The install directory stays read-only.
-
-## Windows Desktop Shell (in progress)
-
-`desktop-shell/` is the Rust + eframe native shell that starts and supervises the Core. UI management uses a named pipe; the loopback HTTP listener is retained for Agent/DSH programmatic APIs only. Full feature parity with the old console is not complete yet:
-
-```bash
-npm run desktop:build:debug       # debug build (keeps a console; required by self-check modes)
-npm run desktop:test              # Rust unit tests (exit-code policy, backoff, probes, paths)
-npm run test-desktop-supervisor   # supervised worker contract (orphan guard, exit codes)
-npm run test-desktop-shell        # end-to-end: spawn/health/restart/port conflict/window/orphans
-```
-
-- Exit codes: `0` normal end (no restart), `2` another instance or port in use (no restart),
-  `10` restart requested (restart now), anything else crashes into a 5/10/20/30 s backoff
-  (giving up after 5 consecutive failures). `start.bat` restarts on anything but 2, so code 10
-  stays compatible with the existing daemon path.
-- A worker started by the shell runs with `WHALEBRIDGE_SUPERVISED=1`: "关闭主程序" then only exits
-  that process instead of killing every `start.bat` daemon on the machine, and a force-killed shell
-  cannot leave an orphaned worker (stdin EOF is the liveness signal).
-- Closing the current native window exits the shell and stops its worker; tray behavior has not yet been migrated.
-- Diagnostics: `--print-core-command`, `--smoke-test` (headless spawn → health → graceful stop).
-  Logs live in `<data dir>\logs\`.
-- Native GUI details (DPI, Chinese IME, keyboard/copy/paste, named-pipe ACL) still need manual acceptance;
-  code signing remains outstanding.
-
-## Testing
-
-```bash
-npm run self-test       # DSH-side link test, no QQ/SnowLuma required
-npm run test-md
-npm run test-wait
-npm run test-vision
-npm run test-forward
-npm run test-slang
-npm run test-stickers
-```
-
-## Compliance
-
-SnowLuma is an independent third-party project and is not affiliated with Tencent/QQ. This project is for learning and technical research only; please follow the relevant terms and the QQ User Agreement.
+Issues, testing feedback and focused pull requests are welcome. Please distinguish features present in source from those verified in production conditions.

@@ -22,6 +22,101 @@ const stage = async (options = {}) => createStagingWorkspace({
 });
 
 try {
+  const gitSource=path.join(root,'git-project');fs.mkdirSync(gitSource);
+  const git=(...args)=>execFileSync('git',['-c','core.fsmonitor=false','-C',gitSource,...args],{stdio:'pipe',windowsHide:true});
+  git('init','-q');
+  fs.writeFileSync(path.join(gitSource,'.gitignore'),'dist/\ntarget/\n.worktrees/\nignored.tmp\n');
+  fs.writeFileSync(path.join(gitSource,'main.ts'),'source');
+  for(const name of ['dist','target','.worktrees']){fs.mkdirSync(path.join(gitSource,name));fs.writeFileSync(path.join(gitSource,name,'large.bin'),Buffer.alloc(512));}
+  fs.writeFileSync(path.join(gitSource,'dist','tracked.ts'),'tracked');
+  fs.writeFileSync(path.join(gitSource,'ignored.tmp'),Buffer.alloc(512));
+  fs.writeFileSync(path.join(gitSource,'new.ts'),'new');
+  git('add','.gitignore','main.ts');git('add','-f','dist/tracked.ts');
+  const gitStage=await createStagingWorkspace({taskId:'git-snapshot',workspaceId:'git',sourceRoot:gitSource,stagingRoot:stageRoot,maxBytes:128});
+  assert.deepEqual([...gitStage.baseline.keys()].sort(),['.gitignore','dist/tracked.ts','main.ts','new.ts']);
+  assert.equal(fs.existsSync(path.join(gitStage.root,'dist','large.bin')),false);
+  assert.deepEqual(collectStagedChanges(gitStage).changes,[]);
+  fs.appendFileSync(path.join(gitStage.root,'.gitignore'),'main.ts\nnew.ts\n');
+  fs.unlinkSync(path.join(gitStage.root,'new.ts'));
+  assert.equal(collectStagedChanges(gitStage).changes.some(row=>row.path==='new.ts'&&row.action==='delete'),true,'new ignore rules cannot hide baseline deletions');
+  cleanupStagingWorkspace(gitStage);
+  fs.writeFileSync(path.join(gitSource,'real-source.bin'),Buffer.alloc(256));
+  await assert.rejects(createStagingWorkspace({taskId:'real-limit',workspaceId:'git',sourceRoot:gitSource,stagingRoot:stageRoot,maxBytes:128}),error=>error.code==='STAGING_TOO_LARGE','nonignored source still obeys byte limit');
+  console.log('PASS Git-ignored build outputs excluded, tracked ignored paths and new source retained, selection fixed for comparisons');
+
+  for (const trackedOutput of [false, true]) {
+    const project=path.join(root, 'late-output-'+trackedOutput); fs.mkdirSync(project);
+    const gitLate=(...args)=>execFileSync('git',['-c','core.fsmonitor=false','-C',project,...args],{stdio:'pipe',windowsHide:true});
+    gitLate('init','--quiet');
+    fs.writeFileSync(path.join(project,'.gitignore'),'dist/\n');
+    fs.writeFileSync(path.join(project,'main.ts'),'source');
+    gitLate('add','.gitignore','main.ts');
+    if (trackedOutput) { fs.mkdirSync(path.join(project,'dist')); fs.writeFileSync(path.join(project,'dist','tracked.ts'),'tracked'); gitLate('add','-f','dist/tracked.ts'); }
+    const pending=await createStagingWorkspace({taskId:'late-output',workspaceId:'git',sourceRoot:project,stagingRoot:stageRoot,maxBytes:128});
+    assert.deepEqual(collectStagedChanges(pending).changes,[], 'tracked files in ignored directories remain visible');
+    for (const base of [project,pending.root]) { fs.mkdirSync(path.join(base,'dist'),{recursive:true}); fs.writeFileSync(path.join(base,'dist','new.bin'),Buffer.alloc(512)); }
+    fs.writeFileSync(path.join(pending.root,'main.ts'),'edited');
+    assert.deepEqual(collectStagedChanges(pending).changes.map(row=>row.path),['main.ts']);
+    fs.writeFileSync(path.join(project,'main.ts'),'edited');
+    assert.equal(refreshStagingBaseline(pending).files,trackedOutput?3:2);
+    cleanupStagingWorkspace(pending);
+  }
+  console.log('PASS late-created ignored outputs stay outside collection and baseline refresh');
+
+  for (const sourceSubdir of ['', 'package']) {
+    const project=path.join(root,'nested-ignore-'+(sourceSubdir||'root')); fs.mkdirSync(project);
+    execFileSync('git',['init','--quiet',project],{stdio:'pipe',windowsHide:true});
+    fs.writeFileSync(path.join(project,'.gitignore'),(sourceSubdir?'package/':'')+'build/*\n!'+(sourceSubdir?'package/':'')+'build/keep/\n');
+    const input=path.join(project,sourceSubdir); fs.mkdirSync(path.join(input,'build','keep'),{recursive:true});
+    fs.writeFileSync(path.join(input,'build','keep','.gitignore'),'*.tmp\n!retained.tmp\n');
+    fs.writeFileSync(path.join(input,'build','keep','main.ts'),'source');
+    const pending=await createStagingWorkspace({taskId:'nested-ignore',workspaceId:'git',sourceRoot:input,stagingRoot:stageRoot,maxBytes:256});
+    for (const base of [input,pending.root]) {
+      fs.mkdirSync(path.join(base,'build','output'),{recursive:true});
+      fs.writeFileSync(path.join(base,'build','output','big.bin'),Buffer.alloc(512));
+      fs.writeFileSync(path.join(base,'build','keep','scratch.tmp'),Buffer.alloc(512));
+    }
+    fs.writeFileSync(path.join(pending.root,'build','keep','retained.tmp'),'new source');
+    fs.writeFileSync(path.join(pending.root,'build','keep','main.ts'),'edited');
+    fs.appendFileSync(path.join(pending.root,'build','keep','.gitignore'),'main.ts\nretained.tmp\n');
+    const selected=collectStagedChanges(pending).changes;
+    assert.deepEqual(selected.map(row=>row.path),['build/keep/.gitignore','build/keep/main.ts','build/keep/retained.tmp']);
+    for (const change of selected) fs.writeFileSync(path.join(input,change.path),change.content);
+    assert.equal(refreshStagingBaseline(pending).files,sourceSubdir?3:4);
+    assert.deepEqual(collectStagedChanges(pending).changes,[]);
+    cleanupStagingWorkspace(pending);
+  }
+  console.log('PASS frozen nested ignore rules, negations and repository subdirectory snapshots');
+
+  const emptyProject=path.join(root,'git-empty-directory'); fs.mkdirSync(path.join(emptyProject,'src'),{recursive:true});
+  execFileSync('git',['init','--quiet',emptyProject],{stdio:'pipe',windowsHide:true});
+  fs.writeFileSync(path.join(emptyProject,'main.ts'),'source');
+  const nestedRepo=path.join(emptyProject,'packages','vendor');fs.mkdirSync(nestedRepo,{recursive:true});
+  execFileSync('git',['init','--quiet',nestedRepo],{stdio:'pipe',windowsHide:true});
+  fs.writeFileSync(path.join(nestedRepo,'other.ts'),'other repository');
+  const emptyStage=await createStagingWorkspace({taskId:'new-directory',workspaceId:'git',sourceRoot:emptyProject,stagingRoot:stageRoot,maxBytes:128});
+  assert.equal(fs.existsSync(path.join(emptyStage.root,'packages','vendor')),false);
+  fs.mkdirSync(path.join(emptyStage.root,'packages','vendor'),{recursive:true});fs.writeFileSync(path.join(emptyStage.root,'packages','vendor','other.ts'),'nested write');
+  fs.mkdirSync(path.join(emptyStage.root,'src'),{recursive:true});fs.writeFileSync(path.join(emptyStage.root,'src','new.ts'),'new source');
+  assert.deepEqual(collectStagedChanges(emptyStage).changes.map(row=>row.path),['src/new.ts'],'initially empty source directory must allow new staged files');
+  fs.writeFileSync(path.join(emptyProject,'src','new.ts'),'new source');
+  assert.equal(refreshStagingBaseline(emptyStage).files,2);cleanupStagingWorkspace(emptyStage);
+  console.log('PASS initially empty nonignored directories accept new source files');
+
+  const configProject=path.join(root,'git-exclude-config');fs.mkdirSync(configProject);
+  const configGit=(...args)=>execFileSync('git',['-C',configProject,...args],{stdio:'pipe',windowsHide:true});
+  configGit('init','--quiet');
+  const globalIgnore=path.join(root,'global-ignore');fs.writeFileSync(globalIgnore,'global-build/\n');
+  configGit('config','core.excludesFile',globalIgnore);
+  fs.appendFileSync(path.join(configProject,'.git','info','exclude'),'local-build/\n');
+  fs.writeFileSync(path.join(configProject,'main.ts'),'source');
+  const configStage=await createStagingWorkspace({taskId:'git-excludes',workspaceId:'git',sourceRoot:configProject,stagingRoot:stageRoot,maxBytes:128});
+  for (const base of [configProject,configStage.root]) for (const dir of ['global-build','local-build']) { fs.mkdirSync(path.join(base,dir));fs.writeFileSync(path.join(base,dir,'output.bin'),Buffer.alloc(512)); }
+  fs.writeFileSync(path.join(configStage.root,'main.ts'),'edited');
+  assert.deepEqual(collectStagedChanges(configStage).changes.map(row=>row.path),['main.ts']);
+  fs.writeFileSync(path.join(configProject,'main.ts'),'edited');
+  assert.equal(refreshStagingBaseline(configStage).files,1);cleanupStagingWorkspace(configStage);
+  console.log('PASS frozen Git global and repository-local exclusion rules');
   const noisySource = path.join(root, 'noisy-project'); fs.mkdirSync(noisySource);
   fs.writeFileSync(path.join(noisySource, 'main.ts'), 'source');
   for (const dir of ['node_modules', '.pnpm-store', '.npm-cache']) {
@@ -66,9 +161,12 @@ try {
   cleanupStagingWorkspace(readOnlyStage);
   const scanStage = await createStagingWorkspace({ taskId: 'read-only-scan', workspaceId: 'live', sourceRoot: liveSource, stagingRoot: stageRoot });
   const originalReadDir = fs.readdirSync;
+  const checkedSource = fs.realpathSync.native(liveSource);
   try {
     fs.readdirSync = function(target, ...args) {
-      if (path.resolve(String(target)) === path.resolve(liveSource)) throw Object.assign(new Error('synthetic live directory unavailable'), { code: 'EACCES' });
+      // The production walk canonicalizes roots. Windows runners can return a
+      // different drive-letter case or alias than the temp path spelling.
+      if (fs.realpathSync.native(String(target)) === checkedSource) throw Object.assign(new Error('synthetic live directory unavailable'), { code: 'EACCES' });
       return originalReadDir.call(this, target, ...args);
     };
     assert.deepEqual(collectStagedChanges(scanStage).changes, [], 'no-op turn must not rescan live source or be blocked by transient source reads');

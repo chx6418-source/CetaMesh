@@ -36,10 +36,13 @@ function freePort() {
   });
 }
 
-async function waitForHttp(url, timeoutMs = 20000) {
+async function waitForHttp(url, worker, timeoutMs = 20000) {
   const deadline = Date.now() + timeoutMs;
   let lastError = null;
   while (Date.now() < deadline) {
+    if (worker.child.exitCode !== null || worker.child.signalCode !== null) {
+      throw new Error(`Legacy worker exited before HTTP readiness (${worker.child.exitCode}): ${worker.stderr()}`);
+    }
     try {
       return await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(1000) });
     } catch (error) {
@@ -116,7 +119,10 @@ function startWorker(dataDir, env, { pipeStdin = true } = {}) {
   child.stderr?.on('data', (chunk) => {
     stderr += String(chunk);
   });
-  return { child, stderr: () => stderr };
+  return { child, stderr: () => {
+    const logfile = path.join(dataDir, 'state', 'bridge.log');
+    return stderr + (fs.existsSync(logfile) ? fs.readFileSync(logfile, 'utf8').slice(-8000) : '');
+  } };
 }
 
 async function waitForExit(child, timeoutMs = 8000) {
@@ -176,7 +182,7 @@ try {
     const env = isolatedEnv(tempRoot, dataDir, { WHALEBRIDGE_SUPERVISED: '1', WHALEBRIDGE_LEGACY_HTTP: '1' });
     const { child, stderr } = startWorker(dataDir, env);
     try {
-      const response = await waitForHttp(`http://127.0.0.1:${port}/`);
+      const response = await waitForHttp(`http://127.0.0.1:${port}/`, { child, stderr });
       assert.equal(response.status, 401, '托管 worker 的根路径仍必须要求鉴权');
       const nativeOnly = await fetch(`http://127.0.0.1:${port}/?token=${CONSOLE_TOKEN}`, { redirect: 'manual' });
       assert.equal(nativeOnly.status, 404, '鉴权后的根路径不应提供网页控制台');
@@ -206,7 +212,7 @@ try {
     const env = isolatedEnv(tempRoot, dataDir, { WHALEBRIDGE_SUPERVISED: '1', WHALEBRIDGE_LEGACY_HTTP: '1' });
     const { child, stderr } = startWorker(dataDir, env);
     try {
-      await waitForHttp(`http://127.0.0.1:${port}/`);
+      await waitForHttp(`http://127.0.0.1:${port}/`, { child, stderr });
       const response = await postJson(`http://127.0.0.1:${port}/api/restart?token=${CONSOLE_TOKEN}`);
       assert.equal(response.status, 200, '带控制台令牌应可请求重启');
       const code = await waitForExit(child);
@@ -226,7 +232,7 @@ try {
     const env = isolatedEnv(tempRoot, dataDir, { WHALEBRIDGE_SUPERVISED: '1', WHALEBRIDGE_LEGACY_HTTP: '1' });
     const { child, stderr } = startWorker(dataDir, env);
     try {
-      await waitForHttp(`http://127.0.0.1:${port}/`);
+      await waitForHttp(`http://127.0.0.1:${port}/`, { child, stderr });
       const response = await postJson(`http://127.0.0.1:${port}/api/shutdown?token=${CONSOLE_TOKEN}`);
       assert.equal(response.status, 200);
       const code = await waitForExit(child);

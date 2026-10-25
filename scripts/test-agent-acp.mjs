@@ -37,6 +37,40 @@ function launch(args = {}) {
 const binding = async ({taskId, workspaceId}) => ({task:{id:taskId, workspaceId}, workspace:{id:workspaceId, root}});
 function provider(extra = {}) { return createAcpAgentProvider({descriptor, launch, resolveTaskWorkspace:binding, ...extra}); }
 try {
+  const permissionSecurity={mode:'native-permissions',verified:true,nativeSandboxSupported:false,strictIsolationVerified:false,nativeApprovalSupported:true,nativePermissionPolicyVerified:true,allToolsRequireApproval:true,nativeSandboxMode:'none'};
+  const permissionProvider=provider({descriptor:{...descriptor,security:permissionSecurity},requestNativeApproval:async()=>({outcome:'rejected'})});
+  assert.equal((await permissionProvider.health()).taskEligible,true,'verified explicit native permissions must be usable without claiming OS sandbox');
+  const permissionSession=await permissionProvider.createSession({taskId:'permissions',workspaceId:'w'});
+  await permissionProvider.closeSession(permissionSession);
+  const unbridged=provider({descriptor:{...descriptor,security:permissionSecurity}});
+  assert.equal((await unbridged.health()).taskEligible,false,'native permission mode requires actual host approval bridge');
+  let runtimeCurrent=true, runtimeChecks=0;
+  const validated=provider({validateRuntime:async()=>{runtimeChecks++;if(!runtimeCurrent)throw Object.assign(new Error('Changed runtime'),{code:'AGENT_RUNTIME_CHANGED'});}});
+  const validatedSession=await validated.createSession({taskId:'validated',workspaceId:'w'});
+  assert.equal(runtimeChecks,2,'runtime validation surrounds staging and launch');
+  runtimeCurrent=false;
+  await assert.rejects(validated.send({sessionId:validatedSession.sessionId,content:'must not execute'}),{code:'AGENT_RUNTIME_CHANGED'});
+  assert.equal((await validated.status(validatedSession)).running,false);
+  await validated.closeSession(validatedSession);
+  const snapshotSource=path.join(root,'snapshot-source'), nested=path.join(snapshotSource,'nested-project');
+  fs.mkdirSync(nested,{recursive:true});
+  fs.writeFileSync(path.join(snapshotSource,'visible.txt'),'visible');
+  fs.writeFileSync(path.join(nested,'other-project.txt'),'separate workspace');
+  fs.writeFileSync(path.join(snapshotSource,'opencode.json'),'untrusted runtime config');
+  const snapshotProvider=provider({stagingRoot:path.join(root,'owned-stages'),snapshotExcludedPaths:['opencode.json'],
+    listWorkspaceRoots:async()=>[{root:nested}],resolveTaskWorkspace:async({taskId,workspaceId})=>({task:{id:taskId,workspaceId},workspace:{id:workspaceId,root:snapshotSource}})});
+  const snapshotSession=await snapshotProvider.createSession({taskId:'snapshot',workspaceId:'w'});
+  assert.equal(fs.readFileSync(path.join(snapshotSession.cwd,'visible.txt'),'utf8'),'visible');
+  assert.equal(fs.existsSync(path.join(snapshotSession.cwd,'nested-project','other-project.txt')),false,'registered nested workspace never enters native staging');
+  assert.equal(fs.existsSync(path.join(snapshotSession.cwd,'opencode.json')),false,'trusted runtime policy files are excluded from project snapshot');
+  assert.ok(path.relative(path.join(root,'owned-stages'),snapshotSession.cwd).split(path.sep)[0]!=='..','owned staging root is honored');
+  await snapshotProvider.closeSession(snapshotSession);
+  const invalidSnapshot=provider({snapshotExcludedPaths:['../outside']});
+  await assert.rejects(invalidSnapshot.createSession({taskId:'bad-policy',workspaceId:'w'}),{code:'ACP_SNAPSHOT_POLICY_INVALID'});
+  const overlappingStage=provider({stagingRoot:nested,listWorkspaceRoots:async()=>[nested]});
+  const beforeOverlap=peers.length;
+  await assert.rejects(overlappingStage.createSession({taskId:'bad-stage',workspaceId:'w'}),{code:'STAGING_ROOT_OVERLAPS_WORKSPACE'});
+  assert.equal(peers.length,beforeOverlap,'stage overlap fails before launching a runtime');
   const buffer = createAgentEventBuffer(); const active=buffer.follow();
   for(let seq=1;seq<=1025;seq++) {
     buffer.push({seq,event:{type:seq===1025?'turn/end':'assistant/chunk'}});

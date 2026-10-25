@@ -4,9 +4,15 @@ export interface ChatSession {
   id: string; title: string; createdAt: string | number | null; updatedAt: string | number | null;
   archived: boolean; taskId: string | null; config: { mode: string; modelProvider: string | null; model: string; agentProvider: string | null; workspaceId: string | null };
 }
+export interface ModelUsage {
+  inputTokens: number | null; outputTokens: number | null; totalTokens: number | null;
+  reasoningTokens: number | null; cacheReadTokens: number | null; cacheWriteTokens: number | null;
+  requestCount: number | null; cacheHitRate: number | null; cost: { status: 'actual' | 'estimated' | 'unknown'; amount: number | null; knownAmount: number | null; currency: string | null; complete: boolean; sources: string[]; versions: string[] } | null; accountingComplete: boolean | null;
+}
 export interface ChatMessage {
   id: string; role: 'user' | 'assistant' | 'system'; text: string; at: string | number | null;
   requestId?: string | null;
+  usage?: ModelUsage | null;
   attachments: string[]; toolActivity: { id: string; label: string; status: string; summary: string; durationMs: number | null }[];
   agentActivity?: { providerId: string; label: string; status: 'running' | 'completed' | 'cancelled' | 'failed' } | null;
   error: string | null; cancelled: boolean;
@@ -16,9 +22,16 @@ export interface ProviderSettingField {
   choices?: string[]; min?: number; max?: number;
 }
 export interface Task {
+  usage?: ModelUsage | null;
   id: string; title: string; goal: string; status: string; currentPhase: string;
   progress: { percent: number; note: string }; workspaceId: string | null; agent: string | null;
   currentAgent: { provider: string; sessionId: string } | null;
+  parentTaskId: string | null; verification: string | null; attemptCount: number;
+  childOutputKind: string | null;
+  attempts: { id: string; provider: string; state: string; at: string | number | null;
+    updatedAt: string | number | null }[];
+  children: { id: string; title: string; status: string; agent: string | null; supersedesChildId: string | null;
+    verification: string; attemptCount: number; usage: ModelUsage | null }[];
   createdAt: string | number | null; updatedAt: string | number | null; rev: number | null;
   checkpoint: { summary: string; nextAction: string } | null; result: { summary: string } | null;
   artifacts: { id: string; kind: string; label: string; createdAt: string | number | null }[];
@@ -44,16 +57,26 @@ export interface MemoryCandidate {
   id: string; status: string; type: string; scope: string; content: string; reason: string;
   proposedAt: string | number | null; memoryId: string | null;
 }
-export type AgentStatus = 'ready' | 'needs-setup' | 'descriptor-incomplete' | 'not-installed' | 'unavailable' | 'not-supported' | 'not-checked';
+export type AgentStatus = 'ready' | 'needs-setup' | 'descriptor-incomplete' | 'not-installed' | 'unavailable' | 'not-supported' | 'not-checked' | 'connection-pending';
 export interface Agent {
   id: string; name: string; role: string; description: string; available: boolean | null; installed: boolean | null; authenticated: boolean | null; compatible: boolean | null; status: AgentStatus;
   eligible: boolean | null; taskEligible: boolean | null; configured: boolean | null; reason: string | null; lastError: string | null; workspaceBoundary: string | null;
-  reachable?: boolean | null; ready?: boolean | null; sessionCapable?: boolean | null;
+  reachable?: boolean | null; ready?: boolean | null; sessionCapable?: boolean | null; cliInstalled?: boolean | null;
   sandboxCapable?: boolean | null; installKind?: string | null; probePhase?: string | null; probeCode?: string | null; checkedAt?: string | null; requiresStandaloneNode?: boolean;
   configuration?: DshConfiguration | null;
+  runtimeConfiguration?: AgentRuntimeConfiguration | null;
+  authConfigured?: boolean | null; authVerified?: boolean | null; authentication?: 'configured-unverified' | 'not-configured' | 'verified' | null;
   preset?: { purpose: string; id: string | null; compatible: boolean | null; loaded: boolean | null; loadState: 'loaded' | 'not-loaded' | 'unknown'; reason: string | null; verification: string | null } | null;
   diagnostic?: { stage: string; code: string | null; retryable: boolean; checkedAt: string | null } | null;
-  version: string | null; desktopApp: { installed: boolean; running: boolean; status: string; version: string | null } | null;
+  version: string | null; desktopApp: { displayName?: string; installed: boolean | null; running: boolean | null; status: string; version: string | null } | null;
+}
+export type AgentRuntimeProvider = 'gemini' | 'opencode' | 'qwen' | 'claude';
+export interface AgentRuntimeConfiguration {
+  provider: AgentRuntimeProvider; enabled: boolean; runtimePath: string; nodePath: string; model: string; baseUrl: string;
+  credentialConfigured: boolean; executionMode: 'native-permissions'; revision: number;
+}
+export interface AgentRuntimeInput {
+  enabled?: boolean; runtimePath?: string; nodePath?: string; model?: string; baseUrl?: string; apiKey?: string; executionMode?: 'native-permissions';
 }
 export interface DshPresetCatalog { state: 'ready' | 'missing' | 'unreadable' | 'outside-root' | 'loading' | 'error'; truncated: boolean; presets: { id: string; compatible: boolean; reason: string | null }[] }
 export interface DshSelection { codingPreset: string | null; socialPreset: string | null; homeDir: string | null; baseUrl: string | null }
@@ -72,7 +95,7 @@ export interface Plugin {
 export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'expired' | 'consumed';
 export interface Approval {
   id: string; title: string; capability: string; status: ApprovalStatus; createdAt: string | number | null;
-  expiresAt: string | number | null; summary: string; risk: string; taskId: string | null;
+  expiresAt: string | number | null; summary: string; risk: string; taskId: string | null; details?: string;
 }
 export interface ApprovalDecisionResult {
   status: 'accepted' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled' | 'unknown' | 'rejected'; operationId?: string; decision?: string; code?: string; approvalId?: string; requestId?: string; turnResumed?: boolean; resumePending?: boolean;
@@ -131,7 +154,7 @@ type UiMethod =
   | 'ui.events.next'
   | 'ui.chat.sessions.list' | 'ui.chat.sessions.create' | 'ui.chat.sessions.rename' | 'ui.chat.sessions.archive' | 'ui.chat.sessions.delete'
   | 'ui.chat.history' | 'ui.chat.status' | 'ui.chat.send' | 'ui.chat.stop' | 'ui.chat.retry' | 'ui.chat.continue' | 'ui.chat.catalog' | 'ui.chat.config.set'
-  | 'ui.task.overview' | 'ui.task.get' | 'ui.task.create' | 'ui.task.start' | 'ui.task.pause' | 'ui.task.resume' | 'ui.task.reconcile' | 'ui.task.cancel' | 'ui.task.handoff'
+  | 'ui.task.overview' | 'ui.task.get' | 'ui.task.outcome.verify' | 'ui.task.child.create' | 'ui.task.child.review' | 'ui.task.child.complete' | 'ui.task.child.verify' | 'ui.task.complete' | 'ui.task.create' | 'ui.task.start' | 'ui.task.pause' | 'ui.task.resume' | 'ui.task.reconcile' | 'ui.task.cancel' | 'ui.task.handoff'
   | 'ui.workshop.proposals' | 'ui.workshop.proposal' | 'ui.workshop.review' | 'ui.workshop.retry' | 'ui.workshop.task.status' | 'ui.workshop.deliver'
   | 'ui.workspace.list' | 'ui.workspace.open' | 'ui.workspace.create'
   | 'ui.memory.overview' | 'ui.memory.get' | 'ui.memory.create' | 'ui.memory.update' | 'ui.memory.pin' | 'ui.memory.delete'
@@ -272,7 +295,7 @@ export const chatClient = {
     remove: (id: string) => uiCall<{ id: string; deleted: boolean }>('ui.chat.sessions.delete', { id })
   },
   history: (id: string, limit = 100, beforeMessageId: string | null = null, afterMessageId: string | null = null) => uiCall<{
-    id: string; total: number; messages: ChatMessage[]; nextBeforeMessageId: string | null; hasMore: boolean; nextAfterMessageId: string | null; hasMoreAfter: boolean
+    id: string; total: number; messages: ChatMessage[]; sessionUsage?: ModelUsage | null; nextBeforeMessageId: string | null; hasMore: boolean; nextAfterMessageId: string | null; hasMoreAfter: boolean
   }>('ui.chat.history', { id, limit, beforeMessageId, afterMessageId }),
   status: (id: string) => uiCall<{ id: string; taskId: string | null; dshSessionAlive: boolean; state: string; requestId: string | null; statusMessage: string | null; retryCount: number; followState: string; followError: string | null; displayText: string; toolActivity: ChatMessage['toolActivity']; agentActivity: ChatMessage['agentActivity']; error: string | null; errorCode: string | null; approvalId: string | null; approvalExpiresAt: string | number | null; routing: Record<string, unknown> }>('ui.chat.status', { id }),
   send: (id: string, text: string, attachments: Attachment[] = [], clientMessageId?: string) => {
@@ -293,6 +316,19 @@ export const chatClient = {
 export const taskClient = {
   overview: (query = '', status = '') => uiCall<{ tasks: Task[]; total: number; counts: Record<string, number>; needsAttention: string[] }>('ui.task.overview', { query, status, limit: 100 }),
   get: (id: string) => uiCall<{ task: Task }>('ui.task.get', { id }),
+    createChild: (input: { parentTaskId: string; expectedParentRev: number; goal: string; requestId: string;
+      workspaceId: string; supersedesChildId?: string; contract: { mode: 'read-only'; outputKind: 'analysis' | 'tool';
+        readScope: string[]; expectedEvidence: string[] } }) => uiCall<{ task: Task }>('ui.task.child.create', input),
+    reviewChild: (id: string, expectedRev: number, approve: boolean, reviewSummary: string, evidenceEventIds: string[]) =>
+      uiCall<{ task: Task }>('ui.task.child.review', { id, expectedRev, approve, reviewSummary, evidenceEventIds }),
+    completeChild: (id: string, expectedRev: number, summary: string) =>
+      uiCall<{ task: Task }>('ui.task.child.complete', { id, expectedRev, summary }),
+    verifyChild: (id: string, expectedRev: number) =>
+      uiCall<{ task: Task }>('ui.task.child.verify', { id, expectedRev }),
+    complete: (id: string, expectedRev: number, summary: string) =>
+      uiCall<{ task: Task }>('ui.task.complete', { id, expectedRev, summary, reviewed: true }),
+  verifyOutcome: (id: string, input: { kind: 'code' | 'file' | 'tool' | 'analysis'; expectedFile?: string; expectedSha256?: string; expectedCapability?: string }) =>
+    uiCall<{ status: 'VERIFIED' | 'NEEDS_REVIEW'; kind: string; evidenceEventIds: string[]; reasons: string[] }>('ui.task.outcome.verify', { id, ...input }),
   create: (input: { goal: string; requirements?: string[]; workspaceId?: string | null; agentProvider?: string; requestId?: string; note?: string }) => uiCall<{ task: Task }>('ui.task.create', input),
   start: (id: string, expectedRev?: number, agentProvider?: string) => uiCall<{ task: Task }>('ui.task.start', { id, expectedRev, agentProvider }),
   pause: (id: string, expectedRev?: number) => uiCall<{ task: Task }>('ui.task.pause', { id, expectedRev }),
@@ -329,9 +365,13 @@ export const memoryClient = {
 export const agentClient = {
   security: (provider: string, workspaceId: string) => uiCall<{ required: boolean; authorized: boolean; fingerprint: string; disclosure: string }>('ui.agent.security', { provider, workspaceId }),
   authorize: (provider: string, workspaceId: string, fingerprint: string) => uiCall<{ status: string; approvalId: string }>('ui.agent.authorize', { provider, workspaceId, fingerprint }),
-  list: () => uiCall<{ agents: Agent[] }>('ui.agent.list', {}),
+  list: (refresh = false) => uiCall<{ agents: Agent[] }>('ui.agent.list', { refresh }),
   health: (provider: string, refresh = false) => uiCall<Agent>('ui.agent.health', { provider, refresh }),
   presets: (homeDir: string | null) => uiCall<DshPresetCatalog>('ui.agent.presets', { provider: 'dsh', homeDir }),
+  configureRuntime: async (provider: AgentRuntimeProvider, config: AgentRuntimeInput) => {
+    const result = await uiCall<{ provider: AgentRuntimeProvider; supported: boolean; applied: boolean; configuration: AgentRuntimeConfiguration }>('ui.agent.configure', { agentId: provider, config });
+    return result.configuration;
+  },
   configure: (config: DshSelection) => uiCall<{ provider: 'dsh'; supported: boolean; applied: false; restartRequired: boolean; configuration: DshConfiguration }>('ui.agent.configure', { agentId: 'dsh', config })
 };
 export const extensionSettingsClient = {

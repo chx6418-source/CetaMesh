@@ -492,11 +492,14 @@ writeJsonAtomic(path.join(workerRoot, 'config.json'), {
 });
 const workerIntegration = createIntegrationService({ stateDir: path.join(workerRoot, 'state') });
 const worker = spawn(process.execPath, [path.join(repoRoot, 'src', 'core-entry.js'), '--worker'], {
-  cwd: repoRoot, windowsHide: true, detached: process.platform !== 'win32', stdio: 'ignore',
+  cwd: repoRoot, windowsHide: true, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'],
   env: { ...process.env, WHALEBRIDGE_DATA_DIR: workerRoot, WHALEBRIDGE_RESOURCE_DIR: repoRoot,
     PATH: discoveryRoot, USERPROFILE: discoveryRoot, LOCALAPPDATA: discoveryRoot, APPDATA: discoveryRoot,
     ProgramFiles: discoveryRoot, 'ProgramFiles(x86)': discoveryRoot }
 });
+let workerStderr = '';
+worker.stderr.on('data', chunk => { workerStderr += String(chunk); });
+worker.stdout.on('data', chunk => { workerStderr += String(chunk); });
 try {
   const pipeName = resolveDataPipeName({ dataRoot: workerRoot });
   let token;
@@ -507,7 +510,7 @@ try {
       token = fs.readFileSync(path.join(workerRoot, 'state', 'agent-token'), 'utf8').trim();
       ready = (await dataCall({ path: '/api/status', token, pipeName, timeoutMs: 500 })).ok;
     } catch (error) {
-      if (worker.exitCode !== null) throw new Error('QQ fixture Core exited before IPC readiness');
+      if (worker.exitCode !== null) throw new Error(`QQ fixture Core exited before IPC readiness (${worker.exitCode}): ${workerStderr}`);
       await new Promise(resolve => setTimeout(resolve, 50));
     }
   }

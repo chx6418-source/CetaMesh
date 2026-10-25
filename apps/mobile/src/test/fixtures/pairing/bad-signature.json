@@ -1,0 +1,25 @@
+{
+  "description": "exchange 的签名被翻转一个字符（必须被拒绝：REFUSED_SIGNATURE）。",
+  "now": "2026-10-08T12:00:00.000Z",
+  "expect": "reject",
+  "envelope": {
+    "protocol": "cetamesh",
+    "version": 1,
+    "id": "mobile-event-0003",
+    "type": "pairing.exchange",
+    "timestamp": "2026-10-08T12:00:00.000Z",
+    "payload": {
+      "invitationId": "inv_7f3a91c2d4e5b6a8",
+      "token": "WY2u5fd2IV3Yf05Qxq7cQWX+deExWS8U7FHEnIinwaQ=",
+      "nonce": "1FjvZHds0sO8Ze9HXRskvXgwlq4NoqgnXXabHXtulMM=",
+      "device": {
+        "deviceId": "a7f3c1e0-9b2d-4e6a-9f11-7c3d5e8b0a42",
+        "deviceName": "Pixel 9 测试机",
+        "publicKey": "BNSaXFh1oVQzL7aHwMP4ma/2REYxre4kPQx3HQNDwVd/Ml7vG07LMdxa4bk4QoG0Andl/BdTUxxKvW0lqC2CfQE=",
+        "platform": "android",
+        "createdAt": "2026-10-08T12:00:00.000Z"
+      },
+      "signature": "MEQCIC8CuHP6JFnHv90S92TXs6tZE5aDgfMz4TeQs/mW8BvsBiAHa426W/fOckhrvJQQa+zDYrE9hRVoUXQkzYhO68LYLw=="
+    }
+  }
+}

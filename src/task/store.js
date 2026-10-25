@@ -37,6 +37,7 @@ function assertTaskSchema(raw, file) {
     throw taskError('STORE_CORRUPT', '任务文件版本、修订号或列表无效：' + file);
   }
   const seen = new Set();
+  const children = [];
   for (const row of raw.tasks) {
     if (!row || typeof row !== 'object' || Array.isArray(row) || typeof row.id !== 'string' || !row.id
       || seen.has(row.id) || typeof row.goal !== 'string' || !TASK_STATUSES.includes(row.status)
@@ -47,7 +48,64 @@ function assertTaskSchema(raw, file) {
       || (row.workspaceId !== undefined && row.workspaceId !== null && typeof row.workspaceId !== 'string')) {
       throw taskError('STORE_CORRUPT', '任务记录结构无效：' + file);
     }
+    const linked = row.parentTaskId !== undefined && row.parentTaskId !== null;
+    if (linked) {
+      const contract = row.childContract;
+      if (typeof row.parentTaskId !== 'string' || !row.parentTaskId || row.parentTaskId === row.id
+        || typeof row.parentFingerprint !== 'string' || !/^[a-f0-9]{64}$/i.test(row.parentFingerprint)
+        || (row.supersedesChildId != null && (typeof row.supersedesChildId !== 'string' || !row.supersedesChildId
+          || row.supersedesChildId === row.id))
+        || !contract || contract.mode !== 'read-only'
+        || !['analysis', 'tool'].includes(contract.outputKind)
+        || !Array.isArray(contract.readScope) || !contract.readScope.length || contract.readScope.length > 50
+        || contract.readScope.some(scope => typeof scope !== 'string' || !scope
+          || scope.replaceAll('\\', '/').startsWith('/') || scope.includes(':')
+          || scope.replaceAll('\\', '/').split('/').some(part => !part || part === '.' || part === '..'))
+        || !Array.isArray(contract.expectedEvidence) || !contract.expectedEvidence.length
+        || !contract.expectedEvidence.every(item => typeof item === 'string')
+        || (contract.outputKind === 'tool' && (new Set(contract.expectedEvidence).size !== contract.expectedEvidence.length
+          || contract.expectedEvidence.some(item => !['filesystem.read', 'filesystem.search'].includes(item))))) {
+        throw taskError('STORE_CORRUPT', 'Invalid child Task authority');
+      }
+      children.push(row);
+    } else if (row.childContract != null) throw taskError('STORE_CORRUPT', 'Unlinked child contract');
+    if (row.attempts !== undefined && (!Array.isArray(row.attempts) || row.attempts.length > 32
+      || row.attempts.some(item => !item || typeof item.id !== 'string' || typeof item.requestId !== 'string'
+        || typeof item.provider !== 'string' || typeof item.sessionId !== 'string'
+        || !['started', 'accepted', 'completed', 'failed', 'cancelled', 'unknown', 'reviewed'].includes(item.state)))) {
+      throw taskError('STORE_CORRUPT', 'Invalid Task Attempts');
+    }
+    if (Array.isArray(row.attempts) && (new Set(row.attempts.map(item => item.id)).size !== row.attempts.length
+      || new Set(row.attempts.map(item => item.requestId)).size !== row.attempts.length)) {
+      throw taskError('STORE_CORRUPT', 'Duplicate Task Attempt identity');
+    }
     seen.add(row.id);
+  }
+  const byId = new Map(raw.tasks.map(row => [row.id, row]));
+  for (const child of children) {
+    const parent = byId.get(child.parentTaskId);
+    if (!parent || parent.parentTaskId || parent.workspaceId !== child.workspaceId
+      || children.filter(row => row.parentTaskId === parent.id).length > 6) {
+      throw taskError('STORE_CORRUPT', 'Invalid Task family linkage');
+    }
+    if (child.supersedesChildId) {
+      const prior = byId.get(child.supersedesChildId);
+      const unverifiedCompleted = prior?.status === 'completed'
+        && prior.result?.verification === 'NEEDS_REVIEW'
+        && (prior.attempts ?? []).length > 0 && prior.attempts.at(-1).state === 'completed';
+      if (!prior || prior.parentTaskId !== parent.id
+        || (!['failed', 'cancelled'].includes(prior.status) && !unverifiedCompleted)
+        || (prior.attempts ?? []).some(item => ['started', 'accepted', 'unknown'].includes(item.state))) {
+        throw taskError('STORE_CORRUPT', 'Unsafe child replacement');
+      }
+    }
+  }
+  for (const parentId of new Set(children.map(row => row.parentTaskId))) {
+    const family = children.filter(row => row.parentTaskId === parentId);
+    const replaced = family.map(row => row.supersedesChildId).filter(Boolean);
+    if (new Set(replaced).size !== replaced.length || family.filter(row => !replaced.includes(row.id)).length > 2) {
+      throw taskError('STORE_CORRUPT', 'Invalid child concurrency or replacement chain');
+    }
   }
 }
 
@@ -71,6 +129,12 @@ function normalizeLoaded(raw) {
     completedWork: asArray(raw.completedWork),
     pendingWork: asArray(raw.pendingWork),
     workspaceId: raw.workspaceId === undefined ? null : raw.workspaceId,
+    parentTaskId: typeof raw.parentTaskId === 'string' ? raw.parentTaskId : null,
+    supersedesChildId: typeof raw.supersedesChildId === 'string' ? raw.supersedesChildId : null,
+    parentFingerprint: typeof raw.parentFingerprint === 'string' ? raw.parentFingerprint : null,
+    childContract: raw.childContract && typeof raw.childContract === 'object' && !Array.isArray(raw.childContract)
+      ? raw.childContract : null,
+    attempts: asArray(raw.attempts),
     createRequest: raw.createRequest && typeof raw.createRequest.id === 'string'
       && typeof raw.createRequest.fingerprint === 'string' ? raw.createRequest : null,
     artifacts: asArray(raw.artifacts),
@@ -205,7 +269,7 @@ export function createTaskStore({ stateDir, now = () => Date.now(), idFactory } 
     const next = mutate(clone(task));
     // Progress, reports and checkpoints are observational. Authority changes,
     // including an away-and-back assignment, invalidate pending approval.
-    const authority = row => JSON.stringify(['goal','requirements','status','workspaceId','currentAgent','modelConfig','ownerContext']
+    const authority = row => JSON.stringify(['goal','requirements','status','workspaceId','currentAgent','modelConfig','ownerContext','parentTaskId','childContract']
       .map(key => row[key] ?? null));
     next.authorizationRevision = (task.authorizationRevision ?? task.rev)
       + (authority(task) === authority(next) ? 0 : 1);

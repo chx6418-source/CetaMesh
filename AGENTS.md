@@ -1,23 +1,30 @@
-# AGENTS.md — Agent 阅读契约
+# CetaMesh — Agent repository rules
 
-目的：让任何 Agent 在本仓库开始工作时，默认只消耗**当前事实**，不吞历史文档。
+## Start here
 
-## 开始工作只读（按序）
+1. Read RULES.md, PROJECT_STATE.md and the affected platform's architecture docs.
+2. Desktop owns root src/, desktop-shell/, desktop-ui/, scripts/, plugins/ and extensions/.
+3. For apps/mobile/** also read apps/mobile/AGENTS.md and apps/mobile/PROJECT_STATE.md.
+4. For docs/protocol/, fixtures/pairing/ and packages/, check both platform implementations. Trust does not grant capability access.
 
-1. `RULES.md` —— 权限/安全红线（不可协商）。
-2. `PROJECT_STATE.md` —— 当前状态、活跃工作、下一步入口。
-3. 与任务直接相关的架构文档（如 `docs/desktop/ARCHITECTURE.md`、`docs/desktop/BUILD_AND_RELEASE.md`）。
+## Build and safety
 
-## 默认不读
+- Run Desktop tests through root npm test. Register new scripts/test-*.mjs in scripts/run-all-tests.mjs.
+- Run Mobile tests from apps/mobile (npm test). Do not hoist React Native dependencies into the Desktop root.
+- Preserve Desktop JSON storage primitives, Mobile local-only memory defaults, native permission boundaries, and independent release artifacts.
+- Do not turn unknown authorization into implied approval. Keep secrets, local state, API keys and private credentials out of Git, logs and publication artifacts.
+- SnowLuma binaries and restricted SDK/MCP are not redistributed. The owned OneBot adapter only interoperates with a separately installed compatible gateway; do not reintroduce upstream SDK code or automatic third-party deployment.
+- Keep GitCode and existing-client update endpoints stable unless a separate, tested release migration is authorized.
 
-- `docs/archive/**` —— 历史阶段快照、旧 handoff/report、旧控制台事实源（AGENT_CONTEXT）。
-  只有在**调查历史行为 / 追溯决策**时才按需读取其中具体文件。
-- 任何 `*.log`、`output/`、构建产物。
+## Public-repository hygiene
 
-## 硬性约定
+- Public repository: chx6418-source/CetaMesh. Do not import private Git histories or unreviewed third-party sources.
+- Publish product source, essential tests, protocols, contribution and architecture documentation only.
+- Keep obsolete UI mocks, theme exploration, internal audit/repair reports, handoff notes, raw CI logs and debug screenshots in the private development archive, not the public repository.
+- Use scripts/test-public-repository-hygiene.mjs and docs/development/PUBLIC_REPOSITORY_POLICY.md when changing tracked content.
+- Preserve existing public Git history. Deleting a file from the active tree does not erase it from earlier public commits.
+- Work in review branches; do not merge to main, force-push rewritten history, publish Releases or remove backups without explicit owner approval.
 
-- 测试只用 `npm test`（统一入口）；新增 `scripts/test-*.mjs` 必须登记进 `scripts/run-all-tests.mjs`，否则聚合器 FAIL。
-- 持久化 JSON 的读/写必须经 `src/storage/json-file.js`（Storage Primitive），错误码映射放在各自 Domain 内。
-- 新增空 `catch` 必须带说明注释（`scripts/test-error-hygiene.mjs` 锁基线，裸 catch 只许减不许增）。
-- 修改后在分支上交付：完成 → Owner 确认 → 合并 main → 删除工作分支（不要直接 push main）。
-- 当前工作分支与活跃任务见 `PROJECT_STATE.md` 的 Active Work 一节。
+## Workflow
+
+Inspect Git status and diffs first. Prefer focused, reversible changes; run available tests and label unrun environment-dependent checks accurately. Do not use destructive Git cleanup/reset commands to resolve conflicts.
