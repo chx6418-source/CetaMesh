@@ -72,6 +72,7 @@ const REGISTRY = {
   'test-usage-projection.mjs': { category: 'desktop' },
   'test-gitcode-mirror.mjs': { category: 'security', note: 'Mirror public main without losing GitCode history or release tags' },
   'test-ui-motion-live.mjs': { category: 'environment', requires: ['ui-motion-live'], timeoutMs: 60000 },
+  'test-responsive-layout.mjs': { category: 'environment', requires: ['ui-motion-live'], timeoutMs: 60000 },
   'test-memory-layout.mjs': { category: 'desktop' },
   'test-dsh-live.mjs': { category: 'environment', requires: ['dsh-live'], timeoutMs: 210000 },
   'test-reference-preview.mjs': { category: 'security' },

@@ -92,7 +92,7 @@ export function ReferenceViewerLayout({ children }: { children: ReactNode }) {
   }, []);
   const active = state.tabs.find(tab => tab.id === state.activeId);
   const width = clampPreviewWidth(preferred ?? available * .42, available);
-  const narrow = available < 640;
+  const narrow = Boolean(active) && available < 640;
   return <div ref={container} className={`reference-layout ${active ? 'has-viewer' : ''} ${narrow ? 'narrow' : ''} ${narrowViewer ? 'show-viewer' : 'show-chat'}`} style={{ '--viewer-width': `${width}px` } as CSSProperties}>
     <div className="reference-chat">{children}</div>
     {active && <>

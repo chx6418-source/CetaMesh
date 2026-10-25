@@ -145,6 +145,12 @@ title, error and authoritative navigation-history events update the renderer too
 Regression entry points are `npm test -- --suite test-reference-preview --suite test-reference-viewer`
 and opt-in `test-reference-browser` / `test-reference-browser-smoke` through the same test runner.
 
+The main page is an inline-size query container: cards, settings and plugin controls respond to
+the available content pane, including a docked viewer, rather than only the outer window width.
+Narrow reference switching requires an active tab; closing the final tab always restores the
+page. `test-responsive-layout` measures Chromium geometry and mounts the production sidebar hook;
+enable its local browser fixture with `WHALEBRIDGE_TEST_UI_MOTION=1` through `npm test`.
+
 # M4.4 Core Channel runtime boundary (2026-10-18)
 
 The formal `--worker` composes Core without importing or running Legacy Bridge.
