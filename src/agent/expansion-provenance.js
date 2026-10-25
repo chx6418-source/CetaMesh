@@ -23,6 +23,7 @@ export const AGENT_EXPANSION_SOURCE_FILES = Object.freeze([
   'src/agent/protocol/agent-permission-bridge.js', 'src/agent/expansion-provenance.js',
   'src/core-dispatch.js', 'src/core-entry.js', 'src/core-sea.js',
   'src/app/service-container.js', 'src/storage/json-file.js',
+  'src/desktop/chat-service.js', 'src/desktop/platform-runtime.js',
   'scripts/claude-sdk-resource.mjs', 'scripts/build-core.mjs'
 ]);
 

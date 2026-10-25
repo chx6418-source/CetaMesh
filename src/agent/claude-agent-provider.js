@@ -59,7 +59,7 @@ export function createClaudeAgentProvider({ launchSdkRunner, taskOptions, resolv
     });
   }
   return defineAgentProvider({ id: 'claude', label: 'Claude', eventProtocol: null,
-    capabilityExtras: { available: false, reason: 'runtime_security_unverified', readyForTask: false,
+    capabilityExtras: { requiresTask: true, available: false, reason: 'runtime_security_unverified', readyForTask: false,
       workspaceBoundary: 'unsupported', supportsFreshSession: false, supportsResume: false,
       security: { mode: 'native', nativeSandboxMode: 'unverified', nativeSandboxSupported: false,
         nativeApprovalPolicy: 'ask', strictIsolationVerified: false,

@@ -179,7 +179,7 @@ export function createAcpAgentProvider({descriptor, launch, resolveTaskWorkspace
     return {closed:true,sessionId};
   }
   return Object.freeze({...defineAgentProvider({id:policy.id,label:policy.label,eventProtocol:'agent-turn-events-v1',
-    capabilityExtras:{security:policy.security ?? {mode:'native',nativeSandboxSupported:false},
+    capabilityExtras:{requiresTask:true,security:policy.security ?? {mode:'native',nativeSandboxSupported:false},
       workspaceBoundary:eligible() ? 'native-staged' : 'unsupported',supportsFreshSession:eligible(),
       executionMode:'native-security-staging',requiresSessionCleanup:true},
     methods:{

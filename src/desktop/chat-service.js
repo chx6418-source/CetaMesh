@@ -139,6 +139,9 @@ export function createChatService({
       .filter((entry) => entry && typeof entry.id === 'string')
       .map((entry) => [entry.id, entry])
   );
+  // Task ownership is structural; a cold/unavailable runtime cannot change its Session contract.
+  const agentRequiresTask = descriptor => descriptor?.requiresTask === true
+    || ['capability-broker', 'staged-capability-broker', 'native-staged'].includes(descriptor?.workspaceBoundary);
   function resolveDefaultAgentProvider() {
     const configured = typeof defaultAgentProvider === 'function' ? defaultAgentProvider() : defaultAgentProvider;
     if (configured === 'auto' || configured === null || configured === undefined || configured === '') return null;
@@ -431,7 +434,7 @@ export function createChatService({
       try { await agentExecute({ method: 'agent.cancel', params: { provider: activeProvider, sessionId: record.dshSessionId } }); }
       catch (error) { if (error?.code !== 'SESSION_NOT_FOUND') onEvent?.({ event: 'chat.warning', data: { sessionId, message: '删除会话时未能确认 Agent 取消。' } }); }
       const descriptor = selectableAgentProviders.get(activeProvider);
-      const taskBound = ['capability-broker', 'staged-capability-broker', 'native-staged'].includes(descriptor?.workspaceBoundary);
+      const taskBound = agentRequiresTask(descriptor);
       if (!taskBound) {
         try { await agentExecute({ method: 'agent.closeSession', params: { provider: activeProvider, sessionId: record.dshSessionId } }); }
         catch (error) { if (error?.code !== 'SESSION_NOT_FOUND') onEvent?.({ event: 'chat.warning', data: { sessionId, message: '删除会话后 Agent Session 清理未完成。' } }); }
@@ -771,7 +774,7 @@ export function createChatService({
         : discoveryFailed ? { status: 'error', available: false, reason: agentDiscoveryError.code } : null;
       const available = typeof live.available === 'boolean' ? live.available
         : typeof entry.available === 'boolean' ? entry.available : null;
-      const requiresTask = ['capability-broker', 'staged-capability-broker', 'native-staged'].includes(workspaceBoundary);
+      const requiresTask = agentRequiresTask(live) || agentRequiresTask(entry);
       const boundaryUnverified = workspaceBoundary === 'unverified';
       const reason = live.reason ?? (discoveryFailed ? agentDiscoveryError.code : null)
         ?? entry.reason ?? (boundaryUnverified ? 'descriptor-incomplete' : requiresTask ? 'task-required' : null);
@@ -780,7 +783,7 @@ export function createChatService({
         label: live.label ?? entry.label ?? live.displayName ?? entry.displayName ?? entry.id,
         displayName: live.displayName ?? entry.displayName ?? live.label ?? entry.label ?? entry.id,
         eventProtocol: entry.eventProtocol,
-        available, eligible: available === true && !requiresTask && !boundaryUnverified,
+        available, requiresTask, eligible: available === true && !requiresTask && !boundaryUnverified,
         version: live.version ?? entry.version ?? null,
         reason,
         workspaceBoundary,
@@ -1994,7 +1997,7 @@ export function createChatService({
       } else if (agentProviderId === 'cetamesh' && platformRoute) {
         await startModelOrDshTurn(record, state, promptText, { attachments, sourceText, forceProject: true, retryMessageId });
       } else if (agentProviderId && agentProviderId !== AGENT_PROVIDER_DISABLED
-        && ['capability-broker', 'staged-capability-broker', 'native-staged'].includes(selectableAgentProviders.get(agentProviderId)?.workspaceBoundary)) {
+        && agentRequiresTask(selectableAgentProviders.get(agentProviderId))) {
         if (typeof platformRoute !== 'function') throw chatError('TASK_REQUIRED', 'Workspace-bound Agent sessions require Task assignment');
         await startModelOrDshTurn(record, state, promptText, { attachments, sourceText, forceProject: true, retryMessageId });
       } else if (agentProviderId && agentProviderId !== AGENT_PROVIDER_DISABLED && agentExecute) {

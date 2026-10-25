@@ -86,3 +86,5 @@
 - Claude 使用固定 SDK 0.3.308 与独立原生 Claude Code 运行时；增加全部工具 PreToolUse 审批和工具 ID 重放防护。桌面 GUI 不视为编码 CLI，未导入桌面登录；真实 CLI 与账号执行仍需单独验收。
 - 四项连接设置可填写运行时、Node、模型和 HTTPS API；凭据按 Provider 保存在独立 Secret Store。配置凭据不等于认证已验证。损坏的可选配置保留原数据并显示不可用，不再阻止 Core 启动。
 - 本地真实 CLI 验证采用隔离测试目录与合成模型服务；不调用付费模型，也不代表外部账户认证。发行与完整回归结果按本轮实际产物单独报告；具体版本边界见 [Agent 接入状态](docs/desktop/AGENT_INTEGRATION_STATUS.md)。
+
+- 新 Agent 冷启动时明确保留 requiresTask 结构契约；首次聊天、目录资格和删除会话均按任务归属处理，不再受启动时未就绪描述影响。
