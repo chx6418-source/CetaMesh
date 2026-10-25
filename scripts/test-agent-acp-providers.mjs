@@ -4,6 +4,7 @@ import { PassThrough } from 'node:stream';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { createAcpProviders, createAcpProcessLauncher, discoverAcpRuntime } from '../src/agent/acp-provider-descriptors.js';
 import { acpArgumentsFromHelp, createNativeAcpProfile, openCodeNativePolicy } from '../src/agent/native-acp-runtime.js';
 import { createAcpAgentProvider } from '../src/agent/acp-agent-provider.js';
@@ -179,6 +180,7 @@ for (const id of ['gemini', 'qwen']) {
    const policy=fs.readFileSync(profile.argv[profile.argv.indexOf('--admin-policy')+1],'utf8');
    assert.match(policy,/decision = "ask_user"/);assert.match(policy,/toolName = "\*"/);
   } else {
+   assert.equal(settings.general.preventSystemSleep,false,'managed Qwen sessions must not spawn the default PowerShell/C# sleep inhibitor');
    assert.equal(settings.disableAllHooks,true);assert.ok(settings.permissions.ask.includes('read_file'));
    assert.ok(settings.permissions.ask.includes('run_shell_command'));assert.ok(settings.permissions.ask.includes('write_file'));
    assert.ok(settings.permissions.deny.includes('agent'));assert.deepEqual(settings.mcp.excluded,['*']);
@@ -224,3 +226,33 @@ try {
  const first=geminiQwenPackageIdentity('qwen',entry);fs.writeFileSync(chunk,'export const policy="allow";');const changedChunk=geminiQwenPackageIdentity('qwen',entry);assert.notEqual(changedChunk,first);
  fs.writeFileSync(path.join(dependency,'index.js'),'export const changed=true;');assert.notEqual(geminiQwenPackageIdentity('qwen',entry),changedChunk,'native dependency changes invalidate consent too');
 }finally{fs.rmSync(packageFixture,{recursive:true,force:true});}
+
+// OS process boundaries are scheduled explicitly to reproduce the real Windows
+// killer-close-before-CLI-close ordering without killing any real process.
+if(process.platform==='win32') {
+ const childProcessModule=createRequire(import.meta.url)('node:child_process');
+ const originalSpawn=childProcessModule.spawn,children=[],killers=[];
+ function child(pid){const value=new EventEmitter();value.pid=pid;value.stdout=new PassThrough();value.stdin=new PassThrough();value.stderr=new PassThrough();children.push(value);return value;}
+ childProcessModule.spawn=(executable,args)=>{
+  assert.equal(path.basename(executable).toLowerCase(),'taskkill.exe');
+  assert.deepEqual(args.slice(2),['/T','/F']);
+  const killer=new EventEmitter();killers.push({killer,pid:args[1]});queueMicrotask(()=>killer.emit('close',128));return killer;
+ };
+ syncBuiltinESMExports();
+ try {
+  const late=child(49152);const handle=createAcpProcessLauncher({executable:'owned-fixture',argv:[],spawnImpl:()=>late,terminationTimeoutMs:100})({cwd:os.tmpdir()});
+  const results=Promise.allSettled([handle.close(),handle.close()]);
+  const timer=setTimeout(()=>late.emit('close',0,null),25);let values;
+  try{values=await results;}finally{clearTimeout(timer);late.emit('close',0,null);}
+  assert.deepEqual(values.map(value=>value.status),['fulfilled','fulfilled'],'late observed CLI close must satisfy the existing proof even when taskkill closes first with nonzero');
+  assert.equal(killers.length,1,'concurrent close callers share one owned termination attempt');
+  await handle.close();assert.equal(killers.length,1,'confirmed close is idempotent');
+  const never=child(49156),unknown=createAcpProcessLauncher({executable:'owned-fixture',argv:[],spawnImpl:()=>never,terminationTimeoutMs:40})({cwd:os.tmpdir()});
+  let done=false;unknown.done.then(()=>done=true);let settled=false;
+  const failure=unknown.close().finally(()=>settled=true);const rejected=assert.rejects(failure,{code:'ACP_CLOSE_UNKNOWN'});
+  await new Promise(resolve=>setTimeout(resolve,5));assert.equal(settled,false,'a failed killer does not preempt the bounded observed-close window');
+  await rejected;assert.equal(done,false,'a signal, killer completion, or timeout must never fabricate the CLI close event');
+  never.emit('close',0,null);await unknown.done;await unknown.close();
+  console.log('PASS Windows ACP late close, unknown exit retention, and concurrent close idempotence');
+ }finally{for(const value of children)value.emit('close',0,null);childProcessModule.spawn=originalSpawn;syncBuiltinESMExports();}
+}

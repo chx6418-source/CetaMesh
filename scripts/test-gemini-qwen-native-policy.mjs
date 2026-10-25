@@ -50,6 +50,7 @@ const server=http.createServer(async(req,res)=>{
 await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
 const endpoint='http://127.0.0.1:'+server.address().port;
 function noStoredCredential(directory){for(const entry of fs.readdirSync(directory,{withFileTypes:true})){const file=path.join(directory,entry.name);if(entry.isDirectory())noStoredCredential(file);else if(fs.statSync(file).size<16*1024*1024)assert.equal(fs.readFileSync(file).includes(Buffer.from(secret)),false,'credentials may not persist in the runtime profile');}}
+let fixtureError=null;
 try {
  const workspace=path.join(root,'workspace'),profiles=path.join(root,'profiles'),staging=path.join(root,'staging'),stateDir=path.join(root,'state');
  for(const directory of [workspace,profiles,staging,stateDir])fs.mkdirSync(directory);
@@ -120,6 +121,8 @@ try {
  try{await rpc.request('initialize',{protocolVersion:1,clientCapabilities:{},clientInfo:{name:'CetaMesh',version:'1'}},{timeoutMs:15000});const created=await rpc.request('session/new',{cwd:currentStage,mcpServers:[]});await rpc.request('session/prompt',{sessionId:created.sessionId,prompt:[{type:'text',text:'CETAMESH_FIXTURE_read'}]},{timeoutMs:30000});assert.equal(observed,1);profile.validate();console.log('PASS actual Gemini CLI 0.65.0: native ask-all observed; exact-input omission denies task eligibility and rejected tool remains unexecuted');}
  finally{await rpc.close();await handle.close();await profile.cleanup();}
  if(serverFailure)throw serverFailure;
-} finally {
- server.closeAllConnections();await new Promise(resolve=>server.close(resolve));fs.rmSync(root,{recursive:true,force:true,maxRetries:20,retryDelay:100});
+} catch(error){fixtureError=error;throw error;} finally {
+ server.closeAllConnections();await new Promise(resolve=>server.close(resolve));
+ if(fixtureError)console.error('Retained failed native fixture for owned-process diagnosis:',root);
+ else fs.rmSync(root,{recursive:true,force:true,maxRetries:20,retryDelay:100});
 }

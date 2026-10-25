@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { CliAgentProcess, createMinimalAgentEnv } from './cli-agent-process.js';
+import { CliAgentProcess, createMinimalAgentEnv, terminateCliProcessTree } from './cli-agent-process.js';
 import { createAcpAgentProvider } from './acp-agent-provider.js';
 import { agentProviderError } from './agent-provider.js';
 import { createNativeAcpRuntime } from './native-acp-runtime.js';
@@ -23,7 +23,7 @@ export function discoverAcpRuntime(id) {
 }
 
 /** Raw pipes; done means observed process close, never signal delivery. */
-export function createAcpProcessLauncher({executable,argv,spawnImpl=spawn,envSource=process.env,trustedEnvironment} = {}) {
+export function createAcpProcessLauncher({executable,argv,spawnImpl=spawn,envSource=process.env,trustedEnvironment,terminationTimeoutMs=5000} = {}) {
   return ({cwd,onHandle}) => {
     const allowed=new Set(['HOME','USERPROFILE','APPDATA','LOCALAPPDATA','PROGRAMDATA','HOMEDRIVE','HOMEPATH','TEMP','TMP','TMPDIR','XDG_CONFIG_HOME','XDG_DATA_HOME','XDG_STATE_HOME','XDG_CACHE_HOME','OPENCODE_CONFIG_CONTENT','OPENCODE_CONFIG_DIR','OPENCODE_DISABLE_PROJECT_CONFIG','OPENCODE_PURE','OPENCODE_DISABLE_EXTERNAL_SKILLS','OPENCODE_DISABLE_AUTOUPDATE','OPENCODE_DISABLE_MODELS_FETCH','OPENCODE_LOG_LEVEL','CETAMESH_AGENT_API_KEY','GEMINI_CLI_HOME','GEMINI_CLI_NO_RELAUNCH','GEMINI_CLI_SYSTEM_SETTINGS_PATH','GEMINI_CLI_SYSTEM_DEFAULTS_PATH','GEMINI_CLI_TRUST_WORKSPACE','GOOGLE_GEMINI_BASE_URL','GEMINI_API_KEY','QWEN_HOME','QWEN_CODE_SYSTEM_SETTINGS_PATH','QWEN_CODE_SYSTEM_DEFAULTS_PATH','QWEN_CODE_DISABLE_WORKFLOWS','NO_BROWSER','OPENAI_BASE_URL','OPENAI_API_KEY']);
     const overrides=typeof trustedEnvironment==='function' ? trustedEnvironment() : trustedEnvironment ?? {};
@@ -41,15 +41,29 @@ export function createAcpProcessLauncher({executable,argv,spawnImpl=spawn,envSou
       const safe='[REDACTED_RUNTIME_DIAGNOSTIC]'; // Whole-chunk redaction also covers credentials split across chunks.
       stderr=Buffer.concat([stderr,Buffer.from(safe)]).subarray(-65536);
     });
+    let closing=null;
+    const closeDeadline=Math.max(10,Math.min(10000,Number(terminationTimeoutMs)||5000));
+    async function waitObservedClose(){
+      let timer;
+      try{await Promise.race([done,new Promise((_,reject)=>{timer=setTimeout(()=>reject(agentProviderError('ACP_CLOSE_UNKNOWN','ACP process tree exit was not confirmed')),closeDeadline);})]);}
+      finally{clearTimeout(timer);}
+    }
     const handle={readable:child.stdout,writable:child.stdin,done,
       async close(){
-        if(!exited && Number.isInteger(child.pid) && child.pid > 0) {
-          if(process.platform==='win32' && Number.isInteger(child.pid)) {
-            const killer=spawn('taskkill.exe',['/PID',String(child.pid),'/T','/F'],{windowsHide:true,stdio:'ignore',env:createMinimalAgentEnv()});
-            await new Promise((resolve,reject)=>{killer.once('error',()=>{child.kill();reject(agentProviderError('ACP_CLOSE_UNKNOWN','ACP process tree termination could not be started'));});killer.once('close',code=>code===0 || exited ? resolve() : reject(agentProviderError('ACP_CLOSE_UNKNOWN','ACP process tree exit was not confirmed')));});
-          } else {try {process.kill(-child.pid,'SIGKILL');} catch(error) {if(error.code!=='ESRCH') throw error;}}
-        }
-        await done;
+        if(closing)return closing;
+        closing=(async()=>{
+          if(!exited && Number.isInteger(child.pid) && child.pid > 0) {
+            if(process.platform==='win32') {
+              const treeTerminated=await terminateCliProcessTree(child);
+              // taskkill can close before the owned CLI's close event. Preserve
+              // the existing tree-success OR observed-close proof, evaluating it
+              // after a bounded observation window rather than at the killer event.
+              if(!treeTerminated && !exited)await waitObservedClose();
+            } else {try {process.kill(-child.pid,'SIGKILL');} catch(error) {if(error.code!=='ESRCH') throw error;}}
+          }
+          await done;
+        })();
+        try{return await closing;}catch(error){closing=null;throw error;}
       }};
     onHandle?.(handle);
     return handle;

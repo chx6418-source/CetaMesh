@@ -68,7 +68,9 @@ export function createGeminiQwenProfile({id,configuration={},profileParent=os.tm
       GEMINI_CLI_SYSTEM_DEFAULTS_PATH:defaultsFile,GEMINI_CLI_TRUST_WORKSPACE:'true',GOOGLE_GEMINI_BASE_URL:configuration.baseUrl});
     argv.push('--admin-policy',policyFile);
   } else {
-    settings={$version:4,general:{enableAutoUpdate:false,chatRecording:false,gitCoAuthor:{commit:false,pr:false}},
+    // Qwen0.26.1 defaults this to true; its PowerShell Add-Type inhibitor can
+    // orphan the compiler when the CLI kills only the helper's parent process.
+    settings={$version:4,general:{enableAutoUpdate:false,chatRecording:false,preventSystemSleep:false,gitCoAuthor:{commit:false,pr:false}},
       security:{auth:{selectedType:'openai',enforcedType:'openai'},folderTrust:{enabled:false}},
       disableAllHooks:true,hooks:{},mcpServers:{},mcp:{excluded:['*'],serverCommand:''},
       permissions:{allow:[],ask:[...QWEN_NATIVE_TOOLS],deny:QWEN_NATIVE_TOOLS.filter(name=>!QWEN_ALLOWED_TOOLS.has(name))},

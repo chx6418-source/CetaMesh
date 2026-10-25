@@ -783,7 +783,7 @@ export function createChatService({
         label: live.label ?? entry.label ?? live.displayName ?? entry.displayName ?? entry.id,
         displayName: live.displayName ?? entry.displayName ?? live.label ?? entry.label ?? entry.id,
         eventProtocol: entry.eventProtocol,
-        available, requiresTask, eligible: available === true && !requiresTask && !boundaryUnverified,
+        available, ...(requiresTask ? {requiresTask:true} : {}), eligible: available === true && !requiresTask && !boundaryUnverified,
         version: live.version ?? entry.version ?? null,
         reason,
         workspaceBoundary,
