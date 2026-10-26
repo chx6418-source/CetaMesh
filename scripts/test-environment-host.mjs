@@ -1,0 +1,42 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import crypto from 'node:crypto';
+const entry=new URL('../src/environment/host.js',import.meta.url);
+assert.ok(fs.existsSync(entry),'Host must exist before lifecycle effects are allowed');
+const {createEnvironmentHost}=await import(entry.href);
+const {profileDigest}=await import('../src/environment/contracts.js');
+const {listenEnvironmentHost,createEnvironmentHostClient}=await import('../src/environment/host-client.js');
+const root=fs.mkdtempSync(path.join(os.tmpdir(),'cetamesh-host-'));
+const limits={cpuCount:2,memoryMiB:4096,diskGiB:64,timeoutMs:10000,maxEvidenceBytes:4096,maxEvidenceFiles:8};
+const profile={version:1,id:'fixture',backend:'hyper-v',mode:'lifecycle-fixture',network:'offline',image:{id:'win',path:path.join(root,'base.vhdx'),sha256:'b'.repeat(64),source:'owner-approved-local-image',windowsBuild:'22631',architecture:'x64'},candidate:null,guestCredentialFile:path.join(root,'credential.xml'),limits,packIds:['W01'],retainedLimit:1};
+const binding=()=>({version:1,actor:{kind:'owner',id:'desktop'},taskId:'task_fixture',attemptId:'attempt_fixture',runId:crypto.randomUUID(),environmentId:crypto.randomUUID(),workspaceId:'ws_fixture',capability:'environment.test',expiresAt:Date.now()+10000,profileId:profile.id,profileDigest:profileDigest(profile),limits});
+let calls=[],failExport=false;
+const backend={preflight:async()=>({status:'PASS'}),prepare:async()=>{calls.push('prepare');return {vmId:crypto.randomUUID()};},start:async()=>calls.push('start'),copyIn:async()=>calls.push('bootstrap'),exec:async()=>({status:'PASS'}),capture:async()=>({}),copyOut:async({binding})=>{if(failExport)throw new Error('export failed');const source=path.join(root,`${binding.runId}.txt`);fs.writeFileSync(source,binding.runId);return {files:[{source,path:'lifecycle.txt',bytes:36,sha256:crypto.createHash('sha256').update(binding.runId).digest('hex')}]};},stop:async()=>{calls.push('stop');return {state:'Off'};},destroyOwned:async ctx=>{assert.equal(ctx.evidenceReceipt.verified,true);calls.push('destroy');},inspect:async()=>({owned:true,state:'Off'})};
+try {
+ const host=createEnvironmentHost({root,profiles:[profile],backend,layer:'Unit/Fixture'});
+ assert.equal(host.profiles()[0].id,'fixture');assert.equal(host.profiles()[0].image,undefined);
+ const b=binding();const report=await host.run(b);
+ assert.equal(report.layer,'Unit/Fixture');assert.equal(report.status,'PASS');assert.equal(report.cleanup.state,'destroyed');
+ assert.deepEqual(calls,['prepare','start','bootstrap','stop','destroy']);
+ await assert.rejects(host.run(b),{code:'ENV_REPLAY'});
+ await assert.rejects(host.status({...b,taskId:'forged'}),{code:'ENV_EVIDENCE_BINDING'});
+ await assert.rejects(host.run({...binding(),profileDigest:'0'.repeat(64)}),{code:'ENV_PROFILE_MISMATCH'});
+ calls=[];failExport=true;const quarantined=await host.run(binding());
+ assert.equal(quarantined.cleanup.state,'quarantined');assert.notEqual(quarantined.status,'PASS');assert.equal(calls.includes('destroy'),false);
+ await assert.rejects(host.run(binding()),{code:'ENV_QUARANTINE_LIMIT'});
+ const restarted=createEnvironmentHost({root,profiles:[profile],backend});
+ assert.equal((await restarted.status(b)).status,'PASS');
+ const pipe=process.platform==='win32'?`\\\\.\\pipe\\CetaMeshEnvironment-${crypto.randomUUID()}`:path.join(root,'host.sock');const token=crypto.randomBytes(32).toString('hex');
+ const server=await listenEnvironmentHost({pipe,token,host});
+ try{assert.equal((await createEnvironmentHostClient({pipe,token}).profiles())[0].id,'fixture');await assert.rejects(createEnvironmentHostClient({pipe,token:'0'.repeat(64)}).profiles(),{code:'IPC_AUTH_DENIED'});}finally{await server.close();}
+ failExport=false;calls=[];
+ const aborter=new AbortController();const cancellationRoot=path.join(root,'cancelled');
+ const cancelHost=createEnvironmentHost({root:cancellationRoot,profiles:[profile],backend:{...backend,stop:async()=>{aborter.abort();return {state:'Off'};}},layer:'Unit/Fixture'});
+ const cancelled=await cancelHost.run(binding(),{signal:aborter.signal});assert.equal(cancelled.status,'INCONCLUSIVE');assert.equal(calls.includes('destroy'),false);
+ const final=JSON.parse(fs.readFileSync(path.join(cancellationRoot,cancelled.finalReport.relativePath),'utf8'));assert.equal(final.status,'INCONCLUSIVE');assert.equal(final.cleanup.state,'quarantined');
+ const lateAbort=new AbortController();const destroyedHost=createEnvironmentHost({root:path.join(root,'late-cancel'),profiles:[profile],backend:{...backend,destroyOwned:async()=>{lateAbort.abort();return {removed:true};}},layer:'Unit/Fixture'});
+ const late=await destroyedHost.run(binding(),{signal:lateAbort.signal});assert.equal(late.status,'INCONCLUSIVE');assert.equal(late.cleanup.state,'destroyed');assert.deepEqual((await destroyedHost.status(late.binding)).finalReport,late.finalReport);
+ console.log('PASS Host profile binding, replay fence, ordered evidence cleanup and quarantine admission');
+}finally{fs.rmSync(root,{recursive:true,force:true});}

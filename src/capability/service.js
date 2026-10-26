@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { registerEnvironmentCapabilities } from '../environment/service.js';
 import { createApprovalOperations } from './operations.js';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -70,7 +71,7 @@ const WORKSPACE_TOOL_DESCRIPTORS = Object.freeze({
  * which bind the Owner identity; Agent/Extension grants never come from IPC. */
 export function createCapabilityService({ stateDir, workspaceService, memoryService,
   taskRuntime, agentBroker, bindAgentSession, resumeAgentApproval = null, searchImpl = null, audit = () => {}, now,
-  isolatedRunner = null, onTaskObservation = null, onOperation = () => {}, evidenceStore = null } = {}) {
+  isolatedRunner = null, onTaskObservation = null, onOperation = () => {}, evidenceStore = null, environmentClient = null, ownedArtifactRoot = null, onEnvironmentChanged = () => {} } = {}) {
   const file = stateDir ? path.join(stateDir, 'capability', 'task-grants.json') : null;
   let grants = file ? readJsonFile(file, { missing: {} }) : {};
   const provisioning = new Map();
@@ -1060,9 +1061,10 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     if (result.cancelled) rememberWorkspaceImport(row.id, { status: 'cancelled', code: 'INVOKE_CANCELLED' });
     return result;
   }
+  const environment = registerEnvironmentCapabilities({broker,taskRuntime,principalForTask,stateDir,ownedArtifactRoot,client:environmentClient,onChanged:onEnvironmentChanged});
   return { execute, executeWorkspace, executeMemory, broker, grantTask, principalForTask, refreshTaskWorkspaceGrant, memoryPrincipal,
     requestAgentNativeApproval: (request, options) => nativeApproval.request(request, options),
-    cancelTaskOperations: scope => operations.cancelScope(scope),
+    cancelTaskOperations: scope => { environment.cancel(scope); return operations.cancelScope(scope); },
     verifyTaskImportReceipts(taskId, runId) {
       const task = taskFor(taskId), latest = new Map();
       const receipts = (task?.executionEvidence ?? []).filter(row => row.source === 'core-import' && row.status === 'completed'
@@ -1079,6 +1081,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       } catch { return false; }
     },
     completionBlocker(taskId) {
+      if (environment.blocker(taskId)) return environment.blocker(taskId);
       if (provisioning.has(taskId) || Object.values(journal).some(row => row?.taskId === taskId && row.status === 'in-flight')) return 'TASK_EXECUTION_UNCONFIRMED';
       if (operations.list().some(row => ['accepted', 'running', 'waiting', 'unknown'].includes(row.status)
         && broker.approvals.get(row.approvalId).request?.taskId === taskId)) return 'TASK_EFFECT_UNCONFIRMED';
@@ -1087,6 +1090,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       return null;
     },
     recoveryForTask(taskId) {
+      if (environment.recovery(taskId)) return environment.recovery(taskId);
       return Object.values(journal).some(row => row?.taskId === taskId && row.status === 'in-flight')
         ? { state: 'needs-reconciliation', capability: 'agent.run' } : null;
     },
@@ -1116,6 +1120,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     },
     applyAgentWorkspaceChanges, workspaceImportStatus, cancelWorkspaceImportApproval,
     async close() {
+      environment.close();
       nativeApproval.close();
       await operations.close();
       const consumers = [...taskFollowConsumers.values()];

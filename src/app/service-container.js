@@ -275,6 +275,9 @@ export function createCetaMeshServices(options = {}) {
     onChanged: data => uiEventBus.publish('memory.updated', { ...data, status: 'working-updated' }) });
   capabilityService = createCapabilityService({
     stateDir,
+    environmentClient: options.environmentClient ?? null,
+    ownedArtifactRoot: path.join(dataRoot,'artifacts'),
+    onEnvironmentChanged: data => uiEventBus.publish('task.updated',{taskId:data.taskId,environmentRunId:data.runId,environmentStatus:data.status}),
     evidenceStore,
     workspaceService,
     memoryService,

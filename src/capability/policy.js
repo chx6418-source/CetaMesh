@@ -52,7 +52,8 @@ export function createCapabilityPolicy({resolveWorkspace,resolveTask,resolveGran
     }
    }
    if((task.workspaceId??null)!==(request.workspaceId??null))throw capabilityError('WORKSPACE_RECONCILIATION_REQUIRED','Task and execution Workspace do not match');
-   if(['completed','failed','cancelled'].includes(task.status))throw capabilityError('TASK_NOT_AUTHORIZED','Terminal Task cannot execute capabilities');
+   const ownerEnvironmentReview=actor.kind==='owner' && ['environment.status','environment.report','environment.cancel','environment.reconcile'].includes(entry.id);
+   if(['completed','failed','cancelled'].includes(task.status) && !ownerEnvironmentReview)throw capabilityError('TASK_NOT_AUTHORIZED','Terminal Task cannot execute capabilities');
    if(actor.kind==='agent'&&['paused','blocked'].includes(task.status))throw capabilityError('TASK_NOT_AUTHORIZED','Paused or interrupted Task cannot execute Agent capabilities');
    if(request.assignment && (task.currentAgent?.provider!==request.assignment.provider || task.currentAgent?.sessionId!==request.assignment.sessionId))
     throw capabilityError('AGENT_ASSIGNMENT_EXPIRED','Agent Session no longer owns this Task');

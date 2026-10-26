@@ -39,6 +39,12 @@ export const CATEGORIES = ['core', 'architecture', 'security', 'runtime', 'integ
 // ── 登记表：scripts/test-*.mjs 的每一个文件都必须出现在这里（或能从 package.json 映射）。
 // requires 的取值见 probeAvailability()；category 取值见 CATEGORIES。
 const REGISTRY = {
+  'test-environment-contracts.mjs': { category: 'security', note: 'Environment identity, profiles, bounded evidence and path confinement' },
+  'test-environment-host.mjs': { category: 'security', note: 'Authenticated developer Host lifecycle, cancellation, quarantine and replay fences' },
+  'test-environment-hyperv.mjs': { category: 'security', note: 'Hyper-V driver fixtures and Windows parser; no VM success implied' },
+  'test-environment-packs.mjs': { category: 'integration', note: 'Windows Guest pack truthfulness and executable runner contracts' },
+  'test-environment-capability.mjs': { category: 'security', note: 'Environment tests through production Task/Attempt and Capability approval' },
+  'test-environment-vm.mjs': { category: 'environment', note: 'Explicitly opted-in Hyper-V Windows VM acceptance; reports blocked prerequisites', timeoutMs: 3600000 },
   'test-agent-auth-regressions.mjs': {category:'security',note:'Real adapter interfaces: cancel, status ownership, profile poison and task scope; synthetic processes only'},
   'test-claude-native-auth.mjs': {category:'environment',requires:['claude-auth-contract'],note:'Opt-in Windows Claude 2.1.308 private-profile help contract; no account action'},
   'test-agent-provider-auth.mjs': {category:'security',note:'Pinned official provider login transport contracts; no real account actions'},
