@@ -61,7 +61,15 @@ try {
   assert.ok(Object.hasOwn(preflight.observations,'network'));
   assert.ok(Object.hasOwn(preflight.observations,'existingResources'));
   assert.ok(!JSON.stringify(preflight.observations).includes('vmName'));
-  const source=fs.readFileSync(script,'utf8').split('\ntry {\n $raw=')[0];
+  const extractDefinitions=value=>{
+   const normalized=value.replace(/^\uFEFF/,'').replace(/\r\n?/g,'\n');
+   const entry=normalized.indexOf('\ntry {\n $raw=');
+   assert.ok(entry>=0,'Driver entrypoint marker must exist before extracting pure function fixtures');
+   return normalized.slice(0,entry);
+  };
+  const scriptText=fs.readFileSync(script,'utf8');
+  const source=extractDefinitions(scriptText);
+  assert.equal(extractDefinitions('\uFEFF'+scriptText.replace(/^\uFEFF/,'').replace(/\r\n?/g,'\n').replace(/\n/g,'\r\n')),source,'CRLF/BOM checkouts must extract the same functions without running the entrypoint');
   const fixtureFile=path.join(root,'driver-fixture.ps1');
   const fixture=String.raw`param([string]$Root)
 `+source+String.raw`
@@ -141,6 +149,7 @@ Write-Output 'Actual PowerShell ownership, CPU masking, cleanup and capture-copy
   fs.writeFileSync(fixtureFile,fixture);
   const fixtures=spawnSync(ps,['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',fixtureFile,'-Root',root],{env:{...process.env,PSModulePath:path.join(process.env.SystemRoot,'System32','WindowsPowerShell','v1.0','Modules')},encoding:'utf8'});
   assert.equal(fixtures.status,0,fixtures.stdout+fixtures.stderr);
+  assert.equal(fixtures.stderr.trim(),'','Function fixtures must not silently ignore PowerShell errors');
   console.log(fixtures.stdout.trim());
   console.log('Real read-only preflight: '+JSON.stringify(preflight));
  }
