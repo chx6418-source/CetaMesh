@@ -71,3 +71,6 @@ design-demos/login-proposals/
 
 # Test runner scratch state
 /scripts/.test-runner/
+
+# Local development evidence, plans and environment acceptance reports
+/.superpowers/
