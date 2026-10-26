@@ -1,3 +1,4 @@
+import {withConnectionLeases} from './runtime-auth-service.js';
 // Agent Provider 注册与 agent.* 私有方法族（阶段 06；会话 2 改为 Agent Broker 支撑）。
 //
 // 与 chat.* / memory.* / task.* 同一接入模式：桌面 Shell 经命名管道调用，
@@ -77,7 +78,7 @@ function summarizeProvider(provider, health = null) {
  * The returned .broker supports process-local turn-end wiring for Chat and Continuity.
  */
 export function createDefaultAgentService({ api, defaults, log, dshOptions = {}, dshPresetConfig = null, codexOptions = {}, codexExecutable,
-  zcodeOptions = {}, zcodeExecutable, acpOptions = {}, claudeOptions = {}, workbuddyOptions = {}, codexRouterOptions = {}, desktopStatus = null, installationStatus, dshConfiguration = null, resolveWorkspaceIdentity, resolveExecutionTask, isTaskHandoffInFlight } = {}) {
+  zcodeOptions = {}, zcodeExecutable, acpOptions = {}, claudeOptions = {}, workbuddyOptions = {}, codexRouterOptions = {}, desktopStatus = null, installationStatus, dshConfiguration = null, resolveWorkspaceIdentity, resolveExecutionTask, isTaskHandoffInFlight, runtimeAuthService, connectionLeases } = {}) {
   const dshProvider = api ? createDshAgentProvider({ api, defaults, log,
     presetPolicy: dshPresetConfig ? createDshPresetPolicy(dshPresetConfig) : null }) : createUnavailableDshProvider();
   const taskBoundDsh = api && typeof dshOptions.resolveTaskWorkspace === 'function' && typeof dshOptions.applyChanges === 'function'
@@ -96,14 +97,14 @@ export function createDefaultAgentService({ api, defaults, log, dshOptions = {},
       ...createAcpProviders({ ...acpOptions, log }),
       createZCodeAgentProvider({ ...zcodeOptions, ...(zcodeOptions.executable === undefined && zcodeExecutable !== undefined ? { executable: zcodeExecutable } : {}) }),
       createWorkBuddyAgentProvider(workbuddyOptions)
-    ]
+    ].map(provider=>withConnectionLeases(provider,connectionLeases))
   });
   const broker = createAgentBroker({ registry, log, resolveWorkspaceIdentity, resolveExecutionTask, isTaskHandoffInFlight });
-  const service = createAgentService({ broker, log, desktopStatus, installationStatus, dshConfiguration });
+  const service = createAgentService({ broker, log, desktopStatus, installationStatus, dshConfiguration, runtimeAuthService });
   return Object.assign(service, { broker, registry });
 }
 
-export function createAgentService({ broker, log = () => {}, desktopStatus = null, installationStatus = createAgentInstallationDetector(), dshConfiguration = null } = {}) {
+export function createAgentService({ broker, log = () => {}, desktopStatus = null, installationStatus = createAgentInstallationDetector(), dshConfiguration = null, runtimeAuthService } = {}) {
   if (!broker || typeof broker.require !== 'function' || typeof broker.registry !== 'object') {
     throw agentProviderError('INVALID_PARAMS', 'createAgentService 需要 Agent Broker');
   }
@@ -152,7 +153,12 @@ export function createAgentService({ broker, log = () => {}, desktopStatus = nul
     }
     return summary;
   };
+  const auth=(name,input)=>{if(!runtimeAuthService)throw agentProviderError('AGENT_AUTH_UNSUPPORTED','Authentication service unavailable');return runtimeAuthService[name](input);};
   const handlers = {
+    'agent.auth.describe': params=>{if(!params || Object.keys(params).some(key=>key!=='provider'))throw agentProviderError('INVALID_PARAMS','Unsupported auth description options');return auth('describe',params.provider);},
+    'agent.auth.start': params=>auth('start',params),
+    'agent.auth.status': params=>auth('status',params),
+    'agent.auth.cancel': params=>auth('cancel',params),
     'agent.list': async (params = {}) => ({
       providers: await Promise.all(registry.list().map(async (provider) => {
         let health = null;
@@ -259,6 +265,8 @@ export function createAgentService({ broker, log = () => {}, desktopStatus = nul
 
     async close() {
       broker.close();
+      let authCloseError=null;
+      try {await runtimeAuthService?.close();}catch(error){authCloseError=error;}
       const results = await Promise.all(registry.list().map(async provider => {
         let timer;
         try {
@@ -272,6 +280,7 @@ export function createAgentService({ broker, log = () => {}, desktopStatus = nul
           return {provider:provider.id,closed:false,state:'unknown',errorCode:error?.code ?? 'PROVIDER_ERROR'};
         } finally { clearTimeout(timer); }
       }));
+      if(authCloseError)results.push({provider:'runtime-auth',closed:false,state:'unknown',errorCode:authCloseError.code??'AGENT_EXIT_UNCONFIRMED'});
       if (results.some(result => !result.closed)) {
         const error = agentProviderError('PROVIDER_CLOSE_UNKNOWN','Some Provider exits remain unconfirmed');
         error.results = results;

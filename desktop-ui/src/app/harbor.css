@@ -583,3 +583,13 @@
 .task-dependency-notice ul { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
 .task-dependency-notice li { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
 .task-dependency-notice .cm-button { min-width: 0; max-width: 100%; overflow-wrap: anywhere; text-align: left; }
+
+.agent-connection-steps { display: grid; gap: 6px; margin: 0; font-size: 11px; }
+.agent-connection-steps > div { display: grid; grid-template-columns: 4.5em minmax(0, 1fr); gap: 8px; }
+.agent-connection-steps dt { color: var(--text-secondary); }
+.agent-connection-steps dd { margin: 0; overflow-wrap: anywhere; }
+.agent-setup-disclosure select { max-width: 100%; min-width: 0; }
+.progress-track { height: 6px; width: 100%; overflow: hidden; border-radius: 999px; background: var(--surface-muted, #dbe2e8); }
+.progress-value { display: block; height: 100%; border-radius: inherit; background: var(--accent, #3b82f6); }
+
+.task-review-report { white-space: pre-wrap; overflow-wrap: anywhere; }

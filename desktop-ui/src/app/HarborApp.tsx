@@ -1,9 +1,10 @@
+import { createAuthPanelController } from './AgentAuthController';
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router';
 import { createPortal } from 'react-dom';
 import { mergeChatHistorySnapshot, mergeLatestChatMessages, prependOlderChatMessages, recoverForwardHistory } from './chat-history';
 import { applyChatStreamUpdates, ChatRequestEpoch, ChatStreamRevision, pendingReplyVisible, type ChatStreamUpdate } from './chat-async-state';
-import { aboutClient, agentClient, approvalClient, bridge, chatClient, extensionSettingsClient, feedbackClient, hostClient, memoryClient, onboardingClient, openExternal, pluginClient, settingsClient, taskClient, updateClient, workspaceClient, workshopClient, type Agent, type AgentRuntimeProvider, type AgentRuntimeConfiguration, type AgentRuntimeInput, type DshConfiguration, type DshSelection, type DshPresetCatalog, type Approval, type ApprovalDecisionResult, type DesktopEventData, type ChatMessage as ChatMessageDto, type ChatSession, type ExtensionSettingsDescription, type ExtensionSettingsSnapshot, type IntegrationSettings, type Memory, type Plugin, type ProviderSettingField, type SettingField, type Settings, type Task, type WorkshopProposal } from '../bridge/typed-client';
+import { aboutClient, agentClient, approvalClient, bridge, chatClient, extensionSettingsClient, feedbackClient, hostClient, memoryClient, onboardingClient, openExternal, pluginClient, settingsClient, taskClient, updateClient, workspaceClient, workshopClient, type Agent, type AgentRuntimeProvider, type AgentRuntimeConfiguration, type AgentRuntimeInput, type AgentAuthStatus, type AgentConnectionEvidence, type DshConfiguration, type DshSelection, type DshPresetCatalog, type Approval, type ApprovalDecisionResult, type DesktopEventData, type ChatMessage as ChatMessageDto, type ChatSession, type ExtensionSettingsDescription, type ExtensionSettingsSnapshot, type IntegrationSettings, type Memory, type Plugin, type ProviderSettingField, type SettingField, type Settings, type Task, type WorkshopProposal } from '../bridge/typed-client';
 import { Icon, type IconName } from '../components/icons';
 import { ArtifactCard } from '../components/product/cards';
 import { Button, IconButton, Input, normalizeSelectOptionLabel, SearchInput, Select, Tabs } from '../components/primitives/inputs';
@@ -56,14 +57,16 @@ function Heading({ eyebrow, title, description, action }: { eyebrow: string; tit
 }
 function StatusBadge({ value, available }: { value: string; available?: boolean | null }) {
   const tone = available === true || ['ready', 'running', 'enabled', 'completed', 'current', 'installed'].includes(value) ? 'success'
-    : ['needs-setup', 'connection-pending', 'descriptor-incomplete', 'pending', 'waiting-approval', 'starting', 'start-timeout', 'checking', 'update'].includes(value) ? 'warning'
+    : ['needs-setup', 'connection-pending', 'descriptor-incomplete', 'pending', 'awaiting-review', 'waiting-approval', 'starting', 'start-timeout', 'checking', 'update'].includes(value) ? 'warning'
       : ['unavailable', 'error', 'failed', 'stopped', 'disabled'].includes(value) ? 'danger' : 'default';
-  const label = ({ ready: '已就绪', running: '运行中', enabled: '已启用', installed: '已安装', update: '可更新', completed: '已完成', current: '当前步骤', 'needs-setup': '需要设置', 'descriptor-incomplete': '配置不完整', 'not-installed': '未安装', 'not-supported': '不支持', 'not-checked': '未检查', 'connection-pending': '已安装 · 待接入', checking: '检查中', 'start-timeout': '等待网关就绪', invalid: '安装需修复', unavailable: '暂不可用', disabled: '已停用', stopped: '已停止', pending: '等待处理', 'waiting-approval': '等待审批', starting: '启动中', error: '异常', failed: '失败', cancelled: '已取消', blocked: '待核对', queued: '待开始', paused: '已暂停' } as Record<string, string>)[value] ?? value;
+  const label = ({ 'awaiting-review': '待验收', ready: '已就绪', running: '运行中', enabled: '已启用', installed: '已安装', update: '可更新', completed: '已完成', current: '当前步骤', 'needs-setup': '需要设置', 'descriptor-incomplete': '配置不完整', 'not-installed': '未安装', 'not-supported': '不支持', 'not-checked': '未检查', 'connection-pending': '已安装 · 待接入', checking: '检查中', 'start-timeout': '等待网关就绪', invalid: '安装需修复', unavailable: '暂不可用', disabled: '已停用', stopped: '已停止', pending: '等待处理', 'waiting-approval': '等待审批', starting: '启动中', error: '异常', failed: '失败', cancelled: '已取消', blocked: '待核对', queued: '待开始', paused: '已暂停' } as Record<string, string>)[value] ?? value;
   return <Badge tone={tone}>{label}</Badge>;
 }
 export function availabilityReasonLabel(reason: string | null) {
   if (!reason) return '';
   const labels: Record<string, string> = {
+    provider_login_execution_unverified: '账号模式尚未通过原生执行验证；可切回 API 配置。',
+    windows_auth_contract_unverified: '官方登录需先完成 Windows 原生验证。',
     agent_model_required: '尚未选择模型，请在连接设置中填写模型。',
     agent_credential_required: '尚未配置此 Agent 的 API Key，请在连接设置中保存凭据。',
     credential_missing: '尚未配置此 Agent 的 API Key，请在连接设置中保存凭据。',
@@ -922,12 +925,31 @@ export function ChatComposer({ busy, models, selectedModelKey, agentProviders, s
   </div></div>;
 }
 
+function taskDisplayStatus(task: Task) {
+  return task.status === 'running' && task.execution?.state === 'awaiting-review' ? 'awaiting-review' : task.status;
+}
+function progressValue(percent: number | null) {
+  return typeof percent === 'number' && Number.isFinite(percent) ? Math.max(0, Math.min(100, percent)) : null;
+}
+function progressLabel(percent: number | null) {
+  const value = progressValue(percent);
+  return value === null ? '进度未报告' : `${value}%`;
+}
+function TaskProgress({ percent, label = '任务进度' }: { percent: number | null; label?: string }) {
+  const value = progressValue(percent);
+  return <div className="progress-track" role="progressbar" aria-label={label}
+    aria-valuenow={value ?? undefined} aria-valuemin={0} aria-valuemax={100}
+    aria-valuetext={value === null ? '进度未报告' : undefined}>
+    {value !== null && <span className="progress-value" style={{ width: `${value}%` }} />}
+  </div>;
+}
+
 export function ChatContextPanel({ task, memories, approvals, onOpenMemory }: { task: Task | null; memories: Memory[]; approvals: Approval[]; onOpenMemory(): void }) {
   if (!task && !memories.length && !approvals.length) return null;
   return <details className="chat-context-card">
-    <summary className="context-card-summary"><Icon name="work" size={17} /><strong className="context-card-title" title={task?.title || '会话上下文'}>{task?.title || '会话上下文'}</strong>{task && <StatusBadge value={task.status} />}<span className="context-card-counts">{task && <span>{task.agent || '待分配'} · {task.progress.percent}%</span>}<span className={approvals.length ? 'context-needs-attention' : ''}>审批 {approvals.length}</span><span>交付物 {task?.artifacts.length ?? 0}</span></span><span className="context-card-toggle"><span className="when-closed">展开</span><span className="when-open">收起</span><Icon name="down" size={14} /></span></summary>
+    <summary className="context-card-summary"><Icon name="work" size={17} /><strong className="context-card-title" title={task?.title || '会话上下文'}>{task?.title || '会话上下文'}</strong>{task && <StatusBadge value={taskDisplayStatus(task)} />}<span className="context-card-counts">{task && <span>{task.agent || '待分配'} · {progressLabel(task.progress.percent)}</span>}<span className={approvals.length ? 'context-needs-attention' : ''}>审批 {approvals.length}</span><span>交付物 {task?.artifacts.length ?? 0}</span></span><span className="context-card-toggle"><span className="when-closed">展开</span><span className="when-open">收起</span><Icon name="down" size={14} /></span></summary>
     <div className="context-card-body">
-    {task ? <Card className="context-task"><div className="row between"><StatusBadge value={task.status} /><Icon name="work" size={17} /></div><h3>{task.title}</h3><small className="muted">{task.workspaceId ? '工作区任务' : '未绑定工作区'}</small><p>{task.currentPhase || task.progress.note || task.goal}</p><div className="context-progress" role="progressbar" aria-label="任务进度" aria-valuenow={task.progress.percent} aria-valuemin={0} aria-valuemax={100}><span className={`progress-${Math.round(task.progress.percent / 25) * 25}`} /></div><div className="row between"><small>执行进度</small><small>{task.progress.percent}%</small></div></Card> : null}
+    {task ? <Card className="context-task"><div className="row between"><StatusBadge value={taskDisplayStatus(task)} /><Icon name="work" size={17} /></div><h3>{task.title}</h3><small className="muted">{task.workspaceId ? '工作区任务' : '未绑定工作区'}</small><p>{task.currentPhase || task.progress.note || task.goal}</p><TaskProgress percent={task.progress.percent} /><div className="row between"><small>执行进度</small><small>{progressLabel(task.progress.percent)}</small></div></Card> : null}
     {approvals.length > 0 && <Surface className="context-section"><div className="section-heading"><h3>审批</h3><Badge>{approvals.length}</Badge></div>{approvals.map(item => <div className="context-approval" key={item.id}><strong>{item.title}</strong><small>{item.summary}</small><small>{item.capability}</small></div>)}</Surface>}
     {memories.length > 0 && <Surface className="context-section"><div className="section-heading"><h3>相关记忆</h3><button className="text-link" onClick={onOpenMemory}>查看全部</button></div>{memories.slice(0, 2).map(memory => <button className="memory-ref" key={memory.id} onClick={onOpenMemory}><Icon name="memory" size={16} /><span><strong>{memory.title}</strong><small>{memory.scope} · {relativeLabel(memory.updatedAt)}</small></span></button>)}</Surface>}
     {Boolean(task?.artifacts.length) && <Surface className="context-section"><div className="section-heading"><h3>交付物</h3><Badge>{task?.artifacts.length ?? 0}</Badge></div>{task?.artifacts.map(artifact => <ArtifactCard key={artifact.id} taskId={task.id} artifact={artifact} />)}</Surface>}
@@ -1094,24 +1116,55 @@ function WorkPage({ workspaces, onRefreshWorkspaces, reviewTaskId, onReviewTaskO
   const [handoffProviders, setHandoffProviders] = useState<{ id: string; name: string; eligible: boolean; reason: string | null }[]>([]);
   const selectedTaskIdRef = useRef('');
   const taskNavigationRef = useRef(0);
+  const taskRefreshRef = useRef(0);
+  const taskQueryRef = useRef('');
+  const taskSnapshotsRef = useRef(new Map<string, Task>());
+  const rememberTask = useCallback((incoming: Task) => {
+    const previous = taskSnapshotsRef.current.get(incoming.id);
+    const newest = previous && (previous.rev ?? -1) > (incoming.rev ?? -1) ? previous : incoming;
+    taskSnapshotsRef.current.delete(incoming.id);
+    taskSnapshotsRef.current.set(incoming.id, newest);
+    if (taskSnapshotsRef.current.size > 4096) taskSnapshotsRef.current.delete(taskSnapshotsRef.current.keys().next().value!);
+    return newest;
+  }, []);
+  taskQueryRef.current = query + '\u0000' + filter;
   selectedTaskIdRef.current = selectedTask?.id ?? '';
   const refresh = useCallback(async (quiet = false) => {
+    const request = ++taskRefreshRef.current;
+    const queryKey = query + '\u0000' + filter;
+    const isCurrent = () => request === taskRefreshRef.current && queryKey === taskQueryRef.current;
     if (!quiet) setLoading(true);
     try {
       const result = await taskClient.overview(query, filter);
-      setTasks(result.tasks);
+      if (!isCurrent()) return;
+      const snapshots = result.tasks.map(rememberTask);
+      setTasks(snapshots);
       const selectedId = selectedTaskIdRef.current;
-      if (selectedId) setSelectedTask(await taskClient.get(selectedId).then(value => value.task).catch(() => null));
-      setError('');
+      const navigation = taskNavigationRef.current;
+      if (selectedId) {
+        const listed = snapshots.find(task => task.id === selectedId);
+        if (listed) setSelectedTask(current => current?.id === selectedId && (current.rev ?? -1) <= (listed.rev ?? -1) ? listed : current);
+        // A transient detail error must not close a valid selection. Navigation,
+        // including close and same-ID reopen, invalidates the in-flight response.
+        const detail = await taskClient.get(selectedId).catch(() => null);
+        if (!isCurrent() || navigation !== taskNavigationRef.current || selectedId !== selectedTaskIdRef.current) return;
+        if (detail) {
+          const newest = rememberTask(detail.task);
+          setSelectedTask(current => current?.id === selectedId ? rememberTask(current.rev !== null && current.rev > (newest.rev ?? -1) ? current : newest) : current);
+        }
+      }
+      if (isCurrent()) setError('');
     }
-    catch (cause) { setError(messageOf(cause)); }
-    finally { if (!quiet) setLoading(false); }
-  }, [query, filter]);
-  useEffect(() => { void refresh(); }, [refresh]);
+    catch (cause) { if (isCurrent()) setError(messageOf(cause)); }
+    finally { if (isCurrent()) setLoading(false); }
+  }, [query, filter, rememberTask]);
+  useEffect(() => { void refresh(); return () => { taskRefreshRef.current += 1; }; }, [refresh]);
   useEffect(() => {
     if (!reviewTaskId) return;
-    void taskClient.get(reviewTaskId).then(value => { setSelectedTask(value.task); onReviewTaskOpened(); }).catch(cause => setError(messageOf(cause)));
-  }, [reviewTaskId, onReviewTaskOpened]);
+    const request = ++taskNavigationRef.current;
+    void taskClient.get(reviewTaskId).then(value => { if (request !== taskNavigationRef.current) return; setSelectedTask(rememberTask(value.task)); onReviewTaskOpened(); }).catch(cause => { if (request === taskNavigationRef.current) setError(messageOf(cause)); });
+    return () => { taskNavigationRef.current += 1; };
+  }, [reviewTaskId, onReviewTaskOpened, rememberTask]);
   useEffect(() => { void agentClient.list().then(value => setHandoffProviders(value.agents.map(agent => ({ id: agent.id, name: agent.name, eligible: agent.taskEligible === true, reason: agent.reason ?? agent.lastError })))).catch(() => setHandoffProviders([])); }, []);
   useEffect(() => {
     const off = bridge.subscribe('task.updated', () => { void refresh(true); });
@@ -1121,12 +1174,13 @@ function WorkPage({ workspaces, onRefreshWorkspaces, reviewTaskId, onReviewTaskO
   async function openTask(task: Task) {
     const request = ++taskNavigationRef.current;
     setTaskOperationError(null);
+    rememberTask(task);
     try {
       const result = await taskClient.get(task.id);
-      if (request === taskNavigationRef.current) setSelectedTask(result.task);
+      if (request === taskNavigationRef.current) setSelectedTask(rememberTask(result.task));
     } catch (cause) {
       if (request !== taskNavigationRef.current) return;
-      setError(messageOf(cause)); setSelectedTask(task);
+      setError(messageOf(cause)); setSelectedTask(rememberTask(task));
     }
   }
   async function openRelatedTask(id: string) {
@@ -1135,7 +1189,7 @@ function WorkPage({ workspaces, onRefreshWorkspaces, reviewTaskId, onReviewTaskO
     try {
       const result = await taskClient.get(id);
       if (request !== taskNavigationRef.current) return;
-      setTaskOperationError(null); setSelectedTask(result.task);
+      setTaskOperationError(null); setSelectedTask(rememberTask(result.task));
     } catch (cause) {
       if (request === taskNavigationRef.current) setTaskOperationError({ taskId: sourceId, message: taskOperationErrorMessage(cause) });
     }
@@ -1149,7 +1203,8 @@ function WorkPage({ workspaces, onRefreshWorkspaces, reviewTaskId, onReviewTaskO
       if (action === 'start' || action === 'resume') {
         await validateTaskExecution(task, async id => {
           const value = await taskClient.get(id);
-          setSelectedTask(current => current?.id === task.id ? value.task : current);
+          rememberTask(value.task);
+          setSelectedTask(current => current?.id === task.id && (current.rev ?? -1) <= (value.task.rev ?? -1) ? value.task : current);
           return value;
         });
       }
@@ -1158,8 +1213,10 @@ function WorkPage({ workspaces, onRefreshWorkspaces, reviewTaskId, onReviewTaskO
         : action === 'pause' ? await taskClient.pause(task.id, task.rev ?? undefined)
         : action === 'resume' ? await taskClient.resume(task.id, task.rev ?? undefined)
           : await taskClient.cancel(task.id, task.rev ?? undefined);
+      const newest = rememberTask(result.task);
       setTaskOperationError(null);
-      setSelectedTask(current => current?.id === task.id ? result.task : current);
+      setSelectedTask(current => current?.id === task.id && (current.rev ?? -1) <= (newest.rev ?? -1) ? newest : current);
+      setTasks(current => current.map(previous => previous.id === newest.id && (previous.rev ?? -1) <= (newest.rev ?? -1) ? newest : previous));
       await refresh();
     } catch (cause) { setTaskOperationError({ taskId: task.id, message: taskOperationErrorMessage(cause) }); }
   }
@@ -1167,8 +1224,10 @@ function WorkPage({ workspaces, onRefreshWorkspaces, reviewTaskId, onReviewTaskO
     try {
       await confirmAgentExecution(provider, task.workspaceId || '');
       const result = await taskClient.handoff(task.id, provider, task.rev ?? undefined);
+      const newest = rememberTask(result.task);
       setTaskOperationError(null);
-      setSelectedTask(current => current?.id === task.id ? result.task : current);
+      setSelectedTask(current => current?.id === task.id && (current.rev ?? -1) <= (newest.rev ?? -1) ? newest : current);
+      setTasks(current => current.map(previous => previous.id === newest.id && (previous.rev ?? -1) <= (newest.rev ?? -1) ? newest : previous));
       await refresh();
     } catch (cause) { setTaskOperationError({ taskId: task.id, message: taskOperationErrorMessage(cause) }); }
   }
@@ -1177,8 +1236,10 @@ function WorkPage({ workspaces, onRefreshWorkspaces, reviewTaskId, onReviewTaskO
       await confirmAgentExecution(provider || task.currentAgent?.provider || '', task.workspaceId || '');
       const result = await taskClient.reconcile(task.id, task.rev ?? undefined,
         reviewSummary, nextInstruction, crypto.randomUUID(), provider);
+      const newest = rememberTask(result.task);
       setTaskOperationError(null);
-      setSelectedTask(current => current?.id === task.id ? result.task : current);
+      setSelectedTask(current => current?.id === task.id && (current.rev ?? -1) <= (newest.rev ?? -1) ? newest : current);
+      setTasks(current => current.map(previous => previous.id === newest.id && (previous.rev ?? -1) <= (newest.rev ?? -1) ? newest : previous));
       await refresh();
     } catch (cause) { setTaskOperationError({ taskId: task.id, message: taskOperationErrorMessage(cause) }); }
   }
@@ -1186,8 +1247,10 @@ function WorkPage({ workspaces, onRefreshWorkspaces, reviewTaskId, onReviewTaskO
     try {
       if (task.rev === null) throw new Error('Task revision is unavailable');
       const result = await taskClient.reviewChild(task.id, task.rev, approve, summary, evidenceEventIds);
+      const newest = rememberTask(result.task);
       setTaskOperationError(null);
-      setSelectedTask(current => current?.id === task.id ? result.task : current);
+      setSelectedTask(current => current?.id === task.id && (current.rev ?? -1) <= (newest.rev ?? -1) ? newest : current);
+      setTasks(current => current.map(previous => previous.id === newest.id && (previous.rev ?? -1) <= (newest.rev ?? -1) ? newest : previous));
       await refresh();
     } catch (cause) { setTaskOperationError({ taskId: task.id, message: taskOperationErrorMessage(cause) }); }
   }
@@ -1199,19 +1262,21 @@ function WorkPage({ workspaces, onRefreshWorkspaces, reviewTaskId, onReviewTaskO
         contract: { mode: 'read-only', outputKind, readScope: [scope],
           expectedEvidence: outputKind === 'tool' ? ['filesystem.read'] : ['source'] } });
       setTaskOperationError(null);
-      const current = (await taskClient.get(task.id)).task;
-      setSelectedTask(selected => selected?.id === task.id ? current : selected);
+      const current = rememberTask((await taskClient.get(task.id)).task);
+      setSelectedTask(selected => selected?.id === task.id && (selected.rev ?? -1) <= (current.rev ?? -1) ? current : selected);
       await refresh();
     } catch (cause) { setTaskOperationError({ taskId: task.id, message: taskOperationErrorMessage(cause) }); }
   }
-  async function finishTask(task: Task, summary: string) {
+  async function finishTask(task: Task, summary: string, reportOnly = false) {
     try {
       if (task.rev === null) throw new Error('Task revision is unavailable');
       const result = task.parentTaskId
         ? await taskClient.completeChild(task.id, task.rev, summary)
-        : await taskClient.complete(task.id, task.rev, summary);
+        : await taskClient.complete(task.id, task.rev, summary, reportOnly && task.reviewReport ? { reviewKind: 'report-only', reportEventId: task.reviewReport.eventId, reportSha256: task.reviewReport.sha256 } : undefined);
+      const newest = rememberTask(result.task);
       setTaskOperationError(null);
-      setSelectedTask(current => current?.id === task.id ? result.task : current);
+      setSelectedTask(current => current?.id === task.id && (current.rev ?? -1) <= (newest.rev ?? -1) ? newest : current);
+      setTasks(current => current.map(previous => previous.id === newest.id && (previous.rev ?? -1) <= (newest.rev ?? -1) ? newest : previous));
       await refresh();
     } catch (cause) { setTaskOperationError({ taskId: task.id, message: taskOperationErrorMessage(cause) }); }
   }
@@ -1219,8 +1284,10 @@ function WorkPage({ workspaces, onRefreshWorkspaces, reviewTaskId, onReviewTaskO
     try {
       if (task.rev === null) throw new Error('Task revision is unavailable');
       const result = await taskClient.verifyChild(task.id, task.rev);
+      const newest = rememberTask(result.task);
       setTaskOperationError(null);
-      setSelectedTask(current => current?.id === task.id ? result.task : current);
+      setSelectedTask(current => current?.id === task.id && (current.rev ?? -1) <= (newest.rev ?? -1) ? newest : current);
+      setTasks(current => current.map(previous => previous.id === newest.id && (previous.rev ?? -1) <= (newest.rev ?? -1) ? newest : previous));
       await refresh();
     } catch (cause) { setTaskOperationError({ taskId: task.id, message: taskOperationErrorMessage(cause) }); }
   }
@@ -1247,7 +1314,7 @@ function WorkPage({ workspaces, onRefreshWorkspaces, reviewTaskId, onReviewTaskO
     <div className="section-heading page-section-heading"><h2>最近工作区</h2><div className="row"><Input aria-label="工作区名称" placeholder="工作区名称（可选）" value={workspaceName} onChange={event => setWorkspaceName(event.target.value)} /><Button compact icon="add" onClick={() => void addWorkspace()} disabled={workspaceBusy}>{workspaceBusy ? '添加中…' : '添加工作区'}</Button></div></div>
     {workspaceError && <ErrorNotice error={workspaceError} />}{workspaces.length ? <div className="workspace-grid">{workspaces.map(workspace => <Card className="workspace-card" key={workspace.id}><div className="workspace-badge">CM</div><div className="workspace-card-body"><strong>{workspace.name}</strong><p>{workspace.status} · 最近活动 {relativeLabel(workspace.lastActivity)}</p></div><StatusBadge value={workspace.status} /></Card>)}</div> : <Surface className="workspace-empty"><p className="muted">尚未登记工作区。添加工作区时会使用 Windows 原生文件夹选择器。</p></Surface>}
     <Sheet open={taskSheet} title="新建任务" onClose={() => setTaskSheet(false)}><TaskCreateForm workspaces={workspaces} providers={handoffProviders} onCreated={async () => { setTaskSheet(false); await refresh(); }} /></Sheet>
-    <Sheet open={Boolean(selectedTask)} title={selectedTask?.title ?? '任务详情'} onClose={() => { taskNavigationRef.current += 1; setSelectedTask(null); }}>{selectedTask && taskOperationError?.taskId === selectedTask.id && <ErrorNotice error={taskOperationError.message} />}{selectedTask && <TaskDetails key={selectedTask.id} task={selectedTask} providers={handoffProviders} onOpenChild={id => void openRelatedTask(id)} onHandoff={provider => void handoffTask(selectedTask, provider)} onAction={action => void taskAction(selectedTask, action)} onStart={provider => void taskAction(selectedTask, 'start', provider)} onReconcile={(summary, instruction, provider) => void reconcileTask(selectedTask, summary, instruction, provider)} onReview={(approve, summary, ids) => void reviewAnalysisChild(selectedTask, approve, summary, ids)} onCreateChild={(goal, scope, kind, replace) => void createReadChild(selectedTask, goal, scope, kind, replace)} onComplete={summary => void finishTask(selectedTask, summary)} onVerifyChild={() => void verifyCompletedChild(selectedTask)} />}</Sheet>
+    <Sheet open={Boolean(selectedTask)} title={selectedTask?.title ?? '任务详情'} onClose={() => { taskNavigationRef.current += 1; selectedTaskIdRef.current = ''; setSelectedTask(null); }}>{selectedTask && taskOperationError?.taskId === selectedTask.id && <ErrorNotice error={taskOperationError.message} />}{selectedTask && <TaskDetails key={selectedTask.id} task={selectedTask} providers={handoffProviders} onOpenChild={id => void openRelatedTask(id)} onHandoff={provider => void handoffTask(selectedTask, provider)} onAction={action => void taskAction(selectedTask, action)} onStart={provider => void taskAction(selectedTask, 'start', provider)} onReconcile={(summary, instruction, provider) => void reconcileTask(selectedTask, summary, instruction, provider)} onReview={(approve, summary, ids) => void reviewAnalysisChild(selectedTask, approve, summary, ids)} onCreateChild={(goal, scope, kind, replace) => void createReadChild(selectedTask, goal, scope, kind, replace)} onComplete={(summary, reportOnly) => void finishTask(selectedTask, summary, reportOnly)} onVerifyChild={() => void verifyCompletedChild(selectedTask)} />}</Sheet>
   </div>;
 }
 
@@ -1364,15 +1431,13 @@ export function WorkTaskList({ tasks, workspaces, providers, historyInitiallyOpe
   return <div className="work-task-list">
     {attention.length > 0 && <div className="task-grid">{attention.map(task => <TaskCard key={task.id} task={task} workspaceName={workspaceName(task)} executorName={executorName(task)} onOpen={() => onOpen(task)} onAction={action => onAction(task, action)} />)}</div>}
     {history.length > 0 && <details className="task-history" open={historyInitiallyOpen || undefined}><summary><Icon name="work" size={16} /><strong>历史任务</strong><span>{history.length} 项</span><small>已完成 {history.filter(task => task.status === 'completed').length} · 已取消 {history.filter(task => task.status === 'cancelled').length}</small><Icon name="down" size={15} /></summary>
-      <div className="task-history-list">{history.map(task => <article key={task.id} className="task-history-row"><div className="task-history-main"><h3>{taskListTitle(task)}</h3><div className="task-meta"><span>{workspaceName(task)}</span><span>·</span><span>{executorName(task)}</span><span>·</span><time>{relativeLabel(task.updatedAt)}</time></div></div><StatusBadge value={task.status} /><Button compact variant="ghost" onClick={() => onOpen(task)}>详情 <Icon name="right" size={14} /></Button></article>)}</div>
+      <div className="task-history-list">{history.map(task => <article key={task.id} className="task-history-row"><div className="task-history-main"><h3>{taskListTitle(task)}</h3><div className="task-meta"><span>{workspaceName(task)}</span><span>·</span><span>{executorName(task)}</span><span>·</span><time>{relativeLabel(task.updatedAt)}</time></div></div><StatusBadge value={taskDisplayStatus(task)} /><Button compact variant="ghost" onClick={() => onOpen(task)}>详情 <Icon name="right" size={14} /></Button></article>)}</div>
     </details>}
   </div>;
 }
 
 function TaskCard({ task, workspaceName, executorName, onOpen, onAction }: { task: Task; workspaceName: string; executorName: string; onOpen(): void; onAction(action: 'start' | 'pause' | 'resume' | 'cancel'): void }) {
-  const progress = Math.max(0, Math.min(100, task.progress.percent));
-  const progressBucket = Math.round(progress / 10) * 10;
-  return <Card className="task-card"><div className="row between"><div className="task-icon"><Icon name="work" size={18} /></div><StatusBadge value={task.status} /></div><h3>{taskListTitle(task)}</h3>{activeTaskChildren(task).length > 0 && <small className="task-dependency-hint">等待 {activeTaskChildren(task).length} 个子任务</small>}<div className="task-meta"><span>{executorName}</span><span>·</span><span>{workspaceName}</span></div><div className="progress-track" role="progressbar" aria-label={`${taskListTitle(task)}进度`} aria-valuenow={progress} aria-valuemin={0} aria-valuemax={100}><span className={`progress-value progress-${progressBucket}`} /></div><div className="row between"><small>{progress}% · {relativeLabel(task.updatedAt)}</small><div className="row"><Button compact variant="ghost" onClick={onOpen}>详情 <Icon name="right" size={14} /></Button>{task.status === 'queued' && task.workspaceId ? <Button compact variant="ghost" onClick={onOpen}>{activeTaskChildren(task).length ? '查看子任务' : '选择执行者'}</Button> : task.status === 'running' ? <Button compact variant="ghost" onClick={() => onAction('pause')}>暂停</Button> : ['paused', 'waiting', 'blocked'].includes(task.status) && !/needs-reconciliation|Owner reviewed interrupted effect/i.test(task.progress.note) ? <Button compact variant="ghost" disabled={activeTaskChildren(task).length > 0} onClick={() => onAction('resume')}>继续</Button> : null}{!['completed', 'cancelled', 'failed'].includes(task.status) && <IconButton label="取消任务" icon="close" compact onClick={() => onAction('cancel')} />}</div></div></Card>;
+  return <Card className="task-card"><div className="row between"><div className="task-icon"><Icon name="work" size={18} /></div><StatusBadge value={taskDisplayStatus(task)} /></div><h3>{taskListTitle(task)}</h3>{activeTaskChildren(task).length > 0 && <small className="task-dependency-hint">等待 {activeTaskChildren(task).length} 个子任务</small>}<div className="task-meta"><span>{executorName}</span><span>·</span><span>{workspaceName}</span></div><TaskProgress percent={task.progress.percent} label={`${taskListTitle(task)}进度`} /><div className="row between"><small>{progressLabel(task.progress.percent)} · {relativeLabel(task.updatedAt)}</small><div className="row"><Button compact variant="ghost" onClick={onOpen}>详情 <Icon name="right" size={14} /></Button>{task.status === 'queued' && task.workspaceId ? <Button compact variant="ghost" onClick={onOpen}>{activeTaskChildren(task).length ? '查看子任务' : '选择执行者'}</Button> : task.status === 'running' ? <Button compact variant="ghost" onClick={() => onAction('pause')}>暂停</Button> : ['paused', 'waiting', 'blocked'].includes(task.status) && !/needs-reconciliation|Owner reviewed interrupted effect/i.test(task.progress.note) ? <Button compact variant="ghost" disabled={activeTaskChildren(task).length > 0} onClick={() => onAction('resume')}>继续</Button> : null}{!['completed', 'cancelled', 'failed'].includes(task.status) && <IconButton label="取消任务" icon="close" compact onClick={() => onAction('cancel')} />}</div></div></Card>;
 }
 
 function TaskCreateForm({ workspaces, providers, onCreated }: { workspaces: { id: string; name: string }[]; providers: { id: string; name: string; eligible: boolean; reason: string | null }[]; onCreated(): Promise<void> }) {
@@ -1451,14 +1516,24 @@ function TaskCollaborationSummary({ task, onReview, onCreateChild, onVerifyChild
   </section>;
 }
 
-export function TaskDetails({ task, providers, onHandoff, onAction, onStart, onReconcile, onReview, onCreateChild, onComplete, onVerifyChild, onOpenChild }: { onOpenChild?(id: string): void; task: Task; providers: { id: string; name: string; eligible: boolean }[]; onHandoff(provider: string): void; onAction(action: 'start' | 'pause' | 'resume' | 'cancel'): void; onStart(provider: string): void; onReconcile(summary: string, instruction: string, provider?: string): void; onReview(approve: boolean, summary: string, evidenceEventIds: string[]): void; onCreateChild(goal: string, scope: string, outputKind: 'analysis' | 'tool', supersedesChildId?: string): void; onComplete(summary: string): void; onVerifyChild(): void }) {
+export function TaskDetails({ task, providers, onHandoff, onAction, onStart, onReconcile, onReview, onCreateChild, onComplete, onVerifyChild, onOpenChild }: { onOpenChild?(id: string): void; task: Task; providers: { id: string; name: string; eligible: boolean }[]; onHandoff(provider: string): void; onAction(action: 'start' | 'pause' | 'resume' | 'cancel'): void; onStart(provider: string): void; onReconcile(summary: string, instruction: string, provider?: string): void; onReview(approve: boolean, summary: string, evidenceEventIds: string[]): void; onCreateChild(goal: string, scope: string, outputKind: 'analysis' | 'tool', supersedesChildId?: string): void; onComplete(summary: string, reportOnly?: boolean): void; onVerifyChild(): void }) {
   const [handoffProvider, setHandoffProvider] = useState('');
   const [startProvider, setStartProvider] = useState('');
   const [reviewSummary, setReviewSummary] = useState('');
   const [nextInstruction, setNextInstruction] = useState('');
   const [recoveryProvider, setRecoveryProvider] = useState('');
   const [completionSummary, setCompletionSummary] = useState('');
-  return <div className="task-details">{task.parentTaskId && onOpenChild && <Button compact variant="ghost" onClick={() => onOpenChild(task.parentTaskId!)}>返回父任务</Button>}<TaskDependencyNotice task={task} onOpenChild={onOpenChild} /><section><h3>Owner result review</h3><label>Verified result summary<textarea className="cm-textarea" value={completionSummary} onChange={event => setCompletionSummary(event.target.value)} rows={3} maxLength={1000} /></label><Button disabled={task.status !== 'running' || !completionSummary.trim() || (task.parentTaskId ? task.attempts?.at(-1)?.state !== 'completed' : (task.children?.length ? task.children.filter(child => !task.children.some(other => other.supersedesChildId === child.id)).some(child => child.status !== 'completed' || child.verification !== 'VERIFIED') : !task.executionEvidence?.some(row => row.status === 'completed')))} onClick={() => onComplete(completionSummary.trim())}>Confirm result</Button></section><TaskCollaborationSummary task={task} onReview={onReview} onCreateChild={onCreateChild} onVerifyChild={onVerifyChild} />{task.status === "queued" && task.workspaceId && <section><h3>启动任务</h3><div className="row"><Select label="执行者" value={startProvider} onChange={event => setStartProvider(event.target.value)}><option value="">选择可用 Agent</option>{providers.filter(item => item.eligible).map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</Select><Button disabled={!startProvider || activeTaskChildren(task).length > 0} onClick={() => onStart(startProvider)}>启动</Button></div></section>}<div className="row between"><StatusBadge value={task.status} /><small>更新于 {dateLabel(task.updatedAt)}</small></div><p>{task.goal}</p><UsageSummary usage={task.usage} label="任务累计用量" />{task.currentPhase && <section><h3>当前阶段</h3><p>{task.currentPhase}</p></section>}{task.progress.note && <section><h3>进度说明</h3><p>{task.progress.note}</p></section>}{task.checkpoint && <section><h3>检查点</h3><p>{task.checkpoint.summary}</p>{task.checkpoint.nextAction && <small>下一步：{task.checkpoint.nextAction}</small>}</section>}{task.result && <section><h3>执行结果</h3><p>{task.result.summary}</p></section>}<section><h3>交付物</h3>{task.artifacts.length ? task.artifacts.map(item => <ArtifactCard key={item.id} taskId={task.id} artifact={item} />) : <p className="muted">暂无交付物。</p>}</section>{task.failure?.reason && <section><h3>中断或失败原因</h3><p>{task.failure.reason}</p></section>}<section><h3>执行证据</h3>{task.executionEvidence.length ? task.executionEvidence.slice(-20).reverse().map(item => <p key={item.eventId}><strong>{item.capability}</strong> · {item.status}{item.tool ? ` · ${item.tool}` : ""}{item.exitCode !== null ? ` · exit ${item.exitCode}` : ""}{item.filePath ? ` · ${item.filePath}` : ""} · Task rev {item.taskRev}</p>) : <p className="muted">暂无工具或测试执行记录。</p>}</section><section><h3>执行者与交接记录</h3>{task.agentHistory.length ? task.agentHistory.map((item, index) => <p key={`${item.sessionId}-${index}`}><strong>{item.provider}</strong> · {dateLabel(item.attachedAt)}{item.detachedAt ? ` → ${dateLabel(item.detachedAt)}` : " · 当前执行者"}{item.note ? ` · ${item.note}` : ""}</p>) : <p className="muted">暂无执行者记录。</p>}</section>{task.currentAgent && ["queued", "running", "waiting", "blocked", "paused"].includes(task.status) && <section><h3>转交执行者</h3><div className="row"><Select label="目标 Agent" value={handoffProvider} onChange={event => setHandoffProvider(event.target.value)}><option value="">选择 Agent</option>{providers.filter(item => item.eligible && item.id !== task.currentAgent?.provider).map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</Select><Button disabled={!handoffProvider} onClick={() => onHandoff(handoffProvider)}>交接任务</Button></div></section>}{/needs-reconciliation|interrupted after Core restart/i.test(task.progress.note) && <section><h3>人工核对后恢复</h3><p>先核对工作区和上次操作的实际结果，再给出新的执行指令；不会重放中断前的工具调用。</p>{!task.currentAgent && <Select label="恢复执行者" value={recoveryProvider} onChange={event => setRecoveryProvider(event.target.value)}><option value="">选择恢复任务的 Agent</option>{providers.filter(item => item.eligible).map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</Select>}<label>核对结果<textarea className="cm-textarea" value={reviewSummary} onChange={event => setReviewSummary(event.target.value)} rows={3} maxLength={1000} /></label><label>新的执行指令<textarea className="cm-textarea" value={nextInstruction} onChange={event => setNextInstruction(event.target.value)} rows={4} maxLength={32000} /></label><Button disabled={!reviewSummary.trim() || !nextInstruction.trim() || (!task.currentAgent && !providers.some(item => item.id === recoveryProvider && item.eligible))} onClick={() => onReconcile(reviewSummary, nextInstruction, task.currentAgent?.provider || recoveryProvider)}>确认核对并执行新指令</Button></section>}<div className="row task-detail-actions">{['working', 'running'].includes(task.status) ? <Button onClick={() => onAction('pause')}>暂停任务</Button> : ['paused', 'waiting', 'blocked'].includes(task.status) && !/needs-reconciliation|Owner reviewed interrupted effect/i.test(task.progress.note) ? <Button disabled={activeTaskChildren(task).length > 0} onClick={() => onAction('resume')}>继续任务</Button> : null}{!['completed', 'cancelled', 'failed'].includes(task.status) && <Button variant="danger" onClick={() => onAction('cancel')}>取消任务</Button>}</div></div>;
+  const [reviewedReport, setReviewedReport] = useState('');
+  const reportKey = task.reviewReport ? task.reviewReport.eventId + ':' + task.reviewReport.sha256 : '';
+  const reportOnlyAllowed = !task.parentTaskId && !task.children?.length && !task.execution?.hadToolActivity
+    && !task.execution?.hasEvidence && task.execution?.state === 'awaiting-review' && Boolean(reportKey);
+  const reportOnly = reportOnlyAllowed && reviewedReport === reportKey;
+  const readyForReview = task.parentTaskId ? task.attempts?.at(-1)?.state === 'completed'
+    : (task.execution?.state === 'awaiting-review' || (!task.currentAgent && Boolean(task.children?.length))) && (task.children?.length
+      ? !task.children.filter(child => !task.children.some(other => other.supersedesChildId === child.id)).some(child => child.status !== 'completed' || child.verification !== 'VERIFIED')
+      : task.execution?.hasEvidence || reportOnly);
+
+  return <div className="task-details">{task.parentTaskId && onOpenChild && <Button compact variant="ghost" onClick={() => onOpenChild(task.parentTaskId!)}>返回父任务</Button>}<TaskDependencyNotice task={task} onOpenChild={onOpenChild} /><section><h3>结果验收</h3>{task.execution?.state === 'awaiting-review' && <p>本轮执行已结束，任务仍待你验收；不是已完成，也不自动计为 100%。</p>}{task.reviewReport && <div><h4>本轮分析报告（Agent 自述，未自动核验）</h4><p className="task-review-report">{task.reviewReport.text}</p></div>}{reportOnlyAllowed && <label className="row"><input type="checkbox" checked={reportOnly} onChange={event => setReviewedReport(event.target.checked ? reportKey : '')} />仅验收分析报告；不确认工具、文件修改或测试成功</label>}<label>验收说明<textarea className="cm-textarea" value={completionSummary} onChange={event => setCompletionSummary(event.target.value)} rows={3} maxLength={1000} /></label><Button disabled={task.status !== 'running' || !completionSummary.trim() || !readyForReview} onClick={() => onComplete(completionSummary.trim(), reportOnly)}>{reportOnly ? '确认分析报告' : '确认结果'}</Button></section><TaskCollaborationSummary task={task} onReview={onReview} onCreateChild={onCreateChild} onVerifyChild={onVerifyChild} />{task.status === "queued" && task.workspaceId && <section><h3>启动任务</h3><div className="row"><Select label="执行者" value={startProvider} onChange={event => setStartProvider(event.target.value)}><option value="">选择可用 Agent</option>{providers.filter(item => item.eligible).map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</Select><Button disabled={!startProvider || activeTaskChildren(task).length > 0} onClick={() => onStart(startProvider)}>启动</Button></div></section>}<div className="row between"><StatusBadge value={taskDisplayStatus(task)} /><small>更新于 {dateLabel(task.updatedAt)}</small></div><p>{task.goal}</p><UsageSummary usage={task.usage} label="任务累计用量" />{task.currentPhase && <section><h3>当前阶段</h3><p>{task.currentPhase}</p></section>}{task.progress.note && <section><h3>进度说明</h3><p>{task.progress.note}</p></section>}{task.checkpoint && <section><h3>检查点</h3><p>{task.checkpoint.summary}</p>{task.checkpoint.nextAction && <small>下一步：{task.checkpoint.nextAction}</small>}</section>}{task.result && <section><h3>执行结果</h3><p>{task.result.summary}</p></section>}<section><h3>交付物</h3>{task.artifacts.length ? task.artifacts.map(item => <ArtifactCard key={item.id} taskId={task.id} artifact={item} />) : <p className="muted">暂无交付物。</p>}</section>{task.failure?.reason && <section><h3>中断或失败原因</h3><p>{task.failure.reason}</p></section>}<section><h3>执行证据</h3>{task.executionEvidence.length ? task.executionEvidence.slice(-20).reverse().map(item => <p key={item.eventId}><strong>{item.capability}</strong> · {item.status}{item.tool ? ` · ${item.tool}` : ""}{item.exitCode !== null ? ` · exit ${item.exitCode}` : ""}{item.filePath ? ` · ${item.filePath}` : ""} · Task rev {item.taskRev}</p>) : <p className="muted">暂无工具或测试执行记录。</p>}</section><section><h3>执行者与交接记录</h3>{task.agentHistory.length ? task.agentHistory.map((item, index) => <p key={`${item.sessionId}-${index}`}><strong>{item.provider}</strong> · {dateLabel(item.attachedAt)}{item.detachedAt ? ` → ${dateLabel(item.detachedAt)}` : " · 当前执行者"}{item.note ? ` · ${item.note}` : ""}</p>) : <p className="muted">暂无执行者记录。</p>}</section>{task.currentAgent && ["queued", "running", "waiting", "blocked", "paused"].includes(task.status) && <section><h3>转交执行者</h3><div className="row"><Select label="目标 Agent" value={handoffProvider} onChange={event => setHandoffProvider(event.target.value)}><option value="">选择 Agent</option>{providers.filter(item => item.eligible && item.id !== task.currentAgent?.provider).map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</Select><Button disabled={!handoffProvider} onClick={() => onHandoff(handoffProvider)}>交接任务</Button></div></section>}{/needs-reconciliation|interrupted after Core restart/i.test(task.progress.note) && <section><h3>人工核对后恢复</h3><p>先核对工作区和上次操作的实际结果，再给出新的执行指令；不会重放中断前的工具调用。</p>{!task.currentAgent && <Select label="恢复执行者" value={recoveryProvider} onChange={event => setRecoveryProvider(event.target.value)}><option value="">选择恢复任务的 Agent</option>{providers.filter(item => item.eligible).map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</Select>}<label>核对结果<textarea className="cm-textarea" value={reviewSummary} onChange={event => setReviewSummary(event.target.value)} rows={3} maxLength={1000} /></label><label>新的执行指令<textarea className="cm-textarea" value={nextInstruction} onChange={event => setNextInstruction(event.target.value)} rows={4} maxLength={32000} /></label><Button disabled={!reviewSummary.trim() || !nextInstruction.trim() || (!task.currentAgent && !providers.some(item => item.id === recoveryProvider && item.eligible))} onClick={() => onReconcile(reviewSummary, nextInstruction, task.currentAgent?.provider || recoveryProvider)}>确认核对并执行新指令</Button></section>}<div className="row task-detail-actions">{['working', 'running'].includes(task.status) ? <Button onClick={() => onAction('pause')}>暂停任务</Button> : ['paused', 'waiting', 'blocked'].includes(task.status) && !/needs-reconciliation|Owner reviewed interrupted effect/i.test(task.progress.note) ? <Button disabled={activeTaskChildren(task).length > 0} onClick={() => onAction('resume')}>继续任务</Button> : null}{!['completed', 'cancelled', 'failed'].includes(task.status) && <Button variant="danger" onClick={() => onAction('cancel')}>取消任务</Button>}</div></div>;
 }
 
 export function mergeAgentHealth(previous: Agent, health: Agent): Agent {
@@ -1568,14 +1643,14 @@ function DshSetupPanel({ agent, onConfigured }: { agent: Agent; onConfigured(con
   return configuration ? <><DshSetupForm configuration={configuration} draft={draft} presets={presets} onRefresh={() => setRefresh(value => value + 1)} saving={saving} onDraftChange={setDraft} onSave={() => void save()} />{error && <ErrorNotice error={error} />}</> : <small>尚未取得连接配置，请检查连接。</small>;
 }
 
-type AgentRuntimeDraft = Required<Pick<AgentRuntimeInput, 'enabled' | 'runtimePath' | 'nodePath' | 'model' | 'baseUrl' | 'apiKey'>>;
+type AgentRuntimeDraft = Required<Pick<AgentRuntimeInput, 'enabled' | 'runtimePath' | 'nodePath' | 'model' | 'baseUrl' | 'apiKey'>> & Pick<AgentRuntimeInput, 'authMode' | 'servicePreset' | 'providerId' | 'methodId'>;
 function isRuntimeProvider(provider: string): provider is AgentRuntimeProvider { return ['gemini', 'opencode', 'qwen', 'claude'].includes(provider); }
 export function agentNeedsSetup(agent: Pick<Agent, 'id' | 'status' | 'reason' | 'eligible' | 'taskEligible' | 'runtimeConfiguration'>): boolean {
   if (isAgentReady(agent) || agent.runtimeConfiguration?.enabled === false || ['disabled', 'provider_disabled', 'runtime_disabled'].includes(agent.reason?.trim().toLowerCase() ?? '')) return false;
   return agent.status === 'needs-setup' || agent.status === 'connection-pending' || isRuntimeProvider(agent.id);
 }
 export function AgentRuntimeAuthenticationNotice({ agent }: { agent: Agent }) {
-  if (!isRuntimeProvider(agent.id) || agent.runtimeConfiguration?.credentialConfigured !== true || (agent.authVerified !== false && agent.authentication !== 'configured-unverified')) return null;
+  if (!isRuntimeProvider(agent.id) || agent.runtimeConfiguration?.authMode === 'provider-login' || agent.runtimeConfiguration?.credentialConfigured !== true || (agent.authVerified !== false && agent.authentication !== 'configured-unverified')) return null;
   return <small role="status">运行时就绪后，API 认证将在实际任务中验证。</small>;
 }
 export function AgentRuntimeSetupGuide({ provider, onOpen }: { provider: AgentRuntimeProvider; onOpen(url: string): void }) {
@@ -1589,23 +1664,42 @@ export function AgentRuntimeSetupGuide({ provider, onOpen }: { provider: AgentRu
   return <div className="dsh-setup-form"><small>本连接使用 {doc.name} 编码运行时；桌面客户端已安装不代表编码 CLI 已就绪。</small><Button compact type="button" variant="ghost" title={doc.url} onClick={() => onOpen(doc.url)}>{doc.name} 官方安装文档</Button></div>;
 }
 function runtimeDraft(configuration: AgentRuntimeConfiguration): AgentRuntimeDraft {
-  return { enabled: configuration.enabled, runtimePath: configuration.runtimePath, nodePath: configuration.nodePath, model: configuration.model, baseUrl: configuration.baseUrl, apiKey: '' };
+  return { enabled: configuration.enabled, runtimePath: configuration.runtimePath, nodePath: configuration.nodePath, model: configuration.model, baseUrl: configuration.baseUrl, apiKey: '', authMode: configuration.authMode ?? 'api-key', servicePreset: configuration.servicePreset ?? 'custom', providerId: configuration.providerId ?? null, methodId: configuration.methodId ?? null };
 }
-export function AgentRuntimeSetupForm({ configuration, draft, saving, onDraftChange, onSave, onRefresh }: {
+export function AgentConnectionSteps({ agent }: { agent: Agent }) {
+  if (!isRuntimeProvider(agent.id)) return null;
+  const evidence = agent.connection;
+  return <dl className="agent-connection-steps">
+    <div><dt>安装</dt><dd>{agent.cliInstalled || evidence?.runtime.installed ? '编码 CLI 已发现' : agent.installed ? '仅客户端；CLI 待检查' : '未发现编码 CLI'}</dd></div>
+    <div><dt>协议</dt><dd>{evidence?.runtime.protocolVerified ? '协议已验证' : '尚未验证'}</dd></div>
+    <div><dt>认证</dt><dd>{evidence?.authentication.state === 'session-present' ? '已有专用登录会话（未验证模型访问）' : evidence?.authentication.state === 'configured-unverified' ? 'API 凭据已保存，未验证' : '尚未配置 / 未验证'}</dd></div>
+    <div><dt>任务执行</dt><dd>{evidence?.execution.eligible ? '需工作区授权及逐次工具审批' : '策略或连接条件尚未满足'}</dd></div>
+  </dl>;
+}
+export function AgentRuntimeSetupForm({ provider, configuration, draft, saving, connection, auth, onDraftChange, onSave, onRefresh, onLogin, onCancel }: {
   provider: AgentRuntimeProvider; configuration: AgentRuntimeConfiguration; draft: AgentRuntimeDraft; saving: boolean;
-  onDraftChange(value: AgentRuntimeDraft): void; onSave(): void; onRefresh(): void;
+  connection?: AgentConnectionEvidence | null; auth?: AgentAuthStatus | null;
+  onDraftChange(value: AgentRuntimeDraft): void; onSave(): void; onRefresh(): void; onLogin?(methodId: string): void; onCancel?(): void;
 }) {
-  const field = (key: 'runtimePath' | 'nodePath' | 'model' | 'baseUrl', label: string, placeholder: string, maxLength: number) => <label>{label}<Input aria-label={label} value={draft[key]} placeholder={placeholder} maxLength={maxLength} disabled={saving} onChange={event => onDraftChange({ ...draft, [key]: event.target.value })} /></label>;
-  return <form className="dsh-setup-form" onSubmit={event => { event.preventDefault(); if (!saving) onSave(); }}>
-    <label><input type="checkbox" checked={draft.enabled} disabled={saving} onChange={event => onDraftChange({ ...draft, enabled: event.target.checked })} /> 启用此连接</label>
-    {field('runtimePath', '运行时路径', '留空自动发现；填写官方编码运行时的绝对路径', 4096)}
-    {field('nodePath', '独立 Node 路径', 'npm 运行时可填写独立 node.exe 的绝对路径', 4096)}
-    {field('model', '模型', '留空使用运行时默认模型', 256)}
-    {field('baseUrl', 'API 端点', 'https://…', 2048)}
-    <label>API Key<Input aria-label="API Key" type="password" value={draft.apiKey} autoComplete="new-password" maxLength={512} placeholder={configuration.credentialConfigured ? '留空保留已保存凭据' : '输入此 Agent 使用的 API Key'} disabled={saving} onChange={event => onDraftChange({ ...draft, apiKey: event.target.value })} /></label>
-    <small>{configuration.credentialConfigured ? '凭据已保存；留空保留已保存凭据。' : '尚未保存此 Agent 的凭据。'} API Key 保存后清空输入框。</small>
-    <small>使用原生权限模式；工作区授权与逐次审批另行确认。保存配置后，以连接检查结果为准。</small>
-    <div className="row"><Button compact type="submit" disabled={saving}>{saving ? '保存中…' : '保存配置'}</Button><Button compact type="button" variant="ghost" disabled={saving} onClick={onRefresh}>刷新连接</Button></div>
+  const account = draft.authMode === 'provider-login';
+  const modelRequired = provider !== 'claude' || connection?.modelRequired !== false;
+  const active = auth && ['starting', 'awaiting-user', 'exit-unconfirmed'].includes(auth.state);
+  const locked = saving || Boolean(active);
+  const field = (key: 'runtimePath' | 'nodePath' | 'model' | 'baseUrl', label: string, placeholder: string, maxLength: number) => <label>{label}<Input aria-label={label} value={draft[key]} placeholder={placeholder} maxLength={maxLength} required={key === 'model' && modelRequired && draft.enabled} disabled={locked} onChange={event => onDraftChange({ ...draft, [key]: event.target.value, ...(key === 'baseUrl' ? { servicePreset: 'custom', apiKey: '' } : {}) })} /></label>;
+  const supported = connection?.methods.find(method => method.id !== 'api-key' && method.supported && (provider !== 'opencode' || method.id === draft.methodId));
+  return <form className="dsh-setup-form" onSubmit={event => { event.preventDefault(); if (!locked) onSave(); }}>
+    <label><input type="checkbox" checked={draft.enabled} disabled={locked} onChange={event => onDraftChange({ ...draft, enabled: event.target.checked })} /> 启用此连接</label>
+    {provider === 'qwen' ? <small>Qwen Code 仅支持 API；旧账号 OAuth 已停用。</small> : <label>认证方式<select aria-label="认证方式" value={draft.authMode ?? 'api-key'} disabled={locked} onChange={event => onDraftChange({ ...draft, authMode: event.target.value as 'api-key' | 'provider-login', apiKey: '', providerId: null, methodId: null })}><option value="api-key">API Key</option><option value="provider-login">服务商官方账号（待原生验证）</option></select></label>}
+    {!account && Boolean(connection?.servicePresets?.length) && <label>API 服务<select aria-label="API 服务" value={draft.servicePreset ?? 'custom'} disabled={locked} onChange={event => { const preset = connection?.servicePresets?.find(item => item.id === event.target.value); if (preset) onDraftChange({ ...draft, servicePreset: preset.id, baseUrl: preset.baseUrl ?? draft.baseUrl, apiKey: '' }); }}>{connection?.servicePresets?.map(preset => <option key={preset.id} value={preset.id}>{preset.label}</option>)}</select></label>}
+    {account && provider === 'opencode' && <label>模型服务的官方登录<select aria-label="模型服务的官方登录" disabled={locked} value={draft.methodId ?? ''} onChange={event => { const item = connection?.providerSelections?.find(item => item.methodId === event.target.value); onDraftChange({ ...draft, providerId: item?.providerId ?? null, methodId: item?.methodId ?? null }); }}><option value="">选择服务及方式（均待验证）</option>{connection?.providerSelections?.map(item => <option key={item.methodId} value={item.methodId}>{item.label}</option>)}</select></label>}
+    {(!account || provider === 'opencode') && field('model', modelRequired ? '模型（必填）' : '模型（可选）', modelRequired ? '填写服务支持的准确模型 ID' : '留空使用已验证的 Claude 默认模型', 256)}
+    {!account && <><label>API Key<Input aria-label="API Key" type="password" value={draft.apiKey} autoComplete="new-password" maxLength={512} placeholder={configuration.credentialConfigured ? '留空保留已保存凭据' : '输入此 Agent 使用的 API Key'} disabled={locked} onChange={event => onDraftChange({ ...draft, apiKey: event.target.value })} /></label><small>{configuration.credentialConfigured ? '凭据已保存；留空保留已保存凭据。' : '尚未保存此 Agent 的凭据。'} 更换服务或端点须重新输入 Key；保存后清空输入框。</small></>}
+    {account && <><small>在 CetaMesh 专用配置中使用服务商官方登录，不复制现有账号目录。服务商可能打开系统默认浏览器；这不是独立浏览器账号。不会自动调用付费模型。</small>{supported ? <Button type="button" disabled={locked || configuration.authMode !== 'provider-login' || draft.methodId !== configuration.methodId} onClick={() => onLogin?.(draft.methodId ?? supported.id)}>开始官方登录</Button> : <small role="status">官方登录暂未启用：需要 Windows 原生进程、私有存储与审批策略验证。可切回 API 配置。</small>}{provider === 'gemini' && <small>Gemini 0.65.0 没有可用于被动检查的账号状态接口，且缺少完整工具输入证明；登录也不会开放任务执行。</small>}{provider === 'claude' && <small>仅计划支持 Claude 订阅登录，不支持 Console 无 Key 登录；SDK 第三方使用资格文档存在差异，需发行前复核。</small>}</>}
+    {active && <div role="status">{auth.state === 'exit-unconfirmed' ? '进程退出尚未确认；连接仍被占用。' : '等待服务商完成登录。'}<Button type="button" variant="ghost" onClick={onCancel}>取消登录</Button></div>}
+    {auth && !active && <small role="status">{{'no-session':'尚无专用登录会话',unsupported:'此账号方式不受支持',starting:'正在启动', 'awaiting-user':'等待用户', 'session-present':'专用会话已保存；不代表模型访问已验证',cancelled:'登录已取消',failed:'登录失败；可重试',expired:'登录已超时；可重试','exit-unconfirmed':'退出未确认'}[auth.state]}</small>}
+    <details><summary>高级设置</summary>{field('runtimePath', '运行时路径', '留空自动发现；填写官方编码运行时的绝对路径', 4096)}{field('nodePath', '独立 Node 路径', 'npm 运行时可填写独立 node.exe 的绝对路径', 4096)}{!account && field('baseUrl', 'API 端点', 'https://…', 2048)}</details>
+    <small>使用原生权限模式；工作区授权与逐次审批另行确认。保存配置不等于连接成功。</small>
+    <div className="row"><Button compact type="submit" disabled={locked}>{saving ? '保存中…' : '保存配置'}</Button><Button compact type="button" variant="ghost" disabled={saving} onClick={onRefresh}>刷新连接</Button></div>
   </form>;
 }
 function AgentRuntimeSetupPanel({ agent, onConfigured, onRefresh }: { agent: Agent; onConfigured(configuration: AgentRuntimeConfiguration): void; onRefresh(): void }) {
@@ -1614,15 +1708,38 @@ function AgentRuntimeSetupPanel({ agent, onConfigured, onRefresh }: { agent: Age
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
-  useEffect(() => { if (configuration) setDraft(runtimeDraft(configuration)); }, [configuration?.provider, configuration?.revision]);
+  const [auth, setAuth] = useState<AgentAuthStatus | null>(null);
+  const authController = useRef<ReturnType<typeof createAuthPanelController> | null>(null);
+  const mountedRevision = useRef(0), savingRef = useRef(false);
+  useEffect(() => {
+    const epoch = ++mountedRevision.current;
+    if (!isRuntimeProvider(agent.id) || !configuration) return;
+    let updates = 0;
+    const controller = createAuthPanelController({ provider: agent.id, revision: configuration.revision, client: agentClient, onUpdate: value => { updates++; setAuth(value); } });
+    authController.current = controller;
+    void agentClient.authDescribe(agent.id).then(value => { if (epoch === mountedRevision.current && updates === 0) controller.adopt(value); }).catch(() => {});
+    return () => { ++mountedRevision.current; controller.dispose(); authController.current = null; };
+  }, [agent.id, configuration?.revision]);
+  useEffect(() => {
+    if (!auth || !['starting', 'awaiting-user', 'exit-unconfirmed'].includes(auth.state)) return;
+    const timer = window.setInterval(() => { void authController.current?.status().catch(() => {}); }, 1500);
+    return () => window.clearInterval(timer);
+  }, [auth]);
+  useEffect(() => { if (configuration) setDraft(runtimeDraft(configuration)); savingRef.current = false; setSaving(false); }, [configuration?.provider, configuration?.revision]);
   async function save() {
-    if (!isRuntimeProvider(agent.id)) return;
+    if (!isRuntimeProvider(agent.id) || savingRef.current) return;
+    savingRef.current = true; const epoch = mountedRevision.current;
     setSaving(true); setError(''); setNotice('');
-    try { const result = await agentClient.configureRuntime(agent.id, { ...draft, executionMode: 'native-permissions' }); onConfigured(result); setNotice('配置已保存，请刷新连接查看验证结果。'); }
-    catch (cause) { setError(messageOf(cause)); }
-    finally { setDraft(current => ({ ...current, apiKey: '' })); setSaving(false); }
+    try { const result = await agentClient.configureRuntime(agent.id, { ...draft, executionMode: 'native-permissions' }); if (epoch === mountedRevision.current) { onConfigured(result); setNotice('配置已保存，请刷新连接查看验证结果。'); } }
+    catch (cause) { if (epoch === mountedRevision.current) setError((cause as { code?: string })?.code === 'AGENT_RUNTIME_CREDENTIAL_SCOPE_MISMATCH' ? '服务或端点已更改，请核对后重新输入对应 API Key。' : messageOf(cause)); }
+    finally { if (epoch === mountedRevision.current) { savingRef.current = false; setDraft(current => ({ ...current, apiKey: '' })); setSaving(false); } }
   }
-  return isRuntimeProvider(agent.id) ? <><AgentRuntimeSetupGuide provider={agent.id} onOpen={url => { setError(''); void openExternal(url).catch(cause => setError(messageOf(cause))); }} />{configuration ? <AgentRuntimeSetupForm provider={agent.id} configuration={configuration} draft={draft} saving={saving} onDraftChange={setDraft} onSave={() => void save()} onRefresh={onRefresh} /> : <small>尚未取得运行时配置，请刷新连接。</small>}{notice && <small role="status">{notice}</small>}{error && <ErrorNotice error={error} />}</> : null;
+  return isRuntimeProvider(agent.id) ? <><AgentRuntimeSetupGuide provider={agent.id} onOpen={url => { setError(''); void openExternal(url).catch(cause => setError(messageOf(cause))); }} />{configuration ? <AgentRuntimeSetupForm provider={agent.id} configuration={configuration} draft={draft} saving={saving} connection={agent.connection} auth={auth} onLogin={method => { void authController.current?.start(method).catch(cause => setError(messageOf(cause))); }} onCancel={() => { void authController.current?.cancel().catch(cause => setError(messageOf(cause))); }} onDraftChange={setDraft} onSave={() => void save()} onRefresh={onRefresh} /> : <small>尚未取得运行时配置，请刷新连接。</small>}{notice && <small role="status">{notice}</small>}{error && <ErrorNotice error={error} />}</> : null;
+}
+
+function AgentRuntimeSetupDisclosure(props: { agent: Agent; onConfigured(configuration: AgentRuntimeConfiguration): void; onRefresh(): void }) {
+  const [open, setOpen] = useState(false);
+  return <details className="agent-setup-disclosure" onToggle={event => setOpen(event.currentTarget.open)}><summary>连接设置</summary>{open && <AgentRuntimeSetupPanel {...props} />}</details>;
 }
 
 export function managedWorkspacePreflight(provider: string, workspaceId: string, activeWorkspaceId: string | null): string {
@@ -1696,7 +1813,7 @@ export function AgentsPage() {
   return <div className="content-page"><Heading eyebrow="AGENT DIRECTORY" title="Agents" description="查看可用 Agent、连接状态与职责。" action={<Button icon="update" onClick={() => void refresh(true)}>刷新状态</Button>} /><Banner><span className="grow"><strong>Gemini · OpenCode · Qwen · Claude 原生权限模式</strong><small>此模式没有 OS 沙箱；批准的命令可能访问宿主文件与网络。每个工作区仍需 Owner 确认，并逐次审批原生工具。</small></span></Banner>{error && <ErrorNotice error={error} onRetry={() => void refresh(true)} />}
     <div className="agent-summary-row"><Surface><strong>{agents.length}</strong><span>已配置 Agent</span></Surface><Surface><strong>{ready}</strong><span>可用 Agent</span></Surface><Surface><strong>{taskReady}</strong><span>任务可用</span></Surface><Surface><strong>{needsSetup}</strong><span>需要设置</span></Surface><Surface><strong>{activeTasks}</strong><span>活跃任务</span></Surface></div>
     <div className="row between work-controls"><Tabs items={[{ id: 'all', label: `全部 Agent ${agents.length}` }, { id: 'ready', label: `可用 Agent ${ready}` }, { id: 'setup', label: `需设置 ${needsSetup}` }]} selected={filter} onChange={setFilter} label="Agent 状态筛选" /><SearchInput label="搜索 Agent" placeholder="搜索名称或职责" value={query} onChange={event => setQuery(event.target.value)} /></div>
-    {loading && !agents.length ? <LoadingState label="正在读取 Agent 状态…" /> : visible.length ? <div className="agent-grid">{visible.map(agent => <Card className="agent-card" key={agent.id}><div className="row between"><div className="agent-avatar">{agentInitials(agent.id)}</div><StatusBadge value={agent.status} available={isAgentReady(agent)} /></div><h3>{agent.name}</h3><strong className="agent-role">{agent.role}</strong><p>{agent.description}</p>{agent.id === 'dsh' && <AgentSetupDiagnostic agent={agent} />}{agent.id === 'codex' && <CodexSetupDiagnostic agent={agent} />}{agent.reason === 'task-required' && <small>Agent 已就绪；此能力需要先分配工作区任务。</small>}{agent.id !== 'dsh' && agent.reason && agent.reason !== 'task-required' && <small>{availabilityReasonLabel(agent.reason)}</small>}<AgentRuntimeAuthenticationNotice agent={agent} />{agent.lastError && <small role="status">{agent.lastError}</small>}{agent.version && <small>版本 {agent.version}</small>}<AgentInstallationDiagnostic agent={agent} /><Button compact variant="ghost" disabled={checking === agent.id} onClick={() => void check(agent)}>{checking === agent.id ? '检查中…' : '检查连接'} <Icon name="right" size={14} /></Button>{agent.id === 'dsh' && <details className="agent-setup-disclosure"><summary>连接设置</summary><DshSetupPanel agent={agent} onConfigured={configuration => setAgents(current => current.map(item => item.id === agent.id ? { ...item, configuration } : item))} /></details>}{isRuntimeProvider(agent.id) && <details className="agent-setup-disclosure"><summary>连接设置</summary><AgentRuntimeSetupPanel agent={agent} onConfigured={runtimeConfiguration => setAgents(current => current.map(item => item.id === agent.id ? { ...item, runtimeConfiguration } : item))} onRefresh={() => void check(agent)} /></details>}</Card>)}</div> : !error && <EmptyNotice icon="agents" title="没有匹配的 Agent" detail="当前安装和注册的 Agent 会在这里显示。" />}
+    {loading && !agents.length ? <LoadingState label="正在读取 Agent 状态…" /> : visible.length ? <div className="agent-grid">{visible.map(agent => <Card className="agent-card" key={agent.id}><div className="row between"><div className="agent-avatar">{agentInitials(agent.id)}</div><StatusBadge value={agent.status} available={isAgentReady(agent)} /></div><h3>{agent.name}</h3><strong className="agent-role">{agent.role}</strong><p>{agent.description}</p>{agent.id === 'dsh' && <AgentSetupDiagnostic agent={agent} />}{agent.id === 'codex' && <CodexSetupDiagnostic agent={agent} />}{agent.reason === 'task-required' && <small>Agent 已就绪；此能力需要先分配工作区任务。</small>}{agent.id !== 'dsh' && agent.reason && agent.reason !== 'task-required' && <small>{availabilityReasonLabel(agent.reason)}</small>}<AgentConnectionSteps agent={agent} /><AgentRuntimeAuthenticationNotice agent={agent} />{agent.lastError && <small role="status">{agent.lastError}</small>}{agent.version && <small>版本 {agent.version}</small>}<AgentInstallationDiagnostic agent={agent} /><Button compact variant="ghost" disabled={checking === agent.id} onClick={() => void check(agent)}>{checking === agent.id ? '检查中…' : '检查连接'} <Icon name="right" size={14} /></Button>{agent.id === 'dsh' && <details className="agent-setup-disclosure"><summary>连接设置</summary><DshSetupPanel agent={agent} onConfigured={configuration => setAgents(current => current.map(item => item.id === agent.id ? { ...item, configuration } : item))} /></details>}{isRuntimeProvider(agent.id) && <AgentRuntimeSetupDisclosure agent={agent} onConfigured={runtimeConfiguration => setAgents(current => current.map(item => item.id === agent.id ? { ...item, runtimeConfiguration } : item))} onRefresh={() => void check(agent)} />}</Card>)}</div> : !error && <EmptyNotice icon="agents" title="没有匹配的 Agent" detail="当前安装和注册的 Agent 会在这里显示。" />}
     <div className="section-heading page-section-heading"><h2>运行策略</h2></div><Surface className="policy-row"><span className="policy-icon"><Icon name="approval" /></span><span className="grow"><strong>敏感操作需要确认</strong><small>文件写入、网络访问和外部副作用由 Capability Broker 逐次管理。</small></span><Badge tone="success">由 Core 强制执行</Badge></Surface>
   </div>;
 }

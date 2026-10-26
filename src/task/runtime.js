@@ -65,6 +65,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     assertTransition(current.status, target);
     const task = mutate(current.id, expectedRev, (draft) => {
       draft.status = target;
+      if (target === 'running') draft.executionObservation = null;
       if (typeof mutateExtra === 'function') mutateExtra(draft);
       return draft;
     });
@@ -431,6 +432,9 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     if (note !== undefined) patch.progressNote = normalizeText(note, 'note', TASK_LIMITS.noteChars);
     if (Object.keys(patch).length === 0) throw taskError('INVALID_PARAMS', '没有需要修改的字段');
     return mutate(id, expectedRev, (task) => {
+      if ((patch.goal !== undefined && patch.goal !== task.goal)
+        || (patch.requirements !== undefined && JSON.stringify(patch.requirements) !== JSON.stringify(task.requirements))
+        || (patch.workspaceId !== undefined && patch.workspaceId !== task.workspaceId)) task.executionObservation = null;
       if (patch.goal !== undefined) task.goal = patch.goal;
       if (patch.requirements !== undefined) task.requirements = patch.requirements;
       if (patch.workspaceId !== undefined) task.workspaceId = patch.workspaceId;
@@ -556,6 +560,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
         draft.agentHistory = draft.agentHistory.slice(-TASK_LIMITS.agentHistory);
       }
       draft.currentAgent = { provider: normalizedProvider, sessionId: normalizedSession };
+      draft.executionObservation = null;
       return draft;
     });
     return { task, changed: true };
@@ -572,6 +577,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
         if (note !== undefined) last.note = normalizeText(note, 'note', TASK_LIMITS.noteChars);
       }
       draft.currentAgent = null;
+      draft.executionObservation = null;
       return draft;
     });
     return { task, changed: true };
@@ -639,6 +645,9 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
         reason: pendingChild ? 'needs-reconciliation: Child Attempt was accepted before Core restart; verify outcome before recovery'
           : 'Task interrupted after Core restart; verify Workspace and checkpoint before resuming' });
       let current = result.task;
+      if (current.executionObservation) current = mutate(current.id, current.rev, draft => {
+        draft.executionObservation = { ...draft.executionObservation, state: 'unknown', updatedAt: now() }; return draft;
+      });
       if (pendingChild) {
         for (const attempt of current.attempts.filter(item => ['started', 'accepted'].includes(item.state))) {
           current = settleAttempt({ id: current.id, expectedRev: current.rev,
@@ -654,7 +663,25 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     return store.listAll().filter(row => row.status === 'blocked');
   }
 
-  function complete({ id, expectedRev, summary } = {}) {
+  function complete({ id, expectedRev, summary, ownerReview } = {}) {
+    if (ownerReview) {
+      const current = requireTask(id), observed = current.executionObservation;
+      if (!['execution', 'report-only'].includes(ownerReview.kind) || !observed
+        || observed.state !== 'awaiting-review' || observed.runId !== ownerReview.runId
+        || observed.provider !== ownerReview.provider || observed.sessionId !== ownerReview.sessionId
+        || current.rev !== ownerReview.taskRev) throw taskError('TASK_CONFLICT', 'Review is not bound to the current execution');
+      const report = (current.agentReports ?? []).filter(row => row.runId === observed.runId
+        && row.provider === observed.provider && row.sessionId === observed.sessionId && row.phase === 'user').at(-1);
+      if (ownerReview.kind === 'report-only' && (observed.hadToolActivity || !report?.sha256
+        || report.eventId !== ownerReview.reportEventId || report.sha256 !== ownerReview.reportSha256)) {
+        throw taskError('TASK_REPORT_CHANGED', 'Report-only review must identify the current no-tool report');
+      }
+      ownerReview = { kind: ownerReview.kind, provider: observed.provider, sessionId: observed.sessionId,
+        runId: observed.runId, taskRev: current.rev,
+        ...(ownerReview.kind === 'report-only' ? { reportEventId: report.eventId, reportSha256: report.sha256 }
+          : { evidenceEventIds: (Array.isArray(ownerReview.evidenceEventIds) ? ownerReview.evidenceEventIds : []).slice(0,200)
+            .map(value => normalizeText(value, 'eventId', 240, { required: true })) }) };
+    }
     const allChildren = store.listAll().filter(row => row.parentTaskId === id);
     const superseded = new Set(allChildren.map(row => row.supersedesChildId).filter(Boolean));
     const children = allChildren.filter(row => !superseded.has(row.id));
@@ -673,6 +700,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     return applyStatus({ id, expectedRev, target: 'completed', mutateExtra: (draft) => {
       draft.progress.percent = 100;
       draft.result = { summary: normalizeText(summary, 'summary', TASK_LIMITS.noteChars), at: now(),
+        ...(ownerReview ? { ownerReview } : {}),
         ...(children.length ? { childResultRefs: children.map(child => ({
           childId: child.id, verificationRev: child.result.verificationRev,
           evidenceEventIds: child.result.evidenceEventIds ?? [],
@@ -799,8 +827,41 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     });
   }
 
+  // A bounded observation of the current Core dispatch, not a Task status or
+  // proof of success. Legacy rows without it remain unconfirmed for UI review.
+  function beginExecutionObservation({ id, provider, sessionId, runId, phase } = {}) {
+    const current = requireTask(id);
+    if (phase !== 'user') return current;
+    if (current.status !== 'running' || current.currentAgent?.provider !== provider
+      || current.currentAgent?.sessionId !== sessionId) throw taskError('AGENT_ASSIGNMENT_EXPIRED', 'Execution does not own this Task');
+    const run = normalizeText(runId, 'runId', 240, { required: true });
+    if (current.executionObservation?.runId === run) throw taskError('REQUEST_ID_CONFLICT', 'A new execution needs a fresh Core run identity');
+    return mutate(id, current.rev, draft => {
+      draft.executionObservation = { provider, sessionId, runId: run, state: 'running',
+        startedRev: draft.rev + 1, hadToolActivity: false, at: now() };
+      return draft;
+    });
+  }
+
+  function observeExecution({ id, provider, sessionId, runId, phase, state, toolActivity = false } = {}) {
+    const current = requireTask(id), observed = current.executionObservation;
+    if (!observed || phase !== 'user' || !runId || observed.runId !== runId
+      || observed.provider !== provider || observed.sessionId !== sessionId
+      || current.status !== 'running' || current.currentAgent?.provider !== provider
+      || current.currentAgent?.sessionId !== sessionId) return current;
+    if (!['running', 'waiting-approval', 'awaiting-review', 'failed', 'cancelled', 'unknown'].includes(state)) {
+      throw taskError('INVALID_PARAMS', 'Invalid execution observation');
+    }
+    if (observed.state === state && (!toolActivity || observed.hadToolActivity)) return current;
+    return mutate(id, current.rev, draft => {
+      draft.executionObservation = { ...observed, state,
+        hadToolActivity: observed.hadToolActivity || toolActivity, updatedAt: now() };
+      return draft;
+    });
+  }
+
   /** Persist one observed Broker tool result against the current Task owner. */
-  function recordToolOutcome({ id, provider, sessionId, eventId, runId, phase, capability, status, filePath, tool, exitCode, hasChanges, retryCount } = {}) {
+  function recordToolOutcome({ id, provider, sessionId, eventId, runId, phase, capability, status, filePath, tool, exitCode, hasChanges, retryCount, source, resultSha256, changes } = {}) {
     const current = requireTask(id);
     const sourceId = normalizeText(eventId, 'eventId', 240, { required: true });
     if (current.executionEvidence?.some(item => item.eventId === sourceId && item.provider === provider && item.sessionId === sessionId)) return { task: current, changed: false };
@@ -820,7 +881,15 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
       draft.executionEvidence.push({ eventId: sourceId, provider, sessionId,
         runId: normalizeText(runId, 'runId', 240) || null,
         phase: normalizeText(phase, 'phase', 40) || 'unknown', capability: name,
-        status: resultStatus, tool: typeof tool === 'string' ? tool.slice(0, 100) : null,
+        status: resultStatus,
+        ...(['native-result', 'core-import'].includes(source) && /^[a-f0-9]{64}$/.test(resultSha256 ?? '')
+          ? { source, resultSha256 } : {}),
+        ...(source === 'core-import' && Array.isArray(changes) ? { changes: changes.slice(0,500).map(row => ({
+          action: row.action === 'delete' ? 'delete' : 'write', path: String(row.path ?? '').slice(0,500),
+          sha256: /^[a-f0-9]{64}$/.test(row.sha256 ?? '') ? row.sha256 : null,
+          previousSha256: /^[a-f0-9]{64}$/.test(row.previousSha256 ?? '') ? row.previousSha256 : null
+        })) } : {}),
+        tool: typeof tool === 'string' ? tool.slice(0, 100) : null,
         exitCode: observedExitCode, filePath: artifactPath,
         retryCount: Number.isSafeInteger(retryCount) && retryCount >= 0 && retryCount <= 1 ? retryCount : null,
         ...(name === 'git.diff' ? { hasChanges: resultStatus === 'completed' && hasChanges === true } : {}),
@@ -892,7 +961,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
   /** Store a native Agent claim separately; do not upgrade it to a verified Task checkpoint. */
   function recordAgentReport({ id, expectedRev, provider, sessionId, eventId, runId, phase, text } = {}) {
     const sourceId = normalizeText(eventId, 'eventId', 240, { required: true });
-    const content = normalizeText(redactText(text), 'text', 1600, { required: true });
+    const content = normalizeText(redactText(text), 'text', 8000, { required: true });
     const current = requireTask(id);
     if ((current.agentReports ?? []).some(row => row.eventId === sourceId && row.provider === provider && row.sessionId === sessionId)) return current;
     if (current.currentAgent?.provider !== provider || current.currentAgent?.sessionId !== sessionId) {
@@ -903,6 +972,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
       task.agentReports.push({ eventId: sourceId, provider, sessionId,
         runId: normalizeText(runId, 'runId', 240) || null,
         phase: normalizeText(phase, 'phase', 40) || 'unknown', text: content,
+        sha256: crypto.createHash('sha256').update(content).digest('hex'),
         verified: false, at: now(), taskRev: task.rev + 1 });
       if (task.agentReports.length > TASK_LIMITS.agentReports) {
         task.agentReports.splice(0, task.agentReports.length - TASK_LIMITS.agentReports);
@@ -1021,6 +1091,8 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     addWork,
     addArtifact,
     recordToolOutcome,
+    beginExecutionObservation,
+    observeExecution,
     verifyOutcome,
     resolveArtifactOpen,
     addDecision,

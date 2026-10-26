@@ -36,15 +36,17 @@ export function knownGeminiQwenRuntime(id,version,initialized) {
     && initialized.agentInfo?.version===expected && initialized.agentInfo?.name===(id==='gemini'?'gemini-cli':'qwen-code'));
 }
 
-export function createGeminiQwenProfile({id,configuration={},profileParent=os.tmpdir(),allowLoopbackHttpForTests=false}={}) {
+export function createGeminiQwenProfile({id,configuration={},profileParent=os.tmpdir(),allowLoopbackHttpForTests=false,ownedRoot,initialize=true}={}) {
   if(!Object.hasOwn(GEMINI_QWEN_NATIVE_VERSIONS,id)) throw fault('ACP_RUNTIME_INVALID','Unsupported native Agent profile');
+  const account=configuration.authMode==='provider-login';
+  if(account && id!=='gemini')throw fault('AGENT_AUTH_UNSUPPORTED','Qwen is API-only');
   const model=configuration.model || 'health-probe';
   if(typeof model!=='string' || model.length>256 || /[\x00-\x1f{}]/.test(model)) throw fault('AGENT_MODEL_REQUIRED','Configure an Agent model');
-  let endpoint;try{endpoint=new URL(configuration.baseUrl);}catch{throw fault('AGENT_ENDPOINT_INVALID','Configure an Agent API endpoint');}
+  let endpoint;try{endpoint=new URL(account?'https://generativelanguage.googleapis.com':configuration.baseUrl);}catch{throw fault('AGENT_ENDPOINT_INVALID','Configure an Agent API endpoint');}
   if(endpoint.username || endpoint.password || endpoint.search || endpoint.hash || /[{}]/.test(configuration.baseUrl)
     || (endpoint.protocol!=='https:' && !(allowLoopbackHttpForTests && endpoint.protocol==='http:' && ['127.0.0.1','localhost','[::1]'].includes(endpoint.hostname))))
     throw fault('AGENT_ENDPOINT_INVALID','Invalid Agent API endpoint');
-  const root=fs.mkdtempSync(path.join(profileParent,'cetamesh-'+id+'-'));
+  const root=ownedRoot ?? fs.mkdtempSync(path.join(profileParent,'cetamesh-'+id+'-'));
   const home=path.join(root,'.'+(id==='gemini'?'gemini':'qwen'));
   const environment={HOME:root,USERPROFILE:root,APPDATA:path.join(root,'app'),LOCALAPPDATA:path.join(root,'local'),
     PROGRAMDATA:path.join(root,'system'),HOMEDRIVE:path.parse(root).root.slice(0,2),HOMEPATH:root.slice(2),
@@ -55,17 +57,17 @@ export function createGeminiQwenProfile({id,configuration={},profileParent=os.tm
   const systemFile=path.join(root,'system','settings.json'),defaultsFile=path.join(root,'system','defaults.json'),settingsFile=path.join(home,'settings.json');
   let settings,argv=['--approval-mode','default','--model',model];
   const ownedFiles=new Map();
-  const own=(file,source)=>{fs.mkdirSync(path.dirname(file),{recursive:true});fs.writeFileSync(file,source);ownedFiles.set(file,source);};
+  const own=(file,source)=>{fs.mkdirSync(path.dirname(file),{recursive:true});if(initialize)fs.writeFileSync(file,source);ownedFiles.set(file,source);};
   if(id==='gemini') {
     const policyFile=path.join(root,'system','policies','cetamesh.toml');
     own(policyFile,'[[rule]]\ntoolName = "*"\ndecision = "ask_user"\npriority = 999\n');
     settings={general:{enableAutoUpdate:false,enableAutoUpdateNotification:false,defaultApprovalMode:'default'},
-      advanced:{ignoreLocalEnv:true,autoConfigureMemory:false},security:{auth:{selectedType:'gemini-api-key',enforcedType:'gemini-api-key'},disableAlwaysAllow:true},
+      advanced:{ignoreLocalEnv:true,autoConfigureMemory:false},security:{auth:{selectedType:account?'oauth-personal':'gemini-api-key',enforcedType:account?'oauth-personal':'gemini-api-key'},disableAlwaysAllow:true},
       hooksConfig:{enabled:false},hooks:{},mcpServers:{},admin:{secureModeEnabled:true,extensions:{enabled:false},mcp:{enabled:false},skills:{enabled:false}},
       skills:{enabled:false},experimental:{enableAgents:false},telemetry:{enabled:false},model:{name:model},
       context:{fileName:[],loadMemoryFromIncludeDirectories:false},tools:{sandbox:false}};
-    Object.assign(environment,{GEMINI_CLI_HOME:home,GEMINI_CLI_NO_RELAUNCH:'true',GEMINI_CLI_SYSTEM_SETTINGS_PATH:systemFile,
-      GEMINI_CLI_SYSTEM_DEFAULTS_PATH:defaultsFile,GEMINI_CLI_TRUST_WORKSPACE:'true',GOOGLE_GEMINI_BASE_URL:configuration.baseUrl});
+    Object.assign(environment,{GEMINI_CLI_HOME:root,GEMINI_CLI_NO_RELAUNCH:'true',GEMINI_CLI_SYSTEM_SETTINGS_PATH:systemFile,
+      GEMINI_CLI_SYSTEM_DEFAULTS_PATH:defaultsFile,GEMINI_CLI_TRUST_WORKSPACE:'true',...(!account?{GOOGLE_GEMINI_BASE_URL:configuration.baseUrl}:{})});
     argv.push('--admin-policy',policyFile);
   } else {
     // Qwen0.26.1 defaults this to true; its PowerShell Add-Type inhibitor can
@@ -82,12 +84,18 @@ export function createGeminiQwenProfile({id,configuration={},profileParent=os.tm
       OPENAI_BASE_URL:configuration.baseUrl,QWEN_CODE_DISABLE_WORKFLOWS:'1',NO_BROWSER:'1'});
     argv.push('--extensions','');
   }
-  for(const file of [systemFile,settingsFile]){writeJsonAtomic(file,settings);ownedFiles.set(file,fs.readFileSync(file,'utf8'));}
-  writeJsonAtomic(defaultsFile,id==='qwen'?{$version:4}:{});ownedFiles.set(defaultsFile,fs.readFileSync(defaultsFile,'utf8'));
+  const userAuthSettings={security:{auth:{selectedType:'oauth-personal'}}};
+  for(const file of [systemFile,settingsFile]){
+    const value=account&&file===settingsFile?userAuthSettings:settings;
+    if(initialize)writeJsonAtomic(file,value);
+    if(!(account&&file===settingsFile))ownedFiles.set(file,JSON.stringify(value,null,2)+'\n');
+  }
+  const defaults=id==='qwen'?{$version:4}:{};if(initialize)writeJsonAtomic(defaultsFile,defaults);ownedFiles.set(defaultsFile,JSON.stringify(defaults,null,2)+'\n');
   const identity=hash(JSON.stringify({policyVersion:GEMINI_QWEN_POLICY_VERSION,id,settings,argv}));
   const protectedDirectories=[path.join(home,'policies'),path.join(home,'extensions'),path.join(home,'hooks'),path.join(home,'skills'),path.join(home,'agents')];
   return {root,environment,identity,argv,validate(){
     try {
+      if(account&&(fs.lstatSync(settingsFile).isSymbolicLink()||JSON.stringify(readJsonFile(settingsFile,{maxBytes:16384}))!==JSON.stringify(userAuthSettings)))throw Error('Unexpected auth settings');
       for(const [file,source] of ownedFiles) if(fs.lstatSync(file).isSymbolicLink() || fs.readFileSync(file,'utf8')!==source) throw Error('Policy changed');
       for(const directory of protectedDirectories) if(fs.existsSync(directory)) {
         if(fs.lstatSync(directory).isSymbolicLink() || !fs.statSync(directory).isDirectory()) throw Error('Unapproved customization');
@@ -100,7 +108,7 @@ export function createGeminiQwenProfile({id,configuration={},profileParent=os.tm
       const policyDir=path.join(root,'system','policies');
       if(id==='gemini' && fs.readdirSync(policyDir).some(name=>name!=='cetamesh.toml')) throw Error('Additional admin policy');
     } catch {throw fault('AGENT_RUNTIME_CHANGED','Native runtime policy changed; close the session and check the connection again');}
-  },async cleanup(){await fs.promises.rm(root,{recursive:true,force:true,maxRetries:20,retryDelay:100});}};
+  },async cleanup(){if(ownedRoot)return;await fs.promises.rm(root,{recursive:true,force:true,maxRetries:20,retryDelay:100});}};
 }
 
 /** Bind consent to bundled chunks and every resolvable declared native dependency. */

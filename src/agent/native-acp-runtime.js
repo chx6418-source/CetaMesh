@@ -28,31 +28,33 @@ function bytesIdentity(file) {
   } finally {fs.closeSync(fd);}
 }
 
-export function openCodeNativePolicy({ model, baseUrl, allowLoopbackHttpForTests=false } = {}) {
+export function openCodeNativePolicy({ model, baseUrl, authMode='api-key', providerId, allowLoopbackHttpForTests=false } = {}) {
   if (typeof model !== 'string' || !model || /[\x00-\x1f{}]/.test(model) || model.length > 256) throw fault('AGENT_MODEL_REQUIRED','Configure an OpenCode model');
+  const account=authMode==='provider-login';
+  if(account && providerId!=='openai')throw fault('AGENT_AUTH_UNSUPPORTED','Native provider selection has no pinned contract');
   let endpoint;
-  try { endpoint = new URL(baseUrl); } catch { throw fault('AGENT_ENDPOINT_INVALID','Configure an Agent API endpoint'); }
+  try { endpoint = new URL(account?'https://api.openai.com/v1':baseUrl); } catch { throw fault('AGENT_ENDPOINT_INVALID','Configure an Agent API endpoint'); }
   if ((endpoint.protocol!=='https:' && !(allowLoopbackHttpForTests && endpoint.protocol==='http:' && ['127.0.0.1','localhost','[::1]'].includes(endpoint.hostname))) || endpoint.username || endpoint.password || /[{}]/.test(baseUrl)) throw fault('AGENT_ENDPOINT_INVALID','Invalid Agent API endpoint');
   return {
-    model:'cetamesh/'+model,default_agent:'cetamesh',update:'disable',snapshots:false,formatter:false,
+    model:(account?providerId:'cetamesh')+'/'+model,default_agent:'cetamesh',update:'disable',snapshots:false,formatter:false,
     warming:false,permissions:allAsk(),
     agents:{cetamesh:{mode:'primary',description:'CetaMesh task agent',permissions:allAsk()},
       build:{disabled:true},plan:{disabled:true},general:{disabled:true},explore:{disabled:true}},
     plugins:[],mcp:{servers:{}},skills:[],commands:{},instructions:[],references:{},
-    policies:[{action:'provider.use',resource:'*',effect:'deny'},{action:'provider.use',resource:'cetamesh',effect:'allow'},
+    policies:[{action:'provider.use',resource:'*',effect:'deny'},{action:'provider.use',resource:account?providerId:'cetamesh',effect:'allow'},
       {action:'integration.use',resource:'plugin:*',effect:'deny'},{action:'integration.use',resource:'mcp:*',effect:'deny'},{action:'integration.use',resource:'skill:*',effect:'deny'},
       {action:'tool.use',resource:'execute:*',effect:'deny'},{action:'tool.use',resource:'subagent:*',effect:'deny'},{action:'tool.use',resource:'skill:*',effect:'deny'}],
-    providers:{cetamesh:{name:'CetaMesh configured endpoint',package:'@opencode/ai/providers/openai-compatible',
+    providers:account?{}:{cetamesh:{name:'CetaMesh configured endpoint',package:'@opencode/ai/providers/openai-compatible',
       env:['CETAMESH_AGENT_API_KEY'],settings:{baseURL:baseUrl,apiKey:'{env:CETAMESH_AGENT_API_KEY}'},
       models:{[model]:{name:model,limit:{context:32768,output:4096}}}}}
   };
 }
 
 /** A private disposable profile. Its files contain policy and a secret reference only. */
-export function createNativeAcpProfile({id,configuration,profileParent=os.tmpdir(),allowLoopbackHttpForTests=false} = {}) {
-  if(id==='gemini' || id==='qwen') return createGeminiQwenProfile({id,configuration,profileParent,allowLoopbackHttpForTests});
-  const selectedPolicy=id==='opencode' ? openCodeNativePolicy({model:configuration.model || 'health-probe',baseUrl:configuration.baseUrl,allowLoopbackHttpForTests}) : null;
-  const root = fs.mkdtempSync(path.join(profileParent,'cetamesh-'+id+'-'));
+export function createNativeAcpProfile({id,configuration,profileParent=os.tmpdir(),allowLoopbackHttpForTests=false,ownedRoot,initialize=true} = {}) {
+  if(id==='gemini' || id==='qwen') return createGeminiQwenProfile({id,configuration,profileParent,allowLoopbackHttpForTests,ownedRoot,initialize});
+  const selectedPolicy=id==='opencode' ? openCodeNativePolicy({...configuration,model:configuration.model || 'health-probe',allowLoopbackHttpForTests}) : null;
+  const root = ownedRoot ?? fs.mkdtempSync(path.join(profileParent,'cetamesh-'+id+'-'));
   const environment={HOME:root,USERPROFILE:root,APPDATA:path.join(root,'app'),LOCALAPPDATA:path.join(root,'local'),
     PROGRAMDATA:path.join(root,'system'),HOMEDRIVE:path.parse(root).root.slice(0,2),HOMEPATH:root.slice(2),
     TEMP:path.join(root,'tmp'),TMP:path.join(root,'tmp'),TMPDIR:path.join(root,'tmp'),
@@ -65,7 +67,7 @@ export function createNativeAcpProfile({id,configuration,profileParent=os.tmpdir
     // System configuration has highest file precedence. Global mirrors it for
     // supported layouts; project config and integrations are independently excluded.
     files=[path.join(root,'.config','opencode','opencode.json'),path.join(root,'system','opencode','opencode.json')];
-    for(const file of files) writeJsonAtomic(file,policy);
+    if(initialize)for(const file of files) writeJsonAtomic(file,policy);
     Object.assign(environment,{OPENCODE_DISABLE_PROJECT_CONFIG:'true',OPENCODE_PURE:'true',OPENCODE_DISABLE_EXTERNAL_SKILLS:'true',
       OPENCODE_DISABLE_AUTOUPDATE:'true',OPENCODE_DISABLE_MODELS_FETCH:'true',OPENCODE_LOG_LEVEL:'error'});
   }
@@ -78,7 +80,7 @@ export function createNativeAcpProfile({id,configuration,profileParent=os.tmpdir
       // Missing, malformed, replaced and additional policy files all invalidate authority.
       throw fault('AGENT_RUNTIME_CHANGED','Native runtime policy changed; close the session and check the connection again');
     }
-  },async cleanup(){await fs.promises.rm(root,{recursive:true,force:true,maxRetries:20,retryDelay:100});}};
+  },async cleanup(){if(ownedRoot)return;await fs.promises.rm(root,{recursive:true,force:true,maxRetries:20,retryDelay:100});}};
 }
 /** Match only a flag actually advertised by the installed requested CLI. */
 export function acpArgumentsFromHelp(id,help) {
@@ -94,8 +96,13 @@ export function acpArgumentsFromHelp(id,help) {
 }
 
 /** Production discovery never consults desktop-client accounts or user CLI profiles. */
-export function createNativeAcpRuntime({id,runtimeConfiguration,launchFactory,envSource=process.env,profileParent,allowLoopbackHttpForTests=false} = {}) {
+export function createNativeAcpRuntime({id,runtimeConfiguration,launchFactory,envSource=process.env,profileParent,allowLoopbackHttpForTests=false,resolveAuthProfile} = {}) {
   const policyVersion=id==='opencode'?POLICY_VERSION:GEMINI_QWEN_POLICY_VERSION;
+  // Account discovery and tasks inherit OS launch essentials only, just like
+  // auth transport. In particular, no other runtime's profile or proxy settings.
+  const accountEnvironment=()=>Object.fromEntries(Object.entries(envSource??{}).filter(([key])=>
+    ['PATH','PATHEXT','SYSTEMROOT','WINDIR','COMSPEC','LANG','LC_ALL','TZ'].includes(key.toUpperCase())));
+  const environmentFor=configuration=>configuration.authMode==='provider-login'?accountEnvironment():envSource;
   let cached=null,pending=null;
   const profiles=new Set();
   function current() {
@@ -115,21 +122,25 @@ export function createNativeAcpRuntime({id,runtimeConfiguration,launchFactory,en
     try { state=current(); } catch { throw fault('AGENT_RUNTIME_CHANGED','Native runtime changed; close the session and check the connection again'); }
     if(state.identity!==expected) throw fault('AGENT_RUNTIME_CHANGED','Native runtime or configuration changed; close the session and check the connection again');
   }
-  async function inspect() {
+  async function inspect(ownership={}) {
+    const launchOwned=(spec,binding)=>{
+      if(ownership.signal?.aborted)throw fault('AGENT_AUTH_CANCELLED','Authentication discovery cancelled');
+      ownership.assertCurrent?.();
+      const handle=launchFactory(spec)({...binding,onHandle:ownership.onHandle});
+      ownership.onHandle?.(handle);return handle;
+    };
     let state;
     try { state=current(); } catch { return {reason:'runtime_detection_failed',compatible:false}; }
     if(state.reason) return {...state,compatible:false};
-    if(!state.configuration.model) return {...state,reason:'agent_model_required',compatible:false};
-    if(!state.configuration.credentialConfigured) return {...state,reason:'agent_credential_required',compatible:false};
     if(cached?.identity===state.identity) return cached;
-    if(pending) {await pending;return inspect();}
+    if(pending) {await pending;return inspect(ownership);}
     pending=(async()=>{
       let profile,handle,rpc;
       try {
         profile=createNativeAcpProfile({id,configuration:state.configuration,profileParent,allowLoopbackHttpForTests});
         const probe=async args=>{
-          const owned=launchFactory({executable:state.target.executable,argv:[...state.target.argsPrefix,...args],envSource,
-            trustedEnvironment:profile.environment})({cwd:profile.root});
+          const owned=launchOwned({executable:state.target.executable,argv:[...state.target.argsPrefix,...args],envSource:environmentFor(state.configuration),
+            trustedEnvironment:profile.environment},{cwd:profile.root});
           handle=owned;
           const chunks=[];let bytes=0,overflow=false,timer;
           const receive=chunk=>{const buffer=Buffer.from(chunk);bytes+=buffer.length;if(bytes>1048576)overflow=true;else chunks.push(buffer);};
@@ -143,7 +154,7 @@ export function createNativeAcpRuntime({id,runtimeConfiguration,launchFactory,en
         const version=versionProbe.status===0 ? String(versionProbe.stdout).trim().split(/\r?\n/)[0].slice(0,200) : null;
         const argv=helpProbe.status===0 ? acpArgumentsFromHelp(id,String(helpProbe.stdout)) : null;
         if(!version || !argv) return {...state,version,reason:!version?'acp_version_unverified':'acp_launch_unverified',compatible:false};
-        handle=launchFactory({executable:state.target.executable,argv:[...state.target.argsPrefix,...argv,...profile.argv??[]],envSource,trustedEnvironment:profile.environment})({cwd:profile.root});
+        handle=launchOwned({executable:state.target.executable,argv:[...state.target.argsPrefix,...argv,...profile.argv??[]],envSource:environmentFor(state.configuration),trustedEnvironment:profile.environment},{cwd:profile.root});
         rpc=createJsonRpcTransport({readable:handle.readable,writable:handle.writable,framing:'acp-v1-jsonl'});
         const initialized=await rpc.request('initialize',{protocolVersion:1,clientCapabilities:{},clientInfo:{name:'CetaMesh',version:'1'}},{timeoutMs:15000});
         if(initialized?.protocolVersion!==1) return {...state,version,reason:'acp_version_unverified',compatible:false};
@@ -157,17 +168,22 @@ export function createNativeAcpRuntime({id,runtimeConfiguration,launchFactory,en
           securityLimitations:['No OS sandbox. Approved commands can access host files and network.','External plugins, skills, MCP and subagents are disabled.']} : undefined;
         const result={...state,version,argv,compatible:true,security,securityVerified:known,
           authMethods:Array.isArray(initialized.authMethods)?initialized.authMethods.map(item=>String(item.id).slice(0,80)):[],
-          reason:!known?(id==='gemini' && knownGeminiQwenRuntime(id,version,initialized)?'native_input_unverified':'native_policy_unverified'):!state.configuration.model?'agent_model_required':!state.configuration.credentialConfigured?'agent_credential_required':null,
+          reason:!known?(id==='gemini' && knownGeminiQwenRuntime(id,version,initialized)?'native_input_unverified':'native_policy_unverified'):state.configuration.authMode==='provider-login'?'provider_login_execution_unverified':!state.configuration.model?'agent_model_required':!state.configuration.credentialConfigured?'agent_credential_required':null,
           validateRuntime:()=>{validateIdentity(state.identity);for(const active of profiles)active.validate();},snapshotExcludedPaths:id==='opencode'?ACP_SNAPSHOT_EXCLUDED_PATHS:GEMINI_QWEN_SNAPSHOT_EXCLUDED_PATHS};
         result.launch=async args=>{
           validateIdentity(state.identity);
-          const credential=runtimeConfiguration.resolveCredential(id);
-          if(!credential?.apiKey || credential.baseUrl!==state.configuration.baseUrl) throw fault('AGENT_CREDENTIAL_REQUIRED','Configure this Agent credential');
-          const launchProfile=createNativeAcpProfile({id,configuration:state.configuration,profileParent,allowLoopbackHttpForTests});
+          const account=state.configuration.authMode==='provider-login';
+          const credential=account?null:runtimeConfiguration.resolveCredential(id);
+          if(!account&&(!credential?.apiKey || credential.baseUrl!==state.configuration.baseUrl)) throw fault('AGENT_CREDENTIAL_REQUIRED','Configure this Agent credential');
+          const ownedProfile=account?await resolveAuthProfile?.(id):null;
+          if(account&&!ownedProfile)throw fault('AGENT_AUTH_UNSUPPORTED','No promoted owned account profile');
+          ownedProfile?.validate();validateIdentity(state.identity);
+          const policyProfile=createNativeAcpProfile({id,configuration:state.configuration,profileParent,allowLoopbackHttpForTests,...(account?{ownedRoot:ownedProfile.root,initialize:false}:{})});
+          const launchProfile={...policyProfile,validate(){ownedProfile?.validate();policyProfile.validate();}};
           let owned;
           try {
-            const launch=launchFactory({executable:state.target.executable,argv:[...state.target.argsPrefix,...argv,...launchProfile.argv??[]],envSource,
-              trustedEnvironment:{...launchProfile.environment,[id==='qwen'?'OPENAI_API_KEY':id==='gemini'?'GEMINI_API_KEY':'CETAMESH_AGENT_API_KEY']:credential.apiKey}});
+            const launch=launchFactory({executable:state.target.executable,argv:[...state.target.argsPrefix,...argv,...launchProfile.argv??[]],envSource:environmentFor(state.configuration),
+              trustedEnvironment:{...launchProfile.environment,...(account?{}:{[id==='qwen'?'OPENAI_API_KEY':id==='gemini'?'GEMINI_API_KEY':'CETAMESH_AGENT_API_KEY']:credential.apiKey})}});
             let wrapped;
             const wrap=handle=>{
               if(wrapped)return wrapped;
@@ -175,7 +191,7 @@ export function createNativeAcpRuntime({id,runtimeConfiguration,launchFactory,en
               wrapped={...handle,async close(){await close();await launchProfile.cleanup();profiles.delete(launchProfile);}};
               args.onHandle?.(wrapped);return wrapped;
             };
-            profiles.add(launchProfile);
+            launchProfile.validate();validateIdentity(state.identity);profiles.add(launchProfile);
             owned=launch({...args,onHandle:wrap});
             return wrap(owned);
           } catch(error) {if(!owned){await launchProfile.cleanup();profiles.delete(launchProfile);}throw error;}

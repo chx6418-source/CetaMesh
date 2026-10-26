@@ -230,12 +230,18 @@ try {
     provider: 'cetamesh', sessionId: 'empty-root-session' }).task;
   await assert.rejects(services.desktopUiService.execute({ method: 'ui.task.complete', params: {
     id: emptyRoot.id, expectedRev: activeEmptyRoot.rev, summary: 'Claimed done', reviewed: true
-  } }), { code: 'TASK_EVIDENCE_REQUIRED' });
-  const activeUiParent = rt.start({ id: uiParent.id, expectedRev: uiParent.rev,
-    provider: 'cetamesh', sessionId: 'ui-parent-session' }).task;
+  } }), { code: 'TASK_EXECUTION_UNCONFIRMED' });
+  const activeUiParent = rt.start({ id: uiParent.id, expectedRev: uiParent.rev }).task;
   await assert.rejects(services.desktopUiService.execute({ method: 'ui.task.complete', params: {
     id: uiParent.id, expectedRev: activeUiParent.rev, summary: 'Accepted source summary', reviewed: false
   } }), { code: 'OWNER_REVIEW_REQUIRED' });
+  assert.equal(activeUiParent.currentAgent, null, 'verified children do not require an artificial parent Provider run');
+  const originalCompletionBlocker = services.capabilityService.completionBlocker;
+  services.capabilityService.completionBlocker = id => id === uiParent.id ? 'TASK_APPROVAL_PENDING' : originalCompletionBlocker(id);
+  await assert.rejects(services.desktopUiService.execute({ method: 'ui.task.complete', params: {
+    id: uiParent.id, expectedRev: activeUiParent.rev, summary: 'Accepted source summary', reviewed: true
+  } }), { code: 'TASK_APPROVAL_PENDING' });
+  services.capabilityService.completionBlocker = originalCompletionBlocker;
   const completedParent = await services.desktopUiService.execute({ method: 'ui.task.complete', params: {
     id: uiParent.id, expectedRev: activeUiParent.rev, summary: 'Accepted source summary', reviewed: true
   } });

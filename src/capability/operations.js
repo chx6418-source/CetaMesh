@@ -18,7 +18,22 @@ export function createApprovalOperations({ stateDir, execute, getApproval, cance
     decision: row.approve ? 'approved' : 'rejected', code: row.code ?? null,
     turnResumed: row.result?.turnResumed === true, resumePending: row.result?.resumePending === true,
     ...(row.result?.resumeError ? { resumeError: row.result.resumeError } : {}) });
-  function changed(row) { save(); notify(view(row)); }
+  function reconcileContinuations() {
+    // Only a trusted resume's exact successor approval in the same Task/Session/turn
+    // can settle a waiting predecessor. Restart-unknown or unrelated work stays fenced.
+    for (let pass = 0; pass < Object.keys(rows).length; pass++) {
+      let changed = false;
+      for (const row of Object.values(rows)) {
+        if (row.status !== 'waiting' || !row.resumeApprovalId || !row.turnId || !row.sessionId || !row.taskId) continue;
+        const next = rows[`approval:${row.resumeApprovalId}`];
+        if (!next || next.status !== 'completed' || next.result?.resumePending || next.result?.turnResumed !== true
+          || next.taskId !== row.taskId || next.sessionId !== row.sessionId || next.turnId !== row.turnId) continue;
+        row.status = 'completed'; row.result.resumePending = false; changed = true;
+      }
+      if (!changed) break;
+    }
+  }
+  function changed(row) { reconcileContinuations(); save(); notify(view(row)); }
   function get(id) {
     const row = Object.hasOwn(rows, id) ? rows[id] : null;
     if (!row) throw capabilityError('OPERATION_NOT_FOUND', 'Operation not found');
@@ -34,7 +49,8 @@ export function createApprovalOperations({ stateDir, execute, getApproval, cance
     if (approval.status !== 'pending') throw capabilityError('APPROVAL_ALREADY_DECIDED', id);
     if (Object.keys(rows).length >= 1000) throw capabilityError('OPERATION_CAPACITY', 'Review operation history before accepting more work');
     const row = { operationId, approvalId: id, approve, status: 'accepted', createdAt: Date.now(),
-      taskId: approval.request?.taskId ?? null, sessionId: approval.request?.origin?.sessionId ?? null };
+      taskId: approval.request?.taskId ?? null, sessionId: approval.request?.origin?.sessionId ?? null,
+      turnId: approval.request?.origin?.turnId ?? null };
     rows[operationId] = row;
     try { save(); } catch (error) { delete rows[operationId]; throw error; }
     const controller = new AbortController();
@@ -47,6 +63,7 @@ export function createApprovalOperations({ stateDir, execute, getApproval, cance
       row.result = { status: result.status, turnResumed: result.turnResumed === true,
         resumePending: result.resumePending === true, taskResumed: result.taskResumed === true,
         ...(result.resumeError ? { resumeError: String(result.resumeError).slice(0,160) } : {}) };
+      row.resumeApprovalId = typeof result.resumeApprovalId === 'string' ? result.resumeApprovalId.slice(0,240) : null;
       row.status = result.resumePending ? 'waiting' : result.resumeError ? 'failed' : 'completed';
     }).catch(error => {
       row.status = error.effectStatus === 'unknown' || error.code === 'INVOKE_CANCEL_UNCONFIRMED' ? 'unknown'

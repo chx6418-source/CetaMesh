@@ -74,7 +74,9 @@ export function createCodexAppServerProvider({launch,taskOptions = {},requestNat
             if (typeof p.item.id !== 'string') { fail(); return; }
             update({sessionUpdate:'tool_call_update',toolCallId:p.item.id,kind:p.item.type === 'fileChange'?'edit':'execute',
               title:p.item.type === 'fileChange'?'Native file change':'Native command',
-              status:method === 'item/completed' ? (p.item.status === 'failed'?'failed':'completed') : 'in_progress'});
+              ...(method === 'item/completed' && typeof p.item.aggregatedOutput === 'string' && Number.isInteger(p.item.exitCode)
+                ? {rawOutput:{output:p.item.aggregatedOutput,exitCode:p.item.exitCode}} : {}),
+              status:method === 'item/completed' ? (p.item.status === 'failed'||(Number.isInteger(p.item.exitCode)&&p.item.exitCode!==0)?'failed':'completed') : 'in_progress'});
           } else if (method === 'turn/completed') {
             const run = active; active = null;
             if (p.turn.status === 'completed' && !run.cancelled) run.resolve({stopReason:'end_turn'});

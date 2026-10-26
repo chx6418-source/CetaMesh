@@ -62,7 +62,7 @@ export function createAcpAgentProvider({descriptor, launch, resolveTaskWorkspace
   }
   function emit(s,type,turn,data = {}) {
     const seq = ++s.sequence;
-    s.buffer.push({type:'event',seq,eventId:`${policy.id}:${s.id}:${seq}`,event:{type,data:{turn,...data}}});
+    s.buffer.push({type:'event',seq,eventId:`${policy.id}:${s.id}:${seq}`,event:{type,data:{turn,runId:s.run?.runId??s.lastRun?.runId??null,phase:s.run?.phase??s.lastRun?.phase??'unknown',...data}}});
   }
   function end(s,run,kind,error = null) {
     if (s.run !== run) return;
@@ -70,6 +70,7 @@ export function createAcpAgentProvider({descriptor, launch, resolveTaskWorkspace
     // are collected while the native process may still run, so keep Domain codes distinct.
     const errorCode = error?.code === 'STAGING_READ_FAILED' ? 'ACP_STAGING_READ_FAILED' : error?.code;
     s.permissions?.cancel();
+    s.lastRun = {runId:run.runId,phase:run.phase};
     s.run = null; s.state = s.closed ? 'closed' : kind === 'error' ? 'unknown' : 'ready';
     s.lastRunStatus = kind === 'aborted' ? 'cancelled' : kind === 'error' ? 'failed' : 'completed';
     s.lastError = errorCode ?? null;
@@ -134,7 +135,7 @@ export function createAcpAgentProvider({descriptor, launch, resolveTaskWorkspace
     if (changes.changes.length) {
       if (typeof applyChanges !== 'function') throw fault('AGENT_BOUNDARY_UNSUPPORTED','Import adapter unavailable');
       let imported = await applyChanges({provider:policy.id,sessionId:s.id,taskId:s.taskId,workspaceId:s.workspaceId,
-        requestId:`${policy.id}-import-${crypto.randomUUID()}`,changes:changes.changes,summary:changes.summary});
+        runId:run.runId,phase:run.phase,requestId:`${policy.id}-import-${crypto.randomUUID()}`,changes:changes.changes,summary:changes.summary});
       if (imported?.status === 'pending') {
         const record = {id:imported.approvalId,cancellation:null,terminal:false};
         s.importApproval = record; s.approvalId = record.id;
@@ -229,6 +230,7 @@ export function createAcpAgentProvider({descriptor, launch, resolveTaskWorkspace
               const active = () => s.run === run && run && !run.cancelled && !s.closed && !s.closing && !s.disconnected;
               if (!active()) return {outcome:{outcome:'cancelled'}};
               s.state = 'waiting';
+              emit(s,'tool/activity',run.id,{activity:{id:String(params?.toolCall?.toolCallId??'').slice(0,160),capability:`${policy.id}.native.tool`,status:'waiting-approval'}});
               try {
                 const result = await s.permissions.request(params);
                 return active() ? result : {outcome:{outcome:'cancelled'}};
@@ -248,6 +250,18 @@ export function createAcpAgentProvider({descriptor, launch, resolveTaskWorkspace
                   emit(s,'tool/activity',run.id,{activity:{id:update.toolCallId,capability:`${policy.id}.native.${update.kind ?? 'tool'}`,
                     name:String(update.title ?? 'Native tool').slice(0,160),executionBoundary:'agent-native',
                     status:update.status === 'completed' ? 'completed' : update.status === 'failed' ? 'failed' : 'running'}});
+                  // Terminal activity alone is not a result. Only retain a digest
+                  // of actual protocol output; never relabel it as verified Core work.
+                  const output = update.rawOutput ?? (Array.isArray(update.content) && update.content.length ? update.content : undefined);
+                  if (['completed','failed'].includes(update.status) && typeof update.toolCallId === 'string'
+                    && output !== undefined && !run.resultIds.has(update.toolCallId)) {
+                    run.resultIds.add(update.toolCallId);
+                    emit(s,'tool/result',run.id,{eventId:`native:${run.id}:${update.toolCallId}`.slice(0,240),
+                      capability:`${policy.id}.native.${String(update.kind ?? 'tool').slice(0,40)}`,
+                      status:update.status,source:'native-result',
+                      resultSha256:crypto.createHash('sha256').update(JSON.stringify(output)).digest('hex')});
+                  }
+
                 }
               } catch (error) { void disconnect(s,error); }
             }});
@@ -281,13 +295,13 @@ export function createAcpAgentProvider({descriptor, launch, resolveTaskWorkspace
           throw error;
         } finally { creating--; pendingCreations.delete(record); completed(); }
       },
-      async send({sessionId,content} = {}) {
+      async send({sessionId,content,runId = null,phase = 'user'} = {}) {
         const s = requireSession(sessionId);
         if (s.state !== 'ready' || s.run || s.closing) throw fault('TURN_BUSY','ACP session is not ready; prompt will not be replayed');
         await validateRuntime();
         const prompt = normalizePromptContent(content);
         if (prompt.some(block=>block.type !== 'text' || typeof block.text !== 'string')) throw fault('AGENT_UNSUPPORTED','Only text prompts supported');
-        const run = {id:crypto.randomUUID(),text:'',cancelled:false}; s.run = run; s.state = 'running';
+        const run = {id:crypto.randomUUID(),runId,phase,text:'',cancelled:false,resultIds:new Set()}; s.run = run; s.state = 'running';
         emit(s,'turn/start',run.id);
         run.done = s.rpc.request('session/prompt',{sessionId:s.nativeId,prompt},{timeoutMs:0})
           .then(result=>finish(s,run,result)).catch(error=>{

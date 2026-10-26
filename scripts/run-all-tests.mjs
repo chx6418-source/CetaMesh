@@ -39,6 +39,14 @@ export const CATEGORIES = ['core', 'architecture', 'security', 'runtime', 'integ
 // ── 登记表：scripts/test-*.mjs 的每一个文件都必须出现在这里（或能从 package.json 映射）。
 // requires 的取值见 probeAvailability()；category 取值见 CATEGORIES。
 const REGISTRY = {
+  'test-agent-auth-regressions.mjs': {category:'security',note:'Real adapter interfaces: cancel, status ownership, profile poison and task scope; synthetic processes only'},
+  'test-claude-native-auth.mjs': {category:'environment',requires:['claude-auth-contract'],note:'Opt-in Windows Claude 2.1.308 private-profile help contract; no account action'},
+  'test-agent-provider-auth.mjs': {category:'security',note:'Pinned official provider login transport contracts; no real account actions'},
+  'test-agent-runtime-auth.mjs': {category:'security',note:'Owned auth generations, cancellation and shared connection leases'},
+  'test-task-progress-core.mjs': { category: 'security', note: 'Current run review, report-only acceptance and completion fences' },
+  'test-task-progress-lifecycle.mjs': { category: 'security', note: 'Native pre-dispatch rejection and early Follow provenance' },
+  'test-native-progress-evidence.mjs': { category: 'security', note: 'Actual native results and approved import receipts without fabricated evidence' },
+  'test-task-progress-ui.mjs': { category: 'desktop', note: 'Exact progress and stale task refresh/navigation responses' },
   'test-state-owner-identity.mjs': { category: 'security', note: 'Process birth identity, PID reuse, fail-closed recovery and StateDir ownership races' },
   'test-task-collaboration.mjs': { category: 'security', note: 'Task child contract, Attempt, depth and completion ownership' },
   'test-agent-collaboration-dispatch.mjs': { category: 'security', note: 'Production Broker read-only child and Workspace writer ownership' },
@@ -348,6 +356,7 @@ async function probeAvailability() {
       && spawnSync('cargo', ['--version'], { timeout: 20000 }).status === 0,
     'agent-expansion-sea': Boolean(process.env.WHALEBRIDGE_AGENT_EXPANSION_SEA_DIR?.trim()),
     'real-gemini-qwen': process.env.WHALEBRIDGE_TEST_REAL_GEMINI_QWEN === '1',
+    'claude-auth-contract': process.platform==='win32' && process.env.WHALEBRIDGE_TEST_CLAUDE_AUTH_CONTRACT==='1',
     'real-opencode': process.env.WHALEBRIDGE_TEST_REAL_OPENCODE === '1',
     'real-codex': process.env.WHALEBRIDGE_TEST_REAL_CODEX === '1'
       && spawnSync('codex', ['login', 'status'], { timeout: 20000 }).status === 0

@@ -23,6 +23,7 @@ try {
     requestNativeApproval:async()=>({outcome:'rejected'})});
   production.configure({runtimePath:runtimePath.join(configuredRoot,'missing',process.platform==='win32'?'claude.exe':'claude'),model:'owner-model',apiKey:'fixture-private-key'});
   const missing=await production.health();
+  assert.equal(missing.connection.runtime.installed,false);assert.equal(missing.connection.authentication.verified,false);
   assert.equal(missing.installed,false);assert.equal(missing.compatible,false);
   assert.equal(missing.taskEligible,false);assert.equal(missing.reason,'claude_code_not_found');
   assert.equal(missing.runtimeConfiguration.model,'owner-model');
@@ -246,7 +247,7 @@ try {await endpointFixture.turn(async options=>{
 
 // SDK0.3.308 PreToolUse gates default-auto-approved tools as well as explicit asks.
 const deferred = () => { let resolve; const promise=new Promise(done=>{resolve=done;});return {promise,resolve}; };
-async function createPermissionFixture({tools=['Read','Bash'],model,baseUrl,profileRoot,executionMode,onPermission=async()=>({approved:true})}={}) {
+async function createPermissionFixture({tools=['Read','Bash'],model,baseUrl,profileRoot,executionMode,authMode,onPermission=async()=>({approved:true})}={}) {
   const input=new PassThrough(),output=new PassThrough(),requests=[];
   let exercise,failure;
   const done=runClaudeSdkRunner({input,output,loadSdk:async()=>({query({options}) {
@@ -257,7 +258,7 @@ async function createPermissionFixture({tools=['Read','Bash'],model,baseUrl,prof
   }})});
   const client=createJsonRpcTransport({readable:output,writable:input,framing:'acp-v1-jsonl',
     onRequest:async(method,params)=>{requests.push({method,params});return onPermission(method,params);}});
-  await client.request('initialize',{credential:'hook-fixture-private',runtimePath:'/verified',cwd:'/fixture',tools,...(model === undefined ? {} : {model}),...(baseUrl === undefined ? {} : {baseUrl}),...(profileRoot === undefined ? {} : {profileRoot}),...(executionMode === undefined ? {} : {executionMode})});
+  await client.request('initialize',{...(authMode==='provider-login'?{authMode}:{credential:'hook-fixture-private'}),runtimePath:'/verified',cwd:'/fixture',tools,...(model === undefined ? {} : {model}),...(baseUrl === undefined ? {} : {baseUrl}),...(profileRoot === undefined ? {} : {profileRoot}),...(executionMode === undefined ? {} : {executionMode})});
   return {client,input,output,requests,async turn(run,{sessionId}={}) {
     exercise=run;failure=null;
     const result=await client.request(sessionId?'session/prompt':'turn',sessionId?
@@ -265,6 +266,12 @@ async function createPermissionFixture({tools=['Read','Bash'],model,baseUrl,prof
     if(failure)throw failure;return result;
   },async close(){input.end();await done;client.close();}};
 }
+const accountProfile=runtimeFs.mkdtempSync(runtimePath.join(runtimeOs.tmpdir(),'claude-account-task-'));
+const accountFixture=await createPermissionFixture({profileRoot:accountProfile,executionMode:'native-permissions',authMode:'provider-login'});
+try {await accountFixture.turn(async options=>{
+ assert.equal(options.env.CLAUDE_CONFIG_DIR,runtimePath.join(accountProfile,'config'));assert.equal(options.env.ANTHROPIC_API_KEY,undefined);assert.equal(options.env.ANTHROPIC_BASE_URL,undefined);
+ assert.deepEqual(options.settingSources,[]);assert.deepEqual(options.mcpServers,{});assert.deepEqual(options.plugins,[]);assert.deepEqual(options.allowedTools,[]);assert.equal(options.permissionMode,'default');assert.equal(typeof allToolHook(options),'function');
+});}finally{await accountFixture.close();runtimeFs.rmSync(accountProfile,{recursive:true,force:true});}
 function allToolHook(options) {
   assert.equal(options.hooks?.PreToolUse?.length,1,'every tool needs a registered PreToolUse gate');
   assert.equal(options.hooks.PreToolUse[0].matcher,undefined,'the host gate must include every tool');

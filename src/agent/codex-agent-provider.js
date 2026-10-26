@@ -372,7 +372,7 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
 
   function emit(session, event) {
     const seq = ++session.nextSequence;
-    session.events.push({ ...event, seq, eventId: `${session.id}:${seq}` });
+    session.events.push({ ...event, data: { ...event.data, runId: session.activeRun?.runId ?? null, phase: session.activeRun?.phase ?? 'unknown' }, seq, eventId: `${session.id}:${seq}` });
     if (session.events.length > CAPTURE_MAX) session.events.splice(0, session.events.length - CAPTURE_MAX);
     const waiters = session.waiters.splice(0);
     for (const wake of waiters) wake();
@@ -486,6 +486,7 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
           workspaceId: session.workspaceId,
           sessionId: session.id,
           provider: 'codex',
+          runId: run.runId, phase: run.phase,
           requestId: `codex-import-${crypto.randomUUID()}`,
           changes: changeSet.changes,
           summary: changeSet.summary
@@ -572,6 +573,17 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
           status: event.type === 'item.completed' ? (item.exit_code === 0 ? 'completed' : 'failed') : 'running',
           exitCode: Number.isInteger(item.exit_code) ? item.exit_code : null
         } }));
+        if (event.type === 'item.completed' && typeof item.id === 'string' && Number.isInteger(item.exit_code)
+          && typeof item.aggregated_output === 'string' && !run.resultIds.has(item.id)) {
+          run.resultIds.add(item.id);
+          emit(session, makeEvent('tool/result', run.turnId, {
+            eventId: `native:${run.turnId}:${item.id}`.slice(0, 240), capability: 'codex.native.command',
+            status: item.exit_code === 0 ? 'completed' : 'failed', exitCode: item.exit_code,
+            source: 'native-result', resultSha256: crypto.createHash('sha256')
+              .update(JSON.stringify({ exitCode: item.exit_code, output: item.aggregated_output })).digest('hex')
+          }));
+        }
+
       }
       if (event.type === 'thread.started') {
         if (typeof event.thread_id === 'string') session.threadId = event.thread_id;
@@ -663,7 +675,7 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
         return { sessionId: id, provider: 'codex', taskId: binding.task.id, workspaceId: binding.workspace.id, cwd: stage.root };
       },
 
-      async send({ sessionId, content } = {}) {
+      async send({ sessionId, content, runId = null, phase = 'user' } = {}) {
         const session = requireSession(sessionId);
         if (session.activeRun) throw agentProviderError('TURN_BUSY', 'Codex Task session already has an active turn');
         const turnId = crypto.randomUUID();
@@ -676,7 +688,7 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
           'Use this staging copy for Task work. It is not host-file read isolation. Native OS operations follow Codex security policy; CetaMesh only approves imports and platform tools. Never access CetaMesh credentials, private IPC, or unrelated host files.',
           String(content ?? '')
         ].filter(Boolean).join('\n\n');
-        const run = { turnId, inspectionGeneration, pendingText: '', text: '', usage: null, turnCompleted: false, failed: false, handle: null };
+        const run = { turnId, runId, phase, resultIds: new Set(), inspectionGeneration, pendingText: '', text: '', usage: null, turnCompleted: false, failed: false, handle: null };
         session.activeRun = run;
         session.lastRunStatus = 'running';
         emit(session, makeEvent('turn/start', turnId));

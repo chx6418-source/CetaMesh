@@ -24,7 +24,7 @@ export interface ProviderSettingField {
 export interface Task {
   usage?: ModelUsage | null;
   id: string; title: string; goal: string; status: string; currentPhase: string;
-  progress: { percent: number; note: string }; workspaceId: string | null; agent: string | null;
+  progress: { percent: number | null; note: string }; workspaceId: string | null; agent: string | null;
   currentAgent: { provider: string; sessionId: string } | null;
   parentTaskId: string | null; verification: string | null; attemptCount: number;
   childOutputKind: string | null;
@@ -38,6 +38,8 @@ export interface Task {
   executionEvidence: { eventId: string; capability: string; status: string; tool: string | null;
     exitCode: number | null; filePath: string | null; taskRev: number | null; at: string | number | null }[];
   agentHistory: { provider: string; sessionId: string; attachedAt: string | number | null; detachedAt: string | number | null; note: string }[];
+  execution?: { state: string; hadToolActivity: boolean; hasEvidence: boolean };
+  reviewReport?: { eventId: string; text: string; sha256: string } | null;
   failure: { reason: string } | null;
 }
 export interface WorkshopProposal {
@@ -65,17 +67,33 @@ export interface Agent {
   sandboxCapable?: boolean | null; installKind?: string | null; probePhase?: string | null; probeCode?: string | null; checkedAt?: string | null; requiresStandaloneNode?: boolean;
   configuration?: DshConfiguration | null;
   runtimeConfiguration?: AgentRuntimeConfiguration | null;
+  connection?: AgentConnectionEvidence | null;
   authConfigured?: boolean | null; authVerified?: boolean | null; authentication?: 'configured-unverified' | 'not-configured' | 'verified' | null;
   preset?: { purpose: string; id: string | null; compatible: boolean | null; loaded: boolean | null; loadState: 'loaded' | 'not-loaded' | 'unknown'; reason: string | null; verification: string | null } | null;
   diagnostic?: { stage: string; code: string | null; retryable: boolean; checkedAt: string | null } | null;
   version: string | null; desktopApp: { displayName?: string; installed: boolean | null; running: boolean | null; status: string; version: string | null } | null;
 }
 export type AgentRuntimeProvider = 'gemini' | 'opencode' | 'qwen' | 'claude';
+export interface AgentConnectionEvidence {
+  runtime: { installed: boolean; protocolVerified: boolean; version: string | null };
+  authentication: { mode: 'api-key' | 'provider-login'; state: string; verified: boolean };
+  execution: { eligible: boolean; reason: string | null }; modelRequired: boolean;
+  servicePresets?: { id: string; label: string; baseUrl: string | null }[];
+  providerSelections?: { providerId: string; methodId: string; label: string }[];
+  accountReason: string | null; methods: { id: string; label: string; supported: boolean; reason: string | null }[];
+}
+export interface AgentAuthStatus {
+  provider: AgentRuntimeProvider; attemptId: string | null; state: 'no-session' | 'unsupported' | 'starting' | 'awaiting-user' | 'session-present' | 'cancelled' | 'failed' | 'expired' | 'exit-unconfirmed';
+  reason: string | null; revision: number; epoch: number;
+  methods?: AgentConnectionEvidence['methods'];
+}
 export interface AgentRuntimeConfiguration {
   provider: AgentRuntimeProvider; enabled: boolean; runtimePath: string; nodePath: string; model: string; baseUrl: string;
+  authMode?: 'api-key' | 'provider-login'; servicePreset?: string; providerId?: string | null; methodId?: string | null; authorizationEpoch?: number;
   credentialConfigured: boolean; executionMode: 'native-permissions'; revision: number;
 }
 export interface AgentRuntimeInput {
+  authMode?: 'api-key' | 'provider-login'; servicePreset?: string; providerId?: string | null; methodId?: string | null;
   enabled?: boolean; runtimePath?: string; nodePath?: string; model?: string; baseUrl?: string; apiKey?: string; executionMode?: 'native-permissions';
 }
 export interface DshPresetCatalog { state: 'ready' | 'missing' | 'unreadable' | 'outside-root' | 'loading' | 'error'; truncated: boolean; presets: { id: string; compatible: boolean; reason: string | null }[] }
@@ -159,6 +177,7 @@ type UiMethod =
   | 'ui.workspace.list' | 'ui.workspace.open' | 'ui.workspace.create'
   | 'ui.memory.overview' | 'ui.memory.get' | 'ui.memory.create' | 'ui.memory.update' | 'ui.memory.pin' | 'ui.memory.delete'
   | 'ui.memory.candidates.confirm' | 'ui.memory.candidates.confirmBatch'
+  | 'ui.agent.auth.describe' | 'ui.agent.auth.start' | 'ui.agent.auth.status' | 'ui.agent.auth.cancel'
   | 'ui.agent.security' | 'ui.agent.authorize' | 'ui.agent.list' | 'ui.agent.health' | 'ui.agent.configure' | 'ui.agent.presets'
   | 'ui.extensions.settings.describe' | 'ui.extensions.settings.get' | 'ui.extensions.settings.update'
   | 'ui.plugins.catalog' | 'ui.plugins.status' | 'ui.plugins.detail' | 'ui.plugins.refresh' | 'ui.plugins.stage' | 'ui.plugins.stage-local' | 'ui.plugins.install'
@@ -325,8 +344,8 @@ export const taskClient = {
       uiCall<{ task: Task }>('ui.task.child.complete', { id, expectedRev, summary }),
     verifyChild: (id: string, expectedRev: number) =>
       uiCall<{ task: Task }>('ui.task.child.verify', { id, expectedRev }),
-    complete: (id: string, expectedRev: number, summary: string) =>
-      uiCall<{ task: Task }>('ui.task.complete', { id, expectedRev, summary, reviewed: true }),
+    complete: (id: string, expectedRev: number, summary: string, review?: { reviewKind: 'report-only'; reportEventId: string; reportSha256: string }) =>
+      uiCall<{ task: Task }>('ui.task.complete', { id, expectedRev, summary, reviewed: true, ...review }),
   verifyOutcome: (id: string, input: { kind: 'code' | 'file' | 'tool' | 'analysis'; expectedFile?: string; expectedSha256?: string; expectedCapability?: string }) =>
     uiCall<{ status: 'VERIFIED' | 'NEEDS_REVIEW'; kind: string; evidenceEventIds: string[]; reasons: string[] }>('ui.task.outcome.verify', { id, ...input }),
   create: (input: { goal: string; requirements?: string[]; workspaceId?: string | null; agentProvider?: string; requestId?: string; note?: string }) => uiCall<{ task: Task }>('ui.task.create', input),
@@ -363,6 +382,10 @@ export const memoryClient = {
   remove: (id: string, expectedRev?: number) => uiCall<{ id: string; deleted: boolean }>('ui.memory.delete', { id, expectedRev })
 };
 export const agentClient = {
+  authDescribe: (provider: AgentRuntimeProvider) => uiCall<AgentAuthStatus>('ui.agent.auth.describe', { provider }),
+  authStart: (provider: AgentRuntimeProvider, expectedRevision: number, methodId: string) => uiCall<AgentAuthStatus>('ui.agent.auth.start', { provider, expectedRevision, methodId }),
+  authStatus: (provider: AgentRuntimeProvider, attemptId: string) => uiCall<AgentAuthStatus>('ui.agent.auth.status', { provider, attemptId }),
+  authCancel: (provider: AgentRuntimeProvider, attemptId: string) => uiCall<AgentAuthStatus>('ui.agent.auth.cancel', { provider, attemptId }),
   security: (provider: string, workspaceId: string) => uiCall<{ required: boolean; authorized: boolean; fingerprint: string; disclosure: string }>('ui.agent.security', { provider, workspaceId }),
   authorize: (provider: string, workspaceId: string, fingerprint: string) => uiCall<{ status: string; approvalId: string }>('ui.agent.authorize', { provider, workspaceId, fingerprint }),
   list: (refresh = false) => uiCall<{ agents: Agent[] }>('ui.agent.list', { refresh }),

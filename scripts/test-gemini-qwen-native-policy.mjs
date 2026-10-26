@@ -1,3 +1,4 @@
+import {geminiAuthProfile} from '../src/agent/auth/gemini.js';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -126,3 +127,6 @@ try {
  if(fixtureError)console.error('Retained failed native fixture for owned-process diagnosis:',root);
  else fs.rmSync(root,{recursive:true,force:true,maxRetries:20,retryDelay:100});
 }
+
+const authRoot=fs.mkdtempSync(path.join(os.tmpdir(),'cetamesh-gemini-auth-contract-'));
+try {const profile=geminiAuthProfile({root:authRoot,validate(){}});assert.equal(profile.environment.GEMINI_CLI_HOME,authRoot);assert.equal(profile.authDirectory,path.join(authRoot,'.gemini'));assert.equal(profile.environment.GEMINI_API_KEY,undefined);assert.equal(profile.environment.GOOGLE_GEMINI_BASE_URL,undefined);profile.validate();}finally{fs.rmSync(authRoot,{recursive:true,force:true});}

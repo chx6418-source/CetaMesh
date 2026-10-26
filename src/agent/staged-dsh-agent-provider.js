@@ -58,6 +58,7 @@ export function createStagedDshAgentProvider({ provider, resolveTaskWorkspace, l
         workspaceId: session.workspaceId,
         sessionId: session.id,
         provider: provider.id,
+        ...(session.runs?.get(String(turn?.turnId ?? turn?.id ?? turn ?? '')) ?? {}),
         requestId: `dsh-import-${crypto.randomUUID()}`,
         changes: changeSet.changes,
         summary: changeSet.summary
@@ -159,10 +160,20 @@ export function createStagedDshAgentProvider({ provider, resolveTaskWorkspace, l
             throw error;
           }
         },
-        async send({ sessionId, content, mode } = {}) {
+        async send({ sessionId, content, mode, runId, phase, onRequestId } = {}) {
           const session = requireSession(sessionId);
           session.cancelRequested = false;
-          return provider.send({ sessionId, content, mode });
+          session.runs ??= new Map();
+          const remember = value => {
+            if (value == null) return;
+            session.runs.set(String(value), {runId,phase});
+            while (session.runs.size > 256) session.runs.delete(session.runs.keys().next().value);
+          };
+          const result = await provider.send({ sessionId, content, mode, onRequestId: requestId => {
+            remember(requestId); onRequestId?.(requestId);
+          } });
+          for (const value of [result?.requestId, result?.turnId]) remember(value);
+          return result;
         },
         async cancel({ sessionId } = {}) {
           const session = requireSession(sessionId);
@@ -219,7 +230,7 @@ export function createStagedDshAgentProvider({ provider, resolveTaskWorkspace, l
           for await (const item of provider.follow({ sessionId, signal, sinceSequence })) {
             const event = item?.type === 'event' ? item.event : item;
             if (event?.type === 'turn/end' && event.data?.reason?.kind === 'completed') {
-              const outcome = await reconcileTurnOnce(session, event.data?.turn, signal);
+              const outcome = await reconcileTurnOnce(session, event.data?.requestId ?? event.data?.turn, signal);
               if (!outcome.ok) {
                 yield withTurnFailure(item, event, outcome.error, outcome.code);
                 continue;

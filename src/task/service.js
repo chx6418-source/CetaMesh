@@ -62,7 +62,7 @@ export function createTaskService({ stateDir, now, resolveWorkspace, resolveMemo
     }),
     'task.wait': (p) => runtime.wait({ id: p.id, expectedRev: p.expectedRev, reason: p.reason }),
     'task.block': (p) => runtime.block({ id: p.id, expectedRev: p.expectedRev, reason: p.reason }),
-    'task.complete': (p) => runtime.complete({ id: p.id, expectedRev: p.expectedRev, summary: p.summary }),
+    'task.complete': (p) => runtime.complete({ id: p.id, expectedRev: p.expectedRev, summary: p.summary, ownerReview: p.ownerReview }),
     'task.fail': (p) => runtime.fail({ id: p.id, expectedRev: p.expectedRev, reason: p.reason }),
     'task.cancel': (p) => runtime.cancel({ id: p.id, expectedRev: p.expectedRev, reason: p.reason }),
 

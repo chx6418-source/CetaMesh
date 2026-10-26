@@ -195,7 +195,7 @@ try {
  for(const type of ['commandExecution','fileChange']) q.send({method:'item/completed',params:{threadId:'native-thread',turnId:'turn-3',item:{id:type,type,status:'failed'}}});
  await tick();
  const toolEvents=p.follow({...s,sinceSequence:rows.at(-1).seq});let failedTools=0;
- while(failedTools<2) {const row=(await toolEvents.next()).value;if(row.event.type==='tool/activity'){assert.equal(row.event.data.activity.status,'failed');failedTools++;}}
+ while(failedTools<2) {const row=(await toolEvents.next()).value;if(row.event.type==='tool/activity' && ['commandExecution','fileChange'].includes(row.event.data.activity.id)){assert.equal(row.event.data.activity.status,'failed');failedTools++;}}
  await toolEvents.return();
  q.send({method:'turn/completed',params:{threadId:'native-thread',turn:{id:'turn-3',status:'failed',error:{message:'secret-output'}}}});await tick();
  assert.equal((await p.status(s)).lastRunStatus,'failed');

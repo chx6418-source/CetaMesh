@@ -1,3 +1,4 @@
+import { runtimeConnectionEvidence } from './runtime-auth-capabilities.js';
 import { AGENT_PROVIDER_METHODS, agentProviderError, defineAgentProvider } from './agent-provider.js';
 import { createAcpAgentProvider } from './acp-agent-provider.js';
 import { isNativePermissionSecurity } from './execution-security.js';
@@ -20,6 +21,34 @@ export function createClaudeSdkRunnerLauncher({executable = process.execPath, se
   return createAcpProcessLauncher({executable:spec.command,argv:spec.args,spawnImpl,envSource});
 }
 
+/** Internal task transport shares only a promoted owned account generation. */
+export function createClaudeTaskRunnerLauncher({authMode='api-key',resolveAuthProfile,validateRuntime=async()=>{},activeProfiles=new Set(),createRunner=createClaudeSdkRunnerLauncher}={}) {
+  return async binding => {
+    await validateRuntime();
+    const account=authMode==='provider-login';
+    const profile=account?await resolveAuthProfile?.('claude'):createClaudeOwnedProfile();
+    if(!profile)throw agentProviderError('AGENT_AUTH_UNSUPPORTED','No promoted owned account profile');
+    let wrapped;
+    const wrap = handle => {
+      if (wrapped) return wrapped;
+      wrapped = { ...handle, profileRoot: profile.root, async close() {
+        await handle.close(); await handle.done; await profile.cleanup(); activeProfiles.delete(profile);
+      } };
+      binding.onHandle?.(wrapped); return wrapped;
+    };
+    activeProfiles.add(profile);
+    try {
+      profile.validate?.(); await validateRuntime(); profile.validate?.();
+      const launch = createRunner({ envSource: profile.environment });
+      return wrap(await launch({ ...binding, onHandle: wrap }));
+    } catch (error) {
+      // Once captured, shared ACP lifecycle owns exit confirmation and cleanup.
+      if (!wrapped) { await profile.cleanup(); activeProfiles.delete(profile); }
+      throw error;
+    }
+  };
+}
+
 // SDK resources, official executable and native policy have not been validated in SEA.
 // Configuring credentials or injecting a launcher cannot bypass these readiness gates.
 export function createClaudeAgentProvider({ launchSdkRunner, taskOptions, resolveCredential, requestNativeApproval, log } = {}) {
@@ -28,7 +57,7 @@ export function createClaudeAgentProvider({ launchSdkRunner, taskOptions, resolv
       && runtime.security?.verified === true
       && ((runtime.security.mode === 'native' && runtime.security.nativeSandboxSupported === true && runtime.security.nativeApprovalSupported === true)
         || isNativePermissionSecurity(runtime.security)) && (launchSdkRunner == null || typeof launchSdkRunner === 'function')
-      && typeof resolveCredential === 'function' && typeof taskOptions.resolveTaskWorkspace === 'function') {
+      && (taskOptions.authMode === 'provider-login' || typeof resolveCredential === 'function') && typeof taskOptions.resolveTaskWorkspace === 'function') {
     const launcher = launchSdkRunner ?? createClaudeSdkRunnerLauncher();
     return createAcpAgentProvider({
       descriptor: { id: 'claude', label: 'Claude', protocolVersion: 1, verifiedRuntime: true, security: runtime.security },
@@ -38,16 +67,17 @@ export function createClaudeAgentProvider({ launchSdkRunner, taskOptions, resolv
       excludedRoots: taskOptions.excludedRoots, listWorkspaceRoots: taskOptions.listWorkspaceRoots, snapshotExcludedPaths: taskOptions.snapshotExcludedPaths,
       async launch(binding) {
         // Secret resolved only after Task Workspace binding and staging were established.
-        const credential = await resolveCredential(taskOptions.credentialRef);
+        const account = taskOptions.authMode === 'provider-login';
+        const credential = account ? null : await resolveCredential(taskOptions.credentialRef);
         const apiKey = typeof credential === 'string' ? credential : credential?.apiKey;
-        if (typeof apiKey !== 'string' || !apiKey) throw Object.assign(new Error('Claude credential unavailable'), { code: 'PROVIDER_UNAVAILABLE' });
+        if (!account && (typeof apiKey !== 'string' || !apiKey)) throw Object.assign(new Error('Claude credential unavailable'), { code: 'PROVIDER_UNAVAILABLE' });
         await taskOptions.validateRuntime?.();
         const handle = await launcher(binding);
         // Shared lifecycle owns close + observed exit before bootstrap can fail.
         binding.onHandle(handle);
         const bootstrap = createJsonRpcTransport({ readable: handle.readable, writable: handle.writable, framing: 'acp-v1-jsonl' });
         try {
-          await bootstrap.request('initialize', { credential: apiKey, cwd: binding.cwd, runtimePath: runtime.runtimePath,
+          await bootstrap.request('initialize', { ...(account ? {authMode:'provider-login'} : {credential:apiKey}), cwd: binding.cwd, runtimePath: runtime.runtimePath,
             ...(typeof credential?.baseUrl === 'string' ? { baseUrl: credential.baseUrl } : {}),
             ...(handle.profileRoot ? { profileRoot: handle.profileRoot, executionMode: 'native-permissions' } : {}),
             tools: runtime.tools ?? [], ...(runtime.model === undefined ? {} : { model: runtime.model }) }, { timeoutMs: 15000 });
@@ -72,7 +102,7 @@ export function createClaudeAgentProvider({ launchSdkRunner, taskOptions, resolv
 
 /** Owner-configured production runtime. All verification and launch inputs stay in Core. */
 export function createConfiguredClaudeAgentProvider({ runtimeConfiguration, taskOptions = {}, requestNativeApproval, log,
-  resourceRoot = APP_PATHS.resourceRoot } = {}) {
+  resourceRoot = APP_PATHS.resourceRoot, resolveAuthProfile } = {}) {
   if (!runtimeConfiguration || ['get', 'identity', 'configure', 'resolveCredential'].some(key => typeof runtimeConfiguration[key] !== 'function')) {
     throw new TypeError('Claude runtime configuration service required');
   }
@@ -100,6 +130,7 @@ export function createConfiguredClaudeAgentProvider({ runtimeConfiguration, task
     if (!configuration.enabled) return 'disabled';
     if (configuration.executionMode !== 'native-permissions') return 'native_policy_unverified';
     if (evidence.reason) return evidence.reason;
+    if (configuration.authMode === 'provider-login') return 'provider_login_execution_unverified';
     if (!configuration.credentialConfigured) return 'credential_missing';
     if (typeof taskOptions.resolveTaskWorkspace !== 'function') return 'task_binding_unavailable';
     if (typeof requestNativeApproval !== 'function') return 'native_approval_unavailable';
@@ -113,10 +144,12 @@ export function createConfiguredClaudeAgentProvider({ runtimeConfiguration, task
     const reason = reasonFor(selected.configuration, evidence);
     const identity = JSON.stringify([selected.identity, evidence.binaryHash, evidence.sdkHash, evidence.reason]);
     if (latest?.identity === identity) return latest;
+    const activeProfiles=new Set();
     const record = { ...selected, identity, configurationIdentity: selected.identity, evidence, reason,
       security: security(evidence, selected.identity, !reason), inner: null };
     if (!reason) {
       async function validateRuntime() {
+        for(const profile of activeProfiles)profile.validate?.();
         if (closing) throw agentProviderError('PROVIDER_SHUTTING_DOWN', 'Claude provider is shutting down');
         const now = current();
         if (now.identity !== record.configurationIdentity) throw agentProviderError('AGENT_RUNTIME_CHANGED', 'Claude configuration changed; create a new session');
@@ -126,7 +159,7 @@ export function createConfiguredClaudeAgentProvider({ runtimeConfiguration, task
         }
       }
       record.inner = createClaudeAgentProvider({
-        taskOptions: { ...taskOptions, credentialRef: 'agent-claude', validateRuntime, verifiedRuntime: { verified: true,
+        taskOptions: { ...taskOptions, authMode:selected.configuration.authMode, credentialRef: 'agent-claude', validateRuntime, verifiedRuntime: { verified: true,
           sdkResourcesVerified: true, binaryVerified: true, runtimePath: evidence.runtimePath,
           ...(selected.configuration.model ? { model: selected.configuration.model } : {}),
           tools: [...CLAUDE_NATIVE_TOOLS], security: record.security } },
@@ -144,27 +177,7 @@ export function createConfiguredClaudeAgentProvider({ runtimeConfiguration, task
           }
           return credential;
         },
-        async launchSdkRunner(binding) {
-          await validateRuntime();
-          const profile = createClaudeOwnedProfile();
-          let wrapped;
-          const wrap = handle => {
-            if (wrapped) return wrapped;
-            wrapped = { ...handle, profileRoot: profile.root, async close() {
-              await handle.close(); await handle.done; profile.cleanup();
-            } };
-            binding.onHandle?.(wrapped); return wrapped;
-          };
-          try {
-            const launch = createClaudeSdkRunnerLauncher({ envSource: profile.environment });
-            const handle = await launch({ ...binding, onHandle: wrap });
-            return wrap(handle);
-          } catch (error) {
-            // Once captured, shared ACP lifecycle owns exit confirmation and profile cleanup.
-            if (!wrapped) profile.cleanup();
-            throw error;
-          }
-        }
+        launchSdkRunner:createClaudeTaskRunnerLauncher({authMode:selected.configuration.authMode,resolveAuthProfile,validateRuntime,activeProfiles})
       });
       inners.add(record.inner);
     }
@@ -209,7 +222,8 @@ export function createConfiguredClaudeAgentProvider({ runtimeConfiguration, task
         sessionCapable: available, taskEligible: available, readyForTask: available,
         reason: closing ? 'provider_shutting_down' : record.reason, version: record.evidence.version ?? null,
         binaryVerified: record.evidence.binaryVerified, sdkResourcesVerified: record.evidence.sdkResourcesVerified,
-        nativePolicyVerified: !record.reason, runtimeConfiguration: record.configuration };
+        nativePolicyVerified: !record.reason, runtimeConfiguration: record.configuration,
+        connection: runtimeConnectionEvidence({provider:'claude',runtimeEvidence:record.evidence,configuration:record.configuration,taskEligible:available,reason:record.reason}) };
     },
     createSession(params = {}) {
       const pending = (async () => {

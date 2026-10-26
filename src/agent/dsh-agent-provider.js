@@ -128,10 +128,12 @@ export function createDshAgentProvider({ api, defaults = {}, log = () => {}, pre
         return { sessionId, provider: 'dsh', model: bound?.model ?? wantModel, modelBindingError: null };
       },
 
-      async send({ sessionId, content, mode = 'queue' } = {}) {
+      async send({ sessionId, content, mode = 'queue', onRequestId } = {}) {
         const sid = requireSessionId(sessionId);
         const blocks = normalizePromptContent(content);
         const requestId = `cetamesh-agent-${Date.now().toString(36)}-${crypto.randomBytes(4).toString('hex')}`;
+        // In-process provenance binding precedes dispatch: Follow can beat the acknowledgement.
+        onRequestId?.(requestId);
         let value;
         try {
           value = await api.callEndpoint('session/prompt', {

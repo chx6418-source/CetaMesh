@@ -33,7 +33,8 @@ const descriptor = () => ({ mode: 'native', nativeSandboxSupported: true, native
 const base = defineAgentProvider({ id: 'test-vendor-native', label: 'Different native policy test adapter',
   capabilityExtras: { workspaceBoundary: 'native-staged', security: descriptor() },
   methods: { async health() { return { available: true, installed: true, authenticated: true, sessionCapable: true }; },
-    async createSession() { runs++; return { sessionId: 'vendor-session' }; }, async send() { return { accepted: true }; } } });
+    async createSession() { runs++; return { sessionId: 'vendor-session' }; },
+    async status() { return { running: false }; }, async send() { return { accepted: true }; } } });
 const adapter = { ...base, capabilities: () => ({ ...base.capabilities(), security: descriptor() }) };
 const broker = createAgentBroker({ registry: createAgentProviderRegistry({ providers: [adapter] }) });
 await assert.rejects(() => broker.createSession(adapter.id, { taskId: 't', workspaceId: 'w' }),
@@ -78,6 +79,7 @@ let permissionSecurity = nativePermissionDescriptor(); let permissionStarts = 0;
 const permissionBase = defineAgentProvider({ id: 'test-native-permissions', label: 'Native permission test adapter',
   capabilityExtras: { workspaceBoundary: 'native-staged', security: permissionSecurity }, methods: {
     async createSession() { return { sessionId: 'permission-session-' + ++permissionStarts }; },
+    async status() { return { running: false }; },
     async send() { permissionSends++; return { accepted: true }; }
   } });
 const permissionAdapter = { ...permissionBase, capabilities: () => ({ ...permissionBase.capabilities(), security: permissionSecurity }) };
@@ -237,6 +239,7 @@ try {
     capabilityExtras:{workspaceBoundary:'native-staged'},methods:{
       async health(){return {...dispatchHealth};},
       async createSession(){dispatchStarts++;return {sessionId:'configured-dispatch-session'};},
+      async status(){return {running:dispatchSends>0};},
       async send(){dispatchSends++;return {accepted:true};},
       async *follow({signal}){await new Promise(resolve=>{if(signal.aborted)resolve();else signal.addEventListener('abort',resolve,{once:true});});}
     }});
