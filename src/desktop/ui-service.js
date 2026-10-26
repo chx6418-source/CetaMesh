@@ -158,6 +158,12 @@ function projectTask(value) {
   const row = record(value);
   const progress = record(row.progress);
   const currentAgent = record(row.currentAgent);
+  const observation = record(row.executionObservation);
+  const sameRun = item => item?.provider === currentAgent.provider && item?.sessionId === currentAgent.sessionId
+    && item?.runId === observation.runId && item?.phase === 'user' && item?.taskRev >= observation.startedRev;
+  const report = (row.agentReports ?? []).filter(sameRun).at(-1);
+  const currentObservation = observation.provider === currentAgent.provider && observation.sessionId === currentAgent.sessionId;
+
   const checkpoint = record(row.checkpoint);
   const result = record(row.result);
   const artifacts = Array.isArray(row.artifacts) ? row.artifacts.slice(0, 100).map(item => {
@@ -180,7 +186,7 @@ function projectTask(value) {
   return {
     id: string(row.id, 128), title: string(row.goal, 500), goal: string(row.goal, 2000), usage: projectUsage(row.usage),
     status: string(row.status, 40), currentPhase: string(row.currentPhase, 500),
-    progress: { percent: Number.isFinite(progress.percent) ? Math.max(0, Math.min(100, progress.percent)) : 0, note: string(progress.note, 1000) },
+    progress: { percent: Number.isFinite(progress.percent) ? Math.max(0, Math.min(100, progress.percent)) : null, note: string(progress.note, 1000) },
     workspaceId: string(row.workspaceId, 128) || null,
     parentTaskId: string(row.parentTaskId, 128) || null,
     childOutputKind: string(row.childContract?.outputKind, 40) || null,
@@ -204,6 +210,11 @@ function projectTask(value) {
     checkpoint: checkpoint.summary ? { summary: string(checkpoint.summary, 2000), nextAction: string(checkpoint.nextAction, 500) } : null,
     result: result.summary ? { summary: string(result.summary, 4000) } : null,
     artifacts, agentHistory, executionEvidence,
+    execution: { state: currentObservation && typeof observation.runId === 'string' ? string(observation.state, 40) : 'unknown',
+      hadToolActivity: observation.hadToolActivity === true,
+      hasEvidence: (row.executionEvidence ?? []).some(item => sameRun(item) && item.status === 'completed') },
+    reviewReport: report && currentObservation ? { eventId: string(report.eventId, 240),
+      text: string(report.text, 8000), sha256: string(report.sha256, 64) } : null,
     failure: row.failure ? { reason: string(record(row.failure).reason, 1000) } : null
   };
 }
@@ -295,7 +306,7 @@ function projectDshConfiguration(value) {
 }
 
 const AGENT_RUNTIME_IDS = ['gemini', 'opencode', 'qwen', 'claude'];
-const AGENT_RUNTIME_INPUT_KEYS = new Set(['enabled', 'runtimePath', 'nodePath', 'model', 'baseUrl', 'apiKey', 'executionMode']);
+const AGENT_RUNTIME_INPUT_KEYS = new Set(['enabled', 'runtimePath', 'nodePath', 'model', 'baseUrl', 'apiKey', 'executionMode', 'authMode', 'servicePreset', 'providerId', 'methodId']);
 function projectAgentRuntimeConfiguration(value) {
   if (!value) return null;
   const row = record(value);
@@ -303,7 +314,31 @@ function projectAgentRuntimeConfiguration(value) {
   return { provider: row.provider, enabled: row.enabled === true, runtimePath: string(row.runtimePath, 4096),
     nodePath: string(row.nodePath, 4096), model: string(row.model, 256), baseUrl: string(row.baseUrl, 2048),
     credentialConfigured: row.credentialConfigured === true, executionMode: 'native-permissions',
+    ...(row.authMode ? {authMode:row.authMode==='provider-login'?'provider-login':'api-key',servicePreset:string(row.servicePreset,80),providerId:string(row.providerId,80)||null,methodId:string(row.methodId,80)||null,authorizationEpoch:Number.isSafeInteger(row.authorizationEpoch)?row.authorizationEpoch:0} : {}),
     revision: Number.isSafeInteger(row.revision) && row.revision >= 0 ? row.revision : 0 };
+}
+
+function projectAgentAuth(value) {
+  const row=record(value);
+  return {provider:AGENT_RUNTIME_IDS.includes(row.provider)?row.provider:null,attemptId:typeof row.attemptId==='string'&&/^[a-f0-9-]{36}$/.test(row.attemptId)?row.attemptId:null,
+    state:['no-session','unsupported','starting','awaiting-user','session-present','cancelled','failed','expired','exit-unconfirmed'].includes(row.state)?row.state:'failed',
+    reason:/^[a-z_]{1,100}$/.test(row.reason??'')?row.reason:null,revision:Number.isSafeInteger(row.revision)?row.revision:0,epoch:Number.isSafeInteger(row.epoch)?row.epoch:0,
+    methods:(Array.isArray(row.methods)?row.methods:[]).slice(0,4).map(m=>({id:string(m.id,80),label:string(m.label,100),supported:m.supported===true,reason:/^[a-z_]{1,100}$/.test(m.reason??'')?m.reason:null}))};
+}
+function authParams(value,keys) {
+  if(!value||typeof value!=='object'||Array.isArray(value)||Object.keys(value).some(key=>!keys.includes(key))||!AGENT_RUNTIME_IDS.includes(value.provider))throw uiError('INVALID_PARAMS','Unsupported Agent auth options');
+  return value;
+}
+
+function projectAgentConnection(value) {
+  if (!value) return null;
+  const row=record(value), runtime=record(row.runtime), auth=record(row.authentication), execution=record(row.execution);
+  return {runtime:{installed:runtime.installed===true,protocolVerified:runtime.protocolVerified===true,version:string(runtime.version,80)||null},
+    authentication:{mode:auth.mode==='provider-login'?'provider-login':'api-key',state:['configured-unverified','not-configured','session-present'].includes(auth.state)?auth.state:'unknown',verified:auth.verified===true},
+    execution:{eligible:execution.eligible===true,reason:string(execution.reason,160)||null},modelRequired:row.modelRequired!==false,
+    servicePresets:(Array.isArray(row.servicePresets)?row.servicePresets:[]).slice(0,8).map(p=>({id:string(p.id,80),label:string(p.label,100),baseUrl:string(p.baseUrl,2048)||null})),
+    providerSelections:(Array.isArray(row.providerSelections)?row.providerSelections:[]).slice(0,4).map(p=>({providerId:string(p.providerId,80),methodId:string(p.methodId,80),label:string(p.label,100)})),
+    accountReason:string(row.accountReason,100)||null,methods:(Array.isArray(row.methods)?row.methods:[]).slice(0,4).map(value=>{const method=record(value);return {id:string(method.id,80),label:string(method.label,100),supported:method.supported===true,reason:string(method.reason,100)||null};})};
 }
 
 function projectAgent(value) {
@@ -364,6 +399,7 @@ function projectAgent(value) {
     preset: projectDshPreset(health.preset),
     diagnostic: projectDshDiagnostic(health.diagnostic),
     configuration: id === 'dsh' ? projectDshConfiguration(row.configuration ?? health.configuration) : null,
+    connection: AGENT_RUNTIME_IDS.includes(id) ? projectAgentConnection(health.connection) : null,
     runtimeConfiguration: AGENT_RUNTIME_IDS.includes(id) ? projectAgentRuntimeConfiguration(row.runtimeConfiguration ?? health.runtimeConfiguration ?? health.configuration) : null,
     reason: reason || (boundaryUnverified ? 'descriptor-incomplete' : available && requiresTask ? 'task-required' : null), lastError, workspaceBoundary, status, version: string(health.version ?? row.version, 80) || null,
     desktopApp: id === 'dsh' || Object.keys(desktop).length ? {
@@ -1064,16 +1100,68 @@ export function createDesktopUiService({ services = {}, system = services.system
     'ui.task.complete': async p => {
       const current = (await task('task.get', { id: idParam(p) })).task;
       if (current.rev !== p.expectedRev) throw uiError('TASK_CONFLICT', 'Task changed before completion');
-      if (current.parentTaskId || p.reviewed !== true) {
-        throw uiError('OWNER_REVIEW_REQUIRED', 'Owner must review the parent Task result');
-      }
+      if (current.parentTaskId || p.reviewed !== true) throw uiError('OWNER_REVIEW_REQUIRED', 'Owner must review the parent Task result');
+      const observed = current.executionObservation;
       const children = (await task('task.child.list', { parentTaskId: current.id })).children;
-      if (!children.length && !(current.executionEvidence ?? []).some(row => row.status === 'completed')) {
-        throw uiError('TASK_EVIDENCE_REQUIRED', 'A model statement alone cannot complete a Task');
+      const childOnly = !current.currentAgent && children.length > 0;
+      if (current.status !== 'running' || (!childOnly && (!current.currentAgent || !observed
+        || observed.state !== 'awaiting-review' || observed.provider !== current.currentAgent.provider
+        || observed.sessionId !== current.currentAgent.sessionId || !observed.runId))
+        || (current.attempts ?? []).some(row => ['started', 'accepted', 'unknown'].includes(row.state))) {
+        throw uiError('TASK_EXECUTION_UNCONFIRMED', 'Current Agent execution has not settled for review');
       }
-      const summary = boundedText(p.summary, 'summary', 1000);
+      const blocker = services.capabilityService?.completionBlocker?.(current.id);
+      if (blocker) throw uiError(blocker, 'Task has pending execution or approval');
+      if (services.capabilityService?.recoveryForTask?.(current.id)?.state === 'needs-reconciliation'
+        || services.toolExecutionCoordinator?.recoveryForTask?.(current.id)) {
+        throw uiError('TASK_EFFECT_UNCONFIRMED', 'Task effects require reconciliation');
+      }
+      if (!childOnly) {
+        let status;
+        try { status = await services.agentBroker?.status(current.currentAgent); }
+        catch { throw uiError('TASK_EXECUTION_UNCONFIRMED', 'Cannot confirm Agent quiescence'); }
+        if (status?.running !== false || status.waitingForApproval || status.approvalId
+          || status.runtimeValid === false || status.errorCode
+          || ['unknown', 'waiting', 'running'].includes(status.state)
+          || (status.lastRunStatus && !['completed', 'idle'].includes(status.lastRunStatus))
+          || Number(status.queued) > 0 || status.waitingApproval) {
+          throw uiError('TASK_EXECUTION_UNCONFIRMED', 'Agent is active, pending approval or has an unknown outcome');
+        }
+      }
+      const sameRun = row => !childOnly && row.provider === observed.provider && row.sessionId === observed.sessionId
+        && row.runId === observed.runId && row.phase === 'user' && row.taskRev >= observed.startedRev;
+      const evidence = (current.executionEvidence ?? []).filter(sameRun);
+      if ((current.executionEvidence ?? []).some(row => ['unknown', 'outcome-unknown', 'cancel-unconfirmed'].includes(row.status))) {
+        throw uiError('TASK_EFFECT_UNCONFIRMED', 'Unconfirmed tool effects cannot be accepted');
+      }
+      if (evidence.some(row => row.source === 'core-import') && services.capabilityService?.verifyTaskImportReceipts?.(current.id, observed.runId) !== true) {
+        throw uiError('TASK_IMPORT_CHANGED', 'Imported file contents changed or cannot be verified; review again');
+      }
+      let ownerReview;
+      if (childOnly) {
+        if (p.reviewKind === 'report-only') throw uiError('TASK_REPORT_ONLY_NOT_ALLOWED', 'Child results require verified child contracts');
+        // task.complete atomically verifies every active child's revision and parent fingerprint.
+      } else if (p.reviewKind === 'report-only') {
+        if (children.length || observed.hadToolActivity || evidence.length) throw uiError('TASK_REPORT_ONLY_NOT_ALLOWED', 'Report-only review cannot certify tool execution or file changes');
+        const report = (current.agentReports ?? []).filter(sameRun).at(-1);
+        if (!report?.sha256 || report.eventId !== p.reportEventId || report.sha256 !== p.reportSha256) {
+          throw uiError('TASK_REPORT_CHANGED', 'Review the exact current report before confirming');
+        }
+        ownerReview = { kind: 'report-only', reportEventId: report.eventId, reportSha256: report.sha256,
+          provider: observed.provider, sessionId: observed.sessionId, runId: observed.runId, taskRev: current.rev };
+      } else {
+        if (!children.length && !evidence.some(row => row.status === 'completed')) throw uiError('TASK_EVIDENCE_REQUIRED', 'Current execution evidence or explicit report-only review is required');
+        ownerReview = { kind: 'execution', evidenceEventIds: evidence.filter(row => row.status === 'completed').map(row => row.eventId),
+          provider: observed.provider, sessionId: observed.sessionId, runId: observed.runId, taskRev: current.rev };
+      }
+      // Recheck after asynchronous status/child reads. No mutation or new dispatch
+      // may slip between reviewing this snapshot and the revision-checked commit.
+      const latest = (await task('task.get', { id: current.id })).task;
+      if (latest.rev !== current.rev) throw uiError('TASK_CONFLICT', 'Task changed during result review');
+      const finalBlocker = services.capabilityService?.completionBlocker?.(current.id);
+      if (finalBlocker) throw uiError(finalBlocker, 'Task became active during result review');
       const result = await task('task.complete', { id: current.id, expectedRev: current.rev,
-        summary });
+        summary: boundedText(p.summary, 'summary', 1000), ownerReview });
       emit('task.updated', { taskId: result.task?.id, status: result.task?.status });
       return { task: projectTaskWithUsage(result.task) };
     },
@@ -1365,6 +1453,10 @@ export function createDesktopUiService({ services = {}, system = services.system
       emit('approval.pending', { approvalId: result.approvalId });
       return selected(result, ['status', 'approvalId', 'expiresAt']);
     },
+    'ui.agent.auth.describe': async p=>projectAgentAuth(await agent('agent.auth.describe',authParams(p,['provider']))),
+    'ui.agent.auth.start': async p=>projectAgentAuth(await agent('agent.auth.start',authParams(p,['provider','expectedRevision','methodId']))),
+    'ui.agent.auth.status': async p=>projectAgentAuth(await agent('agent.auth.status',authParams(p,['provider','attemptId']))),
+    'ui.agent.auth.cancel': async p=>projectAgentAuth(await agent('agent.auth.cancel',authParams(p,['provider','attemptId']))),
     'ui.agent.list': async p => ({ agents: (await agent('agent.list', { refresh: p.refresh === true })).providers.map(projectAgent) }),
     'ui.agent.health': async p => projectAgent(await agent('agent.health', { provider: string(p.provider, 80), refresh: p.refresh === true })),
     'ui.agent.presets': async p => {

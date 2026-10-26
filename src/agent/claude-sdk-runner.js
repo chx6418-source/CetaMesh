@@ -34,7 +34,9 @@ export async function runClaudeSdkRunner({ input = process.stdin, output = proce
       if (closed) throw fault('CLAUDE_RUNNER_CLOSED');
       if (method === 'initialize') {
         if (configuration && params.protocolVersion === 1) return { protocolVersion: 1, agentCapabilities: {} };
-        if (configuration || typeof params.credential !== 'string' || !params.credential ||
+        const account=params.authMode==='provider-login';
+        if (configuration || (params.authMode!==undefined&&!['api-key','provider-login'].includes(params.authMode))
+            || (account ? (params.credential!==undefined||params.baseUrl!==undefined||!params.profileRoot||params.executionMode!=='native-permissions') : (typeof params.credential !== 'string' || !params.credential)) ||
             typeof params.cwd !== 'string' || !params.cwd || typeof params.runtimePath !== 'string' || !params.runtimePath ||
             !Array.isArray(params.tools) || params.tools.some(t => typeof t !== 'string')
             || (params.baseUrl !== undefined && !validEndpoint(params.baseUrl))
@@ -45,7 +47,7 @@ export async function runClaudeSdkRunner({ input = process.stdin, output = proce
         const loaded = await loadSdk();
         if (closed || typeof loaded?.query !== 'function') throw fault('CLAUDE_SDK_UNAVAILABLE');
         sdk = loaded;
-        configuration = { ...(params.baseUrl === undefined ? {} : { baseUrl: params.baseUrl }),
+        configuration = { authMode:account?'provider-login':'api-key', ...(params.baseUrl === undefined ? {} : { baseUrl: params.baseUrl }),
           ...(params.profileRoot === undefined ? {} : { profileRoot: params.profileRoot }),
           ...(params.executionMode === undefined ? {} : { executionMode: params.executionMode }), credential: params.credential, cwd: params.cwd, runtimePath: params.runtimePath, tools: [...params.tools], ...(params.model === undefined ? {} : { model: params.model }) };
         return { initialized: true };
@@ -141,7 +143,7 @@ export async function runClaudeSdkRunner({ input = process.stdin, output = proce
       try {
         turn.query = sdk.query({ prompt: params.prompt, options: {
           cwd: config.cwd, pathToClaudeCodeExecutable: config.runtimePath,
-          env: { ...(config.profileRoot ? claudeProfileEnvironment(config.profileRoot) : {}), ANTHROPIC_API_KEY: config.credential,
+          env: { ...(config.profileRoot ? claudeProfileEnvironment(config.profileRoot) : {}), ...(config.authMode==='provider-login'?{}:{ANTHROPIC_API_KEY:config.credential}),
             ...(config.baseUrl === undefined ? {} : { ANTHROPIC_BASE_URL: config.baseUrl }) },
           ...(config.executionMode === 'native-permissions' ? { sandbox: { enabled: false } } : {}), settingSources: [], mcpServers: {}, plugins: [], strictMcpConfig: true,
           tools: [...config.tools], allowedTools: [], permissionMode: 'default',
@@ -157,6 +159,18 @@ export async function runClaudeSdkRunner({ input = process.stdin, output = proce
           if (message.type === 'stream_event' && message.event?.type === 'content_block_delta' && message.event.delta?.type === 'text_delta') {
             if (acp) rpc.notify('session/update', {sessionId:nativeId, update:{sessionUpdate:'agent_message_chunk', content:{type:'text',text:message.event.delta.text}}});
             else rpc.notify('event', { type: 'text-delta', text: message.event.delta.text });
+          }
+          if (acp && message.type === 'user' && Array.isArray(message.message?.content)) {
+            for (const result of message.message.content) {
+              if (result?.type !== 'tool_result' || typeof result.tool_use_id !== 'string') continue;
+              const entry = decisions.get(result.tool_use_id);
+              if (!entry || entry.resultEmitted || !seenHooks.has(result.tool_use_id)
+                || !alive(entry.signal) || await entry.decision !== true || result.content === undefined) continue;
+              entry.resultEmitted = true;
+              rpc.notify('session/update', {sessionId:nativeId, update:{sessionUpdate:'tool_call_update',
+                toolCallId:result.tool_use_id,kind:'tool',status:result.is_error === true ? 'failed' : 'completed',
+                rawOutput:{content:result.content,isError:result.is_error === true}}});
+            }
           }
           if (message.type === 'result') terminal = { outcome: message.subtype === 'success' ? 'completed' : 'failed',
             ...(typeof message.session_id === 'string' ? { sessionId: message.session_id } : {}) };

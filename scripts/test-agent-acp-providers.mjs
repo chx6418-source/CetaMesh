@@ -169,7 +169,7 @@ for (const id of ['gemini', 'qwen']) {
   profile=createNativeAcpProfile({id,configuration:{model:'fixture',baseUrl:'https://example.test/v1'},profileParent:parent});
   const home=id==='gemini'?profile.environment.GEMINI_CLI_HOME:profile.environment.QWEN_HOME;
   assert.equal(typeof home,'string',id+' must explicitly redirect its CLI home');
-  assert.ok(home.startsWith(profile.root+path.sep));
+  assert.ok(id==='gemini'?home===profile.root:home.startsWith(profile.root+path.sep));
   const systemFile=id==='gemini'?profile.environment.GEMINI_CLI_SYSTEM_SETTINGS_PATH:profile.environment.QWEN_CODE_SYSTEM_SETTINGS_PATH;
   const settings=JSON.parse(fs.readFileSync(systemFile,'utf8'));
   assert.equal(settings.security.auth.selectedType,id==='gemini'?'gemini-api-key':'openai');
@@ -203,11 +203,25 @@ try {
  assert.throws(()=>createAcpProcessLauncher({executable:process.execPath,argv:[],trustedEnvironment:{NODE_OPTIONS:'--import=unapproved'}})({cwd:nativeEnvRoot}),{code:'ACP_ENVIRONMENT_INVALID'});
 }finally{fs.rmSync(nativeEnvRoot,{recursive:true,force:true});}
 
-for(const [model,credentialConfigured,want] of [['',false,'agent_model_required'],['fixture',false,'agent_credential_required']]) {
- const providers=createAcpProviders({runtimeConfiguration:{get:provider=>({provider,enabled:provider==='opencode',runtimePath:process.execPath,nodePath:'',model,credentialConfigured,baseUrl:'https://example.test/v1'}),identity:()=>model+credentialConfigured,resolveCredential(){throw Error('Health cannot read a credential');}},
-  launchFactory(){throw Error('An incomplete explicit setup must not launch a runtime');}});
- try {const health=await providers.find(item=>item.id==='opencode').health();assert.equal(health.reason,want);assert.equal(health.installed,true);assert.equal(health.taskEligible,false);}finally{await Promise.all(providers.map(item=>item.shutdown()));}
+// Missing API configuration must not hide bounded, keyless CLI / ACP evidence.
+for(const model of ['', 'fixture']) {
+ const requests=[];
+ const providers=createAcpProviders({runtimeConfiguration:{get:provider=>({provider,enabled:provider==='opencode',runtimePath:process.execPath,nodePath:'',model,credentialConfigured:false,baseUrl:'https://example.test/v1'}),identity:()=>model,resolveCredential(){throw Error('Health cannot read a credential');}},
+  launchFactory:({argv,trustedEnvironment})=>()=>{
+   assert.equal(trustedEnvironment.CETAMESH_AGENT_API_KEY,undefined);
+   const readable=new PassThrough(),writable=new PassThrough();let resolve;
+   const done=new Promise(r=>resolve=r);
+   if(argv.includes('--version')||argv.includes('--help')) setImmediate(()=>{readable.end(argv.includes('--version')?'opencode v2.1.4':'  acp  Start ACP');resolve({exitCode:0});});
+   else writable.on('data',chunk=>{const request=JSON.parse(String(chunk));requests.push(request.method);readable.write(JSON.stringify({jsonrpc:'2.0',id:request.id,result:{protocolVersion:1,agentInfo:{name:'OpenCode',version:'2.1.4'},authMethods:[{id:'forged-login'}]}})+'\n');});
+   return {readable,writable,done,async close(){resolve({exitCode:0});}};
+  }});
+ try {const health=await providers.find(item=>item.id==='opencode').health();assert.equal(health.installed,true);assert.equal(health.protocolVerified,true);assert.equal(health.taskEligible,false);assert.deepEqual(requests,['initialize']);assert.equal(health.connection.runtime.protocolVerified,true);assert.equal(health.connection.authentication.verified,false);assert.equal(health.connection.modelRequired,true);}finally{await Promise.all(providers.map(item=>item.shutdown()));}
 }
+const {describeRuntimeAuth}=await import('../src/agent/runtime-auth-capabilities.js');
+assert.equal(describeRuntimeAuth({provider:'qwen',runtimeEvidence:{authMethods:['qwen-oauth']}}).methods.some(m=>m.id==='qwen-oauth'&&m.supported),false);
+assert.equal(describeRuntimeAuth({provider:'opencode',runtimeEvidence:{authMethods:['opencode-login'],compatible:true,securityVerified:true}}).methods.some(m=>m.id!=='api-key'&&m.supported),false);
+assert.equal(describeRuntimeAuth({provider:'claude',runtimeEvidence:{compatible:false}}).modelRequired,true);
+assert.equal(describeRuntimeAuth({provider:'claude',runtimeEvidence:{compatible:true,binaryVerified:true,sdkResourcesVerified:true}}).modelRequired,false);
 
 const corruptConfigured=createAcpProviders({runtimeConfiguration:{get(){throw Object.assign(Error('Malformed saved runtime configuration'),{code:'AGENT_RUNTIME_CONFIG_CORRUPT'});},identity(){throw Error('Must not reset corrupted configuration');},configure(){throw Error('Must not repair implicitly');}}});
 for(const item of corruptConfigured){assert.doesNotThrow(()=>item.capabilities());const health=await item.health();assert.equal(health.available,false);assert.equal(health.taskEligible,false);assert.equal(health.reason,'AGENT_RUNTIME_CONFIG_CORRUPT');}

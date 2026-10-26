@@ -32,11 +32,36 @@ Cancellation or changed configuration invalidates pending authority, and unconfi
 process exit retains staging and ownership for recovery. Optional malformed configuration
 is preserved and contained so it cannot prevent Core startup.
 
+Provider-specific account adapters are release-gated independently from existing API
+execution. `runtime-auth-service` owns atomic task/auth/configuration leases and bounded
+authentication attempts; `runtime-auth-profile` owns unpromoted generations and their
+atomic current pointer. Only confirmed exit can release process ownership. A cancelled
+or interrupted generation cannot become current on refresh. Account mode resolves no API
+key or endpoint override. Renderer auth requests use strict Owner-only DTOs, not a generic
+command, environment, terminal or credential interface. Native Windows acceptance remains
+required before enabling any new login or account-execution route.
+
 Explicit Owner dispatch may use configured but unverified API credentials only after
 runtime, session and every-tool permission policy verification. Such dispatch does not
 claim authentication; automatic assignment still abstains without authentication and
 model-specific cost evidence. Supported versions and actual verification limits are
 recorded in [Agent integration status](AGENT_INTEGRATION_STATUS.md).
+
+## Task execution and result review
+
+Task status remains independent of Agent turn completion. A Core-bound, bounded current
+execution observation carries the Task assignment, Session and run identity. New dispatch,
+assignment, objective edits, restart and resume invalidate prior result-review eligibility.
+Completed turns show **awaiting Owner review**, not an invented percentage or automatic Task
+completion. Earlier queued-turn reports remain history and cannot replace current-run state;
+explicit unknown effects still require reconciliation.
+
+Native activity is not execution evidence. Native terminal tool output is retained only as
+an observed result digest, never as a verified test or file outcome. Successful Core imports
+record approved paths, preimage hashes and observed output hashes; acceptance rechecks the
+imported files. Pending approvals, active execution and unknown effects block result review.
+For a no-tool analysis, Owner may explicitly accept the exact current report by ID and hash;
+that record certifies only report review, not tool execution, file changes or passing tests.
 
 ## Process composition
 

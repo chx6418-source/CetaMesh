@@ -1,3 +1,4 @@
+import {openCodeNativePolicy} from '../src/agent/native-acp-runtime.js';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -113,3 +114,8 @@ try {
  assert.equal(fs.readdirSync(profiles).length,0,'all runtime profiles cleaned after observed close');assert.equal(fs.readdirSync(staging).length,0,'staging cleaned after observed close');
  fs.rmSync(root,{recursive:true,force:true,maxRetries:20,retryDelay:100});
 }
+
+const nativeAccountPolicy=openCodeNativePolicy({authMode:'provider-login',providerId:'openai',model:'fixture'});
+assert.deepEqual(nativeAccountPolicy.providers,{});assert.deepEqual(nativeAccountPolicy.permissions,[{action:'*',resource:'*',effect:'ask'}]);
+assert.equal(nativeAccountPolicy.policies.find(p=>p.action==='provider.use'&&p.effect==='allow').resource,'openai');
+console.log('PASS account policy has no API overrides; official login/browser/ACL acceptance remains closed');

@@ -80,6 +80,15 @@ try {
    }
    assert.equal(fs.readFileSync(path.join(corruptState,'agent-runtimes.json'),'utf8'),'{broken','malformed configuration is preserved for recovery');
  } finally {await unaffected.capabilityService.close();await unaffected.agentService.close();}
+ for(const provider of ['gemini','opencode','qwen','claude']) {
+   const description=await services.desktopUiService.execute({method:'ui.agent.auth.describe',params:{provider}});
+   assert.equal(description.methods.some(method=>method.id!=='api-key'&&method.supported),false);
+   assert.doesNotMatch(JSON.stringify(description),/apiKey|accessToken|refreshToken|credential value/);
+ }
+ await assert.rejects(services.desktopUiService.execute({method:'ui.agent.auth.start',params:{provider:'gemini',expectedRevision:0,methodId:'oauth-personal',env:{HOME:'unowned'}}}),{code:'INVALID_PARAMS'});
+ await services.agentService.execute({method:'agent.configure',params:{provider:'claude',settings:{authMode:'provider-login'}}});
+ await assert.rejects(services.agentService.execute({method:'agent.auth.start',params:{provider:'claude',expectedRevision:1,methodId:'claude-subscription'}}),{code:'AGENT_AUTH_UNSUPPORTED'});
+ assert.equal((await services.agentService.execute({method:'agent.health',params:{provider:'claude'}})).available,false);
  console.log('PASS production setup reaches owned runtime configuration and credential vault without enabling missing runtimes or returning secrets');
 } finally {
  if(services){await services.capabilityService.close();await services.agentService.close();}

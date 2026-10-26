@@ -79,6 +79,9 @@ try {
   assert.equal(fs.readFileSync(path.join(workspaceRoot,'b.txt'),'utf8'),'approved B');
   await until(status,s=>!s.turn,'first chat completion');
   await until(task,t=>t.agentReports?.length===1,'first TaskFollow report');
+  assert.equal(services.capabilityService.completionBlocker((await task()).id),null,'settled continuation chain must not remain blocked by historical waiting operation');
+  const settledFirst=await ui.execute({method:'ui.approvals.operation',params:{id:first.operationId}});
+  assert.equal(settledFirst.status,'completed');assert.equal(settledFirst.resumePending,false);
   console.log('PASS managed turn 1 two separate approvals survive concurrent task progress and write only after approval');
   for(const n of [2,3]) {
     await send(n);await until(status,s=>!s.turn,'chat turn '+n);

@@ -1,3 +1,6 @@
+import {createProviderAuthAdapters} from '../agent/auth/index.js';
+import {createConnectionLeases,createAgentRuntimeAuthService} from '../agent/runtime-auth-service.js';
+import {createRuntimeAuthProfileStore} from '../agent/runtime-auth-profile.js';
 import fs from 'node:fs';
 import { createUsageLedger } from '../model/usage-ledger.js';
 import { createToolEvidenceStore } from '../context/tool-evidence.js';
@@ -99,12 +102,15 @@ export function createCetaMeshServices(options = {}) {
   };
 
   const providerSecrets = createProviderSecrets({ root: dataRoot });
-  const agentRuntimeConfiguration = options.agentRuntimeConfiguration ?? createAgentRuntimeConfiguration({ stateDir, providerSecrets });
+  const connectionLeases=createConnectionLeases();
+  const authProfileStore=createRuntimeAuthProfileStore({stateDir,connectionLeases});
+  const agentRuntimeConfiguration = options.agentRuntimeConfiguration ?? createAgentRuntimeConfiguration({ stateDir, providerSecrets, connectionLeases, authProfileIdentity:provider=>authProfileStore.current(provider)?.generationId ?? null });
+  const runtimeAuthService=createAgentRuntimeAuthService({configuration:agentRuntimeConfiguration,adapters:createProviderAuthAdapters({configuration:agentRuntimeConfiguration,resourceRoot}),connectionLeases,profileStore:authProfileStore});
   const nativeApprovalBridge = (request, requestOptions) => {
     if (!capabilityService) throw Object.assign(new Error('Native approval service unavailable'), {code:'AGENT_APPROVAL_UNAVAILABLE'});
     return capabilityService.requestAgentNativeApproval(request, requestOptions);
   };
-  const agentService = createDefaultAgentService({ api, defaults: dshDefaults, log,
+  const agentService = createDefaultAgentService({ api, defaults: dshDefaults, log, runtimeAuthService, connectionLeases,
     resolveWorkspaceIdentity: workspaceId => workspaceService.describeWorkspace(workspaceId)?.root ?? null,
     resolveExecutionTask: taskId => taskService.runtime.get({ id: taskId }).task,
     isTaskHandoffInFlight: taskId => continuityService?.runtime.isInFlight(taskId) === true,
@@ -112,9 +118,11 @@ export function createCetaMeshServices(options = {}) {
     codexOptions: { ...agentTaskOptions,
       authorizeOpenAiEnvironment: () => settingsService.store.get().settings.agents.codexOpenAiEnvironmentAuthorized === true },
     acpOptions: { taskOptions: agentTaskOptions, nativeApprovalBridge,
-      runtimeConfiguration: options.agentAcpOptions?.runtimeResolver ? undefined : agentRuntimeConfiguration, ...options.agentAcpOptions },
+      runtimeConfiguration: options.agentAcpOptions?.runtimeResolver ? undefined : agentRuntimeConfiguration, ...options.agentAcpOptions,
+      runtimeOptions: {...options.agentAcpOptions?.runtimeOptions,resolveAuthProfile:provider=>runtimeAuthService.taskProfile(provider)} },
     claudeOptions: { taskOptions: agentTaskOptions, requestNativeApproval: nativeApprovalBridge,
-      runtimeConfiguration: options.agentClaudeOptions?.taskOptions?.verifiedRuntime ? undefined : agentRuntimeConfiguration, resourceRoot, ...options.agentClaudeOptions },
+      runtimeConfiguration: options.agentClaudeOptions?.taskOptions?.verifiedRuntime ? undefined : agentRuntimeConfiguration, resourceRoot, ...options.agentClaudeOptions,
+      resolveAuthProfile:provider=>runtimeAuthService.taskProfile(provider) },
     workbuddyOptions: options.agentWorkBuddyOptions, codexRouterOptions: options.agentCodexRouterOptions,
     desktopStatus: () => dshDesktop.status() });
   const agentBroker = agentService.broker;
@@ -267,6 +275,9 @@ export function createCetaMeshServices(options = {}) {
     onChanged: data => uiEventBus.publish('memory.updated', { ...data, status: 'working-updated' }) });
   capabilityService = createCapabilityService({
     stateDir,
+    environmentClient: options.environmentClient ?? null,
+    ownedArtifactRoot: path.join(dataRoot,'artifacts'),
+    onEnvironmentChanged: data => uiEventBus.publish('task.updated',{taskId:data.taskId,environmentRunId:data.runId,environmentStatus:data.status}),
     evidenceStore,
     workspaceService,
     memoryService,

@@ -23,6 +23,7 @@ export function createAgentBroker({ registry, log = () => {}, resolveWorkspaceId
   }
   const executionConsents = new Map();
   const executionBindings = new Map();
+  let taskExecutionObserver = null;
   const consentKey = (provider, workspaceId) => JSON.stringify([provider, workspaceId]);
   function securityScope(providerId, workspaceId) {
     const scope = describeAgentExecutionSecurity(requireProvider(providerId), workspaceId, resolveWorkspaceIdentity(workspaceId));
@@ -43,6 +44,7 @@ export function createAgentBroker({ registry, log = () => {}, resolveWorkspaceId
   const turnEndListeners = new Set();
   // Native request IDs are local to a Session; retain bounded Core provenance.
   const runMetadata = new Map();
+  const nativeDispatching = new Set();
   const runKey = (provider, sessionId, kind, id) => JSON.stringify([provider, sessionId, kind, String(id)]);
   function rememberRun(provider, sessionId, result, metadata) {
     for (const [kind, id] of [['request', result?.requestId], ['turn', result?.turnId]]) {
@@ -93,6 +95,7 @@ export function createAgentBroker({ registry, log = () => {}, resolveWorkspaceId
 
   return {
     registry,
+    setTaskExecutionObserver(observer) { taskExecutionObserver = observer; },
 
     describeExecutionSecurity: securityScope,
     assertExecutionConsent,
@@ -202,9 +205,31 @@ export function createAgentBroker({ registry, log = () => {}, resolveWorkspaceId
           }
         }
       }
-      const result = await provider.send({ sessionId, content, mode, phase, runId });
-      if (result?.accepted === true) rememberRun(providerId, sessionId, result, { phase, runId });
-      return result;
+      const observation = { taskId: binding?.taskId, provider: providerId, sessionId, runId, phase };
+      const singleFlight = provider.capabilities()?.workspaceBoundary === 'native-staged';
+      const dispatchKey = consentKey(providerId, sessionId);
+      if (singleFlight && nativeDispatching.has(dispatchKey)) throw agentProviderError('TURN_BUSY', 'Native Session already has a dispatch in progress');
+      if (singleFlight) nativeDispatching.add(dispatchKey);
+      let observed = false;
+      try {
+        // Known pre-effect busy/unknown state must not replace the real current run
+        // or allocate a Follow obligation for a turn that will never exist.
+        if (singleFlight) {
+          const status = await provider.status({ sessionId });
+          if (status.running || status.waitingForApproval || status.approvalId || Number(status.queued) > 0) throw agentProviderError('TURN_BUSY', 'Native Session is active or waiting for approval');
+          if (status.running !== false || status.runtimeValid === false || status.state === 'unknown' || status.lastRunStatus === 'unknown') throw agentProviderError('AGENT_OUTCOME_UNKNOWN', 'Native Session requires reconciliation before dispatch');
+        }
+        if (binding?.taskId && phase === 'user') { taskExecutionObserver?.({ ...observation, state: 'running' }); observed = true; }
+        const metadata = { phase, runId };
+        const result = await provider.send({ sessionId, content, mode, phase, runId,
+          onRequestId: requestId => rememberRun(providerId, sessionId, { requestId }, metadata) });
+        if (result?.accepted === true) rememberRun(providerId, sessionId, result, { phase, runId });
+        else if (binding?.taskId) taskExecutionObserver?.({ ...observation, state: 'unknown' });
+        return result;
+      } catch (error) {
+        if (observed) taskExecutionObserver?.({ ...observation, state: 'unknown' });
+        throw error;
+      } finally { if (singleFlight) nativeDispatching.delete(dispatchKey); }
     },
 
     async cancel({ provider: providerId, sessionId } = {}) {

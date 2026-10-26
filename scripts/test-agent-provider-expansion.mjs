@@ -127,6 +127,7 @@ try {
       if (endpoint === 'session/prompt') {
         const session = dshSessions.get(args.request.sessionId);
         session.running = true;
+        session.requestId = args.request.requestId;
         const prompt = JSON.stringify(args.request.content ?? []);
         session.bootstrapOnly = prompt.includes('此回合只确认恢复事实');
         if (prompt.includes('Task-level follow')) {
@@ -146,10 +147,10 @@ try {
       session.followSubscriptions += 1;
       if (!session.bootstrapOnly) fs.writeFileSync(path.join(session.cwd, session.outputName ?? 'dsh-result.txt'), `dsh fake edit ${sessionId}`);
       yield { type: 'snapshot', cursor: 0, records: [], hasMore: false };
-      yield { type: 'event', event: { seq: 1, type: 'turn/start', data: { turn: 'dsh-turn-1' } } };
-      yield { type: 'event', event: { seq: 2, type: 'assistant/message', data: { turn: 'dsh-turn-1', message: { content: [{ type: 'text', text: 'DSH fixture response' }] } } } };
-      yield { type: 'event', event: { seq: 3, type: 'turn/end', data: { turn: 'dsh-turn-1', reason: { kind: 'completed' } } } };
-      if (session.duplicateTurnEnd) yield { type: 'event', event: { seq: 3, type: 'turn/end', data: { turn: 'dsh-turn-1', reason: { kind: 'completed' } } } };
+      yield { type: 'event', event: { seq: 1, type: 'turn/start', data: { requestId: session.requestId, turn: 'dsh-turn-1' } } };
+      yield { type: 'event', event: { seq: 2, type: 'assistant/message', data: { requestId: session.requestId, turn: 'dsh-turn-1', message: { content: [{ type: 'text', text: 'DSH fixture response' }] } } } };
+      yield { type: 'event', event: { seq: 3, type: 'turn/end', data: { requestId: session.requestId, turn: 'dsh-turn-1', reason: { kind: 'completed' } } } };
+      if (session.duplicateTurnEnd) yield { type: 'event', event: { seq: 3, type: 'turn/end', data: { requestId: session.requestId, turn: 'dsh-turn-1', reason: { kind: 'completed' } } } };
       session.running = false;
     }
   };
@@ -210,6 +211,7 @@ try {
   await assert.rejects(() => dshService.broker.createSession('dsh', { workspaceId: authoritative.id }), error => error.code === 'TASK_REQUIRED');
   const dshSession = await dshService.broker.createSession('dsh', { taskId: task.id, workspaceId: authoritative.id });
   taskRuntime.attachAgent({ id: task.id, expectedRev: taskRuntime.get({ id: task.id }).task.rev, provider: 'dsh', sessionId: dshSession.sessionId });
+  taskRuntime.start({ id: task.id, expectedRev: taskRuntime.get({ id: task.id }).task.rev });
   const dshEvents = [];
   const dshFollow = (async () => {
     for await (const event of dshService.broker.follow({ provider: 'dsh', sessionId: dshSession.sessionId })) dshEvents.push(event);
@@ -497,6 +499,7 @@ try {
   }), error => error.code === 'MODEL_PROVIDER_UNSUPPORTED',
   'Codex must not silently replace a Task authorized model provider with its inherited default');
   taskCapabilities = createCapabilityService({ stateDir, workspaceService, taskRuntime, agentBroker });
+  taskRuntime.setCheckpoint({ id: task.id, expectedRev: taskRuntime.get({ id: task.id }).task.rev, summary: 'Established Owner checkpoint' });
   const assignment = await taskCapabilities.broker.execute({
     actor: { kind: 'owner', id: 'desktop' }, taskId: task.id, workspaceId: authoritative.id,
     capability: 'agent.run', input: { provider: 'codex', content: 'Edit the Task staging copy' }, reason: 'provider test'
@@ -514,7 +517,7 @@ try {
     'Codex is eligible for automatic routing only after its required sandbox has actually executed');
   const codexReports = await waitFor(() => taskRuntime.get({ id: task.id }).task.agentReports,
     rows => Array.isArray(rows) && rows.some(row => row.text.includes('fixture response 1')));
-  assert.equal(taskRuntime.get({ id: task.id }).task.checkpoint.summary, 'Provider workspace import',
+  assert.equal(taskRuntime.get({ id: task.id }).task.checkpoint.summary, 'Established Owner checkpoint',
     'a model report cannot overwrite an established Task checkpoint');
   assert.ok(codexReports.some(row => row.text.includes('fixture response 1') && row.verified === false),
     'Task Follow persists an unverified Codex report separately even when no Chat is attached');
@@ -672,6 +675,7 @@ try {
   const harborAgentSession = await restartedBroker.createSession('codex', {
     taskId: task.id, workspaceId: authoritative.id
   });
+  taskRuntime.attachAgent({ id: task.id, expectedRev: taskRuntime.get({ id: task.id }).task.rev, provider: 'codex', sessionId: harborAgentSession.sessionId });
   const harborEvents = [];
   const harborAgentConfigCalls = [];
   const harborChat = createChatService({
@@ -733,9 +737,11 @@ try {
   const isolatedB = await restartedBroker.createSession('codex', { taskId: task.id, workspaceId: authoritative.id,
     model: 'requested-model-b', reasoningEffort: 'high' });
   await restartedProvider.selectModel({ sessionId: isolatedA.sessionId, model: 'selected-model-a', reasoningEffort: 'medium' });
+  taskRuntime.resume({ id: task.id, expectedRev: taskRuntime.get({ id: task.id }).task.rev, provider: 'codex', sessionId: isolatedA.sessionId, note: 'Fixture Owner reviewed the known failed turn before next configuration check' });
   await restartedBroker.send({ provider: 'codex', sessionId: isolatedA.sessionId, content: 'session A config' });
   await waitFor(() => restartedBroker.status({ provider: 'codex', sessionId: isolatedA.sessionId }),
     status => !status.running && status.lastRunStatus === 'completed');
+  taskRuntime.attachAgent({ id: task.id, expectedRev: taskRuntime.get({ id: task.id }).task.rev, provider: 'codex', sessionId: isolatedB.sessionId });
   await restartedBroker.send({ provider: 'codex', sessionId: isolatedB.sessionId, content: 'session B config' });
   await waitFor(() => restartedBroker.status({ provider: 'codex', sessionId: isolatedB.sessionId }),
     status => !status.running && status.lastRunStatus === 'completed');

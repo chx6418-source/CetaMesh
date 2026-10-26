@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { registerEnvironmentCapabilities } from '../environment/service.js';
 import { createApprovalOperations } from './operations.js';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -70,7 +71,7 @@ const WORKSPACE_TOOL_DESCRIPTORS = Object.freeze({
  * which bind the Owner identity; Agent/Extension grants never come from IPC. */
 export function createCapabilityService({ stateDir, workspaceService, memoryService,
   taskRuntime, agentBroker, bindAgentSession, resumeAgentApproval = null, searchImpl = null, audit = () => {}, now,
-  isolatedRunner = null, onTaskObservation = null, onOperation = () => {}, evidenceStore = null } = {}) {
+  isolatedRunner = null, onTaskObservation = null, onOperation = () => {}, evidenceStore = null, environmentClient = null, ownedArtifactRoot = null, onEnvironmentChanged = () => {} } = {}) {
   const file = stateDir ? path.join(stateDir, 'capability', 'task-grants.json') : null;
   let grants = file ? readJsonFile(file, { missing: {} }) : {};
   const provisioning = new Map();
@@ -156,7 +157,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
         try {
           for await (const item of agentBroker.follow({ provider, sessionId, signal: controller.signal, sinceSequence: consumer.sequence })) {
             if (controller.signal.aborted) break;
-            const event = item?.type === 'event' ? item.event : item;
+            const event = item?.type === 'event' ? { ...item.event, seq: item.event?.seq ?? item.seq } : item;
             if (Number.isSafeInteger(event?.seq)) {
               if (event.seq <= consumer.sequence) continue;
               consumer.sequence = event.seq;
@@ -166,6 +167,15 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
             if (event?.data?.phase && event.data.phase !== 'user') continue;
             if ((options.bootstrapRequestId && event?.data?.requestId === options.bootstrapRequestId)
               || (options.bootstrapTurnId != null && event?.data?.turn === options.bootstrapTurnId)) continue;
+            const observation = taskFor(taskId)?.executionObservation;
+            // The dispatch identity is Core-owned. A prior native turn, internal
+            // bootstrap or stale session cannot replace current user work.
+            const staleRun = observation && (observation.provider !== provider || observation.sessionId !== sessionId
+              || observation.runId !== event?.data?.runId || event?.data?.phase !== 'user');
+            if (event?.type === 'tool/activity' || event?.type === 'tool/result') {
+              taskRuntime.observeExecution?.({ id: taskId, provider, sessionId, runId: event.data?.runId,
+                phase: event.data?.phase, state: event.data?.activity?.status === 'waiting-approval' ? 'waiting-approval' : 'running', toolActivity: true });
+            }
             if (event?.type === 'tool/result') {
               const current = taskFor(taskId);
               if (current?.status === 'running' && current.currentAgent?.provider === provider
@@ -176,11 +186,11 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
                   capability: event.data?.capability, status: event.data?.status,
                   filePath: event.data?.filePath, tool: event.data?.tool,
                   exitCode: event.data?.exitCode, hasChanges: event.data?.hasChanges,
-                  retryCount: event.data?.retryCount });
+                  retryCount: event.data?.retryCount, source: event.data?.source, resultSha256: event.data?.resultSha256 });
                 recordWorkingState(taskId);
               }
             }
-            if (event?.type === 'tool/activity') {
+            if (event?.type === 'tool/activity' && !staleRun) {
               const activity = event.data?.activity;
               const current = taskFor(taskId);
               if (current?.status === 'running' && current.currentAgent?.provider === provider
@@ -205,6 +215,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
             if (event?.type === 'turn/end') {
               sawTurnEnd = true;
               if (['waiting', 'waiting-approval'].includes(event.data?.reason?.kind)) {
+                taskRuntime.observeExecution?.({ id: taskId, provider, sessionId, runId: event.data?.runId, phase: event.data?.phase, state: 'waiting-approval' });
                 consumer.expectedTurns = Math.max(1, consumer.expectedTurns);
                 rememberTaskFollowPosition(key, taskId, consumer.sequence, terminalTurns);
                 continue;
@@ -240,17 +251,21 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
                 taskRuntime.recordAgentReport({ id: taskId, expectedRev: current.rev,
                   provider, sessionId, runId: event.data?.runId, phase: event.data?.phase,
                   eventId: `agent-report:${turnId || event.seq}`,
-                  text: answer.slice(0, 1600) });
+                  text: answer.slice(0, 8000) });
                 const latest = taskFor(taskId);
-                if (!latest.checkpoint?.summary) taskRuntime.setCheckpoint({ id: taskId, expectedRev: latest.rev,
+                if (!staleRun && !latest.checkpoint?.summary) taskRuntime.setCheckpoint({ id: taskId, expectedRev: latest.rev,
                   summary: '[Unverified Agent report]\n' + answer.slice(0, 7900),
                   nextAction: latest.checkpoint?.nextAction ?? '' });
                 recordWorkingState(taskId);
-              } else if (['failed', 'error'].includes(event.data?.reason?.kind)) {
+              } else if (['failed', 'error'].includes(event.data?.reason?.kind) && (!staleRun
+                || /OUTCOME_UNKNOWN|CANCEL_UNCONFIRMED|CLOSE_UNKNOWN|TERMINATION_UNKNOWN/.test(event.data?.reason?.error?.code ?? ''))) {
                 const failureCode = String(event.data?.reason?.error?.code ?? 'Agent turn failed').slice(0, 1000);
                 taskRuntime.block({ id: taskId, expectedRev: current.rev,
-                  reason: failureCode === 'OUTCOME_UNKNOWN' ? 'needs-reconciliation: OUTCOME_UNKNOWN' : failureCode });
+                  reason: /OUTCOME_UNKNOWN|CANCEL_UNCONFIRMED|CLOSE_UNKNOWN|TERMINATION_UNKNOWN/.test(failureCode) ? 'needs-reconciliation: ' + failureCode : failureCode });
               }
+              taskRuntime.observeExecution?.({ id: taskId, provider, sessionId, runId: event.data?.runId, phase: event.data?.phase,
+                state: event.data?.reason?.kind === 'completed' ? 'awaiting-review'
+                  : event.data?.reason?.kind === 'aborted' ? 'cancelled' : 'unknown' });
               // DSH Follow may end once per turn while another request is queued.
               // Keep its independent cursor until all scheduled turns are projected.
               if (consumer.expectedTurns > 0) consumer.expectedTurns -= 1;
@@ -284,6 +299,13 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     });
     return consumer;
   }
+  agentBroker?.setTaskExecutionObserver?.(({ taskId, provider, sessionId, runId, phase, state }) => {
+    if (phase !== 'user' || !taskId) return;
+    if (state === 'running') {
+      taskRuntime.beginExecutionObservation({ id: taskId, provider, sessionId, runId, phase });
+      ensureTaskFollow(provider, sessionId, taskId, { expectTurn: true });
+    } else taskRuntime.observeExecution({ id: taskId, provider, sessionId, runId, phase, state });
+  });
   function stopTaskFollow(provider, sessionId) {
     const key = taskFollowKey(provider, sessionId);
     const consumer = taskFollowConsumers.get(key);
@@ -341,6 +363,11 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     while (workspaceImportStates.size > 1000) workspaceImportStates.delete(workspaceImportStates.keys().next().value);
   }
   function validateWorkspaceImport(request) {
+    const assigned = request.assignment, current = taskFor(request.taskId);
+    if (assigned && current?.executionObservation && (current.currentAgent?.provider !== assigned.provider
+      || current.currentAgent?.sessionId !== assigned.sessionId || current.executionObservation.runId !== assigned.runId)) {
+      throw capabilityError('AGENT_ASSIGNMENT_EXPIRED', 'Workspace import belongs to a stale execution');
+    }
     const changes = request.input?.changes;
     if (!Array.isArray(changes) || changes.length < 1 || changes.length > MAX_AGENT_IMPORT_FILES) {
       throw capabilityError('INVALID_CHANGES', `Workspace import requires 1-${MAX_AGENT_IMPORT_FILES} changes`);
@@ -540,7 +567,17 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
                 tool: request.input.tool, args: request.input.args, timeoutMs: request.input.timeoutMs, signal: request.signal });
             }
             if (id === 'workspace.apply') {
-              return workspaceService.applyChanges({ id: request.workspaceId, changes: request.input.changes, actor: request.actor.id });
+              const result = await workspaceService.applyChanges({ id: request.workspaceId, changes: request.input.changes, actor: request.actor.id });
+              const binding = request.assignment;
+              if (binding?.provider && binding.sessionId && binding.runId && binding.phase === 'user') {
+                const changes = request.input.changes.map(change => ({ action: change.action, path: change.path,
+                  sha256: change.action === 'write' ? sha256(fs.readFileSync(resolveInside(resolveWorkspace(request.workspaceId).root, change.path).absolute)) : null, previousSha256: change.expectedHash ?? null }));
+                taskRuntime.recordToolOutcome({ id: request.taskId, provider: binding.provider, sessionId: binding.sessionId,
+                  runId: binding.runId, phase: binding.phase, eventId: `core-import:${request.requestId}`.slice(0,240),
+                  capability: 'workspace.apply', status: 'completed', source: 'core-import',
+                  resultSha256: sha256(JSON.stringify(changes)), changes });
+              }
+              return result;
             }
             return workspaceService.execute({ method, params: { ...request.input,
               ...(id === 'filesystem.read' ? { maxBytes: request.input.maxBytes ?? request.input.maxChars ?? 8192 } : {}),
@@ -800,7 +837,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
             await agentBroker.status(task.currentAgent);
             if (r.signal?.aborted) throw capabilityError('INVOKE_CANCELLED', 'Agent assignment cancelled');
             if (taskHandoffGuard(task.id)) throw capabilityError('TASK_HANDOFF_IN_FLIGHT', 'Task Handoff owns this execution boundary');
-            ensureTaskFollow(task.currentAgent.provider, task.currentAgent.sessionId, task.id, { expectTurn: true });
+            ensureTaskFollow(task.currentAgent.provider, task.currentAgent.sessionId, task.id, { expectTurn: typeof agentBroker.setTaskExecutionObserver !== 'function' });
             const beforeSend = taskFor(task.id);
             if (beforeSend?.status !== 'running' || beforeSend.currentAgent?.sessionId !== task.currentAgent.sessionId) {
               throw capabilityError('TASK_NOT_RUNNING', 'Task changed before Agent instruction dispatch');
@@ -859,7 +896,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
             startedByRequest = true;
           }
           if (r.signal?.aborted) throw capabilityError('INVOKE_CANCELLED', 'Agent assignment cancelled');
-          ensureTaskFollow(provider, created.sessionId, task.id, { expectTurn: true });
+          ensureTaskFollow(provider, created.sessionId, task.id, { expectTurn: typeof agentBroker.setTaskExecutionObserver !== 'function' });
           const beforeSend = taskFor(task.id);
           if (beforeSend?.status !== 'running' || beforeSend.currentAgent?.sessionId !== created.sessionId) {
             throw capabilityError('TASK_NOT_RUNNING', 'Task changed before Agent instruction dispatch');
@@ -948,6 +985,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
         const resumed = await approvalDecisionListener({ approvalId: params.id,
           requestFingerprint: requestFingerprint(original), decisionResult: result, request: original, signal });
         if (resumed) return { ...result, turnResumed: resumed.resumed === true, resumePending: resumed.pending === true,
+          ...(resumed.pending === true && resumed.approvalId ? { resumeApprovalId: resumed.approvalId } : {}),
           ...(resumed.error ? { resumeError: resumed.error } : {}) };
       }
       if (original.actor.kind === 'agent' && original.taskId && agentBroker) {
@@ -999,15 +1037,16 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       actor: OWNER_ACTOR, input: command, reason: 'Desktop Owner Memory action' });
     return result.result;
   }
-  async function applyAgentWorkspaceChanges({ taskId, workspaceId, provider, sessionId, requestId, changes, summary } = {}) {
+  async function applyAgentWorkspaceChanges({ taskId, workspaceId, provider, sessionId, runId, phase, requestId, changes, summary } = {}) {
     const task = taskFor(String(taskId ?? ''));
     if (!task || task.workspaceId !== String(workspaceId ?? '')
       || !provider || !sessionId || task.currentAgent?.provider !== provider || task.currentAgent?.sessionId !== sessionId) {
       throw capabilityError('TASK_NOT_AUTHORIZED', 'Agent Workspace import requires its Task binding');
     }
+    if (task.executionObservation && task.executionObservation.runId !== runId) throw capabilityError('AGENT_ASSIGNMENT_EXPIRED', 'Workspace import belongs to a stale run');
     const actor = principalForTask(task.id);
     const result = await broker.execute({ actor, taskId: task.id, workspaceId: task.workspaceId,
-      capability: 'workspace.apply', requestId, assignment: { provider, sessionId },
+      capability: 'workspace.apply', requestId, assignment: { provider, sessionId, runId, phase },
       input: { changes, summary }, reason: 'Agent staging Workspace reconciliation' });
     if (result.status === 'pending') rememberWorkspaceImport(result.approvalId, { status: 'pending' });
     return result;
@@ -1022,10 +1061,36 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     if (result.cancelled) rememberWorkspaceImport(row.id, { status: 'cancelled', code: 'INVOKE_CANCELLED' });
     return result;
   }
+  const environment = registerEnvironmentCapabilities({broker,taskRuntime,principalForTask,stateDir,ownedArtifactRoot,client:environmentClient,onChanged:onEnvironmentChanged});
   return { execute, executeWorkspace, executeMemory, broker, grantTask, principalForTask, refreshTaskWorkspaceGrant, memoryPrincipal,
     requestAgentNativeApproval: (request, options) => nativeApproval.request(request, options),
-    cancelTaskOperations: scope => operations.cancelScope(scope),
+    cancelTaskOperations: scope => { environment.cancel(scope); return operations.cancelScope(scope); },
+    verifyTaskImportReceipts(taskId, runId) {
+      const task = taskFor(taskId), latest = new Map();
+      const receipts = (task?.executionEvidence ?? []).filter(row => row.source === 'core-import' && row.status === 'completed'
+        && row.runId === runId && row.provider === task.currentAgent?.provider && row.sessionId === task.currentAgent?.sessionId);
+      for (const receipt of receipts) for (const change of receipt.changes ?? []) latest.set(change.path, change);
+      if (!latest.size) return receipts.length === 0;
+      try {
+        const workspace = resolveWorkspace(task.workspaceId);
+        for (const change of latest.values()) {
+          const file = resolveInside(workspace.root, change.path, { forWrite: change.action === 'delete' }).absolute;
+          if (change.action === 'delete' ? fs.existsSync(file) : sha256(fs.readFileSync(file)) !== change.sha256) return false;
+        }
+        return true;
+      } catch { return false; }
+    },
+    completionBlocker(taskId) {
+      if (environment.blocker(taskId)) return environment.blocker(taskId);
+      if (provisioning.has(taskId) || Object.values(journal).some(row => row?.taskId === taskId && row.status === 'in-flight')) return 'TASK_EXECUTION_UNCONFIRMED';
+      if (operations.list().some(row => ['accepted', 'running', 'waiting', 'unknown'].includes(row.status)
+        && broker.approvals.get(row.approvalId).request?.taskId === taskId)) return 'TASK_EFFECT_UNCONFIRMED';
+      if (broker.approvals.list().some(row => row.request?.taskId === taskId && ['pending', 'approved', 'executing'].includes(row.status))) return 'TASK_APPROVAL_PENDING';
+      if ([...taskFollowConsumers.values()].some(row => row.taskId === taskId && !row.finished && row.expectedTurns > 0)) return 'TASK_EXECUTION_UNCONFIRMED';
+      return null;
+    },
     recoveryForTask(taskId) {
+      if (environment.recovery(taskId)) return environment.recovery(taskId);
       return Object.values(journal).some(row => row?.taskId === taskId && row.status === 'in-flight')
         ? { state: 'needs-reconciliation', capability: 'agent.run' } : null;
     },
@@ -1055,6 +1120,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     },
     applyAgentWorkspaceChanges, workspaceImportStatus, cancelWorkspaceImportApproval,
     async close() {
+      environment.close();
       nativeApproval.close();
       await operations.close();
       const consumers = [...taskFollowConsumers.values()];

@@ -7,6 +7,9 @@ import { readJsonFile } from '../storage/json-file.js';
 // Add new runtime inputs here when extending the adapter/runner domain.
 export const AGENT_EXPANSION_SOURCE_FILES = Object.freeze([
   'src/agent/acp-agent-provider.js', 'src/agent/acp-provider-descriptors.js',
+  'src/agent/auth/index.js', 'src/agent/auth/gemini.js', 'src/agent/auth/opencode.js', 'src/agent/auth/claude.js', 'src/agent/auth/transport.js',
+  'src/agent/runtime-auth-service.js', 'src/agent/runtime-auth-profile.js',
+  'src/agent/runtime-auth-capabilities.js', 'src/agent/runtime-service-presets.js',
   'src/agent/native-acp-runtime.js', 'src/agent/gemini-qwen-runtime.js',
   'src/agent/native-approval-bridge.js', 'src/agent/runtime-configuration.js',
   'src/agent/claude-runtime.js', 'src/agent/installation-discovery.js',

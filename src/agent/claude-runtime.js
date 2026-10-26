@@ -76,7 +76,9 @@ function binaryIdentity(selected) {
 }
 
 /** --version and --help only; no credentials, prompts, GUI, shell or account queries. */
-async function probe(executable, argument) {
+async function probe(executable, argument, ownership={}) {
+  if(ownership.signal?.aborted)throw fault('AGENT_AUTH_CANCELLED');
+  ownership.assertCurrent?.();
   const profile = createClaudeOwnedProfile();
   let child;
   try {
@@ -89,6 +91,12 @@ async function probe(executable, argument) {
     output = Buffer.concat([output, chunk]);
   });
   const closed = new Promise(resolve => child.once('close', code => resolve(code)));
+  const owned={done:closed.then(exitCode=>({exitCode})),async close(){
+    child.kill();let timer;
+    try{await Promise.race([closed,new Promise((_,reject)=>{timer=setTimeout(()=>reject(fault('AGENT_EXIT_UNCONFIRMED')),6000);})]);}
+    finally{clearTimeout(timer);}
+  }};
+  ownership.onHandle?.(owned);
   child.once('error', () => { /* Only close proves this profile is no longer in use. */ });
   const timer = setTimeout(() => { timedOut = true; child.kill(); }, 3000);
   let watchdog;
@@ -105,7 +113,7 @@ async function probe(executable, argument) {
 /** Exact SDK bytes are checked without evaluating a vendor module or creating a session. */
 export function createClaudeRuntimeVerifier({ resourceRoot = APP_PATHS.resourceRoot, envSource = process.env } = {}) {
   const proofs = new Map();
-  return Object.freeze({ async inspect(runtimePath = '') {
+  return Object.freeze({ async inspect(runtimePath = '', ownership={}) {
     const selected = runtimePath || path.join(envSource.USERPROFILE || envSource.HOME || os.homedir(), '.local', 'bin', process.platform === 'win32' ? 'claude.exe' : 'claude');
     let identity;
     try { identity = binaryIdentity(selected); }
@@ -114,10 +122,10 @@ export function createClaudeRuntimeVerifier({ resourceRoot = APP_PATHS.resourceR
     let proof = proofs.get(identity.binaryHash);
     if (!proof) {
       try {
-        const versionOutput = await probe(identity.runtimePath, '--version');
+        const versionOutput = await probe(identity.runtimePath, '--version', ownership);
         const version = /^(\d+\.\d+\.\d+) \(Claude Code\)$/.exec(versionOutput)?.[1];
         if (!version) throw fault('claude_code_identity_unverified');
-        const help = await probe(identity.runtimePath, '--help');
+        const help = await probe(identity.runtimePath, '--help', ownership);
         if (!HELP_FLAGS.every(flag => help.includes(flag)) || !/Claude Code/i.test(help)) throw fault('claude_code_protocol_unverified');
         if (binaryIdentity(selected).binaryHash !== identity.binaryHash) throw fault('claude_code_binary_changed');
         proof = { version }; proofs.set(identity.binaryHash, proof);

@@ -1,3 +1,4 @@
+import { runtimeConnectionEvidence } from './runtime-auth-capabilities.js';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { CliAgentProcess, createMinimalAgentEnv, terminateCliProcessTree } from './cli-agent-process.js';
@@ -25,7 +26,7 @@ export function discoverAcpRuntime(id) {
 /** Raw pipes; done means observed process close, never signal delivery. */
 export function createAcpProcessLauncher({executable,argv,spawnImpl=spawn,envSource=process.env,trustedEnvironment,terminationTimeoutMs=5000} = {}) {
   return ({cwd,onHandle}) => {
-    const allowed=new Set(['HOME','USERPROFILE','APPDATA','LOCALAPPDATA','PROGRAMDATA','HOMEDRIVE','HOMEPATH','TEMP','TMP','TMPDIR','XDG_CONFIG_HOME','XDG_DATA_HOME','XDG_STATE_HOME','XDG_CACHE_HOME','OPENCODE_CONFIG_CONTENT','OPENCODE_CONFIG_DIR','OPENCODE_DISABLE_PROJECT_CONFIG','OPENCODE_PURE','OPENCODE_DISABLE_EXTERNAL_SKILLS','OPENCODE_DISABLE_AUTOUPDATE','OPENCODE_DISABLE_MODELS_FETCH','OPENCODE_LOG_LEVEL','CETAMESH_AGENT_API_KEY','GEMINI_CLI_HOME','GEMINI_CLI_NO_RELAUNCH','GEMINI_CLI_SYSTEM_SETTINGS_PATH','GEMINI_CLI_SYSTEM_DEFAULTS_PATH','GEMINI_CLI_TRUST_WORKSPACE','GOOGLE_GEMINI_BASE_URL','GEMINI_API_KEY','QWEN_HOME','QWEN_CODE_SYSTEM_SETTINGS_PATH','QWEN_CODE_SYSTEM_DEFAULTS_PATH','QWEN_CODE_DISABLE_WORKFLOWS','NO_BROWSER','OPENAI_BASE_URL','OPENAI_API_KEY']);
+    const allowed=new Set(['CLAUDE_CONFIG_DIR','HOME','USERPROFILE','APPDATA','LOCALAPPDATA','PROGRAMDATA','HOMEDRIVE','HOMEPATH','TEMP','TMP','TMPDIR','XDG_CONFIG_HOME','XDG_DATA_HOME','XDG_STATE_HOME','XDG_CACHE_HOME','OPENCODE_CONFIG_CONTENT','OPENCODE_CONFIG_DIR','OPENCODE_DISABLE_PROJECT_CONFIG','OPENCODE_PURE','OPENCODE_DISABLE_EXTERNAL_SKILLS','OPENCODE_DISABLE_AUTOUPDATE','OPENCODE_DISABLE_MODELS_FETCH','OPENCODE_LOG_LEVEL','CETAMESH_AGENT_API_KEY','GEMINI_CLI_HOME','GEMINI_CLI_NO_RELAUNCH','GEMINI_CLI_SYSTEM_SETTINGS_PATH','GEMINI_CLI_SYSTEM_DEFAULTS_PATH','GEMINI_CLI_TRUST_WORKSPACE','GOOGLE_GEMINI_BASE_URL','GEMINI_API_KEY','QWEN_HOME','QWEN_CODE_SYSTEM_SETTINGS_PATH','QWEN_CODE_SYSTEM_DEFAULTS_PATH','QWEN_CODE_DISABLE_WORKFLOWS','NO_BROWSER','OPENAI_BASE_URL','OPENAI_API_KEY']);
     const overrides=typeof trustedEnvironment==='function' ? trustedEnvironment() : trustedEnvironment ?? {};
     if(Object.entries(overrides).some(([key,value])=>!allowed.has(key) || typeof value!=='string' || /[\0]/.test(value))) throw agentProviderError('ACP_ENVIRONMENT_INVALID','Unsupported trusted runtime environment');
     const child=spawnImpl(executable,[...argv],{cwd,env:{...createMinimalAgentEnv(envSource),...overrides},shell:false,windowsHide:true,
@@ -151,7 +152,8 @@ function configuredProvider(spec,{runtimeConfiguration,launchFactory,taskOptions
         installed:Boolean(runtime?.executable),compatible:runtime?.compatible===true,version:runtime?.version??null,
         reason:reason ?? health.reason,protocolVerified:runtime?.compatible===true,
         authConfigured:configuration.credentialConfigured===true,authVerified:false,
-        authentication:configuration.credentialConfigured?'configured-unverified':'not-configured',runtimeConfiguration:configuration};
+        authentication:configuration.credentialConfigured?'configured-unverified':'not-configured',runtimeConfiguration:configuration,
+        connection:runtimeConnectionEvidence({provider:spec.id,runtimeEvidence:runtime,configuration,taskEligible:!reason && health.taskEligible,reason:reason ?? health.reason})};
     },
     configure(settings={}){if(sessions.size || creating)throw agentProviderError('AGENT_RUNTIME_BUSY','Close Agent sessions before changing runtime configuration');return discovery.configure(settings);},
     async createSession(params){if(shuttingDown)throw agentProviderError('PROVIDER_SHUTTING_DOWN','ACP provider is shutting down');if(reason || !provider)throw agentProviderError('PROVIDER_UNAVAILABLE','Check the configured ACP connection first');
