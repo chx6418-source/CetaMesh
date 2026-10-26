@@ -63,7 +63,18 @@ try {
   assert.equal(fs.readFileSync(path.join(snapshotSession.cwd,'visible.txt'),'utf8'),'visible');
   assert.equal(fs.existsSync(path.join(snapshotSession.cwd,'nested-project','other-project.txt')),false,'registered nested workspace never enters native staging');
   assert.equal(fs.existsSync(path.join(snapshotSession.cwd,'opencode.json')),false,'trusted runtime policy files are excluded from project snapshot');
-  assert.ok(path.relative(path.join(root,'owned-stages'),snapshotSession.cwd).split(path.sep)[0]!=='..','owned staging root is honored');
+  const ownedStageRoot=fs.realpathSync.native(path.join(root,'owned-stages'));
+  const stagedCwd=fs.realpathSync.native(snapshotSession.cwd);
+  const insideOwnedStage=candidate=>{
+    const relative=path.relative(ownedStageRoot,candidate);
+    return !!relative && relative!=='..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+  };
+  assert.equal(insideOwnedStage(ownedStageRoot),false,'staging root itself is not a session directory');
+  assert.equal(insideOwnedStage(path.dirname(ownedStageRoot)),false,'staging parent is outside');
+  assert.equal(insideOwnedStage(path.join(path.dirname(ownedStageRoot),'owned-stages-neighbor')),false,'adjacent directory is outside');
+  assert.equal(insideOwnedStage(fs.realpathSync.native(snapshotSource)),false,'actual Workspace outside staging is rejected');
+  assert.ok(insideOwnedStage(stagedCwd),
+    `owned staging root is honored: expected ${ownedStageRoot}, got ${stagedCwd}`);
   await snapshotProvider.closeSession(snapshotSession);
   const invalidSnapshot=provider({snapshotExcludedPaths:['../outside']});
   await assert.rejects(invalidSnapshot.createSession({taskId:'bad-policy',workspaceId:'w'}),{code:'ACP_SNAPSHOT_POLICY_INVALID'});
