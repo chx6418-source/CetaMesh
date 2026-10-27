@@ -1432,7 +1432,9 @@ export function createChatService({
             turn.state = result.status === 'partial' ? 'error' : 'done';
             if (result.status === 'partial') {
               turn.errorCode = result.code ?? 'TOOL_CALL_LIMIT';
-              turn.error = 'Tool execution limit reached before the request completed.';
+              turn.error = result.code === 'OUTCOME_UNKNOWN'
+                ? '上一次操作的结果尚未确认，请先核对实际状态后再继续。'
+                : 'Tool execution limit reached before the request completed.';
             }
             finalizeTurn(record, state);
           }
@@ -2144,7 +2146,9 @@ export function createChatService({
       state.turn.state = result.status === 'partial' ? 'error' : 'done';
       if (result.status === 'partial') {
         state.turn.errorCode = result.code ?? 'TOOL_CALL_LIMIT';
-        state.turn.error = 'Tool execution limit reached before the request completed.';
+        state.turn.error = result.code === 'OUTCOME_UNKNOWN'
+          ? '上一次操作的结果尚未确认，请先核对实际状态后再继续。'
+          : 'Tool execution limit reached before the request completed.';
       }
       delete state.turn.approvalId;
       delete state.turn.approvalExpiresAt;

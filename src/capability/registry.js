@@ -1,4 +1,4 @@
-import { capabilityError } from './types.js';
+import { CAPABILITY_EFFECTS, capabilityError } from './types.js';
 
 function schemaOf(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? structuredClone(value) : null;
@@ -12,6 +12,9 @@ export function createCapabilityRegistry() {
         throw capabilityError('INVALID_CAPABILITY', 'id and execute required');
       }
       const id = String(definition.id).trim();
+      if (definition.effect !== undefined && !CAPABILITY_EFFECTS.includes(definition.effect)) {
+        throw capabilityError('INVALID_CAPABILITY', 'Unknown capability effect');
+      }
       if (entries.has(id)) throw capabilityError('CAPABILITY_EXISTS', id);
       const risk = definition.risk ?? 'low';
       const entry = Object.freeze({
@@ -57,6 +60,7 @@ export function createCapabilityRegistry() {
       availability: typeof entry.availability === 'string' ? entry.availability : (entry.available === true ? 'available' : 'unavailable'),
       requiresApproval: entry.requiresApproval === true,
       modelCallable: entry.modelCallable !== false,
+      ...(entry.effect ? { effect: entry.effect } : {}),
       ...(entry.descriptorVersion ? { descriptorVersion: entry.descriptorVersion } : {}),
       ...(entry.description ? { description: entry.description } : {}),
       ...(entry.inputSchema ? { inputSchema: structuredClone(entry.inputSchema) } : {}),

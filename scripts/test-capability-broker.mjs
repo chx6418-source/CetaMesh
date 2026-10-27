@@ -111,7 +111,20 @@ try {
  assert.equal(expiring.broker.approvals.list().length,0,'expired approvals leave the actionable inbox');
  await deny(expiring.execute({method:'capability.approval.decide',params:{id:expiringPending.approvalId,approve:true}}),'APPROVAL_EXPIRED');
  assert.equal(expiredExecuted,0,'expired approval cannot dispatch its capability');
+ let declaredEffects=0;
+ const effectDefinition={id:'fixture.declared-effect',permission:'extension.invoke',effect:'unknown',risk:'low',
+  execute:()=>{declaredEffects++;return {performed:true};}};
+ svc.broker.register(effectDefinition);
+ assert.throws(()=>svc.broker.register({id:'fixture.invalid-effect',effect:'assume-safe',execute:()=>{}}),{code:'INVALID_CAPABILITY'});
+ const effectRequest=req(effectDefinition.id,{target:'fixture'},{requestId:'declared-effect-once',effect:'read-only'});
+ await svc.broker.execute(effectRequest);
+ await deny(svc.broker.execute(effectRequest),'REQUEST_ALREADY_DISPATCHED');
+ assert.equal(declaredEffects,1,'request payload cannot override the server-owned effect classification');
+ await deny(svc.broker.execute({...effectRequest,input:{target:'changed'}}),'REQUEST_ID_CONFLICT');
  const restart=createCapabilityService({stateDir:path.join(dir,'state'),workspaceService,taskRuntime});
+ restart.broker.register(effectDefinition);
+ await deny(restart.broker.execute(effectRequest),'REQUEST_ALREADY_DISPATCHED');
+ assert.equal(declaredEffects,1,'the existing dispatch journal retains the effect fence across restart');
  assert.equal(restart.principalForTask(task.id).grants.workspaceIds[0],ws);
  console.log('PASS capability broker: registry, permission, boundary, owner approval, replay/tamper, external denial, task grants and desktop actor binding');
 } finally {fs.rmSync(dir,{recursive:true,force:true});}

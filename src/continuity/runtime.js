@@ -47,6 +47,17 @@ const AUTO_ROLLOVER_ACTIONS = Object.freeze(['rollover', 'forced', 'emergency'])
 /** 每个 Task 保留的 handoff packet / reconciliation 文件数上限（更旧的在写入时清理）。 */
 const PACKET_FILES_KEEP = 20;
 
+function assertHandoffIdle(status) {
+  const uncertain = new Set(['unknown', 'outcome-unknown', 'reconciliation-required']);
+  if (status?.running !== false || status.runtimeValid === false
+    || uncertain.has(status.state) || uncertain.has(status.lastRunStatus)
+    || status.effectStatus === 'unknown'
+    || (status.queued !== undefined && status.queued !== 0)
+    || (status.waitingForApproval != null && status.waitingForApproval !== false)) {
+    throw continuityError('ROLLOVER_NOT_SAFE', 'Agent execution is active or unverified; reconcile its state before transferring Task authority');
+  }
+}
+
 function loadContinuityFile(file, fallback) {
   try {
     return readJsonFile(file, { missing: fallback });
@@ -536,9 +547,7 @@ export function createContinuityRuntime({
         // inactive; all other status/auth/transport failures still fail closed.
         status = { running: false, queued: 0, waitingForApproval: false, stale: true };
       }
-      if (status.running || status.queued > 0 || status.waitingForApproval) {
-        throw continuityError('ROLLOVER_NOT_SAFE', 'Agent has active work or an unresolved Owner approval');
-      }
+      assertHandoffIdle(status);
       previousStatus = status;
       const target = targetProvider ? agentBroker.require(targetProvider) : agentBroker.require(previousAgent.provider);
       if (!taskBoundaries.has(target.capabilities().workspaceBoundary)) {
@@ -639,9 +648,7 @@ export function createContinuityRuntime({
         }
         try {
           const afterStop = await agentBroker.status(previousAgent);
-          if (afterStop.running || afterStop.queued > 0 || afterStop.waitingForApproval) {
-            throw continuityError('ROLLOVER_NOT_SAFE', '旧 Agent 仍有活跃执行，拒绝转移 Task 执行权');
-          }
+          assertHandoffIdle(afterStop);
         } catch (statusError) {
           if (statusError?.code !== 'SESSION_NOT_FOUND') throw statusError;
         }

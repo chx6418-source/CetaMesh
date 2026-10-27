@@ -8,7 +8,8 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
  function claimDispatch(request,entry){
   // Only effects that may outlive a local Abort need durable replay protection.
   // Agent provisioning is intentionally retried by Workshop with its stable requestId.
-  if(!['message.send','filesystem.write','git.commit','test.run','publish','network'].includes(entry.permission)||entry.id==='workspace.create')return;
+  const declaredEffect=entry.effect && entry.effect!=='read-only';
+  if((!declaredEffect&&!['message.send','filesystem.write','git.commit','test.run','publish','network'].includes(entry.permission))||entry.id==='workspace.create')return;
   const key=request.requestId, fingerprint=requestFingerprint(request), previous=Object.hasOwn(dispatches,key)?dispatches[key]:null;
   if(previous){
    if(previous.fingerprint!==fingerprint)throw capabilityError('REQUEST_ID_CONFLICT','Request ID reused with different data');
@@ -67,7 +68,16 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
     const authorized=policy.authorize(request,entry);
     if(authorized&&typeof authorized.then==='function')await authorized;
     if(signal?.aborted)throw abortError(signal);
-    return entry.execute(providerRequest);
+    try{return await entry.execute(providerRequest);}
+    catch(error){
+     // Once a declared effect reaches its executor, a rejected response is not
+     // proof that nothing happened. Do not let the model recover by replaying it.
+     if(entry.effect&&entry.effect!=='read-only'){
+      const uncertain=capabilityError(typeof error?.code==='string'?error.code:'PROVIDER_ERROR','Capability failed after dispatch; verify its effect before retrying');
+      uncertain.effectStatus='unknown';throw uncertain;
+     }
+     throw error;
+    }
    });
    providerPromise.then(()=>settleDispatch(request,'completed'),error=>settleDispatch(request,error.effectStatus==='unknown'?'outcome-unknown':'failed'));
    const result=await (entry.cancellationAware===true&&request.actor.kind==='agent'?providerPromise:awaitWithAbort(providerPromise,signal));

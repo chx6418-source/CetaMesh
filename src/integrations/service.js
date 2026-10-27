@@ -260,19 +260,22 @@ export function createIntegrationService({
   function registerCapabilities() {
     const descriptors = {
       [TOOL_CAPABILITIES.read]: {
+        effect: 'read-only',
         description: 'Read or invoke an available integration tool through the registered tool broker.',
         inputSchema: toolCallSchema
       },
       [TOOL_CAPABILITIES.write]: {
+        effect: 'unknown',
         description: 'Invoke an available integration tool that may change local or connected data.',
         inputSchema: toolCallSchema
       },
       [TOOL_CAPABILITIES.admin]: {
+        effect: 'unknown',
         description: 'Invoke a high-risk registered integration tool after Owner approval.',
         inputSchema: toolCallSchema
       },
-      [TOOL_CAPABILITIES.mcpManage]: { modelCallable: false },
-      [TOOL_CAPABILITIES.pluginManage]: { modelCallable: false }
+      [TOOL_CAPABILITIES.mcpManage]: { modelCallable: false, effect: 'unknown' },
+      [TOOL_CAPABILITIES.pluginManage]: { modelCallable: false, effect: 'unknown' }
     };
     for (const [id, permission] of Object.entries(TOOL_CAPABILITY_PERMISSION)) {
       if (broker.registry.has(id)) continue; // 幂等：容器共享同一 broker 时不重复注册

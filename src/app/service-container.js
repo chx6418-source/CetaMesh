@@ -465,6 +465,11 @@ export function createCetaMeshServices(options = {}) {
   });
 
   capabilityService.setApprovalDecisionListener(async decision => {
+    if (decision.decisionResult?.status === 'outcome-unknown') {
+      // Persist the effect before optional Chat/Agent projection, which can be
+      // absent after stop/delete. A presentation failure cannot clear recovery.
+      toolExecutionCoordinator.recordApprovalOutcomeUnknown(decision);
+    }
     const target = toolExecutionCoordinator.pendingTarget(decision.approvalId);
     if (target?.kind === 'chat') return chatService.resumeApproval(decision);
     if (target?.kind === 'agent') return managedAgent.resumeApproval(decision);

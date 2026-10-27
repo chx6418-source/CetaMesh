@@ -381,7 +381,49 @@ function setup({ policy, gate, failSendProvider, alphaStatusError, reconciler, b
   ok('old Agent stop failure keeps the original Task owner and records no successful handoff');
 }
 
-// Phase 3 regressions: the in-flight lock covers asynchronous status inspection.
+// Managed Agent represents no pending approval as null, not false.
+{
+  const { runtime, taskRuntime, broker, rev } = setup();
+  const task = taskRuntime.create({ goal: 'Preserve the Managed Agent idle contract', workspaceId: 'ws-null-approval' });
+  taskRuntime.attachAgent({ id: task.id, expectedRev: rev(task.id), provider: 'alpha', sessionId: 'alpha-old' });
+  broker.status = async () => ({ running: false, queued: 0, waitingForApproval: null });
+  const result = await runtime.rollover({ taskId: task.id, targetProvider: 'beta' });
+  assert.equal(result.to.provider, 'beta');
+  ok('explicit idle status with no pending approval supports handoff');
+}
+
+// Unknown source state must be rejected before transfer.
+for (const status of [{}, { running: false, state: 'unknown' },
+  { running: false, lastRunStatus: 'unknown' }, { running: false, runtimeValid: false }]) {
+  const { runtime, taskRuntime, broker, log, rev } = setup();
+  const task = taskRuntime.create({ goal: 'Unknown execution state cannot transfer authority', workspaceId: 'ws-unknown-state' });
+  taskRuntime.attachAgent({ id: task.id, expectedRev: rev(task.id), provider: 'alpha', sessionId: 'alpha-old' });
+  broker.status = async () => status;
+  await assert.rejects(runtime.rollover({ taskId: task.id, targetProvider: 'beta' }),
+    error => error.code === 'ROLLOVER_NOT_SAFE');
+  assert.equal(log.some(row => row.kind === 'create'), false, 'unknown source status must stop before target creation');
+  assert.deepEqual(taskRuntime.get({ id: task.id }).task.currentAgent, { provider: 'alpha', sessionId: 'alpha-old' });
+  assert.equal(runtime.history({ taskId: task.id }).total, 0);
+}
+ok('missing or explicitly unknown source status cannot be treated as an idle execution');
+
+{
+  const { runtime, taskRuntime, broker, log, rev } = setup();
+  const task = taskRuntime.create({ goal: 'Cancellation acknowledgement is not proof of quiescence', workspaceId: 'ws-post-stop-unknown' });
+  taskRuntime.attachAgent({ id: task.id, expectedRev: rev(task.id), provider: 'alpha', sessionId: 'alpha-old' });
+  let statusReads = 0;
+  broker.status = async () => ++statusReads === 1 ? { running: false } : { running: false, lastRunStatus: 'unknown' };
+  await assert.rejects(runtime.rollover({ taskId: task.id, targetProvider: 'beta' }),
+    error => error.code === 'ROLLOVER_NOT_SAFE');
+  assert.equal(log.some(row => row.kind === 'prompt'), false, 'no bootstrap may start when post-cancel status is unknown');
+  const after = taskRuntime.get({ id: task.id }).task;
+  assert.equal(after.status, 'blocked');
+  assert.equal(after.currentAgent, null);
+  assert.equal(runtime.history({ taskId: task.id }).total, 0);
+  ok('unknown state after cancellation blocks handoff and preserves the Task for reconciliation');
+}
+
+// The in-flight lock covers asynchronous status inspection.
 {
   const { runtime, taskRuntime, broker, rev } = setup();
   const task = taskRuntime.create({ goal: 'Single handoff at a time', workspaceId: 'ws-lock' });

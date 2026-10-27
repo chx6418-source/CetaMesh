@@ -196,6 +196,7 @@ export function createToolExecutionCoordinator({
   if (!continuations || typeof continuations !== 'object' || Array.isArray(continuations)) {
     fail('TOOL_CONTINUATION_STORE_CORRUPT', 'Tool continuation store is invalid');
   }
+  const activeTurns = new Set();
 
   function save() {
     if (!continuationFile) return;
@@ -226,6 +227,23 @@ export function createToolExecutionCoordinator({
     orphanedOnRestart = true;
   }
   if (orphanedOnRestart) save();
+
+  // A failed model-journal write followed by stop may remove its continuation.
+  // Recover uncertainty from the already durable Broker intent/outcome instead
+  // of interpreting an old approval-pending projection as proof of no effect.
+  for (const [id, row] of Object.entries(executions)) {
+    if (row?.status !== 'approval-pending' || !row.approvalId) continue;
+    let dispatch = capabilityBroker.dispatchStatus?.(id);
+    if (!dispatch) {
+      let approval;
+      try { approval = capabilityBroker.approvals?.get(row.approvalId); }
+      catch (error) { if (error?.code === 'APPROVAL_NOT_FOUND') continue; throw error; }
+      dispatch = capabilityBroker.dispatchStatus?.(approval?.request?.requestId);
+    }
+    if (dispatch && ['started', 'outcome-unknown', 'completed'].includes(dispatch.status)) {
+      recordExecution(id, { status: 'outcome-unknown', code: 'APPROVAL_DISPATCH_RECOVERY_REQUIRED' });
+    }
+  }
 
   function recordExecution(requestId, data) {
     executions[requestId] = { ...executions[requestId], ...data };
@@ -613,10 +631,22 @@ export function createToolExecutionCoordinator({
 
   async function run({ providerId, model, reasoning, messages = [], manifest = [], actor, sessionId, turnId, targetKind = 'chat', scope = {}, signal, refreshContext, onCapabilityResult, onActivity, onTextDelta, onStreamReset } = {}) {
     if (!actor || !['owner', 'agent'].includes(actor.kind) || typeof actor.id !== 'string') fail('UNAUTHORIZED', 'Trusted Model actor required');
+    const normalizedSessionId = String(sessionId ?? 'session').slice(0, 160);
+    const normalizedTurnId = turnId == null ? null : String(turnId).slice(0, 160);
+    const turnKey = normalizedTurnId === null ? null : JSON.stringify([normalizedSessionId, normalizedTurnId]);
     if ((scope.taskId && recoveryForTask(scope.taskId)?.state === 'needs-reconciliation')
       || recoveryForSession(sessionId)?.state === 'needs-reconciliation') {
       fail('REQUEST_RECOVERY_REQUIRED', 'Review the uncertain tool result before continuing');
     }
+    // A caller may retry the same logical turn after losing its response. Its
+    // tool request IDs would otherwise be reused while the Broker is called
+    // again, including for writes already recorded as completed.
+    if ((turnKey && activeTurns.has(turnKey)) || (normalizedTurnId !== null && Object.values(executions).some(row =>
+      row?.sessionId === normalizedSessionId && row?.turnId === normalizedTurnId))) {
+      fail('REQUEST_RECOVERY_REQUIRED', 'This turn already dispatched a tool; inspect its recorded outcome before starting a new turn');
+    }
+    if (turnKey) activeTurns.add(turnKey);
+    try {
     const supports = typeof modelRuntime.supportsToolCalling === 'function'
       ? await modelRuntime.supportsToolCalling(providerId, model)
       : true;
@@ -647,6 +677,24 @@ export function createToolExecutionCoordinator({
       clearTimeout(timer);
       signal?.removeEventListener('abort', abort);
     }
+    } finally {
+      if (turnKey) activeTurns.delete(turnKey);
+    }
+  }
+
+  function recordApprovalOutcomeUnknown({ approvalId, requestFingerprint, decisionResult } = {}) {
+    const continuation = continuations[String(approvalId ?? '')];
+    const expected = continuation?.requestFingerprint ?? capabilityBroker.approvals?.get(approvalId)?.fingerprint;
+    if (!expected || expected !== requestFingerprint) fail('APPROVAL_MISMATCH', 'Approval outcome fingerprint mismatch');
+    const rows = Object.entries(executions).filter(([, row]) => row?.approvalId === approvalId);
+    if (!rows.length && continuation) rows.push([`approval:${approvalId}`, {
+      sessionId: continuation.target.sessionId, turnId: continuation.target.turnId,
+      taskId: continuation.state.scope?.taskId ?? null, capability: continuation.state.pendingCapability,
+      approvalId, at: Date.now()
+    }]);
+    for (const [id, row] of rows) recordExecution(id, { ...row, status: 'outcome-unknown',
+      code: String(decisionResult?.error?.code ?? 'OUTCOME_UNKNOWN').slice(0, 100) });
+    return { recorded: rows.length };
   }
 
   async function resumeApproval({ approvalId, requestFingerprint, decisionResult, signal, refreshContext, onCapabilityResult, onTextDelta, onStreamReset } = {}) {
@@ -657,6 +705,27 @@ export function createToolExecutionCoordinator({
     }
     if (continuation.requestFingerprint !== requestFingerprint) fail('APPROVAL_MISMATCH', 'Approval continuation fingerprint mismatch');
     if (decisionResult?.status === 'pending') fail('APPROVAL_NOT_DECIDED', 'Approval decision is still pending');
+    if (decisionResult?.status === 'outcome-unknown') {
+      recordApprovalOutcomeUnknown({ approvalId, requestFingerprint, decisionResult });
+      if (typeof onCapabilityResult === 'function') await onCapabilityResult({
+        capability: continuation.state.pendingCapability, result: decisionResult,
+        input: continuation.state.pendingInput ?? {},
+        eventId: `${continuation.target.turnId}:${continuation.state.pendingToolCallId}`.slice(0, 240),
+        ...continuation.target, scope: continuation.state.scope
+      });
+      delete continuations[String(approvalId)];
+      try { save(); } catch (error) { continuations[String(approvalId)] = continuation; throw error; }
+      return { status: 'partial', code: 'OUTCOME_UNKNOWN', toolCalling: 'supported', text: '',
+        usage: continuation.state.usage ?? null, resolvedModel: continuation.state.resolvedModel ?? null,
+        totalCalls: continuation.state.totalCalls, target: continuation.target, targetKind: continuation.targetKind };
+    }
+    // Distinguish a durably consumed result from a stale pending projection;
+    // startup must review the latter even if the external effect completed late.
+    for (const [id, row] of Object.entries(executions)) {
+      if (row?.approvalId === approvalId) recordExecution(id, {
+        status: decisionResult?.status === 'completed' ? 'completed' : 'failed'
+      });
+    }
     const state = {
       ...continuation.state,
       targetKind: continuation.targetKind,
@@ -744,7 +813,7 @@ export function createToolExecutionCoordinator({
       ? { ...entry.target, kind: entry.targetKind ?? 'chat' } : null;
   }
 
-  return { run, resumeApproval, pendingTarget, cancelSession, recoveryForSession, recoveryForTask,
+  return { run, resumeApproval, recordApprovalOutcomeUnknown, pendingTarget, cancelSession, recoveryForSession, recoveryForTask,
     acknowledgeTaskRecovery };
 }
 

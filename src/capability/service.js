@@ -976,7 +976,22 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     execute: (params, context) => decideApproval(params, context), notify: onOperation });
   async function decideApproval(params, { signal } = {}) {
       const original = broker.approvals.get(params.id).request;
-      const result = await broker.decide({ id: params.id, approve: params.approve === true, actor: OWNER_ACTOR }, { signal });
+      let result;
+      try { result = await broker.decide({ id: params.id, approve: params.approve === true, actor: OWNER_ACTOR }, { signal }); }
+      catch (error) {
+        if (error?.effectStatus === 'unknown' || error?.code === 'INVOKE_CANCEL_UNCONFIRMED') {
+          if (original.capability === 'workspace.apply') rememberWorkspaceImport(params.id, {
+            status: 'outcome-unknown', code: error.code ?? 'OUTCOME_UNKNOWN' });
+          if (typeof approvalDecisionListener === 'function') {
+            try { await approvalDecisionListener({ approvalId: params.id, requestFingerprint: requestFingerprint(original),
+              decisionResult: { status: 'outcome-unknown', error: { code: error.code ?? 'OUTCOME_UNKNOWN' } },
+              request: original, signal }); }
+            catch (resumeError) { audit({ requestId: original.requestId, capability: original.capability,
+              status: 'recovery-record-failed', code: resumeError?.code ?? 'TOOL_RESUME_FAILED' }); }
+          }
+        }
+        throw error;
+      }
       if (original.capability === 'workspace.apply') rememberWorkspaceImport(params.id, {
         status: result.status,
         ...(result.status === 'completed' ? { result: result.result } : {})
