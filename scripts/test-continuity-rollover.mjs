@@ -12,7 +12,7 @@ import { createAgentProviderRegistry } from '../src/agent/registry.js';
 import { createAgentBroker } from '../src/agent/broker.js';
 import { createContinuityService } from '../src/continuity/service.js';
 import { bandFor, normalizePacket } from '../src/continuity/types.js';
-import { writeJsonAtomic } from '../src/storage/json-file.js';
+import { readJsonFile, writeJsonAtomic } from '../src/storage/json-file.js';
 
 const root = path.resolve(import.meta.dirname, '..');
 const tempRoot = process.env.WHALEBRIDGE_TEST_TMPDIR || os.tmpdir();
@@ -86,7 +86,7 @@ function mockProvider(id, log, options = {}) {
 }
 
 /** 每组独立 stateDir；task 写操作统一带最新 rev（store 乐观锁）。 */
-function setup({ policy, gate, failSendProvider, alphaStatusError, reconciler, betaBootstrapGate, onHandoffComplete } = {}) {
+function setup({ policy, gate, failSendProvider, alphaStatusError, reconciler, betaBootstrapGate, onHandoffComplete, readOperations } = {}) {
   const log = [];
   const dir = fs.mkdtempSync(path.join(stateRoot, 'case-'));
   const taskRuntime = createTaskRuntime({ stateDir: dir });
@@ -97,11 +97,49 @@ function setup({ policy, gate, failSendProvider, alphaStatusError, reconciler, b
   registry.register(alpha);
   registry.register(beta);
   const broker = createAgentBroker({ registry });
-  const service = createContinuityService({ taskRuntime, stateDir: dir, agentBroker: broker, policy, reconciler, onHandoffComplete });
+  const service = createContinuityService({ taskRuntime, stateDir: dir, agentBroker: broker, policy, reconciler, onHandoffComplete, readOperations });
   return { service, runtime: service.runtime, broker, taskRuntime, log, rev, dir };
 }
 
 // ── 4a. Core restart: only SESSION_NOT_FOUND triggers a safe fresh-session handoff ──
+{
+  const {runtime,taskRuntime,rev,log,dir}=setup({policy:{maxAutomaticNoProgress:1,maxAutomaticSwitches:2}});
+  const task=taskRuntime.create({goal:'Bound automatic no-progress switches',workspaceId:'ws-switch-budget'});
+  taskRuntime.attachAgent({id:task.id,expectedRev:rev(task.id),provider:'alpha',sessionId:'alpha-budget'});
+  await runtime.rollover({taskId:task.id,targetProvider:'beta',automatic:true});
+  const creates=log.filter(row=>row.kind==='create').length;
+  taskRuntime.addWork({id:task.id,expectedRev:rev(task.id),kind:'completed',text:'model claims progress without evidence'});
+  await assert.rejects(runtime.rollover({taskId:task.id,targetProvider:'alpha',automatic:true}),{code:'HANDOFF_NO_PROGRESS'});
+  assert.equal(log.filter(row=>row.kind==='create').length,creates,'automatic loops stop before creating another executor');
+  await runtime.rollover({taskId:task.id,targetProvider:'alpha',reason:'owner-request'});
+  assert.equal(taskRuntime.get({id:task.id}).task.id,task.id,'explicit Owner handoff remains available after automatic budget exhaustion');
+  runtime.setPolicy({maxAutomaticSwitches:1,maxAutomaticNoProgress:100});
+  const historyFile=path.join(dir,'continuity','rollovers.json');
+  const history=readJsonFile(historyFile);
+  writeJsonAtomic(historyFile,{...history,rollovers:Array.from({length:200},(_,index)=>({taskId:'another-task-'+index,sequence:1}))});
+  await assert.rejects(runtime.rollover({taskId:task.id,targetProvider:'beta',automatic:true}),{code:'HANDOFF_BUDGET_EXHAUSTED'});
+  ok('automatic no-progress handoff budget cannot be reset by model-authored progress');
+}
+
+{
+  const operations=[{operationId:'stable-file-operation',capability:'filesystem.write',status:'completed',attemptId:'attempt-before-switch',requestId:'original-dispatch',at:1,
+    input:{secret:'DO_NOT_EXPORT_OPERATION_INPUT'},retainedResult:{secret:'DO_NOT_EXPORT_OPERATION_RESULT'}}];
+  const {runtime,taskRuntime,rev,log}=setup({readOperations:()=>operations});
+  const task=taskRuntime.create({goal:'Continue remaining operations',workspaceId:'operation-workspace'});
+  taskRuntime.attachAgent({id:task.id,expectedRev:rev(task.id),provider:'alpha',sessionId:'alpha-old'});
+  const result=await runtime.rollover({taskId:task.id,targetProvider:'beta'});
+  const packet=runtime.buildHandoffPacket({taskId:task.id});
+  assert.equal(result.task.id,task.id);assert.equal(packet.operations[0].operationId,'stable-file-operation');
+  assert.equal(packet.operations[0].attemptId,'attempt-before-switch');
+  assert.doesNotMatch(JSON.stringify(packet),/DO_NOT_EXPORT_OPERATION/);
+  assert.ok(log.some(row=>row.kind==='prompt'&&row.text.includes('operation.read(operationRef)')));
+  operations.push({operationId:'unknown-effect',capability:'integration.tool.write',status:'outcome-unknown'});
+  const beforeCreate=log.filter(row=>row.kind==='create').length;
+  await assert.rejects(runtime.rollover({taskId:task.id,targetProvider:'alpha'}),{code:'ROLLOVER_NOT_SAFE'});
+  assert.equal(log.filter(row=>row.kind==='create').length,beforeCreate,'unknown effects block before creating another executor');
+  ok('handoff retains stable operation references without payloads and refuses unknown effects');
+}
+
 {
   const { runtime, taskRuntime, rev, log } = setup({ alphaStatusError: 'SESSION_NOT_FOUND' });
   const task = taskRuntime.create({ goal: 'Core restart after Agent session loss', workspaceId: 'ws-restart-recovery' });

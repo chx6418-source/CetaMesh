@@ -376,6 +376,7 @@ export function createCetaMeshServices(options = {}) {
     canRollover: ({ taskId }) => !capabilityService.isTaskProvisioning(taskId),
     prepareHandoff: async ({ taskId }) => { await chatService.prepareTaskHandoff({ taskId }); workingMemory.record(taskId); },
     readWorkingMemory: taskId => workingMemory.references(taskId),
+    readOperations: scope => capabilityService.broker.operationsForTask(scope),
     onHandoffComplete: async assignment => {
       capabilityService.trackTaskAgent(assignment);
       await chatService.synchronizeTaskAssignment(assignment);
@@ -559,7 +560,7 @@ export function createCetaMeshServices(options = {}) {
     services: {
       chatService, taskService, workshopService, workspaceService, memoryService, capabilityService, agentBroker, continuityService,
       agentService, pluginCenterService, integrationService, extensionService, settingsService, systemServices,
-      toolExecutionCoordinator, usageLedger
+      toolExecutionCoordinator, usageLedger, modelRuntime
     },
     system: systemServices,
     eventBus: uiEventBus

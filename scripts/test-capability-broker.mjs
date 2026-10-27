@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { createCapabilityBroker } from '../src/capability/broker.js';
 import { createCapabilityService } from '../src/capability/service.js';
 import { createWorkspaceService } from '../src/workspace/service.js';
 import { createTaskRuntime } from '../src/task/runtime.js';
@@ -125,6 +126,82 @@ try {
  restart.broker.register(effectDefinition);
  await deny(restart.broker.execute(effectRequest),'REQUEST_ALREADY_DISPATCHED');
  assert.equal(declaredEffects,1,'the existing dispatch journal retains the effect fence across restart');
+ let logicalEffects=0;
+ const logicalDefinition={id:'fixture.logical',permission:'extension.invoke',risk:'low',effect:'non-idempotent',
+  retainOperationResult:result=>result,execute:()=>({receipt:'receipt-'+(++logicalEffects)})};
+ svc.broker.register(logicalDefinition);
+ svc.grantTask(task.id,{capabilities:['fixture.logical'],workspaceIds:[ws]});
+ const logicalRequest={requestId:'logical-first-attempt',operationId:'logical-send-once',attemptId:'attempt-a',
+  actor:owner,taskId:task.id,workspaceId:ws,capability:'fixture.logical',input:{target:'fixture'}};
+ const logicalFirst=await svc.broker.execute(logicalRequest);
+ const logicalNext={...logicalRequest,requestId:'logical-new-executor',attemptId:'attempt-b',actor:svc.principalForTask(task.id)};
+ const logicalReplay=await svc.broker.execute(logicalNext);
+ assert.deepEqual(logicalReplay.result,logicalFirst.result,'same logical operation returns the retained result across attempts/executors');
+ assert.equal(logicalReplay.replayed,true);
+ assert.equal(logicalEffects,1,'a new dispatch identity must not repeat the same logical effect');
+ await deny(svc.broker.execute({...logicalRequest,operationId:'changed-operation-under-same-request',input:{target:'different'}}),'REQUEST_ID_CONFLICT');
+ const legacyLogical={...logicalRequest,requestId:'legacy-logical-request'};delete legacyLogical.operationId;
+ await svc.broker.execute(legacyLogical);
+ const effectsAfterLegacy=logicalEffects;
+ await deny(svc.broker.execute({...legacyLogical,operationId:'added-after-legacy-dispatch'}),'REQUEST_ID_CONFLICT');
+ assert.equal(logicalEffects,effectsAfterLegacy,'a logical ID cannot bypass an existing delivery fence');
+ await deny(svc.broker.execute({...logicalNext,requestId:'logical-conflict',input:{target:'changed'}}),'REQUEST_ID_CONFLICT');
+ const logicalRestart=createCapabilityService({stateDir:path.join(dir,'state'),workspaceService,taskRuntime});
+ logicalRestart.broker.register(logicalDefinition);
+ const recoveredResult=await logicalRestart.broker.execute({...logicalNext,requestId:'logical-after-restart'});
+ assert.deepEqual(recoveredResult.result,logicalFirst.result);
+ assert.equal(logicalEffects,effectsAfterLegacy,'the retained result survives a new Broker process lifetime');
+ await logicalRestart.broker.execute({...logicalNext,requestId:'independent-intent',operationId:'new-logical-send'});
+ assert.equal(logicalEffects,effectsAfterLegacy+1,'independent repeated intent has a different logical identity');
+ logicalRestart.grantTask(task.id,{capabilities:[],workspaceIds:[ws]});
+ await deny(logicalRestart.broker.execute({...logicalNext,requestId:'revoked-replay'}),'PERMISSION_DENIED');
+ logicalRestart.grantTask(task.id,{capabilities:['filesystem.write','fixture.logical','operation.read'],workspaceIds:[ws]});
+ const fileOperation={actor:owner,taskId:task.id,workspaceId:ws,capability:'filesystem.write',approved:true,
+  requestId:'append-attempt-a',operationId:'append-once',input:{path:'once-append.txt',content:'once',append:true}};
+ const writtenOnce=await logicalRestart.broker.execute(fileOperation);
+ const appendedReplay=await logicalRestart.broker.execute({...fileOperation,actor:logicalRestart.principalForTask(task.id),
+  approved:false,requestId:'append-attempt-b',attemptId:'new-agent-attempt'});
+ assert.deepEqual(appendedReplay.result,writtenOnce.result);
+ assert.equal(fs.readFileSync(path.join(dir,'project','once-append.txt'),'utf8'),'once','an append operation cannot append twice after executor change');
+ taskRuntime.attachAgent({id:task.id,expectedRev:taskRuntime.get({id:task.id}).task.rev,provider:'replacement-fixture',sessionId:'new-executor-session'});
+ const receiptRead=await logicalRestart.broker.execute({actor:logicalRestart.principalForTask(task.id),taskId:task.id,workspaceId:ws,
+  capability:'operation.read',input:{operationRef:'append-once'}});
+ assert.equal(receiptRead.result.verified,true);assert.deepEqual(receiptRead.result.result,writtenOnce.result);
+ const unavailableReceipt=await logicalRestart.broker.execute({actor:logicalRestart.principalForTask(task.id),taskId:task.id,workspaceId:ws,
+  capability:'operation.read',input:{operationRef:'logical-send-once'}});
+ assert.equal(unavailableReceipt.result.resultAvailable,false);assert.equal(unavailableReceipt.result.needsReview,true);
+ assert.equal(unavailableReceipt.result.code,'OPERATION_RESULT_REVIEW_REQUIRED','an unverifiable completed result must explicitly require review');
+ await deny(logicalRestart.broker.execute({...fileOperation,requestId:'stale-executor',assignment:{provider:'old-fixture',sessionId:'old-session'}}),'AGENT_ASSIGNMENT_EXPIRED');
+ const otherTask=taskRuntime.create({goal:'Other Task cannot read receipt',workspaceId:ws});
+ logicalRestart.grantTask(otherTask.id,{capabilities:['operation.read','filesystem.write'],workspaceIds:[ws]});
+ await deny(logicalRestart.broker.execute({actor:logicalRestart.principalForTask(otherTask.id),taskId:otherTask.id,workspaceId:ws,
+  capability:'operation.read',input:{operationRef:'append-once'}}),'OPERATION_NOT_FOUND');
+ fs.writeFileSync(path.join(dir,'project','once-append.txt'),'user changed this file');
+ await deny(logicalRestart.broker.execute({...fileOperation,requestId:'append-after-user-change'}),'OPERATION_RESULT_STALE');
+ assert.equal(fs.readFileSync(path.join(dir,'project','once-append.txt'),'utf8'),'user changed this file');
+ let finishLogical,logicalStarted;
+ const startedLogical=new Promise(resolve=>{logicalStarted=resolve;});let concurrentEffects=0;
+ logicalRestart.broker.register({id:'fixture.concurrent-operation',permission:'extension.invoke',risk:'low',effect:'non-idempotent',retainOperationResult:r=>r,
+  execute:()=>{concurrentEffects++;logicalStarted();return new Promise(resolve=>{finishLogical=resolve;});}});
+ const concurrentOperation={...logicalRequest,operationId:'concurrent-operation',capability:'fixture.concurrent-operation',requestId:'concurrent-a'};
+ const originalOperation=logicalRestart.broker.execute(concurrentOperation);await startedLogical;
+ const runningOperation=await logicalRestart.broker.execute({...concurrentOperation,requestId:'concurrent-b'});
+ assert.equal(runningOperation.status,'running');assert.equal(concurrentEffects,1);
+ assert.throws(()=>logicalRestart.broker.acknowledgeTaskOperations({taskId:task.id,workspaceId:ws}),{code:'OPERATION_STILL_RUNNING'});
+ finishLogical({receipt:'concurrent-receipt'});await originalOperation;
+ assert.equal((await logicalRestart.broker.execute({...concurrentOperation,requestId:'concurrent-c'})).result.receipt,'concurrent-receipt');
+ const crashState=path.join(dir,'logical-crash'),crashMarker=path.join(dir,'logical-effect.marker');
+ const brokerModule=new URL('../src/capability/broker.js',import.meta.url).href;
+ const crashSource=`import fs from 'node:fs';import {createCapabilityBroker} from ${JSON.stringify(brokerModule)};
+ const broker=createCapabilityBroker({stateDir:${JSON.stringify(crashState)},policy:{authorize:()=>({allowed:true,approvalRequired:false})}});
+ broker.register({id:'fixture.crash',permission:'extension.invoke',effect:'non-idempotent',execute:()=>{fs.appendFileSync(${JSON.stringify(crashMarker)},'x');process.exit(71);}});
+ await broker.execute({requestId:'crashed-dispatch',operationId:'survive-crash',actor:{kind:'owner',id:'desktop'},taskId:'crash-task',workspaceId:'crash-ws',capability:'fixture.crash',input:{}});`;
+ assert.throws(()=>execFileSync(process.execPath,['--input-type=module','-e',crashSource],{stdio:'ignore'}),error=>error.status===71);
+ const crashBroker=createCapabilityBroker({stateDir:crashState,policy:{authorize:()=>({allowed:true,approvalRequired:false})}});
+ crashBroker.register({id:'fixture.crash',permission:'extension.invoke',effect:'non-idempotent',execute:()=>{throw Error('must not replay crashed effect');}});
+ await deny(crashBroker.execute({requestId:'new-dispatch-after-crash',operationId:'survive-crash',actor:owner,
+  taskId:'crash-task',workspaceId:'crash-ws',capability:'fixture.crash',input:{}}),'REQUEST_RECOVERY_REQUIRED');
+ assert.equal(fs.readFileSync(crashMarker,'utf8'),'x','real child process crash cannot cause the effect to replay');
  assert.equal(restart.principalForTask(task.id).grants.workspaceIds[0],ws);
  console.log('PASS capability broker: registry, permission, boundary, owner approval, replay/tamper, external denial, task grants and desktop actor binding');
 } finally {fs.rmSync(dir,{recursive:true,force:true});}

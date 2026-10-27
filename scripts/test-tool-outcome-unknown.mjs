@@ -96,6 +96,15 @@ try {
   await assert.rejects(duplicateRun, error => error.code === 'REQUEST_RECOVERY_REQUIRED');
   await firstRun;
   assert.equal(brokerCalls, 4, 'simultaneous duplicate turns cannot dispatch twice');
+  const identityCalls=[];let identityModelCalls=0;
+  const identityCoordinator=createToolExecutionCoordinator({
+    modelRuntime:{chat:async()=>++identityModelCalls%2?{toolCalls:[{id:'write',capabilityId:'filesystem.write',arguments:{path:'identity.txt',content:'x'}}]}:{text:'done'}},
+    capabilityBroker:{execute:async request=>{identityCalls.push(request);return {status:'completed',result:{}};}}
+  });
+  await identityCoordinator.run({...writeTurn,sessionId:'alpha:beta',turnId:'gamma'});
+  await identityCoordinator.run({...writeTurn,sessionId:'alpha',turnId:'beta:gamma'});
+  assert.notEqual(identityCalls[0].requestId,identityCalls[1].requestId,'structured turn identities cannot collide through delimiters');
+  assert.notEqual(identityCalls[0].operationId,identityCalls[1].operationId,'independent logical operations must not share an identity');
   const approvalStateDir = path.join(stateDir, 'approved-unknown');
   const approvalBroker = createCapabilityBroker({ stateDir: approvalStateDir,
     approval: createCapabilityApproval({ stateDir: approvalStateDir }) });

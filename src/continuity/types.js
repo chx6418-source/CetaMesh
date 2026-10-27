@@ -31,7 +31,9 @@ export const DEFAULT_CONTEXT_POLICY = Object.freeze({
   charsPerToken: 4,
   // 达到 rollover/forced/emergency 阈值时是否自动执行 Fresh Session rollover
   //（false = 只评估上报，由人工/调用方显式触发）。
-  autoRollover: true
+  autoRollover: true,
+  maxAutomaticSwitches: 8,
+  maxAutomaticNoProgress: 2
 });
 
 /**
@@ -67,11 +69,18 @@ export function normalizePolicy(value) {
   }
   const window = Number(merged.defaultWindowTokens);
   const charsPerToken = Number(merged.charsPerToken);
+  for (const key of ['maxAutomaticSwitches', 'maxAutomaticNoProgress']) {
+    if (!Number.isSafeInteger(merged[key]) || merged[key] < 1 || merged[key] > 100) {
+      throw continuityError('INVALID_PARAMS', `policy.${key} must be an integer in [1,100]`);
+    }
+  }
   return {
     ...numbers,
     defaultWindowTokens: Number.isFinite(window) && window > 0 ? Math.round(window) : DEFAULT_CONTEXT_POLICY.defaultWindowTokens,
     charsPerToken: Number.isFinite(charsPerToken) && charsPerToken > 0 ? charsPerToken : DEFAULT_CONTEXT_POLICY.charsPerToken,
-    autoRollover: merged.autoRollover !== false
+    autoRollover: merged.autoRollover !== false,
+    maxAutomaticSwitches: merged.maxAutomaticSwitches,
+    maxAutomaticNoProgress: merged.maxAutomaticNoProgress
   };
 }
 
@@ -134,6 +143,13 @@ export function normalizePacket(packet) {
   };
   return {
     taskId: text(packet.taskId, PACKET_LIMITS.idChars),
+    attemptId: text(packet.attemptId, PACKET_LIMITS.idChars) || null,
+    operations: (Array.isArray(packet.operations) ? packet.operations : []).slice(0, 100).map(row => ({
+      operationId: text(row.operationId, 160), capability: text(row.capability, 160),
+      status: ['started', 'completed', 'failed', 'outcome-unknown', 'reconciled'].includes(row.status) ? row.status : 'outcome-unknown',
+      attemptId: text(row.attemptId, 160) || null, requestId: text(row.requestId, 240) || null,
+      at: Number.isFinite(row.at) ? row.at : null
+    })),
     goal: text(packet.goal, PACKET_LIMITS.summaryChars),
     ownerContext: packet.ownerContext && Array.isArray(packet.ownerContext.entries)
       ? { sessionId: text(packet.ownerContext.sessionId, 128), omitted: Number(packet.ownerContext.omitted) || 0,

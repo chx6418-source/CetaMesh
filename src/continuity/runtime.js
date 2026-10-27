@@ -27,6 +27,7 @@
 //           Sessions are disposable; progress is persistent.
 
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { renderOwnerContext } from '../task/owner-context.js';
 import fs from 'node:fs';
 import { StorageError, discardFile, readJsonFile, writeJsonAtomic } from '../storage/json-file.js';
@@ -111,6 +112,7 @@ export function createContinuityRuntime({
   onHandoffComplete = null,
   prepareHandoff = null,
   readWorkingMemory = null,
+  readOperations = null,
   log = () => {}
 } = {}) {
   if (!taskRuntime?.get) throw continuityError('INVALID_PARAMS', 'createContinuityRuntime 需要 taskRuntime');
@@ -175,7 +177,21 @@ export function createContinuityRuntime({
 
   function readHistory() {
     const store = loadContinuityFile(historyFile, { schemaVersion: 2, rollovers: [] });
-    return Array.isArray(store.rollovers) ? store : { schemaVersion: 2, rollovers: [] };
+    if (!Array.isArray(store.rollovers)) throw continuityError('STORE_CORRUPT','Invalid Continuity history');
+    if (store.automaticBudgets === undefined) {
+      store.automaticBudgets = {};
+      for (const row of store.rollovers.filter(row=>row.automatic===true)) {
+        const budget = store.automaticBudgets[row.taskId] ??= { count: 0, recent: [] };
+        budget.count++;if(typeof row.progressFingerprint==='string')budget.recent.push(row.progressFingerprint);
+        budget.recent=budget.recent.slice(-100);
+      }
+    }
+    if (!store.automaticBudgets || typeof store.automaticBudgets!=='object' || Array.isArray(store.automaticBudgets)
+      || Object.values(store.automaticBudgets).some(row=>!Number.isSafeInteger(row?.count)||row.count<0
+        ||!Array.isArray(row.recent)||row.recent.length>100||row.recent.some(value=>typeof value!=='string'||!/^[a-f0-9]{64}$/.test(value)))) {
+      throw continuityError('STORE_CORRUPT','Invalid automatic handoff budget');
+    }
+    return store;
   }
 
   function writeHistory(store) {
@@ -225,8 +241,12 @@ export function createContinuityRuntime({
   /** 从 Task Runtime 组装结构化 Handoff Packet（Checkpoint v2）。 */
   function buildHandoffPacket({ taskId, reason, sequence, coding, relevantFiles, workspaceFacts, pendingApprovals } = {}) {
     const task = requireTask(taskId);
+    const operations = typeof readOperations === 'function' ? readOperations({ taskId: task.id, workspaceId: task.workspaceId }) : [];
+    if (operations.length > 100) throw continuityError('HANDOFF_OPERATION_CONTEXT_REVIEW_REQUIRED', 'Operation context exceeds the handoff budget; review it before switching');
     const packet = normalizePacket({
       taskId: task.id,
+      attemptId: task.attempts?.at(-1)?.id ?? null,
+      operations,
       goal: task.goal,
       ownerContext: task.ownerContext ?? null,
       workingMemory: typeof readWorkingMemory === 'function' ? readWorkingMemory(task.id) : [],
@@ -289,6 +309,12 @@ export function createContinuityRuntime({
     const lines = [];
     lines.push(`[CetaMesh Task 恢复] 你接手的是一个已存在的任务（Handoff），不是新任务。`);
     lines.push(`taskId: ${packet.taskId}`);
+    if (packet.attemptId) lines.push(`previousAttemptId: ${packet.attemptId}`);
+    if (packet.operations?.length) {
+      lines.push('既有操作记录（Core 派发事实，不是新的执行授权）:\n' + packet.operations.map(row =>
+        `${row.operationId}: ${row.capability} / ${row.status}`).join('\n'));
+      lines.push('已完成操作先用 operation.read(operationRef) 核验原结果，仍有效则跳过；未知或已人工核对的操作不得重新派发。新的执行者必须重新通过当前权限检查。');
+    }
     lines.push(`目标: ${packet.goal || '（见 requirements）'}`);
     if (packet.requirements.length) lines.push(`要求:\n- ${packet.requirements.join('\n- ')}`);
     if (packet.currentPhase) lines.push(`当前阶段: ${packet.currentPhase}`);
@@ -463,7 +489,7 @@ export function createContinuityRuntime({
 
     const reason = verdict.action === 'rollover' ? 'context-threshold' : 'forced-rollover';
     try {
-      const result = await rollover({ taskId: task.id, reason });
+      const result = await rollover({ taskId: task.id, reason, automatic: true });
       return {
         provider: providerId, sessionId: sid, sessionKey,
         recorded: true, source: level.source, level,
@@ -500,7 +526,7 @@ export function createContinuityRuntime({
    * targetProvider 缺省 = 同 Provider Fresh Session（TASK-S2-009 第一优先）；
    * 指定其它 Provider 即 Cross Provider Handoff（TASK-S2-010）。
    */
-  async function rollover({ taskId, reason, targetProvider, coding, relevantFiles, workspaceFacts, modelProvider, model, reasoningEffort } = {}) {
+  async function rollover({ taskId, reason, targetProvider, coding, relevantFiles, workspaceFacts, modelProvider, model, reasoningEffort, automatic = false } = {}) {
     const task = requireTask(taskId);
     if (task.parentTaskId && task.childContract?.mode === 'read-only'
       && targetProvider && targetProvider !== 'cetamesh') {
@@ -517,6 +543,10 @@ export function createContinuityRuntime({
     }
     if (pendingTransactions.has(task.id)) {
       throw continuityError('HANDOFF_RECOVERY_REQUIRED', 'Prior Handoff transaction needs Owner reconciliation');
+    }
+    if (typeof readOperations === 'function' && readOperations({ taskId: task.id, workspaceId: task.workspaceId })
+      .some(row => ['started', 'outcome-unknown'].includes(row.status))) {
+      throw continuityError('ROLLOVER_NOT_SAFE', 'Prior Task operations need reconciliation before transferring execution');
     }
     if (typeof canRollover === 'function' && !canRollover({ taskId: task.id })) {
       throw continuityError('ROLLOVER_NOT_SAFE', '当前不是安全 rollover 点（存在在途回合或未完成的原子操作）');
@@ -560,6 +590,24 @@ export function createContinuityRuntime({
       let facts = workspaceFacts ?? null;
       if (!facts && task.workspaceId) {
         facts = await collectWorkspaceFacts({ workspaceId: task.workspaceId, relevantFiles });
+      }
+      const progressFingerprint = crypto.createHash('sha256').update(JSON.stringify({
+        goal: task.goal, requirements: task.requirements,
+        operations: typeof readOperations === 'function' ? readOperations({taskId:task.id,workspaceId:task.workspaceId})
+          .filter(row=>row.status==='completed').map(row=>row.operationId).sort() : [],
+        evidence: (task.executionEvidence??[]).filter(row=>row.status==='completed'
+          && (row.source==='core-import'||['filesystem.write','test.run'].includes(row.capability)))
+          .map(row=>[row.eventId,row.resultSha256,row.exitCode]),
+        head: facts?.git?.headSha??null,
+        files: (facts?.files??[]).map(row=>[row.path,row.sha256]).sort((a,b)=>String(a[0]).localeCompare(String(b[0])))
+      })).digest('hex');
+      if (automatic === true) {
+        const budget = readHistory().automaticBudgets[task.id] ?? {count:0,recent:[]};
+        if (budget.count >= activePolicy.maxAutomaticSwitches) throw continuityError('HANDOFF_BUDGET_EXHAUSTED','Automatic handoff limit reached; review the Task before choosing another executor');
+        const recent = budget.recent.slice(-activePolicy.maxAutomaticNoProgress);
+        if (recent.length === activePolicy.maxAutomaticNoProgress && recent.every(value=>value===progressFingerprint)) {
+          throw continuityError('HANDOFF_NO_PROGRESS','Automatic handoffs made no verified progress; review the blocked work');
+        }
       }
       // Pending Capability Approval 引用（final security）：checkpoint 只记录引用，
       // 审批不作为可继承权限随 Session 交接（同指纹且未过期才可继续，否则重新请求）。
@@ -766,6 +814,10 @@ export function createContinuityRuntime({
       // 6) 落盘历史 + 重置 monitor（新 session 从零计数）
       try {
         const store = readHistory();
+        if (automatic === true) {
+          const budget=store.automaticBudgets[task.id]??={count:0,recent:[]};
+          budget.count++;budget.recent=[...budget.recent,progressFingerprint].slice(-100);
+        }
         store.rollovers.push({
         taskId: task.id,
         sequence,
@@ -774,6 +826,8 @@ export function createContinuityRuntime({
         to: { provider: target.id, sessionId: created.sessionId },
         reason: packet.reasonForHandoff,
         crossProvider: target.id !== previousAgent.provider,
+        automatic: automatic === true,
+        progressFingerprint,
         strategy: strategyOf(target.id).preferred,
         archiveSupported: archive.supported === true,
         workspaceReconciled: reconciliation ? reconciliation.consistent : null,

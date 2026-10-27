@@ -441,7 +441,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       throw capabilityError('TASK_CHILD_READ_ONLY', 'Child grant cannot advertise write or unrelated tools');
     }
     const capabilities = new Set(readOnlyChild ? ['filesystem.read', 'filesystem.search']
-      : value?.capabilities ?? ['filesystem.read', 'filesystem.write', 'filesystem.search', 'git.status', 'git.diff', 'memory.read', ...(evidenceStore ? ['context.evidence.read'] : [])]);
+      : value?.capabilities ?? ['filesystem.read', 'filesystem.write', 'filesystem.search', 'git.status', 'git.diff', 'memory.read', 'operation.read', ...(evidenceStore ? ['context.evidence.read'] : [])]);
     if (capabilities.has('filesystem.write')) capabilities.add('workspace.apply');
     for (const id of capabilities) broker.registry.require(id);
     if ((value?.workspaceIds ?? [task.workspaceId]).some(id => id !== task.workspaceId)) {
@@ -495,11 +495,20 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
         description: WORKSPACE_TOOL_DESCRIPTORS[id][0],
         inputSchema: WORKSPACE_TOOL_DESCRIPTORS[id][1],
         category: id.startsWith('filesystem.') ? 'filesystem' : id.startsWith('git.') ? 'git' : 'workspace',
+        ...(id === 'filesystem.write' ? {
+          retainOperationResult: result => result,
+          operationAccessInput: request => ({ path: request.input.path }),
+          operationProof: request => ({ sha256: sha256(fs.readFileSync(resolveInside(resolveWorkspace(request.workspaceId).root, request.input.path).absolute)) }),
+          verifyOperationResult: (request, proof) => {
+            try { return typeof proof?.sha256 === 'string' && proof.sha256 === sha256(fs.readFileSync(resolveInside(resolveWorkspace(request.workspaceId).root, request.input.path).absolute)); }
+            catch { return false; /* Missing or changed files require reconciliation, never a replayed write. */ }
+          }
+        } : {}),
         // test.run = 执行 Workspace 中可被 Agent 修改的代码：high（审批必经），
         // 不是普通 medium。Owner 直接点击"运行测试"走 executeWorkspace 的
         // approved:true（Owner 的点击本身就是显式决定，语义与既往一致）。
         risk: ['workspace.create', 'git.commit', 'test.run', 'workspace.apply', 'filesystem.write'].includes(id) ? 'high' : 'low',
-        validate(request) {
+        validate(request, { replay = false } = {}) {
           if (id === 'workspace.apply') {
             validateWorkspaceImport(request);
             return;
@@ -533,7 +542,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
             }
             try {
               const resolved = resolveInside(ws.root, request.input.path, { forWrite: id === 'filesystem.write' });
-              if (id === 'filesystem.write' && request.actor.kind !== 'owner' && fs.existsSync(resolved.absolute)
+              if (!replay && id === 'filesystem.write' && request.actor.kind !== 'owner' && fs.existsSync(resolved.absolute)
                 && typeof request.input.expectedHash !== 'string') {
                 throw capabilityError('EXPECTED_HASH_REQUIRED', 'Agent write to an existing file requires expectedHash');
               }
@@ -591,6 +600,31 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     }
   }
   if (taskRuntime) {
+    broker.register({ id: 'operation.read', permission: 'storage', risk: 'low', effect: 'read-only',
+      workspace: true, requiresTask: true, provider: 'task-runtime',
+      description: 'Read a prior Task operation receipt and verify its current result without executing the effect again.',
+      inputSchema: objectInput({ operationRef: stringField('Operation identity from this Task continuation context.') }, ['operationRef']),
+      async execute(request) {
+        const row = broker.operationRecordForTask({ taskId: request.taskId, workspaceId: request.workspaceId, operationId: request.input.operationRef });
+        if (!row) throw capabilityError('OPERATION_NOT_FOUND', 'Operation is not in this Task Workspace');
+        const summary = { operationId: row.operationId, capability: row.capability, status: row.status };
+        if (row.status !== 'completed' || !Object.hasOwn(row, 'retainedResult') || !row.accessInput) {
+          return { ...summary, resultAvailable: false, verified: false, needsReview: true,
+            needsReconciliation: row.status !== 'completed', code: row.status === 'completed' ? 'OPERATION_RESULT_REVIEW_REQUIRED' : 'REQUEST_RECOVERY_REQUIRED' };
+        }
+        const source = broker.registry.require(row.capability);
+        if ((source.descriptorVersion ?? null) !== row.descriptorVersion) throw capabilityError('OPERATION_DESCRIPTOR_CHANGED', 'Original capability version changed');
+        const original = { ...request, capability: row.capability, input: row.accessInput, operationId: undefined,
+          approvalId: undefined, approvalBinding: undefined, approved: undefined };
+        policy.authorize(original, source);
+        await source.validate?.(original, { replay: true });
+        policy.authorize(original, source);
+        if (typeof source.verifyOperationResult !== 'function' || await source.verifyOperationResult(original, row.operationProof) !== true) {
+          throw capabilityError('OPERATION_RESULT_STALE', 'Reconcile the changed result before continuing');
+        }
+        return { ...summary, resultAvailable: true, verified: true, result: row.retainedResult };
+      }
+    });
     broker.register({
       id: 'task.create',
       permission: 'task.create',
@@ -1096,6 +1130,9 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       } catch { return false; }
     },
     completionBlocker(taskId) {
+      const operationTask = taskFor(taskId);
+      if (operationTask && broker.operationsForTask({ taskId, workspaceId: operationTask.workspaceId })
+        .some(row => ['started', 'outcome-unknown'].includes(row.status))) return 'TASK_EFFECT_UNCONFIRMED';
       if (environment.blocker(taskId)) return environment.blocker(taskId);
       if (provisioning.has(taskId) || Object.values(journal).some(row => row?.taskId === taskId && row.status === 'in-flight')) return 'TASK_EXECUTION_UNCONFIRMED';
       if (operations.list().some(row => ['accepted', 'running', 'waiting', 'unknown'].includes(row.status)
@@ -1105,11 +1142,17 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       return null;
     },
     recoveryForTask(taskId) {
+      const operationTask = taskFor(taskId);
+      const uncertainOperation = operationTask && broker.operationsForTask({ taskId, workspaceId: operationTask.workspaceId })
+        .find(row => ['started', 'outcome-unknown'].includes(row.status));
+      if (uncertainOperation) return { state: 'needs-reconciliation', capability: uncertainOperation.capability };
       if (environment.recovery(taskId)) return environment.recovery(taskId);
       return Object.values(journal).some(row => row?.taskId === taskId && row.status === 'in-flight')
         ? { state: 'needs-reconciliation', capability: 'agent.run' } : null;
     },
     acknowledgeTaskRecovery(taskId) {
+      const operationTask = taskFor(taskId);
+      const reviewedOperations = operationTask ? broker.acknowledgeTaskOperations({ taskId, workspaceId: operationTask.workspaceId }).reconciled : 0;
       const rows = Object.values(journal).filter(row => row?.taskId === taskId && row.status === 'in-flight');
       for (const row of rows) row.status = 'reconciled';
       if (rows.length) {
@@ -1119,7 +1162,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
           throw error;
         }
       }
-      return { reconciled: rows.length };
+      return { reconciled: rows.length + reviewedOperations };
     },
     isTaskProvisioning(taskId) { return provisioning.has(String(taskId ?? '')); },
     setTaskHandoffGuard(guard) {

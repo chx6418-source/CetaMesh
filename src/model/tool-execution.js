@@ -16,7 +16,7 @@ const MAX_TOTAL_CALLS = 24;
 const MAX_RESULT_CHARS = 12000;
 const AUTHORITY_KEYS = new Set([
   'actor', 'actorid', 'grants', 'taskid', 'workspaceid', 'scope', 'approved', 'approvalid',
-  'requestid', 'principal', 'permissions', 'capabilities', 'provider', 'providerid'
+  'requestid', 'operationid', 'idempotencykey', 'attemptid', 'executorid', 'principal', 'permissions', 'capabilities', 'provider', 'providerid'
 ]);
 
 function fail(code, message) { throw capabilityError(code, message); }
@@ -459,13 +459,17 @@ export function createToolExecutionCoordinator({
         }
         let result;
         let input;
-        const baseToolRequestId = `model:${sessionId}:${turnId}:${cycle}:${index}`.slice(0, 232);
+        const baseToolRequestId = 'model:' + crypto.createHash('sha256')
+          .update(JSON.stringify([sessionId, turnId, cycle, index])).digest('hex');
         let toolRequestId = baseToolRequestId;
         let retryCount = 0;
         try {
           input = parseArguments(call?.arguments);
           const descriptor = state.manifest.find((item) => item.id === capability);
           if (!descriptor) fail('UNKNOWN_TOOL_IN_TURN', 'Tool was not authorized in this turn');
+          const registered = capabilityBroker.registry?.require(capability) ?? descriptor;
+          const hasEffect = (registered.effect && registered.effect !== 'read-only')
+            || ['message.send', 'filesystem.write', 'git.commit', 'test.run', 'publish', 'network'].includes(registered.permission ?? capability);
           validateSchema(descriptor.inputSchema, input);
           const retryStartedAt = Date.now();
           let retryError = null;
@@ -486,6 +490,9 @@ export function createToolExecutionCoordinator({
             try {
               const executeBroker = attemptSignal => capabilityBroker.execute({
                 requestId: toolRequestId, actor: liveActor,
+                ...(hasEffect && state.scope?.taskId && state.scope?.workspaceId ? {
+                  operationId: 'tool:' + crypto.createHash('sha256').update(baseToolRequestId).digest('hex')
+                } : {}),
                 taskId: state.scope?.taskId ?? null,
                 workspaceId: state.scope?.workspaceId ?? null,
                 capability, input, reason: 'Model structured tool call',

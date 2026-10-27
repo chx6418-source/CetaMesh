@@ -14,6 +14,8 @@ export const AGENT_EXPANSION_SOURCE_FILES = Object.freeze([
   'src/agent/native-approval-bridge.js', 'src/agent/runtime-configuration.js',
   'src/agent/claude-runtime.js', 'src/agent/installation-discovery.js',
   'src/capability/service.js', 'src/settings/schema.js', 'src/router/agent-assignment.js',
+  'src/capability/broker.js', 'src/capability/operation-identity.js', 'src/model/tool-execution.js',
+  'src/continuity/runtime.js', 'src/continuity/types.js',
   'src/agent/agent-provider.js', 'src/agent/broker.js', 'src/agent/registry.js',
   'src/agent/service.js', 'src/agent/managed-agent-provider.js', 'src/agent/execution-security.js',
   'src/agent/cli-agent-process.js', 'src/agent/codex-agent-provider.js',

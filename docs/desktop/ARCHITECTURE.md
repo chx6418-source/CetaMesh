@@ -49,6 +49,26 @@ recorded in [Agent integration status](AGENT_INTEGRATION_STATUS.md).
 
 ## Task execution and result review
 
+Task creation can use the Owner's configured default executor. Automatic selection
+uses the configured tool-capable Managed model when no explicit executor preference
+exists; an unavailable explicit preference fails before creating a Task. Native
+execution consent is also checked before creation. Automatic selection does not
+grant native tool permissions or prove an external account is authenticated.
+
+Broker-mediated effects can carry a Task/Workspace-scoped logical `operationId`
+independent of a particular dispatch request or Attempt. The existing dispatch
+journal retains both logical-operation and request bindings. Matching completed
+operations reuse only explicitly retained safe receipts after live authorization;
+file receipts also verify the current postimage. Uncertain effects and unavailable
+receipts require review. The `operation.read` capability reauthorizes the source
+capability and exposes a verified receipt without executing its effect again.
+Handoff packets contain bounded operation references, not their raw inputs or
+results, and do not transfer the predecessor's authority. Automatic rollover has
+per-Task count/no-progress budgets retained independently of display history.
+These guarantees rely on the existing single-Core StateDir ownership boundary;
+the JSON journal is not an independent distributed database or an interception
+layer for arbitrary external native actions.
+
 Task status remains independent of Agent turn completion. A Core-bound, bounded current
 execution observation carries the Task assignment, Session and run identity. New dispatch,
 assignment, objective edits, restart and resume invalidate prior result-review eligibility.
