@@ -76,6 +76,47 @@ async function waitUntil(predicate, timeoutMs = 5000) {
   }
 }
 
+// Caller abort must stop before dispatch or reach a real Worker's reverse Broker call.
+{
+  const { host, pair } = makeHost({ childBehavior: () => null });
+  const controller = new AbortController();
+  controller.abort();
+  const sent = [];
+  pair.host.send = frame => sent.push(frame);
+  try {
+    await assert.rejects(host.invoke('greet', {}, { signal: controller.signal }),
+      error => error.code === 'INVOKE_CANCELLED');
+    assert.deepEqual(sent, [], 'a pre-aborted caller must not dispatch an invoke');
+  } finally { await host.shutdown(); }
+  ok('pre-aborted caller never dispatches an Extension invocation');
+}
+{
+  const fixture = makeInstalledPackage({ permissions: ['memory.read'], source:
+    'module.exports.handlers = { echo: (input, ctx) => ctx.memory.read(input) };' });
+  let brokerSignal = null;
+  const host = createProcessExtensionHost({
+    manifest: fixture.manifest, packageRoot: fixture.packageRoot, storeRoot: fixture.storeRoot,
+    packageFingerprint: fingerprintExtensionPackage(fixture.packageRoot), packaged: false, timeoutMs: 5000,
+    capabilityExecutor: (capability, input, { signal }) => new Promise((resolve, reject) => {
+      brokerSignal = signal;
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    })
+  });
+  const controller = new AbortController();
+  try {
+    const result = host.invoke('echo', {}, { signal: controller.signal });
+    const rejected = assert.rejects(result, error => error.code === 'INVOKE_CANCEL_UNCONFIRMED'
+      && error.effectStatus === 'unknown');
+    await waitUntil(() => brokerSignal !== null);
+    controller.abort();
+    await rejected;
+    await waitUntil(() => brokerSignal.aborted, 1000);
+    assert.equal(host._inflight().length, 0);
+    assert.equal(await host.ping(), true, 'Worker remains healthy after caller cancellation');
+    ok('caller abort reaches real Worker reverse call without claiming side-effect cancellation');
+  } finally { await host.shutdown(); fixture.cleanup(); }
+}
+
 // Extension-private synchronous storage remains scoped and uses the shared JSON Storage Primitive.
 {
   const fixture = makeInstalledPackage({ permissions: ['storage'], source: [

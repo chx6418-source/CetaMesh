@@ -132,6 +132,7 @@ export function createProcessExtensionHost({
   function settlePending(error) {
     for (const [id, entry] of pending) {
       clearTimeout(entry.timer);
+      entry.cleanup?.();
       pending.delete(id);
       if (!entry.settled) { entry.settled = true; entry.reject(error); }
     }
@@ -271,11 +272,13 @@ export function createProcessExtensionHost({
     }
     if (frame.kind === 'cancel') {
       clearTimeout(entry.timer);
+      entry.cleanup?.();
       pending.delete(frame.id);
       if (!entry.settled) { entry.settled = true; entry.reject(extensionError('INVOKE_CANCELLED', 'Invocation cancelled by Worker')); }
       return;
     }
     clearTimeout(entry.timer);
+    entry.cleanup?.();
     pending.delete(frame.id);
     if (entry.settled) return;
     entry.settled = true;
@@ -316,40 +319,68 @@ export function createProcessExtensionHost({
       });
     },
     /** 发起一次受控调用：能力白名单 → 帧发送 → 超时/取消/结果裁决（async：同步拒绝即 rejection）。 */
-    async invoke(capabilityId, input) {
+    async invoke(capabilityId, input, { signal } = {}) {
       const entry = capabilityOrThrow(capabilityId); // 未声明/未授权的能力：不出帧，直接拒绝
       void entry;
       if (closed) fail('PROVIDER_UNAVAILABLE', 'Process extension host 已关闭');
+      if (signal?.aborted) fail('INVOKE_CANCELLED', 'Extension invocation cancelled before dispatch');
       if (pending.size >= MAX_INFLIGHT) fail('INVOKE_OVERLOAD', '在途调用过多（>16），稍后再试');
       const id = 'inv_' + Math.random().toString(36).slice(2) + Date.now().toString(36);
       return new Promise((resolve, reject) => {
+        let dispatched = false;
+        const cleanup = () => signal?.removeEventListener('abort', onAbort);
+        const onAbort = () => {
+          const entry = pending.get(id);
+          if (!entry) return;
+          pending.delete(id);
+          clearTimeout(entry.timer);
+          cleanup();
+          entry.settled = true;
+          const error = extensionError(dispatched ? 'INVOKE_CANCEL_UNCONFIRMED' : 'INVOKE_CANCELLED',
+            dispatched ? 'Extension cancellation requested; side effects are not confirmed cancelled'
+              : 'Extension invocation cancelled before dispatch');
+          if (dispatched) error.effectStatus = 'unknown';
+          reject(error);
+          if (dispatched) {
+            try { checkedSend({ v: PROTOCOL_VERSION, id, kind: 'cancel', capability: capabilityId }); }
+            catch (sendError) { record('warn', 'Unable to send cancellation frame: ' + String(sendError?.message ?? sendError)); }
+          }
+        };
         const timer = setTimeout(() => {
           pending.delete(id);
+          cleanup();
           reject(extensionError('INVOKE_TIMEOUT', `进程扩展调用超时（${timeoutMs}ms）`));
           try { checkedSend({ v: PROTOCOL_VERSION, id, kind: 'cancel', capability: capabilityId }); }
           catch (error) { record('warn', 'Unable to send cancellation frame: ' + String(error?.message ?? error)); }
         }, timeoutMs);
         // 不 unref：等待子进程应答期间超时必须能够触发（否则挂死调用方）。
-        pending.set(id, { capability: capabilityId, resolve, reject, timer, settled: false });
+        pending.set(id, { capability: capabilityId, resolve, reject, timer, settled: false, cleanup });
+        signal?.addEventListener('abort', onAbort, { once: true });
+        if (signal?.aborted) { onAbort(); return; }
         let frame;
         try {
           frame = JSON.stringify({ v: PROTOCOL_VERSION, id, kind: 'invoke', capability: capabilityId, input: input ?? {} });
         } catch (error) {
           clearTimeout(timer);
+          cleanup();
           pending.delete(id);
           reject(extensionError('INVALID_PARAMS', 'invoke 输入不可序列化'));
           return;
         }
+        if (!pending.has(id)) return;
         if (Buffer.byteLength(frame, 'utf8') > maxMessageBytes) {
           clearTimeout(timer);
+          cleanup();
           pending.delete(id);
           reject(extensionError('MESSAGE_TOO_LARGE', `帧超过大小上限（${maxMessageBytes} 字节）`));
           return;
         }
         try {
+          dispatched = true;
           transport.send(frame);
         } catch (error) {
           clearTimeout(timer);
+          cleanup();
           pending.delete(id);
           reject(extensionError('PROVIDER_ERROR', 'transport 发送失败：' + String(error?.message ?? error)));
         }
@@ -361,6 +392,7 @@ export function createProcessExtensionHost({
       if (!entry) return { cancelled: false };
       pending.delete(String(invokeId));
       clearTimeout(entry.timer);
+      entry.cleanup?.();
       if (!entry.settled) { entry.settled = true; entry.reject(extensionError('INVOKE_CANCELLED', '调用已被取消')); }
       try { checkedSend({ v: PROTOCOL_VERSION, id: String(invokeId), kind: 'cancel', capability: entry.capability }); } catch { /* 已关闭 */ }
       return { cancelled: true };

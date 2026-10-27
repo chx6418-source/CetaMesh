@@ -80,7 +80,8 @@ async function waitUntil(predicate, timeoutMs = 7000) {
   }
 }
 const fakeFetch = async (url) => ({
-  status: 200,
+  // Production safeFetch returns statusCode/body; the host exposes a Response.
+  statusCode: 200,
   body: '<html><head><title>Example Domain</title></head><body>hi</body></html>',
   url
 });
@@ -168,6 +169,8 @@ try {
   runtime.enable({ id: 'cetamesh.http-meta' });
   const fetched = await runtime.invoke({ id: 'cetamesh.http-meta', capability: 'meta.fetch-title', input: { url: 'https://example.com/' } });
   equal('network 权限下可调用并解析标题', fetched.result.title, 'Example Domain');
+  equal('HTTP sample preserves the production Response status', fetched.result.status, 200);
+  check('HTTP sample consumes the production Response body', fetched.result.bytes > 0);
   const stored = await runtime.invoke({ id: 'cetamesh.http-meta', capability: 'meta.last-title', input: {} });
   equal('storage 权限下可读写私有存储', stored.result.title, 'Example Domain');
 

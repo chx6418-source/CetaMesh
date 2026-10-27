@@ -137,7 +137,7 @@ export function createExtensionRuntime({
     const catalogOwner = 'extension:' + entry.id;
     const definitions = (entry.manifest.capabilities || []).map(cap => {
       const id = 'extension.' + entry.id + '.' + cap.id;
-      return { id, catalogOwner, descriptorVersion, permission: 'extension.invoke', provider: 'extension', risk: 'low',
+      return { id, catalogOwner, descriptorVersion, permission: 'extension.invoke', provider: 'extension', risk: 'low', effect: 'unknown',
         description: typeof cap.description === 'string' ? cap.description : 'Invoke the declared Extension capability ' + cap.id + '.',
         inputSchema: cap.inputSchema && typeof cap.inputSchema === 'object' ? cap.inputSchema : null,
         modelCallable: Boolean(cap.inputSchema && typeof cap.inputSchema === 'object'),

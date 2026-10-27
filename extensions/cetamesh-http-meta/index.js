@@ -13,7 +13,7 @@ module.exports.handlers = {
     const url = input && typeof input.url === 'string' ? input.url : '';
     if (!url) throw new Error('url 不能为空');
     const response = await ctx.fetch(url, { method: 'GET' });
-    const body = response && typeof response.body === 'string' ? response.body : '';
+    const body = await response.text();
     const match = /<title[^>]*>([^<]*)<\/title>/i.exec(body);
     const title = match ? String(match[1]).trim() : '';
     ctx.storage.set('lastTitle', title);

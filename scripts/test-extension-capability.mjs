@@ -70,6 +70,13 @@ try {
     'ordinary installed code Extensions run in a real Worker process');
   const read = await extensions.execute({ method: 'ext.invoke', params: { id: manifest.id, capability: 'read-file', input: { path: 'src/readme.txt' } } });
   assert.equal(read.result.content, 'workspace data');
+  const stableInvocation={requestId:'extension-logical-delivery',actor:OWNER_ACTOR,
+    capability:'extension.'+manifest.id+'.read-file',input:{path:'src/readme.txt'}};
+  await capabilityService.broker.execute(stableInvocation);
+  const readsAfterFirst=capabilityAudit.filter(row=>row.capability==='filesystem.read'&&row.status==='completed').length;
+  await assert.rejects(capabilityService.broker.execute(stableInvocation),{code:'REQUEST_ALREADY_DISPATCHED'});
+  assert.equal(capabilityAudit.filter(row=>row.capability==='filesystem.read'&&row.status==='completed').length,readsAfterFirst,
+    'an opaque Extension root invocation cannot bypass the original delivery fence');
   await assert.rejects(extensions.execute({ method: 'ext.invoke', params: { id: manifest.id, capability: 'read-file', input: { path: 'docs/private.txt' } } }),
     error => error.code === 'FILESYSTEM_SCOPE_DENIED');
 
