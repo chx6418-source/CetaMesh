@@ -22,6 +22,9 @@ try {
     assert.ok(AGENT_EXPANSION_SOURCE_FILES.includes(file),file+' must bind new native execution inputs to SEA provenance');
   }
   const fingerprint = computeAgentExpansionFingerprint(root);
+  assert.ok(AGENT_EXPANSION_SOURCE_FILES.includes('src/capability/operation-continuation.js'));
+  assert.ok(AGENT_EXPANSION_SOURCE_FILES.includes('src/capability/policy.js'));
+  for(const input of ['src/capability/approval.js','src/model/input-schema.js','src/safe-fetch.js','src/memory/runtime.js','src/memory/store.js','src/memory/types.js','src/memory/links.js','src/memory/task-working-memory.js','src/context/service.js'])assert.ok(AGENT_EXPANSION_SOURCE_FILES.includes(input));
   assert.equal(assertAgentExpansionSourceUnchanged(root, fingerprint), fingerprint);
   assert.match(fingerprint, /^[a-f0-9]{64}$/);
   const artifact = path.join(root, 'artifact'); fs.mkdirSync(artifact);

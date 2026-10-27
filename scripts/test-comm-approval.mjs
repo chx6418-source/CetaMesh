@@ -18,7 +18,7 @@ try {
   store.insert({id:'task',goal:'fixture',requirements:[],status:'running',workspaceId:'ws',rev:1,
     currentAgent:{provider:'fixture',sessionId:'session'},agentHistory:[],artifacts:[]});
   const grants={capabilities:['fixture.write'],taskIds:['task'],workspaceIds:['ws']};
-  const actor={kind:'agent',id:'fixture',grants};
+  const actor={kind:'agent',id:'fixture',grants,assignment:store.get('task').currentAgent,assignmentRevision:store.get('task').authorizationRevision??store.get('task').rev};
   let calls=0;
   const make=()=>{
     const broker=createCapabilityBroker({stateDir:root,
@@ -45,7 +45,7 @@ try {
     taskStore.insert({id:'task',goal:'fixture',requirements:[],status:'running',workspaceId:'ws',rev:1,
       currentAgent:{provider:'fixture',sessionId:'session'},agentHistory:[],artifacts:[]});
     let currentGrants={capabilities:['fixture.write'],taskIds:['task'],workspaceIds:['ws']};
-    const agent={kind:'agent',id:'fixture',grants:structuredClone(currentGrants)};
+    const agent={kind:'agent',id:'fixture',grants:structuredClone(currentGrants),assignment:taskStore.get('task').currentAgent,assignmentRevision:taskStore.get('task').authorizationRevision??taskStore.get('task').rev};
     let effects=0;
     const createBroker=()=>{
       const value=createCapabilityBroker({stateDir,policy:createCapabilityPolicy({resolveTask:id=>taskStore.get(id),

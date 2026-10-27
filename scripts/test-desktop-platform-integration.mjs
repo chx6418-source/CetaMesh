@@ -85,7 +85,8 @@ try {
   check(task.agentHistory.length, 2);
   check(fs.readFileSync(path.join(projectRoot, 'export.csv'), 'utf8'), 'name,value\na,1');
   check(toolRequests.length, 2);
-  check(toolRequests[0].actor, toolRequests[1].actor);
+  check(toolRequests[0].actor.grants, toolRequests[1].actor.grants);
+  assert.notDeepEqual(toolRequests[0].actor.assignment,toolRequests[1].actor.assignment,'handoff must replace the executor binding');
   check(toolRequests[0].workspaceId, toolRequests[1].workspaceId);
   check(toolRequests[0].taskId, toolRequests[1].taskId);
   check(toolRequests[1].actor.grants.workspaceIds, [approved.workspaceId]);
@@ -106,7 +107,7 @@ try {
   const priorWorkspaces = (await workspaceService.execute({ method: 'workspace.list' })).workspaces.length;
   await managed.close();
   agentBroker.close();
-  let requestReview = false, approvedActions = 0;
+  let requestReview = false, approvedActions = 0, reviewOperationRef = '';
   let reviewAwaitingOwnerDecision = false;
   const restartObservations = [];
   const approvalResumePromptEvidence = [];
@@ -117,7 +118,7 @@ try {
       let command;
       if (requestReview && !reviewAwaitingOwnerDecision) {
         reviewAwaitingOwnerDecision = true;
-        command = { capability: 'fixture.review', input: { note: 'Owner must decide' } };
+        command = { capability: 'operation.continue', input: { operationRef: reviewOperationRef, input: { note: 'Owner must decide' } } };
       } else {
         if (reviewAwaitingOwnerDecision) approvalResumePromptEvidence.push(hasOwnerDecision);
         reviewAwaitingOwnerDecision = false;
@@ -141,7 +142,10 @@ try {
   check(recovered.taskId, approved.taskId);
   check(recovered.workspaceId, approved.workspaceId);
   assert.notEqual(recovered.assignment.sessionId, preRestartSession); assertions++;
-  check(recovered.assignment.actor, persistedGrant);
+  check(recovered.assignment.actor.grants, persistedGrant.grants);
+  assert.notDeepEqual(recovered.assignment.actor.assignment,persistedGrant.assignment,'recovery retains grants but binds a fresh executor');
+  await rejected(()=>capabilities.broker.execute({actor:persistedGrant,taskId:task.id,workspaceId:task.workspaceId,
+    capability:'filesystem.read',input:{path:'a.js'}}),'AGENT_ASSIGNMENT_EXPIRED');
   check(taskRuntime.list().total, priorTasks);
   check((await workspaceService.execute({ method: 'workspace.list' })).workspaces.length, priorWorkspaces);
   for (let i = 0; i < 400 && restartObservations.length < 1; i++) await delay(5);
@@ -159,10 +163,14 @@ try {
 
   // The real approval engine executes a harmless injected high-risk operation.
   capabilities.broker.register({ id: 'fixture.review', permission: 'git.commit', workspace: true, risk: 'high',
+    inputSchema:{type:'object',properties:{note:{type:'string'}},required:['note'],additionalProperties:false},
     execute: () => ({ executed: ++approvedActions }) });
-  capabilities.grantTask(task.id, { workspaceIds: [task.workspaceId], capabilities: [...persistedGrant.grants.capabilities, 'fixture.review'] });
+  capabilities.grantTask(task.id, { workspaceIds: [task.workspaceId], capabilities: [...persistedGrant.grants.capabilities, 'fixture.review', 'operation.continue'] });
   requestReview = true;
   for (const approve of [false, true]) {
+    reviewOperationRef='owner-review-'+approve;
+    await capabilities.execute({method:'capability.operation.prepare',params:{taskId:task.id,workspaceId:task.workspaceId,
+      operationId:reviewOperationRef,capability:'fixture.review',input:{note:'Owner must decide'}}});
     const observedBeforeRequest = restartObservations.length;
     await agentBroker.send({ provider: 'cetamesh', sessionId: resumedSession, content: 'Request Owner review ' + approve });
     for (let i = 0; i < 400 && restartObservations.length <= observedBeforeRequest; i++) await delay(5);

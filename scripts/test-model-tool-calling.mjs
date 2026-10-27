@@ -72,6 +72,48 @@ const emptyObjectSchema = {
 };
 
 {
+  const continuationState=path.join(temp,'operation-continuation');
+  const tasks=createTaskRuntime({stateDir:continuationState});
+  const workspace='continuation-workspace';
+  const capabilities=createCapabilityService({stateDir:continuationState,taskRuntime:tasks,
+    workspaceService:{describeWorkspace:id=>id===workspace?{id,root:temp}:null}});
+  const marker=path.join(temp,'continued-effect.marker');let dispatchCount=0;
+  capabilities.broker.register({id:'fixture.resume-write',description:'Append a local test marker',permission:'extension.invoke',risk:'high',effect:'non-idempotent',
+    retainOperationResult:r=>r,inputSchema:{type:'object',properties:{proof:{type:'string'}},required:['proof'],additionalProperties:false},execute:r=>{
+      assert.equal(r.input.proof,'marker');
+      fs.appendFileSync(marker,'x');dispatchCount++;return {receipt:'trusted-local-receipt'};
+    }});
+  const task=tasks.create({goal:'Execute only remaining checkpoint work',workspaceId:workspace});
+  capabilities.grantTask(task.id,{capabilities:['fixture.resume-write','operation.continue'],workspaceIds:[workspace]});
+  tasks.attachAgent({id:task.id,expectedRev:tasks.get({id:task.id}).task.rev,provider:'alpha',sessionId:'alpha'});
+  await capabilities.execute({method:'capability.operation.prepare',params:{taskId:task.id,workspaceId:workspace,
+    operationId:'checkpoint-step',capability:'fixture.resume-write',input:{proof:'marker'}}});
+  tasks.attachAgent({id:task.id,expectedRev:tasks.get({id:task.id}).task.rev,provider:'beta',sessionId:'beta'});
+  const {runtime}=modelRuntimeWith([
+    {toolCalls:[{id:'beta-generated-call',capabilityId:'operation.continue',arguments:{operationRef:'checkpoint-step',input:{proof:'marker'}}}]},
+    {text:'I received the verified original tool result.',toolCalls:[]}
+  ]);
+  const coordinator=createToolExecutionCoordinator({stateDir:continuationState,modelRuntime:runtime,capabilityBroker:capabilities.broker});
+  const options={providerId:'fixture',messages:[{role:'user',content:'Continue the checkpoint.'}],actor:capabilities.principalForTask(task.id),
+    sessionId:'beta',turnId:'beta-turn',scope:{taskId:task.id,workspaceId:workspace},
+    manifest:capabilities.broker.list().filter(row=>row.id==='operation.continue')};
+  const pending=await coordinator.run(options);assert.equal(pending.status,'pending');assert.equal(dispatchCount,0);
+  const approval=capabilities.broker.approvals.get(pending.approvalId);
+  assert.equal(approval.request.capability,'fixture.resume-write','approval binds the actual source rather than a generic wrapper');
+  const decision=await capabilities.broker.decide({id:pending.approvalId,approve:true,actor:OWNER_ACTOR});
+  assert.equal((await coordinator.resumeApproval({approvalId:pending.approvalId,requestFingerprint:approval.fingerprint,decisionResult:decision})).status,'completed');
+  const next=modelRuntimeWith([{toolCalls:[{id:'different-external-call',capabilityId:'operation.continue',arguments:{input:{proof:'marker'},operationRef:'checkpoint-step'}}]},
+    {text:'Skipped completed operation.',toolCalls:[]}]);
+  const replay=await createToolExecutionCoordinator({modelRuntime:next.runtime,capabilityBroker:capabilities.broker}).run({...options,turnId:'new-turn'});
+  assert.equal(replay.status,'completed');assert.equal(dispatchCount,1);assert.equal(fs.readFileSync(marker,'utf8'),'x');
+  const unlinked=modelRuntimeWith([{toolCalls:[{id:'new-id-without-identity',capabilityId:'fixture.resume-write',arguments:{proof:'marker'}}]}]);
+  const review=await createToolExecutionCoordinator({modelRuntime:unlinked.runtime,capabilityBroker:capabilities.broker}).run({...options,
+    turnId:'unlinked-turn',manifest:capabilities.broker.list().filter(row=>row.id==='fixture.resume-write')});
+  assert.equal(review.code,'OUTCOME_UNKNOWN',JSON.stringify(review));assert.equal(dispatchCount,1,'unreferenced resumed effects require review before dispatch');
+  pass('replacement model resumes an explicit prepared operation, real approval and old result without duplicate effects');
+}
+
+{
   const context = buildCapabilityContext({
     registered: [
       {

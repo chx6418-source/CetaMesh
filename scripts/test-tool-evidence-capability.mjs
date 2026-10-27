@@ -45,6 +45,8 @@ try {
  const again = createCapabilityService(options);
  assert.equal(again.principalForTask(other.id).grants.capabilities.includes('context.evidence.read'), false, 'existing explicit grants must not migrate');
  taskRuntime.attachAgent({ id: task.id, expectedRev: taskRuntime.get({ id: task.id }).task.rev, provider: 'cetamesh', sessionId: 'replacement' });
+ await assert.rejects(reloaded.broker.execute(request()),e=>e.code==='AGENT_ASSIGNMENT_EXPIRED');
+ actor=reloaded.principalForTask(task.id);
  await assert.rejects(reloaded.broker.execute(request()), e => e.code === 'TOOL_EVIDENCE_DENIED');
  const ownerBinding = evidenceBinding({ actor: owner, sessionId: 'owner-chat' });
  const ownerRef = evidenceStore.put({ binding: ownerBinding, content: 'clock proof', sourceCapability: 'clock.now', sourceInput: {} });

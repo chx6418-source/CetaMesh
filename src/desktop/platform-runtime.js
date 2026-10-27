@@ -158,7 +158,7 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
                 model: record.config.model !== legacyModel ? record.config.model : undefined,
                 reasoningEffort: record.config.reasoning,
                 grants: { capabilities: ['filesystem.read', 'filesystem.write', 'filesystem.search',
-                  'git.status', 'git.diff', 'memory.read', 'test.run', 'operation.read'] } },
+                  'git.status', 'git.diff', 'memory.read', 'test.run', 'operation.read', 'operation.continue'] } },
               reason: index ? 'Smart project task safe reassignment after verified preflight failure' : 'Smart project task'
             }, { signal });
             if (result.status !== 'completed' || result.result?.accepted !== true) {

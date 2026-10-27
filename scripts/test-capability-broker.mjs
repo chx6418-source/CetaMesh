@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { createCapabilityBroker } from '../src/capability/broker.js';
 import { createCapabilityService } from '../src/capability/service.js';
@@ -203,5 +204,98 @@ try {
   taskId:'crash-task',workspaceId:'crash-ws',capability:'fixture.crash',input:{}}),'REQUEST_RECOVERY_REQUIRED');
  assert.equal(fs.readFileSync(crashMarker,'utf8'),'x','real child process crash cannot cause the effect to replay');
  assert.equal(restart.principalForTask(task.id).grants.workspaceIds[0],ws);
+ const resumeTask=taskRuntime.create({goal:'Resume a verified operation plan',workspaceId:ws});
+ logicalRestart.grantTask(resumeTask.id,{capabilities:['filesystem.write','operation.read','operation.continue'],workspaceIds:[ws]});
+ taskRuntime.attachAgent({id:resumeTask.id,expectedRev:taskRuntime.get({id:resumeTask.id}).task.rev,provider:'alpha',sessionId:'alpha-plan'});
+ const oldPrincipal=logicalRestart.principalForTask(resumeTask.id);
+ const plan=await logicalRestart.execute({method:'capability.operation.prepare',params:{taskId:resumeTask.id,workspaceId:ws,
+  operationId:'planned-append',capability:'filesystem.write',input:{path:'planned.txt',append:true,content:'one'}}});
+ assert.equal(plan.status,'prepared');
+ assert.equal(fs.existsSync(path.join(dir,'project','planned.txt')),false,'preparing an intent cannot execute it');
+ taskRuntime.attachAgent({id:resumeTask.id,expectedRev:taskRuntime.get({id:resumeTask.id}).task.rev,provider:'beta',sessionId:'beta-plan'});
+ const resumePrincipal=logicalRestart.principalForTask(resumeTask.id);
+ await deny(logicalRestart.broker.execute({actor:oldPrincipal,taskId:resumeTask.id,workspaceId:ws,
+  capability:'filesystem.write',input:{path:'stale-write.txt',content:'bad'}}),'AGENT_ASSIGNMENT_EXPIRED');
+ const resumeRequest={actor:resumePrincipal,taskId:resumeTask.id,workspaceId:ws,capability:'operation.continue',
+  input:{operationRef:'planned-append',input:{content:'one',append:true,path:'planned.txt'}}};
+ let resumePending=await logicalRestart.broker.execute({...resumeRequest,requestId:'beta-resume'});
+ assert.equal(resumePending.status,'pending','continuing a prepared write still requires its real source approval');
+ await logicalRestart.execute({method:'capability.approval.decide',params:{id:resumePending.approvalId,approve:false}});
+ await deny(logicalRestart.broker.execute({...resumeRequest,requestId:'cannot-evade-rejected-approval'}),'OPERATION_PERMISSION_REVIEW_REQUIRED');
+ await logicalRestart.execute({method:'capability.operation.review',params:{taskId:resumeTask.id,workspaceId:ws,operationId:'planned-append'}});
+ resumePending=await logicalRestart.broker.execute({...resumeRequest,requestId:'owner-reviewed-new-approval'});
+ await logicalRestart.execute({method:'capability.approval.decide',params:{id:resumePending.approvalId,approve:true}});
+ const resumeResult=await logicalRestart.broker.execute({...resumeRequest,requestId:'new-session-new-tool-call'});
+ assert.equal(resumeResult.replayed,true);
+ assert.equal(fs.readFileSync(path.join(dir,'project','planned.txt'),'utf8'),'one','reordered parameters and new calls cannot duplicate the append');
+ const resumedRead=await logicalRestart.broker.execute({actor:resumePrincipal,taskId:resumeTask.id,workspaceId:ws,
+  capability:'operation.read',input:{operationRef:'planned-append'}});
+ assert.equal(resumedRead.result.verified,true,'replacement Agents can independently verify the completed source result');
+ await deny(logicalRestart.broker.execute({...resumeRequest,requestId:'changed-plan',input:{operationRef:'planned-append',
+  input:{path:'planned.txt',content:'changed',append:true}}}),'REQUEST_ID_CONFLICT');
+ await deny(logicalRestart.broker.execute({actor:resumePrincipal,taskId:resumeTask.id,workspaceId:ws,capability:'filesystem.write',
+  operationId:'guessed-fresh-id',input:{path:'unlinked.txt',content:'unlinked'}}),'OPERATION_LINK_REQUIRED');
+ const independentPlan=await logicalRestart.execute({method:'capability.operation.prepare',params:{taskId:resumeTask.id,workspaceId:ws,
+  operationId:'independent-intent',capability:'filesystem.write',input:{path:'planned.txt',content:'one',append:true,
+   expectedHash:crypto.createHash('sha256').update('one').digest('hex')}}});
+ assert.equal(independentPlan.status,'prepared','a separate explicit intent gets a separate logical identity');
+ const planAfterRestart=createCapabilityService({stateDir:path.join(dir,'state'),workspaceService,taskRuntime});
+ assert.equal(planAfterRestart.broker.operationRecordForTask({taskId:resumeTask.id,workspaceId:ws,operationId:'independent-intent'}).status,'prepared');
+ const newIntent=await planAfterRestart.broker.execute({...resumeRequest,actor:planAfterRestart.principalForTask(resumeTask.id),requestId:'independent-intent-call',
+  input:{operationRef:'independent-intent',input:{path:'planned.txt',content:'one',append:true,expectedHash:crypto.createHash('sha256').update('one').digest('hex')}}});
+ assert.equal(newIntent.status,'pending');
+ await planAfterRestart.execute({method:'capability.approval.decide',params:{id:newIntent.approvalId,approve:true}});
+ assert.equal(fs.readFileSync(path.join(dir,'project','planned.txt'),'utf8'),'oneone','independent intent is executed, not incorrectly deduplicated');
+ await deny(planAfterRestart.broker.execute({...resumeRequest,actor:planAfterRestart.principalForTask(otherTask.id),taskId:otherTask.id,
+  input:{operationRef:'planned-append',input:{path:'planned.txt',content:'one',append:true}}}),'PERMISSION_DENIED');
+ let admissionChecks=0,noEffectWrites=0;
+ const noEffectBroker=createCapabilityBroker({stateDir:path.join(dir,'pre-dispatch-retry'),policy:{authorize:()=>{
+  if(++admissionChecks===3)throw Object.assign(new Error('Admission temporarily unavailable'),{code:'TEMPORARY_ADMISSION'});
+  return {approvalRequired:false};
+ }}});
+ noEffectBroker.register({id:'fixture.pre-dispatch',permission:'extension.invoke',effect:'unknown',retainOperationResult:r=>r,
+  execute:()=>({writes:++noEffectWrites})});
+ const knownUnexecuted={actor:owner,taskId:'no-effect-task',workspaceId:ws,operationId:'retry-known-unexecuted',
+  requestId:'before-dispatch',capability:'fixture.pre-dispatch',input:{}};
+ await deny(noEffectBroker.execute(knownUnexecuted),'TEMPORARY_ADMISSION');
+ assert.equal(noEffectBroker.operationRecordForTask({taskId:'no-effect-task',workspaceId:ws,operationId:'retry-known-unexecuted'}).status,'failed-no-effect');
+ assert.equal((await noEffectBroker.execute({...knownUnexecuted,requestId:'controlled-retry'})).result.writes,1);
+ const grantTask=taskRuntime.create({goal:'Use a bounded exact write grant',workspaceId:ws});
+ logicalRestart.grantTask(grantTask.id,{capabilities:['filesystem.write'],workspaceIds:[ws]});
+ fs.writeFileSync(path.join(dir,'project','l2-grant.txt'),'bounded write');
+ const grantInput={path:'l2-grant.txt',content:'bounded write',expectedHash:crypto.createHash('sha256').update('bounded write').digest('hex')};
+ const bounded=await logicalRestart.execute({method:'capability.grant.create',params:{taskId:grantTask.id,workspaceId:ws,
+  capability:'filesystem.write',input:grantInput,ttlMs:60000,maxUses:1}});
+ assert.equal(bounded.status,'active');
+ const grantedWrite={actor:logicalRestart.principalForTask(grantTask.id),taskId:grantTask.id,workspaceId:ws,
+  capability:'filesystem.write',input:grantInput,operationId:'l2-first',requestId:'l2-first-request'};
+ assert.equal((await logicalRestart.broker.execute(grantedWrite)).status,'completed','an exact finite Owner grant avoids repeat approval');
+ assert.equal((await logicalRestart.execute({method:'capability.grant.list'})).grants.find(row=>row.id===bounded.id).uses,1);
+ assert.equal((await logicalRestart.broker.execute({...grantedWrite,requestId:'same-completed-operation'})).replayed,true,'replay does not consume grant again');
+ const exhausted=await logicalRestart.broker.execute({...grantedWrite,requestId:'new-independent-write',operationId:'l2-second',
+  input:{...grantInput}});
+ assert.equal(exhausted.status,'pending','new parameters or exhausted grant require real approval');
+ const revoked=await logicalRestart.execute({method:'capability.grant.create',params:{taskId:grantTask.id,workspaceId:ws,
+  capability:'filesystem.write',input:{path:'l2-revoked.txt',content:'must not write'},ttlMs:60000,maxUses:2}});
+ await logicalRestart.execute({method:'capability.grant.revoke',params:{id:revoked.id}});
+ assert.equal((await logicalRestart.broker.execute({...grantedWrite,requestId:'revoked-grant',operationId:'l2-revoked',
+  input:{path:'l2-revoked.txt',content:'must not write'}})).status,'pending');
+ assert.equal(fs.existsSync(path.join(dir,'project','l2-revoked.txt')),false);
+ await deny(logicalRestart.execute({method:'capability.grant.create',params:{taskId:grantTask.id,workspaceId:ws,
+  capability:'test.run',input:{},ttlMs:60000,maxUses:1}}),'GRANT_CAPABILITY_DENIED');
+ let grantClock=1000;
+ const clockGrants=createCapabilityService({stateDir:path.join(dir,'clock-grants'),workspaceService,taskRuntime,now:()=>grantClock});
+ clockGrants.grantTask(grantTask.id,{capabilities:['filesystem.write'],workspaceIds:[ws]});
+ await clockGrants.execute({method:'capability.grant.create',params:{taskId:grantTask.id,workspaceId:ws,capability:'filesystem.write',
+  input:{path:'l2-expired.txt',content:'expired'},ttlMs:1000,maxUses:2}});
+ grantClock=2000;
+ assert.equal((await clockGrants.broker.execute({...grantedWrite,actor:clockGrants.principalForTask(grantTask.id),requestId:'expired-grant',
+  operationId:'expired-grant-op',input:{path:'l2-expired.txt',content:'expired'}})).status,'pending');
+ assert.equal(fs.existsSync(path.join(dir,'project','l2-expired.txt')),false,'expiry at the exact deadline prevents dispatch');
+ await clockGrants.execute({method:'capability.grant.create',params:{taskId:grantTask.id,workspaceId:ws,capability:'filesystem.write',
+  input:{path:'l2-new-executor.txt',content:'must reapprove'},ttlMs:1000,maxUses:2}});
+ taskRuntime.attachAgent({id:grantTask.id,expectedRev:taskRuntime.get({id:grantTask.id}).task.rev,provider:'new-fixture',sessionId:'grant-new-executor'});
+ assert.equal((await clockGrants.broker.execute({...grantedWrite,actor:clockGrants.principalForTask(grantTask.id),requestId:'grant-moved-executor',
+  operationId:'new-executor-grant-op',input:{path:'l2-new-executor.txt',content:'must reapprove'}})).status,'pending');
  console.log('PASS capability broker: registry, permission, boundary, owner approval, replay/tamper, external denial, task grants and desktop actor binding');
 } finally {fs.rmSync(dir,{recursive:true,force:true});}

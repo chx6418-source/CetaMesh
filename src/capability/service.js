@@ -6,6 +6,7 @@ import path from 'node:path';
 import { resolveInside, canonicalizeRoot, assertSafeRootForm } from '../workspace/boundary.js';
 import { safeFetch } from '../safe-fetch.js';
 import { createCapabilityBroker } from './broker.js';
+import { registerOperationContinuation } from './operation-continuation.js';
 import { createCapabilityPolicy } from './policy.js';
 import { createCapabilityApproval, requestFingerprint } from './approval.js';
 import { OWNER_ACTOR, capabilityError } from './types.js';
@@ -345,6 +346,15 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
   const resolveWorkspace = id => workspaceService?.describeWorkspace(id);
   const policy = createCapabilityPolicy({ resolveWorkspace, resolveTask: taskFor,
     resolveGrants: taskId => grants[taskId],
+    checkOperation: (request, entry, task) => {
+      const effect = (entry.effect && entry.effect !== 'read-only')
+        || ['message.send','filesystem.write','git.commit','test.run','publish','network'].includes(entry.permission ?? entry.id);
+      if (request.actor.kind === 'agent' && task.agentHistory?.length > 1 && effect && !entry.delegatesOperation
+        && !broker.operationRecordForTask({ taskId: task.id, workspaceId: task.workspaceId, operationId: request.operationId })) {
+        const error = capabilityError('OPERATION_LINK_REQUIRED', 'Resumed effects require a trusted operation reference or an independent Owner-prepared intent');
+        error.effectStatus = 'unknown'; throw error;
+      }
+    },
     isTaskHandoff: taskId => taskHandoffGuard(taskId) });
   const broker = createCapabilityBroker({
     policy,
@@ -441,7 +451,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       throw capabilityError('TASK_CHILD_READ_ONLY', 'Child grant cannot advertise write or unrelated tools');
     }
     const capabilities = new Set(readOnlyChild ? ['filesystem.read', 'filesystem.search']
-      : value?.capabilities ?? ['filesystem.read', 'filesystem.write', 'filesystem.search', 'git.status', 'git.diff', 'memory.read', 'operation.read', ...(evidenceStore ? ['context.evidence.read'] : [])]);
+      : value?.capabilities ?? ['filesystem.read', 'filesystem.write', 'filesystem.search', 'git.status', 'git.diff', 'memory.read', 'operation.read', 'operation.continue', ...(evidenceStore ? ['context.evidence.read'] : [])]);
     if (capabilities.has('filesystem.write')) capabilities.add('workspace.apply');
     for (const id of capabilities) broker.registry.require(id);
     if ((value?.workspaceIds ?? [task.workspaceId]).some(id => id !== task.workspaceId)) {
@@ -474,7 +484,9 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       projected.scopes = [`task:${taskId}`];
       projected.types = ['task'];
     }
-    return { kind: 'agent', id: `task:${taskId}`, grants: projected };
+    return { kind: 'agent', id: `task:${taskId}`, grants: projected,
+      assignment: task.currentAgent ? structuredClone(task.currentAgent) : null,
+      assignmentRevision: task.authorizationRevision ?? task.rev };
   }
   function memoryPrincipal(actor) {
     if (actor.kind === 'owner') return { kind: 'user', id: actor.id };
@@ -600,6 +612,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     }
   }
   if (taskRuntime) {
+    registerOperationContinuation({ broker });
     broker.register({ id: 'operation.read', permission: 'storage', risk: 'low', effect: 'read-only',
       workspace: true, requiresTask: true, provider: 'task-runtime',
       description: 'Read a prior Task operation receipt and verify its current result without executing the effect again.',
@@ -614,7 +627,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
         }
         const source = broker.registry.require(row.capability);
         if ((source.descriptorVersion ?? null) !== row.descriptorVersion) throw capabilityError('OPERATION_DESCRIPTOR_CHANGED', 'Original capability version changed');
-        const original = { ...request, capability: row.capability, input: row.accessInput, operationId: undefined,
+        const original = { ...request, capability: row.capability, input: row.accessInput, operationId: row.operationId,
           approvalId: undefined, approvalBinding: undefined, approved: undefined };
         policy.authorize(original, source);
         await source.validate?.(original, { replay: true });
@@ -729,6 +742,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       }
     },
     execute: r => safeFetch(String(r.input.url), Math.min(50000, Number(r.input.maxChars) || 50000), {
+      signal: r.signal,
       authorizeUrl: url => {
         if (r.actor.kind === 'extension' && !r.actor.grants.hosts.includes(url.host)) {
           throw capabilityError('NETWORK_SCOPE_DENIED', 'Redirect host not declared');
@@ -922,12 +936,12 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
           if (r.signal?.aborted) throw capabilityError('INVOKE_CANCELLED', 'Agent assignment cancelled');
           const assignment = taskRuntime.attachAgent({ id: task.id, expectedRev: task.rev, provider, sessionId: created.sessionId });
           attached = true;
-          if (provider === 'cetamesh') {
-            bindAgentSession?.(created.sessionId, { taskId: task.id, workspaceId: ws.id, actor });
-          }
           if (assignment.task.status === 'queued') {
             taskRuntime.start({ id: task.id, expectedRev: assignment.task.rev });
             startedByRequest = true;
+          }
+          if (provider === 'cetamesh') {
+            bindAgentSession?.(created.sessionId, { taskId: task.id, workspaceId: ws.id, actor: principalForTask(task.id) });
           }
           if (r.signal?.aborted) throw capabilityError('INVOKE_CANCELLED', 'Agent assignment cancelled');
           ensureTaskFollow(provider, created.sessionId, task.id, { expectTurn: typeof agentBroker.setTaskExecutionObserver !== 'function' });
@@ -956,7 +970,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
           }
           return { taskId: task.id, workspaceId: ws.id, provider, sessionId: created.sessionId,
             accepted: sent?.accepted === true, requestId: sent?.requestId ?? sent?.turnId ?? null,
-            turnId: sent?.turnId ?? null, actor };
+            turnId: sent?.turnId ?? null, actor: principalForTask(task.id) };
         } catch (error) {
           if (created?.sessionId) stopTaskFollow(provider, created.sessionId);
           let current = taskFor(task.id);
@@ -1062,6 +1076,28 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     if (method === 'capability.operation.get') return operations.get(params.id);
     if (method === 'capability.operation.list') return { operations: operations.list() };
     if (method === 'capability.operation.cancel') return operations.cancel(params.id);
+    if (method === 'capability.operation.prepare') return broker.prepareOperation({ ...params, actor: OWNER_ACTOR,
+      operationId: params.operationId || crypto.randomUUID() });
+    if (method === 'capability.operation.review') {
+      const task = taskFor(params.taskId);
+      if (!task || task.workspaceId !== params.workspaceId) throw capabilityError('TASK_NOT_AUTHORIZED','Review requires the original Task Workspace');
+      return broker.reviewPreparedOperation({ ...params, actor: OWNER_ACTOR });
+    }
+    if (method === 'capability.grant.list') return { grants: broker.approvals.listGrants() };
+    if (method === 'capability.grant.revoke') return broker.approvals.revokeGrant(params.id, OWNER_ACTOR);
+    if (method === 'capability.grant.create') {
+      if (params.capability !== 'filesystem.write' || params.input?.append === true)
+        throw capabilityError('GRANT_CAPABILITY_DENIED', 'Finite L2 grants only cover exact non-append Workspace file writes');
+      const entry = broker.registry.require(params.capability);
+      const request = { actor: principalForTask(params.taskId), taskId: params.taskId, workspaceId: params.workspaceId,
+        capability: entry.id, input: params.input ?? {}, scope: params.scope ?? null, operationId: params.operationRef };
+      await policy.authorize(request, entry);await entry.validate?.(request);
+      const decision = await policy.authorize(request, entry);
+      const grant = broker.approvals.issueGrant({ actor: OWNER_ACTOR, request, entry, binding: decision.approvalBinding,
+        ttlMs: params.ttlMs, maxUses: params.maxUses });
+      audit({capability:entry.id,status:'bounded-grant-issued',actor:OWNER_ACTOR.id,grantId:grant.id});
+      return grant;
+    }
     if (method === 'capability.execute') return broker.execute({ ...params, actor: OWNER_ACTOR });
     throw capabilityError('METHOD_NOT_FOUND', method);
   }
@@ -1093,9 +1129,14 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       throw capabilityError('TASK_NOT_AUTHORIZED', 'Agent Workspace import requires its Task binding');
     }
     if (task.executionObservation && task.executionObservation.runId !== runId) throw capabilityError('AGENT_ASSIGNMENT_EXPIRED', 'Workspace import belongs to a stale run');
+    // This trusted adapter observes a concrete staging delta, not a model's
+    // semantic guess. Persist its stable run/request identity before approval.
+    const operationId = 'import:' + requestFingerprint({taskId,workspaceId,provider,sessionId,runId,phase,requestId});
+    await broker.prepareOperation({actor:OWNER_ACTOR,taskId,workspaceId,operationId,capability:'workspace.apply',input:{changes,summary},
+      assignment:{provider,sessionId,runId,phase}});
     const actor = principalForTask(task.id);
     const result = await broker.execute({ actor, taskId: task.id, workspaceId: task.workspaceId,
-      capability: 'workspace.apply', requestId, assignment: { provider, sessionId, runId, phase },
+      capability: 'workspace.apply', requestId, operationId, assignment: { provider, sessionId, runId, phase },
       input: { changes, summary }, reason: 'Agent staging Workspace reconciliation' });
     if (result.status === 'pending') rememberWorkspaceImport(result.approvalId, { status: 'pending' });
     return result;

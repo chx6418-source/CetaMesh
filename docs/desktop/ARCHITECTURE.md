@@ -69,6 +69,37 @@ These guarantees rely on the existing single-Core StateDir ownership boundary;
 the JSON journal is not an independent distributed database or an interception
 layer for arbitrary external native actions.
 
+Owner-prepared operation intents use that same dispatch journal and persist their
+canonical contract before execution. `operation.continue(operationRef, input)`
+resolves the original capability and validates its source schema, current grants,
+input/scope fingerprint and result proof. It preserves real source approvals;
+hidden model capabilities cannot become callable through the wrapper. Changed
+ToolCall IDs or parameter key order do not change an explicit operation's identity.
+Unreferenced effects after an Agent transfer require review; the runtime never
+matches operations by similar text or arguments. Rejected prepared operations
+remain blocked until explicit Owner review, which grants no execution permission.
+Only failures proven to occur before entering an executor may reuse their logical
+identity for a bounded retry. Task principals bind the current assignment and
+authorization revision, preventing retained old principals from omitting the fence.
+
+Bounded L2 grants are Owner-issued rows in the existing Approval store. The current
+subset covers exact non-append Workspace file writes, bound to the Task, Workspace,
+executor, live grants, descriptor and complete input. Lifetime is at most 15 minutes,
+usage at most 20 executions, with revocation/expiry and fresh dispatch checks.
+Cached results consume no new grant use. Commands, installations, credentials,
+deletions and general plugin effects retain their existing approval requirements.
+
+Memory may carry a user-assigned `factKey` and `validUntil`. Automatic retrieval
+excludes expired facts and conflicting values for a key within an authorized
+Scope/type. Context packages and linked decisions use the same eligibility checks;
+explicit stale references require review. Owner browsing preserves old records for
+correction. This is deterministic governance of explicit fact identity, not model
+inference of semantic truth. Linked invalid facts block handoff preflight.
+
+Extension text HTTP requests propagate Broker cancellation to the native request
+socket while retaining existing URL, DNS and redirect restrictions. Closing a
+socket does not prove the remote service received no request or undo its effects.
+
 Task status remains independent of Agent turn completion. A Core-bound, bounded current
 execution observation carries the Task assignment, Session and run identity. New dispatch,
 assignment, objective edits, restart and resume invalidate prior result-review eligibility.

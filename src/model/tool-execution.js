@@ -16,7 +16,7 @@ const MAX_TOTAL_CALLS = 24;
 const MAX_RESULT_CHARS = 12000;
 const AUTHORITY_KEYS = new Set([
   'actor', 'actorid', 'grants', 'taskid', 'workspaceid', 'scope', 'approved', 'approvalid',
-  'requestid', 'operationid', 'idempotencykey', 'attemptid', 'executorid', 'principal', 'permissions', 'capabilities', 'provider', 'providerid'
+  'requestid', 'operationid', 'idempotencykey', 'attemptid', 'executorid', 'assignment', 'assignmentrevision', 'principal', 'permissions', 'capabilities', 'provider', 'providerid'
 ]);
 
 function fail(code, message) { throw capabilityError(code, message); }
@@ -490,7 +490,7 @@ export function createToolExecutionCoordinator({
             try {
               const executeBroker = attemptSignal => capabilityBroker.execute({
                 requestId: toolRequestId, actor: liveActor,
-                ...(hasEffect && state.scope?.taskId && state.scope?.workspaceId ? {
+                ...(hasEffect && !registered.delegatesOperation && state.scope?.taskId && state.scope?.workspaceId ? {
                   operationId: 'tool:' + crypto.createHash('sha256').update(baseToolRequestId).digest('hex')
                 } : {}),
                 taskId: state.scope?.taskId ?? null,

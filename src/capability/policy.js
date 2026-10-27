@@ -2,7 +2,7 @@ import {PERMISSIONS,FORBIDDEN_PERMISSIONS,RISK_RANK,capabilityError} from './typ
 import {requestFingerprint} from './approval.js';
 import path from 'node:path';
 import {resolveInside} from '../workspace/boundary.js';
-export function createCapabilityPolicy({resolveWorkspace,resolveTask,resolveGrants,isTaskHandoff=()=>false}={}){
+export function createCapabilityPolicy({resolveWorkspace,resolveTask,resolveGrants,isTaskHandoff=()=>false,checkOperation=()=>{}}={}){
  return {authorize(request,entry){
   const permission=entry.permission??entry.id;
   if(entry.descriptorVersion&&request.approvalId&&request.approvalBinding?.descriptorVersion!==entry.descriptorVersion)
@@ -64,6 +64,11 @@ export function createCapabilityPolicy({resolveWorkspace,resolveTask,resolveGran
      || task.currentAgent?.provider!==request.approvalBinding.provider
      || task.currentAgent?.sessionId!==request.approvalBinding.sessionId))
     throw capabilityError('APPROVAL_EXPIRED','Task or Agent assignment changed while approval was pending');
+   if(actor.kind==='agent'&&resolveGrants&&(task.currentAgent || actor.assignment)
+     && (actor.assignment?.provider!==task.currentAgent?.provider || actor.assignment?.sessionId!==task.currentAgent?.sessionId
+       || actor.assignmentRevision!==(task.authorizationRevision??task.rev)))
+    throw capabilityError('AGENT_ASSIGNMENT_EXPIRED','Trusted Agent principal belongs to a prior Task assignment');
+   checkOperation(request,entry,task);
   }
   if(actor.kind==='agent'){
    if(!request.taskId || !actor.grants?.taskIds?.includes(request.taskId))throw capabilityError('TASK_NOT_AUTHORIZED','Assigned task required');

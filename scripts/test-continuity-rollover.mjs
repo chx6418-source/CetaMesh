@@ -131,6 +131,10 @@ function setup({ policy, gate, failSendProvider, alphaStatusError, reconciler, b
   const packet=runtime.buildHandoffPacket({taskId:task.id});
   assert.equal(result.task.id,task.id);assert.equal(packet.operations[0].operationId,'stable-file-operation');
   assert.equal(packet.operations[0].attemptId,'attempt-before-switch');
+  assert.equal(packet.operations[0].continuationState,'completed-needs-verification');
+  operations.push({operationId:'planned-next',capability:'filesystem.write',status:'prepared'});
+  assert.equal(runtime.buildHandoffPacket({taskId:task.id}).operations[1].continuationState,'not-started');
+  assert.ok(log.some(row=>row.kind==='prompt'&&row.text.includes('operation.continue')));
   assert.doesNotMatch(JSON.stringify(packet),/DO_NOT_EXPORT_OPERATION/);
   assert.ok(log.some(row=>row.kind==='prompt'&&row.text.includes('operation.read(operationRef)')));
   operations.push({operationId:'unknown-effect',capability:'integration.tool.write',status:'outcome-unknown'});
