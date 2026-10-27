@@ -10,6 +10,15 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-phase3-real-codex-'
 let services;
 let taskId;
 let unavailableReason = null;
+async function firstCompletedCursor(assignment) {
+  const abort=new AbortController();const deadline=setTimeout(()=>abort.abort(),10000);
+  try {
+    for await(const event of services.agentBroker.follow({...assignment,sinceSequence:0,signal:abort.signal})) {
+      if(event.type==='turn/end') { assert.ok(Number.isSafeInteger(event.seq));return event.seq; }
+    }
+    assert.fail('No completed public turn event for the initial checkpoint');
+  } finally {clearTimeout(deadline);abort.abort();}
+}
 try {
   const projectRoot = path.join(root, 'project');
   fs.mkdirSync(projectRoot);
@@ -57,7 +66,6 @@ try {
     assert.equal(fs.readFileSync(path.join(projectRoot, 'sample.ts'), 'utf8'), 'export const answer = 4217;\n');
     assert.equal(task.agentHistory.at(-1)?.provider, 'codex');
     process.stdout.write('PASS real Codex CLI Task execution, Task Follow checkpoint, and unchanged authoritative Workspace\n');
-    const native = services.agentBroker.require('codex');
     const assignment = services.taskService.runtime.get({ id: taskId }).task.currentAgent;
     async function waitStatus(predicate, label) {
       const until = Date.now() + 120000;
@@ -67,8 +75,9 @@ try {
       assert.fail(label + ': ' + JSON.stringify(value));
     }
     await waitStatus(value => !value.running, 'first native turn completion');
+    let cursor=await firstCompletedCursor(assignment);
     async function realRound(prompt, expected) {
-      const since = native._sessions.get(assignment.sessionId).nextSequence;
+      const since = cursor;
       const abort = new AbortController(); const events = [];
       const reader = (async () => { for await (const event of services.agentBroker.follow({ ...assignment, sinceSequence: since, signal: abort.signal })) {
         events.push(event); if (event.type === 'turn/end') return;
@@ -81,6 +90,7 @@ try {
         assert.ok(events.some(event => event.type === 'assistant/chunk'), 'Native JSONL response must pass the streaming event contract');
         assert.match(events.filter(event => event.type === 'assistant/message').at(-1)?.data?.message?.content?.[0]?.text ?? '', expected);
         assert.equal(fs.readFileSync(path.join(projectRoot, 'sample.ts'), 'utf8'), 'export const answer = 4217;\n');
+        cursor=events.at(-1).seq;
         return events;
       } finally { clearTimeout(deadline); abort.abort(); }
     }
@@ -140,8 +150,7 @@ try {
       assert.fail('read-only turn must complete after source drift: ' + JSON.stringify({ status: value.status, code: value.progress?.note }));
     }
     const readOnly = await readOnlyCheckpoint('READONLY_HELLO_OK');
-    const readOnlyNative = services.agentBroker.require('codex');
-    const sinceReadOnly = readOnlyNative._sessions.get(readOnly.currentAgent.sessionId).nextSequence;
+    const sinceReadOnly = await firstCompletedCursor(readOnly.currentAgent);
     const nextEvents = []; const nextAbort = new AbortController();
     const nextTimer = setTimeout(() => nextAbort.abort(), 120000);
     try {

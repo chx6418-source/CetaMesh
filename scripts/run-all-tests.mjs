@@ -225,6 +225,8 @@ const REGISTRY = {
   'test-codex-chat-snapshot.mjs': { category: 'environment', requires: ['real-codex'], timeoutMs: 360_000, note: 'Native Codex production Chat in a large synthetic disposable Workspace' },
   'test-phase3-real-codex.mjs': { category: 'environment', requires: ['real-codex'], timeoutMs: 480_000,
     note: 'Owner-authorized real Codex CLI Task E2E in an isolated disposable Workspace' },
+  'test-round3-real-handoff.mjs': { category: 'environment', requires: ['real-codex'], timeoutMs: 360_000,
+    note: 'Hybrid local-model Managed to real Codex and back; explicit operation continuation in a disposable Workspace' },
   'test-memory-runtime.mjs': { category: 'runtime' },
   'test-phase4-memory.mjs': { category: 'runtime' },
   'test-memory-link.mjs': { category: 'runtime' },
