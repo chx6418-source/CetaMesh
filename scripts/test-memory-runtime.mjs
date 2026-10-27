@@ -56,6 +56,32 @@ try {
   // ── 1. CRUD ────────────────────────────────────────────────────────────
   const runtime = createMemoryRuntime({ stateDir: root, now });
 
+  const factState=path.join(root,'fact-governance'),facts=createMemoryRuntime({stateDir:factState,now});
+  const factA=facts.create({principal:user,type:'workspace',scope:'workspace:facts',content:'Build command is alpha',factKey:'build-command'});
+  const factB=facts.create({principal:user,type:'workspace',scope:'workspace:facts',content:'Build command is beta',factKey:'build-command'});
+  facts.create({principal:user,type:'workspace',scope:'workspace:other-facts',content:'Other authorized partition',factKey:'build-command'});
+  const conflict=facts.retrieve({principal:user,scope:'workspace:facts',query:'Build command'});
+  equal('冲突事实不得自动注入',conflict.memories.length,0);
+  equal('冲突事实保留待核验计数',conflict.meta.conflicted,2);
+  equal('Memory context package 不得旁路冲突核验',facts.buildContextPackage({principal:user,scope:'workspace:facts',query:'Build command'}).summary,'');
+  facts.update({principal:user,id:factA.id,expectedRev:factA.rev,validUntil:clock-1});
+  const resolvedFact=facts.retrieve({principal:user,scope:'workspace:facts',query:'Build command'});
+  equal('用户标记旧事实过时后仅注入新事实',resolvedFact.memories.map(row=>row.id),[factB.id]);
+  check('旧事实仍可查询和纠正',facts.get({principal:user,id:factA.id}).memory.content.includes('alpha'));
+  equal('Scope 外同 factKey 不产生冲突',resolvedFact.meta.conflicted,0);
+  const factRestart=createMemoryRuntime({stateDir:factState,now});
+  equal('事实有效期重启后保持',factRestart.get({principal:user,id:factA.id}).memory.validUntil,clock-1);
+  const expired=facts.create({principal:user,type:'workspace',scope:'workspace:facts',content:'Expired pinned fact',pinned:true,validUntil:clock-1});
+  check('置顶不能绕过事实有效期',!facts.retrieve({principal:user,scope:'workspace:facts',query:'Expired'}).memories.some(row=>row.id===expired.id));
+  equal('Memory context package 不得旁路有效期',facts.buildContextPackage({principal:user,scope:'workspace:facts',query:'Expired'}).summary,'');
+  facts.createLink({principal:user,source:{kind:'memory',id:factB.id,scope:'workspace:facts'},target:{kind:'memory',id:expired.id,scope:'workspace:facts'},
+    relation:'related-to',context:{keyDecisions:['STALE_LINK_DECISION_MUST_NOT_INJECT']}});
+  check('失效链接决策不得进入上下文',!JSON.stringify(facts.buildContextPackage({principal:user,scope:'workspace:facts',query:'Build'})).includes('STALE_LINK_DECISION'));
+  equal('显式失效引用标为待核验',facts.resolveReferences({principal:user,sourceScope:'workspace:facts',refs:[{kind:'memory',id:expired.id,scope:'workspace:facts'}]}).references[0].status,'needs-review');
+  const userFact=facts.create({principal:user,type:'working',scope:'workspace:facts',content:'User-established temporary fact',factKey:'owner-fact'});
+  equal('Agent 不得把用户事实内容替换为模型推断',capture(()=>facts.update({principal:{kind:'agent',id:'fact-agent',grants:{scopes:['workspace:facts'],types:['working']}},
+    id:userFact.id,expectedRev:userFact.rev,content:'Model inferred replacement'})).code,'FACT_METADATA_REQUIRES_USER');
+
   const made = runtime.create({
     principal: user, type: 'chat', scope: 'chat:c1', content: 'CetaMesh 采用 Task 独立于 Agent Session 的原则',
     tags: ['架构', 'task'], source: 'user'

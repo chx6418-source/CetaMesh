@@ -52,7 +52,8 @@ function normalizeLoadedRecord(raw) {
     confirmedBy: raw.confirmedBy === undefined ? null : raw.confirmedBy,
     origin: raw.origin && typeof raw.origin === 'object' ? raw.origin : null,
     sourceRefs: Array.isArray(raw.sourceRefs) ? structuredClone(raw.sourceRefs) : [],
-    entityIds: Array.isArray(raw.entityIds) ? [...raw.entityIds] : []
+    entityIds: Array.isArray(raw.entityIds) ? [...raw.entityIds] : [],
+    factKey: raw.factKey ?? null, validUntil: raw.validUntil ?? null
   };
 }
 
@@ -71,7 +72,9 @@ function assertMemorySchema(raw, file) {
       || (row.scopeKey !== scopeKey(normalizedScope) && !(normalizedScope.kind === 'global' && row.scopeKey === 'global:'))
       || typeof row.content !== 'string' || !row.content || !Array.isArray(row.tags)
       || row.tags.some(tag => typeof tag !== 'string') || (row.source !== undefined && !MEMORY_SOURCES.includes(row.source))
-      || !Number.isSafeInteger(row.rev) || row.rev < 1) {
+      || !Number.isSafeInteger(row.rev) || row.rev < 1
+      || (row.factKey!=null && (typeof row.factKey!=='string'||!/^[A-Za-z0-9._:-]{1,128}$/.test(row.factKey)))
+      || (row.validUntil!=null && (!Number.isSafeInteger(row.validUntil)||row.validUntil<=0))) {
       throw memoryError('STORE_CORRUPT', '记忆记录结构无效：' + file);
     }
     ids.add(row.id);

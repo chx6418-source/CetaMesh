@@ -37,10 +37,10 @@ export function createMemoryService({ stateDir, socialV2File, now, audit } = {})
     'memory.get': (p) => runtime.get({ principal: user, id: p.id }),
     'memory.create': (p) => runtime.create({
       principal: user, type: p.type, scope: p.scope, content: p.content,
-      tags: p.tags, source: p.source, pinned: p.pinned, sourceRefs: p.sourceRefs, entityIds: p.entityIds
+      tags: p.tags, source: p.source, pinned: p.pinned, sourceRefs: p.sourceRefs, entityIds: p.entityIds, factKey: p.factKey, validUntil: p.validUntil
     }),
     'memory.update': (p) => runtime.update({
-      principal: user, id: p.id, expectedRev: p.expectedRev, content: p.content, tags: p.tags, pinned: p.pinned
+      principal: user, id: p.id, expectedRev: p.expectedRev, content: p.content, tags: p.tags, pinned: p.pinned, factKey: p.factKey, validUntil: p.validUntil
     }),
     'memory.delete': (p) => runtime.remove({ principal: user, id: p.id, expectedRev: p.expectedRev }),
     'memory.pin': (p) => runtime.update({

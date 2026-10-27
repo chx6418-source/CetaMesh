@@ -81,6 +81,9 @@ export function createTaskWorkingMemoryRecorder({ memoryRuntime, taskRuntime, en
       if (memory.scope !== ref.scope || memory.type !== ref.type) {
         throw memoryError('HANDOFF_MEMORY_CONTEXT_REVIEW_REQUIRED', 'Linked Memory metadata changed; review authorization before Handoff');
       }
+      if((memory.factKey || memory.validUntil != null) && memoryRuntime.assess({principal:actor,id:memory.id}).status!=='current'){
+        throw memoryError('HANDOFF_MEMORY_CONTEXT_REVIEW_REQUIRED','Linked Memory fact is expired or conflicted; review it before transferring execution');
+      }
       // The packet contract retains at most 4000 characters per record. Reject
       // larger linked facts before source stop rather than silently truncating.
       if (memory.content.length > 4000) {

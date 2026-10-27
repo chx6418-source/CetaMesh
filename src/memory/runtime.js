@@ -22,6 +22,7 @@ import {
   assertPrincipal,
   memoryError,
   normalizeContent,
+  normalizeFactMetadata,
   normalizeLimit,
   normalizeMemoryType,
   normalizeQuery,
@@ -89,7 +90,9 @@ function toView(record) {
     confirmedBy: record.confirmedBy,
     origin: record.origin ? structuredClone(record.origin) : null,
     sourceRefs: structuredClone(record.sourceRefs || []),
-    entityIds: [...(record.entityIds || [])]
+    entityIds: [...(record.entityIds || [])],
+    ...(record.factKey ? { factKey: record.factKey } : {}),
+    ...(record.validUntil != null ? { validUntil: record.validUntil } : {})
   };
 }
 
@@ -98,7 +101,7 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
   const policy = createMemoryPolicy({ audit });
   const store = createMemoryStore({ stateDir, now });
   const candidatesFile = path.join(stateDir, 'memory', 'candidates.json');
-  const links = createMemoryLinks({ stateDir, policy, store, now, list: listRecords });
+  const links = createMemoryLinks({ stateDir, policy, store, now, list: retrieveRecords, assess: assessFact });
 
   const candidates = new Map(); // id -> candidate
   const confirmingCandidates = new Set(); // only the trusted confirmation path may consume a candidate
@@ -249,6 +252,22 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
     };
   }
 
+  function factEligibility(rows) {
+    const expired=new Set(rows.filter(row=>row.validUntil!=null&&row.validUntil<=now()).map(row=>row.id));
+    const groups=new Map(),conflicted=new Set();
+    for(const row of rows)if(row.factKey&&!expired.has(row.id)){
+      const key=JSON.stringify([row.scopeKey,row.type,row.factKey]);
+      if(!groups.has(key))groups.set(key,[]);groups.get(key).push(row);
+    }
+    for(const group of groups.values())if(new Set(group.map(row=>row.content)).size>1)for(const row of group)conflicted.add(row.id);
+    return {expired,conflicted};
+  }
+  function assessFact({principal,id}={}) {
+    const decision=authorizeRead({principal});const row=findAuthorized(decision,id);
+    if(!row)throw memoryError('MEMORY_NOT_FOUND','Memory not found');
+    const state=factEligibility(scanFor(decision,item=>item.scopeKey===row.scopeKey&&item.type===row.type));
+    return {id:row.id,status:state.expired.has(row.id)?'expired':state.conflicted.has(row.id)?'conflicted':'current'};
+  }
   function retrieveRecords({ principal, scope, types, query, limit } = {}) {
     const scopes = scope === undefined || scope === null ? null : [normalizeScope(scope)];
     const decision = authorizeRead({ principal, scopes, types: types || null });
@@ -257,7 +276,8 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
       const chars = Array.from(word);
       return chars.length > 2 ? [...chars.slice(1).map((_, i) => chars.slice(i, i + 2).join('')), word] : [word];
     }))];
-    const rows = scanFor(decision);
+    const scannedRows = scanFor(decision), eligibility = factEligibility(scannedRows);
+    const rows = scannedRows.filter(row=>!eligibility.expired.has(row.id)&&!eligibility.conflicted.has(row.id));
     // Automatic retrieval excludes unrelated records; empty queries preserve browsing.
     const ranked = rows.map(row => {
       const haystack = (row.content + ' ' + row.tags.join(' ')).toLowerCase();
@@ -267,7 +287,8 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
       || b.row.updatedAt - a.row.updatedAt || a.row.id.localeCompare(b.row.id));
     const max = normalizeLimit(limit, 50);
     return { memories: ranked.slice(0, max).map(item => readView(item.row, principal)),
-      meta: { total: rows.length, matched: ranked.length, scanned: store.stats.lastScanned, returned: Math.min(ranked.length, max) } };
+      meta: { total: scannedRows.length, matched: ranked.length, expired: eligibility.expired.size, conflicted: eligibility.conflicted.size,
+        scanned: store.stats.lastScanned, returned: Math.min(ranked.length, max) } };
   }
 
   function rank(rows, needle, rawText) {
@@ -296,7 +317,7 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
       .map((entry) => entry.record);
   }
 
-  function createMemory({ principal, type, scope, content, tags, source, pinned, confirmationId, originRef, sourceRefs = [], entityIds = [] } = {}) {
+  function createMemory({ principal, type, scope, content, tags, source, pinned, confirmationId, originRef, sourceRefs = [], entityIds = [], factKey, validUntil } = {}) {
     const normalizedType = normalizeMemoryType(type);
     const normalizedScope = normalizeScope(scope);
     const normalizedSource = normalizeSource(source);
@@ -358,20 +379,23 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
       confirmedBy,
       origin,
       sourceRefs: references,
-      entityIds: entities
+      entityIds: entities,
+      ...normalizeFactMetadata({factKey,validUntil},principal)
     };
     return toView(store.insert(record));
   }
 
-  function updateMemory({ principal, id, expectedRev, content, tags, pinned } = {}) {
+  function updateMemory({ principal, id, expectedRev, content, tags, pinned, factKey, validUntil } = {}) {
     const decision = policy.requireAuthorization({ principal, action: 'write' });
     const existing = findAuthorized(decision, id);
     if (!existing) throw memoryError('MEMORY_NOT_FOUND', '记忆不存在：' + String(id));
+    if(principal.kind!=='user'&&(existing.factKey||existing.validUntil!=null))
+      throw memoryError('FACT_METADATA_REQUIRES_USER','User-established fact identity and content require user correction');
     // 目标记录类型也必须落在授权类型集合内（read 授权类型与 write 授权类型可能不同）。
     if (decision.types && !decision.types.includes(existing.type) && principal.kind === 'agent') {
       throw memoryError('TYPE_NOT_AUTHORIZED', '该记忆类型不允许由当前主体修改');
     }
-    const patch = {};
+    const patch = normalizeFactMetadata({factKey,validUntil},principal);
     if (content !== undefined) patch.content = normalizeContent(content);
     if (tags !== undefined) patch.tags = normalizeTags(tags);
     if (pinned !== undefined) patch.pinned = pinned === true;
@@ -611,6 +635,7 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
     list: listRecords,
     search: listRecords,
     retrieve: retrieveRecords,
+    assess: assessFact,
     get: getMemory,
     create: createMemory,
     update: updateMemory,

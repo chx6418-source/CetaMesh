@@ -25,6 +25,7 @@ function resolveMemoryReferences(memoryService, task, principal, onMemoryError =
       const expectedScope = reference.scope || sourceScope;
       if (item.scope !== expectedScope) continue;
       if (expectedScope !== sourceScope && reference.authorizedBy !== 'user:desktop') continue;
+      if ((item.factKey || item.validUntil != null) && memoryService.runtime.assess?.({principal,id:memoryId}).status !== 'current') continue;
       resolved.push({ memoryId, title: reference.note || item.type || 'Task Memory reference', excerpt: item.content });
     } catch (error) {
       onMemoryError?.(error);
@@ -41,6 +42,7 @@ function automaticMemoryReferences(memoryService, settings, principal, scopes, q
   for (const scope of scopes) {
     try {
       const page = memoryService.runtime.retrieve({ principal, scope, query: String(query).slice(0, 200), limit });
+      if(page.meta?.conflicted)onMemoryError?.({code:'MEMORY_FACT_REVIEW_REQUIRED',message:'Authorized memory contains conflicting fact identities'});
       rows.push(...page.memories);
     } catch (error) {
       // A denied or unavailable partition is omitted, never replaced by a wider scope.

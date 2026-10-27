@@ -5,7 +5,7 @@ import { StorageError, readJsonFile, writeJsonAtomic } from '../storage/json-fil
 import { memoryError, normalizeScope, scopeKey } from './types.js';
 import { CONTEXT_LIMITS, MEMORY_RELATIONS, normalizeContextPackage, normalizeReference, normalizeReferences, referenceKey } from './references.js';
 
-export function createMemoryLinks({ stateDir, policy, store, now, list }) {
+export function createMemoryLinks({ stateDir, policy, store, now, list, assess = null }) {
   const file = path.join(stateDir, 'memory', 'links.json');
   let links = null;
   function load() {
@@ -103,18 +103,24 @@ export function createMemoryLinks({ stateDir, policy, store, now, list }) {
       }
     }
     const refs = normalized.map((ref, index) => retrieve(decisions[index], ref));
-    return { references: refs.map(({ reference, status, memory }) => ({ reference, status, ...(memory ? { type: memory.type, summary: memory.content.slice(0, 240) } : {}) })) };
+    return { references: refs.map(({ reference, status, memory }) => {
+      const validity=memory&&assess?assess({principal:request.principal,id:memory.id}).status:'current';
+      return validity==='current'?{reference,status,...(memory?{type:memory.type,summary:memory.content.slice(0,240)}:{})}
+        :{reference,status:'needs-review',validity};
+    }) };
   }
   function buildContextPackage({ principal, scope, query, types, limit = 8, explicitCrossScope = false } = {}) {
     const key = scopeKey(normalizeScope(scope));
     const memories = list({ principal, scope: key, query, types, limit: Math.min(Number(limit) || 8, CONTEXT_LIMITS.related) }).memories;
-    const visible = listLinks({ principal, scope: key, explicitCrossScope }).links;
+    const eligible=ref=>ref.kind!=='memory'||!assess||assess({principal,id:ref.id}).status==='current';
+    const visible = listLinks({ principal, scope: key, explicitCrossScope }).links.filter(link=>
+      [link.source,link.target,...link.context.sourceRefs,...link.context.relatedMemories].every(eligible));
     const related = [...memories.map((memory) => ({ kind: 'memory', id: memory.id, scope: memory.scope }))];
     for (const link of visible) {
       for (const ref of [link.source, link.target, ...link.context.relatedMemories]) if (ref.kind === 'memory' && !related.some((other) => referenceKey(other) === referenceKey(ref))) related.push(ref);
     }
     const decisions = visible.flatMap((link) => link.context.keyDecisions).slice(0, CONTEXT_LIMITS.decisions);
-    const sourceRefs = [...related, ...memories.flatMap((memory) => memory.sourceRefs || []), ...visible.flatMap((link) => [link.source, link.target, ...link.context.sourceRefs])].filter((ref, index, refs) => refs.findIndex((other) => referenceKey(other) === referenceKey(ref)) === index).slice(0, CONTEXT_LIMITS.refs);
+    const sourceRefs = [...related, ...memories.flatMap((memory) => memory.sourceRefs || []), ...visible.flatMap((link) => [link.source, link.target, ...link.context.sourceRefs])].filter((ref, index, refs) => eligible(ref)&&refs.findIndex((other) => referenceKey(other) === referenceKey(ref)) === index).slice(0, CONTEXT_LIMITS.refs);
     const dates = memories.flatMap((memory) => [memory.createdAt, memory.updatedAt]);
     return normalizeContextPackage({
       summary: memories.map((memory) => memory.content.slice(0, 240)).join('\n').slice(0, CONTEXT_LIMITS.summaryChars),

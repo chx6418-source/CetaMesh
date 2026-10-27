@@ -27,6 +27,16 @@ export function memoryError(code, message) {
   return Object.assign(new Error(message), { code });
 }
 
+export function normalizeFactMetadata({ factKey, validUntil } = {}, principal) {
+  if (factKey === undefined && validUntil === undefined) return {};
+  if (principal?.kind !== 'user') throw memoryError('FACT_METADATA_REQUIRES_USER', 'Only a user may assign semantic fact identity or validity');
+  if (factKey !== undefined && factKey !== null && (typeof factKey !== 'string' || !/^[A-Za-z0-9._:-]{1,128}$/.test(factKey)))
+    throw memoryError('INVALID_FACT_METADATA', 'factKey must be a bounded explicit identifier');
+  if (validUntil !== undefined && validUntil !== null && (!Number.isSafeInteger(validUntil) || validUntil <= 0))
+    throw memoryError('INVALID_FACT_METADATA', 'validUntil must be a positive timestamp or null');
+  return { ...(factKey !== undefined ? { factKey } : {}), ...(validUntil !== undefined ? { validUntil } : {}) };
+}
+
 export function isMemoryType(value) {
   return MEMORY_TYPES.includes(value);
 }
