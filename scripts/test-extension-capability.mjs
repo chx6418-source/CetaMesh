@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import http from 'node:http';
 import { createWorkspaceService } from '../src/workspace/index.js';
 import { createMemoryService } from '../src/memory/index.js';
 import { createCapabilityService } from '../src/capability/index.js';
@@ -91,6 +92,29 @@ try {
   await assert.rejects(extensions.execute({ method: 'ext.invoke', params: { id: manifest.id, capability: 'fetch-local', input: { url: 'http://127.0.0.1/' } } }));
   assert.ok(capabilityAudit.some(event => event.capability === 'network' && event.status === 'denied'),
     'Declared Extension network requests reach the shared Broker and its safe-fetch policy');
+
+  // Transport-only fixture: production SSRF still sees a public literal; only
+  // the test redirects the native request to its own loopback server.
+  let received,closedSocket;
+  const receivedRequest=new Promise(resolve=>{received=resolve;});
+  const socketClosed=new Promise(resolve=>{closedSocket=resolve;});
+  const server=http.createServer((request,response)=>{received();response.on('close',closedSocket);});
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  const nativeRequest=http.request;
+  http.request=(options,callback)=>{
+    assert.equal(options.hostname,'93.184.216.34');
+    return nativeRequest({...options,hostname:'127.0.0.1',port:server.address().port},callback);
+  };
+  try {
+    const abort=new AbortController();
+    const networkActor={kind:'extension',id:'socket-fixture',grants:{capabilities:['network'],approvedCapabilities:['network'],hosts:['93.184.216.34']}};
+    const pending=capabilityService.broker.execute({actor:networkActor,capability:'network',requestId:'cancel-real-native-socket',
+      input:{url:'http://93.184.216.34/slow'}},{signal:abort.signal});
+    await receivedRequest;abort.abort();
+    await assert.rejects(pending,error=>error.code==='INVOKE_CANCEL_UNCONFIRMED'||error.effectStatus==='unknown');
+    assert.equal(await Promise.race([socketClosed.then(()=>true),new Promise(resolve=>setTimeout(()=>resolve(false),500))]),true,
+      'Broker abort must close the actual native HTTP socket, not only abandon its result');
+  } finally {http.request=nativeRequest;server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
 
   // A caller timeout must cancel a real Worker reverse call and reach the Broker adapter signal.
   const cancellationBroker = createCapabilityBroker({ policy: createCapabilityPolicy() });

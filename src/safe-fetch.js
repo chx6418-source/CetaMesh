@@ -176,7 +176,7 @@ function readBoundedText(res, maxChars) {
   });
 }
 
-function requestOnce(url, ip, maxChars = 50000) {
+function requestOnce(url, ip, maxChars = 50000, signal) {
   return new Promise((resolve, reject) => {
     const mod = url.protocol === 'https:' ? https : http;
     const port = url.port || (url.protocol === 'https:' ? 443 : 80);
@@ -194,6 +194,7 @@ function requestOnce(url, ip, maxChars = 50000) {
       servername: url.protocol === 'https:' ? url.hostname : undefined,
       rejectUnauthorized: url.protocol === 'https:',
       timeout: 20000,
+      signal,
     }, (res) => {
       const statusCode = res.statusCode || 0;
       if ([301, 302, 303, 307, 308].includes(statusCode)) {
@@ -211,12 +212,14 @@ function requestOnce(url, ip, maxChars = 50000) {
   });
 }
 
-export async function safeFetch(urlString, maxChars = 50000, { authorizeUrl = null } = {}) {
+export async function safeFetch(urlString, maxChars = 50000, { authorizeUrl = null, signal } = {}) {
   const MAX_REDIRECTS = 5;
+  signal?.throwIfAborted();
   if (authorizeUrl) authorizeUrl(new URL(urlString));
   let { url, ip } = await validateFetchUrl(urlString);
   for (let i = 0; i <= MAX_REDIRECTS; i++) {
-    const result = await requestOnce(url, ip, maxChars);
+    signal?.throwIfAborted();
+    const result = await requestOnce(url, ip, maxChars, signal);
     if ([301, 302, 303, 307, 308].includes(result.statusCode)) {
       if (!result.redirect) throw new Error(`重定向缺少 Location: ${result.statusCode}`);
       const next = new URL(result.redirect, url).toString();
