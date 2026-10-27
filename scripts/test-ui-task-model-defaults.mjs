@@ -19,11 +19,29 @@ try{
  const workspaceRoot=path.join(root,'workspace');fs.mkdirSync(workspaceRoot);
  const workspace=(await services.workspaceService.execute({method:'workspace.create',params:{name:'fixture',root:workspaceRoot}})).workspace;
  await defaults('chosen-a');
- const created=(await ui('ui.task.create',{goal:'Use the Owner-selected default model',workspaceId:workspace.id,agentProvider:'cetamesh'})).task;
+ const created=(await ui('ui.task.create',{goal:'Use the Owner-selected default model',workspaceId:workspace.id})).task;
  let task=await finished(created.id);
  assert.match(task.checkpoint?.summary??'',/synthetic task result/,`Work must use the configured model, not block with ${task.progress?.note}`);
  assert.equal(task.modelConfig.modelProvider,provider);assert.equal(task.modelConfig.model,'chosen-a');
  await ui('ui.task.cancel',{id:task.id,expectedRev:task.rev});
+ await services.settingsService.execute({method:'settings.update',params:{section:'agents',values:{defaultAgentProvider:'dsh'}}});
+ const countBeforePreference=services.taskService.runtime.countAll();
+ await assert.rejects(ui('ui.task.create',{goal:'Respect unavailable preferred executor',workspaceId:workspace.id}),
+  error=>['PROVIDER_UNAVAILABLE','AGENT_BOUNDARY_UNSUPPORTED'].includes(error.code));
+ assert.equal(services.taskService.runtime.countAll(),countBeforePreference,'an unavailable Owner preference must not silently fall back or leave a Task');
+ await services.settingsService.execute({method:'settings.update',params:{section:'agents',values:{defaultAgentProvider:'auto'}}});
+ const savedHealth=services.agentBroker.health,savedCapabilities=services.agentBroker.capabilities,savedConsent=services.agentBroker.assertExecutionConsent;
+ services.agentBroker.health=async()=>({available:true,installed:true,authenticated:true,sessionCapable:true,taskEligible:true,sandboxCapable:true});
+ services.agentBroker.capabilities=()=>({workspaceBoundary:'native-staged'});
+ services.agentBroker.assertExecutionConsent=()=>{throw Object.assign(new Error('scope review required'),{code:'AGENT_SECURITY_CONFIRMATION_REQUIRED'});};
+ await services.settingsService.execute({method:'settings.update',params:{section:'agents',values:{defaultAgentProvider:'codex'}}});
+ try {
+  await assert.rejects(ui('ui.task.create',{goal:'Require native consent before creating Task',workspaceId:workspace.id}),{code:'AGENT_SECURITY_CONFIRMATION_REQUIRED'});
+  assert.equal(services.taskService.runtime.countAll(),countBeforePreference,'missing native consent must not create an incomplete Task');
+ } finally {
+  services.agentBroker.health=savedHealth;services.agentBroker.capabilities=savedCapabilities;services.agentBroker.assertExecutionConsent=savedConsent;
+  await services.settingsService.execute({method:'settings.update',params:{section:'agents',values:{defaultAgentProvider:'auto'}}});
+ }
  await defaults('chosen-b');
  const queued=services.taskService.runtime.create({goal:'Keep this Task model pinned',workspaceId:workspace.id,requestedAgentProvider:'cetamesh'});
  const pinned=services.taskService.runtime.setModelConfig({id:queued.id,expectedRev:queued.rev,modelProvider:provider,model:'chosen-a'});

@@ -737,8 +737,25 @@ export function createDesktopUiService({ services = {}, system = services.system
   });
   const taskCreateDispatches = new Map();
 
-  async function requireTaskProvider(provider, workspaceId) {
-    if (!provider) throw uiError('AGENT_PROVIDER_SELECTION_REQUIRED', '请选择任务执行者');
+  async function requireTaskProvider(provider, workspaceId, modelSelection = {}) {
+    if (!provider) {
+      const defaults = services.settingsService?.store.get().settings;
+      const preferred = defaults?.agents?.defaultAgentProvider;
+      if (preferred && preferred !== 'auto') provider = preferred;
+      else {
+        const modelProvider = modelSelection.modelProvider || defaults?.models?.provider;
+        const model = modelSelection.model || defaults?.models?.defaultModel;
+        try {
+          const ready = await services.modelRuntime?.health(modelProvider);
+          if (model && ready?.configured === true && ready.available !== false
+            && services.modelRuntime?.supportsToolCalling(modelProvider, model) === true) provider = 'cetamesh';
+        } catch {
+          // An unavailable optional default must lead to configuration review.
+          provider = null;
+        }
+      }
+    }
+    if (!provider) throw uiError('AGENT_PROVIDER_SELECTION_REQUIRED', '请先配置可使用工具的默认模型，或选择一个已就绪的任务执行者');
     if (!services.workspaceService.describeWorkspace(workspaceId)) {
       throw uiError('WORKSPACE_NOT_FOUND', '任务工作区不存在或不可访问');
     }
@@ -755,6 +772,7 @@ export function createDesktopUiService({ services = {}, system = services.system
     if (provider === 'codex' && health.sandboxCapable === false) {
       throw uiError('CODEX_SANDBOX_UNAVAILABLE', 'Codex Windows 工作区沙箱已拒绝执行');
     }
+    services.agentBroker.assertExecutionConsent?.(provider, { workspaceId });
     return provider;
   }
 
@@ -793,7 +811,7 @@ export function createDesktopUiService({ services = {}, system = services.system
       }
       recoveryFacts = `\n[Workspace recovery verification]\n${JSON.stringify({ status: status.result, diff: diff.result }).slice(0, 8000)}`;
     }
-    const selectedProvider = await requireTaskProvider(provider || taskRow.currentAgent?.provider, taskRow.workspaceId);
+    const selectedProvider = await requireTaskProvider(provider || taskRow.currentAgent?.provider, taskRow.workspaceId, { modelProvider, model });
     // Work has no model picker. Snapshot Owner defaults only for an unbound
     // Managed Task; explicit/native and persisted per-Task models keep priority.
     if (selectedProvider === 'cetamesh' && !modelProvider && !model
@@ -1204,7 +1222,8 @@ export function createDesktopUiService({ services = {}, system = services.system
       if (workspaceId && services.taskService.runtime.activeWorkspaceOwner({ workspaceId })) {
         throw uiError('TASK_WORKSPACE_BUSY', 'Another Task owns write execution in this Workspace');
       }
-      if (workspaceId) await requireTaskProvider(agentProvider, workspaceId);
+      const dispatchProvider = workspaceId ? await requireTaskProvider(agentProvider, workspaceId,
+        { modelProvider: string(p.modelProvider, 80), model: string(p.model, 160) }) : agentProvider;
       const raced = workspaceId ? services.taskService.runtime.findByGoalWorkspace({ goal, workspaceId }) : null;
       if (raced) {
         if (raced.status === 'queued' && !raced.currentAgent) {
@@ -1226,7 +1245,7 @@ export function createDesktopUiService({ services = {}, system = services.system
       }
       const created = services.taskService.runtime.create({ goal, requirements, workspaceId,
         note: string(p.note, 1000), requestId, requestedAgentProvider: agentProvider });
-      const dispatch = created.workspaceId ? runTask(created, { provider: agentProvider,
+      const dispatch = created.workspaceId ? runTask(created, { provider: dispatchProvider,
         requestId: requestId || undefined, modelProvider: string(p.modelProvider, 80) || undefined,
         model: string(p.model, 160) || undefined }) : Promise.resolve(created);
       if (requestId) taskCreateDispatches.set(requestId, dispatch);
