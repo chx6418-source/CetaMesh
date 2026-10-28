@@ -8,7 +8,7 @@ const verified = (kind, rows) => ({ status: 'VERIFIED', kind,
 
 /** Read-only check of observed Task evidence. It never changes Task status or grants. */
 export function verifyTaskOutcome(task, { kind, expectedFile, expectedSha256, expectedCapability } = {},
-  { workspaceRoot = null } = {}) {
+  { workspaceRoot = null, verifiedImportEventIds = null } = {}) {
   if (!task || !['running', 'waiting', 'completed'].includes(task.status)) return review(kind, 'TASK_NOT_ACTIVE');
   if (!Array.isArray(task.acceptance) || !task.acceptance.length || task.acceptance.some(item => item.met !== true)) {
     return review(kind, 'ACCEPTANCE_UNVERIFIED');
@@ -19,16 +19,19 @@ export function verifyTaskOutcome(task, { kind, expectedFile, expectedSha256, ex
   }
   if (kind === 'code') {
     const diffIndex = evidence.findLastIndex(item => item.capability === 'git.diff');
-    if (diffIndex < 0 || evidence[diffIndex].status !== 'completed' || evidence[diffIndex].hasChanges !== true) {
-      return review(kind, 'DIFF_NOT_VERIFIED');
-    }
+    const currentImports=Array.isArray(verifiedImportEventIds)?evidence.filter(row=>verifiedImportEventIds.includes(row.eventId)&&row.source==='core-import'&&row.status==='completed'):[];
+    const changeProof=diffIndex>=0&&evidence[diffIndex].status==='completed'&&evidence[diffIndex].hasChanges===true?[evidence[diffIndex]]:currentImports;
+    if(!changeProof.length)return review(kind,'DIFF_NOT_VERIFIED');
+    const proofIndex=Math.max(...changeProof.map(row=>evidence.indexOf(row)));
     const mutations = new Set(['filesystem.write', 'git.commit', 'workspace.apply', 'git.apply', 'git.stage']);
-    if (evidence.slice(diffIndex + 1).some(item => item.status === 'completed' && mutations.has(item.capability))) {
+    if (evidence.slice(proofIndex + 1).some(item => item.status === 'completed' && mutations.has(item.capability))) {
       return review(kind, 'CODE_CHANGED_AFTER_DIFF');
     }
-    const test = evidence.slice(diffIndex + 1).findLast(item => item.capability === 'test.run');
-    return test?.status === 'completed' && test.exitCode === 0
-      ? verified(kind, [evidence[diffIndex], test]) : review(kind, 'TEST_NOT_VERIFIED');
+    const testIndex=evidence.findLastIndex(item=>item.capability==='test.run');
+    const test=evidence[testIndex];
+    if(test?.status!=='completed'||test.exitCode!==0)return review(kind,'TEST_NOT_VERIFIED');
+    if(evidence.slice(testIndex+1).some(item=>item.status==='completed'&&mutations.has(item.capability)))return review(kind,'CODE_CHANGED_AFTER_TEST');
+    return verified(kind,[...changeProof,test]);
   }
   if (kind === 'file') {
     if (typeof expectedFile !== 'string' || !expectedFile || !/^[a-f0-9]{64}$/i.test(expectedSha256 ?? '')) {

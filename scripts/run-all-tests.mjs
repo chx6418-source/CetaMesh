@@ -58,6 +58,11 @@ const REGISTRY = {
   'test-agent-collaboration-dispatch.mjs': { category: 'security', note: 'Production Broker read-only child and Workspace writer ownership' },
   'test-agent-collaboration-recovery.mjs': { category: 'security', note: 'Child Attempt restart and Owner verified recovery through production UI' },
   'test-agent-assignment.mjs': { category: 'security', note: 'Trusted Agent eligibility, task capability, cost and latency ranking' },
+  'test-http-extension.mjs': {category:'integration',note:'Declarative HTTP plugin installed through existing Extension lifecycle with Broker approval'},
+  'test-delegation-verification.mjs': {category:'security',note:'Owner-bound automatic code acceptance with real file and Core test evidence'},
+  'test-autonomous-delegation.mjs': { category: 'security', note: 'Task-bound autonomous delegation authorization and crash fencing' },
+  'test-real-autonomous-handoff.mjs': { category: 'environment', requires: ['real-managed','real-codex'], timeoutMs: 900000, note: 'Real Managed model decides generic delegation, real Codex edit and Managed return verification' },
+  'test-autonomous-handoff-integration.mjs': { category: 'integration', note: 'Managed Task autonomous handoff through existing Broker and Continuity', timeoutMs: 60000 },
   'test-task-outcome-verification.mjs': { category: 'security', note: 'Task outcomes require observed tool, diff, test and file evidence' },
   'test-tool-outcome-unknown.mjs': { category: 'security', note: 'Uncertain side effects stop automatic tool replay' },
   'test-tool-safe-retry.mjs': { category: 'security', note: 'Bounded transient read retry with live grant and cancellation checks' },
@@ -366,6 +371,7 @@ async function probeAvailability() {
     'real-gemini-qwen': process.env.WHALEBRIDGE_TEST_REAL_GEMINI_QWEN === '1',
     'claude-auth-contract': process.platform==='win32' && process.env.WHALEBRIDGE_TEST_CLAUDE_AUTH_CONTRACT==='1',
     'real-opencode': process.env.WHALEBRIDGE_TEST_REAL_OPENCODE === '1',
+    'real-managed': process.env.WHALEBRIDGE_TEST_REAL_MANAGED === '1',
     'real-codex': process.env.WHALEBRIDGE_TEST_REAL_CODEX === '1'
       && spawnSync('codex', ['login', 'status'], { timeout: 20000 }).status === 0
   };

@@ -24,7 +24,7 @@ function costEstimate(value, provider, modelProvider, model) {
  * selection still passes through fresh health, boundary and consent checks.
  */
 export async function rankTaskAgents({ agentBroker, workspaceId, explicitProvider = null,
-  agentEnabled = true, taskKind = 'code', requiredTools = [], difficulty = 1, maxCost = null,
+  agentEnabled = true, taskKind = 'code', requiredTools = [], difficulty = 1, maxCost = null, allowUnknownCost = false,
   modelProvider = null, model = null,
   exclude = [] } = {}) {
   if (agentEnabled === false || explicitProvider === 'none') return [];
@@ -51,8 +51,9 @@ export async function rankTaskAgents({ agentBroker, workspaceId, explicitProvide
       // An Agent-wide price is not evidence for the actual selected model.
       const cost = costEstimate(assignment?.estimatedCost, provider, modelProvider, model);
       if (!explicitProvider) {
-        if (!cost || (cost.amount > 0 && (!Number.isFinite(maxCost?.amount)
-          || maxCost.amount < cost.amount || maxCost.currency !== cost.currency))) continue;
+        if (!cost && allowUnknownCost !== true) continue;
+        if (cost && cost.amount > 0 && (!Number.isFinite(maxCost?.amount)
+          || maxCost.amount < cost.amount || maxCost.currency !== cost.currency)) continue;
       }
       const latencyMs = Number.isFinite(assignment?.estimatedLatencyMs) && assignment.estimatedLatencyMs >= 0
         ? assignment.estimatedLatencyMs : null;

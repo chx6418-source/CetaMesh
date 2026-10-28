@@ -61,12 +61,28 @@ export function createMemoryLinks({ stateDir, policy, store, now, list, assess =
     const from = normalizeReference(source), to = normalizeReference(target);
     if (from.scope !== to.scope && explicit !== true) throw memoryError('CROSS_SCOPE_LINK_REQUIRED', 'Cross-scope linking must be explicit');
     const packet = normalizeContextPackage(context);
-    authorizeRefs({ principal, sourceScope: from.scope, refs: [from, to, ...packet.sourceRefs, ...packet.relatedMemories], explicitCrossScope: explicit });
+    const resolved=authorizeRefs({ principal, sourceScope: from.scope, refs: [from, to, ...packet.sourceRefs, ...packet.relatedMemories], explicitCrossScope: explicit });
+    const sourceFact=resolved[0]?.memory,targetFact=resolved[1]?.memory;
+    let factBinding=null;
+    if(relation==='supersedes'&&(sourceFact?.factKey||targetFact?.factKey)) {
+      if(from.kind!=='memory'||to.kind!=='memory'||from.scope!==to.scope||from.id===to.id
+        ||sourceFact?.type!==targetFact?.type||!sourceFact?.factKey||sourceFact.factKey!==targetFact?.factKey)
+        throw memoryError('INVALID_FACT_SUPERSESSION','Fact replacement must bind two distinct versions of the same scoped fact');
+      factBinding={sourceRevision:sourceFact.rev,targetRevision:targetFact.rev};
+    }
     load();
-    const existing = links.find((link) => referenceKey(link.source) === referenceKey(from) && referenceKey(link.target) === referenceKey(to) && link.relation === relation);
+    if(factBinding) {
+      const pending=[to.id],visited=new Set();
+      while(pending.length){const id=pending.pop();if(id===from.id)throw memoryError('FACT_SUPERSESSION_CYCLE','Fact replacement would create a cycle');
+        if(visited.has(id))continue;visited.add(id);
+        for(const link of links)if(link.relation==='supersedes'&&link.source.scope===from.scope&&link.target.scope===from.scope&&link.source.id===id)pending.push(link.target.id);
+      }
+    }
+    const existing = links.find((link) => referenceKey(link.source) === referenceKey(from) && referenceKey(link.target) === referenceKey(to) && link.relation === relation
+      &&JSON.stringify(link.factBinding??null)===JSON.stringify(factBinding));
     if (existing) return { link: structuredClone(existing), created: false };
     if (links.length >= 5000) throw memoryError('STORE_FULL', 'Memory link limit reached');
-    const link = { id: 'link_' + crypto.randomBytes(8).toString('hex'), source: from, target: to, relation, explicit: explicit === true, context: packet, createdAt: now(), createdBy: principal.kind + ':' + principal.id };
+    const link = { id: 'link_' + crypto.randomBytes(8).toString('hex'), source: from, target: to, relation, explicit: explicit === true, context: packet, ...(factBinding?{factBinding}:{}), createdAt: now(), createdBy: principal.kind + ':' + principal.id };
     links.push(link);
     try { persist(); } catch (error) { links.pop(); throw error; }
     return { link: structuredClone(link), created: true };
@@ -88,6 +104,17 @@ export function createMemoryLinks({ stateDir, policy, store, now, list, assess =
       }
     }
     return { links: visible };
+  }
+  function replacementTargets({principal,targets=[]}={}) {
+    // Only validity for an already authorized target is returned. The source
+    // identity/content is never exposed or implicitly granted to a reference reader.
+    const checked=targets.map(target=>{const ref={kind:'memory',id:target.id,scope:target.scope};
+      const decision=authorized(principal,ref);const row=retrieve(decision,ref).memory;
+      return {id:row.id,scope:row.scopeKey,revision:row.rev};});
+    load();
+    return checked.filter(target=>links.some(link=>link.relation==='supersedes'&&link.createdBy?.startsWith('user:')
+      &&link.target.kind==='memory'&&link.target.scope===target.scope&&link.target.id===target.id
+      &&link.factBinding?.targetRevision===target.revision)).map(target=>target.id);
   }
   function resolveReferences(request = {}) {
     const normalized = normalizeReferences(request.refs);
@@ -129,5 +156,5 @@ export function createMemoryLinks({ stateDir, policy, store, now, list, assess =
       confidence: null
     });
   }
-  return { createLink, listLinks, resolveReferences, buildContextPackage, authorizeRefs };
+  return { createLink, listLinks, resolveReferences, buildContextPackage, authorizeRefs, replacementTargets };
 }

@@ -307,6 +307,30 @@ try {
  assert.equal(fs.existsSync(path.join(dir,'project','l2-revoked.txt')),false);
  await deny(logicalRestart.execute({method:'capability.grant.create',params:{taskId:grantTask.id,workspaceId:ws,
   capability:'test.run',input:{},ttlMs:60000,maxUses:1}}),'GRANT_CAPABILITY_DENIED');
+ const batchContent='reviewed batch output';
+ const batchInput={summary:'Owner reviewed exact non-destructive batch',changes:[{action:'write',path:'l2-batch.txt',content:batchContent,
+  expectedHash:null,hash:crypto.createHash('sha256').update(batchContent).digest('hex')}]};
+ const batchGrant=await logicalRestart.execute({method:'capability.grant.create',params:{taskId:grantTask.id,workspaceId:ws,
+  capability:'workspace.apply',input:batchInput,ttlMs:60000,maxUses:1}});
+ assert.deepEqual(batchGrant.resources,['l2-batch.txt'],'finite grant exposes exact resource scope');
+ const batchWrite=await logicalRestart.broker.execute({actor:logicalRestart.principalForTask(grantTask.id),taskId:grantTask.id,workspaceId:ws,
+  capability:'workspace.apply',input:batchInput,operationId:'reviewed-batch',requestId:'reviewed-batch-request'});
+ assert.equal(batchWrite.status,'completed','exact approved batch uses the existing grant and Broker');
+ assert.equal(fs.readFileSync(path.join(dir,'project','l2-batch.txt'),'utf8'),batchContent);
+ const deletion={summary:'must not auto-authorize',changes:[{action:'delete',path:'l2-batch.txt',expectedHash:batchInput.changes[0].hash,hash:null}]};
+ await deny(logicalRestart.execute({method:'capability.grant.create',params:{taskId:grantTask.id,workspaceId:ws,
+  capability:'workspace.apply',input:deletion,ttlMs:60000,maxUses:1}}),'GRANT_CAPABILITY_DENIED');
+ console.log('PASS finite L2 batch write uses exact parameters; deletion and executable code remain outside auto-authorization');
+ const plannedTestInput={tool:'npm',args:['test'],timeoutMs:30000};
+ await logicalRestart.execute({method:'capability.operation.prepare',params:{taskId:grantTask.id,workspaceId:ws,
+  operationId:'planned-independent-test',capability:'test.run',input:plannedTestInput}});
+ const plannedRow=logicalRestart.broker.operationsForTask({taskId:grantTask.id,workspaceId:ws}).find(row=>row.operationId==='planned-independent-test');
+ assert.deepEqual(plannedRow.continuationInput,plannedTestInput,'safe prepared verification parameters survive handoff');
+ const resumedTest=await logicalRestart.broker.execute({actor:owner,taskId:grantTask.id,workspaceId:ws,requestId:'prepared-verify-reference',
+  capability:'operation.continue',input:{operationRef:'planned-independent-test'}});
+ assert.equal(resumedTest.status,'pending','reference-only verification still requires real approval');
+ assert.equal(logicalRestart.broker.operationsForTask({taskId:grantTask.id,workspaceId:ws}).find(row=>row.operationId==='reviewed-batch').continuationInput,undefined,'file contents never become general handoff parameters');
+
  let grantClock=1000;
  const clockGrants=createCapabilityService({stateDir:path.join(dir,'clock-grants'),workspaceService,taskRuntime,now:()=>grantClock});
  clockGrants.grantTask(grantTask.id,{capabilities:['filesystem.write'],workspaceIds:[ws]});

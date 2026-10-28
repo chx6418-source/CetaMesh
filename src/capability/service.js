@@ -7,6 +7,7 @@ import { resolveInside, canonicalizeRoot, assertSafeRootForm } from '../workspac
 import { safeFetch } from '../safe-fetch.js';
 import { createCapabilityBroker } from './broker.js';
 import { registerOperationContinuation } from './operation-continuation.js';
+import { validateSchema } from '../model/input-schema.js';
 import { createCapabilityPolicy } from './policy.js';
 import { createCapabilityApproval, requestFingerprint } from './approval.js';
 import { OWNER_ACTOR, capabilityError } from './types.js';
@@ -14,6 +15,8 @@ import { readJsonFile, writeJsonAtomic } from '../storage/json-file.js';
 import { evidenceBinding, EVIDENCE_SOURCE_CAPABILITIES } from '../context/tool-evidence.js';
 import { createNativeApprovalAdapter } from '../agent/native-approval-bridge.js';
 import { canDispatchConfiguredNativeAgent, hasNegativeAgentReadiness } from '../agent/execution-security.js';
+import { rankTaskAgents } from '../router/agent-assignment.js';
+import { isControlledL2Write } from './l2-grants.js';
 
 // Only this module can mark a failure as occurring before Agent side effects.
 // Provider supplied error fields must never authorize an automatic replay.
@@ -72,7 +75,7 @@ const WORKSPACE_TOOL_DESCRIPTORS = Object.freeze({
  * which bind the Owner identity; Agent/Extension grants never come from IPC. */
 export function createCapabilityService({ stateDir, workspaceService, memoryService,
   taskRuntime, agentBroker, bindAgentSession, resumeAgentApproval = null, searchImpl = null, audit = () => {}, now,
-  isolatedRunner = null, onTaskObservation = null, onOperation = () => {}, evidenceStore = null, environmentClient = null, ownedArtifactRoot = null, onEnvironmentChanged = () => {} } = {}) {
+  isolatedRunner = null, onTaskObservation = null, onAgentTurnSettled = null, onOperation = () => {}, evidenceStore = null, environmentClient = null, ownedArtifactRoot = null, onEnvironmentChanged = () => {} } = {}) {
   const file = stateDir ? path.join(stateDir, 'capability', 'task-grants.json') : null;
   let grants = file ? readJsonFile(file, { missing: {} }) : {};
   const provisioning = new Map();
@@ -271,7 +274,14 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
               // Keep its independent cursor until all scheduled turns are projected.
               if (consumer.expectedTurns > 0) consumer.expectedTurns -= 1;
               rememberTaskFollowPosition(key, taskId, consumer.sequence, terminalTurns);
-              if (consumer.expectedTurns === 0) { consumer.finished = true; return; }
+              if (consumer.expectedTurns === 0) consumer.finished = true;
+              if (!staleRun && observation && event.data?.phase === 'user' && event.data?.runId === observation.runId
+                && typeof onAgentTurnSettled === 'function') {
+                try { onAgentTurnSettled({taskId,provider,sessionId,runId:event.data.runId,phase:'user',
+                  outcome:event.data?.reason?.kind,code:event.data?.reason?.error?.code}); }
+                catch(error) { audit({capability:'agent.run',status:'turn-listener-failed',code:error?.code??'PROVIDER_ERROR'}); }
+              }
+              if (consumer.finished) return;
             }
           }
           if (controller.signal.aborted) { consumer.finished = true; return; }
@@ -350,7 +360,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       const effect = (entry.effect && entry.effect !== 'read-only')
         || ['message.send','filesystem.write','git.commit','test.run','publish','network'].includes(entry.permission ?? entry.id);
       if (request.actor.kind === 'agent' && task.agentHistory?.length > 1 && effect && !entry.delegatesOperation
-        && !broker.operationRecordForTask({ taskId: task.id, workspaceId: task.workspaceId, operationId: request.operationId })) {
+        && entry.id !== 'agent.delegate.propose' && !broker.operationRecordForTask({ taskId: task.id, workspaceId: task.workspaceId, operationId: request.operationId })) {
         const error = capabilityError('OPERATION_LINK_REQUIRED', 'Resumed effects require a trusted operation reference or an independent Owner-prepared intent');
         error.effectStatus = 'unknown'; throw error;
       }
@@ -584,8 +594,20 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
               // Agent 的 test.run 走 Controlled Test Runner（命令 allowlist，绝不执行
               // Owner 的 testCommand 字符串，也绝不接受调用方 shell）。
               // 到达这里意味着 Owner 已经 Approve Once（risk=high 审批已消费）。
-              return isolatedRunner.run({ workspaceId: request.workspaceId,
-                tool: request.input.tool, args: request.input.args, timeoutMs: request.input.timeoutMs, signal: request.signal });
+              return (async()=>{
+                const result=await isolatedRunner.run({ workspaceId: request.workspaceId,
+                  tool: request.input.tool, args: request.input.args, timeoutMs: request.input.timeoutMs, signal: request.signal });
+                const origin=request.origin,binding=request.actor.assignment,observed=taskFor(request.taskId)?.executionObservation;
+                if(origin?.targetKind==='agent'&&origin.phase==='user'&&origin.runId===observed?.runId
+                  &&origin.sessionId===binding?.sessionId&&observed?.sessionId===binding.sessionId) {
+                  taskRuntime.recordToolOutcome({id:request.taskId,provider:binding.provider,sessionId:binding.sessionId,
+                    runId:origin.runId,phase:'user',eventId:'core-test:'+request.requestId,capability:'test.run',status:'completed',
+                    tool:request.input.tool,exitCode:result.exitCode,source:'core-test',operationId:request.operationId,
+                    resultSha256:sha256(JSON.stringify({exitCode:result.exitCode,stdout:result.stdout,stderr:result.stderr}))});
+                  onTaskObservation?.({taskId:request.taskId});
+                }
+                return result;
+              })();
             }
             if (id === 'workspace.apply') {
               const result = await workspaceService.applyChanges({ id: request.workspaceId, changes: request.input.changes, actor: request.actor.id });
@@ -737,13 +759,14 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
   }
   broker.register({ id: 'network', permission: 'network', provider: 'safe-fetch', risk: 'high', modelCallable: false,
     validate: r => {
-      if (r.input.init?.method && r.input.init.method.toUpperCase() !== 'GET' || r.input.init?.body !== undefined) {
-        throw capabilityError('NETWORK_OPERATION_DENIED', 'Only read-only GET is implemented');
+      if (r.input.init?.method && !['GET','HEAD'].includes(String(r.input.init.method).toUpperCase()) || r.input.init?.body !== undefined) {
+        throw capabilityError('NETWORK_OPERATION_DENIED', 'Only GET and HEAD without a body are implemented');
       }
     },
     execute: r => safeFetch(String(r.input.url), Math.min(50000, Number(r.input.maxChars) || 50000), {
-      signal: r.signal,
+      signal: r.signal,method:String(r.input.init?.method??'GET').toUpperCase(),
       authorizeUrl: url => {
+        if(r.input.requireHttps===true&&url.protocol!=='https:')throw capabilityError('NETWORK_SCOPE_DENIED','HTTP adapter requires HTTPS on every redirect hop');
         if (r.actor.kind === 'extension' && !r.actor.grants.hosts.includes(url.host)) {
           throw capabilityError('NETWORK_SCOPE_DENIED', 'Redirect host not declared');
         }
@@ -761,6 +784,54 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     description: 'Return the current local time and timezone.',
     inputSchema: objectInput(),
     execute: () => ({ iso: new Date().toISOString(), timezone: Intl.DateTimeFormat().resolvedOptions().timeZone }) });
+  const delegationNeeds = {
+    taskKind: { type:'string', enum:['code','analysis'] }, difficulty: { type:'integer', minimum:1, maximum:3 },
+    requiredTools: { type:'array', description:'Exact CetaMesh Broker capability requirements; use [] for a generic native development task.', items:{type:'string',minLength:1,maxLength:100}, maxItems:20 }
+  };
+  const delegationNeedsSchema=objectInput(delegationNeeds,['taskKind','difficulty','requiredTools']);
+  async function delegationCandidates(request) {
+    const task=taskFor(request.taskId),policy=task?.delegationPolicy;
+    if(!policy||policy.expiresAt<=Date.now()||policy.revokedAt||policy.used>=policy.maxDelegations)
+      throw capabilityError('DELEGATION_POLICY_DENIED','Current Owner delegation policy is required');
+    return rankTaskAgents({agentBroker,workspaceId:task.workspaceId,taskKind:request.input.taskKind,
+      difficulty:request.input.difficulty,requiredTools:request.input.requiredTools,
+      modelProvider:task.modelConfig?.modelProvider??null,model:task.modelConfig?.model??null,
+      allowUnknownCost:policy.allowUnknownCost===true,exclude:['cetamesh']});
+  }
+  broker.register({id:'agent.delegate.candidates',permission:'storage',provider:'task-runtime',risk:'low',
+    requiresTask:true,workspace:true,effect:'read-only',
+    description:'Discover currently eligible external executors for exact task needs. Call this before proposing. Native development tasks normally use requiredTools: []; native tools are not CetaMesh Broker tools. Results confer no execution permission.',
+    inputSchema:delegationNeedsSchema,validate:r=>validateSchema(delegationNeedsSchema,r.input),
+    async execute(request) {return {candidates:(await delegationCandidates(request)).map(row=>({...row,
+      workspaceBoundary:agentBroker.capabilities(row.provider).workspaceBoundary,
+      taskFit:agentBroker.capabilities(row.provider).assignment}))};}
+  });
+  const delegationProposalSchema = objectInput({
+    taskKind: { type:'string', enum:['code','analysis'] }, difficulty: { type:'integer', minimum:1, maximum:3 },
+    requiredTools: { type:'array', description:'Exact required CetaMesh Broker capability ids. Use [] for a generic native development task; native Agent tools are not Broker tools.', items:{type:'string',minLength:1,maxLength:100}, maxItems:20 },
+    instruction: { type:'string', minLength:1, maxLength:2000 }
+  }, ['taskKind','difficulty','requiredTools','instruction']);
+  broker.register({ id:'agent.delegate.propose', permission:'storage', provider:'task-runtime', risk:'low',
+    workspace:true, requiresTask:true, effect:'idempotent-write',
+    description:'Propose a bounded delegation after checking agent.delegate.candidates with these exact requirements. Core selects and checks the executor after this user turn ends. After a successful proposal, finish the turn without doing the delegated work. This does not grant permissions.',
+    inputSchema:delegationProposalSchema,
+    validate(request) {
+      validateSchema(delegationProposalSchema,request.input);
+      if(request.actor.kind!=='agent'||request.origin?.targetKind!=='agent'||request.origin?.phase!=='user'
+        ||request.origin?.sessionId!==request.actor.assignment?.sessionId||typeof request.origin?.runId!=='string')
+        throw capabilityError('DELEGATION_RUN_MISMATCH','A current managed user turn is required');
+      const task=taskFor(request.taskId), observed=task?.executionObservation;
+      if(task?.currentAgent?.provider!=='cetamesh'||task.currentAgent.sessionId!==request.origin.sessionId
+        ||observed?.runId!==request.origin.runId||observed.sessionId!==request.origin.sessionId||observed.state!=='running')
+        throw capabilityError('DELEGATION_RUN_MISMATCH','Proposal does not belong to the live Task turn');
+    },
+    async execute(request) {
+      if(!(await delegationCandidates(request)).length)throw capabilityError('DELEGATION_NO_ELIGIBLE_AGENT','No executor matches these exact requirements. Query agent.delegate.candidates; native development does not imply Broker tool access.');
+      taskRuntime.recordDelegationProposal({id:request.taskId,actor:request.actor,provider:'cetamesh',
+        sessionId:request.origin.sessionId,runId:request.origin.runId,requestId:request.requestId,intent:request.input});
+      return {proposed:true,dispatch:'not-started'};
+    }
+  });
   broker.register({ id: 'agent.execution.authorize', permission: 'agent.run', provider: 'agent-broker',
     workspace: true, risk: 'high', modelCallable: false,
     description: 'Confirm the disclosed native execution scope for one Workspace and Agent policy.',
@@ -781,6 +852,8 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     inputSchema: objectInput({
       agentProvider: stringField('Registered Agent Provider id.'),
       content: stringField('Task instructions for the Agent.'),
+      delegationRequestId: stringField('Core delegation reference, if this is an automatic dispatch.'),
+      delegationDirection: {type:'string',enum:['outbound','verification']},
       modelProvider: stringField('Optional Model Provider id.'),
       model: stringField('Optional Model id.'),
       reasoningEffort: { type: 'string', enum: ['low', 'medium', 'high', 'max'] },
@@ -799,6 +872,8 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       }
       if (taskHandoffGuard(task.id)) throw capabilityError('TASK_HANDOFF_IN_FLIGHT', 'Task Handoff owns this execution boundary');
       const provider = String(r.input.agentProvider || r.input.provider || 'cetamesh');
+      const assertDelegation=assignment=>{if(r.input.delegationRequestId)taskRuntime.assertDelegationDispatch({id:r.taskId,
+        requestId:r.input.delegationRequestId,direction:r.input.delegationDirection,provider,sessionId:assignment?.sessionId});};
       const readOnlyChild = Boolean(task.parentTaskId && task.childContract?.mode === 'read-only');
       const assertChildParentActive = () => {
         if (!readOnlyChild) return;
@@ -887,7 +962,8 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
             if (r.signal?.aborted) throw capabilityError('INVOKE_CANCELLED', 'Agent assignment cancelled');
             if (taskHandoffGuard(task.id)) throw capabilityError('TASK_HANDOFF_IN_FLIGHT', 'Task Handoff owns this execution boundary');
             ensureTaskFollow(task.currentAgent.provider, task.currentAgent.sessionId, task.id, { expectTurn: typeof agentBroker.setTaskExecutionObserver !== 'function' });
-            const beforeSend = taskFor(task.id);
+            assertDelegation(taskFor(task.id)?.currentAgent);
+          const beforeSend = taskFor(task.id);
             if (beforeSend?.status !== 'running' || beforeSend.currentAgent?.sessionId !== task.currentAgent.sessionId) {
               throw capabilityError('TASK_NOT_RUNNING', 'Task changed before Agent instruction dispatch');
             }
@@ -917,6 +993,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
               turnId: sent?.turnId ?? null, reused: true, actor };
           } catch (error) {
             if (error.code !== 'SESSION_NOT_FOUND') throw error;
+            if(r.input.delegationRequestId)throw capabilityError('DELEGATION_TARGET_LOST','Committed automatic Handoff target was lost; reconcile through Continuity before replacing it');
             task = taskRuntime.detachAgent({ id: task.id, expectedRev: task.rev, note: 'Managed session unavailable after restart; fresh authorized session' }).task;
           }
         }
@@ -946,6 +1023,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
           }
           if (r.signal?.aborted) throw capabilityError('INVOKE_CANCELLED', 'Agent assignment cancelled');
           ensureTaskFollow(provider, created.sessionId, task.id, { expectTurn: typeof agentBroker.setTaskExecutionObserver !== 'function' });
+          assertDelegation(taskFor(task.id)?.currentAgent);
           const beforeSend = taskFor(task.id);
           if (beforeSend?.status !== 'running' || beforeSend.currentAgent?.sessionId !== created.sessionId) {
             throw capabilityError('TASK_NOT_RUNNING', 'Task changed before Agent instruction dispatch');
@@ -1071,6 +1149,26 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       return result;
   }
   async function execute({ method, params = {} } = {}) {
+    if(method==='capability.delegation.revoke') {
+      let task=taskRuntime.revokeDelegationPolicy({id:params.taskId,expectedRev:params.expectedRev,actor:OWNER_ACTOR});
+      if(grants[task.id]){const previous=structuredClone(grants[task.id]);grants[task.id].capabilities=grants[task.id].capabilities.filter(id=>!['agent.delegate.propose','agent.delegate.candidates'].includes(id));
+        try{saveGrants();}catch(error){grants[task.id]=previous;throw error;}}
+      let cancellation='not-needed';
+      if(task.delegationProposal?.state==='unknown'&&task.currentAgent) {
+        cancellation='requested';try{await agentBroker.cancel(task.currentAgent);}catch{cancellation='unconfirmed';}
+      }
+      audit({capability:'agent.delegate.propose',status:'owner-policy-revoked',actor:OWNER_ACTOR.id,taskId:task.id});
+      return {task:taskRuntime.get({id:task.id}).task,cancellation};
+    }
+    if (method === 'capability.delegation.authorize') {
+      const task=taskRuntime.setDelegationPolicy({id:params.taskId,expectedRev:params.expectedRev,actor:OWNER_ACTOR,policy:params.policy});
+      if(!grants[task.id])grantTask(task.id);
+      const previous=structuredClone(grants[task.id]);
+      for(const id of ['agent.delegate.propose','agent.delegate.candidates'])if(!grants[task.id].capabilities.includes(id))grants[task.id].capabilities.push(id);
+      try { saveGrants(); } catch(error) { grants[task.id]=previous; throw error; }
+      audit({capability:'agent.delegate.propose',status:'owner-policy-issued',actor:OWNER_ACTOR.id,taskId:task.id});
+      return {task};
+    }
     if (method === 'capability.list') return { capabilities: broker.list() };
     if (method === 'capability.approval.list') return { approvals: broker.approvals.list() };
     if (method === 'capability.approval.decide') return params.defer === true ? operations.submit({ id: params.id, approve: params.approve === true }) : decideApproval(params);
@@ -1087,9 +1185,9 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     if (method === 'capability.grant.list') return { grants: broker.approvals.listGrants() };
     if (method === 'capability.grant.revoke') return broker.approvals.revokeGrant(params.id, OWNER_ACTOR);
     if (method === 'capability.grant.create') {
-      if (params.capability !== 'filesystem.write' || params.input?.append === true)
-        throw capabilityError('GRANT_CAPABILITY_DENIED', 'Finite L2 grants only cover exact non-append Workspace file writes');
       const entry = broker.registry.require(params.capability);
+      if (!isControlledL2Write({capability:entry.id,input:params.input},entry))
+        throw capabilityError('GRANT_CAPABILITY_DENIED', 'Finite L2 grants cover exact reviewed Core writes or write-only Workspace batches; deletes, executable code and unknown plugin effects require separate review');
       const request = { actor: principalForTask(params.taskId), taskId: params.taskId, workspaceId: params.workspaceId,
         capability: entry.id, input: params.input ?? {}, scope: params.scope ?? null, operationId: params.operationRef };
       await policy.authorize(request, entry);await entry.validate?.(request);

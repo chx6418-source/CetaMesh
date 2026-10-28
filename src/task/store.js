@@ -157,6 +157,8 @@ function normalizeLoaded(raw) {
     acceptance: asArray(raw.acceptance),
     agentHistory: asArray(raw.agentHistory),
     currentAgent: raw.currentAgent && typeof raw.currentAgent === 'object' ? raw.currentAgent : null,
+    delegationPolicy: raw.delegationPolicy && typeof raw.delegationPolicy === 'object' && !Array.isArray(raw.delegationPolicy) ? raw.delegationPolicy : null,
+    delegationProposal: raw.delegationProposal && typeof raw.delegationProposal === 'object' && !Array.isArray(raw.delegationProposal) ? raw.delegationProposal : null,
     modelConfig: raw.modelConfig && typeof raw.modelConfig === 'object' && !Array.isArray(raw.modelConfig)
       ? {
         modelProvider: typeof raw.modelConfig.modelProvider === 'string' ? raw.modelConfig.modelProvider : null,
@@ -269,7 +271,7 @@ export function createTaskStore({ stateDir, now = () => Date.now(), idFactory } 
     const next = mutate(clone(task));
     // Progress, reports and checkpoints are observational. Authority changes,
     // including an away-and-back assignment, invalidate pending approval.
-    const authority = row => JSON.stringify(['goal','requirements','status','workspaceId','currentAgent','modelConfig','ownerContext','parentTaskId','childContract']
+    const authority = row => JSON.stringify(['goal','requirements','status','workspaceId','currentAgent','modelConfig','ownerContext','parentTaskId','childContract','delegationPolicy']
       .map(key => row[key] ?? null));
     next.authorizationRevision = (task.authorizationRevision ?? task.rev)
       + (authority(task) === authority(next) ? 0 : 1);

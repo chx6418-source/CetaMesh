@@ -176,7 +176,7 @@ function readBoundedText(res, maxChars) {
   });
 }
 
-function requestOnce(url, ip, maxChars = 50000, signal) {
+function requestOnce(url, ip, maxChars = 50000, signal, method = 'GET') {
   return new Promise((resolve, reject) => {
     const mod = url.protocol === 'https:' ? https : http;
     const port = url.port || (url.protocol === 'https:' ? 443 : 80);
@@ -184,7 +184,7 @@ function requestOnce(url, ip, maxChars = 50000, signal) {
       hostname: ip,
       port,
       path: url.pathname + url.search,
-      method: 'GET',
+      method,
       headers: {
         host: url.host,
         'user-agent': 'Mozilla/5.0',
@@ -212,14 +212,15 @@ function requestOnce(url, ip, maxChars = 50000, signal) {
   });
 }
 
-export async function safeFetch(urlString, maxChars = 50000, { authorizeUrl = null, signal } = {}) {
+export async function safeFetch(urlString, maxChars = 50000, { authorizeUrl = null, signal, method = 'GET' } = {}) {
+  if(!['GET','HEAD'].includes(method))throw new Error('Only GET and HEAD are supported');
   const MAX_REDIRECTS = 5;
   signal?.throwIfAborted();
   if (authorizeUrl) authorizeUrl(new URL(urlString));
   let { url, ip } = await validateFetchUrl(urlString);
   for (let i = 0; i <= MAX_REDIRECTS; i++) {
     signal?.throwIfAborted();
-    const result = await requestOnce(url, ip, maxChars, signal);
+    const result = await requestOnce(url, ip, maxChars, signal, method);
     if ([301, 302, 303, 307, 308].includes(result.statusCode)) {
       if (!result.redirect) throw new Error(`重定向缺少 Location: ${result.statusCode}`);
       const next = new URL(result.redirect, url).toString();

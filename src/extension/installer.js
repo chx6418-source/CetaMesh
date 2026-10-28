@@ -17,6 +17,7 @@ import { buildReview, permissionDelta } from './review.js';
 import { EXTENSION_LIMITS, compareVersions, extensionError } from './types.js';
 import { validateMemoryPack, validateMemoryPackManifest } from './memory-pack.js';
 import { fingerprintExtensionPackage } from './package-fingerprint.js';
+import {isHttpDataManifest,validateHttpDefinition} from './http-host.js';
 
 function collectFiles(rootDir, relative = '', acc = { files: [], bytes: 0 }) {
   const dir = relative ? path.join(rootDir, relative) : rootDir;
@@ -103,7 +104,8 @@ export function createExtensionInstaller({ store, now = () => Date.now() } = {})
         throw extensionError('MEMORY_PACK_INVALID', 'Memory Pack contains executable or undeclared content');
       }
       scan = { ok: true, findings: [] };
-    } else scan = scanEntrySource(source);
+    } else if(isHttpDataManifest(manifest)){validateHttpDefinition(manifest,source);scan={ok:true,findings:[]};}
+    else scan = scanEntrySource(source);
     const packageFingerprint = fingerprintExtensionPackage(dir);
     if (packageFingerprint !== packageFingerprintBeforeReview) {
       throw extensionError('SOURCE_CHANGED_DURING_REVIEW', 'Extension package changed while it was being reviewed');

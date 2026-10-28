@@ -15,6 +15,7 @@ import { createDesktopPlatformRuntime } from '../desktop/platform-runtime.js';
 import { createCapabilityService, registerChannelMeshCapabilities } from '../capability/index.js';
 import { createWorkshopService } from '../workshop/index.js';
 import { createManagedAgentProvider } from '../agent/managed-agent-provider.js';
+import { createAutonomousHandoff } from '../continuity/autonomous-handoff.js';
 import { searchWeb } from '../mcp-web-search-safe.js';
 import { createProviderSecrets } from '../providers/secrets.js';
 import { createAgentRuntimeConfiguration } from '../agent/runtime-configuration.js';
@@ -86,6 +87,7 @@ export function createCetaMeshServices(options = {}) {
   });
   let capabilityService = null;
   let continuityService = null;
+  let autonomousHandoff = null;
   const agentTaskOptions = {
     stagingRoot: options.agentStagingRoot ?? path.join(os.tmpdir(), 'CetaMesh', 'agent-staging'),
     excludedRoots: [stateDir, dataRoot],
@@ -101,7 +103,7 @@ export function createCetaMeshServices(options = {}) {
     cancelApproval: approvalId => capabilityService.cancelWorkspaceImportApproval(approvalId)
   };
 
-  const providerSecrets = createProviderSecrets({ root: dataRoot });
+  const providerSecrets = options.providerSecrets ?? createProviderSecrets({ root: dataRoot });
   const connectionLeases=createConnectionLeases();
   const authProfileStore=createRuntimeAuthProfileStore({stateDir,connectionLeases});
   const agentRuntimeConfiguration = options.agentRuntimeConfiguration ?? createAgentRuntimeConfiguration({ stateDir, providerSecrets, connectionLeases, authProfileIdentity:provider=>authProfileStore.current(provider)?.generationId ?? null });
@@ -205,6 +207,10 @@ export function createCetaMeshServices(options = {}) {
     onUsage: payload => usageLedger.record(payload),
     onTurnEnd: async payload => {
       const reported = await agentBroker.reportTurnEnd(payload);
+      const reportingTask=taskService.runtime.findByAgent({provider:'cetamesh',sessionId:payload.sessionId});
+      if(reportingTask?.delegationProposal?.state==='proposed'
+        &&reportingTask.delegationProposal.runId===payload.runId&&payload.phase==='user')
+        autonomousHandoff?.schedule(payload);
       if (payload.outcome === 'completed' && settingsService.store.get().settings.memory.enabled === true) {
         const task = taskService.runtime.findByAgent({ provider: 'cetamesh', sessionId: payload.sessionId });
         const proposal = explicitMemoryCandidate(task?.goal);
@@ -285,6 +291,7 @@ export function createCetaMeshServices(options = {}) {
     agentBroker,
     bindAgentSession: managedAgent.bindSession,
     onTaskObservation: ({ taskId }) => workingMemory.record(taskId),
+    onAgentTurnSettled: payload => autonomousHandoff?.scheduleSettled(payload),
     onOperation: data => uiEventBus.publish('approval.operation', data),
     resumeAgentApproval: managedAgent.resumeLegacyApproval,
     searchImpl: searchWeb,
@@ -389,6 +396,7 @@ export function createCetaMeshServices(options = {}) {
     log
   });
   capabilityService.setTaskHandoffGuard(taskId => continuityService.runtime.isInFlight(taskId));
+  autonomousHandoff = createAutonomousHandoff({taskRuntime:taskService.runtime,agentBroker,capabilityService,continuityRuntime:continuityService.runtime,onDiagnostic:details=>log('Automatic delegation state: '+JSON.stringify(details))});
   agentBroker.onTurnEnd(payload => continuityService.runtime.observeAgentTurn(payload)
     .catch(error => log('Continuity 回合观察失败：' + String(error?.message ?? error))));
 
@@ -587,6 +595,7 @@ export function createCetaMeshServices(options = {}) {
     platformRuntime,
     workshopService,
     continuityService,
+    autonomousHandoff,
     extensionService,
     pluginCenterService,
     meshService,

@@ -69,6 +69,12 @@ currentNativeHealth={...nativeHealth};currentNativeSecurity={...nativeDispatchSe
 await assert.rejects(rankTaskAgents(nativeRequest),e=>e.code==='PROVIDER_UNAVAILABLE');
 nativeBroker.health=async()=>{currentNativeSecurity={...nativeDispatchSecurity};return {...nativeHealth};};
 assert.equal((await rankTaskAgents(nativeRequest)).length,1,'eligibility reads refreshed capability evidence after asynchronous health');
+const unknownCostBroker={...agentBroker,ids:()=>['unknown'],assertExecutionConsent:()=>{},health:async()=>({available:true,installed:true,
+ authenticated:true,sessionCapable:true,toolsAvailable:true})};
+assert.deepEqual(await rankTaskAgents({...request,agentBroker:unknownCostBroker}),[],'unknown cost remains blocked by default');
+const explicitBudget=await rankTaskAgents({...request,agentBroker:unknownCostBroker,allowUnknownCost:true});
+assert.equal(explicitBudget[0]?.provider,'unknown','explicit Owner budget may authorize an otherwise eligible unknown-cost candidate');
+assert.equal(explicitBudget[0].cost,null,'unknown cost is never represented as free');
 console.log('PASS explicit configured native Agent routing, no automatic account assumption, current policy evidence');
 
 // Negative evidence must veto automatic selection even when generic health is green.

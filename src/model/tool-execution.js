@@ -496,7 +496,7 @@ export function createToolExecutionCoordinator({
                 taskId: state.scope?.taskId ?? null,
                 workspaceId: state.scope?.workspaceId ?? null,
                 capability, input, reason: 'Model structured tool call',
-                origin: { sessionId, turnId, targetKind: state.targetKind },
+                origin: { sessionId, turnId, runId: state.runId, phase: state.phase, targetKind: state.targetKind },
                 ...(attemptSignal ? { signal: attemptSignal } : {})
               }, { signal: attemptSignal });
               result = attempt
@@ -546,7 +546,7 @@ export function createToolExecutionCoordinator({
             state: {
               providerId, model: model ?? null, reasoning: reasoning ?? null,
               manifest: structuredClone(state.manifest), actor: { kind: actor.kind, id: actor.id },
-              sessionId, turnId, accountingTaskId: state.accountingTaskId ?? null, scope: { taskId: scope?.taskId ?? null, workspaceId: scope?.workspaceId ?? null },
+              sessionId, turnId, runId: state.runId ?? null, phase: state.phase ?? null, accountingTaskId: state.accountingTaskId ?? null, scope: { taskId: scope?.taskId ?? null, workspaceId: scope?.workspaceId ?? null },
               messages: storedState.messages, cycle,
               totalCalls, usage, resolvedModel,
               limitReached,
@@ -636,7 +636,7 @@ export function createToolExecutionCoordinator({
     }
   }
 
-  async function run({ providerId, model, reasoning, messages = [], manifest = [], actor, sessionId, turnId, targetKind = 'chat', scope = {}, signal, refreshContext, onCapabilityResult, onActivity, onTextDelta, onStreamReset } = {}) {
+  async function run({ providerId, model, reasoning, messages = [], manifest = [], actor, sessionId, turnId, runId = null, phase = null, targetKind = 'chat', scope = {}, signal, refreshContext, onCapabilityResult, onActivity, onTextDelta, onStreamReset } = {}) {
     if (!actor || !['owner', 'agent'].includes(actor.kind) || typeof actor.id !== 'string') fail('UNAUTHORIZED', 'Trusted Model actor required');
     const normalizedSessionId = String(sessionId ?? 'session').slice(0, 160);
     const normalizedTurnId = turnId == null ? null : String(turnId).slice(0, 160);
@@ -670,6 +670,8 @@ export function createToolExecutionCoordinator({
         providerId, model, reasoning, manifest: safeManifest, actor,
         sessionId: String(sessionId ?? 'session').slice(0, 160),
         turnId: String(turnId ?? crypto.randomUUID()).slice(0, 160),
+        runId: typeof runId === 'string' && runId.length <= 240 ? runId : null,
+        phase: ['user','bootstrap','system','approval'].includes(phase) ? phase : null,
         targetKind: targetKind === 'agent' ? 'agent' : 'chat',
         accountingTaskId: scope.taskId ?? null,
         scope: { taskId: scope.taskId ?? null, workspaceId: scope.workspaceId ?? null },

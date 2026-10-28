@@ -187,6 +187,7 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
           actor: stepPrincipal.actor,
           sessionId: s.id,
           turnId: turn.id,
+          runId: turn.runId, phase: turn.phase,
           targetKind: 'agent',
           scope: { taskId: stepPrincipal.taskId, workspaceId: stepPrincipal.workspaceId },
           signal: controller.signal,
@@ -326,7 +327,7 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
         let result;
         try {
           result = await capabilityExecutor({ requestId: 'managed:' + turn.id + ':' + step, actor: live.actor, taskId: live.taskId, workspaceId: live.workspaceId,
-            capability: command.capability, input: copy(command.input), reason: 'Managed Agent Task step', origin: { sessionId: s.id, turnId: turn.id, targetKind: 'agent' } });
+            capability: command.capability, input: copy(command.input), reason: 'Managed Agent Task step', origin: { sessionId: s.id, turnId: turn.id, runId: turn.runId, phase: turn.phase, targetKind: 'agent' } });
         } catch (error) {
           result = { status: error?.effectStatus === 'unknown' ? 'outcome-unknown' : 'denied',
             code: error?.code ?? 'CAPABILITY_DENIED' };
@@ -386,7 +387,7 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
       emit(s, 'turn/end', { requestId: turn.id, reason: { ...reason, usage }, usage, promptChars: turn.content.length, outputChars });
       s.currentTurn = null;
       if (typeof onTurnEnd === 'function') {
-        try { await onTurnEnd({ provider: 'cetamesh', sessionId: s.id, usage, promptChars: turn.content.length,
+        try { await onTurnEnd({ provider: 'cetamesh', sessionId: s.id, runId: turn.runId, phase: turn.phase, usage, promptChars: turn.content.length,
           outputChars, source: 'managed-model-runtime', outcome: reason.kind }); }
         catch { /* Turn accounting and optional Memory proposal must not prevent turn termination. */ }
       }
@@ -544,7 +545,7 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
           await recordUsage(s, turn, s.lastUsage);
           emit(s, 'turn/end', { requestId: turn.id, reason: s.lastReason, usage: s.lastUsage });
           if (typeof onTurnEnd === 'function') {
-            try { await onTurnEnd({ provider: 'cetamesh', sessionId: s.id, usage: s.lastUsage,
+            try { await onTurnEnd({ provider: 'cetamesh', sessionId: s.id, runId: turn.runId, phase: turn.phase, usage: s.lastUsage,
               promptChars: turn.content.length, outputChars: 0, source: 'managed-model-runtime', outcome: 'waiting' }); }
             catch { s.accountingWarning = { code: 'TURN_ACCOUNTING_FAILED', requestId: turn.id }; }
           }
@@ -563,7 +564,7 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
         await recordUsage(s, turn, s.lastUsage);
         emit(s, 'turn/end', { requestId: turn.id, reason: s.lastReason, usage: s.lastUsage,
           promptChars: turn.content.length, outputChars: text.length });
-        if (typeof onTurnEnd === 'function') await onTurnEnd({ provider: 'cetamesh', sessionId: s.id, usage: s.lastUsage,
+        if (typeof onTurnEnd === 'function') await onTurnEnd({ provider: 'cetamesh', sessionId: s.id, runId: turn.runId, phase: turn.phase, usage: s.lastUsage,
           promptChars: turn.content.length, outputChars: text.length, source: 'managed-model-runtime', outcome: s.lastReason.kind });
         return { resumed: true, pending: false };
       } catch (error) {
@@ -576,7 +577,7 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
         await recordUsage(s, turn, s.lastUsage);
         emit(s, 'turn/end', { requestId: turn.id, reason: { ...s.lastReason, usage: s.lastUsage }, usage: s.lastUsage });
         if (typeof onTurnEnd === 'function') {
-          try { await onTurnEnd({ provider: 'cetamesh', sessionId: s.id, usage: s.lastUsage,
+          try { await onTurnEnd({ provider: 'cetamesh', sessionId: s.id, runId: turn.runId, phase: turn.phase, usage: s.lastUsage,
             promptChars: turn.content.length, outputChars: 0, source: 'managed-model-runtime', outcome: s.lastReason.kind }); }
           catch { s.accountingWarning = { code: 'TURN_ACCOUNTING_FAILED', requestId: turn.id }; }
         }

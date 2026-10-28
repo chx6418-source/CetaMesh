@@ -1,6 +1,7 @@
 import path from 'node:path';
 import {readJsonFile,writeJsonAtomic} from '../storage/json-file.js';
 import {operationIdentity,retainedOperationResult} from './operation-identity.js';
+import {safeContinuationInput} from './operation-context.js';
 import {normalizeRequest,capabilityError} from './types.js';import {createCapabilityRegistry} from './registry.js';import {createCapabilityPolicy} from './policy.js';import {createCapabilityApproval,requestFingerprint} from './approval.js';
 export function createCapabilityBroker({registry=createCapabilityRegistry(),policy=createCapabilityPolicy(),approval=createCapabilityApproval(),audit=()=>{},stateDir=null}={}){
  const dispatchFile=stateDir?path.join(stateDir,'capability','dispatches.json'):null;
@@ -189,7 +190,8 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
    if(Object.keys(dispatches).length>=50000)throw capabilityError('DISPATCH_JOURNAL_FULL','Capability dispatch journal needs Owner review');
    dispatches[identity.key]={operationId:request.operationId,fingerprint:identity.fingerprint,taskId:request.taskId,
     workspaceId:request.workspaceId,...(logicalStepId?{logicalStepId}:{}),capability:entry.id,descriptorVersion:entry.descriptorVersion??null,
-    executorId:request.actor.id,status:'prepared',at:Date.now()};
+    executorId:request.actor.id,status:'prepared',at:Date.now(),
+    ...(safeContinuationInput(entry.id,request.input)?{continuationInput:safeContinuationInput(entry.id,request.input)}:{})};
    try{if(dispatchFile)writeJsonAtomic(dispatchFile,dispatches);}catch(error){delete dispatches[identity.key];throw error;}
    audit({requestId:request.requestId,capability:entry.id,status:'operation-prepared',actor:request.actor.id});
    return {operationId:request.operationId,status:'prepared',capability:entry.id};
@@ -206,7 +208,7 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
   },
   dispatchStatus:id=>{const alias=dispatches[aliasKey(id)];const row=alias?dispatches[alias.operationKey]:dispatches[String(id)];return row?{capability:row.capability,status:row.status,at:row.at}:null;},
   operationsForTask:({taskId,workspaceId})=>Object.values(dispatches).filter(row=>row.operationId&&row.taskId===taskId&&row.workspaceId===workspaceId)
-   .map(({operationId,logicalStepId,capability,status,at,executorId,attemptId,requestId,blocker})=>({operationId,logicalStepId,capability,status,at,executorId,attemptId,requestId,blocker})),
+   .map(({operationId,logicalStepId,capability,status,at,executorId,attemptId,requestId,blocker,continuationInput})=>({operationId,logicalStepId,capability,status,at,executorId,attemptId,requestId,blocker,...(safeContinuationInput(capability,continuationInput)?{continuationInput:safeContinuationInput(capability,continuationInput)}:{})})),
   operationRecordForStep:({taskId,workspaceId,logicalStepId})=>{
    const rows=Object.values(dispatches).filter(row=>row.operationId&&row.logicalStepId===logicalStepId
     &&row.taskId===taskId&&row.workspaceId===workspaceId);

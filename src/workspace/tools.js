@@ -331,16 +331,26 @@ function gitUnavailable(error) {
   return error?.code === 'ENOENT';
 }
 
-export async function gitStatus(rootReal) {
+export async function gitStatus(rootReal, {completeFiles=false}={}) {
   let out;
   try {
-    out = await gitRun(rootReal, ['status', '--porcelain=v1', '--branch']);
+    out = await gitRun(rootReal, ['status', '--porcelain=v1', '--branch',...(completeFiles?['-z','--untracked-files=all']:[])]);
   } catch (error) {
     if (gitUnavailable(error)) fail('GIT_UNAVAILABLE', 'git 不可用（未安装或不在 PATH）');
     if (/not a git repository/i.test(error.gitStderr ?? '')) {
       return { isRepo: false, branch: '', dirty: false, entries: [] };
     }
     fail('GIT_FAILED', `git status 失败：${error.gitStderr || error.message}`);
+  }
+  if(completeFiles) {
+    const records=out.stdout.split('\0').filter(Boolean),entries=[];let branch='';
+    for(let index=0;index<records.length;index++) {
+      const line=records[index];
+      if(line.startsWith('## ')){branch=line.slice(3).split('...')[0].replace('No commits yet on ','').replace('HEAD (no branch)','(detached)');continue;}
+      const x=line[0],y=line[1],filePath=line.slice(3),origPath=x==='R'||x==='C'||y==='R'||y==='C'?records[++index]??null:null;
+      entries.push({x,y,path:filePath,origPath});
+    }
+    return {isRepo:true,branch,dirty:entries.length>0,entries};
   }
   const lines = out.stdout.split(/\r?\n/).filter(Boolean);
   let branch = '';

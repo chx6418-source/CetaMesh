@@ -78,6 +78,22 @@ try {
     relation:'related-to',context:{keyDecisions:['STALE_LINK_DECISION_MUST_NOT_INJECT']}});
   check('失效链接决策不得进入上下文',!JSON.stringify(facts.buildContextPackage({principal:user,scope:'workspace:facts',query:'Build'})).includes('STALE_LINK_DECISION'));
   equal('显式失效引用标为待核验',facts.resolveReferences({principal:user,sourceScope:'workspace:facts',refs:[{kind:'memory',id:expired.id,scope:'workspace:facts'}]}).references[0].status,'needs-review');
+  const older=facts.create({principal:user,type:'workspace',scope:'workspace:decisions',content:'Use compiler version one',factKey:'compiler'});
+  const newer=facts.create({principal:user,type:'workspace',scope:'workspace:decisions',content:'Use compiler version two',factKey:'compiler'});
+  facts.createLink({principal:user,source:{kind:'memory',id:newer.id,scope:'workspace:decisions'},target:{kind:'memory',id:older.id,scope:'workspace:decisions'},relation:'supersedes'});
+  equal('用户确认取代后只注入新事实',facts.retrieve({principal:user,scope:'workspace:decisions',query:'compiler'}).memories.map(row=>row.id),[newer.id]);
+  equal('取代关系保留旧事实历史',facts.get({principal:user,id:older.id}).memory.content,'Use compiler version one');
+  equal('旧事实显式标记已被取代',facts.assess({principal:user,id:older.id}).status,'superseded');
+  const supersededRestart=createMemoryRuntime({stateDir:factState,now});
+  equal('取代关系重启后保持',supersededRestart.assess({principal:user,id:older.id}).status,'superseded');
+  const exactAgent={kind:'agent',id:'old-reference-reader',grants:{scopes:['workspace:decisions'],types:['workspace'],readOnlyRefs:{'workspace:decisions':[older.id]}}};
+  check('精确旧引用不得因无权读取新事实而恢复为当前',facts.assess({principal:exactAgent,id:older.id}).status!=='current');
+  const oldOnly=facts.retrieve({principal:exactAgent,scope:'workspace:decisions',query:'compiler'});
+  equal('失效精确引用不进入任务上下文',oldOnly.memories.length,0);
+  check('有效性判断不泄露新事实内容或身份',!JSON.stringify(oldOnly).includes(newer.id)&&!JSON.stringify(oldOnly).includes('version two'));
+
+  facts.update({principal:user,id:newer.id,expectedRev:newer.rev,content:'An edited fact needs fresh confirmation'});
+  equal('修改新事实后旧取代授权不能隐式续用',facts.retrieve({principal:user,scope:'workspace:decisions',query:''}).meta.conflicted,2);
   const userFact=facts.create({principal:user,type:'working',scope:'workspace:facts',content:'User-established temporary fact',factKey:'owner-fact'});
   equal('Agent 不得把用户事实内容替换为模型推断',capture(()=>facts.update({principal:{kind:'agent',id:'fact-agent',grants:{scopes:['workspace:facts'],types:['working']}},
     id:userFact.id,expectedRev:userFact.rev,content:'Model inferred replacement'})).code,'FACT_METADATA_REQUIRES_USER');

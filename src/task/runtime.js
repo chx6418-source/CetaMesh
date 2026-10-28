@@ -35,6 +35,7 @@ import {
 import { createTaskStore } from './store.js';
 import { resolveTaskArtifactOpen } from './artifact-open.js';
 import { verifyTaskOutcome } from './outcome-verification.js';
+import {normalizeDelegationVerification,verifyDelegationContract} from './delegation-verification.js';
 
 function subId(prefix) {
   return prefix + '_' + crypto.randomBytes(4).toString('hex');
@@ -72,6 +73,194 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     return { task, changed: true };
   }
 
+  // Owner policy and Agent proposal live in the authoritative Task. A proposal
+  // carries no authority; claiming it is a one-way durable pre-dispatch fence.
+  function delegationBinding(task) {
+    return crypto.createHash('sha256').update(JSON.stringify({goal:task.goal,requirements:task.requirements,workspaceId:task.workspaceId,modelConfig:task.modelConfig??null,acceptance:task.acceptance??[]})).digest('hex');
+  }
+  function validDelegationPolicy(policy,task,{consumed=false}={}) {
+    return Boolean(policy&&typeof policy.id==='string'&&policy.id&&typeof policy.issuedBy==='string'&&policy.issuedBy
+      &&Number.isSafeInteger(policy.expiresAt)&&policy.expiresAt>now()&&Number.isSafeInteger(policy.maxDelegations)
+      &&policy.maxDelegations>=1&&policy.maxDelegations<=3&&Number.isSafeInteger(policy.used)&&policy.used>=0
+      &&(consumed?policy.used>=1&&policy.used<=policy.maxDelegations:policy.used<policy.maxDelegations)&&typeof policy.allowUnknownCost==='boolean'
+      &&policy.revokedAt==null
+      &&(policy.boundSessionId===null||typeof policy.boundSessionId==='string')&&policy.taskBinding===delegationBinding(task));
+  }
+  function setDelegationPolicy({id,expectedRev,actor,policy}={}) {
+    if(actor?.kind!=='owner'||!actor.id)throw taskError('PERMISSION_DENIED','Owner must authorize automatic delegation');
+    const task=requireTask(id);
+    if(task.parentTaskId||!task.workspaceId||!['queued','running'].includes(task.status))throw taskError('DELEGATION_POLICY_DENIED','Task cannot accept delegation policy');
+    if(!policy||typeof policy!=='object'||Array.isArray(policy)||!Number.isSafeInteger(policy.expiresAt)
+      ||policy.expiresAt<now()+1000||policy.expiresAt>now()+86400000||!Number.isSafeInteger(policy.maxDelegations)
+      ||policy.maxDelegations<1||policy.maxDelegations>3||typeof policy.allowUnknownCost!=='boolean')
+      throw taskError('INVALID_DELEGATION_POLICY','A bounded Owner policy is required');
+    if(task.delegationProposal&&['proposed','dispatching','awaiting-result','returning','verifying','unknown'].includes(task.delegationProposal.state))
+      throw taskError('DELEGATION_IN_PROGRESS','Reconcile the existing delegation before changing its policy');
+    const verification=normalizeDelegationVerification(policy.verification,task.acceptance);
+    return mutate(id,expectedRev,draft=>{
+      draft.delegationPolicy={id:crypto.randomUUID(),issuedBy:String(actor.id).slice(0,160),expiresAt:policy.expiresAt,
+        maxDelegations:policy.maxDelegations,used:0,allowUnknownCost:policy.allowUnknownCost,
+        taskBinding:delegationBinding(draft),boundSessionId:null,...(verification?{verification}:{} )};
+      return draft;
+    });
+  }
+  function revokeDelegationPolicy({id,expectedRev,actor}={}) {
+    if(actor?.kind!=='owner'||!actor.id)throw taskError('PERMISSION_DENIED','Owner must revoke delegation authority');
+    const task=requireTask(id);
+    return mutate(id,expectedRev,draft=>{
+      if(draft.delegationPolicy)draft.delegationPolicy={...draft.delegationPolicy,revokedAt:now(),revokedBy:String(actor.id).slice(0,160)};
+      if(draft.delegationProposal?.state==='proposed')draft.delegationProposal={...draft.delegationProposal,state:'blocked',code:'DELEGATION_POLICY_REVOKED'};
+      else if(['dispatching','awaiting-result','returning','verifying'].includes(draft.delegationProposal?.state)) {
+        draft.delegationProposal={...draft.delegationProposal,state:'unknown',code:'DELEGATION_POLICY_REVOKED'};
+        if(['running','waiting','paused'].includes(draft.status))draft.status='blocked';
+        draft.progress.note='needs-reconciliation: Owner revoked delegation; executor cancellation is not side-effect confirmation';
+      }
+      return draft;
+    });
+  }
+  function assertDelegationDispatch({id,requestId,direction,provider,sessionId}={}) {
+    const task=requireTask(id),proposal=task.delegationProposal;
+    if(direction==='outbound')return assertDelegationClaim({id,requestId,selectedProvider:provider,targetSessionId:sessionId});
+    if(direction!=='verification'||task.status!=='running'||proposal?.state!=='returning'||proposal.requestId!==requestId
+      ||proposal.returnSessionId!==sessionId||provider!=='cetamesh'||task.currentAgent?.provider!==provider||task.currentAgent.sessionId!==sessionId
+      ||!validDelegationPolicy(task.delegationPolicy,task,{consumed:true})||task.delegationPolicy.id!==proposal.policyId)
+      throw taskError('DELEGATION_POLICY_DENIED','Automatic dispatch no longer has current Owner authority');
+    return task;
+  }
+  function recordDelegationProposal({id,actor,provider,sessionId,runId,requestId,intent}={}) {
+    const task=requireTask(id),policy=task.delegationPolicy,observation=task.executionObservation;
+    if(actor?.kind!=='agent'||actor.id!==`task:${task.id}`||provider!=='cetamesh'
+      ||task.status!=='running'||task.currentAgent?.provider!==provider||task.currentAgent?.sessionId!==sessionId
+      ||actor.assignment?.provider!==provider||actor.assignment?.sessionId!==sessionId
+      ||actor.assignmentRevision!==(task.authorizationRevision??task.rev))
+      throw taskError('AGENT_ASSIGNMENT_EXPIRED','Delegation proposer no longer owns this Task');
+    if(!observation||observation.provider!==provider||observation.sessionId!==sessionId||observation.runId!==runId||observation.state!=='running')
+      throw taskError('DELEGATION_RUN_MISMATCH','Proposal must belong to the active user turn');
+    if(!validDelegationPolicy(policy,task)||(policy.boundSessionId&&policy.boundSessionId!==sessionId))
+      throw taskError('DELEGATION_POLICY_DENIED','Owner delegation policy is missing, expired or changed');
+    const normalized={taskKind:normalizeText(intent?.taskKind,'taskKind',40,{required:true}),
+      difficulty:intent?.difficulty,requiredTools:normalizeStringList(intent?.requiredTools,'requiredTools',20),
+      instruction:normalizeText(redactText(intent?.instruction),'instruction',2000,{required:true})};
+    if(!['code','analysis'].includes(normalized.taskKind)||!Number.isSafeInteger(normalized.difficulty)
+      ||normalized.difficulty<1||normalized.difficulty>3)throw taskError('INVALID_DELEGATION_PROPOSAL','Invalid bounded task requirements');
+    normalized.requiredTools=[...new Set(normalized.requiredTools)].sort();
+    const request=normalizeText(requestId,'requestId',240,{required:true});
+    const existing=task.delegationProposal;
+    if(existing&&['proposed','dispatching','awaiting-result','returning','verifying','unknown'].includes(existing.state)){
+      if(existing.requestId===request&&existing.runId===runId&&JSON.stringify(existing.intent)===JSON.stringify(normalized))return task;
+      throw taskError('DELEGATION_ALREADY_PROPOSED','Only one active proposal is permitted');
+    }
+    return mutate(id,task.rev,draft=>{
+
+      draft.delegationProposal={requestId:request,provider,sessionId,runId,intent:normalized,state:'proposed',
+        policyId:policy.id,authorizationRevision:task.authorizationRevision??task.rev,createdAt:now()};
+      return draft;
+    });
+  }
+  function claimDelegationProposal({id,requestId,selectedProvider}={}) {
+    const task=requireTask(id),proposal=task.delegationProposal,policy=task.delegationPolicy,observation=task.executionObservation;
+    if(!proposal||proposal.requestId!==requestId||proposal.state!=='proposed')
+      throw taskError('DELEGATION_ALREADY_CLAIMED','Proposal is unavailable or already claimed');
+    if(task.status!=='running'||task.currentAgent?.provider!==proposal.provider||task.currentAgent?.sessionId!==proposal.sessionId
+      ||!validDelegationPolicy(policy,task)||policy.id!==proposal.policyId||(task.authorizationRevision??task.rev)!==proposal.authorizationRevision
+      ||(policy.boundSessionId&&policy.boundSessionId!==proposal.sessionId))
+      throw taskError('DELEGATION_POLICY_DENIED','Delegation authority changed');
+    if(!observation||observation.runId!==proposal.runId||observation.sessionId!==proposal.sessionId||observation.state!=='awaiting-review')
+      throw taskError('DELEGATION_TURN_NOT_COMPLETE','Source turn has not been confirmed complete');
+    const target=normalizeProvider(selectedProvider);
+    if(!target||target===proposal.provider)throw taskError('INVALID_DELEGATION_PROPOSAL','A different verified executor is required');
+    return mutate(id,task.rev,draft=>{
+      draft.delegationPolicy.used++;
+      draft.delegationPolicy.boundSessionId=proposal.sessionId;
+      draft.delegationProposal={...draft.delegationProposal,state:'dispatching',selectedProvider:target,claimedAt:now()};
+      return draft;
+    });
+  }
+  function assertDelegationClaim({id,requestId,selectedProvider,claimedRevision,targetSessionId}={}) {
+    const task=requireTask(id),proposal=task.delegationProposal,policy=task.delegationPolicy;
+    if(task.status!=='running'||!proposal||proposal.requestId!==requestId||proposal.state!=='dispatching'
+      ||proposal.selectedProvider!==selectedProvider||!policy||policy.id!==proposal.policyId
+      ||!validDelegationPolicy(policy,task,{consumed:true}))
+      throw taskError('DELEGATION_POLICY_DENIED','Claimed delegation authority changed');
+    if(targetSessionId) {
+      if(task.currentAgent?.provider!==selectedProvider||task.currentAgent?.sessionId!==targetSessionId)
+        throw taskError('AGENT_ASSIGNMENT_EXPIRED','Handoff target no longer owns the Task');
+    } else if(task.currentAgent?.provider!==proposal.provider||task.currentAgent?.sessionId!==proposal.sessionId
+      ||(task.authorizationRevision??task.rev)!==claimedRevision)
+      throw taskError('AGENT_ASSIGNMENT_EXPIRED','Source Task changed before handoff');
+    return task;
+  }
+  function recordDelegationTarget({id,requestId,selectedProvider,sessionId}={}) {
+    const task=assertDelegationClaim({id,requestId,selectedProvider,targetSessionId:sessionId});
+    if(task.delegationProposal.targetSessionId&&task.delegationProposal.targetSessionId!==sessionId)
+      throw taskError('DELEGATION_STATE_CONFLICT','Delegation target is already bound');
+    return mutate(id,task.rev,draft=>{draft.delegationProposal.targetSessionId=sessionId;return draft;});
+  }
+  function claimDelegationReturn({id,requestId,provider,sessionId,runId}={}) {
+    const task=requireTask(id),proposal=task.delegationProposal,policy=task.delegationPolicy,observed=task.executionObservation;
+    if(task.status!=='running'||!proposal||proposal.requestId!==requestId||proposal.state!=='awaiting-result'
+      ||proposal.selectedProvider!==provider||proposal.targetSessionId!==sessionId
+      ||task.currentAgent?.provider!==provider||task.currentAgent?.sessionId!==sessionId
+      ||!validDelegationPolicy(policy,task,{consumed:true})||policy.id!==proposal.policyId
+      ||!observed||observed.provider!==provider||observed.sessionId!==sessionId||observed.runId!==runId||observed.state!=='awaiting-review')
+      throw taskError('DELEGATION_RETURN_DENIED','External result is not confirmed for the current Task');
+    return mutate(id,task.rev,draft=>{draft.delegationProposal={...draft.delegationProposal,state:'returning',externalRunId:runId,returnClaimedAt:now()};return draft;});
+  }
+  function recordDelegationReturnTarget({id,requestId,sessionId}={}) {
+    const task=requireTask(id),proposal=task.delegationProposal,policy=task.delegationPolicy;
+    if(task.status!=='running'||!proposal||proposal.requestId!==requestId||proposal.state!=='returning'
+      ||task.currentAgent?.provider!=='cetamesh'||task.currentAgent.sessionId!==sessionId
+      ||!policy||policy.id!==proposal.policyId||policy.expiresAt<=now()||policy.taskBinding!==delegationBinding(task))
+      throw taskError('DELEGATION_RETURN_DENIED','Managed return target or Owner policy changed');
+    return mutate(id,task.rev,draft=>{draft.delegationProposal.returnSessionId=sessionId;return draft;});
+  }
+  function markDelegationVerifying({id,requestId,sessionId}={}) {
+    const task=requireTask(id),proposal=task.delegationProposal,observed=task.executionObservation;
+    if(!proposal||proposal.requestId!==requestId||proposal.state!=='returning'||proposal.returnSessionId!==sessionId
+      ||task.currentAgent?.provider!=='cetamesh'||task.currentAgent.sessionId!==sessionId
+      ||!observed||observed.provider!=='cetamesh'||observed.sessionId!==sessionId||!observed.runId)
+      throw taskError('DELEGATION_RETURN_DENIED','Verification turn is not bound to the returned Managed Agent');
+    return mutate(id,task.rev,draft=>{draft.delegationProposal={...draft.delegationProposal,state:'verifying',verificationRunId:observed.runId};return draft;});
+  }
+  function finishDelegationVerification({id,requestId,sessionId,runId,expectedRev,verification}={}) {
+    const task=requireTask(id),proposal=task.delegationProposal,observed=task.executionObservation;
+    if(!proposal||proposal.requestId!==requestId||proposal.state!=='verifying'||proposal.returnSessionId!==sessionId
+      ||proposal.verificationRunId!==runId||task.currentAgent?.provider!=='cetamesh'||task.currentAgent.sessionId!==sessionId
+      ||observed?.runId!==runId||observed.state!=='awaiting-review')
+      throw taskError('DELEGATION_RETURN_DENIED','Verification is not bound to the latest Managed turn');
+    if(!Number.isSafeInteger(expectedRev)||task.rev!==expectedRev)throw taskError('TASK_CONFLICT','Task changed during independent verification');
+    if(verification?.status==='VERIFIED'&&!validDelegationPolicy(task.delegationPolicy,task,{consumed:true}))throw taskError('DELEGATION_POLICY_DENIED','Verification policy changed');
+    const state=verification?.status==='VERIFIED'?'verified':'needs-review';
+    const reasons=Array.isArray(verification?.reasons)?verification.reasons.filter(value=>typeof value==='string').slice(0,20):[];
+    const evidenceEventIds=Array.isArray(verification?.evidenceEventIds)?verification.evidenceEventIds.filter(value=>typeof value==='string').slice(0,100):[];
+    return mutate(id,task.rev,draft=>{
+      if(state==='verified'&&verification.machineAcceptanceIds?.length===draft.acceptance.length
+        &&draft.acceptance.every(row=>verification.machineAcceptanceIds.includes(row.id)))for(const row of draft.acceptance){row.met=true;row.metAt=now();}
+      draft.progress.note=state==='verified'?'Owner machine criteria verified':'Evidence needs review: '+reasons.join(', ');
+      draft.currentPhase=state==='verified'?'Verified':'Awaiting result review';
+      draft.delegationProposal={...draft.delegationProposal,state,verification:{status:verification?.status==='VERIFIED'?'VERIFIED':'NEEDS_REVIEW',reasons,evidenceEventIds},verifiedAt:now()};return draft;});
+  }
+  function markDelegationUnknown({id,requestId,code}={}) {
+    const task=requireTask(id),proposal=task.delegationProposal;
+    if(!proposal||proposal.requestId!==requestId||!['dispatching','awaiting-result','returning','verifying'].includes(proposal.state))
+      throw taskError('DELEGATION_STATE_CONFLICT','Delegation cannot be marked unknown');
+    const safeCode=typeof code==='string'&&/^[A-Z][A-Z0-9_]{0,79}$/.test(code)?code:'DELEGATION_OUTCOME_UNKNOWN';
+    return mutate(id,task.rev,draft=>{draft.delegationProposal={...draft.delegationProposal,state:'unknown',code:safeCode};
+      draft.progress.note='needs-reconciliation: automatic delegation outcome is unknown';return draft;});
+  }
+  function settleDelegationProposal({id,requestId,state,code}={}) {
+    const task=requireTask(id),proposal=task.delegationProposal;
+    if(!proposal||proposal.requestId!==requestId||!['proposed','dispatching'].includes(proposal.state)
+      ||!['blocked','awaiting-result','unknown'].includes(state)
+      ||(state==='awaiting-result'&&(proposal.state!=='dispatching'||!proposal.targetSessionId)))
+      throw taskError('DELEGATION_STATE_CONFLICT','Delegation state cannot be settled');
+    const safeCode=typeof code==='string'&&/^[A-Z][A-Z0-9_]{0,79}$/.test(code)?code:null;
+    return mutate(id,task.rev,draft=>{
+      draft.delegationProposal={...draft.delegationProposal,state,settledAt:now(),...(safeCode?{code:safeCode}:{})};
+      if(state==='blocked'||state==='unknown')draft.progress.note='Automatic delegation requires review'+(safeCode?`: ${safeCode}`:'');
+      return draft;
+    });
+  }
   // ── 创建 / 读取 / 修改 ─────────────────────────────────────────────────
   function create({
     goal, requirements, workspaceId, currentPhase, acceptanceCriteria, status, note, requestId, requestedAgentProvider
@@ -861,7 +1050,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
   }
 
   /** Persist one observed Broker tool result against the current Task owner. */
-  function recordToolOutcome({ id, provider, sessionId, eventId, runId, phase, capability, status, filePath, tool, exitCode, hasChanges, retryCount, source, resultSha256, changes } = {}) {
+  function recordToolOutcome({ id, provider, sessionId, eventId, runId, phase, capability, status, filePath, tool, exitCode, hasChanges, retryCount, source, resultSha256, changes, operationId } = {}) {
     const current = requireTask(id);
     const sourceId = normalizeText(eventId, 'eventId', 240, { required: true });
     if (current.executionEvidence?.some(item => item.eventId === sourceId && item.provider === provider && item.sessionId === sessionId)) return { task: current, changed: false };
@@ -882,8 +1071,9 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
         runId: normalizeText(runId, 'runId', 240) || null,
         phase: normalizeText(phase, 'phase', 40) || 'unknown', capability: name,
         status: resultStatus,
-        ...(['native-result', 'core-import'].includes(source) && /^[a-f0-9]{64}$/.test(resultSha256 ?? '')
+        ...(['native-result', 'core-import', 'core-test'].includes(source) && /^[a-f0-9]{64}$/.test(resultSha256 ?? '')
           ? { source, resultSha256 } : {}),
+        ...(source==='core-test'&&typeof operationId==='string'?{operationId:operationId.slice(0,160)}:{}),
         ...(source === 'core-import' && Array.isArray(changes) ? { changes: changes.slice(0,500).map(row => ({
           action: row.action === 'delete' ? 'delete' : 'write', path: String(row.path ?? '').slice(0,500),
           sha256: /^[a-f0-9]{64}$/.test(row.sha256 ?? '') ? row.sha256 : null,
@@ -922,6 +1112,13 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     return verifyTaskOutcome(candidate, { kind, expectedFile, expectedSha256, expectedCapability }, { workspaceRoot });
   }
 
+  async function verifyDelegationOutcome({id}={}) {
+    const task=requireTask(id);
+    if(!validDelegationPolicy(task.delegationPolicy,task,{consumed:true}))return {status:'NEEDS_REVIEW',kind:'code',evidenceEventIds:[],reasons:['DELEGATION_POLICY_DENIED']};
+    if(!task.delegationPolicy.verification)return {status:'NEEDS_REVIEW',kind:task.delegationProposal?.intent.taskKind??'code',evidenceEventIds:[],reasons:['OWNER_MACHINE_VERIFICATION_NOT_CONFIGURED']};
+    const workspace=await resolveWorkspace(task.workspaceId);
+    return verifyDelegationContract(task,{workspaceRoot:workspace?.id===task.workspaceId?workspace.root:null});
+  }
   async function resolveArtifactOpen({ taskId, artifactId, forPreview = false } = {}) {
     const safeTaskId = normalizeText(taskId, 'taskId', TASK_LIMITS.idChars, { required: true });
     const safeArtifactId = normalizeText(artifactId, 'artifactId', TASK_LIMITS.idChars, { required: true });
@@ -1051,6 +1248,19 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
   }
 
   return {
+    setDelegationPolicy,
+    revokeDelegationPolicy,
+    assertDelegationDispatch,
+    recordDelegationProposal,
+    claimDelegationProposal,
+    assertDelegationClaim,
+    recordDelegationTarget,
+    claimDelegationReturn,
+    recordDelegationReturnTarget,
+    markDelegationVerifying,
+    finishDelegationVerification,
+    markDelegationUnknown,
+    settleDelegationProposal,
     recordOwnerContext,
     recordAgentReport,
     create,
@@ -1094,6 +1304,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     beginExecutionObservation,
     observeExecution,
     verifyOutcome,
+    verifyDelegationOutcome,
     resolveArtifactOpen,
     addDecision,
     linkMemory,

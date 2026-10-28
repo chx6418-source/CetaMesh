@@ -1,5 +1,6 @@
 import path from 'node:path';import crypto from 'node:crypto';
 import {capabilityError} from './types.js';
+import {isControlledL2Write,l2Resources} from './l2-grants.js';
 import {readJsonFile,writeJsonAtomic} from '../storage/json-file.js';
 function canonical(value){if(Array.isArray(value))return value.map(canonical);if(value&&typeof value==='object')return Object.fromEntries(Object.keys(value).sort().map(k=>[k,canonical(value[k])]));return value;}
 export const requestFingerprint=request=>{const {approvalId,approved,...bound}=request;return crypto.createHash('sha256').update(JSON.stringify(canonical(bound))).digest('hex');};
@@ -15,25 +16,28 @@ export function createCapabilityApproval({stateDir,now=()=>Date.now(),ttlMs=6000
  function mutateGrant(row,change){const backup=structuredClone(row);Object.assign(row,change);try{save();}catch(error){Object.keys(row).forEach(key=>delete row[key]);Object.assign(row,backup);throw error;}}
  function validateGrant(id,request,entry,binding){
   const row=requireRow(id);
-  if(row.kind!=='bounded-grant'||row.status!=='active'||row.expiresAt<=now()
+  if(!isControlledL2Write(request,entry)||row.kind!=='bounded-grant'||row.status!=='active'||row.expiresAt<=now()
+    ||!Number.isSafeInteger(row.uses)||row.uses<1||!Number.isSafeInteger(row.maxUses)||row.maxUses>20||row.uses>row.maxUses
     ||row.fingerprint!==grantFingerprint(request,entry,binding))throw capabilityError('GRANT_EXPIRED','Grant revoked, expired or its exact execution scope changed');
   return row;
  }
  const grantMethods={
   issueGrant({actor,request,entry,binding,ttlMs,maxUses}){
-   if(actor?.kind!=='owner')throw capabilityError('PERMISSION_DENIED','Owner must issue bounded grants');
+   if(actor?.kind!=='owner'||typeof actor.id!=='string'||!actor.id)throw capabilityError('PERMISSION_DENIED','Owner must issue bounded grants');
+   if(!isControlledL2Write(request,entry))throw capabilityError('GRANT_CAPABILITY_DENIED','Capability is not a reviewed controlled Core write');
    if(!Number.isSafeInteger(ttlMs)||ttlMs<1000||ttlMs>900000||!Number.isSafeInteger(maxUses)||maxUses<1||maxUses>20)
     throw capabilityError('INVALID_GRANT','Grant lifetime must be 1s–15min and uses 1–20');
    if(rows.length>=1000)throw capabilityError('APPROVAL_STORE_FULL','Review approval history before issuing another grant');
    const row={id:crypto.randomUUID(),kind:'bounded-grant',status:'active',createdAt:now(),expiresAt:now()+ttlMs,
     fingerprint:grantFingerprint(request,entry,binding),capability:entry.id,taskId:request.taskId,workspaceId:request.workspaceId,
-    resource:request.input.path,issuedBy:actor.id,uses:0,maxUses};
+    resource:request.input.path??null,resources:l2Resources(request),riskTier:'L2',issuedBy:actor.id,uses:0,maxUses};
    rows.push(row);try{save();}catch(error){rows.pop();throw error;}
    const {fingerprint,...summary}=row;return structuredClone(summary);
   },
   consumeGrant(request,entry,binding){
+   if(!isControlledL2Write(request,entry))return null;
    const fingerprint=grantFingerprint(request,entry,binding);
-   const row=rows.find(r=>r.kind==='bounded-grant'&&r.status==='active'&&r.expiresAt>now()&&r.uses<r.maxUses&&r.fingerprint===fingerprint);
+   const row=rows.find(r=>r.kind==='bounded-grant'&&r.status==='active'&&r.expiresAt>now()&&Number.isSafeInteger(r.uses)&&r.uses>=0&&Number.isSafeInteger(r.maxUses)&&r.maxUses<=20&&r.uses<r.maxUses&&r.fingerprint===fingerprint);
    if(!row)return null;mutateGrant(row,{uses:row.uses+1,lastUsedAt:now()});return row.id;
   },
   validateGrant,

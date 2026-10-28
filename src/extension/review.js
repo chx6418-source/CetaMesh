@@ -6,6 +6,7 @@
 
 import crypto from 'node:crypto';
 import { manifestFingerprint } from './manifest.js';
+import {isHttpDataManifest} from './http-host.js';
 import { PERMISSIONS, maxRisk, permissionRisk, requiresExplicitApproval, riskRank } from './types.js';
 
 export function reviewToken(fingerprint, permissionNames, riskLevel, packageFingerprint = '') {
@@ -93,7 +94,7 @@ export function buildReview(manifest, { packageFingerprint = '' } = {}) {
     network: { hosts },
     scope: { workspace: manifest.scope?.workspace ?? null, paths },
     source: manifest.source,
-    executionBoundary: { osSandbox: false, codeExecution: manifest.type !== 'memory-pack', permissionEnforcement: 'capability-broker' },
+    executionBoundary: { osSandbox: false, codeExecution: manifest.type !== 'memory-pack'&&!isHttpDataManifest(manifest), permissionEnforcement: 'capability-broker' },
     fingerprint,
     packageFingerprint,
     token: reviewToken(fingerprint, declared, riskLevel, packageFingerprint),

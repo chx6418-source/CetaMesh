@@ -26,6 +26,12 @@ try {
   assert.deepEqual(verifyTaskOutcome(task, { kind: 'code' }, { workspaceRoot: root }), {
     status: 'VERIFIED', kind: 'code', evidenceEventIds: ['diff-1', 'test-1'], reasons: []
   });
+  task.executionEvidence.push({eventId:'diff-read-after-test',capability:'git.diff',status:'completed',hasChanges:true});
+  assert.equal(verifyTaskOutcome(task,{kind:'code'},{workspaceRoot:root}).status,'VERIFIED','read-only diff inspection after a successful test does not invalidate the result');
+  task.executionEvidence.push({eventId:'new-import',capability:'workspace.apply',status:'completed'});
+  task.executionEvidence.push({eventId:'fresh-diff-after-import',capability:'git.diff',status:'completed',hasChanges:true});
+  assert.equal(verifyTaskOutcome(task,{kind:'code'},{workspaceRoot:root}).status,'NEEDS_REVIEW','a new import still requires testing the changed code');
+  task.executionEvidence.splice(2);
   task.executionEvidence.push({ eventId: 'test-failed', capability: 'test.run', status: 'completed', exitCode: 1 });
   assert.equal(verifyTaskOutcome(task, { kind: 'code' }, { workspaceRoot: root }).status, 'NEEDS_REVIEW',
     'a later failed test invalidates earlier passing evidence');

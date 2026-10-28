@@ -615,6 +615,8 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
     eventProtocol: AGENT_EVENT_PROTOCOL_TURN_V1,
     capabilityExtras: {
       workspaceBoundary: 'native-staged',
+      // Generic task fit; native tools are not CetaMesh Broker capabilities.
+      assignment: { taskKinds: ['code', 'analysis'], tools: [], maxDifficulty: 3 },
       supportsFreshSession: true,
       supportsResume: inspection.supportsResume === true,
       contextUsage: { available: true, source: 'Codex exec JSONL usage events when emitted' },

@@ -24,6 +24,7 @@ export function bootstrapCetaMesh(options = {}) {
   lifecycle.register(() => services.extensionService.close(), { name: 'Extensions' });
   lifecycle.register(() => services.managedAgent.close(), { name: 'Managed Agent' });
   lifecycle.register(() => services.chatService.close(), { name: 'Chat' });
+  lifecycle.register(() => services.autonomousHandoff.close(), { name: 'Autonomous handoff' });
   lifecycle.register(() => services.integrationService.close(), { name: 'Integrations' });
   lifecycle.register(() => services.meshService.close(), { name: 'Mesh' });
   lifecycle.register(() => services.channelService.close(), { name: 'Channels' });

@@ -252,21 +252,32 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
     };
   }
 
-  function factEligibility(rows) {
+  function factEligibility(rows,principal) {
     const expired=new Set(rows.filter(row=>row.validUntil!=null&&row.validUntil<=now()).map(row=>row.id));
-    const groups=new Map(),conflicted=new Set();
-    for(const row of rows)if(row.factKey&&!expired.has(row.id)){
+    const groups=new Map(),conflicted=new Set(),superseded=new Set(),visible=new Map(rows.map(row=>[row.id,row]));
+    for(const scope of new Set(rows.map(row=>row.scopeKey))) {
+      for(const link of links.listLinks({principal,scope}).links) {
+        const source=visible.get(link.source.id),target=visible.get(link.target.id),binding=link.factBinding;
+        if(link.relation==='supersedes'&&link.createdBy?.startsWith('user:')&&source&&target&&source.id!==target.id
+          &&source.scopeKey===scope&&target.scopeKey===scope&&source.type===target.type&&source.factKey&&source.factKey===target.factKey
+          &&binding?.sourceRevision===source.rev&&binding.targetRevision===target.rev&&!expired.has(source.id))superseded.add(target.id);
+      }
+    }
+    for(const id of links.replacementTargets({principal,targets:rows.filter(row=>row.factKey).map(row=>({id:row.id,scope:row.scopeKey}))}))
+      if(!superseded.has(id))conflicted.add(id);
+    for(const row of rows)if(row.factKey&&!expired.has(row.id)&&!superseded.has(row.id)){
+
       const key=JSON.stringify([row.scopeKey,row.type,row.factKey]);
       if(!groups.has(key))groups.set(key,[]);groups.get(key).push(row);
     }
     for(const group of groups.values())if(new Set(group.map(row=>row.content)).size>1)for(const row of group)conflicted.add(row.id);
-    return {expired,conflicted};
+    return {expired,conflicted,superseded};
   }
   function assessFact({principal,id}={}) {
     const decision=authorizeRead({principal});const row=findAuthorized(decision,id);
     if(!row)throw memoryError('MEMORY_NOT_FOUND','Memory not found');
-    const state=factEligibility(scanFor(decision,item=>item.scopeKey===row.scopeKey&&item.type===row.type));
-    return {id:row.id,status:state.expired.has(row.id)?'expired':state.conflicted.has(row.id)?'conflicted':'current'};
+    const state=factEligibility(scanFor(decision,item=>item.scopeKey===row.scopeKey&&item.type===row.type),principal);
+    return {id:row.id,status:state.expired.has(row.id)?'expired':state.superseded.has(row.id)?'superseded':state.conflicted.has(row.id)?'conflicted':'current'};
   }
   function retrieveRecords({ principal, scope, types, query, limit } = {}) {
     const scopes = scope === undefined || scope === null ? null : [normalizeScope(scope)];
@@ -276,8 +287,8 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
       const chars = Array.from(word);
       return chars.length > 2 ? [...chars.slice(1).map((_, i) => chars.slice(i, i + 2).join('')), word] : [word];
     }))];
-    const scannedRows = scanFor(decision), eligibility = factEligibility(scannedRows);
-    const rows = scannedRows.filter(row=>!eligibility.expired.has(row.id)&&!eligibility.conflicted.has(row.id));
+    const scannedRows = scanFor(decision), eligibility = factEligibility(scannedRows,principal);
+    const rows = scannedRows.filter(row=>!eligibility.expired.has(row.id)&&!eligibility.conflicted.has(row.id)&&!eligibility.superseded.has(row.id));
     // Automatic retrieval excludes unrelated records; empty queries preserve browsing.
     const ranked = rows.map(row => {
       const haystack = (row.content + ' ' + row.tags.join(' ')).toLowerCase();
@@ -287,7 +298,7 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
       || b.row.updatedAt - a.row.updatedAt || a.row.id.localeCompare(b.row.id));
     const max = normalizeLimit(limit, 50);
     return { memories: ranked.slice(0, max).map(item => readView(item.row, principal)),
-      meta: { total: scannedRows.length, matched: ranked.length, expired: eligibility.expired.size, conflicted: eligibility.conflicted.size,
+      meta: { total: scannedRows.length, matched: ranked.length, expired: eligibility.expired.size, conflicted: eligibility.conflicted.size, superseded: eligibility.superseded.size,
         scanned: store.stats.lastScanned, returned: Math.min(ranked.length, max) } };
   }
 

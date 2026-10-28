@@ -484,6 +484,7 @@ try {
   });
   assert.equal(codexProvider.capabilities().available, true);
   assert.equal(codexProvider.capabilities().supportsResume, true);
+  assert.deepEqual(codexProvider.capabilities().assignment, { taskKinds: ['code', 'analysis'], tools: [], maxDifficulty: 3 }, 'Codex advertises generic task fit without claiming broker tool access');
   const agentBroker = createAgentBroker({ registry: createAgentProviderRegistry({ providers: [codexProvider] }) });
   const taskAgentService = createAgentService({ broker: agentBroker });
   await assert.rejects(() => taskAgentService.execute({ method: 'agent.createSession', params: { provider: 'codex', cwd: workspace } }),

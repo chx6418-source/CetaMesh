@@ -1,3 +1,4 @@
+import { safeContinuationInput } from '../capability/operation-context.js';
 // CetaMesh Continuity Runtime —— 领域契约（阶段 09）。
 //
 // 职责：Context 阈值词表（对齐 docs/architecture/CETAMESH_CONTINUITY_RUNTIME_v1.0.md 第 5 节）、
@@ -151,7 +152,8 @@ export function normalizePacket(packet) {
         :({prepared:'not-started',started:'running',completed:'completed-needs-verification',
         'failed-no-effect':'failed-no-effect',failed:'needs-reconciliation','outcome-unknown':'unknown',reconciled:'needs-review'})[row.status] ?? 'unknown',
       attemptId: text(row.attemptId, 160) || null, requestId: text(row.requestId, 240) || null,
-      at: Number.isFinite(row.at) ? row.at : null
+      at: Number.isFinite(row.at) ? row.at : null,
+      ...(safeContinuationInput(row.capability,row.continuationInput)?{continuationInput:safeContinuationInput(row.capability,row.continuationInput)}:{})
     })),
     goal: text(packet.goal, PACKET_LIMITS.summaryChars),
     ownerContext: packet.ownerContext && Array.isArray(packet.ownerContext.entries)

@@ -15,6 +15,8 @@ import { manifestFingerprint } from './manifest.js';
 import { createCapabilityBroker } from '../capability/broker.js';
 import { createCapabilityPolicy } from '../capability/policy.js';
 import { fingerprintExtensionPackage } from './package-fingerprint.js';
+import {isHttpDataManifest,createHttpExtensionHost} from './http-host.js';
+import {validateSchema} from '../model/input-schema.js';
 
 export function createExtensionRuntime({
   store,
@@ -137,10 +139,11 @@ export function createExtensionRuntime({
     const catalogOwner = 'extension:' + entry.id;
     const definitions = (entry.manifest.capabilities || []).map(cap => {
       const id = 'extension.' + entry.id + '.' + cap.id;
-      return { id, catalogOwner, descriptorVersion, permission: 'extension.invoke', provider: 'extension', risk: 'low', effect: 'unknown',
+      return { id, catalogOwner, descriptorVersion, permission: 'extension.invoke', provider: 'extension', risk: isHttpDataManifest(entry.manifest)?'high':'low', effect: 'unknown',
         description: typeof cap.description === 'string' ? cap.description : 'Invoke the declared Extension capability ' + cap.id + '.',
         inputSchema: cap.inputSchema && typeof cap.inputSchema === 'object' ? cap.inputSchema : null,
         modelCallable: Boolean(cap.inputSchema && typeof cap.inputSchema === 'object'),
+        validate: r=>{if(cap.inputSchema)validateSchema(cap.inputSchema,r.input);},
         execute: async r => {
         const current = entryOrThrow(entry.id);
         if (current.status !== 'enabled') throw extensionError('EXTENSION_DISABLED', current.id);
@@ -216,6 +219,7 @@ export function createExtensionRuntime({
       manifestFingerprint: manifestFingerprint(entry.manifest),
       approvedGrants: [...(entry.permissions || [])].sort()
     };
+    if(isHttpDataManifest(entry.manifest))return createHttpExtensionHost({manifest:entry.manifest,source,capabilityExecutor:capabilityExecutorFor(bound)});
     const trustedVm = entry.type !== 'memory-pack' && isTrustedVmExtension(entry) === true;
     const isProcess = entry.type !== 'memory-pack' && !trustedVm;
     const factory = entry.type === 'memory-pack' ? memoryPackHostFactory : trustedVm ? trustedVmFactory : regularHostFactory;
@@ -637,7 +641,7 @@ export function createExtensionRuntime({
       if (!entry.manifest.capabilities.some(c => c.id === capability)) throw extensionError('CAPABILITY_NOT_DECLARED', String(capability));
       const result = await broker.execute({ actor: actorFor(entry), capability: 'extension.' + entry.id + '.' + capability,
         input: input === undefined ? null : input, reason: 'Extension invocation' });
-      return result.result;
+      return result.status==='completed'?result.result:result;
     },
 
     updateMemoryPackOverlay({ id, patch } = {}) {

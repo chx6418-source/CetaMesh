@@ -1,13 +1,14 @@
 import { capabilityError } from './types.js';
 import { requestFingerprint } from './approval.js';
 import { validateSchema } from '../model/input-schema.js';
+import { safeContinuationInput } from './operation-context.js';
 
 /** An explicit ledger reference, never semantic similarity, links a new call. */
 export function registerOperationContinuation({ broker }) {
   broker.register({ id: 'operation.continue', permission: 'storage', risk: 'low',
     effect: 'unknown', delegatesOperation: true, workspace: true, requiresTask: true, provider: 'task-runtime',
-    description: 'Continue one Task operation by its operation reference or Owner-prepared logical step, with exact original input. Source permissions and approval still apply. Never guess a reference.',
-    inputSchema: { type: 'object', additionalProperties: false, required: ['input'],
+    description: 'Continue a Task operation by its reference or Owner-prepared logical step. Use exact original input, or omit input only for a prepared npm-test operation with saved safe parameters. Source permissions and approval still apply. Never guess a reference.',
+    inputSchema: { type: 'object', additionalProperties: false,
       properties: { operationRef: { type: 'string', minLength: 1, maxLength: 160 }, logicalStepId: { type: 'string', minLength: 1, maxLength: 160 }, input: { type: 'object', additionalProperties: true } } },
     async execute(request) {
       const { operationRef, logicalStepId } = request.input;
@@ -22,13 +23,15 @@ export function registerOperationContinuation({ broker }) {
       if ((source.descriptorVersion ?? null) !== row.descriptorVersion) throw capabilityError('OPERATION_DESCRIPTOR_CHANGED', 'Original capability version changed');
       if(request.actor.kind==='agent'&&(source.modelCallable===false||!source.inputSchema))
         throw capabilityError('OPERATION_SOURCE_NOT_CALLABLE','Continuation cannot expose a source hidden from model tool calls');
-      if(source.inputSchema)validateSchema(source.inputSchema,request.input.input);
+      const input=request.input.input??safeContinuationInput(row.capability,row.continuationInput);
+      if(!input)throw capabilityError('OPERATION_INPUT_REQUIRED','Exact original operation input is required');
+      if(source.inputSchema)validateSchema(source.inputSchema,input);
       // Do not inherit Owner approval or old executor authority. The nested call
       // returns the original Broker envelope, including a real pending approval.
       return broker.execute({ actor: request.actor, taskId: request.taskId, workspaceId: request.workspaceId,
-        assignment: request.assignment, operationId: row.operationId, scope: request.scope,
+        assignment: request.assignment, origin: request.origin, operationId: row.operationId, scope: request.scope,
         requestId: 'resume:' + requestFingerprint({ requestId: request.requestId, operationId: row.operationId }),
-        capability: row.capability, input: request.input.input, reason: 'Continue explicit Task operation' },
+        capability: row.capability, input, reason: 'Continue explicit Task operation' },
       { signal: request.signal });
     }
   });
