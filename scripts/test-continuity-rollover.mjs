@@ -122,7 +122,7 @@ function setup({ policy, gate, failSendProvider, alphaStatusError, reconciler, b
 }
 
 {
-  const operations=[{operationId:'stable-file-operation',capability:'filesystem.write',status:'completed',attemptId:'attempt-before-switch',requestId:'original-dispatch',at:1,
+  const operations=[{operationId:'stable-file-operation',logicalStepId:'verified-step',capability:'filesystem.write',status:'completed',attemptId:'attempt-before-switch',requestId:'original-dispatch',at:1,
     input:{secret:'DO_NOT_EXPORT_OPERATION_INPUT'},retainedResult:{secret:'DO_NOT_EXPORT_OPERATION_RESULT'}}];
   const {runtime,taskRuntime,rev,log}=setup({readOperations:()=>operations});
   const task=taskRuntime.create({goal:'Continue remaining operations',workspaceId:'operation-workspace'});
@@ -131,6 +131,8 @@ function setup({ policy, gate, failSendProvider, alphaStatusError, reconciler, b
   const packet=runtime.buildHandoffPacket({taskId:task.id});
   assert.equal(result.task.id,task.id);assert.equal(packet.operations[0].operationId,'stable-file-operation');
   assert.equal(packet.operations[0].attemptId,'attempt-before-switch');
+  assert.equal(packet.operations[0].logicalStepId,'verified-step');
+  assert.ok(log.some(row=>row.kind==='prompt'&&row.text.includes('step: verified-step')));
   assert.equal(packet.operations[0].continuationState,'completed-needs-verification');
   operations.push({operationId:'planned-next',capability:'filesystem.write',status:'prepared'});
   assert.equal(runtime.buildHandoffPacket({taskId:task.id}).operations[1].continuationState,'not-started');

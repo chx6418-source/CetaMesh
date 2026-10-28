@@ -75,7 +75,7 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
   if(previous&&previous.fingerprint!==fingerprint)throw capabilityError('REQUEST_ID_CONFLICT','Prepared operation parameters changed');
   dispatches[key]={fingerprint,capability:entry.id,at:previous?.at??Date.now(),status:'started',attemptCount:(previous?.attemptCount??0)+1,lastAttemptAt:Date.now(),
    ...(grantId?{authorization:{kind:'bounded-grant',id:grantId}}:request.approvalId?{authorization:{kind:'approval',id:request.approvalId}}:{}),...(identity?{
-   operationId:request.operationId,requestId:request.requestId,taskId:request.taskId,workspaceId:request.workspaceId,
+   operationId:request.operationId,...(previous?.logicalStepId?{logicalStepId:previous.logicalStepId}:{}),requestId:request.requestId,taskId:request.taskId,workspaceId:request.workspaceId,
    descriptorVersion:entry.descriptorVersion??null,executorId:request.actor.id,attemptId:typeof request.attemptId==='string'?request.attemptId.slice(0,160):null}: {})};
   try{if(dispatchFile)writeJsonAtomic(dispatchFile,dispatches);}
   catch(error){if(previous)dispatches[key]=previous;else delete dispatches[key];if(alias)delete dispatches[alias];throw error;}
@@ -175,12 +175,20 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
    const entry=registry.require(request.capability),identity=operationIdentity(request,entry);
    if(!identity||entry.delegatesOperation===true)throw capabilityError('INVALID_OPERATION_ID','Prepare a concrete capability operation');
    await policy.authorize(request,entry);await entry.validate?.(request);await policy.authorize(request,entry);
+   const logicalStepId=request.logicalStepId;
+   if(logicalStepId!==undefined&&(typeof logicalStepId!=='string'||!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(logicalStepId)))
+    throw capabilityError('INVALID_OPERATION_STEP','Logical step identity must be bounded and explicit');
    const previous=dispatches[identity.key];
+   if(previous&&logicalStepId!==undefined&&previous.logicalStepId!==logicalStepId)
+    throw capabilityError('OPERATION_STEP_CONFLICT','Existing operation cannot be rebound to another logical step');
+   if(logicalStepId&&Object.values(dispatches).some(row=>row.operationId&&row.taskId===request.taskId
+    &&row.workspaceId===request.workspaceId&&row.logicalStepId===logicalStepId&&row.operationId!==request.operationId))
+    throw capabilityError('OPERATION_STEP_CONFLICT','Logical step is already bound to another operation');
    if(previous&&previous.fingerprint!==identity.fingerprint)throw capabilityError('REQUEST_ID_CONFLICT','Prepared operation parameters changed');
    if(previous)return {operationId:previous.operationId,status:previous.status,capability:previous.capability};
    if(Object.keys(dispatches).length>=50000)throw capabilityError('DISPATCH_JOURNAL_FULL','Capability dispatch journal needs Owner review');
    dispatches[identity.key]={operationId:request.operationId,fingerprint:identity.fingerprint,taskId:request.taskId,
-    workspaceId:request.workspaceId,capability:entry.id,descriptorVersion:entry.descriptorVersion??null,
+    workspaceId:request.workspaceId,...(logicalStepId?{logicalStepId}:{}),capability:entry.id,descriptorVersion:entry.descriptorVersion??null,
     executorId:request.actor.id,status:'prepared',at:Date.now()};
    try{if(dispatchFile)writeJsonAtomic(dispatchFile,dispatches);}catch(error){delete dispatches[identity.key];throw error;}
    audit({requestId:request.requestId,capability:entry.id,status:'operation-prepared',actor:request.actor.id});
@@ -198,7 +206,13 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
   },
   dispatchStatus:id=>{const alias=dispatches[aliasKey(id)];const row=alias?dispatches[alias.operationKey]:dispatches[String(id)];return row?{capability:row.capability,status:row.status,at:row.at}:null;},
   operationsForTask:({taskId,workspaceId})=>Object.values(dispatches).filter(row=>row.operationId&&row.taskId===taskId&&row.workspaceId===workspaceId)
-   .map(({operationId,capability,status,at,executorId,attemptId,requestId,blocker})=>({operationId,capability,status,at,executorId,attemptId,requestId,blocker})),
+   .map(({operationId,logicalStepId,capability,status,at,executorId,attemptId,requestId,blocker})=>({operationId,logicalStepId,capability,status,at,executorId,attemptId,requestId,blocker})),
+  operationRecordForStep:({taskId,workspaceId,logicalStepId})=>{
+   const rows=Object.values(dispatches).filter(row=>row.operationId&&row.logicalStepId===logicalStepId
+    &&row.taskId===taskId&&row.workspaceId===workspaceId);
+   if(rows.length>1)throw capabilityError('OPERATION_STEP_CONFLICT','Logical step has ambiguous operation bindings');
+   return rows.length?structuredClone(rows[0]):null;
+  },
   operationRecordForTask:({taskId,workspaceId,operationId})=>{
    const row=Object.values(dispatches).find(row=>row.operationId===operationId&&row.taskId===taskId&&row.workspaceId===workspaceId);
    return row?structuredClone(row):null;

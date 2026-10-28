@@ -145,7 +145,7 @@ export function normalizePacket(packet) {
     taskId: text(packet.taskId, PACKET_LIMITS.idChars),
     attemptId: text(packet.attemptId, PACKET_LIMITS.idChars) || null,
     operations: (Array.isArray(packet.operations) ? packet.operations : []).slice(0, 100).map(row => ({
-      operationId: text(row.operationId, 160), capability: text(row.capability, 160),
+      operationId: text(row.operationId, 160), logicalStepId: text(row.logicalStepId, 160) || null, capability: text(row.capability, 160),
       status: ['prepared', 'started', 'completed', 'failed', 'failed-no-effect', 'outcome-unknown', 'reconciled'].includes(row.status) ? row.status : 'outcome-unknown',
       continuationState: ['prepared','failed-no-effect'].includes(row.status)&&['permission','resource'].includes(row.blocker)?'blocked-'+row.blocker
         :({prepared:'not-started',started:'running',completed:'completed-needs-verification',

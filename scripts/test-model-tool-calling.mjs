@@ -87,7 +87,7 @@ const emptyObjectSchema = {
   capabilities.grantTask(task.id,{capabilities:['fixture.resume-write','operation.continue'],workspaceIds:[workspace]});
   tasks.attachAgent({id:task.id,expectedRev:tasks.get({id:task.id}).task.rev,provider:'alpha',sessionId:'alpha'});
   await capabilities.execute({method:'capability.operation.prepare',params:{taskId:task.id,workspaceId:workspace,
-    operationId:'checkpoint-step',capability:'fixture.resume-write',input:{proof:'marker'}}});
+    operationId:'checkpoint-step',logicalStepId:'owner-work-step',capability:'fixture.resume-write',input:{proof:'marker'}}});
   tasks.attachAgent({id:task.id,expectedRev:tasks.get({id:task.id}).task.rev,provider:'beta',sessionId:'beta'});
   const {runtime}=modelRuntimeWith([
     {toolCalls:[{id:'beta-generated-call',capabilityId:'operation.continue',arguments:{operationRef:'checkpoint-step',input:{proof:'marker'}}}]},
@@ -102,7 +102,7 @@ const emptyObjectSchema = {
   assert.equal(approval.request.capability,'fixture.resume-write','approval binds the actual source rather than a generic wrapper');
   const decision=await capabilities.broker.decide({id:pending.approvalId,approve:true,actor:OWNER_ACTOR});
   assert.equal((await coordinator.resumeApproval({approvalId:pending.approvalId,requestFingerprint:approval.fingerprint,decisionResult:decision})).status,'completed');
-  const next=modelRuntimeWith([{toolCalls:[{id:'different-external-call',capabilityId:'operation.continue',arguments:{input:{proof:'marker'},operationRef:'checkpoint-step'}}]},
+  const next=modelRuntimeWith([{toolCalls:[{id:'different-external-call',capabilityId:'operation.continue',arguments:{input:{proof:'marker'},logicalStepId:'owner-work-step'}}]},
     {text:'Skipped completed operation.',toolCalls:[]}]);
   const replay=await createToolExecutionCoordinator({modelRuntime:next.runtime,capabilityBroker:capabilities.broker}).run({...options,turnId:'new-turn'});
   assert.equal(replay.status,'completed');assert.equal(dispatchCount,1);assert.equal(fs.readFileSync(marker,'utf8'),'x');

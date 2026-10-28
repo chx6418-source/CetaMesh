@@ -209,7 +209,7 @@ try {
  taskRuntime.attachAgent({id:resumeTask.id,expectedRev:taskRuntime.get({id:resumeTask.id}).task.rev,provider:'alpha',sessionId:'alpha-plan'});
  const oldPrincipal=logicalRestart.principalForTask(resumeTask.id);
  const plan=await logicalRestart.execute({method:'capability.operation.prepare',params:{taskId:resumeTask.id,workspaceId:ws,
-  operationId:'planned-append',capability:'filesystem.write',input:{path:'planned.txt',append:true,content:'one'}}});
+  operationId:'planned-append',logicalStepId:'step-append',capability:'filesystem.write',input:{path:'planned.txt',append:true,content:'one'}}});
  assert.equal(plan.status,'prepared');
  assert.equal(fs.existsSync(path.join(dir,'project','planned.txt')),false,'preparing an intent cannot execute it');
  taskRuntime.attachAgent({id:resumeTask.id,expectedRev:taskRuntime.get({id:resumeTask.id}).task.rev,provider:'beta',sessionId:'beta-plan'});
@@ -231,6 +231,25 @@ try {
  const resumedRead=await logicalRestart.broker.execute({actor:resumePrincipal,taskId:resumeTask.id,workspaceId:ws,
   capability:'operation.read',input:{operationRef:'planned-append'}});
  assert.equal(resumedRead.result.verified,true,'replacement Agents can independently verify the completed source result');
+ assert.equal(logicalRestart.broker.operationsForTask({taskId:resumeTask.id,workspaceId:ws})
+  .find(row=>row.operationId==='planned-append').logicalStepId,'step-append','trusted step survives dispatch');
+ const stepResult=await logicalRestart.broker.execute({...resumeRequest,requestId:'step-resume-call',
+  input:{logicalStepId:'step-append',input:{append:true,content:'one',path:'planned.txt'}}});
+ assert.equal(stepResult.replayed,true,'Owner-prepared step identity resolves the original operation without duplicate effects');
+ assert.equal(fs.readFileSync(path.join(dir,'project','planned.txt'),'utf8'),'one');
+ await deny(logicalRestart.broker.execute({...resumeRequest,requestId:'unknown-step-call',
+  input:{logicalStepId:'invented-step',input:{append:true,content:'one',path:'planned.txt'}}}),'OPERATION_NOT_FOUND');
+ await deny(logicalRestart.broker.execute({...resumeRequest,requestId:'conflicting-step-call',
+  input:{logicalStepId:'step-append',input:{append:true,content:'different',path:'planned.txt'}}}),'REQUEST_ID_CONFLICT');
+ await deny(logicalRestart.execute({method:'capability.operation.prepare',params:{taskId:resumeTask.id,workspaceId:ws,
+  operationId:'other-operation-same-step',logicalStepId:'step-append',capability:'filesystem.write',
+  input:{path:'another.txt',content:'other'}}}),'OPERATION_STEP_CONFLICT');
+ await deny(logicalRestart.execute({method:'capability.operation.prepare',params:{taskId:resumeTask.id,workspaceId:ws,
+  operationId:'planned-append',logicalStepId:'different-step',capability:'filesystem.write',
+  input:{path:'planned.txt',append:true,content:'one'}}}),'OPERATION_STEP_CONFLICT');
+ await deny(logicalRestart.broker.execute({...resumeRequest,actor:logicalRestart.principalForTask(otherTask.id),taskId:otherTask.id,
+  requestId:'cross-task-step-call',input:{logicalStepId:'step-append',input:{path:'planned.txt',content:'one',append:true}}}),
+  'PERMISSION_DENIED');
  await deny(logicalRestart.broker.execute({...resumeRequest,requestId:'changed-plan',input:{operationRef:'planned-append',
   input:{path:'planned.txt',content:'changed',append:true}}}),'REQUEST_ID_CONFLICT');
  await deny(logicalRestart.broker.execute({actor:resumePrincipal,taskId:resumeTask.id,workspaceId:ws,capability:'filesystem.write',
@@ -241,6 +260,11 @@ try {
  assert.equal(independentPlan.status,'prepared','a separate explicit intent gets a separate logical identity');
  const planAfterRestart=createCapabilityService({stateDir:path.join(dir,'state'),workspaceService,taskRuntime});
  assert.equal(planAfterRestart.broker.operationRecordForTask({taskId:resumeTask.id,workspaceId:ws,operationId:'independent-intent'}).status,'prepared');
+ const restartStep=await planAfterRestart.broker.execute({...resumeRequest,actor:planAfterRestart.principalForTask(resumeTask.id),
+  requestId:'restart-step-call',input:{logicalStepId:'step-append',input:{path:'planned.txt',content:'one',append:true}}});
+ assert.equal(restartStep.replayed,true,'logical step binding survives restart and reuses original receipt');
+ await deny(planAfterRestart.broker.execute({...resumeRequest,requestId:'ambiguous-two-refs',
+  input:{operationRef:'planned-append',logicalStepId:'step-append',input:{path:'planned.txt',content:'one',append:true}}}),'INVALID_OPERATION_REFERENCE');
  const newIntent=await planAfterRestart.broker.execute({...resumeRequest,actor:planAfterRestart.principalForTask(resumeTask.id),requestId:'independent-intent-call',
   input:{operationRef:'independent-intent',input:{path:'planned.txt',content:'one',append:true,expectedHash:crypto.createHash('sha256').update('one').digest('hex')}}});
  assert.equal(newIntent.status,'pending');

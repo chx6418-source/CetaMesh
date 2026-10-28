@@ -54,6 +54,9 @@ uses the configured tool-capable Managed model when no explicit executor prefere
 exists; an unavailable explicit preference fails before creating a Task. Native
 execution consent is also checked before creation. Automatic selection does not
 grant native tool permissions or prove an external account is authenticated.
+Automatic selection rechecks its automatic eligibility and model-bound cost before
+dispatch. Explicit negative launch, version, session, tool, Workspace or quota
+evidence blocks selection and Core dispatch; missing evidence is not proof of readiness.
 
 Broker-mediated effects can carry a Task/Workspace-scoped logical `operationId`
 independent of a particular dispatch request or Attempt. The existing dispatch
@@ -75,6 +78,10 @@ resolves the original capability and validates its source schema, current grants
 input/scope fingerprint and result proof. It preserves real source approvals;
 hidden model capabilities cannot become callable through the wrapper. Changed
 ToolCall IDs or parameter key order do not change an explicit operation's identity.
+Owner may also bind an explicit logical step identifier to a prepared operation
+within its Task and Workspace. The handoff packet carries that identifier;
+continuation resolves it through the same fingerprint, authorization and receipt
+checks. Duplicate or ambiguous step bindings fail closed.
 Unreferenced effects after an Agent transfer require review; the runtime never
 matches operations by similar text or arguments. Rejected prepared operations
 remain blocked until explicit Owner review, which grants no execution permission.

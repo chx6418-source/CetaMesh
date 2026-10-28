@@ -6,12 +6,16 @@ import { validateSchema } from '../model/input-schema.js';
 export function registerOperationContinuation({ broker }) {
   broker.register({ id: 'operation.continue', permission: 'storage', risk: 'low',
     effect: 'unknown', delegatesOperation: true, workspace: true, requiresTask: true, provider: 'task-runtime',
-    description: 'Continue one explicitly identified Task operation with its exact original input. Source permissions and approval still apply. Never guess a reference.',
-    inputSchema: { type: 'object', additionalProperties: false, required: ['operationRef', 'input'],
-      properties: { operationRef: { type: 'string', minLength: 1, maxLength: 160 }, input: { type: 'object', additionalProperties: true } } },
+    description: 'Continue one Task operation by its operation reference or Owner-prepared logical step, with exact original input. Source permissions and approval still apply. Never guess a reference.',
+    inputSchema: { type: 'object', additionalProperties: false, required: ['input'],
+      properties: { operationRef: { type: 'string', minLength: 1, maxLength: 160 }, logicalStepId: { type: 'string', minLength: 1, maxLength: 160 }, input: { type: 'object', additionalProperties: true } } },
     async execute(request) {
-      const row = broker.operationRecordForTask({ taskId: request.taskId, workspaceId: request.workspaceId,
-        operationId: request.input.operationRef });
+      const { operationRef, logicalStepId } = request.input;
+      if (Boolean(operationRef) === Boolean(logicalStepId))
+        throw capabilityError('INVALID_OPERATION_REFERENCE', 'Supply exactly one operation or Owner-prepared logical step reference');
+      const row = logicalStepId
+        ? broker.operationRecordForStep({ taskId: request.taskId, workspaceId: request.workspaceId, logicalStepId })
+        : broker.operationRecordForTask({ taskId: request.taskId, workspaceId: request.workspaceId, operationId: operationRef });
       if (!row) throw capabilityError('OPERATION_NOT_FOUND', 'No operation reference in this Task Workspace');
       const source = broker.registry.require(row.capability);
       if (source.delegatesOperation === true) throw capabilityError('OPERATION_REFERENCE_INVALID', 'Continuation cannot delegate to itself');

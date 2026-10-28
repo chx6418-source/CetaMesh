@@ -312,9 +312,9 @@ export function createContinuityRuntime({
     if (packet.attemptId) lines.push(`previousAttemptId: ${packet.attemptId}`);
     if (packet.operations?.length) {
       lines.push('既有操作记录（Core 派发事实，不是新的执行授权）:\n' + packet.operations.map(row =>
-        `${row.operationId}: ${row.capability} / ${row.status} / ${row.continuationState}`).join('\n'));
+        `${row.operationId}${row.logicalStepId ? ` (step: ${row.logicalStepId})` : ``}: ${row.capability} / ${row.status} / ${row.continuationState}`).join('\n'));
       lines.push('已完成操作先用 operation.read(operationRef) 核验原结果，仍有效则跳过；未知或已人工核对的操作不得重新派发。新的执行者必须重新通过当前权限检查。');
-      lines.push('已登记且尚未执行的操作使用 operation.continue({operationRef,input}) 续接，input 必须符合原始参数指纹；该入口仍检查源工具权限和审批。交接后的新副作用缺少可信操作引用时必须核验，不能猜测匹配或重新执行整项任务。');
+      lines.push('已登记操作使用 operation.continue({operationRef,input}) 或 operation.continue({logicalStepId,input}) 续接；logicalStepId 必须来自 Owner 登记的步骤，input 必须符合原始参数指纹；该入口仍检查源工具权限和审批。交接后的新副作用缺少可信操作引用时必须核验，不能猜测匹配或重新执行整项任务。');
     }
     lines.push(`目标: ${packet.goal || '（见 requirements）'}`);
     if (packet.requirements.length) lines.push(`要求:\n- ${packet.requirements.join('\n- ')}`);
