@@ -2,12 +2,14 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import WebSocket from 'ws';
 import { Script } from 'node:vm';
 import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createSuiteSandbox, finalizeSuiteSandbox } from '../src/testing/suite-sandbox.js';
+import { terminateSuiteProcessTree } from '../src/testing/suite-process.js';
 const uiRoot = fileURLToPath(new URL('../desktop-ui/', import.meta.url));
 const require = createRequire(path.join(uiRoot, 'package.json'));
 const React = require('react');
@@ -99,10 +101,73 @@ try {
   new Script(code);
   fs.writeFileSync(fixture,'<!doctype html><meta charset="utf-8"><pre id="result"></pre><script>'+code+'</script>');
   const edge=path.join(process.env['ProgramFiles(x86)']||'C:/Program Files (x86)','Microsoft/Edge/Application/msedge.exe');
-  const run=spawnSync(edge,['--headless','--disable-gpu','--no-first-run','--no-default-browser-check','--disable-background-networking','--user-data-dir='+path.join(sandbox.root,'profile'),'--dump-dom','--virtual-time-budget=5000',pathToFileURL(fixture).href],{encoding:'utf8',timeout:30000,windowsHide:true,maxBuffer:2*1024*1024});
-  assert.equal(run.error,undefined,run.error?.message);assert.equal(run.status,0,run.stderr);
-  const encoded=run.stdout.match(/<pre id="result">([^<]+)<\/pre>/)?.[1];
-  assert.ok(encoded,'browser produced layout measurements: '+run.stdout.slice(0,600)+' stderr='+run.stderr.slice(-400));
+  // Recent Edge launchers can exit successfully without emitting --dump-dom.
+  // Observe the real page via this run's private DevTools endpoint instead.
+  const profile=path.join(sandbox.root,'profile');
+  const child=spawn(edge,['--headless','--disable-gpu','--no-first-run','--no-default-browser-check',
+    '--disable-background-networking','--remote-debugging-port=0','--remote-debugging-address=127.0.0.1',
+    '--user-data-dir='+profile,'about:blank'],{stdio:'ignore',windowsHide:true});
+  let launchError,socket,encoded='';
+  child.on('error',error=>{launchError=error;});
+  try {
+    const portFile=path.join(profile,'DevToolsActivePort');
+    for(let attempt=0;!fs.existsSync(portFile)&&attempt<100&&!launchError;attempt++)await delay(100);
+    assert.equal(launchError,undefined,launchError?.message);
+    assert.ok(fs.existsSync(portFile),'owned browser exposes its temporary debugging endpoint');
+    const [port,browserPath]=fs.readFileSync(portFile,'utf8').trim().split(/\r?\n/);
+    assert.match(port,/^\d+$/);assert.ok(Number(port)>0&&Number(port)<65536);
+    assert.match(browserPath,/^\/devtools\/browser\/[a-z0-9-]+$/i);
+    socket=new WebSocket('ws://127.0.0.1:'+port+browserPath);
+    await new Promise((resolve,reject)=>{
+      const timer=setTimeout(()=>{socket.terminate();reject(Error('owned browser connection timed out'));},3000);
+      socket.once('open',()=>{clearTimeout(timer);resolve();});
+      socket.once('error',error=>{clearTimeout(timer);reject(error);});
+    });
+    let sequence=0;const pending=new Map();
+    socket.on('message',data=>{const response=JSON.parse(String(data));pending.get(response.id)?.(response);});
+    const rpc=(method,params={},sessionId)=>new Promise((resolve,reject)=>{
+      const id=++sequence;const timer=setTimeout(()=>{pending.delete(id);reject(Error('Browser RPC timed out: '+method));},5000);
+      pending.set(id,response=>{clearTimeout(timer);pending.delete(id);response.error?reject(Error(response.error.message)):resolve(response.result);});
+      socket.send(JSON.stringify({id,method,params,sessionId}));
+    });
+    const {targetId}=await rpc('Target.createTarget',{url:pathToFileURL(fixture).href});
+    const {sessionId}=await rpc('Target.attachToTarget',{targetId,flatten:true});
+    for(let attempt=0;!encoded&&attempt<100;attempt++){
+      const value=await rpc('Runtime.evaluate',{expression:'document.getElementById("result")?.textContent || ""',returnByValue:true},sessionId);
+      encoded=value.result?.value||'';if(!encoded)await delay(100);
+    }
+    assert.ok(encoded,'browser produced layout measurements');
+    assert.ok(!encoded.startsWith('ERROR:'),encoded);
+  } finally {
+    try {
+      if(socket?.readyState!==WebSocket.OPEN){
+        if(socket&&socket.readyState!==WebSocket.CLOSED)socket.terminate();
+        const portFile=path.join(profile,'DevToolsActivePort');
+        for(let attempt=0;!fs.existsSync(portFile)&&attempt<60;attempt++)await delay(50);
+        if(fs.existsSync(portFile)){
+          const [port,browserPath]=fs.readFileSync(portFile,'utf8').trim().split(/\r?\n/);
+          assert.match(port,/^\d+$/);assert.ok(Number(port)>0&&Number(port)<65536);
+          assert.match(browserPath,/^\/devtools\/browser\/[a-z0-9-]+$/i);
+          socket=new WebSocket('ws://127.0.0.1:'+port+browserPath);
+          await new Promise((resolve,reject)=>{
+            const timer=setTimeout(()=>{socket.terminate();reject(Error('owned browser cleanup connection timed out'));},3000);
+            socket.once('open',()=>{clearTimeout(timer);resolve();});
+            socket.once('error',error=>{clearTimeout(timer);reject(error);});
+          });
+        }
+      }
+      if(socket?.readyState===WebSocket.OPEN){
+        socket.send(JSON.stringify({id:999999,method:'Browser.close'}));
+        await Promise.race([new Promise(resolve=>socket.once('close',resolve)),delay(2000)]);
+      }
+    } finally {
+      if(socket&&socket.readyState!==WebSocket.CLOSED)socket.terminate();
+      for(let attempt=0;child.pid&&child.exitCode===null&&child.signalCode===null&&attempt<20;attempt++)await delay(50);
+      if(child.pid&&child.exitCode===null&&child.signalCode===null)await terminateSuiteProcessTree(child);
+      for(let attempt=0;child.pid&&child.exitCode===null&&child.signalCode===null&&attempt<30;attempt++)await delay(100);
+      assert.ok(!child.pid||child.exitCode!==null||child.signalCode!==null,'owned browser child exited');
+    }
+  }
   const {rows,sidebar,closedReferenceRestores}=JSON.parse(decodeURIComponent(encoded));
   const failures=[];
   for(const row of rows){
