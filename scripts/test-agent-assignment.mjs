@@ -70,3 +70,12 @@ await assert.rejects(rankTaskAgents(nativeRequest),e=>e.code==='PROVIDER_UNAVAIL
 nativeBroker.health=async()=>{currentNativeSecurity={...nativeDispatchSecurity};return {...nativeHealth};};
 assert.equal((await rankTaskAgents(nativeRequest)).length,1,'eligibility reads refreshed capability evidence after asynchronous health');
 console.log('PASS explicit configured native Agent routing, no automatic account assumption, current policy evidence');
+
+// Negative evidence must veto automatic selection even when generic health is green.
+for (const flag of ['launchable', 'versionCompatible', 'sessionCreatable', 'toolCallingCapable', 'workspaceCapable', 'quotaAvailable']) {
+  const healthWithVeto = { ...health.fast, authenticated: true, [flag]: false };
+  const brokerWithVeto = { ...agentBroker, ids: () => ['fast'], health: async () => healthWithVeto };
+  assert.deepEqual(await rankTaskAgents({ ...request, agentBroker: brokerWithVeto }), [], `${flag}=false must veto automatic selection`);
+  await assert.rejects(rankTaskAgents({ ...request, agentBroker: brokerWithVeto, explicitProvider: 'fast' }),
+    error => error.code === 'PROVIDER_UNAVAILABLE', `${flag}=false must veto explicit dispatch`);
+}

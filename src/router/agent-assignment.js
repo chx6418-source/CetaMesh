@@ -1,4 +1,4 @@
-import { canDispatchConfiguredNativeAgent } from '../agent/execution-security.js';
+import { canDispatchConfiguredNativeAgent, hasNegativeAgentReadiness } from '../agent/execution-security.js';
 import { capabilityError } from '../capability/types.js';
 
 const BOUNDARIES = new Set(['capability-broker', 'staged-capability-broker', 'native-staged']);
@@ -7,6 +7,7 @@ function eligibleHealth(health, provider, capabilities, explicitProvider) {
   return health?.available === true && health.disabled !== true && health.enabled !== false
     && health.installed !== false && health.ready !== false && health.reachable !== false
     && health.taskEligible !== false && health.compatible !== false
+    && !hasNegativeAgentReadiness(health)
     && (provider === 'cetamesh' || (Boolean(explicitProvider) && canDispatchConfiguredNativeAgent(health,capabilities?.security)) || (health.authenticated === true && health.sessionCapable === true
       && (provider === 'codex' ? health.sandboxCapable === true : health.toolsAvailable === true)));
 }

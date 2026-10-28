@@ -7,6 +7,11 @@ function canonical(value) {
   return value;
 }
 
+/** Explicit negative readiness is authoritative; absence is not proof of readiness. */
+export function hasNegativeAgentReadiness(health) {
+  return ['launchable', 'versionCompatible', 'sessionCreatable', 'toolCallingCapable',
+    'workspaceCapable', 'quotaAvailable'].some(field => health?.[field] === false);
+}
 /** Permission approval is an explicit mode and never establishes an OS sandbox. */
 export function isNativePermissionSecurity(security) {
   return security?.mode === 'native-permissions'

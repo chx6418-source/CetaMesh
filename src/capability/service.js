@@ -13,7 +13,7 @@ import { OWNER_ACTOR, capabilityError } from './types.js';
 import { readJsonFile, writeJsonAtomic } from '../storage/json-file.js';
 import { evidenceBinding, EVIDENCE_SOURCE_CAPABILITIES } from '../context/tool-evidence.js';
 import { createNativeApprovalAdapter } from '../agent/native-approval-bridge.js';
-import { canDispatchConfiguredNativeAgent } from '../agent/execution-security.js';
+import { canDispatchConfiguredNativeAgent, hasNegativeAgentReadiness } from '../agent/execution-security.js';
 
 // Only this module can mark a failure as occurring before Agent side effects.
 // Provider supplied error fields must never authorize an automatic replay.
@@ -818,6 +818,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
         || health?.ready === false || health?.reachable === false || health?.installed === false
         || health?.authenticated === false || health?.sessionCapable === false
         || health?.taskEligible === false || health?.compatible === false
+        || hasNegativeAgentReadiness(health)
         || (provider !== 'cetamesh' && (health?.sessionCapable !== true
           || (health?.authenticated !== true && !configuredNativeDispatch)))) {
         const error = capabilityError('PROVIDER_UNAVAILABLE', 'Agent Provider is not currently eligible for Task execution');

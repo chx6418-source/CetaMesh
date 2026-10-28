@@ -265,6 +265,19 @@ try {
     'retry uses a distinct original Journal request ID');
   assert.equal(recovered.taskId, taskRuntime.findByGoalWorkspace({ goal: 'fix safe retry fixture', workspaceId: retryWorkspaceId }).id);
 
+  // Direct Broker use is also a dispatch boundary and must honor fresh
+  // negative readiness evidence, even after selection already succeeded.
+  for (const flag of ['launchable', 'versionCompatible', 'sessionCreatable', 'toolCallingCapable', 'workspaceCapable', 'quotaAvailable']) {
+    const blockedTask = taskRuntime.create({ goal: `negative preflight ${flag}`, workspaceId: retryWorkspaceId });
+    retryBroker.health = async () => ({ available: true, installed: true, authenticated: true,
+      sessionCapable: true, sandboxCapable: true, [flag]: false });
+    const beforeCalls = retryAgentCalls.length;
+    await assert.rejects(retryCapability.broker.execute({ actor: OWNER_ACTOR, taskId: blockedTask.id,
+      workspaceId: retryWorkspaceId, requestId: `negative-preflight-${flag}`, capability: 'agent.run',
+      input: { agentProvider: 'codex', content: 'do not dispatch' }, reason: 'negative readiness fixture' }),
+      error => error.code === 'PROVIDER_UNAVAILABLE', `${flag}=false must fail Core dispatch`);
+    assert.equal(retryAgentCalls.length, beforeCalls, 'negative readiness must not create or send to an Agent');
+  }
   let unsafeCalls = 0;
   const unsafeRetryRuntime = createDesktopPlatformRuntime({ workspaceService, taskRuntime, agentBroker: routingBroker,
     modelRuntime: { supportsToolCalling: () => true, health: async () => ({ configured: true, available: true }) },
@@ -292,6 +305,26 @@ try {
     record: { config: { workspaceId: retryWorkspaceId, agentProvider: 'codex' } },
     text: 'fix explicit no fallback fixture' }), error => error.code === 'PROVIDER_UNAVAILABLE');
   assert.equal(forgedCalls, 2, 'explicit Agent failure cannot silently fall back');
+  // Selection evidence can change between ranking and dispatch. An automatically
+  // selected provider must not gain the weaker explicit-Owner exception.
+  let evidenceReads = 0;
+  let staleDispatches = 0;
+  const staleBroker = { ...routingBroker, ids: () => ['cetamesh'],
+    health: async () => ({ available: true, sessionCapable: true }),
+    capabilities: () => ({ workspaceBoundary: 'capability-broker', assignment: {
+      taskKinds: ['code'], tools: ['filesystem.read'], maxDifficulty: 3,
+      ...(++evidenceReads === 1 ? { estimatedCost: { amount: 0, currency: 'USD', source: 'fixture',
+        agentProvider: 'cetamesh', modelProvider: 'fixture-model', model: 'fixture-model-id' } } : {})
+    } }) };
+  const staleRuntime = createDesktopPlatformRuntime({ workspaceService, taskRuntime, agentBroker: staleBroker,
+    modelRuntime: { supportsToolCalling: () => true, health: async () => ({ configured: true, available: true }) },
+    capabilityService: { broker: { execute: async () => { staleDispatches++; return { status: 'completed', result: { accepted: true } }; } } } });
+  const staleRecord = { config: { workspaceId: retryWorkspaceId, modelProvider: 'fixture-model', model: 'fixture-model-id' } };
+  await assert.rejects(staleRuntime.route({ decision: { agentIntent: true, class: 'project' },
+    record: staleRecord, text: 'fix stale automatic cost evidence fixture' }), error => error.code === 'AGENT_PROVIDER_SELECTION_REQUIRED');
+  assert.equal(staleDispatches, 0, 'stale automatic eligibility must stop before Broker dispatch');
+  assert.equal(taskRuntime.get({ id: staleRecord.taskId }).task.status, 'failed',
+    'a new Task whose dispatch is proven not to have begun must not remain permanently queued');
   console.log('Smart platform routing: Chat -> Model, Smart tool -> Capability -> Model context, Smart project -> Task -> Agent; no DSH client supplied');
 } finally {
   chat?.close();

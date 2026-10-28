@@ -144,13 +144,24 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
       // 流程：Agent request test.run → pending → Owner 批准/拒绝 → 执行一次 →
       // 结果经决策参考数据回到 Agent。绝不因 grant 静默自动执行。
       let result;
+      let dispatchBegun = false;
       try {
         for (const [index, choice] of candidates.slice(0, 2).entries()) {
           if (signal?.aborted) throw capabilityError('INVOKE_CANCELLED', 'Task dispatch was cancelled');
           try {
             // Recheck after selection and before the real Broker call. The
             // Broker repeats its own authority check at the send boundary.
-            await rankTaskAgents({ agentBroker, workspaceId, explicitProvider: choice.provider });
+            if (!record.config.agentProvider && !task.currentAgent) {
+              // An automatic selection remains automatic at the dispatch boundary:
+              // never apply the weaker explicit Owner-selection exception here.
+              const currentCandidates = await selectProviders(record, task, decision);
+              if (!currentCandidates.some(candidate => candidate.provider === choice.provider)) {
+                throw capabilityError('AGENT_PROVIDER_SELECTION_REQUIRED', 'Automatic Agent eligibility changed before dispatch');
+              }
+            } else {
+              await rankTaskAgents({ agentBroker, workspaceId, explicitProvider: choice.provider });
+            }
+            dispatchBegun = true;
             result = await capabilityService.broker.execute({
               requestId: index === 0 ? requestId : crypto.randomUUID(), actor: OWNER_ACTOR,
               taskId: task.id, workspaceId, capability: 'agent.run',
@@ -172,11 +183,20 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
               && !signal?.aborted && fresh.status === 'queued' && !fresh.currentAgent
               && !(fresh.attempts ?? []).length && !(fresh.executionEvidence ?? []).length;
             if (!safe) throw error;
+            dispatchBegun = false; // trusted preflight confirms no Agent side effect
             taskRuntime.setProgress({ id: task.id, expectedRev: fresh.rev,
               note: `Verified preflight failure for ${choice.provider}; one safe reassignment to ${candidates[1].provider}` });
           }
         }
       } catch (error) {
+        if (createdTask && !dispatchBegun && error.code === 'AGENT_PROVIDER_SELECTION_REQUIRED') {
+          const current = taskRuntime.get({ id: task.id }).task;
+          if (current.status === 'queued' && !current.currentAgent
+            && !(current.attempts ?? []).length && !(current.executionEvidence ?? []).length) {
+            taskRuntime.fail({ id: task.id, expectedRev: current.rev,
+              reason: 'Automatic Agent eligibility changed before dispatch; no Agent was started' });
+          }
+        }
         // Chat owns only a Task it created for this startup attempt. If that request
         // is cancelled before Agent assignment, retain the Task record but close its
         // queued lifecycle so it cannot appear runnable without an owning Chat.
