@@ -713,7 +713,21 @@ export function createToolExecutionCoordinator({
       fail('APPROVAL_CONTINUATION_ORPHANED', 'Interrupted Agent approval requires Owner reconciliation');
     }
     if (continuation.requestFingerprint !== requestFingerprint) fail('APPROVAL_MISMATCH', 'Approval continuation fingerprint mismatch');
-    if (decisionResult?.status === 'pending') fail('APPROVAL_NOT_DECIDED', 'Approval decision is still pending');
+    if(decisionResult?.status==='pending'){
+      const nextId=String(decisionResult.approvalId??''),next=capabilityBroker.approvals?.get(nextId),previous=capabilityBroker.approvals?.get(approvalId);
+      if(!nextId||nextId===String(approvalId))fail('APPROVAL_NOT_DECIDED','Original approval is still pending');
+      if(continuations[nextId]||next?.status!=='pending'||next.expiresAt<=Date.now()
+        ||previous?.status!=='consumed'||next.request?.pluginParent?.approvalId!==String(approvalId)
+        ||next.request.taskId!==continuation.state.scope?.taskId||next.request.workspaceId!==continuation.state.scope?.workspaceId
+        ||next.request.actor?.kind!==continuation.state.actor.kind||next.request.actor.id!==continuation.state.actor.id
+        ||(continuation.approvalDepth??0)>=4)fail('APPROVAL_CONTINUATION_INVALID','Nested pending decision is not an exact bounded successor');
+      const moved={...continuation,approvalId:nextId,requestFingerprint:next.fingerprint,approvalDepth:(continuation.approvalDepth??0)+1};
+      continuations[nextId]=moved;delete continuations[String(approvalId)];
+      try{save();}catch(error){delete continuations[nextId];continuations[String(approvalId)]=continuation;throw error;}
+      for(const [id,row]of Object.entries(executions))if(row?.approvalId===approvalId)recordExecution(id,{status:'approval-pending',approvalId:nextId,parentApprovalId:approvalId});
+      return {status:'pending',approvalId:nextId,expiresAt:next.expiresAt,text:'',usage:continuation.state.usage??null,
+        toolCalling:'supported',target:continuation.target,targetKind:continuation.targetKind};
+    }
     if (decisionResult?.status === 'outcome-unknown') {
       recordApprovalOutcomeUnknown({ approvalId, requestFingerprint, decisionResult });
       if (typeof onCapabilityResult === 'function') await onCapabilityResult({

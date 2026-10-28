@@ -9,7 +9,7 @@ function eligibleHealth(health, provider, capabilities, explicitProvider) {
     && health.taskEligible !== false && health.compatible !== false
     && !hasNegativeAgentReadiness(health)
     && (provider === 'cetamesh' || (Boolean(explicitProvider) && canDispatchConfiguredNativeAgent(health,capabilities?.security)) || (health.authenticated === true && health.sessionCapable === true
-      && (provider === 'codex' ? health.sandboxCapable === true : health.toolsAvailable === true)));
+      && (provider === 'codex' ? (explicitProvider ? health.sandboxCapable !== false : health.sandboxCapable === true && health.toolsAvailable === true) : health.toolsAvailable === true)));
 }
 
 function costEstimate(value, provider, modelProvider, model) {
@@ -26,7 +26,7 @@ function costEstimate(value, provider, modelProvider, model) {
 export async function rankTaskAgents({ agentBroker, workspaceId, explicitProvider = null,
   agentEnabled = true, taskKind = 'code', requiredTools = [], difficulty = 1, maxCost = null, allowUnknownCost = false,
   modelProvider = null, model = null,
-  exclude = [] } = {}) {
+  exclude = [], includePreparation = false } = {}) {
   if (agentEnabled === false || explicitProvider === 'none') return [];
   const ids = explicitProvider ? [explicitProvider] : agentBroker.ids();
   const ranked = [];
@@ -38,10 +38,21 @@ export async function rankTaskAgents({ agentBroker, workspaceId, explicitProvide
       if (!BOUNDARIES.has(capabilities?.workspaceBoundary)) {
         throw capabilityError('AGENT_BOUNDARY_UNSUPPORTED', 'Provider has no verified Task Workspace boundary');
       }
-      if (!eligibleHealth(health, provider, capabilities, explicitProvider)) {
+      const canPrepare=includePreparation===true && !explicitProvider && capabilities.supportsReadinessCheck===true
+        && capabilities.workspaceBoundary==='native-staged' && health?.available===true && health.installed===true
+        && health.compatible===true && health.authenticated===true && health.sessionCapable===true
+        && health.sandboxCapable!==false && health.toolsAvailable!==false && health.taskEligible!==false
+        && health.disabled!==true && health.enabled!==false && health.ready!==false && health.reachable!==false
+        && !hasNegativeAgentReadiness(health);
+      if (!eligibleHealth(health, provider, capabilities, explicitProvider) && !canPrepare) {
         throw capabilityError('PROVIDER_UNAVAILABLE', 'Provider is not currently eligible');
       }
-      agentBroker.assertExecutionConsent?.(provider, { workspaceId });
+      let consentRequired=false;
+      try{agentBroker.assertExecutionConsent?.(provider,{workspaceId});}catch(error){
+        if(!canPrepare||error?.code!=='AGENT_SECURITY_CONFIRMATION_REQUIRED')throw error;
+        consentRequired=true;
+      }
+      const preparationRequired=canPrepare && (consentRequired || !eligibleHealth(health,provider,capabilities,explicitProvider));
       const assignment = capabilities.assignment;
       if (!explicitProvider) {
         if (!assignment || !assignment.taskKinds?.includes(taskKind)
@@ -57,14 +68,14 @@ export async function rankTaskAgents({ agentBroker, workspaceId, explicitProvide
       }
       const latencyMs = Number.isFinite(assignment?.estimatedLatencyMs) && assignment.estimatedLatencyMs >= 0
         ? assignment.estimatedLatencyMs : null;
-      ranked.push({ provider, cost, latencyMs });
+      ranked.push({ provider, cost, latencyMs, ...(preparationRequired?{taskEligible:false,preparationRequired:true,consentRequired}:{}) });
     } catch (error) {
       if (explicitProvider) throw error;
       // A failed probe, revoked consent or malformed descriptor never qualifies
       // a different Provider by assumption. Other verified candidates remain.
     }
   }
-  ranked.sort((a, b) => (a.cost?.amount ?? Infinity) - (b.cost?.amount ?? Infinity)
+  ranked.sort((a, b) => Number(!!a.preparationRequired)-Number(!!b.preparationRequired) || (a.cost?.amount ?? Infinity) - (b.cost?.amount ?? Infinity)
     || (a.latencyMs ?? Infinity) - (b.latencyMs ?? Infinity)
     || a.provider.localeCompare(b.provider));
   return ranked;

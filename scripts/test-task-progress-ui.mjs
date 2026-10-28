@@ -8,8 +8,9 @@ const require = createRequire(root + 'package.json');
 const ts = require('typescript');
 const source = fs.readFileSync(root + 'src/app/HarborApp.tsx', 'utf8');
 const ast = ts.createSourceFile('HarborApp.tsx', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-let code, finishCode, openCode, rememberCode;
+let code, finishCode, openCode, rememberCode, createdCode;
 function walk(node, owner = '') {
+  if (owner === 'WorkPage' && ts.isFunctionDeclaration(node) && node.name?.text === 'showCreatedTask') createdCode=node.getText(ast);
   if (owner === 'WorkPage' && ts.isFunctionDeclaration(node) && node.name?.text === 'openTask') openCode = node.getText(ast);
   if (owner === 'WorkPage' && ts.isVariableDeclaration(node) && node.name.getText(ast) === 'rememberTask') rememberCode = node.initializer.arguments[0].getText(ast);
   if (owner === 'WorkPage' && ts.isFunctionDeclaration(node) && node.name?.text === 'finishTask') finishCode = node.getText(ast);
@@ -17,7 +18,7 @@ function walk(node, owner = '') {
   if (owner === 'WorkPage' && ts.isVariableDeclaration(node) && node.name.getText(ast) === 'refresh') code = node.initializer.arguments[0].getText(ast);
   ts.forEachChild(node, child => walk(child, owner));
 }
-walk(ast); assert.ok(code);
+walk(ast); assert.ok(code); assert.ok(createdCode,'new Task completion needs a navigation-epoch-aware handler');
 const deferred = () => { let resolve, reject; const promise = new Promise((a,b) => { resolve=a; reject=b; }); return { promise, resolve, reject }; };
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const task = (rev, percent, id = 'T') => ({ id, rev, status: percent === 100 ? 'completed' : 'running', progress: { percent } });
@@ -92,3 +93,12 @@ await check('production CSS closure defines progress track dimensions and fill',
   assert.ok(rules.some(([prop,value])=>prop==='height'&&value!=='0'));assert.ok(rules.some(([prop])=>prop==='background'));
 });
 assert.equal(failures.length,0,failures.join('; '));
+
+{
+ const navigation={current:5},state={selected:'newer-selection',sheet:true,refreshes:0},env={taskNavigationRef:navigation,selectedTaskIdRef:{current:'newer-selection'},setTaskSheet:v=>{state.sheet=v;},setSelectedTask:v=>{state.selected=v.id;},rememberTask:v=>v,refresh:async()=>{state.refreshes++;}};
+ const javascript=ts.transpileModule(createdCode,{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
+ const reveal=new Function(...Object.keys(env),javascript+';return showCreatedTask;')(...Object.values(env));
+ await reveal({id:'late-created'},4);assert.equal(state.selected,'newer-selection');assert.equal(state.sheet,true);assert.equal(navigation.current,5);
+ await reveal({id:'current-created'},5);assert.equal(state.selected,'current-created');assert.equal(state.sheet,false);assert.equal(navigation.current,6);
+ console.log('PASS late Task creation cannot reopen a closed sheet or replace newer navigation');
+}

@@ -21,7 +21,9 @@ export interface ProviderSettingField {
   key: string; label: string; type: 'string' | 'number' | 'boolean';
   choices?: string[]; min?: number; max?: number;
 }
+export interface TaskCollaboration { enabled: boolean; allowUnknownCost: boolean; prepareNative: boolean; verification?: { editablePaths: string[]; testFiles: string[] } }
 export interface Task {
+  collaboration?: { enabled: boolean; expiresAt: number | null; state: string | null; code: string | null; selectedProvider: string | null; machineVerification: boolean; allowUnknownCost: boolean };
   usage?: ModelUsage | null;
   id: string; title: string; goal: string; status: string; currentPhase: string;
   progress: { percent: number | null; note: string }; workspaceId: string | null; agent: string | null;
@@ -113,7 +115,7 @@ export interface Plugin {
 export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'expired' | 'consumed';
 export interface Approval {
   id: string; title: string; capability: string; status: ApprovalStatus; createdAt: string | number | null;
-  expiresAt: string | number | null; summary: string; risk: string; taskId: string | null; details?: string;
+  expiresAt: string | number | null; summary: string; risk: string; taskId: string | null; details?: string; reusableL2?: boolean; resources?: string[];
 }
 export interface ApprovalDecisionResult {
   status: 'accepted' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled' | 'unknown' | 'rejected'; operationId?: string; decision?: string; code?: string; approvalId?: string; requestId?: string; turnResumed?: boolean; resumePending?: boolean;
@@ -188,7 +190,7 @@ type UiMethod =
   | 'ui.feedback.links'
   | 'ui.update.capabilities' | 'ui.update.check' | 'ui.update.notes'
   | 'ui.onboarding.status' | 'ui.onboarding.start' | 'ui.onboarding.completeStep' | 'ui.onboarding.skipStep' | 'ui.onboarding.finish' | 'ui.onboarding.testProvider' | 'ui.onboarding.setModel'
-  | 'ui.approvals.list' | 'ui.approvals.decide' | 'ui.approvals.operation' | 'ui.approvals.cancel' | 'ui.search';
+  | 'ui.approvals.grant.revoke' | 'ui.approvals.list' | 'ui.approvals.decide' | 'ui.approvals.operation' | 'ui.approvals.cancel' | 'ui.search';
 type Empty = Record<string, never>;
 export type WindowAction = 'state' | 'drag' | 'minimize' | 'maximize' | 'close' | 'resizeNorth' | 'resizeNorthEast' | 'resizeEast' | 'resizeSouthEast' | 'resizeSouth' | 'resizeSouthWest' | 'resizeWest' | 'resizeNorthWest';
 type HostMethod = 'app.previewBrowser.open' | 'app.previewBrowser.layout' | 'app.previewBrowser.command' | 'app.windowAction' | 'app.ping' | 'app.status' | 'app.about' | 'app.openExternal' | 'app.openArtifact' | 'app.pickFolder' | 'app.pickFiles' | 'app.pickExtensionPackage' | 'app.setWindowBehavior';
@@ -348,7 +350,7 @@ export const taskClient = {
       uiCall<{ task: Task }>('ui.task.complete', { id, expectedRev, summary, reviewed: true, ...review }),
   verifyOutcome: (id: string, input: { kind: 'code' | 'file' | 'tool' | 'analysis'; expectedFile?: string; expectedSha256?: string; expectedCapability?: string }) =>
     uiCall<{ status: 'VERIFIED' | 'NEEDS_REVIEW'; kind: string; evidenceEventIds: string[]; reasons: string[] }>('ui.task.outcome.verify', { id, ...input }),
-  create: (input: { goal: string; requirements?: string[]; workspaceId?: string | null; agentProvider?: string; requestId?: string; note?: string }) => uiCall<{ task: Task }>('ui.task.create', input),
+  create: (input: { goal: string; requirements?: string[]; workspaceId?: string | null; agentProvider?: string; requestId?: string; note?: string; collaboration?: TaskCollaboration }) => uiCall<{ task: Task }>('ui.task.create', input),
   start: (id: string, expectedRev?: number, agentProvider?: string) => uiCall<{ task: Task }>('ui.task.start', { id, expectedRev, agentProvider }),
   pause: (id: string, expectedRev?: number) => uiCall<{ task: Task }>('ui.task.pause', { id, expectedRev }),
   resume: (id: string, expectedRev?: number) => uiCall<{ task: Task }>('ui.task.resume', { id, expectedRev }),
@@ -452,9 +454,11 @@ export const workspaceClient = {
   open: (id: string) => uiCall<{ activeId: string | null; workspace: { id: string; name: string; status: string } }>('ui.workspace.open', { id }),
   create: (name: string, root: string) => uiCall<{ id: string; name: string; status: string }>('ui.workspace.create', { name, root })
 };
+export interface L2Grant {id:string;status:string;taskId:string;workspaceId:string;capability:string;resources:string[];expiresAt:number;uses:number;maxUses:number}
 export const approvalClient = {
-  list: () => uiCall<{ approvals: Approval[]; operations: ApprovalDecisionResult[] }>('ui.approvals.list', {}),
-  decide: (id: string, approve: boolean) => uiCall<ApprovalDecisionResult>('ui.approvals.decide', { id, approve }),
+  revokeGrant:(id:string)=>uiCall('ui.approvals.grant.revoke',{id}),
+  list: () => uiCall<{ approvals: Approval[]; operations: ApprovalDecisionResult[]; grants?: L2Grant[] }>('ui.approvals.list', {}),
+  decide: (id: string, approve: boolean, reuse = false) => uiCall<ApprovalDecisionResult>('ui.approvals.decide', { id, approve, reuse }),
   operation: (id: string) => uiCall<ApprovalDecisionResult>('ui.approvals.operation', { id }),
   cancel: (id: string) => uiCall<ApprovalDecisionResult>('ui.approvals.cancel', { id })
 };

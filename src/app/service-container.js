@@ -277,7 +277,7 @@ export function createCetaMeshServices(options = {}) {
     }
   });
   const workingMemory = createTaskWorkingMemoryRecorder({ memoryRuntime: memoryService.runtime,
-    taskRuntime: taskService.runtime, enabled: () => settingsService.store.get().settings.memory.enabled === true,
+    taskRuntime: taskService.runtime, resolveWorkspace:id=>workspaceService.describeWorkspace(id), enabled: () => settingsService.store.get().settings.memory.enabled === true,
     onChanged: data => uiEventBus.publish('memory.updated', { ...data, status: 'working-updated' }) });
   capabilityService = createCapabilityService({
     stateDir,
@@ -396,7 +396,7 @@ export function createCetaMeshServices(options = {}) {
     log
   });
   capabilityService.setTaskHandoffGuard(taskId => continuityService.runtime.isInFlight(taskId));
-  autonomousHandoff = createAutonomousHandoff({taskRuntime:taskService.runtime,agentBroker,capabilityService,continuityRuntime:continuityService.runtime,onDiagnostic:details=>log('Automatic delegation state: '+JSON.stringify(details))});
+  autonomousHandoff = createAutonomousHandoff({taskRuntime:taskService.runtime,agentBroker,capabilityService,continuityRuntime:continuityService.runtime,onVerifiedTask:taskId=>workingMemory.recordVerifiedOutcome(taskId),onDiagnostic:details=>log('Automatic delegation state: '+JSON.stringify(details))});
   agentBroker.onTurnEnd(payload => continuityService.runtime.observeAgentTurn(payload)
     .catch(error => log('Continuity 回合观察失败：' + String(error?.message ?? error))));
 

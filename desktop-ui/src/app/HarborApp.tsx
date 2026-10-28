@@ -4,7 +4,7 @@ import { useSearchParams } from 'react-router';
 import { createPortal } from 'react-dom';
 import { mergeChatHistorySnapshot, mergeLatestChatMessages, prependOlderChatMessages, recoverForwardHistory } from './chat-history';
 import { applyChatStreamUpdates, ChatRequestEpoch, ChatStreamRevision, pendingReplyVisible, type ChatStreamUpdate } from './chat-async-state';
-import { aboutClient, agentClient, approvalClient, bridge, chatClient, extensionSettingsClient, feedbackClient, hostClient, memoryClient, onboardingClient, openExternal, pluginClient, settingsClient, taskClient, updateClient, workspaceClient, workshopClient, type Agent, type AgentRuntimeProvider, type AgentRuntimeConfiguration, type AgentRuntimeInput, type AgentAuthStatus, type AgentConnectionEvidence, type DshConfiguration, type DshSelection, type DshPresetCatalog, type Approval, type ApprovalDecisionResult, type DesktopEventData, type ChatMessage as ChatMessageDto, type ChatSession, type ExtensionSettingsDescription, type ExtensionSettingsSnapshot, type IntegrationSettings, type Memory, type Plugin, type ProviderSettingField, type SettingField, type Settings, type Task, type WorkshopProposal } from '../bridge/typed-client';
+import { aboutClient, agentClient, approvalClient, bridge, chatClient, extensionSettingsClient, feedbackClient, hostClient, memoryClient, onboardingClient, openExternal, pluginClient, settingsClient, taskClient, updateClient, workspaceClient, workshopClient, type Agent, type AgentRuntimeProvider, type AgentRuntimeConfiguration, type AgentRuntimeInput, type AgentAuthStatus, type AgentConnectionEvidence, type DshConfiguration, type DshSelection, type DshPresetCatalog, type Approval, type ApprovalDecisionResult, type L2Grant, type DesktopEventData, type ChatMessage as ChatMessageDto, type ChatSession, type ExtensionSettingsDescription, type ExtensionSettingsSnapshot, type IntegrationSettings, type Memory, type Plugin, type ProviderSettingField, type SettingField, type Settings, type Task, type WorkshopProposal } from '../bridge/typed-client';
 import { Icon, type IconName } from '../components/icons';
 import { ArtifactCard } from '../components/product/cards';
 import { Button, IconButton, Input, normalizeSelectOptionLabel, SearchInput, Select, Tabs } from '../components/primitives/inputs';
@@ -261,7 +261,7 @@ export function HarborApp() {
       <ReferenceViewerLayout>
       <main key={page} className={`page-frame page-${page}`}>
         {page === 'chat' && <ChatPage key={activeSession?.id ?? 'no-session'} session={activeSession} workspaces={workspaces} activeWorkspaceId={activeWorkspaceId} onSessionUpdate={updated => setSessions(current => current.map(item => item.id === updated.id ? updated : item))} onNew={() => createSession()} onNewChat={() => createSession(true)} onOpenMemory={() => navigate('memory')} onReviewTask={id => { setReviewTaskId(id); navigate('work'); }} />}
-        {page === 'work' && <WorkPage workspaces={workspaces} onRefreshWorkspaces={refreshWorkspaces} reviewTaskId={reviewTaskId} onReviewTaskOpened={() => setReviewTaskId(null)} />}
+        {page === 'work' && <WorkPage activeWorkspaceId={activeWorkspaceId} workspaces={workspaces} onRefreshWorkspaces={refreshWorkspaces} reviewTaskId={reviewTaskId} onReviewTaskOpened={() => setReviewTaskId(null)} />}
         {page === 'memory' && <MemoryPage />}
         {page === 'agents' && <AgentsPage />}
         {page === 'plugins' && <PluginsPage />}
@@ -820,8 +820,8 @@ async function confirmAgentExecution(provider: string, workspaceId: string) {
   if (!(await agentClient.security(provider, workspaceId)).authorized) throw new Error('原生执行范围尚未确认');
 }
 
-export function ApprovalCard({ approval, onDecide }: { approval: Approval; onDecide(id: string, approve: boolean): void }) {
-  return <Card className="approval-card"><div className="approval-icon"><Icon name="approval" size={20} /></div><div className="grow"><div className="row between"><strong>{approval.title}</strong><Badge tone="warning">需要处理</Badge></div><p>{approval.summary}</p>{approval.capability === 'agent.native.approve' && approval.details && <pre aria-label="原生工具参数" style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: '24rem', overflow: 'auto' }}>{approval.details}</pre>}<div className="approval-meta"><span>{approval.capability}</span><span>风险：{approval.risk}</span>{approval.expiresAt && <span>有效至 {dateLabel(approval.expiresAt)}</span>}</div><div className="row approval-actions"><Button compact variant="ghost" onClick={() => onDecide(approval.id, false)}>拒绝</Button><Button compact variant="primary" onClick={() => onDecide(approval.id, true)}>批准一次</Button></div></div></Card>;
+export function ApprovalCard({ approval, onDecide, onReuse }: { approval: Approval; onDecide(id: string, approve: boolean): void; onReuse?(id:string):void }) {
+  return <Card className="approval-card"><div className="approval-icon"><Icon name="approval" size={20} /></div><div className="grow"><div className="row between"><strong>{approval.title}</strong><Badge tone="warning">需要处理</Badge></div><p>{approval.summary}</p>{approval.capability === 'agent.native.approve' && approval.details && <pre aria-label="原生工具参数" style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: '24rem', overflow: 'auto' }}>{approval.details}</pre>}<p>{approval.resources?.length ? "目标文件："+approval.resources.join("、") : ""}</p>{approval.expiresAt && <small>本次请求有效至 {dateLabel(approval.expiresAt)}</small>}<details><summary>权限详情</summary><span>{approval.capability} · 风险 {approval.risk}</span></details><div className="row approval-actions"><Button compact variant="ghost" onClick={() => onDecide(approval.id, false)}>拒绝</Button><Button compact variant="primary" onClick={() => onDecide(approval.id, true)}>批准一次</Button>{approval.reusableL2 && onReuse && <Button compact variant="ghost" onClick={()=>onReuse(approval.id)}>批准，并在 15 分钟内复用最多 3 次</Button>}</div></div></Card>;
 }
 
 export function ChatComposer({ busy, models, selectedModelKey, agentProviders, selectedAgent, workspaces, workspaceId, activeWorkspaceId, onWorkspaceChange, onModelChange, onAgentChange, onSend, onStop }: {
@@ -1101,7 +1101,7 @@ function MemoryManager({ initial, onChanged, createType = 'knowledge', createSco
   </div>;
 }
 
-function WorkPage({ workspaces, onRefreshWorkspaces, reviewTaskId, onReviewTaskOpened }: { workspaces: { id: string; name: string; status: string; lastActivity: string | number | null }[]; onRefreshWorkspaces(): Promise<void>; reviewTaskId: string | null; onReviewTaskOpened(): void }) {
+function WorkPage({ workspaces, activeWorkspaceId, onRefreshWorkspaces, reviewTaskId, onReviewTaskOpened }: { activeWorkspaceId: string | null; workspaces: { id: string; name: string; status: string; lastActivity: string | number | null }[]; onRefreshWorkspaces(): Promise<void>; reviewTaskId: string | null; onReviewTaskOpened(): void }) {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState('');
@@ -1110,6 +1110,7 @@ function WorkPage({ workspaces, onRefreshWorkspaces, reviewTaskId, onReviewTaskO
   const [taskOperationError, setTaskOperationError] = useState<{ taskId: string; message: string } | null>(null);
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
   const [taskSheet, setTaskSheet] = useState(false);
+  const [taskCreateEpoch,setTaskCreateEpoch]=useState(0);
   const [workspaceName, setWorkspaceName] = useState('');
   const [workspaceError, setWorkspaceError] = useState('');
   const [workspaceBusy, setWorkspaceBusy] = useState(false);
@@ -1171,6 +1172,11 @@ function WorkPage({ workspaces, onRefreshWorkspaces, reviewTaskId, onReviewTaskO
     const timer = window.setInterval(() => { void refresh(true); }, 3000);
     return () => { window.clearInterval(timer); off(); };
   }, [refresh]);
+  function beginCreateTask(){const epoch=++taskNavigationRef.current;setTaskCreateEpoch(epoch);setTaskSheet(true);}
+  async function showCreatedTask(task:Task,creationEpoch:number){
+    if(creationEpoch!==taskNavigationRef.current){await refresh(true);return;}
+    taskNavigationRef.current+=1;selectedTaskIdRef.current=task.id;setTaskSheet(false);setSelectedTask(rememberTask(task));await refresh();
+  }
   async function openTask(task: Task) {
     const request = ++taskNavigationRef.current;
     setTaskOperationError(null);
@@ -1306,15 +1312,15 @@ function WorkPage({ workspaces, onRefreshWorkspaces, reviewTaskId, onReviewTaskO
     finally { setWorkspaceBusy(false); }
   }
   const counts = useMemo(() => ({ all: tasks.length, working: tasks.filter(task => ['working', 'running'].includes(task.status)).length, waiting: tasks.filter(task => task.status.includes('waiting')).length, completed: tasks.filter(task => task.status === 'completed').length }), [tasks]);
-  return <div className="content-page"><Heading eyebrow="WORKSPACE" title="工作" description="查看跨会话任务的进展、负责人和下一步。" action={<Button icon="add" variant="primary" onClick={() => setTaskSheet(true)}>新建任务</Button>} />
+  return <div className="content-page"><Heading eyebrow="WORKSPACE" title="工作" description="查看跨会话任务的进展、负责人和下一步。" action={<Button icon="add" variant="primary" onClick={beginCreateTask}>新建任务</Button>} />
     {error && <ErrorNotice error={error} onRetry={() => void refresh()} />}
     <div className="row between work-controls"><Tabs items={[{ id: '', label: `全部 ${counts.all}` }, { id: 'running', label: `运行中 ${counts.working}` }, { id: 'waiting', label: `待处理 ${counts.waiting}` }, { id: 'completed', label: `已完成 ${counts.completed}` }]} selected={filter} onChange={setFilter} label="按任务状态筛选" /><SearchInput label="搜索任务" placeholder="搜索任务" value={query} onChange={event => setQuery(event.target.value)} /></div>
-    {loading && !tasks.length ? <LoadingState label="正在读取任务…" /> : tasks.length ? <WorkTaskList key={query + '|' + filter} tasks={tasks} workspaces={workspaces} providers={handoffProviders} historyInitiallyOpen={Boolean(query || filter)} onOpen={task => void openTask(task)} onAction={(task, action) => void taskAction(task, action)} /> : !error && <EmptyNotice icon="work" title={query || filter ? '没有匹配的任务' : '还没有任务'} detail="你可以在这里创建任务并查看 Core 与 Agent 的执行进度。" action={<Button variant="primary" icon="add" onClick={() => setTaskSheet(true)}>新建任务</Button>} />}
+    {loading && !tasks.length ? <LoadingState label="正在读取任务…" /> : tasks.length ? <WorkTaskList key={query + '|' + filter} tasks={tasks} workspaces={workspaces} providers={handoffProviders} historyInitiallyOpen={Boolean(query || filter)} onOpen={task => void openTask(task)} onAction={(task, action) => void taskAction(task, action)} /> : !error && <EmptyNotice icon="work" title={query || filter ? '没有匹配的任务' : '还没有任务'} detail="你可以在这里创建任务并查看 Core 与 Agent 的执行进度。" action={<Button variant="primary" icon="add" onClick={beginCreateTask}>新建任务</Button>} />}
     <WorkshopInbox providers={handoffProviders} />
     <div className="section-heading page-section-heading"><h2>最近工作区</h2><div className="row"><Input aria-label="工作区名称" placeholder="工作区名称（可选）" value={workspaceName} onChange={event => setWorkspaceName(event.target.value)} /><Button compact icon="add" onClick={() => void addWorkspace()} disabled={workspaceBusy}>{workspaceBusy ? '添加中…' : '添加工作区'}</Button></div></div>
     {workspaceError && <ErrorNotice error={workspaceError} />}{workspaces.length ? <div className="workspace-grid">{workspaces.map(workspace => <Card className="workspace-card" key={workspace.id}><div className="workspace-badge">CM</div><div className="workspace-card-body"><strong>{workspace.name}</strong><p>{workspace.status} · 最近活动 {relativeLabel(workspace.lastActivity)}</p></div><StatusBadge value={workspace.status} /></Card>)}</div> : <Surface className="workspace-empty"><p className="muted">尚未登记工作区。添加工作区时会使用 Windows 原生文件夹选择器。</p></Surface>}
-    <Sheet open={taskSheet} title="新建任务" onClose={() => setTaskSheet(false)}><TaskCreateForm workspaces={workspaces} providers={handoffProviders} onCreated={async () => { setTaskSheet(false); await refresh(); }} /></Sheet>
-    <Sheet open={Boolean(selectedTask)} title={selectedTask?.title ?? '任务详情'} onClose={() => { taskNavigationRef.current += 1; selectedTaskIdRef.current = ''; setSelectedTask(null); }}>{selectedTask && taskOperationError?.taskId === selectedTask.id && <ErrorNotice error={taskOperationError.message} />}{selectedTask && <TaskDetails key={selectedTask.id} task={selectedTask} providers={handoffProviders} onOpenChild={id => void openRelatedTask(id)} onHandoff={provider => void handoffTask(selectedTask, provider)} onAction={action => void taskAction(selectedTask, action)} onStart={provider => void taskAction(selectedTask, 'start', provider)} onReconcile={(summary, instruction, provider) => void reconcileTask(selectedTask, summary, instruction, provider)} onReview={(approve, summary, ids) => void reviewAnalysisChild(selectedTask, approve, summary, ids)} onCreateChild={(goal, scope, kind, replace) => void createReadChild(selectedTask, goal, scope, kind, replace)} onComplete={(summary, reportOnly) => void finishTask(selectedTask, summary, reportOnly)} onVerifyChild={() => void verifyCompletedChild(selectedTask)} />}</Sheet>
+    <Sheet open={taskSheet} title="新建任务" onClose={() => {taskNavigationRef.current+=1;setTaskSheet(false);}}><TaskCreateForm key={taskCreateEpoch} activeWorkspaceId={activeWorkspaceId} workspaces={workspaces} providers={handoffProviders} onCreated={task=>showCreatedTask(task,taskCreateEpoch)} /></Sheet>
+    <Sheet open={Boolean(selectedTask)} title={selectedTask?.title ?? '任务详情'} onClose={() => { taskNavigationRef.current += 1; selectedTaskIdRef.current = ''; setSelectedTask(null); }}>{selectedTask && taskOperationError?.taskId === selectedTask.id && <ErrorNotice error={taskOperationError.message} />}{selectedTask && <TaskCollaborationStatus task={selectedTask} />}{selectedTask && <TaskApprovals key={"approvals:"+selectedTask.id} taskId={selectedTask.id} />}{selectedTask && <TaskDetails key={selectedTask.id} task={selectedTask} providers={handoffProviders} onOpenChild={id => void openRelatedTask(id)} onHandoff={provider => void handoffTask(selectedTask, provider)} onAction={action => void taskAction(selectedTask, action)} onStart={provider => void taskAction(selectedTask, 'start', provider)} onReconcile={(summary, instruction, provider) => void reconcileTask(selectedTask, summary, instruction, provider)} onReview={(approve, summary, ids) => void reviewAnalysisChild(selectedTask, approve, summary, ids)} onCreateChild={(goal, scope, kind, replace) => void createReadChild(selectedTask, goal, scope, kind, replace)} onComplete={(summary, reportOnly) => void finishTask(selectedTask, summary, reportOnly)} onVerifyChild={() => void verifyCompletedChild(selectedTask)} />}</Sheet>
   </div>;
 }
 
@@ -1440,29 +1446,66 @@ function TaskCard({ task, workspaceName, executorName, onOpen, onAction }: { tas
   return <Card className="task-card"><div className="row between"><div className="task-icon"><Icon name="work" size={18} /></div><StatusBadge value={taskDisplayStatus(task)} /></div><h3>{taskListTitle(task)}</h3>{activeTaskChildren(task).length > 0 && <small className="task-dependency-hint">等待 {activeTaskChildren(task).length} 个子任务</small>}<div className="task-meta"><span>{executorName}</span><span>·</span><span>{workspaceName}</span></div><TaskProgress percent={task.progress.percent} label={`${taskListTitle(task)}进度`} /><div className="row between"><small>{progressLabel(task.progress.percent)} · {relativeLabel(task.updatedAt)}</small><div className="row"><Button compact variant="ghost" onClick={onOpen}>详情 <Icon name="right" size={14} /></Button>{task.status === 'queued' && task.workspaceId ? <Button compact variant="ghost" onClick={onOpen}>{activeTaskChildren(task).length ? '查看子任务' : '选择执行者'}</Button> : task.status === 'running' ? <Button compact variant="ghost" onClick={() => onAction('pause')}>暂停</Button> : ['paused', 'waiting', 'blocked'].includes(task.status) && !/needs-reconciliation|Owner reviewed interrupted effect/i.test(task.progress.note) ? <Button compact variant="ghost" disabled={activeTaskChildren(task).length > 0} onClick={() => onAction('resume')}>继续</Button> : null}{!['completed', 'cancelled', 'failed'].includes(task.status) && <IconButton label="取消任务" icon="close" compact onClick={() => onAction('cancel')} />}</div></div></Card>;
 }
 
-function TaskCreateForm({ workspaces, providers, onCreated }: { workspaces: { id: string; name: string }[]; providers: { id: string; name: string; eligible: boolean; reason: string | null }[]; onCreated(): Promise<void> }) {
+export function TaskCreateForm({ workspaces, activeWorkspaceId, providers, onCreated }: { activeWorkspaceId?: string | null; workspaces: { id: string; name: string }[]; providers: { id: string; name: string; eligible: boolean; reason: string | null }[]; onCreated(task: Task): Promise<void> }) {
   const [goal, setGoal] = useState('');
-  const [workspaceId, setWorkspaceId] = useState('');
+  const [workspaceId, setWorkspaceId] = useState(activeWorkspaceId || (workspaces.length === 1 ? workspaces[0].id : ''));
   const [agentProvider, setAgentProvider] = useState('');
+  const [defaultProvider,setDefaultProvider]=useState(''),[defaultsReady,setDefaultsReady]=useState(false);
+  const [cooperate, setCooperate] = useState(true), [allowUnknownCost, setAllowUnknownCost] = useState(false);
+  const [machineCheck, setMachineCheck] = useState(false), [editablePaths, setEditablePaths] = useState(''), [testFiles, setTestFiles] = useState('');
   const createRequest = useRef<{ fingerprint: string; id: string } | null>(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  useEffect(()=>{let alive=true;void settingsClient.get().then(({settings})=>{if(!alive)return;const configured=settings.agents?.defaultAgentProvider;const preferred=typeof configured==='string'&&configured!=='auto'?configured:'';setDefaultProvider(preferred);if(preferred&&preferred!=='cetamesh')setCooperate(false);setDefaultsReady(true);}).catch(cause=>{if(alive)setError(messageOf(cause));});return()=>{alive=false;};},[]);
+  const effectiveProvider=agentProvider||defaultProvider;
+  const managedChoice = !effectiveProvider || effectiveProvider === 'cetamesh';
   async function submit(event: FormEvent) {
     event.preventDefault(); if (!goal.trim()) return;
     setBusy(true); setError('');
     try {
-      await confirmAgentExecution(agentProvider, workspaceId);
-      const fingerprint = JSON.stringify([goal.trim(), workspaceId, agentProvider]);
+      await confirmAgentExecution(effectiveProvider, workspaceId);
+      const enabled=cooperate && managedChoice;
+      const lines=(value:string)=>value.split(/\r?\n/).map(row=>row.trim()).filter(Boolean);
+      const collaboration={enabled,allowUnknownCost:enabled && allowUnknownCost,prepareNative:enabled,
+        ...(enabled && machineCheck?{verification:{editablePaths:lines(editablePaths),testFiles:lines(testFiles)}}:{})};
+      const fingerprint = JSON.stringify([goal.trim(), workspaceId, agentProvider,collaboration]);
       if (createRequest.current?.fingerprint !== fingerprint) createRequest.current = { fingerprint, id: crypto.randomUUID() };
-      await taskClient.create({ goal: goal.trim(), workspaceId: workspaceId || null, agentProvider,
+      const result=await taskClient.create({ goal: goal.trim(), workspaceId: workspaceId || null, agentProvider,collaboration,
         requestId: createRequest.current.id });
       createRequest.current = null;
-      await onCreated();
+      await onCreated(result.task);
     }
     catch (cause) { setError(messageOf(cause)); }
     finally { setBusy(false); }
   }
-  return <form className="task-create-form" onSubmit={submit}><label>任务目标<textarea className="cm-textarea" aria-label="任务目标" value={goal} onChange={event => setGoal(event.target.value)} rows={4} maxLength={2000} placeholder="描述需要完成的工作和预期结果" required /></label><Select label="工作区" value={workspaceId} onChange={event => setWorkspaceId(event.target.value)}><option value="">选择工作区</option>{workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}</Select><Select label="执行者" value={agentProvider} onChange={event => setAgentProvider(event.target.value)}><option value="">自动（使用已配置的默认执行者）</option>{providers.map(item => <option key={item.id} value={item.id} disabled={!item.eligible}>{item.name}{item.eligible ? '' : ` · 不可用：${item.reason ?? '能力或健康未验证'}`}</option>)}</Select>{error && <ErrorNotice error={error} />}<Button variant="primary" type="submit" disabled={busy || !goal.trim() || !workspaceId}>{busy ? '创建中…' : '创建任务'}</Button></form>;
+  return <form className="task-create-form" onSubmit={submit}>
+    <label>任务目标<textarea className="cm-textarea" aria-label="任务目标" value={goal} onChange={event => setGoal(event.target.value)} rows={4} maxLength={2000} placeholder="描述需要完成的工作和预期结果" required /></label>
+    <Select label="工作区" value={workspaceId} onChange={event => setWorkspaceId(event.target.value)}><option value="">选择工作区</option>{workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}</Select>
+    <p className="muted">使用已配置的默认执行者。系统按任务需要选择工具和协作方式，进展与待确认操作会显示在任务详情。</p>
+    <details><summary>协作与验收设置</summary>
+      <Select label="执行者" value={agentProvider} onChange={event => setAgentProvider(event.target.value)}><option value="">自动（使用已配置的默认执行者）</option>{providers.map(item => <option key={item.id} value={item.id} disabled={!item.eligible}>{item.name}{item.eligible ? '' : ' · 不可用'}</option>)}</Select>
+      <label><input type="checkbox" checked={cooperate} disabled={!managedChoice} onChange={event=>setCooperate(event.target.checked)} />允许按需协作（本任务最多一次外部分配，30 分钟内有效）</label>
+      <label><input type="checkbox" checked={allowUnknownCost} disabled={!managedChoice || !cooperate} onChange={event=>setAllowUnknownCost(event.target.checked)} />允许费用未知的外部 Agent 调用（可能产生费用）</label>
+      <p className="muted">原生执行范围仍需单独确认。简单任务会直接处理；未配置自动验收的结果保留人工核验。</p>
+      <label><input type="checkbox" checked={machineCheck} disabled={!managedChoice || !cooperate} onChange={event=>setMachineCheck(event.target.checked)} />以现有项目测试作为自动验收标准</label>
+      {machineCheck && <><label>允许修改的文件（每行一个精确相对路径）<textarea className="cm-textarea" aria-label="允许修改的文件" value={editablePaths} onChange={event=>setEditablePaths(event.target.value)} required /></label><label>已有验收文件（每行一个，内容保持不变）<textarea className="cm-textarea" aria-label="已有验收文件" value={testFiles} onChange={event=>setTestFiles(event.target.value)} required /></label><p className="muted">Core 将固定这些文件和 package.json 的内容，独立运行 npm test。自动验收仅覆盖此测试和修改范围，需要干净的 Git 基线。</p></>}
+    </details>
+    {error && <ErrorNotice error={error} />}<Button variant="primary" type="submit" disabled={busy || !defaultsReady || !goal.trim() || !workspaceId}>{busy ? '启动中…' : '开始任务'}</Button></form>;
+}
+
+export function TaskCollaborationStatus({task}:{task:Task}){
+ const state=task.collaboration;if(!state)return null;
+ const labels:Record<string,string>={proposed:'正在选择并准备执行者',dispatching:'正在核验并交接', 'awaiting-result':'协作执行中',returning:'正在接回结果',verifying:'正在独立验证',verified:'机器验收通过','needs-review':'结果待核验',blocked:'协作需要处理',unknown:'结果未知，需先核对副作用'};
+ return <section aria-label="自动协作状态"><h3>{labels[state.state??'']??(state.enabled?'按需自动协作已启用':'自动协作已撤销')}</h3><p>{state.selectedProvider?'执行者：'+state.selectedProvider+'。 ':''}{state.machineVerification?'以固定测试和文件范围验收。':'交付结果需要人工核验。'}{state.code?' 原因：'+state.code:''}</p></section>;
+}
+
+function TaskApprovals({taskId}:{taskId:string}) {
+ const [approvals,setApprovals]=useState<Approval[]>([]),[operations,setOperations]=useState<ApprovalDecisionResult[]>([]),[error,setError]=useState('');
+ const knownApprovals=useRef(new Set<string>());const [grants,setGrants]=useState<L2Grant[]>([]);
+ const refresh=useCallback(async()=>{const data=await approvalClient.list();const scoped=data.approvals.filter(row=>row.taskId===taskId);for(const row of scoped)knownApprovals.current.add(row.id);setApprovals(scoped.filter(row=>row.status==='pending'));setGrants((data.grants??[]).filter(row=>row.taskId===taskId&&row.status==='active'&&row.expiresAt>Date.now()&&row.uses<row.maxUses));setOperations((data.operations??[]).filter(row=>row.approvalId && knownApprovals.current.has(row.approvalId)));},[taskId]);
+ useEffect(()=>{let alive=true;const load=()=>{if(alive)void refresh().catch(cause=>{if(alive)setError(messageOf(cause));});};load();const off=bridge.subscribe('approval.pending',load),done=bridge.subscribe('approval.operation',load);const timer=window.setInterval(load,1500);return()=>{alive=false;off();done();window.clearInterval(timer);};},[refresh]);
+ async function decide(id:string,approve:boolean,reuse=false){try{await approvalClient.decide(id,approve,reuse);await refresh();setError('');}catch(cause){setError(messageOf(cause));}}
+ return <section aria-label="本任务待确认操作">{error && <ErrorNotice error={error} />}{approvals.map(row=><ApprovalCard key={row.id} approval={row} onDecide={(id,approve)=>void decide(id,approve)} onReuse={id=>void decide(id,true,true)} />)}<p className="muted">有限授权仅覆盖相同执行者、任务、工作区和完全相同的参数；本次批准与后续 3 次分别计数。</p>{grants.map(grant=><p key={grant.id}>{grant.resources.join("、")} · 后续已用 {grant.uses}/{grant.maxUses} · 有效至 {dateLabel(grant.expiresAt)} <Button compact variant="ghost" onClick={()=>{void approvalClient.revokeGrant(grant.id).then(refresh).catch(cause=>setError(messageOf(cause)));}}>撤销授权</Button></p>)}<ApprovalOperationSummary operations={operations} onCancel={id=>{void approvalClient.cancel(id).then(refresh).catch(cause=>setError(messageOf(cause)));}} /></section>;
 }
 
 function TaskCollaborationSummary({ task, onReview, onCreateChild, onVerifyChild }: { task: Task;

@@ -109,6 +109,20 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
   const aborted=new Promise((_,reject)=>{onAbort=()=>reject(abortError(signal,true));signal.addEventListener('abort',onAbort,{once:true});});
   return Promise.race([promise,aborted]).finally(()=>signal.removeEventListener('abort',onAbort));
  }
+ async function validatePluginParent(request){
+  if(!request.pluginParent)return null;
+  const ref=request.pluginParent,row=approval.get(ref.approvalId),parent=row.request;
+  if(row.status!=='consumed'||row.expiresAt<=Date.now()||!parent||parent.capability!==ref.capability
+    ||parent.taskId!==request.taskId||parent.workspaceId!==request.workspaceId||requestFingerprint({actor:parent.actor})!==requestFingerprint({actor:request.actor}))
+    throw capabilityError('APPROVAL_EXPIRED','Nested request no longer belongs to its consumed parent decision');
+  if(!registry.has(ref.capability))throw capabilityError('APPROVAL_EXPIRED','Plugin was disabled; concrete dispatch requires a fresh review');
+  const descriptor=registry.require(ref.capability);
+  if(descriptor.descriptorVersion!==ref.descriptorVersion||typeof descriptor.validateChildRequest!=='function'||typeof descriptor.projectChildResult!=='function')
+    throw capabilityError('APPROVAL_EXPIRED','Parent plugin version or adapter changed');
+  await policy.authorize(parent,descriptor);await descriptor.validate?.(parent);
+  if(await descriptor.validateChildRequest(parent,request)!==true)throw capabilityError('APPROVAL_MISMATCH','Concrete request differs from the reviewed data endpoint');
+  return {descriptor,parent};
+ }
  async function execute(raw,{signal}={}){
   const request=normalizeRequest(raw);
   if(request.approvalId){
@@ -120,6 +134,7 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
    if(signal?.aborted)throw abortError(signal);
    const entry=registry.require(request.capability);
    const decision=await policy.authorize(request,entry);
+   await validatePluginParent(request);
    if(signal?.aborted)throw abortError(signal);
    const previous=priorOperation(request,entry);
    if(previous){await validateReplay(request,entry);
@@ -145,9 +160,12 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
     if(signal?.aborted)throw abortError(signal);
     if(registry.require(request.capability)!==entry)throw capabilityError('APPROVAL_EXPIRED','Capability changed before dispatch');
     const authorized=await policy.authorize(request,entry);
+    const parent=await validatePluginParent(request);
     if(grantId)approval.validateGrant(grantId,request,entry,authorized?.approvalBinding);
     if(signal?.aborted)throw abortError(signal);
-    try{executorEntered=true;return await entry.execute(providerRequest);}
+    try{executorEntered=true;const result=await entry.execute(providerRequest);
+      if(parent){try{await validatePluginParent(request);}catch(error){error.effectStatus='unknown';throw error;}return parent.descriptor.projectChildResult(parent.parent,result);}
+      return result;}
     catch(error){
      // Once a declared effect reaches its executor, a rejected response is not
      // proof that nothing happened. Do not let the model recover by replaying it.

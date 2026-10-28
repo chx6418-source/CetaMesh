@@ -3,7 +3,13 @@ import {requestFingerprint} from './approval.js';
 import path from 'node:path';
 import {resolveInside} from '../workspace/boundary.js';
 export function createCapabilityPolicy({resolveWorkspace,resolveTask,resolveGrants,isTaskHandoff=()=>false,checkOperation=()=>{}}={}){
- return {authorize(request,entry){
+ return {authorize:function authorize(request,entry){
+  if(request.constrainedActor){
+    if(request.constrainedActor.kind!=='extension')throw capabilityError('PERMISSION_DENIED','Only an installed plugin may restrict nested execution');
+    // Check plugin declaration/resource limits independently; live Task/assignment is checked on the primary actor below.
+    const {constrainedActor,approvalId,approvalBinding,...bounded}=request;
+    authorize({...bounded,actor:constrainedActor,taskId:undefined,workspaceId:entry.workspace?request.workspaceId:undefined},{...entry,requiresTask:false});
+  }
   const permission=entry.permission??entry.id;
   if(entry.descriptorVersion&&request.approvalId&&request.approvalBinding?.descriptorVersion!==entry.descriptorVersion)
    throw capabilityError('APPROVAL_EXPIRED','Reconfirm the current capability version before execution');

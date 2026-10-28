@@ -39,6 +39,9 @@ export const CATEGORIES = ['core', 'architecture', 'security', 'runtime', 'integ
 // ── 登记表：scripts/test-*.mjs 的每一个文件都必须出现在这里（或能从 package.json 映射）。
 // requires 的取值见 probeAvailability()；category 取值见 CATEGORIES。
 const REGISTRY = {
+  'test-real-default-ui-autonomy.mjs': {category:'environment',requires:['real-managed','real-codex','ui-motion-live'],timeoutMs:900000,note:'Production Tasks UI through authenticated Core pipe, cold real Codex preparation and independent verification'},
+  'test-cold-autonomous-readiness.mjs': {category:'security',note:'Cold native candidate preparation, cost/consent and actual readiness fences'},
+  'test-default-autonomous-task.mjs': {category:'integration',note:'Default product task launch binds collaboration policy and exact machine criteria without direct setup'},
   'test-environment-contracts.mjs': { category: 'security', note: 'Environment identity, profiles, bounded evidence and path confinement' },
   'test-environment-host.mjs': { category: 'security', note: 'Authenticated developer Host lifecycle, cancellation, quarantine and replay fences' },
   'test-environment-hyperv.mjs': { category: 'security', note: 'Hyper-V driver fixtures and Windows parser; no VM success implied' },

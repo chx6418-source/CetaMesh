@@ -6,7 +6,7 @@ function canonical(value){if(Array.isArray(value))return value.map(canonical);if
 export const requestFingerprint=request=>{const {approvalId,approved,...bound}=request;return crypto.createHash('sha256').update(JSON.stringify(canonical(bound))).digest('hex');};
 const grantFingerprint=(request,entry,binding)=>requestFingerprint({actor:request.actor,taskId:request.taskId,
  workspaceId:request.workspaceId,capability:entry.id,permission:entry.permission,risk:entry.risk,
- descriptorVersion:entry.descriptorVersion??null,input:request.input,scope:request.scope??null,binding});
+ descriptorVersion:entry.descriptorVersion??null,...(request.constrainedActor?{constrainedActor:request.constrainedActor}:{}),input:request.input,scope:request.scope??null,binding});
 export function createCapabilityApproval({stateDir,now=()=>Date.now(),ttlMs=600000}={}){
  const file=stateDir?path.join(stateDir,'capability','approvals.json'):null;
  let rows=[];
@@ -22,15 +22,24 @@ export function createCapabilityApproval({stateDir,now=()=>Date.now(),ttlMs=6000
   return row;
  }
  const grantMethods={
-  issueGrant({actor,request,entry,binding,ttlMs,maxUses}){
+  issueGrant({actor,request,entry,binding,ttlMs,maxUses,sourceApprovalId}){
    if(actor?.kind!=='owner'||typeof actor.id!=='string'||!actor.id)throw capabilityError('PERMISSION_DENIED','Owner must issue bounded grants');
    if(!isControlledL2Write(request,entry))throw capabilityError('GRANT_CAPABILITY_DENIED','Capability is not a reviewed controlled Core write');
    if(!Number.isSafeInteger(ttlMs)||ttlMs<1000||ttlMs>900000||!Number.isSafeInteger(maxUses)||maxUses<1||maxUses>20)
     throw capabilityError('INVALID_GRANT','Grant lifetime must be 1s–15min and uses 1–20');
+   if(sourceApprovalId){
+    const source=requireRow(sourceApprovalId);if(source.status!=='pending')throw capabilityError('APPROVAL_ALREADY_DECIDED','Source decision changed during grant preparation');
+    if(source.expiresAt<=now())throw capabilityError('APPROVAL_EXPIRED','Source decision expired during grant preparation');
+    const prior=rows.find(row=>row.kind==='bounded-grant'&&row.sourceApprovalId===sourceApprovalId);
+    if(prior){if(prior.fingerprint!==grantFingerprint(request,entry,binding)||prior.maxUses!==maxUses||prior.expiresAt-prior.createdAt!==ttlMs)
+      throw capabilityError('GRANT_CONFLICT','This approval already binds different future authorization');
+      if(!['active','pending'].includes(prior.status)||prior.expiresAt<=now())throw capabilityError('GRANT_EXPIRED','Review a new pending operation; an old approval cannot renew authorization');
+      const {fingerprint,...summary}=prior;return structuredClone(summary);}
+   }
    if(rows.length>=1000)throw capabilityError('APPROVAL_STORE_FULL','Review approval history before issuing another grant');
-   const row={id:crypto.randomUUID(),kind:'bounded-grant',status:'active',createdAt:now(),expiresAt:now()+ttlMs,
+   const row={id:crypto.randomUUID(),kind:'bounded-grant',status:sourceApprovalId?'pending':'active',createdAt:now(),expiresAt:now()+ttlMs,
     fingerprint:grantFingerprint(request,entry,binding),capability:entry.id,taskId:request.taskId,workspaceId:request.workspaceId,
-    resource:request.input.path??null,resources:l2Resources(request),riskTier:'L2',issuedBy:actor.id,uses:0,maxUses};
+    ...(sourceApprovalId?{sourceApprovalId}:{}),resource:request.input.path??null,resources:l2Resources(request),riskTier:'L2',issuedBy:actor.id,uses:0,maxUses};
    rows.push(row);try{save();}catch(error){rows.pop();throw error;}
    const {fingerprint,...summary}=row;return structuredClone(summary);
   },
@@ -48,5 +57,5 @@ export function createCapabilityApproval({stateDir,now=()=>Date.now(),ttlMs=6000
    mutateGrant(row,{status:'revoked',revokedAt:now(),revokedBy:actor.id});return {id,status:row.status};
   }
  };
- return {...grantMethods,pending(request){const fingerprint=requestFingerprint(request);const existing=rows.find(r=>r.fingerprint===fingerprint&&r.status==='pending'&&r.expiresAt>now());if(existing)return structuredClone(existing);const row={id:crypto.randomUUID(),fingerprint,request:structuredClone(request),status:'pending',createdAt:now(),expiresAt:now()+ttlMs};rows.push(row);if(rows.length>1000)rows=rows.filter(r=>r.kind==='bounded-grant'&&r.status==='active'&&r.expiresAt>now()||r.status==='pending'||r.createdAt>now()-86400000).slice(-1000);save();return structuredClone(row);},list:()=>rows.filter(r=>r.status==='pending'&&r.expiresAt>now()).map(r=>structuredClone(r)),decide(id,approve,actor){if(actor?.kind!=='owner')throw capabilityError('PERMISSION_DENIED','Owner approval required');const row=requireRow(id);if(row.kind==='bounded-grant')throw capabilityError('INVALID_GRANT','Use bounded grant controls');if(row.status!=='pending')throw capabilityError('APPROVAL_ALREADY_DECIDED',id);if(row.expiresAt<=now())throw capabilityError('APPROVAL_EXPIRED',id);row.status=approve?'approved':'rejected';row.decidedBy=actor.id;row.decidedAt=now();save();return structuredClone(row);},cancel(id,reason='cancelled'){const row=requireRow(id);if(row.status!=='pending')return {cancelled:false,status:row.status};row.status='cancelled';row.cancelReason=String(reason).slice(0,200);row.cancelledAt=now();save();return {cancelled:true,status:row.status};},revoke(id,reason='binding-changed'){const row=requireRow(id);if(!['pending','approved'].includes(row.status))return {revoked:false,status:row.status};row.status='revoked';row.revokeReason=String(reason).slice(0,200);row.revokedAt=now();save();return {revoked:true,status:row.status};},consume(id,request){const row=requireRow(id);if(row.fingerprint!==requestFingerprint(request))throw capabilityError('APPROVAL_MISMATCH','Request changed');if(row.status!=='approved')throw capabilityError('APPROVAL_NOT_APPROVED',id);if(row.expiresAt<=now())throw capabilityError('APPROVAL_EXPIRED',id);row.status='consumed';save();},get:id=>structuredClone(requireRow(id))};
+ return {...grantMethods,pending(request){const fingerprint=requestFingerprint(request);const existing=rows.find(r=>r.fingerprint===fingerprint&&r.status==='pending'&&r.expiresAt>now());if(existing)return structuredClone(existing);const row={id:crypto.randomUUID(),fingerprint,request:structuredClone(request),status:'pending',createdAt:now(),expiresAt:now()+ttlMs};rows.push(row);if(rows.length>1000)rows=rows.filter(r=>r.kind==='bounded-grant'&&r.status==='active'&&r.expiresAt>now()||r.status==='pending'||r.createdAt>now()-86400000).slice(-1000);save();return structuredClone(row);},list:()=>rows.filter(r=>r.status==='pending'&&r.expiresAt>now()).map(r=>structuredClone(r)),decide(id,approve,actor){if(actor?.kind!=='owner')throw capabilityError('PERMISSION_DENIED','Owner approval required');const row=requireRow(id);if(row.kind==='bounded-grant')throw capabilityError('INVALID_GRANT','Use bounded grant controls');if(row.status!=='pending')throw capabilityError('APPROVAL_ALREADY_DECIDED',id);if(row.expiresAt<=now())throw capabilityError('APPROVAL_EXPIRED',id);row.status=approve?'approved':'rejected';row.decidedBy=actor.id;row.decidedAt=now();save();return structuredClone(row);},cancel(id,reason='cancelled'){const row=requireRow(id);if(row.status!=='pending')return {cancelled:false,status:row.status};row.status='cancelled';row.cancelReason=String(reason).slice(0,200);row.cancelledAt=now();save();return {cancelled:true,status:row.status};},revoke(id,reason='binding-changed'){const row=requireRow(id);if(!['pending','approved'].includes(row.status))return {revoked:false,status:row.status};row.status='revoked';row.revokeReason=String(reason).slice(0,200);row.revokedAt=now();save();return {revoked:true,status:row.status};},consume(id,request){const row=requireRow(id);if(row.fingerprint!==requestFingerprint(request))throw capabilityError('APPROVAL_MISMATCH','Request changed');if(row.status!=='approved')throw capabilityError('APPROVAL_NOT_APPROVED',id);if(row.expiresAt<=now())throw capabilityError('APPROVAL_EXPIRED',id);const pendingGrants=rows.filter(grant=>grant.kind==='bounded-grant'&&grant.sourceApprovalId===id&&grant.status==='pending');row.status='consumed';for(const grant of pendingGrants)grant.status='active';try{save();}catch(error){row.status='approved';for(const grant of pendingGrants)grant.status='pending';throw error;}},get:id=>structuredClone(requireRow(id))};
 }

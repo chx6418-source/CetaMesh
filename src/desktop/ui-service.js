@@ -1,5 +1,7 @@
 import { normalizeModelUsage } from '../model/usage.js';
 import crypto from 'node:crypto';
+import {isControlledL2Write,l2Resources} from '../capability/l2-grants.js';
+import {normalizeTaskCollaboration,taskLaunchFingerprint,snapshotTaskVerification,configureTaskCollaboration} from './task-launch.js';
 import { createReferencePreview } from './reference-preview.js';
 import { fitsIpcResponse, requireIpcItem } from '../control/response-budget.js';
 import { LEGACY_RETIRED_TOOLS, isDesktopLocalService } from '../integrations/catalog.js';
@@ -210,6 +212,10 @@ function projectTask(value) {
     checkpoint: checkpoint.summary ? { summary: string(checkpoint.summary, 2000), nextAction: string(checkpoint.nextAction, 500) } : null,
     result: result.summary ? { summary: string(result.summary, 4000) } : null,
     artifacts, agentHistory, executionEvidence,
+    collaboration: row.delegationPolicy ? {enabled:!row.delegationPolicy.revokedAt,expiresAt:scalar(row.delegationPolicy.expiresAt),
+      allowUnknownCost:row.delegationPolicy.allowUnknownCost===true,machineVerification:!!row.delegationPolicy.verification,
+      state:string(row.delegationProposal?.state,40)||null,code:string(row.delegationProposal?.code,100)||null,
+      selectedProvider:string(row.delegationProposal?.selectedProvider,80)||null} : null,
     execution: { state: currentObservation && typeof observation.runId === 'string' ? string(observation.state, 40) : 'unknown',
       hadToolActivity: observation.hadToolActivity === true,
       hasEvidence: (row.executionEvidence ?? []).some(item => sameRun(item) && item.status === 'completed') },
@@ -522,15 +528,18 @@ function projectAbout(value) {
   };
 }
 
-function projectApproval(value) {
+function projectApproval(value, entry) {
   const row = record(value);
   const request = record(row.request);
   const capability = string(row.capability ?? request.capability, 120);
-  const title = capability === 'test.run' ? '运行项目测试'
+  const title = capability === 'agent.execution.authorize' ? '确认外部 Agent 的原生执行范围'
+    : capability === 'workspace.apply' ? '导入工作区改动'
+    : capability === 'test.run' ? '运行项目测试'
     : capability.includes('filesystem.write') ? '修改工作区文件'
       : capability.includes('message.send') ? '发送消息' : '敏感操作需要确认';
   return {
     id: string(row.id, 128), title, capability,
+    reusableL2:isControlledL2Write(request,entry),resources:entry&&isControlledL2Write(request,entry)?l2Resources(request):[],
     status: string(row.status, 40), createdAt: scalar(row.createdAt), expiresAt: scalar(row.expiresAt),
     summary: string(request.reason ?? row.reason, 1000) || '此操作需要你的逐次批准。',
     risk: string(row.risk ?? request.risk, 30) || 'high', taskId: string(request.taskId, 128) || null,
@@ -1193,8 +1202,11 @@ export function createDesktopUiService({ services = {}, system = services.system
       const requirements = boundedStrings(p.requirements, 50, 1000);
       const agentProvider = string(p.agentProvider, 80) || null;
       const requestId = string(p.requestId, 160) || null;
+      const collaboration=normalizeTaskCollaboration(p.collaboration);
+      const launchFingerprint=taskLaunchFingerprint(collaboration,{modelProvider:string(p.modelProvider,80),model:string(p.model,160)});
+      const assertLaunch=row=>{if((row.createRequest?.launchFingerprint??null)!==launchFingerprint)throw uiError('TASK_LAUNCH_CONFLICT','相同目标的任务已有不同协作或验收设置；请先查看现有任务');};
       const prior = services.taskService.runtime.findByCreateRequestId({ requestId, goal, requirements,
-        workspaceId, requestedAgentProvider: agentProvider });
+        workspaceId, requestedAgentProvider: agentProvider, launchFingerprint });
       if (prior) {
         if (prior.status === 'queued' && !prior.currentAgent) {
           const inFlight = requestId ? taskCreateDispatches.get(requestId) : null;
@@ -1205,6 +1217,7 @@ export function createDesktopUiService({ services = {}, system = services.system
       }
       const existing = workspaceId ? services.taskService.runtime.findByGoalWorkspace({ goal, workspaceId }) : null;
       if (existing) {
+        assertLaunch(existing);
         if (existing.status === 'queued' && !existing.currentAgent) {
           throw uiError('TASK_DISPATCH_INCOMPLETE', '同目标 Task 尚未确认派发；请核对后显式启动');
         }
@@ -1224,8 +1237,11 @@ export function createDesktopUiService({ services = {}, system = services.system
       }
       const dispatchProvider = workspaceId ? await requireTaskProvider(agentProvider, workspaceId,
         { modelProvider: string(p.modelProvider, 80), model: string(p.model, 160) }) : agentProvider;
+      if(collaboration?.enabled&&dispatchProvider!=='cetamesh')throw uiError('TASK_COLLABORATION_MANAGED_REQUIRED','自动协作需要使用 CetaMesh 默认模型；指定外部执行者请关闭自动协作');
+      const verification=await snapshotTaskVerification(services,workspaceId,collaboration);
       const raced = workspaceId ? services.taskService.runtime.findByGoalWorkspace({ goal, workspaceId }) : null;
       if (raced) {
+        assertLaunch(raced);
         if (raced.status === 'queued' && !raced.currentAgent) {
           const inFlight = raced.createRequest?.id ? taskCreateDispatches.get(raced.createRequest.id) : null;
           if (inFlight && requestId === raced.createRequest.id) return { task: projectTaskWithUsage(await inFlight) };
@@ -1243,11 +1259,20 @@ export function createDesktopUiService({ services = {}, system = services.system
       if (workspaceId && services.taskService.runtime.activeWorkspaceOwner({ workspaceId })) {
         throw uiError('TASK_WORKSPACE_BUSY', 'Another Task owns write execution in this Workspace');
       }
-      const created = services.taskService.runtime.create({ goal, requirements, workspaceId,
-        note: string(p.note, 1000), requestId, requestedAgentProvider: agentProvider });
-      const dispatch = created.workspaceId ? runTask(created, { provider: dispatchProvider,
+      let created = services.taskService.runtime.create({ goal, requirements, workspaceId,
+        note: string(p.note, 1000), requestId, requestedAgentProvider: agentProvider, launchFingerprint,
+        ...(verification?{acceptanceCriteria:['指定文件范围内完成修改，保持已有验收文件不变，并通过项目 npm test；验收仅覆盖此机器标准。']}:{}) });
+      const dispatch = (async()=>{
+      if(collaboration?.enabled){
+        services.capabilityService.grantTask(created.id);
+        const defaults=services.settingsService?.store.get().settings.models;
+        created=await configureTaskCollaboration(services,created,{collaboration,verification,
+          modelProvider:string(p.modelProvider,80)||defaults?.provider,model:string(p.model,160)||defaults?.defaultModel});
+      }
+      return created.workspaceId ? runTask(created, { provider: dispatchProvider,
         requestId: requestId || undefined, modelProvider: string(p.modelProvider, 80) || undefined,
-        model: string(p.model, 160) || undefined }) : Promise.resolve(created);
+        model: string(p.model, 160) || undefined }) : created;
+      })();
       if (requestId) taskCreateDispatches.set(requestId, dispatch);
       let current;
       try { current = await dispatch; }
@@ -1808,9 +1833,12 @@ export function createDesktopUiService({ services = {}, system = services.system
       return selected(result, ['ok', 'provider', 'status', 'code', 'phase', 'configured', 'reachable', 'authenticated', 'inferencing', 'message', 'connectionStepCompleted']);
     },
     'ui.onboarding.setModel': async p => selected(await onboarding('onboarding.setModel', { provider: boundedText(p.provider, 'provider', 80), model: boundedText(p.model, 'model', 200) }), ['provider', 'model', 'persisted']),
-    'ui.approvals.list': async () => ({ approvals: ((await capability('capability.approval.list', {})).approvals ?? []).map(projectApproval),
+    'ui.approvals.grant.revoke': async p => capability('capability.grant.revoke',{id:idParam(p)}),
+    'ui.approvals.list': async () => ({grants:((await capability('capability.grant.list',{})).grants??[]).map(row=>selected(row,['id','status','taskId','workspaceId','capability','resources','expiresAt','uses','maxUses'])), approvals: ((await capability('capability.approval.list', {})).approvals ?? []).map(row=>{let entry;try{entry=services.capabilityService.broker.registry.require(row.request?.capability);}catch{entry=null; /* A removed plugin stays reviewable; it cannot qualify for finite L2 reuse. */ }return projectApproval(row,entry);}),
       operations: ((await capability('capability.operation.list', {})).operations ?? []).map(row => selected(row, ['operationId','approvalId','status','decision','code','turnResumed','resumePending','resumeError'])) }),
     'ui.approvals.decide': async p => {
+      if(p.reuse===true){if(p.approve!==true)throw uiError('INVALID_GRANT','Only an affirmative decision can issue finite future authorization');
+        await capability('capability.grant.fromApproval',{approvalId:idParam(p),ttlMs:900000,maxUses:3});}
       const result = await capability('capability.approval.decide', { id: idParam(p), approve: p.approve === true, defer: true });
       emit('approval.resolved', { approvalId: p.id, status: p.approve === true ? 'approved' : 'rejected' });
       return selected(result, ['status', 'operationId', 'decision', 'approvalId', 'requestId', 'turnResumed', 'resumePending', 'resumeError', 'taskResumed']);

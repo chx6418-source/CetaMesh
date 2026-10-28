@@ -8,7 +8,7 @@ import { createCetaMeshServices } from '../src/app/service-container.js';
 import { createCodexAgentProvider } from '../src/agent/codex-agent-provider.js';
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-discovery-'));
 const failures = [];
-async function check(name, run) { try { await run(); console.log('PASS', name); } catch (error) { failures.push(name); console.error('FAIL', name, error.message); } }
+async function check(name, run) { try { await run(); console.log('PASS', name); } catch (error) { failures.push(name + ": " + error.message); console.error('FAIL', name, error.message); } }
 const env = { PATH: '', LOCALAPPDATA: path.join(root, 'Local App Data'), APPDATA: path.join(root, 'Roaming'), USERPROFILE: root };
 const native = path.join(env.LOCALAPPDATA, 'Programs', 'OpenAI', 'Codex', 'bin', 'codex.exe');
 function probe(exe, args) {

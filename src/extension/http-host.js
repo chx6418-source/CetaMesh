@@ -19,6 +19,20 @@ export function validateHttpDefinition(manifest,source) {
  }
  return definition;
 }
+export function httpRequestFor(manifest,source,capabilityId,input){
+ const definition=validateHttpDefinition(manifest,source),endpoint=definition.endpoints.find(row=>row.capability===capabilityId),cap=manifest.capabilities.find(row=>row.id===capabilityId);
+ if(!cap||!endpoint)throw extensionError('CAPABILITY_NOT_DECLARED','Unknown data endpoint');validateSchema(cap.inputSchema,input);
+ const url=new URL(endpoint.url);for(const key of endpoint.queryKeys)if(input[key]!==undefined){const value=input[key];if(!['string','number','boolean'].includes(typeof value)||String(value).length>2000)throw extensionError('INVALID_PARAMS','HTTP query needs bounded primitive values');url.searchParams.set(key,String(value));}
+ return {url:url.href,init:{method:endpoint.method},requireHttps:true};
+}
+export function projectHttpResult(manifest,source,capabilityId,response){
+ const endpoint=validateHttpDefinition(manifest,source).endpoints.find(row=>row.capability===capabilityId);
+ if(!endpoint||!response||!Number.isInteger(response.statusCode))throw extensionError('HTTP_RESPONSE_INVALID','Missing transport status');
+ if(response.statusCode<200||response.statusCode>=300)throw extensionError('HTTP_RESPONSE_ERROR','Endpoint returned status '+response.statusCode);
+ if(response.truncated)throw extensionError('HTTP_RESPONSE_TRUNCATED','Response exceeds the permitted size');
+ let data=response.body??'';if(endpoint.response==='json'&&endpoint.method!=='HEAD')try{data=JSON.parse(data);}catch{throw extensionError('HTTP_RESPONSE_INVALID','Endpoint returned invalid JSON');}
+ return {capability:capabilityId,result:{statusCode:response.statusCode,data}};
+}
 /** Data-only HTTP host. Transport, DNS and redirect authorization remain in Core. */
 export function createHttpExtensionHost({manifest,source,capabilityExecutor,timeoutMs=30000}={}) {
  const definition=validateHttpDefinition(manifest,source),active=new Set();let closed=false;
@@ -36,6 +50,7 @@ export function createHttpExtensionHost({manifest,source,capabilityExecutor,time
    try {
     combined.throwIfAborted();
     const response=await capabilityExecutor('network',{url:url.href,init:{method:endpoint.method},requireHttps:true},{signal:combined});combined.throwIfAborted();
+    if(response?.status==='pending')return response;
     if(!response||!Number.isInteger(response.statusCode))throw extensionError('HTTP_RESPONSE_INVALID','HTTP transport returned no status');
     if(response.statusCode<200||response.statusCode>=300)throw extensionError('HTTP_RESPONSE_ERROR','HTTP endpoint returned status '+response.statusCode);
     if(response.truncated)throw extensionError('HTTP_RESPONSE_TRUNCATED','HTTP response exceeds the permitted size');

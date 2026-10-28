@@ -531,7 +531,7 @@ export function createContinuityRuntime({
    * targetProvider 缺省 = 同 Provider Fresh Session（TASK-S2-009 第一优先）；
    * 指定其它 Provider 即 Cross Provider Handoff（TASK-S2-010）。
    */
-  async function rollover({ taskId, reason, targetProvider, coding, relevantFiles, workspaceFacts, modelProvider, model, reasoningEffort, automatic = false } = {}) {
+  async function rollover({ taskId, reason, targetProvider, coding, relevantFiles, workspaceFacts, modelProvider, model, reasoningEffort, automatic = false, requireNativeReadiness = false, authorizationGuard = null } = {}) {
     const task = requireTask(taskId);
     if (task.parentTaskId && task.childContract?.mode === 'read-only'
       && targetProvider && targetProvider !== 'cetamesh') {
@@ -677,12 +677,15 @@ export function createContinuityRuntime({
       let reconciliation = null;
       let oldStopped = false;
       let bootstrapBoundary = {};
+      const nativeReadinessToken=requireNativeReadiness ? 'CM_READY_'+crypto.randomBytes(16).toString('hex') : null;
+      if(nativeReadinessToken && target.capabilities().supportsReadinessCheck!==true)throw continuityError('AGENT_READINESS_UNSUPPORTED','This adapter cannot prove native tool readiness');
       const selectedModelConfig = {
         modelProvider: modelProvider ?? task.modelConfig?.modelProvider ?? (target.id === previousAgent.provider ? previousStatus?.modelProvider : null) ?? target.defaults?.modelProvider,
         model: model ?? task.modelConfig?.model ?? (target.id === previousAgent.provider ? previousStatus?.model : null) ?? target.defaults?.model,
         reasoningEffort: reasoningEffort ?? task.modelConfig?.reasoningEffort ?? (target.id === previousAgent.provider ? previousStatus?.reasoningEffort : null) ?? target.defaults?.reasoningEffort
       };
       try {
+        authorizationGuard?.({provider:target.id});
         created = await agentBroker.createSession(target.id, {
           taskId: task.id,
           workspaceId: task.workspaceId,
@@ -691,6 +694,7 @@ export function createContinuityRuntime({
         if (!created?.sessionId) {
           throw continuityError('PROVIDER_ERROR', `Agent Provider「${target.id}」未返回 sessionId`);
         }
+        authorizationGuard?.({provider:target.id,sessionId:created.sessionId});
         writeTransaction({ ...transaction, to: { provider: target.id, sessionId: created.sessionId } });
         try {
           await agentBroker.cancel({ provider: fromProvider.id, sessionId: previousAgent.sessionId });
@@ -707,6 +711,7 @@ export function createContinuityRuntime({
         }
         // Bind before bootstrap: broker-only providers resolve authorization from the
         // current Task binding. If bootstrap fails, the old binding is restored below.
+        authorizationGuard?.({provider:target.id,sessionId:created.sessionId});
         attached = taskRuntime.attachAgent({
           id: task.id,
           expectedRev: currentRev(),
@@ -714,13 +719,19 @@ export function createContinuityRuntime({
           sessionId: created.sessionId,
           note: `rollover #${sequence} 自 ${previousAgent.provider}:${previousAgent.sessionId}`
         });
-        const bootstrap = await agentBroker.send({ provider: target.id, sessionId: created.sessionId, content: renderResumePrompt(packet),
-          phase: 'bootstrap', runId: `handoff:${task.id}:${sequence}` });
+        const bootstrap = await agentBroker.send({ provider: target.id, sessionId: created.sessionId, content: nativeReadinessToken
+          ? 'Core native readiness check ONLY: use your native command tool once to print the exact token '+nativeReadinessToken+'. Do not read or modify project or host files, execute project code, use network, or perform the Task. Return after the successful command. This bootstrap is not permission for task work.'
+          : renderResumePrompt(packet),...(nativeReadinessToken?{nativeReadinessToken}:{}),
+          phase: 'bootstrap', authorizationGuard:()=>authorizationGuard?.({provider:target.id,sessionId:created.sessionId}), runId: `handoff:${task.id}:${sequence}` });
         if (bootstrap?.accepted !== true) {
           throw continuityError('BOOTSTRAP_REJECTED', 'Target Agent did not accept its recovery turn');
         }
         const bootstrapEnd = await awaitBootstrapTurn({ provider: target.id, sessionId: created.sessionId,
           requestId: bootstrap.requestId, turnId: bootstrap.turnId });
+        if(nativeReadinessToken){const proof=await agentBroker.status({provider:target.id,sessionId:created.sessionId});
+          if(proof.readiness?.verified!==true||proof.readiness.runId!=='handoff:'+task.id+':'+sequence||proof.readiness.tokenSha256!==crypto.createHash('sha256').update(nativeReadinessToken).digest('hex'))
+            throw continuityError('AGENT_READINESS_UNVERIFIED','No current native tool proof was returned');
+        }
         bootstrapBoundary = { sinceSequence: Number.isSafeInteger(bootstrapEnd?.seq) ? bootstrapEnd.seq : 0,
           bootstrapRequestId: bootstrap.requestId ?? null, bootstrapTurnId: bootstrap.turnId ?? bootstrapEnd?.data?.turn ?? null };
 

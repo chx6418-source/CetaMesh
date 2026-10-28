@@ -796,15 +796,18 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     return rankTaskAgents({agentBroker,workspaceId:task.workspaceId,taskKind:request.input.taskKind,
       difficulty:request.input.difficulty,requiredTools:request.input.requiredTools,
       modelProvider:task.modelConfig?.modelProvider??null,model:task.modelConfig?.model??null,
-      allowUnknownCost:policy.allowUnknownCost===true,exclude:['cetamesh']});
+      allowUnknownCost:policy.allowUnknownCost===true,includePreparation:policy.prepareNative===true,exclude:['cetamesh']});
   }
   broker.register({id:'agent.delegate.candidates',permission:'storage',provider:'task-runtime',risk:'low',
     requiresTask:true,workspace:true,effect:'read-only',
-    description:'Discover currently eligible external executors for exact task needs. Call this before proposing. Native development tasks normally use requiredTools: []; native tools are not CetaMesh Broker tools. Results confer no execution permission.',
+    description:'Discover external executors for exact task needs. preparationRequired candidates are NOT task eligible: Core must obtain Owner native consent and verify actual tools before formal work. Call this before proposing. Native development tasks normally use requiredTools: []; native tools are not CetaMesh Broker tools. Results confer no execution permission.',
     inputSchema:delegationNeedsSchema,validate:r=>validateSchema(delegationNeedsSchema,r.input),
-    async execute(request) {return {candidates:(await delegationCandidates(request)).map(row=>({...row,
+    async execute(request) {const candidates=(await delegationCandidates(request)).map(row=>({...row,
+      proposalEligible:true,taskEligible:row.preparationRequired!==true,
       workspaceBoundary:agentBroker.capabilities(row.provider).workspaceBoundary,
-      taskFit:agentBroker.capabilities(row.provider).assignment}))};}
+      taskFit:agentBroker.capabilities(row.provider).assignment}));
+      return {candidates,canPropose:candidates.length>0,nextAction:candidates.length?'propose-matching-needs':'no-authorized-executor',
+        guidance:'proposalEligible permits only a proposal. A preparationRequired candidate is not yet executable: Core will request Owner native consent and verify tools after your turn ends. If external work is needed and canPropose is true, call agent.delegate.propose with these same generic requirements, then end your turn. Do not prepare or dispatch it yourself.'};}
   });
   const delegationProposalSchema = objectInput({
     taskKind: { type:'string', enum:['code','analysis'] }, difficulty: { type:'integer', minimum:1, maximum:3 },
@@ -813,7 +816,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
   }, ['taskKind','difficulty','requiredTools','instruction']);
   broker.register({ id:'agent.delegate.propose', permission:'storage', provider:'task-runtime', risk:'low',
     workspace:true, requiresTask:true, effect:'idempotent-write',
-    description:'Propose a bounded delegation after checking agent.delegate.candidates with these exact requirements. Core selects and checks the executor after this user turn ends. After a successful proposal, finish the turn without doing the delegated work. This does not grant permissions.',
+    description:'Propose a bounded delegation after checking agent.delegate.candidates with these exact requirements. proposalEligible or canPropose allows this proposal even when preparationRequired is true and taskEligible is false; that flag blocks formal execution, not a preparation proposal. Core obtains Owner consent and verifies actual tools before executing. Core selects and checks the executor after this user turn ends. After a successful proposal, finish the turn without doing the delegated work. This does not grant permissions.',
     inputSchema:delegationProposalSchema,
     validate(request) {
       validateSchema(delegationProposalSchema,request.input);
@@ -835,10 +838,17 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
   broker.register({ id: 'agent.execution.authorize', permission: 'agent.run', provider: 'agent-broker',
     workspace: true, risk: 'high', modelCallable: false,
     description: 'Confirm the disclosed native execution scope for one Workspace and Agent policy.',
-    inputSchema: objectInput({ provider: stringField('Agent Provider.'), fingerprint: stringField('Current execution policy fingerprint.') }, ['provider', 'fingerprint']),
+    inputSchema: objectInput({ provider: stringField('Agent Provider.'), fingerprint: stringField('Current execution policy fingerprint.'), delegationRequestId: stringField('Core-bound delegation reference, when preparing a cold executor.') }, ['provider', 'fingerprint']),
     validate(request) {
       if (request.actor.kind !== 'owner') throw capabilityError('PERMISSION_DENIED', 'Only Owner may confirm native execution');
       if (!resolveWorkspace(request.workspaceId)) throw capabilityError('WORKSPACE_NOT_FOUND', 'Registered Workspace required');
+      if(request.input.delegationRequestId){const task=taskFor(request.taskId),proposal=task?.delegationProposal,policy=task?.delegationPolicy;
+        if(!task||task.workspaceId!==request.workspaceId||task.status!=='running'||task.currentAgent?.provider!=='cetamesh'
+          ||proposal?.requestId!==request.input.delegationRequestId||proposal.state!=='proposed'||proposal.sessionId!==task.currentAgent.sessionId
+          ||proposal.runId!==task.executionObservation?.runId||task.executionObservation?.state!=='awaiting-review'
+          ||!policy?.prepareNative||policy.id!==proposal.policyId||policy.revokedAt||policy.expiresAt<=Date.now()||policy.used>=policy.maxDelegations)
+          throw capabilityError('DELEGATION_POLICY_DENIED','Native preparation no longer belongs to an authorized idle Managed Task');
+      }
       const scope = agentBroker.describeExecutionSecurity(request.input.provider, request.workspaceId);
       if (!scope.required || request.input.fingerprint !== scope.fingerprint) throw capabilityError('AGENT_SECURITY_POLICY_CHANGED', 'Agent policy changed; review again');
       // The authoritative disclosure is fingerprint-bound; never trust caller-provided copy.
@@ -1181,6 +1191,18 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       const task = taskFor(params.taskId);
       if (!task || task.workspaceId !== params.workspaceId) throw capabilityError('TASK_NOT_AUTHORIZED','Review requires the original Task Workspace');
       return broker.reviewPreparedOperation({ ...params, actor: OWNER_ACTOR });
+    }
+    if(method==='capability.grant.fromApproval'){
+      const pending=broker.approvals.get(params.approvalId);
+      if(pending.status!=='pending')throw capabilityError('APPROVAL_ALREADY_DECIDED','Only a current pending request can establish future authorization');
+      if(pending.expiresAt<=(typeof now==='function'?now():Date.now()))throw capabilityError('APPROVAL_EXPIRED','Review a fresh request');
+      const request=pending.request,entry=broker.registry.require(request.capability);
+      if(!isControlledL2Write(request,entry))throw capabilityError('GRANT_CAPABILITY_DENIED','Only reviewed controlled Core writes qualify');
+      await policy.authorize(request,entry);await entry.validate?.(request);
+      const decision=await policy.authorize(request,entry);
+      const grant=broker.approvals.issueGrant({actor:OWNER_ACTOR,request,entry,binding:decision.approvalBinding,ttlMs:params.ttlMs,maxUses:params.maxUses,sourceApprovalId:pending.id});
+      audit({capability:entry.id,status:'bounded-grant-from-approval',actor:OWNER_ACTOR.id,grantId:grant.id,approvalId:pending.id});
+      return grant;
     }
     if (method === 'capability.grant.list') return { grants: broker.approvals.listGrants() };
     if (method === 'capability.grant.revoke') return broker.approvals.revokeGrant(params.id, OWNER_ACTOR);

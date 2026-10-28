@@ -30,7 +30,7 @@ const UI_METHODS: &[&str] = &[
     "ui.about.info", "ui.feedback.links", "ui.about.update", "ui.update.capabilities", "ui.update.check", "ui.update.notes",
     "ui.onboarding.status", "ui.onboarding.start", "ui.onboarding.completeStep", "ui.onboarding.skipStep",
     "ui.onboarding.finish", "ui.onboarding.testProvider", "ui.onboarding.setModel",
-    "ui.approvals.list", "ui.approvals.decide", "ui.approvals.operation", "ui.approvals.cancel", "ui.search"
+    "ui.approvals.grant.revoke", "ui.approvals.list", "ui.approvals.decide", "ui.approvals.operation", "ui.approvals.cancel", "ui.search"
 ];
 
 fn is_allowed_method(method: &str) -> bool {

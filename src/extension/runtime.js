@@ -4,6 +4,9 @@
 // 调用只允许调用 manifest 里声明、且所需权限均已授予的能力。
 
 import fs from 'node:fs';
+import crypto from 'node:crypto';
+import {requestFingerprint} from '../capability/approval.js';
+import {AsyncLocalStorage} from 'node:async_hooks';
 import path from 'node:path';
 import { createVmExtensionHost } from './host.js';
 import { createProcessExtensionHost } from './process-host.js';
@@ -15,7 +18,7 @@ import { manifestFingerprint } from './manifest.js';
 import { createCapabilityBroker } from '../capability/broker.js';
 import { createCapabilityPolicy } from '../capability/policy.js';
 import { fingerprintExtensionPackage } from './package-fingerprint.js';
-import {isHttpDataManifest,createHttpExtensionHost} from './http-host.js';
+import {isHttpDataManifest,createHttpExtensionHost,httpRequestFor,projectHttpResult} from './http-host.js';
 import {validateSchema} from '../model/input-schema.js';
 
 export function createExtensionRuntime({
@@ -50,6 +53,7 @@ export function createExtensionRuntime({
     }});
   }
   const actors = new Map();
+  const invocationAuthority=new AsyncLocalStorage();
   function runtimeRecord(id) {
     const key = String(id);
     if (!runtimeRecords.has(key)) runtimeRecords.set(key, {
@@ -92,11 +96,11 @@ export function createExtensionRuntime({
       scopes: scope ? ['workspace:' + scope] : [], types: ['working', 'workspace', 'knowledge', 'skill']
     }};
   }
-  async function invokeOnHost(id, capability, input, { signal } = {}) {
+  async function invokeOnHost(id, capability, input, { signal, authority } = {}) {
     const { host } = hostOrThrow(id);
     const record = runtimeRecord(id);
     record.state = 'running';
-    try { return await host.invoke(capability, input, { signal }); }
+    try { return await invocationAuthority.run({request:authority,next:0},()=>host.invoke(capability, input, { signal })); }
     finally {
       if (hosts.get(String(id)) === host && host.available()) {
         const health = host.health?.() || {};
@@ -139,18 +143,28 @@ export function createExtensionRuntime({
     const catalogOwner = 'extension:' + entry.id;
     const definitions = (entry.manifest.capabilities || []).map(cap => {
       const id = 'extension.' + entry.id + '.' + cap.id;
-      return { id, catalogOwner, descriptorVersion, permission: 'extension.invoke', provider: 'extension', risk: isHttpDataManifest(entry.manifest)?'high':'low', effect: 'unknown',
-        description: typeof cap.description === 'string' ? cap.description : 'Invoke the declared Extension capability ' + cap.id + '.',
+      return { id, catalogOwner, descriptorVersion, permission: 'extension.invoke', provider: 'extension', risk: isHttpDataManifest(entry.manifest)?'high':'low', effect: 'unknown',delegatesOperation:isHttpDataManifest(entry.manifest),
+        description: typeof cap.description === 'string' && cap.description.trim() ? cap.description : 'Invoke the declared Extension capability ' + cap.id + '.',
         inputSchema: cap.inputSchema && typeof cap.inputSchema === 'object' ? cap.inputSchema : null,
         modelCallable: Boolean(cap.inputSchema && typeof cap.inputSchema === 'object'),
-        validate: r=>{if(cap.inputSchema)validateSchema(cap.inputSchema,r.input);},
+        ...(isHttpDataManifest(entry.manifest)?{
+          validateChildRequest(parent,child){const current=entryOrThrow(entry.id);if(current.status!=='enabled'||validateInstalledEntry(current)!==descriptorVersion)throw extensionError('STALE_EXTENSION_HOST','HTTP package identity changed');
+            return child.capability==='network'&&child.constrainedActor?.id===entry.id&&child.scope?.descriptorVersion===descriptorVersion
+              &&requestFingerprint({input:child.input})===requestFingerprint({input:httpRequestFor(current.manifest,fs.readFileSync(path.join(current.sourceRoot,current.manifest.entry),'utf8'),cap.id,parent.input)});},
+          projectChildResult(parent,result){const current=entryOrThrow(entry.id);return projectHttpResult(current.manifest,fs.readFileSync(path.join(current.sourceRoot,current.manifest.entry),'utf8'),cap.id,result);}
+        }:{}),
+        validate: r=>{if(cap.inputSchema)validateSchema(cap.inputSchema,r.input);
+          if(r.taskId && entry.type!=='memory-pack'&&!isHttpDataManifest(entry.manifest)&&isTrustedVmExtension(entry)!==true)
+            throw extensionError('EXTENSION_CONTEXT_UNSUPPORTED','This process adapter does not yet bind reverse calls to a Task invocation; use a context-aware adapter');},
         execute: async r => {
         const current = entryOrThrow(entry.id);
         if (current.status !== 'enabled') throw extensionError('EXTENSION_DISABLED', current.id);
         if (runtimeRecord(current.id).switching || validateInstalledEntry(current) !== descriptorVersion) {
           throw extensionError('STALE_EXTENSION_HOST', 'Capability descriptor no longer matches the active Extension version');
         }
-        return invokeOnHost(entry.id, cap.id, r.input, { signal: r.signal });
+        const result=await invokeOnHost(entry.id, cap.id, r.input, { signal:r.signal,authority:r });
+        if(isHttpDataManifest(entry.manifest))return result?.status==='pending'?result:{requestId:r.requestId,status:'completed',capability:id,result};
+        return result;
       }};
     });
     broker.registry.replaceProviderEntries(catalogOwner, definitions);
@@ -190,8 +204,16 @@ export function createExtensionRuntime({
       if (!broker.registry.has(capability)) {
         throw extensionError('CAPABILITY_NOT_DECLARED', 'Capability Broker has no adapter for ' + capability);
       }
-      const result = await broker.execute({ actor: actorFor(current), capability,
-        workspaceId: current.manifest.scope?.workspace || undefined, input: input || {}, reason: 'Installed Extension capability' }, { signal });
+      const authority=invocationAuthority.getStore(),parent=authority?.request;
+      const taskBound=parent?.taskId && ['agent','owner'].includes(parent.actor?.kind);
+      const ordinal=authority?authority.next++:0;
+      const operationId=taskBound?'plugin:'+crypto.createHash('sha256').update(JSON.stringify([parent.operationId??parent.requestId,current.id,ordinal,capability])).digest('hex'):undefined;
+      const result = await broker.execute({ actor: taskBound?parent.actor:actorFor(current), capability,
+        ...(taskBound?{taskId:parent.taskId,workspaceId:parent.workspaceId,operationId,
+          constrainedActor:actorFor(current),origin:parent.origin,...(parent.approvalId?{pluginParent:{approvalId:parent.approvalId,capability:parent.capability,descriptorVersion:validateInstalledEntry(current)}}:{}),scope:{plugin:current.id,descriptorVersion:validateInstalledEntry(current),parentOperationId:parent.operationId??parent.requestId,ordinal}}:
+          {workspaceId:current.manifest.scope?.workspace || undefined}),
+        input:input||{},reason:'Installed Extension nested capability: '+current.id },{signal});
+      if(result.status==='pending'&&isHttpDataManifest(current.manifest))return result;
       if (result.status !== 'completed') throw extensionError('APPROVAL_REQUIRED', result.approvalId);
       return result.result;
     };

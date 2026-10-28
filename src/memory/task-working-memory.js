@@ -1,3 +1,5 @@
+import crypto from 'node:crypto';
+import {verifyDelegationContract} from '../task/delegation-verification.js';
 import { memoryError } from './types.js';
 import { redactText } from '../logging/redact.js';
 
@@ -9,7 +11,7 @@ function clip(value, max) {
 }
 
 /** Core-only projection into the existing Memory Runtime. No new agent capability is granted. */
-export function createTaskWorkingMemoryRecorder({ memoryRuntime, taskRuntime, enabled, onChanged = () => {} }) {
+export function createTaskWorkingMemoryRecorder({ memoryRuntime, taskRuntime, enabled, resolveWorkspace=()=>null, onChanged = () => {} }) {
   function principal(taskId) {
     return { kind: 'agent', id: 'task:' + taskId, grants: { scopes: ['task:' + taskId], types: ['working'] } };
   }
@@ -97,6 +99,31 @@ export function createTaskWorkingMemoryRecorder({ memoryRuntime, taskRuntime, en
     }
     return excerpts;
   }
-  return {record,references};
+  async function recordVerifiedOutcome(taskId){
+    if(enabled()!==true)return {skipped:true};
+    const task=taskRuntime.get({id:taskId}).task;
+    if(task.status!=='completed'||task.delegationProposal?.state!=='verified'||task.delegationProposal.verification?.status!=='VERIFIED'||!task.delegationPolicy?.verification)return {skipped:true};
+    const workspace=await resolveWorkspace(task.workspaceId);
+    // Completion detaches the live Agent; use only the persisted, already verified return identity for this historical read-only check.
+    const verifierSession=task.delegationProposal.returnSessionId;
+    if(!verifierSession||task.executionObservation?.sessionId!==verifierSession||task.executionObservation?.runId!==task.delegationProposal.verificationRunId)return {skipped:true};
+    const verification=await verifyDelegationContract({...task,currentAgent:{provider:'cetamesh',sessionId:verifierSession}},{workspaceRoot:workspace?.id===task.workspaceId?workspace.root:null});
+    if(verification.status!=='VERIFIED')return {skipped:true,code:'OUTCOME_EVIDENCE_CHANGED'};
+    const scope='workspace:'+task.workspaceId;
+    const actor={kind:'agent',id:'core-verified-task',grants:{scopes:[scope],types:['workspace']}};
+    const prior=memoryRuntime.listCandidates({principal:actor}).candidates.find(row=>row.proposedBy==='agent:core-verified-task'
+      &&row.sourceRefs.some(ref=>ref.kind==='task'&&ref.id===task.id&&ref.scope===scope));
+    // A user's rejection or correction remains authoritative on repeated delivery/restart.
+    if(prior)return {candidate:prior,duplicate:true};
+    const proof={schemaVersion:1,kind:'historical-machine-result',taskId:task.id,workspaceId:task.workspaceId,
+      ownerGoal:clip(task.goal,600),verifiedAt:task.updatedAt,verification:{kind:'code-tests',status:'VERIFIED',
+        evidenceCount:verification.evidenceEventIds.length,evidenceSha256:crypto.createHash('sha256').update(JSON.stringify(verification.evidenceEventIds)).digest('hex'),
+        evidenceEventIds:verification.evidenceEventIds.slice(0,8)},
+      meaning:'这是此任务完成时的机器验收记录，不代表项目当前状态或模型推断已被用户确认为事实；完整证据保留在原 Task。'};
+    const result=memoryRuntime.proposeCandidate({principal:actor,type:'workspace',scope,content:JSON.stringify(proof),
+      reason:'Core 独立验收通过后的项目历史候选；由用户决定是否保存。',sourceRefs:[{kind:'task',id:task.id,scope},{kind:'workspace',id:task.workspaceId,scope}]});
+    onChanged({taskId:task.id,candidateId:result.candidate?.id});return result;
+  }
+  return {record,references,recordVerifiedOutcome};
 }
 

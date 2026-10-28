@@ -163,6 +163,7 @@ try {
   let managedTools = true;
   let codexReady = false;
   let codexSandboxCapable = false;
+  let codexToolsAvailable = null;
   const routingBroker = { ...agentBroker,
     ids: () => ['cetamesh', 'codex'],
     capabilities: id => ({ workspaceBoundary: id === 'codex' ? 'staged-capability-broker' : 'capability-broker',
@@ -172,7 +173,7 @@ try {
         estimatedLatencyMs: id === 'codex' ? 20 : 100 } }),
     health: async id => id === 'codex'
       ? { available: codexReady, installed: codexReady, authenticated: codexReady, sessionCapable: codexReady,
-          sandboxCapable: codexSandboxCapable }
+          sandboxCapable: codexSandboxCapable,toolsAvailable:codexToolsAvailable }
       : { available: true, sessionCapable: true }
   };
   const routingRuntime = createDesktopPlatformRuntime({
@@ -189,6 +190,8 @@ try {
   managedTools = false;
   codexReady = true;
   codexSandboxCapable = true;
+  await assert.rejects(routingRuntime.route({decision:{agentIntent:true,class:'project'},record:{config:{workspaceId,modelProvider:'fixture-model',model:'fixture-model-id'}},text:'Do not infer native tool execution from launch'}),error=>error.code==='AGENT_PROVIDER_SELECTION_REQUIRED');
+  codexToolsAvailable=true;
   const retryWorkspaceApproval = await capabilityService.broker.execute({ actor: OWNER_ACTOR,
     capability: 'workspace.create', input: { name: 'Safe reassignment fixture',
       root: path.join(dir, 'retry-workspace'), createIfMissing: true }, reason: 'Test fixture' });
@@ -239,7 +242,7 @@ try {
   const retryBroker = { ...routingBroker,
     health: async id => id === 'codex'
       ? { available: ++codexHealthCalls !== 3, installed: true, authenticated: true,
-          sessionCapable: true, sandboxCapable: true }
+          sessionCapable: true, sandboxCapable: true, toolsAvailable:true }
       : { available: true, sessionCapable: true },
     async createSession(provider, options) {
       retryAgentCalls.push({ kind: 'create', provider, options });

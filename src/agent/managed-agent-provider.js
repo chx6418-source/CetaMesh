@@ -539,6 +539,7 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
         if (Array.isArray(result.messages)) s.messages = result.messages.filter((message) => message?.role !== 'system');
         s.lastUsage = result.usage ?? s.lastUsage;
         if (result.status === 'pending') {
+          waitingTurns.delete(String(approvalId));
           s.waitingForApproval = result.approvalId ?? null;
           waitingTurns.set(String(result.approvalId), s.id);
           s.lastReason = { kind: 'waiting', approvalId: s.waitingForApproval, usage: s.lastUsage };

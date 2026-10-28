@@ -311,6 +311,7 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
   let authenticated = inspection.available ? loginState(cli) : false;
   let lastProbeAt = Date.now();
   let sandboxCapable = null;
+  let toolsAvailable = null;
   let lastSecurityIdentity = null;
   let inspectionGeneration = 0;
   let inspectedIdentity = JSON.stringify([cli.executable(), inspection.version]);
@@ -321,7 +322,7 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
     if (!force && Date.now() - lastProbeAt < HEALTH_TTL_MS) return;
     inspection = inspectCodexCli(cli);
     const identity = JSON.stringify([cli.executable(), inspection.version]);
-    if (identity !== inspectedIdentity) { sandboxCapable = null; inspectionGeneration++; }
+    if (identity !== inspectedIdentity) { sandboxCapable = null; toolsAvailable = null; inspectionGeneration++; }
     inspectedIdentity = identity;
     authenticated = inspection.available ? loginState(cli) : false;
     lastProbeAt = Date.now();
@@ -333,7 +334,7 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
     catch { executableStat = 'unavailable'; /* Fixtures and failed file probes retain a distinct policy identity. */ }
     const selectedSandbox = selectedWindowsSandbox(resolvedCodexHome);
     const identity = crypto.createHash('sha256').update(JSON.stringify([inspectedIdentity, executableStat, securityMode, selectedSandbox, nativeRulesIdentity(resolvedCodexHome)])).digest('hex');
-    if (lastSecurityIdentity !== null && lastSecurityIdentity !== identity) { sandboxCapable = null; inspectionGeneration++; }
+    if (lastSecurityIdentity !== null && lastSecurityIdentity !== identity) { sandboxCapable = null; toolsAvailable = null; inspectionGeneration++; }
     lastSecurityIdentity = identity;
     return { mode: securityMode, nativeSandboxSupported: inspection.nativeSandboxSupported === true
         && (process.platform !== 'win32' || selectedSandbox === 'unelevated'),
@@ -477,6 +478,13 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
         }
       }
     } finally { run.collectingSnapshot = false; }
+    // Bootstrap may validate tools, but never import project changes.
+    if(run.phase==='bootstrap' && changeSet.changes.length){session.lastRunStatus='failed';session.lastError={code:'BOOTSTRAP_SIDE_EFFECT_DENIED'};emitTurnEnd(session,run.turnId,'error',{code:'BOOTSTRAP_SIDE_EFFECT_DENIED',message:'Bootstrap changed staging files; no import was attempted'});return;}
+    if(run.nativeReadinessToken){
+      if(!run.readinessVerified){session.lastRunStatus='failed';session.lastError={code:'AGENT_READINESS_UNVERIFIED'};emitTurnEnd(session,run.turnId,'error',{code:'AGENT_READINESS_UNVERIFIED',message:'Native bootstrap requires successful token command proof'});return;}
+      session.readiness={verified:true,runId:run.runId,tokenSha256:crypto.createHash('sha256').update(run.nativeReadinessToken).digest('hex')};
+    }
+    if(run.successfulTool&&run.inspectionGeneration===inspectionGeneration)toolsAvailable=true;
     let usage = run.usage ?? null;
     if (changeSet.changes.length) {
       let imported;
@@ -573,6 +581,10 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
           status: event.type === 'item.completed' ? (item.exit_code === 0 ? 'completed' : 'failed') : 'running',
           exitCode: Number.isInteger(item.exit_code) ? item.exit_code : null
         } }));
+        if(event.type==='item.completed'&&item.exit_code===0&&typeof item.aggregated_output==='string'){
+          run.successfulTool=true;
+          if(run.nativeReadinessToken&&item.aggregated_output.split(/\r?\n/).some(line=>line.trim()===run.nativeReadinessToken))run.readinessVerified=true;
+        }
         if (event.type === 'item.completed' && typeof item.id === 'string' && Number.isInteger(item.exit_code)
           && typeof item.aggregated_output === 'string' && !run.resultIds.has(item.id)) {
           run.resultIds.add(item.id);
@@ -617,6 +629,7 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
       workspaceBoundary: 'native-staged',
       // Generic task fit; native tools are not CetaMesh Broker capabilities.
       assignment: { taskKinds: ['code', 'analysis'], tools: [], maxDifficulty: 3 },
+      supportsReadinessCheck: true,
       supportsFreshSession: true,
       supportsResume: inspection.supportsResume === true,
       contextUsage: { available: true, source: 'Codex exec JSONL usage events when emitted' },
@@ -677,20 +690,20 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
         return { sessionId: id, provider: 'codex', taskId: binding.task.id, workspaceId: binding.workspace.id, cwd: stage.root };
       },
 
-      async send({ sessionId, content, runId = null, phase = 'user' } = {}) {
+      async send({ sessionId, content, runId = null, phase = 'user', nativeReadinessToken = null } = {}) {
         const session = requireSession(sessionId);
         if (session.activeRun) throw agentProviderError('TURN_BUSY', 'Codex Task session already has an active turn');
         const turnId = crypto.randomUUID();
         const prompt = [
           `[CetaMesh Task ${session.taskId}]`,
           `Workspace: ${session.workspaceId}`,
-          `Task goal: ${session.task.goal}`,
-          session.task.checkpoint?.summary ? `Checkpoint: ${session.task.checkpoint.summary}` : '',
+          `Original Owner goal (orchestrator context; follow the current Core execution role below): ${session.task.goal}`,
+          session.task.checkpoint?.summary ? `Historical checkpoint (may predate this handoff): ${session.task.checkpoint.summary}` : '',
           session.task.checkpoint?.nextAction ? `Next action: ${session.task.checkpoint.nextAction}` : '',
           'Use this staging copy for Task work. It is not host-file read isolation. Native OS operations follow Codex security policy; CetaMesh only approves imports and platform tools. Never access CetaMesh credentials, private IPC, or unrelated host files.',
           String(content ?? '')
         ].filter(Boolean).join('\n\n');
-        const run = { turnId, runId, phase, resultIds: new Set(), inspectionGeneration, pendingText: '', text: '', usage: null, turnCompleted: false, failed: false, handle: null };
+        const run = { turnId, runId, phase, nativeReadinessToken, readinessVerified:false, successfulTool:false, resultIds: new Set(), inspectionGeneration, pendingText: '', text: '', usage: null, turnCompleted: false, failed: false, handle: null };
         session.activeRun = run;
         session.lastRunStatus = 'running';
         emit(session, makeEvent('turn/start', turnId));
@@ -772,6 +785,7 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
           running: Boolean(session.activeRun), waitingForApproval: Boolean(session.waitingForApproval),
           approvalId: session.waitingForApproval, lastRunStatus: session.lastRunStatus,
           errorCode: session.lastError?.code ?? null,
+          readiness:session.readiness??null,
           snapshotRead: session.lastError?.snapshotRead ? { ...session.lastError.snapshotRead } : null
         };
       },
@@ -843,8 +857,9 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
           reachable: null,
           sessionCapable: available,
           sandboxCapable,
+          toolsAvailable,
           security,
-          readyForTask: available && security.nativeSandboxSupported === true && sandboxCapable === true && securityMode === 'native',
+          readyForTask: available && security.nativeSandboxSupported === true && sandboxCapable === true && toolsAvailable === true && securityMode === 'native',
           installKind: cli.installKind?.() ?? 'unknown',
           probePhase: inspection.available && !authenticated ? 'authentication' : inspection.probePhase,
           probeCode: security.verificationError ?? (inspection.available && !authenticated ? 'CODEX_AUTH_REQUIRED' : inspection.probeCode),

@@ -128,6 +128,7 @@ try {
   const actor=services.capabilityService.principalForTask(item.id);
   assert.ok(actor.grants.capabilities.includes('agent.delegate.propose'),'Owner policy enables a bounded proposal');
   const discovered=await services.capabilityService.broker.execute({actor,taskId:item.id,workspaceId:workspace.id,capability:'agent.delegate.candidates',input:{taskKind:'code',difficulty:2,requiredTools:['filesystem.read']}});
+  assert.equal(discovered.result.canPropose,true);assert.equal(discovered.result.nextAction,'propose-matching-needs');assert.equal(discovered.result.candidates.find(row=>row.provider==='discoverable-fixture').proposalEligible,true);
   assert.ok(discovered.result.candidates.some(row=>row.provider==='discoverable-fixture'),'model can discover actual eligible capability matches');
   const call={actor,taskId:item.id,workspaceId:workspace.id,capability:'agent.delegate.propose',requestId:'proposal-tool',
    input:{taskKind:'code',difficulty:2,requiredTools:['filesystem.read'],instruction:'Perform remaining implementation.'}};

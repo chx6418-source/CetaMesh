@@ -99,7 +99,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     const verification=normalizeDelegationVerification(policy.verification,task.acceptance);
     return mutate(id,expectedRev,draft=>{
       draft.delegationPolicy={id:crypto.randomUUID(),issuedBy:String(actor.id).slice(0,160),expiresAt:policy.expiresAt,
-        maxDelegations:policy.maxDelegations,used:0,allowUnknownCost:policy.allowUnknownCost,
+        maxDelegations:policy.maxDelegations,used:0,allowUnknownCost:policy.allowUnknownCost,prepareNative:policy.prepareNative===true,
         taskBinding:delegationBinding(draft),boundSessionId:null,...(verification?{verification}:{} )};
       return draft;
     });
@@ -190,6 +190,12 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
       throw taskError('AGENT_ASSIGNMENT_EXPIRED','Source Task changed before handoff');
     return task;
   }
+  function assertDelegationReturnBoundary({id,requestId}={}){
+    const task=requireTask(id),proposal=task.delegationProposal;
+    if(task.status!=='running'||proposal?.state!=='returning'||proposal.requestId!==requestId||task.delegationPolicy?.id!==proposal.policyId
+      ||!validDelegationPolicy(task.delegationPolicy,task,{consumed:true}))throw taskError('DELEGATION_RETURN_DENIED','Return preparation authorization changed');
+    return task;
+  }
   function recordDelegationTarget({id,requestId,selectedProvider,sessionId}={}) {
     const task=assertDelegationClaim({id,requestId,selectedProvider,targetSessionId:sessionId});
     if(task.delegationProposal.targetSessionId&&task.delegationProposal.targetSessionId!==sessionId)
@@ -263,7 +269,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
   }
   // ── 创建 / 读取 / 修改 ─────────────────────────────────────────────────
   function create({
-    goal, requirements, workspaceId, currentPhase, acceptanceCriteria, status, note, requestId, requestedAgentProvider
+    goal, requirements, workspaceId, currentPhase, acceptanceCriteria, status, note, requestId, requestedAgentProvider, launchFingerprint
   } = {}) {
     const initialStatus = status === undefined || status === null ? 'queued' : normalizeStatus(status);
     const timestamp = now();
@@ -271,7 +277,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     const normalizedRequirements = normalizeStringList(requirements, 'requirements', TASK_LIMITS.requirements);
     const normalizedWorkspace = normalizeWorkspaceId(workspaceId);
     const priorRequest = findByCreateRequestId({ requestId, goal: normalizedGoal,
-      requirements: normalizedRequirements, workspaceId: normalizedWorkspace, requestedAgentProvider });
+      requirements: normalizedRequirements, workspaceId: normalizedWorkspace, requestedAgentProvider, launchFingerprint });
     if (priorRequest) return priorRequest;
     if (normalizedWorkspace) {
       const existing = findByGoalWorkspace({ goal: normalizedGoal, workspaceId: normalizedWorkspace });
@@ -298,7 +304,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
       attempts: [],
       createRequest: requestId ? { id: normalizeText(requestId, 'requestId', 160, { required: true }),
         fingerprint: createFingerprint({ goal: normalizedGoal, requirements: normalizedRequirements,
-          workspaceId: normalizedWorkspace, requestedAgentProvider }) } : null,
+          workspaceId: normalizedWorkspace, requestedAgentProvider, launchFingerprint }), ...(launchFingerprint?{launchFingerprint}:{}) } : null,
       artifacts: [],
       executionEvidence: [],
       agentReports: [],
@@ -689,21 +695,22 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     return matches[0] ?? null;
   }
 
-  function createFingerprint({ goal, requirements, workspaceId, requestedAgentProvider } = {}) {
+  function createFingerprint({ goal, requirements, workspaceId, requestedAgentProvider, launchFingerprint } = {}) {
     return crypto.createHash('sha256').update(JSON.stringify({
       goal: String(goal ?? '').normalize('NFKC').trim().replace(/\s+/gu, ' ').toLocaleLowerCase(),
       requirements: normalizeStringList(requirements, 'requirements', TASK_LIMITS.requirements),
       workspaceId: normalizeWorkspaceId(workspaceId),
-      requestedAgentProvider: normalizeProvider(requestedAgentProvider) || null
+      requestedAgentProvider: normalizeProvider(requestedAgentProvider) || null,
+      ...(launchFingerprint?{launchFingerprint}:{})
     })).digest('hex');
   }
 
-  function findByCreateRequestId({ requestId, goal, requirements, workspaceId, requestedAgentProvider } = {}) {
+  function findByCreateRequestId({ requestId, goal, requirements, workspaceId, requestedAgentProvider, launchFingerprint } = {}) {
     if (!requestId) return null;
     const id = normalizeText(requestId, 'requestId', 160, { required: true });
     const match = store.listAll().find(row => row.createRequest?.id === id);
     if (!match) return null;
-    if (match.createRequest.fingerprint !== createFingerprint({ goal, requirements, workspaceId, requestedAgentProvider })) {
+    if (match.createRequest.fingerprint !== createFingerprint({ goal, requirements, workspaceId, requestedAgentProvider, launchFingerprint })) {
       throw taskError('REQUEST_ID_CONFLICT', 'Task creation request ID was reused with different data');
     }
     return match;
@@ -1254,6 +1261,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     recordDelegationProposal,
     claimDelegationProposal,
     assertDelegationClaim,
+    assertDelegationReturnBoundary,
     recordDelegationTarget,
     claimDelegationReturn,
     recordDelegationReturnTarget,

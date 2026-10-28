@@ -12,7 +12,7 @@ export function operationIdentity(request, entry) {
   const scope = { taskId: request.taskId, workspaceId: request.workspaceId };
   return { key: 'operation:' + requestFingerprint({ ...scope, operationId: request.operationId }),
     fingerprint: requestFingerprint({ ...scope, capability: entry.id, permission: entry.permission ?? entry.id,
-      descriptorVersion: entry.descriptorVersion ?? null, input: request.input, scope: request.scope ?? null }) };
+      descriptorVersion: entry.descriptorVersion ?? null, ...(request.constrainedActor?{constrainedActor:request.constrainedActor}:{}), input: request.input, scope: request.scope ?? null }) };
 }
 
 /** Only a trusted executor may select a bounded, non-sensitive result receipt. */

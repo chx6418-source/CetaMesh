@@ -177,13 +177,15 @@ export function createAgentBroker({ registry, log = () => {}, resolveWorkspaceId
       return created;
     },
 
-    async send({ provider: providerId, sessionId, content, mode, phase = 'user', runId = crypto.randomUUID() } = {}) {
+    async send({ provider: providerId, sessionId, content, mode, phase = 'user', runId = crypto.randomUUID(), nativeReadinessToken, authorizationGuard } = {}) {
       const provider = requireProvider(providerId);
       requireSessionId({ sessionId });
       if (!['user', 'bootstrap', 'system', 'approval'].includes(phase)
         || typeof runId !== 'string' || !runId || runId.length > 240) {
         throw agentProviderError('INVALID_PARAMS', 'Agent run requires a bounded Core identity and phase');
       }
+      if(nativeReadinessToken!==undefined && (phase!=='bootstrap'||provider.capabilities()?.supportsReadinessCheck!==true||!/^CM_READY_[a-f0-9]{32}$/.test(nativeReadinessToken)))
+        throw agentProviderError('INVALID_PARAMS','Readiness requires an exact Core bootstrap token and a verified adapter');
       const binding = executionBindings.get(consentKey(providerId, sessionId));
       const declaredSecurity = provider.capabilities()?.security;
       if (binding?.securityRequired || (declaredSecurity !== undefined && declaredSecurity !== null)) {
@@ -220,8 +222,10 @@ export function createAgentBroker({ registry, log = () => {}, resolveWorkspaceId
           if (status.running !== false || status.runtimeValid === false || status.state === 'unknown' || status.lastRunStatus === 'unknown') throw agentProviderError('AGENT_OUTCOME_UNKNOWN', 'Native Session requires reconciliation before dispatch');
         }
         if (binding?.taskId && phase === 'user') { taskExecutionObserver?.({ ...observation, state: 'running' }); observed = true; }
+        // Recheck delegated authority after all awaited native status/consent work, immediately before dispatch.
+        if(authorizationGuard!==undefined){if(typeof authorizationGuard!=='function')throw agentProviderError('INVALID_PARAMS','Trusted dispatch guard required');const checked=authorizationGuard();if(checked?.then)throw agentProviderError('INVALID_PARAMS','Dispatch guard must be synchronous');}
         const metadata = { phase, runId };
-        const result = await provider.send({ sessionId, content, mode, phase, runId,
+        const result = await provider.send({ sessionId, content, mode, phase, runId, nativeReadinessToken,
           onRequestId: requestId => rememberRun(providerId, sessionId, { requestId }, metadata) });
         if (result?.accepted === true) rememberRun(providerId, sessionId, result, { phase, runId });
         else if (binding?.taskId) taskExecutionObserver?.({ ...observation, state: 'unknown' });

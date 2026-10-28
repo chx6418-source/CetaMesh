@@ -9,6 +9,8 @@ export function normalizeRequest(value){
  if(!value || typeof value!=='object')throw capabilityError('INVALID_REQUEST','Capability request required');
  if(!value.actor || !['owner','agent','external','extension','device'].includes(value.actor.kind) || !String(value.actor.id??'').trim())throw capabilityError('UNAUTHORIZED','Trusted actor required');
  if(!String(value.capability??'').trim())throw capabilityError('INVALID_REQUEST','Capability required');
- const copy=structuredClone(value);
+ // AbortSignal is transport context, never durable request/fingerprint data.
+ const {signal,...durable}=value;
+ const copy=structuredClone(durable);
  return {...copy,requestId:String(copy.requestId||crypto.randomUUID()),actor:copy.actor,capability:String(copy.capability),input:copy.input??{},scope:copy.scope??null,risk:copy.risk??null,reason:String(copy.reason??'').slice(0,1000)};
 }
