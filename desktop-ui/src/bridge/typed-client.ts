@@ -60,6 +60,7 @@ export interface Memory {
 export interface MemoryCandidate {
   id: string; status: string; type: string; scope: string; content: string; reason: string;
   proposedAt: string | number | null; memoryId: string | null;
+  review?: {status:'needs-review';method:'deterministic-text-v1';hints:{kind:'possible-duplicate'|'possible-conflict';code:'normalized-text-match'|'same-subject-different-value';memoryId:string;revision:number}[];truncated:boolean};
 }
 export type AgentStatus = 'ready' | 'needs-setup' | 'descriptor-incomplete' | 'not-installed' | 'unavailable' | 'not-supported' | 'not-checked' | 'connection-pending';
 export interface Agent {

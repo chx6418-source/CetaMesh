@@ -321,7 +321,7 @@ function runInstaller(args, env = {}) {
     env: { ...process.env, ...env },
     timeout: 300000
   });
-  return { status: result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? '', output: `${result.stdout ?? ''}${result.stderr ?? ''}` };
+  return { status: result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? '', output: `${result.stdout ?? ''}${result.stderr ?? ''}${result.error ? '\n[installer spawn error '+result.error.code+': '+result.error.message+']' : ''}` };
 }
 
 function isInstallerRegistryAccessDenied(output, key) {
@@ -481,7 +481,7 @@ try {
       env: { ...process.env, PATH: noNodePath(), Path: noNodePath(), WHALEBRIDGE_DATA_DIR: dataDir,
         WHALEBRIDGE_INSTANCE_SUFFIX: `rc-${process.pid}` }
     });
-    assert.equal(second.status, 0, `第二个实例应静默退出（实际 ${second.status}）\n${second.stderr}`);
+    assert.equal(second.status, 0, `第二个实例应静默退出（实际 ${second.status}，启动错误 ${second.error?.code ?? "none"}，信号 ${second.signal ?? "none"}）\n${second.stderr ?? ""}`);
     assert.ok(isRunning(shell.pid), '第二个实例不得影响已在运行的实例');
     assert.equal(
       descendants(shell.pid).filter((item) => path.basename(item.ExecutablePath ?? '').toLowerCase() === 'whalebridgecore.exe').length,

@@ -104,9 +104,72 @@ export function createSuiteSandbox({ suiteId, tempRoot = os.tmpdir(), now = new 
   return { root: directory, markerPath, runId, suiteId: safeId, tempRoot: root };
 }
 
+function registeredSecretPath(root, relative) {
+  if (typeof relative !== 'string' || !relative || path.isAbsolute(relative)) throw new Error('test secret path is outside its sandbox');
+  const target = path.resolve(root, relative);
+  const normalized = path.relative(root, target);
+  if (!normalized || normalized === '..' || normalized.startsWith('..' + path.sep) || path.isAbsolute(normalized)) throw new Error('test secret path is outside its sandbox');
+  let cursor = root;
+  const parts = normalized.split(path.sep);
+  for (const part of parts.slice(0, -1)) {
+    cursor = path.join(cursor, part);
+    try {
+      const stat = fs.lstatSync(cursor);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('test secret parent is not an owned directory');
+    } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  }
+  return target;
+}
+
+// Register before writing any credential. Propagate through marked parent suites so
+// the runner can scrub even after taskkill, independently of diagnostic retention.
+export function registerSuiteSecret({ sandbox, file } = {}) {
+  const owned = assertOwnedSandbox(sandbox);
+  let directory = owned.resolved;
+  for (;;) {
+    const info = assertMarkedDirectory(directory, path.dirname(directory));
+    const relative = path.relative(directory, path.resolve(file));
+    registeredSecretPath(directory, relative);
+    const secretFiles = [...new Set([...(info.marker.secretFiles ?? []), relative])];
+    fs.writeFileSync(info.markerPath, JSON.stringify({ ...info.marker, secretFiles }) + '\n');
+    const parent = path.dirname(directory);
+    if (!path.basename(parent).startsWith(PREFIX) || !fs.existsSync(path.join(parent, MARKER))) break;
+    directory = parent;
+  }
+}
+
+export function scrubSuiteSecrets({ sandbox } = {}) {
+  const owned = assertOwnedSandbox(sandbox);
+  let info;
+  try { info = assertMarkedDirectory(owned.resolved, sandbox.tempRoot); }
+  catch (error) { if (error.code === 'ENOENT') return; throw error; }
+  if (info.marker.runId !== sandbox.runId || info.marker.suiteId !== sandbox.suiteId) throw new Error('suite sandbox ownership does not match');
+  if (info.marker.secretFiles !== undefined && !Array.isArray(info.marker.secretFiles)) throw new Error('test secret registration is invalid');
+  for (const relative of info.marker.secretFiles ?? []) {
+    const target = registeredSecretPath(owned.resolved, relative);
+    const targets = [target];
+    // Existing credential/JSON stores use basename.pid.crypto.tmp. A killed writer
+    // may leave those bytes before rename; scrub only this exact naming contract.
+    const prefix = path.basename(target) + '.';
+    try {
+      for (const name of fs.readdirSync(path.dirname(target))) {
+        if (name.startsWith(prefix) && /^\d+\.(?:[a-f0-9]{12}|[a-f0-9]{16})\.tmp$/.test(name.slice(prefix.length))) targets.push(path.join(path.dirname(target), name));
+      }
+    } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    for (const file of targets) {
+      try {
+        const stat = fs.lstatSync(file);
+        if (stat.isDirectory()) throw new Error('registered test secret is not a file');
+        retryFilesystemOperation(() => fs.unlinkSync(file));
+      } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    }
+  }
+}
+
 export function finalizeSuiteSandbox({ sandbox, failed, keepFailed = false } = {}) {
   if (!sandbox?.root || !sandbox?.tempRoot) throw new Error('invalid suite sandbox');
   const owned = assertOwnedSandbox(sandbox);
+  scrubSuiteSecrets({ sandbox });
   let marker = null;
   try {
     const stat = fs.lstatSync(owned.markerPath);

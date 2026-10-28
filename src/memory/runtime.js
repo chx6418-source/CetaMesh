@@ -35,6 +35,7 @@ import { createMemoryPolicy } from './policy.js';
 import { createMemoryStore } from './store.js';
 import { createMemoryLinks } from './links.js';
 import { normalizeReferences } from './references.js';
+import { createCandidateReviewer } from './candidate-review.js';
 
 const CANDIDATE_SCHEMA_VERSION = 1;
 const MAX_CANDIDATES = 500;
@@ -163,7 +164,13 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
     return next;
   }
 
-  function candidateView(candidate) {
+  function candidateView(candidate, principal, reviewCache = new Map()) {
+    let review;
+    if (candidate.status === 'pending' && principal) {
+      const key = JSON.stringify([candidate.scope.key, candidate.type]);
+      if (!reviewCache.has(key)) reviewCache.set(key, createCandidateReviewer(currentCandidateRecords(principal, candidate)));
+      review = reviewCache.get(key)(candidate.content);
+    }
     return {
       id: candidate.id,
       status: candidate.status,
@@ -177,7 +184,8 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
       decidedBy: candidate.decidedBy,
       memoryId: candidate.memoryId,
       sourceRefs: structuredClone(candidate.sourceRefs || []),
-      entityIds: [...(candidate.entityIds || [])]
+      entityIds: [...(candidate.entityIds || [])],
+      ...(review ? { review } : {})
     };
   }
 
@@ -272,6 +280,35 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
     }
     for(const group of groups.values())if(new Set(group.map(row=>row.content)).size>1)for(const row of group)conflicted.add(row.id);
     return {expired,conflicted,superseded};
+  }
+  function currentCandidateRecords(principal, candidate) {
+    let decision;
+    try {
+      decision = authorizeRead({ principal, scopes: [normalizeScope(candidate.scope.key)], types: [candidate.type] });
+    } catch (error) {
+      // Permission to propose a type (or to see one's proposal) never grants
+      // permission to inspect the saved Memory records behind a review hint.
+      if (['SCOPE_NOT_AUTHORIZED', 'TYPE_NOT_AUTHORIZED'].includes(error.code)) return [];
+      throw error;
+    }
+    const rows = scanFor(decision), state = factEligibility(rows, principal);
+    return rows.filter(row => !state.expired.has(row.id) && !state.conflicted.has(row.id) && !state.superseded.has(row.id));
+  }
+  function matchesOwnProposalReceipt(principal, decision, candidate, content) {
+    // This only replays the author's already-recorded confirmation receipt;
+    // it grants no Memory read and contributes no text to review heuristics.
+    const actor = principal.kind + ':' + principal.id;
+    if (candidate.proposedBy !== actor || candidate.confirmedContent !== content
+      || candidate.memoryId !== 'mem_' + candidate.id
+      || (decision.types && !decision.types.includes(candidate.type))) return false;
+    const scopes = decision.scopeKeys.filter(key => key === candidate.scope.key);
+    if (!scopes.length) return false;
+    const [target] = store.scanAuthorized(scopes, row => row.id === candidate.memoryId && row.type === candidate.type);
+    // Explicit fact governance needs full authorized eligibility assessment.
+    // A receipt with no such read rights must abstain rather than infer it.
+    return Boolean(target && !target.factKey && (target.validUntil == null || target.validUntil > now())
+      && target.content === content && target.source === 'chat-candidate'
+      && target.origin?.candidateId === candidate.id && target.origin.proposedBy === actor);
   }
   function assessFact({principal,id}={}) {
     const decision=authorizeRead({principal});const row=findAuthorized(decision,id);
@@ -448,11 +485,15 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
     const duplicate = [...candidates.values()].find(item => item.status === 'pending'
       && item.type === normalizedType && item.scope.key === scopeKey(normalizedScope)
       && item.content === normalizedContent);
-    if (duplicate) return { candidate: candidateView(duplicate), duplicate: true };
-    const prior = [...candidates.values()].find(item => item.status === 'accepted'
+    if (duplicate) return { candidate: candidateView(duplicate, principal), duplicate: true };
+    const priorCandidates = [...candidates.values()].filter(item => item.status === 'accepted'
       && item.type === normalizedType && item.scope.key === scopeKey(normalizedScope)
       && item.content === normalizedContent && item.memoryId);
-    if (prior && store.get(prior.memoryId)?.content === normalizedContent) {
+    const currentById = new Map((priorCandidates.length ? currentCandidateRecords(principal, priorCandidates[0]) : [])
+      .map(row => [row.id, row]));
+    const prior = priorCandidates.find(item => currentById.get(item.memoryId)?.content === normalizedContent
+      || matchesOwnProposalReceipt(principal, decision, item, normalizedContent));
+    if (prior) {
       return { candidate: null, duplicate: true, existingMemoryId: prior.memoryId };
     }
     if ([...candidates.values()].filter(item => ['pending', 'confirming'].includes(item.status)).length >= MAX_CANDIDATES) {
@@ -476,7 +517,7 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
     candidates.set(candidate.id, candidate);
     try { persistCandidates(); }
     catch (error) { candidates.delete(candidate.id); throw error; }
-    return { candidate: candidateView(candidate) };
+    return { candidate: candidateView(candidate, principal) };
   }
 
   function listCandidates({ principal, status } = {}) {
@@ -484,6 +525,7 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
     loadCandidates();
     const allowed = new Set(decision.scopeKeys);
     const all = principal.kind === 'user' && decision.scopeKeys.includes('*');
+    const reviewCache = new Map();
     const rows = [...candidates.values()]
       .filter((candidate) => (all
         ? candidate.scope.kind !== 'user' || candidate.scope.id === principal.id
@@ -491,7 +533,7 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
       .filter((candidate) => !decision.types || decision.types.includes(candidate.type) || candidate.proposedBy === principal.kind + ':' + principal.id)
       .filter((candidate) => (status ? candidate.status === status : true))
       .sort((a, b) => b.proposedAt - a.proposedAt)
-      .map(candidateView);
+      .map(candidate => candidateView(candidate, principal, reviewCache));
     return { candidates: rows, meta: { total: rows.length, pending: rows.filter(row => row.status === 'pending').length,
       confirming: rows.filter(row => row.status === 'confirming').length, capacity: MAX_CANDIDATES,
       remaining: Math.max(0, MAX_CANDIDATES - [...candidates.values()].filter(row => ['pending', 'confirming'].includes(row.status)).length) } };

@@ -277,10 +277,15 @@ function projectMemory(value) {
 }
 
 function projectMemoryCandidate(value) {
-  const row = record(value);
+  const row = record(value), sourceReview=record(row.review);let review;
+  if(row.status==='pending'&&sourceReview.status==='needs-review'&&sourceReview.method==='deterministic-text-v1'&&Array.isArray(sourceReview.hints)){
+    const hints=sourceReview.hints.slice(0,5).map(record).filter(hint=>((hint.kind==='possible-duplicate'&&hint.code==='normalized-text-match')||(hint.kind==='possible-conflict'&&hint.code==='same-subject-different-value'))&&string(hint.memoryId,128)&&Number.isSafeInteger(hint.revision)&&hint.revision>0)
+      .map(hint=>({kind:hint.kind,code:hint.code,memoryId:string(hint.memoryId,128),revision:hint.revision}));
+    if(hints.length)review={status:'needs-review',method:'deterministic-text-v1',hints,truncated:sourceReview.truncated===true||sourceReview.hints.length>5};
+  }
   return { id: string(row.id, 128), status: string(row.status, 32), type: string(row.type, 80),
     scope: string(row.scope, 120), content: string(row.content, 4000), reason: string(row.reason, 500),
-    proposedAt: scalar(row.proposedAt), memoryId: string(row.memoryId, 128) || null };
+    proposedAt: scalar(row.proposedAt), memoryId: string(row.memoryId, 128) || null, ...(review?{review}:{}) };
 }
 
 function projectDshPreset(value) {

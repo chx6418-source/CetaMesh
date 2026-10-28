@@ -24,7 +24,7 @@ import { readRawConfigOrEmpty } from '../src/config/loader.js';
 import { APP_PATHS } from '../src/app-paths.js';
 import { isLegacyBridgeTestOptedIn } from './environment-policy.mjs';
 import { loadReleaseVersion, releaseArtifactDirectory } from '../src/release/version.js';
-import { createSuiteSandbox, finalizeSuiteSandbox } from '../src/testing/suite-sandbox.js';
+import { createSuiteSandbox, finalizeSuiteSandbox, scrubSuiteSecrets } from '../src/testing/suite-sandbox.js';
 import { terminateSuiteProcessTree } from '../src/testing/suite-process.js';
 import { classifySuiteOutcome } from '../src/testing/suite-result.js';
 
@@ -39,6 +39,10 @@ export const CATEGORIES = ['core', 'architecture', 'security', 'runtime', 'integ
 // ── 登记表：scripts/test-*.mjs 的每一个文件都必须出现在这里（或能从 package.json 映射）。
 // requires 的取值见 probeAvailability()；category 取值见 CATEGORIES。
 const REGISTRY = {
+  'test-task-launch-selection.mjs': {category:'desktop',requires:['ui-motion-live'],note:'Production TaskCreateForm handles delayed Workspace lists without overriding Owner selection'},
+  'test-mcp-acceptance-assertions.mjs': {category:'security',timeoutMs:120000,note:'Real MCP smoke process outcomes must assert successful tool data and private-address rejection'},
+  'test-memory-candidate-review.mjs': {category:'runtime',note:'Conservative pending Memory candidate hints preserve live authorized scope and confirmed fact authority'},
+  'test-real-native-autonomy.mjs': {category:'environment',requires:['real-managed','real-codex','native-product'],timeoutMs:900000,note:'Actual built Desktop/Core WebView2 bridge with real Managed/Codex and isolated native UI controls'},
   'test-real-default-ui-autonomy.mjs': {category:'environment',requires:['real-managed','real-codex','ui-motion-live'],timeoutMs:900000,note:'Production Tasks UI through authenticated Core pipe, cold real Codex preparation and independent verification'},
   'test-cold-autonomous-readiness.mjs': {category:'security',note:'Cold native candidate preparation, cost/consent and actual readiness fences'},
   'test-default-autonomous-task.mjs': {category:'integration',note:'Default product task launch binds collaboration policy and exact machine criteria without direct setup'},
@@ -189,6 +193,7 @@ const REGISTRY = {
   'test-final-release-gate.mjs': { category: 'security', note: 'Strict final release decision cannot be overridden by green fixtures or missing acceptance evidence' },
   'test-release-staging-protection.mjs': { category: 'release', note: 'Pre-existing release staging directory protection' },
   'test-storage-hygiene.mjs': { category: 'release', note: 'Exact-path cleanup and release retention fixtures' },
+  'test-suite-secret-cleanup.mjs': { category: 'security', note: 'Registered temporary credentials are scrubbed even when failure artifacts are retained' },
   'test-suite-process-tree.mjs': { category: 'security', note: 'Timeout termination waits for suite process trees' },
 
   // ── architecture：结构契约 / 源码不变量 ────────────────────────────────────
@@ -374,6 +379,7 @@ async function probeAvailability() {
     'real-gemini-qwen': process.env.WHALEBRIDGE_TEST_REAL_GEMINI_QWEN === '1',
     'claude-auth-contract': process.platform==='win32' && process.env.WHALEBRIDGE_TEST_CLAUDE_AUTH_CONTRACT==='1',
     'real-opencode': process.env.WHALEBRIDGE_TEST_REAL_OPENCODE === '1',
+    'native-product': process.platform === 'win32' && process.env.WHALEBRIDGE_TEST_NATIVE_PRODUCT === '1',
     'real-managed': process.env.WHALEBRIDGE_TEST_REAL_MANAGED === '1',
     'real-codex': process.env.WHALEBRIDGE_TEST_REAL_CODEX === '1'
       && spawnSync('codex', ['login', 'status'], { timeout: 20000 }).status === 0
@@ -453,16 +459,20 @@ function runSuite(suite, { verbose }) {
       const failed = outcome.failed;
       let sandboxNote = '';
       let cleanupFailed = false;
+      try { scrubSuiteSecrets({ sandbox }); } catch (error) {
+        cleanupFailed = true;
+        sandboxNote += '\n[test secret cleanup failed] ' + (error?.message ?? error);
+      }
       if (treeError) {
         cleanupFailed = true;
-        sandboxNote = `\n[test sandbox retained because suite process-tree termination could not be confirmed] ${sandbox.root}`;
+        sandboxNote += `\n[test sandbox retained because suite process-tree termination could not be confirmed] ${sandbox.root}`;
       } else {
         try {
           const result = finalizeSuiteSandbox({ sandbox, failed, keepFailed: process.env.KEEP_TEST_ARTIFACTS === '1' });
           if (result.retained) sandboxNote = `\n[test sandbox retained] ${sandbox.root}`;
         } catch (cleanupError) {
           cleanupFailed = true;
-          sandboxNote = `\n[test sandbox cleanup failed] ${cleanupError?.message ?? cleanupError}`;
+          sandboxNote += `\n[test sandbox cleanup failed] ${cleanupError?.message ?? cleanupError}`;
         }
       }
       const detail = error

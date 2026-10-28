@@ -85,6 +85,9 @@ await check('progress widths and accessible values match exact percentages',asyn
     const reviewTask={...task(9,0),title:'Review report',goal:'Analysis only',agent:null,currentAgent:{provider:'codex',sessionId:'s'},artifacts:[],agentHistory:[],children:[],attempts:[],executionEvidence:[],progress:{percent:0,note:''},execution:{state:'awaiting-review',hadToolActivity:false,hasEvidence:false},reviewReport:{eventId:'report-1',text:'Exact report to review',sha256:'a'.repeat(64)}};
     const card=renderToStaticMarkup(React.createElement(ChatContextPanel,{task:reviewTask,memories:[],approvals:[],onOpenMemory(){}}));assert.ok(card.includes('待验收'),'settled run must not say still running');
     const detail=renderToStaticMarkup(React.createElement(TaskDetails,{task:reviewTask,providers:[],onHandoff(){},onAction(){},onStart(){},onReconcile(){},onReview(){},onCreateChild(){},onComplete(){},onVerifyChild(){}}));assert.ok(detail.includes('Exact report to review'));assert.ok(detail.includes('仅验收分析报告'));assert.match(detail,/<input[^>]*type="checkbox"/);assert.doesNotMatch(detail,/<input[^>]*checked=""/);
+    const completed={...reviewTask,status:'completed',result:{summary:'PROVEN_RESULT_DELIVERY'}};
+    const completedHtml=renderToStaticMarkup(React.createElement(TaskDetails,{task:completed,providers:[],onHandoff(){},onAction(){},onStart(){},onReconcile(){},onReview(){},onCreateChild(){},onComplete(){},onVerifyChild(){}}));
+    assert.doesNotMatch(completedHtml,/验收说明/,'completed Task must not ask for a disabled manual acceptance');assert.ok(completedHtml.includes('PROVEN_RESULT_DELIVERY'));assert.ok(completedHtml.indexOf('PROVEN_RESULT_DELIVERY')<completedHtml.indexOf('任务累计用量'),'verified result precedes execution internals');
   }finally {await vite.close();delete globalThis.window;}
 });
 await check('production CSS closure defines progress track dimensions and fill',async()=>{

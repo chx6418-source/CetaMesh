@@ -28,6 +28,14 @@ try {
 
   if (hasQuery) {
     const result = await client.callTool({ name: 'qq_status', arguments: {} });
+    assert.equal(result.isError ?? false, false, 'qq_status must not report a tool error');
+    const text = result.content?.find(part => part.type === 'text')?.text;
+    assert.ok(typeof text === 'string' && text.trim(), 'qq_status must return account status text');
+    const status = JSON.parse(text);
+    assert.ok(status && typeof status === 'object' && !Array.isArray(status), 'qq_status must return a JSON object');
+    assert.match(String(status.user_id ?? ''), /^[1-9]\d*$/, 'qq_status must identify the logged-in account');
+    assert.equal(status.online, true, 'qq_status must confirm the account is online');
+    assert.equal(status.good, true, 'qq_status must confirm the gateway is healthy');
     console.log('✅ qq_status:', JSON.stringify(result).slice(0, 300));
   }
   

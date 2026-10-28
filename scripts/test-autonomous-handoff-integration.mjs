@@ -27,13 +27,14 @@ async function scenario(machineContract,coldNative=false,control='approve') {
   credentialService.set({provider:'automatic-fixture-model',apiKey:'synthetic-local-only'});
   services=createCetaMeshServices({stateDir:path.join(root,'state'),dataRoot:path.join(root,'data'),agentStagingRoot:path.join(root,'staging'),providerSecrets:credentialService});
   assert.equal(services.providerSecrets,credentialService);
-  let modelCalls=0,verificationCalls=0;
+  let modelCalls=0,verificationCalls=0;const observedPlans=[];
   services.modelRegistry.register({id:'automatic-fixture-model',label:'Deterministic local model',defaultModel:'fixture',supportsTools:true,
    health:async()=>({available:true,configured:true}),listModels:async()=>[{id:'fixture'}],chat:async()=>({text:'unused'}),
    stream:async function*(request){
     let call=null;
     if(modelCalls++===0)call={id:'model-choice',capabilityId:'agent.delegate.propose',arguments:JSON.stringify({taskKind:'code',difficulty:2,requiredTools:[],instruction:'Complete the remaining fixture work.'})};
     else if(request.messages.filter(row=>row.role==='user').at(-1)?.content?.startsWith('Independently verify')) {
+     const context=JSON.parse(request.messages.filter(row=>row.role==='user').at(-1).content.split('\n').slice(1).join('\n'));observedPlans.push(context.verificationPlan);
      const step=verificationCalls++;
      if(step===0)call={id:'verify-diff',capabilityId:'git.diff',arguments:'{}'};
      if(step===1)call={id:'verify-test',capabilityId:'operation.continue',arguments:JSON.stringify({operationRef:'fixture-verification'})};
@@ -100,6 +101,9 @@ async function scenario(machineContract,coldNative=false,control='approve') {
   assert.ok(modelCalls>=5);assert.equal(sent.filter(row=>row.phase==='user').length,1);assert.match(sent.find(row=>row.phase==='user').content,/remaining fixture work/);
   assert.deepEqual(current.agentHistory.map(row=>row.provider),['cetamesh','coding-fixture','cetamesh']);
   assert.equal(services.continuityService.runtime.history({taskId}).rollovers.length,2);
+  assert.ok(observedPlans.length>0);
+  if(machineContract)assert.deepEqual(observedPlans[0],{kind:'owner-prepared-code-tests',operationRef:'fixture-verification',allowedPaths:['新增目录/结果.txt'],preservedFiles:['package.json','verify.mjs'],approval:'current-capability-policy',currentEvidenceRequired:true},'return plan must reuse the actual Owner-prepared operation and scope');
+  else assert.equal(observedPlans[0],null,'uncontracted tasks cannot invent an automatic acceptance plan');
   if(machineContract) {
    assert.equal(current.status,'completed');
    const candidates=await (async()=>{for(let i=0;i<100;i++){const rows=services.memoryService.runtime.listCandidates({principal:{kind:'user',id:'desktop'}}).candidates.filter(row=>row.sourceRefs.some(ref=>ref.kind==='task'&&ref.id===taskId));if(rows.length)return rows;await delay(10);}return [];})();

@@ -1,0 +1,32 @@
+// Mount the production TaskCreateForm with real React in Chromium; no Core/model fixture execution.
+import assert from 'node:assert/strict';import fs from 'node:fs';import path from 'node:path';import {spawn} from 'node:child_process';import {setTimeout as delay} from 'node:timers/promises';import WebSocket from 'ws';import {terminateSuiteProcessTree} from '../src/testing/suite-process.js';import {createRequire} from 'node:module';import {fileURLToPath,pathToFileURL} from 'node:url';
+import {createSuiteSandbox,finalizeSuiteSandbox} from '../src/testing/suite-sandbox.js';
+const uiRoot=fileURLToPath(new URL('../desktop-ui/',import.meta.url)),require=createRequire(path.join(uiRoot,'package.json'));
+const {buildSync}=require('esbuild'),sandbox=createSuiteSandbox({suiteId:'task-launch-selection'});let failed=true,child,socket;
+try{
+ const bundle=buildSync({stdin:{resolveDir:uiRoot,loader:'tsx',contents:`
+ import React from 'react';import {createRoot} from 'react-dom/client';import {flushSync} from 'react-dom';import {TaskCreateForm} from './src/app/HarborApp';
+ window.ipc={postMessage(raw){const r=JSON.parse(raw);queueMicrotask(()=>window.__cetameshReceive({id:r.id,ok:true,result:{settings:{agents:{defaultAgentProvider:'auto'}}}}));}};
+ const root=createRoot(document.getElementById('root')),wait=ms=>new Promise(r=>setTimeout(r,ms)),a={id:'a',name:'Alpha'},b={id:'b',name:'Beta'};
+ function render(key,workspaces,activeWorkspaceId){flushSync(()=>root.render(<TaskCreateForm key={key} workspaces={workspaces} activeWorkspaceId={activeWorkspaceId} providers={[]} onCreated={async()=>{throw Error('test must not dispatch');}}/>));}
+ const control=()=>document.querySelector('button[aria-label="工作区"]'),result={};
+ async function choose(text){control().click();await wait(150);Array.from(document.querySelectorAll('[role=listbox][aria-label="工作区"] [role=option]')).find(e=>e.textContent.trim()===text).click();await wait(100);}
+ (async()=>{try{
+ render('late',[]);await wait(100);render('late',[a]);await wait(100);result.lateUnique=control().textContent.trim();
+ render('explicit',[a,b]);await wait(100);await choose('Beta');render('explicit',[a,b],'a');await wait(100);result.keepsExplicit=control().textContent.trim();
+ await choose('选择工作区');render('explicit',[a],'a');await wait(100);result.keepsExplicitEmpty=control().textContent.trim();
+ render('removed',[a,b]);await wait(100);await choose('Beta');const goal=document.querySelector('textarea[aria-label="任务目标"]');Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(goal,'A local task');goal.dispatchEvent(new Event('input',{bubbles:true}));await wait(100);render('removed',[a]);await wait(100);result.removedBlocked=Array.from(document.querySelectorAll('button')).find(e=>e.textContent.trim()==='开始任务').disabled;result.removedNotice=document.body.innerText.includes('所选工作区已不可用');
+ render('ambiguous',[]);await wait(100);render('ambiguous',[a,b]);await wait(100);result.ambiguous=control().textContent.trim();
+ render('context',[a]);await wait(100);render('context',[a,b],'b');await wait(100);result.keepsPriorContext=control().textContent.trim();
+ }catch(error){result.error=String(error.message)}finally{document.getElementById('result').textContent=encodeURIComponent(JSON.stringify(result));}})();
+ `},bundle:true,write:false,minify:true,format:'iife',platform:'browser',jsx:'automatic',loader:{'.css':'empty'}});
+ const file=path.join(sandbox.root,'fixture.html');fs.writeFileSync(file,'<!doctype html><meta charset="utf-8"><div id="root"></div><pre id="result"></pre><script>'+bundle.outputFiles[0].text+'</script>');
+ const edge=path.join(process.env['ProgramFiles(x86)']||'C:/Program Files (x86)','Microsoft/Edge/Application/msedge.exe');
+ const profile=path.join(sandbox.root,'profile');child=spawn(edge,['--headless','--disable-gpu','--no-first-run','--no-default-browser-check','--disable-background-networking','--remote-debugging-port=0','--remote-debugging-address=127.0.0.1','--user-data-dir='+profile,'about:blank'],{windowsHide:true,stdio:'ignore'});
+ const portFile=path.join(profile,'DevToolsActivePort');for(let i=0;!fs.existsSync(portFile)&&i<100;i++)await delay(100);assert.ok(fs.existsSync(portFile));const [port,browserPath]=fs.readFileSync(portFile,'utf8').trim().split(/\r?\n/);
+ socket=new WebSocket('ws://127.0.0.1:'+port+browserPath);await new Promise((resolve,reject)=>{socket.once('open',resolve);socket.once('error',reject);});let seq=0;const pending=new Map();socket.on('message',data=>{const r=JSON.parse(String(data)),p=pending.get(r.id);if(p){pending.delete(r.id);clearTimeout(p.timer);r.error?p.reject(Error(r.error.message)):p.resolve(r.result);}});
+ const rpc=(method,params={},sessionId)=>new Promise((resolve,reject)=>{const id=++seq,timer=setTimeout(()=>{pending.delete(id);reject(Error('CDP timeout '+method));},10000);pending.set(id,{resolve,reject,timer});socket.send(JSON.stringify({id,method,params,sessionId}));});
+ const target=await rpc('Target.createTarget',{url:'about:blank'}),{sessionId}=await rpc('Target.attachToTarget',{targetId:target.targetId,flatten:true});await rpc('Runtime.enable',{},sessionId);await rpc('Page.enable',{},sessionId);await rpc('Page.navigate',{url:pathToFileURL(file).href},sessionId);
+ let encoded;for(let i=0;i<100;i++){const r=await rpc('Runtime.evaluate',{expression:'document.getElementById("result")?.textContent',returnByValue:true},sessionId);encoded=r.result?.value;if(encoded)break;await delay(100);}assert.ok(encoded,'real React fixture must complete');const result=JSON.parse(decodeURIComponent(encoded));console.log(JSON.stringify(result));await rpc('Browser.close');await delay(750);
+ assert.equal(result.error,undefined);assert.equal(result.lateUnique,'Alpha','late single Workspace becomes the safe default');assert.equal(result.keepsExplicit,'Beta');assert.equal(result.keepsExplicitEmpty,'选择工作区','explicit clearing cannot be overridden');assert.equal(result.removedBlocked,true,'removed Workspace cannot remain dispatchable');assert.equal(result.removedNotice,true);assert.equal(result.ambiguous,'选择工作区');assert.equal(result.keepsPriorContext,'Alpha');failed=false;console.log('PASS real TaskCreateForm late Workspace, explicit intent, ambiguity and removal');
+}finally{if(socket?.readyState===WebSocket.OPEN)socket.terminate();if(child?.pid&&child.exitCode===null&&child.signalCode===null){await terminateSuiteProcessTree(child);await delay(250);}finalizeSuiteSandbox({sandbox,failed});}
