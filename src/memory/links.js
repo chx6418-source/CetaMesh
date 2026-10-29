@@ -64,9 +64,9 @@ export function createMemoryLinks({ stateDir, policy, store, now, list, assess =
     const resolved=authorizeRefs({ principal, sourceScope: from.scope, refs: [from, to, ...packet.sourceRefs, ...packet.relatedMemories], explicitCrossScope: explicit });
     const sourceFact=resolved[0]?.memory,targetFact=resolved[1]?.memory;
     let factBinding=null;
-    if(relation==='supersedes'&&(sourceFact?.factKey||targetFact?.factKey)) {
+    if(relation==='supersedes'&&(from.kind==='memory'||to.kind==='memory')) {
       if(from.kind!=='memory'||to.kind!=='memory'||from.scope!==to.scope||from.id===to.id
-        ||sourceFact?.type!==targetFact?.type||!sourceFact?.factKey||sourceFact.factKey!==targetFact?.factKey)
+        ||sourceFact?.type!==targetFact?.type||(sourceFact?.factKey??null)!==(targetFact?.factKey??null))
         throw memoryError('INVALID_FACT_SUPERSESSION','Fact replacement must bind two distinct versions of the same scoped fact');
       factBinding={sourceRevision:sourceFact.rev,targetRevision:targetFact.rev};
     }

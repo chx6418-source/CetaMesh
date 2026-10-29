@@ -20,6 +20,8 @@ import { createCapabilityPolicy } from '../capability/policy.js';
 import { fingerprintExtensionPackage } from './package-fingerprint.js';
 import {isHttpDataManifest,createHttpExtensionHost,httpRequestFor,projectHttpResult} from './http-host.js';
 import {validateSchema} from '../model/input-schema.js';
+import {isEventDataManifest,createEventExtensionHost,eventRequestFor,projectEventResult} from './event-host.js';
+const isDataManifest=manifest=>isHttpDataManifest(manifest)||isEventDataManifest(manifest);
 
 export function createExtensionRuntime({
   store,
@@ -43,6 +45,7 @@ export function createExtensionRuntime({
   const hosts = new Map(); // id -> host
   const runtimeRecords = new Map();
   const pendingReviews = new Map();
+  let closed = false;
   const regularHostFactory = hostFactory || processHostFactory;
   const trustedVmFactory = hostFactory || vmHostFactory;
   const broker = capabilityBroker || createCapabilityBroker({ policy: createCapabilityPolicy() });
@@ -59,7 +62,7 @@ export function createExtensionRuntime({
     if (!runtimeRecords.has(key)) runtimeRecords.set(key, {
       state: 'stopped', startedAt: null, healthySince: null, heartbeatMisses: 0,
       restartTimes: [], monitorTimer: null, recovering: false, switching: false,
-      suppressRecovery: false, lastError: null
+      suppressRecovery: false, lastError: null, lifecycle: new AbortController()
     });
     return runtimeRecords.get(key);
   }
@@ -90,7 +93,7 @@ export function createExtensionRuntime({
     // Only installed manifest/review metadata creates grants, never handler input.
     const scope = entry.manifest.scope?.workspace;
     return { kind: 'extension', id: entry.id, grants: {
-      capabilities: [...entry.permissions, ...(entry.manifest.capabilities || []).map(c => 'extension.' + entry.id + '.' + c.id)],
+      capabilities: [...entry.permissions, ...(entry.manifest.delegates || []).map(row=>row.capability), ...(entry.manifest.capabilities || []).map(c => 'extension.' + entry.id + '.' + c.id)],
       approvedCapabilities: entry.permissions.filter(p => ['network', 'filesystem.read', 'filesystem.write', 'memory.write'].includes(p)),
       workspaceIds: scope ? [scope] : [], paths: entry.manifest.scope?.paths || [], hosts: entry.manifest.network?.hosts || [],
       scopes: scope ? ['workspace:' + scope] : [], types: ['working', 'workspace', 'knowledge', 'skill']
@@ -100,7 +103,9 @@ export function createExtensionRuntime({
     const { host } = hostOrThrow(id);
     const record = runtimeRecord(id);
     record.state = 'running';
-    try { return await invocationAuthority.run({request:authority,next:0},()=>host.invoke(capability, input, { signal })); }
+    const context = { request: authority, next: 0 };
+    try { return await invocationAuthority.run(context,()=>host.invoke(capability, input, { signal,
+      runWithAuthority: callback => invocationAuthority.run(context, callback) })); }
     finally {
       if (hosts.get(String(id)) === host && host.available()) {
         const health = host.health?.() || {};
@@ -143,19 +148,17 @@ export function createExtensionRuntime({
     const catalogOwner = 'extension:' + entry.id;
     const definitions = (entry.manifest.capabilities || []).map(cap => {
       const id = 'extension.' + entry.id + '.' + cap.id;
-      return { id, catalogOwner, descriptorVersion, permission: 'extension.invoke', provider: 'extension', risk: isHttpDataManifest(entry.manifest)?'high':'low', effect: 'unknown',delegatesOperation:isHttpDataManifest(entry.manifest),
+      return { id, catalogOwner, descriptorVersion, permission: 'extension.invoke', provider: 'extension', risk: isDataManifest(entry.manifest)?'high':'low', effect: 'unknown',delegatesOperation:isDataManifest(entry.manifest),lifecycleSignal:()=>runtimeRecord(entry.id).lifecycle.signal,
         description: typeof cap.description === 'string' && cap.description.trim() ? cap.description : 'Invoke the declared Extension capability ' + cap.id + '.',
         inputSchema: cap.inputSchema && typeof cap.inputSchema === 'object' ? cap.inputSchema : null,
         modelCallable: Boolean(cap.inputSchema && typeof cap.inputSchema === 'object'),
-        ...(isHttpDataManifest(entry.manifest)?{
+        ...(isDataManifest(entry.manifest)?{
           validateChildRequest(parent,child){const current=entryOrThrow(entry.id);if(current.status!=='enabled'||validateInstalledEntry(current)!==descriptorVersion)throw extensionError('STALE_EXTENSION_HOST','HTTP package identity changed');
             return child.capability==='network'&&child.constrainedActor?.id===entry.id&&child.scope?.descriptorVersion===descriptorVersion
-              &&requestFingerprint({input:child.input})===requestFingerprint({input:httpRequestFor(current.manifest,fs.readFileSync(path.join(current.sourceRoot,current.manifest.entry),'utf8'),cap.id,parent.input)});},
-          projectChildResult(parent,result){const current=entryOrThrow(entry.id);return projectHttpResult(current.manifest,fs.readFileSync(path.join(current.sourceRoot,current.manifest.entry),'utf8'),cap.id,result);}
+              &&requestFingerprint({input:child.input})===requestFingerprint({input:(isEventDataManifest(current.manifest)?eventRequestFor:httpRequestFor)(current.manifest,fs.readFileSync(path.join(current.sourceRoot,current.manifest.entry),'utf8'),cap.id,parent.input)});},
+          projectChildResult(parent,result){const current=entryOrThrow(entry.id);return (isEventDataManifest(current.manifest)?projectEventResult:projectHttpResult)(current.manifest,fs.readFileSync(path.join(current.sourceRoot,current.manifest.entry),'utf8'),cap.id,result,store.storage(current.id));}
         }:{}),
-        validate: r=>{if(cap.inputSchema)validateSchema(cap.inputSchema,r.input);
-          if(r.taskId && entry.type!=='memory-pack'&&!isHttpDataManifest(entry.manifest)&&isTrustedVmExtension(entry)!==true)
-            throw extensionError('EXTENSION_CONTEXT_UNSUPPORTED','This process adapter does not yet bind reverse calls to a Task invocation; use a context-aware adapter');},
+        validate: r=>{if(cap.inputSchema)validateSchema(cap.inputSchema,r.input);},
         execute: async r => {
         const current = entryOrThrow(entry.id);
         if (current.status !== 'enabled') throw extensionError('EXTENSION_DISABLED', current.id);
@@ -163,7 +166,7 @@ export function createExtensionRuntime({
           throw extensionError('STALE_EXTENSION_HOST', 'Capability descriptor no longer matches the active Extension version');
         }
         const result=await invokeOnHost(entry.id, cap.id, r.input, { signal:r.signal,authority:r });
-        if(isHttpDataManifest(entry.manifest))return result?.status==='pending'?result:{requestId:r.requestId,status:'completed',capability:id,result};
+        if(isDataManifest(entry.manifest))return result?.status==='pending'?result:{requestId:r.requestId,status:'completed',capability:id,result};
         return result;
       }};
     });
@@ -192,10 +195,13 @@ export function createExtensionRuntime({
         || (bound.packageFingerprint && currentPackageFingerprint !== bound.packageFingerprint)) {
         throw extensionError('STALE_EXTENSION_HOST', 'Worker identity no longer matches the active Extension version');
       }
-      if (!(current.manifest.permissions || []).includes(capability)) {
+      const delegate = current.manifest.delegates?.find(row=>row.capability===capability);
+      const permission = delegate ? 'extension.invoke' : capability;
+      if (delegate) validateSchema(delegate.inputSchema,input);
+      if (!(current.manifest.permissions || []).includes(permission)) {
         throw extensionError('CAPABILITY_NOT_DECLARED', 'Extension manifest does not declare ' + capability);
       }
-      if (!(current.permissions || []).includes(capability)) {
+      if (!(current.permissions || []).includes(permission)) {
         throw extensionError('PERMISSION_DENIED', 'Extension grant is not approved: ' + capability);
       }
       if (JSON.stringify(currentGrants) !== JSON.stringify(bound.approvedGrants)) {
@@ -206,14 +212,30 @@ export function createExtensionRuntime({
       }
       const authority=invocationAuthority.getStore(),parent=authority?.request;
       const taskBound=parent?.taskId && ['agent','owner'].includes(parent.actor?.kind);
+      const ancestors = parent?.scope?.pluginChain || [];
+      if (ancestors.length >= 8) throw extensionError('DELEGATION_DEPTH_LIMIT','Plugin delegation is limited to eight hops');
+      for (const ancestor of ancestors) {
+        const installed = entryOrThrow(ancestor.id);
+        if (installed.status !== 'enabled' || validateInstalledEntry(installed) !== ancestor.descriptorVersion)
+          throw extensionError('STALE_EXTENSION_HOST','A parent plugin was disabled or changed');
+      }
+      const constrained = actorFor(current);
+      if (parent?.constrainedActor) {
+        const upstream = parent.constrainedActor.grants;
+        for (const field of ['capabilities','approvedCapabilities','workspaceIds','paths','hosts','scopes','types'])
+          constrained.grants[field] = constrained.grants[field].filter(value=>upstream?.[field]?.includes(value));
+      }
+      const pluginChain = [...ancestors,{id:current.id,descriptorVersion:validateInstalledEntry(current)}];
       const ordinal=authority?authority.next++:0;
       const operationId=taskBound?'plugin:'+crypto.createHash('sha256').update(JSON.stringify([parent.operationId??parent.requestId,current.id,ordinal,capability])).digest('hex'):undefined;
-      const result = await broker.execute({ actor: taskBound?parent.actor:actorFor(current), capability,
-        ...(taskBound?{taskId:parent.taskId,workspaceId:parent.workspaceId,operationId,
-          constrainedActor:actorFor(current),origin:parent.origin,...(parent.approvalId?{pluginParent:{approvalId:parent.approvalId,capability:parent.capability,descriptorVersion:validateInstalledEntry(current)}}:{}),scope:{plugin:current.id,descriptorVersion:validateInstalledEntry(current),parentOperationId:parent.operationId??parent.requestId,ordinal}}:
-          {workspaceId:current.manifest.scope?.workspace || undefined}),
+      const result = await broker.execute({ actor: parent?.actor || actorFor(current), capability,
+        ...(taskBound?{taskId:parent.taskId,workspaceId:parent.workspaceId,attemptId:parent.attemptId,assignment:parent.assignment,operationId,
+          constrainedActor:constrained,origin:parent.origin,...(parent.approvalId&&isDataManifest(current.manifest)?{pluginParent:{approvalId:parent.approvalId,capability:parent.capability,descriptorVersion:validateInstalledEntry(current)}}:{}),scope:{plugin:current.id,pluginChain,...(parent.approvalId?{parentApprovalId:parent.approvalId}:{}),descriptorVersion:validateInstalledEntry(current),parentOperationId:parent.operationId??parent.requestId,ordinal}}:
+          {workspaceId:current.manifest.scope?.workspace || undefined,constrainedActor:constrained,
+            ...(parent?.approvalId&&isDataManifest(current.manifest)?{pluginParent:{approvalId:parent.approvalId,capability:parent.capability,descriptorVersion:validateInstalledEntry(current)}}:{}),
+            scope:{plugin:current.id,pluginChain,descriptorVersion:validateInstalledEntry(current)}}),
         input:input||{},reason:'Installed Extension nested capability: '+current.id },{signal});
-      if(result.status==='pending'&&isHttpDataManifest(current.manifest))return result;
+      if(result.status==='pending'&&isDataManifest(current.manifest))return result;
       if (result.status !== 'completed') throw extensionError('APPROVAL_REQUIRED', result.approvalId);
       return result.result;
     };
@@ -241,6 +263,7 @@ export function createExtensionRuntime({
       manifestFingerprint: manifestFingerprint(entry.manifest),
       approvedGrants: [...(entry.permissions || [])].sort()
     };
+    if(isEventDataManifest(entry.manifest))return createEventExtensionHost({manifest:entry.manifest,source,storage:store.storage(entry.id),capabilityExecutor:capabilityExecutorFor(bound)});
     if(isHttpDataManifest(entry.manifest))return createHttpExtensionHost({manifest:entry.manifest,source,capabilityExecutor:capabilityExecutorFor(bound)});
     const trustedVm = entry.type !== 'memory-pack' && isTrustedVmExtension(entry) === true;
     const isProcess = entry.type !== 'memory-pack' && !trustedVm;
@@ -272,12 +295,15 @@ export function createExtensionRuntime({
 
   async function stopHost(id) {
     const key = String(id);
+    runtimeRecord(key).stopping = true;
+    runtimeRecord(key).lifecycle.abort(Object.assign(extensionError('INVOKE_CANCEL_UNCONFIRMED','Plugin stopped; verify prior effects'),{effectStatus:'unknown'}));
     hideEntry(key);
     clearMonitor(key);
     const host = hosts.get(key);
     hosts.delete(key);
     runtimeRecord(key).state = 'stopped';
-    if (typeof host?.shutdown === 'function') await host.shutdown();
+    try { if (typeof host?.shutdown === 'function') await host.shutdown(); }
+    finally { runtimeRecord(key).stopping = false; }
   }
 
   function reviewResult(reviewed, sourceDir, kind = 'package') {
@@ -378,6 +404,7 @@ export function createExtensionRuntime({
   }
 
   function startHost(entry) {
+    if(runtimeRecord(entry.id).lifecycle.signal.aborted)runtimeRecord(entry.id).lifecycle=new AbortController();
     const host = buildHost(entry);
     if (!host.available()) {
       const failure = host.loadError?.() || { code: 'EXTENSION_LOAD_FAILED', message: 'Extension host is unavailable' };
@@ -479,6 +506,7 @@ export function createExtensionRuntime({
   }
 
   function hostOrThrow(id) {
+    if (closed) throw extensionError('PROVIDER_UNAVAILABLE','Extension runtime is closed');
     const entry = entryOrThrow(id);
     if (entry.status === 'disabled_due_to_crash') {
       throw extensionError('EXTENSION_CRASH_LOOP_DISABLED', 'Extension was disabled after repeated Worker crashes');
@@ -601,6 +629,7 @@ export function createExtensionRuntime({
 
     async uninstall({ id, keepFiles } = {}) {
       const entry = entryOrThrow(id);
+      store.put({ ...entry, status: 'disabled', disabledAt: now(), updatedAt: now() });
       await stopHost(entry.id);
       const result = installer.uninstall({ id: entry.id, keepFiles });
       pendingReviews.delete(entry.id);
@@ -608,6 +637,8 @@ export function createExtensionRuntime({
     },
 
     enable({ id } = {}) {
+      if (closed) throw extensionError('PROVIDER_UNAVAILABLE','Extension runtime is closed');
+      if (runtimeRecord(id).stopping || runtimeRecord(id).switching) throw extensionError('EXTENSION_UPDATE_IN_PROGRESS','Wait for the plugin lifecycle operation to finish');
       const entry = entryOrThrow(id);
       if (entry.status === 'disabled_due_to_crash') {
         throw extensionError('EXTENSION_CRASH_LOOP_DISABLED', 'Use explicit Restart to start this Extension again');
@@ -638,9 +669,9 @@ export function createExtensionRuntime({
 
     async disable({ id } = {}) {
       const entry = entryOrThrow(id);
+      const updated = entry.status === 'disabled' ? entry : store.put({ ...entry, status: 'disabled', disabledAt: now(), updatedAt: now() });
       await stopHost(entry.id);
-      if (entry.status === 'disabled') return { extension: entry, changed: false };
-      const updated = store.put({ ...entry, status: 'disabled', disabledAt: now(), updatedAt: now() });
+      if (entry.status === 'disabled') return { extension: updated, changed: false };
       return { extension: updated, changed: true };
     },
 
@@ -679,6 +710,7 @@ export function createExtensionRuntime({
     },
 
     close() {
+      closed = true;
       for (const entry of store.list()) hideEntry(entry.id);
       return Promise.all([...hosts.keys()].map((id) => stopHost(id))).then(() => undefined);
     }

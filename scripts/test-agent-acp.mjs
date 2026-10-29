@@ -8,6 +8,7 @@ import { createAgentEventBuffer } from '../src/agent/protocol/agent-event-buffer
 import { createAgentPermissionBridge } from '../src/agent/protocol/agent-permission-bridge.js';
 import { createAgentProviderRegistry } from '../src/agent/registry.js';
 import { createAgentBroker } from '../src/agent/broker.js';
+import { cleanupStagingWorkspace } from '../src/workspace/staging.js';
 
 const tick = () => new Promise(resolve => setTimeout(resolve, 10));
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-fixture-'));
@@ -288,8 +289,9 @@ try {
     assert.deepEqual(revoked,[mode]); assert.equal(approvals.get(mode),'cancelled');
     await racing.closeSession(ds); assert.deepEqual(revoked,[mode]);
   }
-  let revocations=0, retryStops=0;
+  let revocations=0, retryStops=0, retryCleanup=null;
   const retry=provider({applyChanges:async()=>({status:'pending',approvalId:'retry-id'}),approvalStatus:()=>({status:'pending'}),
+    cleanupStage:stage=>{retryCleanup=cleanupStagingWorkspace(stage);return retryCleanup;},
     cancelApproval:async id=>{assert.equal(id,'retry-id');revocations++;if(revocations===1)throw new Error('transient revocation failure');},
     launch:async args=>{const handle=launch(args),original=handle.close;return {...handle,close:async()=>{retryStops++;await original();}};}});
   const retrySession=await retry.createSession({taskId:'t',workspaceId:'w'}), retryPeer=peers.at(-1);
@@ -299,7 +301,9 @@ try {
   assert.equal(retryStops,1); assert.equal(revocations,1); assert.equal(fs.existsSync(retrySession.cwd),true);
   assert.equal((await retry.status(retrySession)).approvalId,'retry-id');
   await retry.closeSession(retrySession); assert.equal(revocations,2); assert.equal(retryStops,1);
-  assert.equal(fs.existsSync(retrySession.cwd),false);
+  assert.equal(fs.existsSync(retrySession.cwd),true,'confirmed cancellation retains unimported output for Owner review');
+  assert.deepEqual(retryCleanup,{removed:false,reason:'unimported-changes'});
+  assert.equal(fs.readFileSync(path.join(retrySession.cwd,'result.txt'),'utf8'),'retry','retained output must remain intact after approval revocation');
 
   let bootstrapFail=true, bootstrapArgs;
   const bootstrap=provider({launch:async args=>{

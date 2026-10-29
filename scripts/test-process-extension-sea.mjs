@@ -101,5 +101,7 @@ try {
   console.log('ProcessExtensionHost SEA E2E: real Core SEA child invoked an Extension, reached the Capability Broker, and shut down cleanly.');
 } finally {
   await runtime.close();
-  fs.rmSync(root, { recursive: true, force: true });
+  if (Number.isInteger(workerHost?.pid)) await waitForExit(workerHost.pid);
+  assert.equal(path.dirname(path.resolve(root)),path.resolve(os.tmpdir()));
+  fs.rmSync(root, { recursive: true, force: true, maxRetries:5, retryDelay:100 });
 }

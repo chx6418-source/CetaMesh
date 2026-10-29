@@ -12,7 +12,7 @@ import { assertNoWebUiBinaryMarkers, assertNoWebUiHtmlArtifacts } from './no-web
 
 const args = process.argv.slice(2);
 const noWebUi = true;
-let outputName = 'WhaleBridge-Setup-x64.exe';
+let outputName = 'CetaMesh-Setup-x64.exe';
 const positionalArgs = [];
 for (let index = 0; index < args.length; index += 1) {
   if (args[index] === '--no-web-ui') continue;

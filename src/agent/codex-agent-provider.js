@@ -657,6 +657,7 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
         const registeredRoots = await listWorkspaceRoots();
         const stage = await createStage({
           taskId: binding.task.id,
+          attemptId: binding.task.attempts?.at(-1)?.provider==='codex'?binding.task.attempts.at(-1).id:null,
           workspaceId: binding.workspace.id,
           sourceRoot: binding.workspace.root,
           stagingRoot: stagingRoot ?? path.join(os.tmpdir(), 'CetaMesh', 'agent-staging'),
@@ -664,6 +665,7 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
           excludedRoots
         });
         const id = crypto.randomUUID();
+        if(stage.versionContext)stage.versionContext.executorId='codex:'+id;
         sessions.set(id, {
           id,
           taskId: binding.task.id,
@@ -687,7 +689,7 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
           waiters: [],
           closed: false
         });
-        return { sessionId: id, provider: 'codex', taskId: binding.task.id, workspaceId: binding.workspace.id, cwd: stage.root };
+        return { sessionId: id, provider: 'codex', taskId: binding.task.id, workspaceId: binding.workspace.id, cwd: stage.root, versionContext: stage.versionContext };
       },
 
       async send({ sessionId, content, runId = null, phase = 'user', nativeReadinessToken = null } = {}) {

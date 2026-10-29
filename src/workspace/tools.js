@@ -11,6 +11,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { exec, execFile } from 'node:child_process';
 import { resolveInside } from './boundary.js';
+import {prepareScopedCommit,commitScopedPaths} from './scoped-git-commit.js';
 import { applyWorkspaceTransaction } from './transaction.js';
 
 export class WorkspaceToolError extends Error {
@@ -292,12 +293,14 @@ export function fileSearch(rootReal, { query = '', glob = '', searchPath = '.', 
 
 // ── Git（只读直接执行；commit 由 service 层按策略审批后调用） ────────────────
 
-async function gitRun(cwd, args, { timeoutMs = GIT_TIMEOUT_MS } = {}) {
+async function gitRun(cwd, args, { timeoutMs = GIT_TIMEOUT_MS, indexFile, literalPaths = false } = {}) {
+  const env={...process.env};for(const key of Object.keys(env))if(/^GIT_/i.test(key))delete env[key];
+  env.GIT_OPTIONAL_LOCKS='0';if(indexFile)env.GIT_INDEX_FILE=indexFile;
   // Git's clean/process filters execute commands even for status/diff. Enumerate
   // configuration without running worktree conversions, then disable every driver.
   const keys = await new Promise((resolve, reject) => {
     execFile('git', ['config', '--null', '--name-only', '--get-regexp', '^filter\\..*\\.(clean|smudge|process|required)$'],
-      { cwd, windowsHide: true, timeout: timeoutMs, maxBuffer: GIT_MAX_BUFFER }, (error, stdout) => {
+      { cwd, env, windowsHide: true, timeout: timeoutMs, maxBuffer: GIT_MAX_BUFFER }, (error, stdout) => {
         if (error && error.code !== 1) { reject(error); return; }
         resolve(String(stdout ?? '').split('\0').filter(Boolean));
       });
@@ -306,13 +309,13 @@ async function gitRun(cwd, args, { timeoutMs = GIT_TIMEOUT_MS } = {}) {
   return new Promise((resolve, reject) => {
     execFile(
       'git',
-      ['-c', 'core.fsmonitor=false', '-c', `core.hooksPath=${process.platform === 'win32' ? 'NUL' : '/dev/null'}`, ...filters, ...args],
+      [...(literalPaths?['--literal-pathspecs']:[]), '-c', 'commit.gpgSign=false', '-c', 'core.fsmonitor=false', '-c', `core.hooksPath=${process.platform === 'win32' ? 'NUL' : '/dev/null'}`, ...filters, ...args],
       {
         cwd,
         windowsHide: true,
         timeout: timeoutMs,
         maxBuffer: GIT_MAX_BUFFER,
-        env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' }
+        env
       },
       (error, stdout, stderr) => {
         if (error) {
@@ -334,7 +337,7 @@ function gitUnavailable(error) {
 export async function gitStatus(rootReal, {completeFiles=false}={}) {
   let out;
   try {
-    out = await gitRun(rootReal, ['status', '--porcelain=v1', '--branch',...(completeFiles?['-z','--untracked-files=all']:[])]);
+    out = await gitRun(rootReal, ['status', '--porcelain=v1', '--branch',...(completeFiles?['-z','--untracked-files=all']:[]), '--', '.']);
   } catch (error) {
     if (gitUnavailable(error)) fail('GIT_UNAVAILABLE', 'git 不可用（未安装或不在 PATH）');
     if (/not a git repository/i.test(error.gitStderr ?? '')) {
@@ -342,6 +345,8 @@ export async function gitStatus(rootReal, {completeFiles=false}={}) {
     }
     fail('GIT_FAILED', `git status 失败：${error.gitStderr || error.message}`);
   }
+  const repoRoot=fs.realpathSync.native((await gitRun(rootReal,['rev-parse','--show-toplevel'])).stdout.trim());
+  const {headSha}=await gitHead(rootReal);
   if(completeFiles) {
     const records=out.stdout.split('\0').filter(Boolean),entries=[];let branch='';
     for(let index=0;index<records.length;index++) {
@@ -350,7 +355,7 @@ export async function gitStatus(rootReal, {completeFiles=false}={}) {
       const x=line[0],y=line[1],filePath=line.slice(3),origPath=x==='R'||x==='C'||y==='R'||y==='C'?records[++index]??null:null;
       entries.push({x,y,path:filePath,origPath});
     }
-    return {isRepo:true,branch,dirty:entries.length>0,entries};
+    return {isRepo:true,branch,headSha,repoRoot,dirty:entries.length>0,entries};
   }
   const lines = out.stdout.split(/\r?\n/).filter(Boolean);
   let branch = '';
@@ -371,7 +376,7 @@ export async function gitStatus(rootReal, {completeFiles=false}={}) {
     }
     entries.push({ x, y, path: filePath, origPath });
   }
-  return { isRepo: true, branch, dirty: entries.length > 0, entries };
+  return { isRepo: true, branch, headSha, repoRoot, dirty: entries.length > 0, entries };
 }
 
 export async function gitDiff(rootReal, { cached = false, context = 3, statOnly = false, excludeSensitive = false } = {}) {
@@ -391,6 +396,7 @@ export async function gitDiff(rootReal, { cached = false, context = 3, statOnly 
     '**/secrets', '**/secrets.*', '**/secrets/**',
     '**/id_rsa', '**/id_ed25519'
   ].map(pattern => `:(exclude,icase,glob)${pattern}`));
+  if(!excludeSensitive)args.push('--','.');
   let out;
   try {
     out = await gitRun(rootReal, args);
@@ -429,27 +435,9 @@ export async function gitHead(rootReal) {
   }
 }
 
-/**
- * 执行 commit。service 层已按策略完成审批；这里只做最小动作：
- * git add -A（stage='all' 时）+ git commit -m。绝不构造 reset / clean / push。
- */
-export async function gitCommit(rootReal, { message, stage = 'all' } = {}) {
-  const trimmed = String(message ?? '').trim();
-  if (!trimmed) fail('COMMIT_MESSAGE_REQUIRED', 'commit 需要提交信息');
-  if (trimmed.length > 2000) fail('COMMIT_MESSAGE_TOO_LONG', '提交信息过长（>2000 字符）');
-  try {
-    if (stage === 'all') await gitRun(rootReal, ['add', '--all']);
-    const out = await gitRun(rootReal, ['commit', '-m', trimmed]);
-    const sha = /([0-9a-f]{7,40})\]/.exec(out.stdout)?.[1] ?? null;
-    return { committed: true, sha, stage, output: out.stdout.slice(0, 4000) };
-  } catch (error) {
-    if (gitUnavailable(error)) fail('GIT_UNAVAILABLE', 'git 不可用（未安装或不在 PATH）');
-    if (/nothing to commit/.test(error.gitStderr ?? '')) {
-      return { committed: false, reason: 'nothing-to-commit', stage, output: error.gitStderr.slice(0, 4000) };
-    }
-    fail('GIT_FAILED', `git commit 失败：${error.gitStderr || error.message}`);
-  }
-}
+/** Exact approved paths and hashes are mandatory; no stage-all fallback. */
+export const prepareGitCommit=(root,request)=>prepareScopedCommit(root,request,{gitRun,gitStatus});
+export const gitCommit=(root,request)=>commitScopedPaths(root,request,{gitRun:(cwd,args,options)=>gitRun(cwd,args,{...options,literalPaths:true}),gitStatus});
 
 // ── 测试执行（仅限工作区设置登记的命令） ────────────────────────────────────
 

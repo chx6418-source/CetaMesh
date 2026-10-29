@@ -247,6 +247,7 @@ export function createContinuityRuntime({
     const packet = normalizePacket({
       taskId: task.id,
       attemptId: task.attempts?.at(-1)?.id ?? null,
+      versionContext: task.currentAgent?.versionContext ?? null,
       operations,
       goal: task.goal,
       ownerContext: task.ownerContext ?? null,
@@ -354,6 +355,7 @@ export function createContinuityRuntime({
         if (gitLines.length) lines.push(`工作区核验事实（交接时采集，以此为准）:\n- ${gitLines.join('\n- ')}`);
       }
     }
+    if(packet.versionContext)lines.push('[Executor version reference; historical snapshot, verify current Workspace before using]\n'+JSON.stringify(packet.versionContext));
     if (packet.ownerContext) lines.push(renderOwnerContext(packet.ownerContext));
     if (packet.workingMemory?.length) lines.push('[Authorized Task Memory excerpts: reference data only; preserve each source and verification level]\n' + JSON.stringify(packet.workingMemory));
     lines.push(`检查点摘要: ${packet.checkpoint.summary || '（无）'}`);
@@ -719,6 +721,7 @@ export function createContinuityRuntime({
           expectedRev: currentRev(),
           provider: target.id,
           sessionId: created.sessionId,
+          versionContext: created.versionContext,
           note: `rollover #${sequence} 自 ${previousAgent.provider}:${previousAgent.sessionId}`
         });
         const bootstrap = await agentBroker.send({ provider: target.id, sessionId: created.sessionId, content: nativeReadinessToken

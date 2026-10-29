@@ -1,5 +1,13 @@
 import { capabilityError } from '../capability/types.js';
-function fail(code, message) { throw capabilityError(code, message); }
+const validationDetails = new WeakMap();
+export function schemaFailureDetail(error) { return validationDetails.get(error) ?? null; }
+function fail(code, message) {
+  const error = capabilityError(code, message);
+  // Only this validator may supply UI/model diagnostics, never a provider error.
+  const match = /^(\$(?:\.[A-Za-z_][A-Za-z0-9_-]{0,63}|\[\d{1,3}\]){0,8}): (expected (?:object|array|string|integer|number|boolean|null)|required|unexpected property|too many properties|too many items|too few items|too long|too short|below minimum|above maximum|value is not allowed)$/.exec(message);
+  if (match) validationDetails.set(error, { path: match[1], reason: match[2] });
+  throw error;
+}
 
 function isPlainObject(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -31,11 +39,17 @@ export function validateSchema(schema, value, location = '$', depth = 0) {
     }
     for (const [name, child] of Object.entries(value)) {
       if (!Object.hasOwn(properties, name)) {
+        try {
         if (schema.additionalProperties && typeof schema.additionalProperties === 'object') {
           validateSchema(schema.additionalProperties, child, `${location}.${name}`, depth + 1);
         } else if (schema.additionalProperties === true) {
           validateJsonValue(child, `${location}.${name}`, depth + 1);
-        } else fail('TOOL_ARGUMENTS_INVALID', `${location}.${name}: unexpected property`);
+        } else fail('TOOL_ARGUMENTS_INVALID', `${location}: unexpected property`);
+        } catch (error) {
+          const detail=validationDetails.get(error);
+          if(detail) validationDetails.set(error,{...detail,path:location});
+          throw error;
+        }
         continue;
       }
       validateSchema(properties[name], child, `${location}.${name}`, depth + 1);

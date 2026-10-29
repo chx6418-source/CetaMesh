@@ -39,6 +39,13 @@ export const CATEGORIES = ['core', 'architecture', 'security', 'runtime', 'integ
 // ── 登记表：scripts/test-*.mjs 的每一个文件都必须出现在这里（或能从 package.json 映射）。
 // requires 的取值见 probeAvailability()；category 取值见 CATEGORIES。
 const REGISTRY = {
+  'test-cloud-candidate.mjs': {category:'release',note:'Cloud metadata, brand and non-executing candidate integrity gate'},
+  'test-workspace-git-closeout.mjs': {category:'security',timeoutMs:120000,note:'Real Git exact commits, staging conflict isolation and version references'},
+  'test-extension-events.mjs': {category:'integration',timeoutMs:120000,note:'Bounded authenticated WebSocket and Webhook lifecycle'},
+  'test-plugin-network-transports.mjs': {category:'integration',timeoutMs:120000,note:'Controlled TLS HTTP and remote MCP transport authorization'},
+  'test-memory-closeout.mjs': {category:'security',timeoutMs:120000,note:'Correction, provenance, deduplication and scoped context persistence'},
+  'test-extension-lifecycle-authority.mjs': {category:'security',timeoutMs:120000,note:'Process reverse-call authority and plugin lifecycle fences'},
+  'test-closeout-task-feedback.mjs': {category:'security',timeoutMs:120000,note:'Trusted field errors and actionable bounded task recovery'},
   'test-chat-usage-layout.mjs': {category:'desktop',requires:['ui-motion-live'],timeoutMs:120000,note:'Actual Chromium Chat usage layout and legacy overlap reproduction'},
   'test-real-chat-codex-handoff.mjs': {category:'environment',requires:['real-codex'],timeoutMs:480000,note:'Real source Chat explicit Codex Extension packages, approvals and independent verification'},
   'test-chat-codex-regression.mjs': {category:'security',timeoutMs:120000,note:'User Chat Codex delegation, model scope, write schema, recovery and tool labels'},

@@ -72,6 +72,14 @@ function normalizeEntityIds(values) {
   return [...new Set(values)];
 }
 
+/** Derive truth level from recorded writers, never caller-supplied source labels. */
+function memoryProvenance(record) {
+  const actor = record.updatedBy ?? (record.source === 'qq-adapter' ? null : record.createdBy) ?? record.confirmedBy ?? null;
+  return { status: actor?.startsWith('user:') ? 'user-confirmed'
+    : actor?.startsWith('agent:') ? 'agent-inference' : 'historical-unverified',
+    actor, at: record.updatedAt ?? record.confirmedAt ?? record.createdAt ?? null };
+}
+
 /** 对外投影：UI 需要 来源 / 更新时间 / Scope / rev / pinned。 */
 function toView(record) {
   return {
@@ -92,6 +100,7 @@ function toView(record) {
     origin: record.origin ? structuredClone(record.origin) : null,
     sourceRefs: structuredClone(record.sourceRefs || []),
     entityIds: [...(record.entityIds || [])],
+    provenance: memoryProvenance(record),
     ...(record.factKey ? { factKey: record.factKey } : {}),
     ...(record.validUntil != null ? { validUntil: record.validUntil } : {})
   };
@@ -267,11 +276,11 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
       for(const link of links.listLinks({principal,scope}).links) {
         const source=visible.get(link.source.id),target=visible.get(link.target.id),binding=link.factBinding;
         if(link.relation==='supersedes'&&link.createdBy?.startsWith('user:')&&source&&target&&source.id!==target.id
-          &&source.scopeKey===scope&&target.scopeKey===scope&&source.type===target.type&&source.factKey&&source.factKey===target.factKey
+          &&source.scopeKey===scope&&target.scopeKey===scope&&source.type===target.type&&(source.factKey??null)===(target.factKey??null)
           &&binding?.sourceRevision===source.rev&&binding.targetRevision===target.rev&&!expired.has(source.id))superseded.add(target.id);
       }
     }
-    for(const id of links.replacementTargets({principal,targets:rows.filter(row=>row.factKey).map(row=>({id:row.id,scope:row.scopeKey}))}))
+    for(const id of links.replacementTargets({principal,targets:rows.map(row=>({id:row.id,scope:row.scopeKey}))}))
       if(!superseded.has(id))conflicted.add(id);
     for(const row of rows)if(row.factKey&&!expired.has(row.id)&&!superseded.has(row.id)){
 
@@ -333,10 +342,20 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
     }).filter(item => !needle || item.score > 0)
       .sort((a, b) => b.score - a.score || Number(b.row.pinned) - Number(a.row.pinned)
       || b.row.updatedAt - a.row.updatedAt || a.row.id.localeCompare(b.row.id));
+    // Collapse exact repeats only when the authorized scope, writer and evidence
+    // agree. Different sources remain separate; this never merges stored history.
+    const seen = new Set();
+    const distinct = ranked.filter(({row}) => {
+      const provenance = memoryProvenance(row);
+      const key = JSON.stringify([row.scopeKey, row.type, row.content, row.source,
+        provenance.status, provenance.actor, row.sourceRefs ?? []]);
+      if (seen.has(key)) return false;
+      seen.add(key); return true;
+    });
     const max = normalizeLimit(limit, 50);
-    return { memories: ranked.slice(0, max).map(item => readView(item.row, principal)),
-      meta: { total: scannedRows.length, matched: ranked.length, expired: eligibility.expired.size, conflicted: eligibility.conflicted.size, superseded: eligibility.superseded.size,
-        scanned: store.stats.lastScanned, returned: Math.min(ranked.length, max) } };
+    return { memories: distinct.slice(0, max).map(item => readView(item.row, principal)),
+      meta: { total: scannedRows.length, matched: distinct.length, deduplicated: ranked.length - distinct.length, expired: eligibility.expired.size, conflicted: eligibility.conflicted.size, superseded: eligibility.superseded.size,
+        scanned: store.stats.lastScanned, returned: Math.min(distinct.length, max) } };
   }
 
   function rank(rows, needle, rawText) {
@@ -422,6 +441,8 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
       pinned: pinned === true,
       createdAt: timestamp,
       updatedAt: timestamp,
+      createdBy: principal.kind + ':' + principal.id,
+      updatedBy: normalizedSource === 'qq-adapter' ? null : principal.kind + ':' + principal.id,
       rev: 1,
       confirmedAt,
       confirmedBy,
@@ -448,7 +469,7 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
     if (tags !== undefined) patch.tags = normalizeTags(tags);
     if (pinned !== undefined) patch.pinned = pinned === true;
     if (Object.keys(patch).length === 0) throw memoryError('INVALID_PARAMS', '没有需要更新的字段');
-    const updated = store.update(existing.id, expectedRev, (record) => ({ ...record, ...patch, updatedAt: now() }));
+    const updated = store.update(existing.id, expectedRev, (record) => ({ ...record, ...patch, updatedAt: now(), updatedBy: patch.content !== undefined && patch.content !== record.content ? principal.kind + ':' + principal.id : record.updatedBy }));
     return readView(updated, principal);
   }
 

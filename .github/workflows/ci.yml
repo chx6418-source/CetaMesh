@@ -1,111 +1,107 @@
-# CetaMesh Desktop — 最小 CI（D2）
-#
-# 目标平台：Windows（产品主平台：named pipe / SEA / 安装器均为 Windows 语义）。
-# 原则：
-#   · CI 不依赖真实 QQ / 真实 DSH / 真实 Provider Key —— run-all-tests 会把这类
-#     suite 如实记为 NOT_RUN_ENVIRONMENT（网关探测失败 / 显式 opt-in 才跑公网）；
-#   · 每次 push 只跑测试与 cargo 检查，不做完整 installer 构建；
-#     release 构建仅在工作流手动触发或 main 分支 push 时执行（见 release-build job）。
 name: ci
-
 on:
   push:
     branches: ['**']
-    paths-ignore:
-      - 'apps/mobile/**'
-      - '.github/workflows/android-ci.yml'
+    paths-ignore: ['apps/mobile/**', '.github/workflows/android-ci.yml']
   pull_request:
-    paths-ignore:
-      - 'apps/mobile/**'
-      - '.github/workflows/android-ci.yml'
+    paths-ignore: ['apps/mobile/**', '.github/workflows/android-ci.yml']
   workflow_dispatch:
-
+    inputs:
+      build_candidate:
+        description: Build an internal Windows candidate (public release remains HOLD)
+        type: boolean
+        default: false
+      channel:
+        description: Candidate channel
+        type: choice
+        options: [dev, rc]
+        default: dev
 permissions:
   contents: read
-
 jobs:
   test:
     name: test (windows, node 22, rust stable)
     runs-on: windows-latest
     timeout-minutes: 60
     env:
-      # CI 无真实 SnowLuma/DSH/公网依赖：网关类 suite 走 NOT_RUN_ENVIRONMENT。
       WHALEBRIDGE_TEST_NETWORK: '0'
     steps:
       - uses: actions/checkout@v4
         with:
-          # build:release 记录 commit dirty 状态；完整历史便于追溯构建输入
           fetch-depth: 0
-      - name: Setup Node 22
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: '22'
           cache: npm
-      - name: Setup Rust stable
-        uses: dtolnay/rust-toolchain@stable
-      - name: Rust build cache
-        uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
         with:
           workspaces: desktop-shell
-      - name: Install dependencies
-        run: npm ci
-      - name: Install Harbor dependencies
-        run: npm --prefix desktop-ui ci
-      - name: Build Harbor UI
-        run: npm run build:ui
+      - run: npm ci
+      - run: npm --prefix desktop-ui ci
+      - run: npm run build:ui
       - name: Unified test suite
-        run: npm test
+        run: |
+          npm test 2>&1 | Tee-Object -FilePath ci-test.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Rust checks and tests through unified runner
         env:
           WHALEBRIDGE_TEST_CARGO: '1'
         run: npm test -- --suite cargo:check --suite cargo:test
-
+      - name: Upload test diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cetamesh-test-windows-${{ github.sha }}
+          path: ci-test.log
+          if-no-files-found: error
+          retention-days: 14
   release-build:
-    name: release build (main / manual)
+    name: internal CetaMesh candidate (manual)
     runs-on: windows-latest
     needs: test
+    if: github.event_name == 'workflow_dispatch' && inputs.build_candidate && github.event.repository.private
     timeout-minutes: 90
-    # installer 构建较重：仅 main push 或手动触发时执行（commit 级不构建）
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    env:
+      CANDIDATE_CHANNEL: ${{ inputs.channel }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Setup Node 22
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: '22'
           cache: npm
-      - name: Setup Rust stable
-        uses: dtolnay/rust-toolchain@stable
-      - name: Rust build cache
-        uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
         with:
           workspaces: desktop-shell
-      - name: Install dependencies
-        run: npm ci
-      - name: Install Harbor dependencies
-        run: npm --prefix desktop-ui ci
-      - name: Build Harbor UI
-        run: npm run build:ui
-      - name: Build core (Node SEA)
+      - run: npm ci
+      - run: npm --prefix desktop-ui ci
+      - run: npm run build:ui
+      - name: Build Core SEA
         run: npm run build:core
-      - name: Build desktop shell (release)
+      - name: Build Desktop Shell
         run: npm run desktop:build
-      - name: Build desktop debug shell for acceptance
-        run: npm run desktop:build:debug
-      - name: Assemble release candidate
-        run: npm run build:release
-      - name: Release candidate acceptance
-        run: npm test -- --category release
-      - name: Upload RC artifacts
+      - name: Candidate metadata
+        id: candidate
+        run: node scripts/ci-candidate.mjs --channel "$env:CANDIDATE_CHANNEL"
+      - name: Assemble internal candidate
+        run: |
+          if ($env:CANDIDATE_CHANNEL -eq 'dev') { npm run build:release -- --dev --use-current-build-number }
+          else { npm run build:release -- --use-current-build-number }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify candidate without executing product binaries
+        run: node scripts/ci-candidate.mjs --verify --channel "$env:CANDIDATE_CHANNEL"
+      - name: Upload internal candidate (RELEASE HOLD)
         uses: actions/upload-artifact@v4
         with:
-          name: whalebridge-rc
+          name: ${{ steps.candidate.outputs.artifactName }}
           path: |
-            artifacts/*/*/build-*/*.exe
-            artifacts/*/*/build-*/release-manifest.json
-            artifacts/*/*/build-*/SHA256SUMS.txt
-            artifacts/*/*/build-*/sbom.json
+            ${{ steps.candidate.outputs.directory }}/${{ steps.candidate.outputs.setup }}
+            ${{ steps.candidate.outputs.directory }}/release-manifest.json
+            ${{ steps.candidate.outputs.directory }}/SHA256SUMS.txt
+            ${{ steps.candidate.outputs.directory }}/sbom.json
+            ${{ steps.candidate.outputs.directory }}/licenses/**
           if-no-files-found: error
           retention-days: 14

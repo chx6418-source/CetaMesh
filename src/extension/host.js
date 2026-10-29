@@ -31,6 +31,8 @@ export function createVmExtensionHost({
   const granted = new Set(manifest.permissions || []);
   const logs = [];
   const invocationContext = new AsyncLocalStorage();
+  const activeInvocations = new Set();
+  let closed = false;
 
   const record = (level, args) => {
     const line = { at: Date.now(), level, message: args.map((a) => (typeof a === 'string' ? a : safeStringify(a))).join(' ') };
@@ -89,10 +91,11 @@ export function createVmExtensionHost({
     sandbox.fetch = (url, init) => guardedFetch(url, init);
   }
   const invokeCapability = async (capability, input) => {
-    if (!granted.has(capability)) throw extensionError('PERMISSION_DENIED', capability + ' not declared');
+    if (!granted.has(capability) && !(granted.has('extension.invoke') && manifest.delegates?.some(row => row.capability === capability))) throw extensionError('PERMISSION_DENIED', capability + ' not declared');
     if (typeof capabilityExecutor !== 'function') throw extensionError('CAPABILITY_BROKER_REQUIRED', 'Capability Broker unavailable');
     return capabilityExecutor(capability, input, { signal: invocationContext.getStore() });
   };
+  if (granted.has('extension.invoke')) sandbox.plugins = { invoke: invokeCapability };
   if (granted.has('memory.read') || granted.has('memory.write')) {
     sandbox.memory = {};
     if (granted.has('memory.read')) sandbox.memory.read = input => invokeCapability('memory.read', input);
@@ -145,9 +148,15 @@ export function createVmExtensionHost({
     capabilities: () => (manifest.capabilities || []).map((c) => c.id),
     loadError: () => (loadError.code ? { ...loadError } : null),
     available() {
-      return !loadError.code;
+      return !closed && !loadError.code;
+    },
+    shutdown() {
+      closed = true;
+      for (const controller of activeInvocations) controller.abort(Object.assign(
+        extensionError('INVOKE_CANCEL_UNCONFIRMED', 'Extension stopped; verify prior effects'), { effectStatus: 'unknown' }));
     },
     async invoke(capabilityId, input, { signal: outerSignal } = {}) {
+      if (closed) throw extensionError('PROVIDER_UNAVAILABLE', 'Extension host is closed');
       capabilityOrThrow(capabilityId);
       if (loadError.code) {
         throw extensionError(loadError.code, '扩展加载失败：' + loadError.message);
@@ -166,9 +175,10 @@ export function createVmExtensionHost({
         log: (...args) => record('info', args),
         storage: sandbox.storage,
         fetch: sandbox.fetch
-        ,memory: sandbox.memory, workspace: sandbox.workspace
+        ,memory: sandbox.memory, workspace: sandbox.workspace, plugins: sandbox.plugins
       };
       const controller = new AbortController();
+      activeInvocations.add(controller);
       let rejectAbort;
       const aborted = new Promise((_, reject) => { rejectAbort = reject; });
       const rejectForAbort = () => {
@@ -198,6 +208,7 @@ export function createVmExtensionHost({
         ]);
         return { capability: capabilityId, result: result === undefined ? null : result, elapsedMs: Date.now() - started };
       } finally {
+        activeInvocations.delete(controller);
         if (timer) clearTimeout(timer);
         outerSignal?.removeEventListener('abort', abortFromOuter);
         controller.signal.removeEventListener('abort', rejectForAbort);

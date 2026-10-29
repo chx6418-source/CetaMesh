@@ -55,14 +55,15 @@ try {
   assert.deepEqual(overview.categories, ['installed', 'tools', 'mcp', 'integrations']);
   assert.ok(overview.plugins.length >= 8, '插件卡片：1 工具包 + 2 集成 + 5 MCP');
   assert.equal(overview.tools.total, 53);
-  assert.equal(overview.mcp.total, 5);
+  assert.equal(overview.mcp.total, 6, 'Five built-in stdio servers plus one disabled remote slot');
   const toolsCategory = await service.execute({ method: 'plugins.list', params: { category: 'tools' } });
   assert.deepEqual(toolsCategory.plugins.map(plugin => plugin.id), [PACK]);
   const integrationsCategory = await service.execute({ method: 'plugins.list', params: { category: 'integrations' } });
   assert.deepEqual(integrationsCategory.plugins.map(plugin => plugin.id).sort(), ['cetamesh-dsh', 'cetamesh-snowluma']);
   const mcpCategory = await service.execute({ method: 'plugins.list', params: { category: 'mcp' } });
-  assert.equal(mcpCategory.plugins.length, 5);
-  ok('Plugins 顶层：installed/tools/mcp/integrations 四类；工具包 1 + 集成 2 + MCP 5');
+  assert.equal(mcpCategory.plugins.filter(plugin=>plugin.advanced.transport==='stdio').length, 5);
+  const remote=mcpCategory.plugins.find(plugin=>plugin.id==='mcp.remote');assert.equal(remote.enabled,false);assert.equal(remote.status.callable,false);assert.equal(remote.advanced.transport,'streamable-http');
+  ok('Plugins 顶层：installed/tools/mcp/integrations 四类；工具包 1 + 集成 2 + MCP 5 stdio + disabled remote');
 
   // ── 2. 插件卡片字段 + 二级设置页（总开关 + 每个工具的名称/用途/权限/状态/开关） ──
   const page = await service.execute({ method: 'plugins.settings', params: { id: PACK } });

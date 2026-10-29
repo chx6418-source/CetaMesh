@@ -47,6 +47,10 @@ try{
  const output=execFileSync(process.execPath,['verify.mjs'],{cwd:project,encoding:'utf8',timeout:30000});assert.match(output,/EXTENSION_HANDOFF_VERIFIED/);
  const history=await services.desktopUiService.execute({method:'ui.chat.history',params:{id:sessionId}});assert.ok(history.messages.some(m=>m.role==='assistant'&&m.text));
  evidence.toolLabels=history.messages.flatMap(m=>m.toolActivity??[]).map(t=>t.label);assert.ok(evidence.toolLabels.some(n=>n.includes('Codex')||n.includes('codex')));
+ const rt=services.taskService.runtime;
+ task=rt.get({id:taskId}).task;
+ const completed=await services.desktopUiService.execute({method:'ui.task.complete',params:{id:taskId,expectedRev:task.rev,reviewed:true,summary:'Owner independently verified Extension package files and unchanged acceptance test; npm test exit 0'}});
+ assert.equal(completed.task.status,'completed');assert.equal(completed.task.progress.percent,100);evidence.taskStatus=completed.task.status;evidence.progress=completed.task.progress;
  evidence.hashes=Object.fromEntries(['EXT-01.md','EXT-02.md','extension.mjs'].map(p=>[p,sha(fs.readFileSync(path.join(project,p)))]));evidence.verified=true;console.log('PASS real ordinary Chat -> explicit Codex -> Extension task packages -> native execution -> approved import -> independent Core acceptance');
 }catch(error){evidence.failure={code:error.code??error.name,message:String(error.message).slice(0,500)};process.exitCode=1;}
 finally{

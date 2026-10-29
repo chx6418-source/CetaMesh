@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import {mock} from 'node:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -16,6 +17,7 @@ import {createNativeAcpRuntime} from '../src/agent/native-acp-runtime.js';
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'cetamesh-auth-regression-'));
 const tick=()=>new Promise(r=>setImmediate(r));
 const cases=[];const test=async(name,run)=>{try{await run();console.log('PASS '+name);}catch(error){cases.push(name);console.error('FAIL '+name+': '+error.message);}};
+const timedTest=(name,run)=>test(name,async()=>{mock.timers.enable({apis:['setTimeout']});try{await run();}finally{mock.timers.reset();}});
 const evidence={version:'opencode v2.1.4',target:{executable:process.execPath,argsPrefix:[]},validate(){}};
 const cap=adapter=>({...adapter,describe:()=>{const value=adapter.describe();return {...value,methods:value.methods.map(m=>({...m,supported:true}))};}});
 function setup(provider='opencode') {
@@ -26,7 +28,7 @@ function setup(provider='opencode') {
 }
 const connections=JSON.stringify([{id:'openai',name:'fixture',connections:[{type:'credential',id:'owned',label:'fixture',method:'oauth'}]}]);
 try {
- for(const provider of ['opencode','claude'])for(const passive of [false,true])await test('R1 '+provider+' '+(passive?'passive':'post-login')+' metadata subprocess keeps ownership',async()=>{
+ for(const provider of ['opencode','claude'])for(const passive of [false,true])await timedTest('R1 '+provider+' '+(passive?'passive':'post-login')+' metadata subprocess keeps ownership',async()=>{
   const {leases,configuration,store}=setup(provider);let unknown=!passive,finishStatus;
   const adapter=cap((provider==='opencode'?createOpenCodeAuthAdapter:createClaudeAuthAdapter)({configuration,runtime:async()=>provider==='opencode'?evidence:{...evidence,version:'2.1.308',runtimePath:process.execPath,binaryVerified:true,sdkResourcesVerified:true},transport:{
    start(spec,{onHandle}){const handle={done:Promise.resolve({exitCode:0}),async close(){}};onHandle(handle);return handle;},
@@ -38,7 +40,21 @@ try {
   value=await service.status({provider,attemptId:value.attemptId});assert.equal(value.state,'exit-unconfirmed');
   assert.throws(()=>leases.reserve({provider,kind:'task',expectedEpoch:leases.epoch(provider)}),{code:'AGENT_RUNTIME_BUSY'});
   assert.equal((await service.cancel({provider,attemptId:value.attemptId})).state,'exit-unconfirmed');
+  // Explicit cancellation owns this case; disk/CI speed cannot advance its deadline.
+  mock.timers.tick(51);
   finishStatus({exitCode:0});await tick();await tick();assert.equal((await service.status({provider,attemptId:value.attemptId})).state,'cancelled');await service.close();
+ });
+ await timedTest('R1 expiry before cancellation remains expired after owned exit',async()=>{
+  const {leases,configuration,store}=setup('claude');let finish;
+  const adapter=cap(createClaudeAuthAdapter({configuration,runtime:async()=>({...evidence,version:'2.1.308',runtimePath:process.execPath,binaryVerified:true,sdkResourcesVerified:true}),transport:{
+   start(spec,{onHandle}){const handle={done:Promise.resolve({exitCode:0}),async close(){}};onHandle(handle);return handle;},
+   async run(spec,{onHandle}){const handle={done:new Promise(resolve=>finish=resolve),async close(){throw Object.assign(Error('controlled still running'),{code:'ACP_CLOSE_UNKNOWN'});}};onHandle(handle);throw Object.assign(Error('controlled still running'),{code:'ACP_CLOSE_UNKNOWN'});}
+  }}));
+  const service=createAgentRuntimeAuthService({configuration,connectionLeases:leases,profileStore:store,deadlineMs:50,adapters:{claude:adapter}});
+  const auth=await service.start({provider:'claude',expectedRevision:1,methodId:'claude-subscription'});await tick();await tick();
+  mock.timers.tick(51);await tick();await tick();
+  assert.equal((await service.cancel({provider:'claude',attemptId:auth.attemptId})).state,'exit-unconfirmed');
+  finish({exitCode:0});await tick();await tick();assert.equal((await service.status({provider:'claude',attemptId:auth.attemptId})).state,'expired');await service.close();
  });
  for(const provider of ['opencode','gemini','claude'])await test('R2 '+provider+' Cancel during verification fences launch',async()=>{
   const {leases,configuration,store}=setup(provider);let resolveRuntime,spawns=0;

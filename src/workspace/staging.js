@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import {gitStatus} from './tools.js';
 import { gitPathKey, selectGitSnapshot } from './git-snapshot.js';
 import { isInsideRoot } from './boundary.js';
 
@@ -155,7 +156,7 @@ function walkFiles(root, { maxFiles = DEFAULT_MAX_FILES, maxBytes = DEFAULT_MAX_
 }
 
 /** Make a bounded, credential-filtered snapshot for one Task, outside all Workspace roots. */
-export async function createStagingWorkspace({ taskId, workspaceId, sourceRoot, stagingRoot,
+export async function createStagingWorkspace({ taskId, workspaceId, sourceRoot, stagingRoot, attemptId = null, executorId = null,
   additionalWorkspaceRoots = [], excludedRoots = [], maxFiles = DEFAULT_MAX_FILES,
   maxBytes = DEFAULT_MAX_BYTES } = {}) {
   if (!String(taskId ?? '').trim()) fail('TASK_REQUIRED', 'A Task is required for staging');
@@ -177,6 +178,7 @@ export async function createStagingWorkspace({ taskId, workspaceId, sourceRoot, 
   fs.mkdirSync(stage, { recursive: false, mode: 0o700 });
   const excluded = normalizeRoots([...excludedRoots, ...nestedWorkspaceRoots]);
   try {
+    const version=await gitStatus(source).catch(error=>{if(error.code==='GIT_UNAVAILABLE')return {headSha:null,branch:null};throw error;});
     const gitPolicy = selectGitSnapshot(source, fail);
     const snapshot = walkFiles(source, { maxFiles, maxBytes, excludedRoots: excluded, selection: gitPolicy, discoverBrowserProfiles: true });
     for (const rel of snapshot.files.keys()) {
@@ -194,6 +196,7 @@ export async function createStagingWorkspace({ taskId, workspaceId, sourceRoot, 
     }
     return {
       taskId: String(taskId),
+      versionContext: {taskId:String(taskId),workspaceId:String(workspaceId),snapshotId:path.basename(stage),attemptId,executorId,baselineHead:version.headSha??null,branch:version.branch??null},
       workspaceId: String(workspaceId),
       sourceRoot: source,
       stagingRoot: stageBase,
@@ -244,7 +247,7 @@ export function collectStagedChanges(stage) {
     const sourceSnapshot = walkFiles(stage.sourceRoot, {
       maxFiles: stage.maxFiles, maxBytes: stage.maxBytes, excludedRoots: stage.excludedRoots, gitPolicy: stage.gitPolicy, excludedPaths: stage.excludedPaths ?? stage.excludedDirectories, area: 'source'
     });
-    for (const rel of allPaths) {
+    for (const {path:rel} of changes) {
       const original = stage.baseline.get(rel) ?? null;
       const live = sourceSnapshot.files.get(rel) ?? null;
       if ((original?.hash ?? null) !== (live?.hash ?? null)) {
@@ -271,17 +274,14 @@ export function refreshStagingBaseline(stage) {
   const sourceSnapshot = walkFiles(stage.sourceRoot, {
     maxFiles: stage.maxFiles, maxBytes: stage.maxBytes, excludedRoots: stage.excludedRoots, gitPolicy: stage.gitPolicy, excludedPaths: stage.excludedPaths ?? stage.excludedDirectories
   });
-  if (stageSnapshot.files.size !== sourceSnapshot.files.size) {
-    fail('WORKSPACE_RECONCILIATION_REQUIRED', 'Task Workspace and imported staging output differ');
+  // Advance only accepted outputs. Unrelated live edits remain outside this
+  // executor's observed snapshot; never silently claim they were synchronized.
+  for(const rel of new Set([...stage.baseline.keys(),...stageSnapshot.files.keys()])) {
+    const before=stage.baseline.get(rel)?.hash??null,staged=stageSnapshot.files.get(rel)?.hash??null;
+    if(before!==staged && (sourceSnapshot.files.get(rel)?.hash??null)!==staged)fail('WORKSPACE_RECONCILIATION_REQUIRED','Imported staging output differs: '+rel);
   }
-  for (const [rel, staged] of stageSnapshot.files) {
-    if (sourceSnapshot.files.get(rel)?.hash !== staged.hash) {
-      fail('WORKSPACE_RECONCILIATION_REQUIRED', `Task Workspace and imported staging output differ: ${rel}`);
-    }
-  }
-  stage.baseline = sourceSnapshot.files;
-  stage.bytes = sourceSnapshot.totalBytes;
-  return { files: sourceSnapshot.files.size, bytes: sourceSnapshot.totalBytes };
+  stage.baseline=stageSnapshot.files;stage.bytes=stageSnapshot.totalBytes;
+  return {files:stageSnapshot.files.size,bytes:stageSnapshot.totalBytes};
 }
 
 export function cleanupStagingWorkspace(stage) {
@@ -307,6 +307,10 @@ export function cleanupStagingWorkspace(stage) {
   } catch (error) {
     // A previously removed stage is safe; all other lookup failures stay closed.
     if (error?.code !== 'ENOENT') fail('STAGING_PATH_INVALID', 'Unable to validate staging cleanup path', error);
+  }
+  if(fs.existsSync(root)) {
+    const current=walkFiles(root,{maxFiles:stage.maxFiles,maxBytes:stage.maxBytes,gitPolicy:stage.gitPolicy,excludedPaths:stage.excludedPaths??stage.excludedDirectories,area:'stage'});
+    if(!(stage.baseline instanceof Map) || current.files.size!==stage.baseline.size || [...current.files].some(([rel,row])=>stage.baseline.get(rel)?.hash!==row.hash))return {removed:false,reason:'unimported-changes'};
   }
   fs.rmSync(root, { recursive: true, force: true });
   stage.closed = true;

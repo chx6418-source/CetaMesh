@@ -39,6 +39,7 @@ export function createIntegrationService({
   registry = null,
   mcpRuntime = null,
   transportFactory = undefined,
+  resolveCredential = null, networkOptions = {},
   localServices = null,
   providerSnapshot = null,
   agentHealth = null,
@@ -53,7 +54,7 @@ export function createIntegrationService({
 
   const broker = capabilityBroker ?? createCapabilityBroker({ audit: event => log('Integration capability ' + event.capability + ' ' + event.status) });
   const resolvedStore = store ?? createIntegrationStore({ stateDir });
-  const runtime = mcpRuntime ?? createMcpRuntime({ transportFactory: transportFactory ?? undefined, log });
+  const runtime = mcpRuntime ?? createMcpRuntime({ transportFactory: transportFactory ?? undefined, resolveCredential, networkOptions, log });
   let dshHealthCache = null;
   let dshHealthCheckedAt = 0;
   let dshHealthInFlight = null;
@@ -164,7 +165,7 @@ export function createIntegrationService({
     if (tool.capability !== request.capability) throw integrationError('TOOL_CAPABILITY_MISMATCH', '目标工具与调用能力不匹配');
     const schema = resolvedRegistry.toolView(tool).schema;
     validateSchema(schema, input);
-    const binding = {toolId:tool.id,inputHash:hashValue(input),schemaHash:hashValue(schema)};
+    const binding = {toolId:tool.id,inputHash:hashValue(input),schemaHash:hashValue(schema),...(resolvedRegistry.serverById.get(tool.serverId)?.transport==='streamable-http'?{configHash:hashValue(resolvedRegistry.mcpRuntimeConfig(tool.serverId))}:{})};
     if (request.integrationBinding) {
       if (request.integrationBinding.schemaHash !== binding.schemaHash) throw integrationError('TOOL_SCHEMA_CHANGED', '工具输入约束已变化，请重新请求审批');
       if (hashValue(request.integrationBinding) !== hashValue(binding)) throw integrationError('APPROVAL_MISMATCH', '工具输入与审批不匹配');
@@ -179,7 +180,7 @@ export function createIntegrationService({
     // 在能力执行点**重新**校验一次：审批期间开关可能已变化（TOCTOU）。
     assertQqToolConnectorEnabled(toolId);
     const tool = validateTarget(request, {executing:true});
-    if (tool.source === 'mcp') return runtime.call(tool.serverId, tool.name, input ?? {});
+    if (tool.source === 'mcp') return runtime.call(tool.serverId, tool.name, input ?? {}, {signal:request.signal});
     if (tool.source === 'agent') {
       if (!agentToolExecutor) throw integrationError('PROVIDER_UNAVAILABLE', 'Agent Provider 工具执行器未绑定：' + tool.id);
       return agentToolExecutor({ tool: tool.id, input: input ?? {} });
@@ -235,7 +236,11 @@ export function createIntegrationService({
         }
         return runtime.restart(command.serverId, resolvedRegistry.mcpRuntimeConfig?.(command.serverId) ?? {});
       }
-      case 'mcp.config.update': return resolvedRegistry.updateMcpConfig(command.serverId, command.config ?? {});
+      case 'mcp.config.update': {
+        const updated=resolvedRegistry.updateMcpConfig(command.serverId,command.config??{});
+        if(resolvedRegistry.requireServer(command.serverId).transport==='streamable-http')await runtime.stop(command.serverId);
+        return updated;
+      }
       case 'integration.action': {
         const current = localServices?.() ?? {};
         const binding = current.actions?.[command.localService]?.[command.integrationAction]
@@ -507,6 +512,7 @@ export function createIntegrationService({
     'mcp.tools': params => {
       const id = params.id ?? params.serverId;
       const server = resolvedRegistry.requireServer(id);
+      resolvedRegistry.syncRemoteTools?.();
       return { serverId: id, tools: runtime.discover(id).map(found => {
         const tool = resolvedRegistry.toolById.get(server.namespace + found.name);
         if (!tool) return { ...found, id: null, enabled: false, callable: false };
@@ -530,6 +536,7 @@ export function createIntegrationService({
       const server = resolvedRegistry.requireServer(serverId);
       const toolName = String(params.tool ?? '');
       const toolId = server.namespace + toolName;
+      resolvedRegistry.syncRemoteTools?.();
       if (!resolvedRegistry.toolById.has(toolId)) {
         // 未知 MCP 工具：不猜测、不转发，直接拒绝。
         throw integrationError('UNKNOWN_MCP_TOOL', '未知 MCP 工具：' + toolId);

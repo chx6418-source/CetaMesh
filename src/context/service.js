@@ -25,8 +25,8 @@ function resolveMemoryReferences(memoryService, task, principal, onMemoryError =
       const expectedScope = reference.scope || sourceScope;
       if (item.scope !== expectedScope) continue;
       if (expectedScope !== sourceScope && reference.authorizedBy !== 'user:desktop') continue;
-      if ((item.factKey || item.validUntil != null) && memoryService.runtime.assess?.({principal,id:memoryId}).status !== 'current') continue;
-      resolved.push({ memoryId, title: reference.note || item.type || 'Task Memory reference', excerpt: item.content });
+      if (memoryService.runtime.assess && memoryService.runtime.assess({principal,id:memoryId}).status !== 'current') continue;
+      resolved.push({ memoryId, title: reference.note || item.type || 'Task Memory reference', excerpt: item.content, ...memoryReferenceMetadata(item) });
     } catch (error) {
       onMemoryError?.(error);
       continue;
@@ -80,19 +80,28 @@ function automaticMemoryReferences(memoryService, settings, principal, scopes, q
     }
     if (!excerpt) continue;
     remaining -= cost + overhead;
-    output.push({ memoryId: row.id, title, excerpt, truncated: excerpt.length < row.content.length });
+    output.push({ memoryId: row.id, title, excerpt, truncated: excerpt.length < row.content.length, ...memoryReferenceMetadata(row) });
   }
   return output;
+}
+
+function memoryReferenceMetadata(row) {
+  return { scope: row.scope, revision: row.rev, source: row.source,
+    provenance: row.provenance, createdAt: row.createdAt, updatedAt: row.updatedAt,
+    sourceRefs: (row.sourceRefs ?? []).slice(0, 4) };
 }
 
 function boundMemoryReferences(references, settings) {
   const limit = Math.max(1, Math.min(200, Number(settings?.retrievalLimit) || 50));
   let remaining = 1200;
   const result = [];
+  const seen = new Set();
   for (const item of references) {
+    if (seen.has(item.memoryId)) continue;
+    seen.add(item.memoryId);
     if (result.length >= limit) break;
     const title = String(item.title ?? 'Memory');
-    const overhead = Buffer.byteLength(title + String(item.memoryId ?? ''), 'utf8') + 16;
+    const overhead = Buffer.byteLength(JSON.stringify({ ...item, excerpt: '' }), 'utf8') + 16;
     if (remaining <= overhead) break;
     let excerpt = '';
     for (const char of String(item.excerpt ?? '')) {

@@ -22,6 +22,7 @@ import {
   WorkspaceToolError,
   fileSearch,
   gitCommit,
+  prepareGitCommit,
   gitDiff,
   gitStatus,
   readFile,
@@ -79,7 +80,7 @@ export function createWorkspaceService({ stateDir, now = () => Date.now(), audit
       lastOpenedAt: entry.lastOpenedAt,
       active: registry.getActiveId() === entry.id,
       settings: entry.settings,
-      git: { isRepo: git.isRepo, branch: git.branch, dirty: git.dirty }
+      git: { isRepo: git.isRepo, branch: git.branch, headSha: git.headSha, dirty: git.dirty }
     };
   }
 
@@ -91,8 +92,8 @@ export function createWorkspaceService({ stateDir, now = () => Date.now(), audit
     return text;
   }
 
-  async function executeCommit(entry, { message, stage }) {
-    const result = await gitCommit(entry.root, { message, stage });
+  async function executeCommit(entry, { message, ...selection }) {
+    const result = await gitCommit(entry.root, { message, ...selection });
     record(entry, 'user', 'git.commit', result.committed ? `${message}（${result.sha ?? 'no-sha'}）` : message);
     return result;
   }
@@ -212,15 +213,16 @@ export function createWorkspaceService({ stateDir, now = () => Date.now(), audit
       const message = String(p?.message ?? '').trim();
       if (!message) fail('COMMIT_MESSAGE_REQUIRED', 'commit 需要提交信息');
       const policy = entry.settings?.policies?.gitCommit ?? 'approval';
-      const stage = p?.stage === 'none' ? 'none' : 'all';
+
       if (policy === 'deny') {
         record(entry, String(p?.actor ?? 'user'), 'git.commit.denied', message);
         fail('GIT_COMMIT_DENIED', '当前工作区策略禁止 commit（policies.gitCommit=deny）');
       }
+      const selection = await prepareGitCommit(entry.root,p);
       if (policy === 'allow') {
-        return { status: 'committed', ...(await executeCommit(entry, { message, stage })) };
+        return { status: 'committed', ...(await executeCommit(entry, { message, ...selection })) };
       }
-      const request = registry.addPendingCommit({ workspaceId: entry.id, message, stage });
+      const request = registry.addPendingCommit({ workspaceId: entry.id, message, ...selection });
       record(entry, String(p?.actor ?? 'user'), 'git.commit.pending', message);
       return {
         status: 'pending',
@@ -249,7 +251,7 @@ export function createWorkspaceService({ stateDir, now = () => Date.now(), audit
         record(entry, 'user', 'git.commit.rejected', request.message);
         return { status: 'rejected', requestId: request.id };
       }
-      const result = await executeCommit(entry, { message: request.message, stage: request.stage });
+      const result = await executeCommit(entry, request);
       return { status: 'committed', requestId: request.id, ...result };
     }
   };

@@ -14,6 +14,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
+import crypto from 'node:crypto';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createWorkspaceService } from '../src/workspace/index.js';
@@ -447,6 +448,11 @@ const repoWs = await service.execute({
 });
 const REPO = repoWs.workspace.id;
 const REPO_ROOT = repoWs.workspace.root;
+function commitSelection(root, paths) {
+  let expectedHead=null;
+  try{expectedHead=execFileSync('git',['rev-parse','--verify','HEAD'],{cwd:root,encoding:'utf8',stdio:['ignore','pipe','ignore']}).trim();}catch{}
+  return {paths,expectedHead,expectedHashes:Object.fromEntries(paths.map(rel=>[rel,crypto.createHash('sha256').update(fs.readFileSync(path.join(root,rel))).digest('hex')]))};
+}
 execFileSync('git', ['init', '-q'], { cwd: REPO_ROOT });
 execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: REPO_ROOT });
 execFileSync('git', ['config', 'user.name', 'Workspace Test'], { cwd: REPO_ROOT });
@@ -467,7 +473,7 @@ await check('git.status + commit(allow) 全流程', async () => {
   assert.equal(status0.git.dirty, true, '存在未跟踪文件应为 dirty');
   const commit = await service.execute({
     method: 'workspace.git.commit',
-    params: { id: REPO, message: 'initial commit' }
+    params: { id: REPO, message: 'initial commit', ...commitSelection(REPO_ROOT,["first.txt"]) }
   });
   assert.equal(commit.status, 'committed');
   assert.ok(commit.sha, '应有 commit sha（含 root-commit 形态）');
@@ -478,7 +484,7 @@ await check('git.status + commit(allow) 全流程', async () => {
 
 await check('git.diff: 工作区有改动时 hasChanges=true', async () => {
   fs.writeFileSync(path.join(REPO_ROOT, 'tracked.txt'), 'v1');
-  await service.execute({ method: 'workspace.git.commit', params: { id: REPO, message: 'add tracked' } });
+  await service.execute({ method: 'workspace.git.commit', params: { id: REPO, message: 'add tracked', ...commitSelection(REPO_ROOT,["tracked.txt"]) } });
   fs.writeFileSync(path.join(REPO_ROOT, 'tracked.txt'), 'v2');
   const diff = await service.execute({ method: 'workspace.git.diff', params: { id: REPO } });
   assert.equal(diff.hasChanges, true);
@@ -493,7 +499,7 @@ await check('git.commit: 默认 approval 策略进入待审批', async () => {
   fs.writeFileSync(path.join(REPO_ROOT, 'approved.txt'), 'pending');
   const pending = await service.execute({
     method: 'workspace.git.commit',
-    params: { id: REPO, message: 'needs approval' }
+    params: { id: REPO, message: 'needs approval', ...commitSelection(REPO_ROOT,["approved.txt"]) }
   });
   assert.equal(pending.status, 'pending');
   assert.ok(pending.requestId);
@@ -511,7 +517,7 @@ await check('git.commit: 审批拒绝后不落盘', async () => {
   fs.writeFileSync(path.join(REPO_ROOT, 'rejected.txt'), 'nope');
   const pending = await service.execute({
     method: 'workspace.git.commit',
-    params: { id: REPO, message: 'should be rejected' }
+    params: { id: REPO, message: 'should be rejected', ...commitSelection(REPO_ROOT,["rejected.txt"]) }
   });
   const decided = await service.execute({
     method: 'workspace.pending.decide',
@@ -563,7 +569,7 @@ await check('workspace.remove 同步清理待审批请求', async () => {
   fs.writeFileSync(path.join(temp3.workspace.root, 'x.txt'), 'x');
   const pending = await service.execute({
     method: 'workspace.git.commit',
-    params: { id: temp3.workspace.id, message: 'will be removed' }
+    params: { id: temp3.workspace.id, message: 'will be removed', ...commitSelection(temp3.workspace.root,['x.txt']) }
   });
   await service.execute({ method: 'workspace.remove', params: { id: temp3.workspace.id } });
   await expectError(

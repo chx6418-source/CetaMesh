@@ -64,14 +64,15 @@ check('artifact names include product version, platform build, and architecture'
 
 check('CI uploads files from the canonical immutable release artifact directory', () => {
   const workflow = fs.readFileSync(path.join(ROOT, '.github', 'workflows', 'ci.yml'), 'utf8');
-  const upload = workflow.match(/- name: Upload RC artifacts[\s\S]*?path:\s*\|([\s\S]*?)\n\s*if-no-files-found:/);
+  const upload = workflow.match(/- name: Upload internal candidate[\s\S]*?path:\s*\|([\s\S]*?)\n\s*if-no-files-found:/);
   assert.ok(upload, 'CI artifact upload step and fail-closed missing-file policy are required');
   const paths = upload[1].split(/\r?\n/).map(line => line.trim()).filter(Boolean);
   assert.deepEqual(paths, [
-    'artifacts/*/*/build-*/*.exe',
-    'artifacts/*/*/build-*/release-manifest.json',
-    'artifacts/*/*/build-*/SHA256SUMS.txt',
-    'artifacts/*/*/build-*/sbom.json'
+    '${{ steps.candidate.outputs.directory }}/${{ steps.candidate.outputs.setup }}',
+    '${{ steps.candidate.outputs.directory }}/release-manifest.json',
+    '${{ steps.candidate.outputs.directory }}/SHA256SUMS.txt',
+    '${{ steps.candidate.outputs.directory }}/sbom.json',
+    '${{ steps.candidate.outputs.directory }}/licenses/**'
   ]);
   assert.match(workflow, /if-no-files-found:\s*error/);
   assert.equal(paths.some(item => item.startsWith('dist/app/')), false);

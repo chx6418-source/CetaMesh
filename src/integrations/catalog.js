@@ -29,6 +29,7 @@ const SEND = ['message.send'];
 const NET = ['network'];
 
 export const MCP_SERVER_CATALOG = Object.freeze([
+
   {
     id: 'snowluma',
     name: 'SnowLuma QQ 网关',
@@ -164,7 +165,10 @@ export const MCP_SERVER_CATALOG = Object.freeze([
         reason: '同上：进程控制在能力面之外，防止被 agent/群友诱导触发。'
       })
     ]
-  }
+  },
+  { id: 'remote', name: 'Remote MCP', namespace: 'mcp__remote__', transport: 'streamable-http',
+    entry: null, managedBy: 'cetamesh', source: 'external', permissions: ['network'], defaultEnabled: false,
+    description: 'Owner-configured HTTPS MCP endpoint; only explicitly allowed tools are callable after approval.', tools: [] }
 ]);
 
 /** 由 Agent Provider（DSH）侧提供的内置只读工具：不进 MCP，但属于仿生聊天工具包。 */

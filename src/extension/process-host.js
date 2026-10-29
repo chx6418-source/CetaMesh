@@ -224,6 +224,8 @@ export function createProcessExtensionHost({
       return;
     }
     if (frame.kind === 'invoke') {
+      const parent = pending.get(frame.parentId);
+      if (!parent || parent.settled) return failHost('PROTOCOL_VIOLATION', 'Worker reverse call has no active parent invocation');
       if (reversePending.has(frame.id)) return failHost('PROTOCOL_VIOLATION', 'Worker reused an active reverse capability id');
       if (reversePending.size >= MAX_INFLIGHT) {
         try { checkedSend({ v: PROTOCOL_VERSION, id: frame.id, kind: 'error', capability: frame.capability,
@@ -237,11 +239,12 @@ export function createProcessExtensionHost({
         catch (error) { record('error', 'Unable to reject Worker capability request: ' + String(error?.message ?? error)); }
         return;
       }
-      const active = { capability: frame.capability, controller: new AbortController() };
+      const active = { capability: frame.capability, parentId: frame.parentId, controller: new AbortController() };
       reversePending.set(frame.id, active);
-      Promise.resolve().then(() => capabilityExecutor(frame.capability, frame.input ?? {}, {
-        signal: active.controller.signal
-      })).then((result) => {
+      Promise.resolve().then(() => {
+        const execute = () => capabilityExecutor(frame.capability, frame.input ?? {}, { signal: active.controller.signal });
+        return parent?.runWithAuthority ? parent.runWithAuthority(execute) : execute();
+      }).then((result) => {
         if (reversePending.get(frame.id) !== active) return;
         reversePending.delete(frame.id);
         checkedSend({ v: PROTOCOL_VERSION, id: frame.id, kind: 'result', capability: frame.capability, result: result ?? null });
@@ -319,7 +322,7 @@ export function createProcessExtensionHost({
       });
     },
     /** 发起一次受控调用：能力白名单 → 帧发送 → 超时/取消/结果裁决（async：同步拒绝即 rejection）。 */
-    async invoke(capabilityId, input, { signal } = {}) {
+    async invoke(capabilityId, input, { signal, runWithAuthority } = {}) {
       const entry = capabilityOrThrow(capabilityId); // 未声明/未授权的能力：不出帧，直接拒绝
       void entry;
       if (closed) fail('PROVIDER_UNAVAILABLE', 'Process extension host 已关闭');
@@ -328,7 +331,12 @@ export function createProcessExtensionHost({
       const id = 'inv_' + Math.random().toString(36).slice(2) + Date.now().toString(36);
       return new Promise((resolve, reject) => {
         let dispatched = false;
-        const cleanup = () => signal?.removeEventListener('abort', onAbort);
+        const cleanup = () => {
+          signal?.removeEventListener('abort', onAbort);
+          for (const [reverseId, active] of reversePending) if (active.parentId === id) {
+            reversePending.delete(reverseId); active.controller.abort(extensionError('INVOKE_CANCEL_UNCONFIRMED', 'Parent invocation ended'));
+          }
+        };
         const onAbort = () => {
           const entry = pending.get(id);
           if (!entry) return;
@@ -354,7 +362,7 @@ export function createProcessExtensionHost({
           catch (error) { record('warn', 'Unable to send cancellation frame: ' + String(error?.message ?? error)); }
         }, timeoutMs);
         // 不 unref：等待子进程应答期间超时必须能够触发（否则挂死调用方）。
-        pending.set(id, { capability: capabilityId, resolve, reject, timer, settled: false, cleanup });
+        pending.set(id, { capability: capabilityId, resolve, reject, timer, settled: false, cleanup, runWithAuthority });
         signal?.addEventListener('abort', onAbort, { once: true });
         if (signal?.aborted) { onAbort(); return; }
         let frame;

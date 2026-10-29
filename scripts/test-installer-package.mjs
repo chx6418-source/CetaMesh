@@ -31,7 +31,7 @@ try {
     path.join(root, 'scripts', 'package-installer.mjs'), outDir, payloadDir
   ], { cwd: root, encoding: 'utf8', timeout: 600000, env: packagerEnv });
   assert.equal(result.status, 0, `${result.stdout ?? ''}\n${result.stderr ?? ''}`);
-  const setupExe = path.join(outDir, 'WhaleBridge-Setup-x64.exe');
+  const setupExe = path.join(outDir, 'CetaMesh-Setup-x64.exe');
   assert.ok(fs.existsSync(setupExe), 'IExpress 应生成单文件安装器');
   assert.ok(fs.statSync(setupExe).size > 4096, '安装器中应包含压缩的壳与 payload');
   assert.deepEqual([...fs.readFileSync(setupExe).subarray(0, 2)], [0x4d, 0x5a], '输出应为 Windows PE 可执行文件');
@@ -51,7 +51,7 @@ try {
   });
   assert.equal(iconProbe.status, 0,
     `安装器应带有可由 Windows 提取的绿色 CetaMesh 图标（退出代码 ${iconProbe.status}）：${iconProbe.stderr ?? ''}`);
-  assert.deepEqual(fs.readdirSync(outDir).sort(), ['WhaleBridge-Setup-x64.exe', 'WhaleBridge.exe'].sort());
+  assert.deepEqual(fs.readdirSync(outDir).sort(), ['CetaMesh-Setup-x64.exe', 'WhaleBridge.exe'].sort());
   process.stdout.write('✅ IExpress 生成了带绿色 CetaMesh 图标的单文件安装器，构建中间文件未进入发布目录。\n');
 
   // The package builder must fail closed if an upstream step accidentally reintroduces HTML UI.
@@ -64,7 +64,7 @@ try {
   ], { cwd: root, encoding: 'utf8', timeout: 600000, env: packagerEnv });
   assert.equal(rejected.status, 1, '含产品 HTML 的 payload 必须在封包前被拒绝');
   assert.match(rejected.stderr ?? '', /contains product HTML UI assets/i);
-  assert.equal(fs.existsSync(path.join(rejectedOutDir, 'WhaleBridge-Setup-x64.exe')), false);
+  assert.equal(fs.existsSync(path.join(rejectedOutDir, 'CetaMesh-Setup-x64.exe')), false);
   process.stdout.write('✅ no-web 安装器守卫：检测到 HTML 页面时在生成前拒绝。\n');
 } finally {
   fs.rmSync(tempRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });

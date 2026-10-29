@@ -83,7 +83,7 @@ export function createTaskWorkingMemoryRecorder({ memoryRuntime, taskRuntime, en
       if (memory.scope !== ref.scope || memory.type !== ref.type) {
         throw memoryError('HANDOFF_MEMORY_CONTEXT_REVIEW_REQUIRED', 'Linked Memory metadata changed; review authorization before Handoff');
       }
-      if((memory.factKey || memory.validUntil != null) && memoryRuntime.assess({principal:actor,id:memory.id}).status!=='current'){
+      if(memoryRuntime.assess({principal:actor,id:memory.id}).status!=='current'){
         throw memoryError('HANDOFF_MEMORY_CONTEXT_REVIEW_REQUIRED','Linked Memory fact is expired or conflicted; review it before transferring execution');
       }
       // The packet contract retains at most 4000 characters per record. Reject
@@ -92,7 +92,8 @@ export function createTaskWorkingMemoryRecorder({ memoryRuntime, taskRuntime, en
         throw memoryError('HANDOFF_MEMORY_CONTEXT_REVIEW_REQUIRED', 'Linked Memory exceeds the per-record Handoff budget; review before switching Agents');
       }
       excerpts.push({ memoryId: memory.id, scope: memory.scope, type: memory.type,
-        revision: memory.rev, source: memory.source, content: memory.content });
+        revision: memory.rev, source: memory.source, content: memory.content, provenance: memory.provenance,
+        createdAt: memory.createdAt, updatedAt: memory.updatedAt, sourceRefs: (memory.sourceRefs ?? []).slice(0, 4) });
       if (excerpts.length > 4 || JSON.stringify(excerpts).length > 12000) {
         throw memoryError('HANDOFF_MEMORY_CONTEXT_REVIEW_REQUIRED', 'Linked Memory exceeds the Handoff context budget; review and reduce linked references before switching Agents');
       }

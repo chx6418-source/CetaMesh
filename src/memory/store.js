@@ -47,6 +47,8 @@ function normalizeLoadedRecord(raw) {
     pinned: raw.pinned === true,
     createdAt: Number(raw.createdAt) || 0,
     updatedAt: Number(raw.updatedAt) || 0,
+    createdBy: typeof raw.createdBy === 'string' ? raw.createdBy : null,
+    updatedBy: typeof raw.updatedBy === 'string' ? raw.updatedBy : null,
     rev: Number.isSafeInteger(raw.rev) && raw.rev > 0 ? raw.rev : 1,
     confirmedAt: raw.confirmedAt === undefined ? null : raw.confirmedAt,
     confirmedBy: raw.confirmedBy === undefined ? null : raw.confirmedBy,

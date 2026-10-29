@@ -144,6 +144,13 @@ export function normalizePacket(packet) {
   };
   return {
     taskId: text(packet.taskId, PACKET_LIMITS.idChars),
+    versionContext: packet.versionContext?.taskId===packet.taskId ? {
+      taskId:text(packet.versionContext.taskId,160),workspaceId:text(packet.versionContext.workspaceId,160),
+      snapshotId:text(packet.versionContext.snapshotId,160),attemptId:text(packet.versionContext.attemptId,160)||null,
+      executorId:text(packet.versionContext.executorId,160)||null,
+      baselineHead:/^[a-f0-9]{40}$/.test(packet.versionContext.baselineHead??'')?packet.versionContext.baselineHead:null,
+      branch:text(packet.versionContext.branch,200)||null
+    }:null,
     attemptId: text(packet.attemptId, PACKET_LIMITS.idChars) || null,
     operations: (Array.isArray(packet.operations) ? packet.operations : []).slice(0, 100).map(row => ({
       operationId: text(row.operationId, 160), logicalStepId: text(row.logicalStepId, 160) || null, capability: text(row.capability, 160),
@@ -165,7 +172,13 @@ export function normalizePacket(packet) {
         && (row.scope === 'task:' + packet.taskId || ref.authorizedBy === 'user:desktop'))).slice(0, 4)
       .map(row => ({ memoryId: text(row.memoryId, 128), scope: text(row.scope, 160),
         type: text(row.type, 40), revision: Number.isSafeInteger(row.revision) ? row.revision : null,
-        source: text(row.source, 80), content: text(row.content, 4000) })),
+        source: text(row.source, 80), content: text(row.content, 4000),
+        ...(['user-confirmed', 'agent-inference', 'historical-unverified'].includes(row.provenance?.status)
+          ? {provenance: {status:row.provenance.status, actor:text(row.provenance.actor,160) || null,
+            at:Number.isFinite(row.provenance.at)?row.provenance.at:null}} : {}),
+        createdAt:Number.isFinite(row.createdAt)?row.createdAt:null, updatedAt:Number.isFinite(row.updatedAt)?row.updatedAt:null,
+        sourceRefs:(Array.isArray(row.sourceRefs)?row.sourceRefs:[]).slice(0,4)
+          .filter(ref=>ref.scope===row.scope).map(ref=>({kind:text(ref.kind,40),id:text(ref.id,128),scope:text(ref.scope,160)})) })),
     requirements: stringList(packet.requirements, PACKET_LIMITS.listItems, TASK_LIMITS.requirementChars),
     currentPhase: text(packet.currentPhase, 120),
     completedWork: list(packet.completedWork, PACKET_LIMITS.listItems),

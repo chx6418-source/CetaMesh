@@ -164,7 +164,8 @@ try {
  } finally {
   allowNativeExit=true;if(nativeSession)await nativeCore.agentService.getProvider('codex').closeSession(nativeSession);
   for(const core of [nativeCore,restarted])if(core){core.chatService.close();await core.capabilityService.close();await core.agentService.close();}
-  fs.rmSync(recoveryHome,{recursive:true,force:true});
+  assert.equal(path.dirname(path.resolve(recoveryHome)),path.resolve(os.tmpdir()));
+  fs.rmSync(recoveryHome,{recursive:true,force:true,maxRetries:5,retryDelay:100});
  }
  assert.equal((await createCodexAppServerProvider().health()).available,false);
  const unsupported=createCodexAppServerProvider({launch,taskOptions:{...taskOptions,verifiedRuntime:{...taskOptions.verifiedRuntime,security:{...security,nativeSandboxSupported:false}}}});
@@ -222,4 +223,10 @@ try {
  const enabled=createCodexProviderRouter({legacyProvider:legacy,appServerProvider:app,rolloutEnabled:true});
  await enabled.createSession({});await enabled.send({sessionId:'new'});assert.deepEqual(calls,['exec','exec','app']);
  console.log('Codex pinned schema lifecycle, cancellation approval race, resume binding, legacy router PASS');
-} finally {fs.rmSync(root,{recursive:true,force:true});}
+ } finally {
+ // All synthetic handles belong to this fixture. Await them before deleting
+ // their workspace; Windows may release the final file handle asynchronously.
+ await Promise.all(peers.map(peer=>peer.handle.close()));
+ assert.equal(path.dirname(path.resolve(root)),path.resolve(os.tmpdir()));
+ fs.rmSync(root,{recursive:true,force:true,maxRetries:5,retryDelay:100});
+}

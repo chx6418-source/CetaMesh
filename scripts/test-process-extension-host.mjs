@@ -449,18 +449,27 @@ async function waitUntil(predicate, timeoutMs = 5000) {
       return { brokered: true };
     }
   });
+  let parentFrame;
   const response = new Promise((resolve) => {
     pair.child.onMessage((raw) => {
       const frame = JSON.parse(raw);
-      if (frame.id === 'reverse-capability') resolve(frame);
+      if (frame.kind === 'invoke') {
+        parentFrame = frame;
+        pair.child.send(JSON.stringify({
+          v: 1, id: 'reverse-capability', parentId: frame.id, kind: 'invoke', capability: 'network',
+          input: { url: 'https://example.com/' }, extensionId: 'spoofed-extension',
+          actor: { kind: 'owner', id: 'desktop' }, grants: ['*']
+        }));
+      } else if (frame.id === 'reverse-capability') {
+        resolve(frame);
+        pair.child.send(JSON.stringify({ v: 1, id: parentFrame.id, kind: 'result',
+          capability: parentFrame.capability, result: frame.result }));
+      }
     });
   });
-  pair.child.send(JSON.stringify({
-    v: 1, id: 'reverse-capability', kind: 'invoke', capability: 'network',
-    input: { url: 'https://example.com/' }, extensionId: 'spoofed-extension',
-    actor: { kind: 'owner', id: 'desktop' }, grants: ['*']
-  }));
-  const frame = await response;
+  const invocation = host.invoke('fetch', {});
+  const frame = await Promise.race([response, invocation.then(() => { throw new Error('Parent completed without reverse response'); })]);
+  assert.deepEqual((await invocation).result, { brokered: true });
   assert.deepEqual(requests, [{ capability: 'network', input: { url: 'https://example.com/' } }]);
   assert.equal(frame.kind, 'result');
   assert.deepEqual(frame.result, { brokered: true });

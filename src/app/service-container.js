@@ -36,6 +36,7 @@ import { createQqConnectorHost } from '../channel/qq/connector-host.js';
 import { createBionicService } from '../bionic/service.js';
 import { createSettingsService } from '../settings/service.js';
 import { createIntegrationService } from '../integrations/index.js';
+import { createNetworkCredentialResolver } from '../integrations/network-credentials.js';
 import { createChannelDesktopControls } from '../channel/desktop-controls.js';
 import { createDshDesktopIntegration } from '../integrations/dsh-desktop.js';
 import { createAboutService } from '../about/service.js';
@@ -281,6 +282,7 @@ export function createCetaMeshServices(options = {}) {
     onChanged: data => uiEventBus.publish('memory.updated', { ...data, status: 'working-updated' }) });
   capabilityService = createCapabilityService({
     stateDir,
+    networkCredentialResolver: createNetworkCredentialResolver(providerSecrets),
     environmentClient: options.environmentClient ?? null,
     ownedArtifactRoot: path.join(dataRoot,'artifacts'),
     onEnvironmentChanged: data => uiEventBus.publish('task.updated',{taskId:data.taskId,environmentRunId:data.runId,environmentStatus:data.status}),
@@ -434,6 +436,7 @@ export function createCetaMeshServices(options = {}) {
   const integrationService = createIntegrationService({
     stateDir,
     transportFactory: options.integrationTransportFactory,
+    resolveCredential: createNetworkCredentialResolver(providerSecrets),
     capabilityBroker: capabilityService.broker,
     localServices: options.localServices ?? channelDesktopControls,
     dshDesktop,

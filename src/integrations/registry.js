@@ -7,9 +7,12 @@
 //   3. legacy-unsupported 工具永远不可启用（setToolEnabled 直接拒绝），UI 只能显示 Disabled。
 
 import { allPluginDescriptors, buildToolCatalog, MCP_SERVER_CATALOG } from './catalog.js';
-import { integrationError, isRestorable } from './types.js';
+import { integrationError, isRestorable, TOOL_CAPABILITIES } from './types.js';
 
 const MCP_CONFIG_KEYS = Object.freeze({
+  url: 'https-url',
+  credentialRef: 'credential-ref',
+  allowedTools: 'tool-names',
   args: 'string-array',
   env: 'string-map',
   cwd: 'string',
@@ -27,7 +30,15 @@ function assertMcpConfigPatch(patch) {
       throw integrationError('INVALID_PARAMS', '不支持的 MCP 配置项：' + key);
     }
     const kind = MCP_CONFIG_KEYS[key];
-    if (kind === 'string-array') {
+    if(kind==='https-url') {
+      let url;try{url=new URL(value);}catch{throw integrationError('INVALID_PARAMS','MCP endpoint must be an HTTPS URL');}
+      if(typeof value!=='string'||value.length>1500||url.protocol!=='https:'||url.username||url.password||url.search||url.hash)throw integrationError('INVALID_PARAMS','MCP endpoint must use HTTPS without credentials or query');
+      clean[key]=url.href;
+    } else if(kind==='credential-ref') {
+      if(typeof value!=='string'||(value!==''&&!/^plugin-[a-z0-9][a-z0-9._-]{0,55}$/.test(value)))throw integrationError('INVALID_PARAMS','Dedicated plugin credential reference required');clean[key]=value;
+    } else if(kind==='tool-names') {
+      if(!Array.isArray(value)||!value.length||value.length>100||value.some(name=>typeof name!=='string'||!/^[a-zA-Z0-9_.-]{1,128}$/.test(name)))throw integrationError('INVALID_PARAMS','Explicit remote tool allowlist required');clean[key]=[...new Set(value)];
+    } else if (kind === 'string-array') {
       if (!Array.isArray(value) || value.some(item => typeof item !== 'string')) throw integrationError('INVALID_PARAMS', key + ' 必须是字符串数组');
       clean[key] = [...value];
     } else if (kind === 'string-map') {
@@ -50,6 +61,7 @@ function assertMcpConfigPatch(patch) {
 function projectMcpConfig(config) {
   if (!config || typeof config !== 'object' || Array.isArray(config) || Object.keys(config).length === 0) return {};
   return {
+    ...(config.url ? {url:config.url,credentialRef:config.credentialRef??'',allowedTools:[...(config.allowedTools??[])]} : {}),
     hasArgs: Array.isArray(config.args) && config.args.length > 0,
     hasEnvironment: Boolean(config.env && typeof config.env === 'object' && Object.keys(config.env).length > 0),
     timeoutMs: Number.isSafeInteger(config.timeoutMs) ? config.timeoutMs : null,
@@ -112,6 +124,7 @@ export function createIntegrationRegistry({
   }
 
   function serverState(id) {
+    syncRemoteTools();
     const server = requireServer(id);
     const enabled = serverEnabled(id);
     const runtime = mcpStatus(id) ?? {};
@@ -133,8 +146,8 @@ export function createIntegrationRegistry({
       startedAt: runtime.startedAt ?? null,
       restarts: runtime.restarts ?? 0,
       crashes: runtime.crashes ?? 0,
-      tools: server.tools.map(tool => tool.id ?? (server.namespace + tool.name)),
-      toolCount: server.tools.length,
+      tools: server.transport==='streamable-http' ? discoveredTools.map(tool=>server.namespace+tool.name) : server.tools.map(tool => tool.id ?? (server.namespace + tool.name)),
+      toolCount: server.transport==='streamable-http' ? discoveredTools.length : server.tools.length,
       config: projectMcpConfig(mcpRecord(id).config)
     };
   }
@@ -187,6 +200,7 @@ export function createIntegrationRegistry({
   }
 
   function resolveTool(id) {
+    syncRemoteTools();
     const tool = toolById.get(String(id));
     if (!tool) throw integrationError('UNKNOWN_TOOL', '未知工具：' + id);
     return tool;
@@ -289,7 +303,8 @@ export function createIntegrationRegistry({
   }
 
   function listTools({ source = null, pluginId = null, enabled = null, available = null, serverId = null } = {}) {
-    return tools
+    syncRemoteTools();
+    return [...toolById.values()]
       .filter(tool => (source ? tool.source === source : true))
       .filter(tool => (serverId ? tool.serverId === serverId : true))
       .filter(tool => (pluginId ? (requirePlugin(pluginId).toolIds ?? []).includes(tool.id) : true))
@@ -311,7 +326,9 @@ export function createIntegrationRegistry({
   }
 
   function updateMcpConfig(id, patch) {
-    requireServer(id);
+    const server=requireServer(id);
+    if(server.transport!=='streamable-http'&&Object.keys(patch).some(key=>['url','credentialRef','allowedTools'].includes(key)))throw integrationError('INVALID_PARAMS','Remote settings cannot override a built-in stdio server');
+    if(server.transport==='streamable-http'&&Object.keys(patch).some(key=>['args','env','cwd'].includes(key)))throw integrationError('INVALID_PARAMS','Remote server cannot launch processes');
     const clean = assertMcpConfigPatch(patch);
     store.update(current => {
       const next = structuredClone(current);
@@ -330,6 +347,19 @@ export function createIntegrationRegistry({
   function mcpConfig(id) {
     requireServer(id);
     return { id, config: projectMcpConfig(mcpRecord(id).config), enabled: serverEnabled(id) };
+  }
+
+  function syncRemoteTools() {
+    for(const server of servers.filter(row=>row.transport==='streamable-http')) {
+      for(const [id,tool] of toolById)if(tool.serverId===server.id)toolById.delete(id);
+      const runtime=mcpStatus(server.id);if(runtime?.status!=='running')continue;
+      const allowed=mcpRecord(server.id).config?.allowedTools??[];
+      for(const discovered of runtime.tools??[]) {
+        if(!allowed.includes(discovered.name))continue;
+        const id=server.namespace+discovered.name;
+        toolById.set(id,{id,name:discovered.name,label:discovered.name,description:discovered.description,source:'mcp',origin:'external',serverId:server.id,namespace:server.namespace,group:'remote',schema:discovered.inputSchema,risk:'high',capability:TOOL_CAPABILITIES.admin,permissions:['network'],restore:'partial',enabledByDefault:true});
+      }
+    }
   }
 
   /** 供 DSH preset / agent 侧白名单消费：当前被允许调用的工具全名。 */
@@ -364,6 +394,7 @@ export function createIntegrationRegistry({
     mcpRuntimeConfig,
     updateMcpConfig,
     agentAllowlist,
+    syncRemoteTools,
     toolById,
     pluginById,
     serverById

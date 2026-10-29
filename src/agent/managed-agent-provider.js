@@ -171,8 +171,10 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
           fail('PRODUCT_CONTEXT_UNAVAILABLE', 'CetaMesh Product Context could not be built for the managed Agent');
         }
         const contextText = productTurn?.context ?? productTurn?.serialized ?? '';
+        const canDelegate = ['agent.delegate.candidates','agent.delegate.propose'].every(id=>productTurn?.manifest?.some(row=>row.id===id&&row.available!==false));
+        const delegationGuidance = canDelegate ? ' Delegation is an available workflow under the current Task policy. When the Owner asks an external executor to do the development, inspect only the minimum context needed, then call agent.delegate.candidates with the actual requirements. If canPropose is true, call agent.delegate.propose using the same requirements and a complete bounded technical brief, then end your turn so Core can dispatch. Do not consume the tool budget writing the delegated implementation or repeatedly planning. Respect the requested executor; report an unavailable, unauthorized or conflicting executor instead of silently doing its work yourself. These instructions grant no permission and do not override the candidate checks, Owner approvals, operation identity or unknown-effect recovery. Without canPropose, explain the concrete blocker.' : '';
         const messages = [
-          { role: 'system', content: system },
+          { role: 'system', content: system + delegationGuidance },
           { role: 'system', content: PRODUCT_IDENTITY_PROMPT },
           ...(contextText ? [{ role: 'system', content: 'CetaMesh dynamic context (JSON reference data):\n' + contextText }] : []),
           ...copy(s.messages)

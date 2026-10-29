@@ -1,7 +1,7 @@
 import { evidenceBinding, evidenceSummary, sanitizeToolEvidence, EVIDENCE_SOURCE_CAPABILITIES, validateEvidenceSourceInput } from '../context/tool-evidence.js';
 import { projectMessageBudget } from '../context/message-budget.js';
 import { accumulateModelUsage } from './usage.js';
-import { validateSchema } from './input-schema.js';
+import { validateSchema, schemaFailureDetail } from './input-schema.js';
 import crypto from 'node:crypto';
 import path from 'node:path';
 import { readJsonFile, writeJsonAtomic, StorageError } from '../storage/json-file.js';
@@ -150,7 +150,8 @@ function capabilityFromCall(call, known) {
 }
 
 function errorResult(error) {
-  return { error: { code: String(error?.code ?? 'CAPABILITY_DENIED').slice(0, 100) } };
+  const validation = schemaFailureDetail(error);
+  return { error: { code: String(error?.code ?? 'CAPABILITY_DENIED').slice(0, 100), ...(validation ? { validation } : {}) } };
 }
 
 /** Runs a bounded Model ↔ Capability Broker loop for one logical turn. */
@@ -585,7 +586,7 @@ export function createToolExecutionCoordinator({
           await state.onActivity({
             id: activityId, capability,
             status: result?.status === 'completed' ? 'completed' : 'failed',
-            summary: /^[A-Z][A-Z0-9_]{0,99}$/.test(result?.error?.code ?? '') ? result.error.code : '',
+            summary: /^[A-Z][A-Z0-9_]{0,99}$/.test(result?.error?.code ?? '') ? result.error.code + (result.error.validation ? ': ' + result.error.validation.path + ' ' + result.error.validation.reason : '') : '',
             durationMs: Date.now() - activityStartedAt
           });
         }

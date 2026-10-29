@@ -66,6 +66,20 @@ function projectMemoryReferences(references, include) {
     textField(projected, 'memoryId', reference.memoryId, 160);
     textField(projected, 'title', reference.title, 180);
     textField(projected, 'excerpt', reference.excerpt, 500);
+    textField(projected, 'scope', reference.scope, 160);
+    if (Number.isSafeInteger(reference.revision)) projected.revision = reference.revision;
+    if (['user', 'chat-candidate', 'qq-adapter', 'system'].includes(reference.source)) projected.source = reference.source;
+    for (const key of ['createdAt', 'updatedAt']) if (Number.isFinite(reference[key])) projected[key] = reference[key];
+    if (['user-confirmed', 'agent-inference', 'historical-unverified'].includes(reference.provenance?.status)) {
+      projected.provenance = { status: reference.provenance.status };
+      textField(projected.provenance, 'actor', reference.provenance.actor, 160);
+      if (Number.isFinite(reference.provenance.at)) projected.provenance.at = reference.provenance.at;
+    }
+    if (Array.isArray(reference.sourceRefs)) projected.sourceRefs = reference.sourceRefs.slice(0, 4).map(ref => {
+      const value = {};
+      for (const [key, max] of [['kind', 40], ['id', 128], ['scope', 160]]) textField(value, key, ref[key], max);
+      return value;
+    });
     if (reference.truncated === true || (typeof reference.excerpt === 'string' && reference.excerpt.length > 500)) projected.truncated = true;
     if (Object.keys(projected).length) output.push(projected);
   }

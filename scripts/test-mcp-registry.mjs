@@ -189,7 +189,7 @@ async function builtinProtocolChecks() {
     'snowluma-host': { name: 'snowluma_status', args: {}, match: /"reachable":\s*false/ }
   };
   for (const packaged of process.env.WHALEBRIDGE_TEST_MCP_EXE ? [false, true] : [false]) {
-    for (const server of MCP_SERVER_CATALOG) {
+    for (const server of MCP_SERVER_CATALOG.filter(row=>row.transport==='stdio')) {
       let connection;
       try {
         connection = await createStdioMcpConnection(server, { cwd: dataRoot, env: { WHALEBRIDGE_DATA_DIR: dataRoot } }, {
@@ -234,8 +234,10 @@ try {
 
   // ── 1. 注册表：server id/name/transport/status/tools/permissions/source/last error ──
   const list = await service.execute({ method: 'mcp.list' });
-  assert.equal(list.servers.length, 5, '注册表覆盖 5 个 MCP Server');
-  for (const server of list.servers) {
+  assert.equal(list.servers.filter(row=>row.transport==='stdio').length, 5, 'Five built-in stdio servers remain available');
+  const remote=list.servers.find(row=>row.id==='remote');assert.equal(remote.enabled,false);assert.equal(remote.callable,false);
+  assert.equal(remote.transport,'streamable-http');
+  for (const server of list.servers.filter(row=>row.transport==='stdio')) {
     for (const key of ['id', 'name', 'transport', 'status', 'tools', 'permissions', 'source', 'lastError', 'enabled']) {
       assert.ok(Object.hasOwn(server, key), 'server 缺少 ' + key);
     }

@@ -254,14 +254,14 @@ export function createWorkspaceRegistry({ file, now = () => Date.now() } = {}) {
       return items.slice(0, Math.max(1, Math.min(100, limit)));
     },
 
-    addPendingCommit({ workspaceId, message, stage }) {
+    addPendingCommit({ workspaceId, message, paths, expectedHead, expectedHashes }) {
       requireEntry(workspaceId);
       const request = {
         id: newId('pnd'),
         workspaceId,
         kind: 'git.commit',
         message: String(message ?? ''),
-        stage: stage === 'none' ? 'none' : 'all',
+        paths: [...paths], expectedHead, expectedHashes: {...expectedHashes},
         createdAt: now(),
         expiresAt: now() + PENDING_TTL_MS
       };

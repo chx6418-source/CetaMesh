@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import {AsyncLocalStorage} from 'node:async_hooks';
 import path from 'node:path';
 import { isMainModule, reportEntrypointError } from '../entrypoint.js';
 import { createVmExtensionHost } from './host.js';
@@ -99,6 +100,7 @@ export async function runExtensionWorker({ input = process.stdin, output = proce
   const { manifest, source } = readPackage();
   const pendingCapabilities = new Map();
   const activeInvokes = new Map();
+  const invocationContext = new AsyncLocalStorage();
   let nextRequest = 0;
   let stopped = false;
   let buffer = Buffer.alloc(0);
@@ -173,7 +175,7 @@ export async function runExtensionWorker({ input = process.stdin, output = proce
         return;
       }
       try {
-        send({ v: PROTOCOL_VERSION, id, kind: 'invoke', capability, input: requestInput ?? {} });
+        send({ v: PROTOCOL_VERSION, id, kind: 'invoke', parentId: invocationContext.getStore(), capability, input: requestInput ?? {} });
       } catch (error) {
         clearTimeout(timer);
         signal?.removeEventListener('abort', onAbort);
@@ -237,7 +239,7 @@ export async function runExtensionWorker({ input = process.stdin, output = proce
       if (activeInvokes.has(frame.id)) return failProtocol('duplicate invoke id');
       const active = { cancelled: false, controller: new AbortController() };
       activeInvokes.set(frame.id, active);
-      Promise.resolve().then(() => host.invoke(frame.capability, frame.input, { signal: active.controller.signal })).then((result) => {
+      Promise.resolve().then(() => invocationContext.run(frame.id, () => host.invoke(frame.capability, frame.input, { signal: active.controller.signal }))).then((result) => {
         if (!stopped && !active.cancelled) {
           send({ v: PROTOCOL_VERSION, id: frame.id, kind: 'result', capability: frame.capability, result: result.result ?? null });
         }

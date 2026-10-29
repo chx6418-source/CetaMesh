@@ -242,8 +242,13 @@ try {
   assert.equal(fs.readFileSync(path.join(authoritativeRoot, 'dsh-result.txt'), 'utf8'), `dsh fake edit ${dshSession.sessionId}`,
     'cancelling DSH leaves the authoritative Workspace unchanged');
   await cancelledDshFollow;
-  await dshService.broker.closeSession({ provider: 'dsh', sessionId: cancelledDshSession.sessionId });
-  assert.equal(fs.existsSync(cancelledDshStagePath), false, 'closing the cancelled DSH session cleans its staged Workspace');
+  const cancelledDshClose = await dshService.broker.closeSession({ provider: 'dsh', sessionId: cancelledDshSession.sessionId });
+  assert.equal(cancelledDshClose.closed, true, 'runtime closure is confirmed independently of retained output');
+  assert.equal(fs.existsSync(cancelledDshStagePath), true, 'cancelled unimported output remains available for Owner review');
+  assert.equal(fs.readFileSync(path.join(cancelledDshStagePath, 'dsh-result.txt'), 'utf8'), `dsh fake edit ${cancelledDshSession.sessionId}`,
+    'retained output belongs to the cancelled executor rather than the accepted Workspace version');
+  assert.equal(fs.readFileSync(path.join(authoritativeRoot, 'dsh-result.txt'), 'utf8'), `dsh fake edit ${dshSession.sessionId}`,
+    'closing the cancelled executor cannot import its unapproved result');
   const expectedDshStageRoot = fs.realpathSync.native(path.join(root, 'dsh-staging'));
   const canonicalDshStageRoot = fs.realpathSync.native(approvedDshStageRoot);
   const dshStageRelative = path.relative(expectedDshStageRoot, canonicalDshStageRoot);

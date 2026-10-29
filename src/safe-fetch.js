@@ -372,3 +372,70 @@ function requestOnceBuffer(url, ip, maxBytes) {
     req.end();
   });
 }
+
+/** Pinned, bounded HTTPS request for reviewed authenticated transports.
+ * Unlike public read-only safeFetch, this never follows a redirect or retries.
+ * resolveHost/ca are trusted Core construction dependencies, never request fields.
+ */
+export async function safeHttpResponse(raw, {
+  method = 'GET', headers = {}, body, signal, authorizeUrl = null,
+  resolveHost = resolveSafeHost, ca, maxBytes = 2 * 1024 * 1024, timeoutMs = 30000
+} = {}) {
+  const url = new URL(raw);
+  if (url.protocol !== 'https:' || url.username || url.password || url.hash) throw Object.assign(new Error('HTTPS without URL credentials or fragments is required'), { code: 'NETWORK_SCOPE_DENIED' });
+  if (!['GET','HEAD','POST','PUT','PATCH','DELETE'].includes(method) || (['GET','HEAD'].includes(method) && body !== undefined)) throw Object.assign(new Error('Unsupported HTTP method or body'), { code: 'NETWORK_OPERATION_DENIED' });
+  if (body !== undefined && (typeof body !== 'string' || Buffer.byteLength(body) > 65536)) throw Object.assign(new Error('HTTP body exceeds bounded JSON transport'), { code: 'NETWORK_OPERATION_DENIED' });
+  signal?.throwIfAborted();
+  authorizeUrl?.(url);
+  const ip = await resolveHost(url.hostname);
+  signal?.throwIfAborted();
+  const requestHeaders = Object.fromEntries(new Headers(headers));
+  // Host, length and hop-by-hop headers are transport-owned.
+  for (const name of ['host','content-length','connection','transfer-encoding','proxy-authorization','proxy-connection','upgrade']) delete requestHeaders[name];
+  let dispatched = false;
+  const failure = () => Object.assign(new Error('HTTP request failed; verify remote effects before retrying'), {
+    code: dispatched && !['GET','HEAD'].includes(method) ? 'HTTP_OUTCOME_UNKNOWN' : 'HTTP_REQUEST_FAILED',
+    ...(dispatched && !['GET','HEAD'].includes(method) ? { effectStatus: 'unknown' } : {})
+  });
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const req = https.request({ hostname: ip, port: url.port || 443, path: url.pathname + url.search,
+      servername: url.hostname, rejectUnauthorized: true, ca, method,
+      headers: { ...requestHeaders, host: url.host, ...(body !== undefined ? { 'content-length': Buffer.byteLength(body) } : {}) },
+      signal, timeout: Math.min(600000, Math.max(100, timeoutMs))
+    }, res => {
+      if (res.statusCode >= 300 && res.statusCode < 400) {
+        res.destroy(); reject(failure()); return;
+      }
+      // A web stream preserves SDK SSE framing and cancellation without buffering
+      // an unbounded remote stream. The SDK owns protocol interpretation.
+      let bytes = 0;
+      const stream = new ReadableStream({
+        start(controller) {
+          res.on('data', chunk => {
+            bytes += chunk.length;
+            if (bytes > maxBytes) { res.destroy(failure()); return; }
+            controller.enqueue(new Uint8Array(chunk));
+          });
+          res.on('end', () => { if (!settled) { settled = true; controller.close(); } });
+          res.on('error', () => { if (!settled) { settled = true; controller.error(failure()); } });
+          res.on('aborted', () => { if (!settled) { settled = true; controller.error(failure()); } });
+        },
+        cancel() { settled = true; res.destroy(); req.destroy(); }
+      });
+      const noBody = method === 'HEAD' || [204,205,304].includes(res.statusCode);
+      if (noBody) { settled = true; res.resume(); }
+      resolve(new Response(noBody ? null : stream, { status: res.statusCode, headers: res.headers }));
+    });
+    req.on('timeout', () => req.destroy(failure()));
+    req.on('error', () => reject(failure()));
+    dispatched = true;
+    req.end(body);
+  });
+}
+
+export async function safeHttpFetch(raw, maxChars = 50000, options = {}) {
+  const response = await safeHttpResponse(raw, options);
+  const body = await response.text();
+  return { url: String(raw), statusCode: response.status, body: body.slice(0, maxChars), truncated: body.length > maxChars };
+}

@@ -69,6 +69,19 @@ function normalizeCapabilities(value) {
   return out;
 }
 
+function normalizeDelegates(value, permissions) {
+  if (value === undefined) return undefined;
+  if (!permissions.includes('extension.invoke') || !Array.isArray(value) || value.length < 1 || value.length > 20)
+    throw extensionError('INVALID_DELEGATION', 'Plugin delegation requires extension.invoke and 1..20 explicit targets');
+  const seen = new Set();
+  return value.map(row => {
+    if (!row || !/^extension\.[a-z0-9][a-z0-9._-]{1,63}\.[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(row.capability)
+      || seen.has(row.capability) || !row.inputSchema || row.inputSchema.type !== 'object')
+      throw extensionError('INVALID_DELEGATION', 'Each delegation needs one exact target and object input schema');
+    seen.add(row.capability);
+    return {capability:row.capability, inputSchema:structuredClone(row.inputSchema)};
+  });
+}
 function normalizePermissions(value) {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value)) throw extensionError('INVALID_MANIFEST', 'permissions 必须是数组');
@@ -154,6 +167,8 @@ function buildManifest(raw) {
     }
   }
 
+  const delegates = normalizeDelegates(raw.delegates, permissions);
+  if (permissions.includes('extension.invoke') && !delegates) throw extensionError('INVALID_DELEGATION', 'Declare exact plugin delegation targets');
   const capabilities = normalizeCapabilities(raw.capabilities);
   const settingsSchema = normalizeSettingsSchema(raw.settingsSchema);
 
@@ -170,6 +185,7 @@ function buildManifest(raw) {
     minCetaMeshVersion: normalizeCompatibilityVersion(raw.minCetaMeshVersion, 'minCetaMeshVersion'),
     maxCetaMeshVersion: normalizeCompatibilityVersion(raw.maxCetaMeshVersion, 'maxCetaMeshVersion'),
     capabilities,
+    ...(delegates ? {delegates} : {}),
     permissions,
     network: { hosts },
     scope: { workspace, paths },

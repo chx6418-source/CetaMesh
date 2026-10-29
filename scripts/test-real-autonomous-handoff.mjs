@@ -14,6 +14,8 @@ import {OWNER_ACTOR} from '../src/capability/types.js';
 if(process.env.WHALEBRIDGE_TEST_REAL_MANAGED!=='1'||process.env.WHALEBRIDGE_TEST_REAL_CODEX!=='1'){
  console.log('NOT_RUN_ENVIRONMENT: explicit real Managed Provider and Codex opt-in required');process.exit(77);
 }
+const extensionPackages=process.env.CETAMESH_TEST_EXTENSION_PACKS==='1';
+const allowedPaths=extensionPackages?['EXT-01.md','EXT-02.md','math.mjs']:['math.mjs'];
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'cetamesh-real-auto-'));
 let services,taskId,preflightId;
 const evidence={fixture:false,diagnostics:[],modelProvider:null,modelRequests:0,proposalCalls:0,approvals:[],history:[],fileVerified:false,testExitCode:null};
@@ -42,6 +44,7 @@ try {
  const project=path.join(root,'project');fs.mkdirSync(project);
  const files={'math.mjs':'export const add = (a, b) => a - b;\n','verify.mjs':"import assert from 'node:assert/strict'; import {add} from './math.mjs'; assert.equal(add(3,4),7); assert.equal(add(-2,5),3); console.log('REAL_AUTO_VERIFIED_4217');\n",
   'package.json':JSON.stringify({name:'cetamesh-real-auto-fixture',private:true,type:'module',scripts:{test:'node verify.mjs'}})+'\n'};
+ if(extensionPackages) files['verify.mjs'] += "import fs from 'node:fs';for(const p of ['EXT-01.md','EXT-02.md']){const s=fs.readFileSync(p,'utf8');assert.ok(s.length>20);assert.match(s,/验收|acceptance/i);}\n";
  for(const [file,content]of Object.entries(files))fs.writeFileSync(path.join(project,file),content);
  const protectedHashes=Object.fromEntries(['verify.mjs','package.json'].map(file=>[file,hash(fs.readFileSync(path.join(project,file)))]));
  for(const args of [['init','-q',project],['-C',project,'add','.'],['-C',project,'-c','user.name=Acceptance','-c','user.email=acceptance@example.invalid','-c','core.hooksPath=/dev/null','commit','-qm','synthetic baseline']])execFileSync('git',args,{stdio:'ignore'});
@@ -61,12 +64,12 @@ try {
  await services.desktopUiService.execute({method:'ui.task.cancel',params:{id:preflightId,expectedRev:ready.rev}});
  await services.agentBroker.closeSession(ready.currentAgent);
  const rt=services.taskService.runtime;
- const goal='请安排一个合适的开发执行者修复本项目中失败的加法测试，再由你独立检查差异、运行 npm test 并交付真实结果。只允许修改 math.mjs；已有 verify.mjs 和 package.json 必须保持原样。由 Core 根据真实能力与授权选择执行者。';
- let task=rt.create({goal,workspaceId:workspace.id,acceptanceCriteria:['Unchanged verification script passes and only math.mjs is modified.']});taskId=task.id;
+ const goal=extensionPackages?'把本隔离工作区的插件 Extension 开发拆分为两个独立任务包 EXT-01.md 和 EXT-02.md，任务包含修复 math.mjs 的加法与运行现有 npm test；每包包括目标、文件范围和验收标准。开发交给 Codex 执行，Managed 不要自己修改源码。Codex 返回后由你独立核对差异、运行 npm test，验收通过后交付。仅可修改 math.mjs 和新增两个任务包，verify.mjs 和 package.json 不得修改，不安装依赖、不提交、不联网。':'请安排一个合适的开发执行者修复本项目中失败的加法测试，再由你独立检查差异、运行 npm test 并交付真实结果。只允许修改 math.mjs；已有 verify.mjs 和 package.json 必须保持原样。由 Core 根据真实能力与授权选择执行者。';
+ let task=rt.create({goal,workspaceId:workspace.id,acceptanceCriteria:[extensionPackages?'Unchanged verification passes; exactly the two Extension task packages and math.mjs are delivered.':'Unchanged verification script passes and only math.mjs is modified.']});taskId=task.id;
  task=rt.setModelConfig({id:taskId,expectedRev:task.rev,modelProvider:providerId,model});
  services.capabilityService.grantTask(taskId,{capabilities:['filesystem.read','filesystem.search','git.status','git.diff','workspace.apply','test.run','operation.read','operation.continue','memory.read','context.evidence.read']});
  await services.capabilityService.execute({method:'capability.operation.prepare',params:{taskId,workspaceId:workspace.id,operationId:'independent-verification',capability:'test.run',input:{tool:'npm',args:['test'],timeoutMs:30000}}});
- task=(await services.capabilityService.execute({method:'capability.delegation.authorize',params:{taskId,expectedRev:task.rev,policy:{expiresAt:Date.now()+600000,maxDelegations:1,allowUnknownCost:true,verification:{kind:'code-tests',operationId:'independent-verification',acceptanceIds:task.acceptance.map(row=>row.id),allowedPaths:['math.mjs'],unchangedFiles:Object.entries(protectedHashes).map(([path,sha256])=>({path,sha256}))}}}})).task;
+ task=(await services.capabilityService.execute({method:'capability.delegation.authorize',params:{taskId,expectedRev:task.rev,policy:{expiresAt:Date.now()+600000,maxDelegations:1,allowUnknownCost:true,verification:{kind:'code-tests',operationId:'independent-verification',acceptanceIds:task.acceptance.map(row=>row.id),allowedPaths,unchangedFiles:Object.entries(protectedHashes).map(([path,sha256])=>({path,sha256}))}}}})).task;
  const started=await services.capabilityService.broker.execute({actor:OWNER_ACTOR,taskId,workspaceId:workspace.id,capability:'agent.run',input:{agentProvider:'cetamesh',modelProvider:providerId,model,content:goal}});
  assert.equal(started.result?.accepted,true);
  const until=Date.now()+600000;const approved=new Set();let current;
@@ -75,7 +78,7 @@ try {
    if(approval.status!=='pending'||approval.request?.taskId!==taskId||approved.has(approval.id))continue;
    const request=approval.request;
    if(request.capability==='workspace.apply'){
-    assert.deepEqual(request.input.changes.map(change=>change.path),['math.mjs']);assert.equal(request.input.changes[0].action,'write');
+    assert.deepEqual(request.input.changes.map(change=>change.path).sort(),allowedPaths);assert.ok(request.input.changes.every(change=>change.action==='write'));
     assert.ok(request.input.changes[0].content.length<5000);
    }else if(request.capability==='test.run'){
     assert.equal(request.input.tool,'npm');assert.deepEqual(request.input.args,['test']);
@@ -85,6 +88,7 @@ try {
    await services.capabilityService.execute({method:'capability.approval.decide',params:{id:approval.id,approve:true}});
   }
   current=rt.get({id:taskId}).task;
+  if(current.executionObservation?.state==='awaiting-review'&&!current.delegationProposal)break;
   if(['needs-review','verified','blocked','unknown'].includes(current.delegationProposal?.state)||['blocked','failed','cancelled','completed'].includes(current.status))break;
   await delay(100);
  }
@@ -98,7 +102,7 @@ try {
  const output=execFileSync(process.execPath,['verify.mjs'],{cwd:project,encoding:'utf8',timeout:30000});assert.match(output,/REAL_AUTO_VERIFIED_4217/);evidence.fileVerified=true;
  assert.deepEqual(evidence.history,['cetamesh','codex','cetamesh']);
  assert.equal(evidence.delegationState,'verified','Owner machine contract must complete only after actual evidence checks');
- assert.equal(current.status,'completed');
+ assert.equal(current.status,'completed');evidence.extensionPackages=extensionPackages;if(extensionPackages)evidence.packageHashes=Object.fromEntries(['EXT-01.md','EXT-02.md'].map(p=>[p,hash(fs.readFileSync(path.join(project,p)))]));
  evidence.verification=current.delegationProposal?.verification??null;
  const test=(current.executionEvidence??[]).findLast(row=>row.capability==='test.run'&&row.status==='completed');assert.equal(test?.exitCode,0,'Managed must independently execute the prepared test via Core');evidence.testExitCode=test.exitCode;
  console.log('PASS REAL: actual Managed Provider -> Core choice -> real Codex edit -> approved import -> Managed independent test and truthful delivery');

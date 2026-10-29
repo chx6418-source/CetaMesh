@@ -41,6 +41,7 @@ export interface Task {
     exitCode: number | null; filePath: string | null; taskRev: number | null; at: string | number | null }[];
   agentHistory: { provider: string; sessionId: string; attachedAt: string | number | null; detachedAt: string | number | null; note: string }[];
   execution?: { state: string; hadToolActivity: boolean; hasEvidence: boolean };
+  recovery?: { operations: {operationId:string; capability:string; status:string; executorId:string; blocker:string|null}[]; omitted:number };
   reviewReport?: { eventId: string; text: string; sha256: string } | null;
   failure: { reason: string } | null;
 }
@@ -54,6 +55,8 @@ export interface WorkshopProposal {
   createdAt: string | number | null; updatedAt: string | number | null;
 }
 export interface Memory {
+  provenance?: {status:'user-confirmed'|'agent-inference'|'historical-unverified';actor:string|null;at:string|number|null};
+  validUntil?: number|null;
   id: string; type: string; scope: string; title: string; content: string; summary: string;
   tags: string[]; pinned: boolean; rev: number | null; createdAt: string | number | null; updatedAt: string | number | null;
 }
@@ -175,9 +178,9 @@ type UiMethod =
   | 'ui.events.next'
   | 'ui.chat.sessions.list' | 'ui.chat.sessions.create' | 'ui.chat.sessions.rename' | 'ui.chat.sessions.archive' | 'ui.chat.sessions.delete'
   | 'ui.chat.history' | 'ui.chat.status' | 'ui.chat.send' | 'ui.chat.stop' | 'ui.chat.retry' | 'ui.chat.continue' | 'ui.chat.catalog' | 'ui.chat.config.set'
-  | 'ui.task.overview' | 'ui.task.get' | 'ui.task.outcome.verify' | 'ui.task.child.create' | 'ui.task.child.review' | 'ui.task.child.complete' | 'ui.task.child.verify' | 'ui.task.complete' | 'ui.task.create' | 'ui.task.start' | 'ui.task.pause' | 'ui.task.resume' | 'ui.task.reconcile' | 'ui.task.cancel' | 'ui.task.handoff'
+  | 'ui.task.overview' | 'ui.task.get' | 'ui.task.outcome.verify' | 'ui.task.child.create' | 'ui.task.child.review' | 'ui.task.child.complete' | 'ui.task.child.verify' | 'ui.task.complete' | 'ui.task.create' | 'ui.task.start' | 'ui.task.pause' | 'ui.task.resume' | 'ui.task.recovery.inspect' | 'ui.task.reconcile' | 'ui.task.cancel' | 'ui.task.handoff'
   | 'ui.workshop.proposals' | 'ui.workshop.proposal' | 'ui.workshop.review' | 'ui.workshop.retry' | 'ui.workshop.task.status' | 'ui.workshop.deliver'
-  | 'ui.workspace.list' | 'ui.workspace.open' | 'ui.workspace.create'
+  | 'ui.workspace.version' | 'ui.workspace.list' | 'ui.workspace.open' | 'ui.workspace.create'
   | 'ui.memory.overview' | 'ui.memory.get' | 'ui.memory.create' | 'ui.memory.update' | 'ui.memory.pin' | 'ui.memory.delete'
   | 'ui.memory.candidates.confirm' | 'ui.memory.candidates.confirmBatch'
   | 'ui.agent.auth.describe' | 'ui.agent.auth.start' | 'ui.agent.auth.status' | 'ui.agent.auth.cancel'
@@ -336,6 +339,7 @@ export const chatClient = {
   setConfig: (id: string, config: Record<string, unknown>) => uiCall<ChatSession>('ui.chat.config.set', { id, config })
 };
 export const taskClient = {
+  inspectRecovery: (id:string) => uiCall<{taskId:string;taskRev:number;operations:{operationId:string;capability:string;status:string;verified:boolean;code:string|null}[];omitted:number}>('ui.task.recovery.inspect',{id}),
   overview: (query = '', status = '') => uiCall<{ tasks: Task[]; total: number; counts: Record<string, number>; needsAttention: string[] }>('ui.task.overview', { query, status, limit: 100 }),
   get: (id: string) => uiCall<{ task: Task }>('ui.task.get', { id }),
     createChild: (input: { parentTaskId: string; expectedParentRev: number; goal: string; requestId: string;
@@ -380,7 +384,7 @@ export const memoryClient = {
     uiCall<{ results: { id: string; error?: { code: string; message: string } }[] }>('ui.memory.candidates.confirmBatch', { ids, decision }),
   get: (id: string) => uiCall<Memory>('ui.memory.get', { id}),
   create: (input: { type: string; scope: string; content: string; tags?: string[]; pinned?: boolean }) => uiCall<Memory>('ui.memory.create', input),
-  update: (input: { id: string; expectedRev?: number; content: string; tags?: string[]; pinned?: boolean }) => uiCall<Memory>('ui.memory.update', input),
+  update: (input: { id: string; expectedRev?: number; content: string; tags?: string[]; pinned?: boolean;validUntil?:number|null }) => uiCall<Memory>('ui.memory.update', input),
   pin: (id: string, pinned: boolean, expectedRev?: number) => uiCall<Memory>('ui.memory.pin', { id, pinned, expectedRev }),
   remove: (id: string, expectedRev?: number) => uiCall<{ id: string; deleted: boolean }>('ui.memory.delete', { id, expectedRev })
 };
@@ -425,8 +429,8 @@ export const extensionSettingsClient = {
   mcp: () => uiCall<{ servers: { id: string; name: string; status: string; enabled: boolean; running: boolean; available: boolean; toolCallable: boolean; eligible: boolean; configured: boolean; source: string; toolCount: number | null; discoveredToolCount: number; transport: string; reason: string | null; lastError: string | null }[] }>('ui.mcp.list', {}),
   mcpTools: (id: string) => uiCall<{ serverId: string; tools: { id: string; name: string; description: string; enabled: boolean; discovered: boolean; callable: boolean }[] }>('ui.mcp.tools', { id }),
   manageMcp: (serverId: string, action: 'enable' | 'disable' | 'start' | 'stop' | 'restart') => uiCall<Record<string, unknown>>('ui.mcp.manage', { serverId, action }),
-  mcpConfig: (serverId: string) => uiCall<{ id: string; enabled: boolean; hasArgs: boolean; hasEnvironment: boolean; timeoutMs: number | null; note: string }>('ui.mcp.config.get', { serverId }),
-  updateMcpConfig: (serverId: string, config: { timeoutMs?: number; note?: string }) => uiCall<{ id: string; updatedKeys: string[] }>('ui.mcp.config.update', { serverId, config })
+  mcpConfig: (serverId: string) => uiCall<{ id: string; enabled: boolean; hasArgs: boolean; hasEnvironment: boolean; timeoutMs: number | null; note: string;url:string;credentialRef:string;allowedTools:string[] }>('ui.mcp.config.get', { serverId }),
+  updateMcpConfig: (serverId: string, config: { timeoutMs?: number; note?: string;url?:string;credentialRef?:string;allowedTools?:string[] }) => uiCall<{ id: string; updatedKeys: string[] }>('ui.mcp.config.update', { serverId, config })
 };
 export const settingsClient = {
   describe: () => uiCall<{ sections: { section: string; label: string }[]; fields: SettingSection[] }>('ui.settings.describe', {}),
@@ -451,6 +455,7 @@ export const feedbackClient = {
   links: () => uiCall<{ configured: boolean; entries: { id: string; label: string; description: string; kind: 'feedback' | 'security'; url: string | null }[]; securityNotice: string; message: string }>('ui.feedback.links', {})
 };
 export const workspaceClient = {
+  version:(id:string)=>uiCall<{isRepo:boolean;branch:string;headSha:string|null;dirty:boolean;changes:{path:string;status:string;conflict:boolean}[]}>('ui.workspace.version',{id}),
   list: () => uiCall<{ workspaces: { id: string; name: string; status: string; lastActivity: string | number | null }[]; activeId: string | null }>('ui.workspace.list', {}),
   open: (id: string) => uiCall<{ activeId: string | null; workspace: { id: string; name: string; status: string } }>('ui.workspace.open', { id }),
   create: (name: string, root: string) => uiCall<{ id: string; name: string; status: string }>('ui.workspace.create', { name, root })

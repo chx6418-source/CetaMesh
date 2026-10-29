@@ -273,6 +273,8 @@ function projectMemory(value) {
     id: string(memory.id, 128), type: string(memory.type, 80), scope: string(memory.scope, 120),
     title: display?.title ?? string(memory.title ?? memory.content, 300), content: typeof memory.content === 'string' ? memory.content : string(memory.summary, 4000),
     summary: display?.summary ?? string(memory.summary ?? memory.content, 1200), tags: boundedStrings(memory.tags, 30, 100),
+    provenance: {status:['user-confirmed','agent-inference','historical-unverified'].includes(memory.provenance?.status)?memory.provenance.status:'historical-unverified',actor:string(memory.provenance?.actor,160)||null,at:scalar(memory.provenance?.at)},
+    validUntil: Number.isFinite(memory.validUntil)?memory.validUntil:null,
     pinned: memory.pinned === true, rev: Number.isSafeInteger(memory.rev) ? memory.rev : null,
     createdAt: scalar(memory.createdAt), updatedAt: scalar(memory.updatedAt)
   };
@@ -712,7 +714,15 @@ export function createDesktopUiService({ services = {}, system = services.system
     const usage = services.usageLedger && row?.id
       ? services.usageLedger.summary(children.length ? { taskIds: [row.id, ...children.map(child => child.id)] }
         : { taskId: row.id }) : row?.usage;
-    return projectTask({ ...row, usage, children: withUsage });
+    const projected = projectTask({ ...row, usage, children: withUsage });
+    const operations = row?.id && services.capabilityService?.broker?.operationsForTask
+      ? services.capabilityService.broker.operationsForTask({taskId:row.id,workspaceId:row.workspaceId}) : [];
+    projected.recovery = { operations: operations.slice(-40).map(item => ({
+      operationId:string(item.operationId,160), capability:string(item.capability,100),
+      status:string(item.status,40), executorId:string(item.executorId,160),
+      blocker:string(item.blocker,80)||null
+    })), omitted:Math.max(0,operations.length-40) };
+    return projected;
   };
   function sessionUsageWithLedger(sessionId, historical, sessionIds) {
     if (!services.usageLedger) return historical;
@@ -1341,6 +1351,21 @@ export function createDesktopUiService({ services = {}, system = services.system
       if (!['paused', 'waiting', 'blocked'].includes(current.status)) throw uiError('TASK_NOT_RESUMABLE', '任务当前不能恢复');
       return { task: projectTaskWithUsage(await runTask(current, { requestId: string(p.requestId, 160) || undefined })) };
     },
+    'ui.task.recovery.inspect': async p => {
+      const current = (await task('task.get', {id:idParam(p)})).task;
+      const rows = services.capabilityService.broker.operationsForTask({taskId:current.id,workspaceId:current.workspaceId});
+      const operations = [];
+      for (const row of rows.slice(-40)) {
+        const summary = {operationId:string(row.operationId,160),capability:string(row.capability,100),status:string(row.status,40)};
+        try {
+          const read = await capability('capability.execute', {capability:'operation.read',taskId:current.id,
+            workspaceId:current.workspaceId,input:{operationRef:row.operationId},reason:'Owner read-only operation reconciliation'});
+          operations.push({...summary,verified:read.status==='completed'&&read.result?.verified===true,
+            code:string(read.result?.code,100)||null});
+        } catch (error) { operations.push({...summary,verified:false,code:/^[A-Z][A-Z0-9_]{0,99}$/.test(error?.code??'')?error.code:'OPERATION_REVIEW_REQUIRED'}); }
+      }
+      return {taskId:current.id,taskRev:current.rev,operations,omitted:Math.max(0,rows.length-40)};
+    },
     'ui.task.reconcile': async p => {
       const current = (await task('task.get', { id: idParam(p) })).task;
       if (p.expectedRev !== undefined && current.rev !== p.expectedRev) throw uiError('TASK_CONFLICT', '任务已被其他操作修改');
@@ -1432,6 +1457,12 @@ export function createDesktopUiService({ services = {}, system = services.system
       emit('task.updated', { taskId: updated.id, status: updated.status });
       return { task: projectTaskWithUsage(updated), handoff: { success: Boolean(result.to?.sessionId), from: result.from, to: result.to } };
     },
+    'ui.workspace.version': async p => {
+      const result=await services.workspaceService.execute({method:'workspace.git.status',params:{id:idParam(p)}});
+      const git=record(result.git??result);
+      return {isRepo:git.isRepo===true,branch:string(git.branch,200),headSha:/^[a-f0-9]{40,64}$/i.test(git.headSha??'')?git.headSha:null,
+        dirty:git.dirty===true,changes:(Array.isArray(git.entries)?git.entries:[]).slice(0,100).map(row=>({path:string(row.path,500),status:string(row.x,2)+string(row.y,2),conflict:row.x==='U'||row.y==='U'||['AA','DD'].includes(row.x+row.y)}))};
+    },
     'ui.workspace.list': async () => {
       const result = await workspace('workspace.list', {});
       return { workspaces: (result.workspaces ?? []).map(projectWorkspace), activeId: string(result.activeId, 128) || null };
@@ -1480,7 +1511,7 @@ export function createDesktopUiService({ services = {}, system = services.system
       return projectMemory(result);
     },
     'ui.memory.update': async p => {
-      const result = await memory('memory.update', { id: idParam(p), expectedRev: p.expectedRev, content: boundedText(p.content, 'content', 4000), tags: boundedStrings(p.tags, 30, 100), pinned: p.pinned === true });
+      const result = await memory('memory.update', { id: idParam(p), expectedRev: p.expectedRev, content: boundedText(p.content, 'content', 4000), tags: boundedStrings(p.tags, 30, 100), pinned: p.pinned === true, ...(p.validUntil !== undefined ? {validUntil:p.validUntil} : {}) });
       emit('memory.updated', { status: 'updated' });
       return projectMemory(result);
     },
@@ -1747,7 +1778,8 @@ export function createDesktopUiService({ services = {}, system = services.system
         hasArgs: config.hasArgs === true,
         hasEnvironment: config.hasEnvironment === true,
         timeoutMs: Number.isSafeInteger(config.timeoutMs) ? config.timeoutMs : null,
-        note: string(config.note, 500)
+        note: string(config.note, 500),
+        url:string(config.url,1500),credentialRef:string(config.credentialRef,80),allowedTools:boundedStrings(config.allowedTools,100,128)
       };
     },
     'ui.mcp.config.update': async p => {
@@ -1758,6 +1790,9 @@ export function createDesktopUiService({ services = {}, system = services.system
         safe.timeoutMs = config.timeoutMs;
       }
       if (Object.hasOwn(config, 'note')) safe.note = boundedText(config.note, 'note', 500);
+      if(Object.hasOwn(config,'url'))safe.url=boundedText(config.url,'url',1500);
+      if(Object.hasOwn(config,'credentialRef'))safe.credentialRef=boundedText(config.credentialRef,'credentialRef',80);
+      if(Object.hasOwn(config,'allowedTools'))safe.allowedTools=boundedStrings(config.allowedTools,100,128);
       const result = await integrations('mcp.config.update', { serverId: idParam(p, 'serverId'), config: safe, approved: false });
       emit('plugin.updated', { serverId: p.serverId });
       return { id: string(result.id, 160), updatedKeys: Object.keys(safe) };

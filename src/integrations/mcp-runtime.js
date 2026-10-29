@@ -7,6 +7,8 @@ import { APP_PATHS, isPackagedRuntime } from '../app-paths.js';
 import { redactObject, redactText } from '../logging/redact.js';
 import { MCP_SERVER_CATALOG } from './catalog.js';
 import { integrationError } from './types.js';
+import { createRemoteMcpConnection } from './mcp-remote.js';
+import { validateSchema } from '../model/input-schema.js';
 
 const PACKAGED_MCP_MODES = Object.freeze({
   snowluma: 'snowluma',
@@ -197,7 +199,8 @@ function normalizeTool(tool) {
 
 export function createMcpRuntime({
   servers = MCP_SERVER_CATALOG,
-  transportFactory = createStdioMcpConnection,
+  transportFactory = null,
+  resolveCredential = null, networkOptions = {},
   now = () => Date.now(),
   log = () => {}
 } = {}) {
@@ -251,7 +254,7 @@ export function createMcpRuntime({
     async function startConnection() {
       let connection = null;
       try {
-        connection = await transportFactory(server, config, { log });
+        connection = await (transportFactory ?? (server.transport === 'streamable-http' ? createRemoteMcpConnection : createStdioMcpConnection))(server, config, { log, resolveCredential, networkOptions });
         if (generation !== record.generation) throw integrationError('MCP_START_CANCELLED', 'MCP Server 启动已取消。');
         record.connection = connection;
         record.pid = connection.pid ?? null;
@@ -317,17 +320,21 @@ export function createMcpRuntime({
     if (record.status === 'running') return record.tools.map(tool => ({ ...tool, discovered: true }));
     return server.tools.map(tool => ({ name: tool.name, description: tool.description, inputSchema: { type: 'object' }, discovered: false }));
   }
-  async function call(id, toolName, args = {}) {
+  async function call(id, toolName, args = {}, options = {}) {
     const server = requireServer(id); const record = recordFor(id);
-    if (!server.tools.some(tool => tool.name === toolName)) throw integrationError('UNKNOWN_MCP_TOOL', '未知 MCP 工具：' + server.namespace + toolName);
+    if (server.transport !== 'streamable-http' && !server.tools.some(tool => tool.name === toolName)) throw integrationError('UNKNOWN_MCP_TOOL', '未知 MCP 工具：' + server.namespace + toolName);
     if (record.status !== 'running' || !record.connection) throw integrationError('PROVIDER_UNAVAILABLE', 'MCP Server ' + id + ' 未运行（' + record.status + '）');
     if (!record.tools.some(tool => tool.name === toolName)) throw integrationError('UNKNOWN_MCP_TOOL', 'MCP Server ' + id + ' 未暴露工具：' + toolName);
-    try { return await record.connection.callTool(toolName, args); }
+    const tool=record.tools.find(tool => tool.name === toolName);
+    if(server.transport==='streamable-http')validateSchema(tool.inputSchema,args);
+    try { return await record.connection.callTool(toolName, args, options); }
     catch (error) {
       record.lastError = 'MCP 工具调用失败，请查看本机脱敏诊断日志。';
       try { log('[mcp-diagnostic] ' + JSON.stringify(redactObject({ serverId: id, phase: 'tool/call-failed', toolName, error: error?.message ?? String(error) }))); }
       catch (logError) { void logError; /* Keep the safe error visible when diagnostic output fails. */ }
-      throw error?.code ? integrationError(error.code, record.lastError) : integrationError('MCP_CALL_FAILED', record.lastError);
+      const safeError=error?.code ? integrationError(error.code, record.lastError) : integrationError('MCP_CALL_FAILED', record.lastError);
+      if(error?.effectStatus==='unknown')safeError.effectStatus='unknown';
+      throw safeError;
     }
   }
   function status(id) { requireServer(id); return snapshot(id); }

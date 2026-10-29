@@ -7,6 +7,7 @@
 import crypto from 'node:crypto';
 import { manifestFingerprint } from './manifest.js';
 import {isHttpDataManifest} from './http-host.js';
+import {isEventDataManifest} from './event-host.js';
 import { PERMISSIONS, maxRisk, permissionRisk, requiresExplicitApproval, riskRank } from './types.js';
 
 export function reviewToken(fingerprint, permissionNames, riskLevel, packageFingerprint = '') {
@@ -26,7 +27,7 @@ export function reviewToken(fingerprint, permissionNames, riskLevel, packageFing
  * 其余权限目前只是「声明 + 审查」面：用户可以批准，但宿主还不会给出对应能力 —— 
  * review 里如实标 enforced=false，避免让用户以为批准了就真的放开了磁盘或记忆。
  */
-export const ENFORCED_PERMISSIONS = Object.freeze(['log', 'storage', 'network', 'memory.read', 'memory.write', 'filesystem.read', 'filesystem.write']);
+export const ENFORCED_PERMISSIONS = Object.freeze(['log', 'storage', 'extension.invoke', 'network', 'memory.read', 'memory.write', 'filesystem.read', 'filesystem.write']);
 
 export function isEnforced(name) {
   return ENFORCED_PERMISSIONS.includes(name);
@@ -91,10 +92,11 @@ export function buildReview(manifest, { packageFingerprint = '' } = {}) {
     capabilities: (manifest.capabilities || []).map((c) => ({
       id: c.id, kind: c.kind, title: c.title, requires: c.requires || []
     })),
+    ...(manifest.delegates ? {delegates: structuredClone(manifest.delegates)} : {}),
     network: { hosts },
     scope: { workspace: manifest.scope?.workspace ?? null, paths },
     source: manifest.source,
-    executionBoundary: { osSandbox: false, codeExecution: manifest.type !== 'memory-pack'&&!isHttpDataManifest(manifest), permissionEnforcement: 'capability-broker' },
+    executionBoundary: { osSandbox: false, codeExecution: manifest.type !== 'memory-pack'&&!isHttpDataManifest(manifest)&&!isEventDataManifest(manifest), permissionEnforcement: 'capability-broker' },
     fingerprint,
     packageFingerprint,
     token: reviewToken(fingerprint, declared, riskLevel, packageFingerprint),

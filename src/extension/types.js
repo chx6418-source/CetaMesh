@@ -35,6 +35,7 @@ export function maxRisk(levels) {
  * requires: 声明该权限时必须同时提供哪些附加信息（例如 network 必须列 hosts）。
  */
 export const PERMISSIONS = Object.freeze({
+  'extension.invoke': { risk: 'high', summary: 'Call only reviewed plugin capabilities within their declared input schema' },
   log: { risk: 'low', summary: '写入扩展自己的运行日志' },
   storage: { risk: 'low', summary: '使用按扩展 id 隔离的私有键值存储' },
   'memory.read': { risk: 'medium', summary: '读取已授权范围内的 CetaMesh Memory' },

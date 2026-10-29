@@ -731,11 +731,22 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
       && ['running', 'waiting', 'blocked'].includes(row.status) && row.currentAgent);
   }
 
-  function attachAgent({ id, expectedRev, provider, sessionId, note } = {}) {
+  function attachAgent({ id, expectedRev, provider, sessionId, note, versionContext } = {}) {
     const normalizedProvider = normalizeProvider(provider);
     if (!normalizedProvider) throw taskError('INVALID_PROVIDER', 'attachAgent 需要 provider');
     const normalizedSession = normalizeText(sessionId, 'sessionId', TASK_LIMITS.idChars, { required: true });
     const current = requireTask(id);
+    let version = null;
+    if (versionContext != null) {
+      if(versionContext.taskId!==id || versionContext.workspaceId!==current.workspaceId
+        || versionContext.executorId!==normalizedProvider+':'+normalizedSession
+        || versionContext.attemptId!=null && !(current.attempts??[]).some(row=>row.id===versionContext.attemptId&&row.provider===normalizedProvider)
+        || !/^[A-Za-z0-9._:-]{1,160}$/.test(versionContext.snapshotId??'')
+        || versionContext.baselineHead!==null && !/^[a-f0-9]{40}$/.test(versionContext.baselineHead??''))throw taskError('TASK_VERSION_CONTEXT_INVALID','Version evidence does not match this Task executor');
+      version={taskId:id,workspaceId:current.workspaceId,snapshotId:versionContext.snapshotId,
+        attemptId:versionContext.attemptId??null,executorId:versionContext.executorId,
+        baselineHead:versionContext.baselineHead,branch:normalizeText(versionContext.branch,'version branch',200)||null};
+    }
     if (current.currentAgent
       && current.currentAgent.provider === normalizedProvider
       && current.currentAgent.sessionId === normalizedSession) {
@@ -748,6 +759,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
       draft.agentHistory.push({
         provider: normalizedProvider,
         sessionId: normalizedSession,
+        ...(version?{versionContext:version}:{}),
         attachedAt: timestamp,
         detachedAt: null,
         note: normalizeText(note, 'note', TASK_LIMITS.noteChars)
@@ -755,7 +767,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
       if (draft.agentHistory.length > TASK_LIMITS.agentHistory) {
         draft.agentHistory = draft.agentHistory.slice(-TASK_LIMITS.agentHistory);
       }
-      draft.currentAgent = { provider: normalizedProvider, sessionId: normalizedSession };
+      draft.currentAgent = { provider: normalizedProvider, sessionId: normalizedSession, ...(version?{versionContext:version}:{}) };
       draft.executionObservation = null;
       return draft;
     });

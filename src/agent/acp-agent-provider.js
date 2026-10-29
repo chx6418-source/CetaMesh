@@ -206,10 +206,11 @@ export function createAcpAgentProvider({descriptor, launch, resolveTaskWorkspace
             if(typeof relative!=='string'||!relative||path.isAbsolute(relative)||relative.split(/[\\/]/).some(part=>!part||part==='..'||part==='.') ) throw fault('ACP_SNAPSHOT_POLICY_INVALID','Invalid runtime snapshot exclusion');
             return path.join(binding.workspace.root,relative);
           });
-          const stage = await createStagingWorkspace({taskId,workspaceId,sourceRoot:binding.workspace.root,stagingRoot,
+          const stage = await createStagingWorkspace({taskId,workspaceId,attemptId:binding.task.attempts?.at(-1)?.provider===policy.id?binding.task.attempts.at(-1).id:null,sourceRoot:binding.workspace.root,stagingRoot,
             additionalWorkspaceRoots:[...(binding.additionalWorkspaceRoots ?? []),...(Array.isArray(registeredRoots)?registeredRoots.map(item=>typeof item==='string'?item:item?.root).filter(Boolean):[])],
             excludedRoots:[...(binding.excludedRoots ?? []),...excludedRoots,...runtimeExclusions]});
           s = {id:crypto.randomUUID(),taskId,workspaceId,stage,buffer:createAgentEventBuffer(),sequence:0,state:'new',run:null,closed:false};
+          if(stage.versionContext)stage.versionContext.executorId=policy.id+':'+s.id;
           record.session = s;
           const onHandle = handle => {
             if (s.handle && s.handle !== handle) throw fault('ACP_LAUNCH_HANDLE_MISMATCH','Launcher changed the supervised handle');
@@ -279,7 +280,7 @@ export function createAcpAgentProvider({descriptor, launch, resolveTaskWorkspace
           s.permissions = createAgentPermissionBridge({provider:policy.id,sessionId:s.id,nativeSessionId:s.nativeId,taskId,workspaceId,requestNativeApproval});
           if (shuttingDown) throw fault('PROVIDER_SHUTTING_DOWN','ACP provider is shutting down');
           s.state = 'ready'; sessions.set(s.id,s);
-          return {provider:policy.id,sessionId:s.id,taskId,workspaceId,cwd:stage.root};
+          return {provider:policy.id,sessionId:s.id,taskId,workspaceId,cwd:stage.root,versionContext:stage.versionContext};
         } catch (error) {
           if (s) { s.closed = true; s.permissions?.close(); s.detach?.(); await s.rpc?.close();
             try { await stop(s); cleanupStage(s.stage); }

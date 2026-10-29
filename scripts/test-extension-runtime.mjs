@@ -516,16 +516,21 @@ try {
   bindingRuntime.enable({ id: 'test.bound-worker' });
   let sequence = 0;
   const waiters = new Map();
+  let parentId, parentReady;
+  const parentStarted = new Promise(resolve => { parentReady = resolve; });
   bindingPair.child.onMessage(raw => {
     const frame = JSON.parse(raw);
+    if (frame.kind === 'invoke') { parentId = frame.id; parentReady(); return; }
     const resolve = waiters.get(frame.id);
     if (resolve) { waiters.delete(frame.id); resolve(frame); }
   });
+  const parentInvocation = bindingRuntime.invoke({ id: 'test.bound-worker', capability: 'bound.run', input: {} }).catch(error => error);
+  await parentStarted;
   const reverseCapability = extra => new Promise(resolve => {
     const id = 'runtime-bound-' + (++sequence);
     const timeout = setTimeout(() => { waiters.delete(id); resolve({ kind: 'timeout', error: { code: 'TEST_TIMEOUT' } }); }, 3000);
     waiters.set(id, frame => { clearTimeout(timeout); resolve(frame); });
-    bindingPair.child.send(JSON.stringify({ v: 1, id, kind: 'invoke', capability: 'memory.read', input: { probe: sequence }, ...extra }));
+    bindingPair.child.send(JSON.stringify({ v: 1, id, parentId, kind: 'invoke', capability: 'memory.read', input: { probe: sequence }, ...extra }));
   });
   const boundResult = await reverseCapability({ extensionId: 'spoofed-id', actor: { kind: 'owner', id: 'desktop' }, grants: ['*'] });
   equal('Worker-supplied identity cannot replace the host-bound actor', boundResult.result?.actorId, 'test.bound-worker');
@@ -543,6 +548,7 @@ try {
   const staleFingerprint = await reverseCapability({});
   equal('stale active fingerprint denies reverse capability', staleFingerprint.error.code, 'STALE_EXTENSION_HOST');
   await bindingRuntime.close();
+  await parentInvocation;
 
   // Health monitors distinguish heartbeat misses and bound automatic recovery to a rolling window.
   const recoveryStore = createExtensionStore({ stateDir: path.join(root, 'recovery-state') });

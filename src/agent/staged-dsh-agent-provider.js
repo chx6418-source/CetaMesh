@@ -133,6 +133,7 @@ export function createStagedDshAgentProvider({ provider, resolveTaskWorkspace, l
           const roots = await listWorkspaceRoots();
           const stage = await createStage({
             taskId: binding.task.id,
+            attemptId:binding.task.attempts?.at(-1)?.provider===provider.id?binding.task.attempts.at(-1).id:null,
             workspaceId: binding.workspace.id,
             sourceRoot: binding.workspace.root,
             stagingRoot: stagingRoot ?? path.join(os.tmpdir(), 'CetaMesh', 'agent-staging'),
@@ -142,6 +143,7 @@ export function createStagedDshAgentProvider({ provider, resolveTaskWorkspace, l
           try {
             const created = await provider.createSession({ cwd: stage.root, model, reasoningEffort, modelProvider, purpose: 'coding' });
             if (!created?.sessionId) throw agentProviderError('PROVIDER_ERROR', 'DSH did not return a sessionId');
+            if(stage.versionContext)stage.versionContext.executorId=provider.id+':'+created.sessionId;
             sessions.set(created.sessionId, {
               id: created.sessionId,
               taskId: binding.task.id,
@@ -154,7 +156,7 @@ export function createStagedDshAgentProvider({ provider, resolveTaskWorkspace, l
               reconciledTurns: new Set(),
               reconciliationInFlight: new Map()
             });
-            return { ...created, taskId: binding.task.id, workspaceId: binding.workspace.id, cwd: stage.root };
+            return { ...created, taskId: binding.task.id, workspaceId: binding.workspace.id, cwd: stage.root, versionContext:stage.versionContext };
           } catch (error) {
             cleanupStagingWorkspace(stage);
             throw error;

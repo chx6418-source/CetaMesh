@@ -5,7 +5,8 @@ import { createApprovalOperations } from './operations.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { resolveInside, canonicalizeRoot, assertSafeRootForm } from '../workspace/boundary.js';
-import { safeFetch } from '../safe-fetch.js';
+import { safeFetch, safeHttpFetch } from '../safe-fetch.js';
+import { executeEventTransport } from '../extension/event-transport.js';
 import { createCapabilityBroker } from './broker.js';
 import { registerOperationContinuation } from './operation-continuation.js';
 import { validateSchema } from '../model/input-schema.js';
@@ -55,7 +56,7 @@ const WORKSPACE_TOOL_DESCRIPTORS = Object.freeze({
     offset: { type: 'integer', minimum: 0 }, maxResults: { type: 'integer', minimum: 1, maximum: 100 } }, ['query'])],
   'git.status': ['Read the current Git status for the authorized Workspace.', objectInput()],
   'git.diff': ['Read a bounded Git diff summary inside the authorized Workspace.', objectInput({ path: stringField('Optional Workspace-relative file path.'), statOnly: { type: 'boolean' } })],
-  'git.commit': ['Create a Git commit in the authorized Workspace.', objectInput({ message: stringField('Commit message.') }, ['message'])],
+  'git.commit': ['Commit only explicitly reviewed files in the authorized Workspace; preserve unrelated staged changes.', objectInput({ message: stringField('Commit message.'),paths:{type:'array',items:stringField('Workspace-relative owned path.'),minItems:1,maxItems:100},expectedHead:{type:['string','null'],description:'Current Git HEAD; null only for an unborn branch.'},expectedHashes:{type:'object',additionalProperties:{type:['string','null']},description:'Exact current SHA-256 for each owned path, or null for reviewed deletion.'} }, ['message','paths','expectedHead','expectedHashes'])],
   'test.run': ['Run an allowlisted test command in the authorized Workspace. Owner approval is required.', objectInput({ tool: stringField('Allowlisted test tool.'), args: { type: 'array', items: { type: 'string' }, maxItems: 40 }, timeoutMs: { type: 'integer', minimum: 1000, maximum: 600000 } }, ['tool', 'args'])],
   'workspace.create': ['Register an explicitly selected local Workspace root. Owner approval is required.', objectInput({ root: stringField('Local directory selected by the Owner.'), name: stringField('Optional Workspace display name.') }, ['root'])],
   'workspace.apply': ['Import a staged Task Workspace change set. Owner approval is required.', objectInput({
@@ -75,7 +76,7 @@ const WORKSPACE_TOOL_DESCRIPTORS = Object.freeze({
 /** Trusted in-process API. Public transports must use execute/executeWorkspace,
  * which bind the Owner identity; Agent/Extension grants never come from IPC. */
 export function createCapabilityService({ stateDir, workspaceService, memoryService,
-  taskRuntime, agentBroker, bindAgentSession, resumeAgentApproval = null, searchImpl = null, audit = () => {}, now,
+  taskRuntime, agentBroker, bindAgentSession, resumeAgentApproval = null, searchImpl = null, networkCredentialResolver = null, networkTransportOptions = {}, audit = () => {}, now,
   isolatedRunner = null, onTaskObservation = null, onAgentTurnSettled = null, onOperation = () => {}, evidenceStore = null, environmentClient = null, ownedArtifactRoot = null, onEnvironmentChanged = () => {} } = {}) {
   const file = stateDir ? path.join(stateDir, 'capability', 'task-grants.json') : null;
   let grants = file ? readJsonFile(file, { missing: {} }) : {};
@@ -760,19 +761,53 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
   }
   broker.register({ id: 'network', permission: 'network', provider: 'safe-fetch', risk: 'high', modelCallable: false,
     validate: r => {
-      if (r.input.init?.method && !['GET','HEAD'].includes(String(r.input.init.method).toUpperCase()) || r.input.init?.body !== undefined) {
-        throw capabilityError('NETWORK_OPERATION_DENIED', 'Only GET and HEAD without a body are implemented');
-      }
+      const method = String(r.input.init?.method ?? 'GET').toUpperCase();
+      const event = ['websocket','webhook'].includes(r.input.transport);
+      if (r.input.transport !== undefined && !event) throw capabilityError('NETWORK_OPERATION_DENIED','Unsupported network transport');
+      if (event && (!r.pluginParent || !r.scope?.descriptorVersion)) throw capabilityError('NETWORK_OPERATION_DENIED','Event subscription requires a reviewed plugin endpoint');
+      const controlled = event || !['GET','HEAD'].includes(method) || r.input.credentialRef !== undefined;
+      if (!['GET','HEAD','POST','PUT','PATCH','DELETE'].includes(method)
+        || (['GET','HEAD'].includes(method) && r.input.init?.body !== undefined)
+        || Object.keys(r.input.init ?? {}).some(key => !['method','body'].includes(key)))
+        throw capabilityError('NETWORK_OPERATION_DENIED', 'Only bounded declared HTTP requests are supported');
+      if (controlled && (r.actor.kind !== 'owner' || r.constrainedActor) && (!r.pluginParent || !r.scope?.descriptorVersion))
+        throw capabilityError('NETWORK_OPERATION_DENIED', 'Authenticated requests and writes require a reviewed plugin endpoint');
+      if (r.input.credentialRef !== undefined && (typeof r.input.credentialRef !== 'string' || !/^plugin-[a-z0-9][a-z0-9._-]{0,55}$/.test(r.input.credentialRef)))
+        throw capabilityError('NETWORK_CREDENTIAL_DENIED', 'Dedicated plugin credential reference required');
     },
-    execute: r => safeFetch(String(r.input.url), Math.min(50000, Number(r.input.maxChars) || 50000), {
-      signal: r.signal,method:String(r.input.init?.method??'GET').toUpperCase(),
-      authorizeUrl: url => {
-        if(r.input.requireHttps===true&&url.protocol!=='https:')throw capabilityError('NETWORK_SCOPE_DENIED','HTTP adapter requires HTTPS on every redirect hop');
-        if (r.actor.kind === 'extension' && !r.actor.grants.hosts.includes(url.host)) {
-          throw capabilityError('NETWORK_SCOPE_DENIED', 'Redirect host not declared');
-        }
+    execute: async r => {
+      const method = String(r.input.init?.method ?? 'GET').toUpperCase();
+      const write = !['GET','HEAD'].includes(method);
+      const event = ['websocket','webhook'].includes(r.input.transport);
+      const controlled = event || write || r.input.credentialRef !== undefined;
+      const lifecycleSignal = r.pluginParent ? broker.registry.require(r.pluginParent.capability).lifecycleSignal?.() : null;
+      const signal = lifecycleSignal ? AbortSignal.any([lifecycleSignal,...(r.signal?[r.signal]:[])]) : r.signal;
+      signal?.throwIfAborted();
+      const authorizeUrl = url => {
+        if (r.input.transport !== 'webhook' && (controlled || r.input.requireHttps === true) && url.protocol !== 'https:') throw capabilityError('NETWORK_SCOPE_DENIED','HTTP adapter requires HTTPS');
+        const extension = r.constrainedActor ?? (r.actor.kind === 'extension' ? r.actor : null);
+        if (extension && !extension.grants?.hosts?.includes(url.host)) throw capabilityError('NETWORK_SCOPE_DENIED','Host not declared');
+      };
+      const url = String(r.input.url); authorizeUrl(new URL(url));
+      let secret;
+      if (r.input.credentialRef) {
+        if (!networkCredentialResolver) throw capabilityError('NETWORK_CREDENTIAL_UNAVAILABLE','Plugin credential resolver unavailable');
+        secret = await networkCredentialResolver(r.input.credentialRef, url, {transport:r.input.transport});
       }
-    }) });
+      if(event) {
+        const result=await executeEventTransport(r.input,{signal,secret,networkOptions:networkTransportOptions});
+        return secret ? JSON.parse(JSON.stringify(result).replaceAll(secret,'[REDACTED]')) : result;
+      }
+      const response = await (controlled ? safeHttpFetch : safeFetch)(url, Math.min(50000, Number(r.input.maxChars) || 50000), {
+        ...(controlled ? networkTransportOptions : {}), signal, method, authorizeUrl,
+        ...(controlled ? { body:r.input.init?.body, headers: { 'content-type':'application/json', ...(secret ? { authorization:'Bearer '+secret } : {}) } } : {})
+      });
+      if (secret && response.body) response.body = response.body.replaceAll(secret, '[REDACTED]');
+      if (write && (response.statusCode < 200 || response.statusCode >= 300 || response.truncated)) {
+        const error=capabilityError('HTTP_OUTCOME_UNKNOWN','Remote write returned an unsuccessful or incomplete result; verify effects before retrying'); error.effectStatus='unknown'; throw error;
+      }
+      return response;
+    } });
   broker.register({ id: 'web.search', permission: 'web.search', provider: 'mcp-adapter', risk: 'medium',
     available: typeof searchImpl === 'function',
     description: 'Search the public web through the configured safe-search adapter.',
@@ -1024,7 +1059,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
             ...modelConfig });
           if (!created?.sessionId) throw capabilityError('PROVIDER_ERROR', 'Agent returned no session');
           if (r.signal?.aborted) throw capabilityError('INVOKE_CANCELLED', 'Agent assignment cancelled');
-          const assignment = taskRuntime.attachAgent({ id: task.id, expectedRev: task.rev, provider, sessionId: created.sessionId });
+          const assignment = taskRuntime.attachAgent({ id: task.id, expectedRev: task.rev, provider, sessionId: created.sessionId, versionContext: created.versionContext });
           attached = true;
           if (assignment.task.status === 'queued') {
             taskRuntime.start({ id: task.id, expectedRev: assignment.task.rev });
