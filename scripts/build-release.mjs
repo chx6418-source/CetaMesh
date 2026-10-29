@@ -65,8 +65,10 @@ if (!versionCheck.ok) fail(`release/version.json does not match package/Cargo ve
 const releaseVersion = loadReleaseVersion({ rootDir: ROOT });
 const initialDirty = Boolean(gitOutput(['status', '--porcelain']));
 if (initialDirty && !options.dev) fail('formal Release requires a clean source tree; use --dev to label a working-tree build DEV');
-const sourceCommit = gitOutput(['rev-parse', 'HEAD']) || 'unknown';
-const sourceCommitShort = gitOutput(['rev-parse', '--short', 'HEAD']) || 'unknown';
+const sourceCommit = gitOutput(['rev-parse', 'HEAD']);
+if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(sourceCommit)) fail('SOURCE_COMMIT_INVALID: Git must provide the full source object ID');
+const sourceCommitShort = gitOutput(['rev-parse', '--short', 'HEAD']);
+if (!/^[0-9a-f]{4,64}$/.test(sourceCommitShort) || !sourceCommit.startsWith(sourceCommitShort)) fail('SOURCE_COMMIT_SHORT_MISMATCH: Git source identities must agree');
 const buildNumber = releaseVersion.buildNumber + (options.useCurrentBuildNumber ? 0 : 1);
 const buildChannel = options.dev ? 'dev' : releaseVersion.channel;
 const setupFilename = formatArtifactName({ productVersion: releaseVersion.productVersion, buildNumber, platform: 'windows-x64' });
@@ -107,7 +109,8 @@ function fail(message) {
 
 function gitOutput(args) {
   const result = spawnSync('git', args, { cwd: ROOT, encoding: 'utf8', timeout: 5000, windowsHide: true });
-  return result.status === 0 ? String(result.stdout ?? '').trim() : '';
+  if (result.error || result.status !== 0) fail(`SOURCE_GIT_QUERY_FAILED: git ${args.join(' ')} must succeed before release assembly`);
+  return String(result.stdout ?? '').trim();
 }
 
 function buildHarborUi() {

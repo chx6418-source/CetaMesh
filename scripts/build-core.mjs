@@ -55,7 +55,11 @@ function parseArgs(argv) {
   const options = { outDir: path.join(ROOT, 'dist', 'core'), verify: true, force: false, noWebUi: true };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
-    if (arg === '--out') options.outDir = path.resolve(argv[++i] ?? '');
+    if (arg === '--out') {
+      const value = argv[i + 1];
+      if (!value || !value.trim() || value.startsWith('--')) fail('CORE_OUT_ARGUMENT_REQUIRED: --out requires an explicit output directory');
+      options.outDir = path.resolve(argv[++i]);
+    }
     else if (arg === '--claude-sdk-source') {
       if (!argv[i + 1] || argv[i + 1].startsWith('--')) fail('--claude-sdk-source requires an explicit official package directory');
       options.claudeSdkSource = path.resolve(argv[++i]);

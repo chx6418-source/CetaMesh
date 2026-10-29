@@ -58,6 +58,8 @@ npm run build:release       # dist/app: single-file setup + payload + SBOM + SHA
 
 ## Release input integrity and security blocks
 
+Formal and DEV release assembly require successful Git status and identity queries. A failed query or invalid/inconsistent commit ID blocks before UI or packaging; it cannot be labeled clean or replaced with an unknown commit. A source archive without a usable Git checkout does not meet this provenance requirement. Core `--out` requires an explicit nonblank directory value; an omitted value cannot fall back to the repository root or consume the next option.
+
 The Desktop build wrapper passes Cargo `--locked`; an incompatible or missing reviewed lockfile must fail rather than silently resolving a different dependency graph. The existing path-remapping and static CRT flags are unchanged.
 
 Before UI or installer work, release assembly reuses `verifyAgentExpansionArtifact` to check the Core executable hash and its bounded Agent source fingerprint. It rechecks before copying and verifies the staged Core hash. The release manifest records those verified values and the three dependency-lock hashes. This proves consistency with those inputs; it is not complete product provenance, a malware verdict, or proof that an unsigned binary is safe.
