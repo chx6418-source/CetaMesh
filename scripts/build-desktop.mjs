@@ -28,6 +28,7 @@ const rustflags = `build.rustflags=["--remap-path-prefix",'${ROOT}=.'${staticCrt
 
 const args = [
   'build',
+  '--locked',
   '--manifest-path',
   path.join('desktop-shell', 'Cargo.toml'),
   ...(release ? ['--release'] : []),

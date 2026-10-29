@@ -19,6 +19,7 @@ try {
     timeout: 20_000
   });
   assert.notEqual(result.status, 0, 'build must reject an existing staging directory');
+  assert.match(`${result.stdout ?? ''}${result.stderr ?? ''}`, /临时发布目录已存在/, 'failure must be the actual staging ownership rejection, not another missing input');
   assert.equal(fs.readFileSync(sentinel, 'utf8'), 'pre-existing user data', 'rejected build must preserve the existing staging directory');
 } finally {
   fs.rmSync(preexisting, { recursive: true, force: true });

@@ -25,7 +25,7 @@
 
 The Harbor renderer has a separate TypeScript/Vite dependency lockfile at `desktop-ui/package-lock.json`.
 Use `npm ci --offline --prefix desktop-ui` when the locked packages are present in the local cache.
-`npm run build:release` invokes the Harbor build and stages its generated files at
+`npm run build:release` first validates its Core input, invokes the Harbor build and stages its generated files at
 `payload/resources/desktop-ui/`; the renderer remains offline and does not start an HTTP server.
 
 ## Release candidate build
@@ -55,6 +55,18 @@ npm run build:release       # dist/app: single-file setup + payload + SBOM + SHA
   resources, and the local `resources/desktop-ui/` Harbor bundle
 - `build-info.json` (version / commit / buildId / dirty flag), `release-manifest.json`,
   `SHA256SUMS.txt`, `sbom.json`, `licenses/`, `INSTALL.txt`
+
+## Release input integrity and security blocks
+
+The Desktop build wrapper passes Cargo `--locked`; an incompatible or missing reviewed lockfile must fail rather than silently resolving a different dependency graph. The existing path-remapping and static CRT flags are unchanged.
+
+Before UI or installer work, release assembly reuses `verifyAgentExpansionArtifact` to check the Core executable hash and its bounded Agent source fingerprint. It rechecks before copying and verifies the staged Core hash. The release manifest records those verified values and the three dependency-lock hashes. This proves consistency with those inputs; it is not complete product provenance, a malware verdict, or proof that an unsigned binary is safe.
+
+A previously assembled candidate whose release-shell build output has disappeared blocks `test-desktop-shell` before native dispatch with `RELEASE_SHELL_MISSING`. Missing files can have several causes: investigate the actual build inventory and security events instead of assuming an application startup defect. Explicit `WHALEBRIDGE_SKIP_RELEASE_SHELL_TEST=1` returns `NOT_RUN_ENVIRONMENT`/exit77 for the full suite and cannot certify a pass. Initial debug-only checkouts without candidate evidence retain their separate developer path.
+
+When security software detects or quarantines an artifact, preserve the file hashes, original manifest, detection/remediation events, engine and intelligence versions. Keep protection enabled. Do not restore, execute, rename, repack or change compiler features to evade detection. A successful rebuild or Authenticode check alone cannot clear an unresolved detection. Analyze the build inputs first and obtain Owner approval before sending private samples to a vendor. Native/installer/Guest acceptance remains blocked until the actual candidate is trustworthy and its prerequisites are met.
+
+`test-release-input-integrity` exercises the real build/test entry points with synthetic bytes and blocked subprocess boundaries; it does not launch a private application or claim real installer/Native acceptance. Real CLI suites use exit77 for missing opt-ins or required runtime paths, keeping those outcomes distinct from PASS.
 
 ## Release verification
 

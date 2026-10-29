@@ -19,12 +19,25 @@ import net from 'node:net';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { loadReleaseVersion, releaseArtifactDirectory } from '../src/release/version.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SHELL = process.env.WHALEBRIDGE_TEST_SHELL
   ? path.resolve(process.env.WHALEBRIDGE_TEST_SHELL)
   : path.join(ROOT, 'desktop-shell', 'target', 'debug', 'whalebridge-desktop.exe');
 const CONSOLE_TOKEN = 'desktop-shell-test-token-0123456789';
+// A disappeared output from an assembled candidate is a safety block, not an
+// initial developer checkout with no release build. Check before native dispatch.
+const releaseShellPath = path.join(ROOT, 'desktop-shell', 'target', 'release', 'whalebridge-desktop.exe');
+if (process.env.WHALEBRIDGE_SKIP_RELEASE_SHELL_TEST === '1') {
+  console.log('NOT_RUN_ENVIRONMENT: explicit release exclusion cannot certify the full Desktop suite');
+  process.exit(77);
+}
+const releaseVersion = loadReleaseVersion({ rootDir: ROOT });
+const releaseExpected = [...new Set([releaseVersion.channel, 'dev'])].some(channel => fs.existsSync(path.join(releaseArtifactDirectory({ rootDir: ROOT, ...releaseVersion, channel }), 'release-manifest.json')));
+if (releaseExpected && !fs.existsSync(releaseShellPath)) {
+  throw Object.assign(new Error('RELEASE_SHELL_MISSING: an assembled candidate exists but its release build output is absent; investigate missing/corrupt inputs and security remediation before running this suite'), { code: 'RELEASE_SHELL_MISSING' });
+}
 
 function step(message) {
   process.stdout.write(`${message}\n`);

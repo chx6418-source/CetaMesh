@@ -13,9 +13,9 @@ import { createCapabilityService } from '../src/capability/service.js';
 import { createWorkspaceService } from '../src/workspace/service.js';
 import { createTaskRuntime } from '../src/task/runtime.js';
 
-if(process.env.WHALEBRIDGE_TEST_REAL_OPENCODE!=='1') {console.log('NOT_RUN_ENVIRONMENT real OpenCode opt-in required');process.exit(0);}
+if(process.env.WHALEBRIDGE_TEST_REAL_OPENCODE!=='1') {console.log('NOT_RUN_ENVIRONMENT real OpenCode opt-in required');process.exit(77);}
 const executable=findCliExecutable('opencode');
-if(!executable || process.platform!=='win32') {console.log('NOT_RUN_ENVIRONMENT verified Windows OpenCode coding CLI is missing');process.exit(0);}
+if(!executable || process.platform!=='win32') {console.log('NOT_RUN_ENVIRONMENT verified Windows OpenCode coding CLI is missing');process.exit(77);}
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'cetamesh-real-opencode-'));
 const workspace=path.join(root,'workspace'),profiles=path.join(root,'profiles'),staging=path.join(root,'staging'),stateDir=path.join(root,'state');
 for(const directory of [workspace,profiles,staging,stateDir])fs.mkdirSync(directory);

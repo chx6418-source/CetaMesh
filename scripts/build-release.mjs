@@ -23,6 +23,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { writeJsonAtomic } from '../src/storage/json-file.js';
+import { verifyAgentExpansionArtifact } from '../src/agent/expansion-provenance.js';
 import { bumpBuildNumber, formatArtifactName, loadReleaseVersion, releaseArtifactDirectory, validateVersionMirrors } from '../src/release/version.js';
 import { assertSafeStagingDirectory, cleanupStagingDirectory, publishStagedArtifact } from '../src/release/artifacts.js';
 import {
@@ -147,6 +148,14 @@ function mb(bytes) {
 
 // ------------------------------------------------------------- 前置检查
 
+if (fs.existsSync(BUILD_DIR)) fail(`临时发布目录已存在，拒绝覆盖：${BUILD_DIR}`);
+
+// Reject a damaged/stale Core before dispatching UI or installer work.
+// This is input consistency, not malware or signature attestation.
+let verifiedCoreInput;
+try { verifiedCoreInput = verifyAgentExpansionArtifact(CORE_DIR, ROOT); }
+catch (error) { fail(`Core input verification failed: ${error.message}`); }
+
 buildHarborUi();
 
 if (!fs.existsSync(path.join(CORE_DIR, 'WhaleBridgeCore.exe'))) {
@@ -187,7 +196,6 @@ if (fs.existsSync(debugShell) && shellSize >= fs.statSync(debugShell).size) {
 // ------------------------------------------------------------- 组装
 
 log(`鲸桥发布候选组装（${PKG.version}）`);
-if (fs.existsSync(BUILD_DIR)) fail(`临时发布目录已存在，拒绝覆盖：${BUILD_DIR}`);
 if (fs.existsSync(OUT_DIR)) fail(`规范版本产物已存在，拒绝覆盖：${OUT_DIR}`);
 if (fs.existsSync(MANIFEST_INDEX)) fail(`发布清单索引已存在，拒绝覆盖：${MANIFEST_INDEX}`);
 assertSafeStagingDirectory({ rootDir: ROOT, stagingDirectory: BUILD_DIR });
@@ -196,6 +204,8 @@ fs.mkdirSync(BUILD_DIR, { recursive: false });
 buildDirectoryOwned = true;
 
 const payloadDir = path.join(BUILD_DIR, 'payload');
+const currentCoreInput = verifyAgentExpansionArtifact(CORE_DIR, ROOT);
+if (currentCoreInput.executableSha256 !== verifiedCoreInput.executableSha256 || currentCoreInput.sourceFingerprint !== verifiedCoreInput.sourceFingerprint) fail('CORE_INPUT_CHANGED_DURING_ASSEMBLY');
 log('[1/5] 复制 Core payload 与桌面壳');
 fs.mkdirSync(payloadDir, { recursive: true });
 for (const relative of listFiles(CORE_DIR)) {
@@ -216,6 +226,7 @@ for (const relative of uiFiles) {
   fs.copyFileSync(path.join(UI_DIR, relative), target);
 }
 fs.copyFileSync(SHELL_EXE, path.join(BUILD_DIR, 'WhaleBridge.exe'));
+if (sha256(path.join(payloadDir, 'WhaleBridgeCore.exe')) !== verifiedCoreInput.executableSha256) fail('CORE_INPUT_COPY_MISMATCH');
 log(`  Harbor UI ${uiFiles.length} 个静态文件 ${mb(directorySize(uiResourceDir))}`);
 log(`  WhaleBridge.exe ${mb(shellSize)}，payload/ ${listFiles(payloadDir).length} 个文件 ${mb(directorySize(payloadDir))}`);
 
@@ -493,6 +504,8 @@ const manifest = {
   platform: `${process.platform}-${process.arch}`,
   entry: setupFilename,
   remoteBackedUp: false,
+  verifiedCoreInput: { executableSha256: verifiedCoreInput.executableSha256, agentSourceFingerprint: verifiedCoreInput.sourceFingerprint },
+  dependencyLocks: Object.fromEntries(['package-lock.json', 'desktop-ui/package-lock.json', 'desktop-shell/Cargo.lock'].map(file => [file, sha256(path.join(ROOT, file))])),
   artifacts: artifacts
     .filter((relative) => /\.(exe|msi|zip|apk|aab)$/i.test(relative))
     .map((relative) => ({

@@ -39,6 +39,7 @@ export const CATEGORIES = ['core', 'architecture', 'security', 'runtime', 'integ
 // ── 登记表：scripts/test-*.mjs 的每一个文件都必须出现在这里（或能从 package.json 映射）。
 // requires 的取值见 probeAvailability()；category 取值见 CATEGORIES。
 const REGISTRY = {
+  'test-release-input-integrity.mjs': {category:'security',timeoutMs:120000,note:'Actual release entry rejects stale/tampered Core and missing expected Desktop before executable dispatch'},
   'test-task-launch-selection.mjs': {category:'desktop',requires:['ui-motion-live'],note:'Production TaskCreateForm handles delayed Workspace lists without overriding Owner selection'},
   'test-mcp-acceptance-assertions.mjs': {category:'security',timeoutMs:120000,note:'Real MCP smoke process outcomes must assert successful tool data and private-address rejection'},
   'test-memory-candidate-review.mjs': {category:'runtime',note:'Conservative pending Memory candidate hints preserve live authorized scope and confirmed fact authority'},

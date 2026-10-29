@@ -14,10 +14,10 @@ import { createTaskRuntime } from '../src/task/runtime.js';
 import { QWEN_NATIVE_TOOLS, createGeminiQwenProfile } from '../src/agent/gemini-qwen-runtime.js';
 import { createJsonRpcTransport } from '../src/agent/protocol/json-rpc-transport.js';
 
-if(process.env.WHALEBRIDGE_TEST_REAL_GEMINI_QWEN!=='1') {console.log('NOT_RUN_ENVIRONMENT actual Gemini/Qwen CLI opt-in required');process.exit(0);}
+if(process.env.WHALEBRIDGE_TEST_REAL_GEMINI_QWEN!=='1') {console.log('NOT_RUN_ENVIRONMENT actual Gemini/Qwen CLI opt-in required');process.exit(77);}
 const runtimes={gemini:process.env.WHALEBRIDGE_TEST_GEMINI_CLI,qwen:process.env.WHALEBRIDGE_TEST_QWEN_CLI};
 if(process.platform!=='win32' || Object.values(runtimes).some(file=>!file || !path.isAbsolute(file) || !fs.existsSync(file))) {
- console.log('NOT_RUN_ENVIRONMENT explicit pinned Gemini/Qwen npm command paths are required');process.exit(0);
+ console.log('NOT_RUN_ENVIRONMENT explicit pinned Gemini/Qwen npm command paths are required');process.exit(77);
 }
 const nodePath=process.env.WHALEBRIDGE_TEST_AGENT_NODE || process.execPath;
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'cetamesh-real-gemini-qwen-'));

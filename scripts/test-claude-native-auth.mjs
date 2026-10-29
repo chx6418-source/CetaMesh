@@ -4,9 +4,9 @@ import os from 'node:os';
 import path from 'node:path';
 import {createAuthTransport} from '../src/agent/auth/transport.js';
 import {claudeAuthProfile} from '../src/agent/auth/claude.js';
-if(process.platform!=='win32'||process.env.WHALEBRIDGE_TEST_CLAUDE_AUTH_CONTRACT!=='1') {console.log('NOT_RUN_ENVIRONMENT Windows Claude auth contract opt-in required');process.exit(0);}
+if(process.platform!=='win32'||process.env.WHALEBRIDGE_TEST_CLAUDE_AUTH_CONTRACT!=='1') {console.log('NOT_RUN_ENVIRONMENT Windows Claude auth contract opt-in required');process.exit(77);}
 const executable=process.env.WHALEBRIDGE_TEST_CLAUDE_AUTH_EXECUTABLE;
-if(!executable||!path.isAbsolute(executable)||!fs.existsSync(executable)){console.log('NOT_RUN_ENVIRONMENT explicit native Claude 2.1.308 executable required');process.exit(0);}
+if(!executable||!path.isAbsolute(executable)||!fs.existsSync(executable)){console.log('NOT_RUN_ENVIRONMENT explicit native Claude 2.1.308 executable required');process.exit(77);}
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'cetamesh-claude-auth-native-'));
 let confirmed=true;
 try {
