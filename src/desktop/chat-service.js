@@ -1,3 +1,4 @@
+import { explicitDelegationTarget } from './explicit-delegation.js';
 import { aggregateModelUsage, normalizeModelUsage } from '../model/usage.js';
 // CetaMesh Desktop 产品级 Chat 运行时（阶段 03；会话 1 改造为双通道）。
 //
@@ -1373,7 +1374,7 @@ export function createChatService({
               if (!turn) return;
               const rows = Array.isArray(turn.toolActivity) ? turn.toolActivity : [];
               const existing = rows.findIndex(item => item.id === activity.id);
-              const next = { ...activity, label: activity.capability, summary: '' };
+              const next = { ...activity, label: activity.capability };
               if (existing >= 0) rows[existing] = next; else rows.push(next);
               turn.toolActivity = rows.slice(-32);
               onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: turn.state, requestId: turn.requestId, toolActivity: rows.slice(-32), agentActivity: turn.agentActivity ?? null } });
@@ -1551,7 +1552,7 @@ export function createChatService({
     };
     const done = (async () => {
       try {
-        const routePromise = Promise.resolve().then(() => platformRoute({ decision: routing, record, text: promptText,
+        const routePromise = Promise.resolve().then(() => platformRoute({ decision: routing, record, text: promptText, sourceText: sourceText ?? promptText,
           requestId: operation.requestId,
           signal: controller.signal }));
         // A provider may finish creating a Session after the Chat has been cancelled.
@@ -1994,7 +1995,7 @@ export function createChatService({
     pendingUiDeltas.delete(record.id);
     onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: 'starting', requestId, reset: true, toolActivity: [], agentActivity } });
     try {
-      if (record.taskId && platformRoute && agentProviderId !== AGENT_PROVIDER_DISABLED) {
+      if ((record.taskId || explicitDelegationTarget(sourceText ?? promptText)) && platformRoute && agentProviderId !== AGENT_PROVIDER_DISABLED) {
         await startModelOrDshTurn(record, state, promptText, { attachments, sourceText, forceProject: true, retryMessageId });
       } else if (agentProviderId === 'cetamesh' && platformRoute) {
         await startModelOrDshTurn(record, state, promptText, { attachments, sourceText, forceProject: true, retryMessageId });

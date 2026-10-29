@@ -7,6 +7,7 @@
 //   - 需要能力工具但不改工程的任务（搜索/天气/计算/时间/发送）→ tool。
 //   - Cost Policy 只调阈值与 route，不改变信号本身（TASK-S1-006）。
 
+import { explicitDelegationTarget } from '../desktop/explicit-delegation.js';
 import { COST_POLICIES, DEFAULT_COST_POLICY, normalizeCostPolicy } from './types.js';
 
 // ── 工程信号（Tier A：命中即算直接工程动作）──────────────────────────────────
@@ -106,7 +107,7 @@ export function classifyTask({
       || (weakHits >= 1 && (verbHit || codeContext))
       || (codeContext && verbHit);
   }
-  if (isProject) {
+  if (isProject || explicitDelegationTarget(text)) {
     const route = agentEnabled ? 'agent' : 'model';
     if (!agentEnabled) reasons.push('用户已禁用 Agent → 保持 Model');
     return {

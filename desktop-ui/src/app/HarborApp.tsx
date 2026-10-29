@@ -786,13 +786,13 @@ export function ToolActivity({ tools }: { tools: ChatMessageDto['toolActivity'] 
 }
 
 export function UsageSummary({ usage, label = '本轮用量' }: { usage: ChatMessageDto['usage']; label?: string }) {
-  if (!usage) return <small className="muted">{label} 未知</small>;
+  if (!usage) return <small className="muted usage-summary">{label} 未知</small>;
   const count = (value: number | null) => value === null ? '未知' : String(value);
   const cost = usage.cost;
   const costLabel = cost?.amount != null && cost.currency && cost.complete
     ? `${cost.status === 'actual' ? '实际费用' : '估算费用'} ${cost.currency} ${cost.amount}`
     : `费用 未知${cost?.knownAmount != null && cost.currency ? `（已核算 ${cost.currency} ${cost.knownAmount}，不代表总费用）` : ''}`;
-  return <small className="muted" aria-label={label}>{label}{usage.accountingComplete === false ? ' · 已知用量（不完整）' : usage.accountingComplete === true ? '' : ' · 核算完整性未知'} · 输入 {count(usage.inputTokens)} · 输出 {count(usage.outputTokens)} · 推理 {count(usage.reasoningTokens)} · 缓存读取 {count(usage.cacheReadTokens)} · 缓存写入 {count(usage.cacheWriteTokens)} · 缓存命中 {usage.cacheHitRate === null ? '未知' : `${Math.round(usage.cacheHitRate * 10000) / 100}%`} · 请求 {count(usage.requestCount)} · {costLabel}</small>;
+  return <small className="muted usage-summary" aria-label={label}>{label}{usage.accountingComplete === false ? ' · 已知用量（不完整）' : usage.accountingComplete === true ? '' : ' · 核算完整性未知'} · 输入 {count(usage.inputTokens)} · 输出 {count(usage.outputTokens)} · 推理 {count(usage.reasoningTokens)} · 缓存读取 {count(usage.cacheReadTokens)} · 缓存写入 {count(usage.cacheWriteTokens)} · 缓存命中 {usage.cacheHitRate === null ? '未知' : `${Math.round(usage.cacheHitRate * 10000) / 100}%`} · 请求 {count(usage.requestCount)} · {costLabel}</small>;
 }
 
 export function MessageBubble({ message, reference, streaming = false, sendError, onRetry }: { message: ChatMessageDto; reference?: { sessionId: string; messageId: string }; streaming?: boolean; sendError?: string; onRetry?(): void }) {

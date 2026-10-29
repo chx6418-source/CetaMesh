@@ -1,3 +1,5 @@
+import { explicitDelegationTarget } from './explicit-delegation.js';
+import { isSafeAgentDispatchPreflight } from '../capability/service.js';
 import { normalizeModelUsage } from '../model/usage.js';
 import crypto from 'node:crypto';
 import {isControlledL2Write,l2Resources} from '../capability/l2-grants.js';
@@ -137,7 +139,7 @@ function projectMessage(value) {
   const toolActivity = Array.isArray(row.toolActivity) ? row.toolActivity.slice(0, 50).map(item => {
     const tool = record(item);
     return {
-      id: string(tool.id, 128), label: string(tool.label ?? tool.name, 200),
+      id: string(tool.id, 128), label: string(tool.label ?? tool.name ?? tool.capability, 200),
       status: ['pending', 'running', 'waiting-approval', 'completed', 'failed', 'cancelled'].includes(tool.status) ? tool.status : 'failed',
       summary: string(tool.summary, 1000), durationMs: Number.isFinite(tool.durationMs) ? Math.max(0, tool.durationMs) : null
     };
@@ -863,7 +865,9 @@ export function createDesktopUiService({ services = {}, system = services.system
           const latest = (await task('task.get', { id: taskRow.id })).task;
           if (latest.status === 'running') {
             const blocked = await task('task.block', { id: latest.id, expectedRev: latest.rev,
-              reason: 'needs-reconciliation: Agent dispatch failed during Resume; verify prior effects before retrying' });
+              reason: isSafeAgentDispatchPreflight(error)
+                ? 'Agent dispatch preflight rejected: ' + error.code + '; no new execution started'
+                : 'needs-reconciliation: Agent dispatch failed during Resume; verify prior effects before retrying' });
             emit('task.updated', { taskId: blocked.task.id, status: blocked.task.status });
           }
         } catch (recoveryError) {
@@ -1205,7 +1209,9 @@ export function createDesktopUiService({ services = {}, system = services.system
       const goal = boundedText(p.goal, 'goal', 2000);
       const workspaceId = string(p.workspaceId, 128) || null;
       const requirements = boundedStrings(p.requirements, 50, 1000);
-      const agentProvider = string(p.agentProvider, 80) || null;
+      const requested = explicitDelegationTarget(goal);
+      if (requested && p.agentProvider && p.agentProvider !== requested) throw uiError('AGENT_SELECTION_CONFLICT', '任务目标与执行者选择不一致，请确认执行者');
+      const agentProvider = string(p.agentProvider, 80) || requested || null;
       const requestId = string(p.requestId, 160) || null;
       const collaboration=normalizeTaskCollaboration(p.collaboration);
       const launchFingerprint=taskLaunchFingerprint(collaboration,{modelProvider:string(p.modelProvider,80),model:string(p.model,160)});

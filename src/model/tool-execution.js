@@ -585,6 +585,7 @@ export function createToolExecutionCoordinator({
           await state.onActivity({
             id: activityId, capability,
             status: result?.status === 'completed' ? 'completed' : 'failed',
+            summary: /^[A-Z][A-Z0-9_]{0,99}$/.test(result?.error?.code ?? '') ? result.error.code : '',
             durationMs: Date.now() - activityStartedAt
           });
         }

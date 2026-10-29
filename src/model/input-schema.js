@@ -8,6 +8,12 @@ function isPlainObject(value) {
 }
 export function validateSchema(schema, value, location = '$', depth = 0) {
   if (depth > 8 || !schema || typeof schema !== 'object') fail('TOOL_ARGUMENTS_INVALID', `${location}: invalid schema`);
+  // JSON Schema nullable primitives; keep all non-null constraints intact.
+  if (Array.isArray(schema.type)) {
+    const types = schema.type.filter(type => type !== 'null');
+    if (types.length !== 1) fail('TOOL_ARGUMENTS_INVALID', location + ': unsupported union');
+    return validateSchema({ ...schema, type: value === null && schema.type.includes('null') ? 'null' : types[0] }, value, location, depth);
+  }
   const type = schema.type;
   const validType = type === 'object' ? isPlainObject(value)
     : type === 'array' ? Array.isArray(value)
@@ -15,7 +21,7 @@ export function validateSchema(schema, value, location = '$', depth = 0) {
         : type === 'integer' ? Number.isSafeInteger(value)
           : type === 'number' ? typeof value === 'number' && Number.isFinite(value)
             : type === 'boolean' ? typeof value === 'boolean'
-              : false;
+              : type === 'null' ? value === null : false;
   if (!validType) fail('TOOL_ARGUMENTS_INVALID', `${location}: expected ${String(type)}`);
   if (type === 'object') {
     if (Object.keys(value).length > Math.min(schema.maxProperties ?? 64, 64)) fail('TOOL_ARGUMENTS_INVALID', `${location}: too many properties`);

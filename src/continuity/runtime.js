@@ -26,6 +26,7 @@
 // 核心原则：Tasks belong to CetaMesh, not to agents.
 //           Sessions are disposable; progress is persistent.
 
+import { taskModelForAgent } from '../agent/task-model-selection.js';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { renderOwnerContext } from '../task/owner-context.js';
@@ -679,10 +680,11 @@ export function createContinuityRuntime({
       let bootstrapBoundary = {};
       const nativeReadinessToken=requireNativeReadiness ? 'CM_READY_'+crypto.randomBytes(16).toString('hex') : null;
       if(nativeReadinessToken && target.capabilities().supportsReadinessCheck!==true)throw continuityError('AGENT_READINESS_UNSUPPORTED','This adapter cannot prove native tool readiness');
+      const inheritedModel = taskModelForAgent(task, target.id);
       const selectedModelConfig = {
-        modelProvider: modelProvider ?? task.modelConfig?.modelProvider ?? (target.id === previousAgent.provider ? previousStatus?.modelProvider : null) ?? target.defaults?.modelProvider,
-        model: model ?? task.modelConfig?.model ?? (target.id === previousAgent.provider ? previousStatus?.model : null) ?? target.defaults?.model,
-        reasoningEffort: reasoningEffort ?? task.modelConfig?.reasoningEffort ?? (target.id === previousAgent.provider ? previousStatus?.reasoningEffort : null) ?? target.defaults?.reasoningEffort
+        modelProvider: modelProvider ?? inheritedModel.modelProvider ?? (target.id === previousAgent.provider ? previousStatus?.modelProvider : null) ?? target.defaults?.modelProvider,
+        model: model ?? inheritedModel.model ?? (target.id === previousAgent.provider ? previousStatus?.model : null) ?? target.defaults?.model,
+        reasoningEffort: reasoningEffort ?? inheritedModel.reasoningEffort ?? (target.id === previousAgent.provider ? previousStatus?.reasoningEffort : null) ?? target.defaults?.reasoningEffort
       };
       try {
         authorizationGuard?.({provider:target.id});

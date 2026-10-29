@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { taskModelForAgent } from '../agent/task-model-selection.js';
 import { registerEnvironmentCapabilities } from '../environment/service.js';
 import { createApprovalOperations } from './operations.js';
 import fs from 'node:fs';
@@ -49,7 +50,7 @@ const WORKSPACE_TOOL_DESCRIPTORS = Object.freeze({
   'filesystem.read': ['Read a page of a file inside the authorized Workspace.', objectInput({ path: stringField('Workspace-relative file path.'),
     offset: { type: 'integer', minimum: 0 }, maxBytes: { type: 'integer', minimum: 1, maximum: 50000 },
     maxChars: { type: 'integer', minimum: 1, maximum: 50000 } }, ['path'])],
-  'filesystem.write': ['Write text to a file inside the authorized Workspace. Owner approval is required.', objectInput({ path: stringField('Workspace-relative file path.'), content: stringField('Text to write.'), append: { type: 'boolean' }, expectedHash: stringField('SHA-256 of the existing file; null for a new file.') }, ['path', 'content'])],
+  'filesystem.write': ['Write text to a file inside the authorized Workspace. Owner approval is required.', objectInput({ path: stringField('Workspace-relative file path.'), content: stringField('Text to write.'), append: { type: 'boolean' }, expectedHash: { type: ['string', 'null'], description: 'SHA-256 of the existing file; null for a new file.' } }, ['path', 'content'])],
   'filesystem.search': ['Search file names or contents inside the authorized Workspace.', objectInput({ query: stringField('Search text or file-name query.'), path: stringField('Optional Workspace-relative directory.'),
     offset: { type: 'integer', minimum: 0 }, maxResults: { type: 'integer', minimum: 1, maximum: 100 } }, ['query'])],
   'git.status': ['Read the current Git status for the authorized Workspace.', objectInput()],
@@ -1013,10 +1014,11 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
         let attached = false;
         let startedByRequest = false;
         try {
+          const inheritedModel = taskModelForAgent(task, provider);
           const modelConfig = {
-            model: r.input.model ?? task.modelConfig?.model,
-            modelProvider: r.input.modelProvider ?? task.modelConfig?.modelProvider,
-            reasoningEffort: r.input.reasoningEffort ?? task.modelConfig?.reasoningEffort
+            model: r.input.model ?? inheritedModel.model,
+            modelProvider: r.input.modelProvider ?? inheritedModel.modelProvider,
+            reasoningEffort: r.input.reasoningEffort ?? inheritedModel.reasoningEffort
           };
           created = await agentBroker.createSession(provider, { cwd: ws.root, taskId: task.id, workspaceId: ws.id,
             ...modelConfig });

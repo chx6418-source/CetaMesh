@@ -658,14 +658,14 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     });
   }
 
-  function setModelConfig({ id, expectedRev, modelProvider, model, reasoningEffort } = {}) {
+  function setModelConfig({ id, expectedRev, modelProvider, model, reasoningEffort, agentProvider } = {}) {
     const modelConfig = {
       modelProvider: normalizeText(modelProvider, 'modelProvider', 80) || null,
       model: normalizeText(model, 'model', 160) || null,
       reasoningEffort: normalizeText(reasoningEffort, 'reasoningEffort', 40) || null
     };
     return mutate(id, expectedRev, (task) => {
-      task.modelConfig = modelConfig;
+      task.modelConfig = { ...modelConfig, agentProvider: normalizeProvider(agentProvider || task.currentAgent?.provider || task.requestedAgentProvider || 'cetamesh') };
       return task;
     });
   }

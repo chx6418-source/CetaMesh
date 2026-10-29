@@ -1,3 +1,4 @@
+import { explicitDelegationTarget } from './explicit-delegation.js';
 import { OWNER_ACTOR, capabilityError } from '../capability/types.js';
 import crypto from 'node:crypto';
 import { rankTaskAgents } from '../router/agent-assignment.js';
@@ -5,12 +6,13 @@ import { isSafeAgentDispatchPreflight } from '../capability/service.js';
 
 /** Smart decisions are consumed here; authority is always the trusted Desktop Owner. */
 export function createDesktopPlatformRuntime({ capabilityService, workspaceService, taskRuntime, agentBroker, continuityRuntime, modelRuntime, legacyModel, prepareTaskContext = null }) {
-  async function selectProviders(record, task, decision) {
+  async function selectProviders(record, task, decision, requested = null) {
     const selected = record.config.agentProvider;
     if (selected === 'none' || decision.agentEnabled === false) {
       throw capabilityError('AGENT_DISABLED', 'Agent execution is disabled for this Chat');
     }
-    const explicit = selected && selected !== 'none' ? selected : null;
+    if (requested && selected && requested !== selected) throw capabilityError('AGENT_SELECTION_CONFLICT', '请求的执行者与会话选择不同，请确认执行者后重试');
+    const explicit = requested || (selected && selected !== 'none' ? selected : null);
     const pinned = explicit || task?.currentAgent?.provider;
     if (pinned) {
       const health = await agentBroker.health(pinned);
@@ -58,7 +60,8 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
     }
   }
 
-  async function route({ decision, record, text, requestId, signal }) {
+  async function route({ decision, record, text, sourceText, requestId, signal }) {
+    const requested = explicitDelegationTarget(sourceText ?? text);
     if (decision.agentIntent) {
       if (signal?.aborted) throw Object.assign(new Error('Chat operation cancelled'), { code: 'ABORTED' });
       const workspaceId = record.config.workspaceId || (await workspaceService.execute({ method: 'workspace.list' })).activeId;
@@ -78,7 +81,7 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
         throw capabilityError('TASK_DISPATCH_INCOMPLETE',
           'An existing queued Task has no confirmed Agent; review its original Owner selection before dispatch');
       }
-      const candidates = await selectProviders(record, task, decision);
+      const candidates = await selectProviders(record, task, decision, requested);
       const provider = candidates[0].provider;
       let createdTask = false;
       if (!task) {
@@ -87,7 +90,7 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
           throw capabilityError('TASK_DISPATCH_INCOMPLETE', 'Concurrent queued Task requires Owner review before dispatch');
         }
         task = concurrent ?? taskRuntime.create({ goal: text.slice(0, 2000), workspaceId,
-          note: 'Smart Chat project task', requestId, requestedAgentProvider: record.config.agentProvider || null });
+          note: 'Smart Chat project task', requestId, requestedAgentProvider: requested || record.config.agentProvider || null });
         record.taskId = task.id;
         createdTask = !concurrent;
       } else {
@@ -151,7 +154,7 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
           try {
             // Recheck after selection and before the real Broker call. The
             // Broker repeats its own authority check at the send boundary.
-            if (!record.config.agentProvider && !task.currentAgent) {
+            if (!requested && !record.config.agentProvider && !task.currentAgent) {
               // An automatic selection remains automatic at the dispatch boundary:
               // never apply the weaker explicit Owner-selection exception here.
               const currentCandidates = await selectProviders(record, task, decision);
@@ -165,9 +168,11 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
             result = await capabilityService.broker.execute({
               requestId: index === 0 ? requestId : crypto.randomUUID(), actor: OWNER_ACTOR,
               taskId: task.id, workspaceId, capability: 'agent.run',
-              input: { provider: choice.provider, content: dispatchText, modelProvider: record.config.modelProvider,
-                model: record.config.model !== legacyModel ? record.config.model : undefined,
-                reasoningEffort: record.config.reasoning,
+              input: { provider: choice.provider, content: dispatchText,
+                // Managed Chat settings are not native Agent model authorization.
+                ...(choice.provider === 'cetamesh' || record.config.agentProvider === choice.provider ? { modelProvider: record.config.modelProvider,
+                  model: record.config.model !== legacyModel ? record.config.model : undefined,
+                  reasoningEffort: record.config.reasoning } : {}),
                 grants: { capabilities: ['filesystem.read', 'filesystem.write', 'filesystem.search',
                   'git.status', 'git.diff', 'memory.read', 'test.run', 'operation.read', 'operation.continue'] } },
               reason: index ? 'Smart project task safe reassignment after verified preflight failure' : 'Smart project task'
@@ -178,7 +183,7 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
             break;
           } catch (error) {
             const fresh = taskRuntime.get({ id: task.id }).task;
-            const safe = !record.config.agentProvider && index === 0 && candidates.length > 1
+            const safe = !requested && !record.config.agentProvider && index === 0 && candidates.length > 1
               && isSafeAgentDispatchPreflight(error) && error.code === 'PROVIDER_UNAVAILABLE'
               && !signal?.aborted && fresh.status === 'queued' && !fresh.currentAgent
               && !(fresh.attempts ?? []).length && !(fresh.executionEvidence ?? []).length;

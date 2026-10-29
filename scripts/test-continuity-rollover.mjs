@@ -603,13 +603,14 @@ ok('Handoff Packet retains complete Task requirements');
   taskRuntime.attachAgent({ id: task.id, expectedRev: rev(task.id), provider: 'alpha', sessionId: 'alpha-old' });
   taskRuntime.setModelConfig({ id: task.id, expectedRev: rev(task.id),
     modelProvider: 'custom-compatible', model: 'selected-model', reasoningEffort: 'high' });
-  const result = await runtime.rollover({ taskId: task.id, targetProvider: 'beta' });
+  const result = await runtime.rollover({ taskId: task.id, targetProvider: 'beta',
+    modelProvider: 'custom-compatible', model: 'selected-model', reasoningEffort: 'high' });
   const options = log.findLast(entry => entry.kind === 'create' && entry.provider === 'beta')?.options;
   assert.deepEqual({ modelProvider: options.modelProvider, model: options.model, reasoningEffort: options.reasoningEffort },
     { modelProvider: 'custom-compatible', model: 'selected-model', reasoningEffort: 'high' });
   assert.equal(result.task.modelConfig.modelProvider, 'custom-compatible');
   assert.equal(createTaskRuntime({ stateDir: dir }).get({ id: task.id }).task.modelConfig.model, 'selected-model');
-  ok('cross-Provider Handoff retains and persists the Task-selected model configuration');
+  ok('cross-Provider Handoff retains explicitly selected target model configuration');
 }
 
 {

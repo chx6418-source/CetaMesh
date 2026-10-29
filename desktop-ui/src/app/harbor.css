@@ -95,7 +95,7 @@
 .harbor-empty > strong { color: var(--text-primary); }
 .harbor-empty p { max-width: 480px; margin: 0; font-size: 12px; }
 .chat-workspace { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); height: 100%; min-height: 0; }
-.conversation-pane { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; min-width: 0; min-height: 0; }
+.conversation-pane { display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; min-width: 0; min-height: 0; }
 .conversation-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; min-height: 56px; padding: 10px 24px; border-bottom: 1px solid var(--border); }
 .conversation-heading { display: flex; flex: 1; flex-wrap: wrap; align-items: center; gap: 4px 12px; min-width: 0; }
 .conversation-toolbar h1 { min-width: 0; max-width: min(480px, 100%); margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 18px; }
@@ -593,3 +593,6 @@
 .progress-value { display: block; height: 100%; border-radius: inherit; background: var(--accent, #3b82f6); }
 
 .task-review-report { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.usage-summary { display: block; min-width: 0; overflow-wrap: anywhere; line-height: 1.5; }
+.conversation-pane > .usage-summary { padding: 6px 24px; }

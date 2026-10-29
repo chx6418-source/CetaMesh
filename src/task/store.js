@@ -161,6 +161,7 @@ function normalizeLoaded(raw) {
     delegationProposal: raw.delegationProposal && typeof raw.delegationProposal === 'object' && !Array.isArray(raw.delegationProposal) ? raw.delegationProposal : null,
     modelConfig: raw.modelConfig && typeof raw.modelConfig === 'object' && !Array.isArray(raw.modelConfig)
       ? {
+        ...(typeof raw.modelConfig.agentProvider === 'string' ? { agentProvider: raw.modelConfig.agentProvider } : {}),
         modelProvider: typeof raw.modelConfig.modelProvider === 'string' ? raw.modelConfig.modelProvider : null,
         model: typeof raw.modelConfig.model === 'string' ? raw.modelConfig.model : null,
         reasoningEffort: typeof raw.modelConfig.reasoningEffort === 'string' ? raw.modelConfig.reasoningEffort : null
