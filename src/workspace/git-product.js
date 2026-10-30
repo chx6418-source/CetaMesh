@@ -32,8 +32,6 @@ function enrichEntries(root, rows) {
 
 /** A read projection and two trusted Broker effects; no separate task/worktree store. */
 export function createGitProduct({ stateDir, registry, getTask = () => null, listTasks = () => [], record = () => {} }) {
-  const managedBase = path.join(path.resolve(stateDir), 'agent-worktrees');
-
   async function overview(entry) {
     const status = await gitStatus(entry.root, { completeFiles: true });
     const taskRows = await listTasks({ workspaceId: entry.id, limit: 100 });
@@ -55,6 +53,8 @@ export function createGitProduct({ stateDir, registry, getTask = () => null, lis
       const [sha, parents, timestamp, subject] = line.replace(/\r$/, '').split('\0');
       return { sha, parents: parents ? parents.split(' ') : [], committedAt: Number(timestamp) * 1000, subject: safeText(subject) };
     });
+    // Match creation's canonical StateDir, including Windows junction/short-name aliases.
+    const managedBase = path.join(fs.realpathSync.native(stateDir), 'agent-worktrees');
     const registrations = registry.list(), worktrees = [];
     let row = null;
     const flush = () => {

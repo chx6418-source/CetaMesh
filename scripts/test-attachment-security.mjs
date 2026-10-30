@@ -60,7 +60,12 @@ try {
   assert.throws(() => createAttachmentStore({ stateDir: linkedState }), { code: 'ATTACHMENT_PATH_DENIED' });
   assert.deepEqual(fs.readdirSync(outside), [], 'rejected ancestor links leave the external directory unchanged');
 
-  const stateDir = path.join(root, 'state'), store = createAttachmentStore({ stateDir });
+  // A caller's StateDir may use an ancestor alias (for example Windows TEMP).
+  // Keep that spelling different from the store's canonical metadata paths.
+  const stateParent = path.join(root, 'state-parent'), stateAlias = path.join(root, 'state-alias');
+  fs.mkdirSync(stateParent);
+  fs.symlinkSync(stateParent, stateAlias, process.platform === 'win32' ? 'junction' : 'dir');
+  const stateDir = path.join(stateAlias, 'state'), store = createAttachmentStore({ stateDir });
   const sessionId = 'session-a';
   const sessionRoot = path.join(stateDir, 'desktop-chat', 'attachment-files', digest(sessionId));
   const file = upload(store, sessionId, 'source.ts', Buffer.from('ORIGINAL'), 'text/plain');
@@ -81,12 +86,13 @@ try {
   const png = visionFixturePng();
   const original = upload(store, sessionId, 'original.png', png, 'image/png');
   const model = upload(store, sessionId, 'model.png', png, 'image/png');
-  const originalMeta = path.join(sessionRoot, original.ref + '.json'), originalRename = fs.renameSync;
+  const originalMeta = fs.realpathSync.native(path.join(sessionRoot, original.ref + '.json')), originalRename = fs.renameSync;
+  const writeDenied = Object.assign(new Error('fixture second metadata write denied'), { code: 'EACCES' });
   fs.renameSync = (from, to) => {
-    if (to === originalMeta) throw Object.assign(new Error('fixture second metadata write denied'), { code: 'EACCES' });
+    if (to === originalMeta) throw writeDenied;
     return originalRename(from, to);
   };
-  try { assert.throws(() => store.derive(sessionId, { ref: original.ref, modelRef: model.ref }), { code: 'WRITE_FAILED' }); }
+  try { assert.throws(() => store.derive(sessionId, { ref: original.ref, modelRef: model.ref }), { code: 'WRITE_FAILED', file: originalMeta, cause: writeDenied }); }
   finally { fs.renameSync = originalRename; }
   assert.equal(store.describe(sessionId, original.ref).modelRef, undefined);
   assert.equal(store.describe(sessionId, model.ref).originalRef, original.ref);

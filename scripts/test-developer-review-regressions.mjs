@@ -32,8 +32,13 @@ async function until(read, predicate, description) {
   }
   assert.fail('Timed out waiting for ' + description);
 }
-async function gitFixture(name) {
-  const root = path.join(temporary, name), stateDir = path.join(temporary, name + '-state');
+async function gitFixture(name, { aliasStateDir = false } = {}) {
+  const root = path.join(temporary, name), stateRoot = path.join(temporary, name + '-state');
+  const stateDir = aliasStateDir ? stateRoot + '-alias' : stateRoot;
+  if (aliasStateDir) {
+    fs.mkdirSync(stateRoot); fs.symlinkSync(stateRoot, stateDir, process.platform === 'win32' ? 'junction' : 'dir');
+    assert.notEqual(path.resolve(stateDir), fs.realpathSync.native(stateDir));
+  }
   fs.mkdirSync(root); git(root, 'init', '-q', '-b', 'main');
   git(root, 'config', 'user.name', 'Fixture'); git(root, 'config', 'user.email', 'fixture@example.invalid');
   fs.writeFileSync(path.join(root, 'source.txt'), 'reviewed source\n'); git(root, 'add', 'source.txt'); git(root, 'commit', '-qm', 'fixture');
@@ -63,8 +68,8 @@ function modelFixture(requests) {
 }
 
 try {
-  await check('Agent Git overview excludes other Task goals and branch/worktree associations while Owner keeps them', async () => {
-    const f = await gitFixture('overview-scope');
+  for (const aliasStateDir of [false, true]) await check('Agent Git overview excludes other Task goals and branch/worktree associations while Owner keeps them' + (aliasStateDir ? ' through a directory alias' : ''), async () => {
+    const f = await gitFixture(aliasStateDir ? 'overview-scope-alias' : 'overview-scope', { aliasStateDir });
     for (const [task, branch] of [[f.ownTask, 'codex/own'], [f.foreignTask, 'codex/foreign']]) {
       await f.workspaceService.executeApprovedGit({ method: 'workspace.git.branch.create', params: { id: f.workspace.id, taskId: task.id, branch, expectedHead: f.expectedHead } });
     }

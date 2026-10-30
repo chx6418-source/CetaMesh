@@ -21,13 +21,14 @@ const channelService = { async execute(request) {
   if (method === 'channel.qq.health') return qq;
   if (method === 'channel.bionic.health') return bionic;
   if (method === 'channel.bionic.start') { bionic = { running: true, ready: true, accountId: '12345' }; return bionic; }
+  if (method === 'channel.bionic.reconnect') { bionic = { running: true, ready: false, accountId: '12345' }; return bionic; }
   if (method === 'channel.bionic.stop') { bionic = { running: false, ready: false, accountId: null }; return { stopped: true }; }
   throw new Error('Unexpected method ' + method);
 } };
 const local = createChannelDesktopControls({ channelService, bionicService: {} });
 assert.equal(calls.length, 0, 'constructing management actions never starts workers or probes runtime');
 assert.deepEqual(Object.keys(local.actions.snowluma), ['health', 'start', 'stop', 'reconnect', 'detect']);
-assert.deepEqual(Object.keys(local.actions.bionic), ['health', 'start', 'stop']);
+assert.deepEqual(Object.keys(local.actions.bionic), ['health', 'start', 'stop', 'reconnect']);
 assert.equal(local().snowluma.installed, null);
 assert.equal(local().snowluma.configured, null);
 assert.equal(local().snowluma.running, false);
@@ -55,6 +56,15 @@ const qqStarts = calls.filter(row => row.method === 'channel.qq.start').length;
 await local.actions.bionic.start();
 assert.equal(local().bionic.running, true);
 assert.equal(calls.filter(row => row.method === 'channel.qq.start').length, qqStarts);
+const reconnected = await local.actions.bionic.reconnect({ actor: { kind: 'external' }, config: { bad: true } });
+assert.equal(reconnected.running, true);
+assert.equal(reconnected.ready, false, 'reconnect cannot promote a running but unverified Bionic Agent to ready');
+assert.equal(reconnected.authenticated, false);
+const reconnectCall = calls.find(row => row.method === 'channel.bionic.reconnect');
+assert.ok(reconnectCall, 'the Bionic reconnect action must reach the existing Channel lifecycle');
+assert.deepEqual(reconnectCall.actor, { kind: 'owner', id: 'desktop' });
+assert.equal(reconnectCall.params, undefined, 'reconnect cannot accept caller configuration or actor overrides');
+assert.equal(calls.filter(row => row.method === 'channel.qq.start').length, qqStarts, 'Bionic reconnect does not launch another QQ connector');
 await local.actions.bionic.stop(); assert.equal(local().bionic.running, false);
 assert.equal(local().qq.running, true, 'Bionic stop does not stop QQ');
 await local.actions.snowluma.stop(); assert.equal(local().qq.running, false);

@@ -70,6 +70,7 @@ check('CI uploads files from the canonical immutable release artifact directory'
   assert.deepEqual(paths, [
     '${{ steps.candidate.outputs.directory }}/${{ steps.candidate.outputs.setup }}',
     '${{ steps.candidate.outputs.directory }}/release-manifest.json',
+    '${{ steps.candidate.outputs.directory }}/candidate-provenance.json',
     '${{ steps.candidate.outputs.directory }}/SHA256SUMS.txt',
     '${{ steps.candidate.outputs.directory }}/sbom.json',
     '${{ steps.candidate.outputs.directory }}/licenses/**'

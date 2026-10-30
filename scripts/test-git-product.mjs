@@ -14,8 +14,13 @@ const git = (cwd, ...args) => execFileSync('git', ['-c', 'commit.gpgSign=false',
 const digest = text => crypto.createHash('sha256').update(text).digest('hex');
 let passed = 0, failed = 0;
 async function check(name, run) { try { await run(); passed++; console.log('PASS ' + name); } catch (error) { failed++; console.error('FAIL ' + name + '\n' + error.stack); } }
-async function fixture(name) {
-  const root = path.join(temporary, name), stateDir = path.join(temporary, name + '-state');
+async function fixture(name, { aliasStateDir = false } = {}) {
+  const root = path.join(temporary, name), stateRoot = path.join(temporary, name + '-state');
+  const stateDir = aliasStateDir ? stateRoot + '-alias' : stateRoot;
+  if (aliasStateDir) {
+    fs.mkdirSync(stateRoot); fs.symlinkSync(stateRoot, stateDir, process.platform === 'win32' ? 'junction' : 'dir');
+    assert.notEqual(path.resolve(stateDir), fs.realpathSync.native(stateDir));
+  }
   fs.mkdirSync(root); git(root, 'init', '-q', '-b', 'main'); git(root, 'config', 'core.autocrlf', 'false'); git(root, 'config', 'user.name', 'Fixture'); git(root, 'config', 'user.email', 'fixture@example.invalid');
   fs.writeFileSync(path.join(root, 'a.txt'), 'base\n'); fs.writeFileSync(path.join(root, 'other.txt'), 'other\n'); git(root, 'add', '.'); git(root, 'commit', '-qm', 'base');
   const runtime = createTaskRuntime({ stateDir });
@@ -56,17 +61,24 @@ try {
     await assert.rejects(f.service.executeApprovedGit({ method: 'workspace.git.branch.create', params: { ...f.request, taskId: foreign.id } }), error => error.code === 'TASK_WORKSPACE_MISMATCH');
     assert.equal(git(f.root, 'branch', '--list', f.request.branch), '');
   });
-  await check('worktree is generated under controlled StateDir, registered and linked to original Task after restart', async () => {
-    const f = await fixture('worktree'); fs.writeFileSync(path.join(f.root, 'a.txt'), 'user dirty\n');
+  for (const aliasStateDir of [false, true]) await check('worktree is generated under controlled StateDir, registered and linked to original Task after restart' + (aliasStateDir ? ' through a directory alias' : ''), async () => {
+    const f = await fixture(aliasStateDir ? 'worktree-alias' : 'worktree', { aliasStateDir }); fs.writeFileSync(path.join(f.root, 'a.txt'), 'user dirty\n');
     const before = git(f.root, 'status', '--porcelain');
     const result = await f.service.executeApprovedGit({ method: 'workspace.git.worktree.create', params: f.request });
     assert.ok(result.workspace.id !== f.workspace.id); const target = result.workspace.root;
-    assert.ok(path.relative(path.join(f.stateDir, 'agent-worktrees'), target).split(path.sep).length === 1);
+    assert.equal(path.dirname(target), fs.realpathSync.native(path.join(f.stateDir, 'agent-worktrees')));
     assert.equal(git(target, 'branch', '--show-current'), f.request.branch); assert.equal(fs.readFileSync(path.join(target, 'a.txt'), 'utf8'), 'base\n');
     fs.writeFileSync(path.join(target, 'a.txt'), 'agent edit\n'); assert.equal(fs.readFileSync(path.join(f.root, 'a.txt'), 'utf8'), 'user dirty\n'); assert.equal(git(f.root, 'status', '--porcelain'), before);
     const restarted = createWorkspaceService({ stateDir: f.stateDir, getTask: id => f.runtime.get({ id }).task, listTasks: query => f.runtime.list(query).tasks });
     const overview = await restarted.execute({ method: 'workspace.git.overview', params: { id: f.workspace.id } });
     const row = overview.worktrees.find(item => item.workspaceId === result.workspace.id); assert.equal(row.taskId, f.task.id); assert.equal(row.managed, true); assert.equal(row.baselineHead, f.request.expectedHead);
+  });
+  await check('managed worktree root cannot be a link even when StateDir is a directory alias', async () => {
+    const f = await fixture('worktree-root-link', { aliasStateDir: true });
+    const linkedTarget = path.join(f.stateDir, 'linked-worktrees'); fs.mkdirSync(linkedTarget);
+    fs.symlinkSync(linkedTarget, path.join(f.stateDir, 'agent-worktrees'), process.platform === 'win32' ? 'junction' : 'dir');
+    await assert.rejects(f.service.executeApprovedGit({ method: 'workspace.git.worktree.create', params: f.request }), error => error.code === 'WORKTREE_ROOT_INVALID');
+    assert.deepEqual(fs.readdirSync(linkedTarget), []); assert.equal(git(f.root, 'branch', '--list', f.request.branch), '');
   });
   await check('external destination paths and invalid branch expressions are rejected without writing them', async () => {
     const f = await fixture('paths'); const external = path.join(temporary, 'outside-destination');
