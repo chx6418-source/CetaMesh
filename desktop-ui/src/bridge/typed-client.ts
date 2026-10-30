@@ -13,6 +13,7 @@ export interface ChatMessage {
   id: string; role: 'user' | 'assistant' | 'system'; text: string; at: string | number | null;
   requestId?: string | null;
   usage?: ModelUsage | null;
+  attachmentRefs?: {ref:string;name:string;kind:string;size:number;mimeType:string;modelRef?:string|null}[];
   attachments: string[]; toolActivity: { id: string; label: string; status: string; summary: string; durationMs: number | null }[];
   agentActivity?: { providerId: string; label: string; status: 'running' | 'completed' | 'cancelled' | 'failed' } | null;
   error: string | null; cancelled: boolean;
@@ -125,7 +126,7 @@ export interface ApprovalDecisionResult {
   status: 'accepted' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled' | 'unknown' | 'rejected'; operationId?: string; decision?: string; code?: string; approvalId?: string; requestId?: string; turnResumed?: boolean; resumePending?: boolean;
   resumeError?: string; taskResumed?: boolean;
 }
-export interface Attachment { name: string; content: string; mimeType?: string }
+export interface Attachment { name: string; content?: string; mimeType?: string; ref?:string }
 export type Settings = Record<string, Record<string, string | number | boolean | null>>;
 export type ExtensionSettingType = 'boolean' | 'string' | 'number' | 'enum' | 'secretRef';
 export interface ExtensionSettingField {
@@ -146,6 +147,7 @@ export interface RetiredIntegrationTool {
   replacement: { id: string; label: string } | null;
 }
 export interface LocalServiceSettings {
+  readiness?:import('../app/BionicReadiness').BionicReadinessData|null;activity?:import('../app/BionicReadiness').BionicActivityData|null;
   status: string; installed: boolean | null; running: boolean; ready: boolean; configured: boolean | null;
   authenticated?: boolean; canSend?: boolean;
   accountId?: string | null;
@@ -174,6 +176,7 @@ export interface DesktopEventData {
   delta?: string; replaceText?: string; reset?: boolean; toolActivity?: ChatMessage['toolActivity']; agentActivity?: ChatMessage['agentActivity'];
 }
 type UiMethod =
+  'ui.chat.attachment.list' | 'ui.chat.attachment.begin' | 'ui.chat.attachment.chunk' | 'ui.chat.attachment.finish' | 'ui.chat.attachment.read' | 'ui.chat.attachment.derive' | 'ui.chat.attachment.describe' | 'ui.chat.attachment.remove' | 'ui.chat.attachment.cleanup' | 'ui.chat.attachment.limits' | 'ui.chat.attachment.limits.set' | 'ui.chat.attachment.capabilities' | 'ui.chat.attachment.import' | 'ui.workspace.git.overview' | 'ui.workspace.git.diff' | 'ui.workspace.git.commit' | 'ui.workspace.git.branch.create' | 'ui.workspace.git.worktree.create' | 'ui.developer.forge.describe' | 'ui.developer.forge.save' | 'ui.developer.forge.invoke' | 'ui.developer.forge.credentials.save'
   | 'ui.preview.open' | 'ui.preview.read' | 'ui.preview.close'
   | 'ui.events.next'
   | 'ui.chat.sessions.list' | 'ui.chat.sessions.create' | 'ui.chat.sessions.rename' | 'ui.chat.sessions.archive' | 'ui.chat.sessions.delete'
@@ -324,7 +327,7 @@ export const chatClient = {
   }>('ui.chat.history', { id, limit, beforeMessageId, afterMessageId }),
   status: (id: string) => uiCall<{ id: string; taskId: string | null; dshSessionAlive: boolean; state: string; requestId: string | null; statusMessage: string | null; retryCount: number; followState: string; followError: string | null; displayText: string; toolActivity: ChatMessage['toolActivity']; agentActivity: ChatMessage['agentActivity']; error: string | null; errorCode: string | null; approvalId: string | null; approvalExpiresAt: string | number | null; routing: Record<string, unknown> }>('ui.chat.status', { id }),
   send: (id: string, text: string, attachments: Attachment[] = [], clientMessageId?: string) => {
-    const params = { id, text, attachments, ...(clientMessageId ? { clientMessageId } : {}) };
+    const params = { id, text, attachments:attachments.map(a=>a.ref?{ref:a.ref}:a), ...(clientMessageId ? { clientMessageId } : {}) };
     return uiCall<{ userMessageId?: string; requestId?: string }>('ui.chat.send', params).catch(error => {
       // The Core may have accepted the request while its ACK was lost. Retry only
       // with a stable message ID; Chat's persisted ID makes this idempotent.
@@ -505,3 +508,6 @@ export const previewClient = {
   browserCommand: (targetId: string, action: 'back' | 'forward' | 'reload' | 'close') => bridge.invoke('app.previewBrowser.command', { targetId, action })
 };
 
+
+const PRODUCT_TOOL_METHODS=new Set(["ui.chat.attachment.list","ui.developer.forge.credentials.save","ui.chat.attachment.begin","ui.chat.attachment.chunk","ui.chat.attachment.finish","ui.chat.attachment.read","ui.chat.attachment.derive","ui.chat.attachment.describe","ui.chat.attachment.remove","ui.chat.attachment.cleanup","ui.chat.attachment.limits","ui.chat.attachment.limits.set","ui.chat.attachment.capabilities","ui.chat.attachment.import","ui.workspace.git.overview","ui.workspace.git.diff","ui.workspace.git.commit","ui.workspace.git.branch.create","ui.workspace.git.worktree.create","ui.developer.forge.describe","ui.developer.forge.save","ui.developer.forge.invoke"]);
+export const productToolsClient={call:(method:string,params:Record<string,unknown>={})=>{if(!PRODUCT_TOOL_METHODS.has(method))return Promise.reject(new Error("不支持的开发工具操作"));return uiCall<unknown>(method as UiMethod,params);}};

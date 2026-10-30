@@ -293,7 +293,7 @@ export function fileSearch(rootReal, { query = '', glob = '', searchPath = '.', 
 
 // ── Git（只读直接执行；commit 由 service 层按策略审批后调用） ────────────────
 
-async function gitRun(cwd, args, { timeoutMs = GIT_TIMEOUT_MS, indexFile, literalPaths = false } = {}) {
+export async function gitRun(cwd, args, { timeoutMs = GIT_TIMEOUT_MS, indexFile, literalPaths = false } = {}) {
   const env={...process.env};for(const key of Object.keys(env))if(/^GIT_/i.test(key))delete env[key];
   env.GIT_OPTIONAL_LOCKS='0';if(indexFile)env.GIT_INDEX_FILE=indexFile;
   // Git's clean/process filters execute commands even for status/diff. Enumerate

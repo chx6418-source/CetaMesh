@@ -60,7 +60,7 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
     }
   }
 
-  async function route({ decision, record, text, sourceText, requestId, signal }) {
+  async function route({ decision, record, text, sourceText, requestId, signal,attachmentManifest=[] }) {
     const requested = explicitDelegationTarget(sourceText ?? text);
     if (decision.agentIntent) {
       if (signal?.aborted) throw Object.assign(new Error('Chat operation cancelled'), { code: 'ABORTED' });
@@ -83,6 +83,10 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
       }
       const candidates = await selectProviders(record, task, decision, requested);
       const provider = candidates[0].provider;
+      // Only the local Chat service supplies this normalized manifest. It contains
+      // references, never file bytes; the reader rechecks the committed Session/Task.
+      const attachedText=attachmentManifest.some(r=>r.kind==='text'&&r.scope?.sessionId===record.id&&r.scope?.workspaceId===workspaceId);
+      if(attachmentManifest.length&&provider!=='cetamesh')throw capabilityError('ATTACHMENT_AGENT_UNSUPPORTED','当前外部 Agent 没有受控附件读取桥；请先申请将项目ZIP导入Workspace，或使用CetaMesh分析附件');
       let createdTask = false;
       if (!task) {
         const concurrent = taskRuntime.findByGoalWorkspace({ goal: text.slice(0, 2000), workspaceId });
@@ -174,7 +178,7 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
                   model: record.config.model !== legacyModel ? record.config.model : undefined,
                   reasoningEffort: record.config.reasoning } : {}),
                 grants: { capabilities: ['filesystem.read', 'filesystem.write', 'filesystem.search',
-                  'git.status', 'git.diff', 'memory.read', 'test.run', 'operation.read', 'operation.continue'] } },
+                  'git.status', 'git.diff', 'memory.read', 'test.run', 'operation.read', 'operation.continue',...(attachedText?['attachment.read']:[])] } },
               reason: index ? 'Smart project task safe reassignment after verified preflight failure' : 'Smart project task'
             }, { signal });
             if (result.status !== 'completed' || result.result?.accepted !== true) {

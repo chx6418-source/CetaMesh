@@ -20,7 +20,7 @@ export function createChannelDesktopControls({ channelService, bionicService } =
     return { status: ready ? 'ready' : running ? 'running' : raw.state ?? 'stopped',
       installed: knownBoolean(raw.installed), configured: knownBoolean(raw.configured),
       running, ready, authenticated, canSend: kind === 'qq' && ready && raw.canSend !== false,
-      accountId, lastError: errorView(raw.error ?? raw.lastError),
+      readiness:raw.readiness??null,activity:raw.activity??null,accountId, lastError: errorView(raw.error ?? raw.lastError),
       ...(Number(raw.processId) > 0 ? { processId: raw.processId } : {}) };
   }
 
@@ -68,7 +68,7 @@ export function createChannelDesktopControls({ channelService, bionicService } =
 
   const qq = Object.freeze({ health: () => health('qq'), start: action('qq', 'start'), stop: action('qq', 'stop'),
     reconnect: action('qq', 'reconnect'), detect: () => health('qq') });
-  const bionic = Object.freeze({ health: () => health('bionic'), start: action('bionic', 'start'), stop: action('bionic', 'stop') });
+  const bionic = Object.freeze({ health: () => health('bionic'), start: action('bionic', 'start'), stop: action('bionic', 'stop'),reconnect:action('bionic','reconnect') });
   const localServices = () => ({ snowluma: structuredClone(cache.qq), qq: structuredClone(cache.qq), bionic: structuredClone(cache.bionic) });
   localServices.actions = Object.freeze({ snowluma: qq, qq, bionic });
   localServices.refresh = async () => { await Promise.allSettled([health('qq'), health('bionic')]); return localServices(); };

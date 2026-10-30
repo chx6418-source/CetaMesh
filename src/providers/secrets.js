@@ -73,7 +73,8 @@ function publicEntry(provider, entry) {
     configured: true,
     hint: maskKey(entry.apiKey),
     baseUrl: entry.baseUrl ?? '',
-    updatedAt: entry.updatedAt ?? null
+    updatedAt: entry.updatedAt ?? null,
+    revision: typeof entry.revision==='string'?entry.revision:null
   };
 }
 
@@ -141,8 +142,11 @@ export function createProviderSecrets({ root, fileOps = fs } = {}) {
       : normalizeBaseUrl(baseUrl);
     document.providers[normalizedProvider] = {
       apiKey: normalizedKey,
+      revision: crypto.randomUUID(),
       ...(normalizedBaseUrl ? { baseUrl: normalizedBaseUrl } : {}),
-      updatedAt: new Date().toISOString()
+      // Credential-bound approvals need a distinct revision even under a frozen
+      // or rolled-back clock. Preserve the existing ISO metadata/storage format.
+      updatedAt: new Date(Math.max(Date.now(),(Date.parse(previous?.updatedAt)||0)+1)).toISOString()
     };
     writeDocument(document);
     return publicEntry(normalizedProvider, document.providers[normalizedProvider]);

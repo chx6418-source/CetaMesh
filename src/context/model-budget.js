@@ -25,16 +25,20 @@ export function calculateModelContextBudget({ provider, model, messages, tools =
       || typeof exact.tokenizer !== 'string' || !exact.tokenizer) invalid();
     inputTokens = exact.tokens; counting = 'exact'; estimator = exact.tokenizer;
   } else {
-    if (Array.isArray(messages) && messages.some(m => Array.isArray(m?.content)
-      && m.content.some(part => part?.type !== 'text'))) {
-      throw modelRuntimeError('MODEL_CONTEXT_COUNT_UNAVAILABLE', 'This model requires a modality-aware token counter before context preflight');
+    let imageTokens=0;
+    const countedMessages=structuredClone(messages);
+    for(const m of countedMessages??[])if(Array.isArray(m?.content))for(let i=0;i<m.content.length;i++){
+      const part=m.content[i];if(part?.type==='text')continue;const cap=provider.imageInputCapabilities?.(model);
+      const imageBound=part.image_url?.detail==='low'?cap?.lowDetailTokens:cap?.maxImageTokens;
+      if(part?.type!=='image_url'||!['low','auto','high','original'].includes(part.image_url?.detail)||cap?.supported!==true||!positive(imageBound))throw modelRuntimeError('MODEL_CONTEXT_COUNT_UNAVAILABLE','此模型缺少当前图像输入模式的预算信息');
+      imageTokens+=imageBound;m.content[i]={type:'text',text:'[bounded image input]'};
     }
     // Full serialization preserves tool IDs, continuation and schema text in accounting.
     // Extra framing is a safety allowance, not a claim about provider tokenizer internals.
-    inputTokens = Buffer.byteLength(JSON.stringify({ messages, tools }), 'utf8')
+    inputTokens = imageTokens+Buffer.byteLength(JSON.stringify({ messages:countedMessages, tools }), 'utf8')
       + 64 + (Array.isArray(messages) ? messages.length * 16 : 0)
       + (Array.isArray(tools) ? tools.length * 32 : 0);
-    counting = 'estimated'; estimator = 'utf8-conservative-v1';
+    counting = 'estimated'; estimator = imageTokens?'utf8-plus-declared-image-upper-bound-v1':'utf8-conservative-v1';
   }
   const remainingTokens = capacity.contextWindowTokens - reservedOutputTokens - inputTokens;
   return { status: remainingTokens < 0 ? 'exceeded' : 'within-budget', counting, estimator,

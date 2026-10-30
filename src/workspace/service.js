@@ -30,11 +30,12 @@ import {
   writeFile,
   applyWorkspaceChanges
 } from './tools.js';
+import { createGitProduct } from './git-product.js';
 import { recoverWorkspaceImports } from './transaction.js';
 
 const GIT_INFO_TTL_MS = 5000;
 
-export function createWorkspaceService({ stateDir, now = () => Date.now(), audit = () => {} } = {}) {
+export function createWorkspaceService({ stateDir, now = () => Date.now(), audit = () => {}, getTask, listTasks } = {}) {
   if (!stateDir || typeof stateDir !== 'string') {
     throw new Error('createWorkspaceService 需要 stateDir');
   }
@@ -97,6 +98,8 @@ export function createWorkspaceService({ stateDir, now = () => Date.now(), audit
     record(entry, 'user', 'git.commit', result.committed ? `${message}（${result.sha ?? 'no-sha'}）` : message);
     return result;
   }
+
+  const gitProduct = createGitProduct({ stateDir, registry, getTask, listTasks, record });
 
   const handlers = {
     // ── 管理 ──
@@ -194,6 +197,10 @@ export function createWorkspaceService({ stateDir, now = () => Date.now(), audit
       return result;
     },
 
+    'workspace.git.overview': async p => gitProduct.overview(requireWorkspace(p)),
+    'workspace.git.branch.create': async () => fail('GIT_APPROVAL_REQUIRED', 'Git branch creation must use Capability Broker approval'),
+    'workspace.git.worktree.create': async () => fail('GIT_APPROVAL_REQUIRED', 'Git worktree creation must use Capability Broker approval'),
+
     'workspace.git.status': async (p) => {
       const entry = requireWorkspace(p);
       const git = await gitInfo(entry, { refresh: true });
@@ -287,7 +294,21 @@ export function createWorkspaceService({ stateDir, now = () => Date.now(), audit
     }
   }
 
-  return { execute, describeWorkspace, applyChanges };
+  // Trusted in-process entry only. Transport approval flags cannot call this path.
+  async function executeApprovedGit({ method, params = {} } = {}) {
+    if (method === 'workspace.git.commit') {
+      const entry = requireWorkspace(params);
+      if (entry.settings?.policies?.gitCommit === 'deny') fail('GIT_COMMIT_DENIED', 'Workspace policy denies commits');
+      const selection = await prepareGitCommit(entry.root, params);
+      const result = await executeCommit(entry, { message: params.message, ...selection });
+      gitInfoCache.delete(entry.id);
+      return { status: 'committed', ...result };
+    }
+    if (!['workspace.git.branch.create', 'workspace.git.worktree.create'].includes(method)) fail('METHOD_NOT_FOUND', 'Unknown approved Git effect');
+    return gitProduct.create(requireWorkspace(params), params, { worktree: method === 'workspace.git.worktree.create' });
+  }
+
+  return { execute, executeApprovedGit, describeWorkspace, applyChanges };
 }
 
 export { WorkspaceBoundaryError, WorkspaceRegistryError, WorkspaceToolError };

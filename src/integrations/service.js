@@ -135,7 +135,7 @@ export function createIntegrationService({
     const local = (localServices?.() ?? {})[plugin.localService] ?? null;
     if (!local) return null;
     return {
-      status: local.status ?? 'not-checked', installed: typeof local.installed === 'boolean' ? local.installed : null,
+      readiness:local.readiness??null,activity:local.activity??null,status: local.status ?? 'not-checked', installed: typeof local.installed === 'boolean' ? local.installed : null,
       running: local.running === true, ready: local.ready === true,
       authenticated: local.authenticated === true, canSend: local.canSend === true, configured: typeof local.configured === 'boolean' ? local.configured : null, version: local.version ?? null,
       accountId: typeof local.accountId === 'string' ? local.accountId : null,

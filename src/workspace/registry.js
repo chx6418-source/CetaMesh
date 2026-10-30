@@ -96,7 +96,7 @@ export function createWorkspaceRegistry({ file, now = () => Date.now() } = {}) {
 
   return {
     /** 登记（或按 root 去重返回）一个工作区。root 会先经边界规范化校验。 */
-    create({ name, root, createIfMissing = false }) {
+    create({ name, root, createIfMissing = false, gitWorktree = null }) {
       // createIfMissing 支持产品里的"新建工作区目录"：先做危险形态静态检查
       // （绝不把目录先建进系统位置再拒绝），建完后再做完整的 canonicalizeRoot。
       if (createIfMissing && !fs.existsSync(String(root ?? ''))) {
@@ -131,7 +131,8 @@ export function createWorkspaceRegistry({ file, now = () => Date.now() } = {}) {
         lastOpenedAt: 0,
         settings: defaultSettings(),
         recentFiles: [],
-        artifacts: []
+        artifacts: [],
+        ...(gitWorktree ? { gitWorktree: { ...gitWorktree } } : {})
       };
       state.workspaces.push(entry);
       save();
@@ -164,6 +165,13 @@ export function createWorkspaceRegistry({ file, now = () => Date.now() } = {}) {
       return { ...entry };
     },
 
+    /** Trusted Git service relation, persisted in the existing Workspace registry. */
+    recordGitBranch(id, { taskId, branch, expectedHead }) {
+      const entry = requireEntry(id);
+      entry.gitBranches = [{ taskId, branch, baselineHead: expectedHead }, ...(entry.gitBranches ?? []).filter(item => item.branch !== branch)].slice(0, 200);
+      save();
+      return { ...entry };
+    },
     /** 从 CetaMesh 清单移除登记。绝不删除用户目录本身。 */
     remove(id) {
       const entry = requireEntry(id);

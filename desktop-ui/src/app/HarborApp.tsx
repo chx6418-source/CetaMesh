@@ -1,10 +1,15 @@
+import {GitWorkspace} from './GitWorkspace';
+import {ForgeTools} from './ForgeTools';
+import {BionicReadiness} from './BionicReadiness';
+import {useChatAttachments} from './ChatAttachments';
+import {AttachmentSettings,HistoryAttachments} from './AttachmentSettings';
 import { createAuthPanelController } from './AgentAuthController';
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router';
 import { createPortal } from 'react-dom';
 import { mergeChatHistorySnapshot, mergeLatestChatMessages, prependOlderChatMessages, recoverForwardHistory } from './chat-history';
 import { applyChatStreamUpdates, ChatRequestEpoch, ChatStreamRevision, pendingReplyVisible, type ChatStreamUpdate } from './chat-async-state';
-import { aboutClient, agentClient, approvalClient, bridge, chatClient, extensionSettingsClient, feedbackClient, hostClient, memoryClient, onboardingClient, openExternal, pluginClient, settingsClient, taskClient, updateClient, workspaceClient, workshopClient, type Agent, type AgentRuntimeProvider, type AgentRuntimeConfiguration, type AgentRuntimeInput, type AgentAuthStatus, type AgentConnectionEvidence, type DshConfiguration, type DshSelection, type DshPresetCatalog, type Approval, type ApprovalDecisionResult, type L2Grant, type DesktopEventData, type ChatMessage as ChatMessageDto, type ChatSession, type ExtensionSettingsDescription, type ExtensionSettingsSnapshot, type IntegrationSettings, type Memory, type Plugin, type ProviderSettingField, type SettingField, type Settings, type Task, type WorkshopProposal } from '../bridge/typed-client';
+import { productToolsClient, type Attachment, aboutClient, agentClient, approvalClient, bridge, chatClient, extensionSettingsClient, feedbackClient, hostClient, memoryClient, onboardingClient, openExternal, pluginClient, settingsClient, taskClient, updateClient, workspaceClient, workshopClient, type Agent, type AgentRuntimeProvider, type AgentRuntimeConfiguration, type AgentRuntimeInput, type AgentAuthStatus, type AgentConnectionEvidence, type DshConfiguration, type DshSelection, type DshPresetCatalog, type Approval, type ApprovalDecisionResult, type L2Grant, type DesktopEventData, type ChatMessage as ChatMessageDto, type ChatSession, type ExtensionSettingsDescription, type ExtensionSettingsSnapshot, type IntegrationSettings, type Memory, type Plugin, type ProviderSettingField, type SettingField, type Settings, type Task, type WorkshopProposal } from '../bridge/typed-client';
 import { Icon, type IconName } from '../components/icons';
 import { ArtifactCard } from '../components/product/cards';
 import { Button, IconButton, Input, normalizeSelectOptionLabel, SearchInput, Select, Tabs } from '../components/primitives/inputs';
@@ -384,7 +389,7 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
   const streamStatusFrameRef = useRef<number | null>(null);
   const streamUpdateRef = useRef<ChatStreamUpdate[]>([]);
   const seenMessageIdsRef = useRef<Set<string>>(new Set());
-  const pendingSendsRef = useRef(new Map<string, { text: string; attachments: { name: string; content: string; mimeType?: string }[] }>());
+  const pendingSendsRef = useRef(new Map<string, { text: string; attachments: Attachment[] }>());
   const previousStreamRef = useRef({ state: 'idle', text: '' });
 
   const refreshCatalog = useCallback(async () => {
@@ -662,10 +667,10 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
     }
   };
 
-  async function send(text: string, attachments: { name: string; content: string; mimeType?: string }[], clientMessageId: string) {
-    if (!session) return;
+  async function send(text: string, attachments: Attachment[], clientMessageId: string) {
+    if (!session) return false;
     const preflight = managedWorkspacePreflight(session.config.agentProvider ?? '', session.config.workspaceId ?? '', activeWorkspaceId);
-    if (preflight) { setError(preflight); return; }
+    if (preflight) { setError(preflight); return false; }
     const historyCursorBeforeSend = lastHistoryMessageIdRef.current;
     setError('');
     pendingSendsRef.current.set(clientMessageId, { text, attachments });
@@ -682,6 +687,7 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
       const message = messageOf(cause);
       setSendErrors(current => ({ ...current, [clientMessageId]: message }));
       setError(message);
+      return false;
     }
   }
   async function resumeChat(action: 'retry' | 'continue') {
@@ -753,7 +759,7 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
         }}>有新消息 · 跳到最新</Button> : null}
         render={renderTimelineItem}
       />
-      <div className="composer-dock"><ChatContextPanel key={session.id} task={linkedTask} memories={memories} approvals={approvals} onOpenMemory={onOpenMemory} /><ChatComposer busy={cancellable} models={providers} selectedModelKey={selectedModelKey} agentProviders={catalog?.agentProviders ?? []} selectedAgent={session.config.agentProvider ?? ''} workspaces={workspaces} workspaceId={session.config.workspaceId ?? ''} activeWorkspaceId={activeWorkspaceId} onWorkspaceChange={updateWorkspace} onModelChange={value => { try { const [provider, model] = JSON.parse(value) as [string, string]; void updateModel(provider, model); } catch { setError('无法识别所选模型。'); } }} onAgentChange={updateAgent} onSend={send} onStop={() => void chatClient.stop(session.id).then(load).catch(cause => setError(messageOf(cause)))} /></div>
+      <div className="composer-dock"><ChatContextPanel key={session.id} task={linkedTask} memories={memories} approvals={approvals} onOpenMemory={onOpenMemory} /><ChatComposer sessionId={session.id} busy={cancellable} models={providers} selectedModelKey={selectedModelKey} agentProviders={catalog?.agentProviders ?? []} selectedAgent={session.config.agentProvider ?? ''} workspaces={workspaces} workspaceId={session.config.workspaceId ?? ''} activeWorkspaceId={activeWorkspaceId} onWorkspaceChange={updateWorkspace} onModelChange={value => { try { const [provider, model] = JSON.parse(value) as [string, string]; void updateModel(provider, model); } catch { setError('无法识别所选模型。'); } }} onAgentChange={updateAgent} onSend={send} onStop={() => void chatClient.stop(session.id).then(load).catch(cause => setError(messageOf(cause)))} /></div>
     </section>
   </div>;
 }
@@ -798,7 +804,7 @@ export function UsageSummary({ usage, label = '本轮用量' }: { usage: ChatMes
 export function MessageBubble({ message, reference, streaming = false, sendError, onRetry }: { message: ChatMessageDto; reference?: { sessionId: string; messageId: string }; streaming?: boolean; sendError?: string; onRetry?(): void }) {
   const role = message.role === 'user' ? 'user' : 'assistant';
   const agentActivity = message.agentActivity;
-  return <article className={`chat-message ${role} ${streaming ? 'streaming' : ''}`}><div className="message-avatar">{role === 'assistant' ? <Icon name="sparkles" size={16} /> : '你'}</div><div className="message-body"><div className="message-meta"><strong>{role === 'assistant' ? 'CetaMesh' : '你'}</strong><span>{dateLabel(message.at)}</span>{streaming && <Badge tone="accent">生成中</Badge>}</div>{agentActivity && <div className={`agent-activity ${agentActivity.status}`} role="status"><Icon name={agentActivity.status === 'running' ? 'sparkles' : agentActivity.status === 'completed' ? 'check' : 'help'} size={15} /><span>{agentActivity.label}</span><strong>{agentActivityStatusLabel(agentActivity.status)}</strong></div>}{message.text ? <Markdown reference={reference}>{message.text}</Markdown> : <span className="muted">（没有文本内容）</span>}{message.attachments.length > 0 && <div className="message-attachments">{message.attachments.map(name => <span key={name}><Icon name="attach" size={13} />{name}</span>)}</div>}<ToolActivity tools={message.toolActivity} />{role === 'assistant' && !streaming && <UsageSummary usage={message.usage} />}{sendError && <div className="message-error" role="alert">{sendError}<Button compact variant="ghost" onClick={onRetry}>重试发送</Button></div>}{message.error && <p className="message-error" role="alert">{message.error}</p>}{message.cancelled && <small>本轮已停止</small>}</div></article>;
+  return <article className={`chat-message ${role} ${streaming ? 'streaming' : ''}`}><div className="message-avatar">{role === 'assistant' ? <Icon name="sparkles" size={16} /> : '你'}</div><div className="message-body"><div className="message-meta"><strong>{role === 'assistant' ? 'CetaMesh' : '你'}</strong><span>{dateLabel(message.at)}</span>{streaming && <Badge tone="accent">生成中</Badge>}</div>{agentActivity && <div className={`agent-activity ${agentActivity.status}`} role="status"><Icon name={agentActivity.status === 'running' ? 'sparkles' : agentActivity.status === 'completed' ? 'check' : 'help'} size={15} /><span>{agentActivity.label}</span><strong>{agentActivityStatusLabel(agentActivity.status)}</strong></div>}{message.text ? <Markdown reference={reference}>{message.text}</Markdown> : <span className="muted">（没有文本内容）</span>}{message.attachments.length > 0 && <div className="message-attachments">{message.attachments.map(name => <span key={name}><Icon name="attach" size={13} />{name}</span>)}</div>}{message.attachmentRefs?.length ? <HistoryAttachments files={message.attachmentRefs} sessionId={reference?.sessionId??''}/> : null}<ToolActivity tools={message.toolActivity} />{role === 'assistant' && !streaming && <UsageSummary usage={message.usage} />}{sendError && <div className="message-error" role="alert">{sendError}<Button compact variant="ghost" onClick={onRetry}>重试发送</Button></div>}{message.error && <p className="message-error" role="alert">{message.error}</p>}{message.cancelled && <small>本轮已停止</small>}</div></article>;
 }
 
 async function confirmAgentExecution(provider: string, workspaceId: string) {
@@ -824,15 +830,19 @@ export function ApprovalCard({ approval, onDecide, onReuse }: { approval: Approv
   return <Card className="approval-card"><div className="approval-icon"><Icon name="approval" size={20} /></div><div className="grow"><div className="row between"><strong>{approval.title}</strong><Badge tone="warning">需要处理</Badge></div><p>{approval.summary}</p>{approval.capability === 'agent.native.approve' && approval.details && <pre aria-label="原生工具参数" style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: '24rem', overflow: 'auto' }}>{approval.details}</pre>}<p>{approval.resources?.length ? "目标文件："+approval.resources.join("、") : ""}</p>{approval.expiresAt && <small>本次请求有效至 {dateLabel(approval.expiresAt)}</small>}<details><summary>权限详情</summary><span>{approval.capability} · 风险 {approval.risk}</span></details><div className="row approval-actions"><Button compact variant="ghost" onClick={() => onDecide(approval.id, false)}>拒绝</Button><Button compact variant="primary" onClick={() => onDecide(approval.id, true)}>批准一次</Button>{approval.reusableL2 && onReuse && <Button compact variant="ghost" onClick={()=>onReuse(approval.id)}>批准，并在 15 分钟内复用最多 3 次</Button>}</div></div></Card>;
 }
 
-export function ChatComposer({ busy, models, selectedModelKey, agentProviders, selectedAgent, workspaces, workspaceId, activeWorkspaceId, onWorkspaceChange, onModelChange, onAgentChange, onSend, onStop }: {
+export function ChatComposer({ sessionId = '', busy, models, selectedModelKey, agentProviders, selectedAgent, workspaces, workspaceId, activeWorkspaceId, onWorkspaceChange, onModelChange, onAgentChange, onSend, onStop }: {
   busy: boolean; models: { id: string; label: string; configured: boolean; models: { id?: string; name?: string; label?: string; displayName?: string; modelName?: string }[] }[];
   selectedModelKey: string; agentProviders: Agent[]; selectedAgent: string;
   workspaces: { id: string; name: string; status: string }[]; workspaceId: string; activeWorkspaceId: string | null;
   onWorkspaceChange(workspaceId: string): void; onModelChange(value: string): void; onAgentChange(provider: string): void;
-  onSend(text: string, attachments: { name: string; content: string; mimeType?: string }[], clientMessageId: string): void; onStop(): void;
+  sessionId?:string; onSend(text: string, attachments: Attachment[], clientMessageId: string): void|Promise<boolean|void>; onStop(): void;
 }) {
+  const attachmentDraft=useChatAttachments({sessionId,call:productToolsClient.call,disabled:busy,capabilityKey:selectedModelKey+'|'+selectedAgent});
+  const [sending,setSending]=useState(false);
+  const sendIdentity=useRef<string|null>(null);
   const [draft, setDraft] = useState('');
-  const [attachments, setAttachments] = useState<{ name: string; content: string; mimeType?: string }[]>([]);
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  useEffect(()=>{sendIdentity.current=null;},[attachments,attachmentDraft.files]);
   const [attachmentError, setAttachmentError] = useState('');
   const [picking, setPicking] = useState(false);
   const textarea = useRef<HTMLTextAreaElement>(null);
@@ -898,14 +908,14 @@ export function ChatComposer({ busy, models, selectedModelKey, agentProviders, s
     finally { setPicking(false); textarea.current?.focus(); }
   }
   const workspaceWarning = managedWorkspacePreflight(selectedAgent, workspaceId, activeWorkspaceId);
-  function submit() {
+  async function submit() {
     const text = draft.trim();
-    if (!text || busy || workspaceWarning) return;
-    onSend(text, attachments, crypto.randomUUID());
-    setDraft(''); setAttachments([]);
+    if ((!text&&!attachments.length&&!attachmentDraft.files.length)||busy||sending||attachmentDraft.pending||workspaceWarning)return;
+    setSending(true);sendIdentity.current??=crypto.randomUUID();
+    try{const accepted=await onSend(text,[...attachments,...attachmentDraft.files],sendIdentity.current);if(accepted===false)return;setDraft(current=>current.trim()===text?'':current);setAttachments(current=>current.filter(item=>!attachments.includes(item)));const sentRefs=new Set(attachmentDraft.files.map(f=>f.ref));attachmentDraft.setFiles(current=>current.filter(f=>!sentRefs.has(f.ref)));sendIdentity.current=null;}catch(error){setAttachmentError(messageOf(error));}finally{setSending(false);}
   }
-  return <div className="chat-composer"><div className="composer-field">
-    <textarea ref={textarea} aria-label="输入消息" placeholder="告诉 CetaMesh 你想做什么。" value={draft} rows={1} onChange={event => setDraft(event.target.value)} onKeyDown={event => {
+  return <div className="chat-composer" onPaste={attachmentDraft.onPaste} onDrop={attachmentDraft.onDrop} onDragOver={attachmentDraft.onDragOver}><div className="composer-field">{attachmentDraft.ui}
+    <textarea ref={textarea} aria-label="输入消息" placeholder="告诉 CetaMesh 你想做什么。" value={draft} rows={1} onChange={event => {setDraft(event.target.value);sendIdentity.current=null;}} onKeyDown={event => {
       if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing && event.keyCode !== 229) { event.preventDefault(); submit(); }
     }} />
     <div className="composer-bottom">
@@ -917,7 +927,7 @@ export function ChatComposer({ busy, models, selectedModelKey, agentProviders, s
         </div>
       </div>
       <div className="composer-right"><div className="composer-model"><Select label="选择模型" value={selectedModelKey} onChange={event => onModelChange(event.target.value)} disabled={busy || !modelChoices.length}>{modelChoices.length ? modelChoices.map(choice => <option key={choice.value} value={choice.value} disabled={choice.disabled}>{choice.label}</option>) : <option value="">暂无已配置模型</option>}</Select></div>
-        <button type="button" className="composer-submit" aria-label={busy ? '停止生成' : '发送消息'} title={busy ? '停止生成' : '发送消息'} onClick={busy ? onStop : submit} disabled={!busy && (!draft.trim() || Boolean(workspaceWarning))}>{busy ? <Icon name="square" size={17} /> : <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6" /></svg>}</button>
+        <button type="button" className="composer-submit" aria-label={busy ? '停止生成' : '发送消息'} title={busy ? '停止生成' : '发送消息'} onClick={busy ? onStop : submit} disabled={!busy && ((!draft.trim()&&!attachments.length&&!attachmentDraft.files.length)||sending||attachmentDraft.pending||Boolean(workspaceWarning))}>{busy ? <Icon name="square" size={17} /> : <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6" /></svg>}</button>
       </div>
     </div>
     {attachments.length > 0 && <div className="attachment-list">{attachments.map((file, index) => <span key={file.name + '-' + index}><Icon name="file" size={13} />{file.name}<button type="button" aria-label={'移除 ' + file.name} onClick={() => setAttachments(current => current.filter((_, item) => item !== index))} disabled={busy}><Icon name="close" size={13} /></button></span>)}</div>}
@@ -1327,6 +1337,7 @@ function WorkPage({ workspaces, activeWorkspaceId, onRefreshWorkspaces, reviewTa
     <div className="row between work-controls"><Tabs items={[{ id: '', label: `全部 ${counts.all}` }, { id: 'running', label: `运行中 ${counts.working}` }, { id: 'waiting', label: `待处理 ${counts.waiting}` }, { id: 'completed', label: `已完成 ${counts.completed}` }]} selected={filter} onChange={setFilter} label="按任务状态筛选" /><SearchInput label="搜索任务" placeholder="搜索任务" value={query} onChange={event => setQuery(event.target.value)} /></div>
     {loading && !tasks.length ? <LoadingState label="正在读取任务…" /> : tasks.length ? <WorkTaskList key={query + '|' + filter} tasks={tasks} workspaces={workspaces} providers={handoffProviders} historyInitiallyOpen={Boolean(query || filter)} onOpen={task => void openTask(task)} onAction={(task, action) => void taskAction(task, action)} /> : !error && <EmptyNotice icon="work" title={query || filter ? '没有匹配的任务' : '还没有任务'} detail="你可以在这里创建任务并查看 Core 与 Agent 的执行进度。" action={<Button variant="primary" icon="add" onClick={beginCreateTask}>新建任务</Button>} />}
     <WorkshopInbox providers={handoffProviders} />
+    <details><summary>Git 项目管理</summary><GitWorkspace call={productToolsClient.call} workspaces={workspaces} activeWorkspaceId={activeWorkspaceId} onWorkspaceChanged={onRefreshWorkspaces} onOpenTask={id=>void openRelatedTask(id)}/></details>
     <div className="section-heading page-section-heading"><h2>最近工作区</h2><div className="row"><Input aria-label="工作区名称" placeholder="工作区名称（可选）" value={workspaceName} onChange={event => setWorkspaceName(event.target.value)} /><Button compact icon="add" onClick={() => void addWorkspace()} disabled={workspaceBusy}>{workspaceBusy ? '添加中…' : '添加工作区'}</Button></div></div>
     {workspaceError && <ErrorNotice error={workspaceError} />}{workspaces.length ? <div className="workspace-grid">{workspaces.map(workspace => <Card className="workspace-card" key={workspace.id}><div className="workspace-badge">CM</div><div className="workspace-card-body"><strong>{workspace.name}</strong><p>{workspace.status} · 最近活动 {relativeLabel(workspace.lastActivity)}</p></div><StatusBadge value={workspace.status} /></Card>)}</div> : <Surface className="workspace-empty"><p className="muted">尚未登记工作区。添加工作区时会使用 Windows 原生文件夹选择器。</p></Surface>}
     <Sheet open={taskSheet} title="新建任务" onClose={() => {taskNavigationRef.current+=1;setTaskSheet(false);}}><TaskCreateForm key={taskCreateEpoch} activeWorkspaceId={activeWorkspaceId} workspaces={workspaces} providers={handoffProviders} onCreated={task=>showCreatedTask(task,taskCreateEpoch)} /></Sheet>
@@ -2228,6 +2239,7 @@ function PluginsPage() {
       </section>}
       <section><h3>更新说明</h3>{selectedPlugin.changelog.length ? <ul>{selectedPlugin.changelog.map((line, index) => <li key={`${index}-${line}`}>{line}</li>)}</ul> : <p className="muted">没有更新说明。</p>}</section><div className="row detail-actions">{selectedPlugin.status === 'update' ? <Button variant="primary" disabled={busy === selectedPlugin.id} onClick={() => void stage(selectedPlugin)}>查看更新并安装</Button> : !selectedPlugin.installed ? <Button variant="primary" disabled={busy === selectedPlugin.id} onClick={() => void stage(selectedPlugin)}>查看权限并安装</Button> : selectedPlugin.enabled ? <Button disabled={busy === selectedPlugin.id} onClick={() => void pluginAction(selectedPlugin, 'disable')}>停用</Button> : <Button variant="primary" disabled={busy === selectedPlugin.id} onClick={() => void reviewEnable(selectedPlugin)}>查看权限并启用</Button>}{selectedPlugin.installed && <Button variant="danger" disabled={busy === selectedPlugin.id} onClick={() => void pluginAction(selectedPlugin, 'uninstall')}>卸载</Button>}</div></div>}</Sheet>
     <Sheet open={Boolean(review)} title="安装与权限审查" onClose={() => setReview(null)}>{review && <div className="review-detail"><Badge tone={review.trust === 'publisher-signature-verified' ? 'success' : 'warning'}>{review.trust || '来源待核验'}</Badge><h3>{review.action === 'update' ? '更新前查看权限' : review.action === 'install' ? '安装前查看权限' : '启用前查看权限'}</h3><p>仅继续本次明确选择的操作。运行时能力仍需 Core 按策略审批。</p>{review.summary.length ? <section><h4>操作说明</h4><ul>{review.summary.map((line, index) => <li key={`${index}-${line}`}>{line}</li>)}</ul></section> : null}<section><h4>请求的权限</h4>{review.permissions.length ? <ul>{review.permissions.map(permission => <li key={permission}>{permission}</li>)}</ul> : <p>没有声明额外权限。</p>}</section>{!review.installable && <ErrorNotice error="Core 尚未允许该插件安装或启用。请先处理完整性或兼容性问题。" />}<div className="row detail-actions"><Button onClick={() => setReview(null)}>取消</Button><Button variant="primary" disabled={!review.installable || busy === review.id} onClick={() => void confirmReview()}>{busy === review.id ? '正在处理…' : review.action === 'update' ? '确认更新' : review.action === 'install' ? '确认安装' : '确认启用'}</Button></div></div>}</Sheet>
+    <details><summary>GitHub / GitCode 开发工具</summary><ForgeTools call={productToolsClient.call}/></details>
     <Sheet open={Boolean(selectedIntegration)} title={selectedIntegration?.name ?? '集成设置'} onClose={() => setSelectedIntegration(null)}>
       {selectedIntegration && <div className="plugin-detail">
         <StatusBadge value={selectedIntegration.enabled ? 'enabled' : 'disabled'} available={selectedIntegration.available} />
@@ -2248,7 +2260,7 @@ function PluginsPage() {
               : <Button compact variant="primary" disabled={busy.startsWith('snowluma:') || selectedIntegration.localService.installed === false || selectedIntegration.localService.configured === false} title={!selectedIntegration.localService.configured ? '先保存 OneBot 地址' : undefined} onClick={() => void manageSnowLuma('start')}>启动</Button>}
           </div>
         </section>}
-        {selectedIntegration.id === 'cetamesh-bionic-chat' && selectedIntegration.localService && <section><h3>Bionic 社交运行时</h3><p>{selectedIntegration.localService.running ? '运行中' : '已停止'} · QQ 基础传输具有独立生命周期。</p><div className="row detail-actions">{(['health','start','stop'] as const).map(action => <Button compact key={action} onClick={() => void pluginClient.integrationAction('bionic', action).then(async result => { setNotice(result.pending ? '操作等待审批' : '状态已更新'); setSelectedIntegration(await pluginClient.integrationSettings('cetamesh-bionic-chat')); await refreshApprovals(); }).catch(cause => setError(messageOf(cause)))}>{action === 'health' ? '健康检查' : action === 'start' ? '启动' : '停止'}</Button>)}</div></section>}
+        {selectedIntegration.id === 'cetamesh-bionic-chat' && selectedIntegration.localService && <section><h3>Bionic 社交运行时</h3><BionicReadiness readiness={selectedIntegration.localService.readiness} activity={selectedIntegration.localService.activity}/><p>{selectedIntegration.localService.running ? '运行中' : '已停止'} · QQ 基础传输具有独立生命周期。</p><div className="row detail-actions">{(['health','start','stop','reconnect'] as const).map(action => <Button compact key={action} onClick={() => void pluginClient.integrationAction('bionic', action).then(async result => { setNotice(result.pending ? '操作等待审批' : '状态已更新'); setSelectedIntegration(await pluginClient.integrationSettings('cetamesh-bionic-chat')); await refreshApprovals(); }).catch(cause => setError(messageOf(cause)))}>{action === 'health' ? '健康检查' : action === 'start' ? '启动' : action==='reconnect'?'安全重连':'停止'}</Button>)}</div></section>}
         {selectedIntegration.inventory && <Surface className="bionic-inventory">
           <div className="section-heading"><h3>仿生聊天工具清单</h3><small>按当前 Integration Registry 状态统计</small></div>
           <div className="bionic-inventory-counts">
@@ -2410,10 +2422,11 @@ export function SettingsPage({ theme, onThemeChange, onOpenPlugins }: { theme: '
   const settingPages = [
     { id: 'general', label: '常规' }, { id: 'models', label: '模型' }, { id: 'agents', label: 'Agent' },
     { id: 'extensions', label: '插件与 MCP' }, { id: 'memory', label: '记忆' }, { id: 'workspace', label: '工作区' }, { id: 'devices', label: '设备' },
-    { id: 'appearance', label: '外观' }, { id: 'security', label: '隐私与安全' }, { id: 'updates', label: '更新' }, { id: 'advanced', label: '高级' }
+    {id:'attachments',label:'附件与存储'}, { id: 'appearance', label: '外观' }, { id: 'security', label: '隐私与安全' }, { id: 'updates', label: '更新' }, { id: 'advanced', label: '高级' }
   ];
   if (activeSection === 'about') return <AboutPage />;
   function renderSettingsContent() {
+    if(activeSection==='attachments')return <AttachmentSettings/>;
     if (activeSection === 'appearance') return <div className="theme-options">{(['system', 'light', 'dark'] as const).map(value => <button key={value} className={`theme-choice ${theme === value ? 'selected' : ''}`} aria-pressed={theme === value} onClick={() => void onThemeChange(value)}><span className={`theme-preview theme-${value}`}><i /><i /><i /></span><span>{value === 'system' ? '跟随系统' : value === 'light' ? '浅色' : '深色'}</span>{theme === value && <Icon name="check" size={16} />}</button>)}</div>;
     const groups = activeSection === 'general' ? descriptions.filter(section => section.section === 'general')
       : activeSection === 'extensions' ? sections.filter(section => section.section === 'extensions')

@@ -2,6 +2,7 @@ import { evidenceBinding, evidenceSummary, sanitizeToolEvidence, EVIDENCE_SOURCE
 // Managed Agent: Model inference can request capabilities, but never supplies authority.
 // All file, memory, Git and process access goes through the injected Capability Broker.
 import crypto from 'node:crypto';
+import {validateModelImage} from '../desktop/image-validation.js';
 import { projectMessageBudget } from '../context/message-budget.js';
 import { accumulateModelUsage } from '../model/usage.js';
 import { safeModelErrorDetails } from '../model/types.js';
@@ -33,6 +34,14 @@ function abortable(promise, signal) {
 }
 function promptText(content) {
   const blocks = normalizePromptContent(content);
+  if(blocks.some(block=>block.type==='image_url')){
+    let total=0;
+    if(blocks.length>40)fail('INVALID_PARAMS','Too many content blocks');
+    for(const block of blocks){if(block.type==='text'&&typeof block.text==='string'&&block.text.length<=MAX_TEXT)continue;
+      const url=block.image_url?.url;if(block.type!=='image_url'||typeof url!=='string'||!/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(url))fail('INVALID_PARAMS','Only Core-prepared image inputs are supported');
+      const b=Buffer.from(url.slice(url.indexOf(',')+1),'base64');total+=b.length;validateModelImage(b);if(total>4*1024*1024)fail('INVALID_PARAMS','Image budget exceeded');}
+    return copy(blocks);
+  }
   if (blocks.some((block) => block.type !== 'text' || typeof block.text !== 'string')) fail('INVALID_PARAMS', 'Managed Agent accepts text content only');
   const value = blocks.map((block) => block.text).join('\n');
   if (!value.trim() || value.length > MAX_TEXT) fail('INVALID_PARAMS', 'Agent prompt exceeds the text limit');
@@ -418,6 +427,7 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
         if (s.archived || closed) fail('SESSION_ARCHIVED', 'Managed Agent session is archived');
         if (!['queue', 'interrupt'].includes(mode)) fail('INVALID_PARAMS', 'Unsupported managed Agent send mode');
         const body = promptText(content);
+        if(Array.isArray(body)&&modelRuntime.imageInputCapabilities?.(s.modelProvider||null,s.model||null)?.supported!==true)fail('MODEL_IMAGE_UNSUPPORTED','Managed Agent model does not support verified image input');
         if (s.queue.length >= 10) fail('AGENT_QUEUE_FULL', 'Managed Agent turn queue is full');
         if (mode === 'interrupt') s.controller?.abort();
         const id = crypto.randomUUID(); s.queue.push({ id, content: body, phase: ['user', 'bootstrap', 'system', 'approval'].includes(phase) ? phase : 'user', runId: typeof runId === 'string' && runId ? runId : typeof requestId === 'string' && requestId ? requestId : id });

@@ -28,6 +28,7 @@ import { aggregateModelUsage, normalizeModelUsage } from '../model/usage.js';
 // 会话独占假设：一个 Chat 会话同时只允许一个回合（TURN_BUSY）；
 // 与 DSH 网页端并发使用同一会话时事件可能混流，属已知限制。
 import fs from 'node:fs';
+import {createAttachmentStore} from './attachment-store.js';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fitsIpcResponse, requireIpcItem } from '../control/response-budget.js';
@@ -149,6 +150,7 @@ export function createChatService({
     return selectableAgentProviders.has(String(configured)) ? String(configured) : null;
   }
   const dir = path.join(stateDir, 'desktop-chat');
+  const attachmentStore=createAttachmentStore({stateDir});
   const sessionsFile = path.join(dir, 'sessions.json');
   const historyDir = path.join(dir, 'history');
   const baseConfig = {
@@ -281,14 +283,18 @@ export function createChatService({
 
   function attachmentFingerprint(attachments) {
     const details = attachments.map(item => ({ name: item.name, mimeType: item.mimeType ?? null,
-      contentFingerprint: contentFingerprint(item.content) }));
+      contentFingerprint: item.ref ? item.ref+':'+item.sha256 : contentFingerprint(item.content) }));
     return crypto.createHash('sha256').update(JSON.stringify(details), 'utf8').digest('hex');
   }
 
-  function normalizeAttachments(value) {
-    const rows = Array.isArray(value) ? value.slice(0, MAX_ATTACHMENTS) : [];
+  function normalizeAttachments(value,sessionId) {
+    if(value!==undefined&&!Array.isArray(value))throw chatError('INVALID_PARAMS','附件列表无效');
+    const rows=Array.isArray(value)?value:[];
+    if(rows.length>attachmentStore.limits().count)throw chatError('ATTACHMENT_COUNT_LIMIT','附件数量超过设置上限');
+    attachmentStore.validateSelection(sessionId,rows.filter(r=>r?.ref).map(r=>r.ref));
     let totalChars = 0;
     const attachments = rows.map((attachment, index) => {
+      if(attachment?.ref)return {...attachmentStore.describe(sessionId,attachment.ref),content:''};
       const name = requireText(String(attachment?.name ?? 'attachment'), `附件 ${index + 1} 名称`, 200);
       const content = requireText(String(attachment?.content ?? ''), `附件「${name}」内容`, MAX_ATTACHMENT_CHARS);
       totalChars += content.length;
@@ -304,6 +310,15 @@ export function createChatService({
     return attachments;
   }
 
+  function validateImageRoute(record,list) {
+    if(list.some(r=>r.ref)){
+      if([record.config.agentProvider,record.runtimeProvider].some(p=>p&&!['none','cetamesh'].includes(p)))throw chatError('ATTACHMENT_AGENT_UNSUPPORTED','当前外部 Agent 没有已验证的受控附件桥；请使用 CetaMesh 分析，或先申请导入Workspace');
+    }
+    if(!list.some(r=>r.kind==='image')&&!readHistory(record.id).some(m=>m.attachmentRefs?.some(r=>r.kind==='image')))return;
+    if([record.config.agentProvider,record.runtimeProvider].some(p=>p&&!['none','cetamesh'].includes(p)))throw chatError('IMAGE_AGENT_UNSUPPORTED','此外部 Agent 没有经授权的图片交接协议；请选择支持视觉的 CetaMesh 模型');
+    const cap=modelRuntime?.imageInputCapabilities?.(record.config.modelProvider,modelForRuntime(record));
+    if(cap?.supported!==true)throw chatError('MODEL_IMAGE_UNSUPPORTED','当前 Provider/模型未验证图片输入能力，请选择视觉模型；图片未向此模型发送');
+  }
   function persistAttachmentPayload(sessionId, messageId, attachments, fingerprint) {
     if (!attachments.length) return;
     const file = attachmentPayloadFile(sessionId, messageId);
@@ -321,7 +336,7 @@ export function createChatService({
     const payload = readJsonFile(attachmentPayloadFile(sessionId, message.id), { missing: null, maxBytes: MAX_ATTACHMENT_TOTAL_CHARS * 4 });
     if (!Array.isArray(payload?.attachments)) throw chatError('ATTACHMENTS_UNAVAILABLE', '本地附件正文缺失，无法安全重试');
     const attachments = payload.attachments.map(item => ({ name: String(item?.name ?? ''),
-      content: String(item?.content ?? ''), ...(item?.mimeType ? { mimeType: String(item.mimeType) } : {}) }));
+      content: String(item?.content ?? ''), ...(item?.ref?{...attachmentStore.describe(sessionId,item.ref),content:''}:{}), ...(item?.mimeType ? { mimeType: String(item.mimeType) } : {}) }));
     const fingerprints = payload.attachments.map(item => String(item?.contentFingerprint ?? ''));
     if (attachments.length !== names.length
       || attachments.some((item, index) => item.name !== names[index] || fingerprints[index] !== contentFingerprint(item.content))
@@ -462,7 +477,7 @@ export function createChatService({
       onEvent?.({ event: 'chat.warning', data: { sessionId, code: error?.code ?? 'CHAT_HISTORY_CLEANUP_FAILED',
         message: '会话已删除，但本地历史文件未能清理。' } });
     }
-    try { removeAttachmentPayloadSession(record.id); }
+    try { removeAttachmentPayloadSession(record.id);attachmentStore.removeSession(record.id); }
     catch (error) {
       onEvent?.({ event: 'chat.warning', data: { sessionId, code: error?.code ?? 'ATTACHMENT_CLEANUP_FAILED',
         message: '会话已删除，但本地附件正文未能清理。' } });
@@ -1284,6 +1299,8 @@ export function createChatService({
    * 尾部 user 消息就是当前 prompt，需去重，避免同一消息在载荷里出现两次。
    */
   function buildModelMessages(recordId, promptText, productContext = null, omitHistoryMessageId = null) {
+    const record=sessionOrThrow(recordId);
+    const imageDetail=modelRuntime?.imageInputCapabilities?.(record.config.modelProvider,modelForRuntime(record))?.preferredDetail??'low';
     const history = readHistory(recordId);
     const prior = history.length > 0 && history[history.length - 1]?.role === 'user'
       ? history.slice(0, -1)
@@ -1302,16 +1319,19 @@ export function createChatService({
       const text = typeof message.text === 'string' ? message.text : '';
       const hasProtocol = message.role === 'assistant'
         && (message.modelContinuation || message.modelMessages?.length);
-      if (!text.trim() && !hasProtocol) continue;
+      if (!text.trim() && !hasProtocol && !message.attachmentRefs?.length) continue;
       // Protocol-private tool pairs/continuation never enter public Chat history.
       if (message.role === 'assistant' && Array.isArray(message.modelMessages)) {
         messages.push(...structuredClone(message.modelMessages));
       }
-      messages.push({ role: message.role, content: text,
+      const parts=message.role==='user'&&message.attachmentRefs?.length?attachmentStore.modelParts(recordId,message.attachmentRefs.map(r=>r.ref),{detail:imageDetail}):[];
+      messages.push({ role: message.role, content: parts.length?[{type:'text',text},...parts]:text,
         ...(message.role === 'assistant' && message.modelContinuation
           ? { modelContinuation: structuredClone(message.modelContinuation) } : {}) });
     }
-    messages.push({ role: 'user', content: promptText });
+    const current=history.find(m=>m.id===omitHistoryMessageId)??history.findLast(m=>m.role==='user');
+    const parts=current?.attachmentRefs?.length?attachmentStore.modelParts(recordId,current.attachmentRefs.map(r=>r.ref),{detail:imageDetail}):[];
+    messages.push({ role: 'user', content: parts.length?[{type:'text',text:promptText},...parts]:promptText });
     return projectMessageBudget(messages).messages;
   }
 
@@ -1552,7 +1572,10 @@ export function createChatService({
     };
     const done = (async () => {
       try {
-        const routePromise = Promise.resolve().then(() => platformRoute({ decision: routing, record, text: promptText, sourceText: sourceText ?? promptText,
+        const refs=(readHistory(record.id).findLast(m=>m.role==='user')?.attachmentRefs??[]).filter(r=>r.kind!=='image').map(r=>({ref:r.ref,name:r.name,kind:r.kind,size:r.size,scope:{sessionId:record.id,workspaceId:record.config.workspaceId??null}}));
+        const referenceManifest=refs.length?'\n[CetaMesh 本机附件引用清单；不包含文件正文，也不授予读取权限。只有当前 Task/Workspace 获授权的 attachment.read 可按需读取文本；ZIP 需要 Owner 批准导入。]\n'+JSON.stringify(refs):'';
+        const routePromise = Promise.resolve().then(() => platformRoute({ decision: routing, record, text: promptText+referenceManifest, sourceText: sourceText ?? promptText,
+          attachmentManifest:refs,
           requestId: operation.requestId,
           signal: controller.signal }));
         // A provider may finish creating a Session after the Chat has been cancelled.
@@ -1669,6 +1692,7 @@ export function createChatService({
       : modelRuntime && !explicitlySelectedProvider
         ? { resolvedRoute: 'dsh', fallbackReason: 'no-configured-model-provider' }
         : null;
+    if(readHistory(record.id).findLast(m=>m.role==='user')?.attachmentRefs?.length)throw chatError('ATTACHMENT_DELIVERY_UNSUPPORTED','此运行时没有受控附件桥，请配置 Model Provider、使用 CetaMesh 或申请导入Workspace');
     return startDshTurn(record, state, promptText);
   }
 
@@ -1676,13 +1700,15 @@ export function createChatService({
   async function send({ id, text, attachments, clientMessageId } = {}, signal = undefined) {
     const record = sessionOrThrow(id);
     if (signal?.aborted) throw chatError('INVOKE_CANCELLED', 'Chat 请求在受理前已取消');
-    const content = requireText(text, '消息内容', MAX_PROMPT_CHARS);
+    const content = typeof text==='string'&&!text.trim()&&Array.isArray(attachments)&&attachments.length ? '' : requireText(text, '消息内容', MAX_PROMPT_CHARS);
     const state = runtimeOf(record.id);
     if (state.configChangeInFlight) throw chatError('CONFIG_BUSY', '当前会话正在应用配置变更');
     let promptText = content;
-    const list = normalizeAttachments(attachments);
+    const list = normalizeAttachments(attachments,record.id);
+    if(list.some(r=>r.kind==='image')&&explicitDelegationTarget(content))throw chatError('IMAGE_AGENT_UNSUPPORTED','外部 Agent 图片传递尚未获能力与授权验证，请先用 CetaMesh 视觉模型分析');
+    validateImageRoute(record,list);
     for (const attachment of list) {
-      promptText += `\n\n[附件 ${attachment.name}]\n${attachment.content}`;
+      if(!attachment.ref)promptText += `\n\n[附件 ${attachment.name}]\n${attachment.content}`;
     }
     const attachmentHash = attachmentFingerprint(list);
     const messageId = clientMessageId === undefined || clientMessageId === null || clientMessageId === ''
@@ -1718,10 +1744,11 @@ export function createChatService({
     if (state.turn) throw chatError('TURN_BUSY', '当前会话有回合进行中，请先停止或等待完成');
     const sessionAttachmentChars = history.reduce((total, message) => total + Math.max(0, Number(message.attachmentSizeChars) || 0), 0);
     const attachmentSizeChars = list.reduce((total, item) => total + item.content.length, 0);
-    if (sessionAttachmentChars + attachmentSizeChars > MAX_SESSION_ATTACHMENT_CHARS) {
-      throw chatError('ATTACHMENT_STORAGE_LIMIT', '此会话的本地附件已达到 16 MiB 上限，请删除旧会话后继续');
+    if (sessionAttachmentChars + attachmentSizeChars > attachmentStore.limits().storageMiB*1024*1024) {
+      throw chatError('ATTACHMENT_STORAGE_LIMIT', '附件存储达到设置配额，请清理不再需要的附件');
     }
     const userMessage = { id: messageId, role: 'user', text: content, at: now(), attachments: list.map(item => item.name),
+      attachmentRefs:list.filter(item=>item.ref).map(({ref,name,kind,size,mimeType,quality,modelRef})=>({ref,name,kind,size,mimeType,quality,modelRef})),
       attachmentFingerprint: attachmentHash, attachmentFingerprints: list.map(item => contentFingerprint(item.content)), attachmentSizeChars };
     try {
       persistAttachmentPayload(record.id, messageId, list, attachmentHash);
@@ -1770,7 +1797,8 @@ export function createChatService({
     const attachments = readAttachmentPayload(record.id, last);
     let promptText = last.text;
     // retry 只重发内容，不重复落盘 user 消息（同一条用户消息的新一次尝试）。
-    for (const attachment of attachments) promptText += `\n\n[附件 ${attachment.name}]\n${attachment.content}`;
+    validateImageRoute(record,attachments);
+    for (const attachment of attachments) if(!attachment.ref)promptText += `\n\n[附件 ${attachment.name}]\n${attachment.content}`;
     const accepted = await startTurn(record, state, promptText, { attachments: last.attachments ?? [], sourceText: last.text, retryMessageId: last.id });
     return { userMessageId: last.id, ...(accepted?.requestId ? { requestId: accepted.requestId } : {}) };
   }
@@ -1995,7 +2023,11 @@ export function createChatService({
     pendingUiDeltas.delete(record.id);
     onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: 'starting', requestId, reset: true, toolActivity: [], agentActivity } });
     try {
-      if ((record.taskId || explicitDelegationTarget(sourceText ?? promptText)) && platformRoute && agentProviderId !== AGENT_PROVIDER_DISABLED) {
+      const current=readHistory(record.id).find(m=>m.id===retryMessageId)??readHistory(record.id).findLast(m=>m.role==='user');
+      if(current?.attachmentRefs?.some(r=>r.kind==='image')) {
+        validateImageRoute(record,current.attachmentRefs);
+        await startModelOrDshTurn(record,state,promptText,{attachments,sourceText,retryMessageId,skipPlatformRoute:true,routingOverride:{class:'image-analysis',route:'model',agentIntent:false,capabilityIntent:false}});
+      } else if ((record.taskId || explicitDelegationTarget(sourceText ?? promptText)) && platformRoute && agentProviderId !== AGENT_PROVIDER_DISABLED) {
         await startModelOrDshTurn(record, state, promptText, { attachments, sourceText, forceProject: true, retryMessageId });
       } else if (agentProviderId === 'cetamesh' && platformRoute) {
         await startModelOrDshTurn(record, state, promptText, { attachments, sourceText, forceProject: true, retryMessageId });
@@ -2248,6 +2280,14 @@ export function createChatService({
   loadStore();
 
   const handlers = {
+    'chat.attachment.list':p=>{sessionOrThrow(p?.id);const published=new Set(readHistory(p.id).flatMap(m=>(m.attachmentRefs??[]).map(r=>r.ref)));return {files:attachmentStore.list(p.id).filter(r=>r.status==='ready'&&!r.originalRef&&!published.has(r.ref)&&(r.kind!=='image'||r.modelRef))};},
+    'chat.attachment.limits':()=>attachmentStore.limits(),
+    'chat.attachment.limits.set':p=>attachmentStore.setLimits(p),
+    ...Object.fromEntries(['begin','chunk','finish','read','derive'].map(action=>['chat.attachment.'+action,p=>{sessionOrThrow(p?.id);return attachmentStore[action](p.id,p);}])),
+    'chat.attachment.describe':p=>{sessionOrThrow(p?.id);return attachmentStore.describe(p.id,p.ref);},
+    'chat.attachment.remove':p=>{sessionOrThrow(p?.id);return attachmentStore.remove(p.id,p.ref);},
+    'chat.attachment.cleanup':()=>attachmentStore.cleanup(),
+    'chat.attachment.capabilities':p=>{const r=sessionOrThrow(p?.id);return {...(modelRuntime?.imageInputCapabilities?.(r.config.modelProvider,modelForRuntime(r))??{supported:false,status:'unknown'}),externalAgent:!!r.config.agentProvider&&!['none','cetamesh'].includes(r.config.agentProvider)};},
     'chat.sessions.list': (params) => ({ sessions: listSessions(params ?? {}) }),
     'chat.sessions.create': (params) => createSession(params ?? {}),
     'chat.sessions.rename': (params) => renameSession(params ?? {}),
@@ -2271,7 +2311,13 @@ export function createChatService({
   };
 
   return {
-    prepareTaskContext, prepareTaskHandoff, synchronizeTaskAssignment,
+    readScopedAttachment({taskId,workspaceId,ref,offset=0,maxBytes=16000}) {
+      const record=[...sessions.values()].find(r=>r.taskId===taskId&&r.config.workspaceId===workspaceId&&readHistory(r.id).some(m=>m.attachmentRefs?.some(a=>a.ref===ref)));
+      if(!record)throw chatError('ATTACHMENT_NOT_AUTHORIZED','此附件不属于当前 Task 与 Workspace 的已提交消息');
+      const meta=attachmentStore.describe(record.id,ref);if(meta.kind!=='text')throw chatError('ATTACHMENT_PROCESSOR_REQUIRED','此能力只读取文本；图像由视觉模型处理，项目ZIP需要Owner批准导入');
+      const result=attachmentStore.read(record.id,{ref,offset,maxBytes});return {...result,data:undefined,text:Buffer.from(result.data,'base64').toString('utf8')};
+    },
+    attachmentStore, prepareTaskContext, prepareTaskHandoff, synchronizeTaskAssignment,
     resumeApproval,
     execute({ method, params, signal }) {
       if (closePromise) return Promise.reject(chatError('SERVICE_CLOSED', 'Chat service is closed'));

@@ -30,6 +30,7 @@ export const WORKSPACE_CAPABILITIES = Object.freeze({
   'workspace.read': 'filesystem.read', 'workspace.write': 'filesystem.write',
   'workspace.file.search': 'filesystem.search', 'workspace.git.status': 'git.status',
   'workspace.git.diff': 'git.diff', 'workspace.git.commit': 'git.commit',
+  'workspace.git.overview':'git.overview','workspace.git.branch.create':'git.branch.create','workspace.git.worktree.create':'git.worktree.create',
   'workspace.test.run': 'test.run', 'workspace.create': 'workspace.create',
   'workspace.apply': 'workspace.apply'
 });
@@ -55,6 +56,9 @@ const WORKSPACE_TOOL_DESCRIPTORS = Object.freeze({
   'filesystem.search': ['Search file names or contents inside the authorized Workspace.', objectInput({ query: stringField('Search text or file-name query.'), path: stringField('Optional Workspace-relative directory.'),
     offset: { type: 'integer', minimum: 0 }, maxResults: { type: 'integer', minimum: 1, maximum: 100 } }, ['query'])],
   'git.status': ['Read the current Git status for the authorized Workspace.', objectInput()],
+  'git.overview':['Read Git branches, history, conflicts, Task associations and managed Worktrees.',objectInput()],
+  'git.branch.create':['Create a branch associated with the current server-bound Task at the reviewed HEAD. Owner approval required.',objectInput({branch:stringField('New task branch.'),expectedHead:stringField('Reviewed source HEAD.')},['branch','expectedHead'])],
+  'git.worktree.create':['Create an isolated Worktree for the current server-bound Task. Owner approval required.',objectInput({branch:stringField('New task branch.'),expectedHead:stringField('Reviewed source HEAD.')},['branch','expectedHead'])],
   'git.diff': ['Read a bounded Git diff summary inside the authorized Workspace.', objectInput({ path: stringField('Optional Workspace-relative file path.'), statOnly: { type: 'boolean' } })],
   'git.commit': ['Commit only explicitly reviewed files in the authorized Workspace; preserve unrelated staged changes.', objectInput({ message: stringField('Commit message.'),paths:{type:'array',items:stringField('Workspace-relative owned path.'),minItems:1,maxItems:100},expectedHead:{type:['string','null'],description:'Current Git HEAD; null only for an unborn branch.'},expectedHashes:{type:'object',additionalProperties:{type:['string','null']},description:'Exact current SHA-256 for each owned path, or null for reviewed deletion.'} }, ['message','paths','expectedHead','expectedHashes'])],
   'test.run': ['Run an allowlisted test command in the authorized Workspace. Owner approval is required.', objectInput({ tool: stringField('Allowlisted test tool.'), args: { type: 'array', items: { type: 'string' }, maxItems: 40 }, timeoutMs: { type: 'integer', minimum: 1000, maximum: 600000 } }, ['tool', 'args'])],
@@ -515,7 +519,8 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
   }
   if (workspaceService) {
     for (const [method, id] of Object.entries(WORKSPACE_CAPABILITIES)) {
-      broker.register({ id, cancellationAware: id === 'test.run', permission: id === 'workspace.apply' ? 'filesystem.write' : id, provider: 'workspace', workspace: id !== 'workspace.create',
+      broker.register({ id, cancellationAware: id === 'test.run', permission: ['git.branch.create','git.worktree.create'].includes(id)?'git.commit':id==='git.overview'?'git.status':id === 'workspace.apply' ? 'filesystem.write' : id, provider: 'workspace', workspace: id !== 'workspace.create',
+        ...(['git.branch.create','git.worktree.create'].includes(id)?{effect:'non-idempotent',requiresTask:true}:{}),
         description: WORKSPACE_TOOL_DESCRIPTORS[id][0],
         inputSchema: WORKSPACE_TOOL_DESCRIPTORS[id][1],
         category: id.startsWith('filesystem.') ? 'filesystem' : id.startsWith('git.') ? 'git' : 'workspace',
@@ -531,8 +536,9 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
         // test.run = 执行 Workspace 中可被 Agent 修改的代码：high（审批必经），
         // 不是普通 medium。Owner 直接点击"运行测试"走 executeWorkspace 的
         // approved:true（Owner 的点击本身就是显式决定，语义与既往一致）。
-        risk: ['workspace.create', 'git.commit', 'test.run', 'workspace.apply', 'filesystem.write'].includes(id) ? 'high' : 'low',
+        risk: ['workspace.create', 'git.commit','git.branch.create','git.worktree.create', 'test.run', 'workspace.apply', 'filesystem.write'].includes(id) ? 'high' : 'low',
         validate(request, { replay = false } = {}) {
+          if(['git.branch.create','git.worktree.create'].includes(id)&&!request.taskId)throw capabilityError('TASK_SCOPE_MISMATCH','Git action requires the current server-bound Task');
           if (id === 'workspace.apply') {
             validateWorkspaceImport(request);
             return;
@@ -624,7 +630,13 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
               }
               return result;
             }
-            return workspaceService.execute({ method, params: { ...request.input,
+            const executor=['git.commit','git.branch.create','git.worktree.create'].includes(id)&&workspaceService.executeApprovedGit?workspaceService.executeApprovedGit:workspaceService.execute;
+            if(id==='git.overview'&&request.actor.kind!=='owner'){
+              const overview=await executor({method,params:{...request.input,id:request.workspaceId}});
+              const allowed=request.actor.grants?.taskIds??[request.taskId];return {...overview,tasks:overview.tasks.filter(t=>allowed.includes(t.id)),branches:overview.branches.filter(b=>!b.taskId||allowed.includes(b.taskId)),worktrees:overview.worktrees.filter(w=>!w.taskId||allowed.includes(w.taskId)),worktreeRelation:overview.worktreeRelation?.taskId&&!allowed.includes(overview.worktreeRelation.taskId)?null:overview.worktreeRelation};
+            }
+            return executor({ method, params: { ...request.input,
+              ...(['git.branch.create','git.worktree.create'].includes(id)?{taskId:request.taskId}:{}),
               ...(id === 'filesystem.read' ? { maxBytes: request.input.maxBytes ?? request.input.maxChars ?? 8192 } : {}),
               ...(id === 'filesystem.search' ? { searchRestricted: request.actor.kind !== 'owner' } : {}),
               ...(id === 'git.diff' ? { excludeSensitive: request.actor.kind !== 'owner' } : {}),

@@ -1,4 +1,5 @@
 import { explicitDelegationTarget } from './explicit-delegation.js';
+import {OWNER_ACTOR} from '../capability/types.js';
 import { isSafeAgentDispatchPreflight } from '../capability/service.js';
 import { normalizeModelUsage } from '../model/usage.js';
 import crypto from 'node:crypto';
@@ -135,7 +136,7 @@ function projectUsage(value) {
 function projectMessage(value) {
   const row = record(value);
   const role = ['user', 'assistant', 'system'].includes(row.role) ? row.role : 'assistant';
-  const attachments = boundedStrings(row.attachments, 8, 200);
+  const attachments = boundedStrings(row.attachments, 50, 200);
   const toolActivity = Array.isArray(row.toolActivity) ? row.toolActivity.slice(0, 50).map(item => {
     const tool = record(item);
     return {
@@ -153,7 +154,7 @@ function projectMessage(value) {
   return {
     id: string(row.id, 128), role, text: string(row.text, MAX_TEXT), at: scalar(row.at),
     requestId: string(row.requestId, 200) || null,
-    attachments, toolActivity, agentActivity, usage: projectUsage(row.usage), error: row.error ? string(row.error, 1000) : null,
+    attachments, attachmentRefs:(Array.isArray(row.attachmentRefs)?row.attachmentRefs:[]).slice(0,50).map(r=>({ref:string(r.ref,32),name:string(r.name,200),kind:string(r.kind,20),size:Number(r.size)||0,mimeType:string(r.mimeType,80),modelRef:string(r.modelRef,32)||null,quality:r.quality?{width:Number(r.quality.width),height:Number(r.quality.height),processed:true}:null})), toolActivity, agentActivity, usage: projectUsage(row.usage), error: row.error ? string(row.error, 1000) : null,
     cancelled: row.cancelled === true
   };
 }
@@ -1028,10 +1029,24 @@ export function createDesktopUiService({ services = {}, system = services.system
         routing: selected(turn.routing ?? result.lastRouting, ['modelProvider', 'requestedModel', 'resolvedModel', 'toolCalling', 'taskId', 'blockingTaskId'])
       };
     },
+    'ui.chat.attachment.begin': (p, {signal}={})=>chat('chat.attachment.begin',p,signal),
+    'ui.chat.attachment.list': (p, {signal}={})=>chat('chat.attachment.list',p,signal),
+    'ui.chat.attachment.chunk': (p, {signal}={})=>chat('chat.attachment.chunk',p,signal),
+    'ui.chat.attachment.finish': (p, {signal}={})=>chat('chat.attachment.finish',p,signal),
+    'ui.chat.attachment.read': (p, {signal}={})=>chat('chat.attachment.read',p,signal),
+    'ui.chat.attachment.derive': (p, {signal}={})=>chat('chat.attachment.derive',p,signal),
+    'ui.chat.attachment.describe': (p, {signal}={})=>chat('chat.attachment.describe',p,signal),
+    'ui.chat.attachment.remove': (p, {signal}={})=>chat('chat.attachment.remove',p,signal),
+    'ui.chat.attachment.cleanup': (p, {signal}={})=>chat('chat.attachment.cleanup',p,signal),
+    'ui.chat.attachment.limits': (p, {signal}={})=>chat('chat.attachment.limits',p,signal),
+    'ui.chat.attachment.limits.set': (p, {signal}={})=>chat('chat.attachment.limits.set',p,signal),
+    'ui.chat.attachment.capabilities': (p, {signal}={})=>chat('chat.attachment.capabilities',p,signal),
     'ui.chat.send': async (p, { signal } = {}) => {
       const text = boundedText(p.text, 'text', 32_000);
-      const attachments = Array.isArray(p.attachments) ? p.attachments.slice(0, 8).map((item, index) => {
+      if(Array.isArray(p.attachments)&&p.attachments.length>50)throw uiError('ATTACHMENT_COUNT_LIMIT','附件数量过多');
+      const attachments = Array.isArray(p.attachments) ? p.attachments.map((item, index) => {
         const attachment = record(item);
+        if(attachment.ref)return {ref:boundedText(attachment.ref,'ref',32)};
         if (/\.(?:png|jpe?g|gif|webp|bmp|ico|svg|pdf|mp[34]|wav|ogg|zip)$/i.test(string(attachment.name, 200))
           || (attachment.mimeType && !/^text\/(?:plain|markdown|csv|html|css|javascript|typescript|xml|x-python|x-shellscript)$/i.test(string(attachment.mimeType, 80)))) {
           throw uiError('UNSUPPORTED_ATTACHMENT', '当前仅支持文本和源码附件；图片与富媒体尚不可发送给模型');
@@ -1457,6 +1472,20 @@ export function createDesktopUiService({ services = {}, system = services.system
       emit('task.updated', { taskId: updated.id, status: updated.status });
       return { task: projectTaskWithUsage(updated), handoff: { success: Boolean(result.to?.sessionId), from: result.from, to: result.to } };
     },
+    'ui.workspace.git.overview':p=>workspace('workspace.git.overview',{id:idParam(p)}),
+    'ui.workspace.git.diff':p=>workspace('workspace.git.diff',{id:idParam(p),cached:p.cached===true}),
+    ...Object.fromEntries(['commit','branch.create','worktree.create'].map(action=>['ui.workspace.git.'+action,async(p,{signal}={})=>{
+      const {id,taskId,operationId,...input}=p;const capability='git.'+action;
+      const result=await services.capabilityService.broker.execute({capability,actor:OWNER_ACTOR,approved:false,workspaceId:id,taskId,
+        ...(operationId?{operationId}:{}),input,reason:'Owner requested scoped Git action; await explicit approval'},{signal});
+      return result.status==='completed'?result.result:result;
+    }])),
+    ...Object.fromEntries(['describe','save','invoke','credentials.save'].map(action=>['ui.developer.forge.'+action,(p,{signal}={})=>services.forgeService.execute({method:'ui.developer.forge.'+action,params:p},{signal})])),
+    'ui.chat.attachment.import':async(p,{signal}={})=>{
+      const result=await services.capabilityService.broker.execute({capability:'attachment.archive.import',actor:OWNER_ACTOR,approved:false,
+        input:{sessionId:idParam(p),ref:boundedText(p.ref,'ref',32),...(p.name?{name:boundedText(p.name,'name',120)}:{})},reason:'Review ZIP import to a new managed Workspace before writing'},{signal});
+      return result.status==='completed'?result.result:result;
+    },
     'ui.workspace.version': async p => {
       const result=await services.workspaceService.execute({method:'workspace.git.status',params:{id:idParam(p)}});
       const git=record(result.git??result);
@@ -1724,6 +1753,10 @@ export function createDesktopUiService({ services = {}, system = services.system
             httpUrl: string(local.httpUrl, 500) || null, wsUrl: string(local.wsUrl, 500) || null,
             accessTokenConfigured: local.accessTokenConfigured === true,
             lastError: string(local.lastError?.message ?? local.lastError, 500) || null,
+            readiness:local.readiness?(()=>{const r=record(local.readiness),d=record(r.dsh),p=record(r.preset),m=record(r.mcp),q=record(r.qq);return {ready:r.ready===true,canStart:r.canStart===true,checkedAt:string(r.checkedAt,80)||null,code:string(r.code,100)||null,
+              dsh:{ready:d.ready===true,sessionApi:d.sessionApi===true,state:string(d.state,60),code:string(d.code,100)||null},preset:{id:string(p.id,120),compatible:p.compatible===true,discovered:p.discovered===true,ready:p.ready===true,reason:string(p.reason,120)||null},
+              mcp:{state:string(m.state,60),verified:m.verified===true,tool:string(m.tool,120)||null,checkedAt:string(m.checkedAt,80)||null},qq:{ready:q.ready===true,accountId:string(q.accountId,30)||null}};})():null,
+            activity:local.activity?Object.fromEntries(['receive','send'].map(k=>{const r=record(local.activity[k]);return [k,{state:string(r.state,60),total:Number.isFinite(r.total)?r.total:null,sent:Number.isFinite(r.sent)?r.sent:null,acknowledged:Number.isFinite(r.acknowledged)?r.acknowledged:null,outcomeUnknown:Number.isFinite(r.outcomeUnknown)?r.outcomeUnknown:null,lastAt:string(r.lastAt,80)||null}];})):null,
             actions: boundedStrings(result.actions, 10, 40)
           };
         })() : null,

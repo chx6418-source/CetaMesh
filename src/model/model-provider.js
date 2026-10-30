@@ -74,7 +74,7 @@ export function modelStreamEvent(type, data = {}) {
  *   {tokens,exact:true,tokenizer}. No approximate result may claim exactness.
  * - 实例不可变（Object.freeze），Key 只能经注入的 secrets 在调用时解析，绝不缓存。
  */
-export function defineModelProvider({ id, label, defaultModel = null, supportsTools = false, supportsToolsForModel = null, supportsReasoning = false, promptCacheCapabilities = null, contextCapabilities = null, countInputTokens = null, settingsFields = [], methods }) {
+export function defineModelProvider({ id, label, defaultModel = null, supportsTools = false, supportsToolsForModel = null, supportsReasoning = false, imageInputCapabilities = null, promptCacheCapabilities = null, contextCapabilities = null, countInputTokens = null, settingsFields = [], methods }) {
   if (typeof id !== 'string' || !id.trim()) throw new Error('defineModelProvider 需要 id');
   if (typeof label !== 'string' || !label.trim()) throw new Error('defineModelProvider 需要 label');
   if (!methods || typeof methods !== 'object') throw new Error('defineModelProvider 需要 methods');
@@ -92,6 +92,7 @@ export function defineModelProvider({ id, label, defaultModel = null, supportsTo
     defaultModel: typeof defaultModel === 'string' && defaultModel ? defaultModel : null,
     settingsFields: () => normalizedSettingsFields,
     streamProtocol: MODEL_STREAM_PROTOCOL,
+    imageInputCapabilities: typeof imageInputCapabilities === 'function' ? imageInputCapabilities : () => ({supported:false,status:'unknown'}),
     promptCacheCapabilities: typeof promptCacheCapabilities === 'function' ? promptCacheCapabilities
       : () => ({ status: 'unknown', mode: null, readUsageField: null, writeUsageField: null }),
     contextCapabilities: typeof contextCapabilities === 'function' ? contextCapabilities : () => ({ status: 'unknown' }),

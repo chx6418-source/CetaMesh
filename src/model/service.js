@@ -171,6 +171,7 @@ export function createModelRuntimeService({ registry, secrets, preferredProvider
   };
 
   return {
+    imageInputCapabilities(providerId,model=null){const p=resolveProvider(providerId);return p.imageInputCapabilities?.(model||p.defaultModel)??{supported:false,status:'unknown'};},
     resolveProvider,
     defaultProviderId,
     listProviders,

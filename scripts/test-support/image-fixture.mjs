@@ -1,0 +1,5 @@
+import {deflateSync} from 'node:zlib';
+function crc(b){let c=0xffffffff;for(const x of b){c^=x;for(let n=0;n<8;n++)c=(c>>>1)^((c&1)?0xedb88320:0);}return(c^0xffffffff)>>>0;}
+export function visionFixturePng({swap=false}={}){const w=256,h=128,b=Buffer.alloc((w*4+1)*h,255);for(let y=0;y<h;y++){b[y*(w*4+1)]=0;for(let x=0;x<w;x++){let color=[255,255,255];if(x>=15&&x<=110&&y>=20&&y<=110)color=swap?[0,0,255]:[255,0,0];if((x-190)**2+(y-65)**2<45**2)color=swap?[255,0,0]:[0,0,255];const p=y*(w*4+1)+1+x*4;b[p]=color[0];b[p+1]=color[1];b[p+2]=color[2];b[p+3]=255;}}
+ const chunk=(type,data)=>{const name=Buffer.from(type),n=Buffer.alloc(4),c=Buffer.alloc(4);n.writeUInt32BE(data.length);c.writeUInt32BE(crc(Buffer.concat([name,data])));return Buffer.concat([n,name,data,c]);};const head=Buffer.alloc(13);head.writeUInt32BE(w);head.writeUInt32BE(h,4);head[8]=8;head[9]=6;return Buffer.concat([Buffer.from([137,80,78,71,13,10,26,10]),chunk('IHDR',head),chunk('IDAT',deflateSync(b)),chunk('IEND',Buffer.alloc(0))]);
+}

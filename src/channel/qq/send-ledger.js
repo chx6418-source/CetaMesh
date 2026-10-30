@@ -89,5 +89,5 @@ export function createQqSendLedger(file, { maxRecords = 20000 } = {}) {
     save(saved);
     return record;
   }
-  return { claim, ack, get };
+  return { claim, ack, get, snapshot: () => structuredClone(load()) };
 }

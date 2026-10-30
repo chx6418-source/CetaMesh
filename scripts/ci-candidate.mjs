@@ -1,5 +1,14 @@
 import fs from 'node:fs';import path from 'node:path';import crypto from 'node:crypto';import {fileURLToPath} from 'node:url';
+import {execFileSync} from 'node:child_process';
 import {loadReleaseVersion,formatArtifactName,releaseArtifactDirectory} from '../src/release/version.js';
+export function verifyCandidateSource({rootDir,expectedCommit}={}){
+ if(typeof expectedCommit!=='string'||!/^[a-f0-9]{40,64}$/.test(expectedCommit))throw Error('Explicit candidate source commit is required');
+ const git=args=>{try{return execFileSync('git',args,{cwd:rootDir,encoding:'utf8',windowsHide:true,timeout:10000,maxBuffer:1024*1024}).trim();}catch{throw Error('Candidate source checkout cannot be verified');}};
+ const sourceCommit=git(['rev-parse','HEAD']),sourceTree=git(['rev-parse','HEAD^{tree}']);
+ if(sourceCommit!==expectedCommit)throw Error('Candidate source commit does not match the actual checkout');
+ if(!/^[a-f0-9]{40,64}$/.test(sourceTree)||git(['status','--porcelain','--untracked-files=normal']))throw Error('Candidate source must be a clean reviewed checkout');
+ return {sourceCommit,sourceTree};
+}
 export function candidateMetadata({productVersion,buildNumber,channel,commit}){
  if(!['dev','rc'].includes(channel)||!/^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/.test(productVersion)||!Number.isSafeInteger(buildNumber)||buildNumber<0||!/^[a-f0-9]{40,64}$/.test(commit))throw Error('Invalid candidate source metadata');
  return {artifactName:`cetamesh-desktop-windows-x64-${channel}-${productVersion}-${commit.slice(0,12)}`,setup:formatArtifactName({productVersion,buildNumber,platform:'windows-x64'})};
@@ -24,6 +33,10 @@ export function verifyCandidate(directory,{commit,channel}){
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
  const root=path.resolve(fileURLToPath(new URL('../',import.meta.url))),args=process.argv.slice(2),channel=args[args.indexOf('--channel')+1]||'dev';
  const commit=process.env.GITHUB_SHA;
+ const expected=process.env.CANDIDATE_EXPECTED_COMMIT;
+ if(args.includes('--require-expected')&&(!expected||expected!==commit))throw Error('Candidate dispatch requires the exact published source commit');
+ const source=verifyCandidateSource({rootDir:root,expectedCommit:commit});
+ if(args.includes('--source-only')){console.log(JSON.stringify({...source,releaseState:'HOLD'}));process.exit(0);}
  const release=loadReleaseVersion({rootDir:root}),meta=candidateMetadata({...release,channel,commit});
  const directory=releaseArtifactDirectory({rootDir:root,...release,channel});
  if(args.includes('--verify')){verifyCandidate(directory,{commit,channel});console.log('PASS candidate structure, hashes and source; security/native acceptance remain HOLD');}

@@ -7,6 +7,14 @@ import { createHash } from 'node:crypto';
  * Originals remain owned by the caller; no external retrieval authority is added.
  */
 export function projectMessageBudget(messages, { maxBytes = 512 * 1024, evidenceStore = null, binding = null, canRetrieveEvidence = false, deduplicate = true } = {}) {
+  // Binary modality bytes have their own explicit bound; text/tool accounting
+  // remains unchanged and no image is silently removed during compaction.
+  let imageBytes=0,imageCount=0;
+  for(const message of messages??[])for(const part of Array.isArray(message?.content)?message.content:[]){if(part?.type!=='image_url')continue;
+    const url=part.image_url?.url;if(typeof url!=='string'||!/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(url)||url.length>3*1024*1024)throw Object.assign(new Error('Image transport exceeds bounds'),{code:'MODEL_IMAGE_LIMIT'});
+    imageBytes+=Buffer.byteLength(url);imageCount++;}
+  if(imageBytes>6*1024*1024||imageCount>20)throw Object.assign(new Error('Image transport exceeds bounds'),{code:'MODEL_IMAGE_LIMIT'});
+  maxBytes+=imageBytes;
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new RangeError('maxBytes must be a positive integer');
   const projected = structuredClone(messages);
   const compactions = [];

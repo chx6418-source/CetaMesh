@@ -22,8 +22,10 @@
   user data directory as JSON rather than an OS keychain; protect the Windows account accordingly.
 - **Log redaction is best-effort.** Known secret shapes (tokens, authorization headers, cookies,
   credential fields) are removed; a bare random secret with no recognizable shape can still appear.
-- **Attachments are text-only and bounded.** The chat composer accepts dragged text files up to
-  256K characters; binary attachments are not supported.
+- **Attachments use local references and bounded processors.** Source builds support chunked images,
+  documents and ZIP files; images require a verified vision model. PDF/Office full-text extraction,
+  generic external-Agent attachment transfer and native installed-build acceptance remain separate.
+  See [developer tools and attachment limits](../development/DEVELOPER_TOOLS_AND_ATTACHMENTS.md).
 - **Legacy web console pages remain in the repository** (`public/console.html`, `token-login.html`)
   for development/reference only. Native/no-web release builds exclude product HTML from the Core
   payload; the Release Candidate ships the native UI only. The obsolete Tauri shell was removed.

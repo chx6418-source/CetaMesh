@@ -39,6 +39,17 @@ export const CATEGORIES = ['core', 'architecture', 'security', 'runtime', 'integ
 // ── 登记表：scripts/test-*.mjs 的每一个文件都必须出现在这里（或能从 package.json 映射）。
 // requires 的取值见 probeAvailability()；category 取值见 CATEGORIES。
 const REGISTRY = {
+  'test-attachment-resources.mjs': {category:'environment',timeoutMs:240000,note:'Opt-in real 100MiB document and 196MiB ZIP bounded upload and import'},
+  'test-developer-review-regressions.mjs': {category:'security',timeoutMs:180000,note:'Agent Task fences, approved model tools, image history and cancelled Owner UI'},
+  'test-git-workspace-ui.mjs': {category:'desktop',requires:['ui-motion-live'],timeoutMs:180000,note:'Actual Git page to Core pending approval, real branch Worktree and exact commit'},
+  'test-attachment-security.mjs': {category:'security',timeoutMs:120000,note:'Attachment junctions, content tampering, interrupted linking and archive limits'},
+  'test-chat-attachment-ui.mjs': {category:'desktop',requires:['ui-motion-live'],timeoutMs:180000,note:'Actual Chromium image selection, clipboard, drop, chunk upload and cancellation'},
+  'test-chat-multimodal.mjs': {category:'integration',note:'Actual UI/Core structured multimodal attachment chain and rejection boundaries'},
+  'test-real-chat-vision.mjs': {category:'environment',timeoutMs:240000,note:'Opt-in real image model through source Chat using synthetic images'},
+  'test-forge-tools.mjs': {category:'security',timeoutMs:120000,note:'Fixed-endpoint forge adapters, controlled writes and real developer tools'},
+  'test-git-product.mjs': {category:'security',timeoutMs:120000,note:'Task-linked real branches, worktrees and product Git operations'},
+  'test-bionic-product-readiness.mjs': {category:'integration',timeoutMs:120000,note:'Bionic actual dependency readiness and lifecycle fences'},
+  'test-chat-attachment-store.mjs': {category:'security',note:'Controlled file references, chunk integrity, quotas and session isolation'},
   'test-cloud-candidate.mjs': {category:'release',note:'Cloud metadata, brand and non-executing candidate integrity gate'},
   'test-workspace-git-closeout.mjs': {category:'security',timeoutMs:120000,note:'Real Git exact commits, staging conflict isolation and version references'},
   'test-extension-events.mjs': {category:'integration',timeoutMs:120000,note:'Bounded authenticated WebSocket and Webhook lifecycle'},

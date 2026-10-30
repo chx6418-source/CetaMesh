@@ -37,6 +37,10 @@ import { createBionicService } from '../bionic/service.js';
 import { createSettingsService } from '../settings/service.js';
 import { createIntegrationService } from '../integrations/index.js';
 import { createNetworkCredentialResolver } from '../integrations/network-credentials.js';
+import {createForgeService} from '../integrations/forge-service.js';
+import {registerDeveloperCapabilities} from '../integrations/developer-tools.js';
+import {createDeveloperBrowserExecutor} from '../integrations/developer-browser.js';
+import {importAttachmentArchive} from '../desktop/attachment-archive.js';
 import { createChannelDesktopControls } from '../channel/desktop-controls.js';
 import { createDshDesktopIntegration } from '../integrations/dsh-desktop.js';
 import { createAboutService } from '../about/service.js';
@@ -77,6 +81,8 @@ export function createCetaMeshServices(options = {}) {
 
   const workspaceService = createWorkspaceService({
     stateDir,
+    getTask:id=>taskService.runtime.get({id}).task,
+    listTasks:query=>taskService.runtime.list(query).tasks,
     audit: event => log('Workspace ' + event.action + '（' + (event.workspaceId ?? 'none') + '）')
   });
   let memoryService = null;
@@ -567,11 +573,24 @@ export function createCetaMeshServices(options = {}) {
     onboarding: onboardingService,
     product: productService
   };
+  const forgeService=createForgeService({stateDir,broker:capabilityService.broker,resolveCredential:createNetworkCredentialResolver(providerSecrets),secretStore:providerSecrets});
+  registerDeveloperCapabilities({broker:capabilityService.broker,resolveWorkspace:id=>workspaceService.describeWorkspace(id),
+    openBrowser:createDeveloperBrowserExecutor(),
+    terminalCommands:[{id:'node-version',file:process.execPath,args:['--version']}],
+    readLogs:()=>JSON.stringify(diagnosticsSnapshot())});
+  capabilityService.broker.register({id:'attachment.read',provider:'workspace',permission:'filesystem.read',risk:'low',effect:'read-only',workspace:true,requiresTask:true,description:'Read a bounded text chunk from an attachment already submitted to the current Task and Workspace. Does not access images or unpublished uploads.',
+    inputSchema:{type:'object',properties:{ref:{type:'string'},offset:{type:'integer',minimum:0},maxBytes:{type:'integer',minimum:1,maximum:16000}},required:['ref'],additionalProperties:false},
+    execute:r=>chatService.readScopedAttachment({taskId:r.taskId,workspaceId:r.workspaceId,...r.input})});
+  capabilityService.broker.register({id:'attachment.archive.import',provider:'workspace',permission:'workspace.create',risk:'high',effect:'non-idempotent',description:'Import a reviewed Chat project archive into a new managed Workspace; never overwrite existing projects.',
+    inputSchema:{type:'object',properties:{sessionId:{type:'string'},ref:{type:'string'},name:{type:'string'}},required:['sessionId','ref'],additionalProperties:false},
+    validate:r=>{if(r.actor.kind!=='owner')throw Object.assign(Error('Owner must authorize project import'),{code:'PERMISSION_DENIED'});},
+    execute:async r=>{const result=await importAttachmentArchive({store:chatService.attachmentStore,sessionId:r.input.sessionId,ref:r.input.ref,stateDir,signal:r.signal});
+      const created=await workspaceService.execute({method:'workspace.create',params:{root:result.root,name:r.input.name||'导入项目'}});return {...result,workspace:created.workspace};}});
   const desktopUiService = createDesktopUiService({
     services: {
       chatService, taskService, workshopService, workspaceService, memoryService, capabilityService, agentBroker, continuityService,
       agentService, pluginCenterService, integrationService, extensionService, settingsService, systemServices,
-      toolExecutionCoordinator, usageLedger, modelRuntime
+      toolExecutionCoordinator, usageLedger, modelRuntime,forgeService
     },
     system: systemServices,
     eventBus: uiEventBus

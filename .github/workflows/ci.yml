@@ -16,6 +16,10 @@ on:
         type: choice
         options: [dev, rc]
         default: dev
+      expected_commit:
+        description: Exact published commit SHA required for a candidate build
+        type: string
+        default: ''
 permissions:
   contents: read
 jobs:
@@ -33,6 +37,8 @@ jobs:
         with:
           node-version: '22'
           cache: npm
+      - name: Verify actual source checkout
+        run: node scripts/ci-candidate.mjs --source-only --channel dev
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -64,6 +70,7 @@ jobs:
     timeout-minutes: 90
     env:
       CANDIDATE_CHANNEL: ${{ inputs.channel }}
+      CANDIDATE_EXPECTED_COMMIT: ${{ inputs.expected_commit }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -72,6 +79,8 @@ jobs:
         with:
           node-version: '22'
           cache: npm
+      - name: Require the exact published source commit
+        run: node scripts/ci-candidate.mjs --source-only --require-expected --channel "$env:CANDIDATE_CHANNEL"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -85,14 +94,14 @@ jobs:
         run: npm run desktop:build
       - name: Candidate metadata
         id: candidate
-        run: node scripts/ci-candidate.mjs --channel "$env:CANDIDATE_CHANNEL"
+        run: node scripts/ci-candidate.mjs --require-expected --channel "$env:CANDIDATE_CHANNEL"
       - name: Assemble internal candidate
         run: |
           if ($env:CANDIDATE_CHANNEL -eq 'dev') { npm run build:release -- --dev --use-current-build-number }
           else { npm run build:release -- --use-current-build-number }
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Verify candidate without executing product binaries
-        run: node scripts/ci-candidate.mjs --verify --channel "$env:CANDIDATE_CHANNEL"
+        run: node scripts/ci-candidate.mjs --verify --require-expected --channel "$env:CANDIDATE_CHANNEL"
       - name: Upload internal candidate (RELEASE HOLD)
         uses: actions/upload-artifact@v4
         with:

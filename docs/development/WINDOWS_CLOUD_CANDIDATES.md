@@ -2,7 +2,7 @@
 
 Desktop 的常规候选生成优先使用 GitHub Actions；普通开发可运行源码、UI 与受影响测试，无需本地完整 Release 编译。
 
-1. 将已审查提交推到开发分支。在 GitHub 的 Actions → ci → Run workflow 选择该分支，勾选 build_candidate，并选择 dev 或 rc。
+1. 经 Owner 批准将已审查提交推到开发分支。在 GitHub 的 Actions → ci → Run workflow 选择该分支，填写完整的 expected_commit，勾选 build_candidate，并选择 dev 或 rc。实际 HEAD/tree 和干净工作区均被核对；expected_commit 必须与远程分支的 GITHUB_SHA 一致，本地未推送修改不会进入候选。
 2. 测试、Rust 检查通过后构建 UI、Core SEA、Desktop Shell，并组装安装器。版本和 build number 使用 release/version.json 的 canonical 值，Artifact 名包含渠道、版本和 commit；GitHub Run Number 另作本次工作流标识，不改产品版本计数。
 3. 下载 `cetamesh-desktop-windows-x64-<channel>-<version>-<commit>`，检查 release-manifest.json 的 sourceCommit/channel/buildNumber，并使用 SHA256SUMS.txt 校验。下载包包含 CetaMesh-Setup-...exe、清单、SBOM 与许可证。
 4. 此候选只供内部安全审查。完整性检查通过不代表安装、Native WebView2、Guest 或恶意软件定性通过。Defender RELEASE HOLD 未解除前，不恢复隔离文件、不关闭防护、不运行被标记的候选、不发布正式版本。

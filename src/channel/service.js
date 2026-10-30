@@ -217,7 +217,7 @@ export function createChannelService({ now, stateDir, dataRoot, config = {}, con
       if (method === 'channel.qq.send') return Promise.resolve().then(() => send({ ...params, actor }));
       if (method.startsWith('channel.bionic.')) {
         const action = method.slice('channel.bionic.'.length);
-        if (!bionic || !['start', 'stop', 'health'].includes(action)) return Promise.reject(channelError('METHOD_NOT_FOUND', 'Unknown Bionic lifecycle operation'));
+        if (!bionic || !['start', 'stop', 'health', 'reconnect'].includes(action)) return Promise.reject(channelError('METHOD_NOT_FOUND', 'Unknown Bionic lifecycle operation'));
         return bionic[action]();
       }
       const handler = handlers[method];

@@ -88,3 +88,10 @@
 - 本地真实 CLI 验证采用隔离测试目录与合成模型服务；不调用付费模型，也不代表外部账户认证。发行与完整回归结果按本轮实际产物单独报告；具体版本边界见 [Agent 接入状态](docs/desktop/AGENT_INTEGRATION_STATUS.md)。
 
 - 新 Agent 冷启动时明确保留 requiresTask 结构契约；首次聊天、目录资格和删除会话均按任务归属处理，不再受启动时未就绪描述影响。
+
+## 开发工具与附件源码集成（2026-10-30）
+
+- 复用既有Task/Workspace/Broker，新增Git页面、任务分支/Worktree、精确提交和GitHub/GitCode固定API连接；高风险操作先审批。
+- Chat新增受控分块附件、原图与模型图、视觉能力门禁、历史/重试及ZIP导入；DeepSeek Flash真实多图输入已验证。
+- 仿生聊天修复ready聚合与官方persona前缀；真实QQ收发、当前候选Native/Guest和本分支云端安装包仍需独立验收。Defender RELEASE HOLD保留。
+- 功能、限额和边界见 [开发工具与附件](docs/development/DEVELOPER_TOOLS_AND_ATTACHMENTS.md)。源码测试与Chromium验收不等于已安装版本更新或正式发布。

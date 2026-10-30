@@ -73,6 +73,7 @@ export function createOpenAiCompatibleModelProvider({
   supportsTools = false,
   supportsReasoning = null,
   contextProfiles = {},
+  imageProfiles = {},
   requestTimeoutMs = CHAT_TIMEOUT_MS,
   sseIdleTimeoutMs = SSE_IDLE_TIMEOUT_MS,
   log = () => {}
@@ -236,6 +237,14 @@ export function createOpenAiCompatibleModelProvider({
     return { status: 'unknown' };
   }
 
+  function imageInputCapabilities(model=defaultModel) {
+    let endpoint;try{endpoint=new URL(secrets.raw(id)?.baseUrl||baseUrl).href.replace(/\/$/,'');}catch{return {supported:false,status:'unknown'};}
+    const declared=Object.hasOwn(imageProfiles,model)?imageProfiles[model]:null;
+    if(declared?.baseUrl===endpoint&&declared.supported===true)return {...declared,status:'declared'};
+    if(id==='deepseek-official'&&['https://api.deepseek.com','https://api.deepseek.com/v1'].includes(endpoint)&&['deepseek-flash','deepseek-v4-flash','deepseek-v4-flash-vision-exp'].includes(model))return {supported:true,status:'verified',maxImages:20,maxImageBytes:2*1024*1024,maxTotalBytes:4*1024*1024,lowDetailTokens:1024,maxImageTokens:1024,preferredDetail:'auto',source:'https://api-docs.deepseek.com/guides/vision/',version:'2026-10-30'};
+    if(id==='openai'&&endpoint==='https://api.openai.com/v1'&&['gpt-4o-mini','gpt-4o-mini-2024-07-18','gpt-4o','gpt-4.1','gpt-4.1-mini'].includes(model))return {supported:true,status:'verified',maxImages:20,maxImageBytes:2*1024*1024,maxTotalBytes:4*1024*1024,lowDetailTokens:4000,source:'https://developers.openai.com/api/docs/guides/images-vision',version:'2026-10-30'};
+    return {supported:false,status:id==='deepseek-official'?'unsupported':'unknown'};
+  }
   function buildBody({ model, messages, reasoning, stream, tools = [], toolChoice, maxOutputTokens }) {
     if (typeof model !== 'string' || !model.trim()) {
       throw modelRuntimeError(
@@ -246,6 +255,7 @@ export function createOpenAiCompatibleModelProvider({
     if (!Array.isArray(messages) || messages.length === 0) {
       throw modelRuntimeError(MODEL_ERROR_CODES.INVALID_PARAMS, 'messages 不能为空');
     }
+    if(messages.some(m=>Array.isArray(m.content)&&m.content.some(p=>p.type==='image_url'))&&imageInputCapabilities(model).supported!==true)throw modelRuntimeError('MODEL_IMAGE_UNSUPPORTED','当前 Provider/模型未验证图像输入能力，请选择已支持视觉的模型');
     const thinking = deepseekProfile && reasoning !== 'off';
     const wireMessages = messages.map(message => {
       const { modelContinuation, reasoning_content, ...wire } = message;
@@ -327,6 +337,7 @@ export function createOpenAiCompatibleModelProvider({
   }
 
   return defineModelProvider({
+    imageInputCapabilities,
     promptCacheCapabilities,
     contextCapabilities,
     id,

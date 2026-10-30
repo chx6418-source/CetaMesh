@@ -26,6 +26,8 @@ const check = async (name, fn) => {
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-provider-secrets-'));
 const secrets = createProviderSecrets({ root: temp });
+await check('credential revisions change on every replacement and delete/recreate',()=>{const store=createProviderSecrets({root:path.join(temp,'revision')});const first=store.set({provider:'plugin-fixture',apiKey:'synthetic-secret-one'});const second=store.set({provider:'plugin-fixture',apiKey:'synthetic-secret-two'});assert.notEqual(first.revision,second.revision);assert.ok(Date.parse(second.updatedAt)>Date.parse(first.updatedAt));store.remove({provider:'plugin-fixture'});const third=store.set({provider:'plugin-fixture',apiKey:'synthetic-secret-two'});assert.notEqual(second.revision,third.revision);});
+
 const rawKey = 'sk-test-deepseek-1234567890';
 const providerMethods = {
   listModels: async () => [],
