@@ -11,38 +11,62 @@ import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
 import { createChatService } from '../src/desktop/chat-service.js';
 import { createDesktopUiService } from '../src/desktop/ui-service.js';
+import { createProviderSecrets } from '../src/providers/secrets.js';
+import { createModelProviderRegistry, createModelRuntimeService, createOpenAiCompatibleModelProvider } from '../src/model/index.js';
+import { visionFixturePng } from './test-support/image-fixture.mjs';
 import { createSuiteSandbox, finalizeSuiteSandbox } from '../src/testing/suite-sandbox.js';
 import { terminateSuiteProcessTree } from '../src/testing/suite-process.js';
 
 const uiRoot = fileURLToPath(new URL('../desktop-ui/', import.meta.url));
 const require = createRequire(path.join(uiRoot, 'package.json'));
 const { buildSync } = require('esbuild');
+const realUiVision = process.env.CETAMESH_TEST_REAL_UI_VISION === '1';
+const visionProviderId = 'deepseek-official', visionModel = 'deepseek-flash';
+let visionRuntime = null, providerRequests = 0, allowRealSend = false;
+if (realUiVision) {
+  const unavailable = reason => { console.log('NOT_RUN_ENVIRONMENT: real UI vision ' + reason); process.exit(77); };
+  if (!process.env.LOCALAPPDATA) unavailable('requires local configured Provider credentials');
+  const store = createProviderSecrets({ root: path.join(process.env.LOCALAPPDATA, 'WhaleBridge') });
+  // Backend-only read resolver; raw credentials never enter HTML, IPC or logs.
+  const secrets = Object.freeze({ list: store.list, raw: store.raw });
+  let configured;
+  try { configured = secrets.list().find(entry => entry.provider === visionProviderId); } catch { unavailable('credentials unavailable'); }
+  if (!configured) unavailable('requires configured DeepSeek official credentials');
+  if (configured.baseUrl) { const url = new URL(configured.baseUrl); if (url.protocol !== 'https:' || url.hostname !== 'api.deepseek.com' || url.username || url.password) unavailable('requires official DeepSeek endpoint'); }
+  const provider = createOpenAiCompatibleModelProvider({ id: visionProviderId, label: 'DeepSeek Official', baseUrl: 'https://api.deepseek.com', defaultModel: visionModel, secrets, fetchImpl: (...args) => { providerRequests++; return fetch(...args); } });
+  visionRuntime = createModelRuntimeService({ registry: createModelProviderRegistry({ providers: [provider] }), secrets });
+  if (visionRuntime.imageInputCapabilities(visionProviderId, visionModel).supported !== true) unavailable('requires verified image profile');
+}
 const sandbox = createSuiteSandbox({ suiteId: 'chat-attachment-ui' });
 let failed = true, child, socket, server, chat, closeBrowser;
 const calls = [], faults = { failChunk: false, chunkDelayMs: 0 };
 try {
-  chat = createChatService({ stateDir: path.join(sandbox.root, 'state'), defaults: {}, defaultAgentProvider: () => 'none' });
+  chat = createChatService({ stateDir: path.join(sandbox.root, 'state'), defaults: {}, defaultAgentProvider: () => 'none', ...(realUiVision ? { modelRuntime: visionRuntime, defaultModelConfig: () => ({ provider: visionProviderId, defaultModel: visionModel }), controlExecute: async () => ({}) } : {}) });
   const first = await chat.execute({ method: 'chat.sessions.create', params: { title: 'Attachment UI fixture' } });
   const second = await chat.execute({ method: 'chat.sessions.create', params: { title: 'Other session' } });
   const composer = await chat.execute({method:'chat.sessions.create',params:{title:'Independent Composer fixture'}});
+  const realSession = realUiVision ? await chat.execute({ method: 'chat.sessions.create', params: { title: 'Real UI vision acceptance' } }) : null;
   const ui = createDesktopUiService({ services: { chatService: chat } });
   const bundle = buildSync({ stdin: { resolveDir: uiRoot, loader: 'tsx', contents: `
     import React,{useState} from 'react';import {createRoot} from 'react-dom/client';import {flushSync} from 'react-dom';
-    import {chatClient} from './src/bridge/typed-client';import {useChatAttachments} from './src/app/ChatAttachments';import {ChatComposer} from './src/app/HarborApp';
-    const first=${JSON.stringify(first.id)},second=${JSON.stringify(second.id)},composer=${JSON.stringify(composer.id)};
+    import {chatClient} from './src/bridge/typed-client';import {useChatAttachments} from './src/app/ChatAttachments';import {ChatComposer,MessageBubble} from './src/app/HarborApp';
+    const first=${JSON.stringify(first.id)},second=${JSON.stringify(second.id)},composer=${JSON.stringify(composer.id)},realId=${JSON.stringify(realSession?.id ?? '')};
+    const realModel=${JSON.stringify(visionModel)},realProvider=${JSON.stringify(visionProviderId)},visionImages=${JSON.stringify(realUiVision ? [visionFixturePng().toString('base64'),visionFixturePng({swap:true}).toString('base64')] : [])};
     const call=async(method,params)=>{const response=await fetch('/api',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({method,params})});const data=await response.json();if(!response.ok)throw Object.assign(new Error(data.message),{code:data.code});return data;};
     window.ipc={postMessage(raw){const request=JSON.parse(raw);call(request.method,request.params).then(result=>window.__cetameshReceive({id:request.id,ok:true,result}),error=>window.__cetameshReceive({id:request.id,ok:false,error:{code:error.code||'FIXTURE',message:error.message}}));}};
     const nativeURL=URL.createObjectURL.bind(URL),nativeRevoke=URL.revokeObjectURL.bind(URL);window.revokedUrls=[];URL.createObjectURL=blob=>nativeURL(blob);URL.revokeObjectURL=url=>{window.revokedUrls.push(url);nativeRevoke(url);};
     const nativeBitmap=window.createImageBitmap.bind(window);window.bitmapCalls=0;window.createImageBitmap=(...args)=>{window.bitmapCalls++;return nativeBitmap(...args);};
     const originalArrayBuffer=Blob.prototype.arrayBuffer;window.fullFileReads=0;
     Blob.prototype.arrayBuffer=function(){if(this.size>256*1024){window.fullFileReads++;throw new Error('production path read a whole large file');}return originalArrayBuffer.call(this);};
-    function Harness(){const [sessionId,setSessionId]=useState(first),[mode,setMode]=useState('panel');const draft=useChatAttachments({sessionId,call});
-      window.fixture={files:draft.files,pending:draft.pending,addFiles:draft.addFiles,setFiles:draft.setFiles,changeSession:setSessionId,showComposer:()=>{setSessionId(composer);setMode('composer');},showPanel:()=>setMode('panel'),first,second};
-      return mode==='panel'?<main id="attachment-harness" onPaste={draft.onPaste} onDrop={draft.onDrop} onDragOver={draft.onDragOver}><textarea aria-label="Fixture message"/>{draft.ui}</main>:<div className="composer-dock"><ChatComposer sessionId={sessionId} busy={false} models={[]} selectedModelKey="" agentProviders={[]} selectedAgent="none" workspaces={[]} workspaceId="" activeWorkspaceId={null} onWorkspaceChange={()=>{}} onModelChange={()=>{}} onAgentChange={()=>{}} onSend={async(text,attachments,clientMessageId)=>{window.sentText=text;window.sendAttempts=(window.sendAttempts||0)+1;await chatClient.send(sessionId,text,attachments,clientMessageId);}} onStop={()=>{}}/></div>;
+    function Harness(){const [sessionId,setSessionId]=useState(first),[mode,setMode]=useState('panel'),[history,setHistory]=useState([]);const draft=useChatAttachments({sessionId,call});
+      async function refreshHistory(){const result=await chatClient.history(sessionId);setHistory(result.messages);return result;}
+      window.fixture={history,refreshHistory,showRealVision:()=>{setSessionId(realId);setMode('real');setHistory([]);},realId,files:draft.files,pending:draft.pending,addFiles:draft.addFiles,setFiles:draft.setFiles,changeSession:setSessionId,showComposer:()=>{setSessionId(composer);setMode('composer');},showPanel:()=>setMode('panel'),first,second};
+      return mode==='panel'?<main id="attachment-harness" onPaste={draft.onPaste} onDrop={draft.onDrop} onDragOver={draft.onDragOver}><textarea aria-label="Fixture message"/>{draft.ui}</main>:<div className="composer-dock"><ChatComposer key={sessionId} sessionId={sessionId} busy={false} models={mode==='real'?[{id:realProvider,label:'DeepSeek Official',configured:true,models:[{id:realModel,name:realModel}]}]:[]} selectedModelKey={mode==='real'?JSON.stringify([realProvider,realModel]):''} agentProviders={[]} selectedAgent="none" workspaces={[]} workspaceId="" activeWorkspaceId={null} onWorkspaceChange={()=>{}} onModelChange={()=>{}} onAgentChange={()=>{}} onSend={async(text,attachments,clientMessageId)=>{window.sentText=text;window.sendAttempts=(window.sendAttempts||0)+1;await chatClient.send(sessionId,text,attachments,clientMessageId);}} onStop={()=>{}}/>{mode==='real'&&<section id="real-vision-history" aria-label="实际视觉消息历史">{history.map(message=><MessageBubble key={message.id} message={message} reference={{sessionId,messageId:message.id}}/>)}</section>}</div>;
     }
     flushSync(()=>createRoot(document.getElementById('root')).render(<Harness/>));
     window.makeImage=async(name='pasted.png',large=false)=>{const canvas=document.createElement('canvas');canvas.width=24;canvas.height=12;canvas.getContext('2d').fillRect(0,0,24,12);const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/png'));return new File(large?[blob,new Uint8Array(20*1024*1024-blob.size)]:[blob],name,{type:'image/png'});};
     window.pasteImage=async(large=false)=>{const data=new DataTransfer();data.items.add(await window.makeImage(large?'large.png':'pasted.png',large));document.querySelector('textarea').dispatchEvent(new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:data}));};
+    window.pasteVisionPair=()=>{const data=new DataTransfer();visionImages.forEach((encoded,index)=>{const bytes=Uint8Array.from(atob(encoded),char=>char.charCodeAt(0));data.items.add(new File([bytes],index===0?'first-synthetic.png':'second-synthetic.png',{type:'image/png'}));});document.querySelector('.composer-dock textarea').dispatchEvent(new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:data}));};
     window.dropText=(name='dropped.ts',size=24)=>{const data=new DataTransfer();data.items.add(new File(['x'.repeat(size)],name,{type:'text/plain'}));document.querySelector('main')?.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:data}));};
     window.findButton=text=>Array.from(document.querySelectorAll('button')).find(button=>button.textContent.trim()===text);
   ` }, bundle: true, write: false, format: 'iife', platform: 'browser', jsx: 'automatic', loader: { '.css': 'empty' } });
@@ -52,8 +76,14 @@ try {
     try {
       let body = ''; for await (const chunk of request) { body += chunk; if (body.length > 256 * 1024) throw new Error('Fixture transport frame exceeded bound'); }
       const { method, params } = JSON.parse(body);
-      if (method === 'ui.chat.send') { calls.push({ method, request: params }); throw Object.assign(new Error('fixture-send-rejected'), { code: 'FIXTURE_SEND_REJECTED' }); }
-      if (!/^ui\.chat\.attachment\./.test(method)) throw new Error('Fixture only forwards attachment methods');
+      if (method === 'ui.chat.send') {
+        const record = { method, request: params }; calls.push(record);
+        if (!allowRealSend) throw Object.assign(new Error('fixture-send-rejected'), { code: 'FIXTURE_SEND_REJECTED' });
+        if (!realUiVision || params.id !== realSession.id) throw new Error('Real vision requires its fresh Session');
+        record.result = await ui.execute({ method, params }); response.writeHead(200, { 'Content-Type': 'application/json' }); response.end(JSON.stringify(record.result)); return;
+      }
+      if (!/^ui\.chat\.attachment\./.test(method) && !(allowRealSend && ['ui.chat.history','ui.chat.status'].includes(method))) throw new Error('Fixture only forwards attachments and opted-in visual history');
+      if (allowRealSend && ['ui.chat.history','ui.chat.status'].includes(method) && params.id !== realSession.id) throw new Error('History requires the real vision Session');
       const record = { method, id: params.id, ref: params.ref, name: params.name, offset: params.offset, bytes: params.data ? Buffer.byteLength(params.data, 'base64') : 0 };
       calls.push(record);
       if (method === 'ui.chat.attachment.chunk') {
@@ -137,6 +167,31 @@ try {
   assert.equal(await evaluate('document.querySelector(".composer-dock textarea").value'), 'keep this failed draft'); assert.ok(await evaluate('document.querySelector(".composer-dock").innerText.includes("pasted.png")'));
   const sent = calls.findLast(row => row.method === 'ui.chat.send')?.request.attachments; assert.equal(sent.length, 1); assert.deepEqual(Object.keys(sent[0]), ['ref']); assert.match(sent[0].ref, /^[a-f0-9]{32}$/); assert.equal(await evaluate('window.sentText'), 'keep this failed draft');
   console.log('PASS production ChatComposer async send rejection preserves text and attachment selection (' + composerText + ')');
+  if (realUiVision) {
+    assert.equal(providerRequests, 0, 'default regression stages never call a Provider');
+    allowRealSend = true;
+    await evaluate('window.fixture.showRealVision()');
+    await until('!!document.querySelector(".composer-dock textarea") && document.querySelector(".composer-dock textarea").value===""', 'fresh real vision Composer');
+    await evaluate('window.pasteVisionPair()');
+    await until('document.querySelectorAll(".composer-dock .attachment-item img").length===2 && Array.from(document.querySelectorAll(".composer-dock .attachment-item img")).every(image=>image.naturalWidth===256)', 'two real vision model thumbnails');
+    const question = 'What color is the left square in each of the two attached images? Reply only JSON with string fields first and second, each value in English as "<color> square". Inspect the actual images and preserve their order.';
+    await evaluate('(()=>{const input=document.querySelector(".composer-dock textarea");Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,"value").set.call(input,' + JSON.stringify(question) + ');input.dispatchEvent(new Event("input",{bubbles:true}));})()');
+    await until('(()=>{const button=Array.from(document.querySelectorAll(".composer-dock button")).find(button=>button.getAttribute("aria-label")==="发送消息");return !!button&&!button.disabled;})()', 'real vision send available');
+    await evaluate('Array.from(document.querySelectorAll(".composer-dock button")).find(button=>button.getAttribute("aria-label")==="发送消息").click()');
+    await until('document.querySelector(".composer-dock textarea").value===""', 'actual Core accepts visual send');
+    let history, answer; const deadline = Date.now() + 150000;
+    while (Date.now() < deadline) { history = await evaluate('window.fixture.refreshHistory()'); answer = history.messages.findLast(message => message.role === 'assistant'); if (answer) break; await delay(100); }
+    assert.ok(answer && !answer.error && !answer.cancelled, 'actual Provider response completes successfully');
+    await until('!!document.querySelector("#real-vision-history .chat-message.assistant .cm-markdown")', 'production MessageBubble renders actual history');
+    const domAnswer = await evaluate('document.querySelector("#real-vision-history .chat-message.assistant .cm-markdown").textContent');
+    const structured = JSON.parse(domAnswer.replace(/^```(?:json)?\s*|\s*```$/g, '').trim());
+    assert.match(structured.first, /red\s+square/i); assert.match(structured.second, /blue\s+square/i);
+    const actualSends = calls.filter(row => row.method === 'ui.chat.send' && row.request.id === realSession.id);
+    assert.equal(actualSends.length, 1); assert.equal(actualSends[0].request.attachments.length, 2); for (const attachment of actualSends[0].request.attachments) assert.deepEqual(Object.keys(attachment), ['ref']);
+    assert.ok(calls.some(row => row.method === 'ui.chat.history' && row.id === realSession.id)); assert.equal(providerRequests, 1); assert.equal(history.messages.filter(message => message.role === 'user').length, 1); assert.equal(history.messages[0].attachmentRefs.length, 2);
+    console.log(JSON.stringify({ realUiVisionEvidence: { syntheticInput: true, mockedProvider: false, entrance: 'production ChatComposer paste -> ui.chat.send -> actual Chat Core -> actual DeepSeek Provider -> chatClient.history -> production MessageBubble DOM', provider: visionProviderId, model: visionModel, requests: providerRequests, images: 2, responseFromRenderedDOM: domAnswer, usage: answer.usage ?? null } }));
+    console.log('PASS complete real visual UI -> Core -> Provider -> history -> UI: first red square / second blue square');
+  }
   await rpc('Browser.close'); await delay(750); failed = false;
   console.log('Attachment Chromium UI: PASS (real React + Core; native host acceptance remains separate)');
 } catch (error) { console.error(error.stack); throw error; } finally {
