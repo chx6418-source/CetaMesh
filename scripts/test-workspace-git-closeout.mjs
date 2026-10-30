@@ -13,7 +13,8 @@ import {createContinuityRuntime} from '../src/continuity/runtime.js';
 import {createAgentBroker} from '../src/agent/broker.js';
 import {createAgentProviderRegistry} from '../src/agent/registry.js';
 import {normalizePacket} from '../src/continuity/types.js';
-const root=fs.mkdtempSync(path.join(os.tmpdir(),'cm-git-closeout-'));
+// Match Workspace service roots, including Windows 8.3 Temp aliases.
+const root=fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(),'cm-git-closeout-')));
 const env={...process.env}; for(const key of Object.keys(env))if(key.startsWith('GIT_'))delete env[key];
 const git=(cwd,...args)=>execFileSync('git',['-c','core.hooksPath='+path.join(root,'no-hooks'),'-c','commit.gpgSign=false',...args],{cwd,env,encoding:'utf8',windowsHide:true}).trim();
 const hash=s=>crypto.createHash('sha256').update(s).digest('hex');
