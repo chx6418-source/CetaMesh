@@ -92,16 +92,18 @@ try {
  const callbackSession=await callbackProvider.createSession({taskId:'t',workspaceId:'w'});
  const callbackPeer=peers.at(-1);await callbackProvider.closeSession(callbackSession);
  assert.ok(callbackPeer.closes>0);assert.equal(fs.existsSync(callbackSession.cwd),false);
- let failedPeer,confirmFailedExit;
+ let failedPeer,confirmFailedExit,signalFailedClose;
+ const failedCloseStarted=new Promise(resolve=>{signalFailedClose=resolve;});
  const afterCallbackThrow=createCodexAppServerProvider({taskOptions,launch:binding=>{
   const handle=launch();failedPeer=peers.at(-1);failedPeer.cwd=binding.cwd;
   const done=new Promise(resolve=>{confirmFailedExit=resolve;});
-  binding.onHandle({...handle,done});
+  binding.onHandle({...handle,done,close:async()=>{await handle.close();signalFailedClose();}});
   throw Object.assign(new Error('fixture launcher failure'),{code:'FIXTURE_LAUNCH_FAILED'});
  }});
  let launchRejected=false;
  const failedCreation=assert.rejects(afterCallbackThrow.createSession({taskId:'t',workspaceId:'w'}),{code:'FIXTURE_LAUNCH_FAILED'}).then(()=>{launchRejected=true;});
- await tick();assert.ok(failedPeer.closes>0);assert.equal(launchRejected,false);
+ // Wait until failure cleanup actually starts after asynchronous staging.
+ await failedCloseStarted;assert.ok(failedPeer.closes>0);assert.equal(launchRejected,false);
  assert.equal(fs.existsSync(failedPeer.cwd),true);
  confirmFailedExit({code:0});await failedCreation;
  assert.ok(failedPeer.closes>0);assert.equal(fs.existsSync(failedPeer.cwd),false);

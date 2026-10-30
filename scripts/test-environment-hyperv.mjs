@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import childProcess, { spawnSync } from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+import { EventEmitter } from 'node:events';
 import crypto from 'node:crypto';
 import { sha256 } from '../src/environment/contracts.js';
 import { createHyperVBackend } from '../src/environment/hyperv-backend.js';
@@ -10,6 +12,46 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-hyperv-'));
 const profile={version:1,id:'fixture',backend:'hyper-v',mode:'lifecycle-fixture',network:'offline',image:{id:'win',path:path.join(root,'base.vhdx'),sha256:crypto.createHash('sha256').update('image').digest('hex'),source:'owner-approved-local-image',windowsBuild:'26100',architecture:'x64'},candidate:null,guestCredentialFile:path.join(root,'credential.xml'),limits:{cpuCount:2,memoryMiB:4096,diskGiB:64,timeoutMs:900000,maxEvidenceBytes:67108864,maxEvidenceFiles:128},packIds:['W01'],retainedLimit:1};
 const binding={version:1,actor:{kind:'owner',id:'owner'},taskId:'task',attemptId:'attempt',runId:crypto.randomUUID(),environmentId:crypto.randomUUID(),workspaceId:'workspace',capability:'environment.test',expiresAt:Date.now()+900000,profileId:profile.id,profileDigest:sha256(profile),limits:profile.limits};
 try {
+ // Exercise the actual subprocess result boundary on every OS. A launcher guard
+ // refusal must never become a passing VM check or hide an unknown driver error.
+ const originalPlatform=Object.getOwnPropertyDescriptor(process,'platform');
+ const originalSpawn=childProcess.spawn;
+ let launchResult,launchCode=1;
+ childProcess.spawn=()=>{
+  const child=new EventEmitter();child.stdout=new EventEmitter();child.stderr=new EventEmitter();
+  child.kill=()=>true;child.stdin=new EventEmitter();child.stdin.end=input=>queueMicrotask(()=>{
+   const result=typeof launchResult==='function'?launchResult(JSON.parse(input)):launchResult;
+   child.stdout.emit('data',Buffer.from(typeof result==='string'?result:JSON.stringify(result)));
+   child.emit('close',launchCode);
+  });return child;
+ };
+ syncBuiltinESMExports();Object.defineProperty(process,'platform',{value:'win32',configurable:true});
+ try {
+  const realBoundary=createHyperVBackend({hostRoot:root});
+  for(const reason of ['HOST_ROOT_MISSING','UNSAFE_PRIVILEGED_OWNER','UNSAFE_PRIVILEGED_ACL','UNSAFE_PRIVILEGED_REPARSE']) {
+   launchResult={error:{code:'HYPERV_LAUNCH_REJECTED',reason,message:'Trusted launcher rejected execution'}};
+   const blocked=await realBoundary.preflight({});
+   assert.equal(blocked.status,'BLOCKED_ENV');assert.deepEqual(blocked.reasons,[reason]);
+   assert.equal(blocked.readOnly,true);assert.equal(blocked.executed,false);
+   assert.equal(blocked.observations.permissions.trustedAcl,'UNSAFE_OR_MISSING');
+   await assert.rejects(realBoundary.prepare({binding,profile}),{code:'BLOCKED_ENV'},'unsafe launcher must never create a VM');
+   assert.equal(fs.existsSync(path.join(root,'runs',binding.runId,'ownership.json')),false);
+  }
+  for(const error of [{code:'HYPERV_LAUNCH_REJECTED',reason:'LAUNCH_FAILED'}, {code:'HYPERV_OPERATION_FAILED',message:'driver defect'}, {code:'SCRIPT_CHANGED',message:'pin mismatch'}]) {
+   launchResult={error};await assert.rejects(realBoundary.preflight({}),{code:error.code});
+  }
+  fs.writeFileSync(profile.image.path,'image');
+  const rejectedBinding={...binding,runId:crypto.randomUUID(),environmentId:crypto.randomUUID()};
+  launchResult=input=>input.operation==='preflight'?{status:'PASS'}:{error:{code:'HYPERV_LAUNCH_REJECTED',reason:'UNSAFE_PRIVILEGED_ACL'}};
+  launchCode=0;
+  await assert.rejects(realBoundary.prepare({binding:rejectedBinding,profile}),{code:'HYPERV_LAUNCH_REJECTED'},'mutation refuses the guard failure instead of treating it as a preflight report');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(root,'runs',rejectedBinding.runId,'ownership.json'),'utf8')).state,'quarantined');
+  launchCode=1;
+  launchResult='not JSON';await assert.rejects(realBoundary.preflight({}),{code:'HYPERV_INVALID_OUTPUT'});
+  launchResult={status:'PASS'};await assert.rejects(realBoundary.preflight({}),{code:'HYPERV_FAILED'});
+  launchCode=0;launchResult={status:'BLOCKED_ENV',readOnly:true,reasons:['APPROVED_PROFILE_REQUIRED'],observations:{os:{build:'fixture'}}};
+  assert.deepEqual(await realBoundary.preflight({}),launchResult,'valid driver observations pass through unchanged');
+ } finally {childProcess.spawn=originalSpawn;syncBuiltinESMExports();Object.defineProperty(process,'platform',originalPlatform);}
  fs.writeFileSync(profile.image.path,'image');
  let calls=[];
  const backend=createHyperVBackend({hostRoot:root, executePowerShell:async(op,p)=>{calls.push(op); if(op==='preflight')return {status:'PASS'}; if(op==='prepare')return {...p.resources,vmId:crypto.randomUUID()}; if(op==='inspect')return {owned:true,state:'Off'}; if(op==='stop')return {owned:true,state:'Off'}; return {status:'PASS'};}});
@@ -52,6 +94,12 @@ try {
   const preflight=await createHyperVBackend({hostRoot:root}).preflight({});
   assert.ok(['PASS','BLOCKED_ENV'].includes(preflight.status));
   assert.equal(preflight.readOnly,true);
+  if(preflight.executed===false) {
+   assert.equal(preflight.status,'BLOCKED_ENV');
+   assert.equal(preflight.observations.permissions.trustedAcl,'UNSAFE_OR_MISSING');
+   assert.equal(preflight.reasons.length,1);
+   assert.ok(['HOST_ROOT_MISSING','UNSAFE_PRIVILEGED_OWNER','UNSAFE_PRIVILEGED_ACL','UNSAFE_PRIVILEGED_REPARSE'].includes(preflight.reasons[0]));
+  } else {
   assert.equal(typeof preflight.observations.os.build,'string');
   assert.equal(typeof preflight.observations.memory.availableBytes,'number');
   assert.equal(preflight.observations.memory.hostReserveBytes,2*1024**3);
@@ -61,6 +109,7 @@ try {
   assert.ok(Object.hasOwn(preflight.observations,'network'));
   assert.ok(Object.hasOwn(preflight.observations,'existingResources'));
   assert.ok(!JSON.stringify(preflight.observations).includes('vmName'));
+  }
   const extractDefinitions=value=>{
    const normalized=value.replace(/^\uFEFF/,'').replace(/\r\n?/g,'\n');
    const entry=normalized.indexOf('\ntry {\n $raw=');

@@ -319,14 +319,17 @@ try {
   bootstrapFail=false; await bootstrap.closeSession({sessionId:bootstrapError.sessionId});
   assert.equal(fs.existsSync(bootstrapArgs.cwd),false);
 
-  let nonexitArgs;
+  let nonexitArgs, signalBootstrapClose;
+  const bootstrapCloseStarted=new Promise(resolve=>{signalBootstrapClose=resolve;});
   const bootstrapNonexit=provider({launch:async args=>{
-    nonexitArgs=args; const handle=launch(args),owned={...handle,close:async()=>{}};
+    nonexitArgs=args; const handle=launch(args),owned={...handle,close:async()=>{signalBootstrapClose();}};
     args.onHandle(owned); throw Object.assign(new Error('bootstrap failed'),{code:'FIXTURE_BOOTSTRAP_FAILED'});
   }});
   let bootSettled=false;
   const bootCreating=bootstrapNonexit.createSession({taskId:'t',workspaceId:'w'}).catch(error=>{bootSettled=true;return error;});
-  await tick(); assert.equal(bootSettled,false); assert.equal(fs.existsSync(nonexitArgs.cwd),true);
+  // Staging performs real asynchronous Git probes. Wait for the owned close
+  // attempt, not a 10 ms guess that races slow Windows runners.
+  await bootstrapCloseStarted; assert.equal(bootSettled,false); assert.equal(fs.existsSync(nonexitArgs.cwd),true);
   peers.at(-1).stop(); assert.equal((await bootCreating).code,'FIXTURE_BOOTSTRAP_FAILED');
   assert.equal(fs.existsSync(nonexitArgs.cwd),false);
   console.log('ACP fixture contract PASS');

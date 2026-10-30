@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import crypto from 'node:crypto';import {execFileSync} from 'node:child_process';
 import {normalizeDelegationVerification,verifyDelegationContract} from '../src/task/delegation-verification.js';
-const root=fs.mkdtempSync(path.join(os.tmpdir(),'cetamesh-delegation-verify-'));
+// Direct domain fixtures must satisfy the canonical Workspace-root contract.
+const root=fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(),'cetamesh-delegation-verify-')));
 const hash=file=>crypto.createHash('sha256').update(fs.readFileSync(path.join(root,file))).digest('hex');
 try {
  fs.writeFileSync(path.join(root,'math.mjs'),'original');fs.writeFileSync(path.join(root,'package.json'),'immutable package');fs.writeFileSync(path.join(root,'verify.mjs'),'immutable verification');

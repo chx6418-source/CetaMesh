@@ -772,7 +772,7 @@ try {
     stagingRoot: path.join(root, 'codex-cancel-staging'),
     createStage: async options => {
       const stage = await createStagingWorkspace(options);
-      fs.writeFileSync(path.join(stage.root, 'pending-import.txt'), 'must-clean-on-cancel');
+      fs.writeFileSync(path.join(stage.root, 'pending-import.txt'), 'retain-unimported-output');
       return stage;
     },
     resolveTaskWorkspace: ({ taskId, workspaceId }) => {
@@ -800,7 +800,9 @@ try {
   assert.equal(approvalCancelResult.state, 'cancelled');
   assert.deepEqual(cancelledApprovals, [approvalCancelResult.approvalId]);
   assert.equal(pendingApplyCalls, 1);
-  assert.equal(fs.existsSync(cancelStagePath), false, 'cancel during import approval removes the staged Workspace');
+  assert.equal(fs.existsSync(cancelStagePath), true, 'cancelled approval retains unimported output for Owner review');
+  assert.equal(fs.readFileSync(path.join(cancelStagePath, 'pending-import.txt'), 'utf8'), 'retain-unimported-output',
+    'cancellation must not destroy the unapproved executor result');
   assert.equal(cancelApprovalProvider._sessions.has(cancelSession.sessionId), false, 'cancelled staging Session cannot be reused');
   assert.equal(taskCapabilities.workspaceImportStatus(approvalCancelResult.approvalId).status, 'cancelled');
   await assert.rejects(() => taskCapabilities.execute({ method: 'capability.approval.decide', params: {
