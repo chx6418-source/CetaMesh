@@ -8,7 +8,9 @@ import { EventEmitter } from 'node:events';
 import crypto from 'node:crypto';
 import { sha256 } from '../src/environment/contracts.js';
 import { createHyperVBackend } from '../src/environment/hyperv-backend.js';
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-hyperv-'));
+// Windows TEMP may use an 8.3 alias; .NET GetFullPath expands it before
+// ownership comparison, so fixture resources must use the same canonical root.
+const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-hyperv-')));
 const profile={version:1,id:'fixture',backend:'hyper-v',mode:'lifecycle-fixture',network:'offline',image:{id:'win',path:path.join(root,'base.vhdx'),sha256:crypto.createHash('sha256').update('image').digest('hex'),source:'owner-approved-local-image',windowsBuild:'26100',architecture:'x64'},candidate:null,guestCredentialFile:path.join(root,'credential.xml'),limits:{cpuCount:2,memoryMiB:4096,diskGiB:64,timeoutMs:900000,maxEvidenceBytes:67108864,maxEvidenceFiles:128},packIds:['W01'],retainedLimit:1};
 const binding={version:1,actor:{kind:'owner',id:'owner'},taskId:'task',attemptId:'attempt',runId:crypto.randomUUID(),environmentId:crypto.randomUUID(),workspaceId:'workspace',capability:'environment.test',expiresAt:Date.now()+900000,profileId:profile.id,profileDigest:sha256(profile),limits:profile.limits};
 try {
@@ -128,9 +130,16 @@ function Get-VHD {param($Path) return [pscustomobject]@{ParentPath=$script:paren
 function Get-VMSnapshot {param($VM) return @()}
 function Get-VMNetworkAdapter {param($VM) return @()}
 $r=[pscustomobject]@{vmId=[guid]::NewGuid();vmName='owned';ownerNonce='nonce';runId='fixture';environmentId='env';vmDirectory=(Join-Path $Root 'runs\fixture\vm');diskPath=(Join-Path $Root 'runs\fixture\vm\guest.vhdx')}
+if($r.vmDirectory -cne [IO.Path]::GetFullPath($r.vmDirectory) -or $r.diskPath -cne [IO.Path]::GetFullPath($r.diskPath)){throw 'Fixture paths differ from Windows canonical paths'}
 $p=[pscustomobject]@{hostRoot=$Root;resources=$r;binding=[pscustomobject]@{runId='fixture';environmentId='env'};profile=[pscustomobject]@{limits=[pscustomobject]@{diskGiB=64}}}
 $fakeVm=[pscustomobject]@{Name='owned';Notes='CetaMesh:nonce:fixture:env';Path=$r.vmDirectory;State='Off'}
 $parent=$null
+[void](Inspect-Owned $p)
+$ownedDirectory=$r.vmDirectory
+$r.vmDirectory=Join-Path $Root 'runs\foreign\vm'
+$denied=$false;try{[void](Inspect-Owned $p)}catch{if($_.Exception.Message -eq 'OWNERSHIP_PATH_MISMATCH'){$denied=$true}else{throw}}
+if(-not $denied){throw 'Foreign ownership path accepted'}
+$r.vmDirectory=$ownedDirectory
 [void](Inspect-Owned $p)
 $fakeVm.Notes='foreign'
 $denied=$false;try{[void](Inspect-Owned $p)}catch{$denied=$true};if(-not $denied){throw 'foreign nonce accepted'}
