@@ -222,6 +222,7 @@ function auditArtifacts(outDir, bundleFile, exeFile, { noWebUi = false } = {}) {
       for (const [label, value] of [
         ['consoleToken', parsed?.consoleToken],
         ['snowluma.accessToken', parsed?.snowluma?.accessToken],
+        ['snowluma.httpAccessToken', parsed?.snowluma?.httpAccessToken],
         ['dsh.token', parsed?.dsh?.token]
       ]) {
         const text = String(value ?? '').trim();

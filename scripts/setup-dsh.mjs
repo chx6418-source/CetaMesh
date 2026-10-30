@@ -79,6 +79,7 @@ async function main() {
   const lines = [];
   const core = resolveCoreLaunch({
     packaged: false,
+    dataRoot: APP_PATHS.dataRoot,
     execPath: process.execPath,
     entryPath: path.join(SOURCE_ROOT, 'src', 'core-entry.js')
   });

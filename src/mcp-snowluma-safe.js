@@ -45,7 +45,7 @@ function getOneBotConfig() {
   const c = getConfig();
   return {
     httpUrl: (c.snowluma?.httpUrl ?? 'http://127.0.0.1:3000').replace(/\/+$/, ''),
-    token: c.snowluma?.accessToken ?? ''
+    token: c.snowluma?.httpAccessToken ?? c.snowluma?.accessToken ?? ''
   };
 }
 

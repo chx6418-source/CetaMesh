@@ -40,7 +40,7 @@ export function createQqConnectorHost({ config, dataRoot, stateDir, onMessage, o
     const wireConfig = workerMode === '--qq-connector'
       ? { snowluma: config.snowluma, allow: config.allow, deny: config.deny,
         allowAllWhenEmpty: config.allowAllWhenEmpty, socialV2: config.socialV2, fileSend: config.fileSend }
-      : { ...config, consoleToken: undefined, snowluma: { ...config.snowluma, accessToken: undefined } };
+      : { ...config, consoleToken: undefined, snowluma: { ...config.snowluma, accessToken: undefined, httpAccessToken: undefined } };
     return link.request('start', { config: wireConfig, ownershipDir, ...startParams }, 20000);
   }
   async function health() {

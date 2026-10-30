@@ -468,7 +468,7 @@ const realConfig = path.join(ROOT, 'config.json');
 if (fs.existsSync(realConfig)) {
   try {
     const parsed = JSON.parse(fs.readFileSync(realConfig, 'utf8').replace(/^\uFEFF/, ''));
-    const secrets = [parsed?.consoleToken, parsed?.snowluma?.accessToken, parsed?.dsh?.token]
+    const secrets = [parsed?.consoleToken, parsed?.snowluma?.accessToken, parsed?.snowluma?.httpAccessToken, parsed?.dsh?.token]
       .map((value) => String(value ?? '').trim())
       .filter((value) => value.length >= 8);
     for (const file of [shellExe, coreExe]) {

@@ -11,6 +11,10 @@ on:
         description: Build an internal Windows candidate (public release remains HOLD)
         type: boolean
         default: false
+      confirm_private_hold:
+        description: Owner confirms private internal candidate only; Defender RELEASE HOLD remains
+        type: boolean
+        default: false
       channel:
         description: Candidate channel
         type: choice
@@ -66,7 +70,13 @@ jobs:
     name: internal CetaMesh candidate (manual)
     runs-on: windows-latest
     needs: test
-    if: github.event_name == 'workflow_dispatch' && inputs.build_candidate && github.event.repository.private
+    if: >-
+      github.event_name == 'workflow_dispatch' && inputs.build_candidate && inputs.confirm_private_hold &&
+      github.event.repository.private && github.repository_id == '1383743267' &&
+      github.actor == github.repository_owner && github.triggering_actor == github.repository_owner
+    permissions:
+      contents: read
+      actions: read
     timeout-minutes: 90
     env:
       CANDIDATE_CHANNEL: ${{ inputs.channel }}
@@ -75,12 +85,16 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ inputs.expected_commit }}
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
           cache: npm
-      - name: Require the exact published source commit
-        run: node scripts/ci-candidate.mjs --source-only --require-expected --channel "$env:CANDIDATE_CHANNEL"
+      - name: Verify private builder, authenticated Owner dispatch and exact source
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/ci-candidate.mjs --source-only --require-expected --private-builder --channel "$env:CANDIDATE_CHANNEL"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -100,8 +114,10 @@ jobs:
           if ($env:CANDIDATE_CHANNEL -eq 'dev') { npm run build:release -- --dev --use-current-build-number }
           else { npm run build:release -- --use-current-build-number }
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Verify candidate without executing product binaries
-        run: node scripts/ci-candidate.mjs --verify --require-expected --channel "$env:CANDIDATE_CHANNEL"
+      - name: Recheck private authorization and stage verified candidate without executing product binaries
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/ci-candidate.mjs --verify --require-expected --private-builder --channel "$env:CANDIDATE_CHANNEL"
       - name: Upload internal candidate (RELEASE HOLD)
         uses: actions/upload-artifact@v4
         with:
@@ -109,6 +125,7 @@ jobs:
           path: |
             ${{ steps.candidate.outputs.directory }}/${{ steps.candidate.outputs.setup }}
             ${{ steps.candidate.outputs.directory }}/release-manifest.json
+            ${{ steps.candidate.outputs.directory }}/candidate-provenance.json
             ${{ steps.candidate.outputs.directory }}/SHA256SUMS.txt
             ${{ steps.candidate.outputs.directory }}/sbom.json
             ${{ steps.candidate.outputs.directory }}/licenses/**

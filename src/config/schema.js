@@ -42,6 +42,7 @@ const snowlumaSchema = z.looseObject({
   wsUrl: z.string().optional(),
   httpUrl: z.string().optional(),
   accessToken: z.string().optional(),
+  httpAccessToken: z.string().optional(),
   launcherPath: z.string().optional(),
   homeDir: z.string().optional(),
   webUrl: z.string().optional(),

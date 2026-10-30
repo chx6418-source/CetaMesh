@@ -904,7 +904,8 @@ export function createLocalServiceManager({ root, config = {}, onLog = () => {},
   }
 
   function snowLumaProbeHeaders() {
-    return config?.snowluma?.accessToken ? { authorization: `Bearer ${config.snowluma.accessToken}` } : {};
+    const token = config?.snowluma?.httpAccessToken ?? config?.snowluma?.accessToken;
+    return token ? { authorization: `Bearer ${token}` } : {};
   }
 
   function dshWebUrl() {

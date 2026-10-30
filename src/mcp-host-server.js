@@ -36,7 +36,7 @@ function getHostConfig() {
   return {
     httpUrl,
     httpPort: new URL(httpUrl).port || '80',
-    token: c.snowluma?.accessToken ?? '',
+    token: c.snowluma?.httpAccessToken ?? c.snowluma?.accessToken ?? '',
     launcher,
     homeDir: c.snowluma?.homeDir ?? (launcher ? path.dirname(launcher) : ''),
     // 进程控制默认关闭：只有 config.json 显式设置 snowluma.allowProcessControl=true 才允许启停

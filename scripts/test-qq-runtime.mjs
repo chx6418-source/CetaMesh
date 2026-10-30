@@ -18,6 +18,51 @@ import { writeJsonAtomic } from '../src/storage/json-file.js';
 import { dataCall, resolveDataPipeName } from '../src/control/data-ipc.js';
 import { terminateSuiteProcessTree } from '../src/testing/suite-process.js';
 import { pathToFileURL } from 'node:url';
+import { WebSocketServer } from 'ws';
+import { redactObject } from '../src/logging/redact.js';
+
+assert.ok(!JSON.stringify(redactObject({ snowluma: { httpAccessToken: 'fixture-http-secret', accessToken: 'fixture-ws-secret' } }))
+  .includes('fixture-http-secret'), 'independent HTTP credential must be redacted from object diagnostics');
+
+// A real gateway can configure independent HTTP and WebSocket credentials.
+// Neither transport is allowed to borrow an invalid credential from the other.
+{
+  let sends = 0;
+  const server = http.createServer(async (req, res) => {
+    for await (const _ of req) { /* Consume the bounded fixture request. */ }
+    if (req.headers.authorization !== 'Bearer fixture-http-only') {
+      res.writeHead(401); res.end('{}'); return;
+    }
+    const data = req.url === '/get_login_info' ? { user_id: 10001 }
+      : req.url === '/send_group_msg' ? { message_id: ++sends } : {};
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({ status: 'ok', retcode: 0, data }));
+  });
+  const sockets = new WebSocketServer({ server });
+  sockets.on('connection', (socket, req) => {
+    if (req.headers.authorization !== 'Bearer fixture-ws-only') { socket.close(); return; }
+    socket.on('message', bytes => {
+      const call = JSON.parse(bytes.toString());
+      socket.send(JSON.stringify({ status: 'ok', retcode: 0, echo: call.echo, data: { user_id: 10001 } }));
+    });
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  const split = createQqRuntime({ config: { snowluma: { wsUrl: `ws://127.0.0.1:${port}`,
+    httpUrl: `http://127.0.0.1:${port}`, accessToken: 'fixture-ws-only', httpAccessToken: 'fixture-http-only' } } });
+  try {
+    assert.equal((await split.connect()).connected, true);
+    assert.equal((await split.sendOneBot('send_group_msg', { group_id: 42, message: 'fixture' })).message_id, 1,
+      'HTTP writes and identity verification must use their own configured token');
+    assert.equal(sends, 1);
+  } finally {
+    await split.stop();
+    for (const socket of sockets.clients) socket.terminate();
+    await new Promise(resolve => sockets.close(resolve));
+    await new Promise(resolve => server.close(resolve));
+  }
+  console.log('PASS actual HTTP/WS independent gateway credentials and account verification');
+}
 
 class FakeClient extends EventEmitter {
   constructor() {

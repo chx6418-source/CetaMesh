@@ -51,6 +51,12 @@ function step(message) {
 }
 
 const DEV_CORE = resolveCoreLaunch({ packaged: false, execPath: process.execPath, entryPath: ENTRY });
+const scopedDataRoot = path.join(os.tmpdir(), 'CetaMesh MCP scope');
+const scopedCore = resolveCoreLaunch({ packaged: false, execPath: process.execPath, entryPath: ENTRY, dataRoot: scopedDataRoot });
+assert.deepEqual(scopedCore.argsPrefix, [ENTRY, '--data-dir', scopedDataRoot],
+  'source MCP must retain the configured Core data root after migration');
+assert.deepEqual(resolveCoreLaunch({ packaged: true, execPath: process.execPath, dataRoot: scopedDataRoot }).argsPrefix,
+  ['--data-dir', scopedDataRoot], 'packaged MCP also preserves explicit data ownership');
 const PACKAGED_CORE = resolveCoreLaunch({
   packaged: true,
   execPath: 'D:\\Program Files\\WhaleBridge\\WhaleBridgeCore.exe'

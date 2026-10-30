@@ -57,7 +57,7 @@ export const TEXT_RULES = Object.freeze([
 /** 字段层：这些 key 的**值**整体替换为摘要（不保留内容，只报长度与类型）。 */
 export const SENSITIVE_KEYS = Object.freeze([
   'prompt', 'systemprompt', 'system_prompt', 'messages', 'conversation', 'history',
-  'apikey', 'api_key', 'token', 'accesstoken', 'access_token', 'refreshtoken',
+  'apikey', 'api_key', 'token', 'accesstoken', 'access_token', 'httpaccesstoken', 'http_access_token', 'refreshtoken',
   'secret', 'pairingsecret', 'pairing_secret', 'invitecode', 'invite_code',
   'privatekey', 'private_key', 'password', 'passwd', 'credential', 'authorization', 'cookie'
 ]);

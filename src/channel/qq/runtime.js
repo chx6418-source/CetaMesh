@@ -82,11 +82,12 @@ export function createQqRuntime({
 
   async function callHttpAction(action, params) {
     const httpUrl = String(config.snowluma?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
+    const accessToken = config.snowluma?.httpAccessToken ?? config.snowluma?.accessToken;
     const response = await fetch(`${httpUrl}/${action}`, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        ...(config.snowluma?.accessToken ? { authorization: `Bearer ${config.snowluma.accessToken}` } : {})
+        ...(accessToken ? { authorization: `Bearer ${accessToken}` } : {})
       },
       body: JSON.stringify(params), signal: AbortSignal.timeout(60000)
     });

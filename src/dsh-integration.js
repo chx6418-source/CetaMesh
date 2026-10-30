@@ -70,17 +70,18 @@ export function yamlSingleQuote(value) {
  * - 发布（SEA）：execPath 就是 WhaleBridgeCore.exe，args 里不能再带入口脚本；
  * - 开发：execPath 是 node.exe，args 必须带上 src/core-entry.js。
  */
-export function resolveCoreLaunch({ packaged, execPath = process.execPath, entryPath }) {
+export function resolveCoreLaunch({ packaged, execPath = process.execPath, entryPath, dataRoot }) {
   const command = path.resolve(execPath);
+  const dataArgs = dataRoot ? ['--data-dir', path.resolve(dataRoot)] : [];
   if (packaged) {
-    return { packaged: true, command, argsPrefix: [], description: `WhaleBridgeCore.exe（打包）：${command}` };
+    return { packaged: true, command, argsPrefix: dataArgs, description: `WhaleBridgeCore.exe（打包）：${command}` };
   }
   if (!entryPath) throw new Error('开发模式需要 src/core-entry.js 的绝对路径');
   const entry = path.resolve(entryPath);
   return {
     packaged: false,
     command,
-    argsPrefix: [entry],
+    argsPrefix: [entry, ...dataArgs],
     description: `node + 源码入口：${command} ${entry}`
   };
 }
@@ -1216,6 +1217,7 @@ export async function runSetupDsh(options = {}) {
   if (!resourceRoot || !dataRoot) throw new Error('runSetupDsh 需要 resourceRoot 与 dataRoot');
   const resolvedCore = core ?? resolveCoreLaunch({
     packaged: false,
+    dataRoot,
     entryPath: path.join(sourceRoot ?? resourceRoot, 'src', 'core-entry.js')
   });
   const manifest = readManifest(dshHome);
@@ -1291,6 +1293,7 @@ export function installProfileBundle(profile, log = () => {}) {
 export async function runSetupDshFromApp(options = {}) {
   const core = resolveCoreLaunch({
     packaged: isPackagedRuntime(),
+    dataRoot: options.dataRoot ?? APP_PATHS.dataRoot,
     execPath: process.execPath,
     entryPath: path.join(APP_PATHS.sourceRoot, 'src', 'core-entry.js')
   });
