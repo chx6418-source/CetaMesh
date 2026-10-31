@@ -13,7 +13,7 @@ import { LEGACY_RETIRED_TOOLS, isDesktopLocalService } from '../integrations/cat
 // Business state stays in existing Core services; this module owns no persistent data.
 
 const EVENT_NAMES = Object.freeze([
-  'core.status', 'chat.updated', 'chat.streaming', 'task.updated', 'task.deleted',
+  'core.status', 'diagnostics.updated', 'chat.updated', 'chat.streaming', 'task.updated', 'task.deleted',
   'chat.warning', 'agent.updated', 'workspace.updated', 'plugin.updated', 'plugin.downloadProgress', 'approval.pending',
   'approval.resolved', 'approval.operation', 'channel.message', 'channel.delivery', 'model.updated', 'memory.updated', 'update.status', 'device.updated'
 ]);

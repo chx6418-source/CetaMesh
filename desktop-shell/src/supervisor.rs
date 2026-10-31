@@ -207,7 +207,19 @@ pub fn wait_for_ipc(
         }
         match probe_ipc(pipe_name, Duration::from_millis(800)) {
             Ok(()) => return Ok(started.elapsed()),
-            Err(error) => last_error = error,
+            Err(error) => {
+                // A peer that answered with another protocol or rejected the
+                // authenticated ping is not merely slow. Preserve the precise
+                // communication failure rather than polling until a generic
+                // startup timeout hides it.
+                if error.starts_with("unexpected UI IPC ready event")
+                    || error.starts_with("invalid Core IPC ping response")
+                    || error.starts_with("decode core.ready event")
+                    || error.starts_with("decode Core IPC ping response") {
+                    return Err(error);
+                }
+                last_error = error;
+            }
         }
         thread::sleep(Duration::from_millis(100));
     }
@@ -419,6 +431,17 @@ pub struct Supervisor {
 }
 
 impl Supervisor {
+    /// A launch configuration failure still needs a native diagnostic window.
+    /// This handle owns no child and never starts an implicit retry loop.
+    pub fn unavailable() -> Self {
+        let (commands, _) = mpsc::channel();
+        Self {
+            commands, stdin: Arc::new(Mutex::new(None)), child_pid: Arc::new(Mutex::new(None)),
+            status: Arc::new(Mutex::new(Status::Stopped { exit_code:-1,
+                reason:"Core 启动配置不可用，请查看本机诊断并修复后重启。".to_owned(),needs_attention:true })),
+            spawn_count:Arc::new(Mutex::new(0)),thread:Mutex::new(None),
+        }
+    }
     pub fn start(config: SupervisorConfig) -> Self {
         Self::start_inner(config, None)
     }
@@ -501,19 +524,16 @@ fn run_supervisor(
         let mut child = match spawn_worker(&config) {
             Ok(child) => child,
             Err(error) => {
+                write_shell_log(&config.data_dir, &format!("[spawn-failed] {error}"));
                 set_status(
                     &status,
-                    Status::Stopped {
-                        exit_code: -1,
-                        reason: error,
-                        needs_attention: true,
-                    },
+                    Status::GivenUp { exit_code: -1, failures: 1 },
                     listener.as_ref(),
                 );
-                if !sleep_interruptible(BACKOFF_MAX, &commands, &mut pending_restart) {
-                    return;
-                }
-                continue;
+                // A missing, inaccessible or rejected executable is a launch
+                // fault, not a network outage. Repeated respawns cannot repair
+                // it and previously looped forever outside the retry budget.
+                return;
             }
         };
         let pid = child.id();
@@ -815,7 +835,42 @@ fn touch(_: &File) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn missing_worker_is_a_terminal_diagnostic_failure_not_an_unbounded_spawn_loop() {
+        let directory=std::env::temp_dir().join(format!("cetamesh-missing-worker-{}",std::process::id()));
+        let supervisor=Supervisor::start(SupervisorConfig {
+            launch:CoreLaunchSpec {mode:crate::core_launch::CoreMode::Development,
+                program:directory.join("does-not-exist.exe"),args:Vec::new(),env:Vec::new()},
+            data_dir:directory.clone(),console_port:1,ipc_pipe:None,health_timeout:Duration::from_millis(20),
+        });
+        std::thread::sleep(Duration::from_millis(200));
+        let status=supervisor.status();
+        supervisor.shutdown();
+        assert!(matches!(status,Status::GivenUp{failures:1,..}),"{status:?}");
+        assert_eq!(supervisor.spawn_count(),0);
+        if directory.is_dir(){fs::remove_dir_all(directory).unwrap();}
+    }
     use std::net::TcpListener;
+
+    #[cfg(windows)]
+    #[test]
+    fn real_incompatible_named_pipe_peer_fails_before_generic_startup_timeout() {
+        // A deliberately incompatible peer tests actual Windows pipe I/O. It is
+        // failure injection, never evidence that a real Core service is healthy.
+        let nonce=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let pipe=format!(r"\\.\pipe\CetaMesh-Protocol-Fault-{}-{nonce}",std::process::id());
+        let script="const net=require('node:net');const server=net.createServer(socket=>{const body=Buffer.from(JSON.stringify({version:2,event:'core.ready'}));const head=Buffer.alloc(4);head.writeUInt32LE(body.length);socket.end(Buffer.concat([head,body]));});server.listen(process.argv[1]);process.stdin.resume();process.stdin.once('end',()=>process.exit(0));";
+        let mut child=hidden("node").args(["-e",script,&pipe]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().expect("Node is a Desktop test dependency");
+        let started=Instant::now();
+        let result=wait_for_ipc(&pipe,Duration::from_secs(3),||matches!(child.try_wait(),Ok(Some(_))));
+        drop(child.stdin.take());
+        let cleanup_deadline=Instant::now()+Duration::from_secs(1);
+        while !matches!(child.try_wait(),Ok(Some(_)))&&Instant::now()<cleanup_deadline {thread::sleep(Duration::from_millis(20));}
+        if !matches!(child.try_wait(),Ok(Some(_))){let _=child.kill();let _=child.wait();}
+        let error=result.expect_err("version 2 must never be accepted as protocol 1");
+        assert!(error.starts_with("unexpected UI IPC ready event"),"{error}");
+        assert!(started.elapsed()<Duration::from_secs(2),"a proven contract mismatch must not become a generic timeout");
+    }
 
     #[test]
     fn backoff_escalates_then_caps() {

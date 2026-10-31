@@ -9,6 +9,7 @@ pub const MAX_BRIDGE_REQUEST_BYTES: usize = 900 * 1024;
 pub const PRODUCTION_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; font-src 'self'; connect-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'";
 
 const UI_METHODS: &[&str] = &[
+    "ui.diagnostics.status", "ui.diagnostics.run", "ui.diagnostics.history", "ui.diagnostics.read",
     "ui.preview.open", "ui.preview.read", "ui.preview.close",
     "ui.events.next",
     "ui.chat.sessions.list", "ui.chat.sessions.create", "ui.chat.sessions.rename",
@@ -56,8 +57,12 @@ const UI_METHODS: &[&str] = &[
     "ui.approvals.grant.revoke", "ui.approvals.list", "ui.approvals.decide", "ui.approvals.operation", "ui.approvals.cancel", "ui.search"
 ];
 
+pub fn allowed_while_blocked(method:&str)->bool {
+    matches!(method,"ui.events.next"|"ui.chat.status"|"ui.task.get"|"ui.approvals.list"|"ui.chat.stop"|"ui.task.pause"|"ui.task.cancel"|"ui.approvals.cancel")
+}
+
 fn is_allowed_method(method: &str) -> bool {
-    matches!(method, "app.previewBrowser.open" | "app.previewBrowser.layout" | "app.previewBrowser.command" | "app.windowAction" | "app.ping" | "app.about" | "app.status" | "app.openExternal" | "app.openArtifact" | "app.pickFolder" | "app.pickFiles" | "app.pickExtensionPackage" | "app.setWindowBehavior")
+    matches!(method, "app.diagnostics.status" | "app.diagnostics.run" | "app.diagnostics.history" | "app.diagnostics.read" | "app.diagnostics.export" | "app.diagnostics.feedback" | "app.previewBrowser.open" | "app.previewBrowser.layout" | "app.previewBrowser.command" | "app.windowAction" | "app.ping" | "app.about" | "app.status" | "app.openExternal" | "app.openArtifact" | "app.pickFolder" | "app.pickFiles" | "app.pickExtensionPackage" | "app.setWindowBehavior")
         || UI_METHODS.contains(&method)
 }
 
@@ -244,6 +249,10 @@ pub fn parse_bridge_request(raw: &str) -> Result<BridgeRequest, String> {
         if params_object.len() != 1 || params_object.get("url").and_then(Value::as_str).is_none_or(|url| url.len() > 2048) {
             return Err("external link requires one bounded URL".to_owned());
         }
+    } else if matches!(method, "app.diagnostics.read" | "app.diagnostics.export") {
+        if params_object.len() != 1 || !params_object.get("id").and_then(Value::as_str).is_some_and(crate::startup_diagnostics::valid_report_id) {
+            return Err("diagnostic report requires one stable report identity".to_owned());
+        }
     } else if method == "app.openArtifact" {
         validate_artifact_open_params(params)?;
     } else if method.starts_with("app.") && !params_object.is_empty() {
@@ -255,6 +264,37 @@ pub fn parse_bridge_request(raw: &str) -> Result<BridgeRequest, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn blocked_execution_preserves_only_cancellation_and_safe_recovery_reads(){
+        for method in ["ui.events.next","ui.chat.status","ui.task.get","ui.approvals.list","ui.chat.stop","ui.task.pause","ui.task.cancel","ui.approvals.cancel"] {
+            assert!(allowed_while_blocked(method),"blocked Core must still permit {method}");
+        }
+        for method in ["ui.chat.send","ui.task.start","ui.task.resume","ui.task.handoff","ui.approvals.decide","ui.plugins.enable","app.previewBrowser.open","app.openArtifact"] {
+            assert!(!allowed_while_blocked(method),"no implicit execution permission for {method}");
+        }
+    }
+    #[test]
+    fn diagnostic_bridge_remains_available_without_core_and_rejects_paths_and_urls() {
+        for method in ["app.diagnostics.status", "app.diagnostics.run", "app.diagnostics.history", "app.diagnostics.feedback"] {
+            let request = serde_json::json!({"id":"diagnostics", "method":method, "params":{}});
+            assert!(parse_bridge_request(&request.to_string()).is_ok(), "{method}");
+            let injected = serde_json::json!({"id":"diagnostics", "method":method, "params":{"url":"https://evil.test","path":"C:/private"}});
+            assert!(parse_bridge_request(&injected.to_string()).is_err());
+        }
+        for method in ["app.diagnostics.read", "app.diagnostics.export"] {
+            let request = serde_json::json!({"id":"diagnostics", "method":method, "params":{"id":"76baad50-cb09-41c4-a0a0-a5d493179c82"}});
+            assert!(parse_bridge_request(&request.to_string()).is_ok());
+            for params in [serde_json::json!({"id":"../../private"}),serde_json::json!({"id":"bad"}),serde_json::json!({"id":"76baad50-cb09-41c4-a0a0-a5d493179c82","path":"C:/"})] {
+                let request = serde_json::json!({"id":"diagnostics", "method":method, "params":params});
+                assert!(parse_bridge_request(&request.to_string()).is_err());
+            }
+        }
+        for method in ["ui.diagnostics.status", "ui.diagnostics.run", "ui.diagnostics.history", "ui.diagnostics.read"] {
+            let request = serde_json::json!({"id":"diagnostics", "method":method, "params":{}});
+            assert!(parse_bridge_request(&request.to_string()).is_ok());
+        }
+    }
+
     #[test]
     fn reference_browser_bridge_accepts_only_scoped_operations() {
         let request = serde_json::json!({"id":"preview1","method":"app.previewBrowser.open","params":{"targetId":"preview-1","url":"https://example.com","bounds":{"x":800,"y":100,"width":400,"height":600,"scale":1}}});

@@ -1,5 +1,23 @@
 import type { AboutView } from '../types/views';
 
+export type DiagnosticsStatus = 'PASS' | 'DEGRADED' | 'BLOCKED' | 'NOT_RUN';
+export interface DiagnosticsCheck {
+  id: string; stage: 'storage' | 'core' | 'extensions' | 'transport'; status: DiagnosticsStatus;
+  code: string; reason: string; remediation: string; timedOut: boolean; durationMs: number;
+}
+export interface DiagnosticsReport {
+  schemaVersion: 1; id: string; generatedAt: string; trigger: 'startup' | 'manual' | 'runtime';
+  status: Exclude<DiagnosticsStatus, 'NOT_RUN'>;
+  product: { version: string | null; shellVersion?: string | null;
+    build: { buildId: string | null; commit: string | null; buildTime: string | null };
+    runtime: { platform: string | null; arch: string | null; node: string | null; osVersion?: string | null } };
+  checks: DiagnosticsCheck[]; unconfirmedEffects: boolean | null;
+  feedback: { url: string | null; configured: boolean };
+  retention: { maxReports: number; maxAgeDays: number; maxBytes: number }; persisted: boolean;
+}
+export interface DiagnosticsState { report: DiagnosticsReport | null; coreAvailable: boolean }
+export type DiagnosticsSummary = Pick<DiagnosticsReport, 'id' | 'generatedAt' | 'status' | 'trigger' | 'persisted'>;
+
 export interface ChatSession {
   id: string; title: string; createdAt: string | number | null; updatedAt: string | number | null;
   archived: boolean; taskId: string | null; config: { mode: string; modelProvider: string | null; model: string; agentProvider: string | null; workspaceId: string | null };
@@ -161,7 +179,7 @@ export interface IntegrationSettings {
 }
 
 export type DesktopEvent = 'preview.browser' | 'core.status' | 'chat.updated' | 'chat.streaming' | 'chat.warning' | 'task.updated' | 'task.deleted'
-  | 'core.restarted'
+  | 'core.restarted' | 'diagnostics.updated'
   | 'agent.updated' | 'workspace.updated' | 'plugin.updated' | 'plugin.downloadProgress' | 'approval.pending' | 'approval.resolved'
   | 'approval.operation' | 'channel.message' | 'channel.delivery'
   | 'model.updated' | 'memory.updated' | 'update.status' | 'device.updated';
@@ -201,8 +219,15 @@ type UiMethod =
   | 'ui.approvals.grant.revoke' | 'ui.approvals.list' | 'ui.approvals.decide' | 'ui.approvals.operation' | 'ui.approvals.cancel' | 'ui.search';
 type Empty = Record<string, never>;
 export type WindowAction = 'state' | 'drag' | 'minimize' | 'maximize' | 'close' | 'appearanceLight' | 'appearanceDark' | 'resizeNorth' | 'resizeNorthEast' | 'resizeEast' | 'resizeSouthEast' | 'resizeSouth' | 'resizeSouthWest' | 'resizeWest' | 'resizeNorthWest';
-type HostMethod = 'app.previewBrowser.open' | 'app.previewBrowser.layout' | 'app.previewBrowser.command' | 'app.windowAction' | 'app.ping' | 'app.status' | 'app.about' | 'app.openExternal' | 'app.openArtifact' | 'app.pickFolder' | 'app.pickFiles' | 'app.pickExtensionPackage' | 'app.setWindowBehavior';
+type HostMethod = 'app.previewBrowser.open' | 'app.previewBrowser.layout' | 'app.previewBrowser.command' | 'app.windowAction' | 'app.ping' | 'app.status' | 'app.about' | 'app.openExternal' | 'app.openArtifact' | 'app.pickFolder' | 'app.pickFiles' | 'app.pickExtensionPackage' | 'app.setWindowBehavior'
+  | 'app.diagnostics.status' | 'app.diagnostics.run' | 'app.diagnostics.history' | 'app.diagnostics.read' | 'app.diagnostics.export' | 'app.diagnostics.feedback';
 type HostMap = {
+  'app.diagnostics.status': { params: Empty; result: DiagnosticsState };
+  'app.diagnostics.run': { params: Empty; result: DiagnosticsState };
+  'app.diagnostics.history': { params: Empty; result: { reports: DiagnosticsSummary[] } };
+  'app.diagnostics.read': { params: { id: string }; result: { report: DiagnosticsReport } };
+  'app.diagnostics.export': { params: { id: string }; result: { exported: boolean; cancelled?: boolean } };
+  'app.diagnostics.feedback': { params: Empty; result: { opened: boolean; url: string | null } };
   'app.previewBrowser.open': { params: { targetId: string; url: string; bounds: PreviewBounds }; result: { opened: boolean } };
   'app.previewBrowser.layout': { params: { targetId: string; bounds: PreviewBounds; visible: boolean }; result: { updated: boolean } };
   'app.previewBrowser.command': { params: { targetId: string; action: 'back' | 'forward' | 'reload' | 'close' }; result: { updated: boolean } };
@@ -242,7 +267,7 @@ let eventPump: Promise<void> | null = null;
 const MAX_BRIDGE_REQUEST_BYTES = 900 * 1024;
 // Native selectors wait for human input. Keep their wait bounded without
 // expiring them at the ordinary RPC deadline while the dialog is still open.
-const NATIVE_SELECTOR_METHODS = new Set(['app.pickFolder', 'app.pickFiles', 'app.pickExtensionPackage']);
+const NATIVE_SELECTOR_METHODS = new Set(['app.pickFolder', 'app.pickFiles', 'app.pickExtensionPackage', 'app.diagnostics.export']);
 
 function send<T>(method: HostMethod | UiMethod, params: object): Promise<T> {
   if (!window.ipc) return Promise.reject(new Error('桌面主机连接不可用。请从 CetaMesh Desktop 打开此界面。'));
@@ -315,6 +340,17 @@ export const bridge: HostBridge = Object.freeze({
   }
 });
 window.cetamesh = bridge;
+
+// These methods are served by the native host even when Core cannot start.
+// No renderer-supplied path or URL can select a report file or feedback target.
+export const diagnosticsClient = {
+  status: () => bridge.invoke('app.diagnostics.status', {}),
+  run: () => bridge.invoke('app.diagnostics.run', {}),
+  history: () => bridge.invoke('app.diagnostics.history', {}),
+  read: (id: string) => bridge.invoke('app.diagnostics.read', { id }),
+  export: (id: string) => bridge.invoke('app.diagnostics.export', { id }),
+  feedback: () => bridge.invoke('app.diagnostics.feedback', {})
+};
 
 export const chatClient = {
   sessions: {

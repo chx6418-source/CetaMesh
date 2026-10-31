@@ -67,6 +67,9 @@ export function createDesktopIpcRuntime({
   function dispatch({ method, params } = {}, context = {}) {
     if (stopping || isStopping()) throw Object.assign(new Error('Core is shutting down'), { code: 'CORE_STOPPING' });
     const name = String(method ?? '');
+    if (name.startsWith('ui.diagnostics.')) return services.diagnostics?.execute({method:name,params:params??{}})
+      ?? Promise.reject(Object.assign(new Error('Diagnostics unavailable'),{code:'DIAGNOSTICS_UNAVAILABLE'}));
+    if (services.diagnostics?.blocked() && !['ui.events.next','ui.chat.status','ui.task.get','ui.approvals.list','ui.chat.stop','ui.task.pause','ui.task.cancel','ui.approvals.cancel','chat.stop','task.pause','task.cancel','agent.cancel','capability.operation.cancel'].includes(name)) throw Object.assign(new Error('Core startup checks blocked normal operation; open system diagnostics'),{code:'CORE_DIAGNOSTICS_BLOCKED'});
     // Native IPC accepts a decision, never holds a transport request open for work.
     if (name === 'capability.approval.decide') params = { ...params, defer: true };
     const route = ROUTES.find(([prefix]) => name.startsWith(prefix));

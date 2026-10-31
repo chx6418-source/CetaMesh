@@ -7,7 +7,7 @@ export function bootstrapCetaMesh(options = {}) {
   const owner = options.owner ?? acquireStateOwner(options.stateDir ?? APP_PATHS.stateDir);
   let services;
   try { services = createCetaMeshServices(options); }
-  catch (error) { owner.release(); throw error; }
+  catch (error) { if (!options.retainOwnerOnFailure) owner.release(); throw error; }
   const lifecycle = createApplicationLifecycle({
     processRef: options.processRef ?? process,
     log: options.log ?? (() => {}),

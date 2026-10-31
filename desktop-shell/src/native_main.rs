@@ -24,6 +24,7 @@ mod supervisor;
 mod tray;
 mod ui_prefs;
 mod webview_policy;
+mod startup_diagnostics;
 mod reference_browser_policy;
 #[cfg(windows)]
 mod reference_browser;
@@ -281,12 +282,20 @@ fn smoke_test(supervise: Duration, test_restart_once: bool) -> i32 {
     let mut reached_ready = false;
     let mut last_status = None;
     let mut last_pid = None;
+    let diagnostics=startup_diagnostics::NativeDiagnostics::new(&paths.data_dir);
+    let api=IpcClient::new(pipe.clone());
     while Instant::now() < deadline {
         log_smoke_snapshot(&supervisor, &paths, &mut last_status, &mut last_pid);
         let status = supervisor.status();
         if status.is_ready() {
-            reached_ready = true;
-            break;
+            let state=diagnostics.status(&api,&supervisor,false);
+            if diagnostics.allows_work(){
+                println!("startup_gate={}",state["report"]["status"].as_str().unwrap_or("BLOCKED"));
+                reached_ready=true;break;
+            }
+            if state["report"]["pending"]!=true {
+                println!("startup_gate=BLOCKED");break;
+            }
         }
         if status.needs_attention() {
             break;
@@ -294,6 +303,7 @@ fn smoke_test(supervise: Duration, test_restart_once: bool) -> i32 {
         std::thread::sleep(Duration::from_millis(150));
     }
     println!("reached_ready={reached_ready}");
+    let mut business_rpc_passed=true;
     if reached_ready {
         // Exercise the shipped Harbor/Core methods. QQ policy and old Bridge
         // control commands belong to the explicit Legacy connector entry.
@@ -309,10 +319,12 @@ fn smoke_test(supervise: Duration, test_restart_once: bool) -> i32 {
             match IpcClient::new(pipe.clone()).request(method, serde_json::json!({})) {
                 Ok(value) if value.get(field).is_some() => println!("{label}=ok"),
                 Ok(value) => {
+                    business_rpc_passed=false;
                     eprintln!("{label}=invalid: {value}");
                     println!("{label}=failed");
                 }
                 Err(error) => {
+                    business_rpc_passed=false;
                     eprintln!("{label}=failed: {error}");
                     println!("{label}=failed");
                 }
@@ -342,7 +354,7 @@ fn smoke_test(supervise: Duration, test_restart_once: bool) -> i32 {
     }
     println!("spawn_count_after_supervise={}", supervisor.spawn_count());
     supervisor.shutdown();
-    if reached_ready { 0 } else { 4 }
+    if !reached_ready {4} else if business_rpc_passed {0} else {5}
 }
 
 fn print_core_command(args: &[String]) -> i32 {
@@ -551,6 +563,7 @@ fn main() {
             std::process::exit(2);
         }
     };
+    let diagnostic_data_dir=paths.data_dir.clone();
     let app_result = match selection.mode {
         webview_policy::UiMode::Legacy => run_native_ui(paths),
         webview_policy::UiMode::V2 => {
@@ -561,11 +574,7 @@ fn main() {
         }
     };
     if let Err(error) = app_result {
-        let _ = rfd::MessageDialog::new()
-            .set_title("CetaMesh 启动失败")
-            .set_description(&error)
-            .set_buttons(rfd::MessageButtons::Ok)
-            .show();
+        startup_diagnostics::show_native_startup_failure(&diagnostic_data_dir);
         eprintln!("[whalebridge-desktop] {error}");
         std::process::exit(1);
     }

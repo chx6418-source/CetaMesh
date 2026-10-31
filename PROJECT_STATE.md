@@ -102,3 +102,9 @@
 - Git 与 Task 共享 Unified/Split Diff；文件选择仍是受控提交范围。没有既有授权执行器的暂存操作明确不可用，不新增 Git 权限或 Runtime。
 - Windows 使用同色原生标题栏、系统按钮和缩放边框；原生宿主声明后不再重复绘制网页标题栏。Windows Snap、DPI、系统操作与源码/浏览器验收分别记录，不能据静态构建推定全部通过。
 - 设计规则见 [Harbor UI conventions](docs/desktop/UI_DESIGN_GUIDE.md)。本地开发和隔离 Debug 验收不更新已安装版本，不解除 Defender RELEASE HOLD。
+
+## Desktop 启动诊断追加（2026-10-31）
+
+- 在现有全局 Harbor UI 和原生 Windows Shell 上加入统一只读启动检查与 PASS / DEGRADED / BLOCKED 门禁。关键数据预检先于领域恢复，损坏原文件不自动覆盖；平台工具派发继续经过既有 Capability Broker 和审批。
+- 正常界面、设置/关于和异常启动页复用统一诊断及官方反馈入口。Core 不可用时保留原生本地报告、导出和浏览器反馈；不自动上传诊断资料。
+- 默认检查不创建付费模型回合、外部 Agent 会话、QQ 消息、软件安装或 VM。可选能力明确标识 DEGRADED / NOT_RUN，真实执行及正式发布仍按独立环境与安全门槛验收。Defender RELEASE HOLD 不变。

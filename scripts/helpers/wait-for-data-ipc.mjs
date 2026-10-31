@@ -17,10 +17,10 @@ export async function waitForDataIpc(dataRoot, {
       const token = fs.readFileSync(path.join(dataRoot, 'state', 'agent-token'), 'utf8').trim();
       if (!token) throw Object.assign(new Error('Data IPC token is not ready'), { code: 'TOKEN_NOT_READY' });
       const res = await call({ path: '/api/status', token, timeoutMs: Math.min(2000, Math.max(1, deadline - now())), pipeName });
-      if (res.ok && res.status === 200) return res;
+      if (res.ok && res.status === 200 && res.json?.ready !== false) return res;
       const error = new Error(`Data IPC readiness returned status ${res.status}`);
       // Re-read the token on every attempt; a persistent 401 still fails at the deadline.
-      if (res.status === 401 || res.status === 503) error.code = 'IPC_NOT_READY';
+      if (res.status === 401 || res.status === 503 || res.json?.ready === false) error.code = 'IPC_NOT_READY';
       throw error;
     } catch (error) {
       if (!retryable.has(error.code)) throw error;

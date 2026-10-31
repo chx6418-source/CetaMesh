@@ -1,13 +1,15 @@
-import { useEffect, useRef } from 'react';
+import { useContext, useEffect, useRef } from 'react';
 import type { ReactNode } from 'react';
 import { IconButton } from './inputs';
 import { AnimatePresence, motion, useIsPresent, useReducedMotion } from 'motion/react';
 import { createPortal } from 'react-dom';
+import {InteractionSuspensionContext} from './interaction-suspension';
 
 export function Dialog({ open, title, onClose, children }: { open: boolean; title: string; onClose(): void; children: ReactNode }) {
   const ref = useRef<HTMLDialogElement>(null);
-  useEffect(() => { const element = ref.current; if (!element) return; if (open && !element.open) element.showModal(); if (!open && element.open) element.close(); }, [open]);
-  const content = <dialog ref={ref} className="cm-dialog" aria-label={title} onClose={onClose} onKeyDown={event=>{if(event.key==='Escape'&&!event.defaultPrevented){event.preventDefault();event.stopPropagation();onClose();}}}><div className="row between"><h2>{title}</h2><IconButton label="关闭" icon="close" onClick={onClose} /></div>{children}</dialog>;
+  const suspended=useContext(InteractionSuspensionContext),programmaticCloses=useRef(0);
+  useEffect(() => { const element = ref.current; if (!element) return; if (open && !suspended && !element.open) element.showModal(); if ((!open || suspended) && element.open) {programmaticCloses.current++;element.close();} }, [open,suspended]);
+  const content = <dialog ref={ref} className="cm-dialog" aria-label={title} inert={suspended} aria-hidden={suspended||undefined} onClose={()=>{if(programmaticCloses.current){programmaticCloses.current--;return;}if(open&&!suspended)onClose();}} onKeyDown={event=>{if(!suspended&&event.key==='Escape'&&!event.defaultPrevented){event.preventDefault();event.stopPropagation();onClose();}}}><div className="row between"><h2>{title}</h2><IconButton label="关闭" icon="close" onClick={onClose} /></div>{children}</dialog>;
   return typeof document === 'undefined' ? content : createPortal(content, document.body);
 }
 export function Sheet({ open, title, onClose, children }: { open: boolean; title: string; onClose(): void; children: ReactNode }) {
@@ -16,13 +18,16 @@ export function Sheet({ open, title, onClose, children }: { open: boolean; title
 }
 function SheetLayer({ title, onClose, children, reduced }: { title: string; onClose(): void; children: ReactNode; reduced: boolean }) {
   const present = useIsPresent();
+  const suspended=useContext(InteractionSuspensionContext);
   const panel = useRef<HTMLElement>(null);
+  const launcherRef=useRef<HTMLElement|null>(null);
   const close = useRef(onClose); close.current = onClose;
   useEffect(() => {
-    if (!present) return;
+    if (!present || suspended) return;
     const element = panel.current;
     if (!element) return;
-    const launcher = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    launcherRef.current ??= document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const launcher=launcherRef.current;
     const isTop = () => !document.querySelector('dialog[open]') && [...document.querySelectorAll('.cm-sheet-layer:not([inert])')].at(-1) === element.parentElement;
     const controls = () => [...element.querySelectorAll<HTMLElement>('button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),a[href],[tabindex="0"]')].filter(item => item.getClientRects().length && !item.closest('[inert]'));
     const frame = requestAnimationFrame(() => { if (isTop()) (controls()[0] ?? element).focus(); });
@@ -39,8 +44,8 @@ function SheetLayer({ title, onClose, children, reduced }: { title: string; onCl
     const focus = (event: FocusEvent) => { if (isTop() && !element.contains(event.target as Node)) (controls()[0] ?? element).focus(); };
     document.addEventListener('keydown', key); document.addEventListener('focusin', focus);
     return () => { cancelAnimationFrame(frame); document.removeEventListener('keydown', key); document.removeEventListener('focusin', focus); if (launcher?.isConnected && !launcher.closest('[inert]')) launcher.focus(); };
-  }, [present]);
-  return <motion.div className="cm-sheet-layer" inert={!present} initial="closed" animate="open" exit="closed">
+  }, [present,suspended]);
+  return <motion.div className="cm-sheet-layer" inert={!present||suspended} aria-hidden={suspended||undefined} style={suspended?{visibility:'hidden',pointerEvents:'none'}:undefined} initial="closed" animate="open" exit="closed">
     <motion.button className="cm-sheet-backdrop" aria-label="关闭侧栏" onClick={onClose} variants={{ closed: { opacity: 0 }, open: { opacity: 1 } }} transition={{ duration: reduced ? 0 : .2 }} />
     <motion.aside ref={panel} role="dialog" aria-modal="true" tabIndex={-1} className="cm-sheet" aria-label={title} variants={{ closed: { opacity: 0, x: reduced ? 0 : 24 }, open: { opacity: 1, x: 0 } }} transition={reduced ? { duration: 0 } : { type: 'spring', stiffness: 380, damping: 38, mass: .9 }}><div className="row between"><h2>{title}</h2><IconButton label="关闭" icon="close" onClick={onClose} /></div>{children}</motion.aside>
   </motion.div>;

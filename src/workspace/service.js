@@ -102,6 +102,8 @@ export function createWorkspaceService({ stateDir, now = () => Date.now(), audit
   const gitProduct = createGitProduct({ stateDir, registry, getTask, listTasks, record });
 
   const handlers = {
+    // Local read contract for startup; no Git child, file content, audit or recovery.
+    'workspace.health': () => { const rows=registry.list(),active=registry.getActiveId();return {registered:rows.length,activeValid:!active||rows.some(row=>row.id===active)}; },
     // ── 管理 ──
     'workspace.create': async (p) => {
       const entry = registry.create({

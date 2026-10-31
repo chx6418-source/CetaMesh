@@ -31,7 +31,7 @@ function asArray(value) {
   return Array.isArray(value) ? value : [];
 }
 
-function assertTaskSchema(raw, file) {
+export function assertTaskSchema(raw, file) {
   if (raw?.schemaVersion !== TASK_SCHEMA_VERSION || !Number.isSafeInteger(raw.revision) || raw.revision < 1
     || !Array.isArray(raw.tasks) || raw.tasks.length > MAX_TASKS) {
     throw taskError('STORE_CORRUPT', '任务文件版本、修订号或列表无效：' + file);

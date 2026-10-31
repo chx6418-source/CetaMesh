@@ -291,3 +291,50 @@ facades; its existing Social implementation is reused from bridge.js without
 creating transport, Core or IPC listeners. Legacy-exclusive remains a compatible,
 mutually exclusive host. Existing unscoped Social data blocks Bionic ownership
 switching until Owner-reviewed M5 inventory and Dry Run; no migration is automatic.
+
+## Startup diagnostics and execution admission
+
+Desktop startup reuses the existing Core supervisor, authenticated native UI protocol,
+service-only data pipe, application lifecycle and JSON Storage Primitive. Before constructing
+Domain services (some constructors perform interrupted-operation recovery), the worker reads
+bounded critical state and reuses the Task and Memory schema validators. Invalid existing
+state is preserved. It starts only diagnostic IPC when critical preflight fails; it does not
+initialize replacement Task, Memory or permission data.
+
+`ui.diagnostics.status`, `run`, `history` and `read` are Owner UI methods. The normal native
+renderer uses `app.diagnostics.*`: the Shell combines actual authenticated RPC and product
+version checks with the Core report, and can display/export a local failure report even
+when Core cannot run. Missing WebView2/UI resources use a last-resort native dialog.
+
+PASS admits normal work, DEGRADED retains local UI and only capabilities already permitted
+by the existing Brokers, and BLOCKED denies new work. The existing Capability Broker also
+checks a trusted in-process admission predicate before dispatch; this cannot grant authority.
+Explicit cancellation and bounded read-only status routes remain available. A previous Core
+instance's late diagnostic response cannot reopen a new instance's admission gate.
+
+Checks read actual service contracts and the existing distributed domain journals; an
+in-memory UI event buffer is not called a durable Event Journal. Registered/discovered,
+started, authenticated and actually executable remain distinct. Default checks never
+create Agent sessions, run models, send QQ, call arbitrary plugin tools, install software
+or create VMs. External execution, Browser and Environment acceptance may therefore be
+NOT_RUN. Existing unknown-effect recovery and approvals remain authoritative.
+
+The coalesced runtime monitor uses a lifecycle-owned bounded timer, reports changes through
+the existing UI event bus, and does not restart the application for optional network failures.
+Per-check and total asynchronous budgets are enforced. Local JSON parsing/schema work has
+file/count/byte limits; JavaScript timers cannot preempt synchronous parsing as a process-level
+hard deadline.
+
+Reports contain fixed codes/copy, bounded version/runtime metadata, booleans and check results.
+Core and Shell each keep up to 20 reports for 14 days, each at most 64 KiB. Disk reports are
+re-projected before display/export. Business paths, credentials, chat/Memory/file bodies and
+raw error messages are excluded. Export uses a system Save Dialog; no data is uploaded.
+Developer feedback reuses `release-config.json` and opens the configured HTTPS page in the
+system browser without attaching a report. Browser/offline failure keeps the report and
+copyable configured URL.
+
+Use the root runner for focused source/transport/UI checks:
+`npm test -- --suite test-startup-diagnostics --suite test-startup-diagnostics-ipc` and,
+with `WHALEBRIDGE_TEST_UI_MOTION=1`, `--suite test-startup-diagnostics-ui`.
+Source/fixture results do not replace acceptance of the current Windows WebView2 build,
+Defender safety clearance, installation tests or a release decision.

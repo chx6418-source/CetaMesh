@@ -410,7 +410,7 @@ export function createCetaMeshServices(options = {}) {
 
   const extensionService = createExtensionService({ stateDir, capabilityBroker: capabilityService.broker,
     isTrustedVmExtension: options.isTrustedVmExtension });
-  const meshService = createMeshService({ stateDir, settingsStore: settingsService.store,
+  const meshService = createMeshService({ stateDir, settingsStore: settingsService.store, autoRestore:false,
     isEnabled: () => settingsService.store.get().settings.devices.meshEnabled === true });
   const channelService = createChannelService({ stateDir, dataRoot, config, broker: capabilityService.broker,
     onEvent: (event, data) => uiEventBus.publish(event, data),
@@ -596,6 +596,8 @@ export function createCetaMeshServices(options = {}) {
     eventBus: uiEventBus
   });
 
+  // Do not open an owned listener until all synchronous composition has succeeded.
+  if(options.deferOptionalStart!==true)void meshService.restoreTransport().catch(()=>{});
   return {
     controlService,
     providerSecrets,
@@ -624,6 +626,7 @@ export function createCetaMeshServices(options = {}) {
     channelService,
     bionicService,
     integrationService,
+    forgeService,
     channelControlsReady,
     aboutService,
     settingsService,

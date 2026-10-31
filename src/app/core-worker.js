@@ -1,11 +1,19 @@
 // The desktop worker owns Core composition and both native pipes. Optional
 // QQ/Bionic children start only through the explicit Core Channel lifecycle.
 import crypto from 'node:crypto';
+import {once} from 'node:events';
+import {acquireStateOwner} from './state-owner.js';
+import {createApplicationLifecycle} from './lifecycle.js';
+import {createStartupDiagnostics,preflightCriticalStorage} from '../product/startup-diagnostics.js';
+import {serviceDiagnosticChecks} from './diagnostic-checks.js';
+import {probeNativeIpc} from './diagnostic-ipc.js';
+import {loadReleaseConfig} from '../product/release-config.js';
+import {createAboutService} from '../about/service.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { APP_PATHS } from '../app-paths.js';
 import { readRawConfig } from '../config/loader.js';
-import { startDataIpcServer, resolveDataPipeName } from '../control/data-ipc.js';
+import { startDataIpcServer, resolveDataPipeName, dataCall } from '../control/data-ipc.js';
 import { bootstrapCetaMesh } from './bootstrap.js';
 import { createApplicationOwnershipHold } from './lifecycle.js';
 import { createDesktopIpcRuntime } from './ipc-runtime.js';
@@ -46,6 +54,9 @@ function coreDataHandler(token, services, isStopping = () => false) {
       reply(401, { ok: false, error: '未授权：请提供服务令牌' });
       return;
     }
+    if (pathname !== '/api/status' && services.diagnostics?.blocked()) {
+      reply(503,{ok:false,code:'CORE_DIAGNOSTICS_BLOCKED'});return;
+    }
     if (pathname !== '/api/status' && agentPrivilegeAllows(req.method, pathname)) {
       try {
         if (!(await services.bionicService.health()).running) {
@@ -73,7 +84,7 @@ function coreDataHandler(token, services, isStopping = () => false) {
       return;
     }
     if (req.method === 'GET' && pathname === '/api/status') {
-      reply(200, { ok: true, mode: 'core', tokenModel: 'service-only', agentSurface: { agentAllowedExact: ['/api/status'] }, connectors: 'optional' });
+      reply(200, { ok: true, protocolVersion:1, ready: services.diagnostics ? !services.diagnostics.blocked() : true, mode: 'core', tokenModel: 'service-only', agentSurface: { agentAllowedExact: ['/api/status'] }, connectors: 'optional' });
       return;
     }
     reply(403, { ok: false, error: 'Core 数据面不提供此 Legacy 接口' });
@@ -90,12 +101,41 @@ export async function runCoreWorker({ paths = APP_PATHS, processRef = process, l
     configLoadError = error?.code === 'CONFIG_MISSING' ? 'LEGACY_CONFIG_UNAVAILABLE' : 'LEGACY_CONFIG_INVALID';
   }
   const dsh = createDshCoreConnector({ config, configLoadError, env: processRef.env, stateDir: paths.stateDir, configFile: paths.configFile, dataRoot: paths.dataRoot });
-  const application = bootstrapCetaMesh({
-    config, dataRoot: paths.dataRoot, stateDir: paths.stateDir,
+  // Acquire the existing process-identity lease before any read/recovery. A broken
+  // store yields diagnostic-only IPC, never a second Runtime or automatic reset.
+  const owner=acquireStateOwner(paths.stateDir);
+  const initialStorage=await preflightCriticalStorage({stateDir:paths.stateDir});
+  let application,compositionFailed=false;
+  const options={
+    config, dataRoot: paths.dataRoot, stateDir: paths.stateDir, deferOptionalStart:true,
     sourceRoot: paths.sourceRoot, resourceRoot: paths.resourceRoot,
     api: dsh.api, dshPresetConfig: dsh.presetConfig, dshConfiguration: dsh.configuration, processRef, log,
-    channelServiceToken: () => serviceToken(paths.stateDir)
+    channelServiceToken: () => serviceToken(paths.stateDir),owner,retainOwnerOnFailure:true
+  };
+  if(initialStorage.status!=='BLOCKED') {
+    try{application=bootstrapCetaMesh(options);}catch{compositionFailed=true;}
+  }
+  if(!application){
+    const lifecycle=createApplicationLifecycle({processRef,log});
+    lifecycle.register(()=>owner.release(),{name:'StateDir owner',requireCleanShutdown:true});
+    application={services:{},lifecycle};
+  }
+  const identityRoot=paths.packaged?paths.resourceRoot:paths.sourceRoot;
+  const releaseConfig=application.services.releaseConfig??loadReleaseConfig({rootDir:identityRoot});
+  const about=application.services.aboutService??createAboutService({rootDir:identityRoot,packaged:paths.packaged});
+  let dataProbe=null,uiProbe=null;
+  const diagnostics=createStartupDiagnostics({stateDir:paths.stateDir,
+    aboutInfo:()=>about.about.info(),releaseConfig:releaseConfig.config,
+    initialChecks:compositionFailed?[{id:'core',stage:'core',status:'BLOCKED',code:'CORE_COMPOSITION_FAILED',reason:'Core service composition failed',remediation:'Restart Core only after fixing configuration',timedOut:false,durationMs:0}]:[],
+    preflight:()=>preflightCriticalStorage({stateDir:paths.stateDir}),
+    checks:({light})=>application.services.taskService?serviceDiagnosticChecks(application.services,{light,dataProbe,uiProbe}):
+      [{id:'core',stage:'core',critical:true,run:()=>{throw Error('CORE_RESTART_REQUIRED');}}],
+    publish:report=>application.services.uiEventBus?.publish('diagnostics.updated',{status:report.status,runId:report.id})});
+  application.services.diagnostics=diagnostics;
+  application.services.capabilityService?.broker.setExecutionGuard(()=>{
+    if(diagnostics.blocked())throw Object.assign(new Error('Core selfcheck blocks dispatch'),{code:'CORE_DIAGNOSTICS_BLOCKED'});
   });
+  application.lifecycle.register(()=>diagnostics.close(),{name:'Diagnostics monitor'});
   let shutdownPromise = null;
   let exitCode = 0;
   let ownershipHold = null;
@@ -122,7 +162,9 @@ export async function runCoreWorker({ paths = APP_PATHS, processRef = process, l
       isStopping: application.lifecycle.isStopping,
       onFatalError: error => shutdown(error?.code === 'EADDRINUSE' ? 2 : 1) });
     application.lifecycle.register(() => ipcRuntime.stop(), { name: 'Native UI IPC' });
-    ipcRuntime.start();
+    const uiServer=ipcRuntime.start();
+    if(uiServer&&!uiServer.listening)await once(uiServer,'listening');
+    if(processRef.env?.WHALEBRIDGE_UI_PIPE)uiProbe=()=>probeNativeIpc({pipeName:processRef.env.WHALEBRIDGE_UI_PIPE,token:processRef.env.WHALEBRIDGE_UI_AUTH_TOKEN});
 
     const pipeName = resolveDataPipeName({ dataRoot: paths.dataRoot, env: processRef.env });
     const dataServer = startDataIpcServer({ handleApiRequest: coreDataHandler(token, application.services, application.lifecycle.isStopping), pipeName, log });
@@ -144,6 +186,12 @@ export async function runCoreWorker({ paths = APP_PATHS, processRef = process, l
       });
     }), { name: 'Core data IPC' });
     dataServer.listen(pipeName, () => log(`Core data IPC is ready (${pipeName}).`));
+    if(!dataServer.listening)await once(dataServer,'listening');
+    dataProbe=async()=>{const r=await dataCall({path:'/api/status',method:'GET',token,pipeName,timeoutMs:1000});
+      if(r.status!==200||r.json?.mode!=='core'||r.json?.protocolVersion!==1||r.json?.tokenModel!=='service-only')throw Error('DATA_IPC_INVALID');return true;};
+    const startupReport=await diagnostics.run('startup');
+    if(startupReport.status!=='BLOCKED')void application.services.meshService?.restoreTransport().catch(()=>{});
+    diagnostics.startMonitoring();
     application.lifecycle.bind();
     processRef.once('beforeExit', () => { void shutdown(); });
     const stop = () => { void shutdown(); };

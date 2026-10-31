@@ -10,11 +10,11 @@ import { invitationQr } from './pairing/qr.js';
 const PAIRING_SECURITY_NOTE = '配对邀请一次性、5 分钟内有效，请勿转发。手机只接受证书指纹与邀请一致的 Desktop；请在手机屏幕上核对设备名称后再确认。配对完成后默认仅放行 mesh.presence / mesh.manifest，其他能力需逐项授权与本地批准。';
 
 export function createMeshService({ stateDir, name, role, available = null, executeCapability = null, now,
-  isEnabled = () => true, settingsStore = null } = {}) {
+  isEnabled = () => true, settingsStore = null, autoRestore = true } = {}) {
   if (!stateDir || typeof stateDir !== 'string') throw new Error('createMeshService 需要 stateDir');
   const node = createMeshNode({ stateDir, name, role, available, executeCapability, now, isEnabled,
     presenceTtlMs: () => settingsStore?.get().settings.devices.presenceTtlMs ?? 90000 });
-  let ready = node.restoreTransport().catch(() => node.status().transport);
+  let ready = autoRestore ? node.restoreTransport().catch(() => node.status().transport) : Promise.resolve(null);
   let closed = false;
   const unsubscribe = settingsStore?.onChange?.(settings => {
     if (closed) return;

@@ -1,6 +1,7 @@
 import {MemoryWorkspace} from './MemoryWorkspace';
 import {QuickJump} from './QuickJump';
 import {DevicesPage} from './DevicesPage';
+import {StartupDiagnosticsBoundary, DiagnosticsEntry, FeedbackDeveloperButton} from './StartupDiagnostics';
 import {GitWorkspace} from './GitWorkspace';
 import {WorkspaceChangesReview} from './WorkspaceChangesReview';
 import {ForgeTools} from './ForgeTools';
@@ -57,7 +58,7 @@ const updateStatusLabel = (status: string) => ({ update_available: '有可用更
 const agentInitials = (id: string) => id.slice(0, 2).toUpperCase();
 
 function ErrorNotice({ error, onRetry }: { error: string; onRetry?: () => void }) {
-  return <div className="harbor-error" role="alert"><Icon name="help" size={17} /><span>{error}</span>{onRetry && <Button compact variant="ghost" onClick={onRetry}>重试</Button>}</div>;
+  return <div className="harbor-error" role="alert"><Icon name="help" size={17} /><span>{error}</span>{onRetry && <Button compact variant="ghost" onClick={onRetry}>重试</Button>}<DiagnosticsEntry label="诊断"/><FeedbackDeveloperButton/></div>;
 }
 function EmptyNotice({ icon = 'sparkles', title, detail, action }: { icon?: IconName; title: string; detail: string; action?: ReactNode }) {
   return <div className="harbor-empty"><Icon name={icon} size={26} /><strong>{title}</strong><p>{detail}</p>{action}</div>;
@@ -121,6 +122,10 @@ export function availabilityReasonLabel(reason: string | null) {
 }
 
 export function HarborApp() {
+  return <StartupDiagnosticsBoundary><HarborWorkspaceApp/></StartupDiagnosticsBoundary>;
+}
+
+function HarborWorkspaceApp() {
   const [quickOpen,setQuickOpen]=useState(false);
   useEffect(()=>{const key=(event:KeyboardEvent)=>{if((event.ctrlKey||event.metaKey)&&!event.altKey&&event.key.toLowerCase()==='k'){event.preventDefault();setQuickOpen(value=>!value);}};window.addEventListener('keydown',key);return()=>window.removeEventListener('keydown',key);},[]);
   const [params, setParams] = useSearchParams();
@@ -2369,6 +2374,7 @@ export function SettingsPage({ theme, onThemeChange, onOpenPlugins }: { theme: '
   return <div className="content-page settings-page"><SettingsLayout search={<SearchInput label="搜索设置" placeholder="搜索设置名称或说明" value={settingsQuery} onChange={event=>setSettingsQuery(event.target.value)}/>} items={settingPages} selected={activeSection} onChange={setActiveSection}>
     {error && <ErrorNotice error={error} onRetry={() => {if(retryTarget?.kind==='save'&&retryTarget.section)void save(retryTarget.section);else if(retryTarget?.kind==='window-sync')void syncWindowBehavior();else if(!Object.values(changes).some(value=>Object.keys(value).length))void refresh();else setError('当前有未保存的更改，请先保存后再重新读取设置。');}} />}{notice && <p className="inline-success" role="status">{notice}</p>}{windowSyncPending!==null&&<p role="status">窗口行为待同步。<Button compact disabled={Boolean(saving)} onClick={()=>void syncWindowBehavior()}>重试同步</Button></p>}
     {loading ? <LoadingState label="正在读取本机设置…" /> : <section className="settings-section"><div className="settings-section-main">{renderSettingsContent()}</div></section>}
+    <div className="diagnostics-settings-entry"><DiagnosticsEntry/><FeedbackDeveloperButton/></div>
   </SettingsLayout></div>;
 }
 
@@ -2429,7 +2435,7 @@ function AboutPage() {
       </Surface>
     </div>
     <section className="about-links"><h2>项目链接</h2><Surface>{linkRows.map(row => <button className="about-link-row" key={row.id} onClick={() => void visit(row.url ?? null)} disabled={!row.url?.startsWith('https://')}><Icon name="globe" size={18} /><span>{row.label}</span><span className="grow" /><small>{row.url ? row.url.replace(/^https:\/\//, '') : '未配置'}</small><Icon name="right" size={15} /></button>)}</Surface></section>
-    <section className="about-links"><h2>反馈与安全</h2><Surface>{feedback?.entries.map(entry => <FeedbackLinkRow key={entry.id} entry={entry} message={feedback.message} onVisit={url => { void visit(url); }} />)}{feedback?.securityNotice && <p className="security-notice">{feedback.securityNotice}</p>}{!feedback && <p className="muted">反馈入口由本机产品配置提供。</p>}</Surface></section>
+    <section className="about-links"><h2>反馈与安全</h2><Surface>{feedback?.entries.map(entry => <FeedbackLinkRow key={entry.id} entry={entry} message={feedback.message} onVisit={url => { void visit(url); }} />)}{feedback?.securityNotice && <p className="security-notice">{feedback.securityNotice}</p>}{!feedback && <p className="muted">反馈入口由本机产品配置提供。</p>}<div className="diagnostics-settings-entry"><DiagnosticsEntry/><FeedbackDeveloperButton/></div></Surface></section>
     {releaseNotes.length > 0 && <section className="about-links"><h2>更新说明</h2><Surface>{releaseNotes.map((line, index) => <div className="release-note-row" key={index}><p>{line}</p></div>)}</Surface></section>}
     <p className="about-footnote">桌面使用 WebView2 展示界面，Core 服务和命名管道保持本地运行。</p>
   </>}</div>;

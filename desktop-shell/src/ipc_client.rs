@@ -37,6 +37,15 @@ impl IpcClient {
         }
     }
 
+    /// Diagnostics must finish inside their own total startup budget; they never
+    /// extend the regular RPC timeout or block the native event thread.
+    pub fn request_with_timeout(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, String> {
+        #[cfg(windows)]
+        { request_pipe(&self.pipe_name, method, params, timeout.min(REQUEST_TIMEOUT)) }
+        #[cfg(not(windows))]
+        { let _ = (method, params, timeout); Err("Core named-pipe IPC is only supported on Windows".to_owned()) }
+    }
+
     fn request_inner(&self, method: &str, params: Value) -> Result<Value, String> {
         if method.trim().is_empty() {
             return Err("IPC method must not be empty".to_owned());

@@ -22,6 +22,7 @@ use crate::supervisor::{Status, StatusListener, Supervisor};
 use crate::tray::{TrayCommand, TrayHandle, TrayStatus};
 use crate::ui_prefs::{self, CloseBehavior, UiPrefs};
 use crate::webview_policy::{self, APP_ORIGIN, BridgeRequest, PRODUCTION_CSP, WindowAction};
+use crate::startup_diagnostics::NativeDiagnostics;
 
 // Preserve the native caption: Windows owns Snap, non-client hit testing,
 // keyboard system commands, DPI, resize borders and maximized work-area bounds.
@@ -54,7 +55,14 @@ enum UiEvent {
     WindowAction { id: String, action: WindowAction },
     CoreStatus(Status),
     WindowBehavior { confirm_on_exit: bool },
+    StartupSettings(Value),
     Reply { id: String, result: Result<Value, String> },
+    DiagnosticsReply { id:String, result:Result<Value,String>, generation:Option<u64> },
+}
+
+struct StartupSupervisorGuard(Option<Arc<Supervisor>>);
+impl Drop for StartupSupervisorGuard {
+    fn drop(&mut self) {if let Some(supervisor)=self.0.take(){supervisor.shutdown();}}
 }
 
 fn resolve_bundle() -> Result<PathBuf, String> {
@@ -174,9 +182,17 @@ fn dispatch_bridge(
     proxy: &tao::event_loop::EventLoopProxy<UiEvent>,
     supervisor: &Arc<Supervisor>,
     api: &Arc<IpcClient>,
+    diagnostics: &Arc<NativeDiagnostics>,
 ) {
     let id = request.id;
     let method = request.method.clone();
+    let diagnostic_method = method.starts_with("app.diagnostics.") || method.starts_with("ui.diagnostics.");
+    if !diagnostic_method && !webview_policy::allowed_while_blocked(&method)
+        && (method.starts_with("ui.") || method.starts_with("app.previewBrowser.") || method=="app.openArtifact")
+        && (!supervisor.status().is_ready() || !diagnostics.allows_work()) {
+        let _=proxy.send_event(UiEvent::Reply {id,result:Err("Core IPC CORE_DIAGNOSTICS_BLOCKED: 核心自检尚未通过，请查看系统诊断。".into())});
+        return;
+    }
     if method.starts_with("app.previewBrowser.") {
         let _ = proxy.send_event(UiEvent::ReferenceRequest { id, method, params: request.params });
         return;
@@ -187,7 +203,25 @@ fn dispatch_bridge(
         }
         "app.status" => {
             let status = supervisor.status();
-            let _ = proxy.send_event(UiEvent::Reply { id, result: Ok(json!({ "ready": status.is_ready(), "needsAttention": status.needs_attention() })) });
+            let ready=status.is_ready()&&diagnostics.allows_work();
+            let _ = proxy.send_event(UiEvent::Reply { id, result: Ok(json!({ "ready": ready, "needsAttention": status.needs_attention()||!ready })) });
+        }
+        method if method.starts_with("app.diagnostics.") => {
+            let diagnostics=Arc::clone(diagnostics);let api=Arc::clone(api);let supervisor=Arc::clone(supervisor);let proxy=proxy.clone();
+            let method=method.to_owned();let params=request.params;
+            std::thread::spawn(move || {
+                let result=match method.as_str(){
+                    "app.diagnostics.status"=>Ok(diagnostics.status(&api,&supervisor,false)),
+                    "app.diagnostics.run"=>Ok(diagnostics.status(&api,&supervisor,true)),
+                    "app.diagnostics.history"=>Ok(diagnostics.history()),
+                    "app.diagnostics.read"=>diagnostics.read(params["id"].as_str().unwrap_or_default()),
+                    "app.diagnostics.export"=>diagnostics.export(params["id"].as_str().unwrap_or_default()),
+                    "app.diagnostics.feedback"=>Ok(diagnostics.feedback()),
+                    _=>Err("未知诊断操作。".into()),
+                };
+                let generation=result.as_ref().ok().and_then(|v|v["nativeGeneration"].as_u64());
+                let _=proxy.send_event(UiEvent::DiagnosticsReply{id,result,generation});
+            });
         }
         "app.openExternal" => {
             let url = request.params["url"].as_str().unwrap_or_default();
@@ -368,14 +402,26 @@ pub fn run_webview_ui(paths: DesktopPaths, dev_url: Option<String>) -> Result<()
     let asset_root = if dev_url.is_some() { None } else { Some(resolve_bundle()?) };
     let event_loop = EventLoopBuilder::<UiEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
+    let diagnostics=Arc::new(NativeDiagnostics::new(&paths.data_dir));
     let status_proxy = proxy.clone();
+    let status_gate=Arc::clone(&diagnostics);
     let status_listener: StatusListener = Arc::new(move |status| {
+        if !status.is_ready(){status_gate.invalidate();}
         let _ = status_proxy.send_event(UiEvent::CoreStatus(status));
     });
-    let (supervisor, pipe, _) = crate::start_supervisor_with_listener(&paths, Some(status_listener))?;
+    let (supervisor, pipe, _) = match crate::start_supervisor_with_listener(&paths, Some(status_listener)) {
+        Ok(value)=>value,
+        Err(error)=>{
+            crate::supervisor::write_shell_log(&paths.data_dir,&format!("[startup-config] {error}"));
+            (Supervisor::unavailable(),crate::pipe_name(),0)
+        }
+    };
     let supervisor = Arc::new(supervisor);
+    let mut startup_guard=StartupSupervisorGuard(Some(Arc::clone(&supervisor)));
     let api = Arc::new(IpcClient::new(pipe));
-    let startup_settings = api.request("ui.settings.get", json!({})).ok().unwrap_or(Value::Null);
+    // Never wait for a missing Core on the UI event thread. A real startup gate
+    // is rendered immediately; settings load only after the gate is verified.
+    let startup_settings = Value::Null;
     let general_settings = &startup_settings["settings"]["general"];
     let start_minimized = general_settings["startMinimized"].as_bool().unwrap_or(false);
     let mut confirm_on_exit = general_settings["confirmOnExit"].as_bool().unwrap_or(true);
@@ -444,6 +490,7 @@ pub fn run_webview_ui(paths: DesktopPaths, dev_url: Option<String>) -> Result<()
     let bridge_proxy = proxy.clone();
     let bridge_supervisor = Arc::clone(&supervisor);
     let bridge_api = Arc::clone(&api);
+    let bridge_diagnostics=Arc::clone(&diagnostics);
     let start_url = dev_url
         .clone()
         .unwrap_or_else(|| APP_ORIGIN.to_owned());
@@ -465,7 +512,7 @@ pub fn run_webview_ui(paths: DesktopPaths, dev_url: Option<String>) -> Result<()
                 return;
             }
             if let Ok(request) = webview_policy::parse_bridge_request(message.body()) {
-                dispatch_bridge(request, &bridge_proxy, &bridge_supervisor, &bridge_api);
+                dispatch_bridge(request, &bridge_proxy, &bridge_supervisor, &bridge_api, &bridge_diagnostics);
             }
         });
     let builder = if let Some(root) = asset_root {
@@ -486,12 +533,32 @@ pub fn run_webview_ui(paths: DesktopPaths, dev_url: Option<String>) -> Result<()
     }
     crate::supervisor::write_shell_log(&paths.data_dir, &format!("[ui-v2] WebView2 ready, origin={APP_ORIGIN}"));
 
+    // Preserve startup preferences without hiding a diagnostic failure or
+    // blocking window creation on a missing/unresponsive Core.
+    let settings_api=Arc::clone(&api);let settings_gate=Arc::clone(&diagnostics);
+    let settings_supervisor=Arc::clone(&supervisor);let settings_proxy=proxy.clone();
+    std::thread::spawn(move || {
+        let deadline=Instant::now()+Duration::from_secs(20);
+        while Instant::now()<deadline {
+            if settings_supervisor.status().is_ready()&&settings_gate.allows_work(){
+                if let Ok(value)=settings_api.request_with_timeout("ui.settings.get",json!({}),Duration::from_secs(2)){
+                    let _=settings_proxy.send_event(UiEvent::StartupSettings(value));
+                }
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    });
+
     let prefs_data_dir = paths.data_dir.clone();
     let mut next_prefs_sync = Instant::now() + Duration::from_secs(2);
     let mut reference_browser: Option<crate::reference_browser::ReferenceBrowser> = None;
     let reference_profile = paths.data_dir.join("reference-webview2");
     let reference_proxy = proxy.clone();
     let mut reference_generation = 0u64;
+    // Window creation can fail before an event loop exists. In that case the
+    // guard stops only this owned Core before showing the independent dialog.
+    startup_guard.0=None;
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::WaitUntil(next_prefs_sync);
         match event {
@@ -554,7 +621,18 @@ pub fn run_webview_ui(paths: DesktopPaths, dev_url: Option<String>) -> Result<()
                 send_reply(&webview, id, result);
             }
             Event::UserEvent(UiEvent::Reply { id, result }) => send_reply(&webview, id, result),
+            Event::UserEvent(UiEvent::DiagnosticsReply {id,result,generation}) => {
+                let result=if generation.is_some_and(|captured|captured!=diagnostics.generation()) {Ok(diagnostics.pending_state())}else{result};
+                send_reply(&webview,id,result);
+            }
             Event::UserEvent(UiEvent::WindowBehavior { confirm_on_exit: value }) => confirm_on_exit = value,
+            Event::UserEvent(UiEvent::StartupSettings(settings)) => {
+                let general=&settings["settings"]["general"];
+                confirm_on_exit=general["confirmOnExit"].as_bool().unwrap_or(true);
+                if general["startMinimized"]==true {
+                    if let Some(tray)=&tray {window.set_visible(false);tray.set_window_visible(false);}
+                }
+            }
             Event::UserEvent(UiEvent::CoreStatus(status)) => {
                 send_status_event(&webview, &status);
                 if let Some(tray) = &tray {

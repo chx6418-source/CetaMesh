@@ -80,7 +80,7 @@ check('renderer bridge is typed, Core-backed, bounded, and secret-safe', () => {
   assert.match(projection, /function projectMcpServer\(/);
   assert.match(projection, /SECRET_KEY\.test\(key\)/);
   assert.match(projection, /SETTING_KEYS/);
-  assert.match(host, /api\.request\("ui\.settings\.get"/);
+  assert.match(host, /settings_api\.request_with_timeout\("ui\.settings\.get"/, 'startup settings read is deferred and bounded after admission');
   assert.doesNotMatch(host, /api\.request\("settings\.get"/);
   assert.match(policy, /ui\.plugins\.enable\.review/);
   assert.match(policy, /"ui\.task\.start"/, 'Work Start must be permitted through the desktop bridge');
@@ -337,8 +337,12 @@ check('Missing WebView2 Runtime shows an actionable desktop startup message', ()
   const host = read('desktop-shell/src/webview_ui.rs');
   const entry = read('desktop-shell/src/native_main.rs');
   assert.match(host, /缺少 Microsoft Edge WebView2 Runtime/);
-  assert.match(entry, /MessageDialog/);
-  assert.match(entry, /set_description\(&error\)/);
+  assert.match(entry, /show_native_startup_failure/, 'failed presentation delegates to Core-independent native diagnostics');
+  assert.match(read('desktop-shell/src/startup_diagnostics.rs'), /MessageDialog/, 'last-resort native diagnostics remains available without Core or WebView');
+  const fallback = read('desktop-shell/src/startup_diagnostics.rs');
+  assert.match(fallback, /SHELL_PRESENTATION_UNAVAILABLE/);
+  assert.match(fallback, /set_description\(description\)/, 'show a fixed actionable native failure description');
+  assert.doesNotMatch(entry, /set_description\(&error\)/, 'raw error strings must not bypass diagnostic redaction');
 });
 check('Artifact opening keeps renderer requests identity-only and validates the native Core result', () => {
   const policy = read('desktop-shell/src/webview_policy.rs');

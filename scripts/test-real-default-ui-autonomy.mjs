@@ -1,3 +1,5 @@
+import {createStartupDiagnostics} from '../src/product/startup-diagnostics.js';
+import {serviceDiagnosticChecks} from '../src/app/diagnostic-checks.js';
 // Real product entrance: production HarborApp -> authenticated native Core pipe -> real model/CLI.
 // The browser host adapter replaces only WebView2 message transport; no model or Agent fixture.
 import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import net from 'node:net';import crypto from 'node:crypto';
@@ -37,6 +39,8 @@ try{
   function finish(error,result){clearTimeout(timer);connections.delete(conn);conn.destroy();error?reject(error):resolve(result);}
   conn.once('error',finish);conn.once('connect',()=>{const payload=Buffer.from(JSON.stringify({version:1,id,method,params,role:'console',authToken}));const header=Buffer.alloc(4);header.writeUInt32LE(payload.length);conn.write(Buffer.concat([header,payload]));});
   conn.on('data',chunk=>{buffer=Buffer.concat([buffer,chunk]);while(buffer.length>=4){const n=buffer.readUInt32LE(0);if(n>1024*1024)return finish(Error('Core response limit'));if(buffer.length<4+n)return;const reply=JSON.parse(buffer.subarray(4,4+n).toString());buffer=buffer.subarray(4+n);if(reply.id===id){if(reply.ok)finish(null,reply.result);else finish(Object.assign(Error(reply.error.message),{code:reply.error.code}));return;}}});});}
+ services.diagnostics=createStartupDiagnostics({stateDir:path.join(root,'state'),aboutInfo:()=>services.aboutService.about.info(),releaseConfig:services.releaseConfig.config,checks:()=>serviceDiagnosticChecks(services)});
+ await services.diagnostics.run('startup');
  const uiRoot=fileURLToPath(new URL('../desktop-ui/',import.meta.url)),require=createRequire(uiRoot+'package.json');const {build}=require('esbuild');
  const bundle=await build({stdin:{resolveDir:uiRoot,loader:'tsx',contents:"import React from 'react';import{createRoot}from'react-dom/client';import{BrowserRouter}from'react-router';import{HarborApp}from'./src/app/HarborApp';createRoot(document.getElementById('root')).render(<BrowserRouter><HarborApp/></BrowserRouter>);"},bundle:true,write:false,minify:true,outfile:'bundle.js',format:'iife',platform:'browser',jsx:'automatic',loader:{'.svg':'dataurl','.woff2':'dataurl'}});
  const css=['theme/tokens.css','theme/global.css','app/harbor.css','theme/motion.css'].map(f=>fs.readFileSync(path.join(uiRoot,'src',f),'utf8')).join('\n')+'\n'+bundle.outputFiles.filter(f=>f.path.endsWith('.css')).map(f=>f.text).join('\n');
@@ -50,7 +54,7 @@ try{
  socket.on('message',async data=>{const message=JSON.parse(String(data));if(message.id){const done=pending.get(message.id);if(done){pending.delete(message.id);done(message);}return;}
   if(message.method!=='Runtime.bindingCalled'||closing)return;
   let request;try{request=JSON.parse(message.params.payload);evidence.uiCalls[request.method]=(evidence.uiCalls[request.method]||0)+1;let result;
-   if(request.method==='app.status')result={ready:true,needsAttention:false};else if(request.method==='app.ping')result={host:'webview2',ready:true};else if(request.method==='app.setWindowBehavior')result={updated:true};else if(request.method.startsWith('ui.'))result=await nativeCall(request.method,request.params||{});else throw Object.assign(Error('Host method outside acceptance scope'),{code:'HOST_UNSUPPORTED'});
+   if(request.method==='app.diagnostics.status'||request.method==='app.diagnostics.run')result={...await nativeCall(request.method==='app.diagnostics.run'?'ui.diagnostics.run':'ui.diagnostics.status',{}),coreAvailable:true};else if(request.method==='app.status')result={ready:true,needsAttention:false};else if(request.method==='app.ping')result={host:'webview2',ready:true};else if(request.method==='app.setWindowBehavior')result={updated:true};else if(request.method.startsWith('ui.'))result=await nativeCall(request.method,request.params||{});else throw Object.assign(Error('Host method outside acceptance scope'),{code:'HOST_UNSUPPORTED'});
    if(!closing)await rpc('Runtime.evaluate',{expression:'window.__cetameshReceive('+JSON.stringify({id:request.id,ok:true,result})+')'},message.sessionId);
   }catch(error){if(request&&!closing)try{await rpc('Runtime.evaluate',{expression:'window.__cetameshReceive('+JSON.stringify({id:request.id,ok:false,error:{code:error.code||'ACCEPTANCE_HOST_ERROR',message:String(error.message).slice(0,500)}})+')'},message.sessionId);}catch{}}
  });
@@ -105,7 +109,7 @@ try{
  console.log('PASS REAL UI: default Tasks form -> real Managed choice -> Owner cold native consent -> real Codex -> import -> independent Core npm test -> verified UI delivery');
 }catch(error){evidence.failure={code:error.code||error.name||'ACCEPTANCE_FAILED',message:String(error.message).slice(0,800)};process.exitCode=error.code==='ENVIRONMENT_MISSING'?77:1;}
 finally{
- evidence.finishedAt=new Date().toISOString();evidence.elapsedMs=Date.parse(evidence.finishedAt)-Date.parse(evidence.startedAt);closing=true;
+ evidence.finishedAt=new Date().toISOString();evidence.elapsedMs=Date.parse(evidence.finishedAt)-Date.parse(evidence.startedAt);closing=true;services?.diagnostics?.close();
  if(services&&taskId)try{const t=services.taskService.runtime.get({id:taskId}).task;if(!['completed','failed','cancelled'].includes(t.status))await services.desktopUiService.execute({method:'ui.task.cancel',params:{id:taskId,expectedRev:t.rev}});}catch(e){evidence.cleanupTaskCode=e.code||'CLEANUP_FAILED';}
  if(socket?.readyState===WebSocket.OPEN){try{await rpc('Browser.close');}catch{}await delay(1000);}if(socket&&socket.readyState!==WebSocket.CLOSED)socket.terminate();
  if(child?.pid&&child.exitCode===null&&child.signalCode===null)await terminateSuiteProcessTree(child);evidence.browserExited=!child?.pid||child.exitCode!==null||child.signalCode!==null;

@@ -59,7 +59,7 @@ function normalizeLoadedRecord(raw) {
   };
 }
 
-function assertMemorySchema(raw, file) {
+export function assertMemorySchema(raw, file) {
   if (raw?.schemaVersion !== MEMORY_SCHEMA_VERSION || !Number.isSafeInteger(raw.revision) || raw.revision < 1
     || !Array.isArray(raw.memories) || raw.memories.length > MAX_RECORDS) {
     throw memoryError('STORE_CORRUPT', '记忆文件版本、修订号或列表无效：' + file);

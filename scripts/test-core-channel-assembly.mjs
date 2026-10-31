@@ -74,9 +74,11 @@ async function startCore() {
   coreOutput = '';
   core.stdout.on('data', chunk => { coreOutput += String(chunk); });
   core.stderr.on('data', chunk => { coreOutput += String(chunk); });
-  await eventually(() => {
+  await eventually(async () => {
     if (core.exitCode !== null || core.signalCode !== null) throw new Error(`Core exited before IPC readiness: ${coreOutput}`);
-    return rpc('core.ping');
+    const state=await rpc('ui.diagnostics.status');
+    if(state.report?.status==='BLOCKED')throw Error('Core diagnostic gate blocked fixture: '+JSON.stringify(state.report.checks));
+    return state.report&&['PASS','DEGRADED'].includes(state.report.status);
   });
 }
 async function stopCore(crash = false) {

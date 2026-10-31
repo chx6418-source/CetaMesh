@@ -4,6 +4,9 @@ import {operationIdentity,retainedOperationResult} from './operation-identity.js
 import {safeContinuationInput} from './operation-context.js';
 import {normalizeRequest,capabilityError} from './types.js';import {createCapabilityRegistry} from './registry.js';import {createCapabilityPolicy} from './policy.js';import {createCapabilityApproval,requestFingerprint} from './approval.js';
 export function createCapabilityBroker({registry=createCapabilityRegistry(),policy=createCapabilityPolicy(),approval=createCapabilityApproval(),audit=()=>{},stateDir=null}={}){
+ // A trusted in-process startup guard can only restrict existing authority.
+ // It is never exposed as an IPC capability or an Agent-controlled permission.
+ let executionGuard=()=>{};
  const dispatchFile=stateDir?path.join(stateDir,'capability','dispatches.json'):null;
  const dispatches=dispatchFile?readJsonFile(dispatchFile,{missing:{}}):{};
  if(!dispatches || typeof dispatches!=='object' || Array.isArray(dispatches))throw capabilityError('DISPATCH_JOURNAL_CORRUPT','Capability dispatch journal is invalid');
@@ -134,6 +137,7 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
    if(signal?.aborted)throw abortError(signal);
    const entry=registry.require(request.capability);
    const decision=await policy.authorize(request,entry);
+   await executionGuard();
    await validatePluginParent(request);
    if(signal?.aborted)throw abortError(signal);
    const previous=priorOperation(request,entry);
@@ -152,6 +156,7 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
    }
    // Only trusted Core descriptors delegate; the nested Broker dispatch owns
    // approval, durable intent and the actual effect, including pending results.
+   await executionGuard();
    if(entry.delegatesOperation===true)return await entry.execute(signal?{...request,signal}:request);
    const raced=claimDispatch(request,entry,grantId);if(raced){await validateReplay(request,entry);return raced;}
    const providerRequest=signal?{...request,signal}:request;
@@ -160,6 +165,7 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
     if(signal?.aborted)throw abortError(signal);
     if(registry.require(request.capability)!==entry)throw capabilityError('APPROVAL_EXPIRED','Capability changed before dispatch');
     const authorized=await policy.authorize(request,entry);
+    await executionGuard();
     const parent=await validatePluginParent(request);
     if(grantId)approval.validateGrant(grantId,request,entry,authorized?.approvalBinding);
     if(signal?.aborted)throw abortError(signal);
@@ -188,6 +194,7 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
    status:error.code==='INVOKE_CANCEL_UNCONFIRMED'?'cancel-requested':error.effectStatus==='unknown'?'outcome-unknown':'denied',code:error.code??'PROVIDER_ERROR'});throw error;}
  }
  return {execute,register:registry.register,list:registry.list,registry,approvals:approval,
+  setExecutionGuard(guard){if(typeof guard!=='function')throw TypeError('Execution guard required');executionGuard=guard;},
   async prepareOperation(raw){
    const request=normalizeRequest(raw);
    if(request.actor.kind!=='owner')throw capabilityError('PERMISSION_DENIED','Only Owner can establish an independent operation intent');

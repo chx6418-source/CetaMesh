@@ -1,9 +1,10 @@
-import { Children, forwardRef, isValidElement, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { Children, forwardRef, isValidElement, useContext, useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent, ComponentProps, KeyboardEvent as ReactKeyboardEvent, ReactElement, ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { Icon } from '../icons';
 import type { IconName } from '../icons';
 import { MotionPopup } from './motion-popup';
+import {InteractionSuspensionContext} from './interaction-suspension';
 
 type ButtonProps = ComponentProps<'button'> & { variant?: 'default' | 'primary' | 'ghost' | 'danger'; compact?: boolean; icon?: IconName };
 export function Button({ variant = 'default', compact = false, icon, className = '', children, ...props }: ButtonProps) {
@@ -29,6 +30,7 @@ export function normalizeSelectOptionLabel(...candidates: unknown[]): string {
   return '未命名选项';
 }
 export function Select({ label, children, value, disabled = false, className = '', id, onChange }: Omit<ComponentProps<'select'>, 'children' | 'onChange'> & { label: string; children: ReactNode; onChange?: ComponentProps<'select'>['onChange'] }) {
+  const suspended=useContext(InteractionSuspensionContext);
   const generatedId = useId();
   const controlId = id ?? generatedId;
   const listId = `${controlId}-options`;
@@ -59,13 +61,14 @@ export function Select({ label, children, value, disabled = false, className = '
     setPosition({ top, left: Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)), width });
   }
   function openList() {
+    if(suspended)return;
     updatePosition();
     const firstEnabled = options.findIndex(option => !option.disabled);
     setActiveIndex(options[selectedIndex]?.disabled ? Math.max(0, firstEnabled) : selectedIndex);
     setOpen(true);
   }
   useEffect(() => {
-    if (!open) return;
+    if (!open || suspended) return;
     optionRefs.current[activeIndex]?.focus();
     const outside = (event: PointerEvent) => {
       const target = event.target as Node;
@@ -85,11 +88,12 @@ export function Select({ label, children, value, disabled = false, className = '
       window.removeEventListener('scroll', dismiss, true);
       window.removeEventListener('resize', dismiss);
     };
-  }, [open, activeIndex]);
+  }, [open, activeIndex,suspended]);
+  useEffect(()=>{if(suspended)setOpen(false);},[suspended]);
   useEffect(() => () => { if (typeaheadTimer.current !== null) window.clearTimeout(typeaheadTimer.current); }, []);
   function choose(index: number) {
     const option = options[index];
-    if (!option || option.disabled) return;
+    if (!option || option.disabled || suspended) return;
     onChange?.({ target: { value: option.value }, currentTarget: { value: option.value } } as ChangeEvent<HTMLSelectElement>);
     setOpen(false);
     triggerRef.current?.focus();

@@ -71,3 +71,13 @@ and 125/150% content scale. Content zoom, emulated DPR, application zoom and act
 are distinct evidence. Test keyboard focus, dropdown/dialog bounds, long text and bounded large
 lists. TypeScript, source tests and browser fixtures do not replace native WebView2 acceptance.
 Keep screenshots and internal acceptance records in the private development archive.
+
+## Startup and runtime diagnostic presentation
+
+Startup PASS stays quiet. DEGRADED uses one compact affected-check entry; BLOCKED uses an
+independent diagnostic surface before normal pages are mounted. A later runtime block keeps
+existing mounted UI drafts inert and hidden until a current-generation check admits work.
+Settings/About and important fault banners expose the same system diagnostics and developer
+feedback controls. Details progressively show module, timeout versus failure, fixed code,
+remediation, version/build and unknown-effect status. History/export and browser failures keep
+the current report. Do not show installation, registration or an old PASS as current readiness.

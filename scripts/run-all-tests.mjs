@@ -39,6 +39,10 @@ export const CATEGORIES = ['core', 'architecture', 'security', 'runtime', 'integ
 // ── 登记表：scripts/test-*.mjs 的每一个文件都必须出现在这里（或能从 package.json 映射）。
 // requires 的取值见 probeAvailability()；category 取值见 CATEGORIES。
 const REGISTRY = {
+  'test-startup-diagnostics-report-ui.mjs': {category:'desktop',note:'Actual React report attention projection separates faults from unrun cascade checks'},
+  'test-startup-diagnostics-ipc.mjs': {category:'security',timeoutMs:120000,note:'Real Core pipes, damaged stores, authentication, protocol and live recheck'},
+  'test-startup-diagnostics.mjs': {category:'security',timeoutMs:120000,note:'Read-only startup gates, corruption preservation, safe reports and bounded recovery'},
+  'test-startup-diagnostics-ui.mjs': {category:'desktop',requires:['ui-motion-live'],timeoutMs:120000,note:'Startup diagnostic gate, developer feedback and failure-preserving report UI'},
   'test-attachment-resources.mjs': {category:'environment',timeoutMs:240000,note:'Opt-in real 100MiB document and 196MiB ZIP bounded upload and import'},
   'test-developer-review-regressions.mjs': {category:'security',timeoutMs:180000,note:'Agent Task fences, approved model tools, image history and cancelled Owner UI'},
   'test-git-workspace-ui.mjs': {category:'desktop',requires:['ui-motion-live'],timeoutMs:180000,note:'Actual Git page to Core pending approval, real branch Worktree and exact commit'},
