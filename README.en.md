@@ -77,6 +77,6 @@ Windows native builds require Rust/Windows tools; Android builds require JDK and
 
 CetaMesh source is [GPL-3.0-only](LICENSE), subject to [separate third-party notices](THIRD_PARTY_NOTICES.md). Restricted SnowLuma SDK/MCP and the upstream application are not redistributed; optional QQ interoperation connects to a separately installed and licensed compatible gateway.
 
-[Project status](PROJECT_STATE.md) · [Known limitations](docs/desktop/KNOWN_LIMITATIONS.md) · [Plugin development](docs/plugin-development/README.md) · [Contributing](CONTRIBUTING.md) · [Open-source policy](OPEN_SOURCE.md) · [Security](SECURITY.md)
+[Project status](PROJECT_STATE.md) · [Known limitations](docs/desktop/KNOWN_LIMITATIONS.md) · [Plugin development](docs/plugin-development/README.md) · [Protocol contracts](docs/protocol/README.md) · [Contributing](CONTRIBUTING.md) · [Open-source policy](OPEN_SOURCE.md) · [Security](SECURITY.md)
 
 Issues, testing feedback and focused pull requests are welcome. Please distinguish features present in source from those verified in production conditions.

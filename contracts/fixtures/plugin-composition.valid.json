@@ -1,0 +1,54 @@
+{
+  "compositionVersion": 1,
+  "rootPlugin": "cetamesh.dev-studio",
+  "rootVersion": "1.0.0",
+  "components": [
+    {
+      "key": "parser",
+      "parent": "root",
+      "pluginId": "cetamesh.parser",
+      "version": "1.0.0",
+      "mode": "embedded",
+      "packagePath": "components/parser",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "required": true
+    },
+    {
+      "key": "ocr",
+      "parent": "parser",
+      "pluginId": "cetamesh.ocr",
+      "version": "1.0.0",
+      "mode": "embedded",
+      "packagePath": "components/parser/components/ocr",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "required": false
+    },
+    {
+      "key": "lang",
+      "parent": "ocr",
+      "pluginId": "cetamesh.lang",
+      "version": "1.0.0",
+      "mode": "embedded",
+      "packagePath": "components/parser/components/ocr/components/lang",
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "required": false
+    },
+    {
+      "key": "git",
+      "parent": "root",
+      "pluginId": "cetamesh.git",
+      "version": "1.2.0",
+      "mode": "external",
+      "required": true
+    }
+  ],
+  "bindings": [
+    {
+      "from": "root",
+      "to": "parser",
+      "targetCapability": "extension.cetamesh.parser.document.parse",
+      "purpose": "Parse task attachment",
+      "dataClass": "internal"
+    }
+  ]
+}

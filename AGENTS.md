@@ -27,4 +27,10 @@
 
 ## Workflow
 
+For protocol-sensitive work, read docs/protocol/README.md and the affected CP contract.
+Keep the producer/consumer conformance matrix, schemas, positive/negative fixtures and
+registered tests in sync. CP documents are PROPOSED: they do not replace current wire,
+signed pairing, Manifest v1, permissions or stored data. Breaking changes need an
+explicit compatibility/migration ADR; category tags never grant capabilities.
+
 Inspect Git status and diffs first. Prefer focused, reversible changes; run available tests and label unrun environment-dependent checks accurately. Do not use destructive Git cleanup/reset commands to resolve conflicts.

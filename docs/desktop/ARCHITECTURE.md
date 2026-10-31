@@ -338,3 +338,12 @@ Use the root runner for focused source/transport/UI checks:
 with `WHALEBRIDGE_TEST_UI_MOTION=1`, `--suite test-startup-diagnostics-ui`.
 Source/fixture results do not replace acceptance of the current Windows WebView2 build,
 Defender safety clearance, installation tests or a release decision.
+
+## Core protocol governance
+
+The [protocol index and producer/consumer matrix](../protocol/README.md) govern future
+contract changes. CP documents and `contracts/schemas` are PROPOSED domain projections,
+not replacements for current IPC, Agent framing, Extension Manifest/Worker v1 or signed
+Pairing v1.1. `npm run contracts:validate` is a development-only read-only check and is
+not loaded by Core, native Shell or the Extension installer. Existing lifecycle,
+Capability Broker, domain stores and diagnostics retain authority.

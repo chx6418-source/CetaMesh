@@ -108,3 +108,9 @@
 - 在现有全局 Harbor UI 和原生 Windows Shell 上加入统一只读启动检查与 PASS / DEGRADED / BLOCKED 门禁。关键数据预检先于领域恢复，损坏原文件不自动覆盖；平台工具派发继续经过既有 Capability Broker 和审批。
 - 正常界面、设置/关于和异常启动页复用统一诊断及官方反馈入口。Core 不可用时保留原生本地报告、导出和浏览器反馈；不自动上传诊断资料。
 - 默认检查不创建付费模型回合、外部 Agent 会话、QQ 消息、软件安装或 VM。可选能力明确标识 DEGRADED / NOT_RUN，真实执行及正式发布仍按独立环境与安全门槛验收。Defender RELEASE HOLD 不变。
+
+## 核心协议开发规范整合（2026-10-31）
+
+- 新增 [CP 协议索引与实现映射](docs/protocol/README.md)，纳入 CP-000..090、17 类产品分类、组合侧车 ADR 和契约草案，统一保持 PROPOSED。这不是新 wire 版本或运行时能力发布。
+- 开发验证入口 `npm run contracts:validate` 与已注册 `test-protocol-proposals` 覆盖 10 份 Schema、26 个原始正反例及图/权限/旧 Manifest 边界。工具只读，不装配子插件、不签发授权、不迁移数据。
+- 现有 Agent/Task/Memory/插件、Desktop/Mobile 配对字节与独立发布保持原事实源；启动诊断已实现部分不重复开发。组合安装、通用 Pub/Sub、App/OS Host、Memory Backend 与原生 Simulation 仍按协议索引记录待实施。Defender RELEASE HOLD 不变。

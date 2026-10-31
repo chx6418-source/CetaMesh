@@ -39,6 +39,7 @@ export const CATEGORIES = ['core', 'architecture', 'security', 'runtime', 'integ
 // ── 登记表：scripts/test-*.mjs 的每一个文件都必须出现在这里（或能从 package.json 映射）。
 // requires 的取值见 probeAvailability()；category 取值见 CATEGORIES。
 const REGISTRY = {
+  'test-protocol-proposals.mjs': {category:'architecture',note:'PROPOSED schemas, bounded composition graphs and existing Manifest/Memory compatibility; no runtime adoption'},
   'test-startup-diagnostics-report-ui.mjs': {category:'desktop',note:'Actual React report attention projection separates faults from unrun cascade checks'},
   'test-startup-diagnostics-ipc.mjs': {category:'security',timeoutMs:120000,note:'Real Core pipes, damaged stores, authentication, protocol and live recheck'},
   'test-startup-diagnostics.mjs': {category:'security',timeoutMs:120000,note:'Read-only startup gates, corruption preservation, safe reports and bounded recovery'},

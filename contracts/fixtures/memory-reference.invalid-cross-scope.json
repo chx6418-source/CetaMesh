@@ -1,0 +1,14 @@
+{
+  "id": "mem_01",
+  "type": "task",
+  "scope": {
+    "kind": "global",
+    "id": "task_01"
+  },
+  "source": "system",
+  "provenance": {
+    "status": "historical-unverified"
+  },
+  "revision": 1,
+  "summary": "Bad scope combination"
+}

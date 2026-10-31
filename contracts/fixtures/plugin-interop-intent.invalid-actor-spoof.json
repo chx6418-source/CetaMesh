@@ -1,0 +1,11 @@
+{
+  "targetCapability": "extension.cetamesh.http-meta.meta.fetch-title",
+  "input": {
+    "url": "https://example.com"
+  },
+  "reason": "Read approved page title",
+  "actor": {
+    "kind": "owner",
+    "id": "desktop"
+  }
+}

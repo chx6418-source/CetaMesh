@@ -1,0 +1,16 @@
+{
+  "capabilityId": "extension.cetamesh.parser.document.parse",
+  "contractVersion": "1.0.0",
+  "effectClass": "write-without-receipt",
+  "risk": "low",
+  "hostKind": "extension-process",
+  "inputSchema": {
+    "type": "object"
+  },
+  "outputSchema": {
+    "type": "object"
+  },
+  "dataClasses": [
+    "internal"
+  ]
+}

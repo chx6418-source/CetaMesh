@@ -1,0 +1,26 @@
+{
+  "compositionVersion": 1,
+  "rootPlugin": "cetamesh.dev-studio",
+  "rootVersion": "1.0.0",
+  "components": [
+    {
+      "key": "remote",
+      "parent": "root",
+      "pluginId": "cetamesh.remote",
+      "version": "1.0.0",
+      "mode": "external",
+      "required": true
+    },
+    {
+      "key": "child",
+      "parent": "remote",
+      "pluginId": "cetamesh.child",
+      "version": "1.0.0",
+      "mode": "embedded",
+      "required": true,
+      "packagePath": "components/child",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  ],
+  "bindings": []
+}

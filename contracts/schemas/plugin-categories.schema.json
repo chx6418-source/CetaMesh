@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:cetamesh:protocols:proposed:plugin-categories:1.0",
+  "title": "PROPOSED 17 class product taxonomy",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "catalogVersion",
+    "kind",
+    "status",
+    "categories"
+  ],
+  "properties": {
+    "catalogVersion": {
+      "const": 1
+    },
+    "kind": {
+      "const": "product-capability-taxonomy"
+    },
+    "status": {
+      "const": "PROPOSED"
+    },
+    "categories": {
+      "type": "array",
+      "minItems": 17,
+      "maxItems": 17,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "name",
+          "zhName",
+          "purpose",
+          "contractFamily",
+          "hostMode",
+          "securityRule",
+          "negativeTest",
+          "priority",
+          "baselineStatus"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "zhName": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "purpose": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "contractFamily": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "hostMode": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "securityRule": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "negativeTest": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "priority": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "baselineStatus": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          }
+        }
+      }
+    }
+  }
+}

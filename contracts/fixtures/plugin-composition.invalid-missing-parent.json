@@ -1,0 +1,26 @@
+{
+  "compositionVersion": 1,
+  "rootPlugin": "cetamesh.dev-studio",
+  "rootVersion": "1.0.0",
+  "components": [
+    {
+      "key": "parser",
+      "parent": "unknown",
+      "pluginId": "cetamesh.parser",
+      "version": "1.0.0",
+      "mode": "embedded",
+      "packagePath": "components/parser",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "required": true
+    }
+  ],
+  "bindings": [
+    {
+      "from": "root",
+      "to": "parser",
+      "targetCapability": "extension.cetamesh.parser.document.parse",
+      "purpose": "Parse task attachment",
+      "dataClass": "internal"
+    }
+  ]
+}

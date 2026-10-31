@@ -1,0 +1,172 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:cetamesh:protocols:proposed:memory-reference:1.0",
+  "title": "CetaMesh PROPOSED memory-reference v1 — not a current wire schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "working",
+        "chat",
+        "user",
+        "task",
+        "workspace",
+        "social",
+        "knowledge",
+        "skill"
+      ]
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "global",
+            "workspace",
+            "task",
+            "chat",
+            "user"
+          ]
+        },
+        "id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "global"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "id": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "workspace",
+                  "task",
+                  "chat",
+                  "user"
+                ]
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9._:@-]+$"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "source": {
+      "type": "string",
+      "enum": [
+        "user",
+        "chat-candidate",
+        "qq-adapter",
+        "system"
+      ]
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "user-confirmed",
+            "agent-inference",
+            "historical-unverified"
+          ]
+        },
+        "actor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 160
+        },
+        "at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 40
+        }
+      },
+      "required": [
+        "status"
+      ]
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000
+    },
+    "contentHash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "validUntil": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    }
+  },
+  "required": [
+    "id",
+    "type",
+    "scope",
+    "source",
+    "provenance",
+    "revision",
+    "summary"
+  ]
+}

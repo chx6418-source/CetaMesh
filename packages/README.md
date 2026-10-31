@@ -3,6 +3,10 @@
 This directory reserves a home for stable protocol/types/SDK packages. It is not
 an npm or Cargo workspace and contains no shared runtime at this migration stage.
 
+The [Core protocol index](../docs/protocol/README.md) and [proposed DTO contracts](../contracts/README.md)
+are development guidance and isolated validation only. They do not create shared runtime
+packages, change React Native dependencies or promote draft DTOs to stable SDKs.
+
 Unified Pairing v1.1 is the verified cross-platform contract:
 `../docs/protocol/UNIFIED_PAIRING_V1_1.md`. Desktop fixtures remain at
 `../fixtures/pairing`; Mobile fixtures remain at

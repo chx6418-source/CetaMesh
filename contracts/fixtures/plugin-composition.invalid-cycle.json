@@ -1,0 +1,24 @@
+{
+  "compositionVersion": 1,
+  "rootPlugin": "cetamesh.dev-studio",
+  "rootVersion": "1.0.0",
+  "components": [
+    {
+      "key": "parser",
+      "parent": "ocr",
+      "pluginId": "cetamesh.parser",
+      "version": "1.0.0",
+      "mode": "external",
+      "required": true
+    },
+    {
+      "key": "ocr",
+      "parent": "parser",
+      "pluginId": "cetamesh.ocr",
+      "version": "1.0.0",
+      "mode": "external",
+      "required": true
+    }
+  ],
+  "bindings": []
+}

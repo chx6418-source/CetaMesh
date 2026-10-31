@@ -1,0 +1,9 @@
+{
+  "protocolId": "cetamesh.core",
+  "protocolVersion": "1.0",
+  "kind": "request",
+  "correlationId": "corr_3a91",
+  "timestamp": "2026-10-31T13:00:00.000Z",
+  "method": "example.read",
+  "payload": {}
+}

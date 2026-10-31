@@ -1,0 +1,15 @@
+{
+  "id": "mem_01",
+  "type": "task",
+  "scope": {
+    "kind": "task",
+    "id": "task_01"
+  },
+  "source": "system",
+  "provenance": {
+    "status": "historical-unverified",
+    "actor": null
+  },
+  "revision": 1,
+  "summary": "A bounded task decision reference"
+}

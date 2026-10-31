@@ -21,6 +21,16 @@ The guide documents the v1 Extension Runtime contract. Plugins declare capabilit
 
 The Hello Tool tutorial takes 15–30 minutes. Run npm run plugin:validate -- <directory> before review.
 
+## Proposed protocol development rules
+
+The [Core protocol index](../protocol/README.md) maps current implementations to
+the CP proposals. Read CP-020/021 for current Manifest/Worker/delegation boundaries,
+and CP-022..026 for the 17-category taxonomy, composition, collaboration and SDK
+proposals. Categories are product metadata, not new Manifest v1 types or permissions.
+`npm run contracts:validate` checks draft DTOs and graphs only; the current installer
+does not activate compositions. Existing v1 guides and `plugin:validate` remain the
+source of truth for installing and running supported plugins.
+
 ## Current boundaries
 
 The Plugin Center is prepared for the CetaMesh Plugin Service; its official endpoint remains unconfigured. Offline mode can show a cached Catalog but cannot install or update. Package integrity uses HTTPS, host allowlists, bounded sizes, and SHA-256. Publisher signatures and public publishing endpoints are not implemented. Local plugins are Unverified / Local, require Developer Mode and a separate first-enable Owner Review, and install disabled. The Process Host is defense in depth, not a complete OS security boundary.

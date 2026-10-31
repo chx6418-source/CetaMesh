@@ -80,7 +80,7 @@ npm --prefix apps/mobile test
 CetaMesh 源码采用 [GPL-3.0-only](LICENSE)；第三方组件受各自许可约束，详见 [第三方声明](THIRD_PARTY_NOTICES.md)。CetaMesh 不分发 SnowLuma 主程序或受限 SDK/MCP，QQ 互操作需要用户自行安装和依法使用独立网关。
 
 - [当前项目状态](PROJECT_STATE.md) · [已知限制](docs/desktop/KNOWN_LIMITATIONS.md) · [变更记录](CHANGELOG.md)
-- [产品与工程指南](docs/PROJECT_GUIDE.md) · [插件开发](docs/plugin-development/README.md) · [协议文档](docs/protocol/UNIFIED_PAIRING_V1_1.md)
+- [产品与工程指南](docs/PROJECT_GUIDE.md) · [插件开发](docs/plugin-development/README.md) · [协议索引与开发契约](docs/protocol/README.md)
 - [开源说明](OPEN_SOURCE.zh-CN.md) · [贡献指南](CONTRIBUTING.md) · [安全漏洞报告](SECURITY.md)
 
 欢迎提 Issue、参与测试和提交 PR。由于项目仍在演进，请优先根据真实代码、已确认的验收结果和具体平台限制判断功能可用性。

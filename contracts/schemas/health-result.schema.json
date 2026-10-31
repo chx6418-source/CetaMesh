@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:cetamesh:protocols:proposed:health-result:1.0",
+  "title": "CetaMesh PROPOSED health-result v1 — not a current wire schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "runId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "startedAt": {
+      "type": "string",
+      "format": "date-time",
+      "maxLength": 40
+    },
+    "overall": {
+      "type": "string",
+      "enum": [
+        "PASS",
+        "DEGRADED",
+        "BLOCKED",
+        "NOT_RUN"
+      ]
+    },
+    "checks": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 200,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 96,
+            "pattern": "^[a-z][a-z0-9._-]*$"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "PASS",
+              "DEGRADED",
+              "BLOCKED",
+              "NOT_RUN"
+            ]
+          },
+          "criticality": {
+            "type": "string",
+            "enum": [
+              "core",
+              "optional"
+            ]
+          },
+          "code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 100
+          },
+          "durationMs": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 600000
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "criticality",
+          "code"
+        ]
+      }
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "runId",
+    "startedAt",
+    "overall",
+    "checks"
+  ]
+}

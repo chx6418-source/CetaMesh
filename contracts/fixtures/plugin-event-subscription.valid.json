@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "sourcePlugin": "cetamesh.agent-runner",
+  "subscriberPlugin": "cetamesh.inspector",
+  "eventType": "task.step.completed",
+  "contractVersion": "1.0.0",
+  "purpose": "Record redacted task observations",
+  "maxInFlight": 4,
+  "ttlSeconds": 3600,
+  "filters": {
+    "taskState": "running"
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "providerId": "codex",
+  "adapterVersion": "1.0",
+  "transport": "codex-app-server-jsonl",
+  "protocolId": "codex-app-server",
+  "protocolVersion": "pinned-by-adapter",
+  "capabilities": {
+    "createSession": true,
+    "send": true,
+    "cancel": true,
+    "follow": true,
+    "nativeCheckpoint": false
+  },
+  "security": {
+    "mode": "native-permissions",
+    "nativePolicyVerified": false
+  },
+  "readiness": {
+    "installed": true,
+    "configured": true,
+    "authenticated": null,
+    "ready": false
+  },
+  "limits": {
+    "maxConcurrentSessions": 1,
+    "maxEventBytes": 1048576
+  }
+}

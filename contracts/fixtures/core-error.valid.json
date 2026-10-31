@@ -1,0 +1,8 @@
+{
+  "code": "OPERATION_OUTCOME_UNKNOWN",
+  "category": "execution",
+  "message": "执行结果尚不能确认，需要核对后继续。",
+  "retryable": false,
+  "effectState": "outcome-unknown",
+  "correlationId": "corr_3a91"
+}

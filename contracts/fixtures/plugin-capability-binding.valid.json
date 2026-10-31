@@ -1,0 +1,18 @@
+{
+  "capabilityId": "extension.cetamesh.parser.document.parse",
+  "contractVersion": "1.0.0",
+  "effectClass": "read-only",
+  "risk": "low",
+  "hostKind": "extension-process",
+  "inputSchema": {
+    "type": "object",
+    "additionalProperties": false
+  },
+  "outputSchema": {
+    "type": "object"
+  },
+  "dataClasses": [
+    "internal"
+  ],
+  "maxResultBytes": 4096
+}

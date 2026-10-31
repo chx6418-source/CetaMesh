@@ -1,0 +1,36 @@
+{
+  "compositionVersion": 1,
+  "rootPlugin": "cetamesh.dev-studio",
+  "rootVersion": "1.0.0",
+  "components": [
+    {
+      "key": "parser",
+      "parent": "root",
+      "pluginId": "cetamesh.parser",
+      "version": "1.0.0",
+      "mode": "embedded",
+      "packagePath": "components/parser",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "required": true
+    },
+    {
+      "key": "ocr",
+      "parent": "parser",
+      "pluginId": "cetamesh.ocr",
+      "version": "1.0.0",
+      "mode": "embedded",
+      "packagePath": "components/parser",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "required": false
+    }
+  ],
+  "bindings": [
+    {
+      "from": "root",
+      "to": "parser",
+      "targetCapability": "extension.cetamesh.parser.document.parse",
+      "purpose": "Parse task attachment",
+      "dataClass": "internal"
+    }
+  ]
+}

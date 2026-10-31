@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:cetamesh:protocols:proposed:core-envelope:1.0",
+  "title": "CetaMesh PROPOSED core-envelope v1 — not a current wire schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "protocolId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^cetamesh\\.[a-z0-9.-]+$"
+    },
+    "protocolVersion": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 16,
+      "pattern": "^1\\.[0-9]+$"
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "request",
+        "response",
+        "event",
+        "error"
+      ]
+    },
+    "messageId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "correlationId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "maxLength": 40
+    },
+    "method": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "taskId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "attemptId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "workspaceId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "traceId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "deadlineAt": {
+      "type": "string",
+      "format": "date-time",
+      "maxLength": 40
+    },
+    "payload": {
+      "type": "object"
+    }
+  },
+  "required": [
+    "protocolId",
+    "protocolVersion",
+    "kind",
+    "messageId",
+    "correlationId",
+    "timestamp",
+    "payload"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "request"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "required": [
+          "method"
+        ]
+      }
+    }
+  ]
+}

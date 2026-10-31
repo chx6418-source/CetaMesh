@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:cetamesh:protocols:proposed:plugin-interop-intent:1.0",
+  "title": "CetaMesh PROPOSED plugin-interop-intent v1 — not a current wire schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "targetCapability": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^extension\\.[a-z0-9][a-z0-9._-]{1,63}\\.[A-Za-z0-9][A-Za-z0-9._-]{0,79}$"
+    },
+    "input": {
+      "type": "object"
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1000
+    }
+  },
+  "required": [
+    "targetCapability",
+    "input",
+    "reason"
+  ]
+}

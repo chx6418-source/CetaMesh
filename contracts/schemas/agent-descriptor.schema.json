@@ -1,0 +1,149 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:cetamesh:protocols:proposed:agent-descriptor:1.0",
+  "title": "CetaMesh PROPOSED agent-descriptor v1 — not a current wire schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "providerId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z][a-z0-9._-]+$"
+    },
+    "adapterVersion": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32,
+      "pattern": "^[0-9]+\\.[0-9]+(\\.[0-9]+)?$"
+    },
+    "transport": {
+      "type": "string",
+      "enum": [
+        "acp-v1-jsonl",
+        "codex-app-server-jsonl",
+        "cli",
+        "sdk",
+        "private-api",
+        "a2a",
+        "in-process"
+      ]
+    },
+    "protocolId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "protocolVersion": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80
+    },
+    "capabilities": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[A-Za-z][A-Za-z0-9]+$"
+      },
+      "additionalProperties": {
+        "type": "boolean"
+      }
+    },
+    "security": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "native-permissions",
+            "isolated",
+            "native-sandbox",
+            "none",
+            "unknown"
+          ]
+        },
+        "nativePolicyVerified": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "mode",
+        "nativePolicyVerified"
+      ]
+    },
+    "readiness": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "installed": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "configured": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "authenticated": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "reachable": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "ready": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "taskEligible": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "installed",
+        "configured",
+        "authenticated",
+        "ready"
+      ]
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxConcurrentSessions": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "maxEventBytes": {
+          "type": "integer",
+          "minimum": 256,
+          "maximum": 10485760
+        }
+      }
+    }
+  },
+  "required": [
+    "providerId",
+    "adapterVersion",
+    "transport",
+    "protocolId",
+    "protocolVersion",
+    "capabilities",
+    "security",
+    "readiness"
+  ]
+}

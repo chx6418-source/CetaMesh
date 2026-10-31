@@ -1,0 +1,56 @@
+{
+  "compositionVersion": 1,
+  "rootPlugin": "cetamesh.dev-studio",
+  "rootVersion": "1.0.0",
+  "components": [
+    {
+      "key": "n0",
+      "parent": "root",
+      "pluginId": "cetamesh.level0",
+      "version": "1.0.0",
+      "mode": "external",
+      "required": true
+    },
+    {
+      "key": "n1",
+      "parent": "n0",
+      "pluginId": "cetamesh.level1",
+      "version": "1.0.0",
+      "mode": "external",
+      "required": true
+    },
+    {
+      "key": "n2",
+      "parent": "n1",
+      "pluginId": "cetamesh.level2",
+      "version": "1.0.0",
+      "mode": "external",
+      "required": true
+    },
+    {
+      "key": "n3",
+      "parent": "n2",
+      "pluginId": "cetamesh.level3",
+      "version": "1.0.0",
+      "mode": "external",
+      "required": true
+    },
+    {
+      "key": "n4",
+      "parent": "n3",
+      "pluginId": "cetamesh.level4",
+      "version": "1.0.0",
+      "mode": "external",
+      "required": true
+    }
+  ],
+  "bindings": [
+    {
+      "from": "root",
+      "to": "parser",
+      "targetCapability": "extension.cetamesh.parser.document.parse",
+      "purpose": "Parse task attachment",
+      "dataClass": "internal"
+    }
+  ]
+}

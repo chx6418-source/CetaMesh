@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "runId": "health_01",
+  "startedAt": "2026-10-31T13:00:00.000Z",
+  "overall": "DEGRADED",
+  "checks": [
+    {
+      "id": "core.ipc.handshake",
+      "status": "PASS",
+      "criticality": "core",
+      "code": null,
+      "durationMs": 12
+    },
+    {
+      "id": "channel.onebot",
+      "status": "DEGRADED",
+      "criticality": "optional",
+      "code": "CHANNEL_NOT_CONNECTED",
+      "durationMs": 100
+    }
+  ]
+}

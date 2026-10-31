@@ -20,6 +20,12 @@ includes its existing `check` verification chain. See `docs/MONOREPO.md`.
 
 Please read README.md, PROJECT_STATE.md, AGENTS.md, and OPEN_SOURCE.md. For architecture-sensitive work, inspect Desktop docs/desktop, shared docs/protocol, or Mobile apps/mobile/docs/architecture and apps/mobile/docs/security as appropriate.
 
+Protocol work starts at the [protocol index and conformance matrix](docs/protocol/README.md).
+CP proposals govern design review and contract validation; they do not silently replace
+existing runtime contracts. Update producers/consumers, compatibility notes, schemas and
+negative fixtures together, and run `npm test -- --suite test-protocol-proposals`.
+Shared-wire changes also require separate Mobile tests and an explicit migration ADR.
+
 ## Development setup
 
 - Node.js 22.11+

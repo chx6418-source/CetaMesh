@@ -1,0 +1,136 @@
+{
+  "kind": "proposal-fixtures",
+  "version": "1.1",
+  "fixtures": [
+    {
+      "file": "core-envelope.valid.json",
+      "schema": "core-envelope",
+      "expected": "PASS"
+    },
+    {
+      "file": "core-envelope.invalid-missing-message.json",
+      "schema": "core-envelope",
+      "expected": "FAIL"
+    },
+    {
+      "file": "core-envelope.invalid-unsupported-major.json",
+      "schema": "core-envelope",
+      "expected": "FAIL"
+    },
+    {
+      "file": "agent-descriptor.valid.json",
+      "schema": "agent-descriptor",
+      "expected": "PASS"
+    },
+    {
+      "file": "plugin-interop-intent.valid.json",
+      "schema": "plugin-interop-intent",
+      "expected": "PASS"
+    },
+    {
+      "file": "plugin-interop-intent.invalid-actor-spoof.json",
+      "schema": "plugin-interop-intent",
+      "expected": "FAIL"
+    },
+    {
+      "file": "memory-reference.valid.json",
+      "schema": "memory-reference",
+      "expected": "PASS"
+    },
+    {
+      "file": "memory-reference.invalid-cross-scope.json",
+      "schema": "memory-reference",
+      "expected": "FAIL"
+    },
+    {
+      "file": "health-result.valid.json",
+      "schema": "health-result",
+      "expected": "PASS"
+    },
+    {
+      "file": "core-error.valid.json",
+      "schema": "core-error",
+      "expected": "PASS"
+    },
+    {
+      "file": "plugin-composition.valid.json",
+      "schema": "plugin-composition",
+      "expected": "PASS"
+    },
+    {
+      "file": "plugin-composition.invalid-traversal.json",
+      "schema": "plugin-composition",
+      "expected": "FAIL"
+    },
+    {
+      "file": "plugin-composition.invalid-actor.json",
+      "schema": "plugin-composition",
+      "expected": "FAIL"
+    },
+    {
+      "file": "plugin-event-subscription.valid.json",
+      "schema": "plugin-event-subscription",
+      "expected": "PASS"
+    },
+    {
+      "file": "plugin-event-subscription.invalid-grant.json",
+      "schema": "plugin-event-subscription",
+      "expected": "FAIL"
+    },
+    {
+      "file": "plugin-capability-binding.valid.json",
+      "schema": "plugin-capability-binding",
+      "expected": "PASS"
+    },
+    {
+      "file": "plugin-capability-binding.invalid-effect.json",
+      "schema": "plugin-capability-binding",
+      "expected": "FAIL"
+    },
+    {
+      "file": "plugin-categories.valid.json",
+      "schema": "plugin-categories",
+      "expected": "PASS"
+    },
+    {
+      "file": "plugin-categories.invalid-missing.json",
+      "schema": "plugin-categories",
+      "expected": "FAIL"
+    },
+    {
+      "file": "plugin-composition.invalid-cycle.json",
+      "schema": "plugin-composition",
+      "expected": "FAIL"
+    },
+    {
+      "file": "plugin-composition.invalid-missing-parent.json",
+      "schema": "plugin-composition",
+      "expected": "FAIL"
+    },
+    {
+      "file": "plugin-composition.invalid-depth.json",
+      "schema": "plugin-composition",
+      "expected": "FAIL"
+    },
+    {
+      "file": "plugin-composition.invalid-binding.json",
+      "schema": "plugin-composition",
+      "expected": "FAIL"
+    },
+    {
+      "file": "plugin-composition.invalid-external-embedded.json",
+      "schema": "plugin-composition",
+      "expected": "FAIL"
+    },
+    {
+      "file": "plugin-composition.invalid-duplicate-key.json",
+      "schema": "plugin-composition",
+      "expected": "FAIL"
+    },
+    {
+      "file": "plugin-composition.invalid-path-collision.json",
+      "schema": "plugin-composition",
+      "expected": "FAIL"
+    }
+  ]
+}
