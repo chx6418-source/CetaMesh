@@ -948,6 +948,17 @@ export function createDesktopUiService({ services = {}, system = services.system
   }
 
   const handlers = {
+    'ui.devices.overview': async p => {
+      if (Object.keys(p).length) throw uiError('INVALID_INPUT', '设备状态不接受额外参数');
+      if (!services.meshService) return {available:false,enabled:null,local:null,peers:[],audit:[],truncated:false};
+      const raw = await services.meshService.execute({method:'mesh.snapshot',params:{}});
+      const status = raw.status ?? {}, peers = Array.isArray(raw.peers) ? raw.peers : [];
+      return {available:true,enabled:typeof status.meshEnabled === 'boolean' ? status.meshEnabled : null,
+        local:{id:string(status.nodeId,160),name:string(status.name,160),role:string(status.role,60),transportRunning:typeof status.transport?.running === 'boolean'?status.transport.running:null},
+        peers:peers.slice(0,500).map(row=>({id:string(row.nodeId,160),name:string(row.name,160),role:string(row.role,60),trust:string(row.trust,60)||'unknown',presence:string(row.presence,60)||'unknown',
+          grants:(Array.isArray(row.grants)?row.grants:[]).slice(0,100).map(value=>string(value,100)),lastSeenAt:typeof row.lastSeenAt==='number'?row.lastSeenAt:null,lastError:string(row.lastError,300)||null})),
+        audit:(Array.isArray(raw.audit)?raw.audit:[]).slice(-20).map(row=>({at:typeof row.at==='number'?row.at:null,code:string(row.code,100),direction:string(row.direction,40)})),truncated:peers.length>500};
+    },
     'ui.preview.open': p => previews.open(p),
     'ui.preview.read': p => previews.read(p),
     'ui.preview.close': p => previews.close(p),

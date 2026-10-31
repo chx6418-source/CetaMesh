@@ -111,7 +111,9 @@ check('release bundles only the canonical local React assets', () => {
 });
 
 check('Harbor provides standalone Memory categories and a direct icon navigation entry', () => {
-  const app = read('desktop-ui/src/app/HarborApp.tsx');
+  const harbor = read('desktop-ui/src/app/HarborApp.tsx');
+  assert.match(harbor, /import \{MemoryWorkspace\} from '\.\/MemoryWorkspace'/);
+  const app = harbor + '\n' + read('desktop-ui/src/app/MemoryWorkspace.tsx');
   assert.match(app, /type PageId = [^;]*'memory'/);
   assert.match(app, /function MemoryPage\(/);
   assert.match(app, /memoryClient\.overview/);
@@ -299,7 +301,8 @@ check('Memory page edits saved records through the real update route', () => {
   const app = read('desktop-ui/src/app/HarborApp.tsx');
   const client = read('desktop-ui/src/bridge/typed-client.ts');
   assert.match(client, /update:\s*\(input:.*ui\.memory\.update/);
-  const manager = app.slice(app.indexOf('function MemoryManager('), app.indexOf('function WorkPage('));
+  assert.match(app, /function MemoryPage\(\)\{return <MemoryWorkspace/);
+  const manager = read('desktop-ui/src/app/MemoryWorkspace.tsx');
   assert.match(manager, /memoryClient\.update\(/);
   assert.match(manager, /编辑记忆/);
 });

@@ -114,9 +114,9 @@ try {
   assert.ok(await evaluate('document.querySelector(".git-commit")?.getAttribute("aria-label")==="提交所选文件"'), 'commit panel is an independent named surface');
   assert.ok(await evaluate('document.querySelector(".git-file-list")?.textContent.includes("已暂存")&&document.querySelector(".git-file-list")?.textContent.includes("工作目录")'), 'actual index and working status are represented separately');
   await selectTask(); await evaluate('document.querySelector("button[aria-label=\\"查看差异 a.txt\\"]").click()');
-  await until('document.querySelector(".git-diff")?.textContent.includes("approved UI change")', 'real file working tree diff');
+  await until('document.querySelector(".git-preview .diff-scroll")?.textContent.includes("approved UI change")', 'real file working tree diff');
   assert.ok(calls.some(row=>row.method==='ui.workspace.git.diff'&&row.params.path==='a.txt'&&row.params.cached===false), 'file preview requests an exact path DTO');
-  assert.equal(await evaluate('document.querySelector(".git-diff")?.textContent.includes("unrelated user")'), false, 'file preview excludes unrelated diffs');
+  assert.equal(await evaluate('document.querySelector(".git-preview .diff-scroll")?.textContent.includes("unrelated user")'), false, 'file preview excludes unrelated diffs');
   await input('input[aria-label="新分支名称"]', 'codex/ui-branch'); await click('创建分支'); await click('确认创建');
   const branchApproval = await reviewRequest('git.branch.create');
   assert.equal(git(project, 'branch', '--list', 'codex/ui-branch'), ''); assert.equal(git(project, 'status', '--porcelain'), initialStatus); assert.equal(git(project, 'rev-parse', 'HEAD'), baseline);

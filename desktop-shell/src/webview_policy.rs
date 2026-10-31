@@ -6,7 +6,7 @@ use url::Url;
 pub const APP_ORIGIN: &str = "https://cetamesh.localhost";
 pub const DEV_ORIGIN: &str = "http://127.0.0.1:5173";
 pub const MAX_BRIDGE_REQUEST_BYTES: usize = 900 * 1024;
-pub const PRODUCTION_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'";
+pub const PRODUCTION_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; font-src 'self'; connect-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'";
 
 const UI_METHODS: &[&str] = &[
     "ui.preview.open", "ui.preview.read", "ui.preview.close",
@@ -43,6 +43,7 @@ const UI_METHODS: &[&str] = &[
     "ui.memory.candidates.confirm", "ui.memory.candidates.confirmBatch",
     "ui.agent.auth.describe", "ui.agent.auth.start", "ui.agent.auth.status", "ui.agent.auth.cancel",
     "ui.agent.security", "ui.agent.authorize", "ui.agent.list", "ui.agent.health", "ui.agent.configure", "ui.agent.presets",
+    "ui.devices.overview",
     "ui.extensions.settings.describe", "ui.extensions.settings.get", "ui.extensions.settings.update",
     "ui.plugins.catalog", "ui.plugins.status", "ui.plugins.detail", "ui.plugins.refresh", "ui.plugins.stage", "ui.plugins.stage-local", "ui.plugins.enable.review",
     "ui.plugins.install", "ui.plugins.enable", "ui.plugins.disable", "ui.plugins.uninstall",
@@ -78,7 +79,7 @@ fn validate_artifact_open_params(params: &Value) -> Result<(), String> {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum WindowAction { State, Drag, Minimize, Maximize, Close, ResizeNorth, ResizeNorthEast, ResizeEast, ResizeSouthEast, ResizeSouth, ResizeSouthWest, ResizeWest, ResizeNorthWest }
+pub enum WindowAction { State, Drag, Minimize, Maximize, Close, AppearanceLight, AppearanceDark, ResizeNorth, ResizeNorthEast, ResizeEast, ResizeSouthEast, ResizeSouth, ResizeSouthWest, ResizeWest, ResizeNorthWest }
 
 pub fn window_action(params: &Value) -> Result<WindowAction, String> {
     let object = params.as_object().ok_or("window action must be an object")?;
@@ -89,6 +90,8 @@ pub fn window_action(params: &Value) -> Result<WindowAction, String> {
         Some("minimize") => Ok(WindowAction::Minimize),
         Some("maximize") => Ok(WindowAction::Maximize),
         Some("close") => Ok(WindowAction::Close),
+        Some("appearanceLight") => Ok(WindowAction::AppearanceLight),
+        Some("appearanceDark") => Ok(WindowAction::AppearanceDark),
         Some("resizeNorth") => Ok(WindowAction::ResizeNorth),
         Some("resizeNorthEast") => Ok(WindowAction::ResizeNorthEast),
         Some("resizeEast") => Ok(WindowAction::ResizeEast),
@@ -233,6 +236,10 @@ pub fn parse_bridge_request(raw: &str) -> Result<BridgeRequest, String> {
         crate::reference_browser_policy::validate(method, params)?;
     } else if method == "app.windowAction" {
         window_action(params)?;
+    } else if method == "app.setWindowBehavior" {
+        if params_object.len() != 1 || params_object.get("confirmOnExit").and_then(Value::as_bool).is_none() {
+            return Err("window behavior requires exactly one confirmOnExit boolean".to_owned());
+        }
     } else if method == "app.openExternal" {
         if params_object.len() != 1 || params_object.get("url").and_then(Value::as_str).is_none_or(|url| url.len() > 2048) {
             return Err("external link requires one bounded URL".to_owned());
@@ -258,13 +265,36 @@ mod tests {
 
     #[test]
     fn window_actions_accept_only_local_window_operations() {
-        for action in ["state", "drag", "minimize", "maximize", "close", "resizeNorth", "resizeNorthEast", "resizeEast", "resizeSouthEast", "resizeSouth", "resizeSouthWest", "resizeWest", "resizeNorthWest"] {
+        for action in ["state", "drag", "minimize", "maximize", "close", "appearanceLight", "appearanceDark", "resizeNorth", "resizeNorthEast", "resizeEast", "resizeSouthEast", "resizeSouth", "resizeSouthWest", "resizeWest", "resizeNorthWest"] {
             let request = serde_json::json!({"id":"chrome", "method":"app.windowAction", "params":{"action":action}});
             assert!(parse_bridge_request(&request.to_string()).is_ok(), "{action}");
         }
         for params in [serde_json::json!({}), serde_json::json!({"action":"exitProcess"}), serde_json::json!({"action":"close", "pid":123}), serde_json::json!({"action":"drag", "path":"C:/"}), serde_json::json!({"action":true})] {
             let request = serde_json::json!({"id":"chrome", "method":"app.windowAction", "params":params});
             assert!(parse_bridge_request(&request.to_string()).is_err());
+        }
+    }
+
+    #[test]
+    fn window_behavior_accepts_only_one_explicit_confirmation_boolean() {
+        for confirm_on_exit in [true, false] {
+            let request = serde_json::json!({"id":"window-behavior", "method":"app.setWindowBehavior", "params":{"confirmOnExit":confirm_on_exit}});
+            let parsed = parse_bridge_request(&request.to_string());
+            assert!(parsed.is_ok(), "existing window behavior must reach dispatch: {confirm_on_exit}: {parsed:?}");
+            assert_eq!(parsed.unwrap().params["confirmOnExit"], confirm_on_exit);
+        }
+        for params in [
+            serde_json::json!({}),
+            serde_json::json!({"confirmOnExit":null}),
+            serde_json::json!({"confirmOnExit":"false"}),
+            serde_json::json!({"confirmOnExit":0}),
+            serde_json::json!({"confirmOnExit":{}}),
+            serde_json::json!({"confirmOnExit":false,"path":"C:/"}),
+            serde_json::json!({"confirmOnExit":true,"action":"close"}),
+            serde_json::json!([false]),
+        ] {
+            let request = serde_json::json!({"id":"window-behavior", "method":"app.setWindowBehavior", "params":params});
+            assert!(parse_bridge_request(&request.to_string()).is_err(), "extra authority or non-boolean must remain rejected: {request}");
         }
     }
 
@@ -401,6 +431,7 @@ mod tests {
 
     #[test]
     fn production_csp_denies_eval_and_remote_connections() {
+        assert!(PRODUCTION_CSP.contains("img-src 'self' data: blob:;"));
         assert!(PRODUCTION_CSP.contains("connect-src 'none'"));
         assert!(PRODUCTION_CSP.contains("frame-src 'none'"));
         assert!(!PRODUCTION_CSP.contains("unsafe-eval"));

@@ -35,6 +35,9 @@
 .git-file-path code { white-space: normal; word-break: break-word; }
 .git-file-status { display: flex; flex-wrap: wrap; gap: var(--spacing-2); color: var(--text-secondary); font-size: 10px; margin-top: 3px; }
 .git-file-body > small { display: block; overflow-wrap: anywhere; }
+.git-file-body .git-line-statistics { color: var(--text-secondary); font-size: 10px; }
+.git-stage-unavailable { display: flex; gap: var(--spacing-2); flex-wrap: wrap; align-items: center; margin-top: var(--spacing-3); }
+.git-stage-unavailable small { flex: 1; min-width: min(100%,160px); }
 .git-file.conflicted small { color: var(--danger); }
 .git-pagination { justify-content: space-between; flex-wrap: wrap; padding-top: var(--spacing-3); }
 .git-pagination small { text-align: center; }

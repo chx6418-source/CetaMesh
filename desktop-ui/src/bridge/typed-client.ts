@@ -176,6 +176,7 @@ export interface DesktopEventData {
   delta?: string; replaceText?: string; reset?: boolean; toolActivity?: ChatMessage['toolActivity']; agentActivity?: ChatMessage['agentActivity'];
 }
 type UiMethod =
+  'ui.devices.overview' |
   'ui.chat.attachment.list' | 'ui.chat.attachment.begin' | 'ui.chat.attachment.chunk' | 'ui.chat.attachment.finish' | 'ui.chat.attachment.read' | 'ui.chat.attachment.derive' | 'ui.chat.attachment.describe' | 'ui.chat.attachment.remove' | 'ui.chat.attachment.cleanup' | 'ui.chat.attachment.limits' | 'ui.chat.attachment.limits.set' | 'ui.chat.attachment.capabilities' | 'ui.chat.attachment.import' | 'ui.workspace.git.overview' | 'ui.workspace.git.diff' | 'ui.workspace.git.commit' | 'ui.workspace.git.branch.create' | 'ui.workspace.git.worktree.create' | 'ui.developer.forge.describe' | 'ui.developer.forge.save' | 'ui.developer.forge.invoke' | 'ui.developer.forge.credentials.save'
   | 'ui.preview.open' | 'ui.preview.read' | 'ui.preview.close'
   | 'ui.events.next'
@@ -199,13 +200,13 @@ type UiMethod =
   | 'ui.onboarding.status' | 'ui.onboarding.start' | 'ui.onboarding.completeStep' | 'ui.onboarding.skipStep' | 'ui.onboarding.finish' | 'ui.onboarding.testProvider' | 'ui.onboarding.setModel'
   | 'ui.approvals.grant.revoke' | 'ui.approvals.list' | 'ui.approvals.decide' | 'ui.approvals.operation' | 'ui.approvals.cancel' | 'ui.search';
 type Empty = Record<string, never>;
-export type WindowAction = 'state' | 'drag' | 'minimize' | 'maximize' | 'close' | 'resizeNorth' | 'resizeNorthEast' | 'resizeEast' | 'resizeSouthEast' | 'resizeSouth' | 'resizeSouthWest' | 'resizeWest' | 'resizeNorthWest';
+export type WindowAction = 'state' | 'drag' | 'minimize' | 'maximize' | 'close' | 'appearanceLight' | 'appearanceDark' | 'resizeNorth' | 'resizeNorthEast' | 'resizeEast' | 'resizeSouthEast' | 'resizeSouth' | 'resizeSouthWest' | 'resizeWest' | 'resizeNorthWest';
 type HostMethod = 'app.previewBrowser.open' | 'app.previewBrowser.layout' | 'app.previewBrowser.command' | 'app.windowAction' | 'app.ping' | 'app.status' | 'app.about' | 'app.openExternal' | 'app.openArtifact' | 'app.pickFolder' | 'app.pickFiles' | 'app.pickExtensionPackage' | 'app.setWindowBehavior';
 type HostMap = {
   'app.previewBrowser.open': { params: { targetId: string; url: string; bounds: PreviewBounds }; result: { opened: boolean } };
   'app.previewBrowser.layout': { params: { targetId: string; bounds: PreviewBounds; visible: boolean }; result: { updated: boolean } };
   'app.previewBrowser.command': { params: { targetId: string; action: 'back' | 'forward' | 'reload' | 'close' }; result: { updated: boolean } };
-  'app.windowAction': { params: { action: WindowAction }; result: { maximized: boolean } };
+  'app.windowAction': { params: { action: WindowAction }; result: { maximized: boolean; nativeChrome?: boolean } };
   'app.ping': { params: Empty; result: { host: 'webview2'; ready: boolean } };
   'app.status': { params: Empty; result: { ready: boolean; needsAttention: boolean } };
   'app.about': { params: Empty; result: AboutView };
@@ -227,6 +228,7 @@ declare global {
     ipc?: { postMessage(message: string): void };
     cetamesh: HostBridge;
     __cetameshReceive?: (reply: Reply) => void;
+    __CETAMESH_NATIVE_CHROME__?: boolean;
     __cetameshEvent?: (event: EventEnvelope) => void;
   }
 }
@@ -482,6 +484,9 @@ export const onboardingClient = {
   setModel: (provider: string, model: string) => uiCall<Record<string, unknown>>('ui.onboarding.setModel', { provider, model })
 };
 export const searchClient = { search: (query: string) => uiCall<{ sessions: ChatSession[]; tasks: Task[]; plugins: Plugin[] }>('ui.search', { query }) };
+export interface DevicePeer {id:string;name:string;role:string;trust:string;presence:string;grants:string[];lastSeenAt:number|null;lastError:string|null}
+export interface DeviceOverview {available:boolean;enabled:boolean|null;local:{id:string;name:string;role:string;transportRunning:boolean|null}|null;peers:DevicePeer[];audit:{at:number|null;code:string;direction:string}[];truncated:boolean}
+export const deviceClient={overview:()=>uiCall<DeviceOverview>('ui.devices.overview',{})};
 export const hostClient = {
   status: () => bridge.invoke('app.status', {}),
   about: () => bridge.invoke('app.about', {}),

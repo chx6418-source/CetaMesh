@@ -19,6 +19,9 @@ The earlier HTML prototypes, exploratory screenshot galleries, color tests and t
 - Keep a consistent warm paper/sage direction (including background around #f1f0ea, text around #2e3630, accent around #75937b), accessible contrast, keyboard focus and reduced-motion behavior.
 - Do not introduce sample records as real user state, or re-enable discarded prototype themes by default.
 - Preserve native window behavior, file dialogs, IPC permissions and settings persistence.
+- Windows WebView2 uses one OS-owned caption, harmonized with Harbor via fixed DWM theme attributes;
+  hide the client titlebar when the native host advertises it. Preserve Snap, system menu and resize
+  behavior rather than drawing a second set of controls. See [UI conventions](docs/desktop/UI_DESIGN_GUIDE.md).
 
 ## Change control
 

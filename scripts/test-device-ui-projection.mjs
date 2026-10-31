@@ -1,0 +1,11 @@
+import assert from 'node:assert/strict';
+import {createDesktopUiService} from '../src/desktop/ui-service.js';
+let calls=0;
+const ui=createDesktopUiService({services:{meshService:{execute:async({method})=>{assert.equal(method,'mesh.snapshot');calls++;return {status:{meshEnabled:false,name:'Owner node',nodeId:'local',role:'desktop',transport:{running:false,privateKey:'private-test'}},peers:[{nodeId:'peer',name:'Known device',role:'mobile',trust:'trusted',presence:'offline',grants:['mesh.presence'],advertised:['file.read'],lastSeenAt:100,lastError:'offline',token:'private-test'}],audit:[{at:10,code:'PEER_OFFLINE',requestBody:'private-test'}],pairing:{inviteCode:'private-test'}};}}}});
+const result=await ui.execute({method:'ui.devices.overview'});
+assert.equal(result.enabled,false);assert.equal(result.peers[0].presence,'offline');
+assert.equal(result.peers[0].trust,'trusted');assert.deepEqual(result.peers[0].grants,['mesh.presence']);
+assert.doesNotMatch(JSON.stringify(result),/private-test|inviteCode|requestBody|privateKey|token/,'UI projection never leaks pairing credentials or private payload');
+await assert.rejects(ui.execute({method:'ui.devices.overview',params:{approved:true}}),/参数|input|field/i);assert.equal(calls,1);
+const absent=await createDesktopUiService().execute({method:'ui.devices.overview'});assert.equal(absent.available,false);assert.equal(absent.enabled,null);
+console.log('PASS real Mesh snapshot to bounded read-only UI DTO preserves trust/presence, omits credentials and grants no capabilities');

@@ -2,13 +2,14 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Button, Input, SearchInput, Select, Tabs, Textarea } from '../components/primitives/inputs';
 import { Badge, Surface } from '../components/primitives/surfaces';
 import { Sheet as Drawer } from '../components/primitives/overlays';
+import { DiffViewer, parseUnifiedDiff } from '../components/product/DiffViewer';
 import './GitWorkspace.css';
 
 type GitEntry = { x: string; y: string; path: string; origPath?: string | null; conflict: boolean; commitEligible: boolean; sha256?: string | null; blockedReason?: string };
 type GitTask = { id: string; goal: string; status: string; workspaceId: string; readOnly: boolean; executor?: { provider: string | null; sessionId: string | null } | null };
 type GitBranch = { name: string; headSha: string; current: boolean; upstream: string | null; taskId: string | null; baselineHead: string | null };
 type GitWorktree = { workspaceId: string | null; name: string; branch: string | null; headSha: string | null; current: boolean; managed: boolean; locked: boolean; prunable: boolean; taskId: string | null; parentWorkspaceId: string | null; baselineHead: string | null };
-type GitOverview = {
+export type GitOverview = {
   workspaceId: string;
   git: { isRepo: boolean; branch: string; headSha: string | null; dirty: boolean; entries: GitEntry[] };
   conflicts: GitEntry[];
@@ -19,7 +20,7 @@ type GitOverview = {
   worktreeRelation?: { taskId: string; parentWorkspaceId: string; branch: string; baselineHead: string } | null;
   truncated: boolean;
 };
-type GitDiff = { output: string; cached: boolean; truncated: boolean; hasChanges: boolean };
+export type GitDiff = { output: string; cached: boolean; truncated: boolean; hasChanges: boolean };
 type Review = { kind: 'branch' | 'worktree'; workspaceId: string; headSha: string; taskId: string; branch: string };
 type Detail = { kind: 'branch'; item: GitBranch } | { kind: 'worktree'; item: GitWorktree };
 export type GitWorkspaceProps = {
@@ -28,6 +29,7 @@ export type GitWorkspaceProps = {
   activeWorkspaceId?: string | null;
   onWorkspaceChanged?(): void | Promise<void>;
   onOpenTask?(id: string): void;
+  onExplain?(path: string, output: string, workspaceId: string): void | Promise<void>;
 };
 const PAGE_SIZE = 50;
 const tabs = [{ id: 'changes', label: 'Changes · 变更' }, { id: 'history', label: 'History · 提交记录' }, { id: 'branches', label: 'Branches · 分支' }, { id: 'worktrees', label: 'Worktrees · 工作树' }];
@@ -39,7 +41,7 @@ const working = (entry: GitEntry) => entry.y !== ' ' || entry.x === '?';
 const matches = (query: string, values: (string | null | undefined)[]) => values.some(value => value?.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()));
 
 /** Read-only projections and exact scoped requests use the existing Owner UI DTOs. */
-export function GitWorkspace({ call, workspaces, activeWorkspaceId, onWorkspaceChanged, onOpenTask }: GitWorkspaceProps) {
+export function GitWorkspace({ call, workspaces, activeWorkspaceId, onWorkspaceChanged, onOpenTask, onExplain }: GitWorkspaceProps) {
   const [workspaceId, setWorkspaceId] = useState(activeWorkspaceId ?? workspaces[0]?.id ?? '');
   const [overviewResult, setOverview] = useState<GitOverview | null>(null);
   const [diffResult, setDiff] = useState<(GitDiff & { workspaceId: string; path: string }) | null>(null);
@@ -63,6 +65,8 @@ export function GitWorkspace({ call, workspaces, activeWorkspaceId, onWorkspaceC
   const [page, setPage] = useState(0);
   const [branchQuery, setBranchQuery] = useState('');
   const [worktreeQuery, setWorktreeQuery] = useState('');
+  const [lineStatistics, setLineStatistics] = useState<Record<string, { additions: number; deletions: number; truncated: boolean; cached: boolean }>>({});
+  const previewWorkspace = useRef<string | null>(null);
   const callRef = useRef(call); callRef.current = call;
   const workspaceRef = useRef(workspaceId); workspaceRef.current = workspaceId;
   const generation = useRef(0);
@@ -77,12 +81,14 @@ export function GitWorkspace({ call, workspaces, activeWorkspaceId, onWorkspaceC
     operation.current++;
     setBusy(false); setSelected([]); setMessage(''); setBranch(''); setTaskId('');
     setPreviewPath(''); setDiff(null); setDiffError(''); setReview(null); setDetail(null); setNotice('');
+    previewWorkspace.current = null; setLineStatistics({});
     setQuery(''); setStatusFilter('all'); setPage(0); setBranchQuery(''); setWorktreeQuery('');
     return () => { operation.current++; };
   }, [workspaceId]);
   useEffect(() => {
     const epoch = ++generation.current;
     setOverview(null); setReview(null); setDetail(null); setError('');
+    setLineStatistics({});
     if (!workspaceId) { setLoading(false); return; }
     setLoading(true);
     void callRef.current('ui.workspace.git.overview', { id: workspaceId }).then(value => {
@@ -98,9 +104,13 @@ export function GitWorkspace({ call, workspaces, activeWorkspaceId, onWorkspaceC
   }, [workspaceId, revision]);
   useEffect(() => {
     let current = true; setDiff(null); setDiffError('');
-    if (!workspaceId || tab !== 'changes' || !previewPath) return;
+    if (!workspaceId || previewWorkspace.current !== workspaceId || tab !== 'changes' || !previewPath) return;
     void callRef.current('ui.workspace.git.diff', { id: workspaceId, cached, path: previewPath }).then(value => {
-      if (current && workspaceRef.current === workspaceId) setDiff({ ...value as GitDiff, workspaceId, path: previewPath, cached });
+      if (current && workspaceRef.current === workspaceId) {
+        const result=value as GitDiff, parsed=parseUnifiedDiff(result.output);
+        setDiff({ ...result, workspaceId, path: previewPath, cached });
+        setLineStatistics(previous=>({...previous,[previewPath]:{additions:parsed.additions,deletions:parsed.deletions,truncated:result.truncated||parsed.clipped,cached}}));
+      }
     }).catch(cause => { if (current && workspaceRef.current === workspaceId) setDiffError(errorMessage(cause)); });
     return () => { current = false; };
   }, [workspaceId, revision, cached, tab, previewPath]);
@@ -173,7 +183,7 @@ export function GitWorkspace({ call, workspaces, activeWorkspaceId, onWorkspaceC
     const paths = new Set(pageEligible.map(entry => entry.path));
     setSelected(previous => allPageSelected ? previous.filter(path => !paths.has(path)) : [...new Set([...previous, ...paths])]);
   }
-  function preview(entry: GitEntry) { setPreviewPath(entry.path); setCached(staged(entry) && !working(entry)); }
+  function preview(entry: GitEntry) { previewWorkspace.current=workspaceId; setPreviewPath(entry.path); setCached(staged(entry) && !working(entry)); }
 
   return <div className="git-workspace">
     <header className="git-heading"><div><h1>Git 工作台</h1><p>在当前项目中审查变更、提交与任务隔离目录。</p></div><div className="git-toolbar">
@@ -195,13 +205,15 @@ export function GitWorkspace({ call, workspaces, activeWorkspaceId, onWorkspaceC
               <Input type="checkbox" aria-label={'提交 ' + entry.path} checked={selectedSet.has(entry.path)} disabled={locked || !entry.commitEligible || !!overview.conflicts.length} onChange={event => setSelected(previous => event.target.checked ? [...new Set([...previous, entry.path])] : previous.filter(item => item !== entry.path))} />
               <div className="git-file-body"><Button type="button" variant="ghost" compact className="git-file-path" aria-label={'查看差异 ' + entry.path} aria-pressed={previewPath === entry.path} onClick={() => preview(entry)}><code>{entry.path}</code></Button>
                 <div className="git-file-status"><span title={'Git index status ' + entry.x}>已暂存 {staged(entry) ? entry.x : '—'}</span><span title={'Git working tree status ' + entry.y}>工作目录 {entry.x === '?' ? '未跟踪' : working(entry) ? entry.y : '—'}</span></div>
+                <small className="git-line-statistics">{lineStatistics[entry.path] ? `${lineStatistics[entry.path].cached?'暂存区':'工作目录'} +${lineStatistics[entry.path].additions} −${lineStatistics[entry.path].deletions}${lineStatistics[entry.path].truncated?' · 部分统计':''}` : '增删行待查看差异后统计'}</small>
                 {entry.origPath && <small>来自 {entry.origPath}</small>}{entry.conflict ? <small>文件包含未解决的 Git 冲突</small> : !entry.commitEligible ? <small>需要单独审查 · {entry.blockedReason ?? '原因未知'}</small> : null}
               </div></div>)}</div>
             <nav className="git-pagination" aria-label="变更文件分页"><Button type="button" compact disabled={!visiblePage} onClick={() => setPage(visiblePage - 1)}>上一页</Button><small aria-live="polite">{filteredEntries.length ? visiblePage * PAGE_SIZE + 1 : 0}–{Math.min((visiblePage + 1) * PAGE_SIZE, filteredEntries.length)} / {filteredEntries.length} · 每页 {PAGE_SIZE}</small><Button type="button" compact disabled={visiblePage >= lastPage} onClick={() => setPage(visiblePage + 1)}>下一页</Button></nav>
           </section>
           <section className="git-preview" aria-label="文件差异预览"><div className="git-section-heading"><h2>Diff · 文件差异</h2>{previewPath && <Button type="button" variant="ghost" compact onClick={() => setPreviewPath('')}>关闭预览</Button>}</div>
-            {!previewPath ? <div className="git-empty">选择文件名，查看该文件的差异。<p>文件复选框仅选择提交范围。</p></div> : <><code className="git-preview-path">{previewPath}</code><Select label="Diff 来源" value={cached ? 'cached' : 'working'} onChange={event => setCached(event.target.value === 'cached')}><option value="working">工作目录</option><option value="cached">暂存区</option></Select>
-              {diffError ? <p className="git-notice error" role="alert">{diffError}</p> : !diff ? <div className="git-empty" role="status">正在读取 Diff…</div> : <>{diff.truncated && <p className="git-notice">Diff 已截断，提交前请检查完整文件。</p>}<pre className="git-diff">{diff.output || '当前来源没有已跟踪文件的差异。未跟踪文件尚无 Git Diff。'}</pre></>}
+            {!previewPath ? <div className="git-empty">选择文件名，查看该文件的差异。<p>文件复选框仅选择提交范围。</p></div> : <><Select label="Diff 来源" value={cached ? 'cached' : 'working'} onChange={event => setCached(event.target.value === 'cached')}><option value="working">工作目录</option><option value="cached">暂存区</option></Select>
+              <DiffViewer path={previewPath} output={diff?.output??''} loading={!diff&&!diffError} error={diffError} truncated={diff?.truncated} onRetry={()=>setRevision(value=>value+1)} onExplain={onExplain?(path,output)=>onExplain(path,output,workspaceId):undefined} />
+              <div className="git-stage-unavailable"><Button compact disabled title="现有受控 Git 执行器尚未提供文件级暂存；不会绕过 Broker 直接运行 Git。">{cached?'取消文件暂存':'暂存此文件'}</Button><small>文件级暂存执行器未接入。仍可在提交区按审批提交所选完整文件。</small></div>
             </>}
           </section></div>}
         {tab === 'history' && <><div className="git-section-heading"><h2>提交记录</h2><small>最近 {overview.history.length} 次提交</small></div>{!overview.history.length && <div className="git-empty">仓库还没有提交记录。</div>}{overview.history.map(item => <div className="git-data-row" key={item.sha}><div><strong>{item.subject}</strong><small>{new Date(item.committedAt).toLocaleString()} · {item.parents.length > 1 ? '合并提交' : '提交'}</small></div><code title={item.sha}>{shortSha(item.sha)}</code></div>)}</>}

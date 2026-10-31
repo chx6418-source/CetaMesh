@@ -1,0 +1,59 @@
+/* Harbor Chat and Task presentation; shared controls and semantic colors remain authoritative. */
+.usage-disclosure { font-size: 11px; border: 0; color: var(--text-secondary); }
+.usage-disclosure > summary { display: flex; flex-wrap: wrap; align-items: center; gap: var(--spacing-2); cursor: pointer; padding: var(--spacing-1) 0; list-style: none; }
+.usage-disclosure > summary::-webkit-details-marker { display: none; }
+.usage-disclosure > summary > svg { margin-left: auto; flex: none; }
+.usage-disclosure[open] > summary > svg { transform: rotate(180deg); }
+.usage-accounting { color: var(--text-muted); }
+.usage-detail-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%,160px),1fr)); gap: var(--spacing-2) var(--spacing-4); padding: var(--spacing-2) 0; line-height: 1.7; border-top: 1px solid var(--border); }
+.usage-detail-grid > span { overflow-wrap: anywhere; }
+.tool-call > summary > span:first-of-type { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tool-call-receipt { white-space: pre-wrap; max-height: 260px; overflow: auto; user-select: text; }
+.tool-diagnostic, .task-advanced { font-size: 12px; color: var(--text-secondary); }
+.tool-diagnostic > summary, .task-advanced > summary { cursor: pointer; padding: var(--spacing-2) 0; }
+.tool-diagnostic dl { display: grid; grid-template-columns: 70px minmax(0,1fr); gap: var(--spacing-2); margin: var(--spacing-2) 0; }
+.tool-diagnostic dd { margin: 0; overflow-wrap: anywhere; }
+.task-list-pagination { display: flex; align-items: center; justify-content: space-between; gap: var(--spacing-2); flex-wrap: wrap; padding: var(--spacing-3) 0; }
+.task-list-pagination small { color: var(--text-secondary); }
+.task-card-heading, .task-card-outcome, .task-card-footer, .task-child-heading { display: flex; align-items: center; justify-content: space-between; gap: var(--spacing-2); min-width: 0; }
+.task-collaboration-card { display: flex; flex-direction: column; gap: var(--spacing-3); min-width: 0; }
+.task-collaboration-card h3 { margin: 0; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; line-height: 1.6; }
+.task-card-context { margin: 0; display: grid; gap: var(--spacing-2); }
+.task-card-context > div { display: grid; grid-template-columns: 44px minmax(0,1fr); gap: var(--spacing-2); font-size: 12px; }
+.task-card-context dt { color: var(--text-muted); }
+.task-card-context dd { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); }
+.task-card-outcome { color: var(--text-secondary); font-size: 11px; flex-wrap: wrap; }
+.task-card-outcome > span { display: inline-flex; align-items: center; gap: var(--spacing-1); }
+.task-card-footer { border-top: 1px solid var(--border); padding-top: var(--spacing-2); margin-top: auto; flex-wrap: wrap; }
+.task-card-footer > small { color: var(--text-muted); }
+.task-card-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--spacing-1); }
+.task-delivery-note { color: var(--accent-hover); }
+.task-product-details { gap: var(--spacing-3); min-width: 0; }
+.task-detail-overview { display: flex; align-items: center; flex-wrap: wrap; gap: var(--spacing-2); font-size: 12px; }
+.task-detail-overview > small { margin-left: auto; color: var(--text-muted); }
+.task-detail-section { border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); min-width: 0; }
+.task-detail-section > summary { display: flex; align-items: center; justify-content: space-between; gap: var(--spacing-2); font-size: 13px; font-weight: 600; padding: var(--spacing-3); cursor: pointer; list-style: none; }
+.task-detail-section > summary::-webkit-details-marker { display: none; }
+.task-detail-section > summary > svg { flex: none; }
+.task-detail-section[open] > summary { border-bottom: 1px solid var(--border); }
+.task-detail-section[open] > summary > svg { transform: rotate(180deg); }
+.task-detail-section-body { padding: var(--spacing-3); display: grid; gap: var(--spacing-3); min-width: 0; }
+.task-detail-section h3, .task-detail-section h4 { font-size: 12px; margin: 0 0 var(--spacing-2); }
+.task-detail-section p, .task-detail-section small { overflow-wrap: anywhere; line-height: 1.7; }
+.task-detail-section-body > section { min-width: 0; }
+.task-delivery-summary, .task-failure-summary { padding: var(--spacing-3); border-radius: var(--radius-sm); background: var(--accent-soft); border: 1px solid var(--border); }
+.task-failure-summary { background: color-mix(in srgb,var(--danger) 8%,var(--surface)); }
+.task-delivery-summary h3, .task-failure-summary h3 { font-size: 13px; margin: 0 0 var(--spacing-2); }
+.task-form-grid { display: grid; gap: var(--spacing-3); min-width: 0; }
+.task-form-grid label { display: grid; gap: var(--spacing-2); font-size: 12px; color: var(--text-secondary); }
+.task-form-grid .cm-select, .task-form-grid .cm-input, .task-form-grid .cm-textarea { width: 100%; min-width: 0; }
+.task-form-grid > .cm-button { justify-self: start; }
+.task-form-grid .task-check { display: flex; align-items: flex-start; }
+.task-check .cm-input[type=checkbox] { width: 16px; height: 16px; min-height: 0; padding: 0; margin-top: 2px; flex: none; }
+.task-child-summary, .task-timeline-row { padding: var(--spacing-3) 0; border-bottom: 1px solid var(--border); min-width: 0; }
+.task-child-heading > .cm-button { min-width: 0; padding-left: 0; text-align: left; white-space: normal; overflow-wrap: anywhere; }
+.task-timeline-row > small { display: block; color: var(--text-muted); margin-top: var(--spacing-1); }
+.task-timeline-row code { overflow-wrap: anywhere; user-select: text; }
+.task-product-details .task-detail-actions { flex-wrap: wrap; padding-top: var(--spacing-2); }
+.task-product-details .row { flex-wrap: wrap; }
+@media (max-width: 600px) { .usage-disclosure > summary { column-gap: var(--spacing-2); row-gap: var(--spacing-1); } .usage-accounting { flex-basis: 100%; } .task-card-context > div { grid-template-columns: 40px minmax(0,1fr); } }

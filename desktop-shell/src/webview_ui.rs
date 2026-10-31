@@ -23,6 +23,30 @@ use crate::tray::{TrayCommand, TrayHandle, TrayStatus};
 use crate::ui_prefs::{self, CloseBehavior, UiPrefs};
 use crate::webview_policy::{self, APP_ORIGIN, BridgeRequest, PRODUCTION_CSP, WindowAction};
 
+// Preserve the native caption: Windows owns Snap, non-client hit testing,
+// keyboard system commands, DPI, resize borders and maximized work-area bounds.
+// These DWM colors only harmonize the existing frame with Harbor. Unsupported
+// attributes on older Windows versions harmlessly retain the system appearance.
+fn harmonize_window_frame(window: &Window, dark: bool) {
+    use std::ffi::c_void;
+    #[link(name = "dwmapi")]
+    unsafe extern "system" {
+        #[link_name = "DwmSetWindowAttribute"]
+        fn dwm_attribute(hwnd: *mut c_void, attribute: u32, value: *const c_void, size: u32) -> i32;
+    }
+    window.set_theme(Some(if dark { tao::window::Theme::Dark } else { tao::window::Theme::Light }));
+    let colors: [(u32, u32); 5] = [
+        (20, u32::from(dark)), // DWMWA_USE_IMMERSIVE_DARK_MODE
+        (33, 2), // DWMWA_WINDOW_CORNER_PREFERENCE: DWMWCP_ROUND
+        (34, if dark { 0x00384134 } else { 0x00dde5e1 }), // border, COLORREF
+        (35, if dark { 0x0020251d } else { 0x00f1f6f7 }), // caption
+        (36, if dark { 0x00e9eee9 } else { 0x0030362e }), // text
+    ];
+    for (attribute, value) in colors {
+        unsafe { let _ = dwm_attribute(window.hwnd() as _, attribute, (&value as *const u32).cast(), 4); }
+    }
+}
+
 enum UiEvent {
     ReferenceRequest { id: String, method: String, params: Value },
     ReferenceEvent(Value),
@@ -365,7 +389,7 @@ pub fn run_webview_ui(paths: DesktopPaths, dev_url: Option<String>) -> Result<()
         .and_then(|data| Icon::from_rgba(data.rgba, data.width, data.height).ok());
     let mut window_builder = WindowBuilder::new()
         .with_title("CetaMesh")
-        .with_decorations(false)
+        .with_decorations(true)
         .with_inner_size(LogicalSize::new(1280.0, 800.0))
         .with_min_inner_size(LogicalSize::new(960.0, 640.0))
         .with_visible(!start_minimized)
@@ -395,6 +419,12 @@ pub fn run_webview_ui(paths: DesktopPaths, dev_url: Option<String>) -> Result<()
     let window = window_builder
         .build(&event_loop)
         .map_err(|error| format!("无法创建 CetaMesh v2 窗口：{error}"))?;
+    let dark_frame = match general_settings["theme"].as_str() {
+        Some("dark") => true,
+        Some("light") => false,
+        _ => window.theme() == tao::window::Theme::Dark,
+    };
+    harmonize_window_frame(&window, dark_frame);
     sync_window_geometry(&window, &mut prefs);
     save_ui_prefs(&paths.data_dir, &prefs);
 
@@ -423,6 +453,7 @@ pub fn run_webview_ui(paths: DesktopPaths, dev_url: Option<String>) -> Result<()
         .map_err(|error| format!("创建 WebView2 用户数据目录失败 {}：{error}", webview_data_dir.display()))?;
     let mut web_context = WebContext::new(Some(webview_data_dir));
     let builder = WebViewBuilder::new_with_web_context(&mut web_context)
+        .with_initialization_script("window.__CETAMESH_NATIVE_CHROME__=true;")
         .with_url(start_url)
         .with_devtools(cfg!(debug_assertions))
         .with_clipboard(true)
@@ -497,6 +528,8 @@ pub fn run_webview_ui(paths: DesktopPaths, dev_url: Option<String>) -> Result<()
                     WindowAction::Drag => window.drag_window().map_err(|error| error.to_string()),
                     WindowAction::Minimize => { window.set_minimized(true); Ok(()) }
                     WindowAction::Maximize => { window.set_maximized(!window.is_maximized()); Ok(()) }
+                    WindowAction::AppearanceLight => { harmonize_window_frame(&window, false); Ok(()) }
+                    WindowAction::AppearanceDark => { harmonize_window_frame(&window, true); Ok(()) }
                     // WM_CLOSE reuses CloseRequested, including hide-to-tray and Owner exit confirmation.
                     WindowAction::Close => unsafe {
                         use windows_sys::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
@@ -517,7 +550,7 @@ pub fn run_webview_ui(paths: DesktopPaths, dev_url: Option<String>) -> Result<()
                         };
                         window.drag_resize_window(direction).map_err(|error| error.to_string())
                     }
-                }.map(|()| json!({ "maximized": window.is_maximized() }));
+                }.map(|()| json!({ "maximized": window.is_maximized(), "nativeChrome": true }));
                 send_reply(&webview, id, result);
             }
             Event::UserEvent(UiEvent::Reply { id, result }) => send_reply(&webview, id, result),

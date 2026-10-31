@@ -6,5 +6,6 @@ import './theme/global.css';
 import { HarborApp } from './app/HarborApp';
 
 const root = document.getElementById('root');
+document.documentElement.dataset.windowChrome = window.__CETAMESH_NATIVE_CHROME__ ? 'native' : 'custom';
 if (!root) throw new Error('CetaMesh UI root is missing');
 createRoot(root).render(<React.StrictMode><BrowserRouter><HarborApp /></BrowserRouter></React.StrictMode>);

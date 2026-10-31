@@ -95,3 +95,10 @@
 - Chat新增受控分块附件、原图与模型图、视觉能力门禁、历史/重试及ZIP导入；DeepSeek Flash真实多图输入已验证。
 - 仿生聊天修复ready聚合与官方persona前缀；真实QQ收发、当前候选Native/Guest和本分支云端安装包仍需独立验收。Defender RELEASE HOLD保留。
 - 功能、限额和边界见 [开发工具与附件](docs/development/DEVELOPER_TOOLS_AND_ATTACHMENTS.md)。源码测试与Chromium验收不等于已安装版本更新或正式发布。
+
+## Desktop 全局界面与原生窗口统一（2026-10-31）
+
+- 沿用 Harbor Token 与组件，整理 Chat 用量/工具调用、Task 协作与结果抽屉、Memory 来源与 Scope、Agent 配置、Plugins/MCP 分页、可搜索设置及设备只读状态。
+- Git 与 Task 共享 Unified/Split Diff；文件选择仍是受控提交范围。没有既有授权执行器的暂存操作明确不可用，不新增 Git 权限或 Runtime。
+- Windows 使用同色原生标题栏、系统按钮和缩放边框；原生宿主声明后不再重复绘制网页标题栏。Windows Snap、DPI、系统操作与源码/浏览器验收分别记录，不能据静态构建推定全部通过。
+- 设计规则见 [Harbor UI conventions](docs/desktop/UI_DESIGN_GUIDE.md)。本地开发和隔离 Debug 验收不更新已安装版本，不解除 Defender RELEASE HOLD。

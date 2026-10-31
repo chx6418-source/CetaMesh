@@ -111,6 +111,7 @@ try{
     async function key(value){await rpc('Input.dispatchKeyEvent',{type:'keyDown',key:value,code:value},sessionId);await rpc('Input.dispatchKeyEvent',{type:'keyUp',key:value,code:value},sessionId);await delay(50);}
     await evaluate('document.querySelector("button[aria-label=\\"关联任务\\"]").focus()');await key('ArrowUp');await key('ArrowUp');await key('Enter');assert.equal(await evaluate('document.querySelector("button[aria-label=\\"关联任务\\"]").textContent.trim()'),'选择未结束任务','modal Select keyboard changes use the same controlled value');
     await key('ArrowDown');await key('ArrowDown');await key('Enter');assert.equal(await evaluate('document.querySelector("button[aria-label=\\"关联任务\\"]").textContent.trim()'),'Fixture task');
+    await key('ArrowDown');await key('Escape');await until('document.querySelector("dialog[open]") && document.querySelector("button[aria-label=\\"关联任务\\"]").getAttribute("aria-expanded")==="false"','Escape closes the Select before its owning dialog');
     await evaluate('window.fixture.fault="FORGE_NETWORK_ERROR"');await click('提交审批');await until('document.querySelector("dialog[open]")?.textContent.includes("Forge request failed")','action error visible');
     assert.equal(await evaluate('document.querySelector("input[aria-label=\\"Issue 标题\\"]").value'),'preserved issue');
     await evaluate('window.fixture.fault=""');await click('提交审批');await until('document.body.innerText.includes("fixture-approval")','pending approval shown');

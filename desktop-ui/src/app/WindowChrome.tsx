@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { hostClient, type WindowAction } from '../bridge/typed-client';
+import { useUi } from '../stores/ui';
 
 const edges = ['North', 'NorthEast', 'East', 'SouthEast', 'South', 'SouthWest', 'West', 'NorthWest'] as const;
 
@@ -21,6 +22,8 @@ export function createWindowDragGesture() {
 }
 
 export function WindowChrome() {
+  const theme = useUi(state => state.theme);
+  const [native, setNative] = useState(() => typeof window !== 'undefined' && window.__CETAMESH_NATIVE_CHROME__ === true);
   const gesture = useRef(createWindowDragGesture());
   const [maximized, setMaximized] = useState(false);
   const [error, setError] = useState('');
@@ -28,6 +31,7 @@ export function WindowChrome() {
     try {
       const state = await hostClient.windowAction(action);
       setMaximized(state.maximized);
+      if (state.nativeChrome) { setNative(true); document.documentElement.dataset.windowChrome = 'native'; }
       setError('');
     } catch (cause) { setError(cause instanceof Error ? cause.message : '窗口操作失败'); }
   }
@@ -37,6 +41,14 @@ export function WindowChrome() {
     window.addEventListener('resize', update);
     return () => window.removeEventListener('resize', update);
   }, []);
+  useEffect(() => {
+    if (!native) return;
+    const media = window.matchMedia('(prefers-color-scheme: dark)');
+    const update = () => { void command(theme === 'dark' || theme === 'system' && media.matches ? 'appearanceDark' : 'appearanceLight'); };
+    update(); media.addEventListener('change', update);
+    return () => media.removeEventListener('change', update);
+  }, [native, theme]);
+  if (native) return error ? <span className="window-native-error" role="alert">{error}</span> : null;
   return <>
     <header className="window-chrome" aria-label="窗口标题栏">
       <div className="window-drag-area" onPointerDown={event => {
@@ -46,7 +58,7 @@ export function WindowChrome() {
           event.preventDefault(); void command('drag');
         }
       }} onPointerUp={() => gesture.current.end()} onPointerCancel={() => gesture.current.end()}
-        onPointerLeave={() => gesture.current.end()} onDoubleClick={() => void command('maximize')}><strong>CetaMesh</strong></div>
+        onPointerLeave={() => gesture.current.end()} onDoubleClick={() => void command('maximize')}><svg className="window-brand-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M4 5h9a3 3 0 0 1 0 6H8a3 3 0 0 0 0 6h8M4 5v10" /></svg><strong>CetaMesh</strong></div>
       {error && <span className="window-error" role="alert">{error}</span>}
       <div className="window-controls">
         <button aria-label="最小化" onClick={() => void command('minimize')}><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8h10" /></svg></button>

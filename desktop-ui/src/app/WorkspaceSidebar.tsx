@@ -3,10 +3,11 @@ import type { ChatSession } from '../bridge/typed-client';
 import { Icon, type IconName } from '../components/icons';
 
 type Workspace = { id: string; name: string; status: string };
-type NavigationPage = 'chat' | 'work' | 'memory' | 'agents' | 'plugins' | 'settings' | 'about';
+type NavigationPage = 'chat' | 'work' | 'memory' | 'agents' | 'devices' | 'plugins' | 'settings' | 'about';
 const navigation: { id: NavigationPage; label: string; icon: IconName }[] = [
   { id: 'chat', label: 'Chat', icon: 'chat' }, { id: 'work', label: 'Work', icon: 'work' },
   { id: 'memory', label: '记忆', icon: 'memory' },
+  { id: 'devices', label: '设备', icon: 'device' },
   { id: 'agents', label: 'Agents', icon: 'agents' }, { id: 'plugins', label: 'Plugins', icon: 'plugins' },
   { id: 'settings', label: 'Settings', icon: 'settings' }, { id: 'about', label: '关于', icon: 'help' }
 ];
@@ -24,12 +25,13 @@ export function groupWorkspaceSessions(workspaces: Workspace[], sessions: ChatSe
 
 export function WorkspaceSidebar({ page, workspaces, sessions, activeWorkspaceId, activeSessionId, taskCount,
   hostStatus, collapsed, workspaceError, sessionError, onToggle, onNavigate, onOpenWorkspace, onOpenSession,
-  onNewSession, onAllSessions, renderSessionActions }: {
+  onNewSession, onAllSessions, renderSessionActions, onQuickJump }: {
   page: string; workspaces: Workspace[]; sessions: ChatSession[]; activeWorkspaceId: string | null;
   activeSessionId: string; taskCount: number; hostStatus: 'ready' | 'checking' | 'offline'; collapsed: boolean;
   workspaceError?: string; sessionError?: string; onToggle(): void; onNavigate(page: NavigationPage): void;
   onOpenWorkspace(id: string): void; onOpenSession(id: string): void; onNewSession(): void;
   onAllSessions(): void; renderSessionActions(session: ChatSession): ReactNode;
+  onQuickJump?():void;
 }) {
   const { projects, recent } = groupWorkspaceSessions(workspaces, sessions);
   const connection = hostStatus === 'ready' ? '已连接' : hostStatus === 'checking' ? '正在连接' : '桌面服务离线';
@@ -47,6 +49,7 @@ export function WorkspaceSidebar({ page, workspaces, sessions, activeWorkspaceId
   </div>;
   return <aside className={`harbor-sidebar ${collapsed ? 'is-collapsed' : ''}`} aria-label="应用导航与工作区">
     <div className="navigation-rail">
+      {onQuickJump&&<button type="button" className="rail-button nav-item" aria-label="快速跳转" title="快速跳转 · Ctrl+K" onClick={onQuickJump}><Icon name="search" size={20}/></button>}
       <nav aria-label="工作空间" className="primary-nav">{navigation.filter(item => item.id !== 'settings' && item.id !== 'about').map(railButton)}</nav>
       {page !== 'settings' && <button type="button" className="rail-panel-toggle" aria-label={collapsed ? '展开工作区列表' : '收起工作区列表'}
         title={collapsed ? '展开工作区列表' : '收起工作区列表'} aria-expanded={!collapsed} aria-controls="workspace-panel" onClick={onToggle}><Icon name="panelLeft" size={19} /></button>}
