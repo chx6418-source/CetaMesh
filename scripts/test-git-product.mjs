@@ -31,6 +31,39 @@ async function fixture(name, { aliasStateDir = false } = {}) {
   return { root, stateDir, runtime, service, workspace, task, request };
 }
 try {
+  await check('large repositories expose 1500 actual changes within the bounded display projection', async () => {
+    const f = await fixture('large-display');
+    for (let index = 0; index < 1500; index++) fs.writeFileSync(path.join(f.root, `change-${index}.txt`), 'small fixture\n');
+    const view = await f.service.execute({ method: 'workspace.git.overview', params: { id: f.workspace.id } });
+    assert.equal(view.git.entries.length, 1500); assert.equal(view.truncated, false);
+    assert.ok(view.git.entries.some(row => row.path === 'change-1499.txt'));
+  });
+  await check('file Diff is literal and bounded to the selected Workspace path', async () => {
+    const f = await fixture('file-diff');
+    fs.writeFileSync(path.join(f.root, 'a.txt'), 'selected change\n');
+    fs.writeFileSync(path.join(f.root, 'other.txt'), 'unrelated change\n');
+    const before = git(f.root, 'status', '--porcelain');
+    const one = await f.service.execute({ method: 'workspace.git.diff', params: { id: f.workspace.id, path: 'a.txt' } });
+    assert.match(one.output, /selected change/); assert.doesNotMatch(one.output, /unrelated change/);
+    git(f.root, 'add', 'other.txt');
+    const staged = await f.service.execute({ method: 'workspace.git.diff', params: { id: f.workspace.id, path: 'other.txt', cached: true } });
+    assert.match(staged.output, /unrelated change/); assert.doesNotMatch(staged.output, /selected change/);
+    fs.writeFileSync(path.join(f.root, 'file[1].txt'), 'base'); fs.writeFileSync(path.join(f.root, 'file1.txt'), 'base'); git(f.root, 'add', 'file[1].txt', 'file1.txt'); git(f.root, 'commit', '-qm', 'literal fixtures');
+    fs.writeFileSync(path.join(f.root, 'file[1].txt'), 'literal match'); fs.writeFileSync(path.join(f.root, 'file1.txt'), 'glob must not match');
+    const literal = await f.service.execute({ method: 'workspace.git.diff', params: { id: f.workspace.id, path: 'file[1].txt' } });
+    assert.match(literal.output, /literal match/); assert.doesNotMatch(literal.output, /glob must not match/);
+    await assert.rejects(f.service.execute({ method: 'workspace.git.diff', params: { id: f.workspace.id, path: '.' } }), error => error.code === 'PATH_INVALID');
+    for (const input of ['../outside.txt', path.join(temporary, 'outside.txt')]) await assert.rejects(f.service.execute({ method: 'workspace.git.diff', params: { id: f.workspace.id, path: input } }), error => ['PATH_INVALID', 'BOUNDARY_ESCAPE'].includes(error.code));
+    assert.ok(before.includes('a.txt')); assert.equal(fs.readFileSync(path.join(f.root, 'a.txt'), 'utf8'), 'selected change\n');
+  });
+  await check('Git Task executor display comes only from the current authoritative assignment', async () => {
+    const f = await fixture('task-executor');
+    let view = await f.service.execute({ method: 'workspace.git.overview', params: { id: f.workspace.id } });
+    assert.equal(view.tasks.find(row => row.id === f.task.id).executor, null);
+    f.runtime.attachAgent({ id: f.task.id, expectedRev: f.task.rev, provider: 'codex', sessionId: 'real-task-session' });
+    view = await f.service.execute({ method: 'workspace.git.overview', params: { id: f.workspace.id } });
+    assert.deepEqual(view.tasks.find(row => row.id === f.task.id).executor, { provider: 'codex', sessionId: 'real-task-session' });
+  });
   await check('overview exposes real status, file hashes, branches, history and current Task without changing the repository', async () => {
     const f = await fixture('overview'); fs.writeFileSync(path.join(f.root, 'a.txt'), 'edited\n'); fs.writeFileSync(path.join(f.root, 'loose file.txt'), 'untracked\n');
     const before = git(f.root, 'status', '--porcelain');

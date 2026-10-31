@@ -1,0 +1,49 @@
+.forge-tools { display: grid; align-content: start; gap: var(--spacing-5); min-width: 0; color: var(--text-primary); }
+.forge-tools h2, .forge-tools h3 { margin: 0; }
+.forge-tools p, .forge-dialog-body p { margin: 0; color: var(--text-secondary); font-size: 13px; line-height: 1.65; overflow-wrap: anywhere; }
+.forge-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--spacing-3); min-width: 0; }
+.forge-heading > div { min-width: 0; }
+.forge-heading p { margin: var(--spacing-1) 0 0; }
+.forge-connections { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: var(--spacing-4); }
+.forge-connection-card { display: flex; flex-direction: column; gap: var(--spacing-3); min-width: 0; }
+.forge-connection-card.selected { border-color: var(--border-strong); }
+.forge-status-detail { flex: 1; }
+.forge-connection-meta { display: flex; flex-wrap: wrap; gap: var(--spacing-2) var(--spacing-4); font-size: 12px; color: var(--text-secondary); overflow-wrap: anywhere; }
+.forge-buttons { display: flex; flex-wrap: wrap; align-items: center; gap: var(--spacing-2); }
+.forge-repositories, .forge-workspace { display: grid; gap: var(--spacing-4); min-width: 0; }
+.forge-repository-options { display: flex; flex-wrap: wrap; gap: var(--spacing-2); min-width: 0; }
+.forge-repository-options .cm-button { min-width: 0; max-width: 100%; text-align: left; }
+.forge-repository-options .cm-button > span:first-child { overflow-wrap: anywhere; white-space: normal; }
+.forge-repository-options [aria-pressed=true] { background: var(--accent-soft); border-color: var(--accent); }
+.forge-repository-title { display: flex; align-items: center; gap: var(--spacing-2); flex-wrap: wrap; overflow-wrap: anywhere; }
+.forge-workspace .cm-tabs { max-width: 100%; flex-wrap: wrap; }
+.forge-action-toolbar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: start; gap: var(--spacing-3); }
+.forge-read-action { display: flex; flex-wrap: wrap; align-items: center; gap: var(--spacing-2); }
+.forge-write-entry { display: grid; gap: var(--spacing-2); max-width: 100%; }
+.forge-write-entry small { color: var(--text-secondary); max-width: 270px; }
+.forge-field { display: grid; gap: var(--spacing-2); min-width: 0; font-size: 12px; color: var(--text-secondary); }
+.forge-feedback { padding: var(--spacing-3); border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--accent-soft); color: var(--text-primary); overflow-wrap: anywhere; }
+.forge-feedback.error { color: var(--danger); background: var(--background-soft); border-color: var(--danger); }
+.forge-tools .forge-empty { padding: var(--spacing-4) 0; }
+.forge-data { overflow-x: auto; min-width: 0; }
+.forge-results { border-collapse: collapse; width: 100%; font-size: 12px; table-layout: fixed; }
+.forge-results td, .forge-results th { text-align: left; padding: var(--spacing-3) var(--spacing-2); border-bottom: 1px solid var(--border); overflow-wrap: anywhere; vertical-align: top; }
+.forge-results th { color: var(--text-secondary); font-weight: 600; }
+.forge-results code { font-size: 11px; user-select: text; }
+.forge-dialog-body { display: grid; gap: var(--spacing-4); width: min(480px, calc(100vw - 78px)); max-height: calc(100dvh - 150px); overflow-y: auto; overscroll-behavior: contain; padding: 3px; margin-top: var(--spacing-4); }
+.forge-dialog-body .cm-tabs { flex-wrap: wrap; }
+.forge-dialog-body .cm-button { white-space: normal; overflow-wrap: anywhere; }
+.forge-dialog-body .forge-help { font-size: 12px; }
+.forge-form { display: grid; align-content: start; gap: var(--spacing-4); min-width: 0; }
+.forge-form > .cm-badge { justify-self: start; }
+.forge-secret-control { display: flex; align-items: center; gap: var(--spacing-2); min-width: 0; }
+.forge-secret-control .cm-input { flex: 1; min-width: 0; }
+.forge-secret-control .cm-button { flex: none; }
+.forge-scope-list, .forge-workflow-fields { display: grid; gap: var(--spacing-3); min-width: 0; }
+.forge-scope-list .cm-button { text-align: left; justify-content: start; overflow-wrap: anywhere; }
+.forge-permissions { display: grid; gap: var(--spacing-3); border: 1px solid var(--border); border-radius: var(--radius-sm); min-width: 0; margin: 0; padding: var(--spacing-3); }
+.forge-permissions legend { font-size: 12px; color: var(--text-primary); padding: 0 var(--spacing-2); }
+.forge-check { display: flex; align-items: start; gap: var(--spacing-2); color: var(--text-primary); font-size: 12px; }
+.forge-check .cm-input[type=checkbox] { flex: none; width: 16px; height: 16px; min-height: 0; padding: 0; margin: 2px 0 0; accent-color: var(--accent); }
+.forge-scope-summary { font-weight: 600; overflow-wrap: anywhere; }
+@media (max-width: 600px) { .forge-tools { gap: var(--spacing-4); } .forge-connection-card, .forge-repositories, .forge-workspace { padding: var(--spacing-4); } .forge-action-toolbar { flex-direction: column; } .forge-read-action, .forge-write-entry { width: 100%; } }

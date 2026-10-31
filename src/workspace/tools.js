@@ -379,7 +379,15 @@ export async function gitStatus(rootReal, {completeFiles=false}={}) {
   return { isRepo: true, branch, headSha, repoRoot, dirty: entries.length > 0, entries };
 }
 
-export async function gitDiff(rootReal, { cached = false, context = 3, statOnly = false, excludeSensitive = false } = {}) {
+export async function gitDiff(rootReal, { cached = false, context = 3, statOnly = false, excludeSensitive = false, path: selectedPath } = {}) {
+  let pathspec = '.';
+  if (selectedPath !== undefined) {
+    if (typeof selectedPath !== 'string' || !selectedPath.trim() || path.isAbsolute(selectedPath) || /^[A-Za-z]:/.test(selectedPath)) fail('PATH_INVALID', 'Diff requires one relative Workspace file path');
+    const target = resolveInside(rootReal, selectedPath, { forWrite: true }).absolute;
+    const relative = path.relative(rootReal, target);
+    if (!relative || (fs.existsSync(target) && fs.statSync(target).isDirectory())) fail('PATH_INVALID', 'Diff requires a file, not a directory');
+    pathspec = ':(literal)' + relative.split(path.sep).join('/');
+  }
   const args = ['diff', '--no-color', '--no-ext-diff', '--no-textconv'];
   if (statOnly) {
     // 摘要模式（--stat）：给 Continuity / Handoff Packet 的 diff 摘要用，不携带全文。
@@ -388,7 +396,7 @@ export async function gitDiff(rootReal, { cached = false, context = 3, statOnly 
     args.push(`-U${Math.max(0, Math.min(64, Number(context) || 0))}`);
   }
   if (cached) args.push('--cached');
-  if (excludeSensitive) args.push('--', '.', ...[
+  if (excludeSensitive) args.push('--', pathspec, ...[
     '**/.env', '**/.env.*', '**/.env/**',
     '**/.git/**', '**/.ssh/**', '**/.aws/**',
     '**/credentials', '**/credentials.*', '**/credentials/**',
@@ -396,7 +404,7 @@ export async function gitDiff(rootReal, { cached = false, context = 3, statOnly 
     '**/secrets', '**/secrets.*', '**/secrets/**',
     '**/id_rsa', '**/id_ed25519'
   ].map(pattern => `:(exclude,icase,glob)${pattern}`));
-  if(!excludeSensitive)args.push('--','.');
+  if(!excludeSensitive)args.push('--',pathspec);
   let out;
   try {
     out = await gitRun(rootReal, args);

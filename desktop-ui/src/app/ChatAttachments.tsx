@@ -1,5 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import type { ClipboardEvent, DragEvent, Dispatch, SetStateAction } from 'react';
+import { createPortal } from 'react-dom';
+import { Button, IconButton } from '../components/primitives/inputs';
+import { Dialog } from '../components/primitives/overlays';
+import { MotionPopup } from '../components/primitives/motion-popup';
+import { Icon } from '../components/icons';
+import './chat-attachments.css';
 
 export type AttachmentCall = (method: string, params: Record<string, unknown>) => Promise<unknown>;
 export type AttachmentRef = { ref: string; name: string; size: number; kind: 'image' | 'text' | 'document' | 'archive'; mimeType: string; status?: string; received?: number; sha256?: string; width?: number; height?: number; modelRef?: string; originalRef?: string; quality?: { width: number; height: number; processed: boolean; format?: string } };
@@ -205,7 +211,49 @@ function useAttachmentController({ sessionId, files, onChange, disabled = false,
   return { call: (method: string, params: Record<string, unknown>) => callRef.current(method, params), sessionId, files, disabled, jobs: activeJobs, error, limits, capabilities, pending, preview, previewBusy, removing, addFiles, remove, cancel, retry, dismiss, showPreview, closePreview, download, saveLimits };
 }
 
-const panelStyle = `.chat-attachments{font-size:12px;color:inherit}.chat-attachments button,.chat-attachments input{font:inherit}.chat-attachments button{border:1px solid var(--border,#dbe1d5);background:var(--surface,#fffef9);color:inherit;border-radius:7px;padding:5px 9px;cursor:pointer}.chat-attachments button:disabled{opacity:.45;cursor:default}.attachment-thumbnail{flex:0 0 64px;display:block;width:64px;height:64px;object-fit:contain;border-radius:6px;background:var(--background,#f3f5ee)}.attachment-thumbnail-placeholder{display:grid;place-content:center;color:var(--text-secondary,#788174);font-size:10px;text-align:center}.attachment-controls{display:flex;align-items:center;gap:9px;flex-wrap:wrap;padding:6px 0}.attachment-controls small{color:var(--text-secondary,#788174);font-size:10px}.attachment-items{display:flex;flex-wrap:wrap;gap:7px;margin:7px 0}.attachment-item{border:1px solid var(--border,#dbe1d5);border-radius:9px;background:var(--surface,#fffef9);padding:9px 10px;display:flex;gap:10px;align-items:center;max-width:100%;min-width:200px}.attachment-item>div{min-width:0;flex:1}.attachment-item strong{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:260px;font-size:12px}.attachment-item small{display:block;color:var(--text-secondary,#788174);font-size:10px;margin-top:4px}.attachment-item button{border:0;background:transparent;padding:3px 5px;font-size:11px}.attachment-item progress{width:100%;height:4px;accent-color:#64835a;margin-top:5px}.attachment-error{color:#9a5938;font-size:11px;margin:6px 0;overflow-wrap:anywhere}.attachment-preview{margin:10px 0;padding:12px;border:1px solid var(--border,#dbe1d5);border-radius:9px;background:var(--surface,#fffef9)}.attachment-preview header{display:flex;justify-content:space-between;align-items:center;gap:12px}.attachment-preview img{display:block;max-width:100%;max-height:360px;object-fit:contain;margin:12px auto}.attachment-preview pre{max-height:280px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:11px/1.7 Consolas,monospace}.attachment-preview p{font-size:11px;line-height:1.7;color:var(--text-secondary,#788174)}.attachment-settings{font-size:10px;color:var(--text-secondary,#788174)}.attachment-settings summary{cursor:pointer}.attachment-settings form{display:flex;flex-wrap:wrap;gap:8px;align-items:end;padding:9px 0}.attachment-settings label{display:grid;gap:4px}.attachment-settings input{width:65px;padding:4px;border:1px solid var(--border,#dbe1d5);border-radius:6px;background:var(--surface,#fffef9);color:inherit}.attachment-drag-hint{font-size:10px;color:var(--text-secondary,#788174)}`;
+function AttachmentTrigger({ controller: c }: { controller: AttachmentController }) {
+  const [open, setOpen] = useState(false), [helpOpen, setHelpOpen] = useState(false);
+  const [position, setPosition] = useState({ top: 0, left: 0, width: 272 });
+  const menuId = useId(), triggerRef = useRef<HTMLDivElement>(null), menuRef = useRef<HTMLDivElement>(null), picker = useRef<HTMLInputElement>(null);
+  const unavailable = c.disabled || !c.sessionId;
+  function closeMenu(restoreFocus = false) { setOpen(false); if (restoreFocus) triggerRef.current?.querySelector('button')?.focus(); }
+  function openMenu() {
+    const rect = triggerRef.current?.getBoundingClientRect(); if (!rect || unavailable) return;
+    const width = Math.min(272, window.innerWidth - 16), height = Math.min(226, window.innerHeight - 16);
+    setPosition({ width, left: Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)), top: rect.top >= height + 8 ? rect.top - height - 6 : Math.min(rect.bottom + 6, window.innerHeight - height - 8) }); setOpen(true);
+  }
+  useEffect(() => { closeMenu(); setHelpOpen(false); }, [c.sessionId, unavailable]);
+  useEffect(() => {
+    if (!open) return;
+    menuRef.current?.querySelector('button')?.focus();
+    const outside = (event: PointerEvent) => { const target = event.target as Node; if (!triggerRef.current?.contains(target) && !menuRef.current?.contains(target)) closeMenu(); };
+    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') { event.preventDefault(); closeMenu(true); } };
+    const dismiss = () => closeMenu();
+    document.addEventListener('pointerdown', outside); document.addEventListener('keydown', escape); window.addEventListener('resize', dismiss); window.addEventListener('scroll', dismiss, true);
+    return () => { document.removeEventListener('pointerdown', outside); document.removeEventListener('keydown', escape); window.removeEventListener('resize', dismiss); window.removeEventListener('scroll', dismiss, true); };
+  }, [open]);
+  function choose(category: 'image' | 'file' | 'archive') {
+    if (picker.current) { picker.current.accept = category === 'image' ? '.png,.jpg,.jpeg,.webp' : category === 'archive' ? '.zip' : accept; picker.current.click(); }
+    closeMenu(true);
+  }
+  return <div ref={triggerRef} className="attachment-trigger">
+    <Button type="button" compact variant="ghost" icon="attach" className="attachment-trigger-button" aria-label="添加附件" aria-haspopup="menu" aria-expanded={open} aria-controls={menuId} disabled={unavailable} onClick={() => open ? closeMenu() : openMenu()} onKeyDown={event => { if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); openMenu(); } }}>附件</Button>
+    <input ref={picker} type="file" multiple accept={accept} hidden aria-label="选择图片或文件附件" disabled={unavailable} onChange={event => { if (event.currentTarget.files) c.addFiles(event.currentTarget.files); event.currentTarget.value = ''; }} />
+    {typeof document !== 'undefined' && createPortal(<MotionPopup open={open} id={menuId} ref={menuRef} className="cm-dropdown-menu attachment-menu" role="menu" aria-label="添加附件" style={{ position: 'fixed', ...position }} onKeyDown={event => {
+      if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) { event.preventDefault(); const buttons = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('button')], index = buttons.indexOf(document.activeElement as HTMLButtonElement); buttons[event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : (index + (event.key === 'ArrowUp' ? -1 : 1) + buttons.length) % buttons.length]?.focus(); }
+      else if (event.key === 'Tab') closeMenu();
+    }}>
+      <Button type="button" role="menuitem" variant="ghost" icon="image" onClick={() => choose('image')}>选择图片</Button>
+      <Button type="button" role="menuitem" variant="ghost" icon="file" onClick={() => choose('file')}>选择文件</Button>
+      <Button type="button" role="menuitem" variant="ghost" icon="folder" onClick={() => choose('archive')}>选择项目 ZIP</Button>
+      <div className="attachment-menu-divider" />
+      <Button type="button" role="menuitem" variant="ghost" icon="help" onClick={() => { closeMenu(); setHelpOpen(true); }}>附件帮助</Button>
+    </MotionPopup>, document.body)}
+    <Dialog open={helpOpen} title="附件帮助" onClose={() => { setHelpOpen(false); triggerRef.current?.querySelector('button')?.focus(); }}>
+      <div className="attachment-help"><p>从菜单选择图片、文档、文本源码或项目 ZIP，也可直接粘贴图片和拖放文件。支持一次选择多个附件。</p><dl><div><dt>单张图片</dt><dd>{c.limits.imageMiB} MiB</dd></div><div><dt>单个文档或源码</dt><dd>{c.limits.documentMiB} MiB</dd></div><div><dt>项目 ZIP</dt><dd>{c.limits.archiveMiB} MiB</dd></div><div><dt>每条消息</dt><dd>{c.limits.count} 个 · 合计 {c.limits.messageMiB} MiB</dd></div></dl><p>原文件保存在本机。图片是否可发送由当前模型能力独立校验；项目 ZIP 导入工作区仍需现有审批。</p><p>可在设置 → 附件与存储 → 高级限额中调整。</p><Button type="button" onClick={() => setHelpOpen(false)}>关闭帮助</Button></div>
+    </Dialog>
+  </div>;
+}
 
 /** Display only the bounded model version; Blob URLs never enter attachment DTOs. */
 export function AttachmentThumbnail({ sessionId, file, call }: { sessionId: string; file: AttachmentRef; call: AttachmentCall }) {
@@ -229,18 +277,26 @@ export function AttachmentThumbnail({ sessionId, file, call }: { sessionId: stri
   return url ? <img loading="lazy" className="attachment-thumbnail" src={url} alt={`${file.name} 缩略图`} width={64} height={64} /> : <span className="attachment-thumbnail attachment-thumbnail-placeholder" role="status" title={error || '正在读取模型图片版本'}>{error ? '预览暂不可用' : '图片'}</span>;
 }
 function AttachmentPanelView({ controller: c }: { controller: AttachmentController }) {
-  const picker = useRef<HTMLInputElement | null>(null);
-  return <div className="chat-attachments" onPaste={event => { const picked = Array.from(event.clipboardData.files); if (picked.length) { event.preventDefault(); event.stopPropagation(); c.addFiles(picked); } }} onDragOver={event => { if (event.dataTransfer.types.includes('Files')) event.preventDefault(); }} onDrop={event => { if (event.dataTransfer.files.length) { event.preventDefault(); event.stopPropagation(); c.addFiles(event.dataTransfer.files); } }}><style>{panelStyle}</style>
-    <div className="attachment-controls"><input ref={picker} type="file" multiple accept={accept} aria-label="选择图片或文件附件" style={{ display: 'none' }} disabled={c.disabled || !c.sessionId} onChange={event => { if (event.currentTarget.files) c.addFiles(event.currentTarget.files); event.currentTarget.value = ''; }} /><button type="button" disabled={c.disabled || !c.sessionId} onClick={() => picker.current?.click()}>添加图片 / 文件</button><small>图片 {c.limits.imageMiB} · 文档 {c.limits.documentMiB} · ZIP {c.limits.archiveMiB} MiB · {c.files.length}/{c.limits.count} 个</small><span className="attachment-drag-hint">支持粘贴图片和拖放文件</span></div>
-    {(c.files.length > 0 || c.jobs.length > 0) && <div className="attachment-items">{c.files.map(file => <article className="attachment-item" key={file.ref}>{file.kind === 'image' && <AttachmentThumbnail sessionId={c.sessionId} file={file} call={c.call} />}<div><strong title={file.name}>{file.name}</strong><small>{attachmentSize(file.size)} · {file.kind === 'image' ? `原图已保留${file.quality ? ` · 模型 ${file.quality.width}×${file.quality.height}` : ''}` : file.kind === 'archive' ? 'ZIP 原文件' : file.kind === 'text' ? '文本 / 源码' : '文档原文件'}</small></div><button type="button" disabled={c.previewBusy} onClick={() => void c.showPreview(file)}>预览</button><button type="button" aria-label={`移除 ${file.name}`} disabled={c.disabled || c.removing.includes(file.ref)} onClick={() => void c.remove(file)}>{c.removing.includes(file.ref) ? '移除中' : '移除'}</button></article>)}{c.jobs.map(job => <article className="attachment-item" key={job.key}><div><strong title={job.file.name}>{job.file.name}</strong><small>{job.status === 'queued' ? '排队中' : job.status === 'processing' ? '生成模型图片' : job.status === 'uploading' ? `上传 ${Math.floor(job.progress)}%` : job.status === 'cancelling' ? '取消并清理中' : job.status === 'cancelled' ? '已取消' : '上传失败'} · {attachmentSize(job.file.size)}</small>{!['error', 'cancelled'].includes(job.status) && <progress aria-label={`${job.file.name} 上传进度`} max={100} value={job.progress} />}{job.error && <p className="attachment-error" role="alert">{job.error}</p>}</div>{['error', 'cancelled'].includes(job.status) ? <><button type="button" disabled={c.disabled} onClick={() => void c.retry(job)}>重试</button><button type="button" onClick={() => void c.dismiss(job)}>移除</button></> : <button type="button" disabled={job.status === 'cancelling'} onClick={() => c.cancel(job)}>取消</button>}</article>)}</div>}
-    {c.error && <p className="attachment-error" role="alert">{c.error}</p>}{c.previewBusy && <p role="status">正在读取附件… <button type="button" onClick={c.closePreview}>取消</button></p>}
-    {c.preview && <section className="attachment-preview" aria-label="附件预览"><header><strong>{c.preview.attachment.name}</strong><button type="button" onClick={c.closePreview}>关闭预览</button></header>{c.preview.kind === 'image' && <img src={c.preview.url} alt={c.preview.attachment.name} />}{c.preview.kind === 'text' && <><pre>{c.preview.text}</pre>{c.preview.truncated && <p>预览只显示前 128 KiB，原文件已完整保存。</p>}</>}{c.preview.kind === 'file' && <p>{c.preview.attachment.kind === 'archive' ? 'ZIP 原文件已保存在本机，内容需通过受控的本地处理器读取。' : '文档原文件已保存在本机，可下载后用对应应用查看。'}</p>}<p>{attachmentSize(c.preview.attachment.size)} · {c.preview.attachment.mimeType}{c.preview.attachment.sha256 ? ` · SHA-256 ${c.preview.attachment.sha256.slice(0, 16)}…` : ''}</p><button type="button" disabled={c.previewBusy} onClick={() => void c.download(c.preview!.attachment)}>下载原文件</button></section>}
+  const visible = c.files.length > 0 || c.jobs.length > 0 || c.error || c.previewBusy || c.preview;
+  if (!visible) return null;
+  return <div className="chat-attachments" onPaste={event => { const picked = Array.from(event.clipboardData.files); if (picked.length) { event.preventDefault(); event.stopPropagation(); c.addFiles(picked); } }} onDragOver={event => { if (event.dataTransfer.types.includes('Files')) event.preventDefault(); }} onDrop={event => { if (event.dataTransfer.files.length) { event.preventDefault(); event.stopPropagation(); c.addFiles(event.dataTransfer.files); } }}>
+    {(c.files.length > 0 || c.jobs.length > 0) && <div className="attachment-items" aria-label="已选附件">{c.files.map(file => <article className="attachment-item" key={file.ref}>
+      {file.kind === 'image' ? <AttachmentThumbnail sessionId={c.sessionId} file={file} call={c.call} /> : <span className="attachment-file-icon"><Icon name={file.kind === 'archive' ? 'folder' : file.kind === 'text' ? 'fileCode' : 'file'} size={22} /></span>}
+      <div className="attachment-item-copy"><strong title={file.name}>{file.name}</strong><small>{attachmentSize(file.size)} · {file.kind === 'image' ? '原图已保留' + (file.quality ? ' · 模型 ' + file.quality.width + '×' + file.quality.height : '') : file.kind === 'archive' ? '项目 ZIP' : file.kind === 'text' ? '文本 / 源码' : '文档'}</small></div>
+      <div className="attachment-item-actions"><Button type="button" compact variant="ghost" disabled={c.previewBusy} onClick={() => void c.showPreview(file)}>预览</Button><IconButton label={'移除 ' + file.name} icon="close" disabled={c.disabled || c.removing.includes(file.ref)} onClick={() => void c.remove(file)} /></div>
+    </article>)}{c.jobs.map(job => <article className="attachment-item" key={job.key}>
+      <span className="attachment-file-icon"><Icon name={/\.(png|jpe?g|webp)$/i.test(job.file.name) ? 'image' : 'file'} size={22} /></span>
+      <div className="attachment-item-copy"><strong title={job.file.name}>{job.file.name}</strong><small>{job.status === 'queued' ? '排队中' : job.status === 'processing' ? '生成模型图片' : job.status === 'uploading' ? '上传 ' + Math.floor(job.progress) + '%' : job.status === 'cancelling' ? '取消并清理中' : job.status === 'cancelled' ? '已取消' : '上传失败'} · {attachmentSize(job.file.size)}</small>{!['error', 'cancelled'].includes(job.status) && <progress aria-label={job.file.name + ' 上传进度'} max={100} value={job.progress} />}{job.error && <p className="attachment-error" role="alert">{job.error}</p>}</div>
+      <div className="attachment-item-actions">{['error', 'cancelled'].includes(job.status) ? <><Button type="button" compact variant="ghost" disabled={c.disabled} onClick={() => void c.retry(job)}>重试</Button><IconButton label={'移除 ' + job.file.name} icon="close" onClick={() => void c.dismiss(job)} /></> : <Button type="button" compact variant="ghost" disabled={job.status === 'cancelling'} onClick={() => c.cancel(job)}>取消</Button>}</div>
+    </article>)}</div>}
+    {c.error && <p className="attachment-error" role="alert">{c.error}</p>}{c.previewBusy && <p role="status">正在读取附件… <Button type="button" compact variant="ghost" onClick={c.closePreview}>取消</Button></p>}
+    {c.preview && <section className="attachment-preview" aria-label="附件预览"><header><strong>{c.preview.attachment.name}</strong><Button type="button" compact variant="ghost" onClick={c.closePreview}>关闭预览</Button></header>{c.preview.kind === 'image' && <img src={c.preview.url} alt={c.preview.attachment.name} />}{c.preview.kind === 'text' && <><pre>{c.preview.text}</pre>{c.preview.truncated && <p>预览只显示前 128 KiB，原文件已完整保存。</p>}</>}{c.preview.kind === 'file' && <p>{c.preview.attachment.kind === 'archive' ? 'ZIP 原文件已保存在本机，内容需通过受控的本地处理器读取。' : '文档原文件已保存在本机，可下载后用对应应用查看。'}</p>}<p>{attachmentSize(c.preview.attachment.size)} · {c.preview.attachment.mimeType}{c.preview.attachment.sha256 ? ' · SHA-256 ' + c.preview.attachment.sha256.slice(0, 16) + '…' : ''}</p><Button type="button" compact icon="update" disabled={c.previewBusy} onClick={() => void c.download(c.preview!.attachment)}>下载原文件</Button></section>}
     {c.files.some(file => file.kind === 'image') && <p className="attachment-drag-hint">{c.capabilities.externalAgent ? '原图与模型版本保存在本机；外部 Agent 按实际接入能力读取。' : c.capabilities.supported === true ? '当前模型支持图片输入，发送模型版本，原图保留在本机。' : '当前模型的图片支持尚未确认，发送前将由 Core 校验。'}</p>}
-    <details className="attachment-settings"><summary>附件限额设置 · 每条消息总计 {c.limits.messageMiB} MiB</summary><form onSubmit={event => { event.preventDefault(); const data = new FormData(event.currentTarget); void c.saveLimits(Object.fromEntries(['imageMiB', 'documentMiB', 'archiveMiB', 'messageMiB', 'count'].map(key => [key, Number(data.get(key))]))); }}>{([{ key: 'imageMiB', label: '图片 MiB', max: 100 }, { key: 'documentMiB', label: '文档 MiB', max: 500 }, { key: 'archiveMiB', label: 'ZIP MiB', max: 1024 }, { key: 'messageMiB', label: '总计 MiB', max: 2048 }, { key: 'count', label: '附件数量', max: 50 }] as const).map(field => <label key={`${field.key}-${c.limits[field.key]}`}>{field.label}<input type="number" name={field.key} min={1} max={field.max} step={1} defaultValue={c.limits[field.key]} required disabled={c.disabled} /></label>)}<button type="submit" disabled={c.disabled}>保存限额</button></form></details>
   </div>;
 }
 
-export function AttachmentPanel(props: PanelProps) { const controller = useAttachmentController(props); return <AttachmentPanelView controller={controller} />; }
+export function AttachmentPanel(props: PanelProps) { const controller = useAttachmentController(props); return <><AttachmentTrigger controller={controller} /><AttachmentPanelView controller={controller} /></>; }
+
 const emptyFiles: AttachmentRef[] = [];
 export function useChatAttachments({ sessionId, call, disabled = false,capabilityKey='' }: { sessionId: string; call: AttachmentCall; disabled?: boolean;capabilityKey?:string }) {
   const [drafts, setDrafts] = useState<Record<string, AttachmentRef[]>>({}); const files = drafts[sessionId] ?? emptyFiles;
@@ -249,5 +305,5 @@ export function useChatAttachments({ sessionId, call, disabled = false,capabilit
   const onPaste = (event: ClipboardEvent<HTMLElement>) => { if (event.clipboardData.files.length) { event.preventDefault(); controller.addFiles(event.clipboardData.files); } };
   const onDrop = (event: DragEvent<HTMLElement>) => { if (event.dataTransfer.files.length) { event.preventDefault(); controller.addFiles(event.dataTransfer.files); } };
   const onDragOver = (event: DragEvent<HTMLElement>) => { if (event.dataTransfer.types.includes('Files')) event.preventDefault(); };
-  return { files, setFiles, addFiles: controller.addFiles, onPaste, onDrop, onDragOver, pending: controller.pending, ui: <AttachmentPanelView controller={controller} /> };
+  return { files, setFiles, addFiles: controller.addFiles, onPaste, onDrop, onDragOver, pending: controller.pending, trigger: <AttachmentTrigger controller={controller} />, ui: <AttachmentPanelView controller={controller} /> };
 }

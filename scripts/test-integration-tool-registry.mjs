@@ -6,6 +6,7 @@ import path from 'node:path';
 import { buildToolCatalog, LEGACY_RETIRED_TOOLS } from '../src/integrations/catalog.js';
 import { createIntegrationStore } from '../src/integrations/store.js';
 import { createIntegrationRegistry } from '../src/integrations/registry.js';
+import { createIntegrationService } from '../src/integrations/service.js';
 import { TOOL_SOURCES, RESTORE_STATUSES, MCP_STATUSES } from '../src/integrations/types.js';
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-integration-registry-'));
@@ -15,6 +16,14 @@ const ok = label => { step += 1; console.log('✅ [' + step + '] ' + label); };
 try {
   const store = createIntegrationStore({ stateDir: tmp });
   const tools = buildToolCatalog();
+  const liveService = createIntegrationService({ stateDir: path.join(tmp, 'display-projection') });
+  try {
+    const listed = await liveService.execute({ method: 'integrations.list' });
+    const packs = liveService.registry.plugins.filter(plugin => plugin.kind === 'tool-pack');
+    assert.ok(packs.length > 0, 'actual tool packs exist');
+    for (const pack of packs) assert.equal(listed.integrations.find(row => row.id === pack.id)?.kind, 'tool-pack', 'UI classification uses authoritative plugin kind');
+    ok('实际集成列表保留工具包类型，开发工具不会误归入服务连接');
+  } finally { await liveService.close?.(); }
 
   // ── 1. 目录完整性：每个工具字段齐全、来源合法、id 唯一 ──────────────────────
   assert.ok(tools.length >= 50, '历史审计口径：QQ 仿生聊天工具 >= 50，实际 ' + tools.length);

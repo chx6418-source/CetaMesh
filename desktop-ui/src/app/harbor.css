@@ -596,3 +596,29 @@
 
 .usage-summary { display: block; min-width: 0; overflow-wrap: anywhere; line-height: 1.5; }
 .conversation-pane > .usage-summary { padding: 6px 24px; }
+.work-page > .cm-tabs { flex-wrap: wrap; margin-bottom: var(--spacing-5); }
+.work-view-git .git-workspace { padding: 0; }
+.work-page .workspace-card { flex-wrap: wrap; min-width: 0; }
+.work-page .workspace-card-body { min-width: 0; }
+.work-page .workspace-card-body strong { overflow-wrap: anywhere; }
+.plugin-section-heading { margin: var(--spacing-5) 0 var(--spacing-4); }
+.plugin-section-heading h2 { margin: 0 0 var(--spacing-2); font-size: 16px; }
+.plugin-section-heading p { margin: 0; font-size: 13px; }
+.forge-connections-section { margin-bottom: var(--spacing-6); min-width: 0; }
+.plugin-advanced-settings { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: var(--spacing-3); margin-top: var(--spacing-4); }
+.plugin-advanced-settings > summary { cursor: pointer; font-size: 13px; font-weight: 600; color: var(--text-secondary); }
+.plugin-advanced-settings > summary:focus-visible { outline: none; box-shadow: var(--focus); }
+.plugin-advanced-fields { display: grid; gap: var(--spacing-3); margin-top: var(--spacing-4); min-width: 0; }
+.plugins-page .plugins-controls { align-items: center; gap: var(--spacing-3); flex-wrap: wrap; }
+.plugins-page .plugins-controls .cm-search { flex: 1 1 210px; max-width: 400px; }
+.plugins-page .plugins-controls .cm-tabs { flex-wrap: wrap; }
+.plugins-page .connection-row { min-width: 0; flex-wrap: wrap; }
+.plugins-page .connection-row .grow { min-width: 160px; overflow-wrap: anywhere; }
+@media (max-width: 760px) {
+  .plugins-page .plugins-controls { align-items: stretch; }
+  .plugins-page .plugins-controls .cm-search { max-width: none; }
+  .plugins-page .connection-row .grow { flex-basis: calc(100% - 64px); }
+  .plugins-page .connection-row > .cm-button { margin-left: auto; }
+  .work-page .page-section-heading { align-items: stretch; flex-direction: column; }
+  .work-page .page-section-heading .row { flex-wrap: wrap; }
+}

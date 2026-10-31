@@ -9,12 +9,13 @@ const samePath = (a, b) => process.platform === 'win32' ? path.resolve(a).toLowe
 const conflictCodes = new Set(['DD', 'AU', 'UD', 'UA', 'DU', 'AA', 'UU']);
 const protectedPath = value => value.split('/').some(part => /^(?:\.git|\.ssh|\.aws|\.env(?:\..*)?|credentials(?:\..*)?|secrets?(?:\..*)?|id_rsa|id_ed25519)$/i.test(part));
 const safeText = (value, cap = 240) => String(value ?? '').replace(/[\x00-\x1f\x7f]/g, ' ').slice(0, cap);
+const MAX_DISPLAY_ENTRIES = 2000;
 
 function enrichEntries(root, rows) {
   let remaining = 64 * 1024 * 1024;
   const expanded = [...rows];
   for (const row of rows) if (row.origPath && (row.x === 'R' || row.y === 'R') && !rows.some(item => item.path === row.origPath)) expanded.push({ x: 'D', y: ' ', path: row.origPath, origPath: null });
-  return expanded.slice(0, 1000).map(row => {
+  return expanded.slice(0, MAX_DISPLAY_ENTRIES).map(row => {
     const result = { ...row, conflict: conflictCodes.has(row.x + row.y), commitEligible: false };
     if (result.conflict) return { ...result, blockedReason: 'GIT_CONFLICT' };
     if (protectedPath(row.path)) return { ...result, blockedReason: 'SENSITIVE_RESOURCE' };
@@ -36,7 +37,8 @@ export function createGitProduct({ stateDir, registry, getTask = () => null, lis
     const status = await gitStatus(entry.root, { completeFiles: true });
     const taskRows = await listTasks({ workspaceId: entry.id, limit: 100 });
     const tasks = (Array.isArray(taskRows) ? taskRows : taskRows?.tasks ?? []).slice(0, 100)
-      .filter(task => task.workspaceId === entry.id).map(task => ({ id: task.id, goal: safeText(task.goal), status: task.status, workspaceId: task.workspaceId, readOnly: task.childContract?.mode === 'read-only' }));
+      .filter(task => task.workspaceId === entry.id).map(task => ({ id: task.id, goal: safeText(task.goal), status: task.status, workspaceId: task.workspaceId, readOnly: task.childContract?.mode === 'read-only',
+        executor: task.currentAgent?.provider && task.currentAgent?.sessionId ? { provider: safeText(task.currentAgent.provider, 100), sessionId: safeText(task.currentAgent.sessionId, 200) } : null }));
     if (!status.isRepo) return { workspaceId: entry.id, git: status, branches: [], history: [], worktrees: [], conflicts: [], tasks, truncated: false };
     if (!samePath(status.repoRoot, fs.realpathSync.native(entry.root))) fail('GIT_ROOT_REQUIRED', 'Git management requires the registered repository root');
     const [branchOutput, historyOutput, worktreeOutput] = await Promise.all([
@@ -77,7 +79,7 @@ export function createGitProduct({ stateDir, registry, getTask = () => null, lis
     flush();
     const entries = enrichEntries(entry.root, status.entries);
     return { workspaceId: entry.id, git: { ...status, repoRoot: undefined, entries }, conflicts: entries.filter(item => item.conflict), branches, history, worktrees: worktrees.slice(0, 200), tasks,
-      worktreeRelation: entry.gitWorktree ?? null, truncated: status.entries.length > 1000 || worktrees.length > 200 || branchOutput.stdout.split('\n').filter(Boolean).length > 200 };
+      worktreeRelation: entry.gitWorktree ?? null, truncated: status.entries.length > MAX_DISPLAY_ENTRIES || worktrees.length > 200 || branchOutput.stdout.split('\n').filter(Boolean).length > 200 };
   }
 
   async function validate(entry, params) {

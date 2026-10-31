@@ -39,7 +39,7 @@ if (realUiVision) {
 }
 const sandbox = createSuiteSandbox({ suiteId: 'chat-attachment-ui' });
 let failed = true, child, socket, server, chat, closeBrowser;
-const calls = [], faults = { failChunk: false, chunkDelayMs: 0 };
+const calls = [], faults = { failChunk: false, chunkDelayMs: 0, failLimits: false };
 try {
   chat = createChatService({ stateDir: path.join(sandbox.root, 'state'), defaults: {}, defaultAgentProvider: () => 'none', ...(realUiVision ? { modelRuntime: visionRuntime, defaultModelConfig: () => ({ provider: visionProviderId, defaultModel: visionModel }), controlExecute: async () => ({}) } : {}) });
   const first = await chat.execute({ method: 'chat.sessions.create', params: { title: 'Attachment UI fixture' } });
@@ -49,7 +49,7 @@ try {
   const ui = createDesktopUiService({ services: { chatService: chat } });
   const bundle = buildSync({ stdin: { resolveDir: uiRoot, loader: 'tsx', contents: `
     import React,{useState} from 'react';import {createRoot} from 'react-dom/client';import {flushSync} from 'react-dom';
-    import {chatClient} from './src/bridge/typed-client';import {useChatAttachments} from './src/app/ChatAttachments';import {ChatComposer,MessageBubble} from './src/app/HarborApp';
+    import {chatClient} from './src/bridge/typed-client';import {useChatAttachments} from './src/app/ChatAttachments';import {AttachmentSettings} from './src/app/AttachmentSettings';import {ChatComposer,MessageBubble} from './src/app/HarborApp';
     const first=${JSON.stringify(first.id)},second=${JSON.stringify(second.id)},composer=${JSON.stringify(composer.id)},realId=${JSON.stringify(realSession?.id ?? '')};
     const realModel=${JSON.stringify(visionModel)},realProvider=${JSON.stringify(visionProviderId)},visionImages=${JSON.stringify(realUiVision ? [visionFixturePng().toString('base64'),visionFixturePng({swap:true}).toString('base64')] : [])};
     const call=async(method,params)=>{const response=await fetch('/api',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({method,params})});const data=await response.json();if(!response.ok)throw Object.assign(new Error(data.message),{code:data.code});return data;};
@@ -60,17 +60,20 @@ try {
     Blob.prototype.arrayBuffer=function(){if(this.size>256*1024){window.fullFileReads++;throw new Error('production path read a whole large file');}return originalArrayBuffer.call(this);};
     function Harness(){const [sessionId,setSessionId]=useState(first),[mode,setMode]=useState('panel'),[history,setHistory]=useState([]);const draft=useChatAttachments({sessionId,call});
       async function refreshHistory(){const result=await chatClient.history(sessionId);setHistory(result.messages);return result;}
-      window.fixture={history,refreshHistory,showRealVision:()=>{setSessionId(realId);setMode('real');setHistory([]);},realId,files:draft.files,pending:draft.pending,addFiles:draft.addFiles,setFiles:draft.setFiles,changeSession:setSessionId,showComposer:()=>{setSessionId(composer);setMode('composer');},showPanel:()=>setMode('panel'),first,second};
-      return mode==='panel'?<main id="attachment-harness" onPaste={draft.onPaste} onDrop={draft.onDrop} onDragOver={draft.onDragOver}><textarea aria-label="Fixture message"/>{draft.ui}</main>:<div className="composer-dock"><ChatComposer key={sessionId} sessionId={sessionId} busy={false} models={mode==='real'?[{id:realProvider,label:'DeepSeek Official',configured:true,models:[{id:realModel,name:realModel}]}]:[]} selectedModelKey={mode==='real'?JSON.stringify([realProvider,realModel]):''} agentProviders={[]} selectedAgent="none" workspaces={[]} workspaceId="" activeWorkspaceId={null} onWorkspaceChange={()=>{}} onModelChange={()=>{}} onAgentChange={()=>{}} onSend={async(text,attachments,clientMessageId)=>{window.sentText=text;window.sendAttempts=(window.sendAttempts||0)+1;await chatClient.send(sessionId,text,attachments,clientMessageId);}} onStop={()=>{}}/>{mode==='real'&&<section id="real-vision-history" aria-label="实际视觉消息历史">{history.map(message=><MessageBubble key={message.id} message={message} reference={{sessionId,messageId:message.id}}/>)}</section>}</div>;
+      window.fixture={history,refreshHistory,showRealVision:()=>{setSessionId(realId);setMode('real');setHistory([]);},realId,files:draft.files,pending:draft.pending,addFiles:draft.addFiles,setFiles:draft.setFiles,changeSession:setSessionId,showComposer:()=>{setSessionId(composer);setMode('composer');},showSettings:()=>setMode('settings'),showPanel:()=>setMode('panel'),first,second};
+      if(mode==='settings')return <AttachmentSettings/>;
+      return mode==='panel'?<main id="attachment-harness" onPaste={draft.onPaste} onDrop={draft.onDrop} onDragOver={draft.onDragOver}><textarea aria-label="Fixture message"/>{draft.trigger}{draft.ui}</main>:<div className="composer-dock"><ChatComposer key={sessionId} sessionId={sessionId} busy={false} models={mode==='real'?[{id:realProvider,label:'DeepSeek Official',configured:true,models:[{id:realModel,name:realModel}]}]:[]} selectedModelKey={mode==='real'?JSON.stringify([realProvider,realModel]):''} agentProviders={[]} selectedAgent="none" workspaces={[]} workspaceId="" activeWorkspaceId={null} onWorkspaceChange={()=>{}} onModelChange={()=>{}} onAgentChange={()=>{}} onSend={async(text,attachments,clientMessageId)=>{window.sentText=text;window.sendAttempts=(window.sendAttempts||0)+1;await chatClient.send(sessionId,text,attachments,clientMessageId);}} onStop={()=>{}}/>{mode==='real'&&<section id="real-vision-history" aria-label="实际视觉消息历史">{history.map(message=><MessageBubble key={message.id} message={message} reference={{sessionId,messageId:message.id}}/>)}</section>}</div>;
     }
     flushSync(()=>createRoot(document.getElementById('root')).render(<Harness/>));
     window.makeImage=async(name='pasted.png',large=false)=>{const canvas=document.createElement('canvas');canvas.width=24;canvas.height=12;canvas.getContext('2d').fillRect(0,0,24,12);const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/png'));return new File(large?[blob,new Uint8Array(20*1024*1024-blob.size)]:[blob],name,{type:'image/png'});};
     window.pasteImage=async(large=false)=>{const data=new DataTransfer();data.items.add(await window.makeImage(large?'large.png':'pasted.png',large));document.querySelector('textarea').dispatchEvent(new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:data}));};
+    window.pasteImagePair=async()=>{const data=new DataTransfer();data.items.add(await window.makeImage('first.png'));data.items.add(await window.makeImage('second.png'));document.querySelector('textarea').dispatchEvent(new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:data}));};
     window.pasteVisionPair=()=>{const data=new DataTransfer();visionImages.forEach((encoded,index)=>{const bytes=Uint8Array.from(atob(encoded),char=>char.charCodeAt(0));data.items.add(new File([bytes],index===0?'first-synthetic.png':'second-synthetic.png',{type:'image/png'}));});document.querySelector('.composer-dock textarea').dispatchEvent(new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:data}));};
     window.dropText=(name='dropped.ts',size=24)=>{const data=new DataTransfer();data.items.add(new File(['x'.repeat(size)],name,{type:'text/plain'}));document.querySelector('main')?.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:data}));};
     window.findButton=text=>Array.from(document.querySelectorAll('button')).find(button=>button.textContent.trim()===text);
   ` }, bundle: true, write: false, format: 'iife', platform: 'browser', jsx: 'automatic', loader: { '.css': 'empty' } });
-  const html = '<!doctype html><meta charset="utf-8"><div id="root"></div><script>' + bundle.outputFiles[0].text + '</script>';
+  const styles = ['src/theme/tokens.css', 'src/theme/global.css', 'src/app/chat-attachments.css'].filter(file => fs.existsSync(path.join(uiRoot, file))).map(file => fs.readFileSync(path.join(uiRoot, file), 'utf8')).join('\n');
+  const html = '<!doctype html><meta charset="utf-8"><style>' + styles + '</style><div id="root"></div><script>' + bundle.outputFiles[0].text + '</script>';
   server = http.createServer(async (request, response) => {
     if (request.method === 'GET') { response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); response.end(html); return; }
     try {
@@ -86,6 +89,7 @@ try {
       if (allowRealSend && ['ui.chat.history','ui.chat.status'].includes(method) && params.id !== realSession.id) throw new Error('History requires the real vision Session');
       const record = { method, id: params.id, ref: params.ref, name: params.name, offset: params.offset, bytes: params.data ? Buffer.byteLength(params.data, 'base64') : 0 };
       calls.push(record);
+      if (method === 'ui.chat.attachment.limits.set' && faults.failLimits) { faults.failLimits = false; throw new Error('fixture-limit-save-rejected'); }
       if (method === 'ui.chat.attachment.chunk') {
         if (faults.chunkDelayMs) await delay(faults.chunkDelayMs);
         if (faults.failChunk) { faults.failChunk = false; throw Object.assign(new Error('fixture-upload-interrupted'), { code: 'FIXTURE_UPLOAD_FAILURE' }); }
@@ -114,6 +118,39 @@ try {
   async function until(expression, label, timeout = 15000) { const end = Date.now() + timeout; while (Date.now() < end) { if (await evaluate(expression)) return; await delay(40); } throw new Error('Timed out: ' + label + '\n' + await evaluate('document.body.innerText')); }
   const click = text => evaluate('window.findButton(' + JSON.stringify(text) + ')?.click()');
   await until('!!window.fixture && !!document.querySelector("input[type=file]")', 'production attachment hook mount');
+
+  assert.equal(await evaluate('document.querySelectorAll("button[aria-label=添加附件]").length'), 1, 'Composer exposes one clear attachment entry');
+  assert.equal(await evaluate('document.body.innerText.includes("MiB")'), false, 'empty Composer keeps attachment limits behind help');
+  assert.equal(await evaluate('Array.from(document.querySelectorAll("input[type=file]")).some(input=>input.getClientRects().length>0)'), false, 'native file controls stay hidden');
+  await evaluate('document.querySelector("button[aria-label=添加附件]").click()');
+  await until('!!document.querySelector("[role=menu][aria-label=添加附件]")', 'attachment menu opens');
+  for (const label of ['选择图片', '选择文件', '选择项目 ZIP', '附件帮助']) assert.ok(await evaluate('Array.from(document.querySelectorAll("[role=menu] button")).some(button=>button.textContent.trim()===' + JSON.stringify(label) + ')'), label + ' is available in one menu');
+  await click('附件帮助');
+  await until('document.querySelector("[aria-label=附件帮助]")?.innerText.includes("MiB")', 'limits appear on demand');
+  await click('关闭帮助');
+  assert.equal(await evaluate('document.querySelectorAll(".chat-attachments input[type=number]").length'), 0, 'Composer has no inline limit editor');
+  await evaluate('document.querySelector("button[aria-label=添加附件]").dispatchEvent(new KeyboardEvent("keydown",{key:"ArrowDown",bubbles:true,cancelable:true}))');
+  await until('document.activeElement?.textContent.trim()==="选择图片"', 'keyboard opens menu and focuses first choice');
+  await evaluate('document.activeElement.dispatchEvent(new KeyboardEvent("keydown",{key:"ArrowDown",bubbles:true,cancelable:true}))');
+  assert.equal(await evaluate('document.activeElement.textContent.trim()'), '选择文件', 'keyboard reaches file choice');
+  await evaluate('document.activeElement.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true,cancelable:true}))');
+  await until('document.activeElement?.getAttribute("aria-label")==="添加附件"', 'Escape restores trigger focus');
+  console.log('PASS single attachment menu, category choices, hidden picker and on-demand limits');
+
+  await evaluate('window.fixture.showSettings()');
+  await until('!!document.querySelector("input[aria-label=\\"单张原图 MiB\\"]")', 'attachment settings loaded');
+  assert.equal(await evaluate('document.querySelector("input[aria-label=\\"单张原图 MiB\\"]").checkVisibility()'), false, 'advanced attachment limits start collapsed');
+  await evaluate('document.querySelector(".attachment-advanced summary").click()');
+  assert.ok(await evaluate('document.querySelector("input[aria-label=\\"单张原图 MiB\\"]").checkVisibility()'), 'advanced limits can be edited on demand');
+  faults.failLimits = true;
+  await evaluate('(()=>{const input=document.querySelector("input[aria-label=\\"单张原图 MiB\\"]");Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,"value").set.call(input,"21");input.dispatchEvent(new Event("input",{bubbles:true}));})()');
+  await click('保存附件限额'); await until('document.body.innerText.includes("fixture-limit-save-rejected")', 'advanced settings save failure is visible');
+  assert.equal(await evaluate('document.querySelector("input[aria-label=\\"单张原图 MiB\\"]").value'), '21', 'failed limit save retains the editable draft');
+  await evaluate('(()=>{const input=document.querySelector("input[aria-label=\\"单张原图 MiB\\"]");Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,"value").set.call(input,"20");input.dispatchEvent(new Event("input",{bubbles:true}));})()');
+  await click('保存附件限额'); await until('document.body.innerText.includes("附件限额已保存")', 'advanced settings saves through Core');
+  console.log('PASS attachment advanced limits disclosure and actual Core save');
+  await evaluate('window.fixture.showPanel()');
+  await until('!!document.querySelector("input[type=file]")', 'return to attachment panel');
 
   const textFile = path.join(sandbox.root, 'picked.ts'); fs.writeFileSync(textFile, 'export const attachment = true;\n');
   const { root } = await rpc('DOM.getDocument', {}, sessionId); const { nodeId } = await rpc('DOM.querySelector', { nodeId: root.nodeId, selector: 'input[type=file]' }, sessionId);
@@ -145,6 +182,9 @@ try {
 
   await evaluate('window.fixture.changeSession(window.fixture.second)'); await until('window.fixture.files.length===0', 'new session has isolated draft');
   await until('window.revokedUrls.includes(' + JSON.stringify(thumbnailUrl) + ')', 'thumbnail Blob URL revoked on session change');
+  await evaluate('window.pasteImagePair()'); await until('window.fixture.files.length===2&&!window.fixture.pending', 'multiple pasted images upload within the new session');
+  assert.deepEqual((await evaluate('window.fixture.files')).map(file => file.name), ['first.png', 'second.png']);
+  await until('Array.from(document.querySelectorAll(".attachment-item img")).filter(image=>image.naturalWidth===24).length===2', 'multiple model thumbnails render');
   await evaluate('window.fixture.changeSession(window.fixture.first)'); await until('window.fixture.files.length===3', 'return restores session draft');
   const beforeLarge = calls.length; await evaluate('window.pasteImage(true)'); await until('window.fixture.files.some(file=>file.name==="large.png")&&!window.fixture.pending', '20 MiB original uses bounded chunks', 60000);
   const largeCalls = calls.slice(beforeLarge).filter(row => row.method === 'ui.chat.attachment.chunk'); assert.ok(largeCalls.length >= 160); assert.ok(largeCalls.every(row => row.bytes <= 128 * 1024)); assert.equal(await evaluate('window.fullFileReads'), 0);
@@ -157,6 +197,9 @@ try {
   assert.equal(await evaluate('window.bitmapCalls'), bitmapBefore); assert.ok(!calls.slice(callsBeforeHeader).some(row => row.name === 'oversized-dimensions.png'));
   console.log('PASS oversized image dimensions are rejected before browser decoding or Core upload');
   await evaluate('window.fixture.showComposer()'); await until('!!document.querySelector(".composer-dock textarea")', 'production Composer mount');
+  assert.equal(await evaluate('document.querySelectorAll(".composer-dock button[aria-label=添加附件]").length'), 1, 'production Composer exposes its one attachment entry');
+  assert.equal(await evaluate('document.querySelectorAll(".composer-dock button[aria-label=\\"添加文本或源码附件\\"]").length'), 0, 'production Composer has no second legacy picker entry');
+  assert.equal(await evaluate('document.querySelector(".composer-dock").innerText.includes("MiB")'), false, 'production Composer keeps limit explanations out of its empty draft');
   await evaluate('window.pasteImage()'); await until('document.querySelector(".composer-dock")?.innerText.includes("pasted.png")', 'production Composer receives paste');
   await until('document.querySelector(".composer-dock")?.innerText.includes("原图已保留")', 'Composer upload completes');
   const composerText = await evaluate('document.querySelector(".composer-dock textarea").getAttribute("aria-label")');

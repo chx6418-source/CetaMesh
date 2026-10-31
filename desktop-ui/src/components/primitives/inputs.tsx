@@ -130,7 +130,7 @@ export function Select({ label, children, value, disabled = false, className = '
     </button>
     {typeof document !== 'undefined' && createPortal(<MotionPopup open={open} ref={listRef} id={listId} role="listbox" aria-label={label} className="cm-select-options" style={{ position: 'fixed', top: position.top, left: position.left, width: position.width }}>
       {options.map((option, index) => <button key={`${option.value}-${index}`} ref={element => { if (element) optionRefs.current[index] = element; }} type="button" role="option" aria-selected={option.value === currentValue} className="cm-select-option" disabled={option.disabled} tabIndex={index === activeIndex ? 0 : -1} onKeyDown={handleKeyDown} onClick={() => choose(index)}>{option.label}{option.value === currentValue && <Icon name="check" size={14} />}</button>)}
-    </MotionPopup>, document.body)}
+    </MotionPopup>, triggerRef.current?.closest('dialog[open]') ?? document.body)}
   </label>;
 }
 export function Dropdown({ label, children }: { label: string; children: ReactNode }) {

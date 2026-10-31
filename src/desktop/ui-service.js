@@ -498,6 +498,7 @@ function projectIntegration(value) {
     : string(row.reason ?? agent.reason ?? provider.lastError ?? integration.lastError, 500) || (enabled && !available ? 'provider-unavailable' : null);
   return {
     id: string(row.id, 120), name: string(row.displayName ?? row.name ?? row.id, 160), status, enabled, available,
+    ...(typeof row.kind === 'string' ? { kind: string(row.kind, 60) } : {}),
     eligible: enabled && available, configured: local.configured === true || provider.configured === true,
     reason, lastError: string(local.lastError?.message ?? local.lastError ?? provider.lastError ?? integration.lastError, 500) || null
   };
@@ -1473,7 +1474,7 @@ export function createDesktopUiService({ services = {}, system = services.system
       return { task: projectTaskWithUsage(updated), handoff: { success: Boolean(result.to?.sessionId), from: result.from, to: result.to } };
     },
     'ui.workspace.git.overview':p=>workspace('workspace.git.overview',{id:idParam(p)}),
-    'ui.workspace.git.diff':p=>workspace('workspace.git.diff',{id:idParam(p),cached:p.cached===true}),
+    'ui.workspace.git.diff':p=>workspace('workspace.git.diff',{id:idParam(p),cached:p.cached===true,...(p.path!==undefined?{path:p.path}:{})}),
     ...Object.fromEntries(['commit','branch.create','worktree.create'].map(action=>['ui.workspace.git.'+action,async(p,{signal}={})=>{
       const {id,taskId,operationId,...input}=p;const capability='git.'+action;
       const result=await services.capabilityService.broker.execute({capability,actor:OWNER_ACTOR,approved:false,workspaceId:id,taskId,

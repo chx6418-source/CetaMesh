@@ -51,6 +51,8 @@ const REGISTRY = {
   'test-bionic-product-readiness.mjs': {category:'integration',timeoutMs:120000,note:'Bionic actual dependency readiness and lifecycle fences'},
   'test-chat-attachment-store.mjs': {category:'security',note:'Controlled file references, chunk integrity, quotas and session isolation'},
   'test-cloud-candidate.mjs': {category:'release',note:'Cloud metadata, brand and non-executing candidate integrity gate'},
+  'test-forge-connections-ui.mjs': {category:'desktop',requires:['ui-motion-live'],timeoutMs:120000,note:'Rendered Forge connection cards, scoped operations and failure-preserving dialogs'},
+  'test-ui-productization-layout.mjs': {category:'desktop',requires:['ui-motion-live'],timeoutMs:240000,note:'Rendered 1500-file workbench, Plugin Center and Composer responsive acceptance with before/after captures'},
   'test-workspace-git-closeout.mjs': {category:'security',timeoutMs:120000,note:'Real Git exact commits, staging conflict isolation and version references'},
   'test-extension-events.mjs': {category:'integration',timeoutMs:120000,note:'Bounded authenticated WebSocket and Webhook lifecycle'},
   'test-plugin-network-transports.mjs': {category:'integration',timeoutMs:120000,note:'Controlled TLS HTTP and remote MCP transport authorization'},

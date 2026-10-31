@@ -547,7 +547,7 @@ export function createIntegrationService({
       integrations: await Promise.all(resolvedRegistry.plugins
         .filter(plugin => ['channel-integration', 'agent-integration', 'tool-pack'].includes(plugin.kind))
         .map(async plugin => plugin.kind === 'tool-pack'
-          ? { id: plugin.id, displayName: plugin.name, ...integrationStatus(plugin.id) }
+          ? { id: plugin.id, displayName: plugin.name, kind: plugin.kind, ...integrationStatus(plugin.id) }
           : integrationView(plugin.id)))
     }),
     'integrations.get': params => integrationView(params.id ?? params.pluginId),

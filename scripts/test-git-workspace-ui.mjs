@@ -102,13 +102,31 @@ try {
     assert.equal(capabilityService.broker.approvals.get(row.id).status, 'consumed');
     await click('刷新'); await until('!document.body.innerText.includes("正在读取 Git 状态")', 'Git refresh after approval');
   }
-  async function selectTask() { await until('Array.from(document.querySelector("select[aria-label=\\"关联 Task\\"]")?.options||[]).some(option=>option.value===' + JSON.stringify(selectedTask.id) + ')', 'real Tasks loaded'); await input('select[aria-label="关联 Task"]', selectedTask.id); }
-  await until('!!document.querySelector("input[aria-label=\\"新分支名称\\"]")', 'production GitWorkspace mount'); await selectTask();
-  await click('Diff'); await until('document.querySelector(".git-diff")?.textContent.includes("approved UI change")', 'real working tree diff');
+  async function choose(label, text) {
+    await evaluate('document.querySelector(' + JSON.stringify('button[aria-label="' + label + '"]') + ').click()');
+    await until('Array.from(document.querySelectorAll("[role=option]")).some(option=>option.textContent.trim()===' + JSON.stringify(text) + ')', 'real Select option ' + text);
+    await evaluate('Array.from(document.querySelectorAll("[role=option]")).find(option=>option.textContent.trim()===' + JSON.stringify(text) + ').click()'); await delay(40);
+  }
+  async function selectTask() { await choose('关联 Task', selectedTask.goal); }
+  await until('!!document.querySelector("input[aria-label=\\"新分支名称\\"]")', 'production GitWorkspace mount');
+  assert.deepEqual(await evaluate('Array.from(document.querySelectorAll("[role=tablist][aria-label=\\"Git 视图\\"] [role=tab]")).map(row=>row.textContent.trim())'), ['Changes · 变更', 'History · 提交记录', 'Branches · 分支', 'Worktrees · 工作树'], 'Workspace Git has exactly four product views');
+  assert.ok(await evaluate('!!document.querySelector("input[aria-label=\\"搜索变更文件\\"]")'), 'Changes provides file search');
+  assert.ok(await evaluate('document.querySelector(".git-commit")?.getAttribute("aria-label")==="提交所选文件"'), 'commit panel is an independent named surface');
+  assert.ok(await evaluate('document.querySelector(".git-file-list")?.textContent.includes("已暂存")&&document.querySelector(".git-file-list")?.textContent.includes("工作目录")'), 'actual index and working status are represented separately');
+  await selectTask(); await evaluate('document.querySelector("button[aria-label=\\"查看差异 a.txt\\"]").click()');
+  await until('document.querySelector(".git-diff")?.textContent.includes("approved UI change")', 'real file working tree diff');
+  assert.ok(calls.some(row=>row.method==='ui.workspace.git.diff'&&row.params.path==='a.txt'&&row.params.cached===false), 'file preview requests an exact path DTO');
+  assert.equal(await evaluate('document.querySelector(".git-diff")?.textContent.includes("unrelated user")'), false, 'file preview excludes unrelated diffs');
   await input('input[aria-label="新分支名称"]', 'codex/ui-branch'); await click('创建分支'); await click('确认创建');
   const branchApproval = await reviewRequest('git.branch.create');
   assert.equal(git(project, 'branch', '--list', 'codex/ui-branch'), ''); assert.equal(git(project, 'status', '--porcelain'), initialStatus); assert.equal(git(project, 'rev-parse', 'HEAD'), baseline);
-  await approve(branchApproval); assert.equal(git(project, 'rev-parse', 'refs/heads/codex/ui-branch'), baseline); await click('分支 2'); await until('document.body.innerText.includes("codex/ui-branch")', 'approved branch visible');
+  await approve(branchApproval); assert.equal(git(project, 'rev-parse', 'refs/heads/codex/ui-branch'), baseline); await click('Branches · 分支'); await until('document.body.innerText.includes("codex/ui-branch")', 'approved branch visible');
+  await input('input[aria-label="搜索分支"]', 'codex/ui-branch');
+  assert.equal(await evaluate('document.querySelectorAll(".git-main .git-data-row").length'), 1, 'branch search narrows actual rows');
+  await evaluate('document.querySelector("button[aria-label=\\"分支详情 codex/ui-branch\\"]").click()');
+  await until('document.querySelector(".git-detail")?.textContent.includes(' + JSON.stringify(selectedTask.goal) + ')', 'branch drawer resolves its real Task');
+  assert.ok(await evaluate('document.querySelector(".git-detail")?.textContent.includes("未知 · 未提供执行者信息")'), 'missing actual executor remains explicitly unknown');
+  await evaluate('document.querySelector(".cm-sheet button[aria-label=\\"关闭\\"]").click()');
   console.log('PASS production Task selection, real diff, pending branch without side effects, existing Owner approval and branch refresh');
 
   await selectTask(); await input('input[aria-label="新分支名称"]', 'codex/ui-worktree'); await click('创建 Worktree'); await click('确认创建');
@@ -116,30 +134,34 @@ try {
   assert.equal(fs.existsSync(path.join(stateDir, 'agent-worktrees')), false); assert.equal(git(project, 'branch', '--list', 'codex/ui-worktree'), '');
   await approve(worktreeApproval);
   const { workspaces } = await workspaceService.execute({ method: 'workspace.list' }); const managed = workspaces.find(item => item.id !== workspace.id); assert.ok(managed); assert.ok(path.relative(path.join(stateDir, 'agent-worktrees'), managed.root).split(path.sep).length === 1); assert.equal(git(managed.root, 'branch', '--show-current'), 'codex/ui-worktree'); assert.equal(fs.readFileSync(path.join(managed.root, 'a.txt'), 'utf8'), 'baseline a\n'); assert.equal(git(project, 'status', '--porcelain'), initialStatus);
-  await click('Agent Worktree 2'); await until('document.body.innerText.includes("codex/ui-worktree")&&document.body.innerText.includes("Agent 隔离目录")', 'approved task Worktree visible');
+  await click('Worktrees · 工作树'); await until('document.body.innerText.includes("codex/ui-worktree")&&document.body.innerText.includes("Agent 隔离目录")', 'approved task Worktree visible');
+  await input('input[aria-label="搜索工作树"]', 'codex/ui-worktree');
+  assert.equal(await evaluate('document.querySelectorAll(".git-main .git-data-row").length'), 1, 'worktree search narrows actual rows');
   console.log('PASS pending Worktree creates no path/ref before approval and produces a real isolated registered Task worktree afterwards');
 
-  await evaluate('Array.from(document.querySelectorAll("[role=tab]")).find(button=>button.textContent.startsWith("变更")).click()');
+  await click('Changes · 变更');
   await until('!!document.querySelector("input[aria-label=\\"提交 a.txt\\"]")', 'real file selection returns');
   await evaluate('document.querySelector("input[aria-label=\\"提交 a.txt\\"]").click()'); await input('#git-commit-message', 'approved exact Git UI commit'); await click('提交所选文件（1）');
   const commitApproval = await reviewRequest('git.commit'); assert.deepEqual(commitApproval.request.input.paths, ['a.txt']); assert.equal(commitApproval.request.input.expectedHead, baseline); assert.deepEqual(commitApproval.request.input.expectedHashes, { 'a.txt': crypto.createHash('sha256').update('approved UI change\n').digest('hex') });
   assert.equal(git(project, 'rev-parse', 'HEAD'), baseline); assert.equal(git(project, 'show', ':user.txt'), initialIndex); assert.equal(git(project, 'status', '--porcelain'), initialStatus);
   await approve(commitApproval); const committed = git(project, 'rev-parse', 'HEAD'); assert.notEqual(committed, baseline); assert.equal(git(project, 'diff-tree', '--no-commit-id', '--name-only', '-r', committed), 'a.txt'); assert.equal(git(project, 'show', ':user.txt'), initialIndex); assert.equal(fs.readFileSync(path.join(project, 'user.txt'), 'utf8'), 'unrelated user unstaged\n'); assert.equal(fs.readFileSync(path.join(project, 'loose.txt'), 'utf8'), 'unrelated loose file\n'); assert.equal(git(project, 'diff', '--cached', '--name-only'), 'user.txt');
-  await click('提交记录'); await until('document.querySelector(".git-panel")?.innerText.includes("approved exact Git UI commit")', 'approved commit history refreshed');
+  await click('History · 提交记录'); await until('document.querySelector(".git-panel")?.innerText.includes("approved exact Git UI commit")', 'approved commit history refreshed');
   console.log('PASS selected-path/hash/HEAD commit remains inert while pending, then preserves unrelated staged/unstaged/untracked data and refreshes history');
 
   const staleTask = taskService.runtime.create({ goal: 'Task removed after UI snapshot', workspaceId: workspace.id });
-  await click('刷新'); await until('Array.from(document.querySelectorAll("select option")).some(option=>option.value===' + JSON.stringify(staleTask.id) + ')', 'real Task appears before concurrent removal');
-  await input('select[aria-label="关联 Task"]', staleTask.id); await input('input[aria-label="新分支名称"]', 'codex/stale-task-must-not-execute');
+  await click('刷新'); await until('!document.body.innerText.includes("正在读取 Git 状态")', 'real Task refresh before concurrent removal');
+  await choose('关联 Task', staleTask.goal); await input('input[aria-label="新分支名称"]', 'codex/stale-task-must-not-execute');
   taskService.runtime.remove({ id: staleTask.id, expectedRev: staleTask.rev });
   const priorFailureCalls = calls.length; await click('创建分支'); await click('确认创建');
   for (let index = 0; !calls.slice(priorFailureCalls).some(row => row.method === 'ui.workspace.git.branch.create' && row.error) && index < 100; index++) await delay(30);
   const failedRequest = calls.slice(priorFailureCalls).find(row => row.method === 'ui.workspace.git.branch.create' && row.error); assert.ok(failedRequest); assert.equal(failedRequest.error.code, 'TASK_NOT_AUTHORIZED');
   await delay(200); assert.equal(await evaluate('document.querySelector(".git-notice.error")?.textContent'), failedRequest.error.message, 'actual Core failure must remain visible after the request settles');
+  assert.equal(await evaluate('document.querySelector("input[aria-label=\\"新分支名称\\"]").value'), 'codex/stale-task-must-not-execute', 'creation failure preserves the branch draft');
+  assert.ok(await evaluate('!!document.querySelector(".git-review")'), 'creation failure preserves the exact review for inspection');
   assert.equal(git(project, 'branch', '--list', 'codex/stale-task-must-not-execute'), ''); assert.equal(capabilityService.broker.approvals.list().length, 0);
   console.log('PASS actual stale Task rejection remains visible in Git UI and cannot create a branch or approval');
   git(project, 'commit', '-qm', 'fixture staged baseline'); git(project, 'checkout', '-qb', 'fixture-conflict'); fs.writeFileSync(path.join(project, 'a.txt'), 'branch conflict\n'); git(project, 'commit', '-qam', 'branch conflict'); git(project, 'checkout', '-q', 'main'); fs.writeFileSync(path.join(project, 'a.txt'), 'main conflict\n'); git(project, 'commit', '-qam', 'main conflict'); assert.throws(() => git(project, 'merge', 'fixture-conflict'));
-  const conflicted = fs.readFileSync(path.join(project, 'a.txt'), 'utf8'); await click('刷新'); await until('document.body.innerText.includes("需要在项目中处理后刷新")', 'real conflict summary visible'); await evaluate('Array.from(document.querySelectorAll("[role=tab]")).find(button=>button.textContent.startsWith("变更")).click()');
+  const conflicted = fs.readFileSync(path.join(project, 'a.txt'), 'utf8'); await click('刷新'); await until('document.body.innerText.includes("需要在项目中处理后刷新")', 'real conflict summary visible'); await click('Changes · 变更');
   await until('document.body.innerText.includes("文件包含未解决的 Git 冲突")', 'actual conflict file visible'); assert.equal(await evaluate('document.querySelector("input[aria-label=\\"提交 a.txt\\"]").disabled'), true); assert.equal(fs.readFileSync(path.join(project, 'a.txt'), 'utf8'), conflicted);
   assert.equal(calls.filter(row => row.method === 'ui.approvals.decide').length, 3); assert.ok(calls.filter(row => /^ui\.workspace\.git\.(?:commit|branch\.create|worktree\.create)$/.test(row.method)).every(row => !Object.hasOwn(row.params, 'actor') && !Object.hasOwn(row.params, 'approved')), 'renderer never supplies identity or approval authority');
   console.log('PASS real merge conflict visibility disables commit and preserves conflict bytes; renderer identity and authority are not forged');
