@@ -280,7 +280,7 @@ function injectSea(outDir, buildDir, blobFile) {
   const postjectCli = path.join(ROOT, 'node_modules', 'postject', 'dist', 'cli.js');
   if (!fs.existsSync(postjectCli)) fail('未找到 postject，请先执行 npm install');
   log('  注入 SEA blob（Windows 下会出现签名失效警告，属预期；签名留待发布阶段处理）');
-  run(process.execPath, [postjectCli, exeFile, 'NODE_SEA_BLOB', blobFile, '--sentinel-fuse', SEA_FUSE]);
+  run(process.execPath, [path.join(ROOT, 'scripts', 'inject-core-sea.mjs'), exeFile, blobFile, SEA_FUSE]);
   return exeFile;
 }
 

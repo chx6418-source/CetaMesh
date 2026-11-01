@@ -92,6 +92,7 @@ const REGISTRY = {
   'test-chat-codex-regression.mjs': {category:'security',timeoutMs:120000,note:'User Chat Codex delegation, model scope, write schema, recovery and tool labels'},
   'test-build-source-safety.mjs': {category:'security',timeoutMs:120000,note:'Actual build entries reject unavailable Git source identity and malformed Core output before build effects'},
   'test-release-input-integrity.mjs': {category:'security',timeoutMs:120000,note:'Actual release entry rejects stale/tampered Core and missing expected Desktop before executable dispatch'},
+  'test-sea-write-retry.mjs': {category:'release',timeoutMs:30000,note:'Bounded generated-executable busy-open retries preserve exact bytes and fail on permission or write errors'},
   'test-task-launch-selection.mjs': {category:'desktop',requires:['ui-motion-live'],note:'Production TaskCreateForm handles delayed Workspace lists without overriding Owner selection'},
   'test-mcp-acceptance-assertions.mjs': {category:'security',timeoutMs:120000,note:'Real MCP smoke process outcomes must assert successful tool data and private-address rejection'},
   'test-memory-candidate-review.mjs': {category:'runtime',note:'Conservative pending Memory candidate hints preserve live authorized scope and confirmed fact authority'},
