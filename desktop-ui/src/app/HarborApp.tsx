@@ -1045,6 +1045,15 @@ export function WorkPage({ onExplain, workspaces, activeWorkspaceId, onRefreshWo
     const timer = window.setInterval(() => { void refresh(true); }, 3000);
     return () => { window.clearInterval(timer); off(); };
   }, [refresh]);
+  function openProjectTasks(workspaceId: string) {
+    setWorkView('tasks');
+    if (taskWorkspaceId === workspaceId && taskOffset === 0) {
+      // Keep this project's loaded rows visible while refreshing the same query.
+      void refresh(true);
+      return;
+    }
+    setTaskWorkspaceId(workspaceId); setTaskOffset(0); setTasks([]); setLoading(true);
+  }
   function beginCreateTask(){const epoch=++taskNavigationRef.current;setTaskCreateEpoch(epoch);setTaskSheet(true);}
   async function showCreatedTask(task:Task,creationEpoch:number){
     if(creationEpoch!==taskNavigationRef.current){await refresh(true);return;}
@@ -1200,7 +1209,7 @@ export function WorkPage({ onExplain, workspaces, activeWorkspaceId, onRefreshWo
     </>}
     {workView === 'workspaces' && <>
     <div className="section-heading page-section-heading"><h2>项目工作区</h2><div className="row"><Input aria-label="工作区名称" placeholder="工作区名称（可选）" value={workspaceName} onChange={event => setWorkspaceName(event.target.value)} /><Button compact icon="add" onClick={() => void addWorkspace()} disabled={workspaceBusy}>{workspaceBusy ? '添加中…' : '添加工作区'}</Button></div></div>
-    {workspaceError && <ErrorNotice error={workspaceError} />}{projectWorkspaces.length ? <div className="workspace-grid">{projectWorkspaces.map(workspace => <Card className="workspace-card" key={workspace.id}><div className="workspace-badge">CM</div><div className="workspace-card-body"><strong>{workspace.name}</strong><p>{workspace.managedIsolation ? '任务隔离目录' : '本地项目'} · {workspace.activitySource === 'opened' ? '最近打开' : '登记于'} {relativeLabel(workspace.lastActivity)}</p></div><StatusBadge value={workspace.status} /><Button compact disabled={workspaceBusy} onClick={() => { setTaskWorkspaceId(workspace.id); setTaskOffset(0); setTasks([]); setWorkView('tasks'); }}>查看任务</Button><Button compact icon="code" disabled={workspaceBusy} onClick={() => { void (async () => { setWorkspaceError(''); setWorkspaceBusy(true); try { await workspaceClient.open(workspace.id); await onRefreshWorkspaces(); setGitWorkspaceId(workspace.id); setWorkView('git'); } catch (cause) { setWorkspaceError(messageOf(cause)); } finally { setWorkspaceBusy(false); } })(); }}>Git 工作台</Button></Card>)}</div> : <Surface className="workspace-empty"><p className="muted">尚未登记工作区。添加工作区时会使用 Windows 原生文件夹选择器。</p></Surface>}
+    {workspaceError && <ErrorNotice error={workspaceError} />}{projectWorkspaces.length ? <div className="workspace-grid">{projectWorkspaces.map(workspace => <Card className="workspace-card" key={workspace.id}><div className="workspace-badge">CM</div><div className="workspace-card-body"><strong>{workspace.name}</strong><p>{workspace.managedIsolation ? '任务隔离目录' : '本地项目'} · {workspace.activitySource === 'opened' ? '最近打开' : '登记于'} {relativeLabel(workspace.lastActivity)}</p></div><StatusBadge value={workspace.status} /><Button compact disabled={workspaceBusy} onClick={() => openProjectTasks(workspace.id)}>查看任务</Button><Button compact icon="code" disabled={workspaceBusy} onClick={() => { void (async () => { setWorkspaceError(''); setWorkspaceBusy(true); try { await workspaceClient.open(workspace.id); await onRefreshWorkspaces(); setGitWorkspaceId(workspace.id); setWorkView('git'); } catch (cause) { setWorkspaceError(messageOf(cause)); } finally { setWorkspaceBusy(false); } })(); }}>Git 工作台</Button></Card>)}</div> : <Surface className="workspace-empty"><p className="muted">尚未登记工作区。添加工作区时会使用 Windows 原生文件夹选择器。</p></Surface>}
     </>}
     {workView === 'git' && <GitWorkspace onExplain={onExplain} call={productToolsClient.call} workspaces={workspaces} activeWorkspaceId={gitWorkspaceId} onWorkspaceChanged={onRefreshWorkspaces} onOpenTask={id => { setWorkView('tasks'); void openRelatedTask(id); }} />}
     <Sheet open={taskSheet} title="新建任务" onClose={() => {taskNavigationRef.current+=1;setTaskSheet(false);}}><TaskCreateForm key={taskCreateEpoch} activeWorkspaceId={taskWorkspaceId || activeWorkspaceId} workspaces={projectWorkspaces} providers={handoffProviders} onCreated={task=>showCreatedTask(task,taskCreateEpoch)} /></Sheet>
