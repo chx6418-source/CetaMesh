@@ -2,6 +2,13 @@
 
 更新日期：2026-11-01。
 
+## About 页面维护拆分（2026-11-01，开发分支）
+
+- 关于页独立为 desktop-ui/src/app/AboutPage.tsx，继续使用原 Typed Core Client、Harbor 样式与控件；原页面入口和设置入口保持，共用标题与错误展示移入 PagePresentation.tsx。
+- 既有注册浏览器套件增加显式 CETAMESH_GLOBAL_UI_ABOUT_ONLY=1 模式，对照提取前后实际生产页面，验证明暗主题、480–1600px、100/150/200% CSS 缩放及模拟 DPR，以及错误重试和键盘打开受控 HTTPS 链接。合成 DTO 截图不代替真实 Core、Windows DPI 或已安装产品验收。
+- 本轮源码检查和定向测试、隔离真实 Managed 十次连续任务、Managed→Codex→Managed 与只读并行子任务分别记录；现有安装版未更新，原生与发行门禁仍保留。
+
+
 ## Agent Runtime 稳定性定点修复（2026-11-01，开发分支）
 
 - 修复长 Agent 选择列表内部滚动导致选择丢失、已授权 `test.run` 在上下文预算中遗漏、审批恢复后工具活动缺少终态，以及完成回合被历史失败操作误标为当前失败。

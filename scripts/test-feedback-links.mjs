@@ -199,7 +199,7 @@ try {
   const unavailableLinks = await unavailableUi.execute({ method: 'ui.feedback.links', params: {} });
   equal('typed UI projection 保留 disabled 无 URL 状态', [unavailableLinks.configured, unavailableLinks.entries.every((entry) => entry.url === null), unavailableLinks.message],
     [false, true, FEEDBACK_NOT_CONFIGURED_MESSAGE]);
-  const aboutUi = fs.readFileSync(path.join(repoRoot, 'desktop-ui', 'src', 'app', 'HarborApp.tsx'), 'utf8');
+  const aboutUi = fs.readFileSync(path.join(repoRoot, 'desktop-ui', 'src', 'app', 'AboutPage.tsx'), 'utf8');
   const feedbackRowUi = fs.readFileSync(path.join(repoRoot, 'desktop-ui', 'src', 'app', 'StatusPresentation.tsx'), 'utf8');
   const typedClient = fs.readFileSync(path.join(repoRoot, 'desktop-ui', 'src', 'bridge', 'typed-client.ts'), 'utf8');
   const nativeUi = fs.readFileSync(path.join(repoRoot, 'desktop-shell', 'src', 'webview_ui.rs'), 'utf8');

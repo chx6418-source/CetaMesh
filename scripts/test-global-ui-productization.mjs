@@ -22,6 +22,11 @@ const evidence = process.env.CETAMESH_GLOBAL_UI_EVIDENCE_DIR ? path.resolve(proc
 const baselineOnly = process.env.CETAMESH_GLOBAL_UI_BASELINE_ONLY === '1';
 const quick = process.env.CETAMESH_GLOBAL_UI_QUICK === '1';
 const zoomOnly = Number(process.env.CETAMESH_GLOBAL_UI_ZOOM_ONLY || 0);
+const aboutOnly = process.env.CETAMESH_GLOBAL_UI_ABOUT_ONLY === '1';
+const aboutScenarios = [
+  ...[480,640,900,1280,1600].flatMap(width => ['light','dark'].map(theme => ({width,height:900,zoom:1,theme}))),
+  ...[1.5,2].flatMap(zoom => ['light','dark'].map(theme => ({width:1280,height:900,zoom,theme,dpr:zoom})))
+];
 const agentOnly = process.env.CETAMESH_GLOBAL_UI_AGENT_ONLY === '1';
 const hostSyncOnly = process.env.CETAMESH_GLOBAL_UI_HOST_SYNC_ONLY === '1';
 const behaviorOnly = process.env.CETAMESH_GLOBAL_UI_BEHAVIOR_ONLY === '1';
@@ -114,6 +119,7 @@ async function bundle(directory) {
         if(method==='ui.onboarding.status'||method==='ui.onboarding.start')return onboarding;
         if(method==='ui.chat.attachment.limits')return{imageMiB:20,documentMiB:100,archiveMiB:200,messageMiB:250,count:20,storageMiB:2048,reserveMiB:256,incompleteHours:24};if(method==='ui.chat.attachment.list')return{files:[]};if(method==='ui.chat.attachment.capabilities')return{supported:true,status:'supported'};
         if(method.startsWith('ui.workshop.'))return{proposals:[],total:0};if(method==='ui.search')return{sessions:[session],tasks:[task(0)],plugins:plugins.slice(0,2)};
+        if(method==='ui.about.info'&&window.fixtureState.failAbout)throw new Error('Synthetic About read failed');
         if(method==='ui.about.info')return{productName:'CetaMesh',version:'synthetic-ui-test',buildNumber:0,channel:'fixture',platform:'Windows',developer:'CetaMesh',commit:'synthetic',github:'https://example.invalid/CetaMesh'};
         if(method==='ui.about.update')return{status:'not_configured'};if(method==='ui.update.notes')return{record:{announcement:{notes:['Synthetic acceptance fixture, no release published.']}}};if(method==='ui.feedback.links')return{configured:false,entries:[],securityNotice:'No private files uploaded.',message:''};
         throw Object.assign(new Error('UI display fixture blocks this operation: '+method),{code:'FIXTURE_READ_ONLY'});
@@ -190,6 +196,29 @@ try {
     }
     for(const version of Object.keys(pages)){
       await rpc('Page.navigate',{url:'http://127.0.0.1:'+server.address().port+'/'+version},sessionId);await until('!!window.fixture&&!!document.querySelector(".harbor-shell")','Harbor '+version+' boot');
+      if(aboutOnly){
+        for(const scenario of aboutScenarios){
+          await rpc('Emulation.setDeviceMetricsOverride',{width:scenario.width,height:scenario.height,deviceScaleFactor:scenario.dpr||1,mobile:false},sessionId);
+          await evaluate('(()=>{const root=document.getElementById("root");root.style.zoom='+scenario.zoom+';root.style.width='+JSON.stringify(100/scenario.zoom+'vw')+';root.style.height='+JSON.stringify(100/scenario.zoom+'vh')+';window.fixture.setTheme('+JSON.stringify(scenario.theme)+');})()');
+          await show('about');await until('document.body.innerText.includes("synthetic-ui-test")&&document.body.innerText.includes("Synthetic acceptance fixture")','About actual page data');
+          assert.equal(await evaluate('[...document.querySelectorAll(".about-page button")].find(b=>b.textContent.trim()==="检查更新")?.disabled'),true,'Unconfigured update stays disabled');
+          assert.equal(await evaluate('document.querySelectorAll(".about-page h1").length'),1);
+          await measure(version,scenario,'about');
+          const text=await evaluate('document.querySelector(".about-page").innerText');
+          checks.push({version,scenario,kind:'about-text',text});
+        }
+        await rpc('Emulation.setDeviceMetricsOverride',{width:1280,height:900,deviceScaleFactor:1,mobile:false},sessionId);
+        await evaluate('document.getElementById("root").style.cssText="width:100vw;height:100vh;zoom:1";window.fixture.setTheme("light")');
+        await show('chat');await evaluate('window.fixtureState.failAbout=true');await show('about');
+        await until('document.querySelector(".about-page [role=alert]")?.innerText.includes("Synthetic About read failed")','About failure is visible');
+        await evaluate('window.fixtureState.failAbout=false');await textClick('重试');
+        await until('document.body.innerText.includes("synthetic-ui-test")&&!document.querySelector(".about-page [role=alert]")','About retry recovers');
+        const link='[...document.querySelectorAll(".about-page .about-link-row")].find(b=>b.textContent.includes("GitHub"))';
+        await evaluate(link+'.focus()');await key('Enter');
+        await until('window.fixtureCalls.some(r=>r.method==="app.openExternal"&&r.params.url==="https://example.invalid/CetaMesh")','About keyboard opens only configured HTTPS via host');
+        checks.push({version,kind:'about-error-retry-and-keyboard-host-link',pass:true});
+        continue;
+      }
       if(hostSyncOnly){assert.equal(version,'after','Host sync follow-up uses current source only');await hostSynchronization(version);continue;}
       const selectedScenarios=behaviorOnly?[]:agentOnly?scenarios.filter(row=>row.width===1024||row.zoom===1.5||row.theme==='dark'&&row.dpr===1.5):quick?scenarios.slice(0,1):zoomOnly?scenarios.filter(row=>row.zoom===zoomOnly):scenarios;
       for(const scenario of selectedScenarios){
@@ -235,7 +264,13 @@ try {
         await hostSynchronization(version);
       }
     }
-    console.log('PASS global actual Harbor render: '+measurements.filter(r=>r.version==='after').length+' current / '+measurements.filter(r=>r.version==='before').length+' baseline measurements; '+captures.length+' screenshots; keyboard/failure/large-list checks '+checks.length);failed=false;
+    if(aboutOnly&&baseline&&!baselineOnly){
+      const before=checks.filter(row=>row.version==='before'&&row.kind==='about-text');
+      const after=checks.filter(row=>row.version==='after'&&row.kind==='about-text');
+      assert.equal(before.length,after.length);
+      assert.deepEqual(before.map(row=>row.text),after.map(row=>row.text),'All About page text preserved across extraction');
+    }
+    console.log('PASS '+(aboutOnly?'focused About':'global')+' actual Harbor render: '+measurements.filter(r=>r.version==='after').length+' current / '+measurements.filter(r=>r.version==='before').length+' baseline measurements; '+captures.length+' screenshots; keyboard/failure/large-list checks '+checks.length);failed=false;
   }
 }finally{
   let cleanupError;
@@ -249,5 +284,5 @@ try {
     if(browser?.pid&&browser.exitCode===null&&browser.signalCode===null)await terminateSuiteProcessTree(browser);
   } catch(error) { failed=true;cleanupError=error; }
   if(server)await new Promise(resolve=>server.close(resolve));
-  if(evidence)fs.writeFileSync(path.join(evidence,'global-ui-evidence.json'),JSON.stringify({status:process.exitCode===77?'NOT_RUN_ENVIRONMENT':failed?'FAIL':'PASS',kind:'Actual HarborApp and typed client with fixed synthetic IPC DTOs; not real Core/native/model execution',baselineOnly,agentOnly,hostSyncOnly,behaviorOnly,zoomOnly:zoomOnly||null,testOnlyOmittedQuickMaxWidth:omitQuickMaxWidth,baselineDependencies:'Both source versions use the maintained UI dependency set',scaling:'CSS content zoom and explicitly emulated DPR; no Windows DPI setting changed; headless page focus enabled for trusted key dispatch',measurements,captures,checks,baselineIssues,cleanup:{browserExited:!browser||browser.exitCode!==null||browser.signalCode!==null,error:cleanupError?.message??null}},null,2));finalizeSuiteSandbox({sandbox,failed,keepFailed:failed});if(cleanupError)throw cleanupError;
+  if(evidence)fs.writeFileSync(path.join(evidence,'global-ui-evidence.json'),JSON.stringify({status:process.exitCode===77?'NOT_RUN_ENVIRONMENT':failed?'FAIL':'PASS',kind:'Actual HarborApp and typed client with fixed synthetic IPC DTOs; not real Core/native/model execution',baselineOnly,aboutOnly,agentOnly,hostSyncOnly,behaviorOnly,zoomOnly:zoomOnly||null,testOnlyOmittedQuickMaxWidth:omitQuickMaxWidth,baselineDependencies:'Both source versions use the maintained UI dependency set',scaling:'CSS content zoom and explicitly emulated DPR; no Windows DPI setting changed; headless page focus enabled for trusted key dispatch',measurements,captures,checks,baselineIssues,cleanup:{browserExited:!browser||browser.exitCode!==null||browser.signalCode!==null,error:cleanupError?.message??null}},null,2));finalizeSuiteSandbox({sandbox,failed,keepFailed:failed});if(cleanupError)throw cleanupError;
 }
