@@ -34,7 +34,7 @@ const evidence = {
   sourceDirty: Boolean(execFileSync('git', ['status', '--porcelain'], {encoding: 'utf8'}).trim()),
   runtimeSourceHashes: Object.fromEntries(['capability/broker.js','capability/service.js','task/store.js','task/runtime.js','agent/codex-agent-provider.js','agent/managed-agent-provider.js', 'model/tool-execution.js',
     'desktop/chat-service.js'].map(file => [file, hash(fs.readFileSync(new URL('../src/' + file, import.meta.url)))])),
-  startedAt: new Date().toISOString(), provider, model, managedRequestLimit: codexRestartOnly?0:10, codexUserTurnLimit: codexRestartOnly?2:3,
+  startedAt: new Date().toISOString(), provider:codexRestartOnly?'codex':provider, model:codexRestartOnly?null:model, managedRequestLimit: codexRestartOnly?0:10, codexUserTurnLimit: codexRestartOnly?2:3,
   isolatedRoot:root,
   acceptanceMode:codexRestartOnly?'existing-ChatGPT-account-Core-restart':'Managed-and-Codex-session-loss',
   status: 'RUNNING', modelRequests: [], dispatches: [], agentCalls: [], approvals: [],

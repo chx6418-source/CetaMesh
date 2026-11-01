@@ -8,6 +8,7 @@ import { createCapabilityService } from '../src/capability/service.js';
 import { createWorkspaceService } from '../src/workspace/service.js';
 import { createTaskRuntime } from '../src/task/runtime.js';
 import { assertRecoveryAccount } from './real-recovery-account-guard.mjs';
+import { createCetaMeshServices } from '../src/app/service-container.js';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'cetamesh-recovery-consistency-'));
 const owner={kind:'owner',id:'desktop'};
@@ -151,6 +152,27 @@ try{
  finishEffect({done:true});await effect;
  assert.equal(collision.service.broker.dispatchStatus('one-effect').status,'completed');
  console.log('PASS only the original dispatch claim settles an effect; read request ID collision cannot clear its active fence');
+
+ const coreRoot=path.join(root,'core-handoff'),core=createCetaMeshServices({stateDir:path.join(coreRoot,'state'),dataRoot:path.join(coreRoot,'data'),deferOptionalStart:true});
+ try{
+  const project=path.join(coreRoot,'project');fs.mkdirSync(project,{recursive:true});
+  const workspace=(await core.workspaceService.execute({method:'workspace.create',params:{root:project,name:'handoff fence'}})).workspace;
+  const rt=core.taskService.runtime,task=rt.create({goal:'Do not hand off an unknown effect',workspaceId:workspace.id});
+  rt.start({id:task.id,expectedRev:task.rev,provider:'cetamesh',sessionId:'fixture-idle-session'});
+  core.capabilityService.broker.register({id:'fixture.effect',permission:'publish',effect:'non-idempotent',execute(){fs.writeFileSync(path.join(project,'effect.txt'),'actual local effect');throw Error('effect result lost');}});
+  await assert.rejects(core.capabilityService.broker.execute({actor:owner,approved:true,taskId:task.id,workspaceId:workspace.id,capability:'fixture.effect',requestId:'unkeyed-handoff-effect',input:{}}),error=>error.effectStatus==='unknown');
+  let statusReads=0;
+  core.agentBroker.status=async()=>{statusReads++;throw Object.assign(new Error('handoff reached the Agent despite unknown effect'),{code:'GUARD_NOT_CONSULTED'});};
+  await assert.rejects(core.continuityService.runtime.rollover({taskId:task.id,reason:'manual'}),{code:'ROLLOVER_NOT_SAFE'});
+  assert.equal(statusReads,0);assert.equal(rt.get({id:task.id}).task.currentAgent.sessionId,'fixture-idle-session');
+  assert.equal(fs.readFileSync(path.join(project,'effect.txt'),'utf8'),'actual local effect');
+  assert.equal(core.capabilityService.acknowledgeTaskRecovery(task.id).reconciled,1);
+  await assert.rejects(core.continuityService.runtime.rollover({taskId:task.id,reason:'manual'}),{code:'GUARD_NOT_CONSULTED'});
+  assert.equal(statusReads,1,'only explicit exact-Task review releases the handoff effect fence; Agent safety checks still apply');
+  console.log('PASS actual Core composition blocks Continuity for unkeyed uncertainty and resumes Agent safety checks only after exact Owner review');
+ }finally{
+  for(const name of ['autonomousHandoff','chatService','agentService','managedAgent','capabilityService','pluginCenterService','extensionService','channelService','bionicService','simulationService','meshService'])await core[name]?.close?.();
+ }
 }finally{
  // Only this suite's newly created fixture root is removed.
  assert.equal(path.dirname(root),path.resolve(os.tmpdir()));

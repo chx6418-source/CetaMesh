@@ -72,6 +72,9 @@ binary/non-UTF-8 output is retained for explicit review, never silently transcod
   Owner review requires the exact recorded Task/Workspace and a settled executor;
   the reviewed request remains non-replayable. Older rows lacking attribution
   remain unattributed and require independent evidence, not guessed migration.
+  The Core's Continuity safety point consults both Capability and model-tool
+  recovery, including effects without a logical Operation ID, before transferring
+  Agent authority. Owner review of an effect does not bypass Agent safety checks.
 - Import journals are partitioned by canonical source-root hash and validate
   their recorded root. An incomplete/corrupt journal blocks that project, not
   every registered project. Original files and unknown journal material remain.
