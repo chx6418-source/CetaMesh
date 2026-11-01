@@ -1442,6 +1442,7 @@ export function createChatService({
             onTextDelta: delta => {
               const turn = state.turn;
               if (!turn || typeof delta !== 'string' || !delta) return;
+              if(turn.state==='starting')turn.state='streaming';
               settleOk();
               state.chunkBuffer += delta;
               turn.displayText = displayTextOf(state);

@@ -36,6 +36,13 @@ try{
  status=await ui.execute({method:'ui.chat.status',params:{id:session.id}});assert.equal(status.context.inputTokens,123,'bounded numeric last-request context survives restart');
  await ui.execute({method:'ui.chat.config.set',params:{id:session.id,config:{model:'model-b',reasoning:'off'}}});
  assert.equal((await ui.execute({method:'ui.chat.status',params:{id:session.id}})).context,null,'old snapshot must not inherit the new model window');
+ let releaseStream;const streamGate=new Promise(resolve=>{releaseStream=resolve;});
+ const activeChat=createChatService({stateDir:path.join(root,'active-stream'),modelRuntime:{...runtime,supportsToolCalling:()=>true},defaults:{model:'model-a'},toolExecutionCoordinator:{
+  run:async request=>{request.onTextDelta('visible streamed text');await streamGate;return {status:'completed',text:'visible streamed text'};},cancelSession:()=>({cancelled:0})}});
+ try{const active=await activeChat.execute({method:'chat.sessions.create',params:{}});
+  await activeChat.execute({method:'chat.send',params:{id:active.id,text:'synthetic stream phase'}});
+  assert.equal((await activeChat.execute({method:'chat.status',params:{id:active.id}})).turn.state,'streaming','first public text delta must advance starting to streaming');
+ }finally{releaseStream();await new Promise(r=>setTimeout(r,0));activeChat.close();}
  console.log('PASS context attribution, numeric redaction, reasoning wire selection, unsupported level refusal, quota unknown, persistence and model change invalidation');
  const unresolved=createChatService({stateDir:path.join(root,'unknown'),modelRuntime:runtime,defaults:{model:'model-a'},toolExecutionCoordinator:{recoveryForSession:()=>({state:'needs-reconciliation'}),cancelSession:()=>({cancelled:0})}});
  try{const pending=await unresolved.execute({method:'chat.sessions.create',params:{}});
