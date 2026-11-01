@@ -11,30 +11,36 @@ import {setTimeout as delay} from 'node:timers/promises';
 import {createCetaMeshServices} from '../src/app/service-container.js';
 import {createProviderSecrets} from '../src/providers/secrets.js';
 import {redactText} from '../src/logging/redact.js';
+import {assertRecoveryAccount} from './real-recovery-account-guard.mjs';
 
-if (process.env.WHALEBRIDGE_TEST_REAL_MANAGED !== '1' || process.env.WHALEBRIDGE_TEST_REAL_CODEX !== '1') {
+const codexRestartOnly=process.env.CETAMESH_TEST_RECOVERY_CODEX_RESTART_ONLY==='1';
+if ((!codexRestartOnly&&process.env.WHALEBRIDGE_TEST_REAL_MANAGED !== '1') || process.env.WHALEBRIDGE_TEST_REAL_CODEX !== '1') {
   console.log('NOT_RUN_ENVIRONMENT: explicit real Managed and Codex opt-ins required');
   process.exit(77);
 }
 const provider = 'deepseek-official', model = 'deepseek-flash';
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-real-recovery-'));
+const artifactRoot=process.env.CETAMESH_TEST_RECOVERY_ARTIFACT_ROOT;
+if(artifactRoot)fs.mkdirSync(path.resolve(artifactRoot),{recursive:true});
+const root = fs.mkdtempSync(path.join(artifactRoot?path.resolve(artifactRoot):os.tmpdir(), 'cetamesh-real-recovery-'));
 const hash = value => crypto.createHash('sha256').update(value).digest('hex');
 const existing = createProviderSecrets({root: path.join(process.env.LOCALAPPDATA || os.homedir(), 'WhaleBridge')});
 const providerSecrets = Object.freeze({
-  list: () => existing.list().filter(row => row.provider === provider),
-  raw: id => { assert.equal(id, provider); return existing.raw(id); }
+  list: () => codexRestartOnly?[]:existing.list().filter(row => row.provider === provider),
+  raw: id => { assert.equal(codexRestartOnly,false,'Paid API credentials are unavailable in Codex-only acceptance');assert.equal(id, provider); return existing.raw(id); }
 });
 const evidence = {
   kind: 'real-Provider-production-Core-API-explicit-fault-injection', nativeDesktop: false,
   sourceCommit: execFileSync('git', ['rev-parse', 'HEAD'], {encoding: 'utf8'}).trim(),
   sourceDirty: Boolean(execFileSync('git', ['status', '--porcelain'], {encoding: 'utf8'}).trim()),
-  runtimeSourceHashes: Object.fromEntries(['agent/managed-agent-provider.js', 'model/tool-execution.js',
+  runtimeSourceHashes: Object.fromEntries(['capability/broker.js','capability/service.js','task/store.js','task/runtime.js','agent/codex-agent-provider.js','agent/managed-agent-provider.js', 'model/tool-execution.js',
     'desktop/chat-service.js'].map(file => [file, hash(fs.readFileSync(new URL('../src/' + file, import.meta.url)))])),
-  startedAt: new Date().toISOString(), provider, model, managedRequestLimit: 10, codexUserTurnLimit: 3,
+  startedAt: new Date().toISOString(), provider, model, managedRequestLimit: codexRestartOnly?0:10, codexUserTurnLimit: codexRestartOnly?2:3,
+  isolatedRoot:root,
+  acceptanceMode:codexRestartOnly?'existing-ChatGPT-account-Core-restart':'Managed-and-Codex-session-loss',
   status: 'RUNNING', modelRequests: [], dispatches: [], agentCalls: [], approvals: [],
   managedRejection: {status: 'NOT_RUN'}, codexSessionLoss: {status: 'NOT_RUN'},
   limitations: [
-    'Actual Provider IO is separate from the explicit Owner rejection and owned-session close injected by this suite.',
+    codexRestartOnly?'Actual Codex account reads with a controlled Core service restart after confirmed idle Session close; no OS crash is claimed.':'Actual Provider IO is separate from the explicit Owner rejection and owned-session close injected by this suite.',
     'Core/UI API acceptance; no native Desktop UI or operating-system crash acceptance.',
     'Codex root Tasks retain run observations/history but do not have child Attempt records; no Attempt is fabricated.',
     'Owner block/detach after a confirmed Codex close is explicit reconciliation, not automatic session-loss detection.',
@@ -91,6 +97,9 @@ async function closeServices() {
   }
 }
 function observeProduction() {
+  if(codexRestartOnly){
+    services.modelRuntime.chat=async()=>{throw envBlocked('PAID_API_FORBIDDEN','Paid Model Runtime calls are disabled in this acceptance');};
+  }
   const stream = services.modelRuntime.stream.bind(services.modelRuntime);
   services.modelRuntime.stream = async function* (request) {
     assert.ok(evidence.modelRequests.length < evidence.managedRequestLimit, 'real Managed request budget exceeded');
@@ -317,16 +326,19 @@ async function codexSessionLoss() {
   row.initialNativeReadEvidence = initial.executionEvidence.filter(item => item.runId === initialRun.runId
     && item.source === 'native-result' && item.status === 'completed')
     .map(item => ({eventId: item.eventId, resultSha256: item.resultSha256}));
-  const interruptedRunId = 'real-recovery-codex-interrupted-read';
-  const accepted = await services.agentBroker.send({...originalAssignment, runId: interruptedRunId,
+  const interruptedRunId = codexRestartOnly?null:'real-recovery-codex-interrupted-read';
+  if(!codexRestartOnly){
+   const accepted = await services.agentBroker.send({...originalAssignment, runId: interruptedRunId,
     content: instruction + ' This is a separate fresh read-only instruction; read the file again.'});
   assert.equal(accepted.accepted, true);
   const active = await services.agentBroker.status(originalAssignment);
   if (active.running !== true) throw envBlocked('CANCEL_WINDOW_MISSED', 'Read turn settled before owned-session fault injection; no replay is attempted.');
   row.interruptedRunId = interruptedRunId;
+  }
   const closed = await services.agentBroker.closeSession(originalAssignment);
   if (closed.closed !== true) throw envBlocked('CODEX_CLOSE_UNCONFIRMED', 'Owned Codex close was not confirmed; state retained and recovery not attempted.');
   row.faultInjection = {action: 'agentBroker.closeSession', sessionId: originalAssignment.sessionId, closeConfirmed: true};
+  if(codexRestartOnly)row.faultInjection.boundary='Confirmed idle native Session close, then controlled Core service restart; no operating-system crash claimed';
   try { await services.agentBroker.status(originalAssignment); assert.fail('closed native Session must not remain usable'); }
   catch (error) {
     if (!['SESSION_NOT_FOUND', 'SESSION_TRANSPORT_UNKNOWN'].includes(error.code)) throw error;
@@ -358,10 +370,34 @@ async function codexSessionLoss() {
   }
   // Explicit Owner reconciliation records a known close and detaches only the
   // confirmed-stopped assignment. It does not manufacture a native failure event.
-  await taskApi('task.block', {id: initial.id, expectedRev: task(initial.id).rev,
+  if(codexRestartOnly){
+    await closeServices();
+    services=createCetaMeshServices({stateDir:path.join(root,'state'),dataRoot:path.join(root,'data'),
+      agentStagingRoot:path.join(root,'staging'),providerSecrets,deferOptionalStart:true,log:()=>{}});
+    observeProduction();
+    const restored=task(initial.id);
+    assert.equal(restored.status,'blocked');
+    assert.equal(restored.executionObservation?.state,'unknown');
+    assert.deepEqual(restored.attempts,row.originalAttempts);
+    const beforeResume=evidence.dispatches.length;
+    await assert.rejects(ui('ui.task.resume',{id:restored.id,expectedRev:restored.rev,requestId:'must-not-auto-resume'}),{code:'TASK_RECOVERY_REVIEW_REQUIRED'});
+    assert.equal(evidence.dispatches.length,beforeResume,'restart does not silently send another Agent instruction');
+    row.coreRestart={status:'PASS',restoredStatus:restored.status,restoredObservation:restored.executionObservation.state,automaticSends:0};
+    const freshScope=await ui('ui.agent.security',{provider:'codex',workspaceId:workspace.id});
+    if(!freshScope.authorized){
+      const consent=await ui('ui.agent.authorize',{provider:'codex',workspaceId:workspace.id,fingerprint:freshScope.fingerprint});
+      assert.equal(consent.status,'pending');
+      await cap('capability.approval.decide',{id:consent.approvalId,approve:true});
+      evidence.approvals.push({case:currentCase,id:consent.approvalId,capability:'agent execution consent',decision:'approved-fresh-Core-same-workspace'});
+    }
+    await taskApi('task.agent.detach',{id:restored.id,expectedRev:task(restored.id).rev,
+      note:'Test Owner holds the exact earlier confirmed Session-close receipt; preserve history before fresh recovery'});
+  }else{
+   await taskApi('task.block', {id: initial.id, expectedRev: task(initial.id).rev,
     reason: 'needs-reconciliation: Test Owner confirmed close of this owned read-only Codex session; verify synthetic files before a fresh instruction'});
   await taskApi('task.agent.detach', {id: initial.id, expectedRev: task(initial.id).rev,
     note: 'Owner confirmed old owned Session closed; retain Task and native run history for scoped recovery'});
+  }
   const sendsBeforeReview = evidence.dispatches.length;
   assert.deepEqual(task(initial.id).attempts, row.originalAttempts);
   const recoveryInstruction = instruction + ' In this fresh Session run exactly this read-only command once: '
@@ -397,13 +433,22 @@ async function codexSessionLoss() {
 }
 
 try {
-  if (!providerSecrets.list().some(row => row.configured === true))
+  if(codexRestartOnly){
+    const codexHome=process.env.CODEX_HOME||path.join(process.env.USERPROFILE||os.homedir(),'.codex');
+    const auth=JSON.parse(fs.readFileSync(path.join(codexHome,'auth.json'),'utf8'));
+    const config=fs.readFileSync(path.join(codexHome,'config.toml'),'utf8');
+    try{assertRecoveryAccount({auth,config,environment:process.env});}
+    catch(error){throw envBlocked(error.code,'Only the unambiguous existing ChatGPT subscription account is authorized; custom/provider-profile/API-key routes are denied');}
+    evidence.accountMode='chatgpt';
+    evidence.managedRejection={status:'NOT_RUN',reason:'Paid model calls forbidden in Codex-only acceptance'};
+  }
+  if (!codexRestartOnly&&!providerSecrets.list().some(row => row.configured === true))
     throw envBlocked('MANAGED_NOT_CONFIGURED', 'Authorized existing Managed Provider is not configured.');
   services = createCetaMeshServices({stateDir: path.join(root, 'state'), dataRoot: path.join(root, 'data'),
     agentStagingRoot: path.join(root, 'staging'), providerSecrets, deferOptionalStart: true, log: () => {}});
-  await services.settingsService.execute({method: 'settings.update', params: {section: 'models', values: {provider, defaultModel: model}}});
+  if(!codexRestartOnly)await services.settingsService.execute({method: 'settings.update', params: {section: 'models', values: {provider, defaultModel: model}}});
   observeProduction();
-  await managedRejection();
+  if(!codexRestartOnly)await managedRejection();
   await codexSessionLoss();
   evidence.status = 'PASS'; passed = true;
 } catch (error) {
@@ -415,6 +460,7 @@ try {
   if (error.environmentBlocked) console.log('NOT_RUN_ENVIRONMENT: ' + row.failure.code + ': ' + row.failure.message);
 } finally {
   for (const id of [...taskIds].reverse()) {
+    if(!passed&&artifactRoot)continue; // Retain failed acceptance Tasks for explicit review.
     const current = task(id);
     if (['completed', 'cancelled', 'failed'].includes(current.status)) continue;
     try { await ui('ui.task.cancel', {id, expectedRev: current.rev}); }
@@ -427,7 +473,7 @@ try {
   if (process.env.CETAMESH_TEST_EVIDENCE_FILE)
     fs.writeFileSync(process.env.CETAMESH_TEST_EVIDENCE_FILE, JSON.stringify(evidence, null, 2) + '\n');
   console.log(JSON.stringify({realAgentRecoveryEvidence: evidence}));
-  if (passed) {
+  if (passed&&!artifactRoot) {
     const resolved = path.resolve(root);
     assert.equal(path.dirname(resolved), path.resolve(os.tmpdir()));
     assert.ok(path.basename(resolved).startsWith('cetamesh-real-recovery-'));

@@ -39,6 +39,7 @@ export const CATEGORIES = ['core', 'architecture', 'security', 'runtime', 'integ
 // ── 登记表：scripts/test-*.mjs 的每一个文件都必须出现在这里（或能从 package.json 映射）。
 // requires 的取值见 probeAvailability()；category 取值见 CATEGORIES。
 const REGISTRY = {
+  'test-recovery-state-consistency.mjs': {category:'runtime',timeoutMs:120000,note:'Durable effect outcomes, Task recovery ownership and no replay across restart/cancel/failure'},
   'test-snowluma-retirement.mjs': {category:'security',timeoutMs:120000,note:'Retired branded integration identifiers cannot launch, remap or regain authority'},
   'test-onebot-explicit-activation.mjs': {category:'integration',timeoutMs:120000,note:'Explicit neutral OneBot configuration and opt-in activation; no startup external requests'},
   'test-onebot-connection-ui.mjs': {category:'desktop',timeoutMs:120000,note:'Neutral OneBot configuration, redacted credentials, migration review and separate connection control'},
@@ -125,7 +126,7 @@ const REGISTRY = {
   'test-real-autonomous-handoff.mjs': { category: 'environment', requires: ['real-managed','real-codex'], timeoutMs: 900000, note: 'Real Managed model decides generic delegation, real Codex edit and Managed return verification' },
   'test-real-managed-stability.mjs': { category: 'environment', requires: ['real-managed'], timeoutMs: 2400000, note: 'Ten consecutive real Managed Tasks with scoped approvals, current Core tests, Owner verification and persisted restart state; API acceptance' },
   'test-real-readonly-collaboration.mjs': { category: 'environment', requires: ['real-managed'], timeoutMs: 300000, note: 'Real Managed readonly children in parallel with actual scoped reads, Owner verification and denied extra readers/writers; API acceptance' },
-  'test-real-agent-recovery.mjs': { category: 'environment', requires: ['real-managed','real-codex'], timeoutMs: 900000, note: 'Real scoped Owner denial/review/recovery and owned Codex Session disconnect/reconcile, bounded actual Provider IO; API fault injection' },
+  'test-real-agent-recovery.mjs': { category: 'environment', requires: process.env.CETAMESH_TEST_RECOVERY_CODEX_RESTART_ONLY==='1'?['real-codex']:['real-managed','real-codex'], timeoutMs: 900000, note: 'Real scoped Owner recovery; optional Codex account-only Core restart mode forbids paid Model API' },
   'test-autonomous-handoff-integration.mjs': { category: 'integration', note: 'Managed Task autonomous handoff through existing Broker and Continuity', timeoutMs: 60000 },
   'test-autonomous-handoff-late-events.mjs': { category: 'integration', note: 'Actual Core late source/acceptance events, single dispatch, policy/run/session fences and bounded close', timeoutMs: 120000 },
   'test-task-outcome-verification.mjs': { category: 'security', note: 'Task outcomes require observed tool, diff, test and file evidence' },

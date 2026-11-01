@@ -139,6 +139,8 @@ function normalizeLoaded(raw) {
       && typeof raw.createRequest.fingerprint === 'string' ? raw.createRequest : null,
     artifacts: asArray(raw.artifacts),
     executionEvidence: asArray(raw.executionEvidence),
+    executionObservation: raw.executionObservation && typeof raw.executionObservation === 'object' && !Array.isArray(raw.executionObservation)
+      ? raw.executionObservation : null,
     agentReports: asArray(raw.agentReports),
     ownerContext: raw.ownerContext && typeof raw.ownerContext === 'object' && Array.isArray(raw.ownerContext.entries)
       ? raw.ownerContext : null,

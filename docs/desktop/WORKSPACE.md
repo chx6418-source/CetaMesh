@@ -61,6 +61,17 @@ binary/non-UTF-8 output is retained for explicit review, never silently transcod
 
 ## Failure and recovery rules
 
+- Task execution observations survive JSON reload. Restart blocks interrupted
+  running/waiting Tasks and marks their retained observation unknown; it does not
+  infer completion from a former Agent report or repeat its instruction.
+- Every protected Capability dispatch retains its available Task/Workspace
+  binding, including Tasks with no Workspace. This applies with and without a
+  logical Operation ID. A settlement write failure is an unconfirmed outcome;
+  restart retains that fence. Only the invocation holding the dispatch claim can
+  settle it. Reusing its request ID for another capability cannot clear the fence.
+  Owner review requires the exact recorded Task/Workspace and a settled executor;
+  the reviewed request remains non-replayable. Older rows lacking attribution
+  remain unattributed and require independent evidence, not guessed migration.
 - Import journals are partitioned by canonical source-root hash and validate
   their recorded root. An incomplete/corrupt journal blocks that project, not
   every registered project. Original files and unknown journal material remain.
