@@ -124,7 +124,9 @@ export async function runCoreWorker({ paths = APP_PATHS, processRef = process, p
   }
   const identityRoot=paths.packaged?paths.resourceRoot:paths.sourceRoot;
   const releaseConfig=application.services.releaseConfig??loadReleaseConfig({rootDir:identityRoot});
-  const about=application.services.aboutService??createAboutService({rootDir:identityRoot,packaged:paths.packaged});
+  const about=application.services.aboutService??createAboutService({rootDir:identityRoot,packaged:paths.packaged,
+    ...(paths.packaged?{buildInfoFile:path.join(paths.executableDir,'build-info.json'),releaseManifestFile:path.join(paths.executableDir,'release-manifest.json')}:{}),
+    releaseConfig:releaseConfig.config});
   let dataProbe=null,uiProbe=null;
   const diagnostics=createStartupDiagnostics({stateDir:paths.stateDir,
     aboutInfo:()=>about.about.info(),releaseConfig:releaseConfig.config,

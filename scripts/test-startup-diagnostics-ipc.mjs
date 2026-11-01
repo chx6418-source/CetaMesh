@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import net from 'node:net';import crypto from 'node:crypto';
 import {spawn} from 'node:child_process';import {once} from 'node:events';
 import {dataCall,resolveDataPipeName} from '../src/control/data-ipc.js';
+import {writeJsonAtomic,writeTextAtomic} from '../src/storage/json-file.js';
 const root=path.resolve(import.meta.dirname,'..'),temp=fs.mkdtempSync(path.join(os.tmpdir(),'cetamesh-startup-ipc-'));
 const evidence=[];
 function rpc(pipe,token,method,params={},version=1){return new Promise((resolve,reject)=>{
@@ -14,22 +15,45 @@ function rpc(pipe,token,method,params={},version=1){return new Promise((resolve,
   else if(frame.id===id)finish(null,frame);
  }});
 });}
-async function scenario(name,damage){
+async function scenario(name,damage,{packagedFixture=false,seaDirectory=null}={}){
+ const blocked=Boolean(damage&&!damage.valid);
  const data=path.join(temp,name),state=path.join(data,'state');fs.mkdirSync(state,{recursive:true});const token=crypto.randomBytes(32).toString('hex');
  if(damage){fs.mkdirSync(path.dirname(path.join(state,damage.file)),{recursive:true});fs.writeFileSync(path.join(state,damage.file),damage.bytes);}
  const pipe=process.platform==='win32'?`\\\\.\\pipe\\cetamesh-diag-${crypto.randomUUID()}`:path.join(data,'ui.sock');
- const worker=spawn(process.execPath,[path.join(root,'src/core-entry.js'),'--worker'],{cwd:root,windowsHide:true,stdio:['pipe','pipe','pipe'],env:{...process.env,WHALEBRIDGE_DATA_DIR:data,WHALEBRIDGE_RESOURCE_DIR:root,WHALEBRIDGE_UI_PIPE:pipe,WHALEBRIDGE_UI_AUTH_TOKEN:token,WHALEBRIDGE_SUPERVISED:'1'}});
+ let executable=process.execPath,entry=path.join(root,'src/core-entry.js'),resourceRoot=root,args=[entry,'--worker'];
+ const fixtureBuild={version:'1.0.0-rc.2',buildId:'1.0.0-rc.2-build4242+abcdef0.DEV',commit:'a'.repeat(40)};
+ if(packagedFixture){
+  const install=path.join(temp,name+'-install');resourceRoot=path.join(install,'resources');fs.mkdirSync(resourceRoot,{recursive:true});
+  writeJsonAtomic(path.join(install,'build-info.json'),fixtureBuild);
+  writeJsonAtomic(path.join(install,'release-manifest.json'),{...fixtureBuild,channel:'dev',buildNumber:4242});
+  writeJsonAtomic(path.join(data,'build-info.json'),{version:'0.0.0',buildId:'MUTABLE_DATA_LOOKALIKE',commit:'b'.repeat(40)});
+  if(seaDirectory){
+   executable=path.join(install,'WhaleBridgeCore.exe');fs.copyFileSync(path.join(seaDirectory,'WhaleBridgeCore.exe'),executable);
+   fs.cpSync(path.join(seaDirectory,'resources'),resourceRoot,{recursive:true});args=['--worker'];
+  }else{
+   entry=path.join(temp,name+'-entry.mjs');
+   writeTextAtomic(entry,`import {runCoreWorker} from ${JSON.stringify(new URL('../src/app/core-worker.js',import.meta.url).href)};\nimport {createAppPaths} from ${JSON.stringify(new URL('../src/app-paths.js',import.meta.url).href)};\nawait runCoreWorker({paths:createAppPaths(process.env,{packaged:true,execPath:${JSON.stringify(path.join(install,'WhaleBridgeCore.exe'))}})});\n`);
+   args=[entry];
+  }
+ }
+ const worker=spawn(executable,args,{cwd:data,windowsHide:true,stdio:['pipe','pipe','pipe'],env:{...process.env,WHALEBRIDGE_DATA_DIR:data,WHALEBRIDGE_RESOURCE_DIR:resourceRoot,WHALEBRIDGE_UI_PIPE:pipe,WHALEBRIDGE_UI_AUTH_TOKEN:token,WHALEBRIDGE_SUPERVISED:'1'}});
  let logs='';worker.stdout.on('data',b=>{logs+=b;});worker.stderr.on('data',b=>{logs+=b;});
  try{
   const deadline=Date.now()+20000;let response;
   while(Date.now()<deadline){if(worker.exitCode!==null)throw Error('Core exited before handshake: '+logs);try{response=await rpc(pipe,token,'ui.diagnostics.status');if(response.result?.report)break;}catch(e){if(!['ENOENT','ECONNREFUSED','RPC_TIMEOUT','RPC_CLOSED'].includes(e.code??e.message))throw e;}await new Promise(r=>setTimeout(r,75));}
   assert.ok(response?.result?.report,'real diagnostics IPC must answer within bound: '+logs);
   const report=response.result.report;evidence.push({scenario:name,report});
-  assert.equal(report.status,damage?'BLOCKED':'DEGRADED',JSON.stringify(report));
+  assert.equal(report.status,blocked?'BLOCKED':'DEGRADED',JSON.stringify(report));
+  if(damage)assert.equal(fs.readFileSync(path.join(state,damage.file),'utf8'),damage.bytes,'startup preserves existing journal and corrupt-store bytes');
+  if(packagedFixture){
+   assert.equal(report.product.version,fixtureBuild.version,'diagnostic-only Core reports the installed version while storage is blocked');
+   assert.equal(report.product.build.buildId,fixtureBuild.buildId);
+   assert.equal(report.product.build.commit,fixtureBuild.commit,'mutable data metadata cannot replace the installed identity');
+  }
   const wrong=await rpc(pipe,'0'.repeat(64),'ui.diagnostics.status');assert.equal(wrong.error?.code,'IPC_AUTH_DENIED');
   const protocol=await rpc(pipe,token,'core.ping',{},2);assert.equal(protocol.error?.code,'UNSUPPORTED_VERSION');
-  const normal=await rpc(pipe,token,'ui.chat.sessions.list');assert.equal(normal.ok,!damage);
-  if(damage){assert.equal(normal.error?.code,'CORE_DIAGNOSTICS_BLOCKED');assert.equal(fs.readFileSync(path.join(state,damage.file),'utf8'),damage.bytes);assert.equal(fs.existsSync(path.join(state,'chat')) ,false);}
+  const normal=await rpc(pipe,token,'ui.chat.sessions.list');assert.equal(normal.ok,!blocked);
+  if(blocked){assert.equal(normal.error?.code,'CORE_DIAGNOSTICS_BLOCKED');assert.equal(fs.readFileSync(path.join(state,damage.file),'utf8'),damage.bytes);assert.equal(fs.existsSync(path.join(state,'chat')) ,false);}
   else{
    assert.ok(report.checks.some(c=>c.id==='uiIpc'&&c.status==='PASS'));
    assert.ok(report.checks.some(c=>c.id==='dataIpc'&&c.status==='PASS'));
@@ -52,9 +76,16 @@ async function scenario(name,damage){
 }
 try{
  await scenario('normal-offline');
+ await scenario('reconciled-history',{file:'continuity/transactions/reconciled.json',bytes:'{"taskId":"reconciled-fixture","sequence":1,"state":"reconciled","reconciledAt":1}',valid:true});
  await scenario('task-corruption',{file:'tasks/tasks.json',bytes:'{"schemaVersion":1,"revision":1,"tasks":"invalid"}'});
  await scenario('workspace-corruption',{file:'workspaces.json',bytes:'{"version":1,"workspaces":"invalid","pending":[],"activity":[]}'});
  await scenario('policy-storage-corruption',{file:'capability/approvals.json',bytes:'{"invalid":"policy"}'});
  await scenario('settings-corruption',{file:'settings/settings.json',bytes:'{"schemaVersion":1,"revision":1,"settings":"invalid"}'});
+ await scenario('packaged-blocked-identity',{file:'continuity/transactions/broken.json',bytes:'{"taskId":"broken","sequence":1,"state":"invalid"}'},{packagedFixture:true});
+ if(process.env.CETAMESH_STARTUP_SEA_DIR){
+  const options={packagedFixture:true,seaDirectory:path.resolve(process.env.CETAMESH_STARTUP_SEA_DIR)};
+  await scenario('packaged-sea-blocked-identity',{file:'continuity/transactions/broken.json',bytes:'{"taskId":"broken","sequence":1,"state":"invalid"}'},options);
+  await scenario('packaged-sea-reconciled-history',{file:'continuity/transactions/reconciled.json',bytes:'{"taskId":"reconciled-fixture","sequence":1,"state":"reconciled","reconciledAt":1}',valid:true},options);
+ }
  if(process.env.CETAMESH_STARTUP_EVIDENCE_DIR){fs.mkdirSync(process.env.CETAMESH_STARTUP_EVIDENCE_DIR,{recursive:true});fs.writeFileSync(path.join(process.env.CETAMESH_STARTUP_EVIDENCE_DIR,'real-core-ipc.json'),JSON.stringify({generatedAt:new Date().toISOString(),transport:'real-authenticated-native-and-data-pipe',evidence},null,2));}
 }finally{fs.rmSync(temp,{recursive:true,force:true});}

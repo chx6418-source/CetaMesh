@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import crypto from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
+import { writeJsonAtomic } from '../src/storage/json-file.js';
 const modulePath=new URL('../src/product/startup-diagnostics.js',import.meta.url);
 assert.ok(fs.existsSync(modulePath),'unified diagnostics must provide a bounded real service check runner');
 const {runDiagnosticChecks,createStartupDiagnostics,preflightCriticalStorage}=await import(modulePath);
@@ -29,6 +30,18 @@ try{
  fs.writeFileSync(path.join(temp,'capability/dispatches.json'),JSON.stringify(alias));
  assert.equal((await preflightCriticalStorage({stateDir:temp})).status,'PASS','stable logical operation request aliases are not malformed executions');
  fs.unlinkSync(path.join(temp,'capability/dispatches.json'));
+ const transactions=path.join(temp,'continuity/transactions');fs.mkdirSync(transactions,{recursive:true});
+ const transactionFile=path.join(transactions,'startup-fixture.json');
+ for(const state of ['reconciled','committed','rolled-back','failed','prepared']){
+  writeJsonAtomic(transactionFile,{taskId:'startup-fixture',sequence:1,state,...(state==='reconciled'?{reconciledAt:Date.now()}:{})});
+  const bytes=fs.readFileSync(transactionFile),result=await preflightCriticalStorage({stateDir:temp});
+  assert.equal(result.status,'PASS',`existing Continuity transaction state ${state} is valid`);
+  assert.equal(result.unconfirmedEffects,state==='prepared','only an unresolved prepared transaction requires reconciliation');
+  assert.deepEqual(fs.readFileSync(transactionFile),bytes,'read-only preflight preserves transaction bytes');
+ }
+ writeJsonAtomic(transactionFile,{taskId:'startup-fixture',sequence:1,state:'unrecognized'});
+ assert.equal((await preflightCriticalStorage({stateDir:temp})).status,'BLOCKED','unknown transaction states remain rejected');
+ fs.unlinkSync(transactionFile);
  let enabledReads=0;const {createMeshService}=await import('../src/mesh/service.js');
  const deferred=createMeshService({stateDir:path.join(temp,'deferred'),autoRestore:false,isEnabled:()=>{enabledReads++;return false;}});
  await new Promise(r=>setTimeout(r,0));assert.equal(enabledReads,0,'no eager transport restoration before startup admission');await deferred.restoreTransport();assert.ok(enabledReads>0);await deferred.close();

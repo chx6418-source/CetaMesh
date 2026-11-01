@@ -85,7 +85,7 @@ export async function preflightCriticalStorage({stateDir,timeoutMs=5000}={}){
   const txnDir=path.join(stateDir,'continuity/transactions');assertNoLinks(txnDir);
   let entries=[];try{entries=await fs.promises.readdir(txnDir);}catch(e){if(e.code!=='ENOENT')throw e;}
   if(entries.length>5000)throw fault('STORAGE_INVALID');
-  for(const entry of entries){if(!/^[A-Za-z0-9_.-]+\.json$/.test(entry))continue;await inspect('continuity/transactions/'+entry,v=>{if(!object(v)||!['prepared','committed','rolled-back','failed'].includes(v.state))throw fault('STORAGE_INVALID');if(v.state==='prepared')unconfirmedEffects=true;});}
+  for(const entry of entries){if(!/^[A-Za-z0-9_.-]+\.json$/.test(entry))continue;await inspect('continuity/transactions/'+entry,v=>{if(!object(v)||!['prepared','committed','rolled-back','failed','reconciled'].includes(v.state))throw fault('STORAGE_INVALID');if(v.state==='prepared')unconfirmedEffects=true;});}
   checks.push(result({id:'storage',stage:'storage'},'PASS','STORAGE_VALID'));
  }catch(error){const domain=activeFile.startsWith('tasks/')?'tasks':activeFile.startsWith('memory/')?'memory':activeFile.startsWith('capability/')?'capability':activeFile.startsWith('settings/')?'settings':activeFile==='workspaces.json'?'workspace':'journal';checks.push(result({id:domain,stage:'storage'},'BLOCKED',controller.signal.aborted?'CHECK_TIMEOUT':'STORAGE_INVALID',0,controller.signal.aborted));unconfirmedEffects=null;}
  finally{clearTimeout(timer);}
