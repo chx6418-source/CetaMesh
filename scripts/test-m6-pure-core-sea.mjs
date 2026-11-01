@@ -62,6 +62,8 @@ async function start() {
       HOME: root, USERPROFILE: root, LOCALAPPDATA: root, APPDATA: root, DSH_HOME: path.join(root, 'absent-dsh'),
       WHALEBRIDGE_UI_PIPE: pipe, WHALEBRIDGE_UI_AUTH_TOKEN: token, WHALEBRIDGE_SUPERVISED: '1' } });
   core.stdout.resume(); core.stderr.resume(); await eventually(() => rpc('core.ping'));
+  const report = await eventually(async () => (await rpc('ui.diagnostics.status')).report);
+  assert.notEqual(report.status, 'BLOCKED', JSON.stringify(report));
 }
 async function stop() {
   if (!core) return;
@@ -116,6 +118,9 @@ try {
   assert.equal(fs.readFileSync(social, 'utf8'), '{synthetic damaged social');
   assert.equal((await rpc('channel.qq.health')).ready, false);
   console.log('VERIFIED_RELEASE_INTEGRATION M6 SEA/Owner IPC + synthetic streaming Chat + Agent none + Task/Memory/Workspace restart + history after 10 seconds');
+} catch (error) {
+  console.error('M6 failure diagnostics', JSON.stringify(await rpc('ui.diagnostics.status').catch(() => null)));
+  throw error;
 } finally {
   await stop(); provider.closeAllConnections(); await new Promise(resolve => provider.close(resolve));
   if (!path.basename(root).startsWith('cetamesh-m6-sea-') || path.dirname(root) !== path.resolve(import.meta.dirname, '..')) throw new Error('fixture cleanup boundary');

@@ -3,7 +3,7 @@
 //
 // 验证目标（运行期不需要系统 Node.js）：
 //   1. --help / 无参数 / 非法参数的退出码与输出通道；
-//   2. 五个 MCP 模式真实 stdio：initialize → tools/list → 安全 tools/call；
+//   2. 当前 MCP 模式真实 stdio：initialize → tools/list → 安全 tools/call；退役入口拒绝；
 //   3. --worker 在临时端口 + 临时数据目录启动，显式资源目录与自动发现资源目录均生效；
 //   4. 临时数据目录内生成 agent-token / .core-owner.lock；
 //   5. HTTP loopback 仅提供 API：根路径要求鉴权，且不再提供产品网页控制台；
@@ -31,6 +31,7 @@ import { assertNoWebUiHtmlArtifacts } from './no-web-release-policy.mjs';
 import { resolveDataPipeName, dataCall } from '../src/control/data-ipc.js';
 import { readJsonFile, writeJsonAtomic, writeTextAtomic } from '../src/storage/json-file.js';
 import { probeProcessIdentity } from '../src/app/process-identity.js';
+import { createIntegrationStore } from '../src/integrations/store.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DIST = process.env.WHALEBRIDGE_DIST_DIR
@@ -288,6 +289,8 @@ fs.mkdirSync(dataDir, { recursive: true });
 // MCP 模式与 worker 一样从数据目录读 config.json；这里先放一份禁用高风险工具的隔离配置，
 // 保证 callTool 走的是「已禁用」这类确定性分支，不会去连真实服务。
 fs.writeFileSync(path.join(dataDir, 'config.json'), JSON.stringify(isolatedConfig(9), null, 2));
+createIntegrationStore({ stateDir: path.join(dataDir, 'state') }).update(value => ({ ...value,
+  plugins: { ...value.plugins, 'cetamesh-bionic-chat': { enabled: true } } }));
 
 /** 启动一个 worker，验证鉴权、状态文件、资源目录与进程树。 */
 async function runWorker({ label, dataDir: workerDataDir, resourceDir, useDefaultDataDir = false, supervised = false }) {
@@ -395,21 +398,20 @@ try {
   assert.match(`${selfTest.stdout}${selfTest.stderr}`, /启动失败|ECONNREFUSED|failed|fetch/i);
   step('✅ --self-test：模式可用；DSH 不可达时按预期非零退出（未连接真实 DSH）');
 
-  // ------------------------------------------------------- 五个 MCP 模式
+  // ------------------------------------------------------- 当前 MCP 模式与退役入口拒绝
+  for (const mode of ['snowluma', 'snowluma-host']) {
+    const retired = spawnSync(EXE, ['--mcp', mode], { encoding: 'utf8', env: isolatedEnv(tempRoot, { dataDir }) });
+    assert.equal(retired.status, 1);
+    assert.equal(retired.stdout, '');
+    assert.match(retired.stderr, /SNOWLUMA_INTEGRATION_RETIRED/);
+  }
   const mcpCases = [
     {
-      mode: 'snowluma',
-      entry: 'src/mcp-snowluma-safe.js',
+      mode: 'onebot',
+      entry: 'src/mcp-onebot-safe.js',
       tool: 'qq_get_card_msg',
       call: { name: 'qq_get_card_msg', arguments: { key: 'group:1', token: 'test', messageId: '1' } },
-      expected: /403|已禁用|TOOL_DISABLED|已被关闭/
-    },
-    {
-      mode: 'snowluma-host',
-      entry: 'src/mcp-host-server.js',
-      tool: 'snowluma_status',
-      call: { name: 'snowluma_status', arguments: {} },
-      expected: /reachable|online|unreachable|offline/
+      expected: /403|已禁用|TOOL_DISABLED|已被关闭|QQ_DISABLED/
     },
     {
       mode: 'web-search-safe',
@@ -678,15 +680,15 @@ try {
     const { parseMcpEntries } = await import('../src/dsh-integration.js');
     const entries = parseMcpEntries(patchText);
     for (const [id, mode] of [
-      ['mcp-snowluma', 'snowluma'],
-      ['mcp-snowluma-host', 'snowluma-host'],
+      ['mcp-onebot', 'onebot'],
       ['mcp-web-search-safe', 'web-search-safe'],
       ['mcp-qq-file-send', 'qq-file-send'],
       ['mcp-bilibili', 'bilibili']
     ]) {
       assert.equal(entries[id]?.command, EXE, `${id} 的 command 应指向发行 exe`);
-      assert.deepEqual(entries[id]?.args, ['--mcp', mode], `${id} 的 args 应为 --mcp ${mode}`);
+      assert.deepEqual(entries[id]?.args, ['--data-dir', dataDir, '--mcp', mode], `${id} must bind the isolated data directory and current MCP mode`);
     }
+    for (const id of ['mcp-snowluma', 'mcp-snowluma-host']) assert.equal(entries[id], undefined, 'retired MCP entries must not be reactivated');
     assert.ok(patchText.includes('- id: uiskin-theme'), '用户自己的条目必须保留');
     assert.ok(!patchText.includes('mcp-snowluma-safe.js'), '旧脚本路径必须被迁移掉');
 
@@ -730,7 +732,7 @@ try {
 
   const legacyTransport = new StdioClientTransport({
     command: process.execPath,
-    args: [path.join(ROOT, 'src', 'mcp-snowluma-safe.js')],
+    args: [path.join(ROOT, 'src', 'mcp-onebot-safe.js')],
     cwd: ROOT,
     env: { ...process.env, WHALEBRIDGE_DATA_DIR: dataDir, WHALEBRIDGE_RESOURCE_DIR: RESOURCES },
     stderr: 'pipe'

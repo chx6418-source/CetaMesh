@@ -25,7 +25,7 @@ const model = http.createServer(async (req, res) => {
   const body = JSON.parse(raw), latest = String(body.messages.filter(row => row.role === 'user').at(-1)?.content ?? '');
   const results = body.messages.filter(row => row.role === 'tool'); calls++;
   const name = /M6C_(WRITE|DENY|CANCEL)/.test(latest) ? 'cap_filesystem_write' : 'cap_filesystem_read';
-  const input = name === 'cap_filesystem_write' ? { path: latest.includes('M6C_DENY') ? 'denied.txt' : latest.includes('M6C_CANCEL') ? 'cancelled.txt' : 'created.txt', content: 'M6C generated file' }
+  const input = name === 'cap_filesystem_write' ? { path: latest.includes('M6C_DENY') ? 'denied.txt' : latest.includes('M6C_CANCEL') ? 'cancelled.txt' : 'created.txt', content: 'M6C generated file', expectedHash: null }
     : { path: latest.includes('M6C_ERROR') ? 'missing.txt' : 'analysis.txt' };
   requests.push({ latest, model: body.model, resultCount: results.length, offered: (body.tools ?? []).map(row => row.function.name) });
   let message;
@@ -56,6 +56,8 @@ async function eventually(check) {
 async function start() {
   core = spawn(exe, ['--worker', '--data-dir', data], { cwd: root, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, PATH: path.join(process.env.SystemRoot, 'System32'), HOME: root, USERPROFILE: root, APPDATA: root, LOCALAPPDATA: root, DSH_HOME: path.join(root, 'absent-dsh'), WHALEBRIDGE_UI_PIPE: pipe, WHALEBRIDGE_UI_AUTH_TOKEN: token, WHALEBRIDGE_SUPERVISED: '1' } });
   core.stdout.resume(); core.stderr.resume(); await eventually(() => rpc('core.ping'));
+  const report = await eventually(async () => (await rpc('ui.diagnostics.status')).report);
+  assert.notEqual(report.status, 'BLOCKED', JSON.stringify(report));
 }
 async function stop() {
   if (!core) return; const child = core; core = null; const closed = once(child, 'close'); child.stdin.end(); const deadline = setTimeout(() => child.kill(), 10000); try { await closed; } finally { clearTimeout(deadline); }
@@ -95,7 +97,12 @@ try {
   assert.ok(read.messages.some(row => row.toolActivity?.some(tool => tool.label === 'filesystem.read' && tool.status === 'completed')));
   console.log('PASS real SEA read tool result returned through Model to formal Chat');
   const writeSession = await session('M6C_WRITE controlled artifact');
-  const pending = await eventually(async () => { const rows = (await rpc('ui.approvals.list')).approvals; return rows?.find(row => row.status === 'pending' && row.capability === 'filesystem.write'); });
+  let pending;
+  try { pending = await eventually(async () => { const rows = (await rpc('ui.approvals.list')).approvals; return rows?.find(row => row.status === 'pending' && row.capability === 'filesystem.write'); }); }
+  catch (error) {
+    console.error('M6C write failure', JSON.stringify({ approvals: await rpc('ui.approvals.list'), history: await rpc('ui.chat.history', { id: writeSession }), requests }));
+    throw error;
+  }
   assert.equal(fs.existsSync(path.join(workspace, 'created.txt')), false, 'approval is checked before real write');
   await finishApproval(pending.id, true);
   const written = await settled(writeSession);

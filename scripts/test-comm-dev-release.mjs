@@ -14,5 +14,5 @@ assert.equal(manifest.channel,'dev','This suite only accepts an explicitly DEV-l
 assert.ok(manifest.buildId.endsWith('.DEV'),'DEV build identity must remain visible');
 assert.equal(typeof manifest.dirtySourceTree,'boolean','Preserve truthful source cleanliness for both clean and dirty DEV builds');
 const previous=process.env.WHALEBRIDGE_RC_DIR;
-try {process.env.WHALEBRIDGE_RC_DIR=directory;console.log('VERIFIED_RELEASE_INTEGRATION: DEV artifact, formal RC remains blocked');await import('./test-release-candidate.mjs');}
+try {process.env.WHALEBRIDGE_RC_DIR=directory;console.log('VERIFIED_RELEASE_INTEGRATION: DEV artifact, formal RC remains blocked');await import('./test-release-candidate.mjs');await import('./test-desktop-runtime-dependencies.mjs');}
 finally {if(previous===undefined)delete process.env.WHALEBRIDGE_RC_DIR;else process.env.WHALEBRIDGE_RC_DIR=previous;}
