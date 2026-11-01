@@ -1381,6 +1381,7 @@ export function TaskCreateForm({ workspaces, activeWorkspaceId, providers, onCre
     <p className="muted">使用已配置的默认执行者。系统按任务需要选择工具和协作方式，进展与待确认操作会显示在任务详情。</p>
     <details><summary>协作与验收设置</summary>
       <Select label="执行者" value={agentProvider} onChange={event => setAgentProvider(event.target.value)}><option value="">自动（使用已配置的默认执行者）</option>{providers.map(item => <option key={item.id} value={item.id} disabled={!item.eligible}>{item.name}{item.eligible ? '' : ' · 不可用'}</option>)}</Select>
+      {providers.some(item => !item.eligible) && <details><summary>不可用执行者与恢复方法</summary><ul>{providers.filter(item => !item.eligible).map(item => <li key={item.id}><strong>{item.name}</strong> · {availabilityReasonLabel(item.reason)}</li>)}</ul><p className="muted">请在执行者设置中核对安装、登录、连接与权限，重新检查后重新打开此窗口。执行条件未满足时仍不能派发任务。</p></details>}
       <label><input type="checkbox" checked={cooperate} disabled={!managedChoice} onChange={event=>setCooperate(event.target.checked)} />允许按需协作（本任务最多一次外部分配，30 分钟内有效）</label>
       <label><input type="checkbox" checked={allowUnknownCost} disabled={!managedChoice || !cooperate} onChange={event=>setAllowUnknownCost(event.target.checked)} />允许费用未知的外部 Agent 调用（可能产生费用）</label>
       <p className="muted">原生执行范围仍需单独确认。简单任务会直接处理；未配置自动验收的结果保留人工核验。</p>
