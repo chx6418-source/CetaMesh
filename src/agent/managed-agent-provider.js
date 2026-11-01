@@ -531,6 +531,7 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
           onContext:context=>emit(s,'model/context',{requestId:turn.id,context}), approvalId, requestFingerprint, decisionResult,
           signal: controller.signal,
           onTextDelta: delta => emit(s, 'assistant/chunk', { requestId: turn.id, chunk: { type: 'text-delta', text: delta } }),
+          onActivity: activity => emit(s, 'tool/activity', { requestId: turn.id, activity }),
           onCapabilityResult: ({ capability, result, input, eventId }) => emit(s, 'tool/result', {
             requestId: turn.id, eventId, capability, status: result?.status ?? 'failed',
             filePath: capability === 'filesystem.write' && typeof input?.path === 'string' ? input.path : null,

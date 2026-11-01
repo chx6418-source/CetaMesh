@@ -154,6 +154,16 @@ function errorResult(error) {
   return { error: { code: String(error?.code ?? 'CAPABILITY_DENIED').slice(0, 100), ...(validation ? { validation } : {}) } };
 }
 
+function terminalActivity(result, { id, capability, startedAt } = {}) {
+  const code = result?.error?.code ?? '';
+  return { id, capability,
+    status: result?.status === 'completed' ? 'completed'
+      : result?.status === 'outcome-unknown' ? 'outcome-unknown'
+        : result?.status === 'cancelled' || code === 'INVOKE_CANCELLED' ? 'cancelled' : 'failed',
+    summary: /^[A-Z][A-Z0-9_]{0,99}$/.test(code) ? code + (result.error.validation ? ': ' + result.error.validation.path + ' ' + result.error.validation.reason : '') : '',
+    durationMs: Number.isFinite(startedAt) ? Math.max(0, Date.now() - startedAt) : null };
+}
+
 /** Runs a bounded Model ↔ Capability Broker loop for one logical turn. */
 export function createToolExecutionCoordinator({
   modelRuntime,
@@ -566,6 +576,8 @@ export function createToolExecutionCoordinator({
               ...(typeof state.onContext === 'function' ? { onContext: state.onContext } : {}),
               seenCallIds: state.seenCallIds,
               pendingToolCallId: callId,
+              pendingActivityId: activityId,
+              pendingActivityStartedAt: activityStartedAt,
               pendingCapability: capability,
               pendingInput: { path: typeof input.path === 'string' ? input.path : null,
                 tool: typeof input.tool === 'string' ? input.tool : null },
@@ -596,12 +608,7 @@ export function createToolExecutionCoordinator({
               : result?.error ?? result ?? { status: 'denied', code: 'CAPABILITY_DENIED' })
         });
         if (typeof state.onActivity === 'function') {
-          await state.onActivity({
-            id: activityId, capability,
-            status: result?.status === 'completed' ? 'completed' : 'failed',
-            summary: /^[A-Z][A-Z0-9_]{0,99}$/.test(result?.error?.code ?? '') ? result.error.code + (result.error.validation ? ': ' + result.error.validation.path + ' ' + result.error.validation.reason : '') : '',
-            durationMs: Date.now() - activityStartedAt
-          });
+          await state.onActivity(terminalActivity(result, { id: activityId, capability, startedAt: activityStartedAt }));
         }
         if (typeof state.onCapabilityResult === 'function') {
           await state.onCapabilityResult({ capability, result, input, eventId: activityId,
@@ -722,13 +729,15 @@ export function createToolExecutionCoordinator({
     return { recorded: rows.length };
   }
 
-  async function resumeApproval({ approvalId, requestFingerprint, decisionResult, signal, refreshContext, onCapabilityResult, onTextDelta, onStreamReset, onContext } = {}) {
+  async function resumeApproval({ approvalId, requestFingerprint, decisionResult, signal, refreshContext, onCapabilityResult, onActivity, onTextDelta, onStreamReset, onContext } = {}) {
     const continuation = continuations[String(approvalId ?? '')];
     if (!continuation) fail('APPROVAL_CONTINUATION_NOT_FOUND', 'No Model turn is waiting for this approval');
     if (continuation.status === 'orphaned' || continuation.status === 'reconciled') {
       fail('APPROVAL_CONTINUATION_ORPHANED', 'Interrupted Agent approval requires Owner reconciliation');
     }
     if (continuation.requestFingerprint !== requestFingerprint) fail('APPROVAL_MISMATCH', 'Approval continuation fingerprint mismatch');
+    const activity = { id: continuation.state.pendingActivityId ?? `${continuation.target.turnId}:${continuation.state.pendingToolCallId}`.slice(0, 200),
+      capability: continuation.state.pendingCapability, startedAt: continuation.state.pendingActivityStartedAt };
     if(decisionResult?.status==='pending'){
       const nextId=String(decisionResult.approvalId??''),next=capabilityBroker.approvals?.get(nextId),previous=capabilityBroker.approvals?.get(approvalId);
       if(!nextId||nextId===String(approvalId))fail('APPROVAL_NOT_DECIDED','Original approval is still pending');
@@ -746,10 +755,11 @@ export function createToolExecutionCoordinator({
     }
     if (decisionResult?.status === 'outcome-unknown') {
       recordApprovalOutcomeUnknown({ approvalId, requestFingerprint, decisionResult });
+      if (typeof onActivity === 'function') await onActivity(terminalActivity(decisionResult, activity));
       if (typeof onCapabilityResult === 'function') await onCapabilityResult({
         capability: continuation.state.pendingCapability, result: decisionResult,
         input: continuation.state.pendingInput ?? {},
-        eventId: `${continuation.target.turnId}:${continuation.state.pendingToolCallId}`.slice(0, 240),
+        eventId: activity.id,
         ...continuation.target, scope: continuation.state.scope
       });
       delete continuations[String(approvalId)];
@@ -774,20 +784,24 @@ export function createToolExecutionCoordinator({
     };
     if (typeof refreshContext === 'function') state.refreshContext = refreshContext;
     if (typeof onCapabilityResult === 'function') state.onCapabilityResult = onCapabilityResult;
+    if (typeof onActivity === 'function') state.onActivity = onActivity;
     if (typeof onTextDelta === 'function') state.onTextDelta = onTextDelta;
     if (typeof onStreamReset === 'function') state.onStreamReset = onStreamReset;
     if (typeof onContext === 'function') state.onContext = onContext;
     const result = decisionResult?.status === 'completed'
       ? { status: 'completed', result: decisionResult.result }
-      : { status: 'rejected', error: { code: 'APPROVAL_REJECTED' } };
+      : decisionResult?.status === 'rejected' ? { status: 'rejected', error: { code: 'APPROVAL_REJECTED' } }
+        : { status: ['cancelled', 'failed', 'denied'].includes(decisionResult?.status) ? decisionResult.status : 'failed',
+          error: { code: decisionResult?.error?.code ?? 'CAPABILITY_DENIED' } };
     state.messages.push({
       role: 'tool', tool_call_id: state.pendingToolCallId,
       content: result.status === 'completed' ? completedResultContent(result, state, state.pendingCapability, state.pendingEvidenceInput) : safeJson(result)
     });
+    if (typeof state.onActivity === 'function') await state.onActivity(terminalActivity(result, activity));
     if (typeof state.onCapabilityResult === 'function' && state.pendingCapability) {
       await state.onCapabilityResult({ capability: state.pendingCapability, result,
         input: state.pendingInput ?? {},
-        eventId: `${continuation.target.turnId}:${state.pendingToolCallId}`.slice(0, 240),
+        eventId: activity.id,
         sessionId: continuation.target.sessionId, turnId: continuation.target.turnId, scope: state.scope });
     }
     state.pendingCalls = structuredClone(continuation.state.pendingCalls ?? []);

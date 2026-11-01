@@ -1,4 +1,11 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import crypto from 'node:crypto';
+import {setTimeout as delay} from 'node:timers/promises';
+import {createCetaMeshServices} from '../src/app/service-container.js';
+import {createProviderSecrets} from '../src/providers/secrets.js';
 import { createManagedAgentProvider } from '../src/agent/managed-agent-provider.js';
 const principal = { taskId: 'task-a', workspaceId: 'ws-a', actor: { kind: 'agent', id: 'managed-a', grants: { taskIds: ['task-a'], workspaceIds: ['ws-a'], capabilities: ['filesystem.read'] } } };
 let count = 0;
@@ -180,5 +187,54 @@ check((await turn(nullableHistory.provider, nullableSession.sessionId, 'first tu
 check((await turn(nullableHistory.provider, nullableSession.sessionId, 'second turn')).at(-1).data.reason.kind, 'completed',
   'a null assistant content with tool_calls does not crash history accounting on the next turn');
 await nullableHistory.close();
+
+// Use production Task dispatch, approvals, Follow projection and source filesystem
+// evidence to catch activity observers lost only on Managed approval continuation.
+{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'cetamesh-managed-activity-'));let services,taskId;
+  try{
+    const project=path.join(root,'project');fs.mkdirSync(project);fs.writeFileSync(path.join(project,'proof.txt'),'before');
+    const secrets=createProviderSecrets({root:path.join(root,'synthetic-secrets')});secrets.set({provider:'activity-fixture',apiKey:'synthetic-local-only'});
+    services=createCetaMeshServices({stateDir:path.join(root,'state'),dataRoot:path.join(root,'data'),providerSecrets:secrets});
+    let modelStep=0;
+    services.modelRegistry.register({id:'activity-fixture',label:'Local activity fixture',defaultModel:'fixture',supportsTools:true,
+      health:async()=>({available:true,configured:true}),listModels:async()=>[{id:'fixture'}],chat:async()=>({text:'unused'}),
+      stream:async function*(){
+        const step=modelStep++,call=step===0?{id:'approved-write',capabilityId:'filesystem.write',arguments:JSON.stringify({path:'proof.txt',content:'approved',expectedHash:crypto.createHash('sha256').update('before').digest('hex')})}
+          :step===1?{id:'read-after-approval',capabilityId:'filesystem.read',arguments:'{"path":"proof.txt"}'}:null;
+        if(call)yield {type:'assistant/tool-calls',data:{toolCalls:[call]}};
+        else yield {type:'assistant/message',data:{message:{content:[{type:'text',text:'The approved source write and read returned.'}]}}};
+        yield {type:'turn/end',data:{reason:{kind:'completed'}}};
+      }});
+    const workspace=(await services.workspaceService.execute({method:'workspace.create',params:{root:project,name:'Managed activity fixture'}})).workspace;
+    const created=await services.desktopUiService.execute({method:'ui.task.create',params:{goal:'Write only proof.txt with Owner approval, read it back, and report the actual source result.',workspaceId:workspace.id,
+      agentProvider:'cetamesh',modelProvider:'activity-fixture',model:'fixture',requestId:'managed-activity'}});taskId=created.task.id;
+    async function until(predicate,label){const end=Date.now()+5000;while(Date.now()<end){const value=predicate();if(value)return value;await delay(5);}throw Error('Timed out: '+label);}
+    const pendingApproval=await until(()=>services.capabilityService.broker.approvals.list().find(row=>row.status==='pending'&&row.request.taskId===taskId),'real source approval');
+    const waitingTask=services.taskService.runtime.get({id:taskId}).task,assignment=waitingTask.currentAgent,waitingEvents=[];
+    for await(const event of services.agentBroker.follow(assignment)){waitingEvents.push(event);if(event.type==='turn/end'&&event.data.reason.kind==='waiting')break;}
+    const waitingActivity=waitingEvents.find(event=>event.type==='tool/activity'&&event.data.activity.status==='waiting-approval');
+    assert.ok(waitingActivity);assert.equal(fs.readFileSync(path.join(project,'proof.txt'),'utf8'),'before');
+    const decision=await services.capabilityService.execute({method:'capability.approval.decide',params:{id:pendingApproval.id,approve:true}});
+    assert.equal(decision.status,'completed');assert.equal(decision.turnResumed,true);
+    const completedEvents=[];
+    for await(const event of services.agentBroker.follow({...assignment,sinceSequence:waitingEvents.at(-1).seq})){completedEvents.push(event);if(event.type==='turn/end'&&event.data.reason.kind==='completed')break;}
+    await until(()=>services.taskService.runtime.get({id:taskId}).task.executionObservation?.state==='awaiting-review','source Follow settled');
+    const completedActivity=completedEvents.find(event=>event.type==='tool/activity'&&event.data.activity.id===waitingActivity.data.activity.id);
+    assert.equal(completedActivity?.data.activity.status,'completed','the consumed approval must close its original Managed waiting activity');
+    assert.equal(completedActivity.data.requestId,waitingActivity.data.requestId);
+    assert.equal(completedActivity.data.runId,waitingActivity.data.runId);
+    assert.deepEqual(completedEvents.filter(event=>event.type==='tool/activity'&&event.data.activity.capability==='filesystem.read').map(event=>event.data.activity.status),['running','completed'],'subsequent tools keep the restored observer');
+    const current=services.taskService.runtime.get({id:taskId}).task;
+    assert.equal(current.executionEvidence.filter(row=>row.capability==='filesystem.write'&&row.status==='completed'&&row.runId===current.executionObservation.runId).length,1);
+    assert.equal(fs.readFileSync(path.join(project,'proof.txt'),'utf8'),'approved');
+    assert.ok(!current.currentPhase.includes('approval'),'Task phase follows actual terminal and subsequent tool activity');
+    console.log('PASS Managed real Core approval restores exact source activity and subsequent events');
+  }finally{
+    if(services){if(taskId){const task=services.taskService.runtime.get({id:taskId}).task;services.taskService.runtime.cancel({id:taskId,expectedRev:task.rev,reason:'activity fixture cleanup'});}
+      for(const name of ['autonomousHandoff','chatService','agentService','managedAgent','capabilityService','extensionService'])await services[name].close();}
+    fs.rmSync(root,{recursive:true,force:true,maxRetries:5,retryDelay:100});
+  }
+}
 for (const item of [revocation, runtime, noIdentity, forged, cancel, bounded, pending, dynamic]) await item.close();
 console.log('Managed Agent provider: ' + count + ' assertions passed');

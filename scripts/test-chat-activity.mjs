@@ -41,6 +41,17 @@ try {
   assert.match(primary(unknown), /状态待核验/); assert.doesNotMatch(primary(unknown), /已结束|已完成/);
   const completed = render({ tools: [tool('completed')], state: 'done', taskId: 'task-fixture' });
   assert.match(primary(completed), /工具调用已结束/); assert.doesNotMatch(primary(completed), /任务已完成|交付已核验/);
+  const diagnosticHistory=[tool('failed',{id:'initial-test',exitCode:1,summary:'Original failing test'}),tool('completed',{id:'corrected-test',exitCode:0,summary:'Corrected test passed'})];
+  const historySnapshot=structuredClone(diagnosticHistory);
+  const settledFailures=render({tools:diagnosticHistory,agentActivity:{providerId:'codex',label:'Codex',status:'completed'}});
+  assert.match(primary(settledFailures), /本轮执行已结束.*失败记录/,'a finished diagnostic turn is distinct from a current execution failure');
+  assert.doesNotMatch(primary(settledFailures), /当前操作失败|任务已完成|验收通过/);
+  assert.deepEqual(diagnosticHistory,historySnapshot,'presentation never rewrites failed receipts');
+  assert.match(renderToStaticMarkup(React.createElement(ToolActivity,{tools:diagnosticHistory})),/Original failing test/);
+  assert.match(primary(render({tools:[...diagnosticHistory,tool('outcome-unknown')],agentActivity:{providerId:'codex',label:'Codex',status:'completed'}})),/结果待核验/);
+  assert.match(primary(render({tools:[...diagnosticHistory,tool('waiting-approval')],agentActivity:{providerId:'codex',label:'Codex',status:'completed'}})),/等待审批/);
+  assert.match(primary(render({tools:diagnosticHistory,agentActivity:{providerId:'codex',label:'Codex',status:'failed'}})),/失败/);
+  assert.doesNotMatch(primary(render({tools:diagnosticHistory,agentActivity:{providerId:'codex',label:'Codex',status:'failed'}})),/本轮执行已结束/);
   assert.equal(render({ tools: [], state: 'idle' }), '', 'idle without any structured activity remains quiet');
   const many = Array.from({ length: 1000 }, (_, index) => tool(index < 500 ? 'running' : 'completed', { id: 'call-' + index, label: 'filesystem.read', summary: 'Receipt ' + index }));
   const rows = renderToStaticMarkup(React.createElement(ToolActivity, { tools: many }));

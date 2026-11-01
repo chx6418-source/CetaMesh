@@ -5,10 +5,30 @@ import { TASK_LIMITS } from '../task/types.js';
 
 /** One-shot Task-bound coordination. Continuity owns handoff persistence and fencing. */
 export function createAutonomousHandoff({taskRuntime,agentBroker,capabilityService,continuityRuntime,waitMs=5000,now=()=>Date.now(),onDiagnostic=()=>{},onVerifiedTask=async()=>{}}={}) {
-  const inFlight=new Set(), pending=new Set();
+  const inFlight=new Set(), pending=new Set(), deferredSettled=new Map();
   let closed=false;
   const diagnostic=(stage,error)=>onDiagnostic({stage,code:typeof error?.code==='string'&&/^[A-Z][A-Z0-9_]{0,79}$/.test(error.code)?error.code:'DELEGATION_STATE_CHANGED'});
   const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+  function settledKind(task,payload) {
+    const proposal=task.delegationProposal,observed=task.executionObservation;
+    if(!proposal||task.currentAgent?.provider!==payload.provider||task.currentAgent?.sessionId!==payload.sessionId
+      ||observed?.provider!==payload.provider||observed.sessionId!==payload.sessionId||observed.runId!==payload.runId)return null;
+    if(proposal.state==='proposed'&&payload.provider==='cetamesh'&&proposal.provider===payload.provider
+      &&proposal.sessionId===payload.sessionId&&proposal.runId===payload.runId)return 'source';
+    if(['dispatching','awaiting-result'].includes(proposal.state)&&proposal.selectedProvider===payload.provider
+      &&proposal.targetSessionId===payload.sessionId)return 'external';
+    if(['returning','verifying'].includes(proposal.state)&&payload.provider==='cetamesh'
+      &&proposal.returnSessionId===payload.sessionId)return 'verification';
+    return null;
+  }
+  function releaseTask(taskId) {
+    inFlight.delete(taskId);
+    const deferred=deferredSettled.get(taskId);deferredSettled.delete(taskId);
+    if(closed||!deferred)return;
+    const task=taskRuntime.get({id:taskId}).task;
+    if(task.delegationProposal?.requestId===deferred.requestId&&task.delegationProposal.policyId===deferred.policyId
+      &&settledKind(task,deferred.payload))scheduleSettled(deferred.payload);
+  }
   async function processCompletedTurn({provider,sessionId,runId,phase,outcome}={}) {
     if(closed||provider!=='cetamesh'||phase!=='user'||!runId||outcome==='waiting')return {status:'ignored'};
     const task=taskRuntime.findByAgent({provider,sessionId});
@@ -26,15 +46,18 @@ export function createAutonomousHandoff({taskRuntime,agentBroker,capabilityServi
       let current;
       do {
         current=taskRuntime.get({id:task.id}).task;
-        if(current.currentAgent?.provider!==provider||current.currentAgent?.sessionId!==sessionId||current.status!=='running')
+        if(current.currentAgent?.provider!==provider||current.currentAgent?.sessionId!==sessionId||current.status!=='running'
+          ||current.executionObservation?.provider!==provider||current.executionObservation.sessionId!==sessionId||current.executionObservation.runId!==runId)
           throw capabilityError('AGENT_ASSIGNMENT_EXPIRED','Source Task changed before delegation');
         if(current.executionObservation?.runId===runId&&current.executionObservation.state==='awaiting-review'
           &&!capabilityService.completionBlocker(task.id))break;
-        if(Date.now()>=deadline)throw capabilityError('DELEGATION_SOURCE_NOT_IDLE','Source turn or operations remain unconfirmed');
+        // A pre-claim observation delay proves no failure. The matching Follow
+        // terminal event can re-drive this proposal through the same live guards.
+        if(Date.now()>=deadline)return {status:'waiting-source'};
         await pause(25);
       } while(true);
       const policy=current.delegationPolicy;
-      if(!policy||policy.expiresAt<=now()||policy.id!==proposal.policyId||policy.used>=policy.maxDelegations)
+      if(!policy||policy.revokedAt||policy.expiresAt<=now()||policy.id!==proposal.policyId||policy.used>=policy.maxDelegations)
         throw capabilityError('DELEGATION_POLICY_DENIED','Delegation policy is expired or exhausted');
       const rank=()=>rankTaskAgents({agentBroker,workspaceId:current.workspaceId,taskKind:proposal.intent.taskKind,
         requiredTools:proposal.intent.requiredTools,difficulty:proposal.intent.difficulty,
@@ -106,31 +129,24 @@ export function createAutonomousHandoff({taskRuntime,agentBroker,capabilityServi
         }
       }
       return {status:state,code};
-    } finally {inFlight.delete(task.id);}
-  }
-  async function acquireSettledTask(payload,kind) {
-    const deadline=Date.now()+Math.max(0,Math.min(waitMs,10000));
-    while(Date.now()<deadline&&!closed) {
-      const task=taskRuntime.get({id:payload.taskId}).task, proposal=task.delegationProposal;
-      if(!proposal)return null;
-      const matches=kind==='external'
-        ? proposal.selectedProvider===payload.provider&&proposal.targetSessionId===payload.sessionId
-        : payload.provider==='cetamesh'&&proposal.returnSessionId===payload.sessionId;
-      if(!matches)return null;
-      if(!inFlight.has(task.id)&&((kind==='external'&&proposal.state==='awaiting-result')
-        ||(kind==='verification'&&proposal.state==='verifying')))return task;
-      if(!['dispatching','awaiting-result','returning','verifying'].includes(proposal.state))return null;
-      await pause(25);
-    }
-    return null;
+    } finally {releaseTask(task.id);}
   }
   async function processSettledTurn(payload) {
     if(closed||payload?.phase!=='user'||!payload.taskId||!payload.runId)return {status:'ignored'};
-    const kind=payload.provider==='cetamesh'?'verification':'external';
-    const task=await acquireSettledTask(payload,kind);
-    if(!task)return {status:'ignored'};
+    const task=taskRuntime.get({id:payload.taskId}).task,kind=settledKind(task,payload);
+    if(!kind)return {status:'ignored'};
     const proposal=task.delegationProposal;
-    if(inFlight.has(task.id))return {status:'in-flight'};
+    if(inFlight.has(task.id)) {
+      // Follow must remain free to finish. Keep only the current Task/run's
+      // terminal event until the active coordinator confirms its transition.
+      if(task.status!=='running')return {status:'ignored'};
+      deferredSettled.set(task.id,{requestId:proposal.requestId,policyId:proposal.policyId,
+        payload:{taskId:task.id,provider:payload.provider,sessionId:payload.sessionId,runId:payload.runId,
+          phase:'user',outcome:payload.outcome,code:payload.code}});
+      return {status:'deferred'};
+    }
+    if(kind==='source')return processCompletedTurn(payload);
+    if((kind==='external'&&proposal.state!=='awaiting-result')||(kind==='verification'&&proposal.state!=='verifying'))return {status:'ignored'};
     inFlight.add(task.id);
     try {
       if(payload.outcome!=='completed')throw capabilityError(/^[A-Z][A-Z0-9_]{0,79}$/.test(payload.code??'')?payload.code:'DELEGATION_TURN_FAILED','Agent turn did not complete');
@@ -193,7 +209,7 @@ export function createAutonomousHandoff({taskRuntime,agentBroker,capabilityServi
         taskRuntime.block({id:task.id,expectedRev:latest.rev,reason:'needs-reconciliation: delegated result or verification is unconfirmed'});
       } catch(stateError) { diagnostic('block-result',stateError); }
       return {status:'unknown',code};
-    } finally {inFlight.delete(task.id);}
+    } finally {releaseTask(task.id);}
   }
   function schedule(payload) {
     if(closed)return;
@@ -207,6 +223,6 @@ export function createAutonomousHandoff({taskRuntime,agentBroker,capabilityServi
     pending.add(work);work.then(()=>pending.delete(work),()=>pending.delete(work));
     return work;
   }
-  async function close() {closed=true;await Promise.allSettled([...pending]);}
+  async function close() {closed=true;deferredSettled.clear();await Promise.allSettled([...pending]);}
   return {processCompletedTurn,processSettledTurn,schedule,scheduleSettled,close};
 }

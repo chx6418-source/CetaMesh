@@ -1,4 +1,11 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {execFileSync} from 'node:child_process';
+import {setTimeout as delay} from 'node:timers/promises';
+import {createCetaMeshServices} from '../src/app/service-container.js';
+import {createProviderSecrets} from '../src/providers/secrets.js';
 import {
   PRODUCT_IDENTITY_PROMPT,
   buildProductContext,
@@ -193,3 +200,80 @@ run('long handoff context keeps granted operation controls before optional disco
   assert.throws(() => projectProductContext(snapshot, { maxChars: baseSize + 100 }), { code: 'CONTEXT_BUDGET_EXCEEDED' }, 'do not silently run without granted recovery controls');
   assert.equal(projectProductContext(noControls, { maxChars: 6500 }).manifest.some(row => row.id.startsWith('operation.')), false);
 });
+
+await taskManifestScenario(false);
+await taskManifestScenario(true);
+
+run('compaction retains explicitly granted test schema with operation controls or fails the budget', () => {
+  const schema={type:'object',properties:{operationRef:{type:'string',maxLength:160}},required:['operationRef'],additionalProperties:false};
+  const registered=[...['operation.continue','operation.read'].map(id=>({id,description:'Current Task operation.',inputSchema:schema})),
+    {id:'test.run',description:'Run the authorized project test with Owner approval.',risk:'high',requiresApproval:true,
+      inputSchema:{type:'object',properties:{tool:{type:'string'},args:{type:'array',items:{type:'string'},maxItems:40},timeoutMs:{type:'integer',minimum:1000,maximum:600000}},required:['tool','args'],additionalProperties:false}}];
+  const capabilities=buildCapabilityContext({registered,grantedIds:registered.map(row=>row.id),requestableIds:registered.map(row=>row.id),
+    actorKind:'agent',executionPath:'managed-agent',taskAvailable:true});
+  const snapshot={mode:'managed-agent',executionPath:'managed-agent',task:{id:'authorized-tests',goal:'Report actual project evidence.'},capabilities};
+  const noTest={...snapshot,capabilities:{...capabilities,manifest:capabilities.manifest.filter(row=>row.id!=='test.run')}};
+  const limitedBudget=projectProductContext(noTest,{maxChars:30000}).serialized.length+100;
+  assert.ok(projectProductContext(noTest,{maxChars:limitedBudget}).serialized.length<=limitedBudget);
+  assert.throws(()=>projectProductContext(snapshot,{maxChars:limitedBudget}),{code:'CONTEXT_BUDGET_EXCEEDED'},'do not silently drop an explicitly granted execution tool to fit optional context');
+});
+
+// Regression for the production Task launch: two delegation descriptors force
+// compaction, which used to omit the already granted direct test tool. Capture
+// the real model boundary without executing any model-requested effect.
+async function taskManifestScenario(authorized){
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'cetamesh-context-task-'));let services,taskId;
+  try{
+    const project=path.join(root,'project-1');fs.mkdirSync(project);
+    const files={'math.mjs':'export const add=(a,b)=>a-b;\n',
+      'verify.mjs':"import assert from 'node:assert/strict';import {add} from './math.mjs';assert.equal(add(1,4),5);assert.equal(add(-2,5),3);console.log('STABILITY_TASK_1_VERIFIED');\n",
+      'package.json':JSON.stringify({private:true,type:'module',scripts:{test:'node verify.mjs'}})+'\n'};
+    for(const [file,content]of Object.entries(files))fs.writeFileSync(path.join(project,file),content);
+    for(const args of [['init','-q',project],['-C',project,'add','.'],['-C',project,'-c','user.name=Stability','-c','user.email=stability@example.invalid','-c','core.hooksPath=/dev/null','commit','-qm','controlled baseline']])execFileSync('git',args,{stdio:'ignore'});
+    const provider='context-fixture01',model='deepseek-flash',secrets=createProviderSecrets({root:path.join(root,'synthetic-secrets')});
+    secrets.set({provider,apiKey:'synthetic-local-only'});
+    services=createCetaMeshServices({stateDir:path.join(root,'state'),dataRoot:path.join(root,'data'),agentStagingRoot:path.join(root,'staging'),providerSecrets:secrets});
+    let capture;
+    services.modelRegistry.register({id:provider,label:'Local manifest capture',defaultModel:model,supportsTools:true,
+      health:async()=>({available:true,configured:true}),listModels:async()=>[{id:model}],chat:async()=>({text:'No effects requested.'}),
+      stream:async function*(request){
+        const message=request.messages.find(row=>row.role==='system'&&row.content.startsWith('CetaMesh dynamic context'));
+        const serialized=message.content.split('\n').slice(1).join('\n');
+        capture={tools:request.tools,serialized,context:JSON.parse(serialized)};
+        yield {type:'assistant/message',data:{message:{content:[{type:'text',text:'No effects requested; manifest observation only.'}]}}};
+        yield {type:'turn/end',data:{reason:{kind:'completed'}}};
+      }});
+    const workspace=(await services.workspaceService.execute({method:'workspace.create',params:{root:project,name:'Managed stability 1'}})).workspace;
+    const goal='Stability task 1: fix add in math.mjs to add its arguments. Read math.mjs, verify.mjs and package.json, change only math.mjs, then run existing npm test via test.run and report actual results. Do not change verify.mjs/package.json, delegate, install, use network, or commit. Keep actions minimal.';
+    const created=await services.desktopUiService.execute({method:'ui.task.create',params:{goal,workspaceId:workspace.id,agentProvider:'cetamesh',modelProvider:provider,model,requestId:'stability-1',
+      ...(authorized?{collaboration:{enabled:true,allowUnknownCost:false,prepareNative:false,verification:{editablePaths:['math.mjs'],testFiles:['verify.mjs']}}}:{})}});taskId=created.task.id;
+    const deadline=Date.now()+10000;
+    while(Date.now()<deadline&&(!capture||services.taskService.runtime.get({id:taskId}).task.executionObservation?.state!=='awaiting-review'))await delay(10);
+    assert.ok(capture,'the synthetic tool-capable model must receive an actual Core turn');
+    const task=services.taskService.runtime.get({id:taskId}).task,actor=services.capabilityService.principalForTask(taskId);
+    assert.equal(task.executionObservation.state,'awaiting-review');
+    assert.equal(actor.grants.capabilities.includes('test.run'),authorized);
+    assert.equal(capture.tools.some(row=>row.id==='test.run'),authorized,'compaction must preserve an explicitly granted test tool; the goal alone grants nothing');
+    assert.ok(capture.serialized.length<=12000);assert.equal(capture.context.truncated,true);
+    assert.equal(task.executionEvidence.some(row=>row.source==='core-test'),false,'this capture never invents actual test evidence');
+    if(authorized){
+      const capabilities=buildCapabilityContext({registered:services.capabilityService.broker.list(),grantedIds:actor.grants.capabilities,requestableIds:actor.grants.capabilities,
+        executionPath:'managed-agent',mode:'managed-agent',actorKind:'agent',workspaceAvailable:true,taskAvailable:true,toolCalling:'supported'});
+      const full=projectProductContext({mode:'managed-agent',executionPath:'managed-agent',task,capabilities},{maxChars:50000});
+      for(const id of ['test.run','operation.continue','operation.read']){
+        const descriptor=capture.context.capabilities.manifest.find(row=>row.id===id);
+        assert.deepEqual(descriptor,full.manifest.find(row=>row.id===id),'compaction must retain the complete granted descriptor');
+        assert.ok(capture.tools.some(row=>row.id===id));
+      }
+      const descriptor=capture.context.capabilities.manifest.find(row=>row.id==='test.run');
+      assert.equal(descriptor.risk,'high');assert.equal(descriptor.requiresApproval,true);
+      assert.deepEqual(descriptor.inputSchema.required,['args','tool']);
+      assert.ok(services.capabilityService.broker.operationsForTask({taskId,workspaceId:workspace.id}).some(row=>row.status==='prepared'));
+    }
+    console.log('PASS actual Core initial Task manifest '+(authorized?'retains explicit test authorization':'does not derive test authorization from the goal'));
+  }finally{
+    if(services){if(taskId){const task=services.taskService.runtime.get({id:taskId}).task;services.taskService.runtime.cancel({id:taskId,expectedRev:task.rev,reason:'context capture cleanup'});}
+      for(const name of ['autonomousHandoff','chatService','agentService','managedAgent','capabilityService','extensionService'])await services[name].close();}
+    fs.rmSync(root,{recursive:true,force:true,maxRetries:5,retryDelay:100});
+  }
+}

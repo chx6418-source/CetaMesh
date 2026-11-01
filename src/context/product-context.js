@@ -261,8 +261,8 @@ function projectSnapshot(snapshot) {
   };
 }
 
-// Task/approval facts and granted Task operation controls must survive compaction.
-// Dropping continuation can strand a prepared effect after an Agent handoff.
+// Task/approval facts and granted Task execution controls must survive compaction.
+// Dropping tests can strand initial work; dropping continuation can strand a handoff.
 function compactContext(context, maxChars) {
   context.truncated = true;
   context.omissions = {};
@@ -276,7 +276,7 @@ function compactContext(context, maxChars) {
   }
   const candidates = context.capabilities.manifest;
   const controls = context.task && context.capabilities.executionPath === 'managed-agent'
-    ? candidates.filter(item => ['operation.continue', 'operation.read'].includes(item.id)) : [];
+    ? candidates.filter(item => ['operation.continue', 'operation.read', 'test.run'].includes(item.id)) : [];
   context.capabilities.manifest = [...controls];
   context.capabilities.requestable = controls.map(item => item.id);
   context.capabilities.mcp = [];

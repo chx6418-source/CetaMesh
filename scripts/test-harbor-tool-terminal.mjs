@@ -13,6 +13,7 @@ globalThis.window = { setTimeout, clearTimeout };
 const vite = await createServer({ configFile: false, root: uiRoot, optimizeDeps: { noDiscovery: true }, server: { middlewareMode: true }, appType: 'custom', logLevel: 'error' });
 try {
   const { MessageBubble, isChatTurnCancellable, ChatComposer } = await vite.ssrLoadModule('/src/app/HarborApp.tsx');
+  const { ToolActivity } = await vite.ssrLoadModule('/src/app/ChatActivity.tsx');
   assert.equal(isChatTurnCancellable('waiting-approval'), true, 'pending local approval still exposes the real stop action');
   assert.equal(isChatTurnCancellable('idle'), false);
   const composer = renderToStaticMarkup(React.createElement(ChatComposer, {
@@ -33,7 +34,12 @@ try {
     {id:'failed',label:'Failed command',status:'failed',durationMs:3,summary:'Fixture failure'},
     {id:'cancelled',label:'Cancelled command',status:'cancelled',durationMs:4,summary:''},
     {id:'unknown',label:'Unknown command',status:'unrecognized-state',durationMs:null,summary:''}];
-  const grouped = renderToStaticMarkup(React.createElement(MessageBubble,{message:{...projected,text:'Actual answer',toolActivity:tools}}));
+  const compact = renderToStaticMarkup(React.createElement(MessageBubble,{message:{...projected,text:'Actual answer',toolActivity:tools}}));
+  assert.match(compact,/16 项工具活动/,'the actual message keeps its compact activity summary');
+  assert.doesNotMatch(compact,/Codex completed 0/,'receipt rows mount only when the activity disclosure is expanded');
+  // Static SSR cannot trigger the outer disclosure's onToggle. Render the same
+  // production receipt component mounted by its expanded body for detail checks.
+  const grouped = renderToStaticMarkup(React.createElement(ToolActivity,{tools}));
   assert.match(grouped,/工具活动/);
   assert.match(grouped,/已完成 12/);
   assert.match(grouped,/运行中 1/);

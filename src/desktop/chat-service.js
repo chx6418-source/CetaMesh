@@ -2175,6 +2175,16 @@ export function createChatService({
     try {
       const result = await toolExecutionCoordinator.resumeApproval({
         onContext: value=>observeContext(record,state,value), approvalId, requestFingerprint, decisionResult, signal: controller.signal,
+        onActivity: activity => {
+          const turn = state.turn;
+          if (!turn) return;
+          const rows = Array.isArray(turn.toolActivity) ? turn.toolActivity : [];
+          const existing = rows.findIndex(item => item.id === activity.id);
+          const next = { ...activity, label: activity.capability };
+          if (existing >= 0) rows[existing] = next; else rows.push(next);
+          turn.toolActivity = rows.slice(-32);
+          onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: turn.state, requestId: turn.requestId, toolActivity: rows.slice(-32), agentActivity: turn.agentActivity ?? null } });
+        },
         onTextDelta: delta => {
           const turn = state.turn;
           if (!turn || typeof delta !== 'string' || !delta) return;

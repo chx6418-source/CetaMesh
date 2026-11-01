@@ -75,17 +75,23 @@ export function Select({ label, children, value, disabled = false, className = '
       if (!listRef.current?.contains(target) && !triggerRef.current?.contains(target)) setOpen(false);
     };
     const dismiss = () => setOpen(false);
+    const scroll = (event: Event) => {
+      // The portaled list scrolls when selecting or focusing an offscreen option.
+      // Only movement outside it invalidates its fixed anchor position.
+      if (event.target instanceof Node && listRef.current?.contains(event.target)) return;
+      dismiss();
+    };
     const escape = (event: KeyboardEvent) => {
       if (event.key === 'Escape') { setOpen(false); triggerRef.current?.focus(); }
     };
     document.addEventListener('pointerdown', outside);
     document.addEventListener('keydown', escape);
-    window.addEventListener('scroll', dismiss, true);
+    window.addEventListener('scroll', scroll, true);
     window.addEventListener('resize', dismiss);
     return () => {
       document.removeEventListener('pointerdown', outside);
       document.removeEventListener('keydown', escape);
-      window.removeEventListener('scroll', dismiss, true);
+      window.removeEventListener('scroll', scroll, true);
       window.removeEventListener('resize', dismiss);
     };
   }, [open, activeIndex,suspended]);

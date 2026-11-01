@@ -33,6 +33,7 @@ async function fixture(run) {
   const requests = [], remoteRequests = [], remote = new Map();
   let readOnce = false, readEmitted = false, holdCreate = null, turnScopedFollow = false, continuation = false;
   services.modelRegistry.register({id:'fix-fixture',label:'Synthetic model',defaultModel:'fixture-model',supportsTools:true,
+    modelCapabilities:()=>({reasoning:{levels:['off','high'],status:'declared',source:'handoff-fixture'}}),
     listModels:async()=>[{id:'fixture-model'}], health:async()=>({available:true,configured:true}),
     chat:async()=>({text:'synthetic result'}),
     stream:async function*(request) {

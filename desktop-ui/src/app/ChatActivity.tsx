@@ -54,6 +54,8 @@ function toolName(tool: ActivityTool) {
 function summarize(tools: ActivityTool[], agent: ChatMessage['agentActivity'], state?: string) {
   const phase = state && state !== 'idle' ? activityState(state) : agent ? activityState(agent.status) : null;
   const latest = (wanted: ActivityState) => [...tools].reverse().find(tool => activityState(tool.status) === wanted);
+  const settledWithFailures = phase === 'completed' && Boolean(latest('failed'))
+    && tools.every(tool => ['completed', 'failed', 'cancelled'].includes(activityState(tool.status)));
   let status: ActivityState;
   if (phase === 'waiting-approval' || latest('waiting-approval')) status = 'waiting-approval';
   else if (phase === 'outcome-unknown' || latest('outcome-unknown')) status = 'outcome-unknown';
@@ -69,7 +71,8 @@ function summarize(tools: ActivityTool[], agent: ChatMessage['agentActivity'], s
   const active = latest(status);
   const capability = active?.capability?.trim() || active?.label?.trim() || '';
   const action = Object.hasOwn(CAPABILITY_LABELS, capability) ? CAPABILITY_LABELS[capability] : null;
-  const headline = status === 'running' ? action ? `正在${action}` : tools.length ? '工具活动进行中' : '执行者正在处理请求'
+  const headline = settledWithFailures ? '本轮执行已结束，存在失败记录'
+    : status === 'running' ? action ? `正在${action}` : tools.length ? '工具活动进行中' : '执行者正在处理请求'
     : status === 'pending' ? '等待处理下一步操作'
     : status === 'retrying' ? '正在重试当前操作'
     : status === 'waiting-approval' ? '等待审批后继续操作'
@@ -78,7 +81,7 @@ function summarize(tools: ActivityTool[], agent: ChatMessage['agentActivity'], s
     : status === 'outcome-unknown' ? '操作结果待核验'
     : status === 'completed' ? tools.length ? '工具调用已结束' : '执行者本轮已结束'
     : state === 'cancelling' ? '正在停止，状态待核验' : '活动状态待核验';
-  return { status, headline };
+  return { status, headline, settledWithFailures };
 }
 
 function closeDisclosure(event: KeyboardEvent<HTMLElement>) {
@@ -127,11 +130,12 @@ export function ToolActivity({ tools }: { tools: ChatMessage['toolActivity'] }) 
 export function ChatActivity({ tools, agentActivity, state, taskId, onOpenTask }: ChatActivityProps) {
   const [expanded, setExpanded] = useState(false);
   if (!tools.length && !agentActivity && (!state || state === 'idle')) return null;
-  const { status, headline } = summarize(tools, agentActivity, state), view = STATUS[status];
+  const { status, headline, settledWithFailures } = summarize(tools, agentActivity, state);
+  const view = settledWithFailures ? { ...STATUS[status], label: '已结束 · 有失败记录', tone: 'warning' as const } : STATUS[status];
   const names: Record<string, string> = { codex: 'Codex', cetamesh: 'CetaMesh Agent', dsh: 'DeepSeek Harness', claude: 'Claude', gemini: 'Gemini', qwen: 'Qwen', opencode: 'OpenCode' };
   const provider = agentActivity ? agentActivity.label && agentActivity.label !== agentActivity.providerId ? agentActivity.label : Object.hasOwn(names, agentActivity.providerId) ? names[agentActivity.providerId] : 'Agent' : null;
   return <section className="chat-activity" aria-label="Agent 活动" onKeyDown={closeDisclosure}>
-    <details className={`chat-activity-card ${status}`} onToggle={event => { if (event.target === event.currentTarget) setExpanded(event.currentTarget.open); }}>
+    <details className={`chat-activity-card ${settledWithFailures ? 'settled' : status}`} onToggle={event => { if (event.target === event.currentTarget) setExpanded(event.currentTarget.open); }}>
       <summary className="chat-activity-summary"><span className="chat-activity-main"><span className="chat-activity-icon"><Icon name={view.icon} size={17} /></span><span className="chat-activity-copy"><strong role="status" aria-live="polite" aria-atomic="true">{headline}</strong><small>{[provider, tools.length ? `${tools.length} 项工具活动` : '尚无工具活动记录'].filter(Boolean).join(' · ')}</small></span></span><Badge tone={view.tone}>{view.label}</Badge><Icon name="down" size={14} /></summary>
       {expanded && <div className="chat-activity-body"><ToolActivity tools={tools} />{!tools.length && <p className="chat-activity-empty">执行者尚未报告工具活动。</p>}{taskId && onOpenTask && <Button type="button" compact variant="ghost" icon="work" onClick={() => onOpenTask(taskId)}>查看任务</Button>}<details className="chat-activity-advanced"><summary>高级详情</summary><dl>{agentActivity && <><dt>执行者标识</dt><dd><code>{agentActivity.providerId}</code></dd><dt>执行者状态</dt><dd>{agentActivity.status}</dd></>}{taskId && <><dt>任务标识</dt><dd><code>{taskId}</code></dd></>}{state && <><dt>会话状态</dt><dd>{state}</dd></>}</dl></details></div>}
     </details>

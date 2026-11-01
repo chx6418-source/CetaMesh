@@ -22,8 +22,9 @@ try {
     import {flushSync} from 'react-dom';
     import {Select} from './src/components/primitives/inputs';
     import {MotionPopup} from './src/components/primitives/motion-popup';
-    function Fixture(){const [open,setOpen]=useState(false);return <>
+    function Fixture(){const [open,setOpen]=useState(false);const [agent,setAgent]=useState('agent-0');return <>
       <Select label="fixture models" value="a" onChange={()=>{}}><option value="a">Alpha</option><option value="b">Beta</option></Select>
+      <Select label="long agents" value={agent} onChange={event=>setAgent(event.target.value)}>{Array.from({length:24},(_,i)=><option key={i} value={'agent-'+i}>{'Agent '+i}</option>)}</Select>
       <button id="popup-toggle" onClick={()=>setOpen(v=>!v)}>toggle</button>
       <MotionPopup open={open} id="fixture-popup"><button>Popup content</button><Select label="nested models" value="a"><option value="a">Nested Alpha</option><option value="b">Nested Beta</option></Select></MotionPopup>
       <details className="memory-create-panel"><summary>Add memory</summary><div style={{height:80}}>Synthetic content</div></details>
@@ -40,6 +41,18 @@ try {
       report.selectExitSafe=!closing||(closing.inert&&closing.getAttribute('aria-hidden')==='true');
       report.focusReturned=document.activeElement===trigger;
       await wait(500);report.selectRemoved=!document.querySelector('[role="listbox"]');
+      const longTrigger=document.querySelector('[aria-label="long agents"]');
+      flushSync(()=>longTrigger.click());await wait(100);
+      const longList=document.querySelector('[role="listbox"][aria-label="long agents"]');
+      longList.scrollTop=longList.scrollHeight;await wait(100);
+      report.internalScrollKeepsOpen=longList.scrollTop>0&&longTrigger.getAttribute('aria-expanded')==='true';
+      flushSync(()=>longList.querySelector('[role="option"]').dispatchEvent(new KeyboardEvent('keydown',{key:'End',bubbles:true})));await wait(100);
+      report.endKeepsOpen=longTrigger.getAttribute('aria-expanded')==='true';
+      if(report.endKeepsOpen){flushSync(()=>document.activeElement.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true})));await wait(100);}
+      report.lastAgentSelected=longTrigger.textContent.includes('Agent 23');
+      await wait(500);flushSync(()=>longTrigger.click());await wait(100);
+      window.dispatchEvent(new Event('scroll'));await wait(100);
+      report.externalScrollCloses=longTrigger.getAttribute('aria-expanded')==='false';await wait(500);
       const toggle=document.getElementById('popup-toggle');
       flushSync(()=>toggle.click());await wait(80);flushSync(()=>toggle.click());
       flushSync(()=>toggle.click());await wait(300);
@@ -107,7 +120,7 @@ try {
       assert.ok(encoded, 'browser produced an asynchronous result');
       const report = JSON.parse(decodeURIComponent(encoded));
       assert.equal(report.error, undefined, JSON.stringify(report));
-      for (const key of ['selectOpened', 'selectExitSafe', 'focusReturned', 'selectRemoved', 'reopened', 'nestedOpened', 'nestedExitSafe', 'popupRemoved', 'disclosureVisible']) {
+      for (const key of ['selectOpened', 'selectExitSafe', 'focusReturned', 'selectRemoved', 'internalScrollKeepsOpen', 'endKeepsOpen', 'lastAgentSelected', 'externalScrollCloses', 'reopened', 'nestedOpened', 'nestedExitSafe', 'popupRemoved', 'disclosureVisible']) {
         assert.equal(report[key], true, key + ': ' + JSON.stringify(report));
       }
       if (reduced) assert.ok(report.reduced && report.reducedAnimations, JSON.stringify(report));

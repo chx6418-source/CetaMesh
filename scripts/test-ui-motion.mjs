@@ -20,7 +20,8 @@ for (const selector of ['.memory-create-panel > summary', '.memory-item-details 
 assert.doesNotMatch(css, /scale\(\.95\)|:hover[^{}]*\{[^}]*translateY\(-3px\)/, 'press and hover feedback must not make controls jump');
 assert.match(css, /grid-template-columns var\(--motion-panel\)/, 'sidebar width changes transition with the shell');
 const presence = read('components/primitives/motion-popup.tsx');
-for (const value of ['AnimatePresence', 'useReducedMotion', 'useIsPresent', 'inert={!present}', 'aria-hidden']) assert.ok(presence.includes(value), value);
+for (const value of ['AnimatePresence', 'useReducedMotion', 'useIsPresent', 'aria-hidden']) assert.ok(presence.includes(value), value);
+assert.match(presence, /inert=\{!present\s*\|\|\s*suspended\}/, 'closing and suspended popups both remain inert');
 assert.match(read('components/primitives/inputs.tsx'), /<MotionPopup open=\{open\}/, 'select closes through bounded exit presence');
 const app = read('app/HarborApp.tsx');
 assert.match(app, /import ['"]\.\.\/theme\/motion.css['"]/);
@@ -28,5 +29,5 @@ assert.match(app, /<main key=\{page\}/);
 const overlays = read('components/primitives/overlays.tsx');
 assert.match(overlays, /AnimatePresence/);
 assert.match(overlays, /useReducedMotion/);
-assert.match(overlays, /inert=\{!present\}/);
+assert.match(overlays, /inert=\{!present\s*\|\|\s*suspended\}/, 'closing and suspended drawers both remain inert');
 console.log('PASS unified motion coverage, reduced-motion override, stable virtual rows and presence-based inert drawer exit');

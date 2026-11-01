@@ -346,7 +346,7 @@ const emptyObjectSchema = {
 }
 
 {
-  const executed = [];
+  const executed = [], initialActivities = [], resumedActivities = [];
   const broker = createCapabilityBroker({
     policy: createCapabilityPolicy(),
     approval: createCapabilityApproval({ stateDir: path.join(temp, 'approval-multi-call'), ttlMs: 60_000 })
@@ -370,25 +370,85 @@ const emptyObjectSchema = {
   const manifest = ['fixture.first', 'fixture.second'].map(id => ({ id, description: id,
     inputSchema: { type: 'object', properties: {}, required: [], additionalProperties: false }, available: true, requiresApproval: true }));
   let pending = await coordinator.run({ providerId: 'fixture', messages: [{ role: 'user', content: 'Run both.' }], manifest,
-    actor: OWNER_ACTOR, sessionId: 'chat-multi-approval', turnId: 'turn-multi-approval' });
+    actor: OWNER_ACTOR, sessionId: 'chat-multi-approval', turnId: 'turn-multi-approval', onActivity: activity=>initialActivities.push(activity) });
   assert.equal(pending.status, 'pending');
   const firstId = pending.approvalId;
   const firstRow = broker.approvals.get(firstId);
   const firstDecision = await broker.decide({ id: firstId, approve: true, actor: OWNER_ACTOR });
-  pending = await coordinator.resumeApproval({ approvalId: firstId, requestFingerprint: firstRow.fingerprint, decisionResult: firstDecision });
+  pending = await coordinator.resumeApproval({ approvalId: firstId, requestFingerprint: firstRow.fingerprint, decisionResult: firstDecision,
+    onActivity: activity=>resumedActivities.push(activity) });
   assert.equal(pending.status, 'pending', 'the second tool call must pause for its own approval');
   assert.equal(executed.join(','), 'fixture.first');
   const secondId = pending.approvalId;
   const secondRow = broker.approvals.get(secondId);
   const secondDecision = await broker.decide({ id: secondId, approve: true, actor: OWNER_ACTOR });
-  const completed = await coordinator.resumeApproval({ approvalId: secondId, requestFingerprint: secondRow.fingerprint, decisionResult: secondDecision });
+  const completed = await coordinator.resumeApproval({ approvalId: secondId, requestFingerprint: secondRow.fingerprint, decisionResult: secondDecision,
+    onActivity: activity=>resumedActivities.push(activity) });
   assert.equal(completed.status, 'completed');
   assert.equal(completed.usage.totalTokens, 8);
   assert.equal(completed.usage.requestCount, 2, 'resumed tool batches do not count as provider requests');
   assert.deepEqual(executed, ['fixture.first', 'fixture.second']);
   assert.equal(calls.length, 2, 'the model is called again only after every call in the batch has a tool result');
   assert.deepEqual(calls[1].messages.filter(message => message.role === 'tool').map(message => message.tool_call_id), ['first', 'second']);
+  for(const name of ['first','second']){
+    const activityId='turn-multi-approval:'+name;
+    assert.deepEqual([...initialActivities,...resumedActivities].filter(row=>row.id===activityId).map(row=>row.status),
+      ['running','waiting-approval','completed'],'each approved source call closes its original activity and remaining calls retain the live observer');
+  }
+  assert.equal(initialActivities.some(row=>row.status==='completed'),false,'resume uses the explicitly rebound observer');
   pass('multiple tool calls pause and resume one approval at a time without losing the remaining calls');
+}
+
+for(const outcome of ['rejected','outcome-unknown','cancel-after-completion']){
+  const stateDir=path.join(temp,'activity-outcome-'+outcome),initial=[],resumed=[],sourceResults=[];
+  let executions=0;
+  const broker=createCapabilityBroker({stateDir,policy:createCapabilityPolicy(),
+    approval:createCapabilityApproval({stateDir:path.join(stateDir,'approval'),ttlMs:60000})});
+  broker.register({id:'fixture.activity',permission:'publish',provider:'fixture',risk:'high',description:'Local approval result fixture.',
+    inputSchema:{type:'object',properties:{},additionalProperties:false},execute:()=>{
+      executions++;
+      if(outcome==='outcome-unknown')throw Object.assign(new Error('source result is unknown'),{code:'SOURCE_OUTCOME_UNKNOWN',effectStatus:'unknown'});
+      return {executed:true};
+    }});
+  const {runtime,calls}=modelRuntimeWith([{toolCalls:[{id:'c'.repeat(180),capabilityId:'fixture.activity',arguments:'{}'}]},
+    {text:'Return the actual Owner decision.',toolCalls:[]}]);
+  const create=()=>createToolExecutionCoordinator({stateDir,modelRuntime:runtime,capabilityBroker:broker});
+  const first=create(),pending=await first.run({providerId:'fixture',manifest:[{id:'fixture.activity',description:'Local approval result fixture.',
+    inputSchema:{type:'object',properties:{},additionalProperties:false},available:true}],actor:OWNER_ACTOR,
+    sessionId:'activity-'+outcome,turnId:'t'.repeat(160),onActivity:activity=>initial.push(activity)});
+  const waiting=initial.at(-1);assert.equal(waiting.status,'waiting-approval');
+  const persistedFile=path.join(stateDir,'model','tool-continuations.json'),saved=JSON.parse(fs.readFileSync(persistedFile,'utf8'));
+  assert.equal(Object.hasOwn(saved[pending.approvalId].state,'onActivity'),false,'live callbacks are never persisted');
+  if(outcome==='rejected'){
+    // Older pending records have no explicit activity metadata. Reconstruct the
+    // same bounded ID and report unknown elapsed time instead of inventing it.
+    delete saved[pending.approvalId].state.pendingActivityId;delete saved[pending.approvalId].state.pendingActivityStartedAt;
+    fs.writeFileSync(persistedFile,JSON.stringify(saved));
+  }
+  const coordinator=create(),row=broker.approvals.get(pending.approvalId);
+  let decision;
+  if(outcome==='outcome-unknown'){
+    await assert.rejects(broker.decide({id:pending.approvalId,approve:true,actor:OWNER_ACTOR}),error=>{
+      assert.equal(error.effectStatus,'unknown');decision={status:'outcome-unknown',error:{code:error.code}};return true;
+    });
+    assert.equal(broker.dispatchStatus(row.request.requestId).status,'outcome-unknown');
+  }else decision=await broker.decide({id:pending.approvalId,approve:outcome!=='rejected',actor:OWNER_ACTOR});
+  const controller=new AbortController();if(outcome==='cancel-after-completion')controller.abort();
+  const work=coordinator.resumeApproval({approvalId:pending.approvalId,requestFingerprint:row.fingerprint,decisionResult:decision,signal:controller.signal,
+    onActivity:activity=>resumed.push(activity),onCapabilityResult:result=>sourceResults.push(result)});
+  if(outcome==='cancel-after-completion')await assert.rejects(work,{code:'INVOKE_CANCELLED'});
+  else {
+    const result=await work;assert.equal(result.status,outcome==='outcome-unknown'?'partial':'completed');
+    if(outcome==='outcome-unknown')assert.equal(coordinator.recoveryForSession('activity-'+outcome).state,'needs-reconciliation');
+  }
+  assert.equal(resumed.length,1,'only the consumed pending source call is finalized');
+  assert.equal(resumed[0].id,waiting.id,'even long or legacy identities match the original waiting row');
+  assert.equal(sourceResults[0].eventId,waiting.id,'source result evidence uses the same original activity ID');
+  assert.equal(resumed[0].status,outcome==='rejected'?'failed':outcome==='outcome-unknown'?'outcome-unknown':'completed');
+  if(outcome==='rejected'){assert.equal(resumed[0].summary,'APPROVAL_REJECTED');assert.equal(resumed[0].durationMs,null);}
+  assert.equal(executions,outcome==='rejected'?0:1,'approval effects are never replayed by continuation');
+  assert.equal(calls.length,outcome==='rejected'?2:1,'unknown outcomes and cancellation do not dispatch a recovery model request');
+  pass('resumed approval activity preserves '+outcome+' source truth with a freshly rebound observer');
 }
 
 {
@@ -474,6 +534,8 @@ const emptyObjectSchema = {
     assert.equal(approvedHistory.messages.at(-1).text, 'The approved fixture returned safe-fixture.');
     const approvedCoreHistory = await approved.chatService.execute({ method: 'chat.history', params: { id: approved.session.id } });
     assert.equal(approvedCoreHistory.messages.at(-1).turnId, originalTurnId, 'approval continuation keeps the original Chat turn id');
+    assert.equal(approvedCoreHistory.messages.at(-1).toolActivity[0].id,pendingCoreStatus.turn.toolActivity[0].id);
+    assert.equal(approvedCoreHistory.messages.at(-1).toolActivity[0].status,'completed','real consumed approval replaces the historical waiting activity');
     const afterDecision = await approved.eventBus.next({ after: 0, waitMs: 0 });
     assert.ok(afterDecision.events.some(event => event.event === 'chat.streaming'
       && event.data.sessionId === approved.session.id && event.data.status === 'streaming' && event.data.reset === true),
@@ -493,6 +555,8 @@ const emptyObjectSchema = {
     assert.match(rejected.calls[1].messages.at(-1).content, /APPROVAL_REJECTED/);
     const rejectedHistory = await rejected.ui.execute({ method: 'ui.chat.history', params: { id: rejected.session.id } });
     assert.equal(rejectedHistory.messages.at(-1).text, 'The fixture was rejected and I will not run it.');
+    assert.equal(rejectedHistory.messages.at(-1).toolActivity[0].status,'failed','rejection closes waiting without claiming execution');
+    assert.equal(rejectedHistory.messages.at(-1).toolActivity[0].summary,'APPROVAL_REJECTED');
   } finally { rejected.chatService.close(); }
   pass('typed approval projection keeps the Chat turn pending, then resumes through Approve Once or rejection');
 }

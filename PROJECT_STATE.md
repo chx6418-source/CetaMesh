@@ -2,6 +2,13 @@
 
 更新日期：2026-11-01。
 
+## Agent Runtime 稳定性定点修复（2026-11-01，开发分支）
+
+- 修复长 Agent 选择列表内部滚动导致选择丢失、已授权 `test.run` 在上下文预算中遗漏、审批恢复后工具活动缺少终态，以及完成回合被历史失败操作误标为当前失败。
+- 自动委托保持原有有界等待；源执行尚未结算时等待实际事件，派发受理期间的匹配终态保留到释放执行权后处理。策略撤销、过期、Run/Session 替换及未知副作用围栏继续生效。
+- 独立测试项目已完成真实 Managed 连续十次任务、Managed → Codex → Managed、只读子任务并行与写入冲突拒绝；真实拒绝／Owner 核对恢复及 Codex 会话中断恢复单独验收。Fixture、生产 Core API、真实模型／CLI 和原生 WebView2 证据分别记录，不互相替代。
+- 当前源码与独立可信 Debug Shell 的原生 Chat/Task 流程完成读写、测试、审批及结果验收；不代表已安装版已更新、全部 Provider 已验证或发行安全放行。DSH 连接健康不等于具备已验证的任务工具边界。Defender RELEASE HOLD 不变。
+
 ## Workspace 增量可靠性治理（2026-11-01，开发分支）
 
 - 保留既有 Workspace/Task ID、JSON 存储、Broker 和 Diff 组件；[维护契约](docs/desktop/WORKSPACE.md)明确状态所有者与恢复边界。
