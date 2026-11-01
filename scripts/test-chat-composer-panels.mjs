@@ -34,8 +34,12 @@ try{
  assert.equal(lockedNodes.find(node=>node.props?.['aria-label']==='推理强度 low').props.disabled,true);
  assert.equal(ui.configurationChangeBlocked({state:'needs-reconciliation',followState:'idle',errorCode:null}),true);
  assert.equal(ui.configurationChangeBlocked({state:'idle',followState:'idle',errorCode:null}),false);
- const sourced=render(ui.ChatUsageContent,{context:null,turnUsage:{...usage,measurement:{status:'actual',source:'供应商结构化回执'}},sessionUsage:null});
- assert.match(sourced,/实际.*供应商结构化回执/,'counter source is distinct from accounting completeness');
+ const sourced=render(ui.ChatUsageContent,{context:null,turnUsage:{...usage,measurement:{status:'actual',source:'structured-provider-receipts'}},sessionUsage:null});
+ assert.match(sourced,/实际.*结构化供应商回执/,'counter source is distinct from accounting completeness');
+ for(const[source,label]of[['structured-provider-receipts','结构化供应商回执'],['explicit-usage-estimate','显式用量估算'],['unattributed-usage','来源未归属']]){
+  const localized=render(ui.ChatUsageContent,{context:null,turnUsage:{...usage,measurement:{status:'unknown',source}},sessionUsage:null});
+  assert.match(localized,new RegExp(label));assert.doesNotMatch(localized,new RegExp(source),'raw measurement source codes do not appear in the main usage view');
+ }
  const cacheUnknown=render(ui.ChatUsageContent,{context:null,turnUsage:{...usage,inputTokens:null,cacheReadTokens:10,cacheHitRate:0.8},sessionUsage:null});
  assert.doesNotMatch(cacheUnknown,/80%/,'a supplied cache ratio cannot replace a known valid denominator');
  const cacheInvalid=render(ui.ChatUsageContent,{context:null,turnUsage:{...usage,inputTokens:10,cacheReadTokens:20,cacheHitRate:-1},sessionUsage:null});

@@ -7,6 +7,7 @@ import './chat-composer-panels.css';
 const known=(value:unknown):value is number=>typeof value==='number'&&Number.isFinite(value)&&value>=0;
 const count=(value:unknown)=>known(value)?value.toLocaleString('en-US'):'未知';
 const evidence=(status:string|undefined)=>status==='actual'?'实际':status==='estimated'?'估算':'未知';
+const usageSourceLabels=new Map([['structured-provider-receipts','结构化供应商回执'],['explicit-usage-estimate','显式用量估算'],['unattributed-usage','来源未归属']]);
 export function contextPresentation(context:ChatContextObservation|null|undefined){
   const usable=!!context&&context.schemaVersion===1&&context.status!=='unknown'&&known(context.inputTokens);
   const effective=!!context&&context.capacityStatus!=='unknown'&&known(context.windowTokens)&&known(context.reservedOutputTokens)&&context.windowTokens>context.reservedOutputTokens?context.windowTokens-context.reservedOutputTokens:null;
@@ -23,7 +24,7 @@ function UsageLedger({usage,label}:{usage:ModelUsage|null|undefined;label:string
   const completeCost=cost?.complete===true&&known(cost.amount)&&!!cost.currency&&['actual','estimated'].includes(cost.status);
   const hit=known(usage?.inputTokens)&&usage.inputTokens>0&&known(usage.cacheReadTokens)&&usage.cacheReadTokens<=usage.inputTokens?`${Math.round(usage.cacheReadTokens/usage.inputTokens*10000)/100}%`:'未知';
   return <section className="chat-usage-ledger"><div className="chat-panel-heading"><h4>{label}</h4><small>{usage?.accountingComplete===true?'核算完整':usage?.accountingComplete===false?'已知部分':'完整性未知'}</small></div>
-    <p className="chat-context-caption">{evidence(usage?.measurement?.status)} · {usage?.measurement?.source||'来源未知'}</p>
+    <p className="chat-context-caption">{evidence(usage?.measurement?.status)} · {usageSourceLabels.get(usage?.measurement?.source??'')||'来源未知'}</p>
     <dl className="chat-stat-grid">{[['输入',usage?.inputTokens],['输出',usage?.outputTokens],['推理',usage?.reasoningTokens],['缓存读取',usage?.cacheReadTokens],['缓存写入',usage?.cacheWriteTokens],['请求',usage?.requestCount]].map(([name,value])=><div key={String(name)}><dt>{name}</dt><dd>{count(value)}</dd></div>)}<div><dt>有效缓存命中</dt><dd>{hit}</dd></div></dl>
     <p className="chat-cost-line">{completeCost?`${evidence(cost.status)}费用 ${cost.currency} ${cost.amount}`:'费用未知'}{!completeCost&&known(cost?.knownAmount)&&cost?.currency&&<small>已核算 {cost.currency} {cost.knownAmount}，不代表总费用</small>}</p>
   </section>;

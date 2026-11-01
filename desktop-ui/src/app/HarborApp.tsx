@@ -749,9 +749,11 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
   }
   async function updateReasoning(reasoning:string) {
     if (!session || configurationLocked) return;
-    const model = catalog?.modelProviders.find(item=>item.id===session.config.modelProvider)?.models.find(item=>(item.id||item.name||item.modelName)===session.config.model);
+    const [providerId, modelId] = JSON.parse(selectedModelKey) as [string, string];
+    const provider = providers.find(item=>item.id===providerId);
+    const model = provider?.models.find(item=>(item.id||item.name||item.modelName)===modelId);
     if (!supportedReasoning(model?.capabilities).includes(reasoning)) return;
-    try { onSessionUpdate(await chatClient.setConfig(session.id, {...session.config, reasoning})); await load(); void refreshContext(); }
+    try { onSessionUpdate(await chatClient.setConfig(session.id, {...session.config, modelProvider:providerId, model:modelId, reasoning})); await load(); void refreshContext(); }
     catch (cause) { setError(messageOf(cause)); }
   }
   async function updateWorkspace(workspaceId: string) {
