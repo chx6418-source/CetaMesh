@@ -1381,7 +1381,7 @@ export function TaskCreateForm({ workspaces, activeWorkspaceId, providers, onCre
     <p className="muted">使用已配置的默认执行者。系统按任务需要选择工具和协作方式，进展与待确认操作会显示在任务详情。</p>
     <details><summary>协作与验收设置</summary>
       <Select label="执行者" value={agentProvider} onChange={event => setAgentProvider(event.target.value)}><option value="">自动（使用已配置的默认执行者）</option>{providers.map(item => <option key={item.id} value={item.id} disabled={!item.eligible}>{item.name}{item.eligible ? '' : ' · 不可用'}</option>)}</Select>
-      {providers.some(item => !item.eligible) && <details><summary>不可用执行者与恢复方法</summary><ul>{providers.filter(item => !item.eligible).map(item => <li key={item.id}><strong>{item.name}</strong> · {availabilityReasonLabel(item.reason)}</li>)}</ul><p className="muted">请在执行者设置中核对安装、登录、连接与权限，重新检查后重新打开此窗口。执行条件未满足时仍不能派发任务。</p></details>}
+      {providers.some(item => !item.eligible) && <details><summary>不可用执行者与恢复方法</summary><ul>{providers.filter(item => !item.eligible).map(item => <li key={item.id}><strong>{item.name}</strong> · {item.id === 'dsh' ? dshSetupReasonLabel(item.reason) : availabilityReasonLabel(item.reason)}</li>)}</ul><p className="muted">请在执行者设置中核对安装、登录、连接与权限，重新检查后重新打开此窗口。执行条件未满足时仍不能派发任务。</p></details>}
       <label><input type="checkbox" checked={cooperate} disabled={!managedChoice} onChange={event=>setCooperate(event.target.checked)} />允许按需协作（本任务最多一次外部分配，30 分钟内有效）</label>
       <label><input type="checkbox" checked={allowUnknownCost} disabled={!managedChoice || !cooperate} onChange={event=>setAllowUnknownCost(event.target.checked)} />允许费用未知的外部 Agent 调用（可能产生费用）</label>
       <p className="muted">原生执行范围仍需单独确认。简单任务会直接处理；未配置自动验收的结果保留人工核验。</p>
@@ -1511,10 +1511,9 @@ export function mergeAgentHealth(previous: Agent, health: Agent): Agent {
   return { ...previous, ...health };
 }
 
-export function AgentSetupDiagnostic({ agent }: { agent: Agent }) {
-  const reason = agent.reason || agent.preset?.reason;
+function dshSetupReasonLabel(reason: string | null | undefined) {
   const messages: Record<string, string> = {
-    'preset-not-configured': '尚未选择编程预设，请在下方配置。',
+    'preset-not-configured': '尚未选择编程预设，请配置 DSH 编程预设后重新检查。',
     'preset-file-not-found': '找不到预设文件，请检查 DSH 目录和预设名称。',
     'preset-file-unreadable': '无法读取预设文件，请检查本地文件权限。',
     'preset-file-too-large': '预设文件过大，请缩小文件后重新检查。',
@@ -1533,7 +1532,12 @@ export function AgentSetupDiagnostic({ agent }: { agent: Agent }) {
     'session-api-unavailable': 'DSH 会话接口不可用，请检查 DSH 版本与服务状态。',
     'DSH_CONFIG_INVALID': 'DSH 连接配置无效，请检查并重新保存配置。'
   };
-  return <div className="agent-diagnostic">{reason && <small>{messages[reason] ?? availabilityReasonLabel(reason)}</small>}{agent.preset && <small>编程预设 {agent.preset.id || '未选择'} · {agent.preset.loadState === 'loaded' ? '原生已加载' : agent.preset.loadState === 'not-loaded' ? '原生未加载' : '加载状态未知'} · {agent.preset.compatible === true ? '本地 persona 已验证' : agent.preset.compatible === false ? '本地 persona 不兼容' : '本地 persona 未验证'}</small>}{agent.diagnostic && <details><summary>诊断详情</summary><small>阶段：{agent.diagnostic.stage || '未知'} · 错误码：{agent.diagnostic.code || '无'} · {agent.diagnostic.retryable ? '允许重新检查连接' : '请先处理配置'}{agent.diagnostic.checkedAt ? ` · ${dateLabel(agent.diagnostic.checkedAt)}` : ''}</small></details>}</div>;
+  return reason ? messages[reason] ?? availabilityReasonLabel(reason) : '';
+}
+
+export function AgentSetupDiagnostic({ agent }: { agent: Agent }) {
+  const reason = agent.reason || agent.preset?.reason;
+  return <div className="agent-diagnostic">{reason && <small>{dshSetupReasonLabel(reason)}</small>}{agent.preset && <small>编程预设 {agent.preset.id || '未选择'} · {agent.preset.loadState === 'loaded' ? '原生已加载' : agent.preset.loadState === 'not-loaded' ? '原生未加载' : '加载状态未知'} · {agent.preset.compatible === true ? '本地 persona 已验证' : agent.preset.compatible === false ? '本地 persona 不兼容' : '本地 persona 未验证'}</small>}{agent.diagnostic && <details><summary>诊断详情</summary><small>阶段：{agent.diagnostic.stage || '未知'} · 错误码：{agent.diagnostic.code || '无'} · {agent.diagnostic.retryable ? '允许重新检查连接' : '请先处理配置'}{agent.diagnostic.checkedAt ? ` · ${dateLabel(agent.diagnostic.checkedAt)}` : ''}</small></details>}</div>;
 }
 
 export function DshSetupForm({ configuration, draft, presets, saving, onDraftChange, onSave, onRefresh }: {

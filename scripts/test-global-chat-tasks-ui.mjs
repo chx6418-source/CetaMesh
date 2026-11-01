@@ -27,10 +27,13 @@ try{
  const createForm=render(ui.TaskCreateForm,{workspaces:[{id:'ws',name:'Synthetic project'}],activeWorkspaceId:'ws',providers:[
   {id:'codex',name:'Codex',eligible:true,reason:null},
   {id:'claude',name:'Claude',eligible:false,reason:'not_installed'},
+  {id:'dsh',name:'DSH',eligible:false,reason:'preset-not-configured'},
   {id:'unknown',name:'Unavailable runtime',eligible:false,reason:'C:\\private-owner\\credential-SHOULD-NOT-APPEAR'}
  ],onCreated:async()=>{}});
  assert.match(createForm,/不可用执行者与恢复方法/,'Task form must expose the existing first rejection reason');
  assert.match(createForm,/Claude.*未安装/s,'uninstalled runtime must explain the actual first condition');
+ assert.match(createForm,/DSH.*尚未选择编程预设/s,'the observed DSH rejection must retain its specific cause');
+ assert.match(createForm,/配置 DSH 编程预设后重新检查/,'missing preset must have its specific safe recovery step');
  assert.match(createForm,/重新检查.*重新打开/s,'safe rejection must include a usable next step');
  assert.doesNotMatch(createForm,/private-owner|SHOULD-NOT-APPEAR/,'unknown raw diagnostics cannot expose local paths');
  const readyForm=render(ui.TaskCreateForm,{workspaces:[],providers:[{id:'codex',name:'Codex',eligible:true,reason:null}],onCreated:async()=>{}});
