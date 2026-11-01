@@ -5,6 +5,8 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { test, after } from 'node:test';
+import { spawnSync } from 'node:child_process';
+import { buildSync } from 'esbuild';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const moduleFile = path.join(root, 'src/simulation/persona-assets.js');
@@ -16,6 +18,21 @@ const hash = text => crypto.createHash('sha256').update(text).digest('hex');
 const library = (options = {}) => createPersonaLibrary({ stateDir: fresh(), legacyRoots: [], ...options });
 const code = (fn, expected) => assert.throws(fn, error => error.code === expected);
 after(() => { for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true }); });
+
+test('persona module loads in the CJS format used by Core SEA without import.meta', () => {
+  const temp = fresh();
+  const bundle = path.join(temp, 'persona.cjs');
+  buildSync({ entryPoints: [moduleFile], outfile: bundle, bundle: true, platform: 'node', format: 'cjs',
+    logOverride: { 'empty-import-meta': 'silent' } });
+  const result = spawnSync(process.execPath, ['-e', `
+    const { createPersonaLibrary } = require(process.argv[1]);
+    const library = createPersonaLibrary({ stateDir: process.argv[2], legacyRoots: [] });
+    process.stdout.write(JSON.stringify(library.list()));
+  `, bundle, path.join(temp, 'state')], { cwd: temp, encoding: 'utf8', windowsHide: true, timeout: 10000 });
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout).roles, []);
+});
 
 // Catches the former 6000-character prefix loss and false positive recommendations.
 test('original repository card retains exact source and all positive/negative tail examples', () => {
