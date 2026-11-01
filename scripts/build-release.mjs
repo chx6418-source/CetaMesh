@@ -336,7 +336,7 @@ thirdPartyLines.push(
   '   并放入本目录（例如 `licenses/Node-LICENSE.txt`）。',
   '2. **各依赖的完整许可证文本**：上表列出的是声明值与本地是否存在许可证文件；公开发布时应把',
   '   这些文本一并放入本目录。',
-  '3. **SnowLuma 等第三方程序不随本包分发**：本项目只检测与调用用户自行安装的 SnowLuma。',
+  '3. **SnowLuma 等第三方程序不随本包分发**：本项目仅通过显式配置的通用 OneBot 协议连接独立网关，不管理第三方程序。',
   '',
   '## 本项目自身',
   '',
@@ -468,7 +468,7 @@ const realConfig = path.join(ROOT, 'config.json');
 if (fs.existsSync(realConfig)) {
   try {
     const parsed = JSON.parse(fs.readFileSync(realConfig, 'utf8').replace(/^\uFEFF/, ''));
-    const secrets = [parsed?.consoleToken, parsed?.snowluma?.accessToken, parsed?.snowluma?.httpAccessToken, parsed?.dsh?.token]
+    const secrets = [parsed?.consoleToken, parsed?.onebot?.accessToken, parsed?.onebot?.httpAccessToken, parsed?.snowluma?.accessToken, parsed?.snowluma?.httpAccessToken, parsed?.dsh?.token]
       .map((value) => String(value ?? '').trim())
       .filter((value) => value.length >= 8);
     for (const file of [shellExe, coreExe]) {
@@ -534,7 +534,7 @@ const manifest = {
     '未签名（无代码签名证书）',
     '未在 Windows 10 x64 上验证',
     '未在真实 QQ / DSH 会话中验证四种模式与全部 MCP 工具',
-    '未验证 DSH/SnowLuma 重启恢复（需要真实服务）',
+    '未验证 DSH/通用 OneBot 外部服务重启恢复（需要独立真实环境验收）',
     '未签名的安装器会触发 Windows 的来源提示'
   ]
 };

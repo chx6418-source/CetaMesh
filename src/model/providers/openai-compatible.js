@@ -254,6 +254,24 @@ export function createOpenAiCompatibleModelProvider({
     if(id==='openai'&&endpoint==='https://api.openai.com/v1'&&['gpt-4o-mini','gpt-4o-mini-2024-07-18','gpt-4o','gpt-4.1','gpt-4.1-mini'].includes(model))return {supported:true,status:'verified',maxImages:20,maxImageBytes:2*1024*1024,maxTotalBytes:4*1024*1024,lowDetailTokens:4000,source:'https://developers.openai.com/api/docs/guides/images-vision',version:'2026-10-30'};
     return {supported:false,status:id==='deepseek-official'?'unsupported':'unknown'};
   }
+  function modelCapabilities(model = defaultModel) {
+    const image = imageInputCapabilities(model);
+    const advertised = catalogCapabilities.get(String(model ?? ''));
+    const reasoning = deepseekProfile
+      ? { levels: ['off', 'low', 'high', 'max'], status: 'declared', source: 'provider-adapter:deepseek-chat-v1' }
+      : reasoningEnabled(model)
+        ? { levels: ['off', 'low', 'high'], status: 'declared', source: 'provider-adapter:reasoning-effort-map' }
+        : { levels: [], status: advertised?.reasoning === false || supportsReasoning === false ? 'unsupported' : 'unknown',
+          source: advertised?.reasoning === false ? 'provider-model-catalog' : supportsReasoning === false ? 'provider-adapter:reasoning-disabled' : null };
+    return {
+      vision: { supported: image.status === 'unknown' ? null : image.supported === true,
+        status: image.status, source: image.source ?? (image.status === 'unsupported' ? 'provider-adapter:image-input' : null) },
+      tools: { supported: toolCallingEnabled(model), status: toolCallingEnabled(model) ? 'declared' : 'unsupported',
+        source: typeof advertised?.tools === 'boolean' ? 'provider-model-catalog' : 'provider-adapter:configured-tools' },
+      reasoning,
+      context: contextCapabilities(model)
+    };
+  }
   function buildBody({ model, messages, reasoning, stream, tools = [], toolChoice, maxOutputTokens }) {
     if (typeof model !== 'string' || !model.trim()) {
       throw modelRuntimeError(
@@ -349,6 +367,7 @@ export function createOpenAiCompatibleModelProvider({
     imageInputCapabilities,
     promptCacheCapabilities,
     contextCapabilities,
+    modelCapabilities,
     id,
     label,
     defaultModel,

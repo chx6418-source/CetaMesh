@@ -9,8 +9,10 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { WebSocketServer } from 'ws';
 import { writeJsonAtomic } from '../src/storage/json-file.js';
+import { enableOneBotFixture } from './fixtures/onebot-activation.mjs';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-core-channel-'));
+enableOneBotFixture(path.join(root, 'state'), { bionic: true });
 const token = crypto.randomBytes(32).toString('hex');
 const pipe = process.platform === 'win32'
   ? `\\\\.\\pipe\\CetaMesh-Channel-Test-${crypto.randomUUID()}`
@@ -30,7 +32,7 @@ wss.on('connection', socket => socket.on('message', data => {
 }));
 await new Promise(resolve => gateway.listen(0, '127.0.0.1', resolve));
 writeJsonAtomic(path.join(root, 'config.json'), { allow: { groups: ['42'], private: [] },
-  dsh: { baseUrl: 'http://127.0.0.1:9' }, snowluma: { wsUrl: `ws://127.0.0.1:${gateway.address().port}`,
+  dsh: { baseUrl: 'http://127.0.0.1:9' }, onebot: { enabled: true, wsUrl: `ws://127.0.0.1:${gateway.address().port}`,
     httpUrl: `http://127.0.0.1:${gateway.address().port}` } });
 let core;
 let coreOutput = '';

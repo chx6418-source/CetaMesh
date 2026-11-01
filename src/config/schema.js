@@ -16,6 +16,8 @@ export const SECURITY_DEFAULTS = Object.freeze({
   allowAllWhenEmpty: false,
   // SnowLuma 进程启停控制（=== true 才开启）。
   allowProcessControl: false,
+  // Third-party QQ gateways require explicit Owner activation.
+  onebotEnabled: false,
   // QQ 官方卡片按钮点击（高风险写操作，缺失或不为 true 一律关闭）。
   clickCardButton: false,
   // 表情包备注写入（默认关闭）。
@@ -48,6 +50,14 @@ const snowlumaSchema = z.looseObject({
   webUrl: z.string().optional(),
   customPaths: z.array(z.string()).optional(),
   allowProcessControl: z.boolean().optional()
+});
+
+const onebotSchema = z.looseObject({
+  enabled: z.boolean().optional(),
+  wsUrl: z.string().optional(),
+  httpUrl: z.string().optional(),
+  accessToken: z.string().optional(),
+  httpAccessToken: z.string().optional()
 });
 
 const allowDenySchema = z.looseObject({
@@ -92,6 +102,7 @@ const socialV2Schema = z.looseObject({
 export const rawConfigSchema = z.looseObject({
   dsh: dshSchema.optional(),
   snowluma: snowlumaSchema.optional(),
+  onebot: onebotSchema.optional(),
   ownerQQ: z.union([z.number(), z.string(), z.null()]).optional(),
   sessionCwd: z.string().optional(),
   agentPreset: z.string().optional(),
@@ -144,6 +155,7 @@ export function assertSecurityInvariants(cfg, raw = undefined) {
     }
   };
   checkFlag(raw?.allowAllWhenEmpty, cfg.allowAllWhenEmpty, 'allowAllWhenEmpty');
+  checkFlag(raw?.onebot?.enabled, cfg.onebot?.enabled, 'onebot.enabled');
   checkFlag(raw?.snowluma?.allowProcessControl, cfg.snowluma?.allowProcessControl, 'snowluma.allowProcessControl');
   checkFlag(raw?.socialV2?.tools?.clickCardButton, cfg.socialV2?.tools?.clickCardButton, 'socialV2.tools.clickCardButton');
   checkFlag(raw?.socialV2?.tools?.setStickerRemark, cfg.socialV2?.tools?.setStickerRemark, 'socialV2.tools.setStickerRemark');

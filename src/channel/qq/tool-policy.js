@@ -38,7 +38,7 @@ const QQ_DATA_ROUTES = Object.freeze({
 });
 
 export function qqToolPolicyEnabled(name, options) {
-  return isIntegrationToolEnabled('mcp__snowluma__' + name, options);
+  return isIntegrationToolEnabled('mcp__onebot__' + name, options);
 }
 
 export function qqSocialFlagPolicyEnabled(flag, options) {
@@ -47,5 +47,5 @@ export function qqSocialFlagPolicyEnabled(flag, options) {
 
 export function assertQqDataToolEnabled(pathname, options) {
   const name = QQ_DATA_ROUTES[pathname];
-  if (name) assertMcpToolEnabled('snowluma', name, options);
+  if (name) assertMcpToolEnabled('onebot', name, options);
 }

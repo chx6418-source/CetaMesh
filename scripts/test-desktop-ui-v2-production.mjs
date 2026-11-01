@@ -12,6 +12,13 @@ const exists = (relative) => fs.existsSync(path.join(ROOT, relative));
 let passed = 0;
 const check = (name, fn) => { fn(); passed += 1; process.stdout.write(`PASS ${name}\n`); };
 
+check('retired gateway management has no product UI entrypoint', () => {
+  for (const file of ['desktop-ui/src/app/HarborApp.tsx', 'desktop-ui/src/bridge/typed-client.ts', 'desktop-ui/src/data/mock.ts', 'desktop-shell/src/native_ui.rs']) {
+    assert.equal(/snowluma/i.test(read(file)), false, `${file} must not expose retired gateway management`);
+  }
+  assert.doesNotMatch(read('src/settings/pages.js'), /service\.snowluma/);
+});
+
 check('every typed Owner UI method is explicitly admitted by the native presentation boundary', () => {
   const client = read('desktop-ui/src/bridge/typed-client.ts');
   const methods = [...client.match(/type UiMethod =([\s\S]*?);/)[1].matchAll(/'(ui\.[^']+)'/g)].map(match => match[1]);
@@ -412,7 +419,7 @@ check('Chat streaming is frame-batched and non-bottom reading exposes a latest-m
   assert.doesNotMatch(streamSubscription, /streamUpdateRef\.current = data/);
   assert.doesNotMatch(streamSubscription, /chatClient\.status/);
   assert.match(chat, /status\.agentActivity/);
-  assert.match(messageBubble, /agent-activity/);
+  assert.match(messageBubble, /<ChatActivity[^>]*agentActivity=/);
   assert.match(composer, /const needsScope = \['task-required', 'workspace-required'\]/);
   assert.match(composer, /const disabled = !agent\.available \|\| \(!agent\.eligible && !needsScope\)/);
   assert.match(composer, /availabilityReasonLabel\(agent\.reason\)/);

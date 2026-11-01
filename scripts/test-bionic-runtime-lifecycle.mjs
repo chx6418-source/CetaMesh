@@ -4,6 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { createBionicService } from '../src/bionic/service.js';
 import { createBionicChannelFacade } from '../src/bionic/channel-facade.js';
+import { enableOneBotFixture } from './fixtures/onebot-activation.mjs';
+import { createIntegrationStore } from '../src/integrations/store.js';
 
 const reads = [];
 const facade = createBionicChannelFacade({ accountId: '10001', request: async (method, params) => {
@@ -15,6 +17,7 @@ assert.equal((await facade.client.request('fetch_custom_face_detail', {})).retco
 assert.deepEqual(await facade.client.raw('get_login_info', {}), { fixture: true });
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-bionic-runtime-'));
+enableOneBotFixture(path.join(root, 'state'), { bionic: true });
 let consumer;
 const channel = {
   execute: async () => ({ ready: true, accountId: '10001' }),
@@ -22,7 +25,7 @@ const channel = {
   send: async () => { throw Object.assign(new Error('approval required'), { code: 'QQ_APPROVAL_REQUIRED' }); },
   read: async action => action === 'get_login_info' ? { user_id: 10001, nickname: 'fixture' } : {}
 };
-const config = { allow: { groups: ['42', '43'], private: [] }, dsh: { baseUrl: 'http://127.0.0.1:9' },
+const config = { allow: { groups: ['42', '43', '44'], private: [] }, dsh: { baseUrl: 'http://127.0.0.1:9' },
   socialV2: { wake: { triggers: { anyMessage: false, probability: 0 } } } };
 const service = createBionicService({ dataRoot: root, stateDir: path.join(root, 'state'), config, channelService: channel,
   executable: process.env.WHALEBRIDGE_TEST_QQ_CONNECTOR_EXE });
@@ -35,6 +38,21 @@ try {
   const health = await service.health();
   assert.equal(health.socialLoopRunning, true, 'new lifecycle must actually own the existing Social loop');
   assert.deepEqual(health.conversations.sort(), ['group:42', 'group:43']);
+  const accountState = path.join(root, 'channel', 'qq', '10001', 'bionic', 'state');
+  assert.equal(fs.existsSync(path.join(accountState, 'integrations', 'plugins.json')), false, 'account child must never receive copied grants or integration switches');
+  const policyStore = createIntegrationStore({ stateDir: path.join(root, 'state') });
+  const setSwitch = (id, enabled) => policyStore.update(value => ({ ...value, plugins: { ...value.plugins, [id]: { enabled } } }));
+  const nextMessage = message_id => ({ accountId: '10001', native: { self_id: 10001, user_id: 7, group_id: 44,
+    message_id, message: [{ type: 'text', data: { text: 'parent policy must apply inside the already running child' } }] } });
+  setSwitch('cetamesh-onebot', false);
+  await consumer.handle(nextMessage(10));
+  assert.deepEqual((await service.health()).conversations.sort(), ['group:42', 'group:43'], 'parent QQ revocation is hot in the existing policy child');
+  setSwitch('cetamesh-onebot', true); setSwitch('cetamesh-bionic-chat', false);
+  await consumer.handle(nextMessage(11));
+  assert.deepEqual((await service.health()).conversations.sort(), ['group:42', 'group:43'], 'parent Bionic revocation is hot in the existing policy child');
+  setSwitch('cetamesh-bionic-chat', true);
+  await consumer.handle(nextMessage(12));
+  assert.deepEqual((await service.health()).conversations.sort(), ['group:42', 'group:43', 'group:44'], 'explicit parent reactivation is observed without copying policy or restarting');
   const stateFile = path.join(root, 'channel', 'qq', '10001', 'bionic', 'state', 'social-v2.json');
   const savedBeforeFailure = fs.readFileSync(stateFile);
   fs.unlinkSync(stateFile); fs.mkdirSync(stateFile);

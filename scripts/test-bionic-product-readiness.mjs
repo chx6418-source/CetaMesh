@@ -5,8 +5,10 @@ import path from 'node:path';
 import { createBionicService } from '../src/bionic/service.js';
 import { createQqSendLedger } from '../src/channel/qq/send-ledger.js';
 import { createIntegrationStore } from '../src/integrations/store.js';
+import { enableOneBotFixture } from './fixtures/onebot-activation.mjs';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-bionic-readiness-'));
+enableOneBotFixture(path.join(root, 'state'), { bionic: true });
 let qq = { ready: true, authenticated: true, accountId: '10001' };
 let consumer = null;
 const journal = { events: [{ accountId: '10001', eventId: 'in-1', createdAt: 1700000000000 },
@@ -104,7 +106,7 @@ try {
   const saveEvidence = (overrides = {}) => {
     fs.writeFileSync(path.join(accountState, 'sessions.json'), JSON.stringify({ sessions: { 'group:42': 'social-1' } }));
     fs.writeFileSync(path.join(accountState, 'tool-calls.jsonl'), JSON.stringify({ type: 'result', key: 'group:42',
-      sessionId: 'social-1', time: new Date(now - 100).toISOString(), tool: 'mcp__snowluma__qq_get_prompt', ok: true, ...overrides }) + '\n');
+      sessionId: 'social-1', time: new Date(now - 100).toISOString(), tool: 'mcp__onebot__qq_get_prompt', ok: true, ...overrides }) + '\n');
   };
   try {
     const first = await check({ accountRoot, startedAt });

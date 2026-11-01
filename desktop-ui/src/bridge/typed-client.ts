@@ -20,9 +20,27 @@ export type DiagnosticsSummary = Pick<DiagnosticsReport, 'id' | 'generatedAt' | 
 
 export interface ChatSession {
   id: string; title: string; createdAt: string | number | null; updatedAt: string | number | null;
-  archived: boolean; taskId: string | null; config: { mode: string; modelProvider: string | null; model: string; agentProvider: string | null; workspaceId: string | null };
+  archived: boolean; taskId: string | null; config: { mode: string; modelProvider: string | null; model: string; reasoning?: string; agentProvider: string | null; workspaceId: string | null };
 }
+export type EvidenceStatus = 'actual' | 'estimated' | 'unknown';
+export interface ChatContextObservation {
+  schemaVersion: 1; providerId: string | null; model: string | null; at: number | null;
+  status: EvidenceStatus; inputTokens: number | null; windowTokens: number | null; reservedOutputTokens: number | null;
+  capacityStatus: 'verified' | 'declared' | 'unknown'; source: string | null; version: string | null; estimator: string | null;
+  phase?: 'active-request' | 'last-request'; cycle?: number; requestId?: string;
+  composition: Record<'messages' | 'system' | 'tools' | 'other', { tokens: number | null; status: 'estimated' | 'unknown' }>;
+  projection?: { status: 'observed' | 'unknown'; bytes: number | null; maxBytes: number | null; compacted: boolean | null; compactionCount: number | null; truncated: boolean | null };
+}
+export interface ChatModelCapabilities {
+  vision: { supported: boolean | null; status: 'verified' | 'declared' | 'unsupported' | 'unknown'; source: string | null };
+  tools: { supported: boolean | null; status: 'verified' | 'declared' | 'unsupported' | 'unknown'; source: string | null };
+  reasoning: { levels: string[]; status: 'declared' | 'unsupported' | 'unknown'; source: string | null };
+  context: { status: 'verified' | 'declared' | 'unknown'; contextWindowTokens?: number | null; maxOutputTokens?: number | null; defaultOutputTokens?: number | null; outputTokenParameter?: string | null; source: string | null; version?: string | null };
+}
+export interface ChatCatalogModel { id?: string; name?: string; label?: string; displayName?: string; modelName?: string; toolCalling?: string; streaming?: string; reasoning?: string; capabilities?: ChatModelCapabilities }
+export interface ChatModelProvider { id: string; label: string; configured: boolean; catalogState?: string; reachable?: boolean | null; authenticated?: boolean | null; inferencing?: boolean | null; toolCalling?: boolean; error?: string | null; settingsFields?: ProviderSettingField[]; models: ChatCatalogModel[] }
 export interface ModelUsage {
+  measurement?: { status: EvidenceStatus; source: string | null };
   inputTokens: number | null; outputTokens: number | null; totalTokens: number | null;
   reasoningTokens: number | null; cacheReadTokens: number | null; cacheWriteTokens: number | null;
   requestCount: number | null; cacheHitRate: number | null; cost: { status: 'actual' | 'estimated' | 'unknown'; amount: number | null; knownAmount: number | null; currency: string | null; complete: boolean; sources: string[]; versions: string[] } | null; accountingComplete: boolean | null;
@@ -32,7 +50,7 @@ export interface ChatMessage {
   requestId?: string | null;
   usage?: ModelUsage | null;
   attachmentRefs?: {ref:string;name:string;kind:string;size:number;mimeType:string;modelRef?:string|null}[];
-  attachments: string[]; toolActivity: { id: string; label: string; status: string; summary: string; durationMs: number | null }[];
+  attachments: string[]; toolActivity: { id: string; label: string; status: string; summary: string; durationMs: number | null; capability?: string | null; filePath?: string | null; exitCode?: number | null }[];
   agentActivity?: { providerId: string; label: string; status: 'running' | 'completed' | 'cancelled' | 'failed' } | null;
   error: string | null; cancelled: boolean;
 }
@@ -178,6 +196,25 @@ export interface IntegrationSettings {
   legacyRetired: RetiredIntegrationTool[]; settings: Record<string, unknown>; localService: LocalServiceSettings | null;
 }
 
+export interface OneBotConfiguration {
+  enabled: boolean; httpUrl: string; wsUrl: string; accessTokenConfigured: boolean;
+  httpAccessTokenConfigured: boolean; sourceHash: string; legacyPresent: boolean;
+}
+export interface OneBotHealth {
+  installed: boolean | null; configured: boolean | null; connected: boolean | null;
+  authenticated: boolean | null; ready: boolean | null; accountId: string | null;
+  state: string; canSend: boolean | null; error?: string | {code:string;message:string} | null;
+}
+export interface OneBotSettings { configuration: OneBotConfiguration; health: OneBotHealth }
+export interface OneBotConfigurationInput {
+  enabled: boolean; httpUrl: string; wsUrl: string; expectedSourceHash: string;
+  accessToken?: string; httpAccessToken?: string; clearAccessToken?: boolean; clearHttpAccessToken?: boolean;
+}
+export interface OneBotMigrationPreview {
+  legacyPresent: boolean; sourceHash: string; candidate: { httpUrl: string; wsUrl: string };
+  legacyTokenPresent: boolean; hasCurrentConfig: boolean; requiresTokenEntry: true;
+}
+
 export type DesktopEvent = 'preview.browser' | 'core.status' | 'chat.updated' | 'chat.streaming' | 'chat.warning' | 'task.updated' | 'task.deleted'
   | 'core.restarted' | 'diagnostics.updated'
   | 'agent.updated' | 'workspace.updated' | 'plugin.updated' | 'plugin.downloadProgress' | 'approval.pending' | 'approval.resolved'
@@ -212,6 +249,7 @@ type UiMethod =
   | 'ui.plugins.catalog' | 'ui.plugins.status' | 'ui.plugins.detail' | 'ui.plugins.refresh' | 'ui.plugins.stage' | 'ui.plugins.stage-local' | 'ui.plugins.install'
   | 'ui.plugins.enable.review' | 'ui.plugins.enable' | 'ui.plugins.disable' | 'ui.plugins.uninstall' | 'ui.plugins.integration.list' | 'ui.plugins.integration.settings'
   | 'ui.plugins.integration.manage' | 'ui.plugins.integration.tool.toggle' | 'ui.plugins.integration.action'
+  | 'ui.channel.onebot.get' | 'ui.channel.onebot.configure' | 'ui.channel.onebot.migration.preview' | 'ui.channel.onebot.migration.apply'
   | 'ui.mcp.list' | 'ui.mcp.tools' | 'ui.mcp.manage' | 'ui.mcp.config.get' | 'ui.mcp.config.update'
   | 'ui.settings.describe' | 'ui.settings.get' | 'ui.settings.update' | 'ui.about.info' | 'ui.about.update'
   | 'ui.feedback.links'
@@ -364,7 +402,7 @@ export const chatClient = {
   history: (id: string, limit = 100, beforeMessageId: string | null = null, afterMessageId: string | null = null) => uiCall<{
     id: string; total: number; messages: ChatMessage[]; sessionUsage?: ModelUsage | null; nextBeforeMessageId: string | null; hasMore: boolean; nextAfterMessageId: string | null; hasMoreAfter: boolean
   }>('ui.chat.history', { id, limit, beforeMessageId, afterMessageId }),
-  status: (id: string) => uiCall<{ id: string; taskId: string | null; dshSessionAlive: boolean; state: string; requestId: string | null; statusMessage: string | null; retryCount: number; followState: string; followError: string | null; displayText: string; toolActivity: ChatMessage['toolActivity']; agentActivity: ChatMessage['agentActivity']; error: string | null; errorCode: string | null; approvalId: string | null; approvalExpiresAt: string | number | null; routing: Record<string, unknown> }>('ui.chat.status', { id }),
+  status: (id: string) => uiCall<{ id: string; taskId: string | null; dshSessionAlive: boolean; state: string; requestId: string | null; statusMessage: string | null; retryCount: number; followState: string; followError: string | null; displayText: string; toolActivity: ChatMessage['toolActivity']; agentActivity: ChatMessage['agentActivity']; context?: ChatContextObservation | null; turnUsage?: ModelUsage | null; quota?: { status: 'unknown'; reason: string }; error: string | null; errorCode: string | null; approvalId: string | null; approvalExpiresAt: string | number | null; routing: Record<string, unknown> }>('ui.chat.status', { id }),
   send: (id: string, text: string, attachments: Attachment[] = [], clientMessageId?: string) => {
     const params = { id, text, attachments:attachments.map(a=>a.ref?{ref:a.ref}:a), ...(clientMessageId ? { clientMessageId } : {}) };
     return uiCall<{ userMessageId?: string; requestId?: string }>('ui.chat.send', params).catch(error => {
@@ -377,7 +415,7 @@ export const chatClient = {
   stop: (id: string) => uiCall<{ stopped?: boolean; state?: string; reason?: string }>('ui.chat.stop', { id }),
   retry: (id: string) => uiCall<{ userMessageId?: string }>('ui.chat.retry', { id }),
   continue: (id: string) => uiCall<{ continued?: boolean }>('ui.chat.continue', { id }),
-  catalog: (refresh = false) => uiCall<{ models: unknown[]; modelProviders: { id: string; label: string; configured: boolean; catalogState: string; reachable: boolean | null; authenticated: boolean | null; inferencing: boolean | null; toolCalling: boolean; error: string | null; settingsFields: ProviderSettingField[]; models: { id?: string; name?: string; label?: string; toolCalling?: string; streaming?: string; reasoning?: string }[] }[]; agentProviders: Agent[]; modes: string[]; defaultModelProvider: string | null; available: boolean; reason: string | null }>('ui.chat.catalog', { refresh }),
+  catalog: (refresh = false) => uiCall<{ models: unknown[]; modelProviders: ChatModelProvider[]; agentProviders: Agent[]; modes: string[]; defaultModelProvider: string | null; available: boolean; reason: string | null }>('ui.chat.catalog', { refresh }),
   setConfig: (id: string, config: Record<string, unknown>) => uiCall<ChatSession>('ui.chat.config.set', { id, config })
 };
 export const taskClient = {
@@ -466,13 +504,19 @@ export const extensionSettingsClient = {
   integrations: () => uiCall<{ integrations: { id: string; name: string; status: string; enabled: boolean; available: boolean; eligible: boolean; configured: boolean; reason: string | null; lastError: string | null }[] }>('ui.plugins.integration.list', {}),
   integrationSettings: (id: string) => uiCall<IntegrationSettings>('ui.plugins.integration.settings', { id }),
   manageIntegration: (id: string, action: 'enable' | 'disable') => uiCall<Record<string, unknown>>('ui.plugins.integration.manage', { id, action }),
-  integrationAction: (localService: 'snowluma' | 'qq' | 'bionic', action: 'health' | 'detect' | 'start' | 'stop' | 'reconnect' | 'install' | 'configure', params: Record<string, unknown> = {}) => uiCall<Record<string, unknown>>('ui.plugins.integration.action', { localService, action, params }),
+  integrationAction: (localService: 'onebot' | 'qq' | 'bionic', action: 'health' | 'start' | 'stop' | 'reconnect', params: Record<string, unknown> = {}) => uiCall<Record<string, unknown>>('ui.plugins.integration.action', { localService, action, params }),
   toggleTool: (pluginId: string, toolId: string, enabled: boolean) => uiCall<Record<string, unknown>>('ui.plugins.integration.tool.toggle', { pluginId, toolId, enabled }),
   mcp: () => uiCall<{ servers: { id: string; name: string; status: string; enabled: boolean; running: boolean; available: boolean; toolCallable: boolean; eligible: boolean; configured: boolean; source: string; toolCount: number | null; discoveredToolCount: number; transport: string; reason: string | null; lastError: string | null }[] }>('ui.mcp.list', {}),
   mcpTools: (id: string) => uiCall<{ serverId: string; tools: { id: string; name: string; description: string; enabled: boolean; discovered: boolean; callable: boolean }[] }>('ui.mcp.tools', { id }),
   manageMcp: (serverId: string, action: 'enable' | 'disable' | 'start' | 'stop' | 'restart') => uiCall<Record<string, unknown>>('ui.mcp.manage', { serverId, action }),
   mcpConfig: (serverId: string) => uiCall<{ id: string; enabled: boolean; hasArgs: boolean; hasEnvironment: boolean; timeoutMs: number | null; note: string;url:string;credentialRef:string;allowedTools:string[] }>('ui.mcp.config.get', { serverId }),
   updateMcpConfig: (serverId: string, config: { timeoutMs?: number; note?: string;url?:string;credentialRef?:string;allowedTools?:string[] }) => uiCall<{ id: string; updatedKeys: string[] }>('ui.mcp.config.update', { serverId, config })
+};
+export const oneBotClient = {
+  get: () => uiCall<OneBotSettings>('ui.channel.onebot.get', {}),
+  configure: (config: OneBotConfigurationInput) => uiCall<OneBotSettings>('ui.channel.onebot.configure', config),
+  previewMigration: () => uiCall<OneBotMigrationPreview>('ui.channel.onebot.migration.preview', {}),
+  applyMigration: (expectedSourceHash: string) => uiCall<OneBotSettings & { backup: { id: string; sha256: string } }>('ui.channel.onebot.migration.apply', { confirm: true, expectedSourceHash })
 };
 export const settingsClient = {
   describe: () => uiCall<{ sections: { section: string; label: string }[]; fields: SettingSection[] }>('ui.settings.describe', {}),

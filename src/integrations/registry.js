@@ -8,6 +8,7 @@
 
 import { allPluginDescriptors, buildToolCatalog, MCP_SERVER_CATALOG } from './catalog.js';
 import { integrationError, isRestorable, TOOL_CAPABILITIES } from './types.js';
+import { assertNotRetiredSnowLuma } from './retired.js';
 
 const MCP_CONFIG_KEYS = Object.freeze({
   url: 'https-url',
@@ -89,11 +90,13 @@ export function createIntegrationRegistry({
   const integrationIdForTool = tool => (tool.serverId === 'agent' ? 'cetamesh-dsh' : null);
 
   function requirePlugin(id) {
+    assertNotRetiredSnowLuma(id);
     const plugin = pluginById.get(String(id));
     if (!plugin) throw integrationError('UNKNOWN_PLUGIN', '未知插件：' + id);
     return plugin;
   }
   function requireServer(id) {
+    assertNotRetiredSnowLuma(id);
     const server = serverById.get(String(id));
     if (!server) throw integrationError('UNKNOWN_MCP_SERVER', '未知 MCP Server：' + id);
     return server;
@@ -119,6 +122,8 @@ export function createIntegrationRegistry({
   function toolEnabled(tool, pack = packOwning(tool.id)) {
     const toggle = pack ? pluginRecord(pack.id).tools?.[tool.id] : undefined;
     return isRestorable(tool.restore) && (!pack || pluginEnabled(pack.id))
+      && (!['onebot', 'qq-file-send'].includes(tool.serverId)
+        || (pluginById.has('cetamesh-onebot') && pluginEnabled('cetamesh-onebot')))
       && (typeof toggle === 'boolean' ? toggle : tool.enabledByDefault !== false)
       && (!serverByIdForTool(tool) || serverEnabled(tool.serverId));
   }
@@ -200,6 +205,7 @@ export function createIntegrationRegistry({
   }
 
   function resolveTool(id) {
+    assertNotRetiredSnowLuma(id);
     syncRemoteTools();
     const tool = toolById.get(String(id));
     if (!tool) throw integrationError('UNKNOWN_TOOL', '未知工具：' + id);
@@ -282,6 +288,7 @@ export function createIntegrationRegistry({
   }
 
   function setToolEnabled(pluginId, toolId, enabled) {
+    assertNotRetiredSnowLuma(toolId);
     const plugin = requirePlugin(pluginId);
     if (plugin.kind !== 'tool-pack') {
       throw integrationError('TOOL_TOGGLE_UNSUPPORTED', '插件 ' + plugin.id + ' 不支持逐工具开关');
@@ -303,6 +310,8 @@ export function createIntegrationRegistry({
   }
 
   function listTools({ source = null, pluginId = null, enabled = null, available = null, serverId = null } = {}) {
+    assertNotRetiredSnowLuma(pluginId);
+    assertNotRetiredSnowLuma(serverId);
     syncRemoteTools();
     return [...toolById.values()]
       .filter(tool => (source ? tool.source === source : true))

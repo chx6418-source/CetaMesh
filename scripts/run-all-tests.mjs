@@ -39,6 +39,15 @@ export const CATEGORIES = ['core', 'architecture', 'security', 'runtime', 'integ
 // ── 登记表：scripts/test-*.mjs 的每一个文件都必须出现在这里（或能从 package.json 映射）。
 // requires 的取值见 probeAvailability()；category 取值见 CATEGORIES。
 const REGISTRY = {
+  'test-snowluma-retirement.mjs': {category:'security',timeoutMs:120000,note:'Retired branded integration identifiers cannot launch, remap or regain authority'},
+  'test-onebot-explicit-activation.mjs': {category:'integration',timeoutMs:120000,note:'Explicit neutral OneBot configuration and opt-in activation; no startup external requests'},
+  'test-onebot-connection-ui.mjs': {category:'desktop',timeoutMs:120000,note:'Neutral OneBot configuration, redacted credentials, migration review and separate connection control'},
+  'test-chat-composer-panels-live.mjs': {category:'desktop',timeoutMs:180000,requires:['ui-motion-live'],note:'Rendered composer popovers keyboard, viewport and capability interactions'},
+  'test-chat-composer-panels.mjs': {category:'desktop',timeoutMs:120000,note:'Compact context and model controls with real capability boundaries and unknown data'},
+  'test-chat-activity.mjs': {category:'desktop',timeoutMs:120000,note:'Evidence based bounded Agent and tool activity cards'},
+  'test-model-context-observation.mjs': {category:'security',timeoutMs:120000,note:'Numeric-only per-request model context observations and capability contracts'},
+  'test-chat-runtime-panels.mjs': {category:'security',timeoutMs:120000,note:'Chat context attribution, safe reasoning selection, status and history projection'},
+  'test-onebot-configuration.mjs': {category:'security',timeoutMs:120000,note:'Owner-only neutral config migration, protected backup, fingerprint conflicts and no credential copying'},
   'test-real-simulation.mjs': {category:'environment',timeoutMs:900000,note:'Opt-in configured real model persona comparison, bounded discussion and actual isolated Managed project execution'},
   'test-simulation-integration.mjs': {category:'integration',timeoutMs:120000,note:'Actual Core composition, trusted UI and Model Runtime with social connectors absent'},
   'test-simulation-project.mjs': {category:'security',timeoutMs:120000,note:'Real Task planning, scoped project links and independent evidence without simulated completion'},
@@ -386,11 +395,10 @@ let availabilityCache = null;
 async function probeAvailability() {
   if (availabilityCache) return availabilityCache;
   const cfg = readRawConfigOrEmpty(APP_PATHS.configFile);
-  const gatewayUrl = String(cfg.snowluma?.httpUrl ?? 'http://127.0.0.1:3000');
-  let gatewayPort = 3000;
-  try {
-    gatewayPort = Number(new URL(gatewayUrl).port) || (new URL(gatewayUrl).protocol === 'https:' ? 443 : 80);
-  } catch { /* 默认 3000 */ }
+  let gatewayEndpoint=null;
+  if(process.env.CETAMESH_TEST_ONEBOT==='1'&&cfg.onebot?.enabled===true){
+    try{const endpoint=new URL(cfg.onebot.httpUrl);if(['http:','https:'].includes(endpoint.protocol)&&!endpoint.username&&!endpoint.password&&!endpoint.search&&!endpoint.hash)gatewayEndpoint=endpoint;}catch{/* No implicit gateway probe. */}
+  }
   const consolePort = Number(cfg.consolePort) || 3100;
   const exists = (relative) => fs.existsSync(path.join(ROOT, relative));
   const gatewayConfigPresent = fs.existsSync(path.join(ROOT, 'config.json'));
@@ -414,7 +422,7 @@ async function probeAvailability() {
     'reference-browser-live': process.platform === 'win32' && process.env.WHALEBRIDGE_TEST_REFERENCE_BROWSER === '1',
     'dsh-live': process.platform === 'win32' && process.env.WHALEBRIDGE_TEST_REAL_DSH === '1',
     'ui-motion-live': process.platform === 'win32' && process.env.WHALEBRIDGE_TEST_UI_MOTION === '1',
-    gateway: gatewayConfigPresent && await probeTcp(gatewayPort),
+    gateway: gatewayConfigPresent && !!gatewayEndpoint && await probeTcp(Number(gatewayEndpoint.port)||(gatewayEndpoint.protocol==='https:'?443:80),gatewayEndpoint.hostname),
     // A live TCP listener may be the user’s real desktop bridge; this suite mutates roles/allowlists and sends a test QQ message.
     'legacy-bridge': isLegacyBridgeTestOptedIn() && await probeTcp(consolePort),
     'cargo-opt-in': process.env.WHALEBRIDGE_TEST_CARGO === '1'

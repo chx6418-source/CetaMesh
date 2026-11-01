@@ -206,7 +206,6 @@ enum Operation {
     ServicesRefresh,
     ServicesDetect,
     ServiceSelect(ServiceKind),
-    ServiceInstallSnowLuma,
     ServiceStart(ServiceKind),
     ServiceStop(ServiceKind),
     ModelCatalogLoad,
@@ -342,21 +341,18 @@ fn plugin_action_operation(action: PluginAction) -> Operation {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ServiceKind {
-    SnowLuma,
     Dsh,
 }
 
 impl ServiceKind {
     fn as_str(self) -> &'static str {
         match self {
-            Self::SnowLuma => "snowluma",
             Self::Dsh => "dsh",
         }
     }
 
     fn label(self) -> &'static str {
         match self {
-            Self::SnowLuma => "SnowLuma",
             Self::Dsh => "DSH",
         }
     }
@@ -364,7 +360,6 @@ impl ServiceKind {
     #[cfg(test)]
     fn parse(value: &str) -> Option<Self> {
         match value {
-            "snowluma" => Some(Self::SnowLuma),
             "dsh" => Some(Self::Dsh),
             _ => None,
         }
@@ -373,7 +368,6 @@ impl ServiceKind {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ServiceAction {
-    InstallSnowLuma,
     Start(ServiceKind),
     Stop(ServiceKind),
 }
@@ -851,10 +845,8 @@ pub struct NativeUi {
     loaded_policy_mode: Option<String>,
     policy_confirmation: Option<Value>,
 
-    services_snowluma: ServiceSnapshot,
     services_dsh: ServiceSnapshot,
     services_loaded: bool,
-    selected_snowluma_install: String,
     selected_dsh_install: String,
     service_confirmation: Option<ServiceAction>,
     services_notice: Option<String>,
@@ -1250,10 +1242,8 @@ ApiCall::Family { method, params } => api.request(method, params),
             loaded_policy_mode: None,
             policy_confirmation: None,
 
-            services_snowluma: ServiceSnapshot::default(),
             services_dsh: ServiceSnapshot::default(),
             services_loaded: false,
-            selected_snowluma_install: String::new(),
             selected_dsh_install: String::new(),
             service_confirmation: None,
             services_notice: None,
@@ -1855,12 +1845,6 @@ ApiCall::Family { method, params } => api.request(method, params),
                     ));
                     self.apply_service(service, value);
                 }
-                (Operation::ServiceInstallSnowLuma, Ok(value)) => {
-                    self.services_notice = Some(
-                        "SnowLuma 安装已提交；下载/安装可能仍在后台运行，可稍后刷新。".to_owned(),
-                    );
-                    self.apply_service(ServiceKind::SnowLuma, value);
-                }
                 (Operation::ModelCatalogLoad, Ok(value)) => self.apply_model_catalog(value),
                 (Operation::ModelDefaultsLoad, Ok(value)) => self.apply_model_defaults(value),
                 (Operation::ModelDefaultsSave, Ok(value)) => {
@@ -2228,23 +2212,17 @@ ApiCall::Family { method, params } => api.request(method, params),
 
     fn apply_services(&mut self, value: &Value) {
         let services = value.get("services").unwrap_or(value);
-        let snowluma = services
-            .get("snowluma")
-            .ok_or_else(|| "Core 返回的 SnowLuma 状态缺失。".to_owned())
-            .and_then(parse_service_snapshot);
         let dsh = services
             .get("dsh")
             .ok_or_else(|| "Core 返回的 DSH 状态缺失。".to_owned())
             .and_then(parse_service_snapshot);
-        match (snowluma, dsh) {
-            (Ok(snowluma), Ok(dsh)) => {
-                self.services_snowluma = snowluma;
+        match dsh {
+            Ok(dsh) => {
                 self.services_dsh = dsh;
                 self.services_loaded = true;
-                self.reconcile_selected_install(ServiceKind::SnowLuma);
                 self.reconcile_selected_install(ServiceKind::Dsh);
             }
-            (Err(error), _) | (_, Err(error)) => {
+            Err(error) => {
                 self.feedback.insert(Area::Services, Err(error));
             }
         }
@@ -2256,7 +2234,6 @@ ApiCall::Family { method, params } => api.request(method, params),
         match result {
             Ok(snapshot) => {
                 match service {
-                    ServiceKind::SnowLuma => self.services_snowluma = snapshot,
                     ServiceKind::Dsh => self.services_dsh = snapshot,
                 }
                 self.reconcile_selected_install(service);
@@ -2349,7 +2326,6 @@ ApiCall::Family { method, params } => api.request(method, params),
 
     fn reconcile_selected_install(&mut self, service: ServiceKind) {
         let (snapshot, selected) = match service {
-            ServiceKind::SnowLuma => (&self.services_snowluma, &mut self.selected_snowluma_install),
             ServiceKind::Dsh => (&self.services_dsh, &mut self.selected_dsh_install),
         };
         if snapshot.has_selectable_install(selected) {
@@ -5370,7 +5346,7 @@ impl NativeUi {
 
     fn show_services(&mut self, ui: &mut egui::Ui) {
         ui.heading("本地服务");
-        ui.label("通过本机 Core IPC 查看和控制 SnowLuma、DSH。安装项由 Core 检测返回；此页不接受命令、URL 或路径输入。");
+        ui.label("通过本机 Core IPC 查看和控制 DSH。安装项由 Core 检测返回；此页不接受命令、URL 或路径输入。");
         ui.horizontal(|ui| {
             if self.button(ui, Area::Services, "刷新状态") {
                 self.issue_control(
@@ -5392,8 +5368,6 @@ impl NativeUi {
                 ui.weak("尚未读取服务状态。");
             }
         });
-        ui.separator();
-        self.show_service_card(ui, ServiceKind::SnowLuma);
         ui.separator();
         self.show_service_card(ui, ServiceKind::Dsh);
 
@@ -5789,16 +5763,6 @@ impl NativeUi {
         }
 
         ui.horizontal_wrapped(|ui| {
-            if service == ServiceKind::SnowLuma {
-                let can_install =
-                    snapshot.installed != Some(true) && !self.pending.contains(&Area::Services);
-                if ui
-                    .add_enabled(can_install, egui::Button::new("安装 SnowLuma…"))
-                    .clicked()
-                {
-                    self.service_confirmation = Some(ServiceAction::InstallSnowLuma);
-                }
-            }
             let can_start = snapshot.installed != Some(false)
                 && snapshot.running != Some(true)
                 && !self.pending.contains(&Area::Services);
@@ -5844,11 +5808,6 @@ impl NativeUi {
 
     fn issue_service_action(&mut self, action: ServiceAction) {
         let (operation, method, params) = match action {
-            ServiceAction::InstallSnowLuma => (
-                Operation::ServiceInstallSnowLuma,
-                "services.installSnowLuma",
-                json!({}),
-            ),
             ServiceAction::Start(service) => (
                 Operation::ServiceStart(service),
                 "services.start",
@@ -5865,21 +5824,18 @@ impl NativeUi {
 
     fn service_snapshot(&self, service: ServiceKind) -> &ServiceSnapshot {
         match service {
-            ServiceKind::SnowLuma => &self.services_snowluma,
             ServiceKind::Dsh => &self.services_dsh,
         }
     }
 
     fn selected_install_id(&self, service: ServiceKind) -> &str {
         match service {
-            ServiceKind::SnowLuma => &self.selected_snowluma_install,
             ServiceKind::Dsh => &self.selected_dsh_install,
         }
     }
 
     fn selected_install_id_mut(&mut self, service: ServiceKind) -> &mut String {
         match service {
-            ServiceKind::SnowLuma => &mut self.selected_snowluma_install,
             ServiceKind::Dsh => &mut self.selected_dsh_install,
         }
     }
@@ -7082,10 +7038,6 @@ fn selected_install_label(snapshot: &ServiceSnapshot, selected_id: &str) -> Stri
 
 fn service_confirmation_text(action: ServiceAction) -> String {
     match action {
-        ServiceAction::InstallSnowLuma => {
-            "将由本地 Core 安装 SnowLuma，可能下载组件、写入本机文件并更改系统状态。确认继续？"
-                .to_owned()
-        }
         ServiceAction::Start(service) => format!(
             "将启动 {}，会在本机创建或恢复服务进程，并可能影响正在使用它的应用。确认继续？",
             service.label()
@@ -7431,11 +7383,10 @@ mod services_ui_tests {
 
     #[test]
     fn only_supported_local_service_names_are_allowed() {
-        assert_eq!(ServiceKind::parse("snowluma"), Some(ServiceKind::SnowLuma));
         assert_eq!(ServiceKind::parse("dsh"), Some(ServiceKind::Dsh));
         for unsupported in [
             "",
-            "SnowLuma",
+            "onebot",
             "node",
             "https://example.invalid",
             "C:\\temp",
@@ -7453,7 +7404,7 @@ mod services_ui_tests {
             "lastError": "启动失败提示",
             "selectedId": "local-1",
             "installations": [
-                { "id": "local-1", "name": "SnowLuma", "version": "1.2", "status": "ready", "source": "configured", "valid": true, "path": "ignored" },
+                { "id": "local-1", "name": "DSH", "version": "1.2", "status": "ready", "source": "configured", "valid": true, "path": "ignored" },
                 { "id": "local-1", "name": "duplicate", "valid": false },
                 { "id": "invalid-1", "name": "Invalid install", "valid": false, "invalidReason": "missing launcher" },
                 { "id": "unknown-1", "name": "Missing validity field" }
@@ -7467,7 +7418,7 @@ mod services_ui_tests {
         assert_eq!(snapshot.message.as_deref(), Some("启动失败提示"));
         assert_eq!(snapshot.selected_id.as_deref(), Some("local-1"));
         assert_eq!(snapshot.installations.len(), 3);
-        assert_eq!(snapshot.installations[0].name, "SnowLuma");
+        assert_eq!(snapshot.installations[0].name, "DSH");
         assert_eq!(snapshot.installations[0].version.as_deref(), Some("1.2"));
         assert_eq!(snapshot.installations[0].status.as_deref(), Some("ready"));
         assert_eq!(

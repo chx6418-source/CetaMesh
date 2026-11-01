@@ -86,7 +86,7 @@ function isolatedEnv(tempRoot, dataDir, extra = {}) {
   };
 }
 
-function writeConfig(dataDir, consolePort) {
+function writeConfig(dataDir, consolePort, externalGatewayPort) {
   fs.mkdirSync(dataDir, { recursive: true });
   fs.writeFileSync(
     path.join(dataDir, 'config.json'),
@@ -98,7 +98,9 @@ function writeConfig(dataDir, consolePort) {
         allow: { private: [], groups: [] },
         deny: { private: [], groups: [] },
         allowAllWhenEmpty: false,
-        snowluma: { httpUrl: 'http://127.0.0.1:9', wsUrl: 'ws://127.0.0.1:9', allowProcessControl: false },
+        // Retained legacy metadata cannot grant lifecycle ownership of this
+        // independently running passive fixture process.
+        snowluma: { httpUrl: `http://127.0.0.1:${externalGatewayPort}`, wsUrl: `ws://127.0.0.1:${externalGatewayPort}`, allowProcessControl: false },
         socialV2: { tools: { getCardMsg: false, clickCardButton: false, fileSend: false, bilibili: false } }
       },
       null,
@@ -131,6 +133,43 @@ async function waitForExit(child, timeoutMs = 8000) {
     new Promise((resolve) => child.once('exit', (code) => resolve(code))),
     new Promise((resolve) => setTimeout(() => resolve('timeout'), timeoutMs))
   ]);
+}
+
+async function startExternalGatewayFixture() {
+  const child = spawn(process.execPath, ['--input-type=module', '-e', `
+    import net from 'node:net';
+    const server = net.createServer(socket => socket.end('external-fixture'));
+    server.listen(0, '127.0.0.1', () => process.stdout.write(String(server.address().port) + '\\n'));
+    process.stdin.resume();
+    process.stdin.on('end', () => server.close());
+  `], { cwd: ROOT, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+  try {
+    const port = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Passive external gateway fixture did not become ready')), 5000);
+      let source = '';
+      child.once('error', error => { clearTimeout(timer); reject(error); });
+      child.once('exit', code => { clearTimeout(timer); reject(new Error(`Passive fixture exited during startup (${code})`)); });
+      child.stdout.on('data', bytes => {
+        source += String(bytes);
+        if (source.includes('\n')) { clearTimeout(timer); resolve(Number(source.trim())); }
+      });
+    });
+    assert.ok(Number.isSafeInteger(port) && port > 0);
+    return { child, port };
+  } catch (error) { child.kill(); throw error; }
+}
+
+async function assertExternalGatewayAlive({ child, port }) {
+  assert.equal(child.exitCode, null, 'shutdown must preserve an independently running external gateway process');
+  const response = await new Promise((resolve, reject) => {
+    const socket = net.connect({ host: '127.0.0.1', port });
+    let source = '';
+    socket.setTimeout(3000, () => socket.destroy(new Error('Passive external gateway fixture stopped responding')));
+    socket.on('error', reject);
+    socket.on('data', bytes => { source += String(bytes); });
+    socket.on('end', () => resolve(source));
+  });
+  assert.equal(response, 'external-fixture', 'the external gateway must still answer after owned shutdown');
 }
 
 // ---------------------------------------------------------------- 前置检查
@@ -173,9 +212,10 @@ step('✅ 非托管默认：未设置 WHALEBRIDGE_SUPERVISED 时 isSupervised() 
 
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'whalebridge-supervisor-'));
 const dataDir = path.join(tempRoot, 'data');
-writeConfig(dataDir, await freePort());
+const externalGateway = await startExternalGatewayFixture();
 
 try {
+  writeConfig(dataDir, await freePort(), externalGateway.port);
   // ------------------------------------------------ 1. 托管 worker 启动 + 孤儿守卫
   {
     const port = JSON.parse(fs.readFileSync(path.join(dataDir, 'config.json'), 'utf8')).consolePort;
@@ -245,13 +285,17 @@ try {
       assert.equal(fs.existsSync(path.join(dataDir, 'state', '.core-owner.lock')), false,
         '退出后必须释放 StateDir owner，不能仅释放 Legacy 锁');
       assert.match(log, /Agent Provider 服务已关闭/, '退出前必须完成 owned Agent Provider 清理');
-      assert.match(log, /SnowLuma 保持运行/, '独立 SnowLuma 服务必须保留运行');
+      await assertExternalGatewayAlive(externalGateway);
       step('✅ 托管 /api/shutdown：完成 owned cleanup、无全局清理、退出码 0、释放两层锁');
     } finally {
       if (child.exitCode === null) child.kill();
     }
   }
 } finally {
+  if (externalGateway.child.exitCode === null) {
+    externalGateway.child.stdin.end();
+    if (await waitForExit(externalGateway.child) === 'timeout') externalGateway.child.kill();
+  }
   fs.rmSync(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
 }
 

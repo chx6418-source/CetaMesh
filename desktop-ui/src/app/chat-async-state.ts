@@ -1,3 +1,4 @@
+import type {ChatContextObservation,ModelUsage} from '../bridge/typed-client';
 export type ChatRequestKind = 'load' | 'context' | 'older';
 export type ChatRequestToken = { kind: ChatRequestKind; sessionId: string | null; generation: number };
 
@@ -64,6 +65,8 @@ export type ChatStreamUpdate = {
   reset?: boolean;
   toolActivity?: unknown;
   agentActivity?: unknown;
+  context?: ChatContextObservation | null;
+  turnUsage?: ModelUsage | null;
 };
 
 /** Keep the last streamed answer until the matching durable message reaches history. */
@@ -82,6 +85,8 @@ export function applyChatStreamUpdates<T extends {
   statusMessage: string | null;
   toolActivity: unknown;
   agentActivity: unknown;
+  context?: ChatContextObservation | null;
+  turnUsage?: ModelUsage | null;
 }>(current: T, updates: ChatStreamUpdate[], sessionId: string, activeRequestId: string | null): T {
   let next = current;
   let acceptedRequestId = activeRequestId ?? current.requestId;
@@ -94,6 +99,7 @@ export function applyChatStreamUpdates<T extends {
     if (!next || next === current) next = { ...current };
     if (update.reset) {
       next.displayText = '';
+      if (requestId && requestId !== acceptedRequestId) { next.context = null; next.turnUsage = null; }
       if (requestId) {
         acceptedRequestId = requestId;
         next.requestId = requestId;
@@ -107,6 +113,8 @@ export function applyChatStreamUpdates<T extends {
     next.statusMessage = update.message ?? next.statusMessage;
     next.toolActivity = update.toolActivity ?? next.toolActivity;
     next.agentActivity = update.agentActivity === undefined ? next.agentActivity : update.agentActivity;
+    if (requestId && update.context?.schemaVersion === 1 && (!update.context.requestId || update.context.requestId === requestId)) next.context = update.context;
+    if (requestId && update.turnUsage !== undefined) next.turnUsage = update.turnUsage;
   }
   return next;
 }

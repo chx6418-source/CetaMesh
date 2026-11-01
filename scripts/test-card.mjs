@@ -3,13 +3,14 @@
 // 2. extractCardsFromSegments：json / ark / xml / lightapp / miniapp 提取与上限
 // 3. 结构化字段：普通消息卡片与活动类卡片的 app/view/title/desc/jumpUrl/coverUrl/tag/按钮
 // 4. cardSummaryForMessage / buildCardHint / formatCardResponse
-// 5. 源码接入断言：bridge.js 端点与开关、mcp-snowluma-safe.js 工具、控制台开关、config 默认值
-// 6. MCP 常驻注册检查：进程内（内存传输）启动 mcp-snowluma-safe.js，确认 qq_get_card_msg 无条件注册
+// 5. 源码接入断言：bridge.js 端点与开关、mcp-onebot-safe.js 工具、控制台开关、config 默认值
+// 6. MCP 常驻注册检查：进程内（内存传输）启动 mcp-onebot-safe.js，确认 qq_get_card_msg 无条件注册
 // 7. 桥接运行中时，校验 /api/socialV2/card-message 的安全拒绝逻辑
 // 运行：node scripts/test-card.mjs
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { assertOneBotHttpConfigured } from '../src/channel/qq/config.js';
 import {
   CARD_SEGMENT_TYPES,
   MAX_CARDS_PER_MESSAGE,
@@ -272,7 +273,7 @@ check('sanitizeCardRef 拒绝空白与超长', sanitizeCardRef('1 2') === '' && 
 
 // ── 5. 源码接入断言 ───────────────────────────────────────────────────────
 const bridgeSrc = fs.readFileSync(path.join(ROOT, 'src', 'bridge.js'), 'utf8');
-const mcpSrc = fs.readFileSync(path.join(ROOT, 'src', 'mcp-snowluma-safe.js'), 'utf8');
+const mcpSrc = fs.readFileSync(path.join(ROOT, 'src', 'mcp-onebot-safe.js'), 'utf8');
 const consoleHtml = fs.readFileSync(path.join(ROOT, 'public', 'console.html'), 'utf8');
 // 历史设计实验已移出公开仓库。直接验证当前维护的控制台实现，
 // 不再把已废弃的设计基线当作安全行为测试的依赖。
@@ -310,13 +311,13 @@ check('bridge.js 消息记录带卡片摘要', /cardSummaryForMessage/.test(brid
 const forwardSrc = fs.readFileSync(path.join(ROOT, 'src', 'forward.js'), 'utf8');
 check('forward.js 识别 markdown/按钮段', /case 'markdown'/.test(forwardSrc) && /case 'inline_keyboard'/.test(forwardSrc));
 
-check('mcp-snowluma-safe.js 注册 qq_get_card_msg', mcpSrc.includes("'qq_get_card_msg'"));
-check('mcp-snowluma-safe.js 运行期读配置实现即时开关', /getCardMsg === false/.test(mcpSrc));
-check('mcp-snowluma-safe.js 调用桥接 card-message 端点', mcpSrc.includes('/api/socialV2/card-message'));
-check('mcp-snowluma-safe.js 注册 qq_click_card_button', mcpSrc.includes("'qq_click_card_button'"));
-check('mcp-snowluma-safe.js 卡片点击严格检查显式开启', /clickCardButton !== true/.test(mcpSrc));
-check('mcp-snowluma-safe.js 卡片点击要求 confirm=true', /confirm:\s*z\.literal\(true\)/.test(mcpSrc));
-check('mcp-snowluma-safe.js 注册审批状态查询工具', mcpSrc.includes("'qq_get_card_button_approval'") && mcpSrc.includes('/api/socialV2/card-button-approval'));
+check('mcp-onebot-safe.js 注册 qq_get_card_msg', mcpSrc.includes("'qq_get_card_msg'"));
+check('mcp-onebot-safe.js 运行期读配置实现即时开关', /getCardMsg === false/.test(mcpSrc));
+check('mcp-onebot-safe.js 调用桥接 card-message 端点', mcpSrc.includes('/api/socialV2/card-message'));
+check('mcp-onebot-safe.js 注册 qq_click_card_button', mcpSrc.includes("'qq_click_card_button'"));
+check('mcp-onebot-safe.js 卡片点击严格检查显式开启', /clickCardButton !== true/.test(mcpSrc));
+check('mcp-onebot-safe.js 卡片点击要求 confirm=true', /confirm:\s*z\.literal\(true\)/.test(mcpSrc));
+check('mcp-onebot-safe.js 注册审批状态查询工具', mcpSrc.includes("'qq_get_card_button_approval'") && mcpSrc.includes('/api/socialV2/card-button-approval'));
 
 check('控制台开关面板含 getCardMsg（public/console.html）', consoleHtml.includes('data-v2-tool="getCardMsg"'));
 check('控制台卡片读取工具只验证当前维护的控制台入口', consoleHtml.includes('data-v2-tool="getCardMsg"'));
@@ -391,11 +392,12 @@ if (fs.existsSync(consoleTokenFile) && fs.existsSync(socialV2File) && config) {
             } else if (conv[0].startsWith('group:')) {
               // 从 OneBot 真实历史里挑一条带卡片的群消息，走桥接端点读回卡片与插图。
               const rawCfg = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
-              const ob = rawCfg.snowluma ?? {};
+              const ob = rawCfg.onebot ?? {};
+              const onebotHttpUrl = assertOneBotHttpConfigured(rawCfg);
               const groupId = Number(conv[0].slice('group:'.length));
-              const histRes = await fetch(String(ob.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '') + '/get_group_msg_history', {
+              const histRes = await fetch(onebotHttpUrl + '/get_group_msg_history', {
                 method: 'POST',
-                headers: { 'content-type': 'application/json', ...(ob.accessToken ? { authorization: 'Bearer ' + ob.accessToken } : {}) },
+                headers: { 'content-type': 'application/json', ...(ob.httpAccessToken ? { authorization: 'Bearer ' + ob.httpAccessToken } : {}) },
                 body: JSON.stringify({ group_id: groupId, count: 30 }),
                 signal: AbortSignal.timeout(15000)
               });
@@ -445,11 +447,11 @@ if (fs.existsSync(consoleTokenFile) && fs.existsSync(socialV2File) && config) {
 try {
   const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js');
   const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
-  const { runMcpSnowLuma } = await import('../src/mcp-snowluma-safe.js');
-  check('MCP 常驻注册：提供显式 runMcpSnowLuma 入口', typeof runMcpSnowLuma === 'function');
-  if (typeof runMcpSnowLuma === 'function') {
+  const { runMcpOneBot } = await import('../src/mcp-onebot-safe.js');
+  check('MCP 常驻注册：提供显式 runMcpOneBot 入口', typeof runMcpOneBot === 'function');
+  if (typeof runMcpOneBot === 'function') {
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    const mcpServer = await runMcpSnowLuma(serverTransport);
+    const mcpServer = await runMcpOneBot(serverTransport);
     const client = new Client({ name: 'card-test', version: '0.0.1' });
     await client.connect(clientTransport);
     const listed = await client.listTools();

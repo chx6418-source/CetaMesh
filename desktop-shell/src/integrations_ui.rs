@@ -1351,17 +1351,17 @@ mod tests {
             "tools": [
                 {"id": "bionic.schedule.create", "label": "创建日程", "description": "新建日程", "pluginId": "cetamesh-bionic-chat",
                  "enabled": true, "available": true, "risk": "low"},
-                {"id": "mcp__snowluma__qq_send_group_message", "serverId": "snowluma", "enabled": true, "risk": "medium"}
+                {"id": "mcp__onebot__qq_send_group_message", "serverId": "onebot", "enabled": true, "risk": "medium"}
             ]
         }));
         assert_eq!(tools.len(), 2);
         assert_eq!(tools[0].plugin_id, "cetamesh-bionic-chat");
         assert!(tools[1].plugin_id.is_empty());
-        assert_eq!(tools[1].server_id, "snowluma");
+        assert_eq!(tools[1].server_id, "onebot");
 
         let servers = parse_mcp_servers(&json!({
             "servers": [
-                {"id": "snowluma", "name": "SnowLuma", "status": "running", "enabled": true, "toolCount": 39},
+                {"id": "onebot", "name": "OneBot", "status": "running", "enabled": true, "toolCount": 39},
                 {"id": "bilibili", "status": "stopped", "enabled": false, "lastError": "连接被拒"}
             ]
         }));

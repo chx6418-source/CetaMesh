@@ -14,6 +14,7 @@ import {
 import { createIntegrationStore } from './store.js';
 import { createIntegrationRegistry } from './registry.js';
 import { createMcpRuntime } from './mcp-runtime.js';
+import {assertNotRetiredSnowLuma} from './retired.js';
 import { createCapabilityBroker } from '../capability/broker.js';
 import { OWNER_ACTOR } from '../capability/types.js';
 import crypto from 'node:crypto';
@@ -126,7 +127,9 @@ export function createIntegrationService({
     const local = (localServices?.() ?? {})[plugin.localService] ?? null;
     const provider = providerStatus(plugin.provider ?? null);
     const status = !enabled ? 'disabled' : (local?.status ?? (provider.available ? 'ready' : 'unavailable'));
-    const available = enabled && (local ? (local.running === true || local.status === 'ready') : provider.available);
+    const available = enabled && (local ? plugin.kind==='channel-integration'
+      ? local.ready===true&&local.authenticated===true
+      : local.running===true||local.status==='ready' : provider.available);
     return { id, enabled, available, status, lastError: local?.lastError ?? provider.lastError ?? null, provider };
   }
 
@@ -150,8 +153,9 @@ export function createIntegrationService({
   // ── 工具执行适配（真正"恢复"的落点） ────────────────────────────────────────
   function assertQqToolConnectorEnabled(toolId) {
     const tool = resolvedRegistry.toolById.get(String(toolId));
-    if (['snowluma', 'qq-file-send'].includes(tool?.serverId)
-      && !resolvedRegistry.pluginEnabled('cetamesh-snowluma')) {
+    assertNotRetiredSnowLuma(toolId);
+    if (['onebot', 'qq-file-send'].includes(tool?.serverId)
+      && !resolvedRegistry.pluginEnabled('cetamesh-onebot')) {
       throw integrationError('QQ_DISABLED', 'QQ Connector 已禁用。');
     }
   }
@@ -190,12 +194,20 @@ export function createIntegrationService({
   }
 
   async function applyManagement(command) {
+    for(const key of ['pluginId','serverId','toolId','localService'])assertNotRetiredSnowLuma(command[key]);
     switch (command.action) {
       case 'plugin.enable': return resolvedRegistry.setPluginEnabled(command.pluginId, true);
       case 'plugin.disable': {
         const plugin = resolvedRegistry.requirePlugin(command.pluginId);
         const view = resolvedRegistry.setPluginEnabled(command.pluginId, false);
         if (plugin.kind === 'mcp-server') await runtime.stop(plugin.mcpServerId);
+        if(['onebot','qq','bionic'].includes(plugin.localService)){
+          const stop=(localServices?.()?.actions??localServices?.actions)?.[plugin.localService]?.stop;
+          if(typeof stop==='function'){
+            const result=await stop();
+            if((result?.stopped===false||result?.ok===false))throw integrationError('INTEGRATION_STOP_UNCONFIRMED','开关已关闭；自有连接器退出仍需核对，未重启或重复执行。');
+          }
+        }
         return view;
       }
       case 'tool.toggle': return resolvedRegistry.setToolEnabled(command.pluginId, command.toolId, command.enabled === true);
@@ -565,6 +577,7 @@ export function createIntegrationService({
   };
 
   async function execute({ method, params = {} } = {}) {
+    for(const key of ['id','pluginId','serverId','toolId','localService'])assertNotRetiredSnowLuma(params?.[key]);
     const handler = handlers[method];
     if (!handler) throw integrationError('METHOD_NOT_FOUND', '未知 Plugins/Tools/MCP 方法：' + String(method));
     return handler(params ?? {});

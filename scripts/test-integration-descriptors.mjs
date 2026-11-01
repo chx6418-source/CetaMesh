@@ -1,4 +1,4 @@
-// 产品化任务 B：SnowLuma / DSH 集成描述符 + IPC 路由 + 容器装配验收。
+// 产品化任务 B：OneBot / DSH 集成描述符 + IPC 路由 + 容器装配验收。
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -13,14 +13,13 @@ let step = 0;
 const ok = label => { step += 1; console.log('✅ [' + step + '] ' + label); };
 
 try {
-  // ── 1. SnowLuma = Channel Provider Integration；DSH = Agent Provider Integration ──
+  // ── 1. OneBot = Channel Provider Integration；DSH = Agent Provider Integration ──
   const localServices = () => ({
-    snowluma: { status: 'ready', running: true, ready: true, lastError: '' },
+    onebot: { status: 'ready', running: true, ready: true, lastError: '' },
     dsh: { status: 'ready', running: true, ready: true, lastError: '' }
   });
-  localServices.actions = { snowluma: {
-    detect: async () => ({}), start: async () => ({}), stop: async () => ({}),
-    install: async () => ({}), connect: async () => ({})
+  localServices.actions = { onebot: {
+    connect: async () => ({}), disconnect: async () => ({}), configure: async () => ({})
   } };
   const service = createIntegrationService({
     stateDir: tmp,
@@ -29,19 +28,21 @@ try {
   });
   const list = await service.execute({ method: 'integrations.list' });
   assert.equal(list.integrations.length, 3);
-  const snow = list.integrations.find(item => item.id === 'cetamesh-snowluma');
+  const snow = list.integrations.find(item => item.id === 'cetamesh-onebot');
   const dsh = list.integrations.find(item => item.id === 'cetamesh-dsh');
   const bionic = list.integrations.find(item => item.id === 'cetamesh-bionic-chat');
   assert.ok(bionic, 'Bionic tool pack appears in the Plugin Center Integration list');
   assert.equal(bionic.available, true);
+  assert.equal(bionic.enabled, false, 'legacy Bionic behavior requires explicit enable');
+  assert.equal(snow.enabled, false, 'new OneBot integration requires explicit enable');
   assert.ok(bionic.toolCount >= 50);
 
   assert.equal(snow.kind, 'channel-integration');
   assert.equal(snow.bottomLayer, 'channel-provider');
   assert.deepEqual(snow.provider, { kind: 'channel', id: 'qq', available: true, lastError: null });
   assert.equal(snow.localService.status, 'ready');
-  assert.deepEqual(snow.actions, ['detect', 'start', 'stop', 'install', 'connect']);
-  assert.notEqual(snow.kind, 'extension', 'SnowLuma 不得被表示成 VM Extension');
+  assert.deepEqual(snow.actions, ['connect', 'disconnect', 'configure']);
+  assert.notEqual(snow.kind, 'extension', 'OneBot 不得被表示成 VM Extension');
 
   assert.equal(dsh.kind, 'agent-integration');
   assert.equal(dsh.bottomLayer, 'agent-provider');
@@ -49,21 +50,22 @@ try {
   assert.equal(dsh.provider.id, 'dsh');
   assert.notEqual(dsh.kind, 'extension', 'DSH Agent Provider 不得被塞进 VM Extension');
   assert.equal(dsh.advanced.providerKind, 'agent-provider');
-  ok('集成描述符：SnowLuma=Channel Provider、DSH=Agent Provider，均为 Plugin 卡片入口而非 Extension');
+  ok('集成描述符：OneBot=Channel Provider、DSH=Agent Provider，均为 Plugin 卡片入口而非 Extension');
 
   // ── 2. 底层 Provider 未接入时如实不可用（fail-closed） ─────────────────────
   const bare = createIntegrationService({ stateDir: fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-bare-integration-')) });
   const bareList = await bare.execute({ method: 'integrations.list' });
-  const bareSnow = bareList.integrations.find(item => item.id === 'cetamesh-snowluma');
+  const bareSnow = bareList.integrations.find(item => item.id === 'cetamesh-onebot');
   assert.equal(bareSnow.provider.available, false);
   assert.match(bareSnow.provider.lastError, /未接入/);
   assert.equal(bareSnow.integrationStatus.available, false);
-  await assert.rejects(() => bare.execute({ method: 'integrations.action', params: { localService: 'snowluma', action: 'start', approved: true } }),
+  await assert.rejects(() => bare.execute({ method: 'integrations.action', params: { localService: 'onebot', action: 'connect', approved: true } }),
     error => error.code === 'UNSUPPORTED_ACTION', '未绑定本地服务入口时必须如实拒绝');
   await bare.close();
   ok('底层未接入：provider.available=false + lastError；本地服务动作 UNSUPPORTED_ACTION（不伪造成功）');
 
   // ── 3. 关闭 DSH 集成后，Agent Provider 侧工具如实不可用 ───────────────────
+  await service.execute({ method: 'plugins.enable', params: { id: 'cetamesh-bionic-chat' } });
   await service.execute({ method: 'plugins.disable', params: { id: 'cetamesh-dsh' } });
   const dshOff = await service.execute({ method: 'integrations.get', params: { id: 'cetamesh-dsh' } });
   assert.equal(dshOff.enabled, false);
@@ -91,18 +93,18 @@ try {
   const bound = createIntegrationService({
     stateDir: fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-bound-integration-')),
     localServices: () => ({
-      snowluma: { status: 'stopped', running: false, lastError: '' },
+      onebot: { status: 'stopped', running: false, lastError: '' },
       actions: {
-        snowluma: { start: async params => { calls.push(['snowluma.start', params]); return { service: 'snowluma', status: 'starting' }; } },
+        onebot: { connect: async params => { calls.push(['onebot.connect', params]); return { service: 'onebot', status: 'connecting' }; } },
         dsh: {}
       }
     })
   });
-  const launched = await bound.execute({ method: 'integrations.action', params: { localService: 'snowluma', action: 'start', params: { force: true }, approved: true } });
-  assert.deepEqual(calls, [['snowluma.start', { force: true }]]);
-  assert.equal(launched.status, 'starting');
+  const launched = await bound.execute({ method: 'integrations.action', params: { localService: 'onebot', action: 'connect', params: { force: true }, approved: true } });
+  assert.deepEqual(calls, [['onebot.connect', { force: true }]]);
+  assert.equal(launched.status, 'connecting');
   await bound.close();
-  ok('本地服务入口：绑定后 start 经 integration.mcp.manage（high）执行，未确认时同样进入审批');
+  ok('OneBot连接入口：显式 connect 经 integration.mcp.manage（high）执行');
 
   // ── 5. IPC 路由：plugins. / tools. / mcp. / integrations. 四族都落到 integrationService ──
   const seen = [];
@@ -153,7 +155,7 @@ try {
   assert.deepEqual(projected.manifest.filter(row => row.id.startsWith('integration.tool.')).map(row => row.id).sort(), toolCapabilities.map(row => row.id).sort());
   assert.equal(projected.statusSummary.find(row => row.id === 'integration.mcp.manage')?.reason, 'not-model-callable');
   const containerList = await services.integrationService.execute({ method: 'integrations.list' });
-  const containerSnow = containerList.integrations.find(item => item.id === 'cetamesh-snowluma');
+  const containerSnow = containerList.integrations.find(item => item.id === 'cetamesh-onebot');
   assert.equal(containerSnow.provider.available, true, '容器里的 Channel Provider（qq）必须被识别');
   const containerDsh = containerList.integrations.find(item => item.id === 'cetamesh-dsh');
   // 合并 main 后事实变化：DSH provider 始终注册，但未注入 API 时 available=false。

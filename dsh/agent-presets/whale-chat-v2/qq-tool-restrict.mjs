@@ -37,8 +37,7 @@ const KNOWN_DANGEROUS_GLOBAL_TOOLS = [
 // 执行期白名单：不在这些范围内的工具一律拒绝。
 // 前缀覆盖 DSH MCP client 暴露的命名空间工具。
 const SAFE_PREFIXES = [
-  'mcp__snowluma__',
-  'mcp__snowluma-host__',
+  'mcp__onebot__',
   'mcp__web-search-safe__',
   'mcp__qq-file-send__',
   'mcp__bilibili__',

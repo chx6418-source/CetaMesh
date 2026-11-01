@@ -25,8 +25,7 @@ import { spawnSync } from 'node:child_process';
 import { APP_PATHS, isPackagedRuntime } from './app-paths.js';
 
 export const MCP_SERVERS = Object.freeze([
-  { id: 'mcp-snowluma', mode: 'snowluma', toolCallTimeoutMs: 725000 },
-  { id: 'mcp-snowluma-host', mode: 'snowluma-host' },
+  { id:'mcp-onebot',mode:'onebot',toolCallTimeoutMs:725000 },
   { id: 'mcp-web-search-safe', mode: 'web-search-safe' },
   { id: 'mcp-qq-file-send', mode: 'qq-file-send', toolCallTimeoutMs: 120000 },
   { id: 'mcp-bilibili', mode: 'bilibili', toolCallTimeoutMs: 60000 }
@@ -545,6 +544,7 @@ export function planDshRemoval(options) {
       effects.push({ type: 'write-file', path: patchFile, content: block.text, reason: '移除 MCP 标记块' });
       notes.push('cordis.patch.yml：已移除 whalebridge MCP 标记块');
     } else {
+      if(/mcp-snowluma(?:-host|-safe)?/.test(text))warnings.push('[SNOWLUMA_INTEGRATION_RETIRED] 未标记的历史专属MCP归属未确认，已保留原配置供Owner审阅；不会重新注册或映射。');
       const entries = removeMcpEntries(text);
       if (entries.changed) {
         effects.push({ type: 'write-file', path: patchFile, content: entries.text, reason: '移除 MCP 条目' });
@@ -803,6 +803,7 @@ export function planIntegration(options) {
     const raw = fs.readFileSync(patchFile, 'utf8');
     const text = renameLegacyMarkers(raw);
     const state = detectCordisState(raw);
+    if(/mcp-snowluma(?:-host|-safe)?/.test(raw))warnings.push('[SNOWLUMA_INTEGRATION_RETIRED] 专属MCP已下线；旧标识不会映射，未归属的旧条目保留供Owner审阅。通用OneBot需要独立配置与授权，令牌不迁移。');
     cordisKind = state.kind;
     if (state.hadLegacyMarker) notes.push('cordis.patch.yml：旧注释标记已改名');
 
@@ -815,6 +816,7 @@ export function planIntegration(options) {
         notes.push('cordis.patch.yml：MCP 块已是最新');
       }
     } else if (state.kind === 'unmarked-ours') {
+      warnings.push('该文件没有 whalebridge 标记块；只修复已确认的现行条目，未归属或已下线条目保留供审阅。');
       const result = rewriteEntryCommands(text, core);
       if (result.changed) {
         effects.push({ type: 'write-file', path: patchFile, content: result.text, reason: 'MCP 条目就地修复' });

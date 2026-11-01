@@ -101,8 +101,8 @@ check('权限面自描述可枚举', (() => { const s = describePrivilegeSurface
 
 // ── 4. 源码接入断言 ───────────────────────────────────────────────────────
 const bridgeSrc = fs.readFileSync(path.join(ROOT, 'src', 'bridge.js'), 'utf8');
-const safeSrc = fs.readFileSync(path.join(ROOT, 'src', 'mcp-snowluma-safe.js'), 'utf8');
-const hostSrc = fs.readFileSync(path.join(ROOT, 'src', 'mcp-host-server.js'), 'utf8');
+const safeSrc = fs.readFileSync(path.join(ROOT, 'src', 'mcp-onebot-safe.js'), 'utf8');
+const { runMcpSnowLumaHost } = await import('../src/mcp-host-server.js');
 check('bridge 引入双令牌策略模块', /from '\.\/bridge-privilege\.js'/.test(bridgeSrc) && bridgeSrc.includes('agentPrivilegeAllows(') && bridgeSrc.includes('resolvePrivilege('));
 check('social state HTTP adapter dispatches through ControlService', bridgeSrc.includes('runControlCommand(CONTROL_METHODS.SET_SOCIAL_PHASE, body)') && bridgeSrc.includes('INVALID_SESSION_KEY: 400') && bridgeSrc.includes('INVALID_PHASE: 400'));
 check('bridge 生成并持久化 state/agent-token', bridgeSrc.includes("'agent-token'") && /loadOrCreateAgentToken/.test(bridgeSrc));
@@ -119,11 +119,12 @@ check('移除网页登录与 session Cookie 签发/验证流程',
   && bridgeSrc.includes("网页控制台已移除；请使用 WhaleBridge 原生应用。"));
 check('bridge 重置控制台令牌时同步轮换服务令牌', /loadOrCreateAgentToken\(true\)/.test(bridgeSrc));
 check('bridge 暴露 tokenModel 自描述', bridgeSrc.includes("tokenModel: 'dual'"));
-check('MCP 改读服务令牌（不再首选控制台令牌）', safeSrc.includes("'agent-token'") && hostSrc.includes("'agent-token'") && !safeSrc.includes('readConsoleToken') && !hostSrc.includes('readConsoleToken'));
-check('MCP 读 agent-token 的位置早于 console-token', safeSrc.indexOf("'agent-token'") < safeSrc.indexOf("'console-token'") && hostSrc.indexOf("'agent-token'") < hostSrc.indexOf("'console-token'"));
-check('pid/端口不再拼进 PowerShell 命令文本',
-  !/ProcessId=\$\{/.test(hostSrc) && !/LocalPort -eq \$\{/.test(hostSrc)
-  && hostSrc.includes('WHALEBRIDGE_PID') && hostSrc.includes('WHALEBRIDGE_ONEBOT_PORT'));
+check('MCP 改读服务令牌（不再首选控制台令牌）', safeSrc.includes("'agent-token'") && !safeSrc.includes('readConsoleToken'));
+check('MCP 读 agent-token 的位置早于 console-token', safeSrc.indexOf("'agent-token'") < safeSrc.indexOf("'console-token'"));
+let retiredHostDenied = false;
+try { await runMcpSnowLumaHost(); }
+catch (error) { retiredHostDenied = error.code === 'SNOWLUMA_INTEGRATION_RETIRED'; }
+check('已退役host入口在读取凭据或操作进程前明确拒绝', retiredHostDenied);
 
 // ── 5. 真实端到端（桥接运行且已加载双令牌时） ─────────────────────────────
 const consoleTokenFile = path.join(ROOT, 'state', 'console-token');

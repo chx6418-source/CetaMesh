@@ -663,7 +663,7 @@ export function buildCardHint(key, messageRef, summary) {
   const labels = Array.isArray(summary?.cardLabels) && summary.cardLabels.length
     ? summary.cardLabels.join('/')
     : 'QQ 官方卡片';
-  return '\n【' + labels + '】本条消息包含 ' + count + " 张卡片（消息ID=" + messageRef + '）。如需查看卡片完整原始内容（markdown 原文 / 按钮数据），请调用 mcp__snowluma__qq_get_card_msg，参数 key="' + key + '", messageId="' + messageRef + '"。若管理员已开启高风险交互工具，可再按返回的 cardIndex/buttonIndex 调用 mcp__snowluma__qq_click_card_button；该工具默认关闭，且 requiresApproval=true 的按钮必须等待管理员批准。';
+  return '\n【' + labels + '】本条消息包含 ' + count + " 张卡片（消息ID=" + messageRef + '）。如需查看卡片完整原始内容（markdown 原文 / 按钮数据），请调用 mcp__onebot__qq_get_card_msg，参数 key="' + key + '", messageId="' + messageRef + '"。若管理员已开启高风险交互工具，可再按返回的 cardIndex/buttonIndex 调用 mcp__onebot__qq_click_card_button；该工具默认关闭，且 requiresApproval=true 的按钮必须等待管理员批准。';
 }
 
 function cardButtonClickState(card, button) {

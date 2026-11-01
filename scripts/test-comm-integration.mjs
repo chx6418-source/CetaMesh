@@ -37,6 +37,14 @@ try {
       sessionId,turnId:'turn-'+(++turn),manifest:[{id:entry.id,description:entry.description,inputSchema:entry.inputSchema}],messages:[]});
   }
   const toolId='mcp__web-search-safe__web_search';
+  assert.equal(services.integrationService.registry.pluginEnabled('cetamesh-bionic-chat'), false,
+    'a fresh tool pack grants no tool access implicitly');
+  const disabled = await model({toolId,input:{query:'fixture'}});
+  assert.equal(calls.length, 0, 'registered and discovered MCP tools still require an enabled parent tool pack');
+  assert.ok(disabled.messages.some(message => message.role === 'tool' && /TOOL_DISABLED/.test(message.content)));
+  await services.integrationService.execute({method:'plugins.enable',params:{id:'cetamesh-bionic-chat'}});
+  assert.equal(services.integrationService.registry.pluginEnabled('cetamesh-onebot'), false,
+    'enabling the generic web fixture does not authorize a QQ connection');
   const success=await model({toolId,input:{query:'fixture'}});
   assert.equal(calls.length,1,'legitimate nested input must reach registered MCP target');
   assert.equal(success.status,'completed');

@@ -9,10 +9,10 @@ import { MCP_SERVER_CATALOG } from './catalog.js';
 import { integrationError } from './types.js';
 import { createRemoteMcpConnection } from './mcp-remote.js';
 import { validateSchema } from '../model/input-schema.js';
+import { assertNotRetiredSnowLuma } from './retired.js';
 
 const PACKAGED_MCP_MODES = Object.freeze({
-  snowluma: 'snowluma',
-  'snowluma-host': 'snowluma-host',
+  onebot: 'onebot',
   'web-search-safe': 'web-search-safe',
   'qq-file-send': 'qq-file-send',
   bilibili: 'bilibili'
@@ -49,6 +49,7 @@ export function resolveMcpLaunch(server, config = {}, {
   packaged = isPackagedRuntime(), execPath = process.execPath,
   sourceRoot = APP_PATHS.sourceRoot, env = process.env
 } = {}) {
+  assertNotRetiredSnowLuma(server?.id);
   if (!server?.id || !server?.entry) throw integrationError('MCP_UNSUPPORTED_TRANSPORT', 'MCP Server 缺少有效入口。');
   const executable = path.resolve(execPath);
   const root = path.resolve(sourceRoot);
@@ -208,6 +209,7 @@ export function createMcpRuntime({
   const records = new Map();
 
   function recordFor(id) {
+    assertNotRetiredSnowLuma(id);
     if (!records.has(id)) records.set(id, {
       status: 'stopped', lastError: null, pid: null, startedAt: null,
       restarts: 0, crashes: 0, tools: [], connection: null, stopping: false,
@@ -216,11 +218,13 @@ export function createMcpRuntime({
     return records.get(id);
   }
   function requireServer(id) {
+    assertNotRetiredSnowLuma(id);
     const server = serverById.get(String(id));
     if (!server) throw integrationError('UNKNOWN_MCP_SERVER', '未知 MCP Server：' + id);
     return server;
   }
   function snapshot(id) {
+    assertNotRetiredSnowLuma(id);
     const record = recordFor(id);
     return { id, status: record.status, lastError: record.lastError, pid: record.pid,
       startedAt: record.startedAt, restarts: record.restarts, crashes: record.crashes,

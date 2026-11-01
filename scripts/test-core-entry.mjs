@@ -10,6 +10,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { MCP_MODES, parseCoreArgs } from '../src/core-entry.js';
 import { resolveDataPipeName, dataCall } from '../src/control/data-ipc.js';
+import {createIntegrationStore} from '../src/integrations/store.js';
 
 import { waitForDataIpc } from './helpers/wait-for-data-ipc.mjs';
 
@@ -31,14 +32,15 @@ for (const args of [['--agent-sdk-runner'], ['--agent-sdk-runner', 'other'], ['-
   assert.throws(() => parseCoreArgs(args), /Invalid private/);
 }
 assert.deepEqual(parseCoreArgs(['--extension-worker']), { mode: 'extension-worker' });
-assert.deepEqual(parseCoreArgs(['--mcp', 'snowluma']), { mode: 'mcp', mcp: 'snowluma' });
+assert.deepEqual(parseCoreArgs(['--mcp', 'onebot']), {mode:'mcp',mcp:'onebot'});
+for(const retired of ['snowluma','snowluma-host','mcp-snowluma','mcp-snowluma-host'])assert.throws(()=>parseCoreArgs(['--mcp',retired]),{code:'SNOWLUMA_INTEGRATION_RETIRED'});
 assert.deepEqual(parseCoreArgs(['--mcp=mcp-bilibili']), { mode: 'mcp', mcp: 'bilibili' });
 assert.deepEqual(parseCoreArgs(['--self-test', 'http://127.0.0.1:3080', '测试']), {
   mode: 'self-test', baseUrl: 'http://127.0.0.1:3080', promptText: '测试'
 });
 assert.throws(() => parseCoreArgs(['--mcp', 'unknown']), /未知 MCP 模式/);
 assert.throws(() => parseCoreArgs(['--worker', 'extra']), /不接受额外参数/);
-assert.deepEqual(Object.keys(MCP_MODES), ['snowluma', 'snowluma-host', 'web-search-safe', 'qq-file-send', 'bilibili']);
+assert.deepEqual(Object.keys(MCP_MODES), ['onebot','web-search-safe','qq-file-send','bilibili']);
 
 const help = spawnSync(process.execPath, [ENTRY, '--help'], { cwd: ROOT, encoding: 'utf8' });
 assert.equal(help.status, 0, help.stderr);
@@ -58,7 +60,8 @@ try {
     allow: { private: [], groups: [] },
     deny: { private: [], groups: [] },
     allowAllWhenEmpty: false,
-    snowluma: {
+    onebot: {
+      enabled:false,
       httpUrl: 'http://127.0.0.1:9',
       wsUrl: 'ws://127.0.0.1:9',
       accessToken: '',
@@ -74,19 +77,14 @@ try {
     }
   };
   fs.writeFileSync(path.join(tempRoot, 'config.json'), JSON.stringify(isolatedConfig, null, 2));
+  createIntegrationStore({stateDir:path.join(tempRoot,'state')}).update(value=>({...value,plugins:{...value.plugins,'cetamesh-bionic-chat':{enabled:true}}}));
 
   const cases = [
     {
-      mode: 'snowluma',
+      mode: 'onebot',
       expectedTool: 'qq_get_card_msg',
       call: { name: 'qq_get_card_msg', arguments: { key: 'group:1', token: 'test', messageId: '1' } },
-      result: /403|已禁用|TOOL_DISABLED|已被关闭/
-    },
-    {
-      mode: 'snowluma-host',
-      expectedTool: 'snowluma_status',
-      call: { name: 'snowluma_status', arguments: {} },
-      result: /reachable|online/
+      result: /403|已禁用|TOOL_DISABLED|已被关闭|QQ_DISABLED/
     },
     {
       mode: 'web-search-safe',
@@ -104,7 +102,7 @@ try {
       mode: 'bilibili',
       expectedTool: 'bili_search_video',
       call: { name: 'bili_search_video', arguments: { query: '测试' } },
-      result: /403|已禁用/
+      result: /403|已禁用|TOOL_DISABLED|已被关闭/
     }
   ];
 
@@ -131,8 +129,7 @@ try {
   }
 
   const legacyEntries = {
-    snowluma: 'mcp-snowluma-safe.js',
-    'snowluma-host': 'mcp-host-server.js',
+    onebot:'mcp-onebot-safe.js',
     'web-search-safe': 'mcp-web-search-safe.js',
     'qq-file-send': 'mcp-qq-file-send.js',
     bilibili: 'mcp-bilibili.js'

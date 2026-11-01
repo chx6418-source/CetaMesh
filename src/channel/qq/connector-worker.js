@@ -8,6 +8,7 @@ import { assertQqSendPolicy } from './send-policy.js';
 import { assertMcpToolEnabled, isBionicChatEnabled, isQqConnectorEnabled } from '../../integrations/tool-policy.js';
 import { QQ_READ_ACTIONS } from './request.js';
 import { assertQqAttachments } from './attachments.js';
+import { assertOneBotConfigured } from './config.js';
 
 export function runQqConnectorWorker({ paths = APP_PATHS, processRef = process } = {}) {
   let runtime = null;
@@ -26,7 +27,8 @@ export function runQqConnectorWorker({ paths = APP_PATHS, processRef = process }
       if (method === 'start') {
         if (runtime) return runtime.health();
         config = params.config ?? {};
-        if (!config.snowluma?.wsUrl) throw channelError('QQ_CONFIG_REQUIRED', 'Explicit QQ gateway configuration required');
+        assertOneBotConfigured(config);
+        if (!isQqConnectorEnabled({ stateDir: paths.stateDir })) throw channelError('QQ_DISABLED', 'OneBot QQ channel integration is disabled');
         runtime = createQqRuntime({ config,
           ownershipDir: params.ownershipDir ?? path.join(os.tmpdir(), 'cetamesh-qq-ownership'),
           // Core's durable append is the receipt authority. A transport-local
@@ -40,7 +42,7 @@ export function runQqConnectorWorker({ paths = APP_PATHS, processRef = process }
             assertQqSendPolicy(request, { config,
               qqEnabled: isQqConnectorEnabled({ stateDir: paths.stateDir }),
               bionicEnabled: isBionicChatEnabled({ stateDir: paths.stateDir }),
-              toolEnabled: name => assertMcpToolEnabled(['qq_send_file', 'qq_send_audio_from_url'].includes(name) ? 'qq-file-send' : 'snowluma', name, { stateDir: paths.stateDir }) });
+              toolEnabled: name => assertMcpToolEnabled(['qq_send_file', 'qq_send_audio_from_url'].includes(name) ? 'qq-file-send' : 'onebot', name, { stateDir: paths.stateDir }) });
             await assertQqAttachments(request.params, { config, dataRoot: paths.dataRoot });
           } });
         await runtime.connect();

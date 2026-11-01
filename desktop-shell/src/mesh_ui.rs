@@ -856,7 +856,7 @@ mod tests {
         let value = json!({
             "channels": [
                 { "id": "qq", "name": "QQ", "kind": "channel-adapter", "state": "error",
-                  "status": "error", "lastError": "SnowLuma 未运行", "coreDependency": false }
+                  "status": "error", "lastError": "OneBot 网关不可达", "coreDependency": false }
             ],
             "independence": { "coreGatedByChannels": false }
         });
@@ -865,7 +865,7 @@ mod tests {
         assert_eq!(channels[0].id, "qq");
         assert_eq!(channels[0].kind, "channel-adapter");
         assert!(!channels[0].core_dependency);
-        assert_eq!(channels[0].last_error, "SnowLuma 未运行");
+        assert_eq!(channels[0].last_error, "OneBot 网关不可达");
         assert!(parse_channels(&json!({})).is_empty());
     }
 

@@ -4,6 +4,7 @@ import { acquireQqOwnership } from './ownership.js';
 import { createQqReceipts } from './receipts.js';
 import { createQqSendLedger } from './send-ledger.js';
 import { inferQqMessageKind, inferQqTarget } from './request.js';
+import { assertOneBotConfigured, assertOneBotHttpConfigured } from './config.js';
 
 const HTTP_SEND_ACTIONS = new Set(['send_private_msg', 'send_group_msg', 'upload_private_file', 'upload_group_file']);
 const RAW_WRITE_ACTIONS = new Set(['group_poke', 'send_poke', 'click_inline_keyboard_button']);
@@ -36,9 +37,10 @@ export function createQqRuntime({
   postAction,
   authorizeSend
 } = {}) {
+  const onebot = assertOneBotConfigured(config);
   const client = clientFactory({
-    url: config.snowluma?.wsUrl,
-    accessToken: config.snowluma?.accessToken || undefined,
+    url: onebot.wsUrl,
+    accessToken: onebot.accessToken || undefined,
     reconnect: true
   });
   let state = 'unknown';
@@ -81,19 +83,19 @@ export function createQqRuntime({
   }
 
   async function callHttpAction(action, params) {
-    const httpUrl = String(config.snowluma?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
-    const accessToken = config.snowluma?.httpAccessToken ?? config.snowluma?.accessToken;
+    const httpUrl = assertOneBotHttpConfigured(config);
+    const accessToken = onebot.httpAccessToken;
     const response = await fetch(`${httpUrl}/${action}`, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
         ...(accessToken ? { authorization: `Bearer ${accessToken}` } : {})
       },
-      body: JSON.stringify(params), signal: AbortSignal.timeout(60000)
+      body: JSON.stringify(params), signal: AbortSignal.timeout(60000), redirect: 'error'
     });
     const body = await response.json().catch(() => ({}));
     if (!response.ok || body.status !== 'ok' || body.retcode !== 0) {
-      const hint = response.status === 426 ? '（HTTP 426：snowluma.httpUrl 可能指向了 WebSocket 端口）' : '';
+      const hint = response.status === 426 ? '（HTTP 426：onebot.httpUrl 可能指向了 WebSocket 端口）' : '';
       throw new Error(`OneBot ${action} 失败: ${body.wording || body.retcode || response.status}${hint}`);
     }
     return body.data;
@@ -115,6 +117,7 @@ export function createQqRuntime({
 
   function executeSend(action, params, options, dispatch) {
     return enqueueSend(async () => {
+      assertOneBotConfigured(config);
       assertLease();
       let observedAccount;
       try {
@@ -159,7 +162,10 @@ export function createQqRuntime({
   }
 
   const sendOneBot = (action, params, options = {}) => {
-    try { assertWriteAction(action, HTTP_SEND_ACTIONS); }
+    try {
+      assertWriteAction(action, HTTP_SEND_ACTIONS);
+      if (!postAction) assertOneBotHttpConfigured(config);
+    }
     catch (error) { return Promise.reject(error); }
     return executeSend(action, params, options, () => (postAction ?? defaultPostAction)(action, params));
   };
@@ -207,31 +213,32 @@ export function createQqRuntime({
     if (stopped) return;
     // A transport reconnect must revalidate identity and ownership before sends.
     if (state === 'unavailable' && !connectPromise) void connect();
-    invoke(onOpen, 'SnowLuma open callback failed');
+    invoke(onOpen, 'OneBot open callback failed');
   });
   client.on('close', info => {
     if (stopped) return;
     state = 'unavailable';
-    invoke(onClose, 'SnowLuma close callback failed', info);
+    invoke(onClose, 'OneBot close callback failed', info);
   });
   client.on('error', error => {
-    invoke(onError, 'SnowLuma error callback failed', error);
+    invoke(onError, 'OneBot error callback failed', error);
   });
 
   function connect() {
+    assertOneBotConfigured(config);
     if (stopped) return Promise.resolve({ ok: false, code: 'QQ_CONNECTOR_STOPPED' });
     if (state === 'ready') return Promise.resolve({ ok: true, connected: true });
-    if (connectPromise) return Promise.resolve({ ok: false, pending: true, message: 'SnowLuma 连接正在建立' });
+    if (connectPromise) return Promise.resolve({ ok: false, pending: true, message: 'OneBot 连接正在建立' });
     connectPromise = (async () => {
       let timer;
       try {
         if (ownershipDir && !gatewayLease) {
-          gatewayLease = acquireQqOwnership('gateway', config.snowluma?.wsUrl ?? 'default', ownershipDir);
+          gatewayLease = acquireQqOwnership('gateway', onebot.wsUrl, ownershipDir);
         }
         await Promise.race([
           Promise.resolve().then(() => client.connect()),
           new Promise((_, reject) => {
-            timer = setTimeout(() => reject(new Error('SnowLuma WebSocket 连接超时')), connectionTimeoutMs);
+            timer = setTimeout(() => reject(new Error('OneBot WebSocket 连接超时')), connectionTimeoutMs);
           })
         ]);
         if (stopped) throw Object.assign(new Error('QQ Connector stopped during connect'), { code: 'QQ_CONNECTOR_STOPPED' });
@@ -251,7 +258,7 @@ export function createQqRuntime({
         if (accountLease) { accountLease.release(); accountLease = null; }
         if (gatewayLease) { gatewayLease.release(); gatewayLease = null; }
         if (ownershipDir) client.close?.();
-        log('SnowLuma WebSocket 连接失败，桥接继续独立运行：' + (error?.message ?? error));
+        log('OneBot WebSocket 连接失败，桥接继续独立运行：' + (error?.message ?? error));
         return { ok: false, code: error?.code ?? 'QQ_CONNECT_FAILED', error: error?.message ?? String(error) };
       } finally {
         if (timer) clearTimeout(timer);

@@ -91,7 +91,7 @@ function coreDataHandler(token, services, isStopping = () => false) {
   };
 }
 
-export async function runCoreWorker({ paths = APP_PATHS, processRef = process, log = message => process.stdout.write(`${message}\n`) } = {}) {
+export async function runCoreWorker({ paths = APP_PATHS, processRef = process, providerSecrets = undefined, log = message => process.stdout.write(`${message}\n`) } = {}) {
   // A damaged QQ/Legacy config is optional to Core. Never write it back here.
   let config = {};
   let configLoadError = null;
@@ -107,7 +107,9 @@ export async function runCoreWorker({ paths = APP_PATHS, processRef = process, l
   const initialStorage=await preflightCriticalStorage({stateDir:paths.stateDir});
   let application,compositionFailed=false;
   const options={
-    config, dataRoot: paths.dataRoot, stateDir: paths.stateDir, deferOptionalStart:true,
+    // Trusted in-process injection is used by isolated acceptance harnesses; no IPC/env override.
+    ...(providerSecrets ? {providerSecrets} : {}),
+    config, configFile:paths.configFile, dataRoot: paths.dataRoot, stateDir: paths.stateDir, deferOptionalStart:true,
     sourceRoot: paths.sourceRoot, resourceRoot: paths.resourceRoot,
     api: dsh.api, dshPresetConfig: dsh.presetConfig, dshConfiguration: dsh.configuration, processRef, log,
     channelServiceToken: () => serviceToken(paths.stateDir),owner,retainOwnerOnFailure:true

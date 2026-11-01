@@ -348,7 +348,18 @@ export function createToolExecutionCoordinator({
         toolChoice: cycle < maxCycles && totalCalls < maxCalls ? 'auto' : 'none'
       };
       if (!resumingToolBatch && !toolsAllowed && finalSynthesisAtLimit !== true) limitReached = true;
-      if (!resumingToolBatch) request.messages = projectMessageBudget(request.messages, { evidenceStore, binding: evidenceBinding(state), canRetrieveEvidence: state.manifest.some(item => item.id === 'context.evidence.read' && item.available !== false) }).messages;
+      if (!resumingToolBatch) {
+        const projected = projectMessageBudget(request.messages, { evidenceStore, binding: evidenceBinding(state), canRetrieveEvidence: state.manifest.some(item => item.id === 'context.evidence.read' && item.available !== false) });
+        request.messages = projected.messages;
+        if (typeof state.onContext === 'function') {
+          // Only observed numeric projection facts leave the loop; evidence IDs and message bodies stay internal.
+          const projection = { status: 'observed', bytes: projected.bytes, maxBytes: projected.maxBytes,
+            compacted: projected.compactions.length > 0, compactionCount: projected.compactions.length,
+            truncated: null }; // projectMessageBudget has no independent truncation observation.
+          request.onContext = snapshot => state.onContext({ ...snapshot, cycle,
+            requestId: `${turnId ?? 'turn'}:${cycle}`, projection });
+        }
+      }
       let response;
       if (resumingToolBatch) {
         response = { text: '', toolCalls: state.pendingCalls, usage, resolvedModel };
@@ -551,6 +562,8 @@ export function createToolExecutionCoordinator({
               messages: storedState.messages, cycle,
               totalCalls, usage, resolvedModel,
               limitReached,
+              // Functions stay process-local; the JSON primitive omits this observer from durable state.
+              ...(typeof state.onContext === 'function' ? { onContext: state.onContext } : {}),
               seenCallIds: state.seenCallIds,
               pendingToolCallId: callId,
               pendingCapability: capability,
@@ -638,7 +651,7 @@ export function createToolExecutionCoordinator({
     }
   }
 
-  async function run({ providerId, model, reasoning, messages = [], manifest = [], actor, sessionId, turnId, runId = null, phase = null, targetKind = 'chat', scope = {}, signal, refreshContext, onCapabilityResult, onActivity, onTextDelta, onStreamReset } = {}) {
+  async function run({ providerId, model, reasoning, messages = [], manifest = [], actor, sessionId, turnId, runId = null, phase = null, targetKind = 'chat', scope = {}, signal, refreshContext, onCapabilityResult, onActivity, onTextDelta, onStreamReset, onContext } = {}) {
     if (!actor || !['owner', 'agent'].includes(actor.kind) || typeof actor.id !== 'string') fail('UNAUTHORIZED', 'Trusted Model actor required');
     const normalizedSessionId = String(sessionId ?? 'session').slice(0, 160);
     const normalizedTurnId = turnId == null ? null : String(turnId).slice(0, 160);
@@ -681,6 +694,7 @@ export function createToolExecutionCoordinator({
         ...(typeof onActivity === 'function' ? { onActivity } : {}),
         ...(typeof onTextDelta === 'function' ? { onTextDelta } : {}),
         ...(typeof onStreamReset === 'function' ? { onStreamReset } : {}),
+        ...(typeof onContext === 'function' ? { onContext } : {}),
         ...(typeof refreshContext === 'function' ? { refreshContext } : {}),
         ...(typeof onCapabilityResult === 'function' ? { onCapabilityResult } : {})
       }, controller.signal);
@@ -708,7 +722,7 @@ export function createToolExecutionCoordinator({
     return { recorded: rows.length };
   }
 
-  async function resumeApproval({ approvalId, requestFingerprint, decisionResult, signal, refreshContext, onCapabilityResult, onTextDelta, onStreamReset } = {}) {
+  async function resumeApproval({ approvalId, requestFingerprint, decisionResult, signal, refreshContext, onCapabilityResult, onTextDelta, onStreamReset, onContext } = {}) {
     const continuation = continuations[String(approvalId ?? '')];
     if (!continuation) fail('APPROVAL_CONTINUATION_NOT_FOUND', 'No Model turn is waiting for this approval');
     if (continuation.status === 'orphaned' || continuation.status === 'reconciled') {
@@ -762,6 +776,7 @@ export function createToolExecutionCoordinator({
     if (typeof onCapabilityResult === 'function') state.onCapabilityResult = onCapabilityResult;
     if (typeof onTextDelta === 'function') state.onTextDelta = onTextDelta;
     if (typeof onStreamReset === 'function') state.onStreamReset = onStreamReset;
+    if (typeof onContext === 'function') state.onContext = onContext;
     const result = decisionResult?.status === 'completed'
       ? { status: 'completed', result: decisionResult.result }
       : { status: 'rejected', error: { code: 'APPROVAL_REJECTED' } };

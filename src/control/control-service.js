@@ -1,4 +1,5 @@
 import { PRIVILEGE_CONSOLE } from '../bridge-privilege.js';
+import {assertNotRetiredSnowLuma} from '../integrations/retired.js';
 import { CONTROL_MODES, migrateLegacyMode } from '../runtime-policy.js';
 export { CONTROL_MODES, migrateLegacyMode } from '../runtime-policy.js';
 
@@ -21,7 +22,6 @@ export const CONTROL_METHODS = Object.freeze({
   GET_SERVICES: 'services.get',
   DETECT_SERVICES: 'services.detect',
   SELECT_SERVICE: 'services.select',
-  INSTALL_SNOWLUMA: 'services.installSnowLuma',
   START_SERVICE: 'services.start',
   STOP_SERVICE: 'services.stop',
   GET_MODEL_DEFAULTS: 'model.defaults.get',
@@ -36,7 +36,7 @@ export const CONTROL_METHODS = Object.freeze({
 
 export const DIAGNOSTIC_CHECKS = Object.freeze(['runtime', 'config', 'paths', 'services']);
 export const CONTROL_LOG_SOURCES = Object.freeze(['bridge', 'worker', 'desktop']);
-export const CONTROL_SERVICES = Object.freeze(['snowluma', 'dsh']);
+export const CONTROL_SERVICES = Object.freeze(['dsh']);
 export const CONTROL_REASONING_EFFORTS = Object.freeze(['off', 'low', 'high', 'max']);
 export const PRESET_BINDING_TARGETS = Object.freeze(['chat', 'closedAgent', 'social', 'workshop', 'learner']);
 // Legacy mode aliases are normalized at read/write boundaries; preset keys remain compatible.
@@ -218,7 +218,8 @@ function rejectUnknownFields(body, accepted, method) {
 
 function normalizeServiceName(value) {
   if (!CONTROL_SERVICES.includes(value)) {
-    throw new ControlServiceError('INVALID_SERVICE', 'service 必须是 snowluma 或 dsh');
+    assertNotRetiredSnowLuma(value);
+    throw new ControlServiceError('INVALID_SERVICE', 'service 必须是 dsh');
   }
   return value;
 }
@@ -376,10 +377,8 @@ export function createControlService({
   readLocalServices,
   detectLocalServices,
   selectLocalService,
-  installLocalSnowLuma,
   startLocalService,
   stopLocalService,
-  connectSnowLuma,
   log,
   readModelDefaults = () => ({ provider: 'deepseek-official', model: 'deepseek-flash', reasoningEffort: 'max' }),
   readModelCatalog = () => [],
@@ -426,10 +425,8 @@ export function createControlService({
   if (typeof readLocalServices !== 'function') throw new TypeError('readLocalServices must be a function');
   if (typeof detectLocalServices !== 'function') throw new TypeError('detectLocalServices must be a function');
   if (typeof selectLocalService !== 'function') throw new TypeError('selectLocalService must be a function');
-  if (typeof installLocalSnowLuma !== 'function') throw new TypeError('installLocalSnowLuma must be a function');
   if (typeof startLocalService !== 'function') throw new TypeError('startLocalService must be a function');
   if (typeof stopLocalService !== 'function') throw new TypeError('stopLocalService must be a function');
-  if (typeof connectSnowLuma !== 'function') throw new TypeError('connectSnowLuma must be a function');
   if (typeof log !== 'function') throw new TypeError('log must be a function');
   if (typeof readModelDefaults !== 'function') throw new TypeError('readModelDefaults must be a function');
   if (typeof readModelCatalog !== 'function') throw new TypeError('readModelCatalog must be a function');
@@ -473,7 +470,6 @@ export function createControlService({
     };
     if (service !== undefined) return project(services[service]);
     return {
-      snowluma: project(services.snowluma),
       dsh: project(services.dsh)
     };
   }
@@ -489,6 +485,7 @@ export function createControlService({
       if (actor?.privilege !== PRIVILEGE_CONSOLE) {
         throw new ControlServiceError('FORBIDDEN', '该操作仅控制台管理权限可用');
       }
+      if(method==='services.installSnowLuma')assertNotRetiredSnowLuma('snowluma');
       if (!Object.values(CONTROL_METHODS).includes(method)) {
         throw new ControlServiceError('METHOD_NOT_FOUND', `未知控制命令：${String(method ?? '')}`);
       }
@@ -551,23 +548,12 @@ export function createControlService({
         scheduleServiceTask(`${service} 版本选择`, () => selectLocalService(service, body.id));
         return { service: readServiceSnapshot(service) };
       }
-      if (method === CONTROL_METHODS.INSTALL_SNOWLUMA) {
-        rejectUnknownFields(body, [], method);
-        scheduleServiceTask('SnowLuma 安装', () => installLocalSnowLuma());
-        return { service: readServiceSnapshot('snowluma') };
-      }
       if (method === CONTROL_METHODS.START_SERVICE || method === CONTROL_METHODS.STOP_SERVICE) {
         rejectUnknownFields(body, ['service'], method);
         const service = normalizeServiceName(body.service);
         if (method === CONTROL_METHODS.START_SERVICE) {
           scheduleServiceTask(`${service} 启动`, async () => {
-            const snapshot = await startLocalService(service);
-            if (service === 'snowluma' && snapshot?.ready) {
-              const connected = await connectSnowLuma();
-              if (!connected?.ok) {
-                log(`SnowLuma 已就绪，但 WhaleBridge 连接未完成：${connected?.error ?? '未知错误'}`);
-              }
-            }
+            await startLocalService(service);
           });
         } else {
           scheduleServiceTask(`${service} 停止`, () => stopLocalService(service));

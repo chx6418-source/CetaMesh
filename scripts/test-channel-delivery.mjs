@@ -5,11 +5,14 @@ import path from 'node:path';
 import { createChannelService } from '../src/channel/service.js';
 import { createCapabilityBroker } from '../src/capability/broker.js';
 import { createBrokeredQqRuntime } from '../src/channel/qq/broker-facade.js';
+import { enableOneBotFixture } from './fixtures/onebot-activation.mjs';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-channel-delivery-'));
+enableOneBotFixture(root, { bionic: true });
+enableOneBotFixture(path.join(root, 'authorized'), { bionic: true });
 try {
   let receive;
-  const config = { allow: { groups: ['42'], private: ['7'] } };
+  const config = { onebot: { enabled: true, wsUrl: 'ws://127.0.0.1:1' }, allow: { groups: ['42'], private: ['7'] } };
   const make = () => createChannelService({ stateDir: root, config,
     connectorFactory: ({ onMessage }) => {
       receive = onMessage;

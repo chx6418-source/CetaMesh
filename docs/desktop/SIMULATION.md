@@ -6,6 +6,13 @@ QQ, SnowLuma and DSH are not prerequisites. Generating a reply requires a
 configured Model Provider; missing credentials are an error, never a simulated
 success. Disabling an external connector does not disable native rooms.
 
+The optional external path now uses the neutral OneBot adapter, disabled by default
+with empty endpoints. Owner configuration, integration enablement and an explicit
+connection request are required. SnowLuma-specific installation, detection, process
+management, configuration, plugin and MCP entrypoints are retired; their old IDs
+are rejected rather than mapped to OneBot. CetaMesh neither uninstalls external
+gateways nor terminates their or QQ's processes.
+
 ## Ownership and execution
 
 - `src/simulation/service.js` schedules bounded discussion turns through the
@@ -70,6 +77,20 @@ Paired actual-model comparisons must identify the baseline (for example the old
 role-hint projection versus a live historical DSH session), report automatic
 measurements separately, and retain Owner review as pending until it occurs.
 The old Bionic migration is incomplete until this review passes.
+
+Retiring the connector does not rewrite `roles/*.md`, `state/current-role.json`,
+social memories or private transcripts. The four preset files in `whale-chat` and
+`whale-chat-v2` receive only tool-namespace and corresponding reference revisions;
+original backups and hash comparisons remain in the private development archive.
+This compatibility revision is not a completed persona migration or fidelity review.
+
+Legacy `config.snowluma` is not connection authority. A separate trusted Owner UI
+can preview and confirm endpoint-only migration after an original-byte hash check
+and backup. The new OneBot configuration stays disabled, carries no copied tokens
+and cannot overwrite an existing configuration. Tokens must be entered again;
+saving or migrating does not connect. This connector migration does not import
+persona or conversation data and does not promote CP-080 beyond PROPOSED or add
+a wire version.
 
 ## Real project collaboration
 

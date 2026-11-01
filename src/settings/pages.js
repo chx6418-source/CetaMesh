@@ -1,6 +1,6 @@
 // CetaMesh Desktop —— 页面树与工程页面归位（阶段 12）。
 //
-// 阶段要求：把原来散落的工程页面（Core status / DSH service / SnowLuma / IPC / Logs /
+// 阶段要求：把原来散落的工程页面（Core status / DSH service / IPC / Logs /
 // Whitelists / Runtime policy）**移到高级/诊断区域**。
 //
 // 这份声明让"归位"变成可断言的数据，而不是靠 UI 代码里分散的判断：
@@ -13,7 +13,6 @@ export const PRIMARY_PAGES = Object.freeze(['home', 'chat', 'work', 'social', 'a
 export const ENGINEERING_PAGES = Object.freeze([
   { id: 'core.status', label: 'Core status', area: 'diagnostics', source: 'legacy:Overview' },
   { id: 'service.dsh', label: 'DSH service', area: 'diagnostics', source: 'legacy:Services' },
-  { id: 'service.snowluma', label: 'SnowLuma（Channel Adapter）', area: 'diagnostics', source: 'legacy:Services' },
   { id: 'ipc.status', label: 'IPC', area: 'diagnostics', source: 'legacy:Diagnostics' },
   { id: 'logs', label: 'Logs', area: 'diagnostics', source: 'legacy:Logs' },
   { id: 'security.whitelists', label: 'Whitelists', area: 'advanced', source: 'legacy:Policy' },

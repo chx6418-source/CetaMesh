@@ -2,7 +2,7 @@ import {SimulationSpace} from './SimulationSpace';
 import {MemoryWorkspace} from './MemoryWorkspace';
 import {QuickJump} from './QuickJump';
 import {DevicesPage} from './DevicesPage';
-import {StartupDiagnosticsBoundary, DiagnosticsEntry, FeedbackDeveloperButton} from './StartupDiagnostics';
+import {StartupDiagnosticsBoundary, DiagnosticsEntry, DiagnosticsStatusEntry, FeedbackDeveloperButton} from './StartupDiagnostics';
 import {GitWorkspace} from './GitWorkspace';
 import {WorkspaceChangesReview} from './WorkspaceChangesReview';
 import {ForgeTools} from './ForgeTools';
@@ -10,6 +10,11 @@ import {BionicReadiness} from './BionicReadiness';
 import {useChatAttachments} from './ChatAttachments';
 import {AttachmentSettings,HistoryAttachments} from './AttachmentSettings';
 import { createAuthPanelController } from './AgentAuthController';
+import { oneBotClient, type OneBotSettings, type OneBotMigrationPreview } from '../bridge/typed-client';
+import type {ChatContextObservation, ChatModelProvider, ModelUsage} from '../bridge/typed-client';
+import {ChatModelPicker, ChatUsagePopover, configurationChangeBlocked, supportedReasoning} from './ChatComposerPanels';
+import {ChatActivity} from './ChatActivity';
+export {ToolActivity} from './ChatActivity';
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router';
 import { createPortal } from 'react-dom';
@@ -54,7 +59,6 @@ const relativeLabel = (value: string | number | null | undefined) => {
   return minutes < 1 ? '刚刚' : minutes < 60 ? `${minutes} 分钟前` : minutes < 1440 ? `${Math.floor(minutes / 60)} 小时前` : `${Math.floor(minutes / 1440)} 天前`;
 };
 export const isChatTurnCancellable = (state: string) => ['starting', 'streaming', 'recovering', 'cancelling', 'waiting-approval'].includes(state);
-const agentActivityStatusLabel = (status: string) => ({ running: '正在运行', completed: '已完成', cancelled: '已停止', failed: '未完成' }[status] ?? status);
 const updateStatusLabel = (status: string) => ({ update_available: '有可用更新', up_to_date: '已是最新版本', checked: '已完成检查', not_configured: '软件内更新暂不可用', error: '检查失败', unknown: '尚未检查' }[status] ?? status);
 const agentInitials = (id: string) => id.slice(0, 2).toUpperCase();
 
@@ -283,9 +287,10 @@ function HarborWorkspaceApp() {
       onNewSession={() => void createSession()} onAllSessions={() => { setAllSessionsOpen(true); setAllSessionsQuery(''); void loadAllSessions(); }}
       renderSessionActions={session => <SessionActionsMenu session={session} onAction={action => { void manageSession(session, action); }} />} />
     <div className="harbor-main">
+      <DiagnosticsStatusEntry/>
       <ReferenceViewerLayout>
       <main key={page} className={`page-frame page-${page}`}>
-        {page === 'chat' && <div className="chat-mode-workspace"><div className="chat-mode-selector"><Tabs label="聊天模式" items={[{id:'chat',label:'普通聊天'},{id:'simulation',label:'仿真聊天'},{id:'project',label:'项目协作'}]} selected={chatMode} onChange={value=>setChatMode(value as 'chat'|'simulation'|'project')}/></div>{chatMode==='chat'?<ChatPage key={activeSession?.id ?? 'no-session'} session={activeSession} workspaces={workspaces} activeWorkspaceId={activeWorkspaceId} onSessionUpdate={updated => setSessions(current => current.map(item => item.id === updated.id ? updated : item))} onNew={() => createSession()} onNewChat={() => createSession(true)} onOpenMemory={() => navigate('memory')} onReviewTask={id => { setReviewTaskId(id); navigate('work'); }} />:<SimulationSpace mode={chatMode} workspaces={workspaces} activeWorkspaceId={activeWorkspaceId} onReviewTask={id=>{setReviewTaskId(id);navigate('work');}}/>}</div>}
+        {page === 'chat' && <div className="chat-mode-workspace"><div className="chat-mode-selector"><Tabs label="聊天模式" items={[{id:'chat',label:'普通聊天'},{id:'simulation',label:'仿真聊天'},{id:'project',label:'项目协作'}]} selected={chatMode} onChange={value=>setChatMode(value as 'chat'|'simulation'|'project')}/></div>{chatMode==='chat'?<ChatPage key={activeSession?.id ?? 'no-session'} session={activeSession} workspaces={workspaces} activeWorkspaceId={activeWorkspaceId} onSessionUpdate={updated => setSessions(current => current.map(item => item.id === updated.id ? updated : item))} onNew={() => createSession()} onNewChat={() => createSession(true)} onOpenMemory={() => navigate('memory')} onConfigureModels={() => navigate('settings')} onReviewTask={id => { setReviewTaskId(id); navigate('work'); }} />:<SimulationSpace mode={chatMode} workspaces={workspaces} activeWorkspaceId={activeWorkspaceId} onReviewTask={id=>{setReviewTaskId(id);navigate('work');}}/>}</div>}
         {page === 'work' && <WorkPage onExplain={explainChange} activeWorkspaceId={activeWorkspaceId} workspaces={workspaces} onRefreshWorkspaces={refreshWorkspaces} reviewTaskId={reviewTaskId} onReviewTaskOpened={() => setReviewTaskId(null)} />}
         {page === 'memory' && <MemoryPage />}
         {page === 'agents' && <AgentsPage />}
@@ -378,12 +383,12 @@ export function ChatCatalogStatus({ catalog }: { catalog: Awaited<ReturnType<typ
   return <span>{catalog?.available === false && !hasDirectCatalog ? catalog.reason || '模型状态不可用' : 'CetaMesh Desktop'}</span>;
 }
 
-function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onNew, onNewChat, onOpenMemory, onReviewTask }: { session: ChatSession | null; workspaces: { id: string; name: string; status: string }[]; activeWorkspaceId: string | null; onSessionUpdate(session: ChatSession): void; onNew(): Promise<void>; onNewChat(): Promise<void>; onOpenMemory(): void; onReviewTask(id: string): void }) {
+function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onNew, onNewChat, onOpenMemory, onReviewTask, onConfigureModels }: { session: ChatSession | null; workspaces: { id: string; name: string; status: string }[]; activeWorkspaceId: string | null; onSessionUpdate(session: ChatSession): void; onNew(): Promise<void>; onNewChat(): Promise<void>; onOpenMemory(): void; onReviewTask(id: string): void; onConfigureModels():void }) {
   const [messages, setMessages] = useState<ChatMessageDto[]>([]);
   const [sessionUsage, setSessionUsage] = useState<ChatMessageDto['usage']>(null);
   const [hasMoreHistory, setHasMoreHistory] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
-  const [status, setStatus] = useState<{ state: string; displayText: string; statusMessage: string | null; requestId: string | null; retryCount: number; followState: string; followError: string | null; toolActivity: ChatMessageDto['toolActivity']; agentActivity: ChatMessageDto['agentActivity']; error: string | null; errorCode: string | null; approvalId: string | null; routing: Record<string, unknown> }>({ state: 'idle', displayText: '', statusMessage: null, requestId: null, retryCount: 0, followState: 'idle', followError: null, toolActivity: [], agentActivity: null, error: null, errorCode: null, approvalId: null, routing: {} });
+  const [status, setStatus] = useState<{ state: string; displayText: string; statusMessage: string | null; requestId: string | null; retryCount: number; followState: string; followError: string | null; toolActivity: ChatMessageDto['toolActivity']; agentActivity: ChatMessageDto['agentActivity']; context?:ChatContextObservation|null;turnUsage?:ModelUsage|null; error: string | null; errorCode: string | null; approvalId: string | null; routing: Record<string, unknown> }>({ state: 'idle', displayText: '', statusMessage: null, requestId: null, retryCount: 0, followState: 'idle', followError: null, toolActivity: [], agentActivity: null, error: null, errorCode: null, approvalId: null, routing: {} });
   const [catalog, setCatalog] = useState<Awaited<ReturnType<typeof chatClient.catalog>> | null>(null);
   const [linkedTask, setLinkedTask] = useState<Task | null>(null);
   const [memories, setMemories] = useState<Memory[]>([]);
@@ -621,6 +626,7 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
 
   const streaming = ['starting', 'streaming', 'recovering', 'cancelling'].includes(status.state);
   const cancellable = isChatTurnCancellable(status.state);
+  const configurationLocked = configurationChangeBlocked(status) || linkedTask?.execution?.state === 'needs-reconciliation';
   useLayoutEffect(() => {
     if (streaming && status.displayText && status.requestId) {
       setSettlingReply(current => current?.requestId === status.requestId && current.text === status.displayText
@@ -682,8 +688,8 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
       case 'loading': return <LoadingState label="正在读取会话…" />;
       case 'error': return <ErrorNotice error={item.message} onRetry={() => void load()} />;
       case 'empty': return <EmptyNotice icon="chat" title="还没有消息" detail="写下你要处理的事情。模型和 Agent 会按会话设置运行。" />;
-      case 'message': return <MessageBubble message={item.message} reference={session ? { sessionId: session.id, messageId: item.message.id } : undefined} sendError={sendErrors[item.message.id]} onRetry={sendErrors[item.message.id] ? () => void retrySend(item.message.id) : undefined} />;
-      case 'streaming': return <MessageBubble message={item.message} streaming />;
+      case 'message': return <MessageBubble message={item.message} reference={session ? { sessionId: session.id, messageId: item.message.id } : undefined} activityState={item.message.cancelled?'cancelled':item.message.error?'failed':undefined} taskId={session?.taskId} onOpenTask={onReviewTask} sendError={sendErrors[item.message.id]} onRetry={sendErrors[item.message.id] ? () => void retrySend(item.message.id) : undefined} />;
+      case 'streaming': return <MessageBubble message={item.message} streaming activityState={status.state} taskId={linkedTask?.id??session?.taskId} onOpenTask={onReviewTask} />;
       case 'turn-error': return <div className="turn-error" role="alert">{item.message}<div className="row">{linkedTask ? <ManagedFailureActions taskId={workspaceFailureReviewTaskId(status.routing, linkedTask.id)} onReviewTask={onReviewTask} onNewChat={() => void onNewChat()} /> : <><Button compact variant="ghost" onClick={() => void resumeChat('retry').then(load).catch(cause => setError(messageOf(cause)))}>重试</Button><Button compact variant="ghost" onClick={() => void resumeChat('continue').then(load).catch(cause => setError(messageOf(cause)))}>继续</Button></>}</div></div>;
       case 'approval': return <ApprovalCard approval={item.approval} onDecide={decideApproval} />;
     }
@@ -726,7 +732,7 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
     }
   }
   async function updateAgent(provider: string) {
-    if (!session) return;
+    if (!session || configurationLocked) return;
     try {
       const updated = await chatClient.setConfig(session.id, { ...session.config, agentProvider: provider || null, ...agentModelSelection(session.config, provider) });
       onSessionUpdate(updated);
@@ -735,12 +741,21 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
     catch (cause) { setError(messageOf(cause)); }
   }
   async function updateModel(provider: string, model: string) {
-    if (!session) return;
-    try { onSessionUpdate(await chatClient.setConfig(session.id, { ...session.config, modelProvider: provider, model })); await load(); }
+    if (!session || configurationLocked) return;
+    const selected = catalog?.modelProviders.find(item=>item.id===provider)?.models.find(item=>(item.id||item.name||item.modelName)===model);
+    const reasoning = supportedReasoning(selected?.capabilities).includes(session.config.reasoning ?? '') ? session.config.reasoning : 'off';
+    try { onSessionUpdate(await chatClient.setConfig(session.id, { ...session.config, modelProvider: provider, model, reasoning })); await load(); void refreshContext(); }
+    catch (cause) { setError(messageOf(cause)); }
+  }
+  async function updateReasoning(reasoning:string) {
+    if (!session || configurationLocked) return;
+    const model = catalog?.modelProviders.find(item=>item.id===session.config.modelProvider)?.models.find(item=>(item.id||item.name||item.modelName)===session.config.model);
+    if (!supportedReasoning(model?.capabilities).includes(reasoning)) return;
+    try { onSessionUpdate(await chatClient.setConfig(session.id, {...session.config, reasoning})); await load(); void refreshContext(); }
     catch (cause) { setError(messageOf(cause)); }
   }
   async function updateWorkspace(workspaceId: string) {
-    if (!session) return;
+    if (!session || configurationLocked) return;
     try {
       onSessionUpdate(await chatClient.setConfig(session.id, { ...session.config, workspaceId: workspaceId || null }));
       setError('');
@@ -762,7 +777,6 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
   return <div className="chat-workspace">
     <section className="conversation-pane">
       <div className="conversation-toolbar"><div className="conversation-heading"><h1 title={session.title || '新会话'}>{session.title || '新会话'}</h1><div className="conversation-meta"><StatusBadge value={status.state || 'idle'} /><span>更新于 {relativeLabel(session.updatedAt)}</span><span>·</span><ChatCatalogStatus catalog={catalog} /></div></div><div className="conversation-actions"><IconButton label="刷新会话" icon="refresh" onClick={() => void load()} /></div></div>
-      <UsageSummary usage={historySessionIdRef.current === session.id ? sessionUsage : null} label="会话累计用量" />
       <VirtualList
         items={timelineItems}
         estimateSize={112}
@@ -781,41 +795,14 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
         }}>有新消息 · 跳到最新</Button> : null}
         render={renderTimelineItem}
       />
-      <div className="composer-dock"><ChatContextPanel key={session.id} task={linkedTask} memories={memories} approvals={approvals} onOpenMemory={onOpenMemory} /><ChatComposer sessionId={session.id} busy={cancellable} models={providers} selectedModelKey={selectedModelKey} agentProviders={catalog?.agentProviders ?? []} selectedAgent={session.config.agentProvider ?? ''} workspaces={workspaces} workspaceId={session.config.workspaceId ?? ''} activeWorkspaceId={activeWorkspaceId} onWorkspaceChange={updateWorkspace} onModelChange={value => { try { const [provider, model] = JSON.parse(value) as [string, string]; void updateModel(provider, model); } catch { setError('无法识别所选模型。'); } }} onAgentChange={updateAgent} onSend={send} onStop={() => void chatClient.stop(session.id).then(load).catch(cause => setError(messageOf(cause)))} /></div>
+      <div className="composer-dock"><ChatContextPanel key={session.id} task={linkedTask} memories={memories} approvals={approvals} onOpenMemory={onOpenMemory} /><ChatComposer sessionId={session.id} busy={cancellable} configurationLocked={configurationLocked} context={status.context} turnUsage={status.turnUsage??null} sessionUsage={historySessionIdRef.current===session.id?sessionUsage:null} reasoning={session.config.reasoning} onReasoningChange={value=>void updateReasoning(value)} onConfigureModels={onConfigureModels} models={providers} selectedModelKey={selectedModelKey} agentProviders={catalog?.agentProviders ?? []} selectedAgent={session.config.agentProvider ?? ''} workspaces={workspaces} workspaceId={session.config.workspaceId ?? ''} activeWorkspaceId={activeWorkspaceId} onWorkspaceChange={updateWorkspace} onModelChange={value => { try { const [provider, model] = JSON.parse(value) as [string, string]; void updateModel(provider, model); } catch { setError('无法识别所选模型。'); } }} onAgentChange={updateAgent} onSend={send} onStop={() => void chatClient.stop(session.id).then(load).catch(cause => setError(messageOf(cause)))} /></div>
     </section>
   </div>;
 }
 
-function toolActivityName(tool: ChatMessageDto['toolActivity'][number]) {
-  const label = tool.label?.trim();
-  return !label || label === tool.id || /(?:[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}:|^call_[A-Za-z0-9_-]{12,})/i.test(label) ? '工具调用' : label;
-}
-function ToolActivityRow({ tool }: { tool: ChatMessageDto['toolActivity'][number] }) {
-  const known = ['running', 'completed', 'failed', 'cancelled'].includes(tool.status);
-  const label = ({ running: '运行中', completed: '已完成', failed: '失败', cancelled: '已取消' } as Record<string, string>)[tool.status] ?? '待核验';
-  return <details className={`tool-call ${tool.status === 'running' ? 'active' : tool.status === 'failed' ? 'failed' : !known ? 'unverified' : ''}`}>
-    <summary><Icon name={tool.status === 'completed' ? 'check' : tool.status === 'cancelled' ? 'close' : tool.status === 'running' ? 'update' : 'help'} size={15} /><span title={toolActivityName(tool)}>{toolActivityName(tool)}</span><span className="tool-state">{label}</span>{tool.durationMs !== null && <span className="tool-duration">{(tool.durationMs / 1000).toFixed(1)} 秒</span>}<Icon name="down" size={14} /></summary>
-    {tool.summary && <p className="tool-call-receipt">{tool.summary}</p>}<details className="tool-diagnostic"><summary>技术详情</summary><dl><dt>调用标识</dt><dd><code>{tool.id}</code></dd><dt>原始状态</dt><dd>{tool.status}</dd></dl></details>
-  </details>;
-}
 function SmallPager({ page, total, size, onPage, label }: { page: number; total: number; size: number; onPage(page:number):void; label:string }) {
   const last = Math.max(0, Math.ceil(total / size) - 1);
   return total > size ? <nav className="task-list-pagination" aria-label={label}><Button compact disabled={page === 0} onClick={() => onPage(page - 1)}>上一组</Button><small>{page * size + 1}–{Math.min(total, (page + 1) * size)} / {total}</small><Button compact disabled={page >= last} onClick={() => onPage(page + 1)}>下一组</Button></nav> : null;
-}
-export function ToolActivity({ tools }: { tools: ChatMessageDto['toolActivity'] }) {
-  const [attentionPage, setAttentionPage] = useState(0), [completedPage, setCompletedPage] = useState(0);
-  if (!tools.length) return null;
-  const completed = tools.filter(tool => tool.status === 'completed');
-  const attention = tools.filter(tool => tool.status !== 'completed');
-  const attentionCurrent = Math.min(attentionPage, Math.max(0, Math.ceil(attention.length / 20) - 1));
-  const completedCurrent = Math.min(completedPage, Math.max(0, Math.ceil(completed.length / 20) - 1));
-  const counts = [['已完成', completed.length], ['运行中', tools.filter(tool => tool.status === 'running').length], ['失败', tools.filter(tool => tool.status === 'failed').length], ['已取消', tools.filter(tool => tool.status === 'cancelled').length], ['待核验', tools.filter(tool => !['running', 'completed', 'failed', 'cancelled'].includes(tool.status)).length]].filter(([, count]) => Number(count) > 0);
-  return <section className="tool-activity" aria-label="工具活动">
-    <div className="tool-activity-heading"><strong>工具活动</strong><span aria-live="polite" aria-atomic="true">{counts.map(([label, count]) => `${label} ${count}`).join(' · ')}</span></div>
-    {attention.slice(attentionCurrent * 20, (attentionCurrent + 1) * 20).map(tool => <ToolActivityRow key={tool.id} tool={tool} />)}
-    <SmallPager page={attentionCurrent} total={attention.length} size={20} onPage={setAttentionPage} label="待处理工具分页" />
-    {completed.length > 0 && <details className="tool-completed"><summary><Icon name="check" size={14} /><span>已完成 {completed.length} 项</span><small>展开明细</small><Icon name="down" size={14} /></summary><div className="tool-completed-list" tabIndex={0} aria-label="已完成工具调用明细">{completed.slice(completedCurrent * 20, (completedCurrent + 1) * 20).map(tool => <ToolActivityRow key={tool.id} tool={tool} />)}<SmallPager page={completedCurrent} total={completed.length} size={20} onPage={setCompletedPage} label="已完成工具分页" /></div></details>}
-  </section>;
 }
 export function UsageSummary({ usage, label = '本轮用量' }: { usage: ChatMessageDto['usage']; label?: string }) {
   if (!usage) return <small className="muted usage-summary">{label} 未知</small>;
@@ -827,10 +814,10 @@ export function UsageSummary({ usage, label = '本轮用量' }: { usage: ChatMes
   return <details className="muted usage-summary usage-disclosure" aria-label={label}><summary><span>{label}</span><span>{'输入 ' + count(usage.inputTokens)}</span><span>{'输出 ' + count(usage.outputTokens)}</span><span className="usage-accounting">{complete}</span><Icon name="down" size={12} /></summary><div className="usage-detail-grid">{rows.map(row => <span key={row}>{row}</span>)}</div></details>;
 }
 
-export function MessageBubble({ message, reference, streaming = false, sendError, onRetry }: { message: ChatMessageDto; reference?: { sessionId: string; messageId: string }; streaming?: boolean; sendError?: string; onRetry?(): void }) {
+export function MessageBubble({ message, reference, streaming = false, sendError, onRetry, activityState, taskId, onOpenTask }: { message: ChatMessageDto; reference?: { sessionId: string; messageId: string }; streaming?: boolean; sendError?: string; onRetry?(): void; activityState?:string;taskId?:string|null;onOpenTask?(id:string):void }) {
   const role = message.role === 'user' ? 'user' : 'assistant';
   const agentActivity = message.agentActivity;
-  return <article className={`chat-message ${role} ${streaming ? 'streaming' : ''}`}><div className="message-avatar">{role === 'assistant' ? <Icon name="sparkles" size={16} /> : '你'}</div><div className="message-body"><div className="message-meta"><strong>{role === 'assistant' ? 'CetaMesh' : '你'}</strong><span>{dateLabel(message.at)}</span>{streaming && <Badge tone="accent">生成中</Badge>}</div>{agentActivity && <div className={`agent-activity ${agentActivity.status}`} role="status"><Icon name={agentActivity.status === 'running' ? 'sparkles' : agentActivity.status === 'completed' ? 'check' : 'help'} size={15} /><span>{agentActivity.label}</span><strong>{agentActivityStatusLabel(agentActivity.status)}</strong></div>}{message.text ? <Markdown reference={reference}>{message.text}</Markdown> : <span className="muted">（没有文本内容）</span>}{message.attachments.length > 0 && <div className="message-attachments">{message.attachments.map(name => <span key={name}><Icon name="attach" size={13} />{name}</span>)}</div>}{message.attachmentRefs?.length ? <HistoryAttachments files={message.attachmentRefs} sessionId={reference?.sessionId??''}/> : null}<ToolActivity tools={message.toolActivity} />{role === 'assistant' && !streaming && <UsageSummary usage={message.usage} />}{sendError && <div className="message-error" role="alert">{sendError}<Button compact variant="ghost" onClick={onRetry}>重试发送</Button></div>}{message.error && <p className="message-error" role="alert">{message.error}</p>}{message.cancelled && <small>本轮已停止</small>}</div></article>;
+  return <article className={`chat-message ${role} ${streaming ? 'streaming' : ''}`}><div className="message-avatar">{role === 'assistant' ? <Icon name="sparkles" size={16} /> : '你'}</div><div className="message-body"><div className="message-meta"><strong>{role === 'assistant' ? 'CetaMesh' : '你'}</strong><span>{dateLabel(message.at)}</span>{streaming && <Badge tone="accent">生成中</Badge>}</div>{message.text ? <Markdown reference={reference}>{message.text}</Markdown> : <span className="muted">（没有文本内容）</span>}{message.attachments.length > 0 && <div className="message-attachments">{message.attachments.map(name => <span key={name}><Icon name="attach" size={13} />{name}</span>)}</div>}{message.attachmentRefs?.length ? <HistoryAttachments files={message.attachmentRefs} sessionId={reference?.sessionId??''}/> : null}<ChatActivity tools={message.toolActivity} agentActivity={agentActivity} state={activityState} taskId={taskId} onOpenTask={onOpenTask} />{role === 'assistant' && !streaming && <UsageSummary usage={message.usage} />}{sendError && <div className="message-error" role="alert">{sendError}<Button compact variant="ghost" onClick={onRetry}>重试发送</Button></div>}{message.error && <p className="message-error" role="alert">{message.error}</p>}{message.cancelled && <small>本轮已停止</small>}</div></article>;
 }
 
 async function confirmAgentExecution(provider: string, workspaceId: string) {
@@ -856,12 +843,13 @@ export function ApprovalCard({ approval, onDecide, onReuse }: { approval: Approv
   return <Card className="approval-card"><div className="approval-icon"><Icon name="approval" size={20} /></div><div className="grow"><div className="row between"><strong>{approval.title}</strong><Badge tone="warning">需要处理</Badge></div><p>{approval.summary}</p>{approval.capability === 'agent.native.approve' && approval.details && <pre aria-label="原生工具参数" style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: '24rem', overflow: 'auto' }}>{approval.details}</pre>}<p>{approval.resources?.length ? "目标文件："+approval.resources.join("、") : ""}</p>{approval.expiresAt && <small>本次请求有效至 {dateLabel(approval.expiresAt)}</small>}<details><summary>权限详情</summary><span>{approval.capability} · 风险 {approval.risk}</span></details><div className="row approval-actions"><Button compact variant="ghost" onClick={() => onDecide(approval.id, false)}>拒绝</Button><Button compact variant="primary" onClick={() => onDecide(approval.id, true)}>批准一次</Button>{approval.reusableL2 && onReuse && <Button compact variant="ghost" onClick={()=>onReuse(approval.id)}>批准，并在 15 分钟内复用最多 3 次</Button>}</div></div></Card>;
 }
 
-export function ChatComposer({ sessionId = '', busy, models, selectedModelKey, agentProviders, selectedAgent, workspaces, workspaceId, activeWorkspaceId, onWorkspaceChange, onModelChange, onAgentChange, onSend, onStop }: {
-  busy: boolean; models: { id: string; label: string; configured: boolean; models: { id?: string; name?: string; label?: string; displayName?: string; modelName?: string }[] }[];
+export function ChatComposer({ sessionId = '', busy, models, selectedModelKey, agentProviders, selectedAgent, workspaces, workspaceId, activeWorkspaceId, onWorkspaceChange, onModelChange, onAgentChange, onSend, onStop, context, turnUsage, sessionUsage, reasoning, onReasoningChange=()=>{}, onConfigureModels=()=>{}, configurationLocked=false }: {
+  busy: boolean; models: ChatModelProvider[];
   selectedModelKey: string; agentProviders: Agent[]; selectedAgent: string;
   workspaces: { id: string; name: string; status: string }[]; workspaceId: string; activeWorkspaceId: string | null;
   onWorkspaceChange(workspaceId: string): void; onModelChange(value: string): void; onAgentChange(provider: string): void;
   sessionId?:string; onSend(text: string, attachments: Attachment[], clientMessageId: string): void|Promise<boolean|void>; onStop(): void;
+  context?:ChatContextObservation|null;turnUsage?:ModelUsage|null;sessionUsage?:ModelUsage|null;reasoning?:string;onReasoningChange?(value:string):void;onConfigureModels?():void;configurationLocked?:boolean;
 }) {
   const attachmentDraft=useChatAttachments({sessionId,call:productToolsClient.call,disabled:busy,capabilityKey:selectedModelKey+'|'+selectedAgent});
   const [sending,setSending]=useState(false);
@@ -907,26 +895,6 @@ export function ChatComposer({ sessionId = '', busy, models, selectedModelKey, a
     document.addEventListener('keydown', escape);
     return () => { document.removeEventListener('pointerdown', outside); document.removeEventListener('keydown', escape); };
   }, [contextOpen]);
-  const modelChoices: { value: string; label: string; disabled?: boolean }[] = selectedAgent === 'codex' ? [{ value: JSON.stringify(['', '']), label: 'Codex 本机模型配置' }] : models.flatMap(provider => {
-    if (!provider.configured) return [];
-    const list = provider.models.length ? provider.models : [{ id: '', name: provider.label, label: provider.label }];
-    return list.map(model => ({
-      value: JSON.stringify([provider.id, normalizeSelectOptionLabel(model.id, model.name, model.modelName, provider.id)]),
-      label: normalizeSelectOptionLabel(model.displayName, model.label, model.name, model.modelName, model.id, provider.label, provider.id)
-    }));
-  });
-  if (selectedModelKey && !modelChoices.some(choice => choice.value === selectedModelKey)) {
-    let selectedLabel = selectedModelKey;
-    let availability = '不可用';
-    try {
-      const [providerId, modelId] = JSON.parse(selectedModelKey) as [string, string];
-      const provider = models.find(item => item.id === providerId);
-      const selected = provider?.models.find(item => item.id === modelId);
-      selectedLabel = normalizeSelectOptionLabel(selected?.displayName, selected?.label, selected?.name, selected?.modelName, modelId, provider?.label, providerId);
-      if (provider && !provider.configured) availability = '未配置';
-    } catch { /* Keep the serialized selection visible as a safe fallback label. */ }
-    modelChoices.push({ value: selectedModelKey, label: `${selectedLabel} · ${availability}`, disabled: true });
-  }
   const workspaceWarning = managedWorkspacePreflight(selectedAgent, workspaceId, activeWorkspaceId);
   async function submit() {
     const text = draft.trim();
@@ -942,15 +910,15 @@ export function ChatComposer({ sessionId = '', busy, models, selectedModelKey, a
       <div className="composer-left">
         {attachmentDraft.trigger}
         <div className="composer-context" ref={contextMenuRef}>
-          <button type="button" className="composer-context-trigger" aria-label={'工作区和 Agent：' + workspaceLabel + ' · ' + agentLabel} title={workspaceLabel + ' · ' + agentLabel} aria-expanded={contextOpen} aria-controls={contextMenuId} onClick={() => setContextOpen(value => !value)} disabled={busy}><span>{workspaceLabel} · {agentLabel}</span><Icon name="down" size={14} /></button>
-          <MotionPopup open={contextOpen} id={contextMenuId} className="composer-context-options" role="group" aria-label="工作区和 Agent 设置"><div className="composer-setting"><span>工作区</span><Select label="任务工作区" disabled={busy} value={workspaceId} onChange={event => onWorkspaceChange(event.target.value)}><option value="">自动（当前工作区{activeWorkspaceId ? '' : '，未指定'}）</option>{workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{normalizeSelectOptionLabel(workspace.name, workspace.id)}</option>)}</Select></div><div className="composer-setting"><span>Agent</span><Select label="选择 Agent" disabled={busy} value={selectedAgent} onChange={event => onAgentChange(event.target.value)}><option value="">能力</option><option value="none">不使用 Agent</option>{agentProviders.map(agent => { const needsScope = ['task-required', 'workspace-required'].includes(agent.reason ?? ''); const disabled = !agent.available || (!agent.eligible && !needsScope); const state = agent.eligible ? '' : availabilityReasonLabel(agent.reason) || availabilityReasonLabel(agent.status) || (agent.available ? '当前不可使用' : '不可用'); return <option key={agent.id} value={agent.id} disabled={disabled}>{normalizeSelectOptionLabel(agent.name, agent.id)}{state ? ` · ${state}` : ''}</option>; })}{selectedAgent && !agentProviders.some(agent => agent.id === selectedAgent) && <option value={selectedAgent} disabled>{normalizeSelectOptionLabel(selectedAgent)} · 不可用</option>}</Select></div></MotionPopup>
+          <button type="button" className="composer-context-trigger" aria-label={'工作区和 Agent：' + workspaceLabel + ' · ' + agentLabel} title={workspaceLabel + ' · ' + agentLabel} aria-expanded={contextOpen} aria-controls={contextMenuId} onClick={() => setContextOpen(value => !value)} disabled={busy||configurationLocked}><span>{workspaceLabel} · {agentLabel}</span><Icon name="down" size={14} /></button>
+          <MotionPopup open={contextOpen} id={contextMenuId} className="composer-context-options" role="group" aria-label="工作区和 Agent 设置"><div className="composer-setting"><span>工作区</span><Select label="任务工作区" disabled={busy||configurationLocked} value={workspaceId} onChange={event => onWorkspaceChange(event.target.value)}><option value="">自动（当前工作区{activeWorkspaceId ? '' : '，未指定'}）</option>{workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{normalizeSelectOptionLabel(workspace.name, workspace.id)}</option>)}</Select></div><div className="composer-setting"><span>Agent</span><Select label="选择 Agent" disabled={busy||configurationLocked} value={selectedAgent} onChange={event => onAgentChange(event.target.value)}><option value="">能力</option><option value="none">不使用 Agent</option>{agentProviders.map(agent => { const needsScope = ['task-required', 'workspace-required'].includes(agent.reason ?? ''); const disabled = !agent.available || (!agent.eligible && !needsScope); const state = agent.eligible ? '' : availabilityReasonLabel(agent.reason) || availabilityReasonLabel(agent.status) || (agent.available ? '当前不可使用' : '不可用'); return <option key={agent.id} value={agent.id} disabled={disabled}>{normalizeSelectOptionLabel(agent.name, agent.id)}{state ? ` · ${state}` : ''}</option>; })}{selectedAgent && !agentProviders.some(agent => agent.id === selectedAgent) && <option value={selectedAgent} disabled>{normalizeSelectOptionLabel(selectedAgent)} · 不可用</option>}</Select></div></MotionPopup>
         </div>
       </div>
-      <div className="composer-right"><div className="composer-model"><Select label="选择模型" value={selectedModelKey} onChange={event => onModelChange(event.target.value)} disabled={busy || !modelChoices.length}>{modelChoices.length ? modelChoices.map(choice => <option key={choice.value} value={choice.value} disabled={choice.disabled}>{choice.label}</option>) : <option value="">暂无已配置模型</option>}</Select></div>
+      <div className="composer-right"><ChatModelPicker models={models} selectedModelKey={selectedModelKey} selectedAgent={selectedAgent} agentLabel={agentLabel} selectedReasoning={reasoning} disabledReason={busy || configurationLocked ? '回合正在运行或结果尚未确认，请先结束或核验后再切换。' : null} onModelChange={onModelChange} onReasoningChange={onReasoningChange} onConfigure={onConfigureModels}/><ChatUsagePopover context={context} turnUsage={turnUsage} sessionUsage={sessionUsage}/>
         <button type="button" className="composer-submit" aria-label={busy ? '停止生成' : '发送消息'} title={busy ? '停止生成' : '发送消息'} onClick={busy ? onStop : submit} disabled={!busy && ((!draft.trim()&&!attachments.length&&!attachmentDraft.files.length)||sending||attachmentDraft.pending||Boolean(workspaceWarning))}>{busy ? <Icon name="square" size={17} /> : <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6" /></svg>}</button>
       </div>
     </div>
-    {attachments.length > 0 && <div className="attachment-list">{attachments.map((file, index) => <span key={file.name + '-' + index}><Icon name="file" size={13} />{file.name}<button type="button" aria-label={'移除 ' + file.name} onClick={() => setAttachments(current => current.filter((_, item) => item !== index))} disabled={busy}><Icon name="close" size={13} /></button></span>)}</div>}
+    {attachments.length > 0 && <div className="attachment-list">{attachments.map((file, index) => <span key={file.name + '-' + index}><Icon name="file" size={13} />{file.name}<button type="button" aria-label={'移除 ' + file.name} onClick={() => setAttachments(current => current.filter((_, item) => item !== index))} disabled={busy||configurationLocked}><Icon name="close" size={13} /></button></span>)}</div>}
     {workspaceWarning && <p className="inline-error" role="status">{workspaceWarning}</p>}{attachmentError && <p className="inline-error" role="alert">{attachmentError}</p>}
   </div></div>;
 }
@@ -1820,6 +1788,66 @@ function extensionSettingsDraft(description: ExtensionSettingsDescription, value
     return [field.key, ''];
   }));
 }
+export interface OneBotConnectionDraft {
+  enabled: boolean; httpUrl: string; wsUrl: string; accessToken: string; httpAccessToken: string;
+  clearAccessToken: boolean; clearHttpAccessToken: boolean;
+}
+type OneBotConnectionFormProps = {
+  settings: OneBotSettings; draft: OneBotConnectionDraft; busy: boolean;
+  migrationPreview: OneBotMigrationPreview | null;
+  onDraftChange: (draft: OneBotConnectionDraft) => void; onSave: () => void;
+  onAction: (action: 'health' | 'start' | 'stop' | 'reconnect') => void;
+  onPreviewMigration: () => void; onApplyMigration: () => void; onCancelMigration: () => void;
+};
+export function OneBotConnectionForm({ settings, draft, busy, migrationPreview, onDraftChange, onSave, onAction, onPreviewMigration, onApplyMigration, onCancelMigration }: OneBotConnectionFormProps) {
+  const { configuration, health } = settings;
+  const ready = health.ready === true && health.connected === true && health.authenticated === true;
+  const unavailable = Boolean(health.error) || ['error', 'unavailable', 'auth-failed'].includes(health.state);
+  return <form onSubmit={event => { event.preventDefault(); if (!busy) onSave(); }}>
+    <h3>OneBot 通道</h3>
+    <p>这是可选的外部消息通道，默认关闭。请自行配置兼容 OneBot 的网关；CetaMesh 仅连接通道。</p>
+    <div className="row detail-actions" role="status" aria-label="OneBot 连接证据">
+      <Badge>{health.configured === true ? '已配置' : health.configured === false ? '未配置' : '配置未知'}</Badge>
+      <Badge>{health.connected === true ? '已连接' : health.connected === false ? '未连接' : '连接未验证'}</Badge>
+      <Badge>{health.authenticated === true ? '已认证' : health.authenticated === false ? '未认证' : '认证未验证'}</Badge>
+      <Badge tone={unavailable ? 'danger' : ready ? 'success' : 'default'}>{unavailable ? '不可用' : ready ? '可用' : '可用性未验证'}</Badge>
+    </div>
+    {health.accountId && <small>当前账号 {health.accountId}</small>}
+    {health.error && <p className="message-error" role="status">{typeof health.error==='string'?health.error:`[${health.error.code}] ${health.error.message}`}</p>}
+    <p className="muted">{health.canSend === true ? '当前允许发送；每次操作仍受通道权限和白名单限制。' : health.canSend === false ? '当前不能发送消息。' : '发送权限尚未验证。'}</p>
+    <details className="plugin-advanced-settings" open={!health.configured}>
+      <summary>连接设置</summary>
+      <div className="plugin-advanced-fields">
+        <label><input type="checkbox" aria-label="允许 OneBot 连接" checked={draft.enabled} disabled={busy} onChange={event => onDraftChange({ ...draft, enabled: event.target.checked })} />允许连接（默认关闭）</label>
+        <label>OneBot HTTP 地址<Input aria-label="OneBot HTTP 地址" value={draft.httpUrl} disabled={busy} onChange={event => onDraftChange({ ...draft, httpUrl: event.target.value })} maxLength={500} /></label>
+        <label>OneBot WebSocket 地址<Input aria-label="OneBot WebSocket 地址" value={draft.wsUrl} disabled={busy} onChange={event => onDraftChange({ ...draft, wsUrl: event.target.value })} maxLength={500} /></label>
+        <p className="muted">更改端点后请重新填写令牌。留空保留当前端点已保存的凭据；端点变化时旧凭据会清除。</p>
+        <label>WebSocket Access Token<Input aria-label="OneBot WebSocket 令牌" type="password" autoComplete="new-password" value={draft.accessToken} disabled={busy} placeholder={configuration.accessTokenConfigured ? '已配置；留空保留' : '按网关要求填写'} onChange={event => onDraftChange({ ...draft, accessToken: event.target.value, clearAccessToken: false })} maxLength={512} /></label>
+        {configuration.accessTokenConfigured && <label><input type="checkbox" checked={draft.clearAccessToken} disabled={busy} onChange={event => onDraftChange({ ...draft, clearAccessToken: event.target.checked, accessToken: '' })} />清除已保存的 WebSocket 令牌</label>}
+        <label>HTTP Access Token<Input aria-label="OneBot HTTP 令牌" type="password" autoComplete="new-password" value={draft.httpAccessToken} disabled={busy} placeholder={configuration.httpAccessTokenConfigured ? '已配置；留空保留' : '按网关要求填写'} onChange={event => onDraftChange({ ...draft, httpAccessToken: event.target.value, clearHttpAccessToken: false })} maxLength={512} /></label>
+        {configuration.httpAccessTokenConfigured && <label><input type="checkbox" checked={draft.clearHttpAccessToken} disabled={busy} onChange={event => onDraftChange({ ...draft, clearHttpAccessToken: event.target.checked, httpAccessToken: '' })} />清除已保存的 HTTP 令牌</label>}
+        <Button compact variant="primary" type="submit" disabled={busy}>保存配置</Button>
+      </div>
+    </details>
+    <p className="muted">编辑和保存设置不会建立连接。连接操作使用已保存的配置，并由 Core 检查授权。</p>
+    <div className="row detail-actions">
+      <Button compact type="button" disabled={busy} onClick={() => onAction('health')}>健康检查</Button>
+      <Button compact type="button" variant="primary" disabled={busy || !configuration.enabled || health.configured !== true || health.connected === true} onClick={() => onAction('start')}>连接</Button>
+      <Button compact type="button" disabled={busy || health.connected === false} onClick={() => onAction('stop')}>断开连接</Button>
+      <Button compact type="button" disabled={busy || !configuration.enabled || health.configured !== true} onClick={() => onAction('reconnect')}>重新连接</Button>
+    </div>
+    {configuration.legacyPresent && !migrationPreview && <Button compact type="button" variant="ghost" disabled={busy} onClick={onPreviewMigration}>查看旧连接迁移</Button>}
+    {migrationPreview && <Surface>
+      <h4>确认迁移旧连接端点</h4>
+      <p>仅复制下列端点，迁移后保持关闭。旧配置与角色数据保留；需要重新输入令牌后保存，再明确连接。</p>
+      <p>HTTP：{migrationPreview.candidate.httpUrl || '未配置'}<br />WebSocket：{migrationPreview.candidate.wsUrl || '未配置'}</p>
+      {migrationPreview.hasCurrentConfig && <p className="message-error">已有 OneBot 配置，不能覆盖迁移。</p>}
+      {!migrationPreview.legacyPresent && <p>未发现可迁移的旧连接。</p>}
+      <div className="row detail-actions"><Button compact type="button" disabled={busy} onClick={onCancelMigration}>取消</Button><Button compact type="button" disabled={busy || migrationPreview.hasCurrentConfig || !migrationPreview.legacyPresent} onClick={onApplyMigration}>确认迁移端点并保持关闭</Button></div>
+    </Surface>}
+  </form>;
+}
+
 type IntegrationRow = { kind?: string; id: string; name: string; status: string; enabled: boolean; available: boolean; eligible: boolean; configured: boolean; reason: string | null; lastError: string | null };
 type McpRow = { id: string; name: string; status: string; enabled: boolean; running: boolean; available: boolean; toolCallable: boolean; eligible: boolean; configured: boolean; source: string; toolCount: number | null; discoveredToolCount: number; transport: string; reason: string | null; lastError: string | null };
 
@@ -1841,7 +1869,10 @@ export function PluginsPage() {
   const [extensionSettings, setExtensionSettings] = useState<ExtensionSettingsFormState | null>(null);
   const [extensionSettingsLoading, setExtensionSettingsLoading] = useState(false);
   const [selectedIntegration, setSelectedIntegration] = useState<IntegrationSettings | null>(null);
-  const [snowLumaConfigDraft, setSnowLumaConfigDraft] = useState({ httpUrl: 'http://127.0.0.1:3000', wsUrl: 'ws://127.0.0.1:3001', accessToken: '', clearAccessToken: false });
+  const integrationRequest = useRef(0);
+  const [oneBotSettings, setOneBotSettings] = useState<OneBotSettings | null>(null);
+  const [oneBotMigration, setOneBotMigration] = useState<OneBotMigrationPreview | null>(null);
+  const [oneBotDraft, setOneBotDraft] = useState<OneBotConnectionDraft>({ enabled: false, httpUrl: '', wsUrl: '', accessToken: '', httpAccessToken: '', clearAccessToken: false, clearHttpAccessToken: false });
   const [selectedServer, setSelectedServer] = useState<{ server: McpRow; tools: { id: string; name: string; description: string; enabled: boolean; discovered: boolean; callable: boolean }[]; config: { id: string; enabled: boolean; hasArgs: boolean; hasEnvironment: boolean; timeoutMs: number | null; note: string;url:string;credentialRef:string;allowedTools:string[] } } | null>(null);
   const [mcpToolQuery,setMcpToolQuery]=useState('');
   const [mcpToolPage,setMcpToolPage]=useState(0);
@@ -1970,7 +2001,7 @@ export function PluginsPage() {
   }
   useEffect(() => {
     setChannelEvents([]);
-    const accountId = selectedIntegration?.localService?.accountId;
+    const accountId = selectedIntegration?.id === 'cetamesh-onebot' ? oneBotSettings?.health.accountId : selectedIntegration?.localService?.accountId;
     const accept = (kind: string) => (data: DesktopEventData) => {
       if (!accountId || data.accountId !== accountId) return;
       setChannelEvents(rows => [...rows, { ...data, kind }].slice(-20));
@@ -1978,24 +2009,88 @@ export function PluginsPage() {
     const offMessage = bridge.subscribe('channel.message', accept('入站'));
     const offDelivery = bridge.subscribe('channel.delivery', accept('投递'));
     return () => { offMessage(); offDelivery(); };
-  }, [selectedIntegration?.localService?.accountId]);
-  async function manageSnowLuma(action: 'health' | 'reconnect' | 'detect' | 'start' | 'stop' | 'configure') {
-    setBusy(`snowluma:${action}`); setError(''); setNotice('');
+  }, [selectedIntegration?.id, selectedIntegration?.localService?.accountId, oneBotSettings?.health.accountId]);
+  useEffect(() => {
+    if (selectedIntegration?.id !== 'cetamesh-onebot') return;
+    let active = true;
+    let generation = 0;
+    const refreshHealth = async () => {
+      const current = ++generation;
+      try {
+        const settings = await oneBotClient.get();
+        if (!active || generation !== current) return;
+        // Health refreshes never move the revision bound to an unsaved configuration draft.
+        setOneBotSettings(previous => previous ? { ...previous, health: settings.health } : previous);
+      } catch (cause) {
+        if (!active || generation !== current) return;
+        setOneBotSettings(previous => previous ? { ...previous, health: { ...previous.health, connected: null, authenticated: null, ready: false, canSend: false, state: 'unavailable', error: messageOf(cause) } } : previous);
+      }
+    };
+    const offOperation = bridge.subscribe('approval.operation', () => { void refreshHealth(); });
+    const offResolved = bridge.subscribe('approval.resolved', () => { void refreshHealth(); });
+    const offPlugin = bridge.subscribe('plugin.updated', () => { void refreshHealth(); });
+    const timer = window.setInterval(() => { void refreshHealth(); }, 4000);
+    return () => { active = false; generation += 1; offOperation(); offResolved(); offPlugin(); window.clearInterval(timer); };
+  }, [selectedIntegration?.id]);
+  function acceptOneBotSettings(settings: OneBotSettings) {
+    setOneBotSettings(settings);
+    setOneBotDraft({ enabled: settings.configuration.enabled, httpUrl: settings.configuration.httpUrl || '', wsUrl: settings.configuration.wsUrl || '', accessToken: '', httpAccessToken: '', clearAccessToken: false, clearHttpAccessToken: false });
+  }
+  async function manageOneBot(action: 'health' | 'reconnect' | 'start' | 'stop') {
+    const request = integrationRequest.current;
+    setBusy(`onebot:${action}`); setError(''); setNotice('');
     try {
-      const params = action === 'configure' ? {
-        httpUrl: snowLumaConfigDraft.httpUrl,
-        wsUrl: snowLumaConfigDraft.wsUrl,
-        ...(snowLumaConfigDraft.accessToken ? { accessToken: snowLumaConfigDraft.accessToken } : {}),
-        ...(snowLumaConfigDraft.clearAccessToken ? { clearAccessToken: true } : {})
-      } : {};
-      const result = await pluginClient.integrationAction('snowluma', action, params);
-      setNotice(result.pending === true || result.approvalId ? '操作已提交，等待 Core 审批。' : action === 'configure' ? 'SnowLuma 连接设置已保存。' : 'SnowLuma 状态已更新。');
-      const settings = await pluginClient.integrationSettings('cetamesh-snowluma');
-      setSelectedIntegration(settings);
-      setSnowLumaConfigDraft(current => ({ ...current, accessToken: '', clearAccessToken: false }));
+      const result = await pluginClient.integrationAction('onebot', action);
+      const [settings, integration] = await Promise.all([oneBotClient.get(), pluginClient.integrationSettings('cetamesh-onebot')]);
+      if (request !== integrationRequest.current) return;
+      setNotice(result.pending === true || result.approvalId ? '连接操作已提交，等待 Core 审批。' : '通道状态已刷新，请按连接和认证证据核对。');
+      setOneBotSettings(previous => previous ? { ...previous, health: settings.health } : previous);
+      setSelectedIntegration(integration);
       await Promise.all([refreshConnections(), refreshApprovals()]);
-    } catch (cause) { setError(messageOf(cause)); }
-    finally { setBusy(''); }
+    } catch (cause) { if (request === integrationRequest.current) setError(messageOf(cause)); }
+    finally { if (request === integrationRequest.current) setBusy(''); }
+  }
+  async function saveOneBot() {
+    if (!oneBotSettings) return;
+    const request = integrationRequest.current;
+    setBusy('onebot:configure'); setError(''); setNotice('');
+    try {
+      const settings = await oneBotClient.configure({
+        enabled: oneBotDraft.enabled, httpUrl: oneBotDraft.httpUrl, wsUrl: oneBotDraft.wsUrl,
+        expectedSourceHash: oneBotSettings.configuration.sourceHash,
+        ...(oneBotDraft.accessToken ? { accessToken: oneBotDraft.accessToken } : {}),
+        ...(oneBotDraft.httpAccessToken ? { httpAccessToken: oneBotDraft.httpAccessToken } : {}),
+        ...(oneBotDraft.clearAccessToken ? { clearAccessToken: true } : {}),
+        ...(oneBotDraft.clearHttpAccessToken ? { clearHttpAccessToken: true } : {})
+      });
+      if (request !== integrationRequest.current) return;
+      acceptOneBotSettings(settings); setOneBotMigration(null);
+      setNotice('OneBot 配置已保存，尚未发起连接。');
+      await refreshConnections();
+    } catch (cause) { if (request === integrationRequest.current) setError(messageOf(cause)); }
+    finally { if (request === integrationRequest.current) setBusy(''); }
+  }
+  async function previewOneBotMigration() {
+    const request = integrationRequest.current;
+    setBusy('onebot:migration-preview'); setError('');
+    try {
+      const preview = await oneBotClient.previewMigration();
+      if (request === integrationRequest.current) setOneBotMigration(preview);
+    } catch (cause) { if (request === integrationRequest.current) setError(messageOf(cause)); }
+    finally { if (request === integrationRequest.current) setBusy(''); }
+  }
+  async function applyOneBotMigration() {
+    if (!oneBotMigration || !oneBotMigration.legacyPresent || oneBotMigration.hasCurrentConfig) return;
+    const request = integrationRequest.current;
+    setBusy('onebot:migration-apply'); setError(''); setNotice('');
+    try {
+      const settings = await oneBotClient.applyMigration(oneBotMigration.sourceHash);
+      if (request !== integrationRequest.current) return;
+      acceptOneBotSettings(settings); setOneBotMigration(null);
+      setNotice('端点迁移已完成并保持关闭；旧配置备份已保留。请重新输入令牌，保存后再明确连接。');
+      await refreshConnections();
+    } catch (cause) { if (request === integrationRequest.current) setError(messageOf(cause)); }
+    finally { if (request === integrationRequest.current) setBusy(''); }
   }
   async function manageServer(item: McpRow, action: 'start' | 'stop' | 'enable' | 'disable' | 'restart') {
     setBusy(item.id); setError(''); setNotice('');
@@ -2046,14 +2141,17 @@ export function PluginsPage() {
     finally { setBusy(''); }
   }
   async function openIntegration(item: IntegrationRow) {
+    const request = ++integrationRequest.current;
+    setBusy('');
     try {
-      const settings = await pluginClient.integrationSettings(item.id);
+      const [settings, channel] = await Promise.all([pluginClient.integrationSettings(item.id), item.id === 'cetamesh-onebot' ? oneBotClient.get() : Promise.resolve(null)]);
+      if (request !== integrationRequest.current) return;
       setSelectedIntegration(settings);
-      if (settings.id === 'cetamesh-snowluma' && settings.localService) {
-        setSnowLumaConfigDraft({ httpUrl: settings.localService.httpUrl || 'http://127.0.0.1:3000', wsUrl: settings.localService.wsUrl || 'ws://127.0.0.1:3001', accessToken: '', clearAccessToken: false });
-      }
+      setOneBotMigration(null);
+      if (channel) acceptOneBotSettings(channel);
+      else setOneBotSettings(null);
     }
-    catch (cause) { setError(messageOf(cause)); }
+    catch (cause) { if (request === integrationRequest.current) setError(messageOf(cause)); }
   }
   async function openServer(item: McpRow) {
     const epoch=++serverRequest.current;setError('');
@@ -2147,25 +2245,12 @@ export function PluginsPage() {
       </section>}
       <section><h3>更新说明</h3>{selectedPlugin.changelog.length ? <ul>{selectedPlugin.changelog.map((line, index) => <li key={`${index}-${line}`}>{line}</li>)}</ul> : <p className="muted">没有更新说明。</p>}</section><div className="row detail-actions">{selectedPlugin.status === 'update' ? <Button variant="primary" disabled={busy === selectedPlugin.id} onClick={() => void stage(selectedPlugin)}>查看更新并安装</Button> : !selectedPlugin.installed ? <Button variant="primary" disabled={busy === selectedPlugin.id} onClick={() => void stage(selectedPlugin)}>查看权限并安装</Button> : selectedPlugin.enabled ? <Button disabled={busy === selectedPlugin.id} onClick={() => void pluginAction(selectedPlugin, 'disable')}>停用</Button> : <Button variant="primary" disabled={busy === selectedPlugin.id} onClick={() => void reviewEnable(selectedPlugin)}>查看权限并启用</Button>}{selectedPlugin.installed && <Button variant="danger" disabled={busy === selectedPlugin.id} onClick={() => void pluginAction(selectedPlugin, 'uninstall')}>卸载</Button>}</div></div>}</Sheet>
     <Sheet open={Boolean(review)} title="安装与权限审查" onClose={() => setReview(null)}>{review && <div className="review-detail"><Badge tone={review.trust === 'publisher-signature-verified' ? 'success' : 'warning'}>{review.trust || '来源待核验'}</Badge><h3>{review.action === 'update' ? '更新前查看权限' : review.action === 'install' ? '安装前查看权限' : '启用前查看权限'}</h3><p>仅继续本次明确选择的操作。运行时能力仍需 Core 按策略审批。</p>{review.summary.length ? <section><h4>操作说明</h4><ul>{review.summary.map((line, index) => <li key={`${index}-${line}`}>{line}</li>)}</ul></section> : null}<section><h4>请求的权限</h4>{review.permissions.length ? <ul>{review.permissions.map(permission => <li key={permission}>{permission}</li>)}</ul> : <p>没有声明额外权限。</p>}</section>{!review.installable && <ErrorNotice error="Core 尚未允许该插件安装或启用。请先处理完整性或兼容性问题。" />}<div className="row detail-actions"><Button onClick={() => setReview(null)}>取消</Button><Button variant="primary" disabled={!review.installable || busy === review.id} onClick={() => void confirmReview()}>{busy === review.id ? '正在处理…' : review.action === 'update' ? '确认更新' : review.action === 'install' ? '确认安装' : '确认启用'}</Button></div></div>}</Sheet>
-    <Sheet open={Boolean(selectedIntegration)} title={selectedIntegration?.name ?? '集成设置'} onClose={() => setSelectedIntegration(null)}>
+    <Sheet open={Boolean(selectedIntegration)} title={selectedIntegration?.name ?? '集成设置'} onClose={() => { integrationRequest.current += 1; setSelectedIntegration(null); setOneBotSettings(null); setOneBotMigration(null); setOneBotDraft({ enabled: false, httpUrl: '', wsUrl: '', accessToken: '', httpAccessToken: '', clearAccessToken: false, clearHttpAccessToken: false }); setBusy(''); }}>
       {selectedIntegration && <div className="plugin-detail">
         <StatusBadge value={selectedIntegration.enabled ? 'enabled' : 'disabled'} available={selectedIntegration.available} />
-        {selectedIntegration.id === 'cetamesh-snowluma' && selectedIntegration.localService && <section className="snowluma-settings">
+        {selectedIntegration.id === 'cetamesh-onebot' && oneBotSettings && <section>
           {channelEvents.length > 0 && <div role="status"><h4>当前账号通道活动</h4>{channelEvents.map((event,index) => <p key={index}>{event.kind} · {event.status || '已持久接收'}{event.code ? ' · '+event.code : ''}</p>)}</div>}
-          <div className="row between"><h3>QQ Connector</h3><StatusBadge value={selectedIntegration.localService.status} available={selectedIntegration.localService.ready} /></div>
-          <p>{selectedIntegration.localService.installed === null ? '尚无安装检测证据，可查询 Connector 健康状态。' : !selectedIntegration.localService.installed ? '未检测到本机 SnowLuma 安装。先安装并启动 SnowLuma，再检测连接状态。' : !selectedIntegration.localService.configured ? '需要配置 OneBot HTTP 地址后才能验证连接。' : selectedIntegration.localService.ready ? '网关已就绪，可以连接 QQ 通道。' : selectedIntegration.localService.running ? '进程正在运行；请在 SnowLuma 中完成 QQ 登录和 OneBot 网关配置。' : 'SnowLuma 已安装但当前已停止。'}</p>
-          {selectedIntegration.localService.version && <small>版本 {selectedIntegration.localService.version}</small>}
-          {selectedIntegration.localService.lastError && <p className="message-error" role="status">{selectedIntegration.localService.lastError}</p>}
-          {selectedIntegration.localService.actions.includes('configure') && <details className="plugin-advanced-settings"><summary>连接设置</summary><div className="plugin-advanced-fields"><label>OneBot HTTP 地址<Input value={snowLumaConfigDraft.httpUrl} onChange={event => setSnowLumaConfigDraft(current => ({ ...current, httpUrl: event.target.value }))} maxLength={500} /></label>
-          <label>OneBot WebSocket 地址<Input value={snowLumaConfigDraft.wsUrl} onChange={event => setSnowLumaConfigDraft(current => ({ ...current, wsUrl: event.target.value }))} maxLength={500} /></label>
-          <label>Access Token<Input type="password" autoComplete="new-password" value={snowLumaConfigDraft.accessToken} placeholder={selectedIntegration.localService.accessTokenConfigured ? '已配置；留空保持不变' : '可选'} onChange={event => setSnowLumaConfigDraft(current => ({ ...current, accessToken: event.target.value, clearAccessToken: false }))} maxLength={512} /></label>
-          {selectedIntegration.localService.accessTokenConfigured && <Button compact variant="ghost" onClick={() => setSnowLumaConfigDraft(current => ({ ...current, accessToken: '', clearAccessToken: !current.clearAccessToken }))}>{snowLumaConfigDraft.clearAccessToken ? '保留已配置令牌' : '清除已保存令牌'}</Button>}
-          <Button compact variant="primary" disabled={busy.startsWith('snowluma:')} onClick={() => void manageSnowLuma('configure')}>保存设置</Button></div></details>}<div className="row detail-actions">
-            <Button compact disabled={busy.startsWith('snowluma:')} onClick={() => void manageSnowLuma('health')}>健康检查</Button>{selectedIntegration.localService.actions.includes('reconnect') && <Button compact disabled={busy.startsWith('snowluma:')} onClick={() => void manageSnowLuma('reconnect')}>重新连接</Button>}
-            {selectedIntegration.localService.running
-              ? <Button compact disabled={busy.startsWith('snowluma:')} onClick={() => void manageSnowLuma('stop')}>停止</Button>
-              : <Button compact variant="primary" disabled={busy.startsWith('snowluma:') || selectedIntegration.localService.installed === false || selectedIntegration.localService.configured === false} title={!selectedIntegration.localService.configured ? '先保存 OneBot 地址' : undefined} onClick={() => void manageSnowLuma('start')}>启动</Button>}
-          </div>
+          <OneBotConnectionForm settings={oneBotSettings} draft={oneBotDraft} busy={busy.startsWith('onebot:')} migrationPreview={oneBotMigration} onDraftChange={setOneBotDraft} onSave={() => void saveOneBot()} onAction={action => void manageOneBot(action)} onPreviewMigration={() => void previewOneBotMigration()} onApplyMigration={() => void applyOneBotMigration()} onCancelMigration={() => setOneBotMigration(null)} />
         </section>}
         {selectedIntegration.id === 'cetamesh-bionic-chat' && selectedIntegration.localService && <section><h3>Bionic 社交运行时</h3><BionicReadiness readiness={selectedIntegration.localService.readiness} activity={selectedIntegration.localService.activity}/><p>{selectedIntegration.localService.running ? '运行中' : '已停止'} · QQ 基础传输具有独立生命周期。</p><div className="row detail-actions">{(['health','start','stop','reconnect'] as const).map(action => <Button compact key={action} onClick={() => void pluginClient.integrationAction('bionic', action).then(async result => { setNotice(result.pending ? '操作等待审批' : '状态已更新'); setSelectedIntegration(await pluginClient.integrationSettings('cetamesh-bionic-chat')); await refreshApprovals(); }).catch(cause => setError(messageOf(cause)))}>{action === 'health' ? '健康检查' : action === 'start' ? '启动' : action==='reconnect'?'安全重连':'停止'}</Button>)}</div></section>}
         {selectedIntegration.inventory && <Surface className="bionic-inventory">
@@ -2193,8 +2278,8 @@ export function PluginsPage() {
             <Badge tone={tool.restore === 'deprecated' ? 'default' : 'danger'}>{tool.restore === 'deprecated' ? 'Deprecated' : 'Legacy Unsupported'}</Badge>
           </div>)}
         </details>}
-        <h3>安全设置</h3>
-        {Object.entries(selectedIntegration.settings).length ? Object.entries(selectedIntegration.settings).map(([key, value]) => <div className="tool-setting-row" key={key}><strong>{key}</strong><span>{typeof value === 'boolean' ? value ? '启用' : '停用' : String(value ?? '—')}</span></div>) : <p className="muted">没有可展示的非敏感设置。</p>}
+        {selectedIntegration.id !== 'cetamesh-onebot' && <><h3>安全设置</h3>
+        {Object.entries(selectedIntegration.settings).length ? Object.entries(selectedIntegration.settings).map(([key, value]) => <div className="tool-setting-row" key={key}><strong>{key}</strong><span>{typeof value === 'boolean' ? value ? '启用' : '停用' : String(value ?? '—')}</span></div>) : <p className="muted">没有可展示的非敏感设置。</p>}</>}
       </div>}
     </Sheet>
     <Sheet open={Boolean(selectedServer)} title={selectedServer?.server.name ?? 'MCP 工具'} onClose={() => {serverRequest.current++;setSelectedServer(null);}}>{selectedServer && <div className="plugin-detail">{error&&<ErrorNotice error={error}/>} {notice&&<p role="status">{notice}</p>}

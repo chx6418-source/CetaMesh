@@ -20,16 +20,19 @@ import { terminateSuiteProcessTree } from '../src/testing/suite-process.js';
 import { pathToFileURL } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { redactObject } from '../src/logging/redact.js';
+import { enableOneBotFixture } from './fixtures/onebot-activation.mjs';
 
-assert.ok(!JSON.stringify(redactObject({ snowluma: { httpAccessToken: 'fixture-http-secret', accessToken: 'fixture-ws-secret' } }))
+assert.ok(!JSON.stringify(redactObject({ onebot: { enabled: true, httpAccessToken: 'fixture-http-secret', accessToken: 'fixture-ws-secret' } }))
   .includes('fixture-http-secret'), 'independent HTTP credential must be redacted from object diagnostics');
 
 // A real gateway can configure independent HTTP and WebSocket credentials.
 // Neither transport is allowed to borrow an invalid credential from the other.
 {
   let sends = 0;
+  const httpCredentials = [];
   const server = http.createServer(async (req, res) => {
     for await (const _ of req) { /* Consume the bounded fixture request. */ }
+    httpCredentials.push(req.headers.authorization);
     if (req.headers.authorization !== 'Bearer fixture-http-only') {
       res.writeHead(401); res.end('{}'); return;
     }
@@ -48,13 +51,18 @@ assert.ok(!JSON.stringify(redactObject({ snowluma: { httpAccessToken: 'fixture-h
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const port = server.address().port;
-  const split = createQqRuntime({ config: { snowluma: { wsUrl: `ws://127.0.0.1:${port}`,
-    httpUrl: `http://127.0.0.1:${port}`, accessToken: 'fixture-ws-only', httpAccessToken: 'fixture-http-only' } } });
+  const splitConfig = { onebot: { enabled: true, wsUrl: `ws://127.0.0.1:${port}`,
+    httpUrl: `http://127.0.0.1:${port}`, accessToken: 'fixture-ws-only', httpAccessToken: 'fixture-http-only' } };
+  const split = createQqRuntime({ config: splitConfig });
   try {
     assert.equal((await split.connect()).connected, true);
     assert.equal((await split.sendOneBot('send_group_msg', { group_id: 42, message: 'fixture' })).message_id, 1,
       'HTTP writes and identity verification must use their own configured token');
     assert.equal(sends, 1);
+    delete splitConfig.onebot.httpAccessToken;
+    await assert.rejects(split.sendOneBot('send_group_msg', { group_id: 42, message: 'missing HTTP credential' }), /OneBot get_login_info/);
+    assert.equal(httpCredentials.at(-1), undefined, 'an absent HTTP token cannot borrow the WebSocket credential');
+    assert.equal(sends, 1, 'HTTP identity authentication failure occurs before a write');
   } finally {
     await split.stop();
     for (const socket of sockets.clients) socket.terminate();
@@ -92,7 +100,7 @@ let factoryOptions;
 const incoming = [];
 const notices = [];
 const runtime = createQqRuntime({
-  config: { snowluma: { wsUrl: 'ws://127.0.0.1:6700', accessToken: 'token' } },
+  config: { onebot: { enabled: true, wsUrl: 'ws://127.0.0.1:6700', accessToken: 'token' } },
   clientFactory: options => { factoryOptions = options; return client; },
   onPrivateMessage: event => incoming.push(['private', event]),
   onGroupMessage: event => incoming.push(['group', event]),
@@ -118,7 +126,7 @@ const executedSends = [];
 const queuedClient = new FakeClient();
 queuedClient.connect = async () => { queuedClient.emit('open'); };
 const sendingRuntime = createQqRuntime({
-  config: { snowluma: { wsUrl: 'ws://127.0.0.1:6709' } },
+  config: { onebot: { enabled: true, wsUrl: 'ws://127.0.0.1:6709' } },
   clientFactory: () => queuedClient,
   postAction: async action => {
     executedSends.push(action);
@@ -145,7 +153,7 @@ try {
   const makeLedgerRuntime = postAction => {
     const fixtureClient = new FakeClient();
     fixtureClient.connect = async () => { fixtureClient.emit('open'); };
-    return createQqRuntime({ config: { snowluma: { wsUrl: 'ws://127.0.0.1:6711' } },
+    return createQqRuntime({ config: { onebot: { enabled: true, wsUrl: 'ws://127.0.0.1:6711' } },
       clientFactory: () => fixtureClient, outboundFile: ledgerFile, postAction });
   };
   const firstLedgerRuntime = makeLedgerRuntime(async action => {
@@ -175,7 +183,7 @@ try {
     'offline receipt inspection must preserve the unknown outcome after connector stop');
   const deniedClient = new FakeClient();
   deniedClient.connect = async () => { deniedClient.emit('open'); };
-  const deniedRuntime = createQqRuntime({ config: { snowluma: { wsUrl: 'ws://127.0.0.1:6712' } },
+  const deniedRuntime = createQqRuntime({ config: { onebot: { enabled: true, wsUrl: 'ws://127.0.0.1:6712' } },
     clientFactory: () => deniedClient, outboundFile: path.join(sendLedgerRoot, 'denied.json'),
     authorizeSend: ({ target, kind }) => {
       if (target !== 'group:42' || kind !== 'text') throw Object.assign(new Error('QQ target or media denied'), { code: 'QQ_SEND_DENIED' });
@@ -201,7 +209,7 @@ try {
   await deniedRuntime.stop();
   const sdkClient = new FakeClient();
   sdkClient.connect = async () => { sdkClient.emit('open'); };
-  const sdkRuntime = createQqRuntime({ config: { snowluma: { wsUrl: 'ws://127.0.0.1:6713' } },
+  const sdkRuntime = createQqRuntime({ config: { onebot: { enabled: true, wsUrl: 'ws://127.0.0.1:6713' } },
     clientFactory: () => sdkClient, outboundFile: path.join(sendLedgerRoot, 'sdk.json') });
   await sdkRuntime.connect();
   sdkClient.raw = async () => null;
@@ -249,8 +257,8 @@ try {
   const httpClient = new FakeClient();
   httpClient.connect = async () => { httpClient.emit('open'); };
   const httpRuntime = createQqRuntime({
-    config: { snowluma: { wsUrl: 'ws://127.0.0.1:6710',
-      httpUrl: `http://127.0.0.1:${writeGateway.address().port}`, accessToken: 'fixture-token' } },
+    config: { onebot: { enabled: true, wsUrl: 'ws://127.0.0.1:6710',
+      httpUrl: `http://127.0.0.1:${writeGateway.address().port}`, accessToken: 'fixture-ws-token', httpAccessToken: 'fixture-token' } },
     clientFactory: () => httpClient
   });
   await httpRuntime.connect();
@@ -314,7 +322,7 @@ try {
     return {
       fixtureClient,
       runtime: createQqRuntime({
-        config: { snowluma: { wsUrl } },
+        config: { onebot: { enabled: true, wsUrl } },
         clientFactory: () => fixtureClient,
         ownershipDir: ownershipRoot,
         dedupFile: path.join(ownershipRoot, `dedup-${accountId}.json`),
@@ -342,7 +350,7 @@ try {
   failedClient.connect = async () => { failedClient.emit('open'); };
   let deliveryAttempts = 0;
   const failedRuntime = createQqRuntime({
-    config: { snowluma: { wsUrl: 'ws://127.0.0.1:6799' } },
+    config: { onebot: { enabled: true, wsUrl: 'ws://127.0.0.1:6799' } },
     clientFactory: () => failedClient,
     dedupFile: failedFile,
     onGroupMessage: async () => {
@@ -364,7 +372,7 @@ try {
   const recoveryClient = new FakeClient();
   recoveryClient.connect = async () => { recoveryClient.emit('open'); };
   const recoveryRuntime = createQqRuntime({
-    config: { snowluma: { wsUrl: 'ws://127.0.0.1:6799' } },
+    config: { onebot: { enabled: true, wsUrl: 'ws://127.0.0.1:6799' } },
     clientFactory: () => recoveryClient,
     dedupFile: failedFile,
     onGroupMessage: () => { deliveryAttempts += 1; },
@@ -394,7 +402,7 @@ try {
   const inFlightEntered = new Promise(resolve => { enteredInFlight = resolve; });
   const inFlightClient = new FakeClient();
   inFlightClient.connect = async () => { inFlightClient.emit('open'); };
-  const inFlight = createQqRuntime({ config: { snowluma: { wsUrl: 'ws://127.0.0.1:6700' } },
+  const inFlight = createQqRuntime({ config: { onebot: { enabled: true, wsUrl: 'ws://127.0.0.1:6700' } },
     clientFactory: () => inFlightClient, ownershipDir: ownershipRoot,
     postAction: async () => {
       enteredInFlight();
@@ -420,7 +428,7 @@ try {
   lostLeaseClient.connect = async () => { lostLeaseClient.emit('open'); };
   const lostLeaseRoot = path.join(ownershipRoot, 'lost-lease');
   let lostLeaseSends = 0;
-  const lostLeaseRuntime = createQqRuntime({ config: { snowluma: { wsUrl: 'ws://127.0.0.1:6798' } },
+  const lostLeaseRuntime = createQqRuntime({ config: { onebot: { enabled: true, wsUrl: 'ws://127.0.0.1:6798' } },
     ownershipDir: lostLeaseRoot, clientFactory: () => lostLeaseClient,
     postAction: async () => { lostLeaseSends++; return { message_id: 1 }; } });
   assert.equal((await lostLeaseRuntime.connect()).connected, true);
@@ -434,7 +442,7 @@ try {
   const corruptClient = new FakeClient();
   corruptClient.connect = async () => { corruptClient.emit('open'); };
   const corruptRuntime = createQqRuntime({
-    config: { snowluma: { wsUrl: 'ws://127.0.0.1:6702' } },
+    config: { onebot: { enabled: true, wsUrl: 'ws://127.0.0.1:6702' } },
     clientFactory: () => corruptClient,
     ownershipDir: ownershipRoot,
     dedupFile: corruptFile,
@@ -463,10 +471,11 @@ assert.throws(() => deniedTransport.send('group', '43', 'must not send'), { code
 assert.equal(client.sent.length, 2, 'transport denial must precede the external send');
 
 const mcpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-qq-policy-mcp-'));
+enableOneBotFixture(path.join(mcpRoot, 'state'), { bionic: true });
 const policyOptions = { stateDir: path.join(mcpRoot, 'state') };
 const integration = createIntegrationService(policyOptions);
 const clientTransport = new StdioClientTransport({ command: process.execPath,
-  args: [path.resolve(import.meta.dirname, '../src/mcp-snowluma-safe.js')],
+  args: [path.resolve(import.meta.dirname, '../src/mcp-onebot-safe.js')],
   env: { ...process.env, WHALEBRIDGE_DATA_DIR: mcpRoot }, stderr: 'pipe' });
 const mcpClient = new Client({ name: 'qq-policy-fixture', version: '1.0.0' });
 try {
@@ -474,26 +483,26 @@ try {
   await integration.execute({ method: 'plugins.tool.toggle', params: {
     pluginId: 'cetamesh-bionic-chat', toolId: 'mcp__qq-file-send__qq_send_file', enabled: true
   } });
-  await integration.execute({ method: 'plugins.disable', params: { id: 'cetamesh-snowluma' } });
+  await integration.execute({ method: 'plugins.disable', params: { id: 'cetamesh-onebot' } });
   assert.throws(() => assertMcpToolEnabled('qq-file-send', 'qq_send_file', policyOptions), { code: 'QQ_DISABLED' });
   const disabledQq = await mcpClient.callTool({ name: 'qq_status', arguments: {} });
   assert.equal(disabledQq.isError, true);
   assert.match(disabledQq.content[0].text, /QQ_DISABLED/, 'QQ parent switch must deny MCP execution');
-  await integration.execute({ method: 'plugins.enable', params: { id: 'cetamesh-snowluma' } });
+  await integration.execute({ method: 'plugins.enable', params: { id: 'cetamesh-onebot' } });
   await integration.execute({ method: 'plugins.tool.toggle', params: {
-    pluginId: 'cetamesh-bionic-chat', toolId: 'mcp__snowluma__qq_status', enabled: false
+    pluginId: 'cetamesh-bionic-chat', toolId: 'mcp__onebot__qq_status', enabled: false
   } });
   const disabled = await mcpClient.callTool({ name: 'qq_status', arguments: {} });
   assert.equal(disabled.isError, true);
   assert.match(disabled.content[0].text, /TOOL_DISABLED/, 'MCP callback must enforce a hot persisted plugin tool switch before network IO');
   await integration.execute({ method: 'plugins.tool.toggle', params: {
-    pluginId: 'cetamesh-bionic-chat', toolId: 'mcp__snowluma__qq_get_card_msg', enabled: false
+    pluginId: 'cetamesh-bionic-chat', toolId: 'mcp__onebot__qq_get_card_msg', enabled: false
   } });
   assert.equal(qqSocialFlagPolicyEnabled('getCardMsg', policyOptions), false, 'Bridge prompt and cfg flag must reflect the same tool switch');
   assert.throws(() => assertQqDataToolEnabled('/api/socialV2/card-message', policyOptions), { code: 'TOOL_DISABLED' });
   assert.equal(qqToolPolicyEnabled('qq_click_card_button', policyOptions), false, 'registry cannot override default-off card policy');
   await integration.execute({ method: 'plugins.tool.toggle', params: {
-    pluginId: 'cetamesh-bionic-chat', toolId: 'mcp__snowluma__qq_get_card_msg', enabled: true
+    pluginId: 'cetamesh-bionic-chat', toolId: 'mcp__onebot__qq_get_card_msg', enabled: true
   } });
   assert.equal(qqSocialFlagPolicyEnabled('getCardMsg', policyOptions), true, 'enable takes effect without restarting the MCP process');
   assert.doesNotThrow(() => assertQqDataToolEnabled('/api/socialV2/card-message', policyOptions), 'policy does not require a Core-managed MCP process');
@@ -532,7 +541,7 @@ fs.mkdirSync(discoveryRoot);
 writeJsonAtomic(path.join(workerRoot, 'config.json'), {
   consolePort: 9, consoleToken: 'qq-policy-fixture-console-token',
   allow: { groups: [], private: [] }, deny: { groups: [], private: [] }, allowAllWhenEmpty: false,
-  snowluma: { httpUrl: 'http://127.0.0.1:9', wsUrl: 'ws://127.0.0.1:9', allowProcessControl: false },
+  onebot: { enabled: true, httpUrl: 'http://127.0.0.1:9', wsUrl: 'ws://127.0.0.1:9', allowProcessControl: false },
   dsh: { baseUrl: 'http://127.0.0.1:9' }
 });
 const workerIntegration = createIntegrationService({ stateDir: path.join(workerRoot, 'state') });
@@ -563,7 +572,7 @@ try {
   const recent = () => dataCall({ path: '/api/socialV2/recent', query: { key: 'group:1' }, sessionToken: 'invalid-fixture', token, pipeName });
   assert.equal((await recent()).status, 403);
   await workerIntegration.execute({ method: 'plugins.tool.toggle', params: {
-    pluginId: 'cetamesh-bionic-chat', toolId: 'mcp__snowluma__qq_get_recent_messages', enabled: false
+    pluginId: 'cetamesh-bionic-chat', toolId: 'mcp__onebot__qq_get_recent_messages', enabled: false
   } });
   const deniedRoute = await recent();
   assert.equal(deniedRoute.status, 403);
@@ -600,13 +609,14 @@ const fileTransport = new StdioClientTransport({ command: process.execPath,
 const fileClient = new Client({ name: 'qq-send-owner-fixture', version: '1.0.0' });
 try {
   writeJsonAtomic(path.join(sendRoot, 'config.json'), {
-    snowluma: { httpUrl: `http://127.0.0.1:${onebot.address().port}`, accessToken: 'fixture' },
+    onebot: { enabled: true, httpUrl: `http://127.0.0.1:${onebot.address().port}`, accessToken: 'fixture' },
     allow: { groups: ['42'], private: [] }, deny: { groups: [], private: [] },
     allowAllWhenEmpty: false, socialV2: { tools: { fileSend: true } }
   });
   const fixtureFile = path.join(sendRoot, 'fixture.txt');
   fs.writeFileSync(fixtureFile, 'fixture', 'utf8');
-  await sendIntegration.execute({ method: 'plugins.enable', params: { id: 'cetamesh-snowluma' } });
+  await sendIntegration.execute({ method: 'plugins.enable', params: { id: 'cetamesh-onebot' } });
+  await sendIntegration.execute({ method: 'plugins.enable', params: { id: 'cetamesh-bionic-chat' } });
   await sendIntegration.execute({ method: 'plugins.tool.toggle', params: {
     pluginId: 'cetamesh-bionic-chat', toolId: 'mcp__qq-file-send__qq_send_file', enabled: true
   } });

@@ -203,6 +203,7 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
           scope: { taskId: stepPrincipal.taskId, workspaceId: stepPrincipal.workspaceId },
           signal: controller.signal,
           onTextDelta: delta => { streamedText += delta; emit(s, 'assistant/chunk', { requestId: turn.id, chunk: { type: 'text-delta', text: delta } }); },
+          onContext: context=>emit(s,'model/context',{requestId:turn.id,context}),
           onActivity: activity => emit(s, 'tool/activity', { requestId: turn.id, activity }),
           onCapabilityResult: ({ capability, result, input, eventId }) => emit(s, 'tool/result', {
             requestId: turn.id, eventId, capability, status: result?.status ?? 'failed',
@@ -219,7 +220,7 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
         if (result.status === 'unsupported') {
           const request = { providerId: s.modelProvider || null,
             model: s.model || undefined, reasoning: s.reasoningEffort || undefined,
-            messages: projectMessageBudget(messages).messages, toolChoice: 'none', signal: controller.signal };
+            messages: projectMessageBudget(messages).messages, onContext:context=>emit(s,'model/context',{requestId:turn.id,context}), toolChoice: 'none', signal: controller.signal };
           let fallback;
           if (typeof modelRuntime.stream === 'function') {
             activeRequestId = `${turn.id}:fallback:0`; activeUsage = null; activeModel = null;
@@ -526,7 +527,8 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
       s.running = true;
       emit(s, 'turn/start', { requestId: turn.id, resumed: true });
       try {
-        const result = await toolExecutionCoordinator.resumeApproval({ approvalId, requestFingerprint, decisionResult,
+        const result = await toolExecutionCoordinator.resumeApproval({
+          onContext:context=>emit(s,'model/context',{requestId:turn.id,context}), approvalId, requestFingerprint, decisionResult,
           signal: controller.signal,
           onTextDelta: delta => emit(s, 'assistant/chunk', { requestId: turn.id, chunk: { type: 'text-delta', text: delta } }),
           onCapabilityResult: ({ capability, result, input, eventId }) => emit(s, 'tool/result', {

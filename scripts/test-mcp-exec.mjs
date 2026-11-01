@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
-const mcpEntry = fileURLToPath(new URL('../src/mcp-snowluma-safe.js', import.meta.url));
+const mcpEntry = fileURLToPath(new URL('../src/mcp-onebot-safe.js', import.meta.url));
 
 const transport = new StdioClientTransport({
   command: process.execPath,

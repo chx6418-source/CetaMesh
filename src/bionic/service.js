@@ -17,6 +17,9 @@ export function createBionicService({ dataRoot, stateDir, config, channelService
   let accountRoot = null;
   let startedAt = null;
   const checkEnvironment = createBionicReadiness({ config });
+  let environment = { checkedAt: null, ready: false, canStart: false, state: 'not-checked', code: 'BIONIC_NOT_CHECKED',
+    dsh: { ready: false, sessionApi: false, state: 'not-checked', code: null },
+    preset: { ready: false, state: 'not-checked' }, mcp: { state: 'needs-verification', verified: false, tool: null, checkedAt: null } };
   async function start() {
     if (starting) return starting;
     if (child) return health();
@@ -41,7 +44,7 @@ export function createBionicService({ dataRoot, stateDir, config, channelService
         }
       } catch (error) { throw Object.assign(channelError('BIONIC_STATE_UNAVAILABLE', 'Bionic account state cannot be trusted; original files preserved'), { cause: error }); }
       const current = createQqConnectorHost({ config, dataRoot: accountRoot, stateDir: path.join(accountRoot, 'state'), executable,
-        workerMode: '--bionic-runtime', startParams: { accountId, serviceToken: serviceToken() },
+        workerMode: '--bionic-runtime', startParams: { accountId, serviceToken: serviceToken(), integrationStateDir: stateDir },
         onChildRequest: (method, params) => {
           if (child !== current || !isBionicChatEnabled({ stateDir })) throw channelError('QQ_BIONIC_DISABLED', 'Bionic runtime authority expired');
           if (method === 'read') return channelService.read(params.action, params.params, { envelope: params.envelope === true });
@@ -63,7 +66,7 @@ export function createBionicService({ dataRoot, stateDir, config, channelService
           authorize: event => event.accountId === accountId && isBionicChatEnabled({ stateDir }),
           handle: event => current.request('receive', event) });
         void channelService.drain?.();
-        return health();
+        return check();
       } catch (error) { await current.stop(); child = null; throw error; }
     })().finally(() => { starting = null; });
     return starting;
@@ -73,6 +76,8 @@ export function createBionicService({ dataRoot, stateDir, config, channelService
     detach?.(); detach = null;
     const current = child; child = null;
     startedAt = null;
+    environment = { ...environment, ready: false, canStart: false, state: 'stopped', code: 'BIONIC_STOPPED',
+      mcp: { state: 'needs-verification', verified: false, tool: null, checkedAt: null } };
     await current?.stop();
     return { stopped: true };
   }
@@ -101,10 +106,9 @@ export function createBionicService({ dataRoot, stateDir, config, channelService
   }
   async function health() {
     const current = child;
-    const [policyResult, channelResult, environment] = await Promise.all([
+    const [policyResult, channelResult] = await Promise.all([
       current ? current.health().catch(() => ({ running: false, ready: false })) : { running: false, ready: false },
-      channelService.execute({ method: 'channel.qq.health' }).catch(() => ({ ready: false })),
-      checkEnvironment({ accountRoot, startedAt })
+      channelService.execute({ method: 'channel.qq.health' }).catch(() => ({ ready: false }))
     ]);
     const enabled = isBionicChatEnabled({ stateDir });
     const running = current !== null && current === child && policyResult.running === true;
@@ -120,7 +124,11 @@ export function createBionicService({ dataRoot, stateDir, config, channelService
         enabled, qq: { ready: qqReady, accountId: channelResult.accountId ?? null },
         policy: { running, ready: policyResult.ready === true } } };
   }
+  async function check() {
+    environment = await checkEnvironment({ accountRoot, startedAt });
+    return health();
+  }
   async function reconnect() { await stop(); return start(); }
-  return { start, stop, reconnect, close: stop, health,
+  return { start, stop, reconnect, close: stop, health, check,
     dataCall: params => child ? child.request('api', params, 750000) : Promise.reject(channelError('BIONIC_UNAVAILABLE', 'Bionic runtime is stopped')) };
 }

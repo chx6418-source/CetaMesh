@@ -22,6 +22,27 @@ identities; real project work remains in authoritative Tasks and independently
 verified tool evidence. The original Bionic channel and private historical data
 remain separate until an explicitly reviewed migration.
 
+The optional OneBot channel starts disabled with empty endpoints. Owner configuration
+must explicitly allow it, the `cetamesh-onebot` integration must be enabled, and a
+connection must be requested through the existing Channel lifecycle and approval
+boundary. Its MCP server is `onebot`, with the `mcp__onebot__` tool namespace; server
+and tool enablement remain separate checks. Configuration, transport connection,
+authentication and permission to send are separate evidence. Neither plugin
+enablement nor a saved token proves readiness.
+
+SnowLuma-specific installation, detection, process controls, plugin cards,
+configuration routes and MCP registrations are retired. Old identifiers are denial
+tombstones, not aliases: `SNOWLUMA_INTEGRATION_RETIRED` cannot activate the neutral
+adapter. CetaMesh does not uninstall or terminate external gateways or QQ processes.
+The trusted `ui.channel.onebot.*` methods expose configuration and reviewed migration
+through an exact Owner allowlist and remain blocked by the startup execution gate.
+Migration checks the original configuration byte hash, retains an original-byte
+backup, and copies only legacy endpoints into a disabled OneBot configuration.
+It does not copy credentials or overwrite existing OneBot configuration. Editing,
+saving and migration do not establish a connection; tokens require Owner re-entry.
+Role cards, current-role state and private social history are not migrated by this
+connector change.
+
 ## External coding runtimes
 
 The existing Agent Broker and Registry own Task/Session/Workspace identity and execution
@@ -197,7 +218,7 @@ Native / Infrastructure                     Node SEA Core, Rust supervisor/insta
 | Continuity | `src/continuity/` | context monitor, rollover, handoff packets |
 | Extensions | Runtime: `src/extension/`; packages and fixtures: `extensions/` | The only canonical Extension runtime; manifest review, static scan and sandboxed `vm` host. |
 | Device Mesh | `src/mesh/` | identity/trust, capabilities, transport and approval |
-| Channels | `src/channel/` | Channel Adapter registry (QQ/SnowLuma entry lives here) |
+| Channels | `src/channel/` | Optional QQ/OneBot Adapter registry and independent connection lifecycle; no external gateway process management |
 | Settings / About / Update | `src/settings`, `src/about`, `src/update` | product settings, build provenance, signed-manifest update checks |
 | Config boundary | `src/config/` | one fail-closed config loader/updater for Core, MCP and local services |
 | Logging | `src/logging/` | mandatory redaction (text + field level) |
@@ -224,7 +245,7 @@ Native / Infrastructure                     Node SEA Core, Rust supervisor/insta
 | Agent must not access the disk arbitrarily | Workspace tools resolve user paths through `src/workspace/boundary.js` (lexical + realpath containment, forbidden roots); runtime tests: `npm run test-workspace`. |
 | Trust must not become Permission | Agent/extension capabilities require declared permissions plus explicit grants/approval (`src/extension/review.js`, `src/extension/host.js`, task/agent approval paths); tests: `test-extension`, `test-task`, `test-mesh`. |
 | Task must not depend on an Agent Session | `src/task/runtime.js` keeps `currentAgent` as an optional attachment; detach sets it to `null` without touching task identity. Tests: `npm run test-task`. |
-| QQ must not be a Core dependency | The service-container import closure excludes SnowLuma SDK, QQ runtime and Social adapters; Core injects only an optional DSH API client and starts no DSH process. Tests: `test-composition-boundary`, `test-service-container`, `test-dsh-connector-m3`. |
+| QQ must not be a Core dependency | The service-container import closure excludes SnowLuma SDK, QQ runtime and Social adapters; the optional OneBot connector requires explicit configuration and enablement and makes no default gateway connection. Core injects only an optional DSH API client and starts no DSH process. Tests: `test-composition-boundary`, `test-service-container`, `test-dsh-connector-m3`, `test-onebot-explicit-activation`. |
 | Secrets must not reach logs | `src/logging/redact.js` (mandatory `createRedactingSink`, text + field rules). Test: `npm run test-system` (includes bearer-token regression). |
 | Extensions must not execute downloaded code freely | Static scan forbids `child_process`/`fs`/dynamic import/`new Function`; the host runs code in `vm.createContext` with no host `require`/`process`/`Buffer`/fs/net; high-risk permissions need explicit review approval. Tests: `npm run test-extension`. |
 | Legacy reserved modes stay out of the product flow | No `reserved`/`reserved2` references in `src/desktop`, `src/agent`, `src/memory`, `src/task`, `src/workspace`, `src/continuity`; they remain only in the legacy QQ adapter surfaces (Advanced). Test: `test-architecture`. |

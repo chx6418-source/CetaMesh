@@ -28,14 +28,14 @@ try {
 
   const { createCetaMeshServices } = await import('../src/app/service-container.js');
   const config = { allow: { private: [], groups: ['7'] } };
-  let snowLumaActionCalled = false;
-  const desktopLocalServices = () => ({ snowluma: {
+  let oneBotActionCalled = false;
+  const desktopLocalServices = () => ({ onebot: {
     status: 'stopped', installed: true, running: false, ready: false, configured: true,
     version: '1.2.3', httpUrl: 'http://127.0.0.1:3000', wsUrl: 'ws://127.0.0.1:3001',
     accessTokenConfigured: true, accessToken: 'never-project-this-value', lastError: ''
   } });
-  desktopLocalServices.actions = { snowluma: { detect: async () => {
-    snowLumaActionCalled = true;
+  desktopLocalServices.actions = { onebot: { health: async () => {
+    oneBotActionCalled = true;
     return { status: 'stopped', installed: true, running: false, ready: false, configured: true };
   } } };
   services = createCetaMeshServices({ config, localServices: desktopLocalServices });
@@ -304,11 +304,12 @@ try {
   assert.ok(bionicIntegration, 'Harbor Plugin Center lists the Bionic tool pack as an Integration');
   assert.equal(bionicIntegration.available, true, 'Bionic management remains available even when some backing tools are offline');
   const productPluginCenter = await ui('ui.plugins.status');
-  assert.ok(productPluginCenter.integrations.some(item => item.id === 'cetamesh-snowluma'), 'the unified Plugin Center DTO includes built-in integrations');
-  assert.ok(productPluginCenter.mcp.some(item => item.id === 'snowluma' && item.source === 'builtin'), 'the unified Plugin Center DTO identifies built-in MCP descriptors');
+  assert.ok(productPluginCenter.integrations.some(item => item.id === 'cetamesh-onebot'), 'the unified Plugin Center DTO includes built-in integrations');
+  assert.ok(productPluginCenter.mcp.some(item => item.id === 'onebot' && item.source === 'builtin'), 'the unified Plugin Center DTO identifies built-in MCP descriptors');
   // Exercise a real built-in child through the production service composition, UI
   // projection, actual tools/list schema and Brokered call. The invalid scheme is
   // rejected locally, so this fixture cannot contact an external endpoint.
+  await services.integrationService.execute({method:'plugins.enable',params:{id:'cetamesh-bionic-chat',approved:true}});
   await services.integrationService.execute({ method: 'mcp.start', params: { id: 'web-search-safe', approved: true } });
   try {
     const runningServer = (await ui('ui.mcp.list')).servers.find(server => server.id === 'web-search-safe');
@@ -379,18 +380,18 @@ try {
   } finally {
     services.agentService.execute = originalAgentExecute;
   }
-  const snowLumaSettings = await ui('ui.plugins.integration.settings', { id: 'cetamesh-snowluma' });
-  assert.equal(snowLumaSettings.localService.status, 'stopped');
-  assert.equal(snowLumaSettings.localService.accessTokenConfigured, true);
-  assert.equal(Object.hasOwn(snowLumaSettings.localService, 'accessToken'), false, 'local Integration settings never project the token');
+  const oneBotSettings = await ui('ui.plugins.integration.settings', { id: 'cetamesh-onebot' });
+  assert.equal(oneBotSettings.localService.status, 'stopped');
+  assert.equal(oneBotSettings.localService.accessTokenConfigured, true);
+  assert.equal(Object.hasOwn(oneBotSettings.localService, 'accessToken'), false, 'local Integration settings never project the token');
   const bionicSettings = await ui('ui.plugins.integration.settings', { id: 'cetamesh-bionic-chat' });
   assert.ok(bionicSettings.tools.length >= 50, 'Bionic settings project its real individual tool controls');
-  assert.ok(bionicSettings.tools.some(tool => tool.id === 'mcp__snowluma__qq_status'));
-  const snowLumaAction = await services.integrationService.execute({
-    method: 'integrations.action', params: { localService: 'snowluma', action: 'detect', approved: true }
+  assert.ok(bionicSettings.tools.some(tool => tool.id === 'mcp__onebot__qq_status'));
+  const oneBotAction = await services.integrationService.execute({
+    method: 'integrations.action', params: { localService: 'onebot', action: 'health', approved: true }
   });
-  assert.equal(snowLumaAction.status, 'stopped');
-  assert.equal(snowLumaActionCalled, true, 'Desktop routes SnowLuma controls through the existing local service manager');
+  assert.equal(oneBotAction.status, 'stopped');
+  assert.equal(oneBotActionCalled, true, 'Desktop routes OneBot health through the existing Channel controls');
   const uiSession = await ui('ui.chat.sessions.create', { title: 'Harbor Core contract' });
   const uiHistory = await ui('ui.chat.history', { id: uiSession.id, limit: 100 });
   assert.equal(uiHistory.id, uiSession.id);

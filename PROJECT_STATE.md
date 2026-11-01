@@ -1,6 +1,6 @@
 # CetaMesh — 当前项目状态
 
-更新日期：2026-10-25。
+更新日期：2026-11-01。
 
 ## 正式仓库与平台
 
@@ -113,7 +113,7 @@
 
 - 新增 [CP 协议索引与实现映射](docs/protocol/README.md)，纳入 CP-000..090、17 类产品分类、组合侧车 ADR 和契约草案，统一保持 PROPOSED。这不是新 wire 版本或运行时能力发布。
 - 开发验证入口 `npm run contracts:validate` 与已注册 `test-protocol-proposals` 覆盖 10 份 Schema、26 个原始正反例及图/权限/旧 Manifest 边界。工具只读，不装配子插件、不签发授权、不迁移数据。
-- 现有 Agent/Task/Memory/插件、Desktop/Mobile 配对字节与独立发布保持原事实源；启动诊断已实现部分不重复开发。组合安装、通用 Pub/Sub、App/OS Host、Memory Backend 与原生 Simulation 仍按协议索引记录待实施。Defender RELEASE HOLD 不变。
+- 现有 Agent/Task/Memory/插件、Desktop/Mobile 配对字节与独立发布保持原事实源；启动诊断已实现部分不重复开发。组合安装、通用 Pub/Sub、App/OS Host 与 Memory Backend 仍按协议索引记录待实施；原生 Simulation 的有限实现范围及迁移缺口见下节。Defender RELEASE HOLD 不变。
 
 ## Native Simulation 基础与项目协作（2026-11-01）
 
@@ -122,3 +122,18 @@
 - 讨论只创建待授权 Task；隔离 Worktree、真实 Managed 执行、测试请求授权与逐次审批、独立结果核验继续由既有系统负责。模型说完成不能使房间显示交付。
 - 实际配置模型已验证单角色多轮、三角色有界讨论和隔离 Git 项目的文件修改/真实测试/Task 核验闭环。原始角色提示投影与新版的同模型自动对照已有证据，完整旧版人格迁移仍待 Owner 人工保真评审。
 - 中断请求不重放，未知用量保留预留与不确定标记；显式恢复只开启新轮次，不抹去旧操作。容量、上下文、价格估计及迁移限制见 [Native Simulation](docs/desktop/SIMULATION.md)。本地开发验证不更新已安装版本，不解除 Defender RELEASE HOLD。
+
+## 可选 OneBot 通道与专属集成退役（2026-11-01）
+
+- SnowLuma 专属安装、检测、进程控制、插件卡片、配置与 MCP 注册已从当前产品入口移除。旧插件、服务及工具 ID 明确退役，不自动映射为其他集成；不卸载或终止用户的外部网关、QQ 程序。
+- 通用 OneBot v11 WebSocket/HTTP 适配保留，`onebot` 默认关闭且端点为空。Owner 显式配置并允许连接、启用 `cetamesh-onebot` 后，仍需明确发起连接；MCP Server `onebot` 与工具权限单独检查。配置、连接、认证和可发送状态分别报告，插件启用不代表就绪。
+- 旧 `config.snowluma` 不作为连接授权。可信 Owner UI 可预览并确认端点迁移，按原始文件字节 Hash 校验并备份原始字节；迁移后保持关闭、令牌为空，不覆盖已有 OneBot 配置。令牌需重新输入，保存和迁移不建立连接。
+- 角色卡、当前角色、社交记忆和历史会话数据未在本次退役中迁移或删除。`whale-chat` / `whale-chat-v2` 的四份预设文件仅修订工具命名空间及对应说明；原版备份与 Hash 对照保存在私有开发归档，完整人格迁移仍待 Owner 保真评审。
+- 原生 Simulation 继续独立于外部通道及 DSH。CP-080 保持 PROPOSED，当前实现不新增 wire 版本、不授予额外能力；真实网关、当前安装版本与发布安全门禁仍需独立验收，Defender RELEASE HOLD 不变。
+
+## Chat 模型与运行观测界面（2026-11-01）
+
+- Composer 使用紧凑的模型/推理与上下文/用量浮层，复用现有组件；工具和Agent活动只由真实事件生成摘要，详细回执分页展开。
+- 请求上下文来自Model Runtime当次有效预算，包含来源、窗口、输出预留与压缩观测；估算与实际、最近请求与累计消耗分别标记，未知数据不填零。配额与重置时间无观测来源时保持未知。
+- 每模型能力目录只声明适配器实际支持的推理参数和视觉/工具能力；配置变更继续检查运行中回合、Task/Agent Session恢复记录及已有授权。未知副作用不因清除Chat活动绑定而失去保护。
+- 可选模块降级入口位于Harbor正常布局行，避免覆盖Composer；核心异常的BLOCKED启动与运行中冻结门禁保持。

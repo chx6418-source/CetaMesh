@@ -7,11 +7,11 @@ import { createMcpRuntime, createStdioMcpConnection, resolveMcpLaunch } from '..
 
 const fixtureEntry = fileURLToPath(new URL('./fixtures/mcp-stdio-server.mjs', import.meta.url));
 const packagedExe = path.join(path.parse(process.execPath).root, 'Program Files', 'CetaMesh Installed', 'WhaleBridgeCore.exe');
-const packagedLaunch = resolveMcpLaunch({ id: 'snowluma', entry: 'src/mcp-snowluma-safe.js' }, {}, {
+const packagedLaunch = resolveMcpLaunch({ id: 'onebot', entry: 'src/mcp-onebot-safe.js' }, {}, {
   packaged: true, execPath: packagedExe, sourceRoot: path.dirname(fixtureEntry)
 });
 assert.equal(packagedLaunch.command, packagedExe);
-assert.deepEqual(packagedLaunch.args, ['--mcp', 'snowluma']);
+assert.deepEqual(packagedLaunch.args, ['--mcp', 'onebot']);
 assert.equal(packagedLaunch.cwd, path.dirname(packagedExe), 'installed Core child uses its current install directory as cwd');
 assert.equal(JSON.stringify(packagedLaunch).includes(path.dirname(fixtureEntry)), false, 'installed MCP launch does not depend on the source checkout');
 const sourceRoot = path.dirname(path.dirname(path.dirname(fixtureEntry)));

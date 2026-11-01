@@ -3,6 +3,7 @@ import { channelError } from '../channel/delivery-journal.js';
 import { executeDataCall } from '../control/data-ipc.js';
 import { createBionicPolicyHost } from '../bridge.js';
 import { createBionicChannelFacade } from './channel-facade.js';
+import path from 'node:path';
 
 export function runBionicWorker({ processRef = process } = {}) {
   let policy = null;
@@ -13,9 +14,13 @@ export function runBionicWorker({ processRef = process } = {}) {
     onRequest: async (method, params = {}) => {
       if (method === 'start') {
         if (policy) return policy.status();
+        if (typeof params.integrationStateDir !== 'string' || !path.isAbsolute(params.integrationStateDir)) {
+          throw channelError('BIONIC_POLICY_ROOT_REQUIRED', 'Core-bound integration policy directory required');
+        }
         accountId = params.accountId;
         const channel = createBionicChannelFacade({ request: (...args) => link.request(...args), accountId });
         policy = await createBionicPolicyHost({ config: params.config, channel, serviceToken: params.serviceToken,
+          integrationStateDir: params.integrationStateDir,
           log: message => processRef.stderr.write(`${message}\n`) });
         return policy.status();
       }

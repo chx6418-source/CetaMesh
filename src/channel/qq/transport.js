@@ -2,7 +2,7 @@ import { text } from './onebot-client.js';
 
 export function createQqTransport({ client, textSegment = text, authorize = () => {} } = {}) {
   if (!client || typeof client.sendPrivateMessage !== 'function' || typeof client.sendGroupMessage !== 'function') {
-    throw new TypeError('QQ transport requires a SnowLuma message client');
+    throw new TypeError('QQ transport requires a OneBot message client');
   }
   return {
     send(kind, id, content, options = {}) {

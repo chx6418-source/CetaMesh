@@ -2,7 +2,7 @@
 // 用法：node scripts/test-config-service.mjs
 //
 // 覆盖范围：
-//   1. 黄金等价：migrateLegacyConfig 与抽取前 bridge.js loadConfig 的输出逐字段一致；
+//   1. 保留配置等价：QQ 网关按显式 OneBot 激活契约替换，其余 loadConfig 输出保持；
 //   2. 安全不变量：allowAllWhenEmpty / socialV2.tools.clickCardButton / setStickerRemark 默认 fail-closed；
 //   3. loader fail-closed：BOM 容错、缺失 / 损坏 / 根非对象、readRawConfigOrEmpty 空对象语义；
 //   4. service：updateSection 浅合并保留兄弟与未知字段、writeFile、load 的 fail-closed。
@@ -378,8 +378,10 @@ const FIXTURES = {
 for (const name of Object.keys(FIXTURES)) {
   const fixture = JSON.parse(JSON.stringify(FIXTURES[name]));
   const before = JSON.parse(JSON.stringify(fixture));
-  const expected = legacyLoadConfig(fixture);
-  const actual = migrateLegacyConfig(fixture);
+  // The legacy gateway is intentionally inert; all other retained fields still
+  // use the independently captured compatibility baseline.
+  const { snowluma: retiredGateway, ...expected } = legacyLoadConfig(fixture);
+  const { onebot: explicitGateway, ...actual } = migrateLegacyConfig(fixture);
   checkEqual('黄金等价 ' + name, actual, expected);
   checkEqual('迁移不修改输入 ' + name, fixture, before);
 }

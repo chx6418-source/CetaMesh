@@ -9,6 +9,7 @@ import { QQ_READ_ACTIONS, inferQqMessageKind, inferQqTarget } from './qq/request
 import { assertQqAttachments } from './qq/attachments.js';
 import path from 'node:path';
 import { createQqSendLedger } from './qq/send-ledger.js';
+import { assertOneBotConfigured, oneBotConfigured } from './qq/config.js';
 
 export function createChannelService({ now, stateDir, dataRoot, config = {}, connectorFactory, broker, onEvent = () => {} } = {}) {
   const registry = createChannelRegistry({ now });
@@ -25,6 +26,7 @@ export function createChannelService({ now, stateDir, dataRoot, config = {}, con
   let binding = null;
   let health = { ready: false, state: 'stopped', accountId: null };
   let starting = null;
+  let stopUnconfirmed = false;
   let bionic = null;
   let legacyConnector = null;
   const writeActions = new Set(['send_private_msg', 'send_group_msg', 'upload_private_file', 'upload_group_file',
@@ -39,7 +41,7 @@ export function createChannelService({ now, stateDir, dataRoot, config = {}, con
     // Runtime independently infers the actual payload kind and checks it again.
     assertQqSendPolicy({ ...input.options, accountId: input.accountId, target, kind: input.kind, approvalVerified: true },
       { config, qqEnabled: isQqConnectorEnabled({ stateDir }), bionicEnabled: isBionicChatEnabled({ stateDir }),
-        toolEnabled: name => assertMcpToolEnabled(['qq_send_file', 'qq_send_audio_from_url'].includes(name) ? 'qq-file-send' : 'snowluma', name, { stateDir }) });
+        toolEnabled: name => assertMcpToolEnabled(['qq_send_file', 'qq_send_audio_from_url'].includes(name) ? 'qq-file-send' : 'onebot', name, { stateDir }) });
     await assertQqAttachments(input.params, { config, dataRoot });
   }
   if (broker) broker.register({ id: 'channel.qq.send', permission: 'message.send', provider: 'channel', risk: 'high',
@@ -122,6 +124,9 @@ export function createChannelService({ now, stateDir, dataRoot, config = {}, con
     return result;
   }
   async function start() {
+    if (stopUnconfirmed) throw channelError('CHANNEL_STOP_UNCONFIRMED', 'Verify previous Connector exit before starting another executor');
+    assertOneBotConfigured(config);
+    if (!isQqConnectorEnabled({ stateDir })) throw channelError('QQ_DISABLED', 'OneBot QQ channel integration is disabled');
     journal.snapshot();
     if (health.ready) return health;
     if (starting) return starting;
@@ -150,7 +155,15 @@ export function createChannelService({ now, stateDir, dataRoot, config = {}, con
     if (starting) await starting.catch(() => { /* Failed startup still requires cleanup of its owned child. */ });
     await bionic?.stop();
     binding = null;
-    const result = await connector?.stop();
+    let result;
+    if (connector) {
+      stopUnconfirmed = true;
+      health = { ...health, ready: false, connected: false, state: 'needs-reconciliation' };
+      registry.setState('qq', 'unavailable', 'CHANNEL_STOP_UNCONFIRMED');
+      result = await connector.stop();
+      if (result?.ok === false || result?.stopped === false) return { ...result, stopped: false };
+    }
+    stopUnconfirmed = false;
     connector = null;
     health = { ready: false, state: 'stopped', accountId: null };
     registry.setState('qq', 'unavailable');
@@ -166,9 +179,10 @@ export function createChannelService({ now, stateDir, dataRoot, config = {}, con
     'channel.qq.health': async () => {
       if (connector) {
         health = { ...await connector.health(), state: health.state };
+        if (stopUnconfirmed) health = { ...health, ready: false, connected: false, state: 'needs-reconciliation' };
         registry.setState('qq', health.ready ? 'connected' : 'unavailable');
       }
-      return { ...health, installed: true, configured: typeof config.snowluma?.wsUrl === 'string' && /^wss?:\/\//.test(config.snowluma.wsUrl),
+      return { ...health, connected:health.connected===true||health.ready===true, installed: true, configured: oneBotConfigured(config),
         running: Boolean(connector) && health.state !== 'crashed', authenticated: health.ready === true && Boolean(health.accountId),
         canSend: health.ready === true && isQqConnectorEnabled({ stateDir }) };
     },
@@ -208,6 +222,9 @@ export function createChannelService({ now, stateDir, dataRoot, config = {}, con
       return () => { consumer.enabled = false; consumers.delete(id); };
     },
     execute({ method, params, actor } = {}) {
+      if (/^channel\.(?:qq|bionic)\.(?:start|stop|reconnect|check)$/.test(method) && actor?.kind !== 'owner') {
+        return Promise.reject(channelError('PERMISSION_DENIED', 'Only Owner may control an external Channel lifecycle'));
+      }
       if (method === 'channel.delivery.resolve') return Promise.resolve().then(() => {
         if (actor?.kind !== 'owner') throw channelError('PERMISSION_DENIED', 'Only Owner may resolve unknown Channel effects');
         const result = journal.resolve({ ...params, actor });
@@ -217,7 +234,7 @@ export function createChannelService({ now, stateDir, dataRoot, config = {}, con
       if (method === 'channel.qq.send') return Promise.resolve().then(() => send({ ...params, actor }));
       if (method.startsWith('channel.bionic.')) {
         const action = method.slice('channel.bionic.'.length);
-        if (!bionic || !['start', 'stop', 'health', 'reconnect'].includes(action)) return Promise.reject(channelError('METHOD_NOT_FOUND', 'Unknown Bionic lifecycle operation'));
+        if (!bionic || !['start', 'stop', 'health', 'check', 'reconnect'].includes(action)) return Promise.reject(channelError('METHOD_NOT_FOUND', 'Unknown Bionic lifecycle operation'));
         return bionic[action]();
       }
       const handler = handlers[method];

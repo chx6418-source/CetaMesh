@@ -58,7 +58,6 @@ function fixture(
   });
   const availableRoles = ['helper', 'assistant'];
   const localServices = structuredClone(localServiceState.snapshot ?? {
-    snowluma: { status: 'stopped', installations: [{ id: 'snow-1', valid: true }], selectedId: '' },
     dsh: { status: 'stopped', installations: [{ id: 'dsh-1', valid: true }], selectedId: '' }
   });
   const serviceCalls = [];
@@ -351,46 +350,46 @@ const flushServiceTasks = () => new Promise((resolve) => setImmediate(resolve));
 {
   const fx = fixture(undefined, {}, {}, {}, {}, {}, {}, {
     snapshot: {
-      snowluma: {
+      dsh: {
         status: 'failed', installed: true, running: false, ready: false, managed: false,
-        version: '1.0', selectedId: 'snow-1', lastError: 'token=secret',
+        version: '1.0', selectedId: 'dsh-1', lastError: 'token=secret',
         process: { secret: 'do-not-return' }, launcherPath: 'C:\\private\\launcher.bat',
         logs: [{ text: 'token=secret' }],
         installations: [{
-          id: 'snow-1', name: 'SnowLuma', version: '1.0', status: 'stopped', valid: true,
+          id: 'dsh-1', name: 'DSH', version: '1.0', status: 'stopped', valid: true,
           source: 'configured', launcherPath: 'C:\\private\\launcher.bat', signature: { token: 'no' }
         }]
       },
-      dsh: { status: 'not-installed', installations: [], process: { secret: 'do-not-return' }, credentials: 'C:\\private\\credentials' }
+
     }
   });
   const { services } = fx.service.execute({
     method: CONTROL_METHODS.GET_SERVICES,
     actor: { privilege: PRIVILEGE_CONSOLE }
   });
-  assert.deepEqual(services.snowluma, {
+  assert.deepEqual(services.dsh, {
     status: 'failed', installed: true, running: false, ready: false, managed: false,
-    version: '1.0', selectedId: 'snow-1', lastError: 'token=***',
-    installations: [{ id: 'snow-1', name: 'SnowLuma', version: '1.0', status: 'stopped', valid: true, source: 'configured' }]
+    version: '1.0', selectedId: 'dsh-1', lastError: 'token=***',
+    installations: [{ id: 'dsh-1', name: 'DSH', version: '1.0', status: 'stopped', valid: true, source: 'configured' }]
   });
-  assert.deepEqual(services.dsh, { status: 'not-installed', installations: [] });
+
 }
 
 {
   const fx = fixture();
   const selected = fx.service.execute({
     method: CONTROL_METHODS.SELECT_SERVICE,
-    params: { service: 'snowluma', id: 'snow-1' },
+    params: { service: 'dsh', id: 'dsh-1' },
     actor: { privilege: PRIVILEGE_CONSOLE }
   });
   assert.equal(selected.service.selectedId, '', 'selection replies immediately with the current public snapshot');
   await flushServiceTasks();
-  assert.equal(fx.localServices.snowluma.selectedId, 'snow-1');
-  assert.deepEqual(fx.serviceCalls, [{ name: 'select', value: { service: 'snowluma', id: 'snow-1' } }]);
+  assert.equal(fx.localServices.dsh.selectedId, 'dsh-1');
+  assert.deepEqual(fx.serviceCalls, [{ name: 'select', value: { service: 'dsh', id: 'dsh-1' } }]);
   for (const params of [
-    { service: 'unknown', id: 'snow-1' },
-    { service: 'snowluma', id: 'not-detected' },
-    { service: 'snowluma', id: 'snow-1', path: 'C:\\arbitrary' },
+    { service: 'unknown', id: 'dsh-1' },
+    { service: 'dsh', id: 'not-detected' },
+    { service: 'dsh', id: 'dsh-1', path: 'C:\\arbitrary' },
     { service: 'dsh', id: 'dsh-1', command: 'whoami' },
     { service: 'dsh', id: 'dsh-1', url: 'https://example.invalid' }
   ]) {
@@ -404,60 +403,22 @@ const flushServiceTasks = () => new Promise((resolve) => setImmediate(resolve));
 }
 
 {
-  const fx = fixture();
-  const install = fx.service.execute({
-    method: CONTROL_METHODS.INSTALL_SNOWLUMA,
-    actor: { privilege: PRIVILEGE_CONSOLE }
-  });
-  const startSnow = fx.service.execute({
-    method: CONTROL_METHODS.START_SERVICE,
-    params: { service: 'snowluma' },
-    actor: { privilege: PRIVILEGE_CONSOLE }
-  });
-  const startDsh = fx.service.execute({
-    method: CONTROL_METHODS.START_SERVICE,
-    params: { service: 'dsh' },
-    actor: { privilege: PRIVILEGE_CONSOLE }
-  });
-  const stop = fx.service.execute({
-    method: CONTROL_METHODS.STOP_SERVICE,
-    params: { service: 'dsh' },
-    actor: { privilege: PRIVILEGE_CONSOLE }
-  });
-  assert.deepEqual(install, { service: fx.localServices.snowluma });
-  assert.deepEqual(startSnow, { service: fx.localServices.snowluma });
-  assert.deepEqual(startDsh, { service: fx.localServices.dsh });
-  assert.deepEqual(stop, { service: fx.localServices.dsh });
-  assert.deepEqual(fx.serviceCalls, [], 'long-running install/start/stop work must not delay or precede the reply');
-  await flushServiceTasks();
-  assert.deepEqual(fx.serviceCalls, [
-    { name: 'install', value: undefined },
-    { name: 'start', value: { service: 'snowluma' } },
-    { name: 'connect', value: undefined },
-    { name: 'start', value: { service: 'dsh' } },
-    { name: 'stop', value: { service: 'dsh' } }
-  ]);
-
-  for (const [method, params] of [
-    [CONTROL_METHODS.INSTALL_SNOWLUMA, { path: 'C:\\arbitrary' }],
-    [CONTROL_METHODS.START_SERVICE, { service: 'snowluma', command: 'start.bat' }],
-    [CONTROL_METHODS.STOP_SERVICE, { service: 'dsh', url: 'https://example.invalid' }],
-    [CONTROL_METHODS.START_SERVICE, { service: 'shell' }]
-  ]) {
-    assert.throws(() => fx.service.execute({
-      method, params, actor: { privilege: PRIVILEGE_CONSOLE }
-    }), ControlServiceError);
-  }
+  const fx=fixture();
+  for(const [method,params] of [['services.installSnowLuma',{}],[CONTROL_METHODS.START_SERVICE,{service:'snowluma'}],[CONTROL_METHODS.STOP_SERVICE,{service:'snowluma'}],[CONTROL_METHODS.SELECT_SERVICE,{service:'snowluma',id:'old'}]])
+    assert.throws(()=>fx.service.execute({method,params,actor:{privilege:PRIVILEGE_CONSOLE}}),{code:'SNOWLUMA_INTEGRATION_RETIRED'});
+  assert.deepEqual(fx.serviceCalls,[],'retired identifiers must never reach a process manager');
+  const start=fx.service.execute({method:CONTROL_METHODS.START_SERVICE,params:{service:'dsh'},actor:{privilege:PRIVILEGE_CONSOLE}});
+  const stop=fx.service.execute({method:CONTROL_METHODS.STOP_SERVICE,params:{service:'dsh'},actor:{privilege:PRIVILEGE_CONSOLE}});
+  assert.deepEqual(start,{service:fx.localServices.dsh});assert.deepEqual(stop,{service:fx.localServices.dsh});
+  assert.deepEqual(fx.serviceCalls,[],'long running lifecycle cannot precede the public reply');
+  await flushServiceTasks();assert.deepEqual(fx.serviceCalls,[{name:'start',value:{service:'dsh'}},{name:'stop',value:{service:'dsh'}}]);
+  for(const params of [{service:'dsh',command:'arbitrary'},{service:'dsh',url:'https://example.invalid'},{service:'shell'}])
+    assert.throws(()=>fx.service.execute({method:CONTROL_METHODS.START_SERVICE,params,actor:{privilege:PRIVILEGE_CONSOLE}}),ControlServiceError);
 }
-
 {
-  const fx = fixture(undefined, {}, {}, {}, {}, {}, {}, { installFails: true });
-  fx.service.execute({
-    method: CONTROL_METHODS.INSTALL_SNOWLUMA,
-    actor: { privilege: PRIVILEGE_CONSOLE }
-  });
-  await flushServiceTasks();
-  assert.deepEqual(fx.logs, ['本地服务SnowLuma 安装失败：install failed']);
+  const fx=fixture(undefined,{},{},{},{},{},{},{startFails:true});
+  fx.service.execute({method:CONTROL_METHODS.START_SERVICE,params:{service:'dsh'},actor:{privilege:PRIVILEGE_CONSOLE}});
+  await flushServiceTasks();assert.deepEqual(fx.logs,['本地服务dsh 启动失败：start failed']);
 }
 
 {

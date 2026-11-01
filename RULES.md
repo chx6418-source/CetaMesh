@@ -1,5 +1,11 @@
 # 鲸桥权限与安全规则（RULES）
 
+本文的四模式与 QQ 会话规则适用于可选的历史 QQ/Bionic 通道，不是原生 Simulation 的启动条件。原生仿真聊天与项目协作使用已有 Model Runtime、Task、Memory 和 Capability Broker，见 [Native Simulation](docs/desktop/SIMULATION.md)。
+
+通用 OneBot 通道默认关闭且端点为空。Owner 必须显式配置 `onebot.enabled=true` 和端点、启用 `cetamesh-onebot`，再明确发起连接；插件启用、已配置、已连接、已认证与可发送是不同状态。SnowLuma 专属安装、检测、进程控制、插件卡片、配置和 MCP 入口已退役；旧 ID 返回 `SNOWLUMA_INTEGRATION_RETIRED`，不会自动映射为 OneBot，也不会卸载或结束用户的外部网关、QQ 进程。
+
+旧 `config.snowluma` 仅可通过 Owner 预览并确认的迁移复制端点：按原文件字节 Hash 核对，先保留原始字节备份，迁移后 `onebot.enabled=false`，不复制令牌，不覆盖已有 OneBot 配置。Owner 需重新输入令牌并保存；编辑、保存和迁移都不发起连接。角色卡、当前角色与私有社交历史保持原样。
+
 ## 运行模式（鲸桥四模式）
 
 模式由 DSH WebUI **设置页 → 插件设置（whale-mode）** 控制（DSH 重启后生效），
@@ -45,7 +51,7 @@
 ## QQ 会话 agent 的硬边界
 
 1. **无本地工具**：whale-chat / whale-chat-v2 预设不挂载 bash/pwsh、文件读写、子代理、工作流——群友无论如何诱导，agent 物理上无法操作本机。
-2. **QQ 动作安全子集**：只允许 `mcp__snowluma__*`、`mcp__snowluma-host__*`、`mcp__web-search-safe__*` 三个命名空间下的工具，以及 `ask_user_question` / `todo_write`；其他工具（含 `dev_*` 开发/管理工具）在执行期会被 `qq-tool-restrict.mjs` 拒绝。QQ 动作无禁言、踢人、文件上传下载等管理操作。
+2. **QQ 动作安全子集**：QQ 工具使用 `mcp__onebot__*`；预设还按现有规则允许 `mcp__web-search-safe__*`、`mcp__qq-file-send__*`、`mcp__bilibili__*`、`vision_*` 和 `ask_user_question` / `todo_write` / `read_image` / `describe_image`。其他工具（含 `dev_*` 开发/管理工具）在执行期会被 `qq-tool-restrict.mjs` 拒绝。旧 `mcp__snowluma__*` 与 `mcp__snowluma-host__*` 不再获得调用权；QQ 工具不提供禁言、踢人等群管理操作，文件发送继续由独立受控工具及其权限管理。
 3. **只读联网搜索**：`whale-chat` / `whale-chat-v2` 预设已关闭 DSH 内置 `tool-web` 的 `search` / `fetch`，联网统一走 `src/mcp-web-search-safe.js` 提供的 `mcp__web-search-safe__web_search/web_fetch`。不暴露本地文件、命令执行、写操作。
    - ✅ `mcp__web-search-safe__web_fetch` 已做 SSRF 加固：仅 http/https、禁止 localhost/私有 IP/链路本地/CGNAT/带凭据 URL、DNS 解析结果全量校验、每跳重定向重新校验、响应体限量读取。
 4. **发送强制白名单**：所有发送类工具（`qq_send_group_message` / `qq_send_private_message` / `qq_send_message` / `qq_send_burst` / `qq_reply` / `qq_send_poke` / `qq_send_sticker` 等）的目标必须命中 `config.json` 的 `allow.groups` / `allow.private`，否则拒绝执行。
@@ -104,6 +110,6 @@
 ## 事故与兜底
 
 - 群友诱导 agent 失败时，agent 会按 persona 规则拒绝；即使被诱导成功，最坏后果也只是**发一条白名单内的消息**——本地操作在工具面上不存在，敏感信息会被回复审计拦截。
-- 想彻底关闭机器人：停止桥接进程（start.bat 窗口 Ctrl+C）或 SnowLuma。
+- 想停止 QQ 通道：在 OneBot 连接详情中断开连接并关闭该通道；如需退出桥接，可停止桥接进程（start.bat 窗口 Ctrl+C）。这些操作不结束或卸载外部网关、QQ 程序。
 - 修改白名单/角色/owner 后保存即热更新（控制台写入 config.json / state/*.json 后即时生效）；修改 preset（`~/.dsh/.agent-presets/whale-chat*/`）后重启 DSH 生效。
 - ⚠️ 桥接只能运行一个实例：消息异常时先检查任务管理器里是否有多余的 `node ...bridge.js`。

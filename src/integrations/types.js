@@ -4,7 +4,7 @@
 //   - Tool        ：一次可调用的原子动作（有 schema / risk / 所属 source）。
 //   - MCP Server  ：提供若干 Tool 的独立进程（stdio 传输），可 start/stop/restart。
 //   - Plugin      ：安装/配置/状态/开关的统一挂载单位（parent toggle）。
-//   - Integration ：把**已有底层 Provider**（SnowLuma=Channel Provider，DSH=Agent Provider）
+//   - Integration ：把**已有底层 Provider**（OneBot=Channel Provider，DSH=Agent Provider）
 //                   以 Plugin 卡片形式暴露给用户；不改变底层架构。
 //
 // 本文件只放常量与纯函数，不引入运行时依赖。

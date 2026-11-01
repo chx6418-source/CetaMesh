@@ -4,8 +4,8 @@
 // 打包入口 src/core-sea.js 负责 SEA exe；两者都只 import 本模块，避免其中一方的
 // 主模块守卫在另一方运行时被意外触发（SEA 中 import.meta.url 会等于 exe 自身路径）。
 import { runCoreWorker } from './app/core-worker.js';
-import { runMcpSnowLuma } from './mcp-snowluma-safe.js';
-import { runMcpSnowLumaHost } from './mcp-host-server.js';
+import { runMcpOneBot } from './mcp-onebot-safe.js';
+import {assertNotRetiredSnowLuma} from './integrations/retired.js';
 import { runMcpWebSearchSafe } from './mcp-web-search-safe.js';
 import { runMcpQqFileSend } from './mcp-qq-file-send.js';
 import { runMcpBilibili } from './mcp-bilibili.js';
@@ -15,16 +15,14 @@ import { runExtensionWorker } from './extension/process-worker.js';
 import { runQqConnectorWorker } from './channel/qq/connector-worker.js';
 
 export const MCP_MODES = Object.freeze({
-  snowluma: runMcpSnowLuma,
-  'snowluma-host': runMcpSnowLumaHost,
+  onebot: runMcpOneBot,
   'web-search-safe': runMcpWebSearchSafe,
   'qq-file-send': runMcpQqFileSend,
   bilibili: runMcpBilibili
 });
 
 const MCP_ALIASES = Object.freeze({
-  'mcp-snowluma': 'snowluma',
-  'mcp-snowluma-host': 'snowluma-host',
+  'mcp-onebot': 'onebot',
   'mcp-web-search-safe': 'web-search-safe',
   'mcp-qq-file-send': 'qq-file-send',
   'mcp-bilibili': 'bilibili'
@@ -125,6 +123,7 @@ export function parseCoreArgs(argv = process.argv.slice(2)) {
   }
 
   if (requested !== null) {
+    assertNotRetiredSnowLuma(requested);
     const normalized = MCP_ALIASES[requested] ?? requested;
     if (!Object.hasOwn(MCP_MODES, normalized)) {
       throw new Error(`未知 MCP 模式：${requested}\n\n${CORE_USAGE}`);

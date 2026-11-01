@@ -36,7 +36,9 @@
 
 外部 QQ/OneBot、其他即时通讯、Webhook 等只是可插拔 `channel-adapter`。适配器处理消息来源、`eventId`, `conversationId`, `senderRef`, `receivedAt`, `body/mediaRefs`, `replyTo`, `dedup`；发送由 Capability Broker 的 `message.send`（或实际已注册的受控能力）审批和结果回执处理。
 
-**SnowLuma 下线策略**：移除专属安装/更新/进程控制/UI/MCP 入口，不卸载用户程序、不杀用户 QQ 进程；保留独立 OneBot v11 WebSocket/HTTP 协议解析与可替换适配。旧 `config.snowluma` 如有信息需要迁移，要经 Owner 审查后转换为通用 OneBot 配置，不能自动搬运 accessToken。
+**SnowLuma 下线策略（当前 Desktop 实现）**：专属安装、检测、进程控制、配置、插件卡片与 MCP 入口已退役；旧 ID 明确拒绝，不自动映射为其他集成，不卸载外部网关或结束用户 QQ 进程。独立 OneBot v11 WebSocket/HTTP 适配保留，默认关闭、端点为空，需 Owner 显式配置、启用插件并请求连接。配置、连接、认证与可发送状态独立，不以插件启用代替就绪。
+
+旧 `config.snowluma` 只通过可信 Owner UI 预览并确认端点迁移：核对原文件字节 Hash 并保留原始字节备份，不覆盖已有 OneBot 配置；迁移后保持关闭，不复制令牌，Owner 需重新输入。保存和迁移不发起连接。角色卡与私有历史数据不因通道退役而迁移或删除；预设工具命名空间修订不等于完成人格迁移。上述实现复用现有 Core/Channel 与授权边界，**本文仍为 PROPOSED，不新增 wire 版本**；当前安装版本、真实外部通道与完整人格保真仍需独立验收。
 
 ## 7. 保真与安全验收
 

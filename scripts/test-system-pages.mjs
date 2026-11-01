@@ -297,8 +297,9 @@ try {
   equal('工程页面不变量成立', placement.ok, true);
   equal('没有工程页残留在产品主区', placement.leakedIntoPrimary, []);
   equal('产品导航统一为 CetaMesh Desktop 概念', [...PRIMARY_PAGES], ['home', 'chat', 'work', 'social', 'agents', 'plugins', 'memory', 'workspaces', 'devices', 'connections', 'security', 'settings']);
-  equal('工程页面共 7 个', ENGINEERING_PAGES.length, 7);
-  for (const label of ['Core status', 'DSH service', 'SnowLuma（Channel Adapter）', 'IPC', 'Logs', 'Whitelists', 'Runtime policy']) {
+  check('第三方网关进程管理不注册工程页面', !ENGINEERING_PAGES.some(page => page.id === 'service.snowluma'));
+  equal('工程页面共 6 个', ENGINEERING_PAGES.length, 6);
+  for (const label of ['Core status', 'DSH service', 'IPC', 'Logs', 'Whitelists', 'Runtime policy']) {
     check('工程页面已归位：' + label, ENGINEERING_PAGES.some((p) => p.label === label));
   }
   equal('Logs 归入 diagnostics', ENGINEERING_PAGES.find((p) => p.id === 'logs').area, 'diagnostics');

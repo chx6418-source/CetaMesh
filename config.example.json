@@ -9,16 +9,6 @@
     "executable": "",
     "customPaths": []
   },
-  "snowluma": {
-    "wsUrl": "ws://127.0.0.1:3001",
-    "httpUrl": "http://127.0.0.1:3000",
-    "accessToken": "",
-    "launcherPath": "SnowLuma\\launcher.bat",
-    "homeDir": "SnowLuma",
-    "webUrl": "",
-    "customPaths": [],
-    "allowProcessControl": false
-  },
   "ownerQQ": 123456789,
   "sessionCwd": "",
   "agentPreset": "whale-chat",
@@ -228,5 +218,12 @@
       "unreadLimit": 30,
       "contextWindow": 20
     }
+  },
+  "onebot": {
+    "enabled": false,
+    "wsUrl": "",
+    "httpUrl": "",
+    "accessToken": "",
+    "httpAccessToken": ""
   }
 }

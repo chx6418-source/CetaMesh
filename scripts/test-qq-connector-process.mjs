@@ -5,8 +5,10 @@ import path from 'node:path';
 import http from 'node:http';
 import { WebSocketServer } from 'ws';
 import { createQqConnectorHost } from '../src/channel/qq/connector-host.js';
+import { enableOneBotFixture } from './fixtures/onebot-activation.mjs';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-qq-child-'));
+enableOneBotFixture(path.join(root, 'state'));
 const server = http.createServer(async (req, res) => {
   for await (const chunk of req) { void chunk; }
   res.writeHead(200, { 'content-type': 'application/json' });
@@ -26,7 +28,7 @@ await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 let received;
 let ingressAttempts = 0;
 const config = { allow: { groups: ['42'], private: [] },
-  snowluma: { wsUrl: `ws://127.0.0.1:${server.address().port}`, httpUrl: `http://127.0.0.1:${server.address().port}` } };
+  onebot: { enabled: true, wsUrl: `ws://127.0.0.1:${server.address().port}`, httpUrl: `http://127.0.0.1:${server.address().port}` } };
 const host = createQqConnectorHost({ config, dataRoot: root, stateDir: path.join(root, 'state'),
   executable: process.env.WHALEBRIDGE_TEST_QQ_CONNECTOR_EXE,
   onMessage: async event => {

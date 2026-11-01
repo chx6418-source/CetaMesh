@@ -1,14 +1,12 @@
-// 本地子服务管理层纯逻辑测试：不联网、不启动 SnowLuma/dsh，不修改真实配置。
+// DSH-only lifecycle regression with test-owned files, endpoints and optional fixture process.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import iconv from 'iconv-lite';
-import { createLocalServiceManager, pickSnowLumaReleaseAsset, DSH_INSTALL_HINT, SNOWLUMA_RELEASE_PAGE, createAdaptiveProcessDecoder, connectorProcessEnv } from '../src/local-services.js';
+import { createLocalServiceManager, DSH_INSTALL_HINT, createAdaptiveProcessDecoder, connectorProcessEnv } from '../src/local-services.js';
 
 let passed = 0;
 let failed = 0;
-const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 function check(name, condition, extra = '') {
   if (condition) { passed += 1; console.log(`✅ ${name}${extra ? ` — ${extra}` : ''}`); }
   else { failed += 1; console.error(`❌ ${name}${extra ? ` — ${extra}` : ''}`); }
@@ -18,18 +16,6 @@ const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'whalebridge-local-services-'
 try {
   const connectorEnv = connectorProcessEnv({ PATH: 'fixture-bin', WHALEBRIDGE_UI_AUTH_TOKEN: 'owner-secret', WHALEBRIDGE_UI_PIPE: 'owner-pipe', DSH_HOME: 'fixture-home' });
   check('外部 Connector 子进程不继承 Owner IPC 凭据', connectorEnv.PATH === 'fixture-bin' && connectorEnv.DSH_HOME === 'fixture-home' && !Object.hasOwn(connectorEnv, 'WHALEBRIDGE_UI_AUTH_TOKEN') && !Object.hasOwn(connectorEnv, 'WHALEBRIDGE_UI_PIPE'));
-  const snowDir = path.join(temp, 'SnowLuma');
-  fs.mkdirSync(snowDir, { recursive: true });
-  fs.writeFileSync(path.join(snowDir, 'launcher.bat'), '@echo off\necho SnowLuma test\n');
-  fs.writeFileSync(path.join(snowDir, 'package.json'), '{"version":"1.0.0"}\n');
-  const snowV2 = path.join(temp, 'Snow Luma-v2.1.0');
-  fs.mkdirSync(snowV2, { recursive: true });
-  fs.writeFileSync(path.join(snowV2, 'launcher.bat'), '@echo off\necho SNOWLUMA_START_OK\nexit /b 0\n');
-  fs.writeFileSync(path.join(snowV2, 'package.json'), '{"version":"2.1.0"}\n');
-  const invalidSnow = path.join(temp, 'SnowLuma-broken');
-  fs.mkdirSync(invalidSnow, { recursive: true });
-  fs.writeFileSync(path.join(invalidSnow, 'package.json'), '{"version":"9.9.9"}\n');
-
   const appData = path.join(temp, 'App Data', 'Roaming');
   const npmBin = path.join(appData, 'npm');
   const dshPackage = path.join(npmBin, 'node_modules', '@deepseek-ai', 'dsh');
@@ -46,14 +32,8 @@ try {
     : '#!/bin/sh\necho DSH_START_OK:$1\n');
 
   // 端口 9（discard）必然连不上：让这些用例与「开发机上是否真跑着服务」彻底解耦。
-  const DEAD_CONFIG = { snowluma: { httpUrl: 'http://127.0.0.1:9' }, dsh: { baseUrl: 'http://127.0.0.1:9' } };
+  const DEAD_CONFIG = { dsh: { baseUrl: 'http://127.0.0.1:9' } };
   const config = {
-    snowluma: {
-      homeDir: snowDir,
-      launcherPath: path.join(snowDir, 'launcher.bat'),
-      customPaths: [snowV2, invalidSnow],
-      httpUrl: 'http://127.0.0.1:9'
-    },
     dsh: { baseUrl: 'http://127.0.0.1:9', homeDir: dshHome }
   };
   const manager = createLocalServiceManager({
@@ -66,37 +46,21 @@ try {
     }
   });
   const initial = await manager.detectAll();
-  check('检测本地 SnowLuma launcher.bat', initial.snowluma.installed === true && initial.snowluma.launcherPath.endsWith('launcher.bat'));
-  check('SnowLuma 与 dsh 并行检测均完成', initial.snowluma.detection.status === 'complete' && initial.dsh.detection.status === 'complete');
   check('检测 dsh npm 全局可执行文件并读取版本', initial.dsh.installed === true && initial.dsh.version === '3.2.1' && path.resolve(initial.dsh.executable) === path.resolve(dshExecutable));
-  check('支持 SnowLuma 多版本共存', initial.snowluma.installations.filter((item) => item.valid).length >= 2 && initial.snowluma.installations.some((item) => item.version === '2.1.0'));
-  check('损坏安装被标记为无效', initial.snowluma.installations.some((item) => !item.valid && /缺少/.test(item.invalidReason)));
   const cached = await manager.detectAll();
-  check('第二次检测命中毫秒级缓存层', cached.snowluma.detection.layer === 'cache' && cached.dsh.detection.layer === 'cache');
-  const selectedV2 = initial.snowluma.installations.find((item) => item.valid && item.version === '2.1.0');
-  const selected = await manager.selectSnowLuma({ id: selectedV2?.id });
-  check('可选择多版本并持久化为当前版本', selected.selectedId === selectedV2?.id && selected.version === '2.1.0');
+  check('第二次检测命中缓存层', cached.dsh.detection.layer === 'cache');
+  const selected = await manager.selectDsh({ id: initial.dsh.selectedId });
+  const persisted = JSON.parse(fs.readFileSync(path.join(temp, 'config.json'), 'utf8'));
+  check('DSH 所选版本使用原有 JSON 配置持久化', selected.selectedId === initial.dsh.selectedId
+    && path.resolve(persisted.dsh.executable) === path.resolve(dshExecutable));
   if (process.platform === 'win32') {
-    const snowStartedAt = Date.now();
-    const snowStart = await manager.startSnowLuma({ waitMs: 5000 });
-    check('Windows 可启动含空格路径的 SnowLuma 批处理入口', snowStart.logs.some((item) => item.text.includes('SNOWLUMA_START_OK')));
-    check('SnowLuma 子进程退出后快速结束就绪等待', Date.now() - snowStartedAt < 4000);
     const dshStartedAt = Date.now();
     const dshStart = await manager.startDsh({ waitMs: 5000 });
     check('Windows 可启动 npm dsh.cmd 并正确传递 web 参数', dshStart.logs.some((item) => item.text.includes('DSH_START_OK:web')));
     check('dsh 启动显式传递所选 DSH_HOME', dshStart.logs.some((item) => item.text.includes(path.resolve(dshHome))));
     check('dsh 子进程退出后快速结束就绪等待', Date.now() - dshStartedAt < 4000);
   }
-  check('SnowLuma 发布页固定为 GitHub latest', manager.getSnowLumaReleasePage() === SNOWLUMA_RELEASE_PAGE && /github\.com\/SnowLuma\/SnowLuma/.test(SNOWLUMA_RELEASE_PAGE));
   check('dsh 安装提示包含 Node.js 前置依赖', manager.getDshInstallHint() === DSH_INSTALL_HINT && /Node\.js/.test(DSH_INSTALL_HINT) && /npx @deepseek-ai\/dsh web/.test(DSH_INSTALL_HINT));
-
-  const asset = pickSnowLumaReleaseAsset({ assets: [
-    { name: 'SnowLuma-linux-x64.zip', browser_download_url: 'https://example.invalid/linux.zip' },
-    { name: 'SnowLuma-v1-win-x64-lite.zip', browser_download_url: 'https://example.invalid/win-lite.zip' },
-    { name: 'SnowLuma-v1-win-x64.zip', browser_download_url: 'https://example.invalid/win.zip' }
-  ] });
-  check('最新发布版优先选择 Windows x64 ZIP', asset?.name === 'SnowLuma-v1-win-x64.zip');
-  check('没有 ZIP 资产时安全返回空', pickSnowLumaReleaseAsset({ assets: [{ name: 'SnowLuma.tar.gz' }] }) === null);
 
   const missingManager = createLocalServiceManager({
     root: path.join(temp, 'empty'),
@@ -104,7 +68,7 @@ try {
     detectionOptions: { userHome: path.join(temp, 'empty-user'), fullScanRoots: [], environment: { PATH: '' } }
   });
   const missing = await missingManager.detectAll();
-  check('缺少 SnowLuma 时不抛错并标记未安装', missing.snowluma.installed === false && missing.snowluma.status === 'not-installed');
+  check('缺少 DSH 时不抛错并标记未安装', missing.dsh.installed === false && missing.dsh.status === 'not-installed');
 
   // ── 就绪状态校正：外部已启动的服务不能被显示成“未运行” ──────────────────
   const http = await import('node:http');
@@ -125,27 +89,21 @@ try {
     });
   });
   await listen(fakeDsh);
-  // 模拟 SnowLuma OneBot HTTP API
-  const fakeSnow = http.createServer((req, res) => { res.writeHead(404, { 'content-type': 'text/plain' }); res.end('no api'); });
-  await listen(fakeSnow);
   const readyManager = createLocalServiceManager({
     root: path.join(temp, 'ready-root'),
     config: {
-      dsh: { baseUrl: 'http://127.0.0.1:' + fakeDsh.address().port, homeDir: dshHome },
-      snowluma: { httpUrl: 'http://127.0.0.1:' + fakeSnow.address().port, homeDir: snowDir, launcherPath: path.join(snowDir, 'launcher.bat') }
+      dsh: { baseUrl: 'http://127.0.0.1:' + fakeDsh.address().port, homeDir: dshHome }
     },
     detectionOptions: { userHome: temp, fullScanRoots: [], environment: { PATH: '', APPDATA: path.join(temp, 'no-appdata'), LOCALAPPDATA: '' } }
   });
   await readyManager.detectAll();
   const readySnapshot = readyManager.snapshot();
   check('DSH Ready 由已鉴权的 settings 与 session API 决定（根路径 401 不参与）', readySnapshot.dsh.ready === true && readySnapshot.dsh.running === true && readySnapshot.dsh.authenticated === true && readySnapshot.dsh.sessionCapable === true, 'status=' + readySnapshot.dsh.status);
-  check('外部已运行的 SnowLuma 被判为 ready', readySnapshot.snowluma.ready === true && readySnapshot.snowluma.running === true, 'status=' + readySnapshot.snowluma.status);
-  check('外部实例标记为非托管（不重复拉起、不显示停止按钮）', readySnapshot.dsh.managed === false && readySnapshot.snowluma.managed === false);
+  check('外部实例标记为非托管（不重复拉起、不显示停止按钮）', readySnapshot.dsh.managed === false);
   await closeServer(fakeDsh);
-  await closeServer(fakeSnow);
   await readyManager.reconcileReadiness({ force: true });
   const downSnapshot = readyManager.snapshot();
-  check('外部服务停止后状态回落为未运行', downSnapshot.dsh.ready === false && downSnapshot.dsh.running === false && downSnapshot.snowluma.ready === false);
+  check('外部服务停止后状态回落为未运行', downSnapshot.dsh.ready === false && downSnapshot.dsh.running === false);
 
   const rootOnly = http.createServer((req, res) => {
     if (req.url === '/') { res.writeHead(200); res.end('up'); return; }
@@ -197,28 +155,9 @@ try {
   const tailText = tailOnly.write(Buffer.from('no newline tail', 'utf8')) + tailOnly.end();
   check('无换行残留内容在流结束时输出', tailText.includes('no newline tail'));
 
-  // ── 服务管理边界：只负责本地进程与 OneBot/DSH API，不负责打开网页 ──────
-  const managerMethods = Object.keys(manager);
-  check('管理器保留服务检测、版本选择及进程生命周期 API',
-    ['detectAll', 'snapshot', 'selectSnowLuma', 'selectDsh', 'startSnowLuma', 'stopSnowLuma', 'startDsh', 'stopDsh'].every((name) => managerMethods.includes(name)));
-  check('管理器不暴露浏览器、应用窗口或网页 URL 打开入口',
-    !managerMethods.some((name) => /open.*(?:web|monitor|window|browser)|resolveSnowLumaWebUrl/i.test(name)));
-  const snapshot = manager.snapshot();
-  check('服务快照不携带 SnowLuma / DSH 网页入口地址',
-    !Object.hasOwn(snapshot.snowluma, 'webUrl') && !Object.hasOwn(snapshot.dsh, 'webUrl'));
-
-  const bridgeSource = fs.readFileSync(path.join(scriptDir, '..', 'src', 'bridge.js'), 'utf8');
-  const managerSource = fs.readFileSync(path.join(scriptDir, '..', 'src', 'local-services.js'), 'utf8');
-  check('SnowLuma 与 dsh 使用同一并行调度批次', managerSource.includes('Promise.allSettled([') && managerSource.includes('timed(() => detectSnowLuma(force))') && managerSource.includes('timed(() => detectDshInstallations(force))'));
-  check('检测采用缓存、优先路径、全量扫描三层策略', managerSource.includes("layer: 'cache'") && managerSource.includes("layer: 'priority'") && managerSource.includes("layer: 'full-scan'"));
-  check('管理器提供就绪校正（外部服务不被显示成未运行）', managerSource.includes('reconcileReadiness') && managerSource.includes('applyReadiness') && managerSource.includes('probeDshUrl'));
-  check('SnowLuma 就绪状态基于 OneBot HTTP/WebSocket 端点，而非 WebUI 端口', managerSource.includes('snowLumaHttpUrl()') && managerSource.includes('snowLumaWsUrl()') && managerSource.includes('probeUrl(snowLumaHttpUrl()') && managerSource.includes('probeTcp(snowLumaWsUrl())'));
-  check('桥接端点暴露本地服务状态与 SSE', bridgeSource.includes("url.pathname === '/api/services'") && bridgeSource.includes("url.pathname === '/api/services/stream'"));
-  check('桥接端点支持后台重检和版本选择', bridgeSource.includes("url.pathname === '/api/services/detect'") && bridgeSource.includes("url.pathname === '/api/services/snowluma/select'") && bridgeSource.includes("url.pathname === '/api/services/dsh/select'"));
-  check('桥接不再暴露 SnowLuma / DSH 的浏览器打开接口',
-    !bridgeSource.includes("url.pathname === '/api/services/snowluma/open'") && !bridgeSource.includes("url.pathname === '/api/services/dsh/open'"));
-  check('桥接不再提供 HTML 监控页或网页内容类型',
-    !bridgeSource.includes("url.pathname === '/dsh-monitor.html'") && !bridgeSource.includes('text/html'));
+  check('管理器仅提供 DSH 检测和生命周期',
+    ['detectAll', 'snapshot', 'selectDsh', 'startDsh', 'stopDsh'].every(name => typeof manager[name] === 'function')
+    && Object.keys(manager.snapshot()).join(',') === 'dsh');
 } finally {
   fs.rmSync(temp, { recursive: true, force: true });
 }

@@ -242,9 +242,9 @@ assert.equal(detectCordisState(UNMARKED_CORDIS).kind, 'unmarked-ours');
 const devBlock = buildMcpBlock(DEV_CORE);
 const devEntries = parseMcpEntries(devBlock);
 assert.deepEqual(Object.keys(devEntries), MCP_SERVERS.map((server) => server.id));
-assert.deepEqual(devEntries['mcp-snowluma'].args, [ENTRY, '--mcp', 'snowluma'], '开发模式必须带 core-entry.js');
-assert.equal(devEntries['mcp-snowluma'].command, process.execPath);
-assert.equal(devEntries['mcp-snowluma'].toolCallTimeoutMs, 725000);
+assert.deepEqual(devEntries['mcp-onebot'].args, [ENTRY, '--mcp', 'onebot'], '开发模式必须带 core-entry.js');
+assert.equal(devEntries['mcp-onebot'].command, process.execPath);
+assert.equal(devEntries['mcp-onebot'].toolCallTimeoutMs, 725000);
 
 const packagedEntries = parseMcpEntries(buildMcpBlock(PACKAGED_CORE));
 assert.deepEqual(
@@ -338,7 +338,7 @@ step('✅ 纯函数：cordis 分类、MCP 块生成/解析往返、开发与打�
     assert.ok(migratedText.includes('# === whalebridge MCP BEGIN ==='), '标记必须保留');
     assert.ok(migratedText.includes('- id: uiskin-theme'), '标记块之后的用户条目必须保留');
     assert.ok(migratedText.includes('  disabled: true'), '用户条目的属性必须保留');
-    assert.equal(migratedEntries['mcp-snowluma'].toolCallTimeoutMs, 725000, '超时配置必须保留');
+    assert.equal(migratedEntries['mcp-onebot'].toolCallTimeoutMs, 725000, '超时配置必须保留');
     step('✅ 旧路径迁移：node.exe + src/mcp-*.js → core-entry.js + --mcp <mode>，用户条目与超时保持不变');
 
     // --- 迁移后再跑一次仍然是空操作
@@ -353,7 +353,9 @@ step('✅ 纯函数：cordis 分类、MCP 块生成/解析往返、开发与打�
     applyPlan(unmarkedPlan, { log: () => {} });
     const unmarkedText = fs.readFileSync(patchFile, 'utf8');
     const unmarkedEntries = parseMcpEntries(unmarkedText);
-    assert.deepEqual(unmarkedEntries['mcp-snowluma'].args, [ENTRY, '--mcp', 'snowluma']);
+    assert.equal(unmarkedEntries['mcp-onebot'],undefined,'unmarked retired IDs cannot be silently remapped');
+    assert.ok(unmarkedText.includes('id: mcp-snowluma')&&unmarkedText.includes('mcp-snowluma-safe.js'),'unknown old source remains preserved for explicit review');
+    assert.ok(unmarkedPlan.warnings.some(w=>w.includes('SNOWLUMA_INTEGRATION_RETIRED')),'retirement and manual migration must be explicit');
     assert.deepEqual(unmarkedEntries['my-own-server'].args, ['--serve'], '用户自己的 MCP 条目必须原样保留');
     assert.equal(unmarkedEntries['my-own-server'].command, 'C:\\tools\\mine.exe');
     assert.ok(!unmarkedText.includes('# === whalebridge MCP BEGIN ==='), '不应给无标记文件补标记块（会重复注册）');
@@ -645,8 +647,7 @@ step('✅ 纯函数：cordis 分类、MCP 块生成/解析往返、开发与打�
   writeIsolatedConfig(dataRoot);
 
   const expectedTools = {
-    'mcp-snowluma': 'qq_get_card_msg',
-    'mcp-snowluma-host': 'snowluma_status',
+    'mcp-onebot': 'qq_get_card_msg',
     'mcp-web-search-safe': 'web_fetch',
     'mcp-qq-file-send': 'qq_send_file',
     'mcp-bilibili': 'bili_search_video'
@@ -873,7 +874,8 @@ step('✅ 纯函数：cordis 分类、MCP 块生成/解析往返、开发与打�
       const unmarkedRemoval = planDshRemoval({ dshHome: secondHome, profile: 'web', dataRoot, manifest: null });
       applyPlan(unmarkedRemoval, { log: () => {} });
       const text = fs.readFileSync(path.join(secondHome, 'profiles', 'web', 'cordis.patch.yml'), 'utf8');
-      assert.ok(!text.includes('mcp-snowluma'), '本项目条目应被移除');
+      assert.ok(text.includes('mcp-snowluma'), '无标记且无manifest的历史条目应保留供Owner确认归属');
+      assert.ok(unmarkedRemoval.warnings.some(w=>w.includes('SNOWLUMA_INTEGRATION_RETIRED')),'不能把保留旧配置显示为仍可用');
       assert.ok(text.includes('my-own-server'), '用户自己的 MCP 条目必须保留');
       step('✅ 卸载：只移除本应用拥有的 preset/插件/MCP 条目，用户内容与改动一律保留');
     } finally {

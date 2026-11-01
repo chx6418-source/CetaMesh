@@ -37,7 +37,7 @@ function inspectMcpEvidence({ accountRoot, startedAt, sessions, config, now }) {
       let row;
       try { row = JSON.parse(line); } catch { continue; }
       const time = Date.parse(row.time);
-      if (row.type !== 'result' || !/^mcp__snowluma__qq_[a-z0-9_]{1,100}$/.test(row.tool ?? '') ||
+      if (row.type !== 'result' || !/^mcp__onebot__qq_[a-z0-9_]{1,100}$/.test(row.tool ?? '') ||
           !Number.isFinite(time) || time < startedAt || time > now || !allowed(row.key) ||
           mapping.sessions[row.key] !== row.sessionId || !live.has(row.sessionId)) continue;
       // The latest observed QQ tool result wins, including a failed reconnect.

@@ -1,3 +1,4 @@
+import {projectChatContext} from './chat-telemetry.js';
 import { explicitDelegationTarget } from './explicit-delegation.js';
 import { aggregateModelUsage, normalizeModelUsage } from '../model/usage.js';
 // CetaMesh Desktop 产品级 Chat 运行时（阶段 03；会话 1 改造为双通道）。
@@ -626,6 +627,11 @@ export function createChatService({
     for (const key of ['provider', 'model', 'reasoning', 'mode', 'modelProvider', 'agentProvider', 'workspaceId']) {
       if (config[key] !== undefined) nextConfig[key] = config[key];
     }
+    if (config.reasoning !== undefined && config.reasoning !== previousConfig.reasoning && config.reasoning !== 'off'
+      && nextConfig.modelProvider && typeof modelRuntime?.modelCapabilities === 'function') {
+      const capabilities=modelRuntime.modelCapabilities(nextConfig.modelProvider,nextConfig.model);
+      if (!capabilities?.reasoning?.levels?.includes(nextConfig.reasoning)) throw chatError('MODEL_REASONING_UNSUPPORTED','当前模型未声明支持所选推理强度');
+    }
     const previousAgentProvider = previousConfig.agentProvider;
     const agentProviderChanged = nextConfig.agentProvider !== previousAgentProvider;
     const modelConfigChanged = nextConfig.model !== previousConfig.model
@@ -633,6 +639,15 @@ export function createChatService({
       || nextConfig.modelProvider !== previousConfig.modelProvider;
     const workspaceChanged = nextConfig.workspaceId !== previousConfig.workspaceId;
     const linkedTask = record.taskId && typeof resolveTask === 'function' ? await resolveTask(record.taskId) : null;
+    const executionChanged=agentProviderChanged||modelConfigChanged||workspaceChanged;
+    if(executionChanged&&(toolExecutionCoordinator?.recoveryForSession?.(record.id)
+      || record.taskId&&toolExecutionCoordinator?.recoveryForTask?.(record.taskId)
+      || record.dshSessionId&&toolExecutionCoordinator?.recoveryForSession?.(record.dshSessionId)
+      || linkedTask?.currentAgent?.sessionId&&toolExecutionCoordinator?.recoveryForSession?.(linkedTask.currentAgent.sessionId)
+      || ['unknown','outcome-unknown','cancel-unconfirmed'].includes(linkedTask?.executionObservation?.state)
+      || linkedTask?.delegationProposal?.state==='unknown')) {
+      throw chatError('CONFIG_RECONCILIATION_REQUIRED','先核对未确认的执行副作用，再切换模型、Agent 或工作区');
+    }
     const releasedTask = linkedTask && ['completed', 'cancelled', 'failed'].includes(linkedTask.status) && !linkedTask.currentAgent;
     if (record.taskId && workspaceChanged && !releasedTask) {
       const task = linkedTask;
@@ -986,6 +1001,17 @@ export function createChatService({
       state.turn.displayText = '';
       return true;
     }
+    if (event.type === 'model/context') {
+      // Only our Managed Agent reports Runtime measurements. External Agent context is unknown.
+      if (record.runtimeProvider !== 'cetamesh') return false;
+      observeContext(record,state,data.context);return true;
+    }
+    if (event.type === 'tool/result') {
+      const rows=state.turn.toolActivity??[];
+      const row=[...rows].reverse().find(item=>item.capability===data.capability||item.label===data.capability);
+      if(row){if(typeof data.filePath==='string')row.filePath=data.filePath.slice(0,500);if(Number.isSafeInteger(data.exitCode))row.exitCode=data.exitCode;}
+      return Boolean(row);
+    }
     if (event.type === 'tool/activity') {
       const activity = data.activity;
       if (!activity?.id) return false;
@@ -1106,6 +1132,7 @@ export function createChatService({
         turnId: turn.id,
         requestId: turn.requestId,
         usage: turn.usage ?? null,
+        ...(turn.context ? {context:projectChatContext(turn.context)} : {}),
         accountingSessionId: turn.accountingSessionId ?? record.id,
         ...(turn.state === 'done' && turn.modelContinuation ? { modelContinuation: turn.modelContinuation } : {}),
         ...(turn.state === 'done' && turn.modelMessages?.length ? { modelMessages: turn.modelMessages } : {}),
@@ -1356,6 +1383,18 @@ export function createChatService({
    * worker IPC 线程因此能继续轮询 chat.status（流式可见、停止可达），且回合时长
    * 不再受 IPC 请求超时约束。回合内错误经 finalizeTurn 落为 turn error。
    */
+  function observeContext(record,state,value){
+    if(!state.turn)return;
+    state.turn.context=projectChatContext(value,'active-request');
+    onEvent?.({event:'chat.streaming',data:{sessionId:record.id,requestId:state.turn.requestId,status:state.turn.state,context:state.turn.context}});
+  }
+  function displayedContext(record,value,phase){
+    const snapshot=projectChatContext(value,phase);if(!snapshot)return null;
+    const provider=record.config.modelProvider||modelRuntime?.defaultProviderId?.();
+    if(provider&&snapshot.providerId!==provider)return null;
+    if(record.config.model&&snapshot.model!==record.config.model)return null;
+    return snapshot;
+  }
   function startModelTurn(record, state, promptText, routing, resolved, retryMessageId = null) {
     if (state.turn) state.turn.routing = routing ?? null;
     const model = modelForRuntime(record);
@@ -1381,6 +1420,7 @@ export function createChatService({
             providerId: resolved.id,
             model: model ?? undefined,
             reasoning: record.config.reasoning,
+            onContext: value=>observeContext(record,state,value),
             messages,
             manifest: productContext.manifest,
             actor: OWNER_ACTOR,
@@ -1469,6 +1509,7 @@ export function createChatService({
           model,
           messages,
           reasoning: record.config.reasoning,
+          onContext: value=>observeContext(record,state,value),
           signal: controller.signal
         });
         for await (const event of events) {
@@ -1807,7 +1848,9 @@ export function createChatService({
     const record = sessionOrThrow(id);
     const state = runtimeOf(record.id);
     if (state.turn) throw chatError('TURN_BUSY', '当前会话有回合进行中');
-    const recovery = toolExecutionCoordinator?.recoveryForSession?.(record.id);
+    const recovery = toolExecutionCoordinator?.recoveryForSession?.(record.id)
+        ?? (record.taskId ? toolExecutionCoordinator?.recoveryForTask?.(record.taskId) : null)
+        ?? (record.dshSessionId ? toolExecutionCoordinator?.recoveryForSession?.(record.dshSessionId) : null);
     if (recovery) throw chatError(recovery.state === 'needs-reconciliation'
       ? 'NEEDS_RECONCILIATION' : 'APPROVAL_RECOVERY_REQUIRED',
     'Core 重启前的工具操作或审批仍需人工核对，不能自动重试');
@@ -2059,13 +2102,17 @@ export function createChatService({
     const state = runtimeOf(record.id);
     const turn = state.turn;
     if (!turn) {
-      const recovery = toolExecutionCoordinator?.recoveryForSession?.(record.id);
+      const recovery = toolExecutionCoordinator?.recoveryForSession?.(record.id)
+        ?? (record.taskId ? toolExecutionCoordinator?.recoveryForTask?.(record.taskId) : null)
+        ?? (record.dshSessionId ? toolExecutionCoordinator?.recoveryForSession?.(record.dshSessionId) : null);
       const messages = readHistory(record.id);
       const last = messages[messages.length - 1];
       return {
         id: record.id,
         taskId: record.taskId ?? null,
         turn: null,
+        context: displayedContext(record,last?.context,'last-request'),
+        turnUsage: last?.role==='assistant'?last.usage??null:null,
         lastRouting: last?.role === 'assistant' && last.errorCode === 'TASK_WORKSPACE_BUSY' ? { blockingTaskId: last.routing?.blockingTaskId } : null,
         lastState: recovery?.state ?? (last?.role === 'user' ? (record.interruptedAt ? 'interrupted' : 'awaiting-reply') : last?.error ? 'error' : 'idle'),
         lastError: recovery ? 'Core 重启前的工具操作或审批需要人工核对'
@@ -2092,6 +2139,7 @@ export function createChatService({
         error: turn.error,
         errorCode: turn.errorCode ?? null,
         usage: turn.usage,
+        context: displayedContext(record,turn.context,'active-request'),
         toolActivity: Array.isArray(turn.toolActivity) ? turn.toolActivity.slice(-32) : [],
         agentActivity: turn.agentActivity ?? null,
         ...(turn.approvalId ? { approvalId: turn.approvalId, approvalExpiresAt: turn.approvalExpiresAt ?? null } : {}),
@@ -2124,7 +2172,8 @@ export function createChatService({
     const model = modelForRuntime(record);
     state.modelTurn = { controller, providerId: resolved.id, kind: 'model' };
     try {
-      const result = await toolExecutionCoordinator.resumeApproval({ approvalId, requestFingerprint, decisionResult, signal: controller.signal,
+      const result = await toolExecutionCoordinator.resumeApproval({
+        onContext: value=>observeContext(record,state,value), approvalId, requestFingerprint, decisionResult, signal: controller.signal,
         onTextDelta: delta => {
           const turn = state.turn;
           if (!turn || typeof delta !== 'string' || !delta) return;

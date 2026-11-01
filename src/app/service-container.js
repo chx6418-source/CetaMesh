@@ -45,6 +45,7 @@ import {registerDeveloperCapabilities} from '../integrations/developer-tools.js'
 import {createDeveloperBrowserExecutor} from '../integrations/developer-browser.js';
 import {importAttachmentArchive} from '../desktop/attachment-archive.js';
 import { createChannelDesktopControls } from '../channel/desktop-controls.js';
+import {createOneBotConfiguration} from '../config/onebot-configuration.js';
 import { createDshDesktopIntegration } from '../integrations/dsh-desktop.js';
 import { createAboutService } from '../about/service.js';
 import { createUpdateService } from '../update/service.js';
@@ -199,6 +200,7 @@ export function createCetaMeshServices(options = {}) {
     },
     pendingTarget: approvalId => toolExecutionCoordinator?.pendingTarget(approvalId) ?? null,
     recoveryForSession: sessionId => toolExecutionCoordinator?.recoveryForSession(sessionId) ?? null,
+    recoveryForTask: taskId => toolExecutionCoordinator?.recoveryForTask(taskId) ?? capabilityService?.recoveryForTask(taskId) ?? null,
     cancelSession: (sessionId, reason) => toolExecutionCoordinator?.cancelSession(sessionId, reason) ?? { cancelled: 0 }
   };
   managedAgent = createManagedAgentProvider({
@@ -424,6 +426,11 @@ export function createCetaMeshServices(options = {}) {
   channelService.attachBionic(bionicService);
   const channelDesktopControls = createChannelDesktopControls({ channelService, bionicService });
   const channelControlsReady = channelDesktopControls.refresh();
+  const onebotConfiguration=createOneBotConfiguration({configFile:options.configFile??path.join(dataRoot,'config.json'),stateDir,config,
+    health:()=>channelService.execute({method:'channel.qq.health'}),beforeChange:async()=>{
+      const result=await channelService.stop();
+      if((result?.stopped===false||result?.ok===false))throw Object.assign(new Error('Connector exit is not confirmed; configuration was preserved'),{code:'ONEBOT_CONNECTOR_BUSY'});
+    }});
   registerChannelMeshCapabilities({
     broker: capabilityService.broker,
     channelService,
@@ -608,7 +615,7 @@ export function createCetaMeshServices(options = {}) {
     services: {
       chatService, taskService, workshopService, workspaceService, memoryService, capabilityService, agentBroker, continuityService,
       agentService, pluginCenterService, integrationService, extensionService, settingsService, systemServices,
-      toolExecutionCoordinator, usageLedger, modelRuntime,forgeService,simulationService
+      toolExecutionCoordinator, usageLedger, modelRuntime,forgeService,simulationService,onebotConfiguration
     },
     system: systemServices,
     eventBus: uiEventBus
@@ -642,6 +649,7 @@ export function createCetaMeshServices(options = {}) {
     pluginCenterService,
     meshService,
     channelService,
+    onebotConfiguration,
     bionicService,
     simulationService,
     integrationService,

@@ -12,7 +12,7 @@ import os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { APP_PATHS, listRoleNames, resolveRoleFile } from './app-paths.js';
 import { readRawConfig } from './config/loader.js';
-import { createConfigService } from './config/service.js';
+
 import { DEFAULT_MODEL, migrateLegacyConfig, normalizeOwnerQQ } from './config/migrate.js';
 import { workshopQqIngress } from './workshop/qq-transport.js';
 import { isMainModule, reportEntrypointError } from './entrypoint.js';
@@ -72,13 +72,14 @@ import {
   markStickerUsed
 } from './sticker-lib.js';
 import { loginInfo, extractKugouAuth, createQrLogin, pollQrLogin } from './kugou-api.js';
-import { createLocalServiceManager, SNOWLUMA_RELEASE_PAGE, DSH_INSTALL_HINT } from './local-services.js';
+import { createLocalServiceManager, DSH_INSTALL_HINT } from './local-services.js';
 import { bootstrapCetaMesh } from './app/bootstrap.js';
 import { acquireStateOwner } from './app/state-owner.js';
 import { createLegacyShutdown } from './app/legacy-shutdown.js';
 import { createDesktopIpcRuntime } from './app/ipc-runtime.js';
 import { createDshLifecycle } from './providers/dsh/lifecycle.js';
 import { createQqRuntime } from './channel/qq/runtime.js';
+import {createQqSendLedger} from './channel/qq/send-ledger.js';
 import { assertQqSendPolicy } from './channel/qq/send-policy.js';
 import { autoReplyRequestId } from './channel/qq/auto-request.js';
 import { requireKnownQqSendResult } from './channel/qq/send-result.js';
@@ -124,18 +125,6 @@ export function isSupervised() {
   return SUPERVISED;
 }
 
-// 本进程创建的子服务管理器（main() 里赋值）。SnowLuma 与 WhaleBridge 独立运行；
-// WhaleBridge 退出时保留 SnowLuma，避免中断 QQ 注入和 OneBot 会话。
-let managedServices = null;
-
-/**
- * WhaleBridge 退出时让 SnowLuma 继续作为独立服务运行。
- * SnowLuma 自己持有 QQ 注入和 OneBot 会话；强杀其 launcher 进程树会使这些状态异常。
- */
-function leaveSnowLumaRunningOnExit() {
-  if (!managedServices) return;
-  log('鲸桥正在完全退出；SnowLuma 保持运行，可继续管理 QQ。');
-}
 const STATE_FILE = path.join(STATE_DIR, 'sessions.json');
 const ROLE_STATE_FILE = path.join(STATE_DIR, 'current-role.json');
 const SLANG_FILE = path.join(STATE_DIR, 'slang.json');
@@ -272,7 +261,7 @@ function isSilentMarker(text) {
 
 // DSH MCP 发送类工具：一旦 AI 在回合里调用过这些工具，说明消息已经由工具发出，
 // 桥接应跳过该回合的自动转发，避免“工具发一条 + 自动转发一条”的重复。
-const SEND_TOOL_RE = /^mcp__snowluma__qq_(send_group_message|send_private_message|reply|send_burst|send_message)$/;
+const SEND_TOOL_RE = /^mcp__onebot__qq_(send_group_message|send_private_message|reply|send_burst|send_message)$/;
 function isSendToolName(name) {
   return SEND_TOOL_RE.test(String(name ?? ''));
 }
@@ -593,6 +582,9 @@ const REJECT_WORDS = new Set(['拒绝', '不同意', '不允许', '驳回', 'no'
 
 // ── 主流程 ──────────────────────────────────────────────────────────────────
 async function main(runtimeOptions = {}) {
+  // Only the Core-owned Bionic worker start frame supplies this immutable policy
+  // root. Account-owned social data stays in STATE_DIR; grants are never copied.
+  const integrationPolicy = Object.freeze({ stateDir: runtimeOptions.integrationStateDir ?? STATE_DIR });
   let legacyChannelService = null;
   let cfg;
   try {
@@ -611,81 +603,8 @@ async function main(runtimeOptions = {}) {
   loadState();
   legacyShutdown?.register(() => saveState(), { name: 'Legacy session state' });
 
-  // 可选本地子服务：SnowLuma/dsh 的检测、启动、安装和日志流都由控制台共享。
-  // 构造时只在后台并行检测本地文件，不启动任何进程、也不阻塞控制台上线；
-  // 随后再按“SnowLuma 优先、失败降级”的顺序推进桥接启动。
-  const localServices = runtimeOptions.channel ? { snapshot: () => ({ snowluma: {}, dsh: {} }) } : createLocalServiceManager({
-    root: DATA_ROOT,
-    config: cfg,
-    captureSnowLumaOutput: false,
-    onLog: (line) => log(line),
-    onConfigPatch: (patch) => log(`本地子服务配置已更新：${JSON.stringify(patch)}`)
-  });
-  // 登记给退出路径用：完全退出时保留 SnowLuma，避免 worker 的 stdio / 进程树中断 QQ 注入。
-  managedServices = localServices;
-  const runtimeConfigService = createConfigService({ configFile: CONFIG_FILE });
-  const desktopLocalServices = () => {
-    const snapshot = localServices.snapshot();
-    const snowlumaConfig = cfg.snowluma ?? {};
-    snapshot.snowluma = {
-      ...snapshot.snowluma,
-      configured: typeof snowlumaConfig.httpUrl === 'string' && snowlumaConfig.httpUrl.trim().length > 0,
-      httpUrl: snowlumaConfig.httpUrl || 'http://127.0.0.1:3000',
-      wsUrl: snowlumaConfig.wsUrl || 'ws://127.0.0.1:3001',
-      accessTokenConfigured: typeof snowlumaConfig.accessToken === 'string' && snowlumaConfig.accessToken.length > 0
-    };
-    return snapshot;
-  };
-  desktopLocalServices.actions = {
-    snowluma: {
-      detect: async () => {
-        await localServices.detectAll({ force: true });
-        return desktopLocalServices().snowluma;
-      },
-      install: async () => {
-        await localServices.installSnowLuma();
-        return desktopLocalServices().snowluma;
-      },
-      start: async () => {
-        const result = await localServices.startSnowLuma();
-        if (result.ready) {
-          await connectSnowLumaReady;
-          await connectSnowLuma();
-        }
-        return desktopLocalServices().snowluma;
-      },
-      stop: async () => {
-        await localServices.stopSnowLuma();
-        return desktopLocalServices().snowluma;
-      },
-      configure: ({ httpUrl, wsUrl, accessToken, clearAccessToken } = {}) => {
-        const endpoint = (value, name, protocols) => {
-          const text = String(value ?? '').trim();
-          let parsed;
-          try { parsed = new URL(text); } catch { throw Object.assign(new Error(`${name} 必须是合法 URL`), { code: 'INVALID_PARAMS' }); }
-          if (!protocols.includes(parsed.protocol) || parsed.username || parsed.password || parsed.search || parsed.hash) {
-            throw Object.assign(new Error(`${name} 必须使用 ${protocols.join('/')} 地址，且不能包含凭据、查询或片段`), { code: 'INVALID_PARAMS' });
-          }
-          return text.replace(/\/+$/, '');
-        };
-        const patch = {
-          httpUrl: endpoint(httpUrl, 'OneBot HTTP 地址', ['http:', 'https:']),
-          wsUrl: endpoint(wsUrl, 'OneBot WebSocket 地址', ['ws:', 'wss:'])
-        };
-        if (clearAccessToken === true) patch.accessToken = '';
-        else if (accessToken !== undefined && String(accessToken).length > 0) {
-          const token = String(accessToken);
-          if (token.length > 512 || /[\u0000-\u001f]/.test(token)) {
-            throw Object.assign(new Error('Access Token 不能超过 512 个字符或包含控制字符'), { code: 'INVALID_PARAMS' });
-          }
-          patch.accessToken = token;
-        }
-        runtimeConfigService.updateSection('snowluma', patch);
-        cfg.snowluma = { ...(cfg.snowluma ?? {}), ...patch };
-        return desktopLocalServices().snowluma;
-      }
-    }
-  };
+  // Only optional DSH process management remains; external gateways are not managed.
+  const localServices = runtimeOptions.channel ? { snapshot: () => ({dsh:{}}) } : createLocalServiceManager({root:DATA_ROOT,config:cfg,onLog:line=>log(line)});
 
   // ── 群聊黑话/网络用语学习（slang） ──────────────────────────────────────
   let slangEntries = loadSlang(SLANG_FILE);
@@ -702,7 +621,7 @@ async function main(runtimeOptions = {}) {
 
   // ── 表情包体系（二代仿真）本地知识库 ────────────────────────────────────
   let stickerEntries = loadStickerStore(STICKER_FILE);
-  let stickerSyncedAt = 0; // 上次从 SnowLuma 拉取收藏表情的时间戳（毫秒）
+  let stickerSyncedAt = 0; // 上次从 OneBot 拉取收藏表情的时间戳（毫秒）
   let lastForcedAgentStickerSync = 0; // AI 强制刷新表情库的最小间隔保护
 
   function stickerEnabled() {
@@ -713,7 +632,7 @@ async function main(runtimeOptions = {}) {
     try { saveStickerStore(STICKER_FILE, stickerEntries); } catch (error) { log('保存表情库失败:', error?.message ?? error); }
   }
 
-  // 从 SnowLuma OneBot 拉取 QQ 账号收藏表情（fetch_custom_face_detail），并合并进本地库。
+  // 从 通用 OneBot 拉取 QQ 账号收藏表情（fetch_custom_face_detail），并合并进本地库。
   // force=true 时忽略 TTL 强制刷新；失败时返回 null（调用方决定是否使用缓存）。
   async function syncStickerLibrary(force = false) {
     if (cfg.socialV2?.sticker?.enabled === false) return null;
@@ -869,7 +788,7 @@ async function main(runtimeOptions = {}) {
     const media = mediaList[0];
     let file = '';
     if (media?.kind === 'image') {
-      // 优先取图片字节转 base64，避免 SnowLuma 直接下载聊天图片 URL 失败（带签名/防盗链）。
+      // 优先取图片字节转 base64，避免外部网关 直接下载聊天图片 URL 失败（带签名/防盗链）。
       // 严禁把消息里的原始 media.url / media.file 直接交给 OneBot 去下载：那会绕过 SSRF/本地文件防护。
       const img = await fetchOneBotImage(media);
       if (img?.buffer) {
@@ -1556,9 +1475,6 @@ async function main(runtimeOptions = {}) {
 
   // ── 本地控制台（独立 Web 面板，不依赖 DSH WebUI） ───────────────────────────
   // 模式/角色/静默状态都存 state/*.json，桥接即时感知；此服务只读写这些文件。
-  let connectSnowLuma = async () => ({ ok: false, error: 'SnowLuma 客户端尚未初始化' });
-  let resolveConnectSnowLumaReady;
-  const connectSnowLumaReady = new Promise((resolve) => { resolveConnectSnowLumaReady = resolve; });
   function startProductSurfaces() {
     const port = cfg.consolePort ?? 3100;
     // 运行面策略（D1-001）：唯一判定点在 src/runtime-surface.js。
@@ -1592,7 +1508,7 @@ async function main(runtimeOptions = {}) {
     const v2SessionAllowed = isSessionAllowedInCurrentMode;
     // 卡片按钮点击会代表当前 QQ 账号向外部机器人提交回调，属于高风险写操作：
     // 只有明确配置为 true 才启用；旧配置缺少该字段时必须保持关闭。
-    const v2ToolEnabled = (flag) => qqSocialFlagPolicyEnabled(flag) && (flag === 'clickCardButton'
+    const v2ToolEnabled = (flag) => qqSocialFlagPolicyEnabled(flag, integrationPolicy) && (flag === 'clickCardButton'
       ? cfg.socialV2?.tools?.clickCardButton === true
       : cfg.socialV2?.tools?.[flag] !== false);
     const controlService = createControlService({
@@ -1806,20 +1722,9 @@ async function main(runtimeOptions = {}) {
       deleteSilentContext: (key) => social.silentContext.delete(key),
       readLocalServices: () => localServices.snapshot(),
       detectLocalServices: () => localServices.detectAll({ force: true }),
-      selectLocalService: (service, id) => service === 'snowluma'
-        ? localServices.selectSnowLuma({ id })
-        : localServices.selectDsh({ id }),
-      installLocalSnowLuma: () => localServices.installSnowLuma(),
-      startLocalService: (service) => service === 'snowluma'
-        ? localServices.startSnowLuma()
-        : localServices.startDsh(),
-      stopLocalService: (service) => service === 'snowluma'
-        ? localServices.stopSnowLuma()
-        : localServices.stopDsh(),
-      connectSnowLuma: async () => {
-        await connectSnowLumaReady;
-        return connectSnowLuma();
-      },
+      selectLocalService: (_service,id)=>localServices.selectDsh({id}),
+      startLocalService: ()=>localServices.startDsh(),
+      stopLocalService: ()=>localServices.stopDsh(),
       readModelDefaults: () => ({
         provider: String(cfg.dsh?.provider ?? ''),
         model: String(cfg.dsh?.model ?? ''),
@@ -1990,11 +1895,11 @@ async function main(runtimeOptions = {}) {
       // resources. Inner Core composition must not release that lease early.
       owner: { release() {} },
       config: cfg,
+      configFile: CONFIG_FILE,
       dataRoot: DATA_ROOT,
       stateDir: STATE_DIR,
       sourceRoot: APP_PATHS.sourceRoot,
       socialV2File: SOCIAL_V2_FILE,
-      localServices: desktopLocalServices,
       api,
       controlService,
       log
@@ -2193,7 +2098,7 @@ async function main(runtimeOptions = {}) {
       };
       try {
         try {
-          assertQqDataToolEnabled(url.pathname);
+          assertQqDataToolEnabled(url.pathname, integrationPolicy);
         } catch (error) {
           sendJson({ ok: false, code: error.code, error: error.message }, 403);
           return;
@@ -2243,15 +2148,15 @@ async function main(runtimeOptions = {}) {
           req.on('close', () => { clearInterval(beat); runtimeLogHub.clients.delete(res); });
           return;
         }
-        // 本地子服务：SnowLuma 优先启动、dsh 可选启动；所有失败都只反映在状态里，
+        // 仅保留可选 DSH 服务管理；外部网关连接不受进程管理器控制。
         // 不会阻塞控制台或让 WhaleBridge 主流程退出。
         if (req.method === 'GET' && url.pathname === '/api/services') {
-          sendJson({ ok: true, services: localServices.refresh(), releasePage: SNOWLUMA_RELEASE_PAGE, dshInstallHint: DSH_INSTALL_HINT });
+          sendJson({ ok: true, services: localServices.refresh(), dshInstallHint: DSH_INSTALL_HINT });
           return;
         }
         if (req.method === 'GET' && url.pathname === '/api/services/stream') {
           const requested = String(url.searchParams.get('service') || 'all');
-          const service = ['snowluma', 'dsh'].includes(requested) ? requested : 'all';
+          const service = requested === 'dsh' ? requested : 'all';
           res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-store', connection: 'keep-alive', ...SECURITY_HEADERS });
           const send = (payload) => { try { res.write(`data: ${JSON.stringify(payload)}\n\n`); } catch {} };
           const unsubscribe = localServices.subscribe(service, send);
@@ -2265,49 +2170,13 @@ async function main(runtimeOptions = {}) {
           sendJson({ ok: true, started: true, services: localServices.snapshot() }, 202);
           return;
         }
-        if (req.method === 'POST' && url.pathname === '/api/services/snowluma/select') {
-          const body = await readBody().catch(() => ({}));
-          const result = await localServices.selectSnowLuma({ id: String(body?.id || ''), path: String(body?.path || '') });
-          sendJson({ ok: result.installed && !result.lastError, service: result });
-          return;
-        }
         if (req.method === 'POST' && url.pathname === '/api/services/dsh/select') {
           const body = await readBody().catch(() => ({}));
           const result = await localServices.selectDsh({ id: String(body?.id || ''), path: String(body?.path || '') });
           sendJson({ ok: result.installed && !result.lastError, service: result });
           return;
         }
-        if (req.method === 'POST' && url.pathname === '/api/services/snowluma/install') {
-          const result = await localServices.installSnowLuma();
-          sendJson({ ok: result.status !== 'failed', service: result, releasePage: SNOWLUMA_RELEASE_PAGE });
-          return;
-        }
-        if (req.method === 'POST' && url.pathname === '/api/services/snowluma/start') {
-          const result = await localServices.startSnowLuma();
-          let bridge = null;
-          if (result.ready) {
-            bridge = await connectSnowLuma().catch((error) => ({ ok: false, error: error?.message ?? String(error) }));
-          }
-          sendJson({ ok: result.ready === true, service: result, bridge });
-          return;
-        }
-        if (req.method === 'POST' && url.pathname === '/api/services/snowluma/quit-qq') {
-          // 让 QQ 彻底退出，好让 SnowLuma 自己重新拉起并注入（注入要求 QQ 由 SnowLuma 启动）。
-          // 两步式：不带 confirm 只列出将结束的进程，带 confirm:true 才真的结束。
-          const body = (await readBody().catch(() => ({}))) ?? {};
-          if (body.confirm !== true) {
-            const listed = await localServices.listQqProcesses();
-            sendJson({ ok: true, confirmed: false, targets: listed });
-            return;
-          }
-          const result = await localServices.quitQqProcesses();
-          sendJson({ ok: result.results.every((item) => item.ok), ...result });
-          return;
-        }
-        if (req.method === 'POST' && url.pathname === '/api/services/snowluma/stop') {
-          sendJson({ ok: true, service: await localServices.stopSnowLuma() });
-          return;
-        }
+        if(url.pathname.startsWith('/api/services/snowluma/')){sendJson({ok:false,code:'SNOWLUMA_INTEGRATION_RETIRED',error:'专属集成已下线；请显式配置通用 OneBot 连接器。'},410);return;}
         if (req.method === 'POST' && url.pathname === '/api/services/dsh/start') {
           const result = await localServices.startDsh();
           sendJson({ ok: result.ready === true, service: result, dshInstallHint: DSH_INSTALL_HINT });
@@ -3337,7 +3206,7 @@ async function main(runtimeOptions = {}) {
           if (req.headers['x-agent-token'] && !v2ToolEnabled('getPrompt')) { sendJson({ ok: false, error: '工具未启用：qq_get_prompt' }, 403); return; }
           const st = getSocialV2State(key);
           // 让 prompt 里的表情摘要尽量新鲜：按 TTL 同步一次 QQ 收藏表情（失败不阻塞）。
-          if (cfg.socialV2?.sticker?.enabled !== false) {
+          if (qqRuntime.status().ready && cfg.socialV2?.sticker?.enabled !== false) {
             try { await syncStickerLibrary(false); } catch {}
           }
           const roleState = readRoleState();
@@ -3379,7 +3248,7 @@ async function main(runtimeOptions = {}) {
           const enabledTools = [];
           for (const [flag, name] of Object.entries(toolMap)) {
             if (v2ToolEnabled(flag) && !(stickerToolFlags.has(flag) && !stickerEnabled())) {
-              const activeNames = (name.match(/qq_[a-z_]+/g) ?? []).filter(toolName => qqToolPolicyEnabled(toolName));
+              const activeNames = (name.match(/qq_[a-z_]+/g) ?? []).filter(toolName => qqToolPolicyEnabled(toolName, integrationPolicy));
               if (activeNames.length) enabledTools.push(activeNames.join(' / '));
             }
           }
@@ -5238,7 +5107,7 @@ async function main(runtimeOptions = {}) {
             return;
           }
           try {
-            assertMcpToolEnabled('qq-file-send', toolName, { stateDir: STATE_DIR });
+            assertMcpToolEnabled('qq-file-send', toolName, integrationPolicy);
             if (toolName === 'qq_send_file' && cfg.socialV2?.tools?.fileSend === false) throw new Error('QQ 文件发送工具已禁用');
             if (toolName === 'qq_send_audio_from_url' && cfg.socialV2?.tools?.audioSearch === false) throw new Error('QQ 音频发送工具已禁用');
             const realFile = fs.realpathSync(file);
@@ -5538,7 +5407,7 @@ async function main(runtimeOptions = {}) {
     for (let i = 0; i < parts.length; i++) {
       const part = parts[i];
       batch = batch.then(() => enqueueQqAction(async () => {
-          if (!isQqConnectorEnabled({ stateDir: STATE_DIR })) throw Object.assign(new Error('QQ Connector 已禁用'), { code: 'QQ_DISABLED' });
+          if (!isQqConnectorEnabled(integrationPolicy)) throw Object.assign(new Error('QQ Connector 已禁用'), { code: 'QQ_DISABLED' });
           const options = requestContext ? { requestId: autoReplyRequestId({ ...requestContext, target: key, partIndex: i }) } : {};
           const result = kind === 'private'
             ? await withTimeout(qqTransport.send('private', id, escapeCqText(part), options), SEND_TIMEOUT_MS, `QQ发送 ${kind}:${id}`)
@@ -5703,7 +5572,7 @@ async function main(runtimeOptions = {}) {
 
 
   async function postOneBotAction(action, params, options = {}) {
-    if (!isQqConnectorEnabled({ stateDir: STATE_DIR })) {
+    if (!isQqConnectorEnabled(integrationPolicy)) {
       throw Object.assign(new Error('QQ Connector 已禁用'), { code: 'QQ_DISABLED' });
     }
     return qqRuntime.sendOneBot(action, params, options);
@@ -5827,7 +5696,7 @@ async function main(runtimeOptions = {}) {
   function isSafeLocalMediaPath(filePath) {
     try {
       const real = fs.realpathSync(String(filePath));
-      const homeDir = cfg.snowluma?.homeDir ? String(cfg.snowluma.homeDir) : null;
+      const homeDir = path.join(DATA_ROOT,'attachments');
       if (!homeDir) return false;
       const realHome = fs.realpathSync(homeDir);
       return real === realHome || real.startsWith(realHome + path.sep);
@@ -6044,7 +5913,7 @@ async function main(runtimeOptions = {}) {
   function mediaHintFor(key, messageRef, mediaList) {
     if (!Array.isArray(mediaList) || mediaList.length === 0 || !messageRef) return '';
     if (currentMode === 'social') {
-      return `\n【图片/表情】本条消息包含 ${mediaList.length} 个图片/表情（消息ID=${messageRef}）。如需要查看/识别，请调用 mcp__snowluma__qq_get_message_images，参数 key="${key}", messageId="${messageRef}"。`;
+      return `\n【图片/表情】本条消息包含 ${mediaList.length} 个图片/表情（消息ID=${messageRef}）。如需要查看/识别，请调用 mcp__onebot__qq_get_message_images，参数 key="${key}", messageId="${messageRef}"。`;
     }
     return `\n【图片/表情】本条消息包含 ${mediaList.length} 个图片/表情（消息ID=${messageRef}）。`;
   }
@@ -6462,7 +6331,7 @@ async function main(runtimeOptions = {}) {
     if (currentMode !== 'social') return cardButtonFailure(403, '卡片按钮点击仅 social 模式可用');
     if (cfg.socialV2?.enabled === false) return cardButtonFailure(403, '二代模式已关闭，拒绝执行卡片点击');
     if (socialV2.paused) return cardButtonFailure(403, '二代 AI 已暂停，拒绝执行卡片点击');
-    if (cfg.socialV2?.tools?.clickCardButton !== true || !qqToolPolicyEnabled('qq_click_card_button')) {
+    if (cfg.socialV2?.tools?.clickCardButton !== true || !qqToolPolicyEnabled('qq_click_card_button', integrationPolicy)) {
       return cardButtonFailure(403, '高风险工具未启用：qq_click_card_button（请在桥接控制台确认风险后开启）');
     }
     const groupId = Number(keyMatch[1]);
@@ -8790,8 +8659,8 @@ async function main(runtimeOptions = {}) {
   async function handleIncoming(kind, id, event, cfg) {
     if (legacyAbort.signal.aborted || legacyShutdown?.isStopping()) return;
     const key = convKey(kind, id);
-    if (!isQqConnectorEnabled({ stateDir: STATE_DIR })) return;
-    if (currentMode === 'social' && !isBionicChatEnabled({ stateDir: STATE_DIR })) {
+    if (!isQqConnectorEnabled(integrationPolicy)) return;
+    if (currentMode === 'social' && !isBionicChatEnabled(integrationPolicy)) {
       log(`Bionic Chat 已禁用，QQ 传输保持运行但不处理社交消息：${key}`);
       return;
     }
@@ -9838,7 +9707,7 @@ async function main(runtimeOptions = {}) {
       });
     }
   }
-  // QQ 侧（SnowLuma OneBot WebSocket 客户端）由 Legacy QQ runtime 持有；消息策略仍留在 bridge。
+  // QQ 侧（通用 OneBot WebSocket 客户端）由 Legacy QQ runtime 持有；消息策略仍留在 bridge。
   let botIdentityLoaded = false;
   async function loadBotIdentity() {
     if (botIdentityLoaded) return;
@@ -9851,7 +9720,9 @@ async function main(runtimeOptions = {}) {
       }
     } catch {}
   }
-  const nativeQqRuntime = runtimeOptions.channel ? null : createQqRuntime({
+  const inactiveQq=()=>{throw Object.assign(new Error('OneBot is disabled; configure and explicitly connect it first'),{code:'QQ_DISABLED'});};
+  const inactiveRuntime={client:new Proxy({},{get:()=>inactiveQq}),status:()=>({ready:false,state:'disabled'}),health:()=>({ready:false,state:'disabled'}),connect:inactiveQq,stop:async()=>({stopped:true}),sendReceipt:(requestId,accountId)=>createQqSendLedger(path.join(STATE_DIR,'qq-send-ledger.json')).get(accountId,requestId),sendPrivateMessage:inactiveQq,sendGroupMessage:inactiveQq};
+  const nativeQqRuntime = runtimeOptions.channel ? null : !(cfg.onebot?.enabled===true&&isQqConnectorEnabled(integrationPolicy)) ? inactiveRuntime : createQqRuntime({
     config: cfg,
     ownershipDir: path.join(os.tmpdir(), 'cetamesh-qq-ownership'),
     dedupFile: path.join(STATE_DIR, 'qq-message-receipts.json'),
@@ -9859,11 +9730,11 @@ async function main(runtimeOptions = {}) {
     authorizeSend: (request) => assertQqSendPolicy({ ...request,
       source: currentMode === 'social' ? 'bionic' : request.source }, {
       config: cfg,
-      qqEnabled: isQqConnectorEnabled({ stateDir: STATE_DIR }),
-      bionicEnabled: isBionicChatEnabled({ stateDir: STATE_DIR }),
+      qqEnabled: isQqConnectorEnabled(integrationPolicy),
+      bionicEnabled: isBionicChatEnabled(integrationPolicy),
       toolEnabled: toolName => assertMcpToolEnabled(
-        ['qq_send_file', 'qq_send_audio_from_url'].includes(toolName) ? 'qq-file-send' : 'snowluma',
-        toolName, { stateDir: STATE_DIR })
+        ['qq_send_file', 'qq_send_audio_from_url'].includes(toolName) ? 'qq-file-send' : 'onebot',
+        toolName, integrationPolicy)
     }),
     log,
     onPrivateMessage: async (event) => {
@@ -9881,27 +9752,24 @@ async function main(runtimeOptions = {}) {
       try { await handlePokeNotice(event); } catch (error) { log('处理拍一拍事件出错:', error?.message ?? error); }
     },
     onOpen: () => {
-      log('SnowLuma 已连接：' + cfg.snowluma.wsUrl);
+      log('OneBot 已连接');
+      startDshWatch();
       loadBotIdentity();
     },
-    onClose: (info) => log('SnowLuma 连接断开（code=' + (info?.code ?? '?') + '），重连中…'),
-    onError: (error) => log('SnowLuma 错误:', error)
+    onClose: (info) => log('OneBot 连接断开（code=' + (info?.code ?? '?') + '），重连中…'),
+    onError: (error) => log('OneBot 错误:', error)
   });
   const qqRuntime = runtimeOptions.channel ?? createBrokeredQqRuntime({ runtime: nativeQqRuntime,
     resolveService: () => legacyChannelService });
   const bot = qqRuntime.client;
   const qqTransport = createQqTransport({ client: qqRuntime, authorize: () => {
-    if (!isQqConnectorEnabled({ stateDir: STATE_DIR })) {
+    if (!isQqConnectorEnabled(integrationPolicy)) {
       throw Object.assign(new Error('QQ Connector 已禁用'), { code: 'QQ_DISABLED' });
     }
     if (!qqRuntime.status().ready) {
       throw Object.assign(new Error('QQ Connector 未连接'), { code: 'QQ_UNAVAILABLE' });
     }
   } });
-  connectSnowLuma = () => isQqConnectorEnabled({ stateDir: STATE_DIR })
-    ? qqRuntime.connect() : Promise.resolve({ ok: false, code: 'QQ_DISABLED' });
-  resolveConnectSnowLumaReady();
-
   startProductSurfaces();
   const stopSocialRuntime = async () => {
     legacyAbort.abort();
@@ -9925,21 +9793,11 @@ async function main(runtimeOptions = {}) {
       }
     };
   }
-  // 启动探测在后台进行：QQ WebSocket 只有 SnowLuma ready 后才会连接，
-  // 但控制台、DSH 探活与日志终端不会被最多 35 秒的服务启动等待卡住。
-  if (isQqConnectorEnabled({ stateDir: STATE_DIR })) localServices.startSnowLuma({ waitMs: 35000 }).then(async (snowStartup) => {
-    if (snowStartup.ready) {
-      await connectSnowLuma();
-    } else {
-      log(`SnowLuma 未就绪（${snowStartup.status}），WhaleBridge 已降级独立启动；可在控制台终端中重试。`);
-    }
-  }).catch((error) => log(`SnowLuma 启动流程异常，WhaleBridge 已降级：${error?.message ?? error}`));
-  log(`桥接运行面: ${describeRuntimeSurfacePolicy()}。SnowLuma 就绪后将自动连接 QQ；按 Ctrl+C 退出。`);
+  log(`桥接运行面: ${describeRuntimeSurfacePolicy()}。外部 OneBot 连接默认关闭，需由 Owner 配置并显式连接。`);
   // 预热表情库：启动时同步一次 QQ 收藏表情，失败不阻塞（AI 首次调用工具时还会再试）。
   if (cfg.socialV2?.sticker?.enabled !== false) {
     syncStickerLibrary(true).catch((error) => log('启动预热表情库失败:', error?.message ?? error));
   }
-  startDshWatch();
   // 启动后延迟回填历史卡片元数据（本功能上线前收到的卡片消息），失败不影响启动。
   cardBackfillTimer = setTimeout(() => {
     backfillRecentCardsV2().catch((error) => log('卡片回填失败:', error?.message ?? error));
@@ -9954,9 +9812,9 @@ async function main(runtimeOptions = {}) {
     const now = new Date();
     const clock = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
     const services = localServices.snapshot();
-    const snowLabel = services.snowluma.ready ? '已就绪' : services.snowluma.installed ? services.snowluma.status : '未安装';
+    const channelLabel = qqRuntime.status().ready ? '已连接' : '未连接';
     const dshLabel = services.dsh.ready ? '已就绪' : services.dsh.installed ? services.dsh.status : '未安装';
-    const head = `${clock} 模式 ${currentMode} · SnowLuma ${snowLabel} · dsh ${dshLabel} · DSH ${isDshReady() ? '已就绪' : '不可用（消息排队中）'}${socialV2.paused ? ' · 二代已暂停' : ''} · 会话 ${Object.keys(state.sessions).length}${followStreams.size ? ` · 事件流 ${followStreams.size}` : ''}`;
+    const head = `${clock} 模式 ${currentMode} · OneBot ${channelLabel} · dsh ${dshLabel} · DSH ${isDshReady() ? '已就绪' : '不可用（消息排队中）'}${socialV2.paused ? ' · 二代已暂停' : ''} · 会话 ${Object.keys(state.sessions).length}${followStreams.size ? ` · 事件流 ${followStreams.size}` : ''}`;
     const lines = [{ rule: true, text: '─'.repeat(64) }, head];
     const keys = new Set([...Object.keys(state.sessions), ...socialV2.conversations.keys()]);
     const sorted = [...keys].sort((a, b) => (socialV2.conversations.get(b)?.lastIncomingAt ?? 0) - (socialV2.conversations.get(a)?.lastIncomingAt ?? 0));
@@ -10053,7 +9911,6 @@ export async function runBridge() {
   // This mode remains a combined legacy host until M3/M4 connector migration.
   const owner = acquireStateOwner(STATE_DIR);
   legacyShutdown = createLegacyShutdown({ owner, releaseLegacyLock: releaseLock, log });
-  legacyShutdown.register(() => leaveSnowLumaRunningOnExit(), { name: 'Legacy independent service boundary' });
   legacyShutdown.bind();
   console.error('[bridge] legacy-exclusive compatibility mode; Core and Legacy cannot share a StateDir.');
   installLifecycleHandlers();

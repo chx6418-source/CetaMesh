@@ -1,14 +1,13 @@
 // CetaMesh Tool / MCP 目录（产品化任务 B）。
 
 // Pure metadata: importing Desktop DTOs must not initialize runtime paths.
-export const isDesktopLocalService = value => ['snowluma', 'qq', 'bionic'].includes(value);
+export const isDesktopLocalService = value => ['onebot', 'qq', 'bionic'].includes(value);
 //
 // 事实来源（本仓库 HEAD，禁止凭空创造工具）：
-//   - src/mcp-snowluma-safe.js（39 个 qq_* 工具）
+//   - src/mcp-onebot-safe.js（39 个 qq_* 工具）
 //   - src/mcp-qq-file-send.js（5 个文件/音乐工具）
 //   - src/mcp-web-search-safe.js（web_search / web_fetch）
 //   - src/mcp-bilibili.js（bili_search_video / bili_hot_videos）
-//   - src/mcp-host-server.js（snowluma_status / start_snowluma / stop_snowluma）
 //   - dsh/agent-presets/whale-chat-v2/qq-tool-restrict.mjs（agent 侧白名单与视觉工具）
 //
 // restore 结论口径见 TOOLS_MCP_PLUGIN_RESTORATION_REPORT.md。
@@ -31,18 +30,18 @@ const NET = ['network'];
 export const MCP_SERVER_CATALOG = Object.freeze([
 
   {
-    id: 'snowluma',
-    name: 'SnowLuma QQ 网关',
-    namespace: 'mcp__snowluma__',
+    id: 'onebot',
+    name: 'OneBot QQ 连接',
+    namespace: 'mcp__onebot__',
     transport: 'stdio',
-    entry: 'src/mcp-snowluma-safe.js',
+    entry: 'src/mcp-onebot-safe.js',
     source: 'builtin',
     managedBy: 'dsh-preset',
-    defaultEnabled: true,
+    defaultEnabled: false,
     description: 'QQ 消息读写、发送、表情贴纸、黑话、卡片与社交记忆的安全封装（OneBot/桥接双重白名单）。',
     permissions: [...SEND, 'storage'],
     tools: [
-      T('qq_status', '网关状态', 'low', '查询 SnowLuma 网关与 QQ 账号在线状态。', [], { group: '状态' }),
+      T('qq_status', '网关状态', 'low', '查询已显式配置的 OneBot 网关与 QQ 账号在线状态。', [], { group: '状态' }),
       T('qq_list_groups', '群列表', 'low', '列出机器人已加入的群。', [], { group: '消息读取' }),
       T('qq_get_group_members', '群成员', 'low', '读取指定群成员列表。', [], { group: '消息读取' }),
       T('qq_get_group_history', '群历史', 'low', '读取群历史消息。', [], { group: '消息读取' }),
@@ -143,29 +142,6 @@ export const MCP_SERVER_CATALOG = Object.freeze([
       T('bili_hot_videos', '热门视频', 'low', '读取 B 站热门视频列表。', ['web.search'], { group: '视频' })
     ]
   },
-  {
-    id: 'snowluma-host',
-    name: 'SnowLuma 进程控制',
-    namespace: 'mcp__snowluma-host__',
-    transport: 'stdio',
-    entry: 'src/mcp-host-server.js',
-    source: 'builtin',
-    managedBy: 'dsh-preset',
-    defaultEnabled: true,
-    description: 'SnowLuma 网关探活与（受配置限制的）进程启停。',
-    permissions: ['process'],
-    tools: [
-      T('snowluma_status', '网关探活', 'low', 'HTTP 探活 SnowLuma 网关并返回在线状态。', [], { group: '状态' }),
-      T('start_snowluma', '启动网关', 'critical', '启动 SnowLuma（launcher.bat）并等待就绪。', ['process'], {
-        group: '状态', restore: 'legacy-unsupported', enabledByDefault: false,
-        reason: 'process 在 Capability 词表中属于 forbidden；进程控制只能由 Owner 经控制台本地服务入口执行，不作为可开启工具恢复。'
-      }),
-      T('stop_snowluma', '停止网关', 'critical', '按安装目录匹配进程并结束 SnowLuma。', ['process'], {
-        group: '状态', restore: 'legacy-unsupported', enabledByDefault: false,
-        reason: '同上：进程控制在能力面之外，防止被 agent/群友诱导触发。'
-      })
-    ]
-  },
   { id: 'remote', name: 'Remote MCP', namespace: 'mcp__remote__', transport: 'streamable-http',
     entry: null, managedBy: 'cetamesh', source: 'external', permissions: ['network'], defaultEnabled: false,
     description: 'Owner-configured HTTPS MCP endpoint; only explicitly allowed tools are callable after approval.', tools: [] }
@@ -208,7 +184,7 @@ export const LEGACY_RETIRED_TOOLS = Object.freeze([
     path: 'scripts/test-mcp-exec.mjs', evidence: '906f919 起（仅测试脚本与 package.json 留痕）',
     feature: '按名字查询 OneBot 动作（通用只读动作）', present: false, restore: 'deprecated',
     reason: '通用 OneBot 动作查询面已退役；不再暴露动态动作名查询入口。',
-    replacement: { toolId: 'mcp__snowluma__qq_status', label: 'SnowLuma 安全工具集' }
+    replacement: { label: '已退役；通用 OneBot 需要重新配置并显式启用，无旧工具映射' }
   },
   {
     id: 'snowluma-mcp.invoke_action', name: 'invoke_action', origin: '@snowluma/mcp（外部 npm 包）',
@@ -301,7 +277,7 @@ export function pluginDescriptors() {
       version: '1.0.0',
       summary: '把 QQ 仿生聊天用过、且现在仍然存在的 MCP/内置工具收进一个可总开关、可逐项开关的工具包。',
       permissions: ['message.send', 'filesystem.read', 'network', 'storage'],
-      defaultEnabled: true,
+      defaultEnabled: false,
       toolIds: bionicToolIds,
       advanced: {
         note: '单个工具开关只影响"是否允许调用"；是否真的可用还取决于对应 MCP Server 是否运行。',
@@ -309,16 +285,16 @@ export function pluginDescriptors() {
       }
     },
     {
-      id: 'cetamesh-snowluma',
-      name: 'SnowLuma 集成',
+      id: 'cetamesh-onebot',
+      name: 'OneBot 连接',
       kind: 'channel-integration',
       category: 'integrations',
       version: '1.0.0',
-      summary: 'QQ 通道提供方（Channel Provider）。插件页只做安装/配置/启动/状态/说明的统一入口，底层仍是 Channel Provider。',
+      summary: '连接用户自行配置的 OneBot QQ 网关；只有显式启用后才连接，不管理第三方程序。',
       permissions: ['message.send'],
-      defaultEnabled: true,
+      defaultEnabled: false,
       provider: { kind: 'channel', id: 'qq' },
-      localService: 'snowluma',
+      localService: 'onebot',
       toolIds: [],
       advanced: {
         note: '不把 QQ SDK / 协议实现搬进插件；插件启停不改变 Channel Provider 架构。',

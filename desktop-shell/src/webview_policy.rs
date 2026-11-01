@@ -58,6 +58,7 @@ const UI_METHODS: &[&str] = &[
     "ui.plugins.catalog", "ui.plugins.status", "ui.plugins.detail", "ui.plugins.refresh", "ui.plugins.stage", "ui.plugins.stage-local", "ui.plugins.enable.review",
     "ui.plugins.install", "ui.plugins.enable", "ui.plugins.disable", "ui.plugins.uninstall",
     "ui.plugins.integration.list", "ui.plugins.integration.settings", "ui.plugins.integration.manage", "ui.plugins.integration.action", "ui.plugins.integration.tool.toggle",
+    "ui.channel.onebot.get", "ui.channel.onebot.configure", "ui.channel.onebot.migration.preview", "ui.channel.onebot.migration.apply",
     "ui.mcp.list", "ui.mcp.tools", "ui.mcp.manage", "ui.mcp.config.get", "ui.mcp.config.update",
     "ui.settings.describe", "ui.settings.get", "ui.settings.update",
     "ui.about.info", "ui.feedback.links", "ui.about.update", "ui.update.capabilities", "ui.update.check", "ui.update.notes",
@@ -273,6 +274,19 @@ pub fn parse_bridge_request(raw: &str) -> Result<BridgeRequest, String> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn onebot_settings_require_exact_owner_methods_and_an_open_startup_gate() {
+        for method in ["ui.channel.onebot.get", "ui.channel.onebot.configure", "ui.channel.onebot.migration.preview", "ui.channel.onebot.migration.apply"] {
+            let request = serde_json::json!({"id":"onebot", "method":method, "params":{}});
+            assert!(parse_bridge_request(&request.to_string()).is_ok(), "{method}");
+            assert!(!allowed_while_blocked(method));
+        }
+        for method in ["channel.onebot.configure", "ui.channel.onebot.install", "ui.channel.onebot.process.stop", "ui.channel.onebot.migration.force"] {
+            let request = serde_json::json!({"id":"onebot", "method":method, "params":{}});
+            assert!(parse_bridge_request(&request.to_string()).is_err(), "{method}");
+        }
+    }
+
+    #[test]
     fn simulation_requires_exact_owner_ui_methods_and_an_open_startup_gate() {
         for method in UI_METHODS.iter().filter(|method| method.starts_with("ui.simulation.")) {
             let request = serde_json::json!({"id":"simulation", "method":method, "params":{}});
@@ -427,9 +441,9 @@ mod tests {
     }
 
     #[test]
-    fn snowluma_integration_action_is_allowlisted_for_the_harbor_ui() {
+    fn onebot_integration_action_is_allowlisted_for_the_harbor_ui() {
         let request = parse_bridge_request(
-            r#"{"id":"r-snow","method":"ui.plugins.integration.action","params":{"id":"snowluma","action":"start"}}"#,
+            r#"{"id":"r-onebot","method":"ui.plugins.integration.action","params":{"localService":"onebot","action":"start"}}"#,
         ).unwrap();
         assert_eq!(request.method, "ui.plugins.integration.action");
     }

@@ -221,6 +221,8 @@ function auditArtifacts(outDir, bundleFile, exeFile, { noWebUi = false } = {}) {
       const parsed = JSON.parse(fs.readFileSync(realConfig, 'utf8').replace(/^\uFEFF/, ''));
       for (const [label, value] of [
         ['consoleToken', parsed?.consoleToken],
+        ['onebot.accessToken',parsed?.onebot?.accessToken],
+        ['onebot.httpAccessToken',parsed?.onebot?.httpAccessToken],
         ['snowluma.accessToken', parsed?.snowluma?.accessToken],
         ['snowluma.httpAccessToken', parsed?.snowluma?.httpAccessToken],
         ['dsh.token', parsed?.dsh?.token]

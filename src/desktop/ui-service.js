@@ -1,3 +1,4 @@
+import {projectChatContext,projectModelCapabilities} from './chat-telemetry.js';
 import { explicitDelegationTarget } from './explicit-delegation.js';
 import {SIMULATION_UI_METHODS} from '../simulation/ui-methods.js';
 import {OWNER_ACTOR} from '../capability/types.js';
@@ -19,7 +20,7 @@ const EVENT_NAMES = Object.freeze([
   'approval.resolved', 'approval.operation', 'channel.message', 'channel.delivery', 'model.updated', 'memory.updated', 'update.status', 'device.updated'
 ]);
 
-const EVENT_DATA_KEYS = Object.freeze([
+const EVENT_DATA_KEYS = Object.freeze(['context',
   'sessionId', 'taskId', 'workspaceId', 'agentId', 'pluginId', 'serverId', 'approvalId', 'requestId', 'retryCount',
   'provider', 'status', 'progress', 'ready', 'needsAttention', 'delta', 'replaceText', 'message', 'reset', 'toolActivity', 'agentActivity'
   , 'turnId', 'messageId', 'historyRevision', 'operationId', 'decision', 'code',
@@ -100,6 +101,7 @@ function projectSession(value) {
     updatedAt: scalar(row.updatedAt), archived: row.archived === true, taskId: string(row.taskId, 128) || null,
     config: {
       mode: string(config.mode, 40), modelProvider: string(config.modelProvider, 80) || null,
+      reasoning: ['off','low','high','max'].includes(config.reasoning)?config.reasoning:null,
       model: string(config.model, 200), agentProvider: string(config.agentProvider, 80) || null,
       workspaceId: string(config.workspaceId, 128) || null
     }
@@ -115,6 +117,11 @@ function projectUsage(value) {
     const metric = key === 'requestCount' ? value[key] : normalized[key];
     result[key] = Number.isFinite(metric) && metric >= 0 ? metric : null;
   }
+  const estimated=value.estimated===true||value.counting==='estimated'||value.source==='estimated';
+  const receipt=Array.isArray(value.requests)&&value.requests.some(row=>row?.rawUsage)
+    || value.knownUsage&&typeof value.knownUsage==='object'
+    || ['prompt_tokens','completion_tokens','input_tokens','output_tokens'].some(key=>Number.isFinite(value[key]));
+  result.measurement={status:estimated?'estimated':receipt?'actual':'unknown',source:estimated?'explicit-usage-estimate':receipt?'structured-provider-receipts':'unattributed-usage'};
   result.cacheHitRate = normalized.cacheHitRate;
   result.accountingComplete = typeof value.accountingComplete === 'boolean' ? value.accountingComplete : null;
   const cost = record(value.cost);
@@ -141,8 +148,8 @@ function projectMessage(value) {
   const toolActivity = Array.isArray(row.toolActivity) ? row.toolActivity.slice(0, 50).map(item => {
     const tool = record(item);
     return {
-      id: string(tool.id, 128), label: string(tool.label ?? tool.name ?? tool.capability, 200),
-      status: ['pending', 'running', 'waiting-approval', 'completed', 'failed', 'cancelled'].includes(tool.status) ? tool.status : 'failed',
+      id: string(tool.id, 128), capability:string(tool.capability,180)||null, filePath:string(tool.filePath,500)||null,exitCode:Number.isSafeInteger(tool.exitCode)?tool.exitCode:null, label: string(tool.label ?? tool.name ?? tool.capability, 200),
+      status: ['pending', 'running', 'retrying', 'waiting-approval', 'completed', 'failed', 'cancelled', 'outcome-unknown','unknown'].includes(tool.status) ? tool.status : 'unknown',
       summary: string(tool.summary, 1000), durationMs: Number.isFinite(tool.durationMs) ? Math.max(0, tool.durationMs) : null
     };
   }) : [];
@@ -646,10 +653,11 @@ export function createDesktopUiEventBus({ now = () => Date.now(), maxEvents = 50
       if (typeof value === 'string') safe[key] = value.slice(0, key === 'replaceText' ? MAX_TEXT : key === 'delta' ? 32_000 : 200);
       else if (typeof value === 'number' && Number.isFinite(value)) safe[key] = value;
       else if (typeof value === 'boolean') safe[key] = value;
+      else if (key === 'context') safe.context=projectChatContext(value,'active-request');
       else if (key === 'toolActivity' && Array.isArray(value)) safe[key] = value.slice(-32).map(activity => {
         const row = record(activity);
         return {
-          id: string(row.id, 200), label: string(row.label ?? row.capability, 180),
+          id: string(row.id, 200), capability:string(row.capability,180)||null,filePath:string(row.filePath,500)||null,exitCode:Number.isSafeInteger(row.exitCode)?row.exitCode:null, label: string(row.label ?? row.capability, 180),
           status: string(row.status, 50), summary: string(row.summary, 500),
           durationMs: Number.isFinite(row.durationMs) ? Math.max(0, row.durationMs) : null
         };
@@ -1023,6 +1031,9 @@ export function createDesktopUiService({ services = {}, system = services.system
       return {
         id: string(result.id, 128), taskId: string(result.taskId, 128) || null,
         state: string(turn.state ?? result.lastState, 40),
+        context: projectChatContext(turn.context??result.context,turn.context?'active-request':'last-request'),
+        turnUsage: projectUsage(turn.usage??result.turnUsage),
+        quota:{status:'unknown',reason:'quota-not-observed'},
         requestId: string(turn.requestId, 200) || null,
         followState: string(result.followState, 40) || 'idle', followError: string(result.followError, 100) || null,
         retryCount: Number.isFinite(turn.retryCount) ? Math.max(0, turn.retryCount) : 0,
@@ -1034,7 +1045,7 @@ export function createDesktopUiService({ services = {}, system = services.system
           status: ['running', 'completed', 'cancelled', 'failed'].includes(turn.agentActivity.status) ? turn.agentActivity.status : 'running'
         } : null,
         toolActivity: (Array.isArray(turn.toolActivity) ? turn.toolActivity : []).slice(-32).map(item => ({
-          id: string(item.id, 200), label: string(item.label ?? item.capability, 180),
+          id: string(item.id, 200), capability:string(item.capability,180)||null,filePath:string(item.filePath,500)||null,exitCode:Number.isSafeInteger(item.exitCode)?item.exitCode:null, label: string(item.label ?? item.capability, 180),
           status: string(item.status, 50), summary: string(item.summary, 500),
           durationMs: Number.isFinite(item.durationMs) ? Math.max(0, item.durationMs) : null
         })),
@@ -1096,7 +1107,7 @@ export function createDesktopUiService({ services = {}, system = services.system
             ...(Number.isFinite(field.min) ? { min: field.min } : {}),
             ...(Number.isFinite(field.max) ? { max: field.max } : {})
           })),
-          models: (item.models ?? []).map(value => selected(value, ['id', 'name', 'label', 'owned_by', 'toolCalling', 'streaming', 'reasoning']))
+          models: (item.models ?? []).map(value => ({...selected(value, ['id', 'name', 'label', 'owned_by', 'toolCalling', 'streaming', 'reasoning']),capabilities:projectModelCapabilities(value.capabilities)}))
         })),
         agentProviders: (result.agentProviders ?? []).map(projectAgent),
         modes: boundedStrings(result.modes, 10, 40), defaultModelProvider: string(result.defaultModelProvider, 80) || null,
@@ -1938,6 +1949,10 @@ export function createDesktopUiService({ services = {}, system = services.system
     },
     'ui.approvals.operation': async p => selected(await capability('capability.operation.get', { id: idParam(p) }), ['operationId','approvalId','status','decision','code','turnResumed','resumePending','resumeError']),
     'ui.approvals.cancel': async p => selected(await capability('capability.operation.cancel', { id: idParam(p) }), ['operationId','approvalId','status','cancelRequested','code']),
+    'ui.channel.onebot.get': () => services.onebotConfiguration.get(),
+    'ui.channel.onebot.configure': p => services.onebotConfiguration.configure(p),
+    'ui.channel.onebot.migration.preview': () => services.onebotConfiguration.preview(),
+    'ui.channel.onebot.migration.apply': p => services.onebotConfiguration.migrate(p),
     'ui.search': async p => {
       const query = boundedText(p.query, 'query', 200).trim();
       if (!query) return { sessions: [], tasks: [], plugins: [] };

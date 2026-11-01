@@ -21,12 +21,15 @@ function ok(label) { step += 1; console.log(`✅ [${step}] ${label}`); }
 
 {
   const tools = buildToolCatalog();
-  assert.equal(tools.filter(tool => tool.restore === 'restored').length, 46);
+  assert.equal(tools.length, 50, 'the neutral catalog excludes the three retired host tools');
+  assert.equal(tools.filter(tool => tool.restore === 'restored').length, 45);
   assert.equal(tools.filter(tool => tool.restore === 'partial').length, 5);
-  assert.equal(tools.filter(tool => tool.restore === 'legacy-unsupported').length, 2);
+  assert.equal(tools.filter(tool => tool.restore === 'legacy-unsupported').length, 0);
+  assert.equal(tools.some(tool => ['snowluma', 'snowluma-host'].includes(tool.serverId)), false,
+    'retired servers do not contribute active capability targets');
   assert.equal(LEGACY_RETIRED_TOOLS.filter(tool => tool.restore === 'deprecated').length, 6);
   assert.equal(LEGACY_RETIRED_TOOLS.filter(tool => tool.restore === 'legacy-unsupported').length, 2);
-  ok('Bionic 当前清单 46/5/2，历史条目保留 deprecated 与 legacy-unsupported 分类');
+  ok('Bionic 当前清单 45/5/0（共50项），历史条目保留 deprecated 与 legacy-unsupported 分类');
 }
 function makeEnv({ allow = { groups: ['111'], private: [] }, sendImpl = null } = {}) {
   const channelService = createChannelService();

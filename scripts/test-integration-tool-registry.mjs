@@ -50,6 +50,12 @@ try {
     integrationStatus: () => ({ enabled: true, available: true, status: 'ready' })
   });
 
+  assert.equal(registry.pluginEnabled('cetamesh-bionic-chat'), false);
+  assert.equal(registry.serverEnabled('onebot'), false);
+  registry.setPluginEnabled('cetamesh-bionic-chat', true);
+  registry.setPluginEnabled('cetamesh-onebot', true);
+  registry.setMcpEnabled('onebot', true);
+
   // ── 2. 统一输出形状（tool id/name/description/source/schema/risk/enabled/available/lastError） ──
   const sample = registry.listTools({ source: 'mcp' })[0];
   for (const key of ['id', 'name', 'description', 'source', 'schema', 'risk', 'enabled', 'available', 'lastError']) {
@@ -66,15 +72,9 @@ try {
 
   // ── 4. 不可恢复工具：永远 Disabled，且不允许被打开 ─────────────────────────
   const legacy = registry.listTools().filter(tool => tool.restore === 'legacy-unsupported');
-  assert.ok(legacy.length >= 2, '进程控制类工具被明确标记 legacy-unsupported');
-  assert.ok(legacy.some(tool => tool.id.includes('start_snowluma')), 'start_snowluma 不可恢复');
-  for (const tool of legacy) {
-    assert.equal(tool.enabled, false, tool.id + ' 不可恢复工具必须 Disabled');
-    assert.equal(tool.restorable, false);
-    assert.ok(tool.reason && tool.reason.length > 8, tool.id + ' 必须给出不可恢复原因');
-  }
-  assert.throws(() => registry.setToolEnabled('cetamesh-bionic-chat', legacy[0].id, true),
-    error => error.code === 'LEGACY_UNSUPPORTED');
+  assert.equal(legacy.length, 0, 'retired process-control tools are absent from the live registry');
+  assert.throws(() => registry.setToolEnabled('cetamesh-bionic-chat', 'mcp__snowluma-host__start_snowluma', true),
+    error => error.code === 'SNOWLUMA_INTEGRATION_RETIRED');
 
   // partial = 有实现但有前置条件/安全红线：默认 Disabled，可由 Owner 逐项显式开启。
   const partial = registry.listTools().filter(tool => tool.restore === 'partial');
@@ -110,7 +110,7 @@ try {
   ok('插件总开关：关闭即级联关闭全部工具，重新开启后恢复');
 
   // ── 7. MCP Server 卡片不提供逐工具开关（避免两套开关互相打架） ─────────────
-  assert.throws(() => registry.setToolEnabled('mcp.snowluma', tool.id, false),
+  assert.throws(() => registry.setToolEnabled('mcp.onebot', tool.id, false),
     error => error.code === 'TOOL_TOGGLE_UNSUPPORTED');
   ok('MCP Server 卡片：工具列表只读，逐工具开关 TOOL_TOGGLE_UNSUPPORTED');
 

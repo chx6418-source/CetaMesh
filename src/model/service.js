@@ -78,11 +78,95 @@ export function createModelRuntimeService({ registry, secrets, preferredProvider
     }));
   }
 
+  const metadataText = (value, limit = 512) => typeof value === 'string' && value.trim()
+    && value.length <= limit && !/[\x00-\x1f]/.test(value) ? value : null;
+  const positiveTokens = value => Number.isSafeInteger(value) && value > 0 ? value : null;
+  function contextCapacity(capacity) {
+    const known = ['verified', 'declared'].includes(capacity?.status)
+      && positiveTokens(capacity.contextWindowTokens) && positiveTokens(capacity.maxOutputTokens)
+      && positiveTokens(capacity.defaultOutputTokens) && metadataText(capacity.source) && metadataText(capacity.version, 128);
+    return { status: known ? capacity.status : 'unknown',
+      contextWindowTokens: known ? capacity.contextWindowTokens : null,
+      maxOutputTokens: known ? capacity.maxOutputTokens : null,
+      defaultOutputTokens: known ? capacity.defaultOutputTokens : null,
+      outputTokenParameter: known && ['max_tokens', 'max_completion_tokens'].includes(capacity.outputTokenParameter) ? capacity.outputTokenParameter : null,
+      source: known ? capacity.source : null, version: known ? capacity.version : null };
+  }
+  function booleanCapability(value) {
+    const known = ['verified', 'declared', 'unsupported'].includes(value?.status) && typeof value?.supported === 'boolean';
+    return { supported: known ? value.supported : null, status: known ? value.status : 'unknown',
+      source: known ? metadataText(value.source) : null };
+  }
+  function modelCapabilities(providerId, model = null) {
+    const provider = resolveProvider(providerId);
+    const effectiveModel = model || provider.defaultModel;
+    const declared = provider.modelCapabilities?.(effectiveModel) ?? {};
+    const image = provider.imageInputCapabilities?.(effectiveModel) ?? {};
+    const tools = typeof provider.supportsToolsForModel === 'function'
+      ? provider.supportsToolsForModel(effectiveModel) : provider.supportsTools;
+    const reasoning = declared.reasoning;
+    const reasoningKnown = ['declared', 'verified', 'unsupported'].includes(reasoning?.status)
+      && Array.isArray(reasoning.levels) && reasoning.levels.length <= 16
+      && reasoning.levels.every(level => typeof level === 'string' && /^[a-z][a-z0-9-]{0,31}$/.test(level));
+    return {
+      vision: booleanCapability(declared.vision ?? image),
+      tools: booleanCapability(declared.tools ?? { supported: typeof tools === 'boolean' ? tools : null,
+        status: typeof tools === 'boolean' ? tools ? 'declared' : 'unsupported' : 'unknown', source: 'provider-declaration' }),
+      reasoning: { levels: reasoningKnown ? [...new Set(reasoning.levels)] : [], status: reasoningKnown ? reasoning.status : 'unknown',
+        source: reasoningKnown ? metadataText(reasoning.source) : null },
+      context: contextCapacity(provider.contextCapabilities?.(effectiveModel))
+    };
+  }
+
+  function contextObservation(provider, model, messages, tools, maxOutputTokens, budget) {
+    const unknownComposition = () => Object.fromEntries(['messages', 'system', 'tools', 'other'].map(key => [key, { tokens: null, status: 'unknown' }]));
+    let composition = unknownComposition();
+    // Partition the same conservative estimator, never reinterpret an exact total as exact bucket counts.
+    if (budget.counting === 'estimated') {
+      try {
+        const estimationProvider = { contextCapabilities: value => provider.contextCapabilities?.(value),
+          imageInputCapabilities: value => provider.imageInputCapabilities?.(value) };
+        const estimate = (subsetMessages, subsetTools) => {
+          const part = calculateModelContextBudget({ provider: estimationProvider, model, messages: subsetMessages, tools: subsetTools,
+            maxOutputTokens: budget.reservedOutputTokens ?? maxOutputTokens });
+          if (part.counting !== 'estimated' || part.source !== budget.source || part.version !== budget.version
+            || part.contextWindowTokens !== budget.contextWindowTokens || part.reservedOutputTokens !== budget.reservedOutputTokens) return null;
+          return part.inputTokens;
+        };
+        const base = estimate([], []);
+        const values = { messages: estimate((messages ?? []).filter(message => message.role !== 'system'), []),
+          system: estimate((messages ?? []).filter(message => message.role === 'system'), []), tools: estimate([], tools ?? []) };
+        if (base !== null && Object.values(values).every(value => Number.isSafeInteger(value) && value >= base)) {
+          const counts = Object.fromEntries(Object.entries(values).map(([key, value]) => [key, value - base]));
+          counts.other = budget.inputTokens - counts.messages - counts.system - counts.tools;
+          if (Number.isSafeInteger(counts.other) && counts.other >= 0) composition = Object.fromEntries(
+            Object.entries(counts).map(([key, tokens]) => [key, { tokens, status: 'estimated' }]));
+        }
+      } catch {
+        // Optional composition cannot weaken admission; retain unknown buckets and the enforced total.
+        composition = unknownComposition();
+      }
+    }
+    return { schemaVersion: 1, providerId: provider.id, model, at: Date.now(),
+      status: budget.counting === 'exact' ? 'actual' : budget.counting === 'estimated' ? 'estimated' : 'unknown',
+      inputTokens: budget.inputTokens ?? null, windowTokens: budget.contextWindowTokens ?? null,
+      reservedOutputTokens: budget.reservedOutputTokens ?? null, capacityStatus: budget.capacityStatus ?? 'unknown',
+      source: budget.source ?? null, version: budget.version ?? null, estimator: budget.estimator ?? null, composition };
+  }
+  function notifyContext(callback, provider, model, messages, tools, maxOutputTokens, budget) {
+    if (typeof callback !== 'function') return;
+    const failed = () => log('Model context observer failed; request admission and provider cancellation remain authoritative');
+    try {
+      const result = callback(contextObservation(provider, model, messages, tools, maxOutputTokens, budget));
+      if (result && typeof result.catch === 'function') result.catch(failed);
+    } catch { failed(); }
+  }
+
   async function listModels(providerId) {
     const provider = resolveProvider(providerId);
     try {
       const models = await provider.listModels({});
-      return { provider: provider.id, models, error: null };
+      return { provider: provider.id, models: models.map(model => ({ ...model, capabilities: modelCapabilities(provider.id, model.id) })), error: null };
     } catch (error) {
       const code = typeof error?.code === 'string' ? error.code : MODEL_ERROR_CODES.MODEL_PROVIDER_ERROR;
       return { provider: provider.id, models: [], error: String(error?.message ?? error), code };
@@ -104,7 +188,7 @@ export function createModelRuntimeService({ registry, secrets, preferredProvider
   }
 
   /** 回合流入口：chat-service 传 providerId（已解析）或 null（自动）。 */
-  function stream({ providerId, model, messages, reasoning, signal, tools, toolChoice, maxOutputTokens }) {
+  function stream({ providerId, model, messages, reasoning, signal, tools, toolChoice, maxOutputTokens, onContext }) {
     const provider = resolveProvider(providerId);
     const effectiveModel = typeof model === 'string' && model.trim()
       ? model.trim()
@@ -121,6 +205,7 @@ export function createModelRuntimeService({ registry, secrets, preferredProvider
     let budget;
     try { budget = enforceModelContextBudget({ provider, model: effectiveModel, messages, tools, maxOutputTokens }); }
     catch (error) { return (async function* () { throw error; })(); }
+    notifyContext(onContext, provider, effectiveModel, messages, tools, maxOutputTokens, budget);
     // Preserve the provider stream's established cancellation/finalization path.
     // An extra async-generator relay adds observable microtask delay to abort.
     return provider.stream({
@@ -135,7 +220,7 @@ export function createModelRuntimeService({ registry, secrets, preferredProvider
     });
   }
 
-  async function chat({ providerId, model, messages, reasoning, signal, tools, toolChoice, maxOutputTokens }) {
+  async function chat({ providerId, model, messages, reasoning, signal, tools, toolChoice, maxOutputTokens, onContext }) {
     const provider = resolveProvider(providerId);
     const effectiveModel = typeof model === 'string' && model.trim() ? model.trim() : provider.defaultModel;
     if (!effectiveModel) {
@@ -149,6 +234,7 @@ export function createModelRuntimeService({ registry, secrets, preferredProvider
       throw modelRuntimeError('MODEL_TOOL_CALLING_UNSUPPORTED', 'This Model Provider does not support structured tool calling');
     }
     const contextBudget = enforceModelContextBudget({ provider, model: effectiveModel, messages, tools, maxOutputTokens });
+    notifyContext(onContext, provider, effectiveModel, messages, tools, maxOutputTokens, contextBudget);
     const response = await provider.chat({ model: effectiveModel, messages, reasoning, signal, tools, toolChoice, maxOutputTokens: contextBudget.reservedOutputTokens ?? maxOutputTokens });
     return {
       ...(response && typeof response === 'object' ? response : { text: String(response ?? '') }),
@@ -172,6 +258,7 @@ export function createModelRuntimeService({ registry, secrets, preferredProvider
 
   return {
     imageInputCapabilities(providerId,model=null){const p=resolveProvider(providerId);return p.imageInputCapabilities?.(model||p.defaultModel)??{supported:false,status:'unknown'};},
+    modelCapabilities,
     resolveProvider,
     defaultProviderId,
     listProviders,

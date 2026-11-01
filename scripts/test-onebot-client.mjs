@@ -75,7 +75,7 @@ try {
   assert.ok(!Object.keys(pkg.dependencies).some(name => name.startsWith('@snowluma/')));
   const lock = JSON.parse(fs.readFileSync(new URL('../package-lock.json', import.meta.url), 'utf8'));
   assert.ok(!Object.keys(lock.packages).some(name => name.includes('node_modules/@snowluma/')));
-  const runtime = createQqRuntime({ config: { snowluma: { wsUrl: url } },
+  const runtime = createQqRuntime({ config: { onebot: { enabled: true, wsUrl: url } },
     clientFactory: options => new OneBotWebSocketClient({ ...options, reconnectDelayMs: 10 }) });
   try {
     assert.equal((await runtime.connect()).ok, true);

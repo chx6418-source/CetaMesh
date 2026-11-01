@@ -97,7 +97,7 @@ export function migrateLegacyConfig(raw) {
       reasoningEffort: 'max',
       ...(file.dsh ?? {})
     },
-    snowluma: { wsUrl: 'ws://127.0.0.1:3001', accessToken: '', ...(file.snowluma ?? {}) },
+    onebot: { enabled: false, wsUrl: '', httpUrl: '', accessToken: '', httpAccessToken: '', ...(file.onebot ?? {}) },
     // 空 => 每个会话在 state/agents/<key> 下建独立工作目录
     sessionCwd: file.sessionCwd ?? '',
     agentPreset: file.agentPreset ?? 'whale-chat',

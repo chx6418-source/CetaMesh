@@ -1,10 +1,11 @@
 // 表情包体系自检：
 // 1) sticker-lib 纯函数（合并/查找/格式化/笔记/使用统计）
 // 2) 配置项与 MCP 工具描述存在性
-// 3) 可选 live 模式：WHALEBRIDGE_TEST_LIVE=1 时调用 SnowLuma 拉取收藏表情并验证 safeFetchBuffer 可抓图
+// 3) 可选 live 模式：WHALEBRIDGE_TEST_LIVE=1 时调用显式启用的 OneBot 拉取收藏表情并验证 safeFetchBuffer 可抓图
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { assertOneBotConfigured, assertOneBotHttpConfigured } from '../src/channel/qq/config.js';
 import {
   normalizeStickerEntry,
   mergeStickerLibrary,
@@ -101,7 +102,7 @@ console.log('## 配置文件');
 
 console.log('## 表情单气泡约束');
 {
-  const mcp = fs.readFileSync(path.join(ROOT, 'src', 'mcp-snowluma-safe.js'), 'utf8');
+  const mcp = fs.readFileSync(path.join(ROOT, 'src', 'mcp-onebot-safe.js'), 'utf8');
   const sendStickerBlock = mcp.slice(mcp.indexOf("'qq_send_sticker'"), mcp.indexOf("'qq_sticker_note'"));
   ok(!sendStickerBlock.includes('message: z.string()'), 'qq_send_sticker MCP 不再接受 message 参数');
   ok(sendStickerBlock.includes('不能在同一气泡里附带文字'), 'qq_send_sticker 描述强调单气泡');
@@ -112,7 +113,7 @@ console.log('## 表情单气泡约束');
 
 console.log('## MCP 工具描述存在性');
 {
-  const mcp = fs.readFileSync(path.join(ROOT, 'src', 'mcp-snowluma-safe.js'), 'utf8');
+  const mcp = fs.readFileSync(path.join(ROOT, 'src', 'mcp-onebot-safe.js'), 'utf8');
   for (const name of ['qq_list_stickers', 'qq_get_sticker_image', 'qq_send_sticker', 'qq_sticker_note', 'qq_set_sticker_remark']) {
     ok(mcp.includes(`'${name}'`) || mcp.includes(`"${name}"`), `MCP 工具 ${name} 已注册`);
   }
@@ -127,11 +128,12 @@ console.log('## bridge 路由/函数存在性');
 }
 
 if (process.env.WHALEBRIDGE_TEST_LIVE === '1') {
-  console.log('## live：SnowLuma 收藏表情链路');
+  console.log('## live：显式 OneBot 收藏表情链路');
   try {
     const cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
-    const base = String(cfg.snowluma?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
-    const headers = { 'content-type': 'application/json', ...(cfg.snowluma?.accessToken ? { authorization: `Bearer ${cfg.snowluma.accessToken}` } : {}) };
+    const onebot = assertOneBotConfigured(cfg);
+    const base = assertOneBotHttpConfigured(cfg);
+    const headers = { 'content-type': 'application/json', ...(onebot.httpAccessToken ? { authorization: `Bearer ${onebot.httpAccessToken}` } : {}) };
     const res = await fetch(`${base}/fetch_custom_face_detail`, {
       method: 'POST',
       headers,

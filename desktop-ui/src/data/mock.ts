@@ -23,7 +23,6 @@ export const agents: AgentView[] = [
 export const plugins: PluginView[] = [
   { id: 'bionic', name: 'CetaMesh 仿生聊天', summary: '让聊天更自然，按需开启表情、黑话、音乐与卡片能力。', developer: 'CetaMesh', version: '1.0', status: 'installed', category: '创作', kind: 'extension', icon: 'sparkles', permissions: ['聊天工具调用', '按次审批的发送操作'], changelog: '新增工具分组与逐项控制。' },
   { id: 'dsh', name: 'DeepSeek Harness', summary: '连接 DSH 智能体，继续处理复杂任务。', developer: 'DeepSeek', version: '0.2', status: 'installed', category: '连接', kind: 'integration', icon: 'bot', permissions: ['智能体状态', '任务协作'], changelog: '改进桌面状态识别。' },
-  { id: 'snowluma', name: 'SnowLuma', summary: '将 CetaMesh 连接到已配置的 QQ 渠道。', developer: 'SnowLuma', version: '1.14', status: 'installed', category: '连接', kind: 'integration', icon: 'plug', permissions: ['渠道连接', '消息收发'], changelog: '适配当前渠道版本。' },
   { id: 'web', name: '网页资料', summary: '从公开网页收集和整理信息。', developer: 'CetaMesh', version: '1.1', status: 'available', category: '效率', kind: 'extension', icon: 'globe', permissions: ['只读网络访问'], changelog: '新增来源预览。' },
   { id: 'studio', name: '创作工作台', summary: '协助整理灵感、草稿和视觉素材。', developer: 'CetaMesh', version: '0.9', status: 'update', category: '创作', kind: 'extension', icon: 'image', permissions: ['工作区文件读取'], changelog: '优化素材卡片。' },
   { id: 'code', name: '项目工具', summary: '在授权的工作区内分析项目结构。', developer: 'CetaMesh', version: '1.0', status: 'available', category: '开发', kind: 'extension', icon: 'code', permissions: ['工作区读取', '按次审批的测试运行'], changelog: '首次发布。' },

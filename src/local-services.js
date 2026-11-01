@@ -1,59 +1,21 @@
-// whalebridge 本地子服务管理：SnowLuma 与 dsh。
+// 本地 DSH 子服务管理；外部 OneBot 网关只由 Channel transport 连接。
 //
 // 这个模块只负责本机进程、安装文件检测和日志流，不把任何一个可选服务的
 // 失败向上抛成桥接主流程启动失败。调用方可以在控制台启动后再按需重试。
 import fs from 'node:fs';
-import net from 'node:net';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { createWriteStream } from 'node:fs';
-import { pipeline } from 'node:stream/promises';
-import { Readable } from 'node:stream';
 import { readJsonFile, writeJsonAtomic as writeJsonFileAtomic } from './storage/json-file.js';
 import { NodeApiClient } from './dsh-client.js';
 
 const execFileAsync = promisify(execFile);
 
-export const SNOWLUMA_RELEASE_PAGE = 'https://github.com/SnowLuma/SnowLuma/releases/latest';
-export const SNOWLUMA_RELEASE_API = 'https://api.github.com/repos/SnowLuma/SnowLuma/releases/latest';
 export const DSH_INSTALL_HINT = '前置依赖：需先安装 Node.js 环境\n安装命令：npx @deepseek-ai/dsh web';
 
-/**
- * 从进程列表里挑出「QQ 顶层进程」。
- *
- * 为什么要挑顶层：QQ 是多进程应用（主进程 + 一堆子进程），要让它彻底退出必须从顶层连子树一起结束；
- * 而反过来，只杀子进程会留下主进程继续占用。判定"顶层"用父进程不在同一批 QQ 进程里来识别，
- * 不依赖进程名以外的任何猜测。
- */
-export function selectTopLevelQqProcesses(processes = []) {
-  const qq = processes.filter((item) => /^qq(\.exe)?$/i.test(String(item?.name ?? '')));
-  const ids = new Set(qq.map((item) => Number(item.pid)));
-  return qq.filter((item) => !ids.has(Number(item.parentPid)));
-}
-
-/**
- * 结束指定的 QQ 顶层进程及其子树。`killer` 可注入，便于测试不真的杀进程。
- * 返回每个进程的结果，便于控制台如实展示（不静默失败）。
- */
-export async function quitQqProcesses({ listProcesses, killer } = {}) {
-  const processes = await listProcesses();
-  const targets = selectTopLevelQqProcesses(processes);
-  const results = [];
-  for (const target of targets) {
-    try {
-      await killer(target.pid);
-      results.push({ pid: target.pid, ok: true });
-    } catch (error) {
-      results.push({ pid: target.pid, ok: false, error: error?.message ?? String(error) });
-    }
-  }
-  return { targets, results };
-}
-const MAX_RELEASE_BYTES = 2 * 1024 * 1024 * 1024;
 const LOG_LIMIT = 600;
 const DETECTION_CACHE_VERSION = 2;
 const FULL_SCAN_MAX_DIRS = 4000;
@@ -114,30 +76,6 @@ function isInside(parent, target) {
   return t === p || t.startsWith(p.endsWith(path.sep) ? p : p + path.sep);
 }
 
-function psQuote(value) {
-  return `'${String(value).replace(/'/g, "''")}'`;
-}
-
-function findFile(root, wantedNames, maxDepth = 4) {
-  const names = new Set(wantedNames.map((name) => String(name).toLowerCase()));
-  const base = normalizeDir(root);
-  if (!base || !fs.existsSync(base)) return '';
-  const queue = [{ dir: base, depth: 0 }];
-  while (queue.length) {
-    const { dir, depth } = queue.shift();
-    let entries;
-    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { continue; }
-    for (const entry of entries) {
-      const full = path.join(dir, entry.name);
-      if (entry.isFile() && names.has(entry.name.toLowerCase())) return full;
-      if (entry.isDirectory() && depth < maxDepth && entry.name !== 'node_modules') {
-        queue.push({ dir: full, depth: depth + 1 });
-      }
-    }
-  }
-  return '';
-}
-
 function splitPathEnvironment(environment = process.env) {
   return String(environment.PATH || environment.Path || environment.path || '')
     .split(path.delimiter)
@@ -152,29 +90,6 @@ function installationId(service, entrypoint) {
 function versionFromPath(value) {
   const match = String(value || '').match(/(?:^|[^\d])v?(\d+\.\d+(?:\.\d+)?(?:[-+][0-9a-z.-]+)?)/i);
   return match?.[1] || '';
-}
-
-async function findFilesAsync(root, wantedNames, maxDepth = 4, maxDirs = 500) {
-  const names = new Set(wantedNames.map((name) => String(name).toLowerCase()));
-  const base = normalizeDir(root);
-  if (!base || !(await statSafe(base))?.isDirectory()) return [];
-  const queue = [{ dir: base, depth: 0 }];
-  const found = [];
-  let visited = 0;
-  while (queue.length && visited < maxDirs) {
-    const { dir, depth } = queue.shift();
-    visited += 1;
-    let entries;
-    try { entries = await fsp.readdir(dir, { withFileTypes: true }); } catch { continue; }
-    for (const entry of entries) {
-      const full = path.join(dir, entry.name);
-      if (entry.isFile() && names.has(entry.name.toLowerCase())) found.push(full);
-      if (entry.isDirectory() && depth < maxDepth && !['node_modules', '.git'].includes(entry.name.toLowerCase())) {
-        queue.push({ dir: full, depth: depth + 1 });
-      }
-    }
-  }
-  return uniquePaths(found);
 }
 
 async function readInstallationVersion(homeDir, entrypoint = '') {
@@ -206,36 +121,6 @@ async function fileSignature(homeDir, entrypoint) {
   };
 }
 
-async function validateSnowCandidate(candidate) {
-  const input = normalizeDir(candidate?.path);
-  if (!input) return [];
-  const inputStat = await statSafe(input);
-  if (!inputStat) return [];
-  const explicitFile = inputStat.isFile() ? input : normalizeDir(candidate?.launcherPath);
-  const homeDir = inputStat.isDirectory() ? input : path.dirname(input);
-  let launchers = [];
-  if (explicitFile && (await statSafe(explicitFile))?.isFile()) launchers.push(explicitFile);
-  launchers.push(...await findFilesAsync(homeDir, ['launcher.bat', 'start.bat', 'snowluma.bat'], 4, 600));
-  launchers = uniquePaths(launchers);
-  if (!launchers.length) {
-    return [{
-      id: installationId('snowluma-invalid', homeDir), service: 'snowluma', homeDir,
-      launcherPath: '', entrypoint: '', version: await readInstallationVersion(homeDir), valid: false,
-      invalidReason: '目录存在，但缺少 launcher.bat、start.bat 或 snowluma.bat', source: candidate.source || 'unknown',
-      signature: await fileSignature(homeDir, homeDir)
-    }];
-  }
-  return Promise.all(launchers.map(async (launcherPath) => {
-    const launcherHome = path.dirname(launcherPath);
-    return {
-      id: installationId('snowluma', launcherPath), service: 'snowluma', homeDir: launcherHome,
-      launcherPath, entrypoint: launcherPath, version: await readInstallationVersion(launcherHome, launcherPath),
-      valid: true, invalidReason: '', source: candidate.source || 'unknown',
-      signature: await fileSignature(launcherHome, launcherPath)
-    };
-  }));
-}
-
 async function resolveDshPackageExecutable(packageDir, npmBinDir) {
   const packageJson = await readJsonAsync(path.join(packageDir, 'package.json'));
   const binValue = typeof packageJson?.bin === 'string'
@@ -265,107 +150,6 @@ async function readDshExecutableVersion(executable) {
     return versionFromPath(output) || '';
   } catch {
     return '';
-  }
-}
-
-/**
- * 记录由 WhaleBridge 启动的 SnowLuma launcher，供后续管理与诊断使用。
- * WhaleBridge 完全退出时会保留 SnowLuma 进程，让它继续管理 QQ。
- */
-function snowLumaMarkerFile(root) {
-  return path.join(root, 'state', 'snowluma.pid');
-}
-
-export function readSnowLumaMarker(file) {
-  try {
-    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
-    const pid = Number(parsed?.pid);
-    return Number.isInteger(pid) && pid > 0 ? { ...parsed, pid } : null;
-  } catch {
-    return null;
-  }
-}
-
-function writeSnowLumaMarker(root, { pid, launcherPath, homeDir }) {
-  try {
-    const file = snowLumaMarkerFile(root);
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(
-      file,
-      JSON.stringify({ pid, launcherPath, homeDir, startedAt: new Date().toISOString() }, null, 2),
-      'utf8'
-    );
-  } catch {
-    /* 记录失败不影响启动：最坏情况是后续无法通过 marker 识别这个实例 */
-  }
-}
-
-function clearSnowLumaMarker(root) {
-  try {
-    fs.rmSync(snowLumaMarkerFile(root), { force: true });
-  } catch {}
-}
-
-/**
- * 结束"本应用此前启动、现在仍在运行"的 SnowLuma（跨应用重启的场景）。
- * 只认记录文件里的 pid：调用方负责先确认进程身份（见 identifyProcess），避免 pid 被复用后误杀。
- * 依赖全部可注入，便于测试不真的杀进程。
- */
-export async function stopRecordedSnowLuma({
-  file,
-  readMarker = readSnowLumaMarker,
-  identify = null,
-  killer = null,
-  clearMarker = null
-} = {}) {
-  const markerFile = file ?? null;
-  if (!markerFile) return { stopped: false, reason: 'no-record-file' };
-  const marker = readMarker(markerFile);
-  if (!marker) return { stopped: false, reason: 'no-record' };
-  const discard = () => {
-    if (clearMarker) clearMarker(markerFile);
-  };
-  let identity = null;
-  try {
-    identity = identify ? await identify(marker.pid) : null;
-  } catch {
-    identity = null;
-  }
-  // 记录里有 launcherPath 时要求进程身份匹配（SnowLuma 是 node 进程），
-  // 避免 pid 被复用后误杀别的程序。
-  if (marker.launcherPath && identity && !String(identity).toLowerCase().includes('snowluma') && !/^node(\.exe)?$/i.test(String(identity))) {
-    discard();
-    return { stopped: false, reason: 'pid-reused', pid: marker.pid, identity: String(identity) };
-  }
-  if (identity === null) {
-    discard();
-    return { stopped: false, reason: 'not-running', pid: marker.pid };
-  }
-  try {
-    if (killer) await killer(marker.pid);
-    discard();
-    return { stopped: true, pid: marker.pid };
-  } catch (error) {
-    return { stopped: false, reason: 'kill-failed', pid: marker.pid, error: error?.message ?? String(error) };
-  }
-}
-
-/** 列出本机进程（pid / 父 pid / 名称）。只读查询，用于精确识别 QQ 进程树。 */
-async function listWindowsProcesses() {
-  if (process.platform !== 'win32') return [];
-  try {
-    const { stdout } = await execFileAsync(
-      'powershell.exe',
-      ['-NoProfile', '-NonInteractive', '-Command',
-       'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name | ConvertTo-Json -Compress'],
-      { windowsHide: true, timeout: 20000, maxBuffer: 4 * 1024 * 1024 }
-    );
-    const parsed = JSON.parse(String(stdout).trim() || '[]');
-    const rows = Array.isArray(parsed) ? parsed : [parsed];
-    return rows.map((row) => ({ pid: row.ProcessId, parentPid: row.ParentProcessId, name: row.Name }));
-  } catch {
-    // 查询失败时返回空列表：调用方会如实报"没有可结束的 QQ 进程"，绝不猜测性杀进程。
-    return [];
   }
 }
 
@@ -414,18 +198,6 @@ async function validateDshCandidate(candidate, defaultHome) {
     executable, entrypoint: executable, version, valid: true,
     invalidReason: '', source: candidate.source || 'unknown', signature: await fileSignature(versionHome, executable)
   }];
-}
-
-async function relatedChildDirectories(roots, keyword) {
-  const found = [];
-  for (const root of uniquePaths(roots)) {
-    let entries;
-    try { entries = await fsp.readdir(root, { withFileTypes: true }); } catch { continue; }
-    for (const entry of entries) {
-      if (entry.isDirectory() && entry.name.toLowerCase().includes(keyword)) found.push(path.join(root, entry.name));
-    }
-  }
-  return uniquePaths(found);
 }
 
 async function boundedDirectoryScan(roots, matcher, { maxDirs = FULL_SCAN_MAX_DIRS, maxDepth = FULL_SCAN_MAX_DEPTH } = {}) {
@@ -521,22 +293,6 @@ async function cachedInstallations(cacheEntry, fingerprint) {
   return checks.every(Boolean) ? cacheEntry.installations : null;
 }
 
-export function pickSnowLumaReleaseAsset(release) {
-  const assets = Array.isArray(release?.assets) ? release.assets : [];
-  const zips = assets.filter((asset) => /\.zip$/i.test(String(asset?.name ?? '')) && asset?.browser_download_url);
-  if (!zips.length) return null;
-  const score = (asset) => {
-    const name = String(asset.name).toLowerCase();
-    let value = 0;
-    if (name.includes('win') || name.includes('windows')) value += 50;
-    if (name.includes('x64') || name.includes('amd64')) value += 30;
-    if (name.includes('full')) value += 10;
-    if (name.includes('lite')) value -= 2;
-    return value;
-  };
-  return [...zips].sort((a, b) => score(b) - score(a) || String(a.name).localeCompare(String(b.name)))[0];
-}
-
 function publicSnapshot(state) {
   const result = { ...state };
   delete result.process;
@@ -551,28 +307,15 @@ export function connectorProcessEnv(source = process.env) {
   return Object.fromEntries(Object.entries(source).filter(([name]) => !/^WHALEBRIDGE_UI_/i.test(name)));
 }
 
-export function createLocalServiceManager({ root, config = {}, onLog = () => {}, onConfigPatch = () => {}, detectionOptions = {}, captureSnowLumaOutput = true } = {}) {
+export function createLocalServiceManager({ root, config = {}, onLog = () => {}, onConfigPatch = () => {}, detectionOptions = {} } = {}) {
   const repoRoot = path.resolve(root || process.cwd());
   const configFile = path.join(repoRoot, 'config.json');
   const cacheFile = path.join(repoRoot, 'state', 'local-service-detection.json');
   const environment = detectionOptions.environment || process.env;
   const userHome = normalizeDir(detectionOptions.userHome || os.homedir());
   const pathDirectories = splitPathEnvironment(environment);
-  const commonSnowRoots = uniquePaths([
-    environment.ProgramFiles,
-    environment['ProgramFiles(x86)'],
-    environment.LOCALAPPDATA
-  ]);
   const configuredFullScanRoots = Array.isArray(detectionOptions.fullScanRoots) ? detectionOptions.fullScanRoots : null;
   const state = {
-    snowluma: {
-      name: 'SnowLuma', status: 'checking', installed: false, running: false, ready: false,
-      homeDir: '', launcherPath: '', installDir: path.join(repoRoot, 'SnowLuma'),
-      source: 'unknown', pid: null, lastError: '', releasePage: SNOWLUMA_RELEASE_PAGE,
-      version: '', installations: [], selectedId: '', managed: false,
-      detection: { status: 'pending', layer: 'none', durationMs: 0, completedAt: '', fromCache: false },
-      updatedAt: new Date().toISOString(), logs: []
-    },
     dsh: {
       name: 'dsh', status: 'checking', installed: false, running: false, ready: false,
       processAlive: null, reachable: null, authenticated: null, sessionCapable: null,
@@ -582,9 +325,8 @@ export function createLocalServiceManager({ root, config = {}, onLog = () => {},
       updatedAt: new Date().toISOString(), logs: []
     }
   };
-  const processes = { snowluma: null, dsh: null };
+  const processes = { dsh: null };
   const listeners = new Set();
-  let installPromise = null;
   let detectionPromise = null;
   let cacheData = null;
 
@@ -621,7 +363,7 @@ export function createLocalServiceManager({ root, config = {}, onLog = () => {},
   }
 
   function snapshot() {
-    return { snowluma: publicSnapshot(state.snowluma), dsh: publicSnapshot(state.dsh) };
+    return { dsh: publicSnapshot(state.dsh) };
   }
 
   function customPathsFor(service) {
@@ -629,46 +371,6 @@ export function createLocalServiceManager({ root, config = {}, onLog = () => {},
       ...(Array.isArray(cacheData?.customPaths?.[service]) ? cacheData.customPaths[service] : []),
       ...(Array.isArray(config?.[service]?.customPaths) ? config[service].customPaths : [])
     ], repoRoot);
-  }
-
-  async function detectSnowLuma(force = false) {
-    const customPaths = customPathsFor('snowluma');
-    const configuredHome = normalizeDir(config?.snowluma?.homeDir, repoRoot);
-    const configuredLauncher = normalizeDir(config?.snowluma?.launcherPath, repoRoot);
-    const bundled = path.join(repoRoot, 'SnowLuma');
-    const pathMatches = uniquePaths(pathDirectories
-      .filter((item) => item.toLowerCase().includes('snowluma'))
-      .flatMap((item) => [item, path.dirname(item), path.dirname(path.dirname(item))]));
-    const fingerprint = detectionFingerprint('snowluma', {
-      configuredHome, configuredLauncher, bundled, customPaths, commonSnowRoots, pathMatches
-    });
-    if (!force) {
-      const cached = await cachedInstallations(cacheData?.services?.snowluma, fingerprint);
-      if (cached) return { installations: cached, layer: 'cache', fromCache: true, fingerprint, scannedDirs: 0 };
-    }
-
-    const related = await relatedChildDirectories([repoRoot, ...commonSnowRoots], 'snowluma');
-    const priority = [
-      ...customPaths.map((item) => ({ path: item, source: 'custom' })),
-      ...(configuredHome || configuredLauncher ? [{ path: configuredHome || configuredLauncher, launcherPath: configuredLauncher, source: 'configured' }] : []),
-      { path: bundled, source: 'bundled' },
-      ...commonSnowRoots.map((item) => ({ path: path.join(item, 'SnowLuma'), source: 'common' })),
-      ...related.map((item) => ({ path: item, source: 'common' })),
-      ...pathMatches.map((item) => ({ path: item, source: 'path' }))
-    ];
-    let installations = mergeInstallations(await Promise.all(priority.map(validateSnowCandidate)));
-    if (installations.some((item) => item.valid)) {
-      return { installations, layer: 'priority', fromCache: false, fingerprint, scannedDirs: priority.length };
-    }
-
-    const fullRoots = configuredFullScanRoots === null ? commonSnowRoots : uniquePaths(configuredFullScanRoots);
-    const scan = await boundedDirectoryScan(fullRoots, async (dir, entries) => {
-      if (path.basename(dir).toLowerCase().includes('snowluma')) return true;
-      return entries.some((item) => item.isFile() && ['launcher.bat', 'start.bat', 'snowluma.bat'].includes(item.name.toLowerCase()));
-    }, detectionOptions);
-    const fullRecords = await Promise.all(scan.paths.map((item) => validateSnowCandidate({ path: item, source: 'full-scan' })));
-    installations = mergeInstallations([installations, fullRecords]);
-    return { installations, layer: 'full-scan', fromCache: false, fingerprint, scannedDirs: scan.visited, truncated: scan.truncated };
   }
 
   async function detectDshInstallations(force = false) {
@@ -749,9 +451,7 @@ export function createLocalServiceManager({ root, config = {}, onLog = () => {},
     const installations = result.installations || [];
     const valid = installations.filter((item) => item.valid);
     const previousSelected = state[service].selectedId || cacheData?.selected?.[service] || '';
-    const configuredEntry = service === 'snowluma'
-      ? normalizeDir(config?.snowluma?.launcherPath, repoRoot)
-      : normalizeDir(config?.dsh?.executable, repoRoot);
+    const configuredEntry = normalizeDir(config?.dsh?.executable, repoRoot);
     const selected = valid.find((item) => item.id === previousSelected)
       || valid.find((item) => configuredEntry && pathKey(item.entrypoint) === pathKey(configuredEntry))
       || valid[0]
@@ -777,16 +477,12 @@ export function createLocalServiceManager({ root, config = {}, onLog = () => {},
         ? (state[service].ready ? 'ready' : alive ? 'running' : 'stopped')
         : invalid.length ? 'invalid' : 'not-installed'
     };
-    if (service === 'snowluma') {
-      setState(service, { ...common, homeDir: selected?.homeDir || path.join(repoRoot, 'SnowLuma'), launcherPath: selected?.launcherPath || '' });
-    } else {
-      const fallbackHome = normalizeDir(environment.DSH_HOME || (userHome ? path.join(userHome, '.dsh') : ''));
-      setState(service, {
-        ...common, homeDir: selected?.homeDir || fallbackHome, executable: selected?.executable || '',
-        profileDir: selected?.homeDir ? path.join(selected.homeDir, 'profiles') : '',
-        credentials: selected?.homeDir ? path.join(selected.homeDir, '.credentials.yaml') : ''
-      });
-    }
+    const fallbackHome = normalizeDir(environment.DSH_HOME || (userHome ? path.join(userHome, '.dsh') : ''));
+    setState(service, {
+      ...common, homeDir: selected?.homeDir || fallbackHome, executable: selected?.executable || '',
+      profileDir: selected?.homeDir ? path.join(selected.homeDir, 'profiles') : '',
+      credentials: selected?.homeDir ? path.join(selected.homeDir, '.credentials.yaml') : ''
+    });
   }
 
   async function detectAll({ force = false } = {}) {
@@ -794,46 +490,32 @@ export function createLocalServiceManager({ root, config = {}, onLog = () => {},
     detectionPromise = (async () => {
       const started = Date.now();
       cacheData = cacheData || await readJsonAsync(cacheFile, { version: DETECTION_CACHE_VERSION, services: {}, customPaths: {}, selected: {} });
-      for (const service of ['snowluma', 'dsh']) {
-        setState(service, { detection: { ...state[service].detection, status: 'checking' }, status: state[service].running ? state[service].status : 'checking' });
+      setState('dsh', { detection: { ...state.dsh.detection, status: 'checking' }, status: state.dsh.running ? state.dsh.status : 'checking' });
+      let result;
+      try {
+        result = await detectDshInstallations(force);
+        applyDetection('dsh', result, Date.now() - started);
+      } catch (error) {
+        result = { fingerprint: '', installations: [] };
+        setState('dsh', { lastError: asText(error?.message ?? error), status: 'failed', detection: { ...state.dsh.detection, status: 'failed' } });
       }
-      // 两个服务的所有路径与版本校验同时进行；任一检测失败不影响另一项或主界面。
-      const timed = async (task) => {
-        const serviceStarted = Date.now();
-        const result = await task();
-        return { ...result, durationMs: Date.now() - serviceStarted };
-      };
-      const settled = await Promise.allSettled([
-        timed(() => detectSnowLuma(force)),
-        timed(() => detectDshInstallations(force))
-      ]);
-      const results = settled.map((item, index) => item.status === 'fulfilled'
-        ? item.value
-        : { installations: [], layer: 'failed', fromCache: false, fingerprint: '', error: asText(item.reason?.message ?? item.reason), scannedDirs: 0 });
-      const durationMs = Date.now() - started;
-      applyDetection('snowluma', results[0], results[0].durationMs ?? durationMs);
-      applyDetection('dsh', results[1], results[1].durationMs ?? durationMs);
-      if (settled[0].status === 'rejected') setState('snowluma', { lastError: results[0].error, status: 'failed', detection: { ...state.snowluma.detection, status: 'failed' } });
-      if (settled[1].status === 'rejected') setState('dsh', { lastError: results[1].error, status: 'failed', detection: { ...state.dsh.detection, status: 'failed' } });
+      // Preserve historical cache fields as inert records; retirement does not migrate user data.
       cacheData = {
+        ...cacheData,
         version: DETECTION_CACHE_VERSION,
         updatedAt: new Date().toISOString(),
         customPaths: cacheData?.customPaths || {},
-        selected: { snowluma: state.snowluma.selectedId, dsh: state.dsh.selectedId },
-        services: {
-          snowluma: { fingerprint: results[0].fingerprint, installations: state.snowluma.installations },
-          dsh: { fingerprint: results[1].fingerprint, installations: state.dsh.installations }
-        }
+        selected: { ...cacheData?.selected, dsh: state.dsh.selectedId },
+        services: { ...cacheData?.services, dsh: { fingerprint: result.fingerprint, installations: state.dsh.installations } }
       };
       try { await writeJsonAtomic(cacheFile, cacheData); } catch (error) {
-        push('snowluma', `检测缓存写入失败：${error?.message ?? error}`, 'warn');
+        push('dsh', '检测缓存写入失败：' + (error?.message ?? error), 'warn');
       }
       emitAll('detection-complete', {
-        durationMs,
-        matches: state.snowluma.installations.filter((item) => item.valid).length + state.dsh.installations.filter((item) => item.valid).length,
-        invalid: state.snowluma.installations.filter((item) => !item.valid).length + state.dsh.installations.filter((item) => !item.valid).length
+        durationMs: Date.now() - started,
+        matches: state.dsh.installations.filter(item => item.valid).length,
+        invalid: state.dsh.installations.filter(item => !item.valid).length
       });
-      // 检测完立即校正一次就绪状态，保证首屏就能看到“外部已在运行”的服务。
       try { await reconcileReadiness({ force: true }); } catch {}
       return snapshot();
     })().finally(() => { detectionPromise = null; });
@@ -841,7 +523,7 @@ export function createLocalServiceManager({ root, config = {}, onLog = () => {},
   }
 
   function refresh() {
-    if (!detectionPromise && state.snowluma.detection.status === 'pending') {
+    if (!detectionPromise && state.dsh.detection.status === 'pending') {
       void detectAll();
     } else {
       // 外部启动/停止的服务不经过本管理器，取快照前顺手校正（内部节流，不会反复探活）。
@@ -850,63 +532,6 @@ export function createLocalServiceManager({ root, config = {}, onLog = () => {},
     return snapshot();
   }
 
-
-  /** 从 SnowLuma 的 http/ws 端点里取出 host:port，用于纯 TCP 探测。 */
-  function endpointHostPort(rawUrl) {
-    try {
-      const url = new URL(String(rawUrl));
-      const port = url.port ? Number(url.port) : (url.protocol === 'wss:' || url.protocol === 'https:' ? 443 : 80);
-      return { host: url.hostname || '127.0.0.1', port };
-    } catch {
-      return null;
-    }
-  }
-
-  /**
-   * 纯 TCP 探测：只要端口上有人监听就认为「外部已有 SnowLuma 在跑」。
-   * 比 HTTP 探测更宽松——SnowLuma 的 WebUI 端口会因占用而漂移（实测出现过 5099 → 5100），
-   * 而 OneBot 端口可能只开 WebSocket、不响应普通 HTTP GET，只靠 HTTP 探测会误判成「没在运行」
-   * 并再拉起第二个实例。
-   */
-  async function probeTcp(rawUrl) {
-    const target = endpointHostPort(rawUrl);
-    if (!target) return false;
-    return new Promise((resolve) => {
-      const socket = net.connect({ host: target.host, port: target.port });
-      let settled = false;
-      const done = (value) => { if (settled) return; settled = true; socket.destroy(); resolve(value); };
-      socket.setTimeout(1500);
-      socket.once('connect', () => done(true));
-      socket.once('timeout', () => done(false));
-      socket.once('error', () => done(false));
-    });
-  }
-
-  async function probeUrl(url, headers = {}) {
-    const base = String(url ?? '').replace(/\/+$/, '');
-    if (!base) return false;
-    try {
-      const response = await fetch(`${base}/get_login_info`, { headers, signal: AbortSignal.timeout(2500) });
-      // 401/403/426 也说明 HTTP 服务已经监听，只是鉴权或协议配置不匹配。
-      return response.status >= 200 && response.status < 500;
-    } catch {
-      return false;
-    }
-  }
-
-  function snowLumaHttpUrl() {
-    return String(config?.snowluma?.httpUrl || 'http://127.0.0.1:3000');
-  }
-
-  /** OneBot 端点：用于纯 TCP 探测（SnowLuma 可能只开 WebSocket，不响应普通 HTTP GET）。 */
-  function snowLumaWsUrl() {
-    return String(config?.snowluma?.wsUrl || config?.snowluma?.httpUrl || 'ws://127.0.0.1:3001');
-  }
-
-  function snowLumaProbeHeaders() {
-    const token = config?.snowluma?.httpAccessToken ?? config?.snowluma?.accessToken;
-    return token ? { authorization: `Bearer ${token}` } : {};
-  }
 
   function dshWebUrl() {
     return String(config?.dsh?.baseUrl || 'http://127.0.0.1:3080').replace(/\/+$/, '');
@@ -939,7 +564,7 @@ export function createLocalServiceManager({ root, config = {}, onLog = () => {},
     }
   }
 
-  // 就绪状态校正：SnowLuma / dsh 经常由用户、系统服务或另一个控制台在**本管理器之外**启动，
+  // 就绪状态校正：DSH 可由用户、系统服务或另一个控制台在本管理器之外启动，
   // 只凭“本进程是否托管了子进程”判断会把已经在跑的服务显示成“未运行”。
   // 这里统一以端口探活为准，并区分“托管”（可停止）与“外部”（只监控、不重复拉起）。
   let lastReconcileAt = 0;
@@ -969,22 +594,16 @@ export function createLocalServiceManager({ root, config = {}, onLog = () => {},
     if (!force && Date.now() - lastReconcileAt < throttleMs) return null;
     lastReconcileAt = Date.now();
     reconcilePromise = (async () => {
-      const [snowAlive, dshAlive] = await Promise.all([
-        probeUrl(snowLumaHttpUrl(), snowLumaProbeHeaders()).catch(() => false),
-        probeDshUrl().catch(() => false)
-      ]);
-      for (const [service, alive] of [['snowluma', snowAlive], ['dsh', dshAlive]]) {
-        const current = state[service];
-        // 正在启动/安装时不覆盖；由启动流程自己收敛状态。
-        if (['starting', 'installing'].includes(current.status)) continue;
-        const child = processes[service];
-        const managed = !!child && child.exitCode == null && !child.killed;
-      if (service === 'dsh') setState('dsh', { ...dshProbeState, processAlive: managed ? true : dshProbeState.processAlive });
-        // 托管进程还活着、只是 HTTP 尚未就绪：交给启动流程的等待逻辑，别判成失败。
-        if (!alive && managed) continue;
-        applyReadiness(service, alive, managed);
-        if (service === 'dsh') setState('dsh', dshProbeState);
-      }
+      const alive = await probeDshUrl().catch(() => false);
+      const current = state.dsh;
+      // 启动流程自己收敛状态；外部 DSH 只监控，不取得进程控制权。
+      if (current.status === 'starting') return snapshot();
+      const child = processes.dsh;
+      const managed = !!child && child.exitCode == null && !child.killed;
+      setState('dsh', { ...dshProbeState, processAlive: managed ? true : dshProbeState.processAlive });
+      if (!alive && managed) return snapshot();
+      applyReadiness('dsh', alive, managed);
+      setState('dsh', dshProbeState);
       return snapshot();
     })().finally(() => { reconcilePromise = null; });
     return reconcilePromise;
@@ -1086,101 +705,6 @@ export function createLocalServiceManager({ root, config = {}, onLog = () => {},
     });
   }
 
-  async function startSnowLuma({ waitMs = 35000 } = {}) {
-    await detectAll();
-    const current = state.snowluma;
-    const httpHeaders = snowLumaProbeHeaders();
-    // 先探测“外部已启动”的实例，避免控制台再次拉起第二个 SnowLuma。
-    if (await probeUrl(snowLumaHttpUrl(), httpHeaders)) {
-      setState('snowluma', { status: 'ready', running: true, ready: true, managed: false, lastError: '' });
-      return publicSnapshot(current);
-    }
-    // HTTP 探测可能因为端口漂移或端点不响应 HTTP 而误判「没在运行」，进而重复拉起实例
-    // （实测：WebUI 一度从 5099 漂到 5106，每重启一次桥接就多一个实例）。
-    // 因此再按端点做一次纯 TCP 探测：有监听就复用、不再拉起第二个。
-    // 但**不能因此判定 ready**：SnowLuma 会先占住 OneBot 端口、注入 QQ 成功后才真正提供 API，
-    // 早先这里直接置 ready 会盖掉更有用的「OneBot 尚未就绪」提示。
-    if (await probeTcp(snowLumaWsUrl())) {
-      const reuseText =
-        `SnowLuma 端点 ${snowLumaWsUrl()} 已有实例在监听，直接复用（不再拉起第二个实例）；` +
-        `OneBot API（${snowLumaHttpUrl()}）尚未就绪：请在 SnowLuma 网页控制台完成进程注入` +
-        '（由 SnowLuma 拉起并登录 QQ）与 OneBot 配置；WhaleBridge 将继续独立运行。';
-      setState('snowluma', {
-        status: 'start-timeout',
-        running: true,
-        ready: false,
-        managed: false,
-        lastError: reuseText
-      });
-      // 同一个状态每个检测周期都会走到这里：只在文案变化时记一条，
-      // 否则终端会被同一句话刷屏（实测每 10 秒一条，把有用信息挤掉了）。
-      const lastLog = state.snowluma.logs[state.snowluma.logs.length - 1];
-      if (!lastLog || lastLog.text !== reuseText) push('snowluma', reuseText, 'warn');
-      return publicSnapshot(current);
-    }
-    if (!current.installed) {
-      setState('snowluma', { status: 'not-installed', running: false, ready: false, lastError: '未检测到 SnowLuma 文件' });
-      push('snowluma', `未检测到 SnowLuma。可在控制台确认后从 ${SNOWLUMA_RELEASE_PAGE} 安装。`, 'warn');
-      return publicSnapshot(current);
-    }
-    if (processes.snowluma && processes.snowluma.exitCode == null && !processes.snowluma.killed) {
-      const tracked = processes.snowluma;
-      const ready = await waitFor(
-        'snowluma',
-        () => probeUrl(snowLumaHttpUrl(), httpHeaders),
-        waitMs,
-        () => !!tracked && tracked.exitCode == null && !tracked.killed
-      );
-      const alive = !!tracked && tracked.exitCode == null && !tracked.killed;
-      setState('snowluma', {
-        status: ready ? 'ready' : alive ? 'start-timeout' : 'failed', running: alive, ready,
-        lastError: ready ? '' : alive ? '进程仍在运行，但启动超时且 HTTP API 未就绪' : (state.snowluma.lastError || 'SnowLuma 进程已退出')
-      });
-      return publicSnapshot(current);
-    }
-    if (!current.launcherPath) {
-      setState('snowluma', { status: 'failed', lastError: '已找到 SnowLuma 目录，但没有 launcher.bat' });
-      push('snowluma', '已找到 SnowLuma 目录，但没有 launcher.bat，无法自动启动。', 'error');
-      return publicSnapshot(current);
-    }
-    setState('snowluma', { status: 'starting', running: false, ready: false, lastError: '' });
-    push('snowluma', `按启动优先级启动：${current.launcherPath}`);
-    try {
-      const child = spawnServiceProcess(current.launcherPath, [], {
-        cwd: current.homeDir || repoRoot,
-        env: process.env,
-        // SnowLuma continues running after WhaleBridge exits. Give it independent NUL output handles
-        // so it cannot inherit the worker's pipes and hit EPIPE when the bridge closes.
-        captureOutput: captureSnowLumaOutput
-      });
-      attachProcess('snowluma', child);
-      // 持久化记录启动来源，便于后续管理和诊断；WhaleBridge 退出时保留 SnowLuma，
-      // 下一次启动会通过 OneBot 端点探测复用这个仍在运行的实例。
-      writeSnowLumaMarker(repoRoot, { pid: child.pid, launcherPath: current.launcherPath, homeDir: current.homeDir || repoRoot });
-      const ready = await waitFor(
-        'snowluma',
-        () => probeUrl(snowLumaHttpUrl(), httpHeaders),
-        waitMs,
-        () => processes.snowluma === child && child.exitCode == null && !child.killed
-      );
-      const alive = !!processes.snowluma && processes.snowluma.exitCode == null && !processes.snowluma.killed;
-      const failed = !ready && !alive;
-      // 超时并不等于启动失败：SnowLuma 进程可能仍在运行，但 OneBot HTTP API 尚未就绪。
-      let timeoutHint = '';
-      if (!ready && alive) {
-        const apiUrl = snowLumaHttpUrl();
-        timeoutHint = `SnowLuma 进程仍在运行，但 OneBot API（${apiUrl}）未就绪；请检查 OneBot 网关、QQ 登录和 API 地址配置`;
-      }
-      setState('snowluma', { status: ready ? 'ready' : failed ? 'failed' : 'start-timeout', running: ready || alive, ready, lastError: ready ? '' : failed ? (state.snowluma.lastError || 'SnowLuma 进程已退出') : timeoutHint });
-      push('snowluma', ready ? 'SnowLuma 已就绪，可以连接 鲸桥。' : failed ? 'SnowLuma 进程已退出，WhaleBridge 将继续独立运行。' : `${timeoutHint}；WhaleBridge 将继续独立运行。`, ready ? 'info' : 'warn');
-      return publicSnapshot(current);
-    } catch (error) {
-      setState('snowluma', { status: 'failed', running: false, ready: false, lastError: asText(error?.message ?? error) });
-      push('snowluma', `启动失败：${error?.message ?? error}；WhaleBridge 将继续独立运行。`, 'error');
-      return publicSnapshot(current);
-    }
-  }
-
   async function stopService(service) {
     const child = processes[service];
     if (!child) {
@@ -1207,20 +731,6 @@ export function createLocalServiceManager({ root, config = {}, onLog = () => {},
     return publicSnapshot(state[service]);
   }
 
-  async function persistSnowLumaConfig(homeDir, launcherPath) {
-    const patch = { homeDir, launcherPath };
-    try {
-      const parsed = await readJsonAsync(configFile, {});
-      parsed.snowluma = { ...(parsed.snowluma || {}), ...patch };
-      await writeJsonAtomic(configFile, parsed);
-      if (!config.snowluma || typeof config.snowluma !== 'object') config.snowluma = {};
-      Object.assign(config.snowluma, patch);
-      onConfigPatch({ snowluma: patch });
-    } catch (error) {
-      push('snowluma', `安装完成但写入 config.json 失败：${error?.message ?? error}`, 'warn');
-    }
-  }
-
   async function persistDshConfig(homeDir, executable) {
     const patch = { homeDir, executable };
     try {
@@ -1236,7 +746,7 @@ export function createLocalServiceManager({ root, config = {}, onLog = () => {},
   }
 
   async function selectInstallation(service, choice = {}) {
-    if (!['snowluma', 'dsh'].includes(service)) throw new Error('不支持的本地服务');
+    if (service !== 'dsh') throw new Error('不支持的本地服务');
     if (state[service].running) {
       setState(service, { lastError: '服务运行中，切换版本前请先停止当前进程' });
       return publicSnapshot(state[service]);
@@ -1264,89 +774,15 @@ export function createLocalServiceManager({ root, config = {}, onLog = () => {},
     state[service].source = selected.source;
     state[service].lastError = '';
     if (!state[service].running) state[service].status = 'stopped';
-    if (service === 'snowluma') {
-      state.snowluma.homeDir = selected.homeDir;
-      state.snowluma.launcherPath = selected.launcherPath;
-      await persistSnowLumaConfig(selected.homeDir, selected.launcherPath);
-    } else {
-      state.dsh.homeDir = selected.homeDir;
-      state.dsh.executable = selected.executable;
-      await persistDshConfig(selected.homeDir, selected.executable);
-    }
+    state.dsh.homeDir = selected.homeDir;
+    state.dsh.executable = selected.executable;
+    await persistDshConfig(selected.homeDir, selected.executable);
     cacheData.selected ||= {};
     cacheData.selected[service] = selected.id;
     try { await writeJsonAtomic(cacheFile, cacheData); } catch (error) { push(service, `选择记录保存失败：${error?.message ?? error}`, 'warn'); }
     setState(service, {});
     push(service, `已选择版本 ${selected.version}：${selected.entrypoint}`);
     return publicSnapshot(state[service]);
-  }
-
-  async function installSnowLuma() {
-    if (installPromise) return installPromise;
-    installPromise = (async () => {
-      await detectAll();
-      if (state.snowluma.installed) return publicSnapshot(state.snowluma);
-      const installDir = path.resolve(repoRoot, 'SnowLuma');
-      const tempRoot = fs.mkdtempSync(path.join(repoRoot, '.whalebridge-snowluma-'));
-      const zipFile = path.join(tempRoot, 'SnowLuma-release.zip');
-      const extractDir = path.join(tempRoot, 'extract');
-      try {
-        fs.mkdirSync(extractDir, { recursive: true });
-        setState('snowluma', { status: 'installing', lastError: '', installDir });
-        push('snowluma', '正在查询 GitHub SnowLuma 最新发布版…');
-        const releaseResponse = await fetch(SNOWLUMA_RELEASE_API, {
-          headers: { accept: 'application/vnd.github+json', 'user-agent': 'whalebridge-local-service-manager' },
-          signal: AbortSignal.timeout(20000)
-        });
-        if (!releaseResponse.ok) throw new Error(`GitHub 最新发布版查询失败：HTTP ${releaseResponse.status}`);
-        const release = await releaseResponse.json();
-        const asset = pickSnowLumaReleaseAsset(release);
-        if (!asset) throw new Error('最新发布版没有可用的 Windows ZIP 安装包');
-        const assetUrl = new URL(String(asset.browser_download_url));
-        if (assetUrl.protocol !== 'https:' || !/(^|\.)github\.com$|(^|\.)githubusercontent\.com$/.test(assetUrl.hostname)) {
-          throw new Error('SnowLuma 安装包下载地址不是受信任的 GitHub HTTPS 地址');
-        }
-        push('snowluma', `下载 ${asset.name}…`);
-        const assetResponse = await fetch(assetUrl, {
-          headers: { accept: 'application/octet-stream', 'user-agent': 'whalebridge-local-service-manager' },
-          signal: AbortSignal.timeout(120000)
-        });
-        if (!assetResponse.ok || !assetResponse.body) throw new Error(`SnowLuma 安装包下载失败：HTTP ${assetResponse.status}`);
-        const declared = Number(assetResponse.headers.get('content-length'));
-        if (Number.isFinite(declared) && declared > MAX_RELEASE_BYTES) throw new Error('SnowLuma 安装包超过 2GB，已拒绝下载');
-        await pipeline(Readable.fromWeb(assetResponse.body), createWriteStream(zipFile));
-        const actual = fs.statSync(zipFile).size;
-        if (actual <= 0 || actual > MAX_RELEASE_BYTES) throw new Error('下载的安装包大小异常，已拒绝解压');
-        push('snowluma', '正在解压安装包到 WhaleBridge/SnowLuma…');
-        const command = `Expand-Archive -LiteralPath ${psQuote(zipFile)} -DestinationPath ${psQuote(extractDir)} -Force`;
-        await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', command], {
-          windowsHide: true,
-          timeout: 180000,
-          maxBuffer: 2 * 1024 * 1024
-        });
-        const launcher = findFile(extractDir, ['launcher.bat', 'start.bat', 'snowluma.bat']);
-        if (!launcher) throw new Error('安装包中没有找到 launcher.bat，无法完成安装');
-        const sourceHome = path.dirname(launcher);
-        if (!isInside(extractDir, sourceHome) || isInside(sourceHome, installDir)) throw new Error('安装包目录校验失败');
-        fs.mkdirSync(installDir, { recursive: true });
-        fs.cpSync(sourceHome, installDir, { recursive: true, force: true });
-        const installedLauncher = findFile(installDir, ['launcher.bat', 'start.bat', 'snowluma.bat']);
-        if (!installedLauncher) throw new Error('安装文件复制后未找到 launcher.bat');
-        await persistSnowLumaConfig(installDir, installedLauncher);
-        await detectAll({ force: true });
-        setState('snowluma', { status: 'stopped', installed: true, homeDir: installDir, launcherPath: installedLauncher, installDir, lastError: '' });
-        push('snowluma', `SnowLuma 安装完成：${installDir}`);
-        return publicSnapshot(state.snowluma);
-      } catch (error) {
-        setState('snowluma', { status: 'failed', installed: false, lastError: asText(error?.message ?? error) });
-        push('snowluma', `安装失败：${error?.message ?? error}`, 'error');
-        return publicSnapshot(state.snowluma);
-      } finally {
-        try { fs.rmSync(tempRoot, { recursive: true, force: true }); } catch {}
-        installPromise = null;
-      }
-    })();
-    return installPromise;
   }
 
   async function startDsh({ waitMs = 15000 } = {}) {
@@ -1394,7 +830,7 @@ export function createLocalServiceManager({ root, config = {}, onLog = () => {},
   }
 
   function subscribe(service, send) {
-    const item = { service: service === 'snowluma' || service === 'dsh' ? service : 'all', send };
+    const item = { service: service === 'dsh' ? service : 'all', send };
     listeners.add(item);
     if (item.service === 'all') {
       send({ service: 'all', event: 'snapshot', snapshot: snapshot() });
@@ -1405,12 +841,10 @@ export function createLocalServiceManager({ root, config = {}, onLog = () => {},
   }
 
   void detectAll().catch((error) => {
-    for (const service of ['snowluma', 'dsh']) {
-      setState(service, { status: 'failed', lastError: asText(error?.message ?? error), detection: { ...state[service].detection, status: 'failed' } });
-    }
+    setState('dsh', { status: 'failed', lastError: asText(error?.message ?? error), detection: { ...state.dsh.detection, status: 'failed' } });
   });
   // 控制台面板靠 SSE 推送、没有轮询，所以由管理器自身周期性校正就绪状态，
-  // 这样用户在外部启停 SnowLuma/dsh 时面板也能跟上（unref 不影响进程退出）。
+  // 这样用户在外部启停 DSH 时面板也能跟上（unref 不影响进程退出）。
   const readinessTimer = setInterval(() => { void reconcileReadiness(); }, 10000);
   readinessTimer.unref?.();
   return {
@@ -1420,34 +854,9 @@ export function createLocalServiceManager({ root, config = {}, onLog = () => {},
     reconcileReadiness,
     subscribe,
     detectDsh: async () => (await detectDshInstallations()).installations,
-    findSnowLuma: async () => (await detectSnowLuma()).installations,
-    selectSnowLuma: (choice) => selectInstallation('snowluma', choice),
     selectDsh: (choice) => selectInstallation('dsh', choice),
-    installSnowLuma,
-    startSnowLuma,
-    // 「退出 QQ 以便 SnowLuma 重新注入」：只结束 QQ 顶层进程及其子树，绝不按名字模糊查杀其它进程。
-    listQqProcesses: async () => selectTopLevelQqProcesses(await listWindowsProcesses()),
-    quitQqProcesses: () =>
-      quitQqProcesses({
-        listProcesses: listWindowsProcesses,
-        killer: (pid) => execFileAsync('taskkill.exe', ['/pid', String(pid), '/t', '/f'], { windowsHide: true, timeout: 15000 })
-      }),
-    // 「本应用此前启动、现在仍在运行的 SnowLuma」——跨应用重启也能收掉。
-    stopRecordedSnowLuma: () =>
-      stopRecordedSnowLuma({
-        file: snowLumaMarkerFile(repoRoot),
-        clearMarker: () => clearSnowLumaMarker(repoRoot),
-        identify: async (pid) => {
-          const rows = await listWindowsProcesses();
-          const hit = rows.find((row) => Number(row.pid) === Number(pid));
-          return hit ? String(hit.name) : null;
-        },
-        killer: (pid) => execFileAsync('taskkill.exe', ['/pid', String(pid), '/t', '/f'], { windowsHide: true, timeout: 15000 })
-      }),
-    stopSnowLuma: () => stopService('snowluma'),
     startDsh,
     stopDsh: () => stopService('dsh'),
-    getSnowLumaReleasePage: () => SNOWLUMA_RELEASE_PAGE,
     getDshInstallHint: () => DSH_INSTALL_HINT
   };
 }

@@ -4,6 +4,8 @@ import { fileURLToPath } from 'node:url';
 import { isPackagedRuntime } from '../../app-paths.js';
 import { createChannelProcessLink } from './process-link.js';
 import { channelError } from '../delivery-journal.js';
+import { assertOneBotConfigured } from './config.js';
+import { isQqConnectorEnabled } from '../../integrations/tool-policy.js';
 
 export function createQqConnectorHost({ config, dataRoot, stateDir, onMessage, onExit = () => {},
   executable, sourceEntry, ownershipDir, workerMode = '--qq-connector', startParams = {}, onChildRequest, log = () => {} } = {}) {
@@ -14,6 +16,10 @@ export function createQqConnectorHost({ config, dataRoot, stateDir, onMessage, o
   const packaged = executable || isPackagedRuntime();
   const entry = packaged ? null : sourceEntry ?? path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../core-entry.js');
   async function start() {
+    if (workerMode === '--qq-connector') {
+      assertOneBotConfigured(config);
+      if (!isQqConnectorEnabled({ stateDir })) throw channelError('QQ_DISABLED', 'OneBot QQ channel integration is disabled');
+    }
     if (child) return health();
     const env = { ...process.env };
     for (const key of Object.keys(env)) {
@@ -38,9 +44,10 @@ export function createQqConnectorHost({ config, dataRoot, stateDir, onMessage, o
         return onMessage(params);
       } });
     const wireConfig = workerMode === '--qq-connector'
-      ? { snowluma: config.snowluma, allow: config.allow, deny: config.deny,
+      ? { onebot: config.onebot, allow: config.allow, deny: config.deny,
         allowAllWhenEmpty: config.allowAllWhenEmpty, socialV2: config.socialV2, fileSend: config.fileSend }
-      : { ...config, consoleToken: undefined, snowluma: { ...config.snowluma, accessToken: undefined, httpAccessToken: undefined } };
+      : { ...config, consoleToken: undefined, snowluma: undefined,
+        onebot: { ...config.onebot, accessToken: undefined, httpAccessToken: undefined } };
     return link.request('start', { config: wireConfig, ownershipDir, ...startParams }, 20000);
   }
   async function health() {

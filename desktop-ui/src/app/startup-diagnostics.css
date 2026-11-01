@@ -33,7 +33,10 @@
 .diagnostics-feedback-inline { display:inline-flex; flex-wrap:wrap; align-items:center; gap:5px; min-width:0; }
 .diagnostics-feedback-inline small { max-width:380px; }
 .diagnostics-feedback-inline .cm-input { max-width:360px; font-size:11px; }
-.diagnostics-status-bar { position:fixed; z-index:35; right:18px; bottom:16px; display:flex; align-items:center; flex-wrap:wrap; max-width:calc(100vw - 36px); padding:6px 8px 6px 12px; gap:8px; border:1px solid var(--border-strong); border-radius:var(--radius-md); background:var(--surface-elevated); box-shadow:var(--shadow); color:var(--text-secondary); font-size:12px; }
+.harbor-main:has(>.diagnostics-status-bar) { grid-template-rows:auto minmax(0,1fr); }
+.diagnostics-status-bar { display:flex; align-items:center; flex-wrap:wrap; min-width:0; padding:5px 20px; gap:8px; border-bottom:1px solid var(--border); background:var(--background-soft); color:var(--text-secondary); font-size:12px; }
+.diagnostics-status-bar>span { flex:1; min-width:0; }
+.diagnostics-status-bar>.cm-button { flex:none; }
 .diagnostics-status-bar>svg { color:var(--warning); }
 .diagnostics-settings-entry { margin-top:18px; display:flex; flex-wrap:wrap; gap:8px; }
 @media(max-width:760px) { .diagnostics-blocked-content{padding:22px 16px;} .diagnostics-blocked h1{font-size:22px;} .diagnostics-heading-icon{width:36px;height:36px;} .diagnostics-copy{flex-wrap:wrap;} .diagnostics-copy label{flex-basis:100%;} }
