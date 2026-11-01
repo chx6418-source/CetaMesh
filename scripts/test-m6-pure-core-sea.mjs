@@ -8,12 +8,13 @@ import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { writeJsonAtomic } from '../src/storage/json-file.js';
+import { createSuiteSandbox, finalizeSuiteSandbox } from '../src/testing/suite-sandbox.js';
 
 const exe = path.resolve(process.env.WHALEBRIDGE_DIST_DIR ?? path.join(import.meta.dirname, '../dist/core'), 'WhaleBridgeCore.exe');
-const root = fs.mkdtempSync(path.join(path.resolve(import.meta.dirname, '..'), 'cetamesh-m6-sea-'));
+const sandbox = createSuiteSandbox({ suiteId: 'm6-pure-core-sea' }), root = sandbox.root;
 const token = crypto.randomBytes(32).toString('hex');
 const pipe = `\\\\.\\pipe\\CetaMesh-M6-${crypto.randomUUID()}`;
-let core, modelCalls = 0;
+let core, modelCalls = 0, failed = true;
 const provider = http.createServer(async (req, res) => {
   for await (const part of req) { void part; }
   modelCalls++;
@@ -123,11 +124,11 @@ try {
   assert.equal(fs.readFileSync(social, 'utf8'), '{synthetic damaged social');
   assert.equal((await rpc('channel.qq.health')).ready, false);
   console.log('VERIFIED_RELEASE_INTEGRATION M6 SEA/Owner IPC + synthetic streaming Chat + Agent none + Task/Memory/Workspace restart + history after 10 seconds');
+  failed = false;
 } catch (error) {
   console.error('M6 failure diagnostics', JSON.stringify(await rpc('ui.diagnostics.status').catch(() => null)));
   throw error;
 } finally {
   await stop(); provider.closeAllConnections(); await new Promise(resolve => provider.close(resolve));
-  if (!path.basename(root).startsWith('cetamesh-m6-sea-') || path.dirname(root) !== path.resolve(import.meta.dirname, '..')) throw new Error('fixture cleanup boundary');
-  fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  finalizeSuiteSandbox({ sandbox, failed });
 }
