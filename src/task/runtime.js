@@ -573,7 +573,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     });
   }
 
-  function list({ status, statuses, workspaceId, onlyNeedsAttention, query, limit } = {}) {
+  function list({ status, statuses, workspaceId, onlyNeedsAttention, query, limit, offset } = {}) {
     let rows = store.listAll();
     if (status !== undefined && status !== null) {
       const wanted = normalizeStatus(status);
@@ -602,8 +602,11 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
       if (b.updatedAt !== a.updatedAt) return b.updatedAt - a.updatedAt;
       return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
     });
-    const max = Number.isSafeInteger(limit) && limit > 0 ? Math.min(limit, TASK_LIMITS.listItems) : 50;
-    return { tasks: rows.slice(0, max), total: rows.length };
+    const max = Number.isSafeInteger(limit) && limit > 0 ? Math.min(limit, TASK_LIMITS.listItems) : 100;
+    const start = Number.isSafeInteger(offset) && offset > 0 ? offset : 0;
+    const tasks = rows.slice(start, start + max);
+    return { tasks, total: rows.length, offset: start, limit: max,
+      nextOffset: start + tasks.length < rows.length ? start + tasks.length : null };
   }
 
   function update({ id, expectedRev, goal, requirements, workspaceId, currentPhase, progress, note } = {}) {
@@ -1251,15 +1254,18 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
   }
 
   /** 页面聚合查询：一次往返拿到列表 + 计数 + 需要关注的任务。 */
-  function overview({ status, workspaceId, query, limit } = {}) {
-    const listed = list({ status, workspaceId, query, limit });
-    const all = store.listAll();
+  function overview({ status, workspaceId, query, limit, offset } = {}) {
+    const listed = list({ status, workspaceId, query, limit, offset });
+    const all = store.listAll().filter(task => !workspaceId || task.workspaceId === normalizeWorkspaceId(workspaceId));
     const counts = {};
     for (const name of TASK_STATUSES) counts[name] = 0;
     for (const task of all) counts[task.status] = (counts[task.status] || 0) + 1;
     return {
       tasks: listed.tasks,
       total: listed.total,
+      offset: listed.offset,
+      limit: listed.limit,
+      nextOffset: listed.nextOffset,
       counts,
       needsAttention: all.filter((task) => needsAttention(task)).map((task) => task.id),
       attentionStatuses: [...ATTENTION_STATUSES]

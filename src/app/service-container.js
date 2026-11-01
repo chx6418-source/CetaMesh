@@ -86,7 +86,7 @@ export function createCetaMeshServices(options = {}) {
   const workspaceService = createWorkspaceService({
     stateDir,
     getTask:id=>taskService.runtime.get({id}).task,
-    listTasks:query=>taskService.runtime.list(query).tasks,
+    listTasks:query=>taskService.runtime.list(query),
     audit: event => log('Workspace ' + event.action + '（' + (event.workspaceId ?? 'none') + '）')
   });
   let memoryService = null;

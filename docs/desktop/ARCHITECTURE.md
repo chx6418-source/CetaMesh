@@ -77,6 +77,10 @@ recorded in [Agent integration status](AGENT_INTEGRATION_STATUS.md).
 
 ## Task execution and result review
 
+Workspace state ownership, existing execution backends, compatibility approval
+recovery and the Project → Task → Changes flow are documented in
+[Workspace ownership and recovery](WORKSPACE.md).
+
 Task creation can use the Owner's configured default executor. Automatic selection
 uses the configured tool-capable Managed model when no explicit executor preference
 exists; an unavailable explicit preference fails before creating a Task. Native

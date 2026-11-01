@@ -238,9 +238,15 @@ function projectTask(value) {
 
 function projectWorkspace(value) {
   const row = record(value);
+  const git = record(row.git), recovery = record(row.recovery), worktree = record(row.gitWorktree);
+  const opened = Number(row.lastOpenedAt) > 0;
   return {
     id: string(row.id, 128), name: string(row.name ?? row.label, 200),
-    status: string(row.status, 40), lastActivity: scalar(row.updatedAt ?? row.lastActivity)
+    status: recovery.status === 'blocked' ? 'recovery-required' : git.error ? 'unavailable' : git.isRepo === true ? (git.dirty === true ? 'dirty' : 'clean') : 'directory',
+    lastActivity: scalar(opened ? row.lastOpenedAt : row.createdAt), activitySource: opened ? 'opened' : 'created',
+    managedIsolation: row.managedIsolation === true,
+    ...(worktree.taskId ? { taskId: string(worktree.taskId, 128), parentWorkspaceId: string(worktree.parentWorkspaceId, 128) || null } : {}),
+    ...(recovery.status ? { recovery: { status: recovery.status === 'blocked' ? 'blocked' : 'ready', code: string(recovery.code, 100) || null } } : {})
   };
 }
 
@@ -1124,8 +1130,15 @@ export function createDesktopUiService({ services = {}, system = services.system
       return projectSession(result);
     },
     'ui.task.overview': async p => {
-      const result = await task('task.overview', { query: string(p.query, 200), status: string(p.status, 40) || undefined, limit: Math.max(1, Math.min(200, Number(p.limit) || 100)) });
-      return { tasks: (result.tasks ?? []).map(projectTaskWithUsage), total: Number(result.total) || 0, counts: record(result.counts), needsAttention: boundedStrings(result.needsAttention, 200, 128) };
+      const offset = Number(p.offset);
+      const result = await task('task.overview', { query: string(p.query, 200), status: string(p.status, 40) || undefined,
+        workspaceId: string(p.workspaceId, 128) || undefined,
+        offset: Number.isSafeInteger(offset) && offset >= 0 ? offset : 0,
+        limit: Math.max(1, Math.min(100, Math.floor(Number(p.limit) || 100))) });
+      return { tasks: (result.tasks ?? []).map(projectTaskWithUsage), total: Number(result.total) || 0,
+        offset: Number(result.offset) || 0, limit: Number(result.limit) || 100,
+        nextOffset: Number.isSafeInteger(result.nextOffset) ? result.nextOffset : null,
+        counts: record(result.counts), needsAttention: boundedStrings(result.needsAttention, 200, 128) };
     },
     'ui.task.get': async p => ({ task: projectTaskWithUsage((await task('task.get', { id: idParam(p) })).task) }),
     'ui.task.child.create': async p => {
@@ -1512,10 +1525,12 @@ export function createDesktopUiService({ services = {}, system = services.system
       return result.status==='completed'?result.result:result;
     },
     'ui.workspace.version': async p => {
-      const result=await services.workspaceService.execute({method:'workspace.git.status',params:{id:idParam(p)}});
+      const result=await services.workspaceService.execute({method:'workspace.git.status',params:{id:idParam(p),completeFiles:true}});
       const git=record(result.git??result);
+      const changes = Array.isArray(git.entries) ? git.entries : [];
       return {isRepo:git.isRepo===true,branch:string(git.branch,200),headSha:/^[a-f0-9]{40,64}$/i.test(git.headSha??'')?git.headSha:null,
-        dirty:git.dirty===true,changes:(Array.isArray(git.entries)?git.entries:[]).slice(0,100).map(row=>({path:string(row.path,500),status:string(row.x,2)+string(row.y,2),conflict:row.x==='U'||row.y==='U'||['AA','DD'].includes(row.x+row.y)}))};
+        dirty:git.dirty===true,total:changes.length,truncated:changes.length>100,
+        changes:changes.slice(0,100).map(row=>({path:string(row.path,500),status:string(row.x,2)+string(row.y,2),conflict:row.x==='U'||row.y==='U'||['AA','DD'].includes(row.x+row.y)}))};
     },
     'ui.workspace.list': async () => {
       const result = await workspace('workspace.list', {});

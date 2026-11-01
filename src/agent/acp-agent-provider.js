@@ -207,6 +207,7 @@ export function createAcpAgentProvider({descriptor, launch, resolveTaskWorkspace
             return path.join(binding.workspace.root,relative);
           });
           const stage = await createStagingWorkspace({taskId,workspaceId,attemptId:binding.task.attempts?.at(-1)?.provider===policy.id?binding.task.attempts.at(-1).id:null,sourceRoot:binding.workspace.root,stagingRoot,
+            ...(binding.workspace.managedIsolation===true?{trustedSourceRoot:binding.workspace.root}:{}),
             additionalWorkspaceRoots:[...(binding.additionalWorkspaceRoots ?? []),...(Array.isArray(registeredRoots)?registeredRoots.map(item=>typeof item==='string'?item:item?.root).filter(Boolean):[])],
             excludedRoots:[...(binding.excludedRoots ?? []),...excludedRoots,...runtimeExclusions]});
           s = {id:crypto.randomUUID(),taskId,workspaceId,stage,buffer:createAgentEventBuffer(),sequence:0,state:'new',run:null,closed:false};

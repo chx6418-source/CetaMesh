@@ -64,7 +64,12 @@ export function recoverWorkspaceImports(rootReal, { journalDir = workspaceJourna
     const stat = fs.lstatSync(dir);
     if (!stat.isDirectory() || stat.isSymbolicLink()) throw failure('IMPORT_JOURNAL_INVALID', 'Workspace import batch directory is invalid');
     const manifestFile = path.join(dir, 'manifest.json');
-    const manifestStat = fs.lstatSync(manifestFile);
+    let manifestStat;
+    try { manifestStat = fs.lstatSync(manifestFile); }
+    catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      throw failure('IMPORT_JOURNAL_INCOMPLETE', 'Import intent is incomplete; preserve this project and its journal for review');
+    }
     if (!manifestStat.isFile() || manifestStat.isSymbolicLink()) throw failure('IMPORT_JOURNAL_INVALID', 'Workspace import manifest is invalid');
     const manifest = readJsonFile(manifestFile);
     if (manifest?.schemaVersion !== 1 || manifest.root !== rootReal || !Array.isArray(manifest.rows)

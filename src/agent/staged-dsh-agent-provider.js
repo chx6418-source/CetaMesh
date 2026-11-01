@@ -136,6 +136,7 @@ export function createStagedDshAgentProvider({ provider, resolveTaskWorkspace, l
             attemptId:binding.task.attempts?.at(-1)?.provider===provider.id?binding.task.attempts.at(-1).id:null,
             workspaceId: binding.workspace.id,
             sourceRoot: binding.workspace.root,
+            ...(binding.workspace.managedIsolation === true ? { trustedSourceRoot: binding.workspace.root } : {}),
             stagingRoot: stagingRoot ?? path.join(os.tmpdir(), 'CetaMesh', 'agent-staging'),
             additionalWorkspaceRoots: (Array.isArray(roots) ? roots : []).map(row => typeof row === 'string' ? row : row.root),
             excludedRoots

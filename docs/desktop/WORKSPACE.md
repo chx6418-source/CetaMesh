@@ -1,0 +1,123 @@
+# Workspace ownership, execution and recovery
+
+The product flow is **Project → Task → Changes / Review**. Opening an existing
+folder registers a project; it does not initialize Git, copy the project, approve
+tools, or assign an Agent. Advanced Git views expose branches and worktrees.
+The current Harbor Changes and Task review surfaces share `DiffViewer`; new
+features must not introduce another file-review UI or another Workspace runtime.
+
+## Owners and entry points
+
+| State | Authoritative owner | Derived consumers |
+| --- | --- | --- |
+| Project ID, canonical root, settings, recent files, registered Git relations | `src/workspace/registry.js`, existing atomic `workspaces.json` | Workspace service, sidebar, project selectors |
+| Task ID, revision, Workspace binding, status, Attempts, current executor and evidence | `src/task/runtime.js` / `store.js` | Task UI, Agent Broker, Continuity |
+| Actual file contents, HEAD, refs, index and linked worktrees | Filesystem and native Git | `workspace/tools.js`, `git-product.js`, Changes, Continuity |
+| Tool authority, approval, finite grants and logical-operation outcome | Existing Capability Broker / Policy / Approval / dispatch journal | Workspace executors and Agent adapters |
+| Filtered execution input, baseline hashes, output proposal | `workspace/staging.js`, owned by the Provider session lifecycle | Exact approved imports; never authoritative Task completion |
+| Import intent, original bytes and rollback state | `workspace/transaction.js`, existing root-scoped import journal | Startup recovery and Workspace write fence |
+| Checkpoint and handoff references | Existing Continuity runtime | Reconciliation against live facts, not replacement file/Task state |
+
+Trusted Desktop IPC enters `workspace/service.js` or `desktop/ui-service.js`.
+Agent and plugin effects enter Capability Broker. `executeApprovedGit` is an
+in-process executor, not an IPC approval flag. Callers must not create their own
+Workspace stores, trust arbitrary cwd values, or write project files directly to
+avoid these boundaries. Existing IPC names and Workspace/Task IDs remain stable.
+
+## Execution areas: existing backends, one interpretation
+
+An execution area is a Task-bound working directory and baseline, not another
+persistent domain. Use existing Workspace identity, staging `versionContext`,
+Task Attempt/Session, Git relation and operation references together:
+
+1. Resolve the current Task and authorized Workspace. A role description or
+   historical Worktree `taskId` is not an execution principal.
+2. Prepare the existing backend. A non-Git project uses a bounded filtered copy.
+   Git may provide a separately approved linked worktree, sharing Git history.
+   Creating a worktree registers its provenance; it does not silently retarget an
+   existing Task. Changing an executor does not create a new project or Task.
+3. External native adapters currently still use the filtered-copy boundary even
+   for a Git source. It preserves dirty/untracked inputs, excludes credentials and
+   nested projects, and requires separate import approval. Replacing it with HEAD
+   checkout would change these semantics. **A Git worktree is not an OS sandbox.**
+4. An existing managed worktree under private StateDir is recognized only after
+   checking its canonical managed location, registered parent, native Git link,
+   common metadata and backlink. This exempts only that verified source subtree
+   from private-state ancestor exclusions. Detailed exclusions and path/secret
+   checks remain. No renderer or model can supply this trusted provenance.
+5. Collect a change proposal; compare exact bytes to the baseline. Verify live
+   preimages only for changed paths, including their ancestors. Stage output still
+   receives a full bounded scan. No-op turns do not rebase or claim unrelated edits.
+6. Apply exact Broker-approved changes through the existing import transaction.
+   Refresh only accepted baseline outputs; independently verify before delivery.
+7. Unknown native exit, pending import or uncertain operation retains execution
+   ownership/evidence. Do not clean up or replay it just because an Agent changed.
+
+Initial copying and stage scanning remain bounded full operations. The default
+snapshot limits are separate from import limits: the latter still allow at most
+500 changes and 5 MiB per text file. The current text import contract rejects a
+change that cannot survive UTF-8 round-trip without changing bytes. Original
+binary/non-UTF-8 output is retained for explicit review, never silently transcoded.
+
+## Failure and recovery rules
+
+- Import journals are partitioned by canonical source-root hash and validate
+  their recorded root. An incomplete/corrupt journal blocks that project, not
+  every registered project. Original files and unknown journal material remain.
+  An ancestor/descendant registration of the same unresolved tree inherits the
+  fence. Removing an unresolved registration is refused, preserving recovery
+  ownership across restart. The affected project remains inspectable; execution
+  roots and writes are withheld.
+- Valid journal recovery only restores a file whose current hash matches the
+  known original or staged image. A third-party edit requires review. Never
+  overwrite it to make startup succeed. Do not automatically delete unknown
+  worktrees, reset Git, discard unstaged changes, or merge results.
+- The retained legacy `workspace.pending.*` Owner API rechecks live commit policy,
+  exact HEAD/paths/hashes and expiry. Before dispatch it persists `executing` in
+  the existing pending row. Only specific proven pre-execution failures become
+  `failed-no-effect`, requiring another explicit decision. Uncertain failures and
+  interrupted `executing` rows require reconciliation; denial cannot erase them.
+  Unknown/executing commits block overlapping project writes and execution roots.
+  Their project registration cannot be removed. A failed registry replacement
+  rolls back its in-memory pending mutation, so another save cannot erase the
+  surviving disk execution fence.
+  Current product Git actions continue using Capability Broker approvals.
+- Git HEAD/status/diff or required file observation failure cannot certify an
+  unchanged handoff. `consistent:null` means unverified; it is not success.
+  Diff is not applicable to a positively identified non-Git folder. Non-Git
+  execution is supported; automatic non-Git cross-session handoff remains gated
+  until the existing Continuity contract can prove the required state.
+
+Primary error codes: `WORKSPACE_CONFLICT`, `WORKSPACE_RECONCILIATION_REQUIRED`,
+`WORKSPACE_RECOVERY_REQUIRED`, `IMPORT_JOURNAL_INCOMPLETE`,
+`STAGING_ENCODING_UNSUPPORTED`, `STAGING_PATH_DENIED`, `GIT_INDEX_BUSY`,
+`GIT_COMMIT_DENIED`, `PENDING_BUSY`, `PENDING_RECONCILIATION_REQUIRED`.
+Do not convert any of them into successful delivery or unconditional retry.
+
+## Projections, compatibility and maintenance
+
+UI status is derived from real recovery/Git state; timestamps identify whether
+they mean opening or registration. Task lists use bounded server pagination with
+total/next offset; rendered pagination alone is insufficient. Project version
+previews are bounded and disclose total/truncation rather than calling 100 rows
+the total. Managed task directories stay available to their Task and advanced Git
+view, without filling the normal project list.
+
+Keep persisted schema version 1 and prior field meaning. New optional projections
+do not grant authority. Future persistent/wire changes need the compatibility
+review described in `docs/protocol/CP-000-GOVERNANCE.md`; the proposed protocols
+do not silently replace current storage. Recovery diagnostics should expose
+bounded codes and identities, not private file bodies, credentials or raw prompts.
+
+Contract regressions run through root `npm test`: `test-workspace-governance`,
+`test-workspace-staging-governance`, `test-managed-worktree-boundary`,
+`test-workspace-projections`, `test-workspace-scale`, existing Workspace/Git/Task,
+Capability and Continuity suites. The scale suite uses real native Git and
+generated contents; it is distinct from real model/Agent and native UI acceptance.
+
+Product references: [VS Code folders](https://code.visualstudio.com/docs/editing/workspaces/workspaces),
+[GitHub Desktop Changes and History](https://docs.github.com/en/desktop/overview/creating-your-first-repository-using-github-desktop),
+[Codex worktrees](https://developers.openai.com/codex/app/worktrees/),
+[JetBrains worktree management](https://www.jetbrains.com/help/idea/use-git-worktrees.html).
+These inform interaction and ownership; they do not authorize copying cleanup or
+permission policy into CetaMesh.

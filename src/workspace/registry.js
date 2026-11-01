@@ -94,6 +94,26 @@ export function createWorkspaceRegistry({ file, now = () => Date.now() } = {}) {
     };
   }
 
+  function appendActivity({ workspaceId = null, actor = 'user', action, detail = '' }) {
+    state.activity.unshift({ id: newId('ev'), workspaceId, actor: String(actor ?? 'user'),
+      action: String(action ?? ''), detail: String(detail ?? '').slice(0, 300), at: now() });
+    if (state.activity.length > ACTIVITY_LIMIT) state.activity.length = ACTIVITY_LIMIT;
+  }
+
+  function touchFile(entry, { relPath, action }) {
+    const normalized = String(relPath ?? '').split('\\').join('/');
+    entry.recentFiles = [{ path: normalized, action: String(action ?? ''), at: now() },
+      ...entry.recentFiles.filter(item => item.path !== normalized)].slice(0, RECENT_FILES_LIMIT);
+  }
+
+  // Failed atomic replacement must not leave a new in-memory approval state
+  // that an unrelated later save could persist over the retained disk fence.
+  function mutatePending(update) {
+    const previous = state.pending.map(row => ({ ...row }));
+    try { const result = update(); save(); return result; }
+    catch (error) { state.pending = previous; throw error; }
+  }
+
   return {
     /** 登记（或按 root 去重返回）一个工作区。root 会先经边界规范化校验。 */
     create({ name, root, createIfMissing = false, gitWorktree = null }) {
@@ -175,6 +195,9 @@ export function createWorkspaceRegistry({ file, now = () => Date.now() } = {}) {
     /** 从 CetaMesh 清单移除登记。绝不删除用户目录本身。 */
     remove(id) {
       const entry = requireEntry(id);
+      if (state.pending.some(item => item.workspaceId === id && ['executing', 'outcome-unknown'].includes(item.status))) {
+        fail('WORKSPACE_RECOVERY_REQUIRED', '项目仍有执行中或未知结果的提交；核对前不能移除登记和执行记录');
+      }
       state.workspaces = state.workspaces.filter((item) => item.id !== id);
       state.pending = state.pending.filter((item) => item.workspaceId !== id);
       if (state.activeId === id) state.activeId = null;
@@ -222,26 +245,24 @@ export function createWorkspaceRegistry({ file, now = () => Date.now() } = {}) {
     },
 
     recordActivity({ workspaceId = null, actor = 'user', action, detail = '' }) {
-      state.activity.unshift({
-        id: newId('ev'),
-        workspaceId,
-        actor: String(actor ?? 'user'),
-        action: String(action ?? ''),
-        detail: String(detail ?? '').slice(0, 300),
-        at: now()
-      });
-      if (state.activity.length > ACTIVITY_LIMIT) state.activity.length = ACTIVITY_LIMIT;
+      appendActivity({ workspaceId, actor, action, detail });
       save();
     },
 
     recordFileAccess(id, { relPath, action }) {
       const entry = requireEntry(id);
-      const normalized = String(relPath ?? '').split('\\').join('/');
-      entry.recentFiles = [
-        { path: normalized, action: String(action ?? ''), at: now() },
-        ...entry.recentFiles.filter((item) => item.path !== normalized)
-      ].slice(0, RECENT_FILES_LIMIT);
+      touchFile(entry, { relPath, action });
       save();
+    },
+
+    /** Import receipts share one registry commit, without losing per-file events. */
+    recordFileChanges(id, changes, actor = 'capability-broker') {
+      const entry = requireEntry(id);
+      for (const change of changes) {
+        touchFile(entry, { relPath: change.path, action: change.action });
+        appendActivity({ workspaceId: id, actor, action: change.action, detail: change.path });
+      }
+      if (changes.length) save();
     },
 
     recordArtifact(id, { relPath, note = '' }) {
@@ -273,8 +294,7 @@ export function createWorkspaceRegistry({ file, now = () => Date.now() } = {}) {
         createdAt: now(),
         expiresAt: now() + PENDING_TTL_MS
       };
-      state.pending.push(request);
-      save();
+      mutatePending(() => state.pending.push(request));
       return { ...request };
     },
 
@@ -288,18 +308,37 @@ export function createWorkspaceRegistry({ file, now = () => Date.now() } = {}) {
     getPending(id) {
       const request = state.pending.find((item) => item.id === id);
       if (!request) fail('PENDING_NOT_FOUND', `待审批请求不存在：${id}`);
-      if (request.expiresAt <= now()) {
-        state.pending = state.pending.filter((item) => item.id !== id);
-        save();
+      if (request.expiresAt <= now() && !['executing', 'outcome-unknown'].includes(request.status)) {
+        mutatePending(() => { state.pending = state.pending.filter(item => item.id !== id); });
         fail('PENDING_EXPIRED', '待审批请求已过期（10 分钟）');
       }
       return { ...request };
     },
 
+    claimPending(id) {
+      const request = this.getPending(id);
+      if (!['pending', 'failed-no-effect'].includes(request.status ?? 'pending')) {
+        fail('PENDING_RECONCILIATION_REQUIRED', '审批执行结果未确认；请先核对真实 Git 状态，禁止自动重复提交');
+      }
+      return mutatePending(() => {
+        const row = state.pending.find(item => item.id === id);
+        row.status = 'executing'; row.lastAttemptAt = now(); row.attempts = (row.attempts ?? 0) + 1;
+        return { ...row };
+      });
+    },
+
+    recordPendingFailure(id, { noEffect, code }) {
+      const row = state.pending.find(item => item.id === id);
+      if (!row || row.status !== 'executing') fail('PENDING_RECONCILIATION_REQUIRED', '审批执行归属发生变化');
+      mutatePending(() => {
+        row.status = noEffect ? 'failed-no-effect' : 'outcome-unknown';
+        row.errorCode = String(code ?? 'GIT_FAILED').slice(0, 100);
+      });
+    },
+
     takePending(id) {
       const request = this.getPending(id);
-      state.pending = state.pending.filter((item) => item.id !== id);
-      save();
+      mutatePending(() => { state.pending = state.pending.filter(item => item.id !== id); });
       return request;
     }
   };

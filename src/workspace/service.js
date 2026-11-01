@@ -12,7 +12,7 @@
 //   显式 decide 后才执行；'allow' 直通；'deny' 拒绝。审批请求 10 分钟过期。
 // - workspace.remove 只移除登记，绝不删除用户目录。
 
-import { WorkspaceBoundaryError } from './boundary.js';
+import { WorkspaceBoundaryError, isInsideRoot } from './boundary.js';
 import {
   WorkspaceRegistryError,
   workspaceRegistryFile,
@@ -32,6 +32,7 @@ import {
 } from './tools.js';
 import { createGitProduct } from './git-product.js';
 import { recoverWorkspaceImports } from './transaction.js';
+import { isManagedWorktree } from './managed-worktree.js';
 
 const GIT_INFO_TTL_MS = 5000;
 
@@ -40,8 +41,19 @@ export function createWorkspaceService({ stateDir, now = () => Date.now(), audit
     throw new Error('createWorkspaceService 需要 stateDir');
   }
   const registry = createWorkspaceRegistry({ file: workspaceRegistryFile(stateDir), now });
-  for (const workspace of registry.list()) recoverWorkspaceImports(workspace.root);
+  const recovery = new Map();
+  function recoverEntry(workspace) {
+    try { recoverWorkspaceImports(workspace.root); }
+    catch (error) {
+      // A retained import belongs to one project. Preserve its raw evidence and
+      // fence that execution root, rather than taking every other project down.
+      recovery.set(workspace.root, { status: 'blocked', code: 'WORKSPACE_RECOVERY_REQUIRED',
+        causeCode: error?.code === 'ENOENT' ? 'IMPORT_JOURNAL_INCOMPLETE' : String(error?.code ?? 'IMPORT_JOURNAL_INVALID') });
+    }
+  }
+  for (const workspace of registry.list()) recoverEntry(workspace);
   const gitInfoCache = new Map();
+  const pendingExecutions = new Set();
 
   function fail(code, message) {
     throw Object.assign(new Error(message), { code });
@@ -51,6 +63,45 @@ export function createWorkspaceService({ stateDir, now = () => Date.now(), audit
     const id = String(params?.id ?? '').trim() || registry.getActiveId();
     if (!id) fail('WORKSPACE_NOT_SELECTED', '未指定工作区，也没有当前工作区（先 workspace.open）');
     return registry.get(id);
+  }
+
+  function assertWritable(entry, { pendingId = null } = {}) {
+    if (importRecoveryState(entry).status !== 'blocked') recoverEntry(entry);
+    if (importRecoveryState(entry).status === 'blocked' || pendingRecoveryState(entry, pendingId)) fail('WORKSPACE_RECOVERY_REQUIRED', '项目存在执行中或未核实的恢复记录；原文件与日志已保留，核对前暂停执行');
+    return entry;
+  }
+
+  function managedIsolation(entry) {
+    return isManagedWorktree(entry, { stateDir, resolveWorkspace: id => {
+      try { return registry.get(id); } catch { return null; }
+    } });
+  }
+
+  function importRecoveryState(entry) {
+    // Identity changes and alternate ancestor/descendant registrations must not
+    // grant another write path to the same unresolved project files.
+    for (const [root, state] of recovery) {
+      if (isInsideRoot(root, entry.root) || isInsideRoot(entry.root, root)) return state;
+    }
+    return { status: 'ready' };
+  }
+
+  function pendingRecoveryState(entry, ownedId = null) {
+    for (const request of registry.listPending()) {
+      if (!['executing', 'outcome-unknown'].includes(request.status)) continue;
+      if (request.id === ownedId && pendingExecutions.has(ownedId)) continue;
+      let source;
+      try { source = registry.get(request.workspaceId); } catch { continue; }
+      if (isInsideRoot(source.root, entry.root) || isInsideRoot(entry.root, source.root)) {
+        return { status: 'blocked', code: 'WORKSPACE_RECOVERY_REQUIRED', causeCode: 'GIT_COMMIT_RECONCILIATION_REQUIRED' };
+      }
+    }
+    return null;
+  }
+
+  function recoveryState(entry) {
+    const state = importRecoveryState(entry);
+    return state.status === 'blocked' ? state : pendingRecoveryState(entry) ?? state;
   }
 
   function record(ws, actor, action, detail) {
@@ -81,7 +132,11 @@ export function createWorkspaceService({ stateDir, now = () => Date.now(), audit
       lastOpenedAt: entry.lastOpenedAt,
       active: registry.getActiveId() === entry.id,
       settings: entry.settings,
-      git: { isRepo: git.isRepo, branch: git.branch, headSha: git.headSha, dirty: git.dirty }
+      recovery: recoveryState(entry),
+      gitWorktree: entry.gitWorktree ?? null,
+      managedIsolation: managedIsolation(entry),
+      git: { isRepo: git.isRepo, branch: git.branch, headSha: git.headSha, dirty: git.dirty,
+        ...(git.error ? { error: git.error } : {}) }
     };
   }
 
@@ -93,7 +148,9 @@ export function createWorkspaceService({ stateDir, now = () => Date.now(), audit
     return text;
   }
 
-  async function executeCommit(entry, { message, ...selection }) {
+  async function executeCommit(entry, { message, ...selection }, pendingId = null) {
+    assertWritable(entry, { pendingId });
+    if (entry.settings?.policies?.gitCommit === 'deny') fail('GIT_COMMIT_DENIED', '当前工作区策略禁止 commit');
     const result = await gitCommit(entry.root, { message, ...selection });
     record(entry, 'user', 'git.commit', result.committed ? `${message}（${result.sha ?? 'no-sha'}）` : message);
     return result;
@@ -103,7 +160,7 @@ export function createWorkspaceService({ stateDir, now = () => Date.now(), audit
 
   const handlers = {
     // Local read contract for startup; no Git child, file content, audit or recovery.
-    'workspace.health': () => { const rows=registry.list(),active=registry.getActiveId();return {registered:rows.length,activeValid:!active||rows.some(row=>row.id===active)}; },
+    'workspace.health': () => { const rows=registry.list(),active=registry.getActiveId();return {registered:rows.length,activeValid:!active||rows.some(row=>row.id===active),blockedProjects:rows.filter(row=>recoveryState(row).status==='blocked').length}; },
     // ── 管理 ──
     'workspace.create': async (p) => {
       const entry = registry.create({
@@ -111,6 +168,7 @@ export function createWorkspaceService({ stateDir, now = () => Date.now(), audit
         root: p?.root,
         createIfMissing: p?.createIfMissing === true
       });
+      recoverEntry(entry);
       record(entry, 'user', 'create', entry.root);
       return { workspace: await workspaceSummary(entry) };
     },
@@ -136,6 +194,7 @@ export function createWorkspaceService({ stateDir, now = () => Date.now(), audit
 
     'workspace.remove': async (p) => {
       const entry = registry.get(String(p?.id ?? ''));
+      if (recoveryState(entry).status === 'blocked') fail('WORKSPACE_RECOVERY_REQUIRED', '项目恢复尚未确认；保留登记以避免丢失恢复归属');
       const result = registry.remove(entry.id);
       gitInfoCache.delete(entry.id);
       record(entry, 'user', 'remove', `${entry.name}（目录保留）`);
@@ -145,6 +204,18 @@ export function createWorkspaceService({ stateDir, now = () => Date.now(), audit
     'workspace.info': async (p) => {
       const entry = requireWorkspace(p);
       const git = await gitInfo(entry, { refresh: p?.refreshGit === true });
+      let taskRelation = { enabled: false, status: 'unavailable', total: null, tasks: [], note: 'Task service unavailable' };
+      if (typeof listTasks === 'function') {
+        try {
+          const result = await listTasks({ workspaceId: entry.id, limit: 20 });
+          const rows = Array.isArray(result) ? result : result?.tasks ?? [];
+          // The injected runtime can preserve bounded list metadata; old array
+          // adapters remain readable without claiming a complete project total.
+          taskRelation = { enabled: true, status: 'available',
+            total: Number.isSafeInteger(result?.total) ? result.total : rows.length < 20 ? rows.length : null,
+            tasks: rows.slice(0, 20).map(row => ({ id: row.id, goal: row.goal, status: row.status })) };
+        } catch { taskRelation = { enabled: true, status: 'unknown', total: null, tasks: [], code: 'TASK_RELATION_UNAVAILABLE' }; }
+      }
       return {
         workspace: await workspaceSummary(entry),
         git,
@@ -152,7 +223,7 @@ export function createWorkspaceService({ stateDir, now = () => Date.now(), audit
         artifacts: entry.artifacts ?? [],
         activity: registry.listActivity({ workspaceId: entry.id, limit: 30 }),
         pending: registry.listPending({ workspaceId: entry.id }),
-        taskRelation: { enabled: false, note: 'Persistent Task 未启用（所有者冻结中），暂无任务关联' }
+        taskRelation
       };
     },
 
@@ -173,7 +244,7 @@ export function createWorkspaceService({ stateDir, now = () => Date.now(), audit
     },
 
     'workspace.write': async (p) => {
-      const entry = requireWorkspace(p);
+      const entry = assertWritable(requireWorkspace(p));
       const relPath = normalizeRelPath(p);
       const result = writeFile(entry.root, relPath, p?.content, { createDirs: p?.createDirs !== false,
         append: p?.append === true, expectedHash: p?.expectedHash });
@@ -205,7 +276,9 @@ export function createWorkspaceService({ stateDir, now = () => Date.now(), audit
 
     'workspace.git.status': async (p) => {
       const entry = requireWorkspace(p);
-      const git = await gitInfo(entry, { refresh: true });
+      const git = p?.completeFiles === true
+        ? await gitStatus(entry.root, { completeFiles: true })
+        : await gitInfo(entry, { refresh: true });
       record(entry, String(p?.actor ?? 'user'), 'git.status', '');
       return { git };
     },
@@ -218,7 +291,7 @@ export function createWorkspaceService({ stateDir, now = () => Date.now(), audit
     },
 
     'workspace.git.commit': async (p) => {
-      const entry = requireWorkspace(p);
+      const entry = assertWritable(requireWorkspace(p));
       const message = String(p?.message ?? '').trim();
       if (!message) fail('COMMIT_MESSAGE_REQUIRED', 'commit 需要提交信息');
       const policy = entry.settings?.policies?.gitCommit ?? 'approval';
@@ -242,7 +315,7 @@ export function createWorkspaceService({ stateDir, now = () => Date.now(), audit
     },
 
     'workspace.test.run': async (p) => {
-      const entry = requireWorkspace(p);
+      const entry = assertWritable(requireWorkspace(p));
       const result = await testRun(entry.root, entry.settings?.testCommand, { timeoutMs: p?.timeoutMs });
       record(entry, String(p?.actor ?? 'user'), 'test.run', `exit=${result.exitCode}`);
       return result;
@@ -254,14 +327,36 @@ export function createWorkspaceService({ stateDir, now = () => Date.now(), audit
     },
 
     'workspace.pending.decide': async (p) => {
-      const request = registry.takePending(String(p?.requestId ?? ''));
-      const entry = registry.get(request.workspaceId);
+      const id = String(p?.requestId ?? '');
+      if (pendingExecutions.has(id)) fail('PENDING_BUSY', '该审批已在执行，请等待当前结果');
+      const request = registry.getPending(id);
+      if (!['pending', 'failed-no-effect'].includes(request.status ?? 'pending')) {
+        fail('PENDING_RECONCILIATION_REQUIRED', '审批执行结果未确认；核对 Git 状态前不能重放或丢弃记录');
+      }
+      const entry = assertWritable(registry.get(request.workspaceId));
       if (p?.approve !== true) {
+        registry.takePending(id);
         record(entry, 'user', 'git.commit.rejected', request.message);
         return { status: 'rejected', requestId: request.id };
       }
-      const result = await executeCommit(entry, request);
-      return { status: 'committed', requestId: request.id, ...result };
+      if (entry.settings?.policies?.gitCommit === 'deny') fail('GIT_COMMIT_DENIED', '当前工作区策略禁止 commit');
+      registry.claimPending(id); // Durable intent before any Git side effect.
+      pendingExecutions.add(id);
+      try {
+        const result = await executeCommit(entry, request, id);
+        registry.takePending(id);
+        gitInfoCache.delete(entry.id);
+        return { status: 'committed', requestId: request.id, ...result };
+      } catch (error) {
+        // These errors originate before update-ref. Any other failure could have
+        // lost a successful response and must retain its execution fence.
+        const noEffect = ['GIT_INDEX_BUSY', 'GIT_HEAD_CHANGED', 'GIT_OPERATION_IN_PROGRESS',
+          'WORKSPACE_CONFLICT', 'GIT_NOT_REPOSITORY', 'GIT_COMMIT_DENIED', 'COMMIT_PATHS_REQUIRED',
+          'COMMIT_BASELINE_REQUIRED', 'COMMIT_HASHES_REQUIRED', 'COMMIT_PATH_INVALID', 'COMMIT_ROOT_REQUIRED',
+          'COMMIT_MESSAGE_REQUIRED', 'COMMIT_MESSAGE_TOO_LONG'].includes(error?.code);
+        registry.recordPendingFailure(id, { noEffect, code: error?.code });
+        throw Object.assign(error, { effectStatus: noEffect ? 'no-effect' : 'unknown', requestId: id });
+      } finally { pendingExecutions.delete(id); }
     }
   };
 
@@ -272,12 +367,17 @@ export function createWorkspaceService({ stateDir, now = () => Date.now(), audit
   }
 
   function applyChanges({ id, changes, actor = 'capability-broker' } = {}) {
-    const entry = requireWorkspace({ id });
-    const result = applyWorkspaceChanges(entry.root, changes);
-    for (const change of result.changes) {
-      registry.recordFileAccess(entry.id, { relPath: change.path, action: change.action });
-      record(entry, String(actor), change.action, change.path);
+    const entry = assertWritable(requireWorkspace({ id }));
+    let result;
+    try { result = applyWorkspaceChanges(entry.root, changes); }
+    catch (error) {
+      if (['WORKSPACE_RECOVERY_REQUIRED', 'IMPORT_JOURNAL_INVALID', 'IMPORT_JOURNAL_INCOMPLETE'].includes(error?.code)) {
+        recovery.set(entry.root, { status: 'blocked', code: 'WORKSPACE_RECOVERY_REQUIRED', causeCode: error.code });
+      }
+      throw error;
     }
+    registry.recordFileChanges(entry.id, result.changes, String(actor));
+    for (const change of result.changes) audit({ action: `workspace.${change.action}`, workspaceId: entry.id, actor: String(actor) });
     return { workspaceId: entry.id, ...result };
   }
 
@@ -290,7 +390,8 @@ export function createWorkspaceService({ stateDir, now = () => Date.now(), audit
     if (!text) return null;
     try {
       const entry = registry.get(text);
-      return { id: entry.id, name: entry.name, root: entry.root };
+      if (recoveryState(entry).status === 'blocked') return null;
+      return { id: entry.id, name: entry.name, root: entry.root, managedIsolation: managedIsolation(entry) };
     } catch {
       return null;
     }
@@ -299,7 +400,7 @@ export function createWorkspaceService({ stateDir, now = () => Date.now(), audit
   // Trusted in-process entry only. Transport approval flags cannot call this path.
   async function executeApprovedGit({ method, params = {} } = {}) {
     if (method === 'workspace.git.commit') {
-      const entry = requireWorkspace(params);
+      const entry = assertWritable(requireWorkspace(params));
       if (entry.settings?.policies?.gitCommit === 'deny') fail('GIT_COMMIT_DENIED', 'Workspace policy denies commits');
       const selection = await prepareGitCommit(entry.root, params);
       const result = await executeCommit(entry, { message: params.message, ...selection });
@@ -307,7 +408,7 @@ export function createWorkspaceService({ stateDir, now = () => Date.now(), audit
       return { status: 'committed', ...result };
     }
     if (!['workspace.git.branch.create', 'workspace.git.worktree.create'].includes(method)) fail('METHOD_NOT_FOUND', 'Unknown approved Git effect');
-    return gitProduct.create(requireWorkspace(params), params, { worktree: method === 'workspace.git.worktree.create' });
+    return gitProduct.create(assertWritable(requireWorkspace(params)), params, { worktree: method === 'workspace.git.worktree.create' });
   }
 
   return { execute, executeApprovedGit, describeWorkspace, applyChanges };

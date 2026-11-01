@@ -43,6 +43,7 @@ async function bundle(root) {
       import {WorkPage,PluginsPage,ChatComposer} from './src/app/HarborApp';
       import {WindowChrome} from './src/app/WindowChrome';import {GitWorkspace} from './src/app/GitWorkspace';import {ForgeTools} from './src/app/ForgeTools';import {WorkspaceSidebar} from './src/app/WorkspaceSidebar';
       const workspace={id:'layout-project',name:'CetaMesh · synthetic-layout-project-with-a-long-project-name',status:'ready',lastActivity:1793404800000};
+      const projectTasks=Array.from({length:105},(_,index)=>({id:'layout-task-'+index,title:'Synthetic project task '+index,goal:'Review project output '+index,status:'queued',workspaceId:workspace.id,rev:1,agent:null,currentAgent:null,agentHistory:[],artifacts:[],children:[],attempts:[],progress:{percent:null,note:''},currentPhase:'',createdAt:1793404800000,updatedAt:1793404800000}));
       const sha='8'.repeat(40),longBranch='codex/layout-'+('long-branch-name-'.repeat(7));
       const entries=Array.from({length:1500},(_,index)=>({x:index%3===0?'M':' ',y:index%3===0?' ':'M',path:'src/'+('long-directory-name/'.repeat(index%5===0?7:1))+'module-'+String(index).padStart(4,'0')+'.ts',conflict:false,commitEligible:true,sha256:'7'.repeat(64)}));
       const overview={workspaceId:workspace.id,git:{isRepo:true,branch:longBranch,headSha:sha,dirty:true,entries},conflicts:[],history:[{sha,parents:['6'.repeat(40)],committedAt:1793404800000,subject:'Synthetic display fixture: preserve bounded review and explicit authorization'}],branches:[{name:longBranch,headSha:sha,current:true,upstream:'origin/'+longBranch,taskId:'task-unavailable',baselineHead:null},{name:'main',headSha:'6'.repeat(40),current:false,upstream:'origin/main',taskId:null,baselineHead:null}],worktrees:[{workspaceId:workspace.id,name:workspace.name,branch:longBranch,headSha:sha,current:true,managed:false,locked:false,prunable:false,taskId:'task-unavailable',parentWorkspaceId:null,baselineHead:null},{workspaceId:null,name:'Unbound external worktree · '+('long-directory-'.repeat(5)),branch:'feature/unbound-external-review',headSha:'6'.repeat(40),current:false,managed:false,locked:true,prunable:true,taskId:null,parentWorkspaceId:null,baselineHead:null}],tasks:[],worktreeRelation:null,truncated:false};
@@ -66,7 +67,7 @@ async function bundle(root) {
         if(method==='ui.mcp.list')return {servers};
         if(method==='ui.approvals.list')return {approvals:[],operations:[],grants:[]};
         if(method==='ui.agent.list')return {agents:[]};
-        if(method==='ui.task.overview')return {tasks:[],total:0,counts:{},needsAttention:[]};
+        if(method==='ui.task.overview'){const tasks=projectTasks.filter(task=>(!params.workspaceId||task.workspaceId===params.workspaceId)&&(!params.status||task.status===params.status)&&(!params.query||task.title.includes(params.query))),offset=params.offset||0,limit=params.limit||100;return {tasks:tasks.slice(offset,offset+limit),total:tasks.length,offset,limit,nextOffset:offset+limit<tasks.length?offset+limit:null,counts:{queued:105},needsAttention:[]};}
         if(method.startsWith('ui.workshop.'))return {proposals:[]};
         if(method==='ui.workspace.list')return {workspaces:[workspace],activeId:workspace.id};
         if(method==='ui.workspace.open')return {activeId:workspace.id,workspace};
@@ -176,7 +177,23 @@ try {
           if(version==='after'&&page==='work'){
             assert.equal(await evaluate('document.querySelectorAll(".git-workspace").length'),0,'default task view contains no inline Git form');
             await click('[role=tablist][aria-label="工作与工作区"] [role=tab]:nth-child(2)');await until('!!document.querySelector(".workspace-card")','actual Workspace section');await measureSection(version,scenario,'workspace-projects');
-            await click('.workspace-card button');await until('document.querySelector("[role=tablist][aria-label=\\"工作与工作区\\"] [role=tab][aria-selected=true]")?.innerText==="Git 工作台"&&document.querySelectorAll(".git-file").length>0','Workspace card opens Git workbench');await measureSection(version,scenario,'workspace-git');
+            await evaluate('Array.from(document.querySelectorAll(".workspace-card button")).find(node=>node.textContent.trim()==="查看任务").click()');
+            await until('document.querySelector("[role=tablist][aria-label=\\"工作与工作区\\"] [role=tab][aria-selected=true]")?.innerText==="任务"&&window.fixtureCalls.some(row=>row.method==="ui.task.overview"&&row.params.workspaceId==="layout-project")','Workspace card opens its project Tasks');
+            assert.equal(await evaluate('document.querySelector("button[aria-label=\\"任务项目范围\\"]").textContent.trim()'), await evaluate('window.fixture.workspace.name'), 'project scope displays the real project name');
+            const taskControls = await evaluate('(()=>{const search=document.querySelector(".work-controls .cm-search").getBoundingClientRect();return [...document.querySelectorAll(".work-controls [role=tab]")].map(node=>{const rect=node.getBoundingClientRect();return {label:node.textContent,left:rect.left,right:rect.right,overlapsSearch:rect.left<search.right&&rect.right>search.left&&rect.top<search.bottom&&rect.bottom>search.top};});})()');
+            assert.ok(taskControls.every(control=>control.left>=0&&control.right<=scenario.width+1&&!control.overlapsSearch), 'project/status/search controls stay readable without overlap: '+JSON.stringify(taskControls));
+            await measureSection(version,scenario,'workspace-tasks');
+            await evaluate('Array.from(document.querySelectorAll("button")).find(node=>node.textContent.trim()==="下一页任务").click()');
+            await until('window.fixtureCalls.some(row=>row.method==="ui.task.overview"&&row.params.offset===50)&&document.querySelector(".task-card h3")?.textContent==="Synthetic project task 50"','project Task second page is fetched');
+            await evaluate('Array.from(document.querySelectorAll("button")).find(node=>node.textContent.trim()==="下一页任务").click()');
+            await until('window.fixtureCalls.some(row=>row.method==="ui.task.overview"&&row.params.offset===100)&&document.querySelectorAll(".task-card").length===5','project Task final page beyond100 is fetched');
+            await measureSection(version,scenario,'workspace-tasks-last-page');
+            assert.ok(await evaluate('document.querySelector("nav[aria-label=\\"全部匹配任务分页\\"]").textContent.includes("101–105 / 105")'), 'Task pager retains the real total on the final page');
+            await evaluate('document.querySelector("nav[aria-label=\\"全部匹配任务分页\\"]").scrollIntoView({block:"center"})');
+            await capture(version,scenario,'workspace-task-pagination');
+            await evaluate('document.querySelector(".page-frame").scrollTop=0');
+            await click('[role=tablist][aria-label="工作与工作区"] [role=tab]:nth-child(2)');await until('!!document.querySelector(".workspace-card")','Workspace cards remain reachable');
+            await evaluate('Array.from(document.querySelectorAll(".workspace-card button")).find(node=>node.textContent.trim()==="Git 工作台").click()');await until('document.querySelector("[role=tablist][aria-label=\\"工作与工作区\\"] [role=tab][aria-selected=true]")?.innerText==="Git 工作台"&&document.querySelectorAll(".git-file").length>0','Workspace card opens Git workbench');await measureSection(version,scenario,'workspace-git');
             await checkGitRefresh(scenario,'production-workpage-git');
           }
           if(version==='after'&&page==='plugins'){

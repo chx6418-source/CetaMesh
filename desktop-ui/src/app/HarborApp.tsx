@@ -11,7 +11,7 @@ import {useChatAttachments} from './ChatAttachments';
 import {AttachmentSettings,HistoryAttachments} from './AttachmentSettings';
 import { createAuthPanelController } from './AgentAuthController';
 import { oneBotClient, type OneBotSettings, type OneBotMigrationPreview } from '../bridge/typed-client';
-import type {ChatContextObservation, ChatModelProvider, ModelUsage} from '../bridge/typed-client';
+import type {ChatContextObservation, ChatModelProvider, ModelUsage, WorkspaceSummary} from '../bridge/typed-client';
 import {ChatModelPicker, ChatUsagePopover, configurationChangeBlocked, supportedReasoning} from './ChatComposerPanels';
 import {ChatActivity} from './ChatActivity';
 export {ToolActivity} from './ChatActivity';
@@ -31,7 +31,7 @@ import { Markdown, VirtualList, type VirtualListAnchor, type VirtualListControll
 import { useUi } from '../stores/ui';
 import { WindowChrome } from './WindowChrome';
 import { activeTaskChildren, TaskDependencyNotice, taskOperationErrorMessage, validateTaskExecution } from './TaskExecutionFeedback';
-import { WorkspaceSidebar } from './WorkspaceSidebar';
+import { WorkspaceSidebar, projectWorkspaceChoices } from './WorkspaceSidebar';
 import { useResponsiveSidebar } from './useResponsiveSidebar';
 import { ReferenceViewerLayout, ReferenceViewerProvider } from './ReferenceViewer';
 import { SettingsLayout } from './SettingsLayout';
@@ -72,6 +72,7 @@ function Heading({ eyebrow, title, description, action }: { eyebrow: string; tit
   return <div className="page-heading"><div><p className="eyebrow">{eyebrow}</p><h1>{title}</h1><p className="page-description">{description}</p></div>{action && <div className="heading-action">{action}</div>}</div>;
 }
 function StatusBadge({ value, available }: { value: string; available?: boolean | null }) {
+  if (['clean', 'dirty', 'directory', 'recovery-required'].includes(value)) return <Badge tone={value === 'recovery-required' ? 'danger' : value === 'dirty' ? 'warning' : 'default'}>{({ clean: '工作区干净', dirty: '有未提交修改', directory: '普通目录', 'recovery-required': '待恢复' } as Record<string, string>)[value]}</Badge>;
   const tone = available === true || ['ready', 'running', 'enabled', 'completed', 'current', 'installed'].includes(value) ? 'success'
     : ['needs-setup', 'connection-pending', 'descriptor-incomplete', 'pending', 'awaiting-review', 'waiting-approval', 'starting', 'start-timeout', 'checking', 'update'].includes(value) ? 'warning'
       : ['unavailable', 'error', 'failed', 'stopped', 'disabled'].includes(value) ? 'danger' : 'default';
@@ -147,7 +148,7 @@ function HarborWorkspaceApp() {
   const [allSessionsError, setAllSessionsError] = useState('');
   const [taskCount, setTaskCount] = useState(0);
   const [reviewTaskId, setReviewTaskId] = useState<string | null>(null);
-  const [workspaces, setWorkspaces] = useState<{ id: string; name: string; status: string; lastActivity: string | number | null }[]>([]);
+  const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(null);
   const [workspaceError, setWorkspaceError] = useState('');
   const [onboarding, setOnboarding] = useState<{ complete: boolean; currentStep: string | null } | null>(null);
@@ -969,13 +970,18 @@ export function ChatContextPanel({ task, memories, approvals, onOpenMemory }: { 
 
 function MemoryPage(){return <MemoryWorkspace/>;}
 
-export function WorkPage({ onExplain, workspaces, activeWorkspaceId, onRefreshWorkspaces, reviewTaskId, onReviewTaskOpened }: { activeWorkspaceId: string | null; workspaces: { id: string; name: string; status: string; lastActivity: string | number | null }[]; onRefreshWorkspaces(): Promise<void>; reviewTaskId: string | null; onReviewTaskOpened(): void; onExplain?(path:string,output:string,workspaceId:string):Promise<void> }) {
+export function WorkPage({ onExplain, workspaces, activeWorkspaceId, onRefreshWorkspaces, reviewTaskId, onReviewTaskOpened }: { activeWorkspaceId: string | null; workspaces: WorkspaceSummary[]; onRefreshWorkspaces(): Promise<void>; reviewTaskId: string | null; onReviewTaskOpened(): void; onExplain?(path:string,output:string,workspaceId:string):Promise<void> }) {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState('');
+  const [taskWorkspaceId, setTaskWorkspaceId] = useState(activeWorkspaceId ?? '');
+  const [taskOffset, setTaskOffset] = useState(0);
+  const [taskTotal, setTaskTotal] = useState(0);
+  const [taskCounts, setTaskCounts] = useState<Record<string, number>>({});
   const [workView, setWorkView] = useState('tasks');
   const [gitWorkspaceId, setGitWorkspaceId] = useState(activeWorkspaceId);
   useEffect(() => { setGitWorkspaceId(activeWorkspaceId); }, [activeWorkspaceId]);
+  useEffect(() => { setTaskWorkspaceId(activeWorkspaceId ?? ''); setTaskOffset(0); setTasks([]); }, [activeWorkspaceId]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [taskOperationError, setTaskOperationError] = useState<{ taskId: string; message: string } | null>(null);
@@ -999,18 +1005,20 @@ export function WorkPage({ onExplain, workspaces, activeWorkspaceId, onRefreshWo
     if (taskSnapshotsRef.current.size > 4096) taskSnapshotsRef.current.delete(taskSnapshotsRef.current.keys().next().value!);
     return newest;
   }, []);
-  taskQueryRef.current = query + '\u0000' + filter;
+  taskQueryRef.current = [query, filter, taskWorkspaceId, taskOffset].join('\u0000');
   selectedTaskIdRef.current = selectedTask?.id ?? '';
   const refresh = useCallback(async (quiet = false) => {
     const request = ++taskRefreshRef.current;
-    const queryKey = query + '\u0000' + filter;
+    const queryKey = [query, filter, taskWorkspaceId, taskOffset].join('\u0000');
     const isCurrent = () => request === taskRefreshRef.current && queryKey === taskQueryRef.current;
     if (!quiet) setLoading(true);
     try {
-      const result = await taskClient.overview(query, filter);
+      const result = await taskClient.overview(query, filter, { workspaceId: taskWorkspaceId || undefined, offset: taskOffset, limit: 50 });
       if (!isCurrent()) return;
+      if (taskOffset > 0 && taskOffset >= result.total) { setTaskOffset(Math.max(0, Math.ceil(result.total / 50) - 1) * 50); setTasks([]); return; }
       const snapshots = result.tasks.map(rememberTask);
       setTasks(snapshots);
+      setTaskTotal(result.total); setTaskCounts(result.counts);
       const selectedId = selectedTaskIdRef.current;
       const navigation = taskNavigationRef.current;
       if (selectedId) {
@@ -1029,7 +1037,7 @@ export function WorkPage({ onExplain, workspaces, activeWorkspaceId, onRefreshWo
     }
     catch (cause) { if (isCurrent()) setError(messageOf(cause)); }
     finally { if (isCurrent()) setLoading(false); }
-  }, [query, filter, rememberTask]);
+  }, [query, filter, taskWorkspaceId, taskOffset, rememberTask]);
   useEffect(() => { void refresh(); return () => { taskRefreshRef.current += 1; }; }, [refresh]);
   useEffect(() => {
     if (!reviewTaskId) return;
@@ -1182,21 +1190,26 @@ export function WorkPage({ onExplain, workspaces, activeWorkspaceId, onRefreshWo
     } catch (cause) { setWorkspaceError(messageOf(cause)); }
     finally { setWorkspaceBusy(false); }
   }
-  const counts = useMemo(() => ({ all: tasks.length, working: tasks.filter(task => ['working', 'running'].includes(task.status)).length, waiting: tasks.filter(task => task.status.includes('waiting')).length, completed: tasks.filter(task => task.status === 'completed').length }), [tasks]);
+  const projectWorkspaces = projectWorkspaceChoices(workspaces, [activeWorkspaceId, taskWorkspaceId]);
+  const counts = { all: Object.keys(taskCounts).length ? Object.values(taskCounts).reduce((sum, value) => sum + value, 0) : taskTotal,
+    working: taskCounts.running ?? tasks.filter(task => task.status === 'running').length,
+    waiting: taskCounts.waiting ?? tasks.filter(task => task.status === 'waiting').length,
+    completed: taskCounts.completed ?? tasks.filter(task => task.status === 'completed').length };
   return <div className={`content-page work-page work-view-${workView}`}>{workView !== 'git' && <Heading eyebrow="WORKSPACE" title={workView === 'workspaces' ? '工作区' : '工作'} description="查看跨会话任务的进展、负责人和下一步。" action={<Button icon="add" variant="primary" onClick={beginCreateTask}>新建任务</Button>} />}
     <Tabs label="工作与工作区" selected={workView} onChange={setWorkView} items={[{id:'tasks',label:'任务'},{id:'workspaces',label:'工作区'},{id:'git',label:'Git 工作台'}]} />
     {workView === 'tasks' && <>
     {error && <ErrorNotice error={error} onRetry={() => void refresh()} />}
-    <div className="row between work-controls"><Tabs items={[{ id: '', label: `全部 ${counts.all}` }, { id: 'running', label: `运行中 ${counts.working}` }, { id: 'waiting', label: `待处理 ${counts.waiting}` }, { id: 'completed', label: `已完成 ${counts.completed}` }]} selected={filter} onChange={setFilter} label="按任务状态筛选" /><SearchInput label="搜索任务" placeholder="搜索任务" value={query} onChange={event => setQuery(event.target.value)} /></div>
-    {loading && !tasks.length ? <LoadingState label="正在读取任务…" /> : tasks.length ? <WorkTaskList key={query + '|' + filter} tasks={tasks} workspaces={workspaces} providers={handoffProviders} historyInitiallyOpen={Boolean(query || filter)} onOpen={task => void openTask(task)} onAction={(task, action) => void taskAction(task, action)} /> : !error && <EmptyNotice icon="work" title={query || filter ? '没有匹配的任务' : '还没有任务'} detail="你可以在这里创建任务并查看 Core 与 Agent 的执行进度。" action={<Button variant="primary" icon="add" onClick={beginCreateTask}>新建任务</Button>} />}
+    <div className="row between work-controls" aria-busy={loading}><Select label="任务项目范围" value={taskWorkspaceId} onChange={event => { setTaskWorkspaceId(event.target.value); setTaskOffset(0); setTasks([]); }}><option value="">全部任务</option>{projectWorkspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{workspace.name + (workspace.managedIsolation ? ' · 任务隔离目录' : '') + (workspace.recovery?.status === 'blocked' ? ' · 待恢复' : '')}</option>)}</Select><Tabs items={[{ id: '', label: `全部 ${loading ? '…' : counts.all}` }, { id: 'running', label: `运行中 ${loading ? '…' : counts.working}` }, { id: 'waiting', label: `待处理 ${loading ? '…' : counts.waiting}` }, { id: 'completed', label: `已完成 ${loading ? '…' : counts.completed}` }]} selected={filter} onChange={value => { setFilter(value); setTaskOffset(0); setTasks([]); }} label="按任务状态筛选" /><SearchInput label="搜索任务" placeholder="搜索任务" value={query} onChange={event => { setQuery(event.target.value); setTaskOffset(0); setTasks([]); }} /></div>
+    {loading && !tasks.length ? <LoadingState label="正在读取任务…" /> : tasks.length ? <WorkTaskList key={[query, filter, taskWorkspaceId, taskOffset].join('|')} tasks={tasks} workspaces={workspaces} providers={handoffProviders} historyInitiallyOpen={Boolean(query || filter || taskOffset)} onOpen={task => void openTask(task)} onAction={(task, action) => void taskAction(task, action)} /> : !error && <EmptyNotice icon="work" title={query || filter ? '没有匹配的任务' : '还没有任务'} detail="你可以在这里创建任务并查看 Core 与 Agent 的执行进度。" action={<Button variant="primary" icon="add" onClick={beginCreateTask}>新建任务</Button>} />}
+    {taskTotal > 50 && <nav className="git-pagination" aria-label="全部匹配任务分页"><Button compact disabled={loading || !taskOffset} onClick={() => { setTaskOffset(Math.max(0, taskOffset - 50)); setTasks([]); }}>上一页任务</Button><small>{loading ? '正在读取任务…' : `${taskOffset + 1}–${Math.min(taskOffset + tasks.length, taskTotal)} / ${taskTotal}`}</small><Button compact disabled={loading || taskOffset + 50 >= taskTotal} onClick={() => { setTaskOffset(taskOffset + 50); setTasks([]); }}>下一页任务</Button></nav>}
     <WorkshopInbox providers={handoffProviders} />
     </>}
     {workView === 'workspaces' && <>
     <div className="section-heading page-section-heading"><h2>项目工作区</h2><div className="row"><Input aria-label="工作区名称" placeholder="工作区名称（可选）" value={workspaceName} onChange={event => setWorkspaceName(event.target.value)} /><Button compact icon="add" onClick={() => void addWorkspace()} disabled={workspaceBusy}>{workspaceBusy ? '添加中…' : '添加工作区'}</Button></div></div>
-    {workspaceError && <ErrorNotice error={workspaceError} />}{workspaces.length ? <div className="workspace-grid">{workspaces.map(workspace => <Card className="workspace-card" key={workspace.id}><div className="workspace-badge">CM</div><div className="workspace-card-body"><strong>{workspace.name}</strong><p>{workspace.status} · 最近活动 {relativeLabel(workspace.lastActivity)}</p></div><StatusBadge value={workspace.status} /><Button compact icon="code" disabled={workspaceBusy} onClick={() => { void (async () => { setWorkspaceError(''); setWorkspaceBusy(true); try { await workspaceClient.open(workspace.id); await onRefreshWorkspaces(); setGitWorkspaceId(workspace.id); setWorkView('git'); } catch (cause) { setWorkspaceError(messageOf(cause)); } finally { setWorkspaceBusy(false); } })(); }}>Git 工作台</Button></Card>)}</div> : <Surface className="workspace-empty"><p className="muted">尚未登记工作区。添加工作区时会使用 Windows 原生文件夹选择器。</p></Surface>}
+    {workspaceError && <ErrorNotice error={workspaceError} />}{projectWorkspaces.length ? <div className="workspace-grid">{projectWorkspaces.map(workspace => <Card className="workspace-card" key={workspace.id}><div className="workspace-badge">CM</div><div className="workspace-card-body"><strong>{workspace.name}</strong><p>{workspace.managedIsolation ? '任务隔离目录' : '本地项目'} · {workspace.activitySource === 'opened' ? '最近打开' : '登记于'} {relativeLabel(workspace.lastActivity)}</p></div><StatusBadge value={workspace.status} /><Button compact disabled={workspaceBusy} onClick={() => { setTaskWorkspaceId(workspace.id); setTaskOffset(0); setTasks([]); setWorkView('tasks'); }}>查看任务</Button><Button compact icon="code" disabled={workspaceBusy} onClick={() => { void (async () => { setWorkspaceError(''); setWorkspaceBusy(true); try { await workspaceClient.open(workspace.id); await onRefreshWorkspaces(); setGitWorkspaceId(workspace.id); setWorkView('git'); } catch (cause) { setWorkspaceError(messageOf(cause)); } finally { setWorkspaceBusy(false); } })(); }}>Git 工作台</Button></Card>)}</div> : <Surface className="workspace-empty"><p className="muted">尚未登记工作区。添加工作区时会使用 Windows 原生文件夹选择器。</p></Surface>}
     </>}
     {workView === 'git' && <GitWorkspace onExplain={onExplain} call={productToolsClient.call} workspaces={workspaces} activeWorkspaceId={gitWorkspaceId} onWorkspaceChanged={onRefreshWorkspaces} onOpenTask={id => { setWorkView('tasks'); void openRelatedTask(id); }} />}
-    <Sheet open={taskSheet} title="新建任务" onClose={() => {taskNavigationRef.current+=1;setTaskSheet(false);}}><TaskCreateForm key={taskCreateEpoch} activeWorkspaceId={activeWorkspaceId} workspaces={workspaces} providers={handoffProviders} onCreated={task=>showCreatedTask(task,taskCreateEpoch)} /></Sheet>
+    <Sheet open={taskSheet} title="新建任务" onClose={() => {taskNavigationRef.current+=1;setTaskSheet(false);}}><TaskCreateForm key={taskCreateEpoch} activeWorkspaceId={taskWorkspaceId || activeWorkspaceId} workspaces={projectWorkspaces} providers={handoffProviders} onCreated={task=>showCreatedTask(task,taskCreateEpoch)} /></Sheet>
     <Sheet open={Boolean(selectedTask)} title={selectedTask ? taskDialogTitle(selectedTask) : '任务详情'} onClose={() => { taskNavigationRef.current += 1; selectedTaskIdRef.current = ''; setSelectedTask(null); }}>{selectedTask && taskOperationError?.taskId === selectedTask.id && <ErrorNotice error={taskOperationError.message} />}{selectedTask && <TaskCollaborationStatus task={selectedTask} />}{selectedTask && <TaskApprovals key={"approvals:"+selectedTask.id} taskId={selectedTask.id} />}{selectedTask && <TaskDetails key={selectedTask.id} task={selectedTask} providers={handoffProviders} onOpenChild={id => void openRelatedTask(id)} onHandoff={provider => void handoffTask(selectedTask, provider)} onAction={action => void taskAction(selectedTask, action)} onStart={provider => void taskAction(selectedTask, 'start', provider)} onReconcile={(summary, instruction, provider) => void reconcileTask(selectedTask, summary, instruction, provider)} onReview={(approve, summary, ids) => void reviewAnalysisChild(selectedTask, approve, summary, ids)} onCreateChild={(goal, scope, kind, replace) => void createReadChild(selectedTask, goal, scope, kind, replace)} onComplete={(summary, reportOnly) => void finishTask(selectedTask, summary, reportOnly)} onVerifyChild={() => void verifyCompletedChild(selectedTask)} />}</Sheet>
   </div>;
 }
@@ -1420,7 +1433,7 @@ function TaskCollaborationSummary({ task, onReview, onCreateChild, onVerifyChild
 function WorkspaceVersion({id,executor,revision}: {id:string;executor:string|null;revision:number|null}) {
  const [version,setVersion]=useState<Awaited<ReturnType<typeof workspaceClient.version>>|null>(null),[error,setError]=useState('');
  useEffect(()=>{let alive=true;setVersion(null);setError('');void workspaceClient.version(id).then(v=>{if(alive){setVersion(v);setError('');}}).catch(e=>{if(alive)setError(messageOf(e));});return()=>{alive=false;};},[id,revision]);
- return <section aria-label="项目版本"><h3>项目版本</h3>{error?<p>{error}</p>:version?<><p>{version.isRepo?(version.headSha?'当前版本 '+version.headSha.slice(0,8):'尚未创建版本'):'普通目录 · 使用文件校验追踪'} · 当前执行者 {executor||'待分配'}</p><p>{version.changes.length} 个变更文件 · {version.changes.some(c=>c.conflict)?'存在版本冲突，需核对':'未发现 Git 索引冲突'}</p><details><summary>查看版本详情</summary><p>{version.branch||'未记录分支'} · {version.headSha||'无 Commit'}</p>{version.changes.map(c=><p key={c.path}>{c.status} · {c.path}</p>)}<p>此处仅显示版本状态；文件导入仍逐项核对 Hash。提交和合并需要独立授权。</p></details></>:<p>正在读取项目版本…</p>}</section>;
+ return <section aria-label="项目版本"><h3>项目版本</h3>{error?<p>{error}</p>:version?<><p>{version.isRepo?(version.headSha?'当前版本 '+version.headSha.slice(0,8):'尚未创建版本'):'普通目录 · 使用文件校验追踪'} · 当前执行者 {executor||'待分配'}</p><p>{version.total ?? version.changes.length} 个变更文件 · {version.changes.some(c=>c.conflict)?'存在版本冲突，需核对':version.truncated?'仅显示部分文件，其余变更仍需核对':'未发现 Git 索引冲突'}</p><details><summary>查看版本详情</summary><p>{version.branch||'未记录分支'} · {version.headSha||'无 Commit'}</p>{version.truncated&&<p>仅显示前 {version.changes.length} 个变更；完整修改可在下方工作区审阅入口或 Git 工作台查看。</p>}{version.changes.map(c=><p key={c.path}>{c.status} · {c.path}</p>)}<p>此处仅显示版本状态；文件导入仍逐项核对 Hash。提交和合并需要独立授权。</p></details></>:<p>正在读取项目版本…</p>}</section>;
 }
 
 function TaskRecoveryEvidence({task}: {task:Task}) {

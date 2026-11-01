@@ -660,6 +660,7 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
           attemptId: binding.task.attempts?.at(-1)?.provider==='codex'?binding.task.attempts.at(-1).id:null,
           workspaceId: binding.workspace.id,
           sourceRoot: binding.workspace.root,
+          ...(binding.workspace.managedIsolation === true ? { trustedSourceRoot: binding.workspace.root } : {}),
           stagingRoot: stagingRoot ?? path.join(os.tmpdir(), 'CetaMesh', 'agent-staging'),
           additionalWorkspaceRoots: (Array.isArray(registeredRoots) ? registeredRoots : []).map((row) => typeof row === 'string' ? row : row.root),
           excludedRoots

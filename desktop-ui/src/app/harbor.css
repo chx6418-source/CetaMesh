@@ -255,7 +255,12 @@
 .agent-summary-row .cm-surface { display: flex; flex-direction: column; gap: 4px; }
 .agent-summary-row strong { color: var(--accent-hover); font-size: 25px; }
 .agent-summary-row span { color: var(--text-muted); font-size: 11px; }
-.work-controls { margin: 17px 0; }
+.work-controls { margin: 17px 0; flex-wrap: wrap; }
+.work-controls > .cm-select { flex: 0 1 260px; min-width: 0; max-width: 100%; }
+.work-controls > .cm-select .cm-select-trigger { overflow-wrap: anywhere; }
+.work-controls > .cm-select .cm-select-trigger > span { min-width: 0; }
+.work-controls > .cm-tabs { max-width: 100%; flex-wrap: wrap; flex-shrink: 0; }
+.work-controls > .cm-search { flex: 1 1 180px; min-width: 0; max-width: 320px; }
 .agent-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); align-items: start; gap: 14px; }
 .agent-card { display: flex; flex-direction: column; gap: 10px; min-width: 0; min-height: 210px; overflow-wrap: anywhere; }
 .agent-card h3, .agent-card p { margin: 0; }

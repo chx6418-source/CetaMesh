@@ -22,10 +22,12 @@ walk(ast); assert.ok(code); assert.ok(createdCode,'new Task completion needs a n
 const deferred = () => { let resolve, reject; const promise = new Promise((a,b) => { resolve=a; reject=b; }); return { promise, resolve, reject }; };
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const task = (rev, percent, id = 'T') => ({ id, rev, status: percent === 100 ? 'completed' : 'running', progress: { percent } });
-function harness(client, initial = [], selected = null) {
-  const state = { tasks: initial, selected, error: '', loading: false };
-  const env = { query: '', filter: '', selectedTaskIdRef: { current: selected?.id ?? '' }, taskNavigationRef: { current: 0 }, taskRefreshRef: { current: 0 }, taskQueryRef: { current: '\u0000' },
+function harness(client, initial = [], selected = null, scope = { workspaceId: '', offset: 0 }) {
+  const state = { tasks: initial, selected, error: '', loading: false, total: 0, counts: {}, offset: scope.offset };
+  const env = { query: '', filter: '', taskWorkspaceId: scope.workspaceId, taskOffset: scope.offset,
+    selectedTaskIdRef: { current: selected?.id ?? '' }, taskNavigationRef: { current: 0 }, taskRefreshRef: { current: 0 }, taskQueryRef: { current: ['', '', scope.workspaceId, scope.offset].join('\u0000') },
     setLoading: v => { state.loading=v; }, setError: v => { state.error=v; },
+    setTaskTotal: v => { state.total=v; }, setTaskCounts: v => { state.counts=v; }, setTaskOffset: v => { state.offset=v; },
     setTasks: v => { state.tasks=typeof v === 'function' ? v(state.tasks) : v; },
     setSelectedTask: v => { state.selected=typeof v === 'function' ? v(state.selected) : v; },
     messageOf: String, taskClient: client };
@@ -54,6 +56,23 @@ for (const next of ['B','']) await check(`late detail cannot override navigation
 });
 await check('late error and query responses do not leak into new filter',async()=>{
   const read=deferred();const h=harness({overview:()=>read.promise});const pending=h.refresh();h.env.taskQueryRef.current='new\u0000running';read.reject(new Error('old query failed'));await pending;assert.equal(h.state.error,'');
+});
+for (const next of [{ workspaceId: 'ws-next', offset: 0 }, { workspaceId: 'ws-first', offset: 50 }]) await check(`late Task overview cannot replace the next ${next.offset ? 'page' : 'project'}`, async () => {
+  const read = deferred();
+  const h = harness({ overview: () => read.promise }, [task(1, 10, 'current')], null, { workspaceId: 'ws-first', offset: 0 });
+  const pending = h.refresh(true);
+  h.env.taskQueryRef.current = ['', '', next.workspaceId, next.offset].join('\u0000');
+  h.state.tasks = [task(2, 20, 'next-selection')];
+  read.resolve({ tasks: [task(3, 30, 'stale')], total: 105, counts: { running: 105 } });
+  await pending;
+  assert.equal(h.state.tasks[0].id, 'next-selection'); assert.equal(h.state.total, 0);
+});
+await check('Task refresh requests the selected project and page and retains the server total', async () => {
+  let requested;
+  const h = harness({ overview: async (query, status, page) => { requested = page; return { tasks: [task(1, 20)], total: 105, counts: { running: 105 } }; } }, [], null, { workspaceId: 'ws-first', offset: 100 });
+  await h.refresh(true);
+  assert.deepEqual(requested, { workspaceId: 'ws-first', offset: 100, limit: 50 });
+  assert.equal(h.state.total, 105); assert.equal(h.state.counts.running, 105); assert.equal(h.state.tasks.length, 1);
 });
 await check('selected task revision cannot regress',async()=>{
   const h=harness({overview:async()=>({tasks:[]}),get:async()=>({task:task(6,0)})},[],task(7,100));await h.refresh(true);assert.equal(h.state.selected.rev,7);
@@ -94,6 +113,25 @@ await check('production CSS closure defines progress track dimensions and fill',
   const seen=new Set(),styles=[];function visit(file) {if(seen.has(file))return;seen.add(file);const content=fs.readFileSync(file,'utf8');if(file.endsWith('.css')) {styles.push(content);return;}const ast=ts.createSourceFile(file,content,ts.ScriptTarget.Latest,true);for(const node of ast.statements){if(!ts.isImportDeclaration(node)||!node.moduleSpecifier?.text.startsWith('.'))continue;const base=path.resolve(path.dirname(file),node.moduleSpecifier.text);const resolved=[base,...['.ts','.tsx','.js','/index.ts','/index.tsx'].map(ext=>base+ext)].find(p=>fs.existsSync(p)&&fs.statSync(p).isFile());if(resolved)visit(resolved);}}
   visit(root+'src/main.tsx');const rules=[];require('postcss').parse(styles.join('\n')).walkRules(rule=>{if(rule.selector.split(',').some(s=>s.trim()==='.progress-track'))rules.push(...rule.nodes.filter(n=>n.type==='decl').map(n=>[n.prop,n.value]));});
   assert.ok(rules.some(([prop,value])=>prop==='height'&&value!=='0'));assert.ok(rules.some(([prop])=>prop==='background'));
+});
+await check('ordinary project navigation retains selected and blocked isolation without deleting registrations', async () => {
+  const React = require('react'), { renderToStaticMarkup } = require('react-dom/server');
+  const { createServer } = await import(pathToFileURL(require.resolve('vite')).href);
+  globalThis.window = { setTimeout, clearTimeout };
+  const vite = await createServer({ configFile: false, root, optimizeDeps: { noDiscovery: true }, server: { middlewareMode: true }, appType: 'custom', logLevel: 'error' });
+  try {
+    const { projectWorkspaceChoices, WorkspaceSidebar } = await vite.ssrLoadModule('/src/app/WorkspaceSidebar.tsx');
+    const workspaces = [
+      { id: 'project', name: 'Owner project', status: 'clean' },
+      { id: 'isolated', name: 'Task isolation', status: 'clean', managedIsolation: true, recovery: { status: 'ready', code: null } },
+      { id: 'blocked', name: 'Recovery isolation', status: 'recovery-required', managedIsolation: true, recovery: { status: 'blocked', code: 'WORKSPACE_RECOVERY_REQUIRED' } }
+    ];
+    assert.deepEqual(projectWorkspaceChoices(workspaces).map(row => row.id), ['project', 'blocked']);
+    assert.deepEqual(projectWorkspaceChoices(workspaces, ['isolated']).map(row => row.id), ['project', 'isolated', 'blocked']);
+    const sidebar = renderToStaticMarkup(React.createElement(WorkspaceSidebar, { page: 'work', workspaces, sessions: [], activeWorkspaceId: 'isolated', activeSessionId: '', taskCount: 0, hostStatus: 'ready', collapsed: false, onToggle() {}, onNavigate() {}, onOpenWorkspace() {}, onOpenSession() {}, onNewSession() {}, onAllSessions() {}, renderSessionActions() { return null; } }));
+    assert.ok(sidebar.includes('Task isolation')); assert.ok(sidebar.includes('Recovery isolation')); assert.ok(sidebar.includes('待恢复'));
+    assert.equal(workspaces.length, 3, 'navigation filtering does not delete registrations');
+  } finally { await vite.close(); delete globalThis.window; }
 });
 assert.equal(failures.length,0,failures.join('; '));
 

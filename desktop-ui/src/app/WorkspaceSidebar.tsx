@@ -1,8 +1,12 @@
 import type { ReactNode } from 'react';
-import type { ChatSession } from '../bridge/typed-client';
+import type { ChatSession, WorkspaceSummary } from '../bridge/typed-client';
 import { Icon, type IconName } from '../components/icons';
 
-type Workspace = { id: string; name: string; status: string };
+type Workspace = Pick<WorkspaceSummary, 'id' | 'name' | 'status' | 'managedIsolation' | 'recovery' | 'taskId'>;
+/** A navigation projection only; selection and Core authorization remain independent. */
+export function projectWorkspaceChoices<T extends Workspace>(workspaces: T[], retainedIds: (string | null | undefined)[] = []) {
+  return workspaces.filter(workspace => !workspace.managedIsolation || workspace.recovery?.status === 'blocked' || retainedIds.includes(workspace.id));
+}
 type NavigationPage = 'chat' | 'work' | 'memory' | 'agents' | 'devices' | 'plugins' | 'settings' | 'about';
 const navigation: { id: NavigationPage; label: string; icon: IconName }[] = [
   { id: 'chat', label: 'Chat', icon: 'chat' }, { id: 'work', label: 'Work', icon: 'work' },
@@ -33,7 +37,8 @@ export function WorkspaceSidebar({ page, workspaces, sessions, activeWorkspaceId
   onAllSessions(): void; renderSessionActions(session: ChatSession): ReactNode;
   onQuickJump?():void;
 }) {
-  const { projects, recent } = groupWorkspaceSessions(workspaces, sessions);
+  const choices = projectWorkspaceChoices(workspaces, [activeWorkspaceId, sessions.find(session => session.id === activeSessionId)?.config.workspaceId]);
+  const { projects, recent } = groupWorkspaceSessions(choices, sessions);
   const connection = hostStatus === 'ready' ? '已连接' : hostStatus === 'checking' ? '正在连接' : '桌面服务离线';
   const railButton = (item: typeof navigation[number]) => <button key={item.id} type="button"
     className={`nav-item rail-button ${page === item.id ? 'active' : ''}`} aria-label={item.label} title={item.label}
@@ -60,7 +65,7 @@ export function WorkspaceSidebar({ page, workspaces, sessions, activeWorkspaceId
     </div>
     {!collapsed && <section className="workspace-panel" id="workspace-panel" aria-label="工作区与会话">
       <div className="workspace-panel-heading"><details className="workspace-switch"><summary><strong>工作区</strong><Icon name="down" size={14} /></summary>
-        <div className="workspace-menu">{workspaces.map(workspace => <button type="button" key={workspace.id} aria-current={workspace.id === activeWorkspaceId ? 'true' : undefined} onClick={event => { event.currentTarget.closest('details')?.removeAttribute('open'); onOpenWorkspace(workspace.id); }}><strong>{workspace.name}</strong><small>{workspace.status}</small></button>)}
+        <div className="workspace-menu">{choices.map(workspace => <button type="button" key={workspace.id} aria-current={workspace.id === activeWorkspaceId ? 'true' : undefined} onClick={event => { event.currentTarget.closest('details')?.removeAttribute('open'); onOpenWorkspace(workspace.id); }}><strong>{workspace.name}</strong><small>{workspace.recovery?.status === 'blocked' ? '待恢复' : workspace.managedIsolation ? '任务隔离目录' : '项目'}</small></button>)}
           {!workspaces.length && <p>尚未登记工作区</p>}<button type="button" className="workspace-add" onClick={() => onNavigate('work')}>管理工作区</button></div></details>
       </div>
       <button type="button" className="sidebar-new-session" onClick={onNewSession}><Icon name="add" size={18} />新会话</button>
@@ -69,7 +74,7 @@ export function WorkspaceSidebar({ page, workspaces, sessions, activeWorkspaceId
         {sessionError && <p className="sidebar-error" role="alert">{sessionError}</p>}
         <section className="workspace-projects" aria-label="项目"><div className="session-heading"><span className="nav-label">项目</span><button type="button" aria-label="管理工作区" title="管理工作区" onClick={() => onNavigate('work')}><Icon name="add" size={17} /></button></div>
           {projects.map(project => <details className="workspace-project" key={project.id} open={project.id === activeWorkspaceId || project.sessions.some(session => session.id === activeSessionId)}>
-            <summary title={project.name}><Icon name="right" size={13} /><Icon name="folder" size={17} /><strong>{project.name}</strong>{project.id === activeWorkspaceId && <span className="workspace-current-dot" title="当前工作区" />}</summary>
+            <summary title={project.name}><Icon name="right" size={13} /><Icon name="folder" size={17} /><strong>{project.name}</strong>{project.recovery?.status === 'blocked' && <small>待恢复</small>}{project.managedIsolation && <small>任务隔离</small>}{project.id === activeWorkspaceId && <span className="workspace-current-dot" title="当前工作区" />}</summary>
             <div className="workspace-session-list">{project.sessions.map(sessionRow)}{!project.sessions.length && <p className="sidebar-empty">暂无会话</p>}</div>
           </details>)}{!projects.length && <p className="sidebar-empty">在 Work 中添加工作区</p>}
         </section>

@@ -420,7 +420,7 @@ export const chatClient = {
 };
 export const taskClient = {
   inspectRecovery: (id:string) => uiCall<{taskId:string;taskRev:number;operations:{operationId:string;capability:string;status:string;verified:boolean;code:string|null}[];omitted:number}>('ui.task.recovery.inspect',{id}),
-  overview: (query = '', status = '') => uiCall<{ tasks: Task[]; total: number; counts: Record<string, number>; needsAttention: string[] }>('ui.task.overview', { query, status, limit: 100 }),
+  overview: (query = '', status = '', page: { workspaceId?: string; offset?: number; limit?: number } = {}) => uiCall<{ tasks: Task[]; total: number; offset: number; limit: number; nextOffset: number | null; counts: Record<string, number>; needsAttention: string[] }>('ui.task.overview', { query, status, limit: 100, ...page }),
   get: (id: string) => uiCall<{ task: Task }>('ui.task.get', { id }),
     createChild: (input: { parentTaskId: string; expectedParentRev: number; goal: string; requestId: string;
       workspaceId: string; supersedesChildId?: string; contract: { mode: 'read-only'; outputKind: 'analysis' | 'tool';
@@ -540,11 +540,14 @@ export const aboutClient = {
 export const feedbackClient = {
   links: () => uiCall<{ configured: boolean; entries: { id: string; label: string; description: string; kind: 'feedback' | 'security'; url: string | null }[]; securityNotice: string; message: string }>('ui.feedback.links', {})
 };
+export type WorkspaceSummary = { id: string; name: string; status: string; lastActivity: string | number | null;
+  activitySource?: 'opened' | 'created'; managedIsolation?: boolean; taskId?: string; parentWorkspaceId?: string | null;
+  recovery?: { status: 'ready' | 'blocked'; code: string | null } };
 export const workspaceClient = {
-  version:(id:string)=>uiCall<{isRepo:boolean;branch:string;headSha:string|null;dirty:boolean;changes:{path:string;status:string;conflict:boolean}[]}>('ui.workspace.version',{id}),
-  list: () => uiCall<{ workspaces: { id: string; name: string; status: string; lastActivity: string | number | null }[]; activeId: string | null }>('ui.workspace.list', {}),
-  open: (id: string) => uiCall<{ activeId: string | null; workspace: { id: string; name: string; status: string } }>('ui.workspace.open', { id }),
-  create: (name: string, root: string) => uiCall<{ id: string; name: string; status: string }>('ui.workspace.create', { name, root })
+  version:(id:string)=>uiCall<{isRepo:boolean;branch:string;headSha:string|null;dirty:boolean;total:number;truncated:boolean;changes:{path:string;status:string;conflict:boolean}[]}>('ui.workspace.version',{id}),
+  list: () => uiCall<{ workspaces: WorkspaceSummary[]; activeId: string | null }>('ui.workspace.list', {}),
+  open: (id: string) => uiCall<{ activeId: string | null; workspace: WorkspaceSummary }>('ui.workspace.open', { id }),
+  create: (name: string, root: string) => uiCall<WorkspaceSummary>('ui.workspace.create', { name, root })
 };
 export interface L2Grant {id:string;status:string;taskId:string;workspaceId:string;capability:string;resources:string[];expiresAt:number;uses:number;maxUses:number}
 export const approvalClient = {

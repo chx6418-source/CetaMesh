@@ -160,6 +160,21 @@ async function main() {
     assert.equal(unknown.error.code, 'METHOD_NOT_FOUND');
   });
 
+  // A listening pipe and core.ping prove transport, not business readiness.
+  // Keep the real startup gate: only a completed PASS/DEGRADED report admits work.
+  const diagnosticDeadline = Date.now() + 20_000;
+  let startupReport = null;
+  while (Date.now() < diagnosticDeadline) {
+    const message = await call('ui.diagnostics.status');
+    assert.equal(message.ok, true, JSON.stringify(message.error ?? {}));
+    startupReport = message.result?.report;
+    if (startupReport) break;
+    if (worker.exitCode !== null) throw new Error('Core exited before startup diagnostics completed');
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  assert.ok(startupReport, 'Core startup diagnostics must complete within the bounded readiness wait');
+  assert.ok(['PASS', 'DEGRADED'].includes(startupReport.status), 'Core startup blocked: ' + JSON.stringify(startupReport.checks));
+
   await check('workspace.list 初始为空清单', async () => {
     const message = await call('workspace.list');
     assert.equal(message.ok, true, JSON.stringify(message.error ?? {}));
@@ -225,7 +240,9 @@ async function main() {
     assert.ok(Array.isArray(message.result.recentFiles));
     assert.ok(message.result.recentFiles.some((item) => item.path === 'notes/hello.txt'));
     assert.ok(Array.isArray(message.result.pending));
-    assert.equal(message.result.taskRelation.enabled, false);
+    assert.equal(message.result.taskRelation.enabled, true);
+    assert.equal(message.result.taskRelation.status, 'available');
+    assert.equal(message.result.taskRelation.total, 0);
   });
 
   await check('未知 workspace 方法返回 METHOD_NOT_FOUND', async () => {

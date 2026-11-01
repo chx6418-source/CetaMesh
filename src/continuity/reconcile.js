@@ -48,6 +48,7 @@ export function createWorkspaceReconciler({
     if (!entry?.root) return { available: false, reason: 'workspace-not-found', workspaceId: id };
 
     const files = [];
+    const observationErrors = [];
     for (const rel of Array.isArray(relevantFiles) ? relevantFiles.slice(0, 100) : []) {
       const relPath = String(rel ?? '').trim();
       if (!relPath) continue;
@@ -55,11 +56,13 @@ export function createWorkspaceReconciler({
       try {
         exists = fileExists(entry.root, relPath) === true;
       } catch {
-        exists = false; // 检查本身失败按"不存在"记录，但 discrepancy note 会注明来源
+        exists = null;
+        observationErrors.push('FILE_OBSERVATION_FAILED');
       }
       files.push({ path: relPath, exists });
     }
 
+    let diffFailed = false;
     const [status, head, diffSummary] = await Promise.all([
       gitStatus(entry.root).then(
         (value) => ({
@@ -76,7 +79,7 @@ export function createWorkspaceReconciler({
       gitDiffSummary
         ? gitDiffSummary(entry.root).then(
             (value) => (typeof value === 'string' && value.trim() ? value : null),
-            () => null
+            () => { diffFailed = true; return null; }
           )
         : Promise.resolve(null)
     ]);
@@ -90,9 +93,14 @@ export function createWorkspaceReconciler({
     };
     if (status?.error) git.statusError = status.error;
     if (head?.error) git.headError = head.error;
+    if (status?.error) observationErrors.push('GIT_STATUS_OBSERVATION_FAILED');
+    if (head?.error) observationErrors.push('GIT_HEAD_OBSERVATION_FAILED');
+    // A Git diff is not applicable to a positively observed non-Git folder.
+    if (status?.isRepo === true && diffFailed) observationErrors.push('GIT_DIFF_OBSERVATION_FAILED');
 
     return {
-      available: true,
+      available: observationErrors.length === 0,
+      ...(observationErrors.length ? { reason: 'workspace-observation-incomplete', observationErrors } : {}),
       workspaceId: id,
       workspaceName: entry.name ?? null,
       git,
@@ -110,7 +118,8 @@ export function createWorkspaceReconciler({
    */
   function reconcile({ packet, facts } = {}) {
     const checkedAt = now();
-    if (!facts?.available) {
+    if (!facts?.available || facts.git?.statusError || facts.git?.headError
+      || facts.observationErrors?.length || facts.files?.some(file => file.exists === null)) {
       return {
         checkedAt,
         consistent: null,
