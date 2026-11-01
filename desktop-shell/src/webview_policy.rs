@@ -12,6 +12,15 @@ const UI_METHODS: &[&str] = &[
     "ui.diagnostics.status", "ui.diagnostics.run", "ui.diagnostics.history", "ui.diagnostics.read",
     "ui.preview.open", "ui.preview.read", "ui.preview.close",
     "ui.events.next",
+    "ui.simulation.overview", "ui.simulation.role.list", "ui.simulation.role.get", "ui.simulation.role.save",
+    "ui.simulation.role.export", "ui.simulation.role.import", "ui.simulation.role.restore",
+    "ui.simulation.role.searchExamples", "ui.simulation.role.examples.search", "ui.simulation.role.context", "ui.simulation.role.preview",
+    "ui.simulation.legacy.inventory", "ui.simulation.legacy.import",
+    "ui.simulation.room.list", "ui.simulation.room.create", "ui.simulation.room.get", "ui.simulation.room.update", "ui.simulation.room.search",
+    "ui.simulation.message.send", "ui.simulation.discussion.start", "ui.simulation.discussion.pause",
+    "ui.simulation.discussion.cancel", "ui.simulation.discussion.resume", "ui.simulation.discussion.end",
+    "ui.simulation.project.create", "ui.simulation.project.start", "ui.simulation.project.refresh",
+    "ui.simulation.memory.list", "ui.simulation.memory.propose", "ui.simulation.memory.confirm",
     "ui.chat.sessions.list", "ui.chat.sessions.create", "ui.chat.sessions.rename",
     "ui.chat.sessions.archive", "ui.chat.sessions.delete", "ui.chat.history", "ui.chat.status",
     "ui.chat.send", "ui.chat.stop", "ui.chat.retry", "ui.chat.continue", "ui.chat.catalog", "ui.chat.config.set",
@@ -263,6 +272,18 @@ pub fn parse_bridge_request(raw: &str) -> Result<BridgeRequest, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn simulation_requires_exact_owner_ui_methods_and_an_open_startup_gate() {
+        for method in UI_METHODS.iter().filter(|method| method.starts_with("ui.simulation.")) {
+            let request = serde_json::json!({"id":"simulation", "method":method, "params":{}});
+            assert!(parse_bridge_request(&request.to_string()).is_ok());
+            assert!(!allowed_while_blocked(method));
+        }
+        for method in ["simulation.message.send", "ui.simulation.execute", "ui.simulation.role.delete", "ui.simulation.capability.grant"] {
+            let request = serde_json::json!({"id":"simulation", "method":method, "params":{}});
+            assert!(parse_bridge_request(&request.to_string()).is_err());
+        }
+    }
     use super::*;
     #[test]
     fn blocked_execution_preserves_only_cancellation_and_safe_recovery_reads(){

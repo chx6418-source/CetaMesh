@@ -15,6 +15,13 @@
 - **QQ / OneBot is a Channel Adapter, never the Core.** The independently authored OneBot v11 transport lives in `src/channel/qq/onebot-client.js`; the restricted SnowLuma SDK is not embedded. Compatible external gateways are installed independently, and Core services initialize without requiring that channel or DSH readiness.
 - Desktop and Mobile are independent CetaMesh Nodes; Device Mesh is a separate protocol layer.
 
+Native [Simulation](SIMULATION.md) is a lightweight Core room/persona domain over
+the existing Model Runtime, Task, Workspace, Memory and Capability Broker. It
+requires no QQ or DSH process. Fictional roles are context, never execution
+identities; real project work remains in authoritative Tasks and independently
+verified tool evidence. The original Bionic channel and private historical data
+remain separate until an explicitly reviewed migration.
+
 ## External coding runtimes
 
 The existing Agent Broker and Registry own Task/Session/Workspace identity and execution

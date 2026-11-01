@@ -59,9 +59,11 @@ function projectRouting(routing) {
 
 function projectSchema(schema, depth = 0) {
   if (!schema || typeof schema !== 'object' || Array.isArray(schema) || depth > MAX_SCHEMA_DEPTH) return null;
-  const type = ['object', 'array', 'string', 'number', 'integer', 'boolean'].includes(schema.type) ? schema.type : null;
+  const nullable=Array.isArray(schema.type)&&schema.type.length===2&&new Set(schema.type).size===2
+    &&schema.type.includes('null')&&schema.type.some(t=>['string','number','integer','boolean'].includes(t));
+  const type = nullable?schema.type.find(t=>t!=='null'):['object', 'array', 'string', 'number', 'integer', 'boolean'].includes(schema.type) ? schema.type : null;
   if (!type) return null;
-  const output = { type };
+  const output = { type:nullable?[type,'null']:type };
   const description = safeText(schema.description, 160);
   if (description) output.description = description;
 
@@ -102,6 +104,10 @@ function projectManifest(manifest) {
     const description = safeText(item.description, 240);
     const inputSchema = projectSchema(item.inputSchema);
     if (!id || !description || !inputSchema) return [];
+    // Model-facing Agent writes must supply the preimage (or null for a new file).
+    // Owner/transport validation still uses its original descriptor and live hash check.
+    if(id==='filesystem.write'&&Object.hasOwn(inputSchema.properties??{},'expectedHash'))
+      inputSchema.required=[...new Set([...(inputSchema.required??[]),'expectedHash'])].sort();
     const projected = {
       id,
       description,

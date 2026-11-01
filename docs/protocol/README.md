@@ -31,7 +31,7 @@
 | [CP-050](CP-050-TASK-CONTINUITY.md) | Task / Attempt / Checkpoint / Handoff | EXISTING 基础 / ALIGNMENT |
 | [CP-060](CP-060-TRANSPORT-EVENTS.md) | 多传输、取消、背压与事件 | EXISTING framing / NEW 领域投影 |
 | [CP-070](CP-070-MESH.md) | Trust、配对与跨端授权 | EXISTING 配对 / ALIGNMENT |
-| [CP-080](CP-080-SIMULATION-CHANNEL.md) | Simulation 与可选 Channel | NEW 迁移提案；不执行移除/数据迁移 |
+| [CP-080](CP-080-SIMULATION-CHANNEL.md) | Simulation 与可选 Channel | PARTIAL 原生基础；旧渠道与历史数据保留，人工保真待验收 |
 | [CP-090](CP-090-HEALTH-DIAGNOSTICS.md) | 启动门禁、健康、反馈 | EXISTING 本地实现 / NEW 报告投影 |
 
 ## 依赖与所有权
@@ -72,7 +72,7 @@ flowchart TD
 | IPC / Worker / EXISTING | Native Shell/UI → Core；Core → Extension Worker；Provider → 事件消费者 | [IPC](../../src/control/ipc-protocol.js) v1：4-byte LE + UTF-8 JSON，1 MiB；[Worker](../../src/extension/process-transport.js) v1 JSONL，上限 2 MiB；[Agent JSONL](../../src/agent/protocol/json-rpc-transport.js) 保持适配独立 | `test-ipc-protocol`, `test-process-extension-host`, `test-agent-protocol-lifecycle`；CP-001 不是这些 wire 的下一版本 |
 | Pairing / EXISTING | Desktop [Pairing](../../src/mesh/pairing/protocol.js) ↔ Mobile [PairingProtocol](../../apps/mobile/src/protocol/PairingProtocol.ts)；Trust 与本地 grants 分离 | [已实现 Pairing v1.1](UNIFIED_PAIRING_V1_1.md) 权威；保留 `protocol:cetamesh/version:1`、签名字节与 TLS pin。旧 [Mesh envelope](../../src/mesh/protocol.js) 另有字段，不能混用 | `test-mesh-pairing-interop`, `test-monorepo-contract` + Mobile `npm test`；本次不修改两份 golden fixtures；双设备 E2E 当前未重验 |
 | Mobile / EXISTING + ALIGNMENT | Feature → Runtime → Domain/Repo/Provider → Native；SQLite / secure storage 独立 | [Mobile Architecture](../../apps/mobile/docs/architecture/MOBILE_ARCHITECTURE.md)、[Extension manifest](../../apps/mobile/src/domain/extension/ExtensionManifest.ts)；只声明/远程数据插件、Local Only、未知权限 DENY，不复制 Node Process Host | Mobile `npm test` 覆盖本地契约；没有 Android/iOS 原生 Host/设备验收，不能标 STABLE 或宣称 Desktop 插件直接兼容 |
-| Simulation / Channel / NEW | 现有 [Bionic](../../src/bionic/) / [QQ](../../src/channel/qq/)；提案为独立 Persona/Simulation + 可选 Channel | CP-080 的解耦、SnowLuma 下线属于迁移方案；当前仍有 QQ/DSH 依赖，不删除规则、安装、角色资产、令牌或历史记忆 | `test-bionic-product-readiness` 仅现有就绪测试；独立 Simulation / Persona 示例保真迁移未实施，真实 QQ 不在本次验收范围 |
+| Simulation / Channel / PARTIAL | [原生 Simulation](../../src/simulation/) 复用既有模型/Task/Memory；原 [Bionic](../../src/bionic/) / [QQ](../../src/channel/qq/) 保留 | 原生房间不依赖 QQ/DSH；角色全文、版本、范例、有限讨论和真实 Task 桥接已实施。私有历史不自动迁移；不删除旧渠道与资产 | `test-simulation-persona/runtime/project/integration/ui`；实际模型与原生窗口独立验收；完整旧版人格迁移须人工保真确认，见 [实现边界](../desktop/SIMULATION.md) |
 | Diagnostics / EXISTING + NEW | [Bootstrap](../../src/app/bootstrap.js) / Shell → [诊断](../../src/product/startup-diagnostics.js) → UI / 本地报告 | 已有有界检查、BLOCKED/DEGRADED、白名单、执行门禁和反馈；CP-090 的简化 Descriptor/报告为 NEW 投影，不能套到实际报告 | `test-startup-diagnostics`, `test-startup-diagnostics-ipc`；本次不重写已完成 UI/原生能力；真实安装/Defender 安全门禁独立 |
 
 17 类目录的 `baselineStatus` 是来源草案的描述，**不是当前能力注册表**。仅 `catalogVersion/kind/status/categories` 为可校验产品分类资料；发现和调用必须看实际 Descriptor/授权/健康。
@@ -93,4 +93,4 @@ CLI 为只读开发工具，失败退出非零，输入上限 1 MiB；只编译�
 
 ## 后续实施边界
 
-当前可用于规范后续开发；不自动启动下一阶段。组合安装、锁文件和依赖审批应先形成可审查的只读 Preview，再实现受控 Host staging/rollback；通用事件、Memory Backend、App/OS Host 和原生 Simulation 分别评审。权限扩大和历史数据迁移不能因本目录存在而获批。Defender RELEASE HOLD、现有 GitCode/升级端点与独立平台发布边界保持不变。
+当前可用于规范后续开发；不自动启动下一阶段。组合安装、锁文件和依赖审批应先形成可审查的只读 Preview，再实现受控 Host staging/rollback；通用事件、Memory Backend、App/OS Host 分别评审。原生 Simulation 以实现映射中的有限范围为准。权限扩大和历史数据迁移不能因本目录存在而获批。Defender RELEASE HOLD、现有 GitCode/升级端点与独立平台发布边界保持不变。

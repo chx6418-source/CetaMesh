@@ -54,20 +54,24 @@ export function readFile(rootReal, relPath, { maxBytes = 1024 * 1024, offset = 0
   const handle = fs.openSync(real, 'r');
   try {
     const buffer = Buffer.alloc(Math.min(cap, stat.size - offset));
-    fs.readSync(handle, buffer, 0, buffer.length, offset);
+    const bytesRead=fs.readSync(handle, buffer, 0, buffer.length, offset);
+    const after=fs.fstatSync(handle);
+    const expectedHash=offset===0&&!truncated&&bytesRead===stat.size&&after.size===stat.size
+      &&after.mtimeMs===stat.mtimeMs&&after.ino===stat.ino&&after.dev===stat.dev
+      ?crypto.createHash('sha256').update(buffer).digest('hex'):null;
     const header = Buffer.alloc(Math.min(64, stat.size));
     if (offset) fs.readSync(handle, header, 0, header.length, 0);
     const headerText = offset ? decodeWorkspaceText(header, true) : null;
     const decoded = offset && !headerText ? null : decodeWorkspaceText(buffer, truncated, headerText?.encoding ?? null);
     if (decoded === null) {
       return {
-        path: relPath, size: stat.size, offset, nextOffset: truncated ? offset + buffer.length : null, truncated, binary: true,
+        path: relPath, size: stat.size, offset, nextOffset: truncated ? offset + buffer.length : null, truncated, binary: true,expectedHash,
         base64: buffer.toString('base64')
       };
     }
     const nextOffset = offset + decoded.consumed;
     return { path: relPath, size: stat.size, offset, nextOffset: nextOffset < stat.size ? nextOffset : null,
-      truncated: nextOffset < stat.size, binary: false, content: decoded.content, encoding: decoded.encoding };
+      truncated: nextOffset < stat.size, binary: false, content: decoded.content, encoding: decoded.encoding,expectedHash };
   } finally {
     fs.closeSync(handle);
   }

@@ -114,3 +114,11 @@
 - 新增 [CP 协议索引与实现映射](docs/protocol/README.md)，纳入 CP-000..090、17 类产品分类、组合侧车 ADR 和契约草案，统一保持 PROPOSED。这不是新 wire 版本或运行时能力发布。
 - 开发验证入口 `npm run contracts:validate` 与已注册 `test-protocol-proposals` 覆盖 10 份 Schema、26 个原始正反例及图/权限/旧 Manifest 边界。工具只读，不装配子插件、不签发授权、不迁移数据。
 - 现有 Agent/Task/Memory/插件、Desktop/Mobile 配对字节与独立发布保持原事实源；启动诊断已实现部分不重复开发。组合安装、通用 Pub/Sub、App/OS Host、Memory Backend 与原生 Simulation 仍按协议索引记录待实施。Defender RELEASE HOLD 不变。
+
+## Native Simulation 基础与项目协作（2026-11-01）
+
+- 新增原生角色资产库、房间、五类场景和有界发言调度；通过现有 Model Runtime 生成回复，不以 QQ、SnowLuma 或 DSH 为启动前提。Chat 提供普通聊天、仿真聊天和项目协作入口。
+- 角色全文、原始字节 Hash、版本、正反/多轮范例、行为偏好和检索来源受控保存；旧文件与社交历史保持原样，私有会话不自动迁移。Memory 复用房间/角色 Scope，模型推断需确认。
+- 讨论只创建待授权 Task；隔离 Worktree、真实 Managed 执行、测试请求授权与逐次审批、独立结果核验继续由既有系统负责。模型说完成不能使房间显示交付。
+- 实际配置模型已验证单角色多轮、三角色有界讨论和隔离 Git 项目的文件修改/真实测试/Task 核验闭环。原始角色提示投影与新版的同模型自动对照已有证据，完整旧版人格迁移仍待 Owner 人工保真评审。
+- 中断请求不重放，未知用量保留预留与不确定标记；显式恢复只开启新轮次，不抹去旧操作。容量、上下文、价格估计及迁移限制见 [Native Simulation](docs/desktop/SIMULATION.md)。本地开发验证不更新已安装版本，不解除 Defender RELEASE HOLD。

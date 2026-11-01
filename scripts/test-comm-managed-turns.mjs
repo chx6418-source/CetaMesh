@@ -27,8 +27,8 @@ try {
       if(!emitted.has(turn)&&turn==='COMM_TURN_1') {
         emitted.add(turn);
         yield {type:'assistant/tool-calls',data:{toolCalls:[
-          {id:'write-a',capabilityId:'filesystem.write',arguments:JSON.stringify({path:'a.txt',content:'approved A'})},
-          {id:'write-b',capabilityId:'filesystem.write',arguments:JSON.stringify({path:'b.txt',content:'approved B'})}
+          {id:'write-a',capabilityId:'filesystem.write',arguments:JSON.stringify({path:'a.txt',content:'approved A',expectedHash:null})},
+          {id:'write-b',capabilityId:'filesystem.write',arguments:JSON.stringify({path:'b.txt',content:'approved B',expectedHash:null})}
         ]}};
       } else if(!emitted.has(turn)&&turn==='COMM_TURN_2') {
         emitted.add(turn);

@@ -39,6 +39,12 @@ export const CATEGORIES = ['core', 'architecture', 'security', 'runtime', 'integ
 // ── 登记表：scripts/test-*.mjs 的每一个文件都必须出现在这里（或能从 package.json 映射）。
 // requires 的取值见 probeAvailability()；category 取值见 CATEGORIES。
 const REGISTRY = {
+  'test-real-simulation.mjs': {category:'environment',timeoutMs:900000,note:'Opt-in configured real model persona comparison, bounded discussion and actual isolated Managed project execution'},
+  'test-simulation-integration.mjs': {category:'integration',timeoutMs:120000,note:'Actual Core composition, trusted UI and Model Runtime with social connectors absent'},
+  'test-simulation-project.mjs': {category:'security',timeoutMs:120000,note:'Real Task planning, scoped project links and independent evidence without simulated completion'},
+  'test-simulation-persona.mjs': {category:'security',timeoutMs:120000,note:'Full-fidelity versioned persona assets, scoped legacy import and positive/negative example retrieval'},
+  'test-simulation-runtime.mjs': {category:'runtime',timeoutMs:120000,note:'Native model rooms, bounded behavior, interruption, deduplication and recovery without QQ/DSH'},
+  'test-simulation-ui.mjs': {category:'desktop',requires:['ui-motion-live'],timeoutMs:180000,note:'Rendered Harbor Simulation room, role, discussion and Task boundary interactions'},
   'test-protocol-proposals.mjs': {category:'architecture',note:'PROPOSED schemas, bounded composition graphs and existing Manifest/Memory compatibility; no runtime adoption'},
   'test-startup-diagnostics-report-ui.mjs': {category:'desktop',note:'Actual React report attention projection separates faults from unrun cascade checks'},
   'test-startup-diagnostics-ipc.mjs': {category:'security',timeoutMs:120000,note:'Real Core pipes, damaged stores, authentication, protocol and live recheck'},

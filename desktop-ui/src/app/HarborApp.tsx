@@ -1,3 +1,4 @@
+import {SimulationSpace} from './SimulationSpace';
 import {MemoryWorkspace} from './MemoryWorkspace';
 import {QuickJump} from './QuickJump';
 import {DevicesPage} from './DevicesPage';
@@ -127,6 +128,7 @@ export function HarborApp() {
 
 function HarborWorkspaceApp() {
   const [quickOpen,setQuickOpen]=useState(false);
+  const [chatMode,setChatMode]=useState<'chat'|'simulation'|'project'>('chat');
   useEffect(()=>{const key=(event:KeyboardEvent)=>{if((event.ctrlKey||event.metaKey)&&!event.altKey&&event.key.toLowerCase()==='k'){event.preventDefault();setQuickOpen(value=>!value);}};window.addEventListener('keydown',key);return()=>window.removeEventListener('keydown',key);},[]);
   const [params, setParams] = useSearchParams();
   const routePage = isPage(params.get('page')) ? params.get('page') as PageId : 'chat';
@@ -283,7 +285,7 @@ function HarborWorkspaceApp() {
     <div className="harbor-main">
       <ReferenceViewerLayout>
       <main key={page} className={`page-frame page-${page}`}>
-        {page === 'chat' && <ChatPage key={activeSession?.id ?? 'no-session'} session={activeSession} workspaces={workspaces} activeWorkspaceId={activeWorkspaceId} onSessionUpdate={updated => setSessions(current => current.map(item => item.id === updated.id ? updated : item))} onNew={() => createSession()} onNewChat={() => createSession(true)} onOpenMemory={() => navigate('memory')} onReviewTask={id => { setReviewTaskId(id); navigate('work'); }} />}
+        {page === 'chat' && <div className="chat-mode-workspace"><div className="chat-mode-selector"><Tabs label="聊天模式" items={[{id:'chat',label:'普通聊天'},{id:'simulation',label:'仿真聊天'},{id:'project',label:'项目协作'}]} selected={chatMode} onChange={value=>setChatMode(value as 'chat'|'simulation'|'project')}/></div>{chatMode==='chat'?<ChatPage key={activeSession?.id ?? 'no-session'} session={activeSession} workspaces={workspaces} activeWorkspaceId={activeWorkspaceId} onSessionUpdate={updated => setSessions(current => current.map(item => item.id === updated.id ? updated : item))} onNew={() => createSession()} onNewChat={() => createSession(true)} onOpenMemory={() => navigate('memory')} onReviewTask={id => { setReviewTaskId(id); navigate('work'); }} />:<SimulationSpace mode={chatMode} workspaces={workspaces} activeWorkspaceId={activeWorkspaceId} onReviewTask={id=>{setReviewTaskId(id);navigate('work');}}/>}</div>}
         {page === 'work' && <WorkPage onExplain={explainChange} activeWorkspaceId={activeWorkspaceId} workspaces={workspaces} onRefreshWorkspaces={refreshWorkspaces} reviewTaskId={reviewTaskId} onReviewTaskOpened={() => setReviewTaskId(null)} />}
         {page === 'memory' && <MemoryPage />}
         {page === 'agents' && <AgentsPage />}

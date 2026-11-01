@@ -2,7 +2,7 @@
 
 > 项目整合状态：**PROPOSED**（2026-10-31）。本文来自较早公开基线的草案，现状以[协议索引与实现映射](README.md)为准；示例与目标接口不改变现有 wire、授权或持久化格式。
 
-**状态：NEW + MIGRATION；现有 Bionic 与 QQ/SnowLuma 的耦合属待迁移事实，不应宣称本规范已实现。**
+**状态：PARTIAL + MIGRATION。** 原生基础已在 `src/simulation/` 实施，使用既有 Model Runtime、Task、Workspace、Memory 和 Capability Broker；这不使本提案成为新的 wire 协议。原 Bionic/QQ 路径保留，完整历史迁移和人格人工保真验收尚未完成。当前行为及限制见 [Native Simulation](../desktop/SIMULATION.md)。
 
 ## 1. 独立性
 

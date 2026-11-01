@@ -227,6 +227,15 @@ export function createOpenAiCompatibleModelProvider({
     // Explicit profiles are pinned to an endpoint as well as exact model ID.
     const declared = Object.hasOwn(contextProfiles, model) ? contextProfiles[model] : null;
     if (declared && declared.baseUrl === endpoint.href.replace(/\/$/, '')) return { ...declared, status: 'declared' };
+    if(id==='deepseek-official'&&['https://api.deepseek.com','https://api.deepseek.com/v1'].includes(endpoint.href.replace(/\/$/,''))
+      &&['deepseek-flash','deepseek-v4-flash','deepseek-v4-flash-vision-exp'].includes(model)) {
+      // Official endpoint and exact aliases only, reviewed 2026-11-01. 1,000,000 is a
+      // conservative context bound below the advertised 1M; 8K tokens is local default policy.
+      // Explicit caps use max_tokens (official range 1..393216), including reasoning tokens.
+      return {status:'verified',contextWindowTokens:1000000,maxOutputTokens:393216,
+        defaultOutputTokens:8192,outputTokenParameter:'max_tokens',version:'2026-11-01',
+        source:'https://api-docs.deepseek.com/api/create-chat-completion/'};
+    }
     if (id === 'openai' && endpoint.href === 'https://api.openai.com/v1'
       && ['gpt-4o-mini', 'gpt-4o-mini-2024-07-18'].includes(model)) {
       // Verified 2026-10-24; default reservation is local policy, not model capacity.

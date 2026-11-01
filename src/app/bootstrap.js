@@ -29,6 +29,7 @@ export function bootstrapCetaMesh(options = {}) {
   lifecycle.register(() => services.meshService.close(), { name: 'Mesh' });
   lifecycle.register(() => services.channelService.close(), { name: 'Channels' });
   lifecycle.register(() => services.bionicService.close(), { name: 'Bionic child' });
+  lifecycle.register(() => services.simulationService?.close(), { name: 'Simulation rooms' });
 
   return { services, lifecycle };
 }

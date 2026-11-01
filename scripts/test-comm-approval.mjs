@@ -187,7 +187,7 @@ try {
       health:async()=>({available:true,configured:true}),listModels:async()=>[{id:'fixture'}],chat:async()=>({text:'unused'}),
       stream:async function*(request){
         inference++;
-        if(inference===1)yield {type:'assistant/tool-calls',data:{toolCalls:[{id:'write-once',capabilityId:'filesystem.write',arguments:JSON.stringify({path:'proof.txt',content:'approved once'})}]}};
+        if(inference===1)yield {type:'assistant/tool-calls',data:{toolCalls:[{id:'write-once',capabilityId:'filesystem.write',arguments:JSON.stringify({path:'proof.txt',content:'approved once',expectedHash:null})}]}};
         else {
           reachedGate=true;
           await new Promise((resolve,reject)=>{

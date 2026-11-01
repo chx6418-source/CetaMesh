@@ -194,7 +194,8 @@ export interface DesktopEventData {
   delta?: string; replaceText?: string; reset?: boolean; toolActivity?: ChatMessage['toolActivity']; agentActivity?: ChatMessage['agentActivity'];
 }
 type UiMethod =
-  'ui.devices.overview' |
+  | `ui.simulation.${'overview' | 'role.list' | 'role.get' | 'role.save' | 'role.export' | 'role.import' | 'role.restore' | 'role.searchExamples' | 'role.examples.search' | 'role.context' | 'role.preview' | 'legacy.inventory' | 'legacy.import' | 'room.list' | 'room.create' | 'room.get' | 'room.update' | 'room.search' | 'message.send' | 'discussion.start' | 'discussion.pause' | 'discussion.cancel' | 'discussion.resume' | 'discussion.end' | 'project.create' | 'project.start' | 'project.refresh' | 'memory.list' | 'memory.propose' | 'memory.confirm'}`
+  | 'ui.devices.overview' |
   'ui.chat.attachment.list' | 'ui.chat.attachment.begin' | 'ui.chat.attachment.chunk' | 'ui.chat.attachment.finish' | 'ui.chat.attachment.read' | 'ui.chat.attachment.derive' | 'ui.chat.attachment.describe' | 'ui.chat.attachment.remove' | 'ui.chat.attachment.cleanup' | 'ui.chat.attachment.limits' | 'ui.chat.attachment.limits.set' | 'ui.chat.attachment.capabilities' | 'ui.chat.attachment.import' | 'ui.workspace.git.overview' | 'ui.workspace.git.diff' | 'ui.workspace.git.commit' | 'ui.workspace.git.branch.create' | 'ui.workspace.git.worktree.create' | 'ui.developer.forge.describe' | 'ui.developer.forge.save' | 'ui.developer.forge.invoke' | 'ui.developer.forge.credentials.save'
   | 'ui.preview.open' | 'ui.preview.read' | 'ui.preview.close'
   | 'ui.events.next'
@@ -285,7 +286,7 @@ function send<T>(method: HostMethod | UiMethod, params: object): Promise<T> {
     window.ipc!.postMessage(JSON.stringify({ id, method, params }));
   });
 }
-const uiCall = <T>(method: UiMethod, params: object) => send<T>(method, params);
+export const uiCall = <T>(method: UiMethod, params: object = {}) => send<T>(method, params);
 
 window.__cetameshReceive = (reply) => {
   const request = pending.get(reply.id);

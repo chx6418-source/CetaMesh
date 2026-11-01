@@ -1,4 +1,5 @@
 import { explicitDelegationTarget } from './explicit-delegation.js';
+import {SIMULATION_UI_METHODS} from '../simulation/ui-methods.js';
 import {OWNER_ACTOR} from '../capability/types.js';
 import { isSafeAgentDispatchPreflight } from '../capability/service.js';
 import { normalizeModelUsage } from '../model/usage.js';
@@ -1339,7 +1340,8 @@ export function createDesktopUiService({ services = {}, system = services.system
       if (p.expectedRev !== undefined && current.rev !== p.expectedRev) throw uiError('TASK_CONFLICT', '任务已被其他操作修改');
       if (current.status !== 'queued') throw uiError('TASK_NOT_QUEUED', '只有待启动任务可以启动；请查看当前任务状态');
       return { task: projectTaskWithUsage(await runTask(current, { provider: string(p.agentProvider, 80) || undefined,
-        requestId: string(p.requestId, 160) || undefined })) };
+        requestId: string(p.requestId, 160) || undefined,
+        modelProvider:string(p.modelProvider,80)||undefined,model:string(p.model,160)||undefined })) };
     },
     'ui.task.pause': async p => {
       const preflight = (await task('task.get', { id: idParam(p) })).task;
@@ -1949,6 +1951,9 @@ export function createDesktopUiService({ services = {}, system = services.system
       };
     }
   };
+
+  for(const name of SIMULATION_UI_METHODS)handlers['ui.simulation.'+name]=(params,{signal}={})=>
+    call(services.simulationService,'simulation.'+(name==='role.searchExamples'?'role.examples.search':name),params,false,signal);
 
   return Object.freeze({
     eventNames: EVENT_NAMES,

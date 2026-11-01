@@ -1,4 +1,7 @@
 import {createProviderAuthAdapters} from '../agent/auth/index.js';
+import {createPersonaLibrary} from '../simulation/persona-assets.js';
+import {createSimulationService} from '../simulation/service.js';
+import {createSimulationProjectBridge} from '../simulation/project-bridge.js';
 import {createConnectionLeases,createAgentRuntimeAuthService} from '../agent/runtime-auth-service.js';
 import {createRuntimeAuthProfileStore} from '../agent/runtime-auth-profile.js';
 import fs from 'node:fs';
@@ -586,11 +589,26 @@ export function createCetaMeshServices(options = {}) {
     validate:r=>{if(r.actor.kind!=='owner')throw Object.assign(Error('Owner must authorize project import'),{code:'PERMISSION_DENIED'});},
     execute:async r=>{const result=await importAttachmentArchive({store:chatService.attachmentStore,sessionId:r.input.sessionId,ref:r.input.ref,stateDir,signal:r.signal});
       const created=await workspaceService.execute({method:'workspace.create',params:{root:result.root,name:r.input.name||'导入项目'}});return {...result,workspace:created.workspace};}});
+  const simulationProjectBridge=createSimulationProjectBridge({taskService,workspaceService,capabilityService,
+    taskUi:(method,params)=>desktopUiService.execute({method,params})});
+  let simulationService;
+  try {
+    const legacyRoots=[...new Set([dataRoot,resourceRoot,sourceRoot].filter(Boolean)
+      .flatMap(root=>[path.resolve(root,'roles'),path.resolve(root,'dsh','agent-presets')]))];
+    const personaLibrary=createPersonaLibrary({stateDir,legacyRoots});
+    simulationService=createSimulationService({stateDir,modelRuntime,personaLibrary,memoryRuntime:memoryService.runtime,
+      resolveWorkspace:id=>{const workspace=workspaceService.describeWorkspace(id);if(!workspace)throw Object.assign(new Error('Simulation Workspace is unavailable'),{code:'SIMULATION_WORKSPACE_UNAVAILABLE'});return workspace;},
+      projectBridge:simulationProjectBridge});
+  } catch(error) {
+    // Simulation is optional. Preserve corrupt data and keep unrelated Core/Chat usable.
+    const code=typeof error?.code==='string'&&/^[A-Z0-9_]{1,80}$/.test(error.code)?error.code:'SIMULATION_STATE_UNAVAILABLE';
+    simulationService={execute:async()=>{throw Object.assign(new Error('仿真数据暂不可用，原始文件已保留，请先查看诊断。'),{code});},close(){}};
+  }
   const desktopUiService = createDesktopUiService({
     services: {
       chatService, taskService, workshopService, workspaceService, memoryService, capabilityService, agentBroker, continuityService,
       agentService, pluginCenterService, integrationService, extensionService, settingsService, systemServices,
-      toolExecutionCoordinator, usageLedger, modelRuntime,forgeService
+      toolExecutionCoordinator, usageLedger, modelRuntime,forgeService,simulationService
     },
     system: systemServices,
     eventBus: uiEventBus
@@ -625,6 +643,7 @@ export function createCetaMeshServices(options = {}) {
     meshService,
     channelService,
     bionicService,
+    simulationService,
     integrationService,
     forgeService,
     channelControlsReady,
