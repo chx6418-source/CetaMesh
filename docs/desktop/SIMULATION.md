@@ -43,6 +43,15 @@ run without a tariff, in which case monetary usage stays unknown. Price evidence
 is an estimate, not a provider invoice or a promise about external billing.
 Unknown usage remains visible and reservations remain charged against limits.
 
+Turns and duration bound each run. Model calls, tokens and cost accumulate for the
+room and do not reset after each reply. A role trial starts with one model call;
+the UI states this limit and shows an explicit budget-settings action when it is
+exhausted. Raising the total limit preserves prior usage, reservations, messages
+and drafts. Saving settings never dispatches or replays a request. After ending a
+discussion, a new explicit manual message may start another turn within the same
+remaining room budget. Invalid budget responses identify the rejected field
+without returning submitted values.
+
 Requests have stable identities and input fingerprints. A repeated request with
 the same input returns its stored state; changed input conflicts. A request left
 running on process loss becomes unknown and is never replayed automatically.

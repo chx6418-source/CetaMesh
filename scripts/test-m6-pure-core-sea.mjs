@@ -96,6 +96,11 @@ try {
   assert.equal((await rpc('channel.qq.health')).ready, false);
   await assert.rejects(rpc('task.list', {}, '0'.repeat(64)), 'wrong Owner token must be denied');
   await rpc('providers.secrets.set', { provider: 'openai-compatible', apiKey: 'synthetic-m6-fixture-key', baseUrl: `http://127.0.0.1:${provider.address().port}` });
+  const simulationRole = (await rpc('ui.simulation.role.save', { name: 'SEA budget fixture', sourceText: 'Synthetic role; no tool authority.' })).role;
+  const defaultBudget = { maxTurns: 6, maxOutputTokens: 768, maxTotalTokens: 65536, maxDurationMs: 120000, maxModelCalls: 60, maxCost: null, pricing: null };
+  const simulationRoom = (await rpc('ui.simulation.room.create', { title: 'SEA default budget', goal: 'Untouched UI budget fixture', scene: 'free', roleIds: [simulationRole.id], modelProvider: 'openai-compatible', model: 'fixture-model', budget: defaultBudget })).room;
+  assert.deepEqual(simulationRoom.budget, defaultBudget, 'actual SEA accepts the full untouched UI budget through Owner IPC');
+  await assert.rejects(rpc('ui.simulation.room.create', { title: 'Rejected budget fixture', goal: 'Safe field feedback', scene: 'free', roleIds: [simulationRole.id], budget: { ...defaultBudget, maxModelCalls: 0 } }), error => error.code === 'SIMULATION_BUDGET_INVALID' && error.message.includes('最多模型调用'));
   const session = await rpc('ui.chat.sessions.create', { title: 'M6 isolated chat' });
   await rpc('ui.chat.config.set', { id: session.id, config: { mode: 'chat', agentProvider: 'none', modelProvider: 'openai-compatible', model: 'fixture-model', reasoning: 'off' } });
   await rpc('ui.chat.send', { id: session.id, text: 'synthetic request', clientMessageId: 'm6-fixture-1' });

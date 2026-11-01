@@ -24,6 +24,13 @@ async function room(h,options={}){return (await h.call('room.create',{title:'Roo
 let passed=0;
 async function test(name,run){await run();passed++;console.log(`PASS ${name}`);}
 try {
+ await test('invalid budgets identify the rejected field without echoing private input',async()=>{
+  const h=make();
+  for(const [budget,label]of [[{maxModelCalls:0},'最多模型调用'],[{maxTurns:7},'最多发言数'],[{maxCost:-1},'费用上限'],[{pricing:{source:'PRIVATE_INPUT_DO_NOT_ECHO'}},'模型价格']]){
+   await assert.rejects(room(h,{budget}),error=>error.code==='SIMULATION_BUDGET_INVALID'&&error.message.includes(label)&&!error.message.includes('PRIVATE_INPUT'));
+  }
+  h.service.close();
+ });
  await test('persists room and revision-pinned role references',async()=>{const h=make();const r=await room(h);assert.equal(r.roleRefs[0].revision,1);assert.equal((await h.call('overview')).rooms.length,1);h.service.close();const reopened=createSimulationService({stateDir:h.stateDir,modelRuntime:{chat:async()=>{}},personaLibrary:personas});assert.equal((await reopened.execute({method:'simulation.room.get',params:{roomId:r.id}})).room.title,'Room');reopened.close();});
  await test('single reply calls only Model Runtime, async accept, no tools',async()=>{let release;let call;const h=make(async options=>{call=options;return await new Promise(resolve=>{release=resolve});});const r=await room(h);const accepted=await h.call('message.send',{roomId:r.id,text:'hello',requestId:'one'});assert.equal(accepted.room.status,'running');assert.equal(call.tools,undefined);assert.equal(call.maxOutputTokens,768);release({text:'reply',usage});const done=await settle(h,r.id);assert.equal(done.messages.at(-1).text,'reply');assert.equal(done.usage.completedCalls,1);assert.equal(done.usage.cost.status,'unknown');assert.equal(done.usage.accounting,'complete','first unpriced request may have complete token accounting without a cost estimate');h.service.close();});
  await test('durable request id dedupe and changed payload rejection',async()=>{let calls=0;const h=make(async()=>{calls++;return {text:'reply',usage}});const r=await room(h);const first=await h.call('message.send',{roomId:r.id,text:'hello',requestId:'same'});await settle(h,r.id);const again=await h.call('message.send',{roomId:r.id,text:'hello',requestId:'same'});assert.equal(first.message.id,again.message.id);assert.equal(calls,1);await assert.rejects(h.call('message.send',{roomId:r.id,text:'changed',requestId:'same'}),{code:'SIMULATION_REQUEST_CONFLICT'});h.service.close();});
