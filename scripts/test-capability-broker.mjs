@@ -188,6 +188,10 @@ try {
  const originalOperation=logicalRestart.broker.execute(concurrentOperation);await startedLogical;
  const runningOperation=await logicalRestart.broker.execute({...concurrentOperation,requestId:'concurrent-b'});
  assert.equal(runningOperation.status,'running');assert.equal(concurrentEffects,1);
+ const runningRead=await logicalRestart.broker.execute({actor:owner,taskId:task.id,workspaceId:ws,
+  capability:'operation.read',input:{operationRef:'concurrent-operation'}});
+ assert.equal(runningRead.result.needsReconciliation,true,'a started effect is still uncertain');
+ assert.equal(runningRead.result.verified,false);
  assert.throws(()=>logicalRestart.broker.acknowledgeTaskOperations({taskId:task.id,workspaceId:ws}),{code:'OPERATION_STILL_RUNNING'});
  finishLogical({receipt:'concurrent-receipt'});await originalOperation;
  assert.equal((await logicalRestart.broker.execute({...concurrentOperation,requestId:'concurrent-c'})).result.receipt,'concurrent-receipt');
@@ -211,6 +215,12 @@ try {
  const plan=await logicalRestart.execute({method:'capability.operation.prepare',params:{taskId:resumeTask.id,workspaceId:ws,
   operationId:'planned-append',logicalStepId:'step-append',capability:'filesystem.write',input:{path:'planned.txt',append:true,content:'one'}}});
  assert.equal(plan.status,'prepared');
+ const preparedRead=await logicalRestart.broker.execute({actor:oldPrincipal,taskId:resumeTask.id,workspaceId:ws,
+  capability:'operation.read',input:{operationRef:'planned-append'}});
+ assert.equal(preparedRead.result.status,'prepared');
+ assert.equal(preparedRead.result.needsReconciliation,false,'an unstarted durable intent is not an uncertain effect');
+ assert.equal(preparedRead.result.code,'OPERATION_NOT_STARTED');
+ assert.equal(preparedRead.result.verified,false,'prepared does not mean completed');
  assert.equal(fs.existsSync(path.join(dir,'project','planned.txt')),false,'preparing an intent cannot execute it');
  taskRuntime.attachAgent({id:resumeTask.id,expectedRev:taskRuntime.get({id:resumeTask.id}).task.rev,provider:'beta',sessionId:'beta-plan'});
  const resumePrincipal=logicalRestart.principalForTask(resumeTask.id);
@@ -218,9 +228,16 @@ try {
   capability:'filesystem.write',input:{path:'stale-write.txt',content:'bad'}}),'AGENT_ASSIGNMENT_EXPIRED');
  const resumeRequest={actor:resumePrincipal,taskId:resumeTask.id,workspaceId:ws,capability:'operation.continue',
   input:{operationRef:'planned-append',input:{content:'one',append:true,path:'planned.txt'}}};
+ logicalRestart.grantTask(resumeTask.id,{capabilities:['operation.read','operation.continue']});
+ await deny(logicalRestart.broker.execute({...resumeRequest,actor:logicalRestart.principalForTask(resumeTask.id),requestId:'source-grant-revoked'}),'PERMISSION_DENIED');
+ assert.equal(fs.existsSync(path.join(dir,'project','planned.txt')),false,'retained continuation never grants source authority');
+ logicalRestart.grantTask(resumeTask.id,{capabilities:['filesystem.write','operation.read','operation.continue']});
  let resumePending=await logicalRestart.broker.execute({...resumeRequest,requestId:'beta-resume'});
  assert.equal(resumePending.status,'pending','continuing a prepared write still requires its real source approval');
  await logicalRestart.execute({method:'capability.approval.decide',params:{id:resumePending.approvalId,approve:false}});
+ const deniedRead=await logicalRestart.broker.execute({actor:resumePrincipal,taskId:resumeTask.id,workspaceId:ws,
+  capability:'operation.read',input:{operationRef:'planned-append'}});
+ assert.equal(deniedRead.result.needsReconciliation,true,'a permission blocker cannot become an unstarted safe continuation');
  await deny(logicalRestart.broker.execute({...resumeRequest,requestId:'cannot-evade-rejected-approval'}),'OPERATION_PERMISSION_REVIEW_REQUIRED');
  await logicalRestart.execute({method:'capability.operation.review',params:{taskId:resumeTask.id,workspaceId:ws,operationId:'planned-append'}});
  resumePending=await logicalRestart.broker.execute({...resumeRequest,requestId:'owner-reviewed-new-approval'});

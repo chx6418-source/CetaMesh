@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import {
   PRODUCT_IDENTITY_PROMPT,
-  buildProductContext
+  buildProductContext,
+  projectProductContext
 } from '../src/context/product-context.js';
 import { buildCapabilityContext } from '../src/context/capability-context.js';
 import { buildTaskContext } from '../src/context/task-context.js';
@@ -160,4 +161,35 @@ run('product context is deterministic and stays within the requested character l
   assert.deepEqual(Object.keys(compactManifest.capabilities.statusSummary[0]).sort(), ['availability', 'id', 'reason']);
   assert.equal(compactManifest.capabilities.statusSummary[0].availability, 'registered');
   assert.equal(compactManifest.capabilities.statusSummary[0].reason, 'descriptor-incomplete');
+});
+
+run('long handoff context keeps granted operation controls before optional discovery tools', () => {
+  const schema = { type: 'object', properties: { operationRef: { type: 'string', maxLength: 160 } }, additionalProperties: false };
+  const registered = [
+    ...Array.from({ length: 12 }, (_, i) => ({ id: `agent.discovery.${i}`, description: 'Optional discovery. '.repeat(12), inputSchema: schema })),
+    ...['operation.continue', 'operation.read', 'test.run'].map(id => ({ id, description: 'Current Task operation.', inputSchema: schema }))
+  ];
+  const grantedIds = registered.map(row => row.id).filter(id => id !== 'test.run');
+  const snapshot = { mode: 'managed-agent', executionPath: 'managed-agent',
+    task: { id: 'handoff-task', goal: 'Keep the original goal.', checkpoint: { summary: 'Verified predecessor evidence. '.repeat(130) } },
+    capabilities: buildCapabilityContext({ registered, grantedIds, requestableIds: grantedIds, actorKind: 'agent', executionPath: 'managed-agent', taskAvailable: true }) };
+  const full = projectProductContext(snapshot, { maxChars: 30000 });
+  const limited = projectProductContext(snapshot, { maxChars: 6500 });
+  const parsed = JSON.parse(limited.serialized);
+  assert.equal(limited.truncated, true);
+  assert.ok(limited.serialized.length <= 6500);
+  for (const id of ['operation.continue', 'operation.read']) {
+    assert.deepEqual(limited.manifest.find(row => row.id === id), full.manifest.find(row => row.id === id), 'retain the exact granted schema, not a reduced or invented control');
+    assert.ok(limited.manifest.some(row => row.id === id), `${id} cannot silently disappear after handoff`);
+  }
+  assert.equal(limited.manifest.some(row => row.id === 'test.run'), false, 'priority never grants a missing source permission');
+  assert.equal(parsed.task.checkpoint.summary, snapshot.task.checkpoint.summary.trim());
+  assert.equal(parsed.omissions.capabilityDescriptors, full.manifest.length - limited.manifest.length);
+  assert.deepEqual(parsed.capabilities.requestable, limited.manifest.map(row => row.id));
+  assert.equal(projectProductContext(snapshot, { maxChars: 6500 }).serialized, limited.serialized);
+  const noControls = { ...snapshot, capabilities: { ...snapshot.capabilities,
+    manifest: snapshot.capabilities.manifest.filter(row => !row.id.startsWith('operation.')) } };
+  const baseSize = projectProductContext({ ...snapshot, capabilities: { ...snapshot.capabilities, manifest: [] } }, { maxChars: 30000 }).serialized.length;
+  assert.throws(() => projectProductContext(snapshot, { maxChars: baseSize + 100 }), { code: 'CONTEXT_BUDGET_EXCEEDED' }, 'do not silently run without granted recovery controls');
+  assert.equal(projectProductContext(noControls, { maxChars: 6500 }).manifest.some(row => row.id.startsWith('operation.')), false);
 });

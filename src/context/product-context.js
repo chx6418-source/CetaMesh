@@ -261,8 +261,8 @@ function projectSnapshot(snapshot) {
   };
 }
 
-// Only optional discoverability metadata may be omitted. Task state and approval
-// facts are authoritative input, not prose that can safely be character-clipped.
+// Task/approval facts and granted Task operation controls must survive compaction.
+// Dropping continuation can strand a prepared effect after an Agent handoff.
 function compactContext(context, maxChars) {
   context.truncated = true;
   context.omissions = {};
@@ -275,10 +275,12 @@ function compactContext(context, maxChars) {
     if (fits()) return context;
   }
   const candidates = context.capabilities.manifest;
-  context.capabilities.manifest = [];
-  context.capabilities.requestable = [];
+  const controls = context.task && context.capabilities.executionPath === 'managed-agent'
+    ? candidates.filter(item => ['operation.continue', 'operation.read'].includes(item.id)) : [];
+  context.capabilities.manifest = [...controls];
+  context.capabilities.requestable = controls.map(item => item.id);
   context.capabilities.mcp = [];
-  context.omissions.capabilityDescriptors = candidates.length;
+  context.omissions.capabilityDescriptors = candidates.length - controls.length;
   // Preserve deterministic status facts where space permits; omitted descriptors
   // are not callable. Broker remains the execution authority.
   while (!fits() && context.capabilities.statusSummary.length) {
@@ -286,6 +288,7 @@ function compactContext(context, maxChars) {
     context.omissions.capabilityStatuses = (context.omissions.capabilityStatuses ?? 0) + 1;
   }
   for (const descriptor of candidates) {
+    if (controls.includes(descriptor)) continue;
     context.capabilities.manifest.push(descriptor);
     context.capabilities.requestable.push(descriptor.id);
     context.omissions.capabilityDescriptors--;
@@ -295,7 +298,11 @@ function compactContext(context, maxChars) {
       context.omissions.capabilityDescriptors++;
     }
   }
-  if (fits()) return context;
+  if (fits()) {
+    context.capabilities.manifest.sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
+    context.capabilities.requestable = context.capabilities.manifest.map(item => item.id);
+    return context;
+  }
   throw Object.assign(new Error('Product Context cannot fit without losing task or permission state; reduce optional context or use an explicit verified checkpoint.'), {
     code: 'CONTEXT_BUDGET_EXCEEDED', maxChars, requiredChars: JSON.stringify(context).length
   });

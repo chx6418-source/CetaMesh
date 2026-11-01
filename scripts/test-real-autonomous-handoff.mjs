@@ -10,6 +10,7 @@ import {setTimeout as delay} from 'node:timers/promises';
 import {createCetaMeshServices} from '../src/app/service-container.js';
 import {createProviderSecrets} from '../src/providers/secrets.js';
 import {OWNER_ACTOR} from '../src/capability/types.js';
+import {redactText} from '../src/logging/redact.js';
 
 if(process.env.WHALEBRIDGE_TEST_REAL_MANAGED!=='1'||process.env.WHALEBRIDGE_TEST_REAL_CODEX!=='1'){
  console.log('NOT_RUN_ENVIRONMENT: explicit real Managed Provider and Codex opt-in required');process.exit(77);
@@ -18,7 +19,9 @@ const extensionPackages=process.env.CETAMESH_TEST_EXTENSION_PACKS==='1';
 const allowedPaths=extensionPackages?['EXT-01.md','EXT-02.md','math.mjs']:['math.mjs'];
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'cetamesh-real-auto-'));
 let services,taskId,preflightId;
-const evidence={fixture:false,diagnostics:[],modelProvider:null,modelRequests:0,proposalCalls:0,approvals:[],history:[],fileVerified:false,testExitCode:null};
+const evidence={fixture:false,sourceCommit:execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim(),
+ sourceDirty:Boolean(execFileSync('git',['status','--porcelain'],{encoding:'utf8'}).trim()),
+ diagnostics:[],modelProvider:null,modelRequests:0,modelTurns:[],proposalCalls:0,approvals:[],history:[],fileVerified:false,testExitCode:null};
 const hash=content=>crypto.createHash('sha256').update(content).digest('hex');
 async function waitFor(read,predicate,label,timeout=180000){const until=Date.now()+timeout;let value;
  while(Date.now()<until){value=await read();if(predicate(value))return value;await delay(100);}throw Error(label+' timed out');}
@@ -37,8 +40,19 @@ try {
  assert.ok(model,'A configured Managed model is required');evidence.modelProvider=providerId;evidence.model=model;
  const originalStream=services.modelRuntime.stream;
  services.modelRuntime.stream=async function*(request){evidence.modelRequests++;
+  const verification=request.messages.some(message=>message.role==='user'&&typeof message.content==='string'
+   &&message.content.startsWith('Independently verify the original Task'));
+  const trace={phase:verification?'verification':'initial',toolChoice:request.toolChoice??null,
+   tools:(request.tools??[]).map(tool=>tool.id),calls:[],outcome:null,publicText:''};
+  evidence.modelTurns.push(trace);
   for await(const event of originalStream(request)){
-   if(event.type==='assistant/tool-calls')evidence.proposalCalls+=(event.data?.toolCalls??[]).filter(call=>call.capabilityId==='agent.delegate.propose').length;
+   if(event.type==='assistant/tool-calls'){
+    const calls=(event.data?.toolCalls??[]).map(call=>call.capabilityId);
+    trace.calls.push(...calls);evidence.proposalCalls+=calls.filter(id=>id==='agent.delegate.propose').length;
+   }
+   if(event.type==='assistant/chunk'&&event.data?.chunk?.type==='text-delta')
+    trace.publicText=redactText((trace.publicText+event.data.chunk.text).slice(0,2400));
+   if(event.type==='turn/end')trace.outcome=event.data?.reason?.kind??null;
    yield event;
   }};
  const project=path.join(root,'project');fs.mkdirSync(project);
@@ -95,6 +109,11 @@ try {
  evidence.taskStatus=current.status;evidence.delegationState=current.delegationProposal?.state??null;evidence.delegationError=current.delegationProposal?.code??null;evidence.progressCode=current.progress?.note??null;
  evidence.history=current.agentHistory.map(row=>row.provider);evidence.selectedProvider=current.delegationProposal?.selectedProvider??null;evidence.proposedRequirements=current.delegationProposal?.intent?.requiredTools??null;
  evidence.toolEvidence=(current.executionEvidence??[]).map(row=>({capability:row.capability,status:row.status,source:row.source??null,exitCode:row.exitCode??null}));
+ evidence.managedReports=(current.agentReports??[]).filter(row=>row.provider==='cetamesh')
+  .map(row=>({runId:row.runId,text:redactText(String(row.text??'').slice(0,2400))})).slice(-3);
+ const prepared=services.capabilityService.broker.operationRecordForTask({taskId,workspaceId:workspace.id,operationId:'independent-verification'});
+ evidence.preparedVerification=prepared?{capability:prepared.capability,operationId:prepared.operationId,
+  status:prepared.status,hasSavedInput:Boolean(prepared.continuationInput)}:null;
  assert.ok(evidence.modelRequests>0,'Real Managed Provider must be called');assert.ok(evidence.proposalCalls>0,'Real model must propose generic delegation');
  assert.equal(current.delegationProposal?.selectedProvider,'codex','Core selected the eligible real Codex without a target in the user prompt');
  for(const [file,expected]of Object.entries(protectedHashes))assert.equal(hash(fs.readFileSync(path.join(project,file))),expected);

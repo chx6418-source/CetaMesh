@@ -657,6 +657,10 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
         const row = broker.operationRecordForTask({ taskId: request.taskId, workspaceId: request.workspaceId, operationId: request.input.operationRef });
         if (!row) throw capabilityError('OPERATION_NOT_FOUND', 'Operation is not in this Task Workspace');
         const summary = { operationId: row.operationId, capability: row.capability, status: row.status };
+        if (row.status === 'prepared' && !row.blocker) {
+          return { ...summary, resultAvailable: false, verified: false, needsReview: true,
+            needsReconciliation: false, code: 'OPERATION_NOT_STARTED' };
+        }
         if (row.status !== 'completed' || !Object.hasOwn(row, 'retainedResult') || !row.accessInput) {
           return { ...summary, resultAvailable: false, verified: false, needsReview: true,
             needsReconciliation: row.status !== 'completed', code: row.status === 'completed' ? 'OPERATION_RESULT_REVIEW_REQUIRED' : 'REQUEST_RECOVERY_REQUIRED' };

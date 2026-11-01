@@ -11,7 +11,7 @@ import {createTaskWorkingMemoryRecorder} from '../src/memory/task-working-memory
 import {OWNER_ACTOR} from '../src/capability/types.js';
 import {createProviderSecrets} from '../src/providers/secrets.js';
 
-async function scenario(machineContract,coldNative=false,control='approve') {
+async function scenario(machineContract,coldNative=false,control='approve',longCheckpoint=false) {
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'cetamesh-auto-handoff-integration-'));
  let services,taskId;
  const hash=value=>crypto.createHash('sha256').update(value).digest('hex');
@@ -27,13 +27,16 @@ async function scenario(machineContract,coldNative=false,control='approve') {
   credentialService.set({provider:'automatic-fixture-model',apiKey:'synthetic-local-only'});
   services=createCetaMeshServices({stateDir:path.join(root,'state'),dataRoot:path.join(root,'data'),agentStagingRoot:path.join(root,'staging'),providerSecrets:credentialService});
   assert.equal(services.providerSecrets,credentialService);
-  let modelCalls=0,verificationCalls=0;const observedPlans=[];
+  let modelCalls=0,verificationCalls=0,sawCompactedVerification=false;const observedPlans=[];
   services.modelRegistry.register({id:'automatic-fixture-model',label:'Deterministic local model',defaultModel:'fixture',supportsTools:true,
    health:async()=>({available:true,configured:true}),listModels:async()=>[{id:'fixture'}],chat:async()=>({text:'unused'}),
    stream:async function*(request){
     let call=null;
     if(modelCalls++===0)call={id:'model-choice',capabilityId:'agent.delegate.propose',arguments:JSON.stringify({taskKind:'code',difficulty:2,requiredTools:[],instruction:'Complete the remaining fixture work.'})};
     else if(request.messages.filter(row=>row.role==='user').at(-1)?.content?.startsWith('Independently verify')) {
+     const product=JSON.parse(request.messages.find(row=>row.role==='system'&&row.content.startsWith('CetaMesh dynamic context')).content.split('\n').slice(1).join('\n'));
+     if(product.truncated)sawCompactedVerification=true;
+     assert.ok(request.tools.some(row=>row.id==='operation.continue'),'return manifest must retain the granted exact-operation continuation');
      const context=JSON.parse(request.messages.filter(row=>row.role==='user').at(-1).content.split('\n').slice(1).join('\n'));observedPlans.push(context.verificationPlan);
      const step=verificationCalls++;
      if(step===0)call={id:'verify-diff',capabilityId:'git.diff',arguments:'{}'};
@@ -63,7 +66,7 @@ async function scenario(machineContract,coldNative=false,control='approve') {
        assert.equal(imported?.status,'completed','fixture must use actual approved Core import');
       }else assert.equal(receipt.status,'completed');
      }
-     if(phase==='user')events.push({type:'assistant/message',seq:++sequence,data:{requestId,phase,runId,message:{content:[{type:'text',text:'FIXTURE_RESULT: verify independently.'}]}}});
+     if(phase==='user')events.push({type:'assistant/message',seq:++sequence,data:{requestId,phase,runId,message:{content:[{type:'text',text:'FIXTURE_RESULT: verify independently.'+(longCheckpoint?' Completed file evidence. '.repeat(110):'')}]}}});
      events.push({type:'turn/end',seq:++sequence,data:{requestId,phase,runId,reason:{kind:'completed'}}});return {accepted:true,requestId};
     },
     async status(){return {running:false,queued:0,waitingForApproval:false,readiness};},
@@ -102,6 +105,7 @@ async function scenario(machineContract,coldNative=false,control='approve') {
   assert.deepEqual(current.agentHistory.map(row=>row.provider),['cetamesh','coding-fixture','cetamesh']);
   assert.equal(services.continuityService.runtime.history({taskId}).rollovers.length,2);
   assert.ok(observedPlans.length>0);
+  if(longCheckpoint)assert.equal(sawCompactedVerification,true,'exercise actual production context compaction during handoff');
   if(machineContract)assert.deepEqual(observedPlans[0],{kind:'owner-prepared-code-tests',operationRef:'fixture-verification',allowedPaths:['新增目录/结果.txt'],preservedFiles:['package.json','verify.mjs'],approval:'current-capability-policy',currentEvidenceRequired:true},'return plan must reuse the actual Owner-prepared operation and scope');
   else assert.equal(observedPlans[0],null,'uncontracted tasks cannot invent an automatic acceptance plan');
   if(machineContract) {
@@ -128,6 +132,7 @@ async function scenario(machineContract,coldNative=false,control='approve') {
 }
 await scenario(false);
 await scenario(true);
+await scenario(true,false,'approve',true);
 await scenario(true,true);
 await scenario(true,true,'reject');
 await scenario(true,true,'revoke');
