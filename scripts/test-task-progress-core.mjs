@@ -25,11 +25,25 @@ const report=[{type:'assistant/message',data:{message:{content:[{type:'text',tex
 function uiWith(status={running:false,lastRunStatus:'completed'},capabilityService={}){return createDesktopUiService({services:{taskService:service,agentBroker:{status:async()=>status},capabilityService}});}
 function complete(ui,t,extra={}){return ui.execute({method:'ui.task.complete',params:{id:t.id,expectedRev:t.rev,reviewed:true,summary:'Owner reviewed',...extra}});}
 try{
+ await check('bounded timing facts require the exact live run and never become completion authority',async()=>{
+  let t=begin(start(),'timed-run'),binding={id:t.id,...t.currentAgent,runId:'timed-run',phase:'user'};
+  assert.equal(t.executionObservation.dispatchAcceptedAt,undefined,'dispatch intent is not an accepted ACK');
+  t=rt.observeExecution({...binding,state:'accepted'});assert.ok(Number.isSafeInteger(t.executionObservation.dispatchAcceptedAt));assert.equal(t.executionObservation.state,'running');
+  const accepted=t.executionObservation.dispatchAcceptedAt,rev=t.rev;t=rt.observeExecution({...binding,state:'accepted'});assert.equal(t.rev,rev);assert.equal(t.executionObservation.dispatchAcceptedAt,accepted);
+  t=rt.observeExecution({...binding,state:'running',toolActivity:true});assert.ok(Number.isSafeInteger(t.executionObservation.firstToolObservedAt));
+  rt.recordToolOutcome({...binding,eventId:'timed-result',capability:'filesystem.read',status:'completed'});t=rt.get({id:t.id}).task;assert.ok(Number.isSafeInteger(t.executionObservation.firstToolCompletedAt));
+  t=rt.observeExecution({...binding,state:'awaiting-review'});assert.ok(Number.isSafeInteger(t.executionObservation.turnEndObservedAt));
+  const recorded={...t.executionObservation};rt.recoverInterrupted();t=rt.get({id:t.id}).task;assert.equal(t.executionObservation.state,'unknown');for(const key of ['dispatchAcceptedAt','firstToolObservedAt','firstToolCompletedAt','turnEndObservedAt'])assert.equal(t.executionObservation[key],recorded[key],'restart preserves facts without upgrading review');
+  await assert.rejects(complete(uiWith(),t),{code:'TASK_EXECUTION_UNCONFIRMED'});
+  let next=begin(start(),'fresh-run');const before=next.rev;next=rt.observeExecution({id:next.id,...next.currentAgent,runId:'old-run',phase:'user',state:'accepted'});assert.equal(next.rev,before);assert.equal(next.executionObservation.dispatchAcceptedAt,undefined);
+  next=rt.observeExecution({id:next.id,...next.currentAgent,runId:'fresh-run',phase:'bootstrap',state:'accepted'});assert.equal(next.executionObservation.dispatchAcceptedAt,undefined);
+ });
  await check('actual Broker dispatch invalidates review before native send and Follow settles exact run',async()=>{
   const buffer=createAgentEventBuffer();let seq=0,t;
   const registry=createAgentProviderRegistry();registry.register(defineAgentProvider({id:'fixture',label:'Fixture',eventProtocol:'agent-turn-events-v1',capabilityExtras:{workspaceBoundary:'native-staged'},methods:{
    createSession:async()=>({sessionId:'broker-session'}),send:async({runId,phase})=>{
     assert.equal(rt.get({id:t.id}).task.executionObservation.runId,runId,'observation precedes effects');
+    assert.equal(rt.get({id:t.id}).task.executionObservation.dispatchAcceptedAt,undefined,'accepted time must follow the actual Provider ACK');
     for(const e of report)buffer.push({type:'event',seq:++seq,event:{...e,data:{...e.data,requestId:'native-'+runId,runId,phase}}});
     return {accepted:true,requestId:'native-'+runId};
    },status:async()=>({running:false,lastRunStatus:'completed'}),cancel:async()=>({cancelled:true}),async *follow({signal,sinceSequence}){yield* buffer.follow({signal,sinceSequence});}
@@ -38,7 +52,7 @@ try{
   const cap=createCapabilityService({taskRuntime:rt,agentBroker:broker});capabilities.push(cap);
   t=rt.create({goal:'broker lifecycle '+(++serial),workspaceId:'ws'});const session=await broker.createSession('fixture',{taskId:t.id,workspaceId:'ws'});t=rt.start({id:t.id,expectedRev:t.rev,provider:'fixture',sessionId:session.sessionId}).task;
   await broker.send({...t.currentAgent,runId:'dispatch-1',content:'analysis only'});for(let i=0;i<20;i++)await new Promise(r=>setImmediate(r));
-  t=rt.get({id:t.id}).task;assert.equal(t.executionObservation.state,'awaiting-review');assert.equal(t.agentReports.at(-1).runId,'dispatch-1');
+  t=rt.get({id:t.id}).task;assert.equal(t.executionObservation.state,'awaiting-review');assert.equal(t.agentReports.at(-1).runId,'dispatch-1');assert.ok(Number.isSafeInteger(t.executionObservation.dispatchAcceptedAt),'actual Broker ACK is observed on the current run');
   await broker.send({...t.currentAgent,runId:'dispatch-2',content:'new analysis'});for(let i=0;i<20;i++)await new Promise(r=>setImmediate(r));
   t=rt.get({id:t.id}).task;assert.equal(t.executionObservation.state,'awaiting-review');assert.equal(t.agentReports.at(-1).runId,'dispatch-2');assert.equal(t.executionEvidence.length,0);
  });

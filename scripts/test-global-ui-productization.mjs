@@ -22,6 +22,11 @@ const evidence = process.env.CETAMESH_GLOBAL_UI_EVIDENCE_DIR ? path.resolve(proc
 const baselineOnly = process.env.CETAMESH_GLOBAL_UI_BASELINE_ONLY === '1';
 const quick = process.env.CETAMESH_GLOBAL_UI_QUICK === '1';
 const zoomOnly = Number(process.env.CETAMESH_GLOBAL_UI_ZOOM_ONLY || 0);
+const aboutOnly = process.env.CETAMESH_GLOBAL_UI_ABOUT_ONLY === '1';
+const aboutScenarios = [
+  ...[480,640,900,1280,1600].flatMap(width => ['light','dark'].map(theme => ({width,height:900,zoom:1,theme}))),
+  ...[1.5,2].flatMap(zoom => ['light','dark'].map(theme => ({width:1280,height:900,zoom,theme,dpr:zoom})))
+];
 const agentOnly = process.env.CETAMESH_GLOBAL_UI_AGENT_ONLY === '1';
 const hostSyncOnly = process.env.CETAMESH_GLOBAL_UI_HOST_SYNC_ONLY === '1';
 const behaviorOnly = process.env.CETAMESH_GLOBAL_UI_BEHAVIOR_ONLY === '1';
@@ -87,7 +92,7 @@ async function bundle(directory) {
         if(method==='ui.chat.config.set'){const current=window.fixtureState.sessions.find(row=>row.id===params.id)||session;const updated={...current,config:params.config};window.fixtureState.sessions=window.fixtureState.sessions.map(row=>row.id===params.id?updated:row);return updated;}
         if(method==='ui.chat.history'){const rows=params.id===session.id?messages:[];return{id:params.id,total:rows.length,messages:rows,sessionUsage:params.id===session.id?usage:null,hasMore:false,hasMoreAfter:false,nextBeforeMessageId:null,nextAfterMessageId:null};}
         if(method==='ui.chat.status')return{id:params.id,taskId:params.id===session.id?session.taskId:null,state:'idle',requestId:null,statusMessage:null,retryCount:0,followState:'idle',followError:null,displayText:'',toolActivity:[],agentActivity:null,error:null,errorCode:null,approvalId:null,routing:{}};
-        if(method==='ui.task.overview'){const tasks=Array.from({length:window.fixtureState.largeTasks?1000:18},(_,index)=>task(index)).filter(row=>(!params.query||(row.title+' '+row.goal).toLowerCase().includes(params.query.toLowerCase()))&&(!params.status||row.status===params.status));return{tasks,total:tasks.length,counts:{},needsAttention:['global-task-0']};}
+        if(method==='ui.task.overview'){const tasks=Array.from({length:window.fixtureState.largeTasks?1000:18},(_,index)=>task(index)).filter(row=>(!params.query||(row.title+' '+row.goal).toLowerCase().includes(params.query.toLowerCase()))&&(!params.status||row.status===params.status));if(window.fixtureState.holdTaskOverview)await new Promise(resolve=>(window.fixtureTaskListReleases??=[]).push(resolve));window.fixtureTaskOverviewSettled=(window.fixtureTaskOverviewSettled||0)+1;return{tasks,total:tasks.length,counts:{},needsAttention:['global-task-0']};}
         if(method==='ui.task.get')return{task:task(Number(params.id.split('-').at(-1))||0)};
         if(method==='ui.task.recovery.inspect')return{taskId:params.id,taskRev:3,operations:[{operationId:'synthetic-operation',capability:'filesystem.write',status:'UNKNOWN',verified:false,code:'RECONCILIATION_REQUIRED'}],omitted:0};
         if(method==='ui.memory.overview')return{memories:memories.filter(row=>!params.types||params.types.includes(row.type)),total:memories.length,candidates:[candidate],candidateMeta:{pending:1,capacity:100,remaining:99},recovery:{failed:[]}};
@@ -114,6 +119,7 @@ async function bundle(directory) {
         if(method==='ui.onboarding.status'||method==='ui.onboarding.start')return onboarding;
         if(method==='ui.chat.attachment.limits')return{imageMiB:20,documentMiB:100,archiveMiB:200,messageMiB:250,count:20,storageMiB:2048,reserveMiB:256,incompleteHours:24};if(method==='ui.chat.attachment.list')return{files:[]};if(method==='ui.chat.attachment.capabilities')return{supported:true,status:'supported'};
         if(method.startsWith('ui.workshop.'))return{proposals:[],total:0};if(method==='ui.search')return{sessions:[session],tasks:[task(0)],plugins:plugins.slice(0,2)};
+        if(method==='ui.about.info'&&window.fixtureState.failAbout)throw new Error('Synthetic About read failed');
         if(method==='ui.about.info')return{productName:'CetaMesh',version:'synthetic-ui-test',buildNumber:0,channel:'fixture',platform:'Windows',developer:'CetaMesh',commit:'synthetic',github:'https://example.invalid/CetaMesh'};
         if(method==='ui.about.update')return{status:'not_configured'};if(method==='ui.update.notes')return{record:{announcement:{notes:['Synthetic acceptance fixture, no release published.']}}};if(method==='ui.feedback.links')return{configured:false,entries:[],securityNotice:'No private files uploaded.',message:''};
         throw Object.assign(new Error('UI display fixture blocks this operation: '+method),{code:'FIXTURE_READ_ONLY'});
@@ -154,6 +160,8 @@ try {
     }
     const click=selector=>pointerClick('document.querySelector('+JSON.stringify(selector)+')',selector);
     const textClick=text=>pointerClick('[...document.querySelectorAll("button,summary")].find(n=>n.checkVisibility()&&n.textContent.trim()==='+JSON.stringify(text)+')',text);
+    const workTab=text=>pointerClick('[...document.querySelectorAll(\'[role="tablist"][aria-label="工作与工作区"] [role="tab"]\')].find(n=>n.textContent.trim()==='+JSON.stringify(text)+')','Work tab '+text);
+    const projectAction=text=>pointerClick('[...document.querySelector(".workspace-card").querySelectorAll("button")].find(n=>n.textContent.trim()==='+JSON.stringify(text)+')','Project action '+text);
     const fill=async(selector,value)=>{await evaluate('(()=>{const node=document.querySelector('+JSON.stringify(selector)+');if(!node)throw Error("Missing field");if(!node.checkVisibility()||node.closest("details:not([open])"))throw Error("Field is not visible to the user");node.scrollIntoView({block:"center",inline:"nearest"});node.focus();const prototype=node instanceof HTMLTextAreaElement?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;Object.getOwnPropertyDescriptor(prototype,"value").set.call(node,'+JSON.stringify(value)+');node.dispatchEvent(new Event("input",{bubbles:true}));})()');await delay(100);};
     const key=async(key,modifiers=0)=>{const virtualKey={Tab:9,Enter:13,Escape:27,ArrowUp:38,ArrowDown:40}[key]??key.toUpperCase().charCodeAt(0),code=key.length===1?'Key'+key.toUpperCase():key;await rpc('Input.dispatchKeyEvent',{type:'keyDown',key,code,modifiers,windowsVirtualKeyCode:virtualKey,nativeVirtualKeyCode:virtualKey,...(key==='Enter'?{text:'\r',unmodifiedText:'\r'}:{})},sessionId);await rpc('Input.dispatchKeyEvent',{type:'keyUp',key,code,modifiers,windowsVirtualKeyCode:virtualKey,nativeVirtualKeyCode:virtualKey},sessionId);await delay(80);};
     async function capture(version,scenario,page){
@@ -190,6 +198,29 @@ try {
     }
     for(const version of Object.keys(pages)){
       await rpc('Page.navigate',{url:'http://127.0.0.1:'+server.address().port+'/'+version},sessionId);await until('!!window.fixture&&!!document.querySelector(".harbor-shell")','Harbor '+version+' boot');
+      if(aboutOnly){
+        for(const scenario of aboutScenarios){
+          await rpc('Emulation.setDeviceMetricsOverride',{width:scenario.width,height:scenario.height,deviceScaleFactor:scenario.dpr||1,mobile:false},sessionId);
+          await evaluate('(()=>{const root=document.getElementById("root");root.style.zoom='+scenario.zoom+';root.style.width='+JSON.stringify(100/scenario.zoom+'vw')+';root.style.height='+JSON.stringify(100/scenario.zoom+'vh')+';window.fixture.setTheme('+JSON.stringify(scenario.theme)+');})()');
+          await show('about');await until('document.body.innerText.includes("synthetic-ui-test")&&document.body.innerText.includes("Synthetic acceptance fixture")','About actual page data');
+          assert.equal(await evaluate('[...document.querySelectorAll(".about-page button")].find(b=>b.textContent.trim()==="检查更新")?.disabled'),true,'Unconfigured update stays disabled');
+          assert.equal(await evaluate('document.querySelectorAll(".about-page h1").length'),1);
+          await measure(version,scenario,'about');
+          const text=await evaluate('document.querySelector(".about-page").innerText');
+          checks.push({version,scenario,kind:'about-text',text});
+        }
+        await rpc('Emulation.setDeviceMetricsOverride',{width:1280,height:900,deviceScaleFactor:1,mobile:false},sessionId);
+        await evaluate('document.getElementById("root").style.cssText="width:100vw;height:100vh;zoom:1";window.fixture.setTheme("light")');
+        await show('chat');await evaluate('window.fixtureState.failAbout=true');await show('about');
+        await until('document.querySelector(".about-page [role=alert]")?.innerText.includes("Synthetic About read failed")','About failure is visible');
+        await evaluate('window.fixtureState.failAbout=false');await textClick('重试');
+        await until('document.body.innerText.includes("synthetic-ui-test")&&!document.querySelector(".about-page [role=alert]")','About retry recovers');
+        const link='[...document.querySelectorAll(".about-page .about-link-row")].find(b=>b.textContent.includes("GitHub"))';
+        await evaluate(link+'.focus()');await key('Enter');
+        await until('window.fixtureCalls.some(r=>r.method==="app.openExternal"&&r.params.url==="https://example.invalid/CetaMesh")','About keyboard opens only configured HTTPS via host');
+        checks.push({version,kind:'about-error-retry-and-keyboard-host-link',pass:true});
+        continue;
+      }
       if(hostSyncOnly){assert.equal(version,'after','Host sync follow-up uses current source only');await hostSynchronization(version);continue;}
       const selectedScenarios=behaviorOnly?[]:agentOnly?scenarios.filter(row=>row.width===1024||row.zoom===1.5||row.theme==='dark'&&row.dpr===1.5):quick?scenarios.slice(0,1):zoomOnly?scenarios.filter(row=>row.zoom===zoomOnly):scenarios;
       for(const scenario of selectedScenarios){
@@ -198,7 +229,43 @@ try {
         if(agentOnly){await agentConfiguration(version,scenario);continue;}
         await show('chat');await until('document.querySelectorAll(".chat-message").length>0||document.body.innerText.includes("已保存阶段性分析")','Chat data');await measure(version,scenario,'chat');if(version==='after'){assert.equal(await evaluate('document.body.innerText.includes("958691c1-2135-4ac0-9b05-f204a14b1137:call_00_abcdefghijkl")'),false,'opaque tool IDs stay out of the primary conversation');assert.ok(await evaluate('document.querySelectorAll(".tool-call").length')<=40,'large tool history is bounded');assert.equal(await evaluate('[...document.querySelectorAll(".usage-disclosure")].some(n=>n.open)'),false,'usage details are collapsed by default');}
         await show('work');await until('!!document.querySelector(".task-card")','Task data');await measure(version,scenario,'tasks');await textClick('详情');await until('!!document.querySelector(".cm-sheet")','Task detail drawer');await measure(version,scenario,'task-detail');await closeSheet();
-        await textClick('工作区');await until('!!document.querySelector(".workspace-card")','Workspace view');await measure(version,scenario,'workspace');await click('.workspace-card button');await until('document.querySelectorAll(".git-file").length>0','Git data');await measure(version,scenario,'git');
+        await workTab('工作区');await until('!!document.querySelector(".workspace-card")','Workspace view');await measure(version,scenario,'workspace');
+        const projectOpens=await evaluate('window.fixtureCalls.filter(row=>row.method==="ui.workspace.open").length');
+        const overviewSettledBefore=await evaluate('window.fixtureTaskOverviewSettled||0');
+        const overviewBefore=await evaluate('window.fixtureState.holdTaskOverview=true;window.fixtureCalls.filter(row=>row.method==="ui.task.overview").length');
+        await projectAction('查看任务');
+        const taskNavigation=await evaluate('({taskView:!!document.querySelector(".work-view-tasks"),cards:document.querySelectorAll(".task-card").length,overviewCount:window.fixtureCalls.filter(row=>row.method==="ui.task.overview").length,latestWorkspace:window.fixtureCalls.filter(row=>row.method==="ui.task.overview").at(-1)?.params.workspaceId})');
+        checks.push({kind:'workspace-task-refresh-boundary',version,...scenario,overviewBefore,...taskNavigation});
+        assert.equal(taskNavigation.taskView,true);
+        const taskNavigationIssues=[];
+        if(!taskNavigation.cards)taskNavigationIssues.push('same-project Task rows cleared during pending refresh');
+        if(taskNavigation.overviewCount<=overviewBefore)taskNavigationIssues.push('project Tasks action did not start a fresh scoped read');
+        if(version==='after'){
+          assert.ok(taskNavigation.cards>0,'same-project navigation preserves actual Task rows while refresh is pending: '+JSON.stringify(taskNavigation));
+          assert.ok(taskNavigation.overviewCount>overviewBefore,'project Tasks action starts a fresh scoped read rather than accepting a historical request');
+        }else if(taskNavigationIssues.length)baselineIssues.push({version,...scenario,page:'workspace-project-tasks-pending',issues:taskNavigationIssues});
+        assert.equal(taskNavigation.latestWorkspace,'global-fixture-workspace');
+        await capture(version,scenario,'workspace-project-tasks-pending');
+        await evaluate('window.fixtureState.holdTaskOverview=false;for(const release of window.fixtureTaskListReleases??[])release();window.fixtureTaskListReleases=[]');
+        await until('(window.fixtureTaskOverviewSettled||0)>'+overviewSettledBefore+'&&document.querySelectorAll(".task-card").length>0','Fresh project Task reply settled with actual data visible');
+        assert.equal(await evaluate('window.fixtureCalls.filter(row=>row.method==="ui.workspace.open").length'),projectOpens,'viewing project Tasks does not open or execute the workspace');
+        await click('button[aria-label="任务项目范围"]');await until('!!document.querySelector(\'[role="listbox"][aria-label="任务项目范围"]\')','Task scope selector opened');
+        await pointerClick('[...document.querySelectorAll(\'[role="listbox"][aria-label="任务项目范围"] [role="option"]\')].find(n=>n.textContent.trim()==="全部任务")','All-project Task scope');
+        await until('window.fixtureCalls.filter(row=>row.method==="ui.task.overview").at(-1)?.params.workspaceId==null&&document.querySelectorAll(".task-card").length>0&&document.querySelector(".work-controls").getAttribute("aria-busy")==="false"','All-project data loaded before returning to one project');
+        await workTab('工作区');await until('!!document.querySelector(".workspace-card")','Workspace cards for changed Task scope');
+        const changedScopeBefore=await evaluate('window.fixtureState.holdTaskOverview=true;window.fixtureCalls.filter(row=>row.method==="ui.task.overview").length');
+        await projectAction('查看任务');
+        const changedScope=await evaluate('({cards:document.querySelectorAll(".task-card").length,loading:document.body.innerText.includes("正在读取任务…"),falseEmpty:document.body.innerText.includes("还没有任务"),overviewCount:window.fixtureCalls.filter(row=>row.method==="ui.task.overview").length,workspace:window.fixtureCalls.filter(row=>row.method==="ui.task.overview").at(-1)?.params.workspaceId})');
+        assert.equal(changedScope.cards,0,'different-project results must not leak into a new Task scope');assert.equal(changedScope.loading,true);assert.equal(changedScope.falseEmpty,false,'pending query is not an empty project');
+        assert.ok(changedScope.overviewCount>changedScopeBefore);assert.equal(changedScope.workspace,'global-fixture-workspace');
+        await capture(version,scenario,'workspace-changed-task-scope-pending');
+        await evaluate('window.fixtureState.holdTaskOverview=false;for(const release of window.fixtureTaskListReleases??[])release();window.fixtureTaskListReleases=[]');
+        await until('document.querySelectorAll(".task-card").length>0&&document.querySelector(".work-controls").getAttribute("aria-busy")==="false"','Changed project query settled with actual Task rows');
+        checks.push({kind:'workspace-changed-task-scope',version,...scenario,...changedScope});
+        await workTab('工作区');await until('!!document.querySelector(".workspace-card")','Workspace cards restored');await projectAction('Git 工作台');await until('document.querySelectorAll(".git-file").length>0','Project Git action opens Git data');await measure(version,scenario,'git');
+        assert.equal(await evaluate('window.fixtureCalls.filter(row=>row.method==="ui.workspace.open").length'),projectOpens+1,'explicit Git navigation opens the project exactly once');
+        assert.equal(await evaluate('window.fixtureCalls.filter(row=>row.method==="ui.workspace.open").at(-1)?.params.id'),'global-fixture-workspace');
+        checks.push({kind:'workspace-task-and-git-navigation',version,...scenario,taskScopeVerified:true,explicitGitOpenCount:1});
         if(version==='after')assert.ok(await evaluate('document.querySelectorAll(".git-file").length')<=50,'1500 files stay bounded');
         await show('memory');await until('document.body.innerText.includes("项目构建版本与来源核对")','Memory data');await measure(version,scenario,'memory');
         await agentConfiguration(version,scenario);
@@ -230,12 +297,18 @@ try {
         await key('k',2);await until('!!document.querySelector("input[aria-label=\\"搜索页面、任务和会话\\"]")?.checkVisibility()','Ctrl+K opens real quick jump');await fill('input[aria-label="搜索页面、任务和会话"]','Synthetic');await until('window.fixtureCalls.some(row=>row.method==="ui.search"&&row.params.query==="Synthetic")','Quick jump reuses Core search');await key('Escape');checks.push({kind:'quick-jump-escape-observation',...await evaluate('(()=>{const input=document.querySelector("input[aria-label=\\"搜索页面、任务和会话\\"]");return{inputValue:input?.value,dialogOpen:!!input?.closest("dialog[open]"),visible:input?.checkVisibility()}})()')});await until('!document.querySelector("input[aria-label=\\"搜索页面、任务和会话\\"]")?.checkVisibility()','Escape closes quick jump');checks.push({kind:'quick-jump-keyboard-search',pass:true});
         await key('k',2);await until('!!document.querySelector("input[aria-label=\\"搜索页面、任务和会话\\"]")?.checkVisibility()','Quick jump reopens');await fill('input[aria-label="搜索页面、任务和会话"]','记忆');await key('ArrowDown');checks.push({kind:'quick-jump-arrow-observation',active:await evaluate('document.activeElement?.outerHTML.slice(0,800)')});await key('Enter');checks.push({kind:'quick-jump-enter-observation',active:await evaluate('document.activeElement?.outerHTML.slice(0,800)'),keys:await evaluate('window.fixtureKeyLog.slice(-8)')});await until('!!document.querySelector(".page-memory")&&!document.querySelector("input[aria-label=\\"搜索页面、任务和会话\\"]")?.checkVisibility()','keyboard quick jump opens actual Memory page');checks.push({kind:'quick-jump-keyboard-navigation',pass:true});
         await evaluate('window.fixtureState.largeTasks=true');await show('chat');await show('work');await until('document.body.innerText.includes("1000")||document.querySelectorAll(".task-card").length>50','1000 Tasks loaded');const taskDom=await evaluate('document.querySelectorAll(".task-card,.task-history-row").length');checks.push({kind:'large-task-dom',input:1000,rendered:taskDom});assert.ok(taskDom>0&&taskDom<=100,'1000 Tasks use bounded DOM, not a continuous or missing list: '+taskDom);await fill('input[aria-label="搜索任务"]','Synthetic task 999');await until('document.querySelectorAll(".task-card,.task-history-row").length===1&&document.body.innerText.includes("Synthetic task 999")','Task search reaches final Task');checks.push({kind:'task-search-reaches-last-item',pass:true});
-        await textClick('Git 工作台');await until('!!document.querySelector(".git-file-path")','Git explain workspace');await click('.git-file-path');await until('!!document.querySelector(".diff-scroll")','Shared diff loaded');await capture(version,scenario,'git-diff-unified');await click('[role=tablist][aria-label="Diff 显示方式"] [role=tab]:nth-child(2)');assert.equal(await evaluate('!!document.querySelector(".diff-scroll.is-split")'),true,'Git uses actual shared Split Diff');await capture(version,scenario,'git-diff-split');await textClick('AI 解释');await until('!!document.querySelector(".page-chat textarea[aria-label=\\"输入消息\\"]")?.value.includes("请解释下列文件变更")','Diff opens a bounded ordinary Chat draft');const explain=await evaluate('(()=>{const create=window.fixtureCalls.filter(r=>r.method==="ui.chat.sessions.create").at(-1),config=window.fixtureCalls.filter(r=>r.method==="ui.chat.config.set").at(-1),draft=document.querySelector("textarea[aria-label=\\"输入消息\\"]").value;return{create,config,draft,modelSends:window.fixtureCalls.filter(r=>r.method==="ui.chat.send").length}})()');assert.equal(explain.config.params.config.workspaceId,'global-fixture-workspace','explanation preserves the actual Git Workspace');assert.equal(explain.config.params.config.agentProvider,'none','explanation opens ordinary Chat');assert.equal(explain.modelSends,0,'explanation is a draft, never an implicit model request');assert.ok(explain.draft.length<=26000&&explain.draft.includes('new value'),'bounded draft includes observed Diff');checks.push({kind:'git-explain-opens-scoped-draft',pass:true,workspaceId:explain.config.params.config.workspaceId,modelSends:0,draftLength:explain.draft.length});await capture(version,scenario,'git-explanation-draft');await fill('textarea[aria-label="输入消息"]','Edited synthetic Diff question');await show('memory');await show('chat');await until('document.querySelector("textarea[aria-label=\\"输入消息\\"]")?.value==="Edited synthetic Diff question"','edited explanation draft survives navigation');await fill('textarea[aria-label="输入消息"]','');await show('memory');await show('chat');await until('document.querySelector("textarea[aria-label=\\"输入消息\\"]")?.value===""','cleared explanation draft is not resurrected');checks.push({kind:'explanation-draft-edit-and-clear-persist',pass:true});
+        await workTab('Git 工作台');await until('!!document.querySelector(".git-file-path")','Git explain workspace');await click('.git-file-path');await until('!!document.querySelector(".diff-scroll")','Shared diff loaded');await capture(version,scenario,'git-diff-unified');await click('[role=tablist][aria-label="Diff 显示方式"] [role=tab]:nth-child(2)');assert.equal(await evaluate('!!document.querySelector(".diff-scroll.is-split")'),true,'Git uses actual shared Split Diff');await capture(version,scenario,'git-diff-split');await textClick('AI 解释');await until('!!document.querySelector(".page-chat textarea[aria-label=\\"输入消息\\"]")?.value.includes("请解释下列文件变更")','Diff opens a bounded ordinary Chat draft');const explain=await evaluate('(()=>{const create=window.fixtureCalls.filter(r=>r.method==="ui.chat.sessions.create").at(-1),config=window.fixtureCalls.filter(r=>r.method==="ui.chat.config.set").at(-1),draft=document.querySelector("textarea[aria-label=\\"输入消息\\"]").value;return{create,config,draft,modelSends:window.fixtureCalls.filter(r=>r.method==="ui.chat.send").length}})()');assert.equal(explain.config.params.config.workspaceId,'global-fixture-workspace','explanation preserves the actual Git Workspace');assert.equal(explain.config.params.config.agentProvider,'none','explanation opens ordinary Chat');assert.equal(explain.modelSends,0,'explanation is a draft, never an implicit model request');assert.ok(explain.draft.length<=26000&&explain.draft.includes('new value'),'bounded draft includes observed Diff');checks.push({kind:'git-explain-opens-scoped-draft',pass:true,workspaceId:explain.config.params.config.workspaceId,modelSends:0,draftLength:explain.draft.length});await capture(version,scenario,'git-explanation-draft');await fill('textarea[aria-label="输入消息"]','Edited synthetic Diff question');await show('memory');await show('chat');await until('document.querySelector("textarea[aria-label=\\"输入消息\\"]")?.value==="Edited synthetic Diff question"','edited explanation draft survives navigation');await fill('textarea[aria-label="输入消息"]','');await show('memory');await show('chat');await until('document.querySelector("textarea[aria-label=\\"输入消息\\"]")?.value===""','cleared explanation draft is not resurrected');checks.push({kind:'explanation-draft-edit-and-clear-persist',pass:true});
         assert.equal(await evaluate('window.fixtureCalls.some(row=>/ui\\.(?:task\\.(?:start|resume|reconcile|handoff|complete)|chat\\.send|workspace\\.git\\.(?:commit|branch\\.create|worktree\\.create)|plugins\\.(?:enable|disable|install))$/.test(row.method))'),false,'render acceptance performs no model send, Agent dispatch or side effect');
         await hostSynchronization(version);
       }
     }
-    console.log('PASS global actual Harbor render: '+measurements.filter(r=>r.version==='after').length+' current / '+measurements.filter(r=>r.version==='before').length+' baseline measurements; '+captures.length+' screenshots; keyboard/failure/large-list checks '+checks.length);failed=false;
+    if(aboutOnly&&baseline&&!baselineOnly){
+      const before=checks.filter(row=>row.version==='before'&&row.kind==='about-text');
+      const after=checks.filter(row=>row.version==='after'&&row.kind==='about-text');
+      assert.equal(before.length,after.length);
+      assert.deepEqual(before.map(row=>row.text),after.map(row=>row.text),'All About page text preserved across extraction');
+    }
+    console.log('PASS '+(aboutOnly?'focused About':'global')+' actual Harbor render: '+measurements.filter(r=>r.version==='after').length+' current / '+measurements.filter(r=>r.version==='before').length+' baseline measurements; '+captures.length+' screenshots; keyboard/failure/large-list checks '+checks.length);failed=false;
   }
 }finally{
   let cleanupError;
@@ -249,5 +322,5 @@ try {
     if(browser?.pid&&browser.exitCode===null&&browser.signalCode===null)await terminateSuiteProcessTree(browser);
   } catch(error) { failed=true;cleanupError=error; }
   if(server)await new Promise(resolve=>server.close(resolve));
-  if(evidence)fs.writeFileSync(path.join(evidence,'global-ui-evidence.json'),JSON.stringify({status:process.exitCode===77?'NOT_RUN_ENVIRONMENT':failed?'FAIL':'PASS',kind:'Actual HarborApp and typed client with fixed synthetic IPC DTOs; not real Core/native/model execution',baselineOnly,agentOnly,hostSyncOnly,behaviorOnly,zoomOnly:zoomOnly||null,testOnlyOmittedQuickMaxWidth:omitQuickMaxWidth,baselineDependencies:'Both source versions use the maintained UI dependency set',scaling:'CSS content zoom and explicitly emulated DPR; no Windows DPI setting changed; headless page focus enabled for trusted key dispatch',measurements,captures,checks,baselineIssues,cleanup:{browserExited:!browser||browser.exitCode!==null||browser.signalCode!==null,error:cleanupError?.message??null}},null,2));finalizeSuiteSandbox({sandbox,failed,keepFailed:failed});if(cleanupError)throw cleanupError;
+  if(evidence)fs.writeFileSync(path.join(evidence,'global-ui-evidence.json'),JSON.stringify({status:process.exitCode===77?'NOT_RUN_ENVIRONMENT':failed?'FAIL':'PASS',kind:'Actual HarborApp and typed client with fixed synthetic IPC DTOs; not real Core/native/model execution',baselineOnly,aboutOnly,agentOnly,hostSyncOnly,behaviorOnly,zoomOnly:zoomOnly||null,testOnlyOmittedQuickMaxWidth:omitQuickMaxWidth,baselineDependencies:'Both source versions use the maintained UI dependency set',scaling:'CSS content zoom and explicitly emulated DPR; no Windows DPI setting changed; headless page focus enabled for trusted key dispatch',measurements,captures,checks,baselineIssues,cleanup:{browserExited:!browser||browser.exitCode!==null||browser.signalCode!==null,error:cleanupError?.message??null}},null,2));finalizeSuiteSandbox({sandbox,failed,keepFailed:failed});if(cleanupError)throw cleanupError;
 }

@@ -227,7 +227,10 @@ export function createAgentBroker({ registry, log = () => {}, resolveWorkspaceId
         const metadata = { phase, runId };
         const result = await provider.send({ sessionId, content, mode, phase, runId, nativeReadinessToken,
           onRequestId: requestId => rememberRun(providerId, sessionId, { requestId }, metadata) });
-        if (result?.accepted === true) rememberRun(providerId, sessionId, result, { phase, runId });
+        if (result?.accepted === true) {
+          rememberRun(providerId, sessionId, result, { phase, runId });
+          if (binding?.taskId && phase === 'user') taskExecutionObserver?.({ ...observation, state: 'accepted' });
+        }
         else if (binding?.taskId) taskExecutionObserver?.({ ...observation, state: 'unknown' });
         return result;
       } catch (error) {

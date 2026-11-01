@@ -11,7 +11,7 @@
 //   4. Owner Reject → 测试不执行
 //   5. Owner Approve Once → 恰好执行一次
 //   6. Replay：同一 approvalId 第二次 → DENY
-//   7. Changed Payload：批准 npm test 后换 npm run dangerous → APPROVAL_MISMATCH
+//   7. Changed Payload：原 requestId → REQUEST_ID_CONFLICT；新 requestId 借旧审批 → APPROVAL_MISMATCH
 //   8. Expired Approval → APPROVAL_EXPIRED
 //   9. Workspace change → DENY（policy 层 WORKSPACE_NOT_AUTHORIZED）
 //  10. Agent 改写 package.json 后请求 test.run → 仍需 Owner Approve Once
@@ -144,19 +144,32 @@ fs.writeFileSync(path.join(root, 'src.txt'), 'ok');
   ok('Approval Replay：APPROVAL_NOT_APPROVED，无第二次执行');
 }
 
-// ── 7. Changed Payload：批准 npm test 后换 npm run dangerous → MISMATCH ──────
+// ── 7. Changed Payload：请求身份与审批指纹分别拒绝篡改 ──────────────────────
 {
   const task = taskRuntime.create({ goal: '载荷篡改', workspaceId });
   const agent = svc.grantTask(task.id, { capabilities: ['test.run'] });
   const requestId = 'tamper-1';
   const pending = await svc.broker.execute(agentReq(agent, task.id, workspaceId, 'test.run', { tool: 'npm', args: ['test'] }, { requestId }));
   await svc.execute({ method: 'capability.approval.decide', params: { id: pending.approvalId, approve: true } });
+  const before = markerCount(5);
   await assert.rejects(
     () => svc.broker.execute(agentReq(agent, task.id, workspaceId, 'test.run', { tool: 'npm', args: ['run', 'dangerous'] }, { requestId, approvalId: pending.approvalId })),
-    (e) => e.code === 'APPROVAL_MISMATCH',
-    '批准 npm test 后换成 npm run dangerous → APPROVAL_MISMATCH'
+    (e) => e.code === 'REQUEST_ID_CONFLICT',
+    '已派发 requestId 不能换成另一个载荷；身份围栏先于审批消费'
   );
-  ok('Payload Mutation：APPROVAL_MISMATCH（审批与请求指纹绑定）');
+  await assert.rejects(
+    () => svc.broker.execute(agentReq(agent, task.id, workspaceId, 'test.run', { tool: 'npm', args: ['run', 'dangerous'] }, { requestId: 'tamper-new-id', approvalId: pending.approvalId })),
+    { code: 'APPROVAL_MISMATCH' }
+  );
+  assert.equal(markerCount(5), before, '身份冲突与审批篡改均不再次执行');
+  const unconsumed = await svc.broker.execute(agentReq(agent, task.id, workspaceId, 'test.run', { tool: 'npm', args: ['test'] }, { requestId: 'tamper-unconsumed' }));
+  svc.broker.approvals.decide(unconsumed.approvalId, true, owner);
+  await assert.rejects(
+    () => svc.broker.execute(agentReq(agent, task.id, workspaceId, 'test.run', { tool: 'npm', args: ['run', 'dangerous'] }, { requestId: 'tamper-unconsumed', approvalId: unconsumed.approvalId })),
+    { code: 'APPROVAL_MISMATCH' }
+  );
+  assert.equal(markerCount(5), before, '已批准但未消费的审批也不能派发篡改后的载荷');
+  ok('Payload Mutation：同身份冲突；新身份也不能借用旧审批；执行次数不增加');
 }
 
 // ── 8. Expired Approval → APPROVAL_EXPIRED ──────────────────────────────────

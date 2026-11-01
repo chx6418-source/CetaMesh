@@ -393,7 +393,9 @@ export function createCetaMeshServices(options = {}) {
     reconciler: continuityReconciler,
     workspaceService,
     capabilityService,
-    canRollover: ({ taskId }) => !capabilityService.isTaskProvisioning(taskId),
+    canRollover: ({ taskId }) => !capabilityService.isTaskProvisioning(taskId)
+      && !capabilityService.recoveryForTask(taskId)
+      && !toolExecutionCoordinator.recoveryForTask(taskId),
     prepareHandoff: async ({ taskId }) => { await chatService.prepareTaskHandoff({ taskId }); workingMemory.record(taskId); },
     readWorkingMemory: taskId => workingMemory.references(taskId),
     readOperations: scope => capabilityService.broker.operationsForTask(scope),

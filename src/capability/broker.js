@@ -11,11 +11,11 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
  const dispatches=dispatchFile?readJsonFile(dispatchFile,{missing:{}}):{};
  if(!dispatches || typeof dispatches!=='object' || Array.isArray(dispatches))throw capabilityError('DISPATCH_JOURNAL_CORRUPT','Capability dispatch journal is invalid');
  let recovered=false;
- for(const row of Object.values(dispatches))if(row?.operationId&&row.status==='started'){
+ for(const row of Object.values(dispatches))if(row?.status==='started'){
   row.status='outcome-unknown';row.recoveryCode='CORE_RESTART_RECONCILIATION_REQUIRED';recovered=true;
  }
  if(recovered&&dispatchFile)writeJsonAtomic(dispatchFile,dispatches);
- const activeLogical=new Set();
+ const activeDispatches=new Set();
  const aliasKey=id=>'operation-request:'+requestFingerprint({requestId:String(id)});
  function markOperationBlocker(request,entry,blocker,denied=false){
   const identity=operationIdentity(request,entry),row=identity&&dispatches[identity.key];
@@ -23,10 +23,10 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
   const backup=structuredClone(row);row.blocker=blocker;if(denied)row.authorizationDenied=true;
   try{if(dispatchFile)writeJsonAtomic(dispatchFile,dispatches);}catch(error){dispatches[identity.key]=backup;throw error;}
  }
- function assertRequestBinding(request,identity){
+ function assertRequestBinding(request,identity,{legacyValidated=true}={}){
   const alias=dispatches[aliasKey(request.requestId)];
-  const legacy=identity&&Object.hasOwn(dispatches,request.requestId)?dispatches[request.requestId]:null;
-  if(legacy||(alias&&(!identity||alias.operationKey!==identity.key||alias.fingerprint!==requestFingerprint(request))))
+  const legacy=Object.hasOwn(dispatches,request.requestId)?dispatches[request.requestId]:null;
+  if((legacy&&(identity||(legacyValidated&&legacy.fingerprint!==requestFingerprint(request))))||(alias&&(!identity||alias.operationKey!==identity.key||alias.fingerprint!==requestFingerprint(request))))
    throw capabilityError('REQUEST_ID_CONFLICT','Request identity cannot change its logical operation or parameters');
  }
  function bindRequest(request,identity){
@@ -35,8 +35,8 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
   if(Object.keys(dispatches).length>=50000)throw capabilityError('DISPATCH_JOURNAL_FULL','Capability dispatch journal needs Owner review');
   dispatches[key]={operationKey:identity.key,fingerprint:requestFingerprint(request)};return key;
  }
- function priorOperation(request,entry){
-  const identity=operationIdentity(request,entry);assertRequestBinding(request,identity);
+ function priorOperation(request,entry,options){
+  const identity=operationIdentity(request,entry);assertRequestBinding(request,identity,options);
   const row=identity?dispatches[identity.key]:null;
   if(!row)return null;
   if(row.fingerprint!==identity.fingerprint)throw capabilityError('REQUEST_ID_CONFLICT','Logical operation reused with different scope or parameters');
@@ -78,18 +78,24 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
   const alias=bindRequest(request,identity);
   if(previous&&previous.fingerprint!==fingerprint)throw capabilityError('REQUEST_ID_CONFLICT','Prepared operation parameters changed');
   dispatches[key]={fingerprint,capability:entry.id,at:previous?.at??Date.now(),status:'started',attemptCount:(previous?.attemptCount??0)+1,lastAttemptAt:Date.now(),
-   ...(grantId?{authorization:{kind:'bounded-grant',id:grantId}}:request.approvalId?{authorization:{kind:'approval',id:request.approvalId}}:{}),...(identity?{
-   operationId:request.operationId,...(previous?.logicalStepId?{logicalStepId:previous.logicalStepId}:{}),requestId:request.requestId,taskId:request.taskId,workspaceId:request.workspaceId,
-   descriptorVersion:entry.descriptorVersion??null,executorId:request.actor.id,attemptId:typeof request.attemptId==='string'?request.attemptId.slice(0,160):null}: {})};
+   ...(grantId?{authorization:{kind:'bounded-grant',id:grantId}}:request.approvalId?{authorization:{kind:'approval',id:request.approvalId}}:{}),
+   requestId:request.requestId,...(typeof request.taskId==='string'?{taskId:request.taskId}:{}),
+   workspaceId:typeof request.workspaceId==='string'?request.workspaceId:null,executorId:request.actor.id,
+   attemptId:typeof request.attemptId==='string'?request.attemptId.slice(0,160):null,...(identity?{
+   operationId:request.operationId,...(previous?.logicalStepId?{logicalStepId:previous.logicalStepId}:{}),
+   descriptorVersion:entry.descriptorVersion??null}: {})};
   try{if(dispatchFile)writeJsonAtomic(dispatchFile,dispatches);}
   catch(error){if(previous)dispatches[key]=previous;else delete dispatches[key];if(alias)delete dispatches[alias];throw error;}
-  if(identity)activeLogical.add(key);
+  activeDispatches.add(key);
+  return {dispatchClaim:{key,row:dispatches[key]}};
  }
- function settleDispatch(request, status,entry,result) {
+ function settleDispatch(request, status,entry,result,claim) {
+  // A read/delegating call never owns another invocation's durable intent.
+  if(!claim||dispatches[claim.key]!==claim.row)return;
   const identity=operationIdentity(request,entry),key=identity?.key??request.requestId;
   const row=Object.hasOwn(dispatches,key)?dispatches[key]:null;
   if(!row)return;
-  activeLogical.delete(key);
+  activeDispatches.delete(key);
   row.status=status;
   if(identity&&status==='completed'){
    const receipt=retainedOperationResult(entry,result,request);
@@ -97,7 +103,9 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
   }
   try{if(dispatchFile)writeJsonAtomic(dispatchFile,dispatches);}
   catch(error){audit({requestId:request.requestId,capability:request.capability,status:'dispatch-journal-failed',code:error.code??'WRITE_FAILED'});
-   if(identity){row.status='outcome-unknown';const failure=capabilityError('OPERATION_RESULT_PERSIST_FAILED','Logical operation result was not durably recorded');failure.effectStatus='unknown';throw failure;}}
+   row.status='outcome-unknown';
+   const failure=capabilityError(identity?'OPERATION_RESULT_PERSIST_FAILED':'DISPATCH_RESULT_PERSIST_FAILED','Capability result was not durably recorded');
+   failure.effectStatus='unknown';throw failure;}
  }
  function abortError(signal,inFlight=false){
   if(!inFlight)return typeof signal?.reason?.code==='string'?signal.reason:capabilityError('INVOKE_CANCELLED','Capability operation cancelled');
@@ -140,13 +148,16 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
    await executionGuard();
    await validatePluginParent(request);
    if(signal?.aborted)throw abortError(signal);
-   const previous=priorOperation(request,entry);
+   const previous=priorOperation(request,entry,{legacyValidated:false});
    if(previous){await validateReplay(request,entry);
     if(signal?.aborted)throw abortError(signal);
     audit({requestId:request.requestId,capability:entry.id,status:'operation-replayed',actor:request.actor.id});return previous;}
    // Boundary validation occurs before approval and is repeated at dispatch.
    await entry.validate?.(request);
    await policy.authorize(request,entry);
+   // Legacy fingerprints include descriptor-bound target metadata populated by
+   // validation. Compare that shape before any approval or dispatch, not raw input.
+   assertRequestBinding(request,operationIdentity(request,entry));
    if(signal?.aborted)throw abortError(signal);
    if(request.approvalId){const row=approval.get(request.approvalId);if(row.fingerprint!==requestFingerprint(request))throw capabilityError('APPROVAL_MISMATCH','Request changed');}
    let grantId=null;
@@ -158,7 +169,9 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
    // approval, durable intent and the actual effect, including pending results.
    await executionGuard();
    if(entry.delegatesOperation===true)return await entry.execute(signal?{...request,signal}:request);
-   const raced=claimDispatch(request,entry,grantId);if(raced){await validateReplay(request,entry);return raced;}
+   const claimed=claimDispatch(request,entry,grantId);
+   if(claimed&&!claimed.dispatchClaim){await validateReplay(request,entry);return claimed;}
+   const claim=claimed?.dispatchClaim;
    const providerRequest=signal?{...request,signal}:request;
    let executorEntered=false;
    const providerPromise=Promise.resolve().then(async()=>{
@@ -182,7 +195,7 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
      }
      throw error;
     }
-   }).then(result=>{settleDispatch(request,'completed',entry,result);return result;},error=>{settleDispatch(request,!executorEntered?'failed-no-effect':error.effectStatus==='unknown'?'outcome-unknown':'failed',entry);throw error;});
+   }).then(result=>{settleDispatch(request,'completed',entry,result,claim);return result;},error=>{settleDispatch(request,!executorEntered?'failed-no-effect':error.effectStatus==='unknown'?'outcome-unknown':'failed',entry,undefined,claim);throw error;});
    const result=await (entry.cancellationAware===true&&request.actor.kind==='agent'?providerPromise:awaitWithAbort(providerPromise,signal));
    audit({requestId:request.requestId,capability:entry.id,status:'completed',actor:request.actor.id});
    return {requestId:request.requestId,status:'completed',capability:entry.id,result};
@@ -232,6 +245,9 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
    return {operationId,status:row.status,authorizationGranted:false};
   },
   dispatchStatus:id=>{const alias=dispatches[aliasKey(id)];const row=alias?dispatches[alias.operationKey]:dispatches[String(id)];return row?{capability:row.capability,status:row.status,at:row.at}:null;},
+  uncertainDispatchesForTask:({taskId,workspaceId})=>Object.entries(dispatches)
+   .filter(([,row])=>row?.taskId===taskId&&row.workspaceId===workspaceId&&['started','outcome-unknown'].includes(row.status))
+   .map(([key,row])=>({requestId:row.requestId??key,capability:row.capability,status:row.status,at:row.at})),
   operationsForTask:({taskId,workspaceId})=>Object.values(dispatches).filter(row=>row.operationId&&row.taskId===taskId&&row.workspaceId===workspaceId)
    .map(({operationId,logicalStepId,capability,status,at,executorId,attemptId,requestId,blocker,continuationInput})=>({operationId,logicalStepId,capability,status,at,executorId,attemptId,requestId,blocker,...(safeContinuationInput(capability,continuationInput)?{continuationInput:safeContinuationInput(capability,continuationInput)}:{})})),
   operationRecordForStep:({taskId,workspaceId,logicalStepId})=>{
@@ -245,9 +261,9 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
    return row?structuredClone(row):null;
   },
   acknowledgeTaskOperations:({taskId,workspaceId})=>{
-   const rows=Object.entries(dispatches).filter(([,row])=>row.operationId&&row.taskId===taskId&&row.workspaceId===workspaceId
+   const rows=Object.entries(dispatches).filter(([,row])=>row?.taskId===taskId&&row.workspaceId===workspaceId
     &&['started','outcome-unknown'].includes(row.status));
-   if(rows.some(([key])=>activeLogical.has(key)))throw capabilityError('OPERATION_STILL_RUNNING','The original operation has not settled');
+   if(rows.some(([key])=>activeDispatches.has(key)))throw capabilityError('OPERATION_STILL_RUNNING','The original operation has not settled');
    const prior=rows.map(([,row])=>row.status);for(const [,row]of rows){row.status='reconciled';row.resolution='owner-reviewed-no-replay';}
    try{if(rows.length&&dispatchFile)writeJsonAtomic(dispatchFile,dispatches);}catch(error){rows.forEach(([,row],i)=>{row.status=prior[i];delete row.resolution;});throw error;}
    return {reconciled:rows.length};

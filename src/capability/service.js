@@ -1346,8 +1346,8 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     },
     completionBlocker(taskId) {
       const operationTask = taskFor(taskId);
-      if (operationTask && broker.operationsForTask({ taskId, workspaceId: operationTask.workspaceId })
-        .some(row => ['started', 'outcome-unknown'].includes(row.status))) return 'TASK_EFFECT_UNCONFIRMED';
+      if (operationTask && broker.uncertainDispatchesForTask({ taskId, workspaceId: operationTask.workspaceId })
+        .length) return 'TASK_EFFECT_UNCONFIRMED';
       if (environment.blocker(taskId)) return environment.blocker(taskId);
       if (provisioning.has(taskId) || Object.values(journal).some(row => row?.taskId === taskId && row.status === 'in-flight')) return 'TASK_EXECUTION_UNCONFIRMED';
       if (operations.list().some(row => ['accepted', 'running', 'waiting', 'unknown'].includes(row.status)
@@ -1358,8 +1358,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     },
     recoveryForTask(taskId) {
       const operationTask = taskFor(taskId);
-      const uncertainOperation = operationTask && broker.operationsForTask({ taskId, workspaceId: operationTask.workspaceId })
-        .find(row => ['started', 'outcome-unknown'].includes(row.status));
+      const uncertainOperation = operationTask && broker.uncertainDispatchesForTask({ taskId, workspaceId: operationTask.workspaceId })[0];
       if (uncertainOperation) return { state: 'needs-reconciliation', capability: uncertainOperation.capability };
       if (environment.recovery(taskId)) return environment.recovery(taskId);
       return Object.values(journal).some(row => row?.taskId === taskId && row.status === 'in-flight')

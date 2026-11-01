@@ -15,6 +15,29 @@ import {readJsonFile,writeJsonAtomic} from '../../src/storage/json-file.js';
 
 export const nativeGoal='请把本项目加法实现的修复委派给一个合适且可用的外部开发协作者；你负责选择、交接，并在对方返回后独立查看差异、运行现有 npm test 和交付核验结果。仅允许修改 math.mjs，保持 verify.mjs 与 package.json 不变。需要首次授权时通过本任务审批处理。';
 export const sha256=value=>crypto.createHash('sha256').update(value).digest('hex');
+export function projectNativeRpcEvidence(row){
+ if(!row||!['request','response'].includes(row.kind)||!/^ui\.(?:task\.(?:create|get|start|pause|resume|cancel|complete|handoff|reconcile)|approvals\.decide)$/.test(row.method??''))return null;
+ const ref=value=>typeof value==='string'&&value?sha256(value).slice(0,20):null;
+ const number=value=>Number.isSafeInteger(value)&&value>=0?value:null;
+ const states=new Set(['queued','running','waiting','blocked','paused','completed','failed','cancelled','waiting-approval','awaiting-review','unknown']);
+ return {kind:row.kind,method:row.method,origin:row.origin==='driver'?'driver':'application',requestRef:ref(row.id),taskRef:ref(row.taskId),approvalRef:ref(row.approvalId),expectedRev:number(row.expectedRev),taskRev:number(row.taskRev),status:states.has(row.status)?row.status:null,executionState:states.has(row.executionState)?row.executionState:null,ok:typeof row.ok==='boolean'?row.ok:null,code:typeof row.code==='string'&&/^[A-Z][A-Z0-9_]{0,79}$/.test(row.code)?row.code:null};
+}
+export function nativeRpcObserverSource(){return '('+function(){
+ if(window.__cetameshTestRpcInstalled)return;window.__cetameshTestRpcInstalled=true;
+ // Wry's IPC function is immutable. Observe the existing bridge; never replace it.
+ window.__cetameshObserveRpc=row=>{try{window.__cetameshTestRpcEvidence(JSON.stringify(row));}catch{/* Test diagnostics must not alter product replies. */}};
+}.toString()+')()';}
+export async function invokeNativeTestCall(evaluate,method,params,evidence,launch){
+ const id='native-test-'+crypto.randomUUID(),requestRef=sha256(id).slice(0,20);
+ // Preserve the error on this Promise. CDP exceptions do not carry Error.code;
+ // a transport timeout must never inherit an earlier Core refusal.
+ const reply=await evaluate('window.__nativeTestCall('+JSON.stringify(method)+','+JSON.stringify(params)+','+JSON.stringify(id)+').then(result=>({ok:true,result}),error=>({ok:false,error:{code:error.code,message:error.message}}))');
+ if(reply.ok)return reply.result;
+ const error=Object.assign(Error(reply.error?.message??'Core request rejected'),{code:reply.error?.code});
+ const boundary=evidence.rpcBoundaries?.findLast(row=>row.launch===launch&&row.requestRef===requestRef&&row.kind==='response'&&row.origin==='driver'&&row.ok===false);
+ if(boundary)error.nativeBoundary=boundary;
+ throw error;
+}
 export async function until(read,accept,label,timeout=30000){const end=Date.now()+timeout;let last;while(Date.now()<end){last=await read();if(accept(last))return last;await delay(100);}throw Error(label+' timed out');}
 
 export async function openNativeProduct({packagedDir,provider='deepseek-official',model='deepseek-flash',shellOverride=null,onReady=()=>{}}){
@@ -24,7 +47,8 @@ export async function openNativeProduct({packagedDir,provider='deepseek-official
  function task(){const doc=readJsonFile(path.join(data,'state','tasks','tasks.json'),{missing:{tasks:[]}});return doc.tasks.find(row=>row.goal===nativeGoal);}
  function rpc(method,params={}){return new Promise((resolve,reject)=>{if(!socket||socket.readyState!==WebSocket.OPEN)return reject(Error('Native CDP closed'));const id=++sequence,timer=setTimeout(()=>{pending.delete(id);reject(Error('Native CDP timeout '+method));},20000);pending.set(id,{resolve,reject,timer});socket.send(JSON.stringify({id,method,params}));});}
  async function evaluate(expression){const r=await rpc('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(r.exceptionDetails)throw Error('Native UI action failed: '+String(r.exceptionDetails.exception?.description??r.exceptionDetails.text).slice(0,400));return r.result?.value;}
- async function call(method,params={}){assert.ok(['app.ping','app.status','ui.task.get','ui.task.overview','ui.approvals.list','ui.task.cancel','ui.memory.overview','app.windowAction'].includes(method),'test driver must not create Tasks or grant authority by RPC');if(method==='app.windowAction')assert.equal(params.action,'close');return evaluate('window.__nativeTestCall('+JSON.stringify(method)+','+JSON.stringify(params)+')');}
+ async function call(method,params={}){assert.ok(['app.ping','app.status','ui.task.get','ui.task.overview','ui.approvals.list','ui.task.cancel','ui.memory.overview','app.windowAction'].includes(method),'test driver must not create Tasks or grant authority by RPC');if(method==='app.windowAction')assert.equal(params.action,'close');return invokeNativeTestCall(evaluate,method,params,evidence,evidence.launches?.length||1);}
+ async function waitForTaskUi(current){const target=sha256(current.id).slice(0,20),launch=evidence.launches?.length??1;await until(()=>evidence.rpcBoundaries?.findLast(row=>row.launch===launch&&row.kind==='response'&&row.origin==='application'&&row.taskRef===target&&row.ok===true&&row.taskRev>=current.rev&&(!current.executionObservation?.state||row.executionState===current.executionObservation.state)),Boolean,'current Task UI reply');await evaluate('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');}
  async function click(label){await until(()=>evaluate('Array.from(document.querySelectorAll("button")).some(b=>b.textContent.trim()==='+JSON.stringify(label)+'&&!b.disabled)'),Boolean,'native button '+label);await evaluate('Array.from(document.querySelectorAll("button")).find(b=>b.textContent.trim()==='+JSON.stringify(label)+'&&!b.disabled).click()');evidence.actions.push(label);await delay(150);}
  async function fill(label,value){await evaluate('(()=>{const e=Array.from(document.querySelectorAll("textarea,input")).find(e=>e.getAttribute("aria-label")==='+JSON.stringify(label)+');if(!e)throw Error("missing field");Object.getOwnPropertyDescriptor(e.tagName==="TEXTAREA"?HTMLTextAreaElement.prototype:HTMLInputElement.prototype,"value").set.call(e,'+JSON.stringify(value)+');e.dispatchEvent(new Event("input",{bubbles:true}));})()');evidence.actions.push('填写 '+label);await delay(100);}
  async function capture(file){const r=await rpc('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});fs.writeFileSync(file,Buffer.from(r.data,'base64'));}
@@ -69,6 +93,7 @@ export async function openNativeProduct({packagedDir,provider='deepseek-official
   writeJsonAtomic(path.join(data,'state','desktop-ui.json'),{closeBehavior:'quit'});
   assert.equal(task(),undefined,'configuration seeding must not precreate any Task');
   async function startNative(){
+  const launchOrdinal=(evidence.launches?.length??0)+1;
   const executable=path.join(app,'WhaleBridge.exe');evidence.desktopSha256=sha256(fs.readFileSync(executable));evidence.coreSha256=sha256(fs.readFileSync(path.join(app,'WhaleBridgeCore.exe')));
   const staleEndpoint=findPort(path.join(data,'webview2'));if(staleEndpoint)fs.rmSync(staleEndpoint);
   child=spawn(executable,['--ui=v2','--data-dir',data],{cwd:app,stdio:'ignore',windowsHide:false,env:{...process.env,WHALEBRIDGE_DATA_DIR:data,WHALEBRIDGE_CORE_EXE:path.join(app,'WhaleBridgeCore.exe'),WHALEBRIDGE_CORE_MODE:'packaged',WHALEBRIDGE_INSTANCE_SUFFIX:'native-test-'+sandbox.runId,WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS:'--remote-debugging-port=0 --remote-debugging-address=127.0.0.1 --disable-background-networking'}});
@@ -82,13 +107,16 @@ export async function openNativeProduct({packagedDir,provider='deepseek-official
   socket.on('message',buffer=>{const message=JSON.parse(String(buffer));if(message.method==='Page.javascriptDialogOpening'){const expected=message.params.type==='confirm'&&message.params.message.startsWith('取消任务“')&&message.params.message.includes(nativeGoal.slice(0,30));if(!expected){evidence.unexpectedDialogs??=[];evidence.unexpectedDialogs.push({type:message.params.type,message:String(message.params.message).slice(0,200)});}void rpc('Page.handleJavaScriptDialog',{accept:expected}).catch(error=>{evidence.dialogError=error.message;});}if(message.id&&pending.has(message.id)){const row=pending.get(message.id);pending.delete(message.id);clearTimeout(row.timer);message.error?row.reject(Error(message.error.message)):row.resolve(message.result);}});
   await rpc('Runtime.enable');await rpc('Page.enable');
   await until(()=>evaluate('typeof window.ipc?.postMessage==="function"&&typeof window.__cetameshReceive==="function"'),Boolean,'production native bridge');
-  await evaluate('(()=>{const original=window.__cetameshReceive,pending=new Map();window.__cetameshReceive=m=>{const p=pending.get(m.id);if(p){pending.delete(m.id);m.ok?p.resolve(m.result):p.reject(Error(m.error?.code+": "+m.error?.message));}else original(m);};window.__nativeTestCall=(method,params)=>new Promise((resolve,reject)=>{const id="native-test-"+crypto.randomUUID();pending.set(id,{resolve,reject});window.ipc.postMessage(JSON.stringify({id,method,params}));});})()');connected=true;
+  await evaluate('('+function(){const original=window.__cetameshReceive,pending=new Map(),note=row=>{try{window.__cetameshObserveRpc?.(row);}catch{}};window.__cetameshReceive=m=>{const p=pending.get(m.id);if(p){pending.delete(m.id);const t=m.result?.task;note({...p.meta,kind:'response',taskId:t?.id??p.meta.taskId,taskRev:t?.rev,status:t?.status,executionState:t?.execution?.state,ok:m.ok===true,code:m.error?.code});m.ok?p.resolve(m.result):p.reject(Object.assign(Error(m.error?.message??'Core request rejected'),{code:m.error?.code}));}else original(m);};window.__nativeTestCall=(method,params,id='native-test-'+crypto.randomUUID())=>new Promise((resolve,reject)=>{const meta={id,method,origin:'driver',...(method.startsWith('ui.task.')?{taskId:params.id}:{}),expectedRev:params.expectedRev};pending.set(id,{resolve,reject,meta});note({...meta,kind:'request'});window.ipc.postMessage(JSON.stringify({id,method,params}));});}.toString()+')()');connected=true;
+  evidence.rpcBoundaries??=[];await rpc('Runtime.addBinding',{name:'__cetameshTestRpcEvidence'});
+  socket.on('message',buffer=>{const message=JSON.parse(String(buffer));if(message.method!=='Runtime.bindingCalled'||message.params?.name!=='__cetameshTestRpcEvidence')return;try{const row=projectNativeRpcEvidence(JSON.parse(message.params.payload));if(row){if(evidence.rpcBoundaries.length>=200){evidence.rpcBoundaries.shift();evidence.omittedRpcBoundaries=(evidence.omittedRpcBoundaries??0)+1;}evidence.rpcBoundaries.push({...row,launch:launchOrdinal,observedAt:new Date().toISOString()});if(row.kind==='request')evidence.uiCalls[row.method]=(evidence.uiCalls[row.method]??0)+1;}}catch{evidence.invalidRpcEvidence=(evidence.invalidRpcEvidence??0)+1;}});
+  await evaluate(nativeRpcObserverSource());
   evidence.nativePing=await call('app.ping');assert.equal(evidence.nativePing.host,'webview2');await until(()=>call('app.status'),row=>row.ready===true,'real Core EXE readiness');
   evidence.desktopPid=child.pid;evidence.origin=await evaluate('location.origin');evidence.userAgent=await evaluate('navigator.userAgent');
   evidence.launches??=[];evidence.launches.push({desktopPid:child.pid,origin:evidence.origin});
   if(evidence.launches.length===1)await onReady({executable,pid:child.pid,data,project,root,evidence});
   }
   await startNative();
-  return {root,data,project,app,evidence,task,rpc,evaluate,call,click,fill,capture,close,restart:async()=>{await stopNative();socket=null;connected=false;launchError=null;await startNative();}};
+  return {root,data,project,app,evidence,task,rpc,evaluate,call,click,fill,capture,close,waitForTaskUi,restart:async()=>{await stopNative();socket=null;connected=false;launchError=null;await startNative();}};
  }catch(error){try{if(seeder){const results=await Promise.allSettled([seeder.autonomousHandoff.close(),seeder.chatService.close(),seeder.agentService.close(),seeder.managedAgent.close(),seeder.capabilityService.close(),seeder.extensionService.close()]);if(results.some(row=>row.status==='rejected'))evidence.seederCloseFailed=true;}}finally{try{await close({failed:true});}catch(cleanupError){evidence.cleanupFailure={code:cleanupError.code??cleanupError.name,message:String(cleanupError.message).slice(0,300)};}}error.nativeEvidence=evidence;throw error;}
 }

@@ -50,7 +50,7 @@ check('Harbor shell is the sole design and contains no prototype records', () =>
   assert.ok(exists('desktop-ui/src/app/HarborApp.tsx'));
   const app = read('desktop-ui/src/app/HarborApp.tsx');
   const entry = read('desktop-ui/src/main.tsx');
-  const sources = ['desktop-ui/src/app/HarborApp.tsx', 'desktop-ui/src/main.tsx']
+  const sources = ['desktop-ui/src/app/HarborApp.tsx', 'desktop-ui/src/app/AboutPage.tsx', 'desktop-ui/src/app/PagePresentation.tsx', 'desktop-ui/src/main.tsx']
     .filter(exists).map(read).join('\n');
   assert.match(app, /Chat/);
   assert.match(app, /Agents/);
@@ -58,7 +58,9 @@ check('Harbor shell is the sole design and contains no prototype records', () =>
   assert.match(app, /Settings/);
   assert.match(app, /About/);
   assert.match(entry, /HarborApp/);
-  for (const page of ['ChatPage', 'WorkPage', 'AgentsPage', 'PluginsPage', 'SettingsPage', 'AboutPage', 'OnboardingPage']) assert.match(app, new RegExp(`function ${page}`));
+  for (const page of ['ChatPage', 'WorkPage', 'AgentsPage', 'PluginsPage', 'SettingsPage', 'OnboardingPage']) assert.match(app, new RegExp(`function ${page}`));
+  assert.match(app, /import \{ AboutPage \} from '\.\/AboutPage'/);
+  assert.match(read('desktop-ui/src/app/AboutPage.tsx'), /export function AboutPage/);
   for (const action of ['sessions.rename', 'sessions.archive', 'sessions.remove', 'toggleIntegrationTool', 'pluginClient.toggleTool', 'manageServer']) {
     assert.match(app, new RegExp(action.replace('.', '\\.')), `Harbor is missing ${action}`);
   }
@@ -161,7 +163,7 @@ check('Models settings connect through the provider catalog without retaining AP
   assert.match(client, /testProvider:.*ui\.onboarding\.testProvider/);
 });
 check('About renders real build metadata and cached release notes', () => {
-  const app = read('desktop-ui/src/app/HarborApp.tsx');
+  const app = read('desktop-ui/src/app/AboutPage.tsx');
   const client = read('desktop-ui/src/bridge/typed-client.ts');
   assert.match(app, /aboutClient\.update\(\)/);
   assert.match(app, /info\.buildNumber/);
