@@ -1060,13 +1060,24 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
       || observed.provider !== provider || observed.sessionId !== sessionId
       || current.status !== 'running' || current.currentAgent?.provider !== provider
       || current.currentAgent?.sessionId !== sessionId) return current;
+    // ACK timing is a fact about the existing run, not a new execution state.
+    // A Provider may deliver tool/end events before its send promise resolves.
+    if (state === 'accepted') {
+      if (Number.isSafeInteger(observed.dispatchAcceptedAt)) return current;
+      return mutate(id, current.rev, draft => {
+        draft.executionObservation = { ...observed, dispatchAcceptedAt: now() }; return draft;
+      });
+    }
     if (!['running', 'waiting-approval', 'awaiting-review', 'failed', 'cancelled', 'unknown'].includes(state)) {
       throw taskError('INVALID_PARAMS', 'Invalid execution observation');
     }
     if (observed.state === state && (!toolActivity || observed.hadToolActivity)) return current;
     return mutate(id, current.rev, draft => {
       draft.executionObservation = { ...observed, state,
-        hadToolActivity: observed.hadToolActivity || toolActivity, updatedAt: now() };
+        hadToolActivity: observed.hadToolActivity || toolActivity, updatedAt: now(),
+        ...(toolActivity && !observed.hadToolActivity ? { firstToolObservedAt: now() } : {}),
+        ...(['awaiting-review','failed','cancelled'].includes(state) && !Number.isSafeInteger(observed.turnEndObservedAt)
+          ? { turnEndObservedAt: now() } : {}) };
       return draft;
     });
   }
@@ -1089,6 +1100,14 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     const observedExitCode = Number.isSafeInteger(exitCode) ? exitCode : null;
     const task = mutate(id, current.rev, draft => {
       draft.executionEvidence ??= [];
+      const observed = draft.executionObservation;
+      const sameRun = row => row.provider === provider && row.sessionId === sessionId && row.runId === runId && row.phase === 'user';
+      if (observed && phase === 'user' && observed.provider === provider && observed.sessionId === sessionId
+        && observed.runId === runId && ['completed','failed','cancelled'].includes(resultStatus)
+        && !Number.isSafeInteger(observed.firstToolCompletedAt)
+        && !draft.executionEvidence.some(row => sameRun(row) && ['completed','failed','cancelled'].includes(row.status))) {
+        draft.executionObservation = { ...observed, firstToolCompletedAt: now() };
+      }
       draft.executionEvidence.push({ eventId: sourceId, provider, sessionId,
         runId: normalizeText(runId, 'runId', 240) || null,
         phase: normalizeText(phase, 'phase', 40) || 'unknown', capability: name,

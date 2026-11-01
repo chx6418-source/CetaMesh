@@ -60,7 +60,9 @@ try {
     isRegistered: id => id === 'fixture-model',
     resolveProvider: () => ({ id: 'fixture-model' }),
     async *stream(request) {
-      modelRequests.push(structuredClone(request));
+      const { onContext, signal, ...payload } = request;
+      assert.equal(typeof onContext, 'function', 'production passes an ephemeral context observer, not model payload');
+      modelRequests.push(structuredClone(payload));
       yield { type: 'assistant/chunk', data: { chunk: { type: 'text-delta', text: 'Model reply' } } };
       yield { type: 'turn/end', data: { reason: { kind: 'completed' } } };
     }
@@ -91,6 +93,7 @@ try {
     JSON.stringify({ audit, routing: history.messages.at(-1).routing }));
 
   await chat.execute({ method: 'chat.send', params: { id: session.id, text: 'hello' } });
+  await waitFor(() => chat.execute({ method: 'chat.status', params: { id: session.id } }), status => status.turn === null, 'ordinary Model turn');
   history = await chat.execute({ method: 'chat.history', params: { id: session.id } });
   assert.equal(history.messages.at(-1).routing.resolvedRoute, 'model');
   assert.equal(modelRequests.length, 2);

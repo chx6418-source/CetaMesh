@@ -118,11 +118,12 @@ function makeChatService(stateDir, port, { buildProductContext, defaultModel = '
   const { server, port, close, requests } = await startProviderServer();
   const stateDir = path.join(temp, 'case1');
   const contextCalls = [];
+  const contextCanary = 'fixture-private-product-context-must-not-persist';
   const service = makeChatService(stateDir, port, {
     defaultModel: 'fixture-model-a',
     buildProductContext: async (request) => {
       contextCalls.push(request);
-      return JSON.stringify({ schemaVersion: 1, mode: 'chat', task: null, workspace: null });
+      return JSON.stringify({ schemaVersion: 1, mode: 'chat', task: null, workspace: null, contextCanary });
     }
   });
   const created = await service.execute({ method: 'chat.sessions.create', params: {} });
@@ -150,7 +151,8 @@ function makeChatService(stateDir, port, { buildProductContext, defaultModel = '
   assert.match(requests[0].messages[1].content, /"schemaVersion":1/);
   assert.equal(requests[0].messages.at(-1).role, 'user');
   assert.equal(JSON.stringify(history).includes('You are operating inside CetaMesh'), false, '身份与动态上下文不落入 Chat 历史');
-  assert.equal(JSON.stringify(history).includes('"schemaVersion":1'), false, '动态上下文不落入 Chat 历史');
+  assert.ok(requests[0].messages.some(message => message.content?.includes(contextCanary)), 'private context canary reaches only the request');
+  assert.equal(JSON.stringify(history).includes(contextCanary), false, '动态上下文正文不落入 Chat 历史；数字用量观察可独立含 schemaVersion');
   await close();
   ok('零 DSH 依赖：无 api/controlExecute 构造的 Chat 完成真实 HTTP 流式回合 + usage 落盘');
 }

@@ -23,10 +23,10 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
   const backup=structuredClone(row);row.blocker=blocker;if(denied)row.authorizationDenied=true;
   try{if(dispatchFile)writeJsonAtomic(dispatchFile,dispatches);}catch(error){dispatches[identity.key]=backup;throw error;}
  }
- function assertRequestBinding(request,identity){
+ function assertRequestBinding(request,identity,{legacyValidated=true}={}){
   const alias=dispatches[aliasKey(request.requestId)];
   const legacy=Object.hasOwn(dispatches,request.requestId)?dispatches[request.requestId]:null;
-  if((legacy&&(identity||legacy.fingerprint!==requestFingerprint(request)))||(alias&&(!identity||alias.operationKey!==identity.key||alias.fingerprint!==requestFingerprint(request))))
+  if((legacy&&(identity||(legacyValidated&&legacy.fingerprint!==requestFingerprint(request))))||(alias&&(!identity||alias.operationKey!==identity.key||alias.fingerprint!==requestFingerprint(request))))
    throw capabilityError('REQUEST_ID_CONFLICT','Request identity cannot change its logical operation or parameters');
  }
  function bindRequest(request,identity){
@@ -35,8 +35,8 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
   if(Object.keys(dispatches).length>=50000)throw capabilityError('DISPATCH_JOURNAL_FULL','Capability dispatch journal needs Owner review');
   dispatches[key]={operationKey:identity.key,fingerprint:requestFingerprint(request)};return key;
  }
- function priorOperation(request,entry){
-  const identity=operationIdentity(request,entry);assertRequestBinding(request,identity);
+ function priorOperation(request,entry,options){
+  const identity=operationIdentity(request,entry);assertRequestBinding(request,identity,options);
   const row=identity?dispatches[identity.key]:null;
   if(!row)return null;
   if(row.fingerprint!==identity.fingerprint)throw capabilityError('REQUEST_ID_CONFLICT','Logical operation reused with different scope or parameters');
@@ -148,13 +148,16 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
    await executionGuard();
    await validatePluginParent(request);
    if(signal?.aborted)throw abortError(signal);
-   const previous=priorOperation(request,entry);
+   const previous=priorOperation(request,entry,{legacyValidated:false});
    if(previous){await validateReplay(request,entry);
     if(signal?.aborted)throw abortError(signal);
     audit({requestId:request.requestId,capability:entry.id,status:'operation-replayed',actor:request.actor.id});return previous;}
    // Boundary validation occurs before approval and is repeated at dispatch.
    await entry.validate?.(request);
    await policy.authorize(request,entry);
+   // Legacy fingerprints include descriptor-bound target metadata populated by
+   // validation. Compare that shape before any approval or dispatch, not raw input.
+   assertRequestBinding(request,operationIdentity(request,entry));
    if(signal?.aborted)throw abortError(signal);
    if(request.approvalId){const row=approval.get(request.approvalId);if(row.fingerprint!==requestFingerprint(request))throw capabilityError('APPROVAL_MISMATCH','Request changed');}
    let grantId=null;

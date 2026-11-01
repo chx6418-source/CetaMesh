@@ -562,13 +562,14 @@ try {
   while (Date.now() < deadline && !ready) {
     try {
       token = fs.readFileSync(path.join(workerRoot, 'state', 'agent-token'), 'utf8').trim();
-      ready = (await dataCall({ path: '/api/status', token, pipeName, timeoutMs: 500 })).ok;
+      const status = await dataCall({ path: '/api/status', token, pipeName, timeoutMs: 500 });
+      ready = status.ok && status.json.ready === true;
     } catch (error) {
       if (worker.exitCode !== null) throw new Error(`QQ fixture Core exited before IPC readiness (${worker.exitCode}): ${workerStderr}`);
-      await new Promise(resolve => setTimeout(resolve, 50));
     }
+    if (!ready) await new Promise(resolve => setTimeout(resolve, 50));
   }
-  assert.equal(ready, true, 'isolated Core must expose its real data IPC');
+  assert.equal(ready, true, 'isolated Core must finish diagnostics, not merely expose its status pipe');
   const recent = () => dataCall({ path: '/api/socialV2/recent', query: { key: 'group:1' }, sessionToken: 'invalid-fixture', token, pipeName });
   assert.equal((await recent()).status, 403);
   await workerIntegration.execute({ method: 'plugins.tool.toggle', params: {

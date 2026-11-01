@@ -283,6 +283,7 @@ type HostMap = {
 };
 type Reply = { id: string; ok: true; result: unknown } | { id: string; ok: false; error: { code: string; message: string } };
 type EventEnvelope = { event: DesktopEvent; data: DesktopEventData };
+type RpcObservation = {kind:'request'|'response';id:string;method:string;origin?:'application'|'driver';taskId?:string;approvalId?:string;expectedRev?:number;taskRev?:number;status?:string;executionState?:string;ok?:boolean;code?:string};
 interface HostBridge {
   invoke<M extends HostMethod>(method: M, params: HostMap[M]['params']): Promise<HostMap[M]['result']>;
   subscribe(event: DesktopEvent, callback: (data: DesktopEventData) => void): () => void;
@@ -294,10 +295,12 @@ declare global {
     __cetameshReceive?: (reply: Reply) => void;
     __CETAMESH_NATIVE_CHROME__?: boolean;
     __cetameshEvent?: (event: EventEnvelope) => void;
+    // Optional in-memory acceptance observer. No request bodies or persistence.
+    __cetameshObserveRpc?: (fact: RpcObservation) => void;
   }
 }
 
-const pending = new Map<string, { resolve(value: unknown): void; reject(error: Error): void; timer: number }>();
+const pending = new Map<string, { resolve(value: unknown): void; reject(error: Error): void; timer: number;observation:RpcObservation }>();
 const listeners = new Map<DesktopEvent, Set<(data: DesktopEventData) => void>>();
 let nextId = 0;
 let cursor = 0;
@@ -307,6 +310,10 @@ const MAX_BRIDGE_REQUEST_BYTES = 900 * 1024;
 // Native selectors wait for human input. Keep their wait bounded without
 // expiring them at the ordinary RPC deadline while the dialog is still open.
 const NATIVE_SELECTOR_METHODS = new Set(['app.pickFolder', 'app.pickFiles', 'app.pickExtensionPackage', 'app.diagnostics.export']);
+function observeRpc(fact:RpcObservation){
+  if(!/^ui\.(?:task\.(?:create|get|start|pause|resume|cancel|complete|handoff|reconcile)|approvals\.decide)$/.test(fact.method))return;
+  try{window.__cetameshObserveRpc?.(fact);}catch{/* Diagnostics cannot change transport or authority. */}
+}
 
 function send<T>(method: HostMethod | UiMethod, params: object): Promise<T> {
   if (!window.ipc) return Promise.reject(new Error('桌面主机连接不可用。请从 CetaMesh Desktop 打开此界面。'));
@@ -316,11 +323,15 @@ function send<T>(method: HostMethod | UiMethod, params: object): Promise<T> {
   }
   const id = `harbor-${++nextId}`;
   return new Promise<T>((resolve, reject) => {
+    const input=params as {id?:unknown;expectedRev?:unknown};
+    const entity=typeof input.id==='string'&&input.id.length<=240?input.id:undefined;
+    const observation:RpcObservation={kind:'request',id,method,origin:'application',...(method.startsWith('ui.task.')?{taskId:entity}:{approvalId:entity}),...(Number.isSafeInteger(input.expectedRev)&&Number(input.expectedRev)>=0?{expectedRev:Number(input.expectedRev)}:{})};
     const timer = window.setTimeout(() => {
       pending.delete(id);
       reject(new Error('桌面主机响应超时。'));
     }, NATIVE_SELECTOR_METHODS.has(method) ? 300_000 : 32_000);
-    pending.set(id, { resolve: value => resolve(value as T), reject, timer });
+    pending.set(id, { resolve: value => resolve(value as T), reject, timer,observation });
+    observeRpc(observation);
     window.ipc!.postMessage(JSON.stringify({ id, method, params }));
   });
 }
@@ -331,6 +342,8 @@ window.__cetameshReceive = (reply) => {
   if (!request) return;
   window.clearTimeout(request.timer);
   pending.delete(reply.id);
+  const task=reply.ok?(reply.result as {task?:{id?:string;rev?:number;status?:string;execution?:{state?:string}}}|null)?.task:undefined;
+  observeRpc({...request.observation,kind:'response',taskId:task?.id??request.observation.taskId,taskRev:task?.rev,status:task?.status,executionState:task?.execution?.state,ok:reply.ok,...(!reply.ok?{code:reply.error.code}:{})});
   if (reply.ok) request.resolve(reply.result);
   else request.reject(Object.assign(new Error(reply.error.message), { code: reply.error.code }));
 };
