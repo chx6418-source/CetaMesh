@@ -3,6 +3,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import childProcess from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
 import { setTimeout as delay } from 'node:timers/promises';
 import { classifySuiteOutcome } from '../src/testing/suite-result.js';
 
@@ -23,6 +25,26 @@ try {
   assert.fail(`suite process-tree termination helper is unavailable: ${error.message}`);
 }
 assert.equal(typeof terminateSuiteProcessTree, 'function', 'suite process-tree termination helper is exported');
+
+// Windows may finish closing a descendant between taskkill's enumeration and
+// termination. Mock only taskkill; fake PIDs are never sent to the operating system.
+const rootPid=7200,childPid=2952;
+const rootSuccess='SUCCESS: The process with PID 7200 (child process of PID 9999) has been terminated.\r\n';
+const goneChild='ERROR: The process with PID 2952 (child process of PID 7200) could not be terminated.\r\nReason: There is no running instance of the task.\r\n';
+async function taskkillFixture(stdout,stderr,probe){
+ const original=childProcess.execFile;
+ childProcess.execFile=(file,args,options,done)=>{assert.equal(file,'taskkill.exe');assert.deepEqual(args,['/PID',String(rootPid),'/T','/F']);assert.equal(options.windowsHide,true);queueMicrotask(()=>done(Object.assign(Error('fixture taskkill aggregate error'),{code:128}),stdout,stderr));};
+ syncBuiltinESMExports();
+ try{return await terminateSuiteProcessTree({pid:rootPid},{platform:'win32',killWaitMs:0,signalProcess:(pid,signal)=>{assert.ok([rootPid,childPid].includes(pid),'only reported owned tree members may be probed');assert.equal(signal,0,'confirmation never kills a PID parsed from output');return probe(pid);}});}
+ finally{childProcess.execFile=original;syncBuiltinESMExports();}
+}
+const absent=()=>{throw Object.assign(Error('already exited'),{code:'ESRCH'});};
+await assert.doesNotReject(taskkillFixture(rootSuccess,goneChild,absent),'a confirmed root termination and already exited child are a successful tree cleanup');
+await assert.rejects(taskkillFixture(rootSuccess,goneChild,pid=>pid===childPid?undefined:absent()),/could not confirm/,'a live descendant keeps cleanup unconfirmed');
+await assert.rejects(taskkillFixture(rootSuccess,goneChild,()=>{throw Object.assign(Error('probe denied'),{code:'EPERM'});}),/could not confirm/,'an inaccessible process is not assumed exited');
+await assert.rejects(taskkillFixture('',goneChild,absent),/could not confirm/,'root disappearance alone cannot prove that its descendants exited');
+await assert.rejects(taskkillFixture(rootSuccess,goneChild.replace('There is no running instance of the task.','Access is denied.'),absent),/could not confirm/,'permission failures remain failures even if the root disappeared');
+console.log('PASS taskkill close race requires root success, exact benign errors and every reported PID confirmed absent');
 
 const tempRoot = path.resolve(process.env.WHALEBRIDGE_TEST_TMPDIR || os.tmpdir());
 const fixtureRoot = fs.mkdtempSync(path.join(tempRoot, 'suite-process-tree-'));

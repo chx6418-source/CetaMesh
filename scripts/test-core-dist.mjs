@@ -66,7 +66,7 @@ async function waitForDataIpc(dataRoot, { timeoutMs = 30000 } = {}) {
       const token = fs.readFileSync(path.join(dataRoot, 'state', 'agent-token'), 'utf8').trim();
       if (!token) throw new Error('Data IPC credential is not initialized yet');
       const res = await dataCall({ path: '/api/status', token, timeoutMs: 3000, pipeName });
-      if (!res.ok) throw new Error(`Data IPC is not authenticated/ready (status ${res.status})`);
+      if (!res.ok || res.json?.ready === false) throw new Error(`Data IPC is not authenticated/ready (status ${res.status})`);
       return { pipeName, token, res };
     } catch (error) {
       lastError = error;

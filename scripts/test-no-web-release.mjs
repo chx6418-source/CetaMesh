@@ -15,6 +15,7 @@ import {
 } from './no-web-release-policy.mjs';
 import { resolveRuntimeSurfacePolicy, describeRuntimeSurfacePolicy, RUNTIME_SURFACES } from '../src/runtime-surface.js';
 import { resolveDataPipeName, dataCall, DATA_IPC_METHOD } from '../src/control/data-ipc.js';
+import { waitForDataIpc } from './helpers/wait-for-data-ipc.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -198,19 +199,10 @@ function tryTcpConnect(port, { timeoutMs = 3000 } = {}) {
 /** 经数据面 pipe 等待 worker 就绪并返回 /api/status 结果（同时验证 MCP 数据通道）。 */
 async function waitForDataPlane(dataDir, { timeoutMs = 30000, pipeName } = {}) {
   const resolvedPipe = pipeName ?? resolveDataPipeName({ dataRoot: dataDir });
-  const deadline = Date.now() + timeoutMs;
-  let lastError = null;
-  while (Date.now() < deadline) {
-    try {
-      const token = fs.readFileSync(path.join(dataDir, 'state', 'agent-token'), 'utf8').trim();
-      const res = await dataCall({ path: '/api/status', token, timeoutMs: 3000, pipeName: resolvedPipe });
-      return { pipeName: resolvedPipe, token, res };
-    } catch (error) {
-      lastError = error;
-      await new Promise((resolve) => setTimeout(resolve, 300));
-    }
-  }
-  throw new Error(`data plane not ready: ${lastError?.message ?? lastError}`);
+  const res = await waitForDataIpc(dataDir, { timeoutMs,
+    call: params => dataCall({ ...params, pipeName: resolvedPipe }) });
+  const token = fs.readFileSync(path.join(dataDir, 'state', 'agent-token'), 'utf8').trim();
+  return { pipeName: resolvedPipe, token, res };
 }
 
 /** 原始帧调用（用于验证控制面方法在数据面 pipe 上被拒）。 */

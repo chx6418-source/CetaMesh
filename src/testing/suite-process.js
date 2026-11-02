@@ -21,7 +21,36 @@ async function waitForProcessGroupExit(pid, timeoutMs, signalProcess) {
   return !processGroupExists(pid, signalProcess);
 }
 
-function terminateWindowsTree(pid) {
+function exitedWindowsTreeMembers(pid, error, stdout, stderr) {
+  // A nonzero aggregate can mean a descendant exited during taskkill's walk.
+  // Require the root's affirmative termination and recognize only this exact
+  // benign diagnostic. Other locales/errors remain unconfirmed, never ignored.
+  if (!Number.isInteger(error.code) || error.killed || error.signal) return null;
+  const output = String(stdout).replace(/\r\n/g, '\n'), diagnostic = String(stderr).replace(/\r\n/g, '\n');
+  const success = /^SUCCESS: The process with PID (\d+)(?: \(child process of PID \d+\))? has been terminated\.[ \t]*(?:\n|$)/gm;
+  const missing = /^ERROR: The process with PID (\d+) \(child process of PID \d+\) could not be terminated\.[ \t]*\n[ \t\n]*Reason: There is no running instance of the task\.[ \t]*(?:\n|$)/gm;
+  const terminated = [...output.matchAll(success)].map(match => Number(match[1]));
+  const absent = [...diagnostic.matchAll(missing)].map(match => Number(match[1]));
+  if (!terminated.includes(pid) || !absent.length || absent.includes(pid)
+    || output.replace(success, '').trim() || diagnostic.replace(missing, '').trim()) return null;
+  const members = [...new Set([...terminated, ...absent])];
+  return members.every(member => Number.isSafeInteger(member) && member > 0) ? members : null;
+}
+
+async function confirmWindowsMembersExited(members, timeoutMs, signalProcess) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const gone = members.every(pid => {
+      try { signalProcess(pid, 0); return false; }
+      catch (error) { if (error?.code === 'ESRCH') return true; if (error?.code === 'EPERM') return false; throw error; }
+    });
+    if (gone) return true;
+    if (Date.now() >= deadline) return false;
+    await delay(Math.min(25, Math.max(0, deadline - Date.now())));
+  }
+}
+
+function terminateWindowsTree(pid, killWaitMs, signalProcess) {
   return new Promise((resolve, reject) => {
     execFile('taskkill.exe', ['/PID', String(pid), '/T', '/F'], {
       windowsHide: true,
@@ -29,7 +58,15 @@ function terminateWindowsTree(pid) {
       maxBuffer: 16_384
     }, (error, stdout, stderr) => {
       if (error) {
-        reject(new Error(`taskkill could not confirm suite process-tree termination: ${stderr || stdout || error.message}`));
+        const failure = Object.assign(new Error(`taskkill could not confirm suite process-tree termination: stdout=${stdout}; stderr=${stderr || error.message}`), { code: 'TREE_TERMINATION_UNCONFIRMED' });
+        const members = exitedWindowsTreeMembers(pid, error, stdout, stderr);
+        if (members) {
+          // Probe only; never issue another termination against parsed PIDs.
+          void confirmWindowsMembersExited(members, killWaitMs, signalProcess).then(
+            confirmed => confirmed ? resolve() : reject(failure), reject);
+          return;
+        }
+        reject(failure);
         return;
       }
       resolve();
@@ -53,7 +90,7 @@ export async function terminateSuiteProcessTree(child, {
   const pid = Number(child?.pid);
   if (!Number.isSafeInteger(pid) || pid < 1) throw new Error('cannot terminate a suite process tree without a child PID');
   if (platform === 'win32') {
-    await terminateWindowsTree(pid);
+    await terminateWindowsTree(pid, killWaitMs, signalProcess);
     return;
   }
 
