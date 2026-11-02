@@ -7,7 +7,8 @@ import {readFile,writeFile} from '../src/workspace/tools.js';
 import {projectProductContext} from '../src/context/product-context.js';
 import {createTaskService} from '../src/task/service.js';
 import {createSimulationProjectBridge} from '../src/simulation/project-bridge.js';
-const root=fs.mkdtempSync(path.join(os.tmpdir(),'cm-simulation-project-'));
+// Low-level Workspace tools require the already canonical filesystem identity.
+const root=fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(),'cm-simulation-project-')));
 try {
   fs.writeFileSync(path.join(root,'hash-fixture.txt'),Buffer.from('\uFEFF完整原始字节\r\n','utf8'));
   const read=readFile(root,'hash-fixture.txt');
