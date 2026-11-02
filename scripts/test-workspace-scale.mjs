@@ -9,7 +9,8 @@ import { createStagingWorkspace, collectStagedChanges, cleanupStagingWorkspace }
 
 // Real local Git/filesystem acceptance with generated, nonprivate contents.
 // These are measured controlled operations, not a claim of real model/CLI execution.
-const base = fs.mkdtempSync(path.join(os.tmpdir(), 'cm-workspace-scale-'));
+const tempRoot = fs.realpathSync.native(os.tmpdir());
+const base = fs.realpathSync.native(fs.mkdtempSync(path.join(tempRoot, 'cm-workspace-scale-')));
 const project = path.join(base, 'project'), stateDir = path.join(base, 'state');
 const git = (...args) => execFileSync('git', args, { cwd: project, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const metrics = { generatedFixture: true, files: 1200, branches: 30, managedWorktrees: 12, expectedConflictRejections: 0, unexpectedFailures: 0, elapsedMs: {} };
@@ -77,6 +78,6 @@ finally {
     assert.ok(path.resolve(stage.stagingRoot).startsWith(path.resolve(base) + path.sep));
     cleanupStagingWorkspace(stage);
   }
-  assert.ok(path.resolve(base).startsWith(path.resolve(os.tmpdir()) + path.sep));
+  assert.ok(path.resolve(base).startsWith(path.resolve(tempRoot) + path.sep));
   fs.rmSync(base, { recursive: true, force: true });
 }

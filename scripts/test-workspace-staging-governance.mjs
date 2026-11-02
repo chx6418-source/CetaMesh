@@ -5,7 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { createStagingWorkspace, collectStagedChanges, refreshStagingBaseline } from '../src/workspace/staging.js';
 
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-stage-governance-'));
+// A trusted source grant is a frozen canonical identity, not a mutable alias.
+const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-stage-governance-')));
 let failures = 0;
 let sequence = 0;
 const hash = value => crypto.createHash('sha256').update(value).digest('hex');

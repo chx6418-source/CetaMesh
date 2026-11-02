@@ -8,7 +8,7 @@ import { createWorkspaceService } from '../src/workspace/service.js';
 import { workspaceJournalDir } from '../src/workspace/transaction.js';
 import { createWorkspaceReconciler } from '../src/continuity/reconcile.js';
 
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cm-workspace-governance-'));
+const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cm-workspace-governance-')));
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const journals = new Set();
 let failed = 0;
