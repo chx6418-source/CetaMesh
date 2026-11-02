@@ -22,19 +22,33 @@ async function waitForProcessGroupExit(pid, timeoutMs, signalProcess) {
 }
 
 function exitedWindowsTreeMembers(pid, error, stdout, stderr) {
-  // A nonzero aggregate can mean a descendant exited during taskkill's walk.
-  // Require the root's affirmative termination and recognize only this exact
-  // benign diagnostic. Other locales/errors remain unconfirmed, never ignored.
+  // A root or descendant can exit during taskkill's walk. Require affirmative
+  // termination within a fully reported tree rooted at our child, then probe
+  // every member. Other locales/errors remain unconfirmed, never ignored.
   if (!Number.isInteger(error.code) || error.killed || error.signal) return null;
   const output = String(stdout).replace(/\r\n/g, '\n'), diagnostic = String(stderr).replace(/\r\n/g, '\n');
-  const success = /^SUCCESS: The process with PID (\d+)(?: \(child process of PID \d+\))? has been terminated\.[ \t]*(?:\n|$)/gm;
-  const missing = /^ERROR: The process with PID (\d+) \(child process of PID \d+\) could not be terminated\.[ \t]*\n[ \t\n]*Reason: There is no running instance of the task\.[ \t]*(?:\n|$)/gm;
-  const terminated = [...output.matchAll(success)].map(match => Number(match[1]));
-  const absent = [...diagnostic.matchAll(missing)].map(match => Number(match[1]));
-  if (!terminated.includes(pid) || !absent.length || absent.includes(pid)
+  const success = /^SUCCESS: The process with PID (\d+)(?: \(child process of PID (\d+)\))? has been terminated\.[ \t]*(?:\n|$)/gm;
+  const missing = /^ERROR: The process with PID (\d+) \(child process of PID (\d+)\) could not be terminated\.[ \t]*\n[ \t\n]*Reason: There is no running instance of the task\.[ \t]*(?:\n|$)/gm;
+  const record = match => ({ pid: Number(match[1]), parent: match[2] === undefined ? null : Number(match[2]) });
+  const terminated = [...output.matchAll(success)].map(record);
+  const absent = [...diagnostic.matchAll(missing)].map(record);
+  if (!terminated.length || !absent.length
     || output.replace(success, '').trim() || diagnostic.replace(missing, '').trim()) return null;
-  const members = [...new Set([...terminated, ...absent])];
-  return members.every(member => Number.isSafeInteger(member) && member > 0) ? members : null;
+  const records = [...terminated, ...absent];
+  if (!records.every(row => Number.isSafeInteger(row.pid) && row.pid > 0
+    && (row.parent === null || Number.isSafeInteger(row.parent) && row.parent > 0))) return null;
+  const tree = new Map(records.map(row => [row.pid, row.parent]));
+  if (tree.size !== records.length || !tree.has(pid) || tree.has(tree.get(pid))) return null;
+  for (const member of tree.keys()) {
+    const visited = new Set();
+    let current = member;
+    while (current !== pid) {
+      if (visited.has(current) || !tree.has(current)) return null;
+      visited.add(current);
+      current = tree.get(current);
+    }
+  }
+  return [...tree.keys()];
 }
 
 async function confirmWindowsMembersExited(members, timeoutMs, signalProcess) {
