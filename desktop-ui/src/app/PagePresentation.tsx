@@ -103,3 +103,11 @@ export function dshSetupReasonLabel(reason: string | null | undefined) {
   };
   return reason ? messages[reason] ?? availabilityReasonLabel(reason) : '';
 }
+
+export const relativeLabel = (value: string | number | null | undefined) => {
+  if (value === null || value === undefined) return '—';
+  const date = new Date(value).getTime();
+  if (!Number.isFinite(date)) return '—';
+  const minutes = Math.max(0, Math.round((Date.now() - date) / 60_000));
+  return minutes < 1 ? '刚刚' : minutes < 60 ? `${minutes} 分钟前` : minutes < 1440 ? `${Math.floor(minutes / 60)} 小时前` : `${Math.floor(minutes / 1440)} 天前`;
+};

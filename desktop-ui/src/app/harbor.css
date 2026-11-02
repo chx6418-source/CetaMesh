@@ -256,6 +256,7 @@
 .agent-summary-row strong { color: var(--accent-hover); font-size: 25px; }
 .agent-summary-row span { color: var(--text-muted); font-size: 11px; }
 .work-controls { margin: 17px 0; flex-wrap: wrap; }
+.work-page .task-created-notice { min-width: 0; overflow-wrap: anywhere; }
 .work-controls > .cm-select { flex: 0 1 260px; min-width: 0; max-width: 100%; }
 .work-controls > .cm-select .cm-select-trigger { overflow-wrap: anywhere; }
 .work-controls > .cm-select .cm-select-trigger > span { min-width: 0; }

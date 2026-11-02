@@ -31,6 +31,7 @@ const agentOnly = process.env.CETAMESH_GLOBAL_UI_AGENT_ONLY === '1';
 const agentRaceOnly = process.env.CETAMESH_GLOBAL_UI_AGENT_RACE_ONLY === '1';
 const pluginRaceOnly = process.env.CETAMESH_GLOBAL_UI_PLUGIN_RACE_ONLY === '1';
 const pluginOnly = process.env.CETAMESH_GLOBAL_UI_PLUGIN_ONLY === '1';
+const taskOnly = process.env.CETAMESH_GLOBAL_UI_TASK_ONLY === '1';
 const hostSyncOnly = process.env.CETAMESH_GLOBAL_UI_HOST_SYNC_ONLY === '1';
 const behaviorOnly = process.env.CETAMESH_GLOBAL_UI_BEHAVIOR_ONLY === '1';
 assert.ok(!(agentOnly&&hostSyncOnly),'choose one focused follow-up mode');
@@ -430,10 +431,21 @@ try {
         continue;
       }
       if(hostSyncOnly){assert.equal(version,'after','Host sync follow-up uses current source only');await hostSynchronization(version);continue;}
-      const selectedScenarios=behaviorOnly?[]:agentOnly||pluginOnly?[...scenarios.filter(row=>row.width===1024||row.zoom===1.5||row.theme==='dark'&&row.dpr===1.5),{width:640,height:768,zoom:1,theme:'light'},{width:480,height:768,zoom:1,theme:'dark'}]:quick?scenarios.slice(0,1):zoomOnly?scenarios.filter(row=>row.zoom===zoomOnly):scenarios;
+      const selectedScenarios=taskOnly?[{width:480,height:768,zoom:1,theme:'light'},{width:480,height:768,zoom:1,theme:'dark'},{width:640,height:768,zoom:1,theme:'light'},{width:1024,height:768,zoom:1,theme:'dark'},{width:1280,height:800,zoom:1.5,theme:'light'}]:behaviorOnly?[]:agentOnly||pluginOnly?[...scenarios.filter(row=>row.width===1024||row.zoom===1.5||row.theme==='dark'&&row.dpr===1.5),{width:640,height:768,zoom:1,theme:'light'},{width:480,height:768,zoom:1,theme:'dark'}]:quick?scenarios.slice(0,1):zoomOnly?scenarios.filter(row=>row.zoom===zoomOnly):scenarios;
       for(const scenario of selectedScenarios){
         await rpc('Emulation.setDeviceMetricsOverride',{width:scenario.width,height:scenario.height,deviceScaleFactor:scenario.dpr||1,mobile:false},sessionId);
         await evaluate('(()=>{const root=document.getElementById("root");root.style.zoom='+scenario.zoom+';root.style.width='+JSON.stringify(100/scenario.zoom+'vw')+';root.style.height='+JSON.stringify(100/scenario.zoom+'vh')+';window.fixture.setTheme('+JSON.stringify(scenario.theme)+');})()');
+        if(taskOnly){
+          await show('work');await until('!!document.querySelector(".task-card")','Task data');await measure(version,scenario,'tasks');
+          await textClick('详情');await until('!!document.querySelector(".cm-sheet .task-details")','Task detail');await measure(version,scenario,'task-detail');
+          const drawer=await evaluate('(()=>{const n=document.querySelector(".cm-sheet"),r=n.getBoundingClientRect();return{left:r.left,right:r.right,top:r.top,bottom:r.bottom,viewport:innerWidth,height:innerHeight,scrollHeight:n.scrollHeight,clientHeight:n.clientHeight}})()');
+          if(version==='after')assert.ok(drawer.left>=-1&&drawer.right<=drawer.viewport+1&&drawer.top>=-1&&drawer.bottom<=drawer.height+1,'Task detail drawer remains inside the viewport '+JSON.stringify(drawer));
+          await key('Tab');if(version==='after')assert.equal(await evaluate('!!document.activeElement?.closest(".cm-sheet")'),true,'Task drawer keeps keyboard focus');
+          checks.push({kind:'task-narrow-drawer-and-focus',version,...scenario,...drawer});await closeSheet();
+          await workTab('工作区');await until('!!document.querySelector(".workspace-card")','Workspace cards');await measure(version,scenario,'workspace');
+          await projectAction('查看任务');await until('!!document.querySelector(".task-card")','return to project Tasks');
+          checks.push({kind:'task-workspace-navigation',version,...scenario,pass:true});continue;
+        }
         if(agentOnly){await agentConfiguration(version,scenario);continue;}
         if(pluginOnly){await pluginConfiguration(version,scenario);continue;}
         await show('chat');await until('document.querySelectorAll(".chat-message").length>0||document.body.innerText.includes("已保存阶段性分析")','Chat data');await measure(version,scenario,'chat');if(version==='after'){assert.equal(await evaluate('document.body.innerText.includes("958691c1-2135-4ac0-9b05-f204a14b1137:call_00_abcdefghijkl")'),false,'opaque tool IDs stay out of the primary conversation');assert.ok(await evaluate('document.querySelectorAll(".tool-call").length')<=40,'large tool history is bounded');assert.equal(await evaluate('[...document.querySelectorAll(".usage-disclosure")].some(n=>n.open)'),false,'usage details are collapsed by default');}
@@ -492,7 +504,7 @@ try {
           const dialog=await evaluate('(()=>{const d=document.querySelector("dialog[open]"),r=d.getBoundingClientRect();return{clientWidth:d.clientWidth,scrollWidth:d.scrollWidth,clientHeight:d.clientHeight,scrollHeight:d.scrollHeight,left:r.left,right:r.right,top:r.top,bottom:r.bottom,viewportWidth:innerWidth,viewportHeight:innerHeight}})()');checks.push({kind:'quick-jump-dialog-geometry',...scenario,...dialog});await capture(version,scenario,'quick-jump');assert.ok(dialog.scrollWidth<=dialog.clientWidth+1,'QuickJump dialog has no internal horizontal overflow: '+JSON.stringify(dialog));assert.ok(dialog.left>=-1&&dialog.top>=-1&&dialog.right<=dialog.viewportWidth+1&&dialog.bottom<=dialog.viewportHeight+1,'QuickJump stays within the real viewport: '+JSON.stringify(dialog));await key('Escape');await until('!document.querySelector("input[aria-label=\\"搜索页面、任务和会话\\"]")?.checkVisibility()','Quick jump layout dialog closes');
         }
       }
-      if(version==='after'&&!agentOnly){
+      if(version==='after'&&!agentOnly&&!taskOnly){
         const scenario=scenarios[1];await rpc('Emulation.setDeviceMetricsOverride',{width:1280,height:800,deviceScaleFactor:1,mobile:false},sessionId);await evaluate('document.getElementById("root").style.cssText="width:100vw;height:100vh;zoom:1";window.fixture.setTheme("light")');
         await show('work');const launcher=await evaluate('(()=>{const b=[...document.querySelectorAll("button")].find(n=>n.textContent.trim()==="详情");b.focus();return b.outerHTML})()');await textClick('详情');await until('!!document.querySelector(".cm-sheet")','keyboard Task drawer');if(!await evaluate('[...document.querySelectorAll(".task-detail-section")].find(n=>n.querySelector("summary")?.textContent.trim()==="结果与交付")?.open'))await textClick('结果与交付');await fill('textarea[aria-label="验收说明"]','Synthetic review draft survives disclosure toggles');await textClick('结果与交付');await textClick('结果与交付');assert.equal(await evaluate('document.querySelector("textarea[aria-label=验收说明]").value'),'Synthetic review draft survives disclosure toggles','task result review draft survives closing its detail section');checks.push({kind:'task-result-disclosure-preserves-draft',pass:true});await capture(version,scenario,'task-result-review');
         await evaluate('window.fixtureKeyLog=[];document.addEventListener("keydown",e=>window.fixtureKeyLog.push({key:e.key,prevented:e.defaultPrevented,target:e.target.tagName,focus:document.activeElement?.tagName,hasFocus:document.hasFocus(),top:[...document.querySelectorAll(".cm-sheet-layer:not([inert])")].at(-1)?.outerHTML.slice(0,80)}),true);document.addEventListener("focusin",e=>window.fixtureKeyLog.push({focusin:e.target.tagName,html:e.target.outerHTML.slice(0,100)}),true)');
@@ -531,5 +543,5 @@ try {
     if(browser?.pid&&browser.exitCode===null&&browser.signalCode===null)await terminateSuiteProcessTree(browser);
   } catch(error) { failed=true;cleanupError=error; }
   if(server)await new Promise(resolve=>server.close(resolve));
-  if(evidence)fs.writeFileSync(path.join(evidence,'global-ui-evidence.json'),JSON.stringify({status:process.exitCode===77?'NOT_RUN_ENVIRONMENT':failed?'FAIL':'PASS',kind:'Actual HarborApp and typed client with fixed synthetic IPC DTOs; not real Core/native/model execution',baselineOnly,aboutOnly,agentOnly,hostSyncOnly,behaviorOnly,zoomOnly:zoomOnly||null,testOnlyOmittedQuickMaxWidth:omitQuickMaxWidth,baselineDependencies:'Both source versions use the maintained UI dependency set',scaling:'CSS content zoom and explicitly emulated DPR; no Windows DPI setting changed; headless page focus enabled for trusted key dispatch',measurements,captures,checks,baselineIssues,cleanup:{browserExited:!browser||browser.exitCode!==null||browser.signalCode!==null,error:cleanupError?.message??null}},null,2));finalizeSuiteSandbox({sandbox,failed,keepFailed:failed});if(cleanupError)throw cleanupError;
+  if(evidence)fs.writeFileSync(path.join(evidence,'global-ui-evidence.json'),JSON.stringify({status:process.exitCode===77?'NOT_RUN_ENVIRONMENT':failed?'FAIL':'PASS',kind:'Actual HarborApp and typed client with fixed synthetic IPC DTOs; not real Core/native/model execution',baselineOnly,aboutOnly,agentOnly,taskOnly,hostSyncOnly,behaviorOnly,zoomOnly:zoomOnly||null,testOnlyOmittedQuickMaxWidth:omitQuickMaxWidth,baselineDependencies:'Both source versions use the maintained UI dependency set',scaling:'CSS content zoom and explicitly emulated DPR; no Windows DPI setting changed; headless page focus enabled for trusted key dispatch',measurements,captures,checks,baselineIssues,cleanup:{browserExited:!browser||browser.exitCode!==null||browser.signalCode!==null,error:cleanupError?.message??null}},null,2));finalizeSuiteSandbox({sandbox,failed,keepFailed:failed});if(cleanupError)throw cleanupError;
 }

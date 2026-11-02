@@ -6,8 +6,11 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const root = fileURLToPath(new URL('../desktop-ui/', import.meta.url));
 const require = createRequire(root + 'package.json');
 const ts = require('typescript');
-const source = fs.readFileSync(root + 'src/app/HarborApp.tsx', 'utf8');
-const ast = ts.createSourceFile('HarborApp.tsx', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+const harbor = fs.readFileSync(root + 'src/app/HarborApp.tsx', 'utf8');
+assert.match(harbor, /import \{ WorkPage \} from '\.\/WorkPage'/);
+assert.match(harbor, /export \{ WorkPage \} from '\.\/WorkPage'/);
+const source = fs.readFileSync(root + 'src/app/WorkPage.tsx', 'utf8');
+const ast = ts.createSourceFile('WorkPage.tsx', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
 let code, finishCode, openCode, rememberCode, createdCode;
 function walk(node, owner = '') {
   if (owner === 'WorkPage' && ts.isFunctionDeclaration(node) && node.name?.text === 'showCreatedTask') createdCode=node.getText(ast);
@@ -136,10 +139,45 @@ await check('ordinary project navigation retains selected and blocked isolation 
 assert.equal(failures.length,0,failures.join('; '));
 
 {
- const navigation={current:5},state={selected:'newer-selection',sheet:true,refreshes:0},env={taskNavigationRef:navigation,selectedTaskIdRef:{current:'newer-selection'},setTaskSheet:v=>{state.sheet=v;},setSelectedTask:v=>{state.selected=v.id;},rememberTask:v=>v,refresh:async()=>{state.refreshes++;}};
+ const navigation={current:5},state={selected:'newer-selection',sheet:true,refreshes:0,tasks:[]},env={taskNavigationRef:navigation,selectedTaskIdRef:{current:'newer-selection'},taskRefreshRef:{current:0},taskQueryRef:{current:['','','',0].join('\u0000')},query:'',filter:'',taskWorkspaceId:'',taskOffset:0,setTasks:v=>{state.tasks=typeof v==='function'?v(state.tasks):v;},setTaskSheet:v=>{state.sheet=v;},setSelectedTask:v=>{state.selected=v.id;},rememberTask:v=>v,refresh:async()=>{state.refreshes++;}};
  const javascript=ts.transpileModule(createdCode,{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
  const reveal=new Function(...Object.keys(env),javascript+';return showCreatedTask;')(...Object.values(env));
  await reveal({id:'late-created'},4);assert.equal(state.selected,'newer-selection');assert.equal(state.sheet,true);assert.equal(navigation.current,5);
  await reveal({id:'current-created'},5);assert.equal(state.selected,'current-created');assert.equal(state.sheet,false);assert.equal(navigation.current,6);
  console.log('PASS late Task creation cannot reopen a closed sheet or replace newer navigation');
+}
+
+for (const scenario of [
+  { name:'matching current project and first page', workspace:'ws-a', filter:'', query:'', offset:0, visible:true },
+  { name:'different project', workspace:'ws-b', filter:'', query:'', offset:0, visible:false },
+  { name:'different status', workspace:'ws-a', filter:'completed', query:'', offset:0, visible:false },
+  { name:'active search whose full Core matching data is not projected', workspace:'ws-a', filter:'', query:'something', offset:0, visible:false },
+  { name:'later page', workspace:'ws-a', filter:'', query:'', offset:50, visible:false }
+]) {
+ const waiting=deferred(),state={tasks:[task(4,20,'existing')],selected:null},navigation={current:5};
+ const env={taskNavigationRef:navigation,taskRefreshRef:{current:0},taskQueryRef:{current:[scenario.query,scenario.filter,scenario.workspace,scenario.offset].join('\u0000')},selectedTaskIdRef:{current:''},taskWorkspaceId:scenario.workspace,filter:scenario.filter,query:scenario.query,taskOffset:scenario.offset,
+   setTaskSheet(){},setSelectedTask:v=>{state.selected=v;},setTasks:v=>{state.tasks=typeof v==='function'?v(state.tasks):v;},rememberTask:v=>v,refresh:()=>waiting.promise};
+ const js=ts.transpileModule(createdCode,{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
+ const reveal=new Function(...Object.keys(env),js+';return showCreatedTask;')(...Object.values(env));
+ const created={...task(1,0,'new-task'),status:'queued',workspaceId:'ws-a'};
+ const pending=reveal(created,5);
+ assert.equal(state.selected?.id,'new-task','created Task opens immediately');
+ assert.equal(state.tasks.some(row=>row.id==='new-task'),scenario.visible,scenario.name+' uses a truthful list scope while the Core refresh is pending');
+ waiting.resolve();await pending;
+}
+console.log('PASS created Task is visible immediately without leaking into another list scope');
+
+{
+ const state={tasks:[{id:'beta-task',rev:2}],selected:'beta-task',refreshes:0,sheet:true,notice:null};
+ const env={taskNavigationRef:{current:5},taskRefreshRef:{current:7},taskQueryRef:{current:['','','workspace-b',0].join('\u0000')},selectedTaskIdRef:{current:'beta-task'},taskWorkspaceId:'workspace-a',filter:'',query:'',taskOffset:0,
+   setTaskSheet:v=>{state.sheet=v;},setCreatedTaskNotice:v=>{state.notice=v;},setSelectedTask:v=>{state.selected=v.id;},setTasks:v=>{state.tasks=typeof v==='function'?v(state.tasks):v;},rememberTask:v=>v,refresh:async()=>{state.refreshes++;env.taskRefreshRef.current++;}};
+ const js=ts.transpileModule(createdCode,{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
+ const reveal=new Function(...Object.keys(env),js+';return showCreatedTask;')(...Object.values(env));
+ await reveal({...task(1,0,'alpha-created'),status:'queued',workspaceId:'workspace-a'},5);
+ assert.equal(state.selected,'beta-task','old creation cannot replace a selection in the new Workspace');
+ assert.deepEqual(state.tasks.map(row=>row.id),['beta-task'],'old creation cannot enter the new Workspace list');
+ assert.equal(state.notice?.id,'alpha-created','successful creation remains discoverable without switching scope');assert.equal(state.sheet,false);
+ assert.equal(state.refreshes,0,'old scope must not supersede the active Workspace refresh');
+ assert.equal(env.taskRefreshRef.current,7);
+ console.log('PASS late Task creation respects a changed Workspace scope and its active refresh');
 }

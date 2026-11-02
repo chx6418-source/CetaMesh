@@ -118,6 +118,7 @@ const REGISTRY = {
   'test-task-progress-lifecycle.mjs': { category: 'security', note: 'Native pre-dispatch rejection and early Follow provenance' },
   'test-native-progress-evidence.mjs': { category: 'security', note: 'Actual native results and approved import receipts without fabricated evidence' },
   'test-task-progress-ui.mjs': { category: 'desktop', note: 'Exact progress and stale task refresh/navigation responses' },
+  'test-work-page-races.mjs': { category: 'desktop', requires: ['ui-motion-live'], timeoutMs: 120000, note: 'Actual React and Chromium Task approval response ordering with a synthetic IPC fixture' },
   'test-state-owner-identity.mjs': { category: 'security', note: 'Process birth identity, PID reuse, fail-closed recovery and StateDir ownership races' },
   'test-task-collaboration.mjs': { category: 'security', note: 'Task child contract, Attempt, depth and completion ownership' },
   'test-agent-collaboration-dispatch.mjs': { category: 'security', note: 'Production Broker read-only child and Workspace writer ownership' },

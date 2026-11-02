@@ -16,7 +16,7 @@ const base={id:'task-owned',title:'Preserve all review safeguards',goal:'Review 
 const callbacks={onHandoff(){},onAction(){},onStart(){},onReconcile(){},onReview(){},onCreateChild(){},onComplete(){},onVerifyChild(){},onOpenChild(){}};
 const render=(component,props)=>renderToStaticMarkup(React.createElement(component,props));
 try{
- const ts=require('typescript'),source=fs.readFileSync(path.join(uiRoot,'src/app/HarborApp.tsx'),'utf8'),ast=ts.createSourceFile('HarborApp.tsx',source,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
+ const ts=require('typescript'),source=fs.readFileSync(path.join(uiRoot,'src/app/WorkPage.tsx'),'utf8'),ast=ts.createSourceFile('WorkPage.tsx',source,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
  let inspectCode;function visit(node,owner=''){if(ts.isFunctionDeclaration(node)&&node.name?.text==='inspect'&&owner==='TaskRecoveryEvidence')inspectCode=node.getText(ast);if(ts.isFunctionDeclaration(node))owner=node.name?.text??owner;ts.forEachChild(node,child=>visit(child,owner));}visit(ast);assert.ok(inspectCode);
  let resolveInspection;const delayed=new Promise(resolve=>{resolveInspection=resolve;});let applied=0,errors=0;
  const inspectionEnv={identity:{current:'task-owned:8'},task:{id:'task-owned',rev:8},taskClient:{inspectRecovery:()=>delayed},setBusy(){},setInspection(){applied++;},setError(){errors++;},messageOf:error=>error.message};

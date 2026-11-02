@@ -1,3 +1,11 @@
+import { WorkPage } from './WorkPage';
+export { WorkPage } from './WorkPage';
+export { TaskCreateForm, TaskDetails } from './WorkPage';
+import { confirmAgentExecution } from './AgentExecutionScope';
+import { UsageSummary } from './UsageSummary';
+export { UsageSummary } from './UsageSummary';
+import { taskDisplayStatus, taskProgressValue, taskProgressLabel, TaskProgress } from './TaskPresentation';
+export { taskListTitle, WorkTaskList, TaskCollaborationCard, TaskCollaborationStatus } from './TaskPresentation';
 import { AboutPage } from './AboutPage';
 import { PluginsPage } from './PluginsPage';
 import { ApprovalCard } from './ApprovalCard';
@@ -8,42 +16,38 @@ export type { OneBotConnectionDraft } from './OneBotConnectionForm';
 import { AgentsPage } from './AgentsPage';
 export { AgentsPage } from './AgentsPage';
 export { mergeAgentHealth, AgentSetupDiagnostic, DshSetupForm, dshSetupErrorMessage, agentNeedsSetup, AgentRuntimeAuthenticationNotice, AgentRuntimeSetupGuide, AgentConnectionSteps, AgentRuntimeSetupForm, isAgentReady, CodexSetupDiagnostic, AgentInstallationDiagnostic } from './AgentSetupPanels';
-import { ErrorNotice, Heading, EmptyNotice, StatusBadge, availabilityReasonLabel, messageOf, dateLabel, dshSetupReasonLabel } from './PagePresentation';
+import { ErrorNotice, EmptyNotice, StatusBadge, availabilityReasonLabel, messageOf, dateLabel, relativeLabel } from './PagePresentation';
 export { availabilityReasonLabel } from './PagePresentation';
 import {SimulationSpace} from './SimulationSpace';
 import {MemoryWorkspace} from './MemoryWorkspace';
 import {QuickJump} from './QuickJump';
 import {DevicesPage} from './DevicesPage';
 import {StartupDiagnosticsBoundary, DiagnosticsEntry, DiagnosticsStatusEntry, FeedbackDeveloperButton} from './StartupDiagnostics';
-import {GitWorkspace} from './GitWorkspace';
-import {WorkspaceChangesReview} from './WorkspaceChangesReview';
 import {useChatAttachments} from './ChatAttachments';
 import {AttachmentSettings,HistoryAttachments} from './AttachmentSettings';
 import type {ChatContextObservation, ChatModelProvider, ModelUsage, WorkspaceSummary} from '../bridge/typed-client';
 import {ChatModelPicker, ChatUsagePopover, configurationChangeBlocked, supportedReasoning} from './ChatComposerPanels';
 import {ChatActivity} from './ChatActivity';
 export {ToolActivity} from './ChatActivity';
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { useSearchParams } from 'react-router';
 import { createPortal } from 'react-dom';
 import { mergeChatHistorySnapshot, mergeLatestChatMessages, prependOlderChatMessages, recoverForwardHistory } from './chat-history';
 import { applyChatStreamUpdates, ChatRequestEpoch, ChatStreamRevision, pendingReplyVisible, type ChatStreamUpdate } from './chat-async-state';
-import { productToolsClient, type Attachment, agentClient, approvalClient, bridge, chatClient, hostClient, memoryClient, onboardingClient, settingsClient, taskClient, workspaceClient, workshopClient, type Agent, type Approval, type ApprovalDecisionResult, type L2Grant, type ChatMessage as ChatMessageDto, type ChatSession, type Memory, type ProviderSettingField, type SettingField, type Settings, type Task, type WorkshopProposal } from '../bridge/typed-client';
+import { productToolsClient, type Attachment, approvalClient, bridge, chatClient, hostClient, memoryClient, onboardingClient, settingsClient, taskClient, workspaceClient, type Agent, type Approval, type ChatMessage as ChatMessageDto, type ChatSession, type Memory, type ProviderSettingField, type SettingField, type Settings, type Task } from '../bridge/typed-client';
 import { Icon } from '../components/icons';
 import { ArtifactCard } from '../components/product/cards';
-import { Button, IconButton, Input, normalizeSelectOptionLabel, SearchInput, Select, Tabs, Textarea } from '../components/primitives/inputs';
+import { Button, IconButton, Input, normalizeSelectOptionLabel, SearchInput, Select, Tabs } from '../components/primitives/inputs';
 import { Sheet } from '../components/primitives/overlays';
 import { MotionPopup } from '../components/primitives/motion-popup';
 import { Badge, Card, LoadingState, Surface } from '../components/primitives/surfaces';
 import { Markdown, VirtualList, type VirtualListAnchor, type VirtualListController } from '../components/primitives/content';
 import { useUi } from '../stores/ui';
 import { WindowChrome } from './WindowChrome';
-import { activeTaskChildren, TaskDependencyNotice, taskOperationErrorMessage, validateTaskExecution } from './TaskExecutionFeedback';
-import { WorkspaceSidebar, projectWorkspaceChoices } from './WorkspaceSidebar';
+import { WorkspaceSidebar } from './WorkspaceSidebar';
 import { useResponsiveSidebar } from './useResponsiveSidebar';
 import { ReferenceViewerLayout, ReferenceViewerProvider } from './ReferenceViewer';
 import { SettingsLayout } from './SettingsLayout';
-import { ApprovalOperationSummary } from './StatusPresentation';
 import './harbor.css';
 import './chat-tasks.css';
 import './status-presentation.css';
@@ -53,13 +57,7 @@ import '../theme/motion.css';
 
 type PageId = 'devices' | 'chat' | 'work' | 'agents' | 'plugins' | 'settings' | 'about' | 'memory' | 'onboarding';
 const isPage = (value: string | null): value is PageId => value === 'devices' || value === 'chat' || value === 'work' || value === 'agents' || value === 'plugins' || value === 'settings' || value === 'about' || value === 'memory' || value === 'onboarding';
-const relativeLabel = (value: string | number | null | undefined) => {
-  if (value === null || value === undefined) return '—';
-  const date = new Date(value).getTime();
-  if (!Number.isFinite(date)) return '—';
-  const minutes = Math.max(0, Math.round((Date.now() - date) / 60_000));
-  return minutes < 1 ? '刚刚' : minutes < 60 ? `${minutes} 分钟前` : minutes < 1440 ? `${Math.floor(minutes / 60)} 小时前` : `${Math.floor(minutes / 1440)} 天前`;
-};
+
 export const isChatTurnCancellable = (state: string) => ['starting', 'streaming', 'recovering', 'cancelling', 'waiting-approval'].includes(state);
 
 export function HarborApp() {
@@ -738,43 +736,10 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
   </div>;
 }
 
-function SmallPager({ page, total, size, onPage, label }: { page: number; total: number; size: number; onPage(page:number):void; label:string }) {
-  const last = Math.max(0, Math.ceil(total / size) - 1);
-  return total > size ? <nav className="task-list-pagination" aria-label={label}><Button compact disabled={page === 0} onClick={() => onPage(page - 1)}>上一组</Button><small>{page * size + 1}–{Math.min(total, (page + 1) * size)} / {total}</small><Button compact disabled={page >= last} onClick={() => onPage(page + 1)}>下一组</Button></nav> : null;
-}
-export function UsageSummary({ usage, label = '本轮用量' }: { usage: ChatMessageDto['usage']; label?: string }) {
-  if (!usage) return <small className="muted usage-summary">{label} 未知</small>;
-  const count = (value: number | null) => value === null ? '未知' : String(value);
-  const cost = usage.cost;
-  const costLabel = cost?.amount != null && cost.currency && cost.complete ? `${cost.status === 'actual' ? '实际费用' : '估算费用'} ${cost.currency} ${cost.amount}` : `费用 未知${cost?.knownAmount != null && cost.currency ? `（已核算 ${cost.currency} ${cost.knownAmount}，不代表总费用）` : ''}`;
-  const complete = usage.accountingComplete === false ? '已知用量（不完整）' : usage.accountingComplete === true ? '已核算' : '核算完整性未知';
-  const rows = ['推理 ' + count(usage.reasoningTokens), '缓存读取 ' + count(usage.cacheReadTokens), '缓存写入 ' + count(usage.cacheWriteTokens), '缓存命中 ' + (usage.cacheHitRate === null ? '未知' : `${Math.round(usage.cacheHitRate * 10000) / 100}%`), '请求 ' + count(usage.requestCount), costLabel];
-  return <details className="muted usage-summary usage-disclosure" aria-label={label}><summary><span>{label}</span><span>{'输入 ' + count(usage.inputTokens)}</span><span>{'输出 ' + count(usage.outputTokens)}</span><span className="usage-accounting">{complete}</span><Icon name="down" size={12} /></summary><div className="usage-detail-grid">{rows.map(row => <span key={row}>{row}</span>)}</div></details>;
-}
-
 export function MessageBubble({ message, reference, streaming = false, sendError, onRetry, activityState, taskId, onOpenTask }: { message: ChatMessageDto; reference?: { sessionId: string; messageId: string }; streaming?: boolean; sendError?: string; onRetry?(): void; activityState?:string;taskId?:string|null;onOpenTask?(id:string):void }) {
   const role = message.role === 'user' ? 'user' : 'assistant';
   const agentActivity = message.agentActivity;
   return <article className={`chat-message ${role} ${streaming ? 'streaming' : ''}`}><div className="message-avatar">{role === 'assistant' ? <Icon name="sparkles" size={16} /> : '你'}</div><div className="message-body"><div className="message-meta"><strong>{role === 'assistant' ? 'CetaMesh' : '你'}</strong><span>{dateLabel(message.at)}</span>{streaming && <Badge tone="accent">生成中</Badge>}</div>{message.text ? <Markdown reference={reference}>{message.text}</Markdown> : <span className="muted">（没有文本内容）</span>}{message.attachments.length > 0 && <div className="message-attachments">{message.attachments.map(name => <span key={name}><Icon name="attach" size={13} />{name}</span>)}</div>}{message.attachmentRefs?.length ? <HistoryAttachments files={message.attachmentRefs} sessionId={reference?.sessionId??''}/> : null}<ChatActivity tools={message.toolActivity} agentActivity={agentActivity} state={activityState} taskId={taskId} onOpenTask={onOpenTask} />{role === 'assistant' && !streaming && <UsageSummary usage={message.usage} />}{sendError && <div className="message-error" role="alert">{sendError}<Button compact variant="ghost" onClick={onRetry}>重试发送</Button></div>}{message.error && <p className="message-error" role="alert">{message.error}</p>}{message.cancelled && <small>本轮已停止</small>}</div></article>;
-}
-
-async function confirmAgentExecution(provider: string, workspaceId: string) {
-  if (!provider || provider === 'none' || !workspaceId) return;
-  const scope = await agentClient.security(provider, workspaceId);
-  if (!scope.required || scope.authorized) return;
-  if (!window.confirm(scope.disclosure + '\n\n是否确认此原生执行范围？')) throw new Error('已取消 Agent 原生安全范围确认');
-  const pending = await agentClient.authorize(provider, workspaceId, scope.fingerprint);
-  if (pending.status !== 'pending' || !pending.approvalId) throw new Error('未取得有效的 Owner 审批请求');
-  const decision = await approvalClient.decide(pending.approvalId, true);
-  if (decision.operationId) {
-    for (let n=0;n<100;n++) {
-      const current = await approvalClient.operation(decision.operationId);
-      if (current.status === 'completed') break;
-      if (!['accepted','running'].includes(current.status)) throw new Error(current.code || '授权操作未完成');
-      await new Promise(resolve => window.setTimeout(resolve,100));
-    }
-  }
-  if (!(await agentClient.security(provider, workspaceId)).authorized) throw new Error('原生执行范围尚未确认');
 }
 
 export function ChatComposer({ sessionId = '', busy, models, selectedModelKey, agentProviders, selectedAgent, workspaces, workspaceId, activeWorkspaceId, onWorkspaceChange, onModelChange, onAgentChange, onSend, onStop, context, turnUsage, sessionUsage, reasoning, onReasoningChange=()=>{}, onConfigureModels=()=>{}, configurationLocked=false }: {
@@ -857,34 +822,6 @@ export function ChatComposer({ sessionId = '', busy, models, selectedModelKey, a
   </div></div>;
 }
 
-function taskDisplayStatus(task: Task) {
-  return task.status === 'running' && task.execution?.state === 'awaiting-review' ? 'awaiting-review' : task.status;
-}
-function taskProgressValue(task: Task) {
-  if (task.progress.percent === 0 && (task.execution?.state === 'awaiting-review' || task.execution?.hasEvidence || task.artifacts?.length)) return null;
-  return task.progress.percent;
-}
-function taskProgressLabel(task: Task) {
-  if (task.status === 'running' && task.execution?.state === 'awaiting-review') return '执行已结束，待验收';
-  if (task.progress.percent === 0 && (task.execution?.hasEvidence || task.artifacts?.length)) return '已有成果，进度未量化';
-  return progressLabel(task.progress.percent);
-}
-function progressValue(percent: number | null) {
-  return typeof percent === 'number' && Number.isFinite(percent) ? Math.max(0, Math.min(100, percent)) : null;
-}
-function progressLabel(percent: number | null) {
-  const value = progressValue(percent);
-  return value === null ? '进度未报告' : `${value}%`;
-}
-function TaskProgress({ percent, label = '任务进度' }: { percent: number | null; label?: string }) {
-  const value = progressValue(percent);
-  return <div className="progress-track" role="progressbar" aria-label={label}
-    aria-valuenow={value ?? undefined} aria-valuemin={0} aria-valuemax={100}
-    aria-valuetext={value === null ? '进度未报告' : undefined}>
-    {value !== null && <span className="progress-value" style={{ width: `${value}%` }} />}
-  </div>;
-}
-
 export function ChatContextPanel({ task, memories, approvals, onOpenMemory }: { task: Task | null; memories: Memory[]; approvals: Approval[]; onOpenMemory(): void }) {
   if (!task && !memories.length && !approvals.length) return null;
   return <details className="chat-context-card">
@@ -900,549 +837,6 @@ export function ChatContextPanel({ task, memories, approvals, onOpenMemory }: { 
 }
 
 function MemoryPage(){return <MemoryWorkspace/>;}
-
-export function WorkPage({ onExplain, workspaces, activeWorkspaceId, onRefreshWorkspaces, reviewTaskId, onReviewTaskOpened }: { activeWorkspaceId: string | null; workspaces: WorkspaceSummary[]; onRefreshWorkspaces(): Promise<void>; reviewTaskId: string | null; onReviewTaskOpened(): void; onExplain?(path:string,output:string,workspaceId:string):Promise<void> }) {
-  const [tasks, setTasks] = useState<Task[]>([]);
-  const [query, setQuery] = useState('');
-  const [filter, setFilter] = useState('');
-  const [taskWorkspaceId, setTaskWorkspaceId] = useState(activeWorkspaceId ?? '');
-  const [taskOffset, setTaskOffset] = useState(0);
-  const [taskTotal, setTaskTotal] = useState(0);
-  const [taskCounts, setTaskCounts] = useState<Record<string, number>>({});
-  const [workView, setWorkView] = useState('tasks');
-  const [gitWorkspaceId, setGitWorkspaceId] = useState(activeWorkspaceId);
-  useEffect(() => { setGitWorkspaceId(activeWorkspaceId); }, [activeWorkspaceId]);
-  useEffect(() => { setTaskWorkspaceId(activeWorkspaceId ?? ''); setTaskOffset(0); setTasks([]); }, [activeWorkspaceId]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-  const [taskOperationError, setTaskOperationError] = useState<{ taskId: string; message: string } | null>(null);
-  const [selectedTask, setSelectedTask] = useState<Task | null>(null);
-  const [taskSheet, setTaskSheet] = useState(false);
-  const [taskCreateEpoch,setTaskCreateEpoch]=useState(0);
-  const [workspaceName, setWorkspaceName] = useState('');
-  const [workspaceError, setWorkspaceError] = useState('');
-  const [workspaceBusy, setWorkspaceBusy] = useState(false);
-  const [handoffProviders, setHandoffProviders] = useState<{ id: string; name: string; eligible: boolean; reason: string | null }[]>([]);
-  const selectedTaskIdRef = useRef('');
-  const taskNavigationRef = useRef(0);
-  const taskRefreshRef = useRef(0);
-  const taskQueryRef = useRef('');
-  const taskSnapshotsRef = useRef(new Map<string, Task>());
-  const rememberTask = useCallback((incoming: Task) => {
-    const previous = taskSnapshotsRef.current.get(incoming.id);
-    const newest = previous && (previous.rev ?? -1) > (incoming.rev ?? -1) ? previous : incoming;
-    taskSnapshotsRef.current.delete(incoming.id);
-    taskSnapshotsRef.current.set(incoming.id, newest);
-    if (taskSnapshotsRef.current.size > 4096) taskSnapshotsRef.current.delete(taskSnapshotsRef.current.keys().next().value!);
-    return newest;
-  }, []);
-  taskQueryRef.current = [query, filter, taskWorkspaceId, taskOffset].join('\u0000');
-  selectedTaskIdRef.current = selectedTask?.id ?? '';
-  const refresh = useCallback(async (quiet = false) => {
-    const request = ++taskRefreshRef.current;
-    const queryKey = [query, filter, taskWorkspaceId, taskOffset].join('\u0000');
-    const isCurrent = () => request === taskRefreshRef.current && queryKey === taskQueryRef.current;
-    if (!quiet) setLoading(true);
-    try {
-      const result = await taskClient.overview(query, filter, { workspaceId: taskWorkspaceId || undefined, offset: taskOffset, limit: 50 });
-      if (!isCurrent()) return;
-      if (taskOffset > 0 && taskOffset >= result.total) { setTaskOffset(Math.max(0, Math.ceil(result.total / 50) - 1) * 50); setTasks([]); return; }
-      const snapshots = result.tasks.map(rememberTask);
-      setTasks(snapshots);
-      setTaskTotal(result.total); setTaskCounts(result.counts);
-      const selectedId = selectedTaskIdRef.current;
-      const navigation = taskNavigationRef.current;
-      if (selectedId) {
-        const listed = snapshots.find(task => task.id === selectedId);
-        if (listed) setSelectedTask(current => current?.id === selectedId && (current.rev ?? -1) <= (listed.rev ?? -1) ? listed : current);
-        // A transient detail error must not close a valid selection. Navigation,
-        // including close and same-ID reopen, invalidates the in-flight response.
-        const detail = await taskClient.get(selectedId).catch(() => null);
-        if (!isCurrent() || navigation !== taskNavigationRef.current || selectedId !== selectedTaskIdRef.current) return;
-        if (detail) {
-          const newest = rememberTask(detail.task);
-          setSelectedTask(current => current?.id === selectedId ? rememberTask(current.rev !== null && current.rev > (newest.rev ?? -1) ? current : newest) : current);
-        }
-      }
-      if (isCurrent()) setError('');
-    }
-    catch (cause) { if (isCurrent()) setError(messageOf(cause)); }
-    finally { if (isCurrent()) setLoading(false); }
-  }, [query, filter, taskWorkspaceId, taskOffset, rememberTask]);
-  useEffect(() => { void refresh(); return () => { taskRefreshRef.current += 1; }; }, [refresh]);
-  useEffect(() => {
-    if (!reviewTaskId) return;
-    const request = ++taskNavigationRef.current;
-    void taskClient.get(reviewTaskId).then(value => { if (request !== taskNavigationRef.current) return; setSelectedTask(rememberTask(value.task)); onReviewTaskOpened(); }).catch(cause => { if (request === taskNavigationRef.current) setError(messageOf(cause)); });
-    return () => { taskNavigationRef.current += 1; };
-  }, [reviewTaskId, onReviewTaskOpened, rememberTask]);
-  useEffect(() => { void agentClient.list().then(value => setHandoffProviders(value.agents.map(agent => ({ id: agent.id, name: agent.name, eligible: agent.taskEligible === true, reason: agent.reason ?? agent.lastError })))).catch(() => setHandoffProviders([])); }, []);
-  useEffect(() => {
-    const off = bridge.subscribe('task.updated', () => { void refresh(true); });
-    const timer = window.setInterval(() => { void refresh(true); }, 3000);
-    return () => { window.clearInterval(timer); off(); };
-  }, [refresh]);
-  function openProjectTasks(workspaceId: string) {
-    setWorkView('tasks');
-    if (taskWorkspaceId === workspaceId && taskOffset === 0) {
-      // Keep this project's loaded rows visible while refreshing the same query.
-      void refresh(true);
-      return;
-    }
-    setTaskWorkspaceId(workspaceId); setTaskOffset(0); setTasks([]); setLoading(true);
-  }
-  function beginCreateTask(){const epoch=++taskNavigationRef.current;setTaskCreateEpoch(epoch);setTaskSheet(true);}
-  async function showCreatedTask(task:Task,creationEpoch:number){
-    if(creationEpoch!==taskNavigationRef.current){await refresh(true);return;}
-    taskNavigationRef.current+=1;selectedTaskIdRef.current=task.id;setTaskSheet(false);setSelectedTask(rememberTask(task));await refresh();
-  }
-  async function openTask(task: Task) {
-    const request = ++taskNavigationRef.current;
-    setTaskOperationError(null);
-    rememberTask(task);
-    try {
-      const result = await taskClient.get(task.id);
-      if (request === taskNavigationRef.current) setSelectedTask(rememberTask(result.task));
-    } catch (cause) {
-      if (request !== taskNavigationRef.current) return;
-      setError(messageOf(cause)); setSelectedTask(rememberTask(task));
-    }
-  }
-  async function openRelatedTask(id: string) {
-    const request = ++taskNavigationRef.current;
-    const sourceId = selectedTaskIdRef.current;
-    try {
-      const result = await taskClient.get(id);
-      if (request !== taskNavigationRef.current) return;
-      setTaskOperationError(null); setSelectedTask(rememberTask(result.task));
-    } catch (cause) {
-      if (request === taskNavigationRef.current) setTaskOperationError({ taskId: sourceId, message: taskOperationErrorMessage(cause) });
-    }
-  }
-  async function taskAction(task: Task, action: 'start' | 'pause' | 'resume' | 'cancel', agentProvider?: string) {
-    if (action === 'cancel' && !window.confirm(`取消任务“${task.title}”？`)) return;
-    taskNavigationRef.current += 1;
-    setSelectedTask(current => current?.id === task.id ? current : task);
-    try {
-      setTaskOperationError(null);
-      if (action === 'start' || action === 'resume') {
-        await validateTaskExecution(task, async id => {
-          const value = await taskClient.get(id);
-          rememberTask(value.task);
-          setSelectedTask(current => current?.id === task.id && (current.rev ?? -1) <= (value.task.rev ?? -1) ? value.task : current);
-          return value;
-        });
-      }
-      if (action === 'start' || action === 'resume') await confirmAgentExecution(agentProvider || task.currentAgent?.provider || '', task.workspaceId || '');
-      const result = action === 'start' ? await taskClient.start(task.id, task.rev ?? undefined, agentProvider)
-        : action === 'pause' ? await taskClient.pause(task.id, task.rev ?? undefined)
-        : action === 'resume' ? await taskClient.resume(task.id, task.rev ?? undefined)
-          : await taskClient.cancel(task.id, task.rev ?? undefined);
-      const newest = rememberTask(result.task);
-      setTaskOperationError(null);
-      setSelectedTask(current => current?.id === task.id && (current.rev ?? -1) <= (newest.rev ?? -1) ? newest : current);
-      setTasks(current => current.map(previous => previous.id === newest.id && (previous.rev ?? -1) <= (newest.rev ?? -1) ? newest : previous));
-      await refresh();
-    } catch (cause) { setTaskOperationError({ taskId: task.id, message: taskOperationErrorMessage(cause) }); }
-  }
-  async function handoffTask(task: Task, provider: string) {
-    try {
-      await confirmAgentExecution(provider, task.workspaceId || '');
-      const result = await taskClient.handoff(task.id, provider, task.rev ?? undefined);
-      const newest = rememberTask(result.task);
-      setTaskOperationError(null);
-      setSelectedTask(current => current?.id === task.id && (current.rev ?? -1) <= (newest.rev ?? -1) ? newest : current);
-      setTasks(current => current.map(previous => previous.id === newest.id && (previous.rev ?? -1) <= (newest.rev ?? -1) ? newest : previous));
-      await refresh();
-    } catch (cause) { setTaskOperationError({ taskId: task.id, message: taskOperationErrorMessage(cause) }); }
-  }
-  async function reconcileTask(task: Task, reviewSummary: string, nextInstruction: string, provider?: string) {
-    try {
-      await confirmAgentExecution(provider || task.currentAgent?.provider || '', task.workspaceId || '');
-      const result = await taskClient.reconcile(task.id, task.rev ?? undefined,
-        reviewSummary, nextInstruction, crypto.randomUUID(), provider);
-      const newest = rememberTask(result.task);
-      setTaskOperationError(null);
-      setSelectedTask(current => current?.id === task.id && (current.rev ?? -1) <= (newest.rev ?? -1) ? newest : current);
-      setTasks(current => current.map(previous => previous.id === newest.id && (previous.rev ?? -1) <= (newest.rev ?? -1) ? newest : previous));
-      await refresh();
-    } catch (cause) { setTaskOperationError({ taskId: task.id, message: taskOperationErrorMessage(cause) }); }
-  }
-  async function reviewAnalysisChild(task: Task, approve: boolean, summary: string, evidenceEventIds: string[]) {
-    try {
-      if (task.rev === null) throw new Error('Task revision is unavailable');
-      const result = await taskClient.reviewChild(task.id, task.rev, approve, summary, evidenceEventIds);
-      const newest = rememberTask(result.task);
-      setTaskOperationError(null);
-      setSelectedTask(current => current?.id === task.id && (current.rev ?? -1) <= (newest.rev ?? -1) ? newest : current);
-      setTasks(current => current.map(previous => previous.id === newest.id && (previous.rev ?? -1) <= (newest.rev ?? -1) ? newest : previous));
-      await refresh();
-    } catch (cause) { setTaskOperationError({ taskId: task.id, message: taskOperationErrorMessage(cause) }); }
-  }
-  async function createReadChild(task: Task, goal: string, scope: string, outputKind: 'analysis' | 'tool', supersedesChildId?: string) {
-    try {
-      if (task.rev === null || !task.workspaceId) throw new Error('Parent Task revision or Workspace is unavailable');
-      await taskClient.createChild({ parentTaskId: task.id, expectedParentRev: task.rev,
-        requestId: crypto.randomUUID(), goal, workspaceId: task.workspaceId, supersedesChildId,
-        contract: { mode: 'read-only', outputKind, readScope: [scope],
-          expectedEvidence: outputKind === 'tool' ? ['filesystem.read'] : ['source'] } });
-      setTaskOperationError(null);
-      const current = rememberTask((await taskClient.get(task.id)).task);
-      setSelectedTask(selected => selected?.id === task.id && (selected.rev ?? -1) <= (current.rev ?? -1) ? current : selected);
-      await refresh();
-    } catch (cause) { setTaskOperationError({ taskId: task.id, message: taskOperationErrorMessage(cause) }); }
-  }
-  async function finishTask(task: Task, summary: string, reportOnly = false) {
-    try {
-      if (task.rev === null) throw new Error('Task revision is unavailable');
-      const result = task.parentTaskId
-        ? await taskClient.completeChild(task.id, task.rev, summary)
-        : await taskClient.complete(task.id, task.rev, summary, reportOnly && task.reviewReport ? { reviewKind: 'report-only', reportEventId: task.reviewReport.eventId, reportSha256: task.reviewReport.sha256 } : undefined);
-      const newest = rememberTask(result.task);
-      setTaskOperationError(null);
-      setSelectedTask(current => current?.id === task.id && (current.rev ?? -1) <= (newest.rev ?? -1) ? newest : current);
-      setTasks(current => current.map(previous => previous.id === newest.id && (previous.rev ?? -1) <= (newest.rev ?? -1) ? newest : previous));
-      await refresh();
-    } catch (cause) { setTaskOperationError({ taskId: task.id, message: taskOperationErrorMessage(cause) }); }
-  }
-  async function verifyCompletedChild(task: Task) {
-    try {
-      if (task.rev === null) throw new Error('Task revision is unavailable');
-      const result = await taskClient.verifyChild(task.id, task.rev);
-      const newest = rememberTask(result.task);
-      setTaskOperationError(null);
-      setSelectedTask(current => current?.id === task.id && (current.rev ?? -1) <= (newest.rev ?? -1) ? newest : current);
-      setTasks(current => current.map(previous => previous.id === newest.id && (previous.rev ?? -1) <= (newest.rev ?? -1) ? newest : previous));
-      await refresh();
-    } catch (cause) { setTaskOperationError({ taskId: task.id, message: taskOperationErrorMessage(cause) }); }
-  }
-  async function addWorkspace() {
-    setWorkspaceError('');
-    try {
-      const picked = await hostClient.pickFolder();
-      if (!picked.path) return;
-      const fallback = picked.path.replace(/[\\/]+$/, '').split(/[\\/]/).at(-1) || '本地工作区';
-      const name = workspaceName.trim() || fallback;
-      setWorkspaceBusy(true);
-      await workspaceClient.create(name, picked.path);
-      setWorkspaceName('');
-      await onRefreshWorkspaces();
-    } catch (cause) { setWorkspaceError(messageOf(cause)); }
-    finally { setWorkspaceBusy(false); }
-  }
-  const projectWorkspaces = projectWorkspaceChoices(workspaces, [activeWorkspaceId, taskWorkspaceId]);
-  const counts = { all: Object.keys(taskCounts).length ? Object.values(taskCounts).reduce((sum, value) => sum + value, 0) : taskTotal,
-    working: taskCounts.running ?? tasks.filter(task => task.status === 'running').length,
-    waiting: taskCounts.waiting ?? tasks.filter(task => task.status === 'waiting').length,
-    completed: taskCounts.completed ?? tasks.filter(task => task.status === 'completed').length };
-  return <div className={`content-page work-page work-view-${workView}`}>{workView !== 'git' && <Heading eyebrow="WORKSPACE" title={workView === 'workspaces' ? '工作区' : '工作'} description="查看跨会话任务的进展、负责人和下一步。" action={<Button icon="add" variant="primary" onClick={beginCreateTask}>新建任务</Button>} />}
-    <Tabs label="工作与工作区" selected={workView} onChange={setWorkView} items={[{id:'tasks',label:'任务'},{id:'workspaces',label:'工作区'},{id:'git',label:'Git 工作台'}]} />
-    {workView === 'tasks' && <>
-    {error && <ErrorNotice error={error} onRetry={() => void refresh()} />}
-    <div className="row between work-controls" aria-busy={loading}><Select label="任务项目范围" value={taskWorkspaceId} onChange={event => { setTaskWorkspaceId(event.target.value); setTaskOffset(0); setTasks([]); }}><option value="">全部任务</option>{projectWorkspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{workspace.name + (workspace.managedIsolation ? ' · 任务隔离目录' : '') + (workspace.recovery?.status === 'blocked' ? ' · 待恢复' : '')}</option>)}</Select><Tabs items={[{ id: '', label: `全部 ${loading ? '…' : counts.all}` }, { id: 'running', label: `运行中 ${loading ? '…' : counts.working}` }, { id: 'waiting', label: `待处理 ${loading ? '…' : counts.waiting}` }, { id: 'completed', label: `已完成 ${loading ? '…' : counts.completed}` }]} selected={filter} onChange={value => { setFilter(value); setTaskOffset(0); setTasks([]); }} label="按任务状态筛选" /><SearchInput label="搜索任务" placeholder="搜索任务" value={query} onChange={event => { setQuery(event.target.value); setTaskOffset(0); setTasks([]); }} /></div>
-    {loading && !tasks.length ? <LoadingState label="正在读取任务…" /> : tasks.length ? <WorkTaskList key={[query, filter, taskWorkspaceId, taskOffset].join('|')} tasks={tasks} workspaces={workspaces} providers={handoffProviders} historyInitiallyOpen={Boolean(query || filter || taskOffset)} onOpen={task => void openTask(task)} onAction={(task, action) => void taskAction(task, action)} /> : !error && <EmptyNotice icon="work" title={query || filter ? '没有匹配的任务' : '还没有任务'} detail="你可以在这里创建任务并查看 Core 与 Agent 的执行进度。" action={<Button variant="primary" icon="add" onClick={beginCreateTask}>新建任务</Button>} />}
-    {taskTotal > 50 && <nav className="git-pagination" aria-label="全部匹配任务分页"><Button compact disabled={loading || !taskOffset} onClick={() => { setTaskOffset(Math.max(0, taskOffset - 50)); setTasks([]); }}>上一页任务</Button><small>{loading ? '正在读取任务…' : `${taskOffset + 1}–${Math.min(taskOffset + tasks.length, taskTotal)} / ${taskTotal}`}</small><Button compact disabled={loading || taskOffset + 50 >= taskTotal} onClick={() => { setTaskOffset(taskOffset + 50); setTasks([]); }}>下一页任务</Button></nav>}
-    <WorkshopInbox providers={handoffProviders} />
-    </>}
-    {workView === 'workspaces' && <>
-    <div className="section-heading page-section-heading"><h2>项目工作区</h2><div className="row"><Input aria-label="工作区名称" placeholder="工作区名称（可选）" value={workspaceName} onChange={event => setWorkspaceName(event.target.value)} /><Button compact icon="add" onClick={() => void addWorkspace()} disabled={workspaceBusy}>{workspaceBusy ? '添加中…' : '添加工作区'}</Button></div></div>
-    {workspaceError && <ErrorNotice error={workspaceError} />}{projectWorkspaces.length ? <div className="workspace-grid">{projectWorkspaces.map(workspace => <Card className="workspace-card" key={workspace.id}><div className="workspace-badge">CM</div><div className="workspace-card-body"><strong>{workspace.name}</strong><p>{workspace.managedIsolation ? '任务隔离目录' : '本地项目'} · {workspace.activitySource === 'opened' ? '最近打开' : '登记于'} {relativeLabel(workspace.lastActivity)}</p></div><StatusBadge value={workspace.status} /><Button compact disabled={workspaceBusy} onClick={() => openProjectTasks(workspace.id)}>查看任务</Button><Button compact icon="code" disabled={workspaceBusy} onClick={() => { void (async () => { setWorkspaceError(''); setWorkspaceBusy(true); try { await workspaceClient.open(workspace.id); await onRefreshWorkspaces(); setGitWorkspaceId(workspace.id); setWorkView('git'); } catch (cause) { setWorkspaceError(messageOf(cause)); } finally { setWorkspaceBusy(false); } })(); }}>Git 工作台</Button></Card>)}</div> : <Surface className="workspace-empty"><p className="muted">尚未登记工作区。添加工作区时会使用 Windows 原生文件夹选择器。</p></Surface>}
-    </>}
-    {workView === 'git' && <GitWorkspace onExplain={onExplain} call={productToolsClient.call} workspaces={workspaces} activeWorkspaceId={gitWorkspaceId} onWorkspaceChanged={onRefreshWorkspaces} onOpenTask={id => { setWorkView('tasks'); void openRelatedTask(id); }} />}
-    <Sheet open={taskSheet} title="新建任务" onClose={() => {taskNavigationRef.current+=1;setTaskSheet(false);}}><TaskCreateForm key={taskCreateEpoch} activeWorkspaceId={taskWorkspaceId || activeWorkspaceId} workspaces={projectWorkspaces} providers={handoffProviders} onCreated={task=>showCreatedTask(task,taskCreateEpoch)} /></Sheet>
-    <Sheet open={Boolean(selectedTask)} title={selectedTask ? taskDialogTitle(selectedTask) : '任务详情'} onClose={() => { taskNavigationRef.current += 1; selectedTaskIdRef.current = ''; setSelectedTask(null); }}>{selectedTask && taskOperationError?.taskId === selectedTask.id && <ErrorNotice error={taskOperationError.message} />}{selectedTask && <TaskCollaborationStatus task={selectedTask} />}{selectedTask && <TaskApprovals key={"approvals:"+selectedTask.id} taskId={selectedTask.id} />}{selectedTask && <TaskDetails key={selectedTask.id} task={selectedTask} providers={handoffProviders} onOpenChild={id => void openRelatedTask(id)} onHandoff={provider => void handoffTask(selectedTask, provider)} onAction={action => void taskAction(selectedTask, action)} onStart={provider => void taskAction(selectedTask, 'start', provider)} onReconcile={(summary, instruction, provider) => void reconcileTask(selectedTask, summary, instruction, provider)} onReview={(approve, summary, ids) => void reviewAnalysisChild(selectedTask, approve, summary, ids)} onCreateChild={(goal, scope, kind, replace) => void createReadChild(selectedTask, goal, scope, kind, replace)} onComplete={(summary, reportOnly) => void finishTask(selectedTask, summary, reportOnly)} onVerifyChild={() => void verifyCompletedChild(selectedTask)} />}</Sheet>
-  </div>;
-}
-
-function WorkshopInbox({ providers }: { providers: { id: string; name: string; eligible: boolean; reason: string | null }[] }) {
-  const [proposals, setProposals] = useState<WorkshopProposal[]>([]);
-  const [selected, setSelected] = useState<WorkshopProposal | null>(null);
-  const [workspaceName, setWorkspaceName] = useState('');
-  const [workspaceRoot, setWorkspaceRoot] = useState('');
-  const [provider, setProvider] = useState('');
-  const [capabilities, setCapabilities] = useState<string[]>([]);
-  const [reason, setReason] = useState('');
-  const [deliveryLabel, setDeliveryLabel] = useState('');
-  const [deliveryContent, setDeliveryContent] = useState('');
-  const [taskStatus, setTaskStatus] = useState('');
-  const [error, setError] = useState('');
-  const [busy, setBusy] = useState(false);
-  const deliveryRequest = useRef<{ content: string; id: string } | null>(null);
-  const refresh = useCallback(async () => {
-    try { setProposals((await workshopClient.proposals()).proposals); setError(''); }
-    catch (cause) { setError(messageOf(cause)); }
-  }, []);
-  useEffect(() => { void refresh(); const timer = window.setInterval(() => { void refresh(); }, 5000); return () => window.clearInterval(timer); }, [refresh]);
-  async function open(id: string) {
-    try {
-      const proposal = (await workshopClient.proposal(id)).proposal;
-      setSelected(proposal); setWorkspaceName(proposal.plan?.workspace.name ?? proposal.title);
-      setWorkspaceRoot(proposal.plan?.workspace.root ?? ''); setProvider(proposal.plan?.provider ?? '');
-      setCapabilities(proposal.plan?.capabilities ?? []); setReason(''); setDeliveryLabel(''); setDeliveryContent('');
-      setTaskStatus(proposal.taskId ? (await workshopClient.taskStatus(id)).task?.status ?? '' : ''); setError('');
-    } catch (cause) { setError(messageOf(cause)); }
-  }
-  async function act(action: 'approve' | 'reject' | 'retry' | 'deliver') {
-    if (!selected) return;
-    if (action === 'approve' && !window.confirm(`批准“${selected.title}”并创建工作区及任务？`)) return;
-    if (action === 'deliver' && !window.confirm(`向 ${selected.submitter.id} 交付“${deliveryLabel}”？`)) return;
-    setBusy(true); setError('');
-    try {
-      let result: { proposal: WorkshopProposal };
-      if (action === 'approve') result = await workshopClient.review(selected.id, true, reason, {
-        workspace: { name: workspaceName.trim(), root: workspaceRoot, createIfMissing: true }, provider, capabilities });
-      else if (action === 'reject') result = await workshopClient.review(selected.id, false, reason);
-      else if (action === 'retry') result = await workshopClient.retry(selected.id);
-      else {
-        const fingerprint = JSON.stringify([selected.id, deliveryLabel, deliveryContent]);
-        if (deliveryRequest.current?.content !== fingerprint) deliveryRequest.current = { content: fingerprint, id: crypto.randomUUID() };
-        result = await workshopClient.deliver(selected.id, deliveryLabel.trim(), deliveryContent, deliveryRequest.current.id);
-        deliveryRequest.current = null;
-      }
-      setSelected(result.proposal);
-      setTaskStatus(result.proposal.taskId ? (await workshopClient.taskStatus(result.proposal.id)).task?.status ?? '' : '');
-      await refresh();
-    } catch (cause) { setError(messageOf(cause)); }
-    finally { setBusy(false); }
-  }
-  const toggleCapability = (capability: string) => setCapabilities(current => current.includes(capability)
-    ? current.filter(item => item !== capability) : [...current, capability]);
-  return <section aria-label="Workshop 提议"><div className="section-heading page-section-heading"><h2>Workshop 提议</h2><Button compact variant="ghost" onClick={() => void refresh()}>刷新</Button></div>
-    <p className="muted">外部提议先由 Owner 审查；批准时明确选择工作区、执行者和能力。</p>
-    {error && <ErrorNotice error={error} />}
-    {proposals.length ? <div className="task-grid">{proposals.map(item => <Card className="task-card" key={item.id}><div className="row between"><strong>{item.title}</strong><StatusBadge value={item.status} /></div><p>{item.description}</p><small>{item.submitter.id} · {dateLabel(item.updatedAt)}</small><div><Button compact variant="ghost" onClick={() => void open(item.id)}>审查与交付</Button></div></Card>)}</div>
-      : <Surface className="workspace-empty"><p className="muted">暂无外部提议。</p></Surface>}
-    <Sheet open={Boolean(selected)} title={selected?.title ?? 'Workshop 提议'} onClose={() => setSelected(null)}>{selected && <div className="task-details">
-      <div className="row between"><StatusBadge value={selected.status} /><small>提交者 {selected.submitter.id}</small></div>
-      <p>{selected.description}</p>{selected.requirements.map((item, index) => <p key={index}>· {item}</p>)}
-      {selected.supplements.map(item => <p key={item.id}>补充：{item.text}</p>)}
-      {selected.review && <p>审查：{selected.review.decision} {selected.review.reason}</p>}
-      {selected.status === 'submitted' && <section><h3>Owner 审查</h3>
-        <label>工作区名称<Input value={workspaceName} onChange={event => setWorkspaceName(event.target.value)} /></label>
-        <label>工作区目录<Input value={workspaceRoot} onChange={event => setWorkspaceRoot(event.target.value)} /></label>
-        <Button compact variant="ghost" onClick={() => void hostClient.pickFolder().then(value => { if (value.path) setWorkspaceRoot(value.path); }).catch(cause => setError(messageOf(cause)))}>选择目录</Button>
-        <Select label="执行者" value={provider} onChange={event => setProvider(event.target.value)}><option value="">选择可用 Agent</option>{providers.filter(item => item.eligible).map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</Select>
-        <p>批准的能力（仅作用于本任务）</p>{[['filesystem.read', '读取文件'], ['filesystem.write', '写入文件'], ['filesystem.search', '搜索文件'], ['git.status', 'Git 状态'], ['git.diff', 'Git 差异'], ['git.commit', 'Git 提交'], ['test.run', '运行测试']].map(([cap, label]) => <label key={cap}><input type="checkbox" checked={capabilities.includes(cap)} onChange={() => toggleCapability(cap)} /> {label}</label>)}
-        <label>审查说明<textarea className="cm-textarea" value={reason} onChange={event => setReason(event.target.value)} rows={3} maxLength={2000} /></label>
-        <div className="row"><Button variant="primary" disabled={busy || !workspaceName.trim() || !workspaceRoot.trim() || !provider} onClick={() => void act('approve')}>批准并执行</Button><Button variant="danger" disabled={busy || !reason.trim()} onClick={() => void act('reject')}>拒绝</Button></div>
-      </section>}
-      {selected.plan && <section><h3>已批准范围</h3><p>{selected.plan.workspace.root} · {selected.plan.provider}</p><p>{selected.plan.capabilities.join('、') || '无工具能力'}</p></section>}
-      {selected.errorCode && <p>执行失败：{selected.errorCode}</p>}
-      {selected.status === 'provision_failed' && <Button disabled={busy} onClick={() => void act('retry')}>重试执行</Button>}
-      {selected.taskId && <section><h3>任务与交付</h3><p>Task {selected.taskId} · {taskStatus || '读取中'}</p><Button compact variant="ghost" onClick={() => void open(selected.id)}>刷新状态</Button>
-        {taskStatus === 'completed' && selected.status !== 'delivered' && <><label>交付标签<Input value={deliveryLabel} onChange={event => setDeliveryLabel(event.target.value)} /></label><label>交付内容<textarea className="cm-textarea" value={deliveryContent} onChange={event => setDeliveryContent(event.target.value)} rows={5} maxLength={256000} /></label><Button variant="primary" disabled={busy || !deliveryLabel.trim() || !deliveryContent.trim()} onClick={() => void act('deliver')}>批准交付</Button></>}
-        {selected.artifacts.map(item => <p key={item.id}>已交付：{item.label} · {dateLabel(item.deliveredAt)}</p>)}
-      </section>}
-    </div>}</Sheet>
-  </section>;
-}
-
-export function taskListTitle(task: Pick<Task, 'title' | 'goal'>): string {
-  const original = (task.title || task.goal || '').trim();
-  const envelope = '[Prior Owner constraints in this Task Chat Session; verify against the current request]';
-  const requestMarker = '[Current request]';
-  const source = original.startsWith(envelope) && !original.includes(requestMarker) ? (task.goal || original).trim() : original;
-  const marker = source.lastIndexOf(requestMarker);
-  if (source.startsWith(envelope) && marker < envelope.length) return '历史任务（原始描述见详情）';
-  const display = source.startsWith(envelope) ? source.slice(marker + requestMarker.length).trim() : original;
-  return display.replace(/\s+/g, ' ') || '未命名任务';
-}
-
-function taskDialogTitle(task:Pick<Task,'title'|'goal'>):string { const title=Array.from(taskListTitle(task));return title.length>68?title.slice(0,68).join('')+'…':title.join(''); }
-
-export function WorkTaskList({ tasks, workspaces, providers, historyInitiallyOpen = false, onOpen, onAction }: {
-  tasks: Task[]; workspaces: { id: string; name: string }[]; providers: { id: string; name: string }[];
-  historyInitiallyOpen?: boolean; onOpen(task: Task): void; onAction(task: Task, action: 'start' | 'pause' | 'resume' | 'cancel'): void;
-}) {
-  const [attentionPage, setAttentionPage] = useState(0), [historyPage, setHistoryPage] = useState(0);
-  const isHistory = (task: Task) => ['completed', 'cancelled'].includes(task.status);
-  const history = tasks.filter(isHistory), attention = tasks.filter(task => !isHistory(task));
-  const attentionCurrent = Math.min(attentionPage, Math.max(0, Math.ceil(attention.length / 50) - 1)), historyCurrent = Math.min(historyPage, Math.max(0, Math.ceil(history.length / 50) - 1));
-  const workspaceName = (task: Task) => workspaces.find(item => item.id === task.workspaceId)?.name || (task.workspaceId ? '工作区已不可用' : '未绑定工作区');
-  const executorName = (task: Task) => {
-    const current = task.currentAgent?.provider || task.agent, prior = task.agentHistory.at(-1)?.provider, provider = current || prior;
-    if (!provider) return isHistory(task) ? '执行者已结束' : '未分配智能体';
-    const name = providers.find(item => item.id === provider)?.name || ({ codex: 'Codex', cetamesh: 'CetaMesh Managed Agent', dsh: 'DSH' } as Record<string,string>)[provider] || provider;
-    return name + (!current ? '（已结束）' : '');
-  };
-  return <div className="work-task-list">
-    {attention.length > 0 && <><div className="task-grid">{attention.slice(attentionCurrent * 50, (attentionCurrent + 1) * 50).map(task => <TaskCollaborationCard key={task.id} task={task} workspaceName={workspaceName(task)} executorName={executorName(task)} onOpen={() => onOpen(task)} onAction={action => onAction(task, action)} />)}</div><SmallPager page={attentionCurrent} total={attention.length} size={50} onPage={setAttentionPage} label="任务分页" /></>}
-    {history.length > 0 && <details className="task-history" open={historyInitiallyOpen || undefined}><summary><Icon name="work" size={16} /><strong>历史任务</strong><span>{history.length} 项</span><small>已完成 {history.filter(task => task.status === 'completed').length} · 已取消 {history.filter(task => task.status === 'cancelled').length}</small><Icon name="down" size={15} /></summary><div className="task-history-list">{history.slice(historyCurrent * 50, (historyCurrent + 1) * 50).map(task => <article key={task.id} className="task-history-row"><div className="task-history-main"><h3 title={taskListTitle(task)}>{taskListTitle(task)}</h3><div className="task-meta"><span>{workspaceName(task)}</span><span>·</span><span>{executorName(task)}</span><span>·</span><time>{relativeLabel(task.updatedAt)}</time></div></div><StatusBadge value={taskDisplayStatus(task)} /><Button compact variant="ghost" onClick={() => onOpen(task)}>详情 <Icon name="right" size={14} /></Button></article>)}</div><SmallPager page={historyCurrent} total={history.length} size={50} onPage={setHistoryPage} label="历史任务分页" /></details>}
-  </div>;
-}
-export function TaskCollaborationCard({ task, workspaceName, executorName, onOpen, onAction }: { task: Task; workspaceName: string; executorName: string; onOpen(): void; onAction(action: 'start' | 'pause' | 'resume' | 'cancel'): void }) {
-  return <Card className="task-card task-collaboration-card"><div className="task-card-heading"><div className="task-icon"><Icon name="work" size={18} /></div><StatusBadge value={taskDisplayStatus(task)} /></div><h3 title={taskListTitle(task)}>{taskListTitle(task)}</h3><dl className="task-card-context"><div><dt>项目</dt><dd>{workspaceName}</dd></div><div><dt>执行者</dt><dd>{executorName}</dd></div></dl>{activeTaskChildren(task).length > 0 && <small className="task-dependency-hint">等待 {activeTaskChildren(task).length} 个子任务</small>}{task.execution?.state === 'awaiting-review' && <small className="task-delivery-note">执行结果已返回，等待验收</small>}<TaskProgress percent={taskProgressValue(task)} label={`${taskListTitle(task)}进度`} /><div className="task-card-outcome"><small>{taskProgressLabel(task)}</small><span><Icon name="file" size={12} />交付物 {task.artifacts?.length ?? 0}</span></div><footer className="task-card-footer"><small>{relativeLabel(task.updatedAt)}</small><div className="task-card-actions"><Button compact variant="ghost" onClick={onOpen}>详情 <Icon name="right" size={14} /></Button>{task.status === 'queued' && task.workspaceId ? <Button compact variant="ghost" onClick={onOpen}>{activeTaskChildren(task).length ? '查看子任务' : '选择执行者'}</Button> : task.status === 'running' ? <Button compact variant="ghost" onClick={() => onAction('pause')}>暂停</Button> : ['paused', 'waiting', 'blocked'].includes(task.status) && !/needs-reconciliation|Owner reviewed interrupted effect/i.test(task.progress.note) ? <Button compact variant="ghost" disabled={activeTaskChildren(task).length > 0} onClick={() => onAction('resume')}>继续</Button> : null}{!['completed', 'cancelled', 'failed'].includes(task.status) && <IconButton label="取消任务" icon="close" compact onClick={() => onAction('cancel')} />}</div></footer></Card>;
-}
-
-export function TaskCreateForm({ workspaces, activeWorkspaceId, providers, onCreated }: { activeWorkspaceId?: string | null; workspaces: { id: string; name: string }[]; providers: { id: string; name: string; eligible: boolean; reason: string | null }[]; onCreated(task: Task): Promise<void> }) {
-  const [goal, setGoal] = useState('');
-  const defaultWorkspace = activeWorkspaceId && workspaces.some(item => item.id === activeWorkspaceId) ? activeWorkspaceId : workspaces.length === 1 ? workspaces[0].id : '';
-  const [workspaceId, setWorkspaceId] = useState(defaultWorkspace);
-  const workspaceChosen = useRef(false);
-  const workspaceAvailable = workspaces.some(item => item.id === workspaceId);
-  useEffect(() => { if (!workspaceChosen.current && !workspaceId && defaultWorkspace) setWorkspaceId(defaultWorkspace); }, [defaultWorkspace, workspaceId]);
-  const [agentProvider, setAgentProvider] = useState('');
-  const [defaultProvider,setDefaultProvider]=useState(''),[defaultsReady,setDefaultsReady]=useState(false);
-  const [cooperate, setCooperate] = useState(true), [allowUnknownCost, setAllowUnknownCost] = useState(false);
-  const [machineCheck, setMachineCheck] = useState(false), [editablePaths, setEditablePaths] = useState(''), [testFiles, setTestFiles] = useState('');
-  const createRequest = useRef<{ fingerprint: string; id: string } | null>(null);
-  const [error, setError] = useState('');
-  const [busy, setBusy] = useState(false);
-  useEffect(()=>{let alive=true;void settingsClient.get().then(({settings})=>{if(!alive)return;const configured=settings.agents?.defaultAgentProvider;const preferred=typeof configured==='string'&&configured!=='auto'?configured:'';setDefaultProvider(preferred);if(preferred&&preferred!=='cetamesh')setCooperate(false);setDefaultsReady(true);}).catch(cause=>{if(alive)setError(messageOf(cause));});return()=>{alive=false;};},[]);
-  const effectiveProvider=agentProvider||defaultProvider;
-  const managedChoice = !effectiveProvider || effectiveProvider === 'cetamesh';
-  async function submit(event: FormEvent) {
-    event.preventDefault(); if (!goal.trim()) return;
-    if (!workspaceAvailable) { setError('请选择当前可用的工作区'); return; }
-    setBusy(true); setError('');
-    try {
-      await confirmAgentExecution(effectiveProvider, workspaceId);
-      const enabled=cooperate && managedChoice;
-      const lines=(value:string)=>value.split(/\r?\n/).map(row=>row.trim()).filter(Boolean);
-      const collaboration={enabled,allowUnknownCost:enabled && allowUnknownCost,prepareNative:enabled,
-        ...(enabled && machineCheck?{verification:{editablePaths:lines(editablePaths),testFiles:lines(testFiles)}}:{})};
-      const fingerprint = JSON.stringify([goal.trim(), workspaceId, agentProvider,collaboration]);
-      if (createRequest.current?.fingerprint !== fingerprint) createRequest.current = { fingerprint, id: crypto.randomUUID() };
-      const result=await taskClient.create({ goal: goal.trim(), workspaceId: workspaceId || null, agentProvider,collaboration,
-        requestId: createRequest.current.id });
-      createRequest.current = null;
-      await onCreated(result.task);
-    }
-    catch (cause) { setError(messageOf(cause)); }
-    finally { setBusy(false); }
-  }
-  return <form className="task-create-form" onSubmit={submit}>
-    <label>任务目标<textarea className="cm-textarea" aria-label="任务目标" value={goal} onChange={event => setGoal(event.target.value)} rows={4} maxLength={2000} placeholder="描述需要完成的工作和预期结果" required /></label>
-    <Select label="工作区" value={workspaceId} onChange={event => { workspaceChosen.current = true; setWorkspaceId(event.target.value); }}><option value="">选择工作区</option>{workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}</Select>
-    {workspaceId && !workspaceAvailable && <p role="status" className="muted">所选工作区已不可用，请重新选择。</p>}
-    <p className="muted">使用已配置的默认执行者。系统按任务需要选择工具和协作方式，进展与待确认操作会显示在任务详情。</p>
-    <details><summary>协作与验收设置</summary>
-      <Select label="执行者" value={agentProvider} onChange={event => setAgentProvider(event.target.value)}><option value="">自动（使用已配置的默认执行者）</option>{providers.map(item => <option key={item.id} value={item.id} disabled={!item.eligible}>{item.name}{item.eligible ? '' : ' · 不可用'}</option>)}</Select>
-      {providers.some(item => !item.eligible) && <details><summary>不可用执行者与恢复方法</summary><ul>{providers.filter(item => !item.eligible).map(item => <li key={item.id}><strong>{item.name}</strong> · {item.id === 'dsh' ? dshSetupReasonLabel(item.reason) : availabilityReasonLabel(item.reason)}</li>)}</ul><p className="muted">请在执行者设置中核对安装、登录、连接与权限，重新检查后重新打开此窗口。执行条件未满足时仍不能派发任务。</p></details>}
-      <label><input type="checkbox" checked={cooperate} disabled={!managedChoice} onChange={event=>setCooperate(event.target.checked)} />允许按需协作（本任务最多一次外部分配，30 分钟内有效）</label>
-      <label><input type="checkbox" checked={allowUnknownCost} disabled={!managedChoice || !cooperate} onChange={event=>setAllowUnknownCost(event.target.checked)} />允许费用未知的外部 Agent 调用（可能产生费用）</label>
-      <p className="muted">原生执行范围仍需单独确认。简单任务会直接处理；未配置自动验收的结果保留人工核验。</p>
-      <label><input type="checkbox" checked={machineCheck} disabled={!managedChoice || !cooperate} onChange={event=>setMachineCheck(event.target.checked)} />以现有项目测试作为自动验收标准</label>
-      {machineCheck && <><label>允许修改的文件（每行一个精确相对路径）<textarea className="cm-textarea" aria-label="允许修改的文件" value={editablePaths} onChange={event=>setEditablePaths(event.target.value)} required /></label><label>已有验收文件（每行一个，内容保持不变）<textarea className="cm-textarea" aria-label="已有验收文件" value={testFiles} onChange={event=>setTestFiles(event.target.value)} required /></label><p className="muted">Core 将固定这些文件和 package.json 的内容，独立运行 npm test。自动验收仅覆盖此测试和修改范围，需要干净的 Git 基线。</p></>}
-    </details>
-    {error && <ErrorNotice error={error} />}<Button variant="primary" type="submit" disabled={busy || !defaultsReady || !goal.trim() || !workspaceAvailable}>{busy ? '启动中…' : '开始任务'}</Button></form>;
-}
-
-export function TaskCollaborationStatus({task}:{task:Task}){
- const state=task.collaboration;if(!state)return null;
- const labels:Record<string,string>={proposed:'正在选择并准备执行者',dispatching:'正在核验并交接', 'awaiting-result':'协作执行中',returning:'正在接回结果',verifying:'正在独立验证',verified:'机器验收通过','needs-review':'结果待核验',blocked:'协作需要处理',unknown:'结果未知，需先核对副作用'};
- return <section aria-label="自动协作状态"><h3>{labels[state.state??'']??(state.enabled?'按需自动协作已启用':'自动协作已撤销')}</h3><p>{state.selectedProvider?'执行者：'+state.selectedProvider+'。 ':''}{state.machineVerification?'以固定测试和文件范围验收。':'交付结果需要人工核验。'}{state.code?' 原因：'+state.code:''}</p></section>;
-}
-
-function TaskApprovals({taskId}:{taskId:string}) {
- const [approvals,setApprovals]=useState<Approval[]>([]),[operations,setOperations]=useState<ApprovalDecisionResult[]>([]),[error,setError]=useState('');
- const knownApprovals=useRef(new Set<string>());const [grants,setGrants]=useState<L2Grant[]>([]);
- const refresh=useCallback(async()=>{const data=await approvalClient.list();const scoped=data.approvals.filter(row=>row.taskId===taskId);for(const row of scoped)knownApprovals.current.add(row.id);setApprovals(scoped.filter(row=>row.status==='pending'));setGrants((data.grants??[]).filter(row=>row.taskId===taskId&&row.status==='active'&&row.expiresAt>Date.now()&&row.uses<row.maxUses));setOperations((data.operations??[]).filter(row=>row.approvalId && knownApprovals.current.has(row.approvalId)));},[taskId]);
- useEffect(()=>{let alive=true;const load=()=>{if(alive)void refresh().catch(cause=>{if(alive)setError(messageOf(cause));});};load();const off=bridge.subscribe('approval.pending',load),done=bridge.subscribe('approval.operation',load);const timer=window.setInterval(load,1500);return()=>{alive=false;off();done();window.clearInterval(timer);};},[refresh]);
- async function decide(id:string,approve:boolean,reuse=false){try{await approvalClient.decide(id,approve,reuse);await refresh();setError('');}catch(cause){setError(messageOf(cause));}}
- return <section aria-label="本任务待确认操作">{error && <ErrorNotice error={error} />}{approvals.map(row=><ApprovalCard key={row.id} approval={row} onDecide={(id,approve)=>void decide(id,approve)} onReuse={id=>void decide(id,true,true)} />)}{(approvals.length>0||grants.length>0)&&<p className="muted">有限授权仅覆盖相同执行者、任务、工作区和完全相同的参数；本次批准与后续 3 次分别计数。</p>}{grants.map(grant=><p key={grant.id}>{grant.resources.join("、")} · 后续已用 {grant.uses}/{grant.maxUses} · 有效至 {dateLabel(grant.expiresAt)} <Button compact variant="ghost" onClick={()=>{void approvalClient.revokeGrant(grant.id).then(refresh).catch(cause=>setError(messageOf(cause)));}}>撤销授权</Button></p>)}<ApprovalOperationSummary operations={operations} onCancel={id=>{void approvalClient.cancel(id).then(refresh).catch(cause=>setError(messageOf(cause)));}} /></section>;
-}
-
-function TaskCollaborationSummary({ task, onReview, onCreateChild, onVerifyChild, onOpenChild }: { task: Task;
-  onReview(approve: boolean, summary: string, evidenceEventIds: string[]): void;
-  onVerifyChild(): void; onOpenChild?(id:string):void;
-  onCreateChild(goal: string, scope: string, outputKind: 'analysis' | 'tool', supersedesChildId?: string): void }) {
-  const children = task.children ?? [], attempts = task.attempts ?? [], executionEvidence = task.executionEvidence ?? [];
-  const [reviewText, setReviewText] = useState(''), [childGoal, setChildGoal] = useState(''), [childScope, setChildScope] = useState('');
-  const [childKind, setChildKind] = useState<'analysis' | 'tool'>('analysis'), [replacement, setReplacement] = useState(''), [page, setPage] = useState(0);
-  const currentPage = Math.min(page, Math.max(0, Math.ceil(children.length / 20) - 1));
-  const lastSourceEvidence = executionEvidence.filter(item => ['filesystem.read', 'filesystem.search'].includes(item.capability)).at(-1);
-  if (!task.parentTaskId && !children.length && !['queued', 'running', 'paused'].includes(task.status)) return <p className="muted">暂无子任务协作记录。</p>;
-  return <section aria-label="Task collaboration" className="task-collaboration-summary">
-    {task.parentTaskId && <p><Badge>{task.verification === 'VERIFIED' ? '已核验' : '待核验'}</Badge><small>父任务关联保留，可通过上方入口查看。</small></p>}
-    {attempts.length > 0 && <details className="task-advanced"><summary>执行尝试 · {attempts.length}</summary>{attempts.slice(-20).map(item => <p key={item.id}><strong>{item.provider}</strong> · <StatusBadge value={item.state} /><small>{dateLabel(item.updatedAt ?? item.at)}</small></p>)}</details>}
-    {!task.parentTaskId && task.status === 'running' && <p>先暂停父任务，才能在同一工作区创建只读子任务。</p>}
-    {!task.parentTaskId && ['queued', 'paused'].includes(task.status) && <details className="task-advanced"><summary>创建只读子任务</summary><div className="task-form-grid"><p>最多同时执行两个只读子任务。创建后选择可用执行者并启动。</p>
-      <label>子任务目标<Input aria-label="子任务目标" value={childGoal} onChange={event => setChildGoal(event.target.value)} maxLength={2000} /></label>
-      <label>相对读取范围<Input aria-label="相对读取范围" value={childScope} onChange={event => setChildScope(event.target.value)} maxLength={1000} /></label>
-      <Select label="结果类型" value={childKind} onChange={event => setChildKind(event.target.value as 'analysis' | 'tool')}><option value="analysis">分析，需 Owner 核验</option><option value="tool">文件读取结果</option></Select>
-      <Select label="替代失败子任务" value={replacement} onChange={event => setReplacement(event.target.value)}><option value="">不替代</option>{children.filter(child => ['failed', 'cancelled'].includes(child.status) && !children.some(row => row.supersedesChildId === child.id)).map(child => <option key={child.id} value={child.id}>{child.title}</option>)}</Select>
-      <Button disabled={!childGoal.trim() || !childScope.trim()} onClick={() => onCreateChild(childGoal.trim(), childScope.trim(), childKind, replacement || undefined)}>创建只读子任务</Button>
-    </div></details>}
-    {task.parentTaskId && task.childOutputKind === 'analysis' && task.status === 'completed' && task.verification !== 'VERIFIED' && <div className="task-form-grid"><label>Owner 核验说明<Textarea aria-label="Owner 核验说明" value={reviewText} onChange={event => setReviewText(event.target.value)} rows={3} maxLength={2000} /></label><div className="row"><Button disabled={!reviewText.trim() || lastSourceEvidence?.status !== 'completed'} onClick={() => onReview(true, reviewText, lastSourceEvidence ? [lastSourceEvidence.eventId] : [])}>确认分析证据</Button><Button disabled={!reviewText.trim()} onClick={() => onReview(false, reviewText, [])}>退回审阅</Button></div></div>}
-    {task.parentTaskId && task.childOutputKind === 'tool' && task.status === 'completed' && task.verification !== 'VERIFIED' && <Button onClick={onVerifyChild}>重新核对已观察的证据</Button>}
-    {children.slice(currentPage * 20, (currentPage + 1) * 20).map(child => <article key={child.id} className="task-child-summary"><div className="task-child-heading">{onOpenChild ? <Button compact variant="ghost" onClick={() => onOpenChild(child.id)}>{child.title}</Button> : <strong>{child.title}</strong>}<StatusBadge value={child.status} /></div><p>{child.agent || '未分配执行者'} · {child.verification === 'VERIFIED' ? '证据已核验' : '证据待核验'}</p><small>执行尝试 {child.attemptCount}</small><UsageSummary usage={child.usage} label="子任务用量" /></article>)}
-    <SmallPager page={currentPage} total={children.length} size={20} onPage={setPage} label="子任务分页" />
-  </section>;
-}
-
-function WorkspaceVersion({id,executor,revision}: {id:string;executor:string|null;revision:number|null}) {
- const [version,setVersion]=useState<Awaited<ReturnType<typeof workspaceClient.version>>|null>(null),[error,setError]=useState('');
- useEffect(()=>{let alive=true;setVersion(null);setError('');void workspaceClient.version(id).then(v=>{if(alive){setVersion(v);setError('');}}).catch(e=>{if(alive)setError(messageOf(e));});return()=>{alive=false;};},[id,revision]);
- return <section aria-label="项目版本"><h3>项目版本</h3>{error?<p>{error}</p>:version?<><p>{version.isRepo?(version.headSha?'当前版本 '+version.headSha.slice(0,8):'尚未创建版本'):'普通目录 · 使用文件校验追踪'} · 当前执行者 {executor||'待分配'}</p><p>{version.total ?? version.changes.length} 个变更文件 · {version.changes.some(c=>c.conflict)?'存在版本冲突，需核对':version.truncated?'仅显示部分文件，其余变更仍需核对':'未发现 Git 索引冲突'}</p><details><summary>查看版本详情</summary><p>{version.branch||'未记录分支'} · {version.headSha||'无 Commit'}</p>{version.truncated&&<p>仅显示前 {version.changes.length} 个变更；完整修改可在下方工作区审阅入口或 Git 工作台查看。</p>}{version.changes.map(c=><p key={c.path}>{c.status} · {c.path}</p>)}<p>此处仅显示版本状态；文件导入仍逐项核对 Hash。提交和合并需要独立授权。</p></details></>:<p>正在读取项目版本…</p>}</section>;
-}
-
-function TaskRecoveryEvidence({task}: {task:Task}) {
-  const [inspection,setInspection]=useState<Awaited<ReturnType<typeof taskClient.inspectRecovery>>|null>(null);
-  const [error,setError]=useState(''),[busy,setBusy]=useState(false);
-  const identity=useRef('');identity.current=task.id+':'+task.rev;
-  useEffect(()=>{identity.current=task.id+':'+task.rev;setInspection(null);setError('');setBusy(false);return()=>{identity.current='';};},[task.id,task.rev]);
-  const rows=inspection?.operations??task.recovery?.operations??[];
-  async function inspect(){const current=identity.current;setBusy(true);try{const result=await taskClient.inspectRecovery(task.id);if(identity.current!==current)return;if(result.taskRev===task.rev)setInspection(result);else setError('任务已变化，请刷新后重新核对');}catch(e){if(identity.current===current)setError(messageOf(e));}finally{if(identity.current===current)setBusy(false);}}
-  return <section aria-label="操作核对证据"><h3>操作核对</h3><p>核对只读取操作回执和当前结果，不重新执行写入。无法证实的结果仍需人工核对。</p>
-    <Button disabled={busy} onClick={()=>void inspect()}>{busy?'正在核对…':'核对已记录结果（只读）'}</Button>{error&&<ErrorNotice error={error}/>}
-    {rows.map(row=><div key={row.operationId}><p><strong>{row.capability}</strong> · {'verified' in row&&row.verified?'当前结果已核实':row.status}{'code' in row&&row.code?' · '+row.code:''}</p><details><summary>操作标识</summary><code>{row.operationId}</code></details></div>)}
-    {!rows.length&&<p>没有可关联的操作回执；请核对工作区差异、文件及外部操作记录后再恢复。</p>}
-    {(inspection?.omitted??task.recovery?.omitted??0)>0&&<p>仅展示最近 40 项；仍有历史操作未展示，不代表全部已核对。</p>}
-  </section>;
-}
-
-export function TaskDetails({ task, providers, onHandoff, onAction, onStart, onReconcile, onReview, onCreateChild, onComplete, onVerifyChild, onOpenChild }: { onOpenChild?(id: string): void; task: Task; providers: { id: string; name: string; eligible: boolean }[]; onHandoff(provider: string): void; onAction(action: 'start' | 'pause' | 'resume' | 'cancel'): void; onStart(provider: string): void; onReconcile(summary: string, instruction: string, provider?: string): void; onReview(approve: boolean, summary: string, evidenceEventIds: string[]): void; onCreateChild(goal: string, scope: string, outputKind: 'analysis' | 'tool', supersedesChildId?: string): void; onComplete(summary: string, reportOnly?: boolean): void; onVerifyChild(): void }) {
-  const [handoffProvider, setHandoffProvider] = useState('');
-  const [startProvider, setStartProvider] = useState('');
-  const [reviewSummary, setReviewSummary] = useState('');
-  const [nextInstruction, setNextInstruction] = useState('');
-  const [recoveryProvider, setRecoveryProvider] = useState('');
-  const [completionSummary, setCompletionSummary] = useState('');
-  const [reviewedReport, setReviewedReport] = useState('');
-  const reportKey = task.reviewReport ? task.reviewReport.eventId + ':' + task.reviewReport.sha256 : '';
-  const reportOnlyAllowed = !task.parentTaskId && !task.children?.length && !task.execution?.hadToolActivity
-    && !task.execution?.hasEvidence && task.execution?.state === 'awaiting-review' && Boolean(reportKey);
-  const reportOnly = reportOnlyAllowed && reviewedReport === reportKey;
-  const readyForReview = task.parentTaskId ? task.attempts?.at(-1)?.state === 'completed'
-    : (task.execution?.state === 'awaiting-review' || (!task.currentAgent && Boolean(task.children?.length))) && (task.children?.length
-      ? !task.children.filter(child => !task.children.some(other => other.supersedesChildId === child.id)).some(child => child.status !== 'completed' || child.verification !== 'VERIFIED')
-      : task.execution?.hasEvidence || reportOnly);
-
-  const recoveryRequired = /needs-reconciliation|interrupted after Core restart/i.test(task.progress.note);
-  return <div className="task-details task-product-details">
-    {task.parentTaskId && onOpenChild && <Button compact variant="ghost" onClick={() => onOpenChild(task.parentTaskId!)}>返回父任务</Button>}
-    <TaskDependencyNotice task={task} onOpenChild={onOpenChild} />
-    <div className="task-detail-overview"><StatusBadge value={taskDisplayStatus(task)} /><span>{taskProgressLabel(task)}</span><small>更新于 {dateLabel(task.updatedAt)}</small></div>
-    {task.result && <section className="task-delivery-summary" aria-label="任务执行结果"><h3>执行结果</h3><p className="task-review-report">{task.result.summary}</p></section>}
-    <TaskDetailSection title="任务目标与进度" initialOpen><p className="task-goal">{task.goal}</p><TaskProgress percent={taskProgressValue(task)} />{task.currentPhase && <p><strong>当前阶段</strong> · {task.currentPhase}</p>}{task.progress.note && <p><strong>进度说明</strong> · {task.progress.note}</p>}{task.checkpoint && <section><h4>检查点</h4><p>{task.checkpoint.summary}</p>{task.checkpoint.nextAction && <small>下一步：{task.checkpoint.nextAction}</small>}</section>}<UsageSummary usage={task.usage} label="任务累计用量" /></TaskDetailSection>
-    {task.failure?.reason && <section className="task-failure-summary" role="status"><h3>中断或失败原因</h3><p>{task.failure.reason}</p></section>}
-    <TaskDetailSection title="结果与交付" initialOpen={task.execution?.state === 'awaiting-review' || task.status === 'completed'}>
-      <section><h3>交付物</h3>{task.artifacts.length ? task.artifacts.map(item => <ArtifactCard key={item.id} taskId={task.id} artifact={item} />) : <p className="muted">暂无交付物。</p>}</section>
-      {task.status !== 'completed' && <section className="task-form-grid"><h3>结果验收</h3>{task.execution?.state === 'awaiting-review' && <p>本轮执行已结束，任务仍待你验收；不是已完成，也不自动计为 100%。</p>}{task.reviewReport && <div><h4>本轮分析报告（Agent 自述，未自动核验）</h4><p className="task-review-report">{task.reviewReport.text}</p></div>}{reportOnlyAllowed && <label className="task-check"><Input type="checkbox" checked={reportOnly} onChange={event => setReviewedReport(event.target.checked ? reportKey : '')} /><span>仅验收分析报告；不确认工具、文件修改或测试成功</span></label>}<label>验收说明<Textarea aria-label="验收说明" value={completionSummary} onChange={event => setCompletionSummary(event.target.value)} rows={3} maxLength={1000} /></label><Button disabled={task.status !== 'running' || !completionSummary.trim() || !readyForReview} onClick={() => onComplete(completionSummary.trim(), reportOnly)}>{reportOnly ? '确认分析报告' : '确认结果'}</Button>{!readyForReview && <small>先完成当前执行及必要证据核验，再确认结果。</small>}</section>}
-      {task.workspaceId && <TaskWorkspaceChanges workspaceId={task.workspaceId} />}
-    </TaskDetailSection>
-    <TaskDetailSection title="协作与子任务" initialOpen={Boolean(task.children?.length) || Boolean(task.parentTaskId)}><TaskCollaborationSummary task={task} onReview={onReview} onCreateChild={onCreateChild} onVerifyChild={onVerifyChild} onOpenChild={onOpenChild} /></TaskDetailSection>
-    <TaskDetailSection title="执行者与交接" initialOpen={task.status === 'queued'}>
-      <section><h3>当前执行者</h3><p>{task.currentAgent?.provider || '尚未分配'}</p></section>
-      {task.status === 'queued' && task.workspaceId && <section><h3>启动任务</h3><div className="task-form-grid"><Select label="执行者" value={startProvider} onChange={event => setStartProvider(event.target.value)}><option value="">选择可用 Agent</option>{providers.filter(item => item.eligible).map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</Select><Button disabled={!startProvider || activeTaskChildren(task).length > 0} onClick={() => onStart(startProvider)}>启动</Button></div></section>}
-      {task.currentAgent && ['queued', 'running', 'waiting', 'blocked', 'paused'].includes(task.status) && <section className="task-form-grid"><h3>转交执行者</h3><Select label="目标 Agent" value={handoffProvider} onChange={event => setHandoffProvider(event.target.value)}><option value="">选择 Agent</option>{providers.filter(item => item.eligible && item.id !== task.currentAgent?.provider).map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</Select><Button disabled={!handoffProvider} onClick={() => onHandoff(handoffProvider)}>交接任务</Button></section>}
-      <details className="task-advanced"><summary>执行者与交接记录 · {task.agentHistory.length}</summary>{task.agentHistory.length ? task.agentHistory.slice(-30).map((item, index) => <article className="task-timeline-row" key={item.sessionId + '-' + index}><strong>{item.provider}</strong><small>{dateLabel(item.attachedAt)}{item.detachedAt ? ' → ' + dateLabel(item.detachedAt) : ' · 当前执行者'}</small>{item.note && <p>{item.note}</p>}</article>) : <p className="muted">暂无执行者记录。</p>}</details>
-    </TaskDetailSection>
-    <TaskDetailSection title="来源与项目版本">{task.workspaceId ? <WorkspaceVersion id={task.workspaceId} executor={task.currentAgent?.provider ?? null} revision={task.rev} /> : <p className="muted">未绑定项目工作区。</p>}<p className="muted">相关来源和文件由执行证据保留；工作区当前修改不等于本任务的全部成果。</p></TaskDetailSection>
-    <TaskDetailSection title="执行证据"><p className="muted">记录是执行观察，是否通过验收仍以相应证据核验为准。</p>{task.executionEvidence.length ? task.executionEvidence.slice(-20).reverse().map(item => <article className="task-timeline-row" key={item.eventId}><div className="task-child-heading"><strong>{item.tool || item.capability}</strong><StatusBadge value={item.status} /></div>{item.filePath && <p>{item.filePath}</p>}{item.exitCode !== null && <small>退出码 {item.exitCode}</small>}<details className="task-advanced"><summary>证据详情</summary><p>{item.capability} · Task rev {item.taskRev}</p><code>{item.eventId}</code></details></article>) : <p className="muted">暂无工具或测试执行记录。</p>}</TaskDetailSection>
-    {recoveryRequired && <TaskDetailSection title="人工核对后恢复" initialOpen><TaskRecoveryEvidence task={task} /><div className="task-form-grid"><p>先核对工作区和上次操作的实际结果，再给出新的执行指令；不会重放中断前的工具调用。</p>{!task.currentAgent && <Select label="恢复执行者" value={recoveryProvider} onChange={event => setRecoveryProvider(event.target.value)}><option value="">选择恢复任务的 Agent</option>{providers.filter(item => item.eligible).map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</Select>}<label>核对结果<Textarea aria-label="核对结果" value={reviewSummary} onChange={event => setReviewSummary(event.target.value)} rows={3} maxLength={1000} /></label><label>新的执行指令<Textarea aria-label="新的执行指令" value={nextInstruction} onChange={event => setNextInstruction(event.target.value)} rows={4} maxLength={32000} /></label><Button disabled={!reviewSummary.trim() || !nextInstruction.trim() || (!task.currentAgent && !providers.some(item => item.id === recoveryProvider && item.eligible))} onClick={() => onReconcile(reviewSummary, nextInstruction, task.currentAgent?.provider || recoveryProvider)}>确认核对并执行新指令</Button></div></TaskDetailSection>}
-    <div className="row task-detail-actions">{['working', 'running'].includes(task.status) ? <Button onClick={() => onAction('pause')}>暂停任务</Button> : ['paused', 'waiting', 'blocked'].includes(task.status) && !/needs-reconciliation|Owner reviewed interrupted effect/i.test(task.progress.note) ? <Button disabled={activeTaskChildren(task).length > 0} onClick={() => onAction('resume')}>继续任务</Button> : null}{!['completed', 'cancelled', 'failed'].includes(task.status) && <Button variant="danger" onClick={() => onAction('cancel')}>取消任务</Button>}</div>
-  </div>;
-}
-
-function TaskDetailSection({ title, initialOpen = false, children }: { title:string; initialOpen?:boolean; children:ReactNode }) {
-  return <details className="task-detail-section" open={initialOpen || undefined}><summary>{title}<Icon name="down" size={14} /></summary><div className="task-detail-section-body">{children}</div></details>;
-}
-function TaskWorkspaceChanges({ workspaceId }: { workspaceId:string }) {
-  const [open, setOpen] = useState(false);
-  return <section className="task-workspace-review"><Button compact variant="ghost" aria-expanded={open} onClick={() => setOpen(value => !value)}>{open ? '收起工作区修改' : '审阅工作区修改'}</Button>{open && <WorkspaceChangesReview workspaceId={workspaceId} call={productToolsClient.call} />}</section>;
-}
 
 export function managedWorkspacePreflight(provider: string, workspaceId: string, activeWorkspaceId: string | null): string {
   return provider === 'cetamesh' && !workspaceId && !activeWorkspaceId ? 'CetaMesh 托管任务需要工作区，请先选择工作区后发送。' : '';

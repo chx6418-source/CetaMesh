@@ -13,7 +13,7 @@ let passed = 0;
 const check = (name, fn) => { fn(); passed += 1; process.stdout.write(`PASS ${name}\n`); };
 
 check('retired gateway management has no product UI entrypoint', () => {
-  for (const file of ['desktop-ui/src/app/HarborApp.tsx', 'desktop-ui/src/app/AgentsPage.tsx', 'desktop-ui/src/app/AgentSetupPanels.tsx', 'desktop-ui/src/app/PluginsPage.tsx', 'desktop-ui/src/app/OneBotConnectionForm.tsx', 'desktop-ui/src/app/ApprovalCard.tsx', 'desktop-ui/src/bridge/typed-client.ts', 'desktop-ui/src/data/mock.ts', 'desktop-shell/src/native_ui.rs']) {
+  for (const file of ['desktop-ui/src/app/HarborApp.tsx', 'desktop-ui/src/app/WorkPage.tsx', 'desktop-ui/src/app/TaskPresentation.tsx', 'desktop-ui/src/app/AgentExecutionScope.ts', 'desktop-ui/src/app/UsageSummary.tsx', 'desktop-ui/src/app/AgentsPage.tsx', 'desktop-ui/src/app/AgentSetupPanels.tsx', 'desktop-ui/src/app/PluginsPage.tsx', 'desktop-ui/src/app/OneBotConnectionForm.tsx', 'desktop-ui/src/app/ApprovalCard.tsx', 'desktop-ui/src/bridge/typed-client.ts', 'desktop-ui/src/data/mock.ts', 'desktop-shell/src/native_ui.rs']) {
     assert.equal(/snowluma/i.test(read(file)), false, `${file} must not expose retired gateway management`);
   }
   assert.doesNotMatch(read('src/settings/pages.js'), /service\.snowluma/);
@@ -50,7 +50,7 @@ check('Harbor shell is the sole design and contains no prototype records', () =>
   assert.ok(exists('desktop-ui/src/app/HarborApp.tsx'));
   const app = read('desktop-ui/src/app/HarborApp.tsx');
   const entry = read('desktop-ui/src/main.tsx');
-  const sources = ['desktop-ui/src/app/HarborApp.tsx', 'desktop-ui/src/app/AgentsPage.tsx', 'desktop-ui/src/app/AgentSetupPanels.tsx', 'desktop-ui/src/app/PluginsPage.tsx', 'desktop-ui/src/app/OneBotConnectionForm.tsx', 'desktop-ui/src/app/ApprovalCard.tsx', 'desktop-ui/src/app/AboutPage.tsx', 'desktop-ui/src/app/PagePresentation.tsx', 'desktop-ui/src/main.tsx']
+  const sources = ['desktop-ui/src/app/HarborApp.tsx', 'desktop-ui/src/app/WorkPage.tsx', 'desktop-ui/src/app/TaskPresentation.tsx', 'desktop-ui/src/app/AgentExecutionScope.ts', 'desktop-ui/src/app/UsageSummary.tsx', 'desktop-ui/src/app/AgentsPage.tsx', 'desktop-ui/src/app/AgentSetupPanels.tsx', 'desktop-ui/src/app/PluginsPage.tsx', 'desktop-ui/src/app/OneBotConnectionForm.tsx', 'desktop-ui/src/app/ApprovalCard.tsx', 'desktop-ui/src/app/AboutPage.tsx', 'desktop-ui/src/app/PagePresentation.tsx', 'desktop-ui/src/main.tsx']
     .filter(exists).map(read).join('\n');
   assert.match(app, /Chat/);
   assert.match(app, /Agents/);
@@ -58,7 +58,10 @@ check('Harbor shell is the sole design and contains no prototype records', () =>
   assert.match(app, /Settings/);
   assert.match(app, /About/);
   assert.match(entry, /HarborApp/);
-  for (const page of ['ChatPage', 'WorkPage', 'SettingsPage', 'OnboardingPage']) assert.match(app, new RegExp(`function ${page}`));
+  for (const page of ['ChatPage', 'SettingsPage', 'OnboardingPage']) assert.match(app, new RegExp(`function ${page}`));
+  assert.match(app, /import \{ WorkPage \} from '\.\/WorkPage'/);
+  assert.match(app, /export \{ WorkPage \} from '\.\/WorkPage'/);
+  assert.match(read('desktop-ui/src/app/WorkPage.tsx'), /export function WorkPage\(/);
   assert.match(app, /import \{ AgentsPage \} from '\.\/AgentsPage'/);
   assert.match(app, /export \{ AgentsPage \} from '\.\/AgentsPage'/);
   assert.match(read('desktop-ui/src/app/AgentsPage.tsx'), /export function AgentsPage\(/);
@@ -215,7 +218,7 @@ check('Chat context uses refreshed approval events and opens artifacts through t
   assert.match(app, /<ChatContextPanel[^>]*approvals=\{approvals\}/);
   assert.match(app, /function ChatContextPanel\(\{ task, memories, approvals, onOpenMemory \}/);
   assert.doesNotMatch(app, /function ChatContextPanel\([\s\S]{0,260}useState<Approval\[\]>/);
-  assert.match(app, /暂无交付物/);
+  assert.match(read('desktop-ui/src/app/WorkPage.tsx'), /暂无交付物/);
   assert.match(app, /<ArtifactCard key=\{artifact\.id\} taskId=\{task\.id\} artifact=\{artifact\} \/>/);
   assert.doesNotMatch(app, /selectedArtifact|setSelectedArtifact/);
 });
@@ -295,7 +298,7 @@ check('Harbor accessibility and real-world controls avoid clipping and preserve 
   assert.doesNotMatch(app + plugins, /unzipSync|extractPluginPackage|JSZip/);
 });
 check('Workspace selection opens the chosen Core workspace and preserves the active ID', () => {
-  const app = read('desktop-ui/src/app/HarborApp.tsx');
+  const app = read('desktop-ui/src/app/HarborApp.tsx') + '\n' + read('desktop-ui/src/app/WorkPage.tsx');
   const client = read('desktop-ui/src/bridge/typed-client.ts');
   const projection = read('src/desktop/ui-service.js');
   const hostPolicy = read('desktop-shell/src/webview_policy.rs');
@@ -372,7 +375,7 @@ check('Artifact opening keeps renderer requests identity-only and validates the 
   const external = read('desktop-shell/src/external_link.rs');
   const client = read('desktop-ui/src/bridge/typed-client.ts');
   const cards = read('desktop-ui/src/components/product/cards.tsx');
-  const app = read('desktop-ui/src/app/HarborApp.tsx');
+  const app = read('desktop-ui/src/app/HarborApp.tsx') + '\n' + read('desktop-ui/src/app/WorkPage.tsx');
   const taskProjection = read('src/desktop/ui-service.js');
   assert.match(policy, /app\.openArtifact/);
   assert.match(policy, /validate_artifact_open_params/);
