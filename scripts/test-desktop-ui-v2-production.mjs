@@ -177,17 +177,22 @@ check('About renders real build metadata and cached release notes', () => {
 });
 check('Agent registry states stay distinct and reflect real provider health', () => {
   const app = read('desktop-ui/src/app/HarborApp.tsx');
+  const presentation = read('desktop-ui/src/app/PagePresentation.tsx');
   const projection = read('src/desktop/ui-service.js');
   const client = read('desktop-ui/src/bridge/typed-client.ts');
+  assert.match(app, /import \{[^}]*\bStatusBadge\b[^}]*\} from '\.\/PagePresentation'/);
+  assert.match(app, /export \{ availabilityReasonLabel \} from '\.\/PagePresentation'/);
+  assert.match(presentation, /export function StatusBadge\(/);
+  assert.match(presentation, /export function availabilityReasonLabel\(/);
   assert.match(projection, /not-installed/);
   assert.match(projection, /not-supported/);
   assert.match(projection, /not-checked/);
   assert.match(projection, /healthStatus/);
   assert.match(projection, /agent\('agent\.health'/);
   assert.match(client, /export type AgentStatus = 'ready' \| 'needs-setup' \| 'descriptor-incomplete' \| 'not-installed' \| 'unavailable' \| 'not-supported' \| 'not-checked'/);
-  assert.match(app, /'not-installed': '未安装'/);
-  assert.match(app, /'not-supported': '不支持'/);
-  assert.match(app, /'not-checked': '未检查'/);
+  assert.match(presentation, /'not-installed': '未安装'/);
+  assert.match(presentation, /'not-supported': '不支持'/);
+  assert.match(presentation, /'not-checked': '未检查'/);
   assert.match(app, /StatusBadge value=\{agent\.status\} available=\{isAgentReady\(agent\)\}/);
   assert.match(app, /agent\.status === 'needs-setup'/);
   assert.match(app, /mergeAgentHealth\(item, health\)/);

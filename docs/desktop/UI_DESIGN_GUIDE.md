@@ -16,6 +16,25 @@ The maintained Desktop presentation is Harbor. Extend `desktop-ui/src/theme/toke
 - A button must perform its stated action or disclose why it is unavailable. Busy, failed,
   pending approval, completed and unknown are different states. Disabled controls do not imply success.
 
+## Page patterns and state contracts
+
+Use the existing components to fit the task:
+
+- **Index and detail** for Tasks, Memory, Agents and Plugins: keep the selected identity,
+  search context, return position and error recovery clear.
+- **Conversation and context** for Chat and Simulation: keep composing primary, and show
+  usage, activity and permissions in bounded disclosures. Unknown usage stays unknown.
+- **Settings and diagnostics** for configuration: group edits, save explicitly and retain
+  drafts after failures. Installed, configured, authenticated and executable are distinct.
+- **Review and evidence** for Tasks, Workspaces and Artifacts: show observed changes and
+  verification before Owner acceptance, using the existing DiffViewer and capability routes.
+
+Show loading, empty, ready, pending approval, failed, unknown and degraded/offline states
+according to the relevant Core DTO. An error or denied permission is not an empty result;
+unknown side effects remain subject to the existing recovery and approval boundaries.
+Preserve request generation, Task revision, Agent assignment and Workspace scope across
+asynchronous refreshes. Reuse the existing local draft state and virtual lists.
+
 ## Navigation and detail
 
 The rail keeps Chat, Tasks/Workspace, Memory, Agents, Devices, Plugins, Settings and About.
