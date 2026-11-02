@@ -28,6 +28,7 @@ export function StatusBadge({ value, available }: { value: string; available?: b
 export function availabilityReasonLabel(reason: string | null) {
   if (!reason) return '';
   const labels: Record<string, string> = {
+    check_failed: '连接检查失败，请检查连接后重试。',
     provider_login_execution_unverified: '账号模式尚未通过原生执行验证；可切回 API 配置。',
     windows_auth_contract_unverified: '官方登录需先完成 Windows 原生验证。',
     agent_model_required: '尚未选择模型，请在连接设置中填写模型。',
@@ -71,4 +72,34 @@ export function availabilityReasonLabel(reason: string | null) {
     'not-supported': '暂不支持', 'not-checked': '尚未检查', unavailable: '服务未连接'
   };
   return labels[reason] ?? labels[reason.trim().toLowerCase()] ?? '当前能力尚未验证，请检查连接与配置';
+}
+
+export const dateLabel = (value: string | number | null | undefined) => {
+  if (value === null || value === undefined) return '—';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? String(value) : new Intl.DateTimeFormat('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(date);
+};
+
+export function dshSetupReasonLabel(reason: string | null | undefined) {
+  const messages: Record<string, string> = {
+    'preset-not-configured': '尚未选择编程预设，请配置 DSH 编程预设后重新检查。',
+    'preset-file-not-found': '找不到预设文件，请检查 DSH 目录和预设名称。',
+    'preset-file-unreadable': '无法读取预设文件，请检查本地文件权限。',
+    'preset-file-too-large': '预设文件过大，请缩小文件后重新检查。',
+    'path-outside-root': '预设路径超出 DSH 预设目录，请检查名称和目录。',
+    'preset-yaml-invalid': '预设 YAML 格式无效，请修正文件后重新检查。',
+    'preset-yaml-limits-exceeded': '预设 YAML 超出安全读取限制，请简化文件。',
+    'preset-schema-unverified': '无法验证此预设格式，请使用兼容的 DSH persona 预设。',
+    'persona-missing': '预设缺少 persona 内容，请补全预设。',
+    'persona-prefix-required': '预设 persona 格式不兼容，请检查 persona 前缀。',
+    'preset-not-loaded': '预设未被 DSH 原生加载，请在 DSH 中加载该预设后检查连接。',
+    'preset-load-unknown': '无法确认 DSH 原生加载状态，请检查 DSH 服务后重新检查连接。',
+    'authentication-required': 'DSH 需要本地登录，请在 DSH 中登录后检查连接。',
+    'authentication-material-missing': '缺少 DSH 本地认证信息，请先完成 DSH 登录。',
+    'not_connected': '无法连接 DSH，请检查服务地址和运行状态。',
+    'host-origin-rejected': 'DSH 拒绝了本机来源，请检查 DSH 的来源访问设置。',
+    'session-api-unavailable': 'DSH 会话接口不可用，请检查 DSH 版本与服务状态。',
+    'DSH_CONFIG_INVALID': 'DSH 连接配置无效，请检查并重新保存配置。'
+  };
+  return reason ? messages[reason] ?? availabilityReasonLabel(reason) : '';
 }

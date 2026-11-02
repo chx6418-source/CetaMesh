@@ -87,6 +87,9 @@ try {
 
   assert.equal(ui.isAgentReady({ eligible: false, taskEligible: true }), true, 'Task-only ready providers count as usable');
   assert.equal(ui.isAgentReady({ eligible: false, taskEligible: false }), false);
+  assert.equal(ui.isAgentReady({ eligible: true, taskEligible: true, status: 'ready', reason: 'CHECK_FAILED' }), false, 'a failed check cannot be reported ready from stale eligibility');
+  assert.equal(ui.isAgentReady({ eligible: true, taskEligible: true, status: 'not-checked' }), false, 'unverified health is not readiness');
+  assert.equal(ui.isAgentReady({ eligible: null, taskEligible: null, status: 'ready' }), false, 'unknown eligibility is not readiness');
   const codexMarkup = renderToStaticMarkup(React.createElement(ui.CodexSetupDiagnostic, { agent: { installed: false, compatible: false, authenticated: false, taskEligible: false, sandboxCapable: null, probeCode: 'CLI_NOT_FOUND', probePhase: 'discovery' } }));
   assert.match(codexMarkup, /Codex CLI/); assert.match(codexMarkup, /Desktop/); assert.match(codexMarkup, /CLI_NOT_FOUND/);
   const shimMarkup = renderToStaticMarkup(React.createElement(ui.CodexSetupDiagnostic, { agent: { installed: true, compatible: false, probeCode: 'NODE_RUNTIME_UNAVAILABLE' } }));

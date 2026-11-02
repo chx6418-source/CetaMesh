@@ -1,5 +1,8 @@
 import { AboutPage } from './AboutPage';
-import { ErrorNotice, Heading, EmptyNotice, StatusBadge, availabilityReasonLabel, messageOf } from './PagePresentation';
+import { AgentsPage } from './AgentsPage';
+export { AgentsPage } from './AgentsPage';
+export { mergeAgentHealth, AgentSetupDiagnostic, DshSetupForm, dshSetupErrorMessage, agentNeedsSetup, AgentRuntimeAuthenticationNotice, AgentRuntimeSetupGuide, AgentConnectionSteps, AgentRuntimeSetupForm, isAgentReady, CodexSetupDiagnostic, AgentInstallationDiagnostic } from './AgentSetupPanels';
+import { ErrorNotice, Heading, EmptyNotice, StatusBadge, availabilityReasonLabel, messageOf, dateLabel, dshSetupReasonLabel } from './PagePresentation';
 export { availabilityReasonLabel } from './PagePresentation';
 import {SimulationSpace} from './SimulationSpace';
 import {MemoryWorkspace} from './MemoryWorkspace';
@@ -12,7 +15,6 @@ import {ForgeTools} from './ForgeTools';
 import {BionicReadiness} from './BionicReadiness';
 import {useChatAttachments} from './ChatAttachments';
 import {AttachmentSettings,HistoryAttachments} from './AttachmentSettings';
-import { createAuthPanelController } from './AgentAuthController';
 import { oneBotClient, type OneBotSettings, type OneBotMigrationPreview } from '../bridge/typed-client';
 import type {ChatContextObservation, ChatModelProvider, ModelUsage, WorkspaceSummary} from '../bridge/typed-client';
 import {ChatModelPicker, ChatUsagePopover, configurationChangeBlocked, supportedReasoning} from './ChatComposerPanels';
@@ -23,7 +25,7 @@ import { useSearchParams } from 'react-router';
 import { createPortal } from 'react-dom';
 import { mergeChatHistorySnapshot, mergeLatestChatMessages, prependOlderChatMessages, recoverForwardHistory } from './chat-history';
 import { applyChatStreamUpdates, ChatRequestEpoch, ChatStreamRevision, pendingReplyVisible, type ChatStreamUpdate } from './chat-async-state';
-import { productToolsClient, type Attachment, agentClient, approvalClient, bridge, chatClient, extensionSettingsClient, hostClient, memoryClient, onboardingClient, openExternal, pluginClient, settingsClient, taskClient, workspaceClient, workshopClient, type Agent, type AgentRuntimeProvider, type AgentRuntimeConfiguration, type AgentRuntimeInput, type AgentAuthStatus, type AgentConnectionEvidence, type DshConfiguration, type DshSelection, type DshPresetCatalog, type Approval, type ApprovalDecisionResult, type L2Grant, type DesktopEventData, type ChatMessage as ChatMessageDto, type ChatSession, type ExtensionSettingsDescription, type ExtensionSettingsSnapshot, type IntegrationSettings, type Memory, type Plugin, type ProviderSettingField, type SettingField, type Settings, type Task, type WorkshopProposal } from '../bridge/typed-client';
+import { productToolsClient, type Attachment, agentClient, approvalClient, bridge, chatClient, extensionSettingsClient, hostClient, memoryClient, onboardingClient, pluginClient, settingsClient, taskClient, workspaceClient, workshopClient, type Agent, type Approval, type ApprovalDecisionResult, type L2Grant, type DesktopEventData, type ChatMessage as ChatMessageDto, type ChatSession, type ExtensionSettingsDescription, type ExtensionSettingsSnapshot, type IntegrationSettings, type Memory, type Plugin, type ProviderSettingField, type SettingField, type Settings, type Task, type WorkshopProposal } from '../bridge/typed-client';
 import { Icon, type IconName } from '../components/icons';
 import { ArtifactCard } from '../components/product/cards';
 import { Button, IconButton, Input, normalizeSelectOptionLabel, SearchInput, Select, Tabs, Textarea } from '../components/primitives/inputs';
@@ -48,11 +50,6 @@ import '../theme/motion.css';
 
 type PageId = 'devices' | 'chat' | 'work' | 'agents' | 'plugins' | 'settings' | 'about' | 'memory' | 'onboarding';
 const isPage = (value: string | null): value is PageId => value === 'devices' || value === 'chat' || value === 'work' || value === 'agents' || value === 'plugins' || value === 'settings' || value === 'about' || value === 'memory' || value === 'onboarding';
-const dateLabel = (value: string | number | null | undefined) => {
-  if (value === null || value === undefined) return '—';
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? String(value) : new Intl.DateTimeFormat('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(date);
-};
 const relativeLabel = (value: string | number | null | undefined) => {
   if (value === null || value === undefined) return '—';
   const date = new Date(value).getTime();
@@ -61,7 +58,6 @@ const relativeLabel = (value: string | number | null | undefined) => {
   return minutes < 1 ? '刚刚' : minutes < 60 ? `${minutes} 分钟前` : minutes < 1440 ? `${Math.floor(minutes / 60)} 小时前` : `${Math.floor(minutes / 1440)} 天前`;
 };
 export const isChatTurnCancellable = (state: string) => ['starting', 'streaming', 'recovering', 'cancelling', 'waiting-approval'].includes(state);
-const agentInitials = (id: string) => id.slice(0, 2).toUpperCase();
 
 export function HarborApp() {
   return <StartupDiagnosticsBoundary><HarborWorkspaceApp/></StartupDiagnosticsBoundary>;
@@ -1449,216 +1445,6 @@ function TaskWorkspaceChanges({ workspaceId }: { workspaceId:string }) {
   return <section className="task-workspace-review"><Button compact variant="ghost" aria-expanded={open} onClick={() => setOpen(value => !value)}>{open ? '收起工作区修改' : '审阅工作区修改'}</Button>{open && <WorkspaceChangesReview workspaceId={workspaceId} call={productToolsClient.call} />}</section>;
 }
 
-export function mergeAgentHealth(previous: Agent, health: Agent): Agent {
-  return { ...previous, ...health };
-}
-
-function dshSetupReasonLabel(reason: string | null | undefined) {
-  const messages: Record<string, string> = {
-    'preset-not-configured': '尚未选择编程预设，请配置 DSH 编程预设后重新检查。',
-    'preset-file-not-found': '找不到预设文件，请检查 DSH 目录和预设名称。',
-    'preset-file-unreadable': '无法读取预设文件，请检查本地文件权限。',
-    'preset-file-too-large': '预设文件过大，请缩小文件后重新检查。',
-    'path-outside-root': '预设路径超出 DSH 预设目录，请检查名称和目录。',
-    'preset-yaml-invalid': '预设 YAML 格式无效，请修正文件后重新检查。',
-    'preset-yaml-limits-exceeded': '预设 YAML 超出安全读取限制，请简化文件。',
-    'preset-schema-unverified': '无法验证此预设格式，请使用兼容的 DSH persona 预设。',
-    'persona-missing': '预设缺少 persona 内容，请补全预设。',
-    'persona-prefix-required': '预设 persona 格式不兼容，请检查 persona 前缀。',
-    'preset-not-loaded': '预设未被 DSH 原生加载，请在 DSH 中加载该预设后检查连接。',
-    'preset-load-unknown': '无法确认 DSH 原生加载状态，请检查 DSH 服务后重新检查连接。',
-    'authentication-required': 'DSH 需要本地登录，请在 DSH 中登录后检查连接。',
-    'authentication-material-missing': '缺少 DSH 本地认证信息，请先完成 DSH 登录。',
-    'not_connected': '无法连接 DSH，请检查服务地址和运行状态。',
-    'host-origin-rejected': 'DSH 拒绝了本机来源，请检查 DSH 的来源访问设置。',
-    'session-api-unavailable': 'DSH 会话接口不可用，请检查 DSH 版本与服务状态。',
-    'DSH_CONFIG_INVALID': 'DSH 连接配置无效，请检查并重新保存配置。'
-  };
-  return reason ? messages[reason] ?? availabilityReasonLabel(reason) : '';
-}
-
-export function AgentSetupDiagnostic({ agent }: { agent: Agent }) {
-  const reason = agent.reason || agent.preset?.reason;
-  return <div className="agent-diagnostic">{reason && <small>{dshSetupReasonLabel(reason)}</small>}{agent.preset && <small>编程预设 {agent.preset.id || '未选择'} · {agent.preset.loadState === 'loaded' ? '原生已加载' : agent.preset.loadState === 'not-loaded' ? '原生未加载' : '加载状态未知'} · {agent.preset.compatible === true ? '本地 persona 已验证' : agent.preset.compatible === false ? '本地 persona 不兼容' : '本地 persona 未验证'}</small>}{agent.diagnostic && <details><summary>诊断详情</summary><small>阶段：{agent.diagnostic.stage || '未知'} · 错误码：{agent.diagnostic.code || '无'} · {agent.diagnostic.retryable ? '允许重新检查连接' : '请先处理配置'}{agent.diagnostic.checkedAt ? ` · ${dateLabel(agent.diagnostic.checkedAt)}` : ''}</small></details>}</div>;
-}
-
-export function DshSetupForm({ configuration, draft, presets, saving, onDraftChange, onSave, onRefresh }: {
-  configuration: DshConfiguration; draft: DshSelection; presets?: DshPresetCatalog; saving: boolean;
-  onDraftChange(value: DshSelection): void; onSave(): void; onRefresh?(): void;
-}) {
-  const catalog = presets ?? { state: 'loading', truncated: false, presets: [] };
-  const field = (key: keyof DshSelection, label: string, placeholder: string) => <label>{label}<Input aria-label={label} value={draft[key] ?? ''} placeholder={placeholder} disabled={saving} onChange={event => onDraftChange({ ...draft, [key]: event.target.value || null })} /></label>;
-  const preset = (key: 'codingPreset' | 'socialPreset', label: string) => <div className="dsh-preset-field"><span>{label}</span><Select label={label} value={draft[key] ?? ''} disabled={saving || catalog.state === 'loading'} onChange={event => onDraftChange({ ...draft, [key]: event.target.value || null })}>
-    <option value="">请选择预设</option>
-    {draft[key] && !catalog.presets.some(row => row.id === draft[key]) && <option value={draft[key] ?? ''} disabled>{String(draft[key]) + '（未找到或尚未读取）'}</option>}
-    {catalog.presets.map(row => <option key={row.id} value={row.id} disabled={!row.compatible}>{row.id + (row.compatible ? '' : '（不兼容）')}</option>)}
-  </Select></div>;
-  const listingMessage = catalog.state === 'loading' ? '正在读取本机预设…'
-    : catalog.state === 'missing' ? '未找到预设目录，可在高级设置中检查 DSH 数据目录。'
-    : catalog.state !== 'ready' ? '无法读取本机预设，请检查高级设置中的目录与访问权限。'
-    : !catalog.presets.length ? '此目录下没有预设。请先在 DSH 中创建，再刷新列表。'
-    : !catalog.presets.some(row => row.compatible) ? '未发现兼容预设；不会自动修改已有文件。请在 DSH 中核对后刷新。'
-    : null;
-  return <form className="dsh-setup-form" onSubmit={event => { event.preventDefault(); if (!saving) onSave(); }}>
-    <h4>DSH 设置</h4><p>从本机预设中选择，无需手填名称或编辑文件。</p>
-    {preset('codingPreset', '任务预设')}
-    <small>选择后保存；实际可用状态以连接检查为准。</small>
-    {listingMessage && <small role="status">{listingMessage}</small>}
-    {catalog.presets.some(row => !row.compatible) && <small>部分预设不兼容，已禁用；原因见高级设置。</small>}
-    {catalog.truncated && <small>预设数量较多，仅显示本次有界扫描结果。</small>}
-    {configuration.restartRequired && <small role="status">配置已保存，重启 Core 后生效；当前连接保持原配置。</small>}
-    {configuration.loadError && <p role="alert">连接配置读取失败（{configuration.loadError}），请检查并重新保存。</p>}
-    <div className="row"><Button compact type="submit" disabled={saving}>{saving ? '保存中…' : '保存配置'}</Button><Button compact type="button" variant="ghost" disabled={saving || catalog.state === 'loading'} onClick={onRefresh}>刷新预设</Button></div>
-    <details><summary>高级设置</summary><div className="dsh-advanced-fields">
-      {preset('socialPreset', '社交预设')}
-      <small>仅用于 QQ 社交，与任务预设分别保存。</small>
-      {field('homeDir', 'DSH 数据目录', '留空使用自动检测目录')}{field('baseUrl', 'DSH 服务地址', 'http://127.0.0.1:3080')}
-      <details><summary>诊断信息</summary>{catalog.presets.filter(row => !row.compatible).map(row => <small key={row.id}>{row.id}：{row.reason === 'persona-prefix-required' ? '旧预设缺少 persona prefix' : '本地格式或文件校验未通过'}</small>)}
-        <small>当前生效版本 {configuration.activeRevision} · 编程预设：{configuration.active.codingPreset || '未选择'} · 社交：{configuration.active.socialPreset || '未选择'}</small>
-        {configuration.restartRequired && <small>待生效版本 {configuration.pendingRevision} · 编程：{configuration.pending?.codingPreset || '未选择'} · 社交：{configuration.pending?.socialPreset || '未选择'}。重启 Core 后生效。</small>}
-        <small>配置来源：{configuration.source} · 目录来源：{configuration.homeSource}</small><small>配置文件：{configuration.configFile || '未知'}</small>{configuration.pendingConfigFile && <small>待生效配置文件：{configuration.pendingConfigFile}</small>}<small>数据根：{configuration.dataRoot || '未知'}</small>
-      </details>
-    </div></details>
-  </form>;
-}
-
-export function dshSetupErrorMessage(cause: unknown): string {
-  const code = cause && typeof cause === 'object' && 'code' in cause ? String(cause.code) : '';
-  const message = ({
-    DSH_AUTH_SCOPE_CHANGE_REQUIRES_REVIEW: '服务地址或目录变更涉及已有认证范围，请先核对 DSH 凭据归属，再单独处理连接范围。',
-    DSH_PRESET_INCOMPATIBLE: '预设校验未通过，请检查编程与社交预设的文件、格式和 persona 内容后保存。',
-    CONFIGURATION_UNSUPPORTED: '当前 Core 无法保存 DSH 配置，请检查本机数据目录。',
-    INVALID_PARAMS: '配置字段无效，请检查预设名称、绝对目录路径与服务地址。',
-    WRITE_FAILED: '无法写入连接配置，请检查数据目录的写入权限。'
-  } as Record<string, string>)[code];
-  return message ? `${message}${code ? `（${code}）` : ''}` : messageOf(cause);
-}
-
-function DshSetupPanel({ agent, onConfigured }: { agent: Agent; onConfigured(configuration: DshConfiguration): void }) {
-  const configuration = agent.configuration;
-  const [draft, setDraft] = useState<DshSelection>(() => configuration?.pending ?? configuration?.active ?? { codingPreset: null, socialPreset: null, homeDir: null, baseUrl: null });
-  const [presets, setPresets] = useState<DshPresetCatalog>({state:'loading',truncated:false,presets:[]});
-  const [refresh, setRefresh] = useState(0);
-  useEffect(() => {
-    let active = true;
-    setPresets({state:'loading',truncated:false,presets:[]});
-    const timer=window.setTimeout(() => {
-      void agentClient.presets(draft.homeDir).then(value => { if(active) setPresets(value); })
-        .catch(() => { if(active) setPresets({state:'error',truncated:false,presets:[]}); });
-    },250);
-    return () => { active=false; window.clearTimeout(timer); };
-  },[draft.homeDir,refresh]);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState('');
-  useEffect(() => { if (configuration) setDraft(configuration.pending ?? configuration.active); }, [configuration?.revision, configuration?.activeRevision]);
-  async function save() {
-    setSaving(true); setError('');
-    try { const result = await agentClient.configure(draft); onConfigured(result.configuration); }
-    catch (cause) { setError(dshSetupErrorMessage(cause)); }
-    finally { setSaving(false); }
-  }
-  return configuration ? <><DshSetupForm configuration={configuration} draft={draft} presets={presets} onRefresh={() => setRefresh(value => value + 1)} saving={saving} onDraftChange={setDraft} onSave={() => void save()} />{error && <ErrorNotice error={error} />}</> : <small>尚未取得连接配置，请检查连接。</small>;
-}
-
-type AgentRuntimeDraft = Required<Pick<AgentRuntimeInput, 'enabled' | 'runtimePath' | 'nodePath' | 'model' | 'baseUrl' | 'apiKey'>> & Pick<AgentRuntimeInput, 'authMode' | 'servicePreset' | 'providerId' | 'methodId'>;
-function isRuntimeProvider(provider: string): provider is AgentRuntimeProvider { return ['gemini', 'opencode', 'qwen', 'claude'].includes(provider); }
-export function agentNeedsSetup(agent: Pick<Agent, 'id' | 'status' | 'reason' | 'eligible' | 'taskEligible' | 'runtimeConfiguration'>): boolean {
-  if (isAgentReady(agent) || agent.runtimeConfiguration?.enabled === false || ['disabled', 'provider_disabled', 'runtime_disabled'].includes(agent.reason?.trim().toLowerCase() ?? '')) return false;
-  return agent.status === 'needs-setup' || agent.status === 'connection-pending' || isRuntimeProvider(agent.id);
-}
-export function AgentRuntimeAuthenticationNotice({ agent }: { agent: Agent }) {
-  if (!isRuntimeProvider(agent.id) || agent.runtimeConfiguration?.authMode === 'provider-login' || agent.runtimeConfiguration?.credentialConfigured !== true || (agent.authVerified !== false && agent.authentication !== 'configured-unverified')) return null;
-  return <small role="status">运行时就绪后，API 认证将在实际任务中验证。</small>;
-}
-export function AgentRuntimeSetupGuide({ provider, onOpen }: { provider: AgentRuntimeProvider; onOpen(url: string): void }) {
-  const documentation = {
-    gemini: { name: 'Gemini CLI', url: 'https://geminicli.com/docs/get-started/installation/' },
-    qwen: { name: 'Qwen Code', url: 'https://qwenlm.github.io/qwen-code-docs/en/users/quickstart/' },
-    claude: { name: 'Claude Code', url: 'https://code.claude.com/docs/en/setup' }
-  };
-  if (provider === 'opencode') return <small>优先自动发现 OpenCode 安装包中的编码运行时；已包含时无需另装 CLI。</small>;
-  const doc = documentation[provider];
-  return <div className="dsh-setup-form"><small>本连接使用 {doc.name} 编码运行时；桌面客户端已安装不代表编码 CLI 已就绪。</small><Button compact type="button" variant="ghost" title={doc.url} onClick={() => onOpen(doc.url)}>{doc.name} 官方安装文档</Button></div>;
-}
-function runtimeDraft(configuration: AgentRuntimeConfiguration): AgentRuntimeDraft {
-  return { enabled: configuration.enabled, runtimePath: configuration.runtimePath, nodePath: configuration.nodePath, model: configuration.model, baseUrl: configuration.baseUrl, apiKey: '', authMode: configuration.authMode ?? 'api-key', servicePreset: configuration.servicePreset ?? 'custom', providerId: configuration.providerId ?? null, methodId: configuration.methodId ?? null };
-}
-export function AgentConnectionSteps({ agent }: { agent: Agent }) {
-  if (!isRuntimeProvider(agent.id)) return null;
-  const evidence = agent.connection;
-  return <dl className="agent-connection-steps">
-    <div><dt>安装</dt><dd>{agent.cliInstalled || evidence?.runtime.installed ? '编码 CLI 已发现' : agent.installed ? '仅客户端；CLI 待检查' : '未发现编码 CLI'}</dd></div>
-    <div><dt>协议</dt><dd>{evidence?.runtime.protocolVerified ? '协议已验证' : '尚未验证'}</dd></div>
-    <div><dt>认证</dt><dd>{evidence?.authentication.state === 'session-present' ? '已有专用登录会话（未验证模型访问）' : evidence?.authentication.state === 'configured-unverified' ? 'API 凭据已保存，未验证' : '尚未配置 / 未验证'}</dd></div>
-    <div><dt>任务执行</dt><dd>{evidence?.execution.eligible ? '需工作区授权及逐次工具审批' : '策略或连接条件尚未满足'}</dd></div>
-  </dl>;
-}
-export function AgentRuntimeSetupForm({ provider, configuration, draft, saving, connection, auth, onDraftChange, onSave, onRefresh, onLogin, onCancel }: {
-  provider: AgentRuntimeProvider; configuration: AgentRuntimeConfiguration; draft: AgentRuntimeDraft; saving: boolean;
-  connection?: AgentConnectionEvidence | null; auth?: AgentAuthStatus | null;
-  onDraftChange(value: AgentRuntimeDraft): void; onSave(): void; onRefresh(): void; onLogin?(methodId: string): void; onCancel?(): void;
-}) {
-  const account = draft.authMode === 'provider-login';
-  const modelRequired = provider !== 'claude' || connection?.modelRequired !== false;
-  const active = auth && ['starting', 'awaiting-user', 'exit-unconfirmed'].includes(auth.state);
-  const locked = saving || Boolean(active);
-  const field = (key: 'runtimePath' | 'nodePath' | 'model' | 'baseUrl', label: string, placeholder: string, maxLength: number) => <label>{label}<Input aria-label={label} value={draft[key]} placeholder={placeholder} maxLength={maxLength} required={key === 'model' && modelRequired && draft.enabled} disabled={locked} onChange={event => onDraftChange({ ...draft, [key]: event.target.value, ...(key === 'baseUrl' ? { servicePreset: 'custom', apiKey: '' } : {}) })} /></label>;
-  const supported = connection?.methods.find(method => method.id !== 'api-key' && method.supported && (provider !== 'opencode' || method.id === draft.methodId));
-  return <form className="dsh-setup-form" onSubmit={event => { event.preventDefault(); if (!locked) onSave(); }}>
-    <label><Input type="checkbox" checked={draft.enabled} disabled={locked} onChange={event => onDraftChange({ ...draft, enabled: event.target.checked })} /> 启用此连接</label>
-    {provider === 'qwen' ? <small>Qwen Code 仅支持 API；旧账号 OAuth 已停用。</small> : <label>认证方式<Select label="认证方式" value={draft.authMode ?? 'api-key'} disabled={locked} onChange={event => onDraftChange({ ...draft, authMode: event.target.value as 'api-key' | 'provider-login', apiKey: '', providerId: null, methodId: null })}><option value="api-key">API Key</option><option value="provider-login">服务商官方账号（待原生验证）</option></Select></label>}
-    {!account && Boolean(connection?.servicePresets?.length) && <label>API 服务<Select label="API 服务" value={draft.servicePreset ?? 'custom'} disabled={locked} onChange={event => { const preset = connection?.servicePresets?.find(item => item.id === event.target.value); if (preset) onDraftChange({ ...draft, servicePreset: preset.id, baseUrl: preset.baseUrl ?? draft.baseUrl, apiKey: '' }); }}>{connection?.servicePresets?.map(preset => <option key={preset.id} value={preset.id}>{preset.label}</option>)}</Select></label>}
-    {account && provider === 'opencode' && <label>模型服务的官方登录<Select label="模型服务的官方登录" disabled={locked} value={draft.methodId ?? ''} onChange={event => { const item = connection?.providerSelections?.find(item => item.methodId === event.target.value); onDraftChange({ ...draft, providerId: item?.providerId ?? null, methodId: item?.methodId ?? null }); }}><option value="">选择服务及方式（均待验证）</option>{connection?.providerSelections?.map(item => <option key={item.methodId} value={item.methodId}>{item.label}</option>)}</Select></label>}
-    {(!account || provider === 'opencode') && field('model', modelRequired ? '模型（必填）' : '模型（可选）', modelRequired ? '填写服务支持的准确模型 ID' : '留空使用已验证的 Claude 默认模型', 256)}
-    {!account && <><label>API Key<Input aria-label="API Key" type="password" value={draft.apiKey} autoComplete="new-password" maxLength={512} placeholder={configuration.credentialConfigured ? '留空保留已保存凭据' : '输入此 Agent 使用的 API Key'} disabled={locked} onChange={event => onDraftChange({ ...draft, apiKey: event.target.value })} /></label><small>{configuration.credentialConfigured ? '凭据已保存；留空保留已保存凭据。' : '尚未保存此 Agent 的凭据。'} 更换服务或端点须重新输入 Key；保存后清空输入框。</small></>}
-    {account && <><small>在 CetaMesh 专用配置中使用服务商官方登录，不复制现有账号目录。服务商可能打开系统默认浏览器；这不是独立浏览器账号。不会自动调用付费模型。</small>{supported ? <Button type="button" disabled={locked || configuration.authMode !== 'provider-login' || draft.methodId !== configuration.methodId} onClick={() => onLogin?.(draft.methodId ?? supported.id)}>开始官方登录</Button> : <small role="status">官方登录暂未启用：需要 Windows 原生进程、私有存储与审批策略验证。可切回 API 配置。</small>}{provider === 'gemini' && <small>Gemini 0.65.0 没有可用于被动检查的账号状态接口，且缺少完整工具输入证明；登录也不会开放任务执行。</small>}{provider === 'claude' && <small>仅计划支持 Claude 订阅登录，不支持 Console 无 Key 登录；SDK 第三方使用资格文档存在差异，需发行前复核。</small>}</>}
-    {active && <div role="status">{auth.state === 'exit-unconfirmed' ? '进程退出尚未确认；连接仍被占用。' : '等待服务商完成登录。'}<Button type="button" variant="ghost" onClick={onCancel}>取消登录</Button></div>}
-    {auth && !active && <small role="status">{{'no-session':'尚无专用登录会话',unsupported:'此账号方式不受支持',starting:'正在启动', 'awaiting-user':'等待用户', 'session-present':'专用会话已保存；不代表模型访问已验证',cancelled:'登录已取消',failed:'登录失败；可重试',expired:'登录已超时；可重试','exit-unconfirmed':'退出未确认'}[auth.state]}</small>}
-    <details><summary>高级设置</summary>{field('runtimePath', '运行时路径', '留空自动发现；填写官方编码运行时的绝对路径', 4096)}{field('nodePath', '独立 Node 路径', 'npm 运行时可填写独立 node.exe 的绝对路径', 4096)}{!account && field('baseUrl', 'API 端点', 'https://…', 2048)}</details>
-    <small>使用原生权限模式；工作区授权与逐次审批另行确认。保存配置不等于连接成功。</small>
-    <div className="row"><Button compact type="submit" disabled={locked}>{saving ? '保存中…' : '保存配置'}</Button><Button compact type="button" variant="ghost" disabled={saving} onClick={onRefresh}>刷新连接</Button></div>
-  </form>;
-}
-function AgentRuntimeSetupPanel({ agent, onConfigured, onRefresh }: { agent: Agent; onConfigured(configuration: AgentRuntimeConfiguration): void; onRefresh(): void }) {
-  const configuration = agent.runtimeConfiguration;
-  const [draft, setDraft] = useState<AgentRuntimeDraft>(() => configuration ? runtimeDraft(configuration) : { enabled: true, runtimePath: '', nodePath: '', model: '', baseUrl: '', apiKey: '' });
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState('');
-  const [notice, setNotice] = useState('');
-  const [auth, setAuth] = useState<AgentAuthStatus | null>(null);
-  const authController = useRef<ReturnType<typeof createAuthPanelController> | null>(null);
-  const mountedRevision = useRef(0), savingRef = useRef(false);
-  useEffect(() => {
-    const epoch = ++mountedRevision.current;
-    if (!isRuntimeProvider(agent.id) || !configuration) return;
-    let updates = 0;
-    const controller = createAuthPanelController({ provider: agent.id, revision: configuration.revision, client: agentClient, onUpdate: value => { updates++; setAuth(value); } });
-    authController.current = controller;
-    void agentClient.authDescribe(agent.id).then(value => { if (epoch === mountedRevision.current && updates === 0) controller.adopt(value); }).catch(() => {});
-    return () => { ++mountedRevision.current; controller.dispose(); authController.current = null; };
-  }, [agent.id, configuration?.revision]);
-  useEffect(() => {
-    if (!auth || !['starting', 'awaiting-user', 'exit-unconfirmed'].includes(auth.state)) return;
-    const timer = window.setInterval(() => { void authController.current?.status().catch(() => {}); }, 1500);
-    return () => window.clearInterval(timer);
-  }, [auth]);
-  useEffect(() => { if (configuration) setDraft(runtimeDraft(configuration)); savingRef.current = false; setSaving(false); }, [configuration?.provider, configuration?.revision]);
-  async function save() {
-    if (!isRuntimeProvider(agent.id) || savingRef.current) return;
-    savingRef.current = true; const epoch = mountedRevision.current;
-    setSaving(true); setError(''); setNotice('');
-    try { const result = await agentClient.configureRuntime(agent.id, { ...draft, executionMode: 'native-permissions' }); if (epoch === mountedRevision.current) { onConfigured(result); setNotice('配置已保存，请刷新连接查看验证结果。'); } }
-    catch (cause) { if (epoch === mountedRevision.current) setError((cause as { code?: string })?.code === 'AGENT_RUNTIME_CREDENTIAL_SCOPE_MISMATCH' ? '服务或端点已更改，请核对后重新输入对应 API Key。' : messageOf(cause)); }
-    finally { if (epoch === mountedRevision.current) { savingRef.current = false; setDraft(current => ({ ...current, apiKey: '' })); setSaving(false); } }
-  }
-  return isRuntimeProvider(agent.id) ? <><AgentRuntimeSetupGuide provider={agent.id} onOpen={url => { setError(''); void openExternal(url).catch(cause => setError(messageOf(cause))); }} />{configuration ? <AgentRuntimeSetupForm provider={agent.id} configuration={configuration} draft={draft} saving={saving} connection={agent.connection} auth={auth} onLogin={method => { void authController.current?.start(method).catch(cause => setError(messageOf(cause))); }} onCancel={() => { void authController.current?.cancel().catch(cause => setError(messageOf(cause))); }} onDraftChange={setDraft} onSave={() => void save()} onRefresh={onRefresh} /> : <small>尚未取得运行时配置，请刷新连接。</small>}{notice && <small role="status">{notice}</small>}{error && <ErrorNotice error={error} />}</> : null;
-}
-
-function AgentRuntimeSetupDisclosure(props: { agent: Agent; onConfigured(configuration: AgentRuntimeConfiguration): void; onRefresh(): void }) {
-  const [open, setOpen] = useState(false);
-  return <details className="agent-setup-disclosure" onToggle={event => setOpen(event.currentTarget.open)}><summary>连接设置</summary>{open && <AgentRuntimeSetupPanel {...props} />}</details>;
-}
-
 export function managedWorkspacePreflight(provider: string, workspaceId: string, activeWorkspaceId: string | null): string {
   return provider === 'cetamesh' && !workspaceId && !activeWorkspaceId ? 'CetaMesh 托管任务需要工作区，请先选择工作区后发送。' : '';
 }
@@ -1673,66 +1459,6 @@ export function workspaceFailureReviewTaskId(routing: Record<string, unknown>, f
 
 export function ManagedFailureActions({ taskId, onReviewTask, onNewChat }: { taskId: string; onReviewTask(id: string): void; onNewChat(): void }) {
   return <div className="row"><Button compact variant="ghost" onClick={() => onReviewTask(taskId)}>查看任务</Button><Button compact variant="ghost" onClick={onNewChat}>新建普通聊天</Button></div>;
-}
-
-export function isAgentReady(agent: Pick<Agent, 'eligible' | 'taskEligible'>) { return agent.eligible === true || agent.taskEligible === true; }
-
-export function CodexSetupDiagnostic({ agent }: { agent: Agent }) {
-  const code = agent.probeCode;
-  const action = code === 'NODE_RUNTIME_UNAVAILABLE' ? 'npm CLI 需要独立 Node；可改用原生 Codex CLI。'
-    : code === 'UNSUPPORTED_WINDOWS_SHIM' ? '无法安全解析此启动脚本；请使用原生 CLI 或受支持的 npm 安装。'
-    : code === 'CODEX_CLI_PATH_INVALID' ? '请检查明确配置的 CODEX_CLI_PATH：需要存在且可运行的绝对 exe 路径。'
-    : !agent.installed ? '未找到可调用的 Codex CLI；Desktop App / IDE 插件安装状态不代表 CLI 已安装。'
-    : agent.compatible === false ? '已检测到 CLI，但版本或 exec 协议不兼容；请检查 CLI 版本。'
-    : agent.authenticated === false ? 'Codex CLI 已安装，请在 CLI 完成登录后检查连接。'
-    : agent.sandboxCapable === false ? 'Windows Sandbox 无法执行所需隔离；任务已阻止，不会无沙箱运行。'
-    : agent.taskEligible ? 'Codex CLI 已就绪 · 仅工作区任务。' : '请检查 CLI 的连接与任务条件。';
-  return <div className="agent-setup-diagnostic"><strong>Codex CLI</strong><p>{action}</p><small>安装：{agent.installed ? '已检测' : '未检测'} · 协议：{agent.compatible ? '兼容' : '未验证或不兼容'} · 登录：{agent.authenticated ? '已认证' : '未验证或未登录'} · Sandbox：{agent.sandboxCapable === true ? '已验证' : agent.sandboxCapable === false ? '不可用' : '待首次明确选择的任务验证'}</small>{code && <small role="status">{agent.probePhase} · {code}</small>}</div>;
-}
-
-export function AgentInstallationDiagnostic({ agent }: { agent: Agent }) {
-  if (!agent.desktopApp) return null;
-  if (agent.id === 'dsh') return <div className="agent-desktop-state"><strong>DeepSeek Harness Desktop</strong><span>桌面应用：{agent.desktopApp.installed ? '已安装' : '未安装'} · {agent.desktopApp.running ? '运行中' : agent.desktopApp.status}</span><span>DSH Agent Provider：{agent.available ? '已连接' : agent.status}</span></div>;
-  const installed = agent.desktopApp.installed;
-  return <div className="agent-desktop-state"><strong>{agent.desktopApp.displayName || agent.name} 桌面客户端</strong><span>桌面客户端：{installed === true ? '已安装' : installed === false ? '未检测到' : '检测结果未知'}{agent.desktopApp.version ? ' · ' + agent.desktopApp.version : ''}</span><span>CLI：{agent.cliInstalled === true ? '已检测到' : agent.cliInstalled === false ? '未检测到' : '检测结果未知'} · Agent 连接：{isAgentReady(agent) ? '已就绪' : '待验证'}</span></div>;
-}
-
-export function AgentsPage() {
-  const [agents, setAgents] = useState<Agent[]>([]);
-  const [tasks, setTasks] = useState<Task[]>([]);
-  const [filter, setFilter] = useState('all');
-  const [query, setQuery] = useState('');
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-  const [checking, setChecking] = useState('');
-  const refresh = useCallback(async (forceRefresh = false) => {
-    setLoading(true);
-    try { const [agentResult, taskResult] = await Promise.all([agentClient.list(forceRefresh), taskClient.overview('', '')]); setAgents(agentResult.agents); setTasks(taskResult.tasks); setError(''); }
-    catch (cause) { setError(messageOf(cause)); }
-    finally { setLoading(false); }
-  }, []);
-  useEffect(() => { void refresh(); }, [refresh]);
-  const ready = agents.filter(isAgentReady).length;
-  const taskReady = agents.filter(agent => agent.taskEligible === true).length;
-  const needsSetup = agents.filter(agentNeedsSetup).length;
-  const activeTasks = tasks.filter(task => ['working', 'running'].includes(task.status)).length;
-  const visible = agents.filter(agent => (filter === 'all' || (filter === 'ready' ? isAgentReady(agent) : agentNeedsSetup(agent))) && `${agent.name} ${agent.role} ${agent.description}`.toLowerCase().includes(query.toLowerCase()));
-  async function check(agent: Agent) {
-    setChecking(agent.id);
-    try {
-      const health = await agentClient.health(agent.id, true);
-      setAgents(current => current.map(item => item.id === agent.id ? mergeAgentHealth(item, health) : item));
-      setError('');
-    }
-    catch (cause) { setError(messageOf(cause)); }
-    finally { setChecking(''); }
-  }
-  return <div className="content-page"><Heading eyebrow="AGENT DIRECTORY" title="Agents" description="查看可用 Agent、连接状态与职责。" action={<Button icon="update" onClick={() => void refresh(true)}>刷新状态</Button>} /><Banner><span className="grow"><strong>Gemini · OpenCode · Qwen · Claude 原生权限模式</strong><small>此模式没有 OS 沙箱；批准的命令可能访问宿主文件与网络。每个工作区仍需 Owner 确认，并逐次审批原生工具。</small></span></Banner>{error && <ErrorNotice error={error} onRetry={() => void refresh(true)} />}
-    <div className="agent-summary-row"><Surface><strong>{agents.length}</strong><span>已配置 Agent</span></Surface><Surface><strong>{ready}</strong><span>可用 Agent</span></Surface><Surface><strong>{taskReady}</strong><span>任务可用</span></Surface><Surface><strong>{needsSetup}</strong><span>需要设置</span></Surface><Surface><strong>{activeTasks}</strong><span>活跃任务</span></Surface></div>
-    <div className="row between work-controls"><Tabs items={[{ id: 'all', label: `全部 Agent ${agents.length}` }, { id: 'ready', label: `可用 Agent ${ready}` }, { id: 'setup', label: `需设置 ${needsSetup}` }]} selected={filter} onChange={setFilter} label="Agent 状态筛选" /><SearchInput label="搜索 Agent" placeholder="搜索名称或职责" value={query} onChange={event => setQuery(event.target.value)} /></div>
-    {loading && !agents.length ? <LoadingState label="正在读取 Agent 状态…" /> : visible.length ? <div className="agent-grid">{visible.map(agent => <Card className="agent-card" key={agent.id}><div className="row between"><div className="agent-avatar">{agentInitials(agent.id)}</div><StatusBadge value={agent.status} available={isAgentReady(agent)} /></div><h3>{agent.name}</h3><strong className="agent-role">{agent.role}</strong><p>{agent.description}</p><details className="agent-capability-details"><summary>连接与运行能力</summary>{agent.id === 'dsh' && <AgentSetupDiagnostic agent={agent} />}{agent.id === 'codex' && <CodexSetupDiagnostic agent={agent} />}{agent.reason === 'task-required' && <small>Agent 已就绪；此能力需要先分配工作区任务。</small>}{agent.id !== 'dsh' && agent.reason && agent.reason !== 'task-required' && <small>{availabilityReasonLabel(agent.reason)}</small>}<AgentConnectionSteps agent={agent} /><AgentRuntimeAuthenticationNotice agent={agent} />{agent.lastError && <small role="status">{agent.lastError}</small>}{agent.version && <small>版本 {agent.version}</small>}<AgentInstallationDiagnostic agent={agent} /></details><Button compact variant="ghost" disabled={checking === agent.id} onClick={() => void check(agent)}>{checking === agent.id ? '检查中…' : '检查连接'} <Icon name="right" size={14} /></Button>{agent.id === 'dsh' && <details className="agent-setup-disclosure"><summary>连接设置</summary><DshSetupPanel agent={agent} onConfigured={configuration => setAgents(current => current.map(item => item.id === agent.id ? { ...item, configuration } : item))} /></details>}{isRuntimeProvider(agent.id) && <AgentRuntimeSetupDisclosure agent={agent} onConfigured={runtimeConfiguration => setAgents(current => current.map(item => item.id === agent.id ? { ...item, runtimeConfiguration } : item))} onRefresh={() => void check(agent)} />}</Card>)}</div> : !error && <EmptyNotice icon="agents" title="没有匹配的 Agent" detail="当前安装和注册的 Agent 会在这里显示。" />}
-    <div className="section-heading page-section-heading"><h2>运行策略</h2></div><Surface className="policy-row"><span className="policy-icon"><Icon name="approval" /></span><span className="grow"><strong>敏感操作需要确认</strong><small>文件写入、网络访问和外部副作用由 Capability Broker 逐次管理。</small></span><Badge tone="success">由 Core 强制执行</Badge></Surface>
-  </div>;
 }
 
 type PluginReview = { id: string; stageId: string; action: 'install' | 'update' | 'enable'; installable: boolean; requiresReview: boolean; permissions: string[]; summary: string[]; trust: string };

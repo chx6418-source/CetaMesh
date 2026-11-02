@@ -28,6 +28,7 @@ const aboutScenarios = [
   ...[1.5,2].flatMap(zoom => ['light','dark'].map(theme => ({width:1280,height:900,zoom,theme,dpr:zoom})))
 ];
 const agentOnly = process.env.CETAMESH_GLOBAL_UI_AGENT_ONLY === '1';
+const agentRaceOnly = process.env.CETAMESH_GLOBAL_UI_AGENT_RACE_ONLY === '1';
 const hostSyncOnly = process.env.CETAMESH_GLOBAL_UI_HOST_SYNC_ONLY === '1';
 const behaviorOnly = process.env.CETAMESH_GLOBAL_UI_BEHAVIOR_ONLY === '1';
 assert.ok(!(agentOnly&&hostSyncOnly),'choose one focused follow-up mode');
@@ -69,6 +70,7 @@ async function bundle(directory) {
       agents[2].configuration={version:1,revision:1,activeRevision:1,pendingRevision:null,restartRequired:false,source:'synthetic-fixture',loadError:null,configFile:null,dataRoot:null,homeSource:'fixture',active:{codingPreset:'fixture-coding',socialPreset:'fixture-social',homeDir:'C:/SyntheticFixture/DSH',baseUrl:'http://127.0.0.1:9'},pending:null};
       agents[3].runtimeConfiguration={provider:'gemini',enabled:true,runtimePath:'C:/SyntheticFixture/gemini.exe',nodePath:'',model:'fixture-model',baseUrl:'https://example.invalid/v1',credentialConfigured:false,executionMode:'native-permissions',revision:1,authMode:'api-key',servicePreset:'custom'};
       agents[3].connection={runtime:{installed:true,protocolVerified:false,version:'fixture'},authentication:{mode:'api-key',state:'not-configured',verified:false},execution:{eligible:false,reason:'not-configured'},modelRequired:true,accountReason:'not-verified',methods:[],servicePresets:[{id:'custom',label:'自定义 API',baseUrl:null}]};
+      if(${JSON.stringify(agentOnly)})agents[3].description+=' 长文本排版验收：'+('LongProviderStatusWithoutSpaces'.repeat(5));
       const plugins=Array.from({length:8},(_,index)=>({id:'fixture-plugin-'+index,name:'Synthetic plugin '+index,summary:'真实 UI 的固定展示夹具，不安装或执行第三方代码。',description:'Plugin description with permissions and runtime readiness.',developer:'CetaMesh fixture',version:'1.0.0',status:index===0?'enabled':'available',category:index%2?'效率':'开发工具',kind:'extension',featured:index===0,installed:index<3,enabled:index===0,available:index!==0,configured:true,eligible:index!==0,reason:index===0?'runtime-stopped':null,lastError:null,icon:'layers',permissions:['workspace.read'],changelog:['Preserve permissions'],compatibility:{minimum:null,maximum:null},screenshotCount:0,warning:null}));
       const integrations=[{id:'fixture-service',name:'离线服务连接',kind:'channel-integration',status:'error',enabled:true,available:false,eligible:false,configured:true,reason:'connection-pending',lastError:'Synthetic service is unreachable'},{id:'fixture-tool-pack',name:'开发工具包',kind:'tool-pack',status:'enabled',enabled:true,available:false,eligible:false,configured:true,reason:'runtime-stopped',lastError:null}];
       const server={id:'fixture-remote-mcp',name:'Remote MCP · Synthetic',status:'stopped',enabled:true,running:false,available:false,toolCallable:false,eligible:false,configured:true,source:'external',toolCount:1000,discoveredToolCount:1000,transport:'streamable-http',reason:'not-checked',lastError:'未运行，不能确认工具可调用'};
@@ -81,7 +83,7 @@ async function bundle(directory) {
       const sections=[{section:'general',label:'常规',fields:[field('language','界面语言','string','zh-CN'),field('launchAtStartup','开机启动','boolean',false)]},{section:'models',label:'模型',fields:[field('provider','模型服务商','string','fixture-provider'),field('defaultModel','默认模型','string','fixture-vision')]},{section:'agents',label:'Agent',fields:[field('defaultAgentProvider','默认执行者','string','auto')]},{section:'memory',label:'记忆',fields:[field('enabled','启用记忆','boolean',true)]},{section:'workspace',label:'工作区',fields:[field('boundaryEnforcement','强制工作区边界','boolean',true)]},{section:'devices',label:'设备',fields:[field('meshEnabled','启用设备网格','boolean',false)]},{section:'advanced',label:'高级',fields:[field('logLevel','日志级别','string','info')]}];
       const catalog={models:[],modelProviders:[{id:'fixture-provider',label:'Synthetic vision provider',configured:true,catalogState:'ready',reachable:true,authenticated:true,inferencing:null,toolCalling:true,error:null,settingsFields:[],models:[{id:'fixture-vision',name:'Synthetic vision model',label:'Synthetic vision model',toolCalling:'supported',streaming:'supported',reasoning:'unknown'}]}],agentProviders:agents,modes:['chat'],defaultModelProvider:'fixture-provider',available:true,reason:null};
       const onboarding={complete:true,currentStep:'provider',steps:[{id:'welcome',title:'欢迎',description:'了解本地协作方式',status:'completed',optional:false},{id:'provider',title:'连接模型',description:'保存在本机凭据库',status:'pending',optional:false},{id:'model',title:'选择模型',description:'选择默认模型',status:'pending',optional:false},{id:'agent',title:'Agent',description:'可稍后配置',status:'pending',optional:true}]};
-      window.fixtureCalls=[];window.fixtureErrors=[];window.fixtureState={largeTasks:false,failSettings:false,failWindowSync:false,failMemory:false,failMcp:false,mcpSaveDelay:0,settings,sessions:[session]};
+      window.fixtureCalls=[];window.fixtureErrors=[];window.fixtureState={largeTasks:false,failSettings:false,failWindowSync:false,failMemory:false,failMcp:false,mcpSaveDelay:0,settings,sessions:[session]};window.fixtureAgentOverrides={};window.fixtureAgentListReleases=[];window.fixtureAgentHealthReleases=[];window.fixtureAgentConfigureReleases=[];
       window.addEventListener('error',event=>window.fixtureErrors.push(event.message));window.addEventListener('unhandledrejection',event=>window.fixtureErrors.push(String(event.reason)));
       async function call(method,params={}){if(method!=='ui.events.next')window.fixtureCalls.push({method,params});
         if(method==='ui.events.next'){await new Promise(resolve=>setTimeout(resolve,150));return{instanceId:'synthetic-ui-fixture',cursor:0,events:[]};}
@@ -98,7 +100,9 @@ async function bundle(directory) {
         if(method==='ui.memory.overview')return{memories:memories.filter(row=>!params.types||params.types.includes(row.type)),total:memories.length,candidates:[candidate],candidateMeta:{pending:1,capacity:100,remaining:99},recovery:{failed:[]}};
         if(method==='ui.memory.get')return memories.find(row=>row.id===params.id)||memories[0];
         if(method==='ui.memory.update'){if(window.fixtureState.failMemory)throw new Error('Synthetic memory save failed; draft must remain');return{...memories.find(row=>row.id===params.id),...params,rev:3};}
-        if(method==='ui.agent.list')return{agents};if(method==='ui.agent.health')return agents.find(row=>row.id===params.provider)||agents[0];
+        if(method==='ui.agent.list'){if(window.fixtureState.failNextAgentList){window.fixtureState.failNextAgentList=false;throw new Error('Synthetic Agent list failed');}const snapshot=structuredClone(agents.map(row=>({...row,...window.fixtureAgentOverrides[row.id]})));if(window.fixtureState.holdNextAgentList){window.fixtureState.holdNextAgentList=false;await new Promise(resolve=>window.fixtureAgentListReleases.push(resolve));}return{agents:snapshot};}
+        if(method==='ui.agent.health'){if(window.fixtureState.failNextAgentHealth){window.fixtureState.failNextAgentHealth=false;throw new Error('Synthetic Agent health failed');}const row=agents.find(item=>item.id===params.provider)||agents[0];const snapshot=structuredClone({...row,...window.fixtureAgentOverrides[row.id]});if(window.fixtureState.holdNextAgentHealth){window.fixtureState.holdNextAgentHealth=false;await new Promise(resolve=>window.fixtureAgentHealthReleases.push(resolve));}return snapshot;}
+        if(method==='ui.agent.configure'){if(window.fixtureState.failNextAgentConfigure){window.fixtureState.failNextAgentConfigure=false;throw new Error('Synthetic Agent save failed');}const row=agents.find(item=>item.id===params.agentId);if(row?.id==='dsh'){row.configuration={...row.configuration,revision:row.configuration.revision+1,pending:params.config};return{provider:'dsh',supported:true,applied:false,restartRequired:true,configuration:row.configuration};}if(!row?.runtimeConfiguration)throw new Error('Unsupported fixture configuration');if(window.fixtureState.holdNextAgentConfigure){window.fixtureState.holdNextAgentConfigure=false;await new Promise(resolve=>window.fixtureAgentConfigureReleases.push(resolve));}const {apiKey,...safeConfig}=params.config;row.runtimeConfiguration={...row.runtimeConfiguration,...safeConfig,credentialConfigured:!!apiKey||row.runtimeConfiguration.credentialConfigured,revision:row.runtimeConfiguration.revision+1};return{provider:row.id,supported:true,applied:true,configuration:row.runtimeConfiguration};}
         if(method==='ui.agent.presets')return{state:'missing',truncated:false,presets:[]};
         if(method==='ui.agent.auth.describe')return{provider:params.provider,attemptId:null,state:'no-session',reason:'not-configured',revision:1,epoch:1};
         if(method==='ui.devices.overview')return{available:true,enabled:false,local:{id:'synthetic-local-node',name:'Synthetic Desktop',role:'desktop',transportRunning:false},peers:[{id:'synthetic-mobile-node',name:'Synthetic offline device',role:'mobile',trust:'unknown',presence:'offline',grants:[],lastSeenAt:null,lastError:'连接尚未验证'}],audit:[{at:timestamp,code:'SYNTHETIC_OFFLINE_OBSERVATION',direction:'inbound'}],truncated:false};
@@ -125,7 +129,7 @@ async function bundle(directory) {
         throw Object.assign(new Error('UI display fixture blocks this operation: '+method),{code:'FIXTURE_READ_ONLY'});
       }
       window.ipc={postMessage(raw){const request=JSON.parse(raw);call(request.method,request.params).then(result=>window.__cetameshReceive({id:request.id,ok:true,result}),error=>window.__cetameshReceive({id:request.id,ok:false,error:{code:error.code||'FIXTURE',message:error.message}}));}};
-      function Controls(){const navigate=useNavigate();useEffect(()=>{window.fixture={show:page=>navigate('?page='+page),setTheme:theme=>useUi.getState().setTheme(theme),call,workspace,task,memories};},[navigate]);return null;}
+      function Controls(){const navigate=useNavigate();useEffect(()=>{window.fixture={show:page=>navigate('?page='+page),setTheme:theme=>useUi.getState().setTheme(theme),call,workspace,task,memories,agents};},[navigate]);return null;}
       createRoot(document.getElementById('root')).render(<MemoryRouter initialEntries={['/?page=chat']}><Controls/><HarborApp/></MemoryRouter>);
     ` },
     bundle: true, write: false, outdir: path.join(sandbox.root, 'bundle'), format: 'iife', platform: 'browser', jsx: 'automatic', nodePaths: [path.join(uiRoot, 'node_modules')], alias: aliases
@@ -189,6 +193,15 @@ try {
       if(version==='after'){
         const control=await evaluate('(()=>{const card=[...document.querySelectorAll(".agent-card")].find(n=>n.querySelector("h3")?.textContent==="Gemini"),input=card.querySelector("form input[type=checkbox]"),label=input.closest("label"),range=document.createRange(),walk=document.createTreeWalker(label,NodeFilter.SHOW_TEXT);let text;while(walk.nextNode()){if(walk.currentNode.textContent.trim()){text=walk.currentNode;break}}range.selectNodeContents(text);const a=input.getBoundingClientRect(),b=range.getBoundingClientRect();return{display:getComputedStyle(label).display,direction:getComputedStyle(label).flexDirection,input:{left:a.left,right:a.right,top:a.top,bottom:a.bottom,width:a.width},textLineCount:new Set([...range.getClientRects()].map(r=>Math.round(r.top))).size,text:{left:b.left,right:b.right,top:b.top,bottom:b.bottom},centerDifference:Math.abs((a.top+a.bottom-b.top-b.bottom)/2)}})()');checks.push({kind:'agent-enable-inline-checkbox',...scenario,...control});assert.equal(control.display,'flex','Agent enable checkbox uses one inline row');assert.equal(control.direction,'row');assert.ok(control.input.width<=16*scenario.zoom+1,'checkbox retains its compact intrinsic width');assert.equal(control.textLineCount,1,'enable label stays on one line');assert.ok(control.centerDifference<=6&&control.text.left>=control.input.right,'Agent enable label is beside its checkbox without overlap');
       }
+      if(agentOnly){
+        const trigger='[...document.querySelectorAll(".agent-card")].find(x=>x.querySelector("h3")?.textContent==="Gemini").querySelector("button[aria-label=\\"认证方式\\"]")';
+        await evaluate(trigger+'.scrollIntoView({block:"center",behavior:"instant"})');await delay(150);await evaluate(trigger+'.focus()');await key('Enter');
+        await until(trigger+'?.getAttribute("aria-expanded")==="true"','Agent authentication popup open');
+        const menu=await evaluate('(()=>{const n=document.querySelector("[role=listbox][aria-label=\\"认证方式\\"]"),r=n.getBoundingClientRect();return{left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,viewport:innerWidth,height:innerHeight}})()');
+        if(version==='after')assert.ok(menu.width>0&&menu.left>=0&&menu.right<=menu.viewport+1&&menu.top>=0&&menu.bottom<=menu.height+1,'Agent authentication popup stays inside the viewport '+JSON.stringify(menu));
+        await capture(version,scenario,'agent-auth-menu');await key('Escape');await until(trigger+'?.getAttribute("aria-expanded")==="false"','Agent authentication popup dismissed');
+        if(version==='after')checks.push({kind:'agent-auth-popup-bounds-and-keyboard-dismiss',...scenario,pass:true});
+      }
     }
     async function hostSynchronization(version){
       const scenario=scenarios[1];await rpc('Emulation.setDeviceMetricsOverride',{width:scenario.width,height:scenario.height,deviceScaleFactor:1,mobile:false},sessionId);await evaluate('document.getElementById("root").style.cssText="width:100vw;height:100vh;zoom:1";window.fixture.setTheme("light")');await show('settings');await until('!!document.querySelector("input[aria-label=界面语言]")','host-sync Settings loaded');
@@ -198,6 +211,98 @@ try {
     }
     for(const version of Object.keys(pages)){
       await rpc('Page.navigate',{url:'http://127.0.0.1:'+server.address().port+'/'+version},sessionId);await until('!!window.fixture&&!!document.querySelector(".harbor-shell")','Harbor '+version+' boot');
+      if(agentRaceOnly){
+        assert.equal(version,'after');
+        await show('agents');await until('document.querySelectorAll(".agent-card").length===4','Agent list');
+        await evaluate('window.fixtureState.holdNextAgentList=true');await textClick('刷新状态');
+        await until('window.fixtureAgentListReleases.length===1','first Agent list held');
+        await evaluate('window.fixtureAgentOverrides.codex={status:"unavailable",available:false,eligible:false,taskEligible:false,reason:"runtime_detection_failed"}');
+        await textClick('刷新状态');
+        const codex='[...document.querySelectorAll(".agent-card")].find(n=>n.querySelector("h3")?.textContent==="Codex")';
+        await until(codex+'?.innerText.includes("暂不可用")','newer Agent list is visible');
+        await evaluate('window.fixtureAgentListReleases.shift()()');await delay(300);
+        assert.ok(await evaluate(codex+'?.innerText.includes("暂不可用")'),'late Agent list must not replace a newer result');
+        await evaluate('window.fixtureAgentOverrides.codex={};window.fixtureState.holdNextAgentHealth=true');
+        await pointerClick(codex+'?.querySelector("button")','Codex connection check');
+        await until('window.fixtureAgentHealthReleases.length===1','Agent health held');
+        await evaluate('window.fixtureAgentOverrides.codex={status:"unavailable",available:false,eligible:false,taskEligible:false,reason:"runtime_detection_failed"}');
+        await textClick('刷新状态');await until(codex+'?.innerText.includes("暂不可用")','newer refresh supersedes old health');
+        await evaluate('window.fixtureAgentHealthReleases.shift()()');await delay(300);
+        assert.ok(await evaluate(codex+'?.innerText.includes("暂不可用")'),'late health must not replace a newer Agent refresh');
+        await evaluate('window.fixtureAgentOverrides.codex={status:"ready",available:true,eligible:null,taskEligible:null,reason:"CHECK_FAILED",probeCode:"CHECK_FAILED"}');
+        await textClick('刷新状态');await until(codex+'?.innerText.includes("Codex")','unchecked Agent returned');
+        await delay(300);
+        assert.equal(await evaluate(codex+'?.innerText.includes("已就绪")'),false,'CHECK_FAILED and unknown execution eligibility cannot be presented as ready');
+        await evaluate('window.fixtureAgentOverrides.codex={}');await textClick('刷新状态');await until(codex+'?.innerText.includes("已就绪")','ready fixture reloaded');
+        await evaluate('window.fixtureState.failNextAgentHealth=true');await pointerClick(codex+'?.querySelector("button")','failed Codex check');
+        await until('document.body.innerText.includes("Synthetic Agent health failed")','health failure visible');
+        assert.equal(await evaluate(codex+'?.innerText.includes("已就绪")'),false,'failed health check cannot retain a ready badge');
+        await textClick('刷新状态');await until(codex+'?.innerText.includes("已就绪")','ready fixture reloaded after failed health');
+        await evaluate('window.fixtureState.failNextAgentList=true');await textClick('刷新状态');
+        await until('document.body.innerText.includes("Synthetic Agent list failed")','Agent list failure visible');
+        assert.equal(await evaluate(codex+'?.innerText.includes("已就绪")'),false,'failed Agent list cannot retain a ready badge');
+        await textClick('刷新状态');await until(codex+'?.innerText.includes("已就绪")','ready fixture reloaded after failed list');
+        await evaluate('window.fixtureState.holdNextAgentList=true');await textClick('刷新状态');await until('window.fixtureAgentListReleases.length===1','list held before a newer individual check');
+        await evaluate('window.fixtureAgentOverrides.codex={status:"unavailable",available:false,eligible:false,taskEligible:false,reason:"runtime_detection_failed"}');
+        await pointerClick(codex+'?.querySelector("button")','newer Codex check');await until(codex+'?.innerText.includes("暂不可用")','newer health applied');
+        await evaluate('window.fixtureAgentListReleases.shift()()');await delay(300);
+        assert.ok(await evaluate(codex+'?.innerText.includes("暂不可用")'),'late list must preserve newer provider health');
+        await evaluate('window.fixtureState.holdNextAgentList=true');await textClick('刷新状态');await until('window.fixtureAgentListReleases.length===1','list held before page navigation');
+        await show('chat');await show('agents');await until(codex+'?.innerText.includes("暂不可用")','Agent page remounted');
+        await evaluate('window.fixtureAgentListReleases.shift()()');await delay(300);
+        assert.ok(await evaluate(codex+'?.innerText.includes("暂不可用")'),'old page response must not replace remounted page state');
+        const gemini='[...document.querySelectorAll(".agent-card")].find(n=>n.querySelector("h3")?.textContent==="Gemini")';
+        await pointerClick(gemini+'?.querySelector(".agent-setup-disclosure summary")','Gemini setup');
+        await until('!!('+gemini+'?.querySelector("input[aria-label=\\"模型（必填）\\"]"))','Gemini setup form');
+        await fill('input[aria-label="模型（必填）"]','fixture-retry-model');await fill('input[aria-label="API Key"]','synthetic-test-key');
+        await evaluate('window.fixtureState.failNextAgentConfigure=true');await pointerClick(gemini+'?.querySelector("form button[type=submit]")','save Gemini configuration');
+        await until('document.body.innerText.includes("Synthetic Agent save failed")','save failure visible');
+        assert.equal(await evaluate('document.querySelector("input[aria-label=\\"模型（必填）\\"]")?.value'),'fixture-retry-model','failed save keeps model draft');
+        assert.equal(await evaluate('document.querySelector("input[aria-label=\\"API Key\\"]")?.value'),'synthetic-test-key','failed save keeps masked credential draft for explicit retry');
+        await pointerClick(gemini+'?.querySelector("form button[type=submit]")','retry Gemini save');
+        await until(gemini+'?.innerText.includes("配置已保存")','configuration saved after retry');
+        assert.equal(await evaluate('document.querySelector("input[aria-label=\\"API Key\\"]")?.value'),'','successful save clears credential draft');
+        await fill('input[aria-label="模型（必填）"]','unsaved-owner-draft');
+        await evaluate('(()=>{const saved=window.fixture.agents.find(a=>a.id==="gemini").runtimeConfiguration;window.fixtureAgentOverrides.gemini={runtimeConfiguration:{...saved,model:"external-newer-config",revision:saved.revision+1}}})()');
+        await textClick('刷新状态');await delay(300);
+        assert.equal(await evaluate('document.querySelector("input[aria-label=\\"模型（必填）\\"]")?.value'),'unsaved-owner-draft','a newer configuration must not silently overwrite an unsaved form');
+        assert.ok(await evaluate(gemini+'?.innerText.includes("配置已变化")'),'configuration conflict is visible');
+        assert.equal(await evaluate(gemini+'?.querySelector("form button[type=submit]")?.disabled'),true,'a conflicted draft cannot overwrite the newer configuration');
+        await pointerClick(gemini+'?.querySelector(".agent-setup-disclosure [role=status] button")','reload explicitly reviewed configuration');
+        assert.equal(await evaluate('document.querySelector("input[aria-label=\\"模型（必填）\\"]")?.value'),'external-newer-config','explicit reload adopts newer configuration');
+        await fill('input[aria-label="模型（必填）"]','draft-with-save-in-flight');
+        await evaluate('window.fixtureState.holdNextAgentConfigure=true');await pointerClick(gemini+'?.querySelector("form button[type=submit]")','hold Agent save');
+        await until('window.fixtureAgentConfigureReleases.length===1','Agent save is in flight');
+        await evaluate('(()=>{const saved=window.fixture.agents.find(a=>a.id==="gemini").runtimeConfiguration;window.fixtureAgentOverrides.gemini={runtimeConfiguration:{...saved,model:"newer-during-save",revision:saved.revision+3}}})()');
+        await textClick('刷新状态');await until(gemini+'?.innerText.includes("配置已变化")','in-flight configuration conflict');
+        assert.equal(await evaluate('document.querySelector("input[aria-label=\\"模型（必填）\\"]")?.value'),'draft-with-save-in-flight','refresh cannot replace an in-flight save draft');
+        assert.equal(await evaluate(gemini+'?.querySelector("form button[type=submit]")?.disabled'),true,'save stays locked while request is pending');
+        await evaluate('window.fixtureAgentConfigureReleases.shift()()');await delay(350);
+        assert.ok(await evaluate(gemini+'?.innerText.includes("配置已变化")'),'an older save reply cannot dismiss a newer configuration conflict');
+        assert.equal(await evaluate('document.querySelector("input[aria-label=\\"模型（必填）\\"]")?.value'),'draft-with-save-in-flight','older save reply cannot overwrite the draft');
+        await pointerClick(gemini+'?.querySelector(".agent-setup-disclosure [role=status] button")','reload newer in-flight configuration');
+        assert.equal(await evaluate('document.querySelector("input[aria-label=\\"模型（必填）\\"]")?.value'),'newer-during-save','explicit reload uses the newer observed revision');
+        const dsh='[...document.querySelectorAll(".agent-card")].find(n=>n.querySelector("h3")?.textContent==="DSH")';
+        await pointerClick(dsh+'?.querySelector(".agent-setup-disclosure summary")','DSH setup');
+        await until('!!('+dsh+'?.querySelector("form"))','DSH form');
+        await evaluate(dsh+'?.querySelector("form details > summary")?.scrollIntoView({block:"center",behavior:"instant"})');await delay(250);
+        await pointerClick(dsh+'?.querySelector("form details > summary")','DSH advanced settings');
+        await fill('input[aria-label="DSH 服务地址"]','http://127.0.0.1:3081');
+        await evaluate('window.fixtureState.failNextAgentConfigure=true');await pointerClick(dsh+'?.querySelector("form button[type=submit]")','fail DSH save');
+        await until('document.body.innerText.includes("Synthetic Agent save failed")','DSH save failure visible');
+        assert.equal(await evaluate('document.querySelector("input[aria-label=\\"DSH 服务地址\\"]")?.value'),'http://127.0.0.1:3081','DSH failure retains draft');
+        await pointerClick(dsh+'?.querySelector("form button[type=submit]")','retry DSH save');
+        await until('window.fixture.agents.find(a=>a.id==="dsh").configuration.revision===2','DSH retry completed');
+        await fill('input[aria-label="DSH 服务地址"]','http://127.0.0.1:3082');
+        await evaluate('(()=>{const saved=window.fixture.agents.find(a=>a.id==="dsh").configuration;window.fixtureAgentOverrides.dsh={configuration:{...saved,revision:saved.revision+1,pending:{...saved.pending,baseUrl:"http://127.0.0.1:3083"}}}})()');
+        await textClick('刷新状态');await until(dsh+'?.innerText.includes("配置已变化")','DSH configuration conflict');
+        assert.equal(await evaluate('document.querySelector("input[aria-label=\\"DSH 服务地址\\"]")?.value'),'http://127.0.0.1:3082','DSH refresh preserves unsaved draft');
+        assert.equal(await evaluate(dsh+'?.querySelector("form button[type=submit]")?.disabled'),true,'DSH conflict prevents overwrite');
+        await pointerClick(dsh+'?.querySelector(".agent-setup-disclosure [role=status] button")','reload DSH configuration');
+        assert.equal(await evaluate('document.querySelector("input[aria-label=\\"DSH 服务地址\\"]")?.value'),'http://127.0.0.1:3083','DSH reload adopts latest configuration');
+        checks.push({kind:'agent-out-of-order-list-and-health',pass:true});
+        continue;
+      }
       if(aboutOnly){
         for(const scenario of aboutScenarios){
           await rpc('Emulation.setDeviceMetricsOverride',{width:scenario.width,height:scenario.height,deviceScaleFactor:scenario.dpr||1,mobile:false},sessionId);
@@ -222,7 +327,7 @@ try {
         continue;
       }
       if(hostSyncOnly){assert.equal(version,'after','Host sync follow-up uses current source only');await hostSynchronization(version);continue;}
-      const selectedScenarios=behaviorOnly?[]:agentOnly?scenarios.filter(row=>row.width===1024||row.zoom===1.5||row.theme==='dark'&&row.dpr===1.5):quick?scenarios.slice(0,1):zoomOnly?scenarios.filter(row=>row.zoom===zoomOnly):scenarios;
+      const selectedScenarios=behaviorOnly?[]:agentOnly?[...scenarios.filter(row=>row.width===1024||row.zoom===1.5||row.theme==='dark'&&row.dpr===1.5),{width:640,height:768,zoom:1,theme:'light'},{width:480,height:768,zoom:1,theme:'dark'}]:quick?scenarios.slice(0,1):zoomOnly?scenarios.filter(row=>row.zoom===zoomOnly):scenarios;
       for(const scenario of selectedScenarios){
         await rpc('Emulation.setDeviceMetricsOverride',{width:scenario.width,height:scenario.height,deviceScaleFactor:scenario.dpr||1,mobile:false},sessionId);
         await evaluate('(()=>{const root=document.getElementById("root");root.style.zoom='+scenario.zoom+';root.style.width='+JSON.stringify(100/scenario.zoom+'vw')+';root.style.height='+JSON.stringify(100/scenario.zoom+'vh')+';window.fixture.setTheme('+JSON.stringify(scenario.theme)+');})()');

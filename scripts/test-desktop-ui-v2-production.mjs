@@ -13,7 +13,7 @@ let passed = 0;
 const check = (name, fn) => { fn(); passed += 1; process.stdout.write(`PASS ${name}\n`); };
 
 check('retired gateway management has no product UI entrypoint', () => {
-  for (const file of ['desktop-ui/src/app/HarborApp.tsx', 'desktop-ui/src/bridge/typed-client.ts', 'desktop-ui/src/data/mock.ts', 'desktop-shell/src/native_ui.rs']) {
+  for (const file of ['desktop-ui/src/app/HarborApp.tsx', 'desktop-ui/src/app/AgentsPage.tsx', 'desktop-ui/src/app/AgentSetupPanels.tsx', 'desktop-ui/src/bridge/typed-client.ts', 'desktop-ui/src/data/mock.ts', 'desktop-shell/src/native_ui.rs']) {
     assert.equal(/snowluma/i.test(read(file)), false, `${file} must not expose retired gateway management`);
   }
   assert.doesNotMatch(read('src/settings/pages.js'), /service\.snowluma/);
@@ -50,7 +50,7 @@ check('Harbor shell is the sole design and contains no prototype records', () =>
   assert.ok(exists('desktop-ui/src/app/HarborApp.tsx'));
   const app = read('desktop-ui/src/app/HarborApp.tsx');
   const entry = read('desktop-ui/src/main.tsx');
-  const sources = ['desktop-ui/src/app/HarborApp.tsx', 'desktop-ui/src/app/AboutPage.tsx', 'desktop-ui/src/app/PagePresentation.tsx', 'desktop-ui/src/main.tsx']
+  const sources = ['desktop-ui/src/app/HarborApp.tsx', 'desktop-ui/src/app/AgentsPage.tsx', 'desktop-ui/src/app/AgentSetupPanels.tsx', 'desktop-ui/src/app/AboutPage.tsx', 'desktop-ui/src/app/PagePresentation.tsx', 'desktop-ui/src/main.tsx']
     .filter(exists).map(read).join('\n');
   assert.match(app, /Chat/);
   assert.match(app, /Agents/);
@@ -58,7 +58,10 @@ check('Harbor shell is the sole design and contains no prototype records', () =>
   assert.match(app, /Settings/);
   assert.match(app, /About/);
   assert.match(entry, /HarborApp/);
-  for (const page of ['ChatPage', 'WorkPage', 'AgentsPage', 'PluginsPage', 'SettingsPage', 'OnboardingPage']) assert.match(app, new RegExp(`function ${page}`));
+  for (const page of ['ChatPage', 'WorkPage', 'PluginsPage', 'SettingsPage', 'OnboardingPage']) assert.match(app, new RegExp(`function ${page}`));
+  assert.match(app, /import \{ AgentsPage \} from '\.\/AgentsPage'/);
+  assert.match(app, /export \{ AgentsPage \} from '\.\/AgentsPage'/);
+  assert.match(read('desktop-ui/src/app/AgentsPage.tsx'), /export function AgentsPage\(/);
   assert.match(app, /import \{ AboutPage \} from '\.\/AboutPage'/);
   assert.match(read('desktop-ui/src/app/AboutPage.tsx'), /export function AboutPage/);
   for (const action of ['sessions.rename', 'sessions.archive', 'sessions.remove', 'toggleIntegrationTool', 'pluginClient.toggleTool', 'manageServer']) {
@@ -177,6 +180,8 @@ check('About renders real build metadata and cached release notes', () => {
 });
 check('Agent registry states stay distinct and reflect real provider health', () => {
   const app = read('desktop-ui/src/app/HarborApp.tsx');
+  const agents = read('desktop-ui/src/app/AgentsPage.tsx');
+  const panels = read('desktop-ui/src/app/AgentSetupPanels.tsx');
   const presentation = read('desktop-ui/src/app/PagePresentation.tsx');
   const projection = read('src/desktop/ui-service.js');
   const client = read('desktop-ui/src/bridge/typed-client.ts');
@@ -193,14 +198,14 @@ check('Agent registry states stay distinct and reflect real provider health', ()
   assert.match(presentation, /'not-installed': '未安装'/);
   assert.match(presentation, /'not-supported': '不支持'/);
   assert.match(presentation, /'not-checked': '未检查'/);
-  assert.match(app, /StatusBadge value=\{agent\.status\} available=\{isAgentReady\(agent\)\}/);
-  assert.match(app, /agent\.status === 'needs-setup'/);
-  assert.match(app, /mergeAgentHealth\(item, health\)/);
-  assert.match(app, /return \{ \.\.\.previous, \.\.\.health \}/);
-  assert.doesNotMatch(app, /eligible: available && !requiresTask/);
-  assert.match(app, /agents\.filter\(isAgentReady\)/);
-  assert.match(app, /agent\.desktopApp\.installed/);
-  assert.match(app, /agent\.desktopApp\.running/);
+  assert.match(agents, /StatusBadge value=\{agent\.status === 'ready' && !isAgentReady\(agent\) \? 'not-checked' : agent\.status\} available=\{isAgentReady\(agent\)\}/);
+  assert.match(panels, /agent\.status === 'needs-setup'/);
+  assert.match(agents, /mergeAgentHealth\(item, health\)/);
+  assert.match(panels, /return \{ \.\.\.previous, \.\.\.health \}/);
+  assert.doesNotMatch(agents + panels, /eligible: available && !requiresTask/);
+  assert.match(agents, /agents\.filter\(isAgentReady\)/);
+  assert.match(panels, /agent\.desktopApp\.installed/);
+  assert.match(panels, /agent\.desktopApp\.running/);
 });
 check('Chat context uses refreshed approval events and opens artifacts through the native identity route', () => {
   const app = read('desktop-ui/src/app/HarborApp.tsx');
@@ -430,7 +435,7 @@ check('Chat streaming is frame-batched and non-bottom reading exposes a latest-m
   assert.match(composer, /const needsScope = \['task-required', 'workspace-required'\]/);
   assert.match(composer, /const disabled = !agent\.available \|\| \(!agent\.eligible && !needsScope\)/);
   assert.match(composer, /availabilityReasonLabel\(agent\.reason\)/);
-  assert.match(app, /agents\.filter\(isAgentReady\)/);
+  assert.match(read('desktop-ui/src/app/AgentsPage.tsx'), /agents\.filter\(isAgentReady\)/);
   assert.match(chat, /hasNewMessages/);
   assert.match(chat, /overlay=\{hasNewMessages/);
   assert.match(chat, /setHasNewMessages\(true\)/);
