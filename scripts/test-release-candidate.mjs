@@ -86,6 +86,7 @@ async function waitForDataIpc(dataRoot, { timeoutMs = 40000 } = {}) {
     try {
       const token = fs.readFileSync(path.join(dataRoot, 'state', 'agent-token'), 'utf8').trim();
       const res = await dataCall({ path: '/api/status', token, timeoutMs: 3000, pipeName });
+      if (!res.ok || res.json?.ready === false) throw new Error(`Data IPC is not authenticated/ready (status ${res.status})`);
       return { pipeName, token, res };
     } catch (error) {
       last = error;

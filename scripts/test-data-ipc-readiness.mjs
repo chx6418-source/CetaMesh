@@ -22,6 +22,18 @@ try {
   });
   assert.equal(result, success, '401 during startup is not readiness');
   assert.equal(calls, 2);
+  clock=0;calls=0;
+  const initialized={status:200,ok:true,json:{ready:true}};
+  assert.equal(await waitForDataIpc(root,{
+    timeoutMs:1000,now:()=>clock,sleep:async ms=>{clock+=ms;},
+    call:async()=>++calls===1?{status:200,ok:true,json:{ready:false}}:initialized
+  }),initialized,'an authenticated status pipe is not Core readiness while diagnostics are running');
+  assert.equal(calls,2);
+  clock=0;
+  await assert.rejects(waitForDataIpc(root,{
+    timeoutMs:300,now:()=>clock,sleep:async ms=>{clock+=ms;},
+    call:async()=>({status:200,ok:true,json:{ready:false}})
+  }),error=>error.code==='IPC_NOT_READY','persistent diagnostic blocking cannot be reported ready');
   clock = 0;
   await assert.rejects(waitForDataIpc(root, {
     timeoutMs: 300, now: () => clock, sleep: async ms => { clock += ms; },
