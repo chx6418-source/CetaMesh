@@ -82,6 +82,7 @@ const REGISTRY = {
   'test-memory-workspace-ui.mjs': {category:'desktop',requires:['ui-motion-live'],timeoutMs:120000,note:'Memory editing, scope, candidates, paging and stale search protection'},
   'test-global-ui-productization.mjs': {category:'desktop',requires:['ui-motion-live'],timeoutMs:360000,note:'All maintained Harbor pages, keyboard and responsive render acceptance'},
   'test-agents-page-ui.mjs': {category:'desktop',requires:['ui-motion-live'],timeoutMs:120000,note:'Agent page stale replies, failures, settings drafts and retry through Chromium'},
+  'test-plugins-page-ui.mjs': {category:'desktop',requires:['ui-motion-live'],timeoutMs:120000,note:'Plugin page search races, truthful state and concurrent settings drafts through Chromium'},
   'test-global-chat-tasks-ui.mjs': {category:'desktop',requires:['ui-motion-live'],timeoutMs:180000,note:'Production Chat and Task progressive disclosure with truthful state'},
   'test-diff-review-ui.mjs': {category:'desktop',requires:['ui-motion-live'],timeoutMs:120000,note:'Shared inert Unified/Split diff and current-workspace review'},
   'test-workspace-git-closeout.mjs': {category:'security',timeoutMs:120000,note:'Real Git exact commits, staging conflict isolation and version references'},

@@ -29,6 +29,8 @@ const aboutScenarios = [
 ];
 const agentOnly = process.env.CETAMESH_GLOBAL_UI_AGENT_ONLY === '1';
 const agentRaceOnly = process.env.CETAMESH_GLOBAL_UI_AGENT_RACE_ONLY === '1';
+const pluginRaceOnly = process.env.CETAMESH_GLOBAL_UI_PLUGIN_RACE_ONLY === '1';
+const pluginOnly = process.env.CETAMESH_GLOBAL_UI_PLUGIN_ONLY === '1';
 const hostSyncOnly = process.env.CETAMESH_GLOBAL_UI_HOST_SYNC_ONLY === '1';
 const behaviorOnly = process.env.CETAMESH_GLOBAL_UI_BEHAVIOR_ONLY === '1';
 assert.ok(!(agentOnly&&hostSyncOnly),'choose one focused follow-up mode');
@@ -72,6 +74,7 @@ async function bundle(directory) {
       agents[3].connection={runtime:{installed:true,protocolVerified:false,version:'fixture'},authentication:{mode:'api-key',state:'not-configured',verified:false},execution:{eligible:false,reason:'not-configured'},modelRequired:true,accountReason:'not-verified',methods:[],servicePresets:[{id:'custom',label:'自定义 API',baseUrl:null}]};
       if(${JSON.stringify(agentOnly)})agents[3].description+=' 长文本排版验收：'+('LongProviderStatusWithoutSpaces'.repeat(5));
       const plugins=Array.from({length:8},(_,index)=>({id:'fixture-plugin-'+index,name:'Synthetic plugin '+index,summary:'真实 UI 的固定展示夹具，不安装或执行第三方代码。',description:'Plugin description with permissions and runtime readiness.',developer:'CetaMesh fixture',version:'1.0.0',status:index===0?'enabled':'available',category:index%2?'效率':'开发工具',kind:'extension',featured:index===0,installed:index<3,enabled:index===0,available:index!==0,configured:true,eligible:index!==0,reason:index===0?'runtime-stopped':null,lastError:null,icon:'layers',permissions:['workspace.read'],changelog:['Preserve permissions'],compatibility:{minimum:null,maximum:null},screenshotCount:0,warning:null}));
+      if(${JSON.stringify(pluginOnly)})plugins[0].summary+=' 长文本验收：'+('PluginStatusWithoutSpaces'.repeat(7));
       const integrations=[{id:'fixture-service',name:'离线服务连接',kind:'channel-integration',status:'error',enabled:true,available:false,eligible:false,configured:true,reason:'connection-pending',lastError:'Synthetic service is unreachable'},{id:'fixture-tool-pack',name:'开发工具包',kind:'tool-pack',status:'enabled',enabled:true,available:false,eligible:false,configured:true,reason:'runtime-stopped',lastError:null}];
       const server={id:'fixture-remote-mcp',name:'Remote MCP · Synthetic',status:'stopped',enabled:true,running:false,available:false,toolCallable:false,eligible:false,configured:true,source:'external',toolCount:1000,discoveredToolCount:1000,transport:'streamable-http',reason:'not-checked',lastError:'未运行，不能确认工具可调用'};
       const reads=['repository.get','branches.list','issues.list','pulls.list','builds.list','builds.jobs','releases.list'];
@@ -83,7 +86,7 @@ async function bundle(directory) {
       const sections=[{section:'general',label:'常规',fields:[field('language','界面语言','string','zh-CN'),field('launchAtStartup','开机启动','boolean',false)]},{section:'models',label:'模型',fields:[field('provider','模型服务商','string','fixture-provider'),field('defaultModel','默认模型','string','fixture-vision')]},{section:'agents',label:'Agent',fields:[field('defaultAgentProvider','默认执行者','string','auto')]},{section:'memory',label:'记忆',fields:[field('enabled','启用记忆','boolean',true)]},{section:'workspace',label:'工作区',fields:[field('boundaryEnforcement','强制工作区边界','boolean',true)]},{section:'devices',label:'设备',fields:[field('meshEnabled','启用设备网格','boolean',false)]},{section:'advanced',label:'高级',fields:[field('logLevel','日志级别','string','info')]}];
       const catalog={models:[],modelProviders:[{id:'fixture-provider',label:'Synthetic vision provider',configured:true,catalogState:'ready',reachable:true,authenticated:true,inferencing:null,toolCalling:true,error:null,settingsFields:[],models:[{id:'fixture-vision',name:'Synthetic vision model',label:'Synthetic vision model',toolCalling:'supported',streaming:'supported',reasoning:'unknown'}]}],agentProviders:agents,modes:['chat'],defaultModelProvider:'fixture-provider',available:true,reason:null};
       const onboarding={complete:true,currentStep:'provider',steps:[{id:'welcome',title:'欢迎',description:'了解本地协作方式',status:'completed',optional:false},{id:'provider',title:'连接模型',description:'保存在本机凭据库',status:'pending',optional:false},{id:'model',title:'选择模型',description:'选择默认模型',status:'pending',optional:false},{id:'agent',title:'Agent',description:'可稍后配置',status:'pending',optional:true}]};
-      window.fixtureCalls=[];window.fixtureErrors=[];window.fixtureState={largeTasks:false,failSettings:false,failWindowSync:false,failMemory:false,failMcp:false,mcpSaveDelay:0,settings,sessions:[session]};window.fixtureAgentOverrides={};window.fixtureAgentListReleases=[];window.fixtureAgentHealthReleases=[];window.fixtureAgentConfigureReleases=[];
+      window.fixtureCalls=[];window.fixtureErrors=[];window.fixtureState={largeTasks:false,failSettings:false,failWindowSync:false,failMemory:false,failMcp:false,mcpSaveDelay:0,settings,sessions:[session]};window.fixtureAgentOverrides={};window.fixtureAgentListReleases=[];window.fixtureAgentHealthReleases=[];window.fixtureAgentConfigureReleases=[];window.fixturePluginOverrides={};window.fixtureIntegrationOverrides={};window.fixturePluginListReleases=[];window.fixtureConnectionReleases=[];window.fixtureToggleReleases=[];window.fixtureMcpToolsReleases=[];window.fixtureMcpOverride={};window.fixtureExtensionSaveReleases=[];window.fixtureExtensionValues={message:'initial fixture'};
       window.addEventListener('error',event=>window.fixtureErrors.push(event.message));window.addEventListener('unhandledrejection',event=>window.fixtureErrors.push(String(event.reason)));
       async function call(method,params={}){if(method!=='ui.events.next')window.fixtureCalls.push({method,params});
         if(method==='ui.events.next'){await new Promise(resolve=>setTimeout(resolve,150));return{instanceId:'synthetic-ui-fixture',cursor:0,events:[]};}
@@ -109,14 +112,18 @@ async function bundle(directory) {
         if(method==='ui.workspace.list')return{workspaces:[workspace],activeId:workspace.id};if(method==='ui.workspace.open')return{workspace,activeId:workspace.id};
         if(method==='ui.workspace.git.overview')return gitOverview;if(method==='ui.workspace.version')return{isRepo:true,branch:gitOverview.git.branch,headSha:gitOverview.git.headSha,dirty:true,changes:gitEntries.slice(0,50).map(row=>({path:row.path,status:row.x+row.y,conflict:false}))};
         if(method==='ui.workspace.git.diff')return{output:'diff --git a/'+(params.path||'src/file.ts')+' b/'+(params.path||'src/file.ts')+'\\n--- a/'+(params.path||'src/file.ts')+'\\n+++ b/'+(params.path||'src/file.ts')+'\\n@@ -1,2 +1,2 @@\\n unchanged\\n-old value\\n+new value',cached:false,hasChanges:true,truncated:false};
-        if(method==='ui.plugins.catalog')return{available:true,configured:true,offline:false,reason:null,plugins};if(method==='ui.plugins.status')return{catalogAvailable:true,configured:true,offline:false,developerMode:true,plugins,installed:plugins.filter(row=>row.installed),integrations,mcp:[server]};
+        if(method==='ui.plugins.catalog'){if(window.fixtureState.failNextPluginList){window.fixtureState.failNextPluginList=false;throw new Error('Synthetic plugin catalog failed');}const rows=plugins.map(row=>({...row,...window.fixturePluginOverrides[row.id]})).filter(row=>!params.query||(row.name+' '+row.summary).toLowerCase().includes(params.query.toLowerCase()));const result=structuredClone({available:true,configured:true,offline:false,reason:null,plugins:rows});if(window.fixtureState.holdNextPluginList){window.fixtureState.holdNextPluginList=false;await new Promise(resolve=>window.fixturePluginListReleases.push(resolve));}return result;}if(method==='ui.plugins.status')return{catalogAvailable:true,configured:true,offline:false,developerMode:true,plugins,installed:plugins.filter(row=>row.installed),integrations,mcp:[server]};
         if(method==='ui.plugins.detail')return{available:true,offline:false,plugin:plugins.find(row=>row.id===params.id)};
-        if(method==='ui.plugins.integration.list')return{integrations};if(method==='ui.mcp.list')return{servers:[server]};
-        if(method==='ui.mcp.tools')return{serverId:server.id,tools:Array.from({length:1000},(_,index)=>({id:'synthetic-tool-'+index,name:'Synthetic tool '+index,description:'Tool discovery is not permission to invoke.',enabled:true,discovered:true,callable:false}))};
+        if(method==='ui.plugins.integration.list'){if(window.fixtureState.failNextConnections){window.fixtureState.failNextConnections=false;throw new Error('Synthetic connection refresh failed');}const result=structuredClone({integrations:integrations.map(row=>({...row,...window.fixtureIntegrationOverrides[row.id]}))});if(window.fixtureState.holdNextConnections){window.fixtureState.holdNextConnections=false;await new Promise(resolve=>window.fixtureConnectionReleases.push(resolve));}return result;}if(method==='ui.mcp.list')return{servers:[{...server,...window.fixtureMcpOverride}]};
+        if(method==='ui.plugins.integration.settings')return{id:params.id,name:'Synthetic connection',enabled:true,available:false,...window.fixtureIntegrationOverrides[params.id],tools:[{id:'fixture-tool',name:'Synthetic tool permission',enabled:false,available:false,restorable:true,restore:'restored',reason:'',risk:'low',permission:'workspace.read'}],inventory:null,legacyRetired:[],settings:{},localService:null};
+        if(method==='ui.plugins.integration.tool.toggle'){if(window.fixtureState.holdNextToolToggle){window.fixtureState.holdNextToolToggle=false;await new Promise(resolve=>window.fixtureToggleReleases.push(resolve));}return{pending:false};}
+        if(method==='ui.mcp.tools'){const result={serverId:server.id,tools:Array.from({length:1000},(_,index)=>({id:'synthetic-tool-'+index,name:'Synthetic tool '+index,description:'Tool discovery is not permission to invoke.',enabled:true,discovered:true,callable:window.fixtureState.contradictoryTool===true}))};if(window.fixtureState.holdNextMcpTools){window.fixtureState.holdNextMcpTools=false;await new Promise(resolve=>window.fixtureMcpToolsReleases.push(resolve));}return result;}
+        if(method==='ui.mcp.manage'){window.fixtureMcpOverride={...window.fixtureMcpOverride,...window.fixtureState.nextMcpState};return{pending:false};}
         if(method==='ui.mcp.config.get')return{id:server.id,enabled:true,hasArgs:false,hasEnvironment:false,timeoutMs:30000,note:'Synthetic remote MCP configuration',url:'https://example.invalid/mcp',credentialRef:'synthetic-credential-reference',allowedTools:[]};
         if(method==='ui.mcp.config.update'){if(window.fixtureState.mcpSaveDelay)await new Promise(resolve=>setTimeout(resolve,window.fixtureState.mcpSaveDelay));if(window.fixtureState.failMcp)throw new Error('Synthetic MCP save failed; keep the draft');return{id:server.id,updatedKeys:Object.keys(params.config)};}
         if(method==='ui.developer.forge.describe')return forge;if(method==='ui.developer.forge.invoke')throw Object.assign(new Error('Synthetic network unavailable'),{code:'FORGE_NETWORK_ERROR'});
-        if(method==='ui.extensions.settings.describe')return{id:params.id,name:'Synthetic plugin',available:true,fields:[]};if(method==='ui.extensions.settings.get')return{id:params.id,values:{}};
+        if(method==='ui.extensions.settings.describe')return{id:params.id,name:'Synthetic plugin',available:true,fields:window.fixtureState.pluginSettingsFixture?[{key:'message',label:'显示名称',type:'string',required:false,options:[],maxLength:300,default:''}]:[]};if(method==='ui.extensions.settings.get')return{id:params.id,values:structuredClone(window.fixtureState.pluginSettingsFixture?window.fixtureExtensionValues:{})};
+        if(method==='ui.extensions.settings.update'){if(window.fixtureState.failNextExtensionSave){window.fixtureState.failNextExtensionSave=false;throw new Error('Synthetic extension save failed');}if(window.fixtureState.holdNextExtensionSave){window.fixtureState.holdNextExtensionSave=false;await new Promise(resolve=>window.fixtureExtensionSaveReleases.push(resolve));}window.fixtureExtensionValues={...window.fixtureExtensionValues,...params.values};return{id:params.id,values:structuredClone(window.fixtureExtensionValues)};}
         if(method==='ui.approvals.list')return{approvals:[],operations:[],grants:[]};
         if(method==='ui.settings.get')return{settings:window.fixtureState.settings,revision:1,recoveryRequired:false,lastError:null,backupPath:null};if(method==='ui.settings.describe')return{sections:sections.map(row=>({section:row.section,label:row.label})),fields:sections};
         if(method==='ui.settings.update'){if(window.fixtureState.failSettings)throw new Error('Synthetic settings save failed; keep the draft');window.fixtureState.settings={...settings,[params.section]:{...settings[params.section],...params.values}};return{settings:window.fixtureState.settings,revision:2};}
@@ -202,6 +209,14 @@ try {
         await capture(version,scenario,'agent-auth-menu');await key('Escape');await until(trigger+'?.getAttribute("aria-expanded")==="false"','Agent authentication popup dismissed');
         if(version==='after')checks.push({kind:'agent-auth-popup-bounds-and-keyboard-dismiss',...scenario,pass:true});
       }
+    }
+    async function pluginConfiguration(version,scenario){
+      await show('plugins');await click('[role=tablist][aria-label="插件视图"] [role=tab]:nth-child(1)');await until('document.querySelectorAll(".plugin-card").length===8','plugin catalog data');await measure(version,scenario,'plugin-catalog');
+      await pointerClick('document.querySelector(".plugin-card .plugin-card-main")','plugin detail');await until('!!document.querySelector(".cm-sheet .plugin-detail")','plugin detail');await measure(version,scenario,'plugin-detail');
+      async function checkSheetBounds(){const bounds=await evaluate('(()=>{const r=document.querySelector(".cm-sheet").getBoundingClientRect();return{left:r.left,right:r.right,viewport:innerWidth}})()');assert.ok(bounds.left>=-1&&bounds.right<=bounds.viewport+1,'settled drawer stays within the viewport '+JSON.stringify(bounds));}
+      if(version==='after'){const copy=await evaluate('document.querySelector(".cm-sheet .plugin-detail").innerText');assert.match(copy,/运行状态未验证/);assert.match(copy,/可调用：尚未验证/);assert.doesNotMatch(copy,/信任\s+Core 验证/);await checkSheetBounds();}
+      await closeSheet();await click('[role=tablist][aria-label="插件视图"] [role=tab]:nth-child(2)');await until('!!document.querySelector(".connection-list .connection-row")','plugin connections');await measure(version,scenario,'plugin-connections');
+      await click('[role=tablist][aria-label="插件视图"] [role=tab]:nth-child(4)');await until('!!document.querySelector(".connection-list .connection-row")','MCP list');await textClick('查看工具');await until('!!document.querySelector(".cm-sheet .mcp-settings-card")','MCP detail');await textClick('高级连接设置');await measure(version,scenario,'plugin-mcp-detail');if(version==='after')await checkSheetBounds();await closeSheet();
     }
     async function hostSynchronization(version){
       const scenario=scenarios[1];await rpc('Emulation.setDeviceMetricsOverride',{width:scenario.width,height:scenario.height,deviceScaleFactor:1,mobile:false},sessionId);await evaluate('document.getElementById("root").style.cssText="width:100vw;height:100vh;zoom:1";window.fixture.setTheme("light")');await show('settings');await until('!!document.querySelector("input[aria-label=界面语言]")','host-sync Settings loaded');
@@ -303,6 +318,94 @@ try {
         checks.push({kind:'agent-out-of-order-list-and-health',pass:true});
         continue;
       }
+      if(pluginRaceOnly){
+        assert.equal(version,'after');await show('plugins');await until('document.querySelectorAll(".plugin-card").length===8','plugin catalog');
+        await evaluate('window.fixturePluginOverrides["fixture-plugin-3"]={installed:false,enabled:true,status:"ready"}');await textClick('刷新目录');
+        await until('[...document.querySelectorAll(".plugin-card")].find(n=>n.innerText.includes("Synthetic plugin 3"))?.innerText.includes("已启用")||[...document.querySelectorAll(".plugin-card")].find(n=>n.innerText.includes("Synthetic plugin 3"))?.innerText.includes("未安装")','contradictory plugin projected');
+        const uninstalled=await evaluate('[...document.querySelectorAll(".plugin-card")].find(n=>n.innerText.includes("Synthetic plugin 3"))?.innerText');assert.match(uninstalled,/未安装/);assert.doesNotMatch(uninstalled,/已就绪|已启用/);
+        await evaluate('window.fixturePluginOverrides={}');await textClick('刷新目录');
+        await evaluate('window.fixtureState.holdNextPluginList=true');await fill('input[aria-label="搜索插件"]','Synthetic plugin 1');await until('window.fixturePluginListReleases.length===1','first plugin search held');
+        await fill('input[aria-label="搜索插件"]','Synthetic plugin 2');await until('document.querySelectorAll(".plugin-card").length===1&&document.querySelector(".plugin-card")?.innerText.includes("Synthetic plugin 2")','newer plugin search');
+        await evaluate('window.fixturePluginListReleases.shift()()');await delay(300);
+        assert.ok(await evaluate('document.querySelector(".plugin-card")?.innerText.includes("Synthetic plugin 2")'),'late catalog result cannot replace newer search');
+        await show('chat');await evaluate('window.fixtureState.failNextPluginList=true');await show('plugins');
+        await until('document.body.innerText.includes("Synthetic plugin catalog failed")','catalog failure visible');
+        assert.equal(await evaluate('!!document.querySelector(".plugins-page .harbor-empty")'),false,'catalog failure must not be presented as an empty result');
+        await textClick('刷新目录');await until('document.querySelectorAll(".plugin-card").length===8','plugin catalog retry');
+        await evaluate('window.fixtureState.pluginSettingsFixture=true');await pointerClick('[...document.querySelectorAll(".plugin-card")].find(n=>n.innerText.includes("Synthetic plugin 0"))?.querySelector(".plugin-card-main")','open installed plugin');
+        await until('!!document.querySelector(".cm-sheet input[aria-label=\\"显示名称\\"]")','plugin settings form');
+        const detail=await evaluate('document.querySelector(".cm-sheet").innerText');
+        assert.match(detail,/已安装/);assert.match(detail,/已启用/);assert.match(detail,/运行状态未验证/);assert.match(detail,/授权：声明权限不等于已授权/);assert.match(detail,/可调用：尚未验证/);
+        await fill('input[aria-label="显示名称"]','first owner edit');await evaluate('window.fixtureState.failNextExtensionSave=true');await textClick('保存扩展设置');
+        await until('document.body.innerText.includes("Synthetic extension save failed")','extension save failure');
+        assert.equal(await evaluate('document.querySelector("input[aria-label=\\"显示名称\\"]")?.value'),'first owner edit','failed extension save preserves draft');
+        await evaluate('window.fixtureState.holdNextExtensionSave=true');await textClick('保存扩展设置');await until('window.fixtureExtensionSaveReleases.length===1','extension save held');
+        await fill('input[aria-label="显示名称"]','later owner edit');await evaluate('window.fixtureExtensionSaveReleases.shift()()');await until('document.body.innerText.includes("扩展设置已保存")','extension save acknowledged');
+        assert.equal(await evaluate('document.querySelector("input[aria-label=\\"显示名称\\"]")?.value'),'later owner edit','save acknowledgement preserves a later edit');
+        await textClick('保存扩展设置');await until('window.fixtureExtensionValues.message==="later owner edit"','later extension edit saved');
+        await fill('input[aria-label="显示名称"]','old window draft');await evaluate('window.fixtureState.holdNextExtensionSave=true');await textClick('保存扩展设置');await until('window.fixtureExtensionSaveReleases.length===1','old window save held');
+        await closeSheet();await pointerClick('[...document.querySelectorAll(".plugin-card")].find(n=>n.innerText.includes("Synthetic plugin 0"))?.querySelector(".plugin-card-main")','reopen plugin');
+        await until('!!document.querySelector(".cm-sheet input[aria-label=\\"显示名称\\"]")','plugin settings reopened');await fill('input[aria-label="显示名称"]','new window draft');
+        await evaluate('window.fixtureExtensionSaveReleases.shift()()');await delay(300);
+        assert.equal(await evaluate('document.querySelector("input[aria-label=\\"显示名称\\"]")?.value'),'new window draft','a late save cannot overwrite a reopened draft');
+        assert.equal(await evaluate('document.body.innerText.includes("扩展设置已保存")'),false,'a late save cannot report success for the reopened window');await closeSheet();
+        await evaluate('window.fixtureState.holdNextConnections=true');await click('[role=tablist][aria-label="插件视图"] [role=tab]:nth-child(2)');await until('window.fixtureConnectionReleases.length===1','older connection refresh held');
+        await evaluate('window.fixtureMcpOverride={name:"Newer MCP observation",status:"stopped",enabled:true,running:false,toolCallable:false,eligible:false}');
+        await click('[role=tablist][aria-label="插件视图"] [role=tab]:nth-child(4)');await until('document.querySelector(".connection-list")?.innerText.includes("Newer MCP observation")','newer MCP observation');
+        await evaluate('window.fixtureConnectionReleases.shift()()');await delay(300);
+        assert.ok(await evaluate('document.querySelector(".connection-list")?.innerText.includes("Newer MCP observation")'),'late connection refresh cannot replace newer MCP state');
+        assert.equal(await evaluate('document.querySelector(".connection-list")?.innerText.includes("已就绪")'),false,'stopped MCP is not callable');
+        await click('[role=tablist][aria-label="插件视图"] [role=tab]:nth-child(2)');await until('document.querySelector(".connection-list")?.innerText.includes("离线服务连接")','connection details');
+        await textClick('详情与设置');await until('document.body.innerText.includes("Synthetic tool permission")','connection tool settings');
+        await evaluate('window.fixtureState.holdNextToolToggle=true');await textClick('开启工具');await until('window.fixtureToggleReleases.length===1','tool permission operation held');await closeSheet();
+        await click('[role=tablist][aria-label="插件视图"] [role=tab]:nth-child(4)');await textClick('查看工具');await until('!!document.querySelector(".cm-sheet .mcp-settings-card")','MCP detail after connection closes');
+        await evaluate('window.fixtureToggleReleases.shift()()');await delay(350);
+        assert.equal(await evaluate('document.querySelectorAll(".cm-sheet").length'),1,'late connection tool response must not reopen a closed detail over MCP');
+        assert.equal(await evaluate('document.body.innerText.includes("Synthetic tool permission")'),false,'closed connection settings stay closed');await closeSheet();
+        await evaluate('window.fixtureMcpOverride={name:"Contradictory MCP observation",status:"ready",enabled:true,running:false,toolCallable:true,eligible:true}');
+        await click('[role=tablist][aria-label="插件视图"] [role=tab]:nth-child(2)');await click('[role=tablist][aria-label="插件视图"] [role=tab]:nth-child(4)');
+        await until('document.querySelector(".connection-list")?.innerText.includes("Contradictory MCP observation")','contradictory MCP observation');
+        assert.equal(await evaluate('document.querySelector(".connection-list")?.innerText.includes("已就绪")'),false,'a stopped or unverified MCP cannot be advertised as callable');
+        await evaluate('window.fixtureState.contradictoryTool=true');await textClick('查看工具');await until('!!document.querySelector(".cm-sheet .mcp-tool-row")','MCP tool detail');
+        assert.equal(await evaluate('document.querySelector(".cm-sheet .mcp-tool-row")?.innerText.includes("已就绪")'),false,'tool discovery cannot override the stopped server state');
+        await evaluate('window.fixtureState.nextMcpState={status:"running",enabled:true,running:true,toolCallable:true,eligible:true}');await textClick('重启');
+        await until('document.querySelector(".cm-sheet .mcp-settings-card")?.innerText.includes("运行中")','MCP detail tracks the newer server observation');
+        assert.equal(await evaluate('document.querySelector(".cm-sheet .mcp-tool-row")?.innerText.includes("已就绪")'),false,'old tool discovery is not treated as current after server state changes');
+        assert.ok(await evaluate('document.querySelector(".cm-sheet")?.innerText.includes("工具状态需重新读取")'),'stale tool observation has a recovery action');await closeSheet();
+        await click('[role=tablist][aria-label="插件视图"] [role=tab]:nth-child(2)');await until('document.querySelector(".connection-list")?.innerText.includes("离线服务连接")','connections before failed refresh');
+        await evaluate('window.fixtureState.failNextConnections=true');await click('[role=tablist][aria-label="插件视图"] [role=tab]:nth-child(4)');await until('document.body.innerText.includes("Synthetic connection refresh failed")','connection refresh failure');
+        assert.equal(await evaluate('document.querySelector(".connection-list")?.innerText.includes("已就绪")'),false,'failed connection refresh invalidates earlier MCP readiness');
+        await evaluate('window.fixtureIntegrationOverrides["fixture-service"]={enabled:false,available:true,eligible:true,status:"ready",reason:null}');await click('[role=tablist][aria-label="插件视图"] [role=tab]:nth-child(2)');
+        await until('document.querySelector(".connection-list")?.innerText.includes("已停用")||document.querySelector(".connection-list")?.innerText.includes("已就绪")','disabled connection observation');
+        const disabled=await evaluate('document.querySelector(".connection-list .connection-row")?.innerText');assert.match(disabled,/已停用/);assert.doesNotMatch(disabled,/已就绪/);
+        await textClick('详情与设置');await until('!!document.querySelector(".cm-sheet .plugin-detail")','disabled connection detail');
+        assert.equal(await evaluate('document.querySelector(".cm-sheet .plugin-detail > .cm-badge")?.classList.contains("success")'),false,'disabled connection cannot use a success readiness badge');await closeSheet();
+        await evaluate('window.fixtureMcpOverride={name:"MCP changing during detail",status:"running",enabled:true,running:true,toolCallable:true,eligible:true};window.fixtureState.holdNextMcpTools=true');
+        await click('[role=tablist][aria-label="插件视图"] [role=tab]:nth-child(4)');await until('document.querySelector(".connection-list")?.innerText.includes("MCP changing during detail")','running MCP before detail');
+        await textClick('查看工具');await until('window.fixtureMcpToolsReleases.length===1','MCP detail response held');
+        await evaluate('window.fixtureMcpOverride={name:"MCP changing during detail",status:"stopped",enabled:true,running:false,toolCallable:false,eligible:false}');
+        await click('[role=tablist][aria-label="插件视图"] [role=tab]:nth-child(2)');await click('[role=tablist][aria-label="插件视图"] [role=tab]:nth-child(4)');
+        await until('document.querySelector(".connection-list")?.innerText.includes("已停止")','newer stopped MCP observation');
+        await evaluate('window.fixtureMcpToolsReleases.shift()()');await until('!!document.querySelector(".cm-sheet .mcp-tool-row")','held MCP detail completed');
+        assert.equal(await evaluate('document.querySelector(".cm-sheet .mcp-tool-row")?.innerText.includes("已就绪")'),false,'old detail response cannot revive callable tools after a newer stop');
+        assert.ok(await evaluate('document.querySelector(".cm-sheet")?.innerText.includes("工具状态需重新读取")'),'late detail identifies stale tool evidence');await closeSheet();
+        await evaluate('window.fixtureMcpOverride={name:"MCP pending observation",status:"running",enabled:true,running:true,toolCallable:true,eligible:true}');
+        await click('[role=tablist][aria-label="插件视图"] [role=tab]:nth-child(2)');await click('[role=tablist][aria-label="插件视图"] [role=tab]:nth-child(4)');await until('document.querySelector(".connection-list")?.innerText.includes("MCP pending observation")','running MCP before pending refresh');
+        await evaluate('window.fixtureState.holdNextMcpTools=true');await textClick('查看工具');await until('window.fixtureMcpToolsReleases.length===1','second MCP detail held');
+        await evaluate('window.fixtureState.holdNextConnections=true;window.fixtureMcpOverride={name:"MCP pending observation",status:"stopped",enabled:true,running:false,toolCallable:false,eligible:false}');
+        await click('[role=tablist][aria-label="插件视图"] [role=tab]:nth-child(2)');await until('window.fixtureConnectionReleases.length===1','new connection observation still pending');
+        await evaluate('window.fixtureMcpToolsReleases.shift()()');await until('!!document.querySelector(".cm-sheet .mcp-tool-row")','MCP detail while newer refresh is pending');
+        assert.equal(await evaluate('document.querySelector(".cm-sheet .mcp-tool-row")?.innerText.includes("已就绪")'),false,'pending newer refresh cannot be treated as current callable evidence');
+        assert.ok(await evaluate('document.querySelector(".cm-sheet")?.innerText.includes("工具状态需重新读取")'),'pending observation is marked stale');
+        await evaluate('window.fixtureConnectionReleases.shift()()');await until('document.querySelector(".cm-sheet .mcp-settings-card")?.innerText.includes("已停止")','settled observation updates open detail');await closeSheet();
+        await evaluate('window.fixtureMcpOverride={name:"MCP same aggregate",status:"running",enabled:true,running:true,toolCallable:true,eligible:true}');
+        await click('[role=tablist][aria-label="插件视图"] [role=tab]:nth-child(4)');await until('document.querySelector(".connection-list")?.innerText.includes("MCP same aggregate")','running MCP before same-state refresh');
+        await textClick('查看工具');await until('document.querySelector(".cm-sheet .mcp-tool-row")?.innerText.includes("已就绪")','current tool observation');
+        await evaluate('window.fixtureState.nextMcpState={status:"running",enabled:true,running:true,toolCallable:true,eligible:true}');await textClick('重启');
+        await until('document.querySelector(".cm-sheet")?.innerText.includes("工具状态需重新读取")','same aggregate refresh invalidates old tool snapshot');
+        assert.equal(await evaluate('document.querySelector(".cm-sheet .mcp-tool-row")?.innerText.includes("已就绪")'),false,'unchanged aggregate status does not revalidate old tools');await closeSheet();
+        checks.push({kind:'plugin-search-failure-and-settings-race',pass:true});continue;
+      }
       if(aboutOnly){
         for(const scenario of aboutScenarios){
           await rpc('Emulation.setDeviceMetricsOverride',{width:scenario.width,height:scenario.height,deviceScaleFactor:scenario.dpr||1,mobile:false},sessionId);
@@ -327,11 +430,12 @@ try {
         continue;
       }
       if(hostSyncOnly){assert.equal(version,'after','Host sync follow-up uses current source only');await hostSynchronization(version);continue;}
-      const selectedScenarios=behaviorOnly?[]:agentOnly?[...scenarios.filter(row=>row.width===1024||row.zoom===1.5||row.theme==='dark'&&row.dpr===1.5),{width:640,height:768,zoom:1,theme:'light'},{width:480,height:768,zoom:1,theme:'dark'}]:quick?scenarios.slice(0,1):zoomOnly?scenarios.filter(row=>row.zoom===zoomOnly):scenarios;
+      const selectedScenarios=behaviorOnly?[]:agentOnly||pluginOnly?[...scenarios.filter(row=>row.width===1024||row.zoom===1.5||row.theme==='dark'&&row.dpr===1.5),{width:640,height:768,zoom:1,theme:'light'},{width:480,height:768,zoom:1,theme:'dark'}]:quick?scenarios.slice(0,1):zoomOnly?scenarios.filter(row=>row.zoom===zoomOnly):scenarios;
       for(const scenario of selectedScenarios){
         await rpc('Emulation.setDeviceMetricsOverride',{width:scenario.width,height:scenario.height,deviceScaleFactor:scenario.dpr||1,mobile:false},sessionId);
         await evaluate('(()=>{const root=document.getElementById("root");root.style.zoom='+scenario.zoom+';root.style.width='+JSON.stringify(100/scenario.zoom+'vw')+';root.style.height='+JSON.stringify(100/scenario.zoom+'vh')+';window.fixture.setTheme('+JSON.stringify(scenario.theme)+');})()');
         if(agentOnly){await agentConfiguration(version,scenario);continue;}
+        if(pluginOnly){await pluginConfiguration(version,scenario);continue;}
         await show('chat');await until('document.querySelectorAll(".chat-message").length>0||document.body.innerText.includes("已保存阶段性分析")','Chat data');await measure(version,scenario,'chat');if(version==='after'){assert.equal(await evaluate('document.body.innerText.includes("958691c1-2135-4ac0-9b05-f204a14b1137:call_00_abcdefghijkl")'),false,'opaque tool IDs stay out of the primary conversation');assert.ok(await evaluate('document.querySelectorAll(".tool-call").length')<=40,'large tool history is bounded');assert.equal(await evaluate('[...document.querySelectorAll(".usage-disclosure")].some(n=>n.open)'),false,'usage details are collapsed by default');}
         await show('work');await until('!!document.querySelector(".task-card")','Task data');await measure(version,scenario,'tasks');await textClick('详情');await until('!!document.querySelector(".cm-sheet")','Task detail drawer');await measure(version,scenario,'task-detail');await closeSheet();
         await workTab('工作区');await until('!!document.querySelector(".workspace-card")','Workspace view');await measure(version,scenario,'workspace');

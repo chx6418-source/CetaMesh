@@ -13,7 +13,7 @@ let passed = 0;
 const check = (name, fn) => { fn(); passed += 1; process.stdout.write(`PASS ${name}\n`); };
 
 check('retired gateway management has no product UI entrypoint', () => {
-  for (const file of ['desktop-ui/src/app/HarborApp.tsx', 'desktop-ui/src/app/AgentsPage.tsx', 'desktop-ui/src/app/AgentSetupPanels.tsx', 'desktop-ui/src/bridge/typed-client.ts', 'desktop-ui/src/data/mock.ts', 'desktop-shell/src/native_ui.rs']) {
+  for (const file of ['desktop-ui/src/app/HarborApp.tsx', 'desktop-ui/src/app/AgentsPage.tsx', 'desktop-ui/src/app/AgentSetupPanels.tsx', 'desktop-ui/src/app/PluginsPage.tsx', 'desktop-ui/src/app/OneBotConnectionForm.tsx', 'desktop-ui/src/app/ApprovalCard.tsx', 'desktop-ui/src/bridge/typed-client.ts', 'desktop-ui/src/data/mock.ts', 'desktop-shell/src/native_ui.rs']) {
     assert.equal(/snowluma/i.test(read(file)), false, `${file} must not expose retired gateway management`);
   }
   assert.doesNotMatch(read('src/settings/pages.js'), /service\.snowluma/);
@@ -50,7 +50,7 @@ check('Harbor shell is the sole design and contains no prototype records', () =>
   assert.ok(exists('desktop-ui/src/app/HarborApp.tsx'));
   const app = read('desktop-ui/src/app/HarborApp.tsx');
   const entry = read('desktop-ui/src/main.tsx');
-  const sources = ['desktop-ui/src/app/HarborApp.tsx', 'desktop-ui/src/app/AgentsPage.tsx', 'desktop-ui/src/app/AgentSetupPanels.tsx', 'desktop-ui/src/app/AboutPage.tsx', 'desktop-ui/src/app/PagePresentation.tsx', 'desktop-ui/src/main.tsx']
+  const sources = ['desktop-ui/src/app/HarborApp.tsx', 'desktop-ui/src/app/AgentsPage.tsx', 'desktop-ui/src/app/AgentSetupPanels.tsx', 'desktop-ui/src/app/PluginsPage.tsx', 'desktop-ui/src/app/OneBotConnectionForm.tsx', 'desktop-ui/src/app/ApprovalCard.tsx', 'desktop-ui/src/app/AboutPage.tsx', 'desktop-ui/src/app/PagePresentation.tsx', 'desktop-ui/src/main.tsx']
     .filter(exists).map(read).join('\n');
   assert.match(app, /Chat/);
   assert.match(app, /Agents/);
@@ -58,14 +58,17 @@ check('Harbor shell is the sole design and contains no prototype records', () =>
   assert.match(app, /Settings/);
   assert.match(app, /About/);
   assert.match(entry, /HarborApp/);
-  for (const page of ['ChatPage', 'WorkPage', 'PluginsPage', 'SettingsPage', 'OnboardingPage']) assert.match(app, new RegExp(`function ${page}`));
+  for (const page of ['ChatPage', 'WorkPage', 'SettingsPage', 'OnboardingPage']) assert.match(app, new RegExp(`function ${page}`));
   assert.match(app, /import \{ AgentsPage \} from '\.\/AgentsPage'/);
   assert.match(app, /export \{ AgentsPage \} from '\.\/AgentsPage'/);
   assert.match(read('desktop-ui/src/app/AgentsPage.tsx'), /export function AgentsPage\(/);
+  assert.match(app, /import \{ PluginsPage \} from '\.\/PluginsPage'/);
+  assert.match(app, /export \{ PluginsPage \} from '\.\/PluginsPage'/);
+  assert.match(read('desktop-ui/src/app/PluginsPage.tsx'), /export function PluginsPage\(/);
   assert.match(app, /import \{ AboutPage \} from '\.\/AboutPage'/);
   assert.match(read('desktop-ui/src/app/AboutPage.tsx'), /export function AboutPage/);
   for (const action of ['sessions.rename', 'sessions.archive', 'sessions.remove', 'toggleIntegrationTool', 'pluginClient.toggleTool', 'manageServer']) {
-    assert.match(app, new RegExp(action.replace('.', '\\.')), `Harbor is missing ${action}`);
+    assert.match(sources, new RegExp(action.replace('.', '\\.')), `Harbor is missing ${action}`);
   }
   assert.doesNotMatch(sources, /DirectionPicker|direction-picker|import .*data\/mock|演示数据|探索预览|不会运行命令/);
   assert.match(read('desktop-ui/src/theme/tokens.css'), /--background:\s*#f1f0ea/);
@@ -142,7 +145,7 @@ check('Harbor provides standalone Memory categories and a direct icon navigation
 
 check('MCP detail exposes real restart and masked configuration actions', () => {
   const client = read('desktop-ui/src/bridge/typed-client.ts');
-  const app = read('desktop-ui/src/app/HarborApp.tsx');
+  const app = read('desktop-ui/src/app/PluginsPage.tsx');
   const projection = read('src/desktop/ui-service.js');
   assert.match(client, /mcpConfig:\s*\(serverId: string\).*ui\.mcp\.config\.get/);
   assert.match(client, /updateMcpConfig:\s*\(serverId: string, config:.*ui\.mcp\.config\.update/);
@@ -217,12 +220,12 @@ check('Chat context uses refreshed approval events and opens artifacts through t
   assert.doesNotMatch(app, /selectedArtifact|setSelectedArtifact/);
 });
 check('Plugin Center filters featured and updates and stages a real update review', () => {
-  const app = read('desktop-ui/src/app/HarborApp.tsx');
+  const app = read('desktop-ui/src/app/PluginsPage.tsx');
   const projection = read('src/desktop/ui-service.js');
   assert.match(app, /id: 'recommended', label: '精选'/);
   assert.match(app, /id: 'update-available', label: '可更新'/);
   assert.match(projection, /status === 'Update Available' \? 'update'/);
-  assert.match(app, /action: plugin\.status === 'update' \? 'update' : 'install'/);
+  assert.match(app, /action: plugin\.installed && plugin\.status === 'update' \? 'update' : 'install'/);
   assert.match(app, /review\.action === 'update' \? '插件已更新。'/);
   assert.match(app, /plugin\.status === 'update'[\s\S]{0,260}查看更新并安装/);
 });
@@ -266,6 +269,7 @@ check('Harbor Chat history refresh does not wait for the remote Model Catalog', 
 });
 check('Harbor accessibility and real-world controls avoid clipping and preserve selected content', () => {
   const app = read('desktop-ui/src/app/HarborApp.tsx');
+  const plugins = read('desktop-ui/src/app/PluginsPage.tsx');
   const inputs = read('desktop-ui/src/components/primitives/inputs.tsx');
   const styles = read('desktop-ui/src/theme/global.css');
   const harbor = read('desktop-ui/src/app/harbor.css');
@@ -276,8 +280,8 @@ check('Harbor accessibility and real-world controls avoid clipping and preserve 
   assert.match(app, /<details className="chat-context-card">/);
   assert.match(app, /className="composer-dock"><ChatContextPanel/);
   assert.match(app, /settingPages = \[/);
-  assert.match(app, /导入本地扩展/);
-  assert.match(app, /stageLocalPackage/);
+  assert.match(plugins, /导入本地扩展/);
+  assert.match(plugins, /stageLocalPackage/);
   assert.match(inputs, /role="combobox"|aria-haspopup="listbox"/);
   assert.match(inputs, /role="listbox"/);
   assert.match(inputs, /event\.key === 'Home'/);
@@ -288,7 +292,7 @@ check('Harbor accessibility and real-world controls avoid clipping and preserve 
   assert.match(harbor, /\.chat-workspace\s*\{[^}]*grid-template-columns: minmax\(0, 1fr\)/);
   assert.match(shell, /app\.pickExtensionPackage/);
   assert.match(policy, /"app\.pickExtensionPackage"/);
-  assert.doesNotMatch(app, /unzipSync|extractPluginPackage|JSZip/);
+  assert.doesNotMatch(app + plugins, /unzipSync|extractPluginPackage|JSZip/);
 });
 check('Workspace selection opens the chosen Core workspace and preserves the active ID', () => {
   const app = read('desktop-ui/src/app/HarborApp.tsx');
@@ -326,8 +330,7 @@ check('Memory page edits saved records through the real update route', () => {
   assert.match(manager, /编辑记忆/);
 });
 check('Plugin Center exposes pending Core approvals and one-time decisions', () => {
-  const app = read('desktop-ui/src/app/HarborApp.tsx');
-  const page = app.slice(app.indexOf('function PluginsPage('), app.indexOf('const SETTING_SECTION_LABELS'));
+  const page = read('desktop-ui/src/app/PluginsPage.tsx');
   assert.match(page, /approvalClient\.list\(/);
   assert.match(page, /approvalClient\.decide\(/);
   assert.match(page, /待处理审批/);

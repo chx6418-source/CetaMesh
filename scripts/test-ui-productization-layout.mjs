@@ -84,7 +84,7 @@ async function bundle(root) {
       createRoot(document.getElementById('root')).render(<MemoryRouter><Fixture/></MemoryRouter>);
     ` },
     bundle: true, write: false, outdir: path.join(sandbox.root, 'bundle'), format: 'iife', platform: 'browser', jsx: 'automatic', nodePaths: [path.join(uiRoot, 'node_modules')], alias: dependencyAliases,
-    plugins: [{ name: 'private-page-exports', setup(builder) { builder.onLoad({ filter: /[\\/]HarborApp\.tsx$/ }, async args => { let contents = fs.readFileSync(args.path, 'utf8'); for (const name of ['WorkPage', 'PluginsPage']) if (!new RegExp('export\\s+function\\s+' + name + '\\b').test(contents)) contents += '\nexport {' + name + '};\n'; return { contents, loader: 'tsx', resolveDir: path.dirname(args.path) }; }); } }]
+    plugins: [{ name: 'private-page-exports', setup(builder) { builder.onLoad({ filter: /[\\/]HarborApp\.tsx$/ }, async args => { let contents = fs.readFileSync(args.path, 'utf8'); for (const name of ['WorkPage', 'PluginsPage']) if (!new RegExp('export\\s+function\\s+' + name + '\\b').test(contents) && !new RegExp('export\\s*\\{\\s*' + name + '\\s*\\}\\s*from').test(contents)) contents += '\nexport {' + name + '};\n'; return { contents, loader: 'tsx', resolveDir: path.dirname(args.path) }; }); } }]
   });
   const js = result.outputFiles.find(file => file.path.endsWith('.js'))?.text;
   let css = result.outputFiles.filter(file => file.path.endsWith('.css')).map(file => file.text).join('\n');
