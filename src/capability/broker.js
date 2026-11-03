@@ -10,6 +10,8 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
  const dispatchFile=stateDir?path.join(stateDir,'capability','dispatches.json'):null;
  const dispatches=dispatchFile?readJsonFile(dispatchFile,{missing:{}}):{};
  if(!dispatches || typeof dispatches!=='object' || Array.isArray(dispatches))throw capabilityError('DISPATCH_JOURNAL_CORRUPT','Capability dispatch journal is invalid');
+ // Request IDs are untrusted dictionary keys, including "__proto__" in existing JSON.
+ Object.setPrototypeOf(dispatches,null);
  let recovered=false;
  for(const row of Object.values(dispatches))if(row?.status==='started'){
   row.status='outcome-unknown';row.recoveryCode='CORE_RESTART_RECONCILIATION_REQUIRED';recovered=true;

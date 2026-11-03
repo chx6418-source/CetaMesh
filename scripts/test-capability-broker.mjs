@@ -127,6 +127,16 @@ try {
  restart.broker.register(effectDefinition);
  await deny(restart.broker.execute(effectRequest),'REQUEST_ALREADY_DISPATCHED');
  assert.equal(declaredEffects,1,'the existing dispatch journal retains the effect fence across restart');
+ // Legacy callers choose their request ID. Object property names must have the same replay fence as any other ID.
+ const appendOnce={method:'capability.execute',params:{requestId:'__proto__',approved:true,taskId:task.id,
+  workspaceId:ws,capability:'filesystem.write',input:{path:'legacy-append.txt',content:'x',append:true}}};
+ assert.equal((await svc.execute(appendOnce)).status,'completed');
+ await deny(svc.execute(appendOnce),'REQUEST_ALREADY_DISPATCHED');
+ const appendRestart=createCapabilityService({stateDir:path.join(dir,'state'),workspaceService,taskRuntime});
+ await deny(appendRestart.execute(appendOnce),'REQUEST_ALREADY_DISPATCHED');
+ assert.equal(appendRestart.broker.dispatchStatus('__proto__').status,'completed');
+ assert.equal(appendRestart.broker.dispatchStatus('toString'),null);
+ assert.equal(fs.readFileSync(path.join(dir,'project','legacy-append.txt'),'utf8'),'x');
  let logicalEffects=0;
  const logicalDefinition={id:'fixture.logical',permission:'extension.invoke',risk:'low',effect:'non-idempotent',
   retainOperationResult:result=>result,execute:()=>({receipt:'receipt-'+(++logicalEffects)})};
