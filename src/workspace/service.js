@@ -195,6 +195,10 @@ export function createWorkspaceService({ stateDir, now = () => Date.now(), audit
     'workspace.remove': async (p) => {
       const entry = registry.get(String(p?.id ?? ''));
       if (recoveryState(entry).status === 'blocked') fail('WORKSPACE_RECOVERY_REQUIRED', '项目恢复尚未确认；保留登记以避免丢失恢复归属');
+      // Query the synchronous Task store immediately before removing the execution scope.
+      const linked = listTasks?.({workspaceId:entry.id,statuses:['queued','running','waiting','paused','blocked'],limit:1});
+      if (linked && !Array.isArray(linked.tasks)) fail('WORKSPACE_RECOVERY_REQUIRED', '任务归属当前无法核验');
+      if (linked?.tasks.length) fail('WORKSPACE_TASK_ACTIVE', '项目仍有关联的未结束任务；请先核验并结束任务');
       const result = registry.remove(entry.id);
       gitInfoCache.delete(entry.id);
       record(entry, 'user', 'remove', `${entry.name}（目录保留）`);

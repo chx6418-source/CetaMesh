@@ -414,6 +414,8 @@ try {
       services.agentBroker.createSession = createSession;
     }
     await assert.rejects(launch(writers[1], 'after-attach-' + nestedFirst), { code: 'TASK_WORKSPACE_BUSY' });
+    await assert.rejects(services.workspaceService.execute({method:'workspace.remove',params:{id:projects[0].id}}),
+      {code:'WORKSPACE_TASK_ACTIVE'}, 'removing an execution scope must not orphan its active owner');
     assert.equal(sent.length, before + 1);
     assert.equal(fs.readFileSync(marker, 'utf8'), 'original bytes');
   }
