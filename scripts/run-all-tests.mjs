@@ -41,6 +41,7 @@ export const CATEGORIES = ['core', 'architecture', 'security', 'runtime', 'integ
 const REGISTRY = {
   'test-native-product-session-evidence.mjs': {category:'security',timeoutMs:120000,note:'Deterministic native test-driver RPC facts, revision/refusal capture and privacy; no real models'},
   'test-recovery-state-consistency.mjs': {category:'runtime',timeoutMs:120000,note:'Durable effect outcomes, Task recovery ownership and no replay across restart/cancel/failure'},
+  'test-owner-recovery-races.mjs': {category:'runtime',timeoutMs:60000,note:'Owner review binds exact effects across asynchronous stop checks and approval recovery'},
   'test-snowluma-retirement.mjs': {category:'security',timeoutMs:120000,note:'Retired branded integration identifiers cannot launch, remap or regain authority'},
   'test-onebot-explicit-activation.mjs': {category:'integration',timeoutMs:120000,note:'Explicit neutral OneBot configuration and opt-in activation; no startup external requests'},
   'test-onebot-connection-ui.mjs': {category:'desktop',timeoutMs:120000,note:'Neutral OneBot configuration, redacted credentials, migration review and separate connection control'},

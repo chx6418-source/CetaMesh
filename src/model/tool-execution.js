@@ -868,6 +868,14 @@ export function createToolExecutionCoordinator({
   }
 
   return { run, resumeApproval, recordApprovalOutcomeUnknown, pendingTarget, cancelSession, recoveryForSession, recoveryForTask,
-    acknowledgeTaskRecovery };
+    acknowledgeTaskRecovery,
+    taskReviewState(taskId) {
+      return {
+        executions: Object.entries(executions).filter(([,row]) => row?.taskId === taskId
+          && ['started','outcome-unknown'].includes(row.status)).map(([id,row]) => [id,row.status]),
+        continuations: Object.entries(continuations).filter(([,row]) => row?.state?.scope?.taskId === taskId
+          && row.status !== 'reconciled').map(([id,row]) => [id,row.status])
+      };
+    } };
 }
 

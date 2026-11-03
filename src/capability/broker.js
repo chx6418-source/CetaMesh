@@ -247,6 +247,14 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
    return {operationId,status:row.status,authorizationGranted:false};
   },
   dispatchStatus:id=>{const alias=dispatches[aliasKey(id)];const row=alias?dispatches[alias.operationKey]:dispatches[String(id)];return row?{capability:row.capability,status:row.status,at:row.at}:null;},
+  approvalDispatchReviewed(approvalId, request) {
+   const alias=dispatches[aliasKey(request.requestId)];
+   const row=dispatches[alias?.operationKey??request.requestId];
+   return row?.status==='reconciled' && row.resolution==='owner-reviewed-no-replay'
+    && row.authorization?.kind==='approval' && row.authorization.id===approvalId
+    && row.requestId===request.requestId && row.capability===request.capability
+    && row.taskId===request.taskId && row.workspaceId===(request.workspaceId??null);
+  },
   uncertainDispatchesForTask:({taskId,workspaceId})=>Object.entries(dispatches)
    .filter(([,row])=>row?.taskId===taskId&&row.workspaceId===workspaceId&&['started','outcome-unknown'].includes(row.status))
    .map(([key,row])=>({requestId:row.requestId??key,capability:row.capability,status:row.status,at:row.at})),

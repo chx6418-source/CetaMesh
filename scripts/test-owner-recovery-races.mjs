@@ -1,0 +1,209 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
+import { createTaskService } from '../src/task/service.js';
+import { createWorkspaceService } from '../src/workspace/service.js';
+import { createCapabilityService } from '../src/capability/service.js';
+import { createDesktopUiService } from '../src/desktop/ui-service.js';
+
+// Stop the synthetic Agent at the same await that separates an Owner review from the journal writes.
+async function main() {
+  const parent = fs.realpathSync(os.tmpdir());
+  const root = fs.mkdtempSync(path.join(parent, 'cetamesh-owner-recovery-'));
+
+  async function bounded(promise, label) {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`Timed out waiting for ${label}`)), 5000);
+    });
+    try { return await Promise.race([promise, timeout]); }
+    finally { clearTimeout(timer); }
+  }
+
+  async function fixture(name, gateStop) {
+    const base = path.join(root, name), stateDir = path.join(base, 'state');
+    const workspaces = createWorkspaceService({ stateDir });
+    const state = { taskId: null, sends: 0, taskService: null, capabilities: null, ui: null };
+    const stopEntered = Promise.withResolvers(), releaseStop = Promise.withResolvers();
+    let stopGated = false;
+
+    const binding = { provider: 'cetamesh', sessionId: 'fixture-session' };
+    const agentBroker = {
+      ids: () => ['cetamesh'],
+      capabilities: () => ({ workspaceBoundary: 'capability-broker' }),
+      health: async () => ({ available: true, authenticated: true, sessionCapable: true }),
+      cancel: async () => ({ cancelled: true }),
+      async status() {
+        if (gateStop && !stopGated) {
+          stopGated = true;
+          stopEntered.resolve();
+          await bounded(releaseStop.promise, 'fixture stop-status release');
+        }
+        return { running: false, queued: 0, lastRunStatus: 'completed' };
+      },
+      setTaskExecutionObserver() { /* The fixture's send records an identified synthetic run. */ },
+      async *follow({ signal }) {
+        if (!signal.aborted) await new Promise(done => signal.addEventListener('abort', done, { once: true }));
+      },
+      async send() {
+        const rt = state.taskService.runtime;
+        const runId = `local-run-${++state.sends}`;
+        const ref = { id: state.taskId, ...binding, phase: 'user', runId };
+        const started = rt.beginExecutionObservation(ref);
+        rt.recordAgentReport({ ...ref, expectedRev: started.rev, eventId: `report-${runId}`,
+          text: 'Independent synthetic report for the reviewed fresh run.' });
+        rt.observeExecution({ ...ref, state: 'awaiting-review' });
+        return { accepted: true, requestId: `accepted-${runId}` };
+      }
+    };
+
+    function open() {
+      state.taskService = createTaskService({ stateDir });
+      state.capabilities = createCapabilityService({ stateDir, workspaceService: workspaces,
+        taskRuntime: state.taskService.runtime, agentBroker });
+      state.ui = createDesktopUiService({ services: { taskService: state.taskService,
+        workspaceService: workspaces, capabilityService: state.capabilities, agentBroker } });
+      state.capabilities.broker.register({ id: 'fixture.owner-recovery-effect', permission: 'publish',
+        risk: 'high', effect: 'non-idempotent', execute(request) {
+          const workspace = workspaces.describeWorkspace(request.workspaceId);
+          fs.appendFileSync(path.join(workspace.root, 'marker.bin'), Buffer.from([0x78]));
+          throw Object.assign(new Error('Synthetic response loss after the real local append'), { code: 'FIXTURE_RESULT_LOST' });
+        } });
+    }
+    open();
+
+    async function workspace(label) {
+      const directory = path.join(base, label);
+      fs.mkdirSync(directory, { recursive: true });
+      return (await workspaces.execute({ method: 'workspace.create', params: { name: label, root: directory } })).workspace;
+    }
+    const first = await workspace('first');
+    const rt = state.taskService.runtime;
+    const task = rt.create({ goal: 'Review original Workspace and original effect', workspaceId: first.id });
+    state.taskId = task.id;
+    rt.start({ id: task.id, expectedRev: task.rev, ...binding });
+    state.capabilities.grantTask(task.id, { capabilities: ['filesystem.read'], workspaceIds: [first.id] });
+
+    const read = () => state.taskService.runtime.get({ id: state.taskId }).task;
+    const call = (method, params) => state.ui.execute({ method, params });
+    const effect = (ws, requestId, approved = false) => state.capabilities.execute({
+      method: 'capability.execute', params: { requestId, taskId: state.taskId, workspaceId: ws.id,
+        capability: 'fixture.owner-recovery-effect', input: {}, approved } });
+    const review = () => call('ui.task.reconcile', { id: state.taskId, expectedRev: read().rev, reviewed: true,
+      provider: 'cetamesh', reviewSummary: 'Inspected the original one-byte effect in the original Workspace.',
+      nextInstruction: 'Produce a fresh independent report.', requestId: 'owner-fresh-instruction' });
+    const status = id => state.capabilities.broker.dispatchStatus(id)?.status;
+    const bytes = ws => fs.statSync(path.join(ws.root, 'marker.bin')).size;
+    async function waitUnknown(id) {
+      const until = Date.now() + 5000;
+      do {
+        if ((await call('ui.approvals.operation', { id })).status === 'unknown') return;
+        await delay(5);
+      } while (Date.now() < until);
+      throw new Error('Deferred approval never reported the unknown result');
+    }
+    async function close() {
+      releaseStop.resolve();
+      await bounded(state.capabilities.close(), 'local capability service close');
+    }
+    return { state, first, workspace, open, close, read, call, effect, review, bytes, status,
+      waitUnknown, stopEntered, releaseStop };
+  }
+
+  async function approvalAcrossRestart() {
+    const f = await fixture('deferred-approval-restart', false);
+    try {
+      const pending = await f.effect(f.first, 'ordinary-approval-request');
+      assert.equal(pending.status, 'pending');
+      const decision = { id: pending.approvalId, approve: true };
+      const accepted = await f.call('ui.approvals.decide', decision);
+      assert.equal(accepted.status, 'accepted');
+      await f.waitUnknown(accepted.operationId);
+      assert.equal(f.bytes(f.first), 1);
+      assert.equal(f.status('ordinary-approval-request'), 'outcome-unknown');
+      await f.close();
+      f.open();
+      assert.equal(f.read().status, 'blocked');
+      assert.equal(f.state.capabilities.recoveryForTask(f.state.taskId)?.state, 'needs-reconciliation');
+      const reviewed = await bounded(f.review(), 'public Owner recovery and fresh send');
+      assert.equal(reviewed.task.status, 'running');
+      const current = f.read(), report = current.agentReports.at(-1);
+      assert.equal(current.executionObservation.state, 'awaiting-review');
+      assert.equal(report.runId, current.executionObservation.runId);
+      assert.equal(f.state.sends, 1);
+      const repeated = await f.call('ui.approvals.decide', decision);
+      assert.equal(repeated.operationId, accepted.operationId);
+      assert.equal(f.bytes(f.first), 1);
+      assert.equal(f.status('ordinary-approval-request'), 'reconciled');
+      assert.equal(f.state.capabilities.recoveryForTask(f.state.taskId), null);
+      const result = await f.call('ui.task.complete', { id: current.id, expectedRev: current.rev,
+        reviewed: true, reviewKind: 'report-only', reportEventId: report.eventId,
+        reportSha256: report.sha256, summary: 'Owner accepted the exact fresh report.' });
+
+      assert.equal(result.task.status, 'completed');
+      assert.equal(f.bytes(f.first), 1);
+    } finally { await f.close(); }
+  }
+
+  async function staleOwnerReview(rebindWorkspace) {
+    const f = await fixture(rebindWorkspace ? 'stale-workspace' : 'new-effect-same-workspace', true);
+    let pendingReview;
+    try {
+      const later = rebindWorkspace ? await f.workspace('later') : f.first;
+      const original = f.read();
+      const blocked = f.state.taskService.runtime.block({ id: original.id, expectedRev: original.rev,
+        reason: 'needs-reconciliation: original synthetic operation lost its response' }).task;
+      const lost = error => error.code === 'FIXTURE_RESULT_LOST' && error.effectStatus === 'unknown';
+      await assert.rejects(f.effect(f.first, 'old-effect', true), lost);
+      pendingReview = f.review().then(value => ({ value }), error => ({ error }));
+      await bounded(f.stopEntered.promise, 'last awaited Agent stop-status check');
+      if (rebindWorkspace) {
+        await f.state.taskService.execute({ method: 'task.update', params: { id: blocked.id,
+          expectedRev: blocked.rev, workspaceId: later.id } });
+      }
+      await assert.rejects(f.effect(later, 'new-effect', true), lost);
+      if (!rebindWorkspace) assert.equal(f.read().rev, blocked.rev, 'dispatch alone does not bump Task.rev');
+      assert.deepEqual([f.status('old-effect'), f.status('new-effect')], ['outcome-unknown', 'outcome-unknown']);
+      f.releaseStop.resolve();
+      const reply = await bounded(pendingReview, 'stale Owner review reply');
+      const snapshot = {
+        code: reply.error?.code ?? null, returnedStatus: reply.value?.task?.status ?? null,
+        old: f.status('old-effect'), added: f.status('new-effect'),
+        decisions: f.read().decisions.length, sends: f.state.sends, bytes: f.bytes(later)
+      };
+
+
+      assert.ok(snapshot.code && !snapshot.returnedStatus, JSON.stringify(snapshot));
+      assert.deepEqual([snapshot.old, snapshot.added], ['outcome-unknown', 'outcome-unknown'], JSON.stringify(snapshot));
+      assert.equal(snapshot.decisions, 0);
+      assert.equal(snapshot.sends, 0);
+      assert.equal(snapshot.bytes, rebindWorkspace ? 1 : 2);
+      if (rebindWorkspace) assert.equal(f.bytes(f.first), 1);
+    } finally {
+      f.releaseStop.resolve();
+      if (pendingReview) await bounded(pendingReview, 'final stale Owner review settlement');
+      await f.close();
+    }
+  }
+
+  const failures = [];
+  try {
+    const cases = [['settled approval recovered after restart', approvalAcrossRestart],
+      ['stale review after Workspace rebind', () => staleOwnerReview(true)],
+      ['new effect during unchanged-Task review', () => staleOwnerReview(false)]];
+    for (const [name, run] of cases) {
+      try { await run(); }
+      catch (error) { failures.push(new Error(`${name}: ${error.code ?? error.name} ${error.message}`, { cause: error })); }
+    }
+    if (failures.length) throw new AggregateError(failures, failures.map(error => error.message).join('\n'));
+  } finally {
+    const target = fs.realpathSync(root);
+    assert.equal(path.dirname(target), parent);
+    assert.ok(path.basename(target).startsWith('cetamesh-owner-recovery-'));
+    fs.rmSync(target, { recursive: true, force: true });
+  }
+}
+
+await main();

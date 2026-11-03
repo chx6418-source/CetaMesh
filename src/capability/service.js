@@ -1169,6 +1169,15 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
   const operations = createApprovalOperations({ stateDir, getApproval: id => broker.approvals.get(id),
     cancelApproval: id => broker.approvals.cancel(id, 'owner-cancelled-before-dispatch'),
     execute: (params, context) => decideApproval(params, context), notify: onOperation });
+  function unresolvedApprovalOperations(taskId) {
+    return operations.list().filter(row => {
+      if (!['accepted','running','waiting','unknown'].includes(row.status)) return false;
+      const request = broker.approvals.get(row.approvalId).request;
+      if (request?.taskId !== taskId) return false;
+      // The wrapper keeps its historical result. Only review of its own dispatch releases the fence.
+      return row.status !== 'unknown' || !broker.approvalDispatchReviewed(row.approvalId, request);
+    });
+  }
   async function decideApproval(params, { signal } = {}) {
       const original = broker.approvals.get(params.id).request;
       let result;
@@ -1355,8 +1364,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
         .length) return 'TASK_EFFECT_UNCONFIRMED';
       if (environment.blocker(taskId)) return environment.blocker(taskId);
       if (provisioning.has(taskId) || Object.values(journal).some(row => row?.taskId === taskId && row.status === 'in-flight')) return 'TASK_EXECUTION_UNCONFIRMED';
-      if (operations.list().some(row => ['accepted', 'running', 'waiting', 'unknown'].includes(row.status)
-        && broker.approvals.get(row.approvalId).request?.taskId === taskId)) return 'TASK_EFFECT_UNCONFIRMED';
+      if (unresolvedApprovalOperations(taskId).length) return 'TASK_EFFECT_UNCONFIRMED';
       if (broker.approvals.list().some(row => row.request?.taskId === taskId && ['pending', 'approved', 'executing'].includes(row.status))) return 'TASK_APPROVAL_PENDING';
       if ([...taskFollowConsumers.values()].some(row => row.taskId === taskId && !row.finished && row.expectedTurns > 0)) return 'TASK_EXECUTION_UNCONFIRMED';
       return null;
@@ -1365,12 +1373,26 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       const operationTask = taskFor(taskId);
       const uncertainOperation = operationTask && broker.uncertainDispatchesForTask({ taskId, workspaceId: operationTask.workspaceId })[0];
       if (uncertainOperation) return { state: 'needs-reconciliation', capability: uncertainOperation.capability };
+      if (unresolvedApprovalOperations(taskId).some(row => row.status === 'unknown'))
+        return { state: 'needs-reconciliation', capability: 'approval' };
       if (environment.recovery(taskId)) return environment.recovery(taskId);
       return Object.values(journal).some(row => row?.taskId === taskId && row.status === 'in-flight')
         ? { state: 'needs-reconciliation', capability: 'agent.run' } : null;
     },
+    taskReviewState({ taskId, workspaceId }) {
+      return {
+        dispatches: broker.uncertainDispatchesForTask({ taskId, workspaceId }),
+        requests: Object.entries(journal).filter(([, row]) => row?.taskId === taskId && row.status === 'in-flight')
+          .map(([id, row]) => [id, row.hash]),
+        decisions: unresolvedApprovalOperations(taskId).map(row => [row.operationId, row.status]),
+        approvals: broker.approvals.list().filter(row => row.request?.taskId === taskId &&
+          ['pending','approved','executing'].includes(row.status)).map(row => [row.id,row.status])
+      };
+    },
     acknowledgeTaskRecovery(taskId) {
       const operationTask = taskFor(taskId);
+      if (provisioning.has(taskId) || Object.entries(journal).some(([id,row]) => row?.taskId===taskId && requests.has(id)))
+        throw capabilityError('OPERATION_STILL_RUNNING','Task dispatch has not settled');
       const reviewedOperations = operationTask ? broker.acknowledgeTaskOperations({ taskId, workspaceId: operationTask.workspaceId }).reconciled : 0;
       const rows = Object.values(journal).filter(row => row?.taskId === taskId && row.status === 'in-flight');
       for (const row of rows) row.status = 'reconciled';

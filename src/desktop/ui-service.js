@@ -1433,6 +1433,13 @@ export function createDesktopUiService({ services = {}, system = services.system
         throw uiError('WORKSPACE_NOT_FOUND', '任务工作区不存在或不可访问');
       }
       const recoveryProvider = string(p.provider, 80).trim() || current.currentAgent?.provider;
+      const scope = {taskId:current.id,workspaceId:current.workspaceId};
+      const captureReview = () => JSON.stringify([
+        services.capabilityService.taskReviewState?.(scope),
+        services.toolExecutionCoordinator?.taskReviewState?.(current.id),
+        services.continuityService?.runtime?.transactionReviewState?.(current.id)
+      ]);
+      const reviewedState = captureReview();
       if (current.currentAgent && recoveryProvider !== current.currentAgent.provider) {
         throw uiError('TASK_HANDOFF_REQUIRED', '仍绑定执行者的任务需要通过正式交接切换 Agent');
       }
@@ -1456,9 +1463,13 @@ export function createDesktopUiService({ services = {}, system = services.system
           }
         } catch (error) { if (error?.code !== 'SESSION_NOT_FOUND') throw error; }
       }
+      // Journal changes need not bump the Task revision. Recheck both at the synchronous commit boundary.
+      const latest = services.taskService.runtime.get({id:current.id}).task;
+      if (latest.rev !== current.rev || latest.workspaceId !== current.workspaceId || captureReview() !== reviewedState)
+        throw uiError('TASK_CONFLICT', '核对期间任务或待核对操作已变化，请重新检查');
+      services.capabilityService.acknowledgeTaskRecovery(current.id);
       services.continuityService?.runtime?.acknowledgeTransactionRecovery?.(current.id);
       services.toolExecutionCoordinator?.acknowledgeTaskRecovery(current.id);
-      services.capabilityService.acknowledgeTaskRecovery(current.id);
       const reconciled = current.parentTaskId ? services.taskService.runtime.acknowledgeUnknownAttempts({
         id: current.id, expectedRev: current.rev, reviewSummary: string(p.reviewSummary, 1000).trim()
       }) : current;

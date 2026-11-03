@@ -974,6 +974,10 @@ export function createContinuityRuntime({
 
   return {
     isInFlight(taskId) { return inFlight.has(String(taskId ?? '')) || pendingTransactions.has(String(taskId ?? '')); },
+    transactionReviewState(taskId) {
+      if (inFlight.has(taskId)) throw continuityError('ROLLOVER_IN_FLIGHT', 'Handoff has not settled');
+      return pendingTransactions.has(taskId) ? loadContinuityFile(transactionFile(taskId), null) : null;
+    },
     acknowledgeTransactionRecovery(taskId) {
       const id = String(taskId ?? '');
       if (!pendingTransactions.has(id)) return { acknowledged: false };
