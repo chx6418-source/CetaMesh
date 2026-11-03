@@ -28,8 +28,11 @@ try {
   for(const [name,value] of Object.entries({items:'{settingPages}',selected:'{activeSection}',onChange:'{setActiveSection}'}))assert.equal(props.get(name),value);
   assert.ok(props.has('search'));assert.match(html,/aria-label="搜索设置"/);
   assert.match(app, /保存设置/);
-  assert.match(app, /setApprovalOperations\(result.operations \?\? \[\]\)/);
-  assert.match(app, /<ApprovalOperationSummary operations=\{approvalOperations\}/);
+  // The operation inbox moved with the Plugins page; keep both its host and data flow covered.
+  const plugins = fs.readFileSync(root + 'src/app/PluginsPage.tsx', 'utf8');
+  assert.match(app, /<PluginsPage\s*\/>/);
+  assert.match(plugins, /setApprovalOperations\(result.operations \?\? \[\]\)/);
+  assert.match(plugins, /<ApprovalOperationSummary operations=\{approvalOperations\}/);
   const { ApprovalOperationSummary, FeedbackLinkRow } = await vite.ssrLoadModule('/src/app/StatusPresentation.tsx');
   const operations = [
     ...Array.from({ length: 7 }, (_, index) => ({ operationId: 'done-' + index, status: 'completed' })),

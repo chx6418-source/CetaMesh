@@ -125,7 +125,8 @@ async function bundle(directory) {
         if(method==='ui.developer.forge.describe')return forge;if(method==='ui.developer.forge.invoke')throw Object.assign(new Error('Synthetic network unavailable'),{code:'FORGE_NETWORK_ERROR'});
         if(method==='ui.extensions.settings.describe')return{id:params.id,name:'Synthetic plugin',available:true,fields:window.fixtureState.pluginSettingsFixture?[{key:'message',label:'显示名称',type:'string',required:false,options:[],maxLength:300,default:''}]:[]};if(method==='ui.extensions.settings.get')return{id:params.id,values:structuredClone(window.fixtureState.pluginSettingsFixture?window.fixtureExtensionValues:{})};
         if(method==='ui.extensions.settings.update'){if(window.fixtureState.failNextExtensionSave){window.fixtureState.failNextExtensionSave=false;throw new Error('Synthetic extension save failed');}if(window.fixtureState.holdNextExtensionSave){window.fixtureState.holdNextExtensionSave=false;await new Promise(resolve=>window.fixtureExtensionSaveReleases.push(resolve));}window.fixtureExtensionValues={...window.fixtureExtensionValues,...params.values};return{id:params.id,values:structuredClone(window.fixtureExtensionValues)};}
-        if(method==='ui.approvals.list')return{approvals:[],operations:[],grants:[]};
+        if(method==='ui.approvals.list')return{approvals:[],operations:structuredClone(window.fixtureState.approvalOperations??[]),grants:[]};
+        if(method==='ui.approvals.cancel'){if(params.id!=='synthetic-running')throw Error('Unexpected synthetic approval operation');window.fixtureState.approvalOperations=window.fixtureState.approvalOperations.map(row=>row.operationId===params.id?{...row,status:'cancelled'}:row);return{operationId:params.id,status:'cancelled'};}
         if(method==='ui.settings.get')return{settings:window.fixtureState.settings,revision:1,recoveryRequired:false,lastError:null,backupPath:null};if(method==='ui.settings.describe')return{sections:sections.map(row=>({section:row.section,label:row.label})),fields:sections};
         if(method==='ui.settings.update'){if(window.fixtureState.failSettings)throw new Error('Synthetic settings save failed; keep the draft');window.fixtureState.settings={...settings,[params.section]:{...settings[params.section],...params.values}};return{settings:window.fixtureState.settings,revision:2};}
         if(method==='ui.onboarding.status'||method==='ui.onboarding.start')return onboarding;
@@ -320,7 +321,21 @@ try {
         continue;
       }
       if(pluginRaceOnly){
-        assert.equal(version,'after');await show('plugins');await until('document.querySelectorAll(".plugin-card").length===8','plugin catalog');
+        assert.equal(version,'after');
+        await evaluate('window.fixtureState.approvalOperations=[{operationId:"synthetic-running",status:"running"},{operationId:"synthetic-waiting",status:"waiting"},{operationId:"synthetic-failed",status:"failed",code:"SYNTHETIC_FAILURE"},{operationId:"synthetic-unknown",status:"unknown"},{operationId:"synthetic-completed",status:"completed"}]');
+        await show('plugins');await until('document.querySelectorAll(".plugin-card").length===8','plugin catalog');
+        await until('document.querySelector(".operation-summary")?.innerText.includes("结果未知")','Core approval operations visible');
+        const operationText=await evaluate('document.querySelector(".operation-summary").innerText');
+        for(const text of ['执行中','等待后续审批','失败','结果未知','SYNTHETIC_FAILURE','历史操作 · 1'])assert.ok(operationText.includes(text),'approval operation state remains visible: '+text);
+        assert.equal(await evaluate('document.querySelector(".operation-summary details")?.open'),false,'completed history starts collapsed');
+        assert.equal(await evaluate('document.querySelectorAll(".operation-summary button").length'),1,'only the running operation offers cancellation');
+        await textClick('请求停止');
+        await until('window.fixtureCalls.filter(row=>row.method==="ui.approvals.cancel"&&row.params.id==="synthetic-running").length===1','only the selected operation is sent for cancellation');
+        await until('document.querySelector(".operation-summary")?.innerText.includes("历史操作 · 2")','refreshed cancellation is retained in history');
+        assert.ok(await evaluate('document.querySelector(".operation-summary").innerText.includes("结果未知")'),'unrelated unknown operation remains unresolved');
+        assert.equal(await evaluate('document.querySelectorAll(".operation-summary button").length'),0,'cancelled operation no longer offers cancellation');
+        await show('chat');await evaluate('window.fixtureState.approvalOperations=[]');await show('plugins');
+        await until('document.querySelectorAll(".plugin-card").length===8','plugin catalog restored');
         await evaluate('window.fixturePluginOverrides["fixture-plugin-3"]={installed:false,enabled:true,status:"ready"}');await textClick('刷新目录');
         await until('[...document.querySelectorAll(".plugin-card")].find(n=>n.innerText.includes("Synthetic plugin 3"))?.innerText.includes("已启用")||[...document.querySelectorAll(".plugin-card")].find(n=>n.innerText.includes("Synthetic plugin 3"))?.innerText.includes("未安装")','contradictory plugin projected');
         const uninstalled=await evaluate('[...document.querySelectorAll(".plugin-card")].find(n=>n.innerText.includes("Synthetic plugin 3"))?.innerText');assert.match(uninstalled,/未安装/);assert.doesNotMatch(uninstalled,/已就绪|已启用/);
