@@ -411,7 +411,14 @@ export function createWorkspaceService({ stateDir, now = () => Date.now(), audit
     return gitProduct.create(assertWritable(requireWorkspace(params)), params, { worktree: method === 'workspace.git.worktree.create' });
   }
 
-  return { execute, executeApprovedGit, describeWorkspace, applyChanges };
+  function workspacesOverlap(leftId, rightId) {
+    if (leftId === rightId) return true;
+    if (!leftId || !rightId) return false;
+    const left = registry.get(leftId).root, right = registry.get(rightId).root;
+    return isInsideRoot(left, right) || isInsideRoot(right, left);
+  }
+
+  return { execute, executeApprovedGit, describeWorkspace, applyChanges, workspacesOverlap };
 }
 
 export { WorkspaceBoundaryError, WorkspaceRegistryError, WorkspaceToolError };

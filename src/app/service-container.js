@@ -94,6 +94,7 @@ export function createCetaMeshServices(options = {}) {
     stateDir,
     ownedArtifactRoot: path.join(dataRoot, 'artifacts'),
     resolveWorkspace: workspaceId => workspaceService.describeWorkspace(workspaceId),
+    workspacesOverlap: workspaceService.workspacesOverlap,
     resolveMemory: memoryId => memoryService?.runtime.get({ principal: DESKTOP_USER_PRINCIPAL, id: memoryId }).memory
   });
   let capabilityService = null;

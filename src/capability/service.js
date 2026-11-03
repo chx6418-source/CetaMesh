@@ -87,6 +87,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
   const provisioning = new Map();
   const workspaceProvisioning = new Map();
   const workspaceReadProvisioning = new Map();
+  const workspacesOverlap = workspaceService?.workspacesOverlap ?? ((left, right) => left === right);
   let taskHandoffGuard = () => false;
   const taskFollowConsumers = new Map();
   // Native DSH Follow can end after every completed turn. Retain a bounded
@@ -974,18 +975,22 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       }
       const otherOwner = taskRuntime.activeWorkspaceOwner({ workspaceId: task.workspaceId,
         exceptTaskId: task.id, forReadOnlyTaskId: readOnlyChild ? task.id : null });
-      const reservation = workspaceProvisioning.get(task.workspaceId);
-      const readReservations = workspaceReadProvisioning.get(task.workspaceId);
+      const reservedWorkspaceId = task.workspaceId, reservedTaskId = task.id;
+      const reservation = workspaceProvisioning.get(reservedWorkspaceId);
+      const otherWriter = [...workspaceProvisioning].find(([id, held]) =>
+        held.taskId !== reservedTaskId && workspacesOverlap(id, reservedWorkspaceId))?.[1];
       const activeReaders = taskRuntime.activeWorkspaceReaders({ workspaceId: task.workspaceId, exceptTaskId: task.id });
-      const otherReaders = new Set([...activeReaders.map(row => row.id), ...(readReservations?.keys() ?? [])]);
+      const otherReaders = new Set(activeReaders.map(row => row.id));
+      for (const [id, readers] of workspaceReadProvisioning) {
+        if (workspacesOverlap(id, reservedWorkspaceId)) for (const reader of readers.keys()) otherReaders.add(reader);
+      }
       otherReaders.delete(task.id);
-      if (otherOwner || (reservation && reservation.taskId !== task.id)
-        || (!readOnlyChild && readReservations?.size) || (readOnlyChild && otherReaders.size >= 2)) {
+      if (otherOwner || otherWriter || otherReaders.size >= (readOnlyChild ? 2 : 1)) {
         throw Object.assign(capabilityError('TASK_WORKSPACE_BUSY', '工作区仍由另一任务持有写入权；请先查看占用任务并核验，或切换工作区。'),
-          { blockingTaskId: otherOwner?.id ?? reservation?.taskId ?? otherReaders.values().next().value });
+          { blockingTaskId: otherOwner?.id ?? otherWriter?.taskId ?? otherReaders.values().next().value });
       }
       if (readOnlyChild) {
-        const held = readReservations ?? new Map();
+        const held = workspaceReadProvisioning.get(reservedWorkspaceId) ?? new Map();
         held.set(task.id, (held.get(task.id) ?? 0) + 1);
         workspaceReadProvisioning.set(task.workspaceId, held);
       } else workspaceProvisioning.set(task.workspaceId, { taskId: task.id, count: (reservation?.count ?? 0) + 1 });
@@ -1144,18 +1149,18 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       try { return await pending; } finally {
         if (provisioning.get(task.id) === pending) provisioning.delete(task.id);
         if (readOnlyChild) {
-          const readers = workspaceReadProvisioning.get(task.workspaceId);
-          if (readers?.has(task.id)) {
-            const count = readers.get(task.id);
-            if (count > 1) readers.set(task.id, count - 1);
-            else readers.delete(task.id);
-            if (!readers.size) workspaceReadProvisioning.delete(task.workspaceId);
+          const readers = workspaceReadProvisioning.get(reservedWorkspaceId);
+          if (readers?.has(reservedTaskId)) {
+            const count = readers.get(reservedTaskId);
+            if (count > 1) readers.set(reservedTaskId, count - 1);
+            else readers.delete(reservedTaskId);
+            if (!readers.size) workspaceReadProvisioning.delete(reservedWorkspaceId);
           }
         }
-        const held = workspaceProvisioning.get(task.workspaceId);
-        if (held?.taskId === task.id) {
-          if (held.count > 1) workspaceProvisioning.set(task.workspaceId, { taskId: task.id, count: held.count - 1 });
-          else workspaceProvisioning.delete(task.workspaceId);
+        const held = workspaceProvisioning.get(reservedWorkspaceId);
+        if (held?.taskId === reservedTaskId) {
+          if (held.count > 1) workspaceProvisioning.set(reservedWorkspaceId, { taskId: reservedTaskId, count: held.count - 1 });
+          else workspaceProvisioning.delete(reservedWorkspaceId);
         }
       }
       });

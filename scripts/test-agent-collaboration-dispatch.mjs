@@ -382,6 +382,42 @@ try {
   } });
   assert.equal(queuedChildStarted.task.status, 'running');
   console.log('PASS Agent Broker child read concurrency and Workspace writer fence');
+  for (const nestedFirst of [false, true]) {
+    const outer = path.join(root, 'overlap-' + nestedFirst);
+    const inner = path.join(outer, 'sub');
+    fs.mkdirSync(inner, { recursive: true });
+    const marker = path.join(inner, 'shared.txt');
+    fs.writeFileSync(marker, 'original bytes');
+    const register = async dir => (await services.workspaceService.execute({ method: 'workspace.create',
+      params: { root: dir, name: path.basename(dir) } })).workspace;
+    const projects = [await register(outer), await register(inner)];
+    if (nestedFirst) projects.reverse();
+    const writers = projects.map(ws => rt.create({ goal: 'Edit shared.txt', workspaceId: ws.id }));
+    const launch = (writer, requestId) => services.capabilityService.broker.execute({
+      actor: OWNER_ACTOR, capability: 'agent.run', requestId, taskId: writer.id,
+      workspaceId: writer.workspaceId, input: { agentProvider: 'cetamesh', content: writer.goal }
+    });
+    const entered = Promise.withResolvers(), release = Promise.withResolvers();
+    const createSession = services.agentBroker.createSession.bind(services.agentBroker);
+    services.agentBroker.createSession = async (provider, options) => {
+      if (options.taskId === writers[0].id) { entered.resolve(); await release.promise; }
+      return createSession(provider, options);
+    };
+    const before = sent.length;
+    const first = launch(writers[0], 'outer-owner-' + nestedFirst);
+    try {
+      await Promise.race([entered.promise, first.then(() => { throw Error('missing provisioning barrier'); })]);
+      await assert.rejects(launch(writers[1], 'during-provision-' + nestedFirst), { code: 'TASK_WORKSPACE_BUSY' });
+    } finally {
+      release.resolve();
+      await first;
+      services.agentBroker.createSession = createSession;
+    }
+    await assert.rejects(launch(writers[1], 'after-attach-' + nestedFirst), { code: 'TASK_WORKSPACE_BUSY' });
+    assert.equal(sent.length, before + 1);
+    assert.equal(fs.readFileSync(marker, 'utf8'), 'original bytes');
+  }
+  console.log('PASS nested Workspace registrations share writer ownership before and after Session attachment');
 } finally {
   await services.capabilityService.close();
   fs.rmSync(root, { recursive: true, force: true });

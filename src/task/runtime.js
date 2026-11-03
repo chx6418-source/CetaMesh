@@ -42,7 +42,7 @@ function subId(prefix) {
 }
 
 export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
-  resolveWorkspace = () => null, ownedArtifactRoot = null } = {}) {
+  resolveWorkspace = () => null, workspacesOverlap = (left, right) => left === right, ownedArtifactRoot = null } = {}) {
   if (!stateDir || typeof stateDir !== 'string') throw new Error('createTaskRuntime 需要 stateDir');
   const store = createTaskStore({ stateDir, now, idFactory });
 
@@ -722,16 +722,17 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
   function activeWorkspaceOwner({ workspaceId, exceptTaskId, forReadOnlyTaskId } = {}) {
     const wantedWorkspace = normalizeWorkspaceId(workspaceId);
     if (!wantedWorkspace) return null;
-    return store.listAll().find(row => row.workspaceId === wantedWorkspace
-      && row.id !== exceptTaskId && ['running', 'waiting', 'blocked'].includes(row.status) && row.currentAgent
-      && !(forReadOnlyTaskId && row.parentTaskId && row.childContract?.mode === 'read-only')) ?? null;
+    return store.listAll().find(row => row.id !== exceptTaskId && ['running', 'waiting', 'blocked'].includes(row.status) && row.currentAgent
+      && !(forReadOnlyTaskId && row.parentTaskId && row.childContract?.mode === 'read-only')
+      && workspacesOverlap(row.workspaceId, wantedWorkspace)) ?? null;
   }
 
   function activeWorkspaceReaders({ workspaceId, exceptTaskId } = {}) {
     const wantedWorkspace = normalizeWorkspaceId(workspaceId);
-    return store.listAll().filter(row => row.workspaceId === wantedWorkspace && row.id !== exceptTaskId
+    return store.listAll().filter(row => row.id !== exceptTaskId
       && row.parentTaskId && row.childContract?.mode === 'read-only'
-      && ['running', 'waiting', 'blocked'].includes(row.status) && row.currentAgent);
+      && ['running', 'waiting', 'blocked'].includes(row.status) && row.currentAgent
+      && workspacesOverlap(row.workspaceId, wantedWorkspace));
   }
 
   function attachAgent({ id, expectedRev, provider, sessionId, note, versionContext } = {}) {
