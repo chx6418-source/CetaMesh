@@ -29,12 +29,12 @@ function decodeFrames(buffer) {
   return messages;
 }
 
-function makeHarness({ dispatch = async () => null, maxFrameBytes, dispatchTimeoutMs } = {}) {
+function makeHarness({ dispatch = async () => null, maxFrameBytes, dispatchTimeoutMs, methodFilter } = {}) {
   const input = new PassThrough({ autoDestroy: false });
   const output = new PassThrough();
   const outputChunks = [];
   output.on('data', (chunk) => outputChunks.push(Buffer.from(chunk)));
-  const ipc = startIpcProtocol({ input, output, dispatch, maxFrameBytes, dispatchTimeoutMs });
+  const ipc = startIpcProtocol({ input, output, dispatch, maxFrameBytes, dispatchTimeoutMs, methodFilter });
 
   return {
     input,
@@ -203,5 +203,24 @@ assert.equal(IPC_PROTOCOL_MAX_FRAME_BYTES, 1024 * 1024);
     }
   }), new Promise((_, reject) => setTimeout(() => reject(new Error('async POST body was lost')), 300))]);
   assert.equal(JSON.parse(response.body).value, 42, 'data IPC buffers POST body until an async handler reads it');
+}
+{
+  const methods=['plugin-center.catalog.list','plugins.list','tools.list','mcp.servers.list','integrations.list'];
+  const control=makeHarness({dispatch:async command=>({received:command.method})});
+  const replies=await control.finish(methods.map((method,i)=>request('family-'+i,method,{})));
+  for(const [i,method] of methods.entries()){
+    const frame=replies.find(row=>row.id==='family-'+i);
+    assert.equal(frame.ok,true,method+' must reach the existing Core family router');
+    assert.equal(frame.result.received,method);
+  }
+  let dataDispatches=0;
+  const restricted=makeHarness({methodFilter:method=>method==='data.call',dispatch:async()=>{dataDispatches++;}});
+  const denied=await restricted.finish(methods.map((method,i)=>request('restricted-'+i,method,{})));
+  for (let i=0;i<methods.length;i++) {
+    const frame=denied.find(row=>row.id==='restricted-'+i);
+    assert.equal(frame.ok,false);
+    assert.equal(frame.error.code,'METHOD_NOT_FOUND');
+  }
+  assert.equal(dataDispatches,0,'control families remain unavailable on the data pipe');
 }
 console.log('ipc-protocol tests: PASS');
