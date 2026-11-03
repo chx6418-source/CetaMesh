@@ -119,6 +119,14 @@ export function normalizeReason(value) {
  * 缺失字段如实为空值——不伪造任何 workspace / git / memory 事实。
  * memoryRefs 只存引用 id（Memory 原文留在 Memory Runtime，按需加载，不复制进 packet）。
  */
+export function normalizeRelevantFiles(value) {
+  if (value == null) return [];
+  if (!Array.isArray(value) || value.length > PACKET_LIMITS.listItems ||
+    value.some(item => typeof item !== 'string' || !item.trim() || item.length > 1024))
+    throw continuityError('INVALID_PACKET', 'Relevant files exceed the supported count or path length');
+  return [...value];
+}
+
 export function normalizePacket(packet) {
   if (!packet || typeof packet !== 'object' || Array.isArray(packet)) {
     throw continuityError('INVALID_PACKET', 'Handoff Packet 必须是对象');
@@ -185,7 +193,7 @@ export function normalizePacket(packet) {
     pendingWork: list(packet.pendingWork, PACKET_LIMITS.listItems),
     decisions: list(packet.decisions, PACKET_LIMITS.listItems),
     workspace: text(packet.workspace, PACKET_LIMITS.idChars) || null,
-    relevantFiles: stringList(packet.relevantFiles, PACKET_LIMITS.listItems),
+    relevantFiles: normalizeRelevantFiles(packet.relevantFiles),
     artifacts: stringList(packet.artifacts, PACKET_LIMITS.listItems),
     // Memory 引用：只保留 memoryId（+可选 note），不携带 Memory 原文。
     memoryRefs: (() => {
@@ -268,10 +276,13 @@ function normalizeWorkspaceFacts(facts) {
     available: true,
     workspaceId: text(facts.workspaceId, PACKET_LIMITS.idChars) || null,
     workspaceName: text(facts.workspaceName, 200) || null,
+    ...(['git-workspace-v1','relevant-files-v1'].includes(facts.contentProof?.kind)
+      && /^[a-f0-9]{64}$/.test(facts.contentProof?.sha256 ?? '')
+      ? {contentProof:{kind:facts.contentProof.kind,sha256:facts.contentProof.sha256}} : {}),
     git,
     files: Array.isArray(facts.files)
       ? facts.files.slice(0, PACKET_LIMITS.listItems).map((file) => ({
-          path: text(file?.path, PACKET_LIMITS.idChars),
+          path: text(file?.path, 1024),
           exists: file?.exists === true
         })).filter((file) => file.path)
       : [],

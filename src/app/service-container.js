@@ -31,6 +31,7 @@ import { createIsolatedTestRunner } from '../workspace/isolated-runner.js';
 import { createTaskService } from '../task/service.js';
 import { createContinuityService, createWorkspaceReconciler } from '../continuity/index.js';
 import { gitDiff, gitHead, gitStatus } from '../workspace/tools.js';
+import { workspaceContentProof } from '../workspace/handoff-facts.js';
 import { createDefaultAgentService } from '../agent/index.js';
 import { createExtensionService } from '../extension/service.js';
 import { createMeshService } from '../mesh/service.js';
@@ -373,6 +374,7 @@ export function createCetaMeshServices(options = {}) {
   });
 
   const continuityReconciler = createWorkspaceReconciler({
+    contentProof: workspaceContentProof,
     resolveWorkspace: async workspaceId => workspaceService.describeWorkspace(workspaceId),
     gitStatus: root => gitStatus(root),
     gitHead: root => gitHead(root),

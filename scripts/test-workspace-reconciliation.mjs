@@ -21,7 +21,9 @@ import { createAgentProviderRegistry } from '../src/agent/registry.js';
 import { createAgentBroker } from '../src/agent/broker.js';
 import { createContinuityService } from '../src/continuity/service.js';
 import { createWorkspaceReconciler } from '../src/continuity/reconcile.js';
+import { normalizePacket } from '../src/continuity/types.js';
 import { gitDiff, gitHead, gitStatus } from '../src/workspace/tools.js';
+import { workspaceContentProof } from '../src/workspace/handoff-facts.js';
 
 const root = path.resolve(import.meta.dirname, '..');
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-reconcile-test-'));
@@ -50,6 +52,7 @@ function makeRealRepo() {
 /** 组装 reconciler：真实 workspace 工具 + 注入的登记表。 */
 function makeReconciler({ entries = {} } = {}) {
   return createWorkspaceReconciler({
+    contentProof: workspaceContentProof,
     resolveWorkspace: async (id) => entries[id] ?? null,
     gitStatus: (rootDir) => gitStatus(rootDir),
     gitHead: (rootDir) => gitHead(rootDir),
@@ -89,6 +92,7 @@ function makeReconciler({ entries = {} } = {}) {
   const facts = await reconciler.collectFacts({ workspaceId: 'ws1', relevantFiles: ['exporter.js'] });
   const packet = {
     taskId: 't1', workspace: 'ws1',
+    workspaceFacts: facts,
     coding: { branch: 'main', headSha: repo.headSha, gitStatus: '1 file dirty', testsRun: [], knownFailures: [] },
     relevantFiles: ['exporter.js']
   };
@@ -142,7 +146,8 @@ function makeReconciler({ entries = {} } = {}) {
   assert.equal(facts2.git.isRepo, true);
   assert.equal(facts2.git.headSha, null, '无提交 → headSha:null（不编造 SHA）');
   const result2 = r2.reconcile({ packet: { coding: { branch: null, headSha: null }, relevantFiles: [] }, facts: facts2 });
-  assert.equal(result2.consistent, true, 'checkpoint 无声明 + 工作区无提交 → 无可判不一致');
+  assert.equal(result2.consistent, null, '缺少内容基线不能证明空仓库未变');
+  assert.equal(r2.reconcile({packet:{workspaceFacts:facts2},facts:facts2}).consistent,true);
   ok('边界：非 git 目录 no-git-repo；空仓库 HEAD 如实 null');
 }
 
@@ -255,6 +260,67 @@ for (const scenario of ['plain', 'missing', 'stale-supplied-facts', 'missing-fil
   assert.equal(service.runtime.isInFlight(task.id), false);
   assert.equal(service.runtime.history({taskId: task.id}).rollovers.length, 0);
   ok(scenario + ': preflight rejection leaves the old Session and Task unchanged');
+}
+
+// Same Git statistics and the same file names can describe different on-disk and staged bytes.
+{
+  const {dir} = makeRealRepo();
+  const reconciler = makeReconciler({entries:{checked:{id:'checked',root:dir}}});
+  const collect = () => reconciler.collectFacts({workspaceId:'checked', relevantFiles:['exporter.js']});
+  const packet = facts => normalizePacket({taskId:'handoff-fixture',workspaceFacts:facts});
+  const compare = (before, after) => reconciler.reconcile({packet:packet(before), facts:after}).consistent;
+  const before = await collect();
+  fs.writeFileSync(path.join(dir,'exporter.js'),'export const schema = 3;\n');
+  const changed = await collect();
+  assert.equal(changed.git.diffSummary,before.git.diffSummary);
+  assert.equal(compare(before,changed),false,'a different dirty byte must stop handoff despite identical git diff --stat');
+  fs.writeFileSync(path.join(dir,'new.bin'),Buffer.from([0,1]));
+  const untracked = await collect();
+  fs.writeFileSync(path.join(dir,'new.bin'),Buffer.from([0,2]));
+  assert.equal(compare(untracked,await collect()),false,'untracked bytes are part of the Workspace proof');
+  runGit(dir,['add','exporter.js']);
+  const staged = await collect();
+  fs.writeFileSync(path.join(dir,'exporter.js'),'export const schema = 4;\n');
+  runGit(dir,['add','exporter.js']);
+  fs.writeFileSync(path.join(dir,'exporter.js'),'export const schema = 3;\n');
+  assert.equal(compare(staged,await collect()),false,'staged object can change with identical working bytes');
+  for(let i=0;i<100;i++) fs.writeFileSync(path.join(dir,'long-file-name-for-workspace-reconciliation-'+i+'.txt'),'base\n');
+  runGit(dir,['add','.']);runGit(dir,['commit','-qm','many files']);
+  for(let i=0;i<100;i++) fs.appendFileSync(path.join(dir,'long-file-name-for-workspace-reconciliation-'+i+'.txt'),'change\n');
+  const large = await collect();
+  assert.ok(large.git.diffSummary.length>4000);
+  assert.equal(compare(large,await collect()),true,'packet display limit must not block an unchanged project');
+  assert.equal(compare({available:false,workspaceId:'checked'},large),null,'an absent baseline cannot certify equality');
+  const legacy = {...large};
+  delete legacy.contentProof;
+  assert.equal(compare(legacy,large),null,'old packets remain readable and require a fresh content baseline');
+  assert.equal(reconciler.reconcile({packet:{coding:{}},facts:large}).consistent,null,'a missing checkpoint cannot certify current bytes');
+  const longPath='x'.repeat(150)+'.txt';
+  fs.writeFileSync(path.join(dir,longPath),'long path proof');
+  const longFacts=await reconciler.collectFacts({workspaceId:'checked',relevantFiles:[longPath]});
+  const longPacket=normalizePacket({taskId:'handoff-fixture',workspaceFacts:longFacts,relevantFiles:[longPath]});
+  assert.deepEqual(longPacket.relevantFiles,[longPath],'Checkpoint must retain the complete supported relative path');
+  const reread=await reconciler.collectFacts({workspaceId:'checked',relevantFiles:longPacket.relevantFiles});
+  assert.equal(reconciler.reconcile({packet:longPacket,facts:reread}).consistent,true);
+  const excessive=Array.from({length:101},(_,index)=>'path-'+index);
+  assert.equal((await reconciler.collectFacts({workspaceId:'checked',relevantFiles:excessive})).available,false);
+  fs.writeFileSync(path.join(dir,'.env'),'SYNTHETIC_SECRET=private');
+  assert.equal((await collect()).available,false,'an unverified protected file cannot become a content proof');
+  fs.unlinkSync(path.join(dir,'.env'));
+  const capFile=path.join(dir,'over-cap.bin');
+  const capHandle=fs.openSync(capFile,'w');
+  try { fs.ftruncateSync(capHandle,10*1024*1024+1); } finally { fs.closeSync(capHandle); }
+  assert.equal((await collect()).available,false,'a bounded snapshot must report incomplete large-file evidence');
+  fs.unlinkSync(capFile);
+  const originalRead=fs.readSync;
+  fs.readSync=function(...args){
+    const read=originalRead.apply(this,args);
+    fs.appendFileSync(path.join(dir,'exporter.js'),'changed while collecting\n');
+    return read;
+  };
+  try { assert.equal((await collect()).available,false,'a concurrent write must invalidate the entire observation'); }
+  finally { fs.readSync=originalRead; }
+  ok('byte changes, staged-only edits, untracked edits, long statistics and unavailable baselines');
 }
 
 fs.rmSync(temp, { recursive: true, force: true });

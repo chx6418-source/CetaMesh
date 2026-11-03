@@ -9,6 +9,8 @@
 // 依赖注入：本模块不 import workspace 服务，bridge 用 workspaceService 的
 // 只读入口 + tools.js 的 git 只读动词组装适配器（保持 Continuity 的依赖面最小）。
 
+import { normalizeRelevantFiles } from './types.js';
+
 const MAX_DISCREPANCIES = 50;
 
 // Serialized checkpoints may use empty strings for unavailable Git metadata.
@@ -24,6 +26,7 @@ export function createWorkspaceReconciler({
   gitHead,            // async (root) => { isRepo, headSha|null }（tools.gitHead）
   gitDiffSummary,     // async (root) => string|null（tools.gitDiff { statOnly:true } → output）
   fileExists,         // (root, relPath) => boolean
+  contentProof,       // Core-only bounded byte and index observation
   now = () => Date.now()
 } = {}) {
   for (const [name, fn] of Object.entries({ resolveWorkspace, gitStatus, gitHead, fileExists })) {
@@ -39,6 +42,8 @@ export function createWorkspaceReconciler({
   async function collectFacts({ workspaceId, relevantFiles = [] } = {}) {
     const id = String(workspaceId ?? '').trim();
     if (!id) return { available: false, reason: 'no-workspace-bound', workspaceId: null };
+    try { relevantFiles = normalizeRelevantFiles(relevantFiles); }
+    catch { return {available:false,reason:'invalid-relevant-files',workspaceId:id}; }
     let entry;
     try {
       entry = await resolveWorkspace(id);
@@ -49,9 +54,7 @@ export function createWorkspaceReconciler({
 
     const files = [];
     const observationErrors = [];
-    for (const rel of Array.isArray(relevantFiles) ? relevantFiles.slice(0, 100) : []) {
-      const relPath = String(rel ?? '').trim();
-      if (!relPath) continue;
+    for (const relPath of relevantFiles) {
       let exists = false;
       try {
         exists = fileExists(entry.root, relPath) === true;
@@ -98,6 +101,11 @@ export function createWorkspaceReconciler({
     // A Git diff is not applicable to a positively observed non-Git folder.
     if (status?.isRepo === true && diffFailed) observationErrors.push('GIT_DIFF_OBSERVATION_FAILED');
 
+    let proof = null;
+    if (contentProof) {
+      try { proof = await contentProof(entry.root, {relevantFiles}); }
+      catch { observationErrors.push('WORKSPACE_CONTENT_UNVERIFIED'); }
+    }
     return {
       available: observationErrors.length === 0,
       ...(observationErrors.length ? { reason: 'workspace-observation-incomplete', observationErrors } : {}),
@@ -105,6 +113,7 @@ export function createWorkspaceReconciler({
       workspaceName: entry.name ?? null,
       git,
       files,
+      ...(proof ? {contentProof:proof} : {}),
       collectedAt: now()
     };
   }
@@ -130,12 +139,25 @@ export function createWorkspaceReconciler({
     const discrepancies = [];
     const coding = packet?.coding ?? {};
     const before = packet?.workspaceFacts;
+    const missingContentBaseline = Boolean(facts.contentProof && !before?.contentProof);
+    if (before?.available === false || (facts.contentProof && before && !before.contentProof)) {
+      return {checkedAt,consistent:null,discrepancies:[],note:'Workspace baseline has no comparable content proof'};
+    }
     if (before?.available) {
       if (before.workspaceId !== facts.workspaceId) {
         discrepancies.push({ kind: 'workspace', checkpoint: before.workspaceId, workspace: facts.workspaceId,
           note: 'Task Workspace changed during handoff' });
       }
-      for (const field of ['isRepo', 'branch', 'headSha', 'dirty', 'diffSummary']) {
+      if (before.contentProof || facts.contentProof) {
+        if (!before.contentProof || !facts.contentProof || before.contentProof.kind !== facts.contentProof.kind)
+          return {checkedAt,consistent:null,discrepancies:[],note:'Workspace content proof is incomplete'};
+        if (before.contentProof.sha256 !== facts.contentProof.sha256)
+          discrepancies.push({kind:'content',checkpoint:before.contentProof.sha256,workspace:facts.contentProof.sha256,
+            note:'Workspace bytes or Git index changed during handoff'});
+      }
+      const fields = ['isRepo','branch','headSha','dirty'];
+      if (!facts.contentProof) fields.push('diffSummary');
+      for (const field of fields) {
         const expected = comparableGitValue(field, before.git?.[field]);
         const observed = comparableGitValue(field, facts.git?.[field]);
         if (expected !== observed) discrepancies.push({ kind: field, checkpoint: expected, workspace: observed,
@@ -186,11 +208,11 @@ export function createWorkspaceReconciler({
     }
     return {
       checkedAt,
-      consistent: discrepancies.length === 0,
+      consistent: discrepancies.length ? false : missingContentBaseline ? null : true,
       discrepancies: discrepancies.slice(0, MAX_DISCREPANCIES),
       note: discrepancies.length
         ? `${discrepancies.length} 处不一致（真实 Workspace 优先，已记录，未修改 Task State）`
-        : 'checkpoint 与 workspace 事实一致'
+        : missingContentBaseline ? '历史 Checkpoint 缺少内容摘要，需重新采集工作区基线' : 'checkpoint 与 workspace 事实一致'
     };
   }
 

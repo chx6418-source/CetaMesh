@@ -258,7 +258,7 @@ export function createContinuityRuntime({
       pendingWork: task.pendingWork.map((item) => item.text ?? item),
       decisions: task.decisions.map((item) => ({ text: item.decision ? `${item.decision}${item.rationale ? `（${item.rationale}）` : ''}` : item })),
       workspace: task.workspaceId,
-      relevantFiles: Array.isArray(relevantFiles) ? relevantFiles : [],
+      relevantFiles,
       artifacts: task.artifacts.map((item) => item.label ?? item),
       // Checkpoint v2：只存 memoryId 引用，Memory 原文留在 Memory Runtime 按需加载。
       memoryRefs: task.memoryRefs.map((ref) => ({ memoryId: ref.memoryId, scope: ref.scope ?? `task:${task.id}`,
@@ -607,6 +607,7 @@ export function createContinuityRuntime({
           && (row.source==='core-import'||['filesystem.write','test.run'].includes(row.capability)))
           .map(row=>[row.eventId,row.resultSha256,row.exitCode]),
         head: facts?.git?.headSha??null,
+        contentProof: facts?.contentProof??null,
         files: (facts?.files??[]).map(row=>[row.path,row.sha256]).sort((a,b)=>String(a[0]).localeCompare(String(b[0])))
       })).digest('hex');
       if (automatic === true) {
