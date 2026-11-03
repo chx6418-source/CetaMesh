@@ -250,7 +250,7 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
   approvalDispatchReviewed(approvalId, request) {
    const alias=dispatches[aliasKey(request.requestId)];
    const row=dispatches[alias?.operationKey??request.requestId];
-   return row?.status==='reconciled' && row.resolution==='owner-reviewed-no-replay'
+   return ['completed','reconciled'].includes(row?.status) && row.resolution==='owner-reviewed-no-replay'
     && row.authorization?.kind==='approval' && row.authorization.id===approvalId
     && row.requestId===request.requestId && row.capability===request.capability
     && row.taskId===request.taskId && row.workspaceId===(request.workspaceId??null);
@@ -270,12 +270,17 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
    const row=Object.values(dispatches).find(row=>row.operationId===operationId&&row.taskId===taskId&&row.workspaceId===workspaceId);
    return row?structuredClone(row):null;
   },
-  acknowledgeTaskOperations:({taskId,workspaceId})=>{
+  acknowledgeTaskOperations:({taskId,workspaceId,approvalIds=[]})=>{
    const rows=Object.entries(dispatches).filter(([,row])=>row?.taskId===taskId&&row.workspaceId===workspaceId
-    &&['started','outcome-unknown'].includes(row.status));
+    &&(['started','outcome-unknown'].includes(row.status) || (row.status==='completed'
+      && row.authorization?.kind==='approval' && approvalIds.includes(row.authorization.id)
+      && row.resolution!=='owner-reviewed-no-replay')));
    if(rows.some(([key])=>activeDispatches.has(key)))throw capabilityError('OPERATION_STILL_RUNNING','The original operation has not settled');
-   const prior=rows.map(([,row])=>row.status);for(const [,row]of rows){row.status='reconciled';row.resolution='owner-reviewed-no-replay';}
-   try{if(rows.length&&dispatchFile)writeJsonAtomic(dispatchFile,dispatches);}catch(error){rows.forEach(([,row],i)=>{row.status=prior[i];delete row.resolution;});throw error;}
+   const prior=rows.map(([,row])=>({status:row.status,resolution:row.resolution}));
+   for(const [,row]of rows){if(row.status!=='completed')row.status='reconciled';row.resolution='owner-reviewed-no-replay';}
+   try{if(rows.length&&dispatchFile)writeJsonAtomic(dispatchFile,dispatches);}catch(error){
+    rows.forEach(([,row],i)=>{row.status=prior[i].status;if(prior[i].resolution===undefined)delete row.resolution;else row.resolution=prior[i].resolution;});throw error;
+   }
    return {reconciled:rows.length};
   },
   async decide({id,approve,actor},{signal}={}){

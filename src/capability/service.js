@@ -1393,7 +1393,10 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       const operationTask = taskFor(taskId);
       if (provisioning.has(taskId) || Object.entries(journal).some(([id,row]) => row?.taskId===taskId && requests.has(id)))
         throw capabilityError('OPERATION_STILL_RUNNING','Task dispatch has not settled');
-      const reviewedOperations = operationTask ? broker.acknowledgeTaskOperations({ taskId, workspaceId: operationTask.workspaceId }).reconciled : 0;
+      const approvalIds = unresolvedApprovalOperations(taskId).filter(row => row.status === 'unknown')
+        .map(row => row.approvalId);
+      const reviewedOperations = operationTask ? broker.acknowledgeTaskOperations({
+        taskId, workspaceId: operationTask.workspaceId, approvalIds }).reconciled : 0;
       const rows = Object.values(journal).filter(row => row?.taskId === taskId && row.status === 'in-flight');
       for (const row of rows) row.status = 'reconciled';
       if (rows.length) {

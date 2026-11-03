@@ -22,11 +22,12 @@ async function main() {
     finally { clearTimeout(timer); }
   }
 
-  async function fixture(name, gateStop) {
+  async function fixture(name, gateStop, lateSuccess = false) {
     const base = path.join(root, name), stateDir = path.join(base, 'state');
     const workspaces = createWorkspaceService({ stateDir });
     const state = { taskId: null, sends: 0, taskService: null, capabilities: null, ui: null };
     const stopEntered = Promise.withResolvers(), releaseStop = Promise.withResolvers();
+    const effectEntered = Promise.withResolvers(), releaseEffect = Promise.withResolvers();
     let stopGated = false;
 
     const binding = { provider: 'cetamesh', sessionId: 'fixture-session' };
@@ -66,9 +67,14 @@ async function main() {
       state.ui = createDesktopUiService({ services: { taskService: state.taskService,
         workspaceService: workspaces, capabilityService: state.capabilities, agentBroker } });
       state.capabilities.broker.register({ id: 'fixture.owner-recovery-effect', permission: 'publish',
-        risk: 'high', effect: 'non-idempotent', execute(request) {
+        risk: 'high', effect: 'non-idempotent', async execute(request) {
+          if (lateSuccess) {
+            effectEntered.resolve();
+            await bounded(releaseEffect.promise, 'late successful effect release');
+          }
           const workspace = workspaces.describeWorkspace(request.workspaceId);
           fs.appendFileSync(path.join(workspace.root, 'marker.bin'), Buffer.from([0x78]));
+          if (lateSuccess) return { bytesWritten: 1 };
           throw Object.assign(new Error('Synthetic response loss after the real local append'), { code: 'FIXTURE_RESULT_LOST' });
         } });
     }
@@ -106,10 +112,11 @@ async function main() {
     }
     async function close() {
       releaseStop.resolve();
+      releaseEffect.resolve();
       await bounded(state.capabilities.close(), 'local capability service close');
     }
     return { state, first, workspace, open, close, read, call, effect, review, bytes, status,
-      waitUnknown, stopEntered, releaseStop };
+      waitUnknown, stopEntered, releaseStop, effectEntered, releaseEffect };
   }
 
   async function approvalAcrossRestart() {
@@ -143,6 +150,47 @@ async function main() {
         reportSha256: report.sha256, summary: 'Owner accepted the exact fresh report.' });
 
       assert.equal(result.task.status, 'completed');
+      assert.equal(f.bytes(f.first), 1);
+    } finally { await f.close(); }
+  }
+
+  async function cancellationThenLateSuccess() {
+    const f = await fixture('cancelled-wrapper-late-success', false, true);
+    try {
+      const pending = await f.effect(f.first, 'late-success-original');
+      assert.equal(pending.status, 'pending');
+      const decision = { id: pending.approvalId, approve: true };
+      const accepted = await f.call('ui.approvals.decide', decision);
+      await bounded(f.effectEntered.promise, 'original executor entry');
+      assert.equal((await f.call('ui.approvals.cancel', { id: accepted.operationId })).cancelRequested, true);
+      await f.waitUnknown(accepted.operationId);
+      assert.equal(f.status('late-success-original'), 'started');
+      assert.equal(fs.existsSync(path.join(f.first.root, 'marker.bin')), false);
+      f.releaseEffect.resolve();
+      const settledDeadline = Date.now() + 5000;
+      while (f.status('late-success-original') !== 'completed' && Date.now() < settledDeadline) await delay(5);
+      assert.equal(f.status('late-success-original'), 'completed', 'original dispatch settles within the fixture budget');
+      assert.equal(f.bytes(f.first), 1);
+      assert.equal((await f.call('ui.approvals.operation', { id: accepted.operationId })).status, 'unknown');
+      await f.close();
+      f.open();
+      assert.equal(f.state.capabilities.recoveryForTask(f.state.taskId)?.state, 'needs-reconciliation');
+      const result = await bounded(f.review(), 'explicit review of cancelled wrapper with late success');
+      assert.equal(result.task.status, 'running');
+      assert.equal(f.state.sends, 1);
+      assert.equal(f.status('late-success-original'), 'completed', 'Owner review preserves the real successful dispatch status');
+      const repeat = await f.call('ui.approvals.decide', decision);
+      assert.equal(repeat.operationId, accepted.operationId);
+      assert.equal(repeat.status, 'unknown', 'historical wrapper outcome remains uncertain after explicit review');
+      assert.equal(f.bytes(f.first), 1, 'review and duplicate approval never repeat the original effect');
+      // ee5ec1f reports needs-reconciliation/TASK_EFFECT_UNCONFIRMED indefinitely here.
+      assert.equal(f.state.capabilities.recoveryForTask(f.state.taskId), null);
+      assert.equal(f.state.capabilities.completionBlocker(f.state.taskId), null);
+      const current = f.read(), report = current.agentReports.at(-1);
+      const completed = await f.call('ui.task.complete', { id: current.id, expectedRev: current.rev,
+        reviewed: true, reviewKind: 'report-only', reportEventId: report.eventId,
+        reportSha256: report.sha256, summary: 'Owner accepted the fresh report after reviewing the late original result.' });
+      assert.equal(completed.task.status, 'completed');
       assert.equal(f.bytes(f.first), 1);
     } finally { await f.close(); }
   }
@@ -191,6 +239,7 @@ async function main() {
   const failures = [];
   try {
     const cases = [['settled approval recovered after restart', approvalAcrossRestart],
+      ['cancelled approval wrapper with late successful dispatch', cancellationThenLateSuccess],
       ['stale review after Workspace rebind', () => staleOwnerReview(true)],
       ['new effect during unchanged-Task review', () => staleOwnerReview(false)]];
     for (const [name, run] of cases) {
