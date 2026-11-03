@@ -87,6 +87,58 @@ try {
   await creation;await shutdown;
   assert.equal(closedPending,1);assert.equal(legacyStopped,1);
  });
+ await regression('confirmed close preserves stale-session identity without reviving a native transport',async()=>{
+  const native=createCodexAppServerProvider({launch,taskOptions});
+  const router=createCodexProviderRouter({legacyProvider:{capabilities:()=>({})},appServerProvider:native,rolloutEnabled:true});
+  const session=await router.createSession({taskId:'closed-task',workspaceId:'closed-workspace'});
+  assert.equal((await router.closeSession(session)).closed,true);
+  assert.equal(fs.existsSync(session.cwd),false);
+  for(const method of ['status','cancel','resume','send','closeSession']) {
+   await assert.rejects(router[method]({...session,content:'must not reach the closed process'}),{code:'SESSION_NOT_FOUND'});
+   await assert.rejects(router[method]({...session,taskId:'another-task'}),{code:'TASK_WORKSPACE_MISMATCH'});
+   await assert.rejects(router[method]({...session,workspaceId:'another-workspace'}),{code:'TASK_WORKSPACE_MISMATCH'});
+  }
+  await assert.rejects(router.follow(session).next(),{code:'SESSION_NOT_FOUND'});
+  await assert.rejects(router.status({sessionId:'unobserved-session'}),{code:'SESSION_TRANSPORT_UNKNOWN'});
+  const restarted=createCodexProviderRouter({legacyProvider:{capabilities:()=>({})},appServerProvider:native,rolloutEnabled:true});
+  await assert.rejects(restarted.status(session),{code:'SESSION_TRANSPORT_UNKNOWN'},'a new Core cannot infer a stop receipt');
+ });
+ await regression('unconfirmed close keeps the native binding and refuses stale-session recovery',async()=>{
+  let allowClose=false;
+  const native=createCodexAppServerProvider({taskOptions,launch:binding=>{
+   const raw=launch();
+   const owned={...raw,async close(){
+    if(!allowClose)throw Object.assign(new Error('fixture native exit unconfirmed'),{code:'FIXTURE_CLOSE_UNKNOWN'});
+    await raw.close();
+   }};
+   binding.onHandle(owned);return owned;
+  }});
+  const router=createCodexProviderRouter({legacyProvider:{capabilities:()=>({})},appServerProvider:native,rolloutEnabled:true});
+  const session=await router.createSession({taskId:'unconfirmed-task',workspaceId:'unconfirmed-workspace'});
+  try {
+   await assert.rejects(router.closeSession(session),{code:'ACP_CLOSE_UNKNOWN'});
+   const retained=await router.status(session);
+   assert.equal(retained.taskId,'unconfirmed-task');assert.equal(retained.state,'unknown');
+   assert.equal(fs.existsSync(session.cwd),true);
+  } finally {allowClose=true;await router.closeSession(session);}
+ });
+ await regression('recent close receipts are bounded and a non-acknowledged close is never a receipt',async()=>{
+  let sequence=0,acknowledge=false;
+  const legacy={capabilities:()=>({}),createSession:async()=>({sessionId:'bounded-close-'+ ++sequence}),
+   closeSession:async()=>({closed:acknowledge}),status:async()=>({running:true})};
+  const router=createCodexProviderRouter({legacyProvider:legacy});
+  const first=await router.createSession({taskId:'bounded-task',workspaceId:'bounded-workspace'});
+  assert.equal((await router.closeSession(first)).closed,false);
+  assert.equal((await router.status(first)).running,true,'absence of an exception is not a close ACK');
+  acknowledge=true;await router.closeSession(first);
+  let recent;
+  for(let i=0;i<300;i++) {
+   recent=await router.createSession({taskId:'bounded-task',workspaceId:'bounded-workspace'});
+   await router.closeSession(recent);
+  }
+  await assert.rejects(router.status(first),{code:'SESSION_TRANSPORT_UNKNOWN'},'old receipts must not grow without a bound');
+  await assert.rejects(router.status(recent),{code:'SESSION_NOT_FOUND'},'recent confirmed close remains safely recoverable');
+ });
  if(regressionFailures.length) throw new AggregateError(regressionFailures,regressionFailures.map(e=>e.message).join('; '));
  const callbackProvider=createCodexAppServerProvider({launch,taskOptions});
  const callbackSession=await callbackProvider.createSession({taskId:'t',workspaceId:'w'});

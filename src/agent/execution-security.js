@@ -33,6 +33,26 @@ export function canDispatchConfiguredNativeAgent(health, security) {
     && health?.authentication === 'configured-unverified' && health?.reason == null;
 }
 
+/** Shared observation for task selectors and assignment; dispatch still rechecks live health and consent. */
+export function canDispatchTaskAgent(health, { provider, security, explicitProvider = false } = {}) {
+  return health?.available === true && health.disabled !== true && health.enabled !== false
+    && health.installed !== false && health.ready !== false && health.reachable !== false
+    && health.taskEligible !== false && health.compatible !== false
+    && !hasNegativeAgentReadiness(health)
+    && (provider === 'cetamesh' || (Boolean(explicitProvider) && canDispatchConfiguredNativeAgent(health, security))
+      || (health.authenticated === true && health.sessionCapable === true
+        && (provider === 'codex' ? (explicitProvider ? health.sandboxCapable !== false
+          : health.sandboxCapable === true && health.toolsAvailable === true) : health.toolsAvailable === true)));
+}
+
+/** Fixed diagnostic codes only: remote health text may contain private runtime details. */
+export function taskAgentUnavailableReason(health, { provider, security, explicitProvider = false } = {}) {
+  return provider !== 'cetamesh' && provider !== 'codex' && health?.available === true
+    && health.ready !== false && health.authenticated === true && health.sessionCapable === true
+    && !(explicitProvider && canDispatchConfiguredNativeAgent(health, security)) && health.toolsAvailable !== true
+    ? 'task-tools-unverified' : 'task-execution-unverified';
+}
+
 /** Descriptions are Adapter-owned; platform authority never derives from these fields. */
 export function describeAgentExecutionSecurity(provider, workspaceId, workspaceIdentity = null) {
   const declared = provider.capabilities()?.security;

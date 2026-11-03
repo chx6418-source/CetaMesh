@@ -1,15 +1,10 @@
-import { canDispatchConfiguredNativeAgent, hasNegativeAgentReadiness } from '../agent/execution-security.js';
+import { canDispatchTaskAgent, hasNegativeAgentReadiness, taskAgentUnavailableReason } from '../agent/execution-security.js';
 import { capabilityError } from '../capability/types.js';
 
 const BOUNDARIES = new Set(['capability-broker', 'staged-capability-broker', 'native-staged']);
 
 function eligibleHealth(health, provider, capabilities, explicitProvider) {
-  return health?.available === true && health.disabled !== true && health.enabled !== false
-    && health.installed !== false && health.ready !== false && health.reachable !== false
-    && health.taskEligible !== false && health.compatible !== false
-    && !hasNegativeAgentReadiness(health)
-    && (provider === 'cetamesh' || (Boolean(explicitProvider) && canDispatchConfiguredNativeAgent(health,capabilities?.security)) || (health.authenticated === true && health.sessionCapable === true
-      && (provider === 'codex' ? (explicitProvider ? health.sandboxCapable !== false : health.sandboxCapable === true && health.toolsAvailable === true) : health.toolsAvailable === true)));
+  return canDispatchTaskAgent(health, { provider, security: capabilities?.security, explicitProvider });
 }
 
 function costEstimate(value, provider, modelProvider, model) {
@@ -45,7 +40,10 @@ export async function rankTaskAgents({ agentBroker, workspaceId, explicitProvide
         && health.disabled!==true && health.enabled!==false && health.ready!==false && health.reachable!==false
         && !hasNegativeAgentReadiness(health);
       if (!eligibleHealth(health, provider, capabilities, explicitProvider) && !canPrepare) {
-        throw capabilityError('PROVIDER_UNAVAILABLE', 'Provider is not currently eligible');
+        const reason = taskAgentUnavailableReason(health, { provider, security: capabilities?.security, explicitProvider });
+        throw capabilityError('PROVIDER_UNAVAILABLE', reason === 'task-tools-unverified'
+          ? '所选执行者的任务工具能力尚未验证；请在 Agent 页面检查连接与预设，或选择已就绪的执行者。'
+          : '所选执行者未通过任务执行检查；请在 Agent 页面核对连接、认证和执行条件后重新检查。');
       }
       let consentRequired=false;
       try{agentBroker.assertExecutionConsent?.(provider,{workspaceId});}catch(error){

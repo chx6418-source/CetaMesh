@@ -150,6 +150,66 @@ fn base_report(trigger: &str, code: &str, pending: bool) -> Value {
         "persisted":false,"pending":pending})
 }
 
+fn known_transport_os_code(code: u64) -> bool {
+    matches!(code,2|3|5|6|8|87|109|121|231|232|233|234|535|536|995|997|1450|1816)
+}
+
+fn project_transport_failure(input: &Value) -> Option<Value> {
+    let stage=input["stage"].as_str()?;
+    let code=input["code"].as_str()?;
+    if !matches!(stage,"connect"|"configure"|"ready"|"write"|"read"|"validate"|"dispatch"|"unknown")
+        || !matches!(code,"PIPE_NOT_FOUND"|"PIPE_BUSY"|"ACCESS_DENIED"|"PIPE_CLOSED"|"PIPE_NO_DATA"
+            |"PIPE_WRITE_ZERO"|"IPC_TIMEOUT"|"PROTOCOL_INVALID"|"CORE_REJECTED"|"IO_FAILED"|"UNKNOWN_FAILURE") {
+        return None;
+    }
+    let os_code=input["osCode"].as_u64().filter(|code|known_transport_os_code(*code));
+    Some(json!({"stage":stage,"code":code,"osCode":os_code}))
+}
+
+/// Classify only fixed client prefixes and known OS numbers. Error messages can
+/// contain business data, so neither their text nor arbitrary Core codes survive.
+fn transport_failure(error: &str, timed_out: bool) -> Value {
+    let (stage,native_io)=if error.starts_with("connect to Core pipe:") {("connect",true)}
+        else if error.starts_with("configure Core pipe:") {("configure",true)}
+        else if error.starts_with("read Core IPC ready event:") {("ready",true)}
+        else if error.starts_with("write Core IPC request:") {("write",true)}
+        else if error.starts_with("read Core IPC response:") {("read",true)}
+        else if error.starts_with("invalid Core IPC ready event:") || error.starts_with("unsupported Core IPC ready-event")
+            || error=="expected Core IPC core.ready event" {("ready",false)}
+        else if error.starts_with("invalid Core IPC response:") || error.starts_with("unsupported Core IPC response")
+            || error.starts_with("Core IPC response ") || error.starts_with("Core IPC success response ")
+            || error.starts_with("Core IPC failure response ") {("validate",false)}
+        else if error.starts_with("Core IPC ") {("dispatch",false)}
+        else {("unknown",false)};
+    // Rust's OS error suffix is locale independent even when the message is not.
+    let os_code=if native_io {
+        error.strip_suffix(')').and_then(|text|text.rsplit_once("(os error "))
+            .and_then(|(_,number)|number.parse::<u64>().ok())
+            .filter(|code|known_transport_os_code(*code))
+    } else {None};
+    let code=match os_code {
+        Some(2|3)=>"PIPE_NOT_FOUND",Some(5)=>"ACCESS_DENIED",Some(231)=>"PIPE_BUSY",
+        Some(109|233)=>"PIPE_CLOSED",Some(232|536)=>"PIPE_NO_DATA",
+        _ if timed_out=>"IPC_TIMEOUT",
+        _ if stage=="write" && error.ends_with("Core pipe accepted no data")=>"PIPE_WRITE_ZERO",
+        _ if stage=="dispatch"=>"CORE_REJECTED",
+        _ if stage=="validate" || (stage=="ready" && !native_io)=>"PROTOCOL_INVALID",
+        _ if native_io=>"IO_FAILED",
+        _=>"UNKNOWN_FAILURE",
+    };
+    json!({"stage":stage,"code":code,"osCode":os_code})
+}
+
+fn rpc_failure_report(error: &str, elapsed_ms: u128) -> Value {
+    let text=error.to_ascii_lowercase();
+    let timeout=text.contains("timed out")||text.contains("timeout");
+    let handshake=text.contains("protocol")||text.contains("version")||text.contains("ready event")||text.contains("invalid core ipc");
+    let mut report=base_report("runtime",if timeout{"CORE_RPC_TIMEOUT"}else if handshake{"CORE_IPC_HANDSHAKE_FAILED"}else{"CORE_RPC_UNAVAILABLE"},false);
+    report["checks"][0]["durationMs"]=json!(elapsed_ms.min(30_000));
+    report["checks"][0]["transport"]=transport_failure(error,timeout);
+    report
+}
+
 fn shell_product(build:&Value)->Value {
     let commit=build["commit"].as_str().filter(|s|s.len()>=7&&s.len()<=64&&s.bytes().all(|b|b.is_ascii_hexdigit()));
     json!({"version":env!("CARGO_PKG_VERSION"),"shellVersion":env!("CARGO_PKG_VERSION"),"identitySource":"shell",
@@ -176,6 +236,9 @@ fn project_report(input:&Value, trigger:&str) -> Option<Value> {
         if code.is_null()||id.is_null()||!matches!(status,"PASS"|"DEGRADED"|"BLOCKED"|"NOT_RUN") {return None;}
         let mut projected=check(id.as_str()?,status,code.as_str()?,row["timedOut"]==true,row["durationMs"].as_u64().unwrap_or(0) as u128);
         if matches!(row["stage"].as_str(),Some("storage"|"core"|"extensions"|"transport")) {projected["stage"]=row["stage"].clone();}
+        if id=="shell.rpc" && status=="BLOCKED" {
+            if let Some(transport)=project_transport_failure(&row["transport"]) {projected["transport"]=transport;}
+        }
         // Core emits deterministic allowlisted copy. Do not copy messages from
         // unknown fields or serialized error objects; fixed code copy remains.
         rows.push(projected);
@@ -231,7 +294,7 @@ impl NativeDiagnostics {
             // Stable check results share one stored report; 30s health polls do
             // not churn the history or evict the original failure evidence.
             if let Some(current)=latest.as_ref().and_then(|v|v.as_ref()) {
-                let stable_checks=|r:&Value|r["checks"].as_array().map(|rows|rows.iter().map(|v|json!({"id":v["id"],"status":v["status"],"code":v["code"],"timedOut":v["timedOut"]})).collect::<Vec<_>>());
+                let stable_checks=|r:&Value|r["checks"].as_array().map(|rows|rows.iter().map(|v|json!({"id":v["id"],"status":v["status"],"code":v["code"],"timedOut":v["timedOut"],"transport":project_transport_failure(&v["transport"])})).collect::<Vec<_>>());
                 if report["trigger"]!="manual" && current["status"]==report["status"]
                     && stable_checks(&current)==stable_checks(&report) && current["product"]==report["product"]
                     && current["unconfirmedEffects"]==report["unconfirmedEffects"] {
@@ -264,6 +327,7 @@ impl NativeDiagnostics {
         }
         let started=std::time::Instant::now();
         let response=api.request_with_timeout(if manual{"ui.diagnostics.run"}else{"ui.diagnostics.status"},json!({}),Duration::from_secs(if manual{18}else{2}));
+        let elapsed_ms=started.elapsed().as_millis();
         if matches!(&response,Ok(value)if value.get("report")==Some(&Value::Null)) {
             return json!({"report":self.finish_for_generation(base_report("startup","STARTUP_CHECKS_PENDING",true),false,generation),"coreAvailable":true,"nativeGeneration":generation});
         }
@@ -271,20 +335,17 @@ impl NativeDiagnostics {
             Ok(value)=>match project_report(&value["report"],if manual{"manual"}else if value["report"]["trigger"]=="startup"{"startup"}else{"runtime"}) {
                 Some(report)=>(report,true),None=>(base_report("runtime","CORE_REPORT_INVALID",false),false)
             },
-            Err(error)=>{
-                let text=error.to_ascii_lowercase();
-                let timeout=text.contains("timed out")||text.contains("timeout");
-                let handshake=text.contains("protocol")||text.contains("version")||text.contains("ready event")||text.contains("invalid core ipc");
-                (base_report("runtime",if timeout{"CORE_RPC_TIMEOUT"}else if handshake{"CORE_IPC_HANDSHAKE_FAILED"}else{"CORE_RPC_UNAVAILABLE"},false),false)
-            }
+            Err(error)=>(rpc_failure_report(&error,elapsed_ms),false)
         };
         if available {
             let version_matches=report["product"]["version"].as_str()==Some(env!("CARGO_PKG_VERSION"));
             let checks=report["checks"].as_array_mut().expect("projected checks");
             checks.retain(|r|r["id"]!="shell.rpc"&&r["id"]!="shell.version");
-            checks.push(check("shell.rpc","PASS","CORE_RPC_VERIFIED",false,started.elapsed().as_millis()));
+            checks.push(check("shell.rpc","PASS","CORE_RPC_VERIFIED",false,elapsed_ms));
             checks.push(check("shell.version",if version_matches{"PASS"}else{"BLOCKED"},if version_matches{"CORE_VERSION_VERIFIED"}else{"CORE_VERSION_MISMATCH"},false,0));
             if !version_matches{report["status"]=json!("BLOCKED");}
+        } else {
+            report["checks"][0]["durationMs"]=json!(elapsed_ms.min(30_000));
         }
         let report=self.finish_for_generation(report,true,generation);
         json!({"report":report,"coreAvailable":available,"nativeGeneration":generation})
@@ -379,6 +440,70 @@ pub fn show_native_startup_failure(data_dir:&Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test] fn rpc_failure_keeps_elapsed_and_safe_transport_cause(){
+        let report=rpc_failure_report("connect to Core pipe: Core IPC request timed out: All pipe instances are busy. (os error 231)",2007);
+        assert_eq!(report["checks"][0]["durationMs"],2007);
+        assert_eq!(report["checks"][0]["code"],"CORE_RPC_TIMEOUT");
+        assert_eq!(report["checks"][0]["timedOut"],true);
+        assert_eq!(report["checks"][0]["transport"],json!({"stage":"connect","code":"PIPE_BUSY","osCode":231}));
+    }
+    #[test] fn projection_keeps_only_allowlisted_transport_details(){
+        let mut report=base_report("runtime","CORE_RPC_UNAVAILABLE",false);
+        report["checks"][0]["transport"]=json!({"stage":"read","code":"PIPE_CLOSED","osCode":109,
+            "message":"PRIVATE_TRANSPORT_CANARY C:/private token=secret"});
+        let safe=project_report(&report,"runtime").unwrap();
+        assert_eq!(safe["checks"][0]["transport"],json!({"stage":"read","code":"PIPE_CLOSED","osCode":109}));
+        assert!(!safe.to_string().contains("PRIVATE_TRANSPORT_CANARY"));
+    }
+    #[test] fn transport_evidence_distinguishes_phases_without_copying_errors(){
+        for (error,stage,code,os_code) in [
+            ("configure Core pipe: access refused (os error 5)","configure","ACCESS_DENIED",json!(5)),
+            ("read Core IPC ready event: peer closed (os error 109)","ready","PIPE_CLOSED",json!(109)),
+            ("write Core IPC request: Core pipe accepted no data","write","PIPE_WRITE_ZERO",Value::Null),
+            ("read Core IPC response: Core IPC request timed out","read","IPC_TIMEOUT",Value::Null),
+            ("invalid Core IPC response: PRIVATE_TRANSPORT_CANARY","validate","PROTOCOL_INVALID",Value::Null),
+            ("Core IPC PRIVATE_TRANSPORT_CANARY: C:/private token=secret (os error 5)","dispatch","CORE_REJECTED",Value::Null),
+            ("PRIVATE_TRANSPORT_CANARY (os error 5)","unknown","UNKNOWN_FAILURE",Value::Null),
+        ] {
+            let report=rpc_failure_report(error,48);
+            assert_eq!(report["checks"][0]["transport"],json!({"stage":stage,"code":code,"osCode":os_code}));
+            assert!(!report.to_string().contains("PRIVATE_TRANSPORT_CANARY"));
+            assert!(!report.to_string().contains("token=secret"));
+            assert_eq!(report["status"],"BLOCKED");
+        }
+        assert_eq!(rpc_failure_report("read Core IPC response: Core IPC request timed out",45_000)["checks"][0]["durationMs"],30_000);
+    }
+    #[test] fn untrusted_transport_fields_are_dropped_on_report_read(){
+        let mut report=base_report("runtime","CORE_RPC_UNAVAILABLE",false);
+        for transport in [
+            json!({"stage":"PRIVATE_TRANSPORT_CANARY","code":"IO_FAILED","osCode":5}),
+            json!({"stage":"read","code":"PRIVATE_TRANSPORT_CANARY","osCode":5}),
+        ] {
+            report["checks"][0]["transport"]=transport;
+            let projected=project_report(&report,"runtime").unwrap();
+            assert_eq!(projected["checks"][0]["transport"],Value::Null);
+            assert!(!projected.to_string().contains("PRIVATE_TRANSPORT_CANARY"));
+        }
+        for os_code in [json!(999999),json!("PRIVATE_TRANSPORT_CANARY"),json!(-5)] {
+            report["checks"][0]["transport"]=json!({"stage":"read","code":"IO_FAILED","osCode":os_code});
+            assert_eq!(project_report(&report,"runtime").unwrap()["checks"][0]["transport"]["osCode"],Value::Null);
+        }
+    }
+    #[test] fn changed_transport_failure_is_not_hidden_by_stable_health_codes(){
+        let root=std::env::temp_dir().join(format!("cetamesh-diagnostic-{}",new_id()));
+        let adapter=NativeDiagnostics::new(&root);
+        let mut report=base_report("runtime","CORE_RPC_UNAVAILABLE",false);
+        report["checks"][0]["transport"]=json!({"stage":"connect","code":"PIPE_BUSY","osCode":231});
+        let previous=adapter.finish(report.clone(),true);
+        report["checks"][0]["transport"]=json!({"stage":"read","code":"PIPE_CLOSED","osCode":109});
+        let updated=adapter.finish(report,true);
+        let mut same_failure=updated.clone();same_failure["checks"][0]["durationMs"]=json!(150);
+        let repeated=adapter.finish(same_failure,true);
+        fs::remove_dir_all(root).unwrap();
+        assert_ne!(previous["id"],updated["id"],"a distinct transport failure must retain its own evidence");
+        assert_eq!(updated["checks"][0]["transport"]["stage"],"read");
+        assert_eq!(repeated["id"],updated["id"],"elapsed variation alone must not churn stored reports");
+    }
     #[test] fn poisoned_disk_trigger_never_enters_display_or_export(){
         let mut report=base_report("startup","CORE_PROCESS_UNAVAILABLE",false);
         report["trigger"]=json!("PRIVATE_CHAT_TRIGGER_CANARY");

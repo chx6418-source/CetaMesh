@@ -1012,6 +1012,34 @@ function makeFullService({ withKey = true, fetchImpl, baseUrl = 'https://api.dee
 
 // ── 15. Smart 路由：project 产生 agent-intent（只记录不执行）；你好 → simple ───
 {
+  const health = { available: true, ready: true, reachable: true, compatible: true,
+    authenticated: true, sessionCapable: true, taskEligible: true };
+  const descriptor = { id: 'dsh', label: 'DSH', eventProtocol: 'dsh-session-events', workspaceBoundary: 'capability-broker' };
+  const service = createChatService({ defaults: {}, stateDir: path.join(stateDir, `task-tools-${++caseSeq}`),
+    agentProviders: [descriptor], agentExecute: async ({ method }) => {
+      assert.equal(method, 'agent.list', 'catalog observation must not dispatch a model');
+      return { providers: [{ ...descriptor, available: true, health }] };
+    } });
+  const ui = createDesktopUiService({ services: { chatService: service } });
+  const read = async () => (await ui.execute({ method: 'ui.chat.catalog', params: {} })).agentProviders[0];
+  const unverified = await read();
+  assert.equal(unverified.available, true, 'connection readiness remains visible');
+  assert.equal(unverified.taskEligible, false, 'task selector must agree with the dispatch guard on missing tool evidence');
+  assert.equal(unverified.reason, 'task-tools-unverified');
+  health.toolsAvailable = true;
+  assert.equal((await read()).taskEligible, true, 'verified tool capability can qualify the same provider');
+  health.toolsAvailable = false;
+  assert.equal((await read()).taskEligible, false, 'explicit tool refusal cannot use task-required as an escape');
+  health.toolsAvailable = true;
+  health.available = false;
+  const disconnected = await read();
+  assert.equal(disconnected.available, false);
+  assert.equal(disconnected.taskEligible, false, 'a stale catalog available flag cannot override current health');
+  service.close();
+  ok('Chat catalog uses task dispatch readiness without performing model execution');
+}
+
+{
   const f = sseFetch();
   const contextCalls = [];
   const { service } = makeFullService({

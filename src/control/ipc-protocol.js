@@ -57,6 +57,15 @@ export function startIpcProtocol({
   });
 
   const cleanup = () => {
+    // EOF settles the protocol queue before Node has necessarily flushed its
+    // response. Keep a terminal transport error sink until the streams close:
+    // a peer dropping a partial upload must not crash Core with a late EPIPE.
+    for (const stream of new Set([input, output])) {
+      if (stream.closed) continue;
+      const onLateError = () => {};
+      stream.on('error', onLateError);
+      stream.once('close', () => stream.off('error', onLateError));
+    }
     input.off('data', onData);
     input.off('end', onEnd);
     input.off('error', onInputError);

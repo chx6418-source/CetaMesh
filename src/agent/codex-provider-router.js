@@ -1,17 +1,29 @@
 import { AGENT_PROVIDER_METHODS, agentProviderError as fault } from './agent-provider.js';
 
+const MAX_CLOSED_BINDINGS = 256;
+
 /** Transport decisions come exclusively from trusted composition/session metadata. */
 export function createCodexProviderRouter({legacyProvider,appServerProvider,rolloutEnabled=false,resolveTransport} = {}) {
   if (!legacyProvider) throw new TypeError('Legacy Codex Provider required');
   const bindings = new Map();
+  const closedBindings = new Map();
   const creating = new Set();
   const defaultProvider = rolloutEnabled ? appServerProvider : legacyProvider;
   let closing = false, shutdownPromise;
+  function rememberClosed(id, binding) {
+    if (!binding) return;
+    bindings.delete(id);
+    closedBindings.set(id, binding);
+    if (closedBindings.size > MAX_CLOSED_BINDINGS) closedBindings.delete(closedBindings.keys().next().value);
+  }
   async function route(params) {
-    const id = params?.sessionId, binding = bindings.get(id);
+    const id = params?.sessionId, binding = bindings.get(id) ?? closedBindings.get(id);
     if (binding) {
       if ((params.taskId !== undefined && params.taskId !== binding.taskId)
         || (params.workspaceId !== undefined && params.workspaceId !== binding.workspaceId)) throw fault('TASK_WORKSPACE_MISMATCH','Codex session binding mismatch');
+      // Only this Core's observed close result proves a stale reference. Unknown
+      // identities after restart still need independent process/Workspace review.
+      if (closedBindings.has(id)) throw fault('SESSION_NOT_FOUND','Codex session was closed; create a fresh session');
       return binding.transport === 'exec' ? legacyProvider : appServerProvider;
     }
     const transport = await resolveTransport?.(id);
@@ -36,7 +48,8 @@ export function createCodexProviderRouter({legacyProvider,appServerProvider,roll
         await Promise.allSettled([...creating]);
         const results=await Promise.allSettled([...bindings].map(async([sessionId,binding])=>{
           const selected=binding.transport === 'exec' ? legacyProvider : appServerProvider;
-          await selected.closeSession({sessionId,taskId:binding.taskId,workspaceId:binding.workspaceId});
+          const result = await selected.closeSession({sessionId,taskId:binding.taskId,workspaceId:binding.workspaceId});
+          if (result?.closed === true) rememberClosed(sessionId, binding);
           bindings.delete(sessionId);
         }));
         for(const result of results) if(result.status === 'rejected') failures.push(result.reason);
@@ -54,7 +67,7 @@ export function createCodexProviderRouter({legacyProvider,appServerProvider,roll
       const selected = transport === 'exec' ? legacyProvider : appServerProvider;
       if (!selected) throw fault('PROVIDER_UNAVAILABLE','Codex App Server unavailable');
       const result = await selected.createSession(params);
-      if (!result?.sessionId || bindings.has(result.sessionId)) throw fault('SESSION_ID_COLLISION','Codex session identity collision');
+      if (!result?.sessionId || bindings.has(result.sessionId) || closedBindings.has(result.sessionId)) throw fault('SESSION_ID_COLLISION','Codex session identity collision');
       bindings.set(result.sessionId,{transport,taskId:params.taskId,workspaceId:params.workspaceId});
       return {...result,provider:'codex'};
       })();
@@ -69,7 +82,7 @@ export function createCodexProviderRouter({legacyProvider,appServerProvider,roll
     provider[method] = async params => {
       const selected = await route(params);
       const result = await selected[method](params);
-      if (method === 'closeSession') bindings.delete(params.sessionId);
+      if (method === 'closeSession' && result?.closed === true) rememberClosed(params.sessionId, bindings.get(params.sessionId));
       return result;
     };
   }

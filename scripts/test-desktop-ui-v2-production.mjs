@@ -438,8 +438,8 @@ check('Chat streaming is frame-batched and non-bottom reading exposes a latest-m
   assert.doesNotMatch(streamSubscription, /chatClient\.status/);
   assert.match(chat, /status\.agentActivity/);
   assert.match(messageBubble, /<ChatActivity[^>]*agentActivity=/);
-  assert.match(composer, /const needsScope = \['task-required', 'workspace-required'\]/);
-  assert.match(composer, /const disabled = !agent\.available \|\| \(!agent\.eligible && !needsScope\)/);
+  // Selector eligibility, blocked Enter/send and draft preservation run against
+  // production React in test-chat-composer-layout / test-chat-composer-panels-live.
   assert.match(composer, /availabilityReasonLabel\(agent\.reason\)/);
   assert.match(read('desktop-ui/src/app/AgentsPage.tsx'), /agents\.filter\(isAgentReady\)/);
   assert.match(chat, /hasNewMessages/);

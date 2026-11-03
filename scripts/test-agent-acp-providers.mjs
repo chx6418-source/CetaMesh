@@ -10,6 +10,7 @@ import { acpArgumentsFromHelp, createNativeAcpProfile, openCodeNativePolicy } fr
 import { createAcpAgentProvider } from '../src/agent/acp-agent-provider.js';
 import { createDefaultAgentService } from '../src/agent/service.js';
 import { createDesktopUiService } from '../src/desktop/ui-service.js';
+import { rankTaskAgents } from '../src/router/agent-assignment.js';
 import { createAgentInstallationDetector } from '../src/agent/installation-discovery.js';
 const missing = createAcpProviders({ runtimeResolver: () => null });
 assert.deepEqual(missing.map(p=>p.id), ['gemini','opencode','qwen']);
@@ -66,7 +67,10 @@ try {
  const ui=createDesktopUiService({services:{agentService:verifiedClaudeService}});
  const row=(await ui.execute({method:'ui.agent.list'})).agents.find(item=>item.id==='claude');
  assert.equal(row.available,true,'healthy explicitly verified runtime must survive absent Desktop/PATH metadata');
- assert.equal(row.installed,true);assert.equal(row.cliInstalled,false);assert.equal(row.taskEligible,true);assert.equal(row.status,'ready');
+ assert.equal(row.installed,true);assert.equal(row.cliInstalled,false);assert.equal(row.status,'ready');
+ assert.equal(row.taskEligible,false,'verified binary/runtime alone cannot invent authenticated session and tool evidence');
+ await assert.rejects(rankTaskAgents({agentBroker:verifiedClaudeService.broker,workspaceId:'fixture',explicitProvider:'claude'}),
+  error=>error.code==='PROVIDER_UNAVAILABLE','UI execution eligibility must agree with the actual assignment guard');
 } finally {verifiedClaudeService.close();}
 const uncertainService=createDefaultAgentService({acpOptions:{runtimeResolver:()=>null},codexExecutable:'missing-fixture-cli',zcodeOptions:{desktopDetected:false},installationStatus:async()=>{throw Error('fixture access denied');}});
 try {

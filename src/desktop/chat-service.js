@@ -1,5 +1,6 @@
 import {projectChatContext} from './chat-telemetry.js';
 import { explicitDelegationTarget } from './explicit-delegation.js';
+import { canDispatchTaskAgent, taskAgentUnavailableReason } from '../agent/execution-security.js';
 import { aggregateModelUsage, normalizeModelUsage } from '../model/usage.js';
 // CetaMesh Desktop 产品级 Chat 运行时（阶段 03；会话 1 改造为双通道）。
 //
@@ -807,14 +808,18 @@ export function createChatService({
         : typeof entry.available === 'boolean' ? entry.available : null;
       const requiresTask = agentRequiresTask(live) || agentRequiresTask(entry);
       const boundaryUnverified = workspaceBoundary === 'unverified';
+      const observedHealth = { ...entry, ...live, ...health, available: available === true && health?.available !== false };
+      const execution = { provider: entry.id, security: live.security ?? entry.security, explicitProvider: true };
+      const taskEligible = requiresTask && canDispatchTaskAgent(observedHealth, execution);
       const reason = live.reason ?? (discoveryFailed ? agentDiscoveryError.code : null)
-        ?? entry.reason ?? (boundaryUnverified ? 'descriptor-incomplete' : requiresTask ? 'task-required' : null);
+        ?? entry.reason ?? (boundaryUnverified ? 'descriptor-incomplete' : requiresTask
+          ? taskEligible ? 'task-required' : taskAgentUnavailableReason(observedHealth, execution) : null);
       return {
         ...entry, ...live, id: entry.id,
         label: live.label ?? entry.label ?? live.displayName ?? entry.displayName ?? entry.id,
         displayName: live.displayName ?? entry.displayName ?? live.label ?? entry.label ?? entry.id,
         eventProtocol: entry.eventProtocol,
-        available, ...(requiresTask ? {requiresTask:true} : {}), eligible: available === true && !requiresTask && !boundaryUnverified,
+        available, ...(requiresTask ? {requiresTask:true, taskEligible} : {}), eligible: available === true && !requiresTask && !boundaryUnverified,
         version: live.version ?? entry.version ?? null,
         reason,
         workspaceBoundary,

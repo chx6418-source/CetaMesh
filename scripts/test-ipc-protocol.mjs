@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { PassThrough } from 'node:stream';
+import { PassThrough, Duplex } from 'node:stream';
 import { executeDataCall } from '../src/control/data-ipc.js';
 import {
   startIpcProtocol,
@@ -191,6 +191,20 @@ function request(id, method, params) {
   await harness.ipc.done;
 }
 assert.equal(IPC_PROTOCOL_MAX_FRAME_BYTES, 1024 * 1024);
+{
+  // A client can close after a partial upload while the ready/error response is
+  // still buffered. Its asynchronous write error must not escape into the Core.
+  const socket = new Duplex({
+    read() { this.push(Buffer.from([10, 0, 0, 0, 123])); this.push(null); },
+    write(_chunk, _encoding, callback) {
+      setImmediate(() => callback(Object.assign(new Error('fixture disconnected peer'), { code: 'EPIPE' })));
+    }
+  });
+  const connection = startIpcProtocol({ input: socket, output: socket, dispatch: async () => null });
+  await connection.done.catch(() => {});
+  await new Promise(resolve => socket.once('close', resolve));
+  assert.equal(socket.listenerCount('error'), 0, 'transport handlers are released after stream close');
+}
 {
   const response = await Promise.race([executeDataCall({ method: 'POST', path: '/api/fixture', body: { value: 42 } }, {
     handleApiRequest: async (req, res) => {

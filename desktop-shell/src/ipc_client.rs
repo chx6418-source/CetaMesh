@@ -1,7 +1,7 @@
 //! Synchronous client for the private Core named-pipe protocol.
 //!
 //! `IpcClient` is intended to be called from a worker thread (the native UI does that); every
-//! connect, write, handshake, and response read is bounded by a single ten-second deadline.
+//! connect, write, handshake, and response read is bounded by a single request deadline.
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
@@ -15,6 +15,9 @@ use crate::native_ui::CoreApi;
 
 const PROTOCOL_VERSION: u64 = 1;
 const MAX_FRAME_BYTES: usize = 1024 * 1024;
+// The Core frame limit is not the OS pipe's write capacity. In PIPE_NOWAIT
+// mode a message pipe cannot accept a write larger than its available buffer.
+const WRITE_CHUNK_BYTES: usize = 16 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const CONNECT_RETRY_DELAY: Duration = Duration::from_millis(40);
 const IO_RETRY_DELAY: Duration = Duration::from_millis(4);
@@ -114,7 +117,9 @@ fn connect_until(pipe_name: &str, deadline: Instant) -> Result<File, String> {
                 let _ = error;
                 sleep_until(deadline, CONNECT_RETRY_DELAY);
             }
-            Err(error) => return Err(format!("connect to Core pipe: {error}")),
+            Err(error) => {
+                return Err(format!("connect to Core pipe: Core IPC request timed out: {error}"));
+            }
         }
     }
 }
@@ -176,13 +181,12 @@ fn write_all_until(pipe: &mut File, input: &[u8], deadline: Instant) -> std::io:
         if Instant::now() >= deadline {
             return Err(timeout_error());
         }
-        match pipe.write(&input[offset..]) {
-            Ok(0) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::WriteZero,
-                    "Core pipe accepted no data",
-                ));
-            }
+        let end = input.len().min(offset + WRITE_CHUNK_BYTES);
+        match pipe.write(&input[offset..end]) {
+            // PIPE_NOWAIT reports zero bytes while the peer's buffer is full.
+            // Keep the original frame and offset: only its unwritten suffix may
+            // be retried, within the same deadline, never the logical request.
+            Ok(0) => sleep_until(deadline, IO_RETRY_DELAY),
             Ok(count) => offset += count,
             Err(error) if is_pipe_would_block(&error) => sleep_until(deadline, IO_RETRY_DELAY),
             Err(error) => return Err(error),
@@ -328,6 +332,93 @@ fn validate_response(value: &Value, expected_id: &str) -> Result<Value, String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    struct PipePeer(std::process::Child);
+
+    #[cfg(windows)]
+    impl Drop for PipePeer {
+        fn drop(&mut self) {
+            // Only the fixture process owned by this test is terminated.
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[cfg(windows)]
+    fn backpressured_peer(resume_after_ms: u64) -> (PipePeer, String) {
+        use std::os::windows::process::CommandExt;
+        use std::process::{Command, Stdio};
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let pipe = format!(r"\\.\pipe\CetaMesh-Write-Test-{}-{nonce}", std::process::id());
+        let protocol = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../src/control/ipc-protocol.js").canonicalize().unwrap();
+        let script = r#"
+          const net = require('node:net');
+          const { pathToFileURL } = require('node:url');
+          (async () => {
+            const { startIpcProtocol } = await import(pathToFileURL(process.argv[2]));
+            let dispatches = 0;
+            net.createServer(socket => {
+              const connection = startIpcProtocol({ input: socket, output: socket,
+                dispatch: async ({ params }) => ({ text: params.text, dispatches: ++dispatches }) });
+              connection.done.catch(() => {});
+              socket.pause();
+              setTimeout(() => socket.resume(), Number(process.argv[3]));
+            }).listen(process.argv[1]);
+          })().catch(() => process.exit(1));
+        "#;
+        let child = Command::new("node")
+            .args(["-e", script, &pipe, protocol.to_str().unwrap(), &resume_after_ms.to_string()])
+            .creation_flags(0x0800_0000)
+            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+            .spawn().expect("Node is a Desktop test dependency");
+        (PipePeer(child), pipe)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn real_named_pipe_upload_survives_backpressure_without_replaying_request() {
+        let (_peer, pipe) = backpressured_peer(150);
+        // Base64 attachment chunks exceed the named pipe's buffer. Verify both
+        // directions through the real Core framing implementation, byte for byte.
+        let text = "附件-upload-".repeat(24_000);
+        let result = request_pipe(&pipe, "ui.test.echo", json!({ "text": text }), Duration::from_secs(5))
+            .expect("a temporarily full pipe must not reject an attachment");
+        assert_eq!(result["text"], text);
+        assert_eq!(result["dispatches"], 1);
+        let ping = request_pipe(&pipe, "core.ping", json!({}), Duration::from_secs(2)).unwrap();
+        assert_eq!(ping["status"], "pong");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn real_named_pipe_stalled_upload_obeys_the_original_deadline() {
+        let (_peer, pipe) = backpressured_peer(10_000);
+        // Wait for fixture readiness separately so process startup cannot spend
+        // the short write deadline or turn this into a connect timeout test.
+        let mut connection = connect_until(&pipe, Instant::now() + Duration::from_secs(5)).unwrap();
+        set_pipe_nonblocking(&connection).unwrap();
+        read_frame_until(&mut connection, Instant::now() + Duration::from_secs(2)).unwrap();
+        let started = Instant::now();
+        let error = write_frame_until(&mut connection, &json!({ "text": "x".repeat(512_000) }),
+            started + Duration::from_millis(120)).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn unavailable_named_pipe_reports_exhausted_connect_deadline() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let pipe = format!(r"\\.\pipe\CetaMesh-Absent-Test-{}-{nonce}", std::process::id());
+        let started = Instant::now();
+        let error = connect_until(&pipe, started + Duration::from_millis(120)).unwrap_err();
+        assert!(error.contains("timed out"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
 
     #[test]
     fn frame_round_trip_uses_little_endian_and_utf8_json() {

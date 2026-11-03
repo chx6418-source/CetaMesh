@@ -104,7 +104,12 @@ export function createWorkspaceReconciler({
     let proof = null;
     if (contentProof) {
       try { proof = await contentProof(entry.root, {relevantFiles}); }
-      catch { observationErrors.push('WORKSPACE_CONTENT_UNVERIFIED'); }
+      catch (error) {
+        observationErrors.push('WORKSPACE_CONTENT_UNVERIFIED');
+        // Only this fixed local code crosses the observation boundary. No raw
+        // error, file path or repository metadata becomes product feedback.
+        if (error?.reasonCode === 'WORKSPACE_CONTENT_NESTED_REPOSITORY') observationErrors.push(error.reasonCode);
+      }
     }
     return {
       available: observationErrors.length === 0,

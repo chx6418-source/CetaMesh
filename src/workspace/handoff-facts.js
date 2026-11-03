@@ -8,7 +8,8 @@ const MAX_FILES = 25000;
 const MAX_BYTES = 64 * 1024 * 1024;
 const protectedPath = value => value.split(/[\\/]/).some(part =>
   /^(?:\.git|\.ssh|\.aws|\.env(?:\..*)?|credentials(?:\..*)?|secrets?(?:\..*)?|id_rsa|id_ed25519)$/i.test(part));
-const fail = () => { throw Object.assign(new Error('Workspace content proof is unavailable'), {code:'WORKSPACE_UNVERIFIED'}); };
+const fail = reasonCode => { throw Object.assign(new Error('Workspace content proof is unavailable'), {code:'WORKSPACE_UNVERIFIED',
+  ...(reasonCode ? {reasonCode} : {})}); };
 
 // Core-only observation. The packet receives one digest, with no file contents or per-file hashes.
 export async function workspaceContentProof(root, {relevantFiles = []} = {}) {
@@ -44,6 +45,9 @@ export async function workspaceContentProof(root, {relevantFiles = []} = {}) {
       observed.push([resolved.real,null]);
       continue;
     }
+    // `git ls-files --others` can return an independent nested repository as a
+    // directory. It is outside a regular-file proof; never silently omit it.
+    if (stat.isDirectory() && fs.existsSync(path.join(resolved.real, '.git'))) fail('WORKSPACE_CONTENT_NESTED_REPOSITORY');
     if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 10 * 1024 * 1024 || (bytes += stat.size) > MAX_BYTES) fail();
     const file = readFile(root,name,{maxBytes:Math.max(stat.size,1)});
     if (!file.expectedHash || file.truncated) fail();

@@ -230,10 +230,20 @@ function makeReconciler({ entries = {} } = {}) {
 }
 
 // Production Continuity must reject unverifiable handoff BEFORE changing ownership.
-for (const scenario of ['plain', 'missing', 'stale-supplied-facts', 'missing-file']) {
+for (const scenario of ['plain', 'missing', 'stale-supplied-facts', 'missing-file', 'nested-repository']) {
   const dir = fs.mkdtempSync(path.join(temp, 'preflight-'));
   const plainDir = fs.mkdtempSync(path.join(temp, 'preflight-workspace-'));
-  const repo = scenario === 'missing-file' ? makeRealRepo() : null;
+  const repo = ['missing-file', 'nested-repository'].includes(scenario) ? makeRealRepo() : null;
+  if (scenario === 'nested-repository') {
+    const nested = path.join(repo.dir, '.worktrees', 'nested-project');
+    fs.mkdirSync(nested, { recursive: true });
+    runGit(nested, ['init', '-b', 'main']);
+    runGit(nested, ['config', 'user.email', 'fixture@example.com']);
+    runGit(nested, ['config', 'user.name', 'Fixture']);
+    fs.writeFileSync(path.join(nested, 'nested.txt'), 'Independent execution scope\n');
+    runGit(nested, ['add', 'nested.txt']);
+    runGit(nested, ['commit', '-m', 'nested fixture']);
+  }
   const taskRuntime = createTaskRuntime({ stateDir: dir });
   const task = taskRuntime.create({ goal: 'Inspect only', workspaceId: 'ws-preflight' });
   taskRuntime.attachAgent({ id: task.id, expectedRev: task.rev, provider: 'preflight', sessionId: 'old-session' });
@@ -254,7 +264,15 @@ for (const scenario of ['plain', 'missing', 'stale-supplied-facts', 'missing-fil
   const service = createContinuityService({taskRuntime, stateDir: dir, agentBroker: createAgentBroker({registry}), reconciler: makeReconciler({entries}), prepareHandoff: async () => { calls.push('prepare'); }});
   const supplied = scenario === 'stale-supplied-facts' ? {available: true, workspaceId: 'ws-preflight', git: {isRepo: true, branch: 'main', headSha: 'a'.repeat(40), dirty: false, diffSummary: null}, files: []} : undefined;
   await assert.rejects(service.runtime.rollover({taskId: task.id, workspaceFacts: supplied,
-    relevantFiles: scenario === 'missing-file' ? ['absent.txt'] : []}), error => ['WORKSPACE_CHANGED', 'WORKSPACE_UNVERIFIED'].includes(error.code));
+    relevantFiles: scenario === 'missing-file' ? ['absent.txt'] : []}), error => {
+    assert.ok(['WORKSPACE_CHANGED', 'WORKSPACE_UNVERIFIED'].includes(error.code));
+    assert.doesNotMatch(error.message, /尚未停止/, 'preflight rejection must not claim an idle Agent is running');
+    assert.match(error.message, /绑定保持不变/, 'the source assignment is preserved before handoff starts');
+    if (scenario === 'nested-repository') assert.match(error.message, /嵌套.*仓库.*工作树/, 'identify the actual content-proof restriction');
+    if (scenario === 'missing') assert.match(error.message, /工作区.*不可用/, 'missing workspace has a distinct recovery direction');
+    if (scenario === 'missing-file') assert.match(error.message, /相关文件.*不存在/, 'missing checkpoint files are not generic Git failures');
+    return true;
+  });
   assert.deepEqual(calls, [], scenario + ': do not create, bootstrap, cancel or close an Agent before preflight passes');
   assert.deepEqual(taskRuntime.get({id: task.id}).task, before, scenario + ': retain Task revision, checkpoint and old execution owner');
   assert.equal(service.runtime.isInFlight(task.id), false);

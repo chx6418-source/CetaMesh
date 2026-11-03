@@ -101,6 +101,22 @@ function setup({ policy, gate, failSendProvider, alphaStatusError, reconciler, b
   return { service, runtime: service.runtime, broker, taskRuntime, log, rev, dir };
 }
 
+{
+  const { runtime, taskRuntime, rev, log } = setup({ alphaStatusError: 'SESSION_TRANSPORT_UNKNOWN' });
+  const task = taskRuntime.create({ goal: 'Preserve unknown native transport', workspaceId: 'unknown-transport' });
+  taskRuntime.attachAgent({ id: task.id, expectedRev: rev(task.id), provider: 'alpha', sessionId: 'lost-session' });
+  const before = taskRuntime.get({ id: task.id }).task;
+  await assert.rejects(runtime.rollover({ taskId: task.id, targetProvider: 'beta' }), error => {
+    assert.equal(error.code, 'SESSION_TRANSPORT_UNKNOWN');
+    assert.match(error.message, /旧会话.*无法确认/);
+    assert.match(error.message, /工作区/);
+    return true;
+  });
+  assert.deepEqual(taskRuntime.get({ id: task.id }).task, before, 'unknown transport cannot detach or claim a stopped source');
+  assert.deepEqual(log, [], 'unknown transport must not create, send, cancel or close');
+  ok('unknown transport has actionable feedback without transferring authority');
+}
+
 // ── 4a. Core restart: only SESSION_NOT_FOUND triggers a safe fresh-session handoff ──
 {
   const {runtime,taskRuntime,rev,log,dir}=setup({policy:{maxAutomaticNoProgress:1,maxAutomaticSwitches:2}});

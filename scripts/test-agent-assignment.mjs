@@ -50,6 +50,16 @@ await assert.rejects(rankTaskAgents({ ...request, explicitProvider: 'unknown' })
 assert.deepEqual((await rankTaskAgents({ ...request, maxCost: { amount: 3, currency: 'USD' } })).map(row => row.provider), ['paid'], 'revoked candidate cannot be ranked');
 console.log('Agent assignment: explicit/disabled, health, ability, cost and latency guards passed');
 
+const dshHealth = { available: true, ready: true, reachable: true, compatible: true,
+  authenticated: true, sessionCapable: true, taskEligible: true };
+const dshBroker = { ids: () => ['dsh'], capabilities: () => ({ workspaceBoundary: 'capability-broker' }),
+  health: async () => dshHealth };
+await assert.rejects(rankTaskAgents({ agentBroker: dshBroker, workspaceId, explicitProvider: 'dsh' }),
+  error => error.code === 'PROVIDER_UNAVAILABLE' && /工具能力.*验证/.test(error.message),
+  'session/preset readiness without tool evidence must refuse with an actionable reason');
+dshHealth.toolsAvailable = true;
+assert.equal((await rankTaskAgents({ agentBroker: dshBroker, workspaceId, explicitProvider: 'dsh' }))[0]?.provider, 'dsh');
+
 const nativeDispatchSecurity={mode:'native-permissions',verified:true,nativeSandboxSupported:false,strictIsolationVerified:false,
  nativeApprovalSupported:true,nativePermissionPolicyVerified:true,allToolsRequireApproval:true,nativeSandboxMode:'none'};
 const nativeHealth={available:true,installed:true,compatible:true,taskEligible:true,sessionCapable:true,authenticated:null,

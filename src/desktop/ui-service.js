@@ -3,6 +3,7 @@ import { explicitDelegationTarget } from './explicit-delegation.js';
 import {SIMULATION_UI_METHODS} from '../simulation/ui-methods.js';
 import {OWNER_ACTOR} from '../capability/types.js';
 import { isSafeAgentDispatchPreflight } from '../capability/service.js';
+import { canDispatchTaskAgent, taskAgentUnavailableReason } from '../agent/execution-security.js';
 import { normalizeModelUsage } from '../model/usage.js';
 import crypto from 'node:crypto';
 import {isControlledL2Write,l2Resources} from '../capability/l2-grants.js';
@@ -375,10 +376,10 @@ function projectAgent(value) {
   const row = record(value);
   const health = { ...row, ...record(row.health) };
   const desktop = record(row.desktopApp);
-  const reason = string(health.reason ?? row.reason, 160);
+  const reportedReason = string(health.reason ?? row.reason, 160);
   const lastError = string(row.lastError ?? health.lastError ?? health.message, 500) || null;
   const healthStatus = string(health.status, 50).toLowerCase();
-  const readiness = `${reason} ${healthStatus} ${string(row.status, 50)}`;
+  const readiness = `${reportedReason} ${healthStatus} ${string(row.status, 50)}`;
   const id = string(row.id ?? row.provider, 80);
   const installed = typeof health.installed === 'boolean' ? health.installed
     : typeof row.installed === 'boolean' ? row.installed
@@ -394,6 +395,10 @@ function projectAgent(value) {
   const workspaceBoundary = string(row.workspaceBoundary ?? health.workspaceBoundary, 80) || null;
   const requiresTask = ['capability-broker', 'staged-capability-broker', 'native-staged'].includes(workspaceBoundary);
   const boundaryUnverified = workspaceBoundary === 'unverified';
+  const execution = { provider: id, security: row.security ?? health.security ?? record(row.capabilities).security, explicitProvider: true };
+  const taskEligible = available === null ? null : available && requiresTask && canDispatchTaskAgent(health, execution);
+  const reason = requiresTask && taskEligible === false && (!reportedReason || ['task-required', 'workspace-required'].includes(reportedReason))
+    ? taskAgentUnavailableReason(health, execution) : reportedReason;
   const connectionPending = ['claude', 'gemini', 'opencode', 'qwen'].includes(id) && desktop.installed === true && available === false;
   const status = connectionPending ? 'connection-pending' : installed === false ? 'not-installed'
     : compatible === false || (id === 'codex' && health.sandboxCapable === false) ? 'not-supported'
@@ -410,9 +415,7 @@ function projectAgent(value) {
     role: id === 'codex' ? '代码与项目' : id === 'dsh' ? '通用研究与协作' : '开发辅助',
     description: id === 'codex' ? '理解项目、修改代码并检查结果。' : id === 'dsh' ? '处理资料、规划和跨工具工作流。' : '在可用时连接本地开发能力。',
     available, installed, cliInstalled: typeof row.cliInstalled === 'boolean' ? row.cliInstalled : null, authenticated, compatible, eligible: available === null ? null : available && !requiresTask && !boundaryUnverified,
-    taskEligible: available === false ? false : available === null || (id === 'dsh' && typeof health.taskEligible !== 'boolean') ? null : available && installed !== false && authenticated !== false && requiresTask
-      && health.taskEligible !== false && health.sessionCapable !== false && (id !== 'codex' || health.sandboxCapable !== false)
-      && (id !== 'dsh' || health.taskEligible === true),
+    taskEligible,
     configured: typeof health.configured === 'boolean' ? health.configured : null,
     authConfigured: typeof health.authConfigured === 'boolean' ? health.authConfigured : null,
     authVerified: typeof health.authVerified === 'boolean' ? health.authVerified : null,

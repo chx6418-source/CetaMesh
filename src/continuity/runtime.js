@@ -60,6 +60,24 @@ function assertHandoffIdle(status) {
   }
 }
 
+function workspacePreflightMessage(preflight, facts, onlyMissingGit) {
+  const observed = new Set(facts?.observationErrors ?? []);
+  const discrepancies = new Set((preflight.discrepancies ?? []).map(item => item.kind));
+  let reason;
+  if (onlyMissingGit) reason = '非 Git 工作区无法自动核验交接，请先核对文件和先前操作';
+  else if (facts?.reason === 'workspace-not-found') reason = '任务工作区已不可用，请检查项目文件夹和工作区登记状态';
+  else if (observed.has('WORKSPACE_CONTENT_NESTED_REPOSITORY')) reason = '工作区包含嵌套 Git 仓库或工作树，当前无法核验其内容范围；请先核对这些目录的归属与先前操作，不能直接重试交接';
+  else if (observed.has('GIT_STATUS_OBSERVATION_FAILED')) reason = '无法读取 Git 工作区状态，请检查仓库和文件访问权限';
+  else if (observed.has('GIT_HEAD_OBSERVATION_FAILED')) reason = '无法读取 Git HEAD，请检查仓库状态和 Git 可用性';
+  else if (observed.has('GIT_DIFF_OBSERVATION_FAILED')) reason = '无法读取 Git 差异，请检查仓库状态和 Git 可用性';
+  else if (observed.has('FILE_OBSERVATION_FAILED')) reason = '无法读取交接相关文件，请检查文件访问权限';
+  else if (observed.has('WORKSPACE_CONTENT_UNVERIFIED')) reason = '工作区文件或 Git 索引的内容摘要无法核验，请检查文件类型、访问权限与并发修改';
+  else if (discrepancies.has('missing-file')) reason = '交接记录中的相关文件已不存在，请先核对任务文件和先前操作';
+  else if (preflight.consistent === false) reason = '工作区与交接记录不一致，请先核对分支、提交和文件修改';
+  else reason = '工作区交接证据不完整，请先核对项目和先前操作';
+  return `${reason}。未切换执行者，原任务绑定保持不变。`;
+}
+
 function loadContinuityFile(file, fallback) {
   try {
     return readJsonFile(file, { missing: fallback });
@@ -579,6 +597,8 @@ export function createContinuityRuntime({
       try {
         status = await agentBroker.status(previousAgent);
       } catch (error) {
+        if (error?.code === 'SESSION_TRANSPORT_UNKNOWN') throw continuityError(error.code,
+          '旧会话的执行连接无法确认，当前不能转交。请在任务详情查看恢复证据，并核对旧执行者进程和工作区的实际结果；确认状态前不会启动新执行。');
         if (error?.code !== 'SESSION_NOT_FOUND') throw error;
         // Core restart can leave a durable Task pointing at a Provider's lost
         // in-memory session. Treat only that precise stale-reference result as
@@ -639,9 +659,7 @@ export function createContinuityRuntime({
           const onlyMissingGit = preflight.discrepancies?.length > 0
             && preflight.discrepancies.every(item => item.kind === 'no-git-repo');
           throw continuityError(preflight.consistent === null || onlyMissingGit ? 'WORKSPACE_UNVERIFIED' : 'WORKSPACE_CHANGED',
-            onlyMissingGit
-              ? '非 Git 工作区无法自动核验交接；原执行者尚未停止，请先核对文件和先前操作。'
-              : '工作区交接预检未通过；原执行者尚未停止，请核对工作区后重试。');
+            workspacePreflightMessage(preflight, currentFacts, onlyMissingGit));
         }
       }
       if (typeof prepareHandoff === 'function') await prepareHandoff({ taskId: task.id });

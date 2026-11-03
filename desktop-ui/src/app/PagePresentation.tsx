@@ -4,7 +4,12 @@ import { Button } from '../components/primitives/inputs';
 import { Badge } from '../components/primitives/surfaces';
 import { DiagnosticsEntry, FeedbackDeveloperButton } from './StartupDiagnostics';
 
-export const messageOf = (error: unknown) => error instanceof Error ? error.message : '操作暂时无法完成，请稍后重试。';
+export const messageOf = (error: unknown) => {
+  if (error && typeof error === 'object' && 'code' in error && error.code === 'SESSION_TRANSPORT_UNKNOWN') {
+    return '旧会话的执行连接无法确认，当前无法继续或转交。请在任务详情查看恢复证据，并核对旧执行者进程和工作区的实际结果；确认状态前不会启动新执行。';
+  }
+  return error instanceof Error ? error.message : '操作暂时无法完成，请稍后重试。';
+};
 
 export function ErrorNotice({ error, onRetry }: { error: string; onRetry?: () => void }) {
   return <div className="harbor-error" role="alert"><Icon name="help" size={17} /><span>{error}</span>{onRetry && <Button compact variant="ghost" onClick={onRetry}>重试</Button>}<DiagnosticsEntry label="诊断"/><FeedbackDeveloperButton/></div>;
@@ -69,6 +74,7 @@ export function availabilityReasonLabel(reason: string | null) {
     'not-installed': '未安装', 'needs-setup': '需要配置', stopped: '已停止', 'start-timeout': '等待网关就绪',
     'provider-unavailable': '服务未连接', 'server-stopped': '已停止', 'task-required': '创建任务后使用',
     'workspace-required': '需要工作区', 'scope-unavailable': '需要工作区', 'descriptor-incomplete': '能力描述不完整',
+    'task-tools-unverified': '任务工具能力尚未验证', 'task-execution-unverified': '任务执行条件尚未验证',
     'not-supported': '暂不支持', 'not-checked': '尚未检查', unavailable: '服务未连接'
   };
   return labels[reason] ?? labels[reason.trim().toLowerCase()] ?? '当前能力尚未验证，请检查连接与配置';
