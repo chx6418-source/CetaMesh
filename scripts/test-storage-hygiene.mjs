@@ -177,6 +177,42 @@ try {
   assert.equal(transientFailures, 2, 'transient Windows file locks are retried');
   assert.equal(fs.existsSync(retrySandbox.root), false, 'retry cleanup leaves no markerless partial sandbox');
 
+  for (const location of ['nested', 'root', 'late-junction', 'persistent-root']) {
+    const lateSandbox = createSuiteSandbox({ suiteId: 'late-cleanup-' + location, tempRoot: sandboxRoot });
+    const target = location === 'nested' ? path.join(lateSandbox.root, 'profile', 'Default') : lateSandbox.root;
+    fs.mkdirSync(target, { recursive: true });
+    const originalMarker = JSON.parse(fs.readFileSync(lateSandbox.markerPath, 'utf8'));
+    const originalRmdirSync = fs.rmdirSync;
+    let removals = 0;
+    fs.rmdirSync = function rmdirAfterLateWrite(directory, ...args) {
+      if (path.resolve(directory) === path.resolve(target)) {
+        removals++;
+        if (removals === 1 || location === 'persistent-root') {
+          if (location === 'late-junction') fs.symlinkSync(protectedTarget, path.join(target, 'late-link'), 'junction');
+          else fs.writeFileSync(path.join(target, 'late-browser-output'), 'synthetic late profile write');
+        }
+      }
+      return originalRmdirSync.call(fs, directory, ...args);
+    };
+    try {
+      if (location === 'persistent-root') {
+        assert.throws(() => finalizeSuiteSandbox({ sandbox: lateSandbox, failed: false }), { code: 'ENOTEMPTY' },
+          'persistent writers must remain a cleanup failure, never a successful result');
+        assert.equal(removals, 6, 'directory re-enumeration has a finite retry budget');
+        assert.deepEqual(JSON.parse(fs.readFileSync(lateSandbox.markerPath, 'utf8')), originalMarker,
+          'exhausted root removal keeps the exact ownership marker');
+        assert.equal(fs.existsSync(path.join(target, 'late-browser-output')), true);
+      } else {
+        finalizeSuiteSandbox({ sandbox: lateSandbox, failed: false });
+        assert.equal(removals, 2, 'late entries are re-enumerated before the next directory removal');
+        assert.equal(fs.existsSync(lateSandbox.root), false);
+      }
+      assert.equal(fs.readFileSync(path.join(protectedTarget, 'keep.txt'), 'utf8'), 'outside target',
+        'a junction appearing between attempts must never expose its target to recursive cleanup');
+    } finally { fs.rmdirSync = originalRmdirSync; }
+    if (fs.existsSync(lateSandbox.root)) finalizeSuiteSandbox({ sandbox: lateSandbox, failed: false });
+  }
+
   const stagingRoot = path.join(rootDir, 'artifacts', '.staging');
   const outsideStaging = path.join(tempRoot, 'outside-staging');
   fs.mkdirSync(outsideStaging, { recursive: true });

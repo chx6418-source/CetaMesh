@@ -43,9 +43,11 @@ function assertOwnedSandbox(sandbox) {
   return { resolved, markerPath: path.join(resolved, MARKER) };
 }
 
-function retryFilesystemOperation(operation) {
+function retryFilesystemOperation(operation, prepare = null) {
   const retryableCodes = new Set(['EACCES', 'EBUSY', 'ENOTEMPTY', 'EPERM']);
   for (let attempt = 0; attempt < 6; attempt += 1) {
+    // A failed child cleanup must propagate, not multiply retries at each ancestor.
+    prepare?.();
     try {
       return operation();
     } catch (error) {
@@ -57,7 +59,7 @@ function retryFilesystemOperation(operation) {
   }
 }
 
-function removeOwnedTree(target, { markerLast = false } = {}) {
+function removeOwnedTree(target, { markerLast = false, ownedRoot = null } = {}) {
   let stat;
   try {
     stat = fs.lstatSync(target);
@@ -65,26 +67,63 @@ function removeOwnedTree(target, { markerLast = false } = {}) {
     if (error?.code === 'ENOENT') return;
     throw error;
   }
+  const owned = ownedRoot ?? { path: target, dev: stat.dev, ino: stat.ino };
+  const assertSameRoot = () => {
+    const current = fs.lstatSync(owned.path);
+    if (!current.isDirectory() || current.isSymbolicLink() || current.dev !== owned.dev || current.ino !== owned.ino) {
+      throw new Error('test sandbox ownership changed during cleanup');
+    }
+  };
+  assertSameRoot();
   if (stat.isSymbolicLink()) {
     // Remove only the link entry; recursive fs.rm does not traverse its target.
-    retryFilesystemOperation(() => fs.rmSync(target, { recursive: true, force: false, maxRetries: 5, retryDelay: 100 }));
+    retryFilesystemOperation(() => fs.rmSync(target, { recursive: true, force: false, maxRetries: 5, retryDelay: 100 }), assertSameRoot);
     return;
   }
   if (!stat.isDirectory()) {
-    retryFilesystemOperation(() => fs.unlinkSync(target));
+    retryFilesystemOperation(() => fs.unlinkSync(target), assertSameRoot);
     return;
   }
-  const deferredMarkers = [];
-  for (const entry of fs.readdirSync(target, { withFileTypes: true })) {
-    if (markerLast && entry.name === MARKER) {
-      deferredMarkers.push(path.join(target, entry.name));
-      continue;
+  let marker = null;
+  retryFilesystemOperation(() => {
+    // Only the final root removal may temporarily remove its ownership evidence.
+    // Put it back on failure before retrying or leaving diagnostics for the caller.
+    try { fs.rmdirSync(target); }
+    catch (error) {
+      if (marker && error?.code !== 'ENOENT') {
+        assertSameRoot();
+        try { fs.writeFileSync(marker.path, marker.bytes, { flag: 'wx' }); }
+        catch (restoreError) {
+          if (restoreError?.code !== 'EEXIST') throw restoreError;
+          const current = fs.lstatSync(marker.path);
+          if (!current.isFile() || current.isSymbolicLink() || !fs.readFileSync(marker.path).equals(marker.bytes)) {
+            throw new Error('test sandbox marker changed during cleanup');
+          }
+        }
+      }
+      throw error;
     }
-    removeOwnedTree(path.join(target, entry.name));
-  }
-  // Preserve ownership evidence if any child cannot be removed.
-  for (const markerPath of deferredMarkers) removeOwnedTree(markerPath);
-  retryFilesystemOperation(() => fs.rmdirSync(target));
+  }, () => {
+    assertSameRoot();
+    const current = fs.lstatSync(target);
+    if (!current.isDirectory() || current.isSymbolicLink() || current.dev !== stat.dev || current.ino !== stat.ino) {
+      throw new Error('test sandbox directory changed during cleanup');
+    }
+    // Browser profile writes may appear after the previous enumeration. Recheck
+    // every entry with lstat through removeOwnedTree; never follow a late link.
+    for (const entry of fs.readdirSync(target, { withFileTypes: true })) {
+      const child = path.join(target, entry.name);
+      if (markerLast && entry.name === MARKER) {
+        const markerStat = fs.lstatSync(child);
+        if (!markerStat.isFile() || markerStat.isSymbolicLink()) throw new Error('test sandbox marker is invalid');
+        const bytes = fs.readFileSync(child);
+        if (marker && !bytes.equals(marker.bytes)) throw new Error('test sandbox marker changed during cleanup');
+        marker = { path: child, bytes };
+      } else removeOwnedTree(child, { ownedRoot: owned });
+    }
+    // Keep a marker unlink failure outside this directory's retry loop too.
+    if (marker) removeOwnedTree(marker.path, { ownedRoot: owned });
+  });
 }
 
 function removeMarkedDirectory(directory, tempRoot, expectedStatus) {
