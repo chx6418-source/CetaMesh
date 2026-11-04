@@ -6,6 +6,9 @@
 
 ## Product model
 
+Core state authority, application commands and dependency regression rules are
+specified in [CORE_BOUNDARIES.md](CORE_BOUNDARIES.md).
+
 - **CetaMesh Desktop** is a native Windows app. Primary product areas: **Chat / Tasks / Memory /
   Workspace**; secondary areas: Settings / Diagnostics / Advanced (engineering surfaces).
 - **Task != Agent Session.** A CetaMesh Task owns its own id, rev, status and workspace

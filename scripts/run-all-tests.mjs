@@ -272,6 +272,7 @@ const REGISTRY = {
   // ── architecture：结构契约 / 源码不变量 ────────────────────────────────────
   'test-desktop-architecture.mjs': { category: 'architecture' },
   'test-composition-boundary.mjs': { category: 'architecture' },
+  'test-core-dependency-directions.mjs': { category: 'architecture', note: 'Parsed literal imports, file cycles and authoritative state dependency directions' },
   'test-capability-coverage.mjs': { category: 'architecture' },
   'test-desktop-chat-product.mjs': { category: 'architecture' },
   'test-stage6-settings-media.mjs': { category: 'architecture', note: 'Settings runtime-backed fields and text-only attachment boundary' },
