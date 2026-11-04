@@ -1,23 +1,33 @@
 // Deterministic regression for the native acceptance driver's observability.
 // No Desktop/model/Agent CLI is started. Transport behavior is preserved in a VM fixture.
 import assert from 'node:assert/strict';import vm from 'node:vm';import fs from 'node:fs';import {createRequire} from 'node:module';
-import {spawnSync} from 'node:child_process';
-import {fileURLToPath} from 'node:url';
 import * as helper from './helpers/native-product-session.mjs';
 const runnerSource=fs.readFileSync(new URL('./run-all-tests.mjs',import.meta.url),'utf8');
-assert.match(runnerSource, /'test-codex-owned-supervisor\.mjs':\s*\{[^\n]*requires:\s*\[[^\]]*'native-product'/,
-  'native owned-process supervisor must require explicit product opt-in');
-const optedOut=spawnSync(process.execPath,[fileURLToPath(new URL('./test-codex-owned-supervisor.mjs',import.meta.url))],
-  {env:{...process.env,WHALEBRIDGE_TEST_NATIVE_PRODUCT:'0'},encoding:'utf8',windowsHide:true,timeout:10000});
-assert.ifError(optedOut.error);
-assert.equal(optedOut.status,77,'direct suite invocation also refuses native execution without opt-in');
-assert.match(optedOut.stdout,/NOT_RUN_ENVIRONMENT: owned supervisor requires explicit native product opt-in/);
-console.log('PASS native supervisor registration and direct invocation retain explicit opt-in');
+assert.match(runnerSource, /'test-codex-owned-supervisor\.mjs':\s*\{[^\n]*requires:\s*\['native-product','shell-debug'\]/,
+  'native owned-process supervisor requires explicit product opt-in and a helper');
 const {projectNativeRpcEvidence,nativeRpcObserverSource}=helper;
 assert.equal(typeof projectNativeRpcEvidence,'function','native driver must expose safe Core refusal/revision facts');
 assert.equal(typeof nativeRpcObserverSource,'function','native driver must observe actual application replies');
 const emitted=[],sent=[],transport=raw=>sent.push(raw),ipc={};Object.defineProperty(ipc,'postMessage',{value:transport,writable:false,configurable:false});
 const require=createRequire(new URL('../desktop-ui/package.json',import.meta.url)),ts=require('typescript'),source=fs.readFileSync(new URL('../desktop-ui/src/bridge/typed-client.ts',import.meta.url),'utf8');
+// Evaluate the actual guard with inert imports. A removed guard fails before
+// any host file/process operation; the regression probe cannot launch native code.
+const guardLines=[];
+const deniedImport=new Proxy(()=>{throw Object.assign(new Error('Guard probe effect denied'),{code:'PROBE_EFFECT_DENIED'});},
+  {get:(_target,key)=>key==='__esModule'?true:deniedImport});
+const guardProbe=input=>vm.runInNewContext('(async()=>{'+ts.transpileModule(input,
+  {compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText+'})()',
+  {exports:{},require:()=>deniedImport,console:{log:line=>guardLines.push(line)},
+    process:{platform:'win32',env:{WHALEBRIDGE_TEST_NATIVE_PRODUCT:'0'},
+      exit:exitCode=>{throw Object.assign(new Error('Guard probe exit'),{exitCode});}}});
+for(const operation of ["require('node:fs').mkdtempSync('must-not-create-')",
+  "require('node:child_process').spawn('must-not-run-native.exe',[])"]){
+  await assert.rejects(guardProbe(operation),{code:'PROBE_EFFECT_DENIED'});
+}
+await assert.rejects(guardProbe(fs.readFileSync(new URL('./test-codex-owned-supervisor.mjs',import.meta.url),'utf8')),
+  {exitCode:77});
+assert.match(guardLines.join('\n'),/NOT_RUN_ENVIRONMENT: owned supervisor requires explicit native product opt-in/);
+console.log('PASS native supervisor opt-in and guard probe cannot launch native code');
 const module={exports:{}};let timer=0;const timers=new Map();
 const context=vm.createContext({exports:module.exports,module,TextEncoder,window:{ipc,setTimeout:callback=>{timers.set(++timer,callback);return timer;},clearTimeout:id=>timers.delete(id),__cetameshTestRpcEvidence:raw=>emitted.push(projectNativeRpcEvidence(JSON.parse(raw)))}});
 vm.runInContext(ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText,context);
