@@ -155,6 +155,21 @@ try {
     id: concurrentCreates[0].task.id, expectedRev: services.taskService.runtime.get({ id: concurrentCreates[0].task.id }).task.rev
   } });
 
+  // Task control is an application operation even when no Desktop DTO is needed.
+  // The same existing platform instance must own direct and UI-triggered control.
+  assert.equal(typeof services.platformRuntime.pauseTask, 'function', 'existing application entry must own Task pause');
+  assert.equal(typeof services.platformRuntime.cancelTask, 'function', 'existing application entry must own Task cancellation');
+  let appControlled = services.taskService.runtime.create({ goal: 'Direct application Task control', workspaceId: workspace.id });
+  appControlled = services.taskService.runtime.start({ id: appControlled.id, expectedRev: appControlled.rev }).task;
+  const appPaused = await services.platformRuntime.pauseTask({ id: appControlled.id, expectedRev: appControlled.rev });
+  assert.equal(appPaused.task.status, 'paused');
+  const projectedPause = await services.desktopUiService.execute({ method: 'ui.task.get', params: { id: appControlled.id } });
+  assert.equal(projectedPause.task.rev, appPaused.task.rev);
+  assert.equal(projectedPause.task.status, appPaused.task.status);
+  const appCancelled = await services.platformRuntime.cancelTask({ id: appControlled.id, expectedRev: appPaused.task.rev });
+  assert.equal(appCancelled.task.status, 'cancelled');
+  assert.equal(services.taskService.runtime.get({ id: appControlled.id }).task.currentAgent, null);
+
   const assigned = await services.desktopUiService.execute({ method: 'ui.task.create', params: {
     goal: 'Produce a result in the Workspace', workspaceId: workspace.id, agentProvider: 'cetamesh'
   } });
@@ -163,6 +178,10 @@ try {
   assert.equal(assigned.task.currentAgent.provider, 'cetamesh');
   let cancellations = 0;
   services.agentBroker.cancel = async () => { cancellations++; return { cancelled: true }; };
+  const applicationPause = services.platformRuntime.pauseTask, applicationCancel = services.platformRuntime.cancelTask;
+  let applicationPauses = 0, applicationCancels = 0;
+  services.platformRuntime.pauseTask = request => { applicationPauses++; return applicationPause(request); };
+  services.platformRuntime.cancelTask = request => { applicationCancels++; return applicationCancel(request); };
   const paused = await services.desktopUiService.execute({ method: 'ui.task.pause', params: {
     id: assigned.task.id, expectedRev: assigned.task.rev
   } });
@@ -178,6 +197,10 @@ try {
   } });
   assert.equal(cancelled.task.status, 'cancelled');
   assert.equal(cancellations, 2, 'Cancel must stop Agent execution before terminal Task state');
+  assert.equal(applicationPauses, 1, 'UI pause must use the same application entry');
+  assert.equal(applicationCancels, 1, 'UI cancel must use the same application entry');
+  services.platformRuntime.pauseTask = applicationPause;
+  services.platformRuntime.cancelTask = applicationCancel;
 
   services.agentBroker.createSession = originalCreateSession;
   services.agentBroker.send = originalSend;

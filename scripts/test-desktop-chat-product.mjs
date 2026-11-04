@@ -7,6 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createChatService } from '../src/desktop/chat-service.js';
 import { createDesktopUiEventBus, createDesktopUiService } from '../src/desktop/ui-service.js';
+import { createDesktopPlatformRuntime } from '../src/desktop/platform-runtime.js';
 import { readJsonFile, writeJsonAtomic } from '../src/storage/json-file.js';
 
 const root = path.resolve(import.meta.dirname, '..');
@@ -19,6 +20,14 @@ fs.mkdirSync(stateDir, { recursive: true });
 
 let step = 0;
 function ok(label) { step += 1; console.log(`✅ [${step}] ${label}`); }
+function taskControlUi(services) {
+  const platformRuntime = createDesktopPlatformRuntime({
+    taskRuntime: services.taskService.runtime, agentBroker: services.agentBroker,
+    capabilityService: services.capabilityService, continuityRuntime: services.continuityService?.runtime,
+    toolExecutionCoordinator: services.toolExecutionCoordinator
+  });
+  return createDesktopUiService({ services: { ...services, platformRuntime } });
+}
 async function waitFor(read, predicate, label, timeoutMs = 2000) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
@@ -1668,7 +1677,12 @@ ok('Agent events arriving before send ACK are replayed only after provider ident
  old=taskService.runtime.start({id:old.id,expectedRev:old.rev,provider:'cetamesh',sessionId:'managed-from-previous-core'}).task;
  old=taskService.runtime.block({id:old.id,expectedRev:old.rev,reason:'TOOL_CALL_LIMIT'}).task;
  const managed=createManagedAgentProvider({modelRuntime:{chat:async()=>{throw Error('must not infer');}},capabilityExecutor:async()=>{throw Error('must not execute');}});
- const ui=createDesktopUiService({services:{taskService,agentBroker:{cancel:args=>managed.provider.cancel(args)}}});
+ const disconnectedUi=createDesktopUiService({services:{taskService}});
+ for(const method of ['ui.task.pause','ui.task.cancel']) {
+  await assert.rejects(disconnectedUi.execute({method,params:{id:old.id,expectedRev:old.rev}}),{code:'SERVICE_UNAVAILABLE'});
+  assert.deepEqual(taskService.runtime.get({id:old.id}).task,old,'missing application wiring cannot fall back to raw Task transitions');
+ }
+ const ui=taskControlUi({taskService,agentBroker:{cancel:args=>managed.provider.cancel(args)}});
  const cancelled=await ui.execute({method:'ui.task.cancel',params:{id:old.id,expectedRev:old.rev,reason:'Owner explicitly cancelled old task'}});
  assert.equal(cancelled.task.status,'cancelled');
  assert.equal(taskService.runtime.get({id:old.id}).task.currentAgent,null);
@@ -1678,7 +1692,7 @@ ok('Agent events arriving before send ACK are replayed only after provider ident
   let pending=taskService.runtime.create({goal:`must keep ${provider} ${code}`,workspaceId:`ws-${code}-${provider}`});
   pending=taskService.runtime.start({id:pending.id,expectedRev:pending.rev,provider,sessionId:'uncertain-session'}).task;
   pending=taskService.runtime.block({id:pending.id,expectedRev:pending.rev,reason:'requires stop confirmation'}).task;
-  const uncertainUi=createDesktopUiService({services:{taskService,agentBroker:{cancel:async()=>{throw Object.assign(Error('stop unconfirmed'),{code});}}}});
+  const uncertainUi=taskControlUi({taskService,agentBroker:{cancel:async()=>{throw Object.assign(Error('stop unconfirmed'),{code});}}});
   await assert.rejects(uncertainUi.execute({method:'ui.task.cancel',params:{id:pending.id,expectedRev:pending.rev}}),e=>e.code===code);
   assert.equal(taskService.runtime.get({id:pending.id}).task.currentAgent.sessionId,'uncertain-session');
   assert.equal(taskService.runtime.get({id:pending.id}).task.status,'blocked');
@@ -1718,10 +1732,10 @@ ok('Agent events arriving before send ACK are replayed only after provider ident
   restored.chatService.close();await restored.capabilityService.close();
   const nativeDefaultRow=make();let nativeProofCalled=false;
   const codexProvider=core.agentBroker.require('codex');
-  const nativeDefaultUi=createDesktopUiService({services:{...core,agentBroker:{...core.agentBroker,
+  const nativeDefaultUi=taskControlUi({...core,agentBroker:{...core.agentBroker,
    require:id=>id==='codex'?{...codexProvider,
     capabilities:()=>({...codexProvider.capabilities(),appServerRolloutEnabled:true}),
-    verifyStoppedTask:async()=>{nativeProofCalled=true;return {stopped:true};}}:core.agentBroker.require(id)}}});
+     verifyStoppedTask:async()=>{nativeProofCalled=true;return {stopped:true};}}:core.agentBroker.require(id)}});
   await assert.rejects(nativeDefaultUi.execute({method:'ui.task.cancel',params:{id:nativeDefaultRow.id,expectedRev:nativeDefaultRow.rev}}),e=>e.code==='SESSION_TRANSPORT_UNKNOWN');
   assert.equal(nativeProofCalled,true,'selected default transport cannot suppress independent exact-session inspection');
   assert.equal(core.taskService.runtime.get({id:nativeDefaultRow.id}).task.status,'blocked');
@@ -1736,7 +1750,7 @@ ok('Agent events arriving before send ACK are replayed only after provider ident
    const row=make();
    const originalCapability=core.capabilityService.recoveryForTask;
    const toolGuard={recoveryForTask:()=>null};
-   const gateUi=createDesktopUiService({services:{...core,toolExecutionCoordinator:toolGuard}});
+   const gateUi=taskControlUi({...core,toolExecutionCoordinator:toolGuard});
    const originalApprovals=core.capabilityService.broker.approvals.list;
    const originalHandoff=core.continuityService.runtime.isInFlight;
    if(gate==='capability')core.capabilityService.recoveryForTask=()=>({state:'needs-reconciliation'});

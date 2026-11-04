@@ -3,9 +3,121 @@ import { OWNER_ACTOR, capabilityError } from '../capability/types.js';
 import crypto from 'node:crypto';
 import { rankTaskAgents } from '../router/agent-assignment.js';
 import { isSafeAgentDispatchPreflight } from '../capability/service.js';
+import { inspectTaskSession } from '../agent/session-recovery.js';
 
-/** Smart decisions are consumed here; authority is always the trusted Desktop Owner. */
-export function createDesktopPlatformRuntime({ capabilityService, workspaceService, taskRuntime, agentBroker, continuityRuntime, modelRuntime, legacyModel, prepareTaskContext = null }) {
+/** Owner application operations reuse the existing Task and execution authorities. */
+export function createDesktopPlatformRuntime({ capabilityService, workspaceService, taskRuntime, agentBroker, continuityRuntime, toolExecutionCoordinator, modelRuntime, legacyModel, prepareTaskContext = null }) {
+  async function stopTask(taskRow, { cancelMissingManagedSession = false } = {}) {
+    if (taskRow.recoveryIntent) throw capabilityError('TASK_RECOVERY_REVIEW_REQUIRED', '上次核对尚未完整提交，请先在任务详情完成恢复核对');
+    if (continuityRuntime?.isInFlight?.(taskRow.id)) {
+      throw capabilityError('TASK_HANDOFF_IN_FLIGHT', '任务正在交接执行者，暂不能暂停或取消');
+    }
+    if (!taskRow.currentAgent) {
+      const pending = capabilityService?.taskReviewState?.({ taskId: taskRow.id, workspaceId: taskRow.workspaceId });
+      if (pending?.workspaceFences?.length) throw capabilityError('TASK_RECOVERY_REVIEW_REQUIRED', '新建会话仍有未确认归属，请先在任务详情核对后释放占用');
+      return;
+    }
+    try {
+      await agentBroker.cancel(taskRow.currentAgent);
+      if (taskRow.currentAgent.provider === 'codex'
+        && !(await inspectTaskSession(agentBroker, taskRow)).stopped) {
+        throw capabilityError('SESSION_EXECUTION_UNCONFIRMED', '旧 Codex 执行尚未确认停止，请保留任务并核查恢复凭据');
+      }
+    } catch (error) {
+      // Managed Sessions belong to this Core. A missing external Session or
+      // transport alone never proves the persisted execution owner stopped.
+      const provider = agentBroker.require?.(taskRow.currentAgent.provider);
+      const unknownCodexTransport = taskRow.currentAgent.provider === 'codex'
+        && error?.code === 'SESSION_TRANSPORT_UNKNOWN';
+      if (!cancelMissingManagedSession || (error?.code !== 'SESSION_NOT_FOUND' && !unknownCodexTransport)) throw error;
+      if (taskRow.currentAgent.provider === 'cetamesh') return;
+      const recovery = capabilityService?.recoveryForTask;
+      const approvals = capabilityService?.broker?.approvals;
+      const toolRecovery = toolExecutionCoordinator?.recoveryForTask;
+      if (typeof recovery !== 'function' || typeof approvals?.list !== 'function'
+          || typeof toolRecovery !== 'function' || typeof provider?.verifyStoppedTask !== 'function'
+          || recovery(taskRow.id) || toolRecovery(taskRow.id)
+          || approvals.list().some(row => row.request?.taskId === taskRow.id)) throw error;
+      const proof = await provider.verifyStoppedTask({ taskId: taskRow.id,
+        workspaceId: taskRow.workspaceId, sessionId: taskRow.currentAgent.sessionId });
+      if (proof?.stopped !== true || proof.taskId !== taskRow.id
+          || proof.workspaceId !== taskRow.workspaceId || proof.provider !== taskRow.currentAgent.provider
+          || proof.sessionId !== taskRow.currentAgent.sessionId) throw error;
+    }
+  }
+
+  async function confirmStoppedReadChild(taskRow) {
+    if (!taskRow.parentTaskId || taskRow.childContract?.mode !== 'read-only') return;
+    if (taskRow.currentAgent) {
+      try {
+        const status = await agentBroker.status(taskRow.currentAgent);
+        if (status?.running !== false || Number(status?.queued ?? 0) > 0 || status?.waitingForApproval) {
+          throw capabilityError('INVOKE_CANCEL_UNCONFIRMED', 'Child Agent stop is not confirmed');
+        }
+      } catch (error) {
+        if (!(taskRow.currentAgent.provider === 'cetamesh' && error?.code === 'SESSION_NOT_FOUND')) throw error;
+      }
+    }
+    let current = (await taskRuntime.get({ id: taskRow.id })).task;
+    for (const attempt of current.attempts ?? []) {
+      if (!['started', 'accepted'].includes(attempt.state)) continue;
+      current = taskRuntime.settleAttempt({ id: current.id, expectedRev: current.rev,
+        requestId: attempt.requestId, state: 'unknown', reason: 'Owner confirmed stop; final turn effect was not observed' });
+    }
+  }
+
+  async function pauseTask({ id, expectedRev, reason } = {}) {
+    const preflight = (await taskRuntime.get({ id })).task;
+    if (expectedRev !== undefined && preflight.rev !== expectedRev) throw capabilityError('TASK_CONFLICT', 'Task changed before pause');
+    let fence = null;
+    if (!preflight.parentTaskId) {
+      const children = (await taskRuntime.listChildren({ parentTaskId: preflight.id })).children;
+      if (children.some(child => !['completed', 'failed', 'cancelled'].includes(child.status))) {
+        throw capabilityError('TASK_CHILD_ACTIVE', 'Stop and reconcile child Tasks before pausing the parent');
+      }
+      fence = (await taskRuntime.block({ id: preflight.id, expectedRev: preflight.rev,
+        reason: 'Owner pause in progress; Agent stop must be confirmed' })).task;
+      const afterFence = (await taskRuntime.listChildren({ parentTaskId: preflight.id })).children;
+      if (afterFence.some(child => !['completed', 'failed', 'cancelled'].includes(child.status))) {
+        throw capabilityError('TASK_CHILD_ACTIVE', 'A child started during pause preparation; parent remains blocked for review');
+      }
+    }
+    const operations = await capabilityService?.cancelTaskOperations?.({ taskId: id });
+    if (operations?.some(row => row.status === 'unknown')) throw capabilityError('INVOKE_CANCEL_UNCONFIRMED', '操作结果未知，需核验后暂停任务');
+    const current = (await taskRuntime.get({ id })).task;
+    if (current.rev !== (fence?.rev ?? preflight.rev)) throw capabilityError('TASK_CONFLICT', 'Task changed during pause');
+    await stopTask(current);
+    return taskRuntime.pause({ id: current.id, expectedRev: current.rev, reason });
+  }
+
+  async function cancelTask({ id, expectedRev, reason } = {}) {
+    const first = (await taskRuntime.get({ id })).task;
+    if (expectedRev !== undefined && first.rev !== expectedRev) throw capabilityError('TASK_CONFLICT', 'Task changed before cancellation');
+    const children = !first.parentTaskId ? (await taskRuntime.listChildren({ parentTaskId: first.id })).children : [];
+    if (children.some(child => !['completed', 'failed', 'cancelled'].includes(child.status))) {
+      if (!['blocked', 'completed', 'failed', 'cancelled'].includes(first.status)) {
+        await taskRuntime.block({ id: first.id, expectedRev: first.rev, reason: 'Owner cancelling child Tasks' });
+      }
+      for (const child of children) {
+        if (['completed', 'failed', 'cancelled'].includes(child.status)) continue;
+        const childOperations = await capabilityService?.cancelTaskOperations?.({ taskId: child.id });
+        if (childOperations?.some(row => row.status === 'unknown')) throw capabilityError('INVOKE_CANCEL_UNCONFIRMED', 'Child effect requires review before parent cancellation');
+        const currentChild = (await taskRuntime.get({ id: child.id })).task;
+        await stopTask(currentChild, { cancelMissingManagedSession: true });
+        await confirmStoppedReadChild(currentChild);
+        const settledChild = (await taskRuntime.get({ id: child.id })).task;
+        await taskRuntime.cancel({ id: settledChild.id, expectedRev: settledChild.rev, reason: 'Parent cancelled by Owner' });
+      }
+    }
+    const stoppedOperations = await capabilityService?.cancelTaskOperations?.({ taskId: id });
+    if (stoppedOperations?.some(row => row.status === 'unknown')) throw capabilityError('INVOKE_CANCEL_UNCONFIRMED', '操作结果未知，需核验后取消任务');
+    const current = (await taskRuntime.get({ id })).task;
+    await stopTask(current, { cancelMissingManagedSession: true });
+    await confirmStoppedReadChild(current);
+    const settled = (await taskRuntime.get({ id: current.id })).task;
+    return taskRuntime.cancel({ id: settled.id, expectedRev: settled.rev, reason });
+  }
+
   async function selectProviders(record, task, decision, requested = null) {
     const selected = record.config.agentProvider;
     if (selected === 'none' || decision.agentEnabled === false) {
@@ -249,6 +361,6 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
       throw error;
     }
   }
-  return { route };
+  return { route, pauseTask, cancelTask };
 }
 

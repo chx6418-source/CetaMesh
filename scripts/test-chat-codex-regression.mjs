@@ -80,6 +80,92 @@ try {
   assert.equal(result.provider,'codex');assert.equal(calls.at(-1).options.modelProvider,undefined);
   rt.cancel({id:record.taskId,expectedRev:rt.get({id:record.taskId}).task.rev});
  });
+ // Exercise the real Work and Chat application entries against the same bounded
+ // provider observations. Refusing only at agent.run is too late: Work has
+ // already persisted a queued Task, so retry becomes dispatch-incomplete.
+ const readyHealth={available:true,installed:true,authenticated:true,sessionCapable:true,
+  compatible:true,sandboxCapable:true,toolsAvailable:true};
+ const deniedReadiness=[
+  ['incompatible runtime','codex',{compatible:false}],
+  ...['launchable','versionCompatible','sessionCreatable','toolCallingCapable','workspaceCapable','quotaAvailable']
+   .map(field=>[field+' explicitly false','codex',{[field]:false}]),
+  ['external authentication unknown','codex',{authenticated:null}],
+  ['external session capability unknown','codex',{sessionCapable:null}],
+  ['external tools unavailable','fixture-external',{toolsAvailable:false}],
+  ['external tools unverified','fixture-external',{toolsAvailable:undefined}]
+ ];
+ for(const [index,[label,provider,patch]] of deniedReadiness.entries()) {
+  await check('Work rejects '+label+' before Task persistence, like Chat',async()=>{
+   const originalHealth=broker.health;
+   broker.health=async()=>({...readyHealth,...patch});
+   try {
+    const before=rt.list().tasks.map(row=>row.id),sessionCount=calls.length;
+    const platform=createDesktopPlatformRuntime({capabilityService:cap,workspaceService,taskRuntime:rt,agentBroker:broker});
+    const record={id:'readiness-chat-'+index,config:{workspaceId:workspace.id,agentProvider:provider}};
+    const text='Inspect isolated readiness fixture '+index;
+    await assert.rejects(platform.route({decision:{agentIntent:true,agentEnabled:true},record,text,
+     requestId:'chat-readiness-'+index}),{code:'PROVIDER_UNAVAILABLE'});
+    assert.deepEqual(rt.list().tasks.map(row=>row.id),before,'Chat must reject before writing a Task');
+    const ui=createDesktopUiService({services:{taskService,capabilityService:cap,agentBroker:broker,workspaceService}});
+    await assert.rejects(ui.execute({method:'ui.task.create',params:{goal:text,workspaceId:workspace.id,
+     agentProvider:provider,requestId:'work-readiness-'+index}}),{code:'PROVIDER_UNAVAILABLE'});
+    assert.deepEqual(rt.list().tasks.map(row=>row.id),before,'Work must reject before writing a queued Task');
+    assert.equal(calls.length,sessionCount,'readiness refusal must not create an Agent Session');
+   } finally { broker.health=originalHealth; }
+  });
+ }
+ await check('Work preserves explicit configured-native dispatch without claiming authentication',async()=>{
+  const originalHealth=broker.health,originalCapabilities=broker.capabilities;
+  const health={available:true,installed:true,compatible:true,taskEligible:true,sessionCapable:true,
+   authenticated:null,authConfigured:true,authVerified:false,authentication:'configured-unverified'};
+  broker.health=async()=>({...health});
+  broker.capabilities=()=>({workspaceBoundary:'native-staged',security:{verified:true,mode:'native-permissions',
+   nativeSandboxSupported:false,strictIsolationVerified:false,nativeApprovalSupported:true,
+   nativePermissionPolicyVerified:true,allToolsRequireApproval:true,nativeSandboxMode:'none'}});
+  try {
+   const sessionCount=calls.length;
+   const ui=createDesktopUiService({services:{taskService,capabilityService:cap,agentBroker:broker,workspaceService}});
+   const result=await ui.execute({method:'ui.task.create',params:{goal:'Inspect configured native fixture',
+    workspaceId:workspace.id,agentProvider:'fixture-native',requestId:'work-configured-native'}});
+   assert.equal(result.task.status,'running');
+   assert.equal(rt.get({id:result.task.id}).task.currentAgent.provider,'fixture-native');
+   assert.equal(calls.length,sessionCount+1);
+   assert.equal((await broker.health()).authenticated,null,'dispatch is not an authentication claim');
+  } finally { broker.health=originalHealth;broker.capabilities=originalCapabilities; }
+ });
+ await check('Work Managed readiness does not invent external authentication requirements',async()=>{
+  const originalHealth=broker.health;broker.health=async()=>({available:true});
+  try {
+   const ui=createDesktopUiService({services:{taskService,capabilityService:cap,agentBroker:broker,workspaceService}});
+   const result=await ui.execute({method:'ui.task.create',params:{goal:'Inspect local Managed fixture',
+    workspaceId:workspace.id,agentProvider:'cetamesh',requestId:'work-managed-structural-readiness'}});
+   assert.equal(result.task.status,'running');
+   assert.equal(rt.get({id:result.task.id}).task.currentAgent.provider,'cetamesh');
+  } finally { broker.health=originalHealth; }
+ });
+ for(const field of ['authenticated','sessionCapable']) {
+  await check('Work retains explicit negative Managed '+field+' refusal',async()=>{
+   const originalHealth=broker.health;broker.health=async()=>({available:true,[field]:false});
+   try {
+    const before=rt.list().tasks.map(row=>row.id),sessionCount=calls.length;
+    const ui=createDesktopUiService({services:{taskService,capabilityService:cap,agentBroker:broker,workspaceService}});
+    await assert.rejects(ui.execute({method:'ui.task.create',params:{goal:'Inspect negative Managed '+field,
+     workspaceId:workspace.id,agentProvider:'cetamesh',requestId:'work-managed-negative-'+field}}),{code:'PROVIDER_UNAVAILABLE'});
+    assert.deepEqual(rt.list().tasks.map(row=>row.id),before);
+    assert.equal(calls.length,sessionCount);
+   } finally { broker.health=originalHealth; }
+  });
+ }
+ await check('Work retains the explicit Codex sandbox refusal code before creation',async()=>{
+  const originalHealth=broker.health;broker.health=async()=>({...readyHealth,sandboxCapable:false});
+  try {
+   const before=rt.list().tasks.map(row=>row.id);
+   const ui=createDesktopUiService({services:{taskService,capabilityService:cap,agentBroker:broker,workspaceService}});
+   await assert.rejects(ui.execute({method:'ui.task.create',params:{goal:'Inspect refused sandbox fixture',
+    workspaceId:workspace.id,agentProvider:'codex',requestId:'work-sandbox-refused'}}),{code:'CODEX_SANDBOX_UNAVAILABLE'});
+   assert.deepEqual(rt.list().tasks.map(row=>row.id),before);
+  } finally { broker.health=originalHealth; }
+ });
  await check('verified unavailable preflight on Resume does not invent uncertain effects',async()=>{
   let t=make();t=rt.attachAgent({id:t.id,expectedRev:t.rev,provider:'codex',sessionId:'paused'}).task;t=rt.start({id:t.id,expectedRev:t.rev}).task;t=rt.pause({id:t.id,expectedRev:t.rev}).task;
   // Eligibility changes only at the authoritative Capability preflight, after UI selection.

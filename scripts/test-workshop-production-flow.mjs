@@ -24,12 +24,13 @@ let sessions = 0;
 let failSend = true;
 let closes = 0;
 let stopReceiptAvailable = false;
+let toolsAvailable = true;
 const sessionRecords = new Map();
 const instructions = [];
 services.agentBroker.register({ ...defineAgentProvider({ id: 'workshop-fixture', label: 'Workshop fixture',
   capabilityExtras: { workspaceBoundary: 'capability-broker' }, methods: {
     async health() { return { available: true, installed: true, authenticated: true,
-      sessionCapable: true, compatible: true }; },
+      sessionCapable: true, compatible: true, toolsAvailable }; },
     async createSession({ taskId, workspaceId }) {
       const sessionId = `fixture-${++sessions}`;
       sessionRecords.set(sessionId, { taskId, workspaceId, closed: false });
@@ -125,10 +126,22 @@ try {
   assert.ok(preview.reviewOperationIds.includes('request:' + originalRequestId));
   assert.equal(fs.existsSync(path.join(workspaceRoot, '.git')), false, 'recovery uses non-Git content evidence');
   const nextInstruction = 'Read the retained partial.csv and report what remains; do not repeat the export.';
-  const resumed = await ui('ui.task.reconcile', { id: interrupted.id, expectedRev: preview.taskRev,
+  const recoveryRequest = { id: interrupted.id, expectedRev: preview.taskRev,
     action: 'resume', reviewed: true, reviewToken: preview.reviewToken, reviewedOperationIds: preview.reviewOperationIds,
     reviewSummary: 'Checked the controlled stop receipt, original request and partial CSV; retain its existing bytes.',
-    nextInstruction, requestId: 'workshop-reviewed-next-instruction' });
+    nextInstruction, requestId: 'workshop-reviewed-next-instruction' };
+  const beforeReadinessRefusal = services.taskService.runtime.get({ id: interrupted.id }).task;
+  const requestsFile = path.join(stateDir, 'capability', 'requests.json');
+  const beforeRequests = fs.readFileSync(requestsFile);
+  toolsAvailable = false;
+  await assert.rejects(ui('ui.task.reconcile', recoveryRequest), { code: 'PROVIDER_UNAVAILABLE' });
+  assert.deepEqual(services.taskService.runtime.get({ id: interrupted.id }).task, beforeReadinessRefusal);
+  assert.deepEqual(fs.readFileSync(requestsFile), beforeRequests, 'failed admission cannot acknowledge earlier effects');
+  assert.deepEqual(fs.readFileSync(path.join(workspaceRoot, 'partial.csv')), partialOutput);
+  assert.equal(sessions, 1, 'unverified tools cannot create a recovery Session');
+  assert.equal(instructions.length, 1, 'unverified tools cannot replay the previous instruction');
+  toolsAvailable = true;
+  const resumed = await ui('ui.task.reconcile', recoveryRequest);
   assert.equal(resumed.task.id, interrupted.id);
   assert.equal(sessions, 2);
   assert.equal(services.taskService.runtime.list().tasks.length, 1, 'formal recovery preserves the original Task identity');

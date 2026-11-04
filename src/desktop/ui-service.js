@@ -10,7 +10,6 @@ import {isControlledL2Write,l2Resources} from '../capability/l2-grants.js';
 import {normalizeTaskCollaboration,taskLaunchFingerprint,snapshotTaskVerification,configureTaskCollaboration} from './task-launch.js';
 import { createReferencePreview } from './reference-preview.js';
 import { createTaskRecovery } from './task-recovery.js';
-import { inspectTaskSession } from '../agent/session-recovery.js';
 import { unreviewedTaskEffects } from '../task/recovery-evidence.js';
 import { fitsIpcResponse, requireIpcItem } from '../control/response-budget.js';
 import { LEGACY_RETIRED_TOOLS, isDesktopLocalService } from '../integrations/catalog.js';
@@ -812,18 +811,20 @@ export function createDesktopUiService({ services = {}, system = services.system
     if (!services.workspaceService.describeWorkspace(workspaceId)) {
       throw uiError('WORKSPACE_NOT_FOUND', '任务工作区不存在或不可访问');
     }
-    const boundary = services.agentBroker.capabilities(provider)?.workspaceBoundary;
+    const capabilities = services.agentBroker.capabilities(provider);
+    const boundary = capabilities?.workspaceBoundary;
     if (!['capability-broker', 'staged-capability-broker', 'native-staged'].includes(boundary)) {
       throw uiError('AGENT_BOUNDARY_UNSUPPORTED', '所选 Agent 没有经过验证的工作区权限边界');
     }
     const health = await services.agentBroker.health(provider);
-    if (health?.available !== true || health?.disabled === true || health?.enabled === false
-      || health?.ready === false || health?.reachable === false || health?.installed === false
-      || health?.authenticated === false || health?.sessionCapable === false || health?.taskEligible === false) {
+    if (health?.authenticated === false || health?.sessionCapable === false) {
       throw uiError('PROVIDER_UNAVAILABLE', `所选 Agent ${provider} 未安装、未认证或无法建立会话`);
     }
-    if (provider === 'codex' && health.sandboxCapable === false) {
+    if (provider === 'codex' && health?.sandboxCapable === false) {
       throw uiError('CODEX_SANDBOX_UNAVAILABLE', 'Codex Windows 工作区沙箱已拒绝执行');
+    }
+    if (!canDispatchTaskAgent(health, { provider, security: capabilities?.security, explicitProvider: true })) {
+      throw uiError('PROVIDER_UNAVAILABLE', `所选 Agent ${provider} 未安装、未认证或无法建立会话`);
     }
     services.agentBroker.assertExecutionConsent?.(provider, { workspaceId });
     return provider;
@@ -920,70 +921,6 @@ export function createDesktopUiService({ services = {}, system = services.system
     }
     emit('task.updated', { taskId: current.id, status: current.status });
     return current;
-  }
-
-  async function stopTask(taskRow, { cancelMissingManagedSession = false } = {}) {
-    if (taskRow.recoveryIntent) throw uiError('TASK_RECOVERY_REVIEW_REQUIRED', '上次核对尚未完整提交，请先在任务详情完成恢复核对');
-    if (services.continuityService?.runtime?.isInFlight(taskRow.id)) {
-      throw uiError('TASK_HANDOFF_IN_FLIGHT', '任务正在交接执行者，暂不能暂停或取消');
-    }
-    if (!taskRow.currentAgent) {
-      const pending = services.capabilityService?.taskReviewState?.({ taskId: taskRow.id, workspaceId: taskRow.workspaceId });
-      if (pending?.workspaceFences?.length) throw uiError('TASK_RECOVERY_REVIEW_REQUIRED', '新建会话仍有未确认归属，请先在任务详情核对后释放占用');
-      return;
-    }
-    try {
-      await services.agentBroker.cancel(taskRow.currentAgent);
-      if (taskRow.currentAgent.provider === 'codex'
-        && !(await inspectTaskSession(services.agentBroker, taskRow)).stopped) {
-        throw uiError('SESSION_EXECUTION_UNCONFIRMED', '旧 Codex 执行尚未确认停止，请保留任务并核查恢复凭据');
-      }
-    } catch (error) {
-      // Managed Sessions exist only in this Core's memory. After restart, an explicit
-      // Owner cancellation may end the persisted Task even when its old Session is gone.
-      // External providers and uncertain transport failures still require a stop proof.
-      const provider = services.agentBroker.require?.(taskRow.currentAgent.provider);
-      const unknownCodexTransport = taskRow.currentAgent.provider === 'codex'
-        && error?.code === 'SESSION_TRANSPORT_UNKNOWN';
-      if (!cancelMissingManagedSession || (error?.code !== 'SESSION_NOT_FOUND' && !unknownCodexTransport)) throw error;
-      if (taskRow.currentAgent.provider === 'cetamesh') return;
-      // Missing external Sessions alone are not stop ACKs. The built-in Codex
-      // adapter verifies the exact durable lifecycle generation independently
-      // of the currently selected default transport.
-      // All unknown effects, approvals and incomplete Handoffs remain fenced.
-      const recovery = services.capabilityService?.recoveryForTask;
-      const approvals = services.capabilityService?.broker?.approvals;
-      const toolRecovery = services.toolExecutionCoordinator?.recoveryForTask;
-      if (typeof recovery !== 'function' || typeof approvals?.list !== 'function'
-          || typeof toolRecovery !== 'function' || typeof provider?.verifyStoppedTask !== 'function'
-          || recovery(taskRow.id) || toolRecovery(taskRow.id)
-          || approvals.list().some(row => row.request?.taskId === taskRow.id)) throw error;
-      const proof = await provider.verifyStoppedTask({ taskId: taskRow.id,
-        workspaceId: taskRow.workspaceId, sessionId: taskRow.currentAgent.sessionId });
-      if (proof?.stopped !== true || proof.taskId !== taskRow.id
-          || proof.workspaceId !== taskRow.workspaceId || proof.provider !== taskRow.currentAgent.provider
-          || proof.sessionId !== taskRow.currentAgent.sessionId) throw error;
-    }
-  }
-
-  async function confirmStoppedReadChild(taskRow) {
-    if (!taskRow.parentTaskId || taskRow.childContract?.mode !== 'read-only') return;
-    if (taskRow.currentAgent) {
-      try {
-        const status = await services.agentBroker.status(taskRow.currentAgent);
-        if (status?.running !== false || Number(status?.queued ?? 0) > 0 || status?.waitingForApproval) {
-          throw uiError('INVOKE_CANCEL_UNCONFIRMED', 'Child Agent stop is not confirmed');
-        }
-      } catch (error) {
-        if (!(taskRow.currentAgent.provider === 'cetamesh' && error?.code === 'SESSION_NOT_FOUND')) throw error;
-      }
-    }
-    let current = (await task('task.get', { id: taskRow.id })).task;
-    for (const attempt of current.attempts ?? []) {
-      if (!['started', 'accepted'].includes(attempt.state)) continue;
-      current = services.taskService.runtime.settleAttempt({ id: current.id, expectedRev: current.rev,
-        requestId: attempt.requestId, state: 'unknown', reason: 'Owner confirmed stop; final turn effect was not observed' });
-    }
   }
 
   const handlers = {
@@ -1396,27 +1333,8 @@ export function createDesktopUiService({ services = {}, system = services.system
         modelProvider:string(p.modelProvider,80)||undefined,model:string(p.model,160)||undefined })) };
     },
     'ui.task.pause': async p => {
-      const preflight = (await task('task.get', { id: idParam(p) })).task;
-      if (p.expectedRev !== undefined && preflight.rev !== p.expectedRev) throw uiError('TASK_CONFLICT', 'Task changed before pause');
-      let fence = null;
-      if (!preflight.parentTaskId) {
-        const children = (await task('task.child.list', { parentTaskId: preflight.id })).children;
-        if (children.some(child => !['completed', 'failed', 'cancelled'].includes(child.status))) {
-          throw uiError('TASK_CHILD_ACTIVE', 'Stop and reconcile child Tasks before pausing the parent');
-        }
-        fence = (await task('task.block', { id: preflight.id, expectedRev: preflight.rev,
-          reason: 'Owner pause in progress; Agent stop must be confirmed' })).task;
-        const afterFence = (await task('task.child.list', { parentTaskId: preflight.id })).children;
-        if (afterFence.some(child => !['completed', 'failed', 'cancelled'].includes(child.status))) {
-          throw uiError('TASK_CHILD_ACTIVE', 'A child started during pause preparation; parent remains blocked for review');
-        }
-      }
-      const operations = await services.capabilityService?.cancelTaskOperations?.({ taskId: idParam(p) });
-      if (operations?.some(row => row.status === 'unknown')) throw uiError('INVOKE_CANCEL_UNCONFIRMED', '操作结果未知，需核验后暂停任务');
-      const current = (await task('task.get', { id: idParam(p) })).task;
-      if (current.rev !== (fence?.rev ?? preflight.rev)) throw uiError('TASK_CONFLICT', 'Task changed during pause');
-      await stopTask(current);
-      const result = await task('task.pause', { id: current.id, expectedRev: current.rev, reason: string(p.reason, 1000) });
+      if (typeof services.platformRuntime?.pauseTask !== 'function') throw uiError('SERVICE_UNAVAILABLE', '此项能力当前不可用');
+      const result = await services.platformRuntime.pauseTask({ id: idParam(p), expectedRev: p.expectedRev, reason: string(p.reason, 1000) });
       emit('task.updated', { taskId: result.task?.id, status: result.task?.status });
       return { task: projectTaskWithUsage(result.task) };
     },
@@ -1469,31 +1387,8 @@ export function createDesktopUiService({ services = {}, system = services.system
       return { task: projectTaskWithUsage(resumed) };
     },
     'ui.task.cancel': async p => {
-      const first = (await task('task.get', { id: idParam(p) })).task;
-      if (p.expectedRev !== undefined && first.rev !== p.expectedRev) throw uiError('TASK_CONFLICT', 'Task changed before cancellation');
-      const children = !first.parentTaskId ? (await task('task.child.list', { parentTaskId: first.id })).children : [];
-      if (children.some(child => !['completed', 'failed', 'cancelled'].includes(child.status))) {
-        if (!['blocked', 'completed', 'failed', 'cancelled'].includes(first.status)) {
-          await task('task.block', { id: first.id, expectedRev: first.rev, reason: 'Owner cancelling child Tasks' });
-        }
-        for (const child of children) {
-          if (['completed', 'failed', 'cancelled'].includes(child.status)) continue;
-          const childOperations = await services.capabilityService?.cancelTaskOperations?.({ taskId: child.id });
-          if (childOperations?.some(row => row.status === 'unknown')) throw uiError('INVOKE_CANCEL_UNCONFIRMED', 'Child effect requires review before parent cancellation');
-          const currentChild = (await task('task.get', { id: child.id })).task;
-          await stopTask(currentChild, { cancelMissingManagedSession: true });
-          await confirmStoppedReadChild(currentChild);
-          const settledChild = (await task('task.get', { id: child.id })).task;
-          await task('task.cancel', { id: settledChild.id, expectedRev: settledChild.rev, reason: 'Parent cancelled by Owner' });
-        }
-      }
-      const stoppedOperations = await services.capabilityService?.cancelTaskOperations?.({ taskId: idParam(p) });
-      if (stoppedOperations?.some(row => row.status === 'unknown')) throw uiError('INVOKE_CANCEL_UNCONFIRMED', '操作结果未知，需核验后取消任务');
-      const current = (await task('task.get', { id: idParam(p) })).task;
-      await stopTask(current, { cancelMissingManagedSession: true });
-      await confirmStoppedReadChild(current);
-      const settled = (await task('task.get', { id: current.id })).task;
-      const result = await task('task.cancel', { id: settled.id, expectedRev: settled.rev, reason: string(p.reason, 1000) });
+      if (typeof services.platformRuntime?.cancelTask !== 'function') throw uiError('SERVICE_UNAVAILABLE', '此项能力当前不可用');
+      const result = await services.platformRuntime.cancelTask({ id: idParam(p), expectedRev: p.expectedRev, reason: string(p.reason, 1000) });
       emit('task.updated', { taskId: result.task?.id, status: result.task?.status });
       return { task: projectTaskWithUsage(result.task) };
     },
