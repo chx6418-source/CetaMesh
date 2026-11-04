@@ -258,6 +258,8 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
   uncertainDispatchesForTask:({taskId,workspaceId})=>Object.entries(dispatches)
    .filter(([,row])=>row?.taskId===taskId&&row.workspaceId===workspaceId&&['started','outcome-unknown'].includes(row.status))
    .map(([key,row])=>({requestId:row.requestId??key,capability:row.capability,status:row.status,at:row.at})),
+  hasActiveDispatchForTask:({taskId,workspaceId})=>[...activeDispatches].some(key=>
+   dispatches[key]?.taskId===taskId&&dispatches[key]?.workspaceId===workspaceId),
   operationsForTask:({taskId,workspaceId})=>Object.values(dispatches).filter(row=>row.operationId&&row.taskId===taskId&&row.workspaceId===workspaceId)
    .map(({operationId,logicalStepId,capability,status,at,executorId,attemptId,requestId,blocker,continuationInput})=>({operationId,logicalStepId,capability,status,at,executorId,attemptId,requestId,blocker,...(safeContinuationInput(capability,continuationInput)?{continuationInput:safeContinuationInput(capability,continuationInput)}:{})})),
   operationRecordForStep:({taskId,workspaceId,logicalStepId})=>{

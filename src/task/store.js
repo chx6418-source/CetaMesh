@@ -31,6 +31,53 @@ function asArray(value) {
   return Array.isArray(value) ? value : [];
 }
 
+// These optional v1 additions convey recovery authority. Legacy absence is
+// supported, but malformed or cross-linked evidence must never normalize away.
+const recoveryText = value => typeof value === 'string' && value.length > 0 && value.length <= 1000 && !/[\0\r\n]/.test(value);
+const recoveryHash = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
+const recoveryTime = value => Number.isSafeInteger(value) && value >= 0;
+const recoveryIds = value => Array.isArray(value) && value.length <= 5000 && value.every(recoveryText) && new Set(value).size === value.length;
+const sameAgent = (a, b) => (a?.provider ?? null) === (b?.provider ?? null) && (a?.sessionId ?? null) === (b?.sessionId ?? null);
+function validRecoveryRecord(record, task, intent = false) {
+  if (!record || typeof record !== 'object' || !recoveryText(record.id) || !recoveryTime(record.at)
+    || typeof record.summary !== 'string' || !record.summary.trim() || record.summary.length > 1000
+    || !recoveryHash(record.journalSha256) || !recoveryIds(record.operationIds)) return false;
+  const workspace = record.workspaceProof, proof = record.sessionProof, agent = record.previousAgent;
+  if (!workspace || !['git-workspace-v1', 'filtered-workspace-v1'].includes(workspace.kind) || !recoveryHash(workspace.sha256)
+    || (workspace.kind === 'filtered-workspace-v1' && (!recoveryHash(workspace.scopeSha256)
+      || !recoveryTime(workspace.fileCount) || !recoveryTime(workspace.totalBytes)))) return false;
+  if (agent != null && (!recoveryText(agent.provider) || !recoveryText(agent.sessionId))) return false;
+  if (proof?.stopped !== true || proof.taskId !== task.id || proof.workspaceId !== task.workspaceId
+    || !sameAgent(agent, proof) || !['stopped', 'unbound'].includes(proof.state)) return false;
+  if (agent?.provider === 'codex' && (!recoveryText(proof.receiptId) || !recoveryTime(proof.generation)
+    || !['never-started', 'process-tree-exit', 'supervisor-close'].includes(proof.evidence)
+    || (proof.generation > 0 && !recoveryText(proof.runId)))) return false;
+  if (!agent && (!['no-prior-session', 'owner-retired-session'].includes(proof.evidence)
+    || (proof.evidence === 'owner-retired-session' && !recoveryText(proof.receiptId)))) return false;
+  if (intent) return recoveryIds(record.reviewIds) && record.reviewIds.length > 0 && record.reviewIds.length <= 32;
+  return ['resume', 'release'].includes(record.action) && validRecoveryRecord(record.intent, task, true)
+    && record.intent.reviewIds.includes(record.id) && sameAgent(record.intent.previousAgent, agent)
+    && record.intent.operationIds.every(id => record.operationIds.includes(id));
+}
+
+function assertRecoverySchema(task) {
+  const reviews = task.recoveryReviews ?? [];
+  if (!Array.isArray(reviews) || reviews.length > 32 || reviews.some(row => !validRecoveryRecord(row, task))
+    || new Set(reviews.map(row => row.id)).size !== reviews.length
+    || (task.recoveryReservation !== undefined && typeof task.recoveryReservation !== 'boolean')
+    || (task.recoveryIntent != null && (!validRecoveryRecord(task.recoveryIntent, task, true)
+      || task.recoveryReservation !== true || !sameAgent(task.recoveryIntent.previousAgent, task.currentAgent)))) {
+    throw taskError('STORE_CORRUPT', 'Invalid Task recovery authority');
+  }
+  for (const attempt of task.attempts ?? []) if (attempt.review != null) {
+    const review = reviews.find(row => row.id === attempt.review.reviewId);
+    if (!review || attempt.review.disposition !== 'do-not-replay' || attempt.review.at !== review.at
+      || !sameAgent(attempt, review.previousAgent) || !['started', 'accepted', 'unknown'].includes(attempt.state)) {
+      throw taskError('STORE_CORRUPT', 'Invalid Task Attempt recovery linkage');
+    }
+  }
+}
+
 export function assertTaskSchema(raw, file) {
   if (raw?.schemaVersion !== TASK_SCHEMA_VERSION || !Number.isSafeInteger(raw.revision) || raw.revision < 1
     || !Array.isArray(raw.tasks) || raw.tasks.length > MAX_TASKS) {
@@ -79,6 +126,7 @@ export function assertTaskSchema(raw, file) {
       || new Set(row.attempts.map(item => item.requestId)).size !== row.attempts.length)) {
       throw taskError('STORE_CORRUPT', 'Duplicate Task Attempt identity');
     }
+    assertRecoverySchema(row);
     seen.add(row.id);
   }
   const byId = new Map(raw.tasks.map(row => [row.id, row]));
@@ -158,6 +206,9 @@ function normalizeLoaded(raw) {
       : null,
     acceptance: asArray(raw.acceptance),
     agentHistory: asArray(raw.agentHistory),
+    recoveryReviews: asArray(raw.recoveryReviews),
+    recoveryIntent: raw.recoveryIntent ?? null,
+    recoveryReservation: raw.recoveryReservation === true,
     currentAgent: raw.currentAgent && typeof raw.currentAgent === 'object' ? raw.currentAgent : null,
     delegationPolicy: raw.delegationPolicy && typeof raw.delegationPolicy === 'object' && !Array.isArray(raw.delegationPolicy) ? raw.delegationPolicy : null,
     delegationProposal: raw.delegationProposal && typeof raw.delegationProposal === 'object' && !Array.isArray(raw.delegationProposal) ? raw.delegationProposal : null,

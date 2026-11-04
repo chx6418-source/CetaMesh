@@ -62,6 +62,9 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
    */
   function applyStatus({ id, expectedRev, target, mutateExtra }) {
     const current = requireTask(id);
+    if (current.recoveryIntent && ['running', 'completed', 'cancelled', 'failed'].includes(target)) {
+      throw taskError('TASK_RECOVERY_REVIEW_REQUIRED', 'Pending Owner recovery must finish before changing execution ownership');
+    }
     if (current.status === target) return { task: current, changed: false };
     assertTransition(current.status, target);
     const task = mutate(current.id, expectedRev, (draft) => {
@@ -611,6 +614,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
 
   function update({ id, expectedRev, goal, requirements, workspaceId, currentPhase, progress, note } = {}) {
     const linked = requireTask(id);
+    if (workspaceId !== undefined && normalizeWorkspaceId(workspaceId) !== linked.workspaceId) assertRecoveryWorkspaceBound(linked);
     if (workspaceId !== undefined && normalizeWorkspaceId(workspaceId) !== linked.workspaceId
       && (linked.parentTaskId || store.listAll().some(row => row.parentTaskId === linked.id))) {
       throw taskError('TASK_CHILD_LINKED', 'Linked Task Workspace cannot be changed');
@@ -722,7 +726,10 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
   function activeWorkspaceOwner({ workspaceId, exceptTaskId, forReadOnlyTaskId } = {}) {
     const wantedWorkspace = normalizeWorkspaceId(workspaceId);
     if (!wantedWorkspace) return null;
-    return store.listAll().find(row => row.id !== exceptTaskId && ['running', 'waiting', 'blocked'].includes(row.status) && row.currentAgent
+    return store.listAll().find(row => row.id !== exceptTaskId && (['running', 'waiting', 'blocked'].includes(row.status)
+        || row.status === 'paused' && row.recoveryIntent)
+      && (row.currentAgent || row.recoveryReservation === true || row.executionObservation?.state === 'unknown'
+        || /needs-reconciliation/i.test(row.progress?.note ?? ''))
       && !(forReadOnlyTaskId && row.parentTaskId && row.childContract?.mode === 'read-only')
       && workspacesOverlap(row.workspaceId, wantedWorkspace)) ?? null;
   }
@@ -741,6 +748,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     const normalizedSession = normalizeText(sessionId, 'sessionId', TASK_LIMITS.idChars, { required: true });
     const current = requireTask(id);
     let version = null;
+    if (current.recoveryIntent) throw taskError('TASK_RECOVERY_REVIEW_REQUIRED', 'Pending Owner recovery must finish before attachment');
     if (versionContext != null) {
       if(versionContext.taskId!==id || versionContext.workspaceId!==current.workspaceId
         || versionContext.executorId!==normalizedProvider+':'+normalizedSession
@@ -772,6 +780,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
         draft.agentHistory = draft.agentHistory.slice(-TASK_LIMITS.agentHistory);
       }
       draft.currentAgent = { provider: normalizedProvider, sessionId: normalizedSession, ...(version?{versionContext:version}:{}) };
+      draft.recoveryReservation = false;
       draft.executionObservation = null;
       return draft;
     });
@@ -780,6 +789,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
 
   function detachAgent({ id, expectedRev, note } = {}) {
     const current = requireTask(id);
+    if (current.recoveryIntent) throw taskError('TASK_RECOVERY_REVIEW_REQUIRED', 'Pending Owner recovery must finish before detachment');
     if (!current.currentAgent) return { task: current, changed: false };
     const task = mutate(current.id, expectedRev, (draft) => {
       const timestamp = now();
@@ -793,6 +803,62 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
       return draft;
     });
     return { task, changed: true };
+  }
+
+  // Keep the old execution owner until every journal is acknowledged. A crash
+  // between domain writes leaves this durable intent and its original operation
+  // references for another explicit review; it never silently releases a lease.
+  function prepareOwnerRecovery({ id, expectedRev, reviewId, summary, workspaceProof, sessionProof, operationIds, journalSha256 } = {}) {
+    const current = requireTask(id);
+    if ((current.recoveryReviews?.length ?? 0) >= 32) throw taskError('TASK_RECOVERY_LIMIT', 'Task recovery evidence limit reached; prior evidence is retained');
+    if (!['blocked', 'paused', 'waiting'].includes(current.status) || sessionProof?.stopped !== true
+      || !/^[a-f0-9]{64}$/.test(workspaceProof?.sha256 ?? '') || !Array.isArray(operationIds)) {
+      throw taskError('TASK_RECOVERY_REVIEW_REQUIRED', 'Verified recovery intent is required');
+    }
+    return mutate(id, expectedRev, draft => {
+      const prior = draft.recoveryIntent;
+      draft.recoveryIntent = { ...(prior ?? { id: reviewId, at: now(), summary,
+        previousAgent: draft.currentAgent, previousExecution: draft.executionObservation,
+        workspaceProof, sessionProof, journalSha256 }),
+        reviewIds: [...new Set([...(prior?.reviewIds ?? []), reviewId])].slice(-32),
+        operationIds: [...new Set([...(prior?.operationIds ?? []), ...operationIds])].sort() };
+      draft.recoveryReservation = true;
+      return draft;
+    });
+  }
+
+  // Trusted Core recovery commit. An Owner's text alone never reaches this
+  // method: the Desktop coordinator verifies the exact process/content/journal
+  // proof again first. One atomic Task write preserves the prior run as history.
+  function applyOwnerRecovery({ id, expectedRev, action, reviewId, summary, workspaceProof, sessionProof, operationIds, journalSha256 } = {}) {
+    const current = requireTask(id);
+    if (!['blocked', 'paused', 'waiting'].includes(current.status)
+      || !['resume', 'release'].includes(action) || typeof reviewId !== 'string'
+      || !/^[a-f0-9]{64}$/.test(workspaceProof?.sha256 ?? '') || sessionProof?.stopped !== true
+      || !/^[a-f0-9]{64}$/.test(journalSha256 ?? '')) throw taskError('TASK_RECOVERY_REVIEW_REQUIRED', 'Verified recovery evidence is required');
+    const reviewSummary = normalizeText(redactText(summary), 'reviewSummary', 1000, { required: true });
+    return mutate(id, expectedRev, draft => {
+      const at = now();
+      if (!draft.recoveryIntent?.reviewIds?.includes(reviewId)) throw taskError('TASK_RECOVERY_REVIEW_REQUIRED', 'Durable recovery intent is missing');
+      draft.recoveryReviews = [...(draft.recoveryReviews ?? []), { id: reviewId, at, action, summary: reviewSummary,
+        previousAgent: draft.currentAgent, previousExecution: draft.executionObservation,
+        workspaceProof, sessionProof, operationIds, journalSha256, intent: draft.recoveryIntent }].slice(-32);
+      draft.recoveryIntent = null;
+      const last = draft.agentHistory.at(-1);
+      if (last && last.detachedAt === null) { last.detachedAt = at; last.detachNote = 'Owner verified recovery; prior execution retained'; }
+      draft.currentAgent = null;
+      draft.executionObservation = null;
+      draft.recoveryReservation = action === 'resume';
+      draft.status = action === 'release' ? 'paused' : 'blocked';
+      draft.progress.note = 'Owner reviewed interrupted effect: ' + reviewSummary;
+      draft.decisions = [...draft.decisions, { at, decision: 'Owner reviewed interrupted effect', rationale: reviewSummary }].slice(-TASK_LIMITS.decisions);
+      // Review is not success. Retain the original Attempt, outcome and reason.
+      for (const attempt of draft.attempts ?? []) if (['unknown', 'started', 'accepted'].includes(attempt.state)
+        && attempt.provider === current.currentAgent?.provider && attempt.sessionId === current.currentAgent?.sessionId) {
+        attempt.review = { reviewId, at, disposition: 'do-not-replay' };
+      }
+      return draft;
+    });
   }
 
   // ── 生命周期 ───────────────────────────────────────────────────────────
@@ -977,6 +1043,12 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
   }
 
   /** Explicitly resolves a Task/execution Workspace conflict with optimistic concurrency. */
+  function assertRecoveryWorkspaceBound(task) {
+    if (task.recoveryIntent || task.recoveryReviews?.length) {
+      throw taskError('TASK_RECOVERY_WORKSPACE_BOUND', '该任务的恢复凭据已绑定原 Workspace；请在原工作区继续，其他工作区需创建独立任务。');
+    }
+  }
+
   function reconcileWorkspace({ id, expectedRev, expectedWorkspaceId, observedWorkspaceId, resolution } = {}) {
     const current = requireTask(id);
     const expected = expectedWorkspaceId === undefined ? null : normalizeWorkspaceId(expectedWorkspaceId);
@@ -988,6 +1060,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
       throw taskError('WORKSPACE_RECONCILIATION_STALE', 'Task Workspace changed before resolution');
     }
     if (expected === observed) return { task: current, changed: false };
+    assertRecoveryWorkspaceBound(current);
     const resolvedAt = now();
     const task = mutate(current.id, expectedRev, (draft) => {
       if ((draft.workspaceId ?? null) !== expected) throw taskError('WORKSPACE_RECONCILIATION_STALE', 'Task Workspace changed before resolution');
@@ -1324,6 +1397,8 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     findByGoalWorkspace,
     findByCreateRequestId,
     activeWorkspaceOwner,
+    applyOwnerRecovery,
+    prepareOwnerRecovery,
     activeWorkspaceReaders,
     update,
     remove,

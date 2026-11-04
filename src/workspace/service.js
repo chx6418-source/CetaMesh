@@ -33,10 +33,11 @@ import {
 import { createGitProduct } from './git-product.js';
 import { recoverWorkspaceImports } from './transaction.js';
 import { isManagedWorktree } from './managed-worktree.js';
+import { workspaceContentProof } from './handoff-facts.js';
 
 const GIT_INFO_TTL_MS = 5000;
 
-export function createWorkspaceService({ stateDir, now = () => Date.now(), audit = () => {}, getTask, listTasks } = {}) {
+export function createWorkspaceService({ stateDir, excludedRoots = [], now = () => Date.now(), audit = () => {}, getTask, listTasks } = {}) {
   if (!stateDir || typeof stateDir !== 'string') {
     throw new Error('createWorkspaceService 需要 stateDir');
   }
@@ -422,7 +423,18 @@ export function createWorkspaceService({ stateDir, now = () => Date.now(), audit
     return isInsideRoot(left, right) || isInsideRoot(right, left);
   }
 
-  return { execute, executeApprovedGit, describeWorkspace, applyChanges, workspacesOverlap };
+  // Core-only read: callers cannot supply a root, filter or proof. The same
+  // registry and private-root exclusions govern staging and Owner recovery.
+  async function collectRecoveryProof(id) {
+    const entry = assertWritable(requireWorkspace({ id }));
+    return workspaceContentProof(entry.root, {
+      additionalWorkspaceRoots: registry.list().map(row => row.root),
+      excludedRoots: [stateDir, ...excludedRoots],
+      ...(managedIsolation(entry) ? { trustedSourceRoot: entry.root } : {})
+    });
+  }
+
+  return { execute, executeApprovedGit, describeWorkspace, applyChanges, workspacesOverlap, collectRecoveryProof };
 }
 
 export { WorkspaceBoundaryError, WorkspaceRegistryError, WorkspaceToolError };

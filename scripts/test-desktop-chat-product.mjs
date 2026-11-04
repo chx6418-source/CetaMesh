@@ -848,8 +848,9 @@ function makeFullService({ withKey = true, fetchImpl, baseUrl = 'https://api.dee
   const session = await service.execute({ method: 'chat.sessions.create', params: {} });
   await service.execute({ method: 'chat.config.set', params: { id: session.id, config: { agentProvider: 'dsh' } } });
   await service.execute({ method: 'chat.send', params: { id: session.id, text: '走 DSH Agent' } });
-  const running = await service.execute({ method: 'chat.status', params: { id: session.id } });
-  assert.deepEqual(running.turn.agentActivity, { providerId: 'dsh', label: 'DSH Agent', status: 'running' }, 'the selected Agent is visible immediately while its turn runs');
+  const running = await waitFor(() => service.execute({ method: 'chat.status', params: { id: session.id } }),
+    result => result.turn?.agentActivity?.status === 'running', 'actual Agent dispatch acceptance');
+  assert.deepEqual(running.turn.agentActivity, { providerId: 'dsh', label: 'DSH Agent', status: 'running' }, 'Agent activity begins only after dispatch acceptance');
   assert.ok(uiEvents.some(event => event.event === 'chat.streaming' && event.data.agentActivity?.providerId === 'dsh'), 'stream events carry the running Agent card');
   // DSH Agent 事件经 _injectEvent 注入（与真实 follow 流等价）。
   service._injectEvent(session.id, { type: 'turn/start', data: {} });
@@ -1640,7 +1641,7 @@ ok('Agent events arriving before send ACK are replayed only after provider ident
  await service.execute({method:'chat.config.set',params:{id:session.id,config:{agentProvider:'codex'}}});
  await service.execute({method:'chat.send',params:{id:session.id,text:'hello'}});
  const h=await waitFor(()=>service.execute({method:'chat.history',params:{id:session.id}}),x=>x.messages.at(-1)?.errorCode==='TASK_WORKSPACE_BUSY','Workspace conflict terminal history');
- assert.equal(h.messages.at(-1).agentActivity.status,'failed','rejected startup must not leave a running Agent card');
+ assert.equal(h.messages.at(-1).agentActivity,undefined,'rejected startup never reports Agent or tool execution');
  assert.equal(h.messages.at(-1).routing.blockingTaskId,'task-blocking-owner');
  const status=await service.execute({method:'chat.status',params:{id:session.id}});
  assert.equal(status.lastRouting.blockingTaskId,'task-blocking-owner','review target survives idle status refresh');
@@ -1701,6 +1702,11 @@ ok('Agent events arriving before send ACK are replayed only after provider ident
  };
  try {
   const old=make();
+  await assert.rejects(core.desktopUiService.execute({method:'ui.task.cancel',params:{id:old.id,expectedRev:old.rev}}),e=>e.code==='SESSION_TRANSPORT_UNKNOWN',
+    'Task prose and a missing Session are not stop receipts');
+  const {createCodexSessionLifecycle}=await import('../src/agent/codex-session-lifecycle.js');
+  createCodexSessionLifecycle({stateDir:path.join(home,'state')}).create({sessionId:old.currentAgent.sessionId,
+    taskId:old.id,workspaceId:workspace.id,transport:'exec',snapshotId:'fixture-never-started',attemptId:null});
   const result=await core.desktopUiService.execute({method:'ui.task.cancel',params:{id:old.id,expectedRev:old.rev}});
   assert.equal(result.task.status,'cancelled');
   assert.equal(core.taskService.runtime.get({id:old.id}).task.currentAgent,null);
@@ -1717,7 +1723,7 @@ ok('Agent events arriving before send ACK are replayed only after provider ident
     capabilities:()=>({...codexProvider.capabilities(),appServerRolloutEnabled:true}),
     verifyStoppedTask:async()=>{nativeProofCalled=true;return {stopped:true};}}:core.agentBroker.require(id)}}});
   await assert.rejects(nativeDefaultUi.execute({method:'ui.task.cancel',params:{id:nativeDefaultRow.id,expectedRev:nativeDefaultRow.rev}}),e=>e.code==='SESSION_TRANSPORT_UNKNOWN');
-  assert.equal(nativeProofCalled,false,'unknown transport under native default cannot enter legacy recovery');
+  assert.equal(nativeProofCalled,true,'selected default transport cannot suppress independent exact-session inspection');
   assert.equal(core.taskService.runtime.get({id:nativeDefaultRow.id}).task.status,'blocked');
   core.taskService.runtime.cancel({id:nativeDefaultRow.id,expectedRev:nativeDefaultRow.rev,reason:'isolated fixture cleanup'});
   for(const reason of ['needs-reconciliation: unknown execution','AGENT_TIMEOUT','STAGING_READ_FAILED extra']) {

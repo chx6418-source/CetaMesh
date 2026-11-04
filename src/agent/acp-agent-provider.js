@@ -10,7 +10,7 @@ import { createStagingWorkspace, collectStagedChanges, refreshStagingBaseline, c
 /** ACP v1 only. launch is a trusted process supervisor, never an RPC supplied command. */
 export function createAcpAgentProvider({descriptor, launch, resolveTaskWorkspace, applyChanges,
   cleanupStage = cleanupStagingWorkspace, stagingRoot, excludedRoots = [], listWorkspaceRoots = async () => [], snapshotExcludedPaths = [], validateRuntime = async () => {},
-  approvalStatus = () => null, cancelApproval = async () => {}, requestNativeApproval, log = () => {}} = {}) {
+  approvalStatus = () => null, cancelApproval = async () => {}, requestNativeApproval, log = () => {}, getSessionLifecycle = () => null} = {}) {
   if (!descriptor?.id || !descriptor?.label) throw new TypeError('ACP descriptor required');
   const policy = structuredClone(descriptor), sessions = new Map();
   let creating = 0, shuttingDown = false;
@@ -52,10 +52,19 @@ export function createAcpAgentProvider({descriptor, launch, resolveTaskWorkspace
     if (!s.stopPromise) s.stopPromise = (async()=>{
       let timer;
       try {
-        await Promise.race([
+        const outcomes=await Promise.race([
           Promise.all([Promise.resolve().then(()=>s.handle.close()), s.handle.done]),
           new Promise((_,reject)=>{timer=setTimeout(()=>reject(fault('ACP_CLOSE_UNKNOWN','Runtime exit unconfirmed')),30000);})
         ]);
+        const result=outcomes[1];
+        const treeStopped=result?.processTreeExitConfirmed===true || result?.terminationConfirmed===true;
+        if(result?.terminationConfirmed===false || result?.effectStatus==='unknown' || (s.lifecycle && !treeStopped)) {
+          throw fault('ACP_CLOSE_UNKNOWN','Owned process-tree exit is unconfirmed; staging retained');
+        }
+        if(s.lifecycle) {
+          const row=s.lifecycle.read(s.id);
+          s.lifecycle.settle({sessionId:s.id,generation:row.generation,runId:row.runId,proof:'supervisor-close',staging:'retained'});
+        }
       } finally { clearTimeout(timer); }
     })();
     try { await s.stopPromise; } catch (error) { s.stopPromise = null; throw error; }
@@ -69,6 +78,7 @@ export function createAcpAgentProvider({descriptor, launch, resolveTaskWorkspace
     // The legacy Codex exec code is a post-process-exit recovery proof. ACP snapshots
     // are collected while the native process may still run, so keep Domain codes distinct.
     const errorCode = error?.code === 'STAGING_READ_FAILED' ? 'ACP_STAGING_READ_FAILED' : error?.code;
+    if(s.lifecycle && !s.lifecycle.read(s.id)?.receipt)s.lifecycle.observeIdle({sessionId:s.id,generation:run.generation,runId:run.lifecycleRunId});
     s.permissions?.cancel();
     s.lastRun = {runId:run.runId,phase:run.phase};
     s.run = null; s.state = s.closed ? 'closed' : kind === 'error' ? 'unknown' : 'ready';
@@ -170,7 +180,8 @@ export function createAcpAgentProvider({descriptor, launch, resolveTaskWorkspace
     // Exit and approval revocation are confirmed; retain their completed state if only disk cleanup fails.
     if (s.run) { try { end(s,s.run,'aborted'); } catch (error) { s.buffer.close(error); } }
     s.detach?.();
-    try { cleanupStage(s.stage); }
+    try { const cleanup=cleanupStage(s.stage);
+      if(s.lifecycle?.read(s.id)?.receipt)s.lifecycle.close({sessionId:s.id,staging:cleanup?.removed?'clean':'retained'}); }
     catch (error) {
       s.closing = false; s.state = 'unknown'; s.lastError = error?.code ?? 'ACP_CLEANUP_FAILED';
       s.buffer.close();
@@ -213,6 +224,9 @@ export function createAcpAgentProvider({descriptor, launch, resolveTaskWorkspace
           s = {id:crypto.randomUUID(),taskId,workspaceId,stage,buffer:createAgentEventBuffer(),sequence:0,state:'new',run:null,closed:false};
           if(stage.versionContext)stage.versionContext.executorId=policy.id+':'+s.id;
           record.session = s;
+          s.lifecycle=getSessionLifecycle();
+          s.lifecycle?.create({sessionId:s.id,taskId,workspaceId,transport:'app-server',snapshotId:stage.versionContext?.snapshotId??path.basename(stage.root),
+            attemptId:stage.versionContext?.attemptId??null});
           const onHandle = handle => {
             if (s.handle && s.handle !== handle) throw fault('ACP_LAUNCH_HANDLE_MISMATCH','Launcher changed the supervised handle');
             s.handle = handle;
@@ -303,7 +317,10 @@ export function createAcpAgentProvider({descriptor, launch, resolveTaskWorkspace
         await validateRuntime();
         const prompt = normalizePromptContent(content);
         if (prompt.some(block=>block.type !== 'text' || typeof block.text !== 'string')) throw fault('AGENT_UNSUPPORTED','Only text prompts supported');
-        const run = {id:crypto.randomUUID(),runId,phase,text:'',cancelled:false,resultIds:new Set()}; s.run = run; s.state = 'running';
+        const run = {id:crypto.randomUUID(),runId,phase,text:'',cancelled:false,resultIds:new Set()};
+        run.lifecycleRunId=runId??run.id;
+        if(s.lifecycle)run.generation=s.lifecycle.begin({sessionId:s.id,runId:run.lifecycleRunId,turnId:run.id}).generation;
+        s.run = run; s.state = 'running';
         emit(s,'turn/start',run.id);
         run.done = s.rpc.request('session/prompt',{sessionId:s.nativeId,prompt},{timeoutMs:0})
           .then(result=>finish(s,run,result)).catch(error=>{

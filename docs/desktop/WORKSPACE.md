@@ -108,6 +108,52 @@ Primary error codes: `WORKSPACE_CONFLICT`, `WORKSPACE_RECONCILIATION_REQUIRED`,
 `GIT_COMMIT_DENIED`, `PENDING_BUSY`, `PENDING_RECONCILIATION_REQUIRED`.
 Do not convert any of them into successful delivery or unconditional retry.
 
+## Owner recovery after a lost Agent session
+
+An unavailable transport or `SESSION_NOT_FOUND` from an external Provider is not
+evidence that its process stopped. Keep the old Task binding, execution evidence
+and Workspace ownership until independently verified. For Core-owned Codex
+execution, the lifecycle record binds Task, Workspace, Session, staging snapshot
+and execution generation. Its Windows supervisor issues a stop receipt only when
+the owned Job has no active processes. A root-process exit, missing PID or Owner
+description cannot substitute for that receipt. Historical sessions without
+trustworthy receipts remain unresolved; recovery does not invent missing proof.
+
+`ui.task.recovery.inspect` is read-only. It reports the blocking Task, Agent,
+status, ownership reason, unresolved operations and available actions. Its
+short-lived review token binds the current Task revision, session proof,
+Workspace contents and exact operation set. A non-Git Workspace uses an
+exhaustive bounded proof of the filtered staging scope, including file bytes,
+paths, sizes and modes. This path does not initialize Git. Incomplete scans,
+links, changed roots or concurrent changes cannot certify recovery.
+
+The Owner submits the current token and review through `ui.task.reconcile`.
+Active execution, unknown stop state, active tools, pending approvals, children
+or an unresolved Handoff still prevent retirement. Commit rechecks the recorded
+bindings, writes a recovery intent before acknowledging journals, and then
+records the review and retires the old binding. A partial write retains a fence;
+it cannot free the Workspace or silently mark an unknown effect successful.
+
+The Owner can either release ownership without dispatch or continue the same
+Task with a fresh Session, explicit new instruction and new request identity.
+Prior requests remain non-replayable. Checkpoints, Memory references, reports and
+execution evidence remain available. The compatibility resume entry point also
+requires new instruction/request identity after this retirement. Recovery intent
+and review records remain bound to their original Workspace; changing the Task's
+Workspace cannot detach that evidence from its scope.
+
+A separate durable dispatch fence covers the interval before Task attachment,
+including attachment or blocked-state persistence failure. `blocked` alone never
+releases it. Workspace-busy feedback links to the actual owner; pre-dispatch Chat
+failures do not create Agent output or imply tool completion. The UI requires a
+current inspection before enabling recovery and prevents duplicate submissions.
+
+Registered regressions include `test-owner-session-recovery`,
+`test-agent-workspace-fence`, `test-workspace-recovery-proof`,
+`test-codex-session-lifecycle`, `test-codex-owned-supervisor` and
+`test-chat-failure-feedback-ui`. Controlled fault tests, rendered component tests
+and actual native/model acceptance are separate evidence.
+
 ## Projections, compatibility and maintenance
 
 UI status is derived from real recovery/Git state; timestamps identify whether

@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { writeJsonAtomic } from '../src/storage/json-file.js';
+import { createRuntimeFailureRegistry, projectRuntimeFailures, RUNTIME_FAILURE_CODES } from '../src/product/runtime-failures.js';
 const modulePath=new URL('../src/product/startup-diagnostics.js',import.meta.url);
 assert.ok(fs.existsSync(modulePath),'unified diagnostics must provide a bounded real service check runner');
 const {runDiagnosticChecks,createStartupDiagnostics,preflightCriticalStorage}=await import(modulePath);
@@ -42,6 +43,18 @@ try{
  writeJsonAtomic(transactionFile,{taskId:'startup-fixture',sequence:1,state:'unrecognized'});
  assert.equal((await preflightCriticalStorage({stateDir:temp})).status,'BLOCKED','unknown transaction states remain rejected');
  fs.unlinkSync(transactionFile);
+ for (const journal of ['requests', 'dispatches']) {
+  const file=path.join(temp,'capability',journal+'.json');
+  const prior=fs.existsSync(file)?fs.readFileSync(file):null;
+  writeJsonAtomic(file,{'owner-reviewed':{taskId:'startup-fixture',workspaceId:'workspace-fixture',status:'reconciled',
+   resolution:'owner-reviewed-no-replay',at:Date.now()}});
+  const bytes=fs.readFileSync(file);
+  assert.equal((await preflightCriticalStorage({stateDir:temp})).status,'PASS',`${journal} Owner-reviewed history must survive Core restart`);
+  assert.deepEqual(fs.readFileSync(file),bytes,'startup validates without rewriting reviewed operation evidence');
+  writeJsonAtomic(file,{'owner-reviewed':{status:'pretend-completed'}});
+  assert.equal((await preflightCriticalStorage({stateDir:temp})).status,'BLOCKED','unrecognized operation status remains blocked');
+  if(prior)fs.writeFileSync(file,prior);else fs.unlinkSync(file);
+ }
  let enabledReads=0;const {createMeshService}=await import('../src/mesh/service.js');
  const deferred=createMeshService({stateDir:path.join(temp,'deferred'),autoRestore:false,isEnabled:()=>{enabledReads++;return false;}});
  await new Promise(r=>setTimeout(r,0));assert.equal(enabledReads,0,'no eager transport restoration before startup admission');await deferred.restoreTransport();assert.ok(enabledReads>0);await deferred.close();
@@ -58,6 +71,48 @@ try{
  fs.writeFileSync(reportPath,JSON.stringify({...a,checks:[{id:'core',stage:'core',status:'PASS',code:'CHECK_OK',reason:'API_KEY_PLAINTEXT_PRIVATE',remediation:'SECRET_PRIVATE_BODY',durationMs:1}],chat:'PRIVATE_CHAT_BODY'}));
  const reread=diagnostics.read(a.id);assert.doesNotMatch(JSON.stringify(reread),/API_KEY_PLAINTEXT|SECRET_PRIVATE|PRIVATE_CHAT/,'disk reports are re-projected before display/export');
  diagnostics.close();
+ const safeFailure={at:'2026-11-04T00:00:00.000Z',code:'SESSION_TRANSPORT_UNKNOWN',source:'task',
+  taskId:'task_m0123456_123456789a',blockingTaskId:null,requestId:'11111111-2222-4333-8444-555555555555',
+  correlationId:'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',failureStage:'unknown'};
+ const failureDiagnostics=createStartupDiagnostics({stateDir:path.join(temp,'runtime-failures'),runtimeFailures:()=>[
+  {...safeFailure,message:'PRIVATE_DIAGNOSTIC_PROMPT',path:'C:/private',apiKey:'sk-private-canary'}]});
+ const failureReport=await failureDiagnostics.run('manual');
+ assert.deepEqual(failureReport.runtimeFailures,[safeFailure],'protected report retains only exact bounded fault identities');
+ assert.deepEqual(failureDiagnostics.read(failureReport.id).runtimeFailures,[safeFailure],'correlation evidence survives re-read/export projection');
+ assert.doesNotMatch(JSON.stringify(failureReport),/PRIVATE_DIAGNOSTIC_PROMPT|C:\/private|sk-private-canary/);
+ failureDiagnostics.close();
+ const runtimeFailures=createRuntimeFailureRegistry();
+ const rejected=Object.assign(new Error('PRIVATE_DIAGNOSTIC_PROMPT C:/private sk-private-canary'),{code:'SESSION_TRANSPORT_UNKNOWN'});
+ const {createDesktopIpcRuntime:makeFailureRuntime}=await import('../src/app/ipc-runtime.js');
+ const failureRuntime=makeFailureRuntime({services:{runtimeFailures,desktopUiService:{execute:async()=>{throw rejected;}}}});
+ await assert.rejects(failureRuntime.dispatch({method:'ui.task.resume',params:{id:safeFailure.taskId,requestId:safeFailure.requestId,text:'PRIVATE_DIAGNOSTIC_PROMPT'}}),error=>error===rejected);
+ assert.equal(runtimeFailures.list()[0].taskId,safeFailure.taskId);
+ assert.equal(runtimeFailures.list()[0].requestId,safeFailure.requestId);
+ assert.equal(runtimeFailures.list()[0].code,safeFailure.code);
+ assert.match(runtimeFailures.list()[0].correlationId,/^[a-f0-9-]{36}$/);
+ const brokenOptionalDiagnostics=makeFailureRuntime({services:{runtimeFailures:{record(){throw Error('diagnostic write unavailable');}},
+  desktopUiService:{execute:async()=>{throw rejected;}}}});
+ await assert.rejects(brokenOptionalDiagnostics.dispatch({method:'ui.task.resume',params:{id:safeFailure.taskId}}),error=>error===rejected,
+  'optional diagnostic errors preserve the original execution failure');
+ assert.doesNotMatch(JSON.stringify(runtimeFailures.list()),/PRIVATE_DIAGNOSTIC_PROMPT|C:\/private|sk-private-canary/);
+ const unknownIdentity=runtimeFailures.record({source:'task',code:'PRIVATE_RAW_ERROR_CANARY',requestId:'sk-private-canary C:/private',taskId:'PRIVATE_DIAGNOSTIC_PROMPT'});
+ assert.equal(unknownIdentity.code,'RUNTIME_FAILURE');assert.equal(unknownIdentity.taskId,null);
+ assert.match(unknownIdentity.requestId,/^sha256:[a-f0-9]{64}$/);
+ assert.deepEqual(projectRuntimeFailures([{...safeFailure,code:'PRIVATE_RAW_ERROR_CANARY'}]),[]);
+ const badIds=projectRuntimeFailures([{...safeFailure,taskId:'C:/private',requestId:'sk-private-canary'}])[0];
+ assert.equal(badIds.taskId,null);assert.equal(badIds.requestId,null);
+ let rows=runtimeFailures.list();
+ const live=createStartupDiagnostics({stateDir:path.join(temp,'live-failures'),runtimeFailures:()=>rows});
+ const first=await live.run('manual');rows=[safeFailure];
+ const refreshed=live.status().report;
+ assert.notEqual(first.id,refreshed.id,'new failure metadata persists even when health codes are unchanged');
+ assert.deepEqual(live.read(refreshed.id).runtimeFailures,[safeFailure]);live.close();
+ for(let i=0;i<30;i++)runtimeFailures.record({source:'task',code:'TASK_WORKSPACE_BUSY',requestId:crypto.randomUUID()});
+ assert.equal(runtimeFailures.list().length,20);
+ // Keep the independent Rust export allowlist in conformance with Core.
+ const native=fs.readFileSync(new URL('../desktop-shell/src/startup_diagnostics.rs',import.meta.url),'utf8');
+ const nativeCodes=native.slice(native.indexOf('fn runtime_failure_code'),native.indexOf('fn runtime_task_id'));
+ for(const code of RUNTIME_FAILURE_CODES)assert.ok(nativeCodes.includes('"'+code+'"'),'native export recognizes '+code);
  const {bootstrapCetaMesh}=await import('../src/app/bootstrap.js');
  const {serviceDiagnosticChecks}=await import('../src/app/diagnostic-checks.js');
  const state=path.join(temp,'actual-core/state');const app=bootstrapCetaMesh({stateDir:state,dataRoot:path.dirname(state),config:{}});

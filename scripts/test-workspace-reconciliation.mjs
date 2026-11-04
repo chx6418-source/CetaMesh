@@ -52,7 +52,7 @@ function makeRealRepo() {
 /** 组装 reconciler：真实 workspace 工具 + 注入的登记表。 */
 function makeReconciler({ entries = {} } = {}) {
   return createWorkspaceReconciler({
-    contentProof: workspaceContentProof,
+    contentProof: (root, options) => workspaceContentProof(root, { ...options, additionalWorkspaceRoots: [], excludedRoots: [] }),
     resolveWorkspace: async (id) => entries[id] ?? null,
     gitStatus: (rootDir) => gitStatus(rootDir),
     gitHead: (rootDir) => gitHead(rootDir),

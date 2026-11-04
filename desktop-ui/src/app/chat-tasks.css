@@ -57,3 +57,11 @@
 .task-product-details .task-detail-actions { flex-wrap: wrap; padding-top: var(--spacing-2); }
 .task-product-details .row { flex-wrap: wrap; }
 @media (max-width: 600px) { .usage-disclosure > summary { column-gap: var(--spacing-2); row-gap: var(--spacing-1); } .usage-accounting { flex-basis: 100%; } .task-card-context > div { grid-template-columns: 40px minmax(0,1fr); } }
+/* A request failure is runtime feedback; it is not an assistant response. */
+.chat-failure-card { min-width: 0; overflow-wrap: anywhere; }
+.chat-failure-card p { margin: 8px 0; }
+.chat-failure-card .row { flex-wrap: wrap; }
+.chat-failure-diagnostics { margin-top: 12px; }
+.chat-failure-diagnostics dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 12px; }
+.chat-failure-diagnostics dd { margin: 0; overflow-wrap: anywhere; }
+.chat-request-pending { padding: 16px 20px; color: var(--text-secondary); }

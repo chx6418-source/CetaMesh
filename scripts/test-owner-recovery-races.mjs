@@ -25,10 +25,12 @@ async function main() {
   async function fixture(name, gateStop, lateSuccess = false) {
     const base = path.join(root, name), stateDir = path.join(base, 'state');
     const workspaces = createWorkspaceService({ stateDir });
-    const state = { taskId: null, sends: 0, taskService: null, capabilities: null, ui: null };
+    const state = { taskId: null, sends: 0, sessionCreates: 0, preview: null, commitStatusChecks: 0,
+      taskService: null, capabilities: null, ui: null };
     const stopEntered = Promise.withResolvers(), releaseStop = Promise.withResolvers();
     const effectEntered = Promise.withResolvers(), releaseEffect = Promise.withResolvers();
     let stopGated = false;
+    let committingReview = false;
 
     const binding = { provider: 'cetamesh', sessionId: 'fixture-session' };
     const agentBroker = {
@@ -37,21 +39,29 @@ async function main() {
       health: async () => ({ available: true, authenticated: true, sessionCapable: true }),
       cancel: async () => ({ cancelled: true }),
       async status() {
-        if (gateStop && !stopGated) {
+        if (committingReview) state.commitStatusChecks++;
+        if (gateStop && committingReview && state.commitStatusChecks === 2 && !stopGated) {
           stopGated = true;
           stopEntered.resolve();
           await bounded(releaseStop.promise, 'fixture stop-status release');
         }
         return { running: false, queued: 0, lastRunStatus: 'completed' };
       },
+      async createSession(provider, request) {
+        assert.equal(provider, binding.provider);
+        assert.equal(request.taskId, state.taskId);
+        assert.equal(request.workspaceId, state.taskService.runtime.get({ id: state.taskId }).task.workspaceId);
+        return { sessionId: `fixture-fresh-${++state.sessionCreates}` };
+      },
       setTaskExecutionObserver() { /* The fixture's send records an identified synthetic run. */ },
       async *follow({ signal }) {
         if (!signal.aborted) await new Promise(done => signal.addEventListener('abort', done, { once: true }));
       },
-      async send() {
+      async send({ provider, sessionId }) {
         const rt = state.taskService.runtime;
         const runId = `local-run-${++state.sends}`;
-        const ref = { id: state.taskId, ...binding, phase: 'user', runId };
+        assert.notEqual(sessionId, binding.sessionId, 'Owner recovery must retire the old Session before a fresh instruction');
+        const ref = { id: state.taskId, provider, sessionId, phase: 'user', runId };
         const started = rt.beginExecutionObservation(ref);
         rt.recordAgentReport({ ...ref, expectedRev: started.rev, eventId: `report-${runId}`,
           text: 'Independent synthetic report for the reviewed fresh run.' });
@@ -97,9 +107,17 @@ async function main() {
     const effect = (ws, requestId, approved = false) => state.capabilities.execute({
       method: 'capability.execute', params: { requestId, taskId: state.taskId, workspaceId: ws.id,
         capability: 'fixture.owner-recovery-effect', input: {}, approved } });
-    const review = () => call('ui.task.reconcile', { id: state.taskId, expectedRev: read().rev, reviewed: true,
-      provider: 'cetamesh', reviewSummary: 'Inspected the original one-byte effect in the original Workspace.',
-      nextInstruction: 'Produce a fresh independent report.', requestId: 'owner-fresh-instruction' });
+    const review = async () => {
+      const preview = await call('ui.task.recovery.inspect', { id: state.taskId });
+      assert.equal(preview.canResume, true, JSON.stringify(preview.blockers));
+      assert.ok(preview.reviewToken, 'the race must begin after a real evidence-bound preview');
+      state.preview = preview;
+      committingReview = true;
+      return call('ui.task.reconcile', { id: state.taskId, expectedRev: preview.taskRev, reviewed: true,
+        action: 'resume', reviewToken: preview.reviewToken, reviewedOperationIds: preview.reviewOperationIds,
+        provider: 'cetamesh', reviewSummary: 'Inspected the original one-byte effect in the original Workspace.',
+        nextInstruction: 'Produce a fresh independent report.', requestId: 'owner-fresh-instruction' });
+    };
     const status = id => state.capabilities.broker.dispatchStatus(id)?.status;
     const bytes = ws => fs.statSync(path.join(ws.root, 'marker.bin')).size;
     async function waitUnknown(id) {
@@ -137,6 +155,10 @@ async function main() {
       const reviewed = await bounded(f.review(), 'public Owner recovery and fresh send');
       assert.equal(reviewed.task.status, 'running');
       const current = f.read(), report = current.agentReports.at(-1);
+      assert.equal(current.id, f.state.taskId);
+      assert.equal(f.state.sessionCreates, 1);
+      assert.notEqual(current.currentAgent.sessionId, 'fixture-session');
+      assert.ok(current.agentHistory.some(row => row.sessionId === 'fixture-session'));
       assert.equal(current.executionObservation.state, 'awaiting-review');
       assert.equal(report.runId, current.executionObservation.runId);
       assert.equal(f.state.sends, 1);
@@ -178,6 +200,7 @@ async function main() {
       const result = await bounded(f.review(), 'explicit review of cancelled wrapper with late success');
       assert.equal(result.task.status, 'running');
       assert.equal(f.state.sends, 1);
+      assert.equal(f.state.sessionCreates, 1);
       assert.equal(f.status('late-success-original'), 'completed', 'Owner review preserves the real successful dispatch status');
       const repeat = await f.call('ui.approvals.decide', decision);
       assert.equal(repeat.operationId, accepted.operationId);
@@ -207,6 +230,8 @@ async function main() {
       await assert.rejects(f.effect(f.first, 'old-effect', true), lost);
       pendingReview = f.review().then(value => ({ value }), error => ({ error }));
       await bounded(f.stopEntered.promise, 'last awaited Agent stop-status check');
+      assert.ok(f.state.preview.reviewToken, 'mutation occurs only after the actual preview');
+      assert.equal(f.state.commitStatusChecks, 2, 'mutation occurs at commit final stop verification');
       if (rebindWorkspace) {
         await f.state.taskService.execute({ method: 'task.update', params: { id: blocked.id,
           expectedRev: blocked.rev, workspaceId: later.id } });
@@ -227,6 +252,7 @@ async function main() {
       assert.deepEqual([snapshot.old, snapshot.added], ['outcome-unknown', 'outcome-unknown'], JSON.stringify(snapshot));
       assert.equal(snapshot.decisions, 0);
       assert.equal(snapshot.sends, 0);
+      assert.equal(f.state.sessionCreates, 0);
       assert.equal(snapshot.bytes, rebindWorkspace ? 1 : 2);
       if (rebindWorkspace) assert.equal(f.bytes(f.first), 1);
     } finally {

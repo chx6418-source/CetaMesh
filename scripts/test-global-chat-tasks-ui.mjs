@@ -19,7 +19,7 @@ try{
  const ts=require('typescript'),source=fs.readFileSync(path.join(uiRoot,'src/app/WorkPage.tsx'),'utf8'),ast=ts.createSourceFile('WorkPage.tsx',source,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
  let inspectCode;function visit(node,owner=''){if(ts.isFunctionDeclaration(node)&&node.name?.text==='inspect'&&owner==='TaskRecoveryEvidence')inspectCode=node.getText(ast);if(ts.isFunctionDeclaration(node))owner=node.name?.text??owner;ts.forEachChild(node,child=>visit(child,owner));}visit(ast);assert.ok(inspectCode);
  let resolveInspection;const delayed=new Promise(resolve=>{resolveInspection=resolve;});let applied=0,errors=0;
- const inspectionEnv={identity:{current:'task-owned:8'},task:{id:'task-owned',rev:8},taskClient:{inspectRecovery:()=>delayed},setBusy(){},setInspection(){applied++;},setError(){errors++;},messageOf:error=>error.message};
+ const inspectionEnv={identity:{current:'task-owned:8'},task:{id:'task-owned',rev:8},taskClient:{inspectRecovery:()=>delayed},setBusy(){},setInspection(){applied++;},setError(value){if(value)errors++;},onInspection(){},messageOf:error=>error.message};
  const inspect=new Function('env','with(env){return ('+inspectCode+')}')(inspectionEnv),pendingInspection=inspect();inspectionEnv.identity.current='task-owned:9';resolveInspection({taskRev:8,operations:[]});await pendingInspection;
  assert.equal(applied,0,'a late recovery inspection for an earlier Task revision cannot be shown as current proof');assert.equal(errors,0,'late revision inspection cannot overwrite current error state');
  console.log('PASS late read-only recovery proof is fenced by current Task revision');

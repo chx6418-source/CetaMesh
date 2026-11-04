@@ -11,6 +11,7 @@ import {assertMemorySchema} from '../memory/store.js';
 import {normalizeSettings,SETTINGS_SCHEMA_VERSION} from '../settings/schema.js';
 import {buildDiagnostics} from './diagnostics.js';
 import {buildFeedbackLinks} from './feedback-links.js';
+import {projectRuntimeFailures} from './runtime-failures.js';
 
 export const DIAGNOSTIC_RETENTION=Object.freeze({maxReports:20,maxAgeDays:14,maxBytes:65536});
 const REPORT_ID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
@@ -60,7 +61,7 @@ export async function preflightCriticalStorage({stateDir,timeoutMs=5000}={}){
   ['workspaces.json',v=>{if(v?.version!==1||!['workspaces','pending','activity'].every(k=>Array.isArray(v[k])))throw fault('STORAGE_INVALID');const ids=new Set();for(const row of v.workspaces){if(!object(row)||typeof row.id!=='string'||!row.id||ids.has(row.id)||typeof row.root!=='string')throw fault('STORAGE_INVALID');ids.add(row.id);}}],
   ['capability/approvals.json',v=>{if(!Array.isArray(v)||v.length>1000||v.some(r=>!object(r)||typeof r.id!=='string'||!['pending','approved','consumed','rejected','cancelled','revoked','expired','active','executing','failed'].includes(r.status)))throw fault('STORAGE_INVALID');}],
   ['capability/task-grants.json',v=>{recordMap(v);for(const row of Object.values(v))if(!['capabilities','workspaceIds','taskIds','scopes','types'].every(k=>Array.isArray(row[k])&&row[k].every(x=>typeof x==='string')))throw fault('STORAGE_INVALID');}],
-  ...['requests','dispatches','operations'].map(n=>[`capability/${n}.json`,v=>{recordMap(v);const allowed=n==='requests'?['in-flight','completed','failed']:n==='dispatches'?['prepared','started','completed','failed','failed-no-effect','outcome-unknown','compensated']:['accepted','running','waiting','unknown','completed','failed','cancelled','rejected'];if(Object.entries(v).some(([key,r])=>n==='dispatches'&&key.startsWith('operation-request:')?typeof r.operationKey!=='string'||!Object.hasOwn(v,r.operationKey)||typeof r.fingerprint!=='string'||!/^[a-f0-9]{64}$/.test(r.fingerprint):!allowed.includes(r.status)))throw fault('STORAGE_INVALID');}]),
+  ...['requests','dispatches','operations'].map(n=>[`capability/${n}.json`,v=>{recordMap(v);const allowed=n==='requests'?['in-flight','completed','failed','reconciled']:n==='dispatches'?['prepared','started','completed','failed','failed-no-effect','outcome-unknown','compensated','reconciled']:['accepted','running','waiting','unknown','completed','failed','cancelled','rejected'];if(Object.entries(v).some(([key,r])=>n==='dispatches'&&key.startsWith('operation-request:')?typeof r.operationKey!=='string'||!Object.hasOwn(v,r.operationKey)||typeof r.fingerprint!=='string'||!/^[a-f0-9]{64}$/.test(r.fingerprint):!allowed.includes(r.status)))throw fault('STORAGE_INVALID');}]),
   ...['tool-executions','tool-continuations'].map(n=>[`model/${n}.json`,recordMap]),
   ['continuity/policy.json',validObject],['continuity/monitor.json',validObject],['continuity/rollovers.json',v=>{if(!object(v)||(v.schemaVersion!==undefined&&![1,2].includes(v.schemaVersion))||!Array.isArray(v.rollovers)||(v.automaticBudgets!==undefined&&!object(v.automaticBudgets)))throw fault('STORAGE_INVALID');}],
   ['channel/delivery.json',v=>{if(v?.version!==1||!Array.isArray(v.events)||!object(v.consumers))throw fault('STORAGE_INVALID');for(const c of Object.values(v.consumers)){if(!object(c)||!object(c.deliveries)||!Number.isSafeInteger(c.cursor))throw fault('STORAGE_INVALID');for(const s of Object.values(c.deliveries)){if(!['in-flight','outcome-unknown','acknowledged','denied','retry-authorized'].includes(s))throw fault('STORAGE_INVALID');if(['in-flight','outcome-unknown','retry-authorized'].includes(s))unconfirmedEffects=true;}}}],
@@ -103,9 +104,9 @@ function normalizeReport(report){
  // Reconstruct from trusted configured link at read boundary, never arbitrary persisted URLs/text.
  return {schemaVersion:1,id:report.id,generatedAt:new Date(report.generatedAt).toISOString(),trigger:['startup','manual','runtime'].includes(report.trigger)?report.trigger:'manual',status:aggregate(checks),
   product:{version:identity(p.version),shellVersion:identity(p.shellVersion),build:{buildId:identity(b.buildId),commit:typeof b.commit==='string'&&/^[a-f0-9]{7,64}$/i.test(b.commit)?b.commit:null,buildTime:Number.isFinite(Date.parse(b.buildTime))?new Date(b.buildTime).toISOString():null},runtime:{platform:identity(rt.platform??rt.os),arch:identity(rt.arch),node:identity(rt.node),osVersion:identity(rt.osVersion)}},
-  checks,unconfirmedEffects:typeof report.unconfirmedEffects==='boolean'?report.unconfirmedEffects:null,feedback:{url:null,configured:false},retention:{...DIAGNOSTIC_RETENTION},persisted:report.persisted===true};
+  checks,runtimeFailures:projectRuntimeFailures(report.runtimeFailures),unconfirmedEffects:typeof report.unconfirmedEffects==='boolean'?report.unconfirmedEffects:null,feedback:{url:null,configured:false},retention:{...DIAGNOSTIC_RETENTION},persisted:report.persisted===true};
 }
-export function createStartupDiagnostics({stateDir,aboutInfo=()=>null,releaseConfig=null,checks=()=>[],initialChecks=[],unconfirmedEffects=null,preflight=()=>preflightCriticalStorage({stateDir}),now=()=>Date.now(),publish=()=>{}}={}){
+export function createStartupDiagnostics({stateDir,aboutInfo=()=>null,releaseConfig=null,checks=()=>[],initialChecks=[],unconfirmedEffects=null,preflight=()=>preflightCriticalStorage({stateDir}),now=()=>Date.now(),publish=()=>{},runtimeFailures=()=>[]}={}){
  let current=null,pending=null,closed=false,monitor=null,lastHealthSignature=null;
  const directory=()=>reportDirectory(stateDir);
  const projected=raw=>{const report=normalizeReport(raw);const links=buildFeedbackLinks({config:releaseConfig,aboutInfo:aboutInfo()});const url=links.entries.find(e=>e.id==='bug')?.url??null;report.feedback={url,configured:Boolean(url)};return report;};
@@ -139,16 +140,23 @@ export function createStartupDiagnostics({stateDir,aboutInfo=()=>null,releaseCon
    const bug=links.entries.find(e=>e.id==='bug');
    const report={schemaVersion:1,id:crypto.randomUUID(),generatedAt:new Date(now()).toISOString(),trigger:['startup','manual','runtime'].includes(trigger)?trigger:'manual',status:aggregate(rows),
     product:{version:base.product.version,shellVersion:base.product.shellVersion,build:base.build,runtime:{platform:base.platform.os,arch:base.platform.arch,node:base.platform.node,osVersion:os.release()}},checks:rows,
-    unconfirmedEffects,feedback:{url:bug?.url??null,configured:Boolean(bug?.url)},retention:{...DIAGNOSTIC_RETENTION},persisted:false};
+    runtimeFailures:projectRuntimeFailures(runtimeFailures()),unconfirmedEffects,feedback:{url:bug?.url??null,configured:Boolean(bug?.url)},retention:{...DIAGNOSTIC_RETENTION},persisted:false};
    report.summary=report.status==='PASS'?'核心只读检查通过。可选能力的真实执行仍以各自授权和状态为准。':report.status==='BLOCKED'?'核心通信、安全或数据检查未通过，已阻止正常工作。':'核心服务可用，部分功能受限；查看检查项后处理。';
    current=report;
-   const signature=JSON.stringify([report.status,report.checks.map(c=>[c.id,c.status,c.code]),report.unconfirmedEffects]);
+   const signature=JSON.stringify([report.status,report.checks.map(c=>[c.id,c.status,c.code]),report.unconfirmedEffects,report.runtimeFailures]);
    if(trigger!=='runtime'||signature!==lastHealthSignature){persist(report);publish(report);}
    lastHealthSignature=signature;
    return structuredClone(report);
   })().finally(()=>{pending=null;});return pending;
  }
- return {run,history,read,status:()=>({report:current?structuredClone(current):null}),blocked:()=>current===null||current.status==='BLOCKED',
+ function refreshFailures(){
+  if(!current||closed)return;
+  const rows=projectRuntimeFailures(runtimeFailures());
+  if(JSON.stringify(rows)===JSON.stringify(current.runtimeFailures))return;
+  current={...current,id:crypto.randomUUID(),generatedAt:new Date(now()).toISOString(),trigger:'runtime',runtimeFailures:rows,persisted:false};
+  persist(current);publish(current);
+ }
+ return {run,history,read,refreshFailures,status:()=>{refreshFailures();return {report:current?structuredClone(current):null};},blocked:()=>current===null||current.status==='BLOCKED',
   startMonitoring(intervalMs=30000){
    if(monitor)return;
    const tick=async()=>{

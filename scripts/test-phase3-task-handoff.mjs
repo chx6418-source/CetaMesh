@@ -8,6 +8,13 @@ import { readJsonFile, writeJsonAtomic } from '../src/storage/json-file.js';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-phase3-task-'));
 const services = createCetaMeshServices({ stateDir: path.join(root, 'state'), dataRoot: path.join(root, 'data') });
+async function recoveryPreview(services, id) {
+  const preview = await services.desktopUiService.execute({ method: 'ui.task.recovery.inspect', params: { id } });
+  assert.equal(preview.canResume, true, JSON.stringify(preview.blockers));
+  assert.ok(preview.reviewToken);
+  return { action: 'resume', expectedRev: preview.taskRev, reviewToken: preview.reviewToken,
+    reviewedOperationIds: preview.reviewOperationIds };
+}
 try {
   const workspaceRoot = path.join(root, 'workspace');
   fs.mkdirSync(workspaceRoot);
@@ -91,7 +98,9 @@ try {
   assert.equal(busyStatus.errorCode,'TASK_WORKSPACE_BUSY');
   assert.equal(busyStatus.routing.blockingTaskId, task.id, 'Harbor review target must be the writer, not the newly queued Task');
   const busyHistory = await services.desktopUiService.execute({ method: 'ui.chat.history', params: { id: busyChat.id } });
-  assert.equal(busyHistory.messages.at(-1).agentActivity.status, 'failed');
+  assert.equal(busyHistory.messages.at(-1).role, 'system', 'pre-dispatch failure is local runtime feedback');
+  assert.equal(busyHistory.messages.at(-1).agentActivity, null, 'a rejected dispatch must not invent Agent execution');
+  assert.equal(busyHistory.messages.at(-1).errorCode, 'TASK_WORKSPACE_BUSY');
   assert.equal(sent.length,sentBeforeConflict,'conflict cannot dispatch a second Agent instruction');
   assert.equal(services.taskService.runtime.get({id:task.id}).task.status,'blocked','failed new Chat must not release the unresolved writer');
   services.taskService.runtime.resume({id:task.id,expectedRev:services.taskService.runtime.get({id:task.id}).task.rev,note:'Fixture restore prior running scenario'});
@@ -400,19 +409,22 @@ try {
       input: { agentProvider: 'cetamesh', content: 'must not write before reconciliation' }
     }), error => error.code === 'TASK_WORKSPACE_BUSY',
     'a recovered blocked Task retains the single Workspace writer until Owner reconciliation');
+    const riskPreview = await recoveryPreview(riskRestart, riskTask.id);
     await assert.rejects(riskRestart.desktopUiService.execute({ method: 'ui.task.reconcile', params: {
-      id: riskTask.id, expectedRev: riskRecovered.rev, reviewed: true, reviewSummary: 'Checked the Workspace'
+      id: riskTask.id, ...riskPreview, reviewed: true, reviewSummary: 'Checked the Workspace'
     } }), error => error.code === 'INVALID_PARAMS', 'manual reconciliation requires a new explicit instruction');
     const sentAfterReview = [];
     riskRestart.agentBroker.status = async () => { const error = new Error('Old session ended'); error.code = 'SESSION_NOT_FOUND'; throw error; };
     riskRestart.agentBroker.send = async ({ content }) => { sentAfterReview.push(content); return { accepted: true }; };
     const reconciled = await riskRestart.desktopUiService.execute({ method: 'ui.task.reconcile', params: {
-      id: riskTask.id, expectedRev: riskRecovered.rev, reviewed: true,
+      id: riskTask.id, ...riskPreview, reviewed: true,
       reviewSummary: 'Checked Workspace files and confirmed the prior write outcome',
       nextInstruction: 'Only inspect the existing report; do not repeat the prior write',
       requestId: 'phase3-reconcile-new-instruction'
     } });
     assert.equal(reconciled.task.status, 'running');
+    assert.equal(reconciled.task.id, riskTask.id);
+    assert.notEqual(riskRestart.taskService.runtime.get({ id: riskTask.id }).task.currentAgent.sessionId, 'uncertain-agent-session');
     assert.deepEqual(sentAfterReview, ['Only inspect the existing report; do not repeat the prior write']);
     assert.match(reconciled.task.progress.note, /Owner reviewed interrupted effect/);
     assert.equal(readJsonFile(path.join(riskStateDir, 'capability', 'requests.json'))['uncertain-agent-request'].status,
@@ -429,6 +441,8 @@ try {
     await assert.rejects(riskRestart.chatService.execute({ method: 'chat.continue', params: { id: riskChat.id } }),
       error => error.code === 'RECOVERY_USE_NEW_INSTRUCTION',
     'the interrupted Chat turn cannot replay after the Owner supplied a new reviewed instruction');
+    await assert.rejects(riskRestart.chatService.execute({ method: 'chat.retry', params: { id: riskChat.id } }),
+      error => error.code === 'RECOVERY_USE_NEW_INSTRUCTION', 'retry also cannot replay the reviewed interrupted turn');
   } finally { riskRestart.chatService.close(); await riskRestart.capabilityService.close(); }
   const riskAfterReviewRestart = createCetaMeshServices({ stateDir: riskStateDir,
     dataRoot: path.join(root, 'risk-data') });
@@ -460,12 +474,14 @@ try {
     error => error.code === 'TASK_RECOVERY_REVIEW_REQUIRED',
     'non Git restart must require Owner review instead of retrying unknown effects');
     const reviewed = await nonGitRestart.desktopUiService.execute({ method: 'ui.task.reconcile', params: {
-      id: interrupted.id, expectedRev: interrupted.rev, reviewed: true,
+      id: interrupted.id, ...await recoveryPreview(nonGitRestart, interrupted.id), reviewed: true,
       reviewSummary: 'Checked report.txt and confirmed the prior operation is complete',
       nextInstruction: 'Read report.txt only; do not repeat the prior write',
       requestId: 'non-git-reviewed-new-instruction'
     } });
     assert.equal(reviewed.task.status, 'running', 'Owner-reviewed non Git Task can continue with a new instruction');
+    assert.equal(reviewed.task.id, interrupted.id);
+    assert.notEqual(nonGitRestart.taskService.runtime.get({ id: interrupted.id }).task.currentAgent.sessionId, 'stale-managed-session');
     assert.match(fs.readFileSync(path.join(nonGitRoot, 'report.txt'), 'utf8'), /Existing result/);
     // A failed handoff detaches the stopped Agent: recovery must explicitly
     // select a new executor, before recording review or acknowledging journals.
@@ -478,7 +494,7 @@ try {
     detached = runtime.start({id: detached.id, expectedRev: detached.rev}).task;
     detached = runtime.block({id: detached.id, expectedRev: detached.rev, reason: 'needs-reconciliation: Handoff failed after old Agent stopped (WORKSPACE_CHANGED)'}).task;
     detached = runtime.detachAgent({id: detached.id, expectedRev: detached.rev, note: 'Confirmed stopped fixture'}).task;
-    const recoveryParams = {id: detached.id, expectedRev: detached.rev, reviewed: true,
+    const recoveryParams = {id: detached.id, ...await recoveryPreview(nonGitRestart, detached.id), reviewed: true,
       reviewSummary: 'Fixture files checked; prior Agent stopped; no unknown effect remains',
       nextInstruction: 'Read report.txt only', requestId: 'detached-handoff-recovery'};
     await assert.rejects(nonGitRestart.desktopUiService.execute({method: 'ui.task.reconcile', params: recoveryParams}),

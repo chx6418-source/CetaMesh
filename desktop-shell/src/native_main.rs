@@ -21,6 +21,8 @@ mod native_ui;
 mod product_ui;
 mod theme;
 mod supervisor;
+#[cfg(windows)]
+mod agent_supervisor;
 mod tray;
 mod ui_prefs;
 mod webview_policy;
@@ -484,6 +486,13 @@ fn run_native_ui(paths: DesktopPaths) -> Result<(), String> {
 }
 
 fn main() {
+    #[cfg(windows)]
+    if let Some(config) = std::env::args().find_map(|arg| arg.strip_prefix("--agent-supervisor=").map(PathBuf::from)) {
+        match agent_supervisor::run(&config) {
+            Ok(code) => std::process::exit(code as i32),
+            Err(code) => { eprintln!("{code}"); std::process::exit(78); }
+        }
+    }
     #[cfg(all(windows, debug_assertions))]
     if let Some(report) = std::env::args().find_map(|arg| arg.strip_prefix("--main-webview-smoke=").map(PathBuf::from)) {
         if let Err(error) = main_webview::smoke(&report) { let _ = std::fs::write(&report, format!("FAIL {error}")); }

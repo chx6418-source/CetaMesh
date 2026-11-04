@@ -2,11 +2,14 @@ import { PassThrough } from 'node:stream';
 import { createAcpAgentProvider } from './acp-agent-provider.js';
 import { agentProviderError as fault } from './agent-provider.js';
 import { createJsonRpcTransport } from './protocol/json-rpc-transport.js';
+import { createCodexSessionLifecycle } from './codex-session-lifecycle.js';
 
 export const CODEX_APP_SERVER_SCHEMA_VERSION = '0.163.0-alpha.11.1';
 /** Translates the pinned native protocol into the shared staged Agent lifecycle.
  * No executable/argv or policy is accepted from model messages. */
 export function createCodexAppServerProvider({launch,taskOptions = {},requestNativeApproval,log} = {}) {
+  let lifecycle=taskOptions.sessionLifecycle??(taskOptions.stateDir?createCodexSessionLifecycle({stateDir:taskOptions.stateDir}):null);
+  let sessionCreationStarted=false;
   const runtime = taskOptions.verifiedRuntime;
   const security = runtime?.security;
   const verified = runtime?.verified === true && runtime.version === CODEX_APP_SERVER_SCHEMA_VERSION
@@ -16,6 +19,7 @@ export function createCodexAppServerProvider({launch,taskOptions = {},requestNat
     && security.approvalPolicy === 'on-request';
   const controls = new Map();
   const base = createAcpAgentProvider({resolveTaskWorkspace:taskOptions.resolveTaskWorkspace,
+    getSessionLifecycle:()=>{sessionCreationStarted=true;return lifecycle;},
     applyChanges:taskOptions.applyChanges,approvalStatus:taskOptions.approvalStatus,cancelApproval:taskOptions.cancelApproval,
     descriptor:{id:'codex',label:'Codex App Server',protocolVersion:1,
     verifiedRuntime:verified,security:security ?? {}},requestNativeApproval,log,
@@ -129,7 +133,11 @@ export function createCodexAppServerProvider({launch,taskOptions = {},requestNat
       Promise.resolve(handle.done).then(fail,fail);
       return supervised;
     }});
-  return Object.freeze({...base,async resume({sessionId,taskId,workspaceId} = {}) {
+  return Object.freeze({...base,
+    bindSessionLifecycle(value) {
+      if(sessionCreationStarted && lifecycle!==value)throw fault('CODEX_LIFECYCLE_CONFLICT','Cannot replace active Codex lifecycle ownership');
+      lifecycle=value;
+    },async resume({sessionId,taskId,workspaceId} = {}) {
     const status = await base.status({sessionId});
     if (status.state !== 'ready' || status.taskId !== taskId || status.workspaceId !== workspaceId) throw fault('TASK_WORKSPACE_MISMATCH','Codex resume binding unavailable');
     const control = controls.get(sessionId);

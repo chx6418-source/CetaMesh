@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { CliAgentProcess } from './cli-agent-process.js';
+import { createCodexSessionLifecycle } from './codex-session-lifecycle.js';
 import { agentProviderError, defineAgentProvider } from './agent-provider.js';
 import {
   cleanupStagingWorkspace,
@@ -303,10 +304,11 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
   listWorkspaceRoots = () => [], excludedRoots = [], stagingRoot = null, createStage = createStagingWorkspace,
   applyChanges = async () => { throw agentProviderError('AGENT_BOUNDARY_UNSUPPORTED', 'Capability Broker import adapter is unavailable'); },
   environment = process.env, codexHome = null, securityMode = 'native', authorizeOpenAiEnvironment = () => false,
-  approvalStatus = () => null, cancelApproval = () => ({ cancelled: false }), timeoutMs = 10 * 60 * 1000, log = () => {} } = {}) {
+  approvalStatus = () => null, cancelApproval = () => ({ cancelled: false }), timeoutMs = 10 * 60 * 1000, log = () => {}, stateDir, sessionLifecycle } = {}) {
   const resolvedCodexHome = codexHome || environment.CODEX_HOME || path.join(environment.USERPROFILE || os.homedir(), '.codex');
   const cli = cliProcess ?? new CliAgentProcess({ name: 'codex', executable,
-    envSource: () => ({ ...environment, CODEX_HOME: resolvedCodexHome }) });
+    envSource: () => ({ ...environment, CODEX_HOME: resolvedCodexHome }), ownedTreeStateDir:stateDir });
+  const lifecycle = sessionLifecycle ?? createCodexSessionLifecycle({stateDir});
   let inspection = inspectCodexCli(cli);
   let authenticated = inspection.available ? loginState(cli) : false;
   let lastProbeAt = Date.now();
@@ -409,6 +411,10 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
       run.terminationUnknown = true;
       session.lastRunStatus = 'unknown';
       session.lastError = { code: result.code === 'PROCESS_EXIT_UNCONFIRMED' ? result.code : 'INVOKE_CANCEL_UNCONFIRMED' };
+      // Persisting an observation cannot discard the still-owned native handle.
+      // The pre-dispatch running row already denies recovery if this write fails.
+      try { lifecycle.unknown({sessionId:session.id,generation:run.generation,runId:run.lifecycleRunId}); }
+      catch (error) { log(`Codex unknown lifecycle persistence failed: ${error?.code ?? 'CODEX_LIFECYCLE_WRITE_FAILED'}`); }
       // End the public turn with an error, but retain the active process and
       // staging ownership. emitTurnEnd intentionally clears activeRun, so it
       // must not be used for an unconfirmed external process.
@@ -417,6 +423,11 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
       } } }));
       return;
     }
+    const stopBinding={sessionId:session.id,generation:run.generation,runId:run.lifecycleRunId};
+    const treeStopped=result.processTreeExitConfirmed===true || result.terminationConfirmed===true;
+    if(treeStopped)lifecycle.settle({...stopBinding,proof:'process-tree-exit',staging:'retained'});
+    else lifecycle.observeIdle(stopBinding); // Legacy root-only exit does not certify restart recovery.
+    session.lastProcessProof=treeStopped ? stopBinding : null;
     flushOutput(session, run);
     if (result.timedOut) {
       session.lastRunStatus = 'timeout';
@@ -667,6 +678,9 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
         });
         const id = crypto.randomUUID();
         if(stage.versionContext)stage.versionContext.executorId='codex:'+id;
+        try { lifecycle.create({sessionId:id,taskId:binding.task.id,workspaceId:binding.workspace.id,transport:'exec',
+          snapshotId:stage.versionContext?.snapshotId??path.basename(stage.root),attemptId:stage.versionContext?.attemptId??null}); }
+        catch(error) { cleanupStagingWorkspace(stage);throw error; }
         sessions.set(id, {
           id,
           taskId: binding.task.id,
@@ -707,6 +721,9 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
           String(content ?? '')
         ].filter(Boolean).join('\n\n');
         const run = { turnId, runId, phase, nativeReadinessToken, readinessVerified:false, successfulTool:false, resultIds: new Set(), inspectionGeneration, pendingText: '', text: '', usage: null, turnCompleted: false, failed: false, handle: null };
+        run.lifecycleRunId=runId??turnId;
+        run.generation=lifecycle.begin({sessionId:session.id,runId:run.lifecycleRunId,turnId}).generation;
+        session.lastProcessProof=null;
         session.activeRun = run;
         session.lastRunStatus = 'running';
         emit(session, makeEvent('turn/start', turnId));
@@ -738,6 +755,7 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
             onStdout: (chunk) => parseOutput(session, run, chunk)
           });
         } catch (error) {
+          lifecycle.unknown({sessionId:session.id,generation:run.generation,runId:run.lifecycleRunId});
           session.activeRun = null;
           throw agentProviderError(error?.code === 'PROVIDER_UNAVAILABLE' ? 'PROVIDER_UNAVAILABLE' : 'PROCESS_START_FAILED', 'Unable to start the Codex CLI process', { cause: error });
         }
@@ -826,10 +844,15 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
             && (result?.terminationConfirmed === false || result?.effectStatus === 'unknown'))) {
             throw agentProviderError('PROVIDER_CLOSE_UNKNOWN', 'Codex exit is unconfirmed; staging and ownership retained');
           }
+          if(result?.processTreeExitConfirmed===true || result?.terminationConfirmed===true || handle.terminationConfirmed?.()===true) {
+            const row=lifecycle.read(sessionId);
+            lifecycle.settle({sessionId,generation:row.generation,runId:row.runId,proof:'process-tree-exit',staging:'retained'});
+          }
         }
         session.closed = true;
         if (session.activeRun?.finalized) await session.activeRun.finalized;
-        cleanupStagingWorkspace(session.stage);
+        const cleanup=cleanupStagingWorkspace(session.stage);
+        if(lifecycle.read(sessionId)?.receipt)lifecycle.close({sessionId,staging:cleanup.removed?'clean':'retained'});
         for (const wake of session.waiters.splice(0)) wake();
         sessions.delete(session.id);
         return { closed: true, provider: 'codex', sessionId };
@@ -917,20 +940,33 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
         ...(security.verificationError ? { sessionCapable: false, taskEligible: false, readyForTask: false } : {}),
         health: security.verificationError ? 'unavailable' : authenticated ? 'ready' : inspection.available ? 'needs_auth' : 'unavailable', supportsResume: inspection.supportsResume === true });
     },
-    // Trusted Core recovery only; never exposed as an Agent/renderer stop claim.
-    // STAGING_READ_FAILED is emitted by finalizeRun after handle.done (process close),
-    // before applyChanges. A blocked Task cannot dispatch another native turn.
-    // Other terminal/error codes do not establish this particular stop boundary.
+    // Trusted Core recovery only. Human prose, lost routing and PID probes cannot mint receipts.
+    async verifyTaskQuiescence({ taskId, workspaceId, allowEmpty = false } = {}) {
+      if (!taskId || !workspaceId || typeof lifecycle.forTask !== 'function') return { stopped: false };
+      const rows = lifecycle.forTask(taskId);
+      // Include sessions created before attachment: failed startup can leave an
+      // orphan process that is absent from Task history but still owns this scope.
+      return { stopped: (allowEmpty || rows.length > 0) && rows.every(row => row.workspaceId === workspaceId
+        && row.receipt && ['idle', 'stopped', 'closed'].includes(row.state)
+        && !sessions.get(row.sessionId)?.activeRun) };
+    },
     async verifyStoppedTask({ taskId, workspaceId, sessionId } = {}) {
-      if (!taskId || !workspaceId || !sessionId || sessions.has(sessionId)
+      if (!taskId || !workspaceId || !sessionId || sessions.get(sessionId)?.activeRun
           || typeof resolveTaskWorkspace !== 'function') return { stopped: false };
+      const row=lifecycle.read(sessionId);
+      if(!row?.receipt || !['idle','stopped','closed'].includes(row.state)
+        || row.taskId!==taskId || row.workspaceId!==workspaceId) return {stopped:false};
+      if (!(await this.verifyTaskQuiescence({ taskId, workspaceId })).stopped) return { stopped: false };
       const binding = await resolveTaskWorkspace({ taskId, workspaceId });
       const task = binding?.task;
       if (!binding?.workspace || task?.id !== taskId || task.workspaceId !== workspaceId
           || task.currentAgent?.provider !== 'codex' || task.currentAgent.sessionId !== sessionId
-          || task.status !== 'blocked' || task.progress?.note !== 'STAGING_READ_FAILED') return { stopped: false };
+          || (row.generation>0 && task.executionObservation?.runId!==row.runId)) return { stopped: false };
+      if(row.attemptId!==null && !(task.attempts??[]).some(attempt=>attempt.id===row.attemptId
+        && attempt.provider==='codex' && (!attempt.sessionId||attempt.sessionId===sessionId)))return {stopped:false};
       return { stopped: true, provider: 'codex', taskId, workspaceId, sessionId,
-        evidence: 'codex-post-exit-before-import-read-failure' };
+        receiptId:row.receipt.id,generation:row.generation,runId:row.runId,snapshotId:row.snapshotId,
+        attemptId:row.attemptId,transport:row.transport,evidence:row.receipt.evidence };
     },
     configure(settings = {}) {
       const allowed = new Set(['model', 'reasoningEffort']);
@@ -943,16 +979,14 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
     },
     async shutdown() {
       await cli.shutdown();
-      for (const session of sessions.values()) {
-        try { cleanupStagingWorkspace(session.stage); }
-        catch (error) { log(`Codex staging cleanup failed: ${error?.code ?? 'STAGING_CLEANUP_FAILED'}`); }
-        session.closed = true;
-        for (const wake of session.waiters.splice(0)) wake();
+      const results=await Promise.allSettled([...sessions.keys()].map(sessionId=>contract.closeSession({sessionId})));
+      if(results.some(result=>result.status==='rejected')) {
+        throw agentProviderError('PROVIDER_CLOSE_UNKNOWN','Codex session shutdown is unconfirmed; staging and ownership retained');
       }
-      sessions.clear();
       log('Codex Agent Provider 已关闭');
     },
     _inspection: { ...inspection, authenticated },
+    _sessionLifecycle:lifecycle,
     _sessions: sessions
   });
 }

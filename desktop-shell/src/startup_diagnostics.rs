@@ -145,7 +145,7 @@ fn base_report(trigger: &str, code: &str, pending: bool) -> Value {
     let build=bounded_read(&crate::current_exe_dir().join("build-info.json")).unwrap_or(Value::Null);
     json!({"schemaVersion":1,"id":new_id(),"generatedAt":iso_time(SystemTime::now()),"trigger":trigger,"status":"BLOCKED",
         "product":shell_product(&build),
-        "checks":[check("shell.rpc","BLOCKED",code,code=="CORE_RPC_TIMEOUT",0)],"unconfirmedEffects":null,
+        "checks":[check("shell.rpc","BLOCKED",code,code=="CORE_RPC_TIMEOUT",0)],"unconfirmedEffects":null,"runtimeFailures":[],
         "feedback":{"url":null,"configured":false},"retention":{"maxReports":MAX_REPORTS,"maxAgeDays":14,"maxBytes":MAX_BYTES},
         "persisted":false,"pending":pending})
 }
@@ -217,6 +217,51 @@ fn shell_product(build:&Value)->Value {
         "runtime":{"platform":std::env::consts::OS,"arch":std::env::consts::ARCH,"node":null}})
 }
 
+fn runtime_failure_code(code:&str)->bool {
+    matches!(code,"TASK_WORKSPACE_BUSY"|"TASK_WORKSPACE_REQUIRED"|"TASK_WORKSPACE_MISMATCH"
+        |"TASK_RECOVERY_REVIEW_REQUIRED"|"TASK_RECOVERY_REVIEW_STALE"|"TASK_RECOVERY_OPERATIONS_REQUIRED"
+        |"TASK_RECOVERY_INSTRUCTION_REQUIRED"|"TASK_RECOVERY_NOT_REQUIRED"|"TASK_RECOVERY_LIMIT"|"TASK_RECOVERY_IN_FLIGHT"
+        |"TASK_CONFLICT"|"TASK_NOT_FOUND"|"TASK_RECOVERY_WORKSPACE_BOUND"
+        |"SESSION_TRANSPORT_UNKNOWN"|"SESSION_NOT_FOUND"|"SESSION_EXECUTION_UNCONFIRMED"
+        |"TASK_EXECUTION_UNCONFIRMED"|"OPERATION_STILL_RUNNING"|"OPERATION_REPLAY_DENIED"
+        |"NEEDS_RECONCILIATION"|"APPROVAL_RECOVERY_REQUIRED"|"APPROVAL_REQUIRED"|"RECOVERY_USE_NEW_INSTRUCTION"
+        |"PROVIDER_UNAVAILABLE"|"PROVIDER_ERROR"|"PROVIDER_CLOSE_UNKNOWN"|"ACP_CLOSE_UNKNOWN"
+        |"INVOKE_CANCEL_UNCONFIRMED"|"INVOKE_CANCELLED"|"TASK_HANDOFF_IN_FLIGHT"
+        |"WORKSPACE_RECONCILIATION_FAILED"|"WORKSPACE_CONTENT_PROOF_UNAVAILABLE"|"STAGING_READ_FAILED"
+        |"CODEX_LIFECYCLE_STORE_INVALID"|"CODEX_LIFECYCLE_WRITE_FAILED"|"CODEX_STOP_PROOF_INVALID"
+        |"CORE_DIAGNOSTICS_BLOCKED"|"RUNTIME_FAILURE")
+}
+
+fn runtime_task_id(value:&Value)->Value {
+    value.as_str().filter(|s|s.strip_prefix("task_").and_then(|v|v.split_once('_')).is_some_and(|(time,nonce)|
+        !time.is_empty()&&time.len()<=20&&time.bytes().all(|b|b.is_ascii_alphanumeric())
+        &&nonce.len()==10&&nonce.bytes().all(|b|b.is_ascii_hexdigit())))
+        .map(|s|json!(s)).unwrap_or(Value::Null)
+}
+
+fn runtime_request_id(value:&Value)->Value {
+    value.as_str().filter(|s|{
+        valid_report_id(s)
+            || s.strip_prefix("sha256:").is_some_and(|v|v.len()==64&&v.bytes().all(|b|b.is_ascii_hexdigit()))
+            || s.strip_prefix("cetamesh-chat-").is_some_and(|v|v.is_ascii()&&v.len()==73
+                &&v.as_bytes()[36]==b'-'&&valid_report_id(&v[..36])&&valid_report_id(&v[37..]))
+    }).map(|s|json!(s)).unwrap_or(Value::Null)
+}
+
+fn project_runtime_failures(value:&Value)->Value {
+    let Some(rows)=value.as_array()else{return json!([]);};
+    Value::Array(rows.iter().skip(rows.len().saturating_sub(20)).filter_map(|row|{
+        let code=row["code"].as_str()?;let source=row["source"].as_str()?;
+        let correlation=row["correlationId"].as_str()?;let at=timestamp(&row["at"]);
+        if !runtime_failure_code(code)||!matches!(source,"task"|"chat"|"agent"|"workspace"|"capability"|"continuity")
+            ||!valid_report_id(correlation)||at.is_null(){return None;}
+        Some(json!({"at":at,"code":code,"source":source,"correlationId":correlation,
+            "taskId":runtime_task_id(&row["taskId"]),"blockingTaskId":runtime_task_id(&row["blockingTaskId"]),
+            "requestId":runtime_request_id(&row["requestId"]),
+            "failureStage":match row["failureStage"].as_str(){Some("pre-dispatch")=>"pre-dispatch",Some("execution")=>"execution",_=>"unknown"}}))
+    }).collect())
+}
+
 /// Validate before accepting a report from Core or the local history. Unknown
 /// top-level fields are discarded, never copied into an export.
 fn project_report(input:&Value, trigger:&str) -> Option<Value> {
@@ -250,6 +295,7 @@ fn project_report(input:&Value, trigger:&str) -> Option<Value> {
     report["status"]=input["status"].clone();
     report["product"]["identitySource"]=json!(if input["product"]["identitySource"]=="shell"{"shell"}else{"core"});
     report["unconfirmedEffects"]=if input["unconfirmedEffects"].is_boolean(){input["unconfirmedEffects"].clone()}else{Value::Null};
+    report["runtimeFailures"]=project_runtime_failures(&input["runtimeFailures"]);
     for field in ["version","shellVersion"] {report["product"][field]=metadata(&input["product"][field],80);}
     report["product"]["shellVersion"]=json!(env!("CARGO_PKG_VERSION"));
     for field in ["buildId","commit"] {report["product"]["build"][field]=metadata(&input["product"]["build"][field],80);}
@@ -291,13 +337,21 @@ impl NativeDiagnostics {
         report["summary"]=json!(format!("CetaMesh {} · {} · {}",report["status"].as_str().unwrap_or("BLOCKED"),
             report["generatedAt"].as_str().unwrap_or(""),report["checks"].as_array().map(|v|v.len()).unwrap_or(0)));
         if persist {
+            // A transport outage must not erase already protected Task/request
+            // correlation metadata from the last usable Core report.
+            if report["product"]["identitySource"]=="shell" {
+                if let Some(current)=latest.as_ref().and_then(|v|v.as_ref()) {
+                    report["runtimeFailures"]=project_runtime_failures(&current["runtimeFailures"]);
+                }
+            }
             // Stable check results share one stored report; 30s health polls do
             // not churn the history or evict the original failure evidence.
             if let Some(current)=latest.as_ref().and_then(|v|v.as_ref()) {
                 let stable_checks=|r:&Value|r["checks"].as_array().map(|rows|rows.iter().map(|v|json!({"id":v["id"],"status":v["status"],"code":v["code"],"timedOut":v["timedOut"],"transport":project_transport_failure(&v["transport"])})).collect::<Vec<_>>());
                 if report["trigger"]!="manual" && current["status"]==report["status"]
                     && stable_checks(&current)==stable_checks(&report) && current["product"]==report["product"]
-                    && current["unconfirmedEffects"]==report["unconfirmedEffects"] {
+                    && current["unconfirmedEffects"]==report["unconfirmedEffects"]
+                    && current["runtimeFailures"]==report["runtimeFailures"] {
                     return current.clone();
                 }
             }
@@ -440,6 +494,51 @@ pub fn show_native_startup_failure(data_dir:&Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test] fn runtime_failure_projection_retains_identity_without_private_error_content(){
+        let mut report=base_report("runtime","CORE_RPC_UNAVAILABLE",false);
+        report["runtimeFailures"]=json!([{"at":"2026-11-04T00:00:00.000Z","code":"SESSION_TRANSPORT_UNKNOWN","source":"task",
+            "taskId":"task_m0123456_123456789a","blockingTaskId":null,"requestId":"11111111-2222-4333-8444-555555555555",
+            "correlationId":"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee","failureStage":"unknown",
+            "message":"PRIVATE_DIAGNOSTIC_PROMPT","path":"C:/private","apiKey":"sk-private-canary"}]);
+        let safe=project_report(&report,"runtime").unwrap();
+        assert_eq!(safe["runtimeFailures"][0]["code"],"SESSION_TRANSPORT_UNKNOWN");
+        assert_eq!(safe["runtimeFailures"][0]["taskId"],"task_m0123456_123456789a");
+        assert_eq!(safe["runtimeFailures"][0]["requestId"],"11111111-2222-4333-8444-555555555555");
+        assert_eq!(safe["runtimeFailures"][0]["correlationId"],"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
+        assert!(!safe.to_string().contains("PRIVATE_DIAGNOSTIC_PROMPT"));
+        assert!(!safe.to_string().contains("C:/private"));
+        assert!(!safe.to_string().contains("sk-private-canary"));
+    }
+    #[test] fn runtime_failure_projection_rejects_poisoned_codes_and_identifiers(){
+        let good=json!({"at":"2026-11-04T00:00:00.000Z","code":"TASK_WORKSPACE_BUSY","source":"task",
+            "taskId":"C:/private","blockingTaskId":"sk-private-canary","requestId":"PRIVATE_PROMPT",
+            "correlationId":"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee","failureStage":"PRIVATE_STAGE"});
+        let safe=project_runtime_failures(&json!([good.clone()]));
+        assert_eq!(safe[0]["taskId"],Value::Null);assert_eq!(safe[0]["blockingTaskId"],Value::Null);
+        assert_eq!(safe[0]["requestId"],Value::Null);assert_eq!(safe[0]["failureStage"],"unknown");
+        for key in ["code","source","correlationId","at"] {
+            let mut bad=good.clone();bad[key]=json!("PRIVATE_CANARY");
+            assert_eq!(project_runtime_failures(&json!([bad])),json!([]));
+        }
+        assert_eq!(project_runtime_failures(&Value::Array(vec![good;30])).as_array().unwrap().len(),20);
+    }
+    #[test] fn fault_correlation_change_survives_stable_health_and_later_rpc_failure(){
+        let root=std::env::temp_dir().join(format!("cetamesh-diagnostic-{}",new_id()));
+        let adapter=NativeDiagnostics::new(&root);
+        let mut report=base_report("runtime","CORE_RPC_UNAVAILABLE",false);
+        report["product"]["identitySource"]=json!("core");
+        let prior=adapter.finish(report.clone(),true);
+        report["runtimeFailures"]=json!([{"at":"2026-11-04T00:00:00.000Z","code":"TASK_WORKSPACE_BUSY","source":"task",
+            "taskId":"task_m0123456_123456789a","blockingTaskId":null,"requestId":"11111111-2222-4333-8444-555555555555",
+            "correlationId":"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee","failureStage":"pre-dispatch"}]);
+        let changed=adapter.finish(report.clone(),true);
+        assert_ne!(prior["id"],changed["id"]);
+        let disconnected=adapter.finish(base_report("runtime","CORE_RPC_TIMEOUT",false),true);
+        assert_eq!(disconnected["runtimeFailures"],report["runtimeFailures"]);
+        let exported=adapter.report_for_export(disconnected["id"].as_str().unwrap()).unwrap();
+        assert_eq!(exported["runtimeFailures"],report["runtimeFailures"]);
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test] fn rpc_failure_keeps_elapsed_and_safe_transport_cause(){
         let report=rpc_failure_report("connect to Core pipe: Core IPC request timed out: All pipe instances are busy. (os error 231)",2007);
         assert_eq!(report["checks"][0]["durationMs"],2007);

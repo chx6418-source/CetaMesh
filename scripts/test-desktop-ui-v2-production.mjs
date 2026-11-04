@@ -235,7 +235,8 @@ check('Plugin Center filters featured and updates and stages a real update revie
 check('Chat Core stream events reach Harbor through the composition root event bus', () => {
   const composition = read('src/app/service-container.js');
   const chat = read('src/desktop/chat-service.js');
-  assert.match(composition, /const chatService = createChatService\([\s\S]{0,1800}onEvent:\s*event\s*=>\s*uiEventBus\.publish\(event\.event,\s*event\.data\)/);
+  const chatComposition = composition.slice(composition.indexOf('const chatService = createChatService(')).split('\n  });', 1)[0];
+  assert.match(chatComposition, /onEvent:\s*event\s*=>\s*uiEventBus\.publish\(event\.event,\s*event\.data\)/);
   assert.match(chat, /onEvent\?\.\(\{ event: 'chat\.streaming'/);
   assert.match(chat, /onEvent\?\.\(\{ event: 'chat\.updated'/);
 });
@@ -246,7 +247,10 @@ check('Harbor reconciles optimistic sends, selections, activities, and retry by 
   const chat = read('src/desktop/chat-service.js');
   assert.match(app, /clientMessageId: string/);
   assert.match(app, /pendingSendsRef\.current\.set\(clientMessageId/);
-  assert.match(app, /重试发送/);
+  assert.match(app, /import \{ ChatFailureCard, chatFailureInHistory, type ChatFailure \} from '\.\/ChatFailure'/);
+  assert.match(app, /<ChatFailureCard failure=\{sendError\}[^>]*onRetry=\{onRetry\}/,
+    'optimistic-send failures reach the classified production failure component');
+  assert.match(read('desktop-ui/src/app/ChatFailure.tsx'), /failure\.failureStage === 'pre-dispatch'[\s\S]*重新提交/);
   assert.match(app, /onSessionUpdate\(await chatClient\.setConfig/);
   assert.match(app, /正在思考…/);
   assert.match(app, /status\.toolActivity/);

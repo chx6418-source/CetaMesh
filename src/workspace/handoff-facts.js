@@ -3,6 +3,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { gitRun, gitStatus, readFile } from './tools.js';
 import { resolveInside } from './boundary.js';
+import { collectStagingSourceSnapshot } from './staging.js';
 
 const MAX_FILES = 25000;
 const MAX_BYTES = 64 * 1024 * 1024;
@@ -12,11 +13,38 @@ const fail = reasonCode => { throw Object.assign(new Error('Workspace content pr
   ...(reasonCode ? {reasonCode} : {})}); };
 
 // Core-only observation. The packet receives one digest, with no file contents or per-file hashes.
-export async function workspaceContentProof(root, {relevantFiles = []} = {}) {
-  const status = await gitStatus(root, {completeFiles:true});
+export async function workspaceContentProof(root, {relevantFiles = [], additionalWorkspaceRoots, excludedRoots,
+  trustedSourceRoot = null, maxFiles = MAX_FILES, maxBytes = MAX_BYTES} = {}) {
+  let status;
+  try { status = await gitStatus(root, {completeFiles:true}); }
+  catch { fail(); }
   const relevant = relevantFiles.map(file => String(file));
   if (relevant.some(protectedPath) || status.entries.some(row =>
     protectedPath(row.path) || (row.origPath && protectedPath(row.origPath)))) fail();
+  if (!status.isRepo) {
+    try {
+      const snapshot = collectStagingSourceSnapshot({ sourceRoot: root, additionalWorkspaceRoots, excludedRoots,
+        trustedSourceRoot, maxFiles, maxBytes });
+      // A declared relevant path cannot borrow evidence from an excluded subtree.
+      for (const name of relevant) {
+        const resolved = resolveInside(root, name);
+        const relative = path.relative(root, resolved.absolute).split(path.sep).join('/');
+        if (!snapshot.files.has(relative) && fs.existsSync(resolved.real)) fail();
+      }
+      if (JSON.stringify(status) !== JSON.stringify(await gitStatus(root, { completeFiles: true }))) fail();
+      // The final asynchronous Git probe must not open a collection race.
+      snapshot.assertUnchanged();
+      const scopeSha256 = crypto.createHash('sha256').update(JSON.stringify(snapshot.scope)).digest('hex');
+      const hash = crypto.createHash('sha256').update(JSON.stringify(['filtered-workspace-v1', scopeSha256]));
+      for (const [name, row] of [...snapshot.files].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
+        hash.update(JSON.stringify([name, row.size, row.mode, row.hash]));
+      }
+      return { kind: 'filtered-workspace-v1', sha256: hash.digest('hex'), scopeSha256,
+        fileCount: snapshot.files.size, totalBytes: snapshot.totalBytes };
+    } catch (error) {
+      fail(error?.code === 'WORKSPACE_CONTENT_NESTED_REPOSITORY' ? error.code : undefined);
+    }
+  }
   const readIndex = async () => status.isRepo
     ? (await gitRun(root, ['ls-files','--stage','-z','--','.'])).stdout : '';
   const readUntracked = async () => status.isRepo

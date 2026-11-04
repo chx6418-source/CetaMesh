@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {gitStatus} from './tools.js';
 import { gitPathKey, selectGitSnapshot } from './git-snapshot.js';
-import { isInsideRoot } from './boundary.js';
+import { canonicalizeRoot, isInsideRoot, resolveInside } from './boundary.js';
 
 const DEFAULT_MAX_FILES = 25_000;
 const DEFAULT_MAX_BYTES = 512 * 1024 * 1024;
@@ -43,6 +43,11 @@ function hashFile(file) {
 
 function hashContent(content) {
   return crypto.createHash('sha256').update(content).digest('hex');
+}
+
+function hasEntry(file) {
+  try { fs.lstatSync(file); return true; }
+  catch (error) { if (error?.code === 'ENOENT') return false; throw error; }
 }
 
 function sensitiveName(name) {
@@ -88,8 +93,39 @@ function assertStageOutsideWorkspaces(stagingRoot, workspaceRoots) {
   }
 }
 
+// One scope calculation for execution input and read-only recovery evidence.
+// The caller supplies registered Workspace roots and Core-owned private roots.
+function sourceSnapshotScope({ sourceRoot, additionalWorkspaceRoots = [], excludedRoots = [], trustedSourceRoot = null }) {
+  const source = canonicalRealPath(sourceRoot);
+  const otherRoots = normalizeRoots(additionalWorkspaceRoots);
+  if (otherRoots.some(workspaceRoot => !pathContains(source, workspaceRoot) && pathContains(workspaceRoot, source))) {
+    fail('WORKSPACE_OVERLAP', 'Task Workspace is nested in another registered Workspace');
+  }
+  const nestedWorkspaceRoots = otherRoots.filter(workspaceRoot =>
+    !pathContains(workspaceRoot, source) && pathContains(source, workspaceRoot));
+  let trustedSource = false;
+  if (trustedSourceRoot !== null && trustedSourceRoot !== undefined) {
+    // This is a previously verified canonical identity, never a mutable alias.
+    if (typeof trustedSourceRoot !== 'string' || !path.isAbsolute(trustedSourceRoot)
+      || gitPathKey(path.resolve(trustedSourceRoot)) !== gitPathKey(source)
+      || gitPathKey(path.resolve(sourceRoot)) !== gitPathKey(source)) {
+      fail('STAGING_PATH_DENIED', 'Trusted staging source does not match its Workspace root');
+    }
+    trustedSource = true;
+  }
+  const excluded = normalizeRoots([...excludedRoots, ...nestedWorkspaceRoots]).filter(excludedRoot => {
+    if (!pathContains(excludedRoot, source)) return true;
+    if (!trustedSource) fail('STAGING_PATH_DENIED', 'Task Workspace is inside an excluded private directory');
+    return false;
+  });
+  const excludedPaths = excluded.filter(excludedRoot => pathContains(source, excludedRoot))
+    .map(excludedRoot => path.relative(source, excludedRoot).split(path.sep).join('/'));
+  return { source, excluded, excludedPaths };
+}
+
 function walkFiles(root, { maxFiles = DEFAULT_MAX_FILES, maxBytes = DEFAULT_MAX_BYTES, excludedRoots = [],
-  excludedPaths = [], selection = null, gitPolicy = null, paths = null, discoverBrowserProfiles = false, area = 'unknown' } = {}) {
+  excludedPaths = [], selection = null, gitPolicy = null, paths = null, discoverBrowserProfiles = false,
+  strictObservation = false, area = 'unknown' } = {}) {
   function readFailure(message, cause) {
     const error = new StagingWorkspaceError('STAGING_READ_FAILED', message, { cause });
     error.snapshotArea = area;
@@ -101,6 +137,52 @@ function walkFiles(root, { maxFiles = DEFAULT_MAX_FILES, maxBytes = DEFAULT_MAX_
   const omitted = new Set(excludedPaths);
   const selectedPaths = paths === null ? null : new Set(paths);
   const selectedDirectories = new Set();
+  const observations = [];
+  const directoryEntries = [];
+  const entryLimit = Math.min(DEFAULT_MAX_FILES * 4, maxFiles * 4);
+  let entryCount = 0;
+  const changed = () => fail('STAGING_SNAPSHOT_CHANGED', 'Workspace changed while collecting content evidence');
+  const sameIdentity = (before, after) => before && after &&
+    ['ino', 'dev', 'mode', 'size', 'mtimeMs', 'ctimeMs'].every(key => before[key] === after[key]);
+  const readEntries = dir => {
+    if (!strictObservation) return fs.readdirSync(dir, { withFileTypes: true });
+    // Streaming enumeration bounds empty directories and filtered entries too.
+    const directory = fs.opendirSync(dir);
+    const entries = [];
+    try {
+      for (let entry; (entry = directory.readSync()) !== null;) {
+        if (entries.length >= entryLimit) fail('STAGING_TOO_MANY_FILES', 'Workspace snapshot exceeds entry limit');
+        entries.push(entry);
+      }
+    } finally { directory.closeSync(); }
+    return entries;
+  };
+  const entryNames = entries => entries.map(entry => entry.name).sort();
+  const assertCanonicalIdentity = (file, before) => {
+    const after = fs.lstatSync(file);
+    if (!sameIdentity(before, after) || after.isSymbolicLink()
+      || gitPathKey(fs.realpathSync.native(file)) !== gitPathKey(file)) changed();
+  };
+  const hashObservedFile = (file, before) => {
+    // A fixed buffer and one extra byte detect growth without allocating the file.
+    const descriptor = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+    try {
+      if (!sameIdentity(before, fs.fstatSync(descriptor))) changed();
+      const buffer = Buffer.allocUnsafe(64 * 1024);
+      const hash = crypto.createHash('sha256');
+      let bytes = 0;
+      for (;;) {
+        const count = fs.readSync(descriptor, buffer, 0, Math.min(buffer.length, before.size - bytes + 1), null);
+        if (!count) break;
+        bytes += count;
+        if (bytes > before.size) changed();
+        hash.update(buffer.subarray(0, count));
+      }
+      if (bytes !== before.size || !sameIdentity(before, fs.fstatSync(descriptor))) changed();
+      assertCanonicalIdentity(file, before);
+      return hash.digest('hex');
+    } finally { fs.closeSync(descriptor); }
+  };
   for (const rel of selectedPaths ?? []) {
     const parts = rel.split('/');
     for (let index = 1; index < parts.length; index++) selectedDirectories.add(parts.slice(0, index).join('/'));
@@ -116,10 +198,24 @@ function walkFiles(root, { maxFiles = DEFAULT_MAX_FILES, maxBytes = DEFAULT_MAX_
       omitted.add(relative); return;
     }
     if (depth > MAX_DEPTH) fail('STAGING_TOO_DEEP', 'Workspace snapshot exceeds staging depth limit');
+    if (strictObservation) {
+      const stat = fs.lstatSync(dir);
+      if (!stat.isDirectory() || stat.isSymbolicLink()
+        || gitPathKey(fs.realpathSync.native(dir)) !== gitPathKey(dir)) changed();
+      if (relative && hasEntry(path.join(dir, '.git'))) {
+        fail('WORKSPACE_CONTENT_NESTED_REPOSITORY', 'Nested repository is outside comparable source evidence');
+      }
+      observations.push([dir, stat]);
+    }
     if (selection) selection.captureDirectory(dir);
     let entries;
-    try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
+    try { entries = readEntries(dir); }
     catch (error) { readFailure('Unable to enumerate the Task Workspace snapshot', error); }
+    if (strictObservation) {
+      entryCount += entries.length;
+      if (entryCount > entryLimit) fail('STAGING_TOO_MANY_FILES', 'Workspace snapshot exceeds entry limit');
+      directoryEntries.push([dir, entryNames(entries)]);
+    }
     entries.sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
       if (sensitiveName(entry.name)) continue;
@@ -131,15 +227,23 @@ function walkFiles(root, { maxFiles = DEFAULT_MAX_FILES, maxBytes = DEFAULT_MAX_
       let stat;
       try { stat = fs.lstatSync(source); }
       catch (error) {
-        if (selectedPaths && error?.code !== 'ENOENT') readFailure('Unable to inspect a changed Task Workspace entry', error);
+        if (strictObservation || (selectedPaths && error?.code !== 'ENOENT')) readFailure('Unable to inspect a changed Task Workspace entry', error);
         continue; // The entry disappeared during the bounded snapshot walk.
       }
-      if (stat.isSymbolicLink()) continue;
+      if (stat.isSymbolicLink()) {
+        if (strictObservation) changed();
+        continue;
+      }
       let realSource;
       try { realSource = fs.realpathSync.native(source); }
       catch (error) { readFailure('Unable to resolve a Task Workspace entry', error); }
       if (!pathContains(root, realSource)) fail('STAGING_PATH_ESCAPE', 'Task Workspace entry resolves outside its root');
       if (excluded.some((excludedRoot) => pathContains(excludedRoot, realSource))) continue;
+      if (strictObservation) {
+        const resolved = resolveInside(root, rel);
+        if (gitPathKey(resolved.absolute) !== gitPathKey(resolved.real)
+          || gitPathKey(realSource) !== gitPathKey(source)) changed();
+      }
       if (gitPolicy?.ignored(rel, stat.isDirectory())) continue;
       if (stat.isDirectory()) {
         if (GENERATED_DIRECTORIES.has(entry.name.toLowerCase())) continue;
@@ -152,18 +256,68 @@ function walkFiles(root, { maxFiles = DEFAULT_MAX_FILES, maxBytes = DEFAULT_MAX_
         visit(source, rel, depth + 1);
         continue;
       }
-      if (!stat.isFile()) continue;
+      if (!stat.isFile()) {
+        if (strictObservation) changed();
+        continue;
+      }
       if (selection && !selection.files.has(gitPathKey(rel))) { omitted.add(rel); continue; }
       if (files.size >= maxFiles) fail('STAGING_TOO_MANY_FILES', 'Workspace snapshot exceeds staging file limit');
       totalBytes += stat.size;
       if (totalBytes > maxBytes) fail('STAGING_TOO_LARGE', `工作区快照超过 ${Math.ceil(maxBytes / 1024 / 1024)} MiB 上限。请选择具体项目子目录，或改用普通聊天。`);
       let hash;
-      try { hash = hashFile(source); } catch (error) { readFailure('Unable to read a Task Workspace file', error); }
-      files.set(rel, { hash, size: stat.size });
+      try { hash = strictObservation ? hashObservedFile(source, stat) : hashFile(source); }
+      catch (error) { readFailure('Unable to read a Task Workspace file', error); }
+      files.set(rel, { hash, size: stat.size, ...(strictObservation ? { mode: stat.mode } : {}) });
+      if (strictObservation) observations.push([source, stat]);
     }
   };
   visit(root, '', 0);
-  return { files, totalBytes, excludedPaths: [...omitted] };
+  const assertUnchanged = () => {
+    for (const [file, stat] of observations) assertCanonicalIdentity(file, stat);
+    for (const [dir, names] of directoryEntries) {
+      if (JSON.stringify(entryNames(readEntries(dir))) !== JSON.stringify(names)) changed();
+    }
+    // Enumeration itself must not hide a file or ancestor replacement.
+    for (const [file, stat] of observations) assertCanonicalIdentity(file, stat);
+  };
+  if (strictObservation) assertUnchanged();
+  return { files, totalBytes, excludedPaths: [...omitted], ...(strictObservation ? { assertUnchanged } : {}) };
+}
+
+/** Core-only, read-only non-Git snapshot; uses the exact execution-input scope and filters. */
+export function collectStagingSourceSnapshot({ sourceRoot, additionalWorkspaceRoots, excludedRoots, trustedSourceRoot = null,
+  maxFiles = DEFAULT_MAX_FILES, maxBytes = DEFAULT_MAX_BYTES } = {}) {
+  for (const roots of [additionalWorkspaceRoots, excludedRoots]) {
+    if (!Array.isArray(roots) || roots.some(root => typeof root !== 'string' || !root.trim() || !path.isAbsolute(root) || root.includes('\0'))) {
+      fail('STAGING_SCOPE_UNAVAILABLE', 'Recovery requires the current registered Workspace and private-root scope');
+    }
+  }
+  if (!Number.isSafeInteger(maxFiles) || maxFiles < 1 || maxFiles > DEFAULT_MAX_FILES
+    || !Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > DEFAULT_MAX_BYTES) {
+    fail('STAGING_LIMIT_INVALID', 'Invalid bounded Workspace snapshot limits');
+  }
+  if (typeof sourceRoot !== 'string' || !path.isAbsolute(sourceRoot)) fail('STAGING_PATH_INVALID', 'Workspace source must be an absolute registered root');
+  const canonical = canonicalizeRoot(sourceRoot);
+  if (gitPathKey(path.resolve(sourceRoot)) !== gitPathKey(canonical)) fail('STAGING_PATH_DENIED', 'Recovery source cannot be a mutable filesystem alias');
+  const { source, excluded, excludedPaths } = sourceSnapshotScope({ sourceRoot, additionalWorkspaceRoots, excludedRoots, trustedSourceRoot });
+  if (hasEntry(path.join(source, '.git'))) fail('STAGING_SNAPSHOT_CHANGED', 'Source Git identity changed during observation');
+  const identity = fs.lstatSync(source);
+  const snapshot = walkFiles(source, { maxFiles, maxBytes, excludedRoots: excluded, excludedPaths,
+    discoverBrowserProfiles: true, strictObservation: true, area: 'source' });
+  const assertUnchanged = () => {
+    snapshot.assertUnchanged();
+    const current = fs.lstatSync(source);
+    if (['ino', 'dev', 'mode', 'size', 'mtimeMs', 'ctimeMs'].some(key => identity[key] !== current[key])) {
+      fail('STAGING_SNAPSHOT_CHANGED', 'Workspace root identity changed during content observation');
+    }
+  };
+  assertUnchanged();
+  return {
+    ...snapshot,
+    assertUnchanged,
+    scope: { filterVersion: 'staging-source-v1', root: gitPathKey(source), rootIdentity: [identity.dev, identity.ino],
+      excludedRoots: excluded.map(gitPathKey).sort(), excludedPaths: [...snapshot.excludedPaths].sort() }
+  };
 }
 
 /** Make a bounded, credential-filtered snapshot for one Task, outside all Workspace roots. */
@@ -173,39 +327,10 @@ export async function createStagingWorkspace({ taskId, workspaceId, sourceRoot, 
   if (!String(taskId ?? '').trim()) fail('TASK_REQUIRED', 'A Task is required for staging');
   if (!String(workspaceId ?? '').trim()) fail('WORKSPACE_REQUIRED', 'A Workspace is required for staging');
   if (typeof sourceRoot !== 'string' || !path.isAbsolute(sourceRoot)) fail('WORKSPACE_REQUIRED', 'Workspace source root must be an absolute registered root');
-  const source = canonicalRealPath(sourceRoot);
+  const { source, excluded, excludedPaths } = sourceSnapshotScope({ sourceRoot, additionalWorkspaceRoots, excludedRoots, trustedSourceRoot });
   const stageBase = canonicalRealPath(stagingRoot || path.join(os.tmpdir(), 'CetaMesh', 'agent-staging'));
   const roots = normalizeRoots([source, ...additionalWorkspaceRoots]);
   assertStageOutsideWorkspaces(stageBase, roots);
-  const otherRoots = normalizeRoots(additionalWorkspaceRoots);
-  if (otherRoots.some((workspaceRoot) =>
-    !pathContains(source, workspaceRoot) && pathContains(workspaceRoot, source))) {
-    fail('WORKSPACE_OVERLAP', 'Task Workspace is nested in another registered Workspace');
-  }
-  const nestedWorkspaceRoots = otherRoots
-    .filter((workspaceRoot) => !pathContains(workspaceRoot, source) && pathContains(source, workspaceRoot));
-  // Only the trusted in-process managed-Worktree binding may exempt its exact
-  // source from a private-state ancestor exclusion. This is never a tool input.
-  let trustedSource = false;
-  if (trustedSourceRoot !== null && trustedSourceRoot !== undefined) {
-    // The grant is the previously verified canonical identity, not another
-    // mutable path to follow after a caller has awaited external work.
-    if (typeof trustedSourceRoot !== 'string' || !path.isAbsolute(trustedSourceRoot)
-      || gitPathKey(path.resolve(trustedSourceRoot)) !== gitPathKey(source)
-      || gitPathKey(path.resolve(sourceRoot)) !== gitPathKey(source)) {
-      fail('STAGING_PATH_DENIED', 'Trusted staging source does not match its Workspace root');
-    }
-    trustedSource = true;
-  }
-  const excluded = normalizeRoots([...excludedRoots, ...nestedWorkspaceRoots]).filter(excludedRoot => {
-    if (!pathContains(excludedRoot, source)) return true;
-    if (!trustedSource) fail('STAGING_PATH_DENIED', 'Task Workspace is inside an excluded private directory');
-    return false;
-  });
-  // Freeze source-relative exclusions for stage output too. New output must not
-  // reintroduce an excluded subtree or another registered Workspace.
-  const excludedPaths = excluded.filter(excludedRoot => pathContains(source, excludedRoot))
-    .map(excludedRoot => path.relative(source, excludedRoot).split(path.sep).join('/'));
   fs.mkdirSync(stageBase, { recursive: true, mode: 0o700 });
   const stage = path.join(stageBase, crypto.randomUUID());
   fs.mkdirSync(stage, { recursive: false, mode: 0o700 });

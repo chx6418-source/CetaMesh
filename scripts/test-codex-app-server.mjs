@@ -9,6 +9,8 @@ import { createAgentService } from '../src/agent/service.js';
 import { createAgentProviderRegistry } from '../src/agent/registry.js';
 import { createAgentBroker } from '../src/agent/broker.js';
 import { createCetaMeshServices } from '../src/app/service-container.js';
+import { createCodexSessionLifecycle } from '../src/agent/codex-session-lifecycle.js';
+import { createCodexAgentProvider } from '../src/agent/codex-agent-provider.js';
 const tick=()=>new Promise(r=>setTimeout(r,15));
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'codex-app-fixture-'));
 const peers=[];
@@ -29,13 +31,93 @@ function launch(binding = {}) {
   if(f.method==='turn/start'){q.turn++;q.reply(f,{turn:{id:`turn-${q.turn}`,status:'inProgress'}});}
   if(f.method==='turn/interrupt'){q.reply(f,{});q.send({method:'turn/completed',params:{threadId:'native-thread',turn:{id:`turn-${q.turn}`,status:'interrupted'}}});}
  }});peers.push(q);
- const handle={readable,writable,done,close:async()=>{q.closes=(q.closes ?? 0)+1;finish({code:0});}};
+ const handle={readable,writable,done,close:async()=>{q.closes=(q.closes ?? 0)+1;finish({code:0,processTreeExitConfirmed:true});}};
  q.handle=handle;q.cwd=binding.cwd;binding.onHandle?.(handle);
  return handle;
 }
 try {
  const regressionFailures=[];
  async function regression(name,check) {try {await check();}catch(error){regressionFailures.push(new Error(name,{cause:error}));}}
+ for(const [name,result] of [
+  ['unknown',{terminationConfirmed:false,effectStatus:'unknown'}],
+  ['missing',{code:0}],
+  ['contradictory',{terminationConfirmed:false,processTreeExitConfirmed:true}]
+ ]) await regression(`app-server ${name} exit proof retains staging and session ownership`,async()=>{
+  const sessionLifecycle=createCodexSessionLifecycle({stateDir:path.join(root,`close-proof-${name}`)});
+  let observed=result;
+  const native=createCodexAppServerProvider({taskOptions:{...taskOptions,sessionLifecycle},launch:binding=>{
+   const raw=launch({...binding,onHandle:undefined});
+   const owned={...raw,get done(){return raw.done.then(()=>observed);}};
+   binding.onHandle?.(owned);return owned;
+  }});
+  const created=await native.createSession({taskId:`close-proof-${name}`,workspaceId:'close-workspace'});
+  try {
+   await assert.rejects(native.closeSession(created),{code:'ACP_CLOSE_UNKNOWN'});
+   assert.equal(fs.existsSync(created.cwd),true,'unconfirmed native exit must retain its actual staging files');
+   assert.equal(sessionLifecycle.read(created.sessionId).receipt,null);
+   assert.equal((await native.status(created)).state,'unknown');
+   await assert.rejects(native.shutdown(),{code:'ACP_CLOSE_UNKNOWN'});
+   assert.equal(fs.existsSync(created.cwd),true,'shutdown cannot bypass an unconfirmed close');
+  } finally {
+   observed={processTreeExitConfirmed:true,exitCode:0};
+   try {await native.closeSession(created);}catch(error){if(error.code!=='SESSION_NOT_FOUND')throw error;}
+  }
+ });
+ for(const action of ['close','shutdown']) await regression(`exec lifecycle write failure cannot release unknown execution during ${action}`,async()=>{
+  const fixture=path.join(root,`exec-persist-${action}`),workspace=path.join(fixture,'project'),stateDir=path.join(fixture,'state');
+  fs.mkdirSync(workspace,{recursive:true});fs.writeFileSync(path.join(workspace,'proof.txt'),'retained result');
+  const lifecycleFile=path.join(stateDir,'agent','codex-session-lifecycle.json');
+  const sessionLifecycle=createCodexSessionLifecycle({stateDir});
+  const completion=Promise.withResolvers();let stopped=false,output;
+  const cli={executable:()=>process.execPath,probe(args){return {available:true,stdout:args[0]==='--version'?'codex-cli 9.9.9-fixture'
+   :args[0]==='login'?'Logged in':'--config --ask-for-approval --cd --sandbox workspace-write --json --ignore-user-config --ignore-rules --strict-config --skip-git-repo-check exec resume [SESSION_ID]',stderr:''};},
+   startSession({onStdout}){output=onStdout;return {done:completion.promise,cancel:()=>({requested:true}),cleanupPermitted:()=>stopped,terminationConfirmed:()=>stopped};},
+   async shutdown(){}};
+  const native=createCodexAgentProvider({cliProcess:cli,sessionLifecycle,stateDir,stagingRoot:path.join(fixture,'staging'),codexHome:path.join(fixture,'home'),
+   resolveTaskWorkspace:()=>({task:{id:'persist-task',workspaceId:'persist-workspace',goal:'fixture'},workspace:{id:'persist-workspace',root:workspace}})});
+  const created=await native.createSession({taskId:'persist-task',workspaceId:'persist-workspace'});
+  await native.send({...created,content:'fixture only',runId:'persist-run'});
+  const finalized=native._sessions.get(created.sessionId).activeRun.finalized;
+  const rename=fs.renameSync;
+  fs.renameSync=(from,to)=>{
+   if(path.resolve(String(to))===path.resolve(lifecycleFile))throw Object.assign(new Error('fixture lifecycle persistence failure'),{code:'EIO'});
+   return rename(from,to);
+  };
+  try {
+   completion.resolve({exitCode:null,terminationConfirmed:false,effectStatus:'unknown'});await finalized;
+   if(action==='close') {
+    assert.equal((await native.status(created)).running,true,'a persistence failure must not discard the unresolved native handle');
+    const events=native._sessions.get(created.sessionId).events.length;
+    output('{"type":"item.started","item":{"id":"late-native-tool","type":"command_execution"}}\n');
+    assert.equal(native._sessions.get(created.sessionId).events.length,events,'late unknown-process output is fenced');
+    await assert.rejects(native.closeSession(created),{code:'PROVIDER_CLOSE_UNKNOWN'});
+   } else await assert.rejects(native.shutdown(),{code:'PROVIDER_CLOSE_UNKNOWN'});
+   assert.equal(fs.readFileSync(path.join(created.cwd,'proof.txt'),'utf8'),'retained result');
+   assert.equal(sessionLifecycle.read(created.sessionId).receipt,null);
+  } finally {
+   fs.renameSync=rename;stopped=true;
+   try {await native.closeSession(created);}catch(error){if(error.code!=='SESSION_NOT_FOUND')throw error;}
+  }
+ });
+ await regression('durable app-server lifecycle needs an owned-tree receipt, never turn completion',async()=>{
+  const sessionLifecycle=createCodexSessionLifecycle({stateDir:path.join(root,'durable-native')});
+  const native=createCodexAppServerProvider({taskOptions:{...taskOptions,sessionLifecycle},launch:binding=>{
+   const raw=launch({...binding,onHandle:undefined});
+   const owned={...raw,done:raw.done.then(result=>({...result,processTreeExitConfirmed:true}))};
+   binding.onHandle?.(owned);return owned;
+  }});
+  const created=await native.createSession({taskId:'durable-task',workspaceId:'durable-workspace'});
+  try {
+   assert.equal(sessionLifecycle.read(created.sessionId)?.receipt,null,'native session creation is not termination');
+   await native.send({...created,content:'fixture only',runId:'durable-native-run'});await tick();
+   peers.at(-1).send({method:'turn/completed',params:{threadId:'native-thread',turn:{id:'turn-1',status:'completed'}}});await tick();
+   assert.equal(sessionLifecycle.read(created.sessionId)?.generation,1);
+   assert.equal(sessionLifecycle.read(created.sessionId)?.receipt,null,'completed native turn leaves the app-server alive');
+  } finally {await native.closeSession(created);}
+  const restored=createCodexSessionLifecycle({stateDir:path.join(root,'durable-native')}).read(created.sessionId);
+  assert.equal(restored.state,'closed');assert.equal(restored.receipt.evidence,'supervisor-close');
+  assert.equal(restored.receipt.runId,'durable-native-run');
+ });
  await regression('S1 descriptor override must not bypass pinned runtime',async()=>{
   for(const runtime of [undefined,{verified:true,version:'wrong-version',security}]) {
    const injected=createCodexAppServerProvider({launch,taskOptions:{resolveTaskWorkspace:taskOptions.resolveTaskWorkspace,

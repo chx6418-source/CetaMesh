@@ -58,6 +58,17 @@ async function scenario(name,damage,{packagedFixture=false,seaDirectory=null}={}
    assert.ok(report.checks.some(c=>c.id==='uiIpc'&&c.status==='PASS'));
    assert.ok(report.checks.some(c=>c.id==='dataIpc'&&c.status==='PASS'));
    for(const id of ['tasks','memory','workspace','capability','approval','journal'])assert.equal(report.checks.find(c=>c.id===id)?.status,'PASS',JSON.stringify(report));
+   const synthetic=await rpc(pipe,token,'task.create',{goal:'Isolated diagnostic correlation fixture'});
+   assert.equal(synthetic.ok,true);
+   const taskId=synthetic.result.id,requestId=crypto.randomUUID();
+   const denied=await rpc(pipe,token,'ui.task.start',{id:taskId,expectedRev:synthetic.result.rev,requestId});
+   assert.equal(denied.error?.code,'TASK_WORKSPACE_REQUIRED','missing Workspace fails before Agent creation');
+   const correlated=await rpc(pipe,token,'ui.diagnostics.status');
+   const fault=correlated.result.report.runtimeFailures.find(row=>row.requestId===requestId);
+   assert.equal(fault?.code,'TASK_WORKSPACE_REQUIRED');assert.equal(fault.taskId,taskId);
+   assert.match(fault.correlationId,/^[a-f0-9-]{36}$/);
+   const persisted=await rpc(pipe,token,'ui.diagnostics.read',{id:correlated.result.report.id});
+   assert.deepEqual(persisted.result.report.runtimeFailures,correlated.result.report.runtimeFailures);
    const serviceToken=fs.readFileSync(path.join(state,'agent-token'),'utf8').trim();
    assert.equal((await dataCall({path:'/api/status',token:'wrong',pipeName:resolveDataPipeName({dataRoot:data})})).status,401);
    assert.equal((await dataCall({path:'/api/status',token:serviceToken,pipeName:resolveDataPipeName({dataRoot:data})})).json.ready,true);

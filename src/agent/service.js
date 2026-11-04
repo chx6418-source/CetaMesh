@@ -85,10 +85,11 @@ export function createDefaultAgentService({ api, defaults, log, dshOptions = {},
     ? createStagedDshAgentProvider({ ...dshOptions, provider: dshProvider, log })
     : dshProvider;
   const legacyCodex = createCodexAgentProvider({ ...codexOptions, ...(codexOptions.executable === undefined && codexExecutable !== undefined ? { executable: codexExecutable } : {}), log });
+  codexRouterOptions.appServerProvider?.bindSessionLifecycle?.(legacyCodex._sessionLifecycle);
   const codex = createCodexProviderRouter({ ...codexRouterOptions, legacyProvider: legacyCodex,
     resolveTransport: codexRouterOptions.resolveTransport ?? (id => legacyCodex._sessions?.has(id) ? 'exec' : null) });
-  const routedCodex = Object.freeze({ ...codex, verifyStoppedTask: (...args) => codexRouterOptions.rolloutEnabled === true
-    ? Promise.resolve({ stopped: false }) : legacyCodex.verifyStoppedTask(...args) });
+  const routedCodex = Object.freeze({ ...codex, verifyStoppedTask: (...args) => legacyCodex.verifyStoppedTask(...args),
+    verifyTaskQuiescence: (...args) => legacyCodex.verifyTaskQuiescence(...args) });
   const registry = createAgentProviderRegistry({
     providers: [
       taskBoundDsh,

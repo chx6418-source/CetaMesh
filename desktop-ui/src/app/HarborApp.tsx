@@ -28,6 +28,8 @@ import {AttachmentSettings,HistoryAttachments} from './AttachmentSettings';
 import type {ChatContextObservation, ChatModelProvider, ModelUsage, WorkspaceSummary} from '../bridge/typed-client';
 import {ChatModelPicker, ChatUsagePopover, configurationChangeBlocked, supportedReasoning} from './ChatComposerPanels';
 import {ChatActivity} from './ChatActivity';
+import { ChatFailureCard, chatFailureInHistory, type ChatFailure } from './ChatFailure';
+export { chatFailureInHistory } from './ChatFailure';
 export {ToolActivity} from './ChatActivity';
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { useSearchParams } from 'react-router';
@@ -305,7 +307,8 @@ type ChatTimelineItem =
   | { id: 'error'; kind: 'error'; message: string }
   | { id: 'empty'; kind: 'empty' }
   | { id: 'streaming'; kind: 'streaming'; message: ChatMessageDto }
-  | { id: 'turn-error'; kind: 'turn-error'; message: string }
+  | { id: 'preparing'; kind: 'preparing' }
+  | { id: 'turn-error'; kind: 'turn-error'; failure: ChatFailure }
   | { id: string; kind: 'approval'; approval: Approval };
 const chatTimelineKey = (item: ChatTimelineItem) => item.id;
 const isChatMessageAnchor = (item: ChatTimelineItem) => item.kind === 'message';
@@ -322,7 +325,7 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
   const [sessionUsage, setSessionUsage] = useState<ChatMessageDto['usage']>(null);
   const [hasMoreHistory, setHasMoreHistory] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
-  const [status, setStatus] = useState<{ state: string; displayText: string; statusMessage: string | null; requestId: string | null; retryCount: number; followState: string; followError: string | null; toolActivity: ChatMessageDto['toolActivity']; agentActivity: ChatMessageDto['agentActivity']; context?:ChatContextObservation|null;turnUsage?:ModelUsage|null; error: string | null; errorCode: string | null; approvalId: string | null; routing: Record<string, unknown> }>({ state: 'idle', displayText: '', statusMessage: null, requestId: null, retryCount: 0, followState: 'idle', followError: null, toolActivity: [], agentActivity: null, error: null, errorCode: null, approvalId: null, routing: {} });
+  const [status, setStatus] = useState<{ state: string; displayText: string; statusMessage: string | null; requestId: string | null; retryCount: number; followState: string; followError: string | null; toolActivity: ChatMessageDto['toolActivity']; agentActivity: ChatMessageDto['agentActivity']; context?:ChatContextObservation|null;turnUsage?:ModelUsage|null; error: string | null; errorCode: string | null; failureStage?: ChatMessageDto['failureStage']; approvalId: string | null; routing: Record<string, unknown> }>({ state: 'idle', displayText: '', statusMessage: null, requestId: null, retryCount: 0, followState: 'idle', followError: null, toolActivity: [], agentActivity: null, error: null, errorCode: null, approvalId: null, routing: {} });
   const [catalog, setCatalog] = useState<Awaited<ReturnType<typeof chatClient.catalog>> | null>(null);
   const [linkedTask, setLinkedTask] = useState<Task | null>(null);
   const [memories, setMemories] = useState<Memory[]>([]);
@@ -330,7 +333,8 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [hasNewMessages, setHasNewMessages] = useState(false);
-  const [sendErrors, setSendErrors] = useState<Record<string, string>>({});
+  const [sendErrors, setSendErrors] = useState<Record<string, ChatFailure>>({});
+  const [retryingMessageId, setRetryingMessageId] = useState<string | null>(null);
   const [settlingReply, setSettlingReply] = useState<{ requestId: string | null; text: string } | null>(null);
 
   const historySessionIdRef = useRef<string | null>(null);
@@ -351,6 +355,7 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
   const streamUpdateRef = useRef<ChatStreamUpdate[]>([]);
   const seenMessageIdsRef = useRef<Set<string>>(new Set());
   const pendingSendsRef = useRef(new Map<string, { text: string; attachments: Attachment[] }>());
+  const sendingIdsRef = useRef(new Set<string>());
   const previousStreamRef = useRef({ state: 'idle', text: '' });
 
   const refreshCatalog = useCallback(async () => {
@@ -583,17 +588,18 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
     if (error) rows.push({ id: 'error', kind: 'error', message: error });
     if (!messages.length && !loading && !error) rows.push({ id: 'empty', kind: 'empty' });
     rows.push(...messages.map(message => ({ id: `message:${message.id}`, kind: 'message' as const, message })));
-    if (streaming) rows.push({
+    if (streaming && !status.displayText && !status.toolActivity.length && !status.agentActivity) rows.push({ id: 'preparing', kind: 'preparing' });
+    else if (streaming) rows.push({
       id: 'streaming', kind: 'streaming',
       message: { id: 'streaming', role: 'assistant', text: status.displayText || status.statusMessage || (status.agentActivity ? `${status.agentActivity.label} 正在执行…` : status.toolActivity.length ? '正在处理工具调用…' : '正在思考…'), at: null, attachments: [], toolActivity: status.toolActivity, agentActivity: status.agentActivity, error: null, cancelled: false }
     });
     if (keepSettlingReply && settlingReply) rows.push({ id: 'streaming', kind: 'streaming',
       message: { id: 'streaming', role: 'assistant', text: settlingReply.text, at: null,
         attachments: [], toolActivity: [], agentActivity: null, error: null, cancelled: false } });
-    if (status.error && !streaming) rows.push({ id: 'turn-error', kind: 'turn-error', message: status.error });
+    if (status.error && !streaming && !chatFailureInHistory(status, messages)) rows.push({ id: 'turn-error', kind: 'turn-error', failure: status });
     rows.push(...approvals.map(approval => ({ id: `approval:${approval.id}`, kind: 'approval' as const, approval })));
     return rows;
-  }, [hasMoreHistory, messages, loading, error, streaming, keepSettlingReply, settlingReply, status.displayText, status.statusMessage, status.agentActivity, status.toolActivity, status.error, approvals]);
+  }, [hasMoreHistory, messages, loading, error, streaming, keepSettlingReply, settlingReply, status, approvals]);
 
   useLayoutEffect(() => {
     const hasNewConversationContent =
@@ -622,17 +628,21 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
       case 'loading': return <LoadingState label="正在读取会话…" />;
       case 'error': return <ErrorNotice error={item.message} onRetry={() => void load()} />;
       case 'empty': return <EmptyNotice icon="chat" title="还没有消息" detail="写下你要处理的事情。模型和 Agent 会按会话设置运行。" />;
-      case 'message': return <MessageBubble message={item.message} reference={session ? { sessionId: session.id, messageId: item.message.id } : undefined} activityState={item.message.cancelled?'cancelled':item.message.error?'failed':undefined} taskId={session?.taskId} onOpenTask={onReviewTask} sendError={sendErrors[item.message.id]} onRetry={sendErrors[item.message.id] ? () => void retrySend(item.message.id) : undefined} />;
+      case 'message': return <MessageBubble message={item.message} reference={session ? { sessionId: session.id, messageId: item.message.id } : undefined} activityState={item.message.cancelled?'cancelled':item.message.error?'failed':undefined} taskId={linkedTask?.id ?? session?.taskId} onOpenTask={onReviewTask} sendError={sendErrors[item.message.id]} retrying={retryingMessageId === item.message.id} onRetry={sendErrors[item.message.id] ? () => void retrySend(item.message.id) : undefined} />;
       case 'streaming': return <MessageBubble message={item.message} streaming activityState={status.state} taskId={linkedTask?.id??session?.taskId} onOpenTask={onReviewTask} />;
-      case 'turn-error': return <div className="turn-error" role="alert">{item.message}<div className="row">{linkedTask ? <ManagedFailureActions taskId={workspaceFailureReviewTaskId(status.routing, linkedTask.id)} onReviewTask={onReviewTask} onNewChat={() => void onNewChat()} /> : <><Button compact variant="ghost" onClick={() => void resumeChat('retry').then(load).catch(cause => setError(messageOf(cause)))}>重试</Button><Button compact variant="ghost" onClick={() => void resumeChat('continue').then(load).catch(cause => setError(messageOf(cause)))}>继续</Button></>}</div></div>;
+      case 'preparing': return <div className="chat-request-pending" role="status">正在准备请求，等待运行时处理…</div>;
+      case 'turn-error': return <ChatFailureCard failure={item.failure} taskId={linkedTask?.id ?? session?.taskId} onOpenTask={onReviewTask} onNewChat={() => void onNewChat()} />;
       case 'approval': return <ApprovalCard approval={item.approval} onDecide={decideApproval} />;
     }
   };
 
   async function send(text: string, attachments: Attachment[], clientMessageId: string) {
     if (!session) return false;
+    if (sendingIdsRef.current.has(clientMessageId)) return false;
     const preflight = managedWorkspacePreflight(session.config.agentProvider ?? '', session.config.workspaceId ?? '', activeWorkspaceId);
     if (preflight) { setError(preflight); return false; }
+    sendingIdsRef.current.add(clientMessageId);
+    setRetryingMessageId(clientMessageId);
     const historyCursorBeforeSend = lastHistoryMessageIdRef.current;
     setError('');
     pendingSendsRef.current.set(clientMessageId, { text, attachments });
@@ -646,10 +656,12 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
       setSendErrors(current => { const next = { ...current }; delete next[clientMessageId]; return next; });
       void refreshHistory(historyCursorBeforeSend);
     } catch (cause) {
-      const message = messageOf(cause);
-      setSendErrors(current => ({ ...current, [clientMessageId]: message }));
-      setError(message);
+      const failure = cause as { code?: string; failureStage?: ChatMessageDto['failureStage'] };
+      setSendErrors(current => ({ ...current, [clientMessageId]: { error: messageOf(cause), errorCode: failure?.code ?? null, failureStage: failure?.failureStage ?? 'unknown' } }));
       return false;
+    } finally {
+      sendingIdsRef.current.delete(clientMessageId);
+      setRetryingMessageId(current => current === clientMessageId ? null : current);
     }
   }
   async function resumeChat(action: 'retry' | 'continue') {
@@ -736,10 +748,13 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
   </div>;
 }
 
-export function MessageBubble({ message, reference, streaming = false, sendError, onRetry, activityState, taskId, onOpenTask }: { message: ChatMessageDto; reference?: { sessionId: string; messageId: string }; streaming?: boolean; sendError?: string; onRetry?(): void; activityState?:string;taskId?:string|null;onOpenTask?(id:string):void }) {
+export function MessageBubble({ message, reference, streaming = false, sendError, onRetry, retrying = false, activityState, taskId, onOpenTask }: { message: ChatMessageDto; reference?: { sessionId: string; messageId: string }; streaming?: boolean; sendError?: ChatFailure; onRetry?(): void; retrying?: boolean; activityState?:string;taskId?:string|null;onOpenTask?(id:string):void }) {
+  if (message.error && (message.failureStage === 'pre-dispatch' || message.role === 'system' || (!message.text && !message.toolActivity.length))) {
+    return <ChatFailureCard failure={message} taskId={taskId} onOpenTask={onOpenTask} />;
+  }
   const role = message.role === 'user' ? 'user' : 'assistant';
   const agentActivity = message.agentActivity;
-  return <article className={`chat-message ${role} ${streaming ? 'streaming' : ''}`}><div className="message-avatar">{role === 'assistant' ? <Icon name="sparkles" size={16} /> : '你'}</div><div className="message-body"><div className="message-meta"><strong>{role === 'assistant' ? 'CetaMesh' : '你'}</strong><span>{dateLabel(message.at)}</span>{streaming && <Badge tone="accent">生成中</Badge>}</div>{message.text ? <Markdown reference={reference}>{message.text}</Markdown> : <span className="muted">（没有文本内容）</span>}{message.attachments.length > 0 && <div className="message-attachments">{message.attachments.map(name => <span key={name}><Icon name="attach" size={13} />{name}</span>)}</div>}{message.attachmentRefs?.length ? <HistoryAttachments files={message.attachmentRefs} sessionId={reference?.sessionId??''}/> : null}<ChatActivity tools={message.toolActivity} agentActivity={agentActivity} state={activityState} taskId={taskId} onOpenTask={onOpenTask} />{role === 'assistant' && !streaming && <UsageSummary usage={message.usage} />}{sendError && <div className="message-error" role="alert">{sendError}<Button compact variant="ghost" onClick={onRetry}>重试发送</Button></div>}{message.error && <p className="message-error" role="alert">{message.error}</p>}{message.cancelled && <small>本轮已停止</small>}</div></article>;
+  return <article className={`chat-message ${role} ${streaming ? 'streaming' : ''}`}><div className="message-avatar">{role === 'assistant' ? <Icon name="sparkles" size={16} /> : '你'}</div><div className="message-body"><div className="message-meta"><strong>{role === 'assistant' ? 'CetaMesh' : '你'}</strong><span>{dateLabel(message.at)}</span>{streaming && <Badge tone="accent">生成中</Badge>}</div>{message.text ? <Markdown reference={reference}>{message.text}</Markdown> : <span className="muted">（没有文本内容）</span>}{message.attachments.length > 0 && <div className="message-attachments">{message.attachments.map(name => <span key={name}><Icon name="attach" size={13} />{name}</span>)}</div>}{message.attachmentRefs?.length ? <HistoryAttachments files={message.attachmentRefs} sessionId={reference?.sessionId??''}/> : null}<ChatActivity tools={message.toolActivity} agentActivity={agentActivity} state={activityState} taskId={taskId} onOpenTask={onOpenTask} />{role === 'assistant' && !streaming && <UsageSummary usage={message.usage} />}{sendError && <ChatFailureCard failure={sendError} taskId={taskId} onOpenTask={onOpenTask} onRetry={onRetry} retrying={retrying} />}{message.error && <ChatFailureCard failure={message} taskId={taskId} onOpenTask={onOpenTask} />}{message.cancelled && <small>本轮已停止</small>}</div></article>;
 }
 
 export function ChatComposer({ sessionId = '', busy, models, selectedModelKey, agentProviders, selectedAgent, workspaces, workspaceId, activeWorkspaceId, onWorkspaceChange, onModelChange, onAgentChange, onSend, onStop, context, turnUsage, sessionUsage, reasoning, onReasoningChange=()=>{}, onConfigureModels=()=>{}, configurationLocked=false }: {

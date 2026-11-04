@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { isSea } from 'node:sea';
 import { readJsonFile } from '../storage/json-file.js';
+import { prepareCodexOwnedLaunch } from './codex-process-supervisor.js';
 
 const MAX_CAPTURE_BYTES = 4 * 1024 * 1024;
 const MIN_TIMEOUT_MS = 1000;
@@ -271,7 +272,8 @@ function inspectNaturalExit(child) {
 export class CliAgentProcess {
   constructor({ name, executable, argsPrefix = [], envSource = process.env, spawnImpl = spawn, probeImpl = spawnSync,
     platform = process.platform, nodeExecutable = process.execPath,
-    terminateImpl = terminateCliProcessTree, terminationTimeoutMs = 5000, inspectNaturalExitImpl = inspectNaturalExit } = {}) {
+    terminateImpl = terminateCliProcessTree, terminationTimeoutMs = 5000, inspectNaturalExitImpl = inspectNaturalExit,
+    ownedTreeStateDir, ownedTreeSupervisor } = {}) {
     this.name = String(name ?? 'cli-agent');
     this.executableOverride = executable;
     this.selectedExecutable = null;
@@ -280,6 +282,8 @@ export class CliAgentProcess {
     this.spawnImpl = spawnImpl;
     this.terminateImpl = terminateImpl;
     this.inspectNaturalExitImpl = inspectNaturalExitImpl;
+    this.ownedTreeStateDir=ownedTreeStateDir;
+    this.ownedTreeSupervisor=ownedTreeSupervisor;
     this.terminationTimeoutMs = Math.max(10, Math.min(10000, Number(terminationTimeoutMs) || 5000));
     this.probeImpl = probeImpl;
     this.platform = platform;
@@ -381,7 +385,11 @@ export class CliAgentProcess {
     }
     if (!['end', 'open'].includes(inputMode)) throw Object.assign(new Error('CLI inputMode must be end or open'), { code: 'INVALID_PARAMS' });
     if (this.sessions.has(sessionId)) throw Object.assign(new Error('CLI session id is already active'), { code: 'INVALID_PARAMS' });
-    const child = this.spawnImpl(target.executable, [...target.argsPrefix, ...args.map(String)], {
+    const launchArgs=[...target.argsPrefix,...args.map(String)];
+    const owned=process.platform==='win32' && this.ownedTreeStateDir
+      ?prepareCodexOwnedLaunch({stateDir:this.ownedTreeStateDir,supervisorExecutable:this.ownedTreeSupervisor,
+        executable:target.executable,args:launchArgs,cwd,sessionId}):null;
+    const child = this.spawnImpl(owned?.executable??target.executable, owned?.args??launchArgs, {
       cwd,
       env: createMinimalAgentEnv(this.environment(), env, { authorizedEnvKeys }),
       windowsHide: true,
@@ -418,14 +426,15 @@ export class CliAgentProcess {
       if (!confirmed()) return;
       this.sessions.delete(sessionId);
       publish({ sessionId, ...closeResult, timedOut, cancelled: cancelRequested,
-        ...(stopRequested ? { terminationConfirmed: true } : { processExitObserved: true }), stdout, stderr });
+        ...(stopRequested ? { terminationConfirmed: true } : { processExitObserved: true }),
+        ...((owned?.receipt() || (!owned && process.platform!=='win32' && naturalExitAccepted)) ? {processTreeExitConfirmed:true} : {}), stdout, stderr });
     };
     const stop = () => {
       if (confirmed() || stopRequested || closed) return;
       stopRequested = true;
       clearTimeout(timer);
       stopTimer = setTimeout(unknown, this.terminationTimeoutMs);
-      Promise.resolve().then(() => this.terminateImpl(child)).then(result => {
+      Promise.resolve().then(() => owned ? owned.terminate() : this.terminateImpl(child)).then(result => {
         treeConfirmed = result === true;
         if (!treeConfirmed) unknown();
         else finish();
@@ -463,14 +472,14 @@ export class CliAgentProcess {
       closed = true;
       closeResult = { exitCode: Number.isInteger(exitCode) ? exitCode : 1, signal: signal ?? null };
       if (stopRequested) { finish(); return; }
-      try { naturalExitAccepted = this.inspectNaturalExitImpl(child) === true; }
+      try { naturalExitAccepted = owned ? owned.receipt()?.exitCode===closeResult.exitCode : this.inspectNaturalExitImpl(child) === true; }
       catch { naturalExitAccepted = false; }
       if (!naturalExitAccepted) { runtimeError = true; unknown(); }
       else finish();
     });
     const cleanupPermitted = () => {
       if (closed && !stopRequested && !naturalExitAccepted) {
-        try { naturalExitAccepted = this.inspectNaturalExitImpl(child) === true; }
+        try { naturalExitAccepted = owned ? owned.receipt()?.exitCode===closeResult?.exitCode : this.inspectNaturalExitImpl(child) === true; }
         catch { naturalExitAccepted = false; }
         if (naturalExitAccepted) this.sessions.delete(sessionId);
       }

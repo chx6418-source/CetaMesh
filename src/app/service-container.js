@@ -54,6 +54,7 @@ import { createNotesCache } from '../update/notes-cache.js';
 import { createOnboardingService } from '../onboarding/service.js';
 import { createProductService } from '../product/service.js';
 import { createErrorRegistry } from '../product/error-registry.js';
+import { createRuntimeFailureRegistry } from '../product/runtime-failures.js';
 import { buildDiagnostics } from '../product/diagnostics.js';
 import { loadReleaseConfig } from '../product/release-config.js';
 import { createPluginCenterService } from '../plugin-center/service.js';
@@ -81,11 +82,13 @@ export function createCetaMeshServices(options = {}) {
   const controlService = options.controlService ?? null;
   const log = options.log ?? (() => {});
   const uiEventBus = createDesktopUiEventBus();
+  const runtimeFailures = createRuntimeFailureRegistry();
   const settingsService = options.settingsService ?? createSettingsService({ stateDir });
   const dshDesktop = options.dshDesktop ?? createDshDesktopIntegration({ platform: options.platform ?? process.platform });
 
   const workspaceService = createWorkspaceService({
     stateDir,
+    excludedRoots: [dataRoot],
     getTask:id=>taskService.runtime.get({id}).task,
     listTasks:query=>taskService.runtime.list(query),
     audit: event => log('Workspace ' + event.action + '（' + (event.workspaceId ?? 'none') + '）')
@@ -130,7 +133,7 @@ export function createCetaMeshServices(options = {}) {
     resolveExecutionTask: taskId => taskService.runtime.get({ id: taskId }).task,
     isTaskHandoffInFlight: taskId => continuityService?.runtime.isInFlight(taskId) === true,
     dshOptions: agentTaskOptions, dshPresetConfig: options.dshPresetConfig, dshConfiguration: options.dshConfiguration,
-    codexOptions: { ...agentTaskOptions,
+    codexOptions: { ...agentTaskOptions, stateDir,
       authorizeOpenAiEnvironment: () => settingsService.store.get().settings.agents.codexOpenAiEnvironmentAuthorized === true },
     acpOptions: { taskOptions: agentTaskOptions, nativeApprovalBridge,
       runtimeConfiguration: options.agentAcpOptions?.runtimeResolver ? undefined : agentRuntimeConfiguration, ...options.agentAcpOptions,
@@ -278,6 +281,7 @@ export function createCetaMeshServices(options = {}) {
     stateDir,
     onUsage: payload => usageLedger.record(payload),
     onTurnEnd: payload => agentBroker.reportTurnEnd(payload),
+    onFailure: payload => runtimeFailures.record({ ...payload, source: 'chat' }),
     onEvent: event => uiEventBus.publish(event.event, event.data)
   });
 
@@ -374,7 +378,11 @@ export function createCetaMeshServices(options = {}) {
   });
 
   const continuityReconciler = createWorkspaceReconciler({
-    contentProof: workspaceContentProof,
+    contentProof: async (root, args) => workspaceContentProof(root, { ...args,
+      additionalWorkspaceRoots: (await workspaceService.execute({ method: 'workspace.list' })).workspaces.map(row => row.root),
+      excludedRoots: [stateDir, dataRoot],
+      ...((await workspaceService.execute({ method: 'workspace.list' })).workspaces.some(row => row.root === root
+        && workspaceService.describeWorkspace(row.id)?.managedIsolation) ? { trustedSourceRoot: root } : {}) }),
     resolveWorkspace: async workspaceId => workspaceService.describeWorkspace(workspaceId),
     gitStatus: root => gitStatus(root),
     gitHead: root => gitHead(root),
@@ -667,6 +675,7 @@ export function createCetaMeshServices(options = {}) {
     productService,
     releaseConfig,
     errorRegistry,
+    runtimeFailures,
     systemServices,
     system: systemServices,
     desktopUiService,

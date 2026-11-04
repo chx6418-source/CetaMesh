@@ -110,6 +110,27 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
   let approvalDecisionListener = null;
   const journalFile = stateDir ? path.join(stateDir, 'capability', 'requests.json') : null;
   const journal = journalFile ? readJsonFile(journalFile, { missing: {} }) : {};
+  // This write-ahead ownership record is independent of Task JSON. A native
+  // process can exist before attachment succeeds; failed Task writes must not
+  // silently free its Workspace, including across Core restart.
+  for (const row of Object.values(journal)) if (row?.workspaceFence !== undefined) {
+    const fence = row.workspaceFence;
+    if (!fence || fence.version !== 1 || typeof row.taskId !== 'string' || !row.taskId
+      || typeof fence.workspaceId !== 'string' || !fence.workspaceId || fence.workspaceId.length > 240
+      || typeof fence.provider !== 'string' || !/^[a-z][a-z0-9-]{0,79}$/.test(fence.provider)) {
+      throw capabilityError('REQUEST_JOURNAL_CORRUPT', 'Agent Workspace ownership evidence is invalid');
+    }
+    try {
+      const task = taskRuntime?.get({ id: row.taskId }).task;
+      if (task && ['queued', 'running', 'waiting', 'paused'].includes(task.status)) {
+        taskRuntime.block({ id: task.id, expectedRev: task.rev,
+          reason: 'needs-reconciliation: Interrupted Agent provisioning retains Workspace ownership; verify execution before recovery' });
+      }
+    } catch (error) {
+      audit({ capability: 'agent.run', status: 'recovery-block-failed', code: error?.code ?? 'TASK_WRITE_FAILED' });
+      // Even if Task persistence is still unavailable, the journal fence holds.
+    }
+  }
   const requests = new Map();
   function taskFollowKey(provider, sessionId) { return `${String(provider)}\u0000${String(sessionId)}`; }
   function waitForTaskFollowRetry(ms, signal) {
@@ -337,6 +358,29 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     if (!journalFile) return;
     writeJsonAtomic(journalFile, journal);
   }
+  function workspaceFences() {
+    return Object.entries(journal).filter(([, row]) => row?.workspaceFence).map(([requestId, row]) => ({
+      requestId, taskId: row.taskId, workspaceId: row.workspaceFence.workspaceId, provider: row.workspaceFence.provider
+    }));
+  }
+  function claimWorkspaceFence(request, provider) {
+    const row = journal[request.requestId];
+    const prior = row.workspaceFence;
+    row.workspaceFence = { version: 1, workspaceId: request.workspaceId, provider };
+    try { saveJournal(); }
+    catch (error) { if (prior === undefined) delete row.workspaceFence; else row.workspaceFence = prior; throw error; }
+  }
+  function releaseWorkspaceFence(requestId) {
+    const row = journal[requestId], prior = row?.workspaceFence;
+    if (!prior) return;
+    delete row.workspaceFence;
+    try { saveJournal(); } catch (error) { row.workspaceFence = prior; throw error; }
+  }
+  function assertTaskWorkspaceFenceClear(taskId, allowActive = false) {
+    if (workspaceFences().some(row => row.taskId === taskId) && !(allowActive && provisioning.has(taskId))) {
+      throw capabilityError('TASK_RECOVERY_REVIEW_REQUIRED', 'Unconfirmed Agent provisioning requires Owner recovery before another dispatch');
+    }
+  }
   async function idempotent(request, run) {
     const hash = requestFingerprint(request), old = journal[request.requestId];
     if (old && old.hash !== hash) throw capabilityError('REQUEST_ID_CONFLICT', 'Request ID reused with different data');
@@ -348,8 +392,23 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     journal[request.requestId] = { hash, status: 'in-flight', taskId: request.taskId ?? null }; saveJournal();
     const pending = Promise.resolve().then(run);
     requests.set(request.requestId, pending);
-    try { const result = await pending; journal[request.requestId] = { hash, status: 'completed', taskId: request.taskId ?? null, result }; saveJournal(); return result; }
-    catch (error) { journal[request.requestId] = { hash, status: 'failed', taskId: request.taskId ?? null, code: error.code }; saveJournal(); throw error; }
+    try {
+      const result = await pending, fence = journal[request.requestId]?.workspaceFence;
+      journal[request.requestId] = { hash, status: 'completed', taskId: request.taskId ?? null, result };
+      try { saveJournal(); }
+      catch (error) { if (fence) journal[request.requestId].workspaceFence = fence; throw error; }
+      return result;
+    }
+    catch (error) {
+      const fence = journal[request.requestId]?.workspaceFence;
+      journal[request.requestId] = { hash, status: 'failed', taskId: request.taskId ?? null, code: error.code,
+        ...(fence ? { workspaceFence: fence } : {}) };
+      // The pre-launch fence remains on disk if settlement cannot be written.
+      try { saveJournal(); } catch (writeError) {
+        audit({ requestId: request.requestId, capability: request.capability, status: 'request-journal-failed', code: writeError?.code ?? 'WRITE_FAILED' });
+      }
+      throw error;
+    }
     finally { requests.delete(request.requestId); }
   }
   const taskFor = id => {
@@ -927,11 +986,21 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       if (r.signal?.aborted) throw capabilityError('INVOKE_CANCELLED', 'Agent assignment cancelled');
       let task = taskFor(r.taskId);
       if (!task || task.workspaceId !== r.workspaceId) throw capabilityError('TASK_NOT_AUTHORIZED', 'Task workspace required');
+      assertTaskWorkspaceFenceClear(task.id, true);
+      if (task.recoveryIntent) throw capabilityError('TASK_RECOVERY_REVIEW_REQUIRED', 'Pending Owner recovery must finish before dispatch');
       if (/needs-reconciliation|approval-pending/i.test(task.progress?.note ?? '')) {
         throw capabilityError('NEEDS_RECONCILIATION', 'Task has an unreviewed interrupted effect or approval');
       }
-      if ((task.attempts ?? []).some(row => ['started', 'unknown'].includes(row.state) && row.requestId !== r.requestId)) {
+      const reviewedAttempt = row => row.review?.disposition === 'do-not-replay'
+        && (task.recoveryReviews ?? []).some(review => review.id === row.review.reviewId
+          && review.sessionProof?.stopped === true && review.previousAgent?.provider === row.provider
+          && review.previousAgent?.sessionId === row.sessionId && review.workspaceProof?.sha256);
+      if ((task.attempts ?? []).some(row => ['started', 'unknown'].includes(row.state)
+        && row.requestId !== r.requestId && !reviewedAttempt(row))) {
         throw capabilityError('NEEDS_RECONCILIATION', 'Prior Agent Attempt has an unconfirmed effect');
+      }
+      if ((task.attempts ?? []).some(row => row.requestId === r.requestId && row.review?.disposition === 'do-not-replay')) {
+        throw capabilityError('OPERATION_REPLAY_DENIED', 'A reviewed interrupted Attempt requires a fresh instruction identity');
       }
       if (taskHandoffGuard(task.id)) throw capabilityError('TASK_HANDOFF_IN_FLIGHT', 'Task Handoff owns this execution boundary');
       const provider = String(r.input.agentProvider || r.input.provider || 'cetamesh');
@@ -979,15 +1048,23 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       const reservation = workspaceProvisioning.get(reservedWorkspaceId);
       const otherWriter = [...workspaceProvisioning].find(([id, held]) =>
         held.taskId !== reservedTaskId && workspacesOverlap(id, reservedWorkspaceId))?.[1];
+      const fencedWriter = workspaceFences().find(row => row.taskId !== reservedTaskId
+        && workspacesOverlap(row.workspaceId, reservedWorkspaceId));
       const activeReaders = taskRuntime.activeWorkspaceReaders({ workspaceId: task.workspaceId, exceptTaskId: task.id });
       const otherReaders = new Set(activeReaders.map(row => row.id));
       for (const [id, readers] of workspaceReadProvisioning) {
         if (workspacesOverlap(id, reservedWorkspaceId)) for (const reader of readers.keys()) otherReaders.add(reader);
       }
       otherReaders.delete(task.id);
-      if (otherOwner || otherWriter || otherReaders.size >= (readOnlyChild ? 2 : 1)) {
-        throw Object.assign(capabilityError('TASK_WORKSPACE_BUSY', '工作区仍由另一任务持有写入权；请先查看占用任务并核验，或切换工作区。'),
-          { blockingTaskId: otherOwner?.id ?? otherWriter?.taskId ?? otherReaders.values().next().value });
+      if (otherOwner || otherWriter || fencedWriter || otherReaders.size >= (readOnlyChild ? 2 : 1)) {
+        const blockingTaskId = otherOwner?.id ?? otherWriter?.taskId ?? fencedWriter?.taskId ?? otherReaders.values().next().value;
+        const owner = otherOwner ?? taskFor(blockingTaskId);
+        const error = Object.assign(capabilityError('TASK_WORKSPACE_BUSY',
+          `工作区由任务 ${blockingTaskId} 占用（${owner?.currentAgent?.provider ?? '派发准备'}，${owner?.status ?? 'provisioning'}）。请查看该任务的恢复核查；未确认旧执行结束前保留写入权。`),
+          { blockingTaskId, blockingAgent: owner?.currentAgent?.provider ?? fencedWriter?.provider ?? null,
+            blockingTaskStatus: owner?.status ?? 'provisioning', blockingReason: fencedWriter ? 'unconfirmed-provisioning' : otherWriter ? 'provisioning' : 'assigned-executor' });
+        safeAgentPreflights.add(error);
+        throw error;
       }
       if (readOnlyChild) {
         const held = workspaceReadProvisioning.get(reservedWorkspaceId) ?? new Map();
@@ -1013,12 +1090,20 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
         if (!['queued', 'running'].includes(task.status)) {
           throw capabilityError('TASK_NOT_RUNNING', 'Task is paused or ended; resume it before dispatching Agent work');
         }
+        assertTaskWorkspaceFenceClear(task.id);
         assertChildParentActive();
         const queuedOwner = taskRuntime.activeWorkspaceOwner({ workspaceId: task.workspaceId,
           exceptTaskId: task.id, forReadOnlyTaskId: readOnlyChild ? task.id : null });
-        if (queuedOwner) {
-          throw Object.assign(capabilityError('TASK_WORKSPACE_BUSY', '工作区写入权已由另一任务持有；请查看占用任务后核验。'),
-            { blockingTaskId: queuedOwner.id });
+        const queuedFence = workspaceFences().find(row => row.taskId !== task.id
+          && workspacesOverlap(row.workspaceId, task.workspaceId));
+        if (queuedOwner || queuedFence) {
+          const blockingTaskId = queuedOwner?.id ?? queuedFence.taskId;
+          const error = Object.assign(capabilityError('TASK_WORKSPACE_BUSY',
+            `工作区写入权由任务 ${blockingTaskId} 持有（${queuedOwner?.currentAgent?.provider ?? queuedFence?.provider ?? '待核查'}，${queuedOwner?.status ?? 'blocked'}）。请查看占用任务的恢复核查。`),
+            { blockingTaskId, blockingAgent: queuedOwner?.currentAgent?.provider ?? queuedFence?.provider ?? null,
+              blockingTaskStatus: queuedOwner?.status ?? 'blocked', blockingReason: queuedFence ? 'unconfirmed-provisioning' : 'assigned-executor' });
+          safeAgentPreflights.add(error);
+          throw error;
         }
         if (r.signal?.aborted) throw capabilityError('INVOKE_CANCELLED', 'Agent assignment cancelled');
         if (taskHandoffGuard(task.id)) throw capabilityError('TASK_HANDOFF_IN_FLIGHT', 'Task Handoff owns this execution boundary');
@@ -1061,6 +1146,27 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
           } catch (error) {
             if (error.code !== 'SESSION_NOT_FOUND') throw error;
             if(r.input.delegationRequestId)throw capabilityError('DELEGATION_TARGET_LOST','Committed automatic Handoff target was lost; reconcile through Continuity before replacing it');
+            if (provider !== 'cetamesh') {
+              // A missing native Session is not an owned-process exit receipt.
+              // Status/send awaited external state; retain only the exact old
+              // assignment and use its latest revision when making review reachable.
+              const latest = taskFor(task.id);
+              if (latest?.workspaceId === task.workspaceId
+                && latest.currentAgent?.provider === task.currentAgent.provider
+                && latest.currentAgent?.sessionId === task.currentAgent.sessionId
+                && !['completed', 'failed', 'cancelled'].includes(latest.status)) {
+                const reason = 'needs-reconciliation: Native Agent Session is unavailable; retain execution ownership until Owner verifies stop and effects';
+                try {
+                  if (latest.status === 'blocked') taskRuntime.setProgress({ id: latest.id, expectedRev: latest.rev, note: reason });
+                  else taskRuntime.block({ id: latest.id, expectedRev: latest.rev, reason });
+                } catch (blockError) {
+                  audit({ requestId: r.requestId, capability: 'agent.run', status: 'recovery-block-failed',
+                    code: blockError?.code ?? 'TASK_WRITE_FAILED' });
+                }
+              }
+              throw Object.assign(capabilityError('TASK_RECOVERY_REVIEW_REQUIRED',
+                '原生 Agent 会话不可访问；请在任务详情核对旧执行停止及操作结果后续接'), { cause: error });
+            }
             task = taskRuntime.detachAgent({ id: task.id, expectedRev: task.rev, note: 'Managed session unavailable after restart; fresh authorized session' }).task;
           }
         }
@@ -1069,6 +1175,8 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
         let created = null;
         let attached = false;
         let startedByRequest = false;
+        let creationEntered = false;
+        let instructionEntered = false;
         try {
           const inheritedModel = taskModelForAgent(task, provider);
           const modelConfig = {
@@ -1076,6 +1184,8 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
             modelProvider: r.input.modelProvider ?? inheritedModel.modelProvider,
             reasoningEffort: r.input.reasoningEffort ?? inheritedModel.reasoningEffort
           };
+          claimWorkspaceFence(r, provider);
+          creationEntered = true;
           created = await agentBroker.createSession(provider, { cwd: ws.root, taskId: task.id, workspaceId: ws.id,
             ...modelConfig });
           if (!created?.sessionId) throw capabilityError('PROVIDER_ERROR', 'Agent returned no session');
@@ -1099,6 +1209,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
           assertChildParentActive();
           if (readOnlyChild) taskRuntime.recordAttempt({ id: task.id, expectedRev: beforeSend.rev,
             provider, sessionId: created.sessionId, requestId: r.requestId, state: 'started' });
+          instructionEntered = true;
           const sent = await agentBroker.send({ provider, sessionId: created.sessionId, content: String(r.input.content || task.goal),
             ...(readOnlyChild ? { runId: r.requestId } : {}) });
           if (sent?.accepted !== true) throw capabilityError('AGENT_SEND_REJECTED', 'Agent did not accept Task instruction');
@@ -1115,27 +1226,54 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
             const latest = taskFor(task.id);
             taskRuntime.setModelConfig({ id: task.id, expectedRev: latest.rev, ...modelConfig });
           }
+          // The durable Task assignment now owns this execution. Clear the
+          // provisioning fence before waking the next serialized instruction.
+          releaseWorkspaceFence(r.requestId);
           return { taskId: task.id, workspaceId: ws.id, provider, sessionId: created.sessionId,
             accepted: sent?.accepted === true, requestId: sent?.requestId ?? sent?.turnId ?? null,
             turnId: sent?.turnId ?? null, actor: principalForTask(task.id) };
         } catch (error) {
           if (created?.sessionId) stopTaskFollow(provider, created.sessionId);
           let current = taskFor(task.id);
-          if (attached && current?.currentAgent?.sessionId === created?.sessionId) {
+          let stopped = !creationEntered || (provider === 'cetamesh' && !created?.sessionId);
+          if (creationEntered && !created?.sessionId && provider !== 'cetamesh') {
+            try { stopped = (await agentBroker.require?.(provider)?.verifyTaskQuiescence?.({
+              taskId: task.id, workspaceId: ws.id, allowEmpty: true }))?.stopped === true; }
+            catch { stopped = false; }
+          }
+          if (created?.sessionId) {
+            try { stopped = (await agentBroker.closeSession({ provider, sessionId: created.sessionId }))?.closed === true; }
+            catch (cleanupError) {
+              stopped = provider === 'cetamesh' && cleanupError?.code === 'SESSION_NOT_FOUND';
+              audit({ requestId: r.requestId, capability: 'agent.run', status: 'rollback-warning', stage: 'close-session',
+                code: cleanupError?.code ?? 'SESSION_CLEANUP_FAILED' });
+            }
+            current = taskFor(task.id);
+          }
+          const needsReview = !stopped || instructionEntered;
+          if (!needsReview) {
+            try { releaseWorkspaceFence(r.requestId); }
+            catch (releaseError) { audit({ requestId: r.requestId, capability: 'agent.run', status: 'rollback-warning',
+              stage: 'release-workspace', code: releaseError?.code ?? 'WRITE_FAILED' }); }
+          }
+          if (!needsReview && attached && current?.currentAgent?.sessionId === created?.sessionId) {
             try { current = taskRuntime.detachAgent({ id: task.id, expectedRev: current.rev, note: 'Agent initialization rolled back' }).task; }
             catch (rollbackError) {
               audit({ requestId: r.requestId, capability: 'agent.run', status: 'rollback-warning', stage: 'detach-task',
                 code: rollbackError?.code ?? 'TASK_ROLLBACK_FAILED' });
             }
           }
-          if (created?.sessionId) {
-            try { await agentBroker.closeSession({ provider, sessionId: created.sessionId }); }
-            catch (cleanupError) {
-              audit({ requestId: r.requestId, capability: 'agent.run', status: 'rollback-warning', stage: 'close-session',
-                code: cleanupError?.code ?? 'SESSION_CLEANUP_FAILED' });
+          if ((needsReview || journal[r.requestId]?.workspaceFence) && current && !['completed', 'failed', 'cancelled'].includes(current.status)) {
+            const reason = 'needs-reconciliation: Fresh Agent execution or cleanup needs review; retain Workspace ownership and execution evidence';
+            try {
+              if (current.status === 'blocked') taskRuntime.setProgress({ id: task.id, expectedRev: current.rev, note: reason });
+              else taskRuntime.block({ id: task.id, expectedRev: current.rev, reason });
+            } catch (rollbackError) {
+              audit({ requestId: r.requestId, capability: 'agent.run', status: 'rollback-warning', stage: 'block-task',
+                code: rollbackError?.code ?? 'TASK_ROLLBACK_FAILED' });
             }
           }
-          if (startedByRequest && current?.status === 'running') {
+          if (!needsReview && !journal[r.requestId]?.workspaceFence && startedByRequest && current?.status === 'running') {
             try { taskRuntime.fail({ id: task.id, expectedRev: current.rev, reason: 'Agent initialization failed and was rolled back' }); }
             catch (rollbackError) {
               audit({ requestId: r.requestId, capability: 'agent.run', status: 'rollback-warning', stage: 'fail-task',
@@ -1363,7 +1501,8 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       if (operationTask && broker.uncertainDispatchesForTask({ taskId, workspaceId: operationTask.workspaceId })
         .length) return 'TASK_EFFECT_UNCONFIRMED';
       if (environment.blocker(taskId)) return environment.blocker(taskId);
-      if (provisioning.has(taskId) || Object.values(journal).some(row => row?.taskId === taskId && row.status === 'in-flight')) return 'TASK_EXECUTION_UNCONFIRMED';
+      if (provisioning.has(taskId) || Object.values(journal).some(row => row?.taskId === taskId
+        && (row.status === 'in-flight' || row.workspaceFence))) return 'TASK_EXECUTION_UNCONFIRMED';
       if (unresolvedApprovalOperations(taskId).length) return 'TASK_EFFECT_UNCONFIRMED';
       if (broker.approvals.list().some(row => row.request?.taskId === taskId && ['pending', 'approved', 'executing'].includes(row.status))) return 'TASK_APPROVAL_PENDING';
       if ([...taskFollowConsumers.values()].some(row => row.taskId === taskId && !row.finished && row.expectedTurns > 0)) return 'TASK_EXECUTION_UNCONFIRMED';
@@ -1376,14 +1515,16 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       if (unresolvedApprovalOperations(taskId).some(row => row.status === 'unknown'))
         return { state: 'needs-reconciliation', capability: 'approval' };
       if (environment.recovery(taskId)) return environment.recovery(taskId);
-      return Object.values(journal).some(row => row?.taskId === taskId && row.status === 'in-flight')
+      return Object.values(journal).some(row => row?.taskId === taskId && (row.status === 'in-flight' || row.workspaceFence))
         ? { state: 'needs-reconciliation', capability: 'agent.run' } : null;
     },
     taskReviewState({ taskId, workspaceId }) {
       return {
+        active: provisioning.has(taskId) || broker.hasActiveDispatchForTask({ taskId, workspaceId }),
         dispatches: broker.uncertainDispatchesForTask({ taskId, workspaceId }),
-        requests: Object.entries(journal).filter(([, row]) => row?.taskId === taskId && row.status === 'in-flight')
+        requests: Object.entries(journal).filter(([, row]) => row?.taskId === taskId && (row.status === 'in-flight' || row.workspaceFence))
           .map(([id, row]) => [id, row.hash]),
+        workspaceFences: workspaceFences().filter(row => row.taskId === taskId),
         decisions: unresolvedApprovalOperations(taskId).map(row => [row.operationId, row.status]),
         approvals: broker.approvals.list().filter(row => row.request?.taskId === taskId &&
           ['pending','approved','executing'].includes(row.status)).map(row => [row.id,row.status])
@@ -1397,12 +1538,14 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
         .map(row => row.approvalId);
       const reviewedOperations = operationTask ? broker.acknowledgeTaskOperations({
         taskId, workspaceId: operationTask.workspaceId, approvalIds }).reconciled : 0;
-      const rows = Object.values(journal).filter(row => row?.taskId === taskId && row.status === 'in-flight');
-      for (const row of rows) row.status = 'reconciled';
+      const rows = Object.values(journal).filter(row => row?.taskId === taskId && (row.status === 'in-flight' || row.workspaceFence));
+      const previous = rows.map(row => ({ status: row.status, workspaceFence: row.workspaceFence }));
+      for (const row of rows) { row.status = 'reconciled'; delete row.workspaceFence; }
       if (rows.length) {
         try { saveJournal(); }
         catch (error) {
-          for (const row of rows) row.status = 'in-flight';
+          rows.forEach((row, index) => { row.status = previous[index].status;
+            if (previous[index].workspaceFence) row.workspaceFence = previous[index].workspaceFence; });
           throw error;
         }
       }

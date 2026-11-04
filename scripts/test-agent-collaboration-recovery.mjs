@@ -36,15 +36,27 @@ try {
   assert.equal(blocked.attempts[0].state, 'unknown');
   let sends = 0;
   restarted.agentBroker.send = async () => ({ accepted: true, requestId: `fixture-recovery-${++sends}` });
+  const preview = await restarted.desktopUiService.execute({ method: 'ui.task.recovery.inspect', params: { id: child.id } });
+  assert.equal(preview.canResume, true, JSON.stringify(preview.blockers));
+  assert.ok(preview.reviewToken);
+  assert.equal(preview.workspace.kind, 'filtered-workspace-v1');
+  assert.equal(preview.workspace.fileCount, 1);
   const result = await restarted.desktopUiService.execute({ method: 'ui.task.reconcile', params: {
-    id: child.id, expectedRev: blocked.rev, reviewed: true,
+    id: child.id, expectedRev: preview.taskRev, reviewed: true, action: 'resume',
+    reviewToken: preview.reviewToken, reviewedOperationIds: preview.reviewOperationIds,
     reviewSummary: 'Owner checked the non-Git Workspace and prior read effect',
     nextInstruction: 'Read source.txt again and report observed evidence',
     requestId: 'owner-recovery-run', provider: 'cetamesh'
   } });
   assert.equal(result.task.id, child.id);
   assert.equal(result.task.status, 'running');
-  assert.equal(restarted.taskService.runtime.get({ id: child.id }).task.attempts[0].state, 'reviewed');
+  const resumed = restarted.taskService.runtime.get({ id: child.id }).task;
+  assert.equal(resumed.attempts[0].state, 'unknown', 'review preserves the original uncertain execution outcome');
+  assert.equal(resumed.attempts[0].review.disposition, 'do-not-replay');
+  assert.equal(resumed.attempts[0].review.reviewId, preview.reviewToken);
+  assert.notEqual(resumed.currentAgent.sessionId, 'pre-restart-session');
+  assert.ok(resumed.agentHistory.some(row => row.sessionId === 'pre-restart-session'));
+  assert.equal(resumed.parentTaskId, parent.id);
   assert.equal(sends, 1, 'Owner review starts one fresh native instruction');
   console.log('PASS child Core restart -> unknown Attempt -> Owner Workspace review -> one fresh instruction');
 } finally {

@@ -61,6 +61,11 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
   }
 
   async function route({ decision, record, text, sourceText, requestId, signal,attachmentManifest=[] }) {
+    // This observation describes this request only. It never grants retry or
+    // releases an earlier Task's execution/unknown-effect fence.
+    let executionEntered = false;
+    let handoffEntered = false;
+    try {
     const requested = explicitDelegationTarget(sourceText ?? text);
     if (decision.agentIntent) {
       if (signal?.aborted) throw Object.assign(new Error('Chat operation cancelled'), { code: 'ABORTED' });
@@ -118,6 +123,8 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
         if (typeof continuityRuntime?.rollover !== 'function') {
           throw capabilityError('AGENT_PROVIDER_SWITCH_REQUIRES_CONTINUITY', 'Changing Agent Provider on an existing Task requires Continuity Fresh Session');
         }
+        executionEntered = true;
+        handoffEntered = true;
         const rollover = await continuityRuntime.rollover({
           taskId: task.id,
           targetProvider: provider,
@@ -169,6 +176,7 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
               await rankTaskAgents({ agentBroker, workspaceId, explicitProvider: choice.provider });
             }
             dispatchBegun = true;
+            executionEntered = true;
             result = await capabilityService.broker.execute({
               requestId: index === 0 ? requestId : crypto.randomUUID(), actor: OWNER_ACTOR,
               taskId: task.id, workspaceId, capability: 'agent.run',
@@ -193,6 +201,7 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
               && !(fresh.attempts ?? []).length && !(fresh.executionEvidence ?? []).length;
             if (!safe) throw error;
             dispatchBegun = false; // trusted preflight confirms no Agent side effect
+            executionEntered = false;
             taskRuntime.setProgress({ id: task.id, expectedRev: fresh.rev,
               note: `Verified preflight failure for ${choice.provider}; one safe reassignment to ${candidates[1].provider}` });
           }
@@ -225,6 +234,7 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
       const capability = signals.includes('time') ? 'clock.now' : signals.includes('search') || signals.includes('weather') ? 'web.search' : null;
       if (!capability) return { kind: 'tool', capabilityResult: { status: 'denied', code: 'NO_SAFE_CAPABILITY_MAPPING', signals } };
       try {
+        executionEntered = true;
         return { kind: 'tool', capabilityResult: await capabilityService.broker.execute({ actor: OWNER_ACTOR,
           capability, input: capability === 'web.search' ? { query: text } : {}, reason: 'Explicit Smart tool request' }) };
       } catch (error) {
@@ -232,6 +242,12 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
       }
     }
     return null;
+    } catch (error) {
+      if (error && typeof error === 'object') {
+        error.failureStage = !executionEntered || (!handoffEntered && isSafeAgentDispatchPreflight(error)) ? 'pre-dispatch' : 'unknown';
+      }
+      throw error;
+    }
   }
   return { route };
 }

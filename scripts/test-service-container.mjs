@@ -215,16 +215,48 @@ try {
     const rollbackTask = fallbackServices.taskService.runtime.create({ goal: 'rollback on agent failure', workspaceId: fallbackWorkspace.id });
     const originalSend = fallbackServices.agentBroker.send;
     let closedFailedSession = false;
-    fallbackServices.agentBroker.send = async () => { throw Object.assign(new Error('send failed'), { code: 'PROVIDER_ERROR' }); };
+    let failedSends = 0;
+    fallbackServices.agentBroker.send = async () => { failedSends++; throw Object.assign(new Error('send failed'), { code: 'PROVIDER_ERROR' }); };
     fallbackServices.agentBroker.closeSession = async () => { closedFailedSession = true; return { closed: true }; };
     await assert.rejects(() => fallbackServices.capabilityService.broker.execute({
+      requestId: 'service-container-send-failure',
       actor: { kind: 'owner', id: 'desktop' }, taskId: rollbackTask.id, workspaceId: fallbackWorkspace.id,
       capability: 'agent.run', input: { agentProvider: 'dsh', content: 'fail after create' }, reason: 'rollback fixture'
     }), /send failed/);
     const rolledBackTask = fallbackServices.taskService.runtime.get({ id: rollbackTask.id }).task;
-    assert.equal(rolledBackTask.currentAgent, null, 'failed Agent initialization detaches its Task assignment');
-    assert.equal(rolledBackTask.status, 'failed', 'failed initialization cannot leave a running Task');
+    assert.deepEqual(rolledBackTask.currentAgent, { provider: 'dsh', sessionId: `dsh-fixture-${providerSessionIndex}` },
+      'entering send retains the exact Session assignment for Owner review');
+    assert.equal(rolledBackTask.status, 'blocked', 'uncertain send leaves a recoverable Task instead of a terminal failure');
+    assert.match(rolledBackTask.progress.note, /needs-reconciliation/);
     assert.equal(closedFailedSession, true, 'failed Agent initialization closes the new Session/staging');
+    assert.equal(fallbackServices.taskService.runtime.activeWorkspaceOwner({ workspaceId: fallbackWorkspace.id }).id,
+      rollbackTask.id, 'successful close alone cannot release the Workspace owner');
+    const failedReview = fallbackServices.capabilityService.taskReviewState({ taskId: rollbackTask.id, workspaceId: fallbackWorkspace.id });
+    assert.deepEqual(failedReview.workspaceFences, [{ requestId: 'service-container-send-failure',
+      taskId: rollbackTask.id, workspaceId: fallbackWorkspace.id, provider: 'dsh' }]);
+    const failedJournal = JSON.parse(fs.readFileSync(path.join(root, 'fallback-state', 'capability', 'requests.json'), 'utf8'));
+    assert.equal(failedJournal['service-container-send-failure'].status, 'failed');
+    assert.deepEqual(failedJournal['service-container-send-failure'].workspaceFence,
+      { version: 1, workspaceId: fallbackWorkspace.id, provider: 'dsh' }, 'the unresolved ownership fence is durable');
+    const inspection = await fallbackServices.desktopUiService.execute({ method: 'ui.task.recovery.inspect', params: { id: rollbackTask.id } });
+    assert.equal(inspection.canResume, false);
+    assert.equal(inspection.canRelease, false);
+    assert.equal(inspection.reviewToken, null, 'an idle status and successful close are insufficient without task-wide proof');
+    assert.ok(inspection.blockers.some(row => row.code === 'SESSION_EXECUTION_UNCONFIRMED'));
+    assert.equal(inspection.blockers.some(row => row.code === 'TASK_RECOVERY_NOT_REQUIRED'), false,
+      'the retained blocked Task is eligible for recovery once execution proof is available');
+    assert.ok(inspection.reviewOperationIds.includes('request:service-container-send-failure'));
+    const sessionsBeforeUnsafeRetry = providerSessionIndex;
+    await assert.rejects(() => fallbackServices.capabilityService.broker.execute({
+      requestId: 'service-container-unsafe-retry', actor: { kind: 'owner', id: 'desktop' },
+      taskId: rollbackTask.id, workspaceId: fallbackWorkspace.id, capability: 'agent.run',
+      input: { agentProvider: 'dsh', content: 'unreviewed retry' }, reason: 'must retain the failed send fence'
+    }), { code: 'TASK_RECOVERY_REVIEW_REQUIRED' });
+    assert.equal(providerSessionIndex, sessionsBeforeUnsafeRetry);
+    assert.equal(failedSends, 1, 'direct retry cannot resend an instruction whose effect is unknown');
+    console.log('Service-container send failure:', JSON.stringify({ taskStatus: rolledBackTask.status,
+      currentAgent: rolledBackTask.currentAgent, workspaceOwner: rollbackTask.id,
+      workspaceFences: failedReview.workspaceFences, recoveryBlockers: inspection.blockers.map(row => row.code) }));
     fallbackServices.agentBroker.send = originalSend;
   } finally {
     fallbackServices.agentBroker.assertExecutionConsent = originalExecutionConsent;

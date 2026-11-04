@@ -130,12 +130,15 @@ export async function runCoreWorker({ paths = APP_PATHS, processRef = process, p
   let dataProbe=null,uiProbe=null;
   const diagnostics=createStartupDiagnostics({stateDir:paths.stateDir,
     aboutInfo:()=>about.about.info(),releaseConfig:releaseConfig.config,
+    runtimeFailures:()=>application.services.runtimeFailures?.list()??[],
     initialChecks:compositionFailed?[{id:'core',stage:'core',status:'BLOCKED',code:'CORE_COMPOSITION_FAILED',reason:'Core service composition failed',remediation:'Restart Core only after fixing configuration',timedOut:false,durationMs:0}]:[],
     preflight:()=>preflightCriticalStorage({stateDir:paths.stateDir}),
     checks:({light})=>application.services.taskService?serviceDiagnosticChecks(application.services,{light,dataProbe,uiProbe}):
       [{id:'core',stage:'core',critical:true,run:()=>{throw Error('CORE_RESTART_REQUIRED');}}],
     publish:report=>application.services.uiEventBus?.publish('diagnostics.updated',{status:report.status,runId:report.id})});
   application.services.diagnostics=diagnostics;
+  const unsubscribeFailures=application.services.runtimeFailures?.subscribe(()=>diagnostics.refreshFailures());
+  if(unsubscribeFailures)application.lifecycle.register(unsubscribeFailures,{name:'Diagnostic fault correlation'});
   application.services.capabilityService?.broker.setExecutionGuard(()=>{
     if(diagnostics.blocked())throw Object.assign(new Error('Core selfcheck blocks dispatch'),{code:'CORE_DIAGNOSTICS_BLOCKED'});
   });

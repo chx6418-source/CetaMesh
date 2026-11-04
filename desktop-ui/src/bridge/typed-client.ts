@@ -48,6 +48,9 @@ export interface ModelUsage {
 export interface ChatMessage {
   id: string; role: 'user' | 'assistant' | 'system'; text: string; at: string | number | null;
   requestId?: string | null;
+  errorCode?: string | null;
+  failureStage?: 'pre-dispatch' | 'execution' | 'unknown' | null;
+  routing?: Record<string, unknown>;
   usage?: ModelUsage | null;
   attachmentRefs?: {ref:string;name:string;kind:string;size:number;mimeType:string;modelRef?:string|null}[];
   attachments: string[]; toolActivity: { id: string; label: string; status: string; summary: string; durationMs: number | null; capability?: string | null; filePath?: string | null; exitCode?: number | null }[];
@@ -90,6 +93,19 @@ export interface WorkshopProposal {
   workspaceId: string | null; taskId: string | null; errorCode: string | null;
   artifacts: { id: string; label: string; mediaType: string; deliveredAt: string | number | null }[];
   createdAt: string | number | null; updatedAt: string | number | null;
+}
+export interface TaskRecoveryPreview {
+  taskId: string; taskRev: number;
+  operations: { operationId: string; capability: string; status: string; verified: boolean; code: string | null }[];
+  omitted: number; reviewToken: string | null; expiresAt: number | null;
+  session: { state: string; stopped: boolean; provider: string | null; sessionId: string | null; code: string | null };
+  workspace: { kind: string; sha256: string; scopeSha256?: string; fileCount?: number; totalBytes?: number } | null;
+  blockers: { code: string; message: string }[]; reviewOperationIds: string[];
+  canResume: boolean; canRelease: boolean;
+  ownership: { taskId: string; provider: string | null; taskStatus: string; reason: string; unconfirmedOperations: number; safeActions: string[] };
+}
+export interface TaskRecoverySubmission {
+  preview: TaskRecoveryPreview; action: 'resume' | 'release'; reviewSummary: string; nextInstruction: string; provider?: string;
 }
 export interface Memory {
   provenance?: {status:'user-confirmed'|'agent-inference'|'historical-unverified';actor:string|null;at:string|number|null};
@@ -415,7 +431,7 @@ export const chatClient = {
   history: (id: string, limit = 100, beforeMessageId: string | null = null, afterMessageId: string | null = null) => uiCall<{
     id: string; total: number; messages: ChatMessage[]; sessionUsage?: ModelUsage | null; nextBeforeMessageId: string | null; hasMore: boolean; nextAfterMessageId: string | null; hasMoreAfter: boolean
   }>('ui.chat.history', { id, limit, beforeMessageId, afterMessageId }),
-  status: (id: string) => uiCall<{ id: string; taskId: string | null; dshSessionAlive: boolean; state: string; requestId: string | null; statusMessage: string | null; retryCount: number; followState: string; followError: string | null; displayText: string; toolActivity: ChatMessage['toolActivity']; agentActivity: ChatMessage['agentActivity']; context?: ChatContextObservation | null; turnUsage?: ModelUsage | null; quota?: { status: 'unknown'; reason: string }; error: string | null; errorCode: string | null; approvalId: string | null; approvalExpiresAt: string | number | null; routing: Record<string, unknown> }>('ui.chat.status', { id }),
+  status: (id: string) => uiCall<{ id: string; taskId: string | null; dshSessionAlive: boolean; state: string; requestId: string | null; statusMessage: string | null; retryCount: number; followState: string; followError: string | null; displayText: string; toolActivity: ChatMessage['toolActivity']; agentActivity: ChatMessage['agentActivity']; context?: ChatContextObservation | null; turnUsage?: ModelUsage | null; quota?: { status: 'unknown'; reason: string }; error: string | null; errorCode: string | null; failureStage?: ChatMessage['failureStage']; approvalId: string | null; approvalExpiresAt: string | number | null; routing: Record<string, unknown> }>('ui.chat.status', { id }),
   send: (id: string, text: string, attachments: Attachment[] = [], clientMessageId?: string) => {
     const params = { id, text, attachments:attachments.map(a=>a.ref?{ref:a.ref}:a), ...(clientMessageId ? { clientMessageId } : {}) };
     return uiCall<{ userMessageId?: string; requestId?: string }>('ui.chat.send', params).catch(error => {
@@ -432,7 +448,7 @@ export const chatClient = {
   setConfig: (id: string, config: Record<string, unknown>) => uiCall<ChatSession>('ui.chat.config.set', { id, config })
 };
 export const taskClient = {
-  inspectRecovery: (id:string) => uiCall<{taskId:string;taskRev:number;operations:{operationId:string;capability:string;status:string;verified:boolean;code:string|null}[];omitted:number}>('ui.task.recovery.inspect',{id}),
+  inspectRecovery: (id:string) => uiCall<TaskRecoveryPreview>('ui.task.recovery.inspect',{id}),
   overview: (query = '', status = '', page: { workspaceId?: string; offset?: number; limit?: number } = {}) => uiCall<{ tasks: Task[]; total: number; offset: number; limit: number; nextOffset: number | null; counts: Record<string, number>; needsAttention: string[] }>('ui.task.overview', { query, status, limit: 100, ...page }),
   get: (id: string) => uiCall<{ task: Task }>('ui.task.get', { id }),
     createChild: (input: { parentTaskId: string; expectedParentRev: number; goal: string; requestId: string;
@@ -452,8 +468,8 @@ export const taskClient = {
   start: (id: string, expectedRev?: number, agentProvider?: string) => uiCall<{ task: Task }>('ui.task.start', { id, expectedRev, agentProvider }),
   pause: (id: string, expectedRev?: number) => uiCall<{ task: Task }>('ui.task.pause', { id, expectedRev }),
   resume: (id: string, expectedRev?: number) => uiCall<{ task: Task }>('ui.task.resume', { id, expectedRev }),
-  reconcile: (id: string, expectedRev: number | undefined, reviewSummary: string, nextInstruction: string, requestId: string, provider?: string) =>
-    uiCall<{ task: Task }>('ui.task.reconcile', { id, expectedRev, reviewed: true, reviewSummary, nextInstruction, requestId, provider }),
+  reconcile: (id: string, input: { expectedRev: number; reviewToken: string; reviewedOperationIds: string[]; reviewSummary: string; action: 'resume' | 'release'; provider?: string; nextInstruction?: string; requestId?: string }) =>
+    uiCall<{ task: Task }>('ui.task.reconcile', { id, ...input, reviewed: true }),
   cancel: (id: string, expectedRev?: number) => uiCall<{ task: Task }>('ui.task.cancel', { id, expectedRev }),
   handoff: (id: string, targetProvider: string, expectedRev?: number) => uiCall<{ task: Task; handoff: { success: boolean; from: unknown; to: unknown } }>('ui.task.handoff', { id, targetProvider, expectedRev })
 };

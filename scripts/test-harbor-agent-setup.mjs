@@ -224,9 +224,10 @@ try {
   assert.deepEqual(await agentClient.presets('/isolated/dsh'),presets);
   assert.equal(sent.method,'ui.agent.presets');assert.deepEqual(sent.params,{provider:'dsh',homeDir:'/isolated/dsh'});
   window.ipc.postMessage=payload=>{sent=JSON.parse(payload);window.__cetameshReceive({id:sent.id,ok:true,result:{task:{id:'detached'}}});};
-  await taskClient.reconcile('detached',7,'Fixture reviewed','New read-only instruction','recovery-unique','codex');
+  const recoveryInput={expectedRev:7,reviewToken:'current-preview',reviewedOperationIds:['dispatch:original-operation'],action:'resume',reviewSummary:'Fixture reviewed',nextInstruction:'New read-only instruction',requestId:'recovery-unique',provider:'codex'};
+  await taskClient.reconcile('detached',recoveryInput);
   assert.equal(sent.method,'ui.task.reconcile');
-  assert.deepEqual(sent.params,{id:'detached',expectedRev:7,reviewed:true,reviewSummary:'Fixture reviewed',nextInstruction:'New read-only instruction',requestId:'recovery-unique',provider:'codex'});
+  assert.deepEqual(sent.params,{id:'detached',reviewed:true,...recoveryInput});
   const recoveryTask={id:'detached',title:'Fixture',goal:'Inspect',status:'blocked',progress:{percent:0,note:'needs-reconciliation: handoff failed'},currentAgent:null,artifacts:[],executionEvidence:[],agentHistory:[]};
   const recoveryMarkup=render(ui.TaskDetails,{task:recoveryTask,providers:[{id:'codex',name:'Codex fixture',eligible:true},{id:'unavailable',name:'Unavailable fixture',eligible:false}],onReconcile(){},onAction(){},onStart(){},onHandoff(){}});
   assert.match(recoveryMarkup,/恢复执行者/);
@@ -251,12 +252,34 @@ try {
   assert.equal(ui.managedWorkspacePreflight('none', '', null), '');
   const composer = render(ui.ChatComposer, { busy: false, models: [], selectedModelKey: '', agentProviders: [], selectedAgent: 'cetamesh', workspaces: [], workspaceId: '', activeWorkspaceId: null, onWorkspaceChange() {}, onModelChange() {}, onAgentChange() {}, onSend() {}, onStop() {} });
   assert.match(composer, /CetaMesh 托管任务需要工作区/);
-  const failure = render(ui.ManagedFailureActions, { taskId: 'task-failed', onReviewTask() {}, onNewChat() {} });
-  assert.match(failure, /查看任务/); assert.match(failure, /新建普通聊天/);
-  let reviewed, ordinary = 0;
-  const actions = ui.ManagedFailureActions({ taskId: 'task-failed', onReviewTask(id) { reviewed = id; }, onNewChat() { ordinary++; } });
-  const buttons = React.Children.toArray(actions.props.children); buttons[0].props.onClick(); buttons[1].props.onClick();
-  assert.equal(reviewed, 'task-failed'); assert.equal(ordinary, 1);
+  const {ChatFailureCard}=await vite.ssrLoadModule('/src/app/ChatFailure.tsx');
+  const recoveryFailure={error:'Fixture recovery required',errorCode:'TASK_RECOVERY_REVIEW_REQUIRED',failureStage:'execution'};
+  let reviewed, ordinary = 0, failureRetries = 0;
+  const actions = ChatFailureCard({failure:recoveryFailure,taskId:'task-failed',onOpenTask(id){reviewed=id;},onNewChat(){ordinary++;},onRetry(){failureRetries++;}});
+  const failure=renderToStaticMarkup(actions);
+  assert.match(failure,/查看任务/); assert.match(failure,/新建普通聊天/);
+  assert.doesNotMatch(failure,/>重新提交</,'recovery-required failures cannot replay the old request');
+  descendants(actions).find(child=>child.props?.children==='查看任务').props.onClick();
+  descendants(actions).find(child=>child.props?.children==='新建普通聊天').props.onClick();
+  assert.equal(reviewed,'task-failed'); assert.equal(ordinary,1); assert.equal(failureRetries,0);
+  const retryCases=[
+    {name:'unbound pre-dispatch failure',failure:{errorCode:'REQUEST_FAILED',failureStage:'pre-dispatch'},allowed:true},
+    {name:'execution failure',failure:{errorCode:'REQUEST_FAILED',failureStage:'execution'},allowed:false},
+    {name:'unknown outcome',failure:{errorCode:'REQUEST_FAILED',failureStage:'unknown'},allowed:false},
+    {name:'missing execution stage',failure:{errorCode:'REQUEST_FAILED'},allowed:false},
+    {name:'known Task requires review',failure:{errorCode:'REQUEST_FAILED',failureStage:'pre-dispatch'},taskId:'task-bound',allowed:false},
+    ...['TASK_WORKSPACE_BUSY','APPROVAL_PENDING','APPROVAL_REJECTED','SESSION_TRANSPORT_UNKNOWN','TASK_RECOVERY_REVIEW_REQUIRED']
+      .map(errorCode=>({name:errorCode,failure:{errorCode,failureStage:'pre-dispatch'},allowed:false}))
+  ];
+  for(const row of retryCases){
+    const card=ChatFailureCard({failure:row.failure,taskId:row.taskId,onOpenTask(){},onRetry(){failureRetries++;}});
+    const retry=descendants(card).find(child=>child.props?.children==='重新提交');
+    assert.equal(Boolean(retry),row.allowed,row.name+' must preserve its execution/review gate');
+    if(retry)retry.props.onClick();
+  }
+  assert.equal(failureRetries,1,'only the confirmed unbound pre-dispatch request can be explicitly resubmitted');
+  const submitting=render(ChatFailureCard,{failure:{errorCode:'REQUEST_FAILED',failureStage:'pre-dispatch'},onRetry(){},retrying:true});
+  assert.match(submitting,/<button[^>]*disabled=""[^>]*>正在提交…/,'an in-flight resubmission remains disabled');
   assert.equal(typeof ui.WorkTaskList,'function','Work must separate active and compact historical Tasks');
   const taskBase={id:'old-1',title:'[Prior Owner constraints in this Task Chat Session; verify against the current request] - 你好 [Current request] 你好',goal:'Original unmodified goal',status:'cancelled',workspaceId:'ws-private-internal-id',agent:null,currentAgent:null,agentHistory:[{provider:'codex',sessionId:'old-native'}],progress:{percent:0,note:''},updatedAt:null};
   const workTasks=[taskBase,{...taskBase,id:'done-1',title:'Completed report',status:'completed'}, {...taskBase,id:'blocked-1',title:'Needs review',status:'blocked'},{...taskBase,id:'failed-1',title:'Failed task',status:'failed'}];
@@ -265,7 +288,8 @@ try {
   const parent={...taskBase,id:'parent-waiting',rev:1,title:'等待子任务的父任务',status:'paused',parentTaskId:null,children:[child],artifacts:[],executionEvidence:[],attempts:[]};
   const blockedParent=render(ui.TaskDetails,{task:parent,providers:[],onAction(){},onStart(){},onHandoff(){},onOpenChild(){}});
   assert.match(blockedParent,/先处理子任务/,'dependency blocker is explained before attempting parent execution');
-  assert.match(blockedParent,/<button[^>]*disabled=""[^>]*>继续任务/,'parent resume cannot be offered while a child is active');
+  assert.doesNotMatch(blockedParent,/>继续任务</,'parent never exposes an unchecked direct resume');
+  assert.match(blockedParent,/<button[^>]*disabled=""[^>]*>确认核对并执行新指令/,'parent recovery requires a current approved inspection');
   assert.match(blockedParent,/查看子任务：读取项目文件/,'blocking child has a reachable detail entry');
   const {activeTaskChildren,taskOperationErrorMessage,validateTaskExecution}=await vite.ssrLoadModule('/src/app/TaskExecutionFeedback.tsx');
   assert.equal(activeTaskChildren(parent).length,1);
@@ -280,7 +304,17 @@ try {
   const taskListProps={tasks:workTasks,workspaces:[{id:'ws-private-internal-id',name:'项目工作区'}],providers:[{id:'codex',name:'Codex'}],onOpen(){},onAction(){}};
   const parentCard=render(ui.WorkTaskList,{...taskListProps,tasks:[parent]});
   assert.match(parentCard,/等待 1 个子任务/);
-  assert.match(parentCard,/<button[^>]*disabled=""[^>]*>继续<\/button>/);
+  assert.doesNotMatch(parentCard,/>继续(?:任务)?<\/button>/,'Task cards expose no unchecked direct resume');
+  assert.match(parentCard,/>查看恢复<\/button>/,'dependency-blocked Tasks keep their review entry reachable');
+  for(const status of ['paused','waiting','blocked']){
+    let opened=0;const executionActions=[];
+    const card=ui.TaskCollaborationCard({task:{...parent,status},workspaceName:'项目工作区',executorName:'Codex',
+      onOpen(){opened++;},onAction(action){executionActions.push(action);}});
+    const reviewButton=descendants(card).find(child=>child.props?.children==='查看恢复');
+    assert.ok(reviewButton,status+' must navigate to Owner recovery inspection');
+    reviewButton.props.onClick();
+    assert.equal(opened,1);assert.deepEqual(executionActions,[],status+' recovery entry must not dispatch or resume execution');
+  }
   const {TaskDependencyNotice}=await vite.ssrLoadModule('/src/app/TaskExecutionFeedback.tsx');
   let openedChild='';
   const notice=TaskDependencyNotice({task:parent,onOpenChild:id=>{openedChild=id;}});
@@ -303,5 +337,5 @@ try {
   assert.equal(ui.taskListTitle({...taskBase,title:taskBase.title.split('[Current request]')[0],goal:taskBase.title.split('[Current request]')[0]}),'历史任务（原始描述见详情）','never guess missing user text or show an incomplete internal envelope');
   assert.equal(JSON.stringify(workTasks),originalTasks,'presentation must not rewrite saved Task records');
   assert.match(render(ui.WorkTaskList,{...taskListProps,historyInitiallyOpen:true}),/<details class="task-history" open=""/,'explicit search or status filtering can expose matching history');
-  console.log('PASS production Harbor DSH setup, health fidelity, workspace preflight and managed failure actions');
+  console.log('PASS production Harbor DSH setup, health fidelity, workspace preflight, classified failure gates and Owner recovery navigation');
 } finally { await vite.close(); delete globalThis.window; }

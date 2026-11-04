@@ -40,10 +40,10 @@ const evidence = {
   status: 'RUNNING', modelRequests: [], dispatches: [], agentCalls: [], approvals: [],
   managedRejection: {status: 'NOT_RUN'}, codexSessionLoss: {status: 'NOT_RUN'},
   limitations: [
-    codexRestartOnly?'Actual Codex account reads with a controlled Core service restart after confirmed idle Session close; no OS crash is claimed.':'Actual Provider IO is separate from the explicit Owner rejection and owned-session close injected by this suite.',
+    codexRestartOnly?'Actual Codex account reads with a controlled Core service restart after a whole-process-tree completion receipt; no OS crash is claimed.':'Actual Provider IO is separate from the explicit Owner rejection and owned-session close injected by this suite.',
     'Core/UI API acceptance; no native Desktop UI or operating-system crash acceptance.',
     'Codex root Tasks retain run observations/history but do not have child Attempt records; no Attempt is fabricated.',
-    'Owner block/detach after a confirmed Codex close is explicit reconciliation, not automatic session-loss detection.',
+    'Recovery uses the production token-bound Owner inspection and reconcile APIs; no direct Task detach or storage rewrite.',
     'Only isolated synthetic projects are used. No user process, account configuration or global runtime is terminated.'
   ]
 };
@@ -335,14 +335,21 @@ async function codexSessionLoss() {
   if (active.running !== true) throw envBlocked('CANCEL_WINDOW_MISSED', 'Read turn settled before owned-session fault injection; no replay is attempted.');
   row.interruptedRunId = interruptedRunId;
   }
-  const closed = await services.agentBroker.closeSession(originalAssignment);
-  if (closed.closed !== true) throw envBlocked('CODEX_CLOSE_UNCONFIRMED', 'Owned Codex close was not confirmed; state retained and recovery not attempted.');
-  row.faultInjection = {action: 'agentBroker.closeSession', sessionId: originalAssignment.sessionId, closeConfirmed: true};
-  if(codexRestartOnly)row.faultInjection.boundary='Confirmed idle native Session close, then controlled Core service restart; no operating-system crash claimed';
-  try { await services.agentBroker.status(originalAssignment); assert.fail('closed native Session must not remain usable'); }
-  catch (error) {
-    if (!['SESSION_NOT_FOUND', 'SESSION_TRANSPORT_UNKNOWN'].includes(error.code)) throw error;
-    row.observedLossCode = error.code;
+  if (codexRestartOnly) {
+    const stopProof = await services.agentBroker.require('codex').verifyStoppedTask({ taskId: initial.id,
+      workspaceId: workspace.id, sessionId: originalAssignment.sessionId });
+    assert.equal(stopProof.stopped, true, 'real owned process tree must settle before fixture update');
+    row.faultInjection = { action: 'controlled-Core-restart', sessionId: originalAssignment.sessionId,
+      stopReceiptId: stopProof.receiptId, boundary: 'Normal native run completed, Task still assigned; controlled service restart' };
+  } else {
+    const closed = await services.agentBroker.closeSession(originalAssignment);
+    if (closed.closed !== true) throw envBlocked('CODEX_CLOSE_UNCONFIRMED', 'Owned Codex close was not confirmed; state retained and recovery not attempted.');
+    row.faultInjection = {action: 'agentBroker.closeSession', sessionId: originalAssignment.sessionId, closeConfirmed: true};
+    try { await services.agentBroker.status(originalAssignment); assert.fail('closed native Session must not remain usable'); }
+    catch (error) {
+      if (!['SESSION_NOT_FOUND', 'SESSION_TRANSPORT_UNKNOWN'].includes(error.code)) throw error;
+      row.observedLossCode = error.code;
+    }
   }
   originalProof(project, baseline);
   // Only after confirmed closure, the test Owner changes this synthetic fixture.
@@ -368,8 +375,8 @@ async function codexSessionLoss() {
     for (const suffix of ['', '\n', '\r\n', '\n\n', '\n\r\n', '\r\n\n', '\r\n\r\n'])
       expectedOutputDigests.add(hash(JSON.stringify({exitCode: 0, output: body + suffix})));
   }
-  // Explicit Owner reconciliation records a known close and detaches only the
-  // confirmed-stopped assignment. It does not manufacture a native failure event.
+  // Preserve the assignment and all history across restart. The product recovery
+  // coordinator alone is allowed to retire it after verifying current evidence.
   if(codexRestartOnly){
     await closeServices();
     services=createCetaMeshServices({stateDir:path.join(root,'state'),dataRoot:path.join(root,'data'),
@@ -379,6 +386,10 @@ async function codexSessionLoss() {
     assert.equal(restored.status,'blocked');
     assert.equal(restored.executionObservation?.state,'unknown');
     assert.deepEqual(restored.attempts,row.originalAttempts);
+    assert.deepEqual(restored.currentAgent, originalAssignment);
+    await assert.rejects(services.agentBroker.status(originalAssignment), error => {
+      row.observedLossCode = error.code; return error.code === 'SESSION_TRANSPORT_UNKNOWN';
+    });
     const beforeResume=evidence.dispatches.length;
     await assert.rejects(ui('ui.task.resume',{id:restored.id,expectedRev:restored.rev,requestId:'must-not-auto-resume'}),{code:'TASK_RECOVERY_REVIEW_REQUIRED'});
     assert.equal(evidence.dispatches.length,beforeResume,'restart does not silently send another Agent instruction');
@@ -390,13 +401,9 @@ async function codexSessionLoss() {
       await cap('capability.approval.decide',{id:consent.approvalId,approve:true});
       evidence.approvals.push({case:currentCase,id:consent.approvalId,capability:'agent execution consent',decision:'approved-fresh-Core-same-workspace'});
     }
-    await taskApi('task.agent.detach',{id:restored.id,expectedRev:task(restored.id).rev,
-      note:'Test Owner holds the exact earlier confirmed Session-close receipt; preserve history before fresh recovery'});
   }else{
    await taskApi('task.block', {id: initial.id, expectedRev: task(initial.id).rev,
     reason: 'needs-reconciliation: Test Owner confirmed close of this owned read-only Codex session; verify synthetic files before a fresh instruction'});
-  await taskApi('task.agent.detach', {id: initial.id, expectedRev: task(initial.id).rev,
-    note: 'Owner confirmed old owned Session closed; retain Task and native run history for scoped recovery'});
   }
   const sendsBeforeReview = evidence.dispatches.length;
   assert.deepEqual(task(initial.id).attempts, row.originalAttempts);
@@ -404,7 +411,14 @@ async function codexSessionLoss() {
     + 'Get-Content -Raw -LiteralPath source.txt. Report the exact marker from that actual command output, '
     + 'not a value remembered from checkpoints. Give a fresh observed report after this explicit Owner recovery.';
   assert.ok(!recoveryInstruction.includes(freshMarker), 'fresh value is never supplied in recovery instructions');
-  await ui('ui.task.reconcile', {id: initial.id, expectedRev: task(initial.id).rev, provider: 'codex',
+  const preview = await ui('ui.task.recovery.inspect', { id: initial.id });
+  assert.equal(preview.session.stopped, true);
+  assert.ok(preview.reviewToken);
+  assert.equal(preview.workspace.kind, 'filtered-workspace-v1', 'non-Git content proof is required');
+  row.ownerRecoveryPreview = { taskId: preview.taskId, taskRev: preview.taskRev, session: preview.session,
+    workspace: preview.workspace, blockers: preview.blockers, reviewOperationIds: preview.reviewOperationIds };
+  await ui('ui.task.reconcile', {id: initial.id, expectedRev: preview.taskRev, provider: 'codex',
+    action: 'resume', reviewToken: preview.reviewToken, reviewedOperationIds: preview.reviewOperationIds,
     reviewed: true, reviewSummary: 'Owner verified confirmed session close and unchanged original pre-fault files, then deliberately replaced only the synthetic source marker; authorize a fresh read of the reviewed Owner postimage. No Agent write or import is approved.',
     nextInstruction: recoveryInstruction,
     requestId: 'real-recovery-codex-permitted'});

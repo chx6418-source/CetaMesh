@@ -125,6 +125,7 @@ export function createChatService({
   defaultModelConfig = null,
   onTurnEnd = null,
   onUsage = null,
+  onFailure = null,
   proposeMemoryCandidate = null,
   onEvent = null,
   resolveWorkspace = null,
@@ -1107,6 +1108,9 @@ export function createChatService({
   /** 回合终态：有文本就落盘 assistant 消息；取消后丢弃 DSH 会话以隔离迟到事件。 */
   function finalizeTurn(record, state) {
     const turn = state.turn;
+    if (turn.state === 'error' && !turn.failureStage) {
+      turn.failureStage = turn.agentAcked || turn.displayText?.trim() || turn.toolActivity?.length ? 'execution' : 'unknown';
+    }
     if (turn.agentActivity && ['done', 'error', 'cancelled'].includes(turn.state)) {
       turn.agentActivity = { ...turn.agentActivity, status: turn.state === 'done' ? 'completed' : turn.state === 'cancelled' ? 'cancelled' : 'failed' };
     }
@@ -1131,7 +1135,7 @@ export function createChatService({
       const messageId = crypto.randomUUID();
       const historyRevision = appendMessage(record.id, {
         id: messageId,
-        role: 'assistant',
+        role: turn.state === 'error' && turn.failureStage === 'pre-dispatch' && !text.trim() && !turn.toolActivity?.length ? 'system' : 'assistant',
         text,
         at: now(),
         turnId: turn.id,
@@ -1144,11 +1148,16 @@ export function createChatService({
         toolActivity: Array.isArray(turn.toolActivity) ? turn.toolActivity.slice(-32) : [],
         ...(turn.agentActivity ? { agentActivity: { ...turn.agentActivity } } : {}),
         ...(turn.routing ? { routing: turn.routing } : {}),
-        ...(turn.state === 'error' ? { error: turn.error ?? '回合异常', errorCode: turn.errorCode ?? 'PROVIDER_ERROR' } : {}),
+        ...(turn.state === 'error' ? { error: turn.error ?? '回合异常', errorCode: turn.errorCode ?? 'PROVIDER_ERROR', failureStage: turn.failureStage } : {}),
         ...(turn.state === 'cancelled' ? { cancelled: true } : {})
       });
       onEvent?.({ event: 'chat.updated', data: { sessionId: record.id, turnId: turn.id,
         requestId: turn.requestId, messageId, historyRevision, status: turn.state } });
+      if (turn.state === 'error') {
+        try { onFailure?.({ code: turn.errorCode, taskId: turn.routing?.taskId ?? turn.accountingTaskId ?? record.taskId,
+          blockingTaskId: turn.routing?.blockingTaskId, requestId: turn.requestId, failureStage: turn.failureStage }); }
+        catch { /* Diagnostic failure never changes a settled Chat or its execution evidence. */ }
+      }
     }
     if (turn.state === 'done' && typeof proposeMemoryCandidate === 'function') {
       const userMessage = readHistory(record.id).filter(message => message.role === 'user').at(-1);
@@ -1570,6 +1579,8 @@ export function createChatService({
           request: { requestId, sessionId, mode: 'queue', content: [{ type: 'text', text: promptText }] }
         }, controller.signal);
         if (state.turn === turn) {
+          turn.agentAcked = true;
+          setAgentActivity(record, state, 'dsh');
           turn.state = 'streaming';
           turn.statusMessage = 'DSH accepted the turn; waiting for Agent events.';
           onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: 'streaming', requestId,
@@ -1646,6 +1657,8 @@ export function createChatService({
           if (result.taskId) record.taskId = String(result.taskId);
           saveStore();
           if (state.turn === turn) {
+            state.turn.agentAcked = true;
+            setAgentActivity(record, state, String(result.provider));
             state.turn.accountingSessionId = result.provider === 'cetamesh' ? String(result.sessionId) : record.id;
             state.turn.providerRequestId = typeof result.requestId === 'string' ? result.requestId : null;
             state.turn.providerTurnId = typeof result.turnId === 'string' ? result.turnId : null;
@@ -1678,6 +1691,8 @@ export function createChatService({
           const cancelled = controller.signal.aborted || error?.code === 'ABORTED';
           turn.state = cancelled ? 'cancelled' : 'error';
           turn.errorCode = cancelled ? 'INVOKE_CANCELLED' : String(error?.code ?? 'PROVIDER_ERROR').slice(0, 100);
+          turn.failureStage = ['pre-dispatch', 'execution', 'unknown'].includes(error?.failureStage) ? error.failureStage : 'unknown';
+          turn.routing = { ...turn.routing, ...(record.taskId ? { taskId: record.taskId } : {}) };
           if (error?.code === 'TASK_WORKSPACE_BUSY' && typeof error.blockingTaskId === 'string') {
             turn.routing = { ...turn.routing, blockingTaskId: error.blockingTaskId.slice(0, 128) };
           }
@@ -1710,9 +1725,6 @@ export function createChatService({
       }).decision;
     }
     if (forceProject && !routingOverride) routing = { class: 'project', route: 'agent', agentIntent: true, capabilityIntent: false, reasons: ['Explicit managed Agent'] };
-    if (routing?.agentIntent && typeof platformRoute === 'function' && !state.turn?.agentActivity) {
-      setAgentActivity(record, state, record.config.agentProvider ?? 'cetamesh');
-    }
     if (!skipPlatformRoute && routing && typeof platformRoute === 'function' && (routing.agentIntent || routing.capabilityIntent)) {
       return startPlatformRouteTurn(record, state, promptText, routing, { attachments, sourceText, retryMessageId });
     }
@@ -1825,10 +1837,16 @@ export function createChatService({
     const record = sessionOrThrow(id);
     const state = runtimeOf(record.id);
     if (state.turn) throw chatError('TURN_BUSY', '当前会话有回合进行中');
+    if (record.interruptedAt && record.taskId && typeof resolveTask === 'function') {
+      const task = await resolveTask(record.taskId);
+      if (task?.recoveryReviews?.length || task?.decisions?.some(item => item.decision === 'Owner reviewed interrupted effect')) {
+        throw chatError('RECOVERY_USE_NEW_INSTRUCTION', '旧回合已人工核对，不能重放；请使用核对后的新指令');
+      }
+    }
     const messages = readHistory(record.id);
     let last = messages[messages.length - 1];
     if (last?.role !== 'user') {
-      const failedAttempt = last?.role === 'assistant' && (last.error || last.cancelled);
+      const failedAttempt = ['assistant', 'system'].includes(last?.role) && (last.error || last.cancelled);
       if (failedAttempt) {
         last = null;
         for (let index = messages.length - 2; index >= 0; index -= 1) {
@@ -1864,7 +1882,7 @@ export function createChatService({
     if (record.taskId) {
       const task = typeof resolveTask === 'function' ? await resolveTask(record.taskId) : null;
       if (!task) throw chatError('TASK_NOT_FOUND', 'Chat attached Task is unavailable');
-      if (record.interruptedAt && task.decisions?.some(item => item.decision === 'Owner reviewed interrupted effect')) {
+      if (record.interruptedAt && (task.recoveryReviews?.length || task.decisions?.some(item => item.decision === 'Owner reviewed interrupted effect'))) {
         throw chatError('RECOVERY_USE_NEW_INSTRUCTION', '旧回合的副作用已人工核对；请发送新的明确指令，不能自动重放旧回合');
       }
       if (task.workspaceId !== record.config.workspaceId) throw chatError('WORKSPACE_RECONCILIATION_REQUIRED', 'Chat and Task Workspace differ');
@@ -2005,6 +2023,7 @@ export function createChatService({
           const accepted = await Promise.race([sending, aborted]);
           if (state.turn === turn) {
             turn.agentAcked = true;
+            setAgentActivity(record, state, provider);
             turn.providerRequestId = typeof accepted?.requestId === 'string' ? accepted.requestId : null;
             turn.providerTurnId = typeof accepted?.turnId === 'string' ? accepted.turnId : null;
             const pendingEvents = turn.pendingAgentEvents ?? [];
@@ -2065,7 +2084,7 @@ export function createChatService({
     state.chunkBuffer = '';
     state.promptChars = promptText.length;
     const agentProviderId = record.config.agentProvider ?? null;
-    const agentActivity = agentActivityFor(agentProviderId);
+    const agentActivity = null;
     const turnId = crypto.randomUUID();
     const requestId = `cetamesh-chat-${String(record.id).slice(0, 80)}-${turnId}`;
     state.turn = { id: turnId, requestId, accountingSessionId: record.id, accountingTaskId: record.taskId ?? null, state: 'starting', displayText: '', toolActivity: [], ...(agentActivity ? { agentActivity } : {}), error: null, usage: null, routing: null };
@@ -2119,12 +2138,14 @@ export function createChatService({
         turn: null,
         context: displayedContext(record,last?.context,'last-request'),
         turnUsage: last?.role==='assistant'?last.usage??null:null,
-        lastRouting: last?.role === 'assistant' && last.errorCode === 'TASK_WORKSPACE_BUSY' ? { blockingTaskId: last.routing?.blockingTaskId } : null,
+        lastRequestId: recovery ? null : last?.requestId ?? null,
+        lastFailureStage: recovery ? 'unknown' : last?.failureStage ?? null,
+        lastRouting: last?.routing ?? null,
         lastState: recovery?.state ?? (last?.role === 'user' ? (record.interruptedAt ? 'interrupted' : 'awaiting-reply') : last?.error ? 'error' : 'idle'),
         lastError: recovery ? 'Core 重启前的工具操作或审批需要人工核对'
-          : last?.role === 'assistant' && typeof last.error === 'string' ? last.error : null,
+          : ['assistant', 'system'].includes(last?.role) && typeof last.error === 'string' ? last.error : null,
         lastErrorCode: recovery ? recovery.state.toUpperCase().replace(/-/g, '_')
-          : last?.role === 'assistant' && typeof last.errorCode === 'string' ? last.errorCode : null,
+          : ['assistant', 'system'].includes(last?.role) && typeof last.errorCode === 'string' ? last.errorCode : null,
         dshSessionAlive: Boolean(record.dshSessionId),
         followState: runtimeOf(record.id).follow?.status ?? (record.followError ? 'error' : 'idle'),
         followError: record.followError?.code ?? null,
@@ -2144,6 +2165,7 @@ export function createChatService({
         displayText: turn.displayText,
         error: turn.error,
         errorCode: turn.errorCode ?? null,
+        failureStage: turn.failureStage ?? null,
         usage: turn.usage,
         context: displayedContext(record,turn.context,'active-request'),
         toolActivity: Array.isArray(turn.toolActivity) ? turn.toolActivity.slice(-32) : [],

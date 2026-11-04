@@ -49,17 +49,28 @@ export function createDesktopIpcRuntime({
   const sockets = new Set();
 
   /** 调用 + 记录错误码：失败仍然原样抛给 IPC 协议层（错误语义不变）。 */
-  function invoke(invokeFn, method) {
+  function invoke(invokeFn, method, params) {
     const source = String(method ?? '').split('.')[0] || null;
+    const domain = source === 'ui' ? String(method).split('.')[1] : source;
+    const correlationId = crypto.randomUUID();
+    const recordFailure = error => {
+      try {
+        errorRegistry?.recordError(error, { source });
+        services.runtimeFailures?.record({ code: error?.code, source: domain,
+          taskId: error?.taskId ?? params?.taskId ?? (domain === 'task' ? params?.id : null),
+          blockingTaskId: error?.blockingTaskId, requestId: params?.requestId, correlationId,
+          failureStage: error?.failureStage });
+      } catch { return null; /* Keep the original execution error if optional diagnostics fail. */ }
+    };
     try {
       const result = invokeFn();
-      if (!errorRegistry || !result || typeof result.catch !== 'function') return result;
+      if (!result || typeof result.catch !== 'function') return result;
       return result.catch((error) => {
-        errorRegistry.recordError(error, { source });
+        recordFailure(error);
         throw error;
       });
     } catch (error) {
-      if (errorRegistry) errorRegistry.recordError(error, { source });
+      recordFailure(error);
       throw error;
     }
   }
@@ -78,7 +89,7 @@ export function createDesktopIpcRuntime({
       // Every prefixed desktop route is served on the native Owner UI pipe. Bind
       // identity here; never accept an actor claim from IPC parameters.
       const trustedActor = name.startsWith('continuity.') || name.startsWith('channel.') ? { kind: 'owner', id: 'desktop' } : undefined;
-      return invoke(() => owner[methodName]({ method: name, params, ...(trustedActor ? { actor: trustedActor } : {}), ...(name.startsWith('ui.') ? { signal: context.signal } : {}) }), name);
+      return invoke(() => owner[methodName]({ method: name, params, ...(trustedActor ? { actor: trustedActor } : {}), ...(name.startsWith('ui.') ? { signal: context.signal } : {}) }), name, params);
     }
     if (!services.controlService) {
       throw Object.assign(new Error(`Unknown Core IPC method: ${name}`), { code: 'METHOD_NOT_FOUND' });
@@ -87,7 +98,7 @@ export function createDesktopIpcRuntime({
       method: name,
       params,
       actor: { privilege: PRIVILEGE_CONSOLE }
-    }), name);
+    }), name, params);
   }
 
   function stop() {
