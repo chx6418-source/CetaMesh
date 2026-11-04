@@ -128,11 +128,27 @@ paths, sizes and modes. This path does not initialize Git. Incomplete scans,
 links, changed roots or concurrent changes cannot certify recovery.
 
 The Owner submits the current token and review through `ui.task.reconcile`.
-Active execution, unknown stop state, active tools, pending approvals, children
-or an unresolved Handoff still prevent retirement. Commit rechecks the recorded
+Active execution, unknown stop state, active tools, pending approvals and children
+still prevent retirement. A prepared Handoff additionally requires its original
+Task/Workspace and both exact participants to be verified stopped. Missing target
+Session identity requires a Provider-owned Task-scoped quiescence proof; it cannot
+be inferred from a creation error. Codex Handoff inspection is a private Core
+method that checks lifecycle generations and bootstrap identity; ordinary Session
+recovery retains its stricter current-assignment/current-run checks.
+
+Commit rechecks the recorded
 bindings, writes a recovery intent before acknowledging journals, and then
 records the review and retires the old binding. A partial write retains a fence;
 it cannot free the Workspace or silently mark an unknown effect successful.
+The intent retains the exact reviewed Handoff scope if its journal was already
+acknowledged, so the next inspection rechecks both participants live again.
+
+Unknown native tool observations appear in the same review as opaque hashes
+bound to the Task, Workspace and complete evidence row. Their original status
+and content remain unchanged. Only the exact reviewed older execution stops
+blocking acceptance of a later independently evidenced run; a new unknown tool
+result, changed observation or unrelated Session remains blocked. A textual
+summary alone never retires a tool observation.
 
 The Owner can either release ownership without dispatch or continue the same
 Task with a fresh Session, explicit new instruction and new request identity.

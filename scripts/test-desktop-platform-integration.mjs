@@ -24,7 +24,7 @@ try {
   const workspaceService = createWorkspaceService({ stateDir });
   const taskRuntime = createTaskRuntime({ stateDir });
   let capabilities;
-  const toolRequests = [], modelRequests = [], observations = [];
+  const toolRequests = [], modelRequests = [], observations = [], continuityObservations = [];
   let inference = 0;
   managed = createManagedAgentProvider({
     modelRuntime: { async chat(request) {
@@ -35,8 +35,10 @@ try {
         { capability: 'filesystem.read', input: { path: 'export.csv' } },
         { final: 'Fresh session verified existing export' }
       ][inference] ?? { final: 'Done' };
-      const pressure = inference++ < 2;
-      return { text: JSON.stringify(command), usage: { inputTokens: pressure ? 44 : 2, outputTokens: 1, windowTokens: 100 } };
+      // The approved continuation's latest request occupies 90/100 tokens.
+      // Earlier request cost must not be added to current context occupancy.
+      const inputTokens = [44, 89][inference++] ?? 2;
+      return { text: JSON.stringify(command), usage: { inputTokens, outputTokens: 1, windowTokens: 100 } };
     } },
     capabilityExecutor: (request) => { toolRequests.push(structuredClone(request)); return capabilities.broker.execute(request); },
     taskPrincipalResolver: ({ provider, sessionId }) => {
@@ -50,7 +52,9 @@ try {
     resumeAgentApproval: managed.resumeLegacyApproval });
   const continuity = createContinuityService({ stateDir, taskRuntime, agentBroker,
     canRollover: ({ taskId }) => taskRuntime.get({ id: taskId }).task.status === 'running' });
-  agentBroker.onTurnEnd((payload) => continuity.runtime.observeAgentTurn(payload));
+  agentBroker.onTurnEnd(async (payload) => {
+    continuityObservations.push(await continuity.runtime.observeAgentTurn(payload));
+  });
   let workshop = createWorkshopService({ stateDir, workspaceService, taskRuntime, capabilityBroker: capabilities.broker });
   const external = { kind: 'external', id: 'qq:alice' }, other = { kind: 'external', id: 'qq:bob' };
   const run = (method, params = {}, actor = external) => workshop.execute({ method, params, actor });
@@ -72,10 +76,22 @@ try {
   }
   assert.ok(pendingWrite, 'Agent Workspace write must wait for Owner approval'); assertions++;
   check(fs.existsSync(path.join(projectRoot, 'export.csv')), false);
+  for (let i = 0; i < 400 && !continuityObservations.some(row => row.sessionId === initialSession); i++) await delay(5);
+  const beforeApproval = continuityObservations.find(row => row.sessionId === initialSession);
+  check(beforeApproval?.level.usedTokens, 45);
+  check(beforeApproval?.level.windowTokens, 100);
+  check(beforeApproval?.level.percent, 45);
+  check(beforeApproval?.rolledOver, false);
+  check(continuity.runtime.history({ taskId: approved.taskId }).total, 0);
   check((await capabilities.execute({ method: 'capability.approval.decide', params: { id: pendingWrite.id, approve: true } })).status, 'completed');
   for (let i = 0; i < 400 && (continuity.runtime.history({ taskId: approved.taskId }).total !== 1
-    || observations.length < 2 || toolRequests.length < 2 || modelRequests.length < 4); i++) await delay(5);
+    || observations.length < 2 || toolRequests.length < 2 || modelRequests.length < 4
+    || !continuityObservations.some(row => row.sessionId === initialSession && row.rolledOver)); i++) await delay(5);
   check(continuity.runtime.history({ taskId: approved.taskId }).total, 1);
+  const highPressure = continuityObservations.find(row => row.sessionId === initialSession && row.rolledOver);
+  check(highPressure?.level.usedTokens, 90);
+  check(highPressure?.level.windowTokens, 100);
+  check(highPressure?.level.percent, 90);
   assert.ok(observations.length >= 2, 'Agent turn-end observation follows the approved write'); assertions++;
   let task = taskRuntime.get({ id: approved.taskId }).task;
   check(task.id, approved.taskId);

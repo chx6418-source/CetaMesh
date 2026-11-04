@@ -10,6 +10,10 @@ import { OWNER_ACTOR } from '../src/capability/types.js';
 import { inspectTaskSession } from '../src/agent/session-recovery.js';
 import { assertTaskSchema } from '../src/task/store.js';
 import { createMemoryService } from '../src/memory/service.js';
+import { unreviewedTaskEffects } from '../src/task/recovery-evidence.js';
+import { createContinuityService } from '../src/continuity/service.js';
+import { createCodexSessionLifecycle } from '../src/agent/codex-session-lifecycle.js';
+import { createCodexAgentProvider } from '../src/agent/codex-agent-provider.js';
 
 // Deterministic service-level fault injection. This suite is NOT native/model evidence.
 const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'cetamesh-recovery-chain-'));
@@ -40,7 +44,7 @@ async function fixture(name, { stopped = true, restart = true } = {}) {
   old = tasks.runtime.setCheckpoint({ id: old.id, expectedRev: old.rev, summary: 'Retain prior checkpoint', nextAction: 'Read existing result' });
   if (restart) tasks = createTaskService({ stateDir }); // Real Task JSON reload/restart transition.
   const state = { stopped, sends: 0, creates: 0, cancels: 0, closes: 0, generation: 1, inspections: 0 };
-  const provider = { capabilities: () => ({ workspaceBoundary: 'native-staged' }),
+  const provider = { id: 'codex', capabilities: () => ({ workspaceBoundary: 'native-staged' }),
     async verifyTaskQuiescence() { return { stopped: state.stopped }; },
     async verifyStoppedTask(scope) {
       state.inspections++;
@@ -56,13 +60,22 @@ async function fixture(name, { stopped = true, restart = true } = {}) {
     async closeSession({ sessionId }) { state.closes++; if (sessionId === 'lost-session') throw fault('SESSION_TRANSPORT_UNKNOWN'); return { closed: true }; },
     async createSession() { return { sessionId: `fresh-${++state.creates}` }; },
     async send({ sessionId, content }) { assert.notEqual(sessionId, 'lost-session'); state.sends++; state.instruction = content; return { accepted: true, requestId: `new-${state.sends}` }; },
-    async *follow({ signal }) { if (!signal.aborted) await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true })); }
+    async *follow({ signal }) {
+      if (signal.aborted) return;
+      const event = await new Promise(resolve => {
+        state.finishTurn = resolve;
+        signal.addEventListener('abort', () => resolve(null), { once: true });
+      });
+      if (event) yield event;
+      if (!signal.aborted) await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }));
+    }
   };
   const capabilities = createCapabilityService({ stateDir, workspaceService: workspaces, taskRuntime: tasks.runtime, agentBroker: broker });
   capabilities.grantTask(old.id, { capabilities: ['filesystem.read'], workspaceIds: [workspace.id] });
-  const ui = createDesktopUiService({ services: { taskService: tasks, workspaceService: workspaces,
+  const services = { taskService: tasks, workspaceService: workspaces,
     capabilityService: capabilities, agentBroker: broker,
-    settingsService: { store: { get: () => ({ settings: { agents: { defaultAgentProvider: 'codex' } } }) } } } });
+    settingsService: { store: { get: () => ({ settings: { agents: { defaultAgentProvider: 'codex' } } }) } } };
+  const ui = createDesktopUiService({ services });
   const read = () => tasks.runtime.get({ id: old.id }).task;
   function trace(step, task = read(), code = null) {
     if (!traceFile) return;
@@ -90,7 +103,7 @@ async function fixture(name, { stopped = true, restart = true } = {}) {
     reviewSummary: 'Checked original content and retained receipts; never repeat prior effects.',
     nextInstruction: 'Read proof.txt only; do not repeat the old operation.', requestId: `${name}-fresh`, ...extra
   });
-  return { state, tasks, capabilities, broker, workspaces, workspace, workspaceRoot, stateDir, read, call, inspect, recover, trace,
+  return { state, tasks, capabilities, broker, services, workspaces, workspace, workspaceRoot, stateDir, read, call, inspect, recover, trace,
     async close() {
       trace('scenario-final');
       await capabilities.close();
@@ -99,6 +112,243 @@ async function fixture(name, { stopped = true, restart = true } = {}) {
         'actual persisted Memory content and revision survive successful and rejected recovery unchanged');
     } };
 }
+
+function retainUnknownTool(f) {
+  const task = f.read(), scope = { id: task.id, provider: 'codex', sessionId: 'lost-session', runId: 'old-run', phase: 'user' };
+  f.tasks.runtime.recordToolOutcome({ ...scope, eventId: 'fixture-old-unknown', capability: 'filesystem.write', status: 'outcome-unknown' });
+  f.tasks.runtime.observeExecution({ ...scope, state: 'unknown', toolActivity: true });
+  f.tasks.runtime.block({ id: task.id, expectedRev: f.read().rev, note: 'Interrupted tool outcome needs Owner review' });
+}
+
+async function finishFreshRead(f) {
+  const task = f.read(), scope = { id: task.id, ...task.currentAgent, runId: 'new-run', phase: 'user' };
+  f.tasks.runtime.beginExecutionObservation(scope);
+  f.tasks.runtime.recordToolOutcome({ ...scope, eventId: 'fixture-fresh-read', capability: 'filesystem.read', status: 'completed' });
+  f.state.finishTurn({ type: 'turn/end', seq: 1, data: { phase: 'user', runId: scope.runId,
+    requestId: 'fixture-fresh-turn', reason: { kind: 'completed' } } });
+  for (let n = 0; n < 100 && f.capabilities.completionBlocker(task.id); n++) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.capabilities.completionBlocker(task.id), null, 'the actual follow consumer observed the fresh turn end');
+  return f.read();
+}
+
+test('Owner recovery lists retained unknown native tool evidence for exact review', async () => {
+  const f = await fixture('unknown-evidence-list', { restart: false });
+  try {
+    retainUnknownTool(f);
+    const preview = await f.inspect();
+    assert.equal(preview.canResume, true);
+    assert.equal(preview.reviewOperationIds.filter(id => id.startsWith('task-evidence:')).length, 1,
+      'unknown native evidence must be visible in the formal review, even without a Capability journal row');
+    const before = f.read();
+    await assert.rejects(f.recover(preview, 'resume', { reviewedOperationIds: [] }), error => error.code === 'TASK_RECOVERY_OPERATIONS_REQUIRED');
+    assert.deepEqual(f.read(), before);
+    assert.equal(f.state.sends + f.state.creates, 0);
+  } finally { await f.close(); }
+});
+
+test('formally reviewed historical unknown effects do not permanently block acceptance of a fresh run', async () => {
+  const f = await fixture('unknown-evidence-complete', { restart: false });
+  try {
+    retainUnknownTool(f);
+    const before = f.read();
+    await f.recover(await f.inspect());
+    const finished = await finishFreshRead(f);
+    const accepted = await f.call('ui.task.complete', { id: finished.id, expectedRev: finished.rev, reviewed: true,
+      summary: 'Reviewed the fresh read result and the exact retained earlier uncertainty; do not replay earlier effects.' });
+    assert.equal(accepted.task.id, before.id);
+    assert.equal(accepted.task.status, 'completed');
+    assert.deepEqual(f.read().executionEvidence.slice(0, before.executionEvidence.length), before.executionEvidence,
+      'retired uncertainty is retained verbatim, never converted into successful execution evidence');
+    assert.deepEqual(f.read().checkpoint, before.checkpoint);
+    assert.equal(f.state.creates, 1);
+    assert.equal(f.state.sends, 1);
+    const reloaded = createTaskService({ stateDir: f.stateDir }).runtime.get({ id: before.id }).task;
+    assert.equal(reloaded.status, 'completed');
+    assert.deepEqual(reloaded.executionEvidence, f.read().executionEvidence);
+    assert.deepEqual(reloaded.recoveryReviews, f.read().recoveryReviews);
+  } finally { await f.close(); }
+});
+
+test('a reviewed historical effect cannot certify a different Task, payload, Session or later unknown tool', async () => {
+  const f = await fixture('unknown-review-boundaries', { restart: false });
+  try {
+    retainUnknownTool(f);
+    await f.recover(await f.inspect());
+    await finishFreshRead(f);
+    const reviewed = f.read();
+    assert.equal(unreviewedTaskEffects(reviewed).length, 0);
+    const mutations = [
+      task => { task.id += '-other'; },
+      task => { task.workspaceId += '-other'; },
+      task => { task.executionEvidence.find(row => row.status === 'outcome-unknown').runId = 'unreviewed-run'; },
+      task => { task.executionEvidence.find(row => row.status === 'outcome-unknown').tool = 'different-tool'; },
+      task => { task.recoveryReviews[0].operationIds = []; },
+      task => { task.recoveryReviews[0].intent.operationIds = []; },
+      task => { task.recoveryReviews[0].sessionProof.stopped = false; },
+      task => { task.recoveryReviews[0].sessionProof.sessionId = 'different-session'; },
+      task => { task.currentAgent = { provider: 'codex', sessionId: 'lost-session' }; }
+    ];
+    for (const mutate of mutations) {
+      const changed = structuredClone(reviewed); mutate(changed);
+      assert.equal(unreviewedTaskEffects(changed).length, 1, 'authority only applies to the exact reviewed older observation');
+    }
+    f.tasks.runtime.recordToolOutcome({ id: reviewed.id, ...reviewed.currentAgent, phase: 'user', runId: 'new-run',
+      eventId: 'fixture-fresh-unknown', capability: 'filesystem.write', status: 'cancel-unconfirmed' });
+    const before = f.read();
+    await assert.rejects(f.call('ui.task.complete', { id: before.id, expectedRev: before.rev, reviewed: true, summary: 'Cannot accept unknown new effects' }),
+      error => error.code === 'TASK_EFFECT_UNCONFIRMED');
+    assert.deepEqual(f.read(), before);
+  } finally { await f.close(); }
+});
+
+test('current Session stopped proof cannot retire another historical native executor', async () => {
+  const f = await fixture('unknown-foreign-session', { restart: false });
+  try {
+    retainUnknownTool(f);
+    f.tasks.runtime.attachAgent({ id: f.read().id, expectedRev: f.read().rev, provider: 'codex', sessionId: 'different-retained-session' });
+    const before = f.read(), preview = await f.inspect();
+    assert.equal(preview.canResume, false);
+    assert.ok(preview.blockers.some(row => row.code === 'TASK_EFFECT_SCOPE_UNCONFIRMED'));
+    assert.deepEqual(f.read(), before);
+    assert.equal(f.state.creates + f.state.sends, 0);
+  } finally { await f.close(); }
+});
+
+async function interruptedHandoff(name) {
+  const f = await fixture(name, { restart: false });
+  const sourceStatus = f.broker.status, close = f.broker.closeSession;
+  f.broker.status = async args => args.sessionId === 'lost-session' ? { running: false, queued: 0 } : sourceStatus(args);
+  f.broker.closeSession = async () => ({ closed: false });
+  // Use the production transaction writer and failure path; only the external
+  // Provider is controlled. The Workspace proof for Owner recovery is real.
+  f.services.continuityService = createContinuityService({ stateDir: f.stateDir,
+    taskRuntime: f.tasks.runtime, agentBroker: f.broker });
+  const continuity = f.services.continuityService.runtime;
+  await assert.rejects(continuity.rollover({ taskId: f.read().id, targetProvider: 'codex' }),
+    error => error.code === 'SESSION_TRANSPORT_UNKNOWN');
+  f.broker.closeSession = close;
+  const provider = f.broker.require('codex'), verify = provider.verifyStoppedTask;
+  f.state.targetStopped = false;
+  provider.verifyStoppedTask = async scope => scope.sessionId === 'fresh-1'
+    ? { ...scope, provider: 'codex', stopped: f.state.targetStopped, state: f.state.targetStopped ? 'stop-confirmed' : 'unknown',
+      receiptId: 'target-stop-receipt', generation: 0, runId: null, evidence: 'never-started' }
+    : verify(scope);
+  return { ...f, continuity };
+}
+
+test('prepared Handoff has a formal Owner exit after both exact participants are stopped', async () => {
+  const f = await interruptedHandoff('prepared-owner-exit');
+  try {
+    const before = f.read();
+    assert.equal(before.status, 'blocked');
+    const blocked = await f.inspect();
+    assert.equal(blocked.canResume, false);
+    assert.ok(blocked.blockers.some(row => row.code === 'HANDOFF_EXECUTION_UNCONFIRMED'));
+    assert.equal(f.continuity.isInFlight(before.id), true);
+    f.state.targetStopped = true;
+    const ready = await f.inspect();
+    assert.equal(ready.canResume, true, 'a stopped interrupted Handoff must not be a permanent nonterminal state');
+    assert.ok(ready.reviewOperationIds.some(id => id.startsWith('handoff:')));
+    await assert.rejects(f.recover(ready, 'resume', { reviewedOperationIds: [] }), error => error.code === 'TASK_RECOVERY_OPERATIONS_REQUIRED');
+    const recovered = await f.recover(ready);
+    assert.equal(recovered.task.id, before.id);
+    assert.equal(f.read().currentAgent.sessionId, 'fresh-2');
+    assert.equal(f.state.sends, 1, 'the failed bootstrap is never replayed');
+    assert.equal(f.continuity.transactionReviewState(before.id), null);
+    assert.deepEqual(f.read().executionEvidence, before.executionEvidence);
+    assert.deepEqual(f.read().checkpoint, before.checkpoint);
+  } finally { await f.close(); }
+});
+
+test('Handoff participant stop evidence is revalidated before Owner journal acknowledgement', async () => {
+  const f = await interruptedHandoff('prepared-proof-race');
+  try {
+    f.state.targetStopped = true;
+    const preview = await f.inspect(), before = f.read(), transaction = f.continuity.transactionReviewState(before.id);
+    assert.equal(preview.canResume, true);
+    f.broker.health = async () => {
+      f.state.targetStopped = false;
+      return { available: true, authenticated: true, sessionCapable: true };
+    };
+    await assert.rejects(f.recover(preview), error => error.code === 'TASK_RECOVERY_REVIEW_STALE');
+    assert.deepEqual(f.read(), before);
+    assert.deepEqual(f.continuity.transactionReviewState(before.id), transaction);
+    assert.equal(f.state.sends, 0);
+  } finally { await f.close(); }
+});
+
+test('formal Handoff recovery consumes actual Codex lifecycle proofs for source and bootstrap target', async () => {
+  const f = await interruptedHandoff('prepared-native-proof');
+  try {
+    const task = f.read(), transaction = f.continuity.transactionReviewState(task.id);
+    const lifecycle = createCodexSessionLifecycle({ stateDir: f.stateDir });
+    const binding = sessionId => ({ taskId: task.id, workspaceId: task.workspaceId, sessionId,
+      transport: 'exec', snapshotId: 'fixture-snapshot-' + sessionId, attemptId: null });
+    const source = binding('lost-session'), target = binding('fresh-1');
+    lifecycle.create(source);
+    lifecycle.begin({ ...source, runId: 'old-run', turnId: 'original-turn' });
+    lifecycle.settle({ ...source, runId: 'old-run', proof: 'process-tree-exit' });
+    lifecycle.create(target);
+    const bootstrap = 'handoff:' + task.id + ':' + transaction.sequence;
+    lifecycle.begin({ ...target, runId: bootstrap, turnId: 'bootstrap-turn' });
+    lifecycle.settle({ ...target, runId: bootstrap, proof: 'process-tree-exit' });
+    // No native process is launched. The receipt store and its production
+    // consumer are real, exercising their stricter current/bootstrap semantics.
+    const native = createCodexAgentProvider({ stateDir: f.stateDir, sessionLifecycle: lifecycle,
+      codexHome: path.join(f.stateDir, 'fixture-codex-home'), environment: {},
+      cliProcess: { executable: () => null, probe: () => ({ available: false, stdout: '', stderr: '' }), async shutdown() {} },
+      resolveTaskWorkspace: () => ({ task: f.read(), workspace: { id: task.workspaceId, root: f.workspaceRoot } }) });
+    const adapter = f.broker.require('codex');
+    adapter.verifyStoppedTask = scope => native.verifyStoppedTask(scope);
+    adapter.verifyTaskQuiescence = scope => native.verifyTaskQuiescence(scope);
+    adapter.inspectStoppedHandoffSession = scope => native.inspectStoppedHandoffSession(scope);
+    f.tasks.runtime.attachAgent({ id: task.id, expectedRev: f.read().rev, provider: 'codex', sessionId: target.sessionId });
+    assert.equal((await native.verifyStoppedTask(target)).stopped, false,
+      'ordinary recovery cannot pretend a bootstrap receipt is the current user-run receipt');
+    const preview = await f.inspect();
+    assert.equal(preview.canResume, true);
+    assert.equal(preview.session.sessionId, target.sessionId);
+    await f.recover(preview, 'release');
+    const reviewed = f.read().recoveryReviews.at(-1);
+    assert.equal(reviewed.sessionProof.runId, bootstrap);
+    assert.equal(reviewed.sessionProof.handoffProofs.length, 2);
+    assert.deepEqual(reviewed.sessionProof.handoffProofs.map(row => row.runId), ['old-run', bootstrap]);
+    const reloaded = createTaskService({ stateDir: f.stateDir }).runtime.get({ id: task.id }).task;
+    assert.equal(reloaded.status, 'paused');
+    assert.equal(reloaded.currentAgent, null);
+    assert.deepEqual(reloaded.recoveryReviews, f.read().recoveryReviews);
+    assert.equal(f.state.sends, 0);
+  } finally { await f.close(); }
+});
+
+test('partial Handoff acknowledgement retains both live stop checks after the Task write fails', async () => {
+  const f = await interruptedHandoff('prepared-partial-write');
+  const apply = f.tasks.runtime.applyOwnerRecovery;
+  try {
+    f.state.targetStopped = true;
+    const preview = await f.inspect();
+    f.tasks.runtime.applyOwnerRecovery = () => { throw fault('FIXTURE_TASK_WRITE_FAILED'); };
+    await assert.rejects(f.recover(preview), error => error.code === 'FIXTURE_TASK_WRITE_FAILED');
+    const pending = f.read();
+    assert.ok(pending.recoveryIntent);
+    assert.equal(f.continuity.transactionReviewState(pending.id), null, 'the earlier domain acknowledgement was already durable');
+    f.state.targetStopped = false;
+    const restartedUi = createDesktopUiService({ services: f.services });
+    const blocked = await restartedUi.execute({ method: 'ui.task.recovery.inspect', params: { id: pending.id } });
+    assert.equal(blocked.canResume, false, 'saved stop proofs never replace live revalidation after a partial commit');
+    assert.ok(blocked.blockers.some(row => row.code === 'HANDOFF_EXECUTION_UNCONFIRMED'));
+    assert.deepEqual(f.read(), pending);
+    assert.equal(f.state.sends, 0);
+    f.state.targetStopped = true;
+    f.tasks.runtime.applyOwnerRecovery = apply;
+    const ready = await f.inspect();
+    assert.equal(ready.canResume, true);
+    await f.recover(ready, 'resume', { requestId: 'explicit-retry-after-partial-commit' });
+    assert.equal(f.state.sends, 1);
+    assert.equal(f.read().recoveryIntent, null);
+    assert.equal(f.read().id, pending.id);
+  } finally { f.tasks.runtime.applyOwnerRecovery = apply; await f.close(); }
+});
 
 test('lost Codex transport: same Task fresh-session recovery without direct detach', async () => {
   const f = await fixture('same-task');

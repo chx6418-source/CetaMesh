@@ -13,6 +13,8 @@ import { createAgentBroker } from '../src/agent/broker.js';
 import { createContinuityService } from '../src/continuity/service.js';
 import { bandFor, normalizePacket } from '../src/continuity/types.js';
 import { readJsonFile, writeJsonAtomic } from '../src/storage/json-file.js';
+import { createCodexAgentProvider } from '../src/agent/codex-agent-provider.js';
+import { createCodexSessionLifecycle } from '../src/agent/codex-session-lifecycle.js';
 
 const root = path.resolve(import.meta.dirname, '..');
 const tempRoot = process.env.WHALEBRIDGE_TEST_TMPDIR || os.tmpdir();
@@ -69,7 +71,7 @@ function mockProvider(id, log, options = {}) {
       },
       async closeSession({ sessionId }) {
         log.push({ kind: 'archive', sessionId });
-        return { archived: true, supported: true, sessionId };
+        return { closed: true, sessionId };
       },
       async selectModel({ sessionId, model }) {
         return { sessionId, selected: { model } };
@@ -86,19 +88,267 @@ function mockProvider(id, log, options = {}) {
 }
 
 /** 每组独立 stateDir；task 写操作统一带最新 rev（store 乐观锁）。 */
-function setup({ policy, gate, failSendProvider, alphaStatusError, reconciler, betaBootstrapGate, onHandoffComplete, readOperations } = {}) {
+function setup({ policy, gate, failSendProvider, alphaStatusError, sourceProviderId = 'alpha', sourceStoppedProof, reconciler, betaBootstrapGate, onHandoffComplete, readOperations } = {}) {
   const log = [];
   const dir = fs.mkdtempSync(path.join(stateRoot, 'case-'));
   const taskRuntime = createTaskRuntime({ stateDir: dir });
   const rev = (id) => taskRuntime.get({ id }).task.rev;
   const registry = createAgentProviderRegistry();
-  const alpha = mockProvider('alpha', log, { gate, failSend: failSendProvider === 'alpha', statusError: alphaStatusError });
+  const alpha = mockProvider(sourceProviderId, log, { gate, failSend: failSendProvider === 'alpha', statusError: alphaStatusError });
   const beta = mockProvider('beta', log, { failSend: failSendProvider === 'beta', bootstrapGate: betaBootstrapGate });
-  registry.register(alpha);
+  registry.register(sourceStoppedProof ? { ...alpha, verifyStoppedTask: sourceStoppedProof } : alpha);
   registry.register(beta);
   const broker = createAgentBroker({ registry });
   const service = createContinuityService({ taskRuntime, stateDir: dir, agentBroker: broker, policy, reconciler, onHandoffComplete, readOperations });
-  return { service, runtime: service.runtime, broker, taskRuntime, log, rev, dir };
+  return { service, runtime: service.runtime, broker, registry, taskRuntime, log, rev, dir };
+}
+
+{
+  const { runtime, taskRuntime, rev, log } = setup({ alphaStatusError: 'SESSION_NOT_FOUND' });
+  const task = taskRuntime.create({ goal: 'Do not replace unconfirmed external execution', workspaceId: 'ws-missing-native' });
+  taskRuntime.attachAgent({ id: task.id, expectedRev: rev(task.id), provider: 'alpha', sessionId: 'external-missing' });
+  taskRuntime.setCheckpoint({ id: task.id, expectedRev: rev(task.id), summary: 'preserved checkpoint', nextAction: 'verify source' });
+  const before = taskRuntime.get({ id: task.id }).task;
+  await assert.rejects(runtime.rollover({ taskId: task.id, targetProvider: 'beta' }), { code: 'SESSION_EXECUTION_UNCONFIRMED' });
+  assert.deepEqual(taskRuntime.get({ id: task.id }).task, before);
+  assert.deepEqual(log, [], 'a missing external Session is not proof that its process stopped');
+  assert.equal(runtime.isInFlight(task.id), false);
+  ok('missing external Session preserves Task and Checkpoint and cannot create a replacement');
+}
+
+for (const stopped of [false, true]) {
+  const { runtime, taskRuntime, rev, log } = setup({ sourceProviderId: 'codex', alphaStatusError: 'SESSION_NOT_FOUND',
+    sourceStoppedProof: async binding => ({ ...binding, provider: 'codex', stopped, evidence: 'process-tree-exit', receiptId: 'fixture-stop' }) });
+  const task = taskRuntime.create({ goal: 'Use exact native stop evidence', workspaceId: 'ws-native-stop' });
+  taskRuntime.attachAgent({ id: task.id, expectedRev: rev(task.id), provider: 'codex', sessionId: 'native-missing' });
+  if (stopped) assert.equal((await runtime.rollover({ taskId: task.id, targetProvider: 'beta' })).to.provider, 'beta');
+  else {
+    await assert.rejects(runtime.rollover({ taskId: task.id, targetProvider: 'beta' }), { code: 'SESSION_EXECUTION_UNCONFIRMED' });
+    assert.deepEqual(log, []);
+  }
+}
+
+for (const scenario of ['matching', 'new-generation', 'unknown-effect']) {
+  let nativeProof;
+  const { runtime, taskRuntime, rev, log, dir } = setup({ sourceProviderId: 'codex', alphaStatusError: 'SESSION_NOT_FOUND',
+    sourceStoppedProof: binding => nativeProof.verifyStoppedTask(binding),
+    readOperations: () => scenario === 'unknown-effect' ? [{ operationId: 'unsettled', status: 'outcome-unknown' }] : [] });
+  const task = taskRuntime.create({ goal: 'Check durable native generation', workspaceId: 'ws-proof-' + scenario });
+  taskRuntime.start({ id: task.id, expectedRev: rev(task.id), provider: 'codex', sessionId: 'native-old' });
+  taskRuntime.beginExecutionObservation({ id: task.id, provider: 'codex', sessionId: 'native-old', runId: 'run-1', phase: 'user' });
+  const lifecycle = createCodexSessionLifecycle({ stateDir: dir });
+  lifecycle.create({ sessionId: 'native-old', taskId: task.id, workspaceId: task.workspaceId, transport: 'exec', snapshotId: 'fixture-snapshot' });
+  lifecycle.begin({ sessionId: 'native-old', generation: 0, runId: 'run-1', turnId: 'turn-1' });
+  lifecycle.settle({ sessionId: 'native-old', generation: 1, runId: 'run-1', proof: 'process-tree-exit' });
+  if (scenario === 'new-generation') {
+    lifecycle.begin({ sessionId: 'native-old', generation: 1, runId: 'run-2', turnId: 'turn-2' });
+    lifecycle.settle({ sessionId: 'native-old', generation: 2, runId: 'run-2', proof: 'process-tree-exit' });
+  }
+  nativeProof = createCodexAgentProvider({ stateDir: dir, sessionLifecycle: lifecycle, codexHome: path.join(dir, 'no-user-config'), environment: {},
+    cliProcess: { executable: () => null, probe: () => ({ available: false, stdout: '', stderr: '' }) },
+    resolveTaskWorkspace: async () => ({ task: taskRuntime.get({ id: task.id }).task, workspace: { id: task.workspaceId } }) });
+  const before = taskRuntime.get({ id: task.id }).task;
+  if (scenario === 'matching') assert.equal((await runtime.rollover({ taskId: task.id, targetProvider: 'beta' })).to.provider, 'beta');
+  else {
+    await assert.rejects(runtime.rollover({ taskId: task.id, targetProvider: 'beta' }),
+      { code: scenario === 'unknown-effect' ? 'ROLLOVER_NOT_SAFE' : 'SESSION_EXECUTION_UNCONFIRMED' });
+    assert.deepEqual(taskRuntime.get({ id: task.id }).task, before); assert.deepEqual(log, []);
+  }
+}
+
+{
+  let nativeProof;
+  const { runtime, taskRuntime, rev, log, dir, broker } = setup({ sourceProviderId: 'codex',
+    sourceStoppedProof: binding => nativeProof.verifyStoppedTask(binding) });
+  const task = taskRuntime.create({ goal: 'Retry a late disappeared source safely', workspaceId: 'ws-late-native-source' });
+  taskRuntime.start({ id: task.id, expectedRev: rev(task.id), provider: 'codex', sessionId: 'source' });
+  taskRuntime.beginExecutionObservation({ id: task.id, provider: 'codex', sessionId: 'source', runId: 'run-1', phase: 'user' });
+  const lifecycle = createCodexSessionLifecycle({ stateDir: dir });
+  lifecycle.create({ sessionId: 'source', taskId: task.id, workspaceId: task.workspaceId, transport: 'exec', snapshotId: 'old' });
+  lifecycle.begin({ sessionId: 'source', generation: 0, runId: 'run-1', turnId: 'turn-1' });
+  lifecycle.settle({ sessionId: 'source', generation: 1, runId: 'run-1', proof: 'process-tree-exit' });
+  nativeProof = createCodexAgentProvider({ stateDir: dir, sessionLifecycle: lifecycle, codexHome: path.join(dir, 'no-user-config'), environment: {},
+    cliProcess: { executable: () => null, probe: () => ({ available: false, stdout: '', stderr: '' }) },
+    resolveTaskWorkspace: async () => ({ task: taskRuntime.get({ id: task.id }).task, workspace: { id: task.workspaceId } }) });
+  const create = broker.createSession.bind(broker), status = broker.status.bind(broker), close = broker.closeSession.bind(broker);
+  let sourceGone = false;
+  broker.createSession = async (...args) => {
+    const target = await create(...args);
+    lifecycle.create({ sessionId: target.sessionId, taskId: task.id, workspaceId: task.workspaceId, transport: 'app-server', snapshotId: target.sessionId });
+    return target;
+  };
+  broker.status = args => args.sessionId === 'source' && sourceGone
+    ? Promise.reject(Object.assign(new Error('source disappeared'), { code: 'SESSION_NOT_FOUND' })) : status(args);
+  broker.cancel = async args => {
+    if (args.sessionId !== 'source') return { cancelled: false };
+    sourceGone = true; throw Object.assign(new Error('source disappeared'), { code: 'SESSION_NOT_FOUND' });
+  };
+  broker.closeSession = async args => {
+    lifecycle.settle({ sessionId: args.sessionId, generation: 0, runId: null, proof: 'supervisor-close' });
+    lifecycle.close({ sessionId: args.sessionId }); return close(args);
+  };
+  const before = taskRuntime.get({ id: task.id }).task;
+  await assert.rejects(runtime.rollover({ taskId: task.id, targetProvider: 'codex' }), { code: 'SESSION_EXECUTION_UNCONFIRMED' });
+  assert.deepEqual(taskRuntime.get({ id: task.id }).task.currentAgent, before.currentAgent);
+  assert.deepEqual(taskRuntime.get({ id: task.id }).task.checkpoint, before.checkpoint);
+  assert.equal(runtime.isInFlight(task.id), false, 'confirmed target cleanup permits another explicit safe attempt');
+  assert.equal(log.filter(row => row.kind === 'prompt').length, 0);
+  assert.equal((await runtime.rollover({ taskId: task.id, targetProvider: 'codex' })).to.sessionId, 'codex-s3');
+  assert.equal(log.filter(row => row.kind === 'prompt').length, 1);
+  ok('late same-Provider source disappearance cleans the unused target and permits an explicit proven retry');
+}
+
+{
+  const { runtime, taskRuntime, rev, log, broker } = setup({ sourceProviderId: 'codex', alphaStatusError: 'SESSION_NOT_FOUND',
+    sourceStoppedProof: async binding => ({ ...binding, provider: 'codex', stopped: !log.some(row => row.kind === 'create') }) });
+  const task = taskRuntime.create({ goal: 'Native source proof precedes target startup', workspaceId: 'ws-native-stop-once' });
+  taskRuntime.attachAgent({ id: task.id, expectedRev: rev(task.id), provider: 'codex', sessionId: 'native-missing' });
+  const cancel = broker.cancel.bind(broker);
+  broker.cancel = args => args.provider === 'codex' ? Promise.reject(Object.assign(new Error('source already retired'), { code: 'SESSION_NOT_FOUND' })) : cancel(args);
+  assert.equal((await runtime.rollover({ taskId: task.id, targetProvider: 'beta' })).to.provider, 'beta',
+    'the newly created target must not be mistaken for an unconfirmed old source');
+}
+
+{
+  const { runtime, taskRuntime, rev, log } = setup();
+  const task = taskRuntime.create({ goal: 'Preflight unsupported readiness before journal writes', workspaceId: 'ws-readiness' });
+  taskRuntime.attachAgent({ id: task.id, expectedRev: rev(task.id), provider: 'alpha', sessionId: 'alpha-old' });
+  const before = taskRuntime.get({ id: task.id }).task;
+  await assert.rejects(runtime.rollover({ taskId: task.id, targetProvider: 'beta', requireNativeReadiness: true }), { code: 'AGENT_READINESS_UNSUPPORTED' });
+  assert.equal(runtime.isInFlight(task.id), false, 'unsupported target cannot leave a prepared Handoff fence');
+  assert.equal(runtime.transactionReviewState(task.id), null);
+  assert.deepEqual(taskRuntime.get({ id: task.id }).task, before); assert.deepEqual(log, []);
+}
+
+{
+  const { runtime, taskRuntime, rev, broker } = setup();
+  const task = taskRuntime.create({ goal: 'Preserve Owner checkpoint during failed Handoff', workspaceId: 'ws-owner-checkpoint-race' });
+  taskRuntime.attachAgent({ id: task.id, expectedRev: rev(task.id), provider: 'alpha', sessionId: 'alpha-old' });
+  taskRuntime.setCheckpoint({ id: task.id, expectedRev: rev(task.id), summary: 'old checkpoint', nextAction: 'old step' });
+  const cancel = broker.cancel.bind(broker); let ownerCheckpoint;
+  broker.cancel = async args => {
+    if (args.provider !== 'alpha') return cancel(args);
+    taskRuntime.setCheckpoint({ id: task.id, expectedRev: rev(task.id), summary: 'new Owner correction', nextAction: 'new verified step' });
+    ownerCheckpoint = taskRuntime.get({ id: task.id }).task.checkpoint;
+    throw Object.assign(new Error('source stop failed'), { code: 'SOURCE_STOP_FAILED' });
+  };
+  await assert.rejects(runtime.rollover({ taskId: task.id, targetProvider: 'beta' }), { code: 'SOURCE_STOP_FAILED' });
+  assert.deepEqual(taskRuntime.get({ id: task.id }).task.checkpoint, ownerCheckpoint,
+    'rollback may restore only its own unchanged Checkpoint, never a later Owner correction');
+}
+
+for (const cleanup of ['false', 'missing', 'managed-missing']) {
+  const { runtime, taskRuntime, rev, broker, registry, log } = setup();
+  if (cleanup === 'managed-missing') registry.register(mockProvider('cetamesh', log));
+  if (cleanup === 'missing') registry.register({ ...mockProvider('codex', log), verifyStoppedTask: async () => ({ stopped: false }) });
+  const task = taskRuntime.create({ goal: 'Retain uncertain target cleanup', workspaceId: 'ws-target-cleanup-' + cleanup });
+  taskRuntime.attachAgent({ id: task.id, expectedRev: rev(task.id), provider: 'alpha', sessionId: 'alpha-old' });
+  const cancel = broker.cancel.bind(broker);
+  broker.cancel = async args => {
+    if (args.provider === 'alpha') throw Object.assign(new Error('source stop failed'), { code: 'SOURCE_STOP_FAILED' });
+    return cancel(args);
+  };
+  broker.closeSession = async () => {
+    if (cleanup === 'false') return { closed: false };
+    throw Object.assign(new Error('target is not observable'), { code: 'SESSION_NOT_FOUND' });
+  };
+  if (cleanup === 'managed-missing') {
+    // Keep this case on the real Managed identity while using deterministic provider methods.
+    broker.createSession = async () => ({ sessionId: 'missing-managed-target' });
+    const status = broker.status.bind(broker);
+    broker.status = args => args.provider === 'cetamesh' ? Promise.reject(Object.assign(new Error('managed target absent'), { code: 'SESSION_NOT_FOUND' })) : status(args);
+  }
+  const targetProvider = cleanup === 'managed-missing' ? 'cetamesh' : cleanup === 'missing' ? 'codex' : 'beta';
+  await assert.rejects(runtime.rollover({ taskId: task.id, targetProvider }), { code: 'SOURCE_STOP_FAILED' });
+  assert.equal(runtime.isInFlight(task.id), cleanup !== 'managed-missing', 'only confirmed target cleanup can release the prepared transaction');
+  assert.equal(taskRuntime.get({ id: task.id }).task.currentAgent.provider, 'alpha');
+  if (cleanup !== 'managed-missing') assert.equal(taskRuntime.get({ id: task.id }).task.status, 'blocked',
+    'unattached unknown target must block the original Task immediately while preserving its source binding');
+}
+
+for (const creation of ['retained', 'retained-closed', 'opaque', 'opaque-stopped', 'opaque-raced', 'wrong-provider', 'invalid-return', 'managed', 'guard']) {
+  const { runtime, taskRuntime, rev, broker, registry, log } = setup();
+  const task = taskRuntime.create({ goal: 'Retain interrupted startup ownership', workspaceId: 'ws-create-' + creation });
+  taskRuntime.attachAgent({ id: task.id, expectedRev: rev(task.id), provider: 'alpha', sessionId: 'alpha-old' });
+  taskRuntime.start({ id: task.id, expectedRev: rev(task.id) });
+  taskRuntime.setCheckpoint({ id: task.id, expectedRev: rev(task.id), summary: 'original progress', nextAction: 'original step' });
+  const targetId = creation === 'managed' ? 'cetamesh' : 'startup';
+  registry.register({ ...mockProvider(targetId, log), verifyTaskQuiescence: async scope => {
+    assert.equal(scope.taskId, task.id); assert.equal(scope.workspaceId, task.workspaceId);
+    if (creation === 'opaque-raced') taskRuntime.setCheckpoint({ id: task.id, expectedRev: rev(task.id), summary: 'new Owner progress', nextAction: 'new step' });
+    return { stopped: ['opaque-stopped', 'opaque-raced'].includes(creation) };
+  } });
+  let entered = false;
+  const cleanup = [];
+  broker.createSession = async () => {
+    entered = true;
+    if (creation === 'invalid-return') return {};
+    const error = Object.assign(new Error('startup interrupted'), { code: 'ACP_CLOSE_UNKNOWN' });
+    if (creation.startsWith('retained') || creation === 'wrong-provider') {
+      error.provider = creation === 'wrong-provider' ? 'unrelated' : targetId;
+      error.sessionId = 'retained-startup';
+    }
+    throw error;
+  };
+  broker.cancel = async args => { cleanup.push(['cancel', args]); return { cancelled: true }; };
+  broker.closeSession = async args => { cleanup.push(['close', args]); return { closed: creation === 'retained-closed' }; };
+  await assert.rejects(runtime.rollover({ taskId: task.id, targetProvider: targetId,
+    ...(creation === 'guard' ? { authorizationGuard: () => { throw Object.assign(new Error('revoked'), { code: 'POLICY_REVOKED' }); } } : {}) }));
+  const uncertain = !['retained-closed', 'opaque-stopped', 'managed', 'guard'].includes(creation);
+  const after = taskRuntime.get({ id: task.id }).task;
+  assert.equal(runtime.isInFlight(task.id), uncertain, 'creation failure is not proof that an external target never started');
+  assert.equal(after.status, uncertain ? 'blocked' : 'running');
+  assert.deepEqual(after.currentAgent, { provider: 'alpha', sessionId: 'alpha-old' });
+  assert.equal(after.checkpoint.summary, creation === 'opaque-raced' ? 'new Owner progress' : 'original progress');
+  if (uncertain) assert.equal(runtime.transactionReviewState(task.id).to.sessionId,
+    creation === 'retained' ? 'retained-startup' : null);
+  assert.equal(entered, creation !== 'guard');
+  assert.deepEqual(cleanup.map(row => row[1].sessionId), creation.startsWith('retained') ? ['retained-startup', 'retained-startup'] : [],
+    'only exact trusted retained-startup identities may be cancelled or closed');
+  assert.equal(log.filter(row => row.kind === 'prompt').length, 0);
+}
+
+for (const status of ['paused', 'failed']) {
+  const { runtime, taskRuntime, rev, broker } = setup();
+  const task = taskRuntime.create({ goal: 'Preserve recovery lifecycle state', workspaceId: 'ws-retain-' + status });
+  taskRuntime.attachAgent({ id: task.id, expectedRev: rev(task.id), provider: 'alpha', sessionId: 'alpha-old' });
+  if (status === 'paused') taskRuntime.pause({ id: task.id, expectedRev: rev(task.id) });
+  let expectedAgent = taskRuntime.get({ id: task.id }).task.currentAgent;
+  broker.cancel = async args => {
+    if (status === 'failed' && args.provider === 'alpha') {
+      taskRuntime.fail({ id: task.id, expectedRev: rev(task.id), reason: 'Owner terminated while Handoff awaited' });
+      expectedAgent = taskRuntime.get({ id: task.id }).task.currentAgent;
+    }
+    throw Object.assign(new Error('source stop failed'), { code: 'SOURCE_STOP_FAILED' });
+  };
+  broker.closeSession = async () => ({ closed: false });
+  await assert.rejects(runtime.rollover({ taskId: task.id, targetProvider: 'beta' }), { code: 'SOURCE_STOP_FAILED' });
+  const after = taskRuntime.get({ id: task.id }).task;
+  assert.equal(after.status, status, 'recovery must retain paused state and must never reopen a terminal Task');
+  assert.deepEqual(after.currentAgent, expectedAgent, 'do not restore a binding retired by a concurrent Owner terminal transition');
+  assert.equal(runtime.isInFlight(task.id), true);
+  assert.equal(runtime.transactionReviewState(task.id).from.sessionId, 'alpha-old');
+  assert.equal(runtime.transactionReviewState(task.id).to.sessionId, 'beta-s2');
+  if (status === 'paused') assert.match(after.progress.note, /needs-reconciliation/,
+    'paused Tasks need actionable recovery feedback without an illegal paused-to-blocked transition');
+}
+
+{
+  let entered, release;
+  const enteredPromise = new Promise(resolve => { entered = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  const { runtime, taskRuntime, rev, log } = setup({ sourceProviderId: 'codex', alphaStatusError: 'SESSION_NOT_FOUND',
+    sourceStoppedProof: async binding => { entered(); await gate; return { ...binding, provider: 'codex', stopped: true }; } });
+  const task = taskRuntime.create({ goal: 'Reject stale asynchronous stop evidence', workspaceId: 'ws-stop-race' });
+  taskRuntime.attachAgent({ id: task.id, expectedRev: rev(task.id), provider: 'codex', sessionId: 'native-missing' });
+  const pending = runtime.rollover({ taskId: task.id, targetProvider: 'beta' });
+  await enteredPromise;
+  taskRuntime.setCheckpoint({ id: task.id, expectedRev: rev(task.id), summary: 'new Owner fact', nextAction: 'new step' });
+  const changed = taskRuntime.get({ id: task.id }).task;
+  release();
+  await assert.rejects(pending, { code: 'TASK_CONFLICT' });
+  assert.deepEqual(taskRuntime.get({ id: task.id }).task, changed); assert.deepEqual(log, []);
+  ok('stop evidence is revalidated against the exact Task revision after awaiting');
 }
 
 {
@@ -163,9 +413,9 @@ function setup({ policy, gate, failSendProvider, alphaStatusError, reconciler, b
 }
 
 {
-  const { runtime, taskRuntime, rev, log } = setup({ alphaStatusError: 'SESSION_NOT_FOUND' });
+  const { runtime, taskRuntime, rev, log } = setup({ alphaStatusError: 'SESSION_NOT_FOUND', sourceProviderId: 'cetamesh' });
   const task = taskRuntime.create({ goal: 'Core restart after Agent session loss', workspaceId: 'ws-restart-recovery' });
-  taskRuntime.attachAgent({ id: task.id, expectedRev: rev(task.id), provider: 'alpha', sessionId: 'alpha-old-after-restart' });
+  taskRuntime.attachAgent({ id: task.id, expectedRev: rev(task.id), provider: 'cetamesh', sessionId: 'alpha-old-after-restart' });
   taskRuntime.setProgress({ id: task.id, expectedRev: rev(task.id), percent: 37, note: 'checkpoint survives restart' });
   const before = taskRuntime.get({ id: task.id }).task;
   const result = await runtime.rollover({ taskId: task.id, reason: 'provider-switch', targetProvider: 'beta' });
@@ -336,7 +586,8 @@ function setup({ policy, gate, failSendProvider, alphaStatusError, reconciler, b
 
   const rolledBack = taskRuntime.get({ id: task.id }).task;
   assert.equal(rolledBack.status, 'blocked', 'a stopped old Agent cannot be restored as an active writer');
-  assert.equal(rolledBack.currentAgent, null, 'failed bootstrap leaves the Task awaiting recovery');
+  assert.deepEqual(rolledBack.currentAgent, { provider: 'beta', sessionId: 'beta-s2' },
+    'failed bootstrap retains the stopped target assignment for exact Owner recovery');
   assert.deepEqual(rolledBack.checkpoint, previousCheckpoint,
     'failed bootstrap restores the exact prior checkpoint, including null');
   assert.ok(log.some(entry => entry.kind === 'archive' && entry.sessionId === 'beta-s2'),
@@ -478,7 +729,8 @@ ok('missing or explicitly unknown source status cannot be treated as an idle exe
   assert.equal(log.some(row => row.kind === 'prompt'), false, 'no bootstrap may start when post-cancel status is unknown');
   const after = taskRuntime.get({ id: task.id }).task;
   assert.equal(after.status, 'blocked');
-  assert.equal(after.currentAgent, null);
+  assert.deepEqual(after.currentAgent, { provider: 'alpha', sessionId: 'alpha-old' },
+    'unknown post-cancel source keeps its exact binding for recovery');
   assert.equal(runtime.history({ taskId: task.id }).total, 0);
   ok('unknown state after cancellation blocks handoff and preserves the Task for reconciliation');
 }
@@ -533,7 +785,7 @@ ok('Handoff Packet retains complete Task requirements');
     error => error.code === 'WORKSPACE_CHANGED');
   assert.equal(reads, 3, 'Collect baseline and preflight, then recollect facts after target initialization');
   assert.equal(taskRuntime.get({ id: task.id }).task.status, 'blocked');
-  assert.equal(taskRuntime.get({ id: task.id }).task.currentAgent, null);
+  assert.deepEqual(taskRuntime.get({ id: task.id }).task.currentAgent, { provider: 'beta', sessionId: 'beta-s2' });
   ok('Workspace change during handoff blocks recovery after stopping the prior Agent');
 }
 
@@ -564,6 +816,8 @@ ok('Handoff Packet retains complete Task requirements');
     await new Promise(resolve => setTimeout(resolve, 20));
     assert.equal(settled, false, 'bootstrap ACK alone cannot complete handoff');
     assert.equal(runtime.history({ taskId: task.id }).total, 0);
+    assert.throws(() => runtime.acknowledgeTransactionRecovery(task.id), { code: 'ROLLOVER_IN_FLIGHT' },
+      'Owner acknowledgement must not clear an actively running Handoff transaction');
   } finally { bootstrapGate.release?.(); await Promise.allSettled([handoff]); }
   assert.equal(settled, true);
   assert.equal(runtime.history({ taskId: task.id }).total, 1);
@@ -571,7 +825,7 @@ ok('Handoff Packet retains complete Task requirements');
 }
 
 {
-  const { runtime, taskRuntime, broker, rev } = setup({ failSendProvider: 'beta' });
+  const { runtime, taskRuntime, broker, rev, dir } = setup({ failSendProvider: 'beta' });
   const task = taskRuntime.create({ goal: 'Do not reauthorize old Agent if target cleanup fails', workspaceId: 'ws-cleanup' });
   taskRuntime.attachAgent({ id: task.id, expectedRev: rev(task.id), provider: 'alpha', sessionId: 'alpha-old' });
   taskRuntime.start({ id: task.id, expectedRev: rev(task.id) });
@@ -579,9 +833,32 @@ ok('Handoff Packet retains complete Task requirements');
   await assert.rejects(runtime.rollover({ taskId: task.id, targetProvider: 'beta' }),
     error => error.code === 'PROVIDER_ERROR');
   const after = taskRuntime.get({ id: task.id }).task;
-  assert.equal(after.status, 'failed', 'uncertain target cleanup must revoke further Task writes');
-  assert.equal(after.currentAgent, null);
-  ok('failed target cleanup terminates Task authority rather than restoring an old writer');
+  assert.equal(after.status, 'blocked', 'uncertain target cleanup must revoke dispatch without terminating recoverable Task identity');
+  assert.deepEqual(after.currentAgent, { provider: 'beta', sessionId: 'beta-s2' }, 'unknown target binding remains available for exact Owner review');
+  const review = runtime.transactionReviewState(task.id);
+  assert.equal(review.workspaceId, task.workspaceId);
+  assert.equal(review.from.sessionId, 'alpha-old'); assert.equal(review.to.sessionId, 'beta-s2');
+  assert.equal(runtime.isInFlight(task.id), true);
+  const reloadedTasks = createTaskRuntime({ stateDir: dir });
+  const restarted = createContinuityService({ taskRuntime: reloadedTasks, stateDir: dir, agentBroker: broker });
+  assert.equal(reloadedTasks.get({ id: task.id }).task.status, 'blocked');
+  assert.deepEqual(reloadedTasks.get({ id: task.id }).task.currentAgent, after.currentAgent);
+  assert.equal(restarted.runtime.transactionReviewState(task.id).workspaceId, task.workspaceId);
+  const transactionPath = path.join(dir, 'continuity', 'transactions', task.id + '.json');
+  const record = readJsonFile(transactionPath);
+  const decoyPath = path.join(dir, 'decoy-packet.json');
+  writeJsonAtomic(decoyPath, { taskId: 'other-task', sequence: record.sequence, workspace: 'wrong-workspace' });
+  writeJsonAtomic(transactionPath, { ...record, packetPath: decoyPath });
+  assert.equal(restarted.runtime.transactionReviewState(task.id).workspaceId, task.workspaceId,
+    'review reads the controlled task/sequence packet, never an arbitrary record.packetPath');
+  const exactPacketPath = path.join(dir, 'continuity', 'handoff', task.id, 'packet-' + String(record.sequence).padStart(4, '0') + '.json');
+  const packet = readJsonFile(exactPacketPath);
+  writeJsonAtomic(exactPacketPath, { ...packet, taskId: 'other-task' });
+  assert.throws(() => restarted.runtime.transactionReviewState(task.id), { code: 'STORE_CORRUPT' });
+  writeJsonAtomic(exactPacketPath, { ...packet, sequence: record.sequence + 1 });
+  assert.throws(() => restarted.runtime.transactionReviewState(task.id), { code: 'STORE_CORRUPT' });
+  writeJsonAtomic(exactPacketPath, packet);
+  ok('unknown target remains blocked and exactly reviewable across restart without trusting arbitrary packet paths');
 }
 
 {
@@ -647,7 +924,8 @@ ok('Handoff Packet retains complete Task requirements');
     error => error.code === 'HANDOFF_COMMIT_FAILED');
   const blocked = taskRuntime.get({ id: task.id }).task;
   assert.equal(blocked.status, 'blocked', 'history failure must block the Task');
-  assert.equal(blocked.currentAgent, null, 'history failure must revoke the uncommitted target');
+  assert.deepEqual(blocked.currentAgent, { provider: 'beta', sessionId: 'beta-s2' },
+    'history failure blocks dispatch while preserving the uncommitted target identity for recovery');
   assert.match(blocked.progress.note, /needs-reconciliation/);
   assert.ok(log.some(entry => entry.kind === 'cancel' && entry.sessionId === 'beta-s2'),
     'uncommitted target Session must be stopped');

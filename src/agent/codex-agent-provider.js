@@ -968,6 +968,62 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
         receiptId:row.receipt.id,generation:row.generation,runId:row.runId,snapshotId:row.snapshotId,
         attemptId:row.attemptId,transport:row.transport,evidence:row.receipt.evidence };
     },
+    // Trusted Core Handoff review only; never exposed as a Provider wire method.
+    // The caller supplies the prepared journal (or its retained Owner-intent
+    // snapshot), not user prose. Ordinary Task recovery keeps its stricter API.
+    async inspectStoppedHandoffSession({ taskId, workspaceId, sessionId, handoff } = {}) {
+      const unknown = () => ({ stopped: false });
+      if (!taskId || !workspaceId || !sessionId || typeof resolveTaskWorkspace !== 'function') return unknown();
+      let record;
+      try { record = structuredClone(handoff); } catch { return unknown(); }
+      const validId = value => typeof value === 'string' && value.length > 0;
+      const participant = (value, nullable = false) => value && validId(value.provider)
+        && (validId(value.sessionId) || nullable && value.sessionId === null);
+      const matches = (left, right) => left?.provider === right?.provider && left?.sessionId === right?.sessionId;
+      if (record?.state !== 'prepared' || record.taskId !== taskId || record.workspaceId !== workspaceId
+        || !Number.isSafeInteger(record.sequence) || record.sequence < 1
+        || !participant(record.from) || !participant(record.to, true) || matches(record.from, record.to)) return unknown();
+      const wanted = { provider: 'codex', sessionId };
+      const isSource = matches(wanted, record.from), isTarget = matches(wanted, record.to);
+      if (!isSource && !isTarget) return unknown();
+      const taskValid = binding => binding?.workspace?.id === workspaceId && binding.task?.id === taskId
+        && binding.task.workspaceId === workspaceId && ['blocked', 'paused', 'waiting'].includes(binding.task.status)
+        && (matches(binding.task.currentAgent, record.from) || matches(binding.task.currentAgent, record.to));
+      const taskFacts = task => JSON.stringify({ rev: task.rev, status: task.status, workspaceId: task.workspaceId,
+        currentAgent: task.currentAgent, history: task.agentHistory, attempts: task.attempts });
+      const binding = await resolveTaskWorkspace({ taskId, workspaceId });
+      if (!taskValid(binding)) return unknown();
+      const originalTaskFacts = taskFacts(binding.task);
+      const row = lifecycle.read(sessionId);
+      if (!row?.receipt || !['idle', 'stopped', 'closed'].includes(row.state)
+        || row.taskId !== taskId || row.workspaceId !== workspaceId || sessions.get(sessionId)?.activeRun) return unknown();
+      if (isTarget && row.generation > 0 && row.runId !== `handoff:${taskId}:${record.sequence}`) return unknown();
+      if (isSource && !(binding.task.agentHistory ?? []).some(entry => matches(entry, wanted)
+        && (!entry.versionContext || entry.versionContext.snapshotId === row.snapshotId
+          && (entry.versionContext.attemptId ?? null) === row.attemptId))) return unknown();
+      if (row.attemptId !== null && !(binding.task.attempts ?? []).some(attempt => attempt.id === row.attemptId
+        && attempt.provider === 'codex' && (!attempt.sessionId || attempt.sessionId === sessionId
+          // The fresh Session factory retains the latest same-Provider Attempt;
+          // bootstrap does not rewrite that original source Session identity.
+          || isTarget && record.from.provider === 'codex' && attempt.sessionId === record.from.sessionId
+            && (binding.task.agentHistory ?? []).some(entry => matches(entry, record.from))))) return unknown();
+      if (!(await this.verifyTaskQuiescence({ taskId, workspaceId })).stopped) return unknown();
+      const latestBinding = await resolveTaskWorkspace({ taskId, workspaceId });
+      if (!taskValid(latestBinding) || taskFacts(latestBinding.task) !== originalTaskFacts) return unknown();
+      const latest = lifecycle.read(sessionId);
+      if (latest?.receipt?.id !== row.receipt.id || latest.generation !== row.generation || latest.runId !== row.runId
+        || latest.taskId !== taskId || latest.workspaceId !== workspaceId || latest.snapshotId !== row.snapshotId
+        || latest.attemptId !== row.attemptId || latest.transport !== row.transport
+        || !['idle', 'stopped', 'closed'].includes(latest.state)
+        || sessions.get(sessionId)?.activeRun) return unknown();
+      // Re-read synchronously after the final await: another participant/startup
+      // cannot become active between the Task-wide observation and this receipt.
+      if (lifecycle.forTask(taskId).some(item => item.workspaceId !== workspaceId || !item.receipt
+        || !['idle', 'stopped', 'closed'].includes(item.state) || sessions.get(item.sessionId)?.activeRun)) return unknown();
+      return { stopped: true, provider: 'codex', taskId, workspaceId, sessionId,
+        receiptId: row.receipt.id, generation: row.generation, runId: row.runId, snapshotId: row.snapshotId,
+        attemptId: row.attemptId, transport: row.transport, evidence: row.receipt.evidence };
+    },
     configure(settings = {}) {
       const allowed = new Set(['model', 'reasoningEffort']);
       for (const key of Object.keys(settings ?? {})) {

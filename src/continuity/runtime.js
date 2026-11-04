@@ -3,8 +3,8 @@
 // v2 变更（会话 2 / TASK-S2-003/004/005/006/007/008/009/010）：
 //   1) 唯一依赖 Agent Broker：移除本目录自带的窄 AgentProvider 注册表与 DSH 实现；
 //      会话创建/发送/取消/归档一律走 broker（DSH 只是第一个真实 Provider）。
-//   2) observeAgentTurn：回合机在 Agent 回合结束后调用——真实 usage 优先入
-//      Context Monitor，无真实 usage 时用字符估算并明确标记 estimated；
+//   2) observeAgentTurn：回合机在 Agent 回合结束后调用——最新请求 usage 入
+//      Context Monitor；只知用户消息字符数时保持 unknown，不冒充完整上下文；
 //      绑定了 Task 的会话达到阈值自动执行 Fresh Session Rollover。
 //   3) 自动 Rollover 安全点：canRollover 钩子 / 互斥窗口未到安全点时返回
 //      ROLLOVER_NOT_SAFE，保留当前 Session（forced/emergency 只升级记录，不硬杀）。
@@ -27,6 +27,7 @@
 //           Sessions are disposable; progress is persistent.
 
 import { taskModelForAgent } from '../agent/task-model-selection.js';
+import { inspectTaskSession } from '../agent/session-recovery.js';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { renderOwnerContext } from '../task/owner-context.js';
@@ -41,7 +42,7 @@ import {
   normalizePolicy,
   normalizeReason
 } from './types.js';
-import { normalizeUsageTokens } from '../agent/agent-provider.js';
+import { normalizeModelUsage } from '../model/usage.js';
 import { createContextMonitor } from './monitor.js';
 
 const AUTO_ROLLOVER_ACTIONS = Object.freeze(['rollover', 'forced', 'emergency']);
@@ -455,8 +456,8 @@ export function createContinuityRuntime({
   /**
    * 回合结束入口（TASK-S2-004/005）：回合机上报 usage → Monitor → evaluate →
    * 达阈值且绑定 Task 时自动 Fresh Session Rollover。
-   * usage 为 Provider 真实回传（原始形状，内部归一化）；没有真实 usage 时用
-   * promptChars/outputChars 估算并标记 estimated。绝不把估算冒充真实 Token。
+   * usage 为 Provider 真实回传（内部复用模型用量归一化）；累计账本只取最后一次
+   * 请求。promptChars/outputChars 仅为回合文本长度，不能证明当前完整上下文。
    */
   async function observeAgentTurn({
     provider, sessionId, usage = null, promptChars = 0, outputChars = 0, windowTokens = null, source = null
@@ -466,32 +467,17 @@ export function createContinuityRuntime({
     if (!providerId || !sid) throw continuityError('INVALID_PARAMS', 'observeAgentTurn 需要 provider 与 sessionId');
     const sessionKey = `${providerId}:${sid}`;
 
-    const realUsage = normalizeUsageTokens(usage);
-    if (Array.isArray(usage?.requests)) {
-      for (const receipt of usage.requests) {
-        if (!receipt || typeof receipt.requestId !== 'string' || !receipt.requestId) continue;
-        monitor.record(sessionKey, {
-          requestId: receipt.requestId,
-          accountingComplete: usage.accountingComplete !== false && typeof receipt.inputTokens === 'number' && typeof receipt.outputTokens === 'number',
-          inputTokens: receipt.inputTokens,
-          outputTokens: receipt.outputTokens,
-          windowTokens: Number.isFinite(receipt.windowTokens) && receipt.windowTokens > 0 ? receipt.windowTokens
-            : Number.isFinite(Number(windowTokens)) && Number(windowTokens) > 0 ? Number(windowTokens) : null
-        });
-      }
-    } else if (realUsage) {
-      monitor.record(sessionKey, {
-        inputTokens: realUsage.inputTokens,
-        outputTokens: realUsage.outputTokens,
-        windowTokens: realUsage.windowTokens ?? (Number.isFinite(Number(windowTokens)) && Number(windowTokens) > 0 ? Number(windowTokens) : null)
-      });
-    } else if (Number(promptChars) > 0 || Number(outputChars) > 0) {
-      monitor.record(sessionKey, {
-        promptChars: Number(promptChars),
-        outputChars: Number(outputChars),
-        windowTokens: Number.isFinite(Number(windowTokens)) && Number(windowTokens) > 0 ? Number(windowTokens) : null
-      });
-    }
+    // Tool-loop and approval continuations carry cumulative billing receipts.
+    // Only the latest effective request describes current context occupancy.
+    const receipt = Array.isArray(usage?.requests) ? usage.requests.at(-1) : usage;
+    const currentUsage = normalizeModelUsage(receipt);
+    monitor.record(sessionKey, {
+      requestId: receipt?.requestId,
+      inputTokens: currentUsage.inputTokens,
+      outputTokens: currentUsage.outputTokens,
+      accountingComplete: usage?.accountingComplete !== false && currentUsage.inputTokens !== null && currentUsage.outputTokens !== null,
+      windowTokens: currentUsage.windowTokens ?? (Number.isFinite(Number(windowTokens)) && Number(windowTokens) > 0 ? Number(windowTokens) : null)
+    });
     const level = monitor.level(sessionKey);
 
     const task = taskRuntime.findByAgent?.({ provider: providerId, sessionId: sid }) ?? null;
@@ -554,6 +540,26 @@ export function createContinuityRuntime({
    */
   async function rollover({ taskId, reason, targetProvider, coding, relevantFiles, workspaceFacts, modelProvider, model, reasoningEffort, automatic = false, requireNativeReadiness = false, authorizationGuard = null } = {}) {
     const task = requireTask(taskId);
+    let missingSourceProof = null;
+    async function requireMissingSourceStopped(snapshot) {
+      // The source was proven stopped before target creation. Re-running a
+      // Task-wide quiescence check afterwards would include that new target.
+      // The Handoff fence prevents source dispatch; reuse only this invocation's
+      // exact source proof, never a historical Task summary or another binding.
+      const matching = missingSourceProof?.provider === snapshot.currentAgent?.provider
+        && missingSourceProof?.sessionId === snapshot.currentAgent?.sessionId
+        && missingSourceProof?.workspaceId === snapshot.workspaceId;
+      const proof = matching ? missingSourceProof : await inspectTaskSession(agentBroker, snapshot);
+      const current = requireTask(snapshot.id);
+      if (current.rev !== snapshot.rev || current.workspaceId !== snapshot.workspaceId
+        || current.currentAgent?.provider !== snapshot.currentAgent?.provider
+        || current.currentAgent?.sessionId !== snapshot.currentAgent?.sessionId) {
+        throw continuityError('TASK_CONFLICT', 'Task changed while verifying the previous execution owner');
+      }
+      if (proof.stopped !== true) throw continuityError('SESSION_EXECUTION_UNCONFIRMED',
+        '旧会话不可见不代表执行已停止。请在任务详情核对原执行者停止凭据和工作区结果后恢复。');
+      missingSourceProof = proof;
+    }
     if (task.parentTaskId && task.childContract?.mode === 'read-only'
       && targetProvider && targetProvider !== 'cetamesh') {
       throw continuityError('AGENT_READ_ONLY_BOUNDARY_UNVERIFIED', 'Child Task cannot hand off to an external native Agent without a verified read-only boundary');
@@ -600,9 +606,9 @@ export function createContinuityRuntime({
         if (error?.code === 'SESSION_TRANSPORT_UNKNOWN') throw continuityError(error.code,
           '旧会话的执行连接无法确认，当前不能转交。请在任务详情查看恢复证据，并核对旧执行者进程和工作区的实际结果；确认状态前不会启动新执行。');
         if (error?.code !== 'SESSION_NOT_FOUND') throw error;
-        // Core restart can leave a durable Task pointing at a Provider's lost
-        // in-memory session. Treat only that precise stale-reference result as
-        // inactive; all other status/auth/transport failures still fail closed.
+        // Only Core-owned Managed sessions disappear with Core. Native/external
+        // absence needs the same exact stopped proof as explicit recovery.
+        await requireMissingSourceStopped(task);
         status = { running: false, queued: 0, waitingForApproval: false, stale: true };
       }
       assertHandoffIdle(status);
@@ -610,6 +616,9 @@ export function createContinuityRuntime({
       const target = targetProvider ? agentBroker.require(targetProvider) : agentBroker.require(previousAgent.provider);
       if (!taskBoundaries.has(target.capabilities().workspaceBoundary)) {
         throw continuityError('ROLLOVER_NOT_SAFE', 'A Task cannot switch to a Provider without an enforced Workspace boundary');
+      }
+      if (requireNativeReadiness && target.capabilities().supportsReadinessCheck !== true) {
+        throw continuityError('AGENT_READINESS_UNSUPPORTED', 'This adapter cannot prove native tool readiness');
       }
       agentBroker.assertExecutionConsent?.(target.id, { workspaceId: task.workspaceId });
     }
@@ -681,13 +690,34 @@ export function createContinuityRuntime({
 
       // Keep the live binding and old Session intact until the target is created,
       // attached, and has accepted its bootstrap prompt.
-      const previousCheckpoint = task.checkpoint ?? null;
-      taskRuntime.setCheckpoint({
+      const beforeCheckpoint = requireTask(task.id);
+      const previousCheckpoint = beforeCheckpoint.checkpoint ?? null;
+      const writtenCheckpoint = taskRuntime.setCheckpoint({
         id: task.id,
-        expectedRev: currentRev(),
+        expectedRev: beforeCheckpoint.rev,
         summary: packet.checkpoint.summary || packet.goal,
         nextAction: packet.checkpoint.nextAction || packet.pendingWork[0] || ''
-      });
+      }).checkpoint;
+      function restoreOwnedCheckpoint() {
+        const current = requireTask(task.id);
+        // A rollback owns only its exact checkpoint projection. Other actors may
+        // update this Task while Provider calls are awaited; their later facts win.
+        if (current.workspaceId !== task.workspaceId
+          || JSON.stringify(current.checkpoint) !== JSON.stringify(writtenCheckpoint)) return;
+        taskRuntime.restoreCheckpoint({ id: task.id, expectedRev: current.rev, checkpoint: previousCheckpoint });
+      }
+      function blockForRecovery(reason) {
+        const current = requireTask(task.id);
+        // Binding records the execution we must inspect; blocked revokes new
+        // dispatch. Keep terminal Tasks terminal and preserve every source/target
+        // identity until the existing Owner recovery flow retires it explicitly.
+        if (['queued', 'running', 'waiting'].includes(current.status)) {
+          taskRuntime.block({ id: task.id, expectedRev: current.rev, reason });
+        } else if (current.status === 'paused') {
+          // Paused already forbids execution and has no transition to blocked.
+          taskRuntime.setProgress({ id: task.id, expectedRev: current.rev, note: reason });
+        }
+      }
       const fromProvider = agentBroker.require(previousAgent.provider);
       const target = targetProvider ? agentBroker.require(targetProvider) : fromProvider;
       const targetBoundary = target.capabilities().workspaceBoundary;
@@ -695,12 +725,12 @@ export function createContinuityRuntime({
         throw continuityError('ROLLOVER_NOT_SAFE', 'A Task cannot switch to a Provider without an enforced Workspace boundary');
       }
       let created = null;
+      let creationEntered = false;
       let attached = null;
       let reconciliation = null;
       let oldStopped = false;
       let bootstrapBoundary = {};
       const nativeReadinessToken=requireNativeReadiness ? 'CM_READY_'+crypto.randomBytes(16).toString('hex') : null;
-      if(nativeReadinessToken && target.capabilities().supportsReadinessCheck!==true)throw continuityError('AGENT_READINESS_UNSUPPORTED','This adapter cannot prove native tool readiness');
       const inheritedModel = taskModelForAgent(task, target.id);
       const selectedModelConfig = {
         modelProvider: modelProvider ?? inheritedModel.modelProvider ?? (target.id === previousAgent.provider ? previousStatus?.modelProvider : null) ?? target.defaults?.modelProvider,
@@ -709,6 +739,7 @@ export function createContinuityRuntime({
       };
       try {
         authorizationGuard?.({provider:target.id});
+        creationEntered = true;
         created = await agentBroker.createSession(target.id, {
           taskId: task.id,
           workspaceId: task.workspaceId,
@@ -718,19 +749,24 @@ export function createContinuityRuntime({
           throw continuityError('PROVIDER_ERROR', `Agent Provider「${target.id}」未返回 sessionId`);
         }
         authorizationGuard?.({provider:target.id,sessionId:created.sessionId});
-        writeTransaction({ ...transaction, to: { provider: target.id, sessionId: created.sessionId } });
+        transaction.to = { provider: target.id, sessionId: created.sessionId };
+        writeTransaction(transaction);
+        const beforeStop = requireTask(task.id);
         try {
           await agentBroker.cancel({ provider: fromProvider.id, sessionId: previousAgent.sessionId });
           oldStopped = true;
         } catch (stopError) {
           if (!['SESSION_NOT_FOUND', 'TURN_NOT_RUNNING'].includes(stopError?.code)) throw stopError;
+          if (stopError?.code === 'SESSION_NOT_FOUND') await requireMissingSourceStopped(beforeStop);
           oldStopped = true;
         }
+        const beforeStopStatus = requireTask(task.id);
         try {
           const afterStop = await agentBroker.status(previousAgent);
           assertHandoffIdle(afterStop);
         } catch (statusError) {
           if (statusError?.code !== 'SESSION_NOT_FOUND') throw statusError;
+          await requireMissingSourceStopped(beforeStopStatus);
         }
         // Bind before bootstrap: broker-only providers resolve authorization from the
         // current Task binding. If bootstrap fails, the old binding is restored below.
@@ -780,7 +816,29 @@ export function createContinuityRuntime({
           taskRuntime.setModelConfig({ id: task.id, expectedRev: currentRev(), ...selectedModelConfig });
         }
       } catch (error) {
-        let targetStopped = true;
+        // ACP preserves a supervised session when startup cleanup is unknown.
+        // This is a trusted adapter error contract, not an arbitrary error hint.
+        if (creationEntered && !created?.sessionId && error?.code === 'ACP_CLOSE_UNKNOWN'
+          && error.provider === target.id && typeof error.sessionId === 'string'
+          && error.sessionId.length > 0 && error.sessionId.length <= 240 && !/[\r\n\0]/.test(error.sessionId)) {
+          created = { provider: target.id, sessionId: error.sessionId };
+          transaction.to = { provider: target.id, sessionId: created.sessionId };
+          try { writeTransaction(transaction); }
+          catch (journalError) { log(`Continuity retained startup identity write failed: ${journalError?.code ?? 'WRITE_FAILED'}`); }
+        }
+        // A rejected create can already own an external process. Without an ID,
+        // only its exact Task-wide proof can close that uncertainty; Managed
+        // execution belongs to this Core and has not received a dispatch here.
+        let targetStopped = !creationEntered || target.id === 'cetamesh';
+        if (creationEntered && !created?.sessionId && target.id !== 'cetamesh'
+          && typeof target.verifyTaskQuiescence === 'function') {
+          const snapshot = requireTask(task.id);
+          try {
+            const proof = await target.verifyTaskQuiescence({ taskId: task.id, workspaceId: task.workspaceId });
+            const latest = requireTask(task.id);
+            targetStopped = proof?.stopped === true && latest.rev === snapshot.rev && latest.workspaceId === task.workspaceId;
+          } catch (proofError) { log(`Continuity startup stop proof unavailable: ${proofError?.code ?? 'SESSION_EXECUTION_UNCONFIRMED'}`); }
+        }
         if (created?.sessionId) {
           try { await agentBroker.cancel({ provider: target.id, sessionId: created.sessionId }); }
           catch (cancelError) {
@@ -788,28 +846,35 @@ export function createContinuityRuntime({
               log(`Continuity target Session cancel failed: ${cancelError?.code ?? 'PROVIDER_ERROR'}`);
             }
           }
-          try { await agentBroker.closeSession({ provider: target.id, sessionId: created.sessionId }); }
+          targetStopped = false;
+          try {
+            const closed = await agentBroker.closeSession({ provider: target.id, sessionId: created.sessionId });
+            targetStopped = closed?.closed === true;
+          }
           catch (cleanupError) {
-            targetStopped = cleanupError?.code === 'SESSION_NOT_FOUND';
+            if (cleanupError?.code === 'SESSION_NOT_FOUND') {
+              const snapshot = requireTask(task.id);
+              const proof = await inspectTaskSession(agentBroker, snapshot, { provider: target.id, sessionId: created.sessionId });
+              // Missing Managed state is Core-owned; native absence still needs
+              // exact lifecycle proof. Never clear a transaction after a raced review.
+              targetStopped = proof.stopped === true && requireTask(task.id).rev === snapshot.rev;
+            }
             log(`Continuity target Session cleanup failed: ${cleanupError?.code ?? 'SESSION_CLEANUP_FAILED'}`);
           }
         }
         const current = taskRuntime.get({ id: task.id }).task;
         const targetAttached = Boolean(created?.sessionId && current.currentAgent?.provider === target.id
           && current.currentAgent?.sessionId === created.sessionId);
-        if (targetAttached && !targetStopped) {
-          taskRuntime.fail({ id: task.id, expectedRev: current.rev,
-            reason: 'Handoff target could not be stopped; Task authority revoked for recovery review' });
+        if (!targetStopped) {
+          restoreOwnedCheckpoint();
+          blockForRecovery('needs-reconciliation: Handoff target could not be stopped; verify both execution owners before recovery');
           throw error;
         }
         if (oldStopped) {
-          // A cancelled old Session is no longer a valid execution owner. Retain
-          // the Task and checkpoint, but require explicit Workspace recovery.
-          if (current.currentAgent) taskRuntime.detachAgent({ id: task.id, expectedRev: current.rev,
-            note: `rollover #${sequence} failed after old Agent stopped` });
-          taskRuntime.restoreCheckpoint({ id: task.id, expectedRev: currentRev(), checkpoint: previousCheckpoint });
-          taskRuntime.block({ id: task.id, expectedRev: currentRev(),
-            reason: `needs-reconciliation: Handoff failed after old Agent stopped (${error?.code ?? 'PROVIDER_ERROR'}); verify Workspace before recovery` });
+          // Retain the exact stopped/unknown assignment as recovery evidence.
+          // Only formal Owner recovery retires it; blocked forbids new execution.
+          restoreOwnedCheckpoint();
+          blockForRecovery(`needs-reconciliation: Handoff failed after old Agent stopped (${error?.code ?? 'PROVIDER_ERROR'}); verify Workspace before recovery`);
         } else if (targetAttached) {
           try {
             taskRuntime.detachAgent({ id: task.id, expectedRev: current.rev, note: `rollover #${sequence} failed; restore prior Agent` });
@@ -820,7 +885,7 @@ export function createContinuityRuntime({
           }
         }
         if (!oldStopped) {
-          try { await taskRuntime.restoreCheckpoint({ id: task.id, expectedRev: currentRev(), checkpoint: previousCheckpoint }); }
+          try { restoreOwnedCheckpoint(); }
           catch (rollbackError) {
             log(`Continuity checkpoint rollback failed: ${rollbackError?.code ?? 'CHECKPOINT_ROLLBACK_FAILED'}`);
           }
@@ -829,11 +894,7 @@ export function createContinuityRuntime({
           try { writeTransaction({ ...transaction, state: 'rolled-back', resolvedAt: now() }); }
           catch (journalError) {
             log(`Continuity rollback journal failed: ${journalError?.code ?? 'WRITE_FAILED'}`);
-            const latest = taskRuntime.get({ id: task.id }).task;
-            if (['running', 'paused', 'waiting'].includes(latest.status)) {
-              taskRuntime.block({ id: latest.id, expectedRev: latest.rev,
-                reason: 'needs-reconciliation: Handoff rollback journal was not saved' });
-            }
+            blockForRecovery('needs-reconciliation: Handoff rollback journal was not saved');
           }
         }
         throw error;
@@ -851,7 +912,7 @@ export function createContinuityRuntime({
         }
       }
 
-      // 6) 落盘历史 + 重置 monitor（新 session 从零计数）
+      // 6) 落盘历史 + 清除旧会话占用快照（新会话等待自己的真实观测）
       try {
         const store = readHistory();
         if (automatic === true) {
@@ -882,16 +943,7 @@ export function createContinuityRuntime({
         catch (stopError) { log(`Continuity uncommitted target cancel failed: ${stopError?.code ?? 'PROVIDER_ERROR'}`); }
         try { await agentBroker.closeSession({ provider: target.id, sessionId: created.sessionId }); }
         catch (stopError) { log(`Continuity uncommitted target close failed: ${stopError?.code ?? 'PROVIDER_ERROR'}`); }
-        const latest = taskRuntime.get({ id: task.id }).task;
-        if (latest.currentAgent?.sessionId === created.sessionId) {
-          taskRuntime.detachAgent({ id: task.id, expectedRev: latest.rev,
-            note: 'Handoff commit failed; target authority revoked' });
-        }
-        const blocked = taskRuntime.get({ id: task.id }).task;
-        if (['running', 'paused', 'waiting'].includes(blocked.status)) {
-          taskRuntime.block({ id: task.id, expectedRev: blocked.rev,
-            reason: 'needs-reconciliation: Handoff history or commit journal could not be saved' });
-        }
+        blockForRecovery('needs-reconciliation: Handoff history or commit journal could not be saved');
         throw continuityError('HANDOFF_COMMIT_FAILED', 'Handoff commit was not durable; Owner must reconcile before retrying');
       }
       try { writeTransaction({ ...transaction, state: 'committed', committedAt: now() }); }
@@ -994,11 +1046,26 @@ export function createContinuityRuntime({
   return {
     isInFlight(taskId) { return inFlight.has(String(taskId ?? '')) || pendingTransactions.has(String(taskId ?? '')); },
     transactionReviewState(taskId) {
-      if (inFlight.has(taskId)) throw continuityError('ROLLOVER_IN_FLIGHT', 'Handoff has not settled');
-      return pendingTransactions.has(taskId) ? loadContinuityFile(transactionFile(taskId), null) : null;
+      const id = String(taskId ?? '');
+      if (inFlight.has(id)) throw continuityError('ROLLOVER_IN_FLIGHT', 'Handoff has not settled');
+      if (!pendingTransactions.has(id)) return null;
+      requireTask(id);
+      const record = loadContinuityFile(transactionFile(id), null);
+      if (!record || record.state !== 'prepared' || record.taskId !== id
+        || !Number.isSafeInteger(record.sequence) || record.sequence < 1) {
+        throw continuityError('STORE_CORRUPT', 'Pending Handoff journal identity is invalid');
+      }
+      // packetPath is historical display metadata, not a path-read authority.
+      const packet = loadContinuityFile(packetFile(id, record.sequence), null);
+      if (!packet || packet.taskId !== id || packet.sequence !== record.sequence
+        || typeof packet.workspace !== 'string' || !packet.workspace.trim()) {
+        throw continuityError('STORE_CORRUPT', 'Pending Handoff Packet identity is invalid');
+      }
+      return { ...record, workspaceId: packet.workspace };
     },
     acknowledgeTransactionRecovery(taskId) {
       const id = String(taskId ?? '');
+      if (inFlight.has(id)) throw continuityError('ROLLOVER_IN_FLIGHT', 'Handoff has not settled');
       if (!pendingTransactions.has(id)) return { acknowledged: false };
       const record = loadContinuityFile(transactionFile(id), null);
       if (!record || record.state !== 'prepared') throw continuityError('STORE_CORRUPT', 'Pending Handoff journal is missing');

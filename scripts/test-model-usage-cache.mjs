@@ -58,21 +58,22 @@ try {
   const completed = accumulateModelUsage(pending, { prompt_tokens: 20, completion_tokens: 3 }, { requestId: 'turn-1:1' });
   await continuity.observeAgentTurn({ provider: 'cetamesh', sessionId: 'session', usage: pending });
   let observed = await continuity.observeAgentTurn({ provider: 'cetamesh', sessionId: 'session', usage: completed });
-  assert.equal(observed.level.usedTokens, 35, 'pending then cumulative resume counts each provider request once');
+  assert.equal(observed.level.usedTokens, 23, 'context observes only the latest effective request; billing ledger still totals 35');
   continuity = createContinuityRuntime(options);
   observed = await continuity.observeAgentTurn({ provider: 'cetamesh', sessionId: 'session', usage: completed });
-  assert.equal(observed.level.usedTokens, 35, 'receipt identities survive continuity reload');
+  assert.equal(observed.level.usedTokens, 23, 'duplicate cumulative receipts do not change current occupancy after reload');
   await continuity.observeAgentTurn({ provider: 'cetamesh', sessionId: 'session', usage: { ...completed, accountingComplete: false } });
   continuity = createContinuityRuntime(options);
   assert.equal(continuity.monitor.level('cetamesh:session').accountingComplete, false,
     'revised completeness on duplicate receipts persists across reload');
   const interrupted = accumulateModelUsage(completed, null, { requestId: 'turn-1:failed' });
   observed = await continuity.observeAgentTurn({ provider: 'cetamesh', sessionId: 'session', usage: interrupted });
-  assert.equal(observed.level.usedTokens, 35);
+  assert.equal(observed.level.usedTokens, null);
   assert.equal(observed.level.accountingComplete, false, 'known subtotal is not a measured zero for missing usage');
   const persisted = JSON.parse(fs.readFileSync(path.join(stateDir, 'continuity', 'monitor.json'), 'utf8'));
-  assert.equal(persisted.sessions['cetamesh:session'].accountedRequestIds.length, 2);
-  console.log('PASS Continuity pending/resume/reload accounting is exactly once');
+  assert.equal(persisted.sessions['cetamesh:session'].requestId, 'turn-1:failed');
+  assert.equal(persisted.sessions['cetamesh:session'].accountedRequestIds, undefined, 'Continuity does not duplicate the billing receipt ledger');
+  console.log('PASS Continuity pending/resume/reload keeps current occupancy separate from billing');
 } finally { fs.rmSync(stateDir, { recursive: true, force: true }); }
 {
   const first = accumulateModelUsage(null, { inputTokens: 44, outputTokens: 1, windowTokens: 100 }, { requestId: 'window:0' });

@@ -5,6 +5,7 @@ import path from 'node:path';
 import { createCodexSessionLifecycle } from '../src/agent/codex-session-lifecycle.js';
 import { createCodexAgentProvider } from '../src/agent/codex-agent-provider.js';
 import { createCodexProviderRouter } from '../src/agent/codex-provider-router.js';
+import { createTaskRuntime } from '../src/task/runtime.js';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-codex-lifecycle-'));
 const binding = {sessionId:'session-a',taskId:'task-a',workspaceId:'workspace-a',transport:'exec',snapshotId:'snapshot-a',attemptId:null};
@@ -88,6 +89,114 @@ try {
   task.progress={note:'STAGING_READ_FAILED'};task.currentAgent.sessionId='never-created';
   assert.equal((await restored.verifyStoppedTask({...scope,sessionId:'never-created'})).stopped,false,'Owner or Task prose never substitutes for a receipt');
   console.log('PASS provider completion survives Core transport loss; run mismatch, active generation and unknown tree cannot recover');
+
+  const handoffDir=path.join(root,'handoff'), tasks=createTaskRuntime({stateDir:handoffDir});
+  const handoffTask=tasks.create({goal:'Recover a prepared native Handoff',workspaceId:'handoff-workspace'});
+  const current=()=>tasks.get({id:handoffTask.id}).task;
+  const attach=sessionId=>tasks.attachAgent({id:handoffTask.id,expectedRev:current().rev,provider:'codex',sessionId});
+  attach('handoff-source');
+  const ownedLifecycle=createCodexSessionLifecycle({stateDir:handoffDir});
+  const nativeBinding=sessionId=>({taskId:handoffTask.id,workspaceId:handoffTask.workspaceId,
+    sessionId,transport:'exec',snapshotId:'snapshot-'+sessionId,attemptId:null});
+  const source=nativeBinding('handoff-source'), target=nativeBinding('handoff-target');
+  ownedLifecycle.create(source);
+  const sourceRun=ownedLifecycle.begin({...source,runId:'source-user-run',turnId:'source-turn'});
+  ownedLifecycle.settle({...source,generation:sourceRun.generation,runId:sourceRun.runId,proof:'process-tree-exit'});
+  ownedLifecycle.create(target);
+  const handoff={taskId:handoffTask.id,workspaceId:handoffTask.workspaceId,sequence:3,state:'prepared',
+    from:{provider:'codex',sessionId:source.sessionId},to:{provider:'codex',sessionId:target.sessionId}};
+  const bootstrapRunId='handoff:'+handoffTask.id+':'+handoff.sequence;
+  const bootstrap=ownedLifecycle.begin({...target,runId:bootstrapRunId,turnId:'bootstrap-turn'});
+  ownedLifecycle.settle({...target,generation:bootstrap.generation,runId:bootstrap.runId,proof:'process-tree-exit'});
+  attach(target.sessionId);
+  tasks.block({id:handoffTask.id,expectedRev:current().rev,reason:'prepared Handoff needs Owner review'});
+  let resolveHandoff=()=>({task:current(),workspace:{id:handoffTask.workspaceId,root:workspace}});
+  const handoffProvider=createCodexAgentProvider({stateDir:handoffDir,sessionLifecycle:ownedLifecycle,
+    cliProcess:{executable:()=>null,probe:()=>({available:false,stdout:'',stderr:''}),async shutdown(){}},
+    resolveTaskWorkspace:args=>resolveHandoff(args)});
+  const inspect=sessionId=>handoffProvider.inspectStoppedHandoffSession({taskId:handoffTask.id,
+    workspaceId:handoffTask.workspaceId,sessionId,handoff});
+  assert.equal((await handoffProvider.verifyStoppedTask({...source})).stopped,false,
+    'ordinary recovery stays strict: a retired source is not the current assignment');
+  assert.equal((await handoffProvider.verifyStoppedTask({...target})).stopped,false,
+    'ordinary recovery stays strict: bootstrap is not a Task user execution observation');
+  const sourceProof=await inspect(source.sessionId), targetProof=await inspect(target.sessionId);
+  assert.equal(sourceProof.stopped,true);assert.equal(sourceProof.runId,'source-user-run');
+  assert.equal(targetProof.stopped,true);assert.equal(targetProof.runId,bootstrapRunId);
+  assert.equal(sourceProof.receiptId,ownedLifecycle.read(source.sessionId).receipt.id);
+  attach(source.sessionId);
+  assert.equal((await inspect(target.sessionId)).stopped,true,'an unattached or retired target is still an exact prepared participant');
+  for(const change of [{taskId:'other-task'},{workspaceId:'other-workspace'},{sequence:4},{sequence:0},{state:'committed'},
+    {from:null},{to:{provider:'codex',sessionId:source.sessionId}}]) {
+    assert.equal((await handoffProvider.inspectStoppedHandoffSession({...target,handoff:{...handoff,...change}})).stopped,false);
+  }
+  assert.equal((await inspect('non-participant')).stopped,false);
+  attach('unrelated-current');
+  assert.equal((await inspect(target.sessionId)).stopped,false,'a replacement assignment cannot inherit old Handoff proof');
+  attach(source.sessionId);
+  const orphanBinding={...nativeBinding('handoff-orphan'),transport:'app-server'};
+  ownedLifecycle.create(orphanBinding);
+  assert.equal((await inspect(source.sessionId)).stopped,false,'Task-wide unknown startup prevents participant recovery');
+  ownedLifecycle.settle({...orphanBinding,proof:'supervisor-close'});
+  assert.equal((await inspect(source.sessionId)).stopped,true);
+  const active=ownedLifecycle.begin({...target,runId:bootstrapRunId,turnId:'second-bootstrap'});
+  assert.equal((await inspect(target.sessionId)).stopped,false,'old receipt cannot certify an active generation');
+  ownedLifecycle.settle({...target,generation:active.generation,runId:active.runId,proof:'process-tree-exit'});
+  assert.equal((await inspect(target.sessionId)).generation,active.generation,'proof returns the actual current generation');
+  const wrongRun=ownedLifecycle.begin({...target,runId:'unrelated-user-run',turnId:'wrong-bootstrap'});
+  ownedLifecycle.settle({...target,generation:wrongRun.generation,runId:wrongRun.runId,proof:'process-tree-exit'});
+  assert.equal((await inspect(target.sessionId)).stopped,false,'a later stopped non-bootstrap execution cannot borrow the prepared handoff');
+  const reset=ownedLifecycle.begin({...target,runId:bootstrapRunId,turnId:'verified-bootstrap'});
+  ownedLifecycle.settle({...target,generation:reset.generation,runId:reset.runId,proof:'process-tree-exit'});
+  let bindingLookups=0;
+  resolveHandoff=()=>{
+    const snapshot=current();
+    if(++bindingLookups===2) ownedLifecycle.begin({...target,runId:bootstrapRunId,turnId:'raced-bootstrap'});
+    return {task:snapshot,workspace:{id:handoffTask.workspaceId,root:workspace}};
+  };
+  assert.equal((await inspect(target.sessionId)).stopped,false,'awaited binding lookup cannot return a receipt invalidated during the lookup');
+  resolveHandoff=()=>({task:current(),workspace:{id:handoffTask.workspaceId,root:workspace}});
+  ownedLifecycle.settle({...target,proof:'process-tree-exit'});
+  bindingLookups=0;
+  resolveHandoff=()=>{
+    if(++bindingLookups===2) tasks.setProgress({id:handoffTask.id,expectedRev:current().rev,note:'Owner changed during proof'});
+    return {task:current(),workspace:{id:handoffTask.workspaceId,root:workspace}};
+  };
+  assert.equal((await inspect(target.sessionId)).stopped,false,'the exact Task revision must survive the final awaited lookup');
+  resolveHandoff=()=>({task:{...current(),agentHistory:[]},workspace:{id:handoffTask.workspaceId,root:workspace}});
+  assert.equal((await inspect(source.sessionId)).stopped,false,'the source requires an actual trusted historical attachment');
+  resolveHandoff=()=>({task:current(),workspace:{id:handoffTask.workspaceId,root:workspace}});
+  tasks.recordAttempt({id:handoffTask.id,expectedRev:current().rev,provider:'codex',sessionId:source.sessionId,
+    requestId:'original-source-attempt',state:'completed'});
+  const sourceAttempt=current().attempts.at(-1);
+  const creator=createCodexAgentProvider({stateDir:handoffDir,sessionLifecycle:ownedLifecycle,
+    cliProcess:fakeCli,stagingRoot:path.join(handoffDir,'staging'),codexHome:path.join(handoffDir,'home'),
+    resolveTaskWorkspace:()=>({task:current(),workspace:{id:handoffTask.workspaceId,root:workspace}})});
+  const inheritedTarget=await creator.createSession({taskId:handoffTask.id,workspaceId:handoffTask.workspaceId});
+  assert.equal(ownedLifecycle.read(inheritedTarget.sessionId).attemptId,sourceAttempt.id,
+    'actual fresh Session factory inherits the existing same-Provider Task Attempt');
+  const inheritedHandoff={...handoff,sequence:4,to:{provider:'codex',sessionId:inheritedTarget.sessionId}};
+  const inheritedScope={taskId:handoffTask.id,workspaceId:handoffTask.workspaceId,
+    sessionId:inheritedTarget.sessionId,handoff:inheritedHandoff};
+  assert.equal((await handoffProvider.inspectStoppedHandoffSession(inheritedScope)).stopped,true,
+    'fresh Handoff target may retain the exact source Attempt association before attachment');
+  const inheritedRunId='handoff:'+handoffTask.id+':4';
+  ownedLifecycle.begin({sessionId:inheritedTarget.sessionId,runId:inheritedRunId,turnId:'inherited-bootstrap'});
+  ownedLifecycle.settle({sessionId:inheritedTarget.sessionId,proof:'process-tree-exit'});
+  tasks.attachAgent({id:handoffTask.id,expectedRev:current().rev,provider:'codex',sessionId:inheritedTarget.sessionId,
+    versionContext:inheritedTarget.versionContext});
+  assert.equal((await handoffProvider.inspectStoppedHandoffSession(inheritedScope)).runId,inheritedRunId);
+  resolveHandoff=()=>({task:{...current(),attempts:current().attempts.map(row=>({...row,sessionId:'unrelated-session'}))},
+    workspace:{id:handoffTask.workspaceId,root:workspace}});
+  assert.equal((await handoffProvider.inspectStoppedHandoffSession(inheritedScope)).stopped,false,
+    'a target cannot borrow an Attempt associated with an unrelated Session');
+  resolveHandoff=()=>({task:current(),workspace:{id:handoffTask.workspaceId,root:workspace}});
+  attach(source.sessionId);
+  tasks.start({id:handoffTask.id,expectedRev:current().rev});
+  assert.equal((await inspect(source.sessionId)).stopped,false,'running Task is not a recovery authority');
+  tasks.fail({id:handoffTask.id,expectedRev:current().rev,reason:'Owner ended fixture'});
+  assert.equal((await inspect(source.sessionId)).stopped,false,'terminal Tasks cannot be resurrected by Handoff evidence');
+  console.log('PASS actual Codex Handoff participant proofs preserve ordinary strict recovery and reject scope, generation, activity and binding races');
 } finally {
   const target=path.resolve(root);
   assert.equal(path.dirname(target),path.resolve(os.tmpdir()));

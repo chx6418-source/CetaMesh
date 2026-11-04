@@ -89,6 +89,7 @@ export function createDefaultAgentService({ api, defaults, log, dshOptions = {},
   const codex = createCodexProviderRouter({ ...codexRouterOptions, legacyProvider: legacyCodex,
     resolveTransport: codexRouterOptions.resolveTransport ?? (id => legacyCodex._sessions?.has(id) ? 'exec' : null) });
   const routedCodex = Object.freeze({ ...codex, verifyStoppedTask: (...args) => legacyCodex.verifyStoppedTask(...args),
+    inspectStoppedHandoffSession: (...args) => legacyCodex.inspectStoppedHandoffSession(...args),
     verifyTaskQuiescence: (...args) => legacyCodex.verifyTaskQuiescence(...args) });
   const registry = createAgentProviderRegistry({
     providers: [

@@ -11,6 +11,7 @@ import {normalizeTaskCollaboration,taskLaunchFingerprint,snapshotTaskVerificatio
 import { createReferencePreview } from './reference-preview.js';
 import { createTaskRecovery } from './task-recovery.js';
 import { inspectTaskSession } from '../agent/session-recovery.js';
+import { unreviewedTaskEffects } from '../task/recovery-evidence.js';
 import { fitsIpcResponse, requireIpcItem } from '../control/response-budget.js';
 import { LEGACY_RETIRED_TOOLS, isDesktopLocalService } from '../integrations/catalog.js';
 
@@ -1254,7 +1255,7 @@ export function createDesktopUiService({ services = {}, system = services.system
       const sameRun = row => !childOnly && row.provider === observed.provider && row.sessionId === observed.sessionId
         && row.runId === observed.runId && row.phase === 'user' && row.taskRev >= observed.startedRev;
       const evidence = (current.executionEvidence ?? []).filter(sameRun);
-      if ((current.executionEvidence ?? []).some(row => ['unknown', 'outcome-unknown', 'cancel-unconfirmed'].includes(row.status))) {
+      if (unreviewedTaskEffects(current).length) {
         throw uiError('TASK_EFFECT_UNCONFIRMED', 'Unconfirmed tool effects cannot be accepted');
       }
       if (evidence.some(row => row.source === 'core-import') && services.capabilityService?.verifyTaskImportReceipts?.(current.id, observed.runId) !== true) {

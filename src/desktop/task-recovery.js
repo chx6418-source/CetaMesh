@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { inspectTaskSession } from '../agent/session-recovery.js';
+import { taskEvidenceReference, unreviewedTaskEffects } from '../task/recovery-evidence.js';
 
 const fail = (code, message) => { throw Object.assign(new Error(message), { code }); };
 const digest = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -13,14 +14,29 @@ export function createTaskRecovery({ services, now = () => Date.now() }) {
   const runtime = services.taskService?.runtime;
   function journals(task) {
     const scope = { taskId: task.id, workspaceId: task.workspaceId };
+    const pendingHandoff = services.continuityService?.runtime?.transactionReviewState?.(task.id) ?? null;
+    const retainedHandoff = task.recoveryIntent?.sessionProof?.handoffReview ?? null;
+    // A previous domain acknowledgement can succeed before the Task write. The
+    // durable intent retains the reviewed scope, never reusable stopped=true.
+    if (retainedHandoff && (!task.recoveryIntent.operationIds.includes('handoff:' + digest(retainedHandoff))
+      || (pendingHandoff && digest(pendingHandoff) !== digest(retainedHandoff)))) {
+      fail('HANDOFF_RECOVERY_REQUIRED', '中断交接与原核对范围不一致，请保留原记录供核查');
+    }
+    if (!pendingHandoff && !retainedHandoff && task.recoveryIntent?.sessionProof?.handoffProofs?.length) {
+      fail('HANDOFF_RECOVERY_REQUIRED', '原交接核查缺少完整归属记录，不能复用历史停止凭据');
+    }
     return { capabilities: services.capabilityService.taskReviewState?.(scope) ?? null,
       tools: services.toolExecutionCoordinator?.taskReviewState?.(task.id) ?? null,
-      handoff: services.continuityService?.runtime?.transactionReviewState?.(task.id) ?? null,
+      handoff: pendingHandoff ?? retainedHandoff,
+      taskEvidence: unreviewedTaskEffects(task).map(row => ({ reference: taskEvidenceReference(task, row),
+        provider: row.provider, sessionId: row.sessionId })),
       intent: task.recoveryIntent ?? null };
   }
   function operationIds(review) {
     const ids = new Set();
     for (const id of review.intent?.operationIds ?? []) ids.add(id);
+    for (const row of review.taskEvidence) ids.add(row.reference);
+    if (review.handoff) ids.add('handoff:' + digest(review.handoff));
     for (const row of review.capabilities?.dispatches ?? []) ids.add('dispatch:' + String(row.requestId ?? row.operationId ?? row.id));
     for (const row of review.capabilities?.requests ?? []) ids.add('request:' + row[0]);
     for (const row of review.capabilities?.decisions ?? []) ids.add('approval-operation:' + row[0]);
@@ -61,8 +77,55 @@ export function createTaskRecovery({ services, now = () => Date.now() }) {
     if (review.capabilities?.approvals?.length || services.toolExecutionCoordinator?.recoveryForTask?.(task.id)?.state === 'approval-pending') {
       blockers.push({ code: 'APPROVAL_RECOVERY_REQUIRED', message: '请先在审批中心处理原有审批，再重新核查。' });
     }
-    if (review.handoff) blockers.push({ code: 'HANDOFF_RECOVERY_REQUIRED', message: '中断交接仍保留执行者归属，需先核实交接双方的停止证据。' });
-    const session = await inspectTaskSession(services.agentBroker, task);
+    const handoffProofs = [];
+    if (review.handoff) {
+      const handoff = review.handoff;
+      const participants = [handoff.from, handoff.to];
+      const valid = handoff.state === 'prepared' && handoff.taskId === task.id && handoff.workspaceId === task.workspaceId
+        && typeof handoff.from?.provider === 'string' && typeof handoff.from?.sessionId === 'string'
+        && typeof handoff.to?.provider === 'string'
+        && (handoff.to.sessionId === null || typeof handoff.to.sessionId === 'string')
+        && participants.some(row => row.provider === task.currentAgent?.provider && row.sessionId === task.currentAgent?.sessionId);
+      if (!valid) blockers.push({ code: 'HANDOFF_RECOVERY_REQUIRED',
+        message: '中断交接的任务、工作区或执行归属无法完整对应，请保留原记录供核查。' });
+      else for (const assignment of participants) {
+        let proof;
+        if (assignment.sessionId) {
+          const scope = { taskId: task.id, workspaceId: task.workspaceId, ...assignment };
+          try {
+            const provider = services.agentBroker.require(assignment.provider);
+            proof = typeof provider.inspectStoppedHandoffSession === 'function'
+              ? await provider.inspectStoppedHandoffSession({ ...scope, handoff })
+              : await inspectTaskSession(services.agentBroker, task, assignment);
+            const exact = proof?.stopped === true && proof.taskId === task.id && proof.workspaceId === task.workspaceId
+              && proof.provider === assignment.provider && proof.sessionId === assignment.sessionId;
+            proof = { ...proof, ...scope, stopped: exact, state: exact ? 'stopped' : 'unknown' };
+          } catch { proof = { ...scope, stopped: false, state: 'unknown' }; }
+        }
+        else {
+          // Creation can fail after an external process has started but before
+          // its Session id is returned. Absence needs a Task-scoped stop proof.
+          let stopped = assignment.provider === 'cetamesh';
+          try {
+            const provider = services.agentBroker.require(assignment.provider);
+            if (typeof provider.verifyTaskQuiescence === 'function') stopped = (await provider.verifyTaskQuiescence({
+              taskId: task.id, workspaceId: task.workspaceId, allowEmpty: true }))?.stopped === true;
+          } catch { stopped = false; }
+          proof = { taskId: task.id, workspaceId: task.workspaceId, ...assignment, stopped,
+            evidence: assignment.provider === 'cetamesh' ? 'core-owned-startup-settled' : 'provider-task-quiescence' };
+        }
+        handoffProofs.push(proof);
+        if (!proof.stopped) blockers.push({ code: 'HANDOFF_EXECUTION_UNCONFIRMED',
+          message: '交接的一方尚未确认停止。请保留原任务，确认双方执行结束后重新核查。' });
+      }
+    }
+    const inspectedSession = handoffProofs.find(proof => proof.provider === task.currentAgent?.provider
+      && proof.sessionId === task.currentAgent?.sessionId) ?? await inspectTaskSession(services.agentBroker, task);
+    const session = handoffProofs.length ? { ...inspectedSession, handoffProofs, handoffReview: review.handoff } : inspectedSession;
+    if (review.taskEvidence.some(row => row.provider !== task.currentAgent?.provider || row.sessionId !== task.currentAgent?.sessionId)) {
+      blockers.push({ code: 'TASK_EFFECT_SCOPE_UNCONFIRMED',
+        message: '存在不属于当前执行者的未知工具记录，不能借用当前会话的停止凭据核销。请保留原任务和执行记录。' });
+    }
     if (!session.stopped) blockers.push({ code: 'SESSION_EXECUTION_UNCONFIRMED',
       message: '旧执行尚无完整停止凭据，不能续接或释放写入权。保留任务和结果，等待原执行结束后重新核查。' });
     let workspace = null;
@@ -120,6 +183,7 @@ export function createTaskRecovery({ services, now = () => Date.now() }) {
         sessionProof: final.session, operationIds: final.reviewOperationIds, journalSha256: digest(final.review) });
       services.capabilityService.acknowledgeTaskRecovery(task.id);
       services.toolExecutionCoordinator?.acknowledgeTaskRecovery(task.id);
+      if (final.review.handoff) services.continuityService.runtime.acknowledgeTransactionRecovery(task.id);
       const reviewed = runtime.applyOwnerRecovery({ id: task.id, expectedRev: intent.rev, action,
         reviewId: params.reviewToken, summary: String(params.reviewSummary).trim(), workspaceProof: final.workspace,
         sessionProof: final.session, operationIds: final.reviewOperationIds, journalSha256: digest(final.review) });

@@ -16,7 +16,7 @@ import { createZCodeAgentProvider } from '../src/agent/zcode-agent-provider.js';
 import { createDshAgentProvider } from '../src/agent/dsh-agent-provider.js';
 import { createCapabilityService } from '../src/capability/service.js';
 import { createChatService } from '../src/desktop/chat-service.js';
-import { createTaskRuntime } from '../src/task/runtime.js';
+import { createTaskService } from '../src/task/service.js';
 import { createMemoryService } from '../src/memory/service.js';
 import { createWorkspaceService } from '../src/workspace/service.js';
 import { createStagingWorkspace } from '../src/workspace/staging.js';
@@ -71,7 +71,8 @@ try {
   const authoritative = (await workspaceService.execute({ method: 'workspace.create', params: {
     name: 'task workspace', root: authoritativeRoot, createIfMissing: true
   } })).workspace;
-  const taskRuntime = createTaskRuntime({ stateDir });
+  const taskService = createTaskService({ stateDir });
+  const taskRuntime = taskService.runtime;
   const task = taskRuntime.create({ goal: 'Provider workspace import', workspaceId: authoritative.id });
   taskRuntime.attachAgent({ id: task.id, expectedRev: task.rev, provider: 'codex', sessionId: 'fixture-session' });
   const capabilities = createCapabilityService({ stateDir, workspaceService, taskRuntime });
@@ -448,7 +449,10 @@ try {
       const serialized = records.map(record => JSON.stringify(record)).join('\n');
       onStdout(serialized + (omitFinalNewline ? '' : '\n'));
       omitFinalNewline = false;
-      return { done: Promise.resolve({ sessionId, exitCode: fakeExitCode, timedOut: false, cancelled: false, stdout: '', stderr: fakeStderr }),
+      // This controlled runner has no live OS child. Model its completed owned
+      // execution explicitly; a root-only exit would not prove restart recovery.
+      return { done: Promise.resolve({ sessionId, exitCode: fakeExitCode, timedOut: false, cancelled: false,
+        processTreeExitConfirmed: true, stdout: '', stderr: fakeStderr }),
         cancel: () => ({ cancelled: true, sessionId }), shutdown() {} };
     },
     async shutdown() {}
@@ -475,7 +479,7 @@ try {
   ].join('\n'));
   const codexEnvironment = { ...process.env, CODEX_HOME: codexHome,
     OPENAI_API_KEY: 'codex-environment-secret-fixture', OPENAI_BASE_URL: 'https://authorized-gateway.example.test/v1' };
-  const codexProvider = createCodexAgentProvider({ cliProcess: fakeCli, stagingRoot: codexStagingRoot,
+  const codexProvider = createCodexAgentProvider({ cliProcess: fakeCli, stagingRoot: codexStagingRoot, stateDir,
     codexHome, environment: codexEnvironment, authorizeOpenAiEnvironment: () => false,
     excludedRoots: [stateDir],
     resolveTaskWorkspace: ({ taskId, workspaceId }) => {
@@ -646,10 +650,14 @@ try {
     'Codex sandbox failure details never expose a user path or raw stderr');
   const previousTaskAgent = taskRuntime.get({ id: task.id }).task.currentAgent;
   await codexProvider.shutdown();
+  const previousLifecycle = codexProvider._sessionLifecycle.read(previousTaskAgent.sessionId);
+  assert.equal(previousLifecycle.receipt?.evidence, 'process-tree-exit');
+  assert.equal(fs.existsSync(path.join(stateDir, 'agent', 'codex-session-lifecycle.json')), true,
+    'the old Provider persists its exact stopped generation before reconstruction');
   fakeExitCode = 0;
   fakeStderr = '';
 
-  const restartedProvider = createCodexAgentProvider({ cliProcess: fakeCli, stagingRoot: codexStagingRoot,
+  const restartedProvider = createCodexAgentProvider({ cliProcess: fakeCli, stagingRoot: codexStagingRoot, stateDir,
     excludedRoots: [stateDir],
     resolveTaskWorkspace: ({ taskId, workspaceId }) => {
       const boundTask = taskRuntime.get({ id: taskId }).task;
@@ -662,6 +670,8 @@ try {
   });
   const restartedBroker = createAgentBroker({ registry: createAgentProviderRegistry({ providers: [restartedProvider] }) });
   const restartedCapabilities = createCapabilityService({ stateDir, workspaceService, taskRuntime, agentBroker: restartedBroker });
+  assert.deepEqual(restartedProvider._sessionLifecycle.read(previousTaskAgent.sessionId), previousLifecycle,
+    'a new Provider reads the original lifecycle proof from disk, not its missing Session map');
   const recoveredScope = restartedBroker.describeExecutionSecurity('codex', authoritative.id);
   assert.equal(recoveredScope.authorized, false, 'Core restart must not silently inherit prior native scope confirmation');
   const recoveryConfirmation = await restartedCapabilities.execute({ method: 'capability.execute', params: {
@@ -669,14 +679,48 @@ try {
     input: { provider: 'codex', fingerprint: recoveredScope.fingerprint }, reason: recoveredScope.disclosure
   } });
   await restartedCapabilities.execute({ method: 'capability.approval.decide', params: { id: recoveryConfirmation.approvalId, approve: true } });
-  const recoveredAssignment = await restartedCapabilities.broker.execute({
+  const beforeUnreviewedRecovery = fakeRuns.length;
+  await assert.rejects(restartedCapabilities.broker.execute({
     actor: { kind: 'owner', id: 'desktop' }, taskId: task.id, workspaceId: authoritative.id,
     capability: 'agent.run', input: { provider: 'codex', content: 'Recover from the lost CLI process' }, reason: 'crash recovery test'
-  });
-  assert.equal(recoveredAssignment.status, 'completed');
-  assert.notEqual(recoveredAssignment.result.sessionId, previousTaskAgent.sessionId);
-  await waitFor(() => restartedBroker.status({ provider: 'codex', sessionId: recoveredAssignment.result.sessionId }),
+  }), error => error.code === 'TASK_RECOVERY_REVIEW_REQUIRED');
+  const retainedTask = taskRuntime.get({ id: task.id }).task;
+  assert.equal(retainedTask.status, 'blocked');
+  assert.deepEqual(retainedTask.currentAgent, previousTaskAgent,
+    'renewed execution consent cannot retire the unavailable old Session');
+  assert.equal(fakeRuns.length, beforeUnreviewedRecovery, 'unreviewed recovery executes no old or fresh instruction');
+  assert.equal(restartedProvider._sessions.size, 0, 'unreviewed recovery creates no replacement Session');
+
+  const recoveryUi = createDesktopUiService({ services: {
+    taskService, workspaceService, capabilityService: restartedCapabilities, agentBroker: restartedBroker
+  } });
+  const recoveryPreview = await recoveryUi.execute({ method: 'ui.task.recovery.inspect', params: { id: task.id } });
+  assert.equal(recoveryPreview.canResume, true, JSON.stringify(recoveryPreview.blockers));
+  assert.equal(recoveryPreview.session.stopped, true);
+  assert.equal(recoveryPreview.session.sessionId, previousTaskAgent.sessionId);
+  assert.deepEqual(taskRuntime.get({ id: task.id }).task.currentAgent, previousTaskAgent,
+    'read-only Owner inspection retains the original execution binding');
+  assert.equal(fakeRuns.length, beforeUnreviewedRecovery, 'inspection never dispatches or replays execution');
+  const recoveryInstruction = 'Read the retained result only after reviewing the stopped prior execution';
+  const recoveredAssignment = await recoveryUi.execute({ method: 'ui.task.reconcile', params: {
+    id: task.id, expectedRev: taskRuntime.get({ id: task.id }).task.rev, action: 'resume', provider: 'codex',
+    reviewed: true, reviewToken: recoveryPreview.reviewToken,
+    reviewedOperationIds: recoveryPreview.reviewOperationIds,
+    reviewSummary: 'Reviewed exact stopped lifecycle, current Workspace bytes and original operation references.',
+    nextInstruction: recoveryInstruction, requestId: 'provider-expansion-reviewed-recovery'
+  } });
+  assert.equal(recoveredAssignment.task.id, task.id);
+  const recoveredTask = taskRuntime.get({ id: task.id }).task;
+  const recoveredSessionId = recoveredTask.currentAgent.sessionId;
+  assert.notEqual(recoveredSessionId, previousTaskAgent.sessionId);
+  assert.deepEqual(recoveredTask.checkpoint, retainedTask.checkpoint);
+  assert.equal(recoveredTask.recoveryReviews.at(-1).sessionProof.receiptId, previousLifecycle.receipt.id,
+    'formal Owner recovery retains the exact durable receipt rather than a prose-only review');
+  assert.equal(fakeRuns.length, beforeUnreviewedRecovery + 1, 'formal recovery dispatches exactly one new instruction');
+  assert.ok(fakeRuns.at(-1).input.includes(recoveryInstruction));
+  await waitFor(() => restartedBroker.status({ provider: 'codex', sessionId: recoveredSessionId }),
     status => !status.running && status.lastRunStatus === 'completed');
+  console.log('PASS missing Codex Session preserves ownership until formal Owner recovery consumes durable stopped evidence');
 
   const harborAgentSession = await restartedBroker.createSession('codex', {
     taskId: task.id, workspaceId: authoritative.id

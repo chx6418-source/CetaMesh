@@ -140,6 +140,47 @@ function seedTask(taskRuntime, rev, { provider = 'alpha', sessionId = 'alpha-s1'
   return task;
 }
 
+// Request usage includes the whole effective input, not only newly appended tokens.
+{
+  const { runtime, taskRuntime, rev, logs } = setup();
+  const task = seedTask(taskRuntime, rev);
+  const receipts = [];
+  for (let index = 0; index < 12; index++) {
+    receipts.push({ requestId: 'small-' + index, inputTokens: 1000, outputTokens: 100, windowTokens: 10000,
+      cacheReadTokens: 800, cacheWriteTokens: 0 });
+    const observed = await runtime.observeAgentTurn({ provider: 'alpha', sessionId: 'alpha-s1',
+      usage: { requests: receipts, accountingComplete: true } });
+    assert.equal(observed.level.usedTokens, 1100, 'cumulative billing receipts must not accumulate context occupancy');
+    assert.equal(observed.level.percent, 11); assert.equal(observed.rolledOver, false);
+  }
+  const repeated = await runtime.observeAgentTurn({ provider: 'alpha', sessionId: 'alpha-s1', usage: { requests: receipts } });
+  assert.equal(repeated.level.usedTokens, 1100, 'repeated approval/accounting receipts cannot add occupancy');
+  assert.equal(runtime.history({ taskId: task.id }).total, 0); assert.deepEqual(logs.alpha, []);
+  assert.equal(runtime.monitor.level('beta:unrelated').usedTokens, null, 'unobserved Session context is unknown');
+  const cached = await runtime.observeAgentTurn({ provider: 'beta', sessionId: 'cache',
+    usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 80, cache_creation_input_tokens: 10 }, windowTokens: 1000 });
+  assert.equal(cached.level.usedTokens, 105, 'exclusive provider cache input is normalized once');
+  const capacityUnknown = await runtime.observeAgentTurn({ provider: 'beta', sessionId: 'cache', usage: { inputTokens: 20, outputTokens: 0 } });
+  assert.equal(capacityUnknown.level.windowTokens, null, 'prior model capacity cannot establish the current request window');
+  assert.equal(capacityUnknown.level.percent, null);
+  const unknown = await runtime.observeAgentTurn({ provider: 'alpha', sessionId: 'alpha-s1',
+    usage: { requests: [{ requestId: 'unknown', inputTokens: null, outputTokens: null }] }, promptChars: 50000 });
+  assert.equal(unknown.level.usedTokens, null, 'last user-message characters cannot stand in for full request context');
+  assert.equal(unknown.level.percent, null); assert.equal(unknown.action, 'none');
+  const high = await runtime.observeAgentTurn({ provider: 'alpha', sessionId: 'alpha-s1',
+    usage: { requests: [{ requestId: 'high', inputTokens: 8500, outputTokens: 100, windowTokens: 10000 }] } });
+  assert.equal(high.rolledOver, true, 'a genuinely large current request still triggers a safe rollover');
+  ok('current request occupancy is separate from cumulative billing, cache accounting and other Sessions');
+}
+
+{
+  const { createContextMonitor } = await import('../src/continuity/monitor.js');
+  const monitor = createContextMonitor({ initialSessions: { legacy: { inputTokens: 9000, outputTokens: 100, windowTokens: 10000, real: true } } });
+  assert.equal(monitor.level('legacy').usedTokens, null, 'legacy cumulative totals are not migrated into current occupancy');
+  assert.equal(monitor.level('legacy').percent, null);
+  assert.equal(monitor.record('legacy', { inputTokens: 500, outputTokens: 0, windowTokens: 10000 }).percent, 5);
+}
+
 // ── 1. 阈值带：69/70/85/91/95 → none/checkpoint/ready/forced/emergency ──────
 {
   const { runtime, taskRuntime, rev } = setup();
@@ -147,7 +188,7 @@ function seedTask(taskRuntime, rev, { provider = 'alpha', sessionId = 'alpha-s1'
   runtime.monitor.record('alpha:alpha-s1', { inputTokens: 6900, windowTokens: 10000 });
   assert.equal(runtime.evaluate({ taskId: task.id }).action, 'none', '69% → none');
 
-  runtime.monitor.record('alpha:alpha-s1', { inputTokens: 100, windowTokens: 10000 });
+  runtime.monitor.record('alpha:alpha-s1', { inputTokens: 7000, windowTokens: 10000 });
   const at70 = runtime.evaluate({ taskId: task.id });
   assert.equal(at70.level.percent, 70);
   assert.equal(at70.action, 'checkpoint', '70% → 建议 checkpoint，不切换');
@@ -155,17 +196,17 @@ function seedTask(taskRuntime, rev, { provider = 'alpha', sessionId = 'alpha-s1'
   assert.equal(at70.strategy.preferred, 'fresh-session', '策略面随评估返回');
   assert.equal(at70.strategy.implemented, 'fresh-session');
 
-  runtime.monitor.record('alpha:alpha-s1', { inputTokens: 800, windowTokens: 10000 });
+  runtime.monitor.record('alpha:alpha-s1', { inputTokens: 7800, windowTokens: 10000 });
   assert.equal(runtime.evaluate({ taskId: task.id }).action, 'ready', '78-85 → ready（寻求安全点）');
 
-  runtime.monitor.record('alpha:alpha-s1', { inputTokens: 1000, windowTokens: 10000 });
-  assert.equal(runtime.evaluate({ taskId: task.id }).action, 'rollover', '85%+ → rollover（累计 8800 = 88%）');
+  runtime.monitor.record('alpha:alpha-s1', { inputTokens: 8800, windowTokens: 10000 });
+  assert.equal(runtime.evaluate({ taskId: task.id }).action, 'rollover', 'current input 8800 = 88%');
 
-  runtime.monitor.record('alpha:alpha-s1', { inputTokens: 200, windowTokens: 10000 });
-  assert.equal(runtime.evaluate({ taskId: task.id }).action, 'forced', '90%+ → forced（累计 9000）');
+  runtime.monitor.record('alpha:alpha-s1', { inputTokens: 9000, windowTokens: 10000 });
+  assert.equal(runtime.evaluate({ taskId: task.id }).action, 'forced', 'current input 9000 = 90%');
 
-  runtime.monitor.record('alpha:alpha-s1', { inputTokens: 200, windowTokens: 10000 });
-  assert.equal(runtime.evaluate({ taskId: task.id }).action, 'emergency', '92%+ → emergency（累计 9200）');
+  runtime.monitor.record('alpha:alpha-s1', { inputTokens: 9200, windowTokens: 10000 });
+  assert.equal(runtime.evaluate({ taskId: task.id }).action, 'emergency', 'current input 9200 = 92%');
   ok('阈值带：69 none / 70 checkpoint / 78-85 ready / 85+ rollover / 90+ forced / 92+ emergency（真实 usage）');
 }
 
@@ -175,19 +216,19 @@ function seedTask(taskRuntime, rev, { provider = 'alpha', sessionId = 'alpha-s1'
   const task = seedTask(taskRuntime, rev);
   // promptChars 2800，窗口 10000，charsPerToken=4 → 700 tokens = 7%
   const first = await runtime.observeAgentTurn({ provider: 'alpha', sessionId: 'alpha-s1', promptChars: 2800, windowTokens: 10000 });
-  assert.equal(first.source, 'estimated');
+  assert.equal(first.source, 'unknown');
   assert.equal(first.level.estimated, true);
-  assert.equal(first.level.percent, 7, '2800/4=700 tokens → 7%');
+  assert.equal(first.level.percent, null, 'latest user text is not the full effective request');
   assert.equal(first.action, 'none');
 
-  // 累计 2800+31200=34000 chars → 8500 tokens → 85%：估算累计同样驱动阈值判定。
+  // No provider input accounting: a larger user turn still cannot establish context occupancy.
   const second = await runtime.observeAgentTurn({ provider: 'alpha', sessionId: 'alpha-s1', promptChars: 31200, windowTokens: 10000 });
-  assert.equal(second.source, 'estimated');
-  assert.equal(second.level.percent, 85);
-  assert.equal(second.action, 'rollover', '估算累计也可达 rollover 阈值');
+  assert.equal(second.source, 'unknown');
+  assert.equal(second.level.percent, null);
+  assert.equal(second.action, 'none');
   assert.equal(second.rolledOver, false, 'autoRollover=false 只评估不执行');
   assert.equal(runtime.history({ taskId: task.id }).total, 0);
-  ok('估算路径：字符估算明确 estimated=true，不冒充真实 usage，可驱动阈值判定');
+  ok('turn-only character counts stay unknown rather than fabricating full request occupancy');
 }
 
 {
@@ -196,14 +237,14 @@ function seedTask(taskRuntime, rev, { provider = 'alpha', sessionId = 'alpha-s1'
   runtime.monitor.record('alpha:alpha-s1', { inputTokens: 100, outputTokens: 20,
     promptChars: 400, outputChars: 80, windowTokens: 1000 });
   const mixed = runtime.monitor.record('alpha:alpha-s1', { promptChars: 400, outputChars: 80 });
-  assert.equal(mixed.usedTokens, 240, 'missing second-turn usage must add an explicitly estimated 120 tokens');
-  assert.equal(mixed.source, 'mixed');
+  assert.equal(mixed.usedTokens, 120, 'an explicitly supplied full-input estimate replaces the previous request');
+  assert.equal(mixed.source, 'estimated');
   assert.equal(mixed.estimated, true);
   const partial = runtime.monitor.record('alpha:alpha-s1', { inputTokens: 50,
     promptChars: 200, outputChars: 400 });
-  assert.equal(partial.usedTokens, 390,
-    'partial Provider usage must estimate the missing output side without double-counting real input tokens');
-  ok('mixed real and estimated usage remains monotonic when a Provider omits one turn of token counts');
+  assert.equal(partial.usedTokens, 150, 'missing output is estimated only for the current request');
+  assert.equal(partial.source, 'mixed');
+  ok('current full-input estimates and partial usage do not accumulate historical billing');
 }
 
 // ── 3. 自动 Fresh Session Rollover（同 Provider）：Session B + Task ID 不变 ──
@@ -231,7 +272,7 @@ function seedTask(taskRuntime, rev, { provider = 'alpha', sessionId = 'alpha-s1'
   assert.equal(after.status, 'running', 'rollover 不改变任务状态');
   assert.equal(after.currentAgent.provider, 'alpha');
   assert.equal(after.currentAgent.sessionId, observed.rollover.to.sessionId);
-  assert.equal(runtime.evaluate({ taskId: task.id }).level.percent, 0, '新 Session monitor 从零计数');
+  assert.equal(runtime.evaluate({ taskId: task.id }).level.percent, null, 'new Session context is unknown until observed');
   assert.equal(runtime.history({ taskId: task.id }).total, 1);
 
   // Bootstrap：结构化恢复说明（不复制聊天历史）
@@ -292,9 +333,10 @@ function seedTask(taskRuntime, rev, { provider = 'alpha', sessionId = 'alpha-s1'
   const task = seedTask(taskRuntime, rev);
   runtime.monitor.record('alpha:alpha-s1', { inputTokens: 9000, windowTokens: 10000 });
 
-  const first = runtime.observeAgentTurn({ provider: 'alpha', sessionId: 'alpha-s1' });
+  const observation = { provider: 'alpha', sessionId: 'alpha-s1', usage: { inputTokens: 9000, outputTokens: 0 }, windowTokens: 10000 };
+  const first = runtime.observeAgentTurn(observation);
   await new Promise((resolve) => setTimeout(resolve, 40)); // 等 first 进入 inFlight
-  const second = await runtime.observeAgentTurn({ provider: 'alpha', sessionId: 'alpha-s1' });
+  const second = await runtime.observeAgentTurn(observation);
   assert.equal(second.rolledOver, false, '并发第二次 observe 不得触发第二次 rollover');
   assert.equal(second.rolloverBlocked, 'ROLLOVER_IN_FLIGHT');
 
