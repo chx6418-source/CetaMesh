@@ -423,18 +423,30 @@ export function createWorkspaceService({ stateDir, excludedRoots = [], now = () 
     return isInsideRoot(left, right) || isInsideRoot(right, left);
   }
 
-  // Core-only read: callers cannot supply a root, filter or proof. The same
-  // registry and private-root exclusions govern staging and Owner recovery.
-  async function collectRecoveryProof(id) {
-    const entry = assertWritable(requireWorkspace({ id }));
+  function contentProof(entry, relevantFiles = []) {
     return workspaceContentProof(entry.root, {
+      relevantFiles,
       additionalWorkspaceRoots: registry.list().map(row => row.root),
       excludedRoots: [stateDir, ...excludedRoots],
       ...(managedIsolation(entry) ? { trustedSourceRoot: entry.root } : {})
     });
   }
 
-  return { execute, executeApprovedGit, describeWorkspace, applyChanges, workspacesOverlap, collectRecoveryProof };
+  // Core-only observation: identity and exclusions come from this registry.
+  // Unlike Owner recovery, reading Handoff facts must never recover an import.
+  async function collectContentProof(id, { relevantFiles = [], expectedRoot } = {}) {
+    const entry = registry.get(String(id ?? '').trim());
+    if (expectedRoot !== undefined && expectedRoot !== entry.root) fail('WORKSPACE_UNVERIFIED', 'Workspace identity changed during observation');
+    if (recoveryState(entry).status === 'blocked') fail('WORKSPACE_RECOVERY_REQUIRED', 'Workspace recovery remains unconfirmed');
+    return contentProof(entry, relevantFiles);
+  }
+
+  // Owner recovery intentionally retains its existing write/recovery fence.
+  async function collectRecoveryProof(id) {
+    return contentProof(assertWritable(requireWorkspace({ id })));
+  }
+
+  return { execute, executeApprovedGit, describeWorkspace, applyChanges, workspacesOverlap, collectContentProof, collectRecoveryProof };
 }
 
 export { WorkspaceBoundaryError, WorkspaceRegistryError, WorkspaceToolError };

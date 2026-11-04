@@ -103,7 +103,7 @@ export function createWorkspaceReconciler({
 
     let proof = null;
     if (contentProof) {
-      try { proof = await contentProof(entry.root, {relevantFiles}); }
+      try { proof = await contentProof(entry.root, {relevantFiles, workspaceId: id}); }
       catch (error) {
         observationErrors.push('WORKSPACE_CONTENT_UNVERIFIED');
         // Only this fixed local code crosses the observation boundary. No raw

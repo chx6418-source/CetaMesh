@@ -2,13 +2,21 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { workspaceContentProof } from '../src/workspace/handoff-facts.js';
 import { createStagingWorkspace } from '../src/workspace/staging.js';
+import { createWorkspaceService } from '../src/workspace/service.js';
+import { createWorkspaceRegistry, workspaceRegistryFile } from '../src/workspace/registry.js';
+import { workspaceJournalDir } from '../src/workspace/transaction.js';
+import { createWorkspaceReconciler } from '../src/continuity/reconcile.js';
+import { gitStatus, gitHead, gitDiff } from '../src/workspace/tools.js';
 
 // Real temporary folders only. No models, user state, Git conversion or imports.
 const base = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-recovery-proof-')));
 let sequence = 0;
 let failures = 0;
+const journals = [];
 const scope = { additionalWorkspaceRoots: [], excludedRoots: [] };
 const samePath = (a, b) => typeof a === 'string' && path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
 const denied = error => error?.code === 'WORKSPACE_UNVERIFIED';
@@ -29,7 +37,146 @@ async function check(name, action) {
   catch (error) { failures++; console.error('FAIL ' + name + '\n' + error.stack); }
 }
 
+function registered(root, { excludedRoots = [], additionalRoots = [] } = {}) {
+  const stateDir = path.join(base, 'service-' + ++sequence);
+  const file = workspaceRegistryFile(stateDir);
+  const registry = createWorkspaceRegistry({ file });
+  const entry = registry.create({ root, name: 'Proof fixture' });
+  for (const nested of additionalRoots) registry.create({ root: nested, name: 'Nested fixture' });
+  return { service: createWorkspaceService({ stateDir, excludedRoots }), entry, stateDir, file };
+}
+
+function importIntent(root, original = 'original', staged = 'staged') {
+  const dir = workspaceJournalDir(root);
+  journals.push(dir);
+  const batch = path.join(dir, 'fixture-batch');
+  fs.mkdirSync(batch, { recursive: true });
+  const hash = text => crypto.createHash('sha256').update(text).digest('hex');
+  fs.writeFileSync(path.join(root, 'input.txt'), staged);
+  fs.writeFileSync(path.join(batch, '0.preimage'), original);
+  const manifest = path.join(batch, 'manifest.json');
+  fs.writeFileSync(manifest, JSON.stringify({ schemaVersion: 1, root, status: 'committing',
+    rows: [{ action: 'write', path: 'input.txt', originalHash: hash(original), stagedHash: hash(staged), backup: '0.preimage' }] }));
+  return { manifest, preimage: path.join(batch, '0.preimage') };
+}
+
 try {
+  await check('registered content observation owns exclusions and binds the resolved Workspace identity', async () => {
+    const root = fixture({ 'input.txt': 'visible', 'child/other.txt': 'nested', 'private/local.txt': 'private' });
+    const child = path.join(root, 'child'), privateRoot = path.join(root, 'private');
+    const { service, entry, stateDir, file } = registered(root, { excludedRoots: [privateRoot], additionalRoots: [child] });
+    assert.equal(typeof service.collectContentProof, 'function', 'Workspace owns read-only content observation');
+    const before = fs.readFileSync(file);
+    const expected = await workspaceContentProof(root, { additionalWorkspaceRoots: [root, child], excludedRoots: [stateDir, privateRoot] });
+    const first = await service.collectContentProof(entry.id, { expectedRoot: root });
+    assert.deepEqual(first, expected, 'moving policy assembly preserves the existing proof bytes');
+    assert.equal(first.fileCount, 1);
+    assert.equal(first.totalBytes, 7);
+    fs.writeFileSync(path.join(child, 'other.txt'), 'changed nested');
+    fs.writeFileSync(path.join(privateRoot, 'local.txt'), 'changed private');
+    assert.deepEqual(await service.collectContentProof(entry.id, {
+      excludedRoots: [], additionalWorkspaceRoots: [], trustedSourceRoot: root
+    }), first, 'caller options cannot widen registered exclusions');
+    await assert.rejects(service.collectContentProof(entry.id, { relevantFiles: ['child/other.txt'] }), denied);
+    await assert.rejects(service.collectContentProof(entry.id, { expectedRoot: child }), denied);
+    await assert.rejects(service.collectContentProof('missing'), { code: 'WORKSPACE_NOT_FOUND' });
+    await service.execute({ method: 'workspace.open', params: { id: entry.id } });
+    await assert.rejects(service.collectContentProof(''), { code: 'WORKSPACE_NOT_FOUND' }, 'missing identity cannot borrow active Workspace');
+    // Opening above deliberately persists the Owner selection; observation itself must not.
+    const opened = fs.readFileSync(file);
+    assert.notDeepEqual(opened, before);
+    await service.collectContentProof(entry.id);
+    assert.deepEqual(fs.readFileSync(file), opened);
+    fs.writeFileSync(path.join(root, 'input.txt'), 'changed');
+    assert.notEqual((await service.collectContentProof(entry.id)).sha256, first.sha256);
+  });
+
+  await check('content observation does not recover imports or rewrite registry and journal bytes', async () => {
+    const root = fixture({ 'input.txt': 'original' });
+    const { service, entry, file } = registered(root);
+    assert.equal(typeof service.collectContentProof, 'function');
+    const intent = importIntent(root);
+    const before = [file, intent.manifest, intent.preimage].map(name => fs.readFileSync(name));
+    const proof = await service.collectContentProof(entry.id);
+    assert.equal(proof.fileCount, 1);
+    assert.equal(proof.totalBytes, 6);
+    assert.equal(fs.readFileSync(path.join(root, 'input.txt'), 'utf8'), 'staged', 'read observation must never restore preimage');
+    [file, intent.manifest, intent.preimage].forEach((name, index) => assert.deepEqual(fs.readFileSync(name), before[index]));
+  });
+
+  await check('known blocked import refuses proof while preserving its unknown file and journal', async () => {
+    const root = fixture();
+    const { entry, stateDir, file } = registered(root);
+    const intent = importIntent(root);
+    fs.writeFileSync(path.join(root, 'input.txt'), 'external edit');
+    const before = [file, intent.manifest, intent.preimage].map(name => fs.readFileSync(name));
+    const service = createWorkspaceService({ stateDir });
+    assert.equal(typeof service.collectContentProof, 'function');
+    await assert.rejects(service.collectContentProof(entry.id), { code: 'WORKSPACE_RECOVERY_REQUIRED' });
+    assert.equal(fs.readFileSync(path.join(root, 'input.txt'), 'utf8'), 'external edit');
+    [file, intent.manifest, intent.preimage].forEach((name, index) => assert.deepEqual(fs.readFileSync(name), before[index]));
+  });
+
+  await check('registered observation keeps unavailable and nested-repository failures explicit', async () => {
+    const root = fixture({ 'input.txt': 'before', 'nested/source.txt': 'independent' });
+    const { service, entry } = registered(root);
+    assert.equal(typeof service.collectContentProof, 'function');
+    fs.writeFileSync(path.join(root, 'nested/.git'), 'gitdir: unavailable');
+    await assert.rejects(service.collectContentProof(entry.id), error => denied(error) && error.reasonCode === 'WORKSPACE_CONTENT_NESTED_REPOSITORY');
+    fs.renameSync(root, root + '-preserved');
+    await assert.rejects(service.collectContentProof(entry.id), denied);
+  });
+
+  await check('managed Worktree proof retains verified provenance under excluded StateDir', async () => {
+    const source = fixture({ 'input.txt': 'tracked' });
+    const stateDir = path.join(base, 'managed-state-' + ++sequence);
+    const env = { ...process.env };
+    for (const key of Object.keys(env)) if (key.startsWith('GIT_')) delete env[key];
+    const git = args => execFileSync('git', ['-c', 'core.hooksPath=' + path.join(base, 'no-hooks'),
+      '-c', 'commit.gpgSign=false', ...args], { cwd: source, env, encoding: 'utf8', windowsHide: true, stdio: 'pipe' });
+    git(['init', '-q']); git(['config', 'user.name', 'Proof fixture']); git(['config', 'user.email', 'proof@example.invalid']);
+    git(['add', '.']); git(['commit', '-qm', 'fixture']);
+    const file = workspaceRegistryFile(stateDir), registry = createWorkspaceRegistry({ file });
+    const parent = registry.create({ root: source, name: 'Parent' });
+    const managedRoot = path.join(stateDir, 'agent-worktrees', 'proof');
+    git(['worktree', 'add', '-q', '-b', 'proof', managedRoot]);
+    const managed = registry.create({ root: managedRoot, name: 'Managed', gitWorktree: { parentWorkspaceId: parent.id } });
+    const service = createWorkspaceService({ stateDir, excludedRoots: [stateDir] });
+    assert.equal(typeof service.collectContentProof, 'function');
+    assert.equal(service.describeWorkspace(managed.id).managedIsolation, true);
+    const before = fs.readFileSync(file);
+    const expected = await workspaceContentProof(managedRoot, { additionalWorkspaceRoots: [source, managedRoot],
+      excludedRoots: [stateDir, stateDir], trustedSourceRoot: managedRoot });
+    const proof = await service.collectContentProof(managed.id, { expectedRoot: managedRoot });
+    assert.equal(proof.kind, 'git-workspace-v1');
+    assert.deepEqual(proof, expected);
+    assert.deepEqual(fs.readFileSync(file), before);
+    const untrustedRoot = path.join(stateDir, 'agent-worktrees', 'forged');
+    fs.mkdirSync(untrustedRoot); fs.writeFileSync(path.join(untrustedRoot, 'input.txt'), 'private');
+    const forged = registry.create({ root: untrustedRoot, name: 'Forged', gitWorktree: { parentWorkspaceId: parent.id } });
+    const reopened = createWorkspaceService({ stateDir, excludedRoots: [stateDir] });
+    assert.equal(reopened.describeWorkspace(forged.id).managedIsolation, false);
+    await assert.rejects(reopened.collectContentProof(forged.id, { trustedSourceRoot: untrustedRoot }), denied);
+  });
+
+  await check('Continuity fact observation carries registered identity to the Workspace owner', async () => {
+    const root = fixture();
+    const { service, entry, file } = registered(root);
+    assert.equal(typeof service.collectContentProof, 'function');
+    const before = fs.readFileSync(file);
+    const reconciler = createWorkspaceReconciler({
+      resolveWorkspace: id => service.describeWorkspace(id), gitStatus, gitHead,
+      gitDiffSummary: async root => (await gitDiff(root, { statOnly: true })).output,
+      fileExists: (root, relative) => fs.existsSync(path.join(root, relative)),
+      contentProof: (root, options) => service.collectContentProof(options.workspaceId,
+        { expectedRoot: root, relevantFiles: options.relevantFiles })
+    });
+    const facts = await reconciler.collectFacts({ workspaceId: entry.id, relevantFiles: ['input.txt'] });
+    assert.equal(facts.available, true, 'reconciler passes the resolved ID rather than an implicit active Workspace');
+    assert.equal(facts.contentProof.fileCount, 1);
+    assert.deepEqual(fs.readFileSync(file), before);
+  });
+
   // Hashing only relevantFiles would accept all four mutations below.
   await check('a complete non-Git proof observes edits, additions and deletions outside relevant files', async () => {
     const root = fixture({ 'input.txt': 'before', 'nested/other.bin': Buffer.from([0, 1, 2, 3]) });
@@ -209,6 +356,7 @@ try {
     });
   }
 } finally {
+  for (const journal of journals) fs.rmSync(journal, { recursive: true, force: true });
   // The exact canonical test-owned root was created above; no registered project is removed.
   fs.rmSync(base, { recursive: true, force: true });
 }

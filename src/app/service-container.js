@@ -31,7 +31,6 @@ import { createIsolatedTestRunner } from '../workspace/isolated-runner.js';
 import { createTaskService } from '../task/service.js';
 import { createContinuityService, createWorkspaceReconciler } from '../continuity/index.js';
 import { gitDiff, gitHead, gitStatus } from '../workspace/tools.js';
-import { workspaceContentProof } from '../workspace/handoff-facts.js';
 import { createDefaultAgentService } from '../agent/index.js';
 import { createExtensionService } from '../extension/service.js';
 import { createMeshService } from '../mesh/service.js';
@@ -363,10 +362,14 @@ export function createCetaMeshServices(options = {}) {
     taskRuntime: taskService.runtime,
     agentBroker,
     modelRuntime,
-    continuityRuntime: { rollover: params => {
-      if (!continuityService) throw Object.assign(new Error('Continuity Runtime is unavailable'), { code: 'PROVIDER_UNAVAILABLE' });
-      return continuityService.runtime.rollover(params);
-    } },
+    toolExecutionCoordinator,
+    continuityRuntime: {
+      isInFlight: taskId => continuityService?.runtime.isInFlight(taskId) === true,
+      rollover: params => {
+        if (!continuityService) throw Object.assign(new Error('Continuity Runtime is unavailable'), { code: 'PROVIDER_UNAVAILABLE' });
+        return continuityService.runtime.rollover(params);
+      }
+    },
     prepareTaskContext: async args => { const context = await chatService.prepareTaskContext(args); workingMemory.record(args.taskId); return context; },
     legacyModel: dshDefaults.model
   });
@@ -378,11 +381,8 @@ export function createCetaMeshServices(options = {}) {
   });
 
   const continuityReconciler = createWorkspaceReconciler({
-    contentProof: async (root, args) => workspaceContentProof(root, { ...args,
-      additionalWorkspaceRoots: (await workspaceService.execute({ method: 'workspace.list' })).workspaces.map(row => row.root),
-      excludedRoots: [stateDir, dataRoot],
-      ...((await workspaceService.execute({ method: 'workspace.list' })).workspaces.some(row => row.root === root
-        && workspaceService.describeWorkspace(row.id)?.managedIsolation) ? { trustedSourceRoot: root } : {}) }),
+    contentProof: (root, { workspaceId, relevantFiles }) => workspaceService.collectContentProof(workspaceId,
+      { expectedRoot: root, relevantFiles }),
     resolveWorkspace: async workspaceId => workspaceService.describeWorkspace(workspaceId),
     gitStatus: root => gitStatus(root),
     gitHead: root => gitHead(root),
@@ -626,7 +626,7 @@ export function createCetaMeshServices(options = {}) {
   }
   const desktopUiService = createDesktopUiService({
     services: {
-      chatService, taskService, workshopService, workspaceService, memoryService, capabilityService, agentBroker, continuityService,
+      chatService, taskService, workshopService, workspaceService, memoryService, capabilityService, agentBroker, continuityService, platformRuntime,
       agentService, pluginCenterService, integrationService, extensionService, settingsService, systemServices,
       toolExecutionCoordinator, usageLedger, modelRuntime,forgeService,simulationService,onebotConfiguration
     },
